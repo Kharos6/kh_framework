@@ -32,8 +32,6 @@ KH_var_drawUi3dExecutionStackDeletions = [];
 KH_var_postInitExecutions = [];
 KH_var_preInitLuaExecutions = [];
 KH_var_postInitLuaExecutions = [];
-KH_var_entityInitializations = [];
-KH_var_entityInitializationsDeletions = [];
 KH_var_mouseTargetCheckFrame = 0;
 KH_var_viewTargetCheckFrame = 0;
 KH_var_weaponTargetCheckFrame = 0;
@@ -44,6 +42,7 @@ KH_var_allMen = [];
 KH_var_allLocalMen = [];
 KH_var_cloudletParameterCache = createHashMap;
 KH_var_lightParameterCache = createHashMap;
+KH_var_executedStacks = [];
 ["KH_eve_execution", {(_this select 0) callSerializedFunction (_this select [1]);}] call CBA_fnc_addEventHandler;
 
 [

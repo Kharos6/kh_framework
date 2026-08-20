@@ -5935,17 +5935,12 @@ static bool kh_set_contains(const std::unordered_set<std::string>& set, const ga
 static void process_temporal_execution_stack() {
     rv_namespace ns = sqf::mission_namespace();
 
-    // Entity initialization deletions
-    game_value entity_deletions_gv = sqf::get_variable(ns, "kh_var_entityinitializationsdeletions");
-
-    if (!entity_deletions_gv.is_nil() && entity_deletions_gv.type_enum() == game_data_type::ARRAY) {
-        auto& entity_deletions = entity_deletions_gv.to_array();
+    if (!g_kh_cached_entity_initializations_deletions.is_nil() && g_kh_cached_entity_initializations_deletions.type_enum() == game_data_type::ARRAY) {
+        auto& entity_deletions = g_kh_cached_entity_initializations_deletions.to_array();
 
         if (entity_deletions.size() > 0) {
-            game_value entity_init_gv = sqf::get_variable(ns, "kh_var_entityinitializations");
-
-            if (!entity_init_gv.is_nil() && entity_init_gv.type_enum() == game_data_type::ARRAY) {
-                auto& entity_init = entity_init_gv.to_array();
+            if (!g_kh_cached_entity_initializations.is_nil() && g_kh_cached_entity_initializations.type_enum() == game_data_type::ARRAY) {
+                auto& entity_init = g_kh_cached_entity_initializations.to_array();
                 size_t w = 0;
                 const std::unordered_set<std::string> entity_deletion_set = kh_build_string_set(entity_deletions);
 
@@ -7935,6 +7930,243 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                             // affected either way - 329 can only change the
                             // texel by the latch's 10% headroom.
                             khd_m == 329 ||
+        // 26541: 330 = KH_SNAP_REPROJECT off - the contact clamp reads the
+        // occlusion snapshot at the CURRENT pixel, decoded with the CURRENT
+        // pair, along the CURRENT ray (the 26540 read). Expect: on a low
+        // mesh with the engine near gliding (dump1 pose) the ground-contact
+        // band resumes its pull/no-pull flip; snapReprojArms stops counting
+        // and snapReprojStands counts every arb injection instead. Sharpness
+        // and everything above the contact band are unchanged either way.
+                            khd_m == 330 ||
+        // 26542: 331 = KH_ARB_FIXED_PULL off - the 26186 need-based pull
+        // (gap + 0.25 m) under the honest 26541 read, i.e. 26541 verbatim.
+        // Expect: the ground-contact band resumes the period-2 depth flip
+        // (prbBotDM alternating ~0.25 m frame to frame with the camera
+        // parked); LOD deficits over 0.25 m that 26542 leaves bitten are
+        // overtaken again. Nothing above the contact band changes.
+                            khd_m == 331 ||
+        // 26543: 332 = fixed pull at a 0.10 m margin (mode 0 = 0.25 m). Expect:
+        // ground-line objects/terrain within 0.10-0.25 m of a low face stop being
+        // overtaken; any terrain-LOD bite deeper than 0.10 m returns at the ground line.
+                            khd_m == 332 ||
+        // 26544: 333 = the 0.25 m fixed-pull margin (the 26542/26543 default;
+        // 0.10 m is the default since 26544, operator-validated). Expect: the
+        // ground-line overtake of objects/terrain within 0.10-0.25 m returns.
+                            khd_m == 333 ||
+        // 26544: 334 = KH_LIVE_CAM_PAIR off - the live-table seal pairs its
+        // matrix with the INJECTION camera again. Expect: engine-object
+        // shadows on our meshes (where the band receive does not serve)
+        // resume the brief moving/rotating offset that settles when parked;
+        // liveCamPairFv/Pv stop counting, liveCamPairStale counts instead.
+                            khd_m == 334 ||
+        // 26545: 335 = KH_BAND_PAIR_SAME - band seals pair the harvested sm
+        // with the view of ITS OWN capture frame (staged path: the held
+        // capture-time view; immediate path: the seal keeps its frame view,
+        // the next publish does not replace it). Parked identical; the A/B is
+        // a moving/rotating camera at the offset pose. bandPairSameSeals is
+        // the arming lane - 0 under 335 means the arm never engaged.
+                            khd_m == 335 ||
+        // 26547: 336 = KH_BAND_FOREIGN_VIEW off - foreign cameras (PIP / UAV
+        // feed / mirror renders) may be committed into band seals again.
+        // Expect: once a second camera is live in the mission, cast shadows
+        // on our meshes resume the intermittent offset-then-settle;
+        // bandSealForeignRef stops counting.
+                            khd_m == 336 ||
+        // 26548: 337 = KH_BAND_PAIR_MIXED weld guards OFF (stage-commit
+        // drop + pending-completion invalidate revert to 26547). Expect:
+        // in the multi-camera regime the intermittent offset-then-settle
+        // returns while bandPairMixedRef stops counting; 1x sessions are
+        // byte-identical either way.
+                            khd_m == 337 ||
+        // 26550: 338 = KH_BAND_ALL_NEAR - every band tier reseals at the
+        // near cadence (0.05 s). The staleness A/B: a moving caster's
+        // lagging shadow shrinks ~5x under this arm; a registration
+        // offset does not move. Read bandCadenceForced for engagement
+        // and WATCH bandStageWaitMs + frame time (whole-atlas copy cost).
+                            khd_m == 338 ||
+        // 26551: 339 = KH_BAND_COHERENT_COMPLETE OFF. 26561 NOTE: INERT
+        // since 26560 - the default IS the pre-26551 overwrite, so 339
+        // equals baseline. Number stays reserved (rule 1.10).
+                            khd_m == 339 ||
+        // 26553: 340 = KH_BAND_SAME_SOURCE OFF. 26561 NOTE: INERT since
+        // 26560 - the branch lives inside the mode-341 stack and one mode
+        // slot cannot hold both, so 340 yields BASELINE. Reserved.
+                            khd_m == 340 ||
+        // 26560: 341 = THE FULL EXPERIMENTAL COMPLETION STACK (26551-26559:
+        // flip + adaptive tails + fast reseal). The DEFAULT is baseline
+        // (completions overwrite unconditionally; original epoch death).
+                            khd_m == 341 ||
+        // 26556: 342 = the 26553 same-source lock. 26561 NOTE: INERT since
+        // 26560 - reachable only inside the mode-341 stack, which one mode
+        // slot cannot combine with 342, so 342 yields BASELINE. Reserved.
+                            khd_m == 342 ||
+        // 26556: 343 = KH_BAND_ALT_PROVISIONAL (alt-birth; FIELD-CONVICTED
+        // regression at 26555 - pairs bands with random other cascades,
+        // 48.8 m class. Kept for archaeology only).
+                            khd_m == 343 ||
+        // 26558: 344 = the flip's TAIL FIXES OFF. 26561 NOTE: INERT since
+        // 26560 - reachable only inside the mode-341 stack, which one mode
+        // slot cannot combine with 344, so 344 yields BASELINE. Reserved.
+                            khd_m == 344 ||
+        // 26558: 345 = KH_BAND_INJ_PAIR ON (archaeology; field-falsified
+        // at 26557 - constant 3-9 texel offset, worse and sooner: the
+        // injection camera is not the receive-reconstruction camera).
+                            khd_m == 345 ||
+        // 26561: 346 = KH_BAND_STAGE_FLIP - the staged commit welds the
+        // FIRST cross-source publish latched after THIS band's own stage
+        // (per-band time-adjacency) instead of the commit-time global
+        // frame_view lottery. Arming lane bandStageFlip (~ bandStageCommits
+        // or the arm never engaged); Hold/Single/Late name the fallbacks.
+        // Expect: the intermittent offset-then-settle reduced at the same
+        // poses with no new artifact class; any new artifact reverts the
+        // arm per its pre-registered falsification.
+                            khd_m == 346 ||
+        // 26564: 347 = the pool-miss fall-through UNCAPPED (every miss
+        // takes an immediate whole-atlas copy - the pre-26564 behaviour;
+        // restores the threshold-crossing frame-drop storm).
+                            khd_m == 347 ||
+        // 26565: 348 = epoch-death fast reseal OFF (an invalidated pending
+        // band waits out its tier interval again - the capture/camera-
+        // switch shadow vanish recovers slowly, tier by tier).
+                            khd_m == 348 ||
+        // 26566: 349 = receive warm-up RE-ARMS on every wipe (the 2 s
+        // shadow blackout after F12 captures / camera-class switches
+        // returns; session-start warm-up is identical either way).
+                            khd_m == 349 ||
+        // 26568: 350 = the 1.0 s band age-kill bound (restores the
+        // one-frame far-shadow hole at F12 captures / camera switches).
+                            khd_m == 350 ||
+        // 26569: 351 = rotational weld coherence OFF (the far cascade's
+        // one-boundary rotation skew returns - the far-pose offset).
+                            khd_m == 351 ||
+        // 26572: 352 = stencil range fade OFF (lighting0.y 43; engine
+        // unit-shadow darkening on our meshes pops again at the shadow
+        // view distance instead of thinning over the last ~15%).
+                            khd_m == 352 ||
+        // 26572: 353 = KH_SELF_SOFT_CMP OFF (lighting0.y 44; the hard
+        // PCF corner compare returns - the one-switch proof for the
+        // grazing / crevice / halo speckle class).
+                            khd_m == 353 ||
+        // 26572: 354 = KH_SELF_SPREAD_SMOOTH OFF (lighting0.y 45; the
+        // int-quantized ring spread returns - per-quad footprint jumps).
+                            khd_m == 354 ||
+        // 26573: 355 = VISUAL 29 (dbgCtl.x 29) - receive-term
+        // decomposition paint: R = cascade/band receive occlusion,
+        // G = our sun-map self term, B = stencil volume. The speckle
+        // locus's channel IS its author; no channel = not a shadow
+        // term. Pure instrument; mode-0 behaviour byte-identical.
+                            khd_m == 355 ||
+        // 26574: 356 = KH_SELF_REL_INTERP revert (self chain returns
+        // to the world-absolute interpolant + PS-side anchor sub; the
+        // camera-motion millimetre jitter should RETURN under it).
+                            khd_m == 356 ||
+        // 26575: 357 = KH_SELF_PREFILTER revert (classic taps only;
+        // the grazing/crevice static speckle should RETURN under it).
+                            khd_m == 357 ||
+        // 26577: 358 = PF-EXCLUSIVE (lighting0.y 47) - armed band
+        // verdicts from the pyramid alone; pairs with 357 to separate
+        // tap vs prefilter authorship at the hole in two screenshots.
+                            khd_m == 358 ||
+        // 26579: 359 = VISUAL 30 (pyramid-vs-depth probe; hero window;
+        // grey healthy / red-only convert dead / red+green chain dead /
+        // displaced silhouette = addressing flip).
+                            khd_m == 359 ||
+        // 26580: 360 = VISUAL 31 (Load-vs-SampleLevel splitter; R+B
+        // silhouettes with G flat convicts the linear sampler on RG32F).
+                            khd_m == 360 ||
+        // 26581: 361 = KH_PF_CPU_PROBE (staging readback of the pyramid
+        // and depth; STALLS THE PIPE - dump, then return to 0).
+                            khd_m == 361 ||
+        // 26586: 362 = unbounded grad slack (KH_GS_CLAMP revert; the
+        // halo dots and crevice salt-and-pepper should RETURN).
+                            khd_m == 362 ||
+        // 26587: 363 = KH_BAND_STABLE_RING revert (rotated decision
+        // ring + raw 7.5 km hash; the fireflies and cast-shadow halo
+        // dither should RETURN).
+                            khd_m == 363 ||
+        // 26588: 364 = KH_VOL_MAX_FALLBACK revert (the stencil-resolve
+        // weight collapse falls back to the single-texel point read;
+        // the traced crevice fireflies should RETURN).
+                            khd_m == 364 ||
+        // 26588: 365 = KH_SELF_CLASSIC - the textbook self kernel in
+        // one flip (gs slack 0, RPDB 0, spread 1, offset damper off,
+        // prefilter off; lighting0.y 50). A/B vs 0 answers whether the
+        // accreted fwidth machinery authors the halo/edge noise.
+                            khd_m == 365 ||
+        // 26588: 366 = THE ERA ARM - classic kernel + hero/mid/outer
+        // stand-down + prefilter off: the closest single mode to the
+        // pre-accretion self-shadow era (union-only maps). Crevice
+        // noise returning here is EXPECTED (the clean era had it).
+                            khd_m == 366 ||
+        // 26589: 367 = KH_UNION_LIT_GUARD revert (the union override of
+        // lit band verdicts returns; the cast-shadow halo, whole-face
+        // dither and union-scale shimmer should ALL RETURN).
+                            khd_m == 367 ||
+        // 26591: 368 = straddle guard OFF (unguarded footprint spread +
+        // pf engagement; the crevice fireflies and shadow-edge dither
+        // should RETURN).
+                            khd_m == 368 ||
+        // 26592: 369 = facet bias normal re-armed (the 26432/26435
+        // override; crevice fireflies, edge dither and the camera-motion
+        // film grain should RETURN). 233 is an alias of the default now.
+                            khd_m == 369 ||
+        // 26593: 370 = the 26464 range-fade curve returns (fade from
+        // 85% of shadowVisibility; self shadows thin ~30 m early).
+                            khd_m == 370 ||
+        // 26594: 371 = thin 10% blend band + always-on jurisdiction
+        // return (the quality seams snap again; halo protections stay).
+                            khd_m == 371 ||
+        // 26611 RELOCATION: 381 = 26610 KH_BAND_REL_INTERP revert (the
+        // absolute-interpolant A/B). 26610 minted it straight into the
+        // RETIRED list, so setRenderDebug 381 returned false and the
+        // shipped field A/B was unreachable - the shader ladder always
+        // honoured it, only this gate refused it.
+                            khd_m == 381 ||
+        // 26611: 382 = KH_SUN_LADDER_SCALE revert (mid/outer bands back
+        // to the fixed 8/32 m footprints; tier switch distances stop
+        // scaling with shadowVisibility).
+                            khd_m == 382 ||
+        // 26611: 383 = KH_SUN_UNION_LAT_FIT revert (union texel priced
+        // by the engine-axis enclosing sphere again; the far-caster
+        // balloon returns - expect sunUnionTexelM back at the 0.6 m class
+        // in spread-out scenes).
+                            khd_m == 383 ||
+        // 26611: 384 = KH_BLK_SLEW_REGIME revert (the 26503 unconditional
+        // publish slew returns; skipTime lighting decays at 25%/s again -
+        // expect the glowing-mesh tail after day-to-night skips).
+                            khd_m == 384 ||
+        // 26612: 385 = KH_NIGHT_ZERO_SUN revert (the unconditional 26418
+        // zero-sun refusal returns; expect flat-white/glowing meshes at
+        // night while blkZeroSunRefusals climbs).
+                            khd_m == 385 ||
+        // 26617: 386 = KH_JURIS_EDGE_FADE revert (lighting0.y 60; the
+        // hard certification cliff returns - expect the sharp quality-
+        // level line at the far tier handoffs).
+                            khd_m == 386 ||
+        // 26617: 387 = fixed 12/48/192 m jurisdiction guards (lighting0.y
+        // 61; the pre-26611 literals - under-claims at ladder scale > 1,
+        // expect residual mid/outer mush on certified surfaces at high
+        // shadowVisibility).
+                            khd_m == 387 ||
+        // 26618: 388 = KH_TIER_HOLD revert (lighting0.y 62; the 26594
+        // 0.60 fade start returns - the fine tier yields a third of its
+        // window to the coarser mix again).
+                            khd_m == 388 ||
+        // 26620: 389 = KH_SUN_FAR_BAND OFF (the range-priced far band
+        // stands down; the union's mesh-priced texels serve the far
+        // field again - expect the 26619 wobble and the mesh-size
+        // quality law to return together).
+                            khd_m == 389 ||
+        // 26624: 392 = KH_FAR_SELF_SCOPE revert (lighting0.y 65; the far
+        // self tier serves inside the finer ladder's coverage again - the
+        // all-distance splotch ring returns).
+                            khd_m == 392 ||
+        // 26624: 391 RETIRED - the 26623 KH_CERT_NEIGHBORHOOD it reverted
+        // is withdrawn (field-inert against the splotch: the receivers at
+        // issue have no surface in any map). Fielded once; never remint.
+        // 26622: 390 RETIRED to the dead list - the 26621 KH_PF_BLEED_CUT
+        // it reverted is withdrawn on field falsification (mode 357 null
+        // acquitted the whole pf path). Fielded once; never remint.
         // 26491: 284 = tier-proportional floor OFF (lighting0.y 37;
         // the 26490 arm, now reachable). Expect: distance noise returns.
                             khd_m == 284 ||
@@ -8909,6 +9141,12 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                               // immediately (PoolFall == PoolMiss, DropAge/DropDead 0),
                               // so it is delisted rather than repaired.
                               khd_m == 213 ||
+                              khd_m == 390 ||   // 26622: fielded 26621 revert, withdrawn - never remint (rule 1.18)
+                              khd_m == 391 ||   // 26624: fielded 26623 revert, withdrawn - never remint (rule 1.18)
+                              // 26611: 381 briefly sat HERE by a 26610 misfile -
+                              // it is a LIVE revert, not a retired number, and is
+                              // relocated to the accept list beside 371. Never
+                              // mint another meaning for it (rule 1.18).
                               // 26420: 85 was the live-atlas fallback. Its fault (the
                               // drift gap) was closed at the source by 26415/26416 and
                               // it was field-tested against the teleport transient and
@@ -9125,6 +9363,12 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("blkRingNoBand", RenderIntegration::g_blk_ring_no_band));   // 26501
         out.push_back(kv("blkRingStarveHolds", RenderIntegration::g_blk_ring_starve_holds));   // 26502
         out.push_back(kv("blkPubSlews", RenderIntegration::g_blk_pub_slews));   // 26503
+        // 26611 KH_BLK_SLEW_REGIME (ledger at the slew): >3x channel-sum
+        // moves that committed outright - ~1 per skipTime. 0 across a
+        // session containing a skip = the bypass never engaged (mode 384,
+        // or the skip landed inside 3x and was slewed - read blkAmbLum's
+        // frame trace for the decay tail then).
+        out.push_back(kv("blkSlewRegimeCommits", RenderIntegration::g_blk_slew_regime_commits));
         out.push_back(kv("sunVpSpanXM", RenderIntegration::g_kh_sunvp_span[0]));   // 26504
         out.push_back(kv("sunVpSpanYM", RenderIntegration::g_kh_sunvp_span[1]));   // 26504
         out.push_back(kv("sunVpSpanZM", RenderIntegration::g_kh_sunvp_span[2]));   // 26504
@@ -10618,6 +10862,11 @@ static game_value get_render_stats_sqf() {
         // 26418 ENGAGEMENT LANE for the zero-sun refusal. 0 means the gate never
         // fired and any null result on the black box is void.
         out.push_back(kv("blkZeroSunRefusals", RenderIntegration::g_blk_zero_sun_refusals));
+        // 26612 KH_NIGHT_ZERO_SUN: zero-sun blocks SHIPPED because the
+        // standing scene is measured dark. Night sessions must show this
+        // climbing with Refusals flat; a DAY session showing admits means
+        // the standing probe misread and the 26418 protection is open.
+        out.push_back(kv("blkZeroSunAdmits", RenderIntegration::g_blk_zero_sun_admits));
         out.push_back(kvf("blkShadeNow", RenderIntegration::g_blk_shade_now));
         out.push_back(kvf("blkShadeMin", RenderIntegration::g_blk_shade_min));
         out.push_back(kvf("blkShadeMax", RenderIntegration::g_blk_shade_max));
@@ -11807,6 +12056,23 @@ static game_value get_render_stats_sqf() {
                 : -1.0f));
             out.push_back(kvf("snapAgeInjMs", RenderIntegration::g_snap_age_last));
             out.push_back(kvf("snapAgeInjMaxMs", RenderIntegration::g_snap_age_max));
+            // 26540 KH_ARB_JITTER_CENSUS (instrument only)
+            out.push_back(kv("arbJitFrames", RenderIntegration::g_arb_jit_frames));
+            out.push_back(kv("arbJitOverTol", RenderIntegration::g_arb_jit_over_tol));
+            out.push_back(kvf("arbJitPairM", RenderIntegration::g_arb_jit_pair_m));
+            out.push_back(kvf("arbJitCamM", RenderIntegration::g_arb_jit_cam_m));
+            out.push_back(kvf("arbJitVertM", RenderIntegration::g_arb_jit_vert_m));
+            out.push_back(kvf("arbJitVertMaxM", RenderIntegration::g_arb_jit_vert_max_m));
+            out.push_back(kvf("arbJitVertMeanM", RenderIntegration::g_arb_jit_frames
+                ? static_cast<float>(RenderIntegration::g_arb_jit_vert_sum /
+                                     static_cast<double>(RenderIntegration::g_arb_jit_frames)) : -1.0f));
+            out.push_back(kvf("arbTolM", RenderIntegration::g_arb_tol_m));
+            out.push_back(kvf("arbSnapNearM", RenderIntegration::g_arb_snap_near_m));
+            out.push_back(kvf("arbInjNearM", RenderIntegration::g_arb_inj_near_m));
+            out.push_back(kv("snapPairSrc", static_cast<uint64_t>(RenderIntegration::g_snap_pair_src)));
+            // 26541 KH_SNAP_REPROJECT arming lanes (mode 330 reverts)
+            out.push_back(kv("snapReprojArms", RenderIntegration::g_snap_reproj_arms));
+            out.push_back(kv("snapReprojStands", RenderIntegration::g_snap_reproj_stands));
             // (Campaign diagnostics - jitter probe, config echo, GPU
             // pixel autopsy - retired with the settled model; the notes
             // doc records their findings.)
@@ -11963,7 +12229,31 @@ static game_value get_render_stats_sqf() {
         out.push_back(kvf("sunHeroReach", RenderIntegration::g_sun_band_reach[0]));
         out.push_back(kvf("sunMidReach", RenderIntegration::g_sun_band_reach[1]));
         out.push_back(kvf("sunOutReach", RenderIntegration::g_sun_band_reach[2]));
+        // 26620 KH_SUN_FAR_BAND lanes: halfDiag must read == sunRangeM
+        // (the window IS the range); valid 1 with renders tracking
+        // flushes is the engagement read; reach floors at 6x the range.
+        out.push_back(kv("sunFarValid", RenderIntegration::g_sun5_map_valid ? 1ull : 0ull));
+        out.push_back(kvf("sunFarHalfDiag", RenderIntegration::g_sun5_half_diag));
+        out.push_back(kv("sunFarRenders", RenderIntegration::g_sun5_renders));
+        out.push_back(kv("sunFarCasters", RenderIntegration::g_sun5_casters));
+        out.push_back(kvf("sunFarReach", RenderIntegration::g_sun_band_reach[3]));
         out.push_back(kv("sunBandReachTakes", RenderIntegration::g_sun_band_reach_takes));
+    // 26576 KH_SELF_PREFILTER gauges (the 26575 omission, paid): per-band
+    // moment-pyramid freshness at dump time. 0 with the band valid means
+    // the convert path failed and that band kernel is CLASSIC regardless
+    // of mode - read these before judging any prefilter round.
+    out.push_back(kv("sunPfHeroOk", RenderIntegration::g_sun_pf_valid[0] ? 1 : 0));
+    out.push_back(kv("sunPfMidOk", RenderIntegration::g_sun_pf_valid[1] ? 1 : 0));
+    out.push_back(kv("sunPfOutOk", RenderIntegration::g_sun_pf_valid[2] ? 1 : 0));
+    // 26582 KH_PF_CPU_PROBE, repaired (mode 361 fills; -1 = never read;
+    // the 26581 St lanes were ILLEGAL depth copies and are retired).
+    // mu0 in [0.90, 1.00] with mu3 in the same neighbourhood = pyramid +
+    // chain healthy; kilometre-class values = the foreign delivery
+    // followed the SRV object to the new site (next: per-frame SRV).
+    out.push_back(kvf("sunPfCpuMu0C", RenderIntegration::g_sun_pf_cpu[0]));
+    out.push_back(kvf("sunPfCpuMu3C", RenderIntegration::g_sun_pf_cpu[1]));
+    out.push_back(kvf("sunPfCpuMu0O", RenderIntegration::g_sun_pf_cpu[2]));
+    out.push_back(kvf("sunPfCpuMu3O", RenderIntegration::g_sun_pf_cpu[3]));
         // 26537 KH_UNION_TEXEL_SNAP - the sawtooth's own quantum, measured.
         // sunUnionTexelM is the union window's texel in world metres (~0.0996
         // at shadowVisibility 200) and is the MAXIMUM edge displacement a
@@ -11996,9 +12286,31 @@ static game_value get_render_stats_sqf() {
         out.push_back(kvf("sunUnionRadHeld", RenderIntegration::g_sun_union_rad_held));
         out.push_back(kv("sunUnionRHolds", RenderIntegration::g_sun_union_rad_holds));
         out.push_back(kv("sunUnionRelatches", RenderIntegration::g_sun_union_rad_relatches));
+        // 26611 KH_SUN_LADDER_SCALE / KH_SUN_UNION_LAT_FIT lanes (ledgers
+        // in the rendering unit). sunLadderScale = s (1.0 = stock ladder).
+        // The lat trio reads exactly as the rad trio above: holds must
+        // dominate relatches under a camera walk or nothing was stabilised;
+        // -1 held = the lateral latch never took (mode 383/329, or no
+        // camera-anchored union fit yet). sunUnionTexelM is the acceptance
+        // lane for the lat fit itself (~0.17 m at range 300 in the dump2
+        // scene, vs the 0.645 m it read on 26610).
+        out.push_back(kvf("sunLadderScale", RenderIntegration::g_sun_ladder_scale));
+        // 26613/26615 KH_SUN_RANGE_SOURCE: the range every subsystem rides
+        // and WHO WROTE IT (0 = nobody/the 200 default; 1 = the
+        // getVideoOptions fallback; 2 = the engine's own committed cascade
+        // table, the primary source). A dead source at the stock setting
+        // is invisible without these - the 26611 acceptance lesson.
+        out.push_back(kvf("sunRangeM", RenderIntegration::g_sun_range.load(std::memory_order_relaxed)));
+        out.push_back(kv("sunRangeSrc", static_cast<uint64_t>(RenderIntegration::g_sun_range_src.load(std::memory_order_relaxed))));
+        out.push_back(kvf("sunUnionLatHeld", RenderIntegration::g_sun_union_lat_held));
+        out.push_back(kv("sunUnionLatHolds", RenderIntegration::g_sun_union_lat_holds));
+        out.push_back(kv("sunUnionLatRelatches", RenderIntegration::g_sun_union_lat_relatches));
         // 26454 cascade bands (KH_SUN_CASCADE): halfDiag lanes are the
-        // acceptance instrument - pinned at 8 / 32 by construction, any
-        // other value is a defect. FLOATS THROUGH kvf (the 26406 trap).
+        // acceptance instrument - 26611 KH_SUN_LADDER_SCALE: pinned at
+        // 8*s / 32*s with s = clamp(shadowVisibility/200, 1, 5) (the
+        // sunLadderScale lane carries s; under mode 382 or 241 s = 1 and
+        // the historic 8 / 32 pins return). Any other value is a defect.
+        // FLOATS THROUGH kvf (the 26406 trap).
         out.push_back(kv("sunMidValid", RenderIntegration::g_sun3_map_valid ? 1ull : 0ull));
         out.push_back(kv("sunMidCasters", RenderIntegration::g_sun3_casters));
         out.push_back(kv("sunMidRenders", RenderIntegration::g_sun3_renders));
@@ -12281,6 +12593,90 @@ static game_value get_render_stats_sqf() {
         // (accepted or refused), so a near-miss is visible before it seals.
         out.push_back(kv("bandRejNoView", RenderIntegration::g_band_rej_no_view));
         out.push_back(kv("liveRejNoView", RenderIntegration::g_live_rej_no_view));
+        // 26544 KH_LIVE_CAM_PAIR (mode 334 reverts)
+        out.push_back(kv("liveCamPairFv", RenderIntegration::g_live_cam_pair_fv));
+        out.push_back(kv("liveCamPairPv", RenderIntegration::g_live_cam_pair_pv));
+        out.push_back(kv("liveCamPairStale", RenderIntegration::g_live_cam_pair_stale));
+        out.push_back(kvf("liveCamPairDxM", RenderIntegration::g_live_cam_pair_dx));
+        out.push_back(kvf("liveCamPairDxMaxM", RenderIntegration::g_live_cam_pair_dx_max));
+        out.push_back(kv("bandPairSameSeals", RenderIntegration::g_band_pair_same_seals));   // 26545 arming lane
+        // 26546 KH_BAND_UV_DRIFT (pure gauge)
+        out.push_back(kvf("bandUvDriftPx", RenderIntegration::g_band_uv_drift_px));
+        out.push_back(kvf("bandUvDriftPxMax", RenderIntegration::g_band_uv_drift_px_max));
+        out.push_back(kvf("bandUvDriftPxMean", RenderIntegration::g_band_uv_drift_n
+            ? static_cast<float>(RenderIntegration::g_band_uv_drift_sum /
+                                 static_cast<double>(RenderIntegration::g_band_uv_drift_n)) : -1.0f));
+        out.push_back(kv("bandUvDriftN", RenderIntegration::g_band_uv_drift_n));
+        out.push_back(kv("bandUvDriftOver2", RenderIntegration::g_band_uv_drift_over2));
+        out.push_back(kv("bandUvDriftSlot", static_cast<uint64_t>(
+            RenderIntegration::g_band_uv_drift_slot < 0 ? 99 : RenderIntegration::g_band_uv_drift_slot)));
+        out.push_back(kv("bandUvDriftWhy", static_cast<uint64_t>(RenderIntegration::g_band_uv_drift_why)));   // 26547
+        // 26547 KH_BAND_FOREIGN_VIEW (mode 336 reverts)
+        out.push_back(kv("bandSealForeignRef", RenderIntegration::g_band_seal_foreign_ref));
+        out.push_back(kvf("bandSealForeignM", RenderIntegration::g_band_seal_foreign_m));
+        out.push_back(kvf("bandSealForeignMaxM", RenderIntegration::g_band_seal_foreign_max_m));
+        // 26548 KH_BAND_PAIR_MIXED (mode 337 reverts) + completion-census split
+        out.push_back(kv("bandPairMixedRef", RenderIntegration::g_band_pair_mixed_ref));
+        out.push_back(kvf("bandPairMixedM", RenderIntegration::g_band_pair_mixed_m));
+        out.push_back(kvf("bandPairMixedMaxM", RenderIntegration::g_band_pair_mixed_max_m));
+        out.push_back(kv("bandCompleteInv", RenderIntegration::g_band_complete_inv));
+        out.push_back(kvf("bandCompleteOldTrnM", RenderIntegration::g_band_complete_old_trn_m));
+        out.push_back(kvf("bandCompleteOldTrnMaxM", RenderIntegration::g_band_complete_old_trn_max_m));
+        // 26549: drift metres twin (texels / (|sm row0| * atlas_size))
+        out.push_back(kvf("bandUvDriftM", RenderIntegration::g_band_uv_drift_m));
+        out.push_back(kvf("bandUvDriftMaxM", RenderIntegration::g_band_uv_drift_m_max));
+        // 26550 KH_BAND_ALL_NEAR (mode 338) engagement
+        out.push_back(kv("bandCadenceForced", RenderIntegration::g_band_cadence_forced));
+        // 26551 KH_BAND_COHERENT_COMPLETE (mode 339 reverts)
+        out.push_back(kv("bandPendLateKept", RenderIntegration::g_band_pend_late_kept));
+        out.push_back(kv("bandPendLateBridge", RenderIntegration::g_band_pend_late_bridge));
+        // 26552 ORDER CENSUS (pure gauge)
+        out.push_back(kvf("bandCapFvAgeMs", RenderIntegration::g_band_cap_fv_age_ms));
+        out.push_back(kvf("bandCapFvAgeMsMean", RenderIntegration::g_band_cap_fv_age_n
+            ? static_cast<float>(RenderIntegration::g_band_cap_fv_age_sum /
+                                 static_cast<double>(RenderIntegration::g_band_cap_fv_age_n))
+            : -1.0f));
+        out.push_back(kvf("bandCapFvAgeMsMax", RenderIntegration::g_band_cap_fv_age_max_ms));
+        out.push_back(kvf("bandCompAgeMsMean", RenderIntegration::g_band_comp_age_n
+            ? static_cast<float>(RenderIntegration::g_band_comp_age_sum /
+                                 static_cast<double>(RenderIntegration::g_band_comp_age_n))
+            : -1.0f));
+        out.push_back(kvf("bandCompAgeMsMax", RenderIntegration::g_band_comp_age_max_ms));
+        // 26553 KH_BAND_SAME_SOURCE (mode 340 reverts)
+        out.push_back(kv("bandCompSrcRef", RenderIntegration::g_band_comp_src_ref));
+        out.push_back(kvf("bandCompSrcM", RenderIntegration::g_band_comp_src_m));
+        out.push_back(kvf("bandCompSrcMaxM", RenderIntegration::g_band_comp_src_max_m));
+        out.push_back(kv("bandCompSrcAlt", RenderIntegration::g_band_comp_src_alt));   // 26554
+        // 26555 KH_BAND_ALT_PROVISIONAL (mode 342 reverts)
+        // 26557 KH_BAND_INJ_PAIR (mode 344 reverts)
+        out.push_back(kv("bandInjPair", RenderIntegration::g_band_inj_pair));
+        out.push_back(kv("bandInjPairMiss", RenderIntegration::g_band_inj_pair_miss));
+        out.push_back(kv("bandProvAlt", RenderIntegration::g_band_prov_alt));
+        out.push_back(kv("bandProvAltMiss", RenderIntegration::g_band_prov_alt_miss));
+        out.push_back(kv("bandPendTimeoutKept", RenderIntegration::g_band_pend_timeout_kept));
+        out.push_back(kv("bandPendSingleSrc", RenderIntegration::g_band_pend_single_src));   // 26559
+        // 26560 PICK CENSUS (always on, both paths)
+        out.push_back(kv("bandCompXSrc", RenderIntegration::g_band_comp_xsrc));
+        out.push_back(kv("bandCompSameSrcN", RenderIntegration::g_band_comp_samesrc));
+        out.push_back(kv("bandStageXSrc", RenderIntegration::g_band_stage_xsrc));
+        out.push_back(kv("bandStageSameSrc", RenderIntegration::g_band_stage_samesrc));
+        out.push_back(kv("bandStageFlip", RenderIntegration::g_band_stage_flip));
+        out.push_back(kv("bandStageFlipHold", RenderIntegration::g_band_stage_flip_hold));
+        out.push_back(kv("bandStageFlipSingle", RenderIntegration::g_band_stage_flip_single));
+        out.push_back(kv("bandStageFlipLate", RenderIntegration::g_band_stage_flip_late));
+        out.push_back(kvf("weldFlipInjDxM", RenderIntegration::g_weld_flip_inj_dx));
+        out.push_back(kvf("weldFlipInjDxMaxM", RenderIntegration::g_weld_flip_inj_dx_max));
+        out.push_back(kvf("weldFlipInjDxMeanM", RenderIntegration::g_weld_flip_inj_dx_n
+            ? static_cast<float>(RenderIntegration::g_weld_flip_inj_dx_sum /
+                static_cast<double>(RenderIntegration::g_weld_flip_inj_dx_n)) : -1.0f));
+        out.push_back(kv("weldFlipInjDxN", RenderIntegration::g_weld_flip_inj_dx_n));
+        out.push_back(kvf("weldFlipInjRotMaxDeg", RenderIntegration::g_weld_flip_inj_rot_max));
+        out.push_back(kv("bandStageFlipPoolBail", RenderIntegration::g_band_stage_flip_poolbail));
+        out.push_back(kv("bandStagePoolCap", RenderIntegration::g_band_stage_pool_cap));
+        out.push_back(kv("bandPendDeadFast", RenderIntegration::g_band_pend_dead_fast));
+        out.push_back(kv("bandWipeEvents", RenderIntegration::g_band_wipe_events));
+        out.push_back(kv("bandAgeKills", RenderIntegration::g_band_age_kills));
+        out.push_back(kv("bandRotWelds", RenderIntegration::g_band_rot_welds));
         out.push_back(kv("sunAxisBootRefs", RenderIntegration::g_sun_axis_boot_refs));
         out.push_back(kv("sunAxisColdRejects", RenderIntegration::g_sun_axis_cold_rejects));
         out.push_back(kvf("sunAxisLastRefDeg", RenderIntegration::g_sun_axis_last_ref_deg));
@@ -12366,6 +12762,34 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("bandStageHoldQuality", RenderIntegration::g_band_stage_hold_quality));
         out.push_back(kvf("bandStageWaitMs", RenderIntegration::g_band_stage_wait_ms));
         out.push_back(kvf("bandStageWaitMaxMs", RenderIntegration::g_band_stage_wait_max_ms));
+        // 26540 KH_SEAL_LAND_CENSUS (the 26475 discriminators; instrument only)
+        out.push_back(kv("bandEscLands", RenderIntegration::g_band_esc_lands));
+        out.push_back(kvf("bandEscLandMs", RenderIntegration::g_band_esc_land_ms));
+        out.push_back(kvf("bandEscLandMsMax", RenderIntegration::g_band_esc_land_ms_max));
+        out.push_back(kvf("bandEscLandMsMean", RenderIntegration::g_band_esc_lands
+            ? static_cast<float>(RenderIntegration::g_band_esc_land_ms_sum /
+                                 static_cast<double>(RenderIntegration::g_band_esc_lands)) : -1.0f));
+        out.push_back(kv("bandEscLandFr", static_cast<uint64_t>(RenderIntegration::g_band_esc_land_fr)));
+        out.push_back(kv("bandEscLandFrMax", static_cast<uint64_t>(RenderIntegration::g_band_esc_land_fr_max)));
+        out.push_back(kvf("bandEscLandCdxM", RenderIntegration::g_band_esc_land_cdx));
+        out.push_back(kvf("bandEscLandCdxMaxM", RenderIntegration::g_band_esc_land_cdx_max));
+        out.push_back(kvf("bandSealInjDxM", RenderIntegration::g_band_seal_inj_dx));
+        out.push_back(kvf("bandSealInjDxMaxM", RenderIntegration::g_band_seal_inj_dx_max));
+        out.push_back(kvf("bandSealInjRotDeg", RenderIntegration::g_band_seal_inj_rot));
+        out.push_back(kvf("bandSealInjRotMaxDeg", RenderIntegration::g_band_seal_inj_rot_max));
+        out.push_back(kvf("bandResealStepM", RenderIntegration::g_band_reseal_step));
+        out.push_back(kvf("bandResealStepNearMaxM", RenderIntegration::g_band_reseal_step_max[0]));
+        out.push_back(kvf("bandResealStepMidMaxM", RenderIntegration::g_band_reseal_step_max[1]));
+        out.push_back(kvf("bandResealStepFarMaxM", RenderIntegration::g_band_reseal_step_max[2]));
+        out.push_back(kvf("bandResealStepNearMeanM", RenderIntegration::g_band_reseal_n[0]
+            ? static_cast<float>(RenderIntegration::g_band_reseal_sum[0] / static_cast<double>(RenderIntegration::g_band_reseal_n[0])) : -1.0f));
+        out.push_back(kvf("bandResealStepMidMeanM", RenderIntegration::g_band_reseal_n[1]
+            ? static_cast<float>(RenderIntegration::g_band_reseal_sum[1] / static_cast<double>(RenderIntegration::g_band_reseal_n[1])) : -1.0f));
+        out.push_back(kvf("bandResealStepFarMeanM", RenderIntegration::g_band_reseal_n[2]
+            ? static_cast<float>(RenderIntegration::g_band_reseal_sum[2] / static_cast<double>(RenderIntegration::g_band_reseal_n[2])) : -1.0f));
+        out.push_back(kv("bandResealNear", RenderIntegration::g_band_reseal_n[0]));
+        out.push_back(kv("bandResealMid", RenderIntegration::g_band_reseal_n[1]));
+        out.push_back(kv("bandResealFar", RenderIntegration::g_band_reseal_n[2]));
         out.push_back(kv("recvColdWipes", RenderIntegration::g_recv_cold_wipes));
         out.push_back(kv("recvHealthOk", static_cast<uint64_t>(RenderIntegration::g_recv_health_ok ? 1 : 0)));
         out.push_back(kv("bandOverlapPairs", RenderIntegration::g_band_overlap_pairs));
@@ -13073,6 +13497,24 @@ static game_value dump_render_trace_sqf() {
         names.push_back(game_value("blkAnchSunLum"));   // 26479: anchor at the row latch
         names.push_back(game_value("dBlkApplies"));     // 26479: applies this frame
         names.push_back(game_value("dBlkAnchorRej"));   // 26479: anchor rejects this frame
+        // 26540 append-only tail: the two instruments (keep 1:1 with the pushes)
+        names.push_back(game_value("bandEscLandFr"));    // escape->land cycles of a landing this row (-1 none)
+        names.push_back(game_value("bandEscLandCdxM"));  // baked cam vs injection cam AT LAND
+        names.push_back(game_value("bandResealStepM"));  // largest baked-camera jump of a reseal this row
+        names.push_back(game_value("arbOn"));            // injection ran the analytic arb PS
+        names.push_back(game_value("arbJitPairM"));      // predicted decode error from pair churn (m)
+        names.push_back(game_value("arbJitCamM"));       // ... from camera advance since the snapshot (m)
+        names.push_back(game_value("arbJitVertM"));      // vertical component at the reconstructed point (m)
+        names.push_back(game_value("bandUvDriftPx"));
+        // 26562 append-only tail: WELD IDENTITY CENSUS (keep 1:1 with the
+        // pushes; fieldsN 222 -> 225, in-band audited).
+        names.push_back(game_value("khWeldInjDxM"));   // worst weld vs injection cam (m)
+        names.push_back(game_value("khWeldRotDeg"));   // its forward-axis rotation (deg)
+        names.push_back(game_value("khWeldCode"));     // 1 flip 2 single 3 late 4 base 5 s335 6 imm    // 26546: sealed-vs-live uv of the probe point (texels)
+        names.push_back(game_value("khLiveTab"));      // 26567: live table size at fill
+        names.push_back(game_value("khLiveServed"));   // live cascades written (0 = gated/empty)
+        names.push_back(game_value("khSunSt"));        // 0 cold 1 unstable 2 settled -1 no fill
+        names.push_back(game_value("khWipeLo"));       // wipe counter low bits
 
         // 26291 THE COUNT IS VERIFIED IN-BAND. trace_field_audit hand-counted
         // push CALL SITES against non-delta names and read the delta loop as
@@ -13282,6 +13724,21 @@ static game_value dump_render_trace_sqf() {
             f.push_back(game_value(r.blk_anch_lum));
             f.push_back(game_value(static_cast<float>(r.d_blk_applies)));
             f.push_back(game_value(static_cast<float>(r.d_blk_anch_rej)));
+            f.push_back(game_value(static_cast<float>(r.band_esc_land_fr)));   // 26540
+            f.push_back(game_value(r.band_esc_land_cdx_m));
+            f.push_back(game_value(r.band_reseal_step_m));
+            f.push_back(game_value(static_cast<float>(r.arb_on)));
+            f.push_back(game_value(r.arb_jit_pair_m));
+            f.push_back(game_value(r.arb_jit_cam_m));
+            f.push_back(game_value(r.arb_jit_vert_m));
+            f.push_back(game_value(r.band_uv_drift_px));
+            f.push_back(game_value(r.weld_inj_dx_m));      // 26562
+            f.push_back(game_value(r.weld_inj_rot_deg));
+            f.push_back(game_value(r.weld_code));   // 26546
+            f.push_back(game_value(static_cast<float>(r.kh_live_tab)));      // 26567
+            f.push_back(game_value(static_cast<float>(r.kh_live_served)));
+            f.push_back(game_value(static_cast<float>(r.kh_sun_st)));
+            f.push_back(game_value(static_cast<float>(r.kh_wipe_lo)));
             if (khtr_nrow == 0) khtr_nrow = static_cast<uint32_t>(f.size());   // 26291
             frames.push_back(game_value(std::move(f)));
         }
@@ -13925,7 +14382,29 @@ static game_value flush_ui_render_sqf() {
     // version-drift. Failures leave the previous value standing (default
     // 200 = the game's stock setting). 26451: direct
     // sqf::get_video_options() wrapper, no compiled snippet.
+    // 26613/26614 KH_SUN_RANGE_SOURCE (ledger at KH_BUILD_TAG): the key
+    // compare is widened from a 16-char exact match to a case-folded
+    // 'shadowvis' substring (dump2-26612 read the mirror stuck at 200
+    // through an operator setting of ~500 - a variant key spelling is one
+    // of the two candidate classes and this closes it for free), and a
+    // successful read stamps src 1 so the next dump names the live writer:
+    // sunRangeSrc 0 = the key NEVER matched (the key fault, still open);
+    // src 1 with sunRangeM at the operator's setting = mirror healthy;
+    // src 1 with sunRangeM 200 against a changed setting = getVideoOptions
+    // itself does not carry the change (the operator's setter writes the
+    // engine value outside the video-options store) and NO automatic read
+    // of this map can ever see it - that verdict, if it lands, needs the
+    // operator to name how the setting was changed, not more code.
+    // 26615 KH_SUN_RANGE_FROM_BANDS (ledger at KH_BUILD_TAG in the
+    // rendering unit): the engine's own committed cascade table is the
+    // PRIMARY range source now - dump1-26614 proved this map carries no
+    // shadowvis key at all (src stayed 0) while the band census read the
+    // operator's setting exactly (bandMaxFar 529.986 at ~500). This read
+    // demotes to FALLBACK: it writes only while the band derivation has
+    // not taken (src != 2), covering shadows-disabled and sky-only-cold
+    // sessions where no cascade ever commits.
     try {
+        if (RenderIntegration::g_sun_range_src.load(std::memory_order_relaxed) != 2) {
         // 26452: rv_hashmap read per the intercept types header - the map
         // is game_data_hashmap_pair<game_value> entries with .key/.value,
         // so ITERATION with a case-folded key compare is the access the
@@ -13935,27 +14414,22 @@ static game_value flush_ui_render_sqf() {
 
         for (auto& khsr_e : khsr_map) {
             if (khsr_e.key.type_enum() != game_data_type::STRING) continue;
-            const std::string khsr_k = static_cast<std::string>(khsr_e.key);
-            if (khsr_k.size() != 16) continue;   // "shadowVisibility"
-            static const char khsr_w[17] = "shadowvisibility";
-            bool khsr_m = true;
-
-            for (size_t khsr_i = 0; khsr_i < 16; ++khsr_i) {
-                char khsr_c = khsr_k[khsr_i];
+            std::string khsr_k = static_cast<std::string>(khsr_e.key);
+            for (auto& khsr_c : khsr_k) {
                 if (khsr_c >= 'A' && khsr_c <= 'Z') khsr_c = static_cast<char>(khsr_c + 32);
-                if (khsr_c != khsr_w[khsr_i]) { khsr_m = false; break; }
             }
-
-            if (!khsr_m) continue;
+            if (khsr_k.find("shadowvis") == std::string::npos) continue;
 
             if (khsr_e.value.type_enum() == game_data_type::SCALAR) {
                 const float khsr_f = static_cast<float>(khsr_e.value);
                 if (khsr_f == khsr_f && khsr_f > 0.0f) {
                     RenderIntegration::g_sun_range.store(khsr_f, std::memory_order_relaxed);
+                    RenderIntegration::g_sun_range_src.store(1, std::memory_order_relaxed);
                 }
             }
 
             break;
+        }
         }
     } catch (...) {}
 
@@ -15502,7 +15976,7 @@ static void initialize_sqf_integration() {
             setReturnValue false;
         };
 
-        private _old = uiNamespace getVariable ["kh_uiDriverControl", controlNull];
+        private _old = uiNamespace getVariable ["kh_var_uiDriverControl", controlNull];
 
         if !(isNull _old) then { 
             ctrlDelete _old;
@@ -15528,7 +16002,7 @@ static void initialize_sqf_integration() {
             }
         ];
 
-        uiNamespace setVariable ["kh_uiDriverControl", _control];
+        uiNamespace setVariable ["kh_var_uiDriverControl", _control];
         setReturnValue true;
     )");
 }

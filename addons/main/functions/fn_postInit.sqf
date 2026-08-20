@@ -57,7 +57,12 @@ isNil {
 				};
 
 				{
-					call _x;
+					private _stored = [hashValue _x, "missionLoad"] joinString "_";
+
+					if !(_stored in KH_var_executedStacks) then {
+						KH_var_executedStacks pushBack _stored;
+						call _x;
+					};
 				} forEach KH_var_serverMissionLoadStack;
 
 				call KH_fnc_serverMissionLoadInit;
@@ -76,7 +81,12 @@ isNil {
 						publicVariable "KH_var_missionStarted";
 
 						{
-							call _x;
+							private _stored = [hashValue _x, "missionStart"] joinString "_";
+
+							if !(_stored in KH_var_executedStacks) then {
+								KH_var_executedStacks pushBack _stored;
+								call _x;
+							};
 						} forEach KH_var_serverMissionStartStack;
 
 						call KH_fnc_serverMissionStartInit;
@@ -85,7 +95,12 @@ isNil {
 							[],
 							{
 								{
-									call _x;
+									private _stored = [hashValue _x, "missionStart"] joinString "_";
+
+									if !(_stored in KH_var_executedStacks) then {
+										KH_var_executedStacks pushBack _stored;
+										call _x;
+									};
 								} forEach KH_var_playerMissionStartStack;
 
 								call KH_fnc_playerMissionStartInit;
@@ -99,7 +114,12 @@ isNil {
 							[],
 							{
 								{
-									call _x;
+									private _stored = [hashValue _x, "missionStart"] joinString "_";
+
+									if !(_stored in KH_var_executedStacks) then {
+										KH_var_executedStacks pushBack _stored;
+										call _x;
+									};
 								} forEach KH_var_headlessMissionStartStack;
 
 								call KH_fnc_headlessMissionStartInit;
@@ -130,7 +150,12 @@ isNil {
 								publicVariable "KH_var_playersLoaded";
 
 								{
-									call _x;
+									private _stored = [hashValue _x, "playersLoaded"] joinString "_";
+
+									if !(_stored in KH_var_executedStacks) then {
+										KH_var_executedStacks pushBack _stored;
+										call _x;
+									};
 								} forEach KH_var_serverPlayersLoadedStack;
 
 								call KH_fnc_serverPlayersLoadedInit;
@@ -139,7 +164,12 @@ isNil {
 									[],
 									{
 										{
-											call _x;
+											private _stored = [hashValue _x, "playersLoaded"] joinString "_";
+
+											if !(_stored in KH_var_executedStacks) then {
+												KH_var_executedStacks pushBack _stored;
+												call _x;
+											};
 										} forEach KH_var_playerPlayersLoadedStack;
 
 										call KH_fnc_playerPlayersLoadedInit;
@@ -153,7 +183,12 @@ isNil {
 									[],
 									{
 										{
-											call _x;
+											private _stored = [hashValue _x, "playersLoaded"] joinString "_";
+
+											if !(_stored in KH_var_executedStacks) then {
+												KH_var_executedStacks pushBack _stored;
+												call _x;
+											};
 										} forEach KH_var_headlessPlayersLoadedStack;
 
 										call KH_fnc_headlessPlayersLoadedInit;
@@ -1393,7 +1428,12 @@ isNil {
 						"KH_var_displayLayer" cutRsc ["KH_ResourceKHDisplay", "PLAIN", -1, true, true];
 						
 						{
-							call _x;
+							private _stored = [hashValue _x, "missionLoad"] joinString "_";
+
+							if !(_stored in KH_var_executedStacks) then {
+								KH_var_executedStacks pushBack _stored;
+								call _x;
+							};
 						} forEach KH_var_playerMissionLoadStack;
 
 						call KH_fnc_playerMissionLoadInit;
@@ -1402,7 +1442,12 @@ isNil {
 							[],
 							{
 								{
-									call _x;
+									private _stored = [hashValue _x, "load"] joinString "_";
+
+									if !(_stored in KH_var_executedStacks) then {
+										KH_var_executedStacks pushBack _stored;
+										call _x;
+									};
 								} forEach KH_var_playerLoadStack;
 
 								call KH_fnc_playerLoadInit;
@@ -1927,7 +1972,12 @@ isNil {
 					[],
 					{
 						{
-							call _x;
+							private _stored = [hashValue _x, "missionLoad"] joinString "_";
+
+							if !(_stored in KH_var_executedStacks) then {
+								KH_var_executedStacks pushBack _stored;
+								call _x;
+							};
 						} forEach KH_var_headlessMissionLoadStack;
 
 						call KH_fnc_headlessMissionLoadInit;
@@ -1939,7 +1989,12 @@ isNil {
 								player setVariable ["KH_var_playerUnit", KH_var_playerUnit, true];
 
 								{
-									call _x;
+									private _stored = [hashValue _x, "load"] joinString "_";
+
+									if !(_stored in KH_var_executedStacks) then {
+										KH_var_executedStacks pushBack _stored;
+										call _x;
+									};
 								} forEach KH_var_headlessLoadStack;
 
 								call KH_fnc_headlessLoadInit;

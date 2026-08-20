@@ -768,6 +768,35 @@ struct Resources {
     ID3D11Texture2D* sun4_tex = nullptr;            // 26454 outer cascade band
     ID3D11DepthStencilView* sun4_dsv = nullptr;
     ID3D11ShaderResourceView* sun4_srv = nullptr;
+    ID3D11Texture2D* sun5_tex = nullptr;            // 26620 FAR band (KH_SUN_FAR_BAND)
+    ID3D11DepthStencilView* sun5_dsv = nullptr;
+    ID3D11ShaderResourceView* sun5_srv = nullptr;
+    // 26575 KH_SELF_PREFILTER (ledger at KH_BUILD_TAG; mode 357 reverts):
+    // per-band VSM moment pyramids - half-res RG32F (mu, E[z^2]) + full
+    // mip chain, converted from each band depth pass, sampled by the
+    // self kernel under minification. [0]=hero [1]=mid [2]=outer.
+    ID3D11Texture2D*          sun_pf_tex[3] = {};
+    ID3D11RenderTargetView*   sun_pf_rtv[3] = {};
+    ID3D11ShaderResourceView* sun_pf_srv[3] = {};
+    // 26578 manual mip chain (GenerateMips on RG32F no-ops on this GPU;
+    // ledger at KH_BUILD_TAG): per-tier per-level RTVs (level 0 stays
+    // sun_pf_rtv above), one shared scratch ping-pong texture with
+    // per-level SRVs, and the 2x2 moment-average PS.
+    ID3D11RenderTargetView*   sun_pf_rtvm[3][12] = {};
+    ID3D11Texture2D*          sun_pf_scr = nullptr;
+    ID3D11ShaderResourceView* sun_pf_scr_srvm[12] = {};
+    ID3D11PixelShader*        ps_sunpfm = nullptr;
+    // 26583: the convert MUST NOT inherit the engine blend - the whole
+    // 26575-26582 saga was additive blending summing honest moments
+    // (ledger at KH_BUILD_TAG). BlendEnable FALSE, write mask ALL.
+    ID3D11BlendState*         blend_pf = nullptr;
+    // 26581 KH_PF_CPU_PROBE: 1x1 stagings for the mode-361 readback
+    // (pyramid RG32F + depth R32_TYPELESS; ledger at KH_BUILD_TAG).
+    ID3D11Texture2D*          pf_stage_mu = nullptr;
+    ID3D11Texture2D*          pf_stage_st = nullptr;
+    ID3D11SamplerState*       samp_pf = nullptr;   // linear-clamp; s1 on both mesh paths
+    ID3D11VertexShader*       vs_sunpf = nullptr;  // fullscreen convert pair
+    ID3D11PixelShader*        ps_sunpf = nullptr;
     ID3D11RasterizerState*    rast_sun = nullptr;   // CullNone, NO scene depth bias
     // 26426: the BACK-FACE twin of rast_sun (CullFront). Mode 227. Ledger at
     // KH_SUN_BACKFACE. Nothing else differs.
@@ -1002,6 +1031,9 @@ struct Resources {
         KH_SAFE_RELEASE(sun4_srv);   // 26454
         KH_SAFE_RELEASE(sun4_dsv);
         KH_SAFE_RELEASE(sun4_tex);
+        KH_SAFE_RELEASE(sun5_srv);   // 26620
+        KH_SAFE_RELEASE(sun5_dsv);
+        KH_SAFE_RELEASE(sun5_tex);
         KH_SAFE_RELEASE(rast_sun);
         KH_SAFE_RELEASE(rast_sun_bf);
         KH_SAFE_RELEASE(rast_sun_lo);
@@ -2040,6 +2072,77 @@ static std::atomic<bool> g_stats_armed{ false };
 //  152-155 THE 26304 SET (dump123 convictions; full ledgers at the arms). dump123 decomposed the 99 wrong-encode fire frames and OVERTURNED the 26302 reading: the live bridge was NOT mostly refused for foreign fetches - the arbitration was refusing and mispredicting TRUTH. (1) TWO PREDICTOR-FREEZE RUNS (ser 650-675, 706-711): the 26303 spike guard deadlocked - commits pulsing more than 2x above a stale base were skipped forever, 26 straight frames encoding 0.116 against a 0.30 truth. (2) SLOPE ACROSS SQUARE-WAVE EDGES measured net 3.4x WORSE than a flat hold (err sum 8.965 vs 2.600, worse on 92 rows): undershooting to the 0.5x clamp after down edges (ser 610/617/625 encoded 0.035 where the committed already EQUALLED the needed 0.070), overshooting after up edges (ser 614). (3) CORRIDOR-FLOOR REFUSALS: 4/4 were the world pair landing back on the session baseline 0.070 off a pulse/ramp top (needed ratios 0.13-0.50; 0.070/0.141 = 0.4965 sits a hair under the 0.5x floor) - the two largest single-frame gaps on record (0.463) were exactly these. DEFAULTS 26304: (a) predictor re-bases after two consecutive out-of-band commits that agree with each other (svPairRebase), slope only on smooth ramps (last two commits within 25 percent; measured ramps run ~5 percent/frame, pulse edges 40-400 percent), base freshness 500 ms, state file-scope and reset at teardown; (b) RETURN-TO-BASELINE ACCEPTANCE: a live pair outside the corridor is accepted when it matches the stable committed baseline within 10 percent (two consecutive commits within 2 percent define the baseline; the foreign down class 0.010 is 7x below the baseline itself; svPairBase, seamProjSrc 5); (c) CORRIDOR REFEREE GUARD: when the raw committed reference disagrees with the spike-guarded base by more than 2x (the ser-1772 muzzle-spike class) the base referees (svPairRefGuard). 153 reverts (a) to the 26303 predictor, 154 turns (b) off, 155 turns (c) off. 152 = ENCODE THE BOUND-CB CENSUS PAIR (handoff 3.1): a POINTER-KEYED census records every projection-shaped upload per buffer object (identity separates windows no value can); at the seam the bound VS/PS b0-b3 are looked up and the freshest hit is read into boundPairNear / boundPairAgeMs / censusMatch EVERY armed frame, instrument-first - the lanes decide whether the exact volume-pass pair is readable at the seam instant BEFORE anyone trusts it - and under 152 the seam encodes that pair (seamProjSrc 6, svCbcEncodes). New refusal lanes: seamLiveNear (the raw live-bridge near at the seam fetch - the lane whose absence forced dump123 to proxy through liveNearInj) and seamPairWhy (0 live-corr 1 live-base 2 insane 3 corridor 4 no-ref 5 no sample). Protocol: dump mode 0 look-down fire (expect svPairBase and svPairRebase engaged, svPairPred collapsed, row-shifted mismatches near 0, no frozen seamNear runs), then read boundPairNear against injNear[k+1] on the surviving edge frames - tracking = fold 152 next build and the campaign closes at exact. NOTE 26301 sniff-first postmortem stands: sniffNear[k] == injNear[k] on 132/132 in dump123 - the value the seam needs is not uploaded yet at the seam instant, so re-aiming the sniffer (the old 3.2 plan) is structurally dead; the live bridge and the bound census are the only fresh-phase feeds.
 //  FIELD 26304 (dump1): THE FIXES ENGAGED AND THE INSTRUMENT CLOSED THE CAMPAIGN. Arbitration round: wrong-encode rows 99 to 40, predictor err sum 8.965 to 4.302 (now ~= the flat hold), frozen runs capped at 2 frames by the rebase escape (svPairRebase 13), svPairBase 11 with 5/5 fresh on edges, svPairRefGuard 16; the 40 residuals were genuinely-foreign seam-instant fetches (seamLiveNear 0.010/10.0 in the lane, at last directly visible), rebase lag, and a measured baseline-tracker limitation - the 2 percent stability latch follows ramp PLATEAUS during slow glides, so big returns off a glide top miss the match (ser 730/767, the 0.628 gaps). CENSUS ROUND, THE VERDICT: boundPairNear == injNear[k+1] on 199/199 moving frames AND on 40/40 of the rows every arbitration tier still got wrong, disagreements 0/511 session-wide, age 0-1 ms, one stable identity in VS b2 all session - the engine uploads frame k+1 projection into the bound b2 BEFORE the pre-clear seam runs, and buffer identity reads it where value arbitration structurally cannot. 26305 FOLDS THE BOUND-CENSUS ENCODE TO DEFAULT (seamProjSrc 6, svCbcEncodes ~ svInjects is engagement; the census now runs whenever the live-shadow feature does - measured cost ~1500 probed uploads/frame at ~30 compares each). The 26302-26304 live/baseline/predictor chain stays intact beneath as the census-miss fallback. 156 = REVERT to 26304 live-first (152 stays as an alias of the default). ACCEPTANCE (the closing one): seamNear[k] == injNear[k+1] on moving frames outright, seamProjSrc 6 dominant, FP pulsating scale gone shooting and not, slice/look-down/TP holding.
 //  FIELD 26305 (dump2 + screenshot): THE PROJECTION AXIS IS CLOSED (seamProjSrc 6 on every inject, svCbcEncodes == svInjects == 2232, row-shifted mismatches 0) and the survivor moved axes: on rigorous rotational+positional motion a cascade ground shadow paints THROUGH the box along its edges - every one of the 19 reprojPx spikes (145-2133 px) is the seam TRAJECTORY BOUND refusing a REAL move (svLiveTrnBound 28, seamCamDxM == camStepM on exactly those frames): the bound referenced the latch step from the PREVIOUS seam run (two frames old) and 3x of a two-frame-old step loses to every measured acceleration onset (0.095->0.349 = 3.7x, 0.123->0.405 = 3.3x), so the footprint rode a one-frame-stale camera and the stencil darkening landed across the box edge. 26306 REPAIRS THE BOUND ON THREE AXES: (a) the velocity reference is max(previous, CURRENT-run latch step); (b) 3x -> 4x (covers every legit onset on record; the ser-3642 foreign class - 2.593 m off a STATIONARY latch - is still refused by the 0.30 m floor since stationary means both references ~0); (c) CONFIRMATION ESCAPE, the predictor-rebase pattern on the translation axis: a refused live camera is remembered and taken next run if the new live camera agrees with it within max(0.5 m, 50 percent) - a real relocation confirms itself in one publication, a foreign one-frame flicker never does. svLiveTrnWide counts takes the old bound would have refused; svLiveTrnRebase counts escapes; seamTrnEvent is the per-frame lane (0 none 1 refused 2 wide-take 3 escape). 157 reverts the whole bound block to 26305. AND THE CENSUS LEARNS THE VIEW, INSTRUMENT-FIRST (the projection playbook, round 2): the recorder probes the 16-float windows adjacent to the validated projection for a view signature (near-orthonormal basis rows, 0-0-0-1 column, finite translation, both layouts) and stores the extracted CAMERA per buffer identity; at the seam, boundCamDxM = |census camera - seam draw camera| and boundCamLiveDxM = |census camera - live fetch camera| are read every armed frame with boundCamOk gating. NO ENCODE PATH TOUCHES IT in 26306. THE FOLD VERDICT FOR 26307: boundCamDxM ~ camStepM on exactly the seamTrnEvent-1 frames while boundCamLiveDxM ~ 0 = the engine own upcoming camera is readable at the seam and becomes the translation authority, retiring the bound outright - the 199/199 proof pattern on the translation axis. boundCamOk 0 everywhere = the view does not ride adjacent to the projection and the repaired bound is the final form. ACCEPTANCE 26306: the through-the-box stripe gone on rigorous motion (svLiveTrnWide + svLiveTrnRebase absorbing the former refusals, reprojPx spikes collapsed), FP still resolved, slice/look-down/TP holding. FIELD 26306 (dump10): ALL ACCEPTED AND THE CAMPAIGN IS CLOSED - projection exact (svCbcEncodes == svInjects == 2217, mismatches 0, seamProjSrc 6 throughout), translation clean (0 reprojPx spikes, svLiveTrnWide 33, svLiveTrnBound 3 true refusals), view probe measured NEGATIVE (svCbcCamRecs 0: no view rides adjacent to the projection) and RETIRED at 26307 - the repaired bound is the final form; probe machinery and lanes stay compiled for re-arming, per the counters-never-die rule. || 26308-26313 (full records: RENDER_HANDOFF_CAMPAIGN_43.md; in-code ledgers authoritative): 138/139/140 = footprint grow 2/4/8 pct (svGrowDraws/Last). 158 = absolute-translation revert (26309). 159 = adopted-camera-anchor revert (26310). 160 = latch-FOV revert (26311). 161 = unrefereed-census revert (26311). 162 = record-all-classes census revert (26312). 116/118/120/125 inert since 26308.
+//  || 26625 THE NAMED LIFT IS RETRACTED ON ITS OWN PRECONDITION - objTotal EQUALS THE ADMITTED CASTER COUNT IN EVERY DUMP ON RECORD, SO THE RECEIVER-ABSENCE THEORY IS FALSIFIED AND NO RECEIVER-ONLY MESHES EXIST IN THESE SCENES (ledger-only build; no behaviour change; the 26624 gate and its disclosed trade stand unchanged). THE CHECK, run before applying the lift the operator authorized: objTotal is g_draw_list.size() - the WHOLE registration - and it reads equal to sunHero/Mid/Out/FarCasters in every session (2==2, 3==3), so every registered mesh, the vest included, is admitted to and rendered into every band map (rast_sun is CullNone since its creation - interiors render too). The 26624 ledger's mechanism step 'receivers absent from every map, the first-person-gear class' is therefore WRONG and is corrected here; the lift built on it (register receiver-only meshes as casters) has NO TARGET and applying it would have been theater. WHAT SURVIVES OF 26624, and why the fix stands anyway: the FIELD facts are untouched - 389 kills the splotch, the gate kills the splotch, certification widening did not - and the gate's soundness argument never used the absence step: the far tier cannot add information inside the finer ladder's coverage (the complete admitted caster set exists there at >=4x finer texels), so silencing it inside the outer window is correct WHATEVER blocks the protection. The disclosed trade stands as written. THE OPEN CONTRADICTION, stated so the next campaign starts honest: with the vest in the hero map, the static read says hero certifies at the ring pixels, khla_w latches 1, and the kh5 rejection zeroes the ring - yet the field showed the splotch surviving exactly that machinery on 26623. Something in that chain does not run as read at those pixels (hero validity at those frames, the serving path for those fragments, or an ordering this reading misses). NO CODE until it is read live: the decode is mode 392 (gate lifted) + setRenderDebug 269 at the splotch pose - the tier paint names what serves those pixels and whether hero answers there at all; one screenshot resolves what three static readings could not. NUMBER HYGIENE: nothing minted, nothing retired. FREE NOW: debug modes 393+, lighting0.y codes 66+, visual codes 32+, dbgCtl.w 13+.
+//  || 26624 THE SPLOTCH IS THE FAR BAND'S SILHOUETTE RING SERVED THROUGH THE SELF FALLTHROUGH TO RECEIVERS THE MAPS NEVER HELD, AND THE FAR SELF TIER LEARNS THE CAST CHAIN'S OWN DISCIPLINE - PLUS 26623 IS WITHDRAWN PER THE OPERATOR'S BASELINE DIRECTIVE (KH_FAR_SELF_SCOPE default, mode 392 / lighting0.y 65 restores the ungated 26620 form; certification returns to center-only; modes 391 + code 64 RETIRED - fielded once, never remint, rule 1.18). FIELD (operator, on 26623): the splotch persists at mode 0 (does NOT match 389), IS killed by 389, and - the new datum - shows at EVERY quality level/distance; the light bleed is explicitly deprioritized ('leave it be') and the directive is: fix the splotch, otherwise hold the wobble+ladder good version. THE TRIANGULATION, three facts one author: (killed by 389) the far band serves it; (immune to 26623) no surface-evidence test can ever protect the receiving fragments, so their own surface is ABSENT from the fine maps - the first-person-gear class, receivers that are not casters; (all distances) the serving window is the far band's 0..range, not any tier annulus. THE MECHANISM WHOLE: a real caster's far-band silhouette at 0.10 m texels over-extends its true shadow by up to a texel+filter (~10-30 cm ring); the fine tiers read those ring fragments correctly LIT and fall through per 26507 (correct and necessary - cross-distance casters live in coarser maps); with the receiver absent from every map, no tier certifies, no jurisdiction fires, and kh5's ring answers - at 0.10 m it is a crisp dark SPLOTCH where the union's 0.5 m version was diffuse background the operator's eye had already priced in. 26620 did not create the class; it sharpened it past noticing threshold. WHY THE FIX IS THE CAST CHAIN'S OWN RULE: the cast chain never shows this - 26538 made it lit-authoritative inside a containing window, so khc5 only ever serves PAST the outer band. The self chain kept 26507 fallthrough for good reason, but the far tier is the one rung where fallthrough can only LOSE inside the finer ladder's coverage: outer and below hold the complete admitted caster set at >=4x finer texels, so within the outer window the far tier can never add information, only rings. THE GATE: the far SELF tier runs only when the outer window does NOT hold the fragment interior, or a blend carry is in flight (the outer->far cross-fade stands whole). Inside the finer coverage the chain falls to the union exactly as the field-accepted pre-far-band version - which is also why acceptance is crisp: MODE 0 NOW MATCHES MODE 389 AT THE SPLOTCH by construction, while the >32s far-self quality and the wobble/mesh-law wins (the 26620 campaign) are untouched. Hero/mid/outer are NOT gated - their fallthrough serves real cross-tier casts and their texels cannot manufacture visible rings. 26623 WITHDRAWN, said plainly: the neighborhood certification was sound in its own audit but aimed at the wrong half - the receivers at issue have no surface in any map for ANY footprint to find, the field showed exactly that (mode 0 unchanged), and the operator's directive is the known-good baseline plus one fix, not an accumulation of plausible-but-inert changes. The four latches return to center-only verbatim; the KhCg segment is removed whole; 391/64 join the retired list beside 390/63. PRE-REGISTERED ACCEPTANCE (rule 1.22): (a) the splotch pose at mode 0 == the same pose at 389, both now and at any distance; (b) far-self quality past the outer window unchanged (the 26620 acceptance restated); (c) the outer->far handoff stays line-free from both directions (the carry clause is the whole cross-fade path); (d) 392 restores the ring alone. DISCLOSED TRADE (operator-queried and answered, the 26538 pattern): the gate sacrifices one legitimate slice through the same door the ring used - a REAL distant caster (lateral outside the outer window, inside the range) casting onto a NEAR self receiver was far-band-served at 0.10-0.26 m and is UNION-served now: the shadow survives (the chain still ends at the union terminal) at union quality, re-exposing the mesh-priced texel and the hash-gated re-render wobble WITHIN THAT SLICE ONLY - distant-caster shadow overlapping a near self mesh inside the outer window. The world-side twin of this slice was already conceded at 26538 (cast lit-authoritative), so self and cast are now symmetric in the concession. THE NAMED LIFT: render the receiver-only meshes (the first-person gear class) into the band maps as casters - certification then works, the jurisdiction kills the ring properly, and this gate can retire, returning the slice to far-band quality with no ring; a content/admission campaign of its own. THE LIGHT BLEED stays banked per the directive: thin-gap bias class, decode via setRenderDebug 269 at the pose whenever reopened. NUMBER HYGIENE: mode 392 + lighting0.y 65 minted; 391 + 64 retired (fielded). FREE NOW: debug modes 393+, lighting0.y codes 66+, visual codes 32+, dbgCtl.w 13+.
+//  || 26623 THE OPERATOR'S MODE-389 A/B NAMES THE ARTIFACT'S FIRST HALF IN THE FIELD - COARSE-TIER MUSH SERVED THROUGH A CERTIFICATION HOLE SHAPED EXACTLY LIKE LAYERED FABRIC - AND CERTIFICATION LEARNS TO SEE ITS OWN FOOTPRINT (KH_CERT_NEIGHBORHOOD default at all four latches; mode 391 / lighting0.y 64 restores center-only - one default, one A/B, rule 1.11). FIELD (operator, on 26622): mode 389 (far band OFF) REMOVES the largest splotch and leaves the rest of the band + some bleed - the first differential result on this artifact after four nulls. THE READ: the splotch was the FAR BAND'S 0.10 m mush serving a fragment that fell through hero/mid/outer unprotected; the residue is the same fallthrough class served by the remaining coarse tiers. THE HOLE, mechanically: on sub-texel LAYERED geometry (the vest's stacked fabric, 1-3 cm gaps) the fine tier reads LIT (the gap sits under its bias) and falls through per 26507 - correct and necessary (cross-distance casters live in coarser maps) - but its 26590 CERTIFICATION also fails, because the CENTER texel holds the OTHER LAYER's depth, not this surface's. The jurisdiction built precisely to zero coarse mush is blind precisely on the geometry that manufactures it; 26620's far band did not create the class, it DENSIFIED what serves it (0.10 m stripes where 0.5 m union blotches sat), which is why the artifact 'moved' to new poses and survived both 26621 arms and mode 357 - no pf, no remap, no pyramid anywhere in the chain. THE FIX: certification evidence widens from the center texel to the 2x2 BILINEAR FOOTPRINT (KhCg2..5, min own-surface gap over the four texels the tap kernel already reads) - on layered fabric the neighbor holding THIS surface certifies, khla_g/khla_w latch, and every coarser tier's sub-guard mush - the far band's splotch and the union's alike - zeroes under the existing 26590/26617 machinery. THE GUARD SEMANTICS ARE UNCHANGED AND THAT IS THE SOUNDNESS ARGUMENT: certification's claim is 'this tier's window+reach admitted every occluder in its depth guard and its verdict for this fragment stands' - WHICH footprint texel proves the surface present does not alter that claim; a texel holding this surface within 3 bias widths is the same evidence, spatially robust. False-kill audit: a REAL cross-caster within the guard would be IN this tier's map (admission is lateral + reach, 26537), so a lit verdict already excludes it - neighborhood evidence cannot zero a shadow the center evidence would have kept. WHAT THIS DOES NOT CLAIM: the whole artifact. The light-bleed remainder (bright patches inside TRUE shadow) is the OTHER half - thin gaps eaten by the serving tier's own bias - untouched here, possibly reduced only where it was actually coarse-mush patchwork misread as bleed. PRE-REGISTERED ACCEPTANCE (rule 1.22): (a) at the operator's pose, mode 0 WITH the far band ON now matches or beats the mode-389 presentation (the jurisdiction kills what standing the band down killed) and the residual banding dies where it is coarse mush; (b) mode 391 restores the splotch and the bands together; (c) the vest-pose halo and whole-face dither STAY DEAD (interiors bit-exact under certified weight 1; the widened evidence only ADDS certifications); (d) whatever survives BOTH 0-and-391-identical is the bias/thin-gap class - bounded, named, and decoded by setRenderDebug 269 at the pose before any further code. FALSIFICATION: real cast shadows from near casters vanishing on certified surfaces = the guard audit above is wrong somewhere - 391 is the instant stand-down and the audit reopens at the admission geometry. NUMBER HYGIENE: mode 391 + lighting0.y 64 minted. FREE NOW: debug modes 392+, lighting0.y codes 65+, visual codes 32+, dbgCtl.w 13+.
+//  || 26622 THE 26621 FIX IS WITHDRAWN ON ITS OWN FALSIFICATION CLAUSE AND THE OPERATOR'S DIRECTIVE - THE FIELD BATTERY ACQUITS THE ENTIRE PF PATH, AND THE DEFAULTS RETURN TO 26620 BIT-EXACTLY (the wobble fix and the quality ladder stand untouched; ledger-only beyond the revert). FIELD (operator, on 26621): the banding/bleed PERSISTS, now visible at the hero tier too in places; mode 390 (the 26621 A/B) changes NOTHING - the smooth curve and the linear remap present the artifact identically, so 26621's change was inert against it; and mode 357 (moment pyramids OFF ENTIRELY) changes NOTHING - the artifact lives with the pf path fully stood down. THAT IS THE HARD ACQUITTAL: per 26621's own pre-registered clause (d), the pf path is acquitted whole, my engagement-window conviction is FALSIFIED in the field, and the true author remains UNNAMED. THE REVERT: the three pf remap sites return to the 26576 linear form verbatim; the ladder entry is removed; MODE 390 AND lighting0.y CODE 63 ARE RETIRED, NOT FREED - both were FIELDED on 26621 (the operator ran 390), so rule 1.18 forbids reminting either with a new meaning; 390 moves to the retired list with this note. Every other 26617-26620 default stands exactly as field-accepted: the edge fade, the tier hold, the far band, the range derivation. BANKED FOR A FUTURE REOPEN, LABELED AS UNPROVEN CANDIDATE, NOT CONVICTION: the artifact survives pf-off and remap-swap, sits worst at the mid window, and now shows at hero 'in some places' - a shape consistent with UNCERTIFIED LIT-FALLTHROUGH: a fragment whose own tier says lit but whose center texel holds a DIFFERENT surface (sub-texel layered geometry - the vest's stacked fabric) latches no 26590 certification, so the coarser tiers' mush stands and the fallthrough chain serves it; 26620's far band densified that chain (0.10 m mush where the union's 0.5 m used to sit), which would present as finer banding and could surface the class at new poses. UNEXPLAINED BY THE CANDIDATE and said plainly: the LIGHT-bleed clause (fallthrough mush darkens; it does not brighten) - the candidate is at best half the author. THE ONE-SCREENSHOT DECODE IF EVER REOPENED: setRenderDebug 269 (visual 21) at the artifact pose - the paint names the serving tier at the artifact pixels (magenta = far band mush = the candidate confirmed; hero/mid colors = the kernel that owns them; flicker = selection churn), and mode 389 (far band off) A/Bs the densified-chain half in one switch. No further code until that read exists. PRE-REGISTERED ACCEPTANCE for THIS build: 26622 at mode 0 presents exactly as 26620 did at mode 0 - the operator's accepted baseline - with the artifact unchanged (it predates 26621 and outlived it). NUMBER HYGIENE: modes 390 + code 63 RETIRED (fielded, never remint). FREE NOW: debug modes 391+, lighting0.y codes 64+, visual codes 32+, dbgCtl.w 13+.
+//  || 26621 THE MID-BAND BANDING AND THE LIGHT BLEED ARE ONE LINE - THE PF VERDICT REMAP'S KNEE AND TAIL - AND THE DISTANCE WINDOW THAT NAMED THE TIER IS THE PYRAMID'S OWN ENGAGEMENT CURVE (KH_PF_BLEED_CUT default at all three pf sites; mode 390 / lighting0.y 63 restores the 26576 linear remap - one default, one A/B, rule 1.11). FIELD (operator, on 26620 at stock 200; dump validates the far band whole: sunFarValid 1, sunFarHalfDiag == sunRangeM exactly, renders tracking flushes, reach 6x - the wobble and the mesh-size law CONFIRMED DEAD in the same round): banding + light bleeding on self shadows AT THE SECOND LOD ONLY - closer (hero) clean, further (outer+) clean; screenshot circles striped terraces and bright patches on layered vest fabric. THE TIER WAS NAMED BY THE WINDOW, NOT THE MAP: every tier derivation is symmetric (verified line-by-line), but the moment-pyramid blend engages at footprint 1-2 texels OF THE SERVING TIER - at the operator's pose that is exactly the mid band's range (hero serves magnified with pf off; outer's engagement lies further out where the surface is small), so a pf-path artifact wears the mid band's distance signature while owning none of the mid band's parameters. THE MECHANISM, both symptoms from pfo = 1 - saturate((vv - 0.4)/0.6): (BLEED) vv = s2/(s2 + vd^2) with the 26585 variance floor at max(ft,2) TEXELS means the floor is ~8-16 mm world at the mid band - the vest's own layered-fabric gaps (1-3 cm) land vd inside the floor's reach, vv rides 0.4-0.9, and the blend LIGHTENS the taps' correct occluded verdict: the bright patches. At hero the same floor is 2-4 mm (only invisible sub-gaps bleed); the threshold scales with the tier texel, which is why the artifact is tier-windowed. (BANDING) the remap is linear with a HARD KNEE at 0.4; mu arrives through 26584's integer-mip manual trilinear, so on sloped fabric vv sweeps across the knee along repeated mip iso-contours and pfo terraces: the stripes. THE FIX IS ONE CURVE: pfo = 1 - smoothstep(0.55, 0.95, vv) - zero-derivative ends retire the knee contours entirely, the raised lower bound cuts the thin-gap bleed ~2.5x tighter (sub-6 mm gaps at mid, sub-1.5 mm at hero), and 0.95 keeps confident-lit lit. Dimensionless, so all three bands take it identically; kh5 has no pf by design and needs nothing. PRE-REGISTERED ACCEPTANCE (rule 1.22): (a) the operator's pose reads clean at mode 0 - no stripes, no bright patches - while hero and outer stay as they were; (b) mode 390 brings BOTH symptoms back together (the one-author signature); (c) the 26577/26578 minification AA must NOT regress - returning moire at mode 0 means the 0.55 bound over-darkens and the bound TUNES (toward 0.45), never stands the path down; (d) if any residue survives 390-vs-0 unchanged, mode 357 (pf off everywhere) is the standing decode arm and the pf path is acquitted by it. NUMBER HYGIENE: mode 390 + lighting0.y 63 minted. FREE NOW: debug modes 391+, lighting0.y codes 64+, visual codes 32+, dbgCtl.w 13+.
+//  || 26620 THE FAR BAND SHIPS AND THE UNION'S MESH-PRICED TEXELS LEAVE THE SCREEN - THE 26619 CONVICTION'S FIX, BUILT ON THE PROVEN LADDER PATTERN INSTEAD OF THE PER-CASTER ATLAS (KH_SUN_FAR_BAND default; mode 389 stands the band down - the one-switch A/B, rule 1.11: expect the wobble AND the mesh-size quality law back together, which is the conviction's own signature). OPERATOR DIRECTIVE: eliminate both residuals. THE ARCHITECTURE CHOICE, argued not assumed: the banked per-caster atlas prices each caster's texel at its own size (sub-pixel quality at any distance) but costs N fits + N passes + an atlas walk + a CB array - while the operator's acceptance bar is ENGINE PARITY, and the engine's own answer to the far field is a camera-anchored cascade at range-priced texels. Band 4 IS that answer: half = khsr_rad ITSELF (the window is the range - no ladder scale), depth = 6x half (the calibrated ratio), 4096 px, the khsh_one pattern verbatim - so its texel is the PURE RANGE PRICE (2*1.02*range/4096: ~0.10 m at 200, ~0.26 m at 530, ~one screen pixel at the distances it serves) INDEPENDENT OF THE CASTER SET, the 26445 rule restored across the entire fade range. THE WOBBLE dies by the same stroke: the far band re-renders EVERY flush on a 26465-snapped grid, so caster motion re-quantizes CONTINUOUSLY at the range price instead of sporadically (hash-gated) at the union's mesh price - the two properties the 26619 mechanism named as the authors. THE UNION REMAINS, one tier deeper: the beyond-far presence test, anything outside the range window, and the fail-safe when the far band stands down - its fit, latches, snap and hash are byte-identical. WHAT WAS BUILT, the whole inventory: resources (sun5 trio at KH_SUN_FAR_SIZE, ensure_sun_depth5, releases), state (g_sun5_* sextet, reach[4], session resets), the call site (after OUT, khsr_rad/6x, NO moment pyramid - the far texel is already the minified scale the pyramids exist to reach; pf index 3 is outside kh_sun_pf_convert's 0..2 walk by construction), CB tail append BOTH sides (sunVP5/sunMeta5 after sunPf - every prior offset byte-identical, the CB-split slice geometry untouched), register t32 (t28-31 taken), binds at BOTH mesh twins + the fire path, the fire SRV tables and StateBackup widened to 33 (capture/restore/release all ride _countof or were widened together - the 26582 lesson), tier-5 compare helpers + KhSelfTap5 + the cast tier + the self tier EACH IN OWN NEW SEGMENTS at statement boundaries (69 -> 75 segments, every one under cap, max 15951 - the 26538 precedent applied prophylactically instead of reactively), the far tier woven into every ladder it must ride: the 26465/26594/26618 blend carries (khc4/kh4 now carry INTO the far tier, far carries into the union), the 26590/26617 jurisdiction (far latches 6x the RANGE as its certified guard, so the union may not override a far-certified surface anywhere within the fade - the 'union leaves the screen' property stated as mechanism, not hope), and visual 21 paints the far tier MAGENTA. The self tier drops the pf sub-block only; every other line is the tier-4 twin verbatim. PRE-REGISTERED ACCEPTANCE (rule 1.22): (a) sunFarValid 1, sunFarHalfDiag == sunRangeM exactly, sunFarRenders tracking flushes, sunFarReach >= 6x range; (b) THE QUALITY LAW DIES: far self/cast sharpness reads the range price with the kilometre mesh present (the dump2-class scene that measured 4.8x now measures ~1x - sunUnionTexelM may still read mesh-priced but no on-screen fragment consumes it inside the fade); (c) THE WOBBLE DIES at the same poses that survived the 26618 battery, and visual 21 shows MAGENTA serving where the union's blue used to; (d) tier transitions stay line-free (the far tier rides the same KhTbW/KhJw curves); (e) mode 389 brings BOTH residuals back together. FALSIFICATION: wobble surviving WITH magenta serving = the re-quantization theory is wrong at the range price too and the residual author is upstream of any map (re-open with per-frame grid lanes); quality still mesh-coupled with far valid = a consumer still reads the union inside the fade - visual 21 names it in one screenshot. COST DISCLOSED: one more 4096 D32 target (~64 MiB) and one more per-flush depth pass over the eligible set - the same class as each existing band; if the far pass ever needs a budget, the 26415 band-throttle pattern is the named lever, not a smaller map. NUMBER HYGIENE: mode 389 minted (no lighting0.y code - the C++ gate zeroes sunMeta5 and the shader tier self-disables, the 26611 pattern). FREE NOW: debug modes 390+, lighting0.y codes 63+, visual codes 32+, dbgCtl.w 13+.
+//  || 26619 THE BATTERY'S FOUR NULLS PLUS THE OPERATOR'S MESH-SIZE DATUM CONVERGE ON ONE ROOT, AND IT IS THE UNION'S PRICING LAW - CONVICTION BANKED WITH NUMBERS, NO CODE SHIPPED, WRAP ON THE OPERATOR'S ACCEPTANCE (ledger-only build; rule 1.12: the named fix is a feature campaign, not a patch). THE BATTERY DECODE (operator, on 26618): the wobble and the shape non-reproduction SURVIVE 260 (spread off), 354 (int spread), 269 (tier paint), and 388 (fade-width revert) - per the 26618 pre-registration that eliminates the fwidth kernel, the tap quantization, tier-selection churn, and the blend width, leaving 'grid-scale re-roll despite calm latches'. THE OPERATOR'S NEW DATUM NAMES WHICH GRID: 'quality directly relates to the size of our mesh' - and the dumps had already measured it: across three sessions the union lateral requirement reads 952-1049 m against a range term of 200-530, i.e. THE MESH'S OWN ENCLOSING EXTENTS dominate the price, and sunUnionTexelM pays a 1.8-4.8x premium over the pure range price (0.47-0.52 m vs 0.11-0.29 m). THE MECHANISM, both residuals from one root: the union is ONE 4096 map fitted over (range union mesh extents), so (i) its texel scales with the largest mesh - the operator's quality law, verbatim - and (ii) at half-metre texels a caster whose pose changes re-rasterizes its silhouette at a NEW sub-texel phase every union re-render (the WINDOW grid is snapped and latch-stable - 1932/2, 1933/1 - but the CONTENT's quantization re-rolls with the caster itself), which is the wobbling, non-reproducing shape, worst at transitions where it blends against the bit-stable band rendition. At the hero's millimetre texel the identical re-roll is invisible; at mesh-priced texels it is the report. All four nulls are consistent: no arm touches content quantization. THE PARITY VERDICT, as asked, drawn honestly: the CAMERA BANDS (hero/mid/outer) are textbook camera-anchored cascades - fixed texels, quality a function of distance and the setting only, at or beyond engine parity (finer texels than the engine's own splits at like ranges; the 26445 rule holds there without exception). THE UNION IS BEYOND-PARITY TERRITORY: the engine has NO equivalent tier - its shadows simply fade out at shadowVisibility - while ours serves long shadows and far casts the engine cannot, at the disclosed price that one map covering everything prices its texel by the biggest thing it covers. So: inside band reach (32 m stock / ~85 m at 500), everything is parity-clean and both residuals are absent; past it, the union EXCEEDS parity in reach while VIOLATING the 26445 rule in quality-vs-caster-set - a trade no tuning of the current architecture removes, because coverage-by-construction forbids capping the mesh term (26036: capping clips silhouettes). THE BANKED FIX - KH_UNION_PER_CASTER (named at 26613, spec'd here so the next campaign starts warm): per-caster (or per-size-class) union windows - each caster fitted and rasterized at ITS OWN extents into an atlas slot or map array, texel pricing per caster, so a rifle's shadow never pays a warehouse's price and a posed caster re-quantizes at its own fine grid (which retires the wobble by the same stroke). Costs: N fits + N passes (or clustered), shader-side slot walk in the union tier, atlas management on the 26396 pool pattern. Its own campaign, its own acceptance, per-band A/B - do not compress it into a patch. THE RECOMMENDATION GIVEN: wrap. Both residuals live only in union-served territory, their root is named and measured, the fix is scoped, and nothing in the current defaults is mis-set - the system is doing what its architecture prices. If the far field's look ever stops being acceptable in play, KH_UNION_PER_CASTER is the build, and this entry is its evidence file. NUMBER HYGIENE: nothing minted, nothing retired. FREE NOW: debug modes 389+, lighting0.y codes 63+, visual codes 32+, dbgCtl.w 13+.
+//  || 26618 THE FINE TIER HOLDS ITS QUALITY DEEPER INTO EVERY WINDOW, AND THE WOBBLE GETS A DECODE BATTERY FROM ARMS THE FILE ALREADY OWNS INSTEAD OF A BLIND SWING (KH_TIER_HOLD default, mode 388 / lighting0.y 62 reverts to the 26594 curve - one default, one A/B, rule 1.11; the shimmer axis ships ZERO code by rule 1.12, the 26577 precedent: containment/decode first, conviction before repair). FIELD (operator, on 26617 at stock 200 - dump confirms sunRangeM 200 / src 2 / s 1, latches pristine at 1932/2 and 1933/1, snapM 0.558 within the floor-snap's sqrt(2)-texel bound): the 26617 fades are CORRECT (no lines, both directions), and two residuals remain on the self chain: (a) coarse-tier quality lower than desired near the handoffs, (b) an intermittent WOBBLY SHIMMER during tier transitions with the coarse shadow's SHAPE not reproducing - 'feels like randomization'. (a) SHIPPED - KH_TIER_HOLD: the 26594 cross-fade began at 60% of every window, so the outer 40% of EVERY tier - including the hero's sharpest metre - was already mixing in the next tier's coarser rendition. The fade start moves to 75%: full fine-tier quality over three quarters of every window, the fade still ~23% of the window (hero ~0.47 m, mid ~1.9 m, outer ~7.5 m at stock; 2.65x those at range 530) - far above the 10% band 26594 convicted as imperceptible, and the two-grid mixing zone (the only place the wobble can live if it is blend-borne) narrows by ~40%. The 26617 continuity proof is UNCHANGED by construction: KhJw calls KhTbW, so the protection weight and the carry weight remain the same function of the same edge coordinate. One-carry-deep also strengthens (each blend zone sits even deeper inside the next window's interior). (b) NOT SHIPPED, DECODED INSTEAD - the wobble's candidate authors have different signatures and the arms ALL EXIST: THE ASK, one screenshot/clip each AT THE WOBBLE POSE, camera moving as in the report: mode 0 (baseline), mode 260 (footprint-spread OFF - if the shimmer DIES, the fwidth-driven ring radius is convicted: quad-granular derivative noise whose world amplitude scales with the serving tier's texel, up to spread 8 x 0.47 m at the union, invisible at the hero's mm - exactly a coarse-tier-only randomized wobble), mode 354 (integer spread - if the shimmer coarsens into discrete steps, same conviction, quantization flavour), setRenderDebug 269 (visual 21 paints the SERVING TIER - if the wobble pixels FLICKER between tier colours frame to frame, the author is selection/carry churn, not any kernel; if the paint is CALM, the kernel that owns those pixels is), and mode 388 (this build's revert - if the wobble WIDENS back with the 0.60 start, it is blend-borne and KH_TIER_HOLD already contains it). PRE-REGISTERED DECODE: dies at 260 -> next build stabilizes the spread (analytic or temporally damped footprint, its own campaign); flickers at 269 -> tier-selection hysteresis is the axis; survives ALL arms -> grid-scale re-roll despite calm latches, and the next build instruments per-frame texel/held lanes before touching anything. WHAT IS NOT CLAIMED: the wobble's author - naming it is the next round's job, on the battery's verdict, not this build's guess. PRE-REGISTERED ACCEPTANCE for (a): near-handoff sharpness visibly held deeper on approach (the operator's 'maintain more quality'), fades still line-free (the 26617 acceptance restated - a returning line falsifies the shared-curve claim and 388 stands it down), halo/dither still dead at mode 0. NUMBER HYGIENE: mode 388 + lighting0.y 62 minted. FREE NOW: debug modes 389+, lighting0.y codes 63+, visual codes 32+, dbgCtl.w 13+.
+//  || 26617 THE SHARP FAR-TIER LINE IS THE JURISDICTION PROTECTION ENDING ON A CLIFF, AND THE PROTECTION NOW FADES OVER THE SAME BAND THE VERDICTS DO - PLUS THE 26590 LEDGER'S OWN UNHONORED NOTE: THE GUARD LITERALS NOW MOVE WITH THE SCALED C++ GUARDS (KH_JURIS_EDGE_FADE default, mode 386 / lighting0.y 60 reverts the fade; mode 387 / code 61 reverts the guard scaling - two defaults, two one-switch A/Bs, rule 1.11). FIELD (operator, on 26616 at ~500): self-shadow tier transitions cross-fade correctly at the NEAR handoffs and show a DISTINCT SHARP LINE at the far ones. THE AUTHOR, read from the jurisdiction ladder's own structure: 26594's carry-deference made the 26590 mush-zeroing BINARY on two contours. (1) THE WINDOW-EDGE CLIFF: certification (khla_g) latches only inside the certifying tier's window, so on LIT surfaces the coarse tier's sub-guard mush is zeroed up to the window boundary and stands unguarded one pixel past it - a step of the coarse tier's full disagreement, exactly on the quality-level contour. (2) THE EPSILON-CROSSING STEP inside the blend band: a shadowed fine verdict carries (deference: coarse mush admitted as the blend partner) while an adjacent lit fine verdict does not (protection: coarse mush zeroed) - a full-magnitude flip on the fine tier's zero-crossing, the exact class the 26538 ledger named on the cast chain. BOTH amplitudes scale with the COARSE tier's texel - ~10 mm at hero->mid (invisible, the operator's working near fades) and ~522 mm at outer->union (the reported line) - which is the near/far asymmetry, clause for clause. THE FIX IS ONE WEIGHT: each certifying tier latches khla_w = KhJw(its own window-edge coordinate) beside khla_g - the SAME KhTbW curve the carries ride - and every no-carry rejection becomes res *= (1 - khla_w) instead of res = 0. CONTINUITY BY CONSTRUCTION, all three contours: window interiors are BIT-EXACT (weight 1, res *= 0 - the halo/dither protections 26589/26590/26592 untouched where they were proven); at the window edge the protection reaches 0 and meets the outside's unguarded value; at the epsilon-crossing the lit side's U*(1-khla_w) equals the shadowed side's lerp(U, ~0, khtb_w) because khla_w and khtb_w are the same tier's same edge coordinate through the same curve. The carry-deference itself is byte-identical (26594's falsification clause stands: lit fragments still never carry). CODES 60 / 55 / 26 pin the weight to 1 inside KhJw, so every historic revert reproduces its own era exactly. THE SECOND DEFECT IS OWED TO 26611 AND CONFESSED: the 26590 ledger wrote 'IF THE C++ GUARDS EVER CHANGE, THESE LITERALS MOVE WITH THEM' and 26611 scaled the C++ guards (48/192 -> 48s/192s) without moving the shader's 12/48/192 - the certified radii under-claimed by s at every scaled range, letting coarse mush inside the scaled guards stand on certified surfaces. The literals are now 6 * sunMetaN.w - the KH_SUN_CASCADE 6:1 depth:half ratio through the meta the fill already ships - so they track ANY future guard change structurally instead of by ledger discipline; hero (unscaled, 6*2 = 12) is arithmetically identical, and at s = 1 all three are bit-exact to 26616. Mode 387 restores the fixed literals. SEG BUDGET: seg #12 takes the khla_w declaration and stands at ~16176 B content+7 - ~204 B headroom, the file's tightest; NEXT INSERTION THERE MUST SPLIT (the 26538 statement-boundary precedent). PRE-REGISTERED ACCEPTANCE (rule 1.22): (a) walking the outer->union handoff at high range, the quality transition cross-fades over the outer band's ~34 m blend zone with NO line on the contour, from both directions; (b) the near handoffs unchanged (they were correct); (c) the vest-pose halo and whole-face dither STAY DEAD at mode 0 (interiors bit-exact - the 26589/26590 acceptance restated); (d) 386 brings the line back alone; 387 at high range brings back residual far mush on certified surfaces alone. FALSIFICATION: any halo-class dither on lit surfaces OUTSIDE window interiors at mode 0 = the fade admitted mush the cliff was hiding - tighten KhJw's curve toward the cliff (raise the smoothstep floor), never re-binarize. NUMBER HYGIENE: modes 386/387 + lighting0.y codes 60/61 minted. FREE NOW: debug modes 388+, lighting0.y codes 62+, visual codes 32+, dbgCtl.w 13+.
+//  || 26616 FIELD CONFIRMATION AND CAMPAIGN CLOSE - ENGINE PARITY DECLARED BY THE OPERATOR AND EVERY PRE-REGISTERED ACCEPTANCE READS PASS IN THE CONFIRMING DUMP (dump1 on 26615, ~500 setting, mode 0; ledger-only build, one stale comment amended at g_sun_range, no behaviour change). THE VERDICTS AGAINST THEIR OWN PRE-REGISTRATIONS: (26615 KH_SUN_RANGE_FROM_BANDS) sunRangeM 529.986 == bandMaxFar EXACTLY with sunRangeSrc 2 - the engine's committed cascade table is the live source and tracks the setting; (26611 KH_SUN_LADDER_SCALE, acceptance armed for the first time by 26615 and PASSED) sunLadderScale 2.64993 with halfDiags 2 / 21.1994 / 84.7978 = 2 / 8s / 32s to the digit, all three bands valid and rendering, sunOutReach 508.8 - the checkpoints scale with the slider and the far field is served to the setting; (26611 KH_SUN_UNION_LAT_FIT) latch clean at 1641 holds / 2 relatches with the sphere latch at 1631 / 12, snap 0.153 m inside the 0.522 m texel - the texel is the honest price of this scene's kilometre-class caster, stable, no sawtooth; (26611 KH_BLK_SLEW_REGIME + 26612 KH_NIGHT_ZERO_SUN, closed by dump1-26612 and quiet here as they must be in a skip-free day session) regime commits 0, zero-sun lanes 0/0, blkPubSlews 252 still smoothing, meshDarkFrames 0, dark refusals 0; castChainCode 0, debugMode 0, pf all healthy. WHAT STANDS PERMANENTLY: modes 382/383/384/385 keep their shipped meanings (live one-switch reverts, rule 1.18); the lanes sunRangeM / sunRangeSrc / sunLadderScale / sunUnionLat* / blkSlewRegimeCommits / blkZeroSunAdmits are PERMANENT diagnostics - the whole campaign's root lesson is that a range-riding system without a range lane is unfalsifiable at the default, and these are the falsifiers. THE ENGINE-PARITY TRADE, restated once for the record: raising shadowVisibility coarsens the ENGINE's cascades and, by 26611's design, our mid/outer bands by the same factor - quality-vs-reach is the setting's own dial on both sides of the mirror, hero stays 2 m @ 1 mm regardless. OPEN AXES, BANKED, NOT SCHEDULED: per-caster union windows (named at 26613) if a far-field scene without a kilometre-class caster still reads coarse; the fog session-reset trio (banked since 26539); the sky probe confirmation campaign. NUMBER HYGIENE: nothing minted, nothing retired. FREE NOW: debug modes 386+, lighting0.y codes 60+, visual codes 32+, dbgCtl.w 13+.
+//  || 26615 THE ENGINE HAS BEEN TELLING US THE SHADOW VIEW DISTANCE ALL ALONG, IN THE ONE PLACE WE ALREADY LISTEN - g_sun_range NOW DERIVES FROM THE ENGINE'S OWN COMMITTED CASCADE TABLE, AND THE TWO OPEN FIELD COMPLAINTS RESOLVE TO ONE DEAD READ AND ONE ENGINE-SIDE TRADE (KH_SUN_RANGE_FROM_BANDS, PRIMARY; the getVideoOptions read demotes to fallback, writing only while src != 2; no revert mode - the sources agree wherever both are live). FIELD (dump1 on 26614, operator at ~500): (I) 'whatever you did regressed the engine-cast shadows on our meshes.' READ FROM THE DUMP, NOT ARGUED: debugMode 0, sunLadderScale 1, halfDiags 8/32 - every band footprint bit-exact to 26610; the receive twins untouched since 26610 and verified; the lateral latch clean (1072 holds / 2 relatches). WHAT DID CHANGE IS THE ENGINE'S OWN TABLE: the committed cascade ladder now spans 0 -> 529.986 (slot fars 18.4 / 36.9 / 57.7 / 83.6 / 120.7 / 182.3 / 297.4 / 530.0) where the 200-era table sealed ~0 -> 200+. Raising shadowVisibility stretches the SAME engine cascade resolutions over 2.65x the ground, so every engine texel is ~2.65x coarser per metre - on our meshes AND on vanilla terrain identically, which is the field check that separates authorship in one glance. We mirror the engine's maps verbatim; their quality is the setting's own disclosed trade and no code on this side changed it. NOT DISMISSED, BOOKED: if vanilla ground shadows do NOT show the same coarsening at 500, that falsifies this reading and reopens the receive - the comparison is pre-registered as the discriminator. (II) 'self shadows still die at ~200 with the setting at 500.' sunRangeSrc 0: the getVideoOptions hashmap reached through the wrapper contains NO key matching even the widened case-folded 'shadowvis' substring - the mirror has NEVER written, 26450's per-flush read included, and every range consumer (the 94-99.5% fade, caster eligibility, the 26611 ladder scale, the union window and lateral fit) ran at the 200 default through every field round since. The 26593 'mirror is healthy' verdict is formally WITHDRAWN: it was rendered at the stock setting, where a dead mirror is unfalsifiable - the 26611/26613 lesson completing itself. THE FIX IS THE DUMP'S OWN JUXTAPOSITION: the same file that read src 0 read bandMaxFar 529.986 - the engine's deepest committed cascade far plane IS the live shadow draw distance, whatever path set it, delivered through the band-capture machinery this file has trusted for the receive since 26389. The derivation runs at the band census (max committed far, NaN-guarded, validity floor 8 m, ceiling 1e5, deadband 0.5% so split jitter cannot thrash the union latches downstream), stores src 2, and stands the videoOptions fallback down while it holds. No committed bands ever (shadows disabled, sky-only cold) = fallback order unchanged: videoOptions, then the 200 default. PRE-REGISTERED ACCEPTANCE (rule 1.22), the 26611 ladder acceptance finally armed: at setting ~500, sunRangeM ~530 with sunRangeSrc 2; sunLadderScale ~2.65; sunMid/OutHalfDiag ~21.2 / ~84.8; the self/cast fade edge at ~498-527 m (the operator's 200 m death moves with the slider); checkpoints tracking the setting; at stock 200, sources agree and behaviour is 26614-identical. FALSIFICATION: sunRangeM tracking the setting with the checkpoints still fixed convicts the ladder itself; sunRangeSrc 2 with the fade edge still at ~200 convicts the fade's own mirror plumbing (mirMeta.w) separately. NUMBER HYGIENE: nothing minted (src value 2 reassigned from the never-fielded 26613 command per its own non-reservation note). FREE NOW: debug modes 386+, lighting0.y codes 60+, visual codes 32+, dbgCtl.w 13+.
+//  || 26614 THE setShadowRange OVERRIDE IS WITHDRAWN UNSHIPPED ON OPERATOR DIRECTIVE - THE getVideoOptions MIRROR IS THE SINGLE AUTOMATIC WRITER, PER FLUSH, AS 26450 DESIGNED IT (no revert: 26613 never reached the field, so there is no shipped behaviour to stand down). WHAT 26613 SHIPS FORWARD UNCHANGED, both halves of the actual repair: the WIDENED KEY MATCH (case-folded 'shadowvis' substring instead of the 16-char exact compare - one of the two candidate classes for the stuck mirror, closed for free) and the LANES sunRangeM / sunRangeSrc (the other half: at the 200 default a dead mirror and a healthy one emit identical dumps, which is how this class survived two field rounds). THE DIAGNOSTIC IS NOW PURELY AUTOMATIC AND THE NEXT DUMP IS STILL DECISIVE, three exhaustive verdicts: sunRangeSrc 0 = the key never matched even case-folded (the key fault stands, and the dump carries that fact explicitly for the first time); src 1 with sunRangeM at the operator's setting = the mirror is healthy and the 26611 ladder acceptance goes live (expect sunLadderScale = setting/200, sunMid/OutHalfDiag 8s/32s, the fade edge at 94-99.5% of the SETTING, checkpoints moving with the slider); src 1 with sunRangeM 200 against a changed setting = getVideoOptions itself does not carry the change - the setting was altered through a path that writes the live engine value outside the video-options store, NO read of this map can ever see it by construction, and the resolution is the operator naming how the setting is changed (a config/difficulty/scripted source), not more code on this side. THAT THIRD VERDICT IS THE HONEST RESIDUAL of withdrawing the override: the command existed to cover exactly it, the directive accepts the exposure, and the lane converts it from an invisible failure into a one-line dump read. NUMBER HYGIENE: nothing minted, nothing retired (26613's src value 2 was never fielded and is NOT reserved). FREE NOW: debug modes 386+, lighting0.y codes 60+, visual codes 32+, dbgCtl.w 13+.
+//  || 26613 THE 26611 LADDER NEVER RAN BECAUSE THE RANGE IT SCALES BY NEVER MOVED - THE shadowVisibility MIRROR IS STUCK AT THE 200 DEFAULT AND EVERY RANGE-RIDING SUBSYSTEM PINS WITH IT; THIS BUILD INSTRUMENTS THE MIRROR, HARDENS ITS KEY MATCH, AND GIVES THE OPERATOR A DIRECT OVERRIDE (KH_SUN_RANGE_SOURCE; new command setShadowRange; no revert mode - nothing default-visible changes while the mirror agrees, and the override is operator-explicit). FIELD (dump2 on 26612, operator at shadowVisibility ~500): sunLadderScale reads 1 and sunHeroReach 244 = 200 + the caster's own radius - khsr_rad, hence g_sun_range, read 200 the whole session. The mirror is the master fault for every clause of the complaint AT ONCE: KhSunRangeFade rides the same value, so every shadow of ours - cast AND self - fades to zero across 94-99.5% of TWO HUNDRED metres regardless of the setting (the 'fade or become invisible'); caster eligibility drops at ~200; and the 26611 ladder pins at s=1, which is the unchanged checkpoints. 26611's fixes are NOT acquitted or convicted by this round - they were never engaged. THE BLIND SPOT IS MINE AND THE LESSON IS RULE 1.12'S OLDEST: 26611 shipped a range-driven default with NO LANE CARRYING THE RANGE, and 26593 ledgered 'the mirror is healthy' from a session that never moved the setting - at the 200 default a dead mirror and a healthy one emit identical dumps. An acceptance lane must be able to FAIL; sunLadderScale could not distinguish 'scale correct at 200' from 'range stuck at 200'. WHY THE MIRROR CAN BE DEAD, both candidate classes covered without engine-side proof: (a) the operator's change was made through a path getVideoOptions does not reflect (a scripted setter or difficulty/config source writes the live engine value without touching the video-options store), or (b) the hashmap key does not match the 16-char exact compare (a variant spelling). THE FIXES: (1) LANES sunRangeM + sunRangeSrc - the decisive read; the next dump names the fault class in one line whatever it is. (2) THE KEY MATCH WIDENS to a case-folded substring test for 'shadowvis' (catches shadowVisibility/shadowsVisibility variants; still SCALAR-typed, still leaves the previous value on any failure). (3) setShadowRange <metres> - a registered command writing g_sun_range directly and latching src=2, under which the per-flush mirror STANDS DOWN so the two writers can never fight at flush rate; setShadowRange 0 (or negative) releases back to the mirror (src=0 until the mirror's next successful read). Values are stored raw; every consumer already carries the 8-1000 clamp (the 26454 discipline), so the command cannot out-range the fade, the ladder, the eligibility or the lateral fit - one value, five consumers, one clamp law. ALSO READ FROM THE SAME DUMP, RECORDED FOR THE NEXT ROUND'S EXPECTATIONS: the union lateral fit IS engaged and latching (sunUnionLatHolds 1405 vs 2 relatches) and its requirement legitimately equals the sphere in this scene - sunVpSpans ~2 km with objTotal 2 mean a caster whose OWN extents are kilometre-class, and a single 4096 map over a 2 km subject prices ~0.5 m texels by arithmetic no fit can beat. With the range actually at 500 the scaled ladder serves everything nearer than 80 m at <= 40 mm and the union answers only past that, which is the designed division of labour; if the far picture is still unacceptable THEN, the named next axis is per-caster union windows (a real feature, its own build), not another fit refinement. DUMP1-26612 VALIDATION, closing the lighting campaign: both skips land in ONE frame (dusk-to-night 0.3->0.014 at 5938->5939; night-to-day 0.019->22.7 at 6257->6258), blkZeroSunAdmits 759 through the night with Refusals 2 (the transition edges - the 26418 day protection intact), regime commits 6, meshDarkFrames 0. The operator's residual 1-2 s is the sun-direction settle/jump debounce (sunSettleHolds 6, sunOk unsettled ~1.2 s around each skip) - the deliberate anti-flicker posture on the shadow-shaped consumers, disclosed and accepted ('we can live with that'). LIGHTING: CLOSED. PRE-REGISTERED ACCEPTANCE (rule 1.22): (a) next dump2-class round reads sunRangeM 500 / sunRangeSrc 1 (mirror fixed by the widened key) OR the operator runs setShadowRange 500 and reads sunRangeSrc 2 - either way sunLadderScale 2.5, sunMid/OutHalfDiag 20/80, the fade edge moving to ~470-497 m, and the quality checkpoints moving with the slider; (b) at stock 200 with no override, byte-identical behaviour to 26612. FALSIFICATION: sunRangeM 500 with the checkpoints still fixed convicts the ladder itself (26611's own acceptance finally live). NUMBER HYGIENE: no modes minted. FREE NOW: debug modes 386+, lighting0.y codes 60+, visual codes 32+, dbgCtl.w 13+.
+//  || 26612 THE GLOWING MESH SURVIVED 26611 BECAUSE THE NIGHT BLOCK WAS ARRIVING ON TIME AND BEING REFUSED AT THE DOOR - THE 26418 ZERO-SUN GATE'S OWN PREMISE IS FALSIFIED BY THE FIELD DUMP AND THE REFUSAL LEARNS THE STANDING FLAVOUR (KH_NIGHT_ZERO_SUN, DEFAULT; mode 385 restores the unconditional 26418 refusal - the one-switch A/B, rule 1.11; 99 still stands the whole gate down). FIELD (dump1 on 26611, skipTime to night): THE 26611 SLEW FIX WORKED EXACTLY AS PRE-REGISTERED - blkAmbLum 2.384 -> 0.0088 and blkSunLum -> 0 in ONE frame at the skip with blkSlewRegimeCommits 1, no decay tail - AND THE MESH STILL GLOWED: flushBoxSunMax 7.43 / flushBoxAmbR 0.53 (day values) at the end of a night session whose published block read sun 0 / amb 0.0186. The published pipeline is now proven healthy end-to-end; what ships to the shader is not it. THE AUTHOR IS fill_lighting_obj_cb's 26418 GATE: 'an exactly-zero sun is an unpopulated block, never a lighting state' refuses the block to the cold path - FLAT WHITE SUN OVER SCALAR AMBIENT - and at night the engine's sun IS exactly zero, so the correct block is refused every fill: blkZeroSunRefusals 337 and climbing across the night tail. The 26418 premise ('no time of day produces an identically zero sun colour') is disproven by the same dump's STANDING lanes: stdSunLum exactly 0 with stdAmbLum 0.0186 is the engine's own settled night. THIS IS ALSO THE COMPLETE HISTORY OF THE COMPLAINT: before 26611 the sun channel hit exact zero instantly (the slew's divide guard) which armed 26418's flat-white the moment of the skip, while ambient decayed at 25%/s underneath - two authors stacked, which is why 26611's real fix changed the lanes and not the screen, and why 'a recent build broke it again' names 26418, not 26503. THE FIX USES THE DISCRIMINATOR THIS FILE ALREADY TRUSTS FOR EXACTLY THIS CALL - the standing flavour, the 26344 dark-pub guard's own 0.5 bar: a zero-sun block against a standing sun > 0.5, or against an UNKNOWN standing (std_sun_l < 0, the true-cold window where 26418's unpopulated-block fault actually lives), is the fault and stays refused; against a MEASURED-dark standing (0 <= std_sun_l <= 0.5) it agrees with the scene and ships. The 26418 protection is intact in its own habitat (day cold start: standing is either day or unknown, both refuse) and inert in the one it was never built for. NO OTHER CONSUMER SPECIAL-CASES ZERO SUN: the mesh shader is base * (lightAmb * scalar + direct + dyn) with direct riding lighting2, so the admitted night block renders dark by arithmetic, and the debug magenta (lightAmb.w) keys off the cold path itself, unchanged. PRE-REGISTERED ACCEPTANCE (rule 1.22): (a) skipTime to night - meshes go dark within ~2 frames, flushBoxSunMax 0 with flushBoxAmb at the block's night values, blkZeroSunAdmits climbing, blkZeroSunRefusals FLAT through the night; (b) skipTime night-to-day - meshes light within ~2 frames (the 26611 regime bypass, already field-proven on the lanes); (c) a DAY cold start still counts a handful of blkZeroSunRefusals and never a black box (the 26418 acceptance restated); (d) mode 385 brings the night glow back alone. FALSIFICATION: the 26418 black box returning WITH blkZeroSunAdmits climbing = the standing probe misread dark on a lit scene - tighten the admit bar (it is one constant), never delete the refusal. NUMBER HYGIENE: 385 minted here. FREE NOW: debug modes 386+, lighting0.y codes 60+, visual codes 32+, dbgCtl.w 13+.
+//  || 26611 THE SHADOW LOD LADDER LEARNS THE RANGE, THE UNION STOPS PAYING EUCLIDEAN PRICES FOR SUN-PLANE GOODS, AND THE SKIPTIME LIGHTING TAIL IS THE 26503 SLEW'S OWN EXEMPTION NEVER ENGAGING - THREE DEFAULT CHANGES AND ONE WHITELIST REPAIR, EACH WITH ITS OWN ONE-SWITCH REVERT (rule 1.11). FIELD (operator, two reports + dump1/dump2 on 26610): (I) shadows cast by our meshes - onto the world AND onto our own meshes - switch quality at the SAME distances whatever shadowVisibility says, all the switches land within a few dozen metres, and quality goes 'insanely low' near the range edge; (II) skipTime does not reliably update mesh lighting - sometimes never - leaving meshes glowing at night; 'used to not be a problem, a recent build broke it again'. AUTHORS, ALL THREE READ FROM THE DUMPS AGAINST THE CODE, NONE ASSUMED. (I-a) THE TIER LADDER IS BUILT OF CONSTANTS: hero/mid/outer half-extents 2/8/32 m are KH_SUN_CASCADE build constants, so the three handoffs sit at fixed distances bunched inside 32 m while only the union's far texel follows the slider - raising the range moved the cliff and never the rungs. FIX = KH_SUN_LADDER_SCALE (ledger at the khsh_one call sites; mode 382 reverts): mid/outer halves AND depths (the calibrated 6x ratio kept) scale by s = clamp(range/200, 1, 5); hero stays 2 m @ 1 mm (the near field is a calibration constant). At the stock 200 the scaled defaults are BIT-EXACT to 26610 - the whole validated corpus is the s=1 point - and at the operator's ~300+ the switches move out to 2/12/48+ and spread with the slider, engine-cascade semantics. s is a pure function of the SETTING, so the 26445 governing rule (quality a function of distance only, never caster set or camera) and the 26539 sawtooth law (texel constant per session) both hold; the 26539 ledger text naming khsh_half a build constant is amended in place. ACCEPTANCE: sunMid/OutHalfDiag read 8*s/32*s (12/48 at range 300), sunLadderScale carries s, and the switch distances track the slider in the field. (I-b) THE UNION TEXEL IS PRICED BY THE WRONG SPACE: dump2 reads sunUnionTexelM 0.645 m at sunMapHalfDiag 1165 under a ~300-400 range - 4x the range price - because 26505's caster growth unions ENGINE-AXIS boxes and R is that box's enclosing sphere, so ONE eligible far caster (admitted by the 26036 shadow-reach test, whose own premise is that an eligible far caster is approximately DOWN-SUN and therefore laterally NEAR in the sun plane) charges its full euclidean distance to the LATERAL extent and every union-served fragment pays it. 26036's 'does NOT grow the map fit' claim was true of the caster-anchored fit and silently invalidated by 26505. FIX = KH_SUN_UNION_LAT_FIT (ledger at the fit; mode 383 reverts): R becomes 1.02x a held SUN-PLANE lateral requirement - camera-window lateral offset + range, unioned with each eligible caster's perpendicular-to-sun offset + enclosing radius, computed PER CASTER (never from grown-box corners: engine-axis unions manufacture phantom corners under diagonal sun) - capped at the sphere so it can never price coarser than 26610. R_dep and the whole depth domain still ride the 26539 sphere latch untouched (KH_SUN_FIT_SPLIT makes lateral-only R changes legal), coverage is by construction (an eligible caster's own lateral term is in the max; cross-sun far casters were never eligible), and the lateral radius takes the 26539 latch policy verbatim on its own held value (10% slack, 1.25x drop, mode 329 stands BOTH latches down). ACCEPTANCE: sunUnionTexelM ~0.17 m at range 300 in the dump2 scene with sunUnionLatHolds dominating sunUnionLatRelatches; the 26036 standing-in-the-long-shadow case still paints (if it clips, the premise failed - 383 is the stand-down); sunUnionRadHeld unchanged. (II) THE 26503 PUBLISH SLEW'S SKIPTIME EXEMPTION NEVER ENGAGES: 'cold or stale (>1 s) commits outright' rode the snapshot age, but g_inj_blk_ms refreshes every pass, so in continuous play every skipTime decays at 25%/s. dump1 catches the mechanism whole at the skip frame: stdSunLum 16.72->0 in ONE frame, blkSunLum 0 one frame later - but only because the sun's night target is exactly zero and the khsl_ns > 1e-6 divide guard accidentally commits exact-zero targets - while blkAmbLum (target 0.0105, above the guard) decays 2.07->0.29 across the dump's 8 s tail at exactly the slew's exponential (a fractional cap against a shrinking base needs ~21 s to fall two decades). Ambient-times-material at night IS the glowing mesh, and the sun/ambient asymmetry is why only SOME skips read as 'never'. FIX = KH_BLK_SLEW_REGIME (ledger at the slew; mode 384 reverts): a candidate whose channel SUM moves >3x against the previous publish (either direction, 0.02 floors) is the regime-change class the engine itself steps - commits outright, both channels together; under 3x the slew stands verbatim (referee catch-up 7.3%/frame and the 26502 0.70x clusters are far inside the bar, so nothing 26503 retired can return through it). ACCEPTANCE: blkAmb/SunLum land on stdAmb/SunLum within ~2 frames of a skip with blkSlewRegimeCommits counting ~once per skip; blkPubSlews keeps counting under cloud attenuation. FALSIFICATION: 26503's steps/pops returning at mode 0 = the 3x bar is too low; raise it, never delete the bypass. WHITELIST REPAIR: mode 381 (26610 KH_BAND_REL_INTERP revert) was minted straight into the sqf RETIRED list, so setRenderDebug 381 returned false and the shipped field A/B was unreachable - relocated to the accept list beside 371; the shader ladder always honoured it, only the gate refused it. REVIEW, AS ASKED, ALL FOUR SHADOW CLASSES WALKED: engine-cast stencil receive and cascade-band receive onto our meshes are HEALTHY - both multiply KhSunRangeFade (26464/26593: full to 94% of shadowVisibility, gone at 99.5%), the band z-ladder seals the engine's own cascade table (bandNear/Far 0-400 at the session's setting, engine parity by construction), and the gap0-7 lane table is just the band table latched at a historic worst-gap event, not a live defect; our casts onto the world and onto ourselves both ride the four-tier chain, so (I-a)+(I-b) fix both classes at once. NUMBER HYGIENE: 381 keeps its 26610 meaning (rule 1.18); 382/383/384 minted here. FREE NOW: debug modes 385+, lighting0.y codes 60+, visual codes 32+, dbgCtl.w 13+.
+//  || 26610 THE 45-DEGREE PITCH JITTER IS FIXED AND FIELD-CONFIRMED, AND THIS BUILD IS THE CAMPAIGN'S CLEANED RESULT - THE 26594 BASELINE PLUS EXACTLY THIS FIX (KH_BAND_REL_INTERP, DEFAULT; mode 381 / lighting0.y 59 REVERTS to the absolute interpolant - the one-switch A/B, rule 1.11). THE ARTIFACT: engine-cast cascade shadows on our meshes shimmer/crawl inside a ~5 deg camera-pitch window around ~45 deg down - position- independent, gradual entry from above, snapping in from below, heaviest at the window's bottom, at rest. THE CONVICTION, by experimental exhaustion across a fifteen-build instrumentation campaign (26595-26609, REMOVED from this file after serving their purpose - summary here so the reasoning survives the cleanup): the seal/weld/content/reseal machinery was acquitted by freezes (a pair-change gate holding 79 pct of reseals, then a total reseal freeze - jitter unchanged under both); the PCF filter was acquitted by arms (rotation frozen, early-out disabled - imperceptible both); the routing was pinned by kill-switch (band receive forced down changed the picture wholesale, so the band path serves at mode 0; the 26573 receive-decomposition visual painted the jitter in the receive channel); the served tables were proven memcpy-verbatim into the frame CB and sub-texel stable across a still- camera RenderDoc pair while the engine's own matrices moved 0.05 texels; and a u/v/z input-grid visual, co-armed WITH the reseal freeze, showed the compare's inputs STILL CRAWLING inside the pitch window against fully frozen tables - u/v/z are pure functions of i.wpos through frozen tables, so i.wpos ITSELF oscillates, per frame, only near 45 deg. THE MECHANISM: the historic fp32 jitter-rebase (the camera-read fix) moved the RENDERED position onto camera-relative math and deliberately kept the o.wpos interpolant ABSOLUTE ('the jitter was geometric, not shading' - true when written); 26459 later convicted the absolute interpolant's own noise (perspective-correct attribute interpolation, error scaling with the attribute's screen gradient, re-rolled by re-rasterization every frame) and the SELF chain received two remedies, including 26574's metres-scale interpolant i.wrel = wp - sunOrigin. THE BAND RECEIVE GOT NEITHER: it remained the last consumer of raw absolute i.wpos, at the near tier's ~106 texels/metre - two orders more magnification than any consumer that existed when 'not shading' was written. Near 45 deg pitch on this content the receiving face's world-per-pixel gradient peaks, the ~7 km-magnitude interpolation noise crosses a texel, and the verdict crawls - the window, its bottom-heavy asymmetry, and the position independence, clause by clause. THE FIX, at both twin receive sites: ShadowBandFactor consumes (i.wrel + sunOrigin.xyz) - interpolation at metres scale (error ~1e-7 m, the 26574 measurement), the anchor recomposed once per pixel from a CB constant that cannot re-roll between frames. DEGENERATE-SAFE: an unarmed anchor is zero and the composition is today's path bit for bit. FIELD-CONFIRMED before this cleanup: jitter GONE at mode 0 through the whole window from both approach directions; mode 381 brings the crawl and the jitter back TOGETHER - the conviction's own signature. NUMBER HYGIENE (rule 1.18): debug modes 372-380 and lighting0.y codes 56-58 were consumed by the campaign's instrumentation and are RETIRED UNSPENT with the cleanup - they must not be reused, and 381/59 keep their shipped meanings so the field A/B stays valid. FREE NOW: debug modes 382+, lighting0.y codes 60+, visual codes 32+, dbgCtl.w 13+.
+//  || 26594 THE GRADUAL QUALITY TRANSITION THE OPERATOR REMEMBERS WAS THE MUSH, AND THE HONEST BLEND WAS TOO THIN TO SEE - THE CROSS-FADE BECOMES DELIBERATE (KH_TIER_CROSSFADE default; mode 371 / lighting0.y 55 reverts the wide band AND the carry-deference at once). THE BATTERY, decoded: 367 restores the gradual tier transition TOGETHER with the halo and the noise - the coarse-tier over-shadow that 26589/26590 removed had been faking a wide soft handoff between quality levels; 257 == 0 - the 26465 blend is ALIVE yet perceptually invisible, because its band is the outer 10% of each camera-anchored window (20 cm at hero): a walking camera sweeps it past any given shadow edge in a fraction of a second. THE FIX, two halves under one arm: (1) the blend band widens to the outer 40% of every window - hero 80 cm, mid 3.2 m, outer 12.8 m - through ONE helper (KhTbW, placed before the first consumer per the 26319 ordering law) consumed by all NINE blend sites (cast-chain tiers khc2/3/4, self-kernel tiers kh2/3/4, and the three contact-shortcut carries), so both chains cross-fade identically and the twin discipline is one function; (2) THE JURISDICTION DEFERS TO AN ACTIVE CARRY (khtb_occ >= 0): when a finer tier has established shadow standing and is handing off through its blend band, the coarser tier's rendition of the SAME sub-guard occluder is the legitimate blend partner - rejecting it made carried penumbrae lerp toward LIT across the band instead of toward the coarser tier's honest softer edge. LIT fragments never carry, so every halo protection (26589/26590/26592) is untouched by construction: the deference can only admit coarse verdicts into pixels the fine tier already shadowed. DISCLOSED CHARACTER: inside blend bands, shadow edges now visibly soften toward the coarser tier's rendition weighted by the band position - that IS the requested transition, and it is bounded to the bands; interiors and lit surfaces are byte-identical to 26593. ACCEPTANCE, pre-registered: walking toward/away from a shadow, its sharpness cross-fades over ~0.8 / 3 / 13 m at the three seams instead of snapping; the halo and noise stay dead at mode 0; 371 restores the snap (and the always-on rejection) alone; 367 remains the full-mush museum piece. FALSIFICATION: any halo-class dither reappearing OUTSIDE shadow on lit surfaces at mode 0 -> the carry-deference leaked (a lit fragment carried) - trace it with v1_9, do not widen the exemption. FREE NOW: modes 372+, lighting0.y 56+, visuals 32+, dbgCtl.w 13+.
+//  || 26593 THE EARLY SELF-SHADOW FADE IS 26464'S OWN CURVE, READ FROM CODE AND RETUNED TO HUG THE CLIFF (KH_RANGE_FADE_LATE default; mode 370 / lighting0.y 54 reverts to the 85%/98% curve). THE OPERATOR'S WRAP-UP REPORT, two items: (1) self shadows die a few dozen metres before the engine's shadow distance - MEASURED IN CODE, not guessed: KhSunRangeFade thinned from 0.85*R and completed at 0.98*R (R = the live shadowVisibility mirror, whose feed is verified healthy - sqf reads the game's own config entry), a ~30 m removal band at R=200 that the noise previously masked; the new curve holds full strength to 0.94*R and completes at 0.995*R, keeping the anti-pop contract (completion still precedes the per-caster eligibility cliff at R) while recovering ~two thirds of the lost range - both consumers (SunShadowFactorSelf and PSMaskCast) ride the one function. (2) the tier-quality transition reads SHARP where it used to read gradual - NOT fixed in this build BY RULE (1.12): the leading hypothesis is that the 'gradual' look was partly the COARSE-TIER MUSH the 26590 jurisdiction ladder removed (the same over-shadow that was the halo also smeared tier seams), leaving the honest 1->4->16 mm sharpness step that the 26465 blend's thin 10%-of-window band never fully hid - PRE-REGISTERED BATTERY, one walk across the seam: note WHICH distance the line sits at (~2 m names hero->mid, ~8 m mid->outer, ~32 m outer->union); 257 vs 0 (blend off): if they DIFFER the blend is alive and the line is the unmasked honest step - the fix is WIDENING the blend windows (0.90 -> ~0.75 class), a deliberate priced trade shipped next build; if IDENTICAL the blend is dead at mode 0 and the break gets a v1_9 trace at the seam, not a guess; 367 (jurisdiction off) as corroboration - the old gradual look returning TOGETHER WITH THE HALO proves the mush was the 'fade'. ALSO PRE-REGISTERED for (1): if self shadows still thin early at mode 0, flip 255 (fade off entirely) - shadows reaching the cliff then popping convicts a second fade layer (the 26456 union uv-edge fade or eligibility itself) and THAT gets its own read. ACCEPTANCE: mode 0 self shadows visually full to ~94% of the engine's shadow distance and gone by it, no pop at the edge; 370 restores the early thinning. FREE NOW: modes 371+, lighting0.y 55+, visuals 32+, dbgCtl.w 13+.
+//  || 26592 THE CAMPAIGN CLOSES: MODE 233 READ CLEAN AND THE NOISE AUTHOR IS THE FACET-NORMAL BIAS OVERRIDE - THE INTERPOLATED NORMAL BECOMES THE DEFAULT BIAS NORMAL AND EVERY ORIGINAL ARTIFACT NOW HAS A MEASURED, FIELD-CONFIRMED CONVICTION (KH_BIAS_NORMAL_INTERP default; mode 369 / lighting0.y 53 re-arms the facet override; 233 stays whitelisted as an accepted alias of the default, the 220 precedent). THE FINAL CONVICTION CHAIN, from the v1_9 trace under mode 365 (capture frame2226) to the field: the paired state record caught the fork at the ndl floor - crevice firefly ndl 0.02 vs dark neighbour 0.3719 at pixels whose GEOMETRIC normals agree at ndl 0.50 - then tan 50.0 vs 2.496 (the 1e4 ceiling permitting), slope bias ~19 mm vs 3.4 mm, against a measured 17.8 mm contact occluder: the bias EATS the occluder at the firefly and not at its neighbour. The poisoned input is khBiasN's facet override (26432/26435): a PER-QUAD derivative facet that lands near sun-perpendicular in tight geometry while passing the 60-degree straddle test - the 26435 guard bounded the facet's DIRECTION, never its BIAS CONSEQUENCE, and 'take the harder-grazing normal' was reasoned as acne-safe without pricing that more bias means eaten contact shadows. Sub-pixel camera motion re-derives ddx/ddy, the facet jitters, the bias re-rolls: the operator's binary on/off film-grain law, static at rest, 2x2-blocky, crevice-worst - and immune to FIFTEEN kernel-side arms because it poisons the kernel's INPUT at the call site, upstream of everything 353/354/260/365/26591 ever flipped. The operator's one-command 233 A/B confirmed: noise gone, motion grain gone. CORRECTIONS OWED AND PAID (rule 1.16): (a) 26591's straddle guard claimed the noise fix - falsified in the field (noise survived 0 AND 365) and structurally blind at folds (wrel is CONTINUOUS across a fold; khgs never trips there) - the guard STAYS as harmless silhouette-class protection, the claim is withdrawn; (b) my v1_8 spread conviction inferred a blown ring from the 4/9 tap fraction - the fraction was real, the inferred cause wrong: the taps went lit because the BIAS moved, not the ring. THE CAMPAIGN LEDGER, all three opening bullets: (1) CAST-SHADOW HALO + whole-face dither = coarse tiers overriding correct fine-tier lit verdicts through 26507's unconditional lit-fallthrough - KH_UNION_LIT_GUARD (26589) + KH_TIER_JURISDICTION (26590), FIELD-CONFIRMED (mode 0 kills it, 296 corroborates); (2) CREVICE FIREFLIES + EDGE DITHER + the motion film grain = the facet bias normal, THIS BUILD, field-confirmed via 233; (3) the GRAZING-CAMERA Z-FIGHT = the same near-margin bias class - pre-registered to have fallen with (2); if any residual survives at the grazing pose it reopens on its own v1_9 trace, not on a guess. STANDING TOOLING for whatever comes next: kh_self_v1_9 (input-register capture, per-tier CPU replay, four-map windows, three-window state record) names an author from ONE capture - the instrument this campaign lacked for its first twenty builds. WATCH ITEM, pre-registered: the facet override existed against acne on faceted geometry - if acne resurfaces anywhere at mode 0, the answer is a BOUNDED re-arm (facet tan capped at the code-17 ceiling class), priced separately; do not stack it blind. HOUSEKEEPING: seg #12 headroom ~268 B (split before inserting there); sweep BASELINE_TAG must read 26591 for this build. FREE NOW: modes 370+, lighting0.y 54+, visuals 32+, dbgCtl.w 13+.
+//  || 26591 THE CREVICE FIREFLIES AND THE EDGE DITHER ARE THE FOOTPRINT SPREAD ON DISCONTINUITY-STRADDLING QUADS - 26586'S OWN CONVICTED CLASS, ALIVE IN THE OTHER FWIDTH CONSUMER - AND THE STRADDLE GUARD CLOSES IT (KH_SPREAD_STRADDLE_GUARD default; mode 368 / lighting0.y 52 reverts the guard on spread AND pf engagement at once). THE MEASUREMENT (kh_self_v1_8, capture frame5308, five pixels: crevice firefly/dark pair 3 px apart, edge firefly/dark pair 2 px apart, lit control): the classic replay reads the hero kernel 9/9 OCCLUDED at ALL FOUR noise pixels (+15.7 mm margin at the crevice pair, +34.7 mm at the edge pair, identical windows, identical inputs, real occluders 18 / 37 mm up-sun) - and the LIVE paired state diff (both traces 4082 states, instruction-exact) shows the shadow scalar r7.w at 0.44506 (firefly) vs 0.000 (dark) at the crevice and 0.516 vs 0.000 at the edge, with the lit control reading exactly 1.0 - TAP-COUNT FRACTIONS OF THE 9-TAP RING (4/9 = 0.4444; the stencil resolve does not quantize at ninths), which means the live ring read 4-5 taps LIT where the spread-1 ring reads none. THE GEOMETRY CLOSES IT QUANTITATIVELY: lit-comparing content starts 5 texels from the crevice projection and 2 texels from the edge projection - beyond spread-1 reach (~1.2 texels), inside spread-5..8 reach - and the ONLY live quantity differing between a firefly and its dark neighbour is the per-quad kh?_sp = clamp(0.5*fwidth(kh?_t), 1, 8): a quad whose helper pixels land across the crevice fold or the silhouette measures a MANY-TEXEL jump through fwidth and blows the ring to 8 texels; the neighbouring non-straddling quad keeps spread 1 and reads correctly - per-quad, camera-locked, static at rest, worse close, crevices and edges both (both are map-space discontinuity loci), the complete reported signature. WHY EVERY PRIOR NULL STANDS: 354 changed the spread's ROUNDING, not its straddle magnitude; 365's spread-1 pin was only ever field-read at the HALO pose, where the author was the union override (26589/26590) and the spread was irrelevant; 264's single hard tap reads WORSE because it binary-picks inside the same blown footprint. THE GUARD, 26586's own pattern extended to the second consumer: the raw khgs already measures the quad's world jump, and khgs > 4*kh?_tw (the 26586 clamp line) is precisely 'this quad straddles metres - its screen derivatives are garbage'; such quads PIN SPREAD TO 1 and SKIP THE PF BLEND (kh?_ft is the same poisoned fwidth; a garbage-high lod at a fold quad reads the pyramid's wide mean across the boundary), while honest minified interior quads (khgs at texel scale) keep the full spread and pf - true minification filtering is untouched, and under khcl/code-28/code-25 the guard is inert by construction (khgs is 0 or the spread already pinned). TWIN: all four tiers' spread, three armed tiers' pf. ACCEPTANCE, pre-registered, at the frame5308 loci: mode 0 = the crevice fireflies AND the edge dither GONE (their dark neighbours already correct stay correct); 368 revives both on demand; 365 at the same loci must ALSO kill them (its spread pin subsumes the guard - the corroboration read); open-surface minification (distant shadow softness) unchanged 0-vs-368 away from folds. FALSIFICATION: fireflies survive mode 0 AND survive 368-vs-0 unchanged -> the guard never engaged (khgs at the fold quads is below 4*tw - instrument khgs with a visual before further logic); fireflies survive 0 but DIE under 365 -> the author is RPDB or the offset damper (the remaining classic deltas), bisect 32/39 next, one at a time. STILL OWED FROM 26590: the halo verdicts (0 vs 296 vs 367 at the vest pose). FREE NOW: modes 369+, lighting0.y 53+, visuals 32+, dbgCtl.w 13+.
+//  || 26590 THE FALSIFICATION CLAUSE FIRED AS WRITTEN AND NAMED THE REMAINDER: MODE 0 BEAT 367 BUT THE HALO SURVIVED WHILE 296 KILLED IT - THE UNION GATE WAS RIGHT IN KIND AND INCOMPLETE IN COVERAGE, AND MID/OUTER WERE MINTING THE SAME MUSH AT 4/16 MM - THE GATE GENERALIZES TO THE JURISDICTION LADDER (KH_TIER_JURISDICTION default; mode 367 / lighting0.y 51 reverts every jurisdiction test at once; 296 keeps its blunt fallthrough-off meaning). THE FIELD DECODE, 26589 round: (a) 0 better than 367 = the union share of the halo was real and died; (b) halo residual at 0 + dead at 296 = every surviving halo pixel is a lit hero verdict overridden by a TIER BETWEEN hero and the gate - mid (4 mm) and outer (16 mm) quantize the caster silhouette at their own texel scales exactly as the union did at 524 mm, just narrower; (c) crevice/edge noise SURVIVES 296 = NOT fallthrough-borne - the genuine pre-26507 contact-scale axis, pre-registered as the expected survivor at 26589 and now the named next hunt. THE RULE, generalized from the guard ladder's own semantics rather than patched hop by hop: a band tier with CONTENT AUTHORITY (center texel holds this fragment's surface within 3 bias widths - the 26589 test, measured -2.9/-11.4/-42.2 mm against 6.9/22.1/88.5 mm windows) certifies its sun-ward depth guard CASTER-FREE (12/48/192 m, the KH_SUN_CASCADE constants - if the C++ guards change these shader literals MOVE WITH THEM, ledger note at the union block); any coarser tier whose occluder (center-texel gap, metres) lies INSIDE the certified radius is measuring sub-guard geometry its texels cannot resolve and its verdict ZEROES and falls onward; an occluder BEYOND the radius is a genuine cross-tier caster and STANDS. MECHANICS: khla_own becomes khla_g (metres, 0 = none); latches RELOCATE to post-kernel so a tier's own latch cannot feed its own rejection (ordering: reject on the INCOMING jurisdiction, then latch); hero latches 12, mid 48, outer 192; rejection sites at mid/outer/union re-use one center Load each; the 26589 union early-return gate is DELETED in favour of the same post-kernel form - WHICH RESTORES THE 26589 DISCLOSED TRADE: >192 m union casts are kept again, only sub-jurisdiction mush is rejected. DISCLOSED LIMIT: a beyond-guard caster's coarse penumbra narrows by <= 1 coarse texel at pixels whose center texel still reads the receiver - invisible next to the removed mush. SEG NOTE: the tier-2 latch moved OUT of seg #12 (headroom recovers to ~300 B); the standing seg-12 split warning stays for the next insertion. ACCEPTANCE, pre-registered: mode 0 now equals 296 at the vest pose - halo AND whole-face dither GONE; 367 revives all of it; >192 m casts (if any test scene has them) present at 0, absent under nothing. FALSIFICATION: halo still survives 0 while dying at 296 -> the authority latch itself is not taking (instrument khla_g with a visual before any further logic); 0 shows halo AND 296 shows halo -> the 26589 conviction chain is contradicted, re-trace. NEXT AXIS, pre-registered on the operator's directive: THE CONTACT NOISE (crevices + shadow edges, survives 296) - the hunt re-aims kh_self_v1_8 at a crevice-noise pixel and an edge-noise pixel (same protocol, same script, pixels on the NOISE loci; the hero window + margins there will show the contact-vs-acne knife edge directly); no noise-axis code ships in this build by rule 1.12. FREE NOW: modes 368+, lighting0.y 52+, visuals 32+, dbgCtl.w 13+.
+//  || 26589 THE HALO IS THE UNION OVERRIDING THREE CORRECT TIERS THROUGH 26507'S LIT-FALLTHROUGH, MEASURED TEXEL BY TEXEL FROM ONE CAPTURE, AND THE UNION LOSES THAT AUTHORITY (KH_UNION_LIT_GUARD default; mode 367 / lighting0.y 51 reverts to the unconditional fallthrough; mode 296 keeps its blunt fallthrough-off meaning as the cross-check). THE INSTRUMENT, for the record: kh_self_v1_8 (delivered beside this build) traces the operator's dot/clean/shadow pixels at the authoring draw, reads i.wrel/i.nrm from the pixel debugger's input registers, reads sunVP/sunVP2/3/4 + metas from CBFrame by reflection, recomputes each tier's projection and bias CPU-side (the 26588 365==0 field null licenses the classic recompute), dumps 25x25 windows of ALL FOUR tier maps at each projection, simulates the 3x3 bilinear-corner soft-compare kernel per tier, and replays the fallthrough chain offline. THE NUMBERS, capture frame2212 eid 29163, box face ndl 0.895 (sun-facing - slope bias exonerated): halo dot HERO lit at -5.182 mm margin (stored = own surface -2.881 mm behind the fragment = the map raster bias, content clean, ZERO caster texels in 25x25), MID lit -18.8 mm, OUTER lit -71.7 mm, UNION 0.2222 occluded - its 523.9 mm texel stores depth 1518 mm NEARER (the vest mushed into the fat texel), +549 mm past the union's own 969 mm bias; the clean pixel 2 px away reads the same 0.2222 (the whole-face faint dither the operator reported mid-round); the shadow pixel reads hero 1.0 correct - and union 0.2222 THERE TOO, wrong in both directions at this range, which is the whole reason the band ladder exists. THE MECHANISM: 26507 made every LIT band verdict fall through (correct goal: casters beyond a band's 12/48/192 m sun-ward guard live only in coarser tiers) and never priced the terminal hop - the union, whose half-metre texels cannot resolve sub-metre geometry, got the last word on EVERY lit fragment: the 0/9..2/9 tap staircase re-rolling per pixel is the dither, the union-quantized caster silhouette is the halo's width, and the chain always ending at the union is why 239/242 read tier-independent, why 264's single tap was worse, why 365 (classic kernel) was null, and why the operator's bisect anchor holds - 26507 shipped 81 builds ago, exactly the era the halo appeared while crevice noise (a genuine contact-scale axis, pre-26507) already existed. THE GATE, minimal: one bool khla_own; each band tier, in-window, latches authority when its OWN center texel holds this fragment's surface within 3 bias widths (one Load per tier; measured own-surface gaps -2.9/-11.4/-42.2 mm vs 6.9/22.1/88.5 mm windows - a caster texel reads metres and can never certify; an occluded verdict returns above and never reaches the gate); at the union entry, a latched authority returns the lit verdict (tier-blend carry preserved via the existing lerp form) unless code 51 reverts. Bands keep falling through to EACH OTHER verbatim - 26507's inter-band recovery is untouched. FAIL-SAFE: a mesh absent from the band maps latches nothing and the union still serves it. DISCLOSED TRADE, priced: casters >192 m sun-ward of a band-window fragment were union-served and are unshadowed now (rare, and half-metre texels rendered them as mush regardless); 367 restores them together with the halo. ACCEPTANCE, pre-registered: mode 0 = the cast-shadow halo AND the whole-face dither GONE at the vest pose, the close/grazing union-scale shimmer expected to fall with them; 367 revives all of it on demand; 296 must ALSO kill it (blunt form, cross-check). EXPECTED SURVIVOR: crevice/contact noise (the pre-26507 axis) - it is NOT this build's claim and reopens on its own evidence. FALSIFICATION: halo survives 0 but dies under 296 -> the authority latch or gate placement is wrong - instrument khla_own before touching anything; halo survives BOTH 0 and 296 -> the v1.8 replay is contradicted and the trace gets re-run at a surviving dot. HOUSEKEEPING: seg #12 now ~16187 B (headroom ~190 - the NEXT insertion there requires a chunk split); sweep BASELINE_TAG must read 26588 for this build. FREE NOW: modes 368+, lighting0.y 52+, visuals 32+, dbgCtl.w 13+.
+//  || 26588 THE OPERATOR REDIRECTS THE HUNT INTO THE SELF CHAIN'S OWN BULK AND THE RECORD, RE-READ, SUPPORTS THE REDIRECT - THIS BUILD SHIPS THE PROVEN STENCIL GUARD AS DEFAULT PLUS THE TWO WHOLE-STACK ARMS THE CAMPAIGN NEVER RAN (KH_VOL_MAX_FALLBACK default, mode 364 / dbgCtl.w 12 reverts; KH_SELF_CLASSIC mode 365 / lighting0.y 50; KH_SELF_ERA mode 366 = code 50 + union-only + pf off). CORRECTION OF 26587, FIRST (rule 1.16): the field read mode 363 == 0 - the rotated decision ring was the LOUDEST trace diff, not the DECIDING one; the authorship claim in the 26587 ledger is WITHDRAWN; the stable ring and the 64 m hash tile are KEPT as harmless correctness (fp32 sin at 562548.0 is still degenerate). The o0-deciding fork, walked backward per the trace-reading rule, is the STENCIL-VOLUME RESOLVE: r7.w 0.999 (dot) vs 0.000 (clean) minted at the KhVolSoftScene weight collapse (r14.w < 1e-4) falling back to a SINGLE khVolSten texel that reads lit inside a shadowed neighborhood. SECOND CORRECTION, the handoff's own anchors: 'stenVol2.y * 3.0' does not exist in source - the resolve's membership scale is 'khfs_tol * 3.0f' and the collapse epsilon is 'khfs_w < 1.0e-4f'; 'khsw*' names the SELF chain's soft-band width, an exonerated subsystem - a verbatim grep would have landed the fix in the wrong chain. SHIPPED (1) KH_VOL_MAX_FALLBACK, the pre-registered Step-2(A) conservative guard, DEFAULT ON: on weight collapse the fallback takes the MAXIMUM occlusion over the 3x3 stencil neighborhood - a pinhole cannot survive a max; all-clear neighborhoods return exactly the old point read; only collapsed pixels pay 9 Loads; TWIN edit, both copies byte-identical; 364 restores the point read live. WHY (A) WITHOUT STEP 1's WINDOW DUMP: (A) is the handoff's own named safe default when (A)/(B) are ambiguous, it is strictly artifact-reducing by construction, and the v3.4 window-dump script ships BESIDE this build so the (A)/(B)/(C) fork can still be named from the existing capture with one script run. SHIPPED (2) KH_SELF_CLASSIC (365 -> code 50): under one flip the kernel is the 2011 textbook - khgs 0 (the fwidth(wrel) slack leaves bias AND soft window, which floors at one texel automatically via max(2*gs, tw)), RPDB gradient 0 on all four tiers, spread pinned 1.0, the normal-offset curvature damper (fwidth(n), NO dedicated arm until now) off on the default capped branch, prefilter off - bias floors, slope term, capped normal offset, bilinear corners, soft-at-texel compare, tier blend and range fade all untouched. THE ARGUMENT, from the record itself: the chain feeds FIVE per-quad fwidth terms into a near-binary compare; 26586's own ledger derived '2x2 dots strung along silhouette outlines = THE HALO' from exactly this class; 26579 measured the single hard tap making noise AND halo WORSE; the RPDB arms were never field-run (untested-then-superseded); and every null was a ONE-ARM null with the rest of the stack live - with multiple SUFFICIENT authors every single-arm A/B reads null while the family is guilty. The whole-stack flip is the experiment that separates 'in the accreted machinery' from 'outside it', and it has never been run. SHIPPED (3) KH_SELF_ERA (366): the operator's bisect anchor is that dozens-to-hundreds of builds ago the halo and edge noise did NOT exist while crevice noise DID - 366 is the closest single flip to that configuration: hero/mid/outer not even ensured (the 239/242/244 gates, one mode), prefilter off (the 357 gate), union-only maps under the classic kernel (code 50 shared with 365). PRE-REGISTERED READINGS, the four-way at the vest halo pose, one screenshot each: mode 0 halo+fireflies DIE -> the collapse pinhole was the author and 364 must revive both; survive 0 but DIE under 365 -> the derivative machinery is guilty and the next builds bisect INSIDE the classic-vs-default delta (damper first, RPDB second, spread third - each already has or now has an arm); survive 365 but DIE under 366 -> the band-TIER structure (windows/handoffs/maps) is guilty, not the kernel; survive ALL THREE -> the author is outside both chains and the next step is the v3.4 window dump on the existing capture, no theory permitted. EXPECTED AND NOT A FAILURE: crevice noise RETURNING under 365/366 (the damper and the tiers were treating it; the clean era HAD crevice noise) - the halo/edge axis is the verdict axis, crevices are not. FALSIFICATION OF (1): fireflies survive mode 0 with 364 == 0 -> the collapse fallback was not the minting branch; re-run the trace at a surviving dot (rule: no subsystem convicted without one). DISCLOSED LIMITS: 365/366 change no default; the only default change is the max fallback, strictly one-directional (can only ADD shadow at collapsed pixels, bounded by the 3x3); mode-0 scenes with no engine stencil volumes are byte-identical. FREE NOW: modes 367+, lighting0.y 51+, visuals 32+, dbgCtl.w 13+.
+//  || 26587 THE PIXEL TESTIFIED AND THE AUTHOR WAS NEVER THE SELF CHAIN: THE FIREFLY IS BORN IN THE ENGINE-CASCADE RECEIVE'S ROTATED DECISION RING, AND ITS HASH IS THE CAMPAIGN'S OLDEST ENEMY IN A NEW MASK (KH_BAND_STABLE_RING; mode 363 / lighting0.y 49 reverts both halves). THE EXECUTION RECORD, end to end: pixel history on the scene HDR target shows the firefly pixel CORRECTLY SHADOWED by the wall draw (post 0.3025/0.2407/0.2323) and then OVERWRITTEN at the authoring draw with lit-leather 0.7261/0.4783/0.3027 - a nearer crevice fragment of the vest, rendered LIT. DebugPixel at that draw, dot vs clean 5 px apart, 3525 aligned states: the FIRST divergence that survives to o0 (dot 0.726/0.478/0.303 vs clean 0.017/0.014/0.012, bit-matching the screen) enters at the rotated-poisson PCF of ShadowBandFactor - the disassembly's sincos-of-562548.0-vs-562548.5, the hardcoded disk constants, the 8-cascade walk over shadowBand0..7. NOT SunShadowOcclusionSelf. Every conviction of builds 26575-26586 aimed at the self chain; the self chain was innocent of THIS artifact family, which is why nothing ever moved it - the eliminations were real, the target was wrong. THE MECHANISM, from the source's own lines: the first ring is 4 taps under a PER-PIXEL RANDOM rotation with a DECISIVE EARLY-OUT (acc 0 or 4 -> hard verdict, no refinement). Near an edge, whether the 4 rotated probes all miss (decisive LIT = a firefly in the penumbra) or all hit (decisive DARK = a speck in the fringe) or split (16-tap smooth penumbra) is ITSELF RANDOM PER PIXEL - the classification boundary is dithered, and the early-out promotes the dither to full-contrast dots. AND THE HASH: frac(sin(dot(wpos.xz, k))*43758) on WORLD-ABSOLUTE ~7.5 km coordinates - fp32 sin is degenerate at that magnitude (the trace's own inputs: 562548.0 vs 562548.5 for a 5 px step), so the 'world-anchored' rotation is white noise pixel to pixel. The engine ships the same recipe and survives it because its verdict resolves through the screen-space mask; our port applies it raw. THE REPAIR, minimal and parity-preserving: (1) THE DECISION RING LOSES ITS ROTATION - the 4 classification taps use the fixed disk axes, so decisive/penumbra classification is spatially stable and the early-out can no longer mint dots; the 12 refinement taps KEEP the rotation, where the dither does its banding-suppression job inside an already-averaged 16-tap penumbra. (2) THE HASH IS CONDITIONED - world coords wrap to a 64 m tile (frac(wpos.xz/64)*64) before the sin: still world-anchored (no swimming, the comment's own doctrine kept), repeats invisibly every 64 m, and fp32 sin operates at magnitude < 64 where it is exact. Mode 363 restores both old halves live. ACCEPTANCE, pre-registered: mode 0 = the crevice fireflies AND the cast-shadow halo dither die (this artifact family opened the campaign); 363 revives them on demand. THE HONEST REMAINDER: visual 29 painted a green (self-term) component at the box-side speckle in the 26573 era - after this lands, re-photograph the old loci; whatever survives is genuinely self-authored and gets its own trace, not a guess (the tracer is proven now). FALSIFICATION: fireflies survive at mode 0 with 363 unchanged -> the ring repair missed and the trace gets re-run at a surviving dot - the instrument, not the theory, names the next line. FREE NOW: modes 364+, lighting0.y 50+, visual 32+.
+//  || 26586 THE EDGE WINDOWS FALSIFY SERRATION AND CONVICT THE LAST TERM STANDING: THE 26459 GRADIENT SLACK - ORPHANED MEDICINE FOR A DISEASE 26574 CURED, EATING REAL OCCLUDERS ON SILHOUETTE-STRADDLING QUADS (KH_GS_CLAMP; mode 362 / lighting0.y 48 reverts to the unbounded slack). THE ARTIFACT (extractor v2.2, edge finder at the hero map's strongest in-band discontinuity, step 0.00242): the depth silhouette is a PERFECTLY CLEAN, SOLID, SINGLE-TEXEL STAIRCASE - no dots, no holes, no serration - and the pyramid renders it with exactly one texel of coverage transition. SUB-TEXEL SERRATION IS FALSIFIED AT THE STRONGEST EDGE; with the interior window already smooth, the map and pyramid are exonerated COMPLETELY, and the density axis (26444/26445) is CLOSED WITHOUT BUILDING - the artifact it was reserved for does not exist in the map. The 358 edge fringe is the half-res staircase magnified: expected, and irrelevant to the default path (dormant at magnification by design). THE CONVICTION, by elimination now closed on every side and by mechanism: khgs = 0.5*length(fwidth(khwr)) is PER-QUAD; on a quad that STRADDLES a silhouette, fwidth measures the foreground/background position JUMP - the measured vest-wall gap ~1.7 m - so the slack becomes ~0.85 m, the bias eats every occluder in range, and that quad's pixels read LIT: 2x2 dots strung exactly along silhouette outlines = THE HALO. Crevices are silhouette-dense = the salt-and-pepper. The signature matches the ENTIRE campaign record: tier-independent (khgs computed once above the tiers - the 26578 239/242 verdict), map-independent (both windows clean), ring-mitigated (264 made it worse), untouched by every map-side and read-side fix (none of them were the author). AND THE HISTORY CLOSES THE LOOP: khgs was 26459's guard against wpos-interpolation noise; 26574's wrel interpolant removed that noise at the source (ulp ~1e-7 m); the slack has been guarding nothing and costing silhouettes ever since. THE REPAIR: per-tier clamp to texel scale - kh?_gs = min(khgs, 4*tw) (hero 4 mm, mid 16 mm, outer 64 mm, union at its own texel), applied at BOTH uses (bias add and soft-band width). Straddling quads drop from metres to millimetres of slack; interior quads (fwidth ~ sub-texel) are numerically untouched. The revert arm restores the unbounded slack live. ACCEPTANCE, pre-registered: mode 0 = the halo dots and crevice salt-and-pepper GONE - the artifact family that opened this campaign; mode 362 brings them back on demand; mode 253 (slack fully zero, the existing arm) corroborates - dots gone there too, possibly with mild acne at grazing that the clamped default avoids. FALSIFICATION: dots survive the clamp at mode 0 -> khgs is exonerated and the remaining quad-class term is the RPDB damper (fwidth(n); modes 32/39 battery) - do not stack, A/B first. FREE NOW: modes 363+, lighting0.y 49+, visual 32+.
+//  || 26585 THE CAPTURE PROVES THE SERVER SIDE TO THE BIT AND CONVICTS THE COMPARE: A HARD THRESHOLD ON A COVERAGE-WEIGHTED FIELD - CHEBYSHEV IS REINSTATED ON MEASURED NUMBERS, WITH THE TWO FLOORS THAT MAKE IT SOUND (the banked m2 pays out; modes keep their meanings). THE RENDERDOC ARTIFACT (frame 3567, extractor kh_pf_v1): 3 pyramids, ALL 36 MIPS HEALTHY; hero pyramid min 0.980113 = hero depth min 0.980113 BIT-EXACT, means agreeing to 1e-5; 36 convert draws, blend DISABLED at every one (One/Zero/Add write-through), scissor off, 2048 viewports - the 26583 fix landed and the whole convert/chain is PROVEN, not inferred. meshT29Pyramid=false was the EXTRACTOR's stage-reader failing (this RenderDoc build exposes bindings through the generic descriptor model, not stage attrs - fixed in v2) and is non-blocking regardless: unbound t29 reads zeros -> mu 0 -> pfo 1 -> 358 would be ALL BLACK, and the field shows a real shadow - the binds are demonstrably live. THE CONVICTION IN THE GRID: the hero window's mu field is a smooth wall-plane gradient 0.980 -> 0.987 with the vest silhouette dipping only ~0.004 below it - the 626 m reach compresses the scene into 1% of the depth range. The kernel's compare on those MEASURED numbers: vd ~ 0.004 against W ~ 4.7e-6 -> vd/W ~ 2500 -> the verdict slams BINARY, softened only by bilinear mu across one 2 mm texel. 'Blocky and blurry' is a hard threshold on a bilinear field - the 26576 soft compare THREW AWAY the coverage information the pyramid stores (near a silhouette mu = w*vest + (1-w)*wall IS the coverage). MY 26576 REJECTION, OVERTURNED BY ITS OWN ARITHMETIC AT THE MEASURED GAP: mixture variance s2 = w(1-w)*gap^2; gap 0.004 -> s2 ~ 4e-6 at half coverage, against the fp32 cancellation floor ~1.2e-7 at mu ~ 0.984 - SNR 33:1, VIABLE. The rejection was computed for 0.1 m gaps where s2 drowns in the noise - true, and exactly there the texel ramp suffices. THE SOUND FORM: Chebyshev with TWO FLOORS - s2 = max(m2 - mu^2, max(2.5e-7 [the precision floor, ulp math above], W^2 [the ramp floor])). Where variance is unmeasurable the formula DEGENERATES INTO the 26576 ramp; where it is measurable it decodes coverage and the penumbra spans the true footprint. Light-bleed floor linstep(0.4, 1) kept. KhPfMu returns BOTH moments (float2; the m2 channel written since 26576 'as the banked lane for a future attempt' - the bank pays out); the manual trilinear stays, nothing optional in the path. ACCEPTANCE, pre-registered: (a) mode 358 = smooth coverage-proportional penumbra, the blockiness gone - the one-look check. (b) mode 0 vs 357 differs at the moire/halo band in the smoothing direction. (c) hole stays gone (interior: s2 at the floor, vd 0.004 -> vis ~ 0, occluded hard - bleed structurally starved at these numbers). FALSIFICATION: 358 still blocky -> the decode is not the residual author; capture again with extractor v2 (fixed bindings reader) and read the kernel inputs from the artifact, no inference. FREE NOW: modes 362+, lighting0.y 48+, visual 32+.
+//  || 26584 THE PYRAMID IS HEALTHY FOR THE FIRST TIME IN THE CAMPAIGN AND 358 SHOWS ITS FIRST REAL SHADOW - BLOCKY AND JITTERY, WHICH IS THE POINT-SAMPLING SIGNATURE: THE GPU'S SECOND OPTIONAL-SUPPORT CONFESSION, AND THE LAST OPTIONAL FEATURE LEAVES THE PATH (KhPfMu: manual trilinear via Loads; modes keep their meanings). FIELD ON 26583 (dump mode 361, khBuildTag 26583; the second dump was a stale 26581 file - noted, not needed): sunPfCpuMu0C 0.984173 / Mu3C 0.984185 / Mu0O 0.984852 / Mu3O 0.984851 at sunHeroRenders 4332 - all four lanes IN THE CONTENT BAND with mip 0 and mip 3 in lockstep, where the accumulator would have read ~4300. THE 26583 BLEND CONVICTION IS FIELD-PROVEN; the pyramid content and the manual mip chain are healthy end to end. AND MODE 358 SHOWS AN ACTUAL SHADOW for the first time since the axis shipped - the standing health check passes in substance. Its texture is the diagnosis: BLOCKY (edges quantised to half-res 2 mm texels), JITTERY (shimmer as uv crosses texel centres), NO HALO. That is POINT SAMPLING: linear filtering of R32G32_FLOAT is OPTIONAL on the same D3D11 support table as the mip autogen this GPU already no-ops, and visual 31 QUIETLY PROVED IT two rounds ago - G equalled B exactly, SampleLevel returning raw texel values. It also explains 357 == 0: an unfiltered pyramid verdict approximates the very taps it blends with, so the default arm has been a visual no-op. THE REPAIR, pre-registered at 26580 for exactly this contingency: KhPfMu - manual TRILINEAR built from guaranteed operations only (integer-mip Loads, edge-clamped, bilinear weights by hand, two mips lerped by the fractional lod). No sampler, no filter capability, nothing optional remains anywhere in the prefilter path: draws, copies, Loads, arithmetic. khPfSamp stays declared and bound for the gauge probes only. ACCEPTANCE, pre-registered: (a) mode 358 = the pyramid's own image now SMOOTH - soft stable edges, no blocking, no shimmer; this is the one-look health check for the whole axis. (b) mode 0 vs 357 FINALLY differs at the moire/halo band, in the smoothing direction - the 26578 tier-independent compare-flicker conviction meets a genuinely filtered verdict for the first time. (c) the hole stays gone; 361 lanes unchanged (content was already healthy). FALSIFICATION: (a) still blocky/jittery under 358 -> the read arithmetic is wrong, not the filtering - instrument KhPfMu with a visual before touching it; (b) smooth 358 but 0-vs-357 STILL identical at the noise -> the blend weight/guards are starving the arm at the noise loci and the next edit is the engagement/guard shape, with the arm itself finally proven. FREE NOW: modes 362+, lighting0.y 48+, visual 32+.
+//  || 26583 THE LANES DID ARITHMETIC AND THE ARITHMETIC NAMES ONE MISSING STATE: THE PYRAMID IS THE *SUM* OF EVERY HONEST CONVERT - THE ENGINE'S ADDITIVE BLEND WAS ON AT BOTH SITES ALL ALONG (KH_SELF_PREFILTER repair 4, the real one: a no-blend state + the sun rasterizer, set and restored around the convert; two theories of mine corrected below). FIELD ON 26582 (dump mode 361): sunPfCpuMu3C = 2025.44 with sunHeroRenders = 2026 - THE MIP-3 TEXEL EQUALS THE RENDER COUNT times ~1.0 (a near-clear region's mu ~ 0.9997, summed once per render). Mu0C = 1870.21 = 2026 x 0.923 - a LEGITIMATE content-band mu of 0.923, ACCUMULATED. The convert has been writing correct, saturated moments since 26578; the render target ADDED them, frame after frame, because NEITHER convert site EVER SET A BLEND STATE - the old band envelope is a depth-only pass that never needed one, the new mesh-bind site inherited whatever the engine left, and the 26383 StateBackup ledger's own warning ('a new pass that binds without restoring will leak state') has a converse this campaign just paid for: a new pass that RELIES on unset state inherits the engine's. EVERY OBSERVATION SINCE 26575, ONE MECHANISM: the 'smooth camera-tracking kilometre field' = sum(mu) growing with render count (26581's 2630 -> 2752 within one session = the sum still growing between dumps); the 26582 saturate changing nothing (src was always honest - DEST was the sum); the RELOCATION changing nothing (same missing state at both sites); 358's eternal no-shadow (mu in the thousands => vd hugely negative => pfo = 0 everywhere); the 26576-era blocky hole (early-session partial sums over uninitialized mips through trilinear); visual 30/31 G+B dark even on the lit wall (remap of thousands = 0). CORRECTIONS, the campaign's discipline: (1) 26582's 'the t0 SRV bind silently failed / foreign texture' - WRONG; the bind worked, the input was honest, the OUTPUT MERGE was the defect. The 'why is that bind dropped' mystery is DISSOLVED, not unresolved. (2) 26582's relocation was therefore unnecessary for correctness - it stays (the site is simpler and the once-per-map-set mark is good hygiene), but it fixed nothing and claimed to. (3) The 26581 CPU probe was RIGHT both times; only its depth-side lanes were illegal. The instruments never lied - my readings of WHAT could write those numbers did. THE REPAIR: g_res.blend_pf (BlendEnable FALSE, write mask ALL) created beside the convert shaders; kh_sun_pf_convert saves the blend state + blend factor + sample mask AND the rasterizer state, sets blend_pf + rast_sun (CullNone, scissor off, no depth clip - depth-irrelevant with no DSV), converts, restores both with the rest. With blending off, PSPf overwrites every texel - no clear needed, the accumulation is structurally impossible. ACCEPTANCE, pre-registered: (a) mode 361, TWO dumps a minute apart: Mu0 lanes in [0.90, 1.00], Mu3 in the same neighbourhood, and CRITICALLY the values NOT GROWING between the dumps (the sum signature dead). (b) mode 358 = a soft, correct shadow at last - the pyramid's own image. (c) mode 0: hole stays gone; 0-vs-357 finally differs at the moire/halo band, in the smoothing direction - the tier-independent compare-flicker conviction (26578) meets a live honest filter for the first time in the campaign. FALSIFICATION: values still growing under (a) = a second accumulator exists - RenderDoc, no more lane theories. FREE NOW: modes 362+, lighting0.y 48+, visual 32+.
+//  || 26582 THE CPU READ THE TEXTURE AND THE TEXTURE CONFESSED: THE PYRAMID HOLDS A FOREIGN KILOMETRE FIELD, SO THE CONVERT'S t0 BIND NEVER TOOK AT THAT SITE - THE CONVERT MOVES TO WHERE BINDS ARE FIELD-PROVEN (KH_SELF_PREFILTER repair 3: kh_sun_pf_convert at the mesh-bind region; convert shaders saturate their loads; the CPU probe is repaired and repointed at the chain; modes keep their meanings). FIELD ON 26581 (dump1 mode 361 / dump2 mode 0, both khBuildTag 26581): sunPfCpuMuC/Mu2 = 2630.77 / 2629.35, and 2752.59 / 2751.26 in the later window - the pyramid's mip 0, read by CopySubresourceRegion + Map with NO shader, NO bind, NO sampler anywhere in the path, contains a SMOOTH, CAMERA-TRACKING, KILOMETRE-SCALE FIELD. A depth-convert of [0,1] values cannot write 2630: the convert executed (deterministic, spatially coherent content proves the draw and the moment math ran), its RTV worked (the values LANDED), its PS worked - and its INPUT was a foreign texture of engine eye/linear-depth class. THE ONE CALL THAT SILENTLY FAILED AT THAT SITE IS PSSetShaderResources(t0). Every observation since 26576 is retro-predicted by mu ~ 2600+: visual 30/31 G and B pinned dark EVEN ON THE LIT WALL (remap(2630) = 0), mode 358 removing all shadows (pfo = saturate(negative) = 0 claiming sub-threshold standing through every tier), the original hole (the blend pulling verdicts toward lit garbage), and the 26577 guards + 357 nulling it. WHY that one bind is dropped inside the band envelope while the RTV and shader sets take remains UNRESOLVED AND NAMED (candidate: driver hazard tracking around the just-unbound DSV of the very resource being bound as SRV); the repair does not argue with it - it REMOVES THE SITE. ALSO OWNED, MY PROBE'S OWN DEFECT: sunPfCpuStC/St2 = 2.34457e-38 BIT-CONSTANT across texels and sessions = the untouched staging allocation - the depth-side 1x1 copy was ILLEGAL (D3D11 forbids partial copies from depth-stencil resources; the boxed CopySubresourceRegion was a silent no-op). The depth lanes never measured anything; the conviction above rests entirely on the LEGAL pyramid-side reads, which is why it stands. THE REPAIR: (1) kh_sun_pf_convert - all three band converts + manual mip chains run at the MESH-BIND region (both twins, once per fresh map set via a render-serial mark), the exact place where PSSetShaderResources has bound t11/t25/t26/t27 successfully on every frame of this campaign, inside its own save/restore (RTs, viewports, topology, layout, VS, PS - the 26383 per-site discipline). khsh_one keeps rendering the maps and now only marks freshness; the old in-envelope convert block is DELETED with a relocation note. (2) DEFENSIVE SATURATE in PSPf/PSPfMip loads: any future foreign delivery converts to clean 1.0 = far = the arm goes inert instead of writing garbage - a recurrence will read as 'pyramid empty', a named signature. (3) THE CPU PROBE repaired and repointed: pyramid mip 0 AND mip 3 at two texels (lanes sunPfCpuMu0C/Mu3C/Mu0O/Mu3O; the illegal depth reads retired with the ledger note above; pf_stage_st stays allocated, unused). Probe values also reset with the stats now. ACCEPTANCE, pre-registered: (a) mode 361 lanes read mu0 in the content band [0.90, 1.00] with mu3 in the same neighbourhood (chain healthy); kilometre-class values AT THE NEW SITE falsify the site theory - the foreign delivery then follows the SRV OBJECT itself and the next step is per-frame SRV re-creation, said plainly. (b) mode 358 = a soft CORRECT shadow, the standing health check. (c) mode 0: the hole stays gone, and 0-vs-357 FINALLY differs at the moire/halo band - the tier-independent noise conviction (26578) meets its treatment for the first time with honest content in the pyramid. FREE NOW: modes 362+, lighting0.y 48+, visual 32+.
+//  || 26581 THE SAMPLER IS ACQUITTED AND ONE BINARY QUESTION REMAINS - THE CPU ASKS THE TEXTURE DIRECTLY (KH_PF_CPU_PROBE; mode 361 arms the readback; four kvf lanes; mode 0 byte-identical). FIELD ON 26580, decoded: visual 31 = red only, shadow slightly brighter red than the lit wall, no green, no blue ANYWHERE. R behaving exactly as remap(depth) should (vest nearer the sun than the wall = brighter) re-proves the depth map healthy. G ~ B ACQUITS THE SAMPLER (SampleLevel and raw Load agree). And B dark EVEN ON THE LIT WALL is the loudest bit: an honest pyramid would show the wall's own depth there at full brightness - instead every mesh-side read of khSunPf2 returns ~the clear. So AS SEEN FROM THE MESH SHADER the pyramid holds ~1.0 everywhere, deterministically. Two mutually exclusive worlds fit that, and no shader probe can split them because every shader read crosses the t29 BIND: (A) THE TEXTURE ITSELF holds ~1.0 - the convert executed (deterministic content proves a write) but its Loads saw the depth in its CLEARED state, an ordering/binding pathology on this driver; or (B) THE TEXTURE IS HEALTHY and the MESH'S VIEW of it is broken - the t29 bind path delivers some other ~far-reading resource. THE INSTRUMENT: a CPU staging readback - the API asked directly what bytes the texture holds, no shaders, no binds, no samplers, no optional features. Under mode 361 only (it stalls the pipe, deliberately), the hero convert is followed by four one-texel copies into staging: the pyramid mip 0 at (1024,1024) and (1228,1228), and khSunDepth2 at the same world texels (2048,2048)/(2456,2456). Values publish as sunPfCpuMuC / sunPfCpuStC / sunPfCpuMu2 / sunPfCpuSt2 (-1 = never read). THE READINGS, pre-registered, each naming a mechanical next edit: Mu ~ St at both texels (content agrees) = the TEXTURE IS HEALTHY, world (B) - the mesh-side t29 path is convicted and the next edit is bind-side; Mu ~ 1.0 with St in the content band (~0.93-0.99) = world (A) - the convert reads cleared depth and the next edit MOVES the convert out of the band envelope to a provably-post-draw point in the flush (same shaders, different call site); BOTH ~ 1.0 = the probe texels are empty sky in the map - re-dump while standing so the wall fills the window centre (the window is camera-anchored; facing the wall within 2 m guarantees content at centre). ASK: setRenderDebug 361, face the wall from inside ~2 m for a few seconds, dump, then setRenderDebug 0 (the stall is real; do not leave 361 on). NOT CLAIMED: any fix; any default change. FREE NOW: modes 362+, lighting0.y 48+, visual 32+.
+//  || 26580 RED-ONLY, AND SMOOTH - THE CONVERT CODE READS CLEAN END TO END, SO THE LAST UNTESTED LINK IS THE SAMPLER ITSELF, ON A GPU THAT HAS ALREADY CONFESSED TO ONE OPTIONAL FEATURE (VISUAL 31 = mode 360, dbgCtl.x 31; pure gauge, mode 0 byte-identical). FIELD ON 26579: visual 30 inside the hero window = FULLY RED, NO NOISE. Decoded: R bright = khSunDepth2 holds the occluder at the fragment's own texel (the truth channel is computed from the depth map live, so the vest IS in the hero map at the very uv in question); G and B dark = the pyramid path answers receiver-or-beyond at that same uv; NO NOISE = the answer is smooth and deterministic, not uninitialized garbage (26578's mips are real). THE DESK AUDIT OF THE CONVERT, banked: source SRV = the same object the taps read; target = mip-0 RTV; draws precede the convert inside one Map-succeeded scope; the DSV is unbound by the OM set before the t0 bind; SV_Position-to-texel mapping is identity (p*2, top-left both sides); the fullscreen triangle covers the viewport; the moment math is four Loads and two averages. Every line reads correct - so the defect is in a link the code cannot show: EXECUTION SUPPORT. This GPU already silently no-ops one OPTIONAL R32G32_FLOAT capability (mip autogen, the 26578 conviction). LINEAR FILTERING of 32-bit float formats is ANOTHER optional entry on the same support table, and sampling through an unsupported filter returns UNDEFINED data - which a uniform smooth ~far value satisfies. The taps have been healthy all campaign because they LOAD; the pyramid is consumed exclusively through SampleLevel with a LINEAR sampler - the one path never exercised anywhere else in this file. THE INSTRUMENT: VISUAL 31 (setRenderDebug 360) paints, per hero-window fragment, the same quantity through both paths against the truth: R = remap(khSunDepth2.Load) (the taps' path), G = remap(mu via khSunPf2.SampleLevel lod 0) (the kernel's path), B = remap(mu via khSunPf2.Load mip 0) (the sampler BYPASSED). remap = saturate((1 - z) * 12) so the 624 m-reach content band (z ~ 0.93-0.99) spreads over full brightness and the 1.0 clear reads black. THE READINGS, pre-registered: R+B silhouettes with G flat = THE SAMPLER IS CONVICTED - the fix is one mechanical swap, the kernel's SampleLevel becomes explicit integer-mip Loads with a manual lerp (point sampling of R32G32_FLOAT is guaranteed support on every FL11 device; no state, no sampler, no optional feature left in the path); R only, B dark too = the sampler is acquitted and the CONVERT's writes truly never landed at this uv - the next instrument targets the convert draw itself; R and B silhouettes DISPLACED against each other = addressing, one line; all three aligned and bright = the 26579 probe's scaling lied and the defect is in the kernel's vd/bias consumption after all. ASK: setRenderDebug 360 at the same pose as last round, one screenshot. NOT CLAIMED: any fix; any default change. FREE NOW: modes 361+, lighting0.y 48+, visual 32+.
+//  || 26579 THE NOISE LEFT THE PYRAMID AND THE SHADOW DID NOT ARRIVE - MY OWN HEALTH CHECK FIRES AND THIS BUILD IS THE INSTRUMENT IT DEMANDS, NOT A FOURTH SWING (VISUAL 30 = mode 359, dbgCtl.x 30; pure gauge, mode 0 byte-identical; no kernel or convert changes). FIELD ON 26578, decoded: (1) 358 shows NO shadow, and NO noise - the noise leaving PROVES the 26578 conviction (the mips are now written; uninitialized VRAM is gone) while the missing shadow proves a SECOND defect the first was masking: the pf verdict is a small near-lit value EVERYWHERE, including through the union fallthrough (no shadow AT ALL means every band claims sub-threshold standing or the pyramid mean sits at the receiver's own depth wherever sampled). mu ~ receiver-in-shadow-interior while khSunDepth2 holds the occluder AT THE SAME TEXELS is not arithmetic - it is ADDRESSING or CONTENT: a flip/displacement between convert and sample, a stale/cleared read, or a broken level chain. Desk-checking has not cracked which, and the 26578 acceptance clause binds: say so and stop. (2) Holes stay gone in every mode - the guards hold. (3) 357 == 0: defaults are inert and safe while the defect stands. (4) 264 makes noise AND halo WORSE - the strong form of the pre-registered splitter verdict: the ring was MITIGATING, so ring/spread/soft-band are acquitted wholesale and the author is the CENTER COMPARE's own per-pixel flicker - with 239/242 tier-independence from last round, that is the classic pixel-grid x texel-grid MOIRE of an undersampled compare at grazing, which is EXACTLY the disease the prefilter treats. The whole campaign therefore converges on one repair: make the pyramid answer honestly. THE INSTRUMENT: VISUAL 30 (setRenderDebug 359) paints, for every hero-window fragment, the three depths that must agree: R = the DEPTH MAP's own gap (c.z - khSunDepth2 at this texel - the taps' truth), G = the PYRAMID's gap at lod 0 (c.z - mu0), B = the PYRAMID's gap at lod 2 (c.z - mu2), each scaled x200 so a 3 mm-class gap at the 638 m window reads mid-bright. THE READINGS, pre-registered: WHITE/GREY in shadow interiors (R=G=B) = pyramid healthy end to end and the defect is in the KERNEL's consumption (vd/bias/W) - next edit is compare-side; RED-ONLY (G,B dark) = the mip-0 CONVERT itself never captured the occluder (wrong source, wrong timing, dead draw) - next edit is the convert pass; RED+GREEN with B dark = mip 0 honest, the MANUAL CHAIN broken (copy/level-SRV/RTV plumbing) - next edit is the chain loop; G/B silhouette DISPLACED or MIRRORED against R = the uv mapping between convert and sample is flipped/offset - next edit is one addressing line; MAGENTA = outside the hero window (reposition). Fragments outside every reading stay unclaimed - one screenshot names the next edit's exact file region, which is what an instrument is for. ASK: setRenderDebug 359, frame the vest shadow on the wall inside ~2 m (the hero window), one screenshot. Optionally the same at the moire strip. NOT CLAIMED: any fix; any default change. FREE NOW: modes 360+, lighting0.y 48+, visual 31+.
+//  || 26578 THE 358 SCREENSHOT IS A CONFESSION: THE PYRAMID CONTRADICTS THE VERY DEPTH TEXELS IT WAS CONVERTED FROM, SO ITS MIPS WERE NEVER WRITTEN - GENERATEMIPS ON RG32F IS OPTIONAL-SUPPORT AND THIS GPU NO-OPS IT; THE CHAIN GOES MANUAL (KH_SELF_PREFILTER repair 2; no new modes - 357/358 keep their meanings and become the health check). FIELD ON 26577, all five observations decoded: (1) HOLE GONE AT MODE 0 - the 26577 disagreement guard rejects the authoring reads; containment worked. (2) 357 NO VISIBLE CHANGE - with the guards muzzling garbage, the prefilter's net visible contribution is nil (and the fallthrough-standing guard also blocked the blend at exactly the lit-flicker pixels filtering exists to fix - amended below). (3) MODE 358, THE CONFESSION: pf-exclusive REMOVES the real shadows and keeps ONLY noise - the pyramid reads LIT where khSunDepth2 reads OCCLUDED, from the SAME source texels, and its spatial output is garbage. Honest inputs cannot do this; broken CONTENT can. MECHANISM, positively identified: D3D11_FORMAT_SUPPORT_MIP_AUTOGEN is OPTIONAL for R32G32_FLOAT, and on unsupported hardware GenerateMips is a documented SILENT NO-OP - mip 0 (our own draw) is valid, every mip >= 1 is UNINITIALIZED VRAM. The trilinear SampleLevel pulls mip>=1 garbage the moment lod exceeds 0 (ft > 2), which is: the box-BLOCKY hole shape (uninitialized memory tiles), the 358 noise, the shadows vanishing under pf-exclusive (garbage pfo claims tiny standing and blocks even the union fallthrough), and both prior 'repairs' changing nothing (26576 fixed arithmetic downstream of dead content). (4) 239 null and (5) 242 blur-only are the round's SECOND conviction, banked for the next axis: the halo/edge noise is TIER-INDEPENDENT - identical at 1 mm, 4 mm and 16 mm texels - so by this file's own 26465 law (map artifacts scale with texel size) its author is NOT any map's content but the RECEIVE ARITHMETIC SHARED BY ALL TIERS (bias stack, derivative-driven terms, or tap kernel structure). THE REPAIR: the mip chain is built BY HAND, one path, every GPU: after the mip-0 moment convert, each level m renders from a scratch copy of level m-1 (PSPfMip, 2x2 moment average - the exact arithmetic GenerateMips was trusted to do). Same-resource SRV+RTV is a D3D11 hazard, hence the ping-pong: OM unbound -> CopySubresourceRegion A.mip(m-1) -> scratch.mip(m-1) -> render A.mip(m) reading the scratch level view. One shared scratch (all three bands are 2048 at half-res; SHADER_RESOURCE only), 12 per-level scratch SRVs, per-tier per-level RTVs, ~11 small copies+draws per band render. GenerateMips and its MISC flag are DELETED, not gated - one code path cannot regress by device. ALSO AMENDED: the 26577 standing guard gains the honest-content clause - the blend may now CREATE tier standing when the pyramid itself holds a real occluder (pfo > 0.2): content absent from the window reads pfo ~ 0 and still falls through (the 26506 contract intact), while aliasing-flicker pixels (taps lit, pyramid occluded) finally get filtered - the exact class the halo lives in, unreachable last round by the guard's own blanket. ACCEPTANCE, pre-registered: (a) mode 358 becomes the HEALTH CHECK - it must now show a soft, CORRECT shadow (the pyramid's own image); if 358 still shows noise or missing shadows, the manual chain is broken and the conviction above is wrong - say so and stop. (b) 0-vs-357 must FINALLY differ at the moire/halo band (the filter's first round with honest content AND engagement covering ft 1-2). (c) the hole stays gone at mode 0 (guards remain; honest content gives them nothing to reject). THE NOISE BATTERY for the tier-independent residual, one screenshot each at the halo locus: mode 264 (single hard tap - THE SPLITTER: noise SURVIVES 264 = ring/spread/soft-band all acquitted at once and the CENTER compare's own inputs flicker, next instrument targets the bias stack; noise DIES under 264 = the ring is the author and the work is kernel-side), then 253 (grad slack off), 32 (RPDB off), 28 (spread off). FREE NOW: modes 359+, lighting0.y 48+, visual 30+.
+//  || 26577 THE HOLE SURVIVED THE REPAIR AND ITS OWN MOTION SIGNATURE ARGUES AGAINST MY ARM - THIS BUILD SHIPS CONTAINMENT PLUS THE INSTRUMENTS THAT NAME THE AUTHOR, NOT A THIRD BLIND SWING (guards inside KH_SELF_PREFILTER; lighting0.y 47 / mode 358 = PF-EXCLUSIVE instrument arm; 357 unchanged as the full revert). FIELD ON 26576 (dump: khBuildTag 26576, mode 0, sunPfHeroOk/MidOk/OutOk ALL 1, sunHero/Mid/OutCasters ALL 2 - the vest AND the wall are in every band map, the pyramids are armed - reach again ~625 m): the forward/backward hole PERSISTS (right side of the cast shadow at partial opacity, hardening and going BOX-shaped when the camera approaches), the halo and the edge noise unchanged. THE 26576 FORK (a) FIRES: the Chebyshev retirement changed nothing, so the bound arithmetic was never the sole author. AND THE OPERATOR'S OWN MOTION LAW POINTS AWAY FROM THE ARM ENTIRELY: closer camera = SMALLER footprint = the arm DISENGAGES (pw -> 0 under 1.5 texels), yet the hole HARDENS on approach - an arm-authored hole must fade there. What HARDENS on approach and is BOX-shaped and camera-anchored is a BAND WINDOW cross-section (hero 4 m, mid 16 m boxes on the receiver). The author therefore lives in how a band SERVES that window - tap kernel, bias stack, tier blend, or fallthrough - and NO existing lane separates those; the battery below does, in one screenshot each. SHIPPED, three containments inside the arm (each can only REDUCE the prefilter's authority; none claims the fix): (1) THE FALLTHROUGH CONTRACT GUARD - the pf blend applies only when the tap verdict already has standing (res > the 26506 threshold); a lit tap verdict stays lit so coarser tiers can serve content this window lacks - the pf arm can no longer manufacture tier standing out of bias residue. (2) THE GROSS-DISAGREEMENT GUARD - taps deep-occluded (>0.8) with pf near-lit (<0.2) means one side reads garbage; the taps are the validated corpus, keep them - the pyramid derives from the same depth texels, so honest inputs cannot disagree this hard. (3) ENGAGEMENT WIDENED DOWN - pw = smoothstep(1.0, 2.0, ft) replaces (1.5, 3.0): the operator's moire/dither strip on the wall sits at footprint ~1-2 texels, EXACTLY under the old threshold, which is why the halo read 'exactly the same' through two prefilter rounds - the filter never served the worst aliasing band. lod0 of the half-res pyramid is already a 2x2 average, so engagement at 1 texel is mild and correctly directed. THE INSTRUMENT: lighting0.y 47 (mode 358, mesh fill only - the 264 precedent) makes every armed band verdict PF-EXCLUSIVE (taps bypassed wherever the window and sunPf hold). Combined with 357 (pf OFF) this separates authorship with certainty: hole present under BOTH 357 and 358 = the author is the shared machinery (windows/bias/blend/fallthrough), not either kernel; present only under 358 = pf; present only under 357 = taps. THE ASK - one screenshot each AT THE HOLE POSE: mode 0, mode 357, mode 358, mode 239 (hero down), mode 242 (mid down), and setRenderDebug 269 (visual 21 paints the SERVING TIER - if the boxy region changes colour at the hole boundary, the window authorship is proven and the band is named). Then AT THE HALO/MOIRE STRIP: mode 0 vs 357 (the strip finally gets a live filter under the widened engagement; if 0-vs-357 shows no difference there THIS time, with sunPf*Ok 1, the minification-filtering fork is settled for real and the residual is sub-texel geometry -> per-cluster density, the named next axis). NOT CLAIMED: the hole's author; any acceptance beyond the guards' own no-worse property. FREE NOW: modes 359+, lighting0.y 48+, visual 30+.
+//  || 26576 THE JITTER IS CLOSED, THE HOLE IS MY OWN ARITHMETIC, AND THE DUMP HANDS ME THE CONVICTION IN ONE LANE - CHEBYSHEV IS RETIRED FOR THE FILTERED MEAN (KH_SELF_PREFILTER repair; mode 357 still reverts the whole axis). FIELD ON 26575: (1) the camera-motion millimetre jitter GONE - 26574 KH_SELF_REL_INTERP is field-confirmed and that axis is CLOSED. (2) REGRESSION, operator: moving forward/backward into a cast shadow opens a camera-anchored lit HOLE shaped like the receiving object. (3) the halo + edge noise: unchanged exactly. THE DUMP (khBuildTag 26575, mode 0, 5095 flushes) CONVICTS THE HOLE ARITHMETICALLY: sunHeroReach = sunMidReach = sunOutReach = 624.163 with sunBandReachTakes 15279 = 3 bands x every flush - the operator's MASSIVE box (enclosing radius in the hundreds of metres) is admitted into every band by its own size, and KH_BAND_SUN_REACH honestly stretches every depth window to d2v ~ 638 m. At that window my 26575 variance is DEAD ON ARRIVAL: sigma^2 = E[z^2] - mu^2 in normalized fp32 is a catastrophic cancellation whose noise ~ ulp(0.25) ~ 3e-8 sits 4.5 ORDERS above the (tw*iD/2)^2 floor (6e-13 at 638 m) and EQUALS (d-mu)^2 for a 0.1 m occluder-receiver gap ((0.1/638)^2 = 2.5e-8) - so Chebyshev vis = s2/(s2+(d-mu)^2) is fp32 NOISE for dm-class gaps: random LIT verdicts inside cast shadows, gated by the footprint>1.5 engagement, whose region is camera-anchored and sweeps the receiver as the camera advances/retreats - the hole, its shape, and its motion dependence, all three. The 26575 falsification clause fires on its own author: the mechanism was wrong AT THIS WINDOW DEPTH, not the axis. THE REPAIR keeps the pyramids and changes only the consumption: the filtered MEAN is the precision-sound channel (it averages linearly through the mips; fp32 ulp ~6e-8 normalized = 0.04 mm even at the 638 m window) and the kernel now soft-compares (d - bias) against mu over the footprint's own depth ramp W = max(ft, 2) * tw * iD. Interiors CANNOT bleed by construction - in shadow interior the filtered depth IS the occluder, d - mu is the full gap, verdict occluded; at silhouettes mu ramps smoothly with coverage, so the salt-and-pepper becomes a stable gradient. The m2 channel keeps being written (cheap, mips already average it) as the banked lane for a future EVSM-warped attempt if the mean under-filters; the shader no longer reads it. ALSO PAID: the 26575 gauge omission - three kv lanes sunPfHeroOk/sunPfMidOk/sunPfOutOk publish per-band pyramid freshness so the next read never has to infer arming from the screen. ACCEPTANCE, pre-registered: the forward/backward hole GONE at the same poses (0-vs-357 shows classic taps never had it, repaired arm doesn't either); grazing minified speckle now gets its FIRST honest filtered test - the 26575 field round never delivered one (the variance was noise wherever the arm engaged, and dormant below 1.5 texels). FALSIFICATION, binding: (a) hole SURVIVES the repair -> the author is not the bound arithmetic - suspect the convert/state path next and instrument before touching the kernel; (b) halo/speckle unchanged at a locus where visual 21 names a band tier, footprint minified (grazing), sunPf*Ok 1 -> filtering is exonerated FOR REAL this time and the residual is sub-texel geometry: the named next axis is per-cluster density (26445 option 2), not kernel work. NOT CLAIMED: the halo at NON-minified footprints (close-up edge dither at ~1 texel) - prefiltering never served it and cannot; that class rides the same sub-texel/density fork. FREE NOW: modes 358+, lighting0.y 47+, visual 30+.
+//  || 26575 THE PREFILTERED-MAP AXIS SHIPS ON THE OPERATOR'S PRICE ACCEPTANCE, STACKED ON 26574 FOR ONE FIELD TRIP (KH_SELF_PREFILTER; mode 357 reverts to classic taps everywhere - CPU meta gate, no shader recompile needed for the A/B). WHAT IT IS: each camera band (hero/mid/outer) gains a VARIANCE (moment) pyramid - a half-resolution RG32F texture holding (mu, E[z^2]) of the band's own depth, built every band render by a fullscreen convert pass (4 Loads -> moments) plus GenerateMips, all inside the band's existing state envelope. The self kernel, UNDER MINIFICATION ONLY (footprint > 1.5 full-res texels, fully engaged by 3), blends its tap verdict toward the Chebyshev bound: vis = s2/(s2+(d-mu)^2) for d>mu, variance floored at (tw*iD/2)^2, light-bleed floor linstep(0.4,1). SampleLevel with footprint-derived LOD - correct in non-uniform flow by construction. At ordinary viewing (footprint <= 1.5 texels) the kernel is BYTE-IDENTICAL to 26574: contacts, terminator, everything validated stays on the tap path. The union tier stays classic (its ~100 mm texels never minify at these loci). WHY THIS SHAPE: ESM was designed and REJECTED in-analysis - a single exponential over our reach-fitted windows (hero 26 m stretching past 200 m under KH_BAND_SUN_REACH) forces ramp = d2v/c >= 0.3 m at fp32's c<=88 ceiling: unusable. Moments are window-depth-invariant. Half-res base: the pyramid engages only at footprint >= 1.5 full texels, where 2x decimation is already below Nyquist - and it quarters the memory (three pyramids ~134 MB total vs ~534 full-res). PLUMBING, disclosed completely: CBFrame/ConstantData grow one float4 (sunPf, appended at the tail - the 26444/26454/26458 precedent, offsets untouched); t29/30/31 + linear-clamp s1 join the mesh binds AND StateBackup's save range widens 29->32 srvs, 1->2 samplers IN THE SAME EDIT (the 26444 t25-leak lesson, honoured before first bind); the convert VS/PS compile lazily in ensure_sun_pf beside the band ensures, non-fatal at every step - any failure leaves that band's sun_pf flag false and its kernel classic. Convert sequencing: OM takes the pyramid RTV FIRST (releases the band DSV so its SRV bind is legal), depth SRV at t0, Draw(3), SRV nulled, RTs cleared, GenerateMips, then layout/VS/PS restored for the next band's depth pass - the envelope's own restore covers the rest. COST, priced: ~134 MB VRAM; per band render one half-res fullscreen pass + a mip chain (bands render ~once per flush; dump3 showed 11320/11382). ACCEPTANCE, pre-registered: the STATIC grazing speckle (box-side strip, crevice salt-and-pepper, cast-edge dither at grazing) collapses into stable smooth penumbra at the same poses, mode 0 vs 357 flipping it live; contact shadows and ordinary viewing unchanged (the engage threshold guarantees it); with 26574 in the same binary, motion-jitter and static speckle are SEPARATELY attributable (356 isolates the interpolant, 357 isolates the filter). FALSIFICATION, binding: speckle unchanged at a locus WITH sunPf armed there (paint/tier: visual 21 names the serving tier) = minification filtering exonerated AT THAT LOCUS - the residual is sub-texel geometry (facets smaller than a texel, the 26444 3.24 mm class) and the named next axis is per-cluster density (the 26445 ledger's option 2), NOT a wider blend window. Light-bleed reports (shadow lightening where a thin casters overlaps deep receivers) tune the 0.4 floor - one constant, named here. NOT CLAIMED: the union tier; any cast-chain change; the fire path. FREE NOW: modes 358+, lighting0.y 47+, visual 30+.
+//  || 26574 THE PAINT CAME BACK GREEN, THE JITTER IS ONE HERO TEXEL, AND THE FILE'S OWN 26459 ADMISSION NAMES THE LEAK - THE RECEIVE INTERPOLANT GOES ANCHOR-RELATIVE (KH_SELF_REL_INTERP; mode 356 / lighting0.y 46 reverts bit-exactly). FIELD ON 26573: VISUAL 29 paints the box-side speckle AND the shadows GREEN-ONLY (self chain CONFIRMED author, attribution finally painted not inferred); 183 removes noise+shadows together (consistent); 353 no perceptible difference (margin class stays dead). NEW REPORT: self shadows jitter ~1 mm RANDOMLY under camera motion, static at rest - 1 mm IS the hero texel (0.9995 mm). THE AUDIT, END TO END: the MAP side is phase-exact - 26465's double snap holds the world grid, the double eye and anchor subtraction land the translation row at metres-scale ulp, VSSunDepth subtracts the same fp32 anchor the matrix used, caster instance positions are static fp32 - nothing map-side re-rolls under camera motion. THE RECEIVE SIDE NEVER GOT THE SAME TREATMENT: o.wpos is WORLD-ABSOLUTE (camAbsM 7522 in dump3 -> fp32 ulp 0.49 mm) and rides the interpolators, whose barycentrics re-derive from CLIP coordinates every frame the camera moves - the +-half-texel rounding realization re-rolls per frame, shifting every self-tier UV sub-texel: edges jitter ~1 texel in motion, freeze at rest, and edge-straddling compares re-roll (the motion component of the speckle). 26459 wrote this mechanism down VERBATIM ('the other half is the INTERPOLATOR') and shipped a depth SLACK for it; the slack cannot fix a LATERAL sample-position error - the class was named, half-treated, and left. THE FIX IS THE ENGINE'S OWN DISCIPLINE (its cascade sampling is documented camera-relative in this file for exactly this reason): a new metres-scale interpolant wrel = wp - sunOrigin.xyz (TEXCOORD4) leaves the VS exactly cancelling the same fp32 anchor the sun matrices subtract, interpolates at metres magnitude (ulp ~1e-7 m, three orders under the hero texel), and the whole self chain consumes it: SunShadowOcclusionSelf/SunShadowFactorSelf/KhSelfTierProbe take (wpos, wrel, nrm), all seven tier transforms drop their PS-side '- sunOrigin.xyz', khgs derives from fwidth(khwr) (same derivative - sunOrigin is uniform). KhSunRangeFade stays on absolute wpos (its distance is camera-based via fxParams0, not anchor-based). VSFullscreen zeroes wrel. THE REVERT: lighting0.y 46 selects khwr = wpos - sunOrigin.xyz inside the chain - the exact pre-26574 arithmetic, live-switchable; mode 356 maps to it in the mesh fill ladder (single-site ladder by the 264 precedent: the fire fill has no self reader). ACCEPTANCE, pre-registered: the ~1 mm camera-motion jitter of self shadow EDGES gone (edges world-stable under any motion, 0-vs-356 A/B shows the jitter return under 356); the speckle STOPS RE-ROLLING with camera motion. DISCLOSED LIMIT: the STATIC speckle pattern (grazing minification / sub-texel geometry) is NOT this build's claim - that residual is the pre-registered prefiltered-map axis (ESM/moments + mips per tier), to be priced with the operator if it survives. FALSIFICATION, binding: if 0-vs-356 shows identical jitter, the interpolator is exonerated - next suspect in line is the per-frame khsh_fwd/d2v reach drift (KH_BAND_SUN_REACH fits the depth window to the admitted set every frame; watch sunHeroReach/sunMidReach/sunOutReach lanes move under motion) - STOP and instrument, do not stack fixes. FREE NOW: modes 357+, lighting0.y 47+, visual 30+.
+//  || 26573 THE FORK FIRED AND THE ATTRIBUTION ITSELF GOES UNDER THE PAINT (VISUAL 29 = mode 355; pure instrument, zero mode-0 behaviour). FIELD ON 26572: stencil range fade CONFIRMED and CLOSED on the operator's read (rule 1.16 lifts for KH_STEN_RANGE_FADE); BOTH self-shadow loci 'exactly as they were' - and dump3 proves the mechanisms were LIVE while they weren't helping (khBuildTag 26572, 16 fresh shader compiles, compFailStreak 0, effectSetupFails 0, debugMode 0, hero/mid/outer all valid at halfDiag 2/8/32 with ~11320 renders each). A soft compare that is arithmetically continuous in EVERY tap input cannot leave margin-class noise untouched - so per the 26572 pre-registered fork (a), this noise is NOT the tap-margin class. WHAT THAT BREAKS: nine builds (26459..26572) rest on the attribution 'the self chain authors the grazing/crevice/halo speckle', and that attribution was established by kill-mode inference (183/167/168 flips on EARLIER artifacts), never painted at THESE loci. 26572's KH_SELF_SOFT_CMP + KH_SELF_SPREAD_SMOOTH stay default (not 'worse', theoretically sounder, one-switch revertible; status inert-unconfirmed, rule 1.16 stays down). SHIPS: VISUAL 29 - receive-term decomposition at the fragment: R = the LIVE cascade/band receive occlusion (1-smf at the probe point, mode arms respected), G = OUR sun-map self-term occlusion (SunShadowFactorSelf as configured), B = stencil-volume occlusion (the live dispatch). Probe sits inside the N.L gate after the cascade receive, before the self min - fragments outside the gate shade normally, so speckle visible OUTSIDE the paint convicts the shading path (normal map / facet machinery), not a shadow term. TWIN: PSMain + PSComposite; dbgCtl.x 29 via mode 355 at both fill sites (rule 1.5). FIELD PROTOCOL, one trip: mode 355 screenshot at (a) the grazing box side, (b) the vest halo, (c) a crevice locus - the speckle's channel IS the author; then mode 353 alone and mode 183 alone at the same poses as one-switch cross-checks. PRE-REGISTERED READS: speckle GREEN-only = self chain confirmed -> the named next build is the prefiltered-map axis (ESM/moment per tier + mips - the literature's answer where per-texel slope bias + PCF cannot close grazing minification; do NOT spend another tap/bias knob). Speckle RED-only = engine cascade receive (ShadowBandFactor / ShadowMapFactor hard 2x2 corners + flat bias) -> the self chain is EXONERATED and every 26459+ default gets re-audited for dead weight. Speckle BLUE-only = stencil transport -> witness-membership axis. Speckle in NO channel = not a shadow term at all -> shading/normal path. Mixed channels = per-locus split; treat each locus separately. FALSIFICATION: if mode 355 paints flat (no speckle in ANY channel) while mode 0 shows it at the same pose, the probe placement itself is wrong (before the self min = self speckle absent from the composite by construction is EXPECTED in R; but absence from G too means the noise enters BETWEEN the probe and final shading) - report that verbatim, it is a finding, not a failure. FREE NOW: modes 356+, lighting0.y 46+, visual 30+.
+//  || 26572 THREE OPERATOR REPORTS, ONE THRESHOLD: THE SELF-SHADOW NOISE LOCI (camera-grazing z-fight WORSE WHEN CLOSE; crevice noise + edge shimmer worst at close caster-receiver; a noise halo ringing mesh-on-mesh cast shadows - all camera-locked, static at rest) ARE ALL NEAR-MARGIN LOCI OF THE HARD TAP COMPARE, AND THE ENGINE-STENCIL RECEIVE NEVER GOT THE 26464 RANGE FADE. SHIPS, each one-switch: (1) KH_SELF_SOFT_CMP default ON (lighting0.y 44 / mode 353 restores the hard compare) - every PCF corner verdict becomes saturate((e-stored)/w+0.5), w = max(2*khgs, texelWorld)*iD per tier (the 26459 noise budget doubled, floored at one texel of depth); centered, threshold unmoved; lit-at-bias stays exactly 0 because b >= 1.5*tw*iD + khgs*iD > w/2 by construction - no global haze is possible; margin flips become stable gray at ALL THREE loci because all three are margin loci. (2) KH_SELF_SPREAD_SMOOTH default ON (lighting0.y 45 / mode 354 restores the int spread) - the 26470 ring spread loses its int(round()) quantization (a per-quad 1..8 staircase that re-sizes the ring footprint quad to quad under motion - blocky re-roll at grazing and across cast-shadow edges, where WHICH side a tap lands on is the whole verdict); offsets ride float2, the 26476 PCF corners already resolve fractions; the code-31 point-tap arm rounds them back and stays bit-faithful at integral spreads. (3) KH_STEN_RANGE_FADE default ON (lighting0.y 43 / mode 352 reverts) - the stencil-volume receive multiplies the SAME KhSunRangeFade the 26464 cast/self chains ride, so engine unit-shadow darkening on our meshes thins across the last ~15% of clamp(shadowVisibility, 8, 1000) instead of popping with the caster's eligibility; mirMeta.w = 0 (255 / zero anchor) stands the helper down, inherited unchanged; twins in PSMain + PSComposite, applied after the near-collapse mirror lerp. (4) GAUGE ONLY: kh_band_view_native counts refusals only where they are EVENTS (commit / completion / immediate-seal sites) - the two publish-latch sites judged AND counted, inflating bandSealForeignRef up to 4x per foreign publish (lanes read 0 in every measured session; meaning fixed before it can mislead). NOT CLAIMED: that soft-cmp closes CONTENT undersampling under wide grazing footprints - the ring stays 9 taps; a lit/shadow texel mix under the footprint still dithers, only the margin class is closed. PRE-REGISTERED ACCEPTANCE: the three reported poses read stable smooth shading at mode 0 and mode 353 ALONE brings the speckle back (the one-switch proof); the stencil pop is gone at the shadowVisibility boundary and mode 352 ALONE brings it back. FORK: (a) noise surviving mode 0 at the SAME granularity AND unchanged under 353 = not the margin class -> the footprint-undersampling axis is next (map-side filtering; do NOT widen the band to chase it); (b) noise gone under 354-only comparison but back at 0 = the spread quantization was the author alone -> keep 354's finding, re-rank; (c) stencil pop surviving beyond shadowVisibility = the engine's per-object cutoff is not SV -> the fade radius needs its own source next build. FALSIFICATION, binding per 1.13b: operator 'worse than baseline' on any locus reverts that switch's default next build, analysis after. FREE NOW: modes 355+, lighting0.y 46+, visual 29+.
+//  || 26571 CLOSED: THE CASCADE SHADOW OFFSET IS FIXED AND FIELD-VALIDATED - KH_BAND_STAGE_FIRST STANDS AS DEFAULT (ledger-only build; zero behaviour change; this entry is the campaign's closing record). VALIDATION (operator verdict: fixed; dump at khBuildTag 26570 / fieldsN 229, 199235 flushes ~66 MINUTES of sustained movement, camStepM med 1.9 / p90 9.8 - the offset regime held for over an hour): ARMING TOTAL - bandRotWelds 95860 == bandStageCommits 95860, every staged commit welded stage_first, ring code 8 dominant with code 6 the untouched immediate minority; HEALTH NOMINAL EVERYWHERE - frame spacing 18 ms med / 24 ms MAX across the ring (no stalls, no frame-drop regression), bandAgeKills 4 in an hour (the orphan bound as entitled), wipes 0, pool misses 0.01/flush with bandStagePoolCap absorbing 506 bursts, recvBandsN never below 8, live table alive, sun settled, quality bails 0, warmup one startup window; UNCLAIMED BONUS, recorded not asserted - bandBudgetEscapes 0.11/flush, the lowest of the campaign (historic 2.3-83): stage-first welds sit naturally nearer the escape's reference and the cadence machinery calmed with the artifact. THE ARTIFACT, one paragraph for whoever reads this next: the engine re-fits and re-renders the FAR cascade on a slower round-robin and resolves it LAST in the cycle; our staged seal captures sm+content at that resolve, and the 26179 boundary convention made its commit weld the NEXT frame's view - one frame of camera ROTATION baked into the pair (translation nearly clean), visible only far from the shadow (the far cascade serves there), only under camera rotation/movement, intermittent (per reseal), settling on park, clearing at any stall that forced a reseal - every symptom of four conversations, one epoch skew. The 17:35 rotated capture pair measured it (slot 4's composed world-form 0.7-0.8 deg off the light frame slots 0-3 shared at 0.001 deg; coherent in the second capture; translation 0.115 m) and the fix stores the one view no candidate ever stored - frame N's late publish, stage_first - and welds it at commit: byte-identical for same-cycle commits, the sm-epoch pair for crossing ones. WHAT STAYS BANKED, deliberately unfixed and pre-named: (1) the IMMEDIATE path's completion overwrite carries the same skew's 15 pct minority - unconvicted in the field, and if a faint residual offset ever appears it is the first suspect, fix shape identical (a birth-epoch latch); (2) the F12/switch one-frame 3-band dip - cosmetic, the re-take invalidator not fully named, bandWipeEvents/recvDropWhy instrument it; (3) the live path's rotational-form audit (26566 flag) - moot for this artifact, the far pose is band-served; (4) the 26533 latch axis (>50 m jumps) and the x8 engine perf cost (26547). THE REVERT MAP for the shadow axis as it now stands: 346 per-band flip arm (bracketing only), 347 pool fall-through uncapped (the threshold copy storm), 348 epoch-death slow recovery, 349 warm-up re-arms per wipe (the 2 s capture blackout), 350 the 1.0 s band age kill (the F12 hole), 351 baseline weld (THE OFFSET RETURNS - the one-switch proof of this fix). CORRECTIONS THIS CAMPAIGN CARRIED, counted so the method is remembered with the result: ten named, each falsified by a lane or the operator and each narrowing the space - the fix was found because the misses were recorded. FREE NOW: debug modes 352+, lighting0.y codes 43+, visual codes 29+.
+//  || 26570 26569 IS FALSIFIED BY ITS OWN ARMING LANE AND CORRECTED: STAGE_VIEW WAS THE WRONG EPOCH (N-1, the stage code's own comment says the resolves run before the view upload), AND THE RIGHT EPOCH - FRAME N'S LATE PUBLISH - WAS NEVER STORED BY ANY CANDIDATE IN THE CAMPAIGN; KH_BAND_STAGE_FIRST STORES AND WELDS IT (default; mode 351 = baseline weld; lane bandRotWelds now counts stage-first welds; census code 8 = stage-first weld). THE FALSIFICATION, rule 1.13b: bandRotWelds 417 of 1044 commits with code-8 rows across the ring - the 26569 gate engaged fully - and the operator reports the offset UNCHANGED; a fix that engages and does not fix is wrong, and this one is wrong by ARITHMETIC: stage_view is filled at the RESOLVE from frame_view, and frame N's view uploads only AFTER the resolves (the stage code's own 26177 comment), so stage_view = N-1 while the boundary-crossing commit welds N+1 - the gate swapped a +1-frame rotation skew for a -1-frame one AND, worse, fired on same-cycle commits under yaw (rot(N-1, N) exceeds any bar while rotating), replacing their CORRECT weld too. The campaign's next named correction. THE HOLE IN THE 26564 COMPLETENESS PROOF, named: the proof enumerated the views the system STORED - commit fv (N+1 for crossing stages), stage_view (N-1), injection, alt, cross-source pair - and the sm's OWN frame's view (N) was never stored for crossing stages, because the 26179 boundary convention makes both the commit AND the 26561 latch skip current-cycle stages. The one candidate never welded is the one the 17:35 capture pair points at: slot 4 coherent when the seal happened to pair same-frame (capture B), 0.7-0.8 deg off when it crossed (capture A). THE OPERATOR'S NEW OBSERVATION FOLDS IN: the offset CLEARS at the F12 itself - the stall forces far reseals and the fresh seal pairs coherently, exactly a seal-borne skew's signature and nothing a shading-path defect could do. THE FIX: stage_first - latched at the publish accept beside the 26561 latch with the SAME exact-class and native bars but NO source-gap filter and NO boundary guard - is the first accepted publish after this band's own stage = frame N's late view upload; the commit welds it whenever latched. For same-cycle commits stage_first IS the commit publish (byte-identical weld); for boundary-crossing commits (the far cascade, resolved last in the cycle) it is the sm-epoch view in BOTH rotation and translation. RULE 1.11: conviction = the 17:35 capture measurement + 26569's engaged-and-null field round eliminating the N-1 epoch; revert 351; entitlement - staged path only, byte-identical for same-cycle commits, bandRotWelds counts every stage-first weld and code 8 marks them. PRE-REGISTERED ACCEPTANCE: (a) the far-pose offset under rotation/movement gone or drastically reduced, operator judging, with bandRotWelds counting; (b) a repeat of the capture protocol reads slot 4 coherent with slots 0-3 in BOTH frames; (c) 351 restores the offset; (d) falsification - offset unchanged with stage-first welds counting exonerates the staged path at ALL epochs (N-1, N, N+1 all tested) and the pre-named next suspect is the IMMEDIATE path's completion overwrite, the same skew's minority home - one further build, its shape already known. FREE NOW: debug modes 352+, lighting0.y codes 43+, visual codes 29+.
+//  || 26569 THE AUTHOR IS MEASURED AND NAMED: THE FAR CASCADE'S WELD ROTATES ONE BOUNDARY AWAY FROM ITS OWN SM, AND THE FIX IS ROTATIONAL SAME-FRAME COHERENCE AT THE STAGED WELD (KH_BAND_ROT_COHERENT, default, mode 351 reverts; weld census code 8; lane bandRotWelds). THE MEASUREMENT, from the operator's 17:35 rotated far-pose pair - the first captures in the campaign to carry the served state (26568's bound fix; the full fill lives on the composite draw, and the first sampling of a sun-anchored partial fill was caught in-round): per valid slot the composed world-form W = sm3 x vcol3 must be sun-fixed and shared across slots (one light frame), needing NO external reference. SLOTS 0-3: mutual coherence 0.000-0.002 deg, sun-fixed through a 66-73 deg camera rotation (drift <= 0.034 deg), vcol cameras within 0.044 m - the near/mid machinery is FLAWLESS, which is why every pairing experiment on it returned nulls. SLOT 4 - extent 868, THE artifact cascade - is 0.342/0.803/0.729 deg OFF the shared light frame in capture A and COHERENT (0.001-0.003 deg) in capture B, with translation clean at 0.115 m: an INTERMITTENT, ROTATION-ONLY, FAR-ONLY pairing skew. Magnitude closes the loop: 0.75 deg at the far band's serving range (borders 144-284 m) = 2-4 m = 9-18 texels at 4.72 texels/m - the visible offset, sized from its own capture. THE MECHANISM, from the commit code: stage_view is taken AT THE RESOLVE (same frame as sm); the baseline weld takes the COMMIT-TIME frame_view; 26179's boundary convention makes a late-cycle stage wait for the NEXT cycle's publish - and the far cascade resolves LAST in the engine's order, so ITS commits cross the boundary and weld the next frame's view: one frame of ROTATION baked into the pair, invisible to every translation lane this campaign built, visible only under yaw, only on the far tier, redrawn at each reseal. WHY EVERY PAST A/B MISSED IT: the on-foot 335 null (26546) was translation-regime; the moving 335 round (26564) was drowned by the escape-cadence confound its own ledger names; the weld identity census measured TRANSLATION against the injection camera and read exactly what was true - dx = camStep + floor - while the 0.7 deg that mattered hid inside khWeldRotDeg's flight-rotation noise. THE FIX, scoped to the convicted condition: at the staged commit's baseline branch, if the commit view has ROTATED more than 0.10 deg from the stage view (same-frame noise measured 0.03 deg; the artifact 0.7-0.8), weld the STAGE VIEW - the sm-epoch pair, mode 335's choice applied to exactly the frames where the capture proves it right - else weld baseline, byte-identical. At rest and pure translation the gate never fires (all past validated behaviour preserved); the escape-thrash confound cannot return because vcol only changes on frames where it would have ROTATED, not translated. RULE 1.11: conviction above; revert 351; entitlement - staged path only, rotating commits only, bandRotWelds counts every take and code 8 marks them in the ring. PRE-REGISTERED ACCEPTANCE: (a) the far-pose offset under camera rotation/movement GONE or drastically reduced at the same poses, judged by the operator; (b) bandRotWelds counting during yaw and ~0 parked; (c) 351 restores the offset with the lane still counting the skew it would have fixed; (d) a repeat of the 17:35 capture protocol shows slot 4's W coherent with slots 0-3 in BOTH frames; (e) falsification - any NEW artifact under rotation (jiggle, snapping) with bandRotWelds counting reverts per 1.13b, and the residual suspect is pre-named: the IMMEDIATE path's completion overwrite, the same skew's 15 pct minority home. NOT CLAIMED: the immediate path (untouched, one path at a time); the live path's rotational audit (banked at 26566, now likely moot if this closes the artifact - the far pose is band-served per these captures' own valid slot 4 borders covering the range). FREE NOW: debug modes 352+, lighting0.y codes 43+, visual codes 29+.
+//  || 26568 THE CAPTURE HOLE IS A FLAT 1.0 s BAND AGE KILL SITTING ONE SCREEN BELOW THE COMMENT THAT EXPLAINS WHY IT IS WRONG, AND MY 'ESSENTIALLY SOLVED' CLAIM IS CORRECTED BY THE OPERATOR'S GROUND TRUTH (bound 1.0 -> 4.0 s DEFAULT; mode 350 restores the hole; lane bandAgeKills). THE CORRECTION FIRST, rule 1.13b verbatim: I read the 26567 dumps as 'the vanish is essentially solved' because the machinery survived the stall row - the operator answered that the captured frame STILL has no shadows, and the operator is right: the three bands that die at the stall are tier-selected to be exactly the FAR bands, and the far pose is served by one of them, so every far-pose capture records the hole. Machinery-mostly-alive is not shadows-on-screen. THE CONVICTION, closed in code after the dumps cornered it: the invalidator is none of the counted sites (bandWipeEvents 0, bandPendDeadFast 0 through both F12s) - it is the band age kill at the per-frame prune: valid && now_fr - last_time > 1.0f -> valid = false. The live-table pruner DIRECTLY ABOVE it already encodes the lesson ('a pure time window drains a perfectly valid table... only diagnosable RELATIVE to activity') and the band loop below it kept the pure window. At a 1.5 s capture stall every seal ages past 1.0; the near cascades re-resolve inside the stall frame (20 Hz class, last_time refreshed before the prune), the far tiers' ENGINE ROUND-ROBIN is not due that frame, and precisely the far trio dies - recvBandsN 8 -> 5 with recvDropWhy 1 at the stall row in BOTH regimes, tier-selection explaining the operator's near/far law for the capture half. THE FIX IS ONE NUMBER because the kill never had two duties: an aged slot passes every reseal throttle already, so the next resolve reseals it with or without the kill - the 1.0 s bound bought NO reseal speed, only holes; its real duty is ORPHAN cleanup (a cascade the engine stopped rendering must not serve forever), and 4.0 s performs that duty while riding out capture stalls, camera-class switches and load hitches; discontinuous time (skipTime/setDate) remains the sun-jump wipe's instant job, untouched. RULE 1.11: revert 350 (the 1.0 s bound); conviction above; entitlement - ordinary play never trips either bound (tiers reseal at 0.05-0.25 s; bandAgeKills must sit ~0 outside genuine orphans and >4 s stalls, and the lane says so per session). PRE-REGISTERED ACCEPTANCE: (a) a far-pose F12 on this build captures WITH the far shadows present (content at most stall-stale, resealing at the engine's next round-robin); (b) the one-frame on-screen blink at F12/switches is gone with bandAgeKills NOT ticking at those events; (c) 350 restores the hole and the blink together; (d) falsification - a genuinely orphaned slot (layout shrink) now serves up to 4 s of stale far shadow before dying: if the operator ever sees a lingering ghost band after a cascade-count change, that is this trade, 350 names it, and the next step is the activity-relative form, not a bound war. THE FINALE IS UNCHANGED AND NOW UNBLOCKED FOR REAL: (1) far pose, offset visible, mode 0, F12, yaw 20-30 deg in place, F12 ~1 s later, v3.1 on both, send both jsons - the served-pair comparison names the weld error in texels per slot at the artifact instant; (2) the ten-second router: setRenderDebug 84 at the offset pose - COLORS on the mesh = bands serve it, MAGENTA = the live path serves it - one word back, then mode 0 before capturing. FREE NOW: debug modes 351+, lighting0.y codes 43+, visual codes 29+.
+//  || 26567 THE OPERATOR'S DISTANCE LAW REROUTES THE WHOLE CAMPAIGN TO THE LIVE PATH, THE SECOND CAPTURE PAIR SHOWS BOTH SERVER TABLES ZEROED IN-FRAME AT A FAR POSE, AND THIS BUILD IS THE GAUGE THAT NAMES THE ZERO-ER IN ONE DUMP (pure gauge; mode 0 byte-identical on the shading path; ring gains four tail lanes, fieldsN 225 -> 229, in-band audited as always). THE DISTANCE LAW, the operator's own and the most clarifying fact since the campaign opened: the offset appears ONLY far from the shadows, near their maximum view distance where the cascades coarsen - and the capture vanish obeys THE SAME THRESHOLD (captures close to the shadows do not kill them). Near poses are the BAND path's (post-26566 it survives wipes, matching the near survival); far poses are served by the LIVE path per 26544's own three-read conviction at exactly these poses (visual 14 black, 167 kill, 183 null) - so the offset, the capture vanish, AND the threshold frame-drop all live on one boundary and the artifact axis moves formally to the LIVE path, whose rotational composition the 26566 view-form verdict already flagged as suspect (harvested rows applied to ABSOLUTE world with a translation-only rebase; if its harvest shares the [180] block's VIEW form, that composition is wrong by the full camera rotation - ITS HARVEST FORM WAS NEVER MEASURED and both new captures hold shadowMats/shadowTiles ALL ZERO, so the question stays open one more round). FIELD (frames 5489/5692, v3.1, zero errors, camera rotated 54-56 deg across the pair - the protocol done right): band borders zeroed 8/8 AND the live table zeroed in BOTH captured frames at a far pose - the F12 frame is the wipe/blackout frame, so far-pose captures cannot record the served state until the blackout is fixed, which makes the vanish a CAMPAIGN BLOCKER and not a cosmetic. THE TRIGGER, code-read: release_shadow_device_state is called from the ENGINE RESET HOOK and mission teardown only - F12 capture churn and camera-class switches evidently ride the engine's own reset path; the near/far asymmetry is RECOVERY TIME, not trigger (bands reseal next sweep; the live table must re-harvest its entries, and kh_sun_settled - COLD_HOLD 1250 ms after sun validity re-establishes - gates the live receive AND parts of the composite fills, so a reset that touches sun validity blacks out far shadows for a full 1.25 s). NOT CONCLUDED, deliberately: whether the far blackout is (a) the live table refill, (b) the sun cold-hold, or (c) recvDropWhy bit 4's cold-health gate - three candidate legs, one instrumented answer. THE LANES: khLiveTab (g_ls.count at the frame fill, pre-gate), khLiveServed (cascades written; 0 with khLiveTab > 0 = GATED, 0 with 0 = EMPTY), khSunSt (0 cold-hold, 1 unstable, 2 settled; -1 fill never ran), khWipeLo (the wipe counter's low bits - the wipe row is visible as the step). READ PROTOCOL, one session, two dumps: (1) FAR pose (offset regime), resetRenderStats, F12, dump within ~8 s - the ring shows the wipe row, the blackout duration in rows, and which lane holds it at zero; (2) NEAR pose, same steps, for contrast. PRE-REGISTERED READS: khLiveTab collapsing then refilling over N rows with khSunSt 2 throughout -> the refill is the blackout and the fix is entry survival across benign wipes; khSunSt 0 pinned for ~56 rows (1.25 s) -> the cold-hold is the blackout and the fix is sun-validity continuity across resets (the clocks are NOT touched by release_shadow_device_state, so a 0 here convicts the reset path that IS zeroing them - line 63166's teardown); recvDropWhy bit 4 carrying the band side -> the cold-health gate is the band leg's zero-er and gets the 26566 scoping treatment. ALSO BANKED FROM THIS ROUND: the 54-56 deg pair re-ran the form discriminator on the consumer rows and it holds (view form; nothing new claimed); the served-pair offset meter still awaits a far-pose capture WITH live tables - which is exactly what the blackout fix will unblock. NOT CLAIMED: no behaviour change this build; the offset's author is NOT yet named - the routing is. FREE NOW: debug modes 350+, lighting0.y codes 43+, visual codes 29+.
+//  || 26566 THE ROTATED PAIR RETURNS THE FORM VERDICT - THE STORED MATRIX IS THE VIEW FORM AND THE BAND WALK IS ALGEBRAICALLY ACQUITTED - AND THE VANISH IS THE WARM-UP GATE RE-ARMING ON MID-SESSION WIPES, NOW SCOPED TO ONCE PER SESSION (default; mode 349 re-arms per wipe; TWO corrections to my own prior reads, both lane-falsified, named below). THE FORM VERDICT, from the operator's rotated captures (frames 7703/7833, v3.1, zero errors, same session, extent 868.14 both): the camera yawed ~43.5 deg between the frames (engine eid-47 b2 block: row deltas 43.56/1.72/43.52 = one rigid yaw; our composite-era viewProj agrees at 45.0/0.1/42.1 - the FIRST CBFrame draws are sun-anchored passes whose near-zero delta briefly read as a frozen injection view, a sampling error caught in-round) and the consumer's rows 45-47 rotated under ONE rigid rotation of 43.57 deg (orthonormality residual 0.0002) - the stored sampling matrix ROTATES WITH THE CAMERA. The WORLD form (sun-fixed rows) is dead; the matrix at [180] maps VIEW SPACE to atlas uv, exactly what ShadowBandFactor feeds it (bandView then bandMat) - the double-rotation hypothesis is closed and the band walk is acquitted. WHAT THIS SHARPENS: the weld requirement is now exact - vcol must equal the CONSUMER'S VIEW of the seal's frame, rotation AND translation; the on-screen error is M x (V_weld - V_consumer) x p: rotation mismatch = r x dTheta (26545's 30 m per 11 deg), translation = 4.7 texels/m. And 26557's inj-pair falsification gains its reading: the injection view IS a main-camera view (the mesh is pixel-registered on it) yet paired 0.7-2.0 m from the consumer's - so the CONSUMER reconstructs with a camera that is NOT the color pass's, and naming it is now a same-frame capture comparison, not a guess. FLAGGED, not acted on: the LIVE path applies same-harvested rows to ABSOLUTE world with a translation-only rebase - under the view-form verdict that composition is rotationally suspect and its own audit is owed (its harvest site may differ; one axis at a time). THE VANISH, NAMED WITH ITS CHAIN AND MY 26565 CONVICTION RETRACTED: bandPendDeadFast read 0 across a 7300-flush capture session containing the F12s - the epoch death NEVER FIRED and was not the vanish (the fast reseal stays; its lane keeps watching). The real chain: F12 capture churn or a camera-class switch triggers release_shadow_device_state -> all bands wiped AND first_capture_time reset -> the seals recapture within frames BUT the RECEIVE WARM-UP GATE (2.0 s, built for the startup-shadow session's mid-stream engine atlas garbage) re-arms and zeroes every bandBorder in the fill for two full seconds - which is EXACTLY both captures' state: healthy machinery, all-eight borders zeroed, held long enough to straddle 130 frames, with bandWarmupSkips 704 (~one full window) in the session and the dump's own ring (taken BEFORE the F12s, flush 7300 vs frames 7703/7833) showing recvBandsN 8/8 in ordinary attached play. THE FIX: the warm-up is served ONCE per session (receive_warmed latch; session reset clears it; startup behaviour byte-identical - the first window still stands the receive down); mid-session wipes no longer black out the receive. g_band_wipe_events counts every wipe so the F12/switch trigger is finally readable per event. RULE 1.11: revert 349 (re-arm per wipe, today's behaviour); conviction above; entitlement - the gate's startup duty is untouched, only the RE-arm is scoped. SECOND CORRECTION: 26561 read the initialization latency as baseline's slow pending recovery - the dominant term was THIS gate (any spawn-adjacent wipe re-armed 2.0 s of receive blackout); the 26565 fast reseal remains a minor recovery aid, not the fix it was framed as. PRE-REGISTERED ACCEPTANCE: (a) F12 and first-person-to-Zeus switches no longer blank shadows on our meshes beyond ~a frame, with bandWipeEvents counting exactly at those events and bandWarmupSkips counting ONLY the session's first window; (b) 349 restores the 2 s vanish with the same lanes; (c) session start unchanged (the first window still serves - if startup garbage reappears mid-session in the field, that falsifies the once-per-session scope and 349 stands it down). THE NEXT CAPTURE ROUND IS THE OFFSET METER ITSELF, unblocked by this fix: same v3.1 protocol (mode 0, offset visible, yaw between the two F12s), bands now SURVIVE the capture, and the offline read compares per valid slot the composed world-form rows (bandMat3 x bandView3 - sun-fixed if the seal is coherent) against the consumer's same-frame composition, and cam(bandView) against the consumer's implied camera - the weld error lands in texels, per slot, at the artifact instant, with the form question no longer in the way. FREE NOW: debug modes 350+, lighting0.y codes 43+, visual codes 29+.
+//  || 26565 THE CAPTURE VANISH IS THE EPOCH DEATH'S TIER-INTERVAL WAIT AND IT GETS THE FAST RESEAL, AND THE V3 EXTRACTOR'S RAW DUMP WAS TRUNCATED BY THE BOUND SLOT SIZE - v3.1 FETCHES THE FULL BLOCK (fast reseal DEFAULT, mode 348 reverts; kh_atlas_census3.py patched in place, same filename; ONE of the two rotated-pair jsons arrived - frame23421's upload never landed and is re-requested, the discriminator needs both from ONE session). FIELD: the operator reports shadows VANISHING under the RenderDoc capture itself, the same vanish camera switches (first person -> Zeus/spectator) have always shown - and the frame23701 json confirms the capture-side half: schema v3, zero errors, consumer rows 45-48 intact (extent 868.14, the known cascade), but EVERY named CBFrame array truncates at byte 384 (shadowMats 5 rows, shadowMeta 14, shadowTiles 13 - all ending exactly at 384) = GetBufferData was asked for the BOUND SLOT SIZE, not the block size, so the v3 raw rows (starting at byte 640) read None on their first row and the key never emitted. v3.1: the fetch requests max(bound size, 4096) - the raw dump and the previously-folded arrays both come free. THE VANISH MECHANISM, code-read against the operator's two triggers: a capture hitch (RenderDoc serialization, hundreds of ms) or a big view jump starves publishes past the 50 ms epoch; the epoch death INVALIDATES pending bands (bs.valid = false, the pre-26551 original form restored at 26560) and the dead slot then waits out its FULL TIER INTERVAL (0.25 s far) before the throttle allows recapture - several shadowless frames per event, worst on far tiers, recovering tier by tier: the operator's exact picture, and the reason captured frames can show the fallback state instead of the artifact. THE FIX, scoped to the death itself: the invalidated slot takes last_time = 0 (the aged-drop trick; 26559's one-frame reseal, whose field trouble was the TAIL RULES' 22.7/s invalidation RATE and never the reseal latency) so absence is ~one frame. RULE 1.11: revert mode 348 (the tier-interval wait returns); entitlement - this governs ONLY epoch-dead pendings, historically a SILENT path (no lane ever counted it; bandPendDeadFast now does), rare in ordinary play where completions land sub-ms (bandCompAgeMsMean 0.23-0.31 across every dump on record) and firing precisely on publish droughts = hitches and view jumps, the operator's own two triggers. WHAT THIS DOES NOT COVER, banked honestly: after a >50 m camera jump the foreign-view guard refuses publishes against a stale cycle latch for up to the latch's lost-adopt window (~1 s worst, the 26533 axis) - commits stall that long regardless of reseal speed; that term is the latch campaign's, not this build's. CAPTURE PROTOCOL ADDENDUM: after any camera switch or a previous capture, hold the offset scene ~2-3 s (until shadows visibly return) before pressing F12, and do not switch views between the two captures of a pair - yaw in place. PRE-REGISTERED ACCEPTANCE: (a) capture/switch vanish recovery drops from a visible fraction-of-a-second-per-tier to ~a frame, with bandPendDeadFast counting exactly at those events and ~0 in ordinary play; (b) 348 restores the slow recovery with the lane still counting deaths; (c) no cadence change anywhere else - the lane's ordinary-play count IS the entitlement check, and if it counts steadily outside hitches the read was wrong and 348 stands it down. NOT CLAIMED: the offset (unchanged; its next evidence is the rotated pair - re-send frame23421's json, or if lost, re-capture the pair on THIS build with the v3.1 script: F12, yaw 20-30 degrees in place, F12 again ~1 s later, run the script on each, send both). FREE NOW: debug modes 349+, lighting0.y codes 43+, visual codes 29+.
+//  || 26564 THE PAIRING AXIS CLOSES WITH A COMPLETENESS PROOF, THE FRAME DROP IS CONVICTED IN THE RING AND CAPPED, AND THE DECISIVE QUESTION GOES TO RENDERDOC WITH A PROTOCOL THE OLD CAPTURES PROVE NECESSARY (fall-through cap DEFAULT, mode 347 reverts; extractor v3 ships alongside; no pairing change - there is no pairing left to change). FIELD, three dumps at khBuildTag 26563 / fieldsN 225: (1) dump1 MODE 0 ON FOOT WITH THE EVENT CAUGHT - the census finally reads the artifact decoupled from travel: at a BIT-STILL camera (camStepM 0.000-0.005) every weld sits a CONSTANT 1.474 m from the injection view (90+ consecutive parked rows, rot 0.581 deg constant, both codes 4 and 6), and under motion dx tracks ~floor + camStepM. The parked floor IS the historic camLsDelta 1.3-2.0 class measured at the weld itself; NO foreign/PIP class in 212 event-session weld rows. (2) dump3 MODE 335 ENGAGED FULLY (bandPairSameSeals 783 == StageCommits, completions 0, codes 5/7 as wired) and the operator's verdict is ALMOST WORSE - and the lanes name half of why: bandBudgetEscapes 83 PER FLUSH (vs 4.0 at mode 0), because THE BUDGET ESCAPE'S REFERENCE IS THE INJECTION CAMERA - a weld systematically farther from the injection view (capture-time vs commit-time) trips the near bars every flush and pins every tier at cap cadence. NAMED AS A STANDING CONFOUND: the escape couples reseal CADENCE to the pairing choice independent of registration correctness - every pairing A/B this campaign ran carried it. (3) THE COMPLETENESS PROOF: commit-time publish (baseline, offset), capture-time publish (335 - on foot at 26545 AND now moving, offset/worse), alt latch (26555, 48.8 m regression), injection view (26557, constant offset), first-cross flip (26554/26556 and the 26561 per-band arm) - EVERY camera the publish stream and this file can name has been welded in the artifact's regimes and the offset survived them all. Per the standing ladder the author is DOWNSTREAM of camera CHOICE, and the code read narrows it to one question: THE BAND WALK CONSUMES VIEW SPACE (vp4 = bandView[s] rows dot p, then bandMat[s] rows dot vp4) while the LIVE path consumes ABSOLUTE WORLD with a translation-only rebase (26544's own algebra) - and the harvested block at [180] is a VERBATIM copy, so the two paths assume DIFFERENT reference forms of the SAME stored matrix and at most one is right. If the stored 3x3 is the WORLD form (light axes in world coordinates), the band walk DOUBLE-ROTATES by construction and the offset is r x (weld rotation error) - a basis defect no camera choice can fix, which is precisely the completeness proof's shape; if the VIEW form, the band walk is right and the live path is the suspect. THE DISCRIMINATOR IS ONE ROTATED CAPTURE PAIR: the stored 3x3's row directions are sun-fixed under camera rotation in the world form and rotate with the camera in the view form. THE EXISTING 26557 CAPTURES CANNOT ANSWER - measured this round: their viewProj row directions differ by 0.000 deg (the operator STRAFED, translation only), and under zero rotation the forms are indistinguishable; their consumer rows read 0.00-0.03 deg apart, consistent with BOTH. PRE-REGISTERED CAPTURE PROTOCOL (extractor v3, kh_atlas_census3.py, shipped this round): mode 0, offset scene, our mesh on screen, capture, YAW THE CAMERA 20-30 DEGREES, capture again ~1 s later - the rotation is the discriminator; v3 additionally dumps our CBFrame raw float4 rows 40-108 (shadowMats tail, bandMat[24] at 43, bandView[24] at 67, bandBorder at 91) so the SERVED pair is compared byte-level against the consumer's rows 45-48 in the same frame (the step-5 read, unreadable until now because reflection folded the band arrays). PRE-REGISTERED READS: (a) consumer 3x3 row directions sun-fixed across the rotated pair -> WORLD form -> the band walk's view-space composition is convicted and the fix is the live path's own shape (translation-only rebase; vcol's rotation leaves the composition) - one algebraic build, revert-moded; (b) row directions rotating with the camera -> VIEW form -> the band walk is acquitted, bandMat/bandView vs rows 45-48 in the same frame names the residual directly (mismatch = fill/serve defect with bytes; match = the walk's compare/filter chain, visual 18's domain); (c) either way the pairing campaign ENDS - the completeness proof stands. THE FRAME DROP, CONVICTED AND CAPPED: dump2's ring holds the stall - rows 351-381 at 78-119 ms/frame against an 18 ms median - and bandPoolMissN carries 45 misses on 30 of those 31 rows (every other cluster in the ring overlaps stall rows 0 or 1 times; this one 30 of 31): the stall and the pool-miss storm are the same event, each miss a 26396 fall-through = an immediate whole-atlas CopyResource, the loop self-feeding (long frame -> more escapes -> more simultaneous stages -> the 4-slot pool exhausts -> more copies). THE CAP, DEFAULT (rule 1.11: conviction above; revert 347; entitlement: governs ONLY the pool-miss fall-through - the first miss of every flush is byte-identical to today, and only same-flush burst misses, the storm's own signature and the pm 2-4 rows of ordinary play, convert to the pre-26396 drop whose whole cost is the old COMPLETE seal serving one more sweep): one fall-through per flush, further misses drop and retry next sweep (bandStagePoolCap counts). PRE-REGISTERED ACCEPTANCE: (i) crossing the threshold at speed, frame time no longer collapses (or collapses less) with PoolCap counting exactly there and PoolFall bounded at ~1/flush; (ii) ordinary play: PoolCap counts only on multi-miss flushes, no visible change; (iii) 347 restores the storm; falsification: shadows visibly lagging their reseals in ordinary play with PoolCap counting - the cap is too tight and reverts. NOT CLAIMED: the offset is NOT fixed this build - its next evidence is the rotated capture pair, and no pairing build will precede that read. FREE NOW: debug modes 348+, lighting0.y codes 43+, visual codes 29+.
+//  || 26563 THE WELD IDENTITY CENSUS RETURNED ONE NUMBER AND IT IS THE WHOLE ARTIFACT: EVERY WELD IS THE MAIN CAMERA EXACTLY ONE FRAME FROM THE INJECTION VIEW - dx/camStep 1.005 FLYING AND 0.990 ON FOOT - SO THE PAIRING QUESTION COLLAPSES TO ONE FLIP THAT ALREADY EXISTS (no default change; a pool-pressure bound on the 346 hold; census code 7 for kept births; the deciding round is MODE 335 IN FLIGHT). FIELD (two dumps, khBuildTag 26562 / fieldsN 225 verified, ONE session, no reset between - dump1 flying at camStepM med 6.9, dump2 the same session on foot at med 0.10; MODE 0 BOTH: bandStageFlip/Hold/Single/Late all 0, so nothing about 346 was tested this round, rule 1.12 said aloud): (1) THE IDENTITY - khWeldInjDxM tracks camStepM row-for-row across 462 measured welds spanning two orders of magnitude of speed (ratio med 1.005 n 178 flying; 0.990 n 284 on foot; worst rows 19.81 m at step 19.95, 0.125 m at step 0.13), on BOTH weld codes (4 staged-baseline, 6 immediate completion), with khWeldRotDeg tracking only the frame's own rotation (max 5.7 deg in flight maneuvers, sub-degree on foot). (2) THE ABSENCES, equally load-bearing: NO foreign/PIP class in 570 weld rows (a rotated-camera weld never appears - the 26562 x8-latch hypothesis is retired unused); NO lottery tail distinct from travel (bandEscLandCdxM's 10-15 m class WAS one frame of flight travel; 26562's 'publish spread tail' read is CORRECTED - the campaign's seventh named correction); the census cross/same mix INVERTS with regime (staged welds 92 pct cross flying, 95 pct SAME on foot in the dump2-minus-dump1 window: the 0.5 m bar is a SPEED classifier here, not a source classifier - both prior fork reads through it inherit that caveat). (3) THE COMPOSITION THEREFORE: sm from capture frame N, vcol the main camera of an ADJACENT frame - one frame of paired-camera error on every seal, = camStepM x 4.7 texels/m on screen: 33-94 texels in flight (the operator's visible offset, CONTINUOUS there but redrawn at each tier's own reseal cadence - which reads as intermittent snapping), 0.5 texels on foot (the operator's own new observation, 'harder to see on foot', predicted to the texel). Settle-on-park, direction-of-motion, worse-at-far-tiers (longer holds of a per-seal error) all follow. (4) WHY THIS WAS CALLED CLOSED AND IS NOT: the 26545/26546 mode-335 null 'closed the pairing axis both ways' ON FOOT - 26549's own ledger already caveated that the flight regime sits 7x outside that test's envelope. The closure never covered the regime the artifact lives in. THE DECIDING ROUND, zero new modes: fly the offset route at mode 0, then at MODE 335 (both paths pair the CAPTURE frame's view; whitelisted since 26545; the weld census reads it as code 5 staged + code 7 kept births, the latter wired this build), dump both windows. PRE-REGISTERED: (a) offset dead or drastically reduced under 335 with bandPairSameSeals counting and code-5/7 rows showing dx DECOUPLED from camStep -> capture-frame pairing is correct, 26179's cross-pairing is overturned BY MEASUREMENT IN ITS BLIND REGIME, and the next build folds 335's pairing to default with a revert mode; (b) offset UNCHANGED under 335 with the arm engaged -> the welded camera identity is acquitted at both adjacent frames, the author is downstream of pairing entirely, and the escalation is RenderDoc at the offset instant with extractor v3 (raw CBFrame float4 offsets 43-90) - the pairing axis closes IN THE FLIGHT REGIME with a completeness proof this time; (c) dx under 335 also names the injection view's phase for free: ~0 x camStep = injection is the capture frame's camera, ~2 x = the frame after. ALSO THIS BUILD, THE FRAME-DROP REPORT (operator: crossing outside the shadow view distance drops frames immensely; not caught in either ring - frame pacing in the covered windows is a steady 20-23 ms, captures 2.2/flush, dSunMapPasses 1/frame): the mode-0 additions of 26560-26562 are microsecond-class CPU math and CANNOT author it; two candidates stand: (i) the x8 engine regime itself re-fitting cascades at the boundary (sunHeroRenders 8.4-9.8 per flush all three recent sessions - the 26547 banked perf cost, not ours to fix), and (ii) a REAL design flaw in the 26561 hold, mode 346 only: a held stage keeps its pool slot busy up to 45 ms (150x baseline occupancy), and under threshold escape churn simultaneous holds can exhaust the pool, where EVERY subsequent resolve falls through to an immediate whole-atlas CopyResource - a copy storm. FIXED THIS BUILD regardless of which candidate the operator hit: a pool miss stamps a pressure clock and holds are REFUSED while it is fresh (0.1 s), welding baseline immediately (bandStageFlipPoolBail counts; the arm degrades to baseline exactly where holding would cost copies). ASK: if the frame drop recurs, resetRenderStats, cross the threshold, dump within ~8 s, and STATE THE MODE - bandPoolMissN / dInjections / dFlushes per row plus wall-clock row spacing will localize it in one read. NOT CLAIMED: which adjacent frame is the correct camera (that is the 335 round's one question); any default change; the initialization-latency item (unchanged, pre-existing baseline trait). FREE NOW: debug modes 347+, lighting0.y codes 43+, visual codes 29+.
+//  || 26562 THE ARM ENGAGED, THE EVENT SURVIVED, AND THE DUMP SAYS THE VISIBLE CLASS IS NOT THE ONE THE ARM CLOSES - SO THE WELD GETS AN IDENTITY GAUGE BEFORE ANY THIRD PAIRING SWING (pure gauge; no behaviour change; mode 346 semantics untouched; the ring gains its first fields since 222 - fieldsN 222 -> 225, deliberate, in-band audited as always). FIELD (dump at khBuildTag 26561 / fieldsN 222 verified, mode 346 armed after a resetRenderStats, 721 flushes ~15 s, ring 10.8 s; fast flight again, camStepM med 7.1 m/frame): THE ARM ENGAGED - bandStageFlip 1160 of 1307 commits (88.7 PERCENT) with Hold 64068 sweep-visits (sub-frame holds, WaitMaxMs 45.04 = the bound doing its job), Late 8, Single 139 - and the structural identities Flip == StageXSrc (1160) and Single+Late == StageSameSrc (147) confirm the machinery is self-consistent AND mean the pick census under 346 measures dispositions, not the free lottery (note for future reads). THE OPERATOR STILL CAUGHT THE EVENT. Three facts reframe where it lives: (1) THE REGIME IS x8 THIS SESSION - sunHeroRenders 8.35 per flush (0.97 last session): the onset variable of 26546/26547 is ACTIVE, the publish stream carries multiple passes' cameras, and ForeignRef/MixedRef 0 says they all sit inside the 50 m guards. (2) camLsDelta COLLAPSED to 0.46-0.67 m across all 512 rows - in THIS scene the two-source standing gap is ~0.6 m = ~3 texels, so the LOCK-class minority weld CANNOT paint a visible event here; the 26561 read that the same-source minority authors the artifact is falsified for this regime and stands only where the source gap is metres. (3) THE PUBLISH SPREAD HAS A 10-15 m TAIL (bandCompleteSkewMaxM 15.5 / MaxDeg 8.1 OFFERED) and the welds inherit it: bandEscLandCdxM p90 10.3 / max 15.7 AT LAND, beyond the standing-gap-plus-travel envelope even at this speed - roughly a tenth of escape landings weld a camera from the far end of the spread, arm or no arm (mode-0 session read the same tail). WRONG-IDENTITY PICKS EXIST UNDER THE ARM; whether they are flip picks grabbing another CYCLE'S camera in the x8 regime, the immediate path's untouched lottery, or flight-speed staleness wearing a camera-gap costume, NO EXISTING LANE CAN SAY - every metre lane is drowned by 7 m/frame of legitimate travel and none records WHICH disposition welded or WHAT it welded. THE GAUGE, two halves: (a) per-row ring lanes khWeldInjDxM / khWeldRotDeg / khWeldCode - the worst weld of each row, its camera's distance AND forward-axis rotation against the injection view (the pixel-registered reference, standing 0.7-2.0 m from the reconstruction camera), plus a disposition code (1 flip, 2 single, 3 late, 4 stage-baseline, 5 stage-335, 6 immediate completion). ROTATION is the discriminator this campaign never had: the main camera one publish late differs in TRANSLATION only; a PIP/mirror/other-pass camera differs in DEGREES - the 8.1-deg offered class finally becomes attributable. (b) cumulative weldFlipInjDxM/Max/Mean + weldFlipInjRotMaxDeg for flip welds alone - the arm's identity question in one number set, readable even when the ring misses the event. Unjudgeable welds (stale injection view, bad vcol norms) record nothing - admit-on-unjudgeable, the guards' own convention. NOT CLAIMED: nothing about the event's author is claimed this build; 26561's minority-lottery read is RETRACTED for low-source-gap regimes (named as a correction, the campaign's sixth); the arm stays as shipped for bracketing. ASK FOR THE ROUND, protocol matters this time: run the OFFSET SCENE at mode 346, ideally the ORIGINAL regime (on foot / normal play - flight drowns every metre lane), dump within ~8 s of a visible event; a second dump at mode 0 same scene brackets the arm. PRE-REGISTERED READS: (a) event rows carry khWeldCode 1 with khWeldRotDeg in DEGREES or khWeldInjDxM far past standing+travel -> the flip's per-band time-adjacency grabs other passes' cameras in the x8 regime, and the ONE next change is an identity gate on the LATCH (rotation coherence with the injection view, a reference 26557 indicted for translation but never rotation) - pre-named, not built, awaiting this conviction; (b) event rows carry code 6 -> the immediate path is the author and the same latch design moves there; (c) weld lanes main-camera-class (dx inside standing+travel, rot sub-degree) THROUGH a visible event -> the entire weld chain is acquitted at the event and the escalation is RenderDoc at the offset instant with extractor v3 (dump CBFrame float4 offsets 43-90 raw: bandMat[24] at 43, bandView[24] at 67) - no further pairing builds, per the standing ladder; (d) lanes -1 through committed rows = the fill sites are wrong and the gauge itself is falsified. FREE NOW: debug modes 347+, lighting0.y codes 43+, visual codes 29+.
+//  || 26561 THE BASELINE CENSUS RETURNED AND THE FORK READS INVERTED: BOTH PATHS ALREADY WELD CROSS-SOURCE, SO THE INTERMITTENT OFFSET IS THE LOTTERY'S MINORITY - AND THE STAGE COMMIT GETS THE FLIP AS AN ARM (KH_BAND_STAGE_FLIP, mode 346, opt-in; mode 0 byte-identical). FIELD (dump at khBuildTag 26560 / fieldsN 222 verified in-band, mode 0, fast flight - camStepM median 6.0 m/frame, camAltM ~379 - 3920 flushes, 1x regime: sunHero/flush 0.97, ForeignRef 0, MixedRef 0): the step-1 pick census read for the first time - bandStageXSrc 6796 / bandStageSameSrc 565 (92.3 PERCENT of staged commits weld a view more than 0.5 m from the capture view) and bandCompXSrc 1245 / bandCompSameSrcN 81 (93.9 PERCENT on the immediate path), with bandStageTakes 7365 of 8696 captures (84.7 PERCENT staged) and bandStageWaitMs median 0.3 ms. THE HANDOVER'S STEP-2 PREMISE IS CORRECTED IN TWO PLACES BEFORE IT IS USED: (a) the baseline stage commit welds the COMMIT-TIME g_ls.frame_view, not stage_view (mode 335 welds stage_view - code, not memory); (b) fork (i)'s 'offset frequency should track the XSrc ratio' cannot hold at 92 PERCENT against an INTERMITTENT artifact - the field rank-order (26554/26556/26557: FLIP-publish far above LOCK/pre-resolve) says the cross-source weld is the RIGHT class, so at baseline the commit-time lottery lands right MOST of the time and the artifact is the minority: 565 staged + 81 immediate same-source welds this session (the LOCK class, 1.06-18.1 m off at 4.7 texels per metre = 5-85 texels each, serving until the tier reseals - the operator's 0.1-1.0 s settle), plus an unmeasured slice of cross welds that took ANOTHER cascade's publish: all 8 bands committing in one sweep weld the SAME global frame_view, so which cascade's publish it holds is per-sweep luck (the 26555 lesson, narrower). THE ARM, one rule at the majority path's weld, exactly the plan's step-2 shape: a PER-BAND PAIR LATCH - at every accepted publish, a staged band whose held capture view sits more than 0.5 m from the incoming view (no pair yet; stage precedes the boundary, the commit's own cycle convention; publish native per 26547 and exact-class per the commit's own quality bar) latches it as stage_pair: the FIRST cross-source publish after THIS band's own stage, the flip's time-adjacency applied per band instead of one global latch. The latch is always-on (a few stores and one gap test per staged band per accept - the class of cost the pick census already pays) but READ only under mode 346: the commit welds stage_pair when latched (bandStageFlip); with no pair and the second source ALIVE (alt crossing within 0.25 s) it HOLDS up to 45 ms - the slot's old COMPLETE seal keeps serving, so holding costs reseal latency and never absence, the staged design's own guarantee - then falls back to the baseline weld (bandStageFlipLate); with the second source DEAD it welds baseline immediately, which in a single-source regime IS that source - the 26559 rule (bandStageFlipSingle). Aged-drop, quality-hold, the mixed-pair guard, mode 335 and the pick census are untouched; the census keeps classifying the OFFERED lottery either way. ALSO THIS BUILD, MODE-CATALOG HONESTY (comment-only, zero behaviour): 339/340/342/344 are marked INERT - since 26560 their branches live inside the mode-341 stack and one mode slot cannot hold both, so setting any of them yields BASELINE; the numbers stay reserved per rule 1.10. NOT CLAIMED: no default change; the immediate path is untouched (one path at a time; it carries 15 PERCENT of seals and its own lock-class minority, 81 this session, is the next rule if the staged arm proves out); the operator's initialization-latency report is read as the 26560 reversion restoring baseline's own slower pending-death recovery (the original invalidate-form epoch death, no fast reseal - the 26558/26559 builds the operator had just played resealed invalidations at the next sweep), a pre-existing baseline trait returning, not a new defect - it is not addressed here and will still be measurable under 346 if it matters. CENSUS ASYMMETRY NOTED for future reads: the stage-side census counts OFFERED commits (before the mixed-pair refusal), the completion-side counts ACCEPTED overwrites - identical in 1x play where the guards are inert. ALSO NOTED FOR THE EXTRACTOR: this round's two RenderDoc jsons engaged fully but reflection FOLDED bandMat/bandView out of our named blocks - the step-5 served-pair comparison needs the extractor to dump CBFrame float4 offsets 43-90 raw (bandMat[24] at 43, bandView[24] at 67, from source), an addition owed regardless of this arm's verdict. PRE-REGISTERED ACCEPTANCE (mode 346, the offset scene, dump within ~8 s of an event): (a) ARMING FIRST - bandStageFlip must approach bandStageCommits with Hold small and transient and Single/Late naming the regime; Flip 0 under 346 means the latch never took and NOTHING was tested (read bandStageXSrc and the alt liveness before concluding anything); (b) the intermittent offset reduced or gone AT THE SAME POSES with NO new artifact class - the section-5 bar verbatim, the operator's judgement controlling; (c) mode 0 this build is byte-identical outside dead stores per accept. FALSIFICATION, binding per 1.13b: any NEW artifact under 346 (cutoffs, amputation, constant offset, added flicker) reverts the arm to off next round without argument, and the Hold/Single/Late split names which disposition authored it; offset UNCHANGED with Flip ~ Commits convicts the per-band time-adjacency identity itself, and the escalation is RenderDoc at the offset instant with the band-CB extractor addition above - no further pairing arms on this axis. FREE NOW: debug modes 347+, lighting0.y codes 43+, visual codes 29+.
+//  || 26560 THE DEFAULT RETURNS TO BASELINE AND THE EXPERIMENTS GO BEHIND ONE MODE, BECAUSE THE DUMP EXPOSED A CONFOUND THAT VOIDS SIX BUILDS OF PER-PATH EVIDENCE (default = pre-26551 completion behaviour wholesale; mode 341 = the full 26559 experimental stack; an ALWAYS-ON pick census ships on BOTH capture paths). FIELD (dump at khBuildTag 26559, mode 0, 20 s): tails fell to 4.9/s but the flicker persists with the distance cutoffs - and bandStageTakes 1460 of 1891 captures says 77 PERCENT of all seals take the STAGED path, whose commit welds stage_view (the pre-resolve source) untouched by EVERY completion-side build since 26553. The lottery/lock/flip/tail results were only ever governing the ~23 pct immediate-path minority; the majority path carried the 342-class pairing throughout. Field observations attributed to the completion machinery were therefore CONFOUNDED across two paths, and the operator's three-session verdict is accepted as the controlling fact: every default since baseline traded the original intermittent offset for worse continuous artifacts (jiggle, constant offset, cutoffs, amputation flicker). RULE 1.11'S OWN LOGIC APPLIES TO THE FAMILY IN AGGREGATE: the convictions were real but path-local; the defaults built on them were not entitled to the whole seal population. REVERTED TO BASELINE AS DEFAULT: completions overwrite unconditionally (pre-26551), the 50 ms epoch death invalidates (its original form), no late bar, no source logic, no adaptive tails - byte-for-byte the behaviour whose one known defect is the ORIGINAL complaint (intermittent offset-then-settle after minutes). Every experiment is preserved behind mode 341 (the full 26559 stack: flip + adaptive tails + fast reseal), with 340/342/343/344/345 retained in source for archaeology inside it. WHAT SHIPS ACTIVE: the PICK CENSUS, pure gauge, always on, on BOTH paths at their weld points - completion side: bandCompXSrc / bandCompSameSrcN classify every ACCEPTED overwrite by the camera gap between provisional and completing view (0.5 m bar, the measured classes cannot overlap); staged side: bandStageXSrc / bandStageSameSrc classify every COMMIT by stage_view vs the commit-time frame view - the majority path's source mix, measured for the first time ever. WHAT THE CAMPAIGN KEEPS, in one paragraph: the artifact mechanism is proven (the sampling matrix is camera-relative and near-constant - d(uv)/dC = -M, ~4.7 texels per metre - so the paired camera IS the shadow position); the harvest source is identified to the byte (consumer ps_b1 float offset 180); the camera-source landscape is mapped (multiple publishers per frame, 0.7-48 m apart, scene- and camera-dependent, with the injection camera a measured ~0.7-2.0 m off the reconstruction camera); and the ONE remaining unknown is the per-seal source mix in ordinary baseline play - which this build measures while the operator plays without any experimental artifact. PRE-REGISTERED READS: (a) mode 0 = baseline exactly - the original intermittent offset returns, nothing else; (b) the census lanes from ordinary baseline sessions give the X/Same ratios per path; if the offset events correlate with a nonzero XSrc class on either path, the fix is a SINGLE targeted rule at that path's weld with the ratio as its conviction - built once, on numbers spanning both paths, instead of six times on one path's shadow; (c) mode 341 reproduces the 26559 behaviour for bracketing. FREE NOW: debug modes 346+, lighting0.y codes 43+, visual codes 29+.
+//  || 26559 THE SECOND SOURCE IS NOT ALWAYS THERE, AND WHERE IT IS ABSENT THERE IS NO LOTTERY TO LOSE (adaptive tails + one-frame reseal on invalidation; mode 344 unchanged as the tails A/B). FIELD (dump at khBuildTag 26558, mode 0, 38 s): the operator reports the offset largely gone but shadows CUTTING OFF well inside the view distance in some cameras, and the flicker now amputating PARTS of shadows - and the lanes convict the 26558 tails precisely: 22.7 invalidations PER SECOND (bandPendLateKept 624 + TimeoutKept 235 over 37.8 s = 22 PERCENT of all captures executed), with bandCompSrcAlt 1,054,080 over 1,829 flushes = 576 same-source offers per flush - in this session/camera the SECOND SOURCE BARELY PUBLISHES AT ALL. The flip's premise (cross-source publish ~ once a frame, measured true in the flight session) is SCENE/CAMERA-DEPENDENT; in single-source regimes the 26558 tails killed healthy seals wholesale - dead far bands = the distance cutoff, dead slabs = the missing shadow parts, each absent for a whole reseal interval. TWO REPAIRS, both mechanical: (1) ADAPTIVE TAILS - the alt-latch crossing stamp (g_ls.alt_view_time, maintained at every accept since 26555) is a free liveness signal for the second source. Tail rule now: other source seen within 0.25 s -> the stall is an anomaly, INVALIDATE (absent beats offset stands where a right publish exists); no crossing for 0.25 s -> this regime has ONE source, the provisional IS that source, FINALIZE it - which is byte-for-byte the baseline behaviour that never showed cutoffs, restored exactly where baseline was right. bandPendSingleSrc counts the single-source finalizes so the dump names the regime. (2) ONE-FRAME RESEAL - every tail invalidation now sets last_time = 0 (the aged-drop trick), so an invalidated band reseals at the NEXT sweep instead of waiting out its tier interval: worst-case absence drops from ~250 ms to ~a frame, turning the amputation into a blink where invalidation still fires at all. HONEST STATE, said plainly in the ledger too: mode 0 should now match or beat baseline everywhere - single-source regimes get baseline's own behaviour, dual-source regimes get the flip's near-elimination with sub-frame blinks in stalls - and the remaining unmeasured quantity is unchanged from 26558's pre-registration: the flip's rare wrong PICKS, whose instrument (the pick census) ships the moment the operator reports residual offset at mode 0 with these lanes healthy. PRE-REGISTERED ACCEPTANCE: (a) the distance cutoff GONE in the cameras that showed it, with bandPendSingleSrc counting there; (b) invalidations/sec at or near 0 in single-source regimes and small in dual-source ones, each absence <= ~2 frames; (c) 344 restores the 26556/26558 tail behaviours for bracketing. FREE NOW: debug modes 346+, lighting0.y codes 43+, visual codes 29+.
+//  || 26558 THE FALSIFICATION CLAUSE FIRED AND THE FIELD RANK-ORDER IS NOW COMPLETE (inj-pair DEMOTED to opt-in mode 345; DEFAULT = the 26556 flip, its wait tail fixed by the codebase's own principle - absent beats offset). FIELD (dump at khBuildTag 26557, mode 0, 82 s): bandInjPair 4712 of 4738 captures - the mechanism engaged fully - and the offsets came back WORSE AND SOONER. Per 26557's own pre-registered falsification: the injection view is INDICTED as not-the-receive-camera. It rasterizes our meshes pixel-registered, but the consumer's camera-relative reconstruction uses a camera that sits a standing ~0.7-2.0 m from it (bandCamDx 0.71 this session with vcol == inj view; the camLsDelta 1.3-2.0 class across all sessions) - and at the capture-measured sensitivity (d(uv)/dC = -M, ~4.7 texels per metre) that standing gap is a constant 3-9 texel offset on EVERY seal. A rasterization-proven view and a reconstruction camera are two different things; the field just measured their difference. RECORDED FOR THE ENDGAME, not acted on: that gap is now a NAMED, MEASURED constant - if it proves stable it can one day be calibrated out (inj camera + learned offset), but calibrating on two data points is how 26555 regressed, so it is banked. THE COMPLETE FIELD RANK-ORDER, four camera sources tested at the same sensitivity: FLIP-publish (first cross-source after the resolve - operator: 'almost eliminates the offsets') >> LOCK-publish (pre-resolve publisher - the 20 Hz jiggle) >> ALT-latch (random other cascade - 48.8 m class) ~ INJECTION view (standing 3-9 texel constant). The flip's choice is the closest statement of the content's camera the publish stream offers, exactly as its time-adjacency argument predicted. DEFAULT NOW: the 26556 flip unchanged in its accept path, with its two TAIL dispositions corrected - the flicker the operator reported was never the sub-frame wait (completions land 0.79 ms mean, measured) but the tails: (a) the 45 ms late bar FINALIZED a wrong-source provisional and served it for a whole reseal interval; (b) the 50 ms timeout KEPT it likewise. Both now INVALIDATE the seal instead (the epoch-death shape): a band absent for at most one reseal interval, rarely, beats a wrong camera held just as long, always visibly (absent beats offset - the receive-warmup ledger's own words). Lanes: bandPendLateKept and bandPendTimeoutKept are RE-DOCUMENTED as invalidation counts (names kept, counters never die); expect both near 0 in ordinary play and counting only in publisher-stall storms. MODES: 344 = flip tail-fixes OFF (the 26556 finalize tails return); 345 = inj-pair ON (archaeology; field-convicted twice-shaped constant offset); 340/342/343 as documented. PRE-REGISTERED ACCEPTANCE: (a) mode 0 = the operator's 26556-mode-0 state ('almost eliminates') MINUS the flicker events - jiggle dead, no held wrong-source intervals; residual absence blinks only in stall storms with the Kept lanes counting them; (b) if residual offsets remain at mode 0, they are the flip's rare wrong PICKS, and the next instrument is a pick census (which publisher completed, by camera class), not a fifth camera source; (c) 344 restores the 26556 flicker; 345 restores the 26557 constant offset - the two one-command A/Bs bracket this build exactly. FREE NOW: debug modes 346+, lighting0.y codes 43+, visual codes 29+.
+//  || 26557 THE CAPTURE NAMED EVERYTHING: THE MATRIX IS CAMERA-RELATIVE AND NEARLY CONSTANT, SO THE PAIRED CAMERA IS THE WHOLE SHADOW POSITION - AND WE HELD THE PROVEN CAMERA ALL ALONG (KH_BAND_INJ_PAIR, DEFAULT ON, mode 344 reverts). GROUND TRUTH, from the operator's two RenderDoc captures (mode 342, offset present, census v2, zero errors): (1) THE HARVEST SOURCE IS POSITIVELY IDENTIFIED - our cb-at-180 read is the atlas CONSUMER pass's ps_b1 at float offset 180 = byte 720 = ROW 45: the engine's receive-side sampling matrix, an orthonormal 3x4 mapping CAMERA-RELATIVE WORLD to atlas uv (row norms exactly 1/extent; extent replicated in row 48, 868.14 m in frame A re-fit to 948.05 m in frame B; uv translations 0.44/0.67 = the camera sits mid-window). (2) THE MATRIX IS NEARLY INVARIANT UNDER CAMERA MOTION: across the operator's whole strafe its uv translation moved 0.00015 uv = 0.6 TEXELS - the window follows the camera, so in camera-relative coordinates the matrix barely changes. (3) THEREFORE uv(p) = M(p - C) with M ~ constant: d(uv)/dC = -M, one metre of paired-camera error = ~4.7 texels at this cascade, and the on-screen shadow position of a static receiver is determined ALMOST ENTIRELY BY WHICH CAMERA IS PAIRED. This is the campaign's unification: every pairing change mapped 1:1 to screen because ONLY the camera ever mattered; the jiggle was per-seal camera lottery (SkewM 0.6-1.6 m typical, x 4.7 texels/m); the 20 Hz redraw was the near tier's reseal cadence; the invariance is why cross-frame timing arguments (26551/26552) moved nothing - a one-frame-late pairing is SUB-TEXEL. (4) The shadow PASS carries no camera at all (b1 pure diagonal scale, object->lightspace baked per-object CPU-side, absolute) - the snapped-camera publisher identity is dead; the publish stream's 1.6-20 m spread is other passes' cameras, and NONE of them needs to be guessed anymore, because: (5) THE CORRECT C IS THE MAIN CAMERA - the consumer reconstructs camera-relative world from the main depth buffer - and WE HOLD IT EXACTLY: g_inj_view, the codebase's own 'FLUSH FIDELITY, view lane - the flush repaints pixel-registered with the exact view this pass paints with', refreshed every injection, ms-stamped. camLsDelta's eternal 1.3-2.0 m floor WAS the publish-vs-injection error, measured daily and never read. THE FIX: both capture paths pair with g_inj_view when fresh (< 50 ms; it refreshes every frame, and the 0.6-texel-per-frame invariance makes one frame of skew sub-texel): the immediate path's vcol takes it and the seal is COMPLETE AT CAPTURE - pending_view false, vcol_bridge false, the entire completion machinery (lottery, locks, flips, waits, late bars, timeouts - 26551 through 26556) never runs for these seals, WHICH DELETES THE MODE-0 FLICKER THE OPERATOR CORRECTLY CALLED A REGRESSION; the staged path's stage_view takes it and the commit welds it into vcol as before. The publish-derived chain remains ONLY as the fallback when the injection view is stale (> 50 ms: loading screens, injection stalls), where the 26556 flip still applies. Lanes: bandInjPair (seals born on the proven camera - expect ~ bandCaptures), bandInjPairMiss (fallback births). PRE-REGISTERED ACCEPTANCE: (a) the jiggle AND the flicker both dead at mode 0 in the operator's scene; (b) bandInjPair ~ bandCaptures, Miss ~ 0; bandCompleteCross ~ 0 (nothing pends); (c) mode 344 restores the 26556 behaviour (flip + wait flicker) - the one-command A/B; (d) bandCompleteSkewM, where it still reads (fallback births), stays in the sub-frame class. FALSIFICATION: offset persisting with InjPair ~ captures indicts the injection view itself as non-main-camera - refuted in advance by its own pixel-registration ('the mesh renders pixel-registered with it, every frame'); if the field somehow shows it anyway, the RenderDoc protocol repeats with our CBFrame viewProj against the consumer matrix in the same frame. FREE NOW: debug modes 345+, lighting0.y codes 43+, visual codes 29+.
+//  || 26556 THE GLOBAL LATCH PAIRED EVERY BAND WITH A RANDOM OTHER CASCADE AND THE FIELD CONVICTED IT IN UNDER A MINUTE (alt-birth DEMOTED to opt-in mode 343; the DEFAULT becomes the 26554 flip - the best-known field state - with its wait widened; RenderDoc extractor ships alongside, the pairing question goes to ground truth). FIELD (dump at khBuildTag 26555, mode 0, 17.5 s before the operator stopped): the mechanism engaged fully - bandProvAlt 1695 of 1978 captures, AltMiss 46 - and REGRESSED HARD: bandCompleteSkewMaxM 48.76 / SkewMaxDeg 21.06, the largest ever recorded, massive offsets within a minute. THE REGRESSION IS ITSELF THE NEXT CONVICTION: alt_view is ONE GLOBAL latch, but the publisher stream evidently carries PER-CASCADE views (each cascade's snapped camera differs by up to its own texel - metres at coarse tiles; 48.8 m sits in the coarse-texel class and just under the 50 m foreign bar), so every band was born with a RANDOM OTHER cascade's view. The 26554 flip worked precisely because its timing was implicitly per-band: the first cross-source publish after THIS band's own resolve is that cascade's own view. Two-source was an undercount; it is N-source, keyed by tile, matched only by adjacency in time. DEFAULT NOW: the flip rule - same-source-as-provisional publishes SKIP (bandCompSrcAlt counts), the first cross-source publish completes - with the completion wait widened 0.025 -> 0.045 s (bandCompAgeMsMax measured 24.3; the widened wait covers publisher stalls while the 50 ms epoch still backstops) and the timeout FINALIZE retained, both flicker mitigations that are timing-local and touch no global state. Mode 340 = lottery, 342 = the 26553 same-source lock, 343 = alt-birth (kept for archaeology, convicted in field), 341 = now identical to default. WHY NO FURTHER PAIRING BUILD DECIDES THIS: every axis the dumps can see has been measured - the remaining question is WHICH published view belongs to WHICH tile, and that is a per-drawcall fact only a frame capture can state. THE EXTRACTOR (kh_shadow_atlas_census .py, built on the operator's viewprec v2 scaffolding): finds the shadow-atlas passes (ortho, depth-only), groups draws by depth target + viewport rect = TILES, dumps each tile's VS constants (the tile's true world->clip transform) and post-VS, dumps main-scene draws' constants (the eye view), dumps OUR draws' named blocks in full (CBObj/CBFrame - the sealed band data we actually served that frame), and records the intra-frame EVENT ORDER of tile draws vs atlas-SRV consumption vs our draws - offline that names the render-true view per cascade, its snap delta from the eye, and whether our served vcol matches it, with nothing assumed. CAPTURE PROTOCOL (in the script header): the jiggle scene, mode 0, TWO captures a small strafe apart; optional third at mode 342. PRE-REGISTERED: the extractor's verdict either names the correct per-tile pairing rule (then ONE build implements it against ground truth) or shows our served transform already matching the tile (then the artifact is downstream of pairing entirely and the seal chain is acquitted wholesale). FREE NOW: debug modes 344+, lighting0.y codes 43+, visual codes 29+.
+//  || 26555 THE SEAL IS BORN FROM THE OTHER SOURCE AND EVERY FLICKER MECHANISM DIES WITH THE WAIT (KH_BAND_ALT_PROVISIONAL, DEFAULT ON, mode 342 reverts the family). FIELD (dump at khBuildTag 26554, mode 341): THE FLIP KILLED THE OFFSET - the other publisher is the render-true source, the 26553/26554 fork resolved by A/B - at the cost of occasional flicker whose mechanics the lanes name exactly: bandCompSrcAlt 164,002 over 2,932 flushes (56 same-source skips per flush - the exact-publish stream is overwhelmingly the pre-resolve source, the other publishes about once a frame), bandCompAgeMsMax 24.3 - so under 341 every seal SERVED THE WRONG-SOURCE PROVISIONAL while waiting up to ~1.5 frames, seals whose right-source publish stalled past the 25 ms bar FINALIZED wrong-source for a whole reseal interval, and pendings that saw none for 50 ms DIED to absence. One root: the provisional is always born from the pre-resolve publisher. THE FIX MAKES BIRTH RIGHT INSTEAD OF REPAIR FAST: at the publication accept, when an incoming publish crosses sources (camera gap > 0.5 m from the outgoing frame_view - the classes are 1.6-20 m apart and cannot overlap the same-source millimetre class), the outgoing frame_view is latched as alt_view: the OTHER source's freshest statement, refreshed every alternation. Both capture paths then draw the provisional from alt_view when fresh (< 0.05 s): the immediate path's vcol (vcol_bridge forced false - the alt is a real view, not the bridge) and the staged path's stage_view (the commit welds stage_view into vcol, so staged seals are born right too). bandProvAlt counts alt-born seals; bandProvAltMiss counts fv-present captures where the alt was missing/stale and the old path served. DOWNSTREAM, THE 26553 LOCK BECOMES EXACTLY CORRECT INSTEAD OF EXACTLY WRONG: the frequent pre-resolve publishes are now cross-source to a RIGHT provisional, so the first one FINALIZES an already-correct seal within a frame (bandCompSrcRef will read large BY DESIGN - re-documented from refusal count to early-finalize count), and the rare same-source publish refreshes/completes even fresher. No wait, no wrong-source window, no dependence on the other source's cadence. THE LAST FLICKER PATH CLOSES TOO: the 50 ms epoch death now FINALIZES non-bridge pendings (bandPendTimeoutKept) instead of killing the seal - the provisional it keeps is the right source, so keeping beats absence; bridge pendings keep dying as before (they cannot finalize). MODES: 342 reverts birth, timeout-finalize and restores 26553 behaviour wholesale; 340/341 remain whitelisted as the lottery / flip arms for archaeology. PRE-REGISTERED ACCEPTANCE: (a) the jiggle stays dead AND the 341 flicker is gone in the same scene - the campaign artifact closes; (b) bandProvAlt ~ bandCaptures with AltMiss near 0 (the alt latch refreshes every alternation, ~1/frame measured); (c) 342 restores the 26553 jiggle; (d) parked/1x: sources near-coincide, behaviour identical, AltMiss may count while the gap sits under 0.5 m - by design, the old path is correct there. FALSIFICATION: flicker persisting with ProvAlt ~ captures means a THIRD mechanism beyond source pairing and the RenderDoc escalation fires on a now-fully-instrumented seal chain. FREE NOW: debug modes 343+, lighting0.y codes 43+, visual codes 29+.
+//  || 26554 THE LOCK WORKED AND THE JIGGLE SURVIVED IT, SO THE FLIP ARM IS OWED BEFORE EXHAUSTION IS DECLARED (mode 341 = KH_BAND_OTHER_SOURCE, opt-in; default unchanged from 26553). FIELD (dump at khBuildTag 26553, mode 0): bandCompSrcRef 722 of 838 offered completions - 86 PERCENT of completions were CROSS-SOURCE and refused, so the two-source conviction is re-confirmed with a fraction attached and every seal is now single-source on the PROVISIONAL side (SkewM 0.60 / MaxM 33.6 still measuring the offered gap; comp ages sub-7 ms; bandCamDx0..7 all 0.598 = the whole band set welded to one publisher, the lock doing exactly what it says). THE JIGGLE SURVIVED A WORKING LOCK - and a CORRECTION to 26553's own pre-registration before the escalation clause is misapplied: the 'wrong source -> CONSTANT offset' branch was WRONG. Against a texel-snapped shadow camera, a wrong-source lock yields a SAWTOOTH - the snap offset steps one texel every time the camera crosses a texel boundary - which on screen is JIGGLE, not a constant. 'Still jiggles' therefore cannot distinguish locked-to-wrong-source from family-exhausted, and the lottery arithmetic leans wrong-source: pre-26553 completions were 86 pct the OTHER source and the artifact rode the 14 pct draws; 26553 made seals 100 pct THIS source and the artifact persists - both facts fit the OTHER source being the render-true one. THE FLIP ARM, mode 341: at completion, same-source publishes are SKIPPED (the pending waits; publishes alternate within the frame so a cross-source one arrives inside ~a frame; the 50 ms epoch death backstops) and the first CROSS-SOURCE publish completes - seals become 100 pct other-source. The helper is refactored to return the gap (kh_band_source_gap, -1 unjudgeable) with counting moved to the site: bandCompSrcRef counts default-mode cross-source refusals as before; bandCompSrcAlt counts 341's same-source skips (0 under default = the arm off; 0 under 341 = the arm never engaged and the test is void). PRE-REGISTERED READS, the last pairing fork: (a) 341 kills the jiggle -> the other source is the render source, and the NEXT build makes other-source completion the DEFAULT (with the provisional finalize retained for the no-cross-publish tail) - the campaign's artifact closes; (b) 341 jiggles TOO, with SrcAlt counting - BOTH pure-source pairings fail, the pairing family is exhausted with a completeness proof (lottery, X-lock, Y-lock all tested), and the RenderDoc escalation fires with no further pairing builds: the capture must show whether either published view matches the tile's render transform, or whether the discrepancy lives below the CB fingerprint entirely. 1x parked: sources near-coincide, 341 behaves as default, lanes near 0. FREE NOW: debug modes 342+, lighting0.y codes 43+, visual codes 29+.
+//  || 26553 TWO CAMERAS PUBLISH INSIDE EVERY FRAME AND EVERY SEAL DRAWS ONE BY LOTTERY (KH_BAND_SAME_SOURCE, DEFAULT ON, mode 340 reverts). THE ORDER CENSUS CONVICTED BY IMPOSSIBILITY (dump at khBuildTag 26552, mode 0, on foot): bandCapFvAgeMsMean 0.88 and bandCompAgeMsMean 0.28 - provisional and completion are both sub-millisecond fresh - while bandCompleteSkewM/MaxM/MaxDeg read 1.64 m / 20.3 m / 10.5 deg between them. One camera cannot move 1.6-20 m and 10 deg in 0.3 ms (5,500 m/s; 35,000 deg/s): TWO VIEW SOURCES publish interleaved within the frame, separated by the very 1.3-2.0 m standing gap the camLsDelta lane has carried across every session on record, stretching to 20 m under motion. Every seal pairs its sm with whichever source the lottery hands it - the provisional takes the last publish before the resolve, the completion takes the first after - so each reseal draws a fresh error of 0 or the source gap: the operator's video jiggle at the near tier's 20 Hz redraw, the far tier's held offset-then-settle, and the nulls all explained in one stroke (mode 45 draws from the same lottery at capture; 339's late class was never the floor; every corridor slept because 1.6 m is far under 50 m). IDENTITY, PROBABLE: the sub-ms pre-resolve publisher is the shadow pass's own upload - the engine's TEXEL-SNAPPED shadow camera (snap quantum = one texel of the serving cascade: decimetres fine, metres coarse, matching the 1.6-20 m spread) - and pairing the unsnapped eye view instead UNDOES the engine's own anti-swimming: the jiggle is textbook shadow swim, manufactured by the lottery. THE LOCK: a completion may not switch sources - if the completing camera sits more than 0.5 m from the provisional camera (same source within 25 ms is millimetres to centimetres; cross-source is 1.6 m plus - the classes cannot overlap), the completion is REFUSED and the non-bridge provisional FINALIZES as the seal (the 26551 no-dropout shape). Every seal is thereby internally single-source, sm and view from within 0.3 ms and one publisher; the 1.6-20 m weld class cannot exist. The lock leans provisional deliberately: the sub-ms pre-resolve publisher is the pass that owns the resolve. Bridge provisionals are exempt (they cannot finalize and never serve unfinalized; refusing them would only starve - they complete as today). Lanes: bandCompSrcRef / bandCompSrcM / bandCompSrcMaxM (cross-source completions refused, last and max gap). At high speed a same-source completion near the 25 ms bar edge can exceed 0.5 m and be over-refused - harmless by construction, the finalized provisional is the same seal minus a sub-frame update. PRE-REGISTERED READS: (a) the video jiggle DIES, or collapses to a CONSTANT offset - dead means the provisional source is the render source and the campaign's artifact is closed; CONSTANT means the seal is now consistently the WRONG single source, the amplitude names the snap quantum, and the one-line follow-up flips the lock to the completion side (reserve: mode 341 free for that arm); (b) bandCompSrcRef counts ~the cross-source fraction of completions and SkewMaxM (offered, still measured upstream) keeps reading the source gap while the SERVED welds die; (c) mode 340 restores the lottery and the jiggle returns; (d) 1x parked: both sources near- coincide, lanes near 0, behaviour identical. IF THE JIGGLE SURVIVES A WORKING LOCK (SrcRef counting, jiggle unchanged): the pairing family is exhausted in full and the RenderDoc escalation fires - no further pairing builds, per the standing ladder. FREE NOW: debug modes 341+ (341 reserved as the completion-side lock arm), lighting0.y codes 43+, visual codes 29+.
+//  || 26552 THE VIDEO NAMES THE CADENCE AND THE CADENCE NAMES THE QUESTION (pure gauge build - the ORDER CENSUS; no behaviour change, no new modes). FIELD (dump1, khBuildTag 26551 / fieldsN 222, 380 s on foot; PLUS the operator's first video, 4.25 s 120 fps, bush shadows on the injected box face): frame-by-frame the shadow blob moves RELATIVE TO ITS OWN STATIC CASTER between consecutive 33 ms frames while terrain parallax stays smooth - the jiggle redraws at the near tier's pinned 20 Hz reseal rate. And the lanes bound the weld hard: bandPendLateKept 0 with the 0.025 s bar armed all session, so EVERY served completion was same-frame-window, yet the jiggle persists. CONCLUSION: the artifact is PER-SEAL PAIRING NOISE inside the sub-25 ms window, redrawn at each reseal - near tiers redraw at 20 Hz (the video's jiggle), far tiers hold one draw for 0.1-1.0 s (the operator's original offset-then-settle; bandEscLandMsMax 979 this session). The 26551 bar bounded the tail and changed nothing visible because the noise floor was never the late class. WHAT DECIDES IT: the pairing's correct target is the view the engine rendered the tile with, and WHICH candidate that is depends on upload ORDER within the frame - the deferred-view design (26177) BELIEVES the main view uploads AFTER the resolves (provisional = previous frame, completion = the render frame, completion correct); if the engine in fact uploads BEFORE the resolves - always, or scene-dependently - then the provisional IS the render frame's view and every completion is a +1-frame weld, redrawn per seal: exactly a 20 Hz jiggle. That belief has never been measured. THE ORDER CENSUS, three numbers: bandCapFvAgeMs/Mean/Max = the frame view's age AT CAPTURE (0-4 ms class = the view uploaded THIS frame before the resolve, the provisional is frame-true and completions are the author; 10-16 ms class = previous frame, the deferred belief holds and completions are frame-true); bandPendCompAgeMsMean/Max = the pending's age at its ACCEPTED completion (the served weld span). THE VISUAL A/B SET, all pre-existing, run against the visible jiggle: setRenderDebug 45 (complete-at-capture: kills the jiggle iff the provisional is frame-true), 339 (26551 off: worsens iff the late bar was already helping), 0 (baseline). PRE-REGISTERED FOLD: capFvAge in the 0-4 ms class AND 45 visibly killing the jiggle -> next build makes complete-at-capture the default WITH 26551's no-dropout finalize as the fv-absent fallback (the union dominates 45: no bridge refusals, no completion welds); capFvAge 10-16 ms AND 45 not helping -> completions are frame-true, the pairing family is EXHAUSTED, and the RenderDoc escalation fires with no further pairing builds. capFvAge BIMODAL -> the order is scene-dependent and the fold gates per capture on the measured age (complete-at-capture when fv is this-frame-fresh, completion otherwise) - the gauge's classes become the branch. FREE NOW: debug modes 340+, lighting0.y codes 43+, visual codes 29+.
+//  || 26551 THE COMPLETION IS TAKEN ONLY WHILE IT CAN STILL BE THE SAME-FRAME VIEW (KH_BAND_COHERENT_COMPLETE, DEFAULT ON, mode 339 reverts). THE CONVICTION, assembled from the operator's five-clause field picture against lanes already on record: the pending completion overwrites the provisional vcol with a publish up to 13.6 m / 11.4 deg of camera motion late (bandCompleteSkewM/MaxM/MaxDeg, honest since 26549), composing world -> vcol(late) -> sm(capture) - every shadow in that band lags the CAMERA by the weld delta. The operator's clauses map one-to-one: offset only near the shadow view distance = slots 6-7, the far tier at 0.10-0.25 s cadence, while the near tiers sit pinned at 20 Hz by the standing-gap escape so their welds live under 50 ms, below perception; settle 0.1-0.5-1.0 s = reseal interval plus escape-land latency (bandEscLandMs mean 33, max 411-883 measured); parking not clearing it instantly = the welded seal serves until the next reseal LANDS; snappy and direction-of-motion = the weld delta IS the camera step between capture and completing publish, discrete per seal; unequal across objects = per-band lottery between welded immediate seals and one-cycle staged seals (pool starvation 15 pct and growing with session age - the worse-over-time clause). WHY EVERY PRIOR NULL WAS BLIND TO IT: mode 335 suppresses pending only when fv is FRESH AT CAPTURE, and the deferred-view design uploads the main view AFTER the resolves, so the fv-null half of immediate seals kept welding under 335 - the null covered the wrong half; the 26548 mixed bar sat at 50 m against a 1.5-13.6 m class; the census that measured the weld all along was discredited by its own lever-arm artifact until 26549. WHY THIS FORM AND NOT MODE 45 AS DEFAULT: 45 was never adjudicated (26179's own 'never tested on its own'), and it carries two trades - fv-absent captures become refused bridge-provisionals (dropouts) and complete-at-capture keeps a fixed one-frame-early skew. The timing algebra dominates both: the provisional vcol is at most one frame EARLY, a same-frame completion is ZERO skew, and any later publish is 1+ frames LATE - strictly worse than the provisional it would overwrite. So: a completion within 0.025 s of pending_since (the same-frame window; the epoch clock, same subtraction the 50 ms death uses) completes exactly as today; a later publish DOES NOT OVERWRITE - the non-bridge provisional FINALIZES as the seal (pending_view false, vcol kept, bandPendLateKept counts) and bridge provisionals stay pending (bandPendLateBridge counts) for the existing 50 ms epoch death to reseal - byte-for-byte today's serving behaviour, since the consumption guard already refuses bridge seals (bandSealBridge 0 across every dump on record - the path is near-dead in normal play). Skew is now bounded at one frame ALWAYS and zero in the common case; the 3-4-frame weld class cannot exist. THE CENSUS DELIBERATELY KEEPS MEASURING OFFERED completions (it runs before the late check), so SkewM/MaxM remain the raw instrument and the Kept lane counts what the bar refused. STAGED PATH AUDITED AND LEFT ALONE: its wait is bounded by measurement at 20.3 ms max (bandStageWaitMaxMs), inside the same-frame class. PARKED AND ORDINARY PLAY: completions arrive 5-15 ms after capture, under the bar - the late branch never fires, lanes 0, behaviour identical. PRE-REGISTERED ACCEPTANCE: (a) the operator's far-shadow snap GONE at mode 0 in the same regime; (b) bandPendLateKept counting precisely where the welds used to happen (flight, far tier, pool-starved windows) while bandPickNone/bandProvSkips hold their mode-0 baseline - the no-dropout clause, and its breach falsifies this build's premise; (c) mode 339 restores the overwrite and the offset returns; (d) census SkewMaxM keeps reporting the offered class (instrument retained) while the SERVED welds are bounded - if the offset survives with Kept counting and the bar honest, the weld is acquitted and the RenderDoc escalation stands. FREE NOW: debug modes 340+, lighting0.y codes 43+, visual codes 29+.
+//  || 26550 THE GAUGE WAS MEASURING THE TRUTH AND THE TRUTH IS STALENESS, NOT REGISTRATION (KH_BAND_ALL_NEAR, mode 338 opt-in arm; the drift gauge is RETIRED as an artifact detector, lanes stay compiled). FIELD (dump1, khBuildTag 26549 / fieldsN 222; flight regime again, camAltM ~353 / camStepM to 3.2 / pvNear ~10; foreign lanes 0 a third time). MODE 335 A/B: the operator ran it at the offset (bandPairSameSeals 1158 - engaged during the test window) and the offset SURVIVED: with 26546's on-foot null this closes the pairing axis in the flight regime too, and the redefined census agrees it had nothing left to carry - bandCompleteSkewM 1.51 / MaxM 13.60 (honest camera-gap metres at last; the 1500 m class is confirmed gone with the lever arm) at SkewMaxDeg 11.4. THE GAUGE'S THIRD FORM READ CLEAN ARITHMETIC AND CONVICTED ITS OWN CONCEPT: the cascade window RE-CENTERS on the camera every frame, so for the same world point sealed uv and live uv differ by (camera travel since seal) x scale BY CONSTRUCTION - a benign, guaranteed-nonzero delta that dominates the reading. The numbers close exactly: far tiers age 200-245 ms (bandAgeMs6/7) and step 88.3 m per reseal at this speed (bandResealStepFarMaxM), and the metre twin maxed at 65.9 m - INSIDE that envelope, smooth and pose-correlated in all three field sessions, never event-shaped. Three forms, one concept, one confound: sealed-vs-live uv cannot separate misregistration from window re-centering. Retired as a detector per 26549's own pre-registration; the lanes stay compiled (counters never die) and bandUvDriftM is hereby RE-READ as the STALENESS meter it always was. AND THAT RE-READ IS THE HYPOTHESIS THAT SURVIVES EVERY DUMP ON RECORD: the band system serves 50-250 ms-old FULL-ATLAS SNAPSHOTS. For static world content a stale snapshot still registers its own content correctly - which is precisely why 26544 (live pairing), 26545/26546 (both pairings), 26547/26548 (foreign/mixed welds) and 26549's honest census ALL acquitted registration. But anything that MOVED since the seal - vehicles, soldiers, the operator's own aircraft - has its shadow sitting where it WAS: caster speed x band age = up to 42 m at this session's speeds on the 0.25 s tier, SNAPPING to current at each reseal. Offset-then-settle, intermittent (only when movers move), worst at speed and at range (far tiers age 5x the near), invisible parked until one seal after everything stops (26544's own noted signature), and the 3-4 minute onset is the MISSION developing - moving units and PIP feeds spawn as scenarios open (the 26546 x7 correlation was a proxy for mission activity, not a mechanism). THE DECIDING ARM, mode 338 (KH_BAND_ALL_NEAR): every band tier takes the NEAR cadence (0.05 s) - the maximum lag drops 5x by construction (0.25 -> 0.05 s), so a staleness offset SHRINKS ~5x on screen while any registration offset would not move at all. Engagement lane bandCadenceForced (0 under mode 0 = byte-identical; 0 under 338 = the arm never fired and the test is void). KNOWN COST, stated with the ledger's own storm warning: near tiers already run pinned at 20 Hz (the standing-gap escape, measured 4.4-6.4 escapes/flush across three sessions), so 338 adds the far tiers - bandCaptures can approach ~8/flush of 64 MB whole-atlas copies. WATCH bandStageWaitMs/MaxMs, bandStagePoolMiss and the frame time under 338; this is a DIAGNOSTIC arm, not a shipping cadence - if it convicts, the fix conversation is routing DYNAMIC content to the live path (which reseals per atlas render and cannot lag) or a dynamic-caster-aware reseal trigger, not a permanent 5x copy bill. PRE-REGISTERED READ: (a) offset magnitude on moving casters' shadows drops ~5x under 338 with bandCadenceForced counting = staleness convicted, and bandUvDriftM becomes its magnitude lane; (b) offset UNCHANGED under 338 with the lane counting = staleness acquitted, and the pre-registered RenderDoc escalation (26546 ladder step d) fires with no further gauge forms; (c) mode 0 stays byte-identical (lane 0). FIELD PROTOCOL: same route/regime at mode 0 then 338, eyes on a moving unit's shadow crossing our mesh; dump both windows within the ring's ~9 s of an event. FREE NOW: debug modes 339+, lighting0.y codes 43+, visual codes 29+.
+//  || 26549 THE INSTRUMENTS RETURNED VERDICTS AND ONE IS AGAINST 26548'S OWN REPAIR (pure gauge build - mode 0 byte-identical; no new modes). FIELD (dump2, khBuildTag 26548 / fieldsN 222 verified; foreign regime ABSENT AGAIN - sunHeroRenders 15815/16529 = 0.96, ForeignRef 0, MixedRef 0, so both weld guards remain field-untested and the offsets the operator saw are 1x-regime again; this session is FAST FLIGHT, pvNear 10 fixed / camAltM ~366 / camStepM to 3.7 per frame). VERDICT 1 - THE OLD-TRN LANE WORKED AND IT REWRITES 26547'S PREMISE: bandCompleteOldTrnM reads 7529 on ordinary rows with MaxM 7639 == camAbsM's class (7294-7336 in dump1), so the vcols living in bands are WORLD-SPACE views (|t| = |R*C| = |C|) and so are the completing publishes (SkewMaxM 1556 << 7529 - a camera-relative fv against a world vcol would read ~7500 on EVERY cross row). THEREFORE the 853-1556 m 'foreign camera' class the 26547 ledger convicted was never a camera distance at all: |t_old - t_new| between two world-space views of the SAME camera is rotation times the |C| lever arm - 2*7529*sin(15.18deg/2) = 1990 m, and 1556 m back-solves to 11.9 deg, both inside this session's own measured rotation class. THE 26547 NARRATIVE IS CORRECTED: no foreign camera was ever shown by that lane. The guards themselves STAND - they compare exactly-decoded CAMERAS, not translation rows, are byte-identical in every measured 1x session (ForeignRef/MixedRef 0 twice now), and still bar the weld class in the x7 regime whose onset correlation (26546's two-window A/B) remains the one measured fact about the frequent-offset onset. Their real field test is still owed. VERDICT 2 - THE SKEW-M LANE IS STRUCTURALLY VOID FOR WORLD-SPACE VIEWS and is REDEFINED to what its name says: the exact camera gap, old vcol camera (-sum t_j*col_j, gated by the 26548 sanity split) vs the completing view's exact-inverse camera. Expect single-digit metres tracking camStepM; the DEG lane was always honest and now carries the weld-rotation reading alone: 15.18 deg max cross-frame rotation THIS session, 5025 cross completions - at slot-7 range (81-150 m) a 15 deg cross-pairing weld misregisters by r*2sin(dTheta/2) = 21-39 m, the first quantified 1x mechanism that survives contact with a dump. NOTE HONESTLY: 26546 closed the pairing axis 'both ways' on an on-foot null (~2 deg/frame regime); this session's 15 deg/frame flight regime sits 7x outside that test's envelope, so the closure does not cover it. NO CODE CHANGES ON THAT AXIS THIS BUILD - the existing mode 335 (same-frame pairing, both paths) is the ready-made A/B: fly the offset regime at mode 0, then at 335; offset gone under 335 with bandPairSameSeals counting reopens 26179 cross-pairing as the flight-regime author and the fold is one line next build. VERDICT 3 - AGAINST MY OWN 26548 GAUGE REPAIR, falsified by its own first field numbers: the band textures are FULL-ATLAS COPIES (created from atlas_tex's own desc; CopyResource of the whole resource at both capture paths - in code, always was), so the sealed sm maps to FULL-ATLAS uv and the 26546 form had the spaces right; 26548's tile-local conversion introduced the very mismatch it claimed to fix (drift smooth 933-5195 band texels on 512/512 ring rows, pose-correlated, no discontinuities - a systematic unit error's signature, not an intermittent artifact's) and its extent match divided one side by tile width, letting neighbour cascades (2x steps) pass the 20% window. REPAIRED FORM (third and, per the arithmetic above, structurally final): sealed and live compared DIRECTLY in shared atlas uv; cascade match on raw row-norm scale (both sides are atlas-uv-per-metre, the latch's own 0.2 n0 rule verbatim); probe unchanged (the 26548 starvation fix is the one part that field-verified: 512/512 ring rows read); drift ships in ATLAS TEXELS (the 26546 unit, lane names unchanged) PLUS a metres twin - bandUvDriftM / bandUvDriftMaxM = texels / (|sm row0| * atlas_size) - so readings are physical and comparable across cascades. ALSO MEASURED AND BANKED, NOT ACTED ON: (a) the near-band budget escape is saturated by the STANDING vcol-vs-injection camera gap (bandCamDx 1.99 identical on all 8 slots vs 0.045*width bars of 0.28-1.8 m for slots 0-5) - near tiers are pinned at the 20 Hz cap permanently (bandBudgetEscapes 6.0/flush; 4.37/flush in dump1's on-foot session); the cap bounds the cost (bandCaptures 2.0/flush) so this is a bias note, not a fire; (b) at this session's flight speed the 20 Hz cap moves 8.4 m of camera per reseal (bandResealStepNearMeanM 8.38, measured == 168 m/s / 20 Hz) against a 6.31 m slot-0 width - the finest bands land already displaced by more than their own width, and bandGapMaxM 91.9 at bandGapCamStep 13.7 says adjacent slabs gap at speed exactly as the 26416 pair-sum law predicts above its design envelope; if the operator's flight-regime offsets survive the mode-335 A/B, this outrun class is the named next axis and its fix is budget/cadence, not pairing. PRE-REGISTERED ACCEPTANCE 26549: (a) parked/on-foot 1x: bandUvDriftM at or under the ~single-texel-equivalent metre class (the live latch granularity), N ~ flushes, why bits quiet; (b) at a visible offset event (dump within the ring's ~9 s, as the operator already does): bandUvDriftPx/M TRACKING the event with bandUvDriftSlot naming the band = sealed chain convicted with a magnitude and a slot; FLAT through a visible event = the band seal chain is acquitted for that event class and the RenderDoc escalation (26546's own ladder step d) fires - not a fourth gauge form; (c) SkewM single-digit tracking camStepM with SkewDeg carrying the rotation class; (d) mode-335 flight A/B read as above. FREE NOW: debug modes 338+, lighting0.y codes 43+, visual codes 29+.
+//  || 26548 THE 26547 GUARD JUDGES THE WELDING VIEW AND NOTHING JUDGED THE PAIR (KH_BAND_PAIR_MIXED, mode 337 reverts; 336 stands the whole foreign family down). FIELD (dump1 = the 26547 verdict session re-read, khBuildTag 26547 / fieldsN 222 verified in-band): the operator saw the offset NEAR THE END of a session whose foreign regime was ABSENT the whole way - sunHeroRenders 13905 / 14291 flushes = 0.97 (a late x7 burst would push the ratio OVER 1, not under), dlHarvests 13589, bandSealForeignRef 0 - so per 26547's own pre-registration the guard was NEVER TESTED and the 1x residual is a SEPARATE, UNCONVICTED author. The ring (serials 13780-14291, the last 8.9 s, covering the event) shows the instruments that would have convicted it were both broken: bandUvDriftPx -1 on 512/512 rows (bandUvDriftWhy 3) and bandCompleteSkewMaxM 1499.95 read from a census with no validity check on the OLD vcol it differences. MECHANISM (code-read, the 26547 fork's own words 'a path the three guards do not cover'): registration = the vcol+sm COMPOSITION, so a coherent foreign pair is world-correct and the offset class is the MIXED WELD - sm captured under camera A, vcol welded from camera B. The 26547 sites judge B against the cycle latch and never A against B. Two weld points exist and both are now barred by one helper (kh_band_pair_coherent - capture-time view camera vs welding view camera, the same 50 m bar, admit-on-unjudgeable): (a) STAGE COMMIT - stage_sm is cycle-N harvest, the commit view is cycle N+1's publish; a mixed stage can never become coherent with ANY future publish (its capture camera is fixed), so it DROPS via the aged-drop mechanics and the next sweep re-stages clean; (b) PENDING COMPLETION - the provisional vcol IS the capture's own view; a completing publish >50 m from it would weld the mix, so the seal INVALIDATES (the epoch guard's exact shape - absent beats offset) and the next resolve reseals coherent. Bridge-provisional pairs are cross-convention, unjudgeable, admitted (the consumption guard already refuses them); stage_view_ok false admits. Ordinary play is byte-identical by the same corridor argument as 26547: capture and weld cameras are the same camera one frame apart (camStepM max 2.6 m on record) against a 50 m bar. Site (c) (immediate-seal demote) is NOT touched: whether the demote target (cycle latch) is per-cycle (coherent) or per-frame (mixed) in a foreign cycle is unmeasured, and both weld guards bound the damage to one capture interval. ALSO SHIPPED, ALL MODE-0 BYTE-IDENTICAL: (1) the completion census gets the pre-registered validity audit (ladder step b) - old-vcol column norms 0.9-1.1 and !vcol_bridge gate the skew lanes; bandCompleteInv counts rejected rows and bandCompleteOldTrnM/MaxM record the old vcol's raw translation magnitude on EVERY census row, so the field decides what 1499.95 was: OldTrnMaxM tracking the skew spikes = a real structured foreign/cross-convention matrix is living in bands and the mixed-weld lanes should co-fire; OldTrnMaxM small while Inv counts = first-seal garbage, artifact confirmed, and the skew lane is finally readable against the 0.84-0.90 m floor. (2) the drift gauge is REPAIRED (ladder step c) - the 26546 form compared the sealed side's TILE-LOCAL uv (sm maps into the band's OWN copied texture; BandSlot holds no atlas rect) against the live side's FULL-ATLAS uv (tile[] is vp*inv - the convention mismatch, positively identified, mean 880 px = tile origins, not drift) and its probe (meshes[0]'s base) starved 512/512 rows at the exact event it existed to read. New form: the probe is the finest valid slot's OWN axis at its z-window midpoint (in-window BY CONSTRUCTION - the gauge cannot starve while any readable seal exists), the live entry is matched by CASCADE EXTENT in metres (sealed 1/|sm row0| vs live tile_w/|m row0|, the latch's own 20% rule restated in units that compare), the live atlas uv is converted tile-local through its own tile rect, and the delta ships in the BAND'S OWN TEXELS. Lane names keep (their prior readings were declared unreadable by 26546's own ledger); bandUvDriftWhy bits keep their legs: bit0 preconditions, bit1 no readable sealed slot, bit2 no extent-matched live entry. (3) the fog session-reset debt is PAID - g_fog_below_clamp_y / g_fog_below_ext / g_fog_uw_col[3] now die in reset_session_state (the 26535/26536 arming lanes stop lying after mission change). WHAT IS NOT CLAIMED: no fix for the 1x residual is claimed - dump1 convicts nothing for it, and this build's job there is to make the NEXT event readable; the live-table foreign-phase death and the x7 perf cost stay banked. PRE-REGISTERED ACCEPTANCE: (a) 1x sessions: bandPairMixedRef 0, bandCompleteInv/skew lanes readable, bandUvDriftN ~ flushes with Mean at or under the ~1-texel live-latch granularity, play byte-identical; (b) x7 regime (ladder step a stands): Mixed and/or ForeignRef counting with MaxM in the foreign class AND the offset frequency dropping at the same poses; (c) 337 restores the weld admissions alone, lanes silent; (d) at the NEXT 1x offset event, dump within the ring's 8.9 s: bandUvDriftPx per-row TRACKING the event convicts the sealed chain with a magnitude; FLAT (<= ~1 band texel) through a visible event ACQUITS the whole band seal chain and the pre-registered escalation is RenderDoc (ladder step d), not a fourth lane. FORK ON NULLS: MixedRef 0 in a verified x7 session closes the weld axis; two closed axes there leave the capture-side sm provenance (the per-cycle-latch question above) as the named next instrument. FREE NOW: debug modes 338+, lighting0.y codes 43+, visual codes 29+.
+//  || 26547 THE ONSET VARIABLE IS MEASURED AND IT IS A SECOND CAMERA, AND FOREIGN VIEWS ARE BARRED FROM THE BAND SEALS (KH_BAND_FOREIGN_VIEW; mode 336 reverts). THE 26546 TWO-WINDOW PROTOCOL RAN (dump3 minute one, resetRenderStats, dump2 minute three-plus, khBuildTag 26546 both) AND THE A/B IS LOUD: per flush, sunHeroRenders goes 0.86 -> 6.69, sunMidRenders 0.88 -> 6.71, sunOutRenders 0.92 -> 6.76, dlHarvests 1.00 -> 6.85 - the render-thread cycle machinery runs ~SEVEN CYCLES PER FRAME once the session ages, i.e. the ENGINE is rendering ~six additional camera passes (PIP / UAV feed / mirror / whatever the mission spawns after a few minutes - the operator's 3-4 minute onset, measured). The collateral in the same window: shadowLiveLatches 160 -> ZERO (the extra non-atlas phases wipe the live-table pending every cycle - the !is_atlas branch - so the live path is DEAD late-session), bandBudgetEscapes 5761 -> 46727 (~34 per flush - the seal machinery thrashing), and the drift gauge starved in both windows (bandUvDriftN 0; a starve census ships this build - bandUvDriftWhy bit0 preconditions / bit1 no serving sealed slot / bit2 no live cover - so the next dump says which leg). AND THE NUMBER I DISMISSED TWICE IS THE ARTIFACT: bandCompleteSkewMaxM has read 853 / 1163 / 1479 m across four sessions and was waved off as a teleport tail each time - it is a FOREIGN CAMERA being committed into a band seal. The commit/completion quality gate (khsc_qok, last_publish_rot_err) checks the publish's rotation self-consistency and NEVER the candidate camera's translation - the one axis a PIP-class camera maximally violates. A seal paired with a UAV-feed view is world-registered arbitrarily wrong, serves until its slot reseals (up to 0.25 s far-tier - the operator's fraction-of-a-second settle), recurs whenever the foreign publish wins the race again (the intermittency), and its FREQUENCY tracks the second camera's existence (the onset). Visual 18's offset-blue fits: real content, coherent internal pairing, wrong world registration. THE FIX, three call sites and one helper (kh_band_view_native): a candidate view whose exact-inverse camera sits farther than the KH_LATCH_JUMP_M-class 50 m bar from the cycle latch camera is refused at (a) the stage COMMIT - the stage holds and waits for the next honest publish under the existing 0.05 s age rule; (b) the pending COMPLETION - a foreign publish never completes a seal; (c) the immediate seal - a foreign frame view demotes to the cycle latch. No reference (cycle_pv invalid) or extractor failure ADMITS - the guard can only refuse what it can measure, so ordinary play is byte-identical (the honest publish camera sits centimetres from the latch; the foreign class sits 853-1479 m, four orders of separation - the corridor cannot misfire between them). Mode 336 restores admission. LANES: bandSealForeignRef (the arming lane - it should COUNT precisely in the late-session regime and read 0 in minute one), bandSealForeignM / MaxM (the refused distances - expect the 853-1479 m class). WHAT THIS DOES NOT CLAIM: the live-table death (shadowLiveLatches 0) is named but not fixed here - the live path is the band system's fallback and its repair (pending survival across foreign phases) is its own change, banked; and the x7 cycle load itself is the ENGINE's to run - our machinery riding every cycle at x7 cost is a real perf item, banked separately. PRE-REGISTERED ACCEPTANCE 26547: (a) minute-one play byte-identical, bandSealForeignRef 0; (b) past the onset, bandSealForeignRef counting with ForeignMaxM in the hundreds-to-thousands and the intermittent cast-shadow offset GONE at the same poses; (c) 336 restores the offset alone with the lane silent; (d) bandCompleteSkewMaxM collapses to single-digit metres (the honest inter-frame class) once the guard stands; (e) bandUvDriftWhy names the gauge's starving leg on the same dump. FORK: if the offset survives with ForeignRef counting, foreign views were reaching the seals AND something else is too - re-read bandUvDriftPx, which should finally be live once the gauge's starve leg is named. FREE NOW: debug modes 337+, lighting0.y code 43, visual codes 29+.
+//  || 26546 THREE NULLS CLOSE THE PAIRING AXIS FOR GOOD, AND THE OFFSET GETS READ AS A NUMBER (KH_BAND_UV_DRIFT, pure gauge - mode 0 byte-identical). FIELD ON 26545: the arm engaged completely (bandPairSameSeals 2157 == bandStageCommits, completions suppressed - Cross/Same/skew all 0) and the offset SURVIVED, so per the pre-registered fork BOTH candidate views are acquitted: cross-pairing (26179's) and same-frame pairing produce the same artifact, and the vcol/sm pairing question is closed both ways. Visual 18 at the event paints BLUE - real depth, compares shadowed - WITH THE BLUE STRUCTURE ITSELF OFFSET, which by that instrument's own 26410 reading table convicts REGISTRATION: the world->uv mapping lands wrong while the seal's content is real and its internal pairing is coherent under either convention. AND A NEW OPERATOR OBSERVATION RESHAPES THE SEARCH: the offset needs 3-4 MINUTES of play before it occurs frequently - a session-age onset no hypothesis so far predicts (the capture site is the atlas RESOLVE, so content/sm are per-slot coherent by construction; the CB fill is a verbatim copy; the live-table camera split measured 4 cm; the seal-vs-injection split measured 0.90 m of standing extractor artifact). WHAT SHIPS: the artifact, measured. Per injection, the first staged mesh's ground anchor is mapped CPU-side through the SERVING sealed band (the shader's own walk - slab + uv/z over the same order[]) and through the LIVE table's newest covering entry, and the delta ships in ATLAS TEXELS: bandUvDriftPx / Max / Mean / N / Over2 / Slot, plus a per-row trace lane (fieldsN 222). The number IS the on-screen displacement of the cascade on the mesh at that point, in the atlas's own units, timestamped by the ring. HOW TO READ IT: (a) the lane TRACKING the visible offset event-for-event makes the sealed chain the author with a per-frame magnitude to regress against session age, camStepM and slot - the 3-4 minute onset becomes a curve, not an anecdote; (b) the lane FLAT (~<= 1 texel, the live table's own latch granularity) through a visible event ACQUITS the entire band seal chain - sealed and live agree - and the author is DOWNSTREAM of uv (the compare: shadowMeta.y/z bias sign, texel size term, or the filter), or the visible shadow is not the cascade receive at all; (c) the lane valid only sporadically (bandUvDriftN small against flushes) means the probe point lacks dual coverage and the read needs the mesh inside the live table's tiles - reposition and re-dump. PROTOCOL FOR THE ONSET, one session, two dumps: dump A within the first minute (before the offset is frequent), resetRenderStats, then play to minute 4-5 and dump B at the offset pose - the delta between the two windows in bandUvDriftPxMean/Over2, bandGapFrames, bandStagePoolMiss, bandResealFar and camStepM is the onset variable's fingerprint. ESCALATION, honestly owed after three nulls: if the drift lane reads flat through a visible event, the next step is NOT another lane - it is a RenderDoc capture at the offset instant (the ledger's own repeated escalation for exactly this class: 26303, campaign 50, 26404), reading the engine's actual receive constants against ours at the artifact pixel. The capture question is pre-registered: does the ENGINE's own terrain shadow at the same range sit offset too (engine parity - the offset is upstream of us entirely), and does cb-at-180's matrix at the resolve match the matrix the engine's scene pass consumes for that cascade (the locator window question no lane can answer). FREE NOW: debug modes 336+, lighting0.y code 43, visual codes 29+.
+//  || 26545 THE PAIRING QUESTION 26179 SETTLED ONE WAY IS RE-OPENED BY MEASUREMENT, AND THE OTHER PAIRING SHIPS AS AN ARM (KH_BAND_PAIR_SAME, mode 335; arming lane bandPairSameSeals). FIELD ON 26544, dump3: THE 26544 FIX ARMED COMPLETELY AND IS ACQUITTED AS THE AUTHOR - liveCamPairFv 270 == shadowLiveLatches with Stale 0, and liveCamPairDxMaxM reads 0.0399: the injection-vs-frame-view camera split the fix corrects was FOUR CENTIMETRES all session, three orders under a visible offset. It stays (it is byte-identical parked and correct under motion) but the operator's offset survived it, and the same dump RELOCATES the serving path: bandOn 1 on all 512 rows and prbCtrDM 91.5-229.8 m against bandFar7 248.567 - THIS pose is INSIDE the band range and the BAND RECEIVE serves it (the earlier visual-14 black was the ~460 m pose, a different regime; the report spans both). WHAT THE BAND LANES SAY, and it was in the file's own census the whole time: bandCompleteCross 1499 vs bandCompleteSame 9 with bandSealSame 1500 / bandSealPending 8 - EVERY immediate seal takes the frame view and is then REPLACED one cycle later by the next publish (26179's 'one publication, two consumers', by design), and the staged path (10739 commits of 12247 captures) pairs stage_sm - harvested at cycle N - with g_ls.frame_view AT COMMIT, cycle N+1. Both paths therefore compose world -> view(N+1) -> sm(N). The completion census MEASURES the replacement delta and reads bandCompleteSkewMaxDeg 11.13 with the translation twin at metres (teleport tail aside): under rotation the two frames' views differ by degrees, and if the engine's sm belongs to the frame that uploaded it, that composition misregisters the tile by r x dTheta - THIRTY METRES of shadow displacement at this dump's 158 m mean standoff per 11 deg, ~3 m per ordinary pan frame - scaling with DISTANCE from the camera (worst near the shadow view distance, the operator's words), persisting up to the tier's reseal interval (a fraction of a second), zero when parked. Translation adds camStepM (2.7 mean / 14.1 max here) on top. Every clause of the report is this mechanism's signature. WHY THIS IS AN ARM AND NOT A DEFAULT, stated against my own conviction: 26179 fought exactly this pairing question and chose CROSS on log evidence ('the strongest evidence in every log'), which would mean the engine publishes the view for the frame AFTER the sweep and cross-pairing is CORRECT - in which case the skew is the correct pairing doing its job and the artifact is elsewhere. Overriding a measured historic decision on static inference is the 26189 mistake by name ('I ASSERTED it instead of measuring it'), and rule 1.19 forbids mode 0 carrying it. One flip decides it in the field instead: MODE 335 pairs both paths SAME-FRAME - the staged capture now HOLDS the view live at the capture (frame_view when fresh within 0.05 s, else the cycle latch; stage_view_ok gates) and the commit seals with it; the immediate path's seal KEEPS its frame view (pending_view forced false when fv held, so the next publish does not replace it). Parked, the two pairings are identical by construction; the A/B exists only under motion, which is the artifact's regime. THE READ: at the offset pose, moving/rotating - mode 0 then mode 335, same route. Offset GONE under 335 with bandPairSameSeals counting = cross-pairing convicted, fold next build and 26179's entry gets its correction; offset UNCHANGED with the lane counting = the pairing axis is closed BOTH WAYS (the only two candidate views both acquitted) and the axis moves to CONTENT - what the sealed tile held - with visual 18 (mode 84) at the event as the next instrument. bandPairSameSeals 0 under 335 = the arm never engaged (stage_view never fresh) and nothing was tested - read bandSealUnlocked and the frame_view freshness first. NOT TOUCHED: the 26544 live pairing (correct, measured, stays), the margin default, the arb. FREE NOW: debug modes 336+, lighting0.y code 43, visual codes 29+.
+//  || 26544 THE SHADOW OFFSET IS THE LIVE RECEIVE'S MATRIX/CAMERA PAIRING, ONE CAMERA-STEP STALE BY CONSTRUCTION, AND THE GROUND-LINE MARGIN FOLDS TO DEFAULT (KH_LIVE_CAM_PAIR, mode 334 reverts; margin 0.10 m default, 333 = 0.25 m). FIELD ON 26543, three verdicts: (1) mode 332 FIXES the ground-line bite - folded to default this build, 332 stays whitelisted as an alias, 333 is the 0.25 m revert, the fixed-point construction is untouched (CPU enumeration only). (2) mode 167 REMOVES the shadows being cast onto the mesh - the operator read this as a void test, but 167 gates the WHOLE receive selection block, which holds TWO paths: ShadowBandFactor (bands) and ShadowMapFactor (the live atlas). Visual 14 painting only BLACK already proved the one-pass shading walk gets no slab there and the band factor returns lit - so a shadow that 167 kills and 183 does not (the self term is acquitted by (3)) can only be flowing through ShadowMapFactor: THE LIVE PATH SERVES THIS POSE. That is three independent reads (14 black, 167 kill, 183 null) converging on one branch. THE DEFECT, CONVICTED IN CODE: shadowMeta2.yzw is zeroed ('origins fold per entry'), so the shader samples with rel = wpos and the fill re-absolutes each harvested cascade matrix with dst[3] = row[3] - row . e.cam - correctness rests ENTIRELY on e.cam being the camera the engine's matrix was relative to at the ATLAS RENDER. The seal set e.cam = g_ls.cam with its own comment concedeing the approximation: 'last injection's camera ~ this frame's origin'. Under motion those differ by the camera's travel between the injection and the atlas render - a shadow-space translation of exactly that step, i.e. an engine-object shadow landing OFFSET on our mesh by the frame's travel, worst while moving or rotating, settling ONE SEAL after the camera parks (the next finalize pairs equal cameras), re-provoked by any further movement, and most visible where the live path is what serves - which the band gap census (bandGapFrames 451, far slabs drifting past the fragment) says is precisely the near-shadow-view-distance region the operator names. The struct's own ledger claims 'staleness is mathematically irrelevant' BECAUSE each entry carries its own cam - true if and only if the cam is the right one; this build makes it the right one. THE FIX: at shadow_live_finalize_cycle's seal, e.cam is extracted (kh_view_camera_exact, the 26342 exact inverse) from the SAME-CYCLE engine view the finalize already trusts for its light-axis check (g_ls.frame_view, fresh within 0.05 s), else from the cycle latch (g_ro.cycle_pv), else left on the injection camera (the historic pairing, also mode 334's forced state). Parked, all three cameras agree and the seal is byte-identical; the change exists only under motion, where the pairing was wrong. LANES: liveCamPairFv / liveCamPairPv / liveCamPairStale name the source per seal (Fv should carry ~all of them; Stale counting at rest of a healthy session means frame_view is not fresh at the finalize and the fix is not engaging - that is the arming lane); liveCamPairDxM / DxMaxM measure the correction itself, which is also the OFFSET the old pairing was painting - expect it to track camStepM under motion and read ~0 parked. WHAT THIS DOES NOT TOUCH: the band receive, its seals, escapes and cadence (the 26540 census stays for that axis); the bands were BUILT to fix this same pairing class on the atlas-content side (26181), and the live path kept the old pairing as the fallback - the fallback now gets the same discipline. PRE-REGISTERED ACCEPTANCE 26544: (a) liveCamPairFv counts ~= shadowLiveLatches with Stale ~0 - if Stale carries the session the arm never engaged and NOTHING was tested; (b) the moving/rotating cast-shadow offset on the mesh is GONE at the poses where visual 14 reads black, parked behaviour unchanged; (c) 334 restores the offset alone, with liveCamPairStale taking the count; (d) liveCamPairDxMaxM under a pan reads ~the frame step (the measured size of the artifact that was); (e) the ground line: 0.10 m margin default - objects and terrain at the ground line stay in front, 333 brings the 0.25 m overtake back, 331 still restores the need-based pull. FORK: if the offset SURVIVES with Fv counting, the pairing is right and the residual is the HARVEST itself (pending_m captured from a different atlas draw than the tile it seals against) - the next instrument is a per-seal tile/draw identity stamp, not a camera. FREE NOW: debug modes 335+, lighting0.y code 43, visual codes 29+.
+//  || 26543 GROUND-LINE MARGIN A/B, AND A CORRECTION TO 26542'S OWN CLAIM (KH_ARB_FIXED_PULL margin; mode 332 = 0.10 m, mode 0 = 0.25 m). FIELD ON 26542: khBuildTag 26542, snapReprojArms 2263 == compositeFarArbs, prbBotDM parked alternations 0 - the period-2 flip is gone and the operator confirms it. RESIDUAL, precisely stated: the bottom ~0.5 m of a face contacting the ground draws in front of anything within reach of that face - objects AND terrain - once the camera is far enough away. MECHANISM, and it is arithmetic in the dump: the fixed pull is min(khaCap, 0.25) with khaCap = min(15, 0.06 x depth) x clearance ramp; the ramp saturates as khtClear -> 0 (the bottom of a face standing on the ground) and 0.06 x depth clears 0.25 at ~4 m, so past a few metres the whole 0.25 m margin is spent on the lowest fragments and overtakes ANY competitor within 0.25 m along the ray - a wall base, a rock, terrain in front of a dip. At grazing pitch 0.25 m along the ray is metres of ground. THE CORRECTION: 26542 said a private self-depth record was the remedy for a deep bite. It is - it restores need-based sizing without the loop - but it does NOT fix THIS residual, and 26542's ledger should not be read as if it did: the ground-line overtake is the identity gate's class (26192/26336, the soldier's boots), because a real object's base genuinely sits within khaTol of the heightfield and no read of any depth buffer separates 'the LOD in front of our contact' from 'a rock at the ground line in front of our contact' - both are nearer along the ray, both are at heightfield height, and the 12.5 m field cannot resolve the decimetre that distinguishes them. A self-record separates SELF from NON-SELF; it does not separate LOD from OBJECT. So the honest levers on this residual are the pull's SIZE (this build) and its EXISTENCE (mode 49, contact band off), and the operator's eye is the judge between a bitten ground line and an overtaking one. 332 keeps the 26542 fixed point (self-read stable) at 0.10 m. NOT SHIPPED THIS BUILD, DELIBERATELY: the self-depth record. It is designed and still the right change for the deep-bite case, but it touches the injection's OM binding, the resolve pass and the composite PS signature at once and it does not move this report; it goes in when a bite that 331 clears is reported at range, not before. REPORT 2, THE VISUAL-14 READ IS DECISIVE AND POINTS AWAY FROM THE BANDS: the operator reports visual 14 paints ONLY BLACK before, during and after the offset. Black = ShadowBandIndex pass 0 (the slab gate) held NO slot and the uv/z fallback answered; and at mode 0 the SHADING walk runs one pass (khbf_np = 1 unless lighting0.y code 9 / mode 220), so where the visual paints black the receive term is 1.0 - the mesh gets NO band shadow at all on those fragments. dump2's mesh sat ~460 m from the camera against bandFar7 248.567: BEYOND EVERY SEALED SLAB. Whatever shadow was displaced there did not come from the cascade receive walk, and no reseal cadence, floor bypass or seal camera can be its author. Candidates, in order: the mesh was inside 248 m at the offset event and visual 14 was taken at a different pose (then re-take it AT the event - a colour other than black is required for the band axis to be live); or the displaced shadow is a term of ours (the union / KhSunRangeFade self-cast chain, which fades across the last 15%% of shadowVisibility - 'nearing the shadow view distance' is exactly its window; mode 255 kills the fade, 249 the anchor); or the engine's own shadow on the terrain UNDER the mesh reading as 'on' it. NEXT ASKS: (1) at the offset event, visual 14 again - if any slot colour appears the band axis is live and bandEscLandCdxM/bandResealStepFarMaxM size the fix; if black again, run mode 255 and report whether the offset survives - that splits our cast chain from everything else in one flip; (2) confirm the camera-to-mesh distance at the event against bandFar7. FREE NOW: debug modes 333+, lighting0.y code 43, visual codes 29+.
+//  || 26542 THE HONEST READ EXPOSED THE LOOP: THE CONTACT CLAMP WAS SIZING ITS PULL TO ITS OWN LAST WRITE (KH_ARB_FIXED_PULL; mode 331 = the 26541 need-based form). 26541 ARMED AND HELD - all three dumps read khBuildTag 26541 / fieldsN 221, snapReprojArms == compositeFarArbs (4889/4889, 5757/5757, 584/584), snapReprojStands 0, snapPairSrc 1 (the engine pair) - so the reprojected read shipped on every arb frame, and the operator still reports the ground-contact flicker, now localised: it appears about a dozen metres from the offending face, where the face starts to clip into terrain and objects in front of it on that ground level flicker. THE INSTRUMENT SAYS WHERE, IN NUMBERS: dump1 rows 75-105, camStepM 0.00 on every row (parked), prbCtrDM 32.18 and prbGndDM 18.95 CONSTANT, and prbBotDM - the resolved depth at the box's lower-quarter pixel, one frame latent - ALTERNATING 37.96 / 37.74 / 38.07 / 37.82 / 37.91 / 37.79 / 37.98 / 37.73 / 38.09 ... a clean period-2 toggle of ~0.25-0.33 m with nothing moving, while rows 46-66 (parked at another pose) hold 30.68 flat. That is the pull switching on and off every other frame at a ground-band pixel, measured at the pixel, in the dump. The 26540 census meanwhile reads arbJitOverTol 2755 of 4889 with arbJitVertMaxM 534 (a teleport) - the error the OLD read would have taken - so 26541 fixed what it set out to fix and something else is now the author. WHAT IT IS: on the majority of box pixels the snapshot holds OUR OWN depth from the previous frame (we write depth in the composite; Nsight, the snapshot ledger: an injection-time copy predates the terrain, so the post-scene flush snapshot is the only honest one and it necessarily contains us). With the read now exact, gap = the fragment's depth minus our own last write = exactly the pull we spent last frame. The 26186 need-based pull spends gap + 0.25 - so an unpulled write reads back as a tie (pull 0.25), a pulled write reads back as a competitor 0.25 m in front whose identity point sits 0.25 m nearer along the ray - higher above the heightfield by 0.25 x sin(pitch) - and on any fragment near the tolerance ramp that flips the terrain verdict, the pull drops to zero, the next frame reads a tie again, and so on: period 2, amplitude 0.25 m, exactly the probe. Before 26541 this loop was drowned in decode noise; 26541 made it clean and periodic. It cannot be broken by reading harder - the snapshot has no way to say "this is you" - only by a decision that does not depend on where our own last write landed. THE FIX (default, snapCam.w == 1): (a) a competitor within the possibly-self band, gap <= 0.25 + tie, is judged for identity AT THE FRAGMENT (its own point on the ray) rather than at the competitor sample - a real competitor that close is judged a hand's width from where it was, our own write is judged where it must be, and the verdict is a function of the fragment alone; (b) the pull is the 0.25 m margin itself, min(khaCap, 0.25), not gap + 0.25 - the only magnitude that maps a pulled self-read back onto itself (a fixed point) instead of one step further (a ratchet) or nowhere (a flip). Both together: state A (unpulled, tie) and state B (pulled, gap 0.25) make the same decision from the same inputs and the toggle has no second state to go to. The identity gate, tolerance, up-ramp, clearance ramp, cap, and modes 52/58/180/181/206/207/208 all read as before on the reprojected quantities; mode 331 (snapCam.w == 2) is the 26541 need-based form for the A/B. THE TRADE, DISCLOSED BECAUSE IT IS REAL: 26186 sized the pull to the measured gap so a terrain-LOD deficit larger than 0.25 m was cleared up to the cap; a fixed 0.25 m margin clears deficits up to 0.25 m and leaves anything deeper bitten. On the gentle ground the contact band lives on the deficit is small (26186's own words) and the loop was worse than any bite; on coarse far LOD it may not be, and if a STATIC bite reports at range under 26542 that 331 clears (at the price of the flip returning), the honest next step is a private self-depth record - a second render target on the arb pass and a G channel on the resolve - so the clamp can recognise its own write and HOLD its previous pull instead of re-deciding, which restores need-based sizing without the loop. It is designed, not shipped: it touches the injection's OM binding, the resolve pass, and the composite output signature at once, and a fixed margin either suffices or convicts it cheaply first. WHAT THIS DOES NOT EXPLAIN: the operator's "clips partly into the terrain" a dozen metres from the face. The clamp does not discard fragments; the only thing in the arb path that removes them is the analytic burial (khtClear below -0.35 m against the 12.5 m heightfield). At close range the engine renders fine terrain that departs from a bilinear 12.5 m sample by decimetres to a metre on rough ground, and where the fine mesh is LOWER than the sample the burial removes fragments that are above the real ground - a static cut that appears as you close in and the fine LOD replaces the coarse. That is a THM-resolution defect (a finer field near the camera, or a distance-scaled skirt) and it is a separate axis from the flip; the fixed pull does not touch it. It is named here so it is not read as a 26542 regression. REPORT 2 UNDER THE 26540 LANES, FIRST READ (dump2 pan, dump3 control): the SEAL-SIDE SPLIT IS ACQUITTED - bandSealInjDxMaxM 0.90 against a still-camera floor of 0.84-0.90 (dump3, dump1: compCamRtM / fireCamSkewM 0.84-0.90 at this pose - the transposed-inverse artifact 26342 named, not a real offset) with bandSealInjRotMaxDeg 4.8 on a pan, no excess; bandStageAtlasMoved 0 again. LATENCY IS THE STORY, AND IT IS BIGGER THAN THE FLOOR: bandEscLandFrMax 14 cycles / bandEscLandMsMax 289 ms (mean 27) on the pan against 4 cycles / 155 ms (mean 40) parked - an escape that asks for a reseal lands up to 14 frames later, six times the 0.05 s near-tier floor, so the floor is NOT what bounds the landing; the capture pipeline is (stage -> pairing view -> commit, pool availability, one cascade per qualifying resolve). And the settle magnitude is measured for the first time: bandResealStepFarMeanM 9.49 / MidMeanM 8.44 / NearMeanM 6.55 with FarMaxM 80.6 - every far-tier reseal moves the baked camera ~9.5 m on this pan, which is HALF the far pair's ~20 m overlap per reseal, so two escapes without a landing put the far pair outside its overlap: bandGapFrames 451, bandGapMaxM 53.18. WHAT IS STILL NOT CONVICTED, honestly: a coherent stale seal is world-registered and should not DISPLACE a shadow, only fail to cover - so either the displaced shadow the operator sees is a coverage failure falling through to a coarser tier / the union at a different registration, or something in the receive walk is not as world-registered as its arithmetic says. That is a one-screenshot question: DEBUG VISUAL 14 (which band answers, in colour) taken at the instant of the offset decides it, and it is the ask below. NO REPORT-2 CODE THIS BUILD. PRE-REGISTERED ACCEPTANCE 26542: (a) dump1 pose, camera parked: prbBotDM holds FLAT across consecutive rows (no alternation), snapReprojArms counting; (b) the ground-contact band no longer flips, parked or moving, and object bases in front stay in front; (c) 331 brings the prbBotDM alternation back alone; (d) a static terrain cut at close range that survives 0/331 alike is the THM-resolution axis, not this. FREE NOW: debug modes 332+, lighting0.y code 43, visual codes 29+.
+//  || 26541 THE LOW-TO-GROUND Z-FIGHT IS THE CONTACT CLAMP READING LAST FRAME'S SNAPSHOT IN THIS FRAME'S SPACE, AND IT FLICKERS WITH THE CAMERA STILL (KH_SNAP_REPROJECT; mode 330 reverts). THE 26540 INSTRUMENT DID NOT RUN - all three dumps the operator returned read khBuildTag 26539 / fieldsN 214 - and it did not need to, because dump1 (the report-1 pose) convicts the mechanism on lanes 26539 already had, and corrects the premise I wrote at 26540. THE READ: 512 rows, camStepM 0.00 on EVERY row - the camera was bit-still - and injNear glides continuously 3.26 <-> 5.01 with 384 CHANGES IN 512 ROWS (a smooth sawtooth: 4.909, 4.906, 4.901 ... 4.730, then 4.024 climbing again), while injFar holds within 0.3 m. The engine's dynamic near wanders every frame at this pose with nothing moving. compositeFarArbs 2429 of 2600 flushes (93%%): the analytic contact clamp ran on essentially every frame. WHAT THE CLAMP DOES WITH THAT: it reads the previous frame's resolved depth AT THIS PIXEL (GuardSceneRaw), decodes it with THIS frame's depthParams (KhSceneMeters), and pulls the fragment min(cap, gap + 0.25) in front when the decoded competitor is nearer and the identity gate calls it terrain (khaTol = max(0.15, thmCell * 0.02) = 0.25 m on this 12.5 m grid). Re-decoding a value written under near n1 with the next row's near n2, at a 300 m standoff, gives a MEDIAN error of 0.48 m and a p90 of 2.71 m across dump1's consecutive rows - 316 of 511 frames over the 0.25 m tolerance - WITH THE CAMERA STILL. And on the majority of box pixels the "competitor" the snapshot holds is OUR OWN SURFACE from the previous frame (we write depth in the composite), so gap is exactly the decode residual and its SIGN decides pull (0.25 m in front of the terrain LOD, band visible) or no pull (khaNone, the LOD eats the band): a coin flip re-tossed by the near glide every frame, on precisely the fragments within tolerance of the ground. That is the flicker, its band (khtClear ramp, 0.25 m tolerance, 0.35 m THM skirt), its absence higher up (khaOff 0, exact raster depth), and - the correction - it does NOT need motion, it needs the near to glide, which this pose does at rest; motion adds the camera-advance term on top (dump1 of 26539: camStepM 3.0 mean, injFar 50-140 m per row on 256 of 511 rows). Two builds of this file already fought this in the STATIC axis (26336 tightened the tolerance, 26337 closed the fail-open); the DYNAMIC error - the same value read in a different frame's space - was never measured until now. THE FIX TAKES THE FRAGMENT INTO THE SNAPSHOT'S FRAME instead of the snapshot into ours: at the resolve, the frame's view*proj is folded in double and rebased to that frame's camera (snapVp / snapCam), and the pair the depth was written under (the engine's when located, else ours - snapPairSrc names it) plus its viewport range ride in snapMeta. In the arb PS the fragment's world position is projected with snapVp, the snapshot is read at the pixel it ACTUALLY landed on, decoded with snapMeta's pair and range, compared against the fragment's view depth IN THAT FRAME (the reprojected clip w), and the identity point is reconstructed along THAT frame's ray from snapCam. Encode churn between the frames drops out by construction (same pair both sides), camera motion drops out by construction (same frame both sides), and the pixel misregistration a rotation used to cause is gone with them; the residual is the parallax between two surfaces at almost the same depth - millimetres at any standoff. THE TIE BAND, named because it is a second decision and not a rider: with the read now honest, our own last-frame surface decodes to the fragment's depth to within millimetres, and a strict `sceneZ < khaD` on that tie is still a coin flip on the sign of the residual. The comparison takes a tie band of 0.05 m + 1e-4 x depth (8 cm at 300 m) so a coplanar competitor - which is us, or a surface we already win against - takes the 0.25 m pull consistently. DISCLOSED: a real object standing within that band BEHIND us is now overtaken by up to 0.30 m instead of 0.25 - the same lie class the pull already tells, 5 cm wider, on a set that already loses to us. Off-screen reprojections (the fragment was outside the previous frame) and any frame without a valid snapshot frame fall back to the 26540 read for that fragment/frame - a strip, not a wrong answer - and snapReprojStands counts the frames. NO ARB SEMANTICS MOVE: the cap, the clearance ramp, the identity tolerance, the up-ramp, mode 52/58/180/181/206/207/208 all read exactly as before on the reprojected quantities. CB: 6 float4 appended at the frame tail (snapVp 4, snapMeta, snapCam), HLSL twin in step, KH_CBFRAME_BYTES %% 16 == 0 holds, parity checked at 231 float4 both sides. The 26540 census stays and now measures the error the OLD read would have taken - arbJitOverTol counting while the artifact is gone is the fix working, not a leak. PRE-REGISTERED ACCEPTANCE 26541, ARMING LANE FIRST: (a) snapReprojArms must count on every arb frame (~= compositeFarArbs since the arm) with snapReprojStands ~0 and snapPairSrc 1 or 2 - Arms 0 means the frame fields never shipped and NOTHING was tested. (b) APPEARANCE: the dump1 pose - low mesh touching terrain or an object base, camera parked, engine near gliding - the ground-contact band must hold steady, no banded/noisy depth flip; then walk and rotate the camera and it must still hold. (c) the base of a game object standing in front of the mesh must stay in front, no lower-part flicker. (d) 330 restores the flip alone with everything above the contact band unchanged - the single-toggle proof. (e) sharpness, fog, cascade receive and every lane outside the arb are byte-identical: the new fields are read only by the arb PS. FORK (rule 1.16 - instrument before touching): if the flip SURVIVES with snapReprojArms counting, the read is honest and the author is the pull MAGNITUDE or the identity gate itself - read visual 10 (cyan = gate suppressed) on the band, and the next suspect is khaTol against a real object base within 0.25 m of the heightfield, which is a classification question, not a reprojection one. If a THIN static seam appears at the contact instead of a flicker, that is the tie band and its two constants are the knob. If the flicker returns ONLY under fast motion, read arbJitCamM: a fragment whose reprojection lands OFF the previous frame took the fallback, and the fix is a wider fallback tie or a second snapshot age. REPORT 2 IS NOT TOUCHED HERE and its instrument still has never run: dump2/dump3 on 26539 read recvBandCamDxM to 15.14 m under a pan against a 1.64 m still-camera floor (dump3), never exceeding what camStepM x recvBandAgeMs predicts, and recvBandNear 0 on every row - the lane covers the NEAREST committed band, not the far tier the report lives at. The 26540 KH_SEAL_LAND_CENSUS lanes are the read for that axis; run them on this build. FREE NOW: debug modes 331+, lighting0.y code 43, visual codes 29+.
+//  || 26540 INSTRUMENT-ONLY BUILD FOR TWO OPERATOR REPORTS, BOTH CONVICTED TO A MECHANISM IN dump1 (26539) AND NEITHER SIZED WELL ENOUGH TO FIX BLIND (KH_ARB_JITTER_CENSUS; KH_SEAL_LAND_CENSUS). MODE 0 IS BYTE-IDENTICAL: no shader edit, no CB field, no fill change, no mode spent - every addition is a counter, a per-row lane, or a pure read at a site that already ran. REPORT 1 - LOW-TO-GROUND Z-FIGHT against terrain and against the base of game objects, within ~0.5-1 m of the ground, absent higher up, worst when the camera moves. CONVICTED TO THE ANALYTIC CONTACT CLAMP (KH_ARB_DEPTH, PSComposite): dump1 has the camera at 275-392 m ASL looking down (camEngAltY 293.784), the arb armed on compositeFarArbs 5797 of 6539 flushes (89%%), and on every arb frame the pull is decided from a competitor depth that is (i) read out of the PREVIOUS frame's resolve (snapAgeInjMs 15, max 139), (ii) decoded with THIS frame's depthParams pair, and (iii) reconstructed into a world point along THIS frame's ray for the khaTol identity test - khaTol = max(0.15, thmCell * 0.02) = 0.25 m on this 12.5 m grid. Every one of those three inputs moves under camera motion: the trace reads injFar/liveFar stepping 50-140 m between CONSECUTIVE frames on 256 of 511 rows (the pair churn), and camStepM 3.0 mean / 9.28 max per frame. Simulated against a competitor at the box's ~300 m standoff, the pair churn alone re-decodes it with a median 0.11 m error and a long tail, and the camera advance since the snapshot adds its projection along the ray - so the reconstructed point walks up and down across a 0.25 m threshold frame to frame and the SAME contact pixel is called terrain (pull in front) one frame and object (no pull) the next. That is the banded/noisy flip, it can only exist inside the contact band (khtClear ramp under 6 m, tolerance 0.25 m, THM skirt 0.35 m - the operator's half-metre-to-a-metre), it cannot exist higher up where khaOff is zero and the box writes the exact raster value, and it needs motion to appear. It is the 26336/26337 soldier's-legs class again with the static tolerance already tightened and the DYNAMIC error never measured. WHAT THIS BUILD MEASURES, because the fix is one of two very different things - re-registering the snapshot read (reproject the fragment into the snapshot's own frame and decode with the snapshot's own pair, a CB-field change) versus simply gating the pull's identity test on a jitter budget - and the choice is the size of each error term: at the snapshot the pair its depth was written under (the engine's when located, else ours) and the camera it was resolved from are recorded (g_snap_pair / g_snap_cam); at each arb injection, on the first staged mesh's ground-contact point, the census computes the decode error a competitor at that distance takes from the pair difference (arbJitPairM), the camera advance along the ray since the snapshot (arbJitCamM), and their vertical component at the reconstructed point (arbJitVertM) against khaTol (arbTolM), and counts frames over tolerance (arbJitOverTol of arbJitFrames). arbSnapNearM / arbInjNearM name the two pairs; snapPairSrc names which pair the snapshot carries (1 engine, 2 our injection, 0 none = the census is void). Per row: arbOn, arbJitPairM, arbJitCamM, arbJitVertM. HOW TO READ IT: if arbJitOverTol tracks the flicker and arbJitVertMaxM is a multiple of arbTolM while the camera moves, the crossing is the author and BOTH terms are sized for the fix; if arbJitOverTol is ~0 through a visible event, the reconstruction is steady and the author is the pull MAGNITUDE itself (gap + 0.25 m spent against a competitor that is not the terrain LOD) - a different fix. arbOn 0 through an event acquits the arb outright. REPORT 2 - CASCADE SHADOWS CAST BY ENGINE OBJECTS ONTO OUR MESH BRIEFLY OFFSET, settling within a fraction of a second, when moving or rotating at certain angles and distances, most present nearing the shadow view distance. THIS IS THE 26475 RE-OPEN, UN-ACTIONED SINCE: that entry named two candidates and the two discriminator lanes that would separate them, and no build since added the lanes. dump1 says the mechanism is LIVE and which half it is NOT: bandCompleteCross 2152 / bandCompleteSame 0 (every completion pairs across the boundary, by design), recvBandAgeMs mean 23 / p95 52 / max 62 ms with recvBandCamDxM to 16.06 m and a positive covariance with camStepM (3.31 - the receive drift rises with speed), bandGapFrames 1160 with bandGapMaxM 21.14, bandBudgetEscapes 32320 - the 26415/26416 escape fires hard and the drift persists past it, exactly 26475's "downstream of the trigger". And the CONTENT half is clean: bandStageAtlasMoved 0 against 12821 commits, bandStageDropAge 0, bandStageWaitMaxMs 31.5 - the 26182 foreign-shadow class is not firing, pairing views arrive inside the window. So the offset this session is LATENCY OF A COHERENT SEAL (candidate (a)) unless the split lane says otherwise, and the number a floor bypass has to be sized from - how far the baked camera is from the live one AT THE MOMENT THE SEAL LANDS - has never been read. THE 26475 LANES, ADDED VERBATIM TO ITS PROTOCOL: escape-to-land latency (bandEscLands / bandEscLandMs / MsMax / MsMean / bandEscLandFr / FrMax - a slot stamps the escape that first requested its reseal and reads the stamp when the reseal lands, at either landing site) and camDx AT LAND (bandEscLandCdxM / CdxMaxM - the committed vcol's baked camera against the injection camera at that instant); the seal-side split proxy (bandSealInjDxM / DxMaxM / bandSealInjRotDeg / RotMaxDeg - the committed vcol camera and forward axis against THIS cycle's injection basis, TO BE READ AGAINST the standing ~1.80 m / ~1.07 deg basis offset this tree already carries in compCamRtM / injRotDeltaDeg - only an EXCESS convicts); and the magnitude the operator SEES at the settle, bandResealStepM (how far the baked camera JUMPED at a reseal), by tier: bandResealStepNear/Mid/FarMaxM and MeanM over bandResealNear/Mid/Far landings. Per row: bandEscLandFr, bandEscLandCdxM, bandResealStepM. HOW TO READ IT: bandEscLandFrMax at 3-4 cycles with bandEscLandCdxM small = the seal is honest and the floor is the whole story - the fix is a rate-budgeted floor bypass (26371 shape) sized so bandEscLandCdxM stays under the tier's overlap; bandSealInjDx/Rot in EXCESS of the standing offset on the frames the shadow is displaced = the seal bakes a camera the pass never had, and the fix is at the pairing, not the cadence; bandResealStepFarMaxM against the far tier's ~20 m overlap says whether the far pair can hold at all at this camera speed. WHAT IS NOT CLAIMED: neither report is fixed by this build. Both mechanisms are convicted from dump1's numbers, and both fixes are one number away - a number no shipped lane reads - which is why this ships as an instrument and not as a fix behind a revert. RUNNING IT (the operator's side, and the only asks): (1) one dump on a low mesh from a moving camera - the report-1 pose - with the flicker visible during the trace window; (2) one CONTROLLED PAIR for report 2 - same shadow, same standoff nearing the shadow view distance, camera panning at a steady rate: one dump with the offset visible in the trace window, then resetRenderStats and one still-camera dump at the same pose. Screenshots of each artifact still welcome; a video clip beats both for the flicker. FREE NOW: debug modes 330+, lighting0.y code 43, visual codes 29+.
 //  || 26539 THE 26537 SNAP HELD THE GRID'S ORIGIN AND NOT ITS SCALE (KH_UNION_R_LATCH; mode 329 reverts). OPERATOR, AFTER 26538 SHIPPED AND BOTH REPORTS READ AS CLOSED: the sawtooth is still there, but ONLY in the regime nobody had isolated yet - far enough from the shadow that the coarse cast is the CORRECT one, moving the camera. Explicitly NOT the 26538 artifact, which showed up close with the sharp and the low-quality edge visible together. A different regime, a different tier, a different mechanism, and the operator separated the two before I did. THE ARITHMETIC, DERIVED FROM dump2's OWN NUMBERS AND NOT ASSUMED. The union texel is 2R/4096 with R = 1.02 * |hf|, and hf is the union of a camera box (constant SIZE, centre stepping in 26448's 2 m cells) with the 26505 caster AABB - so R IS A FUNCTION OF CAMERA POSITION. dump2 reads rad 1169.87 and texel 0.582649 m; at hf 675.42 per axis, one 2 m cell crossing moves one axis by 2 m and takes rad by 2 * 675.42 / 1169.87 = 1.155 m, a texel rescale of 9.87e-4. A SNAP FIXES THE GRID'S ORIGIN; A RESCALE MOVES EVERY BOUNDARY IN PROPORTION TO ITS DISTANCE FROM THAT ORIGIN. Shift per crossing: 0.17 texel at 100 m from centre, 0.68 texel at 400 m, 1.98 texels at the window edge. Two thirds of a texel of grid movement per 2 m of camera travel, bitwise static in between, on the one tier whose texels are decimetres. That is the step, the cadence, and the 'only when far enough away' precondition, all three, and it is why 26537's KH_UNION_TEXEL_SNAP measurably armed (sunUnionSnaps 1424, snap 0.199 m inside a 0.583 m texel) and still left this behind. THE CAMERA BANDS ARE IMMUNE AND THAT IS THE CONTROL: khsh_one's lateral extent is khsh_half * 1.02 with khsh_half a BUILD CONSTANT (2 / 8 / 32 m), so its texel never changes and its snapped origin is sufficient - which is exactly why the 26538 close held for near shadows and this survived only where the union answers. The union is the only fit whose extent is data-dependent, and 26505's caster growth is what made it camera-dependent. THIRD CORRECTION IN THREE BUILDS, AND THE PATTERN IS WORTH MORE THAN THE FIX: 26537 convicted the union snap, 26538 withdrew that and convicted the lit-fallthrough, and 26539 finds the union again - on a property of it I did not check. The snap was necessary and is retained; it was never sufficient, and I called it a fix instead of half of one. THE RULE THIS EARNS: when you stabilise a sampling grid, stabilise BOTH its origin AND its spacing, and state which one you fixed. An origin snap against a drifting texel is a fix that measures clean in every lane it owns while the artifact stays on screen - the 26535 lesson in a new coat. WHY LATCHING AND NOT QUANTISING. Quantising R was considered and rejected on its own arithmetic: a point at 400 m from the centre needs R stable to ~2.4e-4 to stay inside half a texel, while the drift is already 9.87e-4, so any quantum fine enough to matter is finer than the drift itself, and any quantum coarse enough to make crossings rare still steps at every crossing - it buys a rarer sawtooth, not none. Holding the committed radius while it still ENCLOSES the required fit buys exactly none: for a static caster and a wandering camera the requirement oscillates about a metre around a value the latch already covers, so R, the texel and the whole grid are bitwise constant and 26537's snap finally holds the phase it was written to hold. WHAT CHANGES AND ONLY THIS: khsf_rad becomes a held value when the union fit is camera-anchored. Acquisition takes 10% headroom; the held radius is REUSED while it is >= the required one and <= 1.25x it, and re-latched otherwise. R and R_dep both ride it, so the lateral extent, the eye placement, the depth range and the 26505 caster enclosure all move together and the window can never under-cover what the raw fit would have covered. The centre, the snap, the hash, the skip, the bands and every shader are untouched. Under 241 the fit is caster-anchored and already camera-independent, so it is left byte-identical. DISCLOSED TRADE, BOUNDED AND SMALL AND THE WHOLE COST: the union texel is up to 10% coarser than the tightest possible fit - 58 mm on dump2's measured 583 mm - which is two orders under the 0.68-texel step it removes. If the operator ever reads the union as visibly coarser than 26538 on a still frame, that is this headroom and 329 stands it down. SESSION-RESET GAP CLOSED WHILE I WAS IN THERE (banked from the 26536-era audit, unrelated to this artifact but one line away from it): g_sun_union_rad_held and its counters, plus the 26537/26538 lanes g_sun_band_reach / g_sun_band_reach_takes / g_sun_union_snap_m / g_sun_union_texel_m / g_sun_union_snaps / g_cast_chain_code, are now cleared in reset_session_state. A -1 'the fill never ran' sentinel that survives a mission change lies in the next one, which would have quietly broken every arming lane this campaign added. The equivalent FOG lanes (g_fog_below_ext, g_fog_uw_col, g_fog_below_clamp_y) have the same defect and are DELIBERATELY NOT touched here - that is the fog axis's own build, with the fog axis's own acceptance, and it stays banked. PRE-REGISTERED ACCEPTANCE 26539, ARMING LANES FIRST: (a) sunUnionRHolds must DOMINATE sunUnionRelatches while the camera moves and the caster stands still - a hold is a frame whose union texel is bitwise identical to the last one, which is a frame whose grid cannot have re-rolled; relatches ~= union re-fits means the latch is thrashing and nothing was stabilised whatever the screen shows. (b) sunUnionRadHeld must read ~1.10x the raw enclosing radius and hold ONE value across a walk - reading -1 means the latch never took. (c) sunUnionSnaps must keep counting with sunUnionSnapM <= sunUnionTexelM, because the origin snap is still doing half the job and this build depends on it. (d) APPEARANCE: far enough away that the coarse union cast is the correct one, walking the camera, the edge must not step - and this build cannot change sharpness, only the 10% headroom, so a SHARPNESS change either way is a defect and not a success. (e) 329 restores the stepping alone, with 327 still available to remove the origin snap independently - the two halves of the grid are now separately revertible, which is the point. (f) near shadows and every band lane must be unchanged: sunHeroReach above 12 with sunBandReachTakes counting, castChainCode 0, halfDiag pinned at 2 / 8 / 32. FORK (rule 1.16): if the stepping SURVIVES with sunUnionRHolds dominating, the union grid is stable and the union is finally exonerated - go to the OUTER band and read whether it is the tier answering at that range (its window is only +/-32.64 m lateral, so 'far away' may be past it and this may never have been the union at all), and instrument which tier answered before touching any fit. If the step becomes RARER but not absent, the latch is holding but re-latching on camera travel - widen KH_SUN_UNION_R_DROP before anything else, and read sunUnionRelatches against sunVpFitGrows to size it. If the union goes visibly coarser, that is the 10% headroom and KH_SUN_UNION_R_SLACK is the single knob. FREE NOW: debug modes 330+, lighting0.y code 43, visual codes 29+.
 //  || 26538 THE RESIDUAL SAWTOOTH IS THE 26506 LIT-FALLTHROUGH, AND 26537 KILLED ITS PREMISE WITHOUT ME NOTICING (KH_LIT_AUTHORITATIVE; mode 328 re-arms). OPERATOR ON 26537: report 1 CLOSED - shadow sharpness now tracks camera distance alone and not caster distance, which is KH_BAND_SUN_REACH landing exactly as pre-registered. Report 2 SURVIVES, and the screenshot sharpens it far past the original wording: outward from the shadow there is the correct SHARP edge, then a strip of NO shadow at all, then a DETACHED, SOFTER, SAWTOOTHING band of shadow further out still. The operator's own reading is right and is the diagnosis: it is a 'leftover' of the blurry-far-shadow defect, now separated from the sharp edge instead of merged with it. CORRECTION TO MY OWN 26537 DIAGNOSIS, STATED PLAINLY BECAUSE THE FIELD FALSIFIED IT: I convicted the union's missing texel snap as the author of the sawtooth and it is NOT. KH_UNION_TEXEL_SNAP is still correct on its own terms - the union genuinely had no grid phase while all three sibling bands have had one since 26445 - and it stays, but it did not author this artifact and I should not have called it the author on structural evidence alone. sunUnionSnaps is now a plain hygiene lane, not an acceptance criterion. The prediction that DID hold is the one I wrote into the 26537 fork: 'if the snapping survives with sunUnionSnaps counting, the union was never the author and the remaining candidate is the band handoff itself.' That is where this build goes. THE MECHANISM, AND IT IS A THRESHOLD NOT A FADE. SunShadowOcclusion's band admission is 'if (khcN_o > 0.0001f || khlf_off)'. At o == 0.0001 the band answers with ~0 and the fragment reads LIT. One ulp below, the band is skipped ENTIRELY - no return, no carry, no weight - and the next coarser tier answers at FULL strength, which can be 1.0. The returned occlusion therefore JUMPS DISCONTINUOUSLY from lit to whatever the coarser map says, along a contour that is the finer map's own zero-crossing. That is precisely the reported morphology: sharp edge (hero), lit strip (hero's kernel bottomed out, coarse tier not yet answering nonzero at that offset), then the coarse tier's skirt at full strength (the detached blurry band). 26465's KH_TIER_BLEND cannot smooth any of it - the blend runs only on the WINDOW-EDGE weight khtb_w, and this path bypasses the carry that feeds khtb_w, which is why a mechanism built to cross-fade tier boundaries has never touched this one. WHY IT STEPS WITH THE CAMERA AND WHY LONG SHADOWS ARE WORST. Which tier supplies the overwrite depends on which windows contain the fragment, and the windows are CAMERA-ANCHORED at +/-2.04 / 8.16 / 32.64 m lateral - so a fixed ground point leaves the hero after ~2 m of camera walk, the mid after ~8 m, the outer after ~32 m. THREE handoffs, each one jumping the overwriting texel 4x coarser, each one a discrete step in the ghost's position and width: the operator's 'one snap every few metres, up to about three snaps before resetting', with 'resetting' being the walk back. And a long shadow is a LOW sun, where every sun-map texel's ground footprint stretches by 1/tan(elevation) - so both the step magnitude and the skirt width scale with shadow LENGTH. That is the operator's 'worse the further the shadow is from its caster' with caster distance no longer in the mechanism at all, which is exactly why report 1 could close while report 2 did not. THE PREMISE IS DEAD, IN 26506'S OWN WORDS. It shipped on this: 'a band verdict of FULLY LIT is not authoritative - the band depth windows are camera-local (12/48/192 m sun-ward), so an occluder farther along the sun ray (the giant-caster class) is depth-clipped out of every band map and reads as open sky.' KH_BAND_SUN_REACH made that false one build ago: each band now fits its window to the farthest caster whose shadow can land in its own footprint, at any sun-ward distance, and rejects only casters whose shadow lands elsewhere (the ortho's own lateral clip) or which sit past the game's own shadowVisibility. A valid band that says LIT has therefore seen every occluder on that ray. THIS IS THE 26197 CLASS AGAIN AND IT IS MINE THIS TIME: a guard outliving the condition it was built for, one build after I removed the condition, in a chain I had read closely enough to quote. The fix is to retire it, not to soften it - softening a mechanism whose justification is gone buys a smoother wrong answer. WHAT CHANGES AND ONLY THIS: the three band-admission tests stop requiring a nonzero verdict, so a valid band's LIT answer returns or carries exactly as its SHADOWED answer already does. Nothing else in the chain moves - the tier order, the window gates, the soft compares, the blend weights, the union path and its beyond-far presence test are all byte-identical, and the SELF chain was never in scope (26506 was cast-only by construction). LADDER, one decision per flip: 328 re-arms the 26506 fallthrough (lighting0.y code 42) and should restore the ghost outright; 326 now ALSO publishes code 42, because it reverts KH_BAND_SUN_REACH and the fallthrough is the cover for exactly the camera-local windows 326 restores - a revert that leaves its dependant behind is not a revert, and 326 was silently that for one build. 295 becomes an ACCEPTED ALIAS of the default (the mode-64 precedent at 26534) and stays whitelisted so a field flip to it reads as a measured no-op. DISCLOSED TRADE, NAMED RATHER THAN DISCOVERED: 26506 was answering a real case - a caster whose shadow reaches the fragment but which sits past khsr_rad up-sun, or a band whose fit failed and left valid 0. The first is now the game's own shadowVisibility cutting the cast, which is parity and correct; the second is already handled, because an invalid band fails its own sunMetaN.x gate and never answers at all. If a giant caster's interior ever goes lit again the way 26505 describes, that is this build and 328 stands it down. PRE-REGISTERED ACCEPTANCE 26538, ARMING LANE FIRST: (a) castChainCode must read 0 on a mode-0 session - 42 means the fallthrough is still armed and nothing here was tested, -1 means the fire's cast fill never ran at all. (b) APPEARANCE, not mechanism (the 26536 lesson, and 26537 satisfied its mechanism while report 2 stayed on screen): walking the camera continuously past a long shadow, there must be ONE shadow edge and no detached band outside it - no lit strip, no second softer edge, nothing that steps. (c) the sharp edge itself must be unchanged - this build cannot sharpen or blur anything, it can only stop a coarser tier overwriting a finer tier's lit verdict. (d) 328 restores the ghost alone, with sharpness untouched, which is the single-toggle proof that the overwrite and not the quantisation is the author. (e) 26537's result must hold: sunHeroReach above 12 with sunBandReachTakes counting on the same frames. FORK (rule 1.16): if the ghost SURVIVES with castChainCode 0, the fallthrough was not the author and the next suspect is the TIER BLEND itself - khtb_w is built from smoothstep(0.90, 0.99, e) on a window-edge coordinate, so it cross-fades over only e in [0.90, 0.996], a 0.2 m skirt on the hero's 4.08 m window, which is a near-step in world terms; instrument which tier answered before widening anything, because widening the blend zone blind is how a cross-fade becomes a double image. If the ghost dies but a THIN dark line remains exactly at the old contour, that is the 0.0001 threshold surviving as a compare artifact rather than a routing one and the read goes to SunShadowCompareSoft2's kernel weights, not to this chain. FREE NOW: debug modes 329+, lighting0.y code 43, visual codes 29+.
 //  || 26537 SHADOW QUALITY DEPENDED ON DISTANCE FROM THE CASTER BECAUSE ONE CONSTANT DID TWO JOBS, AND THE SAWTOOTH IS THE UNION'S MISSING TEXEL SNAP (KH_BAND_SUN_REACH mode 326; KH_UNION_TEXEL_SNAP mode 327). OPERATOR, TWO REPORTS: (1) shadows cast by our meshes lose quality as they get FAR FROM THEIR CASTER, which should depend on camera distance only - and does, but caster distance also moves it; (2) their edges snap discretely, one step per few metres of camera travel, up to about three steps before it resets, worse exactly where the quality is worse. BOTH ARE ONE SUBSYSTEM AND THE FIRST IS CONVICTED IN THE SOURCE, NOT GUESSED. The camera band ladder gives each band ONE constant for TWO unrelated jobs: KH_SUN_*_HALF (2 / 8 / 32 m) sets the lateral extent and therefore the texel (0.996 / 3.984 / 15.94 mm) - the intended camera-distance quality knob - while KH_SUN_*_DEPTH (12 / 48 / 192 m) sets BOTH the sun-axis window AND the isotropic caster-admission sphere 'khsh_dd <= khsh_dep + khsh_er'. Welded at 6:1, the second number decides WHICH CASTERS EXIST in the map. A caster more than ~12 m from the camera is dropped by the sphere; anything surviving it but more than ~13 m up-sun is clipped by the ortho near plane. Either way the hero map is EMPTY at that ground texel, SunShadowCompareSoft2 reads the 1.0 clear, returns LIT, and 26506's KH_BAND_LIT_FALLTHROUGH walks the fragment down to mid (4x coarser), outer (16x), or the union (~100x at shadowVisibility 200). That is the operator's first report exactly, and it VIOLATES THE 26445 GOVERNING PRINCIPLE IN THIS FILE'S OWN WORDS - 'SHADOW QUALITY MUST NOT VARY WITH THE CASTER SET OR THE CAMERA' - which is why it is a defect and not a knob. I AM NAMING MY OWN LEDGER'S PART IN IT: 26506 disclosed this consequence in writing ('widens the lit-side penumbra skirt to the coarsest band that still answers') and the handoff called it 'field-validated, so invisible rather than absent'. It was not invisible. The trade was mispriced, not undisclosed, and a disclosed trade is not permission to keep it. THE STALE PREMISE, QUOTED FROM THE RASTERIZER STATE: 'The private sun map keeps ORDINARY clipping: its ortho volume is fitted around the casters, so nothing legitimate crosses its near/far planes.' True of the UNION at 26436. FALSE of these bands since 26445/26454 - their volume is fitted around the CAMERA and casters cross the near plane routinely. One shared state, two passes, a justification covering one of them: the 26197 expiry class. FIX 1 SEPARATES THE TWO JOBS AND NOTHING ELSE. Admission becomes the ortho's OWN lateral clip - admit iff the caster's perpendicular offset from the sun axis through the band centre is within khsh_r2 + its enclosing radius - because how far UP-SUN a caster sits has no bearing on whether its shadow lands in this footprint. That axis is bounded instead by khsr_rad, the game's own shadowVisibility, the same number the union eligibility already uses; the ANTI-sun side keeps khsh_dep verbatim. This is STRICTLY CLOSER to the 26445 membership rule than the sphere it replaces - the v2 ledger demands 'ALL casters, clipped by the ortho itself', and this admits exactly what the ortho keeps and rejects exactly what it clips laterally, where the sphere cut through the shadow-relevant volume in a direction the ortho does not. The window then fits the admitted set SUN-WARD ONLY, and khsh_fwd is FLOORED AT khsh_dep, so with no caster farther up-sun than the historic window the eye and the view range reduce to ctr + sun*(dep+1) and 2*dep+2 - BIT-IDENTICAL to 26536, which is the entire validated corpus. Only the previously-broken case moves. Bias is D-invariant by construction (bbw is a world quantity shipped as bbw/d2v). DISCLOSED, the one term that is not: the mode-235 arm's floor khsh_bq = d2v * 4 ulp GROWS with the window (hero 26 m -> 214 m at a 200 m reach takes it from ~1.3 mm to ~10.9 mm of world bias). 235 is a non-default A/B; named so it is recognised rather than rediscovered. FIX 2 - THE UNION IS THE ONE BAND WITH NO TEXEL SNAP AT ALL. Its three siblings have snapped their centre to their own texel grid in the sun plane since 26445, in double since 26465. This fit never has: I scanned the whole span and there is no floor(dot/tex)*tex anywhere in it. What it has instead is the 26448 TWO-METRE CAMERA CELL, introduced to make the unchanged-input hash skip work and never as a grid phase. 2 m is not an integer number of this window's texels (at shadowVisibility 200 the texel is 99.6 mm, so 2 m is 20.078 texels), and the cell steps along WORLD axes while the grid lives in the SUN plane - so every crossing lands the caster silhouette at a fresh sub-texel phase in both sun-plane axes at once. THAT IS 26465'S MECHANISM VERBATIM in the band 26465 declined to fix, and 26465's stated reason was PRECISION ('its ~100 mm texels dwarf the 0.5 mm error by two orders'), which is correct and DOES NOT COVER THE ABSENCE OF A SNAP - a snap that is not there cannot be imprecise, it simply does not hold the phase. The predicted signature is the operator's report: bitwise static between crossings (no shimmer, no crawl), then ONE discrete edge shift of up to a texel per ~2 m of camera travel, with an ARBITRARY period - the phase advance is (2 m projected onto each sun-plane axis) mod texel, so it depends on sun azimuth and heading and beats across three world axes including ALTITUDE, which is why the step count before it wraps is 'about three' rather than a constant. And it is UNION-ONLY, which is why it tracks the first report: the union is what answers once the lit-fallthrough has walked a far-from-caster fragment past every camera band. The fix is the band twin's arithmetic on this fit's own numbers, in double. THE SKIP IS UNAFFECTED, CHECKED RATHER THAN ASSUMED: g_sun_map_hash commits input_hash and never the fit matrix, so the snapped centre is a pure function of already-hashed inputs and stays bitwise static between crossings exactly as the cell centre did. R is not circular - it comes from hf alone, which this does not touch. WHAT I DELIBERATELY DID NOT DO. No shader edit of any kind this build: no HLSL segment moved, no CB field appended, no placement-law surface touched - both fixes are CPU-side fit arithmetic, which is why a build against two motion artifacts can ship without a screenshot to convict it. And I did NOT ship the tier-paint visual I proposed, because the operator is right that a still frame cannot show a temporal artifact and the modes below test both axes by camera movement alone, which is the instrument that actually exists. PRE-REGISTERED ACCEPTANCE 26537, ARMING LANES FIRST. (a) sunHeroReach / sunMidReach / sunOutReach must read ABOVE 12 / 48 / 192 with sunBandReachTakes counting whenever a shadow far from its caster is on screen - all three pinned exactly at 12 / 48 / 192 means no caster was ever farther up-sun than the old window and NOTHING about report 1 was tested whatever the screen shows; -1 means the band never fitted at all. (b) sunUnionSnaps must count with sunUnionSnapM in [0, sunUnionTexelM] - both -1 means the snap never ran and report 2 was not tested. (c) APPEARANCE, not only mechanism (the 26536 lesson): a shadow 50 m from its caster must be as sharp as one 2 m from it AT THE SAME CAMERA DISTANCE - walk to a fixed distance from each and compare, because camera distance is the axis that is SUPPOSED to move quality. (d) walking the camera continuously, a far-from-caster shadow edge must move smoothly or not at all - no discrete step every couple of metres. (e) 326 restores the blur-with-caster-distance alone; 327 restores the snapping alone; each rung isolates one decision, and the two are independent by construction (326 cannot change phase, 327 cannot change sharpness). (f) a shadow NEAR its caster must be byte-identical - hero reach floors at 12, the fit reduces to 2*dep+2, and no lane moves. FORK (rule 1.16 - instrument before touching). If the far shadow is still coarse WITH sunHeroReach reading above 12, the reach armed and the author is downstream of the fit: read sunHeroValid/sunHeroCasters on those frames, because a band that captured the caster but reports valid 0 is a resource or instance-cap failure, not a windowing one. If it is sharp but now shows ACNE or peter-panning at long reach, that is the deepened encode and the suspect is the bias, not the window - read under 235 first, since that arm's floor is the one term that grows with d2v (named above). If the snapping SURVIVES with sunUnionSnaps counting, the union was never the author and the remaining candidate is the band handoff itself: the hero window is only +/-2.04 m laterally, so a fixed ground point leaves it after ~2 m of camera walk, the mid after ~8 m, the outer after ~32 m - three handoffs, each re-quantising the same silhouette on a 4x coarser grid, and 26465's KH_TIER_BLEND cross-fades them over only e in [0.90, 0.996], a 0.2 m skirt on a 4.08 m window. That is a NEAR-STEP in world terms and it is the pre-named next axis; do not widen the blend zone blind - instrument which tier answers first. FREE NOW: debug modes 328+, lighting0.y code 42, visual codes 29+.
@@ -2627,6 +2730,25 @@ cbuffer CBObj : register(b0)
     // fogUw.w arms (0 = 26535 verbatim, mode 325).
     float4 fogUw;
     float4 fogUwGrad;
+    // 26541 KH_SNAP_REPROJECT (C++ twins snap_vp / snap_meta / snap_cam;
+    // appended at the tail, both blocks in step - the 26458 precedent).
+    // The occlusion snapshot's OWN frame: snapVp = world->clip of the
+    // frame the snapshot depth was resolved from, REBASED to snapCam.xyz
+    // (mul(float4(wpos - snapCam.xyz, 1), snapVp)); snapMeta = the pair
+    // that depth was written under (x m22, y m32) and its viewport (z min,
+    // w max); snapCam.w = 1 arms (0 = 26540 verbatim, mode 330).
+    row_major float4x4 snapVp;
+    float4 snapMeta;
+    float4 snapCam;
+    // 26575 KH_SELF_PREFILTER (C++ twin sun_pf; appended at the tail,
+    // both blocks in step). x/y/z = hero/mid/outer moment pyramid armed
+    // this frame (0 = classic taps; mode 357 zeroes all three); w free.
+    float4 sunPf;
+    // 26620 KH_SUN_FAR_BAND: world -> FAR-band sun-depth clip (t32) +
+    // x = valid, y = size, z = bias, w = half-diag. Appended at the tail
+    // so every offset above is byte-identical to 26619.
+    row_major float4x4 sunVP5;
+    float4 sunMeta5;
 };
 )HLSL" R"HLSL(
 // ==========================================================================
@@ -3086,6 +3208,46 @@ Texture2D<float> khSunDepth : register(t11);
 Texture2D<float> khSunDepth2 : register(t25);   // 26444: HERO sun map (KH_SUN_HERO_MAP)
 Texture2D<float> khSunDepth3 : register(t26);   // 26454: MID cascade band (KH_SUN_CASCADE)
 Texture2D<float> khSunDepth4 : register(t27);   // 26454: OUTER cascade band (KH_SUN_CASCADE)
+Texture2D<float> khSunDepth5 : register(t32);   // 26620: FAR band (KH_SUN_FAR_BAND; t28-t31 taken)
+// 26575 KH_SELF_PREFILTER: per-band moment pyramids (mu, E[z^2]) at half
+// resolution + mips; the self kernel samples them under minification.
+Texture2D<float2> khSunPf2 : register(t29);   // hero
+Texture2D<float2> khSunPf3 : register(t30);   // mid
+Texture2D<float2> khSunPf4 : register(t31);   // outer
+SamplerState khPfSamp : register(s1);         // linear-clamp (26575; gauges only since 26584)
+// 26584 KhPfMu - manual trilinear mu fetch (ledger at KH_BUILD_TAG).
+// Linear filtering of RG32F is OPTIONAL support and this GPU point-
+// samples it (the 358 blocky/jitter read; visual 31 G==B). Loads are
+// guaranteed everywhere: bilinear by hand at two integer mips, lerped
+// by the fractional lod. khpb_base = the pyramid mip-0 size in texels.
+float2 KhPfMu(Texture2D<float2> khpb_t, float2 khpb_uv, float khpb_base, float khpb_lod)
+{
+    // 26585: BOTH moments come back (mu, E[z^2]) - the Chebyshev decode
+    // needs the pair (ledger at KH_BUILD_TAG).
+    float khpb_l0 = floor(khpb_lod);
+    float khpb_lw = khpb_lod - khpb_l0;
+    int khpb_m0 = (int)khpb_l0;
+    float2 khpb_r = float2(0.0f, 0.0f);
+    [unroll] for (int khpb_i = 0; khpb_i < 2; ++khpb_i) {
+        int khpb_m = khpb_m0 + khpb_i;
+        float khpb_sz = max(khpb_base / exp2((float)khpb_m), 1.0f);
+        float2 khpb_p = khpb_uv * khpb_sz - 0.5f;
+        float2 khpb_f = frac(khpb_p);
+        int2 khpb_i0 = int2(floor(khpb_p));
+        int2 khpb_mx = int2((int)khpb_sz - 1, (int)khpb_sz - 1);
+        int2 khpb_a = clamp(khpb_i0,             int2(0, 0), khpb_mx);
+        int2 khpb_b = clamp(khpb_i0 + int2(1, 0), int2(0, 0), khpb_mx);
+        int2 khpb_c = clamp(khpb_i0 + int2(0, 1), int2(0, 0), khpb_mx);
+        int2 khpb_d = clamp(khpb_i0 + int2(1, 1), int2(0, 0), khpb_mx);
+        float2 khpb_v = lerp(lerp(khpb_t.Load(int3(khpb_a, khpb_m)).xy,
+                                  khpb_t.Load(int3(khpb_b, khpb_m)).xy, khpb_f.x),
+                             lerp(khpb_t.Load(int3(khpb_c, khpb_m)).xy,
+                                  khpb_t.Load(int3(khpb_d, khpb_m)).xy, khpb_f.x),
+                             khpb_f.y);
+        khpb_r = (khpb_i == 0) ? khpb_v : lerp(khpb_r, khpb_v, khpb_lw);
+    }
+    return khpb_r;
+}
 // 26212 ENGINE SCREEN-SPACE SHADOW MASK. The engine resolves its stencil
 // shadow volumes into a full-screen single-channel buffer and every scene
 // shader reads it as its shadow term. t20 is the only slot in StateBackup's
@@ -3377,7 +3539,18 @@ float KhSunRangeFade(float3 khrf_p)
 {
     if (mirMeta.w < 0.5f) return 1.0f;
     float khrf_d = length(khrf_p - sunOrigin.xyz);
-    return 1.0f - smoothstep(0.85f * mirMeta.w, 0.98f * mirMeta.w, khrf_d);
+    // 26593 KH_RANGE_FADE_LATE (mode 370 / lighting0.y 54 reverts to the
+    // 26464 curve): the fade began at 85% of shadowVisibility and finished
+    // at 98% - a ~30 m band at R=200 that removed self shadows dozens of
+    // metres before the engine's own cascades/stencils stop, visible now
+    // that the noise no longer masks it. The mirror (g_sun_range <- the
+    // game's shadowVisibility config) is healthy - the CURVE was the
+    // author. New curve hugs the eligibility cliff: full until 94%, gone
+    // at 99.5% (the 0.5% guard still completes before the per-caster
+    // cliff at R, preserving the anti-pop contract 26464 shipped for).
+    return 1.0f - ((lighting0.y >= 53.5f && lighting0.y < 54.5f)
+                   ? smoothstep(0.85f * mirMeta.w, 0.98f * mirMeta.w, khrf_d)
+                   : smoothstep(0.94f * mirMeta.w, 0.995f * mirMeta.w, khrf_d));
 }
 
 int2 KhVolPx(float2 khvp_xy)
@@ -4019,6 +4192,66 @@ float SunShadowCompareSoft4(float2 uv, float z)
           + SunShadowCompareBilin4(uv + float2(0.0f,  khcs_o), z)
           + SunShadowCompareBilin4(uv + float2(0.0f, -khcs_o), z)) * 0.2f;
 }
+)HLSL" R"HLSL(// 26620 CHUNK BOUNDARY - the FAR band's compare helpers get their own
+// segment (the 26538 statement-boundary precedent; chunks concatenate,
+// so the 26319 placement law holds: bodies precede every call site).
+// KH_SUN_FAR_BAND tier-5 twins of the tier-2/3/4 helpers, verbatim
+// arithmetic on khSunDepth5/sunMeta5.
+float SunShadowCompareBilin5(float2 uv, float z)
+{
+    float2 kcb5_t = uv * sunMeta5.y - 0.5f;
+    float2 kcb5_f = frac(kcb5_t);
+    int2 kcb5_p = int2(kcb5_t);
+    float kcb5_00 = (z > khSunDepth5.Load(int3(kcb5_p + int2(0, 0), 0))) ? 1.0f : 0.0f;
+    float kcb5_10 = (z > khSunDepth5.Load(int3(kcb5_p + int2(1, 0), 0))) ? 1.0f : 0.0f;
+    float kcb5_01 = (z > khSunDepth5.Load(int3(kcb5_p + int2(0, 1), 0))) ? 1.0f : 0.0f;
+    float kcb5_11 = (z > khSunDepth5.Load(int3(kcb5_p + int2(1, 1), 0))) ? 1.0f : 0.0f;
+    return lerp(lerp(kcb5_00, kcb5_10, kcb5_f.x), lerp(kcb5_01, kcb5_11, kcb5_f.x), kcb5_f.y);
+}
+
+float SunShadowCompareSoft5(float2 uv, float z)
+{
+    if (lighting0.y >= 21.5f && lighting0.y < 22.5f) return SunShadowCompareBilin5(uv, z);
+    float khcs_o = 0.75f / max(sunMeta5.y, 1.0f);
+    return (SunShadowCompareBilin5(uv, z)
+          + SunShadowCompareBilin5(uv + float2( khcs_o, 0.0f), z)
+          + SunShadowCompareBilin5(uv + float2(-khcs_o, 0.0f), z)
+          + SunShadowCompareBilin5(uv + float2(0.0f,  khcs_o), z)
+          + SunShadowCompareBilin5(uv + float2(0.0f, -khcs_o), z)) * 0.2f;
+}
+)HLSL" R"HLSL(
+
+// 26594 KH_TIER_CROSSFADE (mode 371 / lighting0.y 55 reverts to the 26465
+// thin band AND the always-on jurisdiction; full ledger at KH_BUILD_TAG).
+// The 26465 blend band was the outer 10% of each window - 20 cm at hero -
+// which a walking camera crosses in a fraction of a second: alive (the
+// operator's 257 A/B) yet perceptually nothing, while the REMOVED coarse
+// mush had been faking a wide transition (the 367 A/B: the gradual look
+// returns only together with the halo). The cross-fade now spans the outer
+// 40% of every window - hero 80 cm, mid 3.2 m, outer 12.8 m - one helper,
+// all nine blend sites (cast chain, self kernel, contact carries).
+// 26618 KH_TIER_HOLD (mode 388 / code 62 restores the 26594 0.60 start;
+// ledger at KH_BUILD_TAG). KhJw shares this curve: 26617 continuity holds.
+float KhTbW(float khtw_e)
+{
+    return (lighting0.y >= 54.5f && lighting0.y < 55.5f)
+         ? 1.0f - smoothstep(0.90f, 0.99f, khtw_e)
+         : (lighting0.y >= 61.5f && lighting0.y < 62.5f)
+         ? 1.0f - smoothstep(0.60f, 0.98f, khtw_e)
+         : 1.0f - smoothstep(0.75f, 0.98f, khtw_e);
+}
+
+// 26617 KH_JURIS_EDGE_FADE (mode 386 / code 60 reverts; full ledger at
+// KH_BUILD_TAG): the certified-protection WEIGHT. The 26590 mush-zeroing
+// now fades over the certifying tier's own 26594 band instead of ending
+// on a cliff at its window edge. Codes 60 / 55 / 26 pin the hard form.
+float KhJw(float khjw_e)
+{
+    return ((lighting0.y >= 59.5f && lighting0.y < 60.5f) ||
+            (lighting0.y >= 54.5f && lighting0.y < 55.5f) ||
+            (lighting0.y >= 25.5f && lighting0.y < 26.5f))
+         ? 1.0f : KhTbW(khjw_e);
+}
 
 float SunShadowOcclusion(float3 wpos)
 {
@@ -4106,7 +4339,7 @@ float SunShadowOcclusion(float3 wpos)
                 float khc2_o = SunShadowCompareSoft2(khc2_u, khc2_c.z - sunMeta2.z);   // 26455: filtered
                 if (khc2_o > 0.0001f || !khlf_on) {   // 26538: lit is authoritative
                     float khc2_e = max(abs(khc2_u.x - 0.5f), abs(khc2_u.y - 0.5f)) * 2.0f;
-                    float khc2_w = khtb_on ? (1.0f - smoothstep(0.90f, 0.99f, khc2_e)) : 1.0f;
+                    float khc2_w = khtb_on ? KhTbW(khc2_e) : 1.0f;   // 26594
                     if (khc2_w >= 0.9999f) return khc2_o;
                     khtb_occ = khc2_o; khtb_w = khc2_w;   // carry into the mid tier
                 }
@@ -4122,7 +4355,7 @@ float SunShadowOcclusion(float3 wpos)
                 if (khc3_o > 0.0001f || !khlf_on) {   // 26538: lit is authoritative
                     if (khtb_occ >= 0.0f) return lerp(khc3_o, khtb_occ, khtb_w);
                     float khc3_e = max(abs(khc3_u.x - 0.5f), abs(khc3_u.y - 0.5f)) * 2.0f;
-                    float khc3_w = khtb_on ? (1.0f - smoothstep(0.90f, 0.99f, khc3_e)) : 1.0f;
+                    float khc3_w = khtb_on ? KhTbW(khc3_e) : 1.0f;   // 26594
                     if (khc3_w >= 0.9999f) return khc3_o;
                     khtb_occ = khc3_o; khtb_w = khc3_w;   // carry into the outer tier
                 }
@@ -4138,9 +4371,28 @@ float SunShadowOcclusion(float3 wpos)
                 if (khc4_o > 0.0001f || !khlf_on) {   // 26538: lit is authoritative
                     if (khtb_occ >= 0.0f) return lerp(khc4_o, khtb_occ, khtb_w);
                     float khc4_e = max(abs(khc4_u.x - 0.5f), abs(khc4_u.y - 0.5f)) * 2.0f;
-                    float khc4_w = khtb_on ? (1.0f - smoothstep(0.90f, 0.99f, khc4_e)) : 1.0f;
+                    float khc4_w = khtb_on ? KhTbW(khc4_e) : 1.0f;   // 26594
                     if (khc4_w >= 0.9999f) return khc4_o;
-                    khtb_occ = khc4_o; khtb_w = khc4_w;   // carry into the union below
+                    khtb_occ = khc4_o; khtb_w = khc4_w;   // carry into the FAR band (26620)
+                }
+            }
+        }
+)HLSL" R"HLSL(        // 26620 KH_SUN_FAR_BAND cast tier (own segment; ledger at
+        // KH_BUILD_TAG): the range-priced band between the outer and the
+        // union - the khc4 pattern verbatim on sunVP5/sunMeta5.
+        if (sunMeta5.x >= 0.5f) {
+            float4 khc5_c = mul(float4(wpos - sunOrigin.xyz, 1.0f), sunVP5);   // 26458 KH_SUN_ANCHOR
+            float2 khc5_u = float2(0.5f + 0.5f * khc5_c.x, 0.5f - 0.5f * khc5_c.y);
+            if (khc5_u.x > 0.002f && khc5_u.x < 0.998f &&
+                khc5_u.y > 0.002f && khc5_u.y < 0.998f &&
+                khc5_c.z > 0.0f && khc5_c.z < 1.0f) {
+                float khc5_o = SunShadowCompareSoft5(khc5_u, khc5_c.z - sunMeta5.z);   // 26455: filtered
+                if (khc5_o > 0.0001f || !khlf_on) {   // 26538: lit is authoritative
+                    if (khtb_occ >= 0.0f) return lerp(khc5_o, khtb_occ, khtb_w);
+                    float khc5_e = max(abs(khc5_u.x - 0.5f), abs(khc5_u.y - 0.5f)) * 2.0f;
+                    float khc5_w = khtb_on ? KhTbW(khc5_e) : 1.0f;   // 26594
+                    if (khc5_w >= 0.9999f) return khc5_o;
+                    khtb_occ = khc5_o; khtb_w = khc5_w;   // carry into the union below (26620: now one tier later)
                 }
             }
         }
@@ -4234,15 +4486,47 @@ float SunShadowOcclusion(float3 wpos)
 // side interior); the window fade already owns the rim. KNOBS if noise
 // survives: the khno_k crevice damping gain (raise) and cap (lower) at
 // their 26469 ledger - measure before touching.
-float KhSelfTap(float2 khst_t, float2 khst_g, float khst_z, float khst_b, int2 khst_o)
+// ==========================================================================
+// 26572 KH_SELF_SOFT_CMP (lighting0.y 44 / mode 353 restores the hard
+// compare) + KH_SELF_SPREAD_SMOOTH (lighting0.y 45 / mode 354 restores the
+// int spread). THE REPORTED LOCI - camera-grazing z-fight (worse when
+// close), crevice noise, edge shimmer, the noise halo ringing mesh-on-mesh
+// cast shadows - are all camera-locked and static at rest: per-quad
+// derivative terms and interpolation error re-roll only when rasterization
+// changes, and every locus is a NEAR-MARGIN locus where the binary corner
+// compare turns that input noise into 0/1 flips. Two mechanisms, two
+// switches, individually revertible:
+// (1) SOFT COMPARE: each PCF corner returns saturate((e - stored)/w + 0.5)
+// instead of step - continuous in EVERY noisy input at once, which is why
+// it covers all three loci where nine rounds of input-sizing (bias, offset,
+// gradient, spread) each covered one. w rides in as khst_w =
+// max(2*khgs, texelWorld) * iD - the tier's own noise budget (the 26459
+// slack doubled, floored at one texel of depth). CENTERED, so the
+// effective threshold is unmoved; lit-at-bias-margin stays exactly 0
+// because b >= 1.5*tw*iD + khgs*iD > w/2 by construction - no global haze
+// is possible. Fail direction: terminators and contacts soften by <= w;
+// if contact definition visibly suffers, LOWER the 2x khgs gain, never
+// the texel floor. Code 31 (PCF OFF) keeps its point-tap arm on the hard
+// step, bit-faithful at integral spreads.
+// (2) SMOOTH SPREAD: the 26470 spread was int(round(0.5*fwidth)) - a
+// per-quad 1..8 staircase that re-sizes the whole ring footprint quad to
+// quad under motion. Across a cast-shadow edge WHICH side a tap lands on
+// is the whole verdict, so the staircase is blocky noise there and at
+// grazing; the spread is float now, the offsets ride float2, and the
+// bilinear corners already resolve fractional positions.
+// NOT CLAIMED: content undersampling (lit/shadow texel mix under a wide
+// footprint, 9 taps) - if noise survives at the same granularity AND is
+// unchanged under 353, that axis is next; do not widen the band for it.
+// ==========================================================================
+float KhSelfTap(float2 khst_t, float2 khst_g, float khst_z, float khst_b, float khst_w, float2 khst_o)
 {
     if (lighting0.y >= 30.5f && lighting0.y < 31.5f) {
-        int2  khsth_p = int2(khst_t) + khst_o;
+        int2  khsth_p = int2(khst_t) + int2(round(khst_o));   // 26572: code-31 arm, rounded back
         float2 khsth_d = (float2(khsth_p) + 0.5f) - khst_t;
         float khsth_e = khst_z + khsth_d.x * khst_g.x + khsth_d.y * khst_g.y - khst_b;
         return (khsth_e > khSunDepth.Load(int3(khsth_p, 0))) ? 1.0f : 0.0f;
     }
-    float2 khst_tc = khst_t + float2(khst_o) - 0.5f;
+    float2 khst_tc = khst_t + khst_o - 0.5f;   // 26572: fractional offsets land on the corners
     float2 khst_f0 = floor(khst_tc);
     float2 khst_fr = khst_tc - khst_f0;
     int2   khst_p0 = int2(khst_f0);
@@ -4251,7 +4535,10 @@ float KhSelfTap(float2 khst_t, float2 khst_g, float khst_z, float khst_b, int2 k
         int2 khst_q = max(khst_p0 + int2(khst_k & 1, khst_k >> 1), int2(0, 0));
         float2 khst_d = (float2(khst_q) + 0.5f) - khst_t;
         float khst_e = khst_z + khst_d.x * khst_g.x + khst_d.y * khst_g.y - khst_b;
-        khst_c[khst_k] = (khst_e > khSunDepth.Load(int3(khst_q, 0))) ? 1.0f : 0.0f;
+        float khst_s = khSunDepth.Load(int3(khst_q, 0));
+        khst_c[khst_k] = (lighting0.y >= 43.5f && lighting0.y < 44.5f)
+                       ? ((khst_e > khst_s) ? 1.0f : 0.0f)
+                       : saturate((khst_e - khst_s) / max(khst_w, 1.0e-9f) + 0.5f);   // 26572
     }
     return lerp(lerp(khst_c.x, khst_c.y, khst_fr.x),
                 lerp(khst_c.z, khst_c.w, khst_fr.x), khst_fr.y);
@@ -4259,15 +4546,15 @@ float KhSelfTap(float2 khst_t, float2 khst_g, float khst_z, float khst_b, int2 k
 
 // 26444: the HERO-map twin (t25). Identical arithmetic, different texture.
 // 26476 KH_SELF_PCF twin (full ledger at KhSelfTap).
-float KhSelfTap2(float2 khst_t, float2 khst_g, float khst_z, float khst_b, int2 khst_o)
+float KhSelfTap2(float2 khst_t, float2 khst_g, float khst_z, float khst_b, float khst_w, float2 khst_o)
 {
     if (lighting0.y >= 30.5f && lighting0.y < 31.5f) {
-        int2  khsth_p = int2(khst_t) + khst_o;
+        int2  khsth_p = int2(khst_t) + int2(round(khst_o));   // 26572: code-31 arm, rounded back
         float2 khsth_d = (float2(khsth_p) + 0.5f) - khst_t;
         float khsth_e = khst_z + khsth_d.x * khst_g.x + khsth_d.y * khst_g.y - khst_b;
         return (khsth_e > khSunDepth2.Load(int3(khsth_p, 0))) ? 1.0f : 0.0f;
     }
-    float2 khst_tc = khst_t + float2(khst_o) - 0.5f;
+    float2 khst_tc = khst_t + khst_o - 0.5f;   // 26572: fractional offsets land on the corners
     float2 khst_f0 = floor(khst_tc);
     float2 khst_fr = khst_tc - khst_f0;
     int2   khst_p0 = int2(khst_f0);
@@ -4276,7 +4563,10 @@ float KhSelfTap2(float2 khst_t, float2 khst_g, float khst_z, float khst_b, int2 
         int2 khst_q = max(khst_p0 + int2(khst_k & 1, khst_k >> 1), int2(0, 0));
         float2 khst_d = (float2(khst_q) + 0.5f) - khst_t;
         float khst_e = khst_z + khst_d.x * khst_g.x + khst_d.y * khst_g.y - khst_b;
-        khst_c[khst_k] = (khst_e > khSunDepth2.Load(int3(khst_q, 0))) ? 1.0f : 0.0f;
+        float khst_s = khSunDepth2.Load(int3(khst_q, 0));
+        khst_c[khst_k] = (lighting0.y >= 43.5f && lighting0.y < 44.5f)
+                       ? ((khst_e > khst_s) ? 1.0f : 0.0f)
+                       : saturate((khst_e - khst_s) / max(khst_w, 1.0e-9f) + 0.5f);   // 26572
     }
     return lerp(lerp(khst_c.x, khst_c.y, khst_fr.x),
                 lerp(khst_c.z, khst_c.w, khst_fr.x), khst_fr.y);
@@ -4288,15 +4578,15 @@ float KhSelfTap2(float2 khst_t, float2 khst_g, float khst_z, float khst_b, int2 
 // 26454: the MID/OUTER cascade twins (t26/t27; KH_SUN_CASCADE in C++).
 // Identical arithmetic again - the 26444 twin rule, twice more.
 // 26476 KH_SELF_PCF twin (full ledger at KhSelfTap).
-float KhSelfTap3(float2 khst_t, float2 khst_g, float khst_z, float khst_b, int2 khst_o)
+float KhSelfTap3(float2 khst_t, float2 khst_g, float khst_z, float khst_b, float khst_w, float2 khst_o)
 {
     if (lighting0.y >= 30.5f && lighting0.y < 31.5f) {
-        int2  khsth_p = int2(khst_t) + khst_o;
+        int2  khsth_p = int2(khst_t) + int2(round(khst_o));   // 26572: code-31 arm, rounded back
         float2 khsth_d = (float2(khsth_p) + 0.5f) - khst_t;
         float khsth_e = khst_z + khsth_d.x * khst_g.x + khsth_d.y * khst_g.y - khst_b;
         return (khsth_e > khSunDepth3.Load(int3(khsth_p, 0))) ? 1.0f : 0.0f;
     }
-    float2 khst_tc = khst_t + float2(khst_o) - 0.5f;
+    float2 khst_tc = khst_t + khst_o - 0.5f;   // 26572: fractional offsets land on the corners
     float2 khst_f0 = floor(khst_tc);
     float2 khst_fr = khst_tc - khst_f0;
     int2   khst_p0 = int2(khst_f0);
@@ -4305,22 +4595,25 @@ float KhSelfTap3(float2 khst_t, float2 khst_g, float khst_z, float khst_b, int2 
         int2 khst_q = max(khst_p0 + int2(khst_k & 1, khst_k >> 1), int2(0, 0));
         float2 khst_d = (float2(khst_q) + 0.5f) - khst_t;
         float khst_e = khst_z + khst_d.x * khst_g.x + khst_d.y * khst_g.y - khst_b;
-        khst_c[khst_k] = (khst_e > khSunDepth3.Load(int3(khst_q, 0))) ? 1.0f : 0.0f;
+        float khst_s = khSunDepth3.Load(int3(khst_q, 0));
+        khst_c[khst_k] = (lighting0.y >= 43.5f && lighting0.y < 44.5f)
+                       ? ((khst_e > khst_s) ? 1.0f : 0.0f)
+                       : saturate((khst_e - khst_s) / max(khst_w, 1.0e-9f) + 0.5f);   // 26572
     }
     return lerp(lerp(khst_c.x, khst_c.y, khst_fr.x),
                 lerp(khst_c.z, khst_c.w, khst_fr.x), khst_fr.y);
 }
 
 // 26476 KH_SELF_PCF twin (full ledger at KhSelfTap).
-float KhSelfTap4(float2 khst_t, float2 khst_g, float khst_z, float khst_b, int2 khst_o)
+float KhSelfTap4(float2 khst_t, float2 khst_g, float khst_z, float khst_b, float khst_w, float2 khst_o)
 {
     if (lighting0.y >= 30.5f && lighting0.y < 31.5f) {
-        int2  khsth_p = int2(khst_t) + khst_o;
+        int2  khsth_p = int2(khst_t) + int2(round(khst_o));   // 26572: code-31 arm, rounded back
         float2 khsth_d = (float2(khsth_p) + 0.5f) - khst_t;
         float khsth_e = khst_z + khsth_d.x * khst_g.x + khsth_d.y * khst_g.y - khst_b;
         return (khsth_e > khSunDepth4.Load(int3(khsth_p, 0))) ? 1.0f : 0.0f;
     }
-    float2 khst_tc = khst_t + float2(khst_o) - 0.5f;
+    float2 khst_tc = khst_t + khst_o - 0.5f;   // 26572: fractional offsets land on the corners
     float2 khst_f0 = floor(khst_tc);
     float2 khst_fr = khst_tc - khst_f0;
     int2   khst_p0 = int2(khst_f0);
@@ -4329,13 +4622,43 @@ float KhSelfTap4(float2 khst_t, float2 khst_g, float khst_z, float khst_b, int2 
         int2 khst_q = max(khst_p0 + int2(khst_k & 1, khst_k >> 1), int2(0, 0));
         float2 khst_d = (float2(khst_q) + 0.5f) - khst_t;
         float khst_e = khst_z + khst_d.x * khst_g.x + khst_d.y * khst_g.y - khst_b;
-        khst_c[khst_k] = (khst_e > khSunDepth4.Load(int3(khst_q, 0))) ? 1.0f : 0.0f;
+        float khst_s = khSunDepth4.Load(int3(khst_q, 0));
+        khst_c[khst_k] = (lighting0.y >= 43.5f && lighting0.y < 44.5f)
+                       ? ((khst_e > khst_s) ? 1.0f : 0.0f)
+                       : saturate((khst_e - khst_s) / max(khst_w, 1.0e-9f) + 0.5f);   // 26572
     }
     return lerp(lerp(khst_c.x, khst_c.y, khst_fr.x),
                 lerp(khst_c.z, khst_c.w, khst_fr.x), khst_fr.y);
 }
-
-float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
+)HLSL" R"HLSL(// 26620 CHUNK BOUNDARY - KhSelfTap5, the FAR band's RPDB tap (tier-4
+// twin verbatim on khSunDepth5), in its own segment before its caller.
+float KhSelfTap5(float2 khst_t, float2 khst_g, float khst_z, float khst_b, float khst_w, float2 khst_o)
+{
+    if (lighting0.y >= 30.5f && lighting0.y < 31.5f) {
+        int2  khsth_p = int2(khst_t) + int2(round(khst_o));   // 26572: code-31 arm, rounded back
+        float2 khsth_d = (float2(khsth_p) + 0.5f) - khst_t;
+        float khsth_e = khst_z + khsth_d.x * khst_g.x + khsth_d.y * khst_g.y - khst_b;
+        return (khsth_e > khSunDepth5.Load(int3(khsth_p, 0))) ? 1.0f : 0.0f;
+    }
+    float2 khst_tc = khst_t + khst_o - 0.5f;   // 26572: fractional offsets land on the corners
+    float2 khst_f0 = floor(khst_tc);
+    float2 khst_fr = khst_tc - khst_f0;
+    int2   khst_p0 = int2(khst_f0);
+    float4 khst_c;
+    [unroll] for (int khst_k = 0; khst_k < 4; ++khst_k) {
+        int2 khst_q = max(khst_p0 + int2(khst_k & 1, khst_k >> 1), int2(0, 0));
+        float2 khst_d = (float2(khst_q) + 0.5f) - khst_t;
+        float khst_e = khst_z + khst_d.x * khst_g.x + khst_d.y * khst_g.y - khst_b;
+        float khst_s = khSunDepth5.Load(int3(khst_q, 0));
+        khst_c[khst_k] = (lighting0.y >= 43.5f && lighting0.y < 44.5f)
+                       ? ((khst_e > khst_s) ? 1.0f : 0.0f)
+                       : saturate((khst_e - khst_s) / max(khst_w, 1.0e-9f) + 0.5f);   // 26572
+    }
+    return lerp(lerp(khst_c.x, khst_c.y, khst_fr.x),
+                lerp(khst_c.z, khst_c.w, khst_fr.x), khst_fr.y);
+}
+)HLSL" R"HLSL(
+float SunShadowOcclusionSelf(float3 wpos, float3 wrel, float3 nrm)
 {
     if (sunMeta.x < 0.5f) return 0.0f;
     // ==========================================================
@@ -4361,8 +4684,18 @@ float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
     // SAMPLE and is untouched. Placed after the uniform sunMeta gate so
     // the gradient runs in uniform control flow.
     // ==========================================================
-    float khgs = (lighting0.y >= 24.5f && lighting0.y < 25.5f)
-               ? 0.0f : 0.5f * length(fwidth(wpos));
+    // 26574 KH_SELF_REL_INTERP (full ledger at KH_BUILD_TAG; mode 356 /
+    // lighting0.y 46 reverts). Every tier transform below samples with
+    // khwr: default = the metres-scale interpolant (anchor cancelled in
+    // the VS at fp32-exact subtraction), revert arm = the historic
+    // PS-side subtraction of world-absolute wpos - bit-identical to
+    // pre-26574. Uniform branch: fwidth below stays well-defined, and
+    // its value is IDENTICAL either way (sunOrigin is uniform).
+    float3 khwr = (lighting0.y >= 45.5f && lighting0.y < 46.5f)
+                ? (wpos - sunOrigin.xyz) : wrel;
+    const bool khcl = (lighting0.y >= 49.5f && lighting0.y < 50.5f);   // 26588 KH_SELF_CLASSIC (365/366)
+    float khgs = (khcl || (lighting0.y >= 24.5f && lighting0.y < 25.5f))
+               ? 0.0f : 0.5f * length(fwidth(khwr));
     // 26466 NORMAL-OFFSET SAMPLING (mode 259 / lighting0.y 27 reverts) -
     // the second half of the industry-standard pair: the SAMPLE POINT
     // shifts one texel-world along the geometric normal before projecting,
@@ -4424,7 +4757,7 @@ float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
                    * saturate(1.0f - 5.0f * length(fwidth(n)))
                  : min(1.0f + 2.0f * sqrt(saturate(1.0f - ndl * ndl))
                               / max(ndl, 0.15f), 2.0f)
-                   * saturate(1.0f - 5.0f * length(fwidth(n)));
+                   * (khcl ? 1.0f : saturate(1.0f - 5.0f * length(fwidth(n))));   // 26588
     // 26430: NO N.L EARLY-OUT. Ledger at KH_GEOMETRIC_NL_VETO. This line
     // vetoed the lookup on the GEOMETRIC normal while the textured path
     // lights through the MAPPED one - so a back-facing facet that the
@@ -4443,6 +4776,8 @@ float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
     // 26465 KH_TIER_BLEND - the self chain's carry, TWIN of the cast
     // chain's (ledger there; mode 257 / lighting0.y 26 reverts).
     float khtb_occ = -1.0f;
+    float khla_g = 0.0f;   // 26589/26590 jurisdiction radius, metres (ledger at the union block)
+    float khla_w = 0.0f;   // 26617 KhJw protection weight
     float khtb_w = 0.0f;
     const bool khtb_on = !(lighting0.y >= 25.5f && lighting0.y < 26.5f);
     // 26507: the self chain's TWIN of 26506 KH_BAND_LIT_FALLTHROUGH (mode
@@ -4466,7 +4801,7 @@ float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
     if (sunMeta2.x >= 0.5f) {
         float kh2_iR0 = length(float3(sunVP2[0].x, sunVP2[1].x, sunVP2[2].x));
         float kh2_no = khno_k * 2.0f / (max(sunMeta2.y, 1.0f) * max(kh2_iR0, 1e-6f));
-        float4 kh2_c = mul(float4(wpos + n * kh2_no - sunOrigin.xyz, 1.0f), sunVP2);   // 26458/26466
+        float4 kh2_c = mul(float4(khwr + n * kh2_no, 1.0f), sunVP2);   // 26458/26466/26574
         float2 kh2_uv = float2(0.5f + 0.5f * kh2_c.x, 0.5f - 0.5f * kh2_c.y);
 
         if (kh2_uv.x > 0.002f && kh2_uv.x < 0.998f &&
@@ -4479,7 +4814,7 @@ float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
             float kh2_tw = 2.0f / (max(sunMeta2.y, 1.0f) * max(kh2_iR, 1e-6f));
             // 26478 CLAMPED RPDB, DEFAULT-ON (full ledger at khsr_k, the
             // union twin; codes 32/33 zero it, 229/code 14 is an alias now).
-            float kh2_k = (lighting0.y >= 31.5f && lighting0.y < 33.5f)
+            float kh2_k = (khcl || (lighting0.y >= 31.5f && lighting0.y < 33.5f))
                         ? 0.0f : kh2_tw * kh2_iD / max(ndl, 0.02f)
                           * ((lighting0.y >= 38.5f && lighting0.y < 39.5f)
                              ? 1.0f : saturate(1.0f - 3.0f * length(fwidth(n))));   // 26494: damper DEFAULT (280's form); off under the 39 arm
@@ -4501,7 +4836,13 @@ float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
                         : max(sunMeta2.z * kh2_fb,   // 26490 tier-proportional floor (code 37 reverts; ledger at khsr_slope)
                               ((lighting0.y >= 36.5f && lighting0.y < 37.5f) ? 0.0f : 1.5f) * kh2_tw * kh2_iD)
                           + kh2_slope * kh2_tan * kh2_tw * kh2_iD;
-            kh2_b += khgs * kh2_iD;   // 26459 KH_SUN_GRAD_SLACK
+            // 26586 KH_GS_CLAMP (mode 362 / lighting0.y 48 reverts; ledger at
+            // KH_BUILD_TAG): straddling quads measure fore/background
+            // jumps in METRES through fwidth - texel scale is the
+            // honest post-26574 budget.
+            float kh2_gs = (lighting0.y >= 47.5f && lighting0.y < 48.5f)
+                        ? khgs : min(khgs, 4.0f * kh2_tw);
+            kh2_b += kh2_gs * kh2_iD;   // 26459/26586
 )HLSL" R"HLSL(// 26472 CHUNK BOUNDARY (the 26427 precedent; chunks concatenate - the
 // hero-tier contact ledger took this segment past the 16380-byte MSVC
 // token cap).
@@ -4544,7 +4885,7 @@ float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
             // where they fell: real code, wrong mechanisms for THIS
             // artifact. TWIN: tiers 2/3/4.
             // ==========================================================
-            float4 khct2_c = mul(float4(wpos - sunOrigin.xyz, 1.0f), sunVP2);
+            float4 khct2_c = mul(float4(khwr, 1.0f), sunVP2);   // 26574
             float2 khct2_t = float2(0.5f + 0.5f * khct2_c.x,
                                        0.5f - 0.5f * khct2_c.y) * sunMeta2.y;
             float khct2_s = khSunDepth2.Load(int3(int2(khct2_t), 0));
@@ -4553,7 +4894,7 @@ float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
                     (3.0f + 1.5f * kh2_tan) * kh2_tw * kh2_iD) {
                 float kh2_cres = 1.0f;   // distinct occluder provably above
                 float kh2_ce = max(abs(kh2_uv.x - 0.5f), abs(kh2_uv.y - 0.5f)) * 2.0f;
-                float kh2_cbw = khtb_on ? (1.0f - smoothstep(0.90f, 0.99f, kh2_ce)) : 1.0f;
+                float kh2_cbw = khtb_on ? KhTbW(kh2_ce) : 1.0f;   // 26594
                 if (kh2_cbw >= 0.9999f) return kh2_cres;
                 khtb_occ = kh2_cres; khtb_w = kh2_cbw;
             } else {
@@ -4582,26 +4923,92 @@ float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
             // four tiers.
             // ==========================================================
             float2 kh2_fw = fwidth(kh2_t);
-            int kh2_sp = (lighting0.y >= 27.5f && lighting0.y < 28.5f)
-                          ? 1 : clamp(int(round(0.5f * max(kh2_fw.x, kh2_fw.y))), 1, 8);
+            // 26572 smooth spread + soft band (ledger at KhSelfTap; 45/44 revert)
+            // 26591 KH_SPREAD_STRADDLE_GUARD (mode 368 / lighting0.y 52
+            // reverts; full ledger at KH_BUILD_TAG): a quad whose raw khgs
+            // exceeds the 26586 texel clamp measured a metres-class
+            // fore/background jump through fwidth - its footprint estimate
+            // is garbage, and a blown ring reads ACROSS the shadow
+            // boundary (the crevice fireflies at 4/9 and the edge dither
+            // at ~4.6/9, measured). Straddling quads pin to spread 1;
+            // honest minified quads keep the full spread. TWIN: 4 tiers.
+            float kh2_sp = (khcl || (lighting0.y >= 27.5f && lighting0.y < 28.5f)
+                            || (khgs > 4.0f * kh2_tw && !(lighting0.y >= 51.5f && lighting0.y < 52.5f)))
+                          ? 1.0f
+                          : (lighting0.y >= 44.5f && lighting0.y < 45.5f)
+                          ? float(clamp(int(round(0.5f * max(kh2_fw.x, kh2_fw.y))), 1, 8))
+                          : clamp(0.5f * max(kh2_fw.x, kh2_fw.y), 1.0f, 8.0f);
+            float khsw2 = max(2.0f * kh2_gs, kh2_tw) * kh2_iD;   // 26586: clamped slack
             // 26489 diamond ring (code 36 restores 3x3; ledger at khsr_slope)
-            float kh2_ctr = KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, int2( 0,  0));
-            float kh2_rng = KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, int2( 0, -1) * kh2_sp)
-                          + KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, int2(-1,  0) * kh2_sp)
-                          + KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, int2( 1,  0) * kh2_sp)
-                          + KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, int2( 0,  1) * kh2_sp);
+            float kh2_ctr = KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, khsw2, float2( 0,  0));
+            float kh2_rng = KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, khsw2, float2( 0, -1) * kh2_sp)
+                          + KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, khsw2, float2(-1,  0) * kh2_sp)
+                          + KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, khsw2, float2( 1,  0) * kh2_sp)
+                          + KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, khsw2, float2( 0,  1) * kh2_sp);
             float kh2_cnt = 4.0f;
             if (!(lighting0.y >= 37.5f && lighting0.y < 38.5f)) {   // 26491: 3x3 DEFAULT again (field: close-range worse under the diamond; 38 arms the diamond; 36 now an alias)
-                kh2_rng += KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, int2(-1, -1) * kh2_sp)
-                         + KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, int2( 1, -1) * kh2_sp)
-                         + KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, int2(-1,  1) * kh2_sp)
-                         + KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, int2( 1,  1) * kh2_sp);
+                kh2_rng += KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, khsw2, float2(-1, -1) * kh2_sp)
+                         + KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, khsw2, float2( 1, -1) * kh2_sp)
+                         + KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, khsw2, float2(-1,  1) * kh2_sp)
+                         + KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, khsw2, float2( 1,  1) * kh2_sp);
                 kh2_cnt = 8.0f;
             }
             float kh2_res = (kh2_ctr + kh2_rng) / (1.0f + kh2_cnt);
+            // 26575 KH_SELF_PREFILTER (mode 357 zeroes sunPf; C++ ledger at
+            // KH_BUILD_TAG): under minification the tap verdict blends toward
+            // the pyramid's filtered-mean verdict (26576) - the true footprint
+            // average the sparse ring cannot reach.
+            if (sunPf.x >= 0.5f && !khcl) {   // 26588
+                float kh2_ft = max(kh2_fw.x, kh2_fw.y);
+                // 26577: engagement covers the moire band (ft 1-2, where the
+                // old 1.5 floor left the worst aliasing unserved).
+                float kh2_pw = (khgs > 4.0f * kh2_tw && !(lighting0.y >= 51.5f && lighting0.y < 52.5f))
+                             ? 0.0f : smoothstep(1.0f, 2.0f, kh2_ft);   // 26591
+                // 26577 lighting0.y 47 (mode 358): PF-EXCLUSIVE instrument arm.
+                bool kh2_px = (lighting0.y >= 46.5f && lighting0.y < 47.5f);
+                if (kh2_pw > 0.001f || kh2_px) {
+                    float kh2_lod = log2(max(kh2_ft * 0.5f, 1.0f));
+                    // 26576: Chebyshev RETIRED (fp32 cancellation conviction
+                    // in the C++ ledger; the 624 m reach-fitted window). The
+                    // filtered MEAN is the precision-sound channel: soft
+                    // compare over the footprint depth ramp. Interiors cannot
+                    // bleed - the filtered depth there IS the occluder.
+                    // 26585: Chebyshev on the moment pair, two floors -
+                    // precision (2.5e-7, the fp32 cancellation ulp at the
+                    // measured mu band) and the texel ramp W^2 (where the
+                    // variance is unmeasurable this DEGENERATES into the
+                    // 26576 soft compare). Manual trilinear kept; ledger at
+                    // KH_BUILD_TAG.
+                    float2 kh2_mv = KhPfMu(khSunPf2, kh2_uv, sunMeta2.y * 0.5f, kh2_lod);
+                    float kh2_vd = (kh2_c.z - kh2_b) - kh2_mv.x;
+                    float kh2_ww = max(kh2_ft, 2.0f) * kh2_tw * kh2_iD;
+                    float kh2_s2 = max(kh2_mv.y - kh2_mv.x * kh2_mv.x,
+                                         max(2.5e-7f, kh2_ww * kh2_ww));
+                    float kh2_vv = kh2_vd <= 0.0f ? 1.0f
+                                 : saturate(kh2_s2 / (kh2_s2 + kh2_vd * kh2_vd));
+                    float kh2_pfo = 1.0f - saturate((kh2_vv - 0.4f) / 0.6f);
+                    // 26577 guards (ledger at KH_BUILD_TAG): the pf blend
+                    // cannot create tier standing (26506 fallthrough contract)
+                    // and yields to the taps on gross disagreement - the
+                    // pyramid derives from the same depth texels, so honest
+                    // inputs cannot read occluded-vs-lit at once.
+                    if (kh2_px) kh2_res = kh2_pfo;
+                    // 26578: honest content may CREATE standing - absent
+                    // content reads pfo ~ 0 and still falls through.
+                    else if ((kh2_res > 0.0001f || kh2_pfo > 0.2f) &&
+                             !(kh2_res > 0.8f && kh2_pfo < 0.2f))
+                        kh2_res = lerp(kh2_res, kh2_pfo, kh2_pw);
+                }
+            }
+            if (abs(kh2_c.z - khSunDepth2.Load(int3(int2(kh2_t), 0))) < 3.0f * kh2_b) {
+                // 26590/26617: hero's certified guard - 6:1 on the half
+                // (the KH_SUN_CASCADE ratio; = 12 m, hero is unscaled).
+                khla_g = 6.0f * sunMeta2.w;
+                khla_w = KhJw(max(abs(kh2_uv.x - 0.5f), abs(kh2_uv.y - 0.5f)) * 2.0f);
+            }
             if (kh2_res > 0.0001f || khlfs_off) {   // 26507: lit falls through
                 float kh2_e = max(abs(kh2_uv.x - 0.5f), abs(kh2_uv.y - 0.5f)) * 2.0f;
-                float kh2_bw = khtb_on ? (1.0f - smoothstep(0.90f, 0.99f, kh2_e)) : 1.0f;
+                float kh2_bw = khtb_on ? KhTbW(kh2_e) : 1.0f;   // 26594
                 if (kh2_bw >= 0.9999f) return kh2_res;
                 khtb_occ = kh2_res; khtb_w = kh2_bw;   // 26465: carry into the mid tier
             }
@@ -4624,7 +5031,7 @@ float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
     if (sunMeta3.x >= 0.5f) {
         float kh3_iR0 = length(float3(sunVP3[0].x, sunVP3[1].x, sunVP3[2].x));
         float kh3_no = khno_k * 2.0f / (max(sunMeta3.y, 1.0f) * max(kh3_iR0, 1e-6f));
-        float4 kh3_c = mul(float4(wpos + n * kh3_no - sunOrigin.xyz, 1.0f), sunVP3);   // 26458/26466
+        float4 kh3_c = mul(float4(khwr + n * kh3_no, 1.0f), sunVP3);   // 26458/26466/26574
         float2 kh3_uv = float2(0.5f + 0.5f * kh3_c.x, 0.5f - 0.5f * kh3_c.y);
 
         if (kh3_uv.x > 0.002f && kh3_uv.x < 0.998f &&
@@ -4637,7 +5044,7 @@ float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
             float kh3_tw = 2.0f / (max(sunMeta3.y, 1.0f) * max(kh3_iR, 1e-6f));
             // 26478 CLAMPED RPDB, DEFAULT-ON (full ledger at khsr_k, the
             // union twin; codes 32/33 zero it, 229/code 14 is an alias now).
-            float kh3_k = (lighting0.y >= 31.5f && lighting0.y < 33.5f)
+            float kh3_k = (khcl || (lighting0.y >= 31.5f && lighting0.y < 33.5f))
                         ? 0.0f : kh3_tw * kh3_iD / max(ndl, 0.02f)
                           * ((lighting0.y >= 38.5f && lighting0.y < 39.5f)
                              ? 1.0f : saturate(1.0f - 3.0f * length(fwidth(n))));   // 26494: damper DEFAULT (280's form); off under the 39 arm
@@ -4659,9 +5066,15 @@ float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
                         : max(sunMeta3.z * kh3_fb,   // 26490 tier-proportional floor (code 37 reverts; ledger at khsr_slope)
                               ((lighting0.y >= 36.5f && lighting0.y < 37.5f) ? 0.0f : 1.5f) * kh3_tw * kh3_iD)
                           + kh3_slope * kh3_tan * kh3_tw * kh3_iD;
-            kh3_b += khgs * kh3_iD;   // 26459 KH_SUN_GRAD_SLACK
+            // 26586 KH_GS_CLAMP (mode 362 / lighting0.y 48 reverts; ledger at
+            // KH_BUILD_TAG): straddling quads measure fore/background
+            // jumps in METRES through fwidth - texel scale is the
+            // honest post-26574 budget.
+            float kh3_gs = (lighting0.y >= 47.5f && lighting0.y < 48.5f)
+                        ? khgs : min(khgs, 4.0f * kh3_tw);
+            kh3_b += kh3_gs * kh3_iD;   // 26459/26586
             // 26472 contact shortcut - twin (ledger at the hero tier).
-            float4 khct3_c = mul(float4(wpos - sunOrigin.xyz, 1.0f), sunVP3);
+            float4 khct3_c = mul(float4(khwr, 1.0f), sunVP3);   // 26574
             float2 khct3_t = float2(0.5f + 0.5f * khct3_c.x,
                                        0.5f - 0.5f * khct3_c.y) * sunMeta3.y;
             float khct3_s = khSunDepth3.Load(int3(int2(khct3_t), 0));
@@ -4670,7 +5083,7 @@ float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
                     (3.0f + 1.5f * kh3_tan) * kh3_tw * kh3_iD) {
                 float kh3_cres = 1.0f;   // distinct occluder provably above
                 float kh3_ce = max(abs(kh3_uv.x - 0.5f), abs(kh3_uv.y - 0.5f)) * 2.0f;
-                float kh3_cbw = khtb_on ? (1.0f - smoothstep(0.90f, 0.99f, kh3_ce)) : 1.0f;
+                float kh3_cbw = khtb_on ? KhTbW(kh3_ce) : 1.0f;   // 26594
                 if (khtb_occ >= 0.0f) return lerp(kh3_cres, khtb_occ, khtb_w);
                 if (kh3_cbw >= 0.9999f) return kh3_cres;
                 khtb_occ = kh3_cres; khtb_w = kh3_cbw;
@@ -4696,42 +5109,113 @@ float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
                         ? saturate(0.001f / max(kh3_tw, 1e-6f)) : 1.0f;
             // 26470 footprint spread - twin (full ledger at the hero tier).
             float2 kh3_fw = fwidth(kh3_t);
-            int kh3_sp = (lighting0.y >= 27.5f && lighting0.y < 28.5f)
-                          ? 1 : clamp(int(round(0.5f * max(kh3_fw.x, kh3_fw.y))), 1, 8);
+            // 26572 smooth spread + soft band (ledger at KhSelfTap; 45/44 revert)
+            // 26591 straddle guard - twin (ledger at the hero tier).
+            float kh3_sp = (khcl || (lighting0.y >= 27.5f && lighting0.y < 28.5f)
+                            || (khgs > 4.0f * kh3_tw && !(lighting0.y >= 51.5f && lighting0.y < 52.5f)))
+                          ? 1.0f
+                          : (lighting0.y >= 44.5f && lighting0.y < 45.5f)
+                          ? float(clamp(int(round(0.5f * max(kh3_fw.x, kh3_fw.y))), 1, 8))
+                          : clamp(0.5f * max(kh3_fw.x, kh3_fw.y), 1.0f, 8.0f);
+            float khsw3 = max(2.0f * kh3_gs, kh3_tw) * kh3_iD;   // 26586: clamped slack
             // 26489 diamond ring (code 36 restores 3x3; ledger at khsr_slope)
-            float kh3_ctr = KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, int2( 0,  0));
-            float kh3_rng = KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, int2( 0, -1) * kh3_sp)
-                          + KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, int2(-1,  0) * kh3_sp)
-                          + KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, int2( 1,  0) * kh3_sp)
-                          + KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, int2( 0,  1) * kh3_sp);
+            float kh3_ctr = KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, khsw3, float2( 0,  0));
+            float kh3_rng = KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, khsw3, float2( 0, -1) * kh3_sp)
+                          + KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, khsw3, float2(-1,  0) * kh3_sp)
+                          + KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, khsw3, float2( 1,  0) * kh3_sp)
+                          + KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, khsw3, float2( 0,  1) * kh3_sp);
             float kh3_cnt = 4.0f;
             if (!(lighting0.y >= 37.5f && lighting0.y < 38.5f)) {   // 26491: 3x3 DEFAULT again (field: close-range worse under the diamond; 38 arms the diamond; 36 now an alias)
-                kh3_rng += KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, int2(-1, -1) * kh3_sp)
-                         + KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, int2( 1, -1) * kh3_sp)
-                         + KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, int2(-1,  1) * kh3_sp)
-                         + KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, int2( 1,  1) * kh3_sp);
+                kh3_rng += KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, khsw3, float2(-1, -1) * kh3_sp)
+                         + KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, khsw3, float2( 1, -1) * kh3_sp)
+                         + KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, khsw3, float2(-1,  1) * kh3_sp)
+                         + KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, khsw3, float2( 1,  1) * kh3_sp);
                 kh3_cnt = 8.0f;
             }
             float kh3_res = (kh3_ctr + kh3_w * kh3_rng) / (1.0f + kh3_cnt * kh3_w);
+            // 26575 KH_SELF_PREFILTER (mode 357 zeroes sunPf; C++ ledger at
+            // KH_BUILD_TAG): under minification the tap verdict blends toward
+            // the pyramid's filtered-mean verdict (26576) - the true footprint
+            // average the sparse ring cannot reach.
+            if (sunPf.y >= 0.5f && !khcl) {   // 26588
+                float kh3_ft = max(kh3_fw.x, kh3_fw.y);
+                // 26577: engagement covers the moire band (ft 1-2, where the
+                // old 1.5 floor left the worst aliasing unserved).
+                float kh3_pw = (khgs > 4.0f * kh3_tw && !(lighting0.y >= 51.5f && lighting0.y < 52.5f))
+                             ? 0.0f : smoothstep(1.0f, 2.0f, kh3_ft);   // 26591
+                // 26577 lighting0.y 47 (mode 358): PF-EXCLUSIVE instrument arm.
+                bool kh3_px = (lighting0.y >= 46.5f && lighting0.y < 47.5f);
+                if (kh3_pw > 0.001f || kh3_px) {
+                    float kh3_lod = log2(max(kh3_ft * 0.5f, 1.0f));
+                    // 26576: Chebyshev RETIRED (fp32 cancellation conviction
+                    // in the C++ ledger; the 624 m reach-fitted window). The
+                    // filtered MEAN is the precision-sound channel: soft
+                    // compare over the footprint depth ramp. Interiors cannot
+                    // bleed - the filtered depth there IS the occluder.
+                    // 26585: Chebyshev on the moment pair, two floors -
+                    // precision (2.5e-7, the fp32 cancellation ulp at the
+                    // measured mu band) and the texel ramp W^2 (where the
+                    // variance is unmeasurable this DEGENERATES into the
+                    // 26576 soft compare). Manual trilinear kept; ledger at
+                    // KH_BUILD_TAG.
+                    float2 kh3_mv = KhPfMu(khSunPf3, kh3_uv, sunMeta3.y * 0.5f, kh3_lod);
+                    float kh3_vd = (kh3_c.z - kh3_b) - kh3_mv.x;
+                    float kh3_ww = max(kh3_ft, 2.0f) * kh3_tw * kh3_iD;
+                    float kh3_s2 = max(kh3_mv.y - kh3_mv.x * kh3_mv.x,
+                                         max(2.5e-7f, kh3_ww * kh3_ww));
+                    float kh3_vv = kh3_vd <= 0.0f ? 1.0f
+                                 : saturate(kh3_s2 / (kh3_s2 + kh3_vd * kh3_vd));
+                    float kh3_pfo = 1.0f - saturate((kh3_vv - 0.4f) / 0.6f);
+                    // 26577 guards (ledger at KH_BUILD_TAG): the pf blend
+                    // cannot create tier standing (26506 fallthrough contract)
+                    // and yields to the taps on gross disagreement - the
+                    // pyramid derives from the same depth texels, so honest
+                    // inputs cannot read occluded-vs-lit at once.
+                    if (kh3_px) kh3_res = kh3_pfo;
+                    // 26578: honest content may CREATE standing - absent
+                    // content reads pfo ~ 0 and still falls through.
+                    else if ((kh3_res > 0.0001f || kh3_pfo > 0.2f) &&
+                             !(kh3_res > 0.8f && kh3_pfo < 0.2f))
+                        kh3_res = lerp(kh3_res, kh3_pfo, kh3_pw);
+                }
+            }
+            float kh3_js = khSunDepth3.Load(int3(int2(kh3_t), 0));   // 26590
+            if (khla_g > 0.5f && kh3_res > 0.0001f &&
+                (kh3_c.z - kh3_js) < khla_g * kh3_iD &&
+                (khtb_occ < 0.0f || (lighting0.y >= 54.5f && lighting0.y < 55.5f)) &&
+                !(lighting0.y >= 50.5f && lighting0.y < 51.5f))
+                kh3_res *= 1.0f - khla_w;   // 26590/26617: rejection at the certifier's edge weight
+            if (abs(kh3_c.z - kh3_js) < 3.0f * kh3_b) {   // 26590/26617
+                khla_g = max(khla_g, (lighting0.y >= 60.5f && lighting0.y < 61.5f)
+                                     ? 48.0f : 6.0f * sunMeta3.w);   // code 61: fixed guard
+                khla_w = KhJw(max(abs(kh3_uv.x - 0.5f), abs(kh3_uv.y - 0.5f)) * 2.0f);
+            }
             if (kh3_res > 0.0001f || khlfs_off) {   // 26507: lit falls through
                 if (khtb_occ >= 0.0f) return lerp(kh3_res, khtb_occ, khtb_w);   // 26465
                 float kh3_e = max(abs(kh3_uv.x - 0.5f), abs(kh3_uv.y - 0.5f)) * 2.0f;
-                float kh3_bw = khtb_on ? (1.0f - smoothstep(0.90f, 0.99f, kh3_e)) : 1.0f;
+                float kh3_bw = khtb_on ? KhTbW(kh3_e) : 1.0f;   // 26594
                 if (kh3_bw >= 0.9999f) return kh3_res;
                 khtb_occ = kh3_res; khtb_w = kh3_bw;   // 26465: carry onward
             }
             }
         }
     }
+)HLSL" R"HLSL(    // 26572 CHUNK BOUNDARY (the 26427 precedent; chunks concatenate -
+    // the smooth-spread + soft-band edits took the mid/outer tier segment
+    // past the 16380-byte MSVC token cap).
+    // 26624 KH_FAR_SELF_SCOPE: whether the OUTER band's window held this
+    // fragment - the far self tier stands silent inside it (ledger there).
+    bool kh4_in = false;
     if (sunMeta4.x >= 0.5f) {
         float kh4_iR0 = length(float3(sunVP4[0].x, sunVP4[1].x, sunVP4[2].x));
         float kh4_no = khno_k * 2.0f / (max(sunMeta4.y, 1.0f) * max(kh4_iR0, 1e-6f));
-        float4 kh4_c = mul(float4(wpos + n * kh4_no - sunOrigin.xyz, 1.0f), sunVP4);   // 26458/26466
+        float4 kh4_c = mul(float4(khwr + n * kh4_no, 1.0f), sunVP4);   // 26458/26466/26574
         float2 kh4_uv = float2(0.5f + 0.5f * kh4_c.x, 0.5f - 0.5f * kh4_c.y);
 
         if (kh4_uv.x > 0.002f && kh4_uv.x < 0.998f &&
             kh4_uv.y > 0.002f && kh4_uv.y < 0.998f &&
             kh4_c.z > 0.0f && kh4_c.z < 1.0f) {
+            kh4_in = true;   // 26624
             float3 kh4_cr = float3(sunVP4[0].x, sunVP4[1].x, sunVP4[2].x);
             float3 kh4_cu = float3(sunVP4[0].y, sunVP4[1].y, sunVP4[2].y);
             float kh4_iR = length(kh4_cr);
@@ -4739,7 +5223,7 @@ float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
             float kh4_tw = 2.0f / (max(sunMeta4.y, 1.0f) * max(kh4_iR, 1e-6f));
             // 26478 CLAMPED RPDB, DEFAULT-ON (full ledger at khsr_k, the
             // union twin; codes 32/33 zero it, 229/code 14 is an alias now).
-            float kh4_k = (lighting0.y >= 31.5f && lighting0.y < 33.5f)
+            float kh4_k = (khcl || (lighting0.y >= 31.5f && lighting0.y < 33.5f))
                         ? 0.0f : kh4_tw * kh4_iD / max(ndl, 0.02f)
                           * ((lighting0.y >= 38.5f && lighting0.y < 39.5f)
                              ? 1.0f : saturate(1.0f - 3.0f * length(fwidth(n))));   // 26494: damper DEFAULT (280's form); off under the 39 arm
@@ -4761,9 +5245,15 @@ float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
                         : max(sunMeta4.z * kh4_fb,   // 26490 tier-proportional floor (code 37 reverts; ledger at khsr_slope)
                               ((lighting0.y >= 36.5f && lighting0.y < 37.5f) ? 0.0f : 1.5f) * kh4_tw * kh4_iD)
                           + kh4_slope * kh4_tan * kh4_tw * kh4_iD;
-            kh4_b += khgs * kh4_iD;   // 26459 KH_SUN_GRAD_SLACK
+            // 26586 KH_GS_CLAMP (mode 362 / lighting0.y 48 reverts; ledger at
+            // KH_BUILD_TAG): straddling quads measure fore/background
+            // jumps in METRES through fwidth - texel scale is the
+            // honest post-26574 budget.
+            float kh4_gs = (lighting0.y >= 47.5f && lighting0.y < 48.5f)
+                        ? khgs : min(khgs, 4.0f * kh4_tw);
+            kh4_b += kh4_gs * kh4_iD;   // 26459/26586
             // 26472 contact shortcut - twin (ledger at the hero tier).
-            float4 khct4_c = mul(float4(wpos - sunOrigin.xyz, 1.0f), sunVP4);
+            float4 khct4_c = mul(float4(khwr, 1.0f), sunVP4);   // 26574
             float2 khct4_t = float2(0.5f + 0.5f * khct4_c.x,
                                        0.5f - 0.5f * khct4_c.y) * sunMeta4.y;
             float khct4_s = khSunDepth4.Load(int3(int2(khct4_t), 0));
@@ -4772,7 +5262,7 @@ float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
                     (3.0f + 1.5f * kh4_tan) * kh4_tw * kh4_iD) {
                 float kh4_cres = 1.0f;   // distinct occluder provably above
                 float kh4_ce = max(abs(kh4_uv.x - 0.5f), abs(kh4_uv.y - 0.5f)) * 2.0f;
-                float kh4_cbw = khtb_on ? (1.0f - smoothstep(0.90f, 0.99f, kh4_ce)) : 1.0f;
+                float kh4_cbw = khtb_on ? KhTbW(kh4_ce) : 1.0f;   // 26594
                 if (khtb_occ >= 0.0f) return lerp(kh4_cres, khtb_occ, khtb_w);
                 if (kh4_cbw >= 0.9999f) return kh4_cres;
                 khtb_occ = kh4_cres; khtb_w = kh4_cbw;
@@ -4798,37 +5288,288 @@ float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
                         ? saturate(0.001f / max(kh4_tw, 1e-6f)) : 1.0f;
             // 26470 footprint spread - twin (full ledger at the hero tier).
             float2 kh4_fw = fwidth(kh4_t);
-            int kh4_sp = (lighting0.y >= 27.5f && lighting0.y < 28.5f)
-                          ? 1 : clamp(int(round(0.5f * max(kh4_fw.x, kh4_fw.y))), 1, 8);
+            // 26572 smooth spread + soft band (ledger at KhSelfTap; 45/44 revert)
+            // 26591 straddle guard - twin (ledger at the hero tier).
+            float kh4_sp = (khcl || (lighting0.y >= 27.5f && lighting0.y < 28.5f)
+                            || (khgs > 4.0f * kh4_tw && !(lighting0.y >= 51.5f && lighting0.y < 52.5f)))
+                          ? 1.0f
+                          : (lighting0.y >= 44.5f && lighting0.y < 45.5f)
+                          ? float(clamp(int(round(0.5f * max(kh4_fw.x, kh4_fw.y))), 1, 8))
+                          : clamp(0.5f * max(kh4_fw.x, kh4_fw.y), 1.0f, 8.0f);
+            float khsw4 = max(2.0f * kh4_gs, kh4_tw) * kh4_iD;   // 26586: clamped slack
             // 26489 diamond ring (code 36 restores 3x3; ledger at khsr_slope)
-            float kh4_ctr = KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, int2( 0,  0));
-            float kh4_rng = KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, int2( 0, -1) * kh4_sp)
-                          + KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, int2(-1,  0) * kh4_sp)
-                          + KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, int2( 1,  0) * kh4_sp)
-                          + KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, int2( 0,  1) * kh4_sp);
+            float kh4_ctr = KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, khsw4, float2( 0,  0));
+            float kh4_rng = KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, khsw4, float2( 0, -1) * kh4_sp)
+                          + KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, khsw4, float2(-1,  0) * kh4_sp)
+                          + KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, khsw4, float2( 1,  0) * kh4_sp)
+                          + KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, khsw4, float2( 0,  1) * kh4_sp);
             float kh4_cnt = 4.0f;
             if (!(lighting0.y >= 37.5f && lighting0.y < 38.5f)) {   // 26491: 3x3 DEFAULT again (field: close-range worse under the diamond; 38 arms the diamond; 36 now an alias)
-                kh4_rng += KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, int2(-1, -1) * kh4_sp)
-                         + KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, int2( 1, -1) * kh4_sp)
-                         + KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, int2(-1,  1) * kh4_sp)
-                         + KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, int2( 1,  1) * kh4_sp);
+                kh4_rng += KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, khsw4, float2(-1, -1) * kh4_sp)
+                         + KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, khsw4, float2( 1, -1) * kh4_sp)
+                         + KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, khsw4, float2(-1,  1) * kh4_sp)
+                         + KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, khsw4, float2( 1,  1) * kh4_sp);
                 kh4_cnt = 8.0f;
             }
             float kh4_res = (kh4_ctr + kh4_w * kh4_rng) / (1.0f + kh4_cnt * kh4_w);
+            // 26575 KH_SELF_PREFILTER (mode 357 zeroes sunPf; C++ ledger at
+            // KH_BUILD_TAG): under minification the tap verdict blends toward
+            // the pyramid's filtered-mean verdict (26576) - the true footprint
+            // average the sparse ring cannot reach.
+            if (sunPf.z >= 0.5f && !khcl) {   // 26588
+                float kh4_ft = max(kh4_fw.x, kh4_fw.y);
+                // 26577: engagement covers the moire band (ft 1-2, where the
+                // old 1.5 floor left the worst aliasing unserved).
+                float kh4_pw = (khgs > 4.0f * kh4_tw && !(lighting0.y >= 51.5f && lighting0.y < 52.5f))
+                             ? 0.0f : smoothstep(1.0f, 2.0f, kh4_ft);   // 26591
+                // 26577 lighting0.y 47 (mode 358): PF-EXCLUSIVE instrument arm.
+                bool kh4_px = (lighting0.y >= 46.5f && lighting0.y < 47.5f);
+                if (kh4_pw > 0.001f || kh4_px) {
+                    float kh4_lod = log2(max(kh4_ft * 0.5f, 1.0f));
+                    // 26576: Chebyshev RETIRED (fp32 cancellation conviction
+                    // in the C++ ledger; the 624 m reach-fitted window). The
+                    // filtered MEAN is the precision-sound channel: soft
+                    // compare over the footprint depth ramp. Interiors cannot
+                    // bleed - the filtered depth there IS the occluder.
+                    // 26585: Chebyshev on the moment pair, two floors -
+                    // precision (2.5e-7, the fp32 cancellation ulp at the
+                    // measured mu band) and the texel ramp W^2 (where the
+                    // variance is unmeasurable this DEGENERATES into the
+                    // 26576 soft compare). Manual trilinear kept; ledger at
+                    // KH_BUILD_TAG.
+                    float2 kh4_mv = KhPfMu(khSunPf4, kh4_uv, sunMeta4.y * 0.5f, kh4_lod);
+                    float kh4_vd = (kh4_c.z - kh4_b) - kh4_mv.x;
+                    float kh4_ww = max(kh4_ft, 2.0f) * kh4_tw * kh4_iD;
+                    float kh4_s2 = max(kh4_mv.y - kh4_mv.x * kh4_mv.x,
+                                         max(2.5e-7f, kh4_ww * kh4_ww));
+                    float kh4_vv = kh4_vd <= 0.0f ? 1.0f
+                                 : saturate(kh4_s2 / (kh4_s2 + kh4_vd * kh4_vd));
+                    float kh4_pfo = 1.0f - saturate((kh4_vv - 0.4f) / 0.6f);
+                    // 26577 guards (ledger at KH_BUILD_TAG): the pf blend
+                    // cannot create tier standing (26506 fallthrough contract)
+                    // and yields to the taps on gross disagreement - the
+                    // pyramid derives from the same depth texels, so honest
+                    // inputs cannot read occluded-vs-lit at once.
+                    if (kh4_px) kh4_res = kh4_pfo;
+                    // 26578: honest content may CREATE standing - absent
+                    // content reads pfo ~ 0 and still falls through.
+                    else if ((kh4_res > 0.0001f || kh4_pfo > 0.2f) &&
+                             !(kh4_res > 0.8f && kh4_pfo < 0.2f))
+                        kh4_res = lerp(kh4_res, kh4_pfo, kh4_pw);
+                }
+            }
+            float kh4_js = khSunDepth4.Load(int3(int2(kh4_t), 0));   // 26590
+            if (khla_g > 0.5f && kh4_res > 0.0001f &&
+                (kh4_c.z - kh4_js) < khla_g * kh4_iD &&
+                (khtb_occ < 0.0f || (lighting0.y >= 54.5f && lighting0.y < 55.5f)) &&
+                !(lighting0.y >= 50.5f && lighting0.y < 51.5f))
+                kh4_res *= 1.0f - khla_w;   // 26590/26617: rejection at the certifier's edge weight
+            if (abs(kh4_c.z - kh4_js) < 3.0f * kh4_b) {   // 26590/26617
+                khla_g = max(khla_g, (lighting0.y >= 60.5f && lighting0.y < 61.5f)
+                                     ? 192.0f : 6.0f * sunMeta4.w);   // code 61: fixed guard
+                khla_w = KhJw(max(abs(kh4_uv.x - 0.5f), abs(kh4_uv.y - 0.5f)) * 2.0f);
+            }
             if (kh4_res > 0.0001f || khlfs_off) {   // 26507: lit falls through
                 if (khtb_occ >= 0.0f) return lerp(kh4_res, khtb_occ, khtb_w);   // 26465
                 float kh4_e = max(abs(kh4_uv.x - 0.5f), abs(kh4_uv.y - 0.5f)) * 2.0f;
-                float kh4_bw = khtb_on ? (1.0f - smoothstep(0.90f, 0.99f, kh4_e)) : 1.0f;
+                float kh4_bw = khtb_on ? KhTbW(kh4_e) : 1.0f;   // 26594
                 if (kh4_bw >= 0.9999f) return kh4_res;
                 khtb_occ = kh4_res; khtb_w = kh4_bw;   // 26465: carry onward
             }
             }
         }
     }
+)HLSL" R"HLSL(    // 26620 KH_SUN_FAR_BAND self tier (own segment; ledger at
+    // KH_BUILD_TAG): the kh4 tier verbatim on tier-5 resources, MINUS the
+    // moment pyramid (its texel is already the minified scale). Its latch
+    // certifies 6x the RANGE - the union may not override a far-certified
+    // surface anywhere within the fade, which is the whole design: the
+    // union's mesh-priced texels leave the screen.
+    // ==========================================================
+    // 26624 KH_FAR_SELF_SCOPE (mode 392 / lighting0.y 65 restores the
+    // ungated 26620 form). OPERATOR FIELD, three facts triangulated: the
+    // splotch is killed by 389 (far band off), survives certification
+    // widening (26623, withdrawn), and shows at EVERY distance. THE
+    // AUTHOR: the far band's 0.10 m silhouettes over-extend real casters'
+    // shadows by up to a texel; a receiver whose own surface is absent
+    // from the fine maps (first-person gear class) can never certify, so
+    // 26507's lit-fallthrough let the far SELF tier answer with that ring
+    // of false shadow anywhere inside its 0..range window. The CAST chain
+    // never had this defect - 26538 made it lit-authoritative inside a
+    // containing window, so khc5 only serves past the outer band - which
+    // is exactly why the splotch was self-only. THE GATE mirrors that
+    // discipline at the far tier alone: the far SELF tier serves only
+    // where it ADDS information - outside the outer band's interior, or
+    // resolving a blend carry at the outer->far handoff. Inside the finer
+    // ladder's coverage it stands silent and the chain falls to the union
+    // exactly as the field-accepted pre-far-band version did. Hero/mid/
+    // outer keep 26507 verbatim (cross-distance casters live in coarser
+    // maps; the finer ladder's texels never manufacture visible rings).
+    // ACCEPTANCE: mode 0 matches mode 389 at the splotch pose; the >32 m
+    // far-self quality (the 26620 win) is untouched; the outer->far
+    // cross-fade stays line-free (the carry clause). 392 = the A/B.
+    // ==========================================================
+    if (sunMeta5.x >= 0.5f &&
+        (!kh4_in || khtb_occ >= 0.0f ||
+         (lighting0.y >= 64.5f && lighting0.y < 65.5f))) {
+        float kh5_iR0 = length(float3(sunVP5[0].x, sunVP5[1].x, sunVP5[2].x));
+        float kh5_no = khno_k * 2.0f / (max(sunMeta5.y, 1.0f) * max(kh5_iR0, 1e-6f));
+        float4 kh5_c = mul(float4(khwr + n * kh5_no, 1.0f), sunVP5);   // 26458/26466/26574
+        float2 kh5_uv = float2(0.5f + 0.5f * kh5_c.x, 0.5f - 0.5f * kh5_c.y);
+
+        if (kh5_uv.x > 0.002f && kh5_uv.x < 0.998f &&
+            kh5_uv.y > 0.002f && kh5_uv.y < 0.998f &&
+            kh5_c.z > 0.0f && kh5_c.z < 1.0f) {
+            float3 kh5_cr = float3(sunVP5[0].x, sunVP5[1].x, sunVP5[2].x);
+            float3 kh5_cu = float3(sunVP5[0].y, sunVP5[1].y, sunVP5[2].y);
+            float kh5_iR = length(kh5_cr);
+            float kh5_iD = length(float3(sunVP5[0].z, sunVP5[1].z, sunVP5[2].z));
+            float kh5_tw = 2.0f / (max(sunMeta5.y, 1.0f) * max(kh5_iR, 1e-6f));
+            // 26478 CLAMPED RPDB, DEFAULT-ON (full ledger at khsr_k, the
+            // union twin; codes 32/33 zero it, 229/code 14 is an alias now).
+            float kh5_k = (khcl || (lighting0.y >= 31.5f && lighting0.y < 33.5f))
+                        ? 0.0f : kh5_tw * kh5_iD / max(ndl, 0.02f)
+                          * ((lighting0.y >= 38.5f && lighting0.y < 39.5f)
+                             ? 1.0f : saturate(1.0f - 3.0f * length(fwidth(n))));   // 26494: damper DEFAULT (280's form); off under the 39 arm
+            float kh5_gc = 8.0f * kh5_tw * kh5_iD;
+            float2 kh5_g = clamp(
+                float2( dot(n, kh5_cr / max(kh5_iR, 1e-9f)) * kh5_k,
+                       -dot(n, kh5_cu / max(kh5_iR, 1e-9f)) * kh5_k),
+                -kh5_gc, kh5_gc);
+            float2 kh5_t = kh5_uv * sunMeta5.y;
+            float kh5_ceil = (lighting0.y >= 16.5f && lighting0.y < 17.5f) ? 8.0f : 1.0e4f;
+            float kh5_tan = clamp(sqrt(saturate(1.0f - ndl * ndl)) / max(ndl, 0.02f), 1.0f, kh5_ceil);
+            // 26488 measured defaults (ledger at khsr_slope, the union twin).
+            // 26494 field-ranked default (280's form; 39 arms the 26488 numbers)
+            float kh5_slope = (lighting0.y >= 17.5f && lighting0.y < 18.5f) ? 3.0f
+                            : (lighting0.y >= 38.5f && lighting0.y < 39.5f) ? 0.8f : 0.35f;
+            float kh5_fb = (lighting0.y >= 38.5f && lighting0.y < 39.5f) ? 1.25f : 1.0f;
+            float kh5_b = (lighting0.y >= 12.5f && lighting0.y < 13.5f)
+                        ? sunMeta5.z
+                        : max(sunMeta5.z * kh5_fb,   // 26490 tier-proportional floor (code 37 reverts; ledger at khsr_slope)
+                              ((lighting0.y >= 36.5f && lighting0.y < 37.5f) ? 0.0f : 1.5f) * kh5_tw * kh5_iD)
+                          + kh5_slope * kh5_tan * kh5_tw * kh5_iD;
+            // 26586 KH_GS_CLAMP (mode 362 / lighting0.y 48 reverts; ledger at
+            // KH_BUILD_TAG): straddling quads measure fore/background
+            // jumps in METRES through fwidth - texel scale is the
+            // honest post-26574 budget.
+            float kh5_gs = (lighting0.y >= 47.5f && lighting0.y < 48.5f)
+                        ? khgs : min(khgs, 4.0f * kh5_tw);
+            kh5_b += kh5_gs * kh5_iD;   // 26459/26586
+            // 26472 contact shortcut - twin (ledger at the hero tier).
+            float4 khct5_c = mul(float4(khwr, 1.0f), sunVP5);   // 26574
+            float2 khct5_t = float2(0.5f + 0.5f * khct5_c.x,
+                                       0.5f - 0.5f * khct5_c.y) * sunMeta5.y;
+            float khct5_s = khSunDepth5.Load(int3(int2(khct5_t), 0));
+            if (khct_on && khct5_c.z > 0.0f && khct5_c.z < 1.0f &&
+                khct5_c.z - khct5_s >
+                    (3.0f + 1.5f * kh5_tan) * kh5_tw * kh5_iD) {
+                float kh5_cres = 1.0f;   // distinct occluder provably above
+                float kh5_ce = max(abs(kh5_uv.x - 0.5f), abs(kh5_uv.y - 0.5f)) * 2.0f;
+                float kh5_cbw = khtb_on ? KhTbW(kh5_ce) : 1.0f;   // 26594
+                if (khtb_occ >= 0.0f) return lerp(kh5_cres, khtb_occ, khtb_w);
+                if (kh5_cbw >= 0.9999f) return kh5_cres;
+                khtb_occ = kh5_cres; khtb_w = kh5_cbw;
+            } else {
+            // 26455 KH_SUN_BAND_FLAT_RING: the FULL flat 3x3 kernel on
+            // the camera bands - the 26443b density-adaptive collapse is
+            // WRONG here and was the 26454 field report's staircase self
+            // shadow. The collapse protected NEAR fragments served by a
+            // COARSE caster-anchored union (crevice speckle, seam fight -
+            // both close-view artifacts); the ladder abolished that case:
+            // this band serves only fragments the finer tiers rejected,
+            // i.e. FAR ones, where the kernel's 2.12-texel reach is
+            // subpixel-scale geometry but the EDGE it filters is many
+            // pixels long. One hard tap at 16 mm quantizes the surface at
+            // texel/N.L - the 50-100 mm blocks on the screenshot's vest
+            // flanks; the filtered ring is what the engine's own cascades
+            // do at every density. The UNION self path below KEEPS the
+            // 26443b weight - its conviction stands where it was
+            // validated (and under the 241 revert it again serves near
+            // fragments, exactly the protected case). lighting0.y 22
+            // (mode 245) restores the collapse on the bands for the A/B.
+            float kh5_w = (lighting0.y >= 21.5f && lighting0.y < 22.5f)
+                        ? saturate(0.001f / max(kh5_tw, 1e-6f)) : 1.0f;
+            // 26470 footprint spread - twin (full ledger at the hero tier).
+            float2 kh5_fw = fwidth(kh5_t);
+            // 26572 smooth spread + soft band (ledger at KhSelfTap; 45/44 revert)
+            // 26591 straddle guard - twin (ledger at the hero tier).
+            float kh5_sp = (khcl || (lighting0.y >= 27.5f && lighting0.y < 28.5f)
+                            || (khgs > 4.0f * kh5_tw && !(lighting0.y >= 51.5f && lighting0.y < 52.5f)))
+                          ? 1.0f
+                          : (lighting0.y >= 44.5f && lighting0.y < 45.5f)
+                          ? float(clamp(int(round(0.5f * max(kh5_fw.x, kh5_fw.y))), 1, 8))
+                          : clamp(0.5f * max(kh5_fw.x, kh5_fw.y), 1.0f, 8.0f);
+            float khsw5 = max(2.0f * kh5_gs, kh5_tw) * kh5_iD;   // 26586: clamped slack
+            // 26489 diamond ring (code 36 restores 3x3; ledger at khsr_slope)
+            float kh5_ctr = KhSelfTap5(kh5_t, kh5_g, kh5_c.z, kh5_b, khsw5, float2( 0,  0));
+            float kh5_rng = KhSelfTap5(kh5_t, kh5_g, kh5_c.z, kh5_b, khsw5, float2( 0, -1) * kh5_sp)
+                          + KhSelfTap5(kh5_t, kh5_g, kh5_c.z, kh5_b, khsw5, float2(-1,  0) * kh5_sp)
+                          + KhSelfTap5(kh5_t, kh5_g, kh5_c.z, kh5_b, khsw5, float2( 1,  0) * kh5_sp)
+                          + KhSelfTap5(kh5_t, kh5_g, kh5_c.z, kh5_b, khsw5, float2( 0,  1) * kh5_sp);
+            float kh5_cnt = 4.0f;
+            if (!(lighting0.y >= 37.5f && lighting0.y < 38.5f)) {   // 26491: 3x3 DEFAULT again (field: close-range worse under the diamond; 38 arms the diamond; 36 now an alias)
+                kh5_rng += KhSelfTap5(kh5_t, kh5_g, kh5_c.z, kh5_b, khsw5, float2(-1, -1) * kh5_sp)
+                         + KhSelfTap5(kh5_t, kh5_g, kh5_c.z, kh5_b, khsw5, float2( 1, -1) * kh5_sp)
+                         + KhSelfTap5(kh5_t, kh5_g, kh5_c.z, kh5_b, khsw5, float2(-1,  1) * kh5_sp)
+                         + KhSelfTap5(kh5_t, kh5_g, kh5_c.z, kh5_b, khsw5, float2( 1,  1) * kh5_sp);
+                kh5_cnt = 8.0f;
+            }
+            float kh5_res = (kh5_ctr + kh5_w * kh5_rng) / (1.0f + kh5_cnt * kh5_w);
+            // 26620: no moment pyramid at the FAR band - its texel is
+            // already the minified scale the pyramids exist to reach.
+            float kh5_js = khSunDepth5.Load(int3(int2(kh5_t), 0));   // 26590
+            if (khla_g > 0.5f && kh5_res > 0.0001f &&
+                (kh5_c.z - kh5_js) < khla_g * kh5_iD &&
+                (khtb_occ < 0.0f || (lighting0.y >= 54.5f && lighting0.y < 55.5f)) &&
+                !(lighting0.y >= 50.5f && lighting0.y < 51.5f))
+                kh5_res *= 1.0f - khla_w;   // 26590/26617: rejection at the certifier's edge weight
+            if (abs(kh5_c.z - kh5_js) < 3.0f * kh5_b) {   // 26590/26620
+                khla_g = max(khla_g, 6.0f * sunMeta5.w);   // = 6x the range: the far band's whole depth window
+                khla_w = KhJw(max(abs(kh5_uv.x - 0.5f), abs(kh5_uv.y - 0.5f)) * 2.0f);
+            }
+            if (kh5_res > 0.0001f || khlfs_off) {   // 26507: lit falls through
+                if (khtb_occ >= 0.0f) return lerp(kh5_res, khtb_occ, khtb_w);   // 26465
+                float kh5_e = max(abs(kh5_uv.x - 0.5f), abs(kh5_uv.y - 0.5f)) * 2.0f;
+                float kh5_bw = khtb_on ? KhTbW(kh5_e) : 1.0f;   // 26594
+                if (kh5_bw >= 0.9999f) return kh5_res;
+                khtb_occ = kh5_res; khtb_w = kh5_bw;   // 26465: carry onward
+            }
+            }
+        }
+    }
 )HLSL" R"HLSL(    // 26425 KH_SELF_RPDB - receiver-plane depth bias; ledger in C++.
+    // ==========================================================
+    // 26589 KH_UNION_LIT_GUARD (mode 367 / lighting0.y 51 reverts to the
+    // 26507 unconditional fallthrough). THE MEASURED DEFECT (offline
+    // fallthrough-chain replay from capture frame2212, kh_self_v1_8, at
+    // the operator's halo dot): hero/mid/outer kernels read LIT with
+    // -5.2 / -18.8 / -71.7 mm of margin on clean receiver content, and
+    // the on-screen verdict is minted by THIS union block - its 524 mm
+    // texel stores the vest 1.52 m nearer and returns 2/9 occlusion,
+    // +549 mm past its own 969 mm bias. 26507 let every lit band verdict
+    // fall through so casters beyond a band's sun-ward depth guard
+    // (12/48/192 m) could still shadow; the unpriced cost was the union -
+    // the one tier whose texels cannot resolve sub-metre geometry -
+    // OVERRIDING three correct finer tiers on every lit fragment: the
+    // cast-shadow halo, the whole-face dither, and the union-scale
+    // close/grazing shimmer, tier-independent under 239/242 because the
+    // chain always ended here. THE GATE: bands keep 26507's inter-band
+    // recovery verbatim; the union may no longer override a lit verdict
+    // from a band that PROVED CONTENT AUTHORITY - its own center texel
+    // holds this fragment's surface within 3 bias widths (measured
+    // own-surface gaps -2.9 / -11.4 / -42.2 mm against 6.9 / 22.1 /
+    // 88.5 mm windows; a caster-holding texel reads metres and can never
+    // certify, and an occluded band verdict returns above and never
+    // reaches this line). A mesh absent from the band maps latches no
+    // authority and still falls through - fail-safe to 26507 exactly.
+    // DISCLOSED TRADE: a caster farther than 192 m sun-ward of a
+    // band-window fragment was union-served before and is unshadowed
+    // now; 367 restores it together with the halo.
+    // ==========================================================
     float khsr_iR0 = length(float3(sunVP[0].x, sunVP[1].x, sunVP[2].x));
     float khsr_no = khno_k * 2.0f / (max(sunMeta.y, 1.0f) * max(khsr_iR0, 1e-6f));
-    float4 khsr_c = mul(float4(wpos + n * khsr_no - sunOrigin.xyz, 1.0f), sunVP);   // ortho: w = 1 (26458/26466)
+    float4 khsr_c = mul(float4(khwr + n * khsr_no, 1.0f), sunVP);   // ortho: w = 1 (26458/26466/26574)
     float2 khsr_uv = float2(0.5f + 0.5f * khsr_c.x, 0.5f - 0.5f * khsr_c.y);
     if (khsr_uv.x <= 0.002f || khsr_uv.x >= 0.998f ||
         khsr_uv.y <= 0.002f || khsr_uv.y >= 0.998f)
@@ -4875,7 +5616,7 @@ float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
     // it jitters tap-to-tap and ADDS the noise the field ranked 0 above
     // 267. Same discriminator as the offset's damper: flat grazing walls
     // (the z-fight locus, fwidth(n) ~ 0) keep the full gradient.
-    float khsr_k = (lighting0.y >= 31.5f && lighting0.y < 33.5f)
+    float khsr_k = (khcl || (lighting0.y >= 31.5f && lighting0.y < 33.5f))
                  ? 0.0f : khsr_tw * khsr_iD / max(ndl, 0.02f)
                    * ((lighting0.y >= 38.5f && lighting0.y < 39.5f)
                       ? 1.0f : saturate(1.0f - 3.0f * length(fwidth(n))));   // 26494 (ledger at khsr_slope)
@@ -4932,7 +5673,13 @@ float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
                  : max(sunMeta.z * khsr_fb,   // 26490 tier-proportional floor (code 37 reverts)
                        ((lighting0.y >= 36.5f && lighting0.y < 37.5f) ? 0.0f : 1.5f) * khsr_tw * khsr_iD)
                    + khsr_slope * khsr_tan * khsr_tw * khsr_iD;
-    khsr_b += khgs * khsr_iD;   // 26459 KH_SUN_GRAD_SLACK
+    // 26586 KH_GS_CLAMP (mode 362 / lighting0.y 48 reverts; ledger at
+            // KH_BUILD_TAG): straddling quads measure fore/background
+            // jumps in METRES through fwidth - texel scale is the
+            // honest post-26574 budget.
+            float khsr_gs = (lighting0.y >= 47.5f && lighting0.y < 48.5f)
+                        ? khgs : min(khgs, 4.0f * khsr_tw);
+            khsr_b += khsr_gs * khsr_iD;   // 26459/26586
     // 26443 DENSITY-ADAPTIVE RING (ledger at the sun-map fit in C++).
     // Every constant in this compare was priced at the calibration fit
     // (texelWorld 0.48975 mm); a multi-caster UNION fit measured 6.62x
@@ -4951,17 +5698,24 @@ float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
                  ? 1.0f : saturate(0.001f / max(khsr_tw, 1e-6f));
     // 26470 footprint spread - twin (full ledger at the hero tier).
     float2 khsr_fw = fwidth(khsr_t);
-    int khsr_sp = (lighting0.y >= 27.5f && lighting0.y < 28.5f)
-                ? 1 : clamp(int(round(0.5f * max(khsr_fw.x, khsr_fw.y))), 1, 8);
-    float khsr_ctr = KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, int2( 0,  0));
-    float khsr_rng = KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, int2(-1, -1) * khsr_sp)
-                   + KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, int2( 0, -1) * khsr_sp)
-                   + KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, int2( 1, -1) * khsr_sp)
-                   + KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, int2(-1,  0) * khsr_sp)
-                   + KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, int2( 1,  0) * khsr_sp)
-                   + KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, int2(-1,  1) * khsr_sp)
-                   + KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, int2( 0,  1) * khsr_sp)
-                   + KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, int2( 1,  1) * khsr_sp);
+    // 26572 smooth spread + soft band (ledger at KhSelfTap; 45/44 revert)
+    // 26591 straddle guard - twin (ledger at the hero tier).
+    float khsr_sp = (khcl || (lighting0.y >= 27.5f && lighting0.y < 28.5f)
+                     || (khgs > 4.0f * khsr_tw && !(lighting0.y >= 51.5f && lighting0.y < 52.5f)))
+                ? 1.0f
+                : (lighting0.y >= 44.5f && lighting0.y < 45.5f)
+                ? float(clamp(int(round(0.5f * max(khsr_fw.x, khsr_fw.y))), 1, 8))
+                : clamp(0.5f * max(khsr_fw.x, khsr_fw.y), 1.0f, 8.0f);
+    float khsr_sw = max(2.0f * khsr_gs, khsr_tw) * khsr_iD;   // 26586: clamped slack
+    float khsr_ctr = KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 0,  0));
+    float khsr_rng = KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2(-1, -1) * khsr_sp)
+                   + KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 0, -1) * khsr_sp)
+                   + KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 1, -1) * khsr_sp)
+                   + KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2(-1,  0) * khsr_sp)
+                   + KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 1,  0) * khsr_sp)
+                   + KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2(-1,  1) * khsr_sp)
+                   + KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 0,  1) * khsr_sp)
+                   + KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 1,  1) * khsr_sp);
     // 26456 KH_SUN_SELF_FADE (C++ ledger at the mesh CB fill): union
     // window edge ~= lateral range, so uv-edge distance is range
     // fraction; fade 0.85 -> 0.98 of it. Camera-anchored fits only
@@ -4973,13 +5727,39 @@ float SunShadowOcclusionSelf(float3 wpos, float3 nrm)
     }
     float khsr_res = (khsr_ctr + khsr_w * khsr_rng)
                    * (1.0f / (1.0f + 8.0f * khsr_w)) * khsr_fd;
+    // 26590 KH_TIER_JURISDICTION (mode 367 / lighting0.y 51 reverts every
+    // jurisdiction test at once; 296 remains the blunt fallthrough-off).
+    // THE 26589 FIELD ROUND, decoded per its own falsification clause:
+    // mode 0 (union gate) BETTER than 367 but the halo SURVIVED, and 296
+    // KILLED it - so every remaining halo pixel was a lit hero verdict
+    // overridden by MID or OUTER mush (the same defect the union gate
+    // closed, at 4 / 16 mm texel scale), and no author outside the
+    // fallthrough chain exists. THE RULE, generalized from the guard
+    // ladder's own semantics: a band tier with content authority (its
+    // center texel holds this fragment's surface within 3 bias widths)
+    // certifies its sun-ward depth guard CASTER-FREE - 12 m hero, 48 m
+    // mid, 192 m outer, the KH_SUN_CASCADE constants; IF THE C++ GUARDS
+    // EVER CHANGE, THESE LITERALS MOVE WITH THEM. Any coarser tier's
+    // occluder measured INSIDE the certified radius (center-texel gap in
+    // metres) is sub-guard mush and its verdict zeroes - it falls onward;
+    // an occluder BEYOND the radius is a genuine cross-tier caster and
+    // stands, which RESTORES the 26589 disclosed trade (>192 m union
+    // casts are kept again; only sub-jurisdiction mush is rejected).
+    // Penumbra-edge pixels whose center texel still reads the receiver
+    // narrow a beyond-guard caster's coarse penumbra by <= 1 coarse
+    // texel - disclosed, and invisible next to the mush it removes.
+    if (khla_g > 0.5f && khsr_res > 0.0001f &&
+        (khsr_c.z - khSunDepth.Load(int3(int2(khsr_t), 0))) < khla_g * khsr_iD &&
+        (khtb_occ < 0.0f || (lighting0.y >= 54.5f && lighting0.y < 55.5f)) &&
+        !(lighting0.y >= 50.5f && lighting0.y < 51.5f))
+        khsr_res *= 1.0f - khla_w;   // 26590/26617
     return (khtb_occ >= 0.0f) ? lerp(khsr_res, khtb_occ, khtb_w) : khsr_res;   // 26465
 }
 
-float SunShadowFactorSelf(float3 wpos, float3 nrm)
+float SunShadowFactorSelf(float3 wpos, float3 wrel, float3 nrm)
 {
     // 26464: receiver-distance range fade (ledger at KhSunRangeFade).
-    return 1.0f - SunShadowOcclusionSelf(wpos, nrm) * saturate(sunMeta.w)
+    return 1.0f - SunShadowOcclusionSelf(wpos, wrel, nrm) * saturate(sunMeta.w)
                 * KhSunRangeFade(wpos);
 }
 
@@ -5035,11 +5815,14 @@ float4 SunSelfProbe(float3 wpos, float3 nrm)
 // contains the fragment. One screenshot then localizes any noise-axis
 // residual to one map's render-vs-compare pair (the 239/242/244 stand-
 // downs remain the behavioural bisection; this is the visual twin).
-float4 KhSelfTierProbe(float3 wpos, float3 nrm)
+float4 KhSelfTierProbe(float3 wpos, float3 wrel, float3 nrm)
 {
-    float khtp_v = 1.0f - 0.65f * saturate(SunShadowOcclusionSelf(wpos, nrm));
+    float khtp_v = 1.0f - 0.65f * saturate(SunShadowOcclusionSelf(wpos, wrel, nrm));
+    // 26574: the probe windows follow the term (same khwr arm).
+    float3 khtp_wr = (lighting0.y >= 45.5f && lighting0.y < 46.5f)
+                   ? (wpos - sunOrigin.xyz) : wrel;
     if (sunMeta2.x >= 0.5f) {
-        float4 khtp_c = mul(float4(wpos - sunOrigin.xyz, 1.0f), sunVP2);
+        float4 khtp_c = mul(float4(khtp_wr, 1.0f), sunVP2);   // 26574
         float2 khtp_uv = float2(0.5f + 0.5f * khtp_c.x, 0.5f - 0.5f * khtp_c.y);
         if (khtp_uv.x > 0.002f && khtp_uv.x < 0.998f &&
             khtp_uv.y > 0.002f && khtp_uv.y < 0.998f &&
@@ -5047,7 +5830,7 @@ float4 KhSelfTierProbe(float3 wpos, float3 nrm)
             return float4(khtp_v, 0.25f * khtp_v, 0.0f, 1.0f);
     }
     if (sunMeta3.x >= 0.5f) {
-        float4 khtp_c = mul(float4(wpos - sunOrigin.xyz, 1.0f), sunVP3);
+        float4 khtp_c = mul(float4(khtp_wr, 1.0f), sunVP3);   // 26574
         float2 khtp_uv = float2(0.5f + 0.5f * khtp_c.x, 0.5f - 0.5f * khtp_c.y);
         if (khtp_uv.x > 0.002f && khtp_uv.x < 0.998f &&
             khtp_uv.y > 0.002f && khtp_uv.y < 0.998f &&
@@ -5055,15 +5838,23 @@ float4 KhSelfTierProbe(float3 wpos, float3 nrm)
             return float4(khtp_v, khtp_v, 0.0f, 1.0f);
     }
     if (sunMeta4.x >= 0.5f) {
-        float4 khtp_c = mul(float4(wpos - sunOrigin.xyz, 1.0f), sunVP4);
+        float4 khtp_c = mul(float4(khtp_wr, 1.0f), sunVP4);   // 26574
         float2 khtp_uv = float2(0.5f + 0.5f * khtp_c.x, 0.5f - 0.5f * khtp_c.y);
         if (khtp_uv.x > 0.002f && khtp_uv.x < 0.998f &&
             khtp_uv.y > 0.002f && khtp_uv.y < 0.998f &&
             khtp_c.z > 0.0f && khtp_c.z < 1.0f)
             return float4(0.0f, khtp_v, khtp_v, 1.0f);
     }
+    if (sunMeta5.x >= 0.5f) {   // 26620 FAR band paint (magenta)
+        float4 khtp_c = mul(float4(khtp_wr, 1.0f), sunVP5);
+        float2 khtp_uv = float2(0.5f + 0.5f * khtp_c.x, 0.5f - 0.5f * khtp_c.y);
+        if (khtp_uv.x > 0.002f && khtp_uv.x < 0.998f &&
+            khtp_uv.y > 0.002f && khtp_uv.y < 0.998f &&
+            khtp_c.z > 0.0f && khtp_c.z < 1.0f)
+            return float4(khtp_v, 0.0f, khtp_v, 1.0f);
+    }
     if (sunMeta.x >= 0.5f) {
-        float4 khtp_c = mul(float4(wpos - sunOrigin.xyz, 1.0f), sunVP);
+        float4 khtp_c = mul(float4(khtp_wr, 1.0f), sunVP);   // 26574
         float2 khtp_uv = float2(0.5f + 0.5f * khtp_c.x, 0.5f - 0.5f * khtp_c.y);
         if (khtp_uv.x > 0.002f && khtp_uv.x < 0.998f &&
             khtp_uv.y > 0.002f && khtp_uv.y < 0.998f &&
@@ -5071,6 +5862,61 @@ float4 KhSelfTierProbe(float3 wpos, float3 nrm)
             return float4(0.1f * khtp_v, 0.25f * khtp_v, khtp_v, 1.0f);
     }
     return float4(1.0f, 0.0f, 1.0f, 1.0f);
+}
+
+// 26579 DEBUG VISUAL 30 (setRenderDebug 359; dbgCtl.x 30) - THE PYRAMID
+// AGAINST THE DEPTH IT WAS CONVERTED FROM. Pure gauge; hero window only
+// (MAGENTA outside). Three gaps that must agree in a healthy pipeline:
+// R = c.z - khSunDepth2 (the taps' truth), G = c.z - mu at lod 0,
+// B = c.z - mu at lod 2, each x200 (3 mm-class gap at the 638 m window
+// reads mid-bright). Grey = healthy; red-only = convert dead; red+green
+// = manual chain dead; displaced silhouette = addressing flip. Ledger
+// at KH_BUILD_TAG.
+float4 KhPfProbe(float3 wpos, float3 wrel, float3 nrm)
+{
+    if (sunMeta2.x < 0.5f) return float4(1.0f, 0.0f, 1.0f, 1.0f);
+    float3 khpp_wr = (lighting0.y >= 45.5f && lighting0.y < 46.5f)
+                   ? (wpos - sunOrigin.xyz) : wrel;
+    float4 khpp_c = mul(float4(khpp_wr, 1.0f), sunVP2);
+    float2 khpp_uv = float2(0.5f + 0.5f * khpp_c.x, 0.5f - 0.5f * khpp_c.y);
+    if (khpp_uv.x <= 0.002f || khpp_uv.x >= 0.998f ||
+        khpp_uv.y <= 0.002f || khpp_uv.y >= 0.998f ||
+        khpp_c.z <= 0.0f || khpp_c.z >= 1.0f)
+        return float4(1.0f, 0.0f, 1.0f, 1.0f);   // MAGENTA: outside hero
+    float khpp_st = khSunDepth2.Load(int3(int2(khpp_uv * sunMeta2.y), 0));
+    float khpp_m0 = khSunPf2.SampleLevel(khPfSamp, khpp_uv, 0.0f).x;
+    float khpp_m2 = khSunPf2.SampleLevel(khPfSamp, khpp_uv, 2.0f).x;
+    return float4(saturate((khpp_c.z - khpp_st) * 200.0f),
+                  saturate((khpp_c.z - khpp_m0) * 200.0f),
+                  saturate((khpp_c.z - khpp_m2) * 200.0f), 1.0f);
+}
+
+// 26580 DEBUG VISUAL 31 (setRenderDebug 360; dbgCtl.x 31) - THE SAME
+// PYRAMID TEXEL THROUGH BOTH READ PATHS, against the depth truth. The
+// taps Load and are healthy; the kernel SampleLevels through a LINEAR
+// sampler - an OPTIONAL capability for R32G32_FLOAT on the very GPU
+// that already no-opped mip autogen. R = remap(depth Load), G =
+// remap(mu, SampleLevel lod 0), B = remap(mu, raw Load mip 0);
+// remap spreads the reach-era content band (z 0.93-0.99) to full
+// brightness, clear reads black. R+B silhouettes with G flat = the
+// sampler is convicted. Ledger at KH_BUILD_TAG.
+float4 KhPfProbe2(float3 wpos, float3 wrel, float3 nrm)
+{
+    if (sunMeta2.x < 0.5f) return float4(1.0f, 0.0f, 1.0f, 1.0f);
+    float3 khpq_wr = (lighting0.y >= 45.5f && lighting0.y < 46.5f)
+                   ? (wpos - sunOrigin.xyz) : wrel;
+    float4 khpq_c = mul(float4(khpq_wr, 1.0f), sunVP2);
+    float2 khpq_uv = float2(0.5f + 0.5f * khpq_c.x, 0.5f - 0.5f * khpq_c.y);
+    if (khpq_uv.x <= 0.002f || khpq_uv.x >= 0.998f ||
+        khpq_uv.y <= 0.002f || khpq_uv.y >= 0.998f ||
+        khpq_c.z <= 0.0f || khpq_c.z >= 1.0f)
+        return float4(1.0f, 0.0f, 1.0f, 1.0f);   // MAGENTA: outside hero
+    float khpq_st = khSunDepth2.Load(int3(int2(khpq_uv * sunMeta2.y), 0));
+    float khpq_gs = khSunPf2.SampleLevel(khPfSamp, khpq_uv, 0.0f).x;
+    float khpq_gl = khSunPf2.Load(int3(int2(khpq_uv * sunMeta2.y * 0.5f), 0)).x;
+    return float4(saturate((1.0f - khpq_st) * 12.0f),
+                  saturate((1.0f - khpq_gs) * 12.0f),
+                  saturate((1.0f - khpq_gl) * 12.0f), 1.0f);
 }
 )HLSL" R"HLSL(// 26479 CHUNK BOUNDARY (the 26427 precedent; chunks concatenate -
 // the tier-probe visual took this segment past the 16380-byte MSVC token cap).
@@ -5682,6 +6528,12 @@ struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL;
 #endif
 };
 struct VSOut { float4 pos : SV_Position; float3 wpos : TEXCOORD0; float3 nrm : TEXCOORD1;
+    // 26574 KH_SELF_REL_INTERP: anchor-relative position, metres-scale
+    // through the interpolators (world-absolute wpos rides at ~7.5 km
+    // where fp32 interpolation rounds at +-0.49 mm PER FRAME under
+    // camera motion - half a hero texel). The self chain samples with
+    // this; wpos stays for fog/range/every absolute consumer.
+    float3 wrel : TEXCOORD4;
 #if KH_TEXTURED
     float2 uv : TEXCOORD2; float4 tanw : TEXCOORD3;   // world tangent + handedness
 #endif
@@ -5953,7 +6805,17 @@ float ShadowBandFactor(float3 wpos)
                     // the indecisive penumbra - exactly where the
                     // dithered foliage lives), bilinear compare per tap
                     // (sample_c equivalent), per-pixel disk rotation.
-                    float ang = frac(sin(dot(wpos.xz, float2(12.9898f, 78.233f))) * 43758.5469f) * 6.2831853f;
+                    // 26587 KH_BAND_STABLE_RING (mode 363 / lighting0.y 49
+                    // reverts; full ledger at KH_BUILD_TAG): the hash sin
+                    // was fed WORLD-ABSOLUTE ~7.5 km coords where fp32 sin
+                    // is degenerate - the traced firefly pixel pair fed it
+                    // 562548.0 vs 562548.5. Wrapping to a 64 m tile keeps
+                    // the world anchoring (no swimming) and puts sin in its
+                    // exact range.
+                    bool khbp_old = (lighting0.y >= 48.5f && lighting0.y < 49.5f);
+                    float2 khbp_hz = khbp_old ? wpos.xz
+                                              : (frac(wpos.xz * 0.015625f) * 64.0f);
+                    float ang = frac(sin(dot(khbp_hz, float2(12.9898f, 78.233f))) * 43758.5469f) * 6.2831853f;
                     float ca = cos(ang);
                     float sa = sin(ang);
                     // ENGINE-EXACT RADIUS (PS-17 disassembly closes the
@@ -5982,7 +6844,15 @@ float ShadowBandFactor(float3 wpos)
                           : (k == 1) ? float2(-0.814100f, 0.914376f)
                           : (k == 2) ? float2( 0.945586f,-0.768907f)
                                      : float2(-0.815442f,-0.879125f);
-                        float2 off = float2(d0.x * ca - d0.y * sa, d0.x * sa + d0.y * ca);
+                        // 26587: the DECISION ring is rotation-free - with a
+                        // per-pixel rotation, whether the early-out fires at
+                        // all was itself random near edges, and the early-out
+                        // promoted that dither to full-contrast dots (the
+                        // fireflies + the halo specks). The 12 refinement
+                        // taps below keep the rotation where it belongs.
+                        float2 off = khbp_old
+                                   ? float2(d0.x * ca - d0.y * sa, d0.x * sa + d0.y * ca)
+                                   : d0;
                         acc += BandCmpBilin(t, base + off * r, z);
                     }
 
@@ -6282,6 +7152,10 @@ VSOut VSMain(VSIn i)
     // view distance is enforced per fragment in the PS (FAR CONTRACT
     // block) instead of here.
     o.wpos = wp;
+    // 26574 KH_SELF_REL_INTERP: subtract the SAME fp32 anchor the sun
+    // matrices subtract - the quantised anchor cancels exactly, and
+    // the interpolant leaves at metres scale.
+    o.wrel = wp - sunOrigin.xyz;
     // Per-axis scale is non-uniform: normals take the inverse scale, then
     // the object rotation (the inverse-transpose of scale-then-rotate for
     // orthonormal R - see kh_set_rotation).
@@ -6486,8 +7360,26 @@ float KhVolSoftScene(float2 khfs_r, float3 khfs_p, float khfs_tol, int khfs_m)
     if (dbgCtl.w >= 9.5f && dbgCtl.w < 10.5f && khfs_bk > 0.0f)
         return KhVolShadowed(KhVolCount(khfs_bq), khfs_m) ? 0.0f : 1.0f;
 
-    if (khfs_w < 1.0e-4f)
-        return KhVolShadowed(KhVolCount(khfs_c), khfs_m) ? 0.0f : 1.0f;   // nothing was us
+    if (khfs_w < 1.0e-4f) {
+        // 26588 KH_VOL_MAX_FALLBACK (mode 364 / dbgCtl.w 12 restores the
+        // point read; ledger at KH_BUILD_TAG). The traced pinhole: on
+        // weight collapse this fallback point-read ONE khVolSten texel,
+        // and a raster/z pinhole there mints a full-contrast firefly
+        // (the capture's r14.w < 1e-4 branch, deciding r7.w 0.999 vs
+        // 0.000 at the dot/clean pair). The fallback now takes the
+        // MAXIMUM occlusion over the 3x3 stencil neighborhood: a pinhole
+        // cannot survive a max, while genuinely lit regions (all-clear
+        // neighborhoods) return exactly what the point read returned.
+        // TWIN: both chunk copies of this function stay byte-identical.
+        if (dbgCtl.w >= 11.5f && dbgCtl.w < 12.5f)
+            return KhVolShadowed(KhVolCount(khfs_c), khfs_m) ? 0.0f : 1.0f;   // 364: point read
+        float khfs_mx = 0.0f;
+        for (int khfs_v = -1; khfs_v <= 1; ++khfs_v)
+            for (int khfs_u = -1; khfs_u <= 1; ++khfs_u)
+                if (KhVolShadowed(KhVolCount(KhVolPx(khfs_r + float2(khfs_u, khfs_v))), khfs_m))
+                    khfs_mx = 1.0f;
+        return 1.0f - khfs_mx;   // any shadowed neighbor -> shadowed
+    }
     return khfs_s / khfs_w;
 }
 // Pre-mesh scene COLOR capture (t3, single-sample) - the perceptual-
@@ -6826,6 +7718,7 @@ VSOut VSFullscreen(uint vid : SV_VertexID)
     o.pos = float4(uv * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
     o.wpos = float3(0.0f, 0.0f, 0.0f);
     o.nrm = float3(0.0f, 1.0f, 0.0f);
+    o.wrel = float3(0.0f, 0.0f, 0.0f);   // 26574 (fullscreen path: no self sampling)
     return o;
 }
 
@@ -6909,7 +7802,7 @@ float4 PSMain(VSOut i) : SV_Target
     // a stencil-shadowed area convicts the COUNTING; magenta convicts
     // PRODUCTION. Pure gauge - mode 0 byte-identical.
     // 26479 DEBUG VISUAL 21 (setRenderDebug 269): the self-tier probe.
-    if (dbgCtl.x >= 20.5f && dbgCtl.x < 21.5f) return KhSelfTierProbe(i.wpos, i.nrm);
+    if (dbgCtl.x >= 20.5f && dbgCtl.x < 21.5f) return KhSelfTierProbe(i.wpos, i.wrel, i.nrm);
     if (dbgCtl.x >= 19.5f && dbgCtl.x < 20.5f) {
         if (mirMeta.x < 0.5f) return float4(1.0f, 0.0f, 1.0f, 1.0f);
         return KhMirUnit(i.pos.xy, mirMeta.y, mirMeta.z) < 0.5f
@@ -7061,11 +7954,29 @@ float4 PSMain(VSOut i) : SV_Target
         // tight. A facet more than 60 deg off the interpolated normal cannot
         // have come from a smoothed surface: it is a straddle, and the vertex
         // normal is the only honest answer there. Ledger at KH_FACET_STRADDLE.
-        if (dot(khFacetN, khBiasN) > 0.5f &&
+        // 26592 KH_BIAS_NORMAL_INTERP (mode 369 / lighting0.y 53 re-arms
+        // the facet override; 233 is an accepted ALIAS of this default -
+        // the 220 precedent). THE CONVICTION, traced then field-confirmed:
+        // the facet normal is PER-QUAD DERIVATIVE OUTPUT, and at tight
+        // geometry it lands near sun-perpendicular while passing the 60
+        // degree straddle test - the capture's crevice firefly read
+        // ndl 0.02 (the clamp floor) -> tan 50 (the 1e4 ceiling permits)
+        // -> slope bias ~19 mm, EATING the measured 17.8 mm contact
+        // occluder, while the dark neighbour's facet read ndl 0.372 ->
+        // bias 3.4 mm -> correct. Any sub-pixel camera motion re-derives
+        // ddx/ddy, the facet jitters, the bias re-rolls: the operator's
+        // binary on/off film grain, static at rest, 2x2-blocky, worst in
+        // crevices - and immune to every kernel-side arm because it
+        // poisons the kernel's INPUT at this call site. The 26435 guard
+        // bounded the facet's DIRECTION (60 deg), not its BIAS
+        // CONSEQUENCE - insufficient by measurement. Mode 233 read clean
+        // in the field: the interpolated normal is the default.
+        if ((lighting0.y >= 52.5f && lighting0.y < 53.5f) &&
+            dot(khFacetN, khBiasN) > 0.5f &&
             abs(dot(khFacetN, lighting1.xyz)) < abs(dot(khBiasN, lighting1.xyz)))
-            khBiasN = khFacetN;
+            khBiasN = khFacetN;   // 26592: opt-in (369)
     }
-    if (lighting0.y >= 18.5f && lighting0.y < 19.5f) khBiasN = normalize(i.nrm);   // 233
+    if (lighting0.y >= 18.5f && lighting0.y < 19.5f) khBiasN = normalize(i.nrm);   // 233 (alias of the 26592 default)
 
     // 26429 THE GATE MUST TEST THE NORMAL THAT LIGHTS THE FRAGMENT. Full
     // ledger at KH_SHADING_NORMAL_GATE in C++. This whole block - cascade
@@ -7085,14 +7996,52 @@ float4 PSMain(VSOut i) : SV_Target
         // the split's cascade arm. TWIN EDIT: PSMain and PSComposite
         // identical.
         if (lighting0.y < 2.5f || lighting0.y >= 3.5f) {
-            if (maskMeta.x >= 0.5f) smf = ShadowBandFactor(i.wpos);
+            // 26610 KH_BAND_REL_INTERP (ledger at KH_BUILD_TAG): the band
+            // walk consumes the 26574 metres-scale interpolant recomposed
+            // with the anchor, not the raw absolute i.wpos whose world-
+            // magnitude interpolation noise authored the 45-degree pitch
+            // jitter. lighting0.y 59 (mode 381) restores the absolute
+            // interpolant: the one-switch A/B (crawl and jitter return
+            // together). TWIN EDIT: PSMain and PSComposite identical.
+            if (maskMeta.x >= 0.5f) smf = ShadowBandFactor(
+                (lighting0.y >= 58.5f && lighting0.y < 59.5f)
+                    ? i.wpos : (i.wrel + sunOrigin.xyz));
             else                    smf = ShadowMapFactor(i.wpos - shadowMeta2.yzw);
+        }
+        // ==================================================================
+        // 26573 VISUAL 29 (mode 355) - RECEIVE-TERM DECOMPOSITION. The 26572
+        // field read (loci unchanged with the soft compare live in every
+        // frame - dump3) fired the pre-registered fork: the noise is not the
+        // tap-margin class, and nine builds of self-chain work rest on an
+        // attribution that has never been painted. One screenshot decides:
+        //   R = engine cascade/band receive occlusion (the LIVE smf here,
+        //       after the receive above, mode arms respected),
+        //   G = OUR sun-map self-term occlusion (as configured),
+        //   B = stencil-volume occlusion (the live dispatch).
+        // The speckle appears in exactly the channel that authors it; a
+        // speckle at this pose visible in NO channel convicts the shading
+        // path (normal / facet machinery), not a shadow term. Inside the
+        // N.L gate: ungated fragments shade normally by construction.
+        // TWIN: PSMain + PSComposite carry the identical block.
+        // ==================================================================
+        if (dbgCtl.x >= 30.5f && dbgCtl.x < 31.5f)   // 26580 VISUAL 31
+            return KhPfProbe2(i.wpos, i.wrel, khBiasN);
+        if (dbgCtl.x >= 29.5f && dbgCtl.x < 30.5f)   // 26579 VISUAL 30
+            return KhPfProbe(i.wpos, i.wrel, khBiasN);
+        if (dbgCtl.x >= 28.5f && dbgCtl.x < 29.5f) {
+            float khv29_s = 1.0f - SunShadowFactorSelf(i.wpos, i.wrel, khBiasN);
+            float khv29_u = 0.0f;
+            if (maskMeta.w >= 0.5f)
+                khv29_u = 1.0f - ((stenVol2.x >= 0.5f && KhVolMode() == 6)
+                        ? KhVolSoftScene(khStenR, khStenP, KH_STEN_TOL_W(i.pos.w), 6)
+                        : KhStenUnit(i.wpos, i.pos.xy, khStenG));
+            return float4(1.0f - smf, khv29_s, khv29_u, 1.0f);
         }
         // 26339 MODE 183 (lighting0.y == 5): OUR OWN SUN-MAP SELF-SHADOW
         // skipped - the arm the 26321 split never had. TWIN EDIT: PSMain and
         // PSComposite identical.
         if (lighting0.y < 4.5f || lighting0.y >= 5.5f)
-            smf = min(smf, SunShadowFactorSelf(i.wpos, khBiasN));   // 26432
+            smf = min(smf, SunShadowFactorSelf(i.wpos, i.wrel, khBiasN));   // 26432/26574
         // 26215 UNIT SHADOWS. The band receive above answers CASCADES for
         // our surface and is already correct - it is not disturbed. This
         // multiplies in the isolated stencil-volume term, which is the
@@ -7114,9 +8063,21 @@ float4 PSMain(VSOut i) : SV_Target
             // 26368 TWIN EDIT: the tolerance is converted from metres per
             // fragment (full ledger at KH_STEN_TOL_M). KhStenUnit and every
             // other stenVol2.y consumer are untouched.
-            smf *= (stenVol2.x >= 0.5f && KhVolMode() == 6)
-                 ? KhVolSoftScene(khStenR, khStenP, KH_STEN_TOL_W(i.pos.w), 6)
-                 : KhStenUnit(i.wpos, i.pos.xy, khStenG);
+            // 26572 KH_STEN_RANGE_FADE (lighting0.y 43 / mode 352 reverts;
+            // twin in PSComposite). The engine's stencil-volume shadows on
+            // our receivers had NO range fade - the caster crosses its
+            // eligibility at shadowVisibility and the darkening pops, while
+            // every cascade / cast / self term has thinned smoothly there
+            // since 26456/26464. The stencil verdict now multiplies the SAME
+            // KhSunRangeFade the 26464 chains ride (zero across the last
+            // ~15% of clamp(shadowVisibility, 8, 1000)); mirMeta.w = 0
+            // (255 revert / zero anchor) stands the helper down, inherited.
+            float khStenU = (stenVol2.x >= 0.5f && KhVolMode() == 6)
+                          ? KhVolSoftScene(khStenR, khStenP, KH_STEN_TOL_W(i.pos.w), 6)
+                          : KhStenUnit(i.wpos, i.pos.xy, khStenG);
+            float khStRf = (lighting0.y >= 42.5f && lighting0.y < 43.5f)
+                         ? 1.0f : KhSunRangeFade(i.wpos);
+            smf *= 1.0f - (1.0f - khStenU) * khStRf;
         }
     }
 
@@ -7718,8 +8679,26 @@ float KhVolSoftScene(float2 khfs_r, float3 khfs_p, float khfs_tol, int khfs_m)
     if (dbgCtl.w >= 9.5f && dbgCtl.w < 10.5f && khfs_bk > 0.0f)
         return KhVolShadowed(KhVolCount(khfs_bq), khfs_m) ? 0.0f : 1.0f;
 
-    if (khfs_w < 1.0e-4f)
-        return KhVolShadowed(KhVolCount(khfs_c), khfs_m) ? 0.0f : 1.0f;   // nothing was us
+    if (khfs_w < 1.0e-4f) {
+        // 26588 KH_VOL_MAX_FALLBACK (mode 364 / dbgCtl.w 12 restores the
+        // point read; ledger at KH_BUILD_TAG). The traced pinhole: on
+        // weight collapse this fallback point-read ONE khVolSten texel,
+        // and a raster/z pinhole there mints a full-contrast firefly
+        // (the capture's r14.w < 1e-4 branch, deciding r7.w 0.999 vs
+        // 0.000 at the dot/clean pair). The fallback now takes the
+        // MAXIMUM occlusion over the 3x3 stencil neighborhood: a pinhole
+        // cannot survive a max, while genuinely lit regions (all-clear
+        // neighborhoods) return exactly what the point read returned.
+        // TWIN: both chunk copies of this function stay byte-identical.
+        if (dbgCtl.w >= 11.5f && dbgCtl.w < 12.5f)
+            return KhVolShadowed(KhVolCount(khfs_c), khfs_m) ? 0.0f : 1.0f;   // 364: point read
+        float khfs_mx = 0.0f;
+        for (int khfs_v = -1; khfs_v <= 1; ++khfs_v)
+            for (int khfs_u = -1; khfs_u <= 1; ++khfs_u)
+                if (KhVolShadowed(KhVolCount(KhVolPx(khfs_r + float2(khfs_u, khfs_v))), khfs_m))
+                    khfs_mx = 1.0f;
+        return 1.0f - khfs_mx;   // any shadowed neighbor -> shadowed
+    }
     return khfs_s / khfs_w;
 }
 
@@ -7745,6 +8724,7 @@ Texture2D<float4> sceneColorTex : register(t3);
 // crossed it; the two halves are joined at the compile site)
 static const char* g_hlsl_composite2 = R"HLSL(
 struct VSOutC { float4 pos : SV_Position; float3 wpos : TEXCOORD0; float3 nrm : TEXCOORD1;
+    float3 wrel : TEXCOORD4;   // 26574 KH_SELF_REL_INTERP (ledger at VSOut)
 #if KH_TEXTURED
     float2 uv : TEXCOORD2; float4 tanw : TEXCOORD3;   // world tangent + handedness
 #endif
@@ -7835,6 +8815,7 @@ VSOutC VSComposite(VSIn i)
     // bent spanning triangles' depth (the contact bite / look-up
     // disappearance). FarVis-off far pop enforced in the PS.
     o.wpos = wp;
+    o.wrel = wp - sunOrigin.xyz;   // 26574 KH_SELF_REL_INTERP (ledger at VSOut)
     // Inverse per-axis scale, then object rotation, for the normal (see
     // VSMain).
     o.nrm = normalize(KhRotate(i.nrm / max(sizeAxes.xyz, float3(1e-4f, 1e-4f, 1e-4f))));
@@ -8044,11 +9025,66 @@ float4 PSComposite(VSOutC i) : SV_Target
             // therefore the EXACT rasterizer depth - a large majority of the
             // mesh instead of a minority.
             // setRenderDebug 52 restores the 26183 unclamped form.
-)HLSL" R"HLSL(            float khaOff = 0.0f;
+)HLSL" R"HLSL(            // 26541 KH_SNAP_REPROJECT (snapCam.w arms; mode 330 = 0 = the
+            // 26540 read). Take the fragment INTO the snapshot's frame: project
+            // it with the snapshot's own rebased VP, read the snapshot at the
+            // pixel it actually landed on, decode with the pair it was written
+            // under, and compare against the fragment's view depth in THAT
+            // frame. Everything below that reads a competitor depth, gap or
+            // ray now reads these four instead of the current-frame set.
+            bool   khaSc   = sceneClear;
+            float  khaSz   = sceneZ;
+            float  khaRefD = khaD;
+            float3 khaRayO = fxParams0.xyz;
+            float  khaRayW = i.pos.w;
+            if (snapCam.w >= 0.5f) {
+                float4 khaSC = mul(float4(i.wpos - snapCam.xyz, 1.0f), snapVp);
+                if (khaSC.w > 0.01f) {
+                    float2 khaSU = khaSC.xy / khaSC.w * float2(0.5f, -0.5f) + 0.5f;
+                    if (khaSU.x >= 0.0f && khaSU.x < 1.0f && khaSU.y >= 0.0f && khaSU.y < 1.0f) {
+                        int2 khaSPx = clamp(int2(khaSU * fxMeta.zw), int2(0, 0),
+                                            int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
+                        float khaSR = GuardSceneRaw(khaSPx);
+                        khaSc = (khaSR <= 0.000001f || khaSR >= 0.999999f);
+                        float khaSN = (khaSR - snapMeta.z) / max(snapMeta.w - snapMeta.z, 1.0e-6f);
+                        float khaSDen = khaSN - snapMeta.x;
+                        khaSz = (khaSc || khaSDen > -1.0e-7f) ? 1.0e9f : (snapMeta.y / khaSDen);
+                        if (!(khaSz > 0.0f)) khaSz = 1.0e9f;
+                        khaRefD = khaSC.w;
+                        khaRayO = snapCam.xyz;
+                        khaRayW = khaSC.w;
+                    }
+                }
+            }
+            // Tie band: a competitor within a few cm of the fragment in the
+            // snapshot frame is coplanar or IS this surface a frame ago (the
+            // majority of box pixels read our own last write); a strict < on
+            // that tie was a coin flip on the sign of the residual, which is
+            // exactly the pull/no-pull alternation. Sized to the residual
+            // (reprojection + decode, mm) with margin; only where the pull is
+            // already spent (identity says terrain, contact band open).
+            const float khaTie = (snapCam.w >= 0.5f) ? (0.05f + 1.0e-4f * khaRefD) : 0.0f;
+            // 26542 KH_ARB_FIXED_PULL (snapCam.w 1 = on, 2 = mode 331 = the 26186
+            // need-based pull under the honest read). The snapshot at a box pixel
+            // is OUR OWN write a frame ago on most of the box, and a pull sized to
+            // the gap to it feeds itself: pulled -> read 0.25 in front -> a
+            // different identity point / a bigger pull -> a period-2 flip that
+            // dump1 (26541) shows verbatim in prbBotDM alternating +-0.15 m with
+            // the camera parked. The only self-consistent decision is one that
+            // does not depend on where our own last write landed: a competitor
+            // within the possibly-self band (gap <= 0.25 + tie) is judged at the
+            // FRAGMENT, and the pull is the 0.25 m margin itself.
+            const bool khaFixed = (snapCam.w >= 0.5f && snapCam.w < 1.5f) || (snapCam.w >= 2.5f && snapCam.w < 3.5f);
+            // 26543/26544: the fixed pull at a 0.10 m margin (DEFAULT since 26544;
+            // snapCam.w 1 = mode 333 = the 0.25 m form). A real object base
+            // 0.10-0.25 m in front of a ground fragment stops being overtaken; a terrain
+            // LOD deficit over 0.10 m is left bitten. Same fixed point, smaller lie.
+            const float khaFixM = (snapCam.w >= 2.5f && snapCam.w < 3.5f) ? 0.10f : 0.25f;
+            float khaOff = 0.0f;
             bool  khaGated = false;   // 26187: gate said 'real occluder'
             bool  khaNone  = true;    // 26187: nothing competing at this pixel
 
-            if (!sceneClear && sceneZ < khaD) {
+            if (!khaSc && khaSz < khaRefD + khaTie) {
                 khaNone = false;
                 float khaCap = min(fxParams1.z, i.pos.w * 0.06f) *
                     saturate((khaCh - khtClear) / max(0.3f * khaCh, 1.0f));
@@ -8056,8 +9092,9 @@ float4 PSComposite(VSOutC i) : SV_Target
                 float khaTerrW = 1.0f;   // 26384: the ramped form of khaTerr
 
                 if (fxParams1.w > 0.0f) {
-                    float3 khaDir = (i.wpos - fxParams0.xyz) / max(i.pos.w, 1.0e-4f);
-                    float3 khaSp = fxParams0.xyz + khaDir * sceneZ;
+                    float3 khaDir = (i.wpos - khaRayO) / max(khaRayW, 1.0e-4f);   // 26541: the snapshot's ray
+                    float khaIdZ = (khaFixed && (khaRefD - khaSz) <= 0.25f + khaTie) ? khaRefD : khaSz;   // 26542
+                    float3 khaSp = khaRayO + khaDir * khaIdZ;
                     float khaSh = KhThmHeight(khaSp.xz);
                     // Vertical tolerance: a quarter cell of the field's own
                     // relief, floored at 2 m. Buildings, trees and poles
@@ -8173,7 +9210,8 @@ float4 PSComposite(VSOutC i) : SV_Target
                 if (khaTerr || (khaUpC && khaTerrW > 0.0f)) {
                     khaOff = (dbgCtl.z >= 0.5f && dbgCtl.z < 1.5f)   // 52
                            ? khaCap
-                           : min(khaCap, (khaD - sceneZ) + 0.25f);
+                           : (khaFixed ? min(khaCap, khaFixM)   // 26542: the margin alone (26543: sized by mode 332)
+                                       : min(khaCap, max(khaRefD - khaSz, 0.0f) + 0.25f));   // 26541: gap in the snapshot frame
                     if (!khaHardC) khaOff *= khaTerrW;   // 26386: default ramps
                     if (khaOff <= 0.0f) khaGated = true;
                 } else {
@@ -8570,7 +9608,7 @@ float4 PSComposite(VSOutC i) : SV_Target
     // a stencil-shadowed area convicts the COUNTING; magenta convicts
     // PRODUCTION. Pure gauge - mode 0 byte-identical.
     // 26479 DEBUG VISUAL 21 (setRenderDebug 269): the self-tier probe.
-    if (dbgCtl.x >= 20.5f && dbgCtl.x < 21.5f) return KhSelfTierProbe(i.wpos, i.nrm);
+    if (dbgCtl.x >= 20.5f && dbgCtl.x < 21.5f) return KhSelfTierProbe(i.wpos, i.wrel, i.nrm);
     if (dbgCtl.x >= 19.5f && dbgCtl.x < 20.5f) {
         if (mirMeta.x < 0.5f) return float4(1.0f, 0.0f, 1.0f, 1.0f);
         return KhMirUnit(i.pos.xy, mirMeta.y, mirMeta.z) < 0.5f
@@ -8709,11 +9747,29 @@ float4 PSComposite(VSOutC i) : SV_Target
         // tight. A facet more than 60 deg off the interpolated normal cannot
         // have come from a smoothed surface: it is a straddle, and the vertex
         // normal is the only honest answer there. Ledger at KH_FACET_STRADDLE.
-        if (dot(khFacetN, khBiasN) > 0.5f &&
+        // 26592 KH_BIAS_NORMAL_INTERP (mode 369 / lighting0.y 53 re-arms
+        // the facet override; 233 is an accepted ALIAS of this default -
+        // the 220 precedent). THE CONVICTION, traced then field-confirmed:
+        // the facet normal is PER-QUAD DERIVATIVE OUTPUT, and at tight
+        // geometry it lands near sun-perpendicular while passing the 60
+        // degree straddle test - the capture's crevice firefly read
+        // ndl 0.02 (the clamp floor) -> tan 50 (the 1e4 ceiling permits)
+        // -> slope bias ~19 mm, EATING the measured 17.8 mm contact
+        // occluder, while the dark neighbour's facet read ndl 0.372 ->
+        // bias 3.4 mm -> correct. Any sub-pixel camera motion re-derives
+        // ddx/ddy, the facet jitters, the bias re-rolls: the operator's
+        // binary on/off film grain, static at rest, 2x2-blocky, worst in
+        // crevices - and immune to every kernel-side arm because it
+        // poisons the kernel's INPUT at this call site. The 26435 guard
+        // bounded the facet's DIRECTION (60 deg), not its BIAS
+        // CONSEQUENCE - insufficient by measurement. Mode 233 read clean
+        // in the field: the interpolated normal is the default.
+        if ((lighting0.y >= 52.5f && lighting0.y < 53.5f) &&
+            dot(khFacetN, khBiasN) > 0.5f &&
             abs(dot(khFacetN, lighting1.xyz)) < abs(dot(khBiasN, lighting1.xyz)))
-            khBiasN = khFacetN;
+            khBiasN = khFacetN;   // 26592: opt-in (369)
     }
-    if (lighting0.y >= 18.5f && lighting0.y < 19.5f) khBiasN = normalize(i.nrm);   // 233
+    if (lighting0.y >= 18.5f && lighting0.y < 19.5f) khBiasN = normalize(i.nrm);   // 233 (alias of the 26592 default)
 
     // N.L early-out: a face pointing away from (or grazing) the light has
     // no direct term for shadows to attenuate - skip the band scan, the
@@ -8737,7 +9793,16 @@ float4 PSComposite(VSOutC i) : SV_Target
         // the split's cascade arm. TWIN EDIT: PSMain and PSComposite
         // identical.
         if (lighting0.y < 2.5f || lighting0.y >= 3.5f) {
-            if (maskMeta.x >= 0.5f) smf = ShadowBandFactor(i.wpos);
+            // 26610 KH_BAND_REL_INTERP (ledger at KH_BUILD_TAG): the band
+            // walk consumes the 26574 metres-scale interpolant recomposed
+            // with the anchor, not the raw absolute i.wpos whose world-
+            // magnitude interpolation noise authored the 45-degree pitch
+            // jitter. lighting0.y 59 (mode 381) restores the absolute
+            // interpolant: the one-switch A/B (crawl and jitter return
+            // together). TWIN EDIT: PSMain and PSComposite identical.
+            if (maskMeta.x >= 0.5f) smf = ShadowBandFactor(
+                (lighting0.y >= 58.5f && lighting0.y < 59.5f)
+                    ? i.wpos : (i.wrel + sunOrigin.xyz));
             else                    smf = ShadowMapFactor(i.wpos - shadowMeta2.yzw);
         }
 
@@ -8748,11 +9813,40 @@ float4 PSComposite(VSOutC i) : SV_Target
         // expression is split. PSMain's twin segment is well under budget and
         // is deliberately NOT split - the twins differ in whitespace only.
 )HLSL" R"HLSL(
+        // ==================================================================
+        // 26573 VISUAL 29 (mode 355) - RECEIVE-TERM DECOMPOSITION. The 26572
+        // field read (loci unchanged with the soft compare live in every
+        // frame - dump3) fired the pre-registered fork: the noise is not the
+        // tap-margin class, and nine builds of self-chain work rest on an
+        // attribution that has never been painted. One screenshot decides:
+        //   R = engine cascade/band receive occlusion (the LIVE smf here,
+        //       after the receive above, mode arms respected),
+        //   G = OUR sun-map self-term occlusion (as configured),
+        //   B = stencil-volume occlusion (the live dispatch).
+        // The speckle appears in exactly the channel that authors it; a
+        // speckle at this pose visible in NO channel convicts the shading
+        // path (normal / facet machinery), not a shadow term. Inside the
+        // N.L gate: ungated fragments shade normally by construction.
+        // TWIN: PSMain + PSComposite carry the identical block.
+        // ==================================================================
+        if (dbgCtl.x >= 30.5f && dbgCtl.x < 31.5f)   // 26580 VISUAL 31
+            return KhPfProbe2(i.wpos, i.wrel, khBiasN);
+        if (dbgCtl.x >= 29.5f && dbgCtl.x < 30.5f)   // 26579 VISUAL 30
+            return KhPfProbe(i.wpos, i.wrel, khBiasN);
+        if (dbgCtl.x >= 28.5f && dbgCtl.x < 29.5f) {
+            float khv29_s = 1.0f - SunShadowFactorSelf(i.wpos, i.wrel, khBiasN);
+            float khv29_u = 0.0f;
+            if (maskMeta.w >= 0.5f)
+                khv29_u = 1.0f - ((stenVol2.x >= 0.5f && KhVolMode() == 6)
+                        ? KhVolSoftScene(khStenR, khStenP, KH_STEN_TOL_W(i.pos.w), 6)
+                        : KhStenUnit(i.wpos, i.pos.xy, khStenG));
+            return float4(1.0f - smf, khv29_s, khv29_u, 1.0f);
+        }
         // 26339 MODE 183 (lighting0.y == 5): OUR OWN SUN-MAP SELF-SHADOW
         // skipped - the arm the 26321 split never had. TWIN EDIT: PSMain and
         // PSComposite identical.
         if (lighting0.y < 4.5f || lighting0.y >= 5.5f)
-            smf = min(smf, SunShadowFactorSelf(i.wpos, khBiasN));   // 26432
+            smf = min(smf, SunShadowFactorSelf(i.wpos, i.wrel, khBiasN));   // 26432/26574
         // 26215 UNIT SHADOWS. The band receive above answers CASCADES for
         // our surface and is already correct - it is not disturbed. This
         // multiplies in the isolated stencil-volume term, which is the
@@ -8820,7 +9914,12 @@ float4 PSComposite(VSOutC i) : SV_Target
                 khStenU = lerp(khMirF, khStenU, khStenF);
             }
 #endif
-            smf *= khStenU;
+            // 26572 KH_STEN_RANGE_FADE twin (ledger at PSMain's site; code
+            // 43 / mode 352 reverts). After the near-collapse mirror lerp:
+            // the fade thins the final verdict.
+            float khStRf = (lighting0.y >= 42.5f && lighting0.y < 43.5f)
+                         ? 1.0f : KhSunRangeFade(i.wpos);
+            smf *= 1.0f - (1.0f - khStenU) * khStRf;
         }
     }
 
@@ -11790,6 +12889,18 @@ struct alignas(16) ConstantData {
     // 2 float4 keeps KH_CBFRAME_BYTES % 16 == 0.
     float fog_uw[4];
     float fog_uw_grad[4];
+    // 26541 KH_SNAP_REPROJECT - HLSL twins snapVp / snapMeta / snapCam (ledger
+    // there and at KH_BUILD_TAG). 6 float4 keeps KH_CBFRAME_BYTES % 16 == 0.
+    float snap_vp[4][4];
+    float snap_meta[4];
+    float snap_cam[4];
+    // 26575 KH_SELF_PREFILTER - HLSL twin sunPf (ledger there and at
+    // KH_BUILD_TAG). 1 float4 keeps KH_CBFRAME_BYTES % 16 == 0.
+    float sun_pf[4];
+    // 26620 KH_SUN_FAR_BAND (appended at the tail: frame-slice data, the
+    // CB split untouched). HLSL twin appended identically.
+    float sun_vp5[4][4];
+    float sun_meta5[4];
 };
 
 // CB-split slice geometry: the object block ends where view_proj (the
@@ -16121,6 +17232,23 @@ static constexpr float KH_SUN_MID_DEPTH = 48.0f;
 static constexpr UINT  KH_SUN_OUT_SIZE  = 4096;
 static constexpr float KH_SUN_OUT_HALF  = 32.0f;
 static constexpr float KH_SUN_OUT_DEPTH = 192.0f;
+// 26611 KH_SUN_LADDER_SCALE (ledger at the khsh_one call sites; mode 382
+// reverts): the MID/OUT halves and depths above are the 200 m-range
+// DEFAULTS now, scaled at the call sites by s = clamp(shadowVisibility/
+// 200, 1, 5) so the switch distances follow the game's own slider. The
+// HERO pair stays fixed - the near field is a calibration constant.
+// 26620 KH_SUN_FAR_BAND (ledger at KH_BUILD_TAG; mode 389 stands the far
+// band down): band 4 of the camera ladder - half = the shadow view
+// distance ITSELF (khsr_rad, no ladder scale: the window IS the range),
+// depth = 6x half (the calibrated ratio), on the khsh_one pattern. Its
+// texel is the pure range price (2*1.02*range/4096: ~0.10 m at 200,
+// ~0.26 m at 530) INDEPENDENT OF THE CASTER SET - the 26445 rule
+// restored across the whole fade range - and it re-renders every flush
+// on a snapped grid, so caster motion re-quantizes continuously at the
+// range price instead of sporadically at the union's mesh price (the
+// 26619 wobble conviction). The union remains BEHIND it for the
+// beyond-far presence test and anything outside the range window.
+static constexpr UINT KH_SUN_FAR_SIZE = 4096;
 // 26449 UNION RANGE = THE GAME'S OWN SHADOW VIEW DISTANCE (operator
 // mandate refined from 26448: not a fixed private cutoff - FOLLOW the
 // game. The union window's enclosing radius is g_sun_range, read from
@@ -16147,11 +17275,25 @@ static constexpr float KH_SUN_OUT_DEPTH = 192.0f;
 // campaign with per-band A/B modes; do not compress it.
 // 26454: BUILT - the ladder above ships whole this build (ledger at
 // KH_SUN_CASCADE). The camera-anchored window at this range is now the
-// union DEFAULT (241 reverts to caster-anchored), the per-flush
-// shadowVisibility read below feeds both the window and the caster
-// eligibility radius, and the mid/outer bands serve everything nearer
+// union DEFAULT (241 reverts to caster-anchored), the shadow view
+// distance below feeds both the window and the caster eligibility
+// radius (26615: derived from the engine's committed cascade table -
+// KH_SUN_RANGE_FROM_BANDS - with the videoOptions read as fallback;
+// the mid/outer footprints scale by 26611's clamp(range/200, 1, 5)),
+// and the mid/outer bands serve everything nearer
 // than 32 m so the range-priced texels only ever answer FAR fragments.
 static std::atomic<float> g_sun_range{200.0f};
+// 26613 KH_SUN_RANGE_SOURCE (ledger at KH_BUILD_TAG). WHO WROTE g_sun_range
+// LAST: 0 = nobody (the 200 default - indistinguishable from a healthy
+// mirror at the stock setting, which is exactly how the dead-mirror class
+// stayed invisible through two field rounds), 1 = the per-flush
+// getVideoOptions fallback, 2 = KH_SUN_RANGE_FROM_BANDS, the engine's own
+// committed cascade table (26615, PRIMARY - dump1-26614 proved the
+// videoOptions map carries no shadowvis key at all while the band census
+// read the setting exactly; the 26614 setShadowRange command stays
+// withdrawn, this is the automatic source the directive asked for).
+// NOT session-reset: settings-class state.
+static std::atomic<int> g_sun_range_src{0};
 
 inline bool ensure_sun_depth(ID3D11Device* dev) {
     if (g_res.sun_tex && g_res.sun_dsv && g_res.sun_srv) return true;
@@ -16194,6 +17336,193 @@ inline bool ensure_sun_depth(ID3D11Device* dev) {
 // 26444: the hero map's resource trio - same construction as
 // ensure_sun_depth, at KH_SUN_HERO_SIZE. Non-fatal: every consumer
 // stands down when absent (sunMeta2.x stays 0).
+// 26575 KH_SELF_PREFILTER convert unit (ledger at KH_BUILD_TAG): one
+// fullscreen pass folds the band depth into half-res moments (mu,
+// E[z^2]) - GenerateMips then averages MOMENTS, which is exactly the
+// filtered-distribution arithmetic Chebyshev consumes. CB-free.
+static const char* g_hlsl_sunpf = R"HLSL(
+Texture2D<float> khpf_src : register(t0);
+struct VSOPf { float4 pos : SV_Position; };
+VSOPf VSPf(uint vid : SV_VertexID)
+{
+    VSOPf o;
+    float2 uv = float2((vid << 1) & 2, vid & 2);
+    o.pos = float4(uv * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
+    return o;
+}
+float4 PSPf(VSOPf i) : SV_Target
+{
+    int2 khpf_p = int2(i.pos.xy) * 2;
+    // 26582: saturate = any foreign/garbage delivery becomes clean far
+    // (arm inert), never kilometre-scale poison (ledger at KH_BUILD_TAG).
+    float z0 = saturate(khpf_src.Load(int3(khpf_p, 0)));
+    float z1 = saturate(khpf_src.Load(int3(khpf_p + int2(1, 0), 0)));
+    float z2 = saturate(khpf_src.Load(int3(khpf_p + int2(0, 1), 0)));
+    float z3 = saturate(khpf_src.Load(int3(khpf_p + int2(1, 1), 0)));
+    float khpf_mu = 0.25f * (z0 + z1 + z2 + z3);
+    float khpf_m2 = 0.25f * (z0 * z0 + z1 * z1 + z2 * z2 + z3 * z3);
+    return float4(khpf_mu, khpf_m2, 0.0f, 0.0f);
+}
+// 26578: one mip level from the previous - the 2x2 MOMENT average
+// GenerateMips was trusted to do and silently did not (ledger at
+// KH_BUILD_TAG). Reads the scratch copy (t1) - never its own resource.
+Texture2D<float2> khpfm_src : register(t1);
+float4 PSPfMip(VSOPf i) : SV_Target
+{
+    int2 khpfm_p = int2(i.pos.xy) * 2;
+    float2 khpfm_a = saturate(khpfm_src.Load(int3(khpfm_p, 0)));         // 26582
+    float2 khpfm_b = saturate(khpfm_src.Load(int3(khpfm_p + int2(1, 0), 0)));
+    float2 khpfm_c = saturate(khpfm_src.Load(int3(khpfm_p + int2(0, 1), 0)));
+    float2 khpfm_d = saturate(khpfm_src.Load(int3(khpfm_p + int2(1, 1), 0)));
+    float2 khpfm_m = 0.25f * (khpfm_a + khpfm_b + khpfm_c + khpfm_d);
+    return float4(khpfm_m.x, khpfm_m.y, 0.0f, 0.0f);
+}
+)HLSL";
+
+// Non-fatal like every band ensure: any failure returns false and the
+// self kernel stays classic (sun_pf flags never arm).
+inline bool ensure_sun_pf(ID3D11Device* dev) {
+    if (!g_res.samp_pf) {
+        D3D11_SAMPLER_DESC sp = {};
+        sp.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        sp.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sp.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sp.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sp.MaxLOD = D3D11_FLOAT32_MAX;
+        if (FAILED(dev->CreateSamplerState(&sp, &g_res.samp_pf))) return false;
+    }
+    if (!g_res.blend_pf) {   // 26583 (ledger at KH_BUILD_TAG)
+        D3D11_BLEND_DESC bd = {};
+        bd.RenderTarget[0].BlendEnable = FALSE;
+        bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        if (FAILED(dev->CreateBlendState(&bd, &g_res.blend_pf))) return false;
+    }
+    if (!g_res.vs_sunpf || !g_res.ps_sunpf) {
+        static const D3D_SHADER_MACRO khpf_defs[] = { { nullptr, nullptr } };
+        ID3DBlob* khpf_vb = nullptr;
+        if (!compile_shader(g_hlsl_sunpf, "VSPf", "vs_5_0", khpf_defs, &khpf_vb).empty() ||
+            !khpf_vb) return false;
+        const HRESULT khpf_vh = dev->CreateVertexShader(khpf_vb->GetBufferPointer(),
+                                                        khpf_vb->GetBufferSize(),
+                                                        nullptr, &g_res.vs_sunpf);
+        khpf_vb->Release();
+        if (FAILED(khpf_vh)) return false;
+        ID3DBlob* khpf_pb = nullptr;
+        if (!compile_shader(g_hlsl_sunpf, "PSPf", "ps_5_0", khpf_defs, &khpf_pb).empty() ||
+            !khpf_pb) return false;
+        const HRESULT khpf_ph = dev->CreatePixelShader(khpf_pb->GetBufferPointer(),
+                                                       khpf_pb->GetBufferSize(),
+                                                       nullptr, &g_res.ps_sunpf);
+        khpf_pb->Release();
+        if (FAILED(khpf_ph)) return false;
+    }
+    if (!g_res.ps_sunpfm) {   // 26578 manual mip chain
+        static const D3D_SHADER_MACRO khpfm_defs[] = { { nullptr, nullptr } };
+        ID3DBlob* khpfm_pb = nullptr;
+        if (!compile_shader(g_hlsl_sunpf, "PSPfMip", "ps_5_0", khpfm_defs, &khpfm_pb).empty() ||
+            !khpfm_pb) return false;
+        const HRESULT khpfm_ph = dev->CreatePixelShader(khpfm_pb->GetBufferPointer(),
+                                                        khpfm_pb->GetBufferSize(),
+                                                        nullptr, &g_res.ps_sunpfm);
+        khpfm_pb->Release();
+        if (FAILED(khpfm_ph)) return false;
+    }
+    static const UINT khpf_sz[3] = {
+        KH_SUN_HERO_SIZE / 2u, KH_SUN_MID_SIZE / 2u, KH_SUN_OUT_SIZE / 2u };
+    for (int khpf_i = 0; khpf_i < 3; ++khpf_i) {
+        if (g_res.sun_pf_tex[khpf_i] && g_res.sun_pf_rtv[khpf_i] &&
+            g_res.sun_pf_srv[khpf_i] && g_res.sun_pf_rtvm[khpf_i][1]) continue;   // 26578
+        KH_SAFE_RELEASE(g_res.sun_pf_srv[khpf_i]);
+        KH_SAFE_RELEASE(g_res.sun_pf_rtv[khpf_i]);
+        KH_SAFE_RELEASE(g_res.sun_pf_tex[khpf_i]);
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = khpf_sz[khpf_i];
+        td.Height = khpf_sz[khpf_i];
+        td.MipLevels = 0;   // full chain
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R32G32_FLOAT;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        // 26578: MISC_GENERATE_MIPS DELETED with the call it served -
+        // the chain is built manually below (ledger at KH_BUILD_TAG).
+        if (FAILED(dev->CreateTexture2D(&td, nullptr, &g_res.sun_pf_tex[khpf_i])))
+            return false;
+        D3D11_RENDER_TARGET_VIEW_DESC rd = {};
+        rd.Format = DXGI_FORMAT_R32G32_FLOAT;
+        rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+        if (FAILED(dev->CreateRenderTargetView(g_res.sun_pf_tex[khpf_i], &rd,
+                                               &g_res.sun_pf_rtv[khpf_i]))) {
+            KH_SAFE_RELEASE(g_res.sun_pf_tex[khpf_i]);
+            return false;
+        }
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+        sd.Format = DXGI_FORMAT_R32G32_FLOAT;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MipLevels = static_cast<UINT>(-1);
+        if (FAILED(dev->CreateShaderResourceView(g_res.sun_pf_tex[khpf_i], &sd,
+                                                 &g_res.sun_pf_srv[khpf_i]))) {
+            KH_SAFE_RELEASE(g_res.sun_pf_rtv[khpf_i]);
+            KH_SAFE_RELEASE(g_res.sun_pf_tex[khpf_i]);
+            return false;
+        }
+        // 26578: per-level RTVs for the manual chain (level 0 = the RTV
+        // above; the loop below stops at 1x1 or the array bound).
+        for (UINT khpf_m = 1; (khpf_sz[khpf_i] >> khpf_m) >= 1u && khpf_m < 12u; ++khpf_m) {
+            KH_SAFE_RELEASE(g_res.sun_pf_rtvm[khpf_i][khpf_m]);
+            D3D11_RENDER_TARGET_VIEW_DESC rm = {};
+            rm.Format = DXGI_FORMAT_R32G32_FLOAT;
+            rm.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+            rm.Texture2D.MipSlice = khpf_m;
+            if (FAILED(dev->CreateRenderTargetView(g_res.sun_pf_tex[khpf_i], &rm,
+                                                   &g_res.sun_pf_rtvm[khpf_i][khpf_m])))
+                return false;
+        }
+    }
+    // 26578: the shared scratch ping-pong (all three bands are the same
+    // half-res size; SHADER_RESOURCE only - it is copied into and read,
+    // never rendered) plus one single-level SRV per mip.
+    if (!g_res.sun_pf_scr || !g_res.sun_pf_scr_srvm[0]) {
+        KH_SAFE_RELEASE(g_res.sun_pf_scr);
+        for (UINT khpf_m = 0; khpf_m < 12u; ++khpf_m)
+            KH_SAFE_RELEASE(g_res.sun_pf_scr_srvm[khpf_m]);
+        D3D11_TEXTURE2D_DESC ts = {};
+        ts.Width = khpf_sz[0];
+        ts.Height = khpf_sz[0];
+        ts.MipLevels = 0;
+        ts.ArraySize = 1;
+        ts.Format = DXGI_FORMAT_R32G32_FLOAT;
+        ts.SampleDesc.Count = 1;
+        ts.Usage = D3D11_USAGE_DEFAULT;
+        ts.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(dev->CreateTexture2D(&ts, nullptr, &g_res.sun_pf_scr))) return false;
+        for (UINT khpf_m = 0; (khpf_sz[0] >> khpf_m) >= 1u && khpf_m < 12u; ++khpf_m) {
+            D3D11_SHADER_RESOURCE_VIEW_DESC sm = {};
+            sm.Format = DXGI_FORMAT_R32G32_FLOAT;
+            sm.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            sm.Texture2D.MostDetailedMip = khpf_m;
+            sm.Texture2D.MipLevels = 1;
+            if (FAILED(dev->CreateShaderResourceView(g_res.sun_pf_scr, &sm,
+                                                     &g_res.sun_pf_scr_srvm[khpf_m])))
+                return false;
+        }
+    }
+    // 26581: the CPU-probe stagings (tiny; created once; failure is
+    // non-fatal for the pyramids - only the probe stays silent).
+    if (!g_res.pf_stage_mu) {
+        D3D11_TEXTURE2D_DESC tg = {};
+        tg.Width = 1; tg.Height = 1; tg.MipLevels = 1; tg.ArraySize = 1;
+        tg.Format = DXGI_FORMAT_R32G32_FLOAT;
+        tg.SampleDesc.Count = 1;
+        tg.Usage = D3D11_USAGE_STAGING;
+        tg.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        dev->CreateTexture2D(&tg, nullptr, &g_res.pf_stage_mu);
+        tg.Format = DXGI_FORMAT_R32_TYPELESS;
+        dev->CreateTexture2D(&tg, nullptr, &g_res.pf_stage_st);
+    }
+    return true;
+}
+
 inline bool ensure_sun_depth2(ID3D11Device* dev) {
     if (g_res.sun2_tex && g_res.sun2_dsv && g_res.sun2_srv) return true;
     KH_SAFE_RELEASE(g_res.sun2_srv);
@@ -16268,6 +17597,42 @@ inline bool ensure_sun_depth3(ID3D11Device* dev) {
 // 26454: the OUTER band's resource trio - the ensure_sun_depth2
 // construction verbatim at KH_SUN_OUT_SIZE. Non-fatal: a failed band
 // stands itself down (its meta stays 0) and the chain falls through.
+// 26620: the FAR band's resource trio - the ensure_sun_depth2
+// construction verbatim at KH_SUN_FAR_SIZE. Non-fatal like every band.
+inline bool ensure_sun_depth5(ID3D11Device* dev) {
+    if (g_res.sun5_tex && g_res.sun5_dsv && g_res.sun5_srv) return true;
+    KH_SAFE_RELEASE(g_res.sun5_srv);
+    KH_SAFE_RELEASE(g_res.sun5_dsv);
+    KH_SAFE_RELEASE(g_res.sun5_tex);
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = KH_SUN_FAR_SIZE;
+    td.Height = KH_SUN_FAR_SIZE;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R32_TYPELESS;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(dev->CreateTexture2D(&td, nullptr, &g_res.sun5_tex))) return false;
+    D3D11_DEPTH_STENCIL_VIEW_DESC dd = {};
+    dd.Format = DXGI_FORMAT_D32_FLOAT;
+    dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+    if (FAILED(dev->CreateDepthStencilView(g_res.sun5_tex, &dd, &g_res.sun5_dsv))) {
+        KH_SAFE_RELEASE(g_res.sun5_tex);
+        return false;
+    }
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+    sd.Format = DXGI_FORMAT_R32_FLOAT;
+    sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    sd.Texture2D.MipLevels = 1;
+    if (FAILED(dev->CreateShaderResourceView(g_res.sun5_tex, &sd, &g_res.sun5_srv))) {
+        KH_SAFE_RELEASE(g_res.sun5_dsv);
+        KH_SAFE_RELEASE(g_res.sun5_tex);
+        return false;
+    }
+    return true;
+}
+
 inline bool ensure_sun_depth4(ID3D11Device* dev) {
     if (g_res.sun4_tex && g_res.sun4_dsv && g_res.sun4_srv) return true;
     KH_SAFE_RELEASE(g_res.sun4_srv);
@@ -16449,8 +17814,10 @@ struct StateBackup {
     // never binds up here) but a discipline breach the campaign-54
     // audit caught. Widened here BEFORE the new bands land, so all
     // three slots are restore-covered from their first frame.
-    ID3D11ShaderResourceView* ps_srvs[29] = {};   // 26458: +t28 (mirror stencil)
-    ID3D11SamplerState*      ps_samps[1] = {};   // s0: the material sampler bind
+    // 26575: +t29-31 (the self moment pyramids) - widened in the SAME
+    // edit that adds the binds, per the 26444 leak lesson above.
+    ID3D11ShaderResourceView* ps_srvs[33] = {};   // 26458: +t28; 26575: t29-31; 26620: +t32 (far band)
+    ID3D11SamplerState*      ps_samps[2] = {};   // s0 material, s1 26575 pyramid sampler
     ID3D11DepthStencilState* dss = nullptr;
     UINT                     stencil_ref = 0;
     ID3D11BlendState*        blend = nullptr;
@@ -18112,6 +19479,46 @@ static uint64_t g_snap_consumed = 0;      // guarded injections since arm
 // (cheap standing forensics; probe-free m22/m32/vp reads via stats).
 static float             g_inj_dp[4] = {};
 static bool              g_inj_dp_valid = false;
+// 26540 KH_ARB_JITTER_CENSUS (instrument only, mode 0 byte-identical; ledger at
+// KH_BUILD_TAG). The contact clamp decides its pull from a competitor depth
+// decoded out of the PREVIOUS frame's snapshot with THIS frame's encode pair,
+// and reconstructs the competitor point along THIS frame's ray. Both errors are
+// computable on the CPU: the pair the snapshot was written under, the camera
+// it was resolved from, and the pair/camera the injection ships. Modelled at
+// the first staged mesh's ground-contact point and compared to khaTol.
+static float    g_snap_pair[2] = { 0.0f, 0.0f };   // m22/m32 the snapshot depth carries
+static int      g_snap_pair_src = 0;                // 0 none, 1 engine pair, 2 last injection pair
+static float    g_snap_cam[3] = { 0.0f, 0.0f, 0.0f };
+static bool     g_snap_cam_valid = false;
+// 26541 KH_SNAP_REPROJECT (mode 330 reverts; full ledger at KH_BUILD_TAG). The
+// contact clamp used to read the previous frame's snapshot AT THIS FRAME'S
+// PIXEL, decode it with THIS FRAME'S pair, and reconstruct the competitor
+// along THIS FRAME'S ray. dump1 (26539, camera bit-still, near gliding 384
+// changes in 512 rows) put the resulting decode error over the 0.25 m identity
+// tolerance on 316 of 511 frames with the camera NOT MOVING. The fix takes
+// the fragment INTO the snapshot's frame: its world position is projected
+// with the snapshot's own (rebased) view-proj, the snapshot is read at the
+// pixel it actually landed on, decoded with the pair it was written under,
+// compared against the fragment's view depth IN THAT FRAME, and the identity
+// point is reconstructed along THAT frame's ray. Camera motion and encode
+// churn between the frames drop out by construction; a residual is the
+// parallax between two surfaces at almost the same depth - millimetres.
+static float    g_snap_vp[4][4] = {};        // rebased world->clip of the snapshot frame
+static float    g_snap_vp_lo = 0.011f;       // its viewport depth range
+static float    g_snap_vp_hi = 0.999f;
+static bool     g_snap_vp_valid = false;
+static uint64_t g_snap_reproj_arms = 0;      // arb injections that shipped the arm
+static uint64_t g_snap_reproj_stands = 0;    // arb injections with no usable snapshot frame
+static uint64_t g_arb_jit_frames = 0;      // arb injections the census evaluated
+static uint64_t g_arb_jit_over_tol = 0;    // ... whose predicted vertical jitter exceeded khaTol
+static float    g_arb_jit_pair_m = -1.0f;  // last
+static float    g_arb_jit_cam_m = -1.0f;
+static float    g_arb_jit_vert_m = -1.0f;
+static float    g_arb_jit_vert_max_m = 0.0f;
+static double   g_arb_jit_vert_sum = 0.0;  // of |vert|
+static float    g_arb_tol_m = -1.0f;       // khaTol as the shader computes it (default arm)
+static float    g_arb_snap_near_m = -1.0f; // near of the snapshot pair (kh_enc_pair_near)
+static float    g_arb_inj_near_m = -1.0f;  // near of the shipped pair, same frame
 
 // ANALYTIC TERRAIN HEIGHTFIELD (the settled terrain-occlusion
 // authority; see the thmParams ledger). The auto-builder is the sole
@@ -20894,7 +22301,7 @@ static uint32_t g_fk_veto_cand_n = 0;       // candidates staged at the last pas
 // (26363/26364, field-confirmed), the seam refuse-and-retry (26371,
 // svLiveTrnBound 0 with 17/17), and the sign-agnostic fade gate (26362, a
 // defect repair that is arithmetically identical on mode 0). Nothing else.
-static constexpr int KH_BUILD_TAG = 26539;
+static constexpr int KH_BUILD_TAG = 26625;
 // NEAR-GAP RAMP (build 26001; the RenderDoc conviction). ROOT, proven by
 // pixel history + depth-window plateaus: the world partition's viewport
 // floor (0.011 in the convicting capture) collapses EVERY fragment nearer
@@ -22849,8 +24256,17 @@ static float g_pub_block_sun[3] = {};
 // that refusing it cannot make anything worse, which is construction. If a
 // black box recurs with blkZeroSunRefusals climbing, the zero is being
 // refused and the darkness has a second source.
+// 26612 PREMISE CORRECTION (KH_NIGHT_ZERO_SUN; ledger at the fill's gate):
+// 'no lighting state produces an identically zero sun colour' is FALSE at
+// deep night - dump1-26611 reads the engine's standing sun at exactly 0
+// with ambient 0.0186 - and 'refusing it cannot make anything worse' fails
+// with it: the refusal shipped flat white all night (the glowing mesh).
+// The refusal now applies only against a standing sun > 0.5 or an unknown
+// standing (the cold window this gate was built for); a measured-dark
+// standing admits the block. Mode 385 restores 26418 verbatim.
 // ==========================================================================
 static uint64_t g_blk_zero_sun_refusals = 0;   // 26418 engagement lane
+static uint64_t g_blk_zero_sun_admits = 0;     // 26612 engagement lane: zero-sun blocks SHIPPED because the standing scene is dark (night)
 static float    g_blk_shade_now   = -1.0f;
 static float    g_blk_shade_min   =  1.0e9f;   // session darkest
 static float    g_blk_shade_max   = -1.0f;     // session brightest
@@ -22999,6 +24415,7 @@ static uint64_t g_blk_ring_band_filtered = 0;  // 26501: anchor-band filter over
 static uint64_t g_blk_ring_no_band = 0;        // 26501/26502: no in-band candidate AND mirror out of anchor band; raw nearest stood
 static uint64_t g_blk_ring_starve_holds = 0;   // 26502: no in-band candidate, mirror in-band with anchor = starved ring; mirror held
 static uint64_t g_blk_pub_slews = 0;           // 26503: publishes rate-limited by the slew (ledger in the catalog)
+static uint64_t g_blk_slew_regime_commits = 0; // 26611: >3x channel-sum moves that bypassed the slew (skipTime class)
 static uint64_t g_blk_anchor_snaps = 0;        // 26476: anchor snaps on regime adoption
 static uint64_t g_blk_smallnf_skips = 0;       // 26476: certified-standing uploads too small for the window test, refused instead of applying blind
 static float    g_blk_sticky_pend_age = -1.0f; // pending age at the last refusal
@@ -24058,6 +25475,12 @@ struct LiveShadowState {
     uint32_t atlas_fmt = 0;
     float    atlas_last_seen = 0.0f;   // last t15 consumption of the HELD atlas (stamped in mask_note_draw)
     float    first_capture_time = -1.0f;   // first band capture (receive warm-up gate)
+    // 26566: the warm-up is a STARTUP defense (mid-stream engine atlas
+    // garbage) and is served ONCE per session; a mid-session wipe
+    // (release_shadow_device_state - F12 capture churn, camera-class
+    // switches) must not re-arm a 2.0 s receive blackout against an
+    // engine atlas that is long settled. Mode 349 re-arms per wipe.
+    bool     receive_warmed = false;
     bool     srv_failed = false;
     bool     phase_on_atlas = false;
     // Per-cycle latch
@@ -24163,6 +25586,32 @@ struct LiveShadowState {
         float    stage_sm[12] = {};
         float    stage_border[4] = {};
         float    stage_since = 0.0f;
+        // 26540 KH_SEAL_LAND_CENSUS (instrument only; ledger at KH_BUILD_TAG):
+        // the escape that requested this reseal - stamped when khbd_over /
+        // khly_over first fires for a slot whose reseal has not landed, read
+        // and cleared at the LANDING (stage commit or immediate seal).
+        float    esc_t = -1.0f;           // effect_time_seconds at the escape
+        uint64_t esc_cycle = 0;           // g_topo_cycles at the escape
+        // 26545 KH_BAND_PAIR_SAME (mode 335 arms; ledger at KH_BUILD_TAG): the
+        // view live AT THE CAPTURE, held so the commit can pair the sm with its
+        // own frame instead of the next publish. vcol layout (columns).
+        float    stage_view[12] = {};
+        bool     stage_view_ok = false;
+        // 26561 KH_BAND_STAGE_FLIP (mode 346 arms; ledger at KH_BUILD_TAG):
+        // the FIRST cross-source publish accepted after this band's own
+        // stage, latched per band so the commit can weld a time-adjacent
+        // view instead of the commit-time global lottery. vcol layout
+        // (columns), like stage_view above.
+        float    stage_pair[12] = {};
+        bool     stage_pair_ok = false;
+        // 26570 KH_BAND_STAGE_FIRST: the FIRST exact native publish
+        // accepted after this band's own stage, NO source filter and NO
+        // boundary guard - i.e. the sm's own frame's late view upload,
+        // the one epoch the campaign never stored (the 26179 boundary
+        // convention made crossing commits weld the NEXT frame, and
+        // every stored candidate was some other epoch). vcol layout.
+        float    stage_first[12] = {};
+        bool     stage_first_ok = false;
         uint64_t stage_atlas_epoch = 0;   // 26182: RETIRED - the copy is back at
                                           // the resolve, so drift is structurally
                                           // impossible. Lane stays published at 0.
@@ -24233,6 +25682,12 @@ struct LiveShadowState {
     float frame_view[16] = {};
     bool  frame_view_valid = false;
     float frame_view_time = -1.0f;
+    // 26555: the OTHER source's latest publish (two view sources publish
+    // per frame, 1.6-20 m apart - the 26553/26554 convictions). Latched
+    // at the accept whenever the incoming publish crosses sources.
+    float alt_view[16] = {};
+    bool  alt_view_valid = false;
+    float alt_view_time = -1.0f;
     // SUPERVISED VIEW-SOURCE LEARNING. The injection holds the PROVEN
     // per-frame view (the mesh renders pixel-registered with it, every
     // frame) but only LATE in the frame; the resolves run EARLY, when the
@@ -25286,6 +26741,38 @@ struct FfrRecord {
     float    blk_anch_lum = -1.0f;
     uint16_t d_blk_applies = 0;
     uint16_t d_blk_anch_rej = 0;
+    // 26540 instrument tail (append-only; trace push appends in step):
+    // KH_SEAL_LAND_CENSUS + KH_ARB_JITTER_CENSUS. Ledger at KH_BUILD_TAG.
+    int16_t  band_esc_land_fr = -1;      // escape->land latency (cycles) of a landing this row
+    float    band_esc_land_cdx_m = -1.0f;// baked cam vs injection cam AT LAND
+    float    band_reseal_step_m = -1.0f; // largest baked-camera jump of a reseal this row
+    uint8_t  arb_on = 0;                 // this row's injection ran the analytic arb PS
+    float    arb_jit_pair_m = -1.0f;     // predicted competitor decode error (m) from pair churn
+    float    arb_jit_cam_m = -1.0f;      // ... from camera advance since the snapshot
+    float    arb_jit_vert_m = -1.0f;     // ... their vertical component at the reconstructed point
+    float    band_uv_drift_px = -1.0f;   // 26546: sealed-vs-live uv of the probe point (atlas texels)
+    // 26562 WELD IDENTITY CENSUS (append-only tail; the trace push appends
+    // in step - a DELIBERATE dump_render_trace change, fieldsN 222 -> 225,
+    // named per the vmir precedent; ledger at KH_BUILD_TAG). The WORST weld
+    // of this row, identified against the injection view - the
+    // pixel-registered reference whose standing gap to the reconstruction
+    // camera is a measured 0.7-2.0 m. TRANSLATION far outside standing gap
+    // + travel, or ROTATION in degrees, names another pass's camera; the
+    // main camera one publish late differs in translation only.
+    float    weld_inj_dx_m = -1.0f;    // |weld camera - injection camera| (m)
+    float    weld_inj_rot_deg = -1.0f; // weld-vs-injection forward-axis angle (deg)
+    float    weld_code = 0.0f;         // 0 none; 1 flip; 2 single; 3 late;
+                                       // 4 stage-baseline; 5 stage-335; 6 immediate completion;
+                                       // 7 immediate kept at birth (26563: 335/343/345 births)
+                                       // 8 stage-first weld (26570; was 26569's rot gate, corrected)
+    // 26567 VANISH ANATOMY (far-pose capture/switch blackouts): the live
+    // table's size and served count, the sun-settle state, and the wipe
+    // counter's low bits - one F12 dump names which leg zeroes the fill
+    // and for how many rows. kh_sun_st: 0 cold-hold, 1 unstable, 2 settled.
+    uint8_t  kh_live_tab = 0;          // g_ls.count at the frame fill
+    uint8_t  kh_live_served = 0;       // live cascades written (0 = gated/empty)
+    int8_t   kh_sun_st = -1;           // -1 = fill never ran this row
+    uint16_t kh_wipe_lo = 0;           // g_band_wipe_events low 16 bits
 };
 
 static FfrRecord g_ffr[KH_FFR_RING];
@@ -26175,13 +27662,159 @@ static float    g_sun4_half_diag = 0.0f;
 static bool     g_sun4_map_valid = false;
 static uint64_t g_sun4_renders = 0;
 static uint64_t g_sun4_casters = 0;
+// 26620 KH_SUN_FAR_BAND state - the hero pattern once more (band 4).
+static float    g_sun5_map_vp[4][4] = {};
+static float    g_sun5_map_bias = 0.0f;
+static float    g_sun5_half_diag = 0.0f;
+static bool     g_sun5_map_valid = false;
+static uint64_t g_sun5_renders = 0;
+static uint64_t g_sun5_casters = 0;
+// 26575 KH_SELF_PREFILTER: per-band moment-pyramid freshness. False
+// unless THIS band render also completed its convert+mips; the mesh
+// fill arms sunPf per band from (band valid && this), mode 357 zeroes.
+static bool g_sun_pf_valid[3] = { false, false, false };
+// 26581 KH_PF_CPU_PROBE lanes (mode 361 fills; -1 = never read):
+// [0] pyramid mu @ centre, [1] depth @ same world texel,
+// [2] pyramid mu @ offset, [3] depth @ same world texel.
+static float g_sun_pf_cpu[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
+
+// 26582 KH_SELF_PREFILTER convert, RELOCATED (full ledger at KH_BUILD_TAG):
+// runs at the mesh-bind region - the one place PSSetShaderResources is
+// field-proven every frame - once per fresh map set, inside its own
+// save/restore (the 26383 per-site discipline). A failed step clears the
+// band flag; the kernel stays classic there.
+inline void kh_sun_pf_convert(ID3D11DeviceContext* ctx) {
+    const uint64_t khpc_mark = g_sun2_renders + g_sun3_renders + g_sun4_renders;
+    static uint64_t khpc_done = ~0ull;
+    if (khpc_done == khpc_mark) return;   // once per fresh map set (twin call sites)
+    khpc_done = khpc_mark;
+    if (!g_res.vs_sunpf || !g_res.ps_sunpf || !g_res.ps_sunpfm ||
+        !g_res.sun_pf_scr) {
+        g_sun_pf_valid[0] = false; g_sun_pf_valid[1] = false; g_sun_pf_valid[2] = false;
+        return;
+    }
+    ID3D11RenderTargetView* khpc_rt[4] = {};
+    ID3D11DepthStencilView* khpc_od = nullptr;
+    ctx->OMGetRenderTargets(4, khpc_rt, &khpc_od);
+    UINT khpc_nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    D3D11_VIEWPORT khpc_ovp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    ctx->RSGetViewports(&khpc_nvp, khpc_ovp);
+    D3D11_PRIMITIVE_TOPOLOGY khpc_topo = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    ctx->IAGetPrimitiveTopology(&khpc_topo);
+    ID3D11InputLayout* khpc_il = nullptr;
+    ctx->IAGetInputLayout(&khpc_il);
+    ID3D11VertexShader* khpc_vs = nullptr;
+    ctx->VSGetShader(&khpc_vs, nullptr, nullptr);
+    ID3D11PixelShader* khpc_ps = nullptr;
+    ctx->PSGetShader(&khpc_ps, nullptr, nullptr);
+    // 26583: THE MISSING STATE - the whole 26575-26582 saga (ledger at
+    // KH_BUILD_TAG). The engine blend summed every honest convert into
+    // the target; the rasterizer joins for scissor/cull completeness.
+    ID3D11BlendState* khpc_bl = nullptr;
+    FLOAT khpc_bf[4] = {};
+    UINT khpc_bm = 0xFFFFFFFF;
+    ctx->OMGetBlendState(&khpc_bl, khpc_bf, &khpc_bm);
+    ID3D11RasterizerState* khpc_rs = nullptr;
+    ctx->RSGetState(&khpc_rs);
+    ctx->OMSetBlendState(g_res.blend_pf, nullptr, 0xFFFFFFFF);
+    if (g_res.rast_sun) ctx->RSSetState(g_res.rast_sun);
+
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->IASetInputLayout(nullptr);
+    ctx->VSSetShader(g_res.vs_sunpf, nullptr, 0);
+    ID3D11ShaderResourceView* khpc_null = nullptr;
+
+    const bool khpc_bv[3] = { g_sun2_map_valid, g_sun3_map_valid, g_sun4_map_valid };
+    ID3D11ShaderResourceView* const khpc_dep[3] = { g_res.sun2_srv, g_res.sun3_srv, g_res.sun4_srv };
+    const UINT khpc_sz[3] = { KH_SUN_HERO_SIZE / 2u, KH_SUN_MID_SIZE / 2u, KH_SUN_OUT_SIZE / 2u };
+
+    for (int khpc_i = 0; khpc_i < 3; ++khpc_i) {
+        if (!g_sun_pf_valid[khpc_i]) continue;   // band did not render fresh
+        g_sun_pf_valid[khpc_i] = false;          // proven again by completion below
+        if (!khpc_bv[khpc_i] || !khpc_dep[khpc_i] ||
+            !g_res.sun_pf_rtv[khpc_i] || !g_res.sun_pf_srv[khpc_i]) continue;
+        ctx->OMSetRenderTargets(1, &g_res.sun_pf_rtv[khpc_i], nullptr);
+        D3D11_VIEWPORT khpc_vp = {};
+        khpc_vp.Width = static_cast<FLOAT>(khpc_sz[khpc_i]);
+        khpc_vp.Height = static_cast<FLOAT>(khpc_sz[khpc_i]);
+        khpc_vp.MaxDepth = 1.0f;
+        ctx->RSSetViewports(1, &khpc_vp);
+        ctx->PSSetShader(g_res.ps_sunpf, nullptr, 0);
+        ctx->PSSetShaderResources(0, 1, &khpc_dep[khpc_i]);
+        ctx->Draw(3, 0);
+        ctx->PSSetShaderResources(0, 1, &khpc_null);
+        ctx->PSSetShader(g_res.ps_sunpfm, nullptr, 0);
+        for (UINT khpc_m = 1; (khpc_sz[khpc_i] >> khpc_m) >= 1u && khpc_m < 12u; ++khpc_m) {
+            ID3D11RenderTargetView* khpc_mr = g_res.sun_pf_rtvm[khpc_i][khpc_m];
+            ID3D11ShaderResourceView* khpc_ms = g_res.sun_pf_scr_srvm[khpc_m - 1];
+            if (!khpc_mr || !khpc_ms) break;
+            ctx->OMSetRenderTargets(0, nullptr, nullptr);
+            ctx->CopySubresourceRegion(g_res.sun_pf_scr, khpc_m - 1, 0, 0, 0,
+                                       g_res.sun_pf_tex[khpc_i], khpc_m - 1, nullptr);
+            ctx->OMSetRenderTargets(1, &khpc_mr, nullptr);
+            D3D11_VIEWPORT khpc_mvp = {};
+            khpc_mvp.Width = static_cast<FLOAT>(khpc_sz[khpc_i] >> khpc_m);
+            khpc_mvp.Height = static_cast<FLOAT>(khpc_sz[khpc_i] >> khpc_m);
+            khpc_mvp.MaxDepth = 1.0f;
+            ctx->RSSetViewports(1, &khpc_mvp);
+            ctx->PSSetShaderResources(1, 1, &khpc_ms);
+            ctx->Draw(3, 0);
+        }
+        ctx->PSSetShaderResources(1, 1, &khpc_null);
+        g_sun_pf_valid[khpc_i] = true;
+    }
+
+    // 26582 KH_PF_CPU_PROBE, repaired (mode 361 only; stalls by design):
+    // pyramid mip 0 AND mip 3 at two texels - content band + chain health.
+    // The 26581 depth-side reads were ILLEGAL (partial copies from depth-
+    // stencil resources are forbidden - the bit-constant 2.34e-38 was the
+    // untouched staging) and are retired; pf_stage_st stays allocated, unused.
+    if (g_dbg_mode.load(std::memory_order_relaxed) == 361 &&
+        g_res.pf_stage_mu && g_sun_pf_valid[0]) {
+        auto khpc_rd = [&](UINT khpc_mip, UINT khpc_x, UINT khpc_y) -> float {
+            D3D11_BOX khpc_b = { khpc_x, khpc_y, 0, khpc_x + 1, khpc_y + 1, 1 };
+            ctx->CopySubresourceRegion(g_res.pf_stage_mu, 0, 0, 0, 0,
+                                       g_res.sun_pf_tex[0], khpc_mip, &khpc_b);
+            D3D11_MAPPED_SUBRESOURCE khpc_mm = {};
+            float khpc_v = -1.0f;
+            if (SUCCEEDED(ctx->Map(g_res.pf_stage_mu, 0, D3D11_MAP_READ, 0, &khpc_mm))) {
+                khpc_v = *static_cast<const float*>(khpc_mm.pData);
+                ctx->Unmap(g_res.pf_stage_mu, 0);
+            }
+            return khpc_v;
+        };
+        const UINT khpc_h0 = khpc_sz[0] / 2u;
+        const UINT khpc_o0 = (khpc_sz[0] * 3u) / 5u;
+        g_sun_pf_cpu[0] = khpc_rd(0, khpc_h0, khpc_h0);
+        g_sun_pf_cpu[1] = khpc_rd(3, khpc_h0 >> 3, khpc_h0 >> 3);
+        g_sun_pf_cpu[2] = khpc_rd(0, khpc_o0, khpc_o0);
+        g_sun_pf_cpu[3] = khpc_rd(3, khpc_o0 >> 3, khpc_o0 >> 3);
+    }
+
+    // Restore (per-site discipline): RTs, viewports, topology, layout, shaders.
+    ctx->OMSetRenderTargets(4, khpc_rt, khpc_od);
+    for (int khpc_r = 0; khpc_r < 4; ++khpc_r) KH_SAFE_RELEASE(khpc_rt[khpc_r]);
+    KH_SAFE_RELEASE(khpc_od);
+    if (khpc_nvp > 0) ctx->RSSetViewports(khpc_nvp, khpc_ovp);
+    ctx->IASetPrimitiveTopology(khpc_topo);
+    ctx->IASetInputLayout(khpc_il);
+    KH_SAFE_RELEASE(khpc_il);
+    ctx->VSSetShader(khpc_vs, nullptr, 0);
+    KH_SAFE_RELEASE(khpc_vs);
+    ctx->PSSetShader(khpc_ps, nullptr, 0);
+    KH_SAFE_RELEASE(khpc_ps);
+    ctx->OMSetBlendState(khpc_bl, khpc_bf, khpc_bm);   // 26583
+    KH_SAFE_RELEASE(khpc_bl);
+    ctx->RSSetState(khpc_rs);
+    KH_SAFE_RELEASE(khpc_rs);
+}
 // 26537 KH_BAND_SUN_REACH lanes (ledger at the band admission test). The
 // sun-ward reach each band's fit actually took, in metres: floored at the
 // band's own KH_SUN_*_DEPTH, so a value EQUAL to that floor means no caster
 // sat farther up-sun than the historic window and the fit is bit-identical
 // to 26536. A value ABOVE it is the arm firing - the band captured a caster
 // the old isotropic sphere would have culled. -1 = the band never fitted.
-static float    g_sun_band_reach[3] = { -1.0f, -1.0f, -1.0f };
+static float    g_sun_band_reach[4] = { -1.0f, -1.0f, -1.0f, -1.0f };   // 26620: [3] = FAR
 static uint64_t g_sun_band_reach_takes = 0;   // fits where reach > the depth floor
 // 26537 KH_UNION_TEXEL_SNAP lanes (ledger at the union snap). The
 // displacement the snap applied to the union centre this fit (m) and the
@@ -26200,6 +27833,16 @@ static float    g_cast_chain_code = -1.0f;
 static float    g_sun_union_rad_held = -1.0f;
 static uint64_t g_sun_union_rad_holds = 0;
 static uint64_t g_sun_union_rad_relatches = 0;
+// 26611 KH_SUN_LADDER_SCALE + KH_SUN_UNION_LAT_FIT lanes (ledgers at the
+// khsh_one call sites and the union lateral fit). g_sun_ladder_scale is
+// the s the mid/outer bands took this fit (1.0 = the stock 200 m ladder
+// verbatim). The lat trio is the held SUN-PLANE lateral radius the union
+// texel is priced from, with hold/relatch counters - the 26539 latch
+// policy verbatim on the second radius. -1 = the latch has never taken.
+static float    g_sun_ladder_scale = 1.0f;
+static float    g_sun_union_lat_held = -1.0f;
+static uint64_t g_sun_union_lat_holds = 0;
+static uint64_t g_sun_union_lat_relatches = 0;
 static uint64_t g_sun_map_hash = 0;            // last rendered input hash (unchanged-input skip)
 static uint64_t g_sun_map_skips = 0;           // passes skipped on identical inputs (perf forensics)
 static float g_sun_map_bounds[6] = {};         // combined caster AABB: center xyz, HALF extents xyz (engine axes)
@@ -26386,6 +28029,18 @@ static uint64_t g_band_rej_no_view = 0;       // band seals refused: no view to 
 static uint64_t g_band_rej_stale_view = 0;    // seals refused: no fresh same-frame view
 static uint64_t g_fire_depth_refreshes = 0;   // re-fires given fresh DEPTH but the first fire's epoch
 static uint64_t g_live_rej_no_view = 0;       // live commits refused for the same reason
+// 26544 KH_LIVE_CAM_PAIR (mode 334 reverts; full ledger at KH_BUILD_TAG). The
+// live-table seal pairs the harvested cascade matrix with THE CAMERA IT WAS
+// RELATIVE TO at the atlas render - the same-cycle engine view (frame_view)
+// when fresh, else the cycle latch - instead of the last INJECTION's camera,
+// which lags by the travel between the injection and the atlas render and was
+// the live receive's whole moving-camera offset. Parked, the three agree and
+// the seal is byte-identical.
+static uint64_t g_live_cam_pair_fv = 0;      // seals paired with the frame view camera
+static uint64_t g_live_cam_pair_pv = 0;      // ... with the cycle latch camera
+static uint64_t g_live_cam_pair_stale = 0;   // ... left on the injection camera (fallback / 334)
+static float    g_live_cam_pair_dx = -1.0f;  // |paired - injection| (m), last seal
+static float    g_live_cam_pair_dx_max = 0.0f;
 // 26141 CAMPAIGN-25 ISSUES 1+2 (ONE defect: the re-fire copy). The freeze
 // forensic below this campaign measured only |cam(bridge) - cam(latch)| -
 // a POSITION-only scalar, which a pure pitch rotation leaves at 0.000 by
@@ -27519,8 +29174,293 @@ static uint64_t g_band_stage_drop_age = 0;     // ... aged out before one arrive
 static uint64_t g_band_stage_drop_dead = 0;    // ... slot wiped underneath them
 static uint64_t g_band_stage_atlas_moved = 0;  // commits whose atlas re-rendered
 static uint64_t g_band_stage_hold_quality = 0; // commits deferred: publish not exact
+static uint64_t g_band_pair_same_seals = 0;    // 26545: commits paired with the capture-time view (mode 335)
+// 26547 KH_BAND_FOREIGN_VIEW (mode 336 reverts; full ledger at KH_BUILD_TAG).
+// A candidate seal view whose camera sits farther than KH_LATCH_JUMP_M-class
+// distance from the cycle latch camera is a FOREIGN render (PIP / UAV feed /
+// mirror - the ser-3642 class) and must never be committed into a band seal:
+// the completion census has been reading such commits at 853-1479 m for four
+// sessions. Refusal HOLDS the previous seal; the next honest publish lands.
+static uint64_t g_band_seal_foreign_ref = 0;   // commits/completions refused: foreign camera
+static float    g_band_seal_foreign_m = -1.0f; // last refused distance (m)
+static float    g_band_seal_foreign_max_m = 0.0f;
+// candidate view (16 floats, view layout) vs the cycle latch camera; true = OK.
+// 26572: counting is caller-scoped (khfv_count) - the two publish-latch
+// sites judge WITHOUT counting, so bandSealForeignRef reads EVENTS
+// (commit / completion / immediate-seal refusals), not call fan-out.
+inline bool kh_band_view_native(const float* khfv_v, bool khfv_count) {
+    if (g_dbg_mode.load(std::memory_order_relaxed) == 336) return true;
+    if (!g_ro.cycle_pv_valid) return true;   // no reference: cannot judge, admit
+    float khfv_c[3], khfv_r[3];
+    if (!kh_view_camera_exact(reinterpret_cast<const float(*)[4]>(khfv_v), khfv_c)) return true;
+    if (!kh_view_camera_exact(g_ro.cycle_pv.view, khfv_r)) return true;
+    const float khfv_dx = khfv_c[0] - khfv_r[0];
+    const float khfv_dy = khfv_c[1] - khfv_r[1];
+    const float khfv_dz = khfv_c[2] - khfv_r[2];
+    const float khfv_d = sqrtf(khfv_dx * khfv_dx + khfv_dy * khfv_dy + khfv_dz * khfv_dz);
+    if (!(khfv_d == khfv_d) || khfv_d <= 50.0f) return true;   // KH_LATCH_JUMP_M-class bar
+    if (khfv_count) {   // 26572
+        g_band_seal_foreign_ref++;
+        g_band_seal_foreign_m = khfv_d;
+        if (khfv_d > g_band_seal_foreign_max_m) g_band_seal_foreign_max_m = khfv_d;
+    }
+    return false;
+}
+// 26548 KH_BAND_PAIR_MIXED (mode 337 reverts; 336 stands the family down;
+// ledger at KH_BUILD_TAG). Registration is the vcol+sm COMPOSITION: a seal is
+// wrong exactly when its sm and its vcol come from different cameras, and the
+// 26547 guard judges only the WELDING view. This helper judges the PAIR:
+// the capture-time view (vcol column layout - stage_view or the provisional
+// vcol) against the welding view (row layout), same 50 m bar, and like its
+// sibling it can only refuse what it can measure - undecodable admits.
+static uint64_t g_band_pair_mixed_ref = 0;     // mixed welds refused (both sites)
+static float    g_band_pair_mixed_m = -1.0f;   // last refused capture-vs-weld camera gap (m)
+static float    g_band_pair_mixed_max_m = 0.0f;
+// 26553 KH_BAND_SAME_SOURCE (mode 340 reverts; ledger at KH_BUILD_TAG).
+// Two view sources publish within every frame, 1.6-20 m apart (order-census
+// conviction). A completion may not switch sources: same source within the
+// 25 ms window is millimetres-to-centimetres; cross-source is 1.6 m plus.
+static uint64_t g_band_comp_src_ref = 0;     // cross-source completions refused
+static float    g_band_comp_src_m = -1.0f;   // last refused source gap (m)
+static float    g_band_comp_src_max_m = 0.0f;
+static uint64_t g_band_comp_src_alt = 0;     // 26554: mode-341 same-source skips
+// 26559: single-source-regime finalizes (the tail found no second source).
+static uint64_t g_band_pend_single_src = 0;
+// 26560 PICK CENSUS (pure gauge, always on, both paths).
+static uint64_t g_band_comp_xsrc = 0;      // accepted completions, cross-source
+static uint64_t g_band_comp_samesrc = 0;   // accepted completions, same-source
+static uint64_t g_band_stage_xsrc = 0;     // stage commits, cross-source weld
+static uint64_t g_band_stage_samesrc = 0;  // stage commits, same-source weld
+// 26561 KH_BAND_STAGE_FLIP (mode 346): staged welds by disposition.
+static uint64_t g_band_stage_flip = 0;        // commits welded to the latched pair
+static uint64_t g_band_stage_flip_hold = 0;   // commits held waiting for a pair
+static uint64_t g_band_stage_flip_single = 0; // no pair, second source dead: baseline weld
+static uint64_t g_band_stage_flip_late = 0;   // no pair past 45 ms, source alive: baseline weld
+// 26562 WELD IDENTITY CENSUS (pure gauge, always on, both weld sites;
+// ledger at KH_BUILD_TAG). Cumulative twin of the per-row lanes, FLIP
+// welds only - the arm's identity question in one number set.
+static float    g_weld_flip_inj_dx = -1.0f;      // last flip weld vs injection camera (m)
+static float    g_weld_flip_inj_dx_max = 0.0f;
+static double   g_weld_flip_inj_dx_sum = 0.0;
+static uint64_t g_weld_flip_inj_dx_n = 0;
+static float    g_weld_flip_inj_rot_max = 0.0f;  // worst flip-weld rotation vs injection (deg)
+// 26563 HOLD POOL-PRESSURE BAIL (mode 346 only; ledger at KH_BUILD_TAG).
+// A held stage keeps its pool slot BUSY for up to 45 ms - 150x the
+// measured 0.3 ms baseline occupancy. Under escape churn (the
+// shadow-view-distance threshold; budget escapes 27/flush measured in
+// the x8 regime) simultaneous holds can exhaust the pool, and every
+// pool miss falls through to an IMMEDIATE whole-atlas CopyResource -
+// the hold's cost stops being latency and becomes a 64 MB copy storm.
+// Rule: a pool miss stamps this clock; holds are refused while it is
+// fresh (0.1 s) and the commit welds baseline immediately instead.
+static float    g_band_pool_miss_t = -1000.0f;    // last pool-miss time (behaviour state; session-reset)
+static uint64_t g_band_stage_flip_poolbail = 0;   // holds refused under pool pressure
+// 26564 FALL-THROUGH CAP (mode 347 reverts; ledger at KH_BUILD_TAG).
+// dump2 (26563) put the operator's threshold frame drop IN the ring:
+// rows 351-381 at 78-119 ms/frame (18 ms median), and bandPoolMissN
+// carried 45 of the session's misses on 30 of those 31 rows - the
+// stall and the miss storm are the same event. Every miss takes the
+// 26396 fall-through = an IMMEDIATE whole-atlas CopyResource, so a
+// miss storm is a copy storm and the loop feeds itself (long frame ->
+// more escapes -> more simultaneous stages -> 4-slot pool exhausts ->
+// more copies). The cap: the FIRST miss of a flush falls through as
+// today; further misses in the SAME flush take the pre-26396 drop -
+// the old COMPLETE seal serves, last_time is untouched, the next
+// sweep retries. Isolated misses are byte-identical; only the
+// same-flush burst (the storm signature, bandPoolMissN 2-4 per row)
+// converts to sub-frame-deferred reseals.
+static uint64_t g_band_fall_flush = ~0ull;        // flush of the last allowed fall-through
+static uint64_t g_band_stage_pool_cap = 0;        // misses capped to the drop path
+// 26565 EPOCH-DEATH FAST RESEAL (mode 348 reverts; ledger at
+// KH_BUILD_TAG). The operator's capture/camera-switch vanish: a frame
+// hitch (RenderDoc serialization) or a big view jump starves publishes
+// past 50 ms, the epoch death INVALIDATES the pending band, and at
+// baseline the dead slot waits out its whole tier interval (0.25 s
+// far) before recapture - several shadowless frames per event. The
+// death itself is RARE in ordinary play (completions land sub-ms;
+// this lane counts it - historically the silent path), so the change
+// is scoped to exactly the hitch/switch recovery: the invalidated
+// slot reseals at the NEXT sweep (last_time = 0, the aged-drop
+// trick), absence ~one frame instead of a tier interval. The 26559
+// cutoffs were the TAIL RULES' invalidation RATE, never this trick.
+static uint64_t g_band_pend_dead_fast = 0;   // epoch deaths fast-resealed
+// 26566: band wipes (release_shadow_device_state) - the F12/camera-
+// switch vanish's trigger, now countable per event.
+static uint64_t g_band_wipe_events = 0;
+// 26568: band seals dying of AGE (the orphan-cleanup bound). In ordinary
+// play this must sit at ~0 - every tier reseals far inside the bound.
+static uint64_t g_band_age_kills = 0;
+// 26569 KH_BAND_ROT_COHERENT (mode 351 = baseline weld unconditionally;
+// full ledger at KH_BUILD_TAG). Staged welds that would ROTATE away from
+// their sm's own frame take the stage view instead; the lane counts them.
+static uint64_t g_band_rot_welds = 0;
+// The weld camera decodes from the vcol just written (columns; norm-gated
+// like the census validity split); the reference is g_inj_view when fresh
+// (< 50 ms, refreshed every injection). Worst weld of the row wins the
+// per-row lanes; unjudgeable welds record nothing (admit-on-unjudgeable).
+inline void kh_weld_note(const float* khwn_vc, float khwn_code) {
+    if (g_inj_view_ms == 0 || steady_now_ms() - g_inj_view_ms >= 50) return;
+    float khwn_a[3] = { 0.0f, 0.0f, 0.0f };
+    for (int khwn_j = 0; khwn_j < 3; ++khwn_j) {
+        const float* khwn_v = &khwn_vc[khwn_j * 4];
+        const float khwn_n = sqrtf(khwn_v[0] * khwn_v[0] +
+                                   khwn_v[1] * khwn_v[1] +
+                                   khwn_v[2] * khwn_v[2]);
+        if (!(khwn_n > 0.9f && khwn_n < 1.1f)) return;
+        khwn_a[0] -= khwn_v[3] * khwn_v[0];
+        khwn_a[1] -= khwn_v[3] * khwn_v[1];
+        khwn_a[2] -= khwn_v[3] * khwn_v[2];
+    }
+    float khwn_b[3];
+    if (!kh_view_camera_exact(reinterpret_cast<const float(*)[4]>(g_inj_view),
+                              khwn_b)) return;
+    const float khwn_dx = khwn_a[0] - khwn_b[0];
+    const float khwn_dy = khwn_a[1] - khwn_b[1];
+    const float khwn_dz = khwn_a[2] - khwn_b[2];
+    const float khwn_d = sqrtf(khwn_dx * khwn_dx + khwn_dy * khwn_dy +
+                               khwn_dz * khwn_dz);
+    if (!(khwn_d == khwn_d)) return;
+    // forward axes: vcol column 2 vs the injection view's row-major z row.
+    float khwn_f = khwn_vc[8] * g_inj_view[2] + khwn_vc[9] * g_inj_view[6] +
+                   khwn_vc[10] * g_inj_view[10];
+    khwn_f = khwn_f > 1.0f ? 1.0f : (khwn_f < -1.0f ? -1.0f : khwn_f);
+    const float khwn_r = acosf(khwn_f) * 57.29578f;
+    FfrRecord& khwn_rec = ffr_head();
+    if (khwn_d > khwn_rec.weld_inj_dx_m) {
+        khwn_rec.weld_inj_dx_m = khwn_d;
+        khwn_rec.weld_inj_rot_deg = khwn_r;
+        khwn_rec.weld_code = khwn_code;
+    }
+    if (khwn_code == 1.0f) {
+        g_weld_flip_inj_dx = khwn_d;
+        if (khwn_d > g_weld_flip_inj_dx_max) g_weld_flip_inj_dx_max = khwn_d;
+        g_weld_flip_inj_dx_sum += khwn_d;
+        g_weld_flip_inj_dx_n++;
+        if (khwn_r > g_weld_flip_inj_rot_max) g_weld_flip_inj_rot_max = khwn_r;
+    }
+}
+// 26557 KH_BAND_INJ_PAIR (mode 344 reverts).
+static uint64_t g_band_inj_pair = 0;       // seals born on the injection-proven camera
+static uint64_t g_band_inj_pair_miss = 0;  // injection view stale: fallback birth
+// 26555 KH_BAND_ALT_PROVISIONAL (mode 342 reverts).
+static uint64_t g_band_prov_alt = 0;          // seals born from the other source
+static uint64_t g_band_prov_alt_miss = 0;     // fv captures with alt missing/stale
+static uint64_t g_band_pend_timeout_kept = 0; // 50 ms timeouts finalized, not died
+// 26554: gap-returning form (-1 = unjudgeable/admit); counting at the site.
+inline float kh_band_source_gap(const float* khss_vc, const float* khss_fv) {
+    float khss_a[3] = { 0.0f, 0.0f, 0.0f };
+    for (int khss_j = 0; khss_j < 3; ++khss_j) {
+        const float* khss_v = &khss_vc[khss_j * 4];
+        const float khss_n = sqrtf(khss_v[0] * khss_v[0] +
+                                   khss_v[1] * khss_v[1] +
+                                   khss_v[2] * khss_v[2]);
+        if (!(khss_n > 0.9f && khss_n < 1.1f)) return -1.0f;
+        khss_a[0] -= khss_v[3] * khss_v[0];
+        khss_a[1] -= khss_v[3] * khss_v[1];
+        khss_a[2] -= khss_v[3] * khss_v[2];
+    }
+    float khss_b[3];
+    if (!kh_view_camera_exact(reinterpret_cast<const float(*)[4]>(khss_fv), khss_b)) return -1.0f;
+    const float khss_dx = khss_a[0] - khss_b[0];
+    const float khss_dy = khss_a[1] - khss_b[1];
+    const float khss_dz = khss_a[2] - khss_b[2];
+    const float khss_d = sqrtf(khss_dx * khss_dx + khss_dy * khss_dy + khss_dz * khss_dz);
+    if (!(khss_d == khss_d)) return -1.0f;
+    return khss_d;
+}
+inline bool kh_band_pair_coherent(const float* khpc_vc, const float* khpc_fv) {
+    const int khpc_m = g_dbg_mode.load(std::memory_order_relaxed);
+    if (khpc_m == 336 || khpc_m == 337) return true;
+    float khpc_a[3] = { 0.0f, 0.0f, 0.0f };
+    for (int khpc_j = 0; khpc_j < 3; ++khpc_j) {   // decode the capture camera
+        const float* khpc_v = &khpc_vc[khpc_j * 4];
+        const float khpc_n = sqrtf(khpc_v[0] * khpc_v[0] +
+                                   khpc_v[1] * khpc_v[1] +
+                                   khpc_v[2] * khpc_v[2]);
+        if (!(khpc_n > 0.9f && khpc_n < 1.1f)) return true;   // undecodable: admit
+        khpc_a[0] -= khpc_v[3] * khpc_v[0];
+        khpc_a[1] -= khpc_v[3] * khpc_v[1];
+        khpc_a[2] -= khpc_v[3] * khpc_v[2];
+    }
+    float khpc_b[3];
+    if (!kh_view_camera_exact(reinterpret_cast<const float(*)[4]>(khpc_fv), khpc_b)) return true;
+    const float khpc_dx = khpc_a[0] - khpc_b[0];
+    const float khpc_dy = khpc_a[1] - khpc_b[1];
+    const float khpc_dz = khpc_a[2] - khpc_b[2];
+    const float khpc_d = sqrtf(khpc_dx * khpc_dx + khpc_dy * khpc_dy + khpc_dz * khpc_dz);
+    if (!(khpc_d == khpc_d) || khpc_d <= 50.0f) return true;   // the 26547 corridor
+    g_band_pair_mixed_ref++;
+    g_band_pair_mixed_m = khpc_d;
+    if (khpc_d > g_band_pair_mixed_max_m) g_band_pair_mixed_max_m = khpc_d;
+    return false;
+}
+// 26548: completion-census validity split (ledger at KH_BUILD_TAG; pure gauge).
+static uint64_t g_band_complete_inv = 0;           // census rows: old vcol failed sanity
+// 26549: drift metres twin (texels / (|sm row0| * atlas_size)).
+// 26550: mode-338 engagement (all tiers at the near cadence).
+static uint64_t g_band_cadence_forced = 0;
+// 26551 KH_BAND_COHERENT_COMPLETE (mode 339 reverts).
+static uint64_t g_band_pend_late_kept = 0;     // late publish: provisional finalized
+static uint64_t g_band_pend_late_bridge = 0;   // late publish: bridge left to epoch death
+// 26552 ORDER CENSUS (pure gauge; ledger at KH_BUILD_TAG).
+static float    g_band_cap_fv_age_ms = -1.0f;    // frame view age AT CAPTURE (last)
+static double   g_band_cap_fv_age_sum = 0.0;
+static uint64_t g_band_cap_fv_age_n = 0;
+static float    g_band_cap_fv_age_max_ms = 0.0f;
+static double   g_band_comp_age_sum = 0.0;       // pending age at ACCEPTED completion
+static uint64_t g_band_comp_age_n = 0;
+static float    g_band_comp_age_max_ms = 0.0f;
+static float    g_band_uv_drift_m = -1.0f;
+static float    g_band_uv_drift_m_max = 0.0f;
+static float    g_band_complete_old_trn_m = -1.0f; // old vcol raw |translation| (every row)
+static float    g_band_complete_old_trn_max_m = 0.0f;
+// 26546 KH_BAND_UV_DRIFT (pure gauge; ledger at KH_BUILD_TAG). The on-screen
+// cascade offset, finally read AS A NUMBER: the probe point (first staged
+// mesh's ground anchor) mapped through the SERVING sealed band's vcol+sm
+// against the same point through the LIVE table's covering entry, atlas
+// texels. Per injection; per-row lane rides the ffr tail.
+static float    g_band_uv_drift_px = -1.0f;    // last (-1 = no dual coverage this frame)
+static float    g_band_uv_drift_px_max = 0.0f;
+static double   g_band_uv_drift_sum = 0.0;
+static uint64_t g_band_uv_drift_n = 0;
+static uint64_t g_band_uv_drift_over2 = 0;     // frames past 2 texels
+static int      g_band_uv_drift_slot = -1;     // serving sealed slot at the last read
+static uint32_t g_band_uv_drift_why = 0;       // 26547 starve census: bit0 preconditions,
+                                               // bit1 no serving sealed slot, bit2 no live cover
 static float    g_band_stage_wait_ms = -1.0f;  // capture -> commit latency
 static float    g_band_stage_wait_max_ms = 0.0f;
+// 26540 KH_SEAL_LAND_CENSUS - the 26475 discriminator lanes, finally added
+// (instrument only, mode 0 byte-identical). Candidate (a) FLOOR LATENCY reads
+// on the escape-to-land lanes: bandEscLandFrMax/MsMax against a 0.05 s
+// floor, and bandEscLandCdxM (baked camera vs the injection camera AT LAND) -
+// small camDx at land = the seal is honest and the floor is the whole story.
+// Candidate (b) SEAL-SIDE SPLIT reads on bandSealInjDxM / bandSealInjRotDeg
+// (the committed vcol camera against THIS cycle's injection basis) - read it
+// against the standing ~1.8 m / ~1.07 deg basis offset this tree already
+// carries (compCamRtM / injRotDeltaDeg); only an EXCESS convicts. And the
+// magnitude the operator SEES at settle is bandResealStepM: how far the
+// baked camera JUMPED at a reseal, by tier (near 0-2 / mid 3-5 / far 6-7).
+static uint64_t g_band_esc_lands = 0;         // reseals that landed after an escape
+static float    g_band_esc_land_ms = -1.0f;   // last escape -> land (ms)
+static float    g_band_esc_land_ms_max = 0.0f;
+static double   g_band_esc_land_ms_sum = 0.0;
+static uint32_t g_band_esc_land_fr = 0;       // last, in cycles
+static uint32_t g_band_esc_land_fr_max = 0;
+static float    g_band_esc_land_cdx = -1.0f;  // baked cam vs g_ls.cam at land (m)
+static float    g_band_esc_land_cdx_max = 0.0f;
+static float    g_band_seal_inj_dx = -1.0f;   // committed vcol cam vs cycle_pv cam (m)
+static float    g_band_seal_inj_dx_max = 0.0f;
+static float    g_band_seal_inj_rot = -1.0f;  // ... forward-axis angle (deg)
+static float    g_band_seal_inj_rot_max = 0.0f;
+static float    g_band_reseal_step = -1.0f;   // old vcol cam -> new vcol cam (m)
+static float    g_band_reseal_step_max[3] = { 0.0f, 0.0f, 0.0f };   // by tier
+static uint64_t g_band_reseal_n[3] = { 0, 0, 0 };
+static double   g_band_reseal_sum[3] = { 0.0, 0.0, 0.0 };
+// Shared landing bookkeeping (render thread only). khsl_vc = the vcol being
+// committed (12 floats, column layout), khsl_old = the vcol it replaces.
+inline void kh_seal_land_note(int khsl_slot, float khsl_now, float khsl_esc_t,
+                              uint64_t khsl_esc_cycle, const float* khsl_old,
+                              const float* khsl_vc);
 
 // Runs per engine draw on the render thread (reorder_pre_draw), so it lands
 // between the cycle's first accept and the injection that consumes the
@@ -27578,14 +29518,123 @@ inline void kh_band_stage_commit(ID3D11DeviceContext* ctx) {
             continue;
         }
 
+        // 26561 KH_BAND_STAGE_FLIP (mode 346, ARM - opt-in, mode 0
+        // byte-identical): weld the latched per-band pair instead of the
+        // commit-time global frame_view. No pair yet: HOLD while the
+        // second source is alive (the slot's old COMPLETE seal keeps
+        // serving - the staged design's own guarantee - so holding costs
+        // reseal latency, never absence) up to 45 ms, then take the
+        // baseline weld; second source DEAD (no alt crossing for 0.25 s)
+        // means there is no pair to wait for and the baseline weld IS
+        // that regime's own source (the 26559 rule).
+        const bool khfl_on = g_dbg_mode.load(std::memory_order_relaxed) == 346;
+        float khwn_code = 4.0f;   // 26562: stage-baseline unless overridden
+        if (khfl_on && !b.stage_pair_ok) {
+            const bool khfl_alive = g_ls.alt_view_valid &&
+                g_ls.frame_view_time - g_ls.alt_view_time < 0.25f;
+            const bool khfl_pool = khsc_now - g_band_pool_miss_t > 0.1f;   // 26563
+            if (khfl_alive && khfl_pool &&
+                khsc_now - b.stage_since <= 0.045f) {
+                khsc_any = true;
+                g_band_stage_flip_hold++;
+                continue;
+            }
+            if (khfl_alive && !khfl_pool) {
+                g_band_stage_flip_poolbail++;   // 26563: refused under pressure
+            }
+            if (khfl_alive) { g_band_stage_flip_late++; khwn_code = 3.0f; }
+            else { g_band_stage_flip_single++; khwn_code = 2.0f; }
+        }
         memcpy(b.sm, b.stage_sm, sizeof(b.sm));
         memcpy(b.border, b.stage_border, sizeof(b.border));
 
-        for (int c = 0; c < 3; ++c) {
-            for (int r = 0; r < 4; ++r) {
-                b.vcol[c * 4 + r] = g_ls.frame_view[r * 4 + c];
+        float khsl_old[12];   // 26540: the vcol being replaced
+        memcpy(khsl_old, b.vcol, sizeof(khsl_old));
+        // 26545 KH_BAND_PAIR_SAME (mode 335): pair the sm with the view of ITS
+        // OWN capture frame instead of the commit-time publish. Parked they are
+        // identical; moving, the difference is exactly the completion census's
+        // skew (11.13 deg / this dump). 26179 chose cross-pairing on log
+        // evidence, so this is an ARM, not a default - one A/B decides it.
+        // 26547: a foreign candidate view refuses the COMMIT outright - the old
+        // seal keeps serving; the stage waits for the next honest publish (or
+        // ages out on the existing 0.05 s rule).
+        if (!kh_band_view_native(g_ls.frame_view, true)) {
+            khsc_any = true;
+            continue;
+        }
+        // 26548 KH_BAND_PAIR_MIXED (mode 337 reverts): the 26547 line judges
+        // the welding view; this one judges the PAIR. stage_sm was harvested
+        // under stage_view's camera - welding it to a publish >50 m away
+        // composes world -> view(B) -> sm(A), world-registered wrong by |A-B|.
+        // A mixed stage can never become coherent with ANY future publish (its
+        // capture camera is fixed), so it DROPS via the aged-drop mechanics and
+        // the next sweep re-stages clean; the old complete seal keeps serving.
+        // 26560 PICK CENSUS (always on): the majority path's source mix,
+        // measured for the first time - stage_view vs the commit-time view.
+        if (b.stage_view_ok) {
+            const float khpx_s = kh_band_source_gap(b.stage_view, g_ls.frame_view);
+            if (khpx_s >= 0.0f) {
+                if (khpx_s > 0.5f) g_band_stage_xsrc++;
+                else g_band_stage_samesrc++;
             }
         }
+        if (b.stage_view_ok &&
+            !kh_band_pair_coherent(b.stage_view, g_ls.frame_view)) {
+            g_band_pool[khsc_p].busy = false;
+            b.stage_valid = false;
+            b.stage_pool = -1;
+            b.last_time = 0.0f;
+            continue;
+        }
+        const bool khsc_same = g_dbg_mode.load(std::memory_order_relaxed) == 335 &&
+                               b.stage_view_ok;
+        if (khfl_on && b.stage_pair_ok) {   // 26561: the per-band flip weld
+            memcpy(b.vcol, b.stage_pair, sizeof(b.vcol));
+            g_band_stage_flip++;
+            khwn_code = 1.0f;   // 26562
+        } else if (khsc_same) {
+            memcpy(b.vcol, b.stage_view, sizeof(b.vcol));
+            g_band_pair_same_seals++;
+            khwn_code = 5.0f;   // 26562
+        } else {
+            // 26569 ROTATIONAL SAME-FRAME COHERENCE. The 17:35 rotated
+            // capture pair measured the far slot's composed world-form
+            // 0.7-0.8 deg off the light frame shared by slots 0-3 at
+            // 0.001 deg, translation clean at 0.115 m, intermittent
+            // (wrong in A, coherent in B): sm and weld from DIFFERENT
+            // frames in rotation. The far cascade resolves last in the
+            // cycle, so its stage crosses the 26179 boundary and welds
+            // the NEXT frame's view - a rotation-only, far-only,
+            // yaw-only skew no translation lane could see. When the
+            // commit view has ROTATED > 0.10 deg off the stage view
+            // (same-frame noise measured 0.03 deg), weld the stage
+            // view: the sm-epoch pair, mode 335's choice scoped to
+            // exactly the frames where it is provably right.
+            // 26570 CORRECTION OF 26569, stated plainly: stage_view at the
+            // resolve is the PREVIOUS frame's upload (the stage code says
+            // so), so the 26569 gate replaced a +1-frame skew with a
+            // -1-frame skew AND fired on healthy commits under yaw - the
+            // operator falsified it in one round. The sm-epoch view is
+            // stage_first (latched above): identical to the commit view
+            // for same-cycle commits, and the never-stored frame-N view
+            // for boundary-crossing ones (the far cascade). Mode 351 =
+            // baseline weld unconditionally.
+            if (b.stage_first_ok &&
+                g_dbg_mode.load(std::memory_order_relaxed) != 351) {
+                memcpy(b.vcol, b.stage_first, sizeof(b.vcol));
+                g_band_rot_welds++;   // 26570: stage-first welds
+                khwn_code = 8.0f;     // 8 = stage-first weld
+            } else {
+                for (int c = 0; c < 3; ++c) {
+                    for (int r = 0; r < 4; ++r) {
+                        b.vcol[c * 4 + r] = g_ls.frame_view[r * 4 + c];
+                    }
+                }
+            }
+        }
+        kh_seal_land_note(khsc_i, khsc_now, b.esc_t, b.esc_cycle, khsl_old, b.vcol);   // 26540
+        kh_weld_note(b.vcol, khwn_code);   // 26562: weld identity census
+        b.esc_t = -1.0f;
 
         // SWAP, do not copy: the back buffer was filled AT THE RESOLVE that
         // paired this sm, so its content is the content that sm describes.
@@ -27607,6 +29656,9 @@ inline void kh_band_stage_commit(ID3D11DeviceContext* ctx) {
         b.pending_view = false;
         b.vcol_bridge = false;
         b.stage_valid = false;
+        b.stage_view_ok = false;
+        b.stage_pair_ok = false;   // 26561
+        b.stage_first_ok = false;   // 26570
         b.last_time = khsc_now;
         b.copies++;
         g_band_stage_commits++;
@@ -30795,12 +32847,40 @@ inline void fill_lighting_frame_cb(ConstantData& cbd) {
     // second cold) -> flat white sun over scalar ambient, as before.
     // 26418: an exactly-zero sun is an unpopulated block, never a lighting
     // state. Refuse it to the cold path. Ledger above blkZeroSunRefusals.
-    const bool khzs_zero = g_pub_block_valid &&
+    // 26612 KH_NIGHT_ZERO_SUN (mode 385 restores the unconditional 26418
+    // refusal; 99 still stands the whole gate down). THE 26418 PREMISE IS
+    // FALSIFIED BY FIELD: 'no lighting state produces an identically zero
+    // sun colour beside a nonzero ambient' - dump1-26611 reads the engine's
+    // own STANDING state at night as stdSunLum exactly 0 with stdAmbLum
+    // 0.0186, so deep night IS that state and the refusal was shipping the
+    // flat-white cold path (the glowing mesh) for every frame of it -
+    // blkZeroSunRefusals 337 and climbing across the night tail while the
+    // published block held the correct values. The 26418 fault class
+    // (an UNPOPULATED block adopted before its sun lanes were written, at
+    // a DAY cold start) stays refused by the discriminator this file
+    // already trusts for exactly this call - the probe's standing flavour,
+    // the 26344 dark-pub guard's own 0.5 bar: a zero-sun block against a
+    // standing sun > 0.5 (or an unknown standing, the true-cold window
+    // where 26418's fault lives) is the fault and is refused; against a
+    // MEASURED-dark standing (0 <= std <= 0.5) it agrees with the scene
+    // and ships. ACCEPTANCE: at night flushBoxSunMax 0 with flushBoxAmb at
+    // the block's night values and blkZeroSunAdmits climbing while
+    // blkZeroSunRefusals holds; on a day cold start refusals still count
+    // (the 26418 protection intact). FALSIFICATION: the 26418 black box
+    // returning WITH blkZeroSunAdmits climbing = the standing probe
+    // misread dark on a lit scene - gate the admit harder, never delete
+    // the refusal.
+    const bool khzs_sunz = g_pub_block_valid &&
                            g_pub_block_sun[0] == 0.0f &&
                            g_pub_block_sun[1] == 0.0f &&
-                           g_pub_block_sun[2] == 0.0f &&
+                           g_pub_block_sun[2] == 0.0f;
+    const bool khzs_dark = g_light_probe.std_sun_l >= 0.0f &&
+                           g_light_probe.std_sun_l <= 0.5f &&
+                           g_dbg_mode.load(std::memory_order_relaxed) != 385;
+    const bool khzs_zero = khzs_sunz && !khzs_dark &&
                            g_dbg_mode.load(std::memory_order_relaxed) != 99;
     if (khzs_zero) g_blk_zero_sun_refusals++;
+    if (khzs_sunz && khzs_dark) g_blk_zero_sun_admits++;
     if (g_pub_block_valid && !khzs_zero) {
         cbd.lighting2[0] = g_pub_block_sun[0];
         cbd.lighting2[1] = g_pub_block_sun[1];
@@ -30972,6 +33052,24 @@ inline void fill_lighting_frame_cb(ConstantData& cbd) {
             cbd.sun_meta4[2] = g_sun4_map_bias;
             cbd.sun_meta4[3] = g_sun4_half_diag;
         }
+        if (g_sun5_map_valid) {   // 26620 FAR band, same clock
+            kh_sun_rebase_vp(&cbd.sun_vp5[0][0], &g_sun5_map_vp[0][0],
+                             g_sun_cam_anchor, g_sun_anchor_now);
+            cbd.sun_meta5[0] = 1.0f;
+            cbd.sun_meta5[1] = static_cast<float>(KH_SUN_FAR_SIZE);
+            cbd.sun_meta5[2] = g_sun5_map_bias;
+            cbd.sun_meta5[3] = g_sun5_half_diag;
+        }
+        // 26575 KH_SELF_PREFILTER arms (mode 357 = classic taps
+        // everywhere; a band whose convert did not complete stays
+        // classic on its own - the flag pairs render AND convert).
+        {
+            const int khpf_dm = g_dbg_mode.load(std::memory_order_relaxed);
+            const bool khpf_off = khpf_dm == 357 || khpf_dm == 366;   // 26588: era arm
+            cbd.sun_pf[0] = (!khpf_off && g_sun2_map_valid && g_sun_pf_valid[0]) ? 1.0f : 0.0f;
+            cbd.sun_pf[1] = (!khpf_off && g_sun3_map_valid && g_sun_pf_valid[1]) ? 1.0f : 0.0f;
+            cbd.sun_pf[2] = (!khpf_off && g_sun4_map_valid && g_sun_pf_valid[2]) ? 1.0f : 0.0f;
+        }
     }
 
     // Cascade table, finest scale first (first containing tile decides in
@@ -30999,6 +33097,15 @@ inline void fill_lighting_frame_cb(ConstantData& cbd) {
         return;
     }
 
+    if (ffr_armed()) {   // 26567: vanish anatomy, written before any gate
+        FfrRecord& khva_r = ffr_head();
+        khva_r.kh_live_tab = static_cast<uint8_t>(g_ls.count > 255u ? 255u : g_ls.count);
+        const uint64_t khva_now = steady_now_ms();
+        khva_r.kh_sun_st = (g_sun_valid_ms == 0 ||
+                            khva_now - g_sun_valid_ms < KH_SUN_COLD_HOLD_MS) ? 0
+                         : (g_sun_unstable_ms != 0 &&
+                            khva_now - g_sun_unstable_ms < KH_SUN_SETTLE_MS) ? 1 : 2;
+    }
     if (g_ls.count == 0 || g_ls.newest < 0) {
         g_recv_term_skips++;
         return;
@@ -31078,6 +33185,7 @@ inline void fill_lighting_frame_cb(ConstantData& cbd) {
     }
 
     cbd.shadow_meta[0] = static_cast<float>(out_i);
+    if (ffr_armed()) ffr_head().kh_live_served = static_cast<uint8_t>(out_i);   // 26567
 
 }
 
@@ -31227,6 +33335,81 @@ inline void fill_lighting_obj_cb(ConstantData& cbd, const RenderObject& o) {
                                                   //        fire-CB reader, so the fire
                                                   //        fill maps 264 to its default
                                                   //        deliberately.
+                         : khl_dm == 352 ? 43.0f  // 26572: stencil range fade OFF
+                         : khl_dm == 353 ? 44.0f  // 26572: soft compare OFF (hard
+                                                  //        corner step restored on
+                                                  //        all four self tiers)
+                         : khl_dm == 354 ? 45.0f  // 26572: smooth spread OFF (the
+                                                  //        int ring spread returns)
+                         : khl_dm == 356 ? 46.0f  // 26574: self chain samples the
+                                                  //        world-absolute interpolant
+                                                  //        again (PS-side anchor sub;
+                                                  //        the pre-26574 arithmetic)
+                         : khl_dm == 358 ? 47.0f  // 26577: PF-EXCLUSIVE (armed band
+                                                  //        verdicts come from the
+                                                  //        pyramid alone; authorship
+                                                  //        separation vs 357)
+                         : khl_dm == 362 ? 48.0f  // 26586: UNBOUNDED grad slack
+                                                  //        returns (falsified as
+                                                  //        author at 26587)
+                         : khl_dm == 392 ? 65.0f  // 26624: far self tier ungated
+                                                  //        (the 26620 form - the
+                                                  //        all-distance splotch
+                                                  //        ring returns)
+                         : khl_dm == 388 ? 62.0f  // 26618: the 26594 0.60 fade
+                                                  //        start returns (fine
+                                                  //        tier yields earlier;
+                                                  //        wider two-grid mix)
+                         : khl_dm == 386 ? 60.0f  // 26617: jurisdiction edge
+                                                  //        fade OFF (the hard
+                                                  //        certification cliff
+                                                  //        returns at window edges)
+                         : khl_dm == 387 ? 61.0f  // 26617: fixed 12/48/192 m
+                                                  //        jurisdiction guards
+                                                  //        (pre-26611 literals;
+                                                  //        under-claim at s > 1)
+                         : khl_dm == 371 ? 55.0f  // 26594: thin 10% blend band
+                                                  //        + always-on jurisdiction
+                                                  //        return (quality seams
+                                                  //        snap again)
+                         : khl_dm == 370 ? 54.0f  // 26593: the 26464 range-fade
+                                                  //        curve returns (fade
+                                                  //        from 85%; self shadows
+                                                  //        thin ~30 m early)
+                         : khl_dm == 369 ? 53.0f  // 26592: facet bias normal
+                                                  //        re-armed (crevice
+                                                  //        fireflies, edge
+                                                  //        dither and motion
+                                                  //        film-grain RETURN)
+                         : khl_dm == 368 ? 52.0f  // 26591: straddle guard OFF
+                                                  //        (unguarded spread +
+                                                  //        pf engagement return;
+                                                  //        crevice fireflies and
+                                                  //        edge dither should
+                                                  //        RETURN)
+                         : khl_dm == 367 ? 51.0f  // 26589: KH_UNION_LIT_GUARD
+                                                  //        revert - the union
+                                                  //        override (26507
+                                                  //        unconditional lit
+                                                  //        fallthrough) returns
+                         : khl_dm == 365 ? 50.0f  // 26588: KH_SELF_CLASSIC -
+                                                  //        textbook kernel: gs 0,
+                                                  //        RPDB 0, spread 1, offset
+                                                  //        damper off, pf off - the
+                                                  //        whole-stack A/B
+                         : khl_dm == 366 ? 50.0f  // 26588: THE ERA ARM - classic
+                                                  //        kernel + union-only maps
+                                                  //        + pf off (CPU halves at
+                                                  //        khsh_render_cams / the
+                                                  //        sun_pf arm fill)
+                         : khl_dm == 363 ? 49.0f  // 26587: rotated decision ring
+                                                  //        + raw world hash return
+                                                  //        (the traced firefly
+                                                  //        author; A/B vs 0)
+                         : khl_dm == 381 ? 59.0f  // 26610: ABSOLUTE-interpolant
+                                                  //        revert (KH_BAND_REL_INTERP
+                                                  //        A/B; codes 56-58 retired
+                                                  //        unspent, rule 1.18)
                          : 1.0f;
         // 26460: the 26458 mirMeta fill that lived HERE is MOVED to
         // fill_lighting_frame_cb (ledger there). mir_meta is a FRAME
@@ -32280,6 +34463,23 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
             if (g_ls.frame_view_valid) {
                 memcpy(g_ls.prev_view, g_ls.frame_view, sizeof(g_ls.prev_view));
                 g_ls.prev_view_valid = true;
+                // 26555 KH_BAND_ALT_PROVISIONAL: when the incoming publish
+                // crosses sources, the outgoing frame_view IS the other
+                // source's freshest statement - latch it.
+                float khav_a[3], khav_b[3];
+                if (kh_view_camera_exact(reinterpret_cast<const float(*)[4]>(g_ls.frame_view), khav_a) &&
+                    kh_view_camera_exact(reinterpret_cast<const float(*)[4]>(fv), khav_b)) {
+                    const float khav_dx = khav_a[0] - khav_b[0];
+                    const float khav_dy = khav_a[1] - khav_b[1];
+                    const float khav_dz = khav_a[2] - khav_b[2];
+                    const float khav_d = sqrtf(khav_dx * khav_dx + khav_dy * khav_dy +
+                                               khav_dz * khav_dz);
+                    if (khav_d == khav_d && khav_d > 0.5f) {
+                        memcpy(g_ls.alt_view, g_ls.frame_view, sizeof(g_ls.alt_view));
+                        g_ls.alt_view_valid = true;
+                        g_ls.alt_view_time = g_ls.frame_view_time;
+                    }
+                }
             }
 
             memcpy(g_ls.frame_view, fv, sizeof(g_ls.frame_view));
@@ -32319,8 +34519,37 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
                 // a same-frame pair. This also retires the 100 ms bridge
                 // fallback (stale pendings die at 50 ms, before it fires).
                 if (g_ls.frame_view_time - bs.pending_since > 0.05f) {
-                    bs.valid = false;
-                    bs.pending_view = false;
+                    // 26560: default = the ORIGINAL epoch death (invalidate).
+                    // The adaptive tail lives inside mode 341 with its stack.
+                    if (g_dbg_mode.load(std::memory_order_relaxed) != 341) {
+                        bs.valid = false;
+                        bs.pending_view = false;
+                        // 26565: reseal next sweep instead of waiting out
+                        // the tier interval (348 restores the wait).
+                        if (g_dbg_mode.load(std::memory_order_relaxed) != 348) {
+                            bs.last_time = 0.0f;
+                            g_band_pend_dead_fast++;
+                        }
+                        continue;
+                    }
+                    // 26559 ADAPTIVE TAIL (see the late bar; same rule).
+                    if (!bs.vcol_bridge) {
+                        const bool khtb_alive = g_ls.alt_view_valid &&
+                            g_ls.frame_view_time - g_ls.alt_view_time < 0.25f;
+                        if (g_dbg_mode.load(std::memory_order_relaxed) == 344 ||
+                            !khtb_alive) {
+                            bs.pending_view = false;
+                            if (!khtb_alive) g_band_pend_single_src++;
+                        } else {
+                            bs.valid = false;
+                            bs.pending_view = false;
+                            bs.last_time = 0.0f;   // reseal next sweep
+                        }
+                        g_band_pend_timeout_kept++;
+                    } else {
+                        bs.valid = false;
+                        bs.pending_view = false;
+                    }
                     continue;
                 }
 
@@ -32329,21 +34558,83 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
                 // event under suspicion. vcol[c*4+r] == V[r*4+c], so the world
                 // camera forward axis is (vcol[8], vcol[9], vcol[10]) on the old
                 // pair and (fv[2], fv[6], fv[10]) on the incoming one.
+                if (!kh_band_view_native(fv, true)) {   // 26547: foreign publish never completes a seal
+                    continue;
+                }
+                // 26548 KH_BAND_PAIR_MIXED (mode 337 reverts): the provisional
+                // vcol IS the capture's own view; a completing publish >50 m
+                // from it would weld sm(A) to view(B). Absent beats offset:
+                // invalidate (the epoch guard's exact shape) and the next
+                // resolve reseals coherent. Bridge-provisional pairs are
+                // cross-convention and unjudgeable - the consumption guard
+                // already refuses them downstream.
+                if (!bs.vcol_bridge &&
+                    !kh_band_pair_coherent(bs.vcol, fv)) {
+                    bs.valid = false;
+                    bs.pending_view = false;
+                    continue;
+                }
                 {
+                    // 26548 VALIDITY SPLIT (ledger at KH_BUILD_TAG): the skew
+                    // lanes read 853-1499.95 m across five sessions from rows
+                    // whose OLD vcol was never sanity-checked. Column norms
+                    // 0.9-1.1 and !vcol_bridge gate the skew lanes now;
+                    // OldTrnM/MaxM record the old vcol's raw |translation| on
+                    // EVERY row so the field decides what the 1499.95 class
+                    // was (structured foreign matrix vs first-seal garbage)
+                    // without this build asserting a convention.
+                    bool khcv_ok = !bs.vcol_bridge;
+                    for (int khcv_j = 0; khcv_ok && khcv_j < 3; ++khcv_j) {
+                        const float* khcv_v = &bs.vcol[khcv_j * 4];
+                        const float khcv_n = sqrtf(khcv_v[0] * khcv_v[0] +
+                                                   khcv_v[1] * khcv_v[1] +
+                                                   khcv_v[2] * khcv_v[2]);
+                        if (!(khcv_n > 0.9f && khcv_n < 1.1f)) khcv_ok = false;
+                    }
+                    const float khcv_t = sqrtf(bs.vcol[3] * bs.vcol[3] +
+                                               bs.vcol[7] * bs.vcol[7] +
+                                               bs.vcol[11] * bs.vcol[11]);
+                    if (khcv_t == khcv_t) {
+                        g_band_complete_old_trn_m = khcv_t;
+                        if (khcv_t > g_band_complete_old_trn_max_m) {
+                            g_band_complete_old_trn_max_m = khcv_t;
+                        }
+                    }
+                    if (!khcv_ok) g_band_complete_inv++;
                     const bool khcc_cross = g_boundary_t >= 0.0f &&
                                             bs.pending_since < g_boundary_t;
                     float khcc_d = bs.vcol[8] * fv[2] + bs.vcol[9] * fv[6] +
                                    bs.vcol[10] * fv[10];
                     khcc_d = khcc_d > 1.0f ? 1.0f : (khcc_d < -1.0f ? -1.0f : khcc_d);
                     const float khcc_deg = acosf(khcc_d) * 57.29578f;
-                    const float khcc_dx = bs.vcol[3] - fv[12];
-                    const float khcc_dy = bs.vcol[7] - fv[13];
-                    const float khcc_dz = bs.vcol[11] - fv[14];
-                    const float khcc_m = sqrtf(khcc_dx * khcc_dx +
-                                               khcc_dy * khcc_dy +
-                                               khcc_dz * khcc_dz);
+                    // 26549: |t_old - t_new| between two WORLD-space views
+                    // (bandCompleteOldTrnM ~ camAbsM, measured) is rotation
+                    // times the |C| lever arm - the 853-1556 m class was
+                    // never a camera distance. The lane now reports the
+                    // exact camera gap; the deg lane carries rotation alone.
+                    float khcc_m = -1.0f;
+                    {
+                        float khcc_a[3] = { 0.0f, 0.0f, 0.0f };
+                        for (int khcc_j = 0; khcc_j < 3; ++khcc_j) {
+                            const float* khcc_v = &bs.vcol[khcc_j * 4];
+                            khcc_a[0] -= khcc_v[3] * khcc_v[0];
+                            khcc_a[1] -= khcc_v[3] * khcc_v[1];
+                            khcc_a[2] -= khcc_v[3] * khcc_v[2];
+                        }
+                        float khcc_b[3];
+                        if (khcv_ok &&
+                            kh_view_camera_exact(reinterpret_cast<const float(*)[4]>(fv), khcc_b)) {
+                            const float khcc_dx = khcc_a[0] - khcc_b[0];
+                            const float khcc_dy = khcc_a[1] - khcc_b[1];
+                            const float khcc_dz = khcc_a[2] - khcc_b[2];
+                            const float khcc_q = sqrtf(khcc_dx * khcc_dx +
+                                                       khcc_dy * khcc_dy +
+                                                       khcc_dz * khcc_dz);
+                            if (khcc_q == khcc_q) khcc_m = khcc_q;
+                        }
+                    }
 
-                    if (khcc_cross) {
+                    if (khcv_ok && khcc_cross) {
                         g_band_complete_cross++;
                         g_band_complete_skew_deg = khcc_deg;
                         g_band_complete_skew_m = khcc_m;
@@ -32355,11 +34646,108 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
                         if (khcc_m > g_band_complete_skew_max_m) {
                             g_band_complete_skew_max_m = khcc_m;
                         }
-                    } else {
+                    } else if (khcv_ok) {
                         g_band_complete_same++;
                     }
                 }
 
+                // 26551 KH_BAND_COHERENT_COMPLETE (mode 339 reverts; ledger
+                // at KH_BUILD_TAG). The census above measured OFFERED
+                // completions at up to 13.6 m / 11.4 deg of camera motion.
+                // The deferred-view design assumed the completing publish is
+                // the capture frame's own view; a publish past the
+                // same-frame window is 1+ frames LATE, strictly worse than
+                // the provisional it would overwrite (at most one frame
+                // EARLY), and its weld is the operator's far-shadow camera
+                // lag. Late publishes no longer overwrite: the non-bridge
+                // provisional FINALIZES as the seal; bridge provisionals
+                // stay pending for the 50 ms epoch death above - serving
+                // byte-for-byte as today (the consumption guard already
+                // refuses bridge seals; bandSealBridge 0 on every dump).
+                const float khoc_page = g_ls.frame_view_time - bs.pending_since;
+                // 26560: the whole 26551-26559 completion stack is mode 341;
+                // the default is baseline (overwrite unconditionally below).
+                const bool khcm_on =
+                    g_dbg_mode.load(std::memory_order_relaxed) == 341;
+                // 26556: widened 0.025 -> 0.045 - the flip's wait for its own
+                // cascade's publish (CompAgeMsMax 24.3 measured; epoch at 50
+                // still backstops).
+                if (khcm_on && khoc_page > 0.045f) {
+                    if (!bs.vcol_bridge) {
+                        // 26559 ADAPTIVE TAIL (ledger at KH_BUILD_TAG): the
+                        // 26558 invalidate executed 22 pct of captures in
+                        // single-source regimes - the operator's distance
+                        // cutoff. Where the second source is DEAD (no
+                        // alt-latch crossing for 0.25 s) there is no lottery:
+                        // the provisional IS the source - finalize (baseline
+                        // behaviour, which never cut off). Where it is ALIVE,
+                        // absent-beats-offset stands, and last_time = 0 makes
+                        // the absence ~one frame. Mode 344 = old tails.
+                        const bool khta_alive = g_ls.alt_view_valid &&
+                            g_ls.frame_view_time - g_ls.alt_view_time < 0.25f;
+                        if (g_dbg_mode.load(std::memory_order_relaxed) == 344 ||
+                            !khta_alive) {
+                            bs.pending_view = false;
+                            if (!khta_alive) g_band_pend_single_src++;
+                        } else {
+                            bs.valid = false;
+                            bs.pending_view = false;
+                            bs.last_time = 0.0f;   // reseal next sweep
+                        }
+                        g_band_pend_late_kept++;   // tail events (both kinds)
+                    } else {
+                        g_band_pend_late_bridge++;
+                    }
+                    continue;
+                }
+
+                // 26553 KH_BAND_SAME_SOURCE (mode 340 reverts; ledger at
+                // KH_BUILD_TAG): a completion may not switch sources. A
+                // cross-source publish does not overwrite - the non-bridge
+                // provisional FINALIZES (the 26551 shape). Bridge
+                // provisionals are exempt: they cannot finalize and never
+                // serve unfinalized, so refusing would only starve them.
+                if (khcm_on && !bs.vcol_bridge) {
+                    const float khss_d = kh_band_source_gap(bs.vcol, fv);
+                    const int khss_m = g_dbg_mode.load(std::memory_order_relaxed);
+                    if (khss_m == 342) {
+                        // 26553 lock (archaeology): cross-source finalizes.
+                        if (khss_d > 0.5f) {
+                            g_band_comp_src_ref++;
+                            g_band_comp_src_m = khss_d;
+                            if (khss_d > g_band_comp_src_max_m) g_band_comp_src_max_m = khss_d;
+                            bs.pending_view = false;
+                            continue;
+                        }
+                    } else if (khss_m != 340) {
+                        // 26556 DEFAULT = the 26554 flip, the best-known field
+                        // state (offset dead at 341): same-source publishes
+                        // skip, the first cross-source publish - implicitly
+                        // THIS band's own cascade by time-adjacency - completes.
+                        if (khss_d >= 0.0f && khss_d <= 0.5f) {
+                            g_band_comp_src_alt++;
+                            continue;
+                        }
+                    }
+                }
+                // 26560 PICK CENSUS (always on): every accepted overwrite,
+                // classified by the provisional-vs-completing camera gap.
+                if (!bs.vcol_bridge) {
+                    const float khpx_d = kh_band_source_gap(bs.vcol, fv);
+                    if (khpx_d >= 0.0f) {
+                        if (khpx_d > 0.5f) g_band_comp_xsrc++;
+                        else g_band_comp_samesrc++;
+                    }
+                }
+                // 26552 ORDER CENSUS: the served weld span (accepted only).
+                {
+                    const float khoc_cms = khoc_page * 1000.0f;
+                    if (khoc_cms == khoc_cms) {
+                        g_band_comp_age_sum += khoc_cms;
+                        g_band_comp_age_n++;
+                        if (khoc_cms > g_band_comp_age_max_ms) g_band_comp_age_max_ms = khoc_cms;
+                    }
+                }
                 for (int c = 0; c < 3; ++c) {
                     for (int r = 0; r < 4; ++r) {
                         bs.vcol[c * 4 + r] = fv[r * 4 + c];
@@ -32369,7 +34757,55 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
                 bs.pending_view = false;
                 bs.vcol_bridge = false;
                 g_ls.seal_completions++;
+                kh_weld_note(bs.vcol, 6.0f);   // 26562: weld identity census
 
+            }
+
+            // 26561 KH_BAND_STAGE_FLIP pair latch (mode 346 arms; ledger at
+            // KH_BUILD_TAG). The staged path's flip: the FIRST cross-source
+            // publish (gap > 0.5 m from the held capture view - the measured
+            // classes cannot overlap) accepted after a band's stage is that
+            // band's time-adjacent statement of the render camera - the
+            // 26554/26556 flip's own argument, applied PER BAND instead of
+            // through one global latch (what convicted 26555). Latched here,
+            // read only by the mode-346 commit; first cross wins; foreign
+            // publishes never latch (26547) and non-exact publishes never
+            // latch (the commit's own quality bar). Stages from the current
+            // cycle wait for the next one, the commit's own convention.
+            // 26570: stage_first latch - same quality/foreign bars as the
+            // 26561 latch below, but NO boundary guard and NO source-gap
+            // filter: the first accepted publish after the stage IS the
+            // stage frame's own late view upload (the resolves run before
+            // the view upload - the stage code's own comment).
+            if (g_ls.last_publish_rot_err <= 1e-3f && kh_band_view_native(fv, false)) {
+                for (int khsf_i = 0; khsf_i < 8; ++khsf_i) {
+                    auto& khsf_b = g_ls.band[khsf_i];
+                    if (!khsf_b.stage_valid || khsf_b.stage_first_ok) continue;
+                    for (int c = 0; c < 3; ++c) {
+                        for (int r = 0; r < 4; ++r) {
+                            khsf_b.stage_first[c * 4 + r] = fv[r * 4 + c];
+                        }
+                    }
+                    khsf_b.stage_first_ok = true;
+                }
+            }
+            if (g_ls.last_publish_rot_err <= 1e-3f && kh_band_view_native(fv, false)) {
+                for (int khfl_i = 0; khfl_i < 8; ++khfl_i) {
+                    auto& khfl_b = g_ls.band[khfl_i];
+                    if (!khfl_b.stage_valid || khfl_b.stage_pair_ok ||
+                        !khfl_b.stage_view_ok) continue;
+                    if (g_boundary_t >= 0.0f &&
+                        khfl_b.stage_since >= g_boundary_t) continue;
+                    const float khfl_d = kh_band_source_gap(khfl_b.stage_view, fv);
+                    if (khfl_d > 0.5f) {
+                        for (int c = 0; c < 3; ++c) {
+                            for (int r = 0; r < 4; ++r) {
+                                khfl_b.stage_pair[c * 4 + r] = fv[r * 4 + c];
+                            }
+                        }
+                        khfl_b.stage_pair_ok = true;
+                    }
+                }
             }
 
             return;
@@ -33309,9 +35745,44 @@ inline void shadow_live_finalize_cycle() {
     e.tile[2] = (vp.TopLeftX + vp.Width) * inv - texel;
     e.tile[3] = (vp.TopLeftY + vp.Height) * inv - texel;
     if (e.tile[2] <= e.tile[0] || e.tile[3] <= e.tile[1]) return;
-    e.cam[0] = g_ls.cam[0];   // last injection's camera ~ this frame's origin
-    e.cam[1] = g_ls.cam[1];
-    e.cam[2] = g_ls.cam[2];
+    // 26544 KH_LIVE_CAM_PAIR (mode 334 = the historic injection-camera pairing).
+    // The engine's matrix is relative to the camera of the frame that RENDERED
+    // this atlas tile; shadowMeta2.yzw is zeroed and the fill re-absolutes with
+    // THIS field, so e.cam must be that camera exactly - the injection's is one
+    // camera-step behind under motion, and that step was the operator's
+    // moving/rotating shadow offset (settling one seal after the camera parks).
+    float khlp_cam[3] = { g_ls.cam[0], g_ls.cam[1], g_ls.cam[2] };
+    int   khlp_src = 0;   // 0 injection (fallback / 334), 1 frame view, 2 cycle latch
+    if (g_dbg_mode.load(std::memory_order_relaxed) != 334) {
+        const float khlp_now = effect_time_seconds();
+        float khlp_c[3];
+        if (g_ls.frame_view_valid && g_ls.frame_view_time >= 0.0f &&
+            khlp_now - g_ls.frame_view_time < 0.05f &&
+            kh_view_camera_exact(reinterpret_cast<const float(*)[4]>(g_ls.frame_view), khlp_c)) {
+            khlp_cam[0] = khlp_c[0]; khlp_cam[1] = khlp_c[1]; khlp_cam[2] = khlp_c[2];
+            khlp_src = 1;
+        } else if (g_ro.cycle_pv_valid &&
+                   kh_view_camera_exact(g_ro.cycle_pv.view, khlp_c)) {
+            khlp_cam[0] = khlp_c[0]; khlp_cam[1] = khlp_c[1]; khlp_cam[2] = khlp_c[2];
+            khlp_src = 2;
+        }
+    }
+    if (khlp_src == 1) g_live_cam_pair_fv++;
+    else if (khlp_src == 2) g_live_cam_pair_pv++;
+    else g_live_cam_pair_stale++;
+    {
+        const float khlp_dx = khlp_cam[0] - g_ls.cam[0];
+        const float khlp_dy = khlp_cam[1] - g_ls.cam[1];
+        const float khlp_dz = khlp_cam[2] - g_ls.cam[2];
+        const float khlp_d = sqrtf(khlp_dx * khlp_dx + khlp_dy * khlp_dy + khlp_dz * khlp_dz);
+        if (khlp_d == khlp_d && khlp_d < 1.0e6f) {
+            g_live_cam_pair_dx = khlp_d;
+            if (khlp_d > g_live_cam_pair_dx_max) g_live_cam_pair_dx_max = khlp_d;
+        }
+    }
+    e.cam[0] = khlp_cam[0];
+    e.cam[1] = khlp_cam[1];
+    e.cam[2] = khlp_cam[2];
     e.stamp = ++g_ls.stamp_counter;
     e.time = effect_time_seconds();
     g_ls.newest = slot;
@@ -33521,10 +35992,26 @@ inline void shadow_live_frame_reset() {
     g_ls.count = keep;
     g_ls.newest = newest;
 
+    // 26568 THE F12/CAMERA-SWITCH HOLE WAS THIS FLAT 1.0 s AGE KILL - the
+    // one lesson the live-table pruner above already encodes (activity-
+    // relative windows) and this loop never learned. A 1.5 s capture
+    // stall ages every seal past 1.0; the near cascades re-resolve
+    // inside the stall frame, the far tiers' engine round-robin is not
+    // due, and exactly the serving far bands die for the one frame the
+    // capture records (dumps: recvBandsN 8 -> 5, recvDropWhy 1, at the
+    // stall row, both regimes). The kill never bought reseal speed -
+    // an aged slot passes every throttle already, so the next resolve
+    // reseals it regardless; its only duty is ORPHAN cleanup (a
+    // cascade the engine stopped rendering). 4.0 s covers that duty
+    // without holing stalls; the sun-jump wipe still handles
+    // discontinuous time instantly. Mode 350 = the 1.0 s bound.
+    const float khak_bound =
+        g_dbg_mode.load(std::memory_order_relaxed) == 350 ? 1.0f : 4.0f;
     for (int b = 0; b < 8; ++b) {
-        if (g_ls.band[b].valid && now_fr - g_ls.band[b].last_time > 1.0f) {
+        if (g_ls.band[b].valid && now_fr - g_ls.band[b].last_time > khak_bound) {
             g_ls.band[b].valid = false;
             g_ls.band[b].pending_view = false;
+            g_band_age_kills++;   // 26568
         }
     }
 
@@ -33769,6 +36256,7 @@ inline void release_shadow_device_state() {
     g_ls.atlas_fmt = 0;
     g_ls.atlas_last_seen = 0.0f;
     g_ls.first_capture_time = -1.0f;
+    g_band_wipe_events++;   // 26566: the vanish trigger, counted
     g_ls.srv_failed = false;
     g_ls.phase_on_atlas = false;
     g_ls.pending_valid = false;
@@ -33807,6 +36295,11 @@ inline void release_shadow_device_state() {
     g_ls.frame_view_valid = false;
     g_ls.frame_view_time = -1.0f;
     g_ls.prev_view_valid = false;
+    g_ls.alt_view_valid = false;   // 26555: the alt latch dies with the session
+    g_ls.receive_warmed = false;   // 26566: next session warms up again
+    g_band_pool_miss_t = -1000.0f;   // 26563: pressure clock dies with the session
+    g_band_fall_flush = ~0ull;       // 26564: cap latch dies with the session
+    g_ls.alt_view_time = -1.0f;
     g_ls.view_published_this_frame = false;
 
     // --- frozen fire + private sun map ---
@@ -33830,6 +36323,7 @@ inline void release_shadow_device_state() {
     g_sun2_map_valid = false;   // 26444
     g_sun3_map_valid = false;   // 26454
     g_sun4_map_valid = false;   // 26454
+    g_sun5_map_valid = false;   // 26620
     g_sun_map_rendered_frame = false;
     g_sun_map_no_local = false;
     g_sun_map_hash = 0;
@@ -33862,6 +36356,99 @@ inline void release_shadow_device_state() {
 // View-paired band capture: at this band's resolve, freeze SM + border
 // (from the resolve CB, at fixed offsets relative to the found matrix) +
 // this frame's view matrix + the atlas content, together.
+// 26540 KH_SEAL_LAND_CENSUS body (declared with its globals; needs g_topo_cycles
+// and g_ro, which are declared after the stage-commit site). Pure read.
+inline void kh_seal_land_note(int khsl_slot, float khsl_now, float khsl_esc_t,
+                              uint64_t khsl_esc_cycle, const float* khsl_old,
+                              const float* khsl_vc) {
+    // baked camera of a vcol (26389 verbatim: c = -sum(t_j * axis_j))
+    auto khsl_cam_of = [](const float* khsl_v, float* khsl_c) -> bool {
+        khsl_c[0] = khsl_c[1] = khsl_c[2] = 0.0f;
+        for (int khsl_j = 0; khsl_j < 3; ++khsl_j) {
+            const float* khsl_a = &khsl_v[khsl_j * 4];
+            const float khsl_n = sqrtf(khsl_a[0] * khsl_a[0] + khsl_a[1] * khsl_a[1] +
+                                       khsl_a[2] * khsl_a[2]);
+            if (!(khsl_n > 0.9f && khsl_n < 1.1f)) return false;
+            khsl_c[0] -= khsl_a[3] * khsl_a[0];
+            khsl_c[1] -= khsl_a[3] * khsl_a[1];
+            khsl_c[2] -= khsl_a[3] * khsl_a[2];
+        }
+        return true;
+    };
+    float khsl_cn[3], khsl_co[3];
+    const bool khsl_okn = khsl_cam_of(khsl_vc, khsl_cn);
+    const bool khsl_oko = khsl_cam_of(khsl_old, khsl_co);
+    const int khsl_tier = khsl_slot < 3 ? 0 : (khsl_slot < 6 ? 1 : 2);
+    // (i) reseal step: how far the baked camera jumped at this landing
+    if (khsl_okn && khsl_oko) {
+        const float khsl_dx = khsl_cn[0] - khsl_co[0];
+        const float khsl_dy = khsl_cn[1] - khsl_co[1];
+        const float khsl_dz = khsl_cn[2] - khsl_co[2];
+        const float khsl_st = sqrtf(khsl_dx * khsl_dx + khsl_dy * khsl_dy + khsl_dz * khsl_dz);
+        if (khsl_st == khsl_st && khsl_st < 1.0e6f) {
+            g_band_reseal_step = khsl_st;
+            if (khsl_st > g_band_reseal_step_max[khsl_tier]) g_band_reseal_step_max[khsl_tier] = khsl_st;
+            g_band_reseal_n[khsl_tier]++;
+            g_band_reseal_sum[khsl_tier] += khsl_st;
+            if (ffr_armed()) {
+                FfrRecord& khsl_r = ffr_head();
+                if (khsl_st > khsl_r.band_reseal_step_m) khsl_r.band_reseal_step_m = khsl_st;
+            }
+        }
+    }
+    // (ii) seal-side split proxy: committed vcol camera/forward against THIS
+    // cycle's injection basis. Read against the standing basis offset.
+    if (khsl_okn && g_ro.cycle_pv_valid) {
+        float khsl_ci[3];
+        extract_camera_pos(g_ro.cycle_pv.view, khsl_ci);
+        const float khsl_dx = khsl_cn[0] - khsl_ci[0];
+        const float khsl_dy = khsl_cn[1] - khsl_ci[1];
+        const float khsl_dz = khsl_cn[2] - khsl_ci[2];
+        const float khsl_d = sqrtf(khsl_dx * khsl_dx + khsl_dy * khsl_dy + khsl_dz * khsl_dz);
+        if (khsl_d == khsl_d && khsl_d < 1.0e6f) {
+            g_band_seal_inj_dx = khsl_d;
+            if (khsl_d > g_band_seal_inj_dx_max) g_band_seal_inj_dx_max = khsl_d;
+        }
+        // forward axes: vcol column 2 = (vc[8], vc[9], vc[10]); cycle_pv.view row-vector col 2
+        float khsl_f = khsl_vc[8] * g_ro.cycle_pv.view[0][2] + khsl_vc[9] * g_ro.cycle_pv.view[1][2] +
+                       khsl_vc[10] * g_ro.cycle_pv.view[2][2];
+        khsl_f = khsl_f > 1.0f ? 1.0f : (khsl_f < -1.0f ? -1.0f : khsl_f);
+        const float khsl_deg = acosf(khsl_f) * 57.29578f;
+        if (khsl_deg == khsl_deg) {
+            g_band_seal_inj_rot = khsl_deg;
+            if (khsl_deg > g_band_seal_inj_rot_max) g_band_seal_inj_rot_max = khsl_deg;
+        }
+    }
+    // (iii) escape -> land latency and camDx AT LAND (26475 candidate (a))
+    // (a stamp older than 5 s spans a wipe or a mission seam and is discarded)
+    if (khsl_esc_t >= 0.0f && khsl_now - khsl_esc_t < 5.0f) {
+        const float khsl_ms = (khsl_now - khsl_esc_t) * 1000.0f;
+        const uint32_t khsl_fr = g_topo_cycles >= khsl_esc_cycle
+            ? static_cast<uint32_t>(g_topo_cycles - khsl_esc_cycle) : 0u;
+        g_band_esc_lands++;
+        g_band_esc_land_ms = khsl_ms;
+        g_band_esc_land_ms_sum += khsl_ms;
+        if (khsl_ms > g_band_esc_land_ms_max) g_band_esc_land_ms_max = khsl_ms;
+        g_band_esc_land_fr = khsl_fr;
+        if (khsl_fr > g_band_esc_land_fr_max) g_band_esc_land_fr_max = khsl_fr;
+        float khsl_cdx = -1.0f;
+        if (khsl_okn) {
+            const float khsl_dx = khsl_cn[0] - g_ls.cam[0];
+            const float khsl_dy = khsl_cn[1] - g_ls.cam[1];
+            const float khsl_dz = khsl_cn[2] - g_ls.cam[2];
+            const float khsl_d = sqrtf(khsl_dx * khsl_dx + khsl_dy * khsl_dy + khsl_dz * khsl_dz);
+            if (khsl_d == khsl_d && khsl_d < 1.0e6f) khsl_cdx = khsl_d;
+        }
+        g_band_esc_land_cdx = khsl_cdx;
+        if (khsl_cdx > g_band_esc_land_cdx_max) g_band_esc_land_cdx_max = khsl_cdx;
+        if (ffr_armed()) {
+            FfrRecord& khsl_r = ffr_head();
+            khsl_r.band_esc_land_fr = static_cast<int16_t>(khsl_fr > 0x7FFEu ? 0x7FFE : static_cast<int>(khsl_fr));
+            khsl_r.band_esc_land_cdx_m = khsl_cdx;
+        }
+    }
+}
+
 inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off, uint32_t nf) {
     if (!g_ro.cycle_pv_valid || !g_ls.atlas_tex) { g_ls.band_bail_pv++; return; }
     if (off + 20 > nf) { g_ls.band_bail_off++; return; }   // need matrix + border
@@ -34086,6 +36673,10 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
                                border[1] > border[0] &&
                                khbd_d > khbd_k * (border[1] - border[0]);
         if (khbd_over) g_ls.band_budget_escapes++;
+        if (khbd_over && b.esc_t < 0.0f) {   // 26540: stamp the request
+            b.esc_t = now;
+            b.esc_cycle = g_topo_cycles;
+        }
         // ==================================================================
         // 26458 THE LAYOUT-CHANGE ESCAPE (mode 251 disables; lane
         // bandLayoutEscapes). The 26419 closure of the mixed-layout table
@@ -34117,10 +36708,18 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
                 fabsf(border[1] - b.border[1]) > 0.02f * khly_w) {
                 khly_over = true;
                 g_ls.band_layout_escapes++;
+                if (b.esc_t < 0.0f) { b.esc_t = now; b.esc_cycle = g_topo_cycles; }   // 26540
             }
         }
         const bool near_band = border[0] < 10.0f || khbd_over || khly_over;
-        const float min_interval = near_band ? 0.05f : (grid_turned ? 0.10f : 0.25f);
+        // 26550 KH_BAND_ALL_NEAR (mode 338, opt-in): every tier takes the
+        // near cadence - the staleness A/B (ledger at KH_BUILD_TAG). A
+        // staleness offset shrinks ~5x under this arm; a registration
+        // offset does not move. Engagement lane below; mode 0 identical.
+        const bool khfc_all = g_dbg_mode.load(std::memory_order_relaxed) == 338;
+        if (khfc_all && !near_band) g_band_cadence_forced++;
+        const float min_interval = (near_band || khfc_all)
+                                 ? 0.05f : (grid_turned ? 0.10f : 0.25f);
 
         // ==================================================================
         // 26377 MODE 195 = THE TRANSLATION ESCAPE, ARMED ONLY. Ledger at
@@ -34375,6 +36974,7 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
 
                 if (khdf_p < 0 || !g_band_pool[khdf_p].tex) {
                     g_band_stage_pool_miss++;
+                    g_band_pool_miss_t = now;   // 26563: pool pressure clock
                     // 26396 A MISS FALLS THROUGH TO THE IMMEDIATE CAPTURE
                     // INSTEAD OF DROPPING THE RESEAL. Full ledger below the
                     // pool constant. In one line: mode 50 removes the delay,
@@ -34386,14 +36986,68 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
                     // pool starves and nowhere else.
                     // 214 restores the drop.
                     if (g_dbg_mode.load(std::memory_order_relaxed) != 214) {
-                        khdf_staged = false;   // -> the immediate path below
-                        g_band_stage_pool_fall++;
+                        // 26564: one fall-through per flush (347 = uncapped).
+                        const bool khfc_un =
+                            g_dbg_mode.load(std::memory_order_relaxed) == 347;
+                        if (khfc_un || g_band_fall_flush != g_stats.flushes) {
+                            g_band_fall_flush = g_stats.flushes;
+                            khdf_staged = false;   // -> the immediate path below
+                            g_band_stage_pool_fall++;
+                        } else {
+                            g_band_stage_pool_cap++;   // drop: old seal serves,
+                        }                              // next sweep retries
                     }
                 } else {
                     g_band_pool[khdf_p].busy = true;
                     b.stage_pool = khdf_p;
                     memcpy(b.stage_sm, sm, sizeof(b.stage_sm));
                     memcpy(b.stage_border, border, sizeof(b.stage_border));
+                    // 26545: hold the CAPTURE-time view for the mode-335 pairing.
+                    b.stage_view_ok = false;
+                    b.stage_pair_ok = false;   // 26561: fresh stage, fresh pair
+                    b.stage_first_ok = false;   // 26570: fresh stage
+                    {
+                        // 26555: staged seals are born from the other
+                        // source too (the commit welds stage_view into
+                        // vcol, so birth is the whole pairing).
+                        // 26557: staged seals born on the proven camera too.
+                        const bool khip_s = g_dbg_mode.load(std::memory_order_relaxed) == 345 &&
+                            g_inj_view_ms != 0 &&
+                            steady_now_ms() - g_inj_view_ms < 50;
+                        const bool khav_s = g_dbg_mode.load(std::memory_order_relaxed) == 343 &&
+                            g_ls.alt_view_valid && g_ls.alt_view_time >= 0.0f &&
+                            now - g_ls.alt_view_time < 0.05f;
+                        const bool khsv_fvf = g_ls.frame_view_valid &&
+                            g_ls.frame_view_time >= 0.0f &&
+                            now - g_ls.frame_view_time < 0.05f;
+                        if (khip_s) {
+                            for (int khsv_c = 0; khsv_c < 3; ++khsv_c)
+                                for (int khsv_r = 0; khsv_r < 4; ++khsv_r)
+                                    b.stage_view[khsv_c * 4 + khsv_r] =
+                                        g_inj_view[khsv_r * 4 + khsv_c];
+                            b.stage_view_ok = true;
+                            g_band_inj_pair++;
+                        } else if (khav_s) {
+                            for (int khsv_c = 0; khsv_c < 3; ++khsv_c)
+                                for (int khsv_r = 0; khsv_r < 4; ++khsv_r)
+                                    b.stage_view[khsv_c * 4 + khsv_r] =
+                                        g_ls.alt_view[khsv_r * 4 + khsv_c];
+                            b.stage_view_ok = true;
+                            g_band_prov_alt++;
+                        } else if (khsv_fvf) {
+                            for (int khsv_c = 0; khsv_c < 3; ++khsv_c)
+                                for (int khsv_r = 0; khsv_r < 4; ++khsv_r)
+                                    b.stage_view[khsv_c * 4 + khsv_r] =
+                                        g_ls.frame_view[khsv_r * 4 + khsv_c];
+                            b.stage_view_ok = true;
+                        } else if (g_ro.cycle_pv_valid) {
+                            for (int khsv_c = 0; khsv_c < 3; ++khsv_c)
+                                for (int khsv_r = 0; khsv_r < 4; ++khsv_r)
+                                    b.stage_view[khsv_c * 4 + khsv_r] =
+                                        g_ro.cycle_pv.view[khsv_r][khsv_c];
+                            b.stage_view_ok = true;
+                        }
+                    }
                     b.stage_since = now;
                     b.stage_valid = true;
                     b.last_time = now;   // throttle as before; a drop resets it
@@ -34457,18 +37111,68 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
         const bool fv = g_ls.frame_view_valid && g_ls.frame_view_time >= 0.0f &&
                         (khsv_old || khsv_anch) &&
                         now - g_ls.frame_view_time < 0.05f;
+        // 26552 ORDER CENSUS: the frame view's age at THIS capture. 0-4 ms
+        // = the view uploaded this frame BEFORE the resolve (the provisional
+        // is frame-true); 10-16 ms = the previous frame's upload (the 26177
+        // deferred-view belief holds). Ledger at KH_BUILD_TAG.
+        if (fv) {
+            const float khoc_ms = (now - g_ls.frame_view_time) * 1000.0f;
+            g_band_cap_fv_age_ms = khoc_ms;
+            g_band_cap_fv_age_sum += khoc_ms;
+            g_band_cap_fv_age_n++;
+            if (khoc_ms > g_band_cap_fv_age_max_ms) g_band_cap_fv_age_max_ms = khoc_ms;
+        }
         const bool khsv_brg = !fv && khsv_177 &&
                               g_ro.cycle_pv_valid && !g_ro.cycle_pv_stale;
 
+        // 26547: a foreign frame view demotes the immediate seal to the cycle
+        // latch (never a foreign camera into a seal).
+        const bool khsv_nat = !fv || kh_band_view_native(g_ls.frame_view, true);
+        // 26555 KH_BAND_ALT_PROVISIONAL (mode 342 reverts): the seal is
+        // BORN from the other source - the render-true one by the 26554
+        // flip's field verdict - instead of repaired toward it later.
+        // 26557 KH_BAND_INJ_PAIR (mode 344 reverts; ledger at KH_BUILD_TAG):
+        // the sampling matrix is camera-relative and near-constant, so the
+        // paired camera IS the shadow position - and the injection view is
+        // the proven main camera, pixel-registered every frame. Seals born
+        // on it are COMPLETE AT CAPTURE; the completion machinery never runs.
+        // 26558: DEMOTED to opt-in (mode 345) - field-falsified at 26557
+        // (constant 3-9 texel offset; the injection camera is not the
+        // consumer's reconstruction camera, gap ~0.7-2.0 m standing).
+        const bool khip_on = g_dbg_mode.load(std::memory_order_relaxed) == 345 &&
+                             g_inj_view_ms != 0 &&
+                             steady_now_ms() - g_inj_view_ms < 50;
+        if (khip_on) g_band_inj_pair++; else g_band_inj_pair_miss++;
+        // 26556: alt-birth DEMOTED to opt-in (mode 343) - the global latch
+        // paired bands with random other cascades (field, 48.8 m class).
+        const bool khav_on = g_dbg_mode.load(std::memory_order_relaxed) == 343 &&
+                             g_ls.alt_view_valid && g_ls.alt_view_time >= 0.0f &&
+                             now - g_ls.alt_view_time < 0.05f;
+        if (khav_on) g_band_prov_alt++;
+        else if (fv) g_band_prov_alt_miss++;
+        float khsl_old[12];   // 26540: the vcol being replaced
+        memcpy(khsl_old, b.vcol, sizeof(khsl_old));
         for (int c = 0; c < 3; ++c) {
             for (int r = 0; r < 4; ++r) {
-                b.vcol[c * 4 + r] = fv ? g_ls.frame_view[r * 4 + c]
+                b.vcol[c * 4 + r] = khip_on ? g_inj_view[r * 4 + c]   // 26557
+                                  : khav_on ? g_ls.alt_view[r * 4 + c]
+                                  : (fv && khsv_nat) ? g_ls.frame_view[r * 4 + c]
                                        : g_ro.cycle_pv.view[r][c];
             }
         }
+        kh_seal_land_note(slot, now, b.esc_t, b.esc_cycle, khsl_old, b.vcol);   // 26540
+        b.esc_t = -1.0f;
 
-        b.pending_view = khsv_old ? true : !(fv || khsv_brg);   // 26177 / 26179
-        b.vcol_bridge  = khsv_old ? !fv : (!fv && !khsv_brg);
+        // 26545 mode 335: a seal taken WITH the frame view keeps it - the next
+        // publish does not replace it (the completion census showed that
+        // replacement carrying up to 11 deg of rotation under motion).
+        b.pending_view = khip_on ? false   // 26557: complete at capture
+                       : (g_dbg_mode.load(std::memory_order_relaxed) == 335 && fv)
+                       ? false
+                       : (khsv_old ? true : !(fv || khsv_brg));   // 26177 / 26179
+        b.vcol_bridge  = (khip_on || khav_on) ? false   // 26557 / 26555
+                       : (khsv_old ? !fv : (!fv && !khsv_brg));
+        if (!b.pending_view) kh_weld_note(b.vcol, 7.0f);   // 26563: kept at birth
 
         if (fv) g_band_seal_same++;
         else if (khsv_brg) g_band_seal_bridge++;
@@ -35103,6 +37807,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         g_sun2_map_valid = false;   // 26444
         g_sun3_map_valid = false;   // 26454
         g_sun4_map_valid = false;   // 26454
+        g_sun5_map_valid = false;   // 26620
         return false;
     }
     // NOTE: validity is NOT cleared here - the previous frame's map stays
@@ -35430,6 +38135,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             g_sun2_map_valid = false;
             g_sun3_map_valid = false;   // 26454
             g_sun4_map_valid = false;   // 26454
+            g_sun5_map_valid = false;   // 26620
             return;
         }
 
@@ -35439,6 +38145,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             g_sun2_map_valid = false;
             g_sun3_map_valid = false;
             g_sun4_map_valid = false;
+            g_sun5_map_valid = false;   // 26620
             return;
         }
         // 26454 per-band enable: a mode stands ONE band down (239 hero /
@@ -35448,14 +38155,19 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         // way, per band, non-fatally.
         const bool khsh_core = g_res.vs_sundepth && g_res.layout_sundepth &&
                                g_res.sun_instance_vb;
-        const bool khsh_ok0 = khsh_core && khsh_dm != 239 && ensure_sun_depth2(khsh_dev);
-        const bool khsh_ok1 = khsh_core && khsh_dm != 242 && ensure_sun_depth3(khsh_dev);
-        const bool khsh_ok2 = khsh_core && khsh_dm != 244 && ensure_sun_depth4(khsh_dev);
+        const bool khsh_ok0 = khsh_core && khsh_dm != 239 && khsh_dm != 366 && ensure_sun_depth2(khsh_dev);   // 26588 era arm
+        const bool khsh_ok1 = khsh_core && khsh_dm != 242 && khsh_dm != 366 && ensure_sun_depth3(khsh_dev);   // 26588 era arm
+        const bool khsh_ok2 = khsh_core && khsh_dm != 244 && khsh_dm != 366 && ensure_sun_depth4(khsh_dev);   // 26588 era arm
+        const bool khsh_ok3 = khsh_core && khsh_dm != 389 && khsh_dm != 366 && ensure_sun_depth5(khsh_dev);   // 26620 FAR band (389 stands it down)
+        // 26575: the moment pyramids + convert pair. Non-fatal: a failed
+        // ensure leaves every band classic (sun_pf flags stay false).
+        const bool khsh_pf_ok = ensure_sun_pf(khsh_dev);
         khsh_dev->Release();
         if (!khsh_ok0) g_sun2_map_valid = false;
         if (!khsh_ok1) g_sun3_map_valid = false;
         if (!khsh_ok2) g_sun4_map_valid = false;
-        if (!khsh_ok0 && !khsh_ok1 && !khsh_ok2) return;
+        if (!khsh_ok3) g_sun5_map_valid = false;   // 26620
+        if (!khsh_ok0 && !khsh_ok1 && !khsh_ok2 && !khsh_ok3) return;
 
         // Sun basis - same construction as the union fit, ONCE for all
         // bands (they share the sun; only the footprint differs).
@@ -35474,6 +38186,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             g_sun2_map_valid = false;
             g_sun3_map_valid = false;
             g_sun4_map_valid = false;
+            g_sun5_map_valid = false;   // 26620
             return;
         }
         khsh_r3[0] /= khsh_rl; khsh_r3[1] /= khsh_rl; khsh_r3[2] /= khsh_rl;
@@ -35543,8 +38256,14 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                             float (&khsh_out_vp)[4][4], float& khsh_out_bias,
                             float& khsh_out_hd, bool& khsh_out_valid,
                             uint64_t& khsh_out_renders, uint64_t& khsh_out_casters,
-                            float& khsh_out_reach) -> void {   // 26537 KH_BAND_SUN_REACH
+                            float& khsh_out_reach,   // 26537 KH_BAND_SUN_REACH
+                            ID3D11ShaderResourceView* khsh_dep_srv,   // 26575
+                            ID3D11RenderTargetView* khsh_pf_rtv,
+                            ID3D11ShaderResourceView* khsh_pf_srv,
+                            UINT khsh_pf_size, int khsh_pf_idx,   // 26578
+                            bool& khsh_out_pf) -> void {
             khsh_out_valid = false;   // proven true only by a completed render
+            khsh_out_pf = false;      // 26575: proven true only by a completed convert
             double khsh_dctr[3] = { 0.0, 0.0, 0.0 };   // 26465: double-snap carry
             bool   khsh_dsnap = false;
 
@@ -35866,22 +38585,93 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                     // fit is bit-identical to 26536. Above it = the arm fired.
                     khsh_out_reach = khsh_fwd;
                     if (khsh_fwd > khsh_dep) g_sun_band_reach_takes++;
+                    // 26582: the convert is RELOCATED to kh_sun_pf_convert
+                    // (called at the mesh-bind region, both twins; ledger at
+                    // KH_BUILD_TAG). At THIS site the t0 SRV bind silently
+                    // delivered a foreign kilometre-scale texture (CPU-proven:
+                    // pyramid mu 2630-2752) while the RTV and shader sets took.
+                    // The band renders here; freshness is all this site marks.
+                    (void)khsh_pf_ok; (void)khsh_dep_srv; (void)khsh_pf_rtv;
+                    (void)khsh_pf_srv; (void)khsh_pf_size; (void)khsh_pf_idx;
+                    khsh_out_pf = khsh_out_valid;   // fresh map => convert due
                 }
             }
         };
 
+        // ==================================================================
+        // KH_SUN_LADDER_SCALE - 26611 (mode 382 reverts to the fixed 8/32 m
+        // footprints; at shadowVisibility 200 the scaled defaults are
+        // ALREADY bit-exact, which is the whole validated corpus). OPERATOR
+        // FIELD REPORT: the tier switches sit at the same distances whatever
+        // the shadow view distance says, all three land within a few dozen
+        // metres, and quality collapses long before the range edge. That is
+        // this ladder read back: 2/8/32 were BUILD CONSTANTS while only the
+        // union's far texel followed the slider, so raising the range moved
+        // the cliff and never the rungs. THE FIX: the MID and OUTER half-
+        // extents (and their depth windows, keeping the calibrated 6x
+        // ratio) scale by s = clamp(range/200, 1, 5) - switch distances now
+        // scale linearly with the game's own shadowVisibility exactly as
+        // engine cascade splits do, and each band's texel/bias/snap follow
+        // through khsh_one's own parameterization (range 300: mid 12 m @
+        // ~6 mm, outer 48 m @ ~24 mm). The HERO stays fixed at 2 m @ 1 mm -
+        // the near field is a calibration constant, not a range function.
+        // The 26445 governing rule holds in its own terms: quality remains
+        // a function of DISTANCE AND THE SETTING only - s moves only when
+        // the operator moves the slider, so the 26539 sawtooth law (texel
+        // constant per session) still covers these bands; the 26539 ledger
+        // text naming khsh_half a build constant is amended beside the
+        // latch. Upper clamp 5 caps the outer band at 160 m @ 80 mm, past
+        // which its texel would be coarser than the union's own range
+        // price; lower clamp 1 keeps small ranges from collapsing mid into
+        // the hero. khsr_rad already carries the 8-1000 clamp; under 241
+        // (caster-anchored revert) s pins to 1 so the historic revert
+        // stays whole. ACCEPTANCE: sunMid/OutHalfDiag read 8*s / 32*s
+        // (12 / 48 at range 300), sunLadderScale carries s verbatim, and
+        // the operator's switch distances move with the slider.
+        // ==================================================================
+        float khls_s = 1.0f;
+        if (khsh_dm != 241 && khsh_dm != 382) {
+            khls_s = khsr_rad / 200.0f;
+            if (khls_s < 1.0f) khls_s = 1.0f;
+            if (khls_s > 5.0f) khls_s = 5.0f;
+        }
+        g_sun_ladder_scale = khls_s;
         if (khsh_ok0) khsh_one(KH_SUN_HERO_HALF, KH_SUN_HERO_DEPTH, KH_SUN_HERO_SIZE,
                                g_res.sun2_dsv, g_sun2_map_vp, g_sun2_map_bias,
                                g_sun2_half_diag, g_sun2_map_valid,
-                               g_sun2_renders, g_sun2_casters, g_sun_band_reach[0]);
-        if (khsh_ok1) khsh_one(KH_SUN_MID_HALF, KH_SUN_MID_DEPTH, KH_SUN_MID_SIZE,
+                               g_sun2_renders, g_sun2_casters, g_sun_band_reach[0],
+                               g_res.sun2_srv, g_res.sun_pf_rtv[0],
+                               g_res.sun_pf_srv[0], KH_SUN_HERO_SIZE / 2u, 0,
+                               g_sun_pf_valid[0]);
+        if (khsh_ok1) khsh_one(KH_SUN_MID_HALF * khls_s, KH_SUN_MID_DEPTH * khls_s,
+                               KH_SUN_MID_SIZE,
                                g_res.sun3_dsv, g_sun3_map_vp, g_sun3_map_bias,
                                g_sun3_half_diag, g_sun3_map_valid,
-                               g_sun3_renders, g_sun3_casters, g_sun_band_reach[1]);
-        if (khsh_ok2) khsh_one(KH_SUN_OUT_HALF, KH_SUN_OUT_DEPTH, KH_SUN_OUT_SIZE,
+                               g_sun3_renders, g_sun3_casters, g_sun_band_reach[1],
+                               g_res.sun3_srv, g_res.sun_pf_rtv[1],
+                               g_res.sun_pf_srv[1], KH_SUN_MID_SIZE / 2u, 1,
+                               g_sun_pf_valid[1]);
+        if (khsh_ok2) khsh_one(KH_SUN_OUT_HALF * khls_s, KH_SUN_OUT_DEPTH * khls_s,
+                               KH_SUN_OUT_SIZE,
                                g_res.sun4_dsv, g_sun4_map_vp, g_sun4_map_bias,
                                g_sun4_half_diag, g_sun4_map_valid,
-                               g_sun4_renders, g_sun4_casters, g_sun_band_reach[2]);
+                               g_sun4_renders, g_sun4_casters, g_sun_band_reach[2],
+                               g_res.sun4_srv, g_res.sun_pf_rtv[2],
+                               g_res.sun_pf_srv[2], KH_SUN_OUT_SIZE / 2u, 2,
+                               g_sun_pf_valid[2]);
+        // 26620 KH_SUN_FAR_BAND: half = the range ITSELF (khsr_rad, no
+        // ladder scale - the window IS the range), depth = 6x half. No
+        // moment pyramid (the far texel is already the minified scale the
+        // pyramids exist to reach; nulls keep the convert inert - pf
+        // index 3 is never read by kh_sun_pf_convert, which walks 0..2).
+        bool khsh_far_pf = false;
+        if (khsh_ok3) khsh_one(khsr_rad, khsr_rad * 6.0f, KH_SUN_FAR_SIZE,
+                               g_res.sun5_dsv, g_sun5_map_vp, g_sun5_map_bias,
+                               g_sun5_half_diag, g_sun5_map_valid,
+                               g_sun5_renders, g_sun5_casters, g_sun_band_reach[3],
+                               g_res.sun5_srv, nullptr,
+                               nullptr, KH_SUN_FAR_SIZE / 2u, 3,
+                               khsh_far_pf);
         // 26458 KH_SUN_ANCHOR: all three band matrices above were built
         // about this flush's anchor - pair them with it for the fills.
         memcpy(g_sun_cam_anchor, g_sun_anchor_now, sizeof(g_sun_cam_anchor));
@@ -36128,10 +38918,15 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     // operator's step, its cadence, and its 'only when far enough away to see
     // the low-quality shadow' precondition, all three.
     // WHY THE CAMERA BANDS ARE IMMUNE and this is union-only: khsh_one's
-    // lateral extent is khsh_half * 1.02 with khsh_half a BUILD CONSTANT
-    // (2 / 8 / 32 m), so its texel never changes and its snapped origin is
-    // sufficient. The union is the only fit whose extent is data-dependent,
-    // and 26505's caster growth is what made it camera-dependent.
+    // lateral extent is khsh_half * 1.02 with khsh_half a pure function of
+    // the range SETTING (26611 KH_SUN_LADDER_SCALE: 2 fixed, 8/32 scaled by
+    // clamp(range/200,1,5) - a build constant per session unless the
+    // operator moves the slider), so its texel never changes under camera
+    // motion and its snapped origin is sufficient. The union is the only
+    // fit whose extent is data-dependent, and 26505's caster growth is what
+    // made it camera-dependent (26611 KH_SUN_UNION_LAT_FIT below re-prices
+    // its LATERAL radius in the sun plane; this latch still owns the depth
+    // radius and the lateral twin latch follows the same law).
     // THE FIX IS TO LATCH THE RADIUS, NOT TO RESIZE THE WINDOW. Quantising R
     // was considered and rejected: the drift is 1e-3 while a point at 400 m
     // needs R stable to ~2.4e-4 to stay inside half a texel, so any quantum
@@ -36175,8 +38970,10 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     const float khsf_rad = khsf_rad_use;
     const bool  khsf_rev = g_dbg_mode.load(std::memory_order_relaxed) == 224;
     const float R_dep = khsf_rad + 1.0f;                        // depth guard: unchanged
-    const float R = khsf_rev ? R_dep                            // 224 = the old single number
-                             : (khsf_rad > 1.0e-4f ? khsf_rad * 1.02f : R_dep);
+    // 26611 KH_SUN_UNION_LAT_FIT: R is refined (only ever downward) after
+    // the sun basis exists below - it needs the sun plane to measure in.
+    float R = khsf_rev ? R_dep                                  // 224 = the old single number
+                       : (khsf_rad > 1.0e-4f ? khsf_rad * 1.02f : R_dep);
 
     // Ortho sun basis (row-vector convention, like every matrix here).
     // The light LOOKS opposite the "toward the light" direction.
@@ -36199,6 +38996,119 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         f[2] * r3[0] - f[0] * r3[2],
         f[0] * r3[1] - f[1] * r3[0],
     };
+
+    // ==========================================================================
+    // KH_SUN_UNION_LAT_FIT - 26611 (mode 383 reverts to the enclosing-sphere
+    // price, bit-exactly). OPERATOR FIELD REPORT: quality near the shadow view
+    // distance is 'insanely low'. dump2 names the author: sunUnionTexelM
+    // 0.645 m at sunMapHalfDiag 1165 under a ~300-400 m shadowVisibility - the
+    // union texel should be range-priced (~0.15-0.2 m) and is 4x coarser.
+    // THE MECHANISM: 26505 grows the camera window's ENGINE-AXIS box to
+    // enclose every eligible caster, and R (the lateral extent, hence the
+    // texel) is the enclosing sphere of that box - so ONE eligible far caster
+    // prices EVERY union-served fragment's texel at its full euclidean
+    // distance. But eligibility past the range is the 26036 shadow-reach
+    // test, whose own premise is that a caster's long shadow shares the
+    // caster's SUN-PLANE footprint with the ground it darkens: a far caster
+    // is only eligible when it is approximately DOWN-SUN, which is exactly
+    // when its lateral (sun-plane) offset from the window is small. The
+    // engine-axis sphere charges the DOWN-SUN distance to the LATERAL
+    // extent - a category error 26036's own ledger warned about ('including
+    // such a caster does NOT grow the map fit') and that 26505's growth
+    // later invalidated unnoticed. THE FIX prices the lateral extent in the
+    // plane it lives in: R becomes 1.02x the held sun-plane lateral
+    // requirement - the camera window's own contribution (its lateral
+    // offset from the committed centre plus the range, the 26449
+    // constant-R design about the moved centre) unioned with each eligible
+    // caster's perpendicular offset from the sun axis through the centre
+    // plus its enclosing radius, computed PER CASTER and never from the
+    // grown box's corners (an engine-axis box union manufactures phantom
+    // corners under diagonal sun that would re-balloon the very term this
+    // fix removes). Capped at the sphere radius so it can never price
+    // coarser than 26610 did. DEPTH IS UNTOUCHED: R_dep still rides the
+    // 26539 held sphere, so the eye placement, the [1, 2R_dep+1] window,
+    // the 26505 caster enclosure in depth and every depth-domain constant
+    // are byte-identical - lateral-only R changes are legal by 26422's own
+    // contract (KH_SUN_FIT_SPLIT). COVERAGE IS BY CONSTRUCTION, NOT
+    // ASSUMPTION: every eligible caster's silhouette lands inside the ortho
+    // because the requirement includes its own lateral offset + radius; a
+    // cross-sun far caster that would demand more lateral than this was
+    // never eligible (khsr_in fails it at the eligibility gate). THE LATCH
+    // RIDES ALONG: the lateral requirement is camera-cell- and caster-
+    // dependent exactly as the sphere was, so it takes the 26539 policy
+    // verbatim on its own held value (10% slack on acquisition, reuse
+    // while >= need and <= 1.25x it; mode 329 stands BOTH latches down
+    // together - one sawtooth law, two radii). The 26537 texel snap
+    // downstream consumes R unchanged and now snaps to the finer grid.
+    // PRE-REGISTERED ACCEPTANCE (rule 1.22): (a) in the operator's same
+    // scene sunUnionTexelM falls to ~2*1.02*1.10*max(range, worst caster
+    // lateral)/4096 (~0.17 m at range 300) with sunUnionLatHolds dominating
+    // sunUnionLatRelatches under a camera walk; (b) the far down-sun
+    // caster's long shadow STILL paints while standing in it (the 26036
+    // field case) - if it clips or vanishes, the uv-footprint premise
+    // failed and 383 is the stand-down; (c) sunUnionRadHeld reads unchanged
+    // (the depth side is untouched); (d) 383 restores the 0.645 m-class
+    // texel alone - the one-switch A/B (rule 1.11).
+    // ==========================================================================
+    if (g_sun_map_cam_anchor && !khsf_rev &&
+        g_dbg_mode.load(std::memory_order_relaxed) != 383) {
+        const float khsl_rng = fminf(fmaxf(
+            g_sun_range.load(std::memory_order_relaxed), 8.0f), 1000.0f);
+        // Camera window term: its cell centre's lateral offset from the
+        // committed (possibly growth-moved) centre, plus the range - the
+        // enclosing-sphere bound of the camera box about its own centre.
+        const float khsl_cc[3] = {
+            floorf(cam_e[0] * 0.5f) * 2.0f + 1.0f,
+            floorf(cam_e[1] * 0.5f) * 2.0f + 1.0f,
+            floorf(cam_e[2] * 0.5f) * 2.0f + 1.0f,
+        };
+        const float khsl_cd[3] = { khsl_cc[0] - ctr[0], khsl_cc[1] - ctr[1],
+                                   khsl_cc[2] - ctr[2] };
+        const float khsl_cs = khsl_cd[0] * sun[0] + khsl_cd[1] * sun[1] +
+                              khsl_cd[2] * sun[2];
+        const float khsl_cl2 = khsl_cd[0] * khsl_cd[0] + khsl_cd[1] * khsl_cd[1] +
+                               khsl_cd[2] * khsl_cd[2] - khsl_cs * khsl_cs;
+        float khsl_need = (khsl_cl2 > 0.0f ? sqrtf(khsl_cl2) : 0.0f) + khsl_rng;
+
+        for (const auto& khsl_c : casters) {
+            const float khsl_ce[3] = { khsl_c.pos[0], khsl_c.pos[2], khsl_c.pos[1] };
+            const float khsl_hl[3] = { khsl_c.size[0] * 0.5f, khsl_c.size[2] * 0.5f,
+                                       khsl_c.size[1] * 0.5f };
+            float khsl_he[3];
+            kh_rot_half_extents(khsl_hl, khsl_c.rot, khsl_c.rotated, khsl_he);
+            const float khsl_er = sqrtf(khsl_he[0] * khsl_he[0] +
+                                        khsl_he[1] * khsl_he[1] +
+                                        khsl_he[2] * khsl_he[2]);
+            const float khsl_d[3] = { khsl_ce[0] - ctr[0], khsl_ce[1] - ctr[1],
+                                      khsl_ce[2] - ctr[2] };
+            const float khsl_ds = khsl_d[0] * sun[0] + khsl_d[1] * sun[1] +
+                                  khsl_d[2] * sun[2];
+            const float khsl_l2 = khsl_d[0] * khsl_d[0] + khsl_d[1] * khsl_d[1] +
+                                  khsl_d[2] * khsl_d[2] - khsl_ds * khsl_ds;
+            const float khsl_lat = (khsl_l2 > 0.0f ? sqrtf(khsl_l2) : 0.0f) + khsl_er;
+            if (khsl_lat > khsl_need) khsl_need = khsl_lat;
+        }
+
+        if (khsl_need > khsf_rad) khsl_need = khsf_rad;   // never coarser than the sphere
+        float khsl_use = khsl_need;
+        if (g_dbg_mode.load(std::memory_order_relaxed) != 329) {
+            constexpr float KH_SUN_UNION_L_SLACK = 1.10f;   // the 26539 policy verbatim
+            constexpr float KH_SUN_UNION_L_DROP  = 1.25f;
+            if (g_sun_union_lat_held >= khsl_need &&
+                g_sun_union_lat_held <= khsl_need * KH_SUN_UNION_L_DROP) {
+                khsl_use = g_sun_union_lat_held;
+                g_sun_union_lat_holds++;
+            } else {
+                g_sun_union_lat_held = khsl_need * KH_SUN_UNION_L_SLACK;
+                khsl_use = g_sun_union_lat_held;
+                g_sun_union_lat_relatches++;
+            }
+        }
+        // Apply only when it genuinely refines - the latch slack can push
+        // the held value past the sphere in dense-lateral scenes, where the
+        // sphere price is already the honest one.
+        if (khsl_use > 1.0e-4f && khsl_use * 1.02f < R) R = khsl_use * 1.02f;
+    }
 
     // ==========================================================================
     // KH_UNION_TEXEL_SNAP - 26537 (mode 327 reverts, bit-exactly). THE UNION IS
@@ -38438,10 +41348,10 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     // range - the exact defect class the 26444 hero left in
     // StateBackup (see its 26454 ledger). Array size IS the save
     // range here too: capture, restore, scan and release all follow.
-    ID3D11ShaderResourceView* old_ps_srvs[29] = {};   // 26458: +t28 (mirror stencil)
-    ID3D11ShaderResourceView* old_vs_srvs[29] = {};
-    ctx->PSGetShaderResources(0, 29, old_ps_srvs);
-    ctx->VSGetShaderResources(0, 29, old_vs_srvs);
+    ID3D11ShaderResourceView* old_ps_srvs[33] = {};   // 26458: +t28; 26620: +t32 (far band; t29-31 unbound on this path but saved for width parity)
+    ID3D11ShaderResourceView* old_vs_srvs[33] = {};   // 26620: widened with the PS table
+    ctx->PSGetShaderResources(0, 33, old_ps_srvs);
+    ctx->VSGetShaderResources(0, 33, old_vs_srvs);
 
     // Census (round-8 conviction): is the engine's mask RESOURCE
     // SRV-bound at our interposition point?
@@ -38452,9 +41362,9 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         g_mask.engine_mask_rtv->GetResource(&khf_mask_res);
 
         if (khf_mask_res) {
-            for (int si = 0; si < 58; ++si) {   // 26458: 29 slots per stage
-                ID3D11ShaderResourceView* sv = si < 29 ? old_ps_srvs[si]
-                                                       : old_vs_srvs[si - 29];
+            for (int si = 0; si < 66; ++si) {   // 26458/26620: 33 slots per stage
+                ID3D11ShaderResourceView* sv = si < 33 ? old_ps_srvs[si]
+                                                       : old_vs_srvs[si - 33];
                 if (!sv) continue;
                 ID3D11Resource* sr = nullptr;
                 sv->GetResource(&sr);
@@ -39088,6 +41998,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     if (sun_map && g_sun2_map_valid && g_res.sun2_srv) ctx->PSSetShaderResources(25, 1, &g_res.sun2_srv);   // 26444
     if (sun_map && g_sun3_map_valid && g_res.sun3_srv) ctx->PSSetShaderResources(26, 1, &g_res.sun3_srv);   // 26454
     if (sun_map && g_sun4_map_valid && g_res.sun4_srv) ctx->PSSetShaderResources(27, 1, &g_res.sun4_srv);   // 26454
+    if (sun_map && g_sun5_map_valid && g_res.sun5_srv) ctx->PSSetShaderResources(32, 1, &g_res.sun5_srv);   // 26620
     if (g_res.thm_srv) ctx->PSSetShaderResources(10, 1, &g_res.thm_srv);   // terrain snap
                                                                            // (full-table restore covers it)
 
@@ -39451,6 +42362,14 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
                 cbd.sun_meta4[2] = g_sun4_map_bias;
                 cbd.sun_meta4[3] = g_sun4_half_diag;
             }
+            if (g_sun5_map_valid) {   // 26620 FAR band
+                kh_sun_rebase_vp(&cbd.sun_vp5[0][0], &g_sun5_map_vp[0][0],
+                                 g_sun_cam_anchor, g_sun_anchor_now);
+                cbd.sun_meta5[0] = 1.0f;
+                cbd.sun_meta5[1] = static_cast<float>(KH_SUN_FAR_SIZE);
+                cbd.sun_meta5[2] = g_sun5_map_bias;
+                cbd.sun_meta5[3] = g_sun5_half_diag;
+            }
             {
                 const int khcc_m = g_dbg_mode.load(std::memory_order_relaxed);
                 cbd.lighting0[1] = khcc_m == 243 ? 21.0f       // 26454: cast chain revert
@@ -39617,8 +42536,8 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     // SRV tables - this runs after the OM restore, so any mask SRV in
     // the captured table is legal to rebind again (the RTV set that
     // nulled it has been reverted). Covers t0/t11 by construction.
-    ctx->PSSetShaderResources(0, 29, old_ps_srvs);   // 26458: covers t25-t28
-    ctx->VSSetShaderResources(0, 29, old_vs_srvs);
+    ctx->PSSetShaderResources(0, 33, old_ps_srvs);   // 26458: covers t25-t28; 26620: +t32
+    ctx->VSSetShaderResources(0, 33, old_vs_srvs);
     ctx->GSSetShader(old_gs, nullptr, 0);
     ctx->HSSetShader(old_hs, nullptr, 0);
     ctx->DSSetShader(old_ds2, nullptr, 0);
@@ -39640,7 +42559,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     KH_SAFE_RELEASE(old_blend);
     KH_SAFE_RELEASE(old_dss);
 
-    for (int s16 = 0; s16 < 29; ++s16) {   // 26458: 29-wide tables
+    for (int s16 = 0; s16 < 33; ++s16) {   // 26458/26620: 33-wide tables
         KH_SAFE_RELEASE(old_ps_srvs[s16]);
         KH_SAFE_RELEASE(old_vs_srvs[s16]);
     }
@@ -51529,6 +54448,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // nearly every frame and would collapse the 5/2 hysteresis to a bare 2.0
     // floor, so the census latches the CLASSIFICATION there instead.
     khr_arb_prev_armed = khr_arb_ungated ? khr_far_phase : khr_far_arb;
+    if (ffr_armed()) ffr_head().arb_on = khr_far_arb ? 1 : 0;   // 26540
 
     // MOTION GUARD-HOLDS: REMOVED (round 10). They compensated the
     // reconstruction guard's snapshot staleness; round 6 retired that
@@ -51687,10 +54607,18 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         }
     }
     // Private sun-depth map for the self term (t11, inside the saved range).
+    kh_sun_pf_convert(ctx);   // 26582: pyramids convert HERE (field-proven binds)
     if (g_sun_map_valid && g_res.sun_srv) ctx->PSSetShaderResources(11, 1, &g_res.sun_srv);
     if (g_sun2_map_valid && g_res.sun2_srv) ctx->PSSetShaderResources(25, 1, &g_res.sun2_srv);   // 26444
     if (g_sun3_map_valid && g_res.sun3_srv) ctx->PSSetShaderResources(26, 1, &g_res.sun3_srv);   // 26454
     if (g_sun4_map_valid && g_res.sun4_srv) ctx->PSSetShaderResources(27, 1, &g_res.sun4_srv);   // 26454
+    if (g_sun5_map_valid && g_res.sun5_srv) ctx->PSSetShaderResources(32, 1, &g_res.sun5_srv);   // 26620 (StateBackup widened to 33)
+    // 26575 moment pyramids (t29-31; StateBackup range widened to 32
+    // this build) + the linear sampler at s1 (save range widened too).
+    if (g_sun2_map_valid && g_sun_pf_valid[0] && g_res.sun_pf_srv[0]) ctx->PSSetShaderResources(29, 1, &g_res.sun_pf_srv[0]);
+    if (g_sun3_map_valid && g_sun_pf_valid[1] && g_res.sun_pf_srv[1]) ctx->PSSetShaderResources(30, 1, &g_res.sun_pf_srv[1]);
+    if (g_sun4_map_valid && g_sun_pf_valid[2] && g_res.sun_pf_srv[2]) ctx->PSSetShaderResources(31, 1, &g_res.sun_pf_srv[2]);
+    if (g_res.samp_pf) ctx->PSSetSamplers(1, 1, &g_res.samp_pf);
     // Analytic terrain heightfield (t10, saved range; see thmParams).
     if (g_thm_valid && g_res.thm_srv) ctx->PSSetShaderResources(10, 1, &g_res.thm_srv);
 
@@ -51794,6 +54722,29 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     if (khr_rebase_on && !khr_vp_substituted)
         kh_jitter_floor_sample(pv.view, pv.projection, cam, 0);
     fill_lighting_frame_cb(khr_cbf);
+    // 26541 KH_SNAP_REPROJECT frame fields (arb PS consumer; every other pass
+    // ignores them). Mode 330 ships the sentinel 0 = the 26540 read.
+    if (g_snap_vp_valid && khr_far_arb &&
+        g_dbg_mode.load(std::memory_order_relaxed) != 330) {
+        memcpy(khr_cbf.snap_vp, g_snap_vp, sizeof(khr_cbf.snap_vp));
+        khr_cbf.snap_meta[0] = g_snap_pair[0];
+        khr_cbf.snap_meta[1] = g_snap_pair[1];
+        khr_cbf.snap_meta[2] = g_snap_vp_lo;
+        khr_cbf.snap_meta[3] = g_snap_vp_hi;
+        khr_cbf.snap_cam[0] = g_snap_cam[0];
+        khr_cbf.snap_cam[1] = g_snap_cam[1];
+        khr_cbf.snap_cam[2] = g_snap_cam[2];
+        // 26542 KH_ARB_FIXED_PULL: 1 = reproject + fixed 0.25 m pull (default),
+        // 2 = reproject + the 26186 need-based pull (mode 331). Ledger at KH_BUILD_TAG.
+        // 26544: the 0.10 m margin IS the default (operator-validated at 26543;
+        // 332 stays whitelisted as an alias). 333 = the 26542/26543 0.25 m margin.
+        khr_cbf.snap_cam[3] = (g_dbg_mode.load(std::memory_order_relaxed) == 331) ? 2.0f
+                            : (g_dbg_mode.load(std::memory_order_relaxed) == 333) ? 1.0f : 3.0f;
+        g_snap_reproj_arms++;
+    } else {
+        khr_cbf.snap_cam[3] = 0.0f;   // the zeroed template already says so; explicit
+        if (khr_far_arb) g_snap_reproj_stands++;
+    }
     {
         bool band_any = false;
         uint8_t khrb_n = 0, khrb_why = 0;   // 26387 receive coverage
@@ -51831,10 +54782,16 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             // slide until the engine settles). Absent beats offset:
             // the receive term stands down for KH_RECEIVE_WARMUP_S after
             // the first capture.
-            if (g_ls.first_capture_time < 0.0f ||
-                effect_time_seconds() - g_ls.first_capture_time < KH_RECEIVE_WARMUP_S) {
-                g_band_warmup_skips++; khrb_why |= 2;
-                continue;
+            // 26566: once per session (mode 349 = re-arm on every wipe).
+            const bool khwu_ra =
+                g_dbg_mode.load(std::memory_order_relaxed) == 349;
+            if (khwu_ra || !g_ls.receive_warmed) {
+                if (g_ls.first_capture_time < 0.0f ||
+                    effect_time_seconds() - g_ls.first_capture_time < KH_RECEIVE_WARMUP_S) {
+                    g_band_warmup_skips++; khrb_why |= 2;
+                    continue;
+                }
+                if (!khwu_ra) g_ls.receive_warmed = true;
             }
 
             // 26179 COLD RECEIVE HEALTH GATE (full ledger at kh_recv_health;
@@ -52108,6 +55065,47 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             }
         }
 
+        // ==================================================================
+        // KH_SUN_RANGE_FROM_BANDS - 26615 (no revert mode: with a healthy
+        // videoOptions mirror the two sources agree and this is inert; with
+        // the dead one it is the repair). THE ENGINE'S OWN CASCADE TABLE IS
+        // THE SHADOW VIEW DISTANCE, LIVE: dump1-26614 reads sunRangeSrc 0 -
+        // the getVideoOptions hashmap reached through the wrapper contains
+        // NO key matching even a case-folded 'shadowvis' substring, so that
+        // mirror has NEVER written and every range consumer ran at the 200
+        // default through two field rounds - while THE SAME DUMP's band
+        // census reads the engine's committed cascade ladder reaching
+        // bandMaxFar 529.986 at the operator's ~500 setting. The engine
+        // tells us its shadow draw distance every frame, through the exact
+        // machinery this file already trusts to mirror its cascade CONTENT;
+        // the deepest committed slot's far plane IS the setting, whatever
+        // path set it (UI, config, script - all land in the split table).
+        // The derivation is therefore PRIMARY and the videoOptions read
+        // demotes to fallback (it writes only while src != 2; see the sqf
+        // mirror). Deadband 0.5% so per-frame split jitter cannot thrash
+        // the downstream latches; validity floor 8 m and a 1e5 ceiling
+        // (consumers carry their own 8-1000 clamp, the 26454 law). A
+        // session with no committed bands (shadows off, sky-only start)
+        // leaves the fallback order standing: videoOptions, then default.
+        // ACCEPTANCE: sunRangeM tracks the operator's setting with
+        // sunRangeSrc 2, sunLadderScale = setting/200, the self-shadow
+        // fade edge at 94-99.5% of the SETTING, and the 26611 ladder's
+        // own acceptance finally live.
+        // ==================================================================
+        {
+            float khsrb_mf = -1.0f;
+            for (int khsrb_i = 0; khsrb_i < 8; ++khsrb_i) {
+                if (g_band_tab_far[khsrb_i] > khsrb_mf) khsrb_mf = g_band_tab_far[khsrb_i];
+            }
+            if (khsrb_mf > 8.0f && khsrb_mf < 1.0e5f && khsrb_mf == khsrb_mf) {
+                const float khsrb_prev = g_sun_range.load(std::memory_order_relaxed);
+                if (!(fabsf(khsrb_mf - khsrb_prev) <= 0.005f * khsrb_prev)) {
+                    g_sun_range.store(khsrb_mf, std::memory_order_relaxed);
+                }
+                g_sun_range_src.store(2, std::memory_order_relaxed);
+            }
+        }
+
         // 26412 THE GAP ARITHMETIC, done in-build rather than left to a reader.
         // A slot holds content for [near - D, far - D] from the live camera, so
         // consecutive slots leave a hole when the drift DIFFERENCE exceeds the
@@ -52147,10 +55145,140 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             (g_atlas_frame_cur || g_atlas_frame_prev)) {   // sun-settle gate + atlas
             khr_cbf.mask_meta[0] = 1.0f;   // stream liveness (round 7): the receive
         }                              // stands down while the system converges
+        // 26549 KH_BAND_UV_DRIFT, THIRD FORM (ledger at KH_BUILD_TAG). The
+        // band textures are FULL-ATLAS COPIES (atlas desc + whole-resource
+        // CopyResource at both capture paths), so sealed sm and live m map
+        // into the SAME full-atlas uv space and the compare is direct -
+        // 26548's tile-local conversion was the unit error its own first
+        // field numbers convicted (smooth 933-5195, pose-correlated). The
+        // 26548 probe STAYS (finest valid slot's own axis at its z-window
+        // midpoint; starvation-proof by construction, field-verified on
+        // 512/512 ring rows). Cascade match: raw row-norm scale, the
+        // latch's own 0.2 n0 rule - both sides are atlas-uv per metre.
+        // Units: ATLAS TEXELS (the 26546 lane unit) + a metres twin.
+        // why bits: bit0 preconditions, bit1 no readable sealed slot,
+        // bit2 no scale-matched live entry.
+        g_band_uv_drift_px = -1.0f;
+        g_band_uv_drift_m = -1.0f;
+        if (!(band_any && g_ls.atlas_size > 0)) {
+            g_band_uv_drift_why |= 1u;   // 26547 starve census
+        }
+        if (band_any && g_ls.atlas_size > 0) {
+            float khud_su = -1.0f, khud_sv = -1.0f;
+            float khud_p[3] = { 0.0f, 0.0f, 0.0f };
+            float khud_n0 = 0.0f;      // sealed |sm row0|^2 (atlas-uv/m)^2
+            float khud_sn = 0.0f;      // sealed |sm row0|
+            int   khud_slot = -1;
+            for (int khud_b = 0; khud_b < 8 && khud_slot < 0; ++khud_b) {
+                const auto& khud_bs = g_ls.band[order[khud_b]];
+                if (!khud_bs.valid || !khud_bs.srv || khud_bs.vcol_bridge) continue;
+                if (!(khud_bs.border[1] > khud_bs.border[0])) continue;
+                bool  khud_ok = true;
+                float khud_c[3] = { 0.0f, 0.0f, 0.0f };
+                for (int khud_j = 0; khud_j < 3; ++khud_j) {
+                    const float* khud_v = &khud_bs.vcol[khud_j * 4];
+                    const float khud_n = sqrtf(khud_v[0] * khud_v[0] +
+                                               khud_v[1] * khud_v[1] +
+                                               khud_v[2] * khud_v[2]);
+                    if (!(khud_n > 0.9f && khud_n < 1.1f)) { khud_ok = false; break; }
+                    khud_c[0] -= khud_v[3] * khud_v[0];
+                    khud_c[1] -= khud_v[3] * khud_v[1];
+                    khud_c[2] -= khud_v[3] * khud_v[2];
+                }
+                if (!khud_ok) continue;
+                const float khud_mid = 0.5f * (khud_bs.border[0] + khud_bs.border[1]);
+                for (int khud_r = 0; khud_r < 3; ++khud_r) {
+                    khud_p[khud_r] = khud_c[khud_r] + khud_mid * khud_bs.vcol[8 + khud_r];
+                }
+                float khud_vx = 0.0f, khud_vy = 0.0f, khud_vz = 0.0f;
+                for (int khud_r = 0; khud_r < 3; ++khud_r) {
+                    const float khud_w = khud_p[khud_r];
+                    khud_vx += khud_w * khud_bs.vcol[0 + khud_r];
+                    khud_vy += khud_w * khud_bs.vcol[4 + khud_r];
+                    khud_vz += khud_w * khud_bs.vcol[8 + khud_r];
+                }
+                khud_vx += khud_bs.vcol[3]; khud_vy += khud_bs.vcol[7]; khud_vz += khud_bs.vcol[11];
+                if (!(khud_vz >= khud_bs.border[0] && khud_vz < khud_bs.border[1])) continue;
+                const float khud_u = khud_vx * khud_bs.sm[0] + khud_vy * khud_bs.sm[1] +
+                                     khud_vz * khud_bs.sm[2] + khud_bs.sm[3];
+                const float khud_v = khud_vx * khud_bs.sm[4] + khud_vy * khud_bs.sm[5] +
+                                     khud_vz * khud_bs.sm[6] + khud_bs.sm[7];
+                const float khud_z = khud_vx * khud_bs.sm[8] + khud_vy * khud_bs.sm[9] +
+                                     khud_vz * khud_bs.sm[10] + khud_bs.sm[11];
+                if (khud_u > 0.001f && khud_u < 0.999f && khud_v > 0.001f &&
+                    khud_v < 0.999f && khud_z > 0.001f && khud_z < 0.999f) {
+                    const float khud_q = khud_bs.sm[0] * khud_bs.sm[0] +
+                                         khud_bs.sm[1] * khud_bs.sm[1] +
+                                         khud_bs.sm[2] * khud_bs.sm[2];
+                    if (khud_q > 1.0e-18f) {
+                        khud_su = khud_u; khud_sv = khud_v;
+                        khud_slot = order[khud_b];
+                        khud_n0 = khud_q;
+                        khud_sn = sqrtf(khud_q);
+                    }
+                }
+            }
+            if (khud_slot < 0) g_band_uv_drift_why |= 2u;   // 26547
+            if (khud_slot >= 0) {
+                float khud_lu = -1.0f, khud_lv = -1.0f;
+                uint64_t khud_best = 0;
+                for (uint32_t khud_i = 0; khud_i < g_ls.count; ++khud_i) {
+                    const LiveShadowEntry& khud_e = g_ls.entries[khud_i];
+                    if (khud_e.stamp <= khud_best) continue;
+                    const float khud_ew = khud_e.tile[2] - khud_e.tile[0];
+                    const float khud_eh = khud_e.tile[3] - khud_e.tile[1];
+                    if (!(khud_ew > 1.0e-6f && khud_eh > 1.0e-6f)) continue;
+                    const float khud_m0 = khud_e.m[0] * khud_e.m[0] +
+                                          khud_e.m[1] * khud_e.m[1] +
+                                          khud_e.m[2] * khud_e.m[2];
+                    // same cascade = same scale: the latch's own 0.2 n0 rule,
+                    // valid verbatim here because BOTH norms are atlas-uv/m.
+                    if (fabsf(khud_m0 - khud_n0) > 0.2f * khud_n0) continue;
+                    float khud_uu = khud_e.m[3], khud_vv = khud_e.m[7];
+                    for (int khud_r = 0; khud_r < 3; ++khud_r) {
+                        const float khud_rel = khud_p[khud_r] - khud_e.cam[khud_r];
+                        khud_uu += khud_e.m[0 + khud_r] * khud_rel;
+                        khud_vv += khud_e.m[4 + khud_r] * khud_rel;
+                    }
+                    if (!(khud_uu == khud_uu && khud_vv == khud_vv)) continue;
+                    // sanity: within two tile-widths of the entry's own rect
+                    if (khud_uu < khud_e.tile[0] - 2.0f * khud_ew ||
+                        khud_uu > khud_e.tile[2] + 2.0f * khud_ew ||
+                        khud_vv < khud_e.tile[1] - 2.0f * khud_eh ||
+                        khud_vv > khud_e.tile[3] + 2.0f * khud_eh) continue;
+                    khud_lu = khud_uu; khud_lv = khud_vv;
+                    khud_best = khud_e.stamp;
+                }
+                if (khud_best == 0) g_band_uv_drift_why |= 4u;   // 26547
+                if (khud_best != 0) {
+                    const float khud_dx = (khud_su - khud_lu) *
+                                          static_cast<float>(g_ls.atlas_size);
+                    const float khud_dy = (khud_sv - khud_lv) *
+                                          static_cast<float>(g_ls.atlas_size);
+                    const float khud_d = sqrtf(khud_dx * khud_dx + khud_dy * khud_dy);
+                    if (khud_d == khud_d && khud_d < 1.0e7f) {
+                        g_band_uv_drift_px = khud_d;
+                        g_band_uv_drift_slot = khud_slot;
+                        g_band_uv_drift_sum += khud_d;
+                        g_band_uv_drift_n++;
+                        if (khud_d > g_band_uv_drift_px_max) g_band_uv_drift_px_max = khud_d;
+                        if (khud_d > 2.0f) g_band_uv_drift_over2++;
+                        if (ffr_armed()) ffr_head().band_uv_drift_px = khud_d;
+                        const float khud_den = khud_sn * static_cast<float>(g_ls.atlas_size);
+                        if (khud_den > 1.0e-9f) {   // 26549 metres twin
+                            const float khud_dm = khud_d / khud_den;
+                            g_band_uv_drift_m = khud_dm;
+                            if (khud_dm > g_band_uv_drift_m_max) g_band_uv_drift_m_max = khud_dm;
+                        }
+                    }
+                }
+            }
+        }
                                        // OR the cascade stream is dead
         g_band_on_last = khr_cbf.mask_meta[0] >= 0.5f ? 1 : 0;   // film strip
         if (ffr_armed()) {   // 26387 receive coverage, this frame
             ffr_head().recv_bands_n = khrb_n;
+            ffr_head().kh_wipe_lo = static_cast<uint16_t>(g_band_wipe_events);   // 26567
             ffr_head().recv_drop_why = khrb_why;
             ffr_head().recv_band_near = khrb_near;
             ffr_head().recv_band_age_ms = khrb_age;
@@ -52705,7 +55833,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                            : (khdc_m == 307 ? 25.0f
                            : (khdc_m == 313 ? 26.0f
                            : (khdc_m == 315 ? 27.0f
-                           : (khdc_m == 317 ? 28.0f : 0.0f)))))))))));   // + 26528 v28 (tie-break map)
+                           : (khdc_m == 317 ? 28.0f
+                             : (khdc_m == 355 ? 29.0f
+                             : (khdc_m == 359 ? 30.0f
+                             : (khdc_m == 360 ? 31.0f : 0.0f))))))))))))));   // + 26579 v30 / 26580 v31 (sampler splitter)
             // 26383 dbgCtl.y IS AN ENUMERATION (full table at the gate it
             // drives). 0 = default (recompute, delta), 1 = 51 (absolute form),
             // 2 = 202 (THE SEAM REVERT - restores the raster passthrough,
@@ -52744,7 +55875,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                            : (khdc_m == 196) ? 10.0f
                            // 26393: 212 = the angle-only sliver clip (the
                            // corner wedge comes back). BOTH twins.
-                           : (khdc_m == 212) ? 11.0f : 0.0f;  // ...68/77/78
+                           : (khdc_m == 212) ? 11.0f
+                           // 26588: 364 = the point-read collapse fallback
+                           // (KH_VOL_MAX_FALLBACK stands down). BOTH twins.
+                           : (khdc_m == 364) ? 12.0f : 0.0f;  // ...68/77/78
         }
         cbd.blend_ctl[0] = (khr_perceptual && o.blend_mode == 0 && o.color[3] < 0.999f) ? 1.0f : 0.0f;
         if (cbd.blend_ctl[0] >= 0.5f) g_pack_on_last = 1;   // film strip
@@ -53118,6 +56252,51 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             g_inj_dp[2] = cbd.depth_params[2];
             g_inj_dp[3] = cbd.depth_params[3];
             g_inj_dp_valid = true;
+            // 26540 KH_ARB_JITTER_CENSUS (first staged mesh, arb frames only).
+            if (khr_far_arb && &o == &meshes[0] && g_snap_pair_src != 0 &&
+                g_snap_cam_valid && g_thm_valid) {
+                // ground-contact reference: SQF [x, y, zASL] -> engine (x, zASL, y);
+                // engine-y half extent is the SQF z half size.
+                const float khaj_ref[3] = { o.pos[0], o.pos[2] - 0.5f * o.size[2], o.pos[1] };
+                const float khaj_dx = khaj_ref[0] - cam[0];
+                const float khaj_dy = khaj_ref[1] - cam[1];
+                const float khaj_dz = khaj_ref[2] - cam[2];
+                const float khaj_D = sqrtf(khaj_dx * khaj_dx + khaj_dy * khaj_dy + khaj_dz * khaj_dz);
+                if (khaj_D > 1.0f && khaj_D < 1.0e5f) {
+                    // decode error: raw written under the snapshot pair, read with ours
+                    const float khaj_raw = g_snap_pair[0] + g_snap_pair[1] / khaj_D;
+                    const float khaj_den = khaj_raw - cbd.depth_params[0];
+                    float khaj_ep = 0.0f;
+                    if (khaj_den < -1.0e-7f) {
+                        const float khaj_z = cbd.depth_params[1] / khaj_den;
+                        khaj_ep = (khaj_z > 0.0f) ? (khaj_z - khaj_D) : 0.0f;
+                    }
+                    // camera advance along the ray since the snapshot: a static
+                    // competitor reads that much FARTHER than it is
+                    const float khaj_ec = ((cam[0] - g_snap_cam[0]) * khaj_dx +
+                                           (cam[1] - g_snap_cam[1]) * khaj_dy +
+                                           (cam[2] - g_snap_cam[2]) * khaj_dz) / khaj_D;
+                    const float khaj_ev = (khaj_ep + khaj_ec) * (khaj_dy / khaj_D);
+                    const float khaj_tol = fmaxf(0.15f, g_thml_cell * 0.02f);
+                    g_arb_jit_pair_m = khaj_ep;
+                    g_arb_jit_cam_m = khaj_ec;
+                    g_arb_jit_vert_m = khaj_ev;
+                    g_arb_tol_m = khaj_tol;
+                    g_arb_snap_near_m = kh_enc_pair_near(g_snap_pair[0], g_snap_pair[1]);
+                    g_arb_inj_near_m = kh_enc_pair_near(cbd.depth_params[0], cbd.depth_params[1]);
+                    const float khaj_av = fabsf(khaj_ev);
+                    g_arb_jit_frames++;
+                    g_arb_jit_vert_sum += khaj_av;
+                    if (khaj_av > g_arb_jit_vert_max_m) g_arb_jit_vert_max_m = khaj_av;
+                    if (khaj_av > khaj_tol) g_arb_jit_over_tol++;
+                    if (ffr_armed()) {
+                        FfrRecord& khaj_r = ffr_head();
+                        khaj_r.arb_jit_pair_m = khaj_ep;
+                        khaj_r.arb_jit_cam_m = khaj_ec;
+                        khaj_r.arb_jit_vert_m = khaj_ev;
+                    }
+                }
+            }
         } else {
             // No depth copy this frame: the plain-pipeline fallback PS now
             // carries the same guard contract, so stand it down EXPLICITLY
@@ -54915,6 +58094,56 @@ inline void kh_reorder_trigger(ID3D11DeviceContext* self) {
                 float khsl_ps = g_inj_blk_sun[0] + g_inj_blk_sun[1] + g_inj_blk_sun[2];
                 float khsl_na = khsn_amb[0] + khsn_amb[1] + khsn_amb[2];
                 float khsl_ns = khsn_sun[0] + khsn_sun[1] + khsn_sun[2];
+                // ==========================================================
+                // KH_BLK_SLEW_REGIME - 26611 (mode 384 reverts to the 26503
+                // unconditional slew). THE 26503 SKIPTIME EXEMPTION NEVER
+                // ENGAGES: its 'cold or stale (> 1 s) commits outright' rode
+                // the snapshot age, but g_inj_blk_ms is refreshed EVERY pass
+                // below, so during continuous play the snapshot is never
+                // stale and every skipTime decays at 25%/s instead. dump1
+                // catches the whole mechanism at the skip frame: stdSunLum
+                // 16.72 -> 0 in ONE frame (the engine stepped), blkSunLum 0
+                // one frame later - but ONLY because the sun's night target
+                // is exactly zero and the khsl_ns > 1e-6f divide guard below
+                // accidentally commits exact-zero targets outright - while
+                // blkAmbLum (night target 0.0105, above the guard) decayed
+                // 2.07 -> 0.29 across the dump's 8 s tail at precisely the
+                // slew's own exponential (a 25%/s fractional cap against a
+                // shrinking base never arrives; 2.07 -> 0.0105 needs ~21 s).
+                // Ambient-times-material at night IS the operator's glowing
+                // mesh, and the asymmetric sun cut is why only some skips
+                // read as 'never updates' - the darker the target, the
+                // longer the tail. THE FIX RESTORES THE EXEMPTION ON THE
+                // QUANTITY THAT ACTUALLY IDENTIFIES THE CLASS: a candidate
+                // whose channel SUM moves more than 3x against the previous
+                // publish (either direction, either channel, 0.02 floor on
+                // both ends) is a REGIME CHANGE - the skipTime/setDate/
+                // eclipse class the engine itself steps - and commits
+                // outright, both channels together (splitting them is the
+                // chroma inconsistency 26503 slews per-sum to avoid). Under
+                // 3x the slew stands exactly as shipped: the referee catch-
+                // up it was built for is 7.3% in one frame and the 26502
+                // starved clusters sit at 0.70-0.75x, both far inside the
+                // bar, so the artifacts 26503 retired cannot return through
+                // it. PRE-REGISTERED ACCEPTANCE (rule 1.22): after skipTime
+                // to night, blkAmbLum/blkSunLum land on stdAmb/SunLum within
+                // ~2 frames (dump1 class: no multi-second decay tail) with
+                // blkSlewRegimeCommits counting ~once per skip; under
+                // ordinary cloud attenuation blkPubSlews keeps counting and
+                // the light still never steps. FALSIFICATION: the 26503
+                // step/pop artifacts returning at mode 0 means the 3x bar
+                // is too low - raise it before touching anything else; 384
+                // is the one-switch A/B either way (rule 1.11).
+                // ==========================================================
+                const float khsl_ra = fmaxf(khsl_na, 0.02f) / fmaxf(khsl_pa, 0.02f);
+                const float khsl_rs = fmaxf(khsl_ns, 0.02f) / fmaxf(khsl_ps, 0.02f);
+                const bool khsl_regime =
+                    g_dbg_mode.load(std::memory_order_relaxed) != 384 &&
+                    (khsl_ra > 3.0f || khsl_ra < 0.333333f ||
+                     khsl_rs > 3.0f || khsl_rs < 0.333333f);
+                if (khsl_regime) {
+                    g_blk_slew_regime_commits++;   // candidates pass through unslewed
+                } else {
                 const float khsl_ca = khsl_r * fmaxf(khsl_pa, 0.02f);
                 const float khsl_cs = khsl_r * fmaxf(khsl_ps, 0.02f);
                 float khsl_ta = khsl_pa + fmaxf(-khsl_ca, fminf(khsl_ca, khsl_na - khsl_pa));
@@ -54930,6 +58159,7 @@ inline void kh_reorder_trigger(ID3D11DeviceContext* self) {
                     khsl_lim = true;
                 }
                 if (khsl_lim) g_blk_pub_slews++;
+                }
             }
         }
         g_inj_blk_amb[0] = khsn_amb[0];
@@ -57361,6 +60591,49 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         } else {
             g_snap_serial++;
             g_snap_ms = steady_now_ms();
+            // 26540 KH_ARB_JITTER_CENSUS: the pair this depth was written under
+            // (the engine's, when located; else the pair we ourselves encoded with)
+            // and the camera it was resolved from.
+            if (g_ro.engine_proj_valid) {
+                g_snap_pair[0] = g_ro.engine_m22; g_snap_pair[1] = g_ro.engine_m32; g_snap_pair_src = 1;
+            } else if (g_inj_dp_valid) {
+                g_snap_pair[0] = g_inj_dp[0]; g_snap_pair[1] = g_inj_dp[1]; g_snap_pair_src = 2;
+            } else {
+                g_snap_pair_src = 0;
+            }
+            if (!kh_view_camera_exact(pv.view, g_snap_cam)) extract_camera_pos(pv.view, g_snap_cam);
+            g_snap_cam_valid = true;
+            // 26541 KH_SNAP_REPROJECT: view*proj of THIS frame folded in double
+            // and rebased to g_snap_cam (row3 += cam . rows), so the shader
+            // multiplies a camera-relative offset - exact algebra whichever
+            // point c is; c near the true camera only keeps magnitudes small.
+            {
+                double khsv_v[4][4];
+                for (int khsv_r = 0; khsv_r < 4; ++khsv_r)
+                    for (int khsv_c = 0; khsv_c < 4; ++khsv_c)
+                        khsv_v[khsv_r][khsv_c] = static_cast<double>(pv.view[khsv_r][khsv_c]);
+                for (int khsv_c = 0; khsv_c < 4; ++khsv_c) {
+                    khsv_v[3][khsv_c] += static_cast<double>(g_snap_cam[0]) * khsv_v[0][khsv_c]
+                                       + static_cast<double>(g_snap_cam[1]) * khsv_v[1][khsv_c]
+                                       + static_cast<double>(g_snap_cam[2]) * khsv_v[2][khsv_c];
+                }
+                for (int khsv_r = 0; khsv_r < 4; ++khsv_r) {
+                    for (int khsv_c = 0; khsv_c < 4; ++khsv_c) {
+                        const double khsv_s = khsv_v[khsv_r][0] * static_cast<double>(pv.projection[0][khsv_c])
+                                            + khsv_v[khsv_r][1] * static_cast<double>(pv.projection[1][khsv_c])
+                                            + khsv_v[khsv_r][2] * static_cast<double>(pv.projection[2][khsv_c])
+                                            + khsv_v[khsv_r][3] * static_cast<double>(pv.projection[3][khsv_c]);
+                        g_snap_vp[khsv_r][khsv_c] = static_cast<float>(khsv_s);
+                    }
+                }
+                // the viewport range the resolved depth was written into: the
+                // last guarded injection's echo (this frame's), else the scene's
+                if (g_inj_dp_valid) { g_snap_vp_lo = g_inj_dp[2]; g_snap_vp_hi = g_inj_dp[3]; }
+                else { g_snap_vp_lo = g_scene_vp_min_d; g_snap_vp_hi = g_scene_vp_max_d; }
+                g_snap_vp_valid = (g_snap_pair_src != 0) &&
+                                  fabsf(pv.projection[2][2]) > 1.0e-6f &&
+                                  g_snap_vp_hi > g_snap_vp_lo;
+            }
             // 26315 content probes (ledger at KH_BUILD_TAG): publish last
             // frame's readback, then sample this frame's resolved depth +
             // volume copy at the stashed box pixels. Behind the snapshot's
@@ -57768,10 +61041,18 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     }
     // Private sun-depth map (self term in PSMain), rendered by the render
     // thread earlier this frame - t11, inside StateBackup's saved range.
+    kh_sun_pf_convert(ctx);   // 26582: pyramids convert HERE (field-proven binds)
     if (g_sun_map_valid && g_res.sun_srv) ctx->PSSetShaderResources(11, 1, &g_res.sun_srv);
     if (g_sun2_map_valid && g_res.sun2_srv) ctx->PSSetShaderResources(25, 1, &g_res.sun2_srv);   // 26444
     if (g_sun3_map_valid && g_res.sun3_srv) ctx->PSSetShaderResources(26, 1, &g_res.sun3_srv);   // 26454
     if (g_sun4_map_valid && g_res.sun4_srv) ctx->PSSetShaderResources(27, 1, &g_res.sun4_srv);   // 26454
+    if (g_sun5_map_valid && g_res.sun5_srv) ctx->PSSetShaderResources(32, 1, &g_res.sun5_srv);   // 26620 (StateBackup widened to 33)
+    // 26575 moment pyramids (t29-31; StateBackup range widened to 32
+    // this build) + the linear sampler at s1 (save range widened too).
+    if (g_sun2_map_valid && g_sun_pf_valid[0] && g_res.sun_pf_srv[0]) ctx->PSSetShaderResources(29, 1, &g_res.sun_pf_srv[0]);
+    if (g_sun3_map_valid && g_sun_pf_valid[1] && g_res.sun_pf_srv[1]) ctx->PSSetShaderResources(30, 1, &g_res.sun_pf_srv[1]);
+    if (g_sun4_map_valid && g_sun_pf_valid[2] && g_res.sun_pf_srv[2]) ctx->PSSetShaderResources(31, 1, &g_res.sun_pf_srv[2]);
+    if (g_res.samp_pf) ctx->PSSetSamplers(1, 1, &g_res.samp_pf);
     // Analytic terrain heightfield (t10, saved range) - the flush twin.
     if (g_thm_valid && g_res.thm_srv) ctx->PSSetShaderResources(10, 1, &g_res.thm_srv);
     // WORLD-SHADOW RECEIVE, flush edition (the translucent-receive fix):
@@ -57890,10 +61171,16 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             // slide until the engine settles). Absent beats offset:
             // the receive term stands down for KH_RECEIVE_WARMUP_S after
             // the first capture.
-            if (g_ls.first_capture_time < 0.0f ||
-                effect_time_seconds() - g_ls.first_capture_time < KH_RECEIVE_WARMUP_S) {
-                g_band_warmup_skips++; khrb_why |= 2;
-                continue;
+            // 26566: once per session (mode 349 = re-arm on every wipe).
+            const bool khwu_ra =
+                g_dbg_mode.load(std::memory_order_relaxed) == 349;
+            if (khwu_ra || !g_ls.receive_warmed) {
+                if (g_ls.first_capture_time < 0.0f ||
+                    effect_time_seconds() - g_ls.first_capture_time < KH_RECEIVE_WARMUP_S) {
+                    g_band_warmup_skips++; khrb_why |= 2;
+                    continue;
+                }
+                if (!khwu_ra) g_ls.receive_warmed = true;
             }
 
             // 26179 COLD RECEIVE HEALTH GATE (full ledger at kh_recv_health;
@@ -57987,6 +61274,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         g_band_on_last = khf_cbf.mask_meta[0] >= 0.5f ? 1 : 0;   // film strip
         if (ffr_armed()) {   // 26387 receive coverage, this frame
             ffr_head().recv_bands_n = khrb_n;
+            ffr_head().kh_wipe_lo = static_cast<uint16_t>(g_band_wipe_events);   // 26567
             ffr_head().recv_drop_why = khrb_why;
             ffr_head().recv_band_near = khrb_near;
             ffr_head().recv_band_age_ms = khrb_age;
@@ -58544,7 +61832,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                            : (khdc_m == 307 ? 25.0f
                            : (khdc_m == 313 ? 26.0f
                            : (khdc_m == 315 ? 27.0f
-                           : (khdc_m == 317 ? 28.0f : 0.0f)))))))))));   // + 26528 v28 (tie-break map)
+                           : (khdc_m == 317 ? 28.0f
+                             : (khdc_m == 355 ? 29.0f
+                             : (khdc_m == 359 ? 30.0f
+                             : (khdc_m == 360 ? 31.0f : 0.0f))))))))))))));   // + 26579 v30 / 26580 v31 (sampler splitter)
             // 26383 dbgCtl.y IS AN ENUMERATION (full table at the gate it
             // drives). 0 = default (recompute, delta), 1 = 51 (absolute form),
             // 2 = 202 (THE SEAM REVERT - restores the raster passthrough,
@@ -58583,7 +61874,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                            : (khdc_m == 196) ? 10.0f
                            // 26393: 212 = the angle-only sliver clip (the
                            // corner wedge comes back). BOTH twins.
-                           : (khdc_m == 212) ? 11.0f : 0.0f;  // ...68/77/78
+                           : (khdc_m == 212) ? 11.0f
+                           // 26588: 364 = the point-read collapse fallback
+                           // (KH_VOL_MAX_FALLBACK stands down). BOTH twins.
+                           : (khdc_m == 364) ? 12.0f : 0.0f;  // ...68/77/78
         }
         cbd.blend_ctl[0] = (khf_perceptual && !o.fullscreen && o.blend_mode == 0 && o.color[3] < 0.999f) ? 1.0f : 0.0f;
         if (cbd.blend_ctl[0] >= 0.5f) g_pack_on_last = 1;   // film strip
@@ -61513,8 +64807,17 @@ inline void reset_stat_counters() {
     // a mission change lies in the next one.)
     g_sun_union_rad_held = -1.0f;
     g_sun_union_rad_holds = 0; g_sun_union_rad_relatches = 0;
+    // 26611: the second latch and the ladder scale reset with the first
+    // (the 26539 session-reset rule - a surviving sentinel lies).
+    g_sun_ladder_scale = 1.0f;
+    g_sun_union_lat_held = -1.0f;
+    g_sun_union_lat_holds = 0; g_sun_union_lat_relatches = 0;
     g_sun_band_reach[0] = g_sun_band_reach[1] = g_sun_band_reach[2] = -1.0f;
+    g_sun_band_reach[3] = -1.0f;   // 26620 FAR band
+    g_sun5_renders = 0; g_sun5_casters = 0;   // 26620 (validity clears at the pass gates)
     g_sun_band_reach_takes = 0;
+    g_sun_pf_cpu[0] = -1.0f; g_sun_pf_cpu[1] = -1.0f;   // 26582 probe lanes
+    g_sun_pf_cpu[2] = -1.0f; g_sun_pf_cpu[3] = -1.0f;
     g_sun_union_snap_m = -1.0f; g_sun_union_texel_m = -1.0f; g_sun_union_snaps = 0;
     g_cast_chain_code = -1.0f;
     g_fire_extrap_used = 0; g_fire_extrap_fails = 0;   // 26160
@@ -61648,6 +64951,61 @@ inline void reset_stat_counters() {
     g_flush_fallback_draws = 0; g_flush_latch_pvs = 0;
     g_snap_fails = 0; g_snap_age_last = -1.0f; g_snap_age_max = 0.0f;
     g_snap_consumed = 0;
+    // 26540 census lanes (both instruments)
+    g_arb_jit_frames = 0; g_arb_jit_over_tol = 0; g_arb_jit_pair_m = -1.0f;
+    g_arb_jit_cam_m = -1.0f; g_arb_jit_vert_m = -1.0f; g_arb_jit_vert_max_m = 0.0f;
+    g_arb_jit_vert_sum = 0.0; g_arb_tol_m = -1.0f;
+    g_arb_snap_near_m = -1.0f; g_arb_inj_near_m = -1.0f;
+    g_snap_reproj_arms = 0; g_snap_reproj_stands = 0;   // 26541
+    g_live_cam_pair_fv = 0; g_live_cam_pair_pv = 0; g_live_cam_pair_stale = 0;   // 26544
+    g_band_pair_same_seals = 0;   // 26545
+    g_band_uv_drift_px = -1.0f; g_band_uv_drift_px_max = 0.0f;   // 26546
+    g_band_uv_drift_sum = 0.0; g_band_uv_drift_n = 0; g_band_uv_drift_over2 = 0;
+    g_band_uv_drift_slot = -1;
+    g_band_uv_drift_why = 0;   // 26547
+    g_band_seal_foreign_ref = 0; g_band_seal_foreign_m = -1.0f;
+    g_band_seal_foreign_max_m = 0.0f;
+    g_band_pair_mixed_ref = 0; g_band_pair_mixed_m = -1.0f;   // 26548
+    g_band_pair_mixed_max_m = 0.0f;
+    g_band_complete_inv = 0; g_band_complete_old_trn_m = -1.0f;   // 26548
+    g_band_complete_old_trn_max_m = 0.0f;
+    g_band_uv_drift_m = -1.0f; g_band_uv_drift_m_max = 0.0f;   // 26549
+    g_band_cadence_forced = 0;   // 26550
+    g_band_pend_late_kept = 0; g_band_pend_late_bridge = 0;   // 26551
+    g_band_cap_fv_age_ms = -1.0f; g_band_cap_fv_age_sum = 0.0;   // 26552
+    g_band_cap_fv_age_n = 0; g_band_cap_fv_age_max_ms = 0.0f;
+    g_band_comp_age_sum = 0.0; g_band_comp_age_n = 0;
+    g_band_comp_age_max_ms = 0.0f;
+    g_band_comp_src_ref = 0; g_band_comp_src_m = -1.0f;   // 26553
+    g_band_comp_src_max_m = 0.0f;
+    g_band_comp_src_alt = 0;   // 26554
+    g_band_inj_pair = 0; g_band_inj_pair_miss = 0;   // 26557
+    g_band_pend_single_src = 0;   // 26559
+    g_band_comp_xsrc = 0; g_band_comp_samesrc = 0;   // 26560
+    g_band_stage_xsrc = 0; g_band_stage_samesrc = 0;
+    g_band_stage_flip = 0; g_band_stage_flip_hold = 0;   // 26561
+    g_band_stage_flip_single = 0; g_band_stage_flip_late = 0;
+    g_weld_flip_inj_dx = -1.0f; g_weld_flip_inj_dx_max = 0.0f;   // 26562
+    g_weld_flip_inj_dx_sum = 0.0; g_weld_flip_inj_dx_n = 0;
+    g_weld_flip_inj_rot_max = 0.0f;
+    g_band_stage_flip_poolbail = 0;   // 26563
+    g_band_stage_pool_cap = 0;   // 26564
+    g_band_pend_dead_fast = 0;   // 26565
+    g_band_wipe_events = 0;   // 26566
+    g_band_age_kills = 0;   // 26568
+    g_band_rot_welds = 0;   // 26569
+    g_band_prov_alt = 0; g_band_prov_alt_miss = 0;   // 26555
+    g_band_pend_timeout_kept = 0;
+    g_live_cam_pair_dx = -1.0f; g_live_cam_pair_dx_max = 0.0f;
+    g_band_esc_lands = 0; g_band_esc_land_ms = -1.0f; g_band_esc_land_ms_max = 0.0f;
+    g_band_esc_land_ms_sum = 0.0; g_band_esc_land_fr = 0; g_band_esc_land_fr_max = 0;
+    g_band_esc_land_cdx = -1.0f; g_band_esc_land_cdx_max = 0.0f;
+    g_band_seal_inj_dx = -1.0f; g_band_seal_inj_dx_max = 0.0f;
+    g_band_seal_inj_rot = -1.0f; g_band_seal_inj_rot_max = 0.0f;
+    g_band_reseal_step = -1.0f;
+    for (int khrs_i = 0; khrs_i < 3; ++khrs_i) {
+        g_band_reseal_step_max[khrs_i] = 0.0f; g_band_reseal_n[khrs_i] = 0; g_band_reseal_sum[khrs_i] = 0.0;
+    }
     g_inj_dp_valid = false;
     g_inj_dp[0] = g_inj_dp[1] = g_inj_dp[2] = g_inj_dp[3] = 0.0f;
     g_flush_pv_repairs = 0; g_flush_repaint_saves = 0; g_flush_anomaly_carries = 0;
@@ -61688,6 +65046,7 @@ inline void reset_stat_counters() {
     // 26417 shade latch. Min starts HIGH and max LOW so the first frame sets
     // both honestly; -1 sentinels everywhere else (rule 1.10).
     g_blk_zero_sun_refusals = 0;   // 26418
+    g_blk_zero_sun_admits = 0;     // 26612
     g_blk_shade_now = -1.0f; g_blk_shade_min = 1.0e9f; g_blk_shade_max = -1.0f;
     g_blk_shade_n = 0; g_blk_shade_dark = 0;
     g_blk_shade_valid = -1.0f; g_blk_shade_litgate = -1.0f;
@@ -61901,6 +65260,7 @@ inline void reset_session_state() {
     g_blk_ring_band_filtered = 0; g_blk_ring_no_band = 0;   // 26501
     g_blk_ring_starve_holds = 0;   // 26502
     g_blk_pub_slews = 0;   // 26503
+    g_blk_slew_regime_commits = 0;   // 26611
     g_kh_sunvp_span[0] = g_kh_sunvp_span[1] = g_kh_sunvp_span[2] = -1.f;   // 26505 (26504 lanes: reset was missing)
     g_kh_sunvp_latches = 0;      // 26505
     g_kh_sunvp_fit_grows = 0;    // 26505
@@ -61990,6 +65350,8 @@ inline void reset_session_state() {
     // with the mission (device objects went with g_res.release()); the
     // auto-builder simply runs again next mission.
     g_snap_serial = 0; g_snap_ms = 0;
+    g_snap_pair_src = 0; g_snap_cam_valid = false;   // 26540
+    g_snap_vp_valid = false;   // 26541
     g_thm_data.clear();
     g_thm_data.shrink_to_fit();
     g_thm_w = g_thm_h = 0;
@@ -62007,6 +65369,12 @@ inline void reset_session_state() {
     g_thm_auto_retry = 0;
     g_thmf_dim = 0;
     g_thmf_cell = 0.0f;
+    // 26548: the fog below-layer sentinels die with the session (the
+    // 26534/26535/26536 state survived mission changes and made the
+    // arming lanes lie on the first post-change dump - the banked debt).
+    g_fog_below_clamp_y = 1.0e9f;
+    g_fog_below_ext = -1.0f;
+    g_fog_uw_col[0] = g_fog_uw_col[1] = g_fog_uw_col[2] = -1.0f;
 }
 
 inline void reset_retained_state() {

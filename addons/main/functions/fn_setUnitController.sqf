@@ -310,14 +310,16 @@ _unit setVariable ["KH_var_unitControllerId", _id, true];
             if (((_unit getVariable ["KH_var_unitControllerId", ""]) isNotEqualTo _id) || !([_unit] call _condition) || !(missionNamespace getVariable _id)) exitWith {
                 [_handlerId] call KH_fnc_removeHandler;
             };
-            
-            if !(isNull (_unit getVariable ["KH_var_pathObjectDestination", objNull])) then {
-                _path set [-1, _unit getVariable ["KH_var_pathObjectDestination", objNull]];
-                _unit setVariable ["KH_var_pathObjectDestination", objNull];
-            };
 
-            _unit setVariable ["KH_var_calculatedPath", _path];
-            _unit setVariable ["KH_var_calculatedPathId", generateUid];
+            if (_path isNotEqualTo []) then {
+                if !(isNull (_unit getVariable ["KH_var_pathObjectDestination", objNull])) then {
+                    _path set [-1, _unit getVariable ["KH_var_pathObjectDestination", objNull]];
+                    _unit setVariable ["KH_var_pathObjectDestination", objNull];
+                };
+
+                _unit setVariable ["KH_var_calculatedPath", _path];
+                _unit setVariable ["KH_var_calculatedPathId", generateUid];
+            };
         }
     ] call KH_fnc_addEventhandler,
     [missionNamespace, _id, true]

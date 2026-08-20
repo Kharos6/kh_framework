@@ -2,7 +2,12 @@ params [["_endName", "KH_MissionConcluded", [""]], ["_isVictory", true, [true]],
 _delay = _delay max 1;
 
 {
-	call _x;
+	private _stored = [hashValue _x, "missionEnd"] joinString "_";
+
+	if !(_stored in KH_var_executedStacks) then {
+		KH_var_executedStacks pushBack _stored;
+		call _x;
+	};
 } forEach KH_var_serverMissionEndStack;
 
 call KH_fnc_serverMissionEndInit;
@@ -11,7 +16,12 @@ execute [
 	[],
 	{
 		{
-			call _x;
+			private _stored = [hashValue _x, "missionEnd"] joinString "_";
+
+			if !(_stored in KH_var_executedStacks) then {
+				KH_var_executedStacks pushBack _stored;
+				call _x;
+			};
 		} forEach KH_var_playerMissionEndStack;
 
 		call KH_fnc_playerMissionEndInit;
@@ -25,7 +35,12 @@ execute [
 	[],
 	{
 		{
-			call _x;
+			private _stored = [hashValue _x, "missionEnd"] joinString "_";
+
+			if !(_stored in KH_var_executedStacks) then {
+				KH_var_executedStacks pushBack _stored;
+				call _x;
+			};
 		} forEach KH_var_headlessMissionEndStack;
 
 		call KH_fnc_headlessMissionEndInit;

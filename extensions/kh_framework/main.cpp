@@ -27,6 +27,8 @@ void intercept::pre_start() {
     g_kh_cached_temporal_stack = game_value(auto_array<game_value>());
     g_kh_cached_temporal_additions = game_value(auto_array<game_value>());
     g_kh_cached_temporal_deletions = game_value(auto_array<game_value>());
+    g_kh_cached_entity_initializations = game_value(auto_array<game_value>());
+    g_kh_cached_entity_initializations_deletions = game_value(auto_array<game_value>());
     (void)AIFramework::instance();
     (void)TTSFramework::instance();
     (void)STTFramework::instance();
@@ -85,11 +87,11 @@ void intercept::pre_init() {
     populate_sqf_command_map();
     auto displays = sqf::all_displays();
     g_is_menu = (displays.size() == 1 && displays[0] == sqf::find_display(0));
+    g_is_dedicated_server = sqf::is_dedicated();
 
-    if (!g_is_menu) {
+    if (!g_is_menu || g_is_dedicated_server) {
         g_last_ts_connect_attempt = -1.0f;
         g_is_server = sqf::is_server();
-        g_is_dedicated_server = sqf::is_dedicated();
         g_is_headless = (!(sqf::is_server()) && !(sqf::has_interface()));
         g_is_player = sqf::has_interface();
         g_mission_time = 0.0f;
@@ -178,16 +180,20 @@ void intercept::pre_init() {
         sqf::set_variable(sqf::mission_namespace(), "kh_var_temporalexecutionstack", game_value(auto_array<game_value>()));
         sqf::set_variable(sqf::mission_namespace(), "kh_var_temporalexecutionstackadditions", game_value(auto_array<game_value>()));
         sqf::set_variable(sqf::mission_namespace(), "kh_var_temporalexecutionstackdeletions", game_value(auto_array<game_value>()));
+        sqf::set_variable(sqf::mission_namespace(), "kh_var_entityinitializations", game_value(auto_array<game_value>()));
+        sqf::set_variable(sqf::mission_namespace(), "kh_var_entityinitializationsdeletions", game_value(auto_array<game_value>()));
         g_kh_cached_temporal_stack = sqf::get_variable(sqf::mission_namespace(), "kh_var_temporalexecutionstack");
         g_kh_cached_temporal_additions = sqf::get_variable(sqf::mission_namespace(), "kh_var_temporalexecutionstackadditions");
         g_kh_cached_temporal_deletions = sqf::get_variable(sqf::mission_namespace(), "kh_var_temporalexecutionstackdeletions");
+        g_kh_cached_entity_initializations = sqf::get_variable(sqf::mission_namespace(), "kh_var_entityinitializations");
+        g_kh_cached_entity_initializations_deletions = sqf::get_variable(sqf::mission_namespace(), "kh_var_entityinitializationsdeletions");
         raw_call_sqf_native_no_return(sqf::get_variable(sqf::mission_namespace(), "kh_fnc_preinit"));
         sqf::diag_log("KH Framework Extension - Pre-init");
     }
 }
 
 void intercept::post_init() {
-    if (!g_is_menu) {
+    if (!g_is_menu || g_is_dedicated_server) {
         if (g_lua_state) {
             LuaStackGuard guard(*g_lua_state);
             sol::table game = (*g_lua_state)["game"];
@@ -200,7 +206,7 @@ void intercept::post_init() {
 }
 
 void intercept::on_frame() {
-    if (!g_is_menu) {
+    if ((!(sqf::is_eden()) && !g_is_menu) || g_is_dedicated_server) {
         if (!g_is_dedicated_server) {
             if (!sqf::is_eden() && sqf::is_multiplayer()) {
                 if (g_last_ts_connect_attempt < 0.0f || g_game_time - g_last_ts_connect_attempt >= 1.0f) {
@@ -247,6 +253,8 @@ void intercept::mission_ended() {
     g_kh_cached_temporal_stack = game_value(auto_array<game_value>());
     g_kh_cached_temporal_additions = game_value(auto_array<game_value>());
     g_kh_cached_temporal_deletions = game_value(auto_array<game_value>());
+    g_kh_cached_entity_initializations = game_value(auto_array<game_value>());
+    g_kh_cached_entity_initializations_deletions = game_value(auto_array<game_value>());
     g_mission_time = 0.0f;
     g_mission_frame = 0;
     reset_lua_state();
@@ -333,6 +341,7 @@ void intercept::mission_ended() {
     }
 
     sqf::diag_log("KH Framework Extension - Mission End");
+    g_is_menu = true;
 }
 
 static bool try_load_vulkan() {

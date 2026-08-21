@@ -8157,6 +8157,62 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
         // field again - expect the 26619 wobble and the mesh-size
         // quality law to return together).
                             khd_m == 389 ||
+        // 26641: 406 = KH_SHADER_ASYNC OFF - ensure_resources BLOCKS the render
+        // thread through the whole cold compile again, the pre-26641 form.
+                            khd_m == 406 ||
+        // 26639: 403/404/405 = KH_SHADER_FLAGS experiment arms, set BEFORE
+        // the first spawn. 403 = PREFER_FLOW_CONTROL, 404 = OPTIMIZATION_
+        // LEVEL0, 405 = SKIP_OPTIMIZATION. All three produce identical
+        // pixels and differ only in compile time and GPU cost; 404 and 405
+        // buy compile time with frame time and are diagnostics, never
+        // candidates. The flags are part of the shader cache key, so each
+        // arm caches separately and cannot poison the default's blobs.
+                            khd_m == 403 || khd_m == 404 || khd_m == 405 ||
+        // 26636: 402 = KH_SHADER_MT OFF - shaders compile SERIALLY on the
+        // calling thread, the pre-26636 behaviour. Set it before the first
+        // ensure to take effect; the long cold-cache startup returns with it.
+                            khd_m == 402 ||
+        // 26635: 401 = KH_FAR_SELF_CERT_SCOPE REVERT, lighting0.y 71 - the
+        // 26624 far-self gate returns, and with it the outer-to-far hard cut
+        // and the far-tier wobble, together. This is the one-switch proof of
+        // the 26635 default: if 401 changes nothing, the default did not take.
+                            khd_m == 401 ||
+        // 26634: 400 = KH_FAR_SELF_CERT_SCOPE. Fielded as the opt-in arm and
+        // PROMOTED TO DEFAULT at 26635, so it is now a bit-exact ALIAS of the
+        // default and is never reminted, rule 1.18 - kept whitelisted so the
+        // scripts that ran the arm still validate. 401 is its revert; 392 is
+        // the UNBOUNDED form of the same lift and now isolates the kh4_cert
+        // bound, differing from the default only where outer did not certify.
+                            khd_m == 400 ||
+        // 26632: 399 = KH_BAND_SHADOW_ADMIT revert (C++-side only, no
+        // lighting0.y code; the camera bands stop re-admitting a caster
+        // whose shadow segment reaches them, so their caster sets fall
+        // short of the union's again and a long shadow can be certified
+        // away by a band that never held its caster).
+                            khd_m == 399 ||
+        // 26631: 398 = KH_FAR_GUARD_ADMIT as an OPT-IN (lighting0.y 69;
+        // clamps the far tier's certified guard to its admission bound -
+        // the withdrawn 26630 default, a real over-claim repair but
+        // unproven as any artifact's author). 397 is RETIRED below.
+                            khd_m == 398 ||
+        // 26629: 396 = KH_CERT_CLEAR revert (lighting0.y 67; a clear
+        // texel stops certifying, so the halo class returns and visual
+        // 32 paints those pixels RED again).
+                            khd_m == 396 ||
+        // 26628: 395 = visual 32, the certification probe (pure gauge -
+        // paints why each pixel is or is not certified; nothing gated).
+                            khd_m == 395 ||
+        // 26627: 394 = KH_CERT_CONTENT revert (lighting0.y 66;
+        // certification returns to the 26590 surface-identity test, so
+        // the layered-fabric certification hole reopens and the splotch
+        // plus its halo return together).
+                            khd_m == 394 ||
+        // 26626: 393 = KH_PF_SRV_RESTORE revert (C++-side only, NO
+        // lighting0.y code - kh_sun_pf_convert stops restoring the
+        // caller's t0/t1 pair, so the injection path draws with
+        // depthTex and shadowAtlas unbound on every band-render frame
+        // again, exactly as it did 26582-26625).
+                            khd_m == 393 ||
         // 26624: 392 = KH_FAR_SELF_SCOPE revert (lighting0.y 65; the far
         // self tier serves inside the finer ladder's coverage again - the
         // all-distance splotch ring returns).
@@ -9127,7 +9183,11 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
         // The kept-alias list is 143 / 144 / 150 / 190 / 207 / 218 (26402
         // folded 218's 100x backstop into mode 0, so setting it is correct
         // and changes nothing; 219 is its revert).
-        const bool khd_dead = khd_m == 90  || khd_m == 91  || khd_m == 92  ||
+        // 26631: 397 RETIRED - the KH_FAR_GUARD_ADMIT default was withdrawn
+        // on its own falsification clause; the behaviour lives at 398 now
+        // and 397 is never reused (the 26624 precedent).
+        const bool khd_dead = khd_m == 397 ||
+                              khd_m == 90  || khd_m == 91  || khd_m == 92  ||
                               khd_m == 94  || khd_m == 100 || khd_m == 101 ||
                               khd_m == 103 || khd_m == 104 || khd_m == 105 ||
                               khd_m == 106 || khd_m == 109 || khd_m == 120 ||
@@ -9394,9 +9454,30 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("blkModeN2", RenderIntegration::g_blk_mode_census_n[2]));
         out.push_back(kvf("blkModeV3", RenderIntegration::g_blk_mode_census_v[3]));
         out.push_back(kv("blkModeN3", RenderIntegration::g_blk_mode_census_n[3]));
-        out.push_back(kv("shaderCacheHits", RenderIntegration::g_shader_cache_hits));
-        out.push_back(kv("shaderCacheMisses", RenderIntegration::g_shader_cache_misses));
-        out.push_back(kv("shaderCompileMs", RenderIntegration::g_shader_compile_ms));
+        out.push_back(kv("shaderCacheHits", RenderIntegration::g_shader_cache_hits.load(std::memory_order_relaxed)));
+        out.push_back(kv("shaderCacheMisses", RenderIntegration::g_shader_cache_misses.load(std::memory_order_relaxed)));
+        // 26636: CPU ms summed across every compiling thread, NOT wall time -
+        // read it against shaderMtWallMs; the ratio IS the parallelism.
+        out.push_back(kv("shaderCompileMs", RenderIntegration::g_shader_compile_ms.load(std::memory_order_relaxed)));
+        out.push_back(kv("shaderMtWallMs", RenderIntegration::g_khsm_wall_ms));
+        out.push_back(kv("shaderMtThreads", RenderIntegration::g_khsm_threads_n));
+        out.push_back(kv("shaderMtBatches", RenderIntegration::g_khsm_batches));
+        out.push_back(kv("shaderMtJobs", RenderIntegration::g_khsm_jobs.load(std::memory_order_relaxed)));
+        out.push_back(kv("shaderMtStolen", RenderIntegration::g_khsm_stolen.load(std::memory_order_relaxed)));
+        out.push_back(kv("shaderMtWaits", RenderIntegration::g_khsm_waits.load(std::memory_order_relaxed)));
+        // 26638: shaderSlowestMs is the AMDAHL BOUND - the longest single
+        // compile unit, the floor no pool width can go under. The per-unit
+        // breakdown is the "KH shader census" RPT line, one per batch.
+        out.push_back(kv("shaderUnits", RenderIntegration::g_khsu_units.load(std::memory_order_relaxed)));
+        out.push_back(kv("shaderSlowestMs", RenderIntegration::g_khsu_slowest_ms.load(std::memory_order_relaxed)));
+        // 26641 async: AsyncFrames counts frames served WHILE compiling - the
+        // arming lane, non-zero means the game was playable through it.
+        // MtLive/MtDetached are the teardown lanes: Detached non-zero means a
+        // mission ended with a compile genuinely in flight.
+        out.push_back(kv("shaderAsyncFrames", RenderIntegration::g_khsa_frames));
+        out.push_back(kv("shaderAsyncMs", RenderIntegration::g_khsa_ms));
+        out.push_back(kv("shaderMtLive", static_cast<uint64_t>(RenderIntegration::g_khsm_live.load(std::memory_order_relaxed))));
+        out.push_back(kv("shaderMtDetached", RenderIntegration::g_khsm_detached));
         out.push_back(kv("offthreadTrigs", RenderIntegration::g_offthread_trigs.load(std::memory_order_relaxed)));
         out.push_back(kvf("hookInstallAtS", RenderIntegration::g_hook_install_at_s));
         out.push_back(kv("compositeAmbiguous", RenderIntegration::g_stats.composite_ambiguous));
@@ -12238,6 +12319,20 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("sunFarCasters", RenderIntegration::g_sun5_casters));
         out.push_back(kvf("sunFarReach", RenderIntegration::g_sun_band_reach[3]));
         out.push_back(kv("sunBandReachTakes", RenderIntegration::g_sun_band_reach_takes));
+        // 26631 KH_BAND_FIT_WHY. READ THESE BEFORE ANY OTHER BAND LANE:
+        // reach/casters/halfDiag are written ONLY on a completed render, so
+        // when FitWhy is anything but 0 those lanes are STALE from an
+        // earlier frame at an unrelated pose. 0 completed, 1 caster set
+        // EMPTY, 2 over the instance cap, 3 CB upload failed, 4 instance VB
+        // Map failed, 5 entered with no exit recorded, 6 not called.
+        out.push_back(kv("sunHeroFitWhy", RenderIntegration::g_sun_fit_why[0]));
+        out.push_back(kv("sunMidFitWhy",  RenderIntegration::g_sun_fit_why[1]));
+        out.push_back(kv("sunOutFitWhy",  RenderIntegration::g_sun_fit_why[2]));
+        out.push_back(kv("sunFarFitWhy",  RenderIntegration::g_sun_fit_why[3]));
+        out.push_back(kv("sunHeroFitN",   RenderIntegration::g_sun_fit_n[0]));
+        out.push_back(kv("sunMidFitN",    RenderIntegration::g_sun_fit_n[1]));
+        out.push_back(kv("sunOutFitN",    RenderIntegration::g_sun_fit_n[2]));
+        out.push_back(kv("sunFarFitN",    RenderIntegration::g_sun_fit_n[3]));
     // 26576 KH_SELF_PREFILTER gauges (the 26575 omission, paid): per-band
     // moment-pyramid freshness at dump time. 0 with the band valid means
     // the convert path failed and that band kernel is CLASSIC regardless

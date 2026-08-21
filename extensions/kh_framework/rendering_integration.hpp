@@ -1034,6 +1034,50 @@ struct Resources {
         KH_SAFE_RELEASE(sun5_srv);   // 26620
         KH_SAFE_RELEASE(sun5_dsv);
         KH_SAFE_RELEASE(sun5_tex);
+        // 26626 THE 26575 PREFILTER GROUP JOINS THE RELEASE PATH (ledger
+        // at KH_BUILD_TAG; no arm - see the ledger's conviction). Every
+        // resource ensure_sun_pf creates was released by NOTHING: not
+        // here, not in release_shadow_device_state, nowhere in the file.
+        // That is not a leak - the pointers are retained and reused - it
+        // is a STALE-DEVICE hazard, because ensure_sun_pf early-outs on
+        // each of them being non-null (if (!samp_pf), if (!blend_pf),
+        // if (!vs_sunpf || !ps_sunpf), and the tex/rtv/srv/rtvm[i][1]
+        // continue-guard), so after on_engine_reset nulled everything
+        // else it would return true without recreating a single one and
+        // kh_sun_pf_convert would draw into a dead device's RTVs. The
+        // 26575 ledger widened StateBackup for these binds "per the
+        // 26444 t25-leak lesson, honoured before first bind" - the bind
+        // half was audited and correct; the release half was not.
+        // 26633 THE TEST PROTOCOL FOR THIS REPAIR WAS WRONG IN TWO PLACES
+        // and it has read UNEXERCISED in every dump since 26626, so the
+        // correction matters more than the code. (a) msaaToggleWipes IS NOT
+        // A PROXY: kh_msaa_toggle_wipe scrubs the atlas, live-capture and
+        // mask state and never calls g_res.release, which is where this
+        // block lives - it counts a DIFFERENT event. bandWipeEvents is the
+        // only gate, and it IS sound: all four release_shadow_device_state
+        // call sites are paired with g_res.release. (b) A MISSION RESTART
+        // CANNOT SHOW IT: on_mission_end runs the release pair and then
+        // reset_session_state, which zeroes g_band_wipe_events - the restart
+        // wipes its own evidence. Only an IN-SESSION device reset can leave
+        // the lane non-zero: alt-tab in fullscreen, a resolution change, or
+        // a window-mode change. Ask for that and nothing else.
+        for (int khpf_i = 0; khpf_i < 3; ++khpf_i) {
+            KH_SAFE_RELEASE(sun_pf_srv[khpf_i]);
+            KH_SAFE_RELEASE(sun_pf_rtv[khpf_i]);
+            KH_SAFE_RELEASE(sun_pf_tex[khpf_i]);
+            for (int khpf_m = 0; khpf_m < 12; ++khpf_m)
+                KH_SAFE_RELEASE(sun_pf_rtvm[khpf_i][khpf_m]);
+        }
+        for (int khpf_m = 0; khpf_m < 12; ++khpf_m)
+            KH_SAFE_RELEASE(sun_pf_scr_srvm[khpf_m]);
+        KH_SAFE_RELEASE(sun_pf_scr);
+        KH_SAFE_RELEASE(ps_sunpfm);
+        KH_SAFE_RELEASE(ps_sunpf);
+        KH_SAFE_RELEASE(vs_sunpf);
+        KH_SAFE_RELEASE(blend_pf);
+        KH_SAFE_RELEASE(samp_pf);
+        KH_SAFE_RELEASE(pf_stage_mu);
+        KH_SAFE_RELEASE(pf_stage_st);
         KH_SAFE_RELEASE(rast_sun);
         KH_SAFE_RELEASE(rast_sun_bf);
         KH_SAFE_RELEASE(rast_sun_lo);
@@ -1438,12 +1482,14 @@ inline void kh_engcam_device_reset();
 // Best-effort by design: resources are released even if acquisition
 // fails mid-teardown - leaking device objects across a reset is the
 // worse failure, and matches the hook's previous (bare) behavior.
+inline void kh_shader_mt_shutdown();   // 26637: joins any live shader-compile pool
 inline void kh_tex_cache_release();   // material-texture cache (defined with the loader)
 inline void kh_user_shader_cache_release();   // user .hlsl PS cache (defined with the loader)
 inline void kh_user_lut_cache_release();   // user .cube LUT cache (defined with the loader)
 
 static void __stdcall on_engine_reset() {
     if (reorder_on_render_thread()) {
+        kh_shader_mt_shutdown();   // 26637: no worker may outlive the device
         g_res.release();
         release_shadow_device_state();
         kh_ui_mask_reset();   // 26055: learned backbuffer identities die with the device
@@ -1454,6 +1500,7 @@ static void __stdcall on_engine_reset() {
     }
 
     RVExtBridge::ScopedGraphicsLock khr_reset_lock;
+    kh_shader_mt_shutdown();   // 26637: no worker may outlive the device
     g_res.release();
     release_shadow_device_state();
     kh_ui_mask_reset();   // 26055: learned backbuffer identities die with the device
@@ -2072,6 +2119,22 @@ static std::atomic<bool> g_stats_armed{ false };
 //  152-155 THE 26304 SET (dump123 convictions; full ledgers at the arms). dump123 decomposed the 99 wrong-encode fire frames and OVERTURNED the 26302 reading: the live bridge was NOT mostly refused for foreign fetches - the arbitration was refusing and mispredicting TRUTH. (1) TWO PREDICTOR-FREEZE RUNS (ser 650-675, 706-711): the 26303 spike guard deadlocked - commits pulsing more than 2x above a stale base were skipped forever, 26 straight frames encoding 0.116 against a 0.30 truth. (2) SLOPE ACROSS SQUARE-WAVE EDGES measured net 3.4x WORSE than a flat hold (err sum 8.965 vs 2.600, worse on 92 rows): undershooting to the 0.5x clamp after down edges (ser 610/617/625 encoded 0.035 where the committed already EQUALLED the needed 0.070), overshooting after up edges (ser 614). (3) CORRIDOR-FLOOR REFUSALS: 4/4 were the world pair landing back on the session baseline 0.070 off a pulse/ramp top (needed ratios 0.13-0.50; 0.070/0.141 = 0.4965 sits a hair under the 0.5x floor) - the two largest single-frame gaps on record (0.463) were exactly these. DEFAULTS 26304: (a) predictor re-bases after two consecutive out-of-band commits that agree with each other (svPairRebase), slope only on smooth ramps (last two commits within 25 percent; measured ramps run ~5 percent/frame, pulse edges 40-400 percent), base freshness 500 ms, state file-scope and reset at teardown; (b) RETURN-TO-BASELINE ACCEPTANCE: a live pair outside the corridor is accepted when it matches the stable committed baseline within 10 percent (two consecutive commits within 2 percent define the baseline; the foreign down class 0.010 is 7x below the baseline itself; svPairBase, seamProjSrc 5); (c) CORRIDOR REFEREE GUARD: when the raw committed reference disagrees with the spike-guarded base by more than 2x (the ser-1772 muzzle-spike class) the base referees (svPairRefGuard). 153 reverts (a) to the 26303 predictor, 154 turns (b) off, 155 turns (c) off. 152 = ENCODE THE BOUND-CB CENSUS PAIR (handoff 3.1): a POINTER-KEYED census records every projection-shaped upload per buffer object (identity separates windows no value can); at the seam the bound VS/PS b0-b3 are looked up and the freshest hit is read into boundPairNear / boundPairAgeMs / censusMatch EVERY armed frame, instrument-first - the lanes decide whether the exact volume-pass pair is readable at the seam instant BEFORE anyone trusts it - and under 152 the seam encodes that pair (seamProjSrc 6, svCbcEncodes). New refusal lanes: seamLiveNear (the raw live-bridge near at the seam fetch - the lane whose absence forced dump123 to proxy through liveNearInj) and seamPairWhy (0 live-corr 1 live-base 2 insane 3 corridor 4 no-ref 5 no sample). Protocol: dump mode 0 look-down fire (expect svPairBase and svPairRebase engaged, svPairPred collapsed, row-shifted mismatches near 0, no frozen seamNear runs), then read boundPairNear against injNear[k+1] on the surviving edge frames - tracking = fold 152 next build and the campaign closes at exact. NOTE 26301 sniff-first postmortem stands: sniffNear[k] == injNear[k] on 132/132 in dump123 - the value the seam needs is not uploaded yet at the seam instant, so re-aiming the sniffer (the old 3.2 plan) is structurally dead; the live bridge and the bound census are the only fresh-phase feeds.
 //  FIELD 26304 (dump1): THE FIXES ENGAGED AND THE INSTRUMENT CLOSED THE CAMPAIGN. Arbitration round: wrong-encode rows 99 to 40, predictor err sum 8.965 to 4.302 (now ~= the flat hold), frozen runs capped at 2 frames by the rebase escape (svPairRebase 13), svPairBase 11 with 5/5 fresh on edges, svPairRefGuard 16; the 40 residuals were genuinely-foreign seam-instant fetches (seamLiveNear 0.010/10.0 in the lane, at last directly visible), rebase lag, and a measured baseline-tracker limitation - the 2 percent stability latch follows ramp PLATEAUS during slow glides, so big returns off a glide top miss the match (ser 730/767, the 0.628 gaps). CENSUS ROUND, THE VERDICT: boundPairNear == injNear[k+1] on 199/199 moving frames AND on 40/40 of the rows every arbitration tier still got wrong, disagreements 0/511 session-wide, age 0-1 ms, one stable identity in VS b2 all session - the engine uploads frame k+1 projection into the bound b2 BEFORE the pre-clear seam runs, and buffer identity reads it where value arbitration structurally cannot. 26305 FOLDS THE BOUND-CENSUS ENCODE TO DEFAULT (seamProjSrc 6, svCbcEncodes ~ svInjects is engagement; the census now runs whenever the live-shadow feature does - measured cost ~1500 probed uploads/frame at ~30 compares each). The 26302-26304 live/baseline/predictor chain stays intact beneath as the census-miss fallback. 156 = REVERT to 26304 live-first (152 stays as an alias of the default). ACCEPTANCE (the closing one): seamNear[k] == injNear[k+1] on moving frames outright, seamProjSrc 6 dominant, FP pulsating scale gone shooting and not, slice/look-down/TP holding.
 //  FIELD 26305 (dump2 + screenshot): THE PROJECTION AXIS IS CLOSED (seamProjSrc 6 on every inject, svCbcEncodes == svInjects == 2232, row-shifted mismatches 0) and the survivor moved axes: on rigorous rotational+positional motion a cascade ground shadow paints THROUGH the box along its edges - every one of the 19 reprojPx spikes (145-2133 px) is the seam TRAJECTORY BOUND refusing a REAL move (svLiveTrnBound 28, seamCamDxM == camStepM on exactly those frames): the bound referenced the latch step from the PREVIOUS seam run (two frames old) and 3x of a two-frame-old step loses to every measured acceleration onset (0.095->0.349 = 3.7x, 0.123->0.405 = 3.3x), so the footprint rode a one-frame-stale camera and the stencil darkening landed across the box edge. 26306 REPAIRS THE BOUND ON THREE AXES: (a) the velocity reference is max(previous, CURRENT-run latch step); (b) 3x -> 4x (covers every legit onset on record; the ser-3642 foreign class - 2.593 m off a STATIONARY latch - is still refused by the 0.30 m floor since stationary means both references ~0); (c) CONFIRMATION ESCAPE, the predictor-rebase pattern on the translation axis: a refused live camera is remembered and taken next run if the new live camera agrees with it within max(0.5 m, 50 percent) - a real relocation confirms itself in one publication, a foreign one-frame flicker never does. svLiveTrnWide counts takes the old bound would have refused; svLiveTrnRebase counts escapes; seamTrnEvent is the per-frame lane (0 none 1 refused 2 wide-take 3 escape). 157 reverts the whole bound block to 26305. AND THE CENSUS LEARNS THE VIEW, INSTRUMENT-FIRST (the projection playbook, round 2): the recorder probes the 16-float windows adjacent to the validated projection for a view signature (near-orthonormal basis rows, 0-0-0-1 column, finite translation, both layouts) and stores the extracted CAMERA per buffer identity; at the seam, boundCamDxM = |census camera - seam draw camera| and boundCamLiveDxM = |census camera - live fetch camera| are read every armed frame with boundCamOk gating. NO ENCODE PATH TOUCHES IT in 26306. THE FOLD VERDICT FOR 26307: boundCamDxM ~ camStepM on exactly the seamTrnEvent-1 frames while boundCamLiveDxM ~ 0 = the engine own upcoming camera is readable at the seam and becomes the translation authority, retiring the bound outright - the 199/199 proof pattern on the translation axis. boundCamOk 0 everywhere = the view does not ride adjacent to the projection and the repaired bound is the final form. ACCEPTANCE 26306: the through-the-box stripe gone on rigorous motion (svLiveTrnWide + svLiveTrnRebase absorbing the former refusals, reprojPx spikes collapsed), FP still resolved, slice/look-down/TP holding. FIELD 26306 (dump10): ALL ACCEPTED AND THE CAMPAIGN IS CLOSED - projection exact (svCbcEncodes == svInjects == 2217, mismatches 0, seamProjSrc 6 throughout), translation clean (0 reprojPx spikes, svLiveTrnWide 33, svLiveTrnBound 3 true refusals), view probe measured NEGATIVE (svCbcCamRecs 0: no view rides adjacent to the projection) and RETIRED at 26307 - the repaired bound is the final form; probe machinery and lanes stay compiled for re-arming, per the counters-never-die rule. || 26308-26313 (full records: RENDER_HANDOFF_CAMPAIGN_43.md; in-code ledgers authoritative): 138/139/140 = footprint grow 2/4/8 pct (svGrowDraws/Last). 158 = absolute-translation revert (26309). 159 = adopted-camera-anchor revert (26310). 160 = latch-FOV revert (26311). 161 = unrefereed-census revert (26311). 162 = record-all-classes census revert (26312). 116/118/120/125 inert since 26308.
+//  || 26641 THE RENDER THREAD STOPS WAITING, AND THE SPECULATION STOPS OVER-REACHING - PARALLELISM IS FINISHED AS AN AXIS AND THIS IS WHAT IS LEFT (KH_SHADER_ASYNC + the LEVER-1 trim; mode 406 restores the blocking form; C++-side only, no shader source, no lighting0.y code). FIELD ON 26640, and it is two results in one line. THE ARM WORKED: shaderMtBatches 1 - the composite batch never armed because every unit was already in the memo - ONE freeze instead of two, speedup 3.02x to 9.76x, and shaderMtWallMs 393391 against shaderSlowestMs 393387, which means WALL TIME IS THE SLOWEST SINGLE UNIT TO FOUR MILLISECONDS. The pool has no scheduling slack left at all and no further parallelism work is worth doing. THE PREDICTION FAILED AND THE CORRECTION IS OWED (rule 1.16): I pre-registered ~270000 ms and the field read 393391. The cause is a thing I treated as a constant and is not - PER-UNIT COMPILE TIME DEPENDS ON CONCURRENCY. Measured across three builds: 2 heavy units concurrent gives 224 s each, 4 gives 260 s, 10 gives 391 s, a fit of roughly N^0.44. Ten D3DCompile instances over 400 KB translation units thrash each other's cache and memory bandwidth, so the speculation bought 1.25x where I promised 1.8x. LEVER 1, THE TRIM: eight composite variants were queued and four consumed, and the MSAA_DEPTH=1 half HAS NEVER BEEN CONSUMED IN ANY DUMP - every one reads MSAA_DEPTH=0, SAMPLE_COUNT=1 at the composite while the scene depth is 8x, because comp_depth_samples is not depth_sample_count. It is removed. Six heavy units instead of ten, ~312 s instead of 391 by the fit. An MSAA-on composite misses and pays a second batch exactly as at 26639 - never worse than the state before this campaign. LEVER 3, AND IT IS THE REAL ONE: A SINGLE UNIT ALONE IS STILL ~200-260 s, so without shipped blobs or a smaller shader, minutes of compiling are physics and the only remaining question is whether the PLAYER IS FROZEN THROUGH THEM. ensure_resources now returns KH_SHADERS_COMPILING while the batch runs. Every caller already treats a non-empty return as skip-this-frame - that contract has existed since 26319 - so the game runs normally, the 30-second watchdog stops firing, and the mesh appears when the shaders are ready. Everything after the gate is UNCHANGED CODE taking memo hits. THE DEFERRAL IS A STATE, NOT A FAILURE, and kh_ensure_ok now recognises the sentinel and stays silent - without that it would reach report_error, which calls sqf::throw_exception, and the 26639 defect would fire once per session. TWO LIFETIME HAZARDS THAT ASYNC CREATES, BOTH CLOSED, because the operator asked for exactly this. (1) DANGLING JOBS: a worker now outlives the ensure that queued it, and every job's source string and define table is a FUNCTION LOCAL at the call site - they would dangle the instant ensure_resources returned. The pool takes a DEEP COPY of every job into heap nodes, so growing the owner vector cannot move the strings the macro table points at, and a null Definition is PRESERVED AS NULL because the cache hash mixes nothing for null and a separator for empty - collapsing them would silently change every key in the cache. (2) TEARDOWN WITH A COMPILE IN FLIGHT: a thread inside D3DCompile cannot be killed, TerminateThread leaks the loader and heap locks and is documented as unusable, so the policy is to stop all UNSTARTED work instantly via an abort flag the worker checks before every claim, then wait a BOUNDED 5 s. Almost every teardown is idle and costs nothing. If a compile really is running the threads are DETACHED rather than blocking the game for minutes, and detaching is safe HERE and only here: the worker touches no device object and no engine state, only D3DCompile, the memo and its own copied strings; the extension DLL stays mapped for the process lifetime; the thread container is leaked since 26637 so no destructor can meet a joinable thread; and the memo, queue and owned storage are DELIBERATELY NOT FREED because the detached worker still reads them. g_khsm_live keeps them alive and makes the next prewarm REFUSE until the last worker exits, at which point the caller compiles inline, which is always correct. A hard crash needs nothing: threads are not processes and die with the address space. PRE-REGISTERED ACCEPTANCE, cold cache: (a) THE GAME DOES NOT FREEZE - it runs at normal frame rate with the mesh absent, and shaderAsyncFrames is non-zero, which is the arming lane; (b) the mesh appears once and does not stall again; (c) shaderAsyncMs lands near 310000 rather than 393000 - lever 1; (d) no 'No alive' watchdog lines in the RPT; (e) shaderMtDetached 0 on a normal session, and a mission ended mid-compile returns to the menu within ~5 s with it reading 1; (f) nothing on screen changes once compilation completes. FALSIFICATION: any shader failing to create, or any non-determinism between launches = the deep copy is not reproducing a define table and 406 is the instant stand-down; a hang at mission end = the 5 s bound is not being reached and the abort flag is not read where I think it is. NUMBER HYGIENE: mode 406 minted, no lighting0.y code. FREE NOW: debug modes 407+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26640 THE IDLE CORES GET THE COMPOSITE UNIT, AND THE OBJECTION THAT STOPPED THIS AT 26639 DISSOLVES ON ONE OBSERVATION - WASTED WORK ON AN IDLE CORE COSTS NO WALL TIME (KH_SHADER_SPECULATE default; mode 402 still stands the whole pool down; C++-side only, no shader source touched, no lighting0.y code). THE MEASURED SHAPE, from the 26638 census: batch 1 has TEN units of which exactly TWO are heavy, so on the operator's 16-thread machine EIGHT CORES SIT IDLE for 225 s while the composite unit's four heavy variants wait for a second batch that cannot start until g_res.comp_depth_samples is known - and then run 267 s on their own. 225 + 267 = the operator's 8.2 minutes, in two freezes, at 25 pct and 50 pct CPU respectively, exactly as he described them before any lane confirmed it. THE FIX IS NOT TO GUESS THE SAMPLE COUNT, IT IS TO REFUSE TO: both plausible configurations are queued into batch 1 - MSAA_DEPTH 0 at SAMPLE_COUNT 1, and MSAA_DEPTH 1 at the learned depth_sample_count or 8 - and the memo serves whichever the engine turns out to want. The loser costs cycles and heat and NEVER A SECOND of the freeze, because it ran on a core that had nothing else to do. Wall collapses from 225 + 267 to max(267) and the SECOND FREEZE DISAPPEARS ENTIRELY: one wait instead of two, ~4.5 minutes instead of 8.2, a measured 1.8x on top of the 3.02x the pool already delivered. AND THE 26637 LIFETIME MODEL IS NOT LOOSENED, which is what I told the operator this change would cost and was WRONG about - the correction is owed and is stated here (rule 1.16). I said a cross-batch prewarm needed a session-scoped POOL, threads living across frames, giving up 'no worker outlives its batch'. It does not. Only the MEMO has to survive, and a memo is a map of blobs, not a thread. ensure_resources still joins every worker before it returns - keep_memo leaves the compiled blobs behind and nothing else - so every guarantee 26637 bought stands verbatim: no thread crosses a scope, the RAII join still covers every early return, the leaked container still cannot terminate at unload. The change is one bool. I had priced a risk that does not exist and nearly traded a crash-safety property for it. DISCLOSED COSTS, all three. (i) THE FIRST FREEZE GETS LONGER, 225 s to ~267 s, because ensure_resources now joins on the slowest COMPOSITE unit too - the mesh appears later, and then does not freeze again. One 4.5-minute wait beats 3.8 plus 4.5 and the operator should know which one he is looking at. (ii) CPU AND HEAT ROUGHLY DOUBLE on the cold run: eight speculative heavy units against four consumed. That is the price of not guessing and it is paid on idle cores. (iii) A 2x OR 4x MSAA USER MISSES both speculations and gets the 26639 behaviour exactly - two freezes - never worse, because a memo miss compiles inline as it always did. THE DEFINE TABLES ARE THE FRAGILE PART AND ARE FLAGGED AT THE SITE: the memo key is an FNV over source, entry, target and the define NAMES AND VALUES IN ORDER, so the speculation must mirror ensure_composite_shader byte for byte, including the asymmetry that the base and arb tables carry KH_ARB_DEPTH explicitly while the TEXTURED base table omits it. A mismatch is silent and costs only speed. PRE-REGISTERED ACCEPTANCE, cold cache: (a) ONE freeze, not two, and the mesh does not stall again after it appears; (b) shaderMtBatches still 2 but the batch-2 census line reads its four PSComposite units as CACHED at 0 ms - THAT IS THE ARMING LANE, and if they read hundreds of seconds the speculation missed and the define tables have diverged; (c) shaderMtWallMs lands near 270000 rather than 490000; (d) shaderUnits climbs from 25 to ~33 - the speculative losers - which is the cost made visible; (e) nothing on screen changes in any mode. FALSIFICATION: batch 2 compiling anything at all = a define mismatch, and the census line names which variant by its define set. NUMBER HYGIENE: nothing minted, nothing retired. FREE NOW: debug modes 406+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26639 THE CENSUS ANSWERED IT AND THE ANSWER IS NOT PARALLELISM - ONE PIXEL SHADER TAKES FOUR AND A HALF MINUTES TO COMPILE (KH_SHADER_FLAGS, three OPT-IN arms 403/404/405, no default change; plus a DEFECT REPAIR I owe for 26638). FIELD, dump2 on 26638 with the RPT census, and it is decisive. shaderCompileMs 1489960 against shaderMtWallMs 492717 = THE POOL DELIVERED 3.02x AND IS WORKING. Batch 2's seven units: four PSComposite variants at 267547, 262535, 259352 and 252611 ms - a quarter of an hour of CPU in four units - then VSComposite at 57 and 53 ms and a stray PSDepthResolve at 4. Batch 1 decomposes by subtraction to 447801 ms of CPU in 225170 ms of wall = 1.99x, which is EXACTLY TWO heavy units at ~224 s each: PSMain and its KH_TEXTURED twin. THE OPERATOR'S OWN DECOMPOSITION WAS RIGHT IN EVERY PARTICULAR - freeze one 3.8 min at ~25 pct CPU because only two threads had work, freeze two 4.5 min at ~50 pct with threads visibly maxing because four did, and shaderMtThreads 10 was capped by the JOB COUNT and never by his 16 cores. THE POOL IS AT ITS AMDAHL FLOOR: shaderSlowestMs 267547, so infinite cores still costs 4.5 minutes and the 26636 pre-registration named that bound before the build shipped. NO FURTHER PARALLELISM IS WORTH BUILDING and the batch-overlap idea is BANKED, NOT SHIPPED - it would fold 8.2 minutes into 4.5 and nothing more, it needs the composite's MSAA sample count before ensure_resources knows it, and guessing wrong compiles variants nobody uses AND pays for the right ones after. THE REAL FINDING, and it is the one number that reframes the whole axis: VSComposite compiles THE SAME SOURCE STRING - the same g_cb_hlsl, the same composite chunks, the same defines - IN 53 MILLISECONDS. Preprocessing and parsing are free. The entire cost is code generation over the shadow chain, which only the pixel shaders call, and 5000x between a VS and a PS on one source is not a big shader, it is a pathology. Flags1 at the single D3DCompile call has been 0 for the life of this file: fxc's default optimisation with full branch flattening, applied to five nested tiers of early-returning branches, each carrying a 9-tap ring, an RPDB tap, a manual trilinear and a jurisdiction test. That is the exact shape whose flattening explodes. THE ARMS, all opt-in, all producing IDENTICAL PIXELS: 403 PREFER_FLOW_CONTROL (keep branches as branches - the prime suspect, and the only one that could ever become a default), 404 OPTIMIZATION_LEVEL0 and 405 SKIP_OPTIMIZATION (diagnostics that buy compile time with FRAME time - they are not candidates and are labelled so in the whitelist). THE FLAGS JOIN THE CACHE HASH AND THEY HAD TO: the 26482 cache is content-addressed over source+entry+target+defines, so without this an arm's blob would be written under the DEFAULT's key and served to a later default run - a silently wrong shader, the one failure mode a content-addressed cache exists to make impossible. DISCLOSED: adding the field invalidates every existing .khsc entry ONCE. THE DEFECT REPAIR, owed from 26638 (rule 1.16): report_error calls sqf::diag_log AND sqf::throw_exception, so the census raised a REAL SCRIPTING ERROR every batch - the operator's RPT carries 'Error Unhandled exception' with the entire census line as its text, inside interceptOnFrame. A gauge must not throw at the mission. kh_report_note logs and returns; the census uses it. My mistake, found by the field in one round, and the census data itself was unaffected. PRE-REGISTERED PROTOCOL, three cold runs, and the cache makes this cheap because each arm caches under its own key: clear the cache once, then run 403, then 404, then 405, reading shaderSlowestMs and the census line each time. THE READS: 403 collapsing the per-unit figures while pixels are unchanged = branch flattening is the author, and 403 becomes a DEFAULT candidate with its own build, its own revert and a frame-time acceptance, because it changes generated code and this file does not ship codegen changes on a compile-time argument alone. 403 null with 404 and 405 collapsing = the cost is raw optimiser volume rather than flattening, no flag is shippable, and the axis moves to the SOURCE - the named candidate there is that PSMain and PSComposite each inline the debug probes (KhSelfCertProbe, KhSelfTierProbe, KhPfProbe, KhPfProbe2), every one of which re-derives the tier walk, so a debug-only compile variant is the lever, at the cost of the live A/B this campaign's whole method rests on - a trade for the operator, not for me. ALL THREE NULL = the time is not where the census says and the next step is a profile of D3DCompile itself, not another guess. NUMBER HYGIENE: modes 403, 404 and 405 minted, no lighting0.y codes. FREE NOW: debug modes 406+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26638 THE POOL ENGAGED AND THE CLOCK DID NOT MOVE, SO THE NEXT THING TO SHIP IS A MEASUREMENT AND NOT A FIX (KH_SHADER_CENSUS, pure gauge; mode 0 rendering byte-identical, no mode minted, and it records under mode 402 as well so a SERIAL run is directly comparable). FIELD ON 26637, and the operator's own decomposition is better than any lane I had: ONE freeze of 3-4 minutes before the mesh appears, a SECOND freeze of 3-4 minutes with it on screen, ~25 pct CPU across 16 threads during the first with NOTHING maxing out, ~50 pct during the second WITH threads visibly maxing. That is not a pool that failed to arm - it is a pool arming twice and finding almost nothing to spread. THE READING, and it is a CANDIDATE until this gauge confirms it: batch 1 is ensure_resources' ten units, of which only PSMain and its KH_TEXTURED twin carry the whole shadow chain while VSMain, VSMirror, VSFullscreen, VSSunDepth, PSInjDepth, PSMaskCast and PSMaskPrime are small - so eight workers finish in seconds and exit, two threads compile for the rest of the freeze, and the caller blocks on PSMain. Two busy threads out of sixteen plus the game is the reported 25 pct. Batch 2 is ensure_composite_shader's six, of which FOUR are heavy PSComposite variants - base, arb, textured, textured-arb - which is four threads pegged and the reported 50 pct WITH maxing, exactly the shape of a working pool. If that reading is right the pool is behaving correctly and is bounded by its longest single unit, which is Amdahl and precisely what 26636 pre-registered: bounded by the single longest unit, PSMain and PSComposite are the tall poles and no pool can beat them. WHY THIS IS A GAUGE BUILD AND NOT A FIX. Three candidate remedies exist and they have completely different costs - overlap the two batches so the freezes run concurrently, attack the compile time of the giant units themselves, or move compilation off the spawn path to mission start so it lands inside the loading screen - and choosing between them needs to know WHICH unit is the tall pole and HOW LONG it actually takes. Session totals cannot answer that: shaderCompileMs over shaderMtWallMs gives an average speedup and names nothing. This campaign has convicted a mechanism from a lane that could not support it three times - visual 21's containment paint, the large-object prediction, and the stale band lanes at 26631 - and each cost a round. Rule 1.12 binds and the operator asked for the instrument first. WHAT IT EMITS: one RPT line per batch, every unit sorted SLOWEST FIRST, each named by entry point, target, the low 32 bits of its content hash and its define set - and the define set is not decoration, it is the ONLY thing separating the four PSComposite variants, which share an entry point and would otherwise be four indistinguishable lines in a log. Cached units report 0 ms and are labelled CACHED, so a warm run reads as obviously warm instead of as a suspiciously fast compile. Records are taken inside kh_shader_compile_raw, so they come from workers as well as the caller and cover FAILED compiles too - a failed compile still spends the time. The list is bounded at 64 entries because user shaders compile all session long. THE WALL AND CPU FIGURES IN EACH LINE ARE SESSION-CUMULATIVE: batch 2's own cost is the DIFFERENCE between its line and batch 1's. That is stated in the code and here because reading them as per-batch is exactly the misreading this gauge exists to prevent. TWO LANES BESIDE IT: shaderUnits (units actually compiled, so a cold run's count is the unit inventory) and shaderSlowestMs - THE AMDAHL BOUND AS ONE NUMBER, the floor no amount of parallelism can go under while the unit list is what it is. ACCEPTANCE, an instrument's acceptance being that it reads: a cold-cache run emits three census lines with plausible per-unit millisecond figures, shaderSlowestMs is non-zero and close to the observed freeze length, and mode 0 rendering is unchanged. FALSIFICATION: every unit reading a similar small number while the freeze is minutes long = the time is NOT in D3DCompile at all and the whole 26636 premise is wrong - the next suspect is then the cache file path or something upstream of the compiler entirely, and it gets its own read before anything else is built. NUMBER HYGIENE: nothing minted, nothing retired. FREE NOW: debug modes 403+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26637 THE 26636 POOL'S LIFETIME EDGES, CLOSED - WHAT A CRASH ACTUALLY DOES TO IT, ANSWERED CASE BY CASE RATHER THAN REASSURED ABOUT (hardening only; mode 402 unchanged, no mode minted, no shader arithmetic touched, mode 0 rendering byte-identical). THE OPERATOR ASKED WHETHER A CRASH MID-COMPILE CAN LEAVE THREADS BEHIND. Three cases, and they have three different answers. (1) A C++ EXCEPTION during an ensure was already covered: KhShaderMtScope joins during unwinding. (2) A HARD FAULT - an access violation - KILLS THE PROCESS, and threads are not processes: the kernel tears every one of them down with the address space. THERE IS NO ZOMBIE PROCESS TO LEAVE BEHIND and it is worth saying plainly rather than building machinery against a hazard that does not exist. (3) THE CASE THAT IS REAL AND WAS NOT COVERED IS THE FROZEN GAME, and it has two doors, both now shut. THE FIRST DOOR - AN EXCEPTION LEAVING A WORKER IS std::terminate. 26636 guarded only the D3DCompile call; the PUBLISH block that follows it takes a lock and assigns two std::strings, either of which can throw bad_alloc, and that throw would have killed the game outright from a thread the operator never knew existed. The whole worker body is now guarded. THE SECOND DOOR - A WORKER THAT DIES BETWEEN CLAIMING A UNIT AND PUBLISHING IT leaves every waiter on that unit blocked forever, and the waiter is the RENDER THREAD inside a graphics lock: a hung game with no recovery, which is the closest thing to the operator's zombie that this design can actually produce. The claimed hash is now tracked and the backstop publishes a FAILURE for exactly that unit - the waiter wakes with an error string, the ensure fails and retries next frame through machinery that has existed since 26347, and nothing hangs. Surgical rather than blanket: units other workers are still compiling are not touched. THE FOURTH THING, AND IT IS THE ONE THAT WOULD HAVE COST A DEBUGGING SESSION: ~std::thread ON A JOINABLE THREAD CALLS std::terminate, and 26636 held the workers in a STATIC vector. Under /EHsc an access violation does NOT unwind C++ destructors, so a fault mid-batch skips the scope guard, leaves the vector joinable, and then the CRT destructs it at DLL detach - raising a SECOND fatal error inside the crash handler and BURYING THE ORIGINAL FAULT IN THE DUMP. Our cleanup would have destroyed the evidence for the bug that triggered it. The container is now deliberately leaked - one empty vector for the process lifetime - so it can never destruct a joinable thread. TWO MORE STRUCTURAL GUARDS while the file was open. kh_shader_mt_prewarm CANNOT THROW: a throw out of the scope's CONSTRUCTOR would skip its destructor and orphan threads that had already spawned, so the body is wrapped and a partial batch claims ownership so the caller tears it down. And it REFUSES TO ARM WHEN A BATCH IS ALREADY LIVE, because a nested batch would clear the job queue under running workers - nothing nests today, verified by walking ensure_resources, ensure_composite_shader and ensure_compute_shaders for every ensure_* they call, and this makes it impossible tomorrow. The scope now records whether it armed and tears down only its own batch. TEARDOWN REACH WIDENED: kh_shader_mt_shutdown is now called from BOTH device-reset paths in on_engine_reset, ahead of g_res.release, as well as from the mission-end path 26636 added - in a correct run every one of them is a no-op, which is the point. WHAT IS STILL TRUE AND IS NOT DEFENDED AGAINST, said rather than hidden: a fault INSIDE D3DCompile itself kills the process exactly as it did before this campaign - moving the compile off-thread changes only WHICH stack appears in the dump, and dumps from this build will now show worker threads sitting in the compiler, which is normal and not the fault. Nothing here bounds a worker that runs forever; D3DCompile is not known to hang, the join is bounded by the longest single shader, and that wait is the SAME wait the serial path already made the render thread endure - so a watchdog would be machinery for an unconvicted hazard, which rule 1.12 forbids. If a startup ever hangs with shaderMtJobs short of the unit count, that is the read, and the watchdog gets built then with a measurement behind it. ACCEPTANCE: mode 0 unchanged in every respect; the 26636 acceptance stands verbatim and is not re-run by this build; shaderMtStolen and the shaderCompileMs-to-shaderMtWallMs ratio still read as 26636 pre-registered them. NUMBER HYGIENE: nothing minted, nothing retired. FREE NOW: debug modes 403+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26636 SHADER COMPILATION GOES WIDE - EVERY CORE INCLUDING THE CALLING ONE, ON A FILE THAT HAS EXACTLY ONE D3DCompile (KH_SHADER_MT default; mode 402 compiles serially - C++-side only, no lighting0.y code, the 26611/26620 pattern). OPERATOR REPORT: five to ten minutes of startup on any machine where the .khsc cache is cold. THE CAUSE IS STRUCTURAL, not a slow shader: 26497 verified in code that this file contains ONE D3DCompile call inside compile_shader and that every family routes through it - and every one of them therefore ran STRICTLY SEQUENTIALLY on the calling thread while every other core idled. Roughly twenty heavy units: the mesh VS/PS twins and their KH_TEXTURED variants, VSMirror, VSFullscreen, VSSunDepth, PSInjDepth, PSMaskCast, PSMaskPrime, the composite trio and its three textured twins, and the two compute kernels over g_cs_hlsl, which is the largest single source in the file. THE SHAPE IS A PREFETCH WITH A MEMO, AND NOT ONE CALL SITE MOVES - that is the design's whole point and the reason it is safe to ship against a five-campaign-old rendering path. A batch of jobs is queued, worker threads compile them into a memo keyed by THE SAME content hash the 26482 disk cache already uses, and compile_shader consults the memo before compiling. Every existing call, every returned error string, every non-fatal fallback and every early return is byte-identical; a memo miss compiles inline exactly as today. So a job list that drifts out of step with its ensure - a new shader added later and not listed - costs SPEED AND CANNOT COST CORRECTNESS. Twenty call sites were left untouched deliberately rather than rewritten into a batch API, because the error handling at those sites is load-bearing and was not worth re-deriving for a startup optimisation. THE CALLING THREAD IS A WORKER, which the operator asked for explicitly: when compile_shader wants a unit that is queued but NOT YET CLAIMED it claims and compiles it ITSELF rather than blocking - work stealing, counted in shaderMtStolen - and blocks only on a unit another thread has already started, bounded by that one unit. Deadlock is impossible because the claimer always publishes a result, a throw included. Workers spawn at hardware_concurrency minus one; a single-core machine takes no pool at all. CLEAN-UP IS RAII AND THAT IS THE POINT. These ensures are dense with early returns - every Create failure is one, and ensure_composite_shader's comp_fail returns from four places - so a join at the bottom would be skipped on exactly the paths where it matters most. KhShaderMtScope joins every worker and releases every unconsumed blob IN ITS DESTRUCTOR, so one declaration covers every exit including a throw: the ScopedGraphicsLock discipline this file already runs on, applied to threads. No worker can outlive its batch by construction, which is why there is no stop flag and nothing to poll. A blob the pool compiled that a conditional path never consumed - VSMirror when g_vmir_vs already exists is the live example - is released there rather than leaked. THREAD SAFETY, AUDITED RATHER THAN ASSUMED, because this is the first off-thread work in this file since the 26497 strip: D3DCompile in d3dcompiler_47 is free-threaded; NO DEVICE CALL AND NO CONTEXT CALL HAPPENS OFF-THREAD - workers produce BLOBS ONLY and the calling thread creates every device object exactly where it did before, so the immediate context is never touched by a worker and the 26497 render-thread-only rule is not reopened; kh_report_error is unreachable from a worker, since errors travel back as strings and are reported by the caller at its own site; the three cache telemetry counters became atomics; and kh_mesh_cache_trim - which ENUMERATES AND DELETES in a shared directory and bumps a plain counter - is serialised on its own mutex, the one genuine shared-state hazard the pool creates and the one thing a naive version of this build would have missed. THE LANES ARE THE ARMING PROOF and they are a PAIR: g_shader_compile_ms is now the SUM OF PER-COMPILE DURATIONS ACROSS ALL THREADS - CPU time - while shaderMtWallMs is the wall clock spent inside batches, so THEIR RATIO IS THE MEASURED PARALLELISM and a serial build reads ~1.0 by construction. Beside them: shaderMtThreads (widest batch, workers plus the caller), shaderMtBatches (expect 3), shaderMtJobs (units compiled by workers), shaderMtStolen (units the caller took itself - THIS IS THE LANE THAT PROVES THE MAIN THREAD PARTICIPATED, and a zero there means it only ever waited), shaderMtWaits. PRE-REGISTERED ACCEPTANCE, and it must be read on a COLD CACHE - delete the .khsc files in Documents\\Arma 3\\kh_framework\\cache first, because a warm cache makes every compile a file read and this build unmeasurable: (a) cold-cache startup falls by roughly the core count, bounded by the single longest unit - PSMain and PSComposite are the tall poles and no pool can beat them; (b) shaderMtThreads reads the core count, shaderMtBatches 3, shaderMtStolen NON-ZERO, and shaderCompileMs divided by shaderMtWallMs reads well above 1 - if that ratio is ~1 the pool did not engage whatever the clock says; (c) shaderCacheMisses on the cold run equals the unit count and the SECOND launch reads all hits with shaderMtWallMs near zero - the 26482 cache still doing the real work; (d) NOTHING ON SCREEN CHANGES, at all, in any mode: identical shaders, identical blobs, identical creates; (e) mode 402 restores the serial compile and the long startup returns with it. FALSIFICATION, binding: any compile error that did not occur before, any shader failing to create, or any non-determinism between launches = the memo is handing out the wrong blob for a hash and 402 is the instant stand-down; a hang at startup = the wait path, and the first thing to read is whether a worker died before publishing. NUMBER HYGIENE: mode 402 minted, no lighting0.y code. FREE NOW: debug modes 403+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26635 THE BOUNDED LIFT IS FIELD-PROVEN AND BECOMES THE DEFAULT - THE OUTER-TO-FAR HARD CUT AND THE FAR-TIER WOBBLE ARE ONE ARTIFACT, THEY DIED TOGETHER, AND THE 26618 REPORT THAT PREDATES THIS ENTIRE CAMPAIGN IS CLOSED (KH_FAR_SELF_CERT_SCOPE default; mode 401 / lighting0.y 71 restores the 26624 gate - one default, one A/B, rule 1.11). FIELD, the full three-arm battery at the transition pose plus the vest pose, operator-run: 392 eliminates the cut, 400 eliminates the cut, 269 places the cut ON the cyan/magenta boundary - the kh4_in contour, the gate's own predicate - and THE WOBBLE DIED WITH THE CUT UNDER BOTH ARMS. That last clause is the one that matters most, because it was pre-registered as binding and it was the mechanism's whole claim: one contour, two populations, the union serving at a hash-gated mesh-priced texel on one side and far serving at a snapped range-priced one on the other. Had the cut died and the wobble lived, the mechanism would have been incomplete. It did not. The operator's own diagnosis - the hard version and the smooth version of the same transition coinciding along one contour - is confirmed end to end, and it was better than any the assistant proposed for four rounds. THE SPLOTCH CLAUSE, the binding one, READ CLEAN AT BOTH ARMS: the 26624 class stays dead at 400 AND at 392, which resolves this build's pre-registered outcome (2) - THE GATE IS REDUNDANT WHOLESALE against current certification. 26624 built it because a receiver absent from the fine maps could never certify and nothing could zero the far band's over-extended silhouette; 26627 changed certification to ray coverage and 26629 made a CLEAR texel certify, so that receiver now certifies at outer, jurisdiction arms, and a sub-guard ring meets khla_w 1 in the window interior and is multiplied to zero. The gate has been doing a job jurisdiction took over two builds later, and doing it with a binary switch where jurisdiction is weighted and wholesale where jurisdiction is selective. WHY THE BOUND STILL SHIPS RATHER THAN THE BLUNT 392 FORM, stated as redundancy rather than hidden as protection: against TODAY'S certification the kh4_cert conjunct is dead weight - the field says so, since 392 and 400 read alike at the splotch pose. It is kept because it is one AND, it costs nothing, and it is the only thing standing between this default and the 26624 class the moment certification stops reaching a receiver: under 394 or 396 - the certification reverts, both live arms - kh4_cert goes false at exactly the absent receivers and the 26624 gate reasserts itself automatically, where 392's form would hand them the ring back. A revert arm that silently re-opens a closed artifact class is not a revert arm, and this construction makes that impossible without a line of special-casing. WHAT CHANGES ON SCREEN, precisely: the far self tier now also serves inside the OUTER band's window wherever outer certified, so the outer-to-far handoff stops being a binary switch into the union for every fragment that is not carrying a blend. The quality step across the contour collapses from the union-versus-far texel ratio, ~3.5-4.3x, to nothing. DISCLOSED COSTS, all three, none of them hypothetical. (i) The far tier's block now executes for fragments that previously skipped it - a per-pixel cost on far-range surfaces inside outer's window, the same class as any tier's own block, and the far tier carries no moment pyramid so it is the cheapest of the four. (ii) FAR NOW CERTIFIES INSIDE OUTER'S WINDOW, so khla_g can rise to 6x the range where it previously stopped at outer's 192s, and the UNION may therefore be vetoed over a much larger guard there. That is 26620's own stated design - the union may not override a far-certified surface anywhere within the fade, the 'union leaves the screen' property - now reaching the territory the 26624 gate had been withholding it from, and it is part of why the wobble died rather than an accident to be discovered later. (iii) The 26624 protection now rests on JURISDICTION wherever outer certifies, not on the gate. If a splotch-class ring is ever reported at range again, that is the first thing to suspect and 401 is the one-switch. NUMBERS, and the alias is deliberate: mode 400 and lighting0.y 70 were FIELDED, so under rule 1.18 they are never reminted - the gate's clause reads 'kh4_cert AND NOT code 71', which under code 70 is arithmetically TRUE, so mode 400 remains a BIT-EXACT ALIAS of the new default and every script that ran the arm still validates. 392 / code 65 keeps its 26624 meaning as the UNBOUNDED form and is now the arm that isolates the bound itself: 0 versus 392 differs only on the population where outer does NOT certify. PRE-REGISTERED ACCEPTANCE (rule 1.22): (a) at the transition pose mode 0 now presents as 400 did - the hard cut and the wobble both gone, the shadow's rendition carrying across the former contour at far's texel; (b) MODE 401 BRINGS BOTH BACK TOGETHER, which is the one-switch proof and the arming lane - if 401 changes nothing the default did not take and nothing here was shipped; (c) the splotch and the halo stay DEAD at mode 0 and visual 32 still paints the former loci GREEN or BLUE with shadows BLUE - 26627 and 26629 untouched; (d) 392 is indistinguishable from mode 0 wherever outer certifies, and ANY difference between them localizes the uncertified population for free; (e) hero, mid and outer are untouched, so near-field sharpness and the contact classes are unchanged. FALSIFICATION, binding: any NEW ring, splotch or halo at mode 0 = the certified lift is admitting the 26624 class after all, 401 is the instant stand-down, and the next build paints kh4_cert before anything widens. The cut surviving at mode 0 while still dying at 392 = the uncertified population owns the remainder, the bound is too tight, and the same paint is the next instrument - do not loosen it blind. Near-field or far-field quality moving at all = the far tier is serving where it should not and the kh4_in predicate is wrong, not the bound. STILL OWED FROM 26634 AND NOT SILENTLY DROPPED: visual 32 at the vest pose under the lift was requested and not run - the splotch was read directly instead, which answers the substance, but the certification PAINT would say whether the lift moved certifier identity as well as served tier. It rides acceptance (c) above rather than being forgotten. WHAT THIS CLOSES: the outer-to-far transition cut, which entered the record as 26618's never-closed wobble report and survived eleven single-arm nulls across five campaigns because the twelfth arm - 392, the gate's own revert, shipped at 26624 - was never once run at the pose that could show it. The lesson is 26588's own rule paid in full: with multiple sufficient authors every single-arm A/B reads null while the family is guilty, and the arm that names the author may already be in the whitelist. NUMBER HYGIENE: mode 401 + lighting0.y 71 minted; mode 400 + code 70 become an ALIAS of the default and are never reminted (the 220/233 precedent); 392 + code 65 keep their 26624 meaning; 397 stays retired; 398 unchanged and still unproven. FREE NOW: debug modes 402+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26634 THE OUTER-TO-FAR HARD CUT IS 26624'S OWN GATE, AND THE GATE'S CONTOUR IS THE CUT'S CONTOUR - NAMED FROM THE CODE AND RETRO-PREDICTING EVERY READING ON RECORD INCLUDING THE TWO NOBODY HAD AN ACCOUNT FOR (KH_FAR_SELF_CERT_SCOPE, OPT-IN mode 400 / lighting0.y 70; NO DEFAULT CHANGES, mode 0 byte-identical, rule 1.12 - a mechanism that retro-predicts the field is a HYPOTHESIS until an arm differentiates it, and this build ships the arm rather than the belief). THE MECHANISM, one line of code. 26624's KH_FAR_SELF_SCOPE gates the far SELF tier on '!kh4_in || khtb_occ >= 0.0f' - the far tier stands silent inside the OUTER band's window unless a blend carry is in flight. A carry is established ONLY by a SHADOWED outer verdict inside outer's fade band, because 26594's deference block is entered on kh4_res > 0.0001f. So inside outer's window there are exactly TWO POPULATIONS: a fragment WITH a carry gets far at its 149 mm texel and lerps outer into it over the fade band - the SMOOTH transition; a fragment WITHOUT one has the far tier SKIPPED WHOLESALE and the chain falls to the UNION at its mesh-priced 522-640 mm - the LOW-QUALITY, WOBBLING rendition. One pixel outside outer's window kh4_in flips false and far serves BOTH populations. That is a BINARY QUALITY SWITCH on the kh4_in contour for everything not carrying, and a continuous one for everything that is: two populations, ONE contour, and the boundary between them is THE SHADOW'S OWN EDGE, which sweeps as the camera moves. THE OPERATOR'S OWN DIAGNOSIS, VERBATIM, AND HE HAD IT BEFORE I DID: the hard version and the smooth version of the same transition coinciding along one contour. WHY IT IS FAR-TIER-ONLY: the contour IS outer's window boundary at 48s metres, so it does not exist near the camera, and the step's amplitude is the union-vs-far texel ratio, ~3.5-4.3x. WHY THE SHAPE GOES RANDOM: the union re-renders on a hash gate at a mesh-priced texel while far re-renders every flush on a snapped grid - 26619's convicted re-quantization, which is why the wobble and the cut are ONE artifact and not two. AND THIS IS NOT A NEW DEFECT: it is 26624's OWN DISCLOSED TRADE read back off the screen. That ledger conceded, in writing, that a REAL distant caster casting onto a near self receiver would be UNION-served instead of far-served, re-exposing the mesh-priced texel and the hash-gated re-render wobble WITHIN THAT SLICE ONLY. The operator is reporting the slice, and the hard cut is its boundary. THE TWELVE READINGS, every one retro-predicted, and the two that had no account before are the load-bearing ones. 269 SERVING TIER, the cut coinciding with magenta-to-cyan: KhSelfTierProbe paints CYAN for outer containment and MAGENTA for far, returning at the FIRST containing tier, so that boundary IS kh4_in flipping - the operator's own probe placed the cut on the gate's own predicate and the reading was filed as a handoff colour note. 257 CARRY OFF leaving the hard cut and removing the smooth transition: with no carry khtb_occ never reaches 0, so the gate refuses far for EVERY fragment inside outer's window - every pixel takes the union, the cut is everywhere and the blend is gone. That is not merely consistent, it is the gate's behaviour computed exactly. 386 khla_w PINNED TO 1 costing ONE SIDE its shadow entirely: on the union-served side outer has certified, so khla_g is 192s and a hard khla_w zeroes the union's verdict outright; on the far-served side kh4_in is false, outer never certifies, khla_g stays 0 and the rejection cannot fire - one side loses its shadow, the other does not, which is what the operator saw and which no prior mechanism explained. 367 ALL JURISDICTION OFF reading null: 26633 already showed the ladder is INERT on both sides of this contour - khla_w falls to 0 at the certifier's own window edge and khla_g never latches past it - so a null there was always the predicted reading and eliminates nothing. 398, 396, 394, 399, 326, 357, 388, 260 and 354 all null: NOT ONE of them touches kh4_in, the carry gate, or the far-self scope clause. Eleven single-arm nulls, and the twelfth arm - 392, the gate's own revert - HAS EXISTED SINCE 26624 AND WAS NEVER RUN AT THIS POSE. That is the campaign's real miss here. WHY THE FIX IS NOT SIMPLY 392, and why the gate was right when it shipped and is wrong now. 26624 built the gate because the far band's coarse silhouette over-extends real shadows by up to a texel and a receiver whose own surface is ABSENT from the fine maps could never certify, so nothing could zero that ring - the gate was the only instrument available. 26627 then changed certification from surface-identity to ray-coverage and 26629 made a CLEAR texel certify, which is exactly the receiver class the gate was built for: an absent receiver reads outer's texel as the 1.0 clear and NOW CERTIFIES. The jurisdiction ladder therefore already zeroes the sub-guard ring, weighted by KhJw, and does it with DISCRIMINATION the gate does not have - it declines against an occluder BEYOND outer's guard, which is precisely the genuine cross-tier cast the operator is watching go coarse. The gate now duplicates jurisdiction badly: binary where jurisdiction is weighted, wholesale where jurisdiction is selective. THE ARM, and it is deliberately BOUNDED rather than the blunt 392: under mode 400 the far self tier ALSO serves inside outer's window WHERE OUTER HAS CERTIFIED - kh4_cert, latched at the same kh4_cok that publishes khla_g and khla_w, so the rejection that must clean any ring is PROVABLY ARMED wherever the lift applies. Where outer does not certify the 26624 gate stands verbatim and the splotch class cannot return through this door by construction, which is the whole reason not to ship 392. Inside outer's window INTERIOR khla_w is 1, so a sub-guard far ring is multiplied to zero and the fragment falls to the union exactly as today - the arm can only change pixels where far's occluder lies BEYOND outer's certified guard, i.e. exactly the beyond-guard cross-tier class 26590's audit was written to protect. WHAT I DO NOT CLAIM: that mode 400 is the shipping default. It is a hypothesis with a mechanism, and 26630 was withdrawn for shipping exactly that on exactly this axis. PRE-REGISTERED PROTOCOL, three arms at ONE pose, the transition pose with the cut visible and the camera moving toward and away as in the report - one clip each: mode 0, then MODE 392 - the blunt full revert, which is the ARMING LANE, because if 392 cannot move the cut then the gate is exonerated whatever 400 does and this whole entry is wrong - then MODE 400. ACCEPTANCE: (a) the hard cut and the wobble DIE TOGETHER at 400, with the shadow's far-side rendition carrying across the former contour at far's texel rather than the union's - together, because they are one artifact and a fix that takes only one of them convicts the mechanism as incomplete; (b) 392 also kills them, which is the arming proof; (c) the SPLOTCH and the halo STAY DEAD at 400 while 392 may bring the splotch class back - that difference is the entire reason the bounded form exists and it is the read that decides which one ships; (d) mode 0 is unchanged from 26633 in every respect. FALSIFICATION, binding: 392 NULL at the transition pose = the gate is not the author, the kh4_in coincidence in the 269 read is a coincidence, and this mechanism is withdrawn in the ledger rather than tuned - the next step is then the whole-stack pair 365 and 366 AT THIS POSE, which 26588 built for the multiple-sufficient-authors case and which have only ever been run at the vest pose, inside hero, where a handoff structurally cannot show. 400 NULL WITH 392 WORKING = certification does not reach these receivers after all, the bounded form has no target, and the read has just measured the coverage of 26627/26629 at range - a finding, not a failure, and the next build instruments kh4_cert with a paint before widening anything. THE CUT SURVIVING 400 ON ONE SIDE ONLY = partial certification coverage, same instrument, same next step. A NEW ring or splotch under 400 = the certified lift is admitting the 26624 class after all and the arm stands down without argument, per rule 1.13b. NOTE FOR THE READER: visual 21 cannot be run simultaneously with 392 or 400 - modes are exclusive - so the tier paint is a mode-0 read and 392 is what proves engagement. FIELD 26634, operator, transition pose, three arms plus the tier paint: THE GATE IS CONVICTED AND THE ARMING LANE FIRED. 392 - the blunt full revert, this build's own arming lane - ELIMINATES the cut; 400, the bounded certified lift, eliminates it too; and 269 at mode 0 places the cut ON the cyan/magenta boundary exactly as predicted, so the contour IS kh4_in and the author IS this gate - measured, not argued, and the twelfth arm closed what eleven nulls could not. Rule 1.22's arming clause is satisfied: a null under 400 could no longer have been misread as an elimination, and it was not a null. PROMOTION IS WITHHELD, DELIBERATELY, because two clauses of this build's own acceptance are UNRUN and one of them is binding. (a) THE WOBBLE HALF IS UNREPORTED. Acceptance (a) reads that the cut and the wobble must die TOGETHER, because the mechanism's whole claim is that they are ONE artifact - the union serving at a hash-gated mesh-priced texel on one side of a contour and far serving at a snapped range-priced one on the other. If the cut dies while the shape still goes low-quality and random on approach, the mechanism is INCOMPLETE rather than wrong, and the residual belongs to whatever still serves those pixels; that is a different next build and it must not be discovered after a promotion. (c) THE SPLOTCH CLAUSE IS BINDING, UNRUN, AND IT DECIDES WHICH FORM SHIPS. 26624 built this gate to suppress the far band's over-extended silhouette on receivers absent from the fine maps, and killing that class is the win 26627 and 26629 actually banked. 400's bound is that the lift applies only where OUTER CERTIFIED, so the 26590/26617 rejection is armed wherever it applies - but 26629's clear-certification means an absent receiver's outer texel reads the 1.0 clear and CERTIFIES, so the lift very likely DOES reach the 26624 class and the protection there is JURISDICTION'S, not the gate's. The arithmetic is sound - a sub-guard ring meets khla_w 1 in the window interior and is multiplied to zero - but it IS arithmetic, it is the third arithmetic argument on this axis, and 26630 was withdrawn on this very axis for shipping exactly that. One screenshot closes it. WHAT IS OWED, at the VEST/SPLOTCH pose and NOT the transition pose: mode 0, then 400, then 392, plus visual 32 at 400. THE FOUR OUTCOMES, pre-registered so none of them can be read after the fact: splotch and halo DEAD at 400 and BACK at 392 = the bound is doing precisely the work it was built for and the bounded form ships as the default at 26635 with the 26624 gate as its revert; DEAD at BOTH = the gate is redundant wholesale, the bound is dead weight against the current certification but cheap insurance against a 394/396 revert or any geometry where certification fails, and it still ships - with that redundancy stated rather than hidden; BACK at 400 = the bound has no content, the arm stands down per rule 1.13b, and the axis returns to why certification reaches those receivers at all; splotch dead but visual 32 painting anything other than the 26629 GREEN/BLUE at the former loci = the lift moved certification itself and nothing about it is understood yet. NUMBER HYGIENE: mode 400 + lighting0.y 70 minted; 392 keeps its 26624 meaning as the blunt revert and is now also this build's arming lane; 397 stays retired; 398 unchanged and still unproven. FREE NOW: debug modes 401+, lighting0.y codes 71+, visual codes 33+, dbgCtl.w 13+.
+//  || 26633 SIX ARRIVAL CORRECTIONS, LEDGER-ONLY, MODE 0 BYTE-IDENTICAL - NO BEHAVIOUR CHANGE, NO MODE MINTED, NO SHADER ARITHMETIC TOUCHED, NOT ONE EXECUTABLE BYTE MOVED (rule 1.16: corrections are owed and are stated; rule 1.12: nothing here is a repair and nothing here is claimed to author any artifact). (1) THE 26632 HEIGHT-PROXY PREMISE IS FALSE AND THE VERTICAL INDEX IS CONFIRMED. 26632 used khsh_er rather than the true height because, in its own words, khsh_one builds khsh_he from a DIFFERENT swizzle and the vertical index could not be confirmed. The two sites are IDENTICAL: kh_collect_sun_casters builds he0 from o.size[0]*0.5, o.size[2]*0.5, o.size[1]*0.5 and khsh_one builds khsh_hl from c.size[0]*0.5, c.size[2]*0.5, c.size[1]*0.5, over the same vector - SunCaster::size is memcpy'd from RenderObject::size at the collection - and BOTH sites index [1] as vertical against g_sun_dir_engine[1]. Index [1] IS vertical at khsh_one and the amendment is written in place at the admission block. THE COST OF THE PROXY IS NOT COSMETIC, which is what 26632 got wrong in the other direction when it priced the follow-up at nothing visually: khsh_er, the enclosing radius, inflates the shadow length by er/H - 1.73x for a cube, ~14x for a wide flat 100x100x10 caster - so at 5 degrees elevation a caster whose shadow genuinely reaches ~185 m is admitted out to ~1690 m up-sun and khsh_fwd stretches with it. The live watch item is hero and mid carrying ~1618 m depth windows with sunHero/Mid/OutReach 1604.43 against 2 m and 12 m half-extents, so the proxy is a CANDIDATE author of exactly that number - candidate, not conviction, because no arm has separated it. THE TIGHTEN IS BANKED, NOT SHIPPED, and it is not the free one-liner 26632 called it: it changes ADMISSION, so it is a behavioural default under rule 1.11, it owes an arm, and it does not ride a correction build. ITS CORRECT FORM, since the naive form is unsafe: khsh_one ROTATES its half-extents and the union does NOT, so khsh_he[1] alone can fall BELOW the union's he0[1] for a rotated caster and re-open the very completeness gap 26632 closed - the safe height is the max of khsh_he[1] and khsh_hl[1], which is >= the union's H by construction. PRE-REGISTERED for whenever it ships: sunHero/MidReach collapsing toward their 12 m and 72 m floors with sunBandReachTakes falling, and sunFarFitN still EQUAL to sunLocalCount at the vanishing pose - a short far set means the tighten refused a caster the union kept and the arm stands it down at once. (2) THE 367 NULL AT THE OUTER-TO-FAR CUT IS ACCOUNTED FOR AND DOES NOT CONTRADICT VISUAL 32 - the open item's single most informative question, closed on a static read rather than a round. khla_w is ASSIGNED, not maxed, from KhJw of the CERTIFYING TIER'S OWN window-edge coordinate, and KhJw is KhTbW is 1 - smoothstep from 0.75 to 0.98, which reaches ZERO at that tier's window edge. At the outer-to-far contour the fragment sits at outer's edge; hero and mid do not contain it, so outer is the SOLE certifier and khla_w falls to 0, making res *= 1 - khla_w a no-op. PAST the cut no finer tier contains the fragment at all, so khla_g never leaves 0 and far's rejection cannot fire on its own khla_g > 0.5 gate. THE JURISDICTION IS PROVABLY INERT ON BOTH SIDES OF THAT CONTOUR, so a 367 null there is the PREDICTED reading and is not evidence that the ladder is inert anywhere else - the eleven-nulls rule of 26588 gains a twelfth instance with a named mechanism instead of a shrug. AND THE APPARENT CONTRADICTION DISSOLVES: KhSelfCertProbe reads khcp.x, khcp.y and khcp.z and NEVER READS khcp.w, so visual 32 paints certifier IDENTITY while khla_w is the WEIGHT - two different quantities, and a certifier boundary at the cut is fully compatible with the null. (3) THE CONSEQUENCE FOR THE LIT-CARRY DIRECTION, stated plainly because it is worse than the handoff's reading that the 367 null merely sits awkwardly: the argument that a bounded lit-carry is safe NOW rests on jurisdiction having already de-mushed the blend partner a lit fragment would fade into, and at this contour jurisdiction does nothing at all. That argument has no support HERE, and the design direction changes before any code is written. (4) A BOUNDED LIT-CARRY AS SKETCHED WOULD SWITCH OFF THE MECHANISM IT DEPENDS ON. All three rejection sites carry the 26594 deference conjunct - khtb_occ < 0.0f, or code 55 - so establishing ANY carry, lit or shadowed, sets khtb_occ >= 0 and disables the coarser tier's mush-zeroing by construction. A workable lit-carry must therefore either apply the rejection BEFORE the blend or exempt lit carries from the deference explicitly; the sketch as written is self-cancelling, and that is a structural fact about the code, not a prediction about the field. (5) THE PF RELEASE REPAIR'S TEST PROTOCOL IS WRONG IN TWO PLACES, and it is the outstanding item most likely to be forgotten while it guards a device-reset hazard. msaaToggleWipes IS NOT A PROXY FOR IT: kh_msaa_toggle_wipe scrubs the atlas, live-capture and mask state and never calls g_res.release, which is where the 26626 pf release actually lives - only bandWipeEvents gates it, and that lane IS sound because all four release_shadow_device_state call sites are paired with g_res.release. AND A MISSION RESTART CANNOT EVER SHOW IT: on_mission_end runs the release pair and then reset_session_state, which ZEROES g_band_wipe_events - the restart wipes its own evidence on the way in. The only reading that can leave the lane non-zero is an IN-SESSION device reset: alt-tab in fullscreen, a resolution change, or a window-mode change. (6) TWO SMALLER NOTES. The 26632 ledger calls the band admission the union's formula - the LENGTH is verbatim, the TEST is not: the union measures capsule proximity of the CAMERA to the shadow segment, while the band applies a scalar up-sun bound beside its own separate lateral clip. That is defensible as the right shape for a band whose ortho clips laterally, but the fidelity was overstated and the next reader should not grep for one and find the other. And khla_g takes a MAX across certifiers while khla_w takes the LAST certifier's value, so the guard radius and the protection weight can in principle come from different tiers - benign only while the guards are monotonic in tier, and a future tier insertion would break it silently. WHAT IS DELIBERATELY NOT IN THIS BUILD, per rule 1.11 and the open item's own do-not-bundle directive: the height tighten of (1), which changes admission and owes an arm; and the khla_w PAINT, which is the direct falsifier for (2) - khcf.w is already computed and already carried out of the kernel, so painting it is a pure gauge and not a default change, but it mints visual code 33 and belongs to its own instrument build. ACCEPTANCE for a correction build is that mode 0 is byte-identical and the sweep is clean; there is nothing here for the field to read. NUMBER HYGIENE: nothing minted, nothing retired. FREE NOW: debug modes 400+, lighting0.y codes 70+, visual codes 33+, dbgCtl.w 13+.
+//  || 26632 THE BANDS NEVER GOT THE ADMISSION RESCUE THE UNION HAS HAD SINCE 26037, AND EVERY CERTIFICATION BUILD SINCE 26589 HAS RESTED ON THE PREMISE THAT THE TWO AGREE (KH_BAND_SHADOW_ADMIT default; mode 399 reverts - C++-side only, no lighting0.y code, the 26611 pattern). CONVICTED, not argued: the 26631 instrument and the 26628 probe agree and the operator ran both. sunFarFitWhy 0 with sunFarFitN 1 against sunLocalCount 2 and objTotal 2 - far COMPLETED its render knowing ONE of the two casters - while sunHero/Mid/OutFitWhy all read 1 (caster set EMPTY, FitN 0) which kills the 'three tiers collapsing' story I told twice and confirms the empty-set reading. Then visual 32 at the vanishing pose: parts of the giant turn GREEN - certified by a strictly finer tier - at the exact frame its shadow disappears. Far certifies, the union's genuine verdict is rejected, the shadow dies. Every link measured. THE ROOT: kh_collect_sun_casters re-admits a caster whose SHADOW SEGMENT reaches the camera even when its body fails the sphere (26037, the operator's own 'a dawn shadow is as long as geometry says' directive); khsh_one had only a flat 'khsh_ds > khsr_rad + khsh_er' bound and refused such a caster outright however long its shadow. So the union's caster set is a strict SUPERSET of every band's, by construction, at low sun - and 26589/26590/26617/26627/26629 all certify on the claim that a tier's map holds every occluder in its guard. It does not, and the more certification the ladder gained the more the gap could bite; 26629's clear-certification exercises it on every lit fragment, which is why it surfaced there. THE FIX makes the band admission match the union's: when the flat bound refuses, the caster is re-tested against its own shadow length (2H / tan(elev) + slack, the union's formula) and admitted if the band still lies inside it. Completeness then holds BY CONSTRUCTION rather than by assumption, which is the property every certification build has needed and none has had. THE HEIGHT PROXY IS A DELIBERATE, DISCLOSED CHOICE: the union takes H from he0[1], but khsh_one builds khsh_he from a different swizzle (c.size[0]/[2]/[1]) and I could NOT confirm which index is vertical at this site. Guessing there produces a silent admission bug that would present as random shadow flicker - the exact class this campaign has spent thirty builds chasing - so khsh_er, the enclosing radius, is used instead: frame-free, and strictly conservative because it over-estimates H. It can only ADMIT more, never refuse a caster the union kept. Over-admission costs a deeper window, which 26537's reach already sizes, and cannot manufacture a shadow - only a missing caster can. If a later build confirms the vertical index, tightening to the true H is a one-line follow-up worth ~nothing visually and some window depth. DISCLOSED COST, and it is real: hero and mid can now admit a distant giant whose shadow crosses them, so their depth windows stretch - the historic sunHeroReach 2029.7 against a 2 m half-extent is exactly this, from frames where they already did it. d2v ~2041 m in D32F is ~0.24 mm per step and the bias is d2v-normalised so world bias is unchanged, but this is the one thing to watch and 399 stands it down whole. ACCEPTANCE, pre-registered, and the first two are LANE reads so a visual null cannot be misread: (a) sunFarFitN EQUALS sunLocalCount at the vanishing pose - if it still reads short the rescue never armed and nothing was tested; (b) sunHero/MidFitWhy move off 1 when the giant's shadow crosses them, with sunBandReachTakes counting; (c) THE SHADOW SURVIVES with a second mesh inside it at every camera distance - the artifact itself; (d) splotch and halo STILL gone and visual 32 still GREEN where they were with shadows BLUE (26627/26629 untouched); (e) 399 brings the vanishing back on demand. FALSIFICATION, binding: the shadow still vanishing with sunFarFitN == sunLocalCount = the caster IS in far's map and the kill is downstream of admission - go to the guard arithmetic then, specifically the hypothesis banked at 26631 (the guard is measured from the FRAGMENT while admission is measured from the BAND CENTRE, so a fragment at up-sun offset d can honestly certify only khsr_rad - d), which is still NOT shipped and still owes an arm. Near-field quality degrading at mode 0 vs 399 = the window stretch is the cost and it is priced too high; 399 stands it down and the tighten-H follow-up comes first. NUMBER HYGIENE: mode 399 minted, no lighting0.y code; 398 (the opt-in far-guard clamp) unchanged and still unproven; 397 stays retired. FREE NOW: debug modes 400+, lighting0.y codes 70+, visual codes 33+, dbgCtl.w 13+.
+//  || 26631 THE 26630 DEFAULT IS WITHDRAWN ON ITS OWN FALSIFICATION CLAUSE, AND THE LANES I MISREAD GET THE INSTRUMENT THAT MAKES THE MISREADING IMPOSSIBLE (KH_BAND_FIT_WHY, pure gauge, mode 0 byte-identical; the 26630 clamp DEMOTED to opt-in mode 398 / lighting0.y 69; mode 397 RETIRED, not reused). THE CLAUSE FIRED AS WRITTEN: 'the shadow still vanishing at mode 0 with a second mesh present = the guard is not the gate'. The operator tested and it vanished. The guard clamp is therefore NOT the artifact's author and is not carried as a default - but it is not deleted either, because the over-claim it repairs is real and independent of this artifact (far certifies 6 * half while admission drops any caster past khsr_rad + khsh_er, and 26620 made far's half the range itself). It ships opt-in and unproven, labelled as such. CORRECTION OWED, AND IT IS THE REASON FOR THIS BUILD (rule 1.16): I read sunHeroValid/MidValid/OutValid 0 with sunHeroReach 2023.4 and sunHeroCasters 1 as three tiers COLLAPSING under a giant caster's admission, and I said so twice. THAT READING IS WITHDRAWN. khsh_out_reach and khsh_out_casters are written only at 38836/38841, INSIDE the completed-render block - so whenever valid is false those lanes are STALE from whichever earlier frame did complete, at a pose that may be nothing like the current one. The far more likely truth at that pose is mundane: hero's window is +-2 m, mid's +-12 m, outer's +-48 m, the camera was hundreds of metres from everything, their caster sets were EMPTY and they returned at the empty-set exit exactly as designed. Nothing collapsed. EVERY BAND LANE IN EVERY DUMP THIS CAMPAIGN HAS HAD THIS PROPERTY AND NOTHING IN THE FILE SAID SO, which makes it a documentation defect as much as an instrument one, and it is the third time this campaign that I have convicted a mechanism from a lane that could not support it (visual 21's containment paint, the 'large object fills the fine maps' prediction, and now this). THE INSTRUMENT: g_sun_fit_why[4] records which exit each band took - 0 completed, 1 caster set EMPTY, 2 over the instance cap, 3 CB upload failed, 4 instance VB Map failed, 5 entered with no exit recorded, 6 not called (the khsh_okN gate refused it) - beside g_sun_fit_n[4], the set size at that exit. Indexed by the khsh_pf_idx the lambda ALREADY carries, so no signature changes and no call site moves; stamped at the entry, at the empty/cap return, at the two deepest stages reached, and at the completed render. Reset to 6 before the call block so an ungated band is distinguishable from a bailed one. Eight new SQF lanes. WHAT THIS SETTLES IN ONE DUMP, without a single further arithmetic argument: whether the three dead tiers are dead because their sets are empty (why 1 - normal, and the whole 'collapse' story dies with it) or because something is failing downstream (why 3 or 4 - a real defect), and whether far's set is short because admission refused the giant (n 1 with why 0) or for some other reason. THE CHEAP READ THAT SHOULD COME FIRST AND THAT I SHOULD HAVE ASKED FOR BEFORE 26630: visual 32 (setRenderDebug 395) AT THE VANISHING-SHADOW POSE. It has only ever been run at the splotch pose. GREEN there means a finer tier is certifying the shadow away and names which; BLUE means the server certifies itself; GREY or ORANGE means certification is not involved at all and the axis is the cast chain or admission. That is free, it is the instrument built for exactly this question, and no build should follow until it has been read. WHAT IS NOT CLAIMED: any mechanism for the vanishing shadow. The arithmetic gap I can see - the guard is measured from the FRAGMENT while admission is measured from the BAND CENTRE, so a fragment at up-sun offset d can honestly certify only khsr_rad - d - is written here as a HYPOTHESIS ONLY, explicitly not shipped, because it is the third arithmetic argument in three builds and the previous two both retro-predicted the field and were both incomplete. It gets an arm only after the probe and the fit lanes have been read. ACCEPTANCE (an instrument's acceptance is that it reads): sunHero/Mid/Out/FarFitWhy populate with plausible codes at the vanishing pose, sunHeroFitWhy reads 1 or 6 rather than 3/4 if the empty-set reading is right, and mode 0 rendering is unchanged. FALSIFICATION: all four lanes reading 5 = the stamps are not where I think they are, an instrument fault, not evidence. WHAT IS ALREADY BANKED AND VERIFIED BY THE OPERATOR, so the campaign's win is not lost in this correction: the splotch and the halo are GONE at mode 0 (26627 + 26629), 395 paints GREEN where they were with shadows BLUE, and the long caster's shadow is correct whenever a second mesh is not sitting inside it. NUMBER HYGIENE: mode 398 + lighting0.y 69 minted; MODE 397 RETIRED (whitelisted dead, never reused - the 26624 precedent); 396, 394, 296, 367, 365, 366 all unchanged. FREE NOW: debug modes 399+, lighting0.y codes 70+, visual codes 33+, dbgCtl.w 13+.
+//  || 26630 THE FAR TIER HAS VOUCHED FOR SIX TIMES THE TERRITORY ITS MAP EVER COVERED SINCE 26620, AND 26629 IS THE FIRST BUILD THAT EXERCISED THE OVER-CLAIM (KH_FAR_GUARD_ADMIT default; mode 397 / lighting0.y 68 restores the 26620 form - one default, one A/B, rule 1.11). THIS IS 26629'S OWN FALSIFICATION CLAUSE FIRING AS WRITTEN ('any real shadow vanishing on a certified surface = the 26623 admission argument is wrong somewhere'), and the clause was right that the argument was incomplete - it covered the LATERAL bound and never checked the UP-SUN one. THE ARITHMETIC, and it is the whole build: each tier certifies 6 * its half sun-ward, while admission drops any caster past khsr_rad + khsh_er, which for a point-like caster is khsr_rad. Hero 12, mid 48s, outer 192s all sit inside a range of 200s (192s < 200s always), so three tiers were always honest and are NOT touched. 26620 made the FAR half the range itself, so its guard became 6 * range against admission of ~range: a 6x over-claim, latent for ten builds because content-certification rarely reached it and structural because nothing tied the two numbers together. 26629's clear-certification reaches it on every lit fragment, which is why this surfaced now and not at 26620. THE OPERATOR'S DECISIVE DATUM, and it is the one that named the mechanism rather than the dump: the giant alone casts indefinitely and correctly; SPAWN A SECOND MESH and the giant's shadow dies once the camera moves past that mesh, reappearing further out, inconsistently. That is admission flipping, exactly: alone, the giant sits beyond the far window so far has ZERO casters, never completes a render, sunFarValid reads 0, the tier does not run and the union serves - correct. The second mesh IS admitted, so far renders (sunFarValid 1, sunFarCasters 1) holding the NEAR mesh and not the giant; a fragment in the giant's shadow then reads far's texel CLEAR, 26629 certifies it at a 1800 m guard the map never covered, and the union's genuine occluder is rejected as sub-guard mush. Move further and the second mesh leaves the +-300 m window, far goes casterless and invalid, the union serves again - the reappearance, and the inconsistency is per-frame admission across the boundary. THE DUMP CORROBORATES EVERY STEP: sunLocalCount 2 against sunFarCasters 1, sunFarValid 1 with sunHero/Mid/OutValid 0, sunRangeM 300 with sunFarHalfDiag 300 (so sunMeta5.w IS khsr_rad), and bandOn/sunOk/recvDropWhy clean throughout - nothing is cold, nothing is failing, the shadow is being deliberately zeroed by a certifier that had no standing. THE FIX: far's certified guard becomes sunMeta5.w - the admission bound - instead of 6x it. A beyond-range occluder's gap then exceeds the guard, the rejection declines, and the union's shadow STANDS. A within-range occluder would have been admitted to far in the first place, so far would read shadowed rather than clear and never reach the latch - the two cases are complementary by construction, which is the property the 26620 form lacked. It repairs the CONTENT path too, which has carried the same over-claim since 26620 independently of 26629. WHAT IS NOT TOUCHED, deliberately: the splotch/halo fix, which lives at hero/mid/outer and is unaffected by a far-tier constant - the operator verified 26629 at 395 with the former RED pixels reading GREEN and shadows BLUE, and that read must survive this build unchanged. STANDING ANOMALY, LOGGED NOT FIXED (rule 1.12 - it has no report and no conviction): sunHeroValid/MidValid/OutValid all read 0 at the operator's far pose with sunHeroReach and sunMidReach at 2031.23 m against 2 m and 12 m half-extents and sunBandReachTakes 5600 - three bands rendering (3152/3305/3875) but not completing, because the giant's admission drags their depth windows to 1000:1. That is a real defect and it is NOT this build's claim; it wants its own instrument (a per-band fit-refusal reason) before anything moves, and the file's own history says a blind swing at band fitting is how 26576 was paid for. ACCEPTANCE, pre-registered: (a) the giant's long shadow survives with a second mesh present AT EVERY camera distance, including the poses where it died at 26629 - this is the whole build; (b) splotch and halo STILL gone at mode 0 and visual 32 still paints GREEN where they were, with shadows BLUE - a regression here means the far constant reached the near tiers and it did not; (c) mode 0 still indistinguishable from 296 at the vest pose; (d) 397 brings the vanishing back on demand, with the second mesh in place, and is the one-switch proof; (e) 396 still brings the halo class back, unchanged. FALSIFICATION, binding: the shadow still vanishing at mode 0 with a second mesh present = the guard is not the gate and the axis is admission itself - stop clamping guards, instrument per-band admission per caster, and read it before touching anything else. If a genuine WITHIN-range cross-tier shadow disappears instead, the clamp is too tight and 397 stands it down. NUMBER HYGIENE: mode 397 + lighting0.y 68 minted; 396, 394, 296, 367, 365, 366 all unchanged. FREE NOW: debug modes 398+, lighting0.y codes 69+, visual codes 33+, dbgCtl.w 13+.
+//  || 26629 THE HALO CLASS IS AN 80-BUILD-OLD ARTIFACT THAT WAS NEVER REPAIRED, ONLY CONTAINED, AND THE CONTAINMENT WAS ASKING THE WRONG QUESTION AT THE ONE PLACE IT LEAKS: A CLEAR TEXEL IS EVIDENCE OF ABSENCE (KH_CERT_CLEAR default at all four latches; mode 396 / lighting0.y 67 restores 26627's content-only form - one default, one A/B, rule 1.11). THE OPERATOR'S REFRAME, and it is his conviction not mine: he asked whether the residual is a CHILD of the halo campaign fixed dozens of builds ago. The record says something stronger - it is the SAME artifact with the SAME producer. 26589 convicted the halo as the union overriding correct tiers through 26507's lit-fallthrough and measured the producer texel by texel (523.9 mm union texel storing depth 1518 mm nearer, 549 mm past its own 969 mm bias); what SHIPPED was 'the union LOSES that authority'. 26590 then said it outright - 'RIGHT IN KIND AND INCOMPLETE IN COVERAGE' - and generalized the veto to every tier. 26617 faded its cliff, 26627 changed its evidence kind. FOUR BUILDS OF COVERAGE WIDENING AND NOT ONE LINE ADDRESSING WHY THE COARSE TIER IS WRONG. The artifact has been retreating to each newly-exposed boundary and returning in a new shape, which is exactly the shape-shifting the operator has been reporting all campaign, and I had been treating the residual as a subordinate detail of the splotch rather than the tail of this. THE 26628 PROBE SETTLES THE MECHANISM. Visual 32 at the residual pose: correct shadows BLUE, splotches and haloes RED. RED is case (1) - the innermost containing tier's own texel holds the 1.0 clear (ClearDepthStencilView 1.0f confirmed; int2(khN_t) indexes the texel the sample falls in, so no corner-offset artifact). That tier looked down this ray, found nothing, returned LIT, fell through per 26507, and a coarser tier's mush won. NOT case (3) - the certifier is not the server, so containment CAN reach these pixels and the structurally-unfixable outcome is off the table. CORROBORATION FROM THE SAME TRIP: 367 (all jurisdiction off) is MUCH WORSE than 0, so the ladder is already carrying most of the load and the residual is its uncovered remainder - the operator's containment reading, confirmed; 365 (KH_SELF_CLASSIC, every derivative term off) is near-null, which CLOSES the 26586/26591 fwidth family as author of THIS residual after it stood open since 26588; 366 (KH_SELF_ERA) is degraded everywhere and carries no information. Also paid, 37 builds late: 26591's 'STILL OWED FROM 26590 - the halo verdicts 0 vs 296 vs 367'. THE FIX. 26627 read a clear texel as no authority. That is backwards: the maps clear to 1.0 and only admitted casters write, so a cleared texel means the tier rasterized its ENTIRE admitted caster set and nothing landed on this ray - the strongest possible form of 26590's own claim, and the form I excluded. The likely producer of the clear is sun-grazing geometry, which projects into very few sun-map texels so large screen areas map to rays the surface does not cover - it fits haloes hugging shadow edges on curved fabric, fits 369 helping, fits 264 hurting, fits coarse tiers being worse. SOUNDNESS, and it rests on an argument the file already banked at 26623 rather than on a new one: the objection is a caster inside the guard depth but outside the tier's lateral window, absent from the map, legitimately shadowing. It cannot happen - admission is lateral PLUS reach (khsh_lat <= khsh_r2 + khsh_er), and a caster that shadows an in-window fragment sits on that fragment's sun ray, so its lateral offset is at most half + its own radius, inside admission by construction. Any caster that can shadow an in-window fragment from within the guard IS in that tier's map. MECHANICALLY the change is one conjunct: dropping js < 1 lets the clear case pass on its own arithmetic, since a cleared texel reads 1.0 and (z - 1.0) is negative, so it is inside any positive guard. Beyond-guard occluders still fail the rejection's own test and STILL STAND - that is the entire difference from 296 and the entire risk. THE RISK WAS RETIRED BEFORE THE BUILD, on the operator's own initiative: he ran the blunt worst case first. At 296 - fallthrough off, which kills beyond-guard casters outright - the giant's long shadow onto our gear mesh REMAINS ALIVE AND CORRECT. If the class survives the blunt form it survives this one, which preserves it deliberately. NOTED, NOT BURIED: the paired dumps read sunHero/Mid/OutCasters 1/1/1 WITH the giant present, so it is not in the fine bands' counts, yet its shadow survives at 296 - resolved by the gear being outside hero's +-2 m window at that pose so a coarser tier (sunFarCasters 1->2) was final. Recorded because assuming which tier serves is precisely the error that cost a round at visual 21. ACCEPTANCE, pre-registered, and (b) is an ARMING LANE so a null cannot be misread as an elimination: (a) the residual halo and the splotch are GONE at mode 0 and mode 0 is indistinguishable from 296 at the vest pose; (b) VISUAL 32 AT THE SAME POSE SHOWS THE FORMER RED PIXELS TURNED GREEN OR BLUE - any pixel still RED means the arm did not engage and nothing about the mechanism was tested; (c) the giant's long shadow onto our gear still lands, AND a distant caster onto a near mesh still lands - this is the beyond-guard class, the one thing this must not trade; (d) crevice fireflies and motion grain stay dead (no bias normal touched); (e) 396 brings the halo class back and visual 32 paints those pixels RED again. FALSIFICATION, binding: any real shadow vanishing on a certified surface = the 26623 admission argument is wrong somewhere, 396 is the instant stand-down, and the next build instruments admission per tier before anything else moves. If the halo survives at mode 0 with visual 32 showing GREEN there, certification is not the blocker at all and the axis returns to the PRODUCER - the coarse tier's bias against its own texel - which is where four builds of containment should have gone in the first place. NUMBER HYGIENE: mode 396 + lighting0.y 67 minted; 394 keeps its 26627 meaning; 296, 367, 365, 366 all unchanged. FREE NOW: debug modes 397+, lighting0.y codes 68+, visual codes 33+, dbgCtl.w 13+.
+//  || 26628 INSTRUMENT-ONLY BUILD, MODE 0 BYTE-IDENTICAL: THE CERTIFICATION FORENSIC 26590 ASKED FOR AND NOBODY BUILT (KH_CERT_PROBE, visual 32 / setRenderDebug 395; no default changes anywhere, so no revert arm is owed and none is minted). WHY NOW, stated as a failure of mine rather than a milestone: four rounds have been spent inferring per-pixel state from per-frame lanes, and one of them was spent on a WRONG inference. 26590's own falsification note read 'instrument khla_g with a visual before any further logic'; it has been unpaid since it was written, I deferred it again at 26627 for scope, and the deferral cost a round. FIELD SINCE 26627, all of it recorded because two results are negative and negatives are the expensive kind to lose: (a) the splotch is GONE up close and 394 brings it back, so KH_CERT_CONTENT carries real load; (b) acceptance (c) PASSES - a massive object's long shadow casts correctly on everything, so the fix bought its win without silencing real shadows, which is the one thing 296 does and the one thing this must not; (c) 296 is ALMOST indistinguishable from 0, leaving a small residual below the old splotch; (d) 386 IS INDISTINGUISHABLE FROM 0 at normal range, which FALSIFIES 26617's pre-registered clause - the residual survives full-strength protection carried to the window edge, so it is not the edge fade admitting mush and the prescribed 'raise the smoothstep floor' remedy is OFF THE TABLE; (e) 386 does kill the splotch up close, so protection STRENGTH matters near and not at range. TWO HYPOTHESES OF MINE DIE HERE. First: I predicted a large object would fill hero's and mid's maps with content so the 26627 content test would latch. The paired dumps refute it flatly - sunHero/Mid/OutCasters read 1/1/1 in BOTH, byte-identical, with reach at the floor in both; everything that moved moved in the union and far band (sunFarCasters 1->2, sunLocalCount 1->2, sunMapHalfDiag 300->1102.53, sunVpSpanZM 664->2429). The large object never touches the fine bands. Second, earlier and also withdrawn: the 'masking' reading of the same datum, killed by the operator's observation that the object only has to be ANYWHERE in the visible scene. I am not replacing them with a third guess. WHAT THE RESIDUAL CAN BE, exhaustively, and why no dump can choose: khla_g and khla_w are LOCALS inside SunShadowOcclusionSelf and nothing CPU-side has ever seen them, so every lane in the ring is a per-frame aggregate of a per-pixel question. (1) no tier certifies because its map is CLEAR on this ray; (2) a tier certifies but the occluder is OUTSIDE the guard, so the rejection correctly declines and the mush is a legitimate cross-tier shadow; (3) the tier producing the mush IS the innermost certifier, and jurisdiction is a CROSS-TIER mechanism that structurally cannot guard a tier against its own verdict - in which case the author is that map's bias-vs-texel and no certification work of any kind will ever reach it. WHAT WAS BUILT: SunShadowOcclusionSelf becomes SunShadowOcclusionSelfEx with an out float4 written before every return (x = innermost containing tier's outcome, y = innermost certifier, z = serving tier, w = the final khla_w), a thin forwarder keeps the old signature so NO call site moves and no twin is disturbed, the four latches and the union each report one line, and visual 32 paints it: GREY no containing tier, RED map clear (case 1), ORANGE outside guard (case 2), BLUE certifier IS the server (case 3), GREEN certified by a strictly finer tier - value darkened by the live verdict and stepped by serving tier. AND IT IS DELIBERATELY NOT VISUAL 21: that probe RE-DERIVES containment independently of the kernel, so it reports what COULD contain the fragment and is blind by construction to what the chain did - it paints hero uniformly over any near surface whether or not hero answered, which is precisely how I misread it. This one REPORTS the kernel's own writes. ACCEPTANCE (an instrument's acceptance is that it reads, not that anything improves): visual 32 paints a non-grey hue over the vest at the residual pose, mode 0 rendering is unchanged with the visual off, and one screenshot at the residual pose selects among (1)/(2)/(3) without further argument. FALSIFICATION: uniform GREY over the whole mesh = the forensic is not being written where I think it is and the probe itself is wrong - read it as an instrument fault, not as evidence about the residual. NUMBER HYGIENE: mode 395 + visual code 32 minted; no lighting0.y code (nothing gated), no mode reverts anything because nothing changed. FREE NOW: debug modes 396+, lighting0.y codes 67+, visual codes 33+, dbgCtl.w 13+.
+//  || 26627 THE SPLOTCH IS A CERTIFICATION HOLE SHAPED LIKE LAYERED FABRIC, AND CERTIFICATION NOW ASKS THE QUESTION ITS OWN CLAIM RESTS ON (KH_CERT_CONTENT default at all four latches; mode 394 / lighting0.y 66 restores the 26590 surface-identity test - one default, one A/B, rule 1.11). FIELD, the battery that convicted it: 244 (outer down) removed the splotch, 389 (far down) and 357 (pf off) were IDENTICAL to 0, 264 (point tap) made it bigger and darker, 296 (lit-fallthrough off) killed the splotch AND the halo below it whole, and 257 (carry off) changed nothing. Fallthrough convicted, carry exonerated, pf and the far band exonerated for the third time. THE DUMP closes the precondition: objTotal 1 with sunHero/Mid/Out/FarCasters 1/1/1/1, sunLocalCount 1, khSunSt 2, bandOn 1, recvDropWhy 0 on 288/288 - the vest is in EVERY band map and the artifact happens anyway, so this is not admission, not coldness and not a missing caster. THE HOLE: the evidence test abs(z - centre texel) < 3*bias asks whether the texel holds THIS FRAGMENT'S OWN SURFACE; hero's bias is floor-dominated at ~1.95 mm (4 * world ulp at the 7 km anchor) so the window is ~5.9 mm, against fabric sheets 1-3 cm apart. The texel holds the other layer, identity fails, khla_g never latches, and every coarser tier's sub-guard mush stands on a surface hero rendered at 1 mm - which is exactly why 296 kills it and why the halo dies with it. CORRECTIONS OWED (rule 1.16), and there are four. (a) 26623 DIAGNOSED THIS CORRECTLY AND MIS-SIZED THE REMEDY: the 2x2 footprint searches ~2 mm at hero's texel, an order of magnitude UNDER the feature it had to see over, so it was never going to reach a texel holding this sheet; 26624 withdrew it on the field null without diagnosing why and the hunt went to the far-self gate, which is why 392 only ever nudged this. 26623's mechanism is REINSTATED; only its remedy was wrong. (b) THE 26624 A/B POLARITY DOES NOT REPRODUCE: the record says 0 = gone / 392 = back, the field now reads 392 = slightly BETTER. The gate is not the author; it stands on its own 26624 soundness argument and nothing here rests on it. (c) MY OWN VISUAL-21 READING WAS WRONG AND COST A ROUND: KhSelfTierProbe paints which tier's window CONTAINS the fragment, not which tier answered - the vest at ~0.5 m is inside hero's window everywhere, so the probe paints hero uniformly and is BLIND to fallthrough by construction. I read its null as eliminating tier selection, jurisdiction, certification and fallthrough; it eliminated none of them, and the withdrawal is recorded here. (d) THE LONG-SHADOW DROPOUT IS RETRACTED by the operator (camera beyond the object's render view distance); my khsh_one up-sun-bound hypothesis had no target and is withdrawn unshipped, with the 26625 lesson honoured - it is not shipped as theater. THE FIX CHANGES THE EVIDENCE'S KIND, NOT ITS SIZE. 26590's claim is 'this tier's window admitted every occluder in its depth guard and its verdict for this fragment stands' - a property of the WINDOW. What that needs is that the tier COVERED THIS RAY: content present (the texel is not the 1.0 clear) with whatever the tier saw sitting inside the radius it is about to certify. SUBSUMPTION, so no currently-working pixel moves: a texel holding this surface has a gap of ~0, orders inside the guard, so it certifies exactly as before. NO-FALSE-KILL, and the 26590 audit is untouched: a genuine cross-tier caster beyond the guard still fails the rejection's own (z - js) < khla_g * iD test and STANDS - the only thing that changes is which pixels get a certifier at all. Applied at all four latches (hero/mid/outer/far) in the single-site shared chunk; the mid/outer/far radii are hoisted so the evidence test asks about the same number the latch publishes, and the hero centre Load is named so both forms read the same texel. Code 61's fixed guards ride the hoist unchanged. ACCEPTANCE, pre-registered and covering the operator's no-swap requirement in full: (a) at the vest pose the splotch is GONE at mode 0 and the halo below it with it; (b) MODE 0 IS INDISTINGUISHABLE FROM 296 at that pose - that is the binding one, since 296 is the known-good presentation; (c) a genuine distant caster's shadow on a near mesh is STILL PRESENT at mode 0 - the one thing 296 breaks and this must not; (d) crevice fireflies, motion grain and the 26592 contact class stay dead (this build does not touch the bias normal at all); (e) 394 restores the splotch and the halo together. FALSIFICATION, binding: any real shadow vanishing on a certified surface = the guard arithmetic is wrong somewhere, 394 is the instant stand-down and the rejection's radius test reopens at the admission geometry (26537). If the splotch survives at mode 0 while still dying at 296, certification is not the blocker and the next axis is the fallthrough contract itself, instrumented before touched. BANKED, NOT SHIPPED, and said plainly because it was promised: the khla_g certification VISUAL. It needs the tier walk re-derived outside the kernel (khla_g/khla_w are locals) and that is a 40-line probe plus a segment split riding the same build as a behavioural change - the 26582/26583 scope lesson. Acceptance (b) is directly observable without it, so the instrument goes to its own build if this one needs a second round. 26590's own 'instrument khla_g with a visual' note therefore stands unpaid and is restated here rather than quietly dropped. HOUSEKEEPING: no C++ behaviour change, no CB field, no new resource, no StateBackup change, 75 HLSL segments unchanged (insertions took seg #18/19/20/21/22, headroom 3486/4284/3109/3635/4928 before the edit). NUMBER HYGIENE: mode 394 + lighting0.y 66 minted; 391 stays retired; 233 and 296 keep their meanings. FREE NOW: debug modes 395+, lighting0.y codes 67+, visual codes 32+, dbgCtl.w 13+.
+//  || 26626 TWO STATIC-READ DEFECTS IN THE 26575-26583 PREFILTER PLUMBING, BOTH IN ITS STATE DISCIPLINE RATHER THAN ITS ARITHMETIC (KH_PF_SRV_RESTORE, mode 393 reverts; plus the pf release-path repair, no arm). NO FIELD REPORT DROVE THIS - it is an arrival audit of the render pipeline, and rule 1.12 binds: NOTHING here is claimed to author any reported artifact, and the predicted signature below is PREDICTED, not measured. (1) THE CONVERT LEAVES t0/t1 NULL FOR ITS CALLER. kh_sun_pf_convert binds t0 (band depth) and t1 (scratch mip) and nulls both before returning - the nulls are the correct read/write hazard break - but 26582 relocated it to the mesh-bind region, where it runs AFTER its call sites bind their own t0/t1. THE TWINS DIVERGE, and only one is covered: the FLUSH path is immune by accident because its draw loop re-swaps the pair per solid mesh (khf_srv_cat starts -1, so the first mesh forces it) - its own pass-bind ledger says so outright. The INJECTION path is not: t0 binds at the snapshot line, t1 at the atlas line, the convert follows both, and a census of EVERY PSSetShaderResources in inject_composited_meshes finds none touching either slot afterwards - its mesh draw loop contains zero SRV binds of any kind. Both slots have live consumers in that assembly (t0 depthTex, t1 shadowAtlas), so on every frame the convert body runs, PSComposite drew with the scene-depth snapshot and the engine cascade atlas reading zero. CORRECTIONS OWED, both to entries that reviewed this exact site and passed it: 26582 endorsed the relocation as 'the exact place where PSSetShaderResources has bound t11/t25/t26/t27 successfully' - true, and irrelevant, because all four bind AFTER the call; the slots bound BEFORE it were never checked. 26583 re-reviewed the relocation, concluded it 'fixed nothing and claimed to', kept it, and did not check them either - while fixing, one slot over, a pass that RELIED on unset state. This is that lesson's converse: a pass that LEAVES state unset hands its caller the null. THE FIX: the pair is saved and restored inside the function with the rest of its block (RTs, viewports, topology, layout, VS, PS, blend, RS), not by reordering the two call sites - one edit instead of two, it cannot regress the flush twin, and the function becomes self-contained at any future call site. Refs are taken and released on both arms; only the SET is gated, so 393 is the historic behaviour bit-exact. C++-side only: no shader recompile, NO lighting0.y code (the 26611/26620 pattern). (2) THE PREFILTER GROUP HAD NO RELEASE PATH AT ALL. Every resource ensure_sun_pf creates - samp_pf, blend_pf, vs_sunpf, ps_sunpf, ps_sunpfm, sun_pf_tex/rtv/srv[3], sun_pf_rtvm[3][12], sun_pf_scr, sun_pf_scr_srvm[12], pf_stage_mu/st - appears in ZERO release sites file-wide: not Resources::release, not release_shadow_device_state. Not a leak (pointers retained and reused); a STALE-DEVICE hazard, because ensure_sun_pf early-outs on each being non-null, so after on_engine_reset nulls everything else it returns true having recreated nothing and the convert draws into a dead device's RTVs. Shipped WITHOUT AN ARM under the 26362 precedent: in-session behaviour is identical - the only observable change is after a device reset, where the prior state is provably stale pointers and a revert arm would arm a crash. g_sun_pf_valid[] now dies with the device beside the band flags. ACCEPTANCE, pre-registered: mode 0 vs 393 at a pose with engine cascade shadows falling across an injected mesh WHILE MOVING (motion keeps the bands re-rendering, which is what gates the convert body) - 0 holds the cascade receive steady, 393 makes it drop out on band-render frames; and an alt-tab or resolution change no longer risks the convert on a dead device. FALSIFICATION, binding: if 0 and 393 read IDENTICAL in that A/B, the convert body is not running at the rate the 26575 ledger's own 11320/11382 implies, the defect is real but inert, and this entry says so next build rather than keeping a fix that buys nothing. If cascade receive on injected meshes gets WORSE at mode 0, the restore is putting back a pair the injection wanted stale - 393 is the instant stand-down. HOUSEKEEPING: no shader edit, no HLSL segment touched (75, unchanged), no CB field, no StateBackup widening. NUMBER HYGIENE: 393 minted (mode only, no lighting0.y code); nothing retired. FIELD AMENDMENT, dump1 on 26626 (mode 0; 8093 flushes / 8081 injections; 512 ring rows; every *Fails lane 0; sunPfHero/Mid/OutOk all 1, so the release-path edit did not break ensure_sun_pf): THE t0 HALF IS LIVE, THE t1 HALF IS MEASURED INERT, AND THE PRE-REGISTERED FALSIFICATION FOR THE ATLAS LEG EXECUTED - recorded here rather than argued away. CADENCE CONFIRMED: sunHero/Mid/OutRenders 7265/7296/7393 against 8081 injections = the convert body runs on ~90 pct of injected frames, exactly what the 26575 11320/11382 figure implied; the defect was frequent, not rare. t0 HAS THREE CONSUMERS EVERY INJECTED FRAME: volCode 6 on 512/512 with svVolWitFrames 8091 / svVolWitAbsent 3 (the scene-witness filter reads depthTex.y at t0), injGuardOff 3 of 8081 (GuardSceneRaw armed essentially always), arbOn 1 on 512/512 (the arb terrain clamp reads it too) - all three read zero on ~90 pct of frames before this build. t1 IS NEVER REACHED: khLiveTab 0 on 512/512 (g_ls.count at the frame fill; EMPTY by the 26567 lane definition, khLiveServed 0 beside it), so shadowMeta.x is 0 and ShadowMapSample returns at its n <= 0 guard BEFORE touching shadowAtlas - including on the 75 rows where bandOn read 0 and the fallback genuinely served (one contiguous ~1.2 s block, rows 211-285, sunOk 3 -> 1: the kh_sun_settled cold hold after a skipTime, not a band failure; recvBandsN 8 and recvDropWhy 0 on 511/512 throughout). THE ATLAS RESTORE THEREFORE BOUGHT NOTHING MEASURABLE HERE. Its acceptance clause is WITHDRAWN as unfalsifiable in this configuration. The code is KEPT - one Get/Set/Release pair on a path that already runs, correct the moment khLiveTab is non-zero - but no field claim rests on it. CORRECTION OWED, on my own prediction made before this dump: I said the fallback window would read DARK (null atlas -> d = 0 -> occluded 1 at sign +1). With an EMPTY live table the sample never happens, so that window's correct reading is NO world receive - injected meshes fully lit - and it reads identically at mode 0 and at 393. ACCEPTANCE, CORRECTED AND REPLACING THE CLAUSE ABOVE: mode 0 vs 393 against the PUNCH-THROUGH GUARD (a mesh behind a wall or ridgeline edge) and against engine shadow-volume shadows crossing an injected mesh - both are t0 consumers and both run every frame. The atlas leg cannot be tested until a session with khLiveTab > 0 exists, and until one does it is offered as evidence in neither direction. SESSION HEALTH, banked, unrelated to this build: sunRangeSrc 2 / sunRangeM 300 / sunLadderScale 1.5 - the 26615 derivation and the 26611 ladder are both correct at the operator's changed setting. blkSlewRegimeCommits 4 across the skips with blkZeroSunAdmits 259 against stdSunLum 0.042 beside stdAmbLum 0.161 = the 26612 night gate admitting correctly on a genuinely dark scene, NOT the watch-item climb (that clause reads admits climbing in a DAY session). bandWipeEvents 0 and msaaToggleWipes 0 - no device reset occurred, so repair (2) is UNTESTED by this dump and still waits on an alt-tab or resolution change. FREE NOW: debug modes 394+, lighting0.y codes 66+, visual codes 32+, dbgCtl.w 13+.
 //  || 26625 THE NAMED LIFT IS RETRACTED ON ITS OWN PRECONDITION - objTotal EQUALS THE ADMITTED CASTER COUNT IN EVERY DUMP ON RECORD, SO THE RECEIVER-ABSENCE THEORY IS FALSIFIED AND NO RECEIVER-ONLY MESHES EXIST IN THESE SCENES (ledger-only build; no behaviour change; the 26624 gate and its disclosed trade stand unchanged). THE CHECK, run before applying the lift the operator authorized: objTotal is g_draw_list.size() - the WHOLE registration - and it reads equal to sunHero/Mid/Out/FarCasters in every session (2==2, 3==3), so every registered mesh, the vest included, is admitted to and rendered into every band map (rast_sun is CullNone since its creation - interiors render too). The 26624 ledger's mechanism step 'receivers absent from every map, the first-person-gear class' is therefore WRONG and is corrected here; the lift built on it (register receiver-only meshes as casters) has NO TARGET and applying it would have been theater. WHAT SURVIVES OF 26624, and why the fix stands anyway: the FIELD facts are untouched - 389 kills the splotch, the gate kills the splotch, certification widening did not - and the gate's soundness argument never used the absence step: the far tier cannot add information inside the finer ladder's coverage (the complete admitted caster set exists there at >=4x finer texels), so silencing it inside the outer window is correct WHATEVER blocks the protection. The disclosed trade stands as written. THE OPEN CONTRADICTION, stated so the next campaign starts honest: with the vest in the hero map, the static read says hero certifies at the ring pixels, khla_w latches 1, and the kh5 rejection zeroes the ring - yet the field showed the splotch surviving exactly that machinery on 26623. Something in that chain does not run as read at those pixels (hero validity at those frames, the serving path for those fragments, or an ordering this reading misses). NO CODE until it is read live: the decode is mode 392 (gate lifted) + setRenderDebug 269 at the splotch pose - the tier paint names what serves those pixels and whether hero answers there at all; one screenshot resolves what three static readings could not. NUMBER HYGIENE: nothing minted, nothing retired. FREE NOW: debug modes 393+, lighting0.y codes 66+, visual codes 32+, dbgCtl.w 13+.
 //  || 26624 THE SPLOTCH IS THE FAR BAND'S SILHOUETTE RING SERVED THROUGH THE SELF FALLTHROUGH TO RECEIVERS THE MAPS NEVER HELD, AND THE FAR SELF TIER LEARNS THE CAST CHAIN'S OWN DISCIPLINE - PLUS 26623 IS WITHDRAWN PER THE OPERATOR'S BASELINE DIRECTIVE (KH_FAR_SELF_SCOPE default, mode 392 / lighting0.y 65 restores the ungated 26620 form; certification returns to center-only; modes 391 + code 64 RETIRED - fielded once, never remint, rule 1.18). FIELD (operator, on 26623): the splotch persists at mode 0 (does NOT match 389), IS killed by 389, and - the new datum - shows at EVERY quality level/distance; the light bleed is explicitly deprioritized ('leave it be') and the directive is: fix the splotch, otherwise hold the wobble+ladder good version. THE TRIANGULATION, three facts one author: (killed by 389) the far band serves it; (immune to 26623) no surface-evidence test can ever protect the receiving fragments, so their own surface is ABSENT from the fine maps - the first-person-gear class, receivers that are not casters; (all distances) the serving window is the far band's 0..range, not any tier annulus. THE MECHANISM WHOLE: a real caster's far-band silhouette at 0.10 m texels over-extends its true shadow by up to a texel+filter (~10-30 cm ring); the fine tiers read those ring fragments correctly LIT and fall through per 26507 (correct and necessary - cross-distance casters live in coarser maps); with the receiver absent from every map, no tier certifies, no jurisdiction fires, and kh5's ring answers - at 0.10 m it is a crisp dark SPLOTCH where the union's 0.5 m version was diffuse background the operator's eye had already priced in. 26620 did not create the class; it sharpened it past noticing threshold. WHY THE FIX IS THE CAST CHAIN'S OWN RULE: the cast chain never shows this - 26538 made it lit-authoritative inside a containing window, so khc5 only ever serves PAST the outer band. The self chain kept 26507 fallthrough for good reason, but the far tier is the one rung where fallthrough can only LOSE inside the finer ladder's coverage: outer and below hold the complete admitted caster set at >=4x finer texels, so within the outer window the far tier can never add information, only rings. THE GATE: the far SELF tier runs only when the outer window does NOT hold the fragment interior, or a blend carry is in flight (the outer->far cross-fade stands whole). Inside the finer coverage the chain falls to the union exactly as the field-accepted pre-far-band version - which is also why acceptance is crisp: MODE 0 NOW MATCHES MODE 389 AT THE SPLOTCH by construction, while the >32s far-self quality and the wobble/mesh-law wins (the 26620 campaign) are untouched. Hero/mid/outer are NOT gated - their fallthrough serves real cross-tier casts and their texels cannot manufacture visible rings. 26623 WITHDRAWN, said plainly: the neighborhood certification was sound in its own audit but aimed at the wrong half - the receivers at issue have no surface in any map for ANY footprint to find, the field showed exactly that (mode 0 unchanged), and the operator's directive is the known-good baseline plus one fix, not an accumulation of plausible-but-inert changes. The four latches return to center-only verbatim; the KhCg segment is removed whole; 391/64 join the retired list beside 390/63. PRE-REGISTERED ACCEPTANCE (rule 1.22): (a) the splotch pose at mode 0 == the same pose at 389, both now and at any distance; (b) far-self quality past the outer window unchanged (the 26620 acceptance restated); (c) the outer->far handoff stays line-free from both directions (the carry clause is the whole cross-fade path); (d) 392 restores the ring alone. DISCLOSED TRADE (operator-queried and answered, the 26538 pattern): the gate sacrifices one legitimate slice through the same door the ring used - a REAL distant caster (lateral outside the outer window, inside the range) casting onto a NEAR self receiver was far-band-served at 0.10-0.26 m and is UNION-served now: the shadow survives (the chain still ends at the union terminal) at union quality, re-exposing the mesh-priced texel and the hash-gated re-render wobble WITHIN THAT SLICE ONLY - distant-caster shadow overlapping a near self mesh inside the outer window. The world-side twin of this slice was already conceded at 26538 (cast lit-authoritative), so self and cast are now symmetric in the concession. THE NAMED LIFT: render the receiver-only meshes (the first-person gear class) into the band maps as casters - certification then works, the jurisdiction kills the ring properly, and this gate can retire, returning the slice to far-band quality with no ring; a content/admission campaign of its own. THE LIGHT BLEED stays banked per the directive: thin-gap bias class, decode via setRenderDebug 269 at the pose whenever reopened. NUMBER HYGIENE: mode 392 + lighting0.y 65 minted; 391 + 64 retired (fielded). FREE NOW: debug modes 393+, lighting0.y codes 66+, visual codes 32+, dbgCtl.w 13+.
 //  || 26623 THE OPERATOR'S MODE-389 A/B NAMES THE ARTIFACT'S FIRST HALF IN THE FIELD - COARSE-TIER MUSH SERVED THROUGH A CERTIFICATION HOLE SHAPED EXACTLY LIKE LAYERED FABRIC - AND CERTIFICATION LEARNS TO SEE ITS OWN FOOTPRINT (KH_CERT_NEIGHBORHOOD default at all four latches; mode 391 / lighting0.y 64 restores center-only - one default, one A/B, rule 1.11). FIELD (operator, on 26622): mode 389 (far band OFF) REMOVES the largest splotch and leaves the rest of the band + some bleed - the first differential result on this artifact after four nulls. THE READ: the splotch was the FAR BAND'S 0.10 m mush serving a fragment that fell through hero/mid/outer unprotected; the residue is the same fallthrough class served by the remaining coarse tiers. THE HOLE, mechanically: on sub-texel LAYERED geometry (the vest's stacked fabric, 1-3 cm gaps) the fine tier reads LIT (the gap sits under its bias) and falls through per 26507 - correct and necessary (cross-distance casters live in coarser maps) - but its 26590 CERTIFICATION also fails, because the CENTER texel holds the OTHER LAYER's depth, not this surface's. The jurisdiction built precisely to zero coarse mush is blind precisely on the geometry that manufactures it; 26620's far band did not create the class, it DENSIFIED what serves it (0.10 m stripes where 0.5 m union blotches sat), which is why the artifact 'moved' to new poses and survived both 26621 arms and mode 357 - no pf, no remap, no pyramid anywhere in the chain. THE FIX: certification evidence widens from the center texel to the 2x2 BILINEAR FOOTPRINT (KhCg2..5, min own-surface gap over the four texels the tap kernel already reads) - on layered fabric the neighbor holding THIS surface certifies, khla_g/khla_w latch, and every coarser tier's sub-guard mush - the far band's splotch and the union's alike - zeroes under the existing 26590/26617 machinery. THE GUARD SEMANTICS ARE UNCHANGED AND THAT IS THE SOUNDNESS ARGUMENT: certification's claim is 'this tier's window+reach admitted every occluder in its depth guard and its verdict for this fragment stands' - WHICH footprint texel proves the surface present does not alter that claim; a texel holding this surface within 3 bias widths is the same evidence, spatially robust. False-kill audit: a REAL cross-caster within the guard would be IN this tier's map (admission is lateral + reach, 26537), so a lit verdict already excludes it - neighborhood evidence cannot zero a shadow the center evidence would have kept. WHAT THIS DOES NOT CLAIM: the whole artifact. The light-bleed remainder (bright patches inside TRUE shadow) is the OTHER half - thin gaps eaten by the serving tier's own bias - untouched here, possibly reduced only where it was actually coarse-mush patchwork misread as bleed. PRE-REGISTERED ACCEPTANCE (rule 1.22): (a) at the operator's pose, mode 0 WITH the far band ON now matches or beats the mode-389 presentation (the jurisdiction kills what standing the band down killed) and the residual banding dies where it is coarse mush; (b) mode 391 restores the splotch and the bands together; (c) the vest-pose halo and whole-face dither STAY DEAD (interiors bit-exact under certified weight 1; the widened evidence only ADDS certifications); (d) whatever survives BOTH 0-and-391-identical is the bias/thin-gap class - bounded, named, and decoded by setRenderDebug 269 at the pose before any further code. FALSIFICATION: real cast shadows from near casters vanishing on certified surfaces = the guard audit above is wrong somewhere - 391 is the instant stand-down and the audit reopens at the admission geometry. NUMBER HYGIENE: mode 391 + lighting0.y 64 minted. FREE NOW: debug modes 392+, lighting0.y codes 65+, visual codes 32+, dbgCtl.w 13+.
@@ -2412,6 +2475,20 @@ inline void kh_report_error(const std::string& msg) {
     MainThreadScheduler::instance().schedule([msg]() { report_error(msg); });
 }
 
+// 26639 kh_report_note - THE NON-THROWING TWIN, AND IT IS A DEFECT REPAIR.
+// report_error calls sqf::diag_log AND sqf::throw_exception, so routing the
+// 26638 shader census through kh_report_error raised a real scripting error
+// every batch: the operator's RPT carries "Error Unhandled exception" with
+// the whole census line as its text, inside interceptOnFrame. A GAUGE MUST
+// NOT THROW AT THE MISSION. This logs and returns. No dedupe: notes are
+// emitted at a known low rate by construction - the census fires once per
+// shader batch, three times in a session at most.
+inline void kh_report_note(const std::string& khrn_msg) {
+    MainThreadScheduler::instance().schedule([khrn_msg]() {
+        try { sqf::diag_log(khrn_msg); } catch (...) {}
+    });
+}
+
 // ---------------------------------------------------------------------------
 // KH_ENSURE_REPORT - 26422 A COMPILE FAILURE MUST NAME ITSELF, AND FOR THE
 // CORE SHADERS IT DID NOT.
@@ -2444,8 +2521,15 @@ inline void kh_report_error(const std::string& msg) {
 // verbatim - `if (!kh_ensure_ok(...)) return;` reads the same way round as
 // the `.empty()` test it replaces, and no control flow moves.
 // ---------------------------------------------------------------------------
+// 26641: the async compile's deferral is a STATE, not a failure. It is
+// returned by ensure_resources every frame until the pool finishes, and it
+// must NEVER reach report_error - which calls sqf::throw_exception, the
+// 26639 defect. Compared by value so no call site changes.
+static const char* const KH_SHADERS_COMPILING = "shaders compiling";
+
 inline bool kh_ensure_ok(const char* khe_what, const std::string& khe_err) {
     if (khe_err.empty()) return true;
+    if (khe_err == KH_SHADERS_COMPILING) return false;   // 26641: benign, silent
     kh_report_error(std::string("KH ") + khe_what + ": " + khe_err);
     return false;
 }
@@ -4245,6 +4329,22 @@ float KhTbW(float khtw_e)
 // KH_BUILD_TAG): the certified-protection WEIGHT. The 26590 mush-zeroing
 // now fades over the certifying tier's own 26594 band instead of ending
 // on a cliff at its window edge. Codes 60 / 55 / 26 pin the hard form.
+// 26633 WHY 367 READS NULL AT THE OUTER-TO-FAR CUT, and why that is not a
+// contradiction with visual 32. This curve reaches ZERO at the certifying
+// tier's own window edge, and khla_w is ASSIGNED - not maxed - from the
+// certifier's edge coordinate. At the outer-to-far contour the fragment
+// sits at outer's edge with hero and mid not containing it, so outer is the
+// sole certifier, khla_w falls to 0, and the rejection res *= 1 - khla_w is
+// a no-op. PAST the cut no finer tier contains the fragment, so khla_g
+// never leaves 0 and far's rejection cannot pass its own khla_g > 0.5 gate.
+// The jurisdiction is INERT ON BOTH SIDES of that contour by construction,
+// so a null there is the predicted reading and eliminates nothing. Visual
+// 32 paints certifier IDENTITY and never reads khcf.w, which is where this
+// WEIGHT is carried - different quantities, no contradiction. Full entry at
+// KH_BUILD_TAG. NOTE the latent coupling while you are here: khla_g takes a
+// MAX across certifiers and khla_w takes the LAST one's value, so a future
+// tier insertion could source the radius and the weight from different
+// tiers - benign only while the guards stay monotonic in tier.
 float KhJw(float khjw_e)
 {
     return ((lighting0.y >= 59.5f && lighting0.y < 60.5f) ||
@@ -4658,8 +4758,13 @@ float KhSelfTap5(float2 khst_t, float2 khst_g, float khst_z, float khst_b, float
                 lerp(khst_c.z, khst_c.w, khst_fr.x), khst_fr.y);
 }
 )HLSL" R"HLSL(
-float SunShadowOcclusionSelf(float3 wpos, float3 wrel, float3 nrm)
+float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
+                               out float4 khcf)
 {
+    // 26628 KH_CERT_PROBE forensic (full comment at KhSelfCertProbe).
+    // x = innermost containing tier outcome, y = innermost certifier,
+    // z = serving tier, w = khla_w. Set before every return.
+    khcf = float4(0.0f, 0.0f, 0.0f, 0.0f);
     if (sunMeta.x < 0.5f) return 0.0f;
     // ==========================================================
     // 26459 KH_SUN_GRAD_SLACK (mode 253 / lighting0.y 25 reverts;
@@ -4778,6 +4883,44 @@ float SunShadowOcclusionSelf(float3 wpos, float3 wrel, float3 nrm)
     float khtb_occ = -1.0f;
     float khla_g = 0.0f;   // 26589/26590 jurisdiction radius, metres (ledger at the union block)
     float khla_w = 0.0f;   // 26617 KhJw protection weight
+    // 26627 KH_CERT_CONTENT (mode 394 / lighting0.y 66 restores the 26590
+    // surface-identity test). THE CERTIFICATION HOLE, field-convicted: 296
+    // (lit-fallthrough off) kills the splotch AND the halo whole; 257
+    // (carry off) changes nothing; the dump reads objTotal 1 with
+    // sunHero/Mid/Out/FarCasters 1/1/1/1, so the vest IS in every band map
+    // and the artifact happens anyway. The blocker is the evidence test:
+    // abs(z - centre texel) < 3*bias asks whether the texel holds THIS
+    // FRAGMENT'S OWN SURFACE, and hero's bias is floor-dominated at ~1.95 mm
+    // (4 * world ulp at 7 km), so the window is ~5.9 mm against layered
+    // fabric whose sheets sit 1-3 cm apart. The texel holds the OTHER layer,
+    // identity fails, nothing certifies, and every coarser tier's sub-guard
+    // mush stands on a surface hero rendered at 1 mm. 26623 read this
+    // correctly and mis-sized the remedy: widening to the 2x2 footprint
+    // searches ~2 mm at hero's texel, an order of magnitude UNDER the
+    // feature it had to see over, which is why it was field-null and
+    // withdrawn at 26624 - the neighbourhood was never going to reach a
+    // texel holding this sheet.
+    // THE EVIDENCE CHANGES KIND RATHER THAN SIZE. 26590's claim is "this
+    // tier's window admitted every occluder in its depth guard and its
+    // verdict for this fragment stands" - a property of the WINDOW, not of
+    // surface identity. What that claim needs is that the tier covered this
+    // ray at all: CONTENT PRESENT (the texel is not the 1.0 clear) with
+    // whatever the tier saw sitting INSIDE the radius it is about to
+    // certify. SUBSUMES the old test where it passed - a texel holding this
+    // surface has a gap of ~0, orders inside the guard - so every currently
+    // certifying pixel certifies unchanged. CANNOT kill a real shadow: the
+    // 26590 false-kill audit is untouched, because a cross-tier caster
+    // beyond the guard still fails the rejection's own (z - js) < khla_g *
+    // iD test and its verdict STANDS; the only thing that changes is which
+    // pixels get a certifier at all.
+    const bool khcc_on = !(lighting0.y >= 65.5f && lighting0.y < 66.5f);
+    // 26629 KH_CERT_CLEAR (mode 396 / lighting0.y 67 restores 26627's
+    // content-only form). A CLEAR texel is evidence of ABSENCE, not
+    // absence of evidence: the tier rasterized its whole admitted caster
+    // set and nothing landed on this ray. Dropping the js < 1 conjunct is
+    // the whole change - a cleared texel reads 1.0, so (z - 1.0) is
+    // negative and passes the guard test on its own arithmetic.
+    const bool khcc_clr = !(lighting0.y >= 66.5f && lighting0.y < 67.5f);
     float khtb_w = 0.0f;
     const bool khtb_on = !(lighting0.y >= 25.5f && lighting0.y < 26.5f);
     // 26507: the self chain's TWIN of 26506 KH_BAND_LIT_FALLTHROUGH (mode
@@ -5000,11 +5143,22 @@ float SunShadowOcclusionSelf(float3 wpos, float3 wrel, float3 nrm)
                         kh2_res = lerp(kh2_res, kh2_pfo, kh2_pw);
                 }
             }
-            if (abs(kh2_c.z - khSunDepth2.Load(int3(int2(kh2_t), 0))) < 3.0f * kh2_b) {
+            // 26627: the centre Load is named so both evidence forms read
+            // the same texel; the old form is preserved verbatim under 66.
+            float kh2_js = khSunDepth2.Load(int3(int2(kh2_t), 0));
+            bool kh2_cok = khcc_on ? ((khcc_clr || kh2_js < 1.0f) &&   // 26629
+                           (kh2_c.z - kh2_js) < (6.0f * sunMeta2.w) * kh2_iD)
+                        : (abs(kh2_c.z - kh2_js) < 3.0f * kh2_b);
+            if (khcf.x < 0.5f) khcf.x = kh2_cok ? 3.0f
+                                     : (kh2_js >= 1.0f ? 1.0f : 2.0f);   // 26628
+            if (kh2_cok && khcf.y < 0.5f) khcf.y = 1.0f;
+            khcf.z = 1.0f;
+            if (kh2_cok) {
                 // 26590/26617: hero's certified guard - 6:1 on the half
                 // (the KH_SUN_CASCADE ratio; = 12 m, hero is unscaled).
                 khla_g = 6.0f * sunMeta2.w;
                 khla_w = KhJw(max(abs(kh2_uv.x - 0.5f), abs(kh2_uv.y - 0.5f)) * 2.0f);
+                khcf.w = khla_w;   // 26628
             }
             if (kh2_res > 0.0001f || khlfs_off) {   // 26507: lit falls through
                 float kh2_e = max(abs(kh2_uv.x - 0.5f), abs(kh2_uv.y - 0.5f)) * 2.0f;
@@ -5180,15 +5334,34 @@ float SunShadowOcclusionSelf(float3 wpos, float3 wrel, float3 nrm)
                 }
             }
             float kh3_js = khSunDepth3.Load(int3(int2(kh3_t), 0));   // 26590
+            // 26633 READ THE DEFERENCE CONJUNCT BELOW BEFORE DESIGNING ANY
+            // LIT-CARRY. khtb_occ < 0.0f means establishing ANY carry - lit
+            // or shadowed - disables this rejection, so a bounded lit-carry
+            // that relies on jurisdiction having de-mushed its blend partner
+            // switches that jurisdiction off in the same stroke. The fix
+            // shape must reject BEFORE the blend or exempt lit carries here
+            // explicitly. Twin conjuncts sit at the outer and far tiers.
             if (khla_g > 0.5f && kh3_res > 0.0001f &&
                 (kh3_c.z - kh3_js) < khla_g * kh3_iD &&
                 (khtb_occ < 0.0f || (lighting0.y >= 54.5f && lighting0.y < 55.5f)) &&
                 !(lighting0.y >= 50.5f && lighting0.y < 51.5f))
                 kh3_res *= 1.0f - khla_w;   // 26590/26617: rejection at the certifier's edge weight
-            if (abs(kh3_c.z - kh3_js) < 3.0f * kh3_b) {   // 26590/26617
-                khla_g = max(khla_g, (lighting0.y >= 60.5f && lighting0.y < 61.5f)
-                                     ? 48.0f : 6.0f * sunMeta3.w);   // code 61: fixed guard
+            // 26627: the radius is hoisted so the evidence test can ask
+            // about the same number the latch is about to publish.
+            float kh3_cg = (lighting0.y >= 60.5f && lighting0.y < 61.5f)
+                         ? 48.0f : 6.0f * sunMeta3.w;   // code 61: fixed guard
+            bool kh3_cok = khcc_on
+                         ? ((khcc_clr || kh3_js < 1.0f) &&   // 26629
+                            (kh3_c.z - kh3_js) < kh3_cg * kh3_iD)
+                         : (abs(kh3_c.z - kh3_js) < 3.0f * kh3_b);   // 26590/26617/26627
+            if (khcf.x < 0.5f) khcf.x = kh3_cok ? 3.0f
+                                     : (kh3_js >= 1.0f ? 1.0f : 2.0f);   // 26628
+            if (kh3_cok && khcf.y < 0.5f) khcf.y = 2.0f;
+            khcf.z = 2.0f;
+            if (kh3_cok) {
+                khla_g = max(khla_g, kh3_cg);
                 khla_w = KhJw(max(abs(kh3_uv.x - 0.5f), abs(kh3_uv.y - 0.5f)) * 2.0f);
+                khcf.w = khla_w;   // 26628
             }
             if (kh3_res > 0.0001f || khlfs_off) {   // 26507: lit falls through
                 if (khtb_occ >= 0.0f) return lerp(kh3_res, khtb_occ, khtb_w);   // 26465
@@ -5206,6 +5379,11 @@ float SunShadowOcclusionSelf(float3 wpos, float3 wrel, float3 nrm)
     // 26624 KH_FAR_SELF_SCOPE: whether the OUTER band's window held this
     // fragment - the far self tier stands silent inside it (ledger there).
     bool kh4_in = false;
+    // 26634 KH_FAR_SELF_CERT_SCOPE: did the OUTER band CERTIFY here - the
+    // bound on the mode-400 lift of the 26624 gate. Latched at kh4_cok, so
+    // wherever the lift applies the 26590/26617 rejection that must clean a
+    // sub-guard far ring is provably armed. Ledger at KH_BUILD_TAG.
+    bool kh4_cert = false;
     if (sunMeta4.x >= 0.5f) {
         float kh4_iR0 = length(float3(sunVP4[0].x, sunVP4[1].x, sunVP4[2].x));
         float kh4_no = khno_k * 2.0f / (max(sunMeta4.y, 1.0f) * max(kh4_iR0, 1e-6f));
@@ -5364,10 +5542,22 @@ float SunShadowOcclusionSelf(float3 wpos, float3 wrel, float3 nrm)
                 (khtb_occ < 0.0f || (lighting0.y >= 54.5f && lighting0.y < 55.5f)) &&
                 !(lighting0.y >= 50.5f && lighting0.y < 51.5f))
                 kh4_res *= 1.0f - khla_w;   // 26590/26617: rejection at the certifier's edge weight
-            if (abs(kh4_c.z - kh4_js) < 3.0f * kh4_b) {   // 26590/26617
-                khla_g = max(khla_g, (lighting0.y >= 60.5f && lighting0.y < 61.5f)
-                                     ? 192.0f : 6.0f * sunMeta4.w);   // code 61: fixed guard
+            // 26627: radius hoisted (the kh3 twin above; same reason).
+            float kh4_cg = (lighting0.y >= 60.5f && lighting0.y < 61.5f)
+                         ? 192.0f : 6.0f * sunMeta4.w;   // code 61: fixed guard
+            bool kh4_cok = khcc_on
+                         ? ((khcc_clr || kh4_js < 1.0f) &&   // 26629
+                            (kh4_c.z - kh4_js) < kh4_cg * kh4_iD)
+                         : (abs(kh4_c.z - kh4_js) < 3.0f * kh4_b);   // 26590/26617/26627
+            if (khcf.x < 0.5f) khcf.x = kh4_cok ? 3.0f
+                                     : (kh4_js >= 1.0f ? 1.0f : 2.0f);   // 26628
+            if (kh4_cok && khcf.y < 0.5f) khcf.y = 3.0f;
+            khcf.z = 3.0f;
+            if (kh4_cok) {
+                khla_g = max(khla_g, kh4_cg);
                 khla_w = KhJw(max(abs(kh4_uv.x - 0.5f), abs(kh4_uv.y - 0.5f)) * 2.0f);
+                khcf.w = khla_w;   // 26628
+                kh4_cert = true;   // 26634
             }
             if (kh4_res > 0.0001f || khlfs_off) {   // 26507: lit falls through
                 if (khtb_occ >= 0.0f) return lerp(kh4_res, khtb_occ, khtb_w);   // 26465
@@ -5409,8 +5599,29 @@ float SunShadowOcclusionSelf(float3 wpos, float3 wrel, float3 nrm)
     // far-self quality (the 26620 win) is untouched; the outer->far
     // cross-fade stays line-free (the carry clause). 392 = the A/B.
     // ==========================================================
+    // 26635 KH_FAR_SELF_CERT_SCOPE IS THE DEFAULT (mode 401 / lighting0.y 71
+    // restores the 26624 gate; full ledger at KH_BUILD_TAG). THE 26624 GATE
+    // WAS THE OUTER-TO-FAR HARD CUT, field-proven: inside outer's window the
+    // far tier served only a CARRYING fragment, and a carry exists only where
+    // outer read SHADOWED - so a carrying fragment got far at 149 mm and
+    // blended while everything else fell to the UNION at its mesh-priced
+    // 522-640 mm. Binary for one population, continuous for the other, on ONE
+    // contour, with the shadow's own edge dividing them: the cut and the
+    // wobble as a single artifact, which is exactly how they died - together,
+    // under both arms. THE DEFAULT NOW lifts the gate wherever OUTER
+    // CERTIFIED, so the 26590/26617 rejection is armed to zero any sub-guard
+    // ring while a genuine BEYOND-guard cast keeps far's rendition. The
+    // kh4_cert conjunct is REDUNDANT against current certification and the
+    // field says so (392 and 400 read alike at the splotch pose); it is kept
+    // because under 394 or 396 - the certification reverts - it goes false at
+    // exactly the absent receivers 26624 was built for and the old gate
+    // reasserts itself, so no revert arm can silently re-open that class.
+    // Code 70 leaves the clause TRUE, so mode 400 stays a bit-exact ALIAS of
+    // this default (rule 1.18: it was fielded). Code 65 is the UNBOUNDED form
+    // and now isolates the bound itself.
     if (sunMeta5.x >= 0.5f &&
         (!kh4_in || khtb_occ >= 0.0f ||
+         (kh4_cert && !(lighting0.y >= 70.5f && lighting0.y < 71.5f)) ||
          (lighting0.y >= 64.5f && lighting0.y < 65.5f))) {
         float kh5_iR0 = length(float3(sunVP5[0].x, sunVP5[1].x, sunVP5[2].x));
         float kh5_no = khno_k * 2.0f / (max(sunMeta5.y, 1.0f) * max(kh5_iR0, 1e-6f));
@@ -5524,9 +5735,47 @@ float SunShadowOcclusionSelf(float3 wpos, float3 wrel, float3 nrm)
                 (khtb_occ < 0.0f || (lighting0.y >= 54.5f && lighting0.y < 55.5f)) &&
                 !(lighting0.y >= 50.5f && lighting0.y < 51.5f))
                 kh5_res *= 1.0f - khla_w;   // 26590/26617: rejection at the certifier's edge weight
-            if (abs(kh5_c.z - kh5_js) < 3.0f * kh5_b) {   // 26590/26620
-                khla_g = max(khla_g, 6.0f * sunMeta5.w);   // = 6x the range: the far band's whole depth window
+            // 26627: radius hoisted (the kh3/kh4 twins above; same reason).
+            // 26630 KH_FAR_GUARD_ADMIT (mode 397 / lighting0.y 68 restores
+            // the 26620 form). THE FAR TIER HAS BEEN OVER-CLAIMING BY 6x
+            // SINCE 26620. Its certified guard was 6 * half, and 26620 made
+            // its half the RANGE itself, so it vouched 'no occluder within
+            // 6 * range up-sun' - on a map whose admission drops any caster
+            // past khsr_rad + er (khsh_ds > khsr_rad + khsh_er). For a
+            // point-like caster that bound IS khsr_rad, so the guaranteed
+            // up-sun coverage is the range and nothing beyond it. The other
+            // three tiers are inside the bound by construction and are NOT
+            // touched: hero 12 m, mid 48s, outer 192s against a range of
+            // 200s - 192s < 200s always (disclosed edge: at the khsr_rad
+            // floor of 8 m, hero's 12 m over-claims by 4 m, which no scene
+            // reaches and which the content path already tolerated).
+            // sunMeta5.w IS khsr_rad here (26620: the far half is the range)
+            // and is only read when the far tier is live, so a stood-down or
+            // invalid far band cannot poison it.
+            // 26631: THE 26630 DEFAULT IS WITHDRAWN ON ITS OWN FALSIFICATION
+            // CLAUSE - the operator's shadow still vanished at mode 0 with a
+            // second mesh present, so the guard was NOT the gate. The clamp
+            // is demoted to opt-in (mode 398 / lighting0.y 69) rather than
+            // deleted, because the over-claim it repairs is real and
+            // independent: far certifies 6 * half while admission drops any
+            // caster past khsr_rad + er, and 26620 made far's half the range
+            // itself. That defect stands unproven as an ARTIFACT author and
+            // is not carried as a default. Mode 397 is RETIRED, not reused.
+            float kh5_cg = (lighting0.y >= 68.5f && lighting0.y < 69.5f)
+                         ? sunMeta5.w          // 398: the admission bound
+                         : 6.0f * sunMeta5.w;  // default = the 26620 form
+            bool kh5_cok = khcc_on
+                         ? ((khcc_clr || kh5_js < 1.0f) &&   // 26629
+                            (kh5_c.z - kh5_js) < kh5_cg * kh5_iD)
+                         : (abs(kh5_c.z - kh5_js) < 3.0f * kh5_b);   // 26590/26620/26627
+            if (khcf.x < 0.5f) khcf.x = kh5_cok ? 3.0f
+                                     : (kh5_js >= 1.0f ? 1.0f : 2.0f);   // 26628
+            if (kh5_cok && khcf.y < 0.5f) khcf.y = 4.0f;
+            khcf.z = 4.0f;
+            if (kh5_cok) {
+                khla_g = max(khla_g, kh5_cg);
                 khla_w = KhJw(max(abs(kh5_uv.x - 0.5f), abs(kh5_uv.y - 0.5f)) * 2.0f);
+                khcf.w = khla_w;   // 26628
             }
             if (kh5_res > 0.0001f || khlfs_off) {   // 26507: lit falls through
                 if (khtb_occ >= 0.0f) return lerp(kh5_res, khtb_occ, khtb_w);   // 26465
@@ -5748,12 +5997,20 @@ float SunShadowOcclusionSelf(float3 wpos, float3 wrel, float3 nrm)
     // Penumbra-edge pixels whose center texel still reads the receiver
     // narrow a beyond-guard caster's coarse penumbra by <= 1 coarse
     // texel - disclosed, and invisible next to the mush it removes.
+    khcf.z = 5.0f;   // 26628: the union is the server if we reached here
     if (khla_g > 0.5f && khsr_res > 0.0001f &&
         (khsr_c.z - khSunDepth.Load(int3(int2(khsr_t), 0))) < khla_g * khsr_iD &&
         (khtb_occ < 0.0f || (lighting0.y >= 54.5f && lighting0.y < 55.5f)) &&
         !(lighting0.y >= 50.5f && lighting0.y < 51.5f))
         khsr_res *= 1.0f - khla_w;   // 26590/26617
     return (khtb_occ >= 0.0f) ? lerp(khsr_res, khtb_occ, khtb_w) : khsr_res;   // 26465
+}
+
+// 26628: forwarder - no call site changes, no twin risk.
+float SunShadowOcclusionSelf(float3 wpos, float3 wrel, float3 nrm)
+{
+    float4 khcf_d;
+    return SunShadowOcclusionSelfEx(wpos, wrel, nrm, khcf_d);
 }
 
 float SunShadowFactorSelf(float3 wpos, float3 wrel, float3 nrm)
@@ -5862,6 +6119,56 @@ float4 KhSelfTierProbe(float3 wpos, float3 wrel, float3 nrm)
             return float4(0.1f * khtp_v, 0.25f * khtp_v, khtp_v, 1.0f);
     }
     return float4(1.0f, 0.0f, 1.0f, 1.0f);
+}
+
+// 26628 DEBUG VISUAL 32 (setRenderDebug 395; dbgCtl.x 32) - WHY THIS PIXEL
+// IS OR IS NOT CERTIFIED. Full ledger at KH_BUILD_TAG. Pure gauge.
+// WHY THIS EXISTS AND WHY IT IS NOT visual 21: KhSelfTierProbe RE-DERIVES
+// window containment independently of the kernel, so it reports which
+// tier COULD contain the fragment and is structurally blind to what the
+// chain actually did - it paints hero uniformly over any near surface
+// whether or not hero answered, which is exactly how it was misread at
+// 26627 and cost a round. This probe REPORTS instead: it runs the real
+// kernel through SunShadowOcclusionSelfEx and paints the forensic the
+// kernel itself wrote. 26590 asked for this instrument in its own
+// falsification note and it has been unpaid since.
+// HUE = the certification outcome at the INNERMOST CONTAINING tier:
+//   GREY   no tier window contained this fragment (the union serves it)
+//   RED    that tier's centre texel is the 1.0 CLEAR - its map holds
+//          nothing on this ray, so no certifier is possible and every
+//          coarser tier's mush stands by design (case 1)
+//   ORANGE content present but the occluder sits OUTSIDE the guard, so
+//          the rejection correctly declines and the mush is legitimate
+//          cross-tier shadow (case 2 - not a bug)
+//   BLUE   certified, but the certifier IS the serving tier - jurisdiction
+//          structurally cannot guard a tier against its own verdict, so a
+//          false shadow here is the serving map's own bias-vs-texel
+//          problem and NO certification work can reach it (case 3)
+//   GREEN  certified by a strictly finer tier - the protection is live
+//          and any residual here is the rejection's arithmetic
+// VALUE = darker where the live self verdict says occluded, and stepped
+// by the SERVING tier (brightest hero, dimmest union) so the tier ladder
+// reads off the same screenshot.
+// 26633: khcp.w - the kernel's final khla_w - IS CARRIED OUT AND NEVER
+// PAINTED. This probe reads x, y and z only, so visual 32 reports certifier
+// IDENTITY and says nothing about the protection WEIGHT. Reading a
+// certifier boundary here therefore cannot contradict a jurisdiction A/B
+// reading null at the same pixels; see the 367 note at KhJw. Painting the w
+// channel is the direct falsifier for that account, it is a pure gauge, and
+// it is BANKED not built - it mints visual code 33 and owes its own
+// instrument build rather than riding a correction.
+float4 KhSelfCertProbe(float3 wpos, float3 wrel, float3 nrm)
+{
+    float4 khcp;
+    float khcp_v = saturate(SunShadowOcclusionSelfEx(wpos, wrel, nrm, khcp));
+    float3 khcp_c;
+    if      (khcp.x < 0.5f) khcp_c = float3(0.35f, 0.35f, 0.35f);
+    else if (khcp.x < 1.5f) khcp_c = float3(1.00f, 0.12f, 0.12f);
+    else if (khcp.x < 2.5f) khcp_c = float3(1.00f, 0.55f, 0.00f);
+    else if (khcp.y >= khcp.z - 0.5f) khcp_c = float3(0.20f, 0.45f, 1.00f);
+    else                    khcp_c = float3(0.15f, 0.90f, 0.25f);
+    float khcp_t = saturate(1.15f - 0.13f * khcp.z);
+    return float4(khcp_c * (1.0f - 0.55f * khcp_v) * khcp_t, 1.0f);
 }
 
 // 26579 DEBUG VISUAL 30 (setRenderDebug 359; dbgCtl.x 30) - THE PYRAMID
@@ -7801,6 +8108,8 @@ float4 PSMain(VSOut i) : SV_Target
     // visible fade still washing out convicts CONSUMPTION; all-green over
     // a stencil-shadowed area convicts the COUNTING; magenta convicts
     // PRODUCTION. Pure gauge - mode 0 byte-identical.
+    // 26628 DEBUG VISUAL 32 (setRenderDebug 395): the certification probe.
+    if (dbgCtl.x >= 31.5f && dbgCtl.x < 32.5f) return KhSelfCertProbe(i.wpos, i.wrel, i.nrm);
     // 26479 DEBUG VISUAL 21 (setRenderDebug 269): the self-tier probe.
     if (dbgCtl.x >= 20.5f && dbgCtl.x < 21.5f) return KhSelfTierProbe(i.wpos, i.wrel, i.nrm);
     if (dbgCtl.x >= 19.5f && dbgCtl.x < 20.5f) {
@@ -9607,6 +9916,8 @@ float4 PSComposite(VSOutC i) : SV_Target
     // visible fade still washing out convicts CONSUMPTION; all-green over
     // a stencil-shadowed area convicts the COUNTING; magenta convicts
     // PRODUCTION. Pure gauge - mode 0 byte-identical.
+    // 26628 DEBUG VISUAL 32 (setRenderDebug 395): the certification probe.
+    if (dbgCtl.x >= 31.5f && dbgCtl.x < 32.5f) return KhSelfCertProbe(i.wpos, i.wrel, i.nrm);
     // 26479 DEBUG VISUAL 21 (setRenderDebug 269): the self-tier probe.
     if (dbgCtl.x >= 20.5f && dbgCtl.x < 21.5f) return KhSelfTierProbe(i.wpos, i.wrel, i.nrm);
     if (dbgCtl.x >= 19.5f && dbgCtl.x < 20.5f) {
@@ -13855,6 +14166,40 @@ inline void kh_mesh_cache_trim();
 // content-addressed, so staleness cannot exist; short/corrupt files fail
 // the size header and recompile over themselves. hookInstallAtS plus the
 // coldFirst lanes measure the win.
+// ===========================================================================
+// KH_SHADER_FLAGS - 26639 THE COMPILE-FLAG ARM. The 26638 census named the
+// real cost and it is NOT parallelism: FOUR PSComposite variants at 252-268
+// SECONDS EACH and two PSMain variants at ~224 s, while VSComposite compiles
+// THE SAME SOURCE STRING in 53 ms. Preprocessing is free; the entire cost is
+// code generation over the shadow chain, which only the pixel shaders call.
+// The pool is already at its Amdahl floor - the longest single unit, 268 s -
+// so the only remaining lever is making a unit cheaper to compile, and the
+// cheapest thing to try is the flags fxc has been given all along: NONE.
+// Flags1 has been 0 at the single D3DCompile call for the life of this file,
+// which is fxc's default optimisation with full branch flattening - and the
+// self chain is five nested tiers of early-returning branches, the exact
+// shape whose flattening explodes. THREE ARMS, none of them default: 403
+// PREFER_FLOW_CONTROL (keep the branches as branches - identical results,
+// different codegen, the prime suspect), 404 OPTIMIZATION_LEVEL0, 405
+// SKIP_OPTIMIZATION. All three produce the SAME PIXELS and differ only in
+// compile time and GPU cost, so this is a safe experiment and an unsafe
+// default - 404 and 405 in particular buy compile time with frame time and
+// are diagnostics, not candidates.
+// THE FLAGS JOIN THE CACHE HASH, and they must: the 26482 cache is content-
+// addressed over source+entry+target+defines, so without this an arm's blob
+// would be stored under the DEFAULT's key and served to a later default run
+// - a silently wrong shader, which is the one failure mode a content-
+// addressed cache exists to make impossible. Adding the field invalidates
+// every existing .khsc entry ONCE, on purpose and disclosed.
+// ===========================================================================
+inline uint32_t kh_shader_flags() {
+    const int khsf_m = g_dbg_mode.load(std::memory_order_relaxed);
+    if (khsf_m == 403) return D3DCOMPILE_PREFER_FLOW_CONTROL;
+    if (khsf_m == 404) return D3DCOMPILE_OPTIMIZATION_LEVEL0;
+    if (khsf_m == 405) return D3DCOMPILE_SKIP_OPTIMIZATION;
+    return 0;   // the historic value, bit for bit
+}
+
 inline uint64_t kh_shader_cache_hash(const char* src, const char* entry, const char* target,
                                      const D3D_SHADER_MACRO* defines) {
     uint64_t h = 1469598103934665603ull;
@@ -13865,6 +14210,8 @@ inline uint64_t kh_shader_cache_hash(const char* src, const char* entry, const c
     };
     mix(src); mix(entry); mix(target);
     for (const D3D_SHADER_MACRO* d = defines; d && d->Name; ++d) { mix(d->Name); mix(d->Definition); }
+    // 26639: the compile FLAGS are part of the identity - see KH_SHADER_FLAGS.
+    h ^= static_cast<uint64_t>(kh_shader_flags()); h *= 1099511628211ull;
     h ^= 26481ull; h *= 1099511628211ull;   // belt+braces: version salt (literal:
                                             // KH_BUILD_TAG is declared later in
                                             // this header; content hashing makes
@@ -13892,12 +14239,218 @@ static constexpr uint32_t KH_SHADER_CACHE_VERSION = 1;
 // MSAA-on spawn still ~30 s with the cache live - these three lanes say
 // whether the cache misses (source not content-stable across launches),
 // hits-but-compile-was-never-the-cost, or hits-and-something-else-is.
-static uint64_t g_shader_cache_hits = 0;
-static uint64_t g_shader_cache_misses = 0;
-static uint64_t g_shader_compile_ms = 0;   // total D3DCompile wall ms this session
+// 26636: ATOMIC because worker threads touch them (KH_SHADER_MT below).
+// g_shader_compile_ms is now the SUM OF PER-COMPILE DURATIONS ACROSS ALL
+// THREADS - CPU time, not wall time. shaderMtWallMs is the wall clock, and
+// the RATIO of the two is the measured parallelism. Read them as a pair.
+static std::atomic<uint64_t> g_shader_cache_hits{0};
+static std::atomic<uint64_t> g_shader_cache_misses{0};
+static std::atomic<uint64_t> g_shader_compile_ms{0};
 
-inline std::string compile_shader(const char* src, const char* entry, const char* target,
-                                  const D3D_SHADER_MACRO* defines, ID3DBlob** out_blob) {
+// ===========================================================================
+// KH_SHADER_MT - 26636 PARALLEL SHADER COMPILATION (mode 402 stands the whole
+// pool down and compiles serially; C++-side only, no lighting0.y code - the
+// 26611/26620 pattern). OPERATOR REPORT: 5-10 minutes of startup on any
+// machine where the .khsc cache is cold. The file has ONE D3DCompile, inside
+// compile_shader, and roughly twenty heavy units route through it - the mesh
+// VS/PS twins and their KH_TEXTURED variants, the mask and sun-depth shaders,
+// the composite trio and ITS textured twins, and the two compute kernels -
+// every one of them compiled strictly one after another on the calling
+// thread while every other core idled.
+// THE SHAPE, chosen so that NOT ONE CALL SITE MOVES: this is a PREFETCH with
+// a memo, not a rewrite of the ensures. A batch of jobs is queued, worker
+// threads compile them into a memo keyed by the SAME content hash the disk
+// cache already uses, and compile_shader consults the memo first. Every
+// existing call, every error string, every non-fatal fallback and every
+// early return is untouched - a memo miss simply compiles inline exactly as
+// it does today, so a job list that drifts out of step with its ensure costs
+// SPEED and can never cost correctness. That property is the whole reason
+// for this design and it is why the twenty-odd call sites are not edited.
+// THE MAIN THREAD IS A WORKER, which the operator asked for explicitly: when
+// compile_shader wants a job that is queued but NOT YET CLAIMED, the calling
+// thread CLAIMS AND COMPILES IT ITSELF rather than blocking - work stealing,
+// counted in shaderMtStolen. It blocks only on a unit another thread has
+// already started, which is bounded by that one unit and can never deadlock
+// because the claimer always publishes a result, error paths included.
+// CLEAN-UP IS RAII AND THAT IS DELIBERATE. These ensures have many early
+// returns - every Create failure is one - so a join placed at the bottom
+// would be skipped on exactly the paths that matter. KhShaderMtScope joins
+// every worker and releases every unconsumed blob in its DESTRUCTOR, so one
+// declaration covers every exit including a throw, the ScopedGraphicsLock
+// discipline this file already runs on. No thread can outlive its batch by
+// construction, which is also why nothing here needs a stop flag.
+// THREAD SAFETY, audited rather than assumed: D3DCompile in d3dcompiler_47
+// is free-threaded; ID3D11Device creation is free-threaded and is NOT done
+// here anyway - workers produce BLOBS and the calling thread creates every
+// device object, so the immediate context is never touched off-thread. The
+// three telemetry counters became atomics above. kh_report_error is NOT
+// reachable from a worker: errors are returned as strings and reported by
+// the caller at its own call site, exactly as before. The disk cache writes
+// distinct files per hash, but kh_mesh_cache_trim ENUMERATES AND DELETES in
+// a shared directory and bumps g_stats.fbx_cache_evicts, so it is serialised
+// on its own mutex - the one genuine shared-state hazard the pool creates.
+// ===========================================================================
+struct KhShaderJob {
+    const char* src;
+    const char* entry;
+    const char* target;
+    const D3D_SHADER_MACRO* defines;
+    uint64_t hash;   // filled by the prewarm
+};
+struct KhShaderMemo {
+    ID3DBlob*   blob;
+    std::string err;
+    bool        done;
+    bool        taken;
+};
+static std::mutex g_khsm_mu;
+static std::condition_variable g_khsm_cv;
+static std::unordered_map<uint64_t, KhShaderMemo> g_khsm_map;
+static std::vector<KhShaderJob> g_khsm_q;   // built before any worker starts
+static std::atomic<size_t> g_khsm_next{0};
+// 26637: THE CONTAINER IS DELIBERATELY NEVER DESTRUCTED. ~std::thread on a
+// JOINABLE thread calls std::terminate, and a static vector of them destructs
+// at DLL detach - so if a hard fault ever bypassed the scope guard (an access
+// violation under /EHsc does NOT unwind C++ destructors), our own cleanup
+// would raise a SECOND fatal error during the crash handler and BURY THE
+// ORIGINAL FAULT IN THE DUMP. A leaked container cannot do that. The leak is
+// one empty vector for the process lifetime.
+static std::vector<std::thread>& g_khsm_thr = *(new std::vector<std::thread>());
+static bool g_khsm_active = false;   // 26637: a batch is live (caller thread only)
+// 26641 ASYNC OWNERSHIP AND LIFETIME.
+// (a) A worker now OUTLIVES the ensure that queued it, so the job's source
+//     string and define table - both FUNCTION LOCALS at every call site -
+//     would dangle the moment ensure_resources returns. The pool therefore
+//     takes a DEEP COPY of every job. The copies live in heap nodes so that
+//     growing the owner vector cannot move the strings the D3D_SHADER_MACRO
+//     table points at. A null Definition is preserved AS NULL, because the
+//     cache hash mixes nothing for null and a separator for "" - collapsing
+//     them would silently change every key.
+// (b) g_khsm_live counts workers that have not yet returned. It is the ONLY
+//     safe basis for teardown: a thread inside D3DCompile cannot be killed
+//     (TerminateThread leaks the loader and heap locks), so shutdown aborts
+//     what has not STARTED and then either joins or detaches.
+static std::atomic<int> g_khsm_live{0};
+static std::atomic<bool> g_khsa_abort{false};
+static uint64_t g_khsm_detached = 0;
+struct KhShaderJobOwned {
+    std::string src, entry, target;
+    std::vector<std::string> dn, dv;
+    std::vector<unsigned char> dhas;
+    std::vector<D3D_SHADER_MACRO> macros;
+    bool had_defines;
+};
+static std::vector<std::unique_ptr<KhShaderJobOwned>> g_khsm_own;
+// Decrements on EVERY worker exit path, normal or exceptional.
+struct KhShaderLive {
+    ~KhShaderLive() { g_khsm_live.fetch_sub(1, std::memory_order_acq_rel); }
+};
+static std::mutex g_khsm_trim_mu;   // kh_mesh_cache_trim is not re-entrant
+static uint64_t g_khsm_wall0 = 0;
+static uint64_t g_khsm_wall_ms = 0;      // WALL ms spent inside batches
+static uint64_t g_khsm_threads_n = 0;    // widest batch, workers + this thread
+static uint64_t g_khsm_batches = 0;
+static std::atomic<uint64_t> g_khsm_jobs{0};     // units compiled by workers
+static std::atomic<uint64_t> g_khsm_stolen{0};   // units the caller took itself
+static std::atomic<uint64_t> g_khsm_waits{0};    // units the caller waited on
+
+// ===========================================================================
+// KH_SHADER_CENSUS - 26638 PER-UNIT COMPILE TIMING (pure gauge; mode 0
+// rendering byte-identical, no mode minted, and it records under mode 402
+// too so a SERIAL run is directly comparable). THE FIELD REPORT THAT FORCED
+// IT: 26636/26637 engaged - the operator sees threads max out during the
+// composite batch - and the wall clock barely moved. The session lanes
+// cannot say why, because they are SESSION TOTALS: shaderCompileMs over
+// shaderMtWallMs gives the average speedup and says nothing about WHICH unit
+// the pool was waiting on. A pool is bounded by its longest single job, and
+// naming that job is a measurement, not an inference - the file has paid
+// three times this campaign for convicting a mechanism from a lane that
+// could not support it.
+// WHAT IT EMITS: one RPT line per batch, every unit sorted SLOWEST FIRST,
+// each named by entry point, target, the low 32 bits of its content hash
+// and its define set - which is what separates the four PSComposite
+// variants, all of which share an entry point and would otherwise be
+// indistinguishable in a log. Cached units report 0 ms and are labelled, so
+// a warm run reads as obviously warm rather than as a fast compile.
+// THE WALL AND CPU FIGURES IN THE LINE ARE SESSION-CUMULATIVE, so batch 2's
+// own cost is the difference between its line and batch 1's - stated here
+// because reading them as per-batch is exactly the misreading this gauge
+// exists to prevent.
+// ===========================================================================
+struct KhShaderUnit {
+    std::string name;
+    uint32_t    ms;
+    bool        hit;
+};
+static std::mutex g_khsu_mu;
+static std::vector<KhShaderUnit> g_khsu;   // census since the last flush
+static std::atomic<uint64_t> g_khsu_units{0};        // units COMPILED this session
+static std::atomic<uint64_t> g_khsu_slowest_ms{0};   // longest single unit = the pool's bound
+
+// Called from workers as well as the caller, hence the lock and the total
+// absence of anything that could throw out of it.
+inline void kh_shader_census_note(const char* khsu_entry, const char* khsu_target,
+                                  const D3D_SHADER_MACRO* khsu_def, uint64_t khsu_hash,
+                                  uint32_t khsu_ms, bool khsu_hit) {
+    try {
+        std::string khsu_d;
+        for (const D3D_SHADER_MACRO* khsu_p = khsu_def; khsu_p && khsu_p->Name; ++khsu_p) {
+            if (!khsu_d.empty()) khsu_d += ",";
+            khsu_d += khsu_p->Name;
+            if (khsu_p->Definition) { khsu_d += "="; khsu_d += khsu_p->Definition; }
+            if (khsu_d.size() > 72) break;
+        }
+        std::ostringstream khsu_s;
+        khsu_s << (khsu_entry ? khsu_entry : "?") << "/"
+               << (khsu_target ? khsu_target : "?") << "#" << std::hex
+               << std::setw(8) << std::setfill('0')
+               << static_cast<uint32_t>(khsu_hash) << std::dec;
+        if (!khsu_d.empty()) khsu_s << " [" << khsu_d << "]";
+        if (khsu_hit) khsu_s << " CACHED";
+        const uint32_t khsu_fl = kh_shader_flags();   // 26639
+        if (khsu_fl) khsu_s << " flags=0x" << std::hex << khsu_fl << std::dec;
+        if (!khsu_hit) {
+            g_khsu_units.fetch_add(1, std::memory_order_relaxed);
+            uint64_t khsu_prev = g_khsu_slowest_ms.load(std::memory_order_relaxed);
+            while (khsu_ms > khsu_prev &&
+                   !g_khsu_slowest_ms.compare_exchange_weak(khsu_prev, khsu_ms)) {}
+        }
+        std::lock_guard<std::mutex> khsu_l(g_khsu_mu);
+        if (g_khsu.size() < 64)   // bounded: user shaders compile all session
+            g_khsu.push_back(KhShaderUnit{ khsu_s.str(), khsu_ms, khsu_hit });
+    } catch (...) {}
+}
+
+// Caller-thread only, after the batch has joined, so every worker's record
+// is already in. Runs from a destructor: it cannot throw.
+inline void kh_shader_census_flush() {
+    try {
+        std::vector<KhShaderUnit> khsu_v;
+        {
+            std::lock_guard<std::mutex> khsu_l(g_khsu_mu);
+            if (g_khsu.empty()) return;
+            khsu_v.swap(g_khsu);
+        }
+        std::sort(khsu_v.begin(), khsu_v.end(),
+                  [](const KhShaderUnit& a, const KhShaderUnit& b) { return a.ms > b.ms; });
+        uint32_t khsu_hits = 0, khsu_miss = 0;
+        for (size_t khsu_i = 0; khsu_i < khsu_v.size(); ++khsu_i) {
+            if (khsu_v[khsu_i].hit) khsu_hits++; else khsu_miss++;
+        }
+        std::ostringstream khsu_s;
+        khsu_s << "KH shader census batch " << g_khsm_batches << ": "
+               << khsu_v.size() << " units, " << khsu_miss << " compiled, "
+               << khsu_hits << " cached, pool " << g_khsm_threads_n
+               << " threads, wall(session) " << g_khsm_wall_ms << " ms, cpu(session) "
+               << g_shader_compile_ms.load(std::memory_order_relaxed) << " ms";
+        for (size_t khsu_i = 0; khsu_i < khsu_v.size() && khsu_i < 24; ++khsu_i)
+            khsu_s << " | " << khsu_v[khsu_i].name << " " << khsu_v[khsu_i].ms << " ms";
+        kh_report_note(khsu_s.str());   // 26639: a gauge must not throw
+    } catch (...) {}
+}
+
+inline std::string kh_shader_compile_raw(const char* src, const char* entry, const char* target,
+                                         const D3D_SHADER_MACRO* defines, ID3DBlob** out_blob) {
     ID3DBlob* err_blob = nullptr;
 
     const bool khsc_on = g_dbg_mode.load(std::memory_order_relaxed) != 275;
@@ -13927,7 +14480,8 @@ inline std::string compile_shader(const char* src, const char* entry, const char
                             std::filesystem::last_write_time(
                                 khsc_p, std::filesystem::file_time_type::clock::now(), khsc_ec);
                             *out_blob = khsc_b;
-                            g_shader_cache_hits++;   // 26484 telemetry
+                            g_shader_cache_hits.fetch_add(1, std::memory_order_relaxed);
+                            kh_shader_census_note(entry, target, defines, khsc_h, 0, true);
                             return "";   // cache hit - no compile
                         }
                         khsc_b->Release();
@@ -13937,11 +14491,15 @@ inline std::string compile_shader(const char* src, const char* entry, const char
         } catch (...) {}   // any doubt is a miss; the compile below rebuilds
     }
 
-    g_shader_cache_misses++;   // 26484 telemetry (also counts cache-off compiles)
+    g_shader_cache_misses.fetch_add(1, std::memory_order_relaxed);   // 26484
     const uint64_t khsc_t0 = steady_now_ms();
+    const uint32_t khsc_fl = kh_shader_flags();   // 26639
     HRESULT hr = D3DCompile(src, strlen(src), "kh_render", defines, nullptr,
-                            entry, target, 0, 0, out_blob, &err_blob);
-    g_shader_compile_ms += steady_now_ms() - khsc_t0;
+                            entry, target, khsc_fl, 0, out_blob, &err_blob);
+    const uint64_t khsc_dt = steady_now_ms() - khsc_t0;
+    g_shader_compile_ms.fetch_add(khsc_dt, std::memory_order_relaxed);   // 26636: CPU ms, summed
+    kh_shader_census_note(entry, target, defines, khsc_h,
+                          static_cast<uint32_t>(khsc_dt), false);   // 26638
 
     if (FAILED(hr)) {
         std::string msg = std::string(entry) + " compile failed " + hr_str(hr);
@@ -13971,9 +14529,359 @@ inline std::string compile_shader(const char* src, const char* entry, const char
                              static_cast<std::streamsize>((*out_blob)->GetBufferSize()));
             }
         } catch (...) {}
-        kh_mesh_cache_trim();
+        // 26636: the shared-directory trim enumerates and deletes, and
+        // bumps a plain counter - one at a time, whoever is compiling.
+        {
+            std::lock_guard<std::mutex> khsm_tl(g_khsm_trim_mu);
+            kh_mesh_cache_trim();
+        }
     }
     return "";
+}
+
+// A worker drains the queue by index. It skips any unit the calling
+// thread already claimed, and it ALWAYS publishes a result - a throw
+// becomes an error string - so nothing waiting on it can hang.
+// 26637 TWO ESCAPE PATHS CLOSED. (a) AN EXCEPTION LEAVING A std::thread BODY
+// IS std::terminate - it would kill the game outright - and the 26636 form
+// guarded only the compile call, leaving the publish block (a lock and two
+// string assignments, both able to throw bad_alloc) outside any handler. The
+// whole body is now guarded. (b) A worker that died between CLAIMING a unit
+// and PUBLISHING it would leave every waiter on that unit blocked forever -
+// a frozen game, which is the closest thing to the zombie the operator asked
+// about. The claimed hash is tracked, and the backstop publishes a failure
+// for exactly that unit: the waiter wakes with an error, the ensure fails and
+// retries next frame, and nothing hangs.
+inline void kh_shader_mt_worker() {
+    KhShaderLive khsm_lv;   // 26641: live count, exception-proof
+    uint64_t khsm_cur = 0;
+    bool khsm_held = false;
+    try {
+        for (;;) {
+            // 26641: teardown stops us claiming ANYTHING NEW instantly. A job
+            // already inside D3DCompile has to finish - it cannot be killed.
+            if (g_khsa_abort.load(std::memory_order_relaxed)) return;
+            const size_t khsm_i = g_khsm_next.fetch_add(1, std::memory_order_relaxed);
+            if (khsm_i >= g_khsm_q.size()) return;
+            const KhShaderJob khsm_j = g_khsm_q[khsm_i];
+            {
+                std::lock_guard<std::mutex> khsm_l(g_khsm_mu);
+                auto khsm_it = g_khsm_map.find(khsm_j.hash);
+                if (khsm_it == g_khsm_map.end() ||
+                    khsm_it->second.done || khsm_it->second.taken) continue;
+                khsm_it->second.taken = true;
+            }
+            khsm_cur = khsm_j.hash;
+            khsm_held = true;   // from here a result is OWED to any waiter
+            ID3DBlob* khsm_b = nullptr;
+            std::string khsm_e;
+            try {
+                khsm_e = kh_shader_compile_raw(khsm_j.src, khsm_j.entry,
+                                               khsm_j.target, khsm_j.defines, &khsm_b);
+            } catch (...) {
+                if (khsm_b) { khsm_b->Release(); khsm_b = nullptr; }
+                khsm_e = std::string(khsm_j.entry) + " compile threw";
+            }
+            {
+                std::lock_guard<std::mutex> khsm_l(g_khsm_mu);
+                KhShaderMemo& khsm_m = g_khsm_map[khsm_j.hash];
+                khsm_m.blob = khsm_b;
+                khsm_m.err = khsm_e;
+                khsm_m.done = true;
+            }
+            khsm_held = false;   // debt paid
+            g_khsm_cv.notify_all();
+            g_khsm_jobs.fetch_add(1, std::memory_order_relaxed);
+        }
+    } catch (...) {
+        if (khsm_held) {
+            try {
+                std::lock_guard<std::mutex> khsm_l(g_khsm_mu);
+                KhShaderMemo& khsm_m = g_khsm_map[khsm_cur];
+                khsm_m.done = true;
+                khsm_m.err = "shader worker aborted";
+            } catch (...) {}
+            g_khsm_cv.notify_all();
+        }
+    }
+}
+
+// Queue a batch and spawn cores-1 workers; the caller is the last core
+// and earns its share through the steal path in compile_shader. Only
+// ever called with the pool quiescent - KhShaderMtScope guarantees it.
+// 26637: returns TRUE iff this call took ownership of a batch. It cannot
+// throw - a throw out of the scope's CONSTRUCTOR would skip the destructor
+// and orphan whatever threads had already spawned - and it refuses to arm if
+// a batch is already live, because a nested batch would clear the queue under
+// running workers. Nothing nests today; this makes it impossible tomorrow.
+inline bool kh_shader_mt_prewarm(const KhShaderJob* khsm_jobs, size_t khsm_n,
+                                 bool khsm_caller_works = true) {
+    if (!khsm_jobs || khsm_n == 0) return false;
+    if (g_khsm_active) return false;   // 26637 re-entrancy guard
+    // 26641: a DETACHED worker from a previous session may still be reading
+    // the queue and the owned-job storage. Refusing here is what makes that
+    // detach safe; the caller then compiles inline, which is always correct.
+    if (g_khsm_live.load(std::memory_order_acquire) > 0) return false;
+    if (g_dbg_mode.load(std::memory_order_relaxed) == 402) return false;   // serial arm
+    unsigned khsm_hw = std::thread::hardware_concurrency();
+    if (khsm_hw == 0) khsm_hw = 1;
+    if (khsm_hw > 64) khsm_hw = 64;
+    if (khsm_hw < 2) return false;   // one core: a pool would only add threads
+    try {
+    g_khsm_q.clear();
+    g_khsm_q.reserve(khsm_n);
+    {
+        std::lock_guard<std::mutex> khsm_l(g_khsm_mu);
+        for (size_t khsm_i = 0; khsm_i < khsm_n; ++khsm_i) {
+            const KhShaderJob khsm_in = khsm_jobs[khsm_i];
+            if (!khsm_in.src || !khsm_in.entry || !khsm_in.target) continue;
+            const uint64_t khsm_h = kh_shader_cache_hash(khsm_in.src, khsm_in.entry,
+                                                         khsm_in.target, khsm_in.defines);
+            if (g_khsm_map.find(khsm_h) != g_khsm_map.end()) continue;   // dup
+            // 26641 DEEP COPY - the caller's strings and macro table are
+            // function locals and a worker outlives them.
+            std::unique_ptr<KhShaderJobOwned> khsm_o(new KhShaderJobOwned());
+            khsm_o->src = khsm_in.src;
+            khsm_o->entry = khsm_in.entry;
+            khsm_o->target = khsm_in.target;
+            khsm_o->had_defines = (khsm_in.defines != nullptr);
+            for (const D3D_SHADER_MACRO* khsm_d = khsm_in.defines;
+                 khsm_d && khsm_d->Name; ++khsm_d) {
+                khsm_o->dn.push_back(khsm_d->Name);
+                khsm_o->dv.push_back(khsm_d->Definition ? khsm_d->Definition : "");
+                khsm_o->dhas.push_back(khsm_d->Definition ? 1u : 0u);
+            }
+            khsm_o->macros.reserve(khsm_o->dn.size() + 1);
+            for (size_t khsm_k = 0; khsm_k < khsm_o->dn.size(); ++khsm_k) {
+                D3D_SHADER_MACRO khsm_m;
+                khsm_m.Name = khsm_o->dn[khsm_k].c_str();
+                khsm_m.Definition = khsm_o->dhas[khsm_k] ? khsm_o->dv[khsm_k].c_str()
+                                                         : nullptr;   // null != ""
+                khsm_o->macros.push_back(khsm_m);
+            }
+            D3D_SHADER_MACRO khsm_term; khsm_term.Name = nullptr; khsm_term.Definition = nullptr;
+            khsm_o->macros.push_back(khsm_term);
+            KhShaderJob khsm_j;
+            khsm_j.src = khsm_o->src.c_str();
+            khsm_j.entry = khsm_o->entry.c_str();
+            khsm_j.target = khsm_o->target.c_str();
+            khsm_j.defines = khsm_o->had_defines ? khsm_o->macros.data() : nullptr;
+            khsm_j.hash = khsm_h;
+            g_khsm_map[khsm_h] = KhShaderMemo{ nullptr, std::string(), false, false };
+            g_khsm_own.push_back(std::move(khsm_o));
+            g_khsm_q.push_back(khsm_j);
+        }
+    }
+    if (g_khsm_q.empty()) return false;
+    g_khsm_active = true;   // 26637: from here the caller OWNS the teardown
+    g_khsm_next.store(0, std::memory_order_relaxed);
+    // 26641: when the caller does NOT participate (the async gate returns
+    // immediately instead of stealing) the pool gets every core.
+    size_t khsm_w = static_cast<size_t>(khsm_hw) - (khsm_caller_works ? 1u : 0u);
+    const size_t khsm_cap = khsm_caller_works ? g_khsm_q.size() - 1 : g_khsm_q.size();
+    if (khsm_w > khsm_cap) khsm_w = khsm_cap;
+    g_khsm_wall0 = steady_now_ms();
+    for (size_t khsm_i = 0; khsm_i < khsm_w; ++khsm_i) {
+        g_khsm_live.fetch_add(1, std::memory_order_acq_rel);   // BEFORE the spawn
+        try {
+            g_khsm_thr.emplace_back(kh_shader_mt_worker);
+        } catch (...) {
+            g_khsm_live.fetch_sub(1, std::memory_order_acq_rel);
+            break;   // fewer threads is slower, never wrong
+        }
+    }
+    const uint64_t khsm_tn = static_cast<uint64_t>(g_khsm_thr.size()) + 1;
+    if (khsm_tn > g_khsm_threads_n) g_khsm_threads_n = khsm_tn;
+    g_khsm_batches++;
+    return true;
+    } catch (...) {
+        // Partial state is possible - map entries, maybe spawned threads.
+        // Claim ownership so the caller's destructor tears it all down.
+        g_khsm_active = true;
+        return true;
+    }
+}
+
+// Join every worker, then release every blob the batch produced that no
+// call site consumed - a conditional ensure path can legitimately skip a
+// unit the pool compiled anyway, and those blobs die here.
+// 26640: keep_memo lets a batch JOIN ITS THREADS - the 26637 guarantee is
+// untouched, no worker ever outlives its scope - while LEAVING THE COMPILED
+// BLOBS in the memo for a later ensure to consume. Only the memo's lifetime
+// widens, and a memo is a map of blobs, not a thread.
+inline void kh_shader_mt_finish(bool khsm_keep_memo = false) {
+    for (std::thread& khsm_t : g_khsm_thr) {
+        if (khsm_t.joinable()) {
+            try { khsm_t.join(); } catch (...) {}
+        }
+    }
+    g_khsm_thr.clear();
+    if (g_khsm_wall0) {
+        g_khsm_wall_ms += steady_now_ms() - g_khsm_wall0;
+        g_khsm_wall0 = 0;
+    }
+    std::lock_guard<std::mutex> khsm_l(g_khsm_mu);
+    if (!khsm_keep_memo) {   // 26640
+        for (auto& khsm_kv : g_khsm_map) {
+            if (khsm_kv.second.blob) khsm_kv.second.blob->Release();
+        }
+        g_khsm_map.clear();
+        g_khsm_own.clear();   // 26641: safe - every worker has been joined
+    }
+    g_khsm_q.clear();
+    g_khsm_q.shrink_to_fit();
+    g_khsm_next.store(0, std::memory_order_relaxed);
+    g_khsm_active = false;   // 26637
+}
+
+// One declaration per batch covers every early return, every Create
+// failure and every throw. Declare it AFTER the source strings and the
+// define tables it points at, so it is destroyed BEFORE them.
+struct KhShaderMtScope {
+    bool khsm_own;    // 26637: only tear down a batch this scope armed
+    bool khsm_keep;   // 26640: leave the compiled blobs for a later ensure
+    KhShaderMtScope(const KhShaderJob* khsm_j, size_t khsm_n, bool khsm_k = false)
+        : khsm_own(kh_shader_mt_prewarm(khsm_j, khsm_n)), khsm_keep(khsm_k) {}
+    // 26638: the census flushes AFTER the join so every worker's record is
+    // in, and it flushes even when the pool never armed - mode 402 and a
+    // single-core machine both still get their per-unit line, which is what
+    // makes a serial run directly comparable. The g_khsm_active test skips
+    // only the nested case, where an outer batch still owns the census.
+    ~KhShaderMtScope() {
+        if (khsm_own) kh_shader_mt_finish(khsm_keep);
+        if (!g_khsm_active) kh_shader_census_flush();
+    }
+    KhShaderMtScope(const KhShaderMtScope&) = delete;
+    KhShaderMtScope& operator=(const KhShaderMtScope&) = delete;
+};
+
+// Teardown belt-and-braces: the scope guard already guarantees no worker
+// outlives its batch, so in a correct run this is a no-op.
+// ===========================================================================
+// KH_SHADER_ASYNC - 26641. The pool is saturated and bounded by ONE unit
+// (26640: wall 393391 ms against a slowest unit of 393387), so no scheduling
+// change can help. What CAN change is that the render thread stops waiting.
+// ensure_resources returns KH_SHADERS_COMPILING while the batch runs; every
+// caller already handles a non-empty return by skipping the frame, so the
+// game keeps running and the mesh simply appears when the shaders are ready.
+// Mode 406 restores the blocking form.
+// ===========================================================================
+static int      g_khsa_state = 0;    // 0 idle, 1 compiling, 2 done
+static uint64_t g_khsa_frames = 0;   // frames served while compiling
+static uint64_t g_khsa_ms = 0;       // wall ms the batch took
+static uint64_t g_khsa_t0 = 0;
+
+// true = the caller must defer this frame.
+inline bool kh_shader_async_gate(const KhShaderJob* khsa_jobs, size_t khsa_n) {
+    if (g_dbg_mode.load(std::memory_order_relaxed) == 406) return false;   // blocking arm
+    if (g_khsa_state == 2) return false;
+    if (g_khsa_state == 0) {
+        // caller_works = false: it returns instead of stealing, so the pool
+        // takes every core rather than cores-1.
+        if (!kh_shader_mt_prewarm(khsa_jobs, khsa_n, false)) {
+            g_khsa_state = 2;   // nothing to do, or the pool refused - compile inline
+            return false;
+        }
+        g_khsa_state = 1;
+        g_khsa_t0 = steady_now_ms();
+        g_khsa_frames = 0;
+        return true;
+    }
+    {
+        std::lock_guard<std::mutex> khsa_l(g_khsm_mu);
+        for (auto& khsa_kv : g_khsm_map) {
+            if (!khsa_kv.second.done) { g_khsa_frames++; return true; }
+        }
+    }
+    kh_shader_mt_finish(true);   // joins instantly - they have all exited - KEEPS the memo
+    kh_shader_census_flush();
+    g_khsa_ms = steady_now_ms() - g_khsa_t0;
+    g_khsa_state = 2;
+    return false;
+}
+
+// 26641 TEARDOWN, and it is the part the operator asked to be sure of.
+// A thread inside D3DCompile CANNOT be killed - TerminateThread leaks the
+// loader and heap locks and is documented as unusable here - so the policy
+// is: stop all UNSTARTED work instantly, then wait a bounded 5 s for the
+// in-flight units. Almost every teardown is idle and takes zero time.
+// If a compile really is running when the mission ends, we DETACH rather
+// than block the game for minutes. Detaching is safe HERE and only here:
+// the worker touches no device object and no engine state - only D3DCompile,
+// the memo and its own deep-copied strings - the extension DLL stays mapped
+// for the process lifetime, the thread container is leaked so no destructor
+// can meet a joinable thread, and the memo, queue and owned storage are
+// DELIBERATELY NOT FREED because the detached worker still reads them.
+// g_khsm_live keeps them alive and makes the next prewarm refuse until the
+// last one exits, at which point the caller simply compiles inline.
+inline void kh_shader_mt_shutdown() {
+    g_khsa_abort.store(true, std::memory_order_relaxed);
+    const uint64_t khss_t0 = steady_now_ms();
+    while (g_khsm_live.load(std::memory_order_acquire) > 0 &&
+           steady_now_ms() - khss_t0 < 5000) {
+        Sleep(10);
+    }
+    if (g_khsm_live.load(std::memory_order_acquire) == 0) {
+        kh_shader_mt_finish(false);   // the clean path: join and free everything
+    } else {
+        for (std::thread& khss_t : g_khsm_thr) {
+            if (khss_t.joinable()) { try { khss_t.detach(); } catch (...) {} }
+        }
+        g_khsm_thr.clear();
+        g_khsm_detached++;
+        g_khsm_active = false;
+        if (g_khsm_wall0) { g_khsm_wall_ms += steady_now_ms() - g_khsm_wall0; g_khsm_wall0 = 0; }
+    }
+    g_khsa_abort.store(false, std::memory_order_relaxed);
+    g_khsa_state = 0;
+}
+
+// THE MEMO-AWARE FRONT DOOR. Identical signature, identical contract,
+// identical return strings - every call site in the file is unchanged.
+inline std::string compile_shader(const char* src, const char* entry, const char* target,
+                                  const D3D_SHADER_MACRO* defines, ID3DBlob** out_blob) {
+    const uint64_t khsm_h = kh_shader_cache_hash(src, entry, target, defines);
+    {
+        std::unique_lock<std::mutex> khsm_l(g_khsm_mu);
+        auto khsm_it = g_khsm_map.find(khsm_h);
+        if (khsm_it != g_khsm_map.end()) {
+            if (!khsm_it->second.done && !khsm_it->second.taken) {
+                khsm_it->second.taken = true;   // STEAL: this thread compiles it
+                khsm_l.unlock();
+                g_khsm_stolen.fetch_add(1, std::memory_order_relaxed);
+                ID3DBlob* khsm_b = nullptr;
+                std::string khsm_e;
+                try {
+                    khsm_e = kh_shader_compile_raw(src, entry, target, defines, &khsm_b);
+                } catch (...) {
+                    if (khsm_b) { khsm_b->Release(); khsm_b = nullptr; }
+                    khsm_e = std::string(entry) + " compile threw";
+                }
+                khsm_l.lock();
+                KhShaderMemo& khsm_m = g_khsm_map[khsm_h];
+                khsm_m.blob = khsm_b;
+                khsm_m.err = khsm_e;
+                khsm_m.done = true;
+                khsm_l.unlock();
+                g_khsm_cv.notify_all();
+                khsm_l.lock();
+            } else if (!khsm_it->second.done) {
+                g_khsm_waits.fetch_add(1, std::memory_order_relaxed);
+                g_khsm_cv.wait(khsm_l, [khsm_h] {
+                    auto khsm_w = g_khsm_map.find(khsm_h);
+                    return khsm_w == g_khsm_map.end() || khsm_w->second.done;
+                });
+            }
+            khsm_it = g_khsm_map.find(khsm_h);
+            if (khsm_it != g_khsm_map.end() && khsm_it->second.done) {
+                *out_blob = khsm_it->second.blob;   // ownership transfers out
+                const std::string khsm_e = khsm_it->second.err;
+                g_khsm_map.erase(khsm_it);
+                return khsm_e;
+            }
+        }
+    }
+    return kh_shader_compile_raw(src, entry, target, defines, out_blob);
 }
 
 // GPU vertex-buffer top-up: create a VB for every PUBLISHED mesh that
@@ -15297,7 +16205,12 @@ inline bool kh_fbx_import(const std::string& path, int& out_id, std::string& err
     // skips ufbx, triangulation, mikktspace AND the bake), then keep the
     // cache under its cap. Both best-effort.
     kh_mesh_cache_store(khmc_hash, d);
-    kh_mesh_cache_trim();
+    {   // 26636: the OTHER trim call site. An FBX import can land while a
+        // KH_SHADER_MT batch is writing .khsc blobs into the same folder, so
+        // both callers take the same mutex - the trim enumerates and deletes.
+        std::lock_guard<std::mutex> khmc_tl(g_khsm_trim_mu);
+        kh_mesh_cache_trim();
+    }
     g_stats.fbx_imports++;
     return kh_fbx_register(std::move(d), path, out_id, err);
 }
@@ -15838,6 +16751,83 @@ inline std::string ensure_resources(ID3D11Device* dev) {
     static const D3D_SHADER_MACRO khcb_rx_defines[] = {
         { "KH_RECEIVE_TEX", "1" }, { nullptr, nullptr },
     };
+    // 26636: HOISTED from the textured-twin block below so the batch can name
+    // it. Same table, same storage class, one truth.
+    static const D3D_SHADER_MACRO khtx_defines[] = {
+        { "KH_RECEIVE_TEX", "1" }, { "KH_TEXTURED", "1" }, { nullptr, nullptr },
+    };
+    // 26636 KH_SHADER_MT: every heavy unit this function compiles, queued in
+    // one batch before the first compile_shader call below. The calls
+    // themselves are UNCHANGED - they hit the memo the pool filled, steal a
+    // unit nobody claimed yet, or compile inline exactly as they always did.
+    // Declared AFTER static_src and the tables, so the scope destructs first.
+    // 26640 KH_SHADER_SPECULATE (full ledger at KH_BUILD_TAG). This batch has
+    // TEN units of which exactly TWO are heavy, so on any modern machine eight
+    // cores sit idle for the whole of the first freeze while the COMPOSITE
+    // unit - four heavy variants - waits for a second batch that cannot start
+    // until g_res.comp_depth_samples is known. THE OBJECTION TO GUESSING WAS
+    // THAT A WRONG GUESS WASTES WORK; the answer is that WORK ON AN IDLE CORE
+    // COSTS NO WALL TIME, so we do not guess - we compile BOTH plausible
+    // sample configurations and let the memo serve whichever the engine turns
+    // out to want. The loser is released at the composite scope's teardown
+    // having cost cycles and heat, never a second of the operator's freeze.
+    // THE DEFINE TABLES BELOW MUST MATCH ensure_composite_shader's BYTE FOR
+    // BYTE - the cache/memo key is an FNV over source, entry, target and the
+    // define NAMES AND VALUES IN ORDER, so a single reordered or added entry
+    // makes the speculation miss silently. Note the asymmetry that is easy to
+    // get wrong: the base and arb tables carry KH_ARB_DEPTH explicitly while
+    // the TEXTURED base table OMITS it entirely. A mismatch costs only speed
+    // - the miss falls through to an inline compile exactly as today.
+    const std::string khsp_sc1 = "1";
+    const std::string khsp_comp_src =
+        std::string(g_cb_hlsl) + g_hlsl_composite + g_hlsl_composite2;
+    const D3D_SHADER_MACRO khsp_d0[] = {
+        { "MSAA_DEPTH", "0" }, { "SAMPLE_COUNT", khsp_sc1.c_str() },
+        { "KH_ARB_DEPTH", "0" }, { "KH_RECEIVE_TEX", "1" }, { nullptr, nullptr } };
+    const D3D_SHADER_MACRO khsp_d0a[] = {
+        { "MSAA_DEPTH", "0" }, { "SAMPLE_COUNT", khsp_sc1.c_str() },
+        { "KH_ARB_DEPTH", "1" }, { "KH_RECEIVE_TEX", "1" }, { nullptr, nullptr } };
+    const D3D_SHADER_MACRO khsp_d0t[] = {
+        { "MSAA_DEPTH", "0" }, { "SAMPLE_COUNT", khsp_sc1.c_str() },
+        { "KH_RECEIVE_TEX", "1" }, { "KH_TEXTURED", "1" }, { nullptr, nullptr } };
+    const D3D_SHADER_MACRO khsp_d0ta[] = {
+        { "MSAA_DEPTH", "0" }, { "SAMPLE_COUNT", khsp_sc1.c_str() },
+        { "KH_ARB_DEPTH", "1" }, { "KH_RECEIVE_TEX", "1" },
+        { "KH_TEXTURED", "1" }, { nullptr, nullptr } };
+    // 26641: the MSAA_DEPTH=1 speculation is REMOVED - it was never consumed
+    // in any dump and its four heavy units were pure contention. Ledger at
+    // KH_BUILD_TAG under LEVER 1.
+    const KhShaderJob khsp_jobs[] = {
+        // the ten this function actually consumes, heaviest first
+        { static_src.c_str(), "PSMain",      "ps_5_0", khcb_rx_defines, 0 },
+        { static_src.c_str(), "PSMain",      "ps_5_0", khtx_defines,    0 },
+        // the composite matrix, SPECULATIVE, on the cores that would idle
+        { khsp_comp_src.c_str(), "PSComposite", "ps_5_0", khsp_d0,   0 },
+        { khsp_comp_src.c_str(), "PSComposite", "ps_5_0", khsp_d0a,  0 },
+        { khsp_comp_src.c_str(), "PSComposite", "ps_5_0", khsp_d0t,  0 },
+        { khsp_comp_src.c_str(), "PSComposite", "ps_5_0", khsp_d0ta, 0 },
+        { static_src.c_str(), "PSMaskCast",  "ps_5_0", khcb_rx_defines, 0 },
+        { static_src.c_str(), "PSMaskPrime", "ps_5_0", khcb_rx_defines, 0 },
+        { static_src.c_str(), "PSInjDepth",  "ps_5_0", khcb_rx_defines, 0 },
+        { static_src.c_str(), "VSMain",      "vs_5_0", khcb_rx_defines, 0 },
+        { static_src.c_str(), "VSMain",      "vs_5_0", khtx_defines,    0 },
+        { static_src.c_str(), "VSMirror",    "vs_5_0", khcb_rx_defines, 0 },
+        { static_src.c_str(), "VSFullscreen","vs_5_0", khcb_rx_defines, 0 },
+        { static_src.c_str(), "VSSunDepth",  "vs_5_0", khcb_rx_defines, 0 },
+        { khsp_comp_src.c_str(), "VSComposite", "vs_5_0", khsp_d0,  0 },
+        { khsp_comp_src.c_str(), "VSComposite", "vs_5_0", khsp_d0t, 0 },
+    };
+    // 26641 LEVER 1, measured: at 26640 this batch ran TEN heavy units at once
+    // and each one slowed to 391 s - per-unit compile time scales as roughly
+    // N^0.44 under memory and cache contention, which is why the 26640
+    // prediction of 270 s came back as 393 s. The MSAA_DEPTH=1 speculation has
+    // never once been consumed in any dump, so it is dropped: SIX heavy units
+    // instead of ten, ~312 s instead of 391 s. An MSAA-on composite now misses
+    // and pays a second batch exactly as it did at 26639 - never worse.
+    // 26641 LEVER 3: the gate returns instead of blocking. Everything below
+    // this line runs UNCHANGED once the pool is done, taking memo hits.
+    if (kh_shader_async_gate(khsp_jobs, _countof(khsp_jobs)))
+        return KH_SHADERS_COMPILING;
     std::string err = compile_shader(static_src.c_str(), "VSMain", "vs_5_0", khcb_rx_defines, &vs_blob);
     if (!err.empty()) return err;
     if (!g_vmir_vs) {   // 26463 VSMirror - NON-FATAL (see the declaration
@@ -15960,9 +16950,8 @@ inline std::string ensure_resources(ID3D11Device* dev) {
     //     objects then draw through the untextured path (visible, solid
     //     color) instead of failing the whole pipeline. ---
     {
-        static const D3D_SHADER_MACRO khtx_defines[] = {
-            { "KH_RECEIVE_TEX", "1" }, { "KH_TEXTURED", "1" }, { nullptr, nullptr },
-        };
+        // 26636: khtx_defines is HOISTED to the top of this function (beside
+        // khcb_rx_defines) so the KH_SHADER_MT batch can reference it.
         ID3DBlob* khtx_vsb = nullptr;
         ID3DBlob* khtx_psb = nullptr;
         std::string khtx_err = compile_shader(static_src.c_str(), "VSMain", "vs_5_0", khtx_defines, &khtx_vsb);
@@ -16913,7 +17902,37 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
         { nullptr, nullptr },
     };
 
+    // 26636: HOISTED from the textured-twin block below for the batch.
+    const D3D_SHADER_MACRO khtx_defines[] = {
+        { "MSAA_DEPTH", g_res.comp_depth_samples > 1 ? "1" : "0" },
+        { "SAMPLE_COUNT", sc.c_str() },
+        { "KH_RECEIVE_TEX", "1" },
+        { "KH_TEXTURED", "1" },
+        { nullptr, nullptr },
+    };
+    const D3D_SHADER_MACRO khtx_defines_arb[] = {
+        { "MSAA_DEPTH", g_res.comp_depth_samples > 1 ? "1" : "0" },
+        { "SAMPLE_COUNT", sc.c_str() },
+        { "KH_ARB_DEPTH", "1" },
+        { "KH_RECEIVE_TEX", "1" },
+        { "KH_TEXTURED", "1" },
+        { nullptr, nullptr },
+    };
+
     const std::string comp_src = std::string(g_cb_hlsl) + g_hlsl_composite + g_hlsl_composite2;
+    // 26636 KH_SHADER_MT: the composite unit's six heavy compiles as one
+    // batch. Declared after comp_src and every table it names, so the scope
+    // joins and frees before any of them go out of scope - and it covers the
+    // comp_fail early returns, which is the reason it is RAII.
+    const KhShaderJob khsm_jobs[] = {
+        { comp_src.c_str(), "PSComposite", "ps_5_0", defines,          0 },
+        { comp_src.c_str(), "PSComposite", "ps_5_0", defines_arb,      0 },
+        { comp_src.c_str(), "PSComposite", "ps_5_0", khtx_defines,     0 },
+        { comp_src.c_str(), "PSComposite", "ps_5_0", khtx_defines_arb, 0 },
+        { comp_src.c_str(), "VSComposite", "vs_5_0", defines,          0 },
+        { comp_src.c_str(), "VSComposite", "vs_5_0", khtx_defines,     0 },
+    };
+    KhShaderMtScope khsm_scope(khsm_jobs, _countof(khsm_jobs));
     ID3DBlob* vs_blob = nullptr;
     ID3DBlob* ps_blob = nullptr;
     auto comp_fail = [&](const std::string& e) {
@@ -16962,21 +17981,8 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
     KH_SAFE_RELEASE(g_res.ps_comp_tex);
     KH_SAFE_RELEASE(g_res.ps_comp_arb_tex);
     {
-        const D3D_SHADER_MACRO khtx_defines[] = {
-            { "MSAA_DEPTH", g_res.comp_depth_samples > 1 ? "1" : "0" },
-            { "SAMPLE_COUNT", sc.c_str() },
-            { "KH_RECEIVE_TEX", "1" },
-            { "KH_TEXTURED", "1" },
-            { nullptr, nullptr },
-        };
-        const D3D_SHADER_MACRO khtx_defines_arb[] = {
-            { "MSAA_DEPTH", g_res.comp_depth_samples > 1 ? "1" : "0" },
-            { "SAMPLE_COUNT", sc.c_str() },
-            { "KH_ARB_DEPTH", "1" },
-            { "KH_RECEIVE_TEX", "1" },
-            { "KH_TEXTURED", "1" },
-            { nullptr, nullptr },
-        };
+        // 26636: both textured tables are HOISTED to this function's top so
+        // the KH_SHADER_MT batch can name them. One truth, same values.
         ID3DBlob* khtx_vsb = nullptr;
         ID3DBlob* khtx_psb = nullptr;
         ID3DBlob* khtx_pab = nullptr;
@@ -17677,6 +18683,14 @@ inline std::string ensure_compute_shaders(ID3D11Device* dev) {
     };
 
     ID3DBlob* blob = nullptr;
+    // 26636 KH_SHADER_MT: g_cs_hlsl is the file's largest single unit and it
+    // compiles twice. g_cs_hlsl is a global literal, so only the scope's
+    // lifetime matters here.
+    const KhShaderJob khsm_jobs[] = {
+        { g_cs_hlsl, "CSVisibility",  "cs_5_0", defines, 0 },
+        { g_cs_hlsl, "CSSampleDepth", "cs_5_0", defines, 0 },
+    };
+    KhShaderMtScope khsm_scope(khsm_jobs, _countof(khsm_jobs));
     std::string err = compile_shader(g_cs_hlsl, "CSVisibility", "cs_5_0", defines, &blob);
     if (!err.empty()) return err;
     HRESULT hr = dev->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &g_res.cs_visibility);
@@ -22301,7 +23315,7 @@ static uint32_t g_fk_veto_cand_n = 0;       // candidates staged at the last pas
 // (26363/26364, field-confirmed), the seam refuse-and-retry (26371,
 // svLiveTrnBound 0 with 17/17), and the sign-agnostic fade gate (26362, a
 // defect repair that is arithmetically identical on mode 0). Nothing else.
-static constexpr int KH_BUILD_TAG = 26625;
+static constexpr int KH_BUILD_TAG = 26641;
 // NEAR-GAP RAMP (build 26001; the RenderDoc conviction). ROOT, proven by
 // pixel history + depth-window plateaus: the world partition's viewport
 // floor (0.011 in the convicting capture) collapses EVERY fragment nearer
@@ -27707,6 +28721,36 @@ inline void kh_sun_pf_convert(ID3D11DeviceContext* ctx) {
     ctx->VSGetShader(&khpc_vs, nullptr, nullptr);
     ID3D11PixelShader* khpc_ps = nullptr;
     ctx->PSGetShader(&khpc_ps, nullptr, nullptr);
+    // 26626 KH_PF_SRV_RESTORE - THE OTHER MISSING STATE (mode 393
+    // reverts; full ledger at KH_BUILD_TAG). This function BINDS t0 (the
+    // band depth) and t1 (the scratch mip) and NULLS both before it
+    // returns - correct in isolation, those nulls are the read/write
+    // hazard break on the pyramid - but 26582 relocated the convert to
+    // the mesh-bind region, where it runs AFTER its call sites have
+    // bound their own t0/t1. The FLUSH twin is immune by accident: its
+    // draw loop re-swaps the pair per solid mesh, exactly as the pass-
+    // bind ledger there states outright ("the atlas (t1) collides with
+    // the effect pair's depth slot and binds per-solid in the draw
+    // loop's swap instead"). The INJECTION twin is NOT: t0 binds at the
+    // snapshot line, t1 at the atlas line, the convert follows both, and
+    // no PSSetShaderResources touches either slot again anywhere in that
+    // function - its whole mesh draw loop contains none at all. Both
+    // slots have live consumers in that assembly (t0 depthTex, t1
+    // shadowAtlas in the shared chunk), so on every frame this body runs
+    // PSComposite drew with the scene-depth snapshot and the engine
+    // cascade atlas reading zero. THIS IS 26583'S CONVERSE, ONE SLOT
+    // OVER: that build fixed a pass RELYING on unset state; this one
+    // fixes a pass LEAVING state unset for its caller. The 26582 ledger
+    // endorsed this site as "the exact place where PSSetShaderResources
+    // has bound t11/t25/t26/t27 successfully" - all four of which are
+    // bound AFTER the call, which is why they were never at issue; the
+    // slots bound BEFORE it were not audited then and are audited now.
+    // Fixed HERE rather than by reordering the two call sites: one edit
+    // instead of two, it cannot regress the flush twin, and it makes the
+    // function self-contained at any future call site - the same posture
+    // the rest of its save/restore block already has.
+    ID3D11ShaderResourceView* khpc_sr[2] = {};
+    ctx->PSGetShaderResources(0, 2, khpc_sr);
     // 26583: THE MISSING STATE - the whole 26575-26582 saga (ledger at
     // KH_BUILD_TAG). The engine blend summed every honest convert into
     // the target; the rasterizer joins for scissor/cull completeness.
@@ -27807,6 +28851,14 @@ inline void kh_sun_pf_convert(ID3D11DeviceContext* ctx) {
     KH_SAFE_RELEASE(khpc_bl);
     ctx->RSSetState(khpc_rs);
     KH_SAFE_RELEASE(khpc_rs);
+    // 26626: the caller's t0/t1 pair. The refs are taken and released
+    // unconditionally (no leak on either arm); only the SET is armed, so
+    // mode 393 reproduces the historic behaviour exactly - both slots
+    // left NULL for whatever draws next.
+    if (g_dbg_mode.load(std::memory_order_relaxed) != 393)
+        ctx->PSSetShaderResources(0, 2, khpc_sr);
+    KH_SAFE_RELEASE(khpc_sr[0]);
+    KH_SAFE_RELEASE(khpc_sr[1]);
 }
 // 26537 KH_BAND_SUN_REACH lanes (ledger at the band admission test). The
 // sun-ward reach each band's fit actually took, in metres: floored at the
@@ -27816,6 +28868,22 @@ inline void kh_sun_pf_convert(ID3D11DeviceContext* ctx) {
 // the old isotropic sphere would have culled. -1 = the band never fitted.
 static float    g_sun_band_reach[4] = { -1.0f, -1.0f, -1.0f, -1.0f };   // 26620: [3] = FAR
 static uint64_t g_sun_band_reach_takes = 0;   // fits where reach > the depth floor
+// 26631 KH_BAND_FIT_WHY - pure gauge, mode 0 byte-identical. WHY THIS
+// EXISTS: at the operator's vanishing-shadow pose three of four bands read
+// valid 0 while their reach/caster lanes read 2023.4 / 1, and I took that
+// for a fit COLLAPSE and said so. It is not: khsh_out_reach and
+// khsh_out_casters are written ONLY inside the completed-render block, so
+// whenever valid is false those lanes are STALE from the last frame that
+// did complete, at a pose that may be nothing like the current one. Every
+// band lane in the dump has always had this property and nothing said so.
+// [0..3] = hero/mid/outer/far, indexed by the khsh_pf_idx the lambda
+// already carries, so no signature and no call site moves.
+//   0 completed   1 caster set EMPTY   2 set over the instance cap
+//   3 CB upload failed   4 instance VB Map failed
+//   5 entered, no exit recorded (should never appear)
+//   6 not called this frame (the khsh_okN gate refused it)
+static int      g_sun_fit_why[4] = { 6, 6, 6, 6 };
+static uint64_t g_sun_fit_n[4]   = { 0, 0, 0, 0 };   // set size at the exit
 // 26537 KH_UNION_TEXEL_SNAP lanes (ledger at the union snap). The
 // displacement the snap applied to the union centre this fit (m) and the
 // union's own texel in world metres - the sawtooth's quantum. -1 = the
@@ -33352,6 +34420,40 @@ inline void fill_lighting_obj_cb(ConstantData& cbd, const RenderObject& o) {
                          : khl_dm == 362 ? 48.0f  // 26586: UNBOUNDED grad slack
                                                   //        returns (falsified as
                                                   //        author at 26587)
+                         : khl_dm == 401 ? 71.0f  // 26635: the 26624 far-self
+                                                  //        GATE returns - the
+                                                  //        outer/far hard cut
+                                                  //        and its wobble come
+                                                  //        back together (the
+                                                  //        one-switch proof)
+                         : khl_dm == 400 ? 70.0f  // 26634, now an ALIAS of the
+                                                  //        default (fielded,
+                                                  //        never reminted): the
+                                                  //        certified far-self
+                                                  //        lift, which code 71
+                                                  //        is the revert of
+                         : khl_dm == 398 ? 69.0f  // 26631: far guard CLAMPED to
+                                                  //        the admission bound
+                                                  //        (the withdrawn 26630
+                                                  //        default, opt-in)
+                         : khl_dm == 397 ? 68.0f  // 26630 RETIRED - dead code
+                                                  //        6x range (the far
+                                                  //        tier over-claims
+                                                  //        again and a beyond-
+                                                  //        range caster's
+                                                  //        shadow can vanish)
+                         : khl_dm == 396 ? 67.0f  // 26629: KH_CERT_CLEAR off
+                                                  //        (a clear texel stops
+                                                  //        certifying; the halo
+                                                  //        class returns and
+                                                  //        visual 32 paints those
+                                                  //        pixels RED again)
+                         : khl_dm == 394 ? 66.0f  // 26627: KH_CERT_CONTENT off
+                                                  //        (certification returns
+                                                  //        to the 26590 surface-
+                                                  //        identity test; the
+                                                  //        layered-fabric splotch
+                                                  //        and its halo return)
                          : khl_dm == 392 ? 65.0f  // 26624: far self tier ungated
                                                   //        (the 26620 form - the
                                                   //        all-distance splotch
@@ -36257,6 +37359,12 @@ inline void release_shadow_device_state() {
     g_ls.atlas_last_seen = 0.0f;
     g_ls.first_capture_time = -1.0f;
     g_band_wipe_events++;   // 26566: the vanish trigger, counted
+    // 26633: this counter is ALSO the only gate on the 26626 pf release
+    // repair, because every call site of this function is paired with
+    // g_res.release. It is zeroed by reset_session_state, so a mission
+    // restart erases the event it just produced - only an in-session
+    // device reset can leave it readable in a dump. msaaToggleWipes does
+    // NOT gate that repair: kh_msaa_toggle_wipe never releases g_res.
     g_ls.srv_failed = false;
     g_ls.phase_on_atlas = false;
     g_ls.pending_valid = false;
@@ -36324,6 +37432,9 @@ inline void release_shadow_device_state() {
     g_sun3_map_valid = false;   // 26454
     g_sun4_map_valid = false;   // 26454
     g_sun5_map_valid = false;   // 26620
+    g_sun_pf_valid[0] = false;  // 26626: the 26575 pyramids' freshness
+    g_sun_pf_valid[1] = false;  // dies with the device alongside the
+    g_sun_pf_valid[2] = false;  // band validity flags above.
     g_sun_map_rendered_frame = false;
     g_sun_map_no_local = false;
     g_sun_map_hash = 0;
@@ -38264,6 +39375,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                             bool& khsh_out_pf) -> void {
             khsh_out_valid = false;   // proven true only by a completed render
             khsh_out_pf = false;      // 26575: proven true only by a completed convert
+            g_sun_fit_why[khsh_pf_idx] = 5;   // 26631: overwritten by every exit below
+            g_sun_fit_n[khsh_pf_idx] = 0;
             double khsh_dctr[3] = { 0.0, 0.0, 0.0 };   // 26465: double-snap carry
             bool   khsh_dsnap = false;
 
@@ -38428,7 +39541,82 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                 const float khsh_l2 = khsh_dd2 - khsh_ds * khsh_ds;
                 const float khsh_lat = khsh_l2 > 0.0f ? sqrtf(khsh_l2) : 0.0f;
                 if (khsh_lat > khsh_r2 + khsh_er) continue;        // ortho clips it laterally
-                if (khsh_ds > khsr_rad + khsh_er) continue;        // past the game's own shadow range
+                if (khsh_ds > khsr_rad + khsh_er) {
+                    // 26632 KH_BAND_SHADOW_ADMIT (mode 399 reverts; C++-side
+                    // only, no lighting0.y code - the 26611 pattern). THE
+                    // BANDS NEVER GOT THE RESCUE THE UNION HAS HAD SINCE
+                    // 26037. The union collection re-admits a caster whose
+                    // SHADOW SEGMENT reaches the camera even when its body is
+                    // far outside the sphere; khsh_one had only this flat
+                    // up-sun bound, so a caster past khsr_rad + er was refused
+                    // outright however long its shadow. The two admission
+                    // paths therefore disagreed, and 26629 built certification
+                    // on the premise that they agree: a band certifies "no
+                    // occluder in my guard" from a map that never contained
+                    // one it had refused. FIELD, dump2 on 26631 with the new
+                    // lanes: sunFarFitWhy 0 with sunFarFitN 1 against
+                    // sunLocalCount 2 - far completed knowing ONE of the two
+                    // casters - and visual 32 turns parts of the giant GREEN
+                    // (certified by a strictly finer tier) at the exact frame
+                    // its shadow vanishes. THE HEIGHT PROXY IS DELIBERATE: the
+                    // union computes the segment from he0[1], and 26632 said
+                    // this site built khsh_he from a DIFFERENT swizzle whose
+                    // vertical index could not be confirmed. THAT CLAIM IS
+                    // FALSE AND IS AMENDED AT 26633 - see the note below this
+                    // paragraph. khsh_er - the enclosing radius - is
+                    // frame-free and strictly conservative: it over-estimates
+                    // the height, so it can only ever ADMIT more, never refuse
+                    // a caster the union kept. Over-admission costs a deeper
+                    // window (26537 reach already sizes that) and cannot
+                    // create a wrong shadow - only a missing one can.
+                    // 26633 AMENDMENT, TWO PARTS.
+                    // (a) THE SWIZZLES ARE IDENTICAL AND INDEX [1] IS
+                    // VERTICAL HERE. kh_collect_sun_casters builds he0 from
+                    // o.size[0]/[2]/[1]; khsh_hl above is built from
+                    // c.size[0]/[2]/[1] - the SAME swizzle over the SAME
+                    // values, since SunCaster::size is memcpy'd from
+                    // RenderObject::size at the collection - and both sites
+                    // index [1] as vertical against g_sun_dir_engine[1].
+                    // khsh_er still SHIPS and is still conservative in the
+                    // safe direction; what is corrected is the PRICE, which
+                    // 26632 put at nothing visually. er/H is 1.73x for a cube
+                    // and ~14x for a wide flat caster, so the up-sun bound
+                    // runs an order past the shadow's true reach and khsh_fwd
+                    // stretches with it - a CANDIDATE author of the ~1618 m
+                    // hero/mid windows on the watch list, candidate and not
+                    // conviction because no arm has separated it. THE TIGHTEN
+                    // IS BANKED, NOT SHIPPED: it changes ADMISSION, so it is a
+                    // behavioural default under rule 1.11 and owes its own arm
+                    // and its own build. ITS SAFE FORM, because the naive one
+                    // is not: this site ROTATES its half-extents and the union
+                    // does NOT, so khsh_he[1] alone can fall BELOW the union's
+                    // he0[1] on a rotated caster and re-open the completeness
+                    // gap 26632 closed - the height to use is the max of
+                    // khsh_he[1] and khsh_hl[1].
+                    // (b) THE FIDELITY CLAIM IS OVERSTATED. 26632 calls the
+                    // block below the union's formula: the LENGTH is verbatim,
+                    // the TEST is not. The union measures capsule proximity of
+                    // the CAMERA to the shadow segment; this bounds the up-sun
+                    // SCALAR beside the separate lateral clip above. That is
+                    // the right shape for a band whose ortho clips laterally,
+                    // but a reader grepping for one will find the other.
+                    float khsh_slim = khsr_rad + khsh_er;
+                    if (g_sun_valid &&
+                        g_dbg_mode.load(std::memory_order_relaxed) != 399) {
+                        const float khsh_ssx = g_sun_dir_engine[0];
+                        const float khsh_ssy = g_sun_dir_engine[1];
+                        const float khsh_ssz = g_sun_dir_engine[2];
+                        const float khsh_shl = sqrtf(khsh_ssx * khsh_ssx +
+                                                     khsh_ssz * khsh_ssz);
+                        if (khsh_shl > 1.0e-4f && khsh_ssy > 1.0e-4f) {
+                            // the union's length, verbatim: 2H / tan(elev) + slack
+                            const float khsh_slen = (2.0f * khsh_er)
+                                                  * (khsh_shl / khsh_ssy) + khsh_er;
+                            if (khsh_slen > khsh_slim) khsh_slim = khsh_slen;
+                        }
+                    }
+                    if (khsh_ds > khsh_slim) continue;   // shadow cannot reach
+                }
                 if (khsh_ds < -(khsh_dep) - khsh_er) continue;     // anti-sun side unchanged
                 khsh_set.push_back(c);
                 const float khsh_need = khsh_ds + khsh_er;
@@ -38501,8 +39689,10 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             // The 26445 v2 requirement is unchanged and better served -
             // membership is the ortho's own lateral clip, never a positional
             // subset of it. Mode 326 restores the isotropic sphere in place.
+            g_sun_fit_n[khsh_pf_idx] = static_cast<uint64_t>(khsh_set.size());   // 26631
             if (khsh_set.empty() ||
                 khsh_set.size() > static_cast<size_t>(g_res.sun_instance_cap)) {
+                g_sun_fit_why[khsh_pf_idx] = khsh_set.empty() ? 1 : 2;   // 26631
                 return;   // capacity grows on union render frames; valid stays false
             }
 
@@ -38515,6 +39705,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             khsh_cbf.sun_origin[1] = g_sun_anchor_now[1];
             khsh_cbf.sun_origin[2] = g_sun_anchor_now[2];
 
+            g_sun_fit_why[khsh_pf_idx] = 3;   // 26631: deepest stage reached
             if (kh_upload_frame_cb(ctx, g_res.composite_frame_cb, khsh_cbf) &&
                 kh_upload_obj_cb(ctx, g_res.composite_cb, khsh_obj)) {
                 ctx->ClearDepthStencilView(khsh_dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
@@ -38532,6 +39723,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                 D3D11_MAPPED_SUBRESOURCE khsh_im = {};
 
                 if (SUCCEEDED(ctx->Map(g_res.sun_instance_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &khsh_im))) {
+                    g_sun_fit_why[khsh_pf_idx] = 4;   // 26631: deepest stage reached
                     float* khsh_outp = static_cast<float*>(khsh_im.pData);
 
                     for (const auto& c : khsh_set) {
@@ -38577,6 +39769,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                     khsh_out_bias = khsh_bbw / khsh_d2v;
                     khsh_out_hd = khsh_half;
                     khsh_out_valid = true;
+                    g_sun_fit_why[khsh_pf_idx] = 0;   // 26631: completed
                     khsh_out_renders++;
                     khsh_out_casters = static_cast<uint64_t>(khsh_set.size());
                     // 26537 ARMING LANE: the reach this fit actually took.
@@ -38636,6 +39829,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             if (khls_s > 5.0f) khls_s = 5.0f;
         }
         g_sun_ladder_scale = khls_s;
+        for (int khsh_wi = 0; khsh_wi < 4; ++khsh_wi) g_sun_fit_why[khsh_wi] = 6;   // 26631
         if (khsh_ok0) khsh_one(KH_SUN_HERO_HALF, KH_SUN_HERO_DEPTH, KH_SUN_HERO_SIZE,
                                g_res.sun2_dsv, g_sun2_map_vp, g_sun2_map_bias,
                                g_sun2_half_diag, g_sun2_map_valid,
@@ -55836,7 +57030,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                            : (khdc_m == 317 ? 28.0f
                              : (khdc_m == 355 ? 29.0f
                              : (khdc_m == 359 ? 30.0f
-                             : (khdc_m == 360 ? 31.0f : 0.0f))))))))))))));   // + 26579 v30 / 26580 v31 (sampler splitter)
+                             : (khdc_m == 360 ? 31.0f
+                             : (khdc_m == 395 ? 32.0f : 0.0f)))))))))))))));   // + 26579 v30 / 26580 v31 (sampler splitter) / 26628 v32 (cert probe)
             // 26383 dbgCtl.y IS AN ENUMERATION (full table at the gate it
             // drives). 0 = default (recompute, delta), 1 = 51 (absolute form),
             // 2 = 202 (THE SEAM REVERT - restores the raster passthrough,
@@ -61835,7 +63030,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                            : (khdc_m == 317 ? 28.0f
                              : (khdc_m == 355 ? 29.0f
                              : (khdc_m == 359 ? 30.0f
-                             : (khdc_m == 360 ? 31.0f : 0.0f))))))))))))));   // + 26579 v30 / 26580 v31 (sampler splitter)
+                             : (khdc_m == 360 ? 31.0f
+                             : (khdc_m == 395 ? 32.0f : 0.0f)))))))))))))));   // + 26579 v30 / 26580 v31 (sampler splitter) / 26628 v32 (cert probe)
             // 26383 dbgCtl.y IS AN ENUMERATION (full table at the gate it
             // drives). 0 = default (recompute, delta), 1 = 51 (absolute form),
             // 2 = 202 (THE SEAM REVERT - restores the raster passthrough,
@@ -65455,6 +66651,7 @@ inline void on_mission_end() {
                                           // doctrine: recompiles come from disk
         kh_user_lut_cache_release();      // user .cube LUTs: same doctrine
                                           // (reloads come from disk)
+        kh_shader_mt_shutdown();   // 26636: no worker may outlive a mission
         reset_session_state();
         khme_done = true;   // 26495: exhaustion is counted + deferred below
         break;

@@ -8157,6 +8157,153 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
         // field again - expect the 26619 wobble and the mesh-size
         // quality law to return together).
                             khd_m == 389 ||
+        // 26663: 428 = KH_BAND_FWD_LATCH OFF - the camera bands' DEPTH window
+        // re-fits to the admitted set every frame again, the 26537 form. It
+        // is only observable with a caster large enough to stretch a band
+        // past its 12 / 48 / 192 m floor; below that the window was always
+        // static and 428 is a measured no-op. Expect under 428: self shadow
+        // on a large mesh DRIFTING with the camera again, with sunFwdHolds
+        // and sunFwdRelatches NOT ADVANCING - read them as a DELTA across the
+        // A/B and not as an absolute, because like their union twins
+        // (sunUnionRHolds / sunUnionRelatches) these are session-scoped by the
+        // 26539 precedent and are deliberately NOT in reset_stat_counters.
+                            khd_m == 428 ||
+        // 26661: 426 = KH_BAND_BIAS_TEXELS OFF - the camera bands' receive
+        // bias goes back to HALF a texel from two, bit-exactly. Arm it if
+        // contact shadows detach from their casters at range, which is the
+        // one disclosed cost of the default. ITS OWN ARMING PROOF IS THE
+        // 26660 CENSUS: under 426, sunMid/Out/FarBiasM must read exactly one
+        // quarter of what mode 0 reports and sunHeroBiasM must barely move,
+        // because hero's ulp floor still nearly wins at either setting.
+                            khd_m == 426 ||
+        // 26656: 423, 424 and 425 are RETIRED - whitelisted DEAD and NEVER
+        // REUSED, the 26624 and 26631 precedent. They armed KH_SUN_FIT_SCALE,
+        // KH_SUN_ER_TIGHTEN and KH_SUN_OVERSIZE, all three of which are gone
+        // from the file; no reader remains, so setting them does nothing at
+        // all. They stay listed so a stale script cannot be refused, and so
+        // that a future build cannot mint them again over a fielded meaning.
+                            khd_m == 425 || khd_m == 424 || khd_m == 423 ||
+        // 26662: 427 = KH_SHADOW_LOD BACK ON - the sun depth ladder and the
+        // mask cast take level 2 again, the 26652 form. It is a REVERT now,
+        // not the default: level 2 authored the oversized-mesh self-shadow
+        // acne, because the receiver draws at the COLOUR level while the map
+        // held level 2 and a quadric collapse moves vertices - two different
+        // surfaces, compared against each other, with the gap scaling by
+        // 'size'. Expect under 427: the acne back on any mesh past ~100x,
+        // frozen in the same spots, and the casting passes a quarter of the
+        // triangles lighter.
+                            khd_m == 427 ||
+        // 26652: 422 = KH_SHADOW_LOD OFF. PROMOTED TO DEFAULT AT 26662 and
+        // kept as a BIT-EXACT ALIAS of it, per rule 1.18 - a fielded number
+        // never changes meaning, so 422 still means level 0 everywhere and
+        // now simply agrees with mode 0. The seam and volume clones were
+        // never in this change, so a registration fault is NOT this mode.
+                            khd_m == 422 ||
+        // 26652: 421 = KH_MESH_SORT OFF - one far-first order for every mesh
+        // again. Under it opaques draw back to front, so an occluded
+        // fragment still runs the whole shadow ladder before failing the
+        // depth test. This is the A/B that prices front-to-back ordering.
+                            khd_m == 421 ||
+        // 26652: 420 = KH_MESH_CULL OFF - no frustum test; every registered
+        // mesh is submitted every flush and every injection, which is the
+        // 26651 behaviour. If a mesh ever VANISHES when it should be
+        // visible, this is the first mode to arm - meshCulled climbing while
+        // the object is on screen convicts the plane extraction.
+                            khd_m == 420 ||
+        // 26651: 419 = KH_MESH_LOD CROSSFADE OFF. The ladder still selects
+        // and the levels still draw, but the dithered transition pair does
+        // not - each level swaps in whole at its boundary. This is the A/B
+        // that prices the crossfade: under 419 the levels POP, visibly, at
+        // exactly the ranges the fade band covers. It is also the stand-down
+        // if the dither pattern itself is ever the complaint, because it
+        // leaves every other part of the feature live.
+                            khd_m == 419 ||
+        // 26651: 418 = KH_MESH_LOD OFF. No ladder is built at import, none is
+        // written to the cache, and every draw takes level 0 - the 26650
+        // behaviour whole. Arm it to price the whole feature, and note that a
+        // model imported UNDER 418 caches WITHOUT levels, so the .khmc must
+        // be deleted or the model re-saved before the ladder appears again.
+                            khd_m == 418 ||
+        // 26651: 417 = KH_MOD_CACHE OFF. Only the writable Documents cache is
+        // consulted; mod-shipped .khsc and .khmc files are ignored. Arm it to
+        // decide whether a mod's shipped blob is the thing behaving oddly -
+        // under 417 the same session recompiles or re-imports from source,
+        // and if the symptom survives that, the shipped cache is innocent.
+                            khd_m == 417 ||
+        // 26650: 416 = KH_USER_SETTLE OFF - the pump arms the instant one
+        // unarmed request exists, the 26649 form. Under it a single material
+        // serialises its three contexts into three batches, each waiting for
+        // a PSMain-class unit to finish before the next starts. Arm it to
+        // reproduce that timing deliberately; userAsyncBatches per material
+        // is the lane that shows the difference.
+                            khd_m == 416 ||
+        // 26649: 415 = KH_USER_MAT_WHITE OFF - a submesh whose user .hlsl is
+        // still compiling, or whose compile FAILED, falls back to builtin
+        // PBR with its real textures again, which is the 26645 behaviour.
+        // Arm it only to compare against the white substitute; note that
+        // under 415 a permanently failed user shader is visually
+        // indistinguishable from a working one that happens to resemble PBR,
+        // which is the exact confusion 26649 exists to remove.
+                            khd_m == 415 ||
+        // 26647: 414 = KH_ACQ_COLD_HOLD OFF - the shadow view scan runs
+        // during the cold-cache deferral again and the acquisition chain is
+        // NOT reset when the gate finally opens, which is the 26646
+        // behaviour and the one the field convicted: mesh lit but receiving
+        // no shadows and no cascades until a mission restart. Arm it only to
+        // reproduce that fault deliberately.
+                            khd_m == 414 ||
+        // 26646: 413 = KH_MESH_CACHE_MT OFF - the .khmc write and the 1 GiB
+        // trim run SYNCHRONOUSLY on the game thread again, above the
+        // register, exactly as they did through 26645. The stand-down for
+        // any suspicion that a cache entry is missing, truncated or written
+        // for the wrong mesh: under 413 the write happens inline before the
+        // mesh is ever published and nothing is queued.
+                            khd_m == 413 ||
+        // 26645: 412 = KH_FX_BATCH OFF - the post-processing unit leaves the
+        // startup batch and ensure_effect_shader compiles it inline on the
+        // calling thread again, which is the 26644 behaviour. Diagnostic for
+        // a suspected define-table mismatch: if shaderCacheMisses gains an
+        // extra PSEffect on a cold run, the speculation is missing and this
+        // arm proves it costs nothing but speed.
+                            khd_m == 412 ||
+        // 26645: 411 = KH_USER_ASYNC OFF - user .hlsl effect and material
+        // shaders compile SYNCHRONOUSLY on the render thread inside the
+        // graphics lock again, the pre-26645 behaviour, which for a material
+        // means a PSMain/PSComposite-class unit and a multi-minute freeze on
+        // a cold cache. The stand-down for any suspicion that a user shader
+        // is late, never arrives, or arrives wrong: under 411 it is compiled
+        // at the call site exactly as it was for five campaigns.
+                            khd_m == 411 ||
+        // 26644: 410 = THE 26643 WHITE-PREVIEW FORM, RESTORED WHOLE. Three
+        // things move together because they were one build's reasoning: the
+        // input layout describes POSITION only against VSIn's two-element
+        // signature, the vertex-buffer top-up gates the ensure again and so
+        // a top-up failure stands the preview down permanently, and the
+        // rasterizer takes DepthBias -32 / SlopeScaledDepthBias -0.25 - the
+        // revert twins' values, not the primaries' 0/0/0. Arm it to prove
+        // which half of a surviving fault is 26644's and which was 26643's.
+        // Read the named step in the RPT either way: the instrument is on
+        // in both arms and is the point of the build.
+                            khd_m == 410 ||
+        // 26643: 409 = KH_WHITE_PREVIEW OFF - the flat-white placeholder pass
+        // stands down and the screen stays empty through the whole cold
+        // compile, the 26642 behaviour exactly. Set it before the first
+        // ensure: the placeholder's shaders are created once per device and
+        // the mode is read at that ensure as well as at every draw.
+                            khd_m == 409 ||
+        // 26642: 407 = KH_POOL_LIFETIME REVERT - restores the 26641 teardown
+        // form whole: the abort latch is cleared at the BOTTOM of
+        // kh_shader_mt_shutdown again (so a detached worker resumes claiming
+        // units), the 5 s wait becomes unconditional including on the two
+        // device-reset paths that hold the graphics lock, and a batch that
+        // spawned no worker at all is armed rather than stood down. One
+        // switch for the whole of 26642's pool repair.
+                            khd_m == 407 ||
+        // 26642: 408 = KH_QUERY_DEFER REVERT - gpuVisibility and
+        // sampleSceneDepth treat the KH_SHADERS_COMPILING sentinel as a fatal
+        // error again and answer [["error","shaders compiling"]] for the whole
+        // cold-compile window, the 26641 behaviour.
+                            khd_m == 408 ||
         // 26641: 406 = KH_SHADER_ASYNC OFF - ensure_resources BLOCKS the render
         // thread through the whole cold compile again, the pre-26641 form.
                             khd_m == 406 ||
@@ -9478,6 +9625,174 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("shaderAsyncMs", RenderIntegration::g_khsa_ms));
         out.push_back(kv("shaderMtLive", static_cast<uint64_t>(RenderIntegration::g_khsm_live.load(std::memory_order_relaxed))));
         out.push_back(kv("shaderMtDetached", RenderIntegration::g_khsm_detached));
+        // 26642 teardown/arming lanes. StallMs is the ms actually spent inside
+        // kh_shader_mt_shutdown's wait - the graphics-lock cost of a teardown
+        // that landed mid-compile, near 0 on a normal session. SpawnFails
+        // counts batches stood down for want of a single worker thread.
+        // READ MtJobs AGAINST MtDetached: a detached pool that keeps
+        // COMPILING after the mission ended is defect (1) of the 26642 ledger
+        // and is the one thing mode 407 puts back.
+        out.push_back(kv("shaderMtStallMs", RenderIntegration::g_khsm_stall_ms));
+        out.push_back(kv("shaderMtSpawnFails", RenderIntegration::g_khsm_spawn_fails));
+        // 26643 KH_WHITE_PREVIEW. CompileMs is the placeholder pair's ONE-TIME
+        // cost and is the lane that tests the parsing-is-free premise: tens of
+        // ms is the prediction, tens of seconds falsifies it. Frames/Draws are
+        // the arming lanes - both 0 on a warm cache is correct, not a failure,
+        // because a warm session never defers and never builds the pass.
+        out.push_back(kv("whiteCompileMs", RenderIntegration::g_khw_compile_ms));
+        out.push_back(kv("whiteFrames", RenderIntegration::g_khw_frames));
+        out.push_back(kv("whiteDraws", RenderIntegration::g_khw_draws));
+        // 26644: frames the placeholder's own vertex-buffer top-up refused.
+        // At 26643 this failure was indistinguishable from a device-object
+        // failure AND permanently fatal to the pass; it is now per-frame and
+        // per-object. A climbing count convicts a published mesh with empty
+        // geometry - kh_mesh_append takes that contract on trust - and the
+        // repair moves there, not here. Expect 0.
+        out.push_back(kv("whiteVbFails", RenderIntegration::g_khw_vb_fails));
+        // 26645 KH_USER_ASYNC. Queued counts requests accepted; Done and
+        // Fails are the two terminal states and must SUM to Queued once the
+        // queue drains. Batches counts pumps that armed a pool - zero with
+        // Queued non-zero means every pump found the pool busy and the
+        // requests are starving. Relost counts memo entries that vanished
+        // under an armed request (a teardown between arm and consume); it
+        // should read 0 and a climbing value is the read for a late shader.
+        // Drops counts requests abandoned by a device reset, an MSAA change
+        // or a cache release - expected non-zero after an FSAA toggle.
+        out.push_back(kv("userAsyncQueued", RenderIntegration::g_user_async_queued));
+        out.push_back(kv("userAsyncDone", RenderIntegration::g_user_async_done));
+        out.push_back(kv("userAsyncFails", RenderIntegration::g_user_async_fails));
+        out.push_back(kv("userAsyncBatches", RenderIntegration::g_user_async_batches));
+        out.push_back(kv("userAsyncRelost", RenderIntegration::g_user_async_relost));
+        out.push_back(kv("userAsyncDrops", RenderIntegration::g_user_async_drops));
+        // 26649: submesh draws served the FLAT WHITE substitute because a
+        // user .hlsl was requested and was pending or failed. Counting while
+        // userAsyncQueued climbs is the compile window and is expected to
+        // stop; counting FOREVER with userAsyncFails non-zero is a broken
+        // shader file and the RPT carries the fxc error once. Zero with a
+        // user material assigned means the substitute never engaged - check
+        // that ps_white exists, since mode 409 suppresses it.
+        out.push_back(kv("userMatWhiteDraws", RenderIntegration::g_user_mat_white_draws));
+        // 26650: pumps spent waiting for the request queue to stop growing.
+        // Small and non-zero is the feature working - two or three per
+        // material. THE LANE THAT MATTERS IS userAsyncBatches AGAINST
+        // userAsyncQueued: one batch carrying every context of a material is
+        // the goal, three batches for three contexts is the fault 26650
+        // closes. A large SettleWaits with batches never climbing means the
+        // queue is growing every frame and the cap is carrying it.
+        out.push_back(kv("userSettleWaits", RenderIntegration::g_user_settle_waits));
+        // 26651 KH_MOD_CACHE. modCacheDirs is how many mod "cache" folders
+        // the one-time scan found and is 0 on a vanilla install - if it is 0
+        // while a mod is meant to ship a cache, the folder is named wrong or
+        // is not where the mod searcher looks, and NOTHING below can be
+        // non-zero. modShaderHits and modMeshHits are blobs served by a mod
+        // rather than by the user's own cache; they are a SUBSET of
+        // shaderCacheHits and fbxCacheHits, never additional to them.
+        out.push_back(kv("modCacheDirs", RenderIntegration::g_mod_cache_dirs_n));
+        out.push_back(kv("modShaderHits",
+                         RenderIntegration::g_mod_shader_hits.load(std::memory_order_relaxed)));
+        out.push_back(kv("modMeshHits", RenderIntegration::g_mod_mesh_hits));
+        // 26651 KH_MESH_LOD. lodMeshes is models that got a ladder and
+        // lodLevels the total depth across them - divide for the mean, and
+        // expect close to 5 on real models and 0 on a box. lodBuildMs is
+        // charged on IMPORT MISSES ONLY, so it reads 0 on every cached
+        // launch; measured before shipping at 6 ms for 4k triangles and
+        // 133 ms for 65k, which is the number that decides whether this
+        // ever needs to leave the game thread - rule 1.12, and do not move
+        // it against anything but this lane. lodFades counts draws that
+        // issued the crossfade PAIR: zero while lodMeshes is non-zero and
+        // the camera is moving means the selector never enters a fade band
+        // and the crossfade is not being exercised at all.
+        out.push_back(kv("lodMeshes", RenderIntegration::g_lod_meshes));
+        out.push_back(kv("lodLevels", RenderIntegration::g_lod_levels));
+        out.push_back(kv("lodBuildMs", RenderIntegration::g_lod_build_ms));
+        out.push_back(kv("lodFades", RenderIntegration::g_lod_fades));
+        // 26652 THE GEOMETRY CENSUS - the lanes that say whether any of this
+        // made anything cheaper, without a GPU timer. meshTris is what the
+        // colour paths actually submitted this session; meshTrisL0 is what
+        // the SAME draws would have submitted with no ladder, so their RATIO
+        // is the LOD win exactly. A ratio of 1.00 means the ladder is not
+        // engaging whatever lodMeshes says, and that is a defect not a slow
+        // path. meshCulled against meshConsidered is the frustum win and is
+        // expected to be large the moment the camera looks away from
+        // anything.
+        // 26658 CHANGED THE ACCOUNTING OF ALL FOUR AND THE HISTORIC NUMBERS
+        // DO NOT COMPARE ACROSS IT. meshTrisL0 was charged inside the LOD
+        // crossfade loop, so a FADING object was billed two level-0 draws
+        // against a pair that exists only because the ladder does - the
+        // ratio flattered itself by the fade rate, and lodFades ran 392 of
+        // 437 and 922 of 2990 in the dumps that priced it. The baseline is
+        // now ONE level-0 draw per object. The ordered two-pass, which
+        // doubles what it submits and had never paid for it, now pays on
+        // both sides. And meshConsidered stopped counting fullscreen
+        // passes, which have no world extent and can never be culled, so
+        // the frustum ratio stopped being diluted by them. LAST READINGS
+        // UNDER THE OLD ACCOUNTING, for anyone comparing an old dump:
+        // meshTris over meshTrisL0 0.414 and 0.444; meshCulled over
+        // meshConsidered 168 of 6561 and 134 of 2304. EXPECT THE PRINTED
+        // LOD RATIO TO GET WORSE at 26658 - that is the correction landing,
+        // not a regression.
+        out.push_back(kv("meshConsidered", RenderIntegration::g_mesh_considered));
+        out.push_back(kv("meshCulled", RenderIntegration::g_mesh_culled));
+        out.push_back(kv("meshTris", RenderIntegration::g_mesh_tris));
+        out.push_back(kv("meshTrisL0", RenderIntegration::g_mesh_tris_l0));
+        // 26657 KH_MESH_TIMER - THE NUMBER FIVE BUILDS OF OPTIMISATION WORK
+        // HAVE BEEN ASSERTED WITHOUT. Cumulative GPU microseconds and a
+        // sample count for each geometry pass, plus the worst single pass.
+        // DIVIDE Us BY N YOURSELF and read Max beside it; an average alone
+        // hides the frame that matters. injGpuUs is the one to watch on this
+        // renderer, because a healthy composite path stands the flush mesh
+        // pass down and the injection draws everything - meshGpuN near zero
+        // with injGpuN tracking the injection count is NORMAL, not a fault.
+        // WHAT THEY DO AND DO NOT SETTLE: they price the mesh passes, so
+        // meshTris against meshTrisL0 finally has a cost attached. They say
+        // nothing about the shadow ladder, the fullscreen chain or the UI
+        // phase, which have their own rings. A pass that never armed - no
+        // queries, a busy slot, a disjoint interval - simply does not count
+        // itself, so N below the pass count is a skipped measurement rather
+        // than a fast frame.
+        // 26658 MADE THESE ANSWERABLE, AND UNTIL 26658 THEY WERE NOT. The
+        // step-1 A/B - mode 0 against mode 421, comparing injGpuUs over
+        // injGpuN - asked whether this renderer is fragment-bound. Mode 421
+        // armed KH_MESH_SORT in flush_locked ALONE, and injGpu brackets the
+        // INJECTION, which sorted back-to-front unconditionally and did not
+        // read the mode at all. The arm could not change one instruction the
+        // measured pass executed, so the null the A/B was always going to
+        // return was guaranteed by construction rather than by the scene -
+        // and the handoff's decision rule would have read that null as a
+        // refutation of the front-to-back argument. 421 now arms BOTH mesh
+        // paths. RUN IT AGAIN, and run it properly: ONE session, ONE pose,
+        // toggle only the mode. The dumps that fed the first attempt were
+        // not matched - 3.00 objects and 28785 triangles per injection
+        // against 2.19 and 19379 - and are evidence of nothing.
+        out.push_back(kv("meshGpuUs",  RenderIntegration::g_msh_gpu_us));
+        out.push_back(kv("meshGpuN",   RenderIntegration::g_msh_gpu_n));
+        out.push_back(kv("meshGpuMaxUs", RenderIntegration::g_msh_gpu_max));
+        out.push_back(kv("injGpuUs",   RenderIntegration::g_inj_gpu_us));
+        out.push_back(kv("injGpuN",    RenderIntegration::g_inj_gpu_n));
+        out.push_back(kv("injGpuMaxUs", RenderIntegration::g_inj_gpu_max));
+        // 26653 THE CULL'S SELF-CHECK. cullBuilds is passes that built a
+        // frustum the apex guard accepted; cullStandDowns is passes that
+        // refused, and a refusing pass culls NOTHING - it is the safe state,
+        // not an error. cullApexMax is the worst distance in metres from the
+        // camera to its own side planes, which is zero for a real
+        // perspective frustum and was measured at 1.2e-4 at 7.5 km in the
+        // harness. READ THEM AS A PAIR WITH meshCulled: culled climbing with
+        // cullBuilds zero is impossible by construction, and cullApexMax in
+        // the hundreds names a matrix that does not belong to its camera -
+        // which is exactly the 26652 defect and exactly what this catches.
+        out.push_back(kv("cullBuilds", RenderIntegration::g_cull_builds));
+        out.push_back(kv("cullStandDowns", RenderIntegration::g_cull_standdowns));
+        // 26654: cullApexMax CHANGED MEANING and the 26653 reading of 7064
+        // is what forced it. It was the camera's distance to its own side
+        // planes, which is huge and CORRECT whenever the pass draws through
+        // a rebased matrix; it is now the FOURTH plane's residual at the
+        // solved apex, which is near zero for any real perspective frustum
+        // in either space. cullRebased counts passes whose matrix was
+        // camera-rebased - expect it to track cullBuilds on this renderer,
+        // because both mesh passes rebase. A pass that stands down culls
+        // NOTHING, so standDowns is a report and never a lost object.
+        out.push_back(kvf("cullApexMax", RenderIntegration::g_cull_apex_max));
+        out.push_back(kv("cullRebased", RenderIntegration::g_cull_rebased));
         out.push_back(kv("offthreadTrigs", RenderIntegration::g_offthread_trigs.load(std::memory_order_relaxed)));
         out.push_back(kvf("hookInstallAtS", RenderIntegration::g_hook_install_at_s));
         out.push_back(kv("compositeAmbiguous", RenderIntegration::g_stats.composite_ambiguous));
@@ -9511,6 +9826,37 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("fbxCacheHits", RenderIntegration::g_stats.fbx_cache_hits));
         out.push_back(kv("fbxCacheWrites", RenderIntegration::g_stats.fbx_cache_writes));
         out.push_back(kv("fbxCacheEvicts", RenderIntegration::g_stats.fbx_cache_evicts));
+        // 26646 THE FIRST TIMING THIS PATH HAS EVER HAD. Counts have existed
+        // since the cache was built and nobody has ever known what an import
+        // COSTS. All four are cumulative ms. ReadMs is file read plus hash;
+        // LoadMs is the binary-cache load and is charged on HITS only;
+        // ParseMs is ufbx plus triangulation plus mikktspace plus bake and
+        // is charged on MISSES only; RegMs is the register and INCLUDES the
+        // ScopedGraphicsLock, so it is the one that measures a render-thread
+        // park rather than game-thread work. ParseMs against fbxImports is
+        // the number that decides whether the parse is worth moving off the
+        // game thread at all - do not redesign that path without it.
+        out.push_back(kv("fbxReadMs", RenderIntegration::g_fbx_read_ms));
+        out.push_back(kv("fbxLoadMs", RenderIntegration::g_fbx_load_ms));
+        out.push_back(kv("fbxParseMs", RenderIntegration::g_fbx_parse_ms));
+        out.push_back(kv("fbxRegMs", RenderIntegration::g_fbx_reg_ms));
+        // 26646 KH_MESH_CACHE_MT. Queued and Done must converge; a permanent
+        // gap means the writer thread is wedged. Dropped counts writes
+        // abandoned at mission end and a small non-zero value is normal.
+        out.push_back(kv("meshWriteQueued", RenderIntegration::g_khmw_queued));
+        out.push_back(kv("meshWriteDone", RenderIntegration::g_khmw_done));
+        out.push_back(kv("meshWriteDropped", RenderIntegration::g_khmw_dropped));
+        // 26647 KH_ACQ_COLD_HOLD. HoldFrames should equal whiteFrames on a
+        // cold run and 0 on a warm one. Resets must be exactly 1 on a cold
+        // run - the single deferred-to-live edge - and 0 on a warm one; more
+        // than 1 means the gate is flapping and the chain is being reset
+        // under a live session, which would be worse than the fault this
+        // closes. Scans counts the view scans refused during the window; a
+        // large number is expected and is the measure of what used to
+        // poison the ring.
+        out.push_back(kv("acqHoldFrames", RenderIntegration::g_acq_hold_frames));
+        out.push_back(kv("acqHoldResets", RenderIntegration::g_acq_hold_resets));
+        out.push_back(kv("acqHoldScans", RenderIntegration::g_acq_hold_scans));
         out.push_back(kv("registeredMeshes", static_cast<uint64_t>(RenderIntegration::mesh_count())));
         out.push_back(kv("compositeKeepEncodes", RenderIntegration::g_stats.composite_keep_encodes));
         out.push_back(kv("compositeAnomalySkips", RenderIntegration::g_stats.composite_anomaly_skips));
@@ -12333,6 +12679,100 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("sunMidFitN",    RenderIntegration::g_sun_fit_n[1]));
         out.push_back(kv("sunOutFitN",    RenderIntegration::g_sun_fit_n[2]));
         out.push_back(kv("sunFarFitN",    RenderIntegration::g_sun_fit_n[3]));
+        // 26655 THE OVERSIZE GAUGES, per tier, STAMPED AT THE ADMISSION LOOP -
+        // which every call runs before any exit, so unlike khsh_out_reach and
+        // khsh_out_casters these are never stale from an earlier frame's pose.
+        // 26631 had to withdraw a conviction in writing for exactly that
+        // reason and these lanes exist so it cannot happen again.
+        //   ErMax  - largest enclosing radius ADMITTED to that tier, metres.
+        //            Read it against the tier's own HalfDiag: an ErMax that
+        //            dwarfs the half-diagonal is a caster the map cannot
+        //            contain, and every fragment past the ortho edge samples
+        //            off the texture and reads LIT.
+        //   FwdM   - khsh_fwd minus the tier's depth floor: how far ONE caster
+        //            stretched the depth window that EVERY caster in the tier
+        //            then shares. THIS IS THE MUTUAL-INTERACTION TERM and it
+        //            has never had a lane. Large here with two meshes present
+        //            and near zero with one is the field report, measured.
+        // 26656: the Refus lanes went out with the oversize bar. ErMax and
+        // FwdM stay - they are behaviour-free and they are what convicted
+        // the 26655 design, so they are the head start the next attempt gets.
+        out.push_back(kvf("sunHeroErMax", RenderIntegration::g_sun_fit_er_max[0]));
+        out.push_back(kvf("sunMidErMax",  RenderIntegration::g_sun_fit_er_max[1]));
+        out.push_back(kvf("sunOutErMax",  RenderIntegration::g_sun_fit_er_max[2]));
+        out.push_back(kvf("sunFarErMax",  RenderIntegration::g_sun_fit_er_max[3]));
+        out.push_back(kvf("sunHeroFwdM",  RenderIntegration::g_sun_fit_fwd[0]));
+        out.push_back(kvf("sunMidFwdM",   RenderIntegration::g_sun_fit_fwd[1]));
+        out.push_back(kvf("sunOutFwdM",   RenderIntegration::g_sun_fit_fwd[2]));
+        out.push_back(kvf("sunFarFwdM",   RenderIntegration::g_sun_fit_fwd[3]));
+        // 26656: sunHero/Mid/Out/FarRefus and sunErTightens are RETIRED with
+        // the mechanisms they measured. sunLadderCasterR stays as a pure
+        // gauge and feeds nothing - it is the largest LOCAL caster's
+        // enclosing radius, it is how the 26655 design was diagnosed, and
+        // the next reader should not have to rebuild it.
+        out.push_back(kvf("sunLadderCasterR", RenderIntegration::g_sun_ladder_caster_r));
+        // 26660 KH_BAND_BIAS_CENSUS - PURE GAUGE, nothing reads these and no
+        // constant moved. They exist because the leading account of the
+        // oversized-mesh self-shadow acne is an ARITHMETIC claim about one
+        // expression and that expression has never been read off a machine.
+        //   TexM     - the band's texel in world metres.
+        //   BiasFlM  - the FLOOR term alone: 4 ulp of the band centre's world
+        //              coordinate, which is ABSOLUTE and therefore the same
+        //              number for all three bands however different their
+        //              texels are.
+        //   BiasM    - khsh_bbw as shipped, world metres: the max of half a
+        //              texel and that floor.
+        //   D2vM     - the depth window the bias is normalised by en route to
+        //              the GPU.
+        // THE NUMBER TO COMPUTE IS BiasM OVER TexM - BIAS IN TEXELS - and it
+        // is the entire read. The 239/242/244 sweep measured the acne as MID
+        // WORST, HERO SOME, OUTER NULL, so the prediction under test is that
+        // hero carries roughly 2 texels of bias while mid and outer carry
+        // roughly half a texel each, with the absolute floor winning at hero
+        // and mid and the texel term winning at outer. IF INSTEAD ALL THREE
+        // READ NEAR THE SAME VALUE IN TEXELS, THE ACCOUNT IS DEAD and the
+        // acne is not this expression - say so and go elsewhere rather than
+        // tuning a constant, because three shadow repairs were already
+        // shipped and withdrawn whole at 26656 for exactly that.
+        // READ THEM AGAINST sunHero/Mid/Out/FarValid: a band that never ran
+        // reports 0 in all four and is not evidence of anything.
+        // WHAT THEY DO NOT COVER, stated so a null is not over-read: this is
+        // the CPU-side world bias. If the shader applies any further per-tier
+        // scaling on top of bbw over d2v, these lanes cannot see it, and the
+        // next instrument is a shader-side paint rather than another lane.
+        out.push_back(kvf("sunHeroTexM",    RenderIntegration::g_sun_fit_tex[0]));
+        out.push_back(kvf("sunMidTexM",     RenderIntegration::g_sun_fit_tex[1]));
+        out.push_back(kvf("sunOutTexM",     RenderIntegration::g_sun_fit_tex[2]));
+        out.push_back(kvf("sunFarTexM",     RenderIntegration::g_sun_fit_tex[3]));
+        out.push_back(kvf("sunHeroBiasFlM", RenderIntegration::g_sun_fit_bfl[0]));
+        out.push_back(kvf("sunMidBiasFlM",  RenderIntegration::g_sun_fit_bfl[1]));
+        out.push_back(kvf("sunOutBiasFlM",  RenderIntegration::g_sun_fit_bfl[2]));
+        out.push_back(kvf("sunFarBiasFlM",  RenderIntegration::g_sun_fit_bfl[3]));
+        out.push_back(kvf("sunHeroBiasM",   RenderIntegration::g_sun_fit_bias[0]));
+        out.push_back(kvf("sunMidBiasM",    RenderIntegration::g_sun_fit_bias[1]));
+        out.push_back(kvf("sunOutBiasM",    RenderIntegration::g_sun_fit_bias[2]));
+        out.push_back(kvf("sunFarBiasM",    RenderIntegration::g_sun_fit_bias[3]));
+        // 26663 KH_BAND_FWD_LATCH arming lanes. sunFwdHolds must DOMINATE
+        // sunFwdRelatches while the camera moves and the caster stands still
+        // - a hold is a frame whose band depth window is bitwise identical to
+        // the last one, which is a frame whose stored depth cannot have
+        // re-quantised. Relatches tracking the band render count means the
+        // latch is thrashing and nothing was stabilised whatever the screen
+        // shows; both reading 0 means no band was ever stretched above its
+        // floor at this pose and the latch was never exercised - which is the
+        // NORMAL reading for an ordinary-sized caster and is not a fault.
+        // sunHero/Mid/Out/FarFwdHeldM is the held stretch per band, -1 when
+        // that band is at its floor and taking the historic value untouched.
+        out.push_back(kv("sunFwdHolds",     RenderIntegration::g_sun_fwd_holds));
+        out.push_back(kv("sunFwdRelatches", RenderIntegration::g_sun_fwd_relatches));
+        out.push_back(kvf("sunHeroFwdHeldM", RenderIntegration::g_sun_fwd_held[0]));
+        out.push_back(kvf("sunMidFwdHeldM",  RenderIntegration::g_sun_fwd_held[1]));
+        out.push_back(kvf("sunOutFwdHeldM",  RenderIntegration::g_sun_fwd_held[2]));
+        out.push_back(kvf("sunFarFwdHeldM",  RenderIntegration::g_sun_fwd_held[3]));
+        out.push_back(kvf("sunHeroD2vM",    RenderIntegration::g_sun_fit_d2v[0]));
+        out.push_back(kvf("sunMidD2vM",     RenderIntegration::g_sun_fit_d2v[1]));
+        out.push_back(kvf("sunOutD2vM",     RenderIntegration::g_sun_fit_d2v[2]));
+        out.push_back(kvf("sunFarD2vM",     RenderIntegration::g_sun_fit_d2v[3]));
     // 26576 KH_SELF_PREFILTER gauges (the 26575 omission, paid): per-band
     // moment-pyramid freshness at dump time. 0 with the band valid means
     // the convert path failed and that band kernel is CLASSIC regardless

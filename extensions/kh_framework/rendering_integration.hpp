@@ -98,11 +98,36 @@ struct MeshSubmesh {
     uint32_t vertex_count = 0;
 };
 
+// KH_MESH_LOD - 26651. Five decimated levels plus the base, six in all.
+// THE LEVELS LIVE IN THE SAME verts VECTOR, appended AFTER level 0's block,
+// so ensure_mesh_vbs still makes exactly ONE immutable vertex buffer per
+// mesh and every draw is still a range into it - no second buffer, no
+// second bind, no change to the VB contract. Level 0 is therefore the
+// range from vertex 0 up to lod_start of level 1 once any level exists,
+// which is what
+// mesh_base_vcount returns and is the ONLY reason mesh_vertex_count keeps
+// meaning what it has always meant.
+// SUBMESH COUNT IS INVARIANT ACROSS LEVELS by construction: decimation
+// runs per submesh and never merges or drops one, so a material slot index
+// addresses the same surface at every level and kh_draw_textured needs no
+// per-level material bookkeeping. A submesh that decimates to nothing
+// keeps a zero-count entry rather than disappearing.
+static constexpr int KH_LOD_MAX = 5;   // decimated levels; 6 total with level 0
+
 struct MeshDef {
     std::string name;    // primary name (SQF mesh selector, lower-case)
     std::string alias;   // accepted alternative ("" = none)
     std::vector<MeshVertex> verts;
     std::vector<MeshSubmesh> submeshes;
+    // 26651: levels 1..lod_n. lod_sub[k] is level k+1's submesh table with
+    // starts already absolute into verts; lod_start/lod_vcount are that
+    // level's whole-mesh range for the untextured draw. lod_n 0 = no LODs
+    // built - builtins, an old cache file, mode 418 - and every consumer
+    // then behaves exactly as it did at 26650.
+    std::vector<MeshSubmesh> lod_sub[KH_LOD_MAX];
+    uint32_t lod_start[KH_LOD_MAX] = {};
+    uint32_t lod_vcount[KH_LOD_MAX] = {};
+    uint8_t  lod_n = 0;
     // Native (pre-normalization) dimensions, ARMA axes - the FBX load
     // result returns these so scripts can pass them back as 'size' for
     // true scale (plan section 0). Builtins are authored at unit size.
@@ -560,9 +585,47 @@ inline uint32_t kh_mesh_publish() {
     return s.appended;
 }
 
+// 26651: THE COMPATIBILITY LINCHPIN. verts now carries the decimated
+// levels too, so verts.size() is no longer the base mesh - every historic
+// caller of mesh_vertex_count wants LEVEL 0 and gets it here. The sun
+// depth pass, the mask cast, the seam, the volume clones and the white
+// preview all reach the geometry through this one function and are
+// therefore byte-identical to 26650 with LODs live: this build moves the
+// COLOUR paths only, deliberately, so no shadow or registration acceptance
+// can move underneath it.
+inline uint32_t mesh_base_vcount(const MeshDef& khl_d) {
+    return khl_d.lod_n ? khl_d.lod_start[0] : static_cast<uint32_t>(khl_d.verts.size());
+}
+
+inline int mesh_lod_clamp(const MeshDef& khl_d, int khl_l) {
+    if (khl_l < 0) return 0;
+    return khl_l > static_cast<int>(khl_d.lod_n) ? static_cast<int>(khl_d.lod_n) : khl_l;
+}
+
+// Whole-mesh vertex range for a level, for the untextured draw.
+inline void mesh_lod_range(const MeshDef& khl_d, int khl_l, UINT& khl_s, UINT& khl_c) {
+    khl_l = mesh_lod_clamp(khl_d, khl_l);
+
+    if (khl_l == 0) {
+        khl_s = 0;
+        khl_c = static_cast<UINT>(mesh_base_vcount(khl_d));
+        return;
+    }
+
+    khl_s = static_cast<UINT>(khl_d.lod_start[khl_l - 1]);
+    khl_c = static_cast<UINT>(khl_d.lod_vcount[khl_l - 1]);
+}
+
+// Per-level submesh table. Level 0 IS the historic table, returned by
+// reference - no copy, no duplicate storage.
+inline const std::vector<MeshSubmesh>& mesh_lod_submeshes(const MeshDef& khl_d, int khl_l) {
+    khl_l = mesh_lod_clamp(khl_d, khl_l);
+    return khl_l == 0 ? khl_d.submeshes : khl_d.lod_sub[khl_l - 1];
+}
+
 inline UINT mesh_vertex_count(int id) {
     if (id < 0 || static_cast<uint32_t>(id) >= mesh_count()) id = 0;
-    return static_cast<UINT>(mesh_def(id).verts.size());
+    return static_cast<UINT>(mesh_base_vcount(mesh_def(id)));
 }
 
 // Registry-bounds clamp shared by every draw path: an out-of-range id
@@ -685,6 +748,24 @@ struct Resources {
     ID3D11Texture2D*          thm_tex = nullptr;
     ID3D11ShaderResourceView* thm_srv = nullptr;
     ID3D11InputLayout*       input_layout = nullptr;
+    // 26643 KH_WHITE_PREVIEW (ledger at KH_BUILD_TAG; mode 409 stands it
+    // down). Its OWN shaders, layout, buffers and states, deliberately:
+    // everything ensure_resources builds is built BELOW the async gate, so
+    // the placeholder cannot borrow any of it without inheriting the very
+    // dependency it exists to escape. Seven small device objects, released
+    // with the device like everything else in this struct.
+    ID3D11VertexShader*      vs_white = nullptr;
+    ID3D11PixelShader*       ps_white = nullptr;
+    ID3D11InputLayout*       layout_white = nullptr;
+    ID3D11Buffer*            white_obj_cb = nullptr;    // b0, CBObj slice
+    ID3D11Buffer*            white_frame_cb = nullptr;  // b1, CBFrame slice
+    ID3D11RasterizerState*   rast_white = nullptr;      // 'rasterizer' verbatim: same
+                                                        // bias, same DepthClipEnable
+                                                        // FALSE, so the placeholder
+                                                        // sits where the real mesh will
+    ID3D11DepthStencilState* dss_white = nullptr;       // LESS_EQUAL, write ALL
+    bool                     white_tried = false;   // one compile attempt per device
+    bool                     white_ready = false;
     ID3D11RasterizerState*   rasterizer_cull = nullptr;  // back-face-culling twin of 'rasterizer'
                                                          // (twoSided = false objects; same biases)
     ID3D11RasterizerState*   rasterizer_front = nullptr; // FRONT-culling twin: pass 1 of the
@@ -920,6 +1001,27 @@ struct Resources {
     ID3D11Query*              ts_cap_stamp[3][2] = {};
     int                       ts_cap_cursor = 0;
     bool                      ts_cap_inflight[3] = {};
+    // 26657 KH_MESH_TIMER. THE GEOMETRY PASSES HAVE NEVER BEEN MEASURED.
+    // The 26080 ring covers the fullscreen chain, 26084 the UI phase and
+    // 26085 the scene capture - and stops. Every cost claim made by 26651
+    // through 26656 about LOD, culling and draw order rests on a triangle
+    // census and on reasoning, never on microseconds, which is rule 1.12
+    // owed and unpaid across five builds.
+    // TWO RINGS, NOT ONE, AND THE REASON IS THREADS. The capture ring's own
+    // ledger states it is single-threaded by contract and game-thread call
+    // sites only. The flush mesh pass runs on the game thread under the
+    // park; the injection mesh pass runs on the RENDER thread. Sharing a
+    // cursor between them would be the 26652 defect in a new costume, so
+    // each pass gets its own ring and each ring is touched by exactly one
+    // thread. Both are device objects and live and die with the device.
+    ID3D11Query*              ts_msh_disjoint[3] = {};   // flush mesh pass
+    ID3D11Query*              ts_msh_stamp[3][2] = {};
+    int                       ts_msh_cursor = 0;
+    bool                      ts_msh_inflight[3] = {};
+    ID3D11Query*              ts_inj_disjoint[3] = {};   // injection mesh pass
+    ID3D11Query*              ts_inj_stamp[3][2] = {};
+    int                       ts_inj_cursor = 0;
+    bool                      ts_inj_inflight[3] = {};
     ID3D11Texture2D*          scene_tex = nullptr;
     ID3D11ShaderResourceView* scene_srv = nullptr;
     UINT                      scene_w = 0, scene_h = 0;
@@ -1127,6 +1229,12 @@ struct Resources {
             KH_SAFE_RELEASE(ts_cap_disjoint[khtsq_i]);  // 26085
             KH_SAFE_RELEASE(ts_cap_stamp[khtsq_i][0]);
             KH_SAFE_RELEASE(ts_cap_stamp[khtsq_i][1]);
+            KH_SAFE_RELEASE(ts_msh_disjoint[khtsq_i]);  // 26657
+            KH_SAFE_RELEASE(ts_msh_stamp[khtsq_i][0]);
+            KH_SAFE_RELEASE(ts_msh_stamp[khtsq_i][1]);
+            KH_SAFE_RELEASE(ts_inj_disjoint[khtsq_i]);
+            KH_SAFE_RELEASE(ts_inj_stamp[khtsq_i][0]);
+            KH_SAFE_RELEASE(ts_inj_stamp[khtsq_i][1]);
 
             for (int khtsq_j = 0; khtsq_j < 34; ++khtsq_j) {
                 KH_SAFE_RELEASE(ts_stamp[khtsq_i][khtsq_j]);
@@ -1136,6 +1244,8 @@ struct Resources {
             ts_inflight[khtsq_i] = false;
             ts_ui_inflight[khtsq_i] = false;   // 26084
             ts_cap_inflight[khtsq_i] = false;  // 26085
+            ts_msh_inflight[khtsq_i] = false;  // 26657
+            ts_inj_inflight[khtsq_i] = false;
             ts_pass_n[khtsq_i] = 0;
         }
         KH_SAFE_RELEASE(cov_hist_srv);     // 26075
@@ -1144,6 +1254,15 @@ struct Resources {
         KH_SAFE_RELEASE(rasterizer);
         KH_SAFE_RELEASE(rasterizer_cull);
         KH_SAFE_RELEASE(rasterizer_front);
+        KH_SAFE_RELEASE(vs_white);          // 26643 KH_WHITE_PREVIEW
+        KH_SAFE_RELEASE(ps_white);
+        KH_SAFE_RELEASE(layout_white);
+        KH_SAFE_RELEASE(white_obj_cb);
+        KH_SAFE_RELEASE(white_frame_cb);
+        KH_SAFE_RELEASE(rast_white);
+        KH_SAFE_RELEASE(dss_white);
+        white_tried = false;   // the device died; the next ensure may retry
+        white_ready = false;
         KH_SAFE_RELEASE(cs_constant_buffer);
         KH_SAFE_RELEASE(points_buffer);
         KH_SAFE_RELEASE(points_srv);
@@ -1482,14 +1601,18 @@ inline void kh_engcam_device_reset();
 // Best-effort by design: resources are released even if acquisition
 // fails mid-teardown - leaking device objects across a reset is the
 // worse failure, and matches the hook's previous (bare) behavior.
-inline void kh_shader_mt_shutdown();   // 26637: joins any live shader-compile pool
+inline void kh_shader_mt_shutdown(bool khss_wait = true);   // 26637: joins any live
+                                       // shader-compile pool. 26642: khss_wait false on
+                                       // the device-reset paths - see its ledger.
 inline void kh_tex_cache_release();   // material-texture cache (defined with the loader)
 inline void kh_user_shader_cache_release();   // user .hlsl PS cache (defined with the loader)
 inline void kh_user_lut_cache_release();   // user .cube LUT cache (defined with the loader)
 
 static void __stdcall on_engine_reset() {
     if (reorder_on_render_thread()) {
-        kh_shader_mt_shutdown();   // 26637: no worker may outlive the device
+        kh_shader_mt_shutdown(false);   // 26637: no worker may outlive the device.
+                                        // 26642: no wait - this path holds the
+                                        // graphics lock and the detach is safe.
         g_res.release();
         release_shadow_device_state();
         kh_ui_mask_reset();   // 26055: learned backbuffer identities die with the device
@@ -1500,7 +1623,8 @@ static void __stdcall on_engine_reset() {
     }
 
     RVExtBridge::ScopedGraphicsLock khr_reset_lock;
-    kh_shader_mt_shutdown();   // 26637: no worker may outlive the device
+    kh_shader_mt_shutdown(false);   // 26637: no worker may outlive the device.
+                                    // 26642: no wait (graphics lock held).
     g_res.release();
     release_shadow_device_state();
     kh_ui_mask_reset();   // 26055: learned backbuffer identities die with the device
@@ -2119,6 +2243,102 @@ static std::atomic<bool> g_stats_armed{ false };
 //  152-155 THE 26304 SET (dump123 convictions; full ledgers at the arms). dump123 decomposed the 99 wrong-encode fire frames and OVERTURNED the 26302 reading: the live bridge was NOT mostly refused for foreign fetches - the arbitration was refusing and mispredicting TRUTH. (1) TWO PREDICTOR-FREEZE RUNS (ser 650-675, 706-711): the 26303 spike guard deadlocked - commits pulsing more than 2x above a stale base were skipped forever, 26 straight frames encoding 0.116 against a 0.30 truth. (2) SLOPE ACROSS SQUARE-WAVE EDGES measured net 3.4x WORSE than a flat hold (err sum 8.965 vs 2.600, worse on 92 rows): undershooting to the 0.5x clamp after down edges (ser 610/617/625 encoded 0.035 where the committed already EQUALLED the needed 0.070), overshooting after up edges (ser 614). (3) CORRIDOR-FLOOR REFUSALS: 4/4 were the world pair landing back on the session baseline 0.070 off a pulse/ramp top (needed ratios 0.13-0.50; 0.070/0.141 = 0.4965 sits a hair under the 0.5x floor) - the two largest single-frame gaps on record (0.463) were exactly these. DEFAULTS 26304: (a) predictor re-bases after two consecutive out-of-band commits that agree with each other (svPairRebase), slope only on smooth ramps (last two commits within 25 percent; measured ramps run ~5 percent/frame, pulse edges 40-400 percent), base freshness 500 ms, state file-scope and reset at teardown; (b) RETURN-TO-BASELINE ACCEPTANCE: a live pair outside the corridor is accepted when it matches the stable committed baseline within 10 percent (two consecutive commits within 2 percent define the baseline; the foreign down class 0.010 is 7x below the baseline itself; svPairBase, seamProjSrc 5); (c) CORRIDOR REFEREE GUARD: when the raw committed reference disagrees with the spike-guarded base by more than 2x (the ser-1772 muzzle-spike class) the base referees (svPairRefGuard). 153 reverts (a) to the 26303 predictor, 154 turns (b) off, 155 turns (c) off. 152 = ENCODE THE BOUND-CB CENSUS PAIR (handoff 3.1): a POINTER-KEYED census records every projection-shaped upload per buffer object (identity separates windows no value can); at the seam the bound VS/PS b0-b3 are looked up and the freshest hit is read into boundPairNear / boundPairAgeMs / censusMatch EVERY armed frame, instrument-first - the lanes decide whether the exact volume-pass pair is readable at the seam instant BEFORE anyone trusts it - and under 152 the seam encodes that pair (seamProjSrc 6, svCbcEncodes). New refusal lanes: seamLiveNear (the raw live-bridge near at the seam fetch - the lane whose absence forced dump123 to proxy through liveNearInj) and seamPairWhy (0 live-corr 1 live-base 2 insane 3 corridor 4 no-ref 5 no sample). Protocol: dump mode 0 look-down fire (expect svPairBase and svPairRebase engaged, svPairPred collapsed, row-shifted mismatches near 0, no frozen seamNear runs), then read boundPairNear against injNear[k+1] on the surviving edge frames - tracking = fold 152 next build and the campaign closes at exact. NOTE 26301 sniff-first postmortem stands: sniffNear[k] == injNear[k] on 132/132 in dump123 - the value the seam needs is not uploaded yet at the seam instant, so re-aiming the sniffer (the old 3.2 plan) is structurally dead; the live bridge and the bound census are the only fresh-phase feeds.
 //  FIELD 26304 (dump1): THE FIXES ENGAGED AND THE INSTRUMENT CLOSED THE CAMPAIGN. Arbitration round: wrong-encode rows 99 to 40, predictor err sum 8.965 to 4.302 (now ~= the flat hold), frozen runs capped at 2 frames by the rebase escape (svPairRebase 13), svPairBase 11 with 5/5 fresh on edges, svPairRefGuard 16; the 40 residuals were genuinely-foreign seam-instant fetches (seamLiveNear 0.010/10.0 in the lane, at last directly visible), rebase lag, and a measured baseline-tracker limitation - the 2 percent stability latch follows ramp PLATEAUS during slow glides, so big returns off a glide top miss the match (ser 730/767, the 0.628 gaps). CENSUS ROUND, THE VERDICT: boundPairNear == injNear[k+1] on 199/199 moving frames AND on 40/40 of the rows every arbitration tier still got wrong, disagreements 0/511 session-wide, age 0-1 ms, one stable identity in VS b2 all session - the engine uploads frame k+1 projection into the bound b2 BEFORE the pre-clear seam runs, and buffer identity reads it where value arbitration structurally cannot. 26305 FOLDS THE BOUND-CENSUS ENCODE TO DEFAULT (seamProjSrc 6, svCbcEncodes ~ svInjects is engagement; the census now runs whenever the live-shadow feature does - measured cost ~1500 probed uploads/frame at ~30 compares each). The 26302-26304 live/baseline/predictor chain stays intact beneath as the census-miss fallback. 156 = REVERT to 26304 live-first (152 stays as an alias of the default). ACCEPTANCE (the closing one): seamNear[k] == injNear[k+1] on moving frames outright, seamProjSrc 6 dominant, FP pulsating scale gone shooting and not, slice/look-down/TP holding.
 //  FIELD 26305 (dump2 + screenshot): THE PROJECTION AXIS IS CLOSED (seamProjSrc 6 on every inject, svCbcEncodes == svInjects == 2232, row-shifted mismatches 0) and the survivor moved axes: on rigorous rotational+positional motion a cascade ground shadow paints THROUGH the box along its edges - every one of the 19 reprojPx spikes (145-2133 px) is the seam TRAJECTORY BOUND refusing a REAL move (svLiveTrnBound 28, seamCamDxM == camStepM on exactly those frames): the bound referenced the latch step from the PREVIOUS seam run (two frames old) and 3x of a two-frame-old step loses to every measured acceleration onset (0.095->0.349 = 3.7x, 0.123->0.405 = 3.3x), so the footprint rode a one-frame-stale camera and the stencil darkening landed across the box edge. 26306 REPAIRS THE BOUND ON THREE AXES: (a) the velocity reference is max(previous, CURRENT-run latch step); (b) 3x -> 4x (covers every legit onset on record; the ser-3642 foreign class - 2.593 m off a STATIONARY latch - is still refused by the 0.30 m floor since stationary means both references ~0); (c) CONFIRMATION ESCAPE, the predictor-rebase pattern on the translation axis: a refused live camera is remembered and taken next run if the new live camera agrees with it within max(0.5 m, 50 percent) - a real relocation confirms itself in one publication, a foreign one-frame flicker never does. svLiveTrnWide counts takes the old bound would have refused; svLiveTrnRebase counts escapes; seamTrnEvent is the per-frame lane (0 none 1 refused 2 wide-take 3 escape). 157 reverts the whole bound block to 26305. AND THE CENSUS LEARNS THE VIEW, INSTRUMENT-FIRST (the projection playbook, round 2): the recorder probes the 16-float windows adjacent to the validated projection for a view signature (near-orthonormal basis rows, 0-0-0-1 column, finite translation, both layouts) and stores the extracted CAMERA per buffer identity; at the seam, boundCamDxM = |census camera - seam draw camera| and boundCamLiveDxM = |census camera - live fetch camera| are read every armed frame with boundCamOk gating. NO ENCODE PATH TOUCHES IT in 26306. THE FOLD VERDICT FOR 26307: boundCamDxM ~ camStepM on exactly the seamTrnEvent-1 frames while boundCamLiveDxM ~ 0 = the engine own upcoming camera is readable at the seam and becomes the translation authority, retiring the bound outright - the 199/199 proof pattern on the translation axis. boundCamOk 0 everywhere = the view does not ride adjacent to the projection and the repaired bound is the final form. ACCEPTANCE 26306: the through-the-box stripe gone on rigorous motion (svLiveTrnWide + svLiveTrnRebase absorbing the former refusals, reprojPx spikes collapsed), FP still resolved, slice/look-down/TP holding. FIELD 26306 (dump10): ALL ACCEPTED AND THE CAMPAIGN IS CLOSED - projection exact (svCbcEncodes == svInjects == 2217, mismatches 0, seamProjSrc 6 throughout), translation clean (0 reprojPx spikes, svLiveTrnWide 33, svLiveTrnBound 3 true refusals), view probe measured NEGATIVE (svCbcCamRecs 0: no view rides adjacent to the projection) and RETIRED at 26307 - the repaired bound is the final form; probe machinery and lanes stay compiled for re-arming, per the counters-never-die rule. || 26308-26313 (full records: RENDER_HANDOFF_CAMPAIGN_43.md; in-code ledgers authoritative): 138/139/140 = footprint grow 2/4/8 pct (svGrowDraws/Last). 158 = absolute-translation revert (26309). 159 = adopted-camera-anchor revert (26310). 160 = latch-FOV revert (26311). 161 = unrefereed-census revert (26311). 162 = record-all-classes census revert (26312). 116/118/120/125 inert since 26308.
+//  || 26663 THE BANDS' DEPTH WINDOW RE-FITS TO THE CAMERA EVERY FRAME, AND 26539's OWN RULE COVERS THE AXIS 26539 SAID WAS IMMUNE (KH_BAND_FWD_LATCH, one behavioural default with one live arm - mode 428 stands the latch down. C++ ONLY: fit arithmetic, no shader source, no HLSL segment, 76 unchanged, no .khsc key moves). OPERATOR, AFTER 26662 CLOSED THE ACNE: self shadow DRIFTS with the camera on large meshes and not on small ones, and 426 does not touch it. MODE 326 FIXES IT - that arm stands the whole 26537 reach fit down, so the axis is convicted before a line was written.
+//  || THE MECHANISM IS IN THE FIELD DATA ALREADY COLLECTED. khsh_fwd is a maximum over khsh_ds + khsh_er, and khsh_ds is the caster's offset along the sun axis FROM THE BAND CENTRE, which is the camera. It is FLOORED at khsh_dep, so a caster whose ds + er never clears 12 / 48 / 192 m leaves the window BITWISE STATIC - which is exactly why the normal-sized mesh reads sunHero/Mid/Out/FarFwdM all 0 with sunHeroReach pinned at 12 and does not drift. A 491.638 m enclosing radius dominates the sum, so khsh_fwd tracks the camera directly: the SAME caster measured stretches of 31.617, 141.299 and 180.882 m at three camera positions, taking sunHeroD2vM from 167.30 to 206.88 between two of them. A depth window that rescales every frame re-quantises every stored depth every frame, and the compare margin walks with it. The 26445 texel snap holds the LATERAL grid phase in the sun plane and cannot hold a depth origin and scale - it was never for that.
+//  || CORRECTION OWED TO 26539, IN ITS OWN WORDS (rule 1.16). That ledger earned the rule 'when you stabilise a sampling grid, stabilise BOTH its origin AND its spacing, and state which one you fixed' - and then wrote 'THE CAMERA BANDS ARE IMMUNE AND THAT IS THE CONTROL: khsh_one's lateral extent is khsh_half * 1.02 with khsh_half a BUILD CONSTANT, so its texel never changes', concluding that the union is the only fit whose extent is data-dependent. THAT IS TRUE OF THE LATERAL AXIS AND ONLY THE LATERAL AXIS. 26537 had made the bands' DEPTH extent data-dependent AND camera-dependent two builds earlier, and the immunity claim reads as though it covered the band. The rule was right and its own application was half of one, which is the same shape 26539 convicted 26537 for.
+//  || AND 26574 NAMED THIS AS THE NEXT SUSPECT AND NOBODY FOLLOWED UP. Its falsification clause reads verbatim: 'next suspect in line is the per-frame khsh_fwd/d2v reach drift - KH_BAND_SUN_REACH fits the depth window to the admitted set every frame; watch sunHeroReach/sunMidReach/sunOutReach lanes move under motion - STOP and instrument, do not stack fixes.' Eighty-odd builds later the lanes it asked for moved exactly as predicted.
+//  || NOT A 26662 REGRESSION, AND THE DISTINCTION MATTERS FOR THE RECORD. KH_BAND_SUN_REACH is 26537. 26662 inverted one comparison deciding which vertex RANGE is drawn and touches no fit, no eye, no d2v and no snap. What it did was UNMASK this: at shadow level 2 the caster surface was geometrically displaced from the receiver, and that static acne dominated the picture; remove it and the subtler temporal artifact underneath becomes visible. The same reason the crevice class flagged as 26662's main regression risk did not appear - the noise floor moved.
+//  || THE FIX IS 26539's LATCH, PER BAND. Hold the committed khsh_fwd while it still ENCLOSES the required fit and has not gone slack past 1.25x, re-acquire at 1.10x otherwise, keyed on the khsh_pf_idx the lambda already carries. IT IS ENTERED ONLY ABOVE THE FLOOR, which is what makes it bit-exact on the entire validated corpus: every normal-sized mesh, every scene before a giant is admitted and all pre-26537 behaviour sit at khsh_fwd == khsh_dep and take the historic value untouched, with the held slot cleared so a return to the floor cannot strand a stale latch. It can never UNDER-cover, because a hold requires held >= required. WHY LATCHING AND NOT QUANTISING is 26539's argument unchanged and is not re-derived here.
+//  || DISCLOSED TRADE, THE SAME ONE 26539 PAID: the window is up to 10 pct deeper than the tightest fit, so khsh_d2v and the depth quantum grow with it. On R32F at a 207 m window that is about 0.01 mm against a ~2 mm bias, two orders under, and what it removes is a whole re-quantisation per frame. PRE-REGISTERED ACCEPTANCE, ARMING LANE FIRST: (a) sunFwdHolds must DOMINATE sunFwdRelatches while the camera moves and the caster stands still - relatches tracking the band render count means the latch is thrashing and nothing was stabilised whatever the screen shows, and BOTH reading 0 means no band was stretched above its floor at that pose, which is the NORMAL reading for an ordinary caster and is not a fault; (b) sunHero/Mid/OutFwdHeldM must hold ONE value across a walk with a giant on screen, and read -1 on a band sitting at its floor; (c) THE ARTIFACT: self shadow on a large mesh is world-stable under camera motion at mode 0 and drifts again under 428 - that A/B is the whole build; (d) a NORMAL-sized mesh is byte-identical in both modes, which sunHero/Mid/Out/FarFwdM reading 0 confirms by construction; (e) 26662's acne stays dead and the 26660 census lanes are unmoved. FALSIFICATION: drift SURVIVING at mode 0 with sunFwdHolds dominating exonerates the depth window, and the next axis is the tier HANDOFF itself - 26537's own fork already names it, the hero window being only 4.08 m laterally so a fixed point leaves it after ~2 m of camera walk, three handoffs each re-quantising on a 4x coarser grid. Do not widen KH_TIER_BLEND blind; instrument which tier answers first. If the drift becomes RARER but not absent, the latch is holding and re-latching on travel - widen KH_BAND_FWD_DROP before suspecting anything else, exactly as 26539 pre-registered for its own twin. NUMBER HYGIENE: mode 428 minted, no lighting0.y code; 326 keeps its 26537 meaning and remains the blunt whole-fit revert. FREE NOW: debug modes 429+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26662 KH_SHADOW_LOD AUTHORED THE ACNE AND STANDS DOWN WITHOUT ARGUMENT (rule 1.13b; mode 427 restores the 26652 ladder, mode 422 promoted to a BIT-EXACT ALIAS of the default per rule 1.18. C++ ONLY - one inverted comparison, no shader source, no HLSL segment, 76 unchanged, not one .khsc key moves). THE CONVICTING READ: 422 kills the artifact outright. That arm has existed since 26652, is on the post-26657 handoff's own never-run list, and would have closed this in one screenshot at any point in the last ten builds.
+//  || THE DEFECT IS THE ONE CASE THE 26652 LEDGER NEVER CONSIDERED - A MESH RECEIVING ITS OWN SHADOW. Every argument in that entry is correct for casting onto OTHER geometry, and silently wrong for self-shadowing: the receiver is drawn at the COLOUR level - level 0 at close range on a giant, which the dumps confirm with meshTris equal to meshTrisL0 exactly - while every casting pass takes level 2 through mesh_shadow_range. Garland-Heckbert edge collapse MOVES VERTICES, so those are two different surfaces and the compare measures the gap between them. The gap is in NORMALISED mesh units multiplied by 'size', and that single fact predicts every observation on record: invisible at 10x and obvious past 100x because the offset crosses the bias there; FROZEN IN THE SAME SPOTS because decimation is deterministic and the same vertices collapse the same way every frame; INDIFFERENT to absolute world position because it is pure local geometry; UNMOVED by 16x of receive bias between 426 and 26661 because the gap is decimetres and the bias is millimetres; GREEN under visual 19 at mode 228, which reads as a GENUINE occluder well clear of the bias and is exactly what the caster's own coarser self is; partially thinned by 261 and 234 because slope compensation in the MAP papers over a geometric offset without removing it; and killed by 366 because the union's texel is 0.296 m so its bias is two orders above the bands' and absorbs what they cannot.
+//  || CORRECTIONS OWED, AND THEY ARE MINE (rule 1.16). The 26661 acceptance clause (c) FAILED - the acne survived at mode 0 with the arming lane reading exactly 2.000 in all four tiers - so THE BIAS ACCOUNT IS WITHDRAWN as the author. KH_BAND_BIAS_TEXELS is KEPT as a default on its own merits and its claim is demoted: 0.5 texels was genuinely under-biased, 2.0 matches the tier the field already validates, and the operator measured 426 as making the splotches slightly LARGER, so it buys a little and costs a little. ITS PETER-PANNING ACCEPTANCE IS STILL UNREAD and outer now carries 31.9 mm with far at 199 mm; if contact shadows detach at range, 426 becomes the default because at that point the change is not earning its cost. FIVE MECHANISMS DIED BEFORE THIS ONE and every eliminating read was the operator's: tier fall-through at 395, grid re-quantisation, the PCF kernel at 245, absolute-world fp32 by the map-origin test, and the whole derivative stack plus prefilter at 365. The record is that a lane or a screenshot beat a reasoned mechanism six times in a row on this artifact.
+//  || THE COST IS DISCLOSED AND IT IS UNMEASURED IN BOTH DIRECTIONS, which is the honest statement and not a hedge. The sun ladder and the mask cast now submit four times the triangles they did at level 2. NOTHING IN THIS FILE HAS EVER TIMED A CASTING PASS - the 26657 rings bracket the two COLOUR passes and nothing else - so 26652's win was priced in triangles, exactly like the front-to-back ordering that later measured at low single digits when a clock was finally put on it. Level 0 is also the configuration the ENTIRE shadow corpus before 26652 was validated against, so this is a return to known ground rather than a step into new.
+//  || THE PROPER REPAIR, NAMED AND DELIBERATELY NOT BUILT. The casting level should EQUAL the caster's own colour level: self-shadowing becomes exact by construction and distant casters still coarsen, which is the whole win 26652 wanted. That requires the level to join the instanced grouping key - group by mesh id AND level rather than mesh id alone - which 26652 avoided precisely because it splits DrawInstanced groups. The split is bounded at six levels and only occurs where instances of one mesh genuinely sit at different levels, so it is tractable. IT DOES NOT GET BUILT UNTIL THE CASTING PASSES HAVE A CLOCK, because rebuilding an optimisation whose benefit nobody has measured is how this campaign spent four builds already.
+//  || PRE-REGISTERED ACCEPTANCE: (a) the static acne on the 1000x mesh is GONE at mode 0 and returns under 427 - that A/B is the whole build, and 422 must read IDENTICAL to mode 0 in every respect, which is the alias check; (b) the 100x case with its haloing goes with it, same mechanism at a smaller offset; (c) normal-sized meshes are visually unchanged, since their decimation offset was always under the bias; (d) shadow SILHOUETTES at range are unchanged or better, never worse, because level 0 is strictly more geometry than level 2; (e) sunDepthCasters, sunHero/Mid/Out/FarValid, bandSlotsValid and recvHealthOk all unmoved - this build changes which range is drawn and nothing about admission, fitting or receiving. FALSIFICATION: a frame-time regression traceable to the casting passes convicts the cost and the answer is the grouped per-level repair above, NOT a return to a fixed coarse level; 427 stands it down meanwhile. THE TWO REMAINING SHADOW ARTIFACTS ARE NOT CLAIMED BY THIS BUILD - the tier-handoff fade and the away-facing-faces-lit both stand, and the second in particular is still the 26656 reading that a fragment's needed occluder lies outside the map it samples. NUMBER HYGIENE: mode 427 minted; 422 promoted to default and kept whitelisted as a bit-exact alias, never reused; 423, 424, 425 stay retired. FREE NOW: debug modes 428+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26661 THE ONE TIER THAT WORKS HAS BEEN CARRYING FOUR TIMES THE BIAS OF THE ONES THAT DO NOT, AND THE CENSUS MEASURED IT (KH_BAND_BIAS_TEXELS, one behavioural default with one live arm - mode 426 restores the 0.5 form bit-exactly. C++ ONLY: khsh_bbw reaches the GPU as khsh_out_bias, a CB value, so NO shader source moves, no HLSL segment moves, 76 segments unchanged, and not one .khsc key moves - the 26611 / 26620 pattern). THE 26660 GAUGE READ AND THE ACCOUNT SURVIVED ITS OWN FALSIFICATION CLAUSE. All four bands Valid 1, FitWhy 0, FitN 1, Casters 1, TexM 0.9961 / 3.9844 / 15.9375 / 99.6094 mm. BiasM over TexM: 1.961 at hero, 0.500 at mid, 0.500 at outer, 0.500 at far, against a pre-registered prediction of 1.96 / 0.50 / 0.50. AND THE CLAUSE THAT COULD HAVE KILLED IT DID NOT: BiasFlM reads 1.9531 mm in ALL FOUR TIERS, so the floor is a property of the band CENTRE and not of the tier, exactly as the expression says, and one absolute number was being asked to serve texels differing by a hundredfold.
+//  || THE DEFECT, NAMED: no tier in that expression ever asks how big its own texel is. khsh_bbw was max of half a texel and 4 ulp of the band centre's world coordinate. At hero the floor wins and accidentally buys 1.96 texels; at MID the half-texel term overtakes the floor BY TWO PER CENT - 1.9922 mm against 1.9531 - and the bias collapses to 0.500 texels, where it stays for outer and far. A single centre tap needs texel times tan of the incidence times 0.5, so 0.500 texels covers a surface only out to 45 degrees from the light while hero's 1.961 covers 76. THAT IS THE FIELD ORDERING AS ARITHMETIC: the 239 / 242 / 244 sweep measured mid WORST, hero merely SOME and outer NULL, and outer reads null because at that range it never serves rather than because it is well biased.
+//  || AND IT IS WHY ONLY OVERSIZED MESHES SHOW IT, which is the part no earlier candidate predicted. Hero's window is plus or minus 2 m, so a normal-sized mesh sits ENTIRELY INSIDE IT and is served at 1.96 texels for its whole surface. Past roughly 100x the mesh spans far beyond that window and MID AND OUTER SERVE MOST OF IT - at a quarter of the bias. Size selects the tier and there is a 4x cliff between tiers. That is the 10x-to-100x onset the operator's size sweep found, and it also explains why the acne sits in the SAME SPOTS at 100x and 1000x - the pattern is set by surface orientation against a fixed threshold, not by anything numeric that would re-roll.
+//  || WHY 2.0 AND WHY IT IS NOT A GUESS, which matters because 26656 withdrew three repairs that were each sized against reasoning. Hero already ships 1.961 texels and is the tier the entire field battery treats as least bad. 2.0 makes every tier match the one already validated, and hero itself barely moves - 1.953 mm to 1.992 mm, its floor still nearly winning - so the tier that works keeps working and the change is concentrated exactly where the census says the bias collapsed. The ulp term stays as a FLOOR under the texel term, which is what it should always have been rather than a substitute for it. A SINGLE CONSTANT AND A SINGLE ARM, deliberately: per-tier constants would be four knobs and could not be bisected, and rule 1.11 wants one default with one revert.
+//  || FOUR MECHANISMS DIED TO GET HERE AND THE ELIMINATIONS ARE WORTH MORE THAN THIS FIX. Tier FALL-THROUGH, killed by visual 32 at 395 painting BLUE - the caster certifies itself. GRID RE-QUANTISATION, killed by the acne being static in fixed spots. The PCF KERNEL and its offset taps, killed by 245 collapsing the band kernels to a single tap and reading identical. ABSOLUTE-WORLD FP32 PRECISION, killed by the same mesh at low map coordinates being unchanged - the one mechanism that REQUIRED a position dependence. And the whole DERIVATIVE STACK plus the PREFILTER, killed by 365 carrying both off and making the acne WORSE. Every one of those was mine and every one died to a single screenshot. 366 then convicted the band tiers as a class and the 239 / 242 / 244 sweep showed no single tier owns it - standing one down hands its fragments to a neighbour carrying its own version, which is the signature of a shared formula rather than a broken tier.
+//  || DISCLOSED, AND IT IS THE WHOLE COST OF THIS BUILD: mid's bias goes 1.99 mm to 7.97 mm, outer 7.97 to 31.9, far 49.8 to 199. More bias is PETER-PANNING - contact shadows detaching from their casters - and outer and far are the tiers where that is visible. Outer is also the tier the field measured as null under 244, so it is taking a 4x increase for no observed benefit; that is accepted here in exchange for one constant and one arm rather than four constants and none. Hero is essentially untouched.
+//  || PRE-REGISTERED ACCEPTANCE, ARMING LANE FIRST AND IT IS FREE BECAUSE 26660 ALREADY BUILT IT. (a) THE ARM: under 426, sunMid/Out/FarBiasM must read EXACTLY ONE QUARTER of what mode 0 reports and sunHeroBiasM must barely move - if they do not, the constant is not reaching the fit and nothing below was tested. (b) sunHero/Mid/Out/FarTexM and BiasFlM must be UNCHANGED from 26660 in both modes: this build moves the multiplier and nothing else. (c) THE ARTIFACT: the static acne on the 1000x mesh is GONE or materially reduced at mode 0 and returns under 426 - that A/B is the whole build. (d) the 100x case with its haloing goes with it, since it is the same tiers at the same ratio. (e) a NORMAL-sized mesh is visually unchanged in both modes, because hero serves it and hero barely moved. FALSIFICATION, BINDING: contact shadows visibly detaching from their casters at 8 to 200 m convicts the coarse tiers and the next form is a K capped in ABSOLUTE METRES on outer and far, not a smaller K everywhere - 426 stands it down meanwhile, per rule 1.13b. If the acne SURVIVES at mode 0 with the arming lane reading correctly, the bias expression is exonerated whatever its ratios look like, the account is withdrawn in writing rather than tuned, and the next axis is the band ORTHO rather than its bias - starting with rast_sun still carrying DepthClipEnable TRUE under a comment justifying it on the UNION's behaviour, which 26537 flagged as an expired premise for the camera-anchored bands and never acted on. NUMBER HYGIENE: mode 426 minted, no lighting0.y code. FREE NOW: debug modes 427+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26660 THE ACNE ACCOUNT IS AN ARITHMETIC CLAIM ABOUT ONE EXPRESSION AND THAT EXPRESSION HAS NEVER BEEN READ OFF A MACHINE (KH_BAND_BIAS_CENSUS, PURE GAUGE - no behaviour change, no mode minted, no constant moved, no shader source, no cache key, 76 HLSL segments unchanged, mode 0 byte-identical to 26659). SIXTEEN LANES, FOUR PER BAND: sunHero/Mid/Out/FarTexM the band's texel in world metres, BiasFlM the FLOOR term alone, BiasM khsh_bbw as shipped, D2vM the depth window the bias is normalised by. Rule 1.12, and this campaign has now paid for breaking it five times.
+//  || WHAT THE FIELD ELIMINATED BEFORE THIS BUILD, five screenshots and four families, recorded because the eliminations are worth more than any hypothesis they killed. THE ARTIFACT: static self-shadow acne on an oversized mesh, always in the same spots, present at 100x and 1000x and ABSENT at 10x, unchanged by absolute map position, thinned by 261 alone. DEAD: tier FALL-THROUGH, because visual 32 at 395 paints BLUE and the caster certifies itself; GRID RE-QUANTISATION, because a moving grid cannot paint fixed spots; the PCF KERNEL and its offset taps, because 245 collapses the band self kernels to a single tap and reads identical; ABSOLUTE-WORLD FP32 PRECISION, because the same mesh at low map coordinates is unchanged and that is the one mechanism which REQUIRED a position dependence; and the whole DERIVATIVE STACK plus the PREFILTER, because 365 carries both off and makes it WORSE. FOUR OF THOSE FIVE WERE MY OWN CONVICTIONS AND ALL FOUR DIED TO ONE SCREENSHOT EACH.
+//  || CONVICTED BY 366, LOCALISED BY THE TIER SWEEP, AND NO SINGLE TIER OWNS IT. 366 is 365 plus hero, mid and outer never being ensured, and it KILLS the acne while carrying the very kernel that made it worse - so the band tiers are the author and the compare is not. The single arms then say the authorship is shared: 239 reduces some, 242 removes much more BUT ADDS OTHERS IN NEW PLACES - the operator's own words are that it changes the seed - and 244 reads identical to 0. Every band produces its own acne in its own places and standing one down hands its fragments to a neighbour carrying its own version, which is exactly why the whole-stack arm works and no single one does.
+//  || THE CLAIM THIS BUILD EXISTS TO TEST, WRITTEN SO THE LANES CAN REFUSE IT. khsh_bbw is max of khsh_tex * 0.5 and a floor of 4 ulp of the band centre's WORLD coordinate. The floor is ABSOLUTE - about 1.95 mm at the field pose by hand - and it is the SAME NUMBER for all three bands while their texels differ by 16x, because no tier in that expression ever asks how big its own texel is. In TEXELS the prediction is therefore hero about 1.96, mid about 0.50 and outer about 0.50: the floor accidentally over-biases the fine tier fourfold and stops dominating exactly at MID, which is also the band whose plus or minus 8 m window covers most of a giant's visible surface at close camera range. Half a texel is below any defensible bias for a surface whose relief is RESOLVABLE in the map, and resolvability is precisely the 10x-to-100x threshold the size sweep found - below it the relief is sub-texel at every tier and there is nothing to self-occlude. Outer is equally under-biased and reads null because at that range it never serves. 261 thinning the acne fits without contradiction: that arm adds per-triangle slope compensation in the MAP and touches no receive-side bias at all.
+//  || PRE-REGISTERED ACCEPTANCE - AN INSTRUMENT'S ACCEPTANCE IS THAT IT READS, AND THE ARMING LANE COMES FIRST. (a) THE ARM: sunHero/Mid/OutTexM must read approximately 1, 4 and 16 mm and BiasM must be non-zero on any pose where sunHero/Mid/OutValid read 1 - all four lanes at 0 for a band means that band never fitted and it is evidence of NOTHING, which is the 26631 trap this discipline exists to avoid. (b) BiasFlM must read the SAME value in all three bands, since the floor is a property of the band centre and not of the tier - if it differs per tier my reading of the expression is wrong and everything below it collapses. (c) THE READ ITSELF: BiasM over TexM per band. (d) mode 0 unchanged, which every other lane confirms by not moving.
+//  || FALSIFICATION, BINDING, AND IT IS THE WHOLE REASON THIS SHIPS ALONE. If BiasM over TexM reads NEAR THE SAME VALUE IN ALL THREE BANDS, the expression does not produce the ordering the 239/242/244 sweep measured, THE ACCOUNT IS DEAD, and it is withdrawn in the ledger rather than tuned - the next axis is then the band ORTHO rather than its bias, starting with the fact that rast_sun still carries DepthClipEnable TRUE under a comment justifying it on the UNION's behaviour, which 26537 flagged as an expired premise for the camera-anchored bands and never acted on. If the ratios DO come back near 1.96 / 0.50 / 0.50, the named defect is that a bias floor derived from world-coordinate ulp is not commensurate with a per-tier texel, the textbook form is texel-relative throughout with the ulp floor as a FLOOR rather than a substitute, and THAT is a behavioural default under rule 1.11 which owes its own build, its own arm and its own acceptance. NOTHING IS TUNED THIS BUILD.
+//  || WHAT THESE LANES DELIBERATELY DO NOT COVER, so a null is not over-read. This is the CPU-side WORLD bias. If the shader applies further per-tier scaling on top of bbw over d2v, no lane here can see it and the next instrument is a shader-side paint, not another counter. The UNION is not instrumented and does not need to be - 366 is union-only and it is the configuration in which the acne DIES, so the union is exonerated by the same read that convicted the bands. NUMBER HYGIENE: nothing minted, nothing retired; 239, 242, 244, 245, 261, 365, 366 and 395 all keep their meanings and are the battery that produced this. FREE NOW: debug modes 426+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26659 THE MESH-RENDERING CAMPAIGN IS CLOSED (LEDGER ONLY - no behaviour change, no mode minted, no lane added, no shader source, no cache key, mode 0 byte-identical to 26658; the 26633 precedent for a correction build that still takes a number). GEOMETRY SUBMISSION IS OPTIMISED WITHIN REASON AND EVERY CLAIM IN IT NOW HAS A NUMBER BEHIND IT, which was not true of a single one of them five builds ago. STANDING, FIELD-CONFIRMED: the frustum cull built per pass and self-validating - cullBuilds equal to the pass count in five consecutive sessions, cullStandDowns 0 in all five, cullApexMax at worst 6.1e-05, cullRebased tracking cullBuilds, and nothing has ever vanished. The six-level LOD ladder by deterministic quadric collapse, welded on full vertex identity, cached in .khmc v2 and mod-shippable, measured at 0.4543 of level-0 triangles with the crossfade exercised. A coarse level 2 on every casting pass with the seam and volume clones excluded, because casting is a silhouette and registration is an identity. Front-to-back opaques on BOTH mesh paths, measured rather than assumed at low single digits. Draw-state elision, per-submesh material binding, one immutable vertex buffer per mesh, and a GPU clock over both passes which is what let any of the above be priced.
+//  || THE INDEXED CONVERSION IS PARKED, NOT FORGOTTEN, AND SECTION 8 STEP 2 OF THE POST-26657 HANDOFF IS PARTLY WITHDRAWN. Its pre-registered gate - a harness that expands the indexed form back through its own indices and asserts the vertex stream is byte-identical to the soup - was BUILT AND RUN, and it REJECTS the weld that handoff names. kh_lod_decimate's weld keys on QUANTISED position, normal and uv at steps 1e-05, 1e-03 and 1e-05, and DOES NOT INCLUDE THE TANGENT: it fails 4 of 5 harness cases including two builtins. The mirrored-uv-seam case welds 6 vertices to 4, so lifting it would merge vertices differing only in tangent HANDEDNESS and flip normal-map decoding on one side of every mirror seam - which is what mikktspace produces on every mirrored island. It also drops degenerate triangles, so the index count stops matching the soup vertex count and uv_sphere's deliberate pole triangles vanish. An EXACT 48-byte identity weld passes all five by construction, and that is the only form that may ever be used. THE 3.2x AND 0.79 MB FIGURES IN THAT HANDOFF ARE ALSO WITHDRAWN - they were derived from the quantised weld; an exact weld buys about 1.3x on the builtins because meshgen::tri computes a PER-FACE tangent, and the real model's ratio is unmeasured. WHY PARKED: the pass is fragment-bound by better than two orders - 462.8 us for 56488 triangles is about 8194 us per Mtri, against single-digit microseconds of actual vertex transform, and the same shader on a screen-filling giant reads 64798 us per Mtri, an 8x swing from coverage alone - so indexing buys memory and vertex fetch and CANNOT move frame time here. Against that it moves about 15 draw sites including three that carry the 26326 registration identity, .khmc version 3, and the vertex-buffer pair. REVISIT ONLY if meshBytesCpu becomes a real constraint with many models resident, and then as housekeeping rather than as optimisation.
+//  || WHAT IS EXPLICITLY NOT PART OF THIS CLOSURE. The per-fragment shader cost, which is where the frame time now lives and whose structural cause is named in the 26658 amendment above - it is its own campaign and its first step is a gauge, not a fix. And the shadow artifacts, which predate every build in this campaign: mode 419 exonerated the LOD crossfade at 26654 and nothing since has implicated the ladder, the cull, the sort or the shadow level in any of them.
+//  || THE SHADOW HANDOFF, because five field reads this round eliminated four whole families and that is worth more than any of the hypotheses it killed. THE ARTIFACT: static self-shadow acne on an oversized mesh, always in the same spots, present at 100x and 1000x and ABSENT at 10x, unchanged by absolute map position, thinned by 261 and by nothing else pulled so far. ELIMINATED, each by one screenshot: tier FALL-THROUGH, because visual 32 at mode 395 paints BLUE and the caster certifies itself; GRID RE-QUANTISATION, because a moving grid cannot paint fixed spots; the PCF KERNEL and its offset taps, because 245 collapses the band self kernels to a single tap and reads identical; and ABSOLUTE-WORLD FP32 PRECISION, because spawning the same mesh at low map coordinates changed nothing, which is the one mechanism that REQUIRED a position dependence. Also exonerated: the whole derivative stack and the prefilter, because 365 carries both off and makes the acne WORSE.
+//  || CONVICTED BY 366 AND LOCALISED BY THE TIER SWEEP: THE CAMERA BAND TIERS, AS A CLASS. 366 is 365 plus hero, mid and outer never being ensured, and it KILLS the acne while carrying the kernel that made it worse - so the band tiers are the author and the compare is not. The single-tier arms then say no ONE band owns it: 239 reduces some, 242 removes much more BUT ADDS OTHERS in new places - the operator's words are that it changes the seed - and 244 reads identical to 0. Every band produces its own acne in its own places and standing one down hands its fragments to a neighbour that has its own version, which is exactly why 366 works and no single arm does.
+//  || THE LEADING ARITHMETIC ACCOUNT, AND IT IS THE FIRST ONE THAT PREDICTS THE TIER ORDERING RATHER THAN RETRO-FITTING IT. HYPOTHESIS, NOT CONVICTION - four have already died here. khsh_bbw is max of khsh_tex times 0.5 and the floor 4 times ulp of the band centre's world coordinate. That floor is ABSOLUTE, about 1.95 mm at the field pose, and identical for all three bands, while their texels are about 1, 4 and 16 mm. In TEXELS the bias is therefore 1.96 for hero, 0.50 for mid and 0.50 for outer: the floor accidentally over-biases the fine tier by about 4x and stops dominating exactly at mid, which is also the band whose plus or minus 8 m window covers most of a giant's visible surface at close camera range. Half a texel is below any defensible value for a surface whose relief is RESOLVABLE in the map, and resolvability is precisely the 10x to 100x threshold the size sweep found - below it the vest's relief is sub-texel at every tier and there is nothing to self-occlude. Outer is equally under-biased and reads null because it never serves at that range. 261 thinning it fits: that arm adds per-triangle slope compensation in the MAP and not receive-side bias. THE NAMED DEFECT, if it holds: a bias floor derived from world-coordinate ulp is not commensurate with a per-tier texel, and the textbook form is texel-relative throughout with the ulp floor as a floor rather than a substitute. THE ARM IS OWED AND SO IS THE INSTRUMENT: no constant moves until a lane reads khsh_bbw and khsh_tex per tier, because three shadow repairs were shipped and withdrawn whole at 26656 for exactly the sin of sizing a constant against reasoning. NUMBER HYGIENE: nothing minted, nothing retired. FREE NOW: debug modes 426+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26658 THE SORT NEVER GOT ITS TWIN, THE FLUSH SORTED THE SAME VECTOR TWICE, AND THE STEP-1 A/B COULD NOT MEASURE ITSELF (KH_MESH_SORT injection edition - mode 421 now arms BOTH mesh paths and gains no new meaning; plus three repairs that move no pixel. C++ ONLY: no shader source, no HLSL segment, no CB field, no cache key, 76 segments unchanged, StateBackup untouched). THE DEFECT: 26652 shipped front-to-back opaques into flush_locked ALONE and armed 421 at that one site. inject_composited_meshes has sorted strictly back-to-front since long before 26652 and still did - rule 1.5's fourth twin pair, unwritten for four builds and the same pair 26657's own entry named. Because a healthy composite path stands the flush mesh pass down, the optimisation ran on the pass that does not draw and the pass that carries every draw kept the worst possible order.
+//  || THE INSTRUMENT WAS THEREFORE WIRED SHUT, WHICH IS WORSE THAN THE MISSING OPTIMISATION. Section 8 step 1 of the post-26657 handoff asks for injGpuUs over injGpuN at mode 0 against mode 421 and pre-registers the reading: identical means the scene is not fragment-bound and 26652's argument is wrong. 421 could not change one instruction inject_composited_meshes executes, so that null was guaranteed by construction and the decision rule would have retired a correct argument. FIELD, and the two dumps are not even matched: dump1 at 421 reads 424.1 us per injection over 437 injections at 3.00 objects and 28785 triangles each; dump2 at mode 0 reads 753.4 us over 2989 at 2.19 objects and 19379 triangles each - 421 CHEAPER while carrying 48 pct more geometry, us per Mtri 14732 against 38863. Different poses, different coverage, no ordering content whatsoever. THE A/B IS VOID TWICE OVER AND IS RE-OWED: one session, one pose, one toggle. What the dumps DO settle is the cull - cullBuilds equal to the pass count in all three, cullStandDowns 0, cullApexMax 0 / 6.1e-05 / 0, cullRebased tracking cullBuilds, meshCulled 168 of 6561 and 134 of 2304 with nothing vanishing - and the bracket, injGpuMaxUs 2950 / 8940 / 6943, microseconds not milliseconds, so 26657's falsification clause does not fire.
+//  || SECOND DEFECT, FOUND BY THE SAME AUDIT AND OLDER THAN IT LOOKS. flush_locked sorted meshes at TWO sites and nothing between them ever iterated the vector, so the first sort's result was overwritten whole every frame from the day 26652 shipped. It carried a THREE-GROUP order the replacement did not: overlays last, then translucent and effect meshes, then opaques. 26652's comparator knows two classes and calls them DISJOINT by their own predicate - true of the two it named, silently untrue of the third - so a DepthMode::Off overlay at alpha 1.0 and any effect mesh at alpha 1.0 fell into the OPAQUE bucket and sorted by distance instead of drawing last, where a translucent could paint over them. The group key is restored at BOTH surviving comparators, with 26652's front-to-back split living strictly inside group 0, so 421 now reproduces the 26650 ordering on both paths - which is what the arm's name has claimed since it was minted.
+//  || THIRD, THE CENSUS WAS FLATTERING ITSELF. meshTrisL0 was charged INSIDE the crossfade loop, so a fading object was billed TWO level-0 draws against a pair that exists only because the ladder does. lodFades ran 392 of 437 and 922 of 2990 in the dumps that priced it, so the bias was not small. The baseline is one level-0 draw per object and is stamped once, above the loop; and the ordered two-pass, which doubles what it submits and had never paid for it, now pays on both sides of the ratio. meshConsidered also stopped counting fullscreen passes, which have no world extent, can never be culled, and were diluting the one lane the frustum win is read from. MESHTRIS OVER MESHTRISL0 AND MESHCULLED OVER MESHCONSIDERED ARE BOTH DISCONTINUOUS ACROSS THIS BUILD - the last readings under the old accounting were 0.414 and 0.444, and 168 of 6561 and 134 of 2304.
+//  || FOURTH, DOCUMENTATION ONLY, RULE 1.16. ConstantData called lighting0.y unused while it is the receive-arm code lane the entire mode map rides on, and documented blend_ctl.x alone while y, z and w are all spent - 26325's trust range, 26533's farVis flag and 26651's LOD crossfade dither. That struct is where the next build goes looking for a free lane, and section 7's per-object tier floor needs one; blend_ctl has none, and now says so.
+//  || DISCLOSED, NOT DISCOVERED LATER. The injection's meshes[0] changes meaning from the FARTHEST mesh to the nearest opaque, which moves the representative caster the 26540 arb-jitter census samples: arbJitVertMaxM and its siblings are NOT comparable across this build, and 421 restores both sites at once. kh_prb_stash reads meshes[0] BEFORE the sort and is unaffected - checked against the ordering, not assumed. Nothing here touches the frustum, the ladder, the shadow level, the caches or any casting, seam or volume-clone path.
+//  || PRE-REGISTERED ACCEPTANCE, ARMING LANE FIRST. (a) THE ARM: mode 0 against 421 at ONE pose in ONE session must now MOVE injGpuUs over injGpuN at all - a null after this build is a real result and means the scene is not fragment-bound, where before this build it meant nothing; (b) injGpuN still tracking compositeInjections within a few counts and injGpuMaxUs still in the microseconds, which says the bracket did not move; (c) an overlay drawn with a translucent present is ON TOP again, and ovListed still equals ovDrawn plus ovSkipped; (d) meshTrisL0 falls relative to meshTris on a fading pose so the printed ratio gets WORSE - that is the correction landing, not a regression; (e) cullBuilds, cullStandDowns, cullApexMax and cullRebased unmoved; (f) meshConsidered falls by exactly the fullscreen count. FALSIFICATION, binding: mode 0 materially SLOWER than 421 on a matched pose convicts front-to-back on this renderer, 421 becomes the default candidate and 26652's ordering argument is withdrawn - which is the reading 26652 could never have obtained. If an overlay now draws in the WRONG place, the group key is the one-line suspect and 421 is the stand-down. NUMBER HYGIENE: nothing minted, nothing retired; 421 gains a second arming site and keeps its meaning exactly. FREE NOW: debug modes 426+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || FIELD AMENDMENT 26658, rule 1.16, written in place because this entry's acceptance pre-registered the read and the field returned it. THE ARM FIRED AND THE MEASUREMENT EXISTS AT LAST. Three A/B attempts were needed and the first two were void for reasons worth recording, because each one is a trap the next reader can walk into: attempt one compared two UNMATCHED sessions - 3.00 objects and 28785 triangles per injection against 2.19 and 19379 - and attempt two ran a scene with objTotal 1, where std::sort over one element is a no-op and mode 0 and 421 execute BYTE-IDENTICAL code, so the 1160.2 against 732.8 us it produced was pure camera pose. AN ORDERING ARM CANNOT BE MEASURED WITHOUT SEVERAL OPAQUE MESHES OVERLAPPING IN DEPTH, and that is now stated where the next person will look for it.
+//  || THE VALID READ, seven objects, 8.88 draws per injection, ladder engaging, meshTrisL0 per injection 124340 against 124824 so the object set and draw structure are matched to 0.4 pct: mode 0 injGpuUs over injGpuN 462.8 us against 421's 593.6 us, i.e. 421 is +28.3 pct RAW. The scenes differ in one respect - LOD engagement, meshTris over meshTrisL0 0.4543 against 0.5705 - so the 421 session sat closer, and closer means more screen coverage which in a fragment-bound pass raises cost and triangle count TOGETHER. Normalised by submitted triangles the gap is 8193.6 against 8336.3 us per Mtri, i.e. mode 0 cheaper by 1.7 pct. THE TRUE VALUE LIES BETWEEN AND NEARER THE BOTTOM: front-to-back buys LOW SINGLE DIGITS on this renderer, not the step change 26652 assumed. The binding falsification clause - mode 0 materially slower - did NOT fire, so the default STANDS and 421 keeps its meaning; but draw order is retired as a lever and no future build should price it as one.
+//  || AND THE REASON IT PAYS SO LITTLE IS STRUCTURAL, NOT A TUNING MISS, which is the finding worth more than the number. PSComposite declares SV_Depth in its SIGNATURE, unconditionally - PSMain deliberately does not, per the 26337/26338 twin asymmetry - and PSComposite is the pass that carries every draw, meshGpuN reading 0 in all five sessions. A shader that writes arbitrary SV_Depth DISABLES EARLY DEPTH TESTING, so a fragment cannot be rejected before the shader runs. Front-to-back lays depth that later fragments should fail, but the test happens AFTER their shader has already executed the five-tier ladder, the cascade receive, the 7x7 witness filter, the PBR and the dynamic lights. The ordering saves ROP writes and cache traffic and cannot save the shader work it exists to save. 26652's argument was not wrong; it was structurally unable to pay.
+//  || THE CONSERVATIVE-DEPTH ROUTE IS CLOSED ON THE ARB VARIANT AND SECTION 8 STEP 4'S HEDGE IS NOW EXPLAINED RATHER THAN JUST OBEYED. Conservative early-Z requires the written depth to move AWAY from the camera relative to the depth test. The test is LESS_EQUAL and the 26336 contact clamp spends khaOff to drive the fragment TOWARD the camera - that ledger's own PixelHistory has it writing 0.9681877 where its nearest vertex was 0.9689184. So SV_DepthLessEqual is the only honest declaration and under LESS_EQUAL it buys nothing. WHAT REMAINS AVAILABLE, unbuilt and priced: the draws where khaODepth equals i.pos.z exactly - 26338 states the non-arb variant has no contact pull at all - pay full early-Z for zero effect, and the fix there is NOT a conservative declaration but a variant that DOES NOT DECLARE SV_Depth, selected per draw off khr_far_arb and khr_mesh_nearz which the CPU already computes. NOT BUILT, and the reason is a number nobody has: the 26626 dump read arbOn 1 on 512 of 512, so the target may be nearly empty, and a fifth PSComposite variant costs every user minutes of cold compile plus a key move. THE GAUGE THAT SIZES IT FIRST is two counters at the injection loop's existing branches - draws with neither arb nor nearz armed, against compositeMeshes. Instrument before repairing; rule 1.12, and this campaign broke it four times already.
+//  || MODE 403 IS NOT A KNOWN IMPROVEMENT AND IS DELIBERATELY LEFT OPT-IN. PREFER_FLOW_CONTROL keeps branches as branches, which skips untaken tiers but costs on divergent warps, so it is BIDIRECTIONAL and untested in the field; 26639 pre-registered it as a default CANDIDATE needing its own build, its own revert and a frame-time acceptance precisely because it changes generated code. Promoting it would also invalidate every .khsc entry once. It stays an arm. ALSO WITHDRAWN HERE, my own overreach: I claimed the inlined debug probes cost FRAME time. They sit behind early returns on dbgCtl.x, a constant-buffer scalar and therefore uniform across the draw, so the branch is coherent and essentially free. 26639's probe finding is about COMPILE time and does not extend to runtime.
+//  || 26657 THE GEOMETRY PASSES GET A CLOCK (KH_MESH_TIMER, INSTRUMENT ONLY - no behavioural change, no mode minted, mode 0 rendering byte-identical to 26656; C++ only, no shader source, no cache key moves). THE DEBT THIS PAYS IS FIVE BUILDS OLD AND IT IS MINE. 26651 through 26656 shipped a LOD ladder, a frustum cull, a front-to-back opaque order and a coarse shadow level, and EVERY cost claim any of them made rests on a triangle census and on reasoning - never once on microseconds. The 26080 ring covers the fullscreen chain, 26084 the UI phase, 26085 the scene capture, and there it stops: nothing in 67,000 lines has ever bracketed a mesh draw. Rule 1.12 says instrument before you repair, and I repaired first four times.
+//  || TWO RINGS, NOT ONE, AND THE REASON IS THREADS RATHER THAN TIDINESS. The capture ring's own ledger states it is single-threaded by contract and game-thread call sites ONLY. The flush mesh pass runs on the game thread under the park; the injection mesh pass runs on the RENDER thread. One cursor shared between them would be 26652's defect in a new costume - a structure published by one pass and consumed by another - so each pass owns a ring and each ring is touched by exactly one thread. Both are device objects, created in the existing query block and released in the existing loop, so they live and die with the device like every other query in the file.
+//  || ALL FOUR FAILURE PATHS ARE NO-OPS AND THAT IS DELIBERATE: no queries created, a slot still in flight, a disjoint interval, or a zero frequency each skip the measurement and leave the draw untouched. A begin that returns -1 makes its matching end do nothing, so neither pass needs close bookkeeping on its early exits - the 26085 shape, which was chosen precisely because flush_locked has many. Harvest is DONOTFLUSH: a slot the GPU has not finished with is left for the next pass rather than stalling the thread that asked.
+//  || WHAT THE LANES SETTLE AND WHAT THEY DO NOT. meshTris against meshTrisL0 has priced the LOD ladder in TRIANGLES since 26652 and in nothing else; injGpuUs over injGpuN finally attaches a cost to it. On this renderer the INJECTION is the pass that matters - a healthy composite path stands the flush mesh pass down, and the field dumps read compositeMeshes carrying every draw - so meshGpuN near zero with injGpuN tracking compositeInjections is the EXPECTED reading and not a fault. They say nothing about the shadow ladder, the chain or the UI phase, each of which has its own ring, and nothing about CPU cost. PRE-REGISTERED ACCEPTANCE: (a) THE ARMING LANE - injGpuN non-zero and tracking compositeInjections within a few counts, since only a busy ring slot should ever skip; N far below the injection count means the ring is being starved and the measurement is not trustworthy; (b) injGpuUs over injGpuN plausible against the frame budget - tens to hundreds of microseconds, not zero and not milliseconds; (c) mode 0 rendering unchanged, which every other census lane confirms by not moving; (d) THE READING THIS WAS BUILT FOR: run the same scene at mode 0 and at mode 421 and compare injGpuUs over injGpuN. 421 draws opaques back to front, so an occluded fragment runs the whole shadow ladder before failing the depth test. IF THE TWO ARE THE SAME the scene is not fragment-bound, the 26652 front-to-back argument is wrong, and the indexed-mesh conversion - which buys vertex work and memory, not fragment work - becomes the only remaining lever worth pulling. If mode 0 is materially cheaper, front-to-back is confirmed and the ordering stays. FALSIFICATION: injGpuMaxUs reading in the milliseconds on a two-mesh scene convicts the bracket rather than the renderer - it would mean the End is landing outside the loop it is meant to enclose. NUMBER HYGIENE: nothing minted, nothing retired. FREE NOW: debug modes 426+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26656 THE THREE 26655 SHADOW REPAIRS ARE WITHDRAWN WHOLE, THE GAUGES THAT CONVICTED THEM STAY (C++ ONLY, no shader source, no cache key moves; modes 423, 424 and 425 RETIRED - whitelisted dead, never reused). OPERATOR DIRECTIVE after a field session in which none of the three reported artifacts moved. RULE 1.13b, WITHOUT ARGUMENT: an arm that misbehaves stands down. All three did, in three different ways, and the instrument built beside them says exactly how - which is the only part of that build worth keeping.
+//  || WHAT EACH ONE ACTUALLY DID, FROM THE LANES RATHER THAN FROM MY REASONING. KH_SUN_FIT_SCALE FIRED EXACTLY AS DESIGNED AND THAT IS WHY IT IS A REGRESSION: sunLadderCasterR 491.638 took sunLadderScale to 4.916 and sunOutHalfDiag from 32 m to 157, so every tier coarsened by a factor of five for every object in the scene - and the caster it grew the ladder for was still not contained by the result. A cost with no demonstrated benefit is a regression however good the reasoning behind it. KH_SUN_ER_TIGHTEN NEVER EXECUTED ONCE: sunErTightens 0 across the session, because that branch is entered only for a caster far UP-SUN and the field's giant sits close - the fix was not wrong, it was unreachable at the pose that mattered, and it goes back to BANKED exactly as 26633 left it, in the same safe form, still owing its own arm and its own build. KH_SUN_OVERSIZE REFUSED ONLY HERO AND MID, whose caster sets were empty anyway: sunOutErMax and sunFarErMax both read 491.638 against an outer half-diagonal of 157, so the eight-times bar was never close to firing where it mattered.
+//  || AND THE OVERSIZE SHAPE CANNOT BE RESCUED BY A TIGHTER CONSTANT, WHICH IS THE ONE REAL RESULT OF THAT BUILD AND IS WHY IT IS DELETED RATHER THAN RETUNED. A 5 m crate sits at 2.1x its hero half-diagonal and shadows correctly; a 983 m caster sits at 2.4x its far half-diagonal and does not. NO MULTIPLIER SEPARATES THEM, so caster-size-against-tier-size is the wrong question. The right one is whether the OCCLUDER a fragment needs is inside the map that fragment samples: for the crate every occluder that matters is within metres and is in the ortho, while on a 983 m caster the geometry that should self-shadow a fragment can be hundreds of metres away and OUTSIDE it - the lookup finds nothing and returns LIT. That is the reported away-facing-faces-are-lit and it was never a shading fault. The criterion that would work is a PER-OBJECT TIER FLOOR - this caster may be received only from a map that contains the whole of it, which for the field's giant is the union at sunMapHalfDiag 557 and sunVpSpanXM 1213 - and that is a RECEIVE-side decision needing a CB lane and a shader branch, so it moves the PSMain and PSComposite keys and is its own build. Written down here so the next attempt starts from the criterion rather than from another constant.
+//  || WHAT SURVIVES, AND IT IS DELIBERATE. sunHero/Mid/Out/FarErMax is the largest enclosing radius ADMITTED to each tier; sunHero/Mid/Out/FarFwdM is khsh_fwd minus the depth floor, the shared-stretch term that has never had a lane; sunLadderCasterR is the largest local caster's radius and now feeds NOTHING. All three are stamped at the ADMISSION LOOP rather than inside the completed-render block, which is the property 26631 had to withdraw a conviction for lacking, and all three are behaviour-free. They are the head start the next conversation gets, and without sunOutErMax this build would have shipped another constant instead of a deletion.
+//  || STILL OPEN AND STILL UNMEASURED, stated so nothing is mistaken for closed: the three artifacts are all live - the tier-handoff shadow fade that affects one of two meshes and not the other at the same range, the acne on a 1000x caster, and its away-facing faces reading lit. The khsh_fwd pair-interaction I convicted for the first of those REMAINS A HYPOTHESIS: the 26655 dump reads sunLocalCount 1 with sunOutFwdM and sunFarFwdM both 0, so that pose never exercised it and the two-mesh pose is still owed. ACCEPTANCE 26656: mode 0 rendering is BYTE-IDENTICAL to 26654 - sunLadderScale back at 1 on the field scene, sunOutHalfDiag back at 32, no admission refused anywhere - and the LOD, cache, cull, sort and shadow-level work of 26651 through 26654 is untouched, which the census lanes confirm by not moving. NUMBER HYGIENE: modes 423, 424 and 425 RETIRED and never reused. FREE NOW: debug modes 426+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26655 THE SUN LADDER SIZES ITSELF FROM RANGE AND NEVER FROM CONTENT, AND A CASTER IT CANNOT CONTAIN IS ADMITTED ANYWAY - THREE ARMED REPAIRS AND THE GAUGES THAT PRICE THEM (**WITHDRAWN WHOLE AT 26656 - all three repairs are gone from the file and modes 423, 424 and 425 are RETIRED; read that entry before this one, and note that the OVERSIZE SHAPE IS REFUTED, not merely mistuned**; KH_SUN_FIT_SCALE mode 423; KH_SUN_ER_TIGHTEN mode 424; KH_SUN_OVERSIZE mode 425; C++ ONLY, no shader source, no cache key moves). OPERATOR DIRECTIVE after three field reports: a shadow that FADES OUT and then snaps coarse at a tier handoff and does so on ONE of two meshes but not the other at the same range; SPECKS of shadow on a mesh scaled 1000x; and faces of that mesh that face AWAY from the sun reading LIT at some angles. Rule 1.11 is deviated from in 26645's declared form - three defaults, disjoint code, independently armed, independently bisectable.
+//  || ONE MECHANISM, THREE FACES, AND khsh_er IS AT THE CENTRE OF ALL OF THEM. The lateral clip is khsh_lat > khsh_r2 + khsh_er and the caster's own enclosing radius is ADDED to the tier's bound, so a caster whose radius dwarfs the tier passes the test wherever it sits. A 1000x mesh carries er near 866 m into a 32 m tier: admitted, rendered into an ortho spanning 64 m, and everything past that edge is OUTSIDE THE MAP - where a shadow lookup returns LIT. The reported unlit-faces-are-lit is therefore not a shading fault at all, it is a sample off the edge of a texture, and no normal or N dot L argument would ever have found it. The same er then drives khsh_slen and khsh_need, so the giant stretches khsh_d2v into the kilometres and khsh_out_bias, which is khsh_bbw over khsh_d2v, collapses against it: depth quantised over 4 km against a sloped kilometre-wide surface is textbook acne, and acne is what the screenshot shows - dense where the surface runs near-parallel to the light, absent where it faces square on.
+//  || AND khsh_fwd IS WHY THE TWO MESHES AFFECT EACH OTHER, which was the operator's observation and the thing that falsified my own earlier reading. khsh_fwd is a MAXIMUM over every admitted caster and it alone sizes khsh_d2v, so ONE member of a tier's set sets the depth precision EVERY member then gets. That is not a tier-handoff property and it is not distance-dependent, which is exactly why moving the front mesh to the back mesh's range does not reproduce it: what matters is which set you are in and who else is in it. The file's own watch list has suspected this since 26633 - er over-estimates the height by er/H, 1.73x for a cube and about 14x for a wide flat caster, and khsh_fwd stretches with it - and named it a candidate rather than a conviction because no arm separated it. 423, 424 and 425 are those arms.
+//  || THE THREE REPAIRS, EACH SIZED AGAINST A MODEL BEFORE SHIPPING. (1) KH_SUN_FIT_SCALE: khls_s takes the largest local caster's enclosing DIAMETER as a content term, MAXed against the range term so it can only ever GROW the ladder and can never coarsen a near-field shadow below what 26539's sawtooth law already allows; the ceiling rises 5 to 8 to give the term somewhere to go. (2) KH_SUN_OVERSIZE: a caster whose radius exceeds its tier's half-diagonal by more than EIGHT TIMES is refused by that tier and served by the coarsest one that can hold it - a kilometre-wide object does not need a centimetre texel, and a map spanning under an eighth of its caster cannot describe it at all. (3) KH_SUN_ER_TIGHTEN: the banked 26633 fix, in the SAFE FORM that ledger specified - the height is max of the rotated and unrotated vertical extents, because this site rotates its half-extents and the union does not, so khsh_he[1] alone can fall BELOW the union's he0[1] on a rotated caster and re-open the very completeness gap 26632 closed. The trailing slack stays khsh_er: that term is the body's own extent and is legitimately a radius. MODELLED, not asserted: the oversize bar leaves a 0.5 m prop and a 5 m crate admitted to EVERY tier including hero, refuses a 20 m building from hero alone, and refuses the 1000x mesh from hero, mid and outer while far still holds it. The tighten is 1.29x to 1.59x at 60 to 15 degrees of elevation on a cube - not the 14x worst case, which needs a wide flat caster.
+//  || THE GAUGES, AND 26631 IS THE REASON THEY ARE SHAPED THIS WAY. That build had to WITHDRAW a conviction in writing because khsh_out_reach and khsh_out_casters are written only inside the completed-render block and are therefore STALE at any pose where valid is false - and one of the three readings it withdrew was 'a large object fills the fine maps', which is a near neighbour of the story this build tells. So every lane here is stamped at the ADMISSION LOOP, which runs before any exit: sunHero/Mid/Out/FarErMax is the largest radius ADMITTED to that tier and is read against that tier's own HalfDiag; sunHero/Mid/Out/FarFwdM is khsh_fwd minus the depth floor and is the shared-stretch term in metres, which has never had a lane; sunHero/Mid/Out/FarRefus counts oversize refusals per tier; sunLadderCasterR is the content term the ladder now sees and sunErTightens counts admissions where the 26633 height was genuinely tighter than the radius it replaced.
+//  || PRE-REGISTERED ACCEPTANCE. ARMING LANES FIRST: sunLadderCasterR non-zero on any scene with a caster, and sunHero/Mid/Out/FarErMax populating - all four reading 0 with casters present means the stamps are not where I think they are, an instrument fault and not evidence, which is 26631's own falsification clause reused. (a) THE 1000x MESH: sunOutRefus and sunMidRefus non-zero with sunFarErMax carrying the giant, the SPECKS GONE and the away-facing faces no longer lit; 425 restores both artifacts, which is the proof the refusal is what removed them. (b) THE PAIR: sunFarFwdM large with both meshes present and near zero with one, and the fade band narrowing or clearing at mode 0; 424 restores the wider window. (c) sunLadderScale moving above 1 on a scene with something large in it, and sunMid/OutHalfDiag reading 8s and 32s; 423 pins it back. (d) NOTHING ELSE MOVES on a scene of normal props: sunHero/Mid/Out/FarRefus all ZERO by construction, so a non-zero value there is itself the defect report. FALSIFICATION AND IT IS THE 26632 HAZARD BY NAME: a splotch, a halo or a vanishing shadow returning means an admission change refused a caster a band then certified away. Arm 425 first, then 424 - those are the only two that touch admission - and read sunHero/Mid/Out/FarRefus to see which tier refused what. If both are armed and the artifact survives, this build is not the author. NUMBER HYGIENE: modes 423, 424 and 425 minted. FREE NOW: debug modes 426+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26654 THE FRUSTUM WAS IN CAMERA-RELATIVE SPACE AND THE APEX SAID SO - THE CULL NOW RECOVERS THE PASS'S REBASE FROM ITS OWN PLANES (C++ ONLY, no shader source, no cache key moves; no mode minted - 420 remains the stand-down). 26653 SHIPPED A GUARD THAT WORKED AND A CULL THAT DID NOTHING: the cold dump reads cullStandDowns 2058 of 2059 passes, cullBuilds 1, cullApexMax 7064 and meshCulled 0. A residual the size of the world coordinate is the exact signature of a frustum whose apex sits at the ORIGIN while the centres being tested are world-absolute - the 26421 fp32 rebase, which both mesh passes apply to the viewProj their vertex shaders consume. So 26653's guard was RIGHT, it refused a matrix it could not vouch for, the field saw no missing meshes, and the cull simply never ran. That is the failure direction this project wants and it is why the guard was worth building before the feature was correct.
+//  || THE FIX IS TO STOP ASSUMING THE SPACE AND MEASURE IT. Three of the four side planes intersect at the apex, so the build SOLVES for it by Cramer and the vector from that apex to the camera IS the rebase the pass applied, whatever it happens to be. Object centres are then biased into the matrix's own space with no branch, no guess and no dependence on knowing which pass rebases. TWO CHECKS SURVIVE and they are what still keeps a foreign matrix out: the FOURTH plane must pass through the solved apex - a real perspective frustum has exactly one - and the recovered origin must be one this file actually uses, zero or the camera, within 4 m. A cycle latch, another view or an orthographic shadow matrix fails one or both and that pass culls nothing. Harness on the SHIPPED code, five cases: absolute matrix accepts with zero bias and the right verdicts; camera-rebased accepts with bias -7500/-50/-7500 and the SAME verdicts; a camera 300 m away, an orthographic pair and mode 420 all stand down. A 2 m radius pad joins the test because fp32 at 7.5 km is worth more than the draws it saves.
+//  || RULE 1.16: cullApexMax CHANGES MEANING IN THIS BUILD and the change is stated rather than left for a reader to trip over. It was the camera's distance to its own side planes - a number that is large and CORRECT under a rebase, which is precisely why 7064 was not a bug report. It is now the fourth plane's residual at the solved apex, near zero in either space. cullRebased is new and is expected to TRACK cullBuilds on this renderer, because both mesh passes rebase; cullRebased 0 with cullBuilds climbing would mean a pass stopped rebasing, which is worth knowing.
+//  || CONFIRMED ON THE OPERATOR'S QUESTION, AUDITED RATHER THAN ASSERTED: NOTHING IS EVER WRITTEN TO A MOD FOLDER. The shader write-through targets khsc_p, which is kh_shader_cache_file and therefore kh_mesh_cache_dir - Documents, or nothing when Documents is unavailable. The mesh store targets kh_mesh_cache_file, the same directory. The 1 GiB trim enumerates kh_mesh_cache_dir alone. kh_mod_cache_append has exactly two call sites and both are READ candidate lists. A mod-served hit also returns before the write-through, so a shipped blob is not copied into Documents either - it costs the user's budget nothing, and if the mod is later uninstalled the unit recompiles or the model re-imports once, which is the correct behaviour and not a defect.
+//  || THE COLD RUN OTHERWISE PASSES AND THE LADDER IS FIELD-CONFIRMED. lodMeshes 1, lodLevels 5, lodBuildMs 48 on a 17,832-triangle model - against a pre-registered 25-45 ms band interpolated from the synthetic ladder, so the decimator costs on real geometry what it cost on a sphere. meshTris 40,018,400 against meshTrisL0 79,459,400 is a ratio of 0.504: THE LADDER IS HALVING THE SUBMITTED GEOMETRY of the colour passes. lodFades 543 over 2058 injections, so the crossfade is exercised and is not the 0 that would have made every visual judgement vacuous. fbxImports 1 with fbxCacheWrites 1, meshWriteQueued 1 and meshWriteDone 1: the v2 file was written off-thread and its load is the outstanding acceptance. acqHoldFrames 1 with acqHoldResets 1, whiteFrames 1, shaderCacheHits 28 with misses 0 - a warm shader cache under a cold mesh cache, so the 26651 dither recompile had already been paid.
+//  || STANDING AND NOT FIXED, because it is a hypothesis and rule 1.12 binds: the operator reports a SELF/CAST SHADOW FADING ALMOST TO NOTHING across a band of a couple of metres at a level threshold, on ONE of two meshes. The leading mechanism is the crossfade dithering two DIFFERENT shading results rather than two silhouettes: kh_lod_decimate CARRIES vertex normals through a collapse instead of rebuilding them, so a level's surface moves while its normals do not, and a shadow term that depends on those normals differs between the two levels being interleaved - half the pixels shadowed, half lit, which reads as a fading shadow and recovers once the band is crossed. 26651 disclosed the carried-normal choice and this is its first field cost. THE A/B IS MODE 419: if the fade becomes a POP the crossfade is dithering divergent shading and the repair is to recompute area-weighted normals per level in the decimator, which is a .khmc version bump and its own build; if the fade SURVIVES 419 the crossfade is innocent and the author is the level geometry itself against a level-2 shadow caster. Do not build either repair before that screenshot. PRE-REGISTERED ACCEPTANCE 26654: cullBuilds tracking the pass count with cullStandDowns near zero and cullApexMax near zero; cullRebased tracking cullBuilds; meshCulled climbing when the camera looks away and reading 0 with everything on screen; and NO mesh vanishing while visible, which is now corroborated by cullApexMax rather than resting on eyes. FALSIFICATION: meshCulled climbing with an object plainly on screen convicts kh_lod_radius or the centre swap, not the planes - those are harness-checked in both spaces now. NUMBER HYGIENE: nothing minted, nothing retired. FREE NOW: debug modes 423+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26653 THE 26652 FRUSTUM WAS BUILT BY ONE PASS AND CONSUMED BY ANOTHER, AND IT HID EVERY MESH BUT ONE - THE CULL NOW BUILDS PER PASS FROM THE MATRIX THAT PASS DRAWS WITH, AND VALIDATES ITSELF AGAINST ITS OWN APEX (C++ ONLY, no shader source, no cache key moves; NO NEW MODE - 420 remains the fielded stand-down and its meaning is unchanged). FIELD REPORT ON 26652: a second and third mesh were invisible wherever they were placed, and only their SHADOWS drew. Mode 420 restored them immediately, which convicted the cull in one step.
+//  || THE DUMP NAMED IT WITHOUT AMBIGUITY. meshConsidered 2793, meshCulled 1692, and compositeMeshes 1161 against 1100 injections - ONE mesh drawn per frame no matter how many were spawned, where the 26649 dump drew 2.0 per injection for two objects and lost none. Shadows survived because no CASTING pass consults the cull at all, so 'invisible but it still casts' was the asymmetry pointing straight at this code. THE ALGEBRA WAS NOT THE FAULT: the shipped kh_cull_publish and kh_mesh_visible were lifted verbatim into a harness and checked against direct clip-space transforms at 7.5 km world coordinates - ahead, off-axis, behind camera, 90 degrees out - with ZERO mismatches. The extraction is correct Gribb-Hartmann for this file's row-vector convention. What was wrong was the MATRIX it was handed.
+//  || THE DEFECT, STATED AS A RULE SO IT IS NOT REPEATED: CULL WITH THE MATRIX YOU DRAW WITH. 26652 built one frustum in flush_locked from that function's ARBITRATED pv - a matrix the code above it may replace with g_ro.cycle_pv, with g_boundary_pv.view or with g_inj_view, and which the file's own viewport block already warns can belong to a SECONDARY render cycle - stored it in a static, and let the INJECTION cull against it on the render thread, in a different pass, with a different matrix. g_lod_proj_px survived that same treatment only because it reads projection[1][1] alone, which is field of view and is invariant under every one of those substitutions; a frustum needs the VIEW, which is not. That is why the LOD ladder measured correct in the same dump that lost three meshes. The set is now a LOCAL, built per pass from that pass's own view_proj - the flush from its own, the injection from the khr_cbf matrix its own VSComposite consumes - so one matrix decides both whether a mesh is on screen and where it lands, and a mesh that would be visible cannot be rejected. Nothing is published and nothing crosses a thread.
+//  || AND IT VALIDATES ITSELF, WHICH IS WHAT MAKES IT SAFE TO SHIP ENABLED RATHER THAN BEHIND AN ARM. For any perspective projection the eye lies ON all four side planes, so the camera's signed distance to each is zero by construction. The build therefore measures exactly that and stands the whole pass's cull down if it is not - four dot products, once per pass. It cannot be fooled by any of the things that fooled 26652 because it does not need to know WHY the matrix is wrong: a foreign camera, a rebased matrix whose apex sits at the origin, an orthographic shadow matrix and a degenerate one all fail the same test. All four were exercised in the harness and all four stand down; the good pair reads an apex residual of 1.2e-4 metres at 7.5 km against a 1.0 m bar. A stood-down pass culls NOTHING, so the failure direction is the 26651 behaviour, never a vanished object.
+//  || RULE 1.16, THE 26652 ENTRY IS CORRECTED IN PLACE ABOVE: its claim that the planes were exact because the encode swap only touches column 2 was TRUE AND IRRELEVANT - the columns were never the problem, the provenance of the matrix was, and the entry did not ask where pv had been. The acceptance it pre-registered was also too weak to catch this: it asked for meshCulled to climb when the camera looks away, which it did, and for a mesh not to vanish while visible, which is a HUMAN check that the census could not corroborate. cullBuilds, cullStandDowns and cullApexMax exist so the next reader does not need eyes to answer it.
+//  || PRE-REGISTERED ACCEPTANCE: (a) THE HEADLINE - spawn four meshes, all four draw, and compositeMeshes tracks the object count per injection rather than pinning at one; (b) cullBuilds non-zero with cullApexMax small - single-digit centimetres or less - which is the frustum agreeing with its own camera; (c) cullStandDowns zero or small on a normal session, and a LARGE value is not a fault but a report that one of the two passes is drawing with a matrix whose apex is not its camera, which is worth knowing and was invisible before; (d) meshCulled still climbing when the camera looks away from a spawned object and reading ZERO when everything is on screen - that pair is the whole test and 26652 passed only half of it; (e) 420 still stands the cull down whole. FALSIFICATION: a mesh still vanishing while on screen with cullBuilds non-zero and cullApexMax near zero means the frustum is right and the RADIUS or the centre swap is wrong, and the next read is kh_lod_radius against the object's size - not the plane extraction, which is now checked by harness and by apex. NUMBER HYGIENE: nothing minted, nothing retired. FREE NOW: debug modes 423+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26652 THE MESH PASSES GET THE OPTIMISATIONS 26651 REASONED ABOUT AND DID NOT SHIP - A FRUSTUM TEST, FRONT-TO-BACK OPAQUE ORDER, A COARSE SHADOW LEVEL AND THE CENSUS THAT PRICES ALL THREE (KH_MESH_CULL mode 420 - **CORRECTED AT 26653: THIS BUILD'S CULL WAS FIELD-DEFECTIVE AND HID EVERY MESH BUT ONE; the published-static frustum described below was built by the flush and consumed by the injection, and 26653 replaces it with a per-pass local plus an apex guard - read that entry before this one**; KH_MESH_SORT mode 421; KH_SHADOW_LOD mode 422; C++ ONLY, NO SHADER SOURCE MOVED, so not one .khsc key moves on top of the ones 26651 already moved). OPERATOR DIRECTIVE: optimise mesh rendering, textbook, including occlusion. FOUR CHANGES, each independently armed and independently bisectable - 26645's declared form of the rule 1.11 deviation, and the census is instrument-only and therefore not one of the three.
+//  || 26651 OPTIMISED THE CHEAP HALF AND SAID SO WHEN ASKED. Its ladder reached the flush and the injection - TWO geometry passes - while the sun depth ladder ran up to FIVE tiers of level-0 geometry per frame and the mask cast ran a sixth. A distant model was therefore drawn coarse once and fine six times, which is the wrong way round: a shadow silhouette is projected, filtered through a 9-tap ring and compared against a depth carrying a centimetre bias, so it tolerates far more geometric error than a lit surface. Engines run shadows COARSER than colour. KH_SHADOW_LOD takes level 2 - a quarter of the triangles - on the sun depth and mask cast, as a FIXED level rather than a per-caster one so the instanced grouping by mesh id stays byte-identical. THE SEAM AND THE VOLUME CLONES ARE DELIBERATELY EXCLUDED and that exclusion is the load-bearing part: those passes rasterise the mesh's own FOOTPRINT and their depth and stencil must register against the visible draw pixel for pixel - the entire 26326 encode campaign stands on that registration. Casting is a silhouette; registration is an identity. Only silhouettes take a level.
+//  || THE FRUSTUM TEST DID NOT EXIST. Not anywhere, not in any form: every registered mesh was submitted every flush AND every injection whether or not it was on screen, and the only visibility machinery in the file is a per-POINT compute query for scripts that culls nothing. An object behind the camera paid a vertex transform, a rasterisation and - until it failed the depth test - the whole PSMain shadow ladder. FOUR PLANES, NOT SIX, and the reason is specific rather than laziness: the flush rewrites projection[2][2] and [3][2] with arbitrated slot encodes before the mesh pass, so near and far derived from that matrix would be whatever the encode arbitration decided rather than the camera's own. The x, y and w clip components come from projection columns 0, 1 and 3 and are untouched by the swap, so left, right, top and bottom are exact, and depth is left to the far contract and the near clip which already own it. SPHERE OVER THE ROTATED HALF EXTENTS, not an OBB: four dot products, conservative at every orientation, and the asymmetry decides the shape - a false accept costs one draw, a false reject is a vanished object. Published under the park beside g_lod_proj_px and read lock-free by the injection; COLD IT PASSES EVERYTHING, so a frame with no flush behind it draws exactly what 26651 drew.
+//  || THE SORT WAS RIGHT FOR ONE CLASS AND EXACTLY WRONG FOR THE OTHER, and this is the occlusion the operator asked for. Far-first is required for the perceptual translucents - the 26088-era argument above the sort is untouched and still correct - but it is the WORST possible order for opaques, which are the class carrying the cost. Opaques now draw front to back, so each lays depth the ones behind it fail, and an occluded fragment never enters the shadow ladder. WHY THIS AND NOT A DEPTH PREPASS, stated because the prepass is the more famous answer and is not the right first move here: PSMain declares no SV_Depth, so hardware early-Z REJECTION is already active on it - discard disables early-Z WRITE, not the test - which means front-to-back ordering alone captures the great majority of what a prepass would buy, for ten lines and no new state, no second loop and no risk to the composite registration. The prepass's remaining margin is the case where a LATER object occludes an EARLIER one, which front-to-back largely eliminates by construction. It is deferred on merit, not skipped.
+//  || WHAT IS STILL ON THE TABLE, PRICED, so the next reader does not have to rediscover it. (1) THE MESH PASS HAS NO GPU TIMER. Nothing in this file has ever measured it - the 26080 ring covers the fullscreen chain, the UI phase and the scene capture, and stops there - so every claim in 26651 and 26652 about cost rests on the geometry census below and on reasoning, not on microseconds. That instrument is owed and it should be the next build, alone, in the 26085 self-contained ring's shape. (2) THE MESHES ARE NON-INDEXED EXPANDED SOUPS: every triangle carries three unique 48-byte vertices, so the post-transform vertex cache does nothing and vertex fetch is roughly 2.5 to 3 times what an indexed mesh would pay. The decimator ALREADY BUILDS the indexed form internally to weld, so the data is a by-product; what it costs is DrawIndexed at every draw site plus an index buffer in the VB contract plus a third .khmc version. That is the largest single remaining win and it is a whole build of its own. (3) THE ARB VARIANT WRITES SV_Depth, which disables early-Z outright for those draws; SV_DepthGreaterEqual or SV_DepthLessEqual would restore conservative early-Z, but ONLY if the encode's clamp direction is proven, and it is not - do not guess it. (4) Submesh merging at levels 4 and 5 would cut draw calls, and should wait on (1) saying draw count is what binds.
+//  || PRE-REGISTERED ACCEPTANCE. THE ARMING LANES FIRST: meshConsidered non-zero on any session with a mesh - if it is zero nothing below can be read - and meshCulled climbing the moment the camera looks away from a spawned object. (a) THE RATIO THAT MATTERS is meshTris against meshTrisL0: it IS the LOD win, exactly, with no timer needed, and 1.00 means the ladder is not engaging whatever lodMeshes says - a defect, not a slow path. (b) meshCulled against meshConsidered large on a scene with objects outside the view, and ZERO on a scene where every object is on screen; a mesh that vanishes while visible convicts the plane extraction and 420 is the instant stand-down. (c) shadows unchanged to the eye with sunDepthCasters and the band lanes not moving, since KH_SHADOW_LOD changes triangle counts and nothing else; 422 restores level 0. (d) 421 makes the same scene draw opaques back to front - expect it to be SLOWER, not different, and if it is not measurably different that is evidence the scene is not fragment-bound and (1) becomes urgent. (e) mode 0 shadows, registration and the composite path all byte-identical in behaviour: bandSlotsValid, recvHealthOk, compositeMeshes and the seam lanes must not move. FALSIFICATION: an object popping out of view at a screen edge convicts the sphere radius or the plane normalisation and 420 stands it down; a shadow that detaches from its caster convicts KH_SHADOW_LOD and 422 stands it down - and note that a REGISTRATION fault cannot be this build, because the seam and volume clones were never touched. NUMBER HYGIENE: modes 420, 421 and 422 minted. FREE NOW: debug modes 423+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26651 MODS MAY SHIP THE CACHE THEY WOULD OTHERWISE MAKE, AND IMPORTED MODELS GROW A SIX-LEVEL DITHER-CROSSFADED LOD LADDER (KH_MOD_CACHE, mode 417 stands the mod lookup down; KH_MESH_LOD, mode 418 stands the ladder down and 419 stands down the crossfade alone; HLSL EDIT - the FIRST since 26643 - confined to the PSMain and PSComposite terminal chunks, so THOSE families' .khsc keys move and NOTHING ELSE'S does). OPERATOR DIRECTIVE, two features, and rule 1.11 is deviated from in 26645's declared form: they touch disjoint code and disjoint call paths, they are independently armed, and they are therefore independently bisectable, which is the property 1.11 exists to protect.
+//  || KH_MOD_CACHE REVERSES A STATED DIRECTIVE AND THE REVERSAL IS THE POINT. The 26482 header says DOCUMENTS ONLY, never mod folders, because the cache is machine-local derived data. That was right about WRITING and wrong about READING. A mod that ships a custom .hlsl or an .fbx ships the thing that costs the user minutes on first use, and the author already paid that cost. So assets keep resolving through the 'rendering' search and their COMPILED PRODUCTS now resolve through a parallel 'cache' search - same ModFolderSearcher recipe, same mod ordering, Documents first. READ ONLY IS THE WHOLE SAFETY ARGUMENT: nothing is written to, evicted from or LRU-touched in a mod folder - the touch is gated on the own-copy flag at both sites - and kh_mesh_cache_trim still enumerates Documents ALONE, so a shipped cache cannot be deleted by us and cannot consume the user's 1 GiB. A mod hit also skips our write-through, so it costs the user's cache directory nothing at all. STALENESS CANNOT EXIST because both caches were ALREADY content-addressed: a .khsc key is an FNV over source, entry, target, defines and compile flags, a .khmc key an FNV over the FBX FILE BYTES. A mod shipping a blob under a key that is ours is by construction a blob for our exact source, and every candidate still fully validates magic, version, stored key and size, so a truncated or hand-edited file reads as a miss and the next candidate or the compile takes over. THREADING, audited not assumed: the directory scan is a magic static and is PRIMED FROM ensure_resources - the game or render thread, always before a pool arms - so the one call that walks mod folders on disk never happens first on a shader worker whose reentrancy into ModFolderSearcher we do not own.
+//  || KH_MESH_LOD, AND THE CACHE KEY DOES NOT MOVE. Six levels: level 0 plus five decimated, each halving the triangle count, built at IMPORT from the final baked engine-space vertices and stored in the .khmc. THE LEVELS LIVE IN THE SAME verts VECTOR, appended after level 0, so ensure_mesh_vbs still makes exactly ONE immutable buffer per mesh and every draw is still a range into it - no second buffer, no second bind, no change to the VB contract. THE COMPATIBILITY LINCHPIN IS ONE FUNCTION: mesh_vertex_count now returns mesh_base_vcount, so the sun depth pass, the mask cast, the seam, the volume clones and the white preview - every historic caller - still get LEVEL 0 and are byte-identical to 26650. This build moves the COLOUR paths only, deliberately, so no shadow or registration acceptance can move underneath it. .khmc goes to VERSION 2 and the KEY IS UNTOUCHED - still the file bytes - so the same model is the same entry it always was and adding levels does NOT make every cached model re-import forever; the version field alone rejects v1, which re-imports ONCE per model per machine and is rewritten as v2. That is the entire staleness cost. SUBMESH CARDINALITY IS INVARIANT ACROSS LEVELS because decimation runs per submesh and never merges or drops one, so a material slot index addresses one surface at every level - and the cache READER validates that invariant rather than trusting it, while the writer refuses to write a level that would fail it.
+//  || THE DECIMATOR IS GARLAND-HECKBERT QUADRIC EDGE COLLAPSE, chosen above all for DETERMINISM: the same bytes in give the same levels out on every machine, which is what lets a mod ship its .khmc and have it be correct for the user - the two halves of this build need each other. Area-weighted face quadrics, boundary constraint planes at weight 1000, optimal-position solve with an endpoint-and-midpoint fallback on a singular system, and FLIP REJECTION - the one check that separates a usable decimator from a mangler, because the quadric cost cannot see a fold. WELDING IS BY FULL VERTEX IDENTITY, position AND normal AND uv, not by position alone: a uv seam or a hard crease becomes a mesh BOUNDARY of each patch and the constraint planes then defend it, so no level can tear a texture or round off an intended edge. The cost is that a hard-surface prop decimates less aggressively than a smooth model, which is the right failure direction. ATTRIBUTES ARE CARRIED, NOT REBUILT - a collapse moves the survivor to the optimal position and keeps its normal, uv and tangent - because a per-level mikktspace pass would change the normal-map convention between levels. DISCLOSED: at level 5 on a heavily creased model the carried normals are visibly approximate, which is what level 5 is for. MEASURED BEFORE SHIPPING on a synthetic ladder: 6 ms at 4k triangles, 133 ms at 65k, exact halving at every level, and a 12-triangle box correctly refuses a ladder outright. VERTEX MEMORY GROWS BY ABOUT 94 PERCENT - the ladder sums to just under the base - and that is a real cost stated plainly.
+//  || THE SELECTOR IS SCREEN SIZE FIRST AND RANGE SECOND, and the log2 falls out of the ladder rather than being fitted to it: the unit of the ladder is a halving of triangles, so the unit of the selector is a halving of PIXELS. The object's bounding-sphere radius is projected to pixels through the pass's own projection scale over its distance - which is 'how big is it on screen' stated exactly, and which folds distance in already. The range term is a BIAS worth about a third of a level at 100 m and one and a half at 1.5 km, because a pure screen-size rule keeps a large mesh at level 0 across a whole map and a pure distance rule is wrong the moment the field of view changes. Self-tested numerically at 70 degrees and 1080p: a 1 m prop is level 0 at 2 m and level 5 by 100 m, a 5 m object holds level 0 to 10 m and reaches level 5 at 400 m, a 20 m building holds level 0 to 50 m and only reaches level 5 past 800 m. Monotone across a 0.5 to 5000 m sweep with no inversion, and every degenerate input - no published projection scale, no ladder, zero radius, zero distance, NaN either side - reads as level 0 with no fade.
+//  || THE CROSSFADE SPENDS A LANE RATHER THAN THE CB LAYOUT, which is 26533's own precedent: blend_ctl[3] is the lane that ledger measured as unread by every shader and deliberately did not spend. So CBObj stays 235 float4 and the 235/237 mirror does not move. The zeroed default is OFF, so every fill site that never heard of LODs keeps drawing whole. A value above zero keeps fragments below the threshold - the finer level fading out - and below zero keeps those at or above the magnitude, the coarser fading in; the pair is complementary at every pixel by construction, so the two levels tile the silhouette exactly once with NO blend state, NO sort and NO second depth regime. Interleaved gradient noise over SV_Position: two ops, no texture, no new function, so THE 26319 ORDERING LAW IS UNTOUCHED and the block is a byte-identical twin in PSMain and PSComposite. The fade band IS the hysteresis - there is no dwell timer and no snap threshold, so a camera sitting on a boundary sees a stable dithered mixture instead of a level flapping. DISCLOSED: a fading object issues TWO draws and one extra object-slice upload for the width of the band, and where the coarser level's silhouette does not cover a pixel the finer one did, that pixel shows background for the width of the band - the standard artifact of every dithered LOD transition, and the reason the boundary quadrics carry the weight they do.
+//  || WHY THE HLSL EDIT WAS CONFINED THE WAY IT WAS, stated because the alternative looks cheaper and is not. Putting the fade parameter in a NEW CBObj field would have edited g_cb_hlsl, which changes the content hash of EVERY unit - the vertex shaders, the effect units, the compute pair, the depth resolve, the white preview - and by the file's own N^0.44 law raises N for the whole cold batch and therefore the wall time of the units that decide when anything is visible at all. Confining the edit to the two terminal chunks moves the PSMain and PSComposite families, which ARE the tall poles and would have moved either way, and leaves the white preview's key in particular untouched so the placeholder still comes off disk instantly on the launch that pays for this. THE COST IS REAL AND IS OWED PLAINLY: every user eats one cold recompile of the PSMain and PSComposite families on their next launch.
+//  || THREE CONCERNS FROM THE 26650 READ-THROUGH, CLOSED HERE. (1) The injection ran THREE DIFFERENT PREDICATES over the same four terms - the PS keyed on far_arb or farkeep or nearz, the depthParams fill on guard or all three, the VS on guard or far_arb ALONE - so a frame with the snapshot guard down and a farkeep or nearz mesh bound the composite-arb PIXEL shader against the FLUSH vertex shader. Inert today and the proof is exact rather than hopeful: VSMain and VSComposite are byte-identical apart from their entry and struct names, and VSOut and VSOutC declare the same four semantics in the same order. It is a TRAP, not a defect - the file maintains those two as hand-edited twins and the day they diverge this pairing takes the wrong transform silently, on the one path that writes SV_Depth - so it is unified while it still costs nothing, and it gets no mode number because a change that cannot alter a pixel does not get to spend one. (2) THE 26645 RETRY BOUND HAD NO TERMINAL STATE: a request whose memo entry vanished three times stayed armed against a hash that no longer exists FOREVER - the cache entry stayed pending, the getter returned nullptr every frame for the rest of the session, the queue slot was never freed so 32 of them wedge every later user shader, and NOTHING WAS EVER REPORTED. It latches as a failure now, exactly as a genuine compile error does: reported once, counted in userAsyncFails, and the caller keeps its fallback - which under 26649 is the white substitute, so the author SEES it. (3) Read and NOT acted on, stated so it is not rediscovered: the 26650 settle costs FOUR pumps per batch, not two, because the first pump spends itself discovering the queue size changed - so userSettleWaits will read 3 per batch, not the 'two or three' 26650 pre-registered, and 3 is the PASS. whiteCompileMs remains device-lifetime rather than per-session and will report the cold session's compile after a mission restart; adding it to the reset would make it read 0 on every warm session, which is less informative, so it stays and this sentence is the correction.
+//  || PRE-REGISTERED ACCEPTANCE. KH_MOD_CACHE: (a) THE ARMING LANE FIRST - modCacheDirs non-zero on any install with a mod carrying a 'cache' folder, and if it reads 0 while one is meant to exist the folder is named wrong or is not where the mod searcher looks and NOTHING else below can be non-zero; (b) modShaderHits climbing on a COLD user cache with a mod that ships .khsc, against shaderCacheMisses that do NOT climb for those units - they are a subset of shaderCacheHits, never additional to it; (c) modMeshHits 1 for a mod-shipped model on a cold cache with fbxImports 0 and lodBuildMs 0, which is the strongest single reading in this build because it proves the shipped ladder loaded rather than being rebuilt; (d) fbxCacheEvicts unchanged in meaning and the Documents directory never growing on account of a mod hit; (e) 417 makes the same session recompile or re-import from source. KH_MESH_LOD: (f) lodMeshes non-zero and lodLevels near 5 times it on real models, 0 on a box; (g) lodBuildMs charged on the import MISS and reading 0 on every cached launch - read it against fbxParseMs, and it is expected to be several times larger; (h) THE LANE THAT MATTERS is lodFades: zero while lodMeshes is non-zero and the camera is moving means the selector never enters a fade band and the crossfade is not being exercised AT ALL, which would make every visual judgement in this build vacuous; (i) walking away from a model shows detail dropping with NO pop and NO visible stipple at normal viewing distance; (j) 419 makes the same walk POP at the band ranges, which is the proof the crossfade is what removed it; (k) 418 restores 26650 exactly, and a model imported under 418 caches WITHOUT levels, so its .khmc must be deleted before the ladder returns; (l) shadows, the mask cast and the white preview are unchanged, which mesh_vertex_count guarantees and which bandSlotsValid, recvHealthOk and whiteDraws should confirm by not moving. FALSIFICATION: a mesh that tears, folds or loses a uv island at any level convicts the decimator and 418 is the stand-down - report WHICH level, because the level names whether the fault is the collapse or the carried attributes; a visible stipple at close range convicts KH_LOD_REF_PX being too low rather than the dither, and the constant moves before anything else; hitching on first import convicts lodBuildMs and the repair is to move the ladder onto the .khmc writer thread, which is where rule 1.12 will have earned the number by then. NUMBER HYGIENE: modes 417, 418 and 419 minted. FREE NOW: debug modes 420+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26650 A MATERIAL'S THREE UNITS COMPILE TOGETHER INSTEAD OF QUEUEING BEHIND EACH OTHER (KH_USER_SETTLE, mode 416 restores the 26649 form; C++ ONLY, no shader source, no cache key moves). OPERATOR DIRECTIVE after two dumps measured the cost. THE FAULT: kh_user_shader_pump armed the instant ONE unarmed request existed, and a single custom material produces up to THREE units - ctx 0 from the flush draw loop, ctx 1 and ctx 2 from the INJECTION HOOK, which is a different hook invocation and therefore a different moment. So the pump armed ctx 0 alone; kh_shader_mt_prewarm then correctly refused every later arm while that batch was live; and the remaining contexts sat unarmed until a PSMain-class unit finished. Both dumps show it in different weather: COLD, userAsyncBatches 1 with shaderMtLive 1 and two requests still waiting 40 s after the main compile ended; WARM, userAsyncBatches 2 for userAsyncQueued 2 - even when every unit is a millisecond cache hit, each context still took its own batch. THE COST IS NOT SMALL: these are the tall poles. A user material compiles PSMain or PSComposite over g_cb_hlsl plus the user source plus the terminal chunk, which the same session measured at shaderSlowestMs 358702 - THREE HUNDRED AND FIFTY-NINE SECONDS - so serialising them is ~300 s then ~260 s instead of one ~267 s window, and the N^0.44 law makes three concurrent units barely dearer than one. THE FIX IS A SETTLE: the queue must STOP GROWING before it is armed. A growing queue resets the count, a still one advances it, and two pumps of stillness - about 33 ms at 60 fps, against a compile measured in hundreds of seconds - is free in every sense that matters. WHY NOT THE OTHER THING THE DIRECTIVE COULD HAVE MEANT, stated because it looks like the bigger win and is not: compiling user units INSIDE the startup batch would make the mesh appear LATER for everyone. That batch already carries six heavy units and is bounded by its slowest; adding three more raises N for all of them, so the builtin shaders - the ones that decide when anything is visible at all - would finish later to make a custom material finish sooner. It also cannot work in practice, because a material is assigned after the mesh spawns and the startup batch is armed on the first frames, so the request does not exist yet; and appending to a LIVE batch means mutating a queue that running workers index by atomic counter, which is the one invariant kh_shader_mt_prewarm's re-entrancy guard exists to protect. The mesh becomes visible and shaded at the same moment either way; only the custom material moves, and it moves the right direction. ONE DEFECT FOUND AND FIXED IN THE SAME BUILD, in a first draft of this file: the starvation cap was tested against the STILLNESS counter, where it is dead code by construction - KH_USER_SETTLE_PUMPS is smaller than the cap, so that branch always returned first and a queue growing on every pump would have waited forever. The cap now counts CONSECUTIVE DECLINES whatever their reason, is cleared only by an actual arm, and is deliberately not spent by the settled path. ALSO VALIDATED, and two of these had never once run: dump1 post-restart reads userAsyncQueued 2 with userAsyncDone 2 and userAsyncFails 0, so DONE PLUS FAILS EQUALS QUEUED and KH_USER_ASYNC finally has a passing acceptance; userMatWhiteDraws 2 - the 26649 substitute engaged for exactly the two frames the cached compiles needed; shaderCacheHits 30 with shaderCacheMisses 0 and shaderUnits 0, so every unit including the user pair came off disk; and fbxCacheHits 1 with fbxImports 0, fbxParseMs 0 and fbxLoadMs 13 - THE 26646 OFF-THREAD .khmc WRITE PRODUCED A LOADABLE FILE, which is the acceptance outstanding since that build and needed a full game restart to witness. acqHoldResets 1 and acqHoldFrames 1 per session, so 26648's reset reads honestly now. Acquisition perfect: viewLocks 1, frameViewHits 395883, bandSlotsValid 8, recvHealthOk 1, bandRejStaleView 2 against 106168 before 26647. PRE-REGISTERED ACCEPTANCE: (a) THE LANE THAT MATTERS is userAsyncBatches against userAsyncQueued - ONE batch carrying every context of a material, so a warm run with one custom material reads Batches 1 and Queued 2 or 3, where 26649 read Batches equal to Queued; (b) userSettleWaits small and non-zero, two or three per material - zero means the settle never engaged and a large value with Batches not climbing means the cap is carrying a queue that grows every frame; (c) on a COLD cache the custom material lands in ONE window of roughly 260-300 s rather than two, with shaderMtLive reading the number of contexts rather than 1; (d) Done plus Fails still equals Queued; (e) 416 restores the per-context batching. FALSIFICATION: userAsyncBatches still equal to Queued means the contexts are arriving further apart than KH_USER_SETTLE_PUMPS and the settle needs more pumps, not a redesign - raise it before suspecting anything else. NUMBER HYGIENE: mode 416 minted. FREE NOW: debug modes 417+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26649 A USER MATERIAL THAT IS NOT READY - OR NEVER WILL BE - DRAWS FLAT WHITE, NOT BUILTIN PBR (KH_USER_MAT_WHITE, mode 415 restores the 26645 form; C++ ONLY, no shader source, no cache key moves). OPERATOR DIRECTIVE, and the reasoning is 26643's own principle turned back on a build that violated it. 26645 gave a PENDING user material the same fallback the fielded contract gives a FAILED one - builtin PBR with the real textures - and those are not the same state and must not look the same. THE PENDING CASE: PBR under a custom material invites the author to believe the shader landed and simply resembles PBR, which is precisely the 'placeholder whose fidelity is arguable' 26643's ledger names as worse than an obvious one. THE FAILED CASE IS STRICTLY WORSE and is the operator's actual objection: a shader that never compiled hides behind a plausible-looking result FOREVER, so the author sees a lit, textured, entirely reasonable object and has no reason to go and read the RPT. Both now draw the SAME FLAT WHITE the 26643 preview already uses during the shader compile window, so a mesh whose material never compiled looks exactly like a mesh whose shaders have not compiled yet - ONE PLACEHOLDER VOCABULARY, not two, and an author who sees white knows to look at a lane or a log rather than at the object. SCOPE IS NARROW BY CONSTRUCTION and this is the sentence that keeps the next reader calm: the substitute is only reachable inside the branch that already tested mat.shader == 1 with a non-empty user_shader, so a submesh asking for 'pbr' is untouched and always was, and builtin PBR remains the answer for every material that never asked for anything else. THE MECHANISM COSTS NO SHADER EDIT. g_res.ps_white is the 26643 pair's own pixel shader and it reads ONLY SV_Position, which VSOut supplies, so the linkage against the textured VS already bound is legal and the material SRVs simply go unread; the substituted submesh also takes khtx_default rather than its real material, which changes no pixel - PSWhite samples nothing - and exists so texture binds are not paid for a surface that cannot show them. ONE ENABLING CHANGE: kh_white_ensure is now called on ensure_resources' SUCCESS path as well as from the two deferral returns, because until this build g_res.ps_white existed only in a session that actually deferred and a pending or failed user material needs it in EVERY session. It is idempotent, latched by white_tried, and the field has already priced it at 3 ms warm and 75-96 ms cold, once per device. DISCLOSED AND NOT FIXED: PSWhite writes alpha 1, so a translucent placeholder draws opaque; and it emits no SV_Depth, so the arb composite variant loses its contact clamp for as long as the substitute is up, which can z-fight terrain at a ground contact band. Both are placeholder-grade, both end the moment the real shader lands, and neither is worth a second white unit to avoid. If mode 409 has suppressed the white pair then ps_white is null and the substitute stands down to builtin PBR - stated because it makes 409 and 415 partially overlap and the next reader should not treat that as a defect. PRE-REGISTERED ACCEPTANCE: (a) THE ARMING LANE - userMatWhiteDraws counts while userAsyncQueued climbs and STOPS when userAsyncDone reaches it; (b) a mesh with a custom material spawned on a cold cache is white through the shader window, STAYS white through the material compile, and becomes the user shader in one step - it must never pass through a textured PBR appearance on the way; (c) a DELIBERATELY BROKEN .hlsl leaves the mesh white forever with userAsyncFails 1 and one fxc error in the RPT, and no PBR-looking result at any point; (d) a submesh with shader 'pbr' is byte-identical to 26648; (e) 415 restores the PBR fallback in both states. FALSIFICATION: the substitute failing to draw at all - a black or missing submesh - convicts the PSWhite linkage against VSOut, and the stand-down is 415; userMatWhiteDraws 0 with a custom material assigned means ps_white was never created and the enabling change did not take. NUMBER HYGIENE: mode 415 minted. FREE NOW: debug modes 416+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26648 THE 26647 FIX IS FIELD-CONFIRMED AND ITS OWN ACCEPTANCE LANE WAS UNREADABLE - THE WHITE AND ACQUISITION COUNTERS JOIN reset_session_state (instrumentation only; NO behaviour change, no mode minted, mode 0 rendering byte-identical). THE COLD RUN PASSES AND THE MECHANISM IS CLOSED. dump2 on 26647, mode 0, cold cache: acqHoldResets EXACTLY 1 and acqHoldFrames 10306 == whiteFrames 10306, so the hold armed once and released once; viewLocks 1, frameViewHits 226126, pubAccepts 226126, pubFirstD 3, bandSlotsValid 8, recvHealthOk 1, ringBestTakes 2 - the full 406 column, on the FIRST session, with no blocking compile and no restart. THE RING NUMBERS ARE THE PROOF AND THEY ARE NOT SUBTLE: viewCandN 0 against 944, vaShaped 7267 against FIFTY MILLION - a seven-thousandfold drop - and viewBestRot 4.80573e-07 against 4.13018. The scan no longer runs without a reference, so no wrong-era candidate is ever admitted, and the lock is exact. bandCaptures 548 against 8. The operator confirms the mesh becomes lit properly after compilation. 26647 acceptance (a), (b) and (c) all PASS. WHAT DID NOT PASS IS ACCEPTANCE (d), AND THE FAULT IS THE INSTRUMENT, NOT THE FIX. dump1, taken after a MISSION RESTART, reads acqHoldFrames 10307 against flushes 223 and acqHoldResets 2. A count larger than the session's own flush count is impossible, and acqHoldResets 2 reads exactly like the 'gate is flapping, stand down to 414' signal 26647 pre-registered. Neither is real. A MISSION RESTART DOES NOT UNLOAD THE DLL - the process and every static in it survive, which is the entire reason reset_session_state exists - and these five counters were declared beside machinery that is session-cumulative BY DESIGN (the 26638 shader census says so in writing) and were never added to the reset. So the warm dump carried the cold session's totals. The deltas are the truth and they are correct: acqHoldFrames +1, acqHoldResets +1, whiteFrames +1, against gatePassed 222 of flushes 223 - a warm mission start still passes through the async gate once, defers EXACTLY ONE FRAME, arms the hold and releases it. One frame, one reset, on a chain that has nothing to lose because the mission is new. That is correct behaviour and the warm acquisition confirms it: viewLocks 1, bandSlotsValid 8, recvHealthOk 1, viewBestRot 5.81926e-20. NO FLAPPING, and the 414 stand-down is NOT indicated. THE FIX IS TWO LINES OF RESET AND THE LESSON IS 1.12'S OLDEST, THE ONE 26613 PAID FOR: an acceptance lane must be able to fail, and a lane that cannot be read per session cannot support a per-session acceptance. The shader-pool lanes beside them stay cumulative deliberately and are NOT added. ALSO READ FROM THE SAME PAIR: shaderCacheHits 0 -> 28 with shaderCacheMisses 28 both times, so the warm session served all twenty-eight units from the .khsc cache and whiteCompileMs fell from 75 ms to 3 - 26643 acceptance (d) confirmed, no key moved by 26644 through 26647. shaderMtBatches 1 -> 2 and shaderMtJobs 17 -> 34: the warm session armed a second full batch that was entirely cache hits. shaderSlowestMs 354983 against shaderMtWallMs 354989 - one unit is still the whole wall clock, Amdahl unchanged. TWO ACCEPTANCES REMAIN GENUINELY UNRUN AND BOTH NEED A SPECIFIC ACT. (1) KH_USER_ASYNC has still never executed - userAsyncQueued 0 in every dump on record, with userShaderEntries 0 and objCustomShader 0, because no mission has yet used a user .hlsl. The MATERIAL path is the one that matters: it compiles PSMain or PSComposite and is the site that used to freeze. (2) THE .khmc ROUND TRIP IS STILL UNPROVEN and the reason is the same process-lifetime fact as above: fbxImports reads 1 then 0 and fbxCacheHits 0 both times, because g_fbx_cache maps resolved path to id IN PROCESS and a mission restart never re-enters kh_fbx_import at all. Proving 26646's off-thread write needs a FULL GAME RESTART, not a mission restart. Stated here so the next reader does not mistake fbxCacheHits 0 for a failed write - meshWriteQueued 1 and meshWriteDone 1 say the write completed; only the LOAD is unwitnessed. PRE-REGISTERED ACCEPTANCE: a mission restart now reads acqHoldFrames and acqHoldResets as the NEW session's own values - 1 and 1 on a warm start, 0 and 0 if the gate never defers - and whiteFrames per session rather than cumulative. Nothing else moves. NUMBER HYGIENE: nothing minted, nothing retired. FREE NOW: debug modes 415+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26647 THE COLD-CACHE DEFERRAL POISONS THE SHADOW ACQUISITION CHAIN, AND THE OPERATOR'S 406 A/B PROVED IT IN ONE SESSION (KH_ACQ_COLD_HOLD, mode 414 restores the 26646 behaviour; C++ ONLY, no shader source, no cache key moves). OPERATOR REPORT ON 26645: after a cold compile completed the mesh took its TEXTURES but stayed UNLIT - no lighting response, no shadows - and a mission restart on the now-warm cache fixed it entirely. THE PRE-REGISTERED A/B WAS RUN AND IT IS DECISIVE. Deferred session, 13275 flushes: viewLocks 0, frameViewHits 0, pubAccepts 0, pubFirstD -1, bandSlotsValid 0, recvHealthOk 0, bandPickNone 13274 of 13274 cycles in ONE unbroken run, bandCaptures 8 all taken at 0.689 s and all 8 killed by the 4 s orphan bound, bandRejStaleView 106168. Same scene under mode 406, where the compile BLOCKS and the very first flush is a gate-passed one: viewLocks 1, frameViewHits 274075, pubAccepts 274075, pubFirstD 2, bandSlotsValid 8, recvHealthOk 1, bandCaptures 673, bandRejStaleView 0. THE MECHANISM, and the ring is the whole of it. shadow_view_scan is HOOK-driven, not flush-driven, so the deferral does not starve it of execution - it starves it of a REFERENCE. It ran for ten thousand flushes with no flush behind it, shaped FIFTY MILLION candidate matrices, admitted 944 of them into the candidate ring and locked nothing: viewBestRot 4.13018 against a 1.0 bar, viewRingBestMin 0.0147805 with ringBestTakes 0. Under 406 the identical scene locks on bind scan NUMBER TWO at viewBestRot 1.79001e-07. So the ring does not merely sit empty through the window - it FILLS WITH WRONG-ERA CANDIDATES, and the wrong best then blocks the right one for the rest of the session, which is exactly why the 3270 gate-passed frames that followed the compile never recovered and why only a restart cleared it. Note what this is NOT: viewDropForced 0 and viewRelockForced 0 in both runs, so the 26156 drop wipe never fired and this is an ACQUISITION failure, not a lock that was lost. THE FIX REPRODUCES THE 406 SEQUENCE WITHOUT THE FREEZE. g_acq_hold is armed on the deferred branch of the flush's ensure gate and released on the first frame the gate passes. While held, shadow_view_scan returns immediately - nothing is admitted, nothing is shaped, no era can accumulate. At the RELEASE edge, which is the edge that matters, the chain is reset COLD: view source, candidate ring, ring best, relock cycle, frame and prev and alt views, the live cascade count and all eight band slots. The first live frame therefore begins acquisition from the same state 406 begins it from, and the field has already shown that state acquires in two bind scans. WHY A HOLD RATHER THAN A REPAIR OF THE RING'S BAR: rule 1.12. The bar rejecting 0.0148 while the true candidate sits at 1.79e-07 might be a bar fault or might be correct behaviour against genuinely foreign data, and nothing in either dump separates those. Standing the scan down during a window where its input is known-meaningless needs no such judgement and cannot be wrong about it. ALSO CONFIRMED BY THE SAME DUMP, and it closes an open question rather than opening one: fbxParseMs 31 with fbxImports 1 and fbxRegMs 7. THE FBX PARSE IS THIRTY-ONE MILLISECONDS. 26646 declined to move it off the game thread pending exactly this number, and the number says there is nothing there to win - that axis is CLOSED, not deferred. 26646's own lanes also read clean: meshWriteQueued 1, meshWriteDone 1, so the off-thread .khmc write completed and its second-launch load is the remaining acceptance. 26645's KH_FX_BATCH is confirmed engaged at shaderMtJobs 17 - sixteen static units plus PSEffect - and whiteCompileMs 96 PASSES 26643 acceptance (b) outright, so the parsing-is-free premise is field-confirmed and the white unit never needs splitting. userAsyncQueued 0 in both runs: KH_USER_ASYNC has STILL never executed and remains untested. PRE-REGISTERED ACCEPTANCE, cold cache, mode 0: (a) THE ARMING LANE - acqHoldFrames equals whiteFrames and acqHoldResets is EXACTLY 1; more than 1 means the gate is flapping and the chain is being reset under a live session, which is worse than the fault this closes and is an instant stand-down to 414. (b) THE HEADLINE: the mesh is lit AND shadowed on the first session, with no restart - viewLocks 1, frameViewHits large, bandSlotsValid 8, recvHealthOk 1, bandRejStaleView near 0, matching the 406 column. (c) acqHoldScans large and non-zero, which is the measure of what used to poison the ring. (d) a WARM session reads acqHoldFrames 0 and acqHoldResets 0 and is byte-identical to 26646. (e) 414 reproduces the fault deliberately. FALSIFICATION: the mesh still unlit with acqHoldResets 1 and viewLocks 0 means the ring was never the blocker and the fault is the bar itself - the next read is then viewBestRot on the first live frame, and if it reads 4-ish with a clean ring the candidate the engine supplies during a deferred session is genuinely different data and the repair moves to the supply path. NUMBER HYGIENE: mode 414 minted. FREE NOW: debug modes 415+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26646 THE 26645 REAP COULD FINISH A BATCH IT DID NOT OWN, AND THE FBX CACHE WRITE LEAVES THE GAME THREAD (KH_MESH_CACHE_MT, mode 413 stands it down; plus the first timing lanes this path has ever had; C++ ONLY, no shader source, no cache key moves). TWO THINGS, AND THE FIRST IS A DEFECT IN 26645 FOUND BY READING IT RATHER THAN RUNNING IT - the 26642 method, on my own build, one turn later. kh_user_shader_reap inferred ownership of the pool from g_khsm_active plus g_khsa_state. That is not ownership. ensure_composite_shader and ensure_compute_shaders arm through KhShaderMtScope, an RAII LOCAL whose destructor calls kh_shader_mt_finish AGAIN with keep_memo FALSE - which RELEASES EVERY BLOB IN THE MEMO. Had a reap landed on one of those it would have torn the pool down under the scope and then cleared the very blobs the scope's own compile_shader calls were about to consume, and the scope would have finished a second time on top. It is unreachable TODAY only because no scope's lifetime spans a flush - injection, the compute ensure and the flush are separate hook invocations on one thread and cannot nest - which is a CALL-GRAPH ACCIDENT, not a guarantee, and exactly the class of latent defect this project keeps paying rounds for. g_user_batch_own is set by the pump and is the only thing the reap will act on; the purge drops the claim because kh_shader_mt_shutdown has already taken the pool on those paths. SECOND, AND IT IS DELIBERATELY NOT WHAT WAS ASKED FOR IN FULL. The directive was to multithread FBX loading the way shaders are multithreaded. THE SHADER SHAPE DOES NOT FIT AND SAYING SO IS THE useful part: the shader pool is a PREFETCH OVER A KNOWN FIXED BATCH, and FBX imports arrive ONE AT A TIME on the GAME THREAD, reached from mesh_id_from_gv inside an SQF extension call, so a batch has nothing to spread. An import does four things - read the file, hash it, parse-or-load, then WRITE the compiled result to disk and TRIM a 1 GiB directory - and only the last two are PROVABLY free to move. Nothing downstream reads them back in the call, the mesh registers from memory either way, and a lost write costs one re-parse on a future launch and nothing else. So those move, on their own joined thread, and the PARSE DOES NOT - because rule 1.12 binds and there has never been a single timing lane on this path, only counts. THIS BUILD MEASURES IT: fbxReadMs, fbxLoadMs charged on hits only, fbxParseMs charged on misses only, and fbxRegMs which INCLUDES the ScopedGraphicsLock and is therefore the one lane that measures a render-thread park rather than game-thread work. fbxParseMs against fbxImports is the number that decides whether the parse is worth moving at all, and it did not exist until now. WHY READING THE MESH BY ID OFF-THREAD IS SAFE, audited not assumed: kh_mesh_append stores new MeshDef at SESSION LIFETIME - v1 has no unregistration - and the MeshDef is IMMUTABLE AFTER PUBLICATION by its own contract, so a published id names a block that never moves and never dies, and the writer reads it without a lock for the same reason every draw path indexes it without one. The store therefore happens AFTER the register rather than before, a deliberate reordering: a crash in the window between them loses a cache entry the next launch re-parses, which is the cheapest failure this path has. NO DEVICE, NO CONTEXT, NO ENGINE STATE - the 26636 audit's rule, and the reason this thread is as safe as a shader worker. It takes g_khsm_trim_mu because 26636 already established that .khsc and .khmc share one folder under one budget and the trim enumerates and deletes. TEARDOWN IS SIMPLER THAN THE SHADER POOL'S AND SAYS SO: this thread is ALWAYS interruptible between jobs - it holds no multi-minute call - so it is JOINED, never detached, and there is no bounded-wait compromise to make. Queued-but-unwritten jobs are counted and dropped rather than holding shutdown for the length of a disk queue. A spawn failure is non-fatal and falls back to writing inline, exactly as a single-core machine takes no shader pool. PRE-REGISTERED ACCEPTANCE: (a) meshWriteQueued non-zero on the first import of any .fbx and meshWriteDone converging on it - a permanent gap means the writer is wedged; (b) the SECOND launch reads fbxCacheHits for those meshes, proving the off-thread write produced a loadable .khmc, which is the whole correctness question of this build; (c) fbxCacheWrites unchanged in meaning and still counting; (d) meshWriteDropped small and non-zero only at mission end; (e) 413 restores the synchronous write above the register and (b) must still pass; (f) the 26645 lanes are unaffected and userAsyncBatches still counts. FALSIFICATION: a .khmc that fails to load on the second launch convicts the off-thread write - the stand-down is 413 - and note the cache header already validates magic, version, hash and size, so a TRUNCATED file reads as a miss and re-parses rather than corrupting a mesh, which is why this was safe to move at all. NUMBER HYGIENE: mode 413 minted. FREE NOW: debug modes 414+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26645 USER SHADERS STOP COMPILING ON THE RENDER THREAD, AND THE POST-PROCESSING UNIT JOINS THE POOL (KH_USER_ASYNC, mode 411 stands it down; KH_FX_BATCH, mode 412 stands it down; C++ ONLY, NO SHADER SOURCE EDIT, not one cache key moves). OPERATOR DIRECTIVE, and 26644 is CONFIRMED IN THE FIELD - the white preview draws. THE DEFECT THIS CLOSES WAS NOT PARALLELISM. kh_user_mat_ps compiles khum_full = g_cb_hlsl + the user source + g_hlsl_static, at entry PSMain - or the composite pair at PSComposite - and those are THE TALL POLES, the same two entry points 26636 named as the heavy units, carrying the whole shadow chain at 200-400 s cold. It ran SYNCHRONOUSLY, from the flush draw loop at the kh_user_fx_ps/kh_user_mat_ps call sites, ON THE RENDER THREAD, INSIDE THE GRAPHICS LOCK, the first time any object used the material. Assigning a user material in-game was therefore a multi-minute hard freeze: the 26637 freeze, reachable from a script call, alive through this entire campaign because every build since 26636 looked at the STARTUP path and this one is on the DRAW path. kh_user_fx_ps has the identical shape and is lighter only because PSEffect does not call the chain. A POOL WOULD NOT HAVE FIXED IT - a pool of one buys nothing and even a perfect one leaves the render thread waiting on a unit that takes minutes; the axis is ASYNCHRONY. WHAT MADE IT CHEAP: both getters already return nullptr on absence or failure and EVERY caller already degrades gracefully - the effect path skips the pass, the material path keeps builtin PBR - so a pending compile returns nullptr, the frame renders correctly, and the shader swaps in the frame its blob lands. That is 26641's shape applied to a path that always needed it. THE PARALLELISM ARRIVES ANYWAY AND IS REAL: requests queue and the pump arms them as ONE BATCH, so five materials activated together compile concurrently instead of as five sequential render-thread freezes. THE ONE RULE, stated because breaking it reinstates the freeze: compile_shader is ALLOWED TO WAIT on the condition variable, and the getters must never call it for a unit in flight. They use kh_shader_memo_try_take, a new non-blocking probe - absent or unfinished both read false and the caller keeps its fallback. EDGE CASES, each answered rather than assumed. EXIT MID-COMPILE: user jobs ride the SAME pool, so 26642's teardown covers them unchanged - abort, bounded wait, detach - and the per-job deep copy is load-bearing here in a way it was not for the static batch, whose sources are global literals while these are runtime strings read off disk. A NEW SHADER ACTIVATED MID-COMPILE was the case the old code handled WORST - an inline compile competing with sixteen saturated workers - and is the one the queue handles best: recorded, served when the pool frees, builtin PBR meanwhile, no stall at any point. kh_shader_mt_prewarm already refuses while a batch is active or a worker is live, so nothing here can nest or clear a job queue under running workers, and a refusal is not an error - the request waits a frame. DEVICE RESET AND MSAA CHANGE: the cache key carries the sample count, so a toggle mints new keys and would strand the old pending entries; kh_user_shader_purge_pending drops every request and releases anything already compiled for one, and it is called from kh_user_shader_cache_release, which both the reset path and the mission-end path already reach. A unit still IN FLIGHT is never erased under its worker - it is left for the discard sweep. MEMO LOST UNDER AN ARMED REQUEST: a teardown between arming and consuming clears g_khsm_map, which would leave a request armed forever against an entry that no longer exists and the caller on its fallback for the whole session with NO ERROR ANYWHERE; the pump detects the vanished hash and re-arms, bounded at three so a genuinely unservable request cannot spin. userAsyncRelost counts it. FAILURE LATCHES exactly as the synchronous path latched it, so a broken .hlsl reports once and is never re-queued. THE QUEUE IS BOUNDED at 32 and an overflowing request is simply not recorded, so the next frame asks again and the retry costs one map lookup, never a compile. ONE SAME-BUILD RETENTION FIX, and it is a defect this feature would have CREATED: g_khsm_own - the owned job storage - was freed by kh_shader_mt_finish(false) alone, i.e. at shutdown, and the async gate finishes with keep_memo TRUE. With three fixed batches a session that was bounded and nobody paid for it; with a batch armed per user-shader activation it is an unbounded per-activation leak of a full g_cb_hlsl-prefixed source each time. It is now cleared in prewarm, safe by the identical argument the queue clear beside it already stands on - past the active guard and past the live check, so no worker exists to read it, and the queue that points into it has just been emptied. KH_FX_BATCH, the second and much smaller half: PSEffect was the last unit on the startup path with no pool at all, compiling strictly AFTER the batch rather than beside it. It joins khsp_jobs as a speculative entry on the 1x arm exactly as the composite matrix does, and its table is MSAA_DEPTH ALONE - no SAMPLE_COUNT, no KH_RECEIVE_TEX, because the effect unit's depthTex owns t1 and it never receives. A wrong guess costs an inline compile exactly as today. RULE 1.11, DECLARED NOT HIDDEN: this build ships TWO behavioural defaults, which 1.11 forbids. It is done under a direct operator directive to build the whole thing, and the two are independently armed - 411 and 412 - touch disjoint code and disjoint call paths, and are therefore independently bisectable, which is the property 1.11 exists to protect. PRE-REGISTERED ACCEPTANCE, cold cache. ARMING LANE FIRST: userAsyncQueued must be non-zero the first time a user .hlsl is used, with userAsyncBatches following it - Queued non-zero and Batches zero means every pump found the pool busy and the requests are starving, and that is a defect not a slow path. (a) THE HEADLINE: assigning a user MATERIAL to a mesh in-game no longer freezes - the object renders with builtin PBR for some frames and then becomes the user shader, and the game never stops. (b) userAsyncDone plus userAsyncFails equals userAsyncQueued once the queue drains; a permanent shortfall means a request is stuck pending. (c) userAsyncRelost 0 on a normal session. (d) userAsyncDrops non-zero after an FSAA toggle and zero without one. (e) a user .hlsl with a syntax error reports ONCE and the object keeps builtin PBR forever, not once per frame. (f) 411 restores the freeze exactly - that is the proof the async path is what removed it. (g) shaderMtBatches climbs past 3 now, by one per user-shader activation round, and that is correct rather than a regression. (h) KH_FX_BATCH: shaderCacheMisses on a cold 1x run gains PSEffect inside the batch instead of after it, and 412 puts it back. FALSIFICATION: a user shader that NEVER arrives with userAsyncBatches counting convicts the try_take probe or the hash agreement between kh_user_async_queue and prewarm - both compute the key over the same owned strings and a divergence there is silent by construction, so compare the census hash against userAsyncQueued before anything else; 411 is the stand-down either way. A user shader arriving WRONG - the wrong blob for a key - convicts the memo and the stand-down is 402, not 411. NUMBER HYGIENE: modes 411 and 412 minted. FREE NOW: debug modes 413+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26644 THE PLACEHOLDER NEVER DREW, AND THE MESSAGE THAT SAID SO NAMED NOTHING - THE WHITE PREVIEW'S ENSURE, INSTRUMENTED AND REPAIRED (mode 410 restores the 26643 form whole; C++ ONLY, NO SHADER SOURCE EDIT, so the 26643 white cache key does not move and no other key has ever moved). OPERATOR REPORT, on a warm-cache run at the moment of a spawn: "KH white preview: device object create failed (preview stands down)". THAT MESSAGE WAS THE FIRST DEFECT. 26643 folded SEVEN device creates plus a vertex-buffer top-up into ONE boolean and reported the collapse with no step name and no HRESULT, so a field report narrows nine independent causes to nine independent causes. Rule 1.12 binds and the instrument ships first: khw_step carries the last attempted call, khw_hr its result, and both ride the one report - CreateVertexShader / CreatePixelShader / CreateInputLayout / CreateBuffer(obj) / CreateBuffer(frame) / CreateRasterizerState / CreateDepthStencilState, each named, each with hr_str. THREE SUBSTANTIVE REPAIRS BESIDE IT, every one of them a deviation from a pattern this file already fields. (1) THE INPUT LAYOUT DESCRIBED ONE ELEMENT AGAINST A TWO-ELEMENT SIGNATURE. VSWhite takes VSIn, whose untextured form declares POSITION AND NORMAL; 26643 described POSITION alone, reasoning from the shader BODY - which reads i.pos only - rather than from the signature the runtime validates against. Every other layout in this file supplies every element its entry point declares: two for VSMain, four for the textured twins, seven for VSSunDepth. And the one entry point that genuinely wanted a position-only vertex was not given a narrow layout at all - it was given its own NARROW INPUT STRUCT, VSInMir, and then rode the WIDE two-element layout, because a layout WIDER than the signature is legal by construction while a layout NARROWER than it is a validation question the runtime answers and we do not get to assume. 26644 takes the two-element layout ensure_resources already builds for VSMain, at the same MeshVertex offsets, fielded verbatim - and because the fix is on the C++ side the HLSL is untouched and the cache key stands. THIS IS THE LEADING CANDIDATE FOR THE REPORTED FAILURE and it is the only create in the block with no fielded precedent, but it is NOT CONFIRMED - the instrument above is what confirms or refutes it, and if the next report names a different step then this repair was cheap and correct anyway. (2) THE VERTEX-BUFFER TOP-UP GATED A FEATURE IT IS NOT PART OF. ensure_mesh_vbs sat inside the same boolean as the creates, so ANY published mesh with empty geometry - and kh_mesh_append enforces the non-empty contract by convention only, never in code - returns an error string, reports as a DEVICE OBJECT failure, and stands the preview down PERMANENTLY because white_tried has already latched. Every real draw path treats that identical failure as skip-this-frame and retries. The top-up moves to kh_white_draw, which already bounds-tested every id against mesh_vb before indexing it at 26643, so a missing buffer now costs one object one frame instead of the feature the whole session; whiteVbFails counts. (3) THE RASTERIZER BIAS CAME OFF THE WRONG TWIN AND 26437 IS THE LEDGER THAT SAYS SO. 26643 set DepthBias -32 and SlopeScaledDepthBias -0.25 and called it "the mesh rasterizer's contract, verbatim". Those are the values of rasterizer_b and rasterizer_ub, the REVERT twins behind modes 187 and 179. The PRIMARY g_res.rasterizer has carried 0 / 0 / 0 since 26364, which folded the mesh bias OFF after the field confirmed the box stopped eating objects standing in front of it, and 26437's standing check states the resolved table in writing: primaries 0/0/0, _b twins -32/-0.25/CLAMP, _ub twins -32/-0.25/0. This is 26436's error repeated one campaign later and in the same shape 26437 named - matching a field assignment instead of the block the consumer reads - which is why that ledger's general form was worth more than its instance. A placeholder pulled 32 units toward the camera is the 26334/26363 z-fighting class returned, on the one pass whose entire job is to be trusted about WHERE a spawn landed. Primaries now, 410 restores -32/-0.25. TWO COMMENT-ONLY CORRECTIONS, rule 1.16. StateBackup does NOT restore on scope exit - it has no destructor and every pass calls restore by hand; kh_white_draw is correct today because every path after capture reaches the bottom, the loop's break included, but the 26643 text invited an early return that would leak the engine's bound state AND every AddRef'd interface. And a tripwire at khsp_jobs: VSWhite and PSWhite are deliberately absent from that batch and must stay absent, because kh_white_ensure calls compile_shader on the RENDER THREAD INSIDE THE GRAPHICS LOCK and compile_shader blocks on the condition variable for any key present-but-not-done - queueing the pair "so the pool warms it too" reintroduces the 26637 freeze by way of 26642 defect (1), for a pair that costs milliseconds inline. ALSO CORRECTED, from the handoff audit: the 135 lighting0.y branch sites are 270 TEXTUAL OCCURRENCES, every site using the two-sided band form, distribution exactly 2 per line across all 135 - a count-asserted edit keyed on 135 against an occurrence grep fails on every pattern, and the twins are 9 sites / 18 occurrences and 10 / 20 the same way. Same class as MEASURE SEGMENTS IN BYTES. PRE-REGISTERED ACCEPTANCE, cold cache: (a) THE ARMING LANE FIRST - a mesh spawned during the compile window appears flat white with whiteFrames and whiteDraws counting, and if it does not, the report now NAMES the step and that name is the whole result of this build; (b) whiteVbFails 0 on a normal session; (c) the placeholder sits at the same depth the shaded mesh takes when it replaces it - no pull, no z-fight against objects standing in front of it, which 26643's bias would have produced and 410 restores for the A/B; (d) whiteCompileMs still tens of ms - and read it against shaderMtThreads before convicting the parsing-is-free premise, since these two inline compiles run while the pool saturates memory bandwidth and the file's own N^0.44 contention law applies to them too; (e) 409 still empties the screen exactly; (f) shaderCacheHits unchanged from 26643 - NO shader source moved in this build, so not one key is new. FALSIFICATION: a step name other than CreateInputLayout convicts a different cause and repair (1) was merely hygiene; whiteVbFails climbing convicts a published empty-geometry mesh and the repair moves to kh_mesh_append enforcing its own contract. NUMBER HYGIENE: mode 410 minted. FREE NOW: debug modes 411+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26643 THE MESHES BECOME VISIBLE BEFORE THE SHADERS DO - A FLAT-WHITE PLACEHOLDER PASS FOR THE WHOLE COMPILE WINDOW (KH_WHITE_PREVIEW default ON; mode 409 stands it down; ONE new HLSL unit, ZERO edits to any existing shader source, so not one cache key moves). OPERATOR DIRECTIVE. 26641 made the game playable through a cold-cache compile and left the screen empty for the whole of it: ensure_resources now returns before it creates a vertex buffer, let alone a shader, so a spawn issued at minute one is invisible until minute six and the operator has no way to tell a working script from a broken one. THE FIX IS A SECOND, TINY UNIT. g_hlsl_white is VSWhite plus PSWhite - VSMain's default transform and a constant white - compiled against the UNCHANGED g_cb_hlsl. THREE THINGS MADE THAT THE RIGHT SHAPE RATHER THAN A DEFINE ON g_hlsl_static. (1) THE CACHE. The 26482 key is an FNV over source, entry, target and defines, so one #ifdef inside g_cb_hlsl or g_hlsl_static changes the content hash of EVERY unit and discards the .khsc cache of every user who already has one - eight minutes of recompile bought with a placeholder. A NEW string appended to an unchanged prefix mints a new key and disturbs no existing one. (2) THE COST. 26641 measured VSComposite compiling the same 414 KB source in 53 ms: parsing is free and the entire compile cost is code generation over the shadow chain, which only the pixel shaders that CALL it pay. PSWhite calls nothing, so the pair costs milliseconds, is compiled INLINE rather than queued, and is cached to disk from the second launch like everything else. (3) THE MIRROR. Compiling against g_cb_hlsl means the placeholder reads the REAL CBObj and CBFrame declarations, so the 235/237 float4 mirror cannot desynchronise behind it - a hand-written cbuffer would have been a second mirror to maintain and the exact hazard the file's architecture note warns about. THE PASS OWNS EVERYTHING IT TOUCHES: its own shaders, input layout, b0/b1 buffers, rasterizer and depth-stencil state, all seven created in kh_white_ensure and all released with the device. That is deliberate - every object ensure_resources builds is built BELOW the async gate, so borrowing any of them would inherit the dependency the placeholder exists to escape. The one shared thing is g_res.mesh_vb, and it is shared safely: ensure_mesh_vbs only ever GROWS that vector and is reached through every ensure including the initialized fast path. The rasterizer is 'rasterizer' verbatim - CullNone, MultisampleEnable, DepthClipEnable FALSE, bias -32 / -0.25 - so the placeholder occupies the depth the real mesh will occupy. WHAT IT DELIBERATELY IS NOT: no lighting, no shadow receive, no effects, no blending, no textures, no two-sided ordering, no composite eligibility, no injection. A placeholder whose fidelity is arguable is worse than one that is obviously a placeholder, and every one of those paths is machinery that does not exist on a deferred frame. Position, rotation and size ARE real, because where the spawn landed is the whole question being answered. ONE CALL SITE: the flush's ensure gate, on the sentinel only, guarded by StateBackup and leaving the render targets alone exactly as the real mesh pass does. NON-FATAL IN EVERY DIRECTION: a compile failure, a create failure or an empty VB list leaves white_ready false and the session behaves as 26642 did. PRE-REGISTERED ACCEPTANCE, cold cache: (a) a mesh spawned during the compile window appears IMMEDIATELY, flat white, at the right place, size and rotation, with whiteFrames and whiteDraws counting; (b) whiteCompileMs reads in the tens of milliseconds, NOT the tens of seconds - a large number there falsifies the parsing-is-free premise and the unit gets split off g_cb_hlsl instead; (c) the white meshes are REPLACED by fully shaded ones the frame compilation completes, with no gap and no double-draw; (d) shaderCacheHits on the SECOND launch is unchanged from 26642 plus two - proof that no existing key moved; (e) mode 409 restores the empty screen exactly; (f) a warm-cache session never defers, so whiteFrames reads 0 and not one white object is ever created. FALSIFICATION: placeholders in the wrong place convict the transform pair (viewProj is built unrebased and VSWhite takes the centreRel.w == 0 branch - they must agree, and disagreeing is the only way to be wrong here); placeholders that SURVIVE compilation convict the flush hook, since it must be unreachable once ensure_resources stops returning the sentinel. NUMBER HYGIENE: mode 409 minted, no lighting0.y code. FREE NOW: debug modes 410+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26642 THE 26641 POOL LIFETIME, REPAIRED - FIVE DEFECTS IN UNTESTED CODE, FOUND BY READING IT (mode 407 restores the 26641 teardown form, 408 the 26641 query-path form; C++-side only, no shader source, no lighting0.y code, mode 0 RENDERING byte-identical). 26641 is UNTESTED and its acceptance is unrun, so this build repairs it rather than extending it, and every repair is stated with the mechanism that convicts it. (1) THE ABORT LATCH UN-ABORTED ITSELF, and this is the one that matters. kh_shader_mt_shutdown stored g_khsa_abort false at its BOTTOM - after the detach - so a detached worker sitting inside D3DCompile finished its unit, looped, read the flag back as false and claimed the NEXT unit off a queue the detach path deliberately does not clear. 'Stop all unstarted work instantly' therefore lasted about five seconds and the whole remaining batch ran on. THE CONSEQUENCE IS NOT MERELY WASTED CPU: g_khsm_live stays above zero for minutes, the next mission's prewarm refuses on it, and compile_shader then finds those memo entries taken-but-not-done and WAITS ON THE CONDITION VARIABLE - the render thread, inside a graphics lock, for up to one full unit. That is the frozen game 26637 closed, arriving one mission later, and it also falsifies 26641's own sentence that the caller 'compiles inline, which is always correct'. The latch is now cleared in kh_shader_mt_prewarm, which is the only place a worker is ever created and is past the live check by one line. (2) THE 5 s TEARDOWN WAIT WAS UNCONDITIONAL AND on_engine_reset HOLDS THE GRAPHICS LOCK. The wait buys exactly one thing - a join instead of a detach when a compile happens to be nearly done - and 26641 is precisely the build that made a device reset mid-compile LIKELY, because the player is now awake and playing for five minutes with the pool live, so an alt-tab, a resolution change or an FSAA toggle lands in a window that used to be a hard freeze. Both reset paths now pass wait=false; mission end keeps the 5 s bound so 26641's acceptance (e) is still runnable as written. New lane shaderMtStallMs measures what teardown actually costs instead of arguing about it. (3) A BATCH THAT SPAWNED NO WORKER DEFERRED FOREVER. If the first emplace_back threw, prewarm broke out with an empty thread vector and still returned true; the gate armed a batch nothing could ever publish and the mesh never appeared for the rest of the session, with shaderMtThreads reading 1 as the only witness. It is a reachable path, so it stands the batch down and everyone compiles inline as on a single-core machine. shaderMtSpawnFails counts it. The legitimate khsm_w == 0 case - a one-job caller-works batch - is deliberately not caught. (4) THE QUERY API WENT DARK FOR THE WHOLE WINDOW. 26641's ledger says 'every caller already treats a non-empty return as skip-this-frame'; that is true of the five render sites and FALSE of run_depth_compute and upload_query_points, which hand the string to SQF - so for minutes gpuVisibility and sampleSceneDepth answered scripts with an error they have no reason to expect, for shaders they do not use. Everything those two consume comes from ensure_depth_srv, ensure_compute_shaders and ensure_query_buffers, so the deferral is skipped past instead of returned - and the ONE thing that made that unsafe, the compute constant buffer being created inside ensure_resources BELOW the gate, is moved to ensure_compute_shaders where it belongs, with a null guard at the map site as belt and braces. 408 reverts. (5) THE GATE WAS ASKED TOO LATE. Everything above it in ensure_resources is two source concatenations totalling 791,059 bytes plus the temporaries the operator+ chain makes of them, rebuilt from scratch on every call, from up to five render sites per frame, for the entire multi-minute deferral - roughly four megabytes of allocation and memcpy per frame inside exactly the window whose whole purpose is to read as a normal frame rate. kh_shader_async_hold needs no source and reaches the identical verdict, so it runs first. THE SPLIT ALSO CLOSES TWO SMALLER THINGS: mode 406 armed MID-BATCH used to leave the batch unfinished, its threads unjoined and its census unflushed, because the 406 test sat above the pending scan - it now sits below it, so a 406 armed in flight blocks on the memo, the waiters drain the entries and the next call finishes the batch normally; and a state-0 prewarm refusal caused by a still-draining detached pool now DEFERS instead of falling through to blocking inline compiles. ALSO IN THIS BUILD, no arm because neither can change an outcome: the per-job deep copy shares its SOURCE by pointer identity (sixteen jobs over two 400 KB units were copying 6.3 MB of identical HLSL and holding it until the next full teardown; the macro tables stay per job, which is what the copy existed for, and unique_ptr nodes keep every address stable), and the fire path's SRV save/restore carries its table WIDTH instead of the literal 33 in six places - the file's own architecture note says ps_srvs 'rides _countof at all three sites', which is true of StateBackup and was not true of mask_cast_engine's twin tables, so a t33 SRV would have widened the array and silently left six literals behind. PRE-REGISTERED ACCEPTANCE: 26641's (a) through (f) all still stand and are what this build exists to let the operator actually run; on top of them, shaderMtStallMs near 0 on a normal session; shaderMtSpawnFails 0; a mission ended mid-compile returns to the menu with shaderMtDetached 1 and shaderMtJobs NOT climbing afterwards - that lane pair is the direct instrument for defect (1); gpuVisibility answering normally during the compile window; and shaderAsyncFrames still non-zero. FALSIFICATION: any shader failing to create or any non-determinism between launches means the source sharing broke the deep copy and 402 is the stand-down, not 407. NUMBER HYGIENE: modes 407 and 408 minted, no lighting0.y code. FREE NOW: debug modes 410+ (409 is minted by 26643, which sits ABOVE this entry - the ledger is newest first), lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
 //  || 26641 THE RENDER THREAD STOPS WAITING, AND THE SPECULATION STOPS OVER-REACHING - PARALLELISM IS FINISHED AS AN AXIS AND THIS IS WHAT IS LEFT (KH_SHADER_ASYNC + the LEVER-1 trim; mode 406 restores the blocking form; C++-side only, no shader source, no lighting0.y code). FIELD ON 26640, and it is two results in one line. THE ARM WORKED: shaderMtBatches 1 - the composite batch never armed because every unit was already in the memo - ONE freeze instead of two, speedup 3.02x to 9.76x, and shaderMtWallMs 393391 against shaderSlowestMs 393387, which means WALL TIME IS THE SLOWEST SINGLE UNIT TO FOUR MILLISECONDS. The pool has no scheduling slack left at all and no further parallelism work is worth doing. THE PREDICTION FAILED AND THE CORRECTION IS OWED (rule 1.16): I pre-registered ~270000 ms and the field read 393391. The cause is a thing I treated as a constant and is not - PER-UNIT COMPILE TIME DEPENDS ON CONCURRENCY. Measured across three builds: 2 heavy units concurrent gives 224 s each, 4 gives 260 s, 10 gives 391 s, a fit of roughly N^0.44. Ten D3DCompile instances over 400 KB translation units thrash each other's cache and memory bandwidth, so the speculation bought 1.25x where I promised 1.8x. LEVER 1, THE TRIM: eight composite variants were queued and four consumed, and the MSAA_DEPTH=1 half HAS NEVER BEEN CONSUMED IN ANY DUMP - every one reads MSAA_DEPTH=0, SAMPLE_COUNT=1 at the composite while the scene depth is 8x, because comp_depth_samples is not depth_sample_count. It is removed. Six heavy units instead of ten, ~312 s instead of 391 by the fit. An MSAA-on composite misses and pays a second batch exactly as at 26639 - never worse than the state before this campaign. LEVER 3, AND IT IS THE REAL ONE: A SINGLE UNIT ALONE IS STILL ~200-260 s, so without shipped blobs or a smaller shader, minutes of compiling are physics and the only remaining question is whether the PLAYER IS FROZEN THROUGH THEM. ensure_resources now returns KH_SHADERS_COMPILING while the batch runs. Every caller already treats a non-empty return as skip-this-frame - that contract has existed since 26319 - so the game runs normally, the 30-second watchdog stops firing, and the mesh appears when the shaders are ready. Everything after the gate is UNCHANGED CODE taking memo hits. THE DEFERRAL IS A STATE, NOT A FAILURE, and kh_ensure_ok now recognises the sentinel and stays silent - without that it would reach report_error, which calls sqf::throw_exception, and the 26639 defect would fire once per session. TWO LIFETIME HAZARDS THAT ASYNC CREATES, BOTH CLOSED, because the operator asked for exactly this. (1) DANGLING JOBS: a worker now outlives the ensure that queued it, and every job's source string and define table is a FUNCTION LOCAL at the call site - they would dangle the instant ensure_resources returned. The pool takes a DEEP COPY of every job into heap nodes, so growing the owner vector cannot move the strings the macro table points at, and a null Definition is PRESERVED AS NULL because the cache hash mixes nothing for null and a separator for empty - collapsing them would silently change every key in the cache. (2) TEARDOWN WITH A COMPILE IN FLIGHT: a thread inside D3DCompile cannot be killed, TerminateThread leaks the loader and heap locks and is documented as unusable, so the policy is to stop all UNSTARTED work instantly via an abort flag the worker checks before every claim, then wait a BOUNDED 5 s. Almost every teardown is idle and costs nothing. If a compile really is running the threads are DETACHED rather than blocking the game for minutes, and detaching is safe HERE and only here: the worker touches no device object and no engine state, only D3DCompile, the memo and its own copied strings; the extension DLL stays mapped for the process lifetime; the thread container is leaked since 26637 so no destructor can meet a joinable thread; and the memo, queue and owned storage are DELIBERATELY NOT FREED because the detached worker still reads them. g_khsm_live keeps them alive and makes the next prewarm REFUSE until the last worker exits, at which point the caller compiles inline, which is always correct. A hard crash needs nothing: threads are not processes and die with the address space. PRE-REGISTERED ACCEPTANCE, cold cache: (a) THE GAME DOES NOT FREEZE - it runs at normal frame rate with the mesh absent, and shaderAsyncFrames is non-zero, which is the arming lane; (b) the mesh appears once and does not stall again; (c) shaderAsyncMs lands near 310000 rather than 393000 - lever 1; (d) no 'No alive' watchdog lines in the RPT; (e) shaderMtDetached 0 on a normal session, and a mission ended mid-compile returns to the menu within ~5 s with it reading 1; (f) nothing on screen changes once compilation completes. FALSIFICATION: any shader failing to create, or any non-determinism between launches = the deep copy is not reproducing a define table and 406 is the instant stand-down; a hang at mission end = the 5 s bound is not being reached and the abort flag is not read where I think it is. NUMBER HYGIENE: mode 406 minted, no lighting0.y code. FREE NOW: debug modes 407+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
 //  || 26640 THE IDLE CORES GET THE COMPOSITE UNIT, AND THE OBJECTION THAT STOPPED THIS AT 26639 DISSOLVES ON ONE OBSERVATION - WASTED WORK ON AN IDLE CORE COSTS NO WALL TIME (KH_SHADER_SPECULATE default; mode 402 still stands the whole pool down; C++-side only, no shader source touched, no lighting0.y code). THE MEASURED SHAPE, from the 26638 census: batch 1 has TEN units of which exactly TWO are heavy, so on the operator's 16-thread machine EIGHT CORES SIT IDLE for 225 s while the composite unit's four heavy variants wait for a second batch that cannot start until g_res.comp_depth_samples is known - and then run 267 s on their own. 225 + 267 = the operator's 8.2 minutes, in two freezes, at 25 pct and 50 pct CPU respectively, exactly as he described them before any lane confirmed it. THE FIX IS NOT TO GUESS THE SAMPLE COUNT, IT IS TO REFUSE TO: both plausible configurations are queued into batch 1 - MSAA_DEPTH 0 at SAMPLE_COUNT 1, and MSAA_DEPTH 1 at the learned depth_sample_count or 8 - and the memo serves whichever the engine turns out to want. The loser costs cycles and heat and NEVER A SECOND of the freeze, because it ran on a core that had nothing else to do. Wall collapses from 225 + 267 to max(267) and the SECOND FREEZE DISAPPEARS ENTIRELY: one wait instead of two, ~4.5 minutes instead of 8.2, a measured 1.8x on top of the 3.02x the pool already delivered. AND THE 26637 LIFETIME MODEL IS NOT LOOSENED, which is what I told the operator this change would cost and was WRONG about - the correction is owed and is stated here (rule 1.16). I said a cross-batch prewarm needed a session-scoped POOL, threads living across frames, giving up 'no worker outlives its batch'. It does not. Only the MEMO has to survive, and a memo is a map of blobs, not a thread. ensure_resources still joins every worker before it returns - keep_memo leaves the compiled blobs behind and nothing else - so every guarantee 26637 bought stands verbatim: no thread crosses a scope, the RAII join still covers every early return, the leaked container still cannot terminate at unload. The change is one bool. I had priced a risk that does not exist and nearly traded a crash-safety property for it. DISCLOSED COSTS, all three. (i) THE FIRST FREEZE GETS LONGER, 225 s to ~267 s, because ensure_resources now joins on the slowest COMPOSITE unit too - the mesh appears later, and then does not freeze again. One 4.5-minute wait beats 3.8 plus 4.5 and the operator should know which one he is looking at. (ii) CPU AND HEAT ROUGHLY DOUBLE on the cold run: eight speculative heavy units against four consumed. That is the price of not guessing and it is paid on idle cores. (iii) A 2x OR 4x MSAA USER MISSES both speculations and gets the 26639 behaviour exactly - two freezes - never worse, because a memo miss compiles inline as it always did. THE DEFINE TABLES ARE THE FRAGILE PART AND ARE FLAGGED AT THE SITE: the memo key is an FNV over source, entry, target and the define NAMES AND VALUES IN ORDER, so the speculation must mirror ensure_composite_shader byte for byte, including the asymmetry that the base and arb tables carry KH_ARB_DEPTH explicitly while the TEXTURED base table omits it. A mismatch is silent and costs only speed. PRE-REGISTERED ACCEPTANCE, cold cache: (a) ONE freeze, not two, and the mesh does not stall again after it appears; (b) shaderMtBatches still 2 but the batch-2 census line reads its four PSComposite units as CACHED at 0 ms - THAT IS THE ARMING LANE, and if they read hundreds of seconds the speculation missed and the define tables have diverged; (c) shaderMtWallMs lands near 270000 rather than 490000; (d) shaderUnits climbs from 25 to ~33 - the speculative losers - which is the cost made visible; (e) nothing on screen changes in any mode. FALSIFICATION: batch 2 compiling anything at all = a define mismatch, and the census line names which variant by its define set. NUMBER HYGIENE: nothing minted, nothing retired. FREE NOW: debug modes 406+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
 //  || 26639 THE CENSUS ANSWERED IT AND THE ANSWER IS NOT PARALLELISM - ONE PIXEL SHADER TAKES FOUR AND A HALF MINUTES TO COMPILE (KH_SHADER_FLAGS, three OPT-IN arms 403/404/405, no default change; plus a DEFECT REPAIR I owe for 26638). FIELD, dump2 on 26638 with the RPT census, and it is decisive. shaderCompileMs 1489960 against shaderMtWallMs 492717 = THE POOL DELIVERED 3.02x AND IS WORKING. Batch 2's seven units: four PSComposite variants at 267547, 262535, 259352 and 252611 ms - a quarter of an hour of CPU in four units - then VSComposite at 57 and 53 ms and a stray PSDepthResolve at 4. Batch 1 decomposes by subtraction to 447801 ms of CPU in 225170 ms of wall = 1.99x, which is EXACTLY TWO heavy units at ~224 s each: PSMain and its KH_TEXTURED twin. THE OPERATOR'S OWN DECOMPOSITION WAS RIGHT IN EVERY PARTICULAR - freeze one 3.8 min at ~25 pct CPU because only two threads had work, freeze two 4.5 min at ~50 pct with threads visibly maxing because four did, and shaderMtThreads 10 was capped by the JOB COUNT and never by his 16 cores. THE POOL IS AT ITS AMDAHL FLOOR: shaderSlowestMs 267547, so infinite cores still costs 4.5 minutes and the 26636 pre-registration named that bound before the build shipped. NO FURTHER PARALLELISM IS WORTH BUILDING and the batch-overlap idea is BANKED, NOT SHIPPED - it would fold 8.2 minutes into 4.5 and nothing more, it needs the composite's MSAA sample count before ensure_resources knows it, and guessing wrong compiles variants nobody uses AND pays for the right ones after. THE REAL FINDING, and it is the one number that reframes the whole axis: VSComposite compiles THE SAME SOURCE STRING - the same g_cb_hlsl, the same composite chunks, the same defines - IN 53 MILLISECONDS. Preprocessing and parsing are free. The entire cost is code generation over the shadow chain, which only the pixel shaders call, and 5000x between a VS and a PS on one source is not a big shader, it is a pathology. Flags1 at the single D3DCompile call has been 0 for the life of this file: fxc's default optimisation with full branch flattening, applied to five nested tiers of early-returning branches, each carrying a 9-tap ring, an RPDB tap, a manual trilinear and a jurisdiction test. That is the exact shape whose flattening explodes. THE ARMS, all opt-in, all producing IDENTICAL PIXELS: 403 PREFER_FLOW_CONTROL (keep branches as branches - the prime suspect, and the only one that could ever become a default), 404 OPTIMIZATION_LEVEL0 and 405 SKIP_OPTIMIZATION (diagnostics that buy compile time with FRAME time - they are not candidates and are labelled so in the whitelist). THE FLAGS JOIN THE CACHE HASH AND THEY HAD TO: the 26482 cache is content-addressed over source+entry+target+defines, so without this an arm's blob would be written under the DEFAULT's key and served to a later default run - a silently wrong shader, the one failure mode a content-addressed cache exists to make impossible. DISCLOSED: adding the field invalidates every existing .khsc entry ONCE. THE DEFECT REPAIR, owed from 26638 (rule 1.16): report_error calls sqf::diag_log AND sqf::throw_exception, so the census raised a REAL SCRIPTING ERROR every batch - the operator's RPT carries 'Error Unhandled exception' with the entire census line as its text, inside interceptOnFrame. A gauge must not throw at the mission. kh_report_note logs and returns; the census uses it. My mistake, found by the field in one round, and the census data itself was unaffected. PRE-REGISTERED PROTOCOL, three cold runs, and the cache makes this cheap because each arm caches under its own key: clear the cache once, then run 403, then 404, then 405, reading shaderSlowestMs and the census line each time. THE READS: 403 collapsing the per-unit figures while pixels are unchanged = branch flattening is the author, and 403 becomes a DEFAULT candidate with its own build, its own revert and a frame-time acceptance, because it changes generated code and this file does not ship codegen changes on a compile-time argument alone. 403 null with 404 and 405 collapsing = the cost is raw optimiser volume rather than flattening, no flag is shippable, and the axis moves to the SOURCE - the named candidate there is that PSMain and PSComposite each inline the debug probes (KhSelfCertProbe, KhSelfTierProbe, KhPfProbe, KhPfProbe2), every one of which re-derives the tier walk, so a debug-only compile variant is the lever, at the cost of the live A/B this campaign's whole method rests on - a trade for the operator, not for me. ALL THREE NULL = the time is not where the census says and the next step is a profile of D3DCompile itself, not another guess. NUMBER HYGIENE: modes 403, 404 and 405 minted, no lighting0.y codes. FREE NOW: debug modes 406+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
@@ -7365,6 +7585,58 @@ float KhHazeT(float khaz_d, float khaz_wposY, float khaz_camY, float khaz_layerY
 
 )HLSL";
 
+// ===========================================================================
+// KH_WHITE_PREVIEW - 26643. THE PLACEHOLDER PASS.
+//
+// A cold-cache session now spends minutes compiling with the game running
+// (26641) and NOTHING ON SCREEN, because ensure_resources returns before it
+// creates a single object. The operator asked for the meshes to be visible in
+// the meantime, flat white, so a spawn is confirmed the moment it happens
+// rather than five minutes later.
+//
+// WHY THIS IS ITS OWN SOURCE STRING AND NOT A DEFINE ON g_hlsl_static. The
+// shader cache key is an FNV over source, entry, target and defines (26482),
+// so adding one #ifdef anywhere inside g_cb_hlsl or g_hlsl_static changes the
+// content hash of EVERY unit and throws away the .khsc cache of every user
+// who already has one - an eight-minute recompile bought with a placeholder.
+// A NEW string appended to the unchanged g_cb_hlsl produces a new key and
+// disturbs no existing one.
+//
+// WHY THE COST IS NOT THE 290 KB PREFIX. 26641 measured VSComposite compiling
+// the same 414 KB source in 53 ms: parsing is free and the entire compile
+// cost is code generation over the shadow chain, which only the pixel shaders
+// that CALL it pay. PSWhite calls nothing, so the pair costs milliseconds and
+// is cached to disk after the first launch like everything else. Compiling it
+// against g_cb_hlsl rather than a hand-written mirror is also what keeps it
+// safe: it reads the REAL CBObj and CBFrame declarations, so the 235/237
+// float4 mirror cannot desynchronise behind it.
+//
+// The transform is VSMain's default path verbatim - centreSize plus the
+// rotated, scaled unit mesh, through viewProj. The stenVol2.z arms (174-176)
+// are not reproduced: they are injection-path experiments and the fill below
+// writes centreRel.w = 0, so the ternary always takes the branch VSMain takes
+// on mode 0. Nothing here samples a texture, tests a mask or reads lighting -
+// a placeholder that could be wrong about shading would defeat its purpose.
+// ===========================================================================
+static const char* g_hlsl_white = R"HLSL(
+struct VSOutW { float4 pos : SV_Position; };
+
+VSOutW VSWhite(VSIn i)
+{
+    VSOutW o;
+    float3 khw_l = KhRotate(i.pos * sizeAxes.xyz);
+    float3 khw_p = (centerRel.w > 0.5f) ? (centerRel.xyz + khw_l)
+                                        : (centerSize.xyz + khw_l);
+    o.pos = mul(float4(khw_p, 1.0f), viewProj);
+    return o;
+}
+
+float4 PSWhite(VSOutW i) : SV_Target
+{
+    return float4(1.0f, 1.0f, 1.0f, 1.0f);
+}
+)HLSL";
+
 // Static entry points (no depth access): compiled once
 static const char* g_hlsl_static = R"HLSL(
 VSOut VSMain(VSIn i)
@@ -8031,6 +8303,26 @@ VSOut VSFullscreen(uint vid : SV_VertexID)
 
 float4 PSMain(VSOut i) : SV_Target
 {
+    // KH_MESH_LOD CROSSFADE - 26651. blendCtl.w carries this fragment's
+    // dither threshold and the ZEROED DEFAULT IS OFF, so every fill site
+    // that never heard of LODs keeps drawing whole. blend_ctl[3] was the
+    // lane 26533 measured as unread by every shader and deliberately did
+    // NOT spend; spending it here is that ledger's own precedent - a lane
+    // rather than a CB layout change, so CBObj stays 235 float4 and the
+    // 235/237 mirror does not move.
+    // v greater than zero keeps fragments BELOW the threshold - the finer
+    // level fading out - and v less than zero keeps those at or above the
+    // magnitude, the coarser level fading in. The pair is complementary at
+    // every pixel by construction, so the two levels of a transition cover
+    // the silhouette exactly once with no blend, no sort and no second
+    // depth regime. Interleaved gradient noise over SV_Position: two ops,
+    // no texture, stable per pixel across the whole fade.
+    // TWIN: PSMain and PSComposite carry the identical block - rule 1.5.
+    if (blendCtl.w != 0.0f) {
+        float khlD = frac(52.9829189f * frac(dot(i.pos.xy, float2(0.06711056f, 0.00583715f))));
+        if (blendCtl.w > 0.0f) { if (khlD >= blendCtl.w) discard; }
+        else if (khlD < -blendCtl.w) discard;
+    }
     ClipEdgeSliver(i.wpos, i.nrm);   // degenerate edge-on fragments (fireflies)
     ClipOwnNear(i.pos.w);            // 26357: our own near plane. TWIN CALL.
     // FAR CONTRACT (depth-clip-off edition; ledger at the rasterizer
@@ -9145,6 +9437,26 @@ float4 PSComposite(VSOutC i, out float khaODepth : SV_Depth) : SV_Target
 float4 PSComposite(VSOutC i) : SV_Target
 #endif
 {
+    // KH_MESH_LOD CROSSFADE - 26651. blendCtl.w carries this fragment's
+    // dither threshold and the ZEROED DEFAULT IS OFF, so every fill site
+    // that never heard of LODs keeps drawing whole. blend_ctl[3] was the
+    // lane 26533 measured as unread by every shader and deliberately did
+    // NOT spend; spending it here is that ledger's own precedent - a lane
+    // rather than a CB layout change, so CBObj stays 235 float4 and the
+    // 235/237 mirror does not move.
+    // v greater than zero keeps fragments BELOW the threshold - the finer
+    // level fading out - and v less than zero keeps those at or above the
+    // magnitude, the coarser level fading in. The pair is complementary at
+    // every pixel by construction, so the two levels of a transition cover
+    // the silhouette exactly once with no blend, no sort and no second
+    // depth regime. Interleaved gradient noise over SV_Position: two ops,
+    // no texture, stable per pixel across the whole fade.
+    // TWIN: PSMain and PSComposite carry the identical block - rule 1.5.
+    if (blendCtl.w != 0.0f) {
+        float khlD = frac(52.9829189f * frac(dot(i.pos.xy, float2(0.06711056f, 0.00583715f))));
+        if (blendCtl.w > 0.0f) { if (khlD >= blendCtl.w) discard; }
+        else if (khlD < -blendCtl.w) discard;
+    }
     ClipEdgeSliver(i.wpos, i.nrm);   // degenerate edge-on fragments (fireflies)
     ClipOwnNear(i.pos.w);            // 26357: our own near plane. TWIN CALL.
     // FAR CONTRACT (depth-clip-off edition; see PSMain's twin + the
@@ -13027,13 +13339,26 @@ struct alignas(16) ConstantData {
     float local1[4];       // x = falloff (normalized to mean radius), y = localized flag
     float local_radii[4];  // xyz = mask radii (engine axes)
     float band0[4];        // x = band min (m), y = band max (m, <=0 unbounded), z = falloff (m), w = banded flag
-    float lighting0[4];    // x = lit flag, y = unused, z = ambient, w = diffuse
+    float lighting0[4];    // x = lit flag, z = ambient, w = diffuse.
+                           // y = THE RECEIVE-ARM CODE LANE - 26658 CORRECTION,
+                           // rule 1.16: this said "unused" and has not been
+                           // since the 166/167/168 receive-kill split. It
+                           // carries the whole lighting0.y ladder the mode
+                           // map rides on. Codes 72 and up are the free ones.
     float shadow_meta2[4];     // x = far-visibility clamp flag (PER OBJECT); yzw = live-table camera origin (zeroed - origins fold per entry)
     float obj_rot[3][4];       // engine-axes rotation rows; [0][3] = 1 marks
                                // filled (the zeroed default reads as identity
                                // in-shader - auxiliary fills stay correct)
     float dbg_ctl[4];          // x = setRenderDebug mode; mesh fill sites only
-    float blend_ctl[4];        // x = perceptual-composite enable (inject fill only)
+    float blend_ctl[4];        // x = perceptual-composite enable (inject fill
+                               // only); y = scene-read trust range in metres
+                               // (26325); z = per-object farVis flag (26533);
+                               // w = KH_MESH_LOD crossfade dither (26651).
+                               // 26658 CORRECTION, rule 1.16: this documented
+                               // x alone. THE FLOAT4 IS FULLY SPENT - there is
+                               // no free lane here, which the next build to go
+                               // looking for one needs to know before it plans
+                               // around finding it.
     // KH_TEXTURED material head (kh_bind_material is the ONLY fill; the
     // zeroed default is unread by every untextured shader). LOCKSTEP
     // with the HLSL matParams0-3 - the mirror contract, per block.
@@ -14158,6 +14483,85 @@ inline std::string hr_str(HRESULT hr) {
 inline const std::filesystem::path& kh_mesh_cache_dir();
 inline void kh_mesh_cache_trim();
 
+// ===========================================================================
+// KH_MOD_CACHE - 26651. A MOD MAY SHIP THE CACHE IT WOULD OTHERWISE MAKE.
+// Mode 417 stands the whole lookup down.
+//
+// OPERATOR DIRECTIVE, and it REVERSES a stated one. The 26482 header says
+// "DOCUMENTS ONLY by directive - never mod folders: the cache is machine-
+// local derived data", and that was right about WRITING and wrong about
+// READING. A mod that ships a custom .hlsl surface shader or an .fbx model
+// ships the thing that COSTS the user five minutes on first use, and the
+// author has already paid that cost on their own machine. So: assets keep
+// resolving through the "rendering" folder search exactly as before, and
+// their compiled products now resolve through a parallel "cache" folder
+// search - the same ModFolderSearcher recipe, the same mod ordering.
+//
+// READ ONLY, AND THAT IS THE WHOLE SAFETY ARGUMENT. Nothing is ever
+// written to, evicted from or LRU-touched in a mod folder. The 1 GiB trim
+// still enumerates the Documents directory ALONE, so a shipped cache
+// cannot be deleted by us and cannot consume the user's budget. A mod hit
+// also skips our own write-through, because the blob is already on disk in
+// a place we will keep finding it - which means shipped caches cost the
+// user's cache directory nothing at all.
+//
+// STALENESS CANNOT EXIST, for the same reason it cannot for the Documents
+// copy: both caches are CONTENT-ADDRESSED. A .khsc key is an FNV over
+// source, entry, target, defines and compile flags; a .khmc key is an FNV
+// over the FBX FILE BYTES. A mod shipping a blob for a shader we no longer
+// have simply never gets asked for it, and a mod shipping a blob under a
+// key that IS ours is by construction a blob for our exact source. Every
+// load still fully validates magic, version, stored key and size, so a
+// truncated or hand-edited file reads as a miss and we rebuild.
+//
+// THREADING. The directory scan is a magic static: once per process,
+// serialized by the language, and PRIMED FROM ensure_resources - i.e. from
+// the game thread, before any shader worker exists - precisely so the one
+// scan that walks mod folders on disk never happens first on a pool thread
+// whose reentrancy into ModFolderSearcher we do not own.
+// ===========================================================================
+static uint64_t g_mod_cache_dirs_n = 0;      // "cache" folders found, once per process
+static std::atomic<uint64_t> g_mod_shader_hits{0};   // .khsc served by a mod
+static uint64_t g_mod_mesh_hits = 0;         // .khmc served by a mod
+
+inline const std::vector<std::filesystem::path>& kh_mod_cache_dirs() {
+    static const std::vector<std::filesystem::path> khmd_dirs = []() {
+        std::vector<std::filesystem::path> khmd_v;
+
+        try {
+            khmd_v = ModFolderSearcher::find_directories_in_mods("cache");
+        } catch (...) { khmd_v.clear(); }
+
+        g_mod_cache_dirs_n = static_cast<uint64_t>(khmd_v.size());
+        return khmd_v;
+    }();
+    return khmd_dirs;
+}
+
+// "khs_<16 hex>.khsc" / "khm_<16 hex>.khmc" - one spelling, three callers.
+inline std::string kh_cache_file_name(const char* khcf_pfx, uint64_t khcf_h,
+                                      const char* khcf_ext) {
+    std::ostringstream khcf_ss;
+    khcf_ss << khcf_pfx << std::hex << std::setfill('0') << std::setw(16) << khcf_h << khcf_ext;
+    return khcf_ss.str();
+}
+
+// Append every mod-shipped candidate that EXISTS, in mod order, after
+// whatever the caller already put first. Mode 417 appends nothing.
+inline void kh_mod_cache_append(std::vector<std::filesystem::path>& khma_out,
+                                const std::string& khma_name) {
+    if (g_dbg_mode.load(std::memory_order_relaxed) == 417) return;
+
+    try {
+        for (const std::filesystem::path& khma_d : kh_mod_cache_dirs()) {
+            std::filesystem::path khma_p = khma_d / khma_name;
+            std::error_code khma_ec;
+
+            if (std::filesystem::is_regular_file(khma_p, khma_ec)) khma_out.push_back(std::move(khma_p));
+        }
+    } catch (...) {}
+}
+
 // 26481 SHADER DISK CACHE (mode 275 disables; ledger at the catalog entry).
 // The operator's 'box takes way longer to spawn' timing tracks the first
 // ensure_resources compile: the tap/gradient work added across 26476-26479
@@ -14334,7 +14738,8 @@ static std::atomic<int> g_khsm_live{0};
 static std::atomic<bool> g_khsa_abort{false};
 static uint64_t g_khsm_detached = 0;
 struct KhShaderJobOwned {
-    std::string src, entry, target;
+    std::shared_ptr<std::string> src_sh;   // 26642: shared across jobs over one unit
+    std::string entry, target;
     std::vector<std::string> dn, dv;
     std::vector<unsigned char> dhas;
     std::vector<D3D_SHADER_MACRO> macros;
@@ -14353,6 +14758,9 @@ static uint64_t g_khsm_batches = 0;
 static std::atomic<uint64_t> g_khsm_jobs{0};     // units compiled by workers
 static std::atomic<uint64_t> g_khsm_stolen{0};   // units the caller took itself
 static std::atomic<uint64_t> g_khsm_waits{0};    // units the caller waited on
+static uint64_t g_khsm_spawn_fails = 0;   // 26642: batches stood down for want of a worker
+static uint64_t g_khsm_stall_ms = 0;      // 26642: ms spent INSIDE shutdown waits (the
+                                          // graphics-lock cost of a teardown mid-compile)
 
 // ===========================================================================
 // KH_SHADER_CENSUS - 26638 PER-UNIT COMPILE TIMING (pure gauge; mode 0
@@ -14458,37 +14866,56 @@ inline std::string kh_shader_compile_raw(const char* src, const char* entry, con
     const std::filesystem::path khsc_p = khsc_on ? kh_shader_cache_file(khsc_h)
                                                  : std::filesystem::path();
 
-    if (khsc_on && !khsc_p.empty()) {
-        try {
-            std::ifstream khsc_f(khsc_p, std::ios::binary);
-            if (khsc_f) {
-                struct { uint32_t magic, ver; uint64_t hash, size; } khsc_hdr = {};
-                khsc_f.read(reinterpret_cast<char*>(&khsc_hdr), sizeof(khsc_hdr));
-                if (khsc_f.gcount() == sizeof(khsc_hdr) &&
-                    khsc_hdr.magic == KH_SHADER_CACHE_MAGIC &&
-                    khsc_hdr.ver == KH_SHADER_CACHE_VERSION &&
-                    khsc_hdr.hash == khsc_h &&
-                    khsc_hdr.size > 0 && khsc_hdr.size < (64ull << 20)) {
-                    ID3DBlob* khsc_b = nullptr;
-                    if (SUCCEEDED(D3DCreateBlob(static_cast<SIZE_T>(khsc_hdr.size), &khsc_b))) {
-                        khsc_f.read(static_cast<char*>(khsc_b->GetBufferPointer()),
-                                    static_cast<std::streamsize>(khsc_hdr.size));
-                        if (khsc_f.gcount() == static_cast<std::streamsize>(khsc_hdr.size)) {
-                            khsc_f.close();
-                            // LRU touch: eviction sorts by write time (FBX rule)
-                            std::error_code khsc_ec;
-                            std::filesystem::last_write_time(
-                                khsc_p, std::filesystem::file_time_type::clock::now(), khsc_ec);
-                            *out_blob = khsc_b;
-                            g_shader_cache_hits.fetch_add(1, std::memory_order_relaxed);
-                            kh_shader_census_note(entry, target, defines, khsc_h, 0, true);
-                            return "";   // cache hit - no compile
+    if (khsc_on) {
+        // 26651 KH_MOD_CACHE: OURS FIRST, then every mod that ships this
+        // blob. Index 0 is the Documents copy and is the ONLY one we touch
+        // for the LRU - a mod folder may sit on read-only media and is not
+        // under our budget in any case.
+        std::vector<std::filesystem::path> khsc_cand;
+        if (!khsc_p.empty()) khsc_cand.push_back(khsc_p);
+        kh_mod_cache_append(khsc_cand, kh_cache_file_name("khs_", khsc_h, ".khsc"));
+
+        for (size_t khsc_ci = 0; khsc_ci < khsc_cand.size(); ++khsc_ci) {
+            const bool khsc_own = khsc_ci == 0 && !khsc_p.empty();
+
+            try {
+                std::ifstream khsc_f(khsc_cand[khsc_ci], std::ios::binary);
+                if (khsc_f) {
+                    struct { uint32_t magic, ver; uint64_t hash, size; } khsc_hdr = {};
+                    khsc_f.read(reinterpret_cast<char*>(&khsc_hdr), sizeof(khsc_hdr));
+                    if (khsc_f.gcount() == sizeof(khsc_hdr) &&
+                        khsc_hdr.magic == KH_SHADER_CACHE_MAGIC &&
+                        khsc_hdr.ver == KH_SHADER_CACHE_VERSION &&
+                        khsc_hdr.hash == khsc_h &&
+                        khsc_hdr.size > 0 && khsc_hdr.size < (64ull << 20)) {
+                        ID3DBlob* khsc_b = nullptr;
+                        if (SUCCEEDED(D3DCreateBlob(static_cast<SIZE_T>(khsc_hdr.size), &khsc_b))) {
+                            khsc_f.read(static_cast<char*>(khsc_b->GetBufferPointer()),
+                                        static_cast<std::streamsize>(khsc_hdr.size));
+                            if (khsc_f.gcount() == static_cast<std::streamsize>(khsc_hdr.size)) {
+                                khsc_f.close();
+
+                                if (khsc_own) {
+                                    // LRU touch: eviction sorts by write time (FBX rule)
+                                    std::error_code khsc_ec;
+                                    std::filesystem::last_write_time(
+                                        khsc_cand[khsc_ci],
+                                        std::filesystem::file_time_type::clock::now(), khsc_ec);
+                                } else {
+                                    g_mod_shader_hits.fetch_add(1, std::memory_order_relaxed);
+                                }
+
+                                *out_blob = khsc_b;
+                                g_shader_cache_hits.fetch_add(1, std::memory_order_relaxed);
+                                kh_shader_census_note(entry, target, defines, khsc_h, 0, true);
+                                return "";   // cache hit - no compile
+                            }
+                            khsc_b->Release();
                         }
-                        khsc_b->Release();
                     }
                 }
-            }
-        } catch (...) {}   // any doubt is a miss; the compile below rebuilds
+            } catch (...) {}   // any doubt is a miss; the next candidate or the compile
+        }
     }
 
     g_shader_cache_misses.fetch_add(1, std::memory_order_relaxed);   // 26484
@@ -14623,12 +15050,39 @@ inline bool kh_shader_mt_prewarm(const KhShaderJob* khsm_jobs, size_t khsm_n,
     // detach safe; the caller then compiles inline, which is always correct.
     if (g_khsm_live.load(std::memory_order_acquire) > 0) return false;
     if (g_dbg_mode.load(std::memory_order_relaxed) == 402) return false;   // serial arm
+    // 26642 THE ABORT LATCH IS CLEARED WHERE A POOL IS ARMED, NEVER WHERE ONE
+    // IS TORN DOWN (mode 407 restores the 26641 form). 26641 reset it at the
+    // BOTTOM of kh_shader_mt_shutdown - after the detach - so a detached
+    // worker sitting inside D3DCompile finished its unit, looped, read the
+    // flag back as false and claimed the NEXT unit off a queue that the
+    // detach path deliberately does not clear. The abort therefore un-aborted
+    // itself within its own 5 s bound and the whole remaining batch ran on.
+    // Clearing it here instead is correct by construction: this is the only
+    // place a worker is ever created, and no worker exists past the live
+    // check one line above.
+    if (g_dbg_mode.load(std::memory_order_relaxed) != 407)
+        g_khsa_abort.store(false, std::memory_order_relaxed);
     unsigned khsm_hw = std::thread::hardware_concurrency();
     if (khsm_hw == 0) khsm_hw = 1;
     if (khsm_hw > 64) khsm_hw = 64;
     if (khsm_hw < 2) return false;   // one core: a pool would only add threads
     try {
+    std::unordered_map<const char*, std::shared_ptr<std::string>> khsm_srcs;   // 26642
     g_khsm_q.clear();
+    // 26645 THE OWNED-JOB STORAGE IS FREED HERE, NOT ONLY AT SHUTDOWN. Until
+    // this build g_khsm_own was cleared by kh_shader_mt_finish(false) alone,
+    // and the async gate finishes with keep_memo TRUE - so a session's owned
+    // sources survived every batch and were released at teardown. With three
+    // fixed batches that was bounded and nobody paid for it. KH_USER_ASYNC
+    // arms a batch whenever a user shader is activated, each one carrying a
+    // full g_cb_hlsl-prefixed source, so the same code becomes an unbounded
+    // per-activation leak. Clearing here is safe by the identical argument
+    // the queue clear one line above already stands on: this point is past
+    // the g_khsm_active guard and past the live check, so no worker exists
+    // to be reading any of it, and g_khsm_q - the only thing that points
+    // into this storage - has just been emptied. The memo is untouched: it
+    // holds blobs and error strings, never job sources.
+    g_khsm_own.clear();
     g_khsm_q.reserve(khsm_n);
     {
         std::lock_guard<std::mutex> khsm_l(g_khsm_mu);
@@ -14641,7 +15095,20 @@ inline bool kh_shader_mt_prewarm(const KhShaderJob* khsm_jobs, size_t khsm_n,
             // 26641 DEEP COPY - the caller's strings and macro table are
             // function locals and a worker outlives them.
             std::unique_ptr<KhShaderJobOwned> khsm_o(new KhShaderJobOwned());
-            khsm_o->src = khsm_in.src;
+            // 26642: the deep copy is per JOB but the SOURCE is per unit -
+            // sixteen jobs over two 400 KB translation units copied 6.3 MB of
+            // identical HLSL and held it until the next full teardown. The
+            // string is shared by pointer identity now; the macro tables stay
+            // per job, which is what the copy existed for. Node addresses are
+            // still stable (unique_ptr), so nothing the macro table points at
+            // can move when the owner vector grows.
+            {
+                auto khsm_si = khsm_srcs.find(khsm_in.src);
+                if (khsm_si == khsm_srcs.end())
+                    khsm_si = khsm_srcs.emplace(khsm_in.src,
+                        std::make_shared<std::string>(khsm_in.src)).first;
+                khsm_o->src_sh = khsm_si->second;
+            }
             khsm_o->entry = khsm_in.entry;
             khsm_o->target = khsm_in.target;
             khsm_o->had_defines = (khsm_in.defines != nullptr);
@@ -14662,7 +15129,7 @@ inline bool kh_shader_mt_prewarm(const KhShaderJob* khsm_jobs, size_t khsm_n,
             D3D_SHADER_MACRO khsm_term; khsm_term.Name = nullptr; khsm_term.Definition = nullptr;
             khsm_o->macros.push_back(khsm_term);
             KhShaderJob khsm_j;
-            khsm_j.src = khsm_o->src.c_str();
+            khsm_j.src = khsm_o->src_sh->c_str();
             khsm_j.entry = khsm_o->entry.c_str();
             khsm_j.target = khsm_o->target.c_str();
             khsm_j.defines = khsm_o->had_defines ? khsm_o->macros.data() : nullptr;
@@ -14689,6 +15156,30 @@ inline bool kh_shader_mt_prewarm(const KhShaderJob* khsm_jobs, size_t khsm_n,
             g_khsm_live.fetch_sub(1, std::memory_order_acq_rel);
             break;   // fewer threads is slower, never wrong
         }
+    }
+    // 26642 A BATCH THAT SPAWNED NOTHING CANNOT BE WAITED ON (mode 407
+    // restores the 26641 form). If the FIRST emplace_back threw, 26641 broke
+    // out of the loop with an empty thread vector and still returned true:
+    // the async gate then armed a batch no worker could ever publish, and
+    // deferred FOREVER - the mesh never appears, for the whole session, with
+    // no error anywhere and shaderMtThreads reading 1 as the only witness.
+    // It is a reachable path, not a hypothetical, so it stands the batch down
+    // and lets every caller compile inline exactly as a single-core machine
+    // does. khsm_w == 0 is the LEGITIMATE case (a one-job caller-works batch)
+    // and is deliberately not caught.
+    if (khsm_w > 0 && g_khsm_thr.empty() &&
+        g_dbg_mode.load(std::memory_order_relaxed) != 407) {
+        g_khsm_spawn_fails++;
+        for (auto& khsm_kv : g_khsm_map) {
+            if (khsm_kv.second.blob) khsm_kv.second.blob->Release();
+        }
+        g_khsm_map.clear();
+        g_khsm_own.clear();
+        g_khsm_q.clear();
+        g_khsm_next.store(0, std::memory_order_relaxed);
+        g_khsm_wall0 = 0;
+        g_khsm_active = false;
+        return false;
     }
     const uint64_t khsm_tn = static_cast<uint64_t>(g_khsm_thr.size()) + 1;
     if (khsm_tn > g_khsm_threads_n) g_khsm_threads_n = khsm_tn;
@@ -14771,33 +15262,81 @@ static uint64_t g_khsa_frames = 0;   // frames served while compiling
 static uint64_t g_khsa_ms = 0;       // wall ms the batch took
 static uint64_t g_khsa_t0 = 0;
 
+// 26642 THE HOLD IS SPLIT OUT OF THE GATE AND IT COSTS NOTHING TO ASK.
+// 26641 put the whole decision BELOW the construction of static_src (383,319
+// bytes) and khsp_comp_src (407,740 bytes), which ensure_resources rebuilds
+// from scratch on EVERY call - and up to five render sites call it per frame.
+// That is roughly four megabytes of allocation and memcpy per frame, for the
+// entire multi-minute deferral, inside exactly the window whose whole purpose
+// is to read as a normal frame rate. The poll below needs no source at all,
+// so it runs first and the strings are never built on a deferred frame. The
+// DECISION is unchanged, provably: same state machine, same predicates, same
+// order - only the point at which it is asked has moved. No arm; a refactor
+// that cannot change an outcome does not get one.
+//
+// It also owns a case 26641 left open: mode 406 armed MID-BATCH. The gate
+// returned false at the top, so the caller blocked on the memo (correct) but
+// the batch was never finished, the threads never joined and the census never
+// flushed. Here the 406 test sits AFTER the pending scan, so a 406 armed
+// mid-flight blocks on the memo, the waiters drain and erase the entries, and
+// the next call finds nothing pending and finishes the batch normally.
+//
+// And the state-0 DRAIN WAIT. A detached pool from a device reset or a
+// previous mission may still be live; kh_shader_mt_prewarm refuses while it
+// is, and 26641 then set state 2 and fell through to INLINE compiles on the
+// render thread - the whole pre-campaign freeze, arriving mid-session. There
+// is nothing to gain by blocking on a pool that is already draining, so we
+// defer instead, exactly as we defer for our own batch, and arm a fresh pool
+// once the last worker exits. Bounded: with 26642's abort latch a detached
+// worker exits after its current unit.
+//
 // true = the caller must defer this frame.
-inline bool kh_shader_async_gate(const KhShaderJob* khsa_jobs, size_t khsa_n) {
-    if (g_dbg_mode.load(std::memory_order_relaxed) == 406) return false;   // blocking arm
+inline bool kh_shader_async_hold() {
     if (g_khsa_state == 2) return false;
     if (g_khsa_state == 0) {
-        // caller_works = false: it returns instead of stealing, so the pool
-        // takes every core rather than cores-1.
-        if (!kh_shader_mt_prewarm(khsa_jobs, khsa_n, false)) {
-            g_khsa_state = 2;   // nothing to do, or the pool refused - compile inline
-            return false;
+        if (g_dbg_mode.load(std::memory_order_relaxed) == 406) return false;
+        if (g_khsm_live.load(std::memory_order_acquire) > 0) {
+            g_khsa_frames++;   // a previous pool is draining - wait it out, do not block
+            return true;
         }
-        g_khsa_state = 1;
-        g_khsa_t0 = steady_now_ms();
-        g_khsa_frames = 0;
-        return true;
+        return false;   // nothing armed yet; kh_shader_async_gate arms below
     }
+    bool khsa_pending = false;
     {
         std::lock_guard<std::mutex> khsa_l(g_khsm_mu);
         for (auto& khsa_kv : g_khsm_map) {
-            if (!khsa_kv.second.done) { g_khsa_frames++; return true; }
+            if (!khsa_kv.second.done) { khsa_pending = true; break; }
         }
+    }
+    if (khsa_pending) {
+        if (g_dbg_mode.load(std::memory_order_relaxed) == 406) return false;   // block below
+        g_khsa_frames++;
+        return true;
     }
     kh_shader_mt_finish(true);   // joins instantly - they have all exited - KEEPS the memo
     kh_shader_census_flush();
     g_khsa_ms = steady_now_ms() - g_khsa_t0;
     g_khsa_state = 2;
     return false;
+}
+
+// The arming half. Only ever reached with state 0 and the pool quiescent,
+// because kh_shader_async_hold has already returned false for every other
+// case. 26642: g_khsa_frames is no longer zeroed here - frames served during
+// a drain wait are frames the player was served, and the lane is a session
+// total like every other one beside it.
+inline bool kh_shader_async_gate(const KhShaderJob* khsa_jobs, size_t khsa_n) {
+    if (g_dbg_mode.load(std::memory_order_relaxed) == 406) return false;   // blocking arm
+    if (g_khsa_state != 0) return false;
+    // caller_works = false: it returns instead of stealing, so the pool
+    // takes every core rather than cores-1.
+    if (!kh_shader_mt_prewarm(khsa_jobs, khsa_n, false)) {
+        g_khsa_state = 2;   // nothing to do, or the pool refused - compile inline
+        return false;
+    }
+    g_khsa_state = 1;
+    g_khsa_t0 = steady_now_ms();
+    return true;
 }
 
 // 26641 TEARDOWN, and it is the part the operator asked to be sure of.
@@ -14814,13 +15353,27 @@ inline bool kh_shader_async_gate(const KhShaderJob* khsa_jobs, size_t khsa_n) {
 // DELIBERATELY NOT FREED because the detached worker still reads them.
 // g_khsm_live keeps them alive and makes the next prewarm refuse until the
 // last one exits, at which point the caller simply compiles inline.
-inline void kh_shader_mt_shutdown() {
+inline void kh_shader_mt_shutdown(bool khss_wait) {
     g_khsa_abort.store(true, std::memory_order_relaxed);
     const uint64_t khss_t0 = steady_now_ms();
-    while (g_khsm_live.load(std::memory_order_acquire) > 0 &&
-           steady_now_ms() - khss_t0 < 5000) {
+    // 26642 THE 5 s WAIT IS NOT FREE AND IT IS NOT ALWAYS WANTED (mode 407
+    // restores the 26641 unconditional wait). It buys exactly one thing - the
+    // chance to JOIN instead of DETACH when a compile happens to be nearly
+    // done - and it pays for it by holding whatever lock the caller holds.
+    // on_engine_reset calls this from inside a ScopedGraphicsLock, and 26641
+    // is precisely the build that made a device reset mid-compile LIKELY: the
+    // player is now awake and playing for five minutes with the pool live, so
+    // an alt-tab, a resolution change or an FSAA toggle lands in that window
+    // where before it could not. The detach is documented safe on that path,
+    // so the reset paths do not wait at all. Mission end keeps the 5 s bound
+    // so the 26641 acceptance (e) is still runnable as it was written.
+    const bool khss_407 = g_dbg_mode.load(std::memory_order_relaxed) == 407;
+    const uint64_t khss_bound = (khss_wait || khss_407) ? 5000u : 0u;
+    while (khss_bound && g_khsm_live.load(std::memory_order_acquire) > 0 &&
+           steady_now_ms() - khss_t0 < khss_bound) {
         Sleep(10);
     }
+    g_khsm_stall_ms += steady_now_ms() - khss_t0;   // 26642: the measured cost
     if (g_khsm_live.load(std::memory_order_acquire) == 0) {
         kh_shader_mt_finish(false);   // the clean path: join and free everything
     } else {
@@ -14832,7 +15385,9 @@ inline void kh_shader_mt_shutdown() {
         g_khsm_active = false;
         if (g_khsm_wall0) { g_khsm_wall_ms += steady_now_ms() - g_khsm_wall0; g_khsm_wall0 = 0; }
     }
-    g_khsa_abort.store(false, std::memory_order_relaxed);
+    // 26642: g_khsa_abort is NOT cleared here - see kh_shader_mt_prewarm.
+    // Under mode 407 the 26641 form is restored exactly.
+    if (khss_407) g_khsa_abort.store(false, std::memory_order_relaxed);
     g_khsa_state = 0;
 }
 
@@ -14882,6 +15437,47 @@ inline std::string compile_shader(const char* src, const char* entry, const char
         }
     }
     return kh_shader_compile_raw(src, entry, target, defines, out_blob);
+}
+
+// 26645 THE NON-BLOCKING HALF OF THE FRONT DOOR. compile_shader is allowed
+// to WAIT on the condition variable, and every one of its callers is on a
+// path where waiting is survivable. The user-shader getters are NOT: they run
+// inside the flush draw loop, on the render thread, under the graphics lock,
+// and a wait there for a PSMain-class unit is the 26637 freeze. This probe
+// answers "is it ready" and NEVER blocks - absent or unfinished both read as
+// false, and the caller keeps its fallback for another frame.
+//
+// TAKE SEMANTICS ARE THE SAME AS compile_shader'S: a done entry hands its
+// blob out and is ERASED, so ownership transfers exactly once and the memo
+// does not retain it. khsm_gone distinguishes "still compiling" from "never
+// queued / already taken", which is what lets the pump re-arm a request whose
+// memo entry was cleared under it by a teardown.
+inline bool kh_shader_memo_try_take(uint64_t khsm_h, ID3DBlob** khsm_out,
+                                    std::string& khsm_err, bool& khsm_gone) {
+    khsm_gone = false;
+    std::lock_guard<std::mutex> khsm_l(g_khsm_mu);
+    auto khsm_it = g_khsm_map.find(khsm_h);
+    if (khsm_it == g_khsm_map.end()) { khsm_gone = true; return false; }
+    if (!khsm_it->second.done) return false;   // in flight - DO NOT WAIT
+    *khsm_out = khsm_it->second.blob;
+    khsm_err = khsm_it->second.err;
+    g_khsm_map.erase(khsm_it);
+    return true;
+}
+
+// 26645: drop a queued-but-unwanted unit and release anything already
+// compiled for it. Used when a pending request is abandoned - a device
+// reset, an MSAA change, a cache release - so an unconsumed blob cannot
+// outlive the request that asked for it. A unit another thread is still
+// compiling is left DONE-able and swept by the same call next time; it is
+// never erased mid-flight, because a worker holds a reference to its node.
+inline void kh_shader_memo_discard(uint64_t khsm_h) {
+    std::lock_guard<std::mutex> khsm_l(g_khsm_mu);
+    auto khsm_it = g_khsm_map.find(khsm_h);
+    if (khsm_it == g_khsm_map.end()) return;
+    if (!khsm_it->second.done) return;   // in flight - leave it; the sweep retries
+    if (khsm_it->second.blob) khsm_it->second.blob->Release();
+    g_khsm_map.erase(khsm_it);
 }
 
 // GPU vertex-buffer top-up: create a VB for every PUBLISHED mesh that
@@ -15334,13 +15930,344 @@ inline ID3D11ShaderResourceView* kh_tex_resolve(ID3D11Device* dev, ID3D11DeviceC
 struct KhUserShaderEntry {
     ID3D11PixelShader* ps = nullptr;
     bool failed = false;
+    bool pending = false;    // 26645: a compile is queued or in flight
+    uint64_t hash = 0;       // 26645: its memo key
 };
 
 static std::unordered_map<std::string, KhUserShaderEntry> g_user_ps_cache;
 
+// ===========================================================================
+// KH_USER_ASYNC - 26645. USER SHADERS STOP COMPILING ON THE RENDER THREAD.
+//
+// THE DEFECT THIS CLOSES. kh_user_mat_ps compiles PSMain over g_cb_hlsl plus
+// the user source plus g_hlsl_static - or PSComposite over the composite
+// chunks - and those are the TALL POLES, the same two entry points 26636
+// named as the heavy units, carrying the whole shadow chain at 200-400 s on a
+// cold cache. It ran synchronously from the flush draw loop, on the RENDER
+// THREAD, INSIDE THE GRAPHICS LOCK, the first time any object used the
+// material. Assigning a user material in-game was therefore a multi-minute
+// hard freeze - the 26637 freeze, reachable from a script call, and still
+// live through this whole campaign because nothing on the startup path ever
+// touched it. kh_user_fx_ps has the same shape and is lighter only because
+// PSEffect does not call the chain.
+//
+// WHY ASYNC AND NOT A POOL. A pool of one buys nothing, and even a perfect
+// pool leaves the render thread waiting on a unit that takes minutes. The
+// axis was never parallelism. What makes the fix cheap is that BOTH getters
+// already return nullptr on absence or failure and EVERY caller already
+// degrades gracefully - the effect path skips the pass, the material path
+// keeps builtin PBR - so a pending compile can return nullptr and the frame
+// renders correctly, then swaps the moment the blob lands. That is 26641's
+// shape applied to a path that always needed it.
+//
+// THE PARALLELISM ARRIVES AS A SIDE EFFECT AND IT IS REAL: requests queue,
+// and the pump arms them as ONE BATCH, so five materials activated together
+// compile concurrently instead of as five sequential render-thread freezes.
+//
+// THE ONE RULE. compile_shader may WAIT; the getters must never call it while
+// a unit is in flight. They use kh_shader_memo_try_take, which cannot block.
+// ===========================================================================
+struct KhUserReq {
+    std::string key;              // the g_user_ps_cache key this serves
+    std::string src;              // FULL concatenated source, owned
+    std::string entry;            // PSMain / PSComposite / PSEffect
+    std::vector<std::string> dn;  // define names, owned
+    std::vector<std::string> dv;  // define values, owned
+    uint64_t hash = 0;
+    bool armed = false;           // handed to a batch at least once
+    int retries = 0;              // memo-lost re-arms; bounded
+};
+static std::vector<KhUserReq> g_user_req;
+static uint64_t g_user_async_queued = 0;    // requests accepted
+static uint64_t g_user_async_done = 0;      // requests that produced a shader
+static uint64_t g_user_async_fails = 0;     // requests that produced an error
+static uint64_t g_user_async_batches = 0;   // pumps that armed a pool
+static uint64_t g_user_async_relost = 0;    // memo entries lost under a request
+static uint64_t g_user_async_drops = 0;     // requests abandoned - reset / MSAA / release
+static uint64_t g_user_mat_white_draws = 0; // 26649: submesh draws served the white substitute
+// 26650 KH_USER_SETTLE. The pump used to arm the instant ONE unarmed request
+// existed, and the field showed why that is wrong: a single material produces
+// up to THREE units - ctx 0 from the flush draw loop, ctx 1 and 2 from the
+// injection hook - and they do not all arrive in the same pump. So the pump
+// armed ctx 0 alone, prewarm then correctly refused every later arm while
+// that batch was live, and the remaining contexts waited for a PSMain-class
+// unit to finish before they even started. Two dumps show it: cold, batches 1
+// with shaderMtLive 1 and two requests still unarmed; warm, userAsyncBatches
+// 2 for two requests. The queue now has to STOP GROWING before it is armed,
+// so a material's contexts go in together and compile CONCURRENTLY.
+static size_t g_user_req_seen = 0;       // queue size at the previous pump
+static int    g_user_req_settle = 0;     // consecutive pumps the queue held still
+static uint64_t g_user_settle_waits = 0; // pumps spent waiting for the queue to settle
+// Two pumps of stillness is ~33 ms at 60 fps against a compile measured in
+// HUNDREDS OF SECONDS, so the delay is free in every sense that matters. The
+// cap exists so a scene registering a material every frame cannot starve the
+// queue forever - it arms anyway and the next batch collects the rest.
+static constexpr int KH_USER_SETTLE_PUMPS = 2;
+static constexpr int KH_USER_SETTLE_CAP   = 16;
+static int g_user_req_waits = 0;         // CONSECUTIVE pumps declined; the cap
+// 26646 OWNERSHIP, NOT INFERENCE. The reap must finish ONLY a batch the pump
+// itself armed. Inferring it from g_khsm_active plus g_khsa_state was wrong:
+// ensure_composite_shader and ensure_compute_shaders arm through
+// KhShaderMtScope, an RAII local whose destructor calls finish AGAIN - with
+// keep_memo FALSE, which RELEASES EVERY BLOB IN THE MEMO. Reaping one of
+// those would hand the scope a torn-down pool and then clear the blobs its
+// own compile_shader calls were about to consume. It is unreachable today
+// only because no scope's lifetime spans a flush, which is a call-graph
+// accident and not a guarantee. This flag makes it correct by construction.
+static bool g_user_batch_own = false;
+// 26645: the queue is bounded. An overflowing request is simply NOT recorded,
+// so the getter returns nullptr, the caller keeps its fallback, and the next
+// frame asks again - a retry costs one map lookup, never a compile.
+static constexpr size_t KH_USER_REQ_MAX = 32;
+
+// 26645: build the macro table a request owns. Returned by value into a
+// caller-scoped vector; the pointers are valid for exactly as long as the
+// request that owns the strings, which is why prewarm's per-job deep copy of
+// the macro table is load-bearing here in a way it was not for the static
+// batch, whose tables are function-static.
+inline std::vector<D3D_SHADER_MACRO> kh_user_req_macros(const KhUserReq& khur) {
+    std::vector<D3D_SHADER_MACRO> khur_m;
+    khur_m.reserve(khur.dn.size() + 1);
+    for (size_t khur_i = 0; khur_i < khur.dn.size(); ++khur_i) {
+        D3D_SHADER_MACRO khur_e = { khur.dn[khur_i].c_str(), khur.dv[khur_i].c_str() };
+        khur_m.push_back(khur_e);
+    }
+    D3D_SHADER_MACRO khur_t = { nullptr, nullptr };
+    khur_m.push_back(khur_t);
+    return khur_m;
+}
+
+// 26645: abandon every pending request and release anything already compiled
+// for one. Called from the cache release, which the device-reset path and the
+// mission-end path both reach - so a blob compiled against a dead device can
+// never be handed to CreatePixelShader, and an unconsumed unit cannot sit in
+// the memo for the rest of the session. A unit still IN FLIGHT is left for
+// kh_shader_memo_discard to sweep when it completes; the request is dropped
+// either way, because the entry it would have filled is gone too.
+inline void kh_user_shader_purge_pending() {
+    // 26646: the pool is torn down by kh_shader_mt_shutdown on these paths,
+    // so any batch we owned is gone with it - drop the claim, never finish it
+    // ourselves from here.
+    g_user_batch_own = false;
+    g_user_req_seen = 0;       // 26650: the settle state dies with the queue
+    g_user_req_settle = 0;
+    g_user_req_waits = 0;
+    for (const KhUserReq& khur : g_user_req) {
+        if (khur.armed) kh_shader_memo_discard(khur.hash);
+        g_user_async_drops++;
+    }
+    g_user_req.clear();
+}
+
 inline void kh_user_shader_cache_release() {
+    kh_user_shader_purge_pending();   // 26645: before the map, never after
     for (auto& khus_kv : g_user_ps_cache) KH_SAFE_RELEASE(khus_kv.second.ps);
     g_user_ps_cache.clear();
+}
+
+// 26645 THE PUMP. Once per flush, on the render thread, under the lock -
+// the same serialized window the cache map itself stands on, so g_user_req
+// needs no lock for the same reason g_user_ps_cache does not.
+//
+// IT NEVER BLOCKS AND IT NEVER NESTS. kh_shader_mt_prewarm refuses while a
+// batch is active or any worker is live, which is exactly the behaviour we
+// want: the startup batch owns the pool until it is done, user requests wait
+// their turn, and nothing here can clear a job queue under running workers.
+// A refusal is not an error - the request stays queued and the next frame
+// tries again.
+inline void kh_user_shader_pump(ID3D11Device* dev) {
+    if (!dev || g_user_req.empty()) return;
+    if (g_dbg_mode.load(std::memory_order_relaxed) == 411) return;   // 26645 stand-down
+    // 26645 THE MEMO-LOST RE-ARM. A teardown between arming and consuming -
+    // kh_shader_mt_finish(false) clears the map - would otherwise leave a
+    // request armed forever against an entry that no longer exists, and the
+    // caller would keep its fallback for the whole session with no error
+    // anywhere. An armed request whose hash has vanished is put back to
+    // unarmed so this pump re-queues it, bounded so a genuinely unservable
+    // request cannot spin.
+    for (KhUserReq& khur : g_user_req) {
+        if (!khur.armed) continue;
+        bool khur_present;
+        {
+            std::lock_guard<std::mutex> khur_l(g_khsm_mu);
+            khur_present = g_khsm_map.find(khur.hash) != g_khsm_map.end();
+        }
+        if (khur_present) continue;
+
+        if (khur.retries < 3) {
+            khur.armed = false;
+            khur.retries++;
+            g_user_async_relost++;
+        } else khur.retries = 4;   // 26651: unservable - latched below
+    }
+
+    // 26651 THE RETRY BOUND HAD NO TERMINAL STATE. A request whose memo
+    // entry vanished three times stayed armed against a hash that no longer
+    // exists, FOREVER: the cache entry stayed pending, so kh_user_async_take
+    // returned nullptr every frame for the rest of the session; the queue
+    // slot was never freed, so 32 of them wedge every later user shader; and
+    // NOTHING WAS EVER REPORTED - Done plus Fails simply never reached
+    // Queued, which 26645 acceptance (b) can detect but which the code could
+    // not fix or even name. It latches as a failure now, exactly as a
+    // genuine compile error does: reported once, counted once, and the
+    // caller keeps its fallback - which under 26649 is the white substitute,
+    // so the author SEES it.
+    for (size_t khup_i = g_user_req.size(); khup_i-- > 0; ) {
+        if (g_user_req[khup_i].retries < 4) continue;
+        auto khup_ce = g_user_ps_cache.find(g_user_req[khup_i].key);
+
+        if (khup_ce != g_user_ps_cache.end()) {
+            khup_ce->second.pending = false;
+            khup_ce->second.failed = true;
+        }
+
+        g_user_async_fails++;
+        kh_report_error("KH user shader: the compiled unit for '" + g_user_req[khup_i].key +
+                        "' was lost from the memo three times - the request is abandoned");
+        g_user_req.erase(g_user_req.begin() + static_cast<ptrdiff_t>(khup_i));
+    }
+    bool khup_any = false;
+    for (const KhUserReq& khur : g_user_req) if (!khur.armed) { khup_any = true; break; }
+    if (!khup_any) { g_user_req_seen = g_user_req.size(); g_user_req_settle = 0; return; }
+    // 26650 KH_USER_SETTLE (mode 416 arms immediately, the 26649 form). Wait
+    // for the queue to stop growing so one material's contexts batch together
+    // instead of serialising behind each other. A GROWING queue resets the
+    // count; a still one advances it; the cap arms regardless so nothing can
+    // starve.
+    if (g_dbg_mode.load(std::memory_order_relaxed) != 416 &&
+        g_user_req_waits < KH_USER_SETTLE_CAP) {
+        // THE CAP BOUNDS THE GROWING CASE, WHICH IS THE ONLY ONE THAT CAN
+        // STARVE. A first draft tested it against the stillness counter,
+        // where it was dead code by construction - KH_USER_SETTLE_PUMPS is
+        // smaller than the cap, so that branch always returned first and a
+        // queue growing on every pump would have waited forever. The counter
+        // is CONSECUTIVE DECLINES, whatever the reason, and is cleared only
+        // by an actual arm.
+        const size_t khup_now = g_user_req.size();
+        g_user_req_waits++;
+        g_user_settle_waits++;
+        if (khup_now != g_user_req_seen) {
+            g_user_req_seen = khup_now;
+            g_user_req_settle = 0;   // still arriving - start the count over
+            return;
+        }
+        if (g_user_req_settle < KH_USER_SETTLE_PUMPS) {
+            g_user_req_settle++;
+            return;
+        }
+        g_user_req_waits--;          // settled, not declined - do not spend the cap
+        g_user_settle_waits--;
+    }
+    // The macro tables must outlive the prewarm call; prewarm deep-copies
+    // them, so this scope is enough.
+    std::vector<std::vector<D3D_SHADER_MACRO>> khup_tabs;
+    std::vector<KhShaderJob> khup_jobs;
+    khup_tabs.reserve(g_user_req.size());
+    khup_jobs.reserve(g_user_req.size());
+    for (const KhUserReq& khur : g_user_req) {
+        if (khur.armed) continue;
+        khup_tabs.push_back(kh_user_req_macros(khur));
+        KhShaderJob khup_j = { khur.src.c_str(), khur.entry.c_str(), "ps_5_0",
+                               khup_tabs.back().data(), khur.hash };
+        khup_jobs.push_back(khup_j);
+    }
+    if (khup_jobs.empty()) return;
+    if (!kh_shader_mt_prewarm(khup_jobs.data(), khup_jobs.size(), false)) return;   // busy: next frame
+    g_user_batch_own = true;   // 26646: only we may reap it
+    g_user_req_settle = 0;     // 26650: the next arrival starts a fresh settle
+    g_user_req_waits = 0;
+    g_user_req_seen = g_user_req.size();
+    g_user_async_batches++;
+    for (KhUserReq& khur : g_user_req) khur.armed = true;
+}
+
+// 26645: retire the batch once every unit in it has landed. Mirrors
+// kh_shader_async_hold's finish, and KEEPS THE MEMO - the getters have not
+// consumed their blobs yet, and finish(false) would free them.
+inline void kh_user_shader_reap() {
+    if (!g_user_batch_own) return;   // 26646: ours, or nobody's business
+    if (!g_khsm_active) { g_user_batch_own = false; return; }
+    bool khur_pending = false;
+    {
+        std::lock_guard<std::mutex> khur_l(g_khsm_mu);
+        for (auto& khur_kv : g_khsm_map) {
+            if (!khur_kv.second.done) { khur_pending = true; break; }
+        }
+    }
+    if (khur_pending) return;
+    kh_shader_mt_finish(true);   // joins instantly - all exited - KEEPS the memo
+    kh_shader_census_flush();
+    g_user_batch_own = false;
+}
+
+// 26645: the pending-to-ready transition, shared by both getters. NEVER
+// blocks - a unit still in flight reads as not-ready and the caller keeps its
+// fallback for another frame. A FAILURE LATCHES exactly as the synchronous
+// path latched it, so a broken .hlsl reports once and is never re-queued.
+inline ID3D11PixelShader* kh_user_async_take(ID3D11Device* dev, const std::string& khua_key,
+                                             const std::string& path, const char* khua_what) {
+    auto khua_it = g_user_ps_cache.find(khua_key);
+    if (khua_it == g_user_ps_cache.end()) return nullptr;
+    KhUserShaderEntry& khua_e = khua_it->second;
+    if (!khua_e.pending) return khua_e.ps;
+    ID3DBlob* khua_blob = nullptr;
+    std::string khua_err;
+    bool khua_gone = false;
+    if (!kh_shader_memo_try_take(khua_e.hash, &khua_blob, khua_err, khua_gone)) {
+        // Not ready, or the entry was cleared under us. Either way we keep
+        // waiting: the pump re-arms a lost request, bounded by its retry
+        // count, and the caller keeps its fallback meanwhile.
+        return nullptr;
+    }
+    khua_e.pending = false;
+    if (khua_err.empty() && khua_blob) {
+        const HRESULT khua_hr = dev->CreatePixelShader(khua_blob->GetBufferPointer(),
+                                                       khua_blob->GetBufferSize(),
+                                                       nullptr, &khua_e.ps);
+        if (FAILED(khua_hr)) { khua_e.ps = nullptr; khua_err = "CreatePixelShader " + hr_str(khua_hr); }
+    }
+    if (khua_blob) khua_blob->Release();
+    for (size_t khua_i = 0; khua_i < g_user_req.size(); ++khua_i) {
+        if (g_user_req[khua_i].key == khua_key) {
+            g_user_req.erase(g_user_req.begin() + static_cast<ptrdiff_t>(khua_i));
+            break;
+        }
+    }
+    if (!khua_e.ps) {
+        khua_e.failed = true;
+        g_user_async_fails++;
+        kh_report_error(std::string("KH user ") + khua_what + " '" + path + "': " +
+                        (khua_err.empty() ? std::string("no blob") : khua_err));
+    } else {
+        g_user_async_done++;
+    }
+    return khua_e.ps;
+}
+
+// 26645: record a request and mark the entry pending. Returns false when the
+// queue is full - the caller then simply does NOT cache anything, so the next
+// frame asks again and the retry costs one map lookup rather than a compile.
+inline bool kh_user_async_queue(std::string khuq_key, std::string khuq_full,
+                                const char* khuq_entry,
+                                const std::vector<std::string>& khuq_dn,
+                                const std::vector<std::string>& khuq_dv) {
+    if (g_user_req.size() >= KH_USER_REQ_MAX) return false;
+    KhUserReq khuq_r;
+    khuq_r.key = khuq_key;
+    khuq_r.src = std::move(khuq_full);
+    khuq_r.entry = khuq_entry;
+    khuq_r.dn = khuq_dn;
+    khuq_r.dv = khuq_dv;
+    const std::vector<D3D_SHADER_MACRO> khuq_m = kh_user_req_macros(khuq_r);
+    khuq_r.hash = kh_shader_cache_hash(khuq_r.src.c_str(), khuq_r.entry.c_str(),
+                                       "ps_5_0", khuq_m.data());
+    KhUserShaderEntry khuq_e;
+    khuq_e.pending = true;
+    khuq_e.hash = khuq_r.hash;
+    g_user_ps_cache.emplace(khuq_key, khuq_e);
+    g_user_req.push_back(std::move(khuq_r));
+    g_user_async_queued++;
+    return true;
 }
 
 inline bool kh_user_shader_source(const std::string& path, std::string& out, std::string& err) {
@@ -15376,7 +16303,28 @@ inline ID3D11PixelShader* kh_user_fx_ps(ID3D11Device* dev, const std::string& pa
     khus_key += path;
     std::transform(khus_key.begin(), khus_key.end(), khus_key.begin(), ::tolower);
     auto khus_it = g_user_ps_cache.find(khus_key);
-    if (khus_it != g_user_ps_cache.end()) return khus_it->second.ps;
+    if (khus_it != g_user_ps_cache.end())
+        return kh_user_async_take(dev, khus_key, path, "effect");   // 26645
+    // 26645 KH_USER_ASYNC. The compile is QUEUED and this returns nullptr;
+    // the caller already skips the pass on nullptr, so the frame renders
+    // correctly and picks the shader up the frame it lands. Mode 411
+    // restores the synchronous render-thread compile below.
+    if (g_dbg_mode.load(std::memory_order_relaxed) != 411) {
+        std::string khua_src, khua_err;
+        if (!kh_user_shader_source(path, khua_src, khua_err)) {
+            KhUserShaderEntry khua_e;
+            khua_e.failed = true;
+            kh_report_error("KH user effect '" + path + "': " + khua_err);
+            g_user_ps_cache.emplace(std::move(khus_key), khua_e);
+            return nullptr;
+        }
+        std::vector<std::string> khua_dn, khua_dv;
+        khua_dn.push_back("MSAA_DEPTH");
+        khua_dv.push_back(g_res.depth_sample_count > 1 ? "1" : "0");
+        kh_user_async_queue(khus_key, std::string(g_cb_hlsl) + khua_src,
+                            "PSEffect", khua_dn, khua_dv);
+        return nullptr;
+    }
     KhUserShaderEntry khus_e;
     std::string khus_src, khus_err;
 
@@ -15425,7 +16373,8 @@ inline ID3D11PixelShader* kh_user_mat_ps(ID3D11Device* dev, const std::string& p
     khum_key += path;
     std::transform(khum_key.begin(), khum_key.end(), khum_key.begin(), ::tolower);
     auto khum_it = g_user_ps_cache.find(khum_key);
-    if (khum_it != g_user_ps_cache.end()) return khum_it->second.ps;
+    if (khum_it != g_user_ps_cache.end())
+        return kh_user_async_take(dev, khum_key, path, "material shader");   // 26645
     KhUserShaderEntry khum_e;
     std::string khum_src, khum_err;
 
@@ -15465,6 +16414,23 @@ inline ID3D11PixelShader* kh_user_mat_ps(ID3D11Device* dev, const std::string& p
             khum_full += g_hlsl_composite2;
             khum_entry = "PSComposite";
             khum_defs = khum_ctx == 2 ? khum_def_arb : khum_def_comp;
+        }
+        // 26645 KH_USER_ASYNC, AND THIS IS THE SITE THAT MATTERED. khum_full
+        // is g_cb_hlsl plus the user source plus g_hlsl_static or the
+        // composite pair, compiled at PSMain or PSComposite - the tall poles,
+        // 200-400 s cold - and until this build that ran HERE, on the render
+        // thread, under the graphics lock, inside the flush draw loop. The
+        // caller keeps builtin PBR on nullptr, so queueing costs one frame of
+        // builtin shading per material instead of a multi-minute freeze.
+        // Mode 411 restores the synchronous compile.
+        if (g_dbg_mode.load(std::memory_order_relaxed) != 411) {
+            std::vector<std::string> khua_dn, khua_dv;
+            for (const D3D_SHADER_MACRO* khua_d = khum_defs; khua_d && khua_d->Name; ++khua_d) {
+                khua_dn.push_back(khua_d->Name);
+                khua_dv.push_back(khua_d->Definition ? khua_d->Definition : "");
+            }
+            kh_user_async_queue(khum_key, std::move(khum_full), khum_entry, khua_dn, khua_dv);
+            return nullptr;
         }
 
         ID3DBlob* khum_blob = nullptr;
@@ -15807,6 +16773,912 @@ inline void kh_gen_tangents(std::vector<MeshVertex>& v) {
     genTangSpaceDefault(&ctx);
 }
 
+// ===========================================================================
+// KH_MESH_LOD - 26651. AUTOMATIC LEVELS OF DETAIL FOR IMPORTED MODELS.
+// Mode 418 stands the whole feature down (no levels built, nothing cached,
+// every draw is level 0); mode 419 keeps the levels and stands down only
+// the dither crossfade, which is the A/B that shows what the crossfade is
+// worth - under 419 the levels POP.
+//
+// THE ALGORITHM IS GARLAND-HECKBERT QUADRIC EDGE COLLAPSE and it is chosen
+// for one property above all the others: it is deterministic. The same
+// bytes in produce the same levels out on every machine, which is what
+// lets a mod SHIP its .khmc and have it be bit-correct for the user - the
+// other half of this build.
+//
+// WELDING IS BY FULL VERTEX IDENTITY - position, normal AND uv - not by
+// position alone. That is deliberate and it is the conservative choice: a
+// uv seam or a hard shading edge appears as a mesh BOUNDARY of each patch,
+// the boundary constraint quadrics below then defend it, and no level can
+// tear a texture or round off an intended crease. The cost is that a model
+// authored with per-face normals - a hard-surface prop - decimates less
+// aggressively than a smooth one. That is the right failure direction.
+//
+// PER SUBMESH, NEVER ACROSS ONE. Two materials are never welded together,
+// so a level's submesh table has the SAME cardinality and the same order
+// as level 0's and a material slot index addresses one surface at every
+// level. kh_mesh_cache_load validates that invariant rather than trusting
+// it.
+//
+// ATTRIBUTES ARE CARRIED, NOT REBUILT. A collapse moves the surviving
+// vertex to the quadric-optimal position and keeps its normal, uv and
+// tangent. Recomputing a tangent basis per level would need mikktspace
+// again on five more meshes and would change the normal-map convention
+// between levels; carrying is cheaper, stable, and the error is a
+// shading error on geometry that is by definition small on screen.
+// DISCLOSED, not hidden: at level 5 on a heavily creased model the
+// carried normals are visibly approximate. That is what level 5 is for.
+// ===========================================================================
+// A submesh under this many triangles is left alone at every level: there
+// is no vertex cost worth saving and a decimator asked to halve a box
+// produces a wedge. THE FLOOR is where the ladder stops shrinking, so a
+// small prop simply runs out of levels early and lod_n says so.
+static constexpr size_t KH_LOD_MIN_TRIS   = 32;
+static constexpr size_t KH_LOD_FLOOR_TRIS = 12;
+
+namespace khlod {
+
+// Symmetric 4x4 quadric, upper triangle: a2 ab ac ad b2 bc bd c2 cd d2.
+struct Q {
+    double m[10];
+};
+
+inline void q_zero(Q& khq_q) {
+    for (int khq_i = 0; khq_i < 10; ++khq_i) khq_q.m[khq_i] = 0.0;
+}
+
+inline void q_plane(Q& khq_q, double khq_a, double khq_b, double khq_c, double khq_d,
+                    double khq_w) {
+    khq_q.m[0] = khq_w * khq_a * khq_a; khq_q.m[1] = khq_w * khq_a * khq_b;
+    khq_q.m[2] = khq_w * khq_a * khq_c; khq_q.m[3] = khq_w * khq_a * khq_d;
+    khq_q.m[4] = khq_w * khq_b * khq_b; khq_q.m[5] = khq_w * khq_b * khq_c;
+    khq_q.m[6] = khq_w * khq_b * khq_d; khq_q.m[7] = khq_w * khq_c * khq_c;
+    khq_q.m[8] = khq_w * khq_c * khq_d; khq_q.m[9] = khq_w * khq_d * khq_d;
+}
+
+inline void q_add(Q& khq_r, const Q& khq_s) {
+    for (int khq_i = 0; khq_i < 10; ++khq_i) khq_r.m[khq_i] += khq_s.m[khq_i];
+}
+
+inline double q_eval(const Q& khq_q, double khq_x, double khq_y, double khq_z) {
+    return khq_q.m[0] * khq_x * khq_x + 2.0 * khq_q.m[1] * khq_x * khq_y +
+           2.0 * khq_q.m[2] * khq_x * khq_z + 2.0 * khq_q.m[3] * khq_x +
+           khq_q.m[4] * khq_y * khq_y + 2.0 * khq_q.m[5] * khq_y * khq_z +
+           2.0 * khq_q.m[6] * khq_y + khq_q.m[7] * khq_z * khq_z +
+           2.0 * khq_q.m[8] * khq_z + khq_q.m[9];
+}
+
+// Minimiser of the quadric: solve the 3x3 gradient system. Returns false on
+// a singular or ill-conditioned system, in which case the caller falls back
+// to the best of the two endpoints and the midpoint - the standard, and the
+// one that cannot produce a wild vertex on a degenerate neighbourhood.
+inline bool q_min(const Q& khq_q, double khq_o[3]) {
+    const double khq_a[3][3] = {
+        { khq_q.m[0], khq_q.m[1], khq_q.m[2] },
+        { khq_q.m[1], khq_q.m[4], khq_q.m[5] },
+        { khq_q.m[2], khq_q.m[5], khq_q.m[7] },
+    };
+    const double khq_det =
+        khq_a[0][0] * (khq_a[1][1] * khq_a[2][2] - khq_a[1][2] * khq_a[2][1]) -
+        khq_a[0][1] * (khq_a[1][0] * khq_a[2][2] - khq_a[1][2] * khq_a[2][0]) +
+        khq_a[0][2] * (khq_a[1][0] * khq_a[2][1] - khq_a[1][1] * khq_a[2][0]);
+    if (!(khq_det > 1.0e-12 || khq_det < -1.0e-12)) return false;
+    const double khq_r[3] = { -khq_q.m[3], -khq_q.m[6], -khq_q.m[8] };
+    const double khq_inv = 1.0 / khq_det;
+    khq_o[0] = khq_inv * (khq_r[0] * (khq_a[1][1] * khq_a[2][2] - khq_a[1][2] * khq_a[2][1]) -
+                          khq_a[0][1] * (khq_r[1] * khq_a[2][2] - khq_a[1][2] * khq_r[2]) +
+                          khq_a[0][2] * (khq_r[1] * khq_a[2][1] - khq_a[1][1] * khq_r[2]));
+    khq_o[1] = khq_inv * (khq_a[0][0] * (khq_r[1] * khq_a[2][2] - khq_a[1][2] * khq_r[2]) -
+                          khq_r[0] * (khq_a[1][0] * khq_a[2][2] - khq_a[1][2] * khq_a[2][0]) +
+                          khq_a[0][2] * (khq_a[1][0] * khq_r[2] - khq_r[1] * khq_a[2][0]));
+    khq_o[2] = khq_inv * (khq_a[0][0] * (khq_a[1][1] * khq_r[2] - khq_r[1] * khq_a[2][1]) -
+                          khq_a[0][1] * (khq_a[1][0] * khq_r[2] - khq_r[1] * khq_a[2][0]) +
+                          khq_r[0] * (khq_a[1][0] * khq_a[2][1] - khq_a[1][1] * khq_a[2][0]));
+    return true;
+}
+
+struct Tri { uint32_t v[3]; bool live; };
+struct Cand { double cost; uint32_t a, b; uint64_t sa, sb; };
+
+// A hand-rolled binary heap over std::vector via push_heap/pop_heap: the
+// comparator is INVERTED so the cheapest collapse comes off the top.
+// std::priority_queue would want <queue>, and this header declares no
+// includes of its own - it inherits the translation unit's. Not adding a
+// dependency to 67,000 lines for one container.
+struct CandWorse {
+    bool operator()(const Cand& khc_x, const Cand& khc_y) const { return khc_x.cost > khc_y.cost; }
+};
+
+inline void tri_normal(const double khn_p0[3], const double khn_p1[3], const double khn_p2[3],
+                       double khn_o[3]) {
+    const double khn_u[3] = { khn_p1[0] - khn_p0[0], khn_p1[1] - khn_p0[1], khn_p1[2] - khn_p0[2] };
+    const double khn_v[3] = { khn_p2[0] - khn_p0[0], khn_p2[1] - khn_p0[1], khn_p2[2] - khn_p0[2] };
+    khn_o[0] = khn_u[1] * khn_v[2] - khn_u[2] * khn_v[1];
+    khn_o[1] = khn_u[2] * khn_v[0] - khn_u[0] * khn_v[2];
+    khn_o[2] = khn_u[0] * khn_v[1] - khn_u[1] * khn_v[0];
+}
+
+}   // namespace khlod
+
+// Decimate ONE expanded triangle soup to khld_target triangles or fewer.
+// Returns the decimated soup; on any structural refusal it returns a copy
+// of the input, so a caller can always use the result and a refusal simply
+// means "this level is the previous one".
+inline std::vector<MeshVertex> kh_lod_decimate(const std::vector<MeshVertex>& khld_src,
+                                               size_t khld_target) {
+    const size_t khld_ntri = khld_src.size() / 3;
+    if (khld_ntri < KH_LOD_MIN_TRIS || khld_target >= khld_ntri) return khld_src;
+
+    // --- weld by FULL vertex identity (see the header) --------------------
+    struct Key {
+        int32_t k[8];
+        bool operator==(const Key& khk_o) const {
+            for (int khk_i = 0; khk_i < 8; ++khk_i) if (k[khk_i] != khk_o.k[khk_i]) return false;
+            return true;
+        }
+    };
+    struct KeyHash {
+        size_t operator()(const Key& khk_k) const {
+            uint64_t khk_h = 1469598103934665603ull;
+
+            for (int khk_i = 0; khk_i < 8; ++khk_i) {
+                khk_h ^= static_cast<uint64_t>(static_cast<uint32_t>(khk_k.k[khk_i]));
+                khk_h *= 1099511628211ull;
+            }
+
+            return static_cast<size_t>(khk_h);
+        }
+    };
+    auto khld_quant = [](float khq_v, float khq_step) {
+        return static_cast<int32_t>(khq_v < 0.0f ? khq_v / khq_step - 0.5f
+                                                 : khq_v / khq_step + 0.5f);
+    };
+    std::unordered_map<Key, uint32_t, KeyHash> khld_map;
+    std::vector<double> khld_pos;          // 3 per welded vertex
+    std::vector<MeshVertex> khld_attr;     // attribute donor per welded vertex
+    std::vector<khlod::Tri> khld_tri;
+    khld_map.reserve(khld_src.size());
+    khld_pos.reserve(khld_src.size() * 3);
+    khld_attr.reserve(khld_src.size());
+    khld_tri.reserve(khld_ntri);
+
+    for (size_t khld_t = 0; khld_t < khld_ntri; ++khld_t) {
+        khlod::Tri khld_f = {};
+        khld_f.live = true;
+
+        for (int khld_c = 0; khld_c < 3; ++khld_c) {
+            const MeshVertex& khld_v = khld_src[khld_t * 3 + khld_c];
+            Key khld_k = {};
+            khld_k.k[0] = khld_quant(khld_v.pos[0], 1.0e-5f);
+            khld_k.k[1] = khld_quant(khld_v.pos[1], 1.0e-5f);
+            khld_k.k[2] = khld_quant(khld_v.pos[2], 1.0e-5f);
+            khld_k.k[3] = khld_quant(khld_v.nrm[0], 1.0e-3f);
+            khld_k.k[4] = khld_quant(khld_v.nrm[1], 1.0e-3f);
+            khld_k.k[5] = khld_quant(khld_v.nrm[2], 1.0e-3f);
+            khld_k.k[6] = khld_quant(khld_v.uv[0], 1.0e-5f);
+            khld_k.k[7] = khld_quant(khld_v.uv[1], 1.0e-5f);
+            auto khld_it = khld_map.find(khld_k);
+            uint32_t khld_ix;
+
+            if (khld_it == khld_map.end()) {
+                khld_ix = static_cast<uint32_t>(khld_attr.size());
+                khld_map.emplace(khld_k, khld_ix);
+                khld_pos.push_back(khld_v.pos[0]);
+                khld_pos.push_back(khld_v.pos[1]);
+                khld_pos.push_back(khld_v.pos[2]);
+                khld_attr.push_back(khld_v);
+            } else khld_ix = khld_it->second;
+
+            khld_f.v[khld_c] = khld_ix;
+        }
+
+        if (khld_f.v[0] == khld_f.v[1] || khld_f.v[1] == khld_f.v[2] ||
+            khld_f.v[0] == khld_f.v[2]) continue;   // degenerate on arrival
+        khld_tri.push_back(khld_f);
+    }
+
+    const size_t khld_nv = khld_attr.size();
+    if (khld_nv < 4 || khld_tri.size() < KH_LOD_MIN_TRIS) return khld_src;
+
+    // --- adjacency + quadrics --------------------------------------------
+    std::vector<std::vector<uint32_t>> khld_adj(khld_nv);
+    std::vector<khlod::Q> khld_q(khld_nv);
+    for (size_t khld_i = 0; khld_i < khld_nv; ++khld_i) khlod::q_zero(khld_q[khld_i]);
+    std::unordered_map<uint64_t, uint32_t> khld_ecount;
+    auto khld_ekey = [](uint32_t khe_a, uint32_t khe_b) {
+        const uint64_t khe_lo = khe_a < khe_b ? khe_a : khe_b;
+        const uint64_t khe_hi = khe_a < khe_b ? khe_b : khe_a;
+        return (khe_hi << 32) | khe_lo;
+    };
+
+    for (size_t khld_t = 0; khld_t < khld_tri.size(); ++khld_t) {
+        const uint32_t* khld_v = khld_tri[khld_t].v;
+        double khld_n[3];
+        khlod::tri_normal(&khld_pos[khld_v[0] * 3], &khld_pos[khld_v[1] * 3],
+                          &khld_pos[khld_v[2] * 3], khld_n);
+        const double khld_len = sqrt(khld_n[0] * khld_n[0] + khld_n[1] * khld_n[1] +
+                                     khld_n[2] * khld_n[2]);
+        if (khld_len < 1.0e-18) continue;
+        const double khld_area = 0.5 * khld_len;
+        const double khld_a = khld_n[0] / khld_len, khld_b = khld_n[1] / khld_len,
+                     khld_c = khld_n[2] / khld_len;
+        const double khld_d = -(khld_a * khld_pos[khld_v[0] * 3] +
+                                khld_b * khld_pos[khld_v[0] * 3 + 1] +
+                                khld_c * khld_pos[khld_v[0] * 3 + 2]);
+        khlod::Q khld_pq;
+        khlod::q_plane(khld_pq, khld_a, khld_b, khld_c, khld_d, khld_area);
+
+        for (int khld_k = 0; khld_k < 3; ++khld_k) {
+            khlod::q_add(khld_q[khld_v[khld_k]], khld_pq);
+            khld_adj[khld_v[khld_k]].push_back(static_cast<uint32_t>(khld_t));
+            khld_ecount[khld_ekey(khld_v[khld_k], khld_v[(khld_k + 1) % 3])]++;
+        }
+    }
+
+    // Boundary constraint: a plane through the open edge, perpendicular to
+    // its triangle, weighted heavily. This DEFENDS silhouettes, uv seams and
+    // hard creases without locking them - locking them outright is what
+    // makes a seam-heavy model refuse to reach the low levels at all.
+    for (size_t khld_t = 0; khld_t < khld_tri.size(); ++khld_t) {
+        const uint32_t* khld_v = khld_tri[khld_t].v;
+        double khld_n[3];
+        khlod::tri_normal(&khld_pos[khld_v[0] * 3], &khld_pos[khld_v[1] * 3],
+                          &khld_pos[khld_v[2] * 3], khld_n);
+        const double khld_len = sqrt(khld_n[0] * khld_n[0] + khld_n[1] * khld_n[1] +
+                                     khld_n[2] * khld_n[2]);
+        if (khld_len < 1.0e-18) continue;
+        khld_n[0] /= khld_len; khld_n[1] /= khld_len; khld_n[2] /= khld_len;
+
+        for (int khld_k = 0; khld_k < 3; ++khld_k) {
+            const uint32_t khld_i0 = khld_v[khld_k], khld_i1 = khld_v[(khld_k + 1) % 3];
+            if (khld_ecount[khld_ekey(khld_i0, khld_i1)] != 1) continue;
+            const double khld_e[3] = { khld_pos[khld_i1 * 3] - khld_pos[khld_i0 * 3],
+                                       khld_pos[khld_i1 * 3 + 1] - khld_pos[khld_i0 * 3 + 1],
+                                       khld_pos[khld_i1 * 3 + 2] - khld_pos[khld_i0 * 3 + 2] };
+            double khld_bn[3] = { khld_e[1] * khld_n[2] - khld_e[2] * khld_n[1],
+                                  khld_e[2] * khld_n[0] - khld_e[0] * khld_n[2],
+                                  khld_e[0] * khld_n[1] - khld_e[1] * khld_n[0] };
+            const double khld_bl = sqrt(khld_bn[0] * khld_bn[0] + khld_bn[1] * khld_bn[1] +
+                                        khld_bn[2] * khld_bn[2]);
+            if (khld_bl < 1.0e-18) continue;
+            khld_bn[0] /= khld_bl; khld_bn[1] /= khld_bl; khld_bn[2] /= khld_bl;
+            const double khld_bd = -(khld_bn[0] * khld_pos[khld_i0 * 3] +
+                                     khld_bn[1] * khld_pos[khld_i0 * 3 + 1] +
+                                     khld_bn[2] * khld_pos[khld_i0 * 3 + 2]);
+            khlod::Q khld_bq;
+            khlod::q_plane(khld_bq, khld_bn[0], khld_bn[1], khld_bn[2], khld_bd, 1000.0);
+            khlod::q_add(khld_q[khld_i0], khld_bq);
+            khlod::q_add(khld_q[khld_i1], khld_bq);
+        }
+    }
+
+    // --- the collapse loop ------------------------------------------------
+    std::vector<uint64_t> khld_stamp(khld_nv, 0);
+    std::vector<uint8_t> khld_dead(khld_nv, 0);
+    std::vector<khlod::Cand> khld_pq2;
+    const khlod::CandWorse khld_worse;
+
+    auto khld_place = [&](uint32_t khp_a, uint32_t khp_b, double khp_o[3]) {
+        khlod::Q khp_q = khld_q[khp_a];
+        khlod::q_add(khp_q, khld_q[khp_b]);
+        double khp_best[3];
+
+        if (khlod::q_min(khp_q, khp_best)) {
+            khp_o[0] = khp_best[0]; khp_o[1] = khp_best[1]; khp_o[2] = khp_best[2];
+            return khlod::q_eval(khp_q, khp_o[0], khp_o[1], khp_o[2]);
+        }
+
+        const double khp_c[3][3] = {
+            { khld_pos[khp_a * 3], khld_pos[khp_a * 3 + 1], khld_pos[khp_a * 3 + 2] },
+            { khld_pos[khp_b * 3], khld_pos[khp_b * 3 + 1], khld_pos[khp_b * 3 + 2] },
+            { 0.5 * (khld_pos[khp_a * 3] + khld_pos[khp_b * 3]),
+              0.5 * (khld_pos[khp_a * 3 + 1] + khld_pos[khp_b * 3 + 1]),
+              0.5 * (khld_pos[khp_a * 3 + 2] + khld_pos[khp_b * 3 + 2]) },
+        };
+        double khp_bc = 1.0e300;
+        int khp_bi = 2;
+
+        for (int khp_i = 0; khp_i < 3; ++khp_i) {
+            const double khp_e = khlod::q_eval(khp_q, khp_c[khp_i][0], khp_c[khp_i][1], khp_c[khp_i][2]);
+            if (khp_e < khp_bc) { khp_bc = khp_e; khp_bi = khp_i; }
+        }
+
+        khp_o[0] = khp_c[khp_bi][0]; khp_o[1] = khp_c[khp_bi][1]; khp_o[2] = khp_c[khp_bi][2];
+        return khp_bc;
+    };
+    auto khld_push = [&](uint32_t khs_a, uint32_t khs_b) {
+        if (khs_a == khs_b || khld_dead[khs_a] || khld_dead[khs_b]) return;
+        double khs_p[3];
+        khlod::Cand khs_c;
+        khs_c.cost = khld_place(khs_a, khs_b, khs_p);
+        khs_c.a = khs_a; khs_c.b = khs_b;
+        khs_c.sa = khld_stamp[khs_a]; khs_c.sb = khld_stamp[khs_b];
+        khld_pq2.push_back(khs_c);
+        std::push_heap(khld_pq2.begin(), khld_pq2.end(), khld_worse);
+    };
+
+    for (const auto& khld_kv : khld_ecount) {
+        khld_push(static_cast<uint32_t>(khld_kv.first & 0xFFFFFFFFull),
+                  static_cast<uint32_t>(khld_kv.first >> 32));
+    }
+
+    size_t khld_live = khld_tri.size();
+    uint64_t khld_ver = 1;
+    // The heap holds every candidate ever pushed; a bound on POPS is what
+    // stops a pathological mesh spinning, and it is generous by design.
+    size_t khld_budget = khld_tri.size() * 32 + 4096;
+
+    while (khld_live > khld_target && !khld_pq2.empty() && khld_budget-- > 0) {
+        std::pop_heap(khld_pq2.begin(), khld_pq2.end(), khld_worse);
+        const khlod::Cand khld_c = khld_pq2.back();
+        khld_pq2.pop_back();
+        const uint32_t khld_a = khld_c.a, khld_b = khld_c.b;
+        if (khld_dead[khld_a] || khld_dead[khld_b]) continue;
+        if (khld_stamp[khld_a] != khld_c.sa || khld_stamp[khld_b] != khld_c.sb) continue;
+        double khld_p[3];
+        khld_place(khld_a, khld_b, khld_p);
+
+        // FLIP REJECTION. A collapse that turns a triangle inside out is a
+        // visible fold, and the quadric cost cannot see it - this is the
+        // one check that separates a usable decimator from a mangler.
+        bool khld_flip = false;
+
+        for (int khld_s = 0; khld_s < 2 && !khld_flip; ++khld_s) {
+            const uint32_t khld_from = khld_s == 0 ? khld_a : khld_b;
+
+            for (uint32_t khld_ti : khld_adj[khld_from]) {
+                if (!khld_tri[khld_ti].live) continue;
+                const uint32_t* khld_v = khld_tri[khld_ti].v;
+                bool khld_has_a = false, khld_has_b = false;
+
+                for (int khld_k = 0; khld_k < 3; ++khld_k) {
+                    if (khld_v[khld_k] == khld_a) khld_has_a = true;
+                    if (khld_v[khld_k] == khld_b) khld_has_b = true;
+                }
+
+                if (khld_has_a && khld_has_b) continue;   // this face dies anyway
+                double khld_old[3], khld_new[3];
+                double khld_pp[3][3];
+
+                for (int khld_k = 0; khld_k < 3; ++khld_k) {
+                    khld_pp[khld_k][0] = khld_pos[khld_v[khld_k] * 3];
+                    khld_pp[khld_k][1] = khld_pos[khld_v[khld_k] * 3 + 1];
+                    khld_pp[khld_k][2] = khld_pos[khld_v[khld_k] * 3 + 2];
+                }
+
+                khlod::tri_normal(khld_pp[0], khld_pp[1], khld_pp[2], khld_old);
+
+                for (int khld_k = 0; khld_k < 3; ++khld_k) {
+                    if (khld_v[khld_k] != khld_a && khld_v[khld_k] != khld_b) continue;
+                    khld_pp[khld_k][0] = khld_p[0];
+                    khld_pp[khld_k][1] = khld_p[1];
+                    khld_pp[khld_k][2] = khld_p[2];
+                }
+
+                khlod::tri_normal(khld_pp[0], khld_pp[1], khld_pp[2], khld_new);
+                const double khld_dot = khld_old[0] * khld_new[0] + khld_old[1] * khld_new[1] +
+                                        khld_old[2] * khld_new[2];
+                if (khld_dot <= 0.0) { khld_flip = true; break; }
+            }
+        }
+
+        if (khld_flip) continue;
+        // Commit: b folds into a at the optimal position.
+        khld_pos[khld_a * 3] = khld_p[0];
+        khld_pos[khld_a * 3 + 1] = khld_p[1];
+        khld_pos[khld_a * 3 + 2] = khld_p[2];
+        khlod::q_add(khld_q[khld_a], khld_q[khld_b]);
+        khld_dead[khld_b] = 1;
+        khld_stamp[khld_a] = ++khld_ver;
+        khld_stamp[khld_b] = ++khld_ver;
+
+        for (uint32_t khld_ti : khld_adj[khld_b]) {
+            if (!khld_tri[khld_ti].live) continue;
+            uint32_t* khld_v = khld_tri[khld_ti].v;
+            bool khld_has_a = false;
+            for (int khld_k = 0; khld_k < 3; ++khld_k) if (khld_v[khld_k] == khld_a) khld_has_a = true;
+
+            if (khld_has_a) {
+                khld_tri[khld_ti].live = false;
+                khld_live--;
+                continue;
+            }
+
+            for (int khld_k = 0; khld_k < 3; ++khld_k) if (khld_v[khld_k] == khld_b) khld_v[khld_k] = khld_a;
+            khld_adj[khld_a].push_back(khld_ti);
+        }
+
+        khld_adj[khld_b].clear();
+        // Re-price every edge still touching a.
+        std::vector<uint32_t> khld_nb;
+
+        for (uint32_t khld_ti : khld_adj[khld_a]) {
+            if (!khld_tri[khld_ti].live) continue;
+            const uint32_t* khld_v = khld_tri[khld_ti].v;
+            for (int khld_k = 0; khld_k < 3; ++khld_k) {
+                if (khld_v[khld_k] != khld_a && !khld_dead[khld_v[khld_k]]) khld_nb.push_back(khld_v[khld_k]);
+            }
+        }
+
+        std::sort(khld_nb.begin(), khld_nb.end());
+        khld_nb.erase(std::unique(khld_nb.begin(), khld_nb.end()), khld_nb.end());
+        for (uint32_t khld_n2 : khld_nb) khld_push(khld_a, khld_n2);
+    }
+
+    // --- emit ------------------------------------------------------------
+    std::vector<MeshVertex> khld_out;
+    khld_out.reserve(khld_live * 3);
+
+    for (const khlod::Tri& khld_f : khld_tri) {
+        if (!khld_f.live) continue;
+        if (khld_f.v[0] == khld_f.v[1] || khld_f.v[1] == khld_f.v[2] ||
+            khld_f.v[0] == khld_f.v[2]) continue;
+        double khld_n[3];
+        khlod::tri_normal(&khld_pos[khld_f.v[0] * 3], &khld_pos[khld_f.v[1] * 3],
+                          &khld_pos[khld_f.v[2] * 3], khld_n);
+        if (khld_n[0] * khld_n[0] + khld_n[1] * khld_n[1] + khld_n[2] * khld_n[2] < 1.0e-24) continue;
+
+        for (int khld_k = 0; khld_k < 3; ++khld_k) {
+            MeshVertex khld_v = khld_attr[khld_f.v[khld_k]];
+            khld_v.pos[0] = static_cast<float>(khld_pos[khld_f.v[khld_k] * 3]);
+            khld_v.pos[1] = static_cast<float>(khld_pos[khld_f.v[khld_k] * 3 + 1]);
+            khld_v.pos[2] = static_cast<float>(khld_pos[khld_f.v[khld_k] * 3 + 2]);
+            khld_out.push_back(khld_v);
+        }
+    }
+
+    if (khld_out.size() < 9) return khld_src;   // nothing usable survived
+    return khld_out;
+}
+
+// Build levels 1..KH_LOD_MAX onto a finished, baked MeshDef. Idempotent by
+// its own guard, non-fatal in every direction: any level that refuses to
+// shrink simply ends the ladder and lod_n names what actually exists.
+inline void kh_lod_build(MeshDef& khlb_d) {
+    if (khlb_d.lod_n) return;
+    if (khlb_d.submeshes.empty() || khlb_d.verts.empty()) return;
+    if (g_dbg_mode.load(std::memory_order_relaxed) == 418) return;
+    const uint32_t khlb_base = static_cast<uint32_t>(khlb_d.verts.size());
+    // The ladder halves the triangle count per level, which is why the
+    // screen-size selector below is a log2 - level k is the level whose
+    // density suits half the pixels level k-1 suited.
+    std::vector<std::vector<MeshVertex>> khlb_cur(khlb_d.submeshes.size());
+
+    for (size_t khlb_s = 0; khlb_s < khlb_d.submeshes.size(); ++khlb_s) {
+        const MeshSubmesh& khlb_sm = khlb_d.submeshes[khlb_s];
+        khlb_cur[khlb_s].assign(khlb_d.verts.begin() + khlb_sm.vertex_start,
+                                khlb_d.verts.begin() + khlb_sm.vertex_start + khlb_sm.vertex_count);
+    }
+
+    for (int khlb_l = 0; khlb_l < KH_LOD_MAX; ++khlb_l) {
+        std::vector<std::vector<MeshVertex>> khlb_next(khlb_cur.size());
+        size_t khlb_before = 0, khlb_after = 0;
+
+        for (size_t khlb_s = 0; khlb_s < khlb_cur.size(); ++khlb_s) {
+            const size_t khlb_tris = khlb_cur[khlb_s].size() / 3;
+            const size_t khlb_want = khlb_tris / 2 < KH_LOD_FLOOR_TRIS
+                                   ? KH_LOD_FLOOR_TRIS : khlb_tris / 2;
+            khlb_next[khlb_s] = kh_lod_decimate(khlb_cur[khlb_s], khlb_want);
+            khlb_before += khlb_cur[khlb_s].size();
+            khlb_after += khlb_next[khlb_s].size();
+        }
+
+        // A level that did not meaningfully shrink is not worth a draw
+        // range, a cache entry or a transition. End the ladder.
+        if (khlb_before == 0 || khlb_after * 100 > khlb_before * 90) break;
+        const uint32_t khlb_start = static_cast<uint32_t>(khlb_d.verts.size());
+        khlb_d.lod_start[khlb_l] = khlb_start;
+        khlb_d.lod_sub[khlb_l].resize(khlb_d.submeshes.size());
+
+        for (size_t khlb_s = 0; khlb_s < khlb_next.size(); ++khlb_s) {
+            MeshSubmesh khlb_sm;
+            khlb_sm.name = khlb_d.submeshes[khlb_s].name;
+            khlb_sm.vertex_start = static_cast<uint32_t>(khlb_d.verts.size());
+            khlb_sm.vertex_count = static_cast<uint32_t>(khlb_next[khlb_s].size());
+            khlb_d.verts.insert(khlb_d.verts.end(), khlb_next[khlb_s].begin(), khlb_next[khlb_s].end());
+            khlb_d.lod_sub[khlb_l][khlb_s] = std::move(khlb_sm);
+        }
+
+        khlb_d.lod_vcount[khlb_l] = static_cast<uint32_t>(khlb_d.verts.size()) - khlb_start;
+        khlb_d.lod_n = static_cast<uint8_t>(khlb_l + 1);
+        khlb_cur.swap(khlb_next);
+    }
+
+    // Level 0 runs from vertex 0 up to lod_start of level 1 - see
+    // mesh_base_vcount. With nothing built the base IS the whole vector and
+    // lod_n reading 0 says exactly that.
+    if (khlb_d.lod_n == 0) return;
+    if (khlb_d.lod_start[0] != khlb_base) khlb_d.lod_n = 0;   // unreachable; the invariant, asserted
+}
+
+// ===========================================================================
+// KH_MESH_LOD SELECTION - 26651. SCREEN SIZE FIRST, RANGE SECOND.
+//
+// The unit of the ladder is a HALVING OF TRIANGLES, so the unit of the
+// selector is a HALVING OF PIXELS and the level is a log2. khl_px is the
+// object's bounding-sphere radius projected to pixels - radius times the
+// pass's own projection scale, over distance - which is "how big is it on
+// screen" stated exactly, and which folds distance in already: the same
+// prop is level 0 at arm's length and level 5 at a kilometre, and a
+// building stays level 0 far past the range at which the prop has given
+// up. That is the behaviour asked for and it falls out of the geometry
+// rather than out of a distance table.
+//
+// THE RANGE TERM IS A BIAS, NOT A SECOND SELECTOR. A pure screen-size rule
+// keeps a large mesh at level 0 across the whole map, where its silhouette
+// is what matters and its interior detail is not; a pure distance rule is
+// wrong the moment the field of view changes. So the pixel term decides and
+// log2 of the range nudges it coarser - worth about a third of a level at
+// 100 m and one and a half at 1.5 km.
+//
+// THE FADE BAND IS THE HYSTERESIS. There is no separate dwell timer and no
+// snap threshold: the last KH_LOD_FADE of every level is a crossfade, so a
+// camera hovering on a boundary sees a stable dithered mixture rather than
+// a level flapping between two draws. khl_t comes back in the OPEN interval
+// - never 0, never 1 - because both endpoints mean "not fading" to the
+// shader and a fade that reaches them has a level drawing nothing.
+// ===========================================================================
+static constexpr float KH_LOD_REF_PX    = 320.0f;   // half-height px where level 0 ends
+static constexpr float KH_LOD_DIST_BIAS = 0.35f;    // levels per log2 of the range term
+static constexpr float KH_LOD_DIST_REF  = 100.0f;   // m
+static constexpr float KH_LOD_FADE      = 0.30f;    // fraction of a level spent crossfading
+// Published once per flush on the game thread with the render thread
+// PARKED - the publish_world_lighting contract exactly - so the injection
+// reads it lock-free on the render thread like every other staged scalar.
+// projection[1][1] is 1 over the tangent of the half vertical FOV, so this
+// whole product is pixels per unit of tangent, and radius over distance IS
+// that tangent.
+static float g_lod_proj_px = 0.0f;
+
+inline void kh_lod_pick(const MeshDef& khl_d, float khl_radius, float khl_dist,
+                        int& khl_lvl, float& khl_t) {
+    khl_lvl = 0;
+    khl_t = 0.0f;
+    if (khl_d.lod_n == 0) return;
+    if (g_dbg_mode.load(std::memory_order_relaxed) == 418) return;
+    if (!(g_lod_proj_px > 0.0f) || !(khl_radius > 0.0f)) return;
+    const float khl_px = khl_radius * g_lod_proj_px / (khl_dist > 0.01f ? khl_dist : 0.01f);
+    float khl_f = log2f(KH_LOD_REF_PX / (khl_px > 0.01f ? khl_px : 0.01f));
+    khl_f += KH_LOD_DIST_BIAS * log2f(1.0f + (khl_dist > 0.0f ? khl_dist : 0.0f) / KH_LOD_DIST_REF);
+    if (!(khl_f > 0.0f)) return;   // NaN-safe: an insane pair reads as level 0
+    const float khl_top = static_cast<float>(khl_d.lod_n);
+
+    if (khl_f >= khl_top) {
+        khl_lvl = static_cast<int>(khl_d.lod_n);
+        return;
+    }
+
+    const float khl_base = floorf(khl_f);
+    khl_lvl = static_cast<int>(khl_base);
+    const float khl_frac = khl_f - khl_base;
+    if (khl_frac <= 1.0f - KH_LOD_FADE) return;
+    float khl_p = (khl_frac - (1.0f - KH_LOD_FADE)) / KH_LOD_FADE;
+    if (khl_p < 0.02f) return;              // not yet worth a second draw
+    if (khl_p > 0.98f) khl_p = 0.98f;       // the coarse level never draws alone here
+    khl_t = khl_p;
+}
+
+// The dither value blendCtl.w takes for one half of a crossfade pair.
+// khl_second false = the finer level, fading OUT below the threshold;
+// true = the coarser level, fading IN at or above it. Complementary at
+// every pixel, which is the property the twins depend on.
+inline float kh_lod_dither(float khl_t, bool khl_second) {
+    if (!(khl_t > 0.0f)) return 0.0f;
+    const float khl_v = 1.0f - khl_t;
+    return khl_second ? -khl_v : khl_v;
+}
+
+// ===========================================================================
+// KH_MESH_CULL - 26652. THE FRUSTUM TEST THIS RENDERER HAS NEVER HAD.
+// Mode 420 stands it down.
+//
+// Every registered mesh has been submitted every flush AND every injection
+// regardless of whether it is on screen. Nothing above this line has ever
+// tested a mesh against the view volume - the visibility compute path is a
+// per-POINT query for scripts and culls nothing - so an object behind the
+// camera paid a full vertex transform, a full rasterisation and, until it
+// failed the depth test, the whole PSMain shadow ladder. That is the
+// cheapest optimisation in this file and it was simply absent.
+//
+// FOUR PLANES, NOT SIX, AND THE REASON IS THE ENCODE SWAP. The flush
+// rewrites projection[2][2] and [3][2] with arbitrated slot encodes before
+// the mesh pass, so the near and far planes derived from this matrix would
+// be whatever the encode arbitration decided rather than the camera's own.
+// The x, y and w clip components come from projection columns 0, 1 and 3
+// and are untouched by that swap, so left, right, top and bottom are exact
+// and the depth range is left to the far contract and the near clip, which
+// already own it. A behind-camera mesh fails the side planes on any real
+// FOV, and the w test catches the rest.
+//
+// SPHERE, NOT BOX, DELIBERATELY. The bounding sphere over the ROTATED half
+// extents is conservative against every orientation, costs four dot
+// products, and cannot cull something that is visible. A tighter OBB test
+// would reject more and would need a correctness argument per rotation; the
+// sphere needs none, and a false ACCEPT costs one draw while a false REJECT
+// is a vanished object - the asymmetry decides the shape.
+//
+// PUBLISHED LIKE g_lod_proj_px: built once per flush on the game thread
+// under the park, read lock-free by the injection on the render thread.
+// Cold, the planes read zero and kh_mesh_visible passes EVERYTHING, so a
+// frame with no flush behind it draws exactly what it drew at 26651.
+// ===========================================================================
+static uint64_t g_mesh_considered = 0;   // objects that reached a mesh draw loop
+static uint64_t g_mesh_culled = 0;       // objects the frustum test rejected
+static uint64_t g_mesh_tris = 0;         // triangles actually submitted by the colour paths
+static uint64_t g_mesh_tris_l0 = 0;      // triangles the SAME draws would have submitted at level 0
+static uint64_t g_cull_standdowns = 0;   // 26653: passes the apex guard refused to cull
+static uint64_t g_cull_builds = 0;       // 26653: passes that built a usable frustum
+static float    g_cull_apex_max = 0.0f;  // worst 4th-plane residual at the solved apex, m
+static uint64_t g_cull_rebased = 0;      // 26654: passes whose matrix was camera-rebased
+
+// ---------------------------------------------------------------------------
+// 26653 THE 26652 CULL WAS PUBLISHED FROM ONE PASS AND CONSUMED BY ANOTHER,
+// AND THAT IS THE WHOLE DEFECT. The frustum was built once in flush_locked
+// from that function's arbitrated pv and stored in a static that the
+// INJECTION - a different pass, on a different thread, with a different
+// matrix, and reachable when the flush's park landed in a secondary render
+// cycle - then culled against. The field result was exactly one mesh drawn
+// per injection whatever you spawned, with shadows intact because no
+// casting pass consults this at all. Operator confirmed: mode 420 brought
+// them straight back.
+//
+// THE RULE IS CULL WITH THE MATRIX YOU DRAW WITH. The set is now built per
+// pass, as a LOCAL, from that pass's own view_proj - the same matrix its
+// own vertex shader will transform with - so a mesh that would land on
+// screen cannot be rejected, because one matrix decides both questions.
+// Nothing is published and nothing is shared across a thread.
+//
+// AND IT VALIDATES ITSELF, which is the part that makes this safe to ship
+// enabled. For any perspective projection the eye point lies ON all four
+// side planes, so the camera's signed distance to each of them is zero by
+// construction. If it is not - a rebased matrix whose apex sits at the
+// origin, an orthographic pass, a foreign view, a matrix from another
+// cycle - the frustum does not belong to the camera this loop measures
+// from, and the pass stands its cull down whole rather than guessing. That
+// test costs four dot products per pass and cannot be fooled by any of the
+// things that fooled 26652, because it does not care WHY the matrix is
+// wrong. cullStandDowns counts it; cullApexMax gauges the worst residual.
+// ---------------------------------------------------------------------------
+// 26654 THE MATRIX IS REBASED AND THE APEX SAYS SO. 26653's guard compared
+// the camera against the planes and stood down on 2058 of 2059 passes with
+// cullApexMax 7064 - a residual the size of the world coordinate itself,
+// which is the signature of a frustum whose apex sits at the ORIGIN rather
+// than at the camera. That is the 26421 fp32 rebase, and it is not a fault:
+// both mesh passes transform through a viewProj rebased on the camera, so
+// their frustum lives in camera-relative space while the object centres I
+// was testing are world-absolute. The guard did exactly its job - it
+// refused to cull against a matrix it could not vouch for, which is why the
+// field saw no missing meshes and meshCulled read 0.
+//
+// THE FIX IS TO STOP ASSUMING THE SPACE AND MEASURE IT. The apex is
+// recoverable from the planes themselves - three of them intersect there -
+// so the build solves for it, and the offset between that apex and the
+// camera IS the pass's rebase origin, whatever it happens to be. Points are
+// then tested in the matrix's own space with no branch and no guess.
+//
+// TWO CHECKS SURVIVE, and they are what keep a foreign matrix out. The
+// FOURTH plane must also pass through the solved apex - a real perspective
+// frustum has one apex, and anything that does not is not one. And the
+// recovered origin must be one this file actually uses: zero, or the
+// camera. A cycle latch, another view or an orthographic pass fails one or
+// both and the pass stands its cull down whole, culling nothing.
+static constexpr float KH_CULL_APEX_TOL   = 1.0f;   // 4th-plane residual at the apex, m
+static constexpr float KH_CULL_ORIGIN_TOL = 4.0f;   // recovered origin must be 0 or the camera
+static constexpr float KH_CULL_PAD        = 2.0f;   // radius pad: fp32 at 7.5 km, and cheap
+
+struct KhCullSet {
+    float p[4][4] = {};       // left, right, bottom, top - normalised
+    float bias[3] = {};       // add to a WORLD centre to reach the matrix's space
+    bool  valid = false;
+};
+
+// Apex of the frustum: the point on planes 0, 1 and 2 at once. Cramer over
+// the 3x3 of normals; a singular system is a degenerate frustum and the
+// caller stands down.
+inline bool kh_cull_apex(const KhCullSet& khc_s, float khc_a[3]) {
+    const float khc_m[3][3] = {
+        { khc_s.p[0][0], khc_s.p[0][1], khc_s.p[0][2] },
+        { khc_s.p[1][0], khc_s.p[1][1], khc_s.p[1][2] },
+        { khc_s.p[2][0], khc_s.p[2][1], khc_s.p[2][2] },
+    };
+    const float khc_r[3] = { -khc_s.p[0][3], -khc_s.p[1][3], -khc_s.p[2][3] };
+    const float khc_det =
+        khc_m[0][0] * (khc_m[1][1] * khc_m[2][2] - khc_m[1][2] * khc_m[2][1]) -
+        khc_m[0][1] * (khc_m[1][0] * khc_m[2][2] - khc_m[1][2] * khc_m[2][0]) +
+        khc_m[0][2] * (khc_m[1][0] * khc_m[2][1] - khc_m[1][1] * khc_m[2][0]);
+    if (!(khc_det > 1.0e-9f || khc_det < -1.0e-9f)) return false;
+    const float khc_inv = 1.0f / khc_det;
+    khc_a[0] = khc_inv * (khc_r[0] * (khc_m[1][1] * khc_m[2][2] - khc_m[1][2] * khc_m[2][1]) -
+                          khc_m[0][1] * (khc_r[1] * khc_m[2][2] - khc_m[1][2] * khc_r[2]) +
+                          khc_m[0][2] * (khc_r[1] * khc_m[2][1] - khc_m[1][1] * khc_r[2]));
+    khc_a[1] = khc_inv * (khc_m[0][0] * (khc_r[1] * khc_m[2][2] - khc_m[1][2] * khc_r[2]) -
+                          khc_r[0] * (khc_m[1][0] * khc_m[2][2] - khc_m[1][2] * khc_m[2][0]) +
+                          khc_m[0][2] * (khc_m[1][0] * khc_r[2] - khc_r[1] * khc_m[2][0]));
+    khc_a[2] = khc_inv * (khc_m[0][0] * (khc_m[1][1] * khc_r[2] - khc_r[1] * khc_m[2][1]) -
+                          khc_m[0][1] * (khc_m[1][0] * khc_r[2] - khc_r[1] * khc_m[2][0]) +
+                          khc_r[0] * (khc_m[1][0] * khc_m[2][1] - khc_m[1][1] * khc_m[2][0]));
+    return true;
+}
+
+// Row-major view-projection, row-vector convention: clip = world * vp, so
+// clip.x takes its coefficients from COLUMN 0. The side planes are the w
+// column plus and minus the x and y columns - Gribb-Hartmann for this
+// convention. Verified against direct clip-space transforms at 7.5 km
+// world coordinates, behind-camera and 90-degrees-off included.
+inline void kh_cull_build(const float khc_vp[4][4], const float khc_cam[3], KhCullSet& khc_o) {
+    khc_o.valid = false;
+    if (g_dbg_mode.load(std::memory_order_relaxed) == 420) return;   // fielded stand-down
+
+    for (int khc_i = 0; khc_i < 4; ++khc_i) {
+        const int khc_r = khc_i >> 1;             // 0 = x column, 1 = y column
+        const float khc_s = (khc_i & 1) ? -1.0f : 1.0f;
+
+        for (int khc_c = 0; khc_c < 4; ++khc_c)
+            khc_o.p[khc_i][khc_c] = khc_vp[khc_c][3] + khc_s * khc_vp[khc_c][khc_r];
+
+        const float khc_l = sqrtf(khc_o.p[khc_i][0] * khc_o.p[khc_i][0] +
+                                  khc_o.p[khc_i][1] * khc_o.p[khc_i][1] +
+                                  khc_o.p[khc_i][2] * khc_o.p[khc_i][2]);
+        if (!(khc_l > 1.0e-9f)) { g_cull_standdowns++; return; }   // degenerate: cull nothing
+
+        for (int khc_c = 0; khc_c < 4; ++khc_c) khc_o.p[khc_i][khc_c] /= khc_l;
+    }
+
+    // THE APEX. Solve it, then check the fourth plane passes through it -
+    // a real perspective frustum has exactly one, and a matrix that does
+    // not produce one is not a frustum we may cull against.
+    float khc_ap[3];
+    if (!kh_cull_apex(khc_o, khc_ap)) { g_cull_standdowns++; return; }
+    const float khc_res = fabsf(khc_o.p[3][0] * khc_ap[0] + khc_o.p[3][1] * khc_ap[1] +
+                                khc_o.p[3][2] * khc_ap[2] + khc_o.p[3][3]);
+    if (khc_res > g_cull_apex_max) g_cull_apex_max = khc_res;
+    if (!(khc_res <= KH_CULL_APEX_TOL)) { g_cull_standdowns++; return; }
+    // THE RECOVERED ORIGIN. The apex is the camera expressed in the
+    // matrix's own space, so cam minus apex is the rebase this pass
+    // applied. Accept only the two this file actually uses - none, and the
+    // camera - so a cycle latch or a foreign view still cannot cull.
+    const float khc_ac[3] = { khc_ap[0] - khc_cam[0], khc_ap[1] - khc_cam[1],
+                              khc_ap[2] - khc_cam[2] };
+    const float khc_dabs = sqrtf(khc_ac[0] * khc_ac[0] + khc_ac[1] * khc_ac[1] +
+                                 khc_ac[2] * khc_ac[2]);
+    const float khc_dreb = sqrtf(khc_ap[0] * khc_ap[0] + khc_ap[1] * khc_ap[1] +
+                                 khc_ap[2] * khc_ap[2]);
+
+    if (khc_dabs <= KH_CULL_ORIGIN_TOL) {
+        khc_o.bias[0] = khc_o.bias[1] = khc_o.bias[2] = 0.0f;   // world-absolute matrix
+    } else if (khc_dreb <= KH_CULL_ORIGIN_TOL) {
+        khc_o.bias[0] = khc_ac[0];                              // camera-rebased matrix
+        khc_o.bias[1] = khc_ac[1];
+        khc_o.bias[2] = khc_ac[2];
+        g_cull_rebased++;
+    } else { g_cull_standdowns++; return; }
+
+    g_cull_builds++;
+    khc_o.valid = true;
+}
+
+// True = draw it. Fails OPEN in every direction: an unbuilt set, a zero
+// radius, a stood-down pass and anything non-finite all return true. A
+// false ACCEPT costs one draw; a false REJECT is a vanished object, and
+// 26652 is what the second one looks like in the field.
+inline bool kh_mesh_visible(const KhCullSet& khc_s, const float khc_ctr[3], float khc_r) {
+    if (!khc_s.valid) return true;
+    if (!(khc_r > 0.0f)) return true;
+
+    // Into the matrix's own space, then a padded sphere test.
+    const float khc_q[3] = { khc_ctr[0] + khc_s.bias[0], khc_ctr[1] + khc_s.bias[1],
+                             khc_ctr[2] + khc_s.bias[2] };
+    const float khc_b = khc_r + KH_CULL_PAD;
+
+    for (int khc_i = 0; khc_i < 4; ++khc_i) {
+        const float khc_d = khc_s.p[khc_i][0] * khc_q[0] + khc_s.p[khc_i][1] * khc_q[1] +
+                            khc_s.p[khc_i][2] * khc_q[2] + khc_s.p[khc_i][3];
+        if (khc_d < -khc_b) return false;
+    }
+
+    return true;
+}
+
+// The object's centre in ENGINE axes - the same swap every fill site makes.
+inline void kh_obj_center_engine(const RenderObject& khc_o, float khc_out[3]) {
+    khc_out[0] = khc_o.pos[0];
+    khc_out[1] = khc_o.pos[2];
+    khc_out[2] = khc_o.pos[1];
+}
+
+// ===========================================================================
+// KH_SHADOW_LOD - 26652. THE SHADOW LADDER TAKES A COARSE LEVEL.
+// Mode 422 restores level 0 on every casting pass.
+//
+// THIS IS THE TEXTBOOK ORDERING AND 26651 HAD IT BACKWARDS. A shadow
+// silhouette tolerates far more geometric error than a lit surface: it is
+// projected, filtered by a 9-tap ring, and compared against a depth with a
+// bias measured in centimetres. Engines therefore run shadows at a COARSER
+// level than colour, not the same one and certainly not a finer one. 26651
+// shipped the ladder to the colour paths ALONE, so a distant model was
+// drawn at level 5 once and at level 0 up to five more times - once per
+// shadow tier - which is the wrong way round and gave back most of the win.
+//
+// A FIXED LEVEL, NOT A PER-CASTER ONE, AND THAT IS DELIBERATE. The casting
+// passes group casters by mesh id and issue ONE DrawInstanced per group; a
+// per-caster level would have to become part of the grouping key and would
+// split every group. A fixed level keeps the grouping byte-identical and
+// still removes three quarters of the triangles at level 2.
+//
+// THE SEAM AND THE VOLUME CLONES ARE EXCLUDED, and this is the one place
+// where getting it wrong would be expensive. Those passes rasterise the
+// mesh's own FOOTPRINT and their depth and stencil must register against
+// the VISIBLE draw pixel for pixel - the whole 26326 encode campaign lives
+// on that registration. A footprint at a different level is a footprint
+// that does not match its mesh. Casting is a silhouette; registration is an
+// identity. Only the casting passes take this.
+// ===========================================================================
+// ===========================================================================
+// 26662 KH_SHADOW_LOD IS WITHDRAWN AS A DEFAULT AND THIS BLOCK IS AMENDED IN
+// PLACE (rule 1.16). IT AUTHORED THE OVERSIZED-MESH SELF-SHADOW ACNE, and the
+// convicting read is mode 422 killing the artifact outright after five other
+// mechanisms had been eliminated one screenshot at a time.
+//
+// THE DEFECT IS THE ONE THING THE 26652 TEXT ABOVE NEVER CONSIDERED: A MESH
+// RECEIVING ITS OWN SHADOW. Everything that block argues is correct for
+// casting onto OTHER geometry - a silhouette does tolerate decimation - and
+// it is silently wrong for SELF-shadowing, because the receiver is drawn at
+// the COLOUR level while the map holds level 2. Garland-Heckbert edge
+// collapse MOVES vertices, so those are two different surfaces, and the
+// compare measures the gap between them. The offset is in NORMALISED mesh
+// units and is multiplied by 'size', which is exactly why the artifact is
+// invisible at 10x and obvious at 100x and beyond, why it is frozen in the
+// same spots (decimation is deterministic), why it ignores absolute world
+// position, why 16x of receive bias could not touch it (the gap is
+// decimetres, the bias is millimetres) and why visual 19 paints it GREEN -
+// the map holds a GENUINE occluder well clear of the bias, and that occluder
+// is the caster's own coarser self.
+//
+// LEVEL 0 IS THE DEFAULT AND 422 IS NOW A BIT-EXACT ALIAS OF IT (rule 1.18:
+// a fielded arm promoted to default keeps its number and the revert gets a
+// new one). MODE 427 RESTORES LEVEL 2. mesh_lod_range at level 0 returns
+// start 0 and mesh_base_vcount, so every casting pass is byte-identical to
+// 26650 again - which is the configuration the whole shadow corpus before
+// 26652 was validated against.
+//
+// THE COST IS DISCLOSED AND IT IS UNMEASURED IN BOTH DIRECTIONS. The sun
+// ladder and the mask cast now submit four times the triangles they did at
+// level 2. NOTHING IN THIS FILE HAS EVER TIMED A CASTING PASS - meshGpuUs and
+// injGpuUs bracket the two COLOUR passes and nothing else - so 26652's win
+// was priced in triangles exactly like the front-to-back ordering that later
+// measured at low single digits. The correct order of work is a clock on the
+// casting passes FIRST and the optimisation rebuilt second, not a constant
+// tuned now against a number nobody has.
+//
+// THE PROPER REPAIR, NAMED AND DELIBERATELY NOT BUILT: the casting level
+// should EQUAL the caster's own colour level, which makes self-shadowing
+// exact by construction and still coarsens distant casters. That needs the
+// level to become part of the instanced grouping key - group by mesh id AND
+// level rather than mesh id alone - which 26652 avoided because it splits
+// DrawInstanced groups. Bounded at six levels, and groups only split where
+// instances of one mesh genuinely sit at different levels. It owes its own
+// build, its own arm, and the clock above before either.
+// ===========================================================================
+static constexpr int KH_SHADOW_LOD_LEVEL = 2;   // 427 restores it; NOT the default
+
+inline void mesh_shadow_range(int khs_mid, UINT& khs_start, UINT& khs_count) {
+    const MeshDef& khs_d = mesh_def(khs_mid);
+    // 26662: the sense is INVERTED - level 0 is the default and 427 restores
+    // the 26652 ladder. 422 keeps its number and is now a bit-exact alias of
+    // the default, per rule 1.18. Ledger above and at KH_BUILD_TAG.
+    const int khs_l = g_dbg_mode.load(std::memory_order_relaxed) == 427
+                    ? KH_SHADOW_LOD_LEVEL : 0;
+    mesh_lod_range(khs_d, khs_l, khs_start, khs_count);
+}
+
+// The object's bounding-sphere radius in WORLD metres, from the rotated
+// half extents every draw path already computes for its own culling.
+inline float kh_lod_radius(const RenderObject& khl_o) {
+    float khl_he[3];
+    kh_world_half_extents(khl_o, khl_he);
+    return sqrtf(khl_he[0] * khl_he[0] + khl_he[1] * khl_he[1] + khl_he[2] * khl_he[2]);
+}
+
 // Vert count is UNCAPPED by policy (performance is the operator's to
 // manage); the only guard is arithmetic - a vertex buffer's ByteWidth
 // is a UINT, and CreateBuffer already fails loudly on sizes the device
@@ -15833,7 +17705,13 @@ static constexpr size_t KH_FBX_VERT_CEIL = 0xFFFFFFFFull / sizeof(MeshVertex);
 // ===========================================================================
 static constexpr uint64_t KH_MESH_CACHE_MAX_BYTES = 1024ull * 1024ull * 1024ull;   // 1 GiB
 static constexpr uint32_t KH_MESH_CACHE_MAGIC = 0x434D484Bu;   // "KHMC" little-endian
-static constexpr uint32_t KH_MESH_CACHE_VERSION = 1;
+// 26651: VERSION 2 carries the KH_MESH_LOD block. THE KEY DOES NOT MOVE -
+// it is still an FNV over the FBX FILE BYTES, so the same model is the same
+// entry it always was and adding levels does NOT make every cached model
+// re-import forever. The version field alone rejects v1 files, which
+// re-import ONCE and are rewritten as v2. That is the whole staleness cost
+// and it is paid a single time per model per machine.
+static constexpr uint32_t KH_MESH_CACHE_VERSION = 2;
 
 inline uint64_t kh_fnv1a64(const uint8_t* khmc_p, size_t khmc_n) {
     uint64_t khmc_h = 1469598103934665603ull;
@@ -15867,19 +17745,18 @@ inline const std::filesystem::path& kh_mesh_cache_dir() {
 }
 
 inline std::filesystem::path kh_mesh_cache_file(uint64_t khmc_hash) {
-    std::ostringstream khmc_ss;
-    khmc_ss << "khm_" << std::hex << std::setfill('0') << std::setw(16) << khmc_hash << ".khmc";
-    return kh_mesh_cache_dir() / khmc_ss.str();
+    return kh_mesh_cache_dir() / kh_cache_file_name("khm_", khmc_hash, ".khmc");
 }
 
 // Full-validation load; true = khmc_d carries the compiled mesh and the
 // file's write time was touched (the LRU term). Any structural doubt is
 // a miss.
-inline bool kh_mesh_cache_load(uint64_t khmc_hash, MeshDef& khmc_d) {
-    if (kh_mesh_cache_dir().empty()) return false;
-
+// 26651: one candidate's worth of load. khmc_own says whether the file is
+// the Documents copy - only that one gets the LRU touch, and only that one
+// is under the trim's budget.
+inline bool kh_mesh_cache_load_one(const std::filesystem::path& khmc_p, bool khmc_own,
+                                   uint64_t khmc_hash, MeshDef& khmc_d) {
     try {
-        const std::filesystem::path khmc_p = kh_mesh_cache_file(khmc_hash);
         std::ifstream khmc_f(khmc_p, std::ios::binary);
         if (!khmc_f) return false;
         std::vector<uint8_t> khmc_b((std::istreambuf_iterator<char>(khmc_f)),
@@ -15905,25 +17782,78 @@ inline bool kh_mesh_cache_load(uint64_t khmc_hash, MeshDef& khmc_d) {
         khmc_d.verts.resize(khmc_nv);
         if (!khmc_rd(khmc_d.verts.data(), static_cast<size_t>(khmc_nv) * sizeof(MeshVertex))) return false;
         khmc_d.submeshes.resize(khmc_ns);
+        // One submesh table, read in place and range-checked against the
+        // vertex count. Shared by level 0 and every LOD level below.
+        auto khmc_tab = [&](std::vector<MeshSubmesh>& khmc_t) -> bool {
+            for (uint32_t khmc_i = 0; khmc_i < khmc_ns; ++khmc_i) {
+                uint32_t khmc_nl = 0;
+                if (!khmc_rd(&khmc_nl, 4) || khmc_nl > 1024u) return false;
+                khmc_t[khmc_i].name.resize(khmc_nl);
+                if (khmc_nl && !khmc_rd(&khmc_t[khmc_i].name[0], khmc_nl)) return false;
+                if (!khmc_rd(&khmc_t[khmc_i].vertex_start, 4) ||
+                    !khmc_rd(&khmc_t[khmc_i].vertex_count, 4)) return false;
+                const uint64_t khmc_end = static_cast<uint64_t>(khmc_t[khmc_i].vertex_start) +
+                                          khmc_t[khmc_i].vertex_count;
+                if (khmc_end > khmc_nv) return false;
+            }
 
-        for (uint32_t khmc_i = 0; khmc_i < khmc_ns; ++khmc_i) {
-            uint32_t khmc_nl = 0;
-            if (!khmc_rd(&khmc_nl, 4) || khmc_nl > 1024u) return false;
-            khmc_d.submeshes[khmc_i].name.resize(khmc_nl);
-            if (khmc_nl && !khmc_rd(&khmc_d.submeshes[khmc_i].name[0], khmc_nl)) return false;
-            if (!khmc_rd(&khmc_d.submeshes[khmc_i].vertex_start, 4) ||
-                !khmc_rd(&khmc_d.submeshes[khmc_i].vertex_count, 4)) return false;
-            const uint64_t khmc_end = static_cast<uint64_t>(khmc_d.submeshes[khmc_i].vertex_start) +
-                                      khmc_d.submeshes[khmc_i].vertex_count;
-            if (khmc_end > khmc_nv) return false;
+            return true;
+        };
+        if (!khmc_tab(khmc_d.submeshes)) return false;
+        // 26651 KH_MESH_LOD BLOCK. lod_n, then per level the whole-mesh
+        // range and a submesh table of the SAME cardinality as level 0 -
+        // that invariant is what lets a material slot index address one
+        // surface at every level, so it is VALIDATED here rather than
+        // assumed. Any structural doubt is a miss and the model re-imports.
+        uint32_t khmc_ln = 0;
+        if (!khmc_rd(&khmc_ln, 4) || khmc_ln > static_cast<uint32_t>(KH_LOD_MAX)) return false;
+        khmc_d.lod_n = static_cast<uint8_t>(khmc_ln);
+
+        for (uint32_t khmc_k = 0; khmc_k < khmc_ln; ++khmc_k) {
+            if (!khmc_rd(&khmc_d.lod_start[khmc_k], 4) ||
+                !khmc_rd(&khmc_d.lod_vcount[khmc_k], 4)) return false;
+            const uint64_t khmc_le = static_cast<uint64_t>(khmc_d.lod_start[khmc_k]) +
+                                     khmc_d.lod_vcount[khmc_k];
+            if (khmc_le > khmc_nv) return false;
+            khmc_d.lod_sub[khmc_k].resize(khmc_ns);
+            if (!khmc_tab(khmc_d.lod_sub[khmc_k])) return false;
         }
 
-        try {
-            std::filesystem::last_write_time(khmc_p, std::filesystem::file_time_type::clock::now());
-        } catch (...) {}
+        // Level 0's own block must END where level 1 begins, or
+        // mesh_base_vcount is lying to every historic caller.
+        if (khmc_ln > 0 && khmc_d.lod_start[0] > khmc_nv) return false;
+
+        if (khmc_own) {
+            try {
+                std::filesystem::last_write_time(khmc_p, std::filesystem::file_time_type::clock::now());
+            } catch (...) {}
+        }
 
         return true;
     } catch (...) { return false; }
+}
+
+// Full-validation load across every candidate: the Documents copy first,
+// then every mod that ships this model's compiled form. A partially filled
+// MeshDef from a rejected candidate is discarded, never carried forward.
+inline bool kh_mesh_cache_load(uint64_t khmc_hash, MeshDef& khmc_d) {
+    std::vector<std::filesystem::path> khmc_cand;
+    const bool khmc_docs = !kh_mesh_cache_dir().empty();
+    if (khmc_docs) khmc_cand.push_back(kh_mesh_cache_file(khmc_hash));
+    kh_mod_cache_append(khmc_cand, kh_cache_file_name("khm_", khmc_hash, ".khmc"));
+
+    for (size_t khmc_i = 0; khmc_i < khmc_cand.size(); ++khmc_i) {
+        const bool khmc_own = khmc_i == 0 && khmc_docs;
+        MeshDef khmc_try;
+
+        if (kh_mesh_cache_load_one(khmc_cand[khmc_i], khmc_own, khmc_hash, khmc_try)) {
+            if (!khmc_own) g_mod_mesh_hits++;
+            khmc_d = std::move(khmc_try);
+            return true;
+        }
+    }
+
+    return false;
 }
 
 inline void kh_mesh_cache_store(uint64_t khmc_hash, const MeshDef& khmc_d) {
@@ -15946,14 +17876,34 @@ inline void kh_mesh_cache_store(uint64_t khmc_hash, const MeshDef& khmc_d) {
         khmc_wr(&khmc_ns, 4);
         khmc_wr(khmc_d.verts.data(), static_cast<size_t>(khmc_nv) * sizeof(MeshVertex));
 
-        for (uint32_t khmc_i = 0; khmc_i < khmc_ns; ++khmc_i) {
-            const MeshSubmesh& khmc_sm = khmc_d.submeshes[khmc_i];
-            const uint32_t khmc_nl = khmc_sm.name.size() > 1024u
-                                   ? 1024u : static_cast<uint32_t>(khmc_sm.name.size());
-            khmc_wr(&khmc_nl, 4);
-            if (khmc_nl) khmc_wr(khmc_sm.name.data(), khmc_nl);
-            khmc_wr(&khmc_sm.vertex_start, 4);
-            khmc_wr(&khmc_sm.vertex_count, 4);
+        auto khmc_tab = [&](const std::vector<MeshSubmesh>& khmc_t) {
+            for (uint32_t khmc_i = 0; khmc_i < khmc_ns; ++khmc_i) {
+                const MeshSubmesh& khmc_sm = khmc_t[khmc_i];
+                const uint32_t khmc_nl = khmc_sm.name.size() > 1024u
+                                       ? 1024u : static_cast<uint32_t>(khmc_sm.name.size());
+                khmc_wr(&khmc_nl, 4);
+                if (khmc_nl) khmc_wr(khmc_sm.name.data(), khmc_nl);
+                khmc_wr(&khmc_sm.vertex_start, 4);
+                khmc_wr(&khmc_sm.vertex_count, 4);
+            }
+        };
+        khmc_tab(khmc_d.submeshes);
+        // 26651: the LOD block. A level whose table cardinality disagrees
+        // with level 0 is not written at all - the reader validates the
+        // same invariant, and writing something the reader would reject is
+        // how a cache starts lying about what it holds.
+        uint32_t khmc_ln = khmc_d.lod_n;
+
+        for (uint32_t khmc_k = 0; khmc_k < khmc_ln; ++khmc_k) {
+            if (khmc_d.lod_sub[khmc_k].size() != khmc_d.submeshes.size()) { khmc_ln = khmc_k; break; }
+        }
+
+        khmc_wr(&khmc_ln, 4);
+
+        for (uint32_t khmc_k = 0; khmc_k < khmc_ln; ++khmc_k) {
+            khmc_wr(&khmc_d.lod_start[khmc_k], 4);
+            khmc_wr(&khmc_d.lod_vcount[khmc_k], 4);
+            khmc_tab(khmc_d.lod_sub[khmc_k]);
         }
 
         khmc_f.flush();
@@ -16036,10 +17986,148 @@ inline bool kh_fbx_register(MeshDef&& d, const std::string& path, int& out_id, s
     return true;
 }
 
+// ===========================================================================
+// KH_MESH_CACHE_MT - 26646. THE .khmc WRITE AND THE 1 GiB TRIM LEAVE THE
+// GAME THREAD. Mode 413 restores the synchronous form.
+//
+// WHAT THIS IS NOT. It is NOT the ufbx parse, and the distinction is the
+// whole point of this build. An FBX import runs on the GAME THREAD - it is
+// reached from mesh_id_from_gv inside the SQF extension call - and it does
+// four things: read the file, hash it, parse-or-load, then WRITE the compiled
+// result back to disk and TRIM a 1 GiB directory. Only the last two are
+// provably free to move: nothing downstream reads them back in this call, the
+// mesh is registered from memory either way, and a lost write costs one
+// re-parse on a future launch and nothing else. The PARSE is a different
+// question and rule 1.12 answers it - there has never been a single timing
+// lane on this path, only counts, so this build MEASURES the parse and moves
+// only what it can prove is free. Do not redesign the parse against a number
+// that does not exist yet.
+//
+// WHY READING THE MESH BY ID OFF-THREAD IS SAFE. kh_mesh_append stores
+// new MeshDef(std::move(def)) at SESSION LIFETIME - v1 has no unregistration
+// - and the MeshDef is IMMUTABLE AFTER PUBLICATION by its own contract. So a
+// published id names a block that never moves and never dies, and the writer
+// reads it without a lock for the same reason every draw path indexes it
+// without one. The store therefore happens AFTER the register rather than
+// before it, which is a deliberate reordering: a crash in the window between
+// them loses a cache entry, which the next launch re-parses, and that is the
+// cheapest failure this path has.
+//
+// NO DEVICE, NO CONTEXT, NO ENGINE STATE - the 26636 audit's rule, and the
+// reason this thread is as safe as a shader worker. It touches the
+// filesystem, its own queue and the SHARED trim mutex that the .khsc writers
+// already take, because both caches live in one folder under one budget.
+// ===========================================================================
+struct KhMeshWriteJob { uint64_t hash; int id; };
+static std::vector<KhMeshWriteJob> g_khmw_q;
+static std::mutex g_khmw_mu;
+static std::condition_variable g_khmw_cv;
+static std::thread g_khmw_thr;
+static bool g_khmw_running = false;
+static std::atomic<bool> g_khmw_abort{false};
+static uint64_t g_khmw_queued = 0;    // writes handed to the thread
+static uint64_t g_khmw_done = 0;      // writes completed
+static uint64_t g_khmw_dropped = 0;   // writes abandoned at teardown
+static uint64_t g_fbx_read_ms = 0;    // 26646: cumulative file read + hash
+static uint64_t g_fbx_parse_ms = 0;   // cumulative ufbx parse + bake (MISSES only)
+static uint64_t g_fbx_load_ms = 0;    // cumulative binary-cache load (HITS only)
+static uint64_t g_fbx_reg_ms = 0;     // cumulative register - INCLUDES the graphics lock
+// 26651 KH_MESH_LOD. Cumulative ms spent building the ladder, charged on
+// MISSES only - a cache hit of either kind pays none of it. Measured on a
+// synthetic ladder before shipping: 6 ms at 4k triangles, 133 ms at 65k,
+// which is roughly four times fbxParseMs and is the number that decides
+// whether this ever needs to leave the game thread. Rule 1.12: it ships
+// measured, and it does NOT ship off-thread on a guess.
+static uint64_t g_lod_build_ms = 0;
+static uint64_t g_lod_meshes = 0;     // models that got a ladder
+static uint64_t g_lod_levels = 0;     // levels built across them - divide for the mean depth
+static uint64_t g_lod_fades = 0;      // draws that issued the crossfade pair
+
+inline void kh_mesh_cache_writer() {
+    for (;;) {
+        KhMeshWriteJob khmw_j;
+        {
+            std::unique_lock<std::mutex> khmw_l(g_khmw_mu);
+            g_khmw_cv.wait(khmw_l, [] {
+                return !g_khmw_q.empty() || g_khmw_abort.load(std::memory_order_relaxed);
+            });
+            if (g_khmw_abort.load(std::memory_order_relaxed) && g_khmw_q.empty()) return;
+            if (g_khmw_q.empty()) continue;
+            khmw_j = g_khmw_q.front();
+            g_khmw_q.erase(g_khmw_q.begin());
+        }
+        try {
+            // Bounds re-checked against the PUBLISHED count on this thread:
+            // the id was published before it was queued, and the count only
+            // ever grows, so this can only pass - it is here so a future
+            // unregistration cannot turn a stale id into a wild read.
+            if (khmw_j.id >= 0 && static_cast<uint32_t>(khmw_j.id) < mesh_count()) {
+                kh_mesh_cache_store(khmw_j.hash, mesh_def(khmw_j.id));
+                std::lock_guard<std::mutex> khmw_tl(g_khsm_trim_mu);
+                kh_mesh_cache_trim();
+            }
+        } catch (...) {}
+        g_khmw_done++;
+    }
+}
+
+// Started on first use, never restarted per import. A spawn failure is
+// non-fatal and falls back to writing inline, exactly as a single-core
+// machine takes no shader pool.
+inline bool kh_mesh_cache_writer_start() {
+    std::lock_guard<std::mutex> khmw_l(g_khmw_mu);
+    if (g_khmw_running) return true;
+    g_khmw_abort.store(false, std::memory_order_relaxed);
+    try {
+        g_khmw_thr = std::thread(kh_mesh_cache_writer);
+    } catch (...) {
+        return false;
+    }
+    g_khmw_running = true;
+    return true;
+}
+
+// 26646 TEARDOWN. Unlike a shader worker this thread is ALWAYS interruptible
+// between jobs - it holds no multi-minute call - so it is JOINED, never
+// detached, and there is no bounded-wait compromise to make. Queued-but-
+// unwritten jobs are counted and dropped: a missing .khmc costs one re-parse
+// on a later launch, and finishing them would hold the shutdown for the
+// length of a disk queue.
+inline void kh_mesh_cache_writer_stop() {
+    {
+        std::lock_guard<std::mutex> khmw_l(g_khmw_mu);
+        if (!g_khmw_running) return;
+        g_khmw_dropped += g_khmw_q.size();
+        g_khmw_q.clear();
+        g_khmw_abort.store(true, std::memory_order_relaxed);
+    }
+    g_khmw_cv.notify_all();
+    if (g_khmw_thr.joinable()) { try { g_khmw_thr.join(); } catch (...) {} }
+    std::lock_guard<std::mutex> khmw_l2(g_khmw_mu);
+    g_khmw_running = false;
+}
+
+inline void kh_mesh_cache_queue(uint64_t khmw_h, int khmw_id) {
+    if (!kh_mesh_cache_writer_start()) {   // no thread: write inline, as before
+        kh_mesh_cache_store(khmw_h, mesh_def(khmw_id));
+        std::lock_guard<std::mutex> khmw_tl(g_khsm_trim_mu);
+        kh_mesh_cache_trim();
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> khmw_l(g_khmw_mu);
+        KhMeshWriteJob khmw_j = { khmw_h, khmw_id };
+        g_khmw_q.push_back(khmw_j);
+        g_khmw_queued++;
+    }
+    g_khmw_cv.notify_one();
+}
+
 inline bool kh_fbx_import(const std::string& path, int& out_id, std::string& err) {
     // ONE READ, THREE CONSUMERS (cache round): the file bytes feed the
     // content hash, the binary-cache probe, and - on a miss - ufbx
     // itself (ufbx_load_memory), so hashing costs no second disk pass.
+    const uint64_t khmc_t0 = steady_now_ms();
     std::vector<uint8_t> khmc_bytes;
     {
         std::ifstream khmc_in(path, std::ios::binary);
@@ -16049,14 +18137,24 @@ inline bool kh_fbx_import(const std::string& path, int& out_id, std::string& err
     }
     if (khmc_bytes.empty()) { err = "empty file"; return false; }
     const uint64_t khmc_hash = kh_fnv1a64(khmc_bytes.data(), khmc_bytes.size());
+    // 26646: the first timing this path has ever had. Counts existed since
+    // the cache was built; nobody has ever known what an import COSTS, which
+    // is why this build measures the parse instead of redesigning it.
+    g_fbx_read_ms += steady_now_ms() - khmc_t0;
     {
         MeshDef khmc_d;
-
-        if (kh_mesh_cache_load(khmc_hash, khmc_d)) {
+        const uint64_t khmc_lt0 = steady_now_ms();
+        const bool khmc_hit = kh_mesh_cache_load(khmc_hash, khmc_d);
+        g_fbx_load_ms += steady_now_ms() - khmc_lt0;
+        if (khmc_hit) {
             g_stats.fbx_cache_hits++;
-            return kh_fbx_register(std::move(khmc_d), path, out_id, err);
+            const uint64_t khmc_rt0 = steady_now_ms();
+            const bool khmc_ok = kh_fbx_register(std::move(khmc_d), path, out_id, err);
+            g_fbx_reg_ms += steady_now_ms() - khmc_rt0;
+            return khmc_ok;
         }
     }
+    const uint64_t khmc_pt0 = steady_now_ms();
     ufbx_load_opts opts = {};
     opts.target_axes = ufbx_axes_right_handed_z_up;    // = ARMA authoring axes
     opts.target_unit_meters = 1.0f;
@@ -16201,18 +18299,53 @@ inline bool kh_fbx_import(const std::string& path, int& out_id, std::string& err
 
     if (has_uv) kh_gen_tangents(d.verts);   // ARMA space; bake flips handedness
     meshgen::bake(d.verts);
+    // 26651 KH_MESH_LOD. AFTER the bake and AFTER the tangents, deliberately:
+    // the levels are cut from the FINAL engine-space vertices, so they land in
+    // the same vertex buffer in the same space and need no second bake, no
+    // second mikktspace pass and no per-level fixup at load. Because it runs
+    // above the store, the ladder is part of what the .khmc carries and a
+    // cache hit pays for none of it - which is the whole reason this is
+    // affordable at all, and the reason a mod can ship it. Mode 418 skips it
+    // and the model behaves exactly as it did at 26650.
+    {
+        const uint64_t khlb_t0 = steady_now_ms();
+        kh_lod_build(d);
+        g_lod_build_ms += steady_now_ms() - khlb_t0;
+
+        if (d.lod_n) {
+            g_lod_meshes++;
+            g_lod_levels += d.lod_n;
+        }
+    }
     // Persist the COMPILED result (post-tangent, post-bake: a cache hit
     // skips ufbx, triangulation, mikktspace AND the bake), then keep the
     // cache under its cap. Both best-effort.
-    kh_mesh_cache_store(khmc_hash, d);
-    {   // 26636: the OTHER trim call site. An FBX import can land while a
-        // KH_SHADER_MT batch is writing .khsc blobs into the same folder, so
-        // both callers take the same mutex - the trim enumerates and deletes.
-        std::lock_guard<std::mutex> khmc_tl(g_khsm_trim_mu);
-        kh_mesh_cache_trim();
-    }
+    g_fbx_parse_ms += steady_now_ms() - khmc_pt0;
     g_stats.fbx_imports++;
-    return kh_fbx_register(std::move(d), path, out_id, err);
+    // 26646 KH_MESH_CACHE_MT. The write and the trim moved BELOW the register
+    // and onto their own thread - see the ledger at the writer. Mode 413
+    // restores the synchronous form, above the register, exactly as it was.
+    // 26636's note still applies and is why the writer takes g_khsm_trim_mu:
+    // an FBX import can land while a KH_SHADER_MT batch is writing .khsc
+    // blobs into the same folder, and the trim enumerates and deletes.
+    if (g_dbg_mode.load(std::memory_order_relaxed) == 413) {
+        kh_mesh_cache_store(khmc_hash, d);
+        {
+            std::lock_guard<std::mutex> khmc_tl(g_khsm_trim_mu);
+            kh_mesh_cache_trim();
+        }
+        const uint64_t khmc_rt1 = steady_now_ms();
+        const bool khmc_ok1 = kh_fbx_register(std::move(d), path, out_id, err);
+        g_fbx_reg_ms += steady_now_ms() - khmc_rt1;
+        return khmc_ok1;
+    }
+    const uint64_t khmc_rt0 = steady_now_ms();
+    const bool khmc_ok = kh_fbx_register(std::move(d), path, out_id, err);
+    g_fbx_reg_ms += steady_now_ms() - khmc_rt0;
+    // Queued only on success: an unregistered mesh has no published id, and
+    // the writer reads the mesh BY id.
+    if (khmc_ok) kh_mesh_cache_queue(khmc_hash, out_id);
+    return khmc_ok;
 }
 
 // The mesh-slot front door for ".fbx" strings: resolve via the rendering
@@ -16360,14 +18493,21 @@ inline uint32_t kh_draw_textured(ID3D11DeviceContext* ctx, ID3D11Device* dev,
                                  ConstantData& cbd, ID3D11Buffer* obj_cb,
                                  const KhMaterialSet& ms, int mid, bool ts_ordered,
                                  ID3D11RasterizerState*& bound_rs,
-                                 int khum_ctx, ID3D11PixelShader* khum_builtin_ps) {
+                                 int khum_ctx, ID3D11PixelShader* khum_builtin_ps,
+                                 int khum_lod) {
     static const KhMaterial khtx_default;   // unset slots draw with defaults
     const MeshDef& md = mesh_def(mid);
     uint32_t draws = 0;
     ID3D11PixelShader* khum_bound = khum_builtin_ps;
+    // 26651 KH_MESH_LOD: the level's OWN submesh table. Its cardinality and
+    // order match level 0's by construction - decimation runs per submesh
+    // and never merges or drops one - and kh_mesh_cache_load validates that
+    // rather than trusting it, which is why si still addresses the right
+    // material slot at every level with no per-level bookkeeping here.
+    const std::vector<MeshSubmesh>& khum_tab = mesh_lod_submeshes(md, khum_lod);
 
-    for (size_t si = 0; si < md.submeshes.size(); ++si) {
-        const MeshSubmesh& sm = md.submeshes[si];
+    for (size_t si = 0; si < khum_tab.size(); ++si) {
+        const MeshSubmesh& sm = khum_tab[si];
         if (sm.vertex_count == 0) continue;
         const KhMaterial& mat = (si < ms.slots.size() && ms.slots[si].used)
                               ? ms.slots[si] : khtx_default;
@@ -16376,10 +18516,42 @@ inline uint32_t kh_draw_textured(ID3D11DeviceContext* ctx, ID3D11Device* dev,
         // builtin (flush / composite / composite-arb); an absent or
         // failed compile keeps builtin PBR - the mesh never blanks.
         ID3D11PixelShader* khum_want = khum_builtin_ps;
+        // 26649 KH_USER_MAT_WHITE (mode 415 restores the 26645 form). A
+        // submesh that ASKED FOR a user shader and has not got one yet - or
+        // never will, because it failed to compile - draws FLAT WHITE, not
+        // builtin PBR. OPERATOR DIRECTIVE, and the reasoning is 26643's own:
+        // a placeholder whose fidelity is arguable is worse than one that is
+        // obviously a placeholder. Builtin PBR under a custom material is a
+        // LIE in both states - while pending it invites the author to think
+        // the shader landed and simply resembles PBR, and on FAILURE it hides
+        // the failure behind a plausible-looking result forever. White is
+        // unmistakable in both, and it is the same white the 26643 preview
+        // already uses during the shader compile window, so a mesh whose
+        // material never compiles looks exactly like a mesh whose shaders
+        // have not compiled yet - one placeholder vocabulary, not two.
+        // SCOPE IS NARROW BY CONSTRUCTION: this branch is only entered when
+        // the material explicitly named a .hlsl. A submesh asking for "pbr"
+        // is untouched and always was.
+        bool khum_white = false;
 
         if (mat.shader == 1 && !mat.user_shader.empty()) {
             ID3D11PixelShader* khum_ps = kh_user_mat_ps(dev, mat.user_shader, khum_ctx);
-            if (khum_ps) khum_want = khum_ps;
+            if (khum_ps) {
+                khum_want = khum_ps;
+            } else if (g_res.ps_white &&
+                       g_dbg_mode.load(std::memory_order_relaxed) != 415) {
+                // PSWhite reads ONLY SV_Position, which VSOut supplies, so the
+                // linkage is legal against the textured VS already bound and
+                // the material SRVs simply go unread. DISCLOSED: it writes
+                // alpha 1, so a translucent placeholder draws opaque, and it
+                // emits no SV_Depth, so the arb variant loses its contact
+                // clamp for as long as the substitute is up. Both are
+                // placeholder-grade and both end the moment the real shader
+                // lands.
+                khum_want = g_res.ps_white;
+                khum_white = true;
+                g_user_mat_white_draws++;
+            }
         }
 
         if (khum_want != khum_bound) {
@@ -16387,7 +18559,11 @@ inline uint32_t kh_draw_textured(ID3D11DeviceContext* ctx, ID3D11Device* dev,
             khum_bound = khum_want;
         }
 
-        kh_bind_material(ctx, dev, cbd, mat);
+        // 26649: the substitute takes the DEFAULT material rather than the
+        // real one. PSWhite samples nothing, so this changes no pixel - it
+        // exists so the texture binds and their loads are not paid for a
+        // surface that cannot show them.
+        kh_bind_material(ctx, dev, cbd, khum_white ? khtx_default : mat);
         if (!kh_upload_obj_cb(ctx, obj_cb, cbd)) break;
 
         if (ts_ordered) {   // interiors first, exteriors over them (the ordered contract)
@@ -16725,12 +18901,189 @@ inline std::string ensure_query_buffers(ID3D11Device* dev, UINT need) {
 // and could not see the local - the build-breaking class this note
 // exists to prevent recurring). NON-FATAL like PSInjDepth: a failure
 // leaves it null and the mirror prepass self-gates dark for the session.
+// ===========================================================================
+// KH_WHITE_PREVIEW - 26643. The placeholder's own ensure. Idempotent, ONE
+// attempt per device, and NON-FATAL in every direction: a failure here leaves
+// white_ready false and the session behaves exactly as 26642 did - nothing
+// drawn until the real shaders land. It is called only from the two deferral
+// returns in ensure_resources, so a warm-cache session that never defers
+// never creates any of it.
+//
+// Note the ordering this respects. The unit is g_cb_hlsl + g_hlsl_white, so
+// the 26319 law is satisfied by construction (KhRotate and the CB are defined
+// in the prefix, VSWhite and PSWhite come after), and it takes the SAME
+// KH_RECEIVE_TEX=1 define the PSMain unit takes so the prefix preprocesses
+// into the state it is known to compile in. It routes through compile_shader
+// like everything else, so it hits the 26482 disk cache from the second
+// launch onward and hits the 26636 memo if a batch ever happened to hold it.
+// ===========================================================================
+static uint64_t g_khw_compile_ms = 0;   // 26643: what the placeholder cost, once
+static uint64_t g_khw_frames = 0;       // frames the placeholder pass ran
+static uint64_t g_khw_draws = 0;        // placeholder draw calls issued
+static uint64_t g_khw_vb_fails = 0;     // 26644: frames the VB top-up refused
+
+inline void kh_white_ensure(ID3D11Device* dev) {
+    if (!dev || g_res.white_tried) return;
+    if (g_dbg_mode.load(std::memory_order_relaxed) == 409) return;   // 26643 stand-down
+    g_res.white_tried = true;
+    const bool khw_410 = g_dbg_mode.load(std::memory_order_relaxed) == 410;   // 26644 revert
+    const uint64_t khw_t0 = steady_now_ms();
+    static const D3D_SHADER_MACRO khw_defines[] = {
+        { "KH_RECEIVE_TEX", "1" }, { nullptr, nullptr },
+    };
+    const std::string khw_src = std::string(g_cb_hlsl) + g_hlsl_white;
+    ID3DBlob* khw_vsb = nullptr;
+    ID3DBlob* khw_psb = nullptr;
+    std::string khw_err = compile_shader(khw_src.c_str(), "VSWhite", "vs_5_0", khw_defines, &khw_vsb);
+    if (khw_err.empty())
+        khw_err = compile_shader(khw_src.c_str(), "PSWhite", "ps_5_0", khw_defines, &khw_psb);
+    g_khw_compile_ms = steady_now_ms() - khw_t0;
+    if (!khw_err.empty() || !khw_vsb || !khw_psb) {
+        if (khw_vsb) khw_vsb->Release();
+        if (khw_psb) khw_psb->Release();
+        kh_report_error("KH white preview: " + (khw_err.empty() ? std::string("no blob") : khw_err));
+        return;
+    }
+    // 26644 THE STEP NAMES ITSELF. 26643 collapsed seven device creates and a
+    // vertex-buffer top-up into ONE message with no HRESULT, so the field
+    // report "device object create failed" narrowed the cause to nothing and
+    // the next build would have been a guess. khw_step carries the last
+    // attempted call and khw_hr its result; both ride the one report below.
+    const char* khw_step = "none";
+    HRESULT khw_hr = S_OK;
+
+    khw_step = "CreateVertexShader";
+    khw_hr = dev->CreateVertexShader(khw_vsb->GetBufferPointer(), khw_vsb->GetBufferSize(),
+                                     nullptr, &g_res.vs_white);
+    if (SUCCEEDED(khw_hr)) {
+        khw_step = "CreatePixelShader";
+        khw_hr = dev->CreatePixelShader(khw_psb->GetBufferPointer(), khw_psb->GetBufferSize(),
+                                        nullptr, &g_res.ps_white);
+    }
+    if (SUCCEEDED(khw_hr)) {
+        // 26644 THE LAYOUT NOW MATCHES THE SIGNATURE, NOT THE SHADER BODY.
+        // VSWhite takes VSIn, whose untextured form declares POSITION AND
+        // NORMAL, and 26643 described POSITION only on the reasoning that the
+        // body reads i.pos alone. That inverts this file's own precedent: the
+        // one other entry point that wanted a position-only vertex - VSMirror
+        // - was given its own NARROW INPUT STRUCT, VSInMir, and then rode the
+        // WIDE two-element layout, because a layout wider than the signature
+        // is always legal while a layout narrower than it is a validation
+        // question the runtime answers and we do not. This is the SAME two
+        // elements ensure_resources builds for VSMain, at the same MeshVertex
+        // offsets, so it is fielded verbatim rather than newly reasoned - and
+        // it needs NO shader edit, so the 26643 cache key does not move.
+        const D3D11_INPUT_ELEMENT_DESC khw_il[] = {
+            { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        };
+        khw_step = "CreateInputLayout";
+        khw_hr = dev->CreateInputLayout(khw_il, khw_410 ? 1u : 2u, khw_vsb->GetBufferPointer(),
+                                        khw_vsb->GetBufferSize(), &g_res.layout_white);
+    }
+    khw_vsb->Release();
+    khw_psb->Release();
+    if (SUCCEEDED(khw_hr)) {
+        D3D11_BUFFER_DESC khw_bd = {};
+        khw_bd.ByteWidth = static_cast<UINT>(KH_CBOBJ_BYTES);
+        khw_bd.Usage = D3D11_USAGE_DYNAMIC;
+        khw_bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        khw_bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        khw_step = "CreateBuffer(obj)";
+        khw_hr = dev->CreateBuffer(&khw_bd, nullptr, &g_res.white_obj_cb);
+        if (SUCCEEDED(khw_hr)) {
+            khw_bd.ByteWidth = static_cast<UINT>(KH_CBFRAME_BYTES);
+            khw_step = "CreateBuffer(frame)";
+            khw_hr = dev->CreateBuffer(&khw_bd, nullptr, &g_res.white_frame_cb);
+        }
+    }
+    if (SUCCEEDED(khw_hr)) {
+        D3D11_RASTERIZER_DESC khw_rd = {};
+        khw_rd.FillMode = D3D11_FILL_SOLID;
+        khw_rd.CullMode = D3D11_CULL_NONE;
+        khw_rd.MultisampleEnable = TRUE;
+        khw_rd.DepthClipEnable = FALSE;      // the mesh rasterizer's contract, verbatim
+        // 26644 THE BIAS WAS COPIED FROM THE WRONG TWIN, AND 26437 IS THE
+        // LEDGER THAT SAYS SO. 26643 took -32 / -0.25 as "the mesh
+        // rasterizer's contract"; those are the values of rasterizer_b /
+        // rasterizer_ub, the REVERT twins behind modes 187 and 179. The
+        // PRIMARY g_res.rasterizer carries 0 / 0 / 0 and has since 26364,
+        // which folded the mesh bias OFF after the field confirmed the box
+        // "stopped eating objects standing in front of it". 26437's standing
+        // check states the resolved table in writing - primaries 0/0/0 - and
+        // this is the identical mistake 26437 was written to stop: matching a
+        // field assignment instead of the block the consumer reads. A
+        // placeholder biased 32 units toward the camera is the 26334/26363
+        // z-fighting class, reintroduced on the one pass whose whole job is
+        // to be trusted about WHERE a spawn landed. 410 restores the 26643
+        // values so the pair can be told apart in the field.
+        khw_rd.DepthBias = khw_410 ? -32 : 0;
+        khw_rd.SlopeScaledDepthBias = khw_410 ? -0.25f : 0.0f;
+        khw_rd.DepthBiasClamp = 0.0f;
+        khw_step = "CreateRasterizerState";
+        khw_hr = dev->CreateRasterizerState(&khw_rd, &g_res.rast_white);
+        if (SUCCEEDED(khw_hr)) {
+            D3D11_DEPTH_STENCIL_DESC khw_dd = {};
+            khw_dd.DepthEnable = TRUE;
+            khw_dd.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+            khw_dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+            khw_dd.StencilEnable = FALSE;
+            khw_step = "CreateDepthStencilState";
+            khw_hr = dev->CreateDepthStencilState(&khw_dd, &g_res.dss_white);
+        }
+    }
+    // 26644 THE VERTEX BUFFERS ARE NOT A WHITE-PREVIEW RESOURCE AND NO LONGER
+    // GATE ONE. 26643 ran ensure_mesh_vbs here and folded its result into the
+    // same boolean as the seven creates, so a top-up failure - "mesh 'x':
+    // empty geometry" from any published mesh, and kh_mesh_append enforces
+    // that contract by convention only, never in code - reported as a DEVICE
+    // OBJECT failure and stood the preview down PERMANENTLY, because
+    // white_tried has already latched. The real draw paths treat exactly the
+    // same failure as skip-this-frame and retry on the next one; there is no
+    // reason the placeholder should be the one consumer that dies of it. The
+    // top-up moves to kh_white_draw, which already bounds-checks every id
+    // against mesh_vb before indexing it, so a missing buffer costs that one
+    // object one frame instead of the feature the whole session. 410 restores
+    // the 26643 gate.
+    if (khw_410 && SUCCEEDED(khw_hr)) {
+        if (!ensure_mesh_vbs(dev).empty() || g_res.mesh_vb.empty()) khw_hr = E_FAIL;
+    }
+    if (FAILED(khw_hr)) {
+        KH_SAFE_RELEASE(g_res.vs_white);
+        KH_SAFE_RELEASE(g_res.ps_white);
+        KH_SAFE_RELEASE(g_res.layout_white);
+        KH_SAFE_RELEASE(g_res.white_obj_cb);
+        KH_SAFE_RELEASE(g_res.white_frame_cb);
+        KH_SAFE_RELEASE(g_res.rast_white);
+        KH_SAFE_RELEASE(g_res.dss_white);
+        kh_report_error(std::string("KH white preview: ") + khw_step + " " + hr_str(khw_hr) +
+                        " (preview stands down)");
+        return;
+    }
+    g_res.white_ready = true;
+}
+
 static ID3D11VertexShader* g_vmir_vs = nullptr;
 inline std::string ensure_resources(ID3D11Device* dev) {
+    // 26651 KH_MOD_CACHE PRIMING. The mod "cache" scan is a magic static and
+    // the ONE call that walks mod folders on disk must not happen first on a
+    // shader worker, whose reentrancy into ModFolderSearcher we do not own.
+    // This site runs on the game or render thread, always before any pool
+    // arms, and costs one guard load per call after the first.
+    kh_mod_cache_dirs();
     // Initialized fast path still tops up mesh VBs: after kh_mesh_publish
     // (park-scoped by contract) the very next ensure - which every draw
     // path performs before indexing mesh_vb - creates the new buffers.
     if (g_res.initialized) return ensure_mesh_vbs(dev);
+
+    // 26642 THE DEFERRAL IS ASKED BEFORE ANYTHING IS BUILT. Everything below
+    // this line - two source concatenations totalling 791,059 bytes, plus the
+    // temporaries the operator+ chain makes of them - was rebuilt from
+    // scratch on EVERY call for the whole of the 26641 deferral, from up to
+    // five render sites per frame. kh_shader_async_hold needs no source at
+    // all and reaches the identical verdict; see its ledger.
+    // 26643: a deferred frame arms the white placeholder on its way out.
+    if (kh_shader_async_hold()) { kh_white_ensure(dev); return KH_SHADERS_COMPILING; }
 
     if (!g_reset_hook_installed && RVExtBridge::has_reset_hook()) {
         RVExtBridge::set_reset_hook(&on_engine_reset);
@@ -16797,6 +19150,32 @@ inline std::string ensure_resources(ID3D11Device* dev) {
     // 26641: the MSAA_DEPTH=1 speculation is REMOVED - it was never consumed
     // in any dump and its four heavy units were pure contention. Ledger at
     // KH_BUILD_TAG under LEVER 1.
+    // 26644 TRIPWIRE, THE 26383 KIND. VSWhite and PSWhite are DELIBERATELY
+    // ABSENT from this list and must stay absent. kh_white_ensure calls
+    // compile_shader on the RENDER THREAD INSIDE THE GRAPHICS LOCK, and
+    // compile_shader blocks on the condition variable for any key that is
+    // present in the memo but not yet done. Today it cannot block, because a
+    // key no batch ever queued misses the map and compiles inline. Add the
+    // white pair here "so the pool warms it too" and the render thread waits
+    // inside the graphics lock for up to one full unit - the 26637 frozen
+    // game, by way of 26642 defect (1), reintroduced by an edit that reads
+    // like an optimisation. The pair costs milliseconds inline; there is
+    // nothing to win here and a freeze to lose.
+    // 26645 KH_FX_BATCH. PSEffect was the last unit on the startup path with
+    // no pool at all: ensure_effect_shader builds g_cb_hlsl + the three
+    // effect chunks and makes ONE compile_shader call on the calling thread,
+    // so it compiled strictly AFTER everything here rather than beside it.
+    // It is speculative in the same sense the composite matrix is - it keys
+    // on g_res.depth_sample_count, which is not known here - so it takes the
+    // 1x arm and a miss costs an inline compile exactly as today. The define
+    // table MUST match ensure_effect_shader's byte for byte, and note it is
+    // MSAA_DEPTH ALONE: no SAMPLE_COUNT, no KH_RECEIVE_TEX, because the
+    // effect unit's depthTex owns t1 and it never receives. Mode 412 drops
+    // it from the batch.
+    const std::string khfx_src =
+        std::string(g_cb_hlsl) + g_hlsl_effect + g_hlsl_effect2 + g_hlsl_effect3;
+    const D3D_SHADER_MACRO khfx_d0[] = {
+        { "MSAA_DEPTH", "0" }, { nullptr, nullptr } };
     const KhShaderJob khsp_jobs[] = {
         // the ten this function actually consumes, heaviest first
         { static_src.c_str(), "PSMain",      "ps_5_0", khcb_rx_defines, 0 },
@@ -16816,6 +19195,10 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         { static_src.c_str(), "VSSunDepth",  "vs_5_0", khcb_rx_defines, 0 },
         { khsp_comp_src.c_str(), "VSComposite", "vs_5_0", khsp_d0,  0 },
         { khsp_comp_src.c_str(), "VSComposite", "vs_5_0", khsp_d0t, 0 },
+        // 26645: the post-processing unit, speculative at 1x. Last because it
+        // is the lightest of the speculative entries - PSEffect does not call
+        // the shadow chain, which is why it was never in 26636's heavy list.
+        { khfx_src.c_str(), "PSEffect", "ps_5_0", khfx_d0, 0 },
     };
     // 26641 LEVER 1, measured: at 26640 this batch ran TEN heavy units at once
     // and each one slowed to 391 s - per-unit compile time scales as roughly
@@ -16826,8 +19209,13 @@ inline std::string ensure_resources(ID3D11Device* dev) {
     // and pays a second batch exactly as it did at 26639 - never worse.
     // 26641 LEVER 3: the gate returns instead of blocking. Everything below
     // this line runs UNCHANGED once the pool is done, taking memo hits.
-    if (kh_shader_async_gate(khsp_jobs, _countof(khsp_jobs)))
+    // 26645: mode 412 drops the trailing PSEffect job from the batch.
+    const size_t khsp_n = _countof(khsp_jobs) -
+        (g_dbg_mode.load(std::memory_order_relaxed) == 412 ? 1u : 0u);
+    if (kh_shader_async_gate(khsp_jobs, khsp_n)) {
+        kh_white_ensure(dev);   // 26643: the arming frame gets a placeholder too
         return KH_SHADERS_COMPILING;
+    }
     std::string err = compile_shader(static_src.c_str(), "VSMain", "vs_5_0", khcb_rx_defines, &vs_blob);
     if (!err.empty()) return err;
     if (!g_vmir_vs) {   // 26463 VSMirror - NON-FATAL (see the declaration
@@ -17015,6 +19403,12 @@ inline std::string ensure_resources(ID3D11Device* dev) {
     }
 
     {
+        // 26642: the compute CB now belongs to ensure_compute_shaders (see its
+        // ledger). This block is kept because ensure_resources is the earliest
+        // guaranteed pass and creating it twice is impossible - the ensure
+        // below early-returns on a live pointer. Both consumers of
+        // cs_constant_buffer (run_depth_compute, flush_dispatch_visibility)
+        // call ensure_compute_shaders first, so neither can now reach a null.
         D3D11_BUFFER_DESC bd = {};
         bd.ByteWidth = sizeof(CSConstantData);
         bd.Usage = D3D11_USAGE_DYNAMIC;
@@ -17208,11 +19602,19 @@ inline std::string ensure_resources(ID3D11Device* dev) {
                 if (FAILED(hr)) { g_res.release(); return "Create ts ui disjoint " + hr_str(hr); }
                 hr = dev->CreateQuery(&khtq_qd, &g_res.ts_cap_disjoint[khtq_i]);   // 26085 capture ring
                 if (FAILED(hr)) { g_res.release(); return "Create ts cap disjoint " + hr_str(hr); }
+                hr = dev->CreateQuery(&khtq_qd, &g_res.ts_msh_disjoint[khtq_i]);   // 26657 mesh ring
+                if (FAILED(hr)) { g_res.release(); return "Create ts mesh disjoint " + hr_str(hr); }
+                hr = dev->CreateQuery(&khtq_qd, &g_res.ts_inj_disjoint[khtq_i]);   // 26657 inject ring
+                if (FAILED(hr)) { g_res.release(); return "Create ts inj disjoint " + hr_str(hr); }
                 khtq_qd.Query = D3D11_QUERY_TIMESTAMP;
 
                 for (int khtq_c = 0; khtq_c < 2; ++khtq_c) {   // 26085 capture stamps
                     hr = dev->CreateQuery(&khtq_qd, &g_res.ts_cap_stamp[khtq_i][khtq_c]);
                     if (FAILED(hr)) { g_res.release(); return "Create ts cap stamp " + hr_str(hr); }
+                    hr = dev->CreateQuery(&khtq_qd, &g_res.ts_msh_stamp[khtq_i][khtq_c]);   // 26657
+                    if (FAILED(hr)) { g_res.release(); return "Create ts mesh stamp " + hr_str(hr); }
+                    hr = dev->CreateQuery(&khtq_qd, &g_res.ts_inj_stamp[khtq_i][khtq_c]);
+                    if (FAILED(hr)) { g_res.release(); return "Create ts inj stamp " + hr_str(hr); }
                 }
 
                 for (int khtq_j = 0; khtq_j < 34; ++khtq_j) {
@@ -17464,6 +19866,13 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         if (FAILED(hr)) { g_res.release(); return "Create inject rasterizer " + hr_str(hr); }
     }
 
+    // 26649 KH_USER_MAT_WHITE. The placeholder pair is ensured on the SUCCESS
+    // path too, not only from the two deferral returns. Until this build
+    // g_res.ps_white existed only in a session that actually deferred, and a
+    // pending or failed user material needs it in EVERY session. It is
+    // idempotent, latched by white_tried, and costs one cached compile - the
+    // field read it at 3 ms warm and 75-96 ms cold, once per device.
+    kh_white_ensure(dev);
     g_res.initialized = true;
     return "";
 }
@@ -17720,6 +20129,75 @@ inline std::string kh_scene_capture_timed(ID3D11Device* dev, ID3D11DeviceContext
     }
 
     return khsc_err;
+}
+
+// ===========================================================================
+// KH_MESH_TIMER - 26657. THE GEOMETRY PASSES GET A CLOCK.
+//
+// Three calls in the 26085 shape - begin, end, harvest - over an explicit
+// ring so the two passes can each own one. ALL FOUR FAILURE PATHS ARE
+// NO-OPS: no queries created, a slot still in flight, a disjoint interval,
+// or a zero frequency all skip the measurement and leave the draw alone. A
+// begin that returns -1 makes the matching end do nothing, so a pass with
+// early exits needs no close bookkeeping.
+//
+// THE LANES ARE CUMULATIVE MICROSECONDS AND A SAMPLE COUNT, not an average,
+// because an average hides the thing worth seeing. Divide them yourself and
+// read the max beside it.
+// ===========================================================================
+static uint64_t g_msh_gpu_us = 0;      // flush mesh pass, cumulative us
+static uint64_t g_msh_gpu_n  = 0;      // completed measurements
+static uint32_t g_msh_gpu_max = 0;     // worst single pass, us
+static uint64_t g_inj_gpu_us = 0;      // injection mesh pass, cumulative us
+static uint64_t g_inj_gpu_n  = 0;
+static uint32_t g_inj_gpu_max = 0;
+
+inline int kh_gpu_begin(ID3D11DeviceContext* khg_ctx, ID3D11Query** khg_dj,
+                        ID3D11Query* (*khg_st)[2], int khg_cur, bool* khg_fly) {
+    if (!khg_ctx || !khg_dj[khg_cur] || khg_fly[khg_cur]) return -1;
+    if (!khg_st[khg_cur][0] || !khg_st[khg_cur][1]) return -1;
+    khg_ctx->Begin(khg_dj[khg_cur]);
+    khg_ctx->End(khg_st[khg_cur][0]);
+    return khg_cur;
+}
+
+inline void kh_gpu_end(ID3D11DeviceContext* khg_ctx, ID3D11Query** khg_dj,
+                       ID3D11Query* (*khg_st)[2], int& khg_cur, bool* khg_fly, int khg_i) {
+    if (khg_i < 0 || !khg_ctx) return;
+    khg_ctx->End(khg_st[khg_i][1]);
+    khg_ctx->End(khg_dj[khg_i]);
+    khg_fly[khg_i] = true;
+    khg_cur = (khg_i + 1) % 3;
+}
+
+// DONOTFLUSH, exactly as the capture ring: a slot the GPU has not finished
+// with is left alone rather than stalling the thread that asks.
+inline void kh_gpu_harvest(ID3D11DeviceContext* khg_ctx, ID3D11Query** khg_dj,
+                           ID3D11Query* (*khg_st)[2], int khg_cur, bool* khg_fly,
+                           uint64_t& khg_us, uint64_t& khg_n, uint32_t& khg_max) {
+    if (!khg_ctx) return;
+
+    for (int khg_k = 0; khg_k < 3; ++khg_k) {
+        const int khg_i = (khg_cur + khg_k) % 3;
+        if (!khg_fly[khg_i] || !khg_dj[khg_i]) continue;
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT khg_d = {};
+
+        if (khg_ctx->GetData(khg_dj[khg_i], &khg_d, sizeof(khg_d),
+                             D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) continue;
+
+        khg_fly[khg_i] = false;
+        if (khg_d.Disjoint || khg_d.Frequency == 0) continue;
+        uint64_t khg_b = 0, khg_e = 0;
+
+        if (khg_ctx->GetData(khg_st[khg_i][0], &khg_b, sizeof(khg_b), 0) != S_OK ||
+            khg_ctx->GetData(khg_st[khg_i][1], &khg_e, sizeof(khg_e), 0) != S_OK) continue;
+        if (khg_e < khg_b) continue;
+        const uint32_t khg_v = static_cast<uint32_t>(static_cast<double>(khg_e - khg_b) *
+                                   (1e6 / static_cast<double>(khg_d.Frequency)));
+        khg_us += khg_v;
+        khg_n++;
+        if (khg_v > khg_max) khg_max = khg_v;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -18674,6 +21152,22 @@ inline bool ensure_sun_depth4(ID3D11Device* dev) {
 }
 
 inline std::string ensure_compute_shaders(ID3D11Device* dev) {
+    // 26642 THE COMPUTE PATH OWNS ITS OWN CONSTANT BUFFER. It used to be
+    // created inside ensure_resources, BELOW the 26641 async gate - so once
+    // ensure_resources learned to defer, gpuVisibility and sampleSceneDepth
+    // could reach ctx->Map on a null buffer if their ensure had been allowed
+    // to tolerate the deferral. Creating it here makes the compute path
+    // self-sufficient, which it always claimed to be, and is what lets the
+    // query API keep working through the compile window (mode 408 reverts).
+    if (!g_res.cs_constant_buffer) {
+        D3D11_BUFFER_DESC khcs_bd = {};
+        khcs_bd.ByteWidth = sizeof(CSConstantData);
+        khcs_bd.Usage = D3D11_USAGE_DYNAMIC;
+        khcs_bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        khcs_bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        const HRESULT khcs_hr = dev->CreateBuffer(&khcs_bd, nullptr, &g_res.cs_constant_buffer);
+        if (FAILED(khcs_hr)) return "Create CS CB " + hr_str(khcs_hr);
+    }
     if (g_res.cs_visibility && g_res.cs_compiled_for_samples == g_res.depth_sample_count) return "";
     g_res.release_compute_shaders();
 
@@ -19080,8 +21574,21 @@ inline std::string run_depth_compute(ComputeKernel kernel, UINT count,
     if (!dev || !ctx) return "device/context null";
     RVExtBridge::ScopedGraphicsLock lock;
     if (!lock.acquired()) return "SKIP: graphics lock not acquired";
+    // 26642 THE QUERY API DOES NOT NEED THE MESH SHADERS AND MUST NOT GO DARK
+    // FOR THEM (mode 408 restores the 26641 behaviour). 26641's ledger says
+    // "every caller already treats a non-empty return as skip-this-frame";
+    // that is true of the five render sites and false of these two, which
+    // return the string to SQF - so for the whole multi-minute compile window
+    // gpuVisibility and sampleSceneDepth answered [["error","shaders
+    // compiling"]] to scripts that have no reason to expect it. Everything
+    // this function actually consumes is created by ensure_depth_srv,
+    // ensure_compute_shaders (26642: the CS CB included) and
+    // ensure_query_buffers, every one of them called below and every one
+    // self-sufficient, so the deferral is skipped past rather than returned.
     std::string err = ensure_resources(dev);
-    if (!err.empty()) return err;
+    if (!err.empty() &&
+        !(err == KH_SHADERS_COMPILING &&
+          g_dbg_mode.load(std::memory_order_relaxed) != 408)) return err;
     UINT depth_w = 0, depth_h = 0;
     err = ensure_depth_srv(dev, ctx, &depth_w, &depth_h);
     if (!err.empty()) return "depth SRV: " + err;
@@ -19117,6 +21624,7 @@ inline std::string run_depth_compute(ComputeKernel kernel, UINT count,
 
     {
         D3D11_MAPPED_SUBRESOURCE mapped = {};
+        if (!g_res.cs_constant_buffer) return "compute CB missing";   // 26642
         HRESULT hr = ctx->Map(g_res.cs_constant_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
         if (FAILED(hr)) return "CS CB map " + hr_str(hr);
         memcpy(mapped.pData, &cbd, sizeof(cbd));
@@ -19175,8 +21683,10 @@ inline std::string upload_query_points(const float* xyz_sqf, UINT count) {
     if (!dev || !ctx) return "device/context null";
     RVExtBridge::ScopedGraphicsLock lock;
     if (!lock.acquired()) return "SKIP: graphics lock not acquired";
-    std::string err = ensure_resources(dev);
-    if (!err.empty()) return err;
+    std::string err = ensure_resources(dev);   // 26642: see run_depth_compute's ledger
+    if (!err.empty() &&
+        !(err == KH_SHADERS_COMPILING &&
+          g_dbg_mode.load(std::memory_order_relaxed) != 408)) return err;
     err = ensure_query_buffers(dev, count);   // grow-on-demand: no point cap
     if (!err.empty()) return err;
     D3D11_MAPPED_SUBRESOURCE mapped = {};
@@ -19515,6 +22025,121 @@ inline float lifetime_envelope(const RenderObject& o, float now, bool& expired) 
 // Camera position in engine space, extracted from the view matrix
 // (row-vector convention: eye_i = -sum_j T_j * R[i][j])
 // ===========================================================================
+
+// ===========================================================================
+// KH_WHITE_PREVIEW - 26643. THE DRAW.
+//
+// Called from exactly ONE site - the flush's ensure gate - and only when that
+// ensure returned the 26641 deferral sentinel. It draws every registered,
+// unexpired, non-fullscreen mesh flat white against the depth buffer the
+// engine left bound, then restores every piece of state it touched.
+//
+// WHAT IT DELIBERATELY DOES NOT DO. No lighting, no shadow receive, no
+// effects, no blending, no textures, no two-sided ordering, no composite
+// eligibility, no injection. A placeholder whose fidelity is arguable is
+// worse than one that is obviously a placeholder, and every one of those
+// paths is machinery that does not exist yet on a deferred frame. Objects
+// keep their real position, rotation and size, because that is the whole
+// point: the operator wants to see WHERE the spawn landed.
+//
+// The transform comes straight from the bridge - view times projection, no
+// rebase - which is the same absolute form run_depth_compute has always used
+// and matches VSWhite's centreRel.w == 0 branch. The fp32 rebase exists to
+// kill sub-millimetre jitter in the shadow chain; a white box does not care.
+//
+// STATE. StateBackup covers the IA, VS/PS, CB slots, SRVs, samplers, RS, OM
+// blend and depth-stencil - everything below. 26644 CORRECTION, rule 1.16:
+// the 26643 text said it "restores on scope exit". IT DOES NOT. StateBackup
+// has NO DESTRUCTOR - restore is an explicit call, and every pass in this
+// file makes it by hand. This function is correct today because every path
+// after capture reaches the restore at the bottom, the loop's break
+// included, but an early return added between them would leak the engine's
+// bound state AND every interface the capture AddRef'd. Do not add one.
+// The render targets are NOT rebound: we draw into whatever the engine
+// has bound at flush time, exactly as the real mesh pass does.
+// ===========================================================================
+inline void kh_white_draw(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    if (!dev || !ctx || !g_res.white_ready) return;
+    if (g_dbg_mode.load(std::memory_order_relaxed) == 409) return;   // 26643 stand-down
+    // 26644: the VB top-up lives HERE now, not in the ensure - see its ledger.
+    // This runs inside the flush's serialized window exactly as every other
+    // ensure_mesh_vbs caller does, and its failure costs the objects whose
+    // buffers are missing, not the pass. The per-object bounds test below is
+    // what makes that safe and it was already present at 26643.
+    if (g_dbg_mode.load(std::memory_order_relaxed) != 410) {
+        if (!ensure_mesh_vbs(dev).empty()) g_khw_vb_fails++;
+    }
+    if (g_res.mesh_vb.empty()) return;
+
+    std::vector<RenderObject> khw_objs;
+    {
+        std::lock_guard<std::mutex> khw_l(g_draw_list_mutex);
+        if (g_draw_list.empty()) return;
+        khw_objs.reserve(g_draw_list.size());
+        for (const auto& khw_kv : g_draw_list) {
+            if (khw_kv.second.fullscreen) continue;
+            khw_objs.push_back(khw_kv.second);
+        }
+    }
+    if (khw_objs.empty()) return;
+
+    const float khw_now = effect_time_seconds();
+    RVExtBridge::ProjectionViewTransform khw_pv = {};
+    if (!RVExtBridge::get_projection_view_transform(khw_pv)) return;
+
+    ConstantData khw_cbf = {};
+    mul_4x4(khw_pv.view, khw_pv.projection, khw_cbf.view_proj);
+    if (!kh_upload_frame_cb(ctx, g_res.white_frame_cb, khw_cbf)) return;
+
+    StateBackup khw_backup;
+    khw_backup.capture(ctx);
+
+    UINT khw_stride = sizeof(MeshVertex), khw_offset = 0;
+    int  khw_bound_mesh = -1;
+    const FLOAT khw_bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    ctx->IASetInputLayout(g_res.layout_white);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(g_res.vs_white, nullptr, 0);
+    ctx->PSSetShader(g_res.ps_white, nullptr, 0);
+    ctx->GSSetShader(nullptr, nullptr, 0);
+    ctx->HSSetShader(nullptr, nullptr, 0);
+    ctx->DSSetShader(nullptr, nullptr, 0);
+    ID3D11Buffer* khw_cbs[2] = { g_res.white_obj_cb, g_res.white_frame_cb };
+    ctx->VSSetConstantBuffers(0, 2, khw_cbs);
+    ctx->PSSetConstantBuffers(0, 2, khw_cbs);
+    ctx->RSSetState(kh_rs_pick(g_res.rast_white));
+    ctx->OMSetDepthStencilState(g_res.dss_white, 0);
+    ctx->OMSetBlendState(nullptr, khw_bf, 0xFFFFFFFF);   // opaque, write all
+
+    for (const RenderObject& khw_o : khw_objs) {
+        bool khw_expired = false;
+        if (lifetime_envelope(khw_o, khw_now, khw_expired) <= 0.0f || khw_expired) continue;
+        const int khw_mid = mesh_id_clamp(khw_o.mesh);
+        if (khw_mid < 0 || static_cast<size_t>(khw_mid) >= g_res.mesh_vb.size()) continue;
+        if (!g_res.mesh_vb[khw_mid]) continue;
+
+        ConstantData khw_cbd = {};
+        khw_cbd.center_size[0] = khw_o.pos[0];
+        khw_cbd.center_size[1] = khw_o.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y]
+        khw_cbd.center_size[2] = khw_o.pos[1];
+        khw_cbd.size_axes[0] = khw_o.size[0];    // SQF [x,y,z] sizes -> engine [x,z,y]
+        khw_cbd.size_axes[1] = khw_o.size[2];
+        khw_cbd.size_axes[2] = khw_o.size[1];
+        kh_fill_obj_rot(khw_cbd, khw_o.rot_m);
+        // centerRel.w stays 0: VSWhite takes the absolute branch, matching the
+        // unrebased viewProj built above. Stated because the pair MUST agree.
+        if (!kh_upload_obj_cb(ctx, g_res.white_obj_cb, khw_cbd)) break;
+
+        if (khw_mid != khw_bound_mesh) {
+            ctx->IASetVertexBuffers(0, 1, &g_res.mesh_vb[khw_mid], &khw_stride, &khw_offset);
+            khw_bound_mesh = khw_mid;
+        }
+        ctx->Draw(mesh_vertex_count(khw_mid), 0);
+        g_khw_draws++;
+    }
+    g_khw_frames++;
+    khw_backup.restore(ctx);
+}
 
 inline void extract_camera_pos(const float view[4][4], float out[3]) {
     for (int i = 0; i < 3; ++i) {
@@ -23315,7 +25940,7 @@ static uint32_t g_fk_veto_cand_n = 0;       // candidates staged at the last pas
 // (26363/26364, field-confirmed), the seam refuse-and-retry (26371,
 // svLiveTrnBound 0 with 17/17), and the sign-agnostic fade gate (26362, a
 // defect repair that is arithmetically identical on mode 0). Nothing else.
-static constexpr int KH_BUILD_TAG = 26641;
+static constexpr int KH_BUILD_TAG = 26663;
 // NEAR-GAP RAMP (build 26001; the RenderDoc conviction). ROOT, proven by
 // pixel history + depth-window plateaus: the world partition's viewport
 // floor (0.011 in the convicting capture) collapses EVERY fragment nearer
@@ -27117,6 +29742,15 @@ static uint32_t g_skybind_maxbw_vs = 0;   // largest VS CB ByteWidth seen bound
 // is handing back the wrong lock).
 static constexpr uint64_t KH_RING_BEST_MAX_CYCLES = 120ull;   // ~2 s at 60 fps
 static bool     g_ring_best_valid = false;
+// 26647 KH_ACQ_COLD_HOLD. True while ensure_resources is returning the 26641
+// deferral sentinel - i.e. for the whole cold-cache compile window. The
+// shadow acquisition chain STANDS DOWN while it is set, and the first
+// gate-passed frame after it clears is treated as the session's frame one.
+// Field-convicted, not inferred: see the ledger at KH_BUILD_TAG.
+static std::atomic<bool> g_acq_hold{false};
+static uint64_t g_acq_hold_frames = 0;    // frames the acquisition stood down
+static uint64_t g_acq_hold_resets = 0;    // cold-state resets issued at the release
+static uint64_t g_acq_hold_scans = 0;     // view scans refused while held
 static float    g_ring_best_er = 0.0f;      // its score at admission
 static const void* g_ring_best_res = nullptr;
 static uint32_t g_ring_best_off = 0;
@@ -28884,6 +31518,99 @@ static uint64_t g_sun_band_reach_takes = 0;   // fits where reach > the depth fl
 //   6 not called this frame (the khsh_okN gate refused it)
 static int      g_sun_fit_why[4] = { 6, 6, 6, 6 };
 static uint64_t g_sun_fit_n[4]   = { 0, 0, 0, 0 };   // set size at the exit
+// 26655 THE THREE LANES THAT MAKE THE OVERSIZE STORY READABLE, and they exist
+// because 26631 convicted a mechanism from lanes that could not carry it and
+// had to withdraw the reading in writing. NONE of these are stale-safe by
+// accident: they are stamped at the ADMISSION LOOP, which every call runs
+// before any exit, so they describe the pose that was evaluated rather than
+// whichever earlier frame last completed a render.
+//   erMax  - the largest enclosing radius ADMITTED to that tier, metres. A
+//            tier whose erMax dwarfs its own half-diagonal is sampling a
+//            caster it cannot contain, which is the acne mechanism.
+//   fwd    - khsh_fwd minus khsh_dep: how far ONE caster stretched the depth
+//            window that EVERY caster in that tier then shares. This is the
+//            mutual-interaction term and it has never had a lane.
+// 26656: the refusal and tighten counters went out with the mechanisms they
+// measured. erMax and fwd stay - they are what convicted the 26655 design and
+// they cost nothing.
+static float    g_sun_fit_er_max[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+static float    g_sun_fit_fwd[4]    = { 0.0f, 0.0f, 0.0f, 0.0f };
+// 26660 KH_BAND_BIAS_CENSUS - THE FOUR NUMBERS THE ACNE HYPOTHESIS RESTS ON,
+// AND NOT ONE OF THEM HAS EVER BEEN READ OFF A MACHINE. PURE GAUGE: nothing
+// here is consumed by any decision, no constant moves, mode 0 is byte-
+// identical. The 26656 lesson is why this ships alone - three shadow repairs
+// were sized against reasoning and all three were withdrawn whole.
+// THE CLAIM UNDER TEST, stated so the lanes can REFUSE it: khsh_bbw is
+// max of half a texel and a floor of 4 ulp of the band centre's WORLD
+// coordinate. That floor is ABSOLUTE and identical across the three bands
+// while their texels differ by 16x, so the SAME formula is expected to buy
+// hero about 2 texels of bias and mid and outer about half a texel each -
+// over-biasing the fine tier and under-biasing the coarse ones, from one
+// expression, with no tier ever asking how big its own texel is.
+//   tex  - the band's texel in world metres, 2 * khsh_r2 / khsh_size
+//   bfl  - the FLOOR term alone, so which half of the max won is readable
+//          rather than inferred
+//   bias - khsh_bbw as SHIPPED, world metres
+//   d2v  - the depth window the bias is normalised by on its way to the GPU
+// THE DERIVED NUMBER IS bias OVER tex - bias in TEXELS - and it is the whole
+// point: the acne severity ordering the 239/242/244 sweep measured was mid
+// worst, hero some, outer null, and this predicts it or it does not.
+// STALE-SAFE BY CONSTRUCTION, the 26631 discipline verbatim: zeroed at the
+// lambda's entry and stamped where khsh_bbw is COMPUTED, which is above the
+// empty-set and instance-cap exits, so every call that fitted anything at
+// all reports the pose it evaluated and a tier that never ran reads 0.
+// ===========================================================================
+// KH_BAND_BIAS_TEXELS - 26661. HALF A TEXEL WAS NEVER ENOUGH, AND THE ONE TIER
+// THAT WORKS HAS BEEN CARRYING FOUR TIMES THAT ALL ALONG. Mode 426 restores
+// the 0.5 form, bit-exactly.
+//
+// MEASURED, not reasoned - the 26660 census on the 1000x mesh, all four bands
+// Valid 1 and FitWhy 0: bias over texel reads 1.961 at hero, 0.500 at mid,
+// 0.500 at outer and 0.500 at far, against a prediction of 1.96 / 0.50 / 0.50.
+// BiasFlM reads 1.9531 mm in ALL FOUR tiers, which is the acceptance clause
+// that could have killed the account and did not: the floor is a property of
+// the band CENTRE and not of the tier, so one absolute number is being asked
+// to serve texels that differ by a hundredfold.
+//
+// THE DEFECT IS THAT NO TIER EVER ASKS HOW BIG ITS OWN TEXEL IS. khsh_bbw was
+// max of half a texel and 4 ulp of the band centre's world coordinate. At
+// hero the floor wins and buys 1.96 texels; at MID the half-texel term
+// overtakes it BY TWO PER CENT and the bias collapses to 0.500 texels, and it
+// stays there for outer and far. A single centre tap needs texel * tan(theta)
+// * 0.5 of bias, so 0.500 texels covers a surface only out to 45 degrees from
+// the light while hero's 1.96 covers 76 - which IS the field ordering the
+// 239 / 242 / 244 sweep measured, mid worst and hero merely some, as
+// arithmetic rather than as a story.
+//
+// AND IT IS WHY ONLY OVERSIZED MESHES SHOW IT. Hero's window is +-2 m, so a
+// normal mesh sits entirely inside it and is served at 1.96 texels. Past
+// about 100x the mesh spans far beyond that window and MID AND OUTER SERVE
+// MOST OF ITS SURFACE - at a quarter of the bias. Size selects the tier and
+// there is a 4x cliff between tiers; that is the 10x-to-100x onset the
+// operator's size sweep found, and no other candidate predicted it.
+//
+// WHY 2.0 AND NOT A GUESS: hero already ships 1.961 texels and is the tier
+// the whole field battery treats as least bad. 2.0 makes every tier match the
+// one already validated, and hero itself barely moves - 1.953 mm to 1.992 mm,
+// the floor still nearly winning - so the tier that works keeps working.
+// The ulp term stays as a FLOOR, which is what it should always have been.
+//
+// DISCLOSED, AND IT IS THE WHOLE COST: mid goes 1.99 mm to 7.97 mm, outer
+// 7.97 to 31.9, far 49.8 to 199. More bias is peter-panning, and outer and
+// far are where that is visible. 426 is the one-switch stand-down and the
+// census lanes are its own arming proof - under 426 sunMid/Out/FarBiasM must
+// fall back to exactly one quarter of what mode 0 reports.
+//
+// CPU-SIDE ONLY: khsh_bbw reaches the GPU as khsh_out_bias, a CB value. No
+// shader source moves, no HLSL segment moves, not one .khsc key moves - the
+// 26611 / 26620 pattern.
+// ===========================================================================
+static constexpr float KH_BAND_BIAS_TEXELS = 2.0f;   // 426 restores 0.5
+static float    g_sun_fit_tex[4]  = { 0.0f, 0.0f, 0.0f, 0.0f };
+static float    g_sun_fit_bfl[4]  = { 0.0f, 0.0f, 0.0f, 0.0f };
+static float    g_sun_fit_bias[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+static float    g_sun_fit_d2v[4]  = { 0.0f, 0.0f, 0.0f, 0.0f };
+static float    g_sun_ladder_caster_r = 0.0f;   // largest local caster radius, GAUGE ONLY
 // 26537 KH_UNION_TEXEL_SNAP lanes (ledger at the union snap). The
 // displacement the snap applied to the union centre this fit (m) and the
 // union's own texel in world metres - the sawtooth's quantum. -1 = the
@@ -28898,6 +31625,71 @@ static float    g_cast_chain_code = -1.0f;
 // radius the union fit is pricing its texel from, and the two counters that
 // say whether it is HOLDING (grid stable) or re-latching (grid rescaled).
 // -1 = the latch has never taken.
+// ===========================================================================
+// KH_BAND_FWD_LATCH - 26663. 26539's OWN RULE, APPLIED TO THE AXIS IT DID NOT
+// COVER. Mode 428 stands the latch down.
+//
+// 26539 wrote the rule - "when you stabilise a sampling grid, stabilise BOTH
+// its origin AND its spacing" - and then stated the camera bands were immune
+// on the grounds that khsh_half is a build constant so their texel never
+// changes. THAT IS TRUE OF THE LATERAL AXIS AND ONLY THE LATERAL AXIS. Since
+// 26537 the bands fit their DEPTH window to the admitted set every frame:
+// khsh_fwd is a max over khsh_ds + khsh_er, and khsh_ds is measured from the
+// band centre, which IS THE CAMERA. So the depth extent is data-dependent AND
+// camera-dependent, exactly the property 26539 called unique to the union,
+// and the band half of that ledger's immunity claim is CORRECTED here.
+//
+// IT ONLY BITES ON LARGE CASTERS AND THE FIELD DATA SAYS SO. khsh_fwd is
+// FLOORED at khsh_dep, so a caster whose ds + er never clears 12 / 48 / 192 m
+// leaves the window BITWISE STATIC - which is why a normal mesh reads
+// sunHero/Mid/Out/FarFwdM all 0 with reach pinned at 12, and never drifts. A
+// 491.638 m enclosing radius dominates the sum, so khsh_fwd tracks the camera
+// directly: the same caster measured 31.617, 141.299 and 180.882 of stretch
+// at three camera positions, with d2v moving 167.30 to 206.88 between two of
+// them. The operator's report is self-shadow drifting with the camera on
+// large meshes and not on small ones, and mode 326 - which stands the reach
+// fit down entirely - fixes it.
+//
+// THE LATCH IS 26539's, VERBATIM IN SHAPE: hold the committed value while it
+// still ENCLOSES the required fit and has not gone slack past the drop bar,
+// re-acquire with headroom otherwise. Per band, keyed on the khsh_pf_idx the
+// lambda already carries.
+//
+// BIT-EXACT AT THE FLOOR, WHICH IS THE WHOLE VALIDATED CORPUS. The latch is
+// entered ONLY when khsh_fwd is strictly above khsh_dep, i.e. only when a
+// caster actually stretched the window. Everything at the floor - every
+// normal-sized mesh, every scene before a giant is admitted, the entire
+// pre-26537 behaviour - takes the historic value untouched, and the held slot
+// is cleared so a return to the floor cannot leave a stale latch behind.
+//
+// DISCLOSED TRADE: the window is up to 25 pct deeper than the tightest fit,
+// so khsh_d2v and the depth quantum grow with it - 0.015 mm on R32F at a
+// 259 m window, against a ~2 mm bias. What it removes is a whole
+// re-quantisation of every stored depth, every frame. It can never
+// UNDER-cover, because a hold requires held >= required.
+// ===========================================================================
+// WHY THE HEADROOM IS WIDER THAN 26539's 1.10 / 1.25, and it is a real
+// asymmetry rather than taste. For the UNION, the latched radius sets the
+// LATERAL extent too, so headroom directly coarsens the texel - 26539 priced
+// that at 58 mm on a 583 mm texel and kept the slack tight for it. HERE
+// khsh_fwd SETS ONLY THE DEPTH WINDOW: the lateral extent is khsh_half * 1.02,
+// a build constant, so the texel cannot move whatever this value does. The
+// only cost is depth quantum, and on R32F at a 259 m window that is 0.015 mm
+// against a ~2 mm bias - under one per cent, two orders down.
+// AND THE APPROACH CASE NEEDS IT. The union's radius OSCILLATES about a value
+// as a camera wanders a static caster, so a tight latch holds. khsh_ds grows
+// MONOTONICALLY as the camera closes on a caster, so headroom is consumed in
+// one direction and the hold ratio is set by fwd * (slack - 1) / step.
+// Harnessed over 600 frames against the field's own 491.638 m caster:
+// 1.10 / 1.25 holds 59:1 walking but falls to 13:1 at 300 m/s, while
+// 1.25 / 1.60 holds 119:1 and 29:1 at the same two speeds for 0.002 mm more
+// quantum. If the drift ever returns as a RARER step, this pair is the knob
+// and KH_BAND_FWD_SLACK is the one to raise first.
+static constexpr float KH_BAND_FWD_SLACK = 1.25f;   // headroom on acquisition
+static constexpr float KH_BAND_FWD_DROP  = 1.60f;   // re-latch tighter past this
+static float    g_sun_fwd_held[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
+static uint64_t g_sun_fwd_holds = 0;        // frames a band reused its window
+static uint64_t g_sun_fwd_relatches = 0;    // frames a band re-acquired one
 static float    g_sun_union_rad_held = -1.0f;
 static uint64_t g_sun_union_rad_holds = 0;
 static uint64_t g_sun_union_rad_relatches = 0;
@@ -35091,6 +37883,23 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
     // binding cannot go dark: the buffer is bound at every world draw.
     if (!reorder_on_render_thread() || bytes < 64 || !res) return;
 
+    // 26647 KH_ACQ_COLD_HOLD, and this is the site the field convicted. During
+    // a cold-cache deferral this scan ran for TEN THOUSAND FLUSHES with no
+    // flush behind it, shaped FIFTY MILLION candidates, admitted 944 of them
+    // into the ring and locked NOTHING - best rotation error 4.13 against a
+    // 1.0 bar - and it never recovered afterwards either: the 3270 gate-passed
+    // frames that followed still read viewLocks 0, frameViewHits 0,
+    // bandSlotsValid 0, recvHealthOk 0. Under mode 406, where the compile
+    // blocks and the very first flush is a gate-passed one, the SAME scene
+    // locks on bind scan number two at a rotation error of 1.79e-07, with
+    // pubAccepts 274075 and every band valid. The ring is not merely empty
+    // during the window - it fills with wrong-era candidates and the wrong
+    // best blocks the right one for the rest of the session. So the scan
+    // stands down entirely while the flush is deferred and the ring is reset
+    // at the release, which reproduces the 406 acquisition sequence exactly
+    // without the blocking compile. Mode 414 restores the 26646 behaviour.
+    if (g_acq_hold.load(std::memory_order_relaxed)) { g_acq_hold_scans++; return; }
+
     // LOCKED FAST PATH: with a source locked, the publish branch requires
     // res == view_src_res and the admission branch requires the lock to be
     // ABSENT - for every foreign resource the whole offset loop is already
@@ -39377,6 +42186,12 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             khsh_out_pf = false;      // 26575: proven true only by a completed convert
             g_sun_fit_why[khsh_pf_idx] = 5;   // 26631: overwritten by every exit below
             g_sun_fit_n[khsh_pf_idx] = 0;
+            g_sun_fit_er_max[khsh_pf_idx] = 0.0f;   // 26655: per-call, never stale
+            g_sun_fit_fwd[khsh_pf_idx] = 0.0f;
+            g_sun_fit_tex[khsh_pf_idx] = 0.0f;      // 26660: same discipline
+            g_sun_fit_bfl[khsh_pf_idx] = 0.0f;
+            g_sun_fit_bias[khsh_pf_idx] = 0.0f;
+            g_sun_fit_d2v[khsh_pf_idx] = 0.0f;
             double khsh_dctr[3] = { 0.0, 0.0, 0.0 };   // 26465: double-snap carry
             bool   khsh_dsnap = false;
 
@@ -39540,6 +42355,19 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                                       khsh_dx[2] * sun[2];
                 const float khsh_l2 = khsh_dd2 - khsh_ds * khsh_ds;
                 const float khsh_lat = khsh_l2 > 0.0f ? sqrtf(khsh_l2) : 0.0f;
+                // 26656: the 26655 oversize refusal stood HERE and is gone.
+                // It refused a caster whose enclosing radius exceeded this
+                // tier's half-diagonal by more than eight times. The field
+                // read it dead: sunOutErMax and sunFarErMax both 491.638
+                // against an outer half-diagonal of 157 - the bar was never
+                // close - so the only tiers it ever refused were hero and
+                // mid, whose caster sets were empty anyway. AND THE SHAPE
+                // CANNOT BE RESCUED BY A TIGHTER CONSTANT: a 5 m crate sits
+                // at 2.1x its hero half-diagonal and works, a 983 m caster
+                // sits at 2.4x its far half-diagonal and does not, so no
+                // multiplier separates them. See the 26656 ledger for the
+                // criterion that would, and why it is a receive-side change
+                // rather than an admission one.
                 if (khsh_lat > khsh_r2 + khsh_er) continue;        // ortho clips it laterally
                 if (khsh_ds > khsr_rad + khsh_er) {
                     // 26632 KH_BAND_SHADOW_ADMIT (mode 399 reverts; C++-side
@@ -39610,6 +42438,17 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                                                      khsh_ssz * khsh_ssz);
                         if (khsh_shl > 1.0e-4f && khsh_ssy > 1.0e-4f) {
                             // the union's length, verbatim: 2H / tan(elev) + slack
+                            // 26656: the 26655 attempt at the banked 26633 tighten
+                            // is WITHDRAWN and the height is khsh_er again. It was
+                            // not wrong, it was UNREACHABLE at the pose that
+                            // mattered - sunErTightens read 0 across the whole
+                            // session, because this branch is entered only for a
+                            // caster far UP-SUN and the field's giant sits close.
+                            // The tighten remains BANKED exactly as 26633 left it,
+                            // in the same safe form - the height is the max of
+                            // khsh_he[1] and khsh_hl[1], because this site rotates
+                            // its half-extents and the union does not - and it
+                            // still owes its own arm and its own build.
                             const float khsh_slen = (2.0f * khsh_er)
                                                   * (khsh_shl / khsh_ssy) + khsh_er;
                             if (khsh_slen > khsh_slim) khsh_slim = khsh_slen;
@@ -39619,9 +42458,37 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                 }
                 if (khsh_ds < -(khsh_dep) - khsh_er) continue;     // anti-sun side unchanged
                 khsh_set.push_back(c);
+                if (khsh_er > g_sun_fit_er_max[khsh_pf_idx])
+                    g_sun_fit_er_max[khsh_pf_idx] = khsh_er;   // 26655
                 const float khsh_need = khsh_ds + khsh_er;
                 if (khsh_need > khsh_fwd) khsh_fwd = khsh_need;
             }
+
+            // 26655: the shared stretch, in metres. khsh_fwd is a MAXIMUM over
+            // every admitted caster and it sizes khsh_d2v, so this number is
+            // how much one member of the set costs all the others in depth
+            // precision. It is the field's "the two meshes affect each other".
+            // 26663 KH_BAND_FWD_LATCH: hold the depth extent so a moving
+            // camera stops re-quantising this band's stored depth every
+            // frame. Entered ONLY above the floor, so a band whose window was
+            // never stretched is bit-exact. Mode 428 stands it down. Full
+            // ledger at KH_BAND_FWD_SLACK.
+            if (g_dbg_mode.load(std::memory_order_relaxed) != 428 &&
+                khsh_fwd > khsh_dep) {
+                float& khsh_hold = g_sun_fwd_held[khsh_pf_idx];
+
+                if (khsh_hold >= khsh_fwd && khsh_hold <= khsh_fwd * KH_BAND_FWD_DROP) {
+                    khsh_fwd = khsh_hold;
+                    g_sun_fwd_holds++;
+                } else {
+                    khsh_hold = khsh_fwd * KH_BAND_FWD_SLACK;
+                    khsh_fwd = khsh_hold;
+                    g_sun_fwd_relatches++;
+                }
+            } else {
+                g_sun_fwd_held[khsh_pf_idx] = -1.0f;   // never leave a stale latch
+            }
+            g_sun_fit_fwd[khsh_pf_idx] = khsh_fwd - khsh_dep;
 
             // The eye rides khsh_rdep exactly as it always has; only the
             // number it carries can now be larger than khsh_dep, and the
@@ -39682,7 +42549,21 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             const float khsh_bulp = nextafterf(khsh_bcm, 3.0e38f) - khsh_bcm;
             const float khsh_bq = khsh_d2v * 4.0f * 5.9604645e-8f;
             const float khsh_bfl = khsh_rev ? 0.01f : (khsh_qf ? khsh_bq : 4.0f * khsh_bulp);
-            const float khsh_bbw = khsh_tex * 0.5f > khsh_bfl ? khsh_tex * 0.5f : khsh_bfl;
+            // 26661 KH_BAND_BIAS_TEXELS: the texel term is a MULTIPLE of the
+            // tier's own texel and the ulp term is a FLOOR under it, which is
+            // what it should always have been. Mode 426 restores 0.5f and is
+            // bit-exact - the ternary shape, the max order and the floor are
+            // all unchanged. Ledger at KH_BAND_BIAS_TEXELS.
+            const float khsh_bk = g_dbg_mode.load(std::memory_order_relaxed) == 426
+                                ? 0.5f : KH_BAND_BIAS_TEXELS;
+            const float khsh_bbw = khsh_tex * khsh_bk > khsh_bfl ? khsh_tex * khsh_bk : khsh_bfl;
+            // 26660 KH_BAND_BIAS_CENSUS, stamped HERE and not lower: this is
+            // above the empty-set and cap exits, so a tier that fitted
+            // anything reports it. Ledger at the lane declarations.
+            g_sun_fit_tex[khsh_pf_idx]  = khsh_tex;
+            g_sun_fit_bfl[khsh_pf_idx]  = khsh_bfl;
+            g_sun_fit_bias[khsh_pf_idx] = khsh_bbw;
+            g_sun_fit_d2v[khsh_pf_idx]  = khsh_d2v;
 
             // 26537 KH_BAND_SUN_REACH: the caster set and the sun-ward reach
             // are built ABOVE, before the eye/d2v that now depend on them.
@@ -39759,8 +42640,12 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                         while (khsh_last < khsh_set.size() && khsh_set[khsh_last].mesh == khsh_mid) ++khsh_last;
                         khsh_vbs[0] = g_res.mesh_vb[khsh_mid];
                         ctx->IASetVertexBuffers(0, 2, khsh_vbs, khsh_strides, khsh_offsets);
-                        ctx->DrawInstanced(mesh_vertex_count(khsh_mid),
-                                           static_cast<UINT>(khsh_last - khsh_first), 0,
+                        // 26652 KH_SHADOW_LOD: a coarse level, the grouping
+                        // untouched. Mode 422 restores level 0.
+                        UINT khsh_ls = 0, khsh_lc = 0;
+                        mesh_shadow_range(khsh_mid, khsh_ls, khsh_lc);
+                        ctx->DrawInstanced(khsh_lc,
+                                           static_cast<UINT>(khsh_last - khsh_first), khsh_ls,
                                            static_cast<UINT>(khsh_first));
                         khsh_first = khsh_last;
                     }
@@ -39822,6 +42707,30 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         // (12 / 48 at range 300), sunLadderScale carries s verbatim, and
         // the operator's switch distances move with the slider.
         // ==================================================================
+        // 26656: the 26655 content term is WITHDRAWN and khls_s is the
+        // range-only form again, ceiling back at 5. It fired exactly as
+        // designed - sunLadderCasterR 491.638 took sunLadderScale to 4.916
+        // and sunOutHalfDiag from 32 m to 157 - and that is precisely the
+        // problem: it coarsened EVERY tier for EVERY object by a factor of
+        // five and bought nothing, because the caster it grew the ladder for
+        // was still not contained by the result. A cost with no demonstrated
+        // benefit is a regression however good its reasoning, and rule 1.13b
+        // does not ask it to argue. THE LOOP BELOW STAYS as a pure gauge:
+        // sunLadderCasterR is how this was diagnosed at all, it feeds
+        // nothing, and the next reader should not have to rebuild it.
+        float khls_cr = 0.0f;
+
+        for (const auto& khls_c : casters) {
+            const float khls_hl[3] = { khls_c.size[0] * 0.5f, khls_c.size[2] * 0.5f,
+                                       khls_c.size[1] * 0.5f };
+            float khls_he[3];
+            kh_rot_half_extents(khls_hl, khls_c.rot, khls_c.rotated, khls_he);
+            const float khls_r = sqrtf(khls_he[0] * khls_he[0] + khls_he[1] * khls_he[1] +
+                                       khls_he[2] * khls_he[2]);
+            if (khls_r > khls_cr) khls_cr = khls_r;
+        }
+
+        g_sun_ladder_caster_r = khls_cr;   // 26656: gauge only, feeds nothing
         float khls_s = 1.0f;
         if (khsh_dm != 241 && khsh_dm != 382) {
             khls_s = khsr_rad / 200.0f;
@@ -41407,8 +44316,12 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                 while (last < casters.size() && casters[last].mesh == mid) ++last;
                 vbs[0] = g_res.mesh_vb[mid];
                 ctx->IASetVertexBuffers(0, 2, vbs, strides, offsets);
-                ctx->DrawInstanced(mesh_vertex_count(mid),
-                                   static_cast<UINT>(last - first), 0,
+                // 26652 KH_SHADOW_LOD twin - the mask cast is a casting pass
+                // exactly as the sun depth is. Mode 422 restores level 0.
+                UINT khmc_ls = 0, khmc_lc = 0;
+                mesh_shadow_range(mid, khmc_ls, khmc_lc);
+                ctx->DrawInstanced(khmc_lc,
+                                   static_cast<UINT>(last - first), khmc_ls,
                                    static_cast<UINT>(first));
                 g_stats.sun_depth_casters += last - first;
                 first = last;
@@ -41437,7 +44350,11 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
 
             kh_fill_obj_rot(cbd, c.rot);         // object rotation (VSMain path)
             if (!kh_upload_obj_cb(ctx, g_res.composite_cb, cbd)) break;   // CB SPLIT: object slice
-            ctx->Draw(mesh_vertex_count(c.mesh), 0);
+            // 26652 KH_SHADOW_LOD: the per-caster fallback takes the same
+            // level as the instanced path, or the two disagree on silhouette.
+            UINT khsf_ls = 0, khsf_lc = 0;
+            mesh_shadow_range(c.mesh, khsf_ls, khsf_lc);
+            ctx->Draw(khsf_lc, khsf_ls);
             g_stats.sun_depth_casters++;
         }
     }
@@ -42544,8 +45461,8 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     // range here too: capture, restore, scan and release all follow.
     ID3D11ShaderResourceView* old_ps_srvs[33] = {};   // 26458: +t28; 26620: +t32 (far band; t29-31 unbound on this path but saved for width parity)
     ID3D11ShaderResourceView* old_vs_srvs[33] = {};   // 26620: widened with the PS table
-    ctx->PSGetShaderResources(0, 33, old_ps_srvs);
-    ctx->VSGetShaderResources(0, 33, old_vs_srvs);
+    ctx->PSGetShaderResources(0, _countof(old_ps_srvs), old_ps_srvs);   // 26642: width, not a literal
+    ctx->VSGetShaderResources(0, _countof(old_vs_srvs), old_vs_srvs);   // 26642
 
     // Census (round-8 conviction): is the engine's mask RESOURCE
     // SRV-bound at our interposition point?
@@ -42557,7 +45474,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
 
         if (khf_mask_res) {
             for (int si = 0; si < 66; ++si) {   // 26458/26620: 33 slots per stage
-                ID3D11ShaderResourceView* sv = si < 33 ? old_ps_srvs[si]
+                ID3D11ShaderResourceView* sv = si < static_cast<int>(_countof(old_ps_srvs)) ? old_ps_srvs[si]
                                                        : old_vs_srvs[si - 33];
                 if (!sv) continue;
                 ID3D11Resource* sr = nullptr;
@@ -43730,8 +46647,8 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     // SRV tables - this runs after the OM restore, so any mask SRV in
     // the captured table is legal to rebind again (the RTV set that
     // nulled it has been reverted). Covers t0/t11 by construction.
-    ctx->PSSetShaderResources(0, 33, old_ps_srvs);   // 26458: covers t25-t28; 26620: +t32
-    ctx->VSSetShaderResources(0, 33, old_vs_srvs);
+    ctx->PSSetShaderResources(0, _countof(old_ps_srvs), old_ps_srvs);   // 26458: covers t25-t28; 26620: +t32; 26642: width
+    ctx->VSSetShaderResources(0, _countof(old_vs_srvs), old_vs_srvs);   // 26642
     ctx->GSSetShader(old_gs, nullptr, 0);
     ctx->HSSetShader(old_hs, nullptr, 0);
     ctx->DSSetShader(old_ds2, nullptr, 0);
@@ -43753,7 +46670,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     KH_SAFE_RELEASE(old_blend);
     KH_SAFE_RELEASE(old_dss);
 
-    for (int s16 = 0; s16 < 33; ++s16) {   // 26458/26620: 33-wide tables
+    for (int s16 = 0; s16 < static_cast<int>(_countof(old_ps_srvs)); ++s16) {   // 26458/26620/26642
         KH_SAFE_RELEASE(old_ps_srvs[s16]);
         KH_SAFE_RELEASE(old_vs_srvs[s16]);
     }
@@ -55525,9 +58442,35 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // of the AABB). The old center metric misordered large meshes whose
     // faces reach far closer than their centers - exactly the error that
     // grows with mesh size.
-    std::sort(meshes.begin(), meshes.end(), [&cam](const RenderObject& a, const RenderObject& b) {
-        return kh_mesh_dist_sq(a, cam) > kh_mesh_dist_sq(b, cam);
-    });
+    // 26658 KH_MESH_SORT, INJECTION EDITION - THE TWIN 26652 NEVER WROTE.
+    // 26652 put front-to-back opaques in flush_locked ALONE and armed mode
+    // 421 at that one site, so the ordering never reached the pass that
+    // actually draws - meshGpuN reads 0 and compositeMeshes carries every
+    // draw on a healthy composite path - and the handoff's step-1 A/B could
+    // not measure itself, because 421 changed nothing this function does.
+    // Rule 1.5, four builds late. Ledger at KH_BUILD_TAG.
+    // THREE GROUPS, NOT TWO: overlays LAST, then translucent and effect
+    // meshes, then opaques front-to-back. 26652's comparator knew two
+    // classes and swept a DepthMode::Off overlay at alpha 1.0 into the
+    // opaque bucket; the group key restores the historic order and the
+    // front-to-back split lives strictly inside group 0.
+    // Far-first for every non-opaque group is the perceptual translucent
+    // contract verbatim and is UNTOUCHED.
+    const bool khr_sort_ftb = g_dbg_mode.load(std::memory_order_relaxed) != 421;
+    std::sort(meshes.begin(), meshes.end(),
+              [&cam, khr_sort_ftb](const RenderObject& a, const RenderObject& b) {
+                  const int khs_ag = a.mode == DepthMode::Off ? 2
+                      : (!a.fullscreen && a.effect == 0 && a.blend_mode == 0 &&
+                         a.color[3] >= 0.999f) ? 0 : 1;
+                  const int khs_bg = b.mode == DepthMode::Off ? 2
+                      : (!b.fullscreen && b.effect == 0 && b.blend_mode == 0 &&
+                         b.color[3] >= 0.999f) ? 0 : 1;
+                  if (khs_ag != khs_bg) return khs_ag < khs_bg;
+                  const float khs_ad = kh_mesh_dist_sq(a, cam);
+                  const float khs_bd = kh_mesh_dist_sq(b, cam);
+                  if (khs_ag != 0 || !khr_sort_ftb) return khs_ad > khs_bd;   // far first
+                  return khs_ad < khs_bd;                                     // near first
+              });
 
     StateBackup backup;
     backup.capture(ctx);
@@ -56980,6 +59923,22 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     }
     const bool khr_frame_ok = kh_upload_frame_cb(ctx, g_res.composite_frame_cb, khr_cbf);
 
+    // 26653 KH_MESH_CULL, injection edition: this pass's OWN matrix - the
+    // one khr_cbf carries into VSComposite - and this pass's own camera.
+    // If that matrix is rebased, or is a cycle latch, or belongs to another
+    // view, the apex guard refuses and this pass culls nothing.
+    KhCullSet khr_cull;
+    kh_cull_build(khr_cbf.view_proj, cam, khr_cull);
+    // 26657 KH_MESH_TIMER, injection edition. Harvest FIRST - a slot armed by
+    // an earlier injection is read before this one arms another - then bracket
+    // the draw loop. RENDER-THREAD RING, touched nowhere else; the flush's own
+    // ring is a separate object for exactly that reason.
+    kh_gpu_harvest(ctx, g_res.ts_inj_disjoint, g_res.ts_inj_stamp,
+                   g_res.ts_inj_cursor, g_res.ts_inj_inflight,
+                   g_inj_gpu_us, g_inj_gpu_n, g_inj_gpu_max);
+    const int khr_ts = kh_gpu_begin(ctx, g_res.ts_inj_disjoint, g_res.ts_inj_stamp,
+                                    g_res.ts_inj_cursor, g_res.ts_inj_inflight);
+
     for (const auto& o : meshes) {
         ConstantData cbd = khr_cbf;
         // 26221 TWIN PARITY, and it is a silent-wrong-answer defect. fxMeta.zw
@@ -57085,6 +60044,11 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         cbd.blend_ctl[2] =
             (o.far_vis && g_dbg_mode.load(std::memory_order_relaxed) != 322)
                 ? 1.0f : 0.0f;
+        // 26651 KH_MESH_LOD: blend_ctl[3] is the crossfade dither and OFF is
+        // zero. Written here so the lane is never inherited from the
+        // previous object's fade - the draw loop arms it per level and
+        // clears it again on the way out. TWIN FILL - rule 1.5.
+        cbd.blend_ctl[3] = 0.0f;
         memcpy(cbd.color, o.color, sizeof(cbd.color));
         // The camera (engine space) serves both the guard's true fragment
         // distance AND the solid band mask, so it is filled regardless.
@@ -57173,13 +60137,30 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         // fallback: the mesh stays visible in its solid color.
         const KhMaterialSet* khr_txm = kh_obj_textured(o);
         const bool khr_tx_arb = khr_far_arb || khr_mesh_farkeep || khr_mesh_nearz;
+        // 26651 THE THREE PREDICATES DISAGREED, AND THEY ARE ONE PREDICATE
+        // NOW. The PS selection below keys on khr_tx_arb - far_arb OR
+        // farkeep OR nearz - and the depthParams fill keys on guard OR all
+        // three, but the VS selection keyed on guard OR far_arb alone. So a
+        // frame with the snapshot guard down and a farkeep or nearz mesh
+        // bound the COMPOSITE-ARB pixel shader against the FLUSH vertex
+        // shader. That is inert today and the proof is exact rather than
+        // hopeful: VSMain and VSComposite are byte-identical apart from
+        // their entry and struct names, and VSOut and VSOutC declare the
+        // same four semantics in the same order, so the linkage is legal
+        // and the transform is the same one. It is a TRAP, not a defect -
+        // the file maintains those two as twins by hand and the day they
+        // diverge this pairing takes the wrong transform silently, on the
+        // one path that writes SV_Depth. Unified here while it still costs
+        // nothing. No arm: a change that cannot alter a pixel does not get
+        // to spend a mode number.
+        const bool khr_comp_vs = guard || khr_far_arb || khr_mesh_farkeep || khr_mesh_nearz;
         const bool khr_tx_on = khr_txm != nullptr &&
             g_res.layout_tex && g_res.mat_sampler &&
             (khr_tx_arb ? g_res.ps_comp_arb_tex != nullptr :
              guard      ? g_res.ps_comp_tex != nullptr :
                           g_res.ps_tex != nullptr) &&
-            ((guard || khr_far_arb) ? g_res.vs_comp_tex != nullptr
-                                    : g_res.vs_tex != nullptr);
+            (khr_comp_vs ? g_res.vs_comp_tex != nullptr
+                         : g_res.vs_tex != nullptr);
         {
             ID3D11PixelShader* khr_want_ps =
                 khr_tx_on ? (khr_tx_arb ? g_res.ps_comp_arb_tex
@@ -57193,8 +60174,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 khr_bound_ps = khr_want_ps;
             }
             ID3D11VertexShader* khr_want_vs =
-                khr_tx_on ? ((guard || khr_far_arb) ? g_res.vs_comp_tex : g_res.vs_tex)
-                          : ((guard || khr_far_arb) ? g_res.vs_composite : g_res.vs);
+                khr_tx_on ? (khr_comp_vs ? g_res.vs_comp_tex : g_res.vs_tex)
+                          : (khr_comp_vs ? g_res.vs_composite : g_res.vs);
             if (khr_want_vs != khr_bound_vs) {
                 ctx->VSSetShader(khr_want_vs, nullptr, 0);
                 khr_bound_vs = khr_want_vs;
@@ -57519,6 +60500,21 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         // CB SPLIT: object slice only (the frame slice went up before
         // the loop). A failed pass-level frame upload stands every draw
         // down - fail dark, never stale-frame draws.
+        // 26652 KH_MESH_CULL, injection edition. TWIN of the flush test -
+        // rule 1.5 - placed ABOVE the object-slice upload so a culled mesh
+        // costs one dot product per plane and no bus traffic at all.
+        // 26658: the census counts CULLABLE objects. A fullscreen pass has
+        // no world extent, can never be rejected, and was diluting
+        // meshCulled over meshConsidered - the lane the frustum win is read
+        // from. Twin at the flush.
+        if (!o.fullscreen) {
+            g_mesh_considered++;
+            float khr_cc[3];
+            kh_obj_center_engine(o, khr_cc);
+
+            if (!kh_mesh_visible(khr_cull, khr_cc, kh_lod_radius(o))) { g_mesh_culled++; continue; }
+        }
+
         if (!khr_frame_ok || !kh_upload_obj_cb(ctx, g_res.composite_cb, cbd)) continue;
         // Under depth func ALWAYS, draw order wins WITHIN the mesh:
         // with CULL_NONE the interior (far-wall) faces paint over the
@@ -57598,26 +60594,85 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             khr_bound_bm = o.blend_mode;
         }
 
-        if (khr_tx_on) {
-            // Per-submesh textured draws: matParams filled + t14-t18
-            // rebound + the object slice re-uploaded per material range.
-            const uint32_t khr_txd = kh_draw_textured(ctx, dev, cbd, g_res.composite_cb,
-                                                      *khr_txm, mid, khr_ts_ordered, khr_bound_rs,
-                                                      khr_tx_arb ? 2 : (guard ? 1 : 0), khr_bound_ps);
-            g_stats.composite_meshes += khr_txd;
-            g_stats.textured_draws += khr_txd;
-        } else {
-            ctx->Draw(mesh_vertex_count(mid), 0);
-            g_stats.composite_meshes++;
+        // 26651 KH_MESH_LOD, injection edition. TWIN of the flush block -
+        // rule 1.5, and it reads g_lod_proj_px, which the flush published
+        // under the park. A frame with no flush behind it therefore selects
+        // level 0 for everything rather than guessing a projection scale,
+        // which is the same fail-whole direction the rest of this path takes.
+        const MeshDef& khr_md = mesh_def(mid);
+        int khr_lod = 0;
+        float khr_lodt = 0.0f;
+        kh_lod_pick(khr_md, kh_lod_radius(o), sqrtf(kh_mesh_dist_sq(o, cam)), khr_lod, khr_lodt);
+        const bool khr_lodx = khr_lodt > 0.0f &&
+                              g_dbg_mode.load(std::memory_order_relaxed) != 419;
+        if (khr_lodx) g_lod_fades++;
+        // 26658: THE NO-LADDER BASELINE, ONCE PER OBJECT. Without a ladder
+        // this object is ONE draw at level 0 - never two - so the term
+        // belongs here and not inside the crossfade loop below. Twin at
+        // the flush. Ledger at KH_BUILD_TAG.
+        g_mesh_tris_l0 += (mesh_base_vcount(khr_md) / 3u) * (khr_ts_ordered ? 2u : 1u);
 
-            if (khr_ts_ordered) {   // pass 2: front faces over the interior
-                ctx->RSSetState(kh_rs_pick(g_res.rasterizer_cull));
-                khr_bound_rs = g_res.rasterizer_cull;
-                ctx->Draw(mesh_vertex_count(mid), 0);
+        for (int khr_li = 0; khr_li < (khr_lodx ? 2 : 1); ++khr_li) {
+            const int khr_lvl = khr_lod + khr_li;
+
+            if (khr_lodx) {
+                cbd.blend_ctl[3] = kh_lod_dither(khr_lodt, khr_li != 0);
+                if (!kh_upload_obj_cb(ctx, g_res.composite_cb, cbd)) break;
+            }
+
+            // 26652 GEOMETRY CENSUS. meshTris is what the colour paths
+            // actually submitted; meshTrisL0 is what the SAME draws would
+            // have submitted with no ladder. Their ratio is the LOD win,
+            // exactly, with no GPU timer needed to read it - and a ratio of
+            // 1.00 means the ladder is not engaging whatever lodMeshes says.
+            // 26658: meshTrisL0 LEFT THIS LOOP. Charged here it billed a
+            // FADING object two level-0 draws against a pair that exists
+            // only because the ladder does, so the ratio flattered itself
+            // by the fade rate - and lodFades ran 392 of 437 and 922 of
+            // 2990 in the two dumps that priced it. The baseline is one
+            // level-0 draw per object and is now stamped once, above.
+            // The ordered two-pass doubles what it submits and never paid
+            // for it; both halves do now, on both sides of the ratio.
+            {
+                UINT khc_s = 0, khc_c = 0;
+                mesh_lod_range(khr_md, khr_lvl, khc_s, khc_c);
+                g_mesh_tris += (khc_c / 3u) * (khr_ts_ordered ? 2u : 1u);
+            }
+            if (khr_tx_on) {
+                // Per-submesh textured draws: matParams filled + t14-t18
+                // rebound + the object slice re-uploaded per material range.
+                const uint32_t khr_txd = kh_draw_textured(ctx, dev, cbd, g_res.composite_cb,
+                                                          *khr_txm, mid, khr_ts_ordered, khr_bound_rs,
+                                                          khr_tx_arb ? 2 : (guard ? 1 : 0), khr_bound_ps,
+                                                          khr_lvl);
+                g_stats.composite_meshes += khr_txd;
+                g_stats.textured_draws += khr_txd;
+            } else {
+                UINT khr_ls = 0, khr_lc = 0;
+                mesh_lod_range(khr_md, khr_lvl, khr_ls, khr_lc);
+
+                if (khr_ts_ordered && khr_bound_rs != g_res.rasterizer_front) {
+                    ctx->RSSetState(kh_rs_pick(g_res.rasterizer_front));
+                    khr_bound_rs = g_res.rasterizer_front;
+                }
+
+                ctx->Draw(khr_lc, khr_ls);
                 g_stats.composite_meshes++;
+
+                if (khr_ts_ordered) {   // pass 2: front faces over the interior
+                    ctx->RSSetState(kh_rs_pick(g_res.rasterizer_cull));
+                    khr_bound_rs = g_res.rasterizer_cull;
+                    ctx->Draw(khr_lc, khr_ls);
+                    g_stats.composite_meshes++;
+                }
             }
         }
+
+        cbd.blend_ctl[3] = 0.0f;   // never leaks into the next object
     }
+
+    kh_gpu_end(ctx, g_res.ts_inj_disjoint, g_res.ts_inj_stamp,
+               g_res.ts_inj_cursor, g_res.ts_inj_inflight, khr_ts);   // 26657
 
     if (n_saved_vp > 0) ctx->RSSetViewports(n_saved_vp, saved_vp);
 
@@ -61268,7 +64323,62 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         g_res.depth_sample_count = td.SampleDesc.Count;
     }
 
-    if (!kh_ensure_ok("flush resources", ensure_resources(dev))) { ffr_flush_stage(4); return; }
+    {   // 26643: a DEFERRED ensure is not a failed one. The frame still ends
+        // here - none of the machinery below exists yet - but the registered
+        // meshes get their flat-white placeholder first, so a spawn is
+        // visible the moment it happens instead of when the pixel shaders
+        // finish minutes later. kh_ensure_ok already recognises the sentinel
+        // and stays silent (26641), so nothing is reported and no control
+        // flow moves; this only adds a draw on the way out. Mode 409 stands
+        // the placeholder down and restores the 26642 behaviour exactly.
+        const std::string khf_res_err = ensure_resources(dev);
+        // 26647 KH_ACQ_COLD_HOLD. The hold is armed on the DEFERRED branch and
+        // released here, on the first frame the gate passes. Mode 414 never
+        // arms it, which is the 26646 behaviour whole.
+        const bool khf_hold_now =
+            (khf_res_err == KH_SHADERS_COMPILING) &&
+            g_dbg_mode.load(std::memory_order_relaxed) != 414;
+        if (khf_hold_now != g_acq_hold.load(std::memory_order_relaxed)) {
+            g_acq_hold.store(khf_hold_now, std::memory_order_relaxed);
+            // RELEASING is the edge that matters. Everything the chain
+            // accumulated while the flush was down belongs to an era that
+            // never had a reference behind it - a ring of wrong-era
+            // candidates whose best blocks the right one - so the release
+            // hands the first live frame a COLD chain rather than a poisoned
+            // one. This is the 406 sequence, which the field proved acquires
+            // in two bind scans, minus the freeze.
+            if (!khf_hold_now) {
+                g_ls.view_src_valid = false;
+                g_ls.vc_n = 0;
+                g_ls.pub_rej_streak = 0;
+                g_ls.frame_view_valid = false;
+                g_ls.prev_view_valid = false;
+                g_ls.alt_view_valid = false;
+                g_ring_best_valid = false;
+                g_view_relock_wide_cycle = 0;
+                g_ls.count = 0;
+                g_ls.newest = -1;
+                for (int khf_b = 0; khf_b < 8; ++khf_b) {
+                    g_ls.band[khf_b].valid = false;
+                    g_ls.band[khf_b].pending_view = false;
+                }
+                g_acq_hold_resets++;
+            }
+        }
+        if (!kh_ensure_ok("flush resources", khf_res_err)) {
+            if (khf_res_err == KH_SHADERS_COMPILING) { kh_white_draw(dev, ctx); g_acq_hold_frames++; }
+            ffr_flush_stage(4);
+            return;
+        }
+    }
+    // 26645 KH_USER_ASYNC. Reap a finished user batch, then arm any requests
+    // the draw loops queued. BELOW the ensure gate deliberately: during the
+    // startup deferral the pool belongs to the static batch, prewarm refuses,
+    // and a request queued now would only be re-offered every frame for the
+    // whole compile window. Above the draw loops so a unit that landed since
+    // last frame is picked up by this frame's getters rather than the next.
+    kh_user_shader_reap();
+    kh_user_shader_pump(dev);
     g_flush_frame++;
     g_flush_frame_pub.store(g_flush_frame, std::memory_order_relaxed);   // 26083: T-machine re-arm gate
     g_stats.gate_passed++;
@@ -62016,6 +65126,12 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         }
     }
 
+    // 26651 KH_MESH_LOD: the pass's own pixels-per-tangent, published for
+    // both draw loops. Under the park, so the injection's read is the same
+    // lock-free staged read publish_world_lighting already relies on.
+    g_lod_proj_px = (screen_h > 0.0f && pv.projection[1][1] > 0.0f)
+                  ? pv.projection[1][1] * screen_h * 0.5f : 0.0f;
+
     const float now = effect_time_seconds();
 
     // Encode forensics for a miss latched THIS flush (the early latch runs
@@ -62166,20 +65282,19 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // object's world BOUNDS (nearest point of the AABB), not its center -
     // large meshes reach far closer than their centers, and the center
     // metric misordered exactly those.
-    auto dist_sq = [&cam](const RenderObject& o) { return kh_mesh_dist_sq(o, cam); };
-
-    auto group_of = [](const RenderObject& o) {
-        if (o.mode == DepthMode::Off) return 2;
-        return (o.color[3] >= 0.999f && o.effect == 0 && o.blend_mode == 0) ? 0 : 1;
-    };
-
-    std::sort(meshes.begin(), meshes.end(),
-              [&](const RenderObject& a, const RenderObject& b) {
-                  const int ga = group_of(a), gb = group_of(b);
-                  if (ga != gb) return ga < gb;
-                  const float da = dist_sq(a), db = dist_sq(b);
-                  return ga == 0 ? da < db : da > db;
-              });
+    // 26658: THE SORT THAT USED TO LIVE HERE WAS DEAD AND ITS SEMANTICS
+    // WERE LOST WITH IT. 26652 added a SECOND std::sort over the same
+    // vector further down, at the mesh pass, and nothing between the two
+    // sites ever iterated meshes - so this comparator's result was
+    // overwritten whole, every frame, from the day 26652 shipped. It
+    // carried a THREE-GROUP order that the replacement did not: overlays
+    // last, then translucent and effect meshes, then opaques. Under the
+    // two-class replacement a DepthMode::Off overlay at alpha 1.0 and any
+    // effect mesh at alpha 1.0 fell into the OPAQUE bucket and sorted by
+    // distance instead of drawing last, so a translucent could paint over
+    // an overlay. The group key is restored at the surviving sort, where
+    // it is read; nothing is sorted twice any more. Ledger at
+    // KH_BUILD_TAG.
 
     StateBackup backup;
     backup.capture(ctx);
@@ -63085,6 +66200,11 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         cbd.blend_ctl[2] =
             (o.far_vis && g_dbg_mode.load(std::memory_order_relaxed) != 322)
                 ? 1.0f : 0.0f;
+        // 26651 KH_MESH_LOD: blend_ctl[3] is the crossfade dither and OFF is
+        // zero. Written here so the lane is never inherited from the
+        // previous object's fade - the draw loop arms it per level and
+        // clears it again on the way out. TWIN FILL - rule 1.5.
+        cbd.blend_ctl[3] = 0.0f;
         memcpy(cbd.color, o.color, sizeof(cbd.color));
         memcpy(cbd.fx0, o.fx, sizeof(cbd.fx0));
         memcpy(cbd.fx1, o.fx + 4, sizeof(cbd.fx1));
@@ -63480,10 +66600,48 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // the sort keeps the count of transitions minimal. Opaques self-
     // resolve by depth regardless of order, so the shared sort is free
     // for them.
+    // 26652 KH_MESH_SORT (mode 421 restores the single far-first order).
+    // THE ORDER WAS RIGHT FOR ONE CLASS AND EXACTLY WRONG FOR THE OTHER.
+    // Far-first is required for the perceptual translucents - the ledger
+    // above explains why, and that argument is untouched - but it is the
+    // WORST possible order for opaques, which is the class that carries the
+    // cost. Front-to-back lets each opaque lay depth that the ones behind it
+    // then fail, so an occluded fragment never enters the shadow ladder.
+    // Textbook, free, and it is the ordering every engine uses.
+    // The two classes are DISJOINT by their own predicate - a perceptual
+    // translucent is normal-blend with alpha under 0.999 - so sorting the
+    // translucents last within one comparator keeps their relative order
+    // exactly what it was and puts them after every opaque, which is also
+    // where they have to be for the re-capture to compose correctly.
+    // 26658: THE GROUP KEY RETURNS, and it is the one the deleted sort
+    // above used to carry. 26652 collapsed three draw groups into two and
+    // called them DISJOINT by their own predicate - true of the two it
+    // named, silently untrue of the third. Overlays draw LAST or a
+    // translucent paints over them; effect meshes follow the opaques whose
+    // pixels they read. 26652's front-to-back opaque split is unchanged and
+    // now lives strictly inside group 0, so 421 restores the 26650 ordering
+    // on this path exactly as it does on the injection twin.
+    const bool khf_sort_ftb = g_dbg_mode.load(std::memory_order_relaxed) != 421;
     std::sort(meshes.begin(), meshes.end(),
-              [&cam](const RenderObject& a, const RenderObject& b) {
-                  return kh_mesh_dist_sq(a, cam) > kh_mesh_dist_sq(b, cam);   // far first
+              [&cam, khf_sort_ftb](const RenderObject& a, const RenderObject& b) {
+                  const int khs_ag = a.mode == DepthMode::Off ? 2
+                      : (!a.fullscreen && a.effect == 0 && a.blend_mode == 0 &&
+                         a.color[3] >= 0.999f) ? 0 : 1;
+                  const int khs_bg = b.mode == DepthMode::Off ? 2
+                      : (!b.fullscreen && b.effect == 0 && b.blend_mode == 0 &&
+                         b.color[3] >= 0.999f) ? 0 : 1;
+                  if (khs_ag != khs_bg) return khs_ag < khs_bg;
+                  const float khs_ad = kh_mesh_dist_sq(a, cam);
+                  const float khs_bd = kh_mesh_dist_sq(b, cam);
+                  if (khs_ag != 0 || !khf_sort_ftb) return khs_ad > khs_bd;   // far first
+                  return khs_ad < khs_bd;                                     // near first
               });
+
+    // 26653 KH_MESH_CULL, flush edition: built HERE, from this pass's own
+    // view_proj and this pass's own camera, as a local. See the ledger at
+    // kh_cull_build for why 26652's published static was wrong.
+    KhCullSet khf_cull;
+    kh_cull_build(view_proj, cam, khf_cull);
 
     uint32_t khf_perc_count = 0;
 
@@ -63565,9 +66723,35 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         ctx->RSSetViewports(1, &khf_vp);
     }
 
+    // 26657 KH_MESH_TIMER, flush edition. GAME-THREAD RING - the park is held
+    // for all of flush_locked, so this ring and the injection's never touch.
+    kh_gpu_harvest(ctx, g_res.ts_msh_disjoint, g_res.ts_msh_stamp,
+                   g_res.ts_msh_cursor, g_res.ts_msh_inflight,
+                   g_msh_gpu_us, g_msh_gpu_n, g_msh_gpu_max);
+    const int khf_ts = kh_gpu_begin(ctx, g_res.ts_msh_disjoint, g_res.ts_msh_stamp,
+                                    g_res.ts_msh_cursor, g_res.ts_msh_inflight);
+
     for (const auto& o : meshes) {
         const bool ov = (o.effect == 0 && o.mode == DepthMode::Off);
         if (ov) g_mask.ov_listed++;      // reached the draw loop
+        // 26652 KH_MESH_CULL, flush edition. TWIN at the injection.
+        // Fullscreen passes have no world extent and are never culled.
+        // 26658: cullable objects only - twin at the injection.
+        if (!o.fullscreen) {
+            g_mesh_considered++;
+            float khf_cc[3];
+            kh_obj_center_engine(o, khf_cc);
+
+            // A culled overlay counts as SKIPPED, not as vanished: the
+            // UI-mask census stands on ov_listed equalling ov_drawn plus
+            // ov_skipped, and a new early exit that does not pay into it
+            // would silently break that identity.
+            if (!kh_mesh_visible(khf_cull, khf_cc, kh_lod_radius(o))) {
+                g_mesh_culled++;
+                if (ov) g_mask.ov_skipped++;
+                continue;
+            }
+        }
         // TRANSLUCENT RE-CAPTURE (ledger at the arm above): this mesh is
         // a perceptual translucent and one already drew - refresh the
         // capture so this one composites over the earlier result instead
@@ -63783,21 +66967,84 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             bound_mesh = mid;
         }
 
-        if (khf_tx_on) {
-            const uint32_t khf_txd = kh_draw_textured(ctx, dev, khf_obj_cbd, g_res.constant_buffer,
-                                                      *khf_txm, mid, khf_ts_ordered, khr_bound_rs,
-                                                      0, g_res.ps_tex);
-            g_stats.textured_draws += khf_txd;
-        } else {
-            ctx->Draw(mesh_vertex_count(mid), 0);
+        // 26651 KH_MESH_LOD, flush edition. TWIN at the injection - rule 1.5.
+        // A single level draws once and the CB slice already went up with the
+        // dither lane zeroed. A level IN ITS FADE BAND draws twice with
+        // complementary dither masks, so the two levels tile the silhouette
+        // exactly once: no blend state, no sort, no second depth regime, and
+        // no popping. The re-upload is owed only by the fading case.
+        // Mode 419 keeps the ladder and stands the crossfade down, which is
+        // the A/B that prices the crossfade - under 419 the levels POP.
+        const MeshDef& khf_md = mesh_def(mid);
+        int khf_lod = 0;
+        float khf_lodt = 0.0f;
+        kh_lod_pick(khf_md, kh_lod_radius(o), sqrtf(kh_mesh_dist_sq(o, cam)), khf_lod, khf_lodt);
+        const bool khf_lodx = khf_lodt > 0.0f &&
+                              g_dbg_mode.load(std::memory_order_relaxed) != 419;
+        if (khf_lodx) g_lod_fades++;
+        // 26658: THE NO-LADDER BASELINE, ONCE PER OBJECT. Twin at the
+        // injection - see that block for the reasoning.
+        g_mesh_tris_l0 += (mesh_base_vcount(khf_md) / 3u) * (khf_ts_ordered ? 2u : 1u);
 
-            if (khf_ts_ordered) {   // pass 2: front faces over the interior
-                ctx->RSSetState(kh_rs_pick(g_res.rasterizer_cull));
-                khr_bound_rs = g_res.rasterizer_cull;
-                ctx->Draw(mesh_vertex_count(mid), 0);
+        for (int khf_li = 0; khf_li < (khf_lodx ? 2 : 1); ++khf_li) {
+            const int khf_lvl = khf_lod + khf_li;
+
+            if (khf_lodx) {
+                khf_obj_cbd.blend_ctl[3] = kh_lod_dither(khf_lodt, khf_li != 0);
+                if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khf_obj_cbd)) break;
+            }
+
+            // 26652 GEOMETRY CENSUS. meshTris is what the colour paths
+            // actually submitted; meshTrisL0 is what the SAME draws would
+            // have submitted with no ladder. Their ratio is the LOD win,
+            // exactly, with no GPU timer needed to read it - and a ratio of
+            // 1.00 means the ladder is not engaging whatever lodMeshes says.
+            // 26658: meshTrisL0 LEFT THIS LOOP. Charged here it billed a
+            // FADING object two level-0 draws against a pair that exists
+            // only because the ladder does, so the ratio flattered itself
+            // by the fade rate - and lodFades ran 392 of 437 and 922 of
+            // 2990 in the two dumps that priced it. The baseline is one
+            // level-0 draw per object and is now stamped once, above.
+            // The ordered two-pass doubles what it submits and never paid
+            // for it; both halves do now, on both sides of the ratio.
+            {
+                UINT khc_s = 0, khc_c = 0;
+                mesh_lod_range(khf_md, khf_lvl, khc_s, khc_c);
+                g_mesh_tris += (khc_c / 3u) * (khf_ts_ordered ? 2u : 1u);
+            }
+            if (khf_tx_on) {
+                const uint32_t khf_txd = kh_draw_textured(ctx, dev, khf_obj_cbd, g_res.constant_buffer,
+                                                          *khf_txm, mid, khf_ts_ordered, khr_bound_rs,
+                                                          0, g_res.ps_tex, khf_lvl);
+                g_stats.textured_draws += khf_txd;
+            } else {
+                UINT khf_ls = 0, khf_lc = 0;
+                mesh_lod_range(khf_md, khf_lvl, khf_ls, khf_lc);
+
+                // The ordered contract restarts per level: iteration 1 left
+                // the cull rasterizer bound, and interiors must precede
+                // exteriors for THIS level too. kh_draw_textured already
+                // does the identical reset per submesh.
+                if (khf_ts_ordered && khr_bound_rs != g_res.rasterizer_front) {
+                    ctx->RSSetState(kh_rs_pick(g_res.rasterizer_front));
+                    khr_bound_rs = g_res.rasterizer_front;
+                }
+
+                ctx->Draw(khf_lc, khf_ls);
+
+                if (khf_ts_ordered) {   // pass 2: front faces over the interior
+                    ctx->RSSetState(kh_rs_pick(g_res.rasterizer_cull));
+                    khr_bound_rs = g_res.rasterizer_cull;
+                    ctx->Draw(khf_lc, khf_ls);
+                }
             }
         }
+
+        khf_obj_cbd.blend_ctl[3] = 0.0f;   // never leaks into the next object
     }
+
+    kh_gpu_end(ctx, g_res.ts_msh_disjoint, g_res.ts_msh_stamp,
+               g_res.ts_msh_cursor, g_res.ts_msh_inflight, khf_ts);   // 26657
 
     // Restore the parked pass's own viewport (the scene depth-range
     // override above covered only the mesh draws; the chain and every
@@ -65640,6 +68887,48 @@ inline void reset_stat_counters() {
     g_recv_term_skips = 0; g_recv_wipes = 0; g_recv_stream_skips = 0;
     g_blk_holds = 0; g_blk_mode_rejects = 0; g_blk_err_rejects = 0;
     g_lit_grace_saves = 0;
+    // 26648 THE 26643/26647 LANES JOIN THEIR SIBLINGS, AND THE REASON IS A
+    // MISREAD THIS BUILD EXISTS TO PREVENT. A MISSION RESTART DOES NOT UNLOAD
+    // THE DLL - the process, and every static in it, survives - which is why
+    // reset_session_state exists at all. These five were declared beside
+    // machinery that IS session-cumulative by design (the shader census) and
+    // were left out of the reset, so a warm dump taken after a mission
+    // restart carried the COLD session's totals: acqHoldFrames 10307 against
+    // flushes 223, and acqHoldResets 2 - which reads exactly like the
+    // "gate is flapping, stand down to 414" signal that 26647's own
+    // acceptance (a) pre-registered, on a session where nothing was wrong.
+    // An instrument that cannot be read per session cannot support a
+    // per-session acceptance. The shader-pool lanes beside them stay
+    // cumulative deliberately - 26638 says so in writing - and are NOT added.
+    g_khw_frames = 0; g_khw_draws = 0; g_khw_vb_fails = 0;
+    g_acq_hold_frames = 0; g_acq_hold_resets = 0; g_acq_hold_scans = 0;
+    // 26649: the KH_USER_ASYNC lanes were in NEITHER reset - the same trap
+    // 26648 closed for the white and acquisition lanes, missed one build
+    // earlier on its own siblings. The user shader CACHE is released at
+    // mission destroy, so its counters must restart with it or a warm dump
+    // reports a previous mission's queue against this mission's flushes.
+    g_user_async_queued = 0; g_user_async_done = 0; g_user_async_fails = 0;
+    g_user_async_batches = 0; g_user_async_relost = 0; g_user_async_drops = 0;
+    g_user_mat_white_draws = 0; g_user_settle_waits = 0;
+    // 26651: the KH_MESH_LOD and KH_MOD_CACHE lanes, in the reset from the
+    // build that mints them - 26648's lesson applied on the first day rather
+    // than two builds later. lodFades is per session by nature; the build
+    // lanes are per session because the FBX import path is re-entered per
+    // session on a cold path cache. g_mod_cache_dirs_n is NOT reset: it is
+    // a property of the installed mod set, not of a mission.
+    g_lod_build_ms = 0; g_lod_meshes = 0; g_lod_levels = 0; g_lod_fades = 0;
+    // 26652: the geometry census is per SESSION - a cumulative triangle
+    // count across missions is a number nobody can divide by anything.
+    g_mesh_considered = 0; g_mesh_culled = 0; g_mesh_tris = 0; g_mesh_tris_l0 = 0;
+    g_cull_standdowns = 0; g_cull_builds = 0; g_cull_apex_max = 0.0f;   // 26653
+    // 26657: the GPU timers are per SESSION. They are NOT in the 26638
+    // shader-census class - that one is cumulative by design because it
+    // measures a process-lifetime compile; these measure a frame.
+    g_msh_gpu_us = 0; g_msh_gpu_n = 0; g_msh_gpu_max = 0;
+    g_inj_gpu_us = 0; g_inj_gpu_n = 0; g_inj_gpu_max = 0;
+    g_cull_rebased = 0;                                                 // 26654
+    g_mod_shader_hits.store(0, std::memory_order_relaxed);
+    g_mod_mesh_hits = 0;
     g_blk_jump_adopts = 0;
     g_blk_collapse_holds = 0;   // 26052: the 26050 counter joins its siblings here
     g_blk_blank_skips = 0;      // 26053: blank-guard census
@@ -66003,6 +69292,10 @@ inline void reset_stat_counters() {
     // a mission change lies in the next one.)
     g_sun_union_rad_held = -1.0f;
     g_sun_union_rad_holds = 0; g_sun_union_rad_relatches = 0;
+    // 26663: the band depth latch resets with the union's, by the same 26539
+    // rule - a surviving sentinel lies about the next mission.
+    for (int khfl_i = 0; khfl_i < 4; ++khfl_i) g_sun_fwd_held[khfl_i] = -1.0f;
+    g_sun_fwd_holds = 0; g_sun_fwd_relatches = 0;
     // 26611: the second latch and the ladder scale reset with the first
     // (the 26539 session-reset rule - a surviving sentinel lies).
     g_sun_ladder_scale = 1.0f;
@@ -66651,6 +69944,13 @@ inline void on_mission_end() {
                                           // doctrine: recompiles come from disk
         kh_user_lut_cache_release();      // user .cube LUTs: same doctrine
                                           // (reloads come from disk)
+        // 26646: the .khmc writer is ALWAYS interruptible between jobs - it
+        // holds no multi-minute call - so it is joined, never detached, and
+        // queued-but-unwritten entries are dropped rather than held for a
+        // disk queue. A missing .khmc costs one re-parse on a later launch.
+        // Stopped BEFORE the shader shutdown so the two teardowns cannot
+        // contend on g_khsm_trim_mu.
+        kh_mesh_cache_writer_stop();
         kh_shader_mt_shutdown();   // 26636: no worker may outlive a mission
         reset_session_state();
         khme_done = true;   // 26495: exhaustion is counted + deferred below

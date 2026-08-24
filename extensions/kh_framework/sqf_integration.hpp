@@ -1319,7 +1319,7 @@ static game_value get_rotation_euler_sqf(game_value_parameter relative, game_val
         if (upLen < EPSILON) return make_zero_result();
         upX /= upLen; upY /= upLen; upZ /= upLen;
 
-        // Right vector = dir ?? up
+        // Right vector = dir up
         float rightX = dirY * upZ - dirZ * upY;
         float rightY = dirZ * upX - dirX * upZ;
         float rightZ = dirX * upY - dirY * upX;
@@ -1327,7 +1327,7 @@ static game_value get_rotation_euler_sqf(game_value_parameter relative, game_val
         if (rightLen < EPSILON) return make_zero_result();
         rightX /= rightLen; rightY /= rightLen; rightZ /= rightLen;
 
-        // Re-orthogonalize up = right ?? dir
+        // Re-orthogonalize up = right dir
         upX = rightY * dirZ - rightZ * dirY;
         upY = rightZ * dirX - rightX * dirZ;
         upZ = rightX * dirY - rightY * dirX;
@@ -1457,7 +1457,7 @@ static game_value vector_to_euler_sqf(game_value_parameter vectors) {
         if (upLen < EPSILON) return make_zero_result();
         upX /= upLen; upY /= upLen; upZ /= upLen;
 
-        // Right vector = dir ?? up
+        // Right vector = dir up
         float rightX = dirY * upZ - dirZ * upY;
         float rightY = dirZ * upX - dirX * upZ;
         float rightZ = dirX * upY - dirY * upX;
@@ -1573,8 +1573,7 @@ static game_value euler_to_quaternion_sqf(game_value_parameter rotation) {
             return game_value();
         }
 
-        // Negate to match eulerToVector convention: R_Z(-yaw) ?? R_Y(-roll)
-        // ?? R_X(-pitch)
+        // Negate to match eulerToVector convention: R_Z(-yaw) R_Y(-roll) R_X(-pitch)
         float halfX = -static_cast<float>(rot[0]) * DEG_TO_RAD * 0.5f;
         float halfY = -static_cast<float>(rot[1]) * DEG_TO_RAD * 0.5f;
         float halfZ = -static_cast<float>(rot[2]) * DEG_TO_RAD * 0.5f;
@@ -1634,13 +1633,13 @@ static game_value quaternion_to_euler_sqf(game_value_parameter quat) {
         float aroundX, aroundY, aroundZ;
 
         if (std::abs(sinRoll) > 1.0f - EPSILON) {
-            // Gimbal lock ??? roll is ??90??
+            // Gimbal lock roll is 90
             aroundX = 0.0f;
             aroundY = (sinRoll < 0.0f) ? 90.0f : 270.0f;
             float coupled = std::atan2(2.0f * (x * y + w * z), 1.0f - 2.0f * (y * y + z * z));
             aroundZ = std::fmod(-coupled * RAD_TO_DEG + 360.0f, 360.0f);
         } else {
-            // Normal case ??? negate extracted angles to undo the convention
+            // Normal case negate extracted angles to undo the convention
             // negation
             float extractedX = std::atan2(2.0f * (w * x + y * z), 1.0f - 2.0f * (x * x + y * y));
             float extractedY = std::asin(sinRoll);
@@ -1705,7 +1704,7 @@ static game_value vector_to_quaternion_sqf(game_value_parameter vectors) {
         if (upLen < EPSILON) return make_identity();
         upX /= upLen; upY /= upLen; upZ /= upLen;
 
-        // Right = dir ?? up
+        // Right = dir up
         float rightX = dirY * upZ - dirZ * upY;
         float rightY = dirZ * upX - dirX * upZ;
         float rightZ = dirX * upY - dirY * upX;
@@ -1713,7 +1712,7 @@ static game_value vector_to_quaternion_sqf(game_value_parameter vectors) {
         if (rightLen < EPSILON) return make_identity();
         rightX /= rightLen; rightY /= rightLen; rightZ /= rightLen;
 
-        // Re-orthogonalize up = right ?? dir
+        // Re-orthogonalize up = right dir
         upX = rightY * dirZ - rightZ * dirY;
         upY = rightZ * dirX - rightX * dirZ;
         upZ = rightX * dirY - rightY * dirX;
@@ -1871,7 +1870,7 @@ static game_value quaternion_slerp_sqf(game_value_parameter right_arg) {
         float w, x, y, z;
 
         if (dot > 0.9995f) {
-            // Very close ??? linear interpolation to avoid division by
+            // Very close linear interpolation to avoid division by
             // near-zero sin
             w = aw + t * (bw - aw);
             x = ax + t * (bx - ax);
@@ -1994,7 +1993,7 @@ static game_value get_quaternion_rotation_sqf(game_value_parameter relative, gam
         if (upLen < EPSILON) return make_identity();
         upX /= upLen; upY /= upLen; upZ /= upLen;
 
-        // Right = dir ?? up
+        // Right = dir up
         float rightX = dirY * upZ - dirZ * upY;
         float rightY = dirZ * upX - dirX * upZ;
         float rightZ = dirX * upY - dirY * upX;
@@ -2002,7 +2001,7 @@ static game_value get_quaternion_rotation_sqf(game_value_parameter relative, gam
         if (rightLen < EPSILON) return make_identity();
         rightX /= rightLen; rightY /= rightLen; rightZ /= rightLen;
 
-        // Re-orthogonalize up = right ?? dir
+        // Re-orthogonalize up = right dir
         upX = rightY * dirZ - rightZ * dirY;
         upY = rightZ * dirX - rightX * dirZ;
         upZ = rightX * dirY - rightY * dirX;
@@ -2118,7 +2117,7 @@ static game_value axis_angle_to_quaternion_sqf(game_value_parameter params) {
         float axisLen = std::sqrt(axisX * axisX + axisY * axisY + axisZ * axisZ);
 
         if (axisLen < EPSILON) {
-            // Zero axis ??? return identity
+            // Zero axis return identity
             auto_array<game_value> r;
             r.reserve(4);
             r.push_back(game_value(1.0f));
@@ -2196,7 +2195,7 @@ static game_value quaternion_to_axis_angle_sqf(game_value_parameter quat) {
             axisY = y / s;
             axisZ = z / s;
         } else {
-            // Near-zero rotation ??? axis is arbitrary
+            // Near-zero rotation axis is arbitrary
             axisX = 0.0f;
             axisY = 1.0f;
             axisZ = 0.0f;
@@ -3609,7 +3608,7 @@ static game_value kh_set_variable_impl(game_value_parameter left_arg, game_value
         game_value message(std::move(message_data));
         bool target_is_code = (!target.is_nil() && target.type_enum() == game_data_type::CODE);
 
-        // Store the JIP message now, unless the target is CODE ??? the CODE
+        // Store the JIP message now, unless the target is CODE
         // branch below stores the conditional wrapper instead (no
         // plain-then-replace).
         if (!jip_key.empty() && !target_is_code) {
@@ -6683,6 +6682,8 @@ static game_value update_post_fx_sqf(game_value_parameter args) {
         } else if (prop == "ui") {
             // "SCENE"/"UI"/"BOTH" or the legacy boolean pair
             if (!kh_ui_phase_from_gv(arr[2], obj.affect_ui, obj.ui_only)) return game_value(false);
+            // UI phase must start the overlay control driver explicitly -
+            // state stays dead otherwise (no passive activation).
             if (obj.affect_ui) RenderIntegration::kh_ui_driver_rehoist();   // Uphase demanded
         } else if (prop == "uispill") {
             // Builtin gather effects are auto-classified; this bit exists so

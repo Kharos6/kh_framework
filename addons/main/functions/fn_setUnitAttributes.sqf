@@ -278,6 +278,8 @@ execute [
 		_unit enableAIFeature ["NVG", _aiFeatures select 15];
 		_unit enableAIFeature ["RADIOPROTOCOL", _aiFeatures select 16];
 		_unit enableAIFeature ["FIREWEAPON", _aiFeatures select 17];
+		_unit enableAIFeature ["COMMAND", _aiFeatures select 18];
+		_unit enableAIFeature ["HEARING", _aiFeatures select 19];
 
 		if (_vehicle isNotEqualTo []) then {
 			_vehicle set [0, ["OBJECT", _vehicle select 0] call KH_fnc_getEntityByIdentifier];

@@ -78,7 +78,9 @@ params [["_unit", objNull, [objNull]]];
 			_unit checkAIFeature "LIGHTS",
 			_unit checkAIFeature "NVG",
 			_unit checkAIFeature "RADIOPROTOCOL",
-			_unit checkAIFeature "FIREWEAPON"
+			_unit checkAIFeature "FIREWEAPON",
+			_unit checkAIFeature "COMMAND",
+			_unit checkAIFeature "HEARING"
 		],
 		groupId (group _unit),
 		assignedTeam _unit,

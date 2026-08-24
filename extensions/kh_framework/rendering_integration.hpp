@@ -717,6 +717,19 @@ struct Resources {
     ID3D11PixelShader*       ps_maskcast = nullptr;     // analytic mask cast (single-sample t0)
     ID3D11PixelShader*       ps_maskprime = nullptr;    // 26230: writes lit over our footprint
     ID3D11PixelShader*       ps_inj_depth = nullptr;    // 26348: the footprint's own SV_Depth encode
+    // 26684 KH_MESH_OWNER_PREPASS (ledger at KH_BUILD_TAG): the injection's
+    // owner map - R32_UINT (depth20|id12) colour + its own D32 depth, both at
+    // the engine DSV's sample count, plus the strict-LESS DSS the owner draw
+    // resolves ties with. Recreated whenever the injection DSV's dims/samples
+    // move (kh_owner_ensure); released with the device like everything here.
+    ID3D11PixelShader*        ps_owner = nullptr;
+    ID3D11Texture2D*          own_tex = nullptr;
+    ID3D11RenderTargetView*   own_rtv = nullptr;
+    ID3D11ShaderResourceView* own_srv = nullptr;
+    ID3D11Texture2D*          own_dsv_tex = nullptr;
+    ID3D11DepthStencilView*   own_dsv = nullptr;
+    ID3D11DepthStencilState*  dss_owner = nullptr;
+    UINT own_w = 0, own_h = 0, own_samp = 0, own_qual = 0;
     ID3D11PixelShader*       ps_composite = nullptr;    // injected-path PS: PSMain + the opaque
     ID3D11PixelShader*       ps_composite_arb = nullptr; // arb variant: + SV_Depth analytic terrain clamp
                                                         // punch-through guard against the copied
@@ -1215,6 +1228,14 @@ struct Resources {
         KH_SAFE_RELEASE(ps_dbg_cov);       // 26069
         KH_SAFE_RELEASE(ps_cov_fix);       // 26075
         KH_SAFE_RELEASE(ps_inj_depth);     // 26348
+        KH_SAFE_RELEASE(ps_owner);         // 26684 KH_MESH_OWNER_PREPASS
+        KH_SAFE_RELEASE(own_srv);
+        KH_SAFE_RELEASE(own_rtv);
+        KH_SAFE_RELEASE(own_tex);
+        KH_SAFE_RELEASE(own_dsv);
+        KH_SAFE_RELEASE(own_dsv_tex);
+        KH_SAFE_RELEASE(dss_owner);
+        own_w = own_h = own_samp = own_qual = 0;
         KH_SAFE_RELEASE(ps_maskprime);     // 26230
         KH_SAFE_RELEASE(ps_maskcast);      // 26087: was created in init but
                                            // never released - one PS object
@@ -2117,6 +2138,12 @@ struct RenderStats {
     uint64_t composite_meshes = 0;      // meshes drawn through the composited path
     uint64_t textured_draws = 0;        // per-submesh textured draws issued (KH_TEXTURED)
     uint64_t tex_loads = 0;             // material textures loaded from disk (cache misses)
+    // 26684 KH_TEX_CACHE (mode 439 bypasses; ledger at KH_BUILD_TAG):
+    uint64_t tex_cache_hits = 0;        // .khtc served (decode + mip build skipped)
+    uint64_t tex_cache_misses = 0;      // stb decode + CPU mip build (then queued for write)
+    uint64_t tex_cache_writes = 0;      // .khtc files persisted by the writer thread
+    uint64_t tex_mip_ms = 0;            // cumulative CPU mip-chain build time (misses only)
+    uint64_t tex_cache_load_ms = 0;     // cumulative .khtc read + validate time (hits only)
     uint64_t fbx_imports = 0;           // .fbx files ufbx-parsed + registered (misses
                                         // of BOTH the id map and the binary mesh cache)
     uint64_t fbx_cache_hits = 0;        // binary-cache-served loads (no ufbx parse,
@@ -2233,9 +2260,17 @@ static std::atomic<bool> g_stats_armed{ false };
 // ===========================================================================
 // 26314 THE MODE CATALOG (relocated from the setRenderDebug SQF description;
 // the register call now carries only "Sets the render debug mode"). This
-// comment IS the catalog of record - the dual-edit rule (this catalog + the
-// whitelist in sqf_integration.hpp's set_render_debug_sqf) is unchanged, only
-// the catalog's home moved. One paragraph per former string literal, verbatim:
+// comment IS the catalog of record THROUGH 26313 (modes 0-162) - the dual-edit
+// rule (this catalog + the whitelist in sqf_integration.hpp's
+// set_render_debug_sqf) is unchanged, only the catalog's home moved. One
+// paragraph per former string literal, verbatim.
+// 26684 CORRECTION, rule 1.12: this header said the block below was the
+// catalog of record, full stop, while every mode minted since 26315 (163 and
+// up, whitelist top 439 at this build) is cataloged ONLY in its own build's
+// ledger entry ("mode NNN reverts/restores/arms") and in the whitelist's
+// per-mode comment. The record of a mode above 162 is its ledger entry; the
+// dual-edit rule as practised is whitelist + ledger entry. Nothing below was
+// moved - the block stays verbatim as the 0-162 record.
 // Debug switches (0-157. 26307; every 18+ mode is a one-thing A/B that REVERTS a shipped fix, so default is always the current behaviour). 0 off. 1-9 shader visuals. 10 depth-clamp forensics (magenta pull / cyan identity-gated / blue no-competitor / gray clamp idle). 11-12 metric ladders: khaOff metres spent, competing gap metres. 13 fog+haze TRANSMITTANCE ladder (black <=0.01 ... white >0.99) (shared legend: gray unmeasured, black 0, navy .5, blue 1, cyan 2, green 4, yellow 8, orange 15, red >15). 13-17 shader visuals. 20 cast kill switch. 21 readiness latch + slab retirement off. 22-23, 26, 28-52 campaign-28/29 A/Bs - see those handoffs. 24 terrain snap off. 25 cast live-grid viewport A/B. 27 UI coverage debug view. 53 DL cadence-mark decay off. 54 block mirror/standing coherence off. 55 far-arb near floor off (FALSIFIED TWICE - closed). 56 contact band back to 25 m. 57 DL TTL multiplier back to 6x. 58 occluder-identity tolerance back to 3.125 m. 59 DL dense gate back to 4 sightings + 40 ms. 60 engine distance haze off. 61 fog far-fade ramp off entirely. 62 engine decay lane ON (opt-in; default is the staged fogParams decay). 63 relative dark re-seed bar off. 64 below-layer (underwater) atmospheric stand-down off. 65 encode near-class agreement off. 66-70 seam forensics: 68 seam arm census, 69 legacy adjacency seam rule, 70 in-hook injection (no deferral). 71 paint the raw engine shadow mask. 73/74 paint the isolated stencil term / the pre snapshot. 75 explicit sten multiply arm. 76 post read from the LIVE mask (the 26217 fault, kept as its own A/B). 78 paint the ratio's inputs side by side (R post, G pre, B sten) - the instrument that falsified 26215's arithmetic. 79 the subtractive ratio form. 80-82 injection rasterization reverts. 83, 90-92, 94, 100, 101, 103, 105, 106 RETIRED NO-OPS, kept only so old scripts still validate. 86 priming-pass revert. 87 the whole stencil feature off (the only wholesale revert; NOT a product safety net - the shipped fallback is kh_svs_sten_ready). 89 injector inherits engine tessellation. 95 injection+snapshots on, MULTIPLY off. 96 injection off, multiply on. 97 force the mask clamp to the main-depth dims. 98 injection depth-CLIP instead of clamp. 102 injection view-adoption off. 104 RETIRED - the raster lookup it selected is now the DEFAULT (26273: it closes the lag; the reprojected read was the defect all along). 126 restores reprojection. 127 both the injection and the composite take the frame's CLEAR-TIME view sample instead of each fetching the newest - they read publications ~289 apart today and that gap is the edge slice; read svBpvInjTakes/svBpvCompTakes for whether they actually shared - svPubOrdMean CANNOT answer it, it counts publications between two call sites in time and not value identity. 128 shares the boundary PROJECTION as well, which 127 proved is the remaining half. 107 draw the VISIBLE mesh in engine space - DIAGNOSTIC ONLY, the box lags the camera and this can never be a fix. 108 prime with 1.0 + disocclusion guard off (the 26247 pair). 109 THE VOLUME TRANSPORT: read the stencil count from our own copy of the volume buffer and disable the priming pass - 0 vs 109 is the cascade-cut A/B. 110 paint the stencil count AS THE SHADING PATH READS IT - guarded, with orange/brown marking where the footprint witness fired (MAGENTA = wrapped = `!= 0` is the wrong test). 111 paint the footprint residual ladder. 112 volume transport with the footprint test off. 113 paint the RAW unguarded count - 110's A/B partner, and the only view that shows the disocclusion band directly. 114 footprint tolerance back to the 26249 value of 1e-4 (default is 3.16e-4, placed in the empty decade mode 111 measured between our surface and the halo). 119 REVERT to the pre-26264 mask transport (priming on, cascade cut back) - the volume buffer is the DEFAULT now. 116 INJECTION on the engine's own view (svReprojPxMean should collapse toward 0). 117 VISIBLE MESH on the engine's own view - note 107 was never this test, it uses the injection's stale matrix. 118 both, the shipping candidate. 115 paint the VERDICT DISAGREEMENT set - black/white = the guard's choice cannot matter, orange/cyan = it did matter and this is where the shadow interlaces. 120 StateBackup restores VS constant buffers WITHOUT reinstating the engine's per-slot offsets (the pre-26265 behaviour) - engSbCbOffMax says whether that ever mattered (26266: it did not, engSbCbOffMax 0 across four sessions). 121/122/123 force the engine-view copy to read wide-enumeration candidate 1/2/3 instead of the latched byte-0 offset - RETIRED BY MEASUREMENT at 26267 (engWideBytes 240 proves the engine CB is a dedicated 240-byte resource, so engWideNMax 1 is exhaustive and there is nowhere to move to; these are no-ops and go in the next deletion build). 124 disables the 26268 AGREEMENT BOUND - the engine-view path keeps its structural gates but stops refusing a basis that disagrees with the historic transform by more than a quarter screen; this is the A/B for the first-person weapon-fire artifact, and engVerRotMaxDeg says whether that bound had anything to catch. 125 PROVABLY CORRECT OR ABSENT: arms the engine view like 116 and suppresses the injection on frames where no candidate validates, so misregistered depth never enters the engine's volume buffer - the stencil artifact becomes impossible rather than smaller, at the cost of no stencil shadow on those frames (engArmInjFrames vs flushes is the price, and it was 
 // 825/825 in third person). 129/130/131/132 THE 26277 READ-SIDE ARMS, ALL OPT-IN - 26278 PUT THE DEFAULT BACK TO 26273 because both were measured and both came back negative. 130 is the WALK: it starts at i.pos.xy and steps toward the reprojected texel, taking the first whose stored depth matches the window z our injection would have written. It regressed the default (noise around the stencil shadow, halo ghost back) and the way it failed closed the axis: the stopping step is decided per pixel, so the read offset varies per pixel over 0..19 px and a sharp stencil boundary sampled at a varying offset is ragged by construction. 131 is the SIGNED COUNT (255 read as -1 = lit): mode 110 painted no magenta and 131 changed nothing in first person, so there are no wrapped texels and the 26249 wrap risk, while real, does not occur here. 132 is both. 129 is an alias of the default, kept so old scripts validate. THE STANDING RESULT: raster read = the slice, reprojected read = the halo, anything chosen per pixel = noise - three arms, three artifacts, one cause, and no third read position exists because no texel holds both our footprint and this pixel shadow. svReprojPxMean 18.96 IS that gap and closing it is the only remaining fix. Read svVolCode for the arm the SHADER ran and svVolWitAbsent for frames the epoch ring missed. 133 THE SHARED VIEW, and it is 127 with one thing changed. 127 closed the slice - the first arm that ever did - and brought the lag back, because the sample it shares is the CLEAR-TIME view, so the box is drawn a frame late. But the two passes are ordered inside the frame: the colour injection draws at ~708 and the seam fires at ~2307, and the earlier one is both what you see and the one already on the freshest view. 133 has the seam take the COLOUR INJECTION s view instead of the boundary s: 127 s registration at mode 0 s freshness. View only, because 128 added the projection on top of 127 and moved nothing. Acceptance is the SCREEN plus svShareTakes == svInjects - NOT svReprojPxMean, which the 127 dump falsified as a bar by going UP while the slice went away; it is computed against a value the seam writes later in the frame. If svShareStale climbs the ordering is inverted and the arm must be flipped. 134 IS THAT FLIP, AND A CAPTURE FORCED IT. RenderDoc on frame 1748 measured both footprints by differencing depth across each draw: seam eid 13794, colour eid 39260 - THE SEAM RUNS FIRST, by 25000 events. 133 therefore had the seam adopting the PREVIOUS frame s colour view, and svShareStale could not see it because the frame seq bumps at the resolve between them. The same capture measured the footprints as identical in size and translated right by 18-34 px, with 33078 slice pixels sitting at background depth with stencil 0 - a genuine footprint hole, not a stencil misread. 134 has the COLOUR pass adopt the SEAM s view instead, so the visible box rasterises where the footprint actually is. Acceptance svSeamViewTakes == compositeInjections with Stale 0; the cost is the box drawn on a view sampled a fraction of a frame earlier, far less than 127 s full frame. 134 WORKED: svSeamViewTakes 906 == svInjects, Stale 0, AgeMax 1, and svReprojPxMean/Max/Over4 ALL COLLAPSED TO ZERO - the first lane in this campaign ever to do so - and the slice went with it. It also drifted the whole box, because 134 copies the ENTIRE view matrix including the translation row, and kh_adopt_frame_view says exactly why that is wrong: the published translation alternates between this frame s and the next frame s camera, a positional dither the eye can see, and at camStepMaxM 2.6 it moves the box metres. 135 IS THE FIX: adopt the seam s 3x3 BASIS only and rebuild the translation row from this pass s own camera through that basis, in double - the same discipline kh_adopt_frame_view uses. The capture already said rotation was the whole error: the two footprints were the same SIZE, shifted sideways 18-34 px with a vertical component of -2 to 0, which is yaw and not camera motion. Acceptance svSeamRotTakes == svSeamViewTakes with svReprojPxMean still 0 and no drift. 142 THE CLEAN SHARE (26291) - 134 with the seam's own adoption stood down, so the value the colour pass copies is the seam-time cycle_pv latch verbatim: continuity-gated, free of the live republication overlay, engine-frame-synchronous. The triangulation that forced it: 127 and 134 closed the slice by sharing a VALUE; 137 shared only a variable name and the slice survived - so two reads of the latch did not yield one transform, and the per-frame lanes seamPvStamp/compPvStamp (the latch write serial each pass consumed) plus seamCamDxM (metres between the two passes' cameras, now computed EVERY mode) settle where the value moved. Acceptance: svSeamViewTakes == compositeInjections with Stale 0 AND svSeamNoAdopt tracking svInjects (both halves engaged, in writing), per-frame reprojPx ~0 in dumpRenderTrace, slice gone on screen, box neither dithering (134's failure) nor lagging beyond 127's bound; the named cost is the close-range look-flick clip the adoption exists for. FIELD 26291: 142 measured reprojPxMean AND Max 0.0 with full engagement and the whole box lagging with the camera - registration proven, freshness cost confirmed, retired as a candidate and kept as the A/B; the same round convicted the mechanism outright (stamps equal on every frame, seamCamDxM == camStepM at corr 1.000, reprojPx corr .99/.94): the seam runs BEFORE the frame's re-latch, so its 
 // translation rebuild anchors one accepted latch step behind the colour pass, translation-only, both artifacts. 143 IS THE FIX SHAPE THAT LEAVES THE AXIS (26292): the seam re-fetches the live bridge at its own instant and rebuilds the translation row from THAT camera through the already-adopted basis - the sim publishes the upcoming clear's camera ~550x per flush before the seam runs, so the footprint moves to where the colour box will rasterise while the VISIBLE box stays byte-identical to mode 0: no lag, no dither, nothing shared. Known risk is publication alternation (the fetch returning the old camera on some frames), and it is a reading now: seamLiveDxM is the applied correction (expect ~camStepM), seamCamDxM the residual (expect ~0; bimodal 0|camStep = alternation, and the next step is latch extrapolation). Acceptance: svLiveTrnTakes == svInjects with Miss/Guard ~0, seamCamDxM mean collapsing toward 0 per frame, reprojPx px-scale, slice gone, box exactly as mode 0, first-person breathing gone. FIELD 26292: 143 MEASURED AND PROMOTED TO DEFAULT - seamCamDxM 0.002 m mean (was == camStepM at corr 1.000), reprojPx max 5.1 (was 268), slice gone, box clean in third person; 143 remains accepted as an alias of the default and 145 is the REVERT (latch-rebuilt seam translation) kept for forensics. THE FP BREATHING SURVIVED 143 AND THE TRACE NAMED THE THIRD AXIS: injNear ramps 0.070-0.361 (delta mean 0.0218, max 0.601 in one frame, moving 231 of 511 frames) with injNear == liveNearInj == slotNearInj frame-exact, while the seam's depth pair is one clear old (cycle_pv base, sniff harvested pre-clear) - depth-domain misregistration reprojPx cannot see, breathing the count band on every near ramp (weapon raise/ADS/lean = random times, worst while shooting; third person static = invisible). 144 IS THE FIX SHAPE: the seam takes m22/m32 from the SAME live fetch its translation rides, guarded by the colour's own near-class + far-ceiling bars, superseding the sniff - one near for both passes, frame-exact. Read seamNear (NEW per-frame lane, the seam's committed near - injNear's missing twin) against injNear through a ramp, plus seamProjSrc (0 latch 1 sniff 2 live). Acceptance: svLivePrjTakes == svInjects with Ref ~0, seamNear tracking injNear, FP breathing gone, third person unchanged. If breathing survives WITH seamNear == injNear, the volume pass runs a different depth window and the sniffer gets re-aimed next - a reading either way. FIELD 26293 (capture4): 144 measured and PROMOTED TO DEFAULT - seamNear tracks injNear through ramps to 0.81 on live-take frames and the operator reports much better overall; 144 stays accepted as an alias, 146 is the DEPTH-PAIR REVERT (sniff/latch pair). THE DOWN-ANGLE FP RESIDUAL WAS THE CLASS FLOOR: svLivePrjRef 172, with 107 dumped frames falling to the stale sniff at |seamNear - injNear| up to 0.52 exactly when the engine dives the near plane looking down - the colour's scalar swap commits the live pair UNGATED, so the floor only ever de-registered the passes; it is dropped from the take (positivity + far ceiling remain, 26294). THE MOTION BANDING IS THE OPEN NUMBER: reprojPx spikes ~300-583 px on high-camStep frames while seamCamDxM reads ~0.002 on the same rows - either the live fetch ALTERNATES publications (a real one-step footprint lag on fast frames, the vsync-like vertical banding) or one gauge is incoherent. primeCamDxM (NEW per-frame lane: |colour rebase cam - seam prime cam|, computed from reprojPx's own inputs) and seamRuns (NEW: seam executions per row) split it in one dump: spikes with primeCamDxM ~camStepM = alternation is real and 147 is the fix; spikes with primeCamDxM ~0 = the gauge lies and gets fixed instead. 147 THE STEP COMPLETION (opt-in): when the fetched camera moved < 25%% of the last latch step while the step is real (0.01..jump bound), the fetch returned the OLD publication - complete the step deterministically from the latch trajectory instead. svTrnExtrap counts completions = the measured alternation rate; acceptance is the banding gone under 147 with primeCamDxM spikes collapsed and no new drift. FIELD 26294 (stats6/stats7): 147 RETIRED - svTrnExtrap 31/596 were deceleration false positives and each overshot a step (the slice returned); alternation ACQUITTED - primeCamDxM 0.000-0.002 on every high-camStep reprojPx spike, so the px spikes are close-range gauge hypersensitivity and primeCamDxM is the honest ruler. THE CORRUPTION CONVICTED (26295): near gap >0.01 on 138/510 mode-0 frames max 0.700, seamNear 0.010 under src 2, ser 3556 live 0.487 vs committed 0.136 - mid-frame bridge publications carry OTHER WINDOWS' projections and the ungated take fed them into the footprint's depth encode, corrupting stencil counts for everything the buffer serves (the engine-shadow flicker, corner cast-through, residual scaling). DEFAULT NOW: the seam encodes with the COLOUR'S COMMITTED PAIR (g_inj_enc_*, fresh <250ms), upgraded to the live pair only on 40% agreement (seamProjSrc 3 = committed, 2 = live-agreeing); plus a TRAJECTORY BOUND on the translation take - |live-latch| beyond max(0.30m, 3x previous latch step) is a foreign publication (ser 3642: 2.593m on a stationary frame = the one-frame full-screen flicker) and the latch stands, counted in svLiveTrnBound. Acceptance: seamNear tracks injNear (no 0.01/0.70 flaps), svPairComm+svPairLive == svInjects after warmup, engine stencil steady, corner cast-through and scaling gone, slice still closed. FIELD 26295 (capture6): near and translation both PROVEN SOLVED - seamNear[k] == injNear[k+1] verbatim (frame-exact under the row bookkeeping, gap max 0.088, the foreign 10.0 flaps gone) and primeCamDxM 0.000-0.003 on every spike row - leaving ROTATION as the last axis: reprojPx bursts 273/318/300 px for 3-4 frames at fire onset with swingPx 285/210/104 on the same rows, recoil and yaw flicks being rotation impulses that any two-instant sampling disagrees on (the FP shooting scale + TP fast-rotation jitter, one mechanism). 26296 FOLDS MODE 135 INTO THE DEFAULT: the colour pass copies the seam's published rotation basis and rebuilds translation from its own camera (cameras agree to mm); 148 is the ROTATION REVERT, 135 an alias of the default, 134/142/136 unchanged as arms; compSrc 4 now means seam-influenced and reads on nearly every frame. Acceptance: svSeamRotTakes ~ svInjects, fire-onset reprojPx bursts collapse to px-scale while swingPx keeps reporting the impulses, FP shooting scale and TP rotation jitter gone, slice and look-down still closed. FIELD 26296 (capture7): the seam-colour axis is CLOSED IN WRITING - svSeamRotTakes == svInjects, reprojPx mean 0.94 px p95 1.8, the fire bursts gone from the gauge - and the scaling survived, so the residual misregistration is 
@@ -2243,6 +2278,37 @@ static std::atomic<bool> g_stats_armed{ false };
 //  152-155 THE 26304 SET (dump123 convictions; full ledgers at the arms). dump123 decomposed the 99 wrong-encode fire frames and OVERTURNED the 26302 reading: the live bridge was NOT mostly refused for foreign fetches - the arbitration was refusing and mispredicting TRUTH. (1) TWO PREDICTOR-FREEZE RUNS (ser 650-675, 706-711): the 26303 spike guard deadlocked - commits pulsing more than 2x above a stale base were skipped forever, 26 straight frames encoding 0.116 against a 0.30 truth. (2) SLOPE ACROSS SQUARE-WAVE EDGES measured net 3.4x WORSE than a flat hold (err sum 8.965 vs 2.600, worse on 92 rows): undershooting to the 0.5x clamp after down edges (ser 610/617/625 encoded 0.035 where the committed already EQUALLED the needed 0.070), overshooting after up edges (ser 614). (3) CORRIDOR-FLOOR REFUSALS: 4/4 were the world pair landing back on the session baseline 0.070 off a pulse/ramp top (needed ratios 0.13-0.50; 0.070/0.141 = 0.4965 sits a hair under the 0.5x floor) - the two largest single-frame gaps on record (0.463) were exactly these. DEFAULTS 26304: (a) predictor re-bases after two consecutive out-of-band commits that agree with each other (svPairRebase), slope only on smooth ramps (last two commits within 25 percent; measured ramps run ~5 percent/frame, pulse edges 40-400 percent), base freshness 500 ms, state file-scope and reset at teardown; (b) RETURN-TO-BASELINE ACCEPTANCE: a live pair outside the corridor is accepted when it matches the stable committed baseline within 10 percent (two consecutive commits within 2 percent define the baseline; the foreign down class 0.010 is 7x below the baseline itself; svPairBase, seamProjSrc 5); (c) CORRIDOR REFEREE GUARD: when the raw committed reference disagrees with the spike-guarded base by more than 2x (the ser-1772 muzzle-spike class) the base referees (svPairRefGuard). 153 reverts (a) to the 26303 predictor, 154 turns (b) off, 155 turns (c) off. 152 = ENCODE THE BOUND-CB CENSUS PAIR (handoff 3.1): a POINTER-KEYED census records every projection-shaped upload per buffer object (identity separates windows no value can); at the seam the bound VS/PS b0-b3 are looked up and the freshest hit is read into boundPairNear / boundPairAgeMs / censusMatch EVERY armed frame, instrument-first - the lanes decide whether the exact volume-pass pair is readable at the seam instant BEFORE anyone trusts it - and under 152 the seam encodes that pair (seamProjSrc 6, svCbcEncodes). New refusal lanes: seamLiveNear (the raw live-bridge near at the seam fetch - the lane whose absence forced dump123 to proxy through liveNearInj) and seamPairWhy (0 live-corr 1 live-base 2 insane 3 corridor 4 no-ref 5 no sample). Protocol: dump mode 0 look-down fire (expect svPairBase and svPairRebase engaged, svPairPred collapsed, row-shifted mismatches near 0, no frozen seamNear runs), then read boundPairNear against injNear[k+1] on the surviving edge frames - tracking = fold 152 next build and the campaign closes at exact. NOTE 26301 sniff-first postmortem stands: sniffNear[k] == injNear[k] on 132/132 in dump123 - the value the seam needs is not uploaded yet at the seam instant, so re-aiming the sniffer (the old 3.2 plan) is structurally dead; the live bridge and the bound census are the only fresh-phase feeds.
 //  FIELD 26304 (dump1): THE FIXES ENGAGED AND THE INSTRUMENT CLOSED THE CAMPAIGN. Arbitration round: wrong-encode rows 99 to 40, predictor err sum 8.965 to 4.302 (now ~= the flat hold), frozen runs capped at 2 frames by the rebase escape (svPairRebase 13), svPairBase 11 with 5/5 fresh on edges, svPairRefGuard 16; the 40 residuals were genuinely-foreign seam-instant fetches (seamLiveNear 0.010/10.0 in the lane, at last directly visible), rebase lag, and a measured baseline-tracker limitation - the 2 percent stability latch follows ramp PLATEAUS during slow glides, so big returns off a glide top miss the match (ser 730/767, the 0.628 gaps). CENSUS ROUND, THE VERDICT: boundPairNear == injNear[k+1] on 199/199 moving frames AND on 40/40 of the rows every arbitration tier still got wrong, disagreements 0/511 session-wide, age 0-1 ms, one stable identity in VS b2 all session - the engine uploads frame k+1 projection into the bound b2 BEFORE the pre-clear seam runs, and buffer identity reads it where value arbitration structurally cannot. 26305 FOLDS THE BOUND-CENSUS ENCODE TO DEFAULT (seamProjSrc 6, svCbcEncodes ~ svInjects is engagement; the census now runs whenever the live-shadow feature does - measured cost ~1500 probed uploads/frame at ~30 compares each). The 26302-26304 live/baseline/predictor chain stays intact beneath as the census-miss fallback. 156 = REVERT to 26304 live-first (152 stays as an alias of the default). ACCEPTANCE (the closing one): seamNear[k] == injNear[k+1] on moving frames outright, seamProjSrc 6 dominant, FP pulsating scale gone shooting and not, slice/look-down/TP holding.
 //  FIELD 26305 (dump2 + screenshot): THE PROJECTION AXIS IS CLOSED (seamProjSrc 6 on every inject, svCbcEncodes == svInjects == 2232, row-shifted mismatches 0) and the survivor moved axes: on rigorous rotational+positional motion a cascade ground shadow paints THROUGH the box along its edges - every one of the 19 reprojPx spikes (145-2133 px) is the seam TRAJECTORY BOUND refusing a REAL move (svLiveTrnBound 28, seamCamDxM == camStepM on exactly those frames): the bound referenced the latch step from the PREVIOUS seam run (two frames old) and 3x of a two-frame-old step loses to every measured acceleration onset (0.095->0.349 = 3.7x, 0.123->0.405 = 3.3x), so the footprint rode a one-frame-stale camera and the stencil darkening landed across the box edge. 26306 REPAIRS THE BOUND ON THREE AXES: (a) the velocity reference is max(previous, CURRENT-run latch step); (b) 3x -> 4x (covers every legit onset on record; the ser-3642 foreign class - 2.593 m off a STATIONARY latch - is still refused by the 0.30 m floor since stationary means both references ~0); (c) CONFIRMATION ESCAPE, the predictor-rebase pattern on the translation axis: a refused live camera is remembered and taken next run if the new live camera agrees with it within max(0.5 m, 50 percent) - a real relocation confirms itself in one publication, a foreign one-frame flicker never does. svLiveTrnWide counts takes the old bound would have refused; svLiveTrnRebase counts escapes; seamTrnEvent is the per-frame lane (0 none 1 refused 2 wide-take 3 escape). 157 reverts the whole bound block to 26305. AND THE CENSUS LEARNS THE VIEW, INSTRUMENT-FIRST (the projection playbook, round 2): the recorder probes the 16-float windows adjacent to the validated projection for a view signature (near-orthonormal basis rows, 0-0-0-1 column, finite translation, both layouts) and stores the extracted CAMERA per buffer identity; at the seam, boundCamDxM = |census camera - seam draw camera| and boundCamLiveDxM = |census camera - live fetch camera| are read every armed frame with boundCamOk gating. NO ENCODE PATH TOUCHES IT in 26306. THE FOLD VERDICT FOR 26307: boundCamDxM ~ camStepM on exactly the seamTrnEvent-1 frames while boundCamLiveDxM ~ 0 = the engine own upcoming camera is readable at the seam and becomes the translation authority, retiring the bound outright - the 199/199 proof pattern on the translation axis. boundCamOk 0 everywhere = the view does not ride adjacent to the projection and the repaired bound is the final form. ACCEPTANCE 26306: the through-the-box stripe gone on rigorous motion (svLiveTrnWide + svLiveTrnRebase absorbing the former refusals, reprojPx spikes collapsed), FP still resolved, slice/look-down/TP holding. FIELD 26306 (dump10): ALL ACCEPTED AND THE CAMPAIGN IS CLOSED - projection exact (svCbcEncodes == svInjects == 2217, mismatches 0, seamProjSrc 6 throughout), translation clean (0 reprojPx spikes, svLiveTrnWide 33, svLiveTrnBound 3 true refusals), view probe measured NEGATIVE (svCbcCamRecs 0: no view rides adjacent to the projection) and RETIRED at 26307 - the repaired bound is the final form; probe machinery and lanes stay compiled for re-arming, per the counters-never-die rule. || 26308-26313 (full records: RENDER_HANDOFF_CAMPAIGN_43.md; in-code ledgers authoritative): 138/139/140 = footprint grow 2/4/8 pct (svGrowDraws/Last). 158 = absolute-translation revert (26309). 159 = adopted-camera-anchor revert (26310). 160 = latch-FOV revert (26311). 161 = unrefereed-census revert (26311). 162 = record-all-classes census revert (26312). 116/118/120/125 inert since 26308.
+//  || 26694 THE LATERAL CLIP WAS A DISC GUARDING A SQUARE, AND THE CORNERS WERE WHERE THE CASTERS WENT MISSING; ADMISSION IS NOW THE ORTHO'S OWN NORM (KH_BAND_ADMIT_NORM default, mode 447 restores the radial test verbatim; C++ only - the shader does not move and this build costs no compile). THE FIELD READ THAT NAMED IT: dump3 at the fade pose, one census, three numbers. sunFarAdmit 7, sunOutAdmit 1, and the faded mesh's caster (index 2) refused by the lateral test with sunOutLatM2 = +0.709 - a POSITIVE margin, which the 26693 census pre-registration says convicts the geometry argument itself, not another test. CORRECTION OWED (rule 1.16, mine): 26693's ledger argued 'none of the three admission tests can refuse a caster whose shadow lands inside the window - its centre sits within one enclosing radius of its own shadow'. That proof bounded the caster's RADIAL offset from the sun axis by r2 + er and concluded safety for a window that is not a disc: the band footprint is a SQUARE, +-r2 along r3 and u3, and its corners reach r2 * sqrt(2) - 46 m radially at the outer band - so a caster at radial 34.6-46 m is refused by the disc while its silhouette lands squarely inside the footprint. Caster 2 sat at radial 35.3 m. The 26454 admission comment carries the same premise in its own words ('perpendicular offset from the sun axis') and is annotated rather than rewritten. This is also the last clause of the report decoded: 'seemingly random' was the corner directions of the sun-plane square sweeping with the camera. THE CHANGE, exact and minimal: khsh_lat becomes max(|dx . r3|, |dx . u3|) - the ortho's own per-axis norm, two dots, no sqrt - tested against the same khsh_r2 + khsh_er. The basis depends only on the sun, so the test is invariant under camera rotation; er (the enclosing radius) over-bounds the per-axis extent exactly as it over-bounded the radial one, so the test stays conservative per axis. Mode 447 recomputes the 26454 radial form bit-for-bit (the sphere arm 326 is untouched above it). The census lanes sunOut/FarLatM* now publish the PER-AXIS margin - same sign convention, negative = inside the clip - noted here and at the lanes (a lane's meaning may move with its ledger note; modes may not - rule 1.7 governs numbers, 1.20 governs lanes). CONSEQUENCE PRICED: bands admit the corner casters they always owed - sets grow by exactly the corner population (at the dump3 pose outer goes 1 to 3), khsh_fwd may stretch when a corner caster sits up-sun (watched by sunOutReach/FwdHeldM; the 26692 ramp floor made deep windows safe for the pf, and every bias term is D-invariant since 26438/26490), and the instance path is unchanged (cap headroom read 3 of hundreds). The KH_ABSENCE_WITNESS stays as the net for any OTHER completeness hole - a band that is genuinely complete never consults it on shadowed texels, so its costs shrink to the rarely-engaged: with the corner casters admitted, their contact strips close because the serving band now holds them and the witness is never asked. PRE-REGISTERED ACCEPTANCE: (a) at the dump3 pose sunOutAdmit reads 7 and sunOutCasters 3 with sunOutFitWhy 0; (b) the ~0.3-0.8 m contact seam at that pose's mesh base closes at mode 0 on both receiver types; (c) 446 (witness off) at that pose no longer reproduces the 50 m fade - the band holds the caster, so removing the net changes nothing, which proves both layers independently healthy; (d) 447 brings the seam and (under 446) the fade back; (e) hero's admitted set at the vest pose is unchanged (the vest was never in a corner) and the halo/dither poses read as at 26693. FALSIFICATION: any pose where sunOutAdmit gains a bit while that caster's shadow visibly cannot reach the window convicts er-per-axis as too loose in a way that matters (it cannot - it is the same bound - so this reading instead convicts the swizzle or the basis, and 447 plus the census localises it); a reach or fwd lane climbing without a corner caster up-sun convicts the fwd accounting, not this test. NUMBER HYGIENE: mode 447 minted (C++ arm, no lighting0.y code - the shader is not involved). FREE NOW: debug modes 448+, lighting0.y codes 77+, visual codes 34+, dbgCtl.w 13+.
+//  || 26693 A BAND CERTIFIED ABSENCE FROM A MAP THAT NEVER HELD THE CASTER, ON BOTH CHAINS, AND THE UNION NOW WITNESSES EVERY SUCH CLAIM; THE 26691 HOLD STANDS DOWN FOR ITS EDGE NOISE (KH_ABSENCE_WITNESS default, mode 446 / lighting0.y 76 restores the 26629 + 26538 forms; the KH_TIER_FADE_DIR hold is now OPT-IN under mode 445 / code 75 and 442 is an accepted ALIAS of the default - rule 1.10, rule 1.7; KH_BAND_ADMIT_CENSUS lanes, C++. One shader edit - one helper in segment 12, four cast-chain gates, four self-chain certification lines, the blend helper's default - so this build costs the cold compile once). THE FIELD, at the 50 m pose, read in order: 244 (outer band down) KILLS the fade on both chains; 269 paints the receiver CYAN through the fade; 395 paints the faded region as the lit-surface GREEN darkened by a partial verdict - outer certifies, far serves; 257 turns the fade into a CLIFF; 396 (a clear texel no longer certifies) KILLS the fade on our meshes and leaves it on the terrain; dump2 reads sunOutCasters 1 against sunLocalCount 3 and sunFarCasters 3, every window at its floor, s 1, range 200. THE MECHANISM, one root and two rules. The outer map's texel at those receivers is CLEAR - a caster whose shadow lands inside outer's window is not in outer's map (the 396 read is the proof; 244 is the conviction; the dump is the count). SELF CHAIN: outer's verdict is lit and falls through (26507), far has the shadow, and 26629 KH_CERT_CLEAR lets the clear texel certify - 'a CLEAR texel is evidence of ABSENCE: the tier rasterized its whole admitted caster set and nothing landed on this ray' - so far's shadow is zeroed by res *= 1 - khla_w across outer's interior and returns over the band as KhJw falls to 0: fade in walking away, fade out walking in, a cliff under 257 (KhJw pinned to 1), gone under 244 (no certifier). CAST CHAIN: no jurisdiction, but 26538 made a band's LIT verdict AUTHORITATIVE - 'a valid band that says LIT has seen every occluder on that ray' - so the same clear texel returns lit across outer's interior and mode 0's lerp into far over the band is the same fade on the terrain, which 396 cannot touch. Both rules assume the band's map is COMPLETE, and 26632 named that premise in writing: 'a band certifies no occluder in my guard from a map that never contained one it had refused'. It got no arm. WHAT IS NOT CLAIMED: which of admission or rasterisation drops the caster. Read statically, none of the three admission tests can refuse a caster whose shadow lands inside the window - its centre sits within one enclosing radius of its own shadow and both windows dwarf any shadow this size can throw - so either the refused pair is innocent and the admitted caster is not rasterised where it should be, or that argument has a hole. KH_BAND_ADMIT_CENSUS decides it on the next dump (below). THE REPAIR DOES NOT DEPEND ON THE ANSWER: it gates on a per-ray fact rather than on admission being right. KH_ABSENCE_WITNESS: KhUnionClear(p) - the UNION map (t11; every caster the collection admits, sunDepthCasters == sunLocalCount per pass) projected at the point, true iff the union holds nothing more than max(3 x bias, 3 texels) in front along the sun, false outside the union's window or with the union stale. SELF CHAIN: every tier's khN_cok now requires the witness in front of the 26627/26629 evidence test - a band certifies absence only where the map that holds everything agrees there is nothing to find. CAST CHAIN: every tier's lit verdict is authoritative only with the witness; without it the lit verdict FALLS THROUGH to the next tier, the 26506 form, which is exactly right for a map that may be missing the occluder. WHY NOT 'complete = admitted == union count': hero admits a subset by design (a +-2 m window in a three-caster scene is always 'incomplete') and that gate would switch off the 26589/26590 halo and dither protections in every multi-caster scene. WHY THE HALO PROTECTIONS SURVIVE THE WITNESS: on the vest's lit surface the union texel holds the vest's own front face at the receiver's depth - inside the margin - so the witness passes and certification is unchanged; the witness fails only where the union sees a genuine occluder metres in front, which is precisely the missing-caster case and never the mush case. DISCLOSED COSTS: (a) within the margin of a MISSING caster's contact (~0.33 m along the sun, ~0.8 m on the ground at 23 deg) the witness still passes and that strip of shadow is still lost - the admission or draw repair removes it; (b) cast chain: within about one union texel of every shadow edge the witness reads the caster in front, the fine tier's lit verdict falls through, and far's softer edge serves that ~0.1-0.2 m skirt - the 26538 class at a fraction of its 522 mm; (c) one Load per tier per fragment on lit fragments, four worst case. KH_TIER_FADE_DIR STANDS DOWN (rule 1.10): the 26691 hold picked its curve per pixel by which verdict was darker, and along a penumbra the fine and coarse verdicts disagree in BOTH directions, so adjacent pixels took different weights - the operator's 'shadow edges become noisy on entering a band'. Inert on both artifacts it was built for, with a named cost: default is the symmetric 26618 curve again, byte-identical to 26690 at every blend site; the hold is opt-in under 445 / code 75; 442 (which selected the symmetric curve) now selects the default and is kept whitelisted as a bit-exact alias, the 26534 mode-64 precedent. KH_BAND_ADMIT_CENSUS (C++, pure gauge): per band, sunHero/Mid/Out/FarAdmit is the bitmask of union-caster indices the band admitted (first 32); sunOutLatM0..3 is each caster's lateral margin lat - (r2 + er) in metres (negative = passes the ortho clip) and sunOutDsM0..3 its up-sun distance; sunFarLatM0..3 the same at far. The next dump at the pose, with the faded mesh named by draw-list index, reads directly: a refused index with a negative margin convicts a test other than the lateral one; a refused index with a positive margin convicts the geometry argument above; an admitted index convicts the draw. PRE-REGISTERED ACCEPTANCE: (a) at the 50 m pose the shadow holds across outer's interior and its band on BOTH chains at mode 0, and 446 brings the fade back on both; (b) 396 is now visually identical to 0 at that pose (the clear-texel path is already witnessed); (c) the vest-pose halo and whole-face dither stay dead at mode 0 (interiors: the witness passes on self surfaces); (d) the 2-8 m hand-offs unchanged from 26692; (e) the band-edge noise is gone at mode 0 and returns alone under 445. FALSIFICATION: a halo or dither returning on a lit self surface at mode 0 = the witness margin is too tight against the union's texel slope on grazing receivers - widen it in texels, never remove it; a shadow edge that reads visibly doubled on terrain = cost (b) is larger than priced and the cast gate takes a lateral guard. NUMBER HYGIENE: modes 445/446 + lighting0.y codes 75/76 minted; 442 kept as an alias; lanes sunHero/Mid/Out/FarAdmit, sunOutLatM0..3, sunOutDsM0..3, sunFarLatM0..3 (last-fit values). FREE NOW: debug modes 447+, lighting0.y codes 77+, visual codes 34+, dbgCtl.w 13+.
+//  || 26692 THE FADE WAS NEVER THE SEAM - IT IS THE MOMENT FILTER'S PRECISION FLOOR STANDING IN FOR SIGMA, AND THAT FLOOR IS NOT D-INVARIANT (KH_PF_RAMP_FLOOR default, mode 444 / lighting0.y 74 restores the 26585 floor form bit-exactly; one shader edit at the three pf sites, hero/mid/outer twins - rule 1.5 - so this build costs the cold compile once). THE FIELD READ THAT DECIDED IT, three shots at one pose on 26691: mode 257 (no blend at all) IDENTICAL to mode 0, mode 443 (partner alone in the band) the same fade plus a step at the band's inner edge, and then mode 357 (moments off, classic taps everywhere) KILLS IT outright, taking the smooth minification transition with it. CORRECTION OWED TO 26691 (rule 1.16): its fact (1) - 'the partner tier is lighter, nothing else can produce the dip' - is FALSIFIED by 257 == 0; the dip does not live in the lerp, it lives in each tier's own verdict, and 443 merely displayed the partner's copy. KH_TIER_FADE_DIR is INERT on this report; it stays as a default on its own merits (the fine tier is the authority inside its own window, its curves are continuous, and 442 is its arm) and claims nothing about this artifact. Facts (2) and (3) stand and were confirmed by the 443 shot: the step ran perpendicular to the sun azimuth exactly where the hero band's inner edge sits with the sun ahead. THE MECHANISM, read from 26585's own arithmetic: s2 = max(var, max(2.5e-7, W^2)). W is the footprint ramp - ft texels times the tier's texel, divided by d2v - a WORLD quantity in normalised units, D-invariant. 2.5e-7 is the fp32 cancellation floor of m2 - mu^2 - a NORMALISED quantity, calibrated at the measured mu band, and its world width is sqrt(2.5e-7) * d2v = 5e-4 * d2v: 1.3 cm at hero's calibrated 26 m window, 31 cm at the 626 m reach window the 26585 capture was taken on, ~0.8 m at the ~1618 m hero/mid windows on the 26633 watch list. At ordinary minification W^2 is far below 2.5e-7 (hero ft 8: W = 8 mm / d2v), so the precision floor IS sigma wherever the pf engages, and Chebyshev with a metre-scale sigma reads any receiver within that width of its occluder as partially lit: vv = s2 / (s2 + vd^2) = 0.5 at vd = sigma, pfo 0.83; 0.74 at vd = 0.6 sigma, pfo 0.44. That is a UNIFORM lightening of a shadow interior wherever the occluder is within sigma of the receiver - a vest 20-50 cm above a ground plane at a stretched window, worst at the contact, present far from it - which is the 443 strip clause for clause. The fade with DISTANCE is kh_pw = smoothstep(1, 2, ft) engaging as the tier's texel minifies (hero at 2-4 m, mid at 8-16 m), the snap-back is the next tier serving un-minified, and 'random' is the reach latch moving d2v under the floor. 26585's acceptance (c) checked the interior at a 2.5 m gap (vd 0.004 at 626 m: vis ~0, correct) and never at the decimetre gaps where the floor lives; its own text says the unmeasurable case 'DEGENERATES INTO the 26576 ramp', which the max() does not do - it degenerates into the precision floor. THE REPAIR implements the stated intent and nothing else: s2 = (var >= 2.5e-7) ? max(var, W^2) : W^2. Variance at or above the measurability bar is used as before, with the ramp under it; variance below the bar is UNMEASURABLE and the ramp alone is sigma - world-scaled, texel-scaled, so a deep window can no longer widen the compare. Interiors at the ramp read vv = W^2 / (W^2 + vd^2) with W = 8 mm at hero ft 8, 32 mm at mid: bleed only inside ~1.5 texel-footprints of the occluder, which is the penumbra the filter exists to draw. The measurable regime - silhouettes, the moire band, the halo the 26585 capture priced - is byte-identical, so the smooth transition the operator asked to keep is kept; the linstep(0.4, 1) bleed cut is unchanged. WHY NOT A BIGGER FLOOR OR A BLEED CONSTANT: the cancellation noise is real in normalised space and cannot be lowered; the error was letting it act as a width. WHY NOT THE WINDOW: the 1618 m windows are the 26633 banked tighten's business and still owe their own arm; this repair is correct at every window and does not wait on it. PRE-REGISTERED ACCEPTANCE: (a) the pose that read fade at 0 / step at 443 / clean at 357 now reads clean at mode 0 WITH the minification transition present (0 differs from 357 in the smoothing direction, 26585's clause (b) restated), and 444 brings the fade back alone; (b) sunHero/Mid/OutD2vM in the same dump price the floor - at d2v 26/98/386 the old sigma was 1.3/5/19 cm and the contact class was already in it at mid; at a stretched value the number IS the report; (c) the 26588 hole and the 26585 halo stay dead at mode 0 (interiors: s2 at the ramp is SMALLER than the old floor, so vis falls further, never rises); (d) 257 stays identical to 0. FALSIFICATION: acne or a returning moire in the minification band at mode 0 = the ramp alone is too narrow where variance sits just under the bar, and the next form is a measurability bar in the ramp's own units (k * W^2) rather than a return of the constant. NOT THIS BUILD'S, disclosed: the operator once saw the same look on ENGINE terrain and could not replicate it. The world cast (PSMaskCast -> SunShadowOcclusion) has no moment path and no camera-dependent term, so this repair cannot touch a terrain instance and 357 would not have either; if it recurs there the triad (257 / 443 / 0 at the pose, then 269) is the read and the author is elsewhere - handoff watch. NUMBER HYGIENE: mode 444 + lighting0.y code 74 minted (self chain only - the cast ladder never reads the pf). FREE NOW: debug modes 445+, lighting0.y codes 75+, visual codes 34+, dbgCtl.w 13+.
+//  || 26691 THE SEAM FADES A SHADOW INTO A PARTNER THAT DOES NOT HAVE IT, THE FADE NOW HOLDS THE FINE VERDICT THROUGH NINE TENTHS OF ITS WINDOW, THE PARTNER GETS A PAINT, AND THREE HANDOFF DEFECTS CLOSE (KH_TIER_FADE_DIR default, mode 442 / lighting0.y 72 reverts to the symmetric 26618 curve; KH_TIER_PARTNER_PAINT gauge, mode 443 / code 73; KH_CB_MIRROR_GAUGE lanes; PSOwner joins the prewarm batch; the 26684 session latches reset. ONE shader edit - one helper in g_cb_hlsl segment 12 and fifteen call-site renames - so this build costs the cold compile once; nothing else here moves shader source). THE REPORT (operator, three poses of one scene): a cast shadow on the world, and the same on our meshes, fades OUT and then back IN as the camera walks, at the tier hand-offs, worst where the occluder is closest to the receiver and not only there. READ FROM THE LADDER, three facts and one open question. (1) The hand-off is lerp(partner, fine, w) over the outer quarter of the fine window (26594/26618), and a lerp cannot dip below both ends - so inside the band the PARTNER tier is LIGHTER than the fine tier at those pixels; nothing else can produce the dip. (2) Every band window is anchored at the CAMERA in the SUN PLANE (khsh_ctr = cam_e), so on the ground its footprint is centred on the camera's own shadow point - h/tan(elev) down-sun, 3.7 m at 25 deg - stretched 1/sin(elev) along the azimuth and only +-2 m ACROSS it at hero; the ground under the operator's feet sits at hero's blend edge whenever the sun is ahead. A fixed shadow therefore leaves and re-enters the hero window on an ordinary walk, which is 'fades out then back in', 'both directions' and 'random where it appears' - the band sweeps, the shadow stands still. (3) With all four bands valid (the 26660 dump) the partner at 2-8 m is MID, and no term in mid's compare can lighten a thick occluder's contact shadow by the width on screen: bias is 2 texels (8 mm at range 200, 40 mm at the s=5 ceiling), the raster slope term is 1.0 texel x tan(incidence), the kernel is five taps at +-0.75 texel, admission is monotone in tier, the depth window is D-invariant for every bias term, and kh_sun_rebase_vp is algebraically exact. THE OPEN QUESTION is which partner is actually answering and why it is light, and this build does not guess (rule 1.3; six mechanisms died to screenshots on the 26656-26662 campaign): it ships the paint that shows the partner alone and the containment that removes the fade's own contribution. KH_TIER_FADE_DIR: KhTbBlend replaces the lerp at all fifteen carry sites (cast chain 6 - tiers 3/4/5, the two union rejections, the union resolve; self chain 9 - the same plus the contact carries; twins, rule 1.5). When the carried fine verdict is DARKER than the partner the weight is smoothstep(0, 0.28, w): 1.0 until the 26618 curve has spent 72 pct of the band (e = 0.90 at stock; w(0.90) = 1 - smoothstep(0.75, 0.98, 0.90) = 0.28), then to 0 at the window edge - a shadow the fine tier certifies holds through nine tenths of its window and fades over the last 16 cm at hero, 65 cm at mid, 2.6 m at outer (x2.65 at range 530). When the fine verdict is LIGHTER (the sharpness direction: the coarse skirt outside the fine edge) the weight is 26618's, unchanged, so the gradual look the operator asked for at 26594 stays where it was earned. CONTINUITY BY CONSTRUCTION: both curves are 1 inside e 0.75 and 0 at e 0.98, so the interiors are bit-exact and the window edge meets the outside's value; the two branches meet where fine == partner (a lerp of equals); the 26617 epsilon-crossing proof is untouched because a nearly-lit fine verdict against a coarse U sits in the unchanged branch, and KhJw is not touched. Codes 26/55/62 keep their meaning through it (72 pins the symmetric curve on top of any of them). DISCLOSED COST: the fade in the peter-pan direction is now a third of its 26618 width, so wherever the partner's INTERIOR is genuinely light the operator will see a shorter fade into the same wrong interior - which is the reading that convicts the partner and not the seam, and is why 442 exists. KH_TIER_PARTNER_PAINT (443 / code 73): KhTbBlend returns the partner alone inside every band, both chains and the world cast (the cast fill has its own code ladder and no dbgCtl - hence a code and not a visual). THE TRIAD, PRE-REGISTERED: at the pose, three screenshots - mode 257 (fine tier to its edge, hard step), 443 (partner alone in the band), 0. 257 dark to the edge and 443 LIGHT in the band = the partner is the author, and 269 (visual 21) names which tier; then 426 (bias 0.5 texel) against the world cast and 357 (classic taps, no moments) against the mesh - a moment-filter light bleed is the one camera-DISTANCE-dependent term in the self kernel (kh2_pw = smoothstep(1, 2, fwidth) engages exactly where hero's 1 mm texel minifies at 2-5 m and mid's 4 mm does not), a candidate for the on-mesh half of the report on its own. Read sunMid/Out/FarValid, sunLadderScale, sunMidTexM/BiasM and sunMidReach from the same dump. If 443 is DARK in the band where 0 fades, the partner HAS the shadow and the blend is reading something other than the partner - that falsifies (1) and the next build instruments the carry, not the maps. PRE-REGISTERED ACCEPTANCE for the default: at the three poses the shadow holds to within ~16 cm of the hero edge where it faded over ~50 cm; 442 brings the wide fade back alone; the 26617 far-tier line stays dead at mode 0; nothing moves on a lone mesh inside one window. KH_CB_MIRROR_GAUGE: D3DReflect on the PSMain blob at every ensure, CBObj/CBFrame declared sizes against KH_CBOBJ_BYTES/KH_CBFRAME_BYTES - cbMirrorObjB/FrameB/Refl/Bad lanes, kh_report_error on a mismatch; the hand-maintained 235/237 mirror gets its tripwire, no shader source moves, cached blobs carry RDEF so it arms on warm sessions too (cbMirrorRefl 1 = reflected, 2 = D3DReflect refused). HANDOFF CORRECTIONS (rule 1.11): post-26690 sect 2.1 said g_obj_vis / g_obj_vis_src / g_video_opt_keys(_done) clear in reset_session_state - nothing cleared them; they were process-scoped and objVisSrc could never return to 0 (watch 8.10's own reading rule). They clear there now. PSOwner was absent from the prewarm batch and compiled inline at the first post-gate ensure (a one-time parse of the static unit, ~50 ms cold); it is in the batch, which carries none of the 26644 hazard because the batch gate waits for every job. NUMBER HYGIENE: modes 442/443 + lighting0.y codes 72/73 minted; lanes cbMirrorObjB/cbMirrorFrameB/cbMirrorRefl/cbMirrorBad (session). FREE NOW: debug modes 444+, lighting0.y codes 74+, visual codes 34+, dbgCtl.w 13+.
+//  || 26690 THE CAMPAIGN CLOSES - OVERDRAW UNDERSTOOD AND NET-POSITIVE, THE RESIDUAL ADJUDICATED INHERENT (KH_CLOSURE_RECORD; record-only, the 26683 precedent - no behaviour, no mode, no lanes). THE A/B, pre-registered at 26689 and run by the operator with the camera parked on the stack: mode 438 (owner prepass OFF) is SLOWER than mode 0 - dump2-26688 under 438 read 12.5 ms per injection and injGpuMaxUs 151 ms on 42 objects against mode 0's lower figures at the same pose; the operator's frame rate agrees. The prepass's rejection buys more than its owner draw costs, so the 26684 design stands as the default. THE TWO CASES, named for the record: (a) MANY MESHES NEAR ONE ANOTHER, overlapping but not coincident - the genuine scenario - is covered twice over: on the early-Z path (injPsEarlyZ 46746 of 60582 draws) a rear mesh's hidden fragments fail the hardware depth test against the nearer mesh's written depth before the pixel shader runs, front-to-back order (26652) having put the nearer draw first; on the arb late-Z path (injPsArb 13836) the owner test at the shader head rejects them before the shadow tiers and PBR. (b) BIT-COINCIDENT COPIES - identical geometry at the identical pose - is the one case that defeats both (equal depth passes LESS_EQUAL everywhere), the case the id tie-break exists for, and the case whose residual is inherent: every copy must still be rasterized at 4K x 8 MSAA twice (owner + colour) to learn that it loses, ~2.5 ms per screen-filling copy, and no shader-side rejection removes raster. OPERATOR ADJUDICATION: no genuine scenario spawns polygons at exactly the same position; (b) is a stress case and its residual is accepted; (a) is the scenario that matters and mode 0 optimises it. NOT BUILT, and why: a hoisted single-pass owner map (fill the whole stack, then the colour loop tests against the complete map) would remove the per-object OM/DSS/blend/SRV ping-pong the interleaved draw pays - 2 rebinds per object - but it changes the tie semantics (the map is complete before any colour draw) and buys its saving only on case (b). New machinery in the injection loop for a case with no scenario is the 26675 disposition. RE-OPEN CONDITIONS: a genuine scene where many overlapping meshes measure slower under mode 0 than under 438 at a parked camera (the prepass losing on real content); or any hole, rim or one-texel noise along an intersection line of two overlapping meshes (the 26688 derivative-helper cost - 438 isolates). BOARD AT CLOSE: texture cache - closed, serving (26684; 439 reverts); object view-distance cut - closed, armed at objectVisibility (26684/26687; 437 reverts); cold-table cascade absence - closed, field-confirmed (26689; 440 reverts); overdraw - closed as understood and net-positive, residual adjudicated inherent (this entry; 438 reverts, 441 paints). STANDING OPEN, carried forward: handoff 8.5 on TRUE data now (a ~77/23 early-Z/arb split - the late-Z share is real and priced by injPsArb); 8.1-8.4 untouched. FREE NOW: debug modes 442+, lighting0.y codes 72+, visual codes 34+, dbgCtl.w 13+.
+//  || 26689 THE COLD-TABLE CASCADE ABSENCE CLOSES ON FIELD CONFIRMATION (KH_CLOSURE_RECORD; record-only, the 26683 precedent - no behaviour, no mode, no lanes). dump1-26688, a 370 s cold-compile session with the camera parked from spawn: liveWipeDoor5 1 (the cold-hold release fired at shader completion), liveWipeDoor4 1 at 388.5 s, both DEFERRED (liveWipeDeferrals 2, liveWipePrunes 0 - no re-render yet), the entries committed at 6.6 s survived both doors, and recvTermSkips read 0 across 524 injections - the receive term served every frame where 26687's same session shape read it skipping every one. The chain for the record: 26682 (sun-jump wipe spared) -> 26686 gauge names door 4 -> 26687 defers door 4, its prune lands at the first re-render -> 26688 per-door counts name door 5 as the cold-hold release (the operator's recompile-session correlation, confirmed) and extend the deferral to doors 3/4/5. Doors 1 (relock) and 2 (wrong-era) stay immediate and unconvicted; 440 restores all three. RE-OPEN CONDITIONS: liveWipeDoor1/2 counting in a session that then reads recvTermSkips climbing on a parked camera (the same absence through an undeferred door); or drifting / camera-tracking shadows after a lock that persist through camera motion (the deferral's own disclosed class - 440 isolates). OVERDRAW STANDS OPEN with its mechanism moved: the owner map is proven (mode 441 paints the coincident stack, which is the only rejection the screen can show; dump2-26688 mean 0.78 ms per draw against 2.06 ms for a lone fully-shaded mesh), and the residual - injGpuMaxUs 80.8 ms on 32 fullscreen copies, ~2.5 ms each - is the raster/ROP cost of two 4K x 8 MSAA surface draws per copy, which no shader-side rejection removes. NEXT MEASUREMENT, pre-registered before any change: camera parked at the stack, injGpuMaxUs under mode 0 against mode 438 without moving it (rule 1.15). 438 at parity or faster convicts the owner draw's own raster cost at the stress case and prices a lower-resolution map (silhouette-fringe cost disclosed in the 26684 entry); 0 clearly faster leaves the inherent per-copy raster as the answer. FREE NOW: debug modes 442+, lighting0.y codes 72+, visual codes 34+, dbgCtl.w 13+.
+//  || 26688 THE REJECTED FRAGMENT RAN THE WHOLE SHADER ANYWAY, THE FIRST DOOR HAD NO NAME AND WAS THE COLD-HOLD RELEASE, AND THE VIEW DISTANCE READS 3000 (owner discard+return with visual 33 = mode 441; KH_LIVE_WIPE_DEFER extends to doors 3 and 5 under the same mode 440; per-door wipe counts). (1) OVERDRAW, dump2-26687: composite compiling (compFailStreak 0), guard armed on every injection, the 8.5 gauge honest at last (injPsArb 5393 / injPsEarlyZ 2271 - the arb path is REAL and item 8.5 is open on true data), owner map armed and built on every draw (ownDraws == compositeMeshes, ownFails 0), test in both shaders with the tie rule fixed - and injGpuMaxUs 45.5 ms on the 24-mesh stack, about 24 x the 1.7 ms one-mesh injection of dump1. The rejection reaches the discard and the shader RUNS ON: a bare discard only flags the lane; execution continues so helper lanes stay valid for the 42 fwidth/ddx sites downstream, and whether a fully-killed wave exits early is a driver decision nobody here can rely on. The 26684 design assumed discard terminates; it does not. Now an explicit return follows the discard in PSMain and PSComposite (the arb variant writes khaODepth = i.pos.z first - SV_Depth is mandatory on every path). DISCLOSED COST: a returned lane no longer serves as a derivative helper, so a quad straddling an ownership boundary computes its kept fragments' fwidth against undefined neighbours - a one-texel noise class along the intersection line of two overlapping meshes in the self-shadow footprint terms, never on a lone mesh and never inside an owned region. VISUAL 33 (mode 441) paints every rejected fragment magenta instead of discarding: the arming proof the numbers cannot give (a PS has no counter). PRE-REGISTERED: under 441 a coincident stack reads magenta everywhere but its first-drawn member; under mode 0 injGpuMaxUs on the stack falls to within a few ms of the one-mesh figure. If 441 paints nothing on a stack, the map is not being read - the depth or id lanes, not the discard - and that is the next door. (2) CASCADES, dump1-26687: liveWipeSite 4 at 391.8 s deferred (liveWipeDeferrals 1) and its prune landed at the first re-render (liveWipePrunes 1 in dump2, 413.8 s) - the shape works. But liveLastCommitT 4.5 s with liveWipeN 2: a door fired BEFORE 4 and emptied the table for good, and 26686's gauge stamps only the last. Read from the code: door 5 is the 26647 cold-hold RELEASE - it fires on the first frame after the shaders finish compiling, which in this session was 372 s of cold compile (shaderMtWallMs 372437) with the camera parked since spawn. That is the operator's recompile-session correlation, confirmed by mechanism: a warm session comes off the cache, never arms the hold, never takes door 5. Door 3 (injection-side prewarm adoption) is the third lock-boundary door on the same premise. All three now defer under 440 (unchanged shape: first post-door commit prunes); doors 1 (relock) and 2 (wrong-era) stay immediate, unconvicted. Per-door counts liveWipeDoor1..6 (session) so the next dump names every door, not the last. (3) VIEW DISTANCE, both dumps: objVisSrc 1, objVisM 3000 - the map's key is 'objectVisibility' (videoOptKeys names it beside shadowVisibility/overallVisibility/pipVisibility), matched by the 'objectvis' fold; the cut is ARMED at 3000 m and reads every flush since the 26687 relocation. The 26614 finding that this map lacks 'shadowvis' is falsified in passing: shadowVisibility is in the list; that read's src stayed 0 because sunRangeSrc 2 (bands) gates it off, not because the key is absent - 26614's own entry is amended in place below. (4) TEXTURE CACHE: 3 hits, 0 misses in dump2 - serving. FREE NOW: debug modes 442+, lighting0.y codes 72+, visual codes 34+, dbgCtl.w 13+.
+//  || 26687 THE COMPOSITE UNIT NEVER COMPILED FOR TWO BUILDS AND EVERY 8.5 READING WAS MY OWN X3004; THE TIE RULE HANDED THE STACK BACK; THE getVideoOptions READ LIVED IN A FUNCTION NOBODY CALLS; AND DOOR 4 IS CONVICTED AND DEFERRED (KH_LIVE_WIPE_DEFER mode 440 restores the immediate wipe; the owner helpers move to the shared header; the tie rule and the read relocation carry no new mode - 438 and the src lanes isolate them). (1) THE COMPILE: 26684 put khOwnMs/khOwnSs/KhOwnerPack/KhOwnerRejects in g_hlsl_static, which only the static unit sees; the composite unit (g_cb_hlsl + g_hlsl_composite + g_hlsl_composite2) died on X3004 at every attempt (compFailStreak 8 of 8 in dump1-26686; the operator's log names it), so the injection fell back to g_res.ps - which is WHY injGuardOff == injections and injPsArb == 0 in every dump of this campaign. 26686's 'item 8.5 CLOSED' and its 'no draw takes the arb path' are WITHDRAWN as readings of the field; they were readings of my defect. The helpers now live in g_cb_hlsl (segment 8) where every unit sees them; PSOwner stays in the static unit that compiles it. The 8.5 gauge is intact and reads HONESTLY from this build on - item 8.5 is OPEN again. (2) THE TIE RULE: KhOwnerRejects kept a non-owner at EQUAL depth, the coincident-stack case itself - the strict-LESS owner draw resolved the tie to the first drawn and the test then let every member through. dump1-26686 had PSMain carrying the test (ownDraws == injections) and the operator's stack still scaled with proximity: that line. Now owner-nearer-OR-EQUAL rejects; only a strictly nearer fragment survives an owned sample. (3) THE READ: uiFlushes 0 and videoOptKeys EMPTY in dump1-26686 - flush_ui_render_sqf never runs in this deployment (the operator's own diagnosis: the UI driver is inert until a post-fx spawns), and the shadow range only ever worked because sunRangeSrc 2 is the BAND derivation, never this map. The one getVideoOptions build moves to stage_world_lighting (Draw3D flush, every frame), same body, same consumers; flush_ui_render_sqf keeps a pointer comment. objVisSrc and videoOptKeys are the arming lanes; if videoOptKeys arrives without an object-visibility key the map cannot serve this and the direct binding is the next step. (4) THE CASCADES: dump1-26686 read liveWipeSite 4 at liveWipeT 272 s, liveLastCommitT 49 s, liveCycleStartT 287 s, hvBestStage 1 - the view-lock boundary wipe emptied the table after the last commit, the camera parked, the engine re-rendered nothing (drought), the mesh stood shadowless until the look-away. The 26686 pre-registered shape ships at that one door: wipe_deferred marks the table suspect and the first post-door commit prunes it before taking its slot (liveWipeDeferrals/liveWipePrunes, session). DISCLOSED TRADE: entries latched before the lock persist until the engine's next re-render - the door's own drift class - instead of vanishing; a parked camera cannot see drift and a moving one triggers the re-render that prunes within a second. Doors 1/2/3/5 are unchanged (unconvicted). FALSIFICATION: drifting or camera-tracking shadows after a lock that persist through camera motion convict the deferral - 440 isolates. ACCEPTANCE: after a spawn, recvTermSkips stops climbing without a look-away; liveWipePrunes counts once per re-render. NUMBER HYGIENE: mode 440 minted; lanes liveWipeDeferrals/liveWipePrunes (session). FREE NOW: debug modes 441+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26686 THE 8.5 GAUGE ANSWERS IN ONE DUMP AND CONVICTS 26684'S OWN PREMISE, THE OWNER TEST GETS THE TWIN IT WAS DENIED, AND TWO GAUGES GO OUT FOR THE TWO OPEN QUESTIONS (KH_MESH_OWNER_PREPASS twin; KH_LIVE_WIPE_SITE and KH_VIDEO_OPT_KEYS gauges; no new mode - 438 still isolates the prepass whole; one shader edit, the twin block). (1) THE GAUGE: dump1/2/3-26685 read injPsArb 0 and injPsEarlyZ == compositeMeshes in every session - NO injection draw takes the SV_Depth path; the late-Z mechanism 26684 argued from the fill sites does not occur in the field, and the non-SV_Depth variant handoff 8.5 priced is already every draw (item 8.5 CLOSED: nothing to build). The 26684 owner-map DESIGN still stands - early-Z passes every member of a bit-coincident stack under LESS_EQUAL and bills each in full, which is the operator's stacked-cluster case exactly - but its TEST was placed on a false premise: injGuardOff == injections and snapConsumed 0 say guard is false on every field injection, so the PS pick binds g_res.ps == PSMain (ps_tex is PSMain under KH_TEXTURED), the one shader 26684 deliberately left the test out of. ownFrames == injections and ownDraws == compositeMeshes with ownFails 0: the map was armed, built and never read. The operator's field verdict (stacked cluster still scales with proximity) is that exact hole. THE FIX is the identical block at PSMain's head, after the view-distance cut; the PSComposite comment is corrected in place. PRE-REGISTERED ACCEPTANCE: injGpuUs per injection on the stacked cluster falls by roughly the stack's multiplicity minus one; FALSIFICATION unchanged from 26684 (hole or rim where meshes overlap; 438 isolates). (2) CASCADES ABSENT AFTER SPAWN (dump1 during, dump2 after the look-away): liveLastCommitT 11.98 s against liveCycleStartT 1223 s - the live table took ONE commit at mission start and then nothing for twenty minutes; recvTermSkips climbed on every injection (empty table); the harvest ran every 16th atlas draw (cascBindScans +716 in the window, full 64 KB spans) and every window died at the scale bar (hvRejScale 1.83 M, hvBestStage 3 reached by two windows ever) - the 26682 drought signature: the engine re-rendered nothing while the camera was parked. Recovery in dump2 is one commit at 1229 s, the look-away's re-render. So the mechanism is 26682's own, on a COLD table: 26682 spared the live table from the SUN-JUMP wipe; five other doors still empty it (view relock, wrong-era receive wipe, lock acquisition, lock boundary, chain release), every one written on the premise 'entries rebuild from live latches within a second' - which 26682 falsified for a parked camera. Which door emptied it here is NOT in the dumps (the uploads mount failed mid-read before the lock lanes were pulled), so rule 1.3: this build ships the gauge, not the repair. KH_LIVE_WIPE_SITE stamps site and time at all six doors (liveWipeSite/liveWipeT/liveWipeN, session-scoped); the next absence dump reads liveWipeT against liveLastCommitT and names the door. THE REPAIR SHAPE, pre-registered so it is not re-derived: the 26682 CONDITIONAL wipe - the door marks the table suspect and the first post-door commit prunes the remainder - applied to whichever door(s) the gauge convicts, with the wrong-era door's drift class weighed against the absence class before it moves. The operator's recompile-session correlation is plausible on this mechanism (the 8-minute cold compile stalls the injection while lock churn runs its doors; a warm restart fills the table during the first camera motion) and is NOT proven. (3) objVisSrc 0 in all three dumps: the getVideoOptions map carries neither 'objectvis' nor 'objectdraw' - the 26614 lesson, again. KH_VIDEO_OPT_KEYS latches the map's string keys once per session into videoOptKeys; the next dump names the key and the read gets its real spelling. The cut stays inert (0 = no cut) until then. (4) TEXTURE CACHE, dump3: 3 misses, 3 writes, 144 ms of mip build total, 0 hits (first session on the build - the next session's hits are the arming read), textured draws healthy. FREE NOW: debug modes 440+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26685 COMPILE-FIX RESPIN OF 26684, NOTHING BEHAVIOURAL (the 26485/26676 precedent): the PSOwner compile block declared its blob as ID3D11Blob, a type that does not exist - the D3D compiler's blob is ID3DBlob, exactly as the PSInjDepth block three lines above it spells it. C2065 on kho_blob and the C2660 on CreatePixelShader were that one undeclared type cascading. One token changed; every 26684 default, mode and lane stands as written. FREE NOW: debug modes 440+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26684 THREE OPERATOR TASKS AND ONE 8.5 GAUGE IN ONE SHADER-MOVING BUILD, EACH WITH ITS OWN ISOLATION MODE (KH_OBJ_VIS_CUT mode 437 / KH_MESH_OWNER_PREPASS mode 438 / KH_TEX_CACHE mode 439; the 26476 four-tasks precedent, disclosed against rule 1.6: three defaults move because the operator asked for all three and every shader-source edit costs every user the 8.2-minute cold compile - the bisection the rule protects is preserved by the modes, flip ONE at a time). (1) KH_OBJ_VIS_CUT. THE MECHANISM: the FAR CONTRACT cuts farVis-off meshes at the PROJECTION far plane, which the engine sets well beyond objectViewDistance - so a mesh stood fog-tinted past the last engine object, visible against sky. shadowMeta2.y (a re-lettered zeroed lane; the two legacy ShadowMapFactor subtractions of yzw were no-ops and are gone) now carries the object view distance and PSMain/PSComposite/PSEffect/PSOwner cut in i.pos.w beside the far contract - a plane cut, sliced exactly as the engine's far edge is, farVis meshes untouched. The read is the operator's directive: sqf_integration.hpp's flush_ui_render_sqf builds the getVideoOptions map ONCE and serves the shadowvis reader (26451, its 26615 gate kept) and the new objectvis/objectdraw reader from the same iteration - no second map build, no second binding; objVisM/objVisSrc lanes because 26614 proved that map may carry no such key. ARMING: objVisSrc 1 with objVisM at the operator's setting; 0 means the key never matched and the cut is inert (0 = no cut). (2) KH_MESH_OWNER_PREPASS. THE MECHANISM, read from the fill sites: with the heightfield live (and on the far arb) the CPU arms fx1.x = 1e9, so the arb PS's occ verdict is DORMANT, and SV_Depth makes every one of those draws late-Z - every fragment of every admitted mesh runs the five shadow tiers, the cascade receive and PBR whatever stands in front of it. The 26658 amendment priced exactly this and named the gauge; the operator's own observation - stacked copies never z-fight - is the confession: LESS_EQUAL plus bit-identical depth passes every copy of a stack and bills each in full. THE FIX is the engine-textbook one adapted to late-Z: an OWNER MAP (R32_UINT depth20|id12 plus its own D32, at the injection DSV's dims and sample pattern, kh_owner_ensure) written by one cheap owner draw per object - same CB, VS, layout, range, rasterizer, viewport as the colour draw, PSOwner under strict LESS so the FIRST-DRAWN of a tie owns the sample - and KhOwnerRejects at the HEAD of PSComposite, before the scene read, the clamp, the tiers and PBR: discard when every sample of the pixel is owned by another object strictly nearer. Per-sample so silhouettes cannot fringe; any empty sample, own-id sample or not-farther sample keeps the fragment; id collisions (mod 4096) only ever keep. Cutout and user-shader materials test but never own (their PS can discard what the owner PS cannot predict). PSOwner mirrors every colour-pass discard through the view-distance cut - the LOD crossfade dither is the load-bearing one. DISCLOSED COST: for a bit-coincident stack the painter changes from LAST drawn to FIRST drawn; two OM switches, one small draw and up to 8 uint loads per fragment per object. Reversed viewports (MinDepth > MaxDepth) stand the map down. ARMING: ownFrames > 0 and ownDraws tracking compositeMeshes; ownFails counting is the map failing to arm and the entry is void until it stops; injPsArb/injPsEarlyZ is the 8.5 gauge finally built (handoff 8.5) and answers whether a non-SV_Depth variant is still worth a key move on top of this. PRE-REGISTERED ACCEPTANCE: injGpuUs per injection falls with stacked or overlapping meshes and does not move on a lone mesh; FALSIFICATION: any hole or dark rim where one mesh overlaps another, 438 isolates it in one flip. (3) KH_TEX_CACHE. Every session re-decoded every stb texture and re-ran GenerateMips, and the no-context branch shipped MIPLESS. Now: source bytes FNV-hashed (srgb folded), .khtc beside .khmc (Documents first, mod cache dirs second, never written to a mod folder, shared 1 GiB trim), miss = decode + CPU box mips averaged in LINEAR for sRGB (alpha linear) + IMMUTABLE upload of every level + a write queued on the mesh cache's writer thread; hit = one read, one create. The mips serve the sampler that already existed (anisotropic 8x, MaxLOD unbounded) - hardware level pick off the screen-space derivative, the textbook minification path. DDS keeps its native pre-mipped route uncached. Lanes: texCacheHits/Misses/Writes, texMipMs, texCacheLoadMs, modTexHits. 439 restores the 26683 stb + GenerateMips path bit-exactly. (4) HYGIENE: the 26314 catalog header corrected in place (it claimed to be the record of every mode; it stops at 162 - the record above that IS the ledger entry), the stale HLSL lighting0.y comment fixed (handoff 11.5, batched into this recompile), shadowMeta2 lane contract re-lettered on both sides of the CB mirror, StateBackup widened to t34. NUMBER HYGIENE: modes 437/438/439 minted and whitelisted; lanes objVisM/objVisSrc (session), injPsArb/injPsEarlyZ, ownFrames/Draws/Skips/Fails, texCache*, modTexHits (window). FREE NOW: debug modes 440+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26683 TWO CAMPAIGNS CLOSE - ONE BY FIELD CONFIRMATION, ONE BY ADJUDICATED RESTRAINT (KH_CLOSURE_RECORD; record-only, the 26675 precedent - no behavioural change, no mode, no lanes). CASCADES (26674-26682): CLOSED, field-confirmed. The arc for the record: an uncounted finalize bail (26674) -> the bail's own arithmetic exonerating every counted gate (26677) -> the rescue probe found structurally dead behind a flag true through every atlas phase, resurrected (26678) -> the residual split by two clocks (26679) -> the harvest's reach convicted and widened twice against the whole-pool bind style (26680/26681) -> and the root: the engine re-renders cascades lazily on VISIBILITY, so the sun-jump wipe was trading the world's shadowed-stale parity for a shadowless mesh; the wipe now spares the live table (26682) and the operator confirms recovery is continuous. Lessons banked along the way, each in its entry: bail lanes need their background rate measured before they mean anything; shared counters prove nothing about any single caller; a rescue below a wrong guard is a rescue that never existed; and a receive term's correctness metric is PARITY with the world, not absolute freshness. STENCIL OFFSET (26675 campaign): CLOSED as understood-and-not-built, the operator adjudicating rarity against risk exactly as rule 1.13's economics intend. The mechanism is proven (engine frame basis lagging its published camera at discontinuities, pvStale 0, our side fresh), the complete repair is specified with pre-registered hazards for both halves, and it stays unbuilt because a rare 0.2 s cosmetic does not buy new machinery in the file's most dangerous ground. The blur and sizing remain FIXED (26673's fold, field-confirmed); the silhouette watch and 434 stand as that fold's insurance. BOARD AT CLOSE: black startup - closed, field-engaged (26665/26666/26672); dimming - hold armed, census self-sufficient (26670/26671); night/skipTime lighting - repaired, field-confirmed (26672); stencil blur/size - folded, field-confirmed (26673); stencil brief offset - understood, deliberately unbuilt (this entry); cascades - closed (this entry). Every closure names its re-open condition in its own entry. FREE NOW: debug modes 437+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26682 THE ENGINE KEEPS ITS OLD SUN UNTIL YOU LOOK AWAY, AND THE WIPE WAS MAKING US MORE CORRECT THAN THE WORLD - WHICH IS WRONG (KH_LIVE_WIPE_PARITY; mode 436 restores the full wipe; C++ ONLY, one conditional at the sun-jump wipe). THE CONVICTION, three independent witnesses agreeing: (1) the 26681 near-miss census - during a post-skip drought, 10,726 full-span harvested windows contain no cascade-family content at any offset (hvBestStage 1, every deep bar at exactly zero rejects), so the atlas-phase draws of a drought are maintenance, not cascade re-renders; (2) the operator's field discriminator - looking AWAY from the mesh and back consistently triggers recovery, a stationary camera only sometimes does, and camera switching never mattered except by looking away - the signature of VISIBILITY-DRIVEN lazy re-rendering; (3) the pruner's own years-old comment ('the engine caches static cascade tiles and re-renders NOTHING while the camera is parked') already knew this and nobody connected it to the wipe. THE REFRAME: after a skipTime the engine's atlas keeps serving OLD-SUN tiles until visibility dirties them - the WORLD's shadows ride stale content for seconds to minutes, converging tile by tile. Our sun-jump wipe emptied the live table instantly, making the mesh SHADOWLESS while the world stayed shadowed-stale: parity broken in pursuit of an absolute correctness the engine itself does not deliver. The receive term's job is parity with the world's actual shading, and the old entries ARE that parity - internally consistent with the old tiles they sample, converging by replace-in-place exactly as the atlas converges, with the orphan expiry pruning slots a layout change abandons. THE CHANGE, minimal by design: the sun-jump wipe no longer clears the live table (count/newest survive); the BAND seals stay wiped as before - they reseal on the sub-second resolve cadence, their pre-wipe artifact was measured ('shadows gone until you spin around the box'), and their parity cost is a frame, not a minute. recvWipes keeps counting the event. WHAT THE STACK NOW DOES ACROSS A SKIP, end to end: table persists (mesh keeps world-matching stale-sun shadows); the engine re-renders tiles as visibility dirties them; the funnel or the resurrected full-span harvest catches each re-render's uploads (offset-bind era: proven by this session's own healthy stretches) and replaces entries in place; convergence tracks the world's. PRE-REGISTERED ACCEPTANCE: (a) THE ARTIFACT: after a skipTime, cascades on the mesh never VANISH - at worst they briefly hold the old sun's angle exactly as the surrounding world's shadows do, and both converge together; (b) khLiveTab never drops to 0 across a skip in the ring; (c) recvTermSkips stays flat through skips; (d) liveLastCommitT may legitimately pause while the engine idles - that pause is now invisible, which is the point. FALSIFICATION, BINDING: mesh shadows holding a WRONG angle visibly LONGER than the world's own shadows convict the parity argument's converse (our entries outliving the tiles they sampled) - the amendment is then a CONDITIONAL wipe keyed on the engine's own re-render activity (first post-jump commit wipes the remainder), never the old unconditional; 436 is the isolation either way. NUMBER HYGIENE: mode 436 minted; no lanes added. FREE NOW: debug modes 437+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+. || 26683 FIELD-CONFIRMED AND CLOSED: the operator reports the cascade issue resolved on this build. The 26674-26682 arc stands as the campaign record; the census lanes (fin-bail split, pend census, stamps, spans, harvest near-miss) STAY as regression tripwires per house practice - all are idle-cheap and each one earned its place by naming a door. Re-open conditions: khLiveTab dropping to 0 across a skip, or mesh shadows holding a wrong angle visibly longer than the world's own (the pre-registered converse, 436 the isolation).
+//  || 26681 THE ENGINE BINDS THE WHOLE POOL AND THE MATRIX HIDES ANYWHERE IN IT - THE HARVEST NOW TAKES IT ALL, AND EVERY FAILURE NAMES ITS BAR (KH_CASCBIND_FULLSPAN + the harvest near-miss census; no mode - 435 stands the whole harvest down; C++ ONLY). THE FIELD ROUND (dump3-26680, skips only, no switches): the drought persists (khLiveTab 0 all ring, no commit for 41 s) with cycles and feeds stamping fresh and the atlas identity still singular - and the 26680 truth-teller answers with SpanMax 65,536: after certain transitions the engine binds the ENTIRE 64 KB constants pool per cascade draw, so the cascade matrix sits at an arbitrary depth that no 2 KB or 16 KB window reaches. The 2,364 latches of this session's healthy stretch also settle an earlier doubt: the resurrected harvest genuinely carries the table under offset binds - the fault is reach, not the rescue. THE REPAIR: the harvest stages the FULL bound span (65,536 ceiling; staging recreation on size change is the existing path; cost is a 64 KB copy at every 16th atlas draw plus a strided scan, fully idled while the table is fresh) and shadow_live_upload's own cap rises from 16,384 to 65,536 - the funnel and the harvest share one scanner, so they share one reach. THE TRUTH-TELLER FOR THE REMAINING BRANCH: the harvest-scoped near-miss census - g_tw_harvest flags the scanner while it runs on harvest-fed windows only (a plain bool, single render thread, set and cleared around the feed), and every bar reject inside that scope counts (hvRejScale/Ratio/Iso/Trans/Ortho) with the deepest ladder stage any candidate reached (hvBestStage, hvBestN0). The funnel firehose cannot drown it. PRE-REGISTERED READINGS, next drought dump: (a) drought GONE with commits flowing through skips = reach convicted and closed, the census idles as pure margin; (b) drought persisting with hvBestStage 0-1 and hvRejScale carrying everything = the whole-pool window contains no matrix-family content at the scanned strides - the cascade constants moved SLOT and the next step widens the slot grab past 0-3; (c) drought persisting with hvBestStage >= 2 = genuine matrices reach the deep bars and fail one - hvBestStage names it, hvBestN0 sizes it, and THAT bar ships a measured widening (the 26381 doctrine, at last with its population). NUMBER HYGIENE: nothing minted; ten lanes added (window-reset class). FREE NOW: debug modes 436+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+. || 26682 AMENDMENT IN PLACE (field round, dump1-26681 + the operator's decisive observation): the census answered with a sharpened reading (b) - hvBestStage 1 with ratio/iso/trans/ortho at EXACTLY zero across 10,726 full-span windows: the drought-era whole-pool binds contain no cascade-family content at ANY offset - and the operator independently established that LOOK-AWAY-THEN-BACK, not camera switching, triggers recovery (switching only worked when the switched-to camera looked away). Slot-widening would have chased junk: the harvested draws during a drought are not cascade draws at all, because THE ENGINE IS NOT RE-RENDERING - its cascade refresh is lazy and visibility-driven. The reach repairs (26680/26681) stand as genuine fixes for the offset-bind refill path; the drought's root is upstream of every harvest and ships as 26682.
+//  || 26680 THE RESCUE'S OWN WINDOW WAS AN EIGHTH THE SIZE OF THE ONE ITS CONSUMER ACCEPTS, AND A SWITCHED CAMERA'S BINDS CAN HIDE THE MATRIX PAST IT (KH_CASCBIND_SPAN; one clamp aligned + two lanes; no mode - the 435 stand-down already covers the whole harvest; C++ ONLY). THE ELIMINATION THAT LEFT ONE DOOR: during the operator's unhealed switch-drought, cycles stamp fresh, feeds stamp fresh, the atlas identity is proven singular and correct by the election census, wanted() is proven true by the cycle starts themselves, bailVp holds at exactly zero and both destructive wipers at zero - so the harvested windows reach the scanner and NOTHING in them passes test_window (livePendSets frozen through the drought at the pre-switch value; the ~10 pct sets/scans ratio in both sessions dates every set to the healthy and skip-heal eras). THE ONE IN-PATH INCONSISTENCY, measured in code rather than argued: the harvest clamps its staging window to 2048 bytes while shadow_live_upload - the same scanner - accepts 16384 from the funnel, and the funnel's own big per-cascade block is 1696 bytes ONLY under the binding style the normal camera uses. A switched camera binding whole ranges (num16 large, per-draw offsets folded into the range instead of first16) places the cascade matrix arbitrarily deep in the bound window - beyond 2 KB is unreachable under the old clamp and perfectly scannable under the consumer's cap. The clamp is ALIGNED to 16384 (staging recreation on size change is the existing bytes[i] != win path; cost is <= 16 KB x 4 staging plus proportionally larger copies at every 16th atlas draw, still idled entirely in healthy sessions). THE TRUTH-TELLER SHIPS WITH THE REPAIR: cascBindSpanLast/Max record the bound span seen at each arm. PRE-REGISTERED READINGS ON THE NEXT SWITCH SESSION: (a) drought GONE with SpanMax previously-clamped-class values (> 2048) = the clamp convicted and closed; (b) drought PERSISTING with SpanMax > 2048 = the matrix is in reach and still failing - the fault moves to window CONTENT under the switched camera (a different matrix family) and the next instrument is a near-miss census (which bar, what value, at the best offset); (c) drought persisting with SpanMax <= 2048 = the spans were never clamped, this entry's theory is dead on its own lane, and (b)'s instrument is next regardless. NUMBER HYGIENE: nothing minted; two lanes added (window-reset class). FREE NOW: debug modes 436+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+. || 26681 AMENDMENT IN PLACE (field round, dump3-26680): the truth-teller read SpanMax 65,536 with the drought persisting - between readings (a) and (b): the clamp WAS binding (spans exceed even the widened 16,384, so the matrix could still be out of reach) and the 26680 alignment was directionally right but undersized against the whole-pool bind style. 26681 completes it: full-span staging, the scanner cap raised to match, and the harvest-scoped near-miss census so a content-class failure names its bar and value.
+//  || 26679 THE SKIP CLASS IS HEALED, THE SWITCH CLASS GETS ITS TWO CLOCKS, AND THE BAIL LANES LEARN THEIR OWN BACKGROUND RATE (KH_LIVE_STAMPS; PURE GAUGE - no mode, no default moved, C++ ONLY). THE FIELD ROUND (dump3-26678): the resurrection proof landed - cascBindScans 8,602 after a lifetime of structural zero - and the skip-class outage is gone: three wipes, table refilled in-ring, commits current. The operator's residual is a distinct class: a camera SWITCH triggers a ~15 s cascade drought that only the NEXT switch heals; waiting does nothing. The same dump also corrected this campaign's own weighting (the 26674 amendment): bailPend runs at ~98 pct of all cycles in healthy sessions - the engine only re-uploads changed cascades - so bails were never the outage signal; commit recency always was. THE INSTRUMENT: two effect-time stamps - liveCycleStartT at every atlas_cycle_start, cascBindFeedT at every harvest feed - against the existing liveLastCommitT. PRE-REGISTERED VERDICTS for the next switch-drought dump, taken DURING the drought: (1) liveCycleStartT STALE = the atlas phase detection lost its target across the switch (the camera switch changed or aliased the atlas identity; shadow_probe_target / g_sr.target_identity is the repair site, and pointer-reuse across the switch is the named hazard); (2) liveCycleStartT fresh with cascBindFeedT STALE = the harvest's remaining gates (the reorder target ctx and the render-thread test, in that order) refuse across the switch; (3) both fresh with the table still empty = the harvested windows themselves fail test_window post-switch and the harvested family's SHAPE (sizes, slots, span) is the next census. PROTOCOL: reproduce by camera switching, wait a few seconds into the drought, dump while broken. NUMBER HYGIENE: nothing minted; two lanes added (session-reset class, beside the commit stamp). FREE NOW: debug modes 436+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+. || 26680 AMENDMENT IN PLACE (field round, dump1-26679, taken DURING a switch-drought that a further switch did NOT heal): the stamps answered in one read exactly as built - liveCycleStartT 42.704 and cascBindFeedT 42.703 against now 42.709 with liveLastCommitT 3.13, i.e. cycles AND feeds fresh with no commit for ~40 s: verdict (3). The pre-registration also missed a case the same dump then closed: verdict (1)'s 'stamp stale' test cannot catch a fresh-but-WRONG atlas - but the 26202 election census exonerated the identity outright (shadowTexAdopts 1, Same 16,439, a single qualifying 4096 atlas hit 16,440 times; no displacement at any switch). The fault is in the harvested windows themselves; the repair attempt and its truth-teller ship as 26680.
+//  || 26678 THE RESCUE BUILT FOR THIS EXACT OUTAGE HAS BEEN DEAD BEHIND A FLAG THAT IS ALWAYS TRUE WHEN IT MATTERS, AND IT NOW RUNS (KH_CASCBIND_RESURRECT; mode 435 stands the harvest down; C++ ONLY, no shader source, no recompile). THE CONVICTION CHAIN, closed by the 26677 census in one dump exactly as pre-registered: livePendSets froze at 214 (the healthy first ~19 s) with liveStashAccepts 0 and BOTH destructive wipers 0 - so the pending was never set again because shadow_live_upload never received another cascade-family window, the fourth pre-registered reading's shape ('an unlisted writer' inverted: an unlisted NON-writer, the feed itself). The 1,700 liveAccepts that seemed to exonerate the feed are a SHARED-COUNTER artifact - test_window counts accepts for every caller including the band capture's derivation sampling - banked as this campaign's second shared-instrument lesson beside swingPx. THE RESCUE WAS ALREADY BUILT for precisely this class ('shadow_live_upload never received a single cascade-family upload while the general hooks ran millions of light-probe confirmations' - the CascBindProbe's own charter): it reads the BOUND VS constant buffers at cascade draw time, immune to whatever upload-path shift starves the funnel, idling whenever the table is fresh. cascBindScans 0 in EVERY dump, healthy and broken, dated its death to placement: the draw-hook block sits below 'if (g_ro.in_injection || g_ro.injected) return;', and g_ro.injected - set at our injection, cleared at the MAIN depth clear - is still true from the previous frame through the entire atlas phase, which the 26327 frame order places BEFORE that clear. The guard was written for the harvest's own draws and killed its purpose instead. THE REPAIR, two moves inside one feature: (1) the harvest hoists ABOVE the guard - phase_on_atlas structurally excludes our own draws (the injection never runs inside an atlas phase) and the explicit in_injection term stays; (2) the freshness idle read RAW slots, so pruned/wiped leftovers beyond g_ls.count could idle the probe on stale ghosts - it now reads the valid portion only, and an empty table never idles, so the rescue arms on the first atlas cycle after any wipe or starvation. Healthy-session cost is structurally zero: the idle fires while any entry is under 3 s fresh, which a funnel-fed table always satisfies. WHY THE FUNNEL'S OWN DEATH IS DELIBERATELY NOT CHASED THIS BUILD: its cause (post-skip slot exhaustion vs a deferred-context move vs a filter miss at the map hook) is unproven, the rescue makes the table self-healing within one atlas cycle regardless of which it is, and the two feeds are now separately countable - livePendSets (funnel) vs cascBindScans (rescue) - so the next dump MEASURES the split for free and the funnel question downgrades from outage to curiosity. PRE-REGISTERED ACCEPTANCE, ARMING LANE FIRST: (a) cascBindScans counting AT ALL is the resurrection proof - it has never been nonzero in any session; (b) THE ARTIFACT: after time skips the world cascades return to our meshes within ~a cycle of the wipe instead of a long outage, khLiveTab nonzero in the ring, recvTermSkips flat; (c) healthy funnel-fed sessions read cascBindScans near 0 (the idle working) with livePendSets carrying the load; (d) liveLastCommitT advances through the whole session. FALSIFICATION, BINDING: an outage recurring with cascBindScans 0 at mode 0 means the harvest still is not reached and the next suspect is the draw hook's remaining gates, named in order (reorder target ctx, render-thread test); an outage with Scans climbing but the table still empty moves the fault into test_window against the HARVESTED window family - and the harvest windows' shape becomes the next census. NUMBER HYGIENE: mode 435 minted; no lanes added (cascBindScans existed). FREE NOW: debug modes 436+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+. || 26679 AMENDMENT IN PLACE (field round, dump3-26678): PARTIALLY LANDED. Acceptance (a) met for the first time in the file's history - cascBindScans 8,602 - and the SKIP class healed: three sun-jump wipes with the table refilled in-ring (khLiveTab 0 -> 8) and commits current (liveLastCommitT 46.3). A SECOND OUTAGE CLASS remains, operator-characterized: a CAMERA SWITCH both triggers a ~15 s table drought and heals one; plain waiting does neither. Whether atlas cycles and harvest feeds even ran during the drought is invisible in cumulative lanes - the 26679 stamps make the next switch-dump decide it in one read, with all three verdicts pre-registered at the stamp globals. || 26681 SECOND AMENDMENT (rule 1.16): the 26679 amendment's 'skip class healed / switch class remains' split was WRONG - dump3-26680 reproduces the drought from skips alone, switches changing nothing either way. The real split was never the trigger; it is the engine's cascade BIND STYLE: offset binds (harvest reaches the matrix, commits flow - the 2,364-latch healthy stretches) versus whole-pool binds after certain transitions (SpanMax 65,536; the matrix at arbitrary depth, out of every partial window's reach). Both skips and switches can flip the style; neither is the mechanism.
+//  || 26677 THE PENDING IS FALSE AT EVERY BOUNDARY AND THE ACCEPTS RUN SOMEWHERE ELSE - THE LAST THREE DOORS GET COUNTERS (KH_LIVE_PEND_CENSUS; PURE GAUGE - no mode, no default moved, C++ ONLY). THE FIELD READ (dump1-26676, the operator's reproduced cascade outage): liveFinBailPend 17,951 with bailVp 0 and bailAtlas 0 - the pre-registered bailPend reading fired, and bailVp's EXACT ZERO is the sharper fact: the pending was FALSE at every one of ~8 boundaries per flush, never set-but-unviewported. Yet liveAccepts ran at 4.4/flush THROUGH the outage at healthy proportions (rej/accept ratios match the clean stress session: ratio 3.1 vs 4.1, iso 1.5 vs 2.2 - the window BARS are exonerated, retiring the 26674 bailPend reading's first guess), liveLastCommitT froze at 3.18 s (the outage began near session start, not at the skip), and shadowLiveLatches 289 all date from that first window. So the accepts flow down a path that never feeds the pending, or the pending is destroyed by a non-boundary wiper - three suspects, made arithmetic: livePendSets counts every pending_valid=true assignment; liveStashAccepts counts accepts on the cycle_latched stash path; livePendWipesNw / livePendWipesMaint count the two non-boundary clearers (the not-wanted OM wiper and the maintenance tail) ONLY when they destroy a live pending. PRE-REGISTERED READINGS, one reproduce-dump to a conviction: pendSets 0 with stashAccepts climbing = cycle_latched is stuck true and the cycle-start reset is the repair site; pendSets tracking wipesNw = shadow_live_wanted() flaps (g_ls.wanted or g_shadow_map_strength) and the repair is at that publisher; pendSets tracking wipesMaint = the maintenance tail runs mid-cycle and the repair is its call placement; pendSets positive with all wipers zero = an unlisted writer, and the next step is a write-site audit, not more lanes. NUMBER HYGIENE: nothing minted; four lanes added (window-reset class). The stencil campaign's step-2 verdict is recorded at the 26675 entry - shape (C) selected, the arm ships as its own build. FREE NOW: debug modes 435+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26676 COMPILE-FIX RESPIN OF 26674's CENSUS RESETS, NOTHING BEHAVIOURAL (the 26485 precedent): the 26674 stat-reset insertion string-matched the DECLARATION of g_live_rej_no_view (whose initializer contains the same 'name = 0;' text as a reset statement) and appended three assignments at namespace scope - C2371/C4430 on MSVC, caught by the operator's build. The stray lines are removed, the declaration's trailing comment restored byte-exactly, and the three resets now live in reset_stat_counters beside g_live_rej_sun_axis where they belonged. LESSON BANKED FOR THE TOOLING RULES: a reset-insertion anchor must be a statement UNIQUE TO FUNCTION SCOPE (anchor on a neighbouring reset line, never on 'name = 0;' which every zero-initialized declaration also contains). The 26675 campaign entry is extended in place with the measured composite depth-mode map - see there. FREE NOW: debug modes 435+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26675 THE ENGINE'S FRAME LAGS ITS OWN CAMERA THROUGH ABRUPT INPUT, THE OFFSET IS REAL MIXED-BASIS RASTERIZATION, AND THE COMPLETE REPAIR IS NAMED WITH ITS ONE PRECONDITION (KH_STEN_BASIS_RECORD; conviction + campaign pre-registration - NO behavioural change, no mode, no lanes; the 26669 entry is amended in place). THE CONVICTION (dump1-26674, burst ser 1789-1799): swingPx ramps 12 -> 499 -> 36 px in the integration shape of one basis holding while the other moves ~1.8 m/frame, with pvStale 0 (the cycle fetch succeeding every row), fvAdopt 2 / fvAgeMs ~0.1 ms / latchLiveDeltaM 0 / seamCamDxM ~0 (our adoption, seam and composite all fresh and mutually consistent), and the engine's cadence perfectly steady (8 cast batches, 1 injection, 1 sun-map pass, volAge 1, stamps advancing every row). Every operand is healthy and they still disagree: the engine rasterized those frames under a view several frames BEHIND the published camera our footprint, box and colour draw ride. The count buffer is therefore mixed-basis on exactly those frames - engine-basis volume edges crossing an adopted-basis footprint - and the shadow boundary displaces by the delta: the operator's brief crisp offset, previously the same frames' blur under the 7x7. No read-side-only transform can be correct against mixed content, which is why three reprojections and one half-pair died on this hill. THE COMPLETE REPAIR, pre-registered for the campaign that ships it: the 26242 pair in full - depth FOOTPRINT rasterized on the engine's per-frame-fetched cycle basis (counting coherent in engine space), verdict READ through the same epoch-paired basis (the compiled 26667 machinery, arm 432, deadbanded so steady state stays bit-exact), VISIBLE box on the adopted camera. THE ONE PRECONDITION, measured this session and blocking a blind ship: the injector binds dss_test_write (LESS_EQUAL, fixed-function) - the visible composite depth-tests against the buffer holding the footprint, so a cycle-basis footprint displaced 500 px for a burst frame would clip the BOX ITSELF across the displacement band, a strictly worse artifact. The escape is the KH_ARB_DEPTH composite variant (dss_off + in-shader analytic compare), which never consults the footprint for its own visibility - the campaign's first step is the composite-variant depth-mode map (which draws run fixed-function vs analytic, keyed on the near-gap routing), its second is the pair behind a fresh arm, its third the operator's fling-and-stop A/B, and only a field pass promotes a default. PRE-REGISTERED HAZARDS so no build ships half of this again: (a) footprint-vs-box clip under any fixed-function composite variant (the reason half A cannot ship alone against dss_test_write); (b) read-without-footprint re-creating 26667's wrong-z bracket (the reason half B cannot ship alone, now mechanically understood); (c) the encode chain's volPassNear == injNear certification must survive the view change untouched - near planes come from the pair authority, not the view, and any drift there voids the campaign. NUMBER HYGIENE: nothing minted, nothing added. FREE NOW: debug modes 435+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+. || 26676 CAMPAIGN STEP 1 BANKED - THE COMPOSITE DEPTH-MODE MAP, MEASURED: the footprint injector binds dss_test_write (LESS_EQUAL + write); the INJECTION composite binds dss_test_write unconditionally and selects its pixel shader per draw (khr_far_arb / farkeep / nearz routes take ps_composite_arb, which OUTPUTS SV_Depth - an analytic per-fragment depth, the 'analytic terrain clamp' - all other draws take the plain variant with rasterized depth); the FLUSH selects per object: fx-arb and DepthMode::Off draws bind dss_off, TestWrite and composite-eligible bind dss_test_write, the remainder dss_test. CONSEQUENCE FOR THE PAIR ARM: with SV_Depth the depth test runs LATE-Z against the shader's analytic value, so even the arb variant still compares against the buffer - a cycle-basis footprint displaced under a burst frame fails that comparison exactly like the fixed-function case, and hazard (a) stands for BOTH variants as bound today. THE TWO VIABLE ARM SHAPES, with their open questions named: (B) under the arm, our composite binds dss_off and the arb variant carries the occlusion analytically - OPEN: whether the arb block holds a scene-depth discard or only the terrain clamp (if only the clamp, world geometry stops occluding the box and the shape is dead); (C) under the arm, the footprint dual-purposes by ORDER - cycle-basis for the counting bracket, re-written adopted-basis before the composite - OPEN: the cost and placement of the repair write inside the frame's bracket structure. NEXT DIG, pre-registered: read the arb variant's khaODepth computation and every discard in its block; if a scene-depth discard exists, shape (B) is one mode away; if not, shape (C)'s repair write is costed next. Nothing ships on this axis until one shape survives its dig. || 26677 CAMPAIGN STEP 2 VERDICT - THE ARB BLOCK IS READ AND ONE SHAPE SURVIVES: the arb variant's in-shader scene test exists (rawS -> sceneZ -> the occ comparison) but rawS is the RESOLVED depth INCLUDING OUR OWN FOOTPRINT, so under shape (B) a cycle-basis footprint occludes our own adopted-basis fragments through the analytic path - hazard (a) resurfacing one layer down - while the footprint-INDEPENDENT machinery (the analytic heightfield clamp) covers terrain only, losing building/vehicle occlusion of the box under dss_off. SHAPE (B) IS DEAD AS A DEFAULT (alive only as a disclosed-loss A/B). SHAPE (C) SELECTED, design fixed for the arm build: (1) the volume-seam injector rasterizes the footprint on the engine cycle basis (pvStale-guarded, adopted fallback); (2) the read crosses through the epoch-paired stenCycVp exactly as compiled (the 432 machinery); (3) a depth RE-WRITE pass at the head of our composite restores the adopted-basis footprint (same injector geometry, adopted VP, a new always-compare write DSS) so the composite's fixed-function occlusion keeps today's semantics byte-for-byte; (4) the deadband keeps steady state bit-exact and the re-write is value-identical there. DISCLOSED RESIDUE of (C), pre-registered: pixels the cycle-basis footprint covered but the adopted re-write vacates keep a stale nearer depth for that one frame - a one-frame foreign-object occlusion sliver at discontinuities only. The arm ships as its own build with a fresh mode; nothing here moves a default. || 26683 CAMPAIGN CLOSED - UNDERSTOOD, SPECIFIED, DELIBERATELY NOT BUILT (the 26661 precedent, operator-adjudicated): the artifact is rare, ~0.2 s, benign, and mechanically understood to the row (the engine's frame basis lagging its published camera through abrupt input; the same frames the old witness rendered as blur, the crisp fold renders as a brief offset). The shape-(C) repair remains fully specified above with both halves' hazards pre-registered, but it lives in the injection-view plumbing that has consumed three reprojections and one half-pair, adds a re-write pass, and carries its own disclosed residue - risk out of proportion to a rare cosmetic. RE-OPEN CONDITIONS: the offset becoming frequent or severe; any future campaign that must touch the injection view anyway (the pair then piggybacks at marginal risk); or the count-content axis (26379, still the blur's named owner if it ever returns) demanding the same ground. Until then: stenCycCtrPx keeps measuring every would-be correction at zero cost, and 432 remains the compiled A/B for anyone who ever needs to see the tap live.
+//  || 26674 THE CASCADE OUTAGE'S LAST DOOR WAS THE ONE RETURN NOBODY COUNTED (KH_LIVE_FIN_CENSUS; PURE GAUGE - no mode, no default moved, C++ ONLY). THE FIELD READ (dump2-26673, the operator's post-skipTime cascade loss: world-object cascades absent from our meshes for a long while, our own casts fine, not recovered in-dump): khLiveTab 0 on all 512 rows with khSunSt 2 - the published cascade table EMPTY for the whole ring while the sun is valid and settled - so the receive early-out (recvTermSkips 2071, the g_ls.count == 0 return) IS the artifact, and the question is why the table never refills after the sun-jump wipe (recvWipes 2, itself correct - post-skip cascades of the old axis must not be consumed). THE ELIMINATION WALK, banked because it is most of the diagnosis: the atlas STREAM is alive (recvStreamSkips 1, g_atlas_frame_cur setting per cycle); the WINDOW test accepts (liveAccepts 15,536, the 15M scale rejects are the everyday CB-scan firehose); the AXIS provenance is quiet AND aligned (liveRejSunAxis 8 all session, sunAxisLastRefDeg 0.052 - the published reference healed, sunPubTravelAgeS 29.9 matching the skip); no-view 0. Two red herrings recorded so the next reader does not chase them: bandRejSunAxisLastDeg 110.7 and sunDerivedSnapLastDeg 110.7 are the BAND system and the derived latch metabolising the 110-degree skip - the band table is FRESH (ages 0.4-54 ms) and the receive that is dark does not consume it. Every counted gate exonerated, the chain dead-ends at shadow_live_finalize_cycle's early bail - pending_valid / pending_vp_valid / atlas_size - which returned UNCOUNTED, the 26236 census-in-the-wrong-branch lesson wearing a new coat. THE CENSUS: the bail splits by reason (bailAtlas tested first - the one term that can LATCH stale across cycles rather than miss one; bailPend; bailVp) and a commit stamp (liveLastCommitT) turns the outage into a measured age. PRE-REGISTERED READINGS, one dump to a conviction since the operator can reproduce with a couple of skips: bailAtlas climbing through the outage = the probe lost the atlas identity across the skip and the repair is a re-probe/refresh of atlas_size; bailPend = the post-skip CB window family changed shape and the repair is at the test_window bars or the offset cache; bailVp = the engine inverted upload/draw order post-skip and the repair is at the on_draw snapshot; ALL THREE near zero with the table still empty = finalizes are not running at all and the cycle-boundary detection (shadow_probe_target / phase transitions) is the suspect. PROTOCOL: reproduce (a skip or two), wait for the outage, dump; the three lanes plus liveLastCommitT name the gate in one read. NUMBER HYGIENE: nothing minted; four lanes added (bails window-reset, the stamp session-reset). FREE NOW: debug modes 435+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+. || 26679 AMENDMENT IN PLACE (rule 1.16): the bail lanes carried a weighting error this entry authored - dump3-26678 arithmetic (bails 20,045 + latches 427 vs ~2,562 flushes x 8 cycles) shows bailPend at ~98 pct of ALL cycles in a HEALTHY session, because the engine only re-uploads changed cascades and a no-upload cycle bails Pend by design. bailPend is background, not a fault signal; the outage ruler is liveLastCommitT (and now the 26679 stamps), and bailVp/bailAtlas retain their diagnostic weight because their background is zero.
+//  || 26673 THE WITNESS CHOOSES THE WRONG TEXEL BEFORE THE FILTER EVER BLURS IT, AND THE CRISP CENTRE COUNT IS THE DEFAULT AT LAST (KH_STEN_CENTER_TAP; mode 434 restores the witnessed filter; C++ ONLY - the fold is the dbgCtl.w publish tail at BOTH twin fill sites, default 9.0 = the 194 tolerance bypass; no shader source, no recompile). THE DISCRIMINATION THAT DECIDED IT, three operator A/Bs against paints: 110/118 show the counts CRISP and correctly placed at the raster texels; 194 (centre tap, membership bypassed) eliminates the blur AND the sizing error with no observed cost; 196 (hard count from the best depth-MATCHING tap) does NOT fix it. 196 failing where 194 succeeds convicts the tap CHOICE, not the averaging: the scene-witness residual is systematically biased at the centre texel, so depth-matching prefers offset taps - averaged they are the operator's blur, hard they are 196's misplacement - while the raw centre count was correct the whole time. This also retires two stale conclusions on their own evidence: 26379's sparse-count reading (the paints show dense crisp counts today) and 26380's 191-null (a tolerance sweep cannot fix a BIASED residual, only a wrong-scale one - the sweep's null was consistent with today's conviction all along, and ~300 builds of depth machinery separate 26378's '194 removes the shadow' from today's '194 is crisp'). THE NAMED SUSPECT FOR THE BIAS, unproven and deliberately not chased this build: KhWitLoad reads the resolve's NEAREST plane (.y, 26334) while the fragment extrapolates its OWN interpolated z - on any sloped surface under 8x MSAA the nearest sample plane sits systematically nearer than the fragment-centre z, a bias the ~3e-4 window-z tolerance cannot absorb; repairing THAT is the path back to a working witness if one is ever needed again. WHAT THE FOLD REVIVES AS RISK - CORRECTED IN PLACE (rule 1.16; the first form of this sentence credited the witness with kills the record assigns elsewhere): the SLICES were killed by 26322's multiply removal, and their true author - the injection's depth ENCODE, 26326's 3.65x conviction - was repaired at the write side across 26326-26383, certified per-frame today by volPassNear == injNear on every row; the mode-132 NOISE's root was the FROZEN vol depth plane, which code 6 cured by ceasing to consult it and which 194 does not consult either. The witness was a read-side shield for a write-side fault since fixed at the source. What it genuinely still covered is only the silhouette rim at motion-discontinuity frames (an off-footprint raster texel carrying the background's verdict for a frame or two) - frames its biased residual served badly regardless. The operator field-ran 194 through normal play with no observed issue, but those classes are scene-shaped (silhouettes against distinct backgrounds, Zeus camera), so the watch item is explicit: box silhouettes against sky/terrain, both persons. ARM SEMANTICS, documented: every mode riding dbgCtl.w (58/108/180/181/182/191/194/196/199/200/201/212/364) implicitly EXCLUDES this fold while armed - 194 itself is now an accepted bit-exact ALIAS of the default (rule 1.18), and 434 is the one-switch witnessed-filter restore. PRE-REGISTERED ACCEPTANCE: (a) the operator's own field read, promoted: stencil blur and sizing gone at mode 0 under both motion regimes; (b) 0 vs 434 is the isolation A/B and 434 must reproduce the blur; (c) silhouette scenes show NO slice return and FP close range NO noise return. FALSIFICATION, BINDING: a slice or the 132-class noise returning at mode 0 flips 434 to the default in one build, amends this entry in place, and moves the axis to the witness DEPTH SOURCE above - never to a tolerance sweep, which 26380 already spent. NUMBER HYGIENE: mode 434 minted; no lanes added. FREE NOW: debug modes 435+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26672 THE ELEVATION WITNESS NEVER KNEW ABOUT THE MOON, AND BOTH OF ITS CONSUMERS NOW ASK THE QUESTION THEY ALWAYS MEANT (KH_BRIGHT_RECENCY; C++ ONLY, no mode minted - 429/430 keep their exact meanings; no shader source, no .khsc key moves). THE FIELD ROUND (dump1-26671, the operator's skipTime-to-night regression): the mesh flashed bright, went dark, then held DAY-BRIGHT at genuine night. blkZeroSunWitRefusals 486 = the 26666 clause fired verbatim, and the root is one lane: sunDirEngineY 0.410 at night - the engine's directional-light export follows the MOON, so fabsf(g_skysun_ref[1]) > 0.10 is true on any moonlit night and the 'real night never engages' guarantee inherited from 26137 was only ever a moonless-night guarantee. The flap decomposes exactly: refusals = the flat-lit bright phases; the 34 admits = kh_sky_static reading unsettled just after the skip = the dark phases; settled moon = steady refusals = 'bright as if daytime'. blkContraPendHolds 0 exonerates 26665 for this event while convicting its witness by inheritance. THE SWAP, one stamp with two consumers: g_blk_bright_seen_t records effect-time whenever ANY upload reaching kh_probe_std_refresh carries sun sum > 1.0, verdict-independent - presence of bright world content is the evidence, the same logic 26054's starvation trusts. 26666's contra := bright-seen within 5 s AND no fresh sun jump (the 26050/26671 15 s escape); 26665's kill-withhold takes the identical terms. THE TRUTH TABLE, walked: cold-start hijack (26664) - bright pendings flow, no jump -> contra armed, zero-sun refused flat-lit for the sub-second 26665 window, heal intact; skipTime day-to-night - jump fresh -> disarmed, the night's first blocks ADMIT immediately, and by jump expiry the 5 s recency is already stale, no gap; moonlit steady night - nothing bright flows -> admit, the moon is irrelevant; ordinary day - bright everywhere -> the 26418 refusal stands. PRE-REGISTERED ACCEPTANCE, ARMING LANE FIRST: (a) a skipTime-to-night session reads blkZeroSunWitRefusals near 0 with Admits climbing and the mesh going dark on the engine's own delay - the exact regression scene, replayed clean; (b) a cold start recurrence still counts WitRefusals during its sub-second window; (c) moonlit nights are byte-identical to moonless ones on every blk lane. FALSIFICATION: a glowing night mesh recurring with WitRefusals climbing now convicts the RECENCY stamp - read what stamped it (a bright foreign flavor genuinely flowing at night is the disclosed 5 s residual, visible as short refusal bursts, and the amendment is a source filter on the stamp, never a return to elevation); a black cold start with WitRefusals 0 means the arbitration never saw the bright content and the stamp site moves, not the bar. NUMBER HYGIENE: nothing minted; one stats lane added (blkBrightSeenT, the raw stamp). FREE NOW: debug modes 434+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26671 THE FIRST RESUMER AFTER AN UPLOAD GAP IS NOT THE WORLD'S LIGHTING, AND A DIM USURPER NOW WAITS THE WAY A COLLAPSED ONE ALWAYS HAS (KH_STARVED_DIM_HOLD; mode 433 reverts; C++ ONLY, one branch in the adoption chain plus a window helper, no shader source, no .khsc key moves). THE ADJUDICATION THAT UNLOCKED IT: 26670 pre-registered the one question its census could not answer - does the WORLD dim with the mesh - and the operator answers NO. The engine's own scene stayed lit through the event, so the flavor the 26054 starvation rescue crowned (entry ratio 0.222 in one flush, dump2-26668) was never the world's lighting; it was a transitional leading the resume after the real flavor's uploads stopped. 26054's premise - a standing unseen 2 s while content flows is dead - stands untouched; its unstated corollary - the first resumer is therefore alive - is the measured falsehood this build repairs. THE HOLD, and it is deliberately a COPY OF AN ACCEPTED SHAPE: the 26050 collapse-class hold already makes a 10x-collapsed candidate wait on the sun-jump witness; 26671 extends the same construction to the STARVED path at 0.5x (the event read 0.222; the anchor's own 8 pct band means in-band weather never reaches this branch at all, and a genuine storm that ADOPTS does so in steps brighter than 0.5x or with the blend walking), with the SAME 15 s sun-jump escape so a skipTime day-to-night adopts exactly as before - the jump IS the witness that the dim is real. THE 26381 BOUND IS STRUCTURAL, NOT ARGUED: the window helper concedes at 10 s of continuous holding and fails the predicate in the same evaluation, so the worst case of a wrong hold is a 10 s lag that self-heals and counts itself (blkStarvedDimConcedes) - chained refusal is impossible by construction, which is the exact failure 26381 convicted and the reason the bar could ship without a second field round. Window edges re-open fresh past a 2 s gap so separated events never pool toward a spurious concede. WHAT THE MEASURED EVENT DOES UNDER THIS BUILD, step by step: uploads gap - standing (20.585) goes stale-bright but RULES ON; the dim transitional (4.581) seeds, ages, reaches the adopt branch and HOLDS (holds counting, window open); the plateau's 5.3 s sit entirely inside the 10 s horizon; the bright flavor returns in its 141-applies burst, matches the still-bright anchor band, and the standing simply continues - the mesh never dims, the pending dies, the window closes. Both of the event's adoptions vanish because neither was ever needed. PRE-REGISTERED ACCEPTANCE, ARMING LANE FIRST: (a) blkStarvedDimHolds counting through the next would-be dim - 0 through a recurrence means the entry took a path other than starved adoption and this entry is void (read blkAdoptRatioMin/GapLastS to name it); (b) THE ARTIFACT: the mesh holds the world's brightness through the event, blkStarvedDimHeldMaxS in low single digits, Concedes 0; (c) blkAdoptRatioMin stops stamping ~0.2 (dim entries barred at the door); (d) an explicit operator skipTime day-to-night adopts with no visible lag (the sun-jump escape's direct test); (e) healthy sessions read Holds 0, byte-identical. FALSIFICATION, BINDING: legit transitions visibly lagging ~10 s with Concedes climbing convicts the 0.5 frac or the jump escape - re-measure the bar off blkAdoptRatio population, never delete the hold; the dim recurring WITH Holds counting and Concedes 0 means a dim flavor is arriving NON-starved (the standing was sighted inside 2 s) and the axis moves to the sighting stamp, not this branch. NUMBER HYGIENE: mode 433 minted; three stats lanes added (window-reset split per 26664). FREE NOW: debug modes 434+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
+//  || 26670 THE DIM ENTERS AND LEAVES BY STARVED ADOPTION AROUND AN UPLOAD GAP, THE EVENT IS MEASURED END-TO-END, AND THE REPAIR IS DELIBERATELY NOT A GATE (KH_ADOPT_CENSUS; PURE GAUGE - no mode minted, no default moved, C++ ONLY). THE FIELD READ (dump2-26668, the operator's in-ring capture): entry ser 23817 - stdSunLum 20.585 -> 4.581 in ONE row, anchor 21.40 -> 4.58, ratio 0.222; plateau ~5.3 s at sun-sum ~4.2-4.6; recovery ser 24193 - 4.457 -> 16.649 in one row AFTER ~2.5 s of dBlkApplies 0 and WITH a 141-applies-per-flush burst. blkStarvedAdopts 4 == blkRegimeAdopts 4: every adoption of the session was the 26054 starvation rescue. The 26668 keel exonerated the walk in the same dump (RatioMin 0.928, DimFrames 0 - its falsification clause, fired honestly), so the whole dim axis lands on ONE mechanism: the standing's uploads STOP for seconds, the rescue adopts whichever flavor leads the resume, and the first-leader after a gap is a dim transitional twice per event (in, then out). WHY NO GATE SHIPS, and this is the measured argument, not caution: the event ran 5.3 s with the bright flavor fully absent, so a dim-candidate exclusivity defer must exceed 5.3 s to prevent it - and any bar that long delays a LEGITIMATE skipTime-to-night adoption by the same amount, because a post-skipTime night flavor is exactly a dim candidate against a bright dead standing under starvation (the interleaved-flavor reseeds that forced 26054 in the first place). The two cases are indistinguishable to every lane this file owns; what splits them is SCENE context - whether the world dimmed with the mesh (engine-legit camera-local regime: the repair is ACCEPT, i.e. today's behaviour) or did not (transitional flavor: the repair is HOLD-THROUGH, sized off this census) - and one operator observation at the next event answers it. THE CENSUS, recorded at the adopt branch itself: blkAdoptRatioLast/Min/Max (candidate/standing at every regime adoption), blkAdoptGapLastS/MaxS (how long the displaced standing had gone unsighted), blkAdoptTLast. With these, the next dim needs NO ring luck: two adoptions with ratios ~0.2 and ~4-5 bracketing a gap tell the whole story from the stats block alone. PREDICTED BOUNDS (26256 rule): healthy long sessions show RatioMin >= ~0.7 with gaps under ~2.5 s; a dim event stamps RatioMin ~0.2 with a paired Max ~4-5 and GapMax well over 2 s. OPERATOR QUESTIONS THAT PICK THE REPAIR, pre-registered: (1) at the next dim - does the SURROUNDING WORLD dim with the mesh or stay lit? (2) was anything scene-shaped happening (map/UI open, cutscene, streaming hitch, cloud front) in the seconds around it? World-dims-too = the block is the engine's own camera-local truth and the artifact is a PHASE error at worst; world-stays-lit = the flavor is transitional and a hold-through bar sized off blkAdoptRatioMin/GapMaxS ships next. NUMBER HYGIENE: nothing minted; six stats lanes added (emission beside the 26668 family; window-reset class). FREE NOW: debug modes 433+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+. || 26671 AMENDMENT IN PLACE (rule 1.11): THE FORK IS ANSWERED - the operator adjudicates 'only our meshes dim, not the world', which is pre-registered question (1)'s world-stays-lit branch verbatim: the starved-adopted flavor is TRANSITIONAL, and the hold-through repair this entry sized in advance ships as 26671, discriminated from skipTime by the 26050 sun-jump witness and bounded by a 10 s concede. The census stays as this hold's own population instrument.
+//  || 26669 THE CYCLE TAP STANDS DOWN BY ITS OWN CLAUSE, AND THE OFFSET IT MINTED NAMES THE LATCH, NOT THE ENGINE (KH_STEN_CYCLE_TAP demoted to arm 432; 431 promoted to a bit-exact alias of the default per rule 1.18; C++ ONLY - the CPU zeroes stenCycVp on mode 0, the compiled shader block is unchanged and dead behind its w gate, NO recompile for this respin). THE FIELD READ (dump1-26668): brief stencil-shadow OFFSET at abrupt camera movement at mode 0 - new since 26667 - while the blur persists under BOTH constant and abrupt motion. The arming lanes prove the tap fired (stenCycPubs 8820 / Miss 1), the deadband held where it promised (no offset at rest or steady motion), and the blur under constant motion - where mode 0 is raster-identical by construction - fires 26667's clause (b): REGISTRATION IS EXONERATED FOR THE BLUR and 26379's sparse-count reading is primary again. THE OFFSET'S ROOT, named from 26667's own convicting rows: swing 88-101 px at camStep 0.008 m is a parked camera 'diverging' by a hundred pixels - impossible for the engine, mandatory for a STALE LATCH. g_ro.cycle_pv goes stale on exactly the fast-camera frame (26533, in its own words: 'stale only when both failed - which is the fast-camera frame and nothing else'), so at motion discontinuities swingPx measures OUR latch error and the tap faithfully projected the read through it. 26246 warned that every gauge on this axis 'differences two of OUR values'; 26667 quoted the warning about b2 and walked past it for cycle_pv. Banked as a rule-shaped lesson: A TRANSFORM IS ONLY AS FRESH AS ITS STALEST INPUT, and a basis that is only needed on discontinuity frames must be VALIDATED on discontinuity frames - the one regime 26533 certifies it absent. WHAT SHIPS: default = the pre-26667 raster tap, bit-exact (the zero matrix refuses every cycle tap in both twins); 432 arms the tap for a controlled A/B; stenCycCtrPx/Max = the engagement instrument 26667 lacked, computed EVERY fill whatever the arm state (caster centre through the epoch cycle basis vs the injection's own absolute VP, both ours, in double per 26244/26255) so the operator can correlate visible artifacts with would-be firings at mode 0 before ever arming 432. THE BLUR'S STANDING PROTOCOL (no constant is touched blind - rule 1.3): during a blur occurrence, screenshot mode 118 (vol depth + count composite) and mode 110 (count paint) in the same scene, both motion regimes if possible; read stenCycCtrPx on the artifact rows of the next dump. 118/110 localize whether the counts at the blur pixels are sparse in the ENGINE's buffer (content axis - the write side or the engine itself) or dense-but-scattered in OUR copy (transport axis); that split is the 26379 fork this file has never had a picture of. PRE-REGISTERED: 432 under a fling-and-stop A/B either reproduces 26668's offset (the latch conviction confirmed in one session) or does not (the staleness theory falsified and the pairing phase becomes the suspect); either reading is progress and neither risks mode 0. NUMBER HYGIENE: mode 432 minted; 431 aliased, never re-minted; two stats lanes added. FREE NOW: debug modes 433+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+. || 26675 AMENDMENT IN PLACE (rule 1.16; the root paragraph above is corrected by dump1-26674's per-row view-source fields): pvStale reads 0 on EVERY burst row - the cycle fetch SUCCEEDED each frame - so the 88-500 px swings are NOT our latch going stale; they are the ENGINE'S OWN CYCLE VIEW genuinely lagging the sim-published camera by up to ~7 frames through abrupt input (fvAdopt 2 / fvAgeMs ~0.1 ms / seam live on the same rows prove our side fresh; engine cadence steady at 8 castBatches + 1 injection + 1 map pass per frame throughout). swingPx is VINDICATED as a true divergence gauge, 26533's staleness reading does not cover these frames, and 26667's failure re-reads mechanically: half B alone fetched the correct COVERAGE at the reprojected texel bracketed against the WRONG footprint depth (the adopted-space point that rasterized there) - 26242's pairing law, violated as shipped. The standing direction moves to the full pair; ledger at the 26675 entry.
+//  || 26668 THE DIM IS IN THE BLOCK, THE BLOCK GOT THERE BY WALKING, AND THE WALK'S EXCURSION FINALLY HAS A RULER (KH_BLK_WALK_KEEL; PURE GAUGE - no mode minted, no default moved, C++ ONLY, no shader source, no .khsc key moves). THE FIELD READ (dump3-26663, the operator's first live capture of the rare mesh dim): blkShadeNow == blkShadeMin == 1.828 AT dump time against a session max of 7.983 - the CB-handed shade is at its session minimum in the very window the operator watched, so the dim IS the lighting block, not a shadow term, and the 26417 latch's pre-registered reading #2 applies verbatim: the standing pair is ALSO at the dim value (blkShadeStdSun 3.9557 == blkAnchorSunL 3.9555 == per-row blkSunLum/blkMirSun/blkAnchSun 3.956, probe age 0) - 'the probe itself believes the world is dark[er]. The fault is upstream in the locator.' HOW IT GOT THERE, by elimination on the locator's own census: blkDarkContraSticky 0 (std never under 0.1 - this is DIM, not the 26665 dark class), blkStickyRejects 0, blkCollapseHolds 0, blkDarkReseeds 0, blkPendAgeS -1 (no live pending), blkRegimeAdopts 12 == blkStarvedAdopts 12 across a 29-minute session - and blkApplies 2.49M with blkAnchorRejects 1.40M. The only route that moves the standing while EVERY counter stays quiet is ACCEPTED IN-BAND WALK STEPS under the 26476 anchor - whose own ledger already names the residual: the rate cap bounds the walk's SPEED (25 pct/s), never its DESTINATION, and 'the end-of-frame winner follows draw composition, i.e. the camera.' The ring shows the walk ALIVE - the standing breathing 3.956 <-> 4.188 (5.9 pct) on a ~1.4 s period for the full 8 s window - but the excursion's START, DEPTH and DURATION all predate the ring, and no session lane measures any of them. flushBoxSunMax 5.61 is NOT the bright reference it resembles: the flush stands down in healthy sessions, so that lane is stale by up to the whole mission (lesson banked: the flushBox/injBox pair only reads as a live comparison when dFallbackDraws is counting). sunBrightness is NOT an independent witness either - it is the same probe block's max channel re-read (1.67002 vs 1.67000), so NO lane in this file can currently say whether 1.67 was wrong for that sky, only the operator's report that the WORLD did not dim with the mesh can. WHY NO REPAIR SHIPS THIS BUILD, and this is rule 1.2/1.3 applied rather than caution recited: any excursion bound needs a reference population, and the obvious bar is wrong on its face - a keel-relative refusal at, say, 1.5x would also refuse a REAL storm front (a 3x natural dimming over 20 s is 5.6 pct/s, over any keel slow enough to resist the measured walk), which is 26381's chained-refusal disaster with weather instead of dusk. 26381's own doctrine names the way out: measure the ordinary population FIRST ('blkAcceptRatioMin ... should exist before any bar moves again'). This gauge IS that population for the walk axis. THE GAUGE: a keel of the standing sun sum rate-clamped to 2 pct/s (an order under the anchor's 25, two under the measured breathing, three orders over real solar drift), RE-SEEDED whenever blkAnchorSnaps advances so a genuine level change (skipTime / weather ADOPTION - which snaps the anchor at the apply tail) snaps the keel with it, read from the counter so a gauge never touches the arbitration. Lanes: blkKeelSl / blkKeelSnaps / blkWalkRatio / blkWalkRatioMin+Max with the min's time+keel+standing triplet / and a dim-window census (blkWalkDimFrames/FirstS/LastS/SpanMaxS) keyed on ratio < 0.70 against the KEEL, not the session max, because a session max is time-of-day-poisoned over a long mission and a 30 pct drop against a 2 pct/s baseline cannot be time of day. Window lanes reset with the stats arm, the keel and its stamps with the session - the 26664 split applied at birth. PREDICTED BOUNDS, published before any dump reads them (the 26256 rule): ordinary play blkWalkRatio in ~[0.85, 1.18]; a dump3-class dim reads RatioMin ~0.3 with DimSpanMaxS in single-digit seconds and DimFrames in the hundreds; a skipTime/weather roll reads as blkKeelSnaps advancing with the ratio back near 1.0 inside the same window. WHAT THE NEXT DIM DUMP DECIDES: RatioMin ~0.3 with recovery and adoption counters still quiet CONVICTS the walk with the excursion measured, and the repair is then a measured bound (or a walk-rate budget) sized off the clean-session RatioMin population per the 26381 doctrine; RatioMin near 1.0 through an operator-witnessed dim FALSIFIES the walk reading outright and moves the dim downstream - and the secondary observation this dump also banked gets its turn: the self sun-map stopped re-rendering when the camera PARKED after fast flight (last dSunMapPasses at ser 24022; mapAge 1.0 -> 4.40 with mapOk 0 for the final 3.4 s; sunHero/Mid/OutValid all 0 with only Far standing), which is logged UNCONVICTED because the age gate's stand-down should brighten, not dim - but 'should' is an argument, and if the walk exonerates, the map-idle-at-park window is the next instrumented suspect, not another argument. ALSO CORRECTED IN PASSING (rule 1.11 scope): none - the 26476 and 26417 ledgers both pre-named their residuals accurately and are quoted, not amended. NUMBER HYGIENE: nothing minted - no mode, no lighting0.y, no visual, no dbgCtl.w; twelve stats lanes added (emission beside the shade-latch family; resets split per 26664). FREE NOW: debug modes 432+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+. || 26670 AMENDMENT IN PLACE (rule 1.11; the gauge's own falsification clause fired on its FIRST field round, which is the gauge working): THE WALK IS EXONERATED - dump2-26668 caught an operator-witnessed dim end-to-end and blkWalkRatioMin read 0.928 with blkWalkDimFrames 0. The dim ENTERED BY ADOPTION: stdSunLum 20.585 -> 4.581 in ONE row with the anchor snapping (entry ratio 0.222), a ~5.3 s plateau, then recovery 4.457 -> 16.649 in one row - preceded by ~2.5 s of dBlkApplies 0 (the standing's uploads STOPPED) and landing with a 141-applies-per-flush resume burst; all four session adoptions starved-class. DESIGN BLINDNESS, disclosed: the keel snaps on blkAnchorSnaps by construction ('a genuine level change does not walk, it ADOPTS'), so an adoption-borne dim reads ratio ~1.0 - the assumption that adoptions are always genuine is FALSE for the starved subclass after an upload gap, and the keel remains the WALK instrument only, which is the axis it just closed. The dim axis moves to the starved-adoption path with the 26670 census.
+//  || 26667 THE STENCIL COUNTS AND THE FRAGMENTS THAT READ THEM RASTERIZE UNDER TWO BASES, AND THE TAP NOW CROSSES BETWEEN THEM ONLY WHEN THEY ACTUALLY DIVERGE (KH_STEN_CYCLE_TAP; mode 431 stands it down CPU-side; C++ + HLSL, the CBFrame/ConstantData tail grows one float4x4 - offsets untouched, the 26575/26620 append precedent - and BOTH twin call sites carry a byte-identical block, the PSComposite copy placed after the KH_ARB_DEPTH #endif so both compiled variants inherit it per the 26434 lesson. SHADER SOURCE MOVED: every user pays one cold recompile). THE FIELD READ (dump2-26664, the operator's blur-and-size report, trace caught seconds before the dump): the NEAR/ENCODE AXIS IS CLEAN - seamNear[k] == injNear[k+1] row-for-row per the 26327 phase law through every 'wild' row including the 0.07/2.185 class flips at ser 12371-12374, and volPassNear[k] == injNear[k] on all of them, so the b2 depth-pair instrument certifies the seam encoded exactly what the counting draws consumed and 26326's fault class did not fire once in 512 rows. What DID move is swingPx, and its correlation is the mechanism: 0.60-0.66 px through STEADY 18 m/s translation (ser 12253-12261 - the two bases track each other at speed), exploding to 44-101 px for ~8 rows the moment the camera abruptly STOPS (ser 12245-12252, camStep collapsing 0.44 -> 0.008 m) and 187 px on the near-class flip row (12372); session svSwingOver32 1375 of 12199 injects, max 4318. The code-6 read taps the count volume at RAW i.pos.xy - 26317 removed reprojection from this path by design - so on exactly those rows every stencil verdict on our meshes belongs to a pixel up to ~100+ px away and the 7x7 scene-witness kernel renders the misregistration as the operator's blur while the basis offset renders as the size breathing. This is 26273's own pre-registered residual ('the fragment reads the stencil at its OWN screen position... differ by exactly svReprojPxMean') finally caught with per-row lanes on artifact frames, and it answers 26381's standing directive to 'ask what ELSE differs on the frames where the offset appears': the adopted-vs-cycle basis, nothing else. WHY THIS IS NOT THE THRICE-FALSIFIED REPROJECTION: 26234/26236/26242 each displaced the lookup by the FULL inter-frame delta (~30 px) on EVERY moving frame - a standing halo by construction - and 26244 traced the scattered edge to a rebased matrix forcing per-pixel fp32 camera subtraction. This tap (1) targets the CYCLE basis of the epoch the consumed copy was captured in (g_svs_cycle_vp - 26255's third channel, the counting draws' own view under the injection's projection - stamped into the SAME ring slot the witness matrix rides, selected by the SAME khs_hs), a transform none of the three dead builds ever used; (2) stores and consumes it ABSOLUTE with absolute i.wpos, the 26244 convention verbatim; (3) carries a 2 px DEADBAND, so at rest and in steady motion - the entire regime the halo lived in, measured 0.6 px this dump - the historic raster tap stands BIT-EXACTLY and the transform can only act on frames where the raster read is already tens of px wrong; (4) refuses behind-camera, off-screen and the zero matrix to the raster tap, the KhVolSel contract. 26382's b2-space prohibition is respected in full: the engine's x/y space is never touched - both matrices in this transform are OURS. DISCLOSED LIMITS: the scene-witness membership compares OUR window z against the resolved depth at the MOVED tap, and a large translation discontinuity shifts the same world point's window z between bases - membership can thin there and fall to the 3x3 max fallback AT the corrected tap, which is still strictly better placed than the raster read; and the count CONTENT is one engine frame of soldier motion old regardless of tap, which no read-side transform can close. PRE-REGISTERED ACCEPTANCE, ARMING LANE FIRST: (a) stenCycPubs tracking injects with stenCycMiss near the cold-start count - Pubs 0 means the ring or the cycle basis never armed and every null downstream is void; (b) THE ARTIFACT: soldier stencil shadows on our meshes hold shape and size through camera flings and abrupt stops at mode 0 and blur/breathe again under 431 - that A/B is the whole build; (c) at a parked camera and in steady motion, 0 and 431 are indistinguishable frame-for-frame (the deadband's guarantee) - any difference there is itself a defect report; (d) NO caster halo or ghost at mode 0 on ordinary movement - the 26243 signature; (e) svSwingOver32 keeps counting (the gauge is upstream of the fix and must not move). FALSIFICATION, BINDING: the halo returning at mode 0 convicts the transform whatever the deadband reads - 431 becomes the default, the entry is amended in place, and the residual moves to the count-content axis (the one-frame soldier lag), which is a WRITE-side or engine-side question this file has no instrument for yet. Blur SURVIVING at mode 0 with the arming lanes healthy exonerates registration entirely and re-opens 26379's sparse-count reading as the primary axis. NUMBER HYGIENE: mode 431 minted; no lighting0.y code, no visual, no dbgCtl.w. FREE NOW: debug modes 432+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+. || 26669 AMENDMENT IN PLACE (rule 1.11; the binding falsification clause fired): FALSIFIED AS A DEFAULT by the first field round - the operator reports a NEW brief offset at abrupt camera movement at mode 0 with the arming lanes healthy (stenCycPubs 8820 / Miss 1), and blur SURVIVING constant motion where the deadband guarantees raster identity - so clause (b) also fired and registration is EXONERATED for the blur, which re-opens 26379's sparse-count reading as the primary axis exactly as pre-registered. ROOT OF THE OFFSET, named on this entry's own convicting data: the swing spikes read 88-101 px at camStep 0.008 m - a PARKED camera - which cannot be engine divergence; swingPx differences the adopted view against OUR cycle latch, and the latch is stale on precisely the fast-camera frame (26533's staleness window verbatim), so the tap projected the read through the latch's error. 26246's warning that 'every gauge here differences two of OUR values' applied to swingPx itself and this entry did not heed it. WHAT SURVIVES: the deadband held (no offset at rest or steady motion, operator-confirmed), the epoch pairing armed cleanly, and the machinery stays compiled. DISPOSITION: default OFF at 26669 (CPU-side only - no shader source moved, no recompile for the respin); 432 arms it; 431 promoted to a bit-exact alias of the default per rule 1.18; stenCycCtrPx/Max added as the engagement instrument this entry shipped without.
+//  || 26666 THE NIGHT ADMIT TRUSTED ONE WITNESS AND THE HIJACK OWNED THAT WITNESS - THE SKY BREAKS THE TIE (KH_NIGHT_ADMIT_WITNESS; mode 430 restores the 26612 admit verbatim; C++ ONLY, one predicate at the fill gate, no shader source, no HLSL segment, no .khsc key moves). 26612's own falsification clause fired in dump1-26664 word for word: 'the 26418 black box returning WITH blkZeroSunAdmits climbing = the standing probe misread dark on a lit scene - gate the admit harder, never delete the refusal.' Measured: blkZeroSunAdmits 262 on a scene whose pending blocks carried sun 9.7-13.9 and whose anchor read blkAnchorSunL 14.1, blkShade latching sun (0,0,0) over amb 0.041 at t 16.0 s with the probe FRESH (4.8e-5 s) - the standing itself was the hijacked party, so 'measured-dark standing' was the fault agreeing with itself. THE GATE, per the clause: a zero-sun block is admitted only when the standing reads dark AND the sky witness does not contradict it - khzs_contra = kh_sky_static() with the witness sun above 0.10 elevation, the SAME discriminant the locator's dark-contra machinery has trusted since 26137 and 26665 now extends. Contradicted zero-sun blocks refuse to the flat-lit cold path: the 26418 trade, a flat box over a black one, now only for the short window 26665 needs to re-adopt (~0.7 s) instead of 26664's measured ~20 s. REAL NIGHT IS BYTE-IDENTICAL BY THE SAME TERM THAT PROTECTS THE DAY: below the horizon the witness reads under 0.10, khzs_contra never engages, and the 26612 night behaviour - admit, flushBoxSunMax 0, the mesh dark as the world is - stands untouched; dusk/dawn inside the 0.10 band simply keeps today's behaviour, which errs toward admitting the engine's own block. PRE-REGISTERED ACCEPTANCE, ARMING LANE FIRST: (a) a day session with a hijacked standing shows blkZeroSunWitRefusals climbing with Admits FLAT - WitRefusals 0 through a recurrence means the gate never fired and the null is void; (b) a night session shows Admits climbing with WitRefusals EXACTLY 0; (c) THE ARTIFACT: the cold-start mesh is flat-lit for under a second where 26664's was black for twenty; (d) 385 and 99 keep their exact 26612/26418 meanings (385 sits inside khzs_dark unchanged; 430 is a strictly narrower revert). FALSIFICATION: a black mesh recurring WITH WitRefusals climbing means the darkness ships through a path other than this admit - the fill took the published branch with a NON-zero dark sun, which is the 26195 dim-flavor axis, not this gate; a GLOWING mesh at genuine night with WitRefusals climbing convicts the witness elevation bar and the amendment is a tighter band, never deletion. NUMBER HYGIENE: mode 430 minted; lane blkZeroSunWitRefusals added (reset in reset_stat_counters beside its family). FREE NOW: debug modes 431+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+. || 26672 AMENDMENT IN PLACE (rule 1.11/1.16; the falsification clause FIRED and its prescribed remedy was the wrong shape): blkZeroSunWitRefusals 486 at genuine operator-confirmed night - the glowing mesh - with the convicting companion sunDirEngineY 0.410 AT NIGHT: the engine's directional-light export follows the MOON, so the elevation witness this entry trusted cannot split day from a moonlit night and the clause's 'tighter band' is unbuildable around it; the 34 admits interleaved with the refusals (the operator's dark phases inside the flap) were the kh_sky_static term reading unsettled right after the skip, which completes the mechanism end to end. The witness is REPLACED, not tightened: bright-content recency (any upload with sun sum > 1 reaching the arbitration inside 5 s - the fault class flows bright content by definition, real night flows none, the moon is irrelevant) with the 26050/26671 sun-jump escape so a skipTime's first night blocks admit immediately; the 15 s jump window covers the 5 s recency tail with no gap. Mode 430's meaning is unchanged. DISCLOSED RESIDUAL, bounded: a transient bright foreign upload at steady night can refuse zero-sun blocks for up to 5 s (a brief flat-lit blink), lane-visible in WitRefusals.
+//  || 26665 THE STANDING'S OWN SIGHTINGS EXECUTED THE PENDING BEFORE ANY RESCUE COULD RUN, AND THE KILL IS NOW WITHHELD EXACTLY WHILE THE STANDING IS CONTRADICTED (KH_BLK_CONTRA_PENDING; mode 429 restores the unconditional kill; C++ ONLY, one branch in the locator arbitration, no shader source, no HLSL segment, no .khsc key moves). THE CONVICTION IS THE WHOLE DUMP (dump1-26664, the cold-start black mesh, caught through its own recovery): the scene is LIT - pending sun 9.7-13.9, blkAnchorSunL 14.1 - while the standing rules DARK (per-row stdSunLum 0.000, blkShadeStdSun 0) and the shader is handed sun (0,0,0) over amb ~0.055 for every visible frame until ser 262, where the ONE regime adoption of the session (blkRegimeAdopts 1 == blkDarkReadopts 1) flips stdSun to 13.37 and the published block follows a flush later. Every rescue built for this exact fault read its null: blkDarkForceAdopts 0 and blkDarkForceHeldS -1 through blkDarkContraSticky 81,507; blkDarkReseeds 0; blkDarkSeedBlocks 0. The lane 26236 built to split the two remaining hypotheses answered: blkStickyPendAgeMax 0.160 s against the 0.5 s exclusivity bar - the pending IS being executed upstream, and the executioner is the standing-anchor-band match branch, which kills the pending on EVERY sighting of the ruling flavor and runs textually BEFORE khp_dark_contra is even computed. The sticky guard (26054/26137) protects the pending from interleaved THIRD flavors only; the 2 s hard escape (26236) needs g_blk_dark_contra_first to age, and that window is cleared every time the kill zeroes pend_t (dark_contra requires a live pending) - so both rescues were structurally unreachable at the dark flavor's own upload cadence, which is what 'pinned near 0 = something upstream is refreshing pend_t' in the 26236 stats commentary was waiting to name. THE REPAIR IS ONE WITHHELD EXECUTION, NOT A NEW PATH: when the same predicate the file already trusts (standing sun < 0.1, pending sun > 1, kh_sky_static with the witness above 0.10 - khp_dark_contra's own terms, recomputed at the kill site because the original is scoped below) holds, the standing's sighting still APPLIES - the mirror refreshes, last_std_time stamps, starvation logic untouched - but the pending survives, ages past 0.5 s, and adopts through the EXISTING exclusivity path; the collapse-class hold cannot intercept it because its own std_sun_l > 1 bar fails against a sub-0.1 standing. Heal time falls from the measured ~20 s to the exclusivity bar plus one flush. REAL NIGHT NEVER ENGAGES the predicate (witness below horizon - the 26137 guarantee, inherited verbatim); dark-vs-dark ping-pong stays excluded by the pending brightness bar; an undisturbed session is bit-identical (the predicate requires a live bright pending against a near-zero standing, which a healthy session never has). PRE-REGISTERED ACCEPTANCE, ARMING LANE FIRST: (a) blkContraPendHolds counting through a recurrence - 0 through a black window means the kill branch is not where the pending dies and this entry is void; (b) blkStickyPendAgeMax finally CLEARING 0.5 during the event - the direct mechanism proof 26236's commentary specified; (c) THE ARTIFACT: the cold-start black mesh lasting under ~1 s where dump1-26664 measured ~20 s, with blkDarkReadopts arriving within a second of blkContraPendHolds first counting; (d) night sessions and healthy day sessions byte-identical, blkContraPendHolds 0 in both. FALSIFICATION, BINDING: night-time lighting flapping between the world block and a bright foreign flavor with blkContraPendHolds climbing convicts the witness gate and 429 stands it down while the elevation bar is re-measured - never delete the sticky or escape layers underneath, they are this fix's own backstops; a black window with (a) counting but the pending STILL never ageing (b) moves the executioner to a third site and the next instrument is a census on pend_t writes, not another branch. NUMBER HYGIENE: mode 429 minted; lane blkContraPendHolds added (reset in reset_stat_counters beside its family). FREE NOW: debug modes 430+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+. || 26672 AMENDMENT IN PLACE (rule 1.11, proactive - blkContraPendHolds read 0 through the moon night, so this entry's clause has NOT fired): the predicate leaned on the same elevation witness the 26666 falsification convicted, and the moon walks through it identically; the witness terms are swapped for bright-content recency plus the sun-jump escape (ledger at g_blk_bright_seen_t and at the kill site). The fault class this entry repairs satisfies the new witness by definition - the contradiction IS bright content flowing against a dark standing - so the cold-start heal is untouched; the night hazard its falsification named now requires bright content genuinely flowing at night rather than merely a moon above 0.10.
+//  || 26664 THE LATCHES WERE SESSION STATE IN THE COMMENT AND STATS STATE IN THE CODE, AND EVERY A/B WINDOW PAID FOR THE DIFFERENCE (KH_LATCH_SESSION_RESET; C++ ONLY - two reset functions, no shader source, no HLSL segment, 76 unchanged, no .khsc key moves, NO MODE MINTED: there is no behaviour to revert to, the old placement was a defect with no field value). THE DEFECT: 26539 wrote 'the union radius latch is SESSION state' and put the reset in reset_stat_counters, and 26611 and 26663 each followed the comment into the same function. reset_stat_counters is called by reset_session_state - fine - AND by the getRenderStats arm AND by resetRenderStats, the call that opens a clean A/B window. So every window opened mid-mission set g_sun_union_rad_held, g_sun_union_lat_held and all four g_sun_fwd_held to -1 and the ladder scale to 1, forcing a re-acquire on the next fit of every band above its floor: ONE WHOLE RE-QUANTISATION of stored depth, the exact event 26663 shipped to suppress, fired by the operator's own measuring instrument at the start of every measurement. The 26663 acceptance clause (a) could therefore read one spurious relatch per window and clause (b) one extra value per window, both charged to the latch and neither its fault. THE REPAIR: held values move to reset_session_state beside the KH_JITTER_FLOOR continuity precedent, which already states the rule in its own words - prev-frame state is continuity, not census, and clearing it at the arm manufactures a false event. The HOLD/RELATCH counters STAY in reset_stat_counters deliberately: they are arming lanes, a window wants them zeroed, and the post-26663 handoff's instruction to read them as a session delta is WITHDRAWN - read them as a window count. The 26537/26538 band reach lanes also stay: they are re-filled every band render and their sentinel is census. The 26539 comment is corrected in place per rule 1.11. ALSO WITHDRAWN from that handoff, found in the same audit: 'PSComposite declares SV_Depth unconditionally' - it does not; KH_ARB_DEPTH selects between two compiled signatures and the injection picks per draw off khr_far_arb || khr_mesh_farkeep || khr_mesh_nearz, so the 8.5 variant already exists and only its GAUGE is open. PRE-REGISTERED ACCEPTANCE, ARMING LANE FIRST: (a) with a giant on screen and the camera parked, call resetRenderStats and read sunFwdRelatches on the next dump - 26663 read exactly one per stretched band per window and 26664 reads 0, sunFwdHolds counting from the first fit; (b) sunHero/Mid/OutFwdHeldM read the SAME value before and after the window reset; (c) a mission restart still reads -1 on every held lane and 1.0 on the ladder scale (the session path is unchanged in effect); (d) the union lanes sunUnionRadHeldM and the lateral twin behave identically under (a)-(c); (e) normal-sized meshes byte-identical - they never enter the latch. FALSIFICATION: a relatch still counting on a parked camera after a window reset means a caller of reset_session_state is firing mid-mission, and the next instrument is a count on THAT. NUMBER HYGIENE: no mode minted, no lane added, no code spent. FREE NOW: debug modes 429+, lighting0.y codes 72+, visual codes 33+, dbgCtl.w 13+.
 //  || 26663 THE BANDS' DEPTH WINDOW RE-FITS TO THE CAMERA EVERY FRAME, AND 26539's OWN RULE COVERS THE AXIS 26539 SAID WAS IMMUNE (KH_BAND_FWD_LATCH, one behavioural default with one live arm - mode 428 stands the latch down. C++ ONLY: fit arithmetic, no shader source, no HLSL segment, 76 unchanged, no .khsc key moves). OPERATOR, AFTER 26662 CLOSED THE ACNE: self shadow DRIFTS with the camera on large meshes and not on small ones, and 426 does not touch it. MODE 326 FIXES IT - that arm stands the whole 26537 reach fit down, so the axis is convicted before a line was written.
 //  || THE MECHANISM IS IN THE FIELD DATA ALREADY COLLECTED. khsh_fwd is a maximum over khsh_ds + khsh_er, and khsh_ds is the caster's offset along the sun axis FROM THE BAND CENTRE, which is the camera. It is FLOORED at khsh_dep, so a caster whose ds + er never clears 12 / 48 / 192 m leaves the window BITWISE STATIC - which is exactly why the normal-sized mesh reads sunHero/Mid/Out/FarFwdM all 0 with sunHeroReach pinned at 12 and does not drift. A 491.638 m enclosing radius dominates the sum, so khsh_fwd tracks the camera directly: the SAME caster measured stretches of 31.617, 141.299 and 180.882 m at three camera positions, taking sunHeroD2vM from 167.30 to 206.88 between two of them. A depth window that rescales every frame re-quantises every stored depth every frame, and the compare margin walks with it. The 26445 texel snap holds the LATERAL grid phase in the sun plane and cannot hold a depth origin and scale - it was never for that.
 //  || CORRECTION OWED TO 26539, IN ITS OWN WORDS (rule 1.16). That ledger earned the rule 'when you stabilise a sampling grid, stabilise BOTH its origin AND its spacing, and state which one you fixed' - and then wrote 'THE CAMERA BANDS ARE IMMUNE AND THAT IS THE CONTROL: khsh_one's lateral extent is khsh_half * 1.02 with khsh_half a BUILD CONSTANT, so its texel never changes', concluding that the union is the only fit whose extent is data-dependent. THAT IS TRUE OF THE LATERAL AXIS AND ONLY THE LATERAL AXIS. 26537 had made the bands' DEPTH extent data-dependent AND camera-dependent two builds earlier, and the immunity claim reads as though it covered the band. The rule was right and its own application was half of one, which is the same shape 26539 convicted 26537 for.
@@ -2366,7 +2432,7 @@ static std::atomic<bool> g_stats_armed{ false };
 //  || 26617 THE SHARP FAR-TIER LINE IS THE JURISDICTION PROTECTION ENDING ON A CLIFF, AND THE PROTECTION NOW FADES OVER THE SAME BAND THE VERDICTS DO - PLUS THE 26590 LEDGER'S OWN UNHONORED NOTE: THE GUARD LITERALS NOW MOVE WITH THE SCALED C++ GUARDS (KH_JURIS_EDGE_FADE default, mode 386 / lighting0.y 60 reverts the fade; mode 387 / code 61 reverts the guard scaling - two defaults, two one-switch A/Bs, rule 1.11). FIELD (operator, on 26616 at ~500): self-shadow tier transitions cross-fade correctly at the NEAR handoffs and show a DISTINCT SHARP LINE at the far ones. THE AUTHOR, read from the jurisdiction ladder's own structure: 26594's carry-deference made the 26590 mush-zeroing BINARY on two contours. (1) THE WINDOW-EDGE CLIFF: certification (khla_g) latches only inside the certifying tier's window, so on LIT surfaces the coarse tier's sub-guard mush is zeroed up to the window boundary and stands unguarded one pixel past it - a step of the coarse tier's full disagreement, exactly on the quality-level contour. (2) THE EPSILON-CROSSING STEP inside the blend band: a shadowed fine verdict carries (deference: coarse mush admitted as the blend partner) while an adjacent lit fine verdict does not (protection: coarse mush zeroed) - a full-magnitude flip on the fine tier's zero-crossing, the exact class the 26538 ledger named on the cast chain. BOTH amplitudes scale with the COARSE tier's texel - ~10 mm at hero->mid (invisible, the operator's working near fades) and ~522 mm at outer->union (the reported line) - which is the near/far asymmetry, clause for clause. THE FIX IS ONE WEIGHT: each certifying tier latches khla_w = KhJw(its own window-edge coordinate) beside khla_g - the SAME KhTbW curve the carries ride - and every no-carry rejection becomes res *= (1 - khla_w) instead of res = 0. CONTINUITY BY CONSTRUCTION, all three contours: window interiors are BIT-EXACT (weight 1, res *= 0 - the halo/dither protections 26589/26590/26592 untouched where they were proven); at the window edge the protection reaches 0 and meets the outside's unguarded value; at the epsilon-crossing the lit side's U*(1-khla_w) equals the shadowed side's lerp(U, ~0, khtb_w) because khla_w and khtb_w are the same tier's same edge coordinate through the same curve. The carry-deference itself is byte-identical (26594's falsification clause stands: lit fragments still never carry). CODES 60 / 55 / 26 pin the weight to 1 inside KhJw, so every historic revert reproduces its own era exactly. THE SECOND DEFECT IS OWED TO 26611 AND CONFESSED: the 26590 ledger wrote 'IF THE C++ GUARDS EVER CHANGE, THESE LITERALS MOVE WITH THEM' and 26611 scaled the C++ guards (48/192 -> 48s/192s) without moving the shader's 12/48/192 - the certified radii under-claimed by s at every scaled range, letting coarse mush inside the scaled guards stand on certified surfaces. The literals are now 6 * sunMetaN.w - the KH_SUN_CASCADE 6:1 depth:half ratio through the meta the fill already ships - so they track ANY future guard change structurally instead of by ledger discipline; hero (unscaled, 6*2 = 12) is arithmetically identical, and at s = 1 all three are bit-exact to 26616. Mode 387 restores the fixed literals. SEG BUDGET: seg #12 takes the khla_w declaration and stands at ~16176 B content+7 - ~204 B headroom, the file's tightest; NEXT INSERTION THERE MUST SPLIT (the 26538 statement-boundary precedent). PRE-REGISTERED ACCEPTANCE (rule 1.22): (a) walking the outer->union handoff at high range, the quality transition cross-fades over the outer band's ~34 m blend zone with NO line on the contour, from both directions; (b) the near handoffs unchanged (they were correct); (c) the vest-pose halo and whole-face dither STAY DEAD at mode 0 (interiors bit-exact - the 26589/26590 acceptance restated); (d) 386 brings the line back alone; 387 at high range brings back residual far mush on certified surfaces alone. FALSIFICATION: any halo-class dither on lit surfaces OUTSIDE window interiors at mode 0 = the fade admitted mush the cliff was hiding - tighten KhJw's curve toward the cliff (raise the smoothstep floor), never re-binarize. NUMBER HYGIENE: modes 386/387 + lighting0.y codes 60/61 minted. FREE NOW: debug modes 388+, lighting0.y codes 62+, visual codes 32+, dbgCtl.w 13+.
 //  || 26616 FIELD CONFIRMATION AND CAMPAIGN CLOSE - ENGINE PARITY DECLARED BY THE OPERATOR AND EVERY PRE-REGISTERED ACCEPTANCE READS PASS IN THE CONFIRMING DUMP (dump1 on 26615, ~500 setting, mode 0; ledger-only build, one stale comment amended at g_sun_range, no behaviour change). THE VERDICTS AGAINST THEIR OWN PRE-REGISTRATIONS: (26615 KH_SUN_RANGE_FROM_BANDS) sunRangeM 529.986 == bandMaxFar EXACTLY with sunRangeSrc 2 - the engine's committed cascade table is the live source and tracks the setting; (26611 KH_SUN_LADDER_SCALE, acceptance armed for the first time by 26615 and PASSED) sunLadderScale 2.64993 with halfDiags 2 / 21.1994 / 84.7978 = 2 / 8s / 32s to the digit, all three bands valid and rendering, sunOutReach 508.8 - the checkpoints scale with the slider and the far field is served to the setting; (26611 KH_SUN_UNION_LAT_FIT) latch clean at 1641 holds / 2 relatches with the sphere latch at 1631 / 12, snap 0.153 m inside the 0.522 m texel - the texel is the honest price of this scene's kilometre-class caster, stable, no sawtooth; (26611 KH_BLK_SLEW_REGIME + 26612 KH_NIGHT_ZERO_SUN, closed by dump1-26612 and quiet here as they must be in a skip-free day session) regime commits 0, zero-sun lanes 0/0, blkPubSlews 252 still smoothing, meshDarkFrames 0, dark refusals 0; castChainCode 0, debugMode 0, pf all healthy. WHAT STANDS PERMANENTLY: modes 382/383/384/385 keep their shipped meanings (live one-switch reverts, rule 1.18); the lanes sunRangeM / sunRangeSrc / sunLadderScale / sunUnionLat* / blkSlewRegimeCommits / blkZeroSunAdmits are PERMANENT diagnostics - the whole campaign's root lesson is that a range-riding system without a range lane is unfalsifiable at the default, and these are the falsifiers. THE ENGINE-PARITY TRADE, restated once for the record: raising shadowVisibility coarsens the ENGINE's cascades and, by 26611's design, our mid/outer bands by the same factor - quality-vs-reach is the setting's own dial on both sides of the mirror, hero stays 2 m @ 1 mm regardless. OPEN AXES, BANKED, NOT SCHEDULED: per-caster union windows (named at 26613) if a far-field scene without a kilometre-class caster still reads coarse; the fog session-reset trio (banked since 26539); the sky probe confirmation campaign. NUMBER HYGIENE: nothing minted, nothing retired. FREE NOW: debug modes 386+, lighting0.y codes 60+, visual codes 32+, dbgCtl.w 13+.
 //  || 26615 THE ENGINE HAS BEEN TELLING US THE SHADOW VIEW DISTANCE ALL ALONG, IN THE ONE PLACE WE ALREADY LISTEN - g_sun_range NOW DERIVES FROM THE ENGINE'S OWN COMMITTED CASCADE TABLE, AND THE TWO OPEN FIELD COMPLAINTS RESOLVE TO ONE DEAD READ AND ONE ENGINE-SIDE TRADE (KH_SUN_RANGE_FROM_BANDS, PRIMARY; the getVideoOptions read demotes to fallback, writing only while src != 2; no revert mode - the sources agree wherever both are live). FIELD (dump1 on 26614, operator at ~500): (I) 'whatever you did regressed the engine-cast shadows on our meshes.' READ FROM THE DUMP, NOT ARGUED: debugMode 0, sunLadderScale 1, halfDiags 8/32 - every band footprint bit-exact to 26610; the receive twins untouched since 26610 and verified; the lateral latch clean (1072 holds / 2 relatches). WHAT DID CHANGE IS THE ENGINE'S OWN TABLE: the committed cascade ladder now spans 0 -> 529.986 (slot fars 18.4 / 36.9 / 57.7 / 83.6 / 120.7 / 182.3 / 297.4 / 530.0) where the 200-era table sealed ~0 -> 200+. Raising shadowVisibility stretches the SAME engine cascade resolutions over 2.65x the ground, so every engine texel is ~2.65x coarser per metre - on our meshes AND on vanilla terrain identically, which is the field check that separates authorship in one glance. We mirror the engine's maps verbatim; their quality is the setting's own disclosed trade and no code on this side changed it. NOT DISMISSED, BOOKED: if vanilla ground shadows do NOT show the same coarsening at 500, that falsifies this reading and reopens the receive - the comparison is pre-registered as the discriminator. (II) 'self shadows still die at ~200 with the setting at 500.' sunRangeSrc 0: the getVideoOptions hashmap reached through the wrapper contains NO key matching even the widened case-folded 'shadowvis' substring - the mirror has NEVER written, 26450's per-flush read included, and every range consumer (the 94-99.5% fade, caster eligibility, the 26611 ladder scale, the union window and lateral fit) ran at the 200 default through every field round since. The 26593 'mirror is healthy' verdict is formally WITHDRAWN: it was rendered at the stock setting, where a dead mirror is unfalsifiable - the 26611/26613 lesson completing itself. THE FIX IS THE DUMP'S OWN JUXTAPOSITION: the same file that read src 0 read bandMaxFar 529.986 - the engine's deepest committed cascade far plane IS the live shadow draw distance, whatever path set it, delivered through the band-capture machinery this file has trusted for the receive since 26389. The derivation runs at the band census (max committed far, NaN-guarded, validity floor 8 m, ceiling 1e5, deadband 0.5% so split jitter cannot thrash the union latches downstream), stores src 2, and stands the videoOptions fallback down while it holds. No committed bands ever (shadows disabled, sky-only cold) = fallback order unchanged: videoOptions, then the 200 default. PRE-REGISTERED ACCEPTANCE (rule 1.22), the 26611 ladder acceptance finally armed: at setting ~500, sunRangeM ~530 with sunRangeSrc 2; sunLadderScale ~2.65; sunMid/OutHalfDiag ~21.2 / ~84.8; the self/cast fade edge at ~498-527 m (the operator's 200 m death moves with the slider); checkpoints tracking the setting; at stock 200, sources agree and behaviour is 26614-identical. FALSIFICATION: sunRangeM tracking the setting with the checkpoints still fixed convicts the ladder itself; sunRangeSrc 2 with the fade edge still at ~200 convicts the fade's own mirror plumbing (mirMeta.w) separately. NUMBER HYGIENE: nothing minted (src value 2 reassigned from the never-fielded 26613 command per its own non-reservation note). FREE NOW: debug modes 386+, lighting0.y codes 60+, visual codes 32+, dbgCtl.w 13+.
-//  || 26614 THE setShadowRange OVERRIDE IS WITHDRAWN UNSHIPPED ON OPERATOR DIRECTIVE - THE getVideoOptions MIRROR IS THE SINGLE AUTOMATIC WRITER, PER FLUSH, AS 26450 DESIGNED IT (no revert: 26613 never reached the field, so there is no shipped behaviour to stand down). WHAT 26613 SHIPS FORWARD UNCHANGED, both halves of the actual repair: the WIDENED KEY MATCH (case-folded 'shadowvis' substring instead of the 16-char exact compare - one of the two candidate classes for the stuck mirror, closed for free) and the LANES sunRangeM / sunRangeSrc (the other half: at the 200 default a dead mirror and a healthy one emit identical dumps, which is how this class survived two field rounds). THE DIAGNOSTIC IS NOW PURELY AUTOMATIC AND THE NEXT DUMP IS STILL DECISIVE, three exhaustive verdicts: sunRangeSrc 0 = the key never matched even case-folded (the key fault stands, and the dump carries that fact explicitly for the first time); src 1 with sunRangeM at the operator's setting = the mirror is healthy and the 26611 ladder acceptance goes live (expect sunLadderScale = setting/200, sunMid/OutHalfDiag 8s/32s, the fade edge at 94-99.5% of the SETTING, checkpoints moving with the slider); src 1 with sunRangeM 200 against a changed setting = getVideoOptions itself does not carry the change - the setting was altered through a path that writes the live engine value outside the video-options store, NO read of this map can ever see it by construction, and the resolution is the operator naming how the setting is changed (a config/difficulty/scripted source), not more code on this side. THAT THIRD VERDICT IS THE HONEST RESIDUAL of withdrawing the override: the command existed to cover exactly it, the directive accepts the exposure, and the lane converts it from an invisible failure into a one-line dump read. NUMBER HYGIENE: nothing minted, nothing retired (26613's src value 2 was never fielded and is NOT reserved). FREE NOW: debug modes 386+, lighting0.y codes 60+, visual codes 32+, dbgCtl.w 13+.
+//  || 26614 THE setShadowRange OVERRIDE IS WITHDRAWN UNSHIPPED ON OPERATOR DIRECTIVE - THE getVideoOptions MIRROR IS THE SINGLE AUTOMATIC WRITER, PER FLUSH, AS 26450 DESIGNED IT (no revert: 26613 never reached the field, so there is no shipped behaviour to stand down). WHAT 26613 SHIPS FORWARD UNCHANGED, both halves of the actual repair: the WIDENED KEY MATCH (case-folded 'shadowvis' substring instead of the 16-char exact compare - one of the two candidate classes for the stuck mirror, closed for free) and the LANES sunRangeM / sunRangeSrc (the other half: at the 200 default a dead mirror and a healthy one emit identical dumps, which is how this class survived two field rounds). THE DIAGNOSTIC IS NOW PURELY AUTOMATIC AND THE NEXT DUMP IS STILL DECISIVE, three exhaustive verdicts: sunRangeSrc 0 = the key never matched even case-folded (the key fault stands, and the dump carries that fact explicitly for the first time); src 1 with sunRangeM at the operator's setting = the mirror is healthy and the 26611 ladder acceptance goes live (expect sunLadderScale = setting/200, sunMid/OutHalfDiag 8s/32s, the fade edge at 94-99.5% of the SETTING, checkpoints moving with the slider); src 1 with sunRangeM 200 against a changed setting = getVideoOptions itself does not carry the change - the setting was altered through a path that writes the live engine value outside the video-options store, NO read of this map can ever see it by construction, and the resolution is the operator naming how the setting is changed (a config/difficulty/scripted source), not more code on this side. THAT THIRD VERDICT IS THE HONEST RESIDUAL of withdrawing the override: the command existed to cover exactly it, the directive accepts the exposure, and the lane converts it from an invisible failure into a one-line dump read. NUMBER HYGIENE: nothing minted, nothing retired (26613's src value 2 was never fielded and is NOT reserved). FREE NOW: debug modes 386+, lighting0.y codes 60+, visual codes 32+, dbgCtl.w 13+. || 26688 AMENDMENT, rule 1.11: dump1/2-26687's videoOptKeys census lists 'shadowVisibility' in this map beside 'objectVisibility'. The key was never absent; sunRangeSrc stayed 0 in 26614's session for a reason this entry did not name, and stayed 2 (bands) in every session since, which gates this read off before it runs. The 'no shadowvis key at all' finding is withdrawn.
 //  || 26613 THE 26611 LADDER NEVER RAN BECAUSE THE RANGE IT SCALES BY NEVER MOVED - THE shadowVisibility MIRROR IS STUCK AT THE 200 DEFAULT AND EVERY RANGE-RIDING SUBSYSTEM PINS WITH IT; THIS BUILD INSTRUMENTS THE MIRROR, HARDENS ITS KEY MATCH, AND GIVES THE OPERATOR A DIRECT OVERRIDE (KH_SUN_RANGE_SOURCE; new command setShadowRange; no revert mode - nothing default-visible changes while the mirror agrees, and the override is operator-explicit). FIELD (dump2 on 26612, operator at shadowVisibility ~500): sunLadderScale reads 1 and sunHeroReach 244 = 200 + the caster's own radius - khsr_rad, hence g_sun_range, read 200 the whole session. The mirror is the master fault for every clause of the complaint AT ONCE: KhSunRangeFade rides the same value, so every shadow of ours - cast AND self - fades to zero across 94-99.5% of TWO HUNDRED metres regardless of the setting (the 'fade or become invisible'); caster eligibility drops at ~200; and the 26611 ladder pins at s=1, which is the unchanged checkpoints. 26611's fixes are NOT acquitted or convicted by this round - they were never engaged. THE BLIND SPOT IS MINE AND THE LESSON IS RULE 1.12'S OLDEST: 26611 shipped a range-driven default with NO LANE CARRYING THE RANGE, and 26593 ledgered 'the mirror is healthy' from a session that never moved the setting - at the 200 default a dead mirror and a healthy one emit identical dumps. An acceptance lane must be able to FAIL; sunLadderScale could not distinguish 'scale correct at 200' from 'range stuck at 200'. WHY THE MIRROR CAN BE DEAD, both candidate classes covered without engine-side proof: (a) the operator's change was made through a path getVideoOptions does not reflect (a scripted setter or difficulty/config source writes the live engine value without touching the video-options store), or (b) the hashmap key does not match the 16-char exact compare (a variant spelling). THE FIXES: (1) LANES sunRangeM + sunRangeSrc - the decisive read; the next dump names the fault class in one line whatever it is. (2) THE KEY MATCH WIDENS to a case-folded substring test for 'shadowvis' (catches shadowVisibility/shadowsVisibility variants; still SCALAR-typed, still leaves the previous value on any failure). (3) setShadowRange <metres> - a registered command writing g_sun_range directly and latching src=2, under which the per-flush mirror STANDS DOWN so the two writers can never fight at flush rate; setShadowRange 0 (or negative) releases back to the mirror (src=0 until the mirror's next successful read). Values are stored raw; every consumer already carries the 8-1000 clamp (the 26454 discipline), so the command cannot out-range the fade, the ladder, the eligibility or the lateral fit - one value, five consumers, one clamp law. ALSO READ FROM THE SAME DUMP, RECORDED FOR THE NEXT ROUND'S EXPECTATIONS: the union lateral fit IS engaged and latching (sunUnionLatHolds 1405 vs 2 relatches) and its requirement legitimately equals the sphere in this scene - sunVpSpans ~2 km with objTotal 2 mean a caster whose OWN extents are kilometre-class, and a single 4096 map over a 2 km subject prices ~0.5 m texels by arithmetic no fit can beat. With the range actually at 500 the scaled ladder serves everything nearer than 80 m at <= 40 mm and the union answers only past that, which is the designed division of labour; if the far picture is still unacceptable THEN, the named next axis is per-caster union windows (a real feature, its own build), not another fit refinement. DUMP1-26612 VALIDATION, closing the lighting campaign: both skips land in ONE frame (dusk-to-night 0.3->0.014 at 5938->5939; night-to-day 0.019->22.7 at 6257->6258), blkZeroSunAdmits 759 through the night with Refusals 2 (the transition edges - the 26418 day protection intact), regime commits 6, meshDarkFrames 0. The operator's residual 1-2 s is the sun-direction settle/jump debounce (sunSettleHolds 6, sunOk unsettled ~1.2 s around each skip) - the deliberate anti-flicker posture on the shadow-shaped consumers, disclosed and accepted ('we can live with that'). LIGHTING: CLOSED. PRE-REGISTERED ACCEPTANCE (rule 1.22): (a) next dump2-class round reads sunRangeM 500 / sunRangeSrc 1 (mirror fixed by the widened key) OR the operator runs setShadowRange 500 and reads sunRangeSrc 2 - either way sunLadderScale 2.5, sunMid/OutHalfDiag 20/80, the fade edge moving to ~470-497 m, and the quality checkpoints moving with the slider; (b) at stock 200 with no override, byte-identical behaviour to 26612. FALSIFICATION: sunRangeM 500 with the checkpoints still fixed convicts the ladder itself (26611's own acceptance finally live). NUMBER HYGIENE: no modes minted. FREE NOW: debug modes 386+, lighting0.y codes 60+, visual codes 32+, dbgCtl.w 13+.
 //  || 26612 THE GLOWING MESH SURVIVED 26611 BECAUSE THE NIGHT BLOCK WAS ARRIVING ON TIME AND BEING REFUSED AT THE DOOR - THE 26418 ZERO-SUN GATE'S OWN PREMISE IS FALSIFIED BY THE FIELD DUMP AND THE REFUSAL LEARNS THE STANDING FLAVOUR (KH_NIGHT_ZERO_SUN, DEFAULT; mode 385 restores the unconditional 26418 refusal - the one-switch A/B, rule 1.11; 99 still stands the whole gate down). FIELD (dump1 on 26611, skipTime to night): THE 26611 SLEW FIX WORKED EXACTLY AS PRE-REGISTERED - blkAmbLum 2.384 -> 0.0088 and blkSunLum -> 0 in ONE frame at the skip with blkSlewRegimeCommits 1, no decay tail - AND THE MESH STILL GLOWED: flushBoxSunMax 7.43 / flushBoxAmbR 0.53 (day values) at the end of a night session whose published block read sun 0 / amb 0.0186. The published pipeline is now proven healthy end-to-end; what ships to the shader is not it. THE AUTHOR IS fill_lighting_obj_cb's 26418 GATE: 'an exactly-zero sun is an unpopulated block, never a lighting state' refuses the block to the cold path - FLAT WHITE SUN OVER SCALAR AMBIENT - and at night the engine's sun IS exactly zero, so the correct block is refused every fill: blkZeroSunRefusals 337 and climbing across the night tail. The 26418 premise ('no time of day produces an identically zero sun colour') is disproven by the same dump's STANDING lanes: stdSunLum exactly 0 with stdAmbLum 0.0186 is the engine's own settled night. THIS IS ALSO THE COMPLETE HISTORY OF THE COMPLAINT: before 26611 the sun channel hit exact zero instantly (the slew's divide guard) which armed 26418's flat-white the moment of the skip, while ambient decayed at 25%/s underneath - two authors stacked, which is why 26611's real fix changed the lanes and not the screen, and why 'a recent build broke it again' names 26418, not 26503. THE FIX USES THE DISCRIMINATOR THIS FILE ALREADY TRUSTS FOR EXACTLY THIS CALL - the standing flavour, the 26344 dark-pub guard's own 0.5 bar: a zero-sun block against a standing sun > 0.5, or against an UNKNOWN standing (std_sun_l < 0, the true-cold window where 26418's unpopulated-block fault actually lives), is the fault and stays refused; against a MEASURED-dark standing (0 <= std_sun_l <= 0.5) it agrees with the scene and ships. The 26418 protection is intact in its own habitat (day cold start: standing is either day or unknown, both refuse) and inert in the one it was never built for. NO OTHER CONSUMER SPECIAL-CASES ZERO SUN: the mesh shader is base * (lightAmb * scalar + direct + dyn) with direct riding lighting2, so the admitted night block renders dark by arithmetic, and the debug magenta (lightAmb.w) keys off the cold path itself, unchanged. PRE-REGISTERED ACCEPTANCE (rule 1.22): (a) skipTime to night - meshes go dark within ~2 frames, flushBoxSunMax 0 with flushBoxAmb at the block's night values, blkZeroSunAdmits climbing, blkZeroSunRefusals FLAT through the night; (b) skipTime night-to-day - meshes light within ~2 frames (the 26611 regime bypass, already field-proven on the lanes); (c) a DAY cold start still counts a handful of blkZeroSunRefusals and never a black box (the 26418 acceptance restated); (d) mode 385 brings the night glow back alone. FALSIFICATION: the 26418 black box returning WITH blkZeroSunAdmits climbing = the standing probe misread dark on a lit scene - tighten the admit bar (it is one constant), never delete the refusal. NUMBER HYGIENE: 385 minted here. FREE NOW: debug modes 386+, lighting0.y codes 60+, visual codes 32+, dbgCtl.w 13+.
 //  || 26611 THE SHADOW LOD LADDER LEARNS THE RANGE, THE UNION STOPS PAYING EUCLIDEAN PRICES FOR SUN-PLANE GOODS, AND THE SKIPTIME LIGHTING TAIL IS THE 26503 SLEW'S OWN EXEMPTION NEVER ENGAGING - THREE DEFAULT CHANGES AND ONE WHITELIST REPAIR, EACH WITH ITS OWN ONE-SWITCH REVERT (rule 1.11). FIELD (operator, two reports + dump1/dump2 on 26610): (I) shadows cast by our meshes - onto the world AND onto our own meshes - switch quality at the SAME distances whatever shadowVisibility says, all the switches land within a few dozen metres, and quality goes 'insanely low' near the range edge; (II) skipTime does not reliably update mesh lighting - sometimes never - leaving meshes glowing at night; 'used to not be a problem, a recent build broke it again'. AUTHORS, ALL THREE READ FROM THE DUMPS AGAINST THE CODE, NONE ASSUMED. (I-a) THE TIER LADDER IS BUILT OF CONSTANTS: hero/mid/outer half-extents 2/8/32 m are KH_SUN_CASCADE build constants, so the three handoffs sit at fixed distances bunched inside 32 m while only the union's far texel follows the slider - raising the range moved the cliff and never the rungs. FIX = KH_SUN_LADDER_SCALE (ledger at the khsh_one call sites; mode 382 reverts): mid/outer halves AND depths (the calibrated 6x ratio kept) scale by s = clamp(range/200, 1, 5); hero stays 2 m @ 1 mm (the near field is a calibration constant). At the stock 200 the scaled defaults are BIT-EXACT to 26610 - the whole validated corpus is the s=1 point - and at the operator's ~300+ the switches move out to 2/12/48+ and spread with the slider, engine-cascade semantics. s is a pure function of the SETTING, so the 26445 governing rule (quality a function of distance only, never caster set or camera) and the 26539 sawtooth law (texel constant per session) both hold; the 26539 ledger text naming khsh_half a build constant is amended in place. ACCEPTANCE: sunMid/OutHalfDiag read 8*s/32*s (12/48 at range 300), sunLadderScale carries s, and the switch distances track the slider in the field. (I-b) THE UNION TEXEL IS PRICED BY THE WRONG SPACE: dump2 reads sunUnionTexelM 0.645 m at sunMapHalfDiag 1165 under a ~300-400 range - 4x the range price - because 26505's caster growth unions ENGINE-AXIS boxes and R is that box's enclosing sphere, so ONE eligible far caster (admitted by the 26036 shadow-reach test, whose own premise is that an eligible far caster is approximately DOWN-SUN and therefore laterally NEAR in the sun plane) charges its full euclidean distance to the LATERAL extent and every union-served fragment pays it. 26036's 'does NOT grow the map fit' claim was true of the caster-anchored fit and silently invalidated by 26505. FIX = KH_SUN_UNION_LAT_FIT (ledger at the fit; mode 383 reverts): R becomes 1.02x a held SUN-PLANE lateral requirement - camera-window lateral offset + range, unioned with each eligible caster's perpendicular-to-sun offset + enclosing radius, computed PER CASTER (never from grown-box corners: engine-axis unions manufacture phantom corners under diagonal sun) - capped at the sphere so it can never price coarser than 26610. R_dep and the whole depth domain still ride the 26539 sphere latch untouched (KH_SUN_FIT_SPLIT makes lateral-only R changes legal), coverage is by construction (an eligible caster's own lateral term is in the max; cross-sun far casters were never eligible), and the lateral radius takes the 26539 latch policy verbatim on its own held value (10% slack, 1.25x drop, mode 329 stands BOTH latches down). ACCEPTANCE: sunUnionTexelM ~0.17 m at range 300 in the dump2 scene with sunUnionLatHolds dominating sunUnionLatRelatches; the 26036 standing-in-the-long-shadow case still paints (if it clips, the premise failed - 383 is the stand-down); sunUnionRadHeld unchanged. (II) THE 26503 PUBLISH SLEW'S SKIPTIME EXEMPTION NEVER ENGAGES: 'cold or stale (>1 s) commits outright' rode the snapshot age, but g_inj_blk_ms refreshes every pass, so in continuous play every skipTime decays at 25%/s. dump1 catches the mechanism whole at the skip frame: stdSunLum 16.72->0 in ONE frame, blkSunLum 0 one frame later - but only because the sun's night target is exactly zero and the khsl_ns > 1e-6 divide guard accidentally commits exact-zero targets - while blkAmbLum (target 0.0105, above the guard) decays 2.07->0.29 across the dump's 8 s tail at exactly the slew's exponential (a fractional cap against a shrinking base needs ~21 s to fall two decades). Ambient-times-material at night IS the glowing mesh, and the sun/ambient asymmetry is why only SOME skips read as 'never'. FIX = KH_BLK_SLEW_REGIME (ledger at the slew; mode 384 reverts): a candidate whose channel SUM moves >3x against the previous publish (either direction, 0.02 floors) is the regime-change class the engine itself steps - commits outright, both channels together; under 3x the slew stands verbatim (referee catch-up 7.3%/frame and the 26502 0.70x clusters are far inside the bar, so nothing 26503 retired can return through it). ACCEPTANCE: blkAmb/SunLum land on stdAmb/SunLum within ~2 frames of a skip with blkSlewRegimeCommits counting ~once per skip; blkPubSlews keeps counting under cloud attenuation. FALSIFICATION: 26503's steps/pops returning at mode 0 = the 3x bar is too low; raise it, never delete the bypass. WHITELIST REPAIR: mode 381 (26610 KH_BAND_REL_INTERP revert) was minted straight into the sqf RETIRED list, so setRenderDebug 381 returned false and the shipped field A/B was unreachable - relocated to the accept list beside 371; the shader ladder always honoured it, only the gate refused it. REVIEW, AS ASKED, ALL FOUR SHADOW CLASSES WALKED: engine-cast stencil receive and cascade-band receive onto our meshes are HEALTHY - both multiply KhSunRangeFade (26464/26593: full to 94% of shadowVisibility, gone at 99.5%), the band z-ladder seals the engine's own cascade table (bandNear/Far 0-400 at the session's setting, engine parity by construction), and the gap0-7 lane table is just the band table latched at a historic worst-gap event, not a live defect; our casts onto the world and onto ourselves both ride the four-tier chain, so (I-a)+(I-b) fix both classes at once. NUMBER HYGIENE: 381 keeps its 26610 meaning (rule 1.18); 382/383/384 minted here. FREE NOW: debug modes 385+, lighting0.y codes 60+, visual codes 32+, dbgCtl.w 13+.
@@ -2829,8 +2895,17 @@ cbuffer CBObj : register(b0)
     float4 localParams1; // x = falloff (normalized to mean radius), y = localized flag
     float4 localRadii;   // xyz = mask radii (engine axes)
     float4 bandParams;   // x = band min (m), y = band max (m, <=0 unbounded), z = falloff (m), w = banded flag
-    float4 lighting0;    // x = lit flag, y = unused, z = ambient, w = diffuse
+    float4 lighting0;    // x = lit flag, y = THE RECEIVE-ARM CODE LANE (26658
+                         // correction, rule 1.16 - never "unused" since the
+                         // 166/167/168 receive-kill split; codes 72+ free),
+                         // z = ambient, w = diffuse
     float4 shadowMeta2;      // x = far-visibility clamp flag (VSMain/VSComposite; PER OBJECT);
+                             // 26684: y = object view-distance cut in metres (0 = off;
+                             // KH_OBJ_VIS_CUT, mode 437 zeroes), z = owner-map object id
+                             // (0 = not tested; KH_MESH_OWNER_PREPASS), w = owner-map
+                             // sample count (0 = map absent). yzw were the zeroed live-table
+                             // origin, folded per entry long ago; the two legacy
+                             // ShadowMapFactor subtractions of yzw were no-ops and are gone.
                              // yzw = the table's OWN camera origin (engine axes)
     float4 objRot0;       // engine-axes rotation rows (row-vector: world =
     float4 objRot1;       // center + local.x*R0 + local.y*R1 + local.z*R2).
@@ -3053,6 +3128,11 @@ cbuffer CBObj : register(b0)
     // so every offset above is byte-identical to 26619.
     row_major float4x4 sunVP5;
     float4 sunMeta5;
+    // 26667 KH_STEN_CYCLE_TAP - the cycle-basis view-projection of the
+    // frame the consumed volume copy was captured in. Appended at the tail
+    // so every offset above is byte-identical to 26666. All-zero = stand
+    // down (the consumer's w gate refuses to the raster tap).
+    row_major float4x4 stenCycVp;
 };
 )HLSL" R"HLSL(
 // ==========================================================================
@@ -4043,7 +4123,57 @@ float KhVolSoft(float2 khf_r, float khf_z, float khf_gx, float khf_gy, float khf
     return khf_s / khf_w;
 }
 
-)HLSL" R"HLSL(int2 KhVolWalk(float2 khw_r, float2 khw_j, float khw_z,
+)HLSL" R"HLSL(// 26687 KH_MESH_OWNER_PREPASS helpers (shared header; see the block's own comment)
+// 26684 KH_MESH_OWNER_PREPASS (mode 438 stands it down; ledger at
+// KH_BUILD_TAG). 26687: MOVED into the shared header g_cb_hlsl - 26684 put
+// this in g_hlsl_static, which the composite and effect units never see;
+// every composite compile failed on X3004 'KhOwnerRejects' for two builds
+// (compFailStreak 8/8) and the injection fell back to PSMain.
+// The injection's OWNER MAP: per sample, the nearest admitted
+// mesh fragment's (viewport depth, object id) pair packed in one R32_UINT,
+// written under a strict-LESS depth test so the FIRST-DRAWN of any tie owns
+// the sample - a stack of coincident meshes has exactly one owner and the
+// rest of the stack exits PSComposite at its head. Depth rides 20 bits of
+// the saturated viewport value (one quantum of slack in the test); the id is
+// the 1-based draw index modulo 4096, and an id collision only ever KEEPS a
+// fragment (it reads as the owner), never rejects one - the conservative
+// direction. Two bindings, one runtime switch on the sample count in
+// shadowMeta2.w: Texture2DMS cannot alias a single-sample resource.
+Texture2DMS<uint> khOwnMs : register(t33);
+Texture2D<uint>   khOwnSs : register(t34);
+uint KhOwnerPack(float khop_z, float khop_id)
+{
+    uint khop_q = (uint)(saturate(khop_z) * 1048575.0f + 0.5f);
+    return (khop_q << 12) | ((uint)khop_id & 4095u);
+}
+// true = REJECT: on EVERY sample of the pixel the map holds a DIFFERENT
+// object that is nearer OR EQUAL (within one quantum) to this fragment. Any
+// empty sample, any sample this object owns, or any sample where this
+// fragment is strictly nearer than the owner keeps it - at silhouettes the
+// map is per sample, so a fragment covering samples the owner does not
+// cover survives on those samples.
+// 26687 CORRECTION, rule 1.11: 26684 kept a non-owner at EQUAL depth ("not
+// farther keeps it"), which is precisely the coincident-stack case the map
+// exists for - the strict-LESS owner draw resolved the tie to the first
+// drawn and the test then handed it back. dump1-26686 (PSMain carrying the
+// test, ownDraws == injections) still scaled with the stack: this line.
+bool KhOwnerRejects(float2 khot_px, float khot_z, float khot_id, float khot_samp)
+{
+    int2  khot_p  = int2(khot_px);
+    uint  khot_me = (uint)khot_id & 4095u;
+    float khot_q  = floor(saturate(khot_z) * 1048575.0f + 0.5f);
+    float khot_dir = (depthParams.w < depthParams.z) ? -1.0f : 1.0f;   // toward-far positive
+    int   khot_n  = (int)khot_samp;
+    [loop] for (int khot_s = 0; khot_s < khot_n; ++khot_s) {
+        uint khot_o = (khot_n > 1) ? khOwnMs.Load(khot_p, khot_s)
+                                   : khOwnSs.Load(int3(khot_p, 0));
+        if (khot_o == 0u) return false;
+        if ((khot_o & 4095u) == khot_me) return false;
+        if (((float)(khot_o >> 12) - khot_q) * khot_dir > 1.0f) return false;   // owner farther: keep
+    }
+    return true;
+}
+int2 KhVolWalk(float2 khw_r, float2 khw_j, float khw_z,
                float khw_gx, float khw_gy, float khw_tol)
 {
     float2 khw_d = khw_j - khw_r;
@@ -4544,6 +4674,60 @@ float KhTbW(float khtw_e)
          ? 1.0f - smoothstep(0.60f, 0.98f, khtw_e)
          : 1.0f - smoothstep(0.75f, 0.98f, khtw_e);
 }
+// 26691 KH_TIER_FADE_DIR (mode 442 / lighting0.y 72 reverts to the symmetric
+// 26618 curve; ledger at KH_BUILD_TAG). THE ONE BLEND, all fifteen carry
+// sites, both chains and the world cast. A hand-off lerp cannot dip below
+// either end, so a shadow that fades out inside the fine tier's own window
+// is the PARTNER tier reading lighter - and the fine tier is the authority
+// wherever it contains the fragment. When the carried fine verdict is DARKER
+// than the partner the weight holds at 1 until the 26618 curve has spent
+// 72 pct of the band (w = 0.28 <=> e = 0.90 at stock) and reaches 0 at the
+// window edge as before; when it is LIGHTER (the sharpness direction, the
+// coarse skirt) the weight is 26618's verbatim. Both curves are 1 inside
+// e 0.75 and 0 at 0.98, the branches meet where fine == partner, KhJw is
+// untouched, so the 26617 continuity proof stands clause for clause.
+// Code 73 (mode 443) is the PARTNER PAINT: the partner alone inside the
+// band, the arming read for which tier authors a fade (read with 257 and
+// 0 at the same pose; 269 names the tier).
+// 26693: the hold STANDS DOWN (rule 1.10) - its per-pixel curve choice
+// jitters along penumbrae where the two verdicts disagree in both
+// directions (field: band-edge noise). Default is the symmetric 26618
+// curve, byte-identical to 26690; code 75 (mode 445) arms the hold; code
+// 72 (mode 442) now selects the default and is a bit-exact alias.
+float KhTbBlend(float khtd_c, float khtd_f, float khtd_w)
+{
+    if (lighting0.y >= 72.5f && lighting0.y < 73.5f) return khtd_c;   // 443: partner alone
+    float khtd_h = (khtd_f > khtd_c && (lighting0.y >= 74.5f && lighting0.y < 75.5f))
+                 ? smoothstep(0.0f, 0.28f, khtd_w) : khtd_w;   // 445: the 26691 hold, opt-in
+    return lerp(khtd_c, khtd_f, khtd_h);
+}
+// 26693 KH_ABSENCE_WITNESS (mode 446 / lighting0.y 76 restores the 26629
+// and 26538 forms; ledger at KH_BUILD_TAG). A band's map can be missing
+// a caster whose shadow lands inside its window (dump2-26692: outer 1 of
+// 3, far 3 of 3; 396 proves the texel clear), and two rules then act on
+// the empty texel: 26629 lets it CERTIFY absence (self chain, far's
+// shadow zeroed), 26538 makes the lit verdict AUTHORITATIVE (cast chain).
+// The UNION map holds every caster the collection admits, so it is the
+// witness for both claims: true iff the union sees nothing more than
+// max(3 x bias, 3 texels) in front of the point along the sun. Takes
+// the ANCHOR-RELATIVE point (khwr in the self kernel, wpos - sunOrigin
+// in the cast). False with no union, outside its window, or stale -
+// nobody certifies absence from nothing.
+bool KhUnionClear(float3 khuw_r)
+{
+    if (sunMeta.x < 0.5f) return false;
+    float4 khuw_c = mul(float4(khuw_r, 1.0f), sunVP);
+    float2 khuw_uv = float2(0.5f + 0.5f * khuw_c.x, 0.5f - 0.5f * khuw_c.y);
+    if (khuw_uv.x <= 0.001f || khuw_uv.x >= 0.999f ||
+        khuw_uv.y <= 0.001f || khuw_uv.y >= 0.999f ||
+        khuw_c.z <= 0.0f || khuw_c.z >= 1.0f) return false;
+    float khuw_s = khSunDepth.Load(int3(int2(khuw_uv * sunMeta.y), 0));
+    float khuw_iR = length(float3(sunVP[0].x, sunVP[1].x, sunVP[2].x));
+    float khuw_iD = length(float3(sunVP[0].z, sunVP[1].z, sunVP[2].z));
+    float khuw_tw = 2.0f / (max(sunMeta.y, 1.0f) * max(khuw_iR, 1.0e-6f));
+    float khuw_m = max(3.0f * sunMeta.z, 3.0f * khuw_tw * khuw_iD);
+    return (khuw_c.z - khuw_s) < khuw_m;
+}
 
 // 26617 KH_JURIS_EDGE_FADE (mode 386 / code 60 reverts; full ledger at
 // KH_BUILD_TAG): the certified-protection WEIGHT. The 26590 mush-zeroing
@@ -4649,6 +4833,7 @@ float SunShadowOcclusion(float3 wpos)
     // carry its dependants or it is not a revert.
     // ======================================================================
     const bool khlf_on = (lighting0.y >= 41.5f && lighting0.y < 42.5f);
+    const bool khuw_off = (lighting0.y >= 75.5f && lighting0.y < 76.5f);   // 26693 KH_ABSENCE_WITNESS off (446)
     if (lighting0.y < 20.5f || lighting0.y >= 21.5f) {
         if (sunMeta2.x >= 0.5f) {
             float4 khc2_c = mul(float4(wpos - sunOrigin.xyz, 1.0f), sunVP2);   // 26458 KH_SUN_ANCHOR
@@ -4657,7 +4842,8 @@ float SunShadowOcclusion(float3 wpos)
                 khc2_u.y > 0.002f && khc2_u.y < 0.998f &&
                 khc2_c.z > 0.0f && khc2_c.z < 1.0f) {
                 float khc2_o = SunShadowCompareSoft2(khc2_u, khc2_c.z - sunMeta2.z);   // 26455: filtered
-                if (khc2_o > 0.0001f || !khlf_on) {   // 26538: lit is authoritative
+                if (khc2_o > 0.0001f ||
+                    (!khlf_on && (khuw_off || KhUnionClear(wpos - sunOrigin.xyz)))) {   // 26538 lit authoritative - 26693: only with the union's witness, else fall through
                     float khc2_e = max(abs(khc2_u.x - 0.5f), abs(khc2_u.y - 0.5f)) * 2.0f;
                     float khc2_w = khtb_on ? KhTbW(khc2_e) : 1.0f;   // 26594
                     if (khc2_w >= 0.9999f) return khc2_o;
@@ -4672,8 +4858,9 @@ float SunShadowOcclusion(float3 wpos)
                 khc3_u.y > 0.002f && khc3_u.y < 0.998f &&
                 khc3_c.z > 0.0f && khc3_c.z < 1.0f) {
                 float khc3_o = SunShadowCompareSoft3(khc3_u, khc3_c.z - sunMeta3.z);   // 26455: filtered
-                if (khc3_o > 0.0001f || !khlf_on) {   // 26538: lit is authoritative
-                    if (khtb_occ >= 0.0f) return lerp(khc3_o, khtb_occ, khtb_w);
+                if (khc3_o > 0.0001f ||
+                    (!khlf_on && (khuw_off || KhUnionClear(wpos - sunOrigin.xyz)))) {   // 26538 lit authoritative - 26693: only with the union's witness, else fall through
+                    if (khtb_occ >= 0.0f) return KhTbBlend(khc3_o, khtb_occ, khtb_w);
                     float khc3_e = max(abs(khc3_u.x - 0.5f), abs(khc3_u.y - 0.5f)) * 2.0f;
                     float khc3_w = khtb_on ? KhTbW(khc3_e) : 1.0f;   // 26594
                     if (khc3_w >= 0.9999f) return khc3_o;
@@ -4688,8 +4875,9 @@ float SunShadowOcclusion(float3 wpos)
                 khc4_u.y > 0.002f && khc4_u.y < 0.998f &&
                 khc4_c.z > 0.0f && khc4_c.z < 1.0f) {
                 float khc4_o = SunShadowCompareSoft4(khc4_u, khc4_c.z - sunMeta4.z);   // 26455: filtered
-                if (khc4_o > 0.0001f || !khlf_on) {   // 26538: lit is authoritative
-                    if (khtb_occ >= 0.0f) return lerp(khc4_o, khtb_occ, khtb_w);
+                if (khc4_o > 0.0001f ||
+                    (!khlf_on && (khuw_off || KhUnionClear(wpos - sunOrigin.xyz)))) {   // 26538 lit authoritative - 26693: only with the union's witness, else fall through
+                    if (khtb_occ >= 0.0f) return KhTbBlend(khc4_o, khtb_occ, khtb_w);
                     float khc4_e = max(abs(khc4_u.x - 0.5f), abs(khc4_u.y - 0.5f)) * 2.0f;
                     float khc4_w = khtb_on ? KhTbW(khc4_e) : 1.0f;   // 26594
                     if (khc4_w >= 0.9999f) return khc4_o;
@@ -4707,8 +4895,9 @@ float SunShadowOcclusion(float3 wpos)
                 khc5_u.y > 0.002f && khc5_u.y < 0.998f &&
                 khc5_c.z > 0.0f && khc5_c.z < 1.0f) {
                 float khc5_o = SunShadowCompareSoft5(khc5_u, khc5_c.z - sunMeta5.z);   // 26455: filtered
-                if (khc5_o > 0.0001f || !khlf_on) {   // 26538: lit is authoritative
-                    if (khtb_occ >= 0.0f) return lerp(khc5_o, khtb_occ, khtb_w);
+                if (khc5_o > 0.0001f ||
+                    (!khlf_on && (khuw_off || KhUnionClear(wpos - sunOrigin.xyz)))) {   // 26538 lit authoritative - 26693: only with the union's witness, else fall through
+                    if (khtb_occ >= 0.0f) return KhTbBlend(khc5_o, khtb_occ, khtb_w);
                     float khc5_e = max(abs(khc5_u.x - 0.5f), abs(khc5_u.y - 0.5f)) * 2.0f;
                     float khc5_w = khtb_on ? KhTbW(khc5_e) : 1.0f;   // 26594
                     if (khc5_w >= 0.9999f) return khc5_o;
@@ -4731,9 +4920,9 @@ float SunShadowOcclusion(float3 wpos)
     // 26465 KH_TIER_BLEND: a carried band verdict resolves against
     // WHATEVER the union answers - including its rejections (0 = lit).
     if (uv.x <= 0.001f || uv.x >= 0.999f || uv.y <= 0.001f || uv.y >= 0.999f)
-        return (khtb_occ >= 0.0f) ? lerp(0.0f, khtb_occ, khtb_w) : 0.0f;
+        return (khtb_occ >= 0.0f) ? KhTbBlend(0.0f, khtb_occ, khtb_w) : 0.0f;
     if (c.z <= 0.0f)
-        return (khtb_occ >= 0.0f) ? lerp(0.0f, khtb_occ, khtb_w) : 0.0f;
+        return (khtb_occ >= 0.0f) ? KhTbBlend(0.0f, khtb_occ, khtb_w) : 0.0f;
 
     // BEYOND THE FAR PLANE (the long-shadow cutoff): the ortho depth
     // window D = 2R+2 wraps the CASTERS, not the ground their shadows
@@ -4761,7 +4950,7 @@ float SunShadowOcclusion(float3 wpos)
 
     // 26465 KH_TIER_BLEND: the union answer resolves any carried band edge.
     float khtb_un = SunShadowCompareSoft(uv, z_bias(c.z));   // 26455: filtered
-    return (khtb_occ >= 0.0f) ? lerp(khtb_un, khtb_occ, khtb_w) : khtb_un;
+    return (khtb_occ >= 0.0f) ? KhTbBlend(khtb_un, khtb_occ, khtb_w) : khtb_un;
 }
 
 // Soft variant for the SELF term: five bilinear taps in a +/-0.75-texel
@@ -5141,6 +5330,7 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
     // the whole change - a cleared texel reads 1.0, so (z - 1.0) is
     // negative and passes the guard test on its own arithmetic.
     const bool khcc_clr = !(lighting0.y >= 66.5f && lighting0.y < 67.5f);
+    const bool khuw_off = (lighting0.y >= 75.5f && lighting0.y < 76.5f);   // 26693 KH_ABSENCE_WITNESS off (446)
     float khtb_w = 0.0f;
     const bool khtb_on = !(lighting0.y >= 25.5f && lighting0.y < 26.5f);
     // 26507: the self chain's TWIN of 26506 KH_BAND_LIT_FALLTHROUGH (mode
@@ -5345,8 +5535,21 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
                     float2 kh2_mv = KhPfMu(khSunPf2, kh2_uv, sunMeta2.y * 0.5f, kh2_lod);
                     float kh2_vd = (kh2_c.z - kh2_b) - kh2_mv.x;
                     float kh2_ww = max(kh2_ft, 2.0f) * kh2_tw * kh2_iD;
-                    float kh2_s2 = max(kh2_mv.y - kh2_mv.x * kh2_mv.x,
-                                         max(2.5e-7f, kh2_ww * kh2_ww));
+                    // 26692 KH_PF_RAMP_FLOOR (mode 444 / lighting0.y 74 restores the
+                    // 26585 form; ledger at KH_BUILD_TAG; TWIN at mid/outer). The
+                    // 2.5e-7 precision floor is a NORMALISED width - 5e-4 * d2v in
+                    // metres, 1.3 cm at the 26 m hero window and ~0.8 m at a 1618 m
+                    // reach-stretched one - and max() made it sigma wherever the
+                    // ramp sat under it, i.e. at every ordinary minification: a
+                    // receiver within that width of its occluder read partially lit
+                    // across the whole interior (field: 357 kills it, 257 == 0).
+                    // Below the measurability bar the variance is NOISE, and the
+                    // D-invariant ramp alone is sigma - 26585's own stated intent.
+                    float kh2_var = kh2_mv.y - kh2_mv.x * kh2_mv.x;
+                    float kh2_s2 = (lighting0.y >= 73.5f && lighting0.y < 74.5f)
+                                 ? max(kh2_var, max(2.5e-7f, kh2_ww * kh2_ww))   // 444: 26585 floor
+                                 : (kh2_var >= 2.5e-7f ? max(kh2_var, kh2_ww * kh2_ww)
+                                                          : kh2_ww * kh2_ww);   // 26692 ramp
                     float kh2_vv = kh2_vd <= 0.0f ? 1.0f
                                  : saturate(kh2_s2 / (kh2_s2 + kh2_vd * kh2_vd));
                     float kh2_pfo = 1.0f - saturate((kh2_vv - 0.4f) / 0.6f);
@@ -5366,9 +5569,10 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
             // 26627: the centre Load is named so both evidence forms read
             // the same texel; the old form is preserved verbatim under 66.
             float kh2_js = khSunDepth2.Load(int3(int2(kh2_t), 0));
-            bool kh2_cok = khcc_on ? ((khcc_clr || kh2_js < 1.0f) &&   // 26629
+            bool kh2_cok = (khuw_off || KhUnionClear(khwr)) &&   // 26693: the union witnesses every certification
+                           (khcc_on ? ((khcc_clr || kh2_js < 1.0f) &&   // 26629
                            (kh2_c.z - kh2_js) < (6.0f * sunMeta2.w) * kh2_iD)
-                        : (abs(kh2_c.z - kh2_js) < 3.0f * kh2_b);
+                        : (abs(kh2_c.z - kh2_js) < 3.0f * kh2_b));
             if (khcf.x < 0.5f) khcf.x = kh2_cok ? 3.0f
                                      : (kh2_js >= 1.0f ? 1.0f : 2.0f);   // 26628
             if (kh2_cok && khcf.y < 0.5f) khcf.y = 1.0f;
@@ -5458,7 +5662,7 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
                 float kh3_cres = 1.0f;   // distinct occluder provably above
                 float kh3_ce = max(abs(kh3_uv.x - 0.5f), abs(kh3_uv.y - 0.5f)) * 2.0f;
                 float kh3_cbw = khtb_on ? KhTbW(kh3_ce) : 1.0f;   // 26594
-                if (khtb_occ >= 0.0f) return lerp(kh3_cres, khtb_occ, khtb_w);
+                if (khtb_occ >= 0.0f) return KhTbBlend(kh3_cres, khtb_occ, khtb_w);
                 if (kh3_cbw >= 0.9999f) return kh3_cres;
                 khtb_occ = kh3_cres; khtb_w = kh3_cbw;
             } else {
@@ -5535,8 +5739,11 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
                     float2 kh3_mv = KhPfMu(khSunPf3, kh3_uv, sunMeta3.y * 0.5f, kh3_lod);
                     float kh3_vd = (kh3_c.z - kh3_b) - kh3_mv.x;
                     float kh3_ww = max(kh3_ft, 2.0f) * kh3_tw * kh3_iD;
-                    float kh3_s2 = max(kh3_mv.y - kh3_mv.x * kh3_mv.x,
-                                         max(2.5e-7f, kh3_ww * kh3_ww));
+                    float kh3_var = kh3_mv.y - kh3_mv.x * kh3_mv.x;
+                    float kh3_s2 = (lighting0.y >= 73.5f && lighting0.y < 74.5f)
+                                 ? max(kh3_var, max(2.5e-7f, kh3_ww * kh3_ww))   // 444: 26585 floor
+                                 : (kh3_var >= 2.5e-7f ? max(kh3_var, kh3_ww * kh3_ww)
+                                                          : kh3_ww * kh3_ww);   // 26692 ramp
                     float kh3_vv = kh3_vd <= 0.0f ? 1.0f
                                  : saturate(kh3_s2 / (kh3_s2 + kh3_vd * kh3_vd));
                     float kh3_pfo = 1.0f - saturate((kh3_vv - 0.4f) / 0.6f);
@@ -5570,10 +5777,10 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
             // about the same number the latch is about to publish.
             float kh3_cg = (lighting0.y >= 60.5f && lighting0.y < 61.5f)
                          ? 48.0f : 6.0f * sunMeta3.w;   // code 61: fixed guard
-            bool kh3_cok = khcc_on
+            bool kh3_cok = (khuw_off || KhUnionClear(khwr)) && (khcc_on   // 26693: union witness
                          ? ((khcc_clr || kh3_js < 1.0f) &&   // 26629
                             (kh3_c.z - kh3_js) < kh3_cg * kh3_iD)
-                         : (abs(kh3_c.z - kh3_js) < 3.0f * kh3_b);   // 26590/26617/26627
+                         : (abs(kh3_c.z - kh3_js) < 3.0f * kh3_b));   // 26590/26617/26627
             if (khcf.x < 0.5f) khcf.x = kh3_cok ? 3.0f
                                      : (kh3_js >= 1.0f ? 1.0f : 2.0f);   // 26628
             if (kh3_cok && khcf.y < 0.5f) khcf.y = 2.0f;
@@ -5584,7 +5791,7 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
                 khcf.w = khla_w;   // 26628
             }
             if (kh3_res > 0.0001f || khlfs_off) {   // 26507: lit falls through
-                if (khtb_occ >= 0.0f) return lerp(kh3_res, khtb_occ, khtb_w);   // 26465
+                if (khtb_occ >= 0.0f) return KhTbBlend(kh3_res, khtb_occ, khtb_w);   // 26465
                 float kh3_e = max(abs(kh3_uv.x - 0.5f), abs(kh3_uv.y - 0.5f)) * 2.0f;
                 float kh3_bw = khtb_on ? KhTbW(kh3_e) : 1.0f;   // 26594
                 if (kh3_bw >= 0.9999f) return kh3_res;
@@ -5661,7 +5868,7 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
                 float kh4_cres = 1.0f;   // distinct occluder provably above
                 float kh4_ce = max(abs(kh4_uv.x - 0.5f), abs(kh4_uv.y - 0.5f)) * 2.0f;
                 float kh4_cbw = khtb_on ? KhTbW(kh4_ce) : 1.0f;   // 26594
-                if (khtb_occ >= 0.0f) return lerp(kh4_cres, khtb_occ, khtb_w);
+                if (khtb_occ >= 0.0f) return KhTbBlend(kh4_cres, khtb_occ, khtb_w);
                 if (kh4_cbw >= 0.9999f) return kh4_cres;
                 khtb_occ = kh4_cres; khtb_w = kh4_cbw;
             } else {
@@ -5738,8 +5945,11 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
                     float2 kh4_mv = KhPfMu(khSunPf4, kh4_uv, sunMeta4.y * 0.5f, kh4_lod);
                     float kh4_vd = (kh4_c.z - kh4_b) - kh4_mv.x;
                     float kh4_ww = max(kh4_ft, 2.0f) * kh4_tw * kh4_iD;
-                    float kh4_s2 = max(kh4_mv.y - kh4_mv.x * kh4_mv.x,
-                                         max(2.5e-7f, kh4_ww * kh4_ww));
+                    float kh4_var = kh4_mv.y - kh4_mv.x * kh4_mv.x;
+                    float kh4_s2 = (lighting0.y >= 73.5f && lighting0.y < 74.5f)
+                                 ? max(kh4_var, max(2.5e-7f, kh4_ww * kh4_ww))   // 444: 26585 floor
+                                 : (kh4_var >= 2.5e-7f ? max(kh4_var, kh4_ww * kh4_ww)
+                                                          : kh4_ww * kh4_ww);   // 26692 ramp
                     float kh4_vv = kh4_vd <= 0.0f ? 1.0f
                                  : saturate(kh4_s2 / (kh4_s2 + kh4_vd * kh4_vd));
                     float kh4_pfo = 1.0f - saturate((kh4_vv - 0.4f) / 0.6f);
@@ -5765,10 +5975,10 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
             // 26627: radius hoisted (the kh3 twin above; same reason).
             float kh4_cg = (lighting0.y >= 60.5f && lighting0.y < 61.5f)
                          ? 192.0f : 6.0f * sunMeta4.w;   // code 61: fixed guard
-            bool kh4_cok = khcc_on
+            bool kh4_cok = (khuw_off || KhUnionClear(khwr)) && (khcc_on   // 26693: union witness
                          ? ((khcc_clr || kh4_js < 1.0f) &&   // 26629
                             (kh4_c.z - kh4_js) < kh4_cg * kh4_iD)
-                         : (abs(kh4_c.z - kh4_js) < 3.0f * kh4_b);   // 26590/26617/26627
+                         : (abs(kh4_c.z - kh4_js) < 3.0f * kh4_b));   // 26590/26617/26627
             if (khcf.x < 0.5f) khcf.x = kh4_cok ? 3.0f
                                      : (kh4_js >= 1.0f ? 1.0f : 2.0f);   // 26628
             if (kh4_cok && khcf.y < 0.5f) khcf.y = 3.0f;
@@ -5780,7 +5990,7 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
                 kh4_cert = true;   // 26634
             }
             if (kh4_res > 0.0001f || khlfs_off) {   // 26507: lit falls through
-                if (khtb_occ >= 0.0f) return lerp(kh4_res, khtb_occ, khtb_w);   // 26465
+                if (khtb_occ >= 0.0f) return KhTbBlend(kh4_res, khtb_occ, khtb_w);   // 26465
                 float kh4_e = max(abs(kh4_uv.x - 0.5f), abs(kh4_uv.y - 0.5f)) * 2.0f;
                 float kh4_bw = khtb_on ? KhTbW(kh4_e) : 1.0f;   // 26594
                 if (kh4_bw >= 0.9999f) return kh4_res;
@@ -5898,7 +6108,7 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
                 float kh5_cres = 1.0f;   // distinct occluder provably above
                 float kh5_ce = max(abs(kh5_uv.x - 0.5f), abs(kh5_uv.y - 0.5f)) * 2.0f;
                 float kh5_cbw = khtb_on ? KhTbW(kh5_ce) : 1.0f;   // 26594
-                if (khtb_occ >= 0.0f) return lerp(kh5_cres, khtb_occ, khtb_w);
+                if (khtb_occ >= 0.0f) return KhTbBlend(kh5_cres, khtb_occ, khtb_w);
                 if (kh5_cbw >= 0.9999f) return kh5_cres;
                 khtb_occ = kh5_cres; khtb_w = kh5_cbw;
             } else {
@@ -5984,10 +6194,10 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
             float kh5_cg = (lighting0.y >= 68.5f && lighting0.y < 69.5f)
                          ? sunMeta5.w          // 398: the admission bound
                          : 6.0f * sunMeta5.w;  // default = the 26620 form
-            bool kh5_cok = khcc_on
+            bool kh5_cok = (khuw_off || KhUnionClear(khwr)) && (khcc_on   // 26693: union witness
                          ? ((khcc_clr || kh5_js < 1.0f) &&   // 26629
                             (kh5_c.z - kh5_js) < kh5_cg * kh5_iD)
-                         : (abs(kh5_c.z - kh5_js) < 3.0f * kh5_b);   // 26590/26620/26627
+                         : (abs(kh5_c.z - kh5_js) < 3.0f * kh5_b));   // 26590/26620/26627
             if (khcf.x < 0.5f) khcf.x = kh5_cok ? 3.0f
                                      : (kh5_js >= 1.0f ? 1.0f : 2.0f);   // 26628
             if (kh5_cok && khcf.y < 0.5f) khcf.y = 4.0f;
@@ -5998,7 +6208,7 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
                 khcf.w = khla_w;   // 26628
             }
             if (kh5_res > 0.0001f || khlfs_off) {   // 26507: lit falls through
-                if (khtb_occ >= 0.0f) return lerp(kh5_res, khtb_occ, khtb_w);   // 26465
+                if (khtb_occ >= 0.0f) return KhTbBlend(kh5_res, khtb_occ, khtb_w);   // 26465
                 float kh5_e = max(abs(kh5_uv.x - 0.5f), abs(kh5_uv.y - 0.5f)) * 2.0f;
                 float kh5_bw = khtb_on ? KhTbW(kh5_e) : 1.0f;   // 26594
                 if (kh5_bw >= 0.9999f) return kh5_res;
@@ -6042,9 +6252,9 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
     float2 khsr_uv = float2(0.5f + 0.5f * khsr_c.x, 0.5f - 0.5f * khsr_c.y);
     if (khsr_uv.x <= 0.002f || khsr_uv.x >= 0.998f ||
         khsr_uv.y <= 0.002f || khsr_uv.y >= 0.998f)
-        return (khtb_occ >= 0.0f) ? lerp(0.0f, khtb_occ, khtb_w) : 0.0f;   // 26465
+        return (khtb_occ >= 0.0f) ? KhTbBlend(0.0f, khtb_occ, khtb_w) : 0.0f;   // 26465
     if (khsr_c.z <= 0.0f || khsr_c.z >= 1.0f)
-        return (khtb_occ >= 0.0f) ? lerp(0.0f, khtb_occ, khtb_w) : 0.0f;   // 26465
+        return (khtb_occ >= 0.0f) ? KhTbBlend(0.0f, khtb_occ, khtb_w) : 0.0f;   // 26465
     // Sun-space basis straight out of sunVP: column 0 is r3/R, column 1 is
     // u3/R, column 2 is f/D. texelWorld = 2R / mapSize.
     float3 khsr_cr = float3(sunVP[0].x, sunVP[1].x, sunVP[2].x);
@@ -6223,7 +6433,7 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
         (khtb_occ < 0.0f || (lighting0.y >= 54.5f && lighting0.y < 55.5f)) &&
         !(lighting0.y >= 50.5f && lighting0.y < 51.5f))
         khsr_res *= 1.0f - khla_w;   // 26590/26617
-    return (khtb_occ >= 0.0f) ? lerp(khsr_res, khtb_occ, khtb_w) : khsr_res;   // 26465
+    return (khtb_occ >= 0.0f) ? KhTbBlend(khsr_res, khtb_occ, khtb_w) : khsr_res;   // 26465
 }
 
 // 26628: forwarder - no call site changes, no twin risk.
@@ -7814,6 +8024,28 @@ void PSInjDepth(VSOut i, out float khiODepth : SV_Depth)
 
     khiODepth = clamp(khiZ, khiFloor, khiHi);
 }
+// The owner draw's PS. Input is the (pos, wpos, nrm) prefix every mesh VS
+// emits (VSOut and VSOutC alike, textured or not), so one PS serves every VS
+// the colour pass binds. TWIN CONTRACT: every discard the colour pass applies
+// up to and including the view-distance cut is applied here identically - a
+// fragment the colour pass would discard must never own a sample (the LOD
+// crossfade's complementary dither is the load-bearing one: without it the
+// finer level owns the pixels it dithers OUT and the coarser level holes).
+void PSOwner(float4 khow_pos : SV_Position, float3 khow_wpos : TEXCOORD0,
+             float3 khow_nrm : TEXCOORD1, out uint khow_out : SV_Target)
+{
+    if (blendCtl.w != 0.0f) {
+        float khlD = frac(52.9829189f * frac(dot(khow_pos.xy, float2(0.06711056f, 0.00583715f))));
+        if (blendCtl.w > 0.0f) { if (khlD >= blendCtl.w) discard; }
+        else if (khlD < -blendCtl.w) discard;
+    }
+    ClipEdgeSliver(khow_wpos, khow_nrm);
+    ClipOwnNear(khow_pos.w);
+    if (shadowMeta2.x < 0.5f && depthParams.y < -1.0e-3f &&
+        depthParams.x + depthParams.y / max(khow_pos.w, 1.0e-4f) > 1.0f) discard;
+    if (shadowMeta2.x < 0.5f && shadowMeta2.y > 0.0f && khow_pos.w > shadowMeta2.y) discard;
+    khow_out = KhOwnerPack(khow_pos.z, shadowMeta2.z);
+}
 
 // Instanced depth-only transform for the private sun-depth pass: ONE
 // DrawInstanced per mesh type regardless of object count - the per-object
@@ -8337,6 +8569,30 @@ float4 PSMain(VSOut i) : SV_Target
     // by construction (w = 1 puts ndc far below 1).
     if (shadowMeta2.x < 0.5f && depthParams.y < -1.0e-3f &&
         depthParams.x + depthParams.y / max(i.pos.w, 1.0e-4f) > 1.0f) discard;
+    // 26684 KH_OBJ_VIS_CUT (mode 437 zeroes the lane; ledger at KH_BUILD_TAG):
+    // the engine's own objects end at objectViewDistance, not at the projection
+    // far plane, so a farVis-off mesh is sliced at the same view depth the
+    // engine's objects stop at - a plane cut in i.pos.w exactly like the far
+    // contract above. TWIN: PSMain / PSComposite / PSEffect / PSOwner.
+    if (shadowMeta2.x < 0.5f && shadowMeta2.y > 0.0f && i.pos.w > shadowMeta2.y) discard;
+    // 26686 KH_MESH_OWNER_PREPASS - THE TWIN 26684 WITHHELD (mode 438; ledger
+    // at KH_BUILD_TAG). 26684 put the owner test in PSComposite only, on the
+    // premise that the injection binds a composite variant; dump1-26685 read
+    // injGuardOff == injections and snapConsumed 0 - guard is false on every
+    // injection in the field, the PS pick lands on g_res.ps, and THAT IS THIS
+    // SHADER. The map was built every frame and nothing read it. Identical
+    // block; inert on the flush path where the lanes are zero.
+    if (shadowMeta2.w > 0.5f && shadowMeta2.z > 0.5f &&
+        KhOwnerRejects(i.pos.xy, i.pos.z, shadowMeta2.z, shadowMeta2.w)) {
+        // 26688: RETURN after the discard. A bare discard only FLAGS the lane;
+        // execution continues so the quad's helper lanes stay valid for the
+        // 42 fwidth/ddx sites below, and the shader ran to its end for every
+        // rejected fragment (dump2-26687: injGpuMaxUs 45.5 ms on the stack).
+        // Visual 33 (mode 441) paints the rejection instead: the arming proof.
+        if (dbgCtl.x >= 32.5f && dbgCtl.x < 33.5f) return float4(1.0f, 0.0f, 1.0f, 1.0f);
+        discard;
+        return float4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
     // Punch-through / overlay-occlusion guard, flush-path edition: the
     // same contract as PSComposite's. t0 (sceneDepthTex) holds the
     // mid-frame scene-depth snapshot when the CPU armed tight margins in
@@ -8531,6 +8787,34 @@ float4 PSMain(VSOut i) : SV_Target
     // 26358: the plain tap here on purpose - fxMeta.x is the EFFECT ID on this
     // path, not a near plane. See the asymmetry note in PSComposite.
     float2 khStenR = i.pos.xy;
+    // 26667 KH_STEN_CYCLE_TAP (mode 431 stands it down CPU-side by zeroing
+    // stenCycVp - a zero matrix projects to w == 0 and the gate below leaves
+    // the raster tap standing; full ledger at KH_BUILD_TAG). The stencil
+    // counts were rasterized under the engine cycle's basis; this fragment
+    // rasterizes under the adopted one. At steady motion the two agree to
+    // sub-pixel (0.6 px measured across 18 m/s rows) and the 2 px DEADBAND
+    // keeps the historic raster tap BIT-EXACTLY - so the halo regime that
+    // killed 26234/26236/26242 (a standing ~30 px displacement on every
+    // moving frame) cannot form. At a motion discontinuity the bases diverge
+    // by the whole swing (44-187 px on the dump2-26664 artifact rows, 4318
+    // session max) and the tap follows the counts instead of reading a
+    // basis the counting draws never used. Behind-camera or off-screen
+    // refuses to the raster tap - a wrong tap is worse than an uncorrected
+    // one (the KhVolSel contract). Absolute matrix, absolute i.wpos - the
+    // 26244 convention, no per-pixel camera subtraction.
+    // TWIN EDIT: PSMain and PSComposite carry the identical block.
+    {
+        float4 khcy_c = mul(float4(i.wpos, 1.0f), stenCycVp);
+        if (khcy_c.w > 1.0e-4f) {
+            float2 khcy_px = float2((khcy_c.x / khcy_c.w * 0.5f + 0.5f) * stenVol.z,
+                                    (0.5f - khcy_c.y / khcy_c.w * 0.5f) * stenVol.w);
+            float2 khcy_d = khcy_px - khStenR;
+            if (dot(khcy_d, khcy_d) > 4.0f &&
+                khcy_px.x >= 0.0f && khcy_px.y >= 0.0f &&
+                khcy_px.x <= stenVol.z - 1.0f && khcy_px.y <= stenVol.w - 1.0f)
+                khStenR = khcy_px;
+        }
+    }
     float3 khStenP = float3(i.pos.z, ddx(i.pos.z), ddy(i.pos.z));
     // 26432 THE BIAS SLOPE WANTS THE FACET, NOT THE VERTEX NORMAL. Ledger at
     // KH_FACET_BIAS_NORMAL. Taken HERE, beside khStenP, for 26277's reason:
@@ -8607,7 +8891,7 @@ float4 PSMain(VSOut i) : SV_Target
             if (maskMeta.x >= 0.5f) smf = ShadowBandFactor(
                 (lighting0.y >= 58.5f && lighting0.y < 59.5f)
                     ? i.wpos : (i.wrel + sunOrigin.xyz));
-            else                    smf = ShadowMapFactor(i.wpos - shadowMeta2.yzw);
+            else                    smf = ShadowMapFactor(i.wpos);   // 26684: yzw re-lettered (were zero)
         }
         // ==================================================================
         // 26573 VISUAL 29 (mode 355) - RECEIVE-TERM DECOMPOSITION. The 26572
@@ -9464,6 +9748,30 @@ float4 PSComposite(VSOutC i) : SV_Target
     // objects now that the mesh rasterizers no longer z-clip.
     if (shadowMeta2.x < 0.5f && depthParams.y < -1.0e-3f &&
         depthParams.x + depthParams.y / max(i.pos.w, 1.0e-4f) > 1.0f) discard;
+    // 26684 KH_OBJ_VIS_CUT - TWIN of PSMain's (mode 437; ledger at KH_BUILD_TAG).
+    if (shadowMeta2.x < 0.5f && shadowMeta2.y > 0.0f && i.pos.w > shadowMeta2.y) discard;
+    // 26684 KH_MESH_OWNER_PREPASS (mode 438 stands it down; ledger at
+    // KH_BUILD_TAG; helpers beside khOwnMs). The injection's own owner map
+    // says whether another admitted mesh already holds every sample of this
+    // pixel strictly nearer. Rejecting HERE - before the scene read, the
+    // analytic clamp, five shadow tiers and PBR - is the early-Z this
+    // SV_Depth (late-Z) variant can never get from the hardware. Lanes zero
+    // on every non-injection fill. 26686 CORRECTION, rule 1.11: this said
+    // PSMain's twin was deliberately absent because the injection always
+    // binds a composite variant - it does not (guard false on every field
+    // injection, dump1-26685), so PSMain carries the identical block now.
+    if (shadowMeta2.w > 0.5f && shadowMeta2.z > 0.5f &&
+        KhOwnerRejects(i.pos.xy, i.pos.z, shadowMeta2.z, shadowMeta2.w)) {
+        // 26688: RETURN after the discard - TWIN of PSMain's (ledger at
+        // KH_BUILD_TAG). SV_Depth is mandatory on every path of the arb
+        // variant, so the raster value is written before leaving.
+#if KH_ARB_DEPTH
+        khaODepth = i.pos.z;
+#endif
+        if (dbgCtl.x >= 32.5f && dbgCtl.x < 33.5f) return float4(1.0f, 0.0f, 1.0f, 1.0f);
+        discard;
+        return float4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
     // Punch-through guard, campaign-settled: METRIC compare in the
     // remap-decode space against the flush-time snapshot. Dormant
     // (fxParams1.x = 1e9) whenever the heightfield is live - the
@@ -10347,6 +10655,37 @@ float4 PSComposite(VSOutC i) : SV_Target
 #else
     float3 khStenP = float3(i.pos.z, ddx(i.pos.z), ddy(i.pos.z));
 #endif
+    // 26667 KH_STEN_CYCLE_TAP (mode 431 stands it down CPU-side by zeroing
+    // stenCycVp - a zero matrix projects to w == 0 and the gate below leaves
+    // the raster tap standing; full ledger at KH_BUILD_TAG). The stencil
+    // counts were rasterized under the engine cycle's basis; this fragment
+    // rasterizes under the adopted one. At steady motion the two agree to
+    // sub-pixel (0.6 px measured across 18 m/s rows) and the 2 px DEADBAND
+    // keeps the historic raster tap BIT-EXACTLY - so the halo regime that
+    // killed 26234/26236/26242 (a standing ~30 px displacement on every
+    // moving frame) cannot form. At a motion discontinuity the bases diverge
+    // by the whole swing (44-187 px on the dump2-26664 artifact rows, 4318
+    // session max) and the tap follows the counts instead of reading a
+    // basis the counting draws never used. Behind-camera or off-screen
+    // refuses to the raster tap - a wrong tap is worse than an uncorrected
+    // one (the KhVolSel contract). Absolute matrix, absolute i.wpos - the
+    // 26244 convention, no per-pixel camera subtraction. Placed AFTER the
+    // KH_ARB_DEPTH #endif so BOTH compiled variants carry it - the 26434
+    // variant-edit lesson. Composes with the 199-arm KhStenTapComp above:
+    // the deadband applies to whatever khStenR that arm produced.
+    // TWIN EDIT: PSMain and PSComposite carry the identical block.
+    {
+        float4 khcy_c = mul(float4(i.wpos, 1.0f), stenCycVp);
+        if (khcy_c.w > 1.0e-4f) {
+            float2 khcy_px = float2((khcy_c.x / khcy_c.w * 0.5f + 0.5f) * stenVol.z,
+                                    (0.5f - khcy_c.y / khcy_c.w * 0.5f) * stenVol.w);
+            float2 khcy_d = khcy_px - khStenR;
+            if (dot(khcy_d, khcy_d) > 4.0f &&
+                khcy_px.x >= 0.0f && khcy_px.y >= 0.0f &&
+                khcy_px.x <= stenVol.z - 1.0f && khcy_px.y <= stenVol.w - 1.0f)
+                khStenR = khcy_px;
+        }
+    }
     // 26432 THE BIAS SLOPE WANTS THE FACET, NOT THE VERTEX NORMAL. Ledger at
     // KH_FACET_BIAS_NORMAL. Taken HERE, beside khStenP, for 26277's reason:
     // ddx/ddy are undefined inside the divergent gate below, so the
@@ -10426,7 +10765,7 @@ float4 PSComposite(VSOutC i) : SV_Target
             if (maskMeta.x >= 0.5f) smf = ShadowBandFactor(
                 (lighting0.y >= 58.5f && lighting0.y < 59.5f)
                     ? i.wpos : (i.wrel + sunOrigin.xyz));
-            else                    smf = ShadowMapFactor(i.wpos - shadowMeta2.yzw);
+            else                    smf = ShadowMapFactor(i.wpos);   // 26684: yzw re-lettered (were zero)
         }
 
         // 26358 CHUNK BOUNDARY - MSVC caps one string literal token at 16380
@@ -11513,6 +11852,8 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
     // depthParams stand the test down via the m32 gate.
     if (shadowMeta2.x < 0.5f && depthParams.y < -1.0e-3f &&
         depthParams.x + depthParams.y / max(i.pos.w, 1.0e-4f) > 1.0f) discard;
+    // 26684 KH_OBJ_VIS_CUT - TWIN of PSMain's (mode 437; ledger at KH_BUILD_TAG).
+    if (shadowMeta2.x < 0.5f && shadowMeta2.y > 0.0f && i.pos.w > shadowMeta2.y) discard;
     int2  px = int2(i.pos.xy);
     float2 uv = i.pos.xy / float2(fxMeta.z, fxMeta.w);
     int   effect = (int)fxMeta.x;
@@ -13345,7 +13686,14 @@ struct alignas(16) ConstantData {
                            // since the 166/167/168 receive-kill split. It
                            // carries the whole lighting0.y ladder the mode
                            // map rides on. Codes 72 and up are the free ones.
-    float shadow_meta2[4];     // x = far-visibility clamp flag (PER OBJECT); yzw = live-table camera origin (zeroed - origins fold per entry)
+    float shadow_meta2[4];     // x = far-visibility clamp flag (PER OBJECT).
+                               // 26684: y = object view-distance cut (m, 0 = off;
+                               // KH_OBJ_VIS_CUT), z = owner-map object id (0 =
+                               // untested; KH_MESH_OWNER_PREPASS), w = owner-map
+                               // sample count (0 = absent). yzw were the zeroed
+                               // live-table camera origin (folded per entry);
+                               // the HLSL twin's two legacy subtractions of yzw
+                               // were no-ops and are removed at 26684.
     float obj_rot[3][4];       // engine-axes rotation rows; [0][3] = 1 marks
                                // filled (the zeroed default reads as identity
                                // in-shader - auxiliary fills stay correct)
@@ -13537,6 +13885,17 @@ struct alignas(16) ConstantData {
     // CB split untouched). HLSL twin appended identically.
     float sun_vp5[4][4];
     float sun_meta5[4];
+    // 26667 KH_STEN_CYCLE_TAP (appended at the tail; HLSL twin stenCycVp
+    // appended identically; ledger at KH_BUILD_TAG). The ABSOLUTE cycle-basis
+    // view-projection of the frame the consumed volume copy was captured in,
+    // epoch-matched from the same ring slot the stencil transport already
+    // keys on - the 26244 convention (absolute matrix, absolute i.wpos, no
+    // per-pixel camera subtraction). All-zero = stand down (mode 431, an
+    // epoch miss, or an invalid cycle basis): a zero matrix projects to
+    // w == 0 and the shader's own w gate refuses to the raster tap, so no
+    // separate validity lane is needed. 4 float4 keeps
+    // KH_CBFRAME_BYTES % 16 == 0.
+    float sten_cyc_vp[4][4];
 };
 
 // CB-split slice geometry: the object block ends where view_proj (the
@@ -13547,6 +13906,16 @@ static constexpr size_t KH_CBFRAME_BYTES    = sizeof(ConstantData) - KH_CBOBJ_BY
 static_assert(KH_CBOBJ_BYTES == KH_CBOBJ_HEAD_BYTES + sizeof(ConstantData::dl_lights),
               "dl_lights must be the LAST per-object field (the upload trim depends on it)");
 static_assert(KH_CBOBJ_BYTES % 16 == 0 && KH_CBFRAME_BYTES % 16 == 0, "CB blocks must be float4-aligned");
+// 26691 KH_CB_MIRROR_GAUGE (pure gauge; ledger at KH_BUILD_TAG). The HLSL
+// CBObj/CBFrame declarations and this struct are a hand-kept mirror with no
+// tripwire; the compiled PSMain blob carries the declared cbuffer sizes in
+// its RDEF chunk (cached .khsc blobs too), so every ensure reflects them and
+// publishes the comparison. Refl: 0 never ran, 1 reflected, 2 D3DReflect
+// refused (lanes then read 0 and Bad stays false - read Refl first).
+static uint32_t g_cb_mirror_obj_b = 0;
+static uint32_t g_cb_mirror_frame_b = 0;
+static int32_t  g_cb_mirror_refl = 0;
+static bool     g_cb_mirror_bad = false;
 
 // Shared mesh-CB rotation fill (injection, flush, sun fallback - one
 // truth). rot_m = engine-axes rows (RenderObject::rot_m or SunCaster::rot).
@@ -15707,11 +16076,29 @@ inline ID3D11ShaderResourceView* kh_load_dds(ID3D11Device* dev, const std::vecto
     return srv;
 }
 
+// 26684 KH_TEX_CACHE (ledger at KH_BUILD_TAG; definitions after the mesh cache
+// writer they share): the cached, pre-mipped path for every stb-decoded
+// texture. handled is true on every return today (the legacy path below is
+// reached only under mode 439); it stays so a future stand-down can fall through.
+struct KhTexBlob;
+inline ID3D11ShaderResourceView* kh_tex_load_cached(ID3D11Device* dev, const std::string& path,
+                                                    bool srgb, std::string& err, bool& handled);
+
 // stb path: decode to RGBA8; with a context available (always true inside
 // the serialized draw windows) build a full mip chain via GenerateMips -
 // the windows are exactly the sanctioned safe points for context work.
+// 26684: this is now the mode-439 / no-cache-dir LEGACY path. The default
+// path is kh_tex_load_cached: CPU mip chain, IMMUTABLE upload with every
+// level, persisted as .khtc so the second session never decodes again - and
+// it needs no context, so the ctx-less branch below (which shipped
+// MIPLESS) is reached only under 439.
 inline ID3D11ShaderResourceView* kh_load_stb(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                                              const std::string& path, bool srgb, std::string& err) {
+    if (g_dbg_mode.load(std::memory_order_relaxed) != 439) {
+        bool khtc_handled = false;
+        ID3D11ShaderResourceView* khtc_srv = kh_tex_load_cached(dev, path, srgb, err, khtc_handled);
+        if (khtc_handled) return khtc_srv;
+    }
     int w = 0, h = 0, comp = 0;
     stbi_uc* px = stbi_load(path.c_str(), &w, &h, &comp, 4);
     if (!px) { err = std::string("decode failed: ") + (stbi_failure_reason() ? stbi_failure_reason() : "?"); return nullptr; }
@@ -17933,7 +18320,8 @@ inline void kh_mesh_cache_trim() {
             // 26482: the shader cache (.khsc) shares this folder and this
             // budget by operator directive - one 1 GiB cap over both.
             if (khmc_e.path().extension() != ".khmc" &&
-                khmc_e.path().extension() != ".khsc") continue;
+                khmc_e.path().extension() != ".khsc" &&
+                khmc_e.path().extension() != ".khtc") continue;   // 26684: textures share the 1 GiB
             KhmcEnt khmc_k{ khmc_e.path(),
                             static_cast<uint64_t>(khmc_e.file_size()),
                             khmc_e.last_write_time() };
@@ -18018,7 +18406,13 @@ inline bool kh_fbx_register(MeshDef&& d, const std::string& path, int& out_id, s
 // filesystem, its own queue and the SHARED trim mutex that the .khsc writers
 // already take, because both caches live in one folder under one budget.
 // ===========================================================================
-struct KhMeshWriteJob { uint64_t hash; int id; };
+struct KhTexBlob {   // 26684 KH_TEX_CACHE: one decoded RGBA8 texture, every mip level
+    uint32_t w = 0, h = 0, mips = 0;
+    bool srgb = false;
+    std::vector<uint32_t> level_off;   // byte offset of each level into data (pitch = level width * 4)
+    std::vector<uint8_t> data;
+};
+struct KhMeshWriteJob { uint64_t hash; int id; std::shared_ptr<const KhTexBlob> tex; };   // 26684: tex set = a .khtc write
 static std::vector<KhMeshWriteJob> g_khmw_q;
 static std::mutex g_khmw_mu;
 static std::condition_variable g_khmw_cv;
@@ -18043,6 +18437,7 @@ static uint64_t g_lod_meshes = 0;     // models that got a ladder
 static uint64_t g_lod_levels = 0;     // levels built across them - divide for the mean depth
 static uint64_t g_lod_fades = 0;      // draws that issued the crossfade pair
 
+inline void kh_tex_cache_store(uint64_t khtc_hash, const KhTexBlob& khtc_b);   // 26684, defined below
 inline void kh_mesh_cache_writer() {
     for (;;) {
         KhMeshWriteJob khmw_j;
@@ -18061,7 +18456,11 @@ inline void kh_mesh_cache_writer() {
             // the id was published before it was queued, and the count only
             // ever grows, so this can only pass - it is here so a future
             // unregistration cannot turn a stale id into a wild read.
-            if (khmw_j.id >= 0 && static_cast<uint32_t>(khmw_j.id) < mesh_count()) {
+            if (khmw_j.tex) {   // 26684 KH_TEX_CACHE write (defined below; same thread, same trim)
+                kh_tex_cache_store(khmw_j.hash, *khmw_j.tex);
+                std::lock_guard<std::mutex> khmw_tl(g_khsm_trim_mu);
+                kh_mesh_cache_trim();
+            } else if (khmw_j.id >= 0 && static_cast<uint32_t>(khmw_j.id) < mesh_count()) {
                 kh_mesh_cache_store(khmw_j.hash, mesh_def(khmw_j.id));
                 std::lock_guard<std::mutex> khmw_tl(g_khsm_trim_mu);
                 kh_mesh_cache_trim();
@@ -18116,11 +18515,297 @@ inline void kh_mesh_cache_queue(uint64_t khmw_h, int khmw_id) {
     }
     {
         std::lock_guard<std::mutex> khmw_l(g_khmw_mu);
-        KhMeshWriteJob khmw_j = { khmw_h, khmw_id };
+        KhMeshWriteJob khmw_j = { khmw_h, khmw_id, nullptr };
         g_khmw_q.push_back(khmw_j);
         g_khmw_queued++;
     }
     g_khmw_cv.notify_one();
+}
+// ===========================================================================
+// 26684 KH_TEX_CACHE (mode 439 bypasses the whole block; ledger at
+// KH_BUILD_TAG). Textures went through stb decode + GenerateMips on EVERY
+// session (and MIPLESS whenever no context was available). Now: the source
+// bytes are hashed (FNV-1a, the mesh cache's own hash, srgb folded in), a
+// .khtc beside the .khmc files is tried first (Documents, then the mod cache
+// dirs - the 26651 shape, nothing is ever written to a mod folder), and on a
+// miss the decode is followed by a CPU box-filtered mip chain - sRGB-correct
+// (average in linear, encode back; alpha stays linear) so the small levels do
+// not darken the way a gamma-space average does - uploaded IMMUTABLE with
+// every level, and handed to the mesh cache's writer thread to persist. What
+// the mips are FOR is the sampler that already existed: anisotropic 8x,
+// MaxLOD unbounded (kh_tex_resolve's mat_sampler) - the hardware picks the
+// level from the screen-space derivative like every engine does, so the
+// minified texels stop shimmering and the fetch footprint stays in cache.
+// DDS files keep their native pre-mipped path and are NOT cached (they are
+// already the cache). Format: KHTC v1, hash, w, h, mips, srgb, then the
+// levels tightly packed at pitch = width * 4.
+// ===========================================================================
+static constexpr uint32_t KH_TEX_CACHE_MAGIC = 0x4354484Bu;   // "KHTC" little-endian
+static constexpr uint32_t KH_TEX_CACHE_VERSION = 1;
+static constexpr uint32_t KH_TEX_CACHE_MAX_MIPS = 15;          // 16384 -> 1
+static uint64_t g_mod_tex_hits = 0;   // .khtc served by a mod (window-reset)
+
+inline std::filesystem::path kh_tex_cache_file(uint64_t khtc_hash) {
+    return kh_mesh_cache_dir() / kh_cache_file_name("kht_", khtc_hash, ".khtc");
+}
+inline uint64_t kh_tex_hash(const std::vector<uint8_t>& khtc_bytes, bool khtc_srgb) {
+    uint64_t khtc_h = kh_fnv1a64(khtc_bytes.data(), khtc_bytes.size());
+    if (khtc_srgb) khtc_h ^= 0x9E3779B97F4A7C15ull;   // the two colour spaces are two textures
+    return khtc_h;
+}
+// sRGB <-> linear tables: 256 -> float for the decode, 4096 -> byte for the
+// encode (12-bit linear quantisation is below the 8-bit sRGB step everywhere
+// but the darkest few codes, where a box average is already noise).
+inline const float* kh_tex_s2l() {
+    static float khtc_t[256];
+    static bool khtc_init = false;
+    if (!khtc_init) {
+        for (int khtc_i = 0; khtc_i < 256; ++khtc_i) {
+            const float khtc_c = khtc_i / 255.0f;
+            khtc_t[khtc_i] = khtc_c <= 0.04045f ? khtc_c / 12.92f : powf((khtc_c + 0.055f) / 1.055f, 2.4f);
+        }
+        khtc_init = true;
+    }
+    return khtc_t;
+}
+inline const uint8_t* kh_tex_l2s() {
+    static uint8_t khtc_t[4096];
+    static bool khtc_init = false;
+    if (!khtc_init) {
+        for (int khtc_i = 0; khtc_i < 4096; ++khtc_i) {
+            const float khtc_l = khtc_i / 4095.0f;
+            const float khtc_s = khtc_l <= 0.0031308f ? khtc_l * 12.92f : 1.055f * powf(khtc_l, 1.0f / 2.4f) - 0.055f;
+            int khtc_v = static_cast<int>(khtc_s * 255.0f + 0.5f);
+            khtc_t[khtc_i] = static_cast<uint8_t>(khtc_v < 0 ? 0 : khtc_v > 255 ? 255 : khtc_v);
+        }
+        khtc_init = true;
+    }
+    return khtc_t;
+}
+// Full chain from level 0 (RGBA8, pitch w*4). 2x2 box; an odd edge repeats
+// its last texel (clamp), the textbook choice for non-power-of-two sources.
+inline void kh_tex_build_mips(KhTexBlob& khtc_b, const uint8_t* khtc_px, uint32_t khtc_w, uint32_t khtc_h, bool khtc_srgb) {
+    khtc_b.w = khtc_w; khtc_b.h = khtc_h; khtc_b.srgb = khtc_srgb;
+    khtc_b.level_off.clear();
+    khtc_b.data.clear();
+    uint32_t khtc_lw = khtc_w, khtc_lh = khtc_h, khtc_n = 0;
+    size_t khtc_total = 0;
+    for (;;) {
+        khtc_total += static_cast<size_t>(khtc_lw) * khtc_lh * 4u;
+        ++khtc_n;
+        if ((khtc_lw == 1 && khtc_lh == 1) || khtc_n >= KH_TEX_CACHE_MAX_MIPS) break;
+        khtc_lw = khtc_lw > 1 ? khtc_lw >> 1 : 1;
+        khtc_lh = khtc_lh > 1 ? khtc_lh >> 1 : 1;
+    }
+    khtc_b.mips = khtc_n;
+    khtc_b.data.resize(khtc_total);
+    khtc_b.level_off.resize(khtc_n);
+    memcpy(khtc_b.data.data(), khtc_px, static_cast<size_t>(khtc_w) * khtc_h * 4u);
+    khtc_b.level_off[0] = 0;
+    const float* khtc_s2l = kh_tex_s2l();
+    const uint8_t* khtc_l2s = kh_tex_l2s();
+    uint32_t khtc_sw = khtc_w, khtc_sh = khtc_h;
+    size_t khtc_soff = 0;
+    for (uint32_t khtc_l = 1; khtc_l < khtc_n; ++khtc_l) {
+        const uint32_t khtc_dw = khtc_sw > 1 ? khtc_sw >> 1 : 1;
+        const uint32_t khtc_dh = khtc_sh > 1 ? khtc_sh >> 1 : 1;
+        const size_t khtc_doff = khtc_soff + static_cast<size_t>(khtc_sw) * khtc_sh * 4u;
+        khtc_b.level_off[khtc_l] = static_cast<uint32_t>(khtc_doff);
+        const uint8_t* khtc_s = khtc_b.data.data() + khtc_soff;
+        uint8_t* khtc_d = khtc_b.data.data() + khtc_doff;
+        for (uint32_t khtc_y = 0; khtc_y < khtc_dh; ++khtc_y) {
+            const uint32_t khtc_y0 = khtc_y * 2u < khtc_sh ? khtc_y * 2u : khtc_sh - 1u;
+            const uint32_t khtc_y1 = khtc_y0 + 1u < khtc_sh ? khtc_y0 + 1u : khtc_sh - 1u;
+            for (uint32_t khtc_x = 0; khtc_x < khtc_dw; ++khtc_x) {
+                const uint32_t khtc_x0 = khtc_x * 2u < khtc_sw ? khtc_x * 2u : khtc_sw - 1u;
+                const uint32_t khtc_x1 = khtc_x0 + 1u < khtc_sw ? khtc_x0 + 1u : khtc_sw - 1u;
+                const uint8_t* khtc_p[4] = {
+                    khtc_s + (static_cast<size_t>(khtc_y0) * khtc_sw + khtc_x0) * 4u,
+                    khtc_s + (static_cast<size_t>(khtc_y0) * khtc_sw + khtc_x1) * 4u,
+                    khtc_s + (static_cast<size_t>(khtc_y1) * khtc_sw + khtc_x0) * 4u,
+                    khtc_s + (static_cast<size_t>(khtc_y1) * khtc_sw + khtc_x1) * 4u };
+                uint8_t* khtc_o = khtc_d + (static_cast<size_t>(khtc_y) * khtc_dw + khtc_x) * 4u;
+                if (khtc_srgb) {
+                    for (int khtc_c = 0; khtc_c < 3; ++khtc_c) {
+                        const float khtc_lin = 0.25f * (khtc_s2l[khtc_p[0][khtc_c]] + khtc_s2l[khtc_p[1][khtc_c]] +
+                                                        khtc_s2l[khtc_p[2][khtc_c]] + khtc_s2l[khtc_p[3][khtc_c]]);
+                        int khtc_q = static_cast<int>(khtc_lin * 4095.0f + 0.5f);
+                        khtc_o[khtc_c] = khtc_l2s[khtc_q < 0 ? 0 : khtc_q > 4095 ? 4095 : khtc_q];
+                    }
+                } else {
+                    for (int khtc_c = 0; khtc_c < 3; ++khtc_c) {
+                        khtc_o[khtc_c] = static_cast<uint8_t>((khtc_p[0][khtc_c] + khtc_p[1][khtc_c] +
+                                                               khtc_p[2][khtc_c] + khtc_p[3][khtc_c] + 2u) >> 2);
+                    }
+                }
+                khtc_o[3] = static_cast<uint8_t>((khtc_p[0][3] + khtc_p[1][3] + khtc_p[2][3] + khtc_p[3][3] + 2u) >> 2);
+            }
+        }
+        khtc_soff = khtc_doff;
+        khtc_sw = khtc_dw; khtc_sh = khtc_dh;
+    }
+}
+// Full-validation load (the mesh cache's discipline: any structural doubt is
+// a miss). khtc_own = the Documents copy: LRU-touched, under the trim budget.
+inline bool kh_tex_cache_load_one(const std::filesystem::path& khtc_p, bool khtc_own,
+                                  uint64_t khtc_hash, bool khtc_srgb, KhTexBlob& khtc_b) {
+    try {
+        std::ifstream khtc_f(khtc_p, std::ios::binary | std::ios::ate);
+        if (!khtc_f) return false;
+        const std::streamsize khtc_n = khtc_f.tellg();
+        if (khtc_n < 36) return false;
+        khtc_f.seekg(0);
+        uint32_t khtc_hd[7] = {};   // magic, version, hash lo, hash hi, w, h, mips
+        uint32_t khtc_flags = 0;
+        khtc_f.read(reinterpret_cast<char*>(khtc_hd), sizeof(khtc_hd));
+        khtc_f.read(reinterpret_cast<char*>(&khtc_flags), 4);
+        if (!khtc_f) return false;
+        const uint64_t khtc_fh = (static_cast<uint64_t>(khtc_hd[3]) << 32) | khtc_hd[2];
+        if (khtc_hd[0] != KH_TEX_CACHE_MAGIC || khtc_hd[1] != KH_TEX_CACHE_VERSION || khtc_fh != khtc_hash) return false;
+        const uint32_t khtc_w = khtc_hd[4], khtc_h = khtc_hd[5], khtc_m = khtc_hd[6];
+        if (khtc_w == 0 || khtc_h == 0 || khtc_w > 16384 || khtc_h > 16384 || khtc_m == 0 || khtc_m > KH_TEX_CACHE_MAX_MIPS) return false;
+        if (((khtc_flags & 1u) != 0u) != khtc_srgb) return false;
+        size_t khtc_total = 0;
+        uint32_t khtc_lw = khtc_w, khtc_lh = khtc_h;
+        std::vector<uint32_t> khtc_off(khtc_m);
+        for (uint32_t khtc_l = 0; khtc_l < khtc_m; ++khtc_l) {
+            khtc_off[khtc_l] = static_cast<uint32_t>(khtc_total);
+            khtc_total += static_cast<size_t>(khtc_lw) * khtc_lh * 4u;
+            khtc_lw = khtc_lw > 1 ? khtc_lw >> 1 : 1;
+            khtc_lh = khtc_lh > 1 ? khtc_lh >> 1 : 1;
+        }
+        if (static_cast<size_t>(khtc_n) != 32u + khtc_total) return false;
+        khtc_b.data.resize(khtc_total);
+        khtc_f.read(reinterpret_cast<char*>(khtc_b.data.data()), static_cast<std::streamsize>(khtc_total));
+        if (!khtc_f) return false;
+        khtc_f.close();
+        khtc_b.w = khtc_w; khtc_b.h = khtc_h; khtc_b.mips = khtc_m; khtc_b.srgb = khtc_srgb;
+        khtc_b.level_off = std::move(khtc_off);
+        if (khtc_own) {
+            std::error_code khtc_ec;
+            std::filesystem::last_write_time(khtc_p, std::filesystem::file_time_type::clock::now(), khtc_ec);
+        }
+        return true;
+    } catch (...) { return false; }
+}
+inline bool kh_tex_cache_load(uint64_t khtc_hash, bool khtc_srgb, KhTexBlob& khtc_b) {
+    std::vector<std::filesystem::path> khtc_cand;
+    const bool khtc_docs = !kh_mesh_cache_dir().empty();
+    if (khtc_docs) khtc_cand.push_back(kh_tex_cache_file(khtc_hash));
+    kh_mod_cache_append(khtc_cand, kh_cache_file_name("kht_", khtc_hash, ".khtc"));
+    for (size_t khtc_i = 0; khtc_i < khtc_cand.size(); ++khtc_i) {
+        const bool khtc_own = khtc_i == 0 && khtc_docs;
+        if (kh_tex_cache_load_one(khtc_cand[khtc_i], khtc_own, khtc_hash, khtc_srgb, khtc_b)) {
+            if (!khtc_own) g_mod_tex_hits++;
+            return true;
+        }
+    }
+    return false;
+}
+inline void kh_tex_cache_store(uint64_t khtc_hash, const KhTexBlob& khtc_b) {
+    if (kh_mesh_cache_dir().empty()) return;
+    if (khtc_b.data.empty() || khtc_b.mips == 0) return;
+    try {
+        std::ofstream khtc_f(kh_tex_cache_file(khtc_hash), std::ios::binary | std::ios::trunc);
+        if (!khtc_f) return;
+        const uint32_t khtc_hd[7] = { KH_TEX_CACHE_MAGIC, KH_TEX_CACHE_VERSION,
+                                      static_cast<uint32_t>(khtc_hash & 0xFFFFFFFFu),
+                                      static_cast<uint32_t>(khtc_hash >> 32),
+                                      khtc_b.w, khtc_b.h, khtc_b.mips };
+        const uint32_t khtc_flags = khtc_b.srgb ? 1u : 0u;
+        khtc_f.write(reinterpret_cast<const char*>(khtc_hd), sizeof(khtc_hd));
+        khtc_f.write(reinterpret_cast<const char*>(&khtc_flags), 4);
+        khtc_f.write(reinterpret_cast<const char*>(khtc_b.data.data()), static_cast<std::streamsize>(khtc_b.data.size()));
+        khtc_f.flush();
+        if (khtc_f) g_stats.tex_cache_writes++;
+    } catch (...) {}
+}
+inline void kh_tex_cache_queue(uint64_t khtc_hash, std::shared_ptr<const KhTexBlob> khtc_b) {
+    if (!kh_mesh_cache_writer_start()) {   // no thread: write inline, the mesh cache's own fallback
+        kh_tex_cache_store(khtc_hash, *khtc_b);
+        std::lock_guard<std::mutex> khtc_tl(g_khsm_trim_mu);
+        kh_mesh_cache_trim();
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> khtc_l(g_khmw_mu);
+        KhMeshWriteJob khtc_j = { khtc_hash, -1, std::move(khtc_b) };
+        g_khmw_q.push_back(std::move(khtc_j));
+        g_khmw_queued++;
+    }
+    g_khmw_cv.notify_one();
+}
+// IMMUTABLE upload, every level in one create - no GenerateMips, no RT bind,
+// no context needed.
+inline ID3D11ShaderResourceView* kh_tex_create(ID3D11Device* dev, const KhTexBlob& khtc_b, std::string& err) {
+    D3D11_TEXTURE2D_DESC khtc_td = {};
+    khtc_td.Width = khtc_b.w; khtc_td.Height = khtc_b.h;
+    khtc_td.MipLevels = khtc_b.mips; khtc_td.ArraySize = 1;
+    khtc_td.Format = khtc_b.srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+    khtc_td.SampleDesc.Count = 1;
+    khtc_td.Usage = D3D11_USAGE_IMMUTABLE;
+    khtc_td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    std::vector<D3D11_SUBRESOURCE_DATA> khtc_init(khtc_b.mips);
+    uint32_t khtc_lw = khtc_b.w;
+    for (uint32_t khtc_l = 0; khtc_l < khtc_b.mips; ++khtc_l) {
+        khtc_init[khtc_l].pSysMem = khtc_b.data.data() + khtc_b.level_off[khtc_l];
+        khtc_init[khtc_l].SysMemPitch = khtc_lw * 4u;
+        khtc_init[khtc_l].SysMemSlicePitch = 0;
+        khtc_lw = khtc_lw > 1 ? khtc_lw >> 1 : 1;
+    }
+    ID3D11Texture2D* khtc_tex = nullptr;
+    HRESULT khtc_hr = dev->CreateTexture2D(&khtc_td, khtc_init.data(), &khtc_tex);
+    if (FAILED(khtc_hr)) { err = "CreateTexture2D(mipped) " + hr_str(khtc_hr); return nullptr; }
+    ID3D11ShaderResourceView* khtc_srv = nullptr;
+    khtc_hr = dev->CreateShaderResourceView(khtc_tex, nullptr, &khtc_srv);
+    khtc_tex->Release();
+    if (FAILED(khtc_hr)) { err = "CreateSRV(mipped) " + hr_str(khtc_hr); return nullptr; }
+    return khtc_srv;
+}
+inline ID3D11ShaderResourceView* kh_tex_load_cached(ID3D11Device* dev, const std::string& path,
+                                                    bool srgb, std::string& err, bool& handled) {
+    handled = true;   // the cached path owns every stb texture unless mode 439 says otherwise
+    std::vector<uint8_t> khtc_bytes;
+    try {
+        std::ifstream khtc_fs(path, std::ios::binary | std::ios::ate);
+        if (khtc_fs) {
+            const std::streamsize khtc_n = khtc_fs.tellg();
+            if (khtc_n > 0 && khtc_n < (std::streamsize)512u * 1024u * 1024u) {
+                khtc_bytes.resize(static_cast<size_t>(khtc_n));
+                khtc_fs.seekg(0);
+                khtc_fs.read(reinterpret_cast<char*>(khtc_bytes.data()), khtc_n);
+            }
+        }
+    } catch (...) { khtc_bytes.clear(); }
+    if (khtc_bytes.empty()) { err = "read failed"; return nullptr; }
+    const uint64_t khtc_hash = kh_tex_hash(khtc_bytes, srgb);
+    {
+        const auto khtc_t0 = std::chrono::steady_clock::now();
+        KhTexBlob khtc_hit;
+        if (kh_tex_cache_load(khtc_hash, srgb, khtc_hit)) {
+            g_stats.tex_cache_load_ms += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - khtc_t0).count());
+            ID3D11ShaderResourceView* khtc_srv = kh_tex_create(dev, khtc_hit, err);
+            if (khtc_srv) { g_stats.tex_cache_hits++; return khtc_srv; }
+            // a corrupt-but-valid-looking file: fall through to the decode
+        }
+    }
+    int khtc_w = 0, khtc_h = 0, khtc_comp = 0;
+    stbi_uc* khtc_px = stbi_load_from_memory(khtc_bytes.data(), static_cast<int>(khtc_bytes.size()),
+                                             &khtc_w, &khtc_h, &khtc_comp, 4);
+    if (!khtc_px) { err = std::string("decode failed: ") + (stbi_failure_reason() ? stbi_failure_reason() : "?"); return nullptr; }
+    if (khtc_w <= 0 || khtc_h <= 0 || khtc_w > 16384 || khtc_h > 16384) { stbi_image_free(khtc_px); err = "bad dimensions"; return nullptr; }
+    auto khtc_blob = std::make_shared<KhTexBlob>();
+    const auto khtc_t1 = std::chrono::steady_clock::now();
+    kh_tex_build_mips(*khtc_blob, khtc_px, static_cast<uint32_t>(khtc_w), static_cast<uint32_t>(khtc_h), srgb);
+    g_stats.tex_mip_ms += static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - khtc_t1).count());
+    stbi_image_free(khtc_px);
+    ID3D11ShaderResourceView* khtc_srv = kh_tex_create(dev, *khtc_blob, err);
+    if (!khtc_srv) return nullptr;
+    g_stats.tex_cache_misses++;
+    if (!kh_mesh_cache_dir().empty()) kh_tex_cache_queue(khtc_hash, std::move(khtc_blob));
+    return khtc_srv;
 }
 
 inline bool kh_fbx_import(const std::string& path, int& out_id, std::string& err) {
@@ -19188,6 +19873,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         { static_src.c_str(), "PSMaskCast",  "ps_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "PSMaskPrime", "ps_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "PSInjDepth",  "ps_5_0", khcb_rx_defines, 0 },
+        { static_src.c_str(), "PSOwner",     "ps_5_0", khcb_rx_defines, 0 },   // 26691: was inline at the first post-gate ensure
         { static_src.c_str(), "VSMain",      "vs_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "VSMain",      "vs_5_0", khtx_defines,    0 },
         { static_src.c_str(), "VSMirror",    "vs_5_0", khcb_rx_defines, 0 },
@@ -19239,6 +19925,33 @@ inline std::string ensure_resources(ID3D11Device* dev) {
     if (!err.empty()) { vs_blob->Release(); return err; }
     err = compile_shader(static_src.c_str(), "PSMain", "ps_5_0", khcb_rx_defines, &ps_blob);
     if (!err.empty()) { vs_blob->Release(); vs_fs_blob->Release(); return err; }
+    {   // 26691 KH_CB_MIRROR_GAUGE: reflect the blob just compiled (or served
+        // from .khsc) and compare the declared cbuffer sizes to the C++ split.
+        // Non-fatal in every direction: a failed reflect publishes Refl 2.
+        ID3D11ShaderReflection* khcm_r = nullptr;
+        if (ps_blob && SUCCEEDED(D3DReflect(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(),
+                                            __uuidof(ID3D11ShaderReflection),
+                                            reinterpret_cast<void**>(&khcm_r))) && khcm_r) {
+            auto khcm_size = [&](const char* khcm_name) -> uint32_t {
+                ID3D11ShaderReflectionConstantBuffer* khcm_cb = khcm_r->GetConstantBufferByName(khcm_name);
+                D3D11_SHADER_BUFFER_DESC khcm_d = {};
+                return (khcm_cb && SUCCEEDED(khcm_cb->GetDesc(&khcm_d))) ? khcm_d.Size : 0u;
+            };
+            g_cb_mirror_obj_b = khcm_size("CBObj");
+            g_cb_mirror_frame_b = khcm_size("CBFrame");
+            g_cb_mirror_refl = 1;
+            g_cb_mirror_bad = g_cb_mirror_obj_b != static_cast<uint32_t>(KH_CBOBJ_BYTES) ||
+                              g_cb_mirror_frame_b != static_cast<uint32_t>(KH_CBFRAME_BYTES);
+            khcm_r->Release();
+            if (g_cb_mirror_bad) {
+                kh_report_error("KH CB mirror: HLSL CBObj/CBFrame " + std::to_string(g_cb_mirror_obj_b) + "/" +
+                                std::to_string(g_cb_mirror_frame_b) + " B vs C++ " +
+                                std::to_string(KH_CBOBJ_BYTES) + "/" + std::to_string(KH_CBFRAME_BYTES) + " B");
+            }
+        } else {
+            g_cb_mirror_refl = 2;
+        }
+    }
 
     {   // 26348 the injection's depth-encode PS: NON-FATAL. A failure here
         // leaves ps_inj_depth null, the seam binds nullptr, and the footprint
@@ -19251,6 +19964,18 @@ inline std::string ensure_resources(ID3D11Device* dev) {
             khi_blob->Release();
         } else if (!khi_err.empty()) {
             kh_report_error("KH inject-depth shader: " + khi_err);   // render-thread-reachable
+        }
+    }
+    {   // 26684 KH_MESH_OWNER_PREPASS: the owner draw's PS. NON-FATAL - a null
+        // ps_owner stands the whole prepass down (khr_own_on false) and the
+        // injection draws exactly as 26683 did.
+        ID3DBlob* kho_blob = nullptr;
+        const std::string kho_err = compile_shader(static_src.c_str(), "PSOwner", "ps_5_0", khcb_rx_defines, &kho_blob);
+        if (kho_err.empty() && kho_blob) {
+            dev->CreatePixelShader(kho_blob->GetBufferPointer(), kho_blob->GetBufferSize(), nullptr, &g_res.ps_owner);
+            kho_blob->Release();
+        } else if (!kho_err.empty()) {
+            kh_report_error("KH owner-prepass shader: " + kho_err);
         }
     }
 
@@ -19437,6 +20162,16 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
         hr = dev->CreateDepthStencilState(&dd, &g_res.dss_test_write);
         if (FAILED(hr)) { g_res.release(); return "Create DSS(write) " + hr_str(hr); }
+        {   // 26684 KH_MESH_OWNER_PREPASS: strict LESS so the first-drawn of a
+            // depth tie owns the sample (LESS_EQUAL would hand a coincident
+            // stack to its LAST member and defeat the point). Non-fatal.
+            D3D11_DEPTH_STENCIL_DESC khod = {};
+            khod.DepthEnable = TRUE;
+            khod.DepthFunc = D3D11_COMPARISON_LESS;
+            khod.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+            khod.StencilEnable = FALSE;
+            if (FAILED(dev->CreateDepthStencilState(&khod, &g_res.dss_owner))) g_res.dss_owner = nullptr;
+        }
         dd.DepthEnable = FALSE;
         dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
         hr = dev->CreateDepthStencilState(&dd, &g_res.dss_off);
@@ -20767,6 +21502,24 @@ static constexpr UINT KH_SUN_FAR_SIZE = 4096;
 // and the mid/outer bands serve everything nearer
 // than 32 m so the range-priced texels only ever answer FAR fragments.
 static std::atomic<float> g_sun_range{200.0f};
+// 26684 KH_OBJ_VIS_CUT (ledger at KH_BUILD_TAG): the engine's OBJECT view
+// distance, read on the game thread every flush (stage_world_lighting) and
+// consumed per object at fill_lighting_obj_cb as shadow_meta2.y. 0 = never
+// read = no cut (the 26683 behaviour). WRITTEN by sqf_integration.hpp's
+// flush_ui_render_sqf, which builds the getVideoOptions map ONCE and serves
+// both the shadowvis (26451) and the objectvis/objectdraw readers from it
+// (operator directive - no second map build, no second binding). objVisSrc
+// 1 = the key matched a positive scalar; 0 = it never has (26614 proved this
+// map can lack a key entirely) and the cut is inert - rule 1.4, read it first.
+static std::atomic<float> g_obj_vis{0.0f};
+static std::atomic<int>   g_obj_vis_src{0};
+// 26686 KH_VIDEO_OPT_KEYS (gauge): dump1-26685 read objVisSrc 0 - the map
+// carries no 'objectvis'/'objectdraw' key, exactly 26614's lesson again.
+// The shared read latches the map's STRING keys once per session (game
+// thread writes, game thread dumps) so the next dump names the real key
+// instead of a fourth guess at its spelling.
+static std::string g_video_opt_keys;
+static bool        g_video_opt_keys_done = false;
 // 26613 KH_SUN_RANGE_SOURCE (ledger at KH_BUILD_TAG). WHO WROTE g_sun_range
 // LAST: 0 = nobody (the 200 default - indistinguishable from a healthy
 // mirror at the stock setting, which is exactly how the dead-mirror class
@@ -21324,7 +22077,7 @@ struct StateBackup {
     // three slots are restore-covered from their first frame.
     // 26575: +t29-31 (the self moment pyramids) - widened in the SAME
     // edit that adds the binds, per the 26444 leak lesson above.
-    ID3D11ShaderResourceView* ps_srvs[33] = {};   // 26458: +t28; 26575: t29-31; 26620: +t32 (far band)
+    ID3D11ShaderResourceView* ps_srvs[35] = {};   // 26458: +t28; 26575: t29-31; 26620: +t32 (far band); 26684: +t33/t34 (owner map)
     ID3D11SamplerState*      ps_samps[2] = {};   // s0 material, s1 26575 pyramid sampler
     ID3D11DepthStencilState* dss = nullptr;
     UINT                     stencil_ref = 0;
@@ -23764,6 +24517,22 @@ static uint64_t g_far_keep_inside_routes = 0;   // 26514: far-keep routings admi
                                                 // construction - nothing reaches the
                                                 // far plane then.
 static uint64_t g_far_clip_no_farvis = 0;   // reached the far plane, far_vis OFF
+// 26684 THE 8.5 GAUGE (handoff item 8.5, sized before any shader variant):
+// injection draws by PS signature. arb = SV_Depth declared (late-Z, the
+// khr_tx_arb pick, textured folded in); earlyZ = no SV_Depth (ps_composite /
+// ps and their textured twins). Read against compositeMeshes. Window-reset.
+static uint64_t g_inj_ps_arb_draws = 0;
+static uint64_t g_inj_ps_earlyz_draws = 0;
+// 26684 KH_MESH_OWNER_PREPASS lanes (window-reset). ownFrames = injections
+// that armed the map; ownDraws = owner draws issued; ownSkips = objects
+// admitted but NOT drawn into the map (cutout or user-shader material - they
+// still test, they never own); ownFails = injections where the map could not
+// arm (no DSV / target creation failed / reversed viewport) - the arming lane,
+// read it FIRST.
+static uint64_t g_own_frames = 0;
+static uint64_t g_own_draws = 0;
+static uint64_t g_own_skips = 0;
+static uint64_t g_own_fails = 0;
 static uint64_t g_far_clip_stale = 0;       // reached it with far_vis ON but the
                                             // far-keep pair not fresh/usable
 static float    g_far_clip_acc_far = -1.0f; // the accepted far the cut sits at (m)
@@ -25940,7 +26709,7 @@ static uint32_t g_fk_veto_cand_n = 0;       // candidates staged at the last pas
 // (26363/26364, field-confirmed), the seam refuse-and-retry (26371,
 // svLiveTrnBound 0 with 17/17), and the sign-agnostic fade gate (26362, a
 // defect repair that is arithmetically identical on mode 0). Nothing else.
-static constexpr int KH_BUILD_TAG = 26663;
+static constexpr int KH_BUILD_TAG = 26694;
 // NEAR-GAP RAMP (build 26001; the RenderDoc conviction). ROOT, proven by
 // pixel history + depth-window plateaus: the world partition's viewport
 // floor (0.011 in the convicting capture) collapses EVERY fragment nearer
@@ -27906,9 +28675,131 @@ static float g_pub_block_sun[3] = {};
 // ==========================================================================
 static uint64_t g_blk_zero_sun_refusals = 0;   // 26418 engagement lane
 static uint64_t g_blk_zero_sun_admits = 0;     // 26612 engagement lane: zero-sun blocks SHIPPED because the standing scene is dark (night)
+static uint64_t g_blk_zero_sun_wit_refusals = 0;   // 26666 engagement lane: zero-sun blocks REFUSED because the sky witness contradicts the dark standing
+static uint64_t g_blk_contra_pend_holds = 0;       // 26665 engagement lane: standing-band sightings that spared the bright pending under contradiction
 static float    g_blk_shade_now   = -1.0f;
 static float    g_blk_shade_min   =  1.0e9f;   // session darkest
 static float    g_blk_shade_max   = -1.0f;     // session brightest
+// ==========================================================================
+// 26668 KH_BLK_WALK_KEEL - THE IN-BAND WALK'S EXCURSION, MEASURED AGAINST A
+// REFERENCE TOO SLOW TO BE DRAGGED ALONG. PURE GAUGE - no gate, no mode, no
+// arbitration input anywhere (the 26417 doctrine; a gauge with a gate in it
+// is how blkDarkPubRefusals read 0 through a live event).
+//
+// THE DUMP3-26664 CONVICTION THIS SERVES (full ledger at KH_BUILD_TAG): the
+// operator caught the dim live; blkShadeNow == blkShadeMin (1.828 of an
+// 7.98 session max) AT dump time, standing == anchor == published == probe
+// (sun sum 3.956 on every lane), probe fresh, zero contra/sticky/collapse/
+// reseed counters, no live pending - so the standing reached the dim value
+// through the one path that leaves every counter quiet: ACCEPTED IN-BAND
+// WALK STEPS under the 26476 anchor, whose rate cap bounds the walk's SPEED
+// (25 pct/s) and not its DESTINATION. The ring even shows the walk
+// breathing (sun sum 3.96 <-> 4.19, ~1.4 s period). What NO lane measured:
+// where the excursion started, how deep it went relative to the level it
+// left, and how long it held - the ring is 8 s and the event is longer.
+//
+// THE KEEL: a follower of the standing sun sum rate-clamped to 2 pct/s -
+// an order of magnitude under the anchor's 25 pct/s and two under the
+// measured walk oscillation, yet comfortably above real solar time (a 2x
+// dusk dimming over 20 min is ~0.06 pct/s). A genuine level change does not
+// walk, it ADOPTS - and the anchor SNAPS at the apply tail when it does -
+// so the keel re-seeds itself whenever blkAnchorSnaps advances, by reading
+// the counter rather than by touching the locator (no arbitration edit for
+// a gauge). Between snaps, standing/keel is the walk's excursion ratio.
+//
+// PREDICTED BOUNDS, published with the gauge per the 26256 rule: ordinary
+// play holds blkWalkRatio in ~[0.85, 1.18] (the measured 5.5 pct breathing
+// plus keel lag through dusk drift); a dump3-class dim reads blkWalkRatioMin
+// ~0.3 with blkWalkDimSpanMaxS in single-digit seconds and blkWalkDimFrames
+// in the hundreds; a skipTime/weather adoption reads as a keel snap with the
+// ratio back near 1.0 the same window. A ratio min near the bounds' floor
+// on a session the operator calls CLEAN falsifies the walk reading and
+// moves the dim to the downstream terms the shade latch already splits.
+// WHAT THIS BUYS: the 26381 doctrine requires the ordinary population
+// measured before any bar moves ('blkAcceptRatioMin ... should exist before
+// any bar moves again' - same shape, publish axis). blkWalkRatioMin over
+// clean sessions IS that population for the walk axis; the repair - if the
+// next dim dump confirms - is then a measured excursion bound, not an
+// argued one.
+// Dim-window census keys on ratio < 0.7 against the keel, NOT on the
+// session max: a session max is time-of-day-poisoned over a long mission,
+// a 30 pct drop against a 2 pct/s baseline cannot be time of day.
+// ==========================================================================
+static const float KH_BLK_KEEL_RATE = 0.02f;   // fraction per second
+static const float KH_BLK_DIM_BAR   = 0.70f;   // census bar, ratio vs keel
+static float    g_blk_keel_sl        = -1.0f;  // session state: the keel itself
+static float    g_blk_keel_t         = -1.0f;  // session state: last update stamp
+static uint64_t g_blk_keel_snap_mark = 0;      // session state: blkAnchorSnaps consumed
+static uint64_t g_blk_keel_snaps     = 0;      // keel re-seeds taken from anchor snaps
+static float    g_blk_walk_ratio     = -1.0f;  // current standing/keel
+static float    g_blk_walk_ratio_min = -1.0f;  // window extreme (stats-arm lane)
+static float    g_blk_walk_ratio_max = -1.0f;  // window extreme (stats-arm lane)
+static float    g_blk_walk_min_t     = -1.0f;  // effect time at the min
+static float    g_blk_walk_min_keel  = -1.0f;  // keel at the min
+static float    g_blk_walk_min_std   = -1.0f;  // standing at the min
+static uint64_t g_blk_walk_dim_frames = 0;     // fills with ratio < KH_BLK_DIM_BAR
+static float    g_blk_walk_dim_first = -1.0f;  // window census
+static float    g_blk_walk_dim_last  = -1.0f;
+static float    g_blk_walk_dim_open  = -1.0f;  // session state: current dim window's open edge
+static float    g_blk_walk_dim_span_max = 0.0f;
+// 26670 KH_ADOPT_CENSUS (ledger at KH_BUILD_TAG; recorded at the adopt
+// branch). What every regime adoption replaced, and after how long a gap.
+static float    g_blk_adopt_ratio_last = -1.0f;  // candidate/standing at adoption
+static float    g_blk_adopt_ratio_min  = -1.0f;
+static float    g_blk_adopt_ratio_max  = -1.0f;
+static float    g_blk_adopt_gap_last   = -1.0f;  // standing-unseen seconds at adoption
+static float    g_blk_adopt_gap_max    =  0.0f;
+static float    g_blk_adopt_t_last     = -1.0f;  // effect time of the last adoption
+// 26671 KH_STARVED_DIM_HOLD (ledger at KH_BUILD_TAG; mode 433 reverts).
+// The operator answered 26670's pre-registered fork: ONLY OUR MESHES DIM,
+// the world stays lit - the starved-adopted dim flavor is TRANSITIONAL,
+// never the engine's camera-local truth, and the repair is the hold the
+// 26670 entry sized in advance. Constants and the reasoning that sizes
+// them live at the hold branch in the locator.
+static const float KH_BLK_STARVED_DIM_FRAC   = 0.5f;   // dim bar vs the displaced standing
+static const float KH_BLK_STARVED_DIM_HOLD_S = 10.0f;  // concede horizon (26381 bound)
+static const float KH_BLK_SDH_WINDOW_GAP_S   = 2.0f;   // a stale window re-opens fresh
+static uint64_t g_blk_starved_dim_holds    = 0;     // engagement lane
+static uint64_t g_blk_starved_dim_concedes = 0;     // horizon expiries that adopted anyway
+// 26672 KH_BRIGHT_RECENCY (ledger at KH_BUILD_TAG). The witness that replaces
+// the sky-elevation term in the 26665/26666 predicates after the moon
+// falsified it in the field (sunDirEngineY 0.410 at genuine night - the
+// engine's directional-light export follows the MOON, so elevation cannot
+// split day from a moonlit night). Stamped in kh_probe_std_refresh whenever
+// ANY upload reaching the arbitration carries sun sum > 1.0, regardless of
+// the verdict on it: the question both gates actually ask is 'is bright
+// world content flowing right now', and presence is the evidence - the
+// same logic 26054 trusts for starvation. Effect-time seconds, the fill's
+// own clock. Session-reset (continuity).
+static const float KH_BLK_BRIGHT_RECENT_S = 5.0f;
+static float g_blk_bright_seen_t = -1.0f;
+static float    g_blk_sdh_first = -1.0f;   // session state: current hold window's open edge
+static float    g_blk_sdh_last  = -1.0f;   // session state: last hold in the window
+static float    g_blk_sdh_held_max = 0.0f; // longest window bridged (stats-arm lane)
+
+// 26671: window bookkeeping for the starved-dim hold, factored so a conceded
+// window fails the predicate in the SAME evaluation and falls straight
+// through to the adopt branch - a hold that fired and then adopted on the
+// next upload would stamp two events' worth of census for one. A window
+// whose last hold is older than KH_BLK_SDH_WINDOW_GAP_S re-opens fresh, so
+// separated events never pool their ages toward a spurious concede.
+inline bool kh_blk_sdh_window_holds(float khsd_now) {
+    if (g_blk_sdh_first < 0.0f ||
+        (g_blk_sdh_last >= 0.0f &&
+         khsd_now - g_blk_sdh_last > KH_BLK_SDH_WINDOW_GAP_S)) {
+        g_blk_sdh_first = khsd_now;   // fresh window
+    }
+    g_blk_sdh_last = khsd_now;
+    const float khsd_held = khsd_now - g_blk_sdh_first;
+    if (khsd_held > g_blk_sdh_held_max) g_blk_sdh_held_max = khsd_held;
+    if (khsd_held > KH_BLK_STARVED_DIM_HOLD_S) {
+        g_blk_starved_dim_concedes++;   // 26381 bound: adopt anyway
+        g_blk_sdh_first = -1.0f;
+        g_blk_sdh_last = -1.0f;
+        return false;
+    }
+    return true;
+}
 static uint64_t g_blk_shade_n     = 0;
 static uint64_t g_blk_shade_dark  = 0;         // frames under 0.10 x brightest
 // latched AT the darkest frame
@@ -27919,6 +28810,28 @@ static float g_blk_shade_litgate  = -1.0f;
 static float g_blk_shade_strength = -1.0f;   // g_shadow_map_strength
 static float g_blk_shade_std_amb  = -1.0f;   // the probe's standing pair at that instant
 static float g_blk_shade_std_sun  = -1.0f;
+// 26667 THE DIM-WINDOW CENSUS (pure gauge, no mode, no gate; rides the 26417
+// latch it extends). The operator's third report - the mesh occasionally DIMS
+// (sun visibly darkens, recovers in seconds, no pattern, never caught by a
+// dump) - is measured, not repaired, per rule 1.3: no event has ever been in
+// hand. blkShadeDarkFrames counts under 0.10x of the session max, which is
+// the BLACK class; a dim-not-black event lives between the two bars, so this
+// counts under 0.50x, latches the window edges, and captures the candidate
+// discriminators AT the darkest frame: the ANCHOR sun luminance (an anchor
+// tracking the dark reading = the 26476 walk / a slow adoption excursion;
+// an anchor still bright = the publish or a downstream term) and the SUN MAP
+// age (a stale map = the self-term axis the age gate exists for, not the
+// block at all). 26665 removes the likeliest author of LONG dim windows (a
+// zero-sun standing hijack); a window recurring with these lanes populated
+// and blkContraPendHolds 0 is the 26195 dim-flavor model (a non-zero ~0.3x
+// flavor ruling), which dark-contra cannot see by design (std >= 0.1) - the
+// relative re-seed bar behind modes 63/18 is the pre-built lever for it,
+// still unmeasured, and these are the numbers it was waiting for.
+static uint64_t g_blk_dim_frames = 0;      // fills under 0.50x session max (and >= 0.10x: the dim-not-black band)
+static float    g_blk_dim_first_s = -1.0f; // first dim fill this session
+static float    g_blk_dim_last_s  = -1.0f; // most recent dim fill
+static float    g_blk_shade_anch_sun = -1.0f;   // anchor sun luminance at the darkest frame
+static float    g_blk_shade_map_age  = -1.0f;   // sun-map age (s) at the darkest frame
 static float g_blk_shade_probe_age = -1.0f;  // s since the locator last confirmed
 static float g_blk_shade_t        = -1.0f;   // effect time of the darkest frame
 static float g_pub_block_fog[3] = {};
@@ -29170,6 +30083,7 @@ struct LiveShadowState {
     // place when their cascade re-renders.
     LiveShadowEntry entries[KH_LIVE_MAX_CASCADES] = {};
     uint32_t count = 0;
+    bool     wipe_deferred = false;   // 26687 KH_LIVE_WIPE_DEFER: door 4 marked the table suspect; the first commit prunes it
     uint64_t stamp_counter = 0;
     int      newest = -1;          // entry index of the last finalize
     // VIEW-PAIRED BANDS (pair mode 2, default): the engine's own resolve
@@ -31610,6 +32524,13 @@ static float    g_sun_fit_tex[4]  = { 0.0f, 0.0f, 0.0f, 0.0f };
 static float    g_sun_fit_bfl[4]  = { 0.0f, 0.0f, 0.0f, 0.0f };
 static float    g_sun_fit_bias[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 static float    g_sun_fit_d2v[4]  = { 0.0f, 0.0f, 0.0f, 0.0f };
+// 26693 KH_BAND_ADMIT_CENSUS (pure gauge; ledger at KH_BUILD_TAG): per band,
+// the bitmask of union-caster indices admitted (first 32), and for the
+// first four casters the lateral margin lat - (r2 + er) in metres (negative
+// = inside the ortho clip) and the up-sun distance ds. Last-fit values.
+static uint32_t g_sun_fit_admit[4] = { 0u, 0u, 0u, 0u };
+static float    g_sun_fit_lat[4][4] = {};
+static float    g_sun_fit_ds[4][4] = {};
 static float    g_sun_ladder_caster_r = 0.0f;   // largest local caster radius, GAUGE ONLY
 // 26537 KH_UNION_TEXEL_SNAP lanes (ledger at the union snap). The
 // displacement the snap applied to the union centre this fit (m) and the
@@ -31888,6 +32809,57 @@ static uint64_t g_band_rej_no_view = 0;       // band seals refused: no view to 
 // fallback; the live table keeps the fallback, since its entries turn over.
 static uint64_t g_band_rej_stale_view = 0;    // seals refused: no fresh same-frame view
 static uint64_t g_fire_depth_refreshes = 0;   // re-fires given fresh DEPTH but the first fire's epoch
+// 26674 KH_LIVE_FIN_CENSUS (ledger at KH_BUILD_TAG): the finalize bail,
+// split by reason, plus the commit stamp that turns 'the table is empty'
+// into 'the table has been empty for N seconds because of THIS term'.
+static uint64_t g_live_fin_bail_pend = 0;   // no upgraded pending at cycle exit
+static uint64_t g_live_fin_bail_vp = 0;     // pending never saw its viewport draw
+static uint64_t g_live_fin_bail_atlas = 0;  // atlas_size 0 - the latchable stale term
+// 26677 KH_LIVE_PEND_CENSUS (ledger at KH_BUILD_TAG): dump1-26676 proved the
+// pending FALSE at all 17,951 boundaries (bailVp 0) while accepts flowed at
+// 4.4/flush - so either the accepts run the stash path (cycle_latched stuck),
+// or the pending is set and destroyed by a NON-boundary wiper. These lanes
+// make the alternatives arithmetic: pendSets 0 with stashAccepts climbing =
+// the latch is stuck; pendSets tracking wipesNw = the wanted() flap; pendSets
+// tracking wipesMaint = the maintenance tail runs mid-cycle; pendSets > 0
+// with all wipers 0 = an unlisted writer and the next census is a write
+// breakpoint list, not more lanes.
+static uint64_t g_live_pend_sets = 0;        // pending_valid = true assignments
+static uint64_t g_live_stash_accepts = 0;    // window accepts on the cycle_latched stash path
+static uint64_t g_live_pend_wipes_nw = 0;    // 56050 not-wanted wiper, pending was TRUE
+static uint64_t g_live_pend_wipes_maint = 0; // maintenance tail, pending was TRUE
+// 26679 KH_LIVE_STAMPS: the two clocks that split the camera-switch outage
+// (dump3-26678: skips heal, a SWITCH both triggers and heals a ~15 s table
+// drought; whether cycles and harvest feeds even RAN during it is invisible
+// in cumulative lanes). liveCycleStartT stale through an outage = the atlas
+// phase detection lost the target across the switch (probe identity is the
+// repair site); fresh with cascBindFeedT stale = the harvest gate; both
+// fresh with the table empty = the fed windows fail test_window and the
+// harvested family's shape is the next census.
+static float g_live_cycle_start_t = -1.0f;   // stamped at every atlas_cycle_start
+static float g_cascbind_feed_t = -1.0f;      // stamped at every harvest feed
+static float    g_live_last_commit_t = -1.0f;   // session state: last successful commit
+// 26686 KH_LIVE_WIPE_SITE (pure gauge, session-scoped; ledger at KH_BUILD_TAG):
+// every site that empties the live cascade table stamps WHICH site and WHEN,
+// so a dump reading liveLastCommitT far behind liveCycleStartT names the
+// door the table left by in one read. Sites: 1 view relock, 2 wrong-era
+// receive wipe, 3 view-lock acquisition, 4 view-lock boundary (second
+// adoption), 5 chain release (cold hand-off), 6 the mode-436 sun-jump wipe.
+static int   g_live_wipe_site = 0;
+static float g_live_wipe_t = -1.0f;
+static uint64_t g_live_wipe_n = 0;
+// 26688 KH_LIVE_WIPE_DOORS: per-door counts (session) - 26686 stamped only
+// the LAST door, and dump1-26687 had two wipes with liveLastCommitT 4.5 s:
+// the first door was the one that mattered and it had no name. Index = door.
+static uint64_t g_live_wipe_door[7] = {};
+static uint64_t g_live_wipe_deferrals = 0;   // 26687: lock-boundary wipes deferred (session; doors 3/4/5 since 26688)
+static uint64_t g_live_wipe_prunes = 0;      // 26687: deferred wipes landed at a commit (session)
+inline void kh_live_wipe_note(int khlw_site) {
+    if (khlw_site >= 1 && khlw_site <= 6) g_live_wipe_door[khlw_site]++;   // 26688
+    g_live_wipe_site = khlw_site;
+    g_live_wipe_t = effect_time_seconds();
+    g_live_wipe_n++;
+}
 static uint64_t g_live_rej_no_view = 0;       // live commits refused for the same reason
 // 26544 KH_LIVE_CAM_PAIR (mode 334 reverts; full ledger at KH_BUILD_TAG). The
 // live-table seal pairs the harvested cascade matrix with THE CAMERA IT WAS
@@ -36734,13 +37706,55 @@ inline void fill_lighting_frame_cb(ConstantData& cbd) {
                            g_pub_block_sun[0] == 0.0f &&
                            g_pub_block_sun[1] == 0.0f &&
                            g_pub_block_sun[2] == 0.0f;
+    // 26666 KH_NIGHT_ADMIT_WITNESS (mode 430 restores the 26612 admit
+    // verbatim; full ledger at KH_BUILD_TAG). dump1-26664 fired 26612's own
+    // pre-registered falsification - the 26418 black box returned WITH
+    // blkZeroSunAdmits climbing (262) on a LIT scene (pending sun 9.7-13.9,
+    // blkAnchorSunL 14.1): the standing probe misread dark, and this gate's
+    // "measured-dark standing" agreed with the misreading. Per that
+    // falsification clause the admit is gated HARDER, the refusal untouched:
+    // a zero-sun block is admitted only when the standing reads dark AND the
+    // sky witness does not contradict it. At real night the witness sun sits
+    // below the horizon (the same discriminant the locator's dark-contra
+    // machinery has trusted since 26137), the contradiction never engages,
+    // and the 26612 night behaviour is byte-identical. On a lit scene with a
+    // hijacked-dark standing the block is refused to the flat-lit cold path -
+    // the 26418 trade, a flat box over a black one - for the short window
+    // 26665 now needs to re-adopt.
+    // 26672 WITNESS SWAP IN PLACE (rule 1.11; the 26666 falsification clause
+    // fired - blkZeroSunWitRefusals 486 at genuine night, the glowing mesh -
+    // and the convicting lane is sunDirEngineY 0.410 AT NIGHT: the engine's
+    // directional-light export follows the MOON, so the elevation term can
+    // never split day from a moonlit night and 'a tighter band' - the
+    // remedy the clause prescribed - is unbuildable around it.) The witness
+    // is now BRIGHT-CONTENT RECENCY (ledger at g_blk_bright_seen_t): a
+    // zero-sun block is the 26418/26664 fault class only while bright world
+    // content was flowing seconds ago; at real night nothing bright flows
+    // and the admit stands, moon or no moon. The 26050/26671 sun-jump
+    // escape disarms the contra after a skipTime so the night's first
+    // blocks admit immediately - the jump IS the proof the change is real -
+    // and the 15 s jump window fully covers the 5 s recency tail, so no
+    // gap exists between them. Mode 430 restores the 26612 admit verbatim,
+    // unchanged in meaning.
+    const float khzs_now = effect_time_seconds();
+    const bool khzs_jump = g_sun_last_jump_ms != 0 &&
+                           steady_now_ms() - g_sun_last_jump_ms < 15000;
+    const bool khzs_contra = g_blk_bright_seen_t >= 0.0f &&
+                             khzs_now - g_blk_bright_seen_t < KH_BLK_BRIGHT_RECENT_S &&
+                             !khzs_jump &&
+                             g_dbg_mode.load(std::memory_order_relaxed) != 430;
     const bool khzs_dark = g_light_probe.std_sun_l >= 0.0f &&
                            g_light_probe.std_sun_l <= 0.5f &&
+                           !khzs_contra &&
                            g_dbg_mode.load(std::memory_order_relaxed) != 385;
     const bool khzs_zero = khzs_sunz && !khzs_dark &&
                            g_dbg_mode.load(std::memory_order_relaxed) != 99;
     if (khzs_zero) g_blk_zero_sun_refusals++;
     if (khzs_sunz && khzs_dark) g_blk_zero_sun_admits++;
+    if (khzs_sunz && khzs_contra &&
+        g_light_probe.std_sun_l >= 0.0f && g_light_probe.std_sun_l <= 0.5f) {
+        g_blk_zero_sun_wit_refusals++;   // 26666 engagement lane
+    }
     if (g_pub_block_valid && !khzs_zero) {
         cbd.lighting2[0] = g_pub_block_sun[0];
         cbd.lighting2[1] = g_pub_block_sun[1];
@@ -36770,6 +37784,16 @@ inline void fill_lighting_frame_cb(ConstantData& cbd) {
             g_blk_shade_n++;
             if (khbs_s > g_blk_shade_max) g_blk_shade_max = khbs_s;
             if (g_blk_shade_max > 0.0f && khbs_s < 0.10f * g_blk_shade_max) g_blk_shade_dark++;
+            // 26667 dim-window census (ledger at g_blk_dim_frames): the
+            // dim-not-black band, between the 26417 dark bar and half the
+            // session's own brightest - self-anchored, no constant to tune.
+            if (g_blk_shade_max > 0.0f &&
+                khbs_s < 0.50f * g_blk_shade_max &&
+                khbs_s >= 0.10f * g_blk_shade_max) {
+                g_blk_dim_frames++;
+                g_blk_dim_last_s = effect_time_seconds();
+                if (g_blk_dim_first_s < 0.0f) g_blk_dim_first_s = g_blk_dim_last_s;
+            }
             if (khbs_s < g_blk_shade_min) {
                 g_blk_shade_min = khbs_s;
                 for (int khbs_i = 0; khbs_i < 3; ++khbs_i) {
@@ -36781,10 +37805,69 @@ inline void fill_lighting_frame_cb(ConstantData& cbd) {
                 g_blk_shade_strength = g_shadow_map_strength;
                 g_blk_shade_std_amb  = g_light_probe.std_amb_l;
                 g_blk_shade_std_sun  = g_light_probe.std_sun_l;
+                // 26667: the dim discriminators, taken at the same instant
+                // (ledger at g_blk_dim_frames).
+                g_blk_shade_anch_sun = g_light_probe.anch_sun_l;
+                g_blk_shade_map_age  = (g_sun_map_valid && g_sun_map_time >= 0.0f)
+                    ? (effect_time_seconds() - g_sun_map_time) : -1.0f;
                 g_blk_shade_t        = effect_time_seconds();
                 g_blk_shade_probe_age = (g_light_probe.valid &&
                                          g_light_probe.last_confirm >= 0.0f)
                     ? (g_blk_shade_t - g_light_probe.last_confirm) : -1.0f;
+            }
+        }
+    }
+
+    // 26668 KH_BLK_WALK_KEEL (full ledger at the globals and KH_BUILD_TAG).
+    // Pure gauge, updated once per fill beside the latch it extends. Reads
+    // the standing sun sum - the same lane blkShadeStdSun latches - never
+    // the block being filled, so a publish-path fault cannot poison the
+    // reference it is measured against.
+    {
+        const float khkl_std = g_light_probe.std_sun_l;
+        const float khkl_now = effect_time_seconds();
+        if (khkl_std > 1.0e-6f) {
+            // A regime adoption snapped the anchor since the last fill: a
+            // genuine level change (skipTime / weather roll). The keel snaps
+            // with it - read from the counter, not wired into the locator.
+            if (g_blk_anchor_snaps != g_blk_keel_snap_mark) {
+                g_blk_keel_snap_mark = g_blk_anchor_snaps;
+                g_blk_keel_sl = khkl_std;
+                g_blk_keel_snaps++;
+            }
+            if (g_blk_keel_sl <= 0.0f) {
+                g_blk_keel_sl = khkl_std;   // first capture
+            } else if (g_blk_keel_t >= 0.0f && khkl_now > g_blk_keel_t) {
+                const float khkl_dt = khkl_now - g_blk_keel_t;
+                const float khkl_r  = KH_BLK_KEEL_RATE *
+                                      (khkl_dt < 1.0f ? khkl_dt : 1.0f);
+                float khkl_f = khkl_std / g_blk_keel_sl;
+                if (khkl_f > 1.0f + khkl_r) khkl_f = 1.0f + khkl_r;
+                if (khkl_f < 1.0f - khkl_r) khkl_f = 1.0f - khkl_r;
+                g_blk_keel_sl *= khkl_f;
+            }
+            g_blk_keel_t = khkl_now;
+
+            if (g_blk_keel_sl > 1.0e-6f) {
+                const float khkl_q = khkl_std / g_blk_keel_sl;
+                g_blk_walk_ratio = khkl_q;
+                if (khkl_q > g_blk_walk_ratio_max) g_blk_walk_ratio_max = khkl_q;
+                if (g_blk_walk_ratio_min < 0.0f || khkl_q < g_blk_walk_ratio_min) {
+                    g_blk_walk_ratio_min = khkl_q;
+                    g_blk_walk_min_t    = khkl_now;
+                    g_blk_walk_min_keel = g_blk_keel_sl;
+                    g_blk_walk_min_std  = khkl_std;
+                }
+                if (khkl_q < KH_BLK_DIM_BAR) {
+                    g_blk_walk_dim_frames++;
+                    if (g_blk_walk_dim_first < 0.0f) g_blk_walk_dim_first = khkl_now;
+                    g_blk_walk_dim_last = khkl_now;
+                    if (g_blk_walk_dim_open < 0.0f) g_blk_walk_dim_open = khkl_now;
+                    const float khkl_sp = khkl_now - g_blk_walk_dim_open;
+                    if (khkl_sp > g_blk_walk_dim_span_max) g_blk_walk_dim_span_max = khkl_sp;
+                } else {
+                    g_blk_walk_dim_open = -1.0f;   // window closes; span already banked
+                }
             }
         }
     }
@@ -37212,6 +38295,11 @@ inline void fill_lighting_obj_cb(ConstantData& cbd, const RenderObject& o) {
                          : khl_dm == 362 ? 48.0f  // 26586: UNBOUNDED grad slack
                                                   //        returns (falsified as
                                                   //        author at 26587)
+                         : khl_dm == 446 ? 76.0f  // 26693: KH_ABSENCE_WITNESS OFF (26629 + 26538 forms)
+                         : khl_dm == 445 ? 75.0f  // 26693: the 26691 fade-direction hold, opt-in
+                         : khl_dm == 444 ? 74.0f  // 26692: KH_PF_RAMP_FLOOR OFF (26585 precision floor as sigma)
+                         : khl_dm == 442 ? 72.0f  // 26691: KH_TIER_FADE_DIR OFF (symmetric 26618 fade)
+                         : khl_dm == 443 ? 73.0f  // 26691: KH_TIER_PARTNER_PAINT (partner alone in the band)
                          : khl_dm == 401 ? 71.0f  // 26635: the 26624 far-self
                                                   //        GATE returns - the
                                                   //        outer/far hard cut
@@ -37337,6 +38425,13 @@ inline void fill_lighting_obj_cb(ConstantData& cbd, const RenderObject& o) {
     // default.
     cbd.shadow_meta2[0] = (o.far_vis ||
         g_dbg_mode.load(std::memory_order_relaxed) == 303) ? 1.0f : 0.0f;   // far-visibility clamp (see far_vis)
+    // 26684 KH_OBJ_VIS_CUT (mode 437 zeroes; 303 already stands the whole far
+    // contract down): a farVis-off object is sliced at the engine's object
+    // view distance. 0 when never read - the shader treats 0 as no cut.
+    cbd.shadow_meta2[1] = (o.far_vis ||
+        g_dbg_mode.load(std::memory_order_relaxed) == 437 ||
+        g_dbg_mode.load(std::memory_order_relaxed) == 303) ? 0.0f
+        : g_obj_vis.load(std::memory_order_relaxed);
     // Dynamic lights (points/spots/environment lamps): the validated
     // engine mirror, culled PER OBJECT (mode 3's nearest-set selection
     // is a per-mesh verdict). Unlit objects skip - the historic gate,
@@ -37805,6 +38900,17 @@ inline void shadow_live_consider_atlas(ID3D11Texture2D* tex, const D3D11_TEXTURE
 // dump). The sampling transform's shape signature, consistent across every
 // capture: mutually orthogonal rows, ISOTROPIC u/v scales, and all scales
 // far below 1 (they are 1/extent for extents of meters to kilometers).
+// 26681 harvest-scoped near-miss census (ledger at KH_BUILD_TAG): per-bar
+// rejects and the deepest bar-ladder stage any harvested candidate reached,
+// counted ONLY while the scanner runs on harvest-fed windows (the flag), so
+// the funnel firehose cannot drown the reading. Stages: 0 scale-hi, 1
+// scale-lo, 2 ratio, 3 iso, 4 trans, 5 ortho, 6 ident/axis.
+static bool     g_tw_harvest = false;
+static uint64_t g_hv_windows = 0;
+static uint64_t g_hv_rej_scale = 0, g_hv_rej_ratio = 0, g_hv_rej_iso = 0;
+static uint64_t g_hv_rej_trans = 0, g_hv_rej_ortho = 0;
+static uint32_t g_hv_best_stage = 0;
+static float    g_hv_best_n0 = -1.0f;
 inline bool shadow_live_test_window(const float* w) {
     const float* r0 = w + 0;
     const float* r1 = w + 4;
@@ -37818,18 +38924,28 @@ inline bool shadow_live_test_window(const float* w) {
     // 1/160 .. 1/24 per meter (plus a 1/600 long-range one); [1/1000, 1/8]
     // keeps that family with margin and rejects the 1/2.2-scale look-alikes
     // that slipped under a bare <0.5 ceiling.
-    if (n0 > 0.015625f || n1 > 0.015625f) { g_stats.live_rej_scale++; return false; }                 // uv scale <= 1/8
-    if (n0 < 1e-7f || n1 < 1e-7f) { g_stats.live_rej_scale++; return false; }   // floor 1/3162: LOW sun stretches extents                         // uv scale >= 1/1000
+    if (n0 > 0.015625f || n1 > 0.015625f) { g_stats.live_rej_scale++;
+        if (g_tw_harvest) { g_hv_rej_scale++; if (g_hv_best_stage < 1) { g_hv_best_stage = 0; } }
+        return false; }                 // uv scale <= 1/8
+    if (n0 < 1e-7f || n1 < 1e-7f) { g_stats.live_rej_scale++;
+        if (g_tw_harvest) { g_hv_rej_scale++; if (g_hv_best_stage < 1) { g_hv_best_stage = 1; g_hv_best_n0 = n0; } }
+        return false; }   // floor 1/3162: LOW sun stretches extents                         // uv scale >= 1/1000
     // Depth scale within a factor ~20 of the uv scale (observed ~0.5-2x).
-    if (n2 < 0.0025f * n0 || n2 > 400.0f * n0) { g_stats.live_rej_ratio++; return false; }
+    if (n2 < 0.0025f * n0 || n2 > 400.0f * n0) { g_stats.live_rej_ratio++;
+        if (g_tw_harvest) { g_hv_rej_ratio++; if (g_hv_best_stage < 2) { g_hv_best_stage = 2; g_hv_best_n0 = n0; } }
+        return false; }
     // u/v isotropy (norms-squared within ~10% = norms within ~5%).
-    if (fabsf(n1 - n0) > 0.1f * n0) { g_stats.live_rej_iso++; return false; }
+    if (fabsf(n1 - n0) > 0.1f * n0) { g_stats.live_rej_iso++;
+        if (g_tw_harvest) { g_hv_rej_iso++; if (g_hv_best_stage < 3) { g_hv_best_stage = 3; g_hv_best_n0 = n0; } }
+        return false; }
     // THE discriminator: the translation IS the transform's output at the
     // camera, and the output space is atlas-UV + normalized depth - all
     // three components of every genuine capture lie in [0,1] ((0.47, 0.18,
     // 0.71), (0.82, 0.48, 0.45), ...), while view-shaped impostors carry
     // meters (47, -38, 66). Range padded for a camera near a tile edge.
-    if (w[3] < -8.0f || w[3] > 9.0f) { g_stats.live_rej_trans++; return false; }
+    if (w[3] < -8.0f || w[3] > 9.0f) { g_stats.live_rej_trans++;
+        if (g_tw_harvest) { g_hv_rej_trans++; if (g_hv_best_stage < 4) { g_hv_best_stage = 4; g_hv_best_n0 = n0; } }
+        return false; }
     if (w[7] < -8.0f || w[7] > 9.0f) { g_stats.live_rej_trans++; return false; }
     if (w[11] < -8.0f || w[11] > 9.0f) { g_stats.live_rej_trans++; return false; }
     const float d01 = r0[0] * r1[0] + r0[1] * r1[1] + r0[2] * r1[2];
@@ -37840,6 +38956,7 @@ inline bool shadow_live_test_window(const float* w) {
         fabsf(d02) > KH_SHADOW_ORTHO_TOL * sqrtf(n0 * n2) ||
         fabsf(d12) > KH_SHADOW_ORTHO_TOL * sqrtf(n1 * n2)) {
         g_stats.live_rej_ortho++;
+        if (g_tw_harvest) { g_hv_rej_ortho++; if (g_hv_best_stage < 5) { g_hv_best_stage = 5; g_hv_best_n0 = n0; } }
         return false;
     }
 
@@ -38062,6 +39179,7 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
                     g_ls.pub_rej_streak = 0;
                     g_ls.pub_ok_since_lock = false;   // 26128: re-confirm
                     g_ls.view_relocks++;
+                    kh_live_wipe_note(1);   // 26686
                     g_ls.count = 0;
                     g_ls.newest = -1;
                     g_lock_wipes++;
@@ -38350,6 +39468,7 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
                                 // lock's publishes are the dancing-receive
                                 // symptom; boundary-wipe semantics (the
                                 // table and seals rebuild within a second).
+                                kh_live_wipe_note(2);   // 26686
                                 g_ls.count = 0;
                                 g_ls.newest = -1;
 
@@ -38944,6 +40063,9 @@ inline void kh_probe_std_refresh(CbColorProbe& khp, const float* f, uint32_t nf,
         const float* khp_b = f + (khp.off - 40);
         const float khp_al = khp_b[8] + khp_b[9] + khp_b[10];
         const float khp_sl = khp_b[16] + khp_b[17] + khp_b[18];
+        // 26672 KH_BRIGHT_RECENCY (ledger at the global): bright content
+        // reaching the arbitration stamps presence, verdict-independent.
+        if (khp_sl > 1.0f) g_blk_bright_seen_t = khp_now;
 
         // 26476 THE ANCHOR GATE (mode 258 reverts to the instantaneous
         // standing). dump1 conviction, banked verbatim: blkSunLum flips
@@ -38968,10 +40090,53 @@ inline void kh_probe_std_refresh(CbColorProbe& khp, const float* f, uint32_t nf,
         const float khan_ra = (!khan_off && khp.anch_amb_l >= 0.0f) ? khp.anch_amb_l : khp.std_amb_l;
         const float khan_rs = (!khan_off && khp.anch_sun_l >= 0.0f) ? khp.anch_sun_l : khp.std_sun_l;
 
+        // 26665 KH_BLK_CONTRA_PENDING (mode 429 restores the unconditional
+        // kill; full ledger at KH_BUILD_TAG). dump1-26664 conviction: this
+        // kill is what made both rescue paths unreachable. A dark standing
+        // that keeps uploading matches its own anchor band, takes THIS
+        // branch on every sighting, and executes the pending BEFORE the
+        // dark-contradiction logic below ever runs - blkStickyPendAgeMax
+        // 0.160 s against the 0.5 s exclusivity bar (the pending never
+        // outlives the dark flavor's upload cadence), g_blk_dark_contra_first
+        // cleared on every kill so the 26236 2 s escape read
+        // blkDarkForceAdopts 0 through an 81,507-sighting contradiction.
+        // The sticky guard protects the pending from THIRD flavors only;
+        // nothing protected it from the ruling flavor itself. So: while the
+        // standing is dark-CONTRADICTED (same terms as khp_dark_contra
+        // below - measured-dark standing, bright pending, live above-horizon
+        // sky witness), its sightings still APPLY (the mirror and the
+        // starvation stamp are untouched) but no longer execute the pending,
+        // which then reaches the existing 500 ms exclusivity adoption - the
+        // collapse hold cannot bite it (std < 0.1 fails its own std > 1
+        // bar). Real night: witness below horizon, predicate never engages,
+        // bit-identical. Dark-vs-dark: the pend_sun_l > 1 bar excludes it.
         if (kh_probe_anchor_band(khp_al, khan_ra) &&   // 26477: 8% - see the band's ledger
             kh_probe_anchor_band(khp_sl, khan_rs)) {
-            khp.pend_t = -1.0f;   // standing flavor still live: pending dies
-            khp.pend_seen = -1.0f;
+            // 26672 WITNESS SWAP IN PLACE (rule 1.11, proactive - this
+            // clause has NOT fired, blkContraPendHolds 0 through the moon
+            // night, but the predicate leaned on the same elevation witness
+            // the 26666 falsification convicted, and a moonlit night with a
+            // persistent bright foreign flavor would have walked straight
+            // through it.) Same swap as the fill gate: bright-content
+            // recency (which the fault class - a bright pending flowing
+            // against a hijacked-dark standing - satisfies by definition)
+            // plus the sun-jump escape so a skipTime never has its kills
+            // withheld while the world is legitimately re-flavoring.
+            const bool khkc_jump = g_sun_last_jump_ms != 0 &&
+                steady_now_ms() - g_sun_last_jump_ms < 15000;
+            const bool khp_kill_contra =
+                g_dbg_mode.load(std::memory_order_relaxed) != 429 &&
+                khp.std_sun_l >= 0.0f && khp.std_sun_l < 0.1f &&
+                khp.pend_t >= 0.0f && khp.pend_sun_l > 1.0f &&
+                g_blk_bright_seen_t >= 0.0f &&
+                khp_now - g_blk_bright_seen_t < KH_BLK_BRIGHT_RECENT_S &&
+                !khkc_jump;
+            if (khp_kill_contra) {
+                g_blk_contra_pend_holds++;   // 26665 engagement lane
+            } else {
+                khp.pend_t = -1.0f;   // standing flavor still live: pending dies
+                khp.pend_seen = -1.0f;
+            }
         } else {
             if (kh_probe_lum_band(khp_al, khp.std_amb_l) &&
                 kh_probe_lum_band(khp_sl, khp.std_sun_l)) {
@@ -39149,11 +40314,73 @@ inline void kh_probe_std_refresh(CbColorProbe& khp, const float* f, uint32_t nf,
                 khp_apply = false;
                 khp.regime_rejects++;
                 g_blk_collapse_holds++;
+            } else if (khp_starved && khp.std_sun_l > 1.0f &&
+                       khp.pend_sun_l >= 0.0f &&
+                       khp.pend_sun_l < KH_BLK_STARVED_DIM_FRAC * khp.std_sun_l &&
+                       !(g_sun_last_jump_ms != 0 &&
+                         steady_now_ms() - g_sun_last_jump_ms < 15000) &&
+                       g_dbg_mode.load(std::memory_order_relaxed) != 433 &&
+                       kh_blk_sdh_window_holds(khp_now)) {
+                // 26671 KH_STARVED_DIM_HOLD (mode 433 reverts; full ledger at
+                // KH_BUILD_TAG). The dump2-26668 dim, operator-adjudicated:
+                // only our meshes dimmed, the world stayed lit, so the flavor
+                // a starved adoption crowns after an upload gap is
+                // TRANSITIONAL when it is much dimmer than the standing it
+                // displaces. The 26054 rescue's premise - the unseen standing
+                // is dead - remains true; its corollary - the first resumer
+                // is therefore the world's lighting - was never stated and is
+                // now measured false (entry ratio 0.222 in one flush against
+                // a standing confirmed bright moments before). THE HOLD: a
+                // starved candidate under 0.5x of a live-valued standing
+                // waits, exactly as the 26050 collapse hold makes 10x
+                // candidates wait, with the SAME sun-jump escape - a fresh
+                // jump (skipTime) admits immediately, so day-to-night skips
+                // adopt exactly as before. THE 26381 BOUND, by construction:
+                // the window helper CONCEDES past 10 s and this predicate
+                // fails in the same evaluation - a genuine unwitnessed dim
+                // transition lags at most 10 s and self-heals, while the
+                // measured fault class (5.3 s round trip) is fully bridged.
+                // Brightening candidates, non-starved paths and the 26665
+                // dark-contra machinery (std < 0.1, disjoint by its own bar)
+                // are untouched.
+                khp_apply = false;
+                khp.regime_rejects++;
+                g_blk_starved_dim_holds++;
             } else {
                 khp.regime_adopts++;   // exclusive for 500 ms: a real level change
                 khp_adopted = true;    // 26476: anchor snaps at the apply tail
                 if (khp_starved) g_blk_starved_adopts++;   // 26054 census
                 if (khp_dark_contra) g_blk_dark_readopts++;   // 26137 census
+                // 26670 KH_ADOPT_CENSUS (ledger at KH_BUILD_TAG; pure gauge,
+                // no gate - the dump2-26668 dim event was measured end-to-end
+                // by a lucky ring and these lanes make the next one
+                // self-sufficient without one). Every regime adoption records
+                // what it replaced: the candidate/standing luminance ratio
+                // (entry there: 4.581/20.585 = 0.222 in ONE flush) and how
+                // long the displaced standing had gone unsighted (the
+                // upload-gap correlate; dApplies read 0 for ~2.5 s before the
+                // recovery adoption). A gate was DELIBERATELY not shipped:
+                // the measured event ran 5.3 s with the bright flavor fully
+                // absent, so any dim-candidate defer short enough to spare a
+                // skipTime-to-night adoption cannot outlast it, and the fork
+                // that picks the repair (transitional flavor vs the engine's
+                // own camera-local regime) needs the operator's scene
+                // context, not another bar.
+                {
+                    const float khac_r = (khp.std_sun_l > 1.0e-6f && khp.pend_sun_l >= 0.0f)
+                        ? khp.pend_sun_l / khp.std_sun_l : -1.0f;
+                    g_blk_adopt_ratio_last = khac_r;
+                    if (khac_r >= 0.0f) {
+                        if (g_blk_adopt_ratio_min < 0.0f || khac_r < g_blk_adopt_ratio_min)
+                            g_blk_adopt_ratio_min = khac_r;
+                        if (khac_r > g_blk_adopt_ratio_max) g_blk_adopt_ratio_max = khac_r;
+                    }
+                    const float khac_g = (khp.last_std_time >= 0.0f)
+                        ? khp_now - khp.last_std_time : -1.0f;
+                    g_blk_adopt_gap_last = khac_g;
+                    if (khac_g > g_blk_adopt_gap_max) g_blk_adopt_gap_max = khac_g;
+                    g_blk_adopt_t_last = khp_now;
+                }
             }
         }
     }
@@ -39476,7 +40703,9 @@ inline void shadow_live_upload(const void* data, uint32_t bytes) {
     // block is the cycle's own cascade constants.
     if (!shadow_live_wanted() || !g_ls.phase_on_atlas) return;
     if (bytes < 12 * sizeof(float)) return;
-    if (bytes > 16384) bytes = 16384;
+    // 26681: cap raised for the whole-pool bind era (SpanMax 65,536 measured;
+    // the cascade matrix sits at an arbitrary depth in the bound range).
+    if (bytes > 65536) bytes = 65536;
     const float* f = static_cast<const float*>(data);
     const uint32_t nfloats = bytes / 4;
 
@@ -39487,7 +40716,7 @@ inline void shadow_live_upload(const void* data, uint32_t bytes) {
     // latch bookkeeping below stays once-per-cycle; the SCAN does not.
     if (g_ls.cycle_latched) {
         for (uint32_t off = 0; off + 12 <= nfloats && off <= 128; off += 4) {
-            if (shadow_live_test_window(f + off)) break;   // accept stashes internally
+            if (shadow_live_test_window(f + off)) { g_live_stash_accepts++; break; }   // accept stashes internally (26677 census)
         }
 
         return;
@@ -39512,6 +40741,7 @@ inline void shadow_live_upload(const void* data, uint32_t bytes) {
         if (shadow_live_test_window(f + g_ls.cache_offset)) {
             memcpy(g_ls.pending_m, f + g_ls.cache_offset, sizeof(g_ls.pending_m));
             g_ls.pending_valid = true;
+            g_live_pend_sets++;   // 26677 census
             g_ls.pending_bytes = static_cast<uint32_t>(bytes);
             return;
         }
@@ -39524,6 +40754,7 @@ inline void shadow_live_upload(const void* data, uint32_t bytes) {
             g_ls.cache_offset = off;
             memcpy(g_ls.pending_m, f + off, sizeof(g_ls.pending_m));
             g_ls.pending_valid = true;
+            g_live_pend_sets++;   // 26677 census
             g_ls.pending_bytes = static_cast<uint32_t>(bytes);
             return;
         }
@@ -39553,11 +40784,24 @@ inline void shadow_live_on_draw(ID3D11DeviceContext* ctx) {
 // Cycle exit: the fully-upgraded pending latch becomes a table entry.
 inline void shadow_live_finalize_cycle() {
     if (!g_ls.pending_valid || !g_ls.pending_vp_valid || g_ls.atlas_size == 0) {
+        // 26674 KH_LIVE_FIN_CENSUS (ledger at KH_BUILD_TAG). The dump2-26673
+        // cascade outage (khLiveTab 0 across the whole ring, ~10+ s, world
+        // cascades gone from our meshes after time skips) walked EVERY
+        // counted gate to an exoneration - stream alive (recvStreamSkips 1),
+        // window test accepting (liveAccepts 15.5k), axis 8 rejects total,
+        // no-view 0 - and dead-ended HERE, the one uncounted return in the
+        // chain. Priority order matches the condition; the atlas term is
+        // tested first because it is the only one that can latch stale
+        // across cycles rather than merely miss one.
+        if (g_ls.atlas_size == 0)            g_live_fin_bail_atlas++;
+        else if (!g_ls.pending_valid)        g_live_fin_bail_pend++;
+        else                                 g_live_fin_bail_vp++;
         g_ls.pending_valid = false;
         g_ls.pending_bytes = 0;
         g_ls.pending_vp_valid = false;
         return;
     }
+    g_live_last_commit_t = effect_time_seconds();   // 26674: outage ruler
 
     g_ls.pending_valid = false;
     g_ls.pending_bytes = 0;
@@ -39627,6 +40871,12 @@ inline void shadow_live_finalize_cycle() {
     // a full table evicts the stalest entry.
     const float* pm = g_ls.pending_m;
     const float pn0 = pm[0] * pm[0] + pm[1] * pm[1] + pm[2] * pm[2];
+    if (g_ls.wipe_deferred) {   // 26687 KH_LIVE_WIPE_DEFER: the deferred door-4 wipe lands here
+        g_ls.count = 0;
+        g_ls.newest = -1;
+        g_ls.wipe_deferred = false;
+        g_live_wipe_prunes++;
+    }
     int slot = -1;
 
     for (uint32_t i = 0; i < g_ls.count; ++i) {
@@ -39719,6 +40969,8 @@ struct CascBindProbe {
 };
 static CascBindProbe g_cascbind;
 static uint64_t g_cascbind_scans = 0;   // harvested windows fed to live_upload
+static uint32_t g_cascbind_span_last = 0;   // 26680: bound span seen at the last arm
+static uint32_t g_cascbind_span_max = 0;
 static uint32_t g_cascharv_ctr = 0;     // atlas-draw sampling counter
 
 inline void cascbind_release() {
@@ -39739,14 +40991,21 @@ inline void cascbind_step(ID3D11DeviceContext* ctx) {
         g_cascbind.pending &= static_cast<uint8_t>(~(1u << i));
         if (FAILED(hr) || !ms.pData) continue;
         g_cascbind_scans++;
+        g_cascbind_feed_t = effect_time_seconds();   // 26679 stamp
+        g_tw_harvest = true; g_hv_windows++;   // 26681 near-miss scope
         shadow_live_upload(ms.pData, g_cascbind.bytes[i]);
+        g_tw_harvest = false;
         ctx->Unmap(g_cascbind.staging[i], 0);
     }
 
     // Idle while the table is being fed by anyone (uploads included).
     const float now_c = effect_time_seconds();
 
-    for (uint32_t i = 0; i < KH_LIVE_MAX_CASCADES; ++i) {
+    // 26678: the idle read the RAW slots, so pruned/wiped leftovers beyond
+    // g_ls.count could idle the probe on stale ghosts; it now reads the
+    // valid portion only, and an EMPTY table (count 0 - the post-wipe and
+    // outage state) never idles: the rescue arms on the next atlas cycle.
+    for (uint32_t i = 0; i < g_ls.count && i < KH_LIVE_MAX_CASCADES; ++i) {
         const auto& e = g_ls.entries[i];
         if (e.tile[2] > 0.0f && e.stamp != 0 && now_c - e.time < 3.0f) return;
     }
@@ -39776,7 +41035,24 @@ inline void cascbind_step(ID3D11DeviceContext* ctx) {
                                                  : (bd.ByteWidth > off_b ? bd.ByteWidth - off_b : 0u);
 
             if (span_b >= 64 && off_b + 64 <= bd.ByteWidth) {
-                uint32_t win = span_b < 2048u ? span_b : 2048u;
+                // 26680 KH_CASCBIND_SPAN (ledger at KH_BUILD_TAG): the harvest
+                // clamped its window to 2048 while shadow_live_upload - the
+                // scanner it feeds - accepts 16384 from the funnel. A switched
+                // camera's whole-range binds can place the cascade matrix
+                // beyond 2 KB into the bound window, unreachable under the old
+                // clamp while perfectly scannable under the consumer's own
+                // cap. Aligned; the span lanes prove or refute the theory on
+                // the next drought dump (spanMax pinned at the old 2048 during
+                // a drought would have convicted the clamp; spans small with
+                // livePendSets still frozen exonerate it and move the fault to
+                // the window CONTENT - the near-miss instrument is then next).
+                // 26681 KH_CASCBIND_FULLSPAN: SpanMax read 65,536 during the
+                // persisting drought - the post-skip engine binds the WHOLE
+                // 64 KB pool per cascade draw, so the matrix can sit past any
+                // partial window. The harvest now stages the full bound span.
+                uint32_t win = span_b < 65536u ? span_b : 65536u;
+                g_cascbind_span_last = span_b;
+                if (span_b > g_cascbind_span_max) g_cascbind_span_max = span_b;
                 if (off_b + win > bd.ByteWidth) win = bd.ByteWidth - off_b;
 
                 if (g_cascbind.staging[i] && g_cascbind.bytes[i] != win) {
@@ -39927,6 +41203,7 @@ inline void shadow_live_frame_reset() {
     }
 
     g_stats.shadow_live_cascades = g_ls.count;
+    if (g_ls.pending_valid) g_live_pend_wipes_maint++;   // 26677 census: destructive only
     g_ls.pending_valid = false;
     g_ls.pending_bytes = 0;
     g_atlas_srv_count = 0;   // per-frame SRV relearn (see the cache note)
@@ -42192,6 +43469,11 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             g_sun_fit_bfl[khsh_pf_idx] = 0.0f;
             g_sun_fit_bias[khsh_pf_idx] = 0.0f;
             g_sun_fit_d2v[khsh_pf_idx] = 0.0f;
+            g_sun_fit_admit[khsh_pf_idx] = 0u;   // 26693 census
+            for (int khsh_zi = 0; khsh_zi < 4; ++khsh_zi) {
+                g_sun_fit_lat[khsh_pf_idx][khsh_zi] = 0.0f;
+                g_sun_fit_ds[khsh_pf_idx][khsh_zi] = 0.0f;
+            }
             double khsh_dctr[3] = { 0.0, 0.0, 0.0 };   // 26465: double-snap carry
             bool   khsh_dsnap = false;
 
@@ -42296,7 +43578,10 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             // Admission becomes the ortho's OWN lateral clip - a caster is
             // admitted iff its silhouette can land in this band's footprint,
             // i.e. its perpendicular offset from the sun axis through the
-            // band centre is within khsh_r2 + its own enclosing radius. How
+            // band centre is within khsh_r2 + its own enclosing radius. [26694:
+            // 'perpendicular offset' was the stale clause - radial guards only
+            // the inscribed disc of a SQUARE footprint; the test is per-axis
+            // now, ledger at KH_BUILD_TAG.] How
             // far UP-SUN it sits is irrelevant to whether its shadow lands
             // here, so that axis is bounded by the game's own shadow view
             // distance (khsr_rad, the same number the union eligibility
@@ -42329,8 +43614,10 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             static std::vector<SunCaster> khsh_set;   // render-thread scratch
             khsh_set.clear();
             float khsh_fwd = khsh_dep;   // floored at the historic window
+            uint32_t khsh_ci = 0;   // 26693 census: union-caster index
 
             for (const auto& c : casters) {
+                const uint32_t khsh_i = khsh_ci++;
                 const float khsh_dx[3] = { c.pos[0] - khsh_ctr[0],
                                            c.pos[2] - khsh_ctr[1],
                                            c.pos[1] - khsh_ctr[2] };
@@ -42350,11 +43637,29 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                 }
                 // Sun-axis split: khsh_ds is how far UP-SUN the caster sits
                 // (sun[] points toward the sun - the eye below rides it),
-                // khsh_lat is the perpendicular offset the ortho clips on.
+                // khsh_lat is the offset the ortho clips on (since 26694 the
+                // per-axis max - the radial form under 447; see below).
                 const float khsh_ds = khsh_dx[0] * sun[0] + khsh_dx[1] * sun[1] +
                                       khsh_dx[2] * sun[2];
-                const float khsh_l2 = khsh_dd2 - khsh_ds * khsh_ds;
-                const float khsh_lat = khsh_l2 > 0.0f ? sqrtf(khsh_l2) : 0.0f;
+                // 26694 KH_BAND_ADMIT_NORM (mode 447 restores the radial form;
+                // ledger at KH_BUILD_TAG). The footprint is a SQUARE, +-r2 along
+                // r3 and u3; the radial offset guarded only its inscribed disc
+                // and refused corner casters whose silhouettes land inside
+                // (dump3: sunOutLatM2 +0.709 at the fade pose). The clip below
+                // is the ortho's own per-axis norm - exact, two dots, and the
+                // basis depends only on the sun, so camera rotation cannot move
+                // the verdict. er over-bounds the per-axis extent the same way
+                // it over-bounded the radial one.
+                const float khsh_lu = fabsf(khsh_dx[0] * khsh_r3[0] +
+                                            khsh_dx[1] * khsh_r3[1] +
+                                            khsh_dx[2] * khsh_r3[2]);
+                const float khsh_lv = fabsf(khsh_dx[0] * khsh_u3[0] +
+                                            khsh_dx[1] * khsh_u3[1] +
+                                            khsh_dx[2] * khsh_u3[2]);
+                const float khsh_l2 = khsh_dd2 - khsh_ds * khsh_ds;   // 447 arm
+                const float khsh_lat = (khsh_dm == 447)
+                                     ? (khsh_l2 > 0.0f ? sqrtf(khsh_l2) : 0.0f)
+                                     : fmaxf(khsh_lu, khsh_lv);
                 // 26656: the 26655 oversize refusal stood HERE and is gone.
                 // It refused a caster whose enclosing radius exceeded this
                 // tier's half-diagonal by more than eight times. The field
@@ -42368,6 +43673,10 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                 // multiplier separates them. See the 26656 ledger for the
                 // criterion that would, and why it is a receive-side change
                 // rather than an admission one.
+                if (khsh_i < 4u) {   // 26693 census, stamped before any refusal
+                    g_sun_fit_lat[khsh_pf_idx][khsh_i] = khsh_lat - (khsh_r2 + khsh_er);
+                    g_sun_fit_ds[khsh_pf_idx][khsh_i] = khsh_ds;
+                }
                 if (khsh_lat > khsh_r2 + khsh_er) continue;        // ortho clips it laterally
                 if (khsh_ds > khsr_rad + khsh_er) {
                     // 26632 KH_BAND_SHADOW_ADMIT (mode 399 reverts; C++-side
@@ -42458,6 +43767,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                 }
                 if (khsh_ds < -(khsh_dep) - khsh_er) continue;     // anti-sun side unchanged
                 khsh_set.push_back(c);
+                if (khsh_i < 32u) g_sun_fit_admit[khsh_pf_idx] |= (1u << khsh_i);   // 26693 census
                 if (khsh_er > g_sun_fit_er_max[khsh_pf_idx])
                     g_sun_fit_er_max[khsh_pf_idx] = khsh_er;   // 26655
                 const float khsh_need = khsh_ds + khsh_er;
@@ -46486,6 +47796,10 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
                 cbd.lighting0[1] = khcc_m == 243 ? 21.0f       // 26454: cast chain revert
                                  : khcc_m == 257 ? 26.0f       // 26465: tier blend OFF (twin)
                                  : khcc_m == 245 ? 22.0f       // 26455: filtering revert
+                                 : khcc_m == 442 ? 72.0f       // 26691: KH_TIER_FADE_DIR OFF (twin)
+                                 : khcc_m == 443 ? 73.0f       // 26691: partner paint (twin)
+                                 : khcc_m == 446 ? 76.0f       // 26693: witness off (twin)
+                                 : khcc_m == 445 ? 75.0f       // 26693: hold opt-in (twin)
                                  // 26538: code 42 RE-ARMS the 26506 lit-
                                  // fallthrough. 328 arms it deliberately; 326
                                  // arms it because it reverts KH_BAND_SUN_REACH,
@@ -47103,6 +48417,19 @@ static float    g_svs_vp_hi_hist[4] = {};
 static float    g_svs_cam_hist[4][3] = {};
 static bool     g_svs_rebase_hist[4] = {};
 static uint64_t g_svs_seq_hist[4] = {};
+// 26667 KH_STEN_CYCLE_TAP - the CYCLE basis joins the ring (ledger at
+// KH_BUILD_TAG). g_svs_cycle_vp is the counting draws' view under the
+// injection's projection (26255's third channel, absolute, built before the
+// rebase); the stencil counts consumed at epoch N were rasterized under
+// epoch N's cycle basis, so the tap's target transform is stamped and
+// selected exactly like the matrix above - same slot, same seq, same block.
+// ok = false travels as an all-zero publish (the shader's w gate refuses).
+static float    g_svs_cyc_hist[4][4][4] = {};
+static bool     g_svs_cyc_hist_ok[4] = {};
+static uint64_t g_sten_cyc_pubs = 0;   // 26667: fills that armed the cycle tap
+static uint64_t g_sten_cyc_miss = 0;   // ... that stood it down (epoch miss / cycle invalid / 431)
+static float    g_sten_cyc_ctr_px = -1.0f;   // 26669: the correction the tap WOULD apply at the caster centre
+static float    g_sten_cyc_ctr_px_max = 0.0f;
 static uint64_t g_svs_reproj_epoch_hits = 0;   // matrix for the snapshot's epoch found
 static uint64_t g_svs_reproj_epoch_miss = 0;   // ... not in the ring: falls back to raster
 static uint64_t g_svs_reproj_wild = 0;         // delta rejected as non-physical
@@ -50788,6 +52115,89 @@ inline void kh_fill_sten_reproj(ConstantData& khs_cbd) {
             ffr_head().vol_age = static_cast<uint16_t>(
                 g_svs_vol_age_last > 0xFFFEull ? 0xFFFEu
                 : static_cast<uint16_t>(g_svs_vol_age_last));
+        }
+    }
+
+    // 26667 KH_STEN_CYCLE_TAP (mode 431 stands it down; full ledger at
+    // KH_BUILD_TAG). Filled HERE, above the branch, so every path through
+    // this function - the default flow AND the 126 restore - publishes the
+    // field (the 26249 placement lesson this function opens with). The tap's
+    // target is the cycle basis of the epoch the consumed copy was captured
+    // in: the same khs_hs slot the witness matrix rides. Any miss publishes
+    // zeros, which the shader's w gate turns into the historic raster tap.
+    {
+        bool khs_cyc_on = false;
+        // 26669 FIELD-FALSIFIED AS A DEFAULT, PER 26667's OWN BINDING CLAUSE
+        // (full ledger at KH_BUILD_TAG; the 26667 entry is amended in place).
+        // The operator's read on 26668: a NEW brief offset at abrupt camera
+        // movement at mode 0 - the tap displacing the read on exactly the
+        // frames it fires - while the blur survives steady motion where the
+        // deadband guarantees raster identity. Root, named: swingPx at the
+        // convicting discontinuity rows read 88-101 px with camStep 0.008 m -
+        // a PARKED camera - which cannot be engine divergence; it is OUR
+        // cycle latch going stale on precisely the fast-camera frame (the
+        // 26533 staleness window, in 26533's own words), so the tap projected
+        // through a wrong basis by the whole latch error. 26246's warning
+        // ('every gauge here differences two of OUR values') applied to
+        // swingPx itself and was not heeded. The machinery stays; mode 432
+        // ARMS it for a controlled A/B; 431 is a bit-exact ALIAS of the
+        // default (rule 1.18). Default mode 0 is the pre-26667 raster tap.
+        if (g_dbg_mode.load(std::memory_order_relaxed) == 432 &&
+            khs_hs >= 0 && g_svs_cyc_hist_ok[khs_hs]) {
+            memcpy(khs_cbd.sten_cyc_vp, g_svs_cyc_hist[khs_hs],
+                   sizeof(khs_cbd.sten_cyc_vp));
+            khs_cyc_on = true;
+        } else {
+            memset(khs_cbd.sten_cyc_vp, 0, sizeof(khs_cbd.sten_cyc_vp));
+        }
+        if (khs_cyc_on) g_sten_cyc_pubs++; else g_sten_cyc_miss++;
+        // 26669 THE ENGAGEMENT INSTRUMENT 26667 SHIPPED WITHOUT: the
+        // correction the tap WOULD apply at the caster centre, computed
+        // every fill whatever the arm state, so artifact reports correlate
+        // with would-be firings without arming anything. Projects the
+        // caster centre through the epoch's cycle basis and through the
+        // injection's own absolute VP (both OURS; the b2 prohibition is
+        // untouched), in double per the 26244/26255 discipline. -1 = no
+        // slot, refused w, or off-diagonal - never approximated.
+        {
+            float khcc_px = -1.0f;
+            if (khs_hs >= 0 && g_svs_cyc_hist_ok[khs_hs] &&
+                g_svs_inj_vp_abs_valid && g_vpx_geo_ok &&
+                g_main_depth_w && g_main_depth_h) {
+                const double khcc_w[3] = { static_cast<double>(g_vpx_ctr[0]),
+                                           static_cast<double>(g_vpx_ctr[1]),
+                                           static_cast<double>(g_vpx_ctr[2]) };
+                double khcc_s[2][2];
+                bool khcc_ok = true;
+                for (int khcc_k = 0; khcc_k < 2 && khcc_ok; ++khcc_k) {
+                    const float (*khcc_m)[4] = khcc_k == 0
+                        ? g_svs_cyc_hist[khs_hs] : g_svs_inj_vp_abs;
+                    double khcc_c[4];
+                    for (int khcc_j = 0; khcc_j < 4; ++khcc_j) {
+                        khcc_c[khcc_j] = static_cast<double>(khcc_m[3][khcc_j])
+                            + khcc_w[0] * static_cast<double>(khcc_m[0][khcc_j])
+                            + khcc_w[1] * static_cast<double>(khcc_m[1][khcc_j])
+                            + khcc_w[2] * static_cast<double>(khcc_m[2][khcc_j]);
+                    }
+                    if (khcc_c[3] <= 0.05) { khcc_ok = false; break; }
+                    khcc_s[khcc_k][0] = (khcc_c[0] / khcc_c[3] * 0.5 + 0.5)
+                                      * static_cast<double>(g_main_depth_w);
+                    khcc_s[khcc_k][1] = (0.5 - khcc_c[1] / khcc_c[3] * 0.5)
+                                      * static_cast<double>(g_main_depth_h);
+                }
+                if (khcc_ok) {
+                    const double khcc_dx = khcc_s[0][0] - khcc_s[1][0];
+                    const double khcc_dy = khcc_s[0][1] - khcc_s[1][1];
+                    const double khcc_d = sqrt(khcc_dx * khcc_dx + khcc_dy * khcc_dy);
+                    const double khcc_diag = sqrt(
+                        static_cast<double>(g_main_depth_w) * g_main_depth_w +
+                        static_cast<double>(g_main_depth_h) * g_main_depth_h);
+                    if (khcc_d == khcc_d && khcc_d <= khcc_diag)
+                        khcc_px = static_cast<float>(khcc_d);
+                }
+            }
+            g_sten_cyc_ctr_px = khcc_px;
+            if (khcc_px > g_sten_cyc_ctr_px_max) g_sten_cyc_ctr_px_max = khcc_px;
         }
     }
 
@@ -54930,6 +56340,15 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
         g_svs_vp_lo_hist[khv_hs] = khv_vp_lo;   // 26249: travels with the matrix
         g_svs_vp_hi_hist[khv_hs] = khv_vp_hi;
         g_svs_seq_hist[khv_hs] = g_svs_frame_seq;
+        // 26667: the cycle basis travels with the same slot - ABSOLUTE, per
+        // the 26244 convention the ring already enforces. Invalid this frame
+        // -> the slot is honestly zeroed, never left carrying a stale epoch.
+        g_svs_cyc_hist_ok[khv_hs] = g_svs_cycle_vp_valid;
+        if (g_svs_cycle_vp_valid) {
+            memcpy(g_svs_cyc_hist[khv_hs], g_svs_cycle_vp, sizeof(g_svs_cyc_hist[khv_hs]));
+        } else {
+            memset(g_svs_cyc_hist[khv_hs], 0, sizeof(g_svs_cyc_hist[khv_hs]));
+        }
     }
     const bool khv_frame_ok = kh_upload_frame_cb(ctx, g_res.composite_frame_cb, khv_cbf);
     if (!khv_frame_ok) g_svs_fail_framecb++;   // 26208: was a silent path
@@ -55471,6 +56890,7 @@ inline void shadow_track_targets(ID3D11DeviceContext* ctx, ID3D11DepthStencilVie
         }
 
         g_ls.phase_on_atlas = false;
+        if (g_ls.pending_valid) g_live_pend_wipes_nw++;   // 26677 census: destructive only
         g_ls.pending_valid = false;
     g_ls.pending_bytes = 0;
         return;
@@ -55504,6 +56924,7 @@ inline void shadow_track_targets(ID3D11DeviceContext* ctx, ID3D11DepthStencilVie
         g_ls.atlas_epoch++;           // 26181: content-drift witness for staged captures
         g_ls.cycle_latched = false;   // new cascade cycle, new latch
         g_atlas_frame_cur = true;     // atlas stream liveness (round 7)
+        g_live_cycle_start_t = effect_time_seconds();   // 26679 stamp
     }
     if (!is_atlas) { g_ls.pending_valid = false; g_ls.pending_bytes = 0; g_ls.pending_vp_valid = false; }
 }
@@ -55749,8 +57170,17 @@ inline void shadow_view_prewarm() {
     // (coarse cascades relatch rarely). Entries rebuild from live
     // latches within a second of the wipe; a briefly thinner cascade
     // set is delay-class, drift is artifact-class.
-    g_ls.count = 0;
-    g_ls.newest = -1;
+    kh_live_wipe_note(3);   // 26686
+    // 26688 KH_LIVE_WIPE_DEFER extends to this lock-boundary door (mode 440
+    // restores the immediate wipe; ledger at KH_BUILD_TAG): same premise as
+    // door 4, same falsification by a parked camera.
+    if (g_dbg_mode.load(std::memory_order_relaxed) == 440) {
+        g_ls.count = 0;
+        g_ls.newest = -1;
+    } else {
+        g_ls.wipe_deferred = true;
+        g_live_wipe_deferrals++;
+    }
     g_lock_wipes++;
 }
 
@@ -56756,6 +58186,47 @@ inline void kh_prb_flush(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             g_prb.vol_pending = true;
         }
     }
+}
+
+// 26684 KH_MESH_OWNER_PREPASS: (re)create the owner map to match the
+// injection DSV's dims and sample pattern. False = the prepass stands down
+// this injection (ownFails counts it); nothing else in the frame moves.
+inline bool kh_owner_ensure(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& kho_td) {
+    if (!dev || kho_td.Width == 0 || kho_td.Height == 0) return false;
+    if (g_res.own_rtv && g_res.own_srv && g_res.own_dsv &&
+        g_res.own_w == kho_td.Width && g_res.own_h == kho_td.Height &&
+        g_res.own_samp == kho_td.SampleDesc.Count && g_res.own_qual == kho_td.SampleDesc.Quality) return true;
+    KH_SAFE_RELEASE(g_res.own_srv);
+    KH_SAFE_RELEASE(g_res.own_rtv);
+    KH_SAFE_RELEASE(g_res.own_tex);
+    KH_SAFE_RELEASE(g_res.own_dsv);
+    KH_SAFE_RELEASE(g_res.own_dsv_tex);
+    g_res.own_w = g_res.own_h = g_res.own_samp = g_res.own_qual = 0;
+    D3D11_TEXTURE2D_DESC kho_c = {};
+    kho_c.Width = kho_td.Width; kho_c.Height = kho_td.Height;
+    kho_c.MipLevels = 1; kho_c.ArraySize = 1;
+    kho_c.Format = DXGI_FORMAT_R32_UINT;
+    kho_c.SampleDesc = kho_td.SampleDesc;
+    kho_c.Usage = D3D11_USAGE_DEFAULT;
+    kho_c.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(dev->CreateTexture2D(&kho_c, nullptr, &g_res.own_tex))) return false;
+    if (FAILED(dev->CreateRenderTargetView(g_res.own_tex, nullptr, &g_res.own_rtv)) ||
+        FAILED(dev->CreateShaderResourceView(g_res.own_tex, nullptr, &g_res.own_srv))) {
+        KH_SAFE_RELEASE(g_res.own_srv); KH_SAFE_RELEASE(g_res.own_rtv); KH_SAFE_RELEASE(g_res.own_tex);
+        return false;
+    }
+    D3D11_TEXTURE2D_DESC kho_d = kho_c;
+    kho_d.Format = DXGI_FORMAT_D32_FLOAT;
+    kho_d.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    if (FAILED(dev->CreateTexture2D(&kho_d, nullptr, &g_res.own_dsv_tex)) ||
+        FAILED(dev->CreateDepthStencilView(g_res.own_dsv_tex, nullptr, &g_res.own_dsv))) {
+        KH_SAFE_RELEASE(g_res.own_dsv); KH_SAFE_RELEASE(g_res.own_dsv_tex);
+        KH_SAFE_RELEASE(g_res.own_srv); KH_SAFE_RELEASE(g_res.own_rtv); KH_SAFE_RELEASE(g_res.own_tex);
+        return false;
+    }
+    g_res.own_w = kho_td.Width; g_res.own_h = kho_td.Height;
+    g_res.own_samp = kho_td.SampleDesc.Count; g_res.own_qual = kho_td.SampleDesc.Quality;
+    return true;
 }
 
 inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
@@ -58299,8 +59770,22 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                     // twice through THIS path and lockWipes stayed 0
                     // - entries predating the lock survived and the
                     // post-spawn drift with them)
-                    g_ls.count = 0;
-                    g_ls.newest = -1;
+                    kh_live_wipe_note(4);   // 26686
+                    // 26687 KH_LIVE_WIPE_DEFER (mode 440 restores the immediate
+                    // wipe; ledger at KH_BUILD_TAG). dump1-26686 convicted THIS
+                    // door: liveWipeSite 4 at 272 s, last commit 49 s, camera
+                    // parked, table empty for minutes - 26682's cold-table
+                    // converse. The 26682 conditional shape: the table is
+                    // marked suspect and the FIRST post-door commit prunes it,
+                    // so the mesh keeps the world-parity entries until the
+                    // engine re-renders, exactly as it does across a sun jump.
+                    if (g_dbg_mode.load(std::memory_order_relaxed) == 440) {
+                        g_ls.count = 0;
+                        g_ls.newest = -1;
+                    } else {
+                        g_ls.wipe_deferred = true;
+                        g_live_wipe_deferrals++;
+                    }
                     g_lock_wipes++;
                 }
             }
@@ -58798,6 +60283,53 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // test is the object authority again (months-stable); the arb
     // variant beats terrain LOD via its SV_Depth clamp, not ALWAYS.
     ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);
+    // 26684 KH_MESH_OWNER_PREPASS (mode 438 stands it down; ledger at
+    // KH_BUILD_TAG). Arm the owner map against the DSV this injection draws
+    // into: same dims, same sample pattern, cleared to 'no owner'. The engine's
+    // bound RTVs/DSV are held for the per-draw restore and released at the
+    // epilogue. A reversed viewport (MinDepth > MaxDepth) stands the map down
+    // rather than owning the wrong end of it.
+    bool khr_own_on = false;
+    UINT khr_own_samp = 0;
+    ID3D11RenderTargetView* khr_own_saved_rtv[8] = {};
+    ID3D11DepthStencilView* khr_own_saved_dsv = nullptr;
+    if (g_dbg_mode.load(std::memory_order_relaxed) != 438 &&
+        g_res.ps_owner && g_res.dss_owner && khr_pass_vp.MinDepth <= khr_pass_vp.MaxDepth) {
+        ctx->OMGetRenderTargets(8, khr_own_saved_rtv, &khr_own_saved_dsv);
+        if (khr_own_saved_dsv) {
+            ID3D11Resource* khr_own_res = nullptr;
+            khr_own_saved_dsv->GetResource(&khr_own_res);
+            ID3D11Texture2D* khr_own_t2 = nullptr;
+            if (khr_own_res) {
+                khr_own_res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&khr_own_t2));
+                khr_own_res->Release();
+            }
+            if (khr_own_t2) {
+                D3D11_TEXTURE2D_DESC khr_own_td = {};
+                khr_own_t2->GetDesc(&khr_own_td);
+                khr_own_t2->Release();
+                if (kh_owner_ensure(dev, khr_own_td)) {
+                    khr_own_samp = khr_own_td.SampleDesc.Count;
+                    khr_own_on = khr_own_samp >= 1;
+                }
+            }
+        }
+        if (khr_own_on) {
+            const FLOAT khr_own_zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            ctx->ClearRenderTargetView(g_res.own_rtv, khr_own_zero);
+            ctx->ClearDepthStencilView(g_res.own_dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
+            ID3D11ShaderResourceView* khr_own_srvs[2] = {
+                khr_own_samp > 1 ? g_res.own_srv : nullptr,
+                khr_own_samp > 1 ? nullptr : g_res.own_srv };
+            ctx->PSSetShaderResources(33, 2, khr_own_srvs);
+            g_own_frames++;
+        } else {
+            for (int khr_oi = 0; khr_oi < 8; ++khr_oi) KH_SAFE_RELEASE(khr_own_saved_rtv[khr_oi]);
+            KH_SAFE_RELEASE(khr_own_saved_dsv);
+            g_own_fails++;
+        }
+    }
+    uint32_t khr_own_id = 0;   // 1-based draw index -> shadow_meta2.z (mod 4096)
     ctx->RSSetState(kh_rs_pick(g_res.rasterizer));
     ID3D11RasterizerState* khr_bound_rs = g_res.rasterizer;   // per-object twoSided switch
     // IDEMPOTENT-SET ELISION (the khr_bound_rs / bound_mesh pattern,
@@ -59990,7 +61522,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                              : (khdc_m == 355 ? 29.0f
                              : (khdc_m == 359 ? 30.0f
                              : (khdc_m == 360 ? 31.0f
-                             : (khdc_m == 395 ? 32.0f : 0.0f)))))))))))))));   // + 26579 v30 / 26580 v31 (sampler splitter) / 26628 v32 (cert probe)
+                             : (khdc_m == 395 ? 32.0f
+                             : (khdc_m == 441 ? 33.0f : 0.0f))))))))))))))));   // 26688 v33 owner-reject paint   // + 26579 v30 / 26580 v31 (sampler splitter) / 26628 v32 (cert probe)
             // 26383 dbgCtl.y IS AN ENUMERATION (full table at the gate it
             // drives). 0 = default (recompute, delta), 1 = 51 (absolute form),
             // 2 = 202 (THE SEAM REVERT - restores the raster passthrough,
@@ -60032,7 +61565,15 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                            : (khdc_m == 212) ? 11.0f
                            // 26588: 364 = the point-read collapse fallback
                            // (KH_VOL_MAX_FALLBACK stands down). BOTH twins.
-                           : (khdc_m == 364) ? 12.0f : 0.0f;  // ...68/77/78
+                           // 26673 KH_STEN_CENTER_TAP: the DEFAULT is the
+                           // 194 tolerance bypass (9.0 = the crisp centre
+                           // count; ledger at KH_BUILD_TAG). Mode 434
+                           // restores the witnessed filter. Any armed
+                           // dbgCtl.w mode above implicitly excludes the
+                           // fold while it rides the lane - documented
+                           // there and here, deliberately.
+                           : (khdc_m == 364) ? 12.0f
+                           : (khdc_m == 434) ? 0.0f : 9.0f;  // ...68/77/78
         }
         cbd.blend_ctl[0] = (khr_perceptual && o.blend_mode == 0 && o.color[3] < 0.999f) ? 1.0f : 0.0f;
         if (cbd.blend_ctl[0] >= 0.5f) g_pack_on_last = 1;   // film strip
@@ -60185,6 +61726,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 ctx->IASetInputLayout(khr_want_il);
                 khr_bound_il = khr_want_il;
             }
+            if (khr_tx_arb) g_inj_ps_arb_draws++; else g_inj_ps_earlyz_draws++;   // 26684: the 8.5 gauge
         }
         if (khr_mesh_farkeep) { g_farkeep_mesh_draws++; ++khr_fk_count; }   // C8: + frame lane
         if (khr_mesh_nearz) g_nearz_gap_draws++;
@@ -60515,6 +62057,11 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             if (!kh_mesh_visible(khr_cull, khr_cc, kh_lod_radius(o))) { g_mesh_culled++; continue; }
         }
 
+        // 26684 KH_MESH_OWNER_PREPASS lanes: the object's id for the owner
+        // draw and the test, and the map's sample count. Zero = untested.
+        ++khr_own_id;
+        cbd.shadow_meta2[2] = khr_own_on ? static_cast<float>(1u + (khr_own_id & 4095u)) : 0.0f;
+        cbd.shadow_meta2[3] = khr_own_on ? static_cast<float>(khr_own_samp) : 0.0f;
         if (!khr_frame_ok || !kh_upload_obj_cb(ctx, g_res.composite_cb, cbd)) continue;
         // Under depth func ALWAYS, draw order wins WITHIN the mesh:
         // with CULL_NONE the interior (far-wall) faces paint over the
@@ -60638,6 +62185,42 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 mesh_lod_range(khr_md, khr_lvl, khc_s, khc_c);
                 g_mesh_tris += (khc_c / 3u) * (khr_ts_ordered ? 2u : 1u);
             }
+            // 26684 KH_MESH_OWNER_PREPASS: the owner draw. Same CB, VS, layout,
+            // VB range, rasterizer and viewport as the colour draw that follows
+            // (parity is the contract - a face the colour pass culls must not
+            // own a sample), only PS/OM/DSS/blend swap for one draw. Cutout and
+            // user-shader materials skip the draw: their PS may discard pixels
+            // the owner PS cannot predict, so they test but never own.
+            if (khr_own_on) {
+                bool khr_own_cast = true;
+                if (khr_tx_on && khr_txm) {
+                    for (const KhMaterial& khr_om : khr_txm->slots) {
+                        if (khr_om.used && (khr_om.alpha_mode != 0 || khr_om.shader != 0)) { khr_own_cast = false; break; }
+                    }
+                }
+                if (khr_own_cast) {
+                    UINT khr_os = 0, khr_oc = 0;
+                    mesh_lod_range(khr_md, khr_lvl, khr_os, khr_oc);
+                    ID3D11ShaderResourceView* khr_own_null[2] = {};
+                    ctx->PSSetShaderResources(33, 2, khr_own_null);   // RTV hazard: unbind before writing
+                    ctx->OMSetRenderTargets(1, &g_res.own_rtv, g_res.own_dsv);
+                    ctx->OMSetDepthStencilState(g_res.dss_owner, 0);
+                    ctx->OMSetBlendState(nullptr, bf, 0xFFFFFFFF);   // integer RT: blending must be off
+                    ctx->PSSetShader(g_res.ps_owner, nullptr, 0);
+                    ctx->Draw(khr_oc, khr_os);
+                    ctx->PSSetShader(khr_bound_ps, nullptr, 0);
+                    ctx->OMSetBlendState(g_res.blend_modes[o.blend_mode], bf, 0xFFFFFFFF);
+                    ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);
+                    ctx->OMSetRenderTargets(8, khr_own_saved_rtv, khr_own_saved_dsv);
+                    ID3D11ShaderResourceView* khr_own_srvs[2] = {
+                        khr_own_samp > 1 ? g_res.own_srv : nullptr,
+                        khr_own_samp > 1 ? nullptr : g_res.own_srv };
+                    ctx->PSSetShaderResources(33, 2, khr_own_srvs);
+                    g_own_draws++;
+                } else {
+                    g_own_skips++;
+                }
+            }
             if (khr_tx_on) {
                 // Per-submesh textured draws: matParams filled + t14-t18
                 // rebound + the object slice re-uploaded per material range.
@@ -60674,6 +62257,12 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     kh_gpu_end(ctx, g_res.ts_inj_disjoint, g_res.ts_inj_stamp,
                g_res.ts_inj_cursor, g_res.ts_inj_inflight, khr_ts);   // 26657
 
+    if (khr_own_on) {   // 26684: the map's SRVs off, the held engine views released
+        ID3D11ShaderResourceView* khr_own_null[2] = {};
+        ctx->PSSetShaderResources(33, 2, khr_own_null);
+        for (int khr_oi = 0; khr_oi < 8; ++khr_oi) KH_SAFE_RELEASE(khr_own_saved_rtv[khr_oi]);
+        KH_SAFE_RELEASE(khr_own_saved_dsv);
+    }
     if (n_saved_vp > 0) ctx->RSSetViewports(n_saved_vp, saved_vp);
 
     {
@@ -62591,14 +64180,27 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
             dynlights_sample_draw(self);
         }
     }
-    if (g_ro.in_injection || g_ro.injected) return;
-
-    // Cascade binding harvest: during atlas phases the draws' VS CBs
-    // carry the cascade matrices - sample every 16th; the step idles
-    // whenever the table is fresh, so healthy sessions pay nothing.
-    if (g_ls.phase_on_atlas && ((++g_cascharv_ctr & 15) == 0)) {
+    // 26678 KH_CASCBIND_RESURRECT (mode 435 stands the harvest down; full
+    // ledger at KH_BUILD_TAG). The harvest lived BELOW the injected guard,
+    // and g_ro.injected - set at our injection, cleared at the MAIN depth
+    // clear - is still true from the PREVIOUS frame through the whole atlas
+    // phase, which runs before that clear (the 26327 frame order). The
+    // rescue this probe implements was therefore structurally dead in every
+    // session since placement - cascBindScans 0 across every dump, healthy
+    // and broken alike - and the dump3-26677 outage is exactly the starved-
+    // funnel class it was built for (livePendSets frozen at 214 with stash
+    // and both wipers at 0: uploads simply stopped reaching the pending
+    // scan). Hoisted ABOVE the guard: phase_on_atlas structurally excludes
+    // our own draws (the injection never runs inside the atlas phase) and
+    // the explicit in_injection term stays for safety; the every-16th
+    // sample plus the freshness idle keep healthy sessions at zero cost.
+    if (!g_ro.in_injection && g_ls.phase_on_atlas &&
+        g_dbg_mode.load(std::memory_order_relaxed) != 435 &&
+        ((++g_cascharv_ctr & 15) == 0)) {
         cascbind_step(self);
     }
+
+    if (g_ro.in_injection || g_ro.injected) return;
 
     // 26308: the engine-view locator sweep is retired with the path (ledger at
     // the seam's copy site; full record at kh_svs_eng_sweep). The body stays
@@ -63298,9 +64900,30 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
                     g_ls.band[b].last_time = 0.0f;
                 }
 
-                g_ls.count = 0;
-                g_ls.newest = -1;
-                g_recv_wipes++;
+                // 26682 KH_LIVE_WIPE_PARITY (mode 436 restores the full wipe;
+                // ledger at KH_BUILD_TAG). The live TABLE is no longer wiped
+                // here: the engine re-renders its cascade tiles LAZILY on
+                // visibility (the dump1-26681 conviction - during a post-skip
+                // drought the harvested whole-pool windows contain no cascade
+                // content at any offset, hvBestStage 1 across 10,726 full-span
+                // windows, and the operator's look-away-look-back is what
+                // triggers the refill), so the atlas the WORLD shades from
+                // keeps its old-sun tiles for seconds-to-minutes after a skip.
+                // Wiping our table made the mesh SHADOWLESS while the world
+                // stayed shadowed-stale: parity broken in pursuit of a
+                // correctness the engine itself does not deliver. Old entries
+                // are internally consistent with the old tiles they sample;
+                // replace-in-place converges our table exactly as the engine
+                // converges its atlas, and the orphan expiry prunes slots a
+                // layout change abandons. The BAND seals above stay wiped -
+                // they reseal on the sub-second resolve cadence and their
+                // pre-26682 wipe artifact was measured, not argued.
+                if (g_dbg_mode.load(std::memory_order_relaxed) == 436) {
+                    kh_live_wipe_note(6);   // 26686
+                    g_ls.count = 0;
+                    g_ls.newest = -1;
+                }
+                g_recv_wipes++;   // still counts the wipe EVENT (bands + map)
                 g_mask.sweep_settle = 0;   // the stream's content just changed sun
                 g_mask.sweep_need = 10;    // skip-type transitions run transitional
                                            // resolves for several sweeps, exactly
@@ -64356,8 +65979,20 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 g_ls.alt_view_valid = false;
                 g_ring_best_valid = false;
                 g_view_relock_wide_cycle = 0;
-                g_ls.count = 0;
-                g_ls.newest = -1;
+                kh_live_wipe_note(5);   // 26686
+                // 26688 KH_LIVE_WIPE_DEFER extends to the cold-hold release
+                // (mode 440 restores the immediate wipe; ledger at KH_BUILD_TAG).
+                // THIS is the operator's recompile-session correlation: the
+                // hold releases when the shaders finish, minutes in, with the
+                // camera long parked - the table emptied here has nothing to
+                // refill it until a look-away. Warm sessions never take this door.
+                if (g_dbg_mode.load(std::memory_order_relaxed) == 440) {
+                    g_ls.count = 0;
+                    g_ls.newest = -1;
+                } else {
+                    g_ls.wipe_deferred = true;
+                    g_live_wipe_deferrals++;
+                }
                 for (int khf_b = 0; khf_b < 8; ++khf_b) {
                     g_ls.band[khf_b].valid = false;
                     g_ls.band[khf_b].pending_view = false;
@@ -66146,7 +67781,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                              : (khdc_m == 355 ? 29.0f
                              : (khdc_m == 359 ? 30.0f
                              : (khdc_m == 360 ? 31.0f
-                             : (khdc_m == 395 ? 32.0f : 0.0f)))))))))))))));   // + 26579 v30 / 26580 v31 (sampler splitter) / 26628 v32 (cert probe)
+                             : (khdc_m == 395 ? 32.0f
+                             : (khdc_m == 441 ? 33.0f : 0.0f))))))))))))))));   // 26688 v33 owner-reject paint   // + 26579 v30 / 26580 v31 (sampler splitter) / 26628 v32 (cert probe)
             // 26383 dbgCtl.y IS AN ENUMERATION (full table at the gate it
             // drives). 0 = default (recompute, delta), 1 = 51 (absolute form),
             // 2 = 202 (THE SEAM REVERT - restores the raster passthrough,
@@ -66188,7 +67824,15 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                            : (khdc_m == 212) ? 11.0f
                            // 26588: 364 = the point-read collapse fallback
                            // (KH_VOL_MAX_FALLBACK stands down). BOTH twins.
-                           : (khdc_m == 364) ? 12.0f : 0.0f;  // ...68/77/78
+                           // 26673 KH_STEN_CENTER_TAP: the DEFAULT is the
+                           // 194 tolerance bypass (9.0 = the crisp centre
+                           // count; ledger at KH_BUILD_TAG). Mode 434
+                           // restores the witnessed filter. Any armed
+                           // dbgCtl.w mode above implicitly excludes the
+                           // fold while it rides the lane - documented
+                           // there and here, deliberately.
+                           : (khdc_m == 364) ? 12.0f
+                           : (khdc_m == 434) ? 0.0f : 9.0f;  // ...68/77/78
         }
         cbd.blend_ctl[0] = (khf_perceptual && !o.fullscreen && o.blend_mode == 0 && o.color[3] < 0.999f) ? 1.0f : 0.0f;
         if (cbd.blend_ctl[0] >= 0.5f) g_pack_on_last = 1;   // film strip
@@ -67577,7 +69221,54 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 // happens inside flush_locked.
 // ===========================================================================
 
+// 26687 KH_VIDEO_OPTIONS_READ: the ONE getVideoOptions build, relocated
+// from flush_ui_render_sqf (which dump1-26686 read as never called: uiFlushes
+// 0, videoOptKeys empty) to the Draw3D flush every render frame runs. Same
+// body, same three consumers: the shadowvis fallback (26451; its 26615 gate
+// kept), the objectvis/objectdraw read (26684), the key census (26686).
+inline void stage_video_options() {
+    try {
+        const bool khsr_want_shadow = g_sun_range_src.load(std::memory_order_relaxed) != 2;
+        rv_hashmap khsr_map = sqf::get_video_options();
+        bool khsr_shadow_done = !khsr_want_shadow;
+        bool khsr_obj_done = false;
+        const bool khsr_census = !g_video_opt_keys_done;
+        for (auto& khsr_e : khsr_map) {
+            if (!khsr_census && khsr_shadow_done && khsr_obj_done) break;
+            if (khsr_e.key.type_enum() != game_data_type::STRING) continue;
+            std::string khsr_k = static_cast<std::string>(khsr_e.key);
+            if (khsr_census) {
+                if (!g_video_opt_keys.empty()) g_video_opt_keys += "|";
+                g_video_opt_keys += khsr_k;
+            }
+            for (auto& khsr_c : khsr_k) {
+                if (khsr_c >= 'A' && khsr_c <= 'Z') khsr_c = static_cast<char>(khsr_c + 32);
+            }
+            const bool khsr_is_shadow = !khsr_shadow_done && khsr_k.find("shadowvis") != std::string::npos;
+            const bool khsr_is_obj = !khsr_obj_done &&
+                (khsr_k.find("objectvis") != std::string::npos ||
+                 khsr_k.find("objectdraw") != std::string::npos);
+            if (!khsr_is_shadow && !khsr_is_obj) continue;
+            if (khsr_e.value.type_enum() == game_data_type::SCALAR) {
+                const float khsr_f = static_cast<float>(khsr_e.value);
+                if (khsr_f == khsr_f && khsr_f > 0.0f) {
+                    if (khsr_is_shadow) {
+                        g_sun_range.store(khsr_f, std::memory_order_relaxed);
+                        g_sun_range_src.store(1, std::memory_order_relaxed);
+                    } else {
+                        g_obj_vis.store(khsr_f, std::memory_order_relaxed);
+                        g_obj_vis_src.store(1, std::memory_order_relaxed);
+                    }
+                }
+            }
+            if (khsr_is_shadow) khsr_shadow_done = true;
+            else                khsr_obj_done = true;
+        }
+        if (khsr_census) g_video_opt_keys_done = true;
+    } catch (...) {}
+}
 inline void stage_world_lighting() {
+    stage_video_options();   // 26687
     // (26064: the lit-exists recompute moved to flush_frame's demand
     // block - BEFORE the has_work early-out - fixing the sticky-demand
     // bug where deleting the last object froze g_ls.wanted forever.
@@ -68929,6 +70620,7 @@ inline void reset_stat_counters() {
     g_cull_rebased = 0;                                                 // 26654
     g_mod_shader_hits.store(0, std::memory_order_relaxed);
     g_mod_mesh_hits = 0;
+    g_mod_tex_hits = 0;   // 26684
     g_blk_jump_adopts = 0;
     g_blk_collapse_holds = 0;   // 26052: the 26050 counter joins its siblings here
     g_blk_blank_skips = 0;      // 26053: blank-guard census
@@ -69088,6 +70780,8 @@ inline void reset_stat_counters() {
     // ring - zeroing the seqs would turn every lookup into a miss for four
     // frames after every arming.
     g_svs_reproj_epoch_hits = 0; g_svs_reproj_epoch_miss = 0;
+    g_sten_cyc_pubs = 0; g_sten_cyc_miss = 0;   // 26667
+    g_sten_cyc_ctr_px = -1.0f; g_sten_cyc_ctr_px_max = 0.0f;   // 26669
     g_svs_reproj_wild = 0;
     g_svs_reproj_frames = 0; g_svs_reproj_over4 = 0;   // 26240
     g_svs_reproj_over32 = 0; g_svs_reproj_px_sum = 0.0;
@@ -69286,21 +70980,24 @@ inline void reset_stat_counters() {
     g_haze_ref_pub = -1.0f; g_haze_den_pub = -1.0f; g_haze_fal_pub = -1.0f;
     g_haze_layer_pub = -1.0e9f;
     // 26539: the union radius latch is SESSION state - a new mission's caster
-    // set has no business inheriting the last one's held radius. The counters
-    // go with it. (Same pass also clears the 26537/26538 sun lanes, which the
-    // 26536-era audit found stranded: a -1 'never ran' sentinel that survives
-    // a mission change lies in the next one.)
-    g_sun_union_rad_held = -1.0f;
+    // set has no business inheriting the last one's held radius. 26664
+    // CORRECTION IN PLACE (rule 1.11): that sentence was true and the lines
+    // under it were in the WRONG FUNCTION. This is the stats reset, which
+    // the getRenderStats arm and resetRenderStats both call mid-session, so
+    // every A/B window opened dropped every held window and forced a
+    // re-latch - one whole re-quantisation - on the next fit, exactly the
+    // event the latches exist to suppress. The HELD VALUES (union radius,
+    // union lateral, the four band depth windows, the ladder scale) are
+    // continuity, not census, and now reset ONLY in reset_session_state,
+    // by the KH_JITTER_FLOOR precedent directly above. The HOLD/RELATCH
+    // COUNTERS stay here on purpose: they are the arming lanes of their
+    // builds ('holds must dominate relatches') and a clean A/B window
+    // needs them zeroed. Read them as a window count, not a session delta.
+    // (The 26537/26538 sun lanes below are per-dump gauges re-filled every
+    // band render; their -1 sentinel stays here as census.)
     g_sun_union_rad_holds = 0; g_sun_union_rad_relatches = 0;
-    // 26663: the band depth latch resets with the union's, by the same 26539
-    // rule - a surviving sentinel lies about the next mission.
-    for (int khfl_i = 0; khfl_i < 4; ++khfl_i) g_sun_fwd_held[khfl_i] = -1.0f;
-    g_sun_fwd_holds = 0; g_sun_fwd_relatches = 0;
-    // 26611: the second latch and the ladder scale reset with the first
-    // (the 26539 session-reset rule - a surviving sentinel lies).
-    g_sun_ladder_scale = 1.0f;
-    g_sun_union_lat_held = -1.0f;
-    g_sun_union_lat_holds = 0; g_sun_union_lat_relatches = 0;
+    g_sun_fwd_holds = 0; g_sun_fwd_relatches = 0;          // 26663 lanes
+    g_sun_union_lat_holds = 0; g_sun_union_lat_relatches = 0;   // 26611 lanes
     g_sun_band_reach[0] = g_sun_band_reach[1] = g_sun_band_reach[2] = -1.0f;
     g_sun_band_reach[3] = -1.0f;   // 26620 FAR band
     g_sun5_renders = 0; g_sun5_casters = 0;   // 26620 (validity clears at the pass gates)
@@ -69317,6 +71014,9 @@ inline void reset_stat_counters() {
     g_fire_view_repairs = 0; g_fire_view_era_rejects = 0;
     g_cast_ready_holds = 0; g_cast_map_holds = 0; g_cast_ready_drops = 0;
     g_live_rej_sun_axis = 0; g_live_rej_sun_axis_deg = -1.0f;
+    g_live_fin_bail_pend = 0; g_live_fin_bail_vp = 0; g_live_fin_bail_atlas = 0;   // 26674
+    g_live_pend_sets = 0; g_live_stash_accepts = 0;
+    g_live_pend_wipes_nw = 0; g_live_pend_wipes_maint = 0;   // 26677
     g_band_rej_sun_axis = 0; g_band_rej_sun_axis_deg = -1.0f;
     g_sun_snap_adopts = 0; g_sun_snap_refusals = 0; g_sun_snap_neutral = 0;
     g_sun_snap_last_deg = -1.0f;
@@ -69509,6 +71209,8 @@ inline void reset_stat_counters() {
     g_dcopy_pre_inject = 0; g_dcopy_post_inject = 0;   // 26521
     g_dcopy_draw_at = 0; g_dcopy_inject_at = 0;        // 26521
     g_far_clip_no_farvis = 0; g_far_clip_stale = 0;   // 26513
+    g_inj_ps_arb_draws = 0; g_inj_ps_earlyz_draws = 0;   // 26684: the 8.5 gauge
+    g_own_frames = 0; g_own_draws = 0; g_own_skips = 0; g_own_fails = 0;   // 26684
     g_far_keep_inside_routes = 0;                    // 26514
     g_part_rej_lo_min = 2.0f; g_part_rej_lo_max = -1.0f;   // 26526
     g_part_rej_hi_max = -1.0f; g_part_sky_spans = 0;       // 26526
@@ -69536,11 +71238,34 @@ inline void reset_stat_counters() {
     // both honestly; -1 sentinels everywhere else (rule 1.10).
     g_blk_zero_sun_refusals = 0;   // 26418
     g_blk_zero_sun_admits = 0;     // 26612
+    g_blk_zero_sun_wit_refusals = 0;   // 26666
+    g_blk_contra_pend_holds = 0;       // 26665
+    // 26668: the walk gauge's WINDOW lanes reset with the stats arm so an
+    // A/B window reads its own extremes; the keel itself, its stamps and
+    // the open dim-window edge are CONTINUITY and reset only with the
+    // session (the 26664 split, applied at birth instead of by correction).
+    g_blk_keel_snaps = 0;
+    g_blk_walk_ratio_min = -1.0f; g_blk_walk_ratio_max = -1.0f;
+    g_blk_walk_min_t = -1.0f; g_blk_walk_min_keel = -1.0f; g_blk_walk_min_std = -1.0f;
+    g_blk_walk_dim_frames = 0;
+    g_blk_walk_dim_first = -1.0f; g_blk_walk_dim_last = -1.0f;
+    g_blk_walk_dim_span_max = 0.0f;
+    // 26670: the adoption census reads per window, like its blk siblings
+    g_blk_adopt_ratio_last = -1.0f; g_blk_adopt_ratio_min = -1.0f;
+    g_blk_adopt_ratio_max = -1.0f;
+    g_blk_adopt_gap_last = -1.0f; g_blk_adopt_gap_max = 0.0f;
+    g_blk_adopt_t_last = -1.0f;
+    // 26671: hold counters + bridged-window extreme read per window;
+    // the window stamps themselves are continuity (session reset).
+    g_blk_starved_dim_holds = 0; g_blk_starved_dim_concedes = 0;
+    g_blk_sdh_held_max = 0.0f;
     g_blk_shade_now = -1.0f; g_blk_shade_min = 1.0e9f; g_blk_shade_max = -1.0f;
     g_blk_shade_n = 0; g_blk_shade_dark = 0;
     g_blk_shade_valid = -1.0f; g_blk_shade_litgate = -1.0f;
     g_blk_shade_strength = -1.0f; g_blk_shade_std_amb = -1.0f;
     g_blk_shade_std_sun = -1.0f; g_blk_shade_probe_age = -1.0f;
+    g_blk_dim_frames = 0; g_blk_dim_first_s = -1.0f; g_blk_dim_last_s = -1.0f;   // 26667
+    g_blk_shade_anch_sun = -1.0f; g_blk_shade_map_age = -1.0f;               // 26667
     g_blk_shade_t = -1.0f;
     for (int khbs_r = 0; khbs_r < 3; ++khbs_r) {
         g_blk_shade_amb[khbs_r] = -1.0f; g_blk_shade_sun[khbs_r] = -1.0f;
@@ -69592,6 +71317,10 @@ inline void reset_stat_counters() {
     g_skybind_maxbw = 0; g_skybind_slots = 0; g_skybind_off1 = 0;
     g_skybind_maxbw_vs = 0; g_skybind_offs_seen = 0;
     g_viewbind_scans = 0; g_cascbind_scans = 0;
+    g_cascbind_span_last = 0; g_cascbind_span_max = 0;   // 26680
+    g_hv_windows = 0; g_hv_rej_scale = 0; g_hv_rej_ratio = 0; g_hv_rej_iso = 0;
+    g_hv_rej_trans = 0; g_hv_rej_ortho = 0;
+    g_hv_best_stage = 0; g_hv_best_n0 = -1.0f;   // 26681
     g_loc_scan_uploads = 0; g_loc_max_cb_floats = 0;
     g_comp_compiles = 0;
     g_ui_poll_attempts = 0;
@@ -69683,6 +71412,33 @@ inline void reset_session_state() {
     // fabricated hold.
     g_jit_prev_valid = false;
     g_jit_hold_run = 0;
+
+    // 26664: THE SUN LATCHES ARE CONTINUITY AND LIVE HERE, NOT IN THE STATS
+    // RESET (ledger at KH_BUILD_TAG; the 26539 comment in reset_stat_counters
+    // carries the correction in place). A new mission's caster set inherits
+    // no held window - and a stats arm mid-mission no longer drops one.
+    g_sun_union_rad_held = -1.0f;                    // 26539 union radius
+    g_sun_union_lat_held = -1.0f;                    // 26611 union lateral
+    g_sun_ladder_scale = 1.0f;                       // 26611 ladder scale
+    for (int khfl_i = 0; khfl_i < 4; ++khfl_i) g_sun_fwd_held[khfl_i] = -1.0f;   // 26663 bands
+    // 26668: the walk keel is continuity - a new mission re-seeds from its
+    // own first standing sample and inherits no other mission's baseline.
+    g_blk_keel_sl = -1.0f; g_blk_keel_t = -1.0f; g_blk_keel_snap_mark = 0;
+    g_blk_walk_ratio = -1.0f; g_blk_walk_dim_open = -1.0f;
+    g_blk_sdh_first = -1.0f; g_blk_sdh_last = -1.0f;   // 26671 window edges
+    g_blk_bright_seen_t = -1.0f;   // 26672 recency stamp: continuity
+    g_live_last_commit_t = -1.0f;  // 26674 commit stamp: continuity
+    g_live_wipe_site = 0; g_live_wipe_t = -1.0f; g_live_wipe_n = 0;   // 26686 (session)
+    g_live_wipe_deferrals = 0; g_live_wipe_prunes = 0; g_ls.wipe_deferred = false;   // 26687
+    for (int khlw_i = 0; khlw_i < 7; ++khlw_i) g_live_wipe_door[khlw_i] = 0;   // 26688
+    // 26691 (rule 1.11, handoff sect 2.1 correction): the 26684/26686 video-
+    // options latches are SESSION-scoped as documented, not process-scoped as
+    // shipped - objVisSrc could never return to 0 and the key census never
+    // re-ran. Cleared here, re-armed by the first stage_video_options().
+    g_obj_vis.store(0.0f, std::memory_order_relaxed);
+    g_obj_vis_src.store(0, std::memory_order_relaxed);
+    g_video_opt_keys.clear(); g_video_opt_keys_done = false;
+    g_live_cycle_start_t = -1.0f; g_cascbind_feed_t = -1.0f;   // 26679 stamps
 
     // the lifetime pairing trio is session-scoped under full destroy
     g_view_relock_forced = 0; g_lock_wipes = 0; g_ls.view_locks = 0;

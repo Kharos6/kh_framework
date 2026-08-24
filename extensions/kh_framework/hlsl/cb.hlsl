@@ -65,7 +65,9 @@ cbuffer CBObj : register(b0)
     float4 dlCtl;   // x = mode (0 off, 1 camera-relative world)
                           // 2 view space), y = point count, z = spot count, w
                           // = global distance scale (cb10[2].x)
-    float4 dlGlobal;   // xyz = global diffuse multiplier (cb10[3])
+    float4 dlGlobal;   // xyz = global diffuse multiplier (cb10[3]); w = the
+                          // script intensity, applied to the WHOLE DynLights
+                          // sum (C++ twin dl_global)
     float4 dlView[3];   // view matrix COLUMNS (world->view rotation)
                           // for mode 2, captured WITH the light list
     float4 dlLights[192];   // 32 lights x 6 float4, cb11 layout verbatim:
@@ -783,128 +785,40 @@ float4 KhStenPaintU(float3 khpu_w, float2 khpu_raster, float khpu_sel)
 // one-texel-soft edges, and the acne band averages instead of flipping.
 float z_bias(float z) { return z - sunMeta.z; }
 
-float SunShadowCompareBilin(float2 uv, float z)
+// ONE bilinear compare and ONE 5-tap soft compare for all five maps: the
+// texture and its size are parameters (per-map twins retired; fxc resolves
+// resource parameters at inlining). lighting0.y 22 (mode 245, fire CB)
+// restores the hard single tap. Band maps never contain the ground, so a
+// receiver never self-compares here: widening cannot acne, no slope term.
+float KhSunBilinT(Texture2D<float> khcb_m, float khcb_sz, float2 uv, float z)
 {
-    float2 tx = uv * sunMeta.y - 0.5f;
+    float2 tx = uv * khcb_sz - 0.5f;
     float2 f = frac(tx);
     int2 p0 = int2(tx);
-    float o00 = (z > khSunDepth.Load(int3(p0 + int2(0, 0), 0))) ? 1.0f : 0.0f;
-    float o10 = (z > khSunDepth.Load(int3(p0 + int2(1, 0), 0))) ? 1.0f : 0.0f;
-    float o01 = (z > khSunDepth.Load(int3(p0 + int2(0, 1), 0))) ? 1.0f : 0.0f;
-    float o11 = (z > khSunDepth.Load(int3(p0 + int2(1, 1), 0))) ? 1.0f : 0.0f;
+    float o00 = (z > khcb_m.Load(int3(p0 + int2(0, 0), 0))) ? 1.0f : 0.0f;
+    float o10 = (z > khcb_m.Load(int3(p0 + int2(1, 0), 0))) ? 1.0f : 0.0f;
+    float o01 = (z > khcb_m.Load(int3(p0 + int2(0, 1), 0))) ? 1.0f : 0.0f;
+    float o11 = (z > khcb_m.Load(int3(p0 + int2(1, 1), 0))) ? 1.0f : 0.0f;
     return lerp(lerp(o00, o10, f.x), lerp(o01, o11, f.x), f.y);
 }
 
-// the cascade-band twins of the cast compare (t25/t26/t27). Identical
-// arithmetic, different texture - the KhSelfTap2 pattern applied to the world
-// cast.
-// Band maps never contain the ground, so a receiver never self-compares
-// here: widening the kernel cannot acne and no slope term is needed.
-float SunShadowCompareBilin2(float2 uv, float z)
+float KhSunSoftT(Texture2D<float> khcs_m, float khcs_sz, float2 uv, float z)
 {
-    float2 kcb2_t = uv * sunMeta2.y - 0.5f;
-    float2 kcb2_f = frac(kcb2_t);
-    int2 kcb2_p = int2(kcb2_t);
-    float kcb2_00 = (z > khSunDepth2.Load(int3(kcb2_p + int2(0, 0), 0))) ? 1.0f : 0.0f;
-    float kcb2_10 = (z > khSunDepth2.Load(int3(kcb2_p + int2(1, 0), 0))) ? 1.0f : 0.0f;
-    float kcb2_01 = (z > khSunDepth2.Load(int3(kcb2_p + int2(0, 1), 0))) ? 1.0f : 0.0f;
-    float kcb2_11 = (z > khSunDepth2.Load(int3(kcb2_p + int2(1, 1), 0))) ? 1.0f : 0.0f;
-    return lerp(lerp(kcb2_00, kcb2_10, kcb2_f.x), lerp(kcb2_01, kcb2_11, kcb2_f.x), kcb2_f.y);
+    if (lighting0.y >= 21.5f && lighting0.y < 22.5f) return KhSunBilinT(khcs_m, khcs_sz, uv, z);
+    float khcs_o = 0.75f / max(khcs_sz, 1.0f);
+    return (KhSunBilinT(khcs_m, khcs_sz, uv, z)
+          + KhSunBilinT(khcs_m, khcs_sz, uv + float2( khcs_o, 0.0f), z)
+          + KhSunBilinT(khcs_m, khcs_sz, uv + float2(-khcs_o, 0.0f), z)
+          + KhSunBilinT(khcs_m, khcs_sz, uv + float2(0.0f,  khcs_o), z)
+          + KhSunBilinT(khcs_m, khcs_sz, uv + float2(0.0f, -khcs_o), z)) * 0.2f;
 }
 
-float SunShadowCompareBilin3(float2 uv, float z)
-{
-    float2 kcb3_t = uv * sunMeta3.y - 0.5f;
-    float2 kcb3_f = frac(kcb3_t);
-    int2 kcb3_p = int2(kcb3_t);
-    float kcb3_00 = (z > khSunDepth3.Load(int3(kcb3_p + int2(0, 0), 0))) ? 1.0f : 0.0f;
-    float kcb3_10 = (z > khSunDepth3.Load(int3(kcb3_p + int2(1, 0), 0))) ? 1.0f : 0.0f;
-    float kcb3_01 = (z > khSunDepth3.Load(int3(kcb3_p + int2(0, 1), 0))) ? 1.0f : 0.0f;
-    float kcb3_11 = (z > khSunDepth3.Load(int3(kcb3_p + int2(1, 1), 0))) ? 1.0f : 0.0f;
-    return lerp(lerp(kcb3_00, kcb3_10, kcb3_f.x), lerp(kcb3_01, kcb3_11, kcb3_f.x), kcb3_f.y);
-}
+// Union-map forms keep their names: the cast tail, the probes and PSMaskCast
+// read them.
+float SunShadowCompareBilin(float2 uv, float z) { return KhSunBilinT(khSunDepth, sunMeta.y, uv, z); }
+float SunShadowCompareSoft(float2 uv, float z)  { return KhSunSoftT(khSunDepth, sunMeta.y, uv, z); }
 
-float SunShadowCompareBilin4(float2 uv, float z)
-{
-    float2 kcb4_t = uv * sunMeta4.y - 0.5f;
-    float2 kcb4_f = frac(kcb4_t);
-    int2 kcb4_p = int2(kcb4_t);
-    float kcb4_00 = (z > khSunDepth4.Load(int3(kcb4_p + int2(0, 0), 0))) ? 1.0f : 0.0f;
-    float kcb4_10 = (z > khSunDepth4.Load(int3(kcb4_p + int2(1, 0), 0))) ? 1.0f : 0.0f;
-    float kcb4_01 = (z > khSunDepth4.Load(int3(kcb4_p + int2(0, 1), 0))) ? 1.0f : 0.0f;
-    float kcb4_11 = (z > khSunDepth4.Load(int3(kcb4_p + int2(1, 1), 0))) ? 1.0f : 0.0f;
-    return lerp(lerp(kcb4_00, kcb4_10, kcb4_f.x), lerp(kcb4_01, kcb4_11, kcb4_f.x), kcb4_f.y);
-}
-
-// lighting0.y 22 (mode 245, fire CB) restores the hard single tap.
-float SunShadowCompareSoft(float2 uv, float z)
-{
-    if (lighting0.y >= 21.5f && lighting0.y < 22.5f) return SunShadowCompareBilin(uv, z);
-    float khcs_o = 0.75f / max(sunMeta.y, 1.0f);
-    return (SunShadowCompareBilin(uv, z)
-          + SunShadowCompareBilin(uv + float2( khcs_o, 0.0f), z)
-          + SunShadowCompareBilin(uv + float2(-khcs_o, 0.0f), z)
-          + SunShadowCompareBilin(uv + float2(0.0f,  khcs_o), z)
-          + SunShadowCompareBilin(uv + float2(0.0f, -khcs_o), z)) * 0.2f;
-}
-
-float SunShadowCompareSoft2(float2 uv, float z)
-{
-    if (lighting0.y >= 21.5f && lighting0.y < 22.5f) return SunShadowCompareBilin2(uv, z);
-    float khcs_o = 0.75f / max(sunMeta2.y, 1.0f);
-    return (SunShadowCompareBilin2(uv, z)
-          + SunShadowCompareBilin2(uv + float2( khcs_o, 0.0f), z)
-          + SunShadowCompareBilin2(uv + float2(-khcs_o, 0.0f), z)
-          + SunShadowCompareBilin2(uv + float2(0.0f,  khcs_o), z)
-          + SunShadowCompareBilin2(uv + float2(0.0f, -khcs_o), z)) * 0.2f;
-}
-
-float SunShadowCompareSoft3(float2 uv, float z)
-{
-    if (lighting0.y >= 21.5f && lighting0.y < 22.5f) return SunShadowCompareBilin3(uv, z);
-    float khcs_o = 0.75f / max(sunMeta3.y, 1.0f);
-    return (SunShadowCompareBilin3(uv, z)
-          + SunShadowCompareBilin3(uv + float2( khcs_o, 0.0f), z)
-          + SunShadowCompareBilin3(uv + float2(-khcs_o, 0.0f), z)
-          + SunShadowCompareBilin3(uv + float2(0.0f,  khcs_o), z)
-          + SunShadowCompareBilin3(uv + float2(0.0f, -khcs_o), z)) * 0.2f;
-}
-
-float SunShadowCompareSoft4(float2 uv, float z)
-{
-    if (lighting0.y >= 21.5f && lighting0.y < 22.5f) return SunShadowCompareBilin4(uv, z);
-    float khcs_o = 0.75f / max(sunMeta4.y, 1.0f);
-    return (SunShadowCompareBilin4(uv, z)
-          + SunShadowCompareBilin4(uv + float2( khcs_o, 0.0f), z)
-          + SunShadowCompareBilin4(uv + float2(-khcs_o, 0.0f), z)
-          + SunShadowCompareBilin4(uv + float2(0.0f,  khcs_o), z)
-          + SunShadowCompareBilin4(uv + float2(0.0f, -khcs_o), z)) * 0.2f;
-}
-)HLSL" R"HLSL(   // CHUNK BOUNDARY - the FAR band's compare helpers get their own
-float SunShadowCompareBilin5(float2 uv, float z)
-{
-    float2 kcb5_t = uv * sunMeta5.y - 0.5f;
-    float2 kcb5_f = frac(kcb5_t);
-    int2 kcb5_p = int2(kcb5_t);
-    float kcb5_00 = (z > khSunDepth5.Load(int3(kcb5_p + int2(0, 0), 0))) ? 1.0f : 0.0f;
-    float kcb5_10 = (z > khSunDepth5.Load(int3(kcb5_p + int2(1, 0), 0))) ? 1.0f : 0.0f;
-    float kcb5_01 = (z > khSunDepth5.Load(int3(kcb5_p + int2(0, 1), 0))) ? 1.0f : 0.0f;
-    float kcb5_11 = (z > khSunDepth5.Load(int3(kcb5_p + int2(1, 1), 0))) ? 1.0f : 0.0f;
-    return lerp(lerp(kcb5_00, kcb5_10, kcb5_f.x), lerp(kcb5_01, kcb5_11, kcb5_f.x), kcb5_f.y);
-}
-
-float SunShadowCompareSoft5(float2 uv, float z)
-{
-    if (lighting0.y >= 21.5f && lighting0.y < 22.5f) return SunShadowCompareBilin5(uv, z);
-    float khcs_o = 0.75f / max(sunMeta5.y, 1.0f);
-    return (SunShadowCompareBilin5(uv, z)
-          + SunShadowCompareBilin5(uv + float2( khcs_o, 0.0f), z)
-          + SunShadowCompareBilin5(uv + float2(-khcs_o, 0.0f), z)
-          + SunShadowCompareBilin5(uv + float2(0.0f,  khcs_o), z)
-          + SunShadowCompareBilin5(uv + float2(0.0f, -khcs_o), z)) * 0.2f;
-}
 )HLSL" R"HLSL(
-
 // The cross-fade now spans the outer 40% of every window - hero 80 cm, mid
 // 3.2 m, outer 12.8 m - one helper, all nine blend sites (cast chain, self
 // kernel, contact carries). KhJw shares this curve: continuity holds.
@@ -964,6 +878,36 @@ float KhJw(float khjw_e)
          ? 1.0f : KhTbW(khjw_e);
 }
 
+// ONE cast tier for the four camera-anchored bands (hero/mid/outer/far). The
+// per-band twins differed only in map/matrix/meta; the hero copy also lacked
+// the carried-verdict resolve, which is dead at tier one (khtb_occ is -1
+// there). khC_done = a verdict was returned; false = fall through with the
+// carry state updated in place. TWIN CONTRACT with KhSelfTier's ladder.
+float KhCastTier(Texture2D<float> khC_map, float4x4 khC_vp, float4 khC_meta, float3 khC_r,
+                 bool khlf_on, bool khuw_off, bool khtb_on,
+                 inout float khtb_occ, inout float khtb_w, out bool khC_done)
+{
+    khC_done = false;
+    if (khC_meta.x >= 0.5f) {
+        float4 khC_c = mul(float4(khC_r, 1.0f), khC_vp);   // KH_SUN_ANCHOR
+        float2 khC_u = float2(0.5f + 0.5f * khC_c.x, 0.5f - 0.5f * khC_c.y);
+        if (khC_u.x > 0.002f && khC_u.x < 0.998f &&
+            khC_u.y > 0.002f && khC_u.y < 0.998f &&
+            khC_c.z > 0.0f && khC_c.z < 1.0f) {
+            float khC_o = KhSunSoftT(khC_map, khC_meta.y, khC_u, khC_c.z - khC_meta.z);   // filtered
+            if (khC_o > 0.0001f ||
+                (!khlf_on && (khuw_off || KhUnionClear(khC_r)))) {   // lit authoritative - only with the union's witness, else fall through
+                if (khtb_occ >= 0.0f) { khC_done = true; return KhTbBlend(khC_o, khtb_occ, khtb_w); }
+                float khC_e = max(abs(khC_u.x - 0.5f), abs(khC_u.y - 0.5f)) * 2.0f;
+                float khC_w = khtb_on ? KhTbW(khC_e) : 1.0f;
+                if (khC_w >= 0.9999f) { khC_done = true; return khC_o; }
+                khtb_occ = khC_o; khtb_w = khC_w;   // carry into the next tier
+            }
+        }
+    }
+    return 0.0f;
+}
+
 float SunShadowOcclusion(float3 wpos)
 {
     if (sunMeta.x < 0.5f) return 0.0f;
@@ -982,74 +926,17 @@ float SunShadowOcclusion(float3 wpos)
     const bool khlf_on = (lighting0.y >= 41.5f && lighting0.y < 42.5f);
     const bool khuw_off = (lighting0.y >= 75.5f && lighting0.y < 76.5f);   // KH_ABSENCE_WITNESS off (446)
     if (lighting0.y < 20.5f || lighting0.y >= 21.5f) {
-        if (sunMeta2.x >= 0.5f) {
-            float4 khc2_c = mul(float4(wpos - sunOrigin.xyz, 1.0f), sunVP2);   // KH_SUN_ANCHOR
-            float2 khc2_u = float2(0.5f + 0.5f * khc2_c.x, 0.5f - 0.5f * khc2_c.y);
-            if (khc2_u.x > 0.002f && khc2_u.x < 0.998f &&
-                khc2_u.y > 0.002f && khc2_u.y < 0.998f &&
-                khc2_c.z > 0.0f && khc2_c.z < 1.0f) {
-                float khc2_o = SunShadowCompareSoft2(khc2_u, khc2_c.z - sunMeta2.z);   // filtered
-                if (khc2_o > 0.0001f ||
-                    (!khlf_on && (khuw_off || KhUnionClear(wpos - sunOrigin.xyz)))) {   // lit authoritative - only with the union's witness, else fall through
-                    float khc2_e = max(abs(khc2_u.x - 0.5f), abs(khc2_u.y - 0.5f)) * 2.0f;
-                    float khc2_w = khtb_on ? KhTbW(khc2_e) : 1.0f;
-                    if (khc2_w >= 0.9999f) return khc2_o;
-                    khtb_occ = khc2_o; khtb_w = khc2_w;   // carry into the mid tier
-                }
-            }
-        }
-        if (sunMeta3.x >= 0.5f) {
-            float4 khc3_c = mul(float4(wpos - sunOrigin.xyz, 1.0f), sunVP3);   // KH_SUN_ANCHOR
-            float2 khc3_u = float2(0.5f + 0.5f * khc3_c.x, 0.5f - 0.5f * khc3_c.y);
-            if (khc3_u.x > 0.002f && khc3_u.x < 0.998f &&
-                khc3_u.y > 0.002f && khc3_u.y < 0.998f &&
-                khc3_c.z > 0.0f && khc3_c.z < 1.0f) {
-                float khc3_o = SunShadowCompareSoft3(khc3_u, khc3_c.z - sunMeta3.z);   // filtered
-                if (khc3_o > 0.0001f ||
-                    (!khlf_on && (khuw_off || KhUnionClear(wpos - sunOrigin.xyz)))) {   // lit authoritative - only with the union's witness, else fall through
-                    if (khtb_occ >= 0.0f) return KhTbBlend(khc3_o, khtb_occ, khtb_w);
-                    float khc3_e = max(abs(khc3_u.x - 0.5f), abs(khc3_u.y - 0.5f)) * 2.0f;
-                    float khc3_w = khtb_on ? KhTbW(khc3_e) : 1.0f;
-                    if (khc3_w >= 0.9999f) return khc3_o;
-                    khtb_occ = khc3_o; khtb_w = khc3_w;   // carry into the outer tier
-                }
-            }
-        }
-        if (sunMeta4.x >= 0.5f) {
-            float4 khc4_c = mul(float4(wpos - sunOrigin.xyz, 1.0f), sunVP4);   // KH_SUN_ANCHOR
-            float2 khc4_u = float2(0.5f + 0.5f * khc4_c.x, 0.5f - 0.5f * khc4_c.y);
-            if (khc4_u.x > 0.002f && khc4_u.x < 0.998f &&
-                khc4_u.y > 0.002f && khc4_u.y < 0.998f &&
-                khc4_c.z > 0.0f && khc4_c.z < 1.0f) {
-                float khc4_o = SunShadowCompareSoft4(khc4_u, khc4_c.z - sunMeta4.z);   // filtered
-                if (khc4_o > 0.0001f ||
-                    (!khlf_on && (khuw_off || KhUnionClear(wpos - sunOrigin.xyz)))) {   // lit authoritative - only with the union's witness, else fall through
-                    if (khtb_occ >= 0.0f) return KhTbBlend(khc4_o, khtb_occ, khtb_w);
-                    float khc4_e = max(abs(khc4_u.x - 0.5f), abs(khc4_u.y - 0.5f)) * 2.0f;
-                    float khc4_w = khtb_on ? KhTbW(khc4_e) : 1.0f;
-                    if (khc4_w >= 0.9999f) return khc4_o;
-                    khtb_occ = khc4_o; khtb_w = khc4_w;   // carry into the FAR band
-                }
-            }
-        }
-)HLSL" R"HLSL(   // KH_SUN_FAR_BAND cast tier (own segment; at)
-        if (sunMeta5.x >= 0.5f) {
-            float4 khc5_c = mul(float4(wpos - sunOrigin.xyz, 1.0f), sunVP5);   // KH_SUN_ANCHOR
-            float2 khc5_u = float2(0.5f + 0.5f * khc5_c.x, 0.5f - 0.5f * khc5_c.y);
-            if (khc5_u.x > 0.002f && khc5_u.x < 0.998f &&
-                khc5_u.y > 0.002f && khc5_u.y < 0.998f &&
-                khc5_c.z > 0.0f && khc5_c.z < 1.0f) {
-                float khc5_o = SunShadowCompareSoft5(khc5_u, khc5_c.z - sunMeta5.z);   // filtered
-                if (khc5_o > 0.0001f ||
-                    (!khlf_on && (khuw_off || KhUnionClear(wpos - sunOrigin.xyz)))) {   // lit authoritative - only with the union's witness, else fall through
-                    if (khtb_occ >= 0.0f) return KhTbBlend(khc5_o, khtb_occ, khtb_w);
-                    float khc5_e = max(abs(khc5_u.x - 0.5f), abs(khc5_u.y - 0.5f)) * 2.0f;
-                    float khc5_w = khtb_on ? KhTbW(khc5_e) : 1.0f;
-                    if (khc5_w >= 0.9999f) return khc5_o;
-                    khtb_occ = khc5_o; khtb_w = khc5_w;   // carry into the union below (now one tier later)
-                }
-            }
-        }
+        const float3 khc_r = wpos - sunOrigin.xyz;   // KH_SUN_ANCHOR
+        bool khc_done;
+        float khc_v;
+        khc_v = KhCastTier(khSunDepth2, sunVP2, sunMeta2, khc_r, khlf_on, khuw_off, khtb_on, khtb_occ, khtb_w, khc_done);
+        if (khc_done) return khc_v;
+        khc_v = KhCastTier(khSunDepth3, sunVP3, sunMeta3, khc_r, khlf_on, khuw_off, khtb_on, khtb_occ, khtb_w, khc_done);
+        if (khc_done) return khc_v;
+        khc_v = KhCastTier(khSunDepth4, sunVP4, sunMeta4, khc_r, khlf_on, khuw_off, khtb_on, khtb_occ, khtb_w, khc_done);
+        if (khc_done) return khc_v;
+        khc_v = KhCastTier(khSunDepth5, sunVP5, sunMeta5, khc_r, khlf_on, khuw_off, khtb_on, khtb_occ, khtb_w, khc_done);
+        if (khc_done) return khc_v;
     }
 )HLSL" R"HLSL(   // CHUNK BOUNDARY - SIXTH C2026 CATCH OF THE CAMPAIGN
     float4 c = mul(float4(wpos - sunOrigin.xyz, 1.0f), sunVP);   // ortho: w = 1 (KH_SUN_ANCHOR)
@@ -1078,13 +965,16 @@ float SunShadowOcclusion(float3 wpos)
 // anywhere. SunShadowCompareBilin stays - the world CAST (SunShadowOcclusion
 // / PSMaskCast) still uses it, and that path never compares a surface against
 // itself so it cannot acne and needs none of this.
-float KhSelfTap(float2 khst_t, float2 khst_g, float khst_z, float khst_b, float khst_w, float2 khst_o)
+// ONE tap body for all five maps - the texture is the only thing that ever
+// differed between the per-map twins, and fxc resolves a resource parameter
+// at inlining, so this costs nothing and cannot drift.
+float KhSelfTapT(Texture2D<float> khst_m, float2 khst_t, float2 khst_g, float khst_z, float khst_b, float khst_w, float2 khst_o)
 {
     if (lighting0.y >= 30.5f && lighting0.y < 31.5f) {
         int2  khsth_p = int2(khst_t) + int2(round(khst_o));   // code-31 arm, rounded back
         float2 khsth_d = (float2(khsth_p) + 0.5f) - khst_t;
         float khsth_e = khst_z + khsth_d.x * khst_g.x + khsth_d.y * khst_g.y - khst_b;
-        return (khsth_e > khSunDepth.Load(int3(khsth_p, 0))) ? 1.0f : 0.0f;
+        return (khsth_e > khst_m.Load(int3(khsth_p, 0))) ? 1.0f : 0.0f;
     }
     float2 khst_tc = khst_t + khst_o - 0.5f;   // fractional offsets land on the corners
     float2 khst_f0 = floor(khst_tc);
@@ -1095,7 +985,7 @@ float KhSelfTap(float2 khst_t, float2 khst_g, float khst_z, float khst_b, float 
         int2 khst_q = max(khst_p0 + int2(khst_k & 1, khst_k >> 1), int2(0, 0));
         float2 khst_d = (float2(khst_q) + 0.5f) - khst_t;
         float khst_e = khst_z + khst_d.x * khst_g.x + khst_d.y * khst_g.y - khst_b;
-        float khst_s = khSunDepth.Load(int3(khst_q, 0));
+        float khst_s = khst_m.Load(int3(khst_q, 0));
         khst_c[khst_k] = (lighting0.y >= 43.5f && lighting0.y < 44.5f)
                        ? ((khst_e > khst_s) ? 1.0f : 0.0f)
                        : saturate((khst_e - khst_s) / max(khst_w, 1.0e-9f) + 0.5f);
@@ -1103,115 +993,186 @@ float KhSelfTap(float2 khst_t, float2 khst_g, float khst_z, float khst_b, float 
     return lerp(lerp(khst_c.x, khst_c.y, khst_fr.x),
                 lerp(khst_c.z, khst_c.w, khst_fr.x), khst_fr.y);
 }
-
 // the HERO-map twin (t25). Identical arithmetic, different texture.
-float KhSelfTap2(float2 khst_t, float2 khst_g, float khst_z, float khst_b, float khst_w, float2 khst_o)
+
+)HLSL" R"HLSL(   // CHUNK BOUNDARY (C2026) - the shared self tier gets its own segment
+// ONE self tier for the four camera-anchored bands. Derived from the mid
+// tier, which carries every branch; the real per-tier differences are the
+// parameters: map / moment pyramid / matrix / meta, the pf arm (far has no
+// pyramid: 0), the code-61 fixed guard (mid 48, outer 192, 0 = no arm), the
+// code-69 admission-bound guard (far only), the code-22 ring collapse (hero
+// never had it), and the certifier id written to khcf. The two branches the
+// hero copy lacked - the carried-verdict resolve and the jurisdiction
+// rejection - are dead at tier one by construction (khtb_occ is -1 and
+// khla_g is 0 there). khT_in / khT_cert are the outer tier's stamps for the
+// far gate; the other tiers receive scratch. khT_done = a verdict was
+// returned; false = fall through with the carry state updated in place.
+// TWIN CONTRACT with KhCastTier's ladder: same tier order, same KhTbBlend
+// carry shape.
+float KhSelfTier(Texture2D<float> khT_map, Texture2D<float2> khT_pf, float4x4 khT_vp, float4 khT_meta,
+                 float khT_pfArm, float khT_cg61, bool khT_cg69, bool khT_wArm, float khT_id,
+                 float3 khwr, float3 n, float ndl, float khno_k, float khgs,
+                 bool khcl, bool khcc_on, bool khcc_clr, bool khuw_off, bool khtb_on,
+                 bool khlfs_off, bool khct_on,
+                 inout float khtb_occ, inout float khtb_w, inout float khla_g, inout float khla_w,
+                 inout float4 khcf, inout bool khT_in, inout bool khT_cert, out bool khT_done)
 {
-    if (lighting0.y >= 30.5f && lighting0.y < 31.5f) {
-        int2  khsth_p = int2(khst_t) + int2(round(khst_o));   // code-31 arm, rounded back
-        float2 khsth_d = (float2(khsth_p) + 0.5f) - khst_t;
-        float khsth_e = khst_z + khsth_d.x * khst_g.x + khsth_d.y * khst_g.y - khst_b;
-        return (khsth_e > khSunDepth2.Load(int3(khsth_p, 0))) ? 1.0f : 0.0f;
+    khT_done = false;
+    if (khT_meta.x >= 0.5f) {
+        float khT_iR0 = length(float3(khT_vp[0].x, khT_vp[1].x, khT_vp[2].x));
+        float khT_no = khno_k * 2.0f / (max(khT_meta.y, 1.0f) * max(khT_iR0, 1e-6f));
+        float4 khT_c = mul(float4(khwr + n * khT_no, 1.0f), khT_vp);
+        float2 khT_uv = float2(0.5f + 0.5f * khT_c.x, 0.5f - 0.5f * khT_c.y);
+
+        if (khT_uv.x > 0.002f && khT_uv.x < 0.998f &&
+            khT_uv.y > 0.002f && khT_uv.y < 0.998f &&
+            khT_c.z > 0.0f && khT_c.z < 1.0f) {
+            khT_in = true;   // outer: the far gate reads it
+            float3 khT_cr = float3(khT_vp[0].x, khT_vp[1].x, khT_vp[2].x);
+            float3 khT_cu = float3(khT_vp[0].y, khT_vp[1].y, khT_vp[2].y);
+            float khT_iR = length(khT_cr);
+            float khT_iD = length(float3(khT_vp[0].z, khT_vp[1].z, khT_vp[2].z));
+            float khT_tw = 2.0f / (max(khT_meta.y, 1.0f) * max(khT_iR, 1e-6f));
+            float khT_k = (khcl || (lighting0.y >= 31.5f && lighting0.y < 33.5f))
+                        ? 0.0f : khT_tw * khT_iD / max(ndl, 0.02f)
+                          * ((lighting0.y >= 38.5f && lighting0.y < 39.5f)
+                             ? 1.0f : saturate(1.0f - 3.0f * length(fwidth(n))));   // damper DEFAULT (280's form); off under the 39 arm
+            float khT_gc = 8.0f * khT_tw * khT_iD;
+            float2 khT_g = clamp(
+                float2( dot(n, khT_cr / max(khT_iR, 1e-9f)) * khT_k,
+                       -dot(n, khT_cu / max(khT_iR, 1e-9f)) * khT_k),
+                -khT_gc, khT_gc);
+            float2 khT_t = khT_uv * khT_meta.y;
+            float khT_ceil = (lighting0.y >= 16.5f && lighting0.y < 17.5f) ? 8.0f : 1.0e4f;
+            float khT_tan = clamp(sqrt(saturate(1.0f - ndl * ndl)) / max(ndl, 0.02f), 1.0f, khT_ceil);
+            float khT_slope = (lighting0.y >= 17.5f && lighting0.y < 18.5f) ? 3.0f
+                            : (lighting0.y >= 38.5f && lighting0.y < 39.5f) ? 0.8f : 0.35f;
+            float khT_fb = (lighting0.y >= 38.5f && lighting0.y < 39.5f) ? 1.25f : 1.0f;
+            float khT_b = (lighting0.y >= 12.5f && lighting0.y < 13.5f)
+                        ? khT_meta.z
+                        : max(khT_meta.z * khT_fb,   // tier-proportional floor (code 37 reverts; at khsr_slope)
+                              ((lighting0.y >= 36.5f && lighting0.y < 37.5f) ? 0.0f : 1.5f) * khT_tw * khT_iD)
+                          + khT_slope * khT_tan * khT_tw * khT_iD;
+            float khT_gs = (lighting0.y >= 47.5f && lighting0.y < 48.5f)
+                        ? khgs : min(khgs, 4.0f * khT_tw);
+            khT_b += khT_gs * khT_iD;
+            float4 khTc_c = mul(float4(khwr, 1.0f), khT_vp);
+            float2 khTc_t = float2(0.5f + 0.5f * khTc_c.x,
+                                       0.5f - 0.5f * khTc_c.y) * khT_meta.y;
+            float khTc_s = khT_map.Load(int3(int2(khTc_t), 0));
+            if (khct_on && khTc_c.z > 0.0f && khTc_c.z < 1.0f &&
+                khTc_c.z - khTc_s >
+                    (3.0f + 1.5f * khT_tan) * khT_tw * khT_iD) {
+                float khT_cres = 1.0f;   // distinct occluder provably above
+                float khT_ce = max(abs(khT_uv.x - 0.5f), abs(khT_uv.y - 0.5f)) * 2.0f;
+                float khT_cbw = khtb_on ? KhTbW(khT_ce) : 1.0f;
+                if (khtb_occ >= 0.0f) { khT_done = true; return KhTbBlend(khT_cres, khtb_occ, khtb_w); }
+                if (khT_cbw >= 0.9999f) { khT_done = true; return khT_cres; }
+                khtb_occ = khT_cres; khtb_w = khT_cbw;
+            } else {
+            // lighting0.y 22 (mode 245) restores the collapse on the bands
+            // for the A/B.
+            float khT_w = (khT_wArm && (lighting0.y >= 21.5f && lighting0.y < 22.5f))
+                        ? saturate(0.001f / max(khT_tw, 1e-6f)) : 1.0f;
+            float2 khT_fw = fwidth(khT_t);
+            float khT_sp = (khcl || (lighting0.y >= 27.5f && lighting0.y < 28.5f)
+                            || (khgs > 4.0f * khT_tw && !(lighting0.y >= 51.5f && lighting0.y < 52.5f)))
+                          ? 1.0f
+                          : (lighting0.y >= 44.5f && lighting0.y < 45.5f)
+                          ? float(clamp(int(round(0.5f * max(khT_fw.x, khT_fw.y))), 1, 8))
+                          : clamp(0.5f * max(khT_fw.x, khT_fw.y), 1.0f, 8.0f);
+            float khT_sw = max(2.0f * khT_gs, khT_tw) * khT_iD;   // clamped slack
+            float khT_ctr = KhSelfTapT(khT_map, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 0,  0));
+            float khT_rng = KhSelfTapT(khT_map, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 0, -1) * khT_sp)
+                          + KhSelfTapT(khT_map, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2(-1,  0) * khT_sp)
+                          + KhSelfTapT(khT_map, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 1,  0) * khT_sp)
+                          + KhSelfTapT(khT_map, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 0,  1) * khT_sp);
+            float khT_cnt = 4.0f;
+            if (!(lighting0.y >= 37.5f && lighting0.y < 38.5f)) {   // 3x3 DEFAULT again (field: close-range worse under the diamond; 38 arms the diamond; 36 now an alias)
+                khT_rng += KhSelfTapT(khT_map, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2(-1, -1) * khT_sp)
+                         + KhSelfTapT(khT_map, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 1, -1) * khT_sp)
+                         + KhSelfTapT(khT_map, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2(-1,  1) * khT_sp)
+                         + KhSelfTapT(khT_map, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 1,  1) * khT_sp);
+                khT_cnt = 8.0f;
+            }
+            float khT_res = (khT_ctr + khT_w * khT_rng) / (1.0f + khT_cnt * khT_w);
+            if (khT_pfArm >= 0.5f && !khcl) {
+                float khT_ft = max(khT_fw.x, khT_fw.y);
+                // engagement covers the moire band (ft 1-2, where the old 1.5
+                // floor left the worst aliasing unserved).
+                float khT_pw = (khgs > 4.0f * khT_tw && !(lighting0.y >= 51.5f && lighting0.y < 52.5f))
+                             ? 0.0f : smoothstep(1.0f, 2.0f, khT_ft);
+                // lighting0.y 47 (mode 358): PF-EXCLUSIVE instrument arm.
+                bool khT_px = (lighting0.y >= 46.5f && lighting0.y < 47.5f);
+                if (khT_pw > 0.001f || khT_px) {
+                    float khT_lod = log2(max(khT_ft * 0.5f, 1.0f));
+                    // The filtered MEAN is the precision-sound channel: soft
+                    // compare over the footprint depth ramp. Interiors cannot
+                    // bleed - the filtered depth there IS the occluder.
+                    float2 khT_mv = KhPfMu(khT_pf, khT_uv, khT_meta.y * 0.5f, khT_lod);
+                    float khT_vd = (khT_c.z - khT_b) - khT_mv.x;
+                    float khT_ww = max(khT_ft, 2.0f) * khT_tw * khT_iD;
+                    float khT_var = khT_mv.y - khT_mv.x * khT_mv.x;
+                    float khT_s2 = (lighting0.y >= 73.5f && lighting0.y < 74.5f)
+                                 ? max(khT_var, max(2.5e-7f, khT_ww * khT_ww))   // 444: floor
+                                 : (khT_var >= 2.5e-7f ? max(khT_var, khT_ww * khT_ww)
+                                                          : khT_ww * khT_ww);   // ramp
+                    float khT_vv = khT_vd <= 0.0f ? 1.0f
+                                 : saturate(khT_s2 / (khT_s2 + khT_vd * khT_vd));
+                    float khT_pfo = 1.0f - saturate((khT_vv - 0.4f) / 0.6f);
+                    if (khT_px) khT_res = khT_pfo;
+                    // honest content may CREATE standing - absent content
+                    // reads pfo ~ 0 and still falls through.
+                    else if ((khT_res > 0.0001f || khT_pfo > 0.2f) &&
+                             !(khT_res > 0.8f && khT_pfo < 0.2f))
+                        khT_res = lerp(khT_res, khT_pfo, khT_pw);
+                }
+            }
+            float khT_js = khT_map.Load(int3(int2(khT_t), 0));
+            if (khla_g > 0.5f && khT_res > 0.0001f &&
+                (khT_c.z - khT_js) < khla_g * khT_iD &&
+                (khtb_occ < 0.0f || (lighting0.y >= 54.5f && lighting0.y < 55.5f)) &&
+                !(lighting0.y >= 50.5f && lighting0.y < 51.5f))
+                khT_res *= 1.0f - khla_w;   // rejection at the certifier's edge weight
+            // the radius is hoisted so the evidence test can ask about the
+            // same number the latch is about to publish.
+            float khT_cg = (khT_cg61 > 0.0f && (lighting0.y >= 60.5f && lighting0.y < 61.5f))
+                         ? khT_cg61   // code 61: fixed guard (mid 48, outer 192)
+                         : (khT_cg69 && (lighting0.y >= 68.5f && lighting0.y < 69.5f))
+                         ? khT_meta.w   // 398: the admission bound (far)
+                         : 6.0f * khT_meta.w;   // default = form
+            bool khT_cok = (khuw_off || KhUnionClear(khwr)) && (khcc_on   // union witness
+                         ? ((khcc_clr || khT_js < 1.0f) &&
+                            (khT_c.z - khT_js) < khT_cg * khT_iD)
+                         : (abs(khT_c.z - khT_js) < 3.0f * khT_b));
+            if (khcf.x < 0.5f) khcf.x = khT_cok ? 3.0f
+                                     : (khT_js >= 1.0f ? 1.0f : 2.0f);
+            if (khT_cok && khcf.y < 0.5f) khcf.y = khT_id;
+            khcf.z = khT_id;
+            if (khT_cok) {
+                // khla_g takes the MAX across certifiers while khla_w takes
+                // the LAST certifier's value - coherent only while guards
+                // are monotonic in tier; inserting a tier out of order
+                // breaks this silently.
+                khla_g = max(khla_g, khT_cg);
+                khla_w = KhJw(max(abs(khT_uv.x - 0.5f), abs(khT_uv.y - 0.5f)) * 2.0f);
+                khcf.w = khla_w;
+                khT_cert = true;   // outer: the far gate reads it
+            }
+            if (khT_res > 0.0001f || khlfs_off) {   // lit falls through
+                if (khtb_occ >= 0.0f) { khT_done = true; return KhTbBlend(khT_res, khtb_occ, khtb_w); }
+                float khT_e = max(abs(khT_uv.x - 0.5f), abs(khT_uv.y - 0.5f)) * 2.0f;
+                float khT_bw = khtb_on ? KhTbW(khT_e) : 1.0f;
+                if (khT_bw >= 0.9999f) { khT_done = true; return khT_res; }
+                khtb_occ = khT_res; khtb_w = khT_bw;   // carry onward
+            }
+            }
+        }
     }
-    float2 khst_tc = khst_t + khst_o - 0.5f;   // fractional offsets land on the corners
-    float2 khst_f0 = floor(khst_tc);
-    float2 khst_fr = khst_tc - khst_f0;
-    int2   khst_p0 = int2(khst_f0);
-    float4 khst_c;
-    [unroll] for (int khst_k = 0; khst_k < 4; ++khst_k) {
-        int2 khst_q = max(khst_p0 + int2(khst_k & 1, khst_k >> 1), int2(0, 0));
-        float2 khst_d = (float2(khst_q) + 0.5f) - khst_t;
-        float khst_e = khst_z + khst_d.x * khst_g.x + khst_d.y * khst_g.y - khst_b;
-        float khst_s = khSunDepth2.Load(int3(khst_q, 0));
-        khst_c[khst_k] = (lighting0.y >= 43.5f && lighting0.y < 44.5f)
-                       ? ((khst_e > khst_s) ? 1.0f : 0.0f)
-                       : saturate((khst_e - khst_s) / max(khst_w, 1.0e-9f) + 0.5f);
-    }
-    return lerp(lerp(khst_c.x, khst_c.y, khst_fr.x),
-                lerp(khst_c.z, khst_c.w, khst_fr.x), khst_fr.y);
+    return 0.0f;
 }
 
-)HLSL" R"HLSL(   // CHUNK BOUNDARY (precedent; chunks concatenate)
-// the KH_SELF_PCF twins took this segment to 2 bytes under the 16380-byte
-// MSVC token cap).
-float KhSelfTap3(float2 khst_t, float2 khst_g, float khst_z, float khst_b, float khst_w, float2 khst_o)
-{
-    if (lighting0.y >= 30.5f && lighting0.y < 31.5f) {
-        int2  khsth_p = int2(khst_t) + int2(round(khst_o));   // code-31 arm, rounded back
-        float2 khsth_d = (float2(khsth_p) + 0.5f) - khst_t;
-        float khsth_e = khst_z + khsth_d.x * khst_g.x + khsth_d.y * khst_g.y - khst_b;
-        return (khsth_e > khSunDepth3.Load(int3(khsth_p, 0))) ? 1.0f : 0.0f;
-    }
-    float2 khst_tc = khst_t + khst_o - 0.5f;   // fractional offsets land on the corners
-    float2 khst_f0 = floor(khst_tc);
-    float2 khst_fr = khst_tc - khst_f0;
-    int2   khst_p0 = int2(khst_f0);
-    float4 khst_c;
-    [unroll] for (int khst_k = 0; khst_k < 4; ++khst_k) {
-        int2 khst_q = max(khst_p0 + int2(khst_k & 1, khst_k >> 1), int2(0, 0));
-        float2 khst_d = (float2(khst_q) + 0.5f) - khst_t;
-        float khst_e = khst_z + khst_d.x * khst_g.x + khst_d.y * khst_g.y - khst_b;
-        float khst_s = khSunDepth3.Load(int3(khst_q, 0));
-        khst_c[khst_k] = (lighting0.y >= 43.5f && lighting0.y < 44.5f)
-                       ? ((khst_e > khst_s) ? 1.0f : 0.0f)
-                       : saturate((khst_e - khst_s) / max(khst_w, 1.0e-9f) + 0.5f);
-    }
-    return lerp(lerp(khst_c.x, khst_c.y, khst_fr.x),
-                lerp(khst_c.z, khst_c.w, khst_fr.x), khst_fr.y);
-}
-
-float KhSelfTap4(float2 khst_t, float2 khst_g, float khst_z, float khst_b, float khst_w, float2 khst_o)
-{
-    if (lighting0.y >= 30.5f && lighting0.y < 31.5f) {
-        int2  khsth_p = int2(khst_t) + int2(round(khst_o));   // code-31 arm, rounded back
-        float2 khsth_d = (float2(khsth_p) + 0.5f) - khst_t;
-        float khsth_e = khst_z + khsth_d.x * khst_g.x + khsth_d.y * khst_g.y - khst_b;
-        return (khsth_e > khSunDepth4.Load(int3(khsth_p, 0))) ? 1.0f : 0.0f;
-    }
-    float2 khst_tc = khst_t + khst_o - 0.5f;   // fractional offsets land on the corners
-    float2 khst_f0 = floor(khst_tc);
-    float2 khst_fr = khst_tc - khst_f0;
-    int2   khst_p0 = int2(khst_f0);
-    float4 khst_c;
-    [unroll] for (int khst_k = 0; khst_k < 4; ++khst_k) {
-        int2 khst_q = max(khst_p0 + int2(khst_k & 1, khst_k >> 1), int2(0, 0));
-        float2 khst_d = (float2(khst_q) + 0.5f) - khst_t;
-        float khst_e = khst_z + khst_d.x * khst_g.x + khst_d.y * khst_g.y - khst_b;
-        float khst_s = khSunDepth4.Load(int3(khst_q, 0));
-        khst_c[khst_k] = (lighting0.y >= 43.5f && lighting0.y < 44.5f)
-                       ? ((khst_e > khst_s) ? 1.0f : 0.0f)
-                       : saturate((khst_e - khst_s) / max(khst_w, 1.0e-9f) + 0.5f);
-    }
-    return lerp(lerp(khst_c.x, khst_c.y, khst_fr.x),
-                lerp(khst_c.z, khst_c.w, khst_fr.x), khst_fr.y);
-}
-)HLSL" R"HLSL(   // CHUNK BOUNDARY - KhSelfTap5, the FAR band's RPDB tap (tier-4)
-float KhSelfTap5(float2 khst_t, float2 khst_g, float khst_z, float khst_b, float khst_w, float2 khst_o)
-{
-    if (lighting0.y >= 30.5f && lighting0.y < 31.5f) {
-        int2  khsth_p = int2(khst_t) + int2(round(khst_o));   // code-31 arm, rounded back
-        float2 khsth_d = (float2(khsth_p) + 0.5f) - khst_t;
-        float khsth_e = khst_z + khsth_d.x * khst_g.x + khsth_d.y * khst_g.y - khst_b;
-        return (khsth_e > khSunDepth5.Load(int3(khsth_p, 0))) ? 1.0f : 0.0f;
-    }
-    float2 khst_tc = khst_t + khst_o - 0.5f;   // fractional offsets land on the corners
-    float2 khst_f0 = floor(khst_tc);
-    float2 khst_fr = khst_tc - khst_f0;
-    int2   khst_p0 = int2(khst_f0);
-    float4 khst_c;
-    [unroll] for (int khst_k = 0; khst_k < 4; ++khst_k) {
-        int2 khst_q = max(khst_p0 + int2(khst_k & 1, khst_k >> 1), int2(0, 0));
-        float2 khst_d = (float2(khst_q) + 0.5f) - khst_t;
-        float khst_e = khst_z + khst_d.x * khst_g.x + khst_d.y * khst_g.y - khst_b;
-        float khst_s = khSunDepth5.Load(int3(khst_q, 0));
-        khst_c[khst_k] = (lighting0.y >= 43.5f && lighting0.y < 44.5f)
-                       ? ((khst_e > khst_s) ? 1.0f : 0.0f)
-                       : saturate((khst_e - khst_s) / max(khst_w, 1.0e-9f) + 0.5f);
-    }
-    return lerp(lerp(khst_c.x, khst_c.y, khst_fr.x),
-                lerp(khst_c.z, khst_c.w, khst_fr.x), khst_fr.y);
-}
-)HLSL" R"HLSL(
+)HLSL" R"HLSL(   // CHUNK BOUNDARY (C2026)
 float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
                                out float4 khcf)
 {
@@ -1264,556 +1225,39 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
     const bool khlfs_off = (lighting0.y >= 40.5f && lighting0.y < 41.5f);
     // A re-arm needs margin > 2.5 and accepts losing sub-centimetre contacts.
     const bool khct_on = (lighting0.y >= 29.5f && lighting0.y < 30.5f);
-    if (sunMeta2.x >= 0.5f) {
-        float kh2_iR0 = length(float3(sunVP2[0].x, sunVP2[1].x, sunVP2[2].x));
-        float kh2_no = khno_k * 2.0f / (max(sunMeta2.y, 1.0f) * max(kh2_iR0, 1e-6f));
-        float4 kh2_c = mul(float4(khwr + n * kh2_no, 1.0f), sunVP2);
-        float2 kh2_uv = float2(0.5f + 0.5f * kh2_c.x, 0.5f - 0.5f * kh2_c.y);
-
-        if (kh2_uv.x > 0.002f && kh2_uv.x < 0.998f &&
-            kh2_uv.y > 0.002f && kh2_uv.y < 0.998f &&
-            kh2_c.z > 0.0f && kh2_c.z < 1.0f) {
-            float3 kh2_cr = float3(sunVP2[0].x, sunVP2[1].x, sunVP2[2].x);
-            float3 kh2_cu = float3(sunVP2[0].y, sunVP2[1].y, sunVP2[2].y);
-            float kh2_iR = length(kh2_cr);
-            float kh2_iD = length(float3(sunVP2[0].z, sunVP2[1].z, sunVP2[2].z));
-            float kh2_tw = 2.0f / (max(sunMeta2.y, 1.0f) * max(kh2_iR, 1e-6f));
-            float kh2_k = (khcl || (lighting0.y >= 31.5f && lighting0.y < 33.5f))
-                        ? 0.0f : kh2_tw * kh2_iD / max(ndl, 0.02f)
-                          * ((lighting0.y >= 38.5f && lighting0.y < 39.5f)
-                             ? 1.0f : saturate(1.0f - 3.0f * length(fwidth(n))));   // damper DEFAULT (280's form); off under the 39 arm
-            float kh2_gc = 8.0f * kh2_tw * kh2_iD;
-            float2 kh2_g = clamp(
-                float2( dot(n, kh2_cr / max(kh2_iR, 1e-9f)) * kh2_k,
-                       -dot(n, kh2_cu / max(kh2_iR, 1e-9f)) * kh2_k),
-                -kh2_gc, kh2_gc);
-            float2 kh2_t = kh2_uv * sunMeta2.y;
-            float kh2_ceil = (lighting0.y >= 16.5f && lighting0.y < 17.5f) ? 8.0f : 1.0e4f;
-            float kh2_tan = clamp(sqrt(saturate(1.0f - ndl * ndl)) / max(ndl, 0.02f), 1.0f, kh2_ceil);
-            float kh2_slope = (lighting0.y >= 17.5f && lighting0.y < 18.5f) ? 3.0f
-                            : (lighting0.y >= 38.5f && lighting0.y < 39.5f) ? 0.8f : 0.35f;
-            float kh2_fb = (lighting0.y >= 38.5f && lighting0.y < 39.5f) ? 1.25f : 1.0f;
-            float kh2_b = (lighting0.y >= 12.5f && lighting0.y < 13.5f)
-                        ? sunMeta2.z
-                        : max(sunMeta2.z * kh2_fb,   // tier-proportional floor (code 37 reverts; at khsr_slope)
-                              ((lighting0.y >= 36.5f && lighting0.y < 37.5f) ? 0.0f : 1.5f) * kh2_tw * kh2_iD)
-                          + kh2_slope * kh2_tan * kh2_tw * kh2_iD;
-            float kh2_gs = (lighting0.y >= 47.5f && lighting0.y < 48.5f)
-                        ? khgs : min(khgs, 4.0f * kh2_tw);
-            kh2_b += kh2_gs * kh2_iD;
-)HLSL" R"HLSL(   // CHUNK BOUNDARY (precedent; chunks concatenate - the)
-// Delta beyond 3 texel-worlds => a distinct occluder is provably above =>
-// occluded outright - no offset, no kernel: the noisy machinery never runs
-// exactly where its inputs are contaminated.
-            float4 khct2_c = mul(float4(khwr, 1.0f), sunVP2);
-            float2 khct2_t = float2(0.5f + 0.5f * khct2_c.x,
-                                       0.5f - 0.5f * khct2_c.y) * sunMeta2.y;
-            float khct2_s = khSunDepth2.Load(int3(int2(khct2_t), 0));
-            if (khct_on && khct2_c.z > 0.0f && khct2_c.z < 1.0f &&
-                khct2_c.z - khct2_s >
-                    (3.0f + 1.5f * kh2_tan) * kh2_tw * kh2_iD) {
-                float kh2_cres = 1.0f;   // distinct occluder provably above
-                float kh2_ce = max(abs(kh2_uv.x - 0.5f), abs(kh2_uv.y - 0.5f)) * 2.0f;
-                float kh2_cbw = khtb_on ? KhTbW(kh2_ce) : 1.0f;
-                if (kh2_cbw >= 0.9999f) return kh2_cres;
-                khtb_occ = kh2_cres; khtb_w = kh2_cbw;
-            } else {
-            float2 kh2_fw = fwidth(kh2_t);
-            // TWIN: 4 tiers.
-            float kh2_sp = (khcl || (lighting0.y >= 27.5f && lighting0.y < 28.5f)
-                            || (khgs > 4.0f * kh2_tw && !(lighting0.y >= 51.5f && lighting0.y < 52.5f)))
-                          ? 1.0f
-                          : (lighting0.y >= 44.5f && lighting0.y < 45.5f)
-                          ? float(clamp(int(round(0.5f * max(kh2_fw.x, kh2_fw.y))), 1, 8))
-                          : clamp(0.5f * max(kh2_fw.x, kh2_fw.y), 1.0f, 8.0f);
-            float khsw2 = max(2.0f * kh2_gs, kh2_tw) * kh2_iD;   // clamped slack
-            float kh2_ctr = KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, khsw2, float2( 0,  0));
-            float kh2_rng = KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, khsw2, float2( 0, -1) * kh2_sp)
-                          + KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, khsw2, float2(-1,  0) * kh2_sp)
-                          + KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, khsw2, float2( 1,  0) * kh2_sp)
-                          + KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, khsw2, float2( 0,  1) * kh2_sp);
-            float kh2_cnt = 4.0f;
-            if (!(lighting0.y >= 37.5f && lighting0.y < 38.5f)) {   // 3x3 DEFAULT again (field: close-range worse under the diamond; 38 arms the diamond; 36 now an alias)
-                kh2_rng += KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, khsw2, float2(-1, -1) * kh2_sp)
-                         + KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, khsw2, float2( 1, -1) * kh2_sp)
-                         + KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, khsw2, float2(-1,  1) * kh2_sp)
-                         + KhSelfTap2(kh2_t, kh2_g, kh2_c.z, kh2_b, khsw2, float2( 1,  1) * kh2_sp);
-                kh2_cnt = 8.0f;
-            }
-            float kh2_res = (kh2_ctr + kh2_rng) / (1.0f + kh2_cnt);
-            if (sunPf.x >= 0.5f && !khcl) {
-                float kh2_ft = max(kh2_fw.x, kh2_fw.y);
-                // engagement covers the moire band (ft 1-2, where the old 1.5
-                // floor left the worst aliasing unserved).
-                float kh2_pw = (khgs > 4.0f * kh2_tw && !(lighting0.y >= 51.5f && lighting0.y < 52.5f))
-                             ? 0.0f : smoothstep(1.0f, 2.0f, kh2_ft);
-                // lighting0.y 47 (mode 358): PF-EXCLUSIVE instrument arm.
-                bool kh2_px = (lighting0.y >= 46.5f && lighting0.y < 47.5f);
-                if (kh2_pw > 0.001f || kh2_px) {
-                    float kh2_lod = log2(max(kh2_ft * 0.5f, 1.0f));
-                    // The filtered MEAN is the precision-sound channel: soft
-                    // compare over the footprint depth ramp. Interiors cannot
-                    // bleed - the filtered depth there IS the occluder.
-                    float2 kh2_mv = KhPfMu(khSunPf2, kh2_uv, sunMeta2.y * 0.5f, kh2_lod);
-                    float kh2_vd = (kh2_c.z - kh2_b) - kh2_mv.x;
-                    float kh2_ww = max(kh2_ft, 2.0f) * kh2_tw * kh2_iD;
-                    float kh2_var = kh2_mv.y - kh2_mv.x * kh2_mv.x;
-                    float kh2_s2 = (lighting0.y >= 73.5f && lighting0.y < 74.5f)
-                                 ? max(kh2_var, max(2.5e-7f, kh2_ww * kh2_ww))   // 444: floor
-                                 : (kh2_var >= 2.5e-7f ? max(kh2_var, kh2_ww * kh2_ww)
-                                                          : kh2_ww * kh2_ww);   // ramp
-                    float kh2_vv = kh2_vd <= 0.0f ? 1.0f
-                                 : saturate(kh2_s2 / (kh2_s2 + kh2_vd * kh2_vd));
-                    float kh2_pfo = 1.0f - saturate((kh2_vv - 0.4f) / 0.6f);
-                    if (kh2_px) kh2_res = kh2_pfo;
-                    // honest content may CREATE standing - absent content
-                    // reads pfo ~ 0 and still falls through.
-                    else if ((kh2_res > 0.0001f || kh2_pfo > 0.2f) &&
-                             !(kh2_res > 0.8f && kh2_pfo < 0.2f))
-                        kh2_res = lerp(kh2_res, kh2_pfo, kh2_pw);
-                }
-            }
-            float kh2_js = khSunDepth2.Load(int3(int2(kh2_t), 0));
-            bool kh2_cok = (khuw_off || KhUnionClear(khwr)) &&   // the union witnesses every certification
-                           (khcc_on ? ((khcc_clr || kh2_js < 1.0f) &&
-                           (kh2_c.z - kh2_js) < (6.0f * sunMeta2.w) * kh2_iD)
-                        : (abs(kh2_c.z - kh2_js) < 3.0f * kh2_b));
-            if (khcf.x < 0.5f) khcf.x = kh2_cok ? 3.0f
-                                     : (kh2_js >= 1.0f ? 1.0f : 2.0f);
-            if (kh2_cok && khcf.y < 0.5f) khcf.y = 1.0f;
-            khcf.z = 1.0f;
-            if (kh2_cok) {
-                // hero's certified guard - 6:1 on the half (the
-                // KH_SUN_CASCADE ratio; = 12 m, hero is unscaled).
-                khla_g = 6.0f * sunMeta2.w;
-                khla_w = KhJw(max(abs(kh2_uv.x - 0.5f), abs(kh2_uv.y - 0.5f)) * 2.0f);
-                khcf.w = khla_w;
-            }
-            if (kh2_res > 0.0001f || khlfs_off) {   // lit falls through
-                float kh2_e = max(abs(kh2_uv.x - 0.5f), abs(kh2_uv.y - 0.5f)) * 2.0f;
-                float kh2_bw = khtb_on ? KhTbW(kh2_e) : 1.0f;
-                if (kh2_bw >= 0.9999f) return kh2_res;
-                khtb_occ = kh2_res; khtb_w = kh2_bw;   // carry into the mid tier
-            }
-            }
-        }
-    }
-)HLSL" R"HLSL(   // CHUNK BOUNDARY - the gradient-slack ledger took this
-    // CASCADE BANDS 1-2 (KH_SUN_CASCADE in C++): the hero-first chain
-    // continues - mid (8 m @ 4 mm), then outer (32 m @ 16 mm), then the union
-    // (band 3, camera-anchored at the game's own shadowVisibility).
-    if (sunMeta3.x >= 0.5f) {
-        float kh3_iR0 = length(float3(sunVP3[0].x, sunVP3[1].x, sunVP3[2].x));
-        float kh3_no = khno_k * 2.0f / (max(sunMeta3.y, 1.0f) * max(kh3_iR0, 1e-6f));
-        float4 kh3_c = mul(float4(khwr + n * kh3_no, 1.0f), sunVP3);
-        float2 kh3_uv = float2(0.5f + 0.5f * kh3_c.x, 0.5f - 0.5f * kh3_c.y);
-
-        if (kh3_uv.x > 0.002f && kh3_uv.x < 0.998f &&
-            kh3_uv.y > 0.002f && kh3_uv.y < 0.998f &&
-            kh3_c.z > 0.0f && kh3_c.z < 1.0f) {
-            float3 kh3_cr = float3(sunVP3[0].x, sunVP3[1].x, sunVP3[2].x);
-            float3 kh3_cu = float3(sunVP3[0].y, sunVP3[1].y, sunVP3[2].y);
-            float kh3_iR = length(kh3_cr);
-            float kh3_iD = length(float3(sunVP3[0].z, sunVP3[1].z, sunVP3[2].z));
-            float kh3_tw = 2.0f / (max(sunMeta3.y, 1.0f) * max(kh3_iR, 1e-6f));
-            float kh3_k = (khcl || (lighting0.y >= 31.5f && lighting0.y < 33.5f))
-                        ? 0.0f : kh3_tw * kh3_iD / max(ndl, 0.02f)
-                          * ((lighting0.y >= 38.5f && lighting0.y < 39.5f)
-                             ? 1.0f : saturate(1.0f - 3.0f * length(fwidth(n))));   // damper DEFAULT (280's form); off under the 39 arm
-            float kh3_gc = 8.0f * kh3_tw * kh3_iD;
-            float2 kh3_g = clamp(
-                float2( dot(n, kh3_cr / max(kh3_iR, 1e-9f)) * kh3_k,
-                       -dot(n, kh3_cu / max(kh3_iR, 1e-9f)) * kh3_k),
-                -kh3_gc, kh3_gc);
-            float2 kh3_t = kh3_uv * sunMeta3.y;
-            float kh3_ceil = (lighting0.y >= 16.5f && lighting0.y < 17.5f) ? 8.0f : 1.0e4f;
-            float kh3_tan = clamp(sqrt(saturate(1.0f - ndl * ndl)) / max(ndl, 0.02f), 1.0f, kh3_ceil);
-            float kh3_slope = (lighting0.y >= 17.5f && lighting0.y < 18.5f) ? 3.0f
-                            : (lighting0.y >= 38.5f && lighting0.y < 39.5f) ? 0.8f : 0.35f;
-            float kh3_fb = (lighting0.y >= 38.5f && lighting0.y < 39.5f) ? 1.25f : 1.0f;
-            float kh3_b = (lighting0.y >= 12.5f && lighting0.y < 13.5f)
-                        ? sunMeta3.z
-                        : max(sunMeta3.z * kh3_fb,   // tier-proportional floor (code 37 reverts; at khsr_slope)
-                              ((lighting0.y >= 36.5f && lighting0.y < 37.5f) ? 0.0f : 1.5f) * kh3_tw * kh3_iD)
-                          + kh3_slope * kh3_tan * kh3_tw * kh3_iD;
-            float kh3_gs = (lighting0.y >= 47.5f && lighting0.y < 48.5f)
-                        ? khgs : min(khgs, 4.0f * kh3_tw);
-            kh3_b += kh3_gs * kh3_iD;
-            float4 khct3_c = mul(float4(khwr, 1.0f), sunVP3);
-            float2 khct3_t = float2(0.5f + 0.5f * khct3_c.x,
-                                       0.5f - 0.5f * khct3_c.y) * sunMeta3.y;
-            float khct3_s = khSunDepth3.Load(int3(int2(khct3_t), 0));
-            if (khct_on && khct3_c.z > 0.0f && khct3_c.z < 1.0f &&
-                khct3_c.z - khct3_s >
-                    (3.0f + 1.5f * kh3_tan) * kh3_tw * kh3_iD) {
-                float kh3_cres = 1.0f;   // distinct occluder provably above
-                float kh3_ce = max(abs(kh3_uv.x - 0.5f), abs(kh3_uv.y - 0.5f)) * 2.0f;
-                float kh3_cbw = khtb_on ? KhTbW(kh3_ce) : 1.0f;
-                if (khtb_occ >= 0.0f) return KhTbBlend(kh3_cres, khtb_occ, khtb_w);
-                if (kh3_cbw >= 0.9999f) return kh3_cres;
-                khtb_occ = kh3_cres; khtb_w = kh3_cbw;
-            } else {
-            // lighting0.y 22 (mode 245) restores the collapse on the bands
-            // for the A/B.
-            float kh3_w = (lighting0.y >= 21.5f && lighting0.y < 22.5f)
-                        ? saturate(0.001f / max(kh3_tw, 1e-6f)) : 1.0f;
-            float2 kh3_fw = fwidth(kh3_t);
-            float kh3_sp = (khcl || (lighting0.y >= 27.5f && lighting0.y < 28.5f)
-                            || (khgs > 4.0f * kh3_tw && !(lighting0.y >= 51.5f && lighting0.y < 52.5f)))
-                          ? 1.0f
-                          : (lighting0.y >= 44.5f && lighting0.y < 45.5f)
-                          ? float(clamp(int(round(0.5f * max(kh3_fw.x, kh3_fw.y))), 1, 8))
-                          : clamp(0.5f * max(kh3_fw.x, kh3_fw.y), 1.0f, 8.0f);
-            float khsw3 = max(2.0f * kh3_gs, kh3_tw) * kh3_iD;   // clamped slack
-            float kh3_ctr = KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, khsw3, float2( 0,  0));
-            float kh3_rng = KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, khsw3, float2( 0, -1) * kh3_sp)
-                          + KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, khsw3, float2(-1,  0) * kh3_sp)
-                          + KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, khsw3, float2( 1,  0) * kh3_sp)
-                          + KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, khsw3, float2( 0,  1) * kh3_sp);
-            float kh3_cnt = 4.0f;
-            if (!(lighting0.y >= 37.5f && lighting0.y < 38.5f)) {   // 3x3 DEFAULT again (field: close-range worse under the diamond; 38 arms the diamond; 36 now an alias)
-                kh3_rng += KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, khsw3, float2(-1, -1) * kh3_sp)
-                         + KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, khsw3, float2( 1, -1) * kh3_sp)
-                         + KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, khsw3, float2(-1,  1) * kh3_sp)
-                         + KhSelfTap3(kh3_t, kh3_g, kh3_c.z, kh3_b, khsw3, float2( 1,  1) * kh3_sp);
-                kh3_cnt = 8.0f;
-            }
-            float kh3_res = (kh3_ctr + kh3_w * kh3_rng) / (1.0f + kh3_cnt * kh3_w);
-            if (sunPf.y >= 0.5f && !khcl) {
-                float kh3_ft = max(kh3_fw.x, kh3_fw.y);
-                // engagement covers the moire band (ft 1-2, where the old 1.5
-                // floor left the worst aliasing unserved).
-                float kh3_pw = (khgs > 4.0f * kh3_tw && !(lighting0.y >= 51.5f && lighting0.y < 52.5f))
-                             ? 0.0f : smoothstep(1.0f, 2.0f, kh3_ft);
-                // lighting0.y 47 (mode 358): PF-EXCLUSIVE instrument arm.
-                bool kh3_px = (lighting0.y >= 46.5f && lighting0.y < 47.5f);
-                if (kh3_pw > 0.001f || kh3_px) {
-                    float kh3_lod = log2(max(kh3_ft * 0.5f, 1.0f));
-                    // The filtered MEAN is the precision-sound channel: soft
-                    // compare over the footprint depth ramp. Interiors cannot
-                    // bleed - the filtered depth there IS the occluder.
-                    float2 kh3_mv = KhPfMu(khSunPf3, kh3_uv, sunMeta3.y * 0.5f, kh3_lod);
-                    float kh3_vd = (kh3_c.z - kh3_b) - kh3_mv.x;
-                    float kh3_ww = max(kh3_ft, 2.0f) * kh3_tw * kh3_iD;
-                    float kh3_var = kh3_mv.y - kh3_mv.x * kh3_mv.x;
-                    float kh3_s2 = (lighting0.y >= 73.5f && lighting0.y < 74.5f)
-                                 ? max(kh3_var, max(2.5e-7f, kh3_ww * kh3_ww))   // 444: floor
-                                 : (kh3_var >= 2.5e-7f ? max(kh3_var, kh3_ww * kh3_ww)
-                                                          : kh3_ww * kh3_ww);   // ramp
-                    float kh3_vv = kh3_vd <= 0.0f ? 1.0f
-                                 : saturate(kh3_s2 / (kh3_s2 + kh3_vd * kh3_vd));
-                    float kh3_pfo = 1.0f - saturate((kh3_vv - 0.4f) / 0.6f);
-                    if (kh3_px) kh3_res = kh3_pfo;
-                    // honest content may CREATE standing - absent content
-                    // reads pfo ~ 0 and still falls through.
-                    else if ((kh3_res > 0.0001f || kh3_pfo > 0.2f) &&
-                             !(kh3_res > 0.8f && kh3_pfo < 0.2f))
-                        kh3_res = lerp(kh3_res, kh3_pfo, kh3_pw);
-                }
-            }
-            float kh3_js = khSunDepth3.Load(int3(int2(kh3_t), 0));
-            if (khla_g > 0.5f && kh3_res > 0.0001f &&
-                (kh3_c.z - kh3_js) < khla_g * kh3_iD &&
-                (khtb_occ < 0.0f || (lighting0.y >= 54.5f && lighting0.y < 55.5f)) &&
-                !(lighting0.y >= 50.5f && lighting0.y < 51.5f))
-                kh3_res *= 1.0f - khla_w;   // rejection at the certifier's edge weight
-            // the radius is hoisted so the evidence test can ask about the
-            // same number the latch is about to publish.
-            float kh3_cg = (lighting0.y >= 60.5f && lighting0.y < 61.5f)
-                         ? 48.0f : 6.0f * sunMeta3.w;   // code 61: fixed guard
-            bool kh3_cok = (khuw_off || KhUnionClear(khwr)) && (khcc_on   // union witness
-                         ? ((khcc_clr || kh3_js < 1.0f) &&
-                            (kh3_c.z - kh3_js) < kh3_cg * kh3_iD)
-                         : (abs(kh3_c.z - kh3_js) < 3.0f * kh3_b));
-            if (khcf.x < 0.5f) khcf.x = kh3_cok ? 3.0f
-                                     : (kh3_js >= 1.0f ? 1.0f : 2.0f);
-            if (kh3_cok && khcf.y < 0.5f) khcf.y = 2.0f;
-            khcf.z = 2.0f;
-            if (kh3_cok) {
-                // khla_g takes the MAX across certifiers while khla_w takes
-                // the LAST certifier's value - coherent only while guards
-                // are monotonic in tier; inserting a tier out of order
-                // breaks this silently.
-                khla_g = max(khla_g, kh3_cg);
-                khla_w = KhJw(max(abs(kh3_uv.x - 0.5f), abs(kh3_uv.y - 0.5f)) * 2.0f);
-                khcf.w = khla_w;
-            }
-            if (kh3_res > 0.0001f || khlfs_off) {   // lit falls through
-                if (khtb_occ >= 0.0f) return KhTbBlend(kh3_res, khtb_occ, khtb_w);
-                float kh3_e = max(abs(kh3_uv.x - 0.5f), abs(kh3_uv.y - 0.5f)) * 2.0f;
-                float kh3_bw = khtb_on ? KhTbW(kh3_e) : 1.0f;
-                if (kh3_bw >= 0.9999f) return kh3_res;
-                khtb_occ = kh3_res; khtb_w = kh3_bw;   // carry onward
-            }
-            }
-        }
-    }
-)HLSL" R"HLSL(   // CHUNK BOUNDARY (precedent; chunks concatenate)
-    // the smooth-spread + soft-band edits took the mid/outer tier segment
-    // past the 16380-byte MSVC token cap).
+    // HERO -> MID -> OUTER -> FAR -> union, one helper per tier. The outer
+    // tier's in-window / certified stamps gate the far tier (KH_SUN_FAR_BAND).
+    bool  khT_done = false;
+    bool  khT_scr_in = false, khT_scr_cert = false;   // scratch for the non-outer tiers
+    float khT_v;
+    khT_v = KhSelfTier(khSunDepth2, khSunPf2, sunVP2, sunMeta2, sunPf.x, 0.0f,   false, false, 1.0f,
+                       khwr, n, ndl, khno_k, khgs, khcl, khcc_on, khcc_clr, khuw_off, khtb_on, khlfs_off, khct_on,
+                       khtb_occ, khtb_w, khla_g, khla_w, khcf, khT_scr_in, khT_scr_cert, khT_done);
+    if (khT_done) return khT_v;
+    khT_v = KhSelfTier(khSunDepth3, khSunPf3, sunVP3, sunMeta3, sunPf.y, 48.0f,  false, true,  2.0f,
+                       khwr, n, ndl, khno_k, khgs, khcl, khcc_on, khcc_clr, khuw_off, khtb_on, khlfs_off, khct_on,
+                       khtb_occ, khtb_w, khla_g, khla_w, khcf, khT_scr_in, khT_scr_cert, khT_done);
+    if (khT_done) return khT_v;
     bool kh4_in = false;
-    // Ledger at
     bool kh4_cert = false;
-    if (sunMeta4.x >= 0.5f) {
-        float kh4_iR0 = length(float3(sunVP4[0].x, sunVP4[1].x, sunVP4[2].x));
-        float kh4_no = khno_k * 2.0f / (max(sunMeta4.y, 1.0f) * max(kh4_iR0, 1e-6f));
-        float4 kh4_c = mul(float4(khwr + n * kh4_no, 1.0f), sunVP4);
-        float2 kh4_uv = float2(0.5f + 0.5f * kh4_c.x, 0.5f - 0.5f * kh4_c.y);
-
-        if (kh4_uv.x > 0.002f && kh4_uv.x < 0.998f &&
-            kh4_uv.y > 0.002f && kh4_uv.y < 0.998f &&
-            kh4_c.z > 0.0f && kh4_c.z < 1.0f) {
-            kh4_in = true;
-            float3 kh4_cr = float3(sunVP4[0].x, sunVP4[1].x, sunVP4[2].x);
-            float3 kh4_cu = float3(sunVP4[0].y, sunVP4[1].y, sunVP4[2].y);
-            float kh4_iR = length(kh4_cr);
-            float kh4_iD = length(float3(sunVP4[0].z, sunVP4[1].z, sunVP4[2].z));
-            float kh4_tw = 2.0f / (max(sunMeta4.y, 1.0f) * max(kh4_iR, 1e-6f));
-            float kh4_k = (khcl || (lighting0.y >= 31.5f && lighting0.y < 33.5f))
-                        ? 0.0f : kh4_tw * kh4_iD / max(ndl, 0.02f)
-                          * ((lighting0.y >= 38.5f && lighting0.y < 39.5f)
-                             ? 1.0f : saturate(1.0f - 3.0f * length(fwidth(n))));   // damper DEFAULT (280's form); off under the 39 arm
-            float kh4_gc = 8.0f * kh4_tw * kh4_iD;
-            float2 kh4_g = clamp(
-                float2( dot(n, kh4_cr / max(kh4_iR, 1e-9f)) * kh4_k,
-                       -dot(n, kh4_cu / max(kh4_iR, 1e-9f)) * kh4_k),
-                -kh4_gc, kh4_gc);
-            float2 kh4_t = kh4_uv * sunMeta4.y;
-            float kh4_ceil = (lighting0.y >= 16.5f && lighting0.y < 17.5f) ? 8.0f : 1.0e4f;
-            float kh4_tan = clamp(sqrt(saturate(1.0f - ndl * ndl)) / max(ndl, 0.02f), 1.0f, kh4_ceil);
-            float kh4_slope = (lighting0.y >= 17.5f && lighting0.y < 18.5f) ? 3.0f
-                            : (lighting0.y >= 38.5f && lighting0.y < 39.5f) ? 0.8f : 0.35f;
-            float kh4_fb = (lighting0.y >= 38.5f && lighting0.y < 39.5f) ? 1.25f : 1.0f;
-            float kh4_b = (lighting0.y >= 12.5f && lighting0.y < 13.5f)
-                        ? sunMeta4.z
-                        : max(sunMeta4.z * kh4_fb,   // tier-proportional floor (code 37 reverts; at khsr_slope)
-                              ((lighting0.y >= 36.5f && lighting0.y < 37.5f) ? 0.0f : 1.5f) * kh4_tw * kh4_iD)
-                          + kh4_slope * kh4_tan * kh4_tw * kh4_iD;
-            float kh4_gs = (lighting0.y >= 47.5f && lighting0.y < 48.5f)
-                        ? khgs : min(khgs, 4.0f * kh4_tw);
-            kh4_b += kh4_gs * kh4_iD;
-            float4 khct4_c = mul(float4(khwr, 1.0f), sunVP4);
-            float2 khct4_t = float2(0.5f + 0.5f * khct4_c.x,
-                                       0.5f - 0.5f * khct4_c.y) * sunMeta4.y;
-            float khct4_s = khSunDepth4.Load(int3(int2(khct4_t), 0));
-            if (khct_on && khct4_c.z > 0.0f && khct4_c.z < 1.0f &&
-                khct4_c.z - khct4_s >
-                    (3.0f + 1.5f * kh4_tan) * kh4_tw * kh4_iD) {
-                float kh4_cres = 1.0f;   // distinct occluder provably above
-                float kh4_ce = max(abs(kh4_uv.x - 0.5f), abs(kh4_uv.y - 0.5f)) * 2.0f;
-                float kh4_cbw = khtb_on ? KhTbW(kh4_ce) : 1.0f;
-                if (khtb_occ >= 0.0f) return KhTbBlend(kh4_cres, khtb_occ, khtb_w);
-                if (kh4_cbw >= 0.9999f) return kh4_cres;
-                khtb_occ = kh4_cres; khtb_w = kh4_cbw;
-            } else {
-            // lighting0.y 22 (mode 245) restores the collapse on the bands
-            // for the A/B.
-            float kh4_w = (lighting0.y >= 21.5f && lighting0.y < 22.5f)
-                        ? saturate(0.001f / max(kh4_tw, 1e-6f)) : 1.0f;
-            float2 kh4_fw = fwidth(kh4_t);
-            float kh4_sp = (khcl || (lighting0.y >= 27.5f && lighting0.y < 28.5f)
-                            || (khgs > 4.0f * kh4_tw && !(lighting0.y >= 51.5f && lighting0.y < 52.5f)))
-                          ? 1.0f
-                          : (lighting0.y >= 44.5f && lighting0.y < 45.5f)
-                          ? float(clamp(int(round(0.5f * max(kh4_fw.x, kh4_fw.y))), 1, 8))
-                          : clamp(0.5f * max(kh4_fw.x, kh4_fw.y), 1.0f, 8.0f);
-            float khsw4 = max(2.0f * kh4_gs, kh4_tw) * kh4_iD;   // clamped slack
-            float kh4_ctr = KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, khsw4, float2( 0,  0));
-            float kh4_rng = KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, khsw4, float2( 0, -1) * kh4_sp)
-                          + KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, khsw4, float2(-1,  0) * kh4_sp)
-                          + KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, khsw4, float2( 1,  0) * kh4_sp)
-                          + KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, khsw4, float2( 0,  1) * kh4_sp);
-            float kh4_cnt = 4.0f;
-            if (!(lighting0.y >= 37.5f && lighting0.y < 38.5f)) {   // 3x3 DEFAULT again (field: close-range worse under the diamond; 38 arms the diamond; 36 now an alias)
-                kh4_rng += KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, khsw4, float2(-1, -1) * kh4_sp)
-                         + KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, khsw4, float2( 1, -1) * kh4_sp)
-                         + KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, khsw4, float2(-1,  1) * kh4_sp)
-                         + KhSelfTap4(kh4_t, kh4_g, kh4_c.z, kh4_b, khsw4, float2( 1,  1) * kh4_sp);
-                kh4_cnt = 8.0f;
-            }
-            float kh4_res = (kh4_ctr + kh4_w * kh4_rng) / (1.0f + kh4_cnt * kh4_w);
-            if (sunPf.z >= 0.5f && !khcl) {
-                float kh4_ft = max(kh4_fw.x, kh4_fw.y);
-                // engagement covers the moire band (ft 1-2, where the old 1.5
-                // floor left the worst aliasing unserved).
-                float kh4_pw = (khgs > 4.0f * kh4_tw && !(lighting0.y >= 51.5f && lighting0.y < 52.5f))
-                             ? 0.0f : smoothstep(1.0f, 2.0f, kh4_ft);
-                // lighting0.y 47 (mode 358): PF-EXCLUSIVE instrument arm.
-                bool kh4_px = (lighting0.y >= 46.5f && lighting0.y < 47.5f);
-                if (kh4_pw > 0.001f || kh4_px) {
-                    float kh4_lod = log2(max(kh4_ft * 0.5f, 1.0f));
-                    // The filtered MEAN is the precision-sound channel: soft
-                    // compare over the footprint depth ramp. Interiors cannot
-                    // bleed - the filtered depth there IS the occluder.
-                    float2 kh4_mv = KhPfMu(khSunPf4, kh4_uv, sunMeta4.y * 0.5f, kh4_lod);
-                    float kh4_vd = (kh4_c.z - kh4_b) - kh4_mv.x;
-                    float kh4_ww = max(kh4_ft, 2.0f) * kh4_tw * kh4_iD;
-                    float kh4_var = kh4_mv.y - kh4_mv.x * kh4_mv.x;
-                    float kh4_s2 = (lighting0.y >= 73.5f && lighting0.y < 74.5f)
-                                 ? max(kh4_var, max(2.5e-7f, kh4_ww * kh4_ww))   // 444: floor
-                                 : (kh4_var >= 2.5e-7f ? max(kh4_var, kh4_ww * kh4_ww)
-                                                          : kh4_ww * kh4_ww);   // ramp
-                    float kh4_vv = kh4_vd <= 0.0f ? 1.0f
-                                 : saturate(kh4_s2 / (kh4_s2 + kh4_vd * kh4_vd));
-                    float kh4_pfo = 1.0f - saturate((kh4_vv - 0.4f) / 0.6f);
-                    if (kh4_px) kh4_res = kh4_pfo;
-                    // honest content may CREATE standing - absent content
-                    // reads pfo ~ 0 and still falls through.
-                    else if ((kh4_res > 0.0001f || kh4_pfo > 0.2f) &&
-                             !(kh4_res > 0.8f && kh4_pfo < 0.2f))
-                        kh4_res = lerp(kh4_res, kh4_pfo, kh4_pw);
-                }
-            }
-            float kh4_js = khSunDepth4.Load(int3(int2(kh4_t), 0));
-            if (khla_g > 0.5f && kh4_res > 0.0001f &&
-                (kh4_c.z - kh4_js) < khla_g * kh4_iD &&
-                (khtb_occ < 0.0f || (lighting0.y >= 54.5f && lighting0.y < 55.5f)) &&
-                !(lighting0.y >= 50.5f && lighting0.y < 51.5f))
-                kh4_res *= 1.0f - khla_w;   // rejection at the certifier's edge weight
-            // radius hoisted (the kh3 twin above; same reason).
-            float kh4_cg = (lighting0.y >= 60.5f && lighting0.y < 61.5f)
-                         ? 192.0f : 6.0f * sunMeta4.w;   // code 61: fixed guard
-            bool kh4_cok = (khuw_off || KhUnionClear(khwr)) && (khcc_on   // union witness
-                         ? ((khcc_clr || kh4_js < 1.0f) &&
-                            (kh4_c.z - kh4_js) < kh4_cg * kh4_iD)
-                         : (abs(kh4_c.z - kh4_js) < 3.0f * kh4_b));
-            if (khcf.x < 0.5f) khcf.x = kh4_cok ? 3.0f
-                                     : (kh4_js >= 1.0f ? 1.0f : 2.0f);
-            if (kh4_cok && khcf.y < 0.5f) khcf.y = 3.0f;
-            khcf.z = 3.0f;
-            if (kh4_cok) {
-                khla_g = max(khla_g, kh4_cg);
-                khla_w = KhJw(max(abs(kh4_uv.x - 0.5f), abs(kh4_uv.y - 0.5f)) * 2.0f);
-                khcf.w = khla_w;
-                kh4_cert = true;
-            }
-            if (kh4_res > 0.0001f || khlfs_off) {   // lit falls through
-                if (khtb_occ >= 0.0f) return KhTbBlend(kh4_res, khtb_occ, khtb_w);
-                float kh4_e = max(abs(kh4_uv.x - 0.5f), abs(kh4_uv.y - 0.5f)) * 2.0f;
-                float kh4_bw = khtb_on ? KhTbW(kh4_e) : 1.0f;
-                if (kh4_bw >= 0.9999f) return kh4_res;
-                khtb_occ = kh4_res; khtb_w = kh4_bw;   // carry onward
-            }
-            }
-        }
-    }
-)HLSL" R"HLSL(   // KH_SUN_FAR_BAND self tier (own segment; at)
+    khT_v = KhSelfTier(khSunDepth4, khSunPf4, sunVP4, sunMeta4, sunPf.z, 192.0f, false, true,  3.0f,
+                       khwr, n, ndl, khno_k, khgs, khcl, khcc_on, khcc_clr, khuw_off, khtb_on, khlfs_off, khct_on,
+                       khtb_occ, khtb_w, khla_g, khla_w, khcf, kh4_in, kh4_cert, khT_done);
+    if (khT_done) return khT_v;
+)HLSL" R"HLSL(   // KH_SUN_FAR_BAND self tier (own segment)
     // ACCEPTANCE: mode 0 matches mode 389 at the splotch pose; the >32 m
     // far-self quality (win) is untouched; the outer->far cross-fade stays
-    // line-free (the carry clause). 392 = the A/B.
+    // line-free (the carry clause). 392 = the A/B. No moment pyramid at the
+    // FAR band - its texel is already the minified scale the pyramids exist
+    // to reach (pf arm 0; khSunPf4 is a placeholder the arm never reads).
     if (sunMeta5.x >= 0.5f &&
         (!kh4_in || khtb_occ >= 0.0f ||
          (kh4_cert && !(lighting0.y >= 70.5f && lighting0.y < 71.5f)) ||
          (lighting0.y >= 64.5f && lighting0.y < 65.5f))) {
-        float kh5_iR0 = length(float3(sunVP5[0].x, sunVP5[1].x, sunVP5[2].x));
-        float kh5_no = khno_k * 2.0f / (max(sunMeta5.y, 1.0f) * max(kh5_iR0, 1e-6f));
-        float4 kh5_c = mul(float4(khwr + n * kh5_no, 1.0f), sunVP5);
-        float2 kh5_uv = float2(0.5f + 0.5f * kh5_c.x, 0.5f - 0.5f * kh5_c.y);
-
-        if (kh5_uv.x > 0.002f && kh5_uv.x < 0.998f &&
-            kh5_uv.y > 0.002f && kh5_uv.y < 0.998f &&
-            kh5_c.z > 0.0f && kh5_c.z < 1.0f) {
-            float3 kh5_cr = float3(sunVP5[0].x, sunVP5[1].x, sunVP5[2].x);
-            float3 kh5_cu = float3(sunVP5[0].y, sunVP5[1].y, sunVP5[2].y);
-            float kh5_iR = length(kh5_cr);
-            float kh5_iD = length(float3(sunVP5[0].z, sunVP5[1].z, sunVP5[2].z));
-            float kh5_tw = 2.0f / (max(sunMeta5.y, 1.0f) * max(kh5_iR, 1e-6f));
-            float kh5_k = (khcl || (lighting0.y >= 31.5f && lighting0.y < 33.5f))
-                        ? 0.0f : kh5_tw * kh5_iD / max(ndl, 0.02f)
-                          * ((lighting0.y >= 38.5f && lighting0.y < 39.5f)
-                             ? 1.0f : saturate(1.0f - 3.0f * length(fwidth(n))));   // damper DEFAULT (280's form); off under the 39 arm
-            float kh5_gc = 8.0f * kh5_tw * kh5_iD;
-            float2 kh5_g = clamp(
-                float2( dot(n, kh5_cr / max(kh5_iR, 1e-9f)) * kh5_k,
-                       -dot(n, kh5_cu / max(kh5_iR, 1e-9f)) * kh5_k),
-                -kh5_gc, kh5_gc);
-            float2 kh5_t = kh5_uv * sunMeta5.y;
-            float kh5_ceil = (lighting0.y >= 16.5f && lighting0.y < 17.5f) ? 8.0f : 1.0e4f;
-            float kh5_tan = clamp(sqrt(saturate(1.0f - ndl * ndl)) / max(ndl, 0.02f), 1.0f, kh5_ceil);
-            float kh5_slope = (lighting0.y >= 17.5f && lighting0.y < 18.5f) ? 3.0f
-                            : (lighting0.y >= 38.5f && lighting0.y < 39.5f) ? 0.8f : 0.35f;
-            float kh5_fb = (lighting0.y >= 38.5f && lighting0.y < 39.5f) ? 1.25f : 1.0f;
-            float kh5_b = (lighting0.y >= 12.5f && lighting0.y < 13.5f)
-                        ? sunMeta5.z
-                        : max(sunMeta5.z * kh5_fb,   // tier-proportional floor (code 37 reverts; at khsr_slope)
-                              ((lighting0.y >= 36.5f && lighting0.y < 37.5f) ? 0.0f : 1.5f) * kh5_tw * kh5_iD)
-                          + kh5_slope * kh5_tan * kh5_tw * kh5_iD;
-            float kh5_gs = (lighting0.y >= 47.5f && lighting0.y < 48.5f)
-                        ? khgs : min(khgs, 4.0f * kh5_tw);
-            kh5_b += kh5_gs * kh5_iD;
-            float4 khct5_c = mul(float4(khwr, 1.0f), sunVP5);
-            float2 khct5_t = float2(0.5f + 0.5f * khct5_c.x,
-                                       0.5f - 0.5f * khct5_c.y) * sunMeta5.y;
-            float khct5_s = khSunDepth5.Load(int3(int2(khct5_t), 0));
-            if (khct_on && khct5_c.z > 0.0f && khct5_c.z < 1.0f &&
-                khct5_c.z - khct5_s >
-                    (3.0f + 1.5f * kh5_tan) * kh5_tw * kh5_iD) {
-                float kh5_cres = 1.0f;   // distinct occluder provably above
-                float kh5_ce = max(abs(kh5_uv.x - 0.5f), abs(kh5_uv.y - 0.5f)) * 2.0f;
-                float kh5_cbw = khtb_on ? KhTbW(kh5_ce) : 1.0f;
-                if (khtb_occ >= 0.0f) return KhTbBlend(kh5_cres, khtb_occ, khtb_w);
-                if (kh5_cbw >= 0.9999f) return kh5_cres;
-                khtb_occ = kh5_cres; khtb_w = kh5_cbw;
-            } else {
-            // lighting0.y 22 (mode 245) restores the collapse on the bands
-            // for the A/B.
-            float kh5_w = (lighting0.y >= 21.5f && lighting0.y < 22.5f)
-                        ? saturate(0.001f / max(kh5_tw, 1e-6f)) : 1.0f;
-            float2 kh5_fw = fwidth(kh5_t);
-            float kh5_sp = (khcl || (lighting0.y >= 27.5f && lighting0.y < 28.5f)
-                            || (khgs > 4.0f * kh5_tw && !(lighting0.y >= 51.5f && lighting0.y < 52.5f)))
-                          ? 1.0f
-                          : (lighting0.y >= 44.5f && lighting0.y < 45.5f)
-                          ? float(clamp(int(round(0.5f * max(kh5_fw.x, kh5_fw.y))), 1, 8))
-                          : clamp(0.5f * max(kh5_fw.x, kh5_fw.y), 1.0f, 8.0f);
-            float khsw5 = max(2.0f * kh5_gs, kh5_tw) * kh5_iD;   // clamped slack
-            float kh5_ctr = KhSelfTap5(kh5_t, kh5_g, kh5_c.z, kh5_b, khsw5, float2( 0,  0));
-            float kh5_rng = KhSelfTap5(kh5_t, kh5_g, kh5_c.z, kh5_b, khsw5, float2( 0, -1) * kh5_sp)
-                          + KhSelfTap5(kh5_t, kh5_g, kh5_c.z, kh5_b, khsw5, float2(-1,  0) * kh5_sp)
-                          + KhSelfTap5(kh5_t, kh5_g, kh5_c.z, kh5_b, khsw5, float2( 1,  0) * kh5_sp)
-                          + KhSelfTap5(kh5_t, kh5_g, kh5_c.z, kh5_b, khsw5, float2( 0,  1) * kh5_sp);
-            float kh5_cnt = 4.0f;
-            if (!(lighting0.y >= 37.5f && lighting0.y < 38.5f)) {   // 3x3 DEFAULT again (field: close-range worse under the diamond; 38 arms the diamond; 36 now an alias)
-                kh5_rng += KhSelfTap5(kh5_t, kh5_g, kh5_c.z, kh5_b, khsw5, float2(-1, -1) * kh5_sp)
-                         + KhSelfTap5(kh5_t, kh5_g, kh5_c.z, kh5_b, khsw5, float2( 1, -1) * kh5_sp)
-                         + KhSelfTap5(kh5_t, kh5_g, kh5_c.z, kh5_b, khsw5, float2(-1,  1) * kh5_sp)
-                         + KhSelfTap5(kh5_t, kh5_g, kh5_c.z, kh5_b, khsw5, float2( 1,  1) * kh5_sp);
-                kh5_cnt = 8.0f;
-            }
-            float kh5_res = (kh5_ctr + kh5_w * kh5_rng) / (1.0f + kh5_cnt * kh5_w);
-            // no moment pyramid at the FAR band - its texel is already the
-            // minified scale the pyramids exist to reach.
-            float kh5_js = khSunDepth5.Load(int3(int2(kh5_t), 0));
-            if (khla_g > 0.5f && kh5_res > 0.0001f &&
-                (kh5_c.z - kh5_js) < khla_g * kh5_iD &&
-                (khtb_occ < 0.0f || (lighting0.y >= 54.5f && lighting0.y < 55.5f)) &&
-                !(lighting0.y >= 50.5f && lighting0.y < 51.5f))
-                kh5_res *= 1.0f - khla_w;   // rejection at the certifier's edge weight
-            float kh5_cg = (lighting0.y >= 68.5f && lighting0.y < 69.5f)
-                         ? sunMeta5.w   // 398: the admission bound
-                         : 6.0f * sunMeta5.w;   // default = form
-            bool kh5_cok = (khuw_off || KhUnionClear(khwr)) && (khcc_on   // union witness
-                         ? ((khcc_clr || kh5_js < 1.0f) &&
-                            (kh5_c.z - kh5_js) < kh5_cg * kh5_iD)
-                         : (abs(kh5_c.z - kh5_js) < 3.0f * kh5_b));
-            if (khcf.x < 0.5f) khcf.x = kh5_cok ? 3.0f
-                                     : (kh5_js >= 1.0f ? 1.0f : 2.0f);
-            if (kh5_cok && khcf.y < 0.5f) khcf.y = 4.0f;
-            khcf.z = 4.0f;
-            if (kh5_cok) {
-                khla_g = max(khla_g, kh5_cg);
-                khla_w = KhJw(max(abs(kh5_uv.x - 0.5f), abs(kh5_uv.y - 0.5f)) * 2.0f);
-                khcf.w = khla_w;
-            }
-            if (kh5_res > 0.0001f || khlfs_off) {   // lit falls through
-                if (khtb_occ >= 0.0f) return KhTbBlend(kh5_res, khtb_occ, khtb_w);
-                float kh5_e = max(abs(kh5_uv.x - 0.5f), abs(kh5_uv.y - 0.5f)) * 2.0f;
-                float kh5_bw = khtb_on ? KhTbW(kh5_e) : 1.0f;
-                if (kh5_bw >= 0.9999f) return kh5_res;
-                khtb_occ = kh5_res; khtb_w = kh5_bw;   // carry onward
-            }
-            }
-        }
+        khT_v = KhSelfTier(khSunDepth5, khSunPf4, sunVP5, sunMeta5, 0.0f,    0.0f,   true,  true,  4.0f,
+                           khwr, n, ndl, khno_k, khgs, khcl, khcc_on, khcc_clr, khuw_off, khtb_on, khlfs_off, khct_on,
+                           khtb_occ, khtb_w, khla_g, khla_w, khcf, khT_scr_in, khT_scr_cert, khT_done);
+        if (khT_done) return khT_v;
     }
 )HLSL" R"HLSL(   // KH_SELF_RPDB - receiver-plane depth bias; in C++.
     float khsr_iR0 = length(float3(sunVP[0].x, sunVP[1].x, sunVP[2].x));
@@ -1880,15 +1324,15 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
                 ? float(clamp(int(round(0.5f * max(khsr_fw.x, khsr_fw.y))), 1, 8))
                 : clamp(0.5f * max(khsr_fw.x, khsr_fw.y), 1.0f, 8.0f);
     float khsr_sw = max(2.0f * khsr_gs, khsr_tw) * khsr_iD;   // clamped slack
-    float khsr_ctr = KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 0,  0));
-    float khsr_rng = KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2(-1, -1) * khsr_sp)
-                   + KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 0, -1) * khsr_sp)
-                   + KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 1, -1) * khsr_sp)
-                   + KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2(-1,  0) * khsr_sp)
-                   + KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 1,  0) * khsr_sp)
-                   + KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2(-1,  1) * khsr_sp)
-                   + KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 0,  1) * khsr_sp)
-                   + KhSelfTap(khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 1,  1) * khsr_sp);
+    float khsr_ctr = KhSelfTapT(khSunDepth, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 0,  0));
+    float khsr_rng = KhSelfTapT(khSunDepth, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2(-1, -1) * khsr_sp)
+                   + KhSelfTapT(khSunDepth, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 0, -1) * khsr_sp)
+                   + KhSelfTapT(khSunDepth, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 1, -1) * khsr_sp)
+                   + KhSelfTapT(khSunDepth, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2(-1,  0) * khsr_sp)
+                   + KhSelfTapT(khSunDepth, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 1,  0) * khsr_sp)
+                   + KhSelfTapT(khSunDepth, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2(-1,  1) * khsr_sp)
+                   + KhSelfTapT(khSunDepth, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 0,  1) * khsr_sp)
+                   + KhSelfTapT(khSunDepth, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 1,  1) * khsr_sp);
     // Camera-anchored fits only (sunMeta.x 2.0); code 23 (mode 246) restores
     // the hard edge.
     float khsr_fd = 1.0f;
@@ -2628,9 +2072,10 @@ float4 ShadowBandContent(float3 wpos)
 
 float ShadowBandFactor(float3 wpos)
 {
-    // Straight-line evaluation (no [unroll]/continue/break: X4575 in this
-    // unit). Slots arrive finest-first; the first containing band wins;
-    // bandBorder.w-1 names the physical texture.
+    // NO [unroll] on these loops (X4575 in this unit); the 'done' flag plus
+    // a plain break is the accepted early-out shape - no continue. Slots
+    // arrive finest-first; the first containing band wins; bandBorder.w-1
+    // names the physical texture.
     float4 p = float4(wpos, 1.0f);
     float occ = -1.0f;
     float khbf_vz = 0.0f;   // the winning band's view-z, for the far fade

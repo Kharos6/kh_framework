@@ -558,6 +558,20 @@ public:
     }
 };
 
+static std::mutex g_err_once_mutex;
+static std::vector<std::string> g_err_once;
+
+static void report_error_once_safe(const std::string& msg) {
+    {
+        std::lock_guard<std::mutex> g(g_err_once_mutex);
+        if (std::find(g_err_once.begin(), g_err_once.end(), msg) != g_err_once.end()) return;
+        if (g_err_once.size() >= 256) return;
+        g_err_once.push_back(msg);
+    }
+
+    MainThreadScheduler::instance().schedule([msg]() { report_error(msg); });
+}
+
 template<typename Key, typename Value>
 class LRUCache {
 public:

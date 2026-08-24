@@ -17,11 +17,14 @@ VSOut VSMain(VSIn i)
     float3 khvTp = (centerRel.w > 0.5f)
                  ? (centerRel.xyz + KhRotate(i.pos * sizeAxes.xyz))
                  : wp;
-    // The historic transform below is the only one taken - stenVol2.z is
-    // never written non-zero, so this line is the whole of the vertex path
-    // again. A large-world engine that feeds cb4[4..6] before cb2 may well be
-    // handing cb2 CAMERA-RELATIVE world, in which case absolute wp is
-    // displaced by the whole camera vector and never wins the depth test.
+    // stenVol2.z selects the vertex path: 0 = the historic viewProj transform
+    // (every flush/injection mesh fill at mode 0); 3 = viewProj position with
+    // the ENGINE'S depth mapping (the seam-inject fill's mode-0 value, 176
+    // alias); 1/2 = the engine's whole cb2 transform (modes 174/175 and the
+    // 117/118 engine-view arm). A large-world engine that feeds cb4[4..6]
+    // before cb2 may well be handing cb2 CAMERA-RELATIVE world, in which case
+    // absolute wp is displaced by the whole camera vector and never wins the
+    // depth test - that is why 1/2 are arms, not the default.
     float4x4 khEngVP = float4x4(engBlk[0], engBlk[1], engBlk[2], engBlk[3]);
     float3   khEngP  = (stenVol2.z >= 1.5f) ? khvTp : wp;
     float4   khClip  = mul(float4(khvTp, 1.0f), viewProj);

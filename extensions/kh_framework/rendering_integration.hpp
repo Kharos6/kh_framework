@@ -1707,36 +1707,12 @@ inline ID3D11RasterizerState* kh_rs_pick(ID3D11RasterizerState* khrs_in) {
     return khrs_in;
 }
 
-// report_error logs through SQF and throws - both game-thread-only acts - yet
-// several compile paths run on the RENDER thread (ensure_resources and the
-// composite compile inside the D3D hook). Render-thread-safe error reporting.
-static std::mutex g_err_once_mutex;
-static std::vector<std::string> g_err_once;
-
-inline void kh_report_error(const std::string& msg) {
-    {
-        std::lock_guard<std::mutex> g(g_err_once_mutex);
-        if (std::find(g_err_once.begin(), g_err_once.end(), msg) != g_err_once.end()) return;
-        if (g_err_once.size() >= 256) return;
-        g_err_once.push_back(msg);
-    }
-
-    MainThreadScheduler::instance().schedule([msg]() { report_error(msg); });
-}
-
-// A GAUGE MUST NOT THROW AT THE MISSION. This logs and returns.
-inline void kh_report_note(const std::string& khrn_msg) {
-    MainThreadScheduler::instance().schedule([khrn_msg]() {
-        try { sqf::diag_log(khrn_msg); } catch (...) {}
-    });
-}
-
 static const char* const KH_SHADERS_COMPILING = "shaders compiling";
 
 inline bool kh_ensure_ok(const char* khe_what, const std::string& khe_err) {
     if (khe_err.empty()) return true;
     if (khe_err == KH_SHADERS_COMPILING) return false;   // benign, silent
-    kh_report_error(std::string("KH ") + khe_what + ": " + khe_err);
+    report_error_once_safe(std::string("KH ") + khe_what + ": " + khe_err);
     return false;
 }
 
@@ -1870,7 +1846,10 @@ struct alignas(16) ConstantData {
     float dl_ctl[4];   // x = mode (0 off / 1 camera-relative world /
                                // 2 view space / 3 absolute pool), y = point
                                // count, z = spot count, w = distance scale
-    float dl_global[4];   // xyz = global diffuse multiplier (cb10[3])
+    float dl_global[4];   // xyz = global diffuse multiplier (cb10[3]); w = the
+                               // script intensity (g_dl_intensity_bits) - DynLights
+                               // scales its WHOLE sum by w, so a zero here is
+                               // 'lights off', never a padding lane
     float dl_view[3][4];   // view matrix COLUMNS for the mode-2 rotation
     float dl_lights[192][4];   // 32 lights x 6 float4, engine cb11.
                                // LAST per-object field BY CONTRACT: the obj
@@ -2490,6 +2469,9 @@ inline void kh_mod_cache_append(std::vector<std::filesystem::path>& khma_out,
 // addressed over source+entry+target+defines, so without folding the flags an
 // arm's blob would be stored under the DEFAULT's key and served to a later
 // default run - a silently wrong shader.
+// Every hash in this header is CryptoGenerator's FNV-1a 64 (standard
+// offset basis): the on-disk cache keys (.khmc / .khsc / .khtc) and the
+// in-memory change hashes alike. Field-separated where fields concatenate.
 inline uint32_t kh_shader_flags() {
     const int khsf_m = g_dbg_mode.load(std::memory_order_relaxed);
     if (khsf_m == 403) return D3DCOMPILE_PREFER_FLOW_CONTROL;
@@ -2500,17 +2482,18 @@ inline uint32_t kh_shader_flags() {
 
 inline uint64_t kh_shader_cache_hash(const char* src, const char* entry, const char* target,
                                      const D3D_SHADER_MACRO* defines) {
-    uint64_t h = 1469598103934665603ull;
+    uint64_t h = CryptoGenerator::FNV1A64_OFFSET;
     auto mix = [&h](const char* s) {
-        if (!s) return;
-        while (*s) { h ^= static_cast<unsigned char>(*s++); h *= 1099511628211ull; }
-        h ^= 0xFFu; h *= 1099511628211ull;   // field separator
+        if (!s) return;   // a null macro Definition contributes nothing; "" contributes the separator
+        h = CryptoGenerator::fnv1a64_update(h, s, strlen(s));
+        h = CryptoGenerator::fnv1a64_update(h, "\xFF", 1);   // field separator
     };
     mix(src); mix(entry); mix(target);
     for (const D3D_SHADER_MACRO* d = defines; d && d->Name; ++d) { mix(d->Name); mix(d->Definition); }
-    // the compile FLAGS are part of the identity - see KH_SHADER_FLAGS.
-    h ^= static_cast<uint64_t>(kh_shader_flags()); h *= 1099511628211ull;
-    h ^= 26481ull; h *= 1099511628211ull;   // belt+braces: version salt (literal:
+    // the compile FLAGS are part of the identity - see KH_SHADER_FLAGS. Word
+    // mixes, not byte updates: the flags and the salt fold in as whole values.
+    h ^= static_cast<uint64_t>(kh_shader_flags()); h *= CryptoGenerator::FNV1A64_PRIME;
+    h ^= 26481ull; h *= CryptoGenerator::FNV1A64_PRIME;   // belt+braces: version salt (literal:
                                             // is declared later in this header;
                                             // content hashing makes the salt redundant
                                             // anyway)
@@ -2592,76 +2575,20 @@ static uint64_t g_khsm_stall_ms = 0;   // ms spent INSIDE shutdown waits (the)
                                           // graphics-lock cost of a teardown
                                           // mid-compile)
 
-struct KhShaderUnit {
-    std::string name;
-    uint32_t    ms;
-    bool        hit;
-};
-static std::mutex g_khsu_mu;
-static std::vector<KhShaderUnit> g_khsu;   // census since the last flush
 static std::atomic<uint64_t> g_khsu_units{0};   // units COMPILED this session
 static std::atomic<uint64_t> g_khsu_slowest_ms{0};   // longest single unit = the pool's bound
 
-// Called from workers as well as the caller, hence the lock and the total
-// absence of anything that could throw out of it.
+// Called from workers as well as the caller: atomics only, nothing that can
+// throw. Gauges only - the per-unit census log is gone.
 inline void kh_shader_census_note(const char* khsu_entry, const char* khsu_target,
                                   const D3D_SHADER_MACRO* khsu_def, uint64_t khsu_hash,
                                   uint32_t khsu_ms, bool khsu_hit) {
-    try {
-        std::string khsu_d;
-        for (const D3D_SHADER_MACRO* khsu_p = khsu_def; khsu_p && khsu_p->Name; ++khsu_p) {
-            if (!khsu_d.empty()) khsu_d += ",";
-            khsu_d += khsu_p->Name;
-            if (khsu_p->Definition) { khsu_d += "="; khsu_d += khsu_p->Definition; }
-            if (khsu_d.size() > 72) break;
-        }
-        std::ostringstream khsu_s;
-        khsu_s << (khsu_entry ? khsu_entry : "?") << "/"
-               << (khsu_target ? khsu_target : "?") << "#" << std::hex
-               << std::setw(8) << std::setfill('0')
-               << static_cast<uint32_t>(khsu_hash) << std::dec;
-        if (!khsu_d.empty()) khsu_s << " [" << khsu_d << "]";
-        if (khsu_hit) khsu_s << " CACHED";
-        const uint32_t khsu_fl = kh_shader_flags();
-        if (khsu_fl) khsu_s << " flags=0x" << std::hex << khsu_fl << std::dec;
-        if (!khsu_hit) {
-            g_khsu_units.fetch_add(1, std::memory_order_relaxed);
-            uint64_t khsu_prev = g_khsu_slowest_ms.load(std::memory_order_relaxed);
-            while (khsu_ms > khsu_prev &&
-                   !g_khsu_slowest_ms.compare_exchange_weak(khsu_prev, khsu_ms)) {}
-        }
-        std::lock_guard<std::mutex> khsu_l(g_khsu_mu);
-        if (g_khsu.size() < 64)   // bounded: user shaders compile all session
-            g_khsu.push_back(KhShaderUnit{ khsu_s.str(), khsu_ms, khsu_hit });
-    } catch (...) {}
-}
-
-// Caller-thread only, after the batch has joined, so every worker's record is
-// already in. Runs from a destructor: it cannot throw.
-inline void kh_shader_census_flush() {
-    try {
-        std::vector<KhShaderUnit> khsu_v;
-        {
-            std::lock_guard<std::mutex> khsu_l(g_khsu_mu);
-            if (g_khsu.empty()) return;
-            khsu_v.swap(g_khsu);
-        }
-        std::sort(khsu_v.begin(), khsu_v.end(),
-                  [](const KhShaderUnit& a, const KhShaderUnit& b) { return a.ms > b.ms; });
-        uint32_t khsu_hits = 0, khsu_miss = 0;
-        for (size_t khsu_i = 0; khsu_i < khsu_v.size(); ++khsu_i) {
-            if (khsu_v[khsu_i].hit) khsu_hits++; else khsu_miss++;
-        }
-        std::ostringstream khsu_s;
-        khsu_s << "KH shader census batch " << g_khsm_batches << ": "
-               << khsu_v.size() << " units, " << khsu_miss << " compiled, "
-               << khsu_hits << " cached, pool " << g_khsm_threads_n
-               << " threads, wall(session) " << g_khsm_wall_ms << " ms, cpu(session) "
-               << g_shader_compile_ms.load(std::memory_order_relaxed) << " ms";
-        for (size_t khsu_i = 0; khsu_i < khsu_v.size() && khsu_i < 24; ++khsu_i)
-            khsu_s << " | " << khsu_v[khsu_i].name << " " << khsu_v[khsu_i].ms << " ms";
-        kh_report_note(khsu_s.str());   // a gauge must not throw
-    } catch (...) {}
+    (void)khsu_entry; (void)khsu_target; (void)khsu_def; (void)khsu_hash;
+    if (khsu_hit) return;
+    g_khsu_units.fetch_add(1, std::memory_order_relaxed);
+    uint64_t khsu_prev = g_khsu_slowest_ms.load(std::memory_order_relaxed);
+    while (khsu_ms > khsu_prev &&
+           !g_khsu_slowest_ms.compare_exchange_weak(khsu_prev, khsu_ms)) {}
 }
 
 inline std::string kh_shader_compile_raw(const char* src, const char* entry, const char* target,
@@ -2753,8 +2680,17 @@ inline std::string kh_shader_compile_raw(const char* src, const char* entry, con
     // cache write-through (best-effort; a failed write costs nothing), then
     // the SHARED trim - models and shaders under one 1 GiB.
     if (khsc_on && !khsc_p.empty() && *out_blob) {
+        // Written to a private temp name and renamed into place: the reader
+        // validates header+size, so a torn final file only costs a miss, but
+        // two processes sharing the cache dir could otherwise each read the
+        // other's half-written blob and both recompile. Rename replaces on
+        // Windows; a sharing violation (reader holding the file) leaves the
+        // existing file and drops the temp.
+        const std::filesystem::path khsc_tmp = khsc_p.string() + ".tmp" +
+            std::to_string(static_cast<unsigned long>(GetCurrentProcessId()));
+        bool khsc_wrote = false;
         try {
-            std::ofstream khsc_w(khsc_p, std::ios::binary | std::ios::trunc);
+            std::ofstream khsc_w(khsc_tmp, std::ios::binary | std::ios::trunc);
             if (khsc_w) {
                 struct { uint32_t magic, ver; uint64_t hash, size; } khsc_hdr = {
                     KH_SHADER_CACHE_MAGIC, KH_SHADER_CACHE_VERSION,
@@ -2762,8 +2698,13 @@ inline std::string kh_shader_compile_raw(const char* src, const char* entry, con
                 khsc_w.write(reinterpret_cast<const char*>(&khsc_hdr), sizeof(khsc_hdr));
                 khsc_w.write(static_cast<const char*>((*out_blob)->GetBufferPointer()),
                              static_cast<std::streamsize>((*out_blob)->GetBufferSize()));
+                khsc_w.flush();
+                khsc_wrote = static_cast<bool>(khsc_w);
             }
-        } catch (...) {}
+        } catch (...) { khsc_wrote = false; }
+        std::error_code khsc_ec;
+        if (khsc_wrote) std::filesystem::rename(khsc_tmp, khsc_p, khsc_ec);
+        if (!khsc_wrote || khsc_ec) std::filesystem::remove(khsc_tmp, khsc_ec);
         // the shared-directory trim enumerates and deletes, and bumps a plain
         // counter - one at a time, whoever is compiling.
         {
@@ -2994,7 +2935,6 @@ struct KhShaderMtScope {
     // still owns the census.
     ~KhShaderMtScope() {
         if (khsm_own) kh_shader_mt_finish(khsm_keep);
-        if (!g_khsm_active) kh_shader_census_flush();
     }
     KhShaderMtScope(const KhShaderMtScope&) = delete;
     KhShaderMtScope& operator=(const KhShaderMtScope&) = delete;
@@ -3033,7 +2973,6 @@ inline bool kh_shader_async_hold() {
         return true;
     }
     kh_shader_mt_finish(true);   // joins instantly - they have all exited - KEEPS the memo
-    kh_shader_census_flush();
     g_khsa_ms = steady_now_ms() - g_khsa_t0;
     g_khsa_state = 2;
     return false;
@@ -3462,7 +3401,7 @@ inline ID3D11ShaderResourceView* kh_tex_resolve(ID3D11Device* dev, ID3D11DeviceC
         if (kh_ends_with_ci(path, ".tga")) {
             err += " - if the file opens elsewhere, re-export as uncompressed true-color 24/32-bit TGA";
         }
-        kh_report_error("KH texture '" + path + "': " + err);
+        report_error_once_safe("KH texture '" + path + "': " + err);
     }
 
     g_tex_cache[key] = e;
@@ -3590,7 +3529,7 @@ inline void kh_user_shader_pump(ID3D11Device* dev) {
         }
 
         g_user_async_fails++;
-        kh_report_error("KH user shader: the compiled unit for '" + g_user_req[khup_i].key +
+        report_error_once_safe("KH user shader: the compiled unit for '" + g_user_req[khup_i].key +
                         "' was lost from the memo three times - the request is abandoned");
         g_user_req.erase(g_user_req.begin() + static_cast<ptrdiff_t>(khup_i));
     }
@@ -3656,7 +3595,6 @@ inline void kh_user_shader_reap() {
     }
     if (khur_pending) return;
     kh_shader_mt_finish(true);   // joins instantly - all exited - KEEPS the memo
-    kh_shader_census_flush();
     g_user_batch_own = false;
 }
 
@@ -3696,7 +3634,7 @@ inline ID3D11PixelShader* kh_user_async_take(ID3D11Device* dev, const std::strin
     if (!khua_e.ps) {
         khua_e.failed = true;
         g_user_async_fails++;
-        kh_report_error(std::string("KH user ") + khua_what + " '" + path + "': " +
+        report_error_once_safe(std::string("KH user ") + khua_what + " '" + path + "': " +
                         (khua_err.empty() ? std::string("no blob") : khua_err));
     } else {
         g_user_async_done++;
@@ -3767,7 +3705,7 @@ inline ID3D11PixelShader* kh_user_fx_ps(ID3D11Device* dev, const std::string& pa
         if (!kh_user_shader_source(path, khua_src, khua_err)) {
             KhUserShaderEntry khua_e;
             khua_e.failed = true;
-            kh_report_error("KH user effect '" + path + "': " + khua_err);
+            report_error_once_safe("KH user effect '" + path + "': " + khua_err);
             g_user_ps_cache.emplace(std::move(khus_key), khua_e);
             return nullptr;
         }
@@ -3801,7 +3739,7 @@ inline ID3D11PixelShader* kh_user_fx_ps(ID3D11Device* dev, const std::string& pa
 
     if (!khus_e.ps) {
         khus_e.failed = true;
-        kh_report_error("KH user effect '" + path + "': " + khus_err);
+        report_error_once_safe("KH user effect '" + path + "': " + khus_err);
     }
 
     g_user_ps_cache.emplace(std::move(khus_key), khus_e);
@@ -3894,7 +3832,7 @@ inline ID3D11PixelShader* kh_user_mat_ps(ID3D11Device* dev, const std::string& p
 
     if (!khum_e.ps) {
         khum_e.failed = true;
-        kh_report_error("KH user material shader '" + path + "': " + khum_err);
+        report_error_once_safe("KH user material shader '" + path + "': " + khum_err);
     }
 
     g_user_ps_cache.emplace(std::move(khum_key), khum_e);
@@ -4138,7 +4076,7 @@ inline ID3D11ShaderResourceView* kh_user_lut_srv(ID3D11Device* dev, const std::s
 
     if (!khlu_e.srv) {
         khlu_e.failed = true;
-        kh_report_error("KH user LUT '" + path + "': " + khlu_err);
+        report_error_once_safe("KH user LUT '" + path + "': " + khlu_err);
     }
 
     g_user_lut_cache.emplace(std::move(khlu_key), khlu_e);
@@ -4295,11 +4233,14 @@ inline std::vector<MeshVertex> kh_lod_decimate(const std::vector<MeshVertex>& kh
     };
     struct KeyHash {
         size_t operator()(const Key& khk_k) const {
-            uint64_t khk_h = 1469598103934665603ull;
+            // WORD-wise FNV mix (one quantised coordinate per step), not the
+            // byte stream: in-memory only, but the weld's candidate order
+            // follows this map, so it is not swapped for the byte form.
+            uint64_t khk_h = CryptoGenerator::FNV1A64_OFFSET;
 
             for (int khk_i = 0; khk_i < 8; ++khk_i) {
                 khk_h ^= static_cast<uint64_t>(static_cast<uint32_t>(khk_k.k[khk_i]));
-                khk_h *= 1099511628211ull;
+                khk_h *= CryptoGenerator::FNV1A64_PRIME;
             }
 
             return static_cast<size_t>(khk_h);
@@ -4881,17 +4822,6 @@ static constexpr uint64_t KH_MESH_CACHE_MAX_BYTES = 1024ull * 1024ull * 1024ull;
 static constexpr uint32_t KH_MESH_CACHE_MAGIC = 0x434D484Bu;   // "KHMC" little-endian
 static constexpr uint32_t KH_MESH_CACHE_VERSION = 2;
 
-inline uint64_t kh_fnv1a64(const uint8_t* khmc_p, size_t khmc_n) {
-    uint64_t khmc_h = 1469598103934665603ull;
-
-    for (size_t khmc_i = 0; khmc_i < khmc_n; ++khmc_i) {
-        khmc_h ^= khmc_p[khmc_i];
-        khmc_h *= 1099511628211ull;
-    }
-
-    return khmc_h;
-}
-
 // Resolved once; "" = documents unavailable or creation failed - the cache
 // silently disables and every load is a plain import.
 inline const std::filesystem::path& kh_mesh_cache_dir() {
@@ -5145,7 +5075,7 @@ inline bool kh_fbx_register(MeshDef&& d, const std::string& path, int& out_id, s
             // Failure is non-fatal here: the id is published and every draw
             // path re-runs ensure_mesh_vbs (and skips the frame on error) -
             // report and let the retry own it.
-            if (!ve.empty()) kh_report_error("KH fbx '" + path + "': " + ve);
+            if (!ve.empty()) report_error_once_safe("KH fbx '" + path + "': " + ve);
         }
     }
     out_id = id;
@@ -5274,7 +5204,7 @@ inline std::filesystem::path kh_tex_cache_file(uint64_t khtc_hash) {
     return kh_mesh_cache_dir() / kh_cache_file_name("kht_", khtc_hash, ".khtc");
 }
 inline uint64_t kh_tex_hash(const std::vector<uint8_t>& khtc_bytes, bool khtc_srgb) {
-    uint64_t khtc_h = kh_fnv1a64(khtc_bytes.data(), khtc_bytes.size());
+    uint64_t khtc_h = CryptoGenerator::fnv1a64_raw(khtc_bytes.data(), khtc_bytes.size());
     if (khtc_srgb) khtc_h ^= 0x9E3779B97F4A7C15ull;   // the two colour spaces are two textures
     return khtc_h;
 }
@@ -5546,7 +5476,7 @@ inline bool kh_fbx_import(const std::string& path, int& out_id, std::string& err
                           std::istreambuf_iterator<char>());
     }
     if (khmc_bytes.empty()) { err = "empty file"; return false; }
-    const uint64_t khmc_hash = kh_fnv1a64(khmc_bytes.data(), khmc_bytes.size());
+    const uint64_t khmc_hash = CryptoGenerator::fnv1a64_raw(khmc_bytes.data(), khmc_bytes.size());
     // the first timing this path has ever had.
     g_fbx_read_ms += steady_now_ms() - khmc_t0;
     {
@@ -6215,7 +6145,7 @@ inline void kh_white_ensure(ID3D11Device* dev) {
     if (!khw_err.empty() || !khw_vsb || !khw_psb) {
         if (khw_vsb) khw_vsb->Release();
         if (khw_psb) khw_psb->Release();
-        kh_report_error("KH white preview: " + (khw_err.empty() ? std::string("no blob") : khw_err));
+        report_error_once_safe("KH white preview: " + (khw_err.empty() ? std::string("no blob") : khw_err));
         return;
     }
     // THE STEP NAMES ITSELF. khw_step carries the last attempted call and
@@ -6292,7 +6222,7 @@ inline void kh_white_ensure(ID3D11Device* dev) {
         KH_SAFE_RELEASE(g_res.white_frame_cb);
         KH_SAFE_RELEASE(g_res.rast_white);
         KH_SAFE_RELEASE(g_res.dss_white);
-        kh_report_error(std::string("KH white preview: ") + khw_step + " " + hr_str(khw_hr) +
+        report_error_once_safe(std::string("KH white preview: ") + khw_step + " " + hr_str(khw_hr) +
                         " (preview stands down)");
         return;
     }
@@ -6417,11 +6347,11 @@ inline std::string ensure_resources(ID3D11Device* dev) {
                                                khmv_blob->GetBufferSize(),
                                                nullptr, &g_vmir_vs))) {
                 g_vmir_vs = nullptr;
-                kh_report_error("KH mirror VS create failed (mirror stands down)");
+                report_error_once_safe("KH mirror VS create failed (mirror stands down)");
             }
             khmv_blob->Release();
         } else {
-            kh_report_error("KH mirror VS compile failed (mirror stands down): " + khmv_err);
+            report_error_once_safe("KH mirror VS compile failed (mirror stands down): " + khmv_err);
         }
     }
     err = compile_shader(static_src.c_str(), "VSFullscreen", "vs_5_0", khcb_rx_defines, &vs_fs_blob);
@@ -6447,7 +6377,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
                               g_cb_mirror_frame_b != static_cast<uint32_t>(KH_CBFRAME_BYTES);
             khcm_r->Release();
             if (g_cb_mirror_bad) {
-                kh_report_error("KH CB mirror: HLSL CBObj/CBFrame " + std::to_string(g_cb_mirror_obj_b) + "/" +
+                report_error_once_safe("KH CB mirror: HLSL CBObj/CBFrame " + std::to_string(g_cb_mirror_obj_b) + "/" +
                                 std::to_string(g_cb_mirror_frame_b) + " B vs C++ " +
                                 std::to_string(KH_CBOBJ_BYTES) + "/" + std::to_string(KH_CBFRAME_BYTES) + " B");
             }
@@ -6464,7 +6394,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
             dev->CreatePixelShader(khi_blob->GetBufferPointer(), khi_blob->GetBufferSize(), nullptr, &g_res.ps_inj_depth);
             khi_blob->Release();
         } else if (!khi_err.empty()) {
-            kh_report_error("KH inject-depth shader: " + khi_err);   // render-thread-reachable
+            report_error_once_safe("KH inject-depth shader: " + khi_err);   // render-thread-reachable
         }
     }
     {   // KH_MESH_OWNER_PREPASS: the owner draw's PS. NON-FATAL - a null
@@ -6476,7 +6406,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
             dev->CreatePixelShader(kho_blob->GetBufferPointer(), kho_blob->GetBufferSize(), nullptr, &g_res.ps_owner);
             kho_blob->Release();
         } else if (!kho_err.empty()) {
-            kh_report_error("KH owner-prepass shader: " + kho_err);
+            report_error_once_safe("KH owner-prepass shader: " + kho_err);
         }
     }
 
@@ -6488,7 +6418,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
             dev->CreatePixelShader(mc_blob->GetBufferPointer(), mc_blob->GetBufferSize(), nullptr, &g_res.ps_maskcast);
             mc_blob->Release();
         } else if (!mc_err.empty()) {
-            kh_report_error("KH maskcast shader: " + mc_err);   // render-thread-reachable
+            report_error_once_safe("KH maskcast shader: " + mc_err);   // render-thread-reachable
         }
     }
 
@@ -6502,7 +6432,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
             dev->CreatePixelShader(mp_blob->GetBufferPointer(), mp_blob->GetBufferSize(), nullptr, &g_res.ps_maskprime);
             mp_blob->Release();
         } else if (!mp_err.empty()) {
-            kh_report_error("KH maskprime shader: " + mp_err);
+            report_error_once_safe("KH maskprime shader: " + mp_err);
         }
     }
 
@@ -6529,7 +6459,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
 
             sd_blob->Release();
         } else if (!sd_err.empty()) {
-            kh_report_error("KH sun-depth shader: " + sd_err);   // render-thread-reachable
+            report_error_once_safe("KH sun-depth shader: " + sd_err);   // render-thread-reachable
         }
     }
 
@@ -6598,10 +6528,10 @@ inline std::string ensure_resources(ID3D11Device* dev) {
                 KH_SAFE_RELEASE(g_res.vs_tex);
                 KH_SAFE_RELEASE(g_res.ps_tex);
                 KH_SAFE_RELEASE(g_res.layout_tex);
-                kh_report_error("KH textured shaders: create " + hr_str(khtx_hr));
+                report_error_once_safe("KH textured shaders: create " + hr_str(khtx_hr));
             }
         } else {
-            kh_report_error("KH textured shaders: " + khtx_err);
+            report_error_once_safe("KH textured shaders: " + khtx_err);
         }
 
         if (khtx_vsb) khtx_vsb->Release();
@@ -6956,7 +6886,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         rd.CullMode = D3D11_CULL_FRONT;
         if (FAILED(dev->CreateRasterizerState(&rd, &g_res.rast_sun_bf))) {
             g_res.rast_sun_bf = nullptr;
-            kh_report_error("KH sun back-face rasterizer: create failed (mode 227 inert)");
+            report_error_once_safe("KH sun back-face rasterizer: create failed (mode 227 inert)");
         }
         rd.CullMode = D3D11_CULL_NONE;
         rd.DepthBias = 0;
@@ -6970,7 +6900,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         // a null bind or a silent half-arm.
         if (FAILED(dev->CreateRasterizerState(&rd, &g_res.rast_sun_nb))) {
             g_res.rast_sun_nb = nullptr;
-            kh_report_error("KH sun zero-bias rasterizer: create failed (mode 234 raster half inert)");
+            report_error_once_safe("KH sun zero-bias rasterizer: create failed (mode 234 raster half inert)");
         }
 
         // Everything rast_sun is, with DepthClipEnable FALSE - because the
@@ -7442,7 +7372,7 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
     ID3DBlob* ps_blob = nullptr;
     auto comp_fail = [&](const std::string& e) {
         g_comp_last_err = e;
-        if (g_comp_fail_streak == 0) kh_report_error("KH composite shader: " + e);   // render-thread-reachable
+        if (g_comp_fail_streak == 0) report_error_once_safe("KH composite shader: " + e);   // render-thread-reachable
         g_comp_fail_streak++;
         g_comp_next_retry = now_bo + 2.0f;
         g_stats.effect_setup_fails++;
@@ -7491,10 +7421,10 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
                 KH_SAFE_RELEASE(g_res.vs_comp_tex);
                 KH_SAFE_RELEASE(g_res.ps_comp_tex);
                 KH_SAFE_RELEASE(g_res.ps_comp_arb_tex);
-                kh_report_error("KH textured composite: create " + hr_str(khtx_hr));
+                report_error_once_safe("KH textured composite: create " + hr_str(khtx_hr));
             }
         } else {
-            kh_report_error("KH textured composite: " + khtx_err);
+            report_error_once_safe("KH textured composite: " + khtx_err);
         }
 
         if (khtx_vsb) khtx_vsb->Release();
@@ -7583,42 +7513,14 @@ static bool        g_video_opt_keys_done = false;
 // NOT session-reset: settings-class state.
 static std::atomic<int> g_sun_range_src{0};
 
+inline bool kh_sun_map_ensure(ID3D11Device* dev, UINT khsm_size,
+                              ID3D11Texture2D*& khsm_tex,
+                              ID3D11DepthStencilView*& khsm_dsv,
+                              ID3D11ShaderResourceView*& khsm_srv);   // defined with the bands
+
 inline bool ensure_sun_depth(ID3D11Device* dev) {
     if (g_res.sun_tex && g_res.sun_dsv && g_res.sun_srv) return true;
-    KH_SAFE_RELEASE(g_res.sun_srv);
-    KH_SAFE_RELEASE(g_res.sun_dsv);
-    KH_SAFE_RELEASE(g_res.sun_tex);
-    D3D11_TEXTURE2D_DESC td = {};
-    td.Width = KH_SUN_DEPTH_SIZE;
-    td.Height = KH_SUN_DEPTH_SIZE;
-    td.MipLevels = 1;
-    td.ArraySize = 1;
-    td.Format = DXGI_FORMAT_R32_TYPELESS;
-    td.SampleDesc.Count = 1;
-    td.Usage = D3D11_USAGE_DEFAULT;
-    td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
-    if (FAILED(dev->CreateTexture2D(&td, nullptr, &g_res.sun_tex))) return false;
-    D3D11_DEPTH_STENCIL_VIEW_DESC dd = {};
-    dd.Format = DXGI_FORMAT_D32_FLOAT;
-    dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-
-    if (FAILED(dev->CreateDepthStencilView(g_res.sun_tex, &dd, &g_res.sun_dsv))) {
-        KH_SAFE_RELEASE(g_res.sun_tex);
-        return false;
-    }
-
-    D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
-    sd.Format = DXGI_FORMAT_R32_FLOAT;
-    sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-    sd.Texture2D.MipLevels = 1;
-
-    if (FAILED(dev->CreateShaderResourceView(g_res.sun_tex, &sd, &g_res.sun_srv))) {
-        KH_SAFE_RELEASE(g_res.sun_dsv);
-        KH_SAFE_RELEASE(g_res.sun_tex);
-        return false;
-    }
-
-    return true;
+    return kh_sun_map_ensure(dev, KH_SUN_DEPTH_SIZE, g_res.sun_tex, g_res.sun_dsv, g_res.sun_srv);
 }
 
 // the hero map's resource trio - same construction as ensure_sun_depth, at
@@ -7767,144 +7669,62 @@ inline bool ensure_sun_pf(ID3D11Device* dev) {
     return true;
 }
 
-inline bool ensure_sun_depth2(ID3D11Device* dev) {
-    if (g_res.sun2_tex && g_res.sun2_dsv && g_res.sun2_srv) return true;
-    KH_SAFE_RELEASE(g_res.sun2_srv);
-    KH_SAFE_RELEASE(g_res.sun2_dsv);
-    KH_SAFE_RELEASE(g_res.sun2_tex);
+// ONE map ensure for every private sun map (union + the four camera-anchored
+// bands): R32_TYPELESS texture, D32 DSV, R32 SRV, square, single-sample.
+// The per-band twins differed only in size and resource triple. Non-fatal:
+// a failed band stands itself down (its meta stays 0) and the chain falls
+// through.
+inline bool kh_sun_map_ensure(ID3D11Device* dev, UINT khsm_size,
+                              ID3D11Texture2D*& khsm_tex,
+                              ID3D11DepthStencilView*& khsm_dsv,
+                              ID3D11ShaderResourceView*& khsm_srv) {
+    if (khsm_tex && khsm_dsv && khsm_srv) return true;
+    KH_SAFE_RELEASE(khsm_srv);
+    KH_SAFE_RELEASE(khsm_dsv);
+    KH_SAFE_RELEASE(khsm_tex);
     D3D11_TEXTURE2D_DESC td = {};
-    td.Width = KH_SUN_HERO_SIZE;
-    td.Height = KH_SUN_HERO_SIZE;
+    td.Width = khsm_size;
+    td.Height = khsm_size;
     td.MipLevels = 1;
     td.ArraySize = 1;
     td.Format = DXGI_FORMAT_R32_TYPELESS;
     td.SampleDesc.Count = 1;
     td.Usage = D3D11_USAGE_DEFAULT;
     td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
-    if (FAILED(dev->CreateTexture2D(&td, nullptr, &g_res.sun2_tex))) return false;
+    if (FAILED(dev->CreateTexture2D(&td, nullptr, &khsm_tex))) return false;
     D3D11_DEPTH_STENCIL_VIEW_DESC dd = {};
     dd.Format = DXGI_FORMAT_D32_FLOAT;
     dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-    if (FAILED(dev->CreateDepthStencilView(g_res.sun2_tex, &dd, &g_res.sun2_dsv))) {
-        KH_SAFE_RELEASE(g_res.sun2_tex);
+    if (FAILED(dev->CreateDepthStencilView(khsm_tex, &dd, &khsm_dsv))) {
+        KH_SAFE_RELEASE(khsm_tex);
         return false;
     }
     D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
     sd.Format = DXGI_FORMAT_R32_FLOAT;
     sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
     sd.Texture2D.MipLevels = 1;
-    if (FAILED(dev->CreateShaderResourceView(g_res.sun2_tex, &sd, &g_res.sun2_srv))) {
-        KH_SAFE_RELEASE(g_res.sun2_dsv);
-        KH_SAFE_RELEASE(g_res.sun2_tex);
+    if (FAILED(dev->CreateShaderResourceView(khsm_tex, &sd, &khsm_srv))) {
+        KH_SAFE_RELEASE(khsm_dsv);
+        KH_SAFE_RELEASE(khsm_tex);
         return false;
     }
     return true;
 }
 
-// Non-fatal: a failed band stands itself down (its meta stays 0) and the
-// chain falls through.
-inline bool ensure_sun_depth3(ID3D11Device* dev) {
-    if (g_res.sun3_tex && g_res.sun3_dsv && g_res.sun3_srv) return true;
-    KH_SAFE_RELEASE(g_res.sun3_srv);
-    KH_SAFE_RELEASE(g_res.sun3_dsv);
-    KH_SAFE_RELEASE(g_res.sun3_tex);
-    D3D11_TEXTURE2D_DESC td = {};
-    td.Width = KH_SUN_MID_SIZE;
-    td.Height = KH_SUN_MID_SIZE;
-    td.MipLevels = 1;
-    td.ArraySize = 1;
-    td.Format = DXGI_FORMAT_R32_TYPELESS;
-    td.SampleDesc.Count = 1;
-    td.Usage = D3D11_USAGE_DEFAULT;
-    td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
-    if (FAILED(dev->CreateTexture2D(&td, nullptr, &g_res.sun3_tex))) return false;
-    D3D11_DEPTH_STENCIL_VIEW_DESC dd = {};
-    dd.Format = DXGI_FORMAT_D32_FLOAT;
-    dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-    if (FAILED(dev->CreateDepthStencilView(g_res.sun3_tex, &dd, &g_res.sun3_dsv))) {
-        KH_SAFE_RELEASE(g_res.sun3_tex);
-        return false;
-    }
-    D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
-    sd.Format = DXGI_FORMAT_R32_FLOAT;
-    sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-    sd.Texture2D.MipLevels = 1;
-    if (FAILED(dev->CreateShaderResourceView(g_res.sun3_tex, &sd, &g_res.sun3_srv))) {
-        KH_SAFE_RELEASE(g_res.sun3_dsv);
-        KH_SAFE_RELEASE(g_res.sun3_tex);
-        return false;
-    }
-    return true;
+inline bool ensure_sun_depth2(ID3D11Device* dev) {   // hero
+    return kh_sun_map_ensure(dev, KH_SUN_HERO_SIZE, g_res.sun2_tex, g_res.sun2_dsv, g_res.sun2_srv);
 }
 
-// Non-fatal: a failed band stands itself down (its meta stays 0) and the
-// chain falls through. Non-fatal like every band.
-inline bool ensure_sun_depth5(ID3D11Device* dev) {
-    if (g_res.sun5_tex && g_res.sun5_dsv && g_res.sun5_srv) return true;
-    KH_SAFE_RELEASE(g_res.sun5_srv);
-    KH_SAFE_RELEASE(g_res.sun5_dsv);
-    KH_SAFE_RELEASE(g_res.sun5_tex);
-    D3D11_TEXTURE2D_DESC td = {};
-    td.Width = KH_SUN_FAR_SIZE;
-    td.Height = KH_SUN_FAR_SIZE;
-    td.MipLevels = 1;
-    td.ArraySize = 1;
-    td.Format = DXGI_FORMAT_R32_TYPELESS;
-    td.SampleDesc.Count = 1;
-    td.Usage = D3D11_USAGE_DEFAULT;
-    td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
-    if (FAILED(dev->CreateTexture2D(&td, nullptr, &g_res.sun5_tex))) return false;
-    D3D11_DEPTH_STENCIL_VIEW_DESC dd = {};
-    dd.Format = DXGI_FORMAT_D32_FLOAT;
-    dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-    if (FAILED(dev->CreateDepthStencilView(g_res.sun5_tex, &dd, &g_res.sun5_dsv))) {
-        KH_SAFE_RELEASE(g_res.sun5_tex);
-        return false;
-    }
-    D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
-    sd.Format = DXGI_FORMAT_R32_FLOAT;
-    sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-    sd.Texture2D.MipLevels = 1;
-    if (FAILED(dev->CreateShaderResourceView(g_res.sun5_tex, &sd, &g_res.sun5_srv))) {
-        KH_SAFE_RELEASE(g_res.sun5_dsv);
-        KH_SAFE_RELEASE(g_res.sun5_tex);
-        return false;
-    }
-    return true;
+inline bool ensure_sun_depth3(ID3D11Device* dev) {   // mid band
+    return kh_sun_map_ensure(dev, KH_SUN_MID_SIZE, g_res.sun3_tex, g_res.sun3_dsv, g_res.sun3_srv);
 }
 
-inline bool ensure_sun_depth4(ID3D11Device* dev) {
-    if (g_res.sun4_tex && g_res.sun4_dsv && g_res.sun4_srv) return true;
-    KH_SAFE_RELEASE(g_res.sun4_srv);
-    KH_SAFE_RELEASE(g_res.sun4_dsv);
-    KH_SAFE_RELEASE(g_res.sun4_tex);
-    D3D11_TEXTURE2D_DESC td = {};
-    td.Width = KH_SUN_OUT_SIZE;
-    td.Height = KH_SUN_OUT_SIZE;
-    td.MipLevels = 1;
-    td.ArraySize = 1;
-    td.Format = DXGI_FORMAT_R32_TYPELESS;
-    td.SampleDesc.Count = 1;
-    td.Usage = D3D11_USAGE_DEFAULT;
-    td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
-    if (FAILED(dev->CreateTexture2D(&td, nullptr, &g_res.sun4_tex))) return false;
-    D3D11_DEPTH_STENCIL_VIEW_DESC dd = {};
-    dd.Format = DXGI_FORMAT_D32_FLOAT;
-    dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-    if (FAILED(dev->CreateDepthStencilView(g_res.sun4_tex, &dd, &g_res.sun4_dsv))) {
-        KH_SAFE_RELEASE(g_res.sun4_tex);
-        return false;
-    }
-    D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
-    sd.Format = DXGI_FORMAT_R32_FLOAT;
-    sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-    sd.Texture2D.MipLevels = 1;
-    if (FAILED(dev->CreateShaderResourceView(g_res.sun4_tex, &sd, &g_res.sun4_srv))) {
-        KH_SAFE_RELEASE(g_res.sun4_dsv);
-        KH_SAFE_RELEASE(g_res.sun4_tex);
-        return false;
-    }
-    return true;
+inline bool ensure_sun_depth5(ID3D11Device* dev) {   // FAR band
+    return kh_sun_map_ensure(dev, KH_SUN_FAR_SIZE, g_res.sun5_tex, g_res.sun5_dsv, g_res.sun5_srv);
+}
+
+inline bool ensure_sun_depth4(ID3D11Device* dev) {   // outer band
+    return kh_sun_map_ensure(dev, KH_SUN_OUT_SIZE, g_res.sun4_tex, g_res.sun4_dsv, g_res.sun4_srv);
 }
 
 inline std::string ensure_compute_shaders(ID3D11Device* dev) {
@@ -8050,6 +7870,38 @@ struct StateBackup {
     }
 };
 
+// OMSetRenderTargets(N, ...) NULLS every slot it does not name, so a
+// get/set pair that carries only slot 0 silently drops any engine
+// multi-target bind behind our draw. Every flush-side target swap goes
+// through this: full slot set in, full slot set out. Window census:
+// g_om_mrt_saves counts captures that found a target in a slot above 0 -
+// a non-zero read is the proof the width mattered (reset_stat_counters).
+static uint64_t g_om_mrt_saves = 0;
+
+struct KhOmSave {
+    ID3D11RenderTargetView* rtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+    ID3D11DepthStencilView* dsv = nullptr;
+    void capture(ID3D11DeviceContext* ctx) {
+        ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, &dsv);
+        for (UINT khom_i = 1; khom_i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++khom_i) {
+            if (rtv[khom_i]) { g_om_mrt_saves++; break; }
+        }
+    }
+    // Rebind the saved targets under a DIFFERENT depth view (the read-only
+    // DSV swap): the colour set is untouched, only the DSV moves.
+    void set_with_dsv(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* khom_dsv) {
+        ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, khom_dsv);
+    }
+    void restore(ID3D11DeviceContext* ctx) {
+        ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, dsv);
+    }
+    void release() {
+        for (UINT khom_i = 0; khom_i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++khom_i)
+            KH_SAFE_RELEASE(rtv[khom_i]);
+        KH_SAFE_RELEASE(dsv);
+    }
+};
+
 // Compute-stage state snapshot (only what compute dispatches touch)
 struct ComputeStateBackup {
     ID3D11ComputeShader*       cs = nullptr;
@@ -8148,9 +8000,8 @@ inline std::string snapshot_composite_depth(ID3D11Device* dev, ID3D11DeviceConte
     // hazard null-out; everything touched is restored below.
     StateBackup backup;
     backup.capture(ctx);
-    ID3D11RenderTargetView* saved_rtv = nullptr;
-    ID3D11DepthStencilView* saved_dsv = nullptr;
-    ctx->OMGetRenderTargets(1, &saved_rtv, &saved_dsv);
+    KhOmSave khs_om;
+    khs_om.capture(ctx);
     UINT n_vp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
     D3D11_VIEWPORT saved_vp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
     ctx->RSGetViewports(&n_vp, saved_vp);
@@ -8181,9 +8032,8 @@ inline std::string snapshot_composite_depth(ID3D11Device* dev, ID3D11DeviceConte
     ID3D11ShaderResourceView* khs_null_srv = nullptr;
     ctx->PSSetShaderResources(0, 1, &khs_null_srv);
 
-    ctx->OMSetRenderTargets(1, &saved_rtv, saved_dsv);
-    if (saved_rtv) saved_rtv->Release();
-    if (saved_dsv) saved_dsv->Release();
+    khs_om.restore(ctx);
+    khs_om.release();
     if (n_vp > 0) ctx->RSSetViewports(n_vp, saved_vp);
     backup.restore(ctx);
 
@@ -9398,7 +9248,7 @@ inline void kh_thm_autobuild_step() {
     } catch (...) {
         g_thm_auto_state = 3;
         g_thm_auto_retry = 0;
-        kh_report_error("KH terrain auto-acquisition: engine query failed (will retry)");
+        report_error_once_safe("KH terrain auto-acquisition: engine query failed (will retry)");
     }
 }
 
@@ -9600,7 +9450,7 @@ static uint32_t g_fk_veto_cand_n = 0;   // candidates staged at the last pass BE
                                             // campaign-43 handoff.
 // Build tag: monotonic, never reused, bumped once per shipped build (including
 // pure reverts). Keep it a constexpr int, not a #define.
-static constexpr int KH_BUILD_TAG = 26694;
+static constexpr int KH_BUILD_TAG = 26699;
 // Continuous at the near plane, so routing on/off never pops a fragment.
 static constexpr float KH_NEARZ_GAP_FRAC = 0.92f;
 // 3 = mode 203 - passthrough + absolute form.
@@ -12579,6 +12429,21 @@ static float    g_sun5_half_diag = 0.0f;
 static bool     g_sun5_map_valid = false;
 static uint64_t g_sun5_renders = 0;
 static uint64_t g_sun5_casters = 0;
+
+// The four camera-anchored bands fill CBFrame identically (rebased VP + meta:
+// valid, size, bias, half-diag); one helper keeps the flush and injection
+// fills - twins by rule - from drifting. A stood-down band leaves its lanes
+// at the zeroed default, which the shader reads as 'no map'.
+inline void kh_fill_sun_tier_cb(float khft_vp[4][4], float khft_meta[4], bool khft_valid,
+                                float khft_map_vp[4][4], float khft_bias,
+                                float khft_half_diag, UINT khft_size) {
+    if (!khft_valid) return;
+    kh_sun_rebase_vp(&khft_vp[0][0], &khft_map_vp[0][0], g_sun_cam_anchor, g_sun_anchor_now);
+    khft_meta[0] = 1.0f;
+    khft_meta[1] = static_cast<float>(khft_size);
+    khft_meta[2] = khft_bias;
+    khft_meta[3] = khft_half_diag;
+}
 // KH_SELF_PREFILTER: per-band moment-pyramid freshness. False unless THIS
 // band render also completed its convert+mips; the mesh fill arms sunPf per
 // band from (band valid && this), mode 357 zeroes.
@@ -15535,12 +15400,12 @@ inline void dynlights_publish(const uint8_t* khd_p, int khd_s) {
     g_dl.serial++;
     g_dl.valid = true;
 
-    uint64_t khd_h = 1469598103934665603ull;   // FNV-1a over counts + active records
-    khd_h = (khd_h ^ khd_pc) * 1099511628211ull;
-    khd_h = (khd_h ^ khd_sc) * 1099511628211ull;
+    uint64_t khd_h = CryptoGenerator::FNV1A64_OFFSET;   // FNV-1a over counts (word mixes) + active records (bytes)
+    khd_h = (khd_h ^ khd_pc) * CryptoGenerator::FNV1A64_PRIME;
+    khd_h = (khd_h ^ khd_sc) * CryptoGenerator::FNV1A64_PRIME;
     const uint8_t* khd_hb = khd_p + KH_DL_CTL_BYTES;
     const size_t khd_hn = static_cast<size_t>(khd_total) * KH_DL_LIGHT_BYTES;
-    for (size_t i = 0; i < khd_hn; ++i) khd_h = (khd_h ^ khd_hb[i]) * 1099511628211ull;
+    khd_h = CryptoGenerator::fnv1a64_update(khd_h, khd_hb, khd_hn);
     if (khd_h != g_dl.hash) { g_dl.hash_changes++; g_dl.hash = khd_h; }
 
     DlRingEntry& khd_r = g_dl.ring[g_dl.ring_head++ % KH_DL_RING];
@@ -16114,44 +15979,20 @@ inline void fill_lighting_frame_cb(ConstantData& cbd) {
 
         // the hero tier rides the union's freshness window - it is rendered
         // by the same pass, so one clock serves both.
-        if (g_sun2_map_valid) {
-            kh_sun_rebase_vp(&cbd.sun_vp2[0][0], &g_sun2_map_vp[0][0],
-                             g_sun_cam_anchor, g_sun_anchor_now);
-            cbd.sun_meta2[0] = 1.0f;
-            cbd.sun_meta2[1] = static_cast<float>(KH_SUN_HERO_SIZE);
-            cbd.sun_meta2[2] = g_sun2_map_bias;
-            cbd.sun_meta2[3] = g_sun2_half_diag;
-        }
+        kh_fill_sun_tier_cb(cbd.sun_vp2, cbd.sun_meta2, g_sun2_map_valid,
+                            g_sun2_map_vp, g_sun2_map_bias, g_sun2_half_diag, KH_SUN_HERO_SIZE);
 
         // the MID and OUTER bands ride the same clock - rendered by the same
         // pass, one freshness window for the whole ladder (KH_SUN_CASCADE). A
         // downed/failed band leaves its meta zeroed and the shader chain
         // falls through.
-        if (g_sun3_map_valid) {
-            kh_sun_rebase_vp(&cbd.sun_vp3[0][0], &g_sun3_map_vp[0][0],
-                             g_sun_cam_anchor, g_sun_anchor_now);
-            cbd.sun_meta3[0] = 1.0f;
-            cbd.sun_meta3[1] = static_cast<float>(KH_SUN_MID_SIZE);
-            cbd.sun_meta3[2] = g_sun3_map_bias;
-            cbd.sun_meta3[3] = g_sun3_half_diag;
-        }
+        kh_fill_sun_tier_cb(cbd.sun_vp3, cbd.sun_meta3, g_sun3_map_valid,
+                            g_sun3_map_vp, g_sun3_map_bias, g_sun3_half_diag, KH_SUN_MID_SIZE);
 
-        if (g_sun4_map_valid) {
-            kh_sun_rebase_vp(&cbd.sun_vp4[0][0], &g_sun4_map_vp[0][0],
-                             g_sun_cam_anchor, g_sun_anchor_now);
-            cbd.sun_meta4[0] = 1.0f;
-            cbd.sun_meta4[1] = static_cast<float>(KH_SUN_OUT_SIZE);
-            cbd.sun_meta4[2] = g_sun4_map_bias;
-            cbd.sun_meta4[3] = g_sun4_half_diag;
-        }
-        if (g_sun5_map_valid) {   // FAR band, same clock
-            kh_sun_rebase_vp(&cbd.sun_vp5[0][0], &g_sun5_map_vp[0][0],
-                             g_sun_cam_anchor, g_sun_anchor_now);
-            cbd.sun_meta5[0] = 1.0f;
-            cbd.sun_meta5[1] = static_cast<float>(KH_SUN_FAR_SIZE);
-            cbd.sun_meta5[2] = g_sun5_map_bias;
-            cbd.sun_meta5[3] = g_sun5_half_diag;
-        }
+        kh_fill_sun_tier_cb(cbd.sun_vp4, cbd.sun_meta4, g_sun4_map_valid,
+                            g_sun4_map_vp, g_sun4_map_bias, g_sun4_half_diag, KH_SUN_OUT_SIZE);
+        kh_fill_sun_tier_cb(cbd.sun_vp5, cbd.sun_meta5, g_sun5_map_valid,
+                            g_sun5_map_vp, g_sun5_map_bias, g_sun5_half_diag, KH_SUN_FAR_SIZE);   // FAR band, same clock
         // KH_SELF_PREFILTER arms (mode 357 = classic taps everywhere; a band
         // whose convert did not complete stays classic on its own - the flag
         // pairs render AND convert).
@@ -19959,7 +19800,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     // never let a stale map vouch for new inputs. (Failure-exonerated
     // re-application: this block sits after the derived-sun guard and
     // provably never executed in the corrupted sessions.)
-    uint64_t input_hash = 1469598103934665603ull;
+    uint64_t input_hash = CryptoGenerator::FNV1A64_OFFSET;
     auto khsh_render_cams = [&](bool khsh_standalone) -> void {
         const int khsh_dm = g_dbg_mode.load(std::memory_order_relaxed);
         if (!cam_valid || casters.empty()) {
@@ -20522,12 +20363,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
 
     {
         auto fnv = [&input_hash](const void* p, size_t n) {
-            const unsigned char* b = static_cast<const unsigned char*>(p);
-
-            for (size_t i = 0; i < n; ++i) {
-                input_hash ^= b[i];
-                input_hash *= 1099511628211ull;
-            }
+            input_hash = CryptoGenerator::fnv1a64_update(input_hash, p, n);
         };
 
         for (const auto& c : casters) {
@@ -22369,38 +22205,14 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
             // is this CB's consumer; the mesh fill's map deliberately does
             // not carry 243 (its default 1.0 keeps every mesh-side term at
             // mode-0 behaviour).
-            if (g_sun2_map_valid) {
-                kh_sun_rebase_vp(&cbd.sun_vp2[0][0], &g_sun2_map_vp[0][0],
-                                 g_sun_cam_anchor, g_sun_anchor_now);
-                cbd.sun_meta2[0] = 1.0f;
-                cbd.sun_meta2[1] = static_cast<float>(KH_SUN_HERO_SIZE);
-                cbd.sun_meta2[2] = g_sun2_map_bias;
-                cbd.sun_meta2[3] = g_sun2_half_diag;
-            }
-            if (g_sun3_map_valid) {
-                kh_sun_rebase_vp(&cbd.sun_vp3[0][0], &g_sun3_map_vp[0][0],
-                                 g_sun_cam_anchor, g_sun_anchor_now);
-                cbd.sun_meta3[0] = 1.0f;
-                cbd.sun_meta3[1] = static_cast<float>(KH_SUN_MID_SIZE);
-                cbd.sun_meta3[2] = g_sun3_map_bias;
-                cbd.sun_meta3[3] = g_sun3_half_diag;
-            }
-            if (g_sun4_map_valid) {
-                kh_sun_rebase_vp(&cbd.sun_vp4[0][0], &g_sun4_map_vp[0][0],
-                                 g_sun_cam_anchor, g_sun_anchor_now);
-                cbd.sun_meta4[0] = 1.0f;
-                cbd.sun_meta4[1] = static_cast<float>(KH_SUN_OUT_SIZE);
-                cbd.sun_meta4[2] = g_sun4_map_bias;
-                cbd.sun_meta4[3] = g_sun4_half_diag;
-            }
-            if (g_sun5_map_valid) {   // FAR band
-                kh_sun_rebase_vp(&cbd.sun_vp5[0][0], &g_sun5_map_vp[0][0],
-                                 g_sun_cam_anchor, g_sun_anchor_now);
-                cbd.sun_meta5[0] = 1.0f;
-                cbd.sun_meta5[1] = static_cast<float>(KH_SUN_FAR_SIZE);
-                cbd.sun_meta5[2] = g_sun5_map_bias;
-                cbd.sun_meta5[3] = g_sun5_half_diag;
-            }
+            kh_fill_sun_tier_cb(cbd.sun_vp2, cbd.sun_meta2, g_sun2_map_valid,
+                                g_sun2_map_vp, g_sun2_map_bias, g_sun2_half_diag, KH_SUN_HERO_SIZE);
+            kh_fill_sun_tier_cb(cbd.sun_vp3, cbd.sun_meta3, g_sun3_map_valid,
+                                g_sun3_map_vp, g_sun3_map_bias, g_sun3_half_diag, KH_SUN_MID_SIZE);
+            kh_fill_sun_tier_cb(cbd.sun_vp4, cbd.sun_meta4, g_sun4_map_valid,
+                                g_sun4_map_vp, g_sun4_map_bias, g_sun4_half_diag, KH_SUN_OUT_SIZE);
+            kh_fill_sun_tier_cb(cbd.sun_vp5, cbd.sun_meta5, g_sun5_map_valid,
+                                g_sun5_map_vp, g_sun5_map_bias, g_sun5_half_diag, KH_SUN_FAR_SIZE);   // FAR band
             {
                 const int khcc_m = g_dbg_mode.load(std::memory_order_relaxed);
                 cbd.lighting0[1] = khcc_m == 243 ? 21.0f   // cast chain revert
@@ -25421,7 +25233,7 @@ inline bool kh_vmir_ensure_gpu(ID3D11Device* khvg_dev) {
                                                     nullptr, &khvg_blob);
         if (!khvg_err.empty() || !khvg_blob) {
             g_vmir_cs_failed = true;   // rule: a compile failure names itself
-            kh_report_error("KH mirror CS compile failed (pass stands down): " + khvg_err);
+            report_error_once_safe("KH mirror CS compile failed (pass stands down): " + khvg_err);
             return false;
         }
         const HRESULT khvg_hr = khvg_dev->CreateComputeShader(khvg_blob->GetBufferPointer(),
@@ -25431,7 +25243,7 @@ inline bool kh_vmir_ensure_gpu(ID3D11Device* khvg_dev) {
         if (FAILED(khvg_hr) || !g_vmir_cs) {
             g_vmir_cs = nullptr;
             g_vmir_cs_failed = true;
-            kh_report_error("KH mirror CS create failed (pass stands down)");
+            report_error_once_safe("KH mirror CS create failed (pass stands down)");
             return false;
         }
     }
@@ -34024,7 +33836,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
         if (!khs_err.empty()) {
             g_snap_fails++;
-            kh_report_error("KH occlusion snapshot: " + khs_err);
+            report_error_once_safe("KH occlusion snapshot: " + khs_err);
         } else {
             g_snap_serial++;
             g_snap_ms = steady_now_ms();
@@ -34083,7 +33895,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // the game thread; the texture + live meta go live here, under the park).
     if (g_thm_dirty) {
         std::string kht_err = kh_thm_upload(dev);
-        if (!kht_err.empty()) kh_report_error("KH terrain heightmap: " + kht_err);
+        if (!kht_err.empty()) report_error_once_safe("KH terrain heightmap: " + kht_err);
     }
 
     if (khs_nothing_late) {
@@ -34316,7 +34128,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             // Once per distinct message: effect setup failures used to be
             // COUNTED only (effectSetupFails), which named the symptom but
             // never the cause.
-            if (!effects_ready) kh_report_error("KH effect setup: " + khf_fx_err);
+            if (!effects_ready) report_error_once_safe("KH effect setup: " + khf_fx_err);
         }
 
         depth_fx_ready = effects_ready && any_depth_fx &&
@@ -34367,12 +34179,11 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // effect while active: depth WRITES are disabled for the whole phase, so
     // mode-1 objects do not write depth on frames where Outline/Pulse effects
     // are present.
-    ID3D11RenderTargetView* saved_rtv = nullptr;
-    ID3D11DepthStencilView* saved_dsv = nullptr;
+    KhOmSave khf_om;
 
     if (depth_fx_ready) {
-        ctx->OMGetRenderTargets(1, &saved_rtv, &saved_dsv);
-        ctx->OMSetRenderTargets(1, &saved_rtv, g_res.depth_dsv_ro);
+        khf_om.capture(ctx);
+        khf_om.set_with_dsv(ctx, g_res.depth_dsv_ro);
     }
 
     // Common pipeline state
@@ -35577,9 +35388,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             // never did.
             kh_ensure_ok("fullscreen chain", chain_err);
         } else {
-            ID3D11RenderTargetView* saved_chain_rtv = nullptr;
-            ID3D11DepthStencilView* saved_chain_dsv = nullptr;
-            ctx->OMGetRenderTargets(1, &saved_chain_rtv, &saved_chain_dsv);
+            KhOmSave khfp_om;
+            khfp_om.capture(ctx);
             ctx->IASetInputLayout(nullptr);
             ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
             ctx->PSSetShader(g_res.ps_effect, nullptr, 0);
@@ -35776,7 +35586,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 // Unbind the source slot before binding it as RTV next round
                 ID3D11ShaderResourceView* khfp_null = nullptr;
                 ctx->PSSetShaderResources(0, 1, &khfp_null);
-                if (khfp_final) ctx->OMSetRenderTargets(1, &saved_chain_rtv, saved_chain_dsv);
+                if (khfp_final) khfp_om.restore(ctx);
                 else            ctx->OMSetRenderTargets(1, &g_res.chain_rtv[write_idx], nullptr);
                 ctx->PSSetShaderResources(0, 1, &src_srv);
                 // gather at t3 for the resolve draw (bound AFTER the OM above
@@ -35865,7 +35675,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             if (khfp_live) {
                 khfp_flush(true);
             } else {
-                ctx->OMSetRenderTargets(1, &saved_chain_rtv, saved_chain_dsv);
+                khfp_om.restore(ctx);
             }
 
             if (khts_arm) {
@@ -35876,17 +35686,15 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 g_res.ts_cursor = (khts_slot + 1) % 3;
             }
 
-            if (saved_chain_rtv) saved_chain_rtv->Release();
-            if (saved_chain_dsv) saved_chain_dsv->Release();
+            khfp_om.release();
         }
     }
 
     if (depth_fx_ready) {
-        ctx->OMSetRenderTargets(1, &saved_rtv, saved_dsv);
+        khf_om.restore(ctx);
     }
 
-    if (saved_rtv) saved_rtv->Release();
-    if (saved_dsv) saved_dsv->Release();
+    khf_om.release();
     backup.restore(ctx);
 }
 
@@ -36936,6 +36744,7 @@ inline void ensure_draw_eh() {
 
 inline void reset_stat_counters() {
     g_stats = RenderStats{};
+    g_om_mrt_saves = 0;
     // KH_JITTER_FLOOR . The prev-frame state is NOT reset - it is continuity,
     // not census, and clearing it would manufacture one false hold on the
     // frame after every getRenderStats call.

@@ -150,6 +150,31 @@ public:
         return result;
     }
 
+    // Raw FNV-1a 64 for binary consumers (cache keys, change detection):
+    // numeric result, arbitrary bytes, streaming form. Separate from the
+    // SQF-facing fnv1a64() below, which stays as it is.
+    static constexpr uint64_t FNV1A64_OFFSET = 0xcbf29ce484222325ull;
+    static constexpr uint64_t FNV1A64_PRIME  = 0x100000001b3ull;
+
+    // Continue `hash` over `size` bytes; seed with FNV1A64_OFFSET for the
+    // standard digest, or with a previous return value to chain fields.
+    static uint64_t fnv1a64_update(uint64_t hash, const void* data, size_t size) {
+        const uint8_t* p = static_cast<const uint8_t*>(data);
+        const uint8_t* end = p + size;
+
+        while (p != end) {
+            hash ^= *p++;
+            hash *= FNV1A64_PRIME;
+        }
+
+        return hash;
+    }
+
+    // One-shot numeric digest of a byte range.
+    static uint64_t fnv1a64_raw(const void* data, size_t size) {
+        return fnv1a64_update(FNV1A64_OFFSET, data, size);
+    }
+
     static std::string fnv1a64(const std::string& input) {
         uint64_t hash = 0xcbf29ce484222325ull;
         const uint8_t* data = reinterpret_cast<const uint8_t*>(input.data());

@@ -1322,6 +1322,10 @@ struct RenderObject {
                                 // this flag is the custom author's one-bit
                                 // declaration (updatePostFX "uispill").
     bool  localized = false;   // fullscreen pass masked to a world-space sphere around pos
+    bool  local_inverse = false;   // KH_LOCAL_INVERSE: the mask complemented - the
+                                // pass reaches everything EXCEPT the volume
+                                // (addLocalPostFX 'inverse'; CB lane local_radii[3]
+                                // <-> localRadii.w, both sides; effect3 flips the mask)
     float local_radius[3] = { 25.0f, 25.0f, 25.0f };   // full-strength radii per SQF axis [x, y, z] (m)
     int   local_shape = 0;   // 0 = sphere/ellipsoid, 1 = cube/mesh mask
     float local_falloff = 10.0f;   // fade-to-zero band beyond the radius (m)
@@ -1360,6 +1364,13 @@ struct RenderObject {
                                 // this). Draw paths only; the sun-depth and
                                 // analytic cast passes stay CullNone so open
                                 // meshes still cast full shadows.
+    bool  lod_lock = false;   // KH_LOD_LOCK: this INSTANCE always draws level
+                                // 0 - kh_lod_pick is skipped at both colour
+                                // loops (twins), so no crossfade and no
+                                // transition ever. The mesh's ladder still
+                                // builds and caches (kh_lod_build is per
+                                // MeshDef, not per instance) and the shadow
+                                // pass keeps its own level rule.
     int   blend_mode = 0;   // 0 normal, 1 additive, 2 multiply, 3 screen, 4 lighten, 5 darken
     // FBX materials (updateRender3D "material"): immutable snapshot, swapped
     // copy-on-write under g_draw_list_mutex.
@@ -9630,7 +9641,7 @@ static uint32_t g_fk_veto_cand_n = 0;   // candidates staged at the last pass BE
                                             // campaign-43 handoff.
 // Build tag: monotonic, never reused, bumped once per shipped build (including
 // pure reverts). Keep it a constexpr int, not a #define.
-static constexpr int KH_BUILD_TAG = 26718;
+static constexpr int KH_BUILD_TAG = 26720;
 // Continuous at the near plane, so routing on/off never pops a fragment.
 static constexpr float KH_NEARZ_GAP_FRAC = 0.92f;
 // 3 = mode 203 - passthrough + absolute form.
@@ -16398,9 +16409,8 @@ inline void fill_lighting_obj_cb(ConstantData& cbd, const RenderObject& o) {
                                                   // verdicts come from the pyramid alone;
                                                   // authorship separation vs 357)
                          : khl_dm == 362 ? 48.0f   // UNBOUNDED grad slack
-                         : khl_dm == 446 ? 76.0f   // KH_ABSENCE_WITNESS OFF - an ALIAS of the default since 26711 (stays whitelisted, the mode-64 precedent)
-                         : khl_dm == 450 ? 77.0f   // whole-union witness ON (the 26694 form; the witness itself is retired by default since 26711)
-                         : khl_dm == 452 ? 78.0f   // KH_ABSENCE_WITNESS ON, tier-scoped (the 26707-26710 default; 26711 retired it - KH_SUN_PANCAKE)
+                         // 446 (code 76, witness off) is an ALIAS of the default since 26711 and maps to the default deliberately (the 264 precedent): the shader has had no reader for 76 since then.
+                         // 450 (code 77, whole-union witness) and 452 (code 78, tier-scoped witness) were RETIRED at 26719 with the witness body (KhUnionClear deleted; KH_SUN_PANCAKE removed its only case): modes retired in the whitelist, codes 76 / 77 / 78 burned (never reassign).
                          // 453 (code 79, pf deep gate) and 455 (code 81, geometric horizon) were minted at 26711/26713, read null against the strap and were WIPED at 26714: modes retired in the whitelist, codes 79 and 81 burned (never reassign).
                          : khl_dm == 454 ? 80.0f   // KH_RPDB_WORLD_CLAMP OFF: the receiver-plane gradient clamp back to 8 TEXELS per tier (the 26711 form; 32 mm at mid). Mesh fill only (no RPDB in the cast chain).
                          : khl_dm == 456 ? 82.0f   // KH_SLOPE_WORLD ON - an ALIAS of the default since 26714 (stays whitelisted).
@@ -16410,14 +16420,12 @@ inline void fill_lighting_obj_cb(ConstantData& cbd, const RenderObject& o) {
                          : khl_dm == 459 ? 85.0f   // KH_HOLD_STEEP: hold, 0.10 ramp - OPT-IN again since 26718 (default 26716-26717)
                          : khl_dm == 460 ? 86.0f   // hold 0.28 - an ALIAS of 445 since 26718
                          : khl_dm == 461 ? 87.0f   // fade end 0.98 - an ALIAS of the default since 26718
-                         : khl_dm == 462 ? 88.0f   // KH_FADE_TO_GUARD: the tier fade ends at the 0.998 guard - OPT-IN (default at 26717 only). Next free code: 89.
+                         : khl_dm == 462 ? 88.0f   // KH_FADE_TO_GUARD: the tier fade ends at the 0.998 guard - OPT-IN (default at 26717 only).
+                         : khl_dm == 463 ? 89.0f   // KH_FAR_SELF_GATE ON: the far self tier runs only when outer did not contain / carried / certified the fragment (the 26718 default; retired at 26719 under KH_SUN_PANCAKE). Mesh fill only (no far gate in the cast chain). Next free code: 90.
                          : khl_dm == 444 ? 74.0f   // KH_PF_RAMP_FLOOR OFF (precision floor as sigma)
                          : khl_dm == 442 ? 72.0f   // KH_TIER_FADE_DIR OFF (symmetric fade)
                          : khl_dm == 443 ? 73.0f   // KH_TIER_PARTNER_PAINT (partner alone in the band)
-                         : khl_dm == 401 ? 71.0f   // far-self
-                                                  // GATE returns - the outer/far hard cut
-                                                  // and its wobble come back together (the
-                                                  // one-switch proof)
+                         // 401 (code 71, the far-self gate WITHOUT the kh4_cert clause) was RETIRED at 26719 with the gate: mode retired in the whitelist, code 71 burned (never reassign). 463 / 89 is the gate's restore arm.
                          : khl_dm == 400 ? 70.0f   // now an ALIAS of the
                          : khl_dm == 398 ? 69.0f   // far guard CLAMPED to
                          : khl_dm == 397 ? 68.0f   // RETIRED - dead code
@@ -16429,7 +16437,7 @@ inline void fill_lighting_obj_cb(ConstantData& cbd, const RenderObject& o) {
                                                   // halo class returns and visual 32 paints
                                                   // those pixels RED again)
                          : khl_dm == 394 ? 66.0f   // KH_CERT_CONTENT off
-                         : khl_dm == 392 ? 65.0f   // far self tier ungated
+                         : khl_dm == 392 ? 65.0f   // far self tier ungated - an ALIAS of the default since 26719 (stays whitelisted; the shader no longer reads 65)
                          : khl_dm == 388 ? 62.0f   // 0.60 fade
                                                   // start returns (fine tier yields earlier;
                                                   // wider two-grid mix)
@@ -22449,9 +22457,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
                                  : khcc_m == 245 ? 22.0f   // filtering revert
                                  : khcc_m == 442 ? 72.0f   // KH_TIER_FADE_DIR OFF (twin)
                                  : khcc_m == 443 ? 73.0f   // partner paint (twin)
-                                 : khcc_m == 446 ? 76.0f   // witness off - alias of the default since 26711 (twin)
-                                 : khcc_m == 450 ? 77.0f   // whole-union witness on (twin)
-                                 : khcc_m == 452 ? 78.0f   // tier-scoped witness on (twin). 454 / 456 / 457 (the self-kernel gradient clamp and slope-bias arms) are mesh-fill only: the cast chain has no receiver-plane kernel, so they map to the default here deliberately - the 264 precedent. 453 / 455 are retired (26714).
+                                 // 446 / 450 / 452 (codes 76 / 77 / 78, the absence witness) - 446 an alias since 26711, 450 / 452 RETIRED at 26719 with the witness body (twin of the mesh ladder); codes burned. 454 / 456 / 457 (the self-kernel gradient clamp and slope-bias arms) are mesh-fill only: the cast chain has no receiver-plane kernel, so they map to the default here deliberately - the 264 precedent. 453 / 455 are retired (26714). 463 (code 89, the far-self gate restore) is mesh-fill only for the same reason: the cast chain has no far gate (the 264 precedent); 401 retired (26719).
                                  : khcc_m == 445 ? 75.0f   // hold 0.28, opt-in (twin)
                                  : khcc_m == 458 ? 84.0f   // hold off - alias of the default (twin)
                                  : khcc_m == 459 ? 85.0f   // hold 0.10, opt-in (twin)
@@ -30663,6 +30669,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         const float mean_r = (o.local_radius[0] + o.local_radius[1] + o.local_radius[2]) / 3.0f;
         cbd.local1[0] = o.local_falloff / (mean_r > 0.01f ? mean_r : 0.01f);
         cbd.local1[1] = o.localized ? 1.0f : 0.0f;
+        cbd.local_radii[3] = o.local_inverse ? 1.0f : 0.0f;   // KH_LOCAL_INVERSE (three fill sites, twins)
         cbd.band0[0] = o.band_min;
         cbd.band0[1] = o.band_max;
         cbd.band0[2] = o.band_falloff;
@@ -30949,7 +30956,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         const MeshDef& khr_md = mesh_def(mid);
         int khr_lod = 0;
         float khr_lodt = 0.0f;
-        kh_lod_pick(khr_md, kh_lod_radius(o), sqrtf(kh_mesh_dist_sq(o, cam)), khr_lod, khr_lodt);
+        // KH_LOD_LOCK: a locked instance never picks - level 0, no fade. Twin at the flush.
+        if (!o.lod_lock) kh_lod_pick(khr_md, kh_lod_radius(o), sqrtf(kh_mesh_dist_sq(o, cam)), khr_lod, khr_lodt);
         const bool khr_lodx = khr_lodt > 0.0f &&
                               g_dbg_mode.load(std::memory_order_relaxed) != 419;
         if (khr_lodx) g_lod_fades++;
@@ -35180,6 +35188,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         const float mean_r = (o.local_radius[0] + o.local_radius[1] + o.local_radius[2]) / 3.0f;
         cbd.local1[0] = o.local_falloff / (mean_r > 0.01f ? mean_r : 0.01f);   // normalized falloff
         cbd.local1[1] = o.localized ? 1.0f : 0.0f;
+        cbd.local_radii[3] = o.local_inverse ? 1.0f : 0.0f;   // KH_LOCAL_INVERSE (three fill sites, twins)
         cbd.band0[0] = o.band_min;
         cbd.band0[1] = o.band_max;
         cbd.band0[2] = o.band_falloff;
@@ -35500,7 +35509,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         const MeshDef& khf_md = mesh_def(mid);
         int khf_lod = 0;
         float khf_lodt = 0.0f;
-        kh_lod_pick(khf_md, kh_lod_radius(o), sqrtf(kh_mesh_dist_sq(o, cam)), khf_lod, khf_lodt);
+        // KH_LOD_LOCK: a locked instance never picks - level 0, no fade. Twin at the injection.
+        if (!o.lod_lock) kh_lod_pick(khf_md, kh_lod_radius(o), sqrtf(kh_mesh_dist_sq(o, cam)), khf_lod, khf_lodt);
         const bool khf_lodx = khf_lodt > 0.0f &&
                               g_dbg_mode.load(std::memory_order_relaxed) != 419;
         if (khf_lodx) g_lod_fades++;
@@ -35955,7 +35965,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 // inside flush_locked.
 
 // Same body, same three consumers: the shadowvis fallback (; its gate kept),
-// the objectvis/objectdraw read , the key census .
+// the objectvis read , the key census .
 inline void stage_video_options() {
     try {
         const bool khsr_want_shadow = g_sun_range_src.load(std::memory_order_relaxed) != 2;
@@ -35976,8 +35986,7 @@ inline void stage_video_options() {
             }
             const bool khsr_is_shadow = !khsr_shadow_done && khsr_k.find("shadowvis") != std::string::npos;
             const bool khsr_is_obj = !khsr_obj_done &&
-                (khsr_k.find("objectvis") != std::string::npos ||
-                 khsr_k.find("objectdraw") != std::string::npos);
+                (khsr_k.find("objectvis") != std::string::npos);
             if (!khsr_is_shadow && !khsr_is_obj) continue;
             if (khsr_e.value.type_enum() == game_data_type::SCALAR) {
                 const float khsr_f = static_cast<float>(khsr_e.value);
@@ -36823,6 +36832,7 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         const float mean_r = (o.local_radius[0] + o.local_radius[1] + o.local_radius[2]) / 3.0f;
         cbd.local1[0] = o.local_falloff / (mean_r > 0.01f ? mean_r : 0.01f);
         cbd.local1[1] = o.localized ? 1.0f : 0.0f;
+        cbd.local_radii[3] = o.local_inverse ? 1.0f : 0.0f;   // KH_LOCAL_INVERSE (three fill sites, twins)
         cbd.band0[0] = o.band_min;
         cbd.band0[1] = o.band_max;
         cbd.band0[2] = o.band_falloff;

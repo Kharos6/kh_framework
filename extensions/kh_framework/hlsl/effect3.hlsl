@@ -122,6 +122,11 @@ R"HLSL(    else if (effect == 23)   // fogscatter: [intensity, maxRadiusPx (0 = 
                  ? max(nd3.x, max(nd3.y, nd3.z))   // cube (Chebyshev)
                  : length(nd3);   // sphere/ellipsoid
         float mask = 1.0f - smoothstep(1.0f, 1.0f + max(localParams1.x, 0.001f), nd);
+        // KH_LOCAL_INVERSE (26720): localRadii.w >= 0.5 complements the
+        // mask - the effect reaches everything EXCEPT the volume, the
+        // falloff band included, the sky (fenced depth, nd >> 1) included.
+        // C++ twin local_radii[3] (addLocalPostFX 'inverse').
+        if (localRadii.w >= 0.5f) mask = 1.0f - mask;
         outc = lerp(scene, outc, mask);
     }
 

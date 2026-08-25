@@ -6240,10 +6240,34 @@ static game_value gpu_visibility_sqf(game_value_parameter args) {
 // farVis?, rotation?, twoSided?] Adds a persistent mesh drawn every frame by
 // the internal Draw3D EH until removed.
 
+// Rotation argument: nil = identity, a bare number = heading (yaw), or
+// [pitch, yaw, roll] degrees (ARMA sense - see kh_set_rotation). ONE parser
+// for addRender3D (slot 1, right after position) and updateRender3D
+// "rotation", so the two cannot drift. Returns false on a malformed value.
+static bool kh_rotation_from_gv(const game_value& khrg_v, float& khrg_p, float& khrg_y, float& khrg_r) {
+    khrg_p = 0.0f; khrg_y = 0.0f; khrg_r = 0.0f;
+    if (khrg_v.is_nil()) return true;
+    if (khrg_v.type_enum() == game_data_type::SCALAR) {
+        khrg_y = static_cast<float>(khrg_v);   // bare number = heading (yaw)
+        return true;
+    }
+    if (khrg_v.type_enum() != game_data_type::ARRAY) return false;
+    auto& ra = khrg_v.to_array();
+    if ((ra.size() > 0 && ra[0].type_enum() != game_data_type::SCALAR) ||
+        (ra.size() > 1 && ra[1].type_enum() != game_data_type::SCALAR) ||
+        (ra.size() > 2 && ra[2].type_enum() != game_data_type::SCALAR)) return false;
+    if (ra.size() >= 1) khrg_p = static_cast<float>(ra[0]);
+    if (ra.size() >= 2) khrg_y = static_cast<float>(ra[1]);
+    if (ra.size() >= 3) khrg_r = static_cast<float>(ra[2]);
+    return true;
+}
+
 static game_value add_render3d_sqf(game_value_parameter args) {
     try {
         auto& arr = args.to_array();
-        if (arr.size() < 2) return game_value("usage: addRender3D [[x,y,zASL], size, [r,g,b,a]?, mode?, sceneRead?, effect?, fxParams?, band?, blend?, duration?, lit?, mesh?, farVis?, rotation?, twoSided?]");
+        // 26720: rotation sits at slot 1 (right after position; nil = identity);
+        // every later slot moved up by one; lodLock appended at 15.
+        if (arr.size() < 3) return game_value("usage: addRender3D [[x,y,zASL], rotation, size, [r,g,b,a]?, mode?, sceneRead?, effect?, fxParams?, band?, blend?, duration?, lit?, mesh?, farVis?, twoSided?, lodLock?]");
         RenderIntegration::RenderObject obj;
         if (arr[0].type_enum() != game_data_type::ARRAY) return game_value("position must be [x, y, zASL]");
         auto& pos = arr[0].to_array();
@@ -6255,13 +6279,20 @@ static game_value add_render3d_sqf(game_value_parameter args) {
         obj.pos[1] = static_cast<float>(pos[1]);
         obj.pos[2] = static_cast<float>(pos[2]);
 
-        if (!RenderIntegration::read_vec3_or_uniform(arr[1], obj.size_mul)) {
+        {
+            float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f;
+            if (!kh_rotation_from_gv(arr[1], khr_p, khr_y, khr_r))
+                return game_value("rotation must be nil, a number (yaw) or [pitch, yaw, roll] degrees");
+            RenderIntegration::kh_set_rotation(obj, khr_p, khr_y, khr_r);
+        }
+
+        if (!RenderIntegration::read_vec3_or_uniform(arr[2], obj.size_mul)) {
             return game_value("size must be a number or [x, y, z] multipliers of the mesh's own size");
         }
 
-        if (arr.size() > 2 && !arr[2].is_nil()) {
-            if (arr[2].type_enum() != game_data_type::ARRAY) return game_value("color must be [r, g, b, a] numbers");
-            auto& col = arr[2].to_array();
+        if (arr.size() > 3 && !arr[3].is_nil()) {
+            if (arr[3].type_enum() != game_data_type::ARRAY) return game_value("color must be [r, g, b, a] numbers");
+            auto& col = arr[3].to_array();
             if ((col.size() > 0 && col[0].type_enum() != game_data_type::SCALAR) ||
                 (col.size() > 1 && col[1].type_enum() != game_data_type::SCALAR) ||
                 (col.size() > 2 && col[2].type_enum() != game_data_type::SCALAR) ||
@@ -6270,38 +6301,38 @@ static game_value add_render3d_sqf(game_value_parameter args) {
             RenderIntegration::kh_sanitize_color(obj.color);
         }
 
-        if (arr.size() > 3 && !arr[3].is_nil()) {
-            if (arr[3].type_enum() != game_data_type::SCALAR) return game_value("mode must be a number (0 = test, 1 = test + write, 2 = overlay)");
-            int m = static_cast<int>(static_cast<float>(arr[3]));
+        if (arr.size() > 4 && !arr[4].is_nil()) {
+            if (arr[4].type_enum() != game_data_type::SCALAR) return game_value("mode must be a number (0 = test, 1 = test + write, 2 = overlay)");
+            int m = static_cast<int>(static_cast<float>(arr[4]));
             if (m >= 0 && m <= 2) obj.mode = static_cast<RenderIntegration::DepthMode>(m);
         }
 
-        if (arr.size() > 4 && !arr[4].is_nil()) {
-            if (arr[4].type_enum() != game_data_type::BOOL) return game_value("sceneRead must be a boolean");
-            obj.effect = static_cast<bool>(arr[4]) ? 2 : 0;   // sceneRead = tinted scene-read (colorgrade defaults)
+        if (arr.size() > 5 && !arr[5].is_nil()) {
+            if (arr[5].type_enum() != game_data_type::BOOL) return game_value("sceneRead must be a boolean");
+            obj.effect = static_cast<bool>(arr[5]) ? 2 : 0;   // sceneRead = tinted scene-read (colorgrade defaults)
         }
 
         const auto_array<game_value>* fx_params = nullptr;
 
-        if (arr.size() > 5 &&
-            !(arr[5].type_enum() == game_data_type::STRING && static_cast<std::string>(arr[5]).empty())) {
+        if (arr.size() > 6 &&
+            !(arr[6].type_enum() == game_data_type::STRING && static_cast<std::string>(arr[6]).empty())) {
             // empty string = slot skipped (placeholder to reach later args)
             std::string khfx_path, khfx_err;
-            const int e = RenderIntegration::kh_effect_from_gv(arr[5], khfx_path, khfx_err);
+            const int e = RenderIntegration::kh_effect_from_gv(arr[6], khfx_path, khfx_err);
             if (e < 0) return game_value(khfx_err.empty() ? std::string("unknown effect") : khfx_err);
             obj.effect = e;
             obj.fx_shader = khfx_path;
         }
-        if (arr.size() > 6 && !arr[6].is_nil()) {
-            if (arr[6].type_enum() != game_data_type::ARRAY) return game_value("fxParams must be an array of numbers");
-            fx_params = &arr[6].to_array();
+        if (arr.size() > 7 && !arr[7].is_nil()) {
+            if (arr[7].type_enum() != game_data_type::ARRAY) return game_value("fxParams must be an array of numbers");
+            fx_params = &arr[7].to_array();
         }
 
         if (!RenderIntegration::set_effect_params(obj, fx_params)) return game_value("fxParams entries must be numbers");
 
-        if (arr.size() > 7 && !arr[7].is_nil()) {
-            if (arr[7].type_enum() != game_data_type::ARRAY) return game_value("band must be [minDist, maxDist, falloff?] numbers");
-            auto& band = arr[7].to_array();
+        if (arr.size() > 8 && !arr[8].is_nil()) {
+            if (arr[8].type_enum() != game_data_type::ARRAY) return game_value("band must be [minDist, maxDist, falloff?] numbers");
+            auto& band = arr[8].to_array();
             if ((band.size() > 0 && band[0].type_enum() != game_data_type::SCALAR) ||
                 (band.size() > 1 && band[1].type_enum() != game_data_type::SCALAR) ||
                 (band.size() > 2 && band[2].type_enum() != game_data_type::SCALAR)) return game_value("band must be [minDist, maxDist, falloff?] numbers");
@@ -6314,26 +6345,26 @@ static game_value add_render3d_sqf(game_value_parameter args) {
             }
         }
 
-        if (arr.size() > 8 &&
-            !(arr[8].type_enum() == game_data_type::STRING && static_cast<std::string>(arr[8]).empty())) {
+        if (arr.size() > 9 &&
+            !(arr[9].type_enum() == game_data_type::STRING && static_cast<std::string>(arr[9]).empty())) {
             // empty string = slot skipped (the positional-placeholder
             // convention, matching the effect slot): blend stays default
-            const int bm = RenderIntegration::blend_id_from_gv(arr[8]);
+            const int bm = RenderIntegration::blend_id_from_gv(arr[9]);
             if (bm < 0) return game_value("unknown blend mode");
             obj.blend_mode = bm;
         }
 
-        if (arr.size() > 9) {
-            if (!RenderIntegration::parse_duration_gv(arr[9], obj)) {
+        if (arr.size() > 10) {
+            if (!RenderIntegration::parse_duration_gv(arr[10], obj)) {
                 return game_value("duration must be seconds or [fadeIn, hold, fadeOut]");
             }
         }
 
-        if (arr.size() > 10 && !arr[10].is_nil()) {
-            if (arr[10].type_enum() == game_data_type::BOOL) {
-                obj.lit = static_cast<bool>(arr[10]);
-            } else if (arr[10].type_enum() == game_data_type::ARRAY) {
-                auto& la = arr[10].to_array();
+        if (arr.size() > 11 && !arr[11].is_nil()) {
+            if (arr[11].type_enum() == game_data_type::BOOL) {
+                obj.lit = static_cast<bool>(arr[11]);
+            } else if (arr[11].type_enum() == game_data_type::ARRAY) {
+                auto& la = arr[11].to_array();
                 if ((la.size() > 0 && la[0].type_enum() != game_data_type::SCALAR) ||
                     (la.size() > 1 && la[1].type_enum() != game_data_type::SCALAR)) return game_value("lit must be a boolean or [ambient, diffuse] numbers");
                 obj.lit = true;
@@ -6345,20 +6376,20 @@ static game_value add_render3d_sqf(game_value_parameter args) {
             }
         }
 
-        if (arr.size() > 11) {
+        if (arr.size() > 12) {
             int mid = -1;
 
-            if (arr[11].type_enum() == game_data_type::STRING &&
-                RenderIntegration::kh_ends_with_ci(static_cast<std::string>(arr[11]), ".fbx")) {
+            if (arr[12].type_enum() == game_data_type::STRING &&
+                RenderIntegration::kh_ends_with_ci(static_cast<std::string>(arr[12]), ".fbx")) {
                 // A ".fbx" path (case-insensitive suffix REQUIRED) in the
                 // mesh slot: resolved Documents-first then mod "rendering"
                 // folders, imported once (synchronous - the first spawn of a
                 // model pays the parse), cached thereafter.
                 std::string khfb_err;
-                mid = RenderIntegration::kh_fbx_mesh_id(static_cast<std::string>(arr[11]), khfb_err);
+                mid = RenderIntegration::kh_fbx_mesh_id(static_cast<std::string>(arr[12]), khfb_err);
                 if (mid < 0) return game_value("fbx: " + khfb_err);
             } else {
-                mid = RenderIntegration::mesh_id_from_gv(arr[11]);
+                mid = RenderIntegration::mesh_id_from_gv(arr[12]);
                 if (mid < 0) return game_value("unknown mesh (builtin name, registry index, or a path ending .fbx)");
             }
 
@@ -6370,34 +6401,19 @@ static game_value add_render3d_sqf(game_value_parameter args) {
         // negative = |value| x native) - the true-scale path for FBX.
         RenderIntegration::kh_apply_native_size(obj);
 
-        if (arr.size() > 12 && !arr[12].is_nil()) {
-            if (arr[12].type_enum() != game_data_type::BOOL) return game_value("farVis must be a boolean");
-            obj.far_vis = static_cast<bool>(arr[12]);   // visible beyond max view distance
-        }
-
-        if (arr.size() > 13) {
-            float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f;
-
-            if (arr[13].type_enum() == game_data_type::SCALAR) {
-                khr_y = static_cast<float>(arr[13]);   // bare number = heading (yaw)
-            } else if (arr[13].type_enum() == game_data_type::ARRAY) {
-                auto& ra = arr[13].to_array();
-                if ((ra.size() > 0 && ra[0].type_enum() != game_data_type::SCALAR) ||
-                    (ra.size() > 1 && ra[1].type_enum() != game_data_type::SCALAR) ||
-                    (ra.size() > 2 && ra[2].type_enum() != game_data_type::SCALAR)) return game_value("rotation must be a number (yaw) or [pitch, yaw, roll] degrees");
-                if (ra.size() >= 1) khr_p = static_cast<float>(ra[0]);
-                if (ra.size() >= 2) khr_y = static_cast<float>(ra[1]);
-                if (ra.size() >= 3) khr_r = static_cast<float>(ra[2]);
-            } else {
-                return game_value("rotation must be a number (yaw) or [pitch, yaw, roll] degrees");
-            }
-
-            RenderIntegration::kh_set_rotation(obj, khr_p, khr_y, khr_r);
+        if (arr.size() > 13 && !arr[13].is_nil()) {
+            if (arr[13].type_enum() != game_data_type::BOOL) return game_value("farVis must be a boolean");
+            obj.far_vis = static_cast<bool>(arr[13]);   // visible beyond max view distance
         }
 
         if (arr.size() > 14 && !arr[14].is_nil()) {
             if (arr[14].type_enum() != game_data_type::BOOL) return game_value("twoSided must be a boolean");
             obj.two_sided = static_cast<bool>(arr[14]);   // false = back-face culling
+        }
+
+        if (arr.size() > 15 && !arr[15].is_nil()) {
+            if (arr[15].type_enum() != game_data_type::BOOL) return game_value("lodLock must be a boolean");
+            obj.lod_lock = static_cast<bool>(arr[15]);   // KH_LOD_LOCK: this instance stays at level 0
         }
 
         return game_value(RenderIntegration::add_render_object(obj));
@@ -6520,21 +6536,7 @@ static game_value update_render3d_sqf(game_value_parameter args) {
             RenderIntegration::kh_apply_native_size(obj);   // multiplier -> metres
         } else if (prop == "rotation") {
             float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f;
-
-            if (arr[2].type_enum() == game_data_type::SCALAR) {
-                khr_y = static_cast<float>(arr[2]);   // bare number = heading (yaw)
-            } else if (arr[2].type_enum() == game_data_type::ARRAY) {
-                auto& ra = arr[2].to_array();
-                if ((ra.size() > 0 && ra[0].type_enum() != game_data_type::SCALAR) ||
-                    (ra.size() > 1 && ra[1].type_enum() != game_data_type::SCALAR) ||
-                    (ra.size() > 2 && ra[2].type_enum() != game_data_type::SCALAR)) return game_value(false);
-                if (ra.size() >= 1) khr_p = static_cast<float>(ra[0]);
-                if (ra.size() >= 2) khr_y = static_cast<float>(ra[1]);
-                if (ra.size() >= 3) khr_r = static_cast<float>(ra[2]);
-            } else {
-                return game_value(false);
-            }
-
+            if (!kh_rotation_from_gv(arr[2], khr_p, khr_y, khr_r)) return game_value(false);
             RenderIntegration::kh_set_rotation(obj, khr_p, khr_y, khr_r);
         } else if (prop == "mesh") {
             int mid = -1;
@@ -6604,6 +6606,9 @@ static game_value update_render3d_sqf(game_value_parameter args) {
         } else if (prop == "farvis") {
             if (arr[2].type_enum() != game_data_type::BOOL) return game_value(false);
             obj.far_vis = static_cast<bool>(arr[2]);   // visible beyond max view distance
+        } else if (prop == "lodlock") {
+            if (arr[2].type_enum() != game_data_type::BOOL) return game_value(false);
+            obj.lod_lock = static_cast<bool>(arr[2]);   // KH_LOD_LOCK: level 0, no transitions, this instance only
         } else {
             return game_value(false);
         }
@@ -6711,6 +6716,9 @@ static game_value update_post_fx_sqf(game_value_parameter args) {
             const int sh = RenderIntegration::shape_id_from_gv(arr[2]);
             if (sh < 0) return game_value(false);
             obj.local_shape = sh;
+        } else if (prop == "inverse") {
+            if (arr[2].type_enum() != game_data_type::BOOL) return game_value(false);
+            obj.local_inverse = static_cast<bool>(arr[2]);   // KH_LOCAL_INVERSE: everything except the volume
         } else {
             return game_value(false);
         }
@@ -7497,15 +7505,22 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
         // time, so it cannot be combined with 445/459; it closes the dead
         // zone only in the symmetric fade.
                             khd_m == 462 ||
+        // 463 = KH_FAR_SELF_GATE ON (lighting0.y 89) - the far self tier runs
+        // only when the outer tier did not contain the fragment, carried a
+        // verdict into it, or certified it: the 26718 default, retired at
+        // 26719 because under KH_SUN_PANCAKE outer's lit verdict is complete
+        // and the gate only ever handed a 30-50 m caster's shadow on a near
+        // mesh to the union. The A/B for that retirement.
+                            khd_m == 463 ||
         // 446 = KH_ABSENCE_WITNESS OFF - an ALIAS of the default since 26711
         // (the witness was retired when KH_SUN_PANCAKE made every tier map
         // complete by construction). Stays whitelisted: a stale script is not
         // refused and the number is never re-minted.
                             khd_m == 446 ||
-        // 452 = KH_ABSENCE_WITNESS ON, tier-scoped - the 26707-26710 default:
-        // a band certifies absence / the cast trusts a lit band verdict only
-        // when the union map sees no occluder OUTSIDE that band's depth
-        // window. The A/B for the 26711 retirement.
+        // 452 = RETIRED (KH_ABSENCE_WITNESS ON, tier-scoped: the 26707-26710
+        // default, off since 26711, body deleted at 26719 - KH_SUN_PANCAKE
+        // removed its only case). Listed so a stale script is not refused
+        // and the number is never re-minted.
                             khd_m == 452 ||
         // 453 = RETIRED (KH_PF_DEEP_GATE, 26711-26713: read null against
         // the strap; wiped at 26714). Listed so a stale script is not
@@ -7533,7 +7548,7 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
         // certification for ANY occluder it sees (the 26694 form), instead of
         // only for one outside that tier's depth window. Restores the
         // union-texel rectangles beside fine shadow edges (26707's defect).
-                            khd_m == 450 ||
+                            khd_m == 450 ||   // RETIRED at 26719 with 452 (whole-union witness; body deleted). Listed so a stale script is not refused and the number is never re-minted.
         // 448 = KH_SUN_LADDER 2048 - union/hero/mid/outer sun maps at 2048 and
         // their pyramids at 1024 (A/B ONLY: the texel-priced normal offset
         // leaks on thin geometry there - 26702's defect, 26703 reverted it).
@@ -7638,9 +7653,11 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
         // thread, the pre-behaviour. Set it before the first ensure to take
         // effect; the long cold-cache startup returns with it.
                             khd_m == 402 ||
-        // 401 = KH_FAR_SELF_CERT_SCOPE REVERT, lighting0.y 71 - far-self gate
-        // returns, and with it the outer-to-far hard cut and the far-tier
-        // wobble, together.
+        // 401 = RETIRED (KH_FAR_SELF_CERT_SCOPE REVERT, lighting0.y 71: the
+        // far-self gate without the kh4_cert clause; the gate itself was
+        // retired at 26719 under KH_SUN_PANCAKE, 463 is its restore arm).
+        // Listed so a stale script is not refused and the number is never
+        // re-minted.
                             khd_m == 401 ||
         // 400 = KH_FAR_SELF_CERT_SCOPE. 401 is its revert; 392 is the
         // UNBOUNDED form of the same lift and now isolates the kh4_cert
@@ -7674,8 +7691,10 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
         // band-render frame again, exactly as it did -).
                             khd_m == 393 ||
         // 392 = KH_FAR_SELF_SCOPE revert (lighting0.y 65; the far self tier
-        // serves inside the finer ladder's coverage again - the all-distance
-        // splotch ring returns).
+        // serves whenever reached) - an ALIAS of the default since 26719 (the
+        // far-self gate was retired under KH_SUN_PANCAKE; 463 restores the
+        // gate). Stays whitelisted: a stale script is not refused and the
+        // number is never re-minted.
                             khd_m == 392 ||
         // 284 = tier-proportional floor OFF (lighting0.y 37; arm, now
         // reachable). Fielded once; never remint. Fielded once; never remint.
@@ -12221,7 +12240,7 @@ static game_value dump_dynamic_lights_sqf() {
 static game_value add_local_postfx_sqf(game_value_parameter args) {
     try {
         auto& arr = args.to_array();
-        if (arr.size() < 4) return game_value("usage: addLocalPostFX [[x,y,zASL], radius, falloff, effect, params?, [r,g,b,a]?, shape?, blend?, duration?]");
+        if (arr.size() < 4) return game_value("usage: addLocalPostFX [[x,y,zASL], radius, falloff, effect, params?, [r,g,b,a]?, shape?, blend?, duration?, inverse?]");
         RenderIntegration::RenderObject obj;
         obj.fullscreen = true;
         obj.localized = true;
@@ -12286,6 +12305,11 @@ static game_value add_local_postfx_sqf(game_value_parameter args) {
             if (!RenderIntegration::parse_duration_gv(arr[8], obj)) {
                 return game_value("duration must be seconds or [fadeIn, hold, fadeOut]");
             }
+        }
+
+        if (arr.size() > 9 && !arr[9].is_nil()) {
+            if (arr[9].type_enum() != game_data_type::BOOL) return game_value("inverse must be a boolean");
+            obj.local_inverse = static_cast<bool>(arr[9]);   // KH_LOCAL_INVERSE: the effect reaches everything except the volume
         }
 
         return game_value(RenderIntegration::add_render_object(obj));
@@ -13540,7 +13564,7 @@ static void initialize_sqf_integration() {
 
     _sqf_add_render3d_array = intercept::client::host::register_sqf_command(
         "addRender3D",
-        "[[x,y,zASL], size, [r,g,b,a]?, mode?, sceneRead?, effect?, fxParams?, band?, blend?, duration?, lit?, mesh?, farVis?, rotation?, twoSided?]. Returns the khr_ handle, or a plain error sentence",
+        "[[x,y,zASL], rotation, size, [r,g,b,a]?, mode?, sceneRead?, effect?, fxParams?, band?, blend?, duration?, lit?, mesh?, farVis?, twoSided?, lodLock?]. rotation = nil | yaw | [pitch, yaw, roll]. Returns the khr_ handle, or a plain error sentence",
         userFunctionWrapper<add_render3d_sqf>,
         game_data_type::STRING,
         game_data_type::ARRAY
@@ -13572,7 +13596,7 @@ static void initialize_sqf_integration() {
 
     _sqf_add_local_postfx_array = intercept::client::host::register_sqf_command(
         "addLocalPostFX",
-        "Create a persistent post-processing effect confined to a world-space volume. Returns the khr_ handle, or a plain error sentence",
+        "[[x,y,zASL], radius, falloff, effect, params?, [r,g,b,a]?, shape?, blend?, duration?, inverse?]. Create a persistent post-processing effect confined to a world-space volume (inverse = true: everywhere except it). Returns the khr_ handle, or a plain error sentence",
         userFunctionWrapper<add_local_postfx_sqf>,
         game_data_type::STRING,
         game_data_type::ARRAY

@@ -603,18 +603,11 @@ float4 PSMain(VSOut i) : SV_Target
     // Slices surviving this are painted by the ENGINE over our pixels, not by
     // any term of ours. TWIN EDIT: PSMain and PSComposite identical.
     if (lighting0.y >= 1.5f && lighting0.y < 2.5f) smf = 1.0f;
-    // KH_GEO_HORIZON (26713, OPT-IN: code 81 / mode 455). Textured meshes
-    // shade with the MAPPED normal, so a normal-map texel tilted sunward on
-    // a GEOMETRICALLY back-facing fragment receives direct light and the
-    // self-shadow chain is left to hide it - at a coarse tier, with a
-    // centimetre bias, it cannot. A surface whose geometric normal faces
-    // away from the light receives no direct light regardless of its normal
-    // map (the textbook horizon term); this folds that into smf, which is
-    // the direct-light multiplier in KhApplyPBR / ApplyLighting and nothing
-    // else. Tier-independent, so it cannot author a seam. TWIN EDIT: PSMain
-    // and PSComposite identical.
-    if (lighting0.y >= 80.5f && lighting0.y < 81.5f)
-        smf *= smoothstep(0.0f, 0.05f, dot(normalize(i.nrm), lighting1.xyz));
+    // KH_GEO_HORIZON (code 81 / mode 455): minted 26713, read identical to
+    // 0, wiped 26714, code burned. A residual copy of the arm survived in
+    // THIS twin (never in PSComposite; no ladder emitted 81, so it was dead)
+    // until the 26719 twin-parity check removed it. TWIN EDIT: PSMain and
+    // PSComposite identical from here to the shading call.
 #if KH_TEXTURED
     khtxS.albedo *= color.rgb;   // the object color tints the albedo lane only
 #if KH_USER_MAT

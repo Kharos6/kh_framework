@@ -866,7 +866,11 @@ float SunShadowCompareSoft(float2 uv, float z)  { return KhSunSoftT(khSunDepth, 
 // weight could reach it (the seam stripe's last residual, handoff 6.4).
 // With the end at the guard the hold's 0.10 ramp covers ~1.6 cm of hero
 // instead of ~9. The symmetric tail lengthens by the same 0.9% at near-
-// zero weight; the kernel's OOB margin at the guard is still 8 texels.
+// zero weight. The kernel's OOB margin at the 0.998 guard is 8.2 texels
+// while KhSelfTapT reaches up to 9 (spread 8 + bilinear 1, no high-side
+// clamp): under 462 alone a one-texel out-of-bounds load (reads 0 =
+// occluded) is possible at >= 16 texels/px minification; at the default
+// the 0.98 end zeroes that band, so it is a boundary, not a defect.
 // REVERTED at 26718 (operator: the shared fade shape must stay equal at
 // every tier boundary; a shorter fade reads as a snap). Default = the
 // 0.98 end again; code 88 / mode 462 = the guard end, OPT-IN; code 87 /
@@ -915,51 +919,19 @@ float KhTbBlend(float khtd_c, float khtd_f, float khtd_w)
                  ? smoothstep(0.0f, khtd_h10 ? 0.10f : 0.28f, khtd_w) : khtd_w;
     return lerp(khtd_c, khtd_f, khtd_h);
 }
-// ABSENCE WITNESS: a per-camera band's map can be missing a caster whose
-// shadow lands inside its window, so an empty band texel is NOT proof of
-// absence on its own. The union map holds every caster the collection
-// admits, so it is the witness for both certification (self chain) and
-// lit-authority (cast chain): true iff the union sees nothing more than
-// max(3 x bias, 3 texels) in front of the point along the sun. Takes the
-// ANCHOR-RELATIVE point. Returns false with no union, outside its window,
-// or out of depth range - nobody certifies absence from nothing. Margin is
-// priced in union texels, which scale with shadow range. Mode 446 / code 76
-// disables the witness (restores the unconditional forms).
-// KH_WITNESS_TIER_SCOPE (26707): the union's texel is mesh-priced (11 cm at
-// a 448 m span) and over-extends every occluder laterally by up to half of
-// itself, so the whole-union witness vetoed certification in union-texel
-// RECTANGLES beside every fine shadow edge and the coarser tiers' sub-guard
-// verdict leaked there (field: 446 removed them, 444/447 did not). The
-// witness may now veto only for an occluder OUTSIDE the asking tier's depth
-// window - sun-ward of its near plane, which is the one case the tier could
-// not have rendered (the 50 m fade's root). Inside the window the tier saw
-// that region at its own texel and its verdict stands. khuw_tz / khuw_tiD =
-// the fragment's depth in the tier map and that map's depth scale. Code 77 /
-// mode 450 restores the whole-union form.
-// RETIRED BY DEFAULT (26711, KH_SUN_PANCAKE): the tiers no longer clip a
-// caster sun-ward of their near plane - it pancakes onto z = 0 and still
-// occludes - so the one case this witness existed for (an occluder the tier
-// could not have rendered) no longer occurs. Reached only under code 78
-// (tier-scoped) or 77 (whole-union); see khuw_off at both callers.
-bool KhUnionClear(float3 khuw_r, float khuw_tz, float khuw_tiD)
-{
-    if (sunMeta.x < 0.5f) return false;
-    float4 khuw_c = mul(float4(khuw_r, 1.0f), sunVP);
-    float2 khuw_uv = float2(0.5f + 0.5f * khuw_c.x, 0.5f - 0.5f * khuw_c.y);
-    if (khuw_uv.x <= 0.001f || khuw_uv.x >= 0.999f ||
-        khuw_uv.y <= 0.001f || khuw_uv.y >= 0.999f ||
-        khuw_c.z <= 0.0f || khuw_c.z >= 1.0f) return false;
-    float khuw_s = khSunDepth.Load(int3(int2(khuw_uv * sunMeta.y), 0));
-    float khuw_iR = length(float3(sunVP[0].x, sunVP[1].x, sunVP[2].x));
-    float khuw_iD = length(float3(sunVP[0].z, sunVP[1].z, sunVP[2].z));
-    float khuw_tw = 2.0f / (max(sunMeta.y, 1.0f) * max(khuw_iR, 1.0e-6f));
-    float khuw_m = max(3.0f * sunMeta.z, 3.0f * khuw_tw * khuw_iD);
-    if ((khuw_c.z - khuw_s) < khuw_m) return true;   // nothing above the point
-    if (lighting0.y >= 76.5f && lighting0.y < 77.5f) return false;   // 450: whole-union veto
-    float khuw_dm  = (khuw_c.z - khuw_s) / max(khuw_iD, 1.0e-6f);   // occluder height above the point, metres
-    float khuw_win = khuw_tz / max(khuw_tiD, 1.0e-6f);              // tier near plane to the point, metres
-    return khuw_dm < khuw_win - khuw_tw;   // inside the tier's window (one union texel of guard at the plane)
-}
+// KH_ABSENCE_WITNESS - RETIRED (26719; off by default since 26711). The
+// union-map witness (KhUnionClear, 26694; tier-scoped at 26707) vetoed a
+// tier's certification and the cast's lit-authority for an occluder the
+// tier could not have RENDERED: a caster sun-ward of its near plane, which
+// DepthClipEnable clipped out of the tier map. KH_SUN_PANCAKE (26710)
+// removed that case - such a caster lands on z = 0 and still occludes - so
+// every tier map is complete by construction and a clear texel IS absence.
+// Body deleted, both khuw_off gates deleted, KhCastTier's khC_iD (the
+// witness's depth scale) deleted. Modes 450 / 452 retired in the whitelist;
+// codes 76 / 77 / 78 BURNED (never reassign). Restore = the 26718 upload's
+// KhUnionClear, verbatim. Relabeling (6.1 of the 26718 handoff): the 26718
+// default already evaluated khuw_off = true for every code but 77 / 78, so
+// the default path is unchanged bit-for-bit.
 
 // PAST the cut no finer tier contains the fragment, so khla_g never leaves 0
 // and far's rejection cannot pass its own khla_g > 0.5 gate. Visual 32 paints
@@ -979,20 +951,18 @@ float KhJw(float khjw_e)
 // there). khC_done = a verdict was returned; false = fall through with the
 // carry state updated in place. TWIN CONTRACT with KhSelfTier's ladder.
 float KhCastTier(Texture2D<float> khC_map, float4x4 khC_vp, float4 khC_meta, float3 khC_r,
-                 bool khlf_on, bool khuw_off, bool khtb_on,
+                 bool khlf_on, bool khtb_on,
                  inout float khtb_occ, inout float khtb_w, out bool khC_done)
 {
     khC_done = false;
     if (khC_meta.x >= 0.5f) {
         float4 khC_c = mul(float4(khC_r, 1.0f), khC_vp);   // KH_SUN_ANCHOR
-        float  khC_iD = length(float3(khC_vp[0].z, khC_vp[1].z, khC_vp[2].z));   // depth scale, for the witness
         float2 khC_u = float2(0.5f + 0.5f * khC_c.x, 0.5f - 0.5f * khC_c.y);
         if (khC_u.x > 0.002f && khC_u.x < 0.998f &&
             khC_u.y > 0.002f && khC_u.y < 0.998f &&
             khC_c.z > 0.0f && khC_c.z < 1.0f) {
             float khC_o = KhSunSoftT(khC_map, khC_meta.y, khC_u, khC_c.z - khC_meta.z);   // filtered
-            if (khC_o > 0.0001f ||
-                (!khlf_on && (khuw_off || KhUnionClear(khC_r, khC_c.z, khC_iD)))) {   // lit authoritative - only with the union's witness (tier-scoped), else fall through
+            if (khC_o > 0.0001f || !khlf_on) {   // lit authoritative (the tier map is complete: KH_ABSENCE_WITNESS retired); code 42 falls through
                 if (khtb_occ >= 0.0f) { khC_done = true; return KhTbBlend(khC_o, khtb_occ, khtb_w); }
                 float khC_e = max(abs(khC_u.x - 0.5f), abs(khC_u.y - 0.5f)) * 2.0f;
                 float khC_w = khtb_on ? KhTbW(khC_e) : 1.0f;
@@ -1020,26 +990,19 @@ float SunShadowOcclusion(float3 wpos)
     // 295) is now an accepted ALIAS of the default and stays whitelisted -
     // the mode-64 precedent.
     const bool khlf_on = (lighting0.y >= 41.5f && lighting0.y < 42.5f);
-    // KH_ABSENCE_WITNESS RETIRED (26711): with the camera-anchored tiers
-    // depth-clamped (KH_SUN_PANCAKE) every tier map is complete by
-    // construction, so a clear tier texel IS absence and the union witness
-    // has no case left to veto. Default = the 446 form. Code 78 (mode 452)
-    // restores the tier-scoped witness (the 26707-26710 default); code 77
-    // (mode 450) restores the whole-union witness; code 76 (mode 446) is
-    // now an alias of the default. TWIN: identical line in both chains.
-    const bool khuw_off = !((lighting0.y >= 77.5f && lighting0.y < 78.5f) ||
-                            (lighting0.y >= 76.5f && lighting0.y < 77.5f));
+    // KH_ABSENCE_WITNESS: retired (26719) - see the note above KhJw. TWIN:
+    // the self chain dropped its gate in the same build.
     if (lighting0.y < 20.5f || lighting0.y >= 21.5f) {
         const float3 khc_r = wpos - sunOrigin.xyz;   // KH_SUN_ANCHOR
         bool khc_done;
         float khc_v;
-        khc_v = KhCastTier(khSunDepth2, sunVP2, sunMeta2, khc_r, khlf_on, khuw_off, khtb_on, khtb_occ, khtb_w, khc_done);
+        khc_v = KhCastTier(khSunDepth2, sunVP2, sunMeta2, khc_r, khlf_on, khtb_on, khtb_occ, khtb_w, khc_done);
         if (khc_done) return khc_v;
-        khc_v = KhCastTier(khSunDepth3, sunVP3, sunMeta3, khc_r, khlf_on, khuw_off, khtb_on, khtb_occ, khtb_w, khc_done);
+        khc_v = KhCastTier(khSunDepth3, sunVP3, sunMeta3, khc_r, khlf_on, khtb_on, khtb_occ, khtb_w, khc_done);
         if (khc_done) return khc_v;
-        khc_v = KhCastTier(khSunDepth4, sunVP4, sunMeta4, khc_r, khlf_on, khuw_off, khtb_on, khtb_occ, khtb_w, khc_done);
+        khc_v = KhCastTier(khSunDepth4, sunVP4, sunMeta4, khc_r, khlf_on, khtb_on, khtb_occ, khtb_w, khc_done);
         if (khc_done) return khc_v;
-        khc_v = KhCastTier(khSunDepth5, sunVP5, sunMeta5, khc_r, khlf_on, khuw_off, khtb_on, khtb_occ, khtb_w, khc_done);
+        khc_v = KhCastTier(khSunDepth5, sunVP5, sunMeta5, khc_r, khlf_on, khtb_on, khtb_occ, khtb_w, khc_done);
         if (khc_done) return khc_v;
     }
 )HLSL" R"HLSL(   // CHUNK BOUNDARY - SIXTH C2026 CATCH OF THE CAMPAIGN
@@ -1116,7 +1079,7 @@ float KhSelfTapT(Texture2D<float> khst_m, float2 khst_t, float2 khst_g, float kh
 float KhSelfTier(Texture2D<float> khT_map, Texture2D<float2> khT_pf, float4x4 khT_vp, float4 khT_meta,
                  float khT_pfArm, float khT_cg61, bool khT_cg69, bool khT_wArm, float khT_id,
                  float3 khwr, float3 n, float ndl, float khno_k, float khgs,
-                 bool khcl, bool khcc_on, bool khcc_clr, bool khuw_off, bool khtb_on,
+                 bool khcl, bool khcc_on, bool khcc_clr, bool khtb_on,
                  bool khlfs_off, bool khct_on,
                  inout float khtb_occ, inout float khtb_w, inout float khla_g, inout float khla_w,
                  inout float4 khcf, inout bool khT_in, inout bool khT_cert, out bool khT_done)
@@ -1252,7 +1215,7 @@ float KhSelfTier(Texture2D<float> khT_map, Texture2D<float2> khT_pf, float4x4 kh
                          : (khT_cg69 && (lighting0.y >= 68.5f && lighting0.y < 69.5f))
                          ? khT_meta.w   // 398: the admission bound (far)
                          : 6.0f * khT_meta.w;   // default = form
-            bool khT_cok = (khuw_off || KhUnionClear(khwr, khT_c.z, khT_iD)) && (khcc_on   // union witness, tier-scoped
+            bool khT_cok = (khcc_on   // the tier's own map certifies (KH_ABSENCE_WITNESS retired, 26719)
                          ? ((khcc_clr || khT_js < 1.0f) &&
                             (khT_c.z - khT_js) < khT_cg * khT_iD)
                          : (abs(khT_c.z - khT_js) < 3.0f * khT_b));
@@ -1327,15 +1290,8 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
     // the tier rasterized its whole admitted caster set and nothing landed on
     // this ray.
     const bool khcc_clr = !(lighting0.y >= 66.5f && lighting0.y < 67.5f);
-    // KH_ABSENCE_WITNESS RETIRED (26711): with the camera-anchored tiers
-    // depth-clamped (KH_SUN_PANCAKE) every tier map is complete by
-    // construction, so a clear tier texel IS absence and the union witness
-    // has no case left to veto. Default = the 446 form. Code 78 (mode 452)
-    // restores the tier-scoped witness (the 26707-26710 default); code 77
-    // (mode 450) restores the whole-union witness; code 76 (mode 446) is
-    // now an alias of the default. TWIN: identical line in both chains.
-    const bool khuw_off = !((lighting0.y >= 77.5f && lighting0.y < 78.5f) ||
-                            (lighting0.y >= 76.5f && lighting0.y < 77.5f));
+    // KH_ABSENCE_WITNESS: retired (26719) - see the note above KhJw. TWIN:
+    // the cast chain dropped its gate in the same build.
     float khtb_w = 0.0f;
     const bool khtb_on = !(lighting0.y >= 25.5f && lighting0.y < 26.5f);
     // the self chain's TWIN of KH_BAND_LIT_FALLTHROUGH (mode 296 =
@@ -1350,31 +1306,39 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
     bool  khT_scr_in = false, khT_scr_cert = false;   // scratch for the non-outer tiers
     float khT_v;
     khT_v = KhSelfTier(khSunDepth2, khSunPf2, sunVP2, sunMeta2, sunPf.x, 0.0f,   false, false, 1.0f,
-                       khwr, n, ndl, khno_k, khgs, khcl, khcc_on, khcc_clr, khuw_off, khtb_on, khlfs_off, khct_on,
+                       khwr, n, ndl, khno_k, khgs, khcl, khcc_on, khcc_clr, khtb_on, khlfs_off, khct_on,
                        khtb_occ, khtb_w, khla_g, khla_w, khcf, khT_scr_in, khT_scr_cert, khT_done);
     if (khT_done) return khT_v;
     khT_v = KhSelfTier(khSunDepth3, khSunPf3, sunVP3, sunMeta3, sunPf.y, 48.0f,  false, true,  2.0f,
-                       khwr, n, ndl, khno_k, khgs, khcl, khcc_on, khcc_clr, khuw_off, khtb_on, khlfs_off, khct_on,
+                       khwr, n, ndl, khno_k, khgs, khcl, khcc_on, khcc_clr, khtb_on, khlfs_off, khct_on,
                        khtb_occ, khtb_w, khla_g, khla_w, khcf, khT_scr_in, khT_scr_cert, khT_done);
     if (khT_done) return khT_v;
     bool kh4_in = false;
     bool kh4_cert = false;
     khT_v = KhSelfTier(khSunDepth4, khSunPf4, sunVP4, sunMeta4, sunPf.z, 192.0f, false, true,  3.0f,
-                       khwr, n, ndl, khno_k, khgs, khcl, khcc_on, khcc_clr, khuw_off, khtb_on, khlfs_off, khct_on,
+                       khwr, n, ndl, khno_k, khgs, khcl, khcc_on, khcc_clr, khtb_on, khlfs_off, khct_on,
                        khtb_occ, khtb_w, khla_g, khla_w, khcf, kh4_in, kh4_cert, khT_done);
     if (khT_done) return khT_v;
 )HLSL" R"HLSL(   // KH_SUN_FAR_BAND self tier (own segment)
-    // ACCEPTANCE: mode 0 matches mode 389 at the splotch pose; the >32 m
-    // far-self quality (win) is untouched; the outer->far cross-fade stays
-    // line-free (the carry clause). 392 = the A/B. No moment pyramid at the
-    // FAR band - its texel is already the minified scale the pyramids exist
-    // to reach (pf arm 0; khSunPf4 is a placeholder the arm never reads).
+    // KH_FAR_SELF_GATE - RETIRED (26719). The far tier used to run only
+    // when outer did not contain the fragment, or carried a verdict, or
+    // certified it: the gate existed because an outer map could be
+    // INCOMPLETE (a 30-50 m caster clipped out sun-ward of outer's near
+    // plane read lit there, and the gate handed such a fragment to the
+    // union). Under KH_SUN_PANCAKE (26710) outer's lit verdict is
+    // trustworthy, so far now runs whenever it is reached - the code-65
+    // form (mode 392, now an ALIAS of the default). Code 89 / mode 463 =
+    // KH_FAR_SELF_GATE ON, the 26718 default verbatim (the restore arm);
+    // code 71 / mode 401 (the harder cut without the kh4_cert clause) is
+    // retired, code 71 BURNED. kh4_in / kh4_cert survive for the arm.
+    // No moment pyramid at the FAR band - its texel is already the
+    // minified scale the pyramids exist to reach (pf arm 0; khSunPf4 is a
+    // placeholder the arm never reads).
     if (sunMeta5.x >= 0.5f &&
-        (!kh4_in || khtb_occ >= 0.0f ||
-         (kh4_cert && !(lighting0.y >= 70.5f && lighting0.y < 71.5f)) ||
-         (lighting0.y >= 64.5f && lighting0.y < 65.5f))) {
+        (!(lighting0.y >= 88.5f && lighting0.y < 89.5f) ||   // 463: the 26718 gate
+         !kh4_in || khtb_occ >= 0.0f || kh4_cert)) {
         khT_v = KhSelfTier(khSunDepth5, khSunPf4, sunVP5, sunMeta5, 0.0f,    0.0f,   true,  true,  4.0f,
-                           khwr, n, ndl, khno_k, khgs, khcl, khcc_on, khcc_clr, khuw_off, khtb_on, khlfs_off, khct_on,
+                           khwr, n, ndl, khno_k, khgs, khcl, khcc_on, khcc_clr, khtb_on, khlfs_off, khct_on,
                            khtb_occ, khtb_w, khla_g, khla_w, khcf, khT_scr_in, khT_scr_cert, khT_done);
         if (khT_done) return khT_v;
     }

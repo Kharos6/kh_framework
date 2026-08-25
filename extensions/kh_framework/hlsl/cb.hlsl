@@ -201,6 +201,43 @@ cbuffer CBEngView2 : register(b4)
 
 // mode 117 - the visible mesh leaves the frustum entirely: THE BOX
 // DISAPPEARS.
+// KH_RPDB_WORLD_CLAMP (26712): the receiver-plane depth gradient (khT_g /
+// khsr_g) is clamped per texel; the clamp used to be 8 TEXELS at every tier,
+// so the world distance a kernel tap may extrapolate the receiver plane grew
+// 4x per tier - 8 mm at hero, 32 mm at mid, 128 mm at outer, metres at the
+// union. On a receiver at grazing incidence the slope saturates the clamp,
+// and the up-slope taps of the 3x3 kernel then predict the receiver far
+// enough sun-ward to pass a thin occluder standing a few centimetres above
+// it: the strap read part-lit the moment it left hero's window (269: on
+// entering yellow), uniformly over the region (a fixed fraction of the
+// taps), and only while the curvature damper let the gradient through
+// (close range) - the third instance of a texel-priced world quantity
+// (KH_SUN_HERO_BASE's normal offset, the 2/2 offset cap). The clamp is now
+// priced in METRES at the hero calibration - 8 hero texels = 8 mm - so no
+// tier may look further around an occluder than hero can, and the seams
+// between tiers stop disagreeing about thin geometry. Hero itself is
+// unchanged at the 4096 ladder (under 448 its 16 mm becomes 8). Coarse
+// tiers lose gradient reach on steep slopes; the slope-scaled bias covers
+// that to ~79 deg at mid, ~72 at outer, ~66 at the union (grazing light,
+// where direct light is small and the soft compare halves the residual).
+// Code 80 / mode 454 restores the texel-priced clamp (the 26711 form).
+// TWIN: the tier body and the union tail carry the identical form.
+#define KH_RPDB_GC_M 0.008f
+// KH_SLOPE_WORLD (DEFAULT since 26714; minted opt-in at 26713 as code 82 /
+// mode 456, now an alias of the default): the slope-scaled bias term
+// (khT_slope * tan * texel) was the second texel-priced world quantity in
+// the self kernel - 0.35 mm * tan at hero, 1.4 mm * tan at mid, tan ceiling
+// 1e4 (code 17 / mode 232 restores 8). It is now priced at the HERO texel on
+// every tier, so no tier biases a receiver further sun-ward than hero would
+// at the same incidence and the hero->mid seam stops disagreeing about thin
+// geometry (field: the last of the strap leak, 26713 read). The floor stays
+// texel-priced: it covers the coarse map's own quantisation, which really is
+// per texel. Code 83 / mode 457 restores the texel-priced term (the 26713
+// form). Falsifier: acne on grazing receivers beyond hero - 457 is the
+// stand-down and the floor is the knob, not this term.
+#define KH_HERO_TEXEL_M 0.001f
+#define KH_SLOPE_TW(khtw) ((lighting0.y >= 82.5f && lighting0.y < 83.5f) ? (khtw) : min((khtw), KH_HERO_TEXEL_M))
+#define KH_RPDB_GC(khtw) ((lighting0.y >= 79.5f && lighting0.y < 80.5f) ? (8.0f * (khtw)) : min(8.0f * (khtw), KH_RPDB_GC_M))
 #define KH_STEN_TOL_M 0.5f
 // MODE 194 = THE CRISP PATH, AND IT EXISTS TO PROTECT MODE 131.
 #define KH_STEN_TOL_W(khw) ((dbgCtl.w >= 8.5f && dbgCtl.w < 9.5f) ? 1.0e9f : (dbgCtl.w >= 7.5f && dbgCtl.w < 8.5f) ? clamp(KH_STEN_TOL_M * (depthParams.w - depthParams.z) * abs(depthParams.y) / max((khw) * (khw), 1.0e-6f), 4.0e-7f, 1.0e-2f) : stenVol2.y)
@@ -822,22 +859,60 @@ float SunShadowCompareSoft(float2 uv, float z)  { return KhSunSoftT(khSunDepth, 
 // The cross-fade now spans the outer 40% of every window - hero 80 cm, mid
 // 3.2 m, outer 12.8 m - one helper, all nine blend sites (cast chain, self
 // kernel, contact carries). KhJw shares this curve: continuity holds.
+// KH_FADE_TO_GUARD (26717): the fade ends at the window's 0.998 uv guard,
+// not 0.98. The 0.98 end left a DEAD ZONE - the last 0.9% of every window
+// (4 cm of hero) where a finer tier's carry exists with weight exactly 0,
+// so the coarser tier answered alone and no hold ramp expressed in that
+// weight could reach it (the seam stripe's last residual, handoff 6.4).
+// With the end at the guard the hold's 0.10 ramp covers ~1.6 cm of hero
+// instead of ~9. The symmetric tail lengthens by the same 0.9% at near-
+// zero weight; the kernel's OOB margin at the guard is still 8 texels.
+// REVERTED at 26718 (operator: the shared fade shape must stay equal at
+// every tier boundary; a shorter fade reads as a snap). Default = the
+// 0.98 end again; code 88 / mode 462 = the guard end, OPT-IN; code 87 /
+// mode 461 is an alias of the default. Codes 55 / 62 keep their own
+// end points.
 float KhTbW(float khtw_e)
 {
     return (lighting0.y >= 54.5f && lighting0.y < 55.5f)
          ? 1.0f - smoothstep(0.90f, 0.99f, khtw_e)
          : (lighting0.y >= 61.5f && lighting0.y < 62.5f)
          ? 1.0f - smoothstep(0.60f, 0.98f, khtw_e)
+         : (lighting0.y >= 87.5f && lighting0.y < 88.5f)
+         ? 1.0f - smoothstep(0.75f, 0.998f, khtw_e)   // 462: fade to the guard
          : 1.0f - smoothstep(0.75f, 0.98f, khtw_e);
 }
 // Code 73 (mode 443) is the PARTNER PAINT: the partner alone inside the band,
 // the arming read for which tier authors a fade (read with 257 and 0 at the
 // same pose; 269 names the tier).
+// KH_TIER_FADE_DIR - the HOLD is the DEFAULT since 26715 (minted opt-in as
+// code 75 / mode 445, now an alias). A finer tier that carried a MORE
+// shadowed verdict than the tier resolving the blend keeps it: the finer
+// map resolved something the coarser one is on its ambiguity ramp over
+// (field: a contact-scale fold at a seam - hero full shadow, mid a soft-
+// compare partial - read as a lit stripe on entering hero's window, 269
+// orange / 395 green = certified by hero, served by mid; 257 removed it,
+// 445 removed most of it). The lighter direction still fades symmetrically
+// (a lit finer verdict against a shadowed coarser one is the penumbra case
+// the fade was built for). Continuity at the window edge holds: h -> 0 as
+// w -> 0. The remaining band is KhTbW's dead zone (w == 0 for e in
+// 0.98..0.998, the last 4 cm of hero) plus the hold's own ramp.
+// REVERTED at 26718: the hold shortens the darker direction of the fade
+// (46 cm of hero -> 11 cm at a 0.28 ramp, 5 cm at 0.10) and the operator
+// judged an equal fade at every tier boundary worth more than the seam
+// stripe (handoff 6.4 records the stripe as accepted). Default = the
+// symmetric lerp (the 26714 form). Code 75 / mode 445 = hold, 0.28 ramp
+// (its original meaning); code 85 / mode 459 = hold, 0.10 ramp; codes
+// 84 / 86 (modes 458 / 460) are aliases - of the default and of 445
+// respectively. Nine blend sites, both chains: this is the only body.
 float KhTbBlend(float khtd_c, float khtd_f, float khtd_w)
 {
     if (lighting0.y >= 72.5f && lighting0.y < 73.5f) return khtd_c;   // 443: partner alone
-    float khtd_h = (khtd_f > khtd_c && (lighting0.y >= 74.5f && lighting0.y < 75.5f))
-                 ? smoothstep(0.0f, 0.28f, khtd_w) : khtd_w;   // 445: hold, opt-in
+    const bool khtd_h28 = (lighting0.y >= 74.5f && lighting0.y < 75.5f) ||
+                          (lighting0.y >= 85.5f && lighting0.y < 86.5f);   // 445 / 460: hold, 0.28
+    const bool khtd_h10 = (lighting0.y >= 84.5f && lighting0.y < 85.5f);   // 459: hold, 0.10
+    float khtd_h = (khtd_f > khtd_c && (khtd_h28 || khtd_h10))
+                 ? smoothstep(0.0f, khtd_h10 ? 0.10f : 0.28f, khtd_w) : khtd_w;
     return lerp(khtd_c, khtd_f, khtd_h);
 }
 // ABSENCE WITNESS: a per-camera band's map can be missing a caster whose
@@ -861,6 +936,11 @@ float KhTbBlend(float khtd_c, float khtd_f, float khtd_w)
 // that region at its own texel and its verdict stands. khuw_tz / khuw_tiD =
 // the fragment's depth in the tier map and that map's depth scale. Code 77 /
 // mode 450 restores the whole-union form.
+// RETIRED BY DEFAULT (26711, KH_SUN_PANCAKE): the tiers no longer clip a
+// caster sun-ward of their near plane - it pancakes onto z = 0 and still
+// occludes - so the one case this witness existed for (an occluder the tier
+// could not have rendered) no longer occurs. Reached only under code 78
+// (tier-scoped) or 77 (whole-union); see khuw_off at both callers.
 bool KhUnionClear(float3 khuw_r, float khuw_tz, float khuw_tiD)
 {
     if (sunMeta.x < 0.5f) return false;
@@ -940,7 +1020,15 @@ float SunShadowOcclusion(float3 wpos)
     // 295) is now an accepted ALIAS of the default and stays whitelisted -
     // the mode-64 precedent.
     const bool khlf_on = (lighting0.y >= 41.5f && lighting0.y < 42.5f);
-    const bool khuw_off = (lighting0.y >= 75.5f && lighting0.y < 76.5f);   // KH_ABSENCE_WITNESS off (446)
+    // KH_ABSENCE_WITNESS RETIRED (26711): with the camera-anchored tiers
+    // depth-clamped (KH_SUN_PANCAKE) every tier map is complete by
+    // construction, so a clear tier texel IS absence and the union witness
+    // has no case left to veto. Default = the 446 form. Code 78 (mode 452)
+    // restores the tier-scoped witness (the 26707-26710 default); code 77
+    // (mode 450) restores the whole-union witness; code 76 (mode 446) is
+    // now an alias of the default. TWIN: identical line in both chains.
+    const bool khuw_off = !((lighting0.y >= 77.5f && lighting0.y < 78.5f) ||
+                            (lighting0.y >= 76.5f && lighting0.y < 77.5f));
     if (lighting0.y < 20.5f || lighting0.y >= 21.5f) {
         const float3 khc_r = wpos - sunOrigin.xyz;   // KH_SUN_ANCHOR
         bool khc_done;
@@ -1053,7 +1141,7 @@ float KhSelfTier(Texture2D<float> khT_map, Texture2D<float2> khT_pf, float4x4 kh
                         ? 0.0f : khT_tw * khT_iD / max(ndl, 0.02f)
                           * ((lighting0.y >= 38.5f && lighting0.y < 39.5f)
                              ? 1.0f : saturate(1.0f - 3.0f * length(fwidth(n))));   // damper DEFAULT (280's form); off under the 39 arm
-            float khT_gc = 8.0f * khT_tw * khT_iD;
+            float khT_gc = KH_RPDB_GC(khT_tw) * khT_iD;   // KH_RPDB_WORLD_CLAMP (454 = texel-priced)
             float2 khT_g = clamp(
                 float2( dot(n, khT_cr / max(khT_iR, 1e-9f)) * khT_k,
                        -dot(n, khT_cu / max(khT_iR, 1e-9f)) * khT_k),
@@ -1068,7 +1156,7 @@ float KhSelfTier(Texture2D<float> khT_map, Texture2D<float2> khT_pf, float4x4 kh
                         ? khT_meta.z
                         : max(khT_meta.z * khT_fb,   // tier-proportional floor (code 37 reverts; at khsr_slope)
                               ((lighting0.y >= 36.5f && lighting0.y < 37.5f) ? 0.0f : 1.5f) * khT_tw * khT_iD)
-                          + khT_slope * khT_tan * khT_tw * khT_iD;
+                          + khT_slope * khT_tan * KH_SLOPE_TW(khT_tw) * khT_iD;   // KH_SLOPE_WORLD (457 = texel-priced)
             float khT_gs = (lighting0.y >= 47.5f && lighting0.y < 48.5f)
                         ? khgs : min(khgs, 4.0f * khT_tw);
             khT_b += khT_gs * khT_iD;
@@ -1112,6 +1200,10 @@ float KhSelfTier(Texture2D<float> khT_map, Texture2D<float2> khT_pf, float4x4 kh
                 khT_cnt = 8.0f;
             }
             float khT_res = (khT_ctr + khT_w * khT_rng) / (1.0f + khT_cnt * khT_w);
+            // Centre texel of the map (the jurisdiction test reads it):
+            // hoisted above the pf block in 26711 for an arm since wiped;
+            // left here - same load, same value, no reason to move it back.
+            float khT_js = khT_map.Load(int3(int2(khT_t), 0));
             if (khT_pfArm >= 0.5f && !khcl) {
                 float khT_ft = max(khT_fw.x, khT_fw.y);
                 // engagement covers the moire band (ft 1-2, where the old 1.5
@@ -1138,13 +1230,16 @@ float KhSelfTier(Texture2D<float> khT_map, Texture2D<float2> khT_pf, float4x4 kh
                     float khT_pfo = 1.0f - saturate((khT_vv - 0.4f) / 0.6f);
                     if (khT_px) khT_res = khT_pfo;
                     // honest content may CREATE standing - absent content
-                    // reads pfo ~ 0 and still falls through.
+                    // reads pfo ~ 0 and still falls through. (26711's
+                    // KH_PF_DEEP_GATE arm, code 79 / mode 453, stood here;
+                    // it read null against the strap and was wiped at
+                    // 26714. The strap was the texel-priced gradient clamp
+                    // and slope bias, not the pyramid.)
                     else if ((khT_res > 0.0001f || khT_pfo > 0.2f) &&
                              !(khT_res > 0.8f && khT_pfo < 0.2f))
                         khT_res = lerp(khT_res, khT_pfo, khT_pw);
                 }
             }
-            float khT_js = khT_map.Load(int3(int2(khT_t), 0));
             if (khla_g > 0.5f && khT_res > 0.0001f &&
                 (khT_c.z - khT_js) < khla_g * khT_iD &&
                 (khtb_occ < 0.0f || (lighting0.y >= 54.5f && lighting0.y < 55.5f)) &&
@@ -1232,7 +1327,15 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
     // the tier rasterized its whole admitted caster set and nothing landed on
     // this ray.
     const bool khcc_clr = !(lighting0.y >= 66.5f && lighting0.y < 67.5f);
-    const bool khuw_off = (lighting0.y >= 75.5f && lighting0.y < 76.5f);   // KH_ABSENCE_WITNESS off (446)
+    // KH_ABSENCE_WITNESS RETIRED (26711): with the camera-anchored tiers
+    // depth-clamped (KH_SUN_PANCAKE) every tier map is complete by
+    // construction, so a clear tier texel IS absence and the union witness
+    // has no case left to veto. Default = the 446 form. Code 78 (mode 452)
+    // restores the tier-scoped witness (the 26707-26710 default); code 77
+    // (mode 450) restores the whole-union witness; code 76 (mode 446) is
+    // now an alias of the default. TWIN: identical line in both chains.
+    const bool khuw_off = !((lighting0.y >= 77.5f && lighting0.y < 78.5f) ||
+                            (lighting0.y >= 76.5f && lighting0.y < 77.5f));
     float khtb_w = 0.0f;
     const bool khtb_on = !(lighting0.y >= 25.5f && lighting0.y < 26.5f);
     // the self chain's TWIN of KH_BAND_LIT_FALLTHROUGH (mode 296 =
@@ -1301,7 +1404,7 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
                  ? 0.0f : khsr_tw * khsr_iD / max(ndl, 0.02f)
                    * ((lighting0.y >= 38.5f && lighting0.y < 39.5f)
                       ? 1.0f : saturate(1.0f - 3.0f * length(fwidth(n))));   // (at khsr_slope)
-    float khsr_gc = 8.0f * khsr_tw * khsr_iD;
+    float khsr_gc = KH_RPDB_GC(khsr_tw) * khsr_iD;   // KH_RPDB_WORLD_CLAMP twin (454 = texel-priced)
     float2 khsr_g = clamp(
         float2( dot(n, khsr_cr / max(khsr_iR, 1e-9f)) * khsr_k,
                -dot(n, khsr_cu / max(khsr_iR, 1e-9f)) * khsr_k),
@@ -1325,7 +1428,7 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
                  ? sunMeta.z
                  : max(sunMeta.z * khsr_fb,   // tier-proportional floor (code 37 reverts)
                        ((lighting0.y >= 36.5f && lighting0.y < 37.5f) ? 0.0f : 1.5f) * khsr_tw * khsr_iD)
-                   + khsr_slope * khsr_tan * khsr_tw * khsr_iD;
+                   + khsr_slope * khsr_tan * KH_SLOPE_TW(khsr_tw) * khsr_iD;   // KH_SLOPE_WORLD twin (457 = texel-priced)
             float khsr_gs = (lighting0.y >= 47.5f && lighting0.y < 48.5f)
                         ? khgs : min(khgs, 4.0f * khsr_tw);
             khsr_b += khsr_gs * khsr_iD;

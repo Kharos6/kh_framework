@@ -7478,10 +7478,57 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
         // 445 = KH_TIER_FADE_DIR ON - hold, opt-in: a shadowed fine verdict
         // holds through 90 pct of its window against a lighter partner.
                             khd_m == 445 ||
-        // 446 = KH_ABSENCE_WITNESS OFF - a band certifies absence from a
-        // clear texel and the cast chain trusts a band's lit verdict WITHOUT
-        // the union map's witness again.
+        // 458 = hold OFF - an ALIAS of the default since 26718 (the hold was
+        // the default 26715-26717; reverted for the shared fade shape).
+                            khd_m == 458 ||
+        // 459 = KH_HOLD_STEEP ON - an ALIAS of the default since 26716. The
+        // original minting note: the hold's ramp runs over the first
+        // 10 pct of the blend weight instead of 28 pct, narrowing the band
+        // at a window edge where the finer tier's shadow still fades to the
+        // coarser partial. The read for the sliver 445 leaves.
+                            khd_m == 459 ||
+        // 460 = hold, 0.28 ramp - an ALIAS of 445 since 26718.
+                            khd_m == 460 ||
+        // 461 = fade end 0.98 - an ALIAS of the default since 26718.
+                            khd_m == 461 ||
+        // 462 = KH_FADE_TO_GUARD - opt-in: every tier's cross-fade ends at
+        // the 99.8 pct uv guard instead of 98 pct (the 26717 default,
+        // reverted at 26718: it shortens the shared fade). One mode at a
+        // time, so it cannot be combined with 445/459; it closes the dead
+        // zone only in the symmetric fade.
+                            khd_m == 462 ||
+        // 446 = KH_ABSENCE_WITNESS OFF - an ALIAS of the default since 26711
+        // (the witness was retired when KH_SUN_PANCAKE made every tier map
+        // complete by construction). Stays whitelisted: a stale script is not
+        // refused and the number is never re-minted.
                             khd_m == 446 ||
+        // 452 = KH_ABSENCE_WITNESS ON, tier-scoped - the 26707-26710 default:
+        // a band certifies absence / the cast trusts a lit band verdict only
+        // when the union map sees no occluder OUTSIDE that band's depth
+        // window. The A/B for the 26711 retirement.
+                            khd_m == 452 ||
+        // 453 = RETIRED (KH_PF_DEEP_GATE, 26711-26713: read null against
+        // the strap; wiped at 26714). Listed so a stale script is not
+        // refused and the number is never re-minted.
+                            khd_m == 453 ||
+        // 454 = KH_RPDB_WORLD_CLAMP OFF - the self chain's receiver-plane
+        // depth gradient is clamped at 8 texels per tier again (8/32/128 mm
+        // at hero/mid/outer) instead of 8 mm at every tier. The A/B for the
+        // 26712 strap fix: the part-lit strap on entering 269's yellow
+        // (mid) returns under it.
+                            khd_m == 454 ||
+        // 455 = RETIRED (KH_GEO_HORIZON, 26713: read identical to 0 at the
+        // strap; wiped at 26714). Listed so a stale script is not refused
+        // and the number is never re-minted.
+                            khd_m == 455 ||
+        // 456 = KH_SLOPE_WORLD ON - an ALIAS of the default since 26714 (the
+        // 26713 strap read promoted it). Stays whitelisted.
+                            khd_m == 456 ||
+        // 457 = KH_SLOPE_WORLD OFF - the self chain's slope-scaled bias term
+        // texel-priced per tier again (0.35 / 1.4 / 5.6 mm * tan at hero /
+        // mid / outer) instead of the hero texel everywhere. The A/B for
+        // the 26714 default; the strap's residual leak returns under it.
+                            khd_m == 457 ||
         // 450 = KH_WITNESS_TIER_SCOPE OFF - the union witness vetoes a tier's
         // certification for ANY occluder it sees (the 26694 form), instead of
         // only for one outside that tier's depth window. Restores the
@@ -7491,6 +7538,11 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
         // their pyramids at 1024 (A/B ONLY: the texel-priced normal offset
         // leaks on thin geometry there - 26702's defect, 26703 reverted it).
                             khd_m == 448 ||
+        // 451 = KH_SUN_PANCAKE OFF - the camera-anchored sun tiers rasterize
+        // with depth CLIP again (the pre-26710 form): a caster sun-ward of a
+        // tier's near plane drops out of that tier's map instead of
+        // pancaking onto z = 0. The union map clips in both settings.
+                            khd_m == 451 ||
         // 449 = RETIRED (KH_FLUSH_ELIDE, 26704-26708: never fielded armed;
         // withdrawn for the un-reprojected guard's silhouette risk). Listed so
         // a stale script is not refused and the number is never re-minted.
@@ -10190,6 +10242,7 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("sunHeroCasters", RenderIntegration::g_sun2_casters));
         out.push_back(kv("sunHeroRenders", RenderIntegration::g_sun2_renders));
         out.push_back(kv("sunSizeDiv", RenderIntegration::g_sun_size_div.load(std::memory_order_relaxed)));   // 1 = the 4096 ladder (default), 2 = mode 448 (the 2048 A/B arm)
+        out.push_back(kv("sunPancakeOn", static_cast<uint64_t>(RenderIntegration::g_sun_pancake_on.load(std::memory_order_relaxed))));   // KH_SUN_PANCAKE gauge: 1 = tiers bound a depth-clamp twin, 0 = mode 451 / null twin (clip)
         out.push_back(kv("sunHeroSize", RenderIntegration::g_sun2_map_size));   // rendered hero map size (26702)
         out.push_back(kvf("sunHeroHalfDiag", RenderIntegration::g_sun2_half_diag));
         // 1 = the band never fitted at all, in which case NOTHING about this

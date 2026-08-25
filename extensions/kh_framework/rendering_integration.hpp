@@ -782,6 +782,15 @@ struct Resources {
     // frame. Standing check 2 counts THIRTEEN states now; this one resolves
     // 0/0/0 with DepthClipEnable TRUE.
     ID3D11RasterizerState*    rast_sun_nb = nullptr;
+    // KH_SUN_PANCAKE: the DEPTH-CLAMP twins of the four sun states above
+    // (DepthClipEnable FALSE, every other field identical). The camera-
+    // anchored tiers bind these; the union keeps the clip forms. Non-fatal:
+    // a null twin falls through to its clip form at the pick and the
+    // sunPancakeOn gauge reads 0. Ledger at KH_SUN_PANCAKE.
+    ID3D11RasterizerState*    rast_sun_pk = nullptr;
+    ID3D11RasterizerState*    rast_sun_lo_pk = nullptr;
+    ID3D11RasterizerState*    rast_sun_bf_pk = nullptr;
+    ID3D11RasterizerState*    rast_sun_nb_pk = nullptr;
     // THE INJECTION'S OWN RASTERIZER. Ledger at g_svs_inj_rs_clamp.
     ID3D11RasterizerState*    rast_inject = nullptr;
     ID3D11RasterizerState*    rasterizer_ub = nullptr;
@@ -995,6 +1004,10 @@ struct Resources {
         KH_SAFE_RELEASE(rast_sun_bf);
         KH_SAFE_RELEASE(rast_sun_lo);
         KH_SAFE_RELEASE(rast_sun_nb);
+        KH_SAFE_RELEASE(rast_sun_pk);   // KH_SUN_PANCAKE twins
+        KH_SAFE_RELEASE(rast_sun_lo_pk);
+        KH_SAFE_RELEASE(rast_sun_bf_pk);
+        KH_SAFE_RELEASE(rast_sun_nb_pk);
         KH_SAFE_RELEASE(rast_inject);
         KH_SAFE_RELEASE(rasterizer_b);
         KH_SAFE_RELEASE(rasterizer_cull_b);
@@ -1143,11 +1156,17 @@ static std::atomic<bool> g_ui_mask_wanted{false};   // any visible UI-mode pass 
 
 // Set/cleared strictly INSIDE the graphics-lock scope, so every other
 // submission thread is parked whenever it is true: no race exists.
-static bool g_kh_flush_active = false;
+// std::atomic (26710): written on the game thread, read in render-thread
+// hooks. The park makes the plain bool correct in practice; the atomic makes
+// the compiler unable to cache it across a hook body and is the prerequisite
+// for any flush work that ever runs OFF the park (H1b). Relaxed stores and
+// the implicit loads compile to the same plain moves on x86-64 - identical
+// by construction.
+static std::atomic<bool> g_kh_flush_active{false};
 // recursion guard for the UI-phase-thread injection (the clear's own Draw
 // re-enters the hooks on that thread). Deliberately separate from
 // g_ro.in_injection, which belongs to the render thread.
-static bool g_ui_mask_injecting = false;
+static std::atomic<bool> g_ui_mask_injecting{false};   // T-side writer, render-thread readers (same note)
 static std::atomic<bool> g_kh_track_wanted{false};
 static uint64_t g_ui_mask_clears = 0;   // alpha-zero injections fired (render thread)
                                         // steady state: one per frame while
@@ -1201,7 +1220,7 @@ static uint64_t g_ui_mask_floor_holds = 0;
 inline void kh_ui_mask_reset() {   // device reset / session destroy: forget everything
     g_ui_mask = KhUiMask{};
     g_ui_mask_wanted.store(false, std::memory_order_relaxed);
-    g_ui_mask_injecting = false;   // (g_kh_flush_active is lock-scoped, never reset here)
+    g_ui_mask_injecting.store(false, std::memory_order_relaxed);   // (g_kh_flush_active is lock-scoped, never reset here)
 }
 
 inline bool kh_ui_mask_known_bb(void* id, UINT* w = nullptr, UINT* h = nullptr) {
@@ -6894,16 +6913,33 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         rd.DepthBias = 16;
         rd.SlopeScaledDepthBias = 3.0f;
         rd.DepthBiasClamp = 0.0f;   // unclamped: a per-triangle bias has no
-                                    // The private sun map keeps ORDINARY
+                                    // The UNION map keeps ORDINARY
                                     // clipping: its ortho volume is fitted
                                     // around the casters, so nothing
-                                    // legitimate crosses its near/far planes -
-                                    // and clamped out-of-volume depth would
-                                    // silently corrupt the self-shadow
-                                    // compares.
+                                    // legitimate crosses its near/far planes.
+                                    // That argument is the union's ONLY: the
+                                    // camera-anchored tiers have fixed depth
+                                    // windows that casters legitimately
+                                    // cross, and they bind the clamp twins
+                                    // minted below (KH_SUN_PANCAKE, 26710).
         rd.DepthClipEnable = TRUE;
         hr = dev->CreateRasterizerState(&rd, &g_res.rast_sun);
         if (FAILED(hr)) { g_res.release(); return "Create sun rasterizer " + hr_str(hr); }
+        // KH_SUN_PANCAKE: each sun state's clamp twin is minted from the SAME
+        // desc with DepthClipEnable FALSE, immediately after its clip form,
+        // so the pair cannot drift; rd is returned to TRUE so every state
+        // below still sees the sun block's desc unchanged. Non-fatal, the
+        // 227 shape: a null twin falls through to clip at kh_sun_rs_pick.
+        auto khpk_twin = [&](ID3D11RasterizerState** khpk_out, const char* khpk_what) {
+            rd.DepthClipEnable = FALSE;
+            if (FAILED(dev->CreateRasterizerState(&rd, khpk_out))) {
+                *khpk_out = nullptr;
+                report_error_once_safe(std::string("KH sun pancake rasterizer (") + khpk_what +
+                                       "): create failed (that tier state clips)");
+            }
+            rd.DepthClipEnable = TRUE;
+        };
+        khpk_twin(&g_res.rast_sun_pk, "base");
         // THE LOW-BIAS SUN STATE IS THE DEFAULT (mode 261 restores 16/3.0).
         // The dominant variance source is THIS state's SlopeScaledDepthBias
         // 3.0: per-TRIANGLE slope baked into the map, so organic meshes put
@@ -6913,6 +6949,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         rd.SlopeScaledDepthBias = 1.0f;
         hr = dev->CreateRasterizerState(&rd, &g_res.rast_sun_lo);
         if (FAILED(hr)) { g_res.release(); return "Create sun rasterizer(lo) " + hr_str(hr); }
+        khpk_twin(&g_res.rast_sun_lo_pk, "lo");
 
         // Identical in every field except CullMode. Non-fatal: a creation
         // failure leaves it null and the arm falls through to rast_sun, so
@@ -6923,13 +6960,15 @@ inline std::string ensure_resources(ID3D11Device* dev) {
             g_res.rast_sun_bf = nullptr;
             report_error_once_safe("KH sun back-face rasterizer: create failed (mode 227 inert)");
         }
+        khpk_twin(&g_res.rast_sun_bf_pk, "bf");   // CullFront still set: the true twin
         rd.CullMode = D3D11_CULL_NONE;
         rd.DepthBias = 0;
         rd.SlopeScaledDepthBias = 0.0f;
         rd.DepthBiasClamp = 0.0f;
 
-        // DepthClipEnable is still TRUE from the sun block, which is correct:
-        // same pass, same fitted ortho volume. Non-fatal, the 227 shape: a
+        // DepthClipEnable is still TRUE from the sun block: this is the
+        // union's clip form (the tiers take the clamp twin minted right
+        // after it - KH_SUN_PANCAKE). Non-fatal, the 227 shape: a
         // creation failure leaves it null, the bind falls through to
         // rast_sun, and 234's raster half becomes a REPORTED no-op instead of
         // a null bind or a silent half-arm.
@@ -6937,6 +6976,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
             g_res.rast_sun_nb = nullptr;
             report_error_once_safe("KH sun zero-bias rasterizer: create failed (mode 234 raster half inert)");
         }
+        khpk_twin(&g_res.rast_sun_nb_pk, "nb");
 
         // Everything rast_sun is, with DepthClipEnable FALSE - because the
         // injection rasterizes into the ENGINE's perspective volume buffer,
@@ -7581,6 +7621,43 @@ static UINT g_sun2_map_size = KH_SUN_HERO_BASE;
 static UINT g_sun3_map_size = KH_SUN_MID_BASE;
 static UINT g_sun4_map_size = KH_SUN_OUT_BASE;
 static UINT g_sun5_map_size = KH_SUN_FAR_BASE;
+// KH_SUN_PANCAKE (26710): depth CLAMP, not clip, on the camera-anchored sun
+// tiers. rast_sun's DepthClipEnable TRUE is justified by "the ortho volume
+// is fitted around the casters" - true of the union map, false of the four
+// camera-anchored tiers (hero/mid/outer 12/48/192 m sun-ward, far 6x its
+// half): a caster sun-ward of a tier's near plane was CLIPPED out of that
+// tier's map, so the tier read "clear" where an occluder stood. In an
+// orthographic map a fragment's occluders project to its own texel and can
+// only be missing depth-wise, so that clip was the sole way a tier could be
+// wrong about absence - the root the absence witness (26694/26707), the
+// far-self gate and the 50 m fade all compensated for. Textbook CSM
+// pancakes instead: DepthClipEnable FALSE, an out-of-window caster lands on
+// z = 0 and still occludes. The tiers bind the clamp twins (rast_sun*_pk);
+// the union keeps the clip forms (its fit argument holds). Mode 451 = clip
+// again (the A/B). The two RSSetState picks (tier pass and union pass) are
+// the twins and both go through kh_sun_rs_pick; no lighting0.y code is
+// spent - this is a C++ raster switch like 448, not a shader arm.
+// Gauge sunPancakeOn: 1 = the tier pass last bound a clamp twin; 0 = mode
+// 451, or a null twin fell through to clip. Never reset: it describes the
+// state the maps on the GPU were rendered with (the g_sun*_map_size rule).
+// Pre-registered falsifier: new acne or leak at a pancaked near plane means
+// z = 0 is meeting the compare-bias floor (khT_b) or the moment pyramid's
+// mean/variance (KhPfMu) - stand down to 451 and instrument; do not stack a
+// bias change on top.
+static std::atomic<int32_t> g_sun_pancake_on{0};
+// ONE pick for the union site and the tier site (the 227 / 234 / 261 arms).
+// khrs_clamp selects the clamp twin of whatever the mode picked, falling
+// through to that clip form when the twin is null.
+inline ID3D11RasterizerState* kh_sun_rs_pick(int khrs_dm, bool khrs_clamp) {
+    ID3D11RasterizerState* khrs_clip;
+    ID3D11RasterizerState* khrs_pk;
+    if (khrs_dm == 227 && g_res.rast_sun_bf)      { khrs_clip = g_res.rast_sun_bf; khrs_pk = g_res.rast_sun_bf_pk; }
+    else if (khrs_dm == 234 && g_res.rast_sun_nb) { khrs_clip = g_res.rast_sun_nb; khrs_pk = g_res.rast_sun_nb_pk; }
+    else if (khrs_dm == 261)                      { khrs_clip = g_res.rast_sun;    khrs_pk = g_res.rast_sun_pk; }
+    else if (g_res.rast_sun_lo)                   { khrs_clip = g_res.rast_sun_lo; khrs_pk = g_res.rast_sun_lo_pk; }
+    else                                          { khrs_clip = g_res.rast_sun;    khrs_pk = g_res.rast_sun_pk; }
+    return (khrs_clamp && khrs_pk) ? khrs_pk : khrs_clip;
+}
 static std::atomic<float> g_sun_range{200.0f};
 static std::atomic<float> g_obj_vis{0.0f};
 static std::atomic<int>   g_obj_vis_src{0};
@@ -7597,8 +7674,15 @@ inline bool kh_sun_map_ensure(ID3D11Device* dev, UINT khsm_size,
                               ID3D11DepthStencilView*& khsm_dsv,
                               ID3D11ShaderResourceView*& khsm_srv);   // defined with the bands
 
+// KH_SUN_LADDER: no trio early-out here (26710) - the union goes through
+// the same width check the four tiers do, so a 448 flip recreates it too.
+// Before this an existing union stayed at whatever size it was FIRST
+// created at while the viewport and sunMeta.y followed the wanted size
+// (448 before first creation, then 0, left a 2048 map under a 4096
+// viewport: three quarters of every read out of bounds = occluded).
+// Output-identical at the default: the width matches, the ensure returns
+// true after one GetDesc, exactly the tiers' cost.
 inline bool ensure_sun_depth(ID3D11Device* dev) {
-    if (g_res.sun_tex && g_res.sun_dsv && g_res.sun_srv) return true;
     return kh_sun_map_ensure(dev, kh_sun_depth_size(), g_res.sun_tex, g_res.sun_dsv, g_res.sun_srv);
 }
 
@@ -9546,7 +9630,7 @@ static uint32_t g_fk_veto_cand_n = 0;   // candidates staged at the last pass BE
                                             // campaign-43 handoff.
 // Build tag: monotonic, never reused, bumped once per shipped build (including
 // pure reverts). Keep it a constexpr int, not a #define.
-static constexpr int KH_BUILD_TAG = 26709;
+static constexpr int KH_BUILD_TAG = 26718;
 // Continuous at the near plane, so routing on/off never pops a fragment.
 static constexpr float KH_NEARZ_GAP_FRAC = 0.92f;
 // 3 = mode 203 - passthrough + absolute form.
@@ -16314,9 +16398,19 @@ inline void fill_lighting_obj_cb(ConstantData& cbd, const RenderObject& o) {
                                                   // verdicts come from the pyramid alone;
                                                   // authorship separation vs 357)
                          : khl_dm == 362 ? 48.0f   // UNBOUNDED grad slack
-                         : khl_dm == 446 ? 76.0f   // KH_ABSENCE_WITNESS OFF (+ forms)
-                         : khl_dm == 450 ? 77.0f   // KH_WITNESS_TIER_SCOPE OFF (whole-union veto, the 26694 form)
-                         : khl_dm == 445 ? 75.0f   // fade-direction hold, opt-in
+                         : khl_dm == 446 ? 76.0f   // KH_ABSENCE_WITNESS OFF - an ALIAS of the default since 26711 (stays whitelisted, the mode-64 precedent)
+                         : khl_dm == 450 ? 77.0f   // whole-union witness ON (the 26694 form; the witness itself is retired by default since 26711)
+                         : khl_dm == 452 ? 78.0f   // KH_ABSENCE_WITNESS ON, tier-scoped (the 26707-26710 default; 26711 retired it - KH_SUN_PANCAKE)
+                         // 453 (code 79, pf deep gate) and 455 (code 81, geometric horizon) were minted at 26711/26713, read null against the strap and were WIPED at 26714: modes retired in the whitelist, codes 79 and 81 burned (never reassign).
+                         : khl_dm == 454 ? 80.0f   // KH_RPDB_WORLD_CLAMP OFF: the receiver-plane gradient clamp back to 8 TEXELS per tier (the 26711 form; 32 mm at mid). Mesh fill only (no RPDB in the cast chain).
+                         : khl_dm == 456 ? 82.0f   // KH_SLOPE_WORLD ON - an ALIAS of the default since 26714 (stays whitelisted).
+                         : khl_dm == 457 ? 83.0f   // KH_SLOPE_WORLD OFF: the slope-scaled self bias texel-priced per tier again (the 26713 form; 1.4 mm * tan at mid). Mesh fill only. Next free code: 84.
+                         : khl_dm == 445 ? 75.0f   // KH_TIER_FADE_DIR hold, 0.28 ramp - OPT-IN again since 26718 (default 26715-26717)
+                         : khl_dm == 458 ? 84.0f   // hold OFF - an ALIAS of the default since 26718
+                         : khl_dm == 459 ? 85.0f   // KH_HOLD_STEEP: hold, 0.10 ramp - OPT-IN again since 26718 (default 26716-26717)
+                         : khl_dm == 460 ? 86.0f   // hold 0.28 - an ALIAS of 445 since 26718
+                         : khl_dm == 461 ? 87.0f   // fade end 0.98 - an ALIAS of the default since 26718
+                         : khl_dm == 462 ? 88.0f   // KH_FADE_TO_GUARD: the tier fade ends at the 0.998 guard - OPT-IN (default at 26717 only). Next free code: 89.
                          : khl_dm == 444 ? 74.0f   // KH_PF_RAMP_FLOOR OFF (precision floor as sigma)
                          : khl_dm == 442 ? 72.0f   // KH_TIER_FADE_DIR OFF (symmetric fade)
                          : khl_dm == 443 ? 73.0f   // KH_TIER_PARTNER_PAINT (partner alone in the band)
@@ -20033,11 +20127,16 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             ctx->VSSetConstantBuffers(0, 2, khsh_cbs);
             ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);
             // FRONT faces stay the default (227 = the back-face arm, historic
-            // meaning intact). Twin of the union site.
-            ctx->RSSetState(khsh_dm == 227 && g_res.rast_sun_bf ? g_res.rast_sun_bf
-                          : khsh_dm == 234 && g_res.rast_sun_nb ? g_res.rast_sun_nb
-                          : khsh_dm == 261 ? g_res.rast_sun
-                          : g_res.rast_sun_lo ? g_res.rast_sun_lo : g_res.rast_sun);
+            // meaning intact). Twin of the union site through kh_sun_rs_pick.
+            // KH_SUN_PANCAKE: the tiers bind the CLAMP twin of the picked
+            // state (451 = clip again, the A/B); the gauge reads whether a
+            // clamp twin was actually bound (a null twin falls through).
+            {
+                ID3D11RasterizerState* khsh_rs = kh_sun_rs_pick(khsh_dm, khsh_dm != 451);
+                g_sun_pancake_on.store(khsh_rs != kh_sun_rs_pick(khsh_dm, false) ? 1 : 0,
+                                       std::memory_order_relaxed);
+                ctx->RSSetState(khsh_rs);
+            }
         }
 
         // the hero body, parameterized - one band per call. Outputs land in
@@ -20861,12 +20960,12 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         // A thin wall puts the back face millimetres behind the front, the
         // 16/3.0 bias exceeds the thickness and light leaks straight through;
         // OPEN or single-sided meshes store NO back face at all and
-        // everything behind them reads lit. TWIN EDIT: the band pass
-        // (khsh_one) carries the identical form. Twin of the band site.
-        ctx->RSSetState(khsd_dm == 227 && g_res.rast_sun_bf ? g_res.rast_sun_bf
-                      : khsd_dm == 234 && g_res.rast_sun_nb ? g_res.rast_sun_nb
-                      : khsd_dm == 261 ? g_res.rast_sun
-                      : g_res.rast_sun_lo ? g_res.rast_sun_lo : g_res.rast_sun);
+        // everything behind them reads lit. TWIN of the band pass
+        // (khsh_one) through kh_sun_rs_pick. The union stays on the CLIP
+        // form (khrs_clamp false): its ortho volume is fitted around the
+        // caster set, so the fitting argument holds here and only here
+        // (KH_SUN_PANCAKE).
+        ctx->RSSetState(kh_sun_rs_pick(khsd_dm, false));
     }
     if (instanced) {
         // ONE constant upload, ONE instance-buffer fill, ONE DrawInstanced
@@ -22350,9 +22449,15 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
                                  : khcc_m == 245 ? 22.0f   // filtering revert
                                  : khcc_m == 442 ? 72.0f   // KH_TIER_FADE_DIR OFF (twin)
                                  : khcc_m == 443 ? 73.0f   // partner paint (twin)
-                                 : khcc_m == 446 ? 76.0f   // witness off (twin)
-                                 : khcc_m == 450 ? 77.0f   // whole-union veto (twin)
-                                 : khcc_m == 445 ? 75.0f   // hold opt-in (twin)
+                                 : khcc_m == 446 ? 76.0f   // witness off - alias of the default since 26711 (twin)
+                                 : khcc_m == 450 ? 77.0f   // whole-union witness on (twin)
+                                 : khcc_m == 452 ? 78.0f   // tier-scoped witness on (twin). 454 / 456 / 457 (the self-kernel gradient clamp and slope-bias arms) are mesh-fill only: the cast chain has no receiver-plane kernel, so they map to the default here deliberately - the 264 precedent. 453 / 455 are retired (26714).
+                                 : khcc_m == 445 ? 75.0f   // hold 0.28, opt-in (twin)
+                                 : khcc_m == 458 ? 84.0f   // hold off - alias of the default (twin)
+                                 : khcc_m == 459 ? 85.0f   // hold 0.10, opt-in (twin)
+                                 : khcc_m == 460 ? 86.0f   // alias of 445 (twin)
+                                 : khcc_m == 461 ? 87.0f   // alias of the default (twin)
+                                 : khcc_m == 462 ? 88.0f   // fade to the guard, opt-in (twin)
                                  // 328 arms it deliberately; 326 arms it
                                  // because it reverts KH_BAND_SUN_REACH, and
                                  // the fallthrough is the cover for exactly
@@ -31064,7 +31169,7 @@ inline void kh_ui_mask_clear_alpha(ID3D11DeviceContext* ctx) {
         }
     }
 
-    g_ui_mask_injecting = true;   // T-side recursion guard (not g_ro.in_injection)
+    g_ui_mask_injecting.store(true, std::memory_order_relaxed);   // T-side recursion guard (not g_ro.in_injection)
                                   // that flag belongs to the render thread's
                                   // machinery)
     StateBackup khz_backup;
@@ -31095,7 +31200,7 @@ inline void kh_ui_mask_clear_alpha(ID3D11DeviceContext* ctx) {
 
     if (khz_nvp > 0) ctx->RSSetViewports(khz_nvp, khz_saved_vp);
     khz_backup.restore(ctx);
-    g_ui_mask_injecting = false;
+    g_ui_mask_injecting.store(false, std::memory_order_relaxed);
 
     g_ui_mask.phase = 3;
     g_ui_mask.mask_valid = true;
@@ -36038,9 +36143,9 @@ inline void flush_frame() {
             reset_session_state();
             return;
         }
-        g_kh_flush_active = true;   // our draws traverse the T-path otherwise
+        g_kh_flush_active.store(true, std::memory_order_relaxed);   // our draws traverse the T-path otherwise
         flush_locked(dev, ctx);
-        g_kh_flush_active = false;
+        g_kh_flush_active.store(false, std::memory_order_relaxed);
         QueryPerformanceCounter(&khfc_t2);
         g_stats.fx_cpu_flush_us = kh_qpc_ticks_to_us(khfc_t2.QuadPart - khfc_t1.QuadPart);
         return;
@@ -36802,9 +36907,9 @@ inline bool flush_ui_frame() {
 
         QueryPerformanceCounter(&khufc_t1);
         g_stats.fx_cpu_ui_park_us = kh_qpc_ticks_to_us(khufc_t1.QuadPart - khufc_t0.QuadPart);
-        g_kh_flush_active = true;   // our draws traverse the T-path otherwise
+        g_kh_flush_active.store(true, std::memory_order_relaxed);   // our draws traverse the T-path otherwise
         flush_ui_locked(dev, ctx);
-        g_kh_flush_active = false;
+        g_kh_flush_active.store(false, std::memory_order_relaxed);
         QueryPerformanceCounter(&khufc_t2);
         g_stats.fx_cpu_ui_flush_us = kh_qpc_ticks_to_us(khufc_t2.QuadPart - khufc_t1.QuadPart);
         return true;

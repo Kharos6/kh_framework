@@ -517,11 +517,9 @@ float4 PSMain(VSOut i) : SV_Target
     // legality as the pair above. TWIN EDIT: PSMain and PSComposite carry the
     // identical line.
 )HLSL" R"HLSL(   // THE SLICE IS A UNITS MISMATCH BETWEEN WHAT WE WRITE AND WHAT WE
-    // This is the one place the twins legitimately differ; do not "restore"
-    // it. COMPARE. This chunk declares SV_Depth and the contact clamp above
-    // may have moved it, so the value that reached the depth buffer - and
-    // therefore the value the witness snapshot holds - is khaODepth, NOT
-    // i.pos.z.
+    // PSMain writes no depth: the raster tap reads i.pos.z. (PSComposite's
+    // ARB variant declares SV_Depth and carries the khaODepth note - the one
+    // place the twins legitimately differ.)
     float2 khStenR = i.pos.xy;
     // At steady motion the two agree to sub-pixel (0.6 px measured across 18
     // m/s rows) and the 2 px DEADBAND keeps the historic raster tap
@@ -622,12 +620,12 @@ float4 PSMain(VSOut i) : SV_Target
         return float4(color.a, SolidMask(i.wpos), smf, 1.0f);
     }
 
-        if (maskMeta.y >= 0.5f) {
-            float kmv = khShadowMask.Load(int3(KhMaskPx(i.pos.xy), 0)).r;
-            return float4(kmv, kmv, kmv, 1.0f);
-        }
+    if (maskMeta.y >= 0.5f) {   // mode 71 paint arm (function scope, not the 4.5-7.5 block above)
+        float kmv = khShadowMask.Load(int3(KhMaskPx(i.pos.xy), 0)).r;
+        return float4(kmv, kmv, kmv, 1.0f);
+    }
 
-        if (maskMeta.z >= 0.5f) return KhStenPaintU(i.wpos, i.pos.xy, maskMeta.z);
+    if (maskMeta.z >= 0.5f) return KhStenPaintU(i.wpos, i.pos.xy, maskMeta.z);
 
     if (dbgCtl.x >= 22.5f && dbgCtl.x < 23.5f) return float4(1.0f, 0.0f, 1.0f, 1.0f);
     // The census settled the partition question: partVpLo/Hi 0.011/0.999 are

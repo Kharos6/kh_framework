@@ -850,7 +850,18 @@ float KhTbBlend(float khtd_c, float khtd_f, float khtd_w)
 // or out of depth range - nobody certifies absence from nothing. Margin is
 // priced in union texels, which scale with shadow range. Mode 446 / code 76
 // disables the witness (restores the unconditional forms).
-bool KhUnionClear(float3 khuw_r)
+// KH_WITNESS_TIER_SCOPE (26707): the union's texel is mesh-priced (11 cm at
+// a 448 m span) and over-extends every occluder laterally by up to half of
+// itself, so the whole-union witness vetoed certification in union-texel
+// RECTANGLES beside every fine shadow edge and the coarser tiers' sub-guard
+// verdict leaked there (field: 446 removed them, 444/447 did not). The
+// witness may now veto only for an occluder OUTSIDE the asking tier's depth
+// window - sun-ward of its near plane, which is the one case the tier could
+// not have rendered (the 50 m fade's root). Inside the window the tier saw
+// that region at its own texel and its verdict stands. khuw_tz / khuw_tiD =
+// the fragment's depth in the tier map and that map's depth scale. Code 77 /
+// mode 450 restores the whole-union form.
+bool KhUnionClear(float3 khuw_r, float khuw_tz, float khuw_tiD)
 {
     if (sunMeta.x < 0.5f) return false;
     float4 khuw_c = mul(float4(khuw_r, 1.0f), sunVP);
@@ -863,7 +874,11 @@ bool KhUnionClear(float3 khuw_r)
     float khuw_iD = length(float3(sunVP[0].z, sunVP[1].z, sunVP[2].z));
     float khuw_tw = 2.0f / (max(sunMeta.y, 1.0f) * max(khuw_iR, 1.0e-6f));
     float khuw_m = max(3.0f * sunMeta.z, 3.0f * khuw_tw * khuw_iD);
-    return (khuw_c.z - khuw_s) < khuw_m;
+    if ((khuw_c.z - khuw_s) < khuw_m) return true;   // nothing above the point
+    if (lighting0.y >= 76.5f && lighting0.y < 77.5f) return false;   // 450: whole-union veto
+    float khuw_dm  = (khuw_c.z - khuw_s) / max(khuw_iD, 1.0e-6f);   // occluder height above the point, metres
+    float khuw_win = khuw_tz / max(khuw_tiD, 1.0e-6f);              // tier near plane to the point, metres
+    return khuw_dm < khuw_win - khuw_tw;   // inside the tier's window (one union texel of guard at the plane)
 }
 
 // PAST the cut no finer tier contains the fragment, so khla_g never leaves 0
@@ -890,13 +905,14 @@ float KhCastTier(Texture2D<float> khC_map, float4x4 khC_vp, float4 khC_meta, flo
     khC_done = false;
     if (khC_meta.x >= 0.5f) {
         float4 khC_c = mul(float4(khC_r, 1.0f), khC_vp);   // KH_SUN_ANCHOR
+        float  khC_iD = length(float3(khC_vp[0].z, khC_vp[1].z, khC_vp[2].z));   // depth scale, for the witness
         float2 khC_u = float2(0.5f + 0.5f * khC_c.x, 0.5f - 0.5f * khC_c.y);
         if (khC_u.x > 0.002f && khC_u.x < 0.998f &&
             khC_u.y > 0.002f && khC_u.y < 0.998f &&
             khC_c.z > 0.0f && khC_c.z < 1.0f) {
             float khC_o = KhSunSoftT(khC_map, khC_meta.y, khC_u, khC_c.z - khC_meta.z);   // filtered
             if (khC_o > 0.0001f ||
-                (!khlf_on && (khuw_off || KhUnionClear(khC_r)))) {   // lit authoritative - only with the union's witness, else fall through
+                (!khlf_on && (khuw_off || KhUnionClear(khC_r, khC_c.z, khC_iD)))) {   // lit authoritative - only with the union's witness (tier-scoped), else fall through
                 if (khtb_occ >= 0.0f) { khC_done = true; return KhTbBlend(khC_o, khtb_occ, khtb_w); }
                 float khC_e = max(abs(khC_u.x - 0.5f), abs(khC_u.y - 0.5f)) * 2.0f;
                 float khC_w = khtb_on ? KhTbW(khC_e) : 1.0f;
@@ -1141,7 +1157,7 @@ float KhSelfTier(Texture2D<float> khT_map, Texture2D<float2> khT_pf, float4x4 kh
                          : (khT_cg69 && (lighting0.y >= 68.5f && lighting0.y < 69.5f))
                          ? khT_meta.w   // 398: the admission bound (far)
                          : 6.0f * khT_meta.w;   // default = form
-            bool khT_cok = (khuw_off || KhUnionClear(khwr)) && (khcc_on   // union witness
+            bool khT_cok = (khuw_off || KhUnionClear(khwr, khT_c.z, khT_iD)) && (khcc_on   // union witness, tier-scoped
                          ? ((khcc_clr || khT_js < 1.0f) &&
                             (khT_c.z - khT_js) < khT_cg * khT_iD)
                          : (abs(khT_c.z - khT_js) < 3.0f * khT_b));

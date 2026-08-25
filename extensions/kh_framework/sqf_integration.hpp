@@ -7482,6 +7482,19 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
         // clear texel and the cast chain trusts a band's lit verdict WITHOUT
         // the union map's witness again.
                             khd_m == 446 ||
+        // 450 = KH_WITNESS_TIER_SCOPE OFF - the union witness vetoes a tier's
+        // certification for ANY occluder it sees (the 26694 form), instead of
+        // only for one outside that tier's depth window. Restores the
+        // union-texel rectangles beside fine shadow edges (26707's defect).
+                            khd_m == 450 ||
+        // 448 = KH_SUN_LADDER 2048 - union/hero/mid/outer sun maps at 2048 and
+        // their pyramids at 1024 (A/B ONLY: the texel-priced normal offset
+        // leaks on thin geometry there - 26702's defect, 26703 reverted it).
+                            khd_m == 448 ||
+        // 449 = RETIRED (KH_FLUSH_ELIDE, 26704-26708: never fielded armed;
+        // withdrawn for the un-reprojected guard's silhouette risk). Listed so
+        // a stale script is not refused and the number is never re-minted.
+                            khd_m == 449 ||
         // 447 = KH_BAND_ADMIT_NORM OFF - band admission returns to radial
         // (disc) test, which refuses casters whose shadows land in the square
         // window's corners (the 50 m fade's root, dump3).
@@ -8365,6 +8378,7 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("msaaToggleWipes", RenderIntegration::g_msaa_toggle_wipes));
         out.push_back(kv("missionResetFails", RenderIntegration::g_mission_reset_fails));   // mission-end lock exhaustions (destroy deferred, never skipped)
         out.push_back(kv("fsaaStandDownFrames", RenderIntegration::g_fsaa_standdown_frames));   // injection triggers refused by the FSAA requirement
+        out.push_back(kv("omMrtSaves", RenderIntegration::g_om_mrt_saves));   // flush-side target captures that found an RTV above slot 0 (26695 arm)
         out.push_back(kv("fsaaDepthSamples", RenderIntegration::g_scene_depth_samples));   // the learned scene-depth sample count (1 = standing down, 0 = not yet learned; learned at the flush adoption)
         // mode-lane census + cache telemetry.
         out.push_back(kvf("blkModeLast", RenderIntegration::g_light_probe.last_mode));
@@ -8378,6 +8392,7 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("blkModeN3", RenderIntegration::g_blk_mode_census_n[3]));
         out.push_back(kv("shaderCacheHits", RenderIntegration::g_shader_cache_hits.load(std::memory_order_relaxed)));
         out.push_back(kv("shaderCacheMisses", RenderIntegration::g_shader_cache_misses.load(std::memory_order_relaxed)));
+        out.push_back(kv("shaderCacheCorrupt", RenderIntegration::g_shader_cache_corrupt.load(std::memory_order_relaxed)));   // DXBC-invalid cache blobs deleted on read (26700)
         // CPU ms summed across every compiling thread, NOT wall time - read
         // it against shaderMtWallMs; the ratio IS the parallelism.
         out.push_back(kv("shaderCompileMs", RenderIntegration::g_shader_compile_ms.load(std::memory_order_relaxed)));
@@ -10011,6 +10026,7 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("ownFrames", RenderIntegration::g_own_frames));
         out.push_back(kv("ownDraws", RenderIntegration::g_own_draws));
         out.push_back(kv("ownSkips", RenderIntegration::g_own_skips));
+        out.push_back(kv("ownSoloSkips", RenderIntegration::g_own_solo_skips));   // lone-mesh prepass skips (26701)
         out.push_back(kv("ownFails", RenderIntegration::g_own_fails));
         // KH_CB_MIRROR_GAUGE: the HLSL CBObj/CBFrame sizes reflected off the
         // PSMain blob against the C++ split. Read Refl first (1 = the lanes
@@ -10173,6 +10189,8 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("sunHeroValid", RenderIntegration::g_sun2_map_valid ? 1ull : 0ull));
         out.push_back(kv("sunHeroCasters", RenderIntegration::g_sun2_casters));
         out.push_back(kv("sunHeroRenders", RenderIntegration::g_sun2_renders));
+        out.push_back(kv("sunSizeDiv", RenderIntegration::g_sun_size_div.load(std::memory_order_relaxed)));   // 1 = the 4096 ladder (default), 2 = mode 448 (the 2048 A/B arm)
+        out.push_back(kv("sunHeroSize", RenderIntegration::g_sun2_map_size));   // rendered hero map size (26702)
         out.push_back(kvf("sunHeroHalfDiag", RenderIntegration::g_sun2_half_diag));
         // 1 = the band never fitted at all, in which case NOTHING about this
         // axis was tested whatever the screen shows. KH_BAND_SUN_REACH - THE
@@ -11109,7 +11127,7 @@ static game_value get_render_stats_sqf() {
         out.push_back(kvf("sunMapAgeS", RenderIntegration::g_sun_map_time >= 0.0f
             ? RenderIntegration::effect_time_seconds() - RenderIntegration::g_sun_map_time
             : -1.0f));
-        out.push_back(kv("sunMapSizePx", static_cast<uint64_t>(RenderIntegration::KH_SUN_DEPTH_SIZE)));
+        out.push_back(kv("sunMapSizePx", static_cast<uint64_t>(RenderIntegration::g_sun_map_size)));   // the union map's RENDERED size (KH_SUN_LADDER)
         out.push_back(kvf("sunMapCenterX", RenderIntegration::g_sun_map_bounds[0]));
         out.push_back(kvf("sunMapCenterY", RenderIntegration::g_sun_map_bounds[1]));
         out.push_back(kvf("sunMapCenterZ", RenderIntegration::g_sun_map_bounds[2]));

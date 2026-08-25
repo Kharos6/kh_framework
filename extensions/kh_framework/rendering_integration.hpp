@@ -606,6 +606,13 @@ inline bool kh_ends_with_ci(const std::string& s, const char* suffix) {
     return true;
 }
 
+// KH_DEPTH_SRV_FASTPATH: the ID3D11Resource the live depth SRV was built
+// over. Sound as a key because depth_srv holds a reference on that texture,
+// so its interface address cannot be reused while the SRV lives; nulled
+// wherever depth_srv is released. Game thread (flush) only.
+static void* g_eds_memo_res = nullptr;
+static UINT  g_eds_memo_w = 0, g_eds_memo_h = 0;
+
 struct Resources {
     // Mesh drawing
     ID3D11VertexShader*      vs = nullptr;
@@ -908,6 +915,7 @@ struct Resources {
         if (depth_dsv_ro) { depth_dsv_ro->Release(); depth_dsv_ro = nullptr; }
         depth_res_identity = nullptr;
         depth_sample_count = 0;
+        g_eds_memo_res = nullptr;   // the fast-path key dies with the SRV
     }
 
     void release_compute_shaders() {
@@ -2519,6 +2527,7 @@ static constexpr uint32_t KH_SHADER_CACHE_VERSION = 1;
 // the RATIO of the two is the measured parallelism. Read them as a pair.
 static std::atomic<uint64_t> g_shader_cache_hits{0};
 static std::atomic<uint64_t> g_shader_cache_misses{0};
+static std::atomic<uint64_t> g_shader_cache_corrupt{0};   // header-valid, DXBC-invalid blobs deleted
 static std::atomic<uint64_t> g_shader_compile_ms{0};
 
 // Every existing call, every error string, every non-fatal fallback and every
@@ -2626,7 +2635,33 @@ inline std::string kh_shader_compile_raw(const char* src, const char* entry, con
                         if (SUCCEEDED(D3DCreateBlob(static_cast<SIZE_T>(khsc_hdr.size), &khsc_b))) {
                             khsc_f.read(static_cast<char*>(khsc_b->GetBufferPointer()),
                                         static_cast<std::streamsize>(khsc_hdr.size));
-                            if (khsc_f.gcount() == static_cast<std::streamsize>(khsc_hdr.size)) {
+                            // DXBC container sanity: 'DXBC' magic and the
+                            // container's own total-size field (offset 24)
+                            // must agree with the blob. A truncated read
+                            // already costs a miss; this makes a corrupt
+                            // correct-length blob a miss too, where before
+                            // it was a permanent Create* failure until the
+                            // LRU evicted it. The bad file is deleted so
+                            // the write-through below replaces it.
+                            bool khsc_dxbc = false;
+                            if (khsc_f.gcount() == static_cast<std::streamsize>(khsc_hdr.size) &&
+                                khsc_hdr.size >= 32) {
+                                const uint8_t* khsc_pb = static_cast<const uint8_t*>(khsc_b->GetBufferPointer());
+                                uint32_t khsc_tot = 0;
+                                memcpy(&khsc_tot, khsc_pb + 24, sizeof(khsc_tot));
+                                khsc_dxbc = khsc_pb[0] == 'D' && khsc_pb[1] == 'X' &&
+                                            khsc_pb[2] == 'B' && khsc_pb[3] == 'C' &&
+                                            khsc_tot == static_cast<uint32_t>(khsc_hdr.size);
+                            }
+                            if (khsc_f.gcount() == static_cast<std::streamsize>(khsc_hdr.size) && !khsc_dxbc) {
+                                khsc_f.close();
+                                g_shader_cache_corrupt.fetch_add(1, std::memory_order_relaxed);
+                                if (khsc_own) {   // ours only; a mod's copy is not our budget
+                                    std::error_code khsc_rm;
+                                    std::filesystem::remove(khsc_cand[khsc_ci], khsc_rm);
+                                }
+                            }
+                            if (khsc_dxbc) {
                                 khsc_f.close();
 
                                 if (khsc_own) {
@@ -6326,9 +6361,9 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         // in 's heavy list.
         { khfx_src.c_str(), "PSEffect", "ps_5_0", khfx_d0, 0 },
     };
-    // The MSAA_DEPTH=1 speculation has never once been consumed in any dump,
-    // so it is dropped: SIX heavy units instead of ten, ~312 s instead of 391
-    // s.
+    // The MSAA_DEPTH=1 rows were removed outright (never consumed in any
+    // dump). Mode 412 now trims the LAST entry - the PSEffect speculation -
+    // and nothing else; it is not the MSAA arm its name once meant.
     const size_t khsp_n = _countof(khsp_jobs) -
         (g_dbg_mode.load(std::memory_order_relaxed) == 412 ? 1u : 0u);
     if (kh_shader_async_gate(khsp_jobs, khsp_n)) {
@@ -7178,19 +7213,32 @@ inline std::string ensure_depth_srv(ID3D11Device* dev, ID3D11DeviceContext* ctx,
     dsv->GetResource(&res);
     dsv->Release();
     if (!res) return "DSV has no resource";
+    // KH_DEPTH_SRV_FASTPATH: same resource the live SRV was built over ->
+    // the QI + GetDesc walk below would only re-derive the identity it
+    // already matched. Dimensions are those of that same texture.
+    if (g_res.depth_srv && static_cast<void*>(res) == g_eds_memo_res) {
+        res->Release();
+        if (out_width)  *out_width = g_eds_memo_w;
+        if (out_height) *out_height = g_eds_memo_h;
+        return "";
+    }
     ID3D11Texture2D* tex = nullptr;
     HRESULT hr = res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex));
-    res->Release();
-    if (FAILED(hr) || !tex) return "DSV resource is not a Texture2D";
+    if (FAILED(hr) || !tex) { res->Release(); return "DSV resource is not a Texture2D"; }
     D3D11_TEXTURE2D_DESC td = {};
     tex->GetDesc(&td);
     if (out_width)  *out_width = td.Width;
     if (out_height) *out_height = td.Height;
 
     if (g_res.depth_srv && g_res.depth_res_identity == static_cast<void*>(tex)) {
+        g_eds_memo_res = static_cast<void*>(res);   // key the fast path on the matched resource
+        g_eds_memo_w = td.Width;
+        g_eds_memo_h = td.Height;
+        res->Release();
         tex->Release();
         return "";
     }
+    res->Release();
 
     // Shared dedup state (g_res.depth_sample_count, stored at the tail) keeps
     // this and the flush-side trigger from double-firing on one transition.
@@ -7478,7 +7526,7 @@ inline std::string ensure_depth_resolve_shader(ID3D11Device* dev) {
 // SunShadowOcclusionSelf offsets the sample by a FIXED multiple of one
 // sun-map texel - 1.25 along the light, 1.5 along the normal, both times
 // texelWorld.
-static constexpr UINT KH_SUN_DEPTH_SIZE = 4096;
+static constexpr UINT KH_SUN_DEPTH_BASE = 4096;   // the union map (KH_SUN_LADDER)
 // Bounding the fit is what bounds the texel size, the locality reach and the
 // normal-offset all at once. Casters beyond this camera radius stay OUT of
 // the sun-depth fit (no self-shadow, no cast) - the same distance behavior
@@ -7486,22 +7534,53 @@ static constexpr UINT KH_SUN_DEPTH_SIZE = 4096;
 static constexpr float KH_SUN_FIT_RADIUS = 250.0f;
 // The hero tier is CAMERA-ANCHORED with a FIXED footprint: lateral
 // half-extent 2.0 m at 4096 px = 0.9995 mm texels - the 1 mm calibration
-// budget, met exactly, forever, independent of what or how many casters
-// exist. The depth window extends 12 m sun-ward so out-of-window occluders
-// still cast in. 64 MB R32.
-static constexpr UINT  KH_SUN_HERO_SIZE = 4096;
+// budget, met exactly, independent of what or how many casters exist. The
+// depth window extends 12 m sun-ward so out-of-window occluders still cast
+// in. 64 MB R32. THE BUDGET IS LOAD-BEARING: the self tier's normal offset
+// (KhSelfTier, khno_k texels) is priced in TEXELS, so halving the map
+// doubles the offset in millimetres - 26702 shipped 2048 and thin folded
+// geometry leaked light in world-fixed streaks (the 3 mm offset punched
+// through the cloth). Do not lower the ladder without re-pricing the
+// offset floor in millimetres.
+static constexpr UINT  KH_SUN_HERO_BASE = 4096;
 static constexpr float KH_SUN_HERO_HALF = 2.0f;
 static constexpr float KH_SUN_HERO_DEPTH = 12.0f;
-static constexpr UINT  KH_SUN_MID_SIZE  = 4096;
+static constexpr UINT  KH_SUN_MID_BASE  = 4096;
 static constexpr float KH_SUN_MID_HALF  = 8.0f;
 static constexpr float KH_SUN_MID_DEPTH = 48.0f;
-static constexpr UINT  KH_SUN_OUT_SIZE  = 4096;
+static constexpr UINT  KH_SUN_OUT_BASE  = 4096;
 static constexpr float KH_SUN_OUT_HALF  = 32.0f;
 static constexpr float KH_SUN_OUT_DEPTH = 192.0f;
 // The HERO pair stays fixed - the near field is a calibration constant. The
 // union remains BEHIND it for the beyond-far presence test and anything
 // outside the range window.
-static constexpr UINT KH_SUN_FAR_SIZE = 4096;
+static constexpr UINT KH_SUN_FAR_BASE = 4096;   // 12 cm texels over the 500 m fit already; not on the ladder
+// KH_SUN_LADDER: sizes are runtime. The default is the 4096 ladder (the
+// calibrated one); mode 448 runs the union/hero/mid/outer maps at 2048 and
+// their pyramids at 1024 - an A/B ARM ONLY, since the texel-priced normal
+// offset leaks on thin geometry there (see KH_SUN_HERO_BASE). The divisor
+// is latched once per frame (the main-depth clear boundary, and the flush
+// prelude for the hook-less case); the ensures recreate a map whose
+// texture no longer matches the wanted size, and the CB fills read the
+// size each map was RENDERED at (g_sun*_map_size), never the wanted one -
+// so a flip mid-frame costs one recreate, never a mismatched sunMeta.y.
+// The far band is not on the ladder.
+static std::atomic<uint32_t> g_sun_size_div{1};
+inline UINT kh_sun_depth_size() { return KH_SUN_DEPTH_BASE / g_sun_size_div.load(std::memory_order_relaxed); }
+inline UINT kh_sun_hero_size()  { return KH_SUN_HERO_BASE  / g_sun_size_div.load(std::memory_order_relaxed); }
+inline UINT kh_sun_mid_size()   { return KH_SUN_MID_BASE   / g_sun_size_div.load(std::memory_order_relaxed); }
+inline UINT kh_sun_out_size()   { return KH_SUN_OUT_BASE   / g_sun_size_div.load(std::memory_order_relaxed); }
+inline UINT kh_sun_far_size()   { return KH_SUN_FAR_BASE; }
+inline void kh_sun_size_latch() {
+    g_sun_size_div.store(g_dbg_mode.load(std::memory_order_relaxed) == 448 ? 2u : 1u,
+                         std::memory_order_relaxed);
+}
+// The size each map was last RENDERED at - what sunMeta.y must carry.
+static UINT g_sun_map_size  = KH_SUN_DEPTH_BASE;
+static UINT g_sun2_map_size = KH_SUN_HERO_BASE;
+static UINT g_sun3_map_size = KH_SUN_MID_BASE;
+static UINT g_sun4_map_size = KH_SUN_OUT_BASE;
+static UINT g_sun5_map_size = KH_SUN_FAR_BASE;
 static std::atomic<float> g_sun_range{200.0f};
 static std::atomic<float> g_obj_vis{0.0f};
 static std::atomic<int>   g_obj_vis_src{0};
@@ -7520,11 +7599,11 @@ inline bool kh_sun_map_ensure(ID3D11Device* dev, UINT khsm_size,
 
 inline bool ensure_sun_depth(ID3D11Device* dev) {
     if (g_res.sun_tex && g_res.sun_dsv && g_res.sun_srv) return true;
-    return kh_sun_map_ensure(dev, KH_SUN_DEPTH_SIZE, g_res.sun_tex, g_res.sun_dsv, g_res.sun_srv);
+    return kh_sun_map_ensure(dev, kh_sun_depth_size(), g_res.sun_tex, g_res.sun_dsv, g_res.sun_srv);
 }
 
 // the hero map's resource trio - same construction as ensure_sun_depth, at
-// KH_SUN_HERO_SIZE. Non-fatal: every consumer stands down when absent
+// the hero ladder size (KH_SUN_LADDER). Non-fatal: every consumer stands down when absent
 // (sunMeta2.x stays 0). CB-free.
 static const char* g_hlsl_sunpf =
 #include "hlsl/sunpf.hlsl"
@@ -7578,11 +7657,17 @@ inline bool ensure_sun_pf(ID3D11Device* dev) {
         khpfm_pb->Release();
         if (FAILED(khpfm_ph)) return false;
     }
-    static const UINT khpf_sz[3] = {
-        KH_SUN_HERO_SIZE / 2u, KH_SUN_MID_SIZE / 2u, KH_SUN_OUT_SIZE / 2u };
+    const UINT khpf_sz[3] = {   // KH_SUN_LADDER: runtime, half the map
+        kh_sun_hero_size() / 2u, kh_sun_mid_size() / 2u, kh_sun_out_size() / 2u };
     for (int khpf_i = 0; khpf_i < 3; ++khpf_i) {
         if (g_res.sun_pf_tex[khpf_i] && g_res.sun_pf_rtv[khpf_i] &&
-            g_res.sun_pf_srv[khpf_i] && g_res.sun_pf_rtvm[khpf_i][1]) continue;
+            g_res.sun_pf_srv[khpf_i] && g_res.sun_pf_rtvm[khpf_i][1]) {
+            D3D11_TEXTURE2D_DESC khpf_have = {};
+            g_res.sun_pf_tex[khpf_i]->GetDesc(&khpf_have);
+            if (khpf_have.Width == khpf_sz[khpf_i]) continue;
+            for (UINT khpf_m = 1; khpf_m < 12u; ++khpf_m)   // the mip views die with the texture
+                KH_SAFE_RELEASE(g_res.sun_pf_rtvm[khpf_i][khpf_m]);
+        }
         KH_SAFE_RELEASE(g_res.sun_pf_srv[khpf_i]);
         KH_SAFE_RELEASE(g_res.sun_pf_rtv[khpf_i]);
         KH_SAFE_RELEASE(g_res.sun_pf_tex[khpf_i]);
@@ -7628,7 +7713,13 @@ inline bool ensure_sun_pf(ID3D11Device* dev) {
                 return false;
         }
     }
-    if (!g_res.sun_pf_scr || !g_res.sun_pf_scr_srvm[0]) {
+    bool khpf_scr_stale = false;   // KH_SUN_LADDER: the scratch pyramid follows the hero size
+    if (g_res.sun_pf_scr) {
+        D3D11_TEXTURE2D_DESC khpf_shave = {};
+        g_res.sun_pf_scr->GetDesc(&khpf_shave);
+        khpf_scr_stale = khpf_shave.Width != khpf_sz[0];
+    }
+    if (!g_res.sun_pf_scr || !g_res.sun_pf_scr_srvm[0] || khpf_scr_stale) {
         KH_SAFE_RELEASE(g_res.sun_pf_scr);
         for (UINT khpf_m = 0; khpf_m < 12u; ++khpf_m)
             KH_SAFE_RELEASE(g_res.sun_pf_scr_srvm[khpf_m]);
@@ -7678,7 +7769,11 @@ inline bool kh_sun_map_ensure(ID3D11Device* dev, UINT khsm_size,
                               ID3D11Texture2D*& khsm_tex,
                               ID3D11DepthStencilView*& khsm_dsv,
                               ID3D11ShaderResourceView*& khsm_srv) {
-    if (khsm_tex && khsm_dsv && khsm_srv) return true;
+    if (khsm_tex && khsm_dsv && khsm_srv) {
+        D3D11_TEXTURE2D_DESC khsm_have = {};
+        khsm_tex->GetDesc(&khsm_have);
+        if (khsm_have.Width == khsm_size) return true;   // KH_SUN_LADDER: else recreate at the wanted size
+    }
     KH_SAFE_RELEASE(khsm_srv);
     KH_SAFE_RELEASE(khsm_dsv);
     KH_SAFE_RELEASE(khsm_tex);
@@ -7712,19 +7807,19 @@ inline bool kh_sun_map_ensure(ID3D11Device* dev, UINT khsm_size,
 }
 
 inline bool ensure_sun_depth2(ID3D11Device* dev) {   // hero
-    return kh_sun_map_ensure(dev, KH_SUN_HERO_SIZE, g_res.sun2_tex, g_res.sun2_dsv, g_res.sun2_srv);
+    return kh_sun_map_ensure(dev, kh_sun_hero_size(), g_res.sun2_tex, g_res.sun2_dsv, g_res.sun2_srv);
 }
 
 inline bool ensure_sun_depth3(ID3D11Device* dev) {   // mid band
-    return kh_sun_map_ensure(dev, KH_SUN_MID_SIZE, g_res.sun3_tex, g_res.sun3_dsv, g_res.sun3_srv);
+    return kh_sun_map_ensure(dev, kh_sun_mid_size(), g_res.sun3_tex, g_res.sun3_dsv, g_res.sun3_srv);
 }
 
 inline bool ensure_sun_depth5(ID3D11Device* dev) {   // FAR band
-    return kh_sun_map_ensure(dev, KH_SUN_FAR_SIZE, g_res.sun5_tex, g_res.sun5_dsv, g_res.sun5_srv);
+    return kh_sun_map_ensure(dev, kh_sun_far_size(), g_res.sun5_tex, g_res.sun5_dsv, g_res.sun5_srv);
 }
 
 inline bool ensure_sun_depth4(ID3D11Device* dev) {   // outer band
-    return kh_sun_map_ensure(dev, KH_SUN_OUT_SIZE, g_res.sun4_tex, g_res.sun4_dsv, g_res.sun4_srv);
+    return kh_sun_map_ensure(dev, kh_sun_out_size(), g_res.sun4_tex, g_res.sun4_dsv, g_res.sun4_srv);
 }
 
 inline std::string ensure_compute_shaders(ID3D11Device* dev) {
@@ -9431,6 +9526,7 @@ static uint64_t g_inj_ps_earlyz_draws = 0;
 static uint64_t g_own_frames = 0;
 static uint64_t g_own_draws = 0;
 static uint64_t g_own_skips = 0;
+static uint64_t g_own_solo_skips = 0;   // injections that skipped the prepass for a lone mesh (KH_OWNER_SOLO_SKIP)
 static uint64_t g_own_fails = 0;
 static uint64_t g_far_clip_stale = 0;   // reached it with far_vis ON but the
                                             // far-keep pair not fresh/usable
@@ -9450,7 +9546,7 @@ static uint32_t g_fk_veto_cand_n = 0;   // candidates staged at the last pass BE
                                             // campaign-43 handoff.
 // Build tag: monotonic, never reused, bumped once per shipped build (including
 // pure reverts). Keep it a constexpr int, not a #define.
-static constexpr int KH_BUILD_TAG = 26699;
+static constexpr int KH_BUILD_TAG = 26709;
 // Continuous at the near plane, so routing on/off never pops a fragment.
 static constexpr float KH_NEARZ_GAP_FRAC = 0.92f;
 // 3 = mode 203 - passthrough + absolute form.
@@ -9879,7 +9975,9 @@ static float    g_haze_fal_pub = -1.0f;   // last armed height falloff (/m)
 static float    g_haze_layer_pub = -1.0e9f;   // last armed fog-layer altitude (m)
 
 // Resolves a depth view to its underlying resource identity, live - never
-// cached (see the note above).
+// cached: the engine recreates views within a frame, so a pointer can
+// name a different view before the frame ends (26701 memoized this per
+// frame; 26706 removed it - see the KH_UPLOAD_SCRATCH note).
 inline void* reorder_dsv_identity(ID3D11DepthStencilView* dsv) {
     void* id = nullptr;
     ID3D11Resource* res = nullptr;
@@ -10203,6 +10301,23 @@ inline void proj_scan_upload(ID3D11Resource* res, const void* data, uint32_t byt
             return;
         }
     }
+}
+
+// KH_UPLOAD_SCRATCH: the unmap-time scanners used to read the mapped pointer
+// directly - write-combined memory, where every plain load is one uncached
+// transaction, and up to six scanners walked it per upload. One plain copy
+// into a cached scratch, and every scanner reads the copy: the same loads
+// the scanners issued before, issued once. NO STREAMING LOADS: MOVNTDQA
+// from WC memory may return stale bytes until the writer's WC buffers
+// drain (26701 used it; 26706 removed it while chasing world-fixed dark
+// patches on lit receivers). Render thread only (both callers gate on
+// reorder_on_render_thread()); 64 KiB is the D3D11 constant-buffer cap.
+static constexpr uint32_t KH_UPLOAD_SCRATCH_BYTES = 65536u;
+static alignas(64) uint8_t g_upload_scratch[KH_UPLOAD_SCRATCH_BYTES];
+inline const void* kh_upload_scratch(const void* khus_src, uint32_t& khus_bytes) {
+    if (khus_bytes > KH_UPLOAD_SCRATCH_BYTES) khus_bytes = KH_UPLOAD_SCRATCH_BYTES;
+    memcpy(g_upload_scratch, khus_src, khus_bytes);
+    return g_upload_scratch;
 }
 
 // Returns the buffer's byte width when it is a plausibly-sized constant
@@ -12500,10 +12615,17 @@ inline void kh_sun_pf_convert(ID3D11DeviceContext* ctx) {
 
     const bool khpc_bv[3] = { g_sun2_map_valid, g_sun3_map_valid, g_sun4_map_valid };
     ID3D11ShaderResourceView* const khpc_dep[3] = { g_res.sun2_srv, g_res.sun3_srv, g_res.sun4_srv };
-    const UINT khpc_sz[3] = { KH_SUN_HERO_SIZE / 2u, KH_SUN_MID_SIZE / 2u, KH_SUN_OUT_SIZE / 2u };
+    UINT khpc_sz[3] = { 0, 0, 0 };   // KH_SUN_LADDER: the pyramid's own size, never the wanted one
+    for (int khpc_k = 0; khpc_k < 3; ++khpc_k) {
+        if (!g_res.sun_pf_tex[khpc_k]) continue;
+        D3D11_TEXTURE2D_DESC khpc_td = {};
+        g_res.sun_pf_tex[khpc_k]->GetDesc(&khpc_td);
+        khpc_sz[khpc_k] = khpc_td.Width;
+    }
 
     for (int khpc_i = 0; khpc_i < 3; ++khpc_i) {
         if (!g_sun_pf_valid[khpc_i]) continue;   // band did not render fresh
+        if (khpc_sz[khpc_i] == 0) { g_sun_pf_valid[khpc_i] = false; continue; }   // no pyramid texture
         g_sun_pf_valid[khpc_i] = false;   // proven again by completion below
         if (!khpc_bv[khpc_i] || !khpc_dep[khpc_i] ||
             !g_res.sun_pf_rtv[khpc_i] || !g_res.sun_pf_srv[khpc_i]) continue;
@@ -15973,26 +16095,26 @@ inline void fill_lighting_frame_cb(ConstantData& cbd) {
         kh_sun_rebase_vp(&cbd.sun_vp[0][0], g_sun_map_vp,
                          g_sun_map_anchor, g_sun_anchor_now);
         cbd.sun_meta[0] = g_sun_map_cam_anchor ? 2.0f : 1.0f;
-        cbd.sun_meta[1] = static_cast<float>(KH_SUN_DEPTH_SIZE);
+        cbd.sun_meta[1] = static_cast<float>(g_sun_map_size);   // rendered size (KH_SUN_LADDER)
         cbd.sun_meta[2] = g_sun_map_bias;
         cbd.sun_meta[3] = g_shadow_map_strength;
 
         // the hero tier rides the union's freshness window - it is rendered
         // by the same pass, so one clock serves both.
         kh_fill_sun_tier_cb(cbd.sun_vp2, cbd.sun_meta2, g_sun2_map_valid,
-                            g_sun2_map_vp, g_sun2_map_bias, g_sun2_half_diag, KH_SUN_HERO_SIZE);
+                            g_sun2_map_vp, g_sun2_map_bias, g_sun2_half_diag, g_sun2_map_size);
 
         // the MID and OUTER bands ride the same clock - rendered by the same
         // pass, one freshness window for the whole ladder (KH_SUN_CASCADE). A
         // downed/failed band leaves its meta zeroed and the shader chain
         // falls through.
         kh_fill_sun_tier_cb(cbd.sun_vp3, cbd.sun_meta3, g_sun3_map_valid,
-                            g_sun3_map_vp, g_sun3_map_bias, g_sun3_half_diag, KH_SUN_MID_SIZE);
+                            g_sun3_map_vp, g_sun3_map_bias, g_sun3_half_diag, g_sun3_map_size);
 
         kh_fill_sun_tier_cb(cbd.sun_vp4, cbd.sun_meta4, g_sun4_map_valid,
-                            g_sun4_map_vp, g_sun4_map_bias, g_sun4_half_diag, KH_SUN_OUT_SIZE);
+                            g_sun4_map_vp, g_sun4_map_bias, g_sun4_half_diag, g_sun4_map_size);
         kh_fill_sun_tier_cb(cbd.sun_vp5, cbd.sun_meta5, g_sun5_map_valid,
-                            g_sun5_map_vp, g_sun5_map_bias, g_sun5_half_diag, KH_SUN_FAR_SIZE);   // FAR band, same clock
+                            g_sun5_map_vp, g_sun5_map_bias, g_sun5_half_diag, g_sun5_map_size);   // FAR band, same clock
         // KH_SELF_PREFILTER arms (mode 357 = classic taps everywhere; a band
         // whose convert did not complete stays classic on its own - the flag
         // pairs render AND convert).
@@ -16193,6 +16315,7 @@ inline void fill_lighting_obj_cb(ConstantData& cbd, const RenderObject& o) {
                                                   // authorship separation vs 357)
                          : khl_dm == 362 ? 48.0f   // UNBOUNDED grad slack
                          : khl_dm == 446 ? 76.0f   // KH_ABSENCE_WITNESS OFF (+ forms)
+                         : khl_dm == 450 ? 77.0f   // KH_WITNESS_TIER_SCOPE OFF (whole-union veto, the 26694 form)
                          : khl_dm == 445 ? 75.0f   // fade-direction hold, opt-in
                          : khl_dm == 444 ? 74.0f   // KH_PF_RAMP_FLOOR OFF (precision floor as sigma)
                          : khl_dm == 442 ? 72.0f   // KH_TIER_FADE_DIR OFF (symmetric fade)
@@ -20307,28 +20430,34 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         }
         g_sun_ladder_scale = khls_s;
         for (int khsh_wi = 0; khsh_wi < 4; ++khsh_wi) g_sun_fit_why[khsh_wi] = 6;
-        if (khsh_ok0) khsh_one(KH_SUN_HERO_HALF, KH_SUN_HERO_DEPTH, KH_SUN_HERO_SIZE,
+        // KH_SUN_LADDER: the ensures above guarantee each texture IS the
+        // wanted size; record it as the rendered size for the CB fills.
+        if (khsh_ok0) g_sun2_map_size = kh_sun_hero_size();
+        if (khsh_ok1) g_sun3_map_size = kh_sun_mid_size();
+        if (khsh_ok2) g_sun4_map_size = kh_sun_out_size();
+        if (khsh_ok3) g_sun5_map_size = kh_sun_far_size();
+        if (khsh_ok0) khsh_one(KH_SUN_HERO_HALF, KH_SUN_HERO_DEPTH, kh_sun_hero_size(),
                                g_res.sun2_dsv, g_sun2_map_vp, g_sun2_map_bias,
                                g_sun2_half_diag, g_sun2_map_valid,
                                g_sun2_renders, g_sun2_casters, g_sun_band_reach[0],
                                g_res.sun2_srv, g_res.sun_pf_rtv[0],
-                               g_res.sun_pf_srv[0], KH_SUN_HERO_SIZE / 2u, 0,
+                               g_res.sun_pf_srv[0], kh_sun_hero_size() / 2u, 0,
                                g_sun_pf_valid[0]);
         if (khsh_ok1) khsh_one(KH_SUN_MID_HALF * khls_s, KH_SUN_MID_DEPTH * khls_s,
-                               KH_SUN_MID_SIZE,
+                               kh_sun_mid_size(),
                                g_res.sun3_dsv, g_sun3_map_vp, g_sun3_map_bias,
                                g_sun3_half_diag, g_sun3_map_valid,
                                g_sun3_renders, g_sun3_casters, g_sun_band_reach[1],
                                g_res.sun3_srv, g_res.sun_pf_rtv[1],
-                               g_res.sun_pf_srv[1], KH_SUN_MID_SIZE / 2u, 1,
+                               g_res.sun_pf_srv[1], kh_sun_mid_size() / 2u, 1,
                                g_sun_pf_valid[1]);
         if (khsh_ok2) khsh_one(KH_SUN_OUT_HALF * khls_s, KH_SUN_OUT_DEPTH * khls_s,
-                               KH_SUN_OUT_SIZE,
+                               kh_sun_out_size(),
                                g_res.sun4_dsv, g_sun4_map_vp, g_sun4_map_bias,
                                g_sun4_half_diag, g_sun4_map_valid,
                                g_sun4_renders, g_sun4_casters, g_sun_band_reach[2],
                                g_res.sun4_srv, g_res.sun_pf_rtv[2],
-                               g_res.sun_pf_srv[2], KH_SUN_OUT_SIZE / 2u, 2,
+                               g_res.sun_pf_srv[2], kh_sun_out_size() / 2u, 2,
                                g_sun_pf_valid[2]);
         // No moment pyramid (the far texel is already the minified scale the
         // pyramids exist to reach; nulls keep the convert inert - pf index 3
@@ -20336,12 +20465,12 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         // KH_SUN_FAR_BAND: half = the range ITSELF (khsr_rad, no ladder scale
         // - the window IS the range), depth = 6x half.
         bool khsh_far_pf = false;
-        if (khsh_ok3) khsh_one(khsr_rad, khsr_rad * 6.0f, KH_SUN_FAR_SIZE,
+        if (khsh_ok3) khsh_one(khsr_rad, khsr_rad * 6.0f, kh_sun_far_size(),
                                g_res.sun5_dsv, g_sun5_map_vp, g_sun5_map_bias,
                                g_sun5_half_diag, g_sun5_map_valid,
                                g_sun5_renders, g_sun5_casters, g_sun_band_reach[3],
                                g_res.sun5_srv, nullptr,
-                               nullptr, KH_SUN_FAR_SIZE / 2u, 3,
+                               nullptr, kh_sun_far_size() / 2u, 3,
                                khsh_far_pf);
         // KH_SUN_ANCHOR: all three band matrices above were built about this
         // flush's anchor - pair them with it for the fills.
@@ -20601,7 +20730,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     // has.
     if (g_dbg_mode.load(std::memory_order_relaxed) != 327) {
         const double khut_tex = (2.0 * static_cast<double>(R)) /
-                                static_cast<double>(KH_SUN_DEPTH_SIZE);
+                                static_cast<double>(kh_sun_depth_size());
         if (khut_tex > 1.0e-9) {
             const double khut_c[3] = { ctr[0], ctr[1], ctr[2] };
             const double khut_r[3] = { r3[0], r3[1], r3[2] };
@@ -20665,7 +20794,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     // ground is never in our map, so it never compares against itself), and
     // the SELF term's acne is handled geometrically by the receiver- normal
     // offset + grazing fade.
-    const float texel_world = (2.0f * R) / static_cast<float>(KH_SUN_DEPTH_SIZE);
+    const float texel_world = (2.0f * R) / static_cast<float>(kh_sun_depth_size());
     // THE FLOOR IS fp32 WORLD PRECISION, NOT DEPTH-BUFFER PRECISION. 235
     // restores the D32 quantisation.
     const float khsb_cx = fabsf(ctr[0]) > fabsf(ctr[1]) ? fabsf(ctr[0]) : fabsf(ctr[1]);
@@ -20698,13 +20827,14 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     D3D11_VIEWPORT old_vps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
     ctx->RSGetViewports(&old_nvp, old_vps);
 
+    g_sun_map_size = kh_sun_depth_size();   // KH_SUN_LADDER: the union's rendered size
     ctx->ClearDepthStencilView(g_res.sun_dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
     ctx->OMSetRenderTargets(0, nullptr, g_res.sun_dsv);
 
     {
         D3D11_VIEWPORT vp = {};
-        vp.Width = static_cast<FLOAT>(KH_SUN_DEPTH_SIZE);
-        vp.Height = static_cast<FLOAT>(KH_SUN_DEPTH_SIZE);
+        vp.Width = static_cast<FLOAT>(kh_sun_depth_size());
+        vp.Height = static_cast<FLOAT>(kh_sun_depth_size());
         vp.MaxDepth = 1.0f;
         ctx->RSSetViewports(1, &vp);
     }
@@ -22197,7 +22327,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
             kh_sun_rebase_vp(&cbd.sun_vp[0][0], g_sun_map_vp,
                              g_sun_map_anchor, g_sun_anchor_now);
             cbd.sun_meta[0] = g_sun_map_cam_anchor ? 2.0f : 1.0f;
-            cbd.sun_meta[1] = static_cast<float>(KH_SUN_DEPTH_SIZE);
+            cbd.sun_meta[1] = static_cast<float>(g_sun_map_size);   // rendered size (KH_SUN_LADDER)
             cbd.sun_meta[2] = g_sun_map_bias;
             cbd.sun_meta[3] = g_shadow_map_strength;
             // lighting0.y 21 (mode 243) reverts the whole chain to the
@@ -22206,13 +22336,13 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
             // not carry 243 (its default 1.0 keeps every mesh-side term at
             // mode-0 behaviour).
             kh_fill_sun_tier_cb(cbd.sun_vp2, cbd.sun_meta2, g_sun2_map_valid,
-                                g_sun2_map_vp, g_sun2_map_bias, g_sun2_half_diag, KH_SUN_HERO_SIZE);
+                                g_sun2_map_vp, g_sun2_map_bias, g_sun2_half_diag, g_sun2_map_size);
             kh_fill_sun_tier_cb(cbd.sun_vp3, cbd.sun_meta3, g_sun3_map_valid,
-                                g_sun3_map_vp, g_sun3_map_bias, g_sun3_half_diag, KH_SUN_MID_SIZE);
+                                g_sun3_map_vp, g_sun3_map_bias, g_sun3_half_diag, g_sun3_map_size);
             kh_fill_sun_tier_cb(cbd.sun_vp4, cbd.sun_meta4, g_sun4_map_valid,
-                                g_sun4_map_vp, g_sun4_map_bias, g_sun4_half_diag, KH_SUN_OUT_SIZE);
+                                g_sun4_map_vp, g_sun4_map_bias, g_sun4_half_diag, g_sun4_map_size);
             kh_fill_sun_tier_cb(cbd.sun_vp5, cbd.sun_meta5, g_sun5_map_valid,
-                                g_sun5_map_vp, g_sun5_map_bias, g_sun5_half_diag, KH_SUN_FAR_SIZE);   // FAR band
+                                g_sun5_map_vp, g_sun5_map_bias, g_sun5_half_diag, g_sun5_map_size);   // FAR band
             {
                 const int khcc_m = g_dbg_mode.load(std::memory_order_relaxed);
                 cbd.lighting0[1] = khcc_m == 243 ? 21.0f   // cast chain revert
@@ -22221,6 +22351,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
                                  : khcc_m == 442 ? 72.0f   // KH_TIER_FADE_DIR OFF (twin)
                                  : khcc_m == 443 ? 73.0f   // partner paint (twin)
                                  : khcc_m == 446 ? 76.0f   // witness off (twin)
+                                 : khcc_m == 450 ? 77.0f   // whole-union veto (twin)
                                  : khcc_m == 445 ? 75.0f   // hold opt-in (twin)
                                  // 328 arms it deliberately; 326 arms it
                                  // because it reverts KH_BAND_SUN_REACH, and
@@ -27103,18 +27234,21 @@ static void STDMETHODCALLTYPE hooked_unmap(ID3D11DeviceContext* self, ID3D11Reso
         for (auto& p : g_proj_pending) {
             if (p.res == res) {
                 // The engine has finished writing; the pointer is valid until
-                // the original Unmap below runs.
-                proj_scan_upload(res, p.data, p.bytes);
-                shadow_live_upload(p.data, p.bytes);
-                locator_note_upload(res, p.data, p.bytes);   // fog/sun color locators (read-only)
-                kh_engcam_scan(res, p.data, p.bytes);   // engine-camera locator (read-only)
+                // the original Unmap below runs. One WC read into the scratch
+                // (KH_UPLOAD_SCRATCH); the scanners walk the cached copy.
+                uint32_t khus_n = p.bytes;
+                const void* khus_d = kh_upload_scratch(p.data, khus_n);
+                proj_scan_upload(res, khus_d, khus_n);
+                shadow_live_upload(khus_d, khus_n);
+                locator_note_upload(res, khus_d, khus_n);   // fog/sun color locators (read-only)
+                kh_engcam_scan(res, khus_d, khus_n);   // engine-camera locator (read-only)
                 // the register ring and the view scan feed the LIT-ONLY
                 // shadow machinery (band/seal pairing, the view lock the cast
                 // consumes) - gate both on that demand. The locators above
                 // stay full-rate: unlit meshes consume fog/sky.
                 if (!g_ro.in_injection && shadow_live_wanted()) {   // our own CBs carry view columns
-                    shadow_register_upload(res, p.data, p.bytes);   // and window rows:
-                    shadow_view_scan(res, p.data, p.bytes);   // never self-learn
+                    shadow_register_upload(res, khus_d, khus_n);   // and window rows:
+                    shadow_view_scan(res, khus_d, khus_n);   // never self-learn
                 }
                 p = ProjPendingMap{};
                 break;
@@ -27138,13 +27272,18 @@ static void STDMETHODCALLTYPE hooked_updatesubresource(ID3D11DeviceContext* self
         const uint32_t bytes = proj_upload_byte_width(res);
 
         if (bytes != 0) {
-            proj_scan_upload(res, data, bytes);
-            shadow_live_upload(data, bytes);
-            locator_note_upload(res, data, bytes);   // fog/sun color locators (read-only)
-            kh_engcam_scan(res, data, bytes);   // engine-camera locator (read-only)
+            // UpdateSubresource data is the ENGINE'S OWN CPU buffer (cached
+            // memory, not the WC upload heap), but the two sites stay twins:
+            // same copy, same scanner arguments.
+            uint32_t khus_n = bytes;
+            const void* khus_d = kh_upload_scratch(data, khus_n);
+            proj_scan_upload(res, khus_d, khus_n);
+            shadow_live_upload(khus_d, khus_n);
+            locator_note_upload(res, khus_d, khus_n);   // fog/sun color locators (read-only)
+            kh_engcam_scan(res, khus_d, khus_n);   // engine-camera locator (read-only)
             if (!g_ro.in_injection && shadow_live_wanted()) {   // lit-only
-                shadow_register_upload(res, data, bytes);   // consumers (
-                shadow_view_scan(res, data, bytes);   // at the unmap twin)
+                shadow_register_upload(res, khus_d, khus_n);   // consumers (
+                shadow_view_scan(res, khus_d, khus_n);   // at the unmap twin)
             }
         }
     }
@@ -29421,7 +29560,13 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     UINT khr_own_samp = 0;
     ID3D11RenderTargetView* khr_own_saved_rtv[8] = {};
     ID3D11DepthStencilView* khr_own_saved_dsv = nullptr;
-    if (g_dbg_mode.load(std::memory_order_relaxed) != 438 &&
+    // KH_OWNER_SOLO_SKIP: KhOwnerRejects returns false whenever the owner id
+    // is the fragment's own, so with ONE composited mesh (its LOD pair
+    // shares the id) the map can reject nothing - the prepass is pure cost.
+    // Two or more: the map orders ARB depths the depth test cannot, so it
+    // stays.
+    if (meshes.size() < 2) g_own_solo_skips++;
+    if (g_dbg_mode.load(std::memory_order_relaxed) != 438 && meshes.size() >= 2 &&
         g_res.ps_owner && g_res.dss_owner && khr_pass_vp.MinDepth <= khr_pass_vp.MaxDepth) {
         ctx->OMGetRenderTargets(8, khr_own_saved_rtv, &khr_own_saved_dsv);
         if (khr_own_saved_dsv) {
@@ -32531,6 +32676,7 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
             // The engine clears the main scene depth on its render thread:
             // this is where that thread is identified for the tracking gate.
             g_reorder_render_tid.store(GetCurrentThreadId(), std::memory_order_relaxed);
+            kh_sun_size_latch();   // KH_SUN_LADDER: mode 448 (2048 A/B) read once per frame
 
             // Flight recorder: finalize the closing frame, open the next.
             // Runs BEFORE the census (which consumes and resets the flush
@@ -35851,6 +35997,7 @@ inline void flush_frame() {
         }
     }
     g_mask.ov_listed = g_mask.ov_skipped = g_mask.ov_drawn = 0;
+    kh_sun_size_latch();   // KH_SUN_LADDER: the hook-less path latches here
     stage_world_lighting();   // game thread: getLighting -> staged sun state (pre-lock)
     kh_thm_autobuild_step();   // game thread: zero-setup terrain acquisition (pre-lock)
     ensure_reorder_hook();   // cheap early-out once installed; refreshes the tracked context
@@ -37324,6 +37471,7 @@ inline void reset_stat_counters() {
     g_far_clip_no_farvis = 0; g_far_clip_stale = 0;
     g_inj_ps_arb_draws = 0; g_inj_ps_earlyz_draws = 0;   // the 8.5 gauge
     g_own_frames = 0; g_own_draws = 0; g_own_skips = 0; g_own_fails = 0;
+    g_own_solo_skips = 0;
     g_far_keep_inside_routes = 0;
     g_part_rej_lo_min = 2.0f; g_part_rej_lo_max = -1.0f;
     g_part_rej_hi_max = -1.0f; g_part_sky_spans = 0;

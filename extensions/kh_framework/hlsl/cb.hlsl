@@ -1976,10 +1976,112 @@ struct VSOut { float4 pos : SV_Position; float3 wpos : TEXCOORD0; float3 nrm : T
     // a hero texel). The self chain samples with this; wpos stays for
     // fog/range/every absolute consumer.
     float3 wrel : TEXCOORD4;
+    // KH_INSTANCING (26762): the object colour rides the interpolators, so
+    // the pixel twins read ONE source whether the draw was per object (the
+    // VS copies the CB's color lane in) or a batch (the instance stream's
+    // own lane). Flat across a triangle by construction - every vertex of
+    // a draw carries the same value - so the interpolation is exact.
+    float4 icol : TEXCOORD5;
 #if KH_TEXTURED
     float2 uv : TEXCOORD2; float4 tanw : TEXCOORD3;   // world tangent + handedness
 #endif
 };
+
+// KH_INSTANCING (26762) - THE ONE VERTEX TRANSFORM. The per-object lanes
+// the vertex path reads (centre, rebase-relative centre + arm, edge lengths,
+// rotation rows) come from the CB on a per-object draw and from the instance
+// stream on a batch draw; everything below the lane read is identical, so it
+// lives here once and the four entry points (VSMain / VSMainInst in the
+// static unit, VSComposite / VSCompositeInst in the composite unit) are
+// wrappers that only choose the source. KhRotateR is KhRotate's rotated
+// branch over explicit rows; KhObjRows supplies the CB rows with KhRotate's
+// unfilled-default rule (objRot0.w = 0 reads as identity), and identity rows
+// through KhRotateR are bit-exact with the old early return (x*1 + y*0 + z*0
+// is x). The body is VSMain's, expression for expression - the stenVol2.z
+// ladder included - so a per-object draw through the wrapper produces the
+// same clip position, wpos, wrel and normal as before.
+struct VSInst {
+    float4 ipos  : TEXCOORD4;    // xyz = world centre (engine axes)
+    float4 irel  : TEXCOORD5;    // xyz = centre MINUS the pass's rebase camera (double-subtracted on the CPU); w = 1 armed
+    float4 isize : TEXCOORD6;    // xyz = edge lengths (engine axes)
+    float4 irot0 : TEXCOORD7;    // engine-axes rotation rows (row-vector), ALWAYS filled (identity when unrotated)
+    float4 irot1 : TEXCOORD8;
+    float4 irot2 : TEXCOORD9;
+    float4 icol  : TEXCOORD10;   // object colour, lifetime envelope applied
+};
+
+float3 KhRotateR(float3 p, float3 r0, float3 r1, float3 r2)
+{
+    return p.x * r0 + p.y * r1 + p.z * r2;
+}
+
+void KhObjRows(out float3 r0, out float3 r1, out float3 r2)
+{
+    if (objRot0.w < 0.5f) {
+        r0 = float3(1.0f, 0.0f, 0.0f);
+        r1 = float3(0.0f, 1.0f, 0.0f);
+        r2 = float3(0.0f, 0.0f, 1.0f);
+    } else {
+        r0 = objRot0.xyz;
+        r1 = objRot1.xyz;
+        r2 = objRot2.xyz;
+    }
+}
+
+void KhVsCore(float3 khvc_lp, float3 khvc_ln, float3 khvc_ctr, float3 khvc_rel, float khvc_relArm,
+              float3 khvc_size, float3 khvc_r0, float3 khvc_r1, float3 khvc_r2,
+              out float4 khvc_opos, out float3 khvc_owpos, out float3 khvc_owrel, out float3 khvc_onrm)
+{
+    float3 wp = khvc_ctr + KhRotateR(khvc_lp * khvc_size, khvc_r0, khvc_r1, khvc_r2);
+    // FP32 JITTER REBASE (see centerRel): when armed, transform the
+    // CAMERA-RELATIVE position through the REBASED viewProj - the
+    // world-absolute fp32 cancellation (the stationary micro-jitter's
+    // reducible term) never enters the position path.
+    float3 khvTp = (khvc_relArm > 0.5f)
+                 ? (khvc_rel + KhRotateR(khvc_lp * khvc_size, khvc_r0, khvc_r1, khvc_r2))
+                 : wp;
+    // stenVol2.z selects the vertex path: 0 = the historic viewProj transform
+    // (every flush/injection mesh fill at mode 0); 3 = viewProj position with
+    // the ENGINE'S depth mapping (the seam-inject fill's mode-0 value, 176
+    // alias); 1/2 = the engine's whole cb2 transform (modes 174/175 and the
+    // 117/118 engine-view arm). A large-world engine that feeds cb4[4..6]
+    // before cb2 may well be handing cb2 CAMERA-RELATIVE world, in which case
+    // absolute wp is displaced by the whole camera vector and never wins the
+    // depth test - that is why 1/2 are arms, not the default.
+    float4x4 khEngVP = float4x4(engBlk[0], engBlk[1], engBlk[2], engBlk[3]);
+    float3   khEngP  = (stenVol2.z >= 1.5f) ? khvTp : wp;
+    float4   khClip  = mul(float4(khvTp, 1.0f), viewProj);
+
+    // This is SPACE-AGNOSTIC: it cannot be wrong about a frame of reference
+    // because it never uses one. TAKE THE ENGINE'S DEPTH MAPPING, NOT ITS
+    // POSITION (mode 176).
+    if (stenVol2.z >= 2.5f) {
+        float3 khC2 = float3(engBlk[0].z, engBlk[1].z, engBlk[2].z);
+        float3 khC3 = float3(engBlk[0].w, engBlk[1].w, engBlk[2].w);
+        float  khD3 = dot(khC3, khC3);
+
+        if (khD3 > 1.0e-12f) {
+            float khM22 = dot(khC2, khC3) / khD3;
+            float khM32 = engBlk[3].z - engBlk[3].w * khM22;
+            khClip.z = khM22 * khClip.w + khM32;
+        }
+        khvc_opos = khClip;
+    } else {
+        khvc_opos = (stenVol2.z >= 0.5f) ? mul(float4(khEngP, 1.0f), khEngVP)
+                                         : khClip;
+    }
+    // The farVis-off pop at max view distance is enforced per fragment in the
+    // PS (FAR CONTRACT block) instead of here.
+    khvc_owpos = wp;
+    // KH_SELF_REL_INTERP: subtract the SAME fp32 anchor the sun matrices
+    // subtract - the quantised anchor cancels exactly, and the interpolant
+    // leaves at metres scale.
+    khvc_owrel = wp - sunOrigin.xyz;
+    // Per-axis scale is non-uniform: normals take the inverse scale, then the
+    // object rotation (the inverse-transpose of scale-then-rotate for
+    // orthonormal R - see kh_set_rotation).
+    khvc_onrm = normalize(KhRotateR(khvc_ln / max(khvc_size, float3(1e-4f, 1e-4f, 1e-4f)), khvc_r0, khvc_r1, khvc_r2));
+}
 
 // Guarded so the effect unit - whose depthTex owns register t1 - never sees
 // the atlas declaration: only the static and composite compiles pass

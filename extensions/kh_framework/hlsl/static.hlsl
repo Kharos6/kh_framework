@@ -6,64 +6,37 @@
 // user). Keep CRLF line endings. Never spell raw-string open/close tokens
 // inside comments - the gate scripts scan for them textually.
 R"HLSL(
+// KH_INSTANCING (26762): both entry points are wrappers over KhVsCore (the
+// shared prefix) - the per-object one hands in the CB lanes, the instanced
+// one the stream's. TWIN: VSComposite / VSCompositeInst carry the identical
+// pair of wrappers over the same core.
 VSOut VSMain(VSIn i)
 {
     VSOut o;
-    float3 wp = centerSize.xyz + KhRotate(i.pos * sizeAxes.xyz);
-    // FP32 JITTER REBASE (see centerRel): when armed, transform the
-    // CAMERA-RELATIVE position through the REBASED viewProj - the
-    // world-absolute fp32 cancellation (the stationary micro-jitter's
-    // reducible term) never enters the position path.
-    float3 khvTp = (centerRel.w > 0.5f)
-                 ? (centerRel.xyz + KhRotate(i.pos * sizeAxes.xyz))
-                 : wp;
-    // stenVol2.z selects the vertex path: 0 = the historic viewProj transform
-    // (every flush/injection mesh fill at mode 0); 3 = viewProj position with
-    // the ENGINE'S depth mapping (the seam-inject fill's mode-0 value, 176
-    // alias); 1/2 = the engine's whole cb2 transform (modes 174/175 and the
-    // 117/118 engine-view arm). A large-world engine that feeds cb4[4..6]
-    // before cb2 may well be handing cb2 CAMERA-RELATIVE world, in which case
-    // absolute wp is displaced by the whole camera vector and never wins the
-    // depth test - that is why 1/2 are arms, not the default.
-    float4x4 khEngVP = float4x4(engBlk[0], engBlk[1], engBlk[2], engBlk[3]);
-    float3   khEngP  = (stenVol2.z >= 1.5f) ? khvTp : wp;
-    float4   khClip  = mul(float4(khvTp, 1.0f), viewProj);
-
-    // This is SPACE-AGNOSTIC: it cannot be wrong about a frame of reference
-    // because it never uses one. TAKE THE ENGINE'S DEPTH MAPPING, NOT ITS
-    // POSITION (mode 176).
-    if (stenVol2.z >= 2.5f) {
-        float3 khC2 = float3(engBlk[0].z, engBlk[1].z, engBlk[2].z);
-        float3 khC3 = float3(engBlk[0].w, engBlk[1].w, engBlk[2].w);
-        float  khD3 = dot(khC3, khC3);
-
-        if (khD3 > 1.0e-12f) {
-            float khM22 = dot(khC2, khC3) / khD3;
-            float khM32 = engBlk[3].z - engBlk[3].w * khM22;
-            khClip.z = khM22 * khClip.w + khM32;
-        }
-        o.pos = khClip;
-    } else {
-        o.pos = (stenVol2.z >= 0.5f) ? mul(float4(khEngP, 1.0f), khEngVP)
-                                     : khClip;
-    }
-    // The farVis-off pop at max view distance is enforced per fragment in the
-    // PS (FAR CONTRACT block) instead of here.
-    o.wpos = wp;
-    // KH_SELF_REL_INTERP: subtract the SAME fp32 anchor the sun matrices
-    // subtract - the quantised anchor cancels exactly, and the interpolant
-    // leaves at metres scale.
-    o.wrel = wp - sunOrigin.xyz;
-    // Per-axis scale is non-uniform: normals take the inverse scale, then the
-    // object rotation (the inverse-transpose of scale-then-rotate for
-    // orthonormal R - see kh_set_rotation).
-    o.nrm = normalize(KhRotate(i.nrm / max(sizeAxes.xyz, float3(1e-4f, 1e-4f, 1e-4f))));
+    float3 khvR0, khvR1, khvR2;
+    KhObjRows(khvR0, khvR1, khvR2);
+    KhVsCore(i.pos, i.nrm, centerSize.xyz, centerRel.xyz, centerRel.w, sizeAxes.xyz,
+             khvR0, khvR1, khvR2, o.pos, o.wpos, o.wrel, o.nrm);
+    o.icol = color;
 #if KH_TEXTURED
     o.uv = i.uv;
     // Tangents are COVARIANT (transform like positions, not normals):
     // per-axis scale then the object rotation, renormalized. The handedness
     // sign rides untouched in w.
-    o.tanw = float4(normalize(KhRotate(i.tan.xyz * sizeAxes.xyz)), i.tan.w);
+    o.tanw = float4(normalize(KhRotateR(i.tan.xyz * sizeAxes.xyz, khvR0, khvR1, khvR2)), i.tan.w);
+#endif
+    return o;
+}
+
+VSOut VSMainInst(VSIn i, VSInst n)
+{
+    VSOut o;
+    KhVsCore(i.pos, i.nrm, n.ipos.xyz, n.irel.xyz, n.irel.w, n.isize.xyz,
+             n.irot0.xyz, n.irot1.xyz, n.irot2.xyz, o.pos, o.wpos, o.wrel, o.nrm);
+    o.icol = n.icol;
+#if KH_TEXTURED
+    o.uv = i.uv;
+    o.tanw = float4(normalize(KhRotateR(i.tan.xyz * n.isize.xyz, n.irot0.xyz, n.irot1.xyz, n.irot2.xyz)), i.tan.w);
 #endif
     return o;
 }
@@ -409,6 +382,7 @@ VSOut VSFullscreen(uint vid : SV_VertexID)
     o.wpos = float3(0.0f, 0.0f, 0.0f);
     o.nrm = float3(0.0f, 1.0f, 0.0f);
     o.wrel = float3(0.0f, 0.0f, 0.0f);   // (fullscreen path: no self sampling)
+    o.icol = color;   // KH_INSTANCING: every VSOut carries the colour lane (PSEffect reads the CB directly)
     return o;
 }
 
@@ -647,20 +621,20 @@ float4 PSMain(VSOut i) : SV_Target
     // until the 26719 twin-parity check removed it. TWIN EDIT: PSMain and
     // PSComposite identical from here to the shading call.
 #if KH_TEXTURED
-    khtxS.albedo *= color.rgb;   // the object color tints the albedo lane only
+    khtxS.albedo *= i.icol.rgb;   // the object colour tints the albedo lane only (KH_INSTANCING: the interpolant)
 #if KH_USER_MAT
     float3 lc = KhUserShade(khtxS, i.wpos, khtxN, smf);
 #else
     float3 lc = KhApplyPBR(khtxS, i.wpos, khtxN, smf);
 #endif
 #else
-    float3 lc = ApplyLighting(color.rgb, i.wpos, i.nrm, smf);
+    float3 lc = ApplyLighting(i.icol.rgb, i.wpos, i.nrm, smf);
 #endif
 
     if (dbgCtl.x >= 4.5f && dbgCtl.x < 7.5f) {
-        if (dbgCtl.x < 5.5f) return float4(color.rgb, 1.0f);
+        if (dbgCtl.x < 5.5f) return float4(i.icol.rgb, 1.0f);
         if (dbgCtl.x < 6.5f) return float4(lc, 1.0f);
-        return float4(color.a, SolidMask(i.wpos), smf, 1.0f);
+        return float4(i.icol.a, SolidMask(i.wpos), smf, 1.0f);
     }
 
     if (maskMeta.y >= 0.5f) {   // mode 71 paint arm (function scope, not the 4.5-7.5 block above)
@@ -835,9 +809,9 @@ float4 PSMain(VSOut i) : SV_Target
     }
 
 #if KH_TEXTURED
-    float a = color.a * khtxS.alpha * SolidMask(i.wpos);
+    float a = i.icol.a * khtxS.alpha * SolidMask(i.wpos);
 #else
-    float a = color.a * SolidMask(i.wpos);
+    float a = i.icol.a * SolidMask(i.wpos);
 #endif
     if (bm == 1 || bm == 3) return float4(lc * a, 1.0f);
     if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), lc, a), 1.0f);

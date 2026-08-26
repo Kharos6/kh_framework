@@ -6441,8 +6441,12 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj,
     if (prop == "twosided") { bool b = obj.two_sided; if (!kh_rv_bool(val, b, "twoSided", err)) return false; obj.two_sided = b; return true; }
     if (prop == "farvis")   { bool b = obj.far_vis;   if (!kh_rv_bool(val, b, "farVis", err))   return false; obj.far_vis = b;   return true; }
     if (prop == "lodlock")  { bool b = obj.lod_lock;  if (!kh_rv_bool(val, b, "lodLock", err))  return false; obj.lod_lock = b;  return true; }
+    // KH_INSTANCING (26762): updateRender3D [h, "instanced", true]. Default
+    // false (the RenderObject default; addRender3D sets nothing). See the
+    // field's note in RenderObject for what a batch shares and gives up.
+    if (prop == "instanced") { bool b = obj.instanced; if (!kh_rv_bool(val, b, "instanced", err)) return false; obj.instanced = b; return true; }
 
-    err = "unknown property (position | size | rotation | mesh | material | mode | sceneRead | effect | params | lit | twoSided | farVis | lodLock | casterOnly | color | visible | blend | band | duration)";
+    err = "unknown property (position | size | rotation | mesh | material | mode | sceneRead | effect | params | lit | twoSided | farVis | lodLock | instanced | casterOnly | color | visible | blend | band | duration)";
     return false;
 }
 
@@ -7313,6 +7317,8 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                             khd_m == 476 ||   // KH_SVS_SKIP_OFF: every seam pass re-injects
                             khd_m == 478 ||   // KH_CULL_BACK_OFF: disable the back-half cull
                             khd_m == 480 ||   // KH_CB_RING_OFF: per-object DISCARD uploads (the A/B; cbRingLegacy climbs)
+                            khd_m == 482 ||   // KH_INSTANCING_OFF: every instanced object draws per object (the A/B;
+                                              // the picture must not change; instFallbacks climbs, instBatches stays 0)
                             khd_m == 481 ||   // KH_CB_RING_NULLFIRST: force the null-bind between the ring's two Set1
                                               // calls on every slice (the documented command-list-emulation workaround,
                                               // latched per context otherwise; the A/B that the ring survives the dance
@@ -8391,6 +8397,21 @@ static game_value get_render_stats_sqf() {
         // KH_MAT_BLEND (26760): flush translucent-part submesh draws, and
         // parts skipped for want of the textured twins (health: 0).
         out.push_back(kv("blendPartDraws", RenderIntegration::g_blend_part_draws));
+        // KH_INSTANCING (26762): instOn 1 = the twins and both stream rings
+        // exist and 482 is off. Health: instBatches = batch draws issued
+        // (one per representative), instDraws = DrawInstanced calls (one per
+        // submesh x LOD level x ring chunk, x2 on the ordered two-sided
+        // pass), instInstances = records drawn (on a static scene of N
+        // instanced objects in one batch: N per pass that draws them),
+        // instDiscards << instBatches (one rename per ~16k records),
+        // instFallbacks = instanced objects drawn per object (0 unless a
+        // twin is absent or 482 is on).
+        out.push_back(kv("instOn",        RenderIntegration::kh_inst_twins_on() ? 1ull : 0ull));
+        out.push_back(kv("instBatches",   RenderIntegration::g_inst_batches));
+        out.push_back(kv("instDraws",     RenderIntegration::g_inst_draws));
+        out.push_back(kv("instInstances", RenderIntegration::g_inst_instances));
+        out.push_back(kv("instDiscards",  RenderIntegration::g_inst_discards));
+        out.push_back(kv("instFallbacks", RenderIntegration::g_inst_fallbacks));
         out.push_back(kv("blendPartSkips", RenderIntegration::g_blend_part_skips));
         out.push_back(kv("fbxCacheHits", RenderIntegration::g_stats.fbx_cache_hits));
         out.push_back(kv("fbxCacheWrites", RenderIntegration::g_stats.fbx_cache_writes));

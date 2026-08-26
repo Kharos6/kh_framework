@@ -611,7 +611,50 @@ struct KhMaterial {
 struct KhMaterialSet {
     std::vector<KhMaterial> slots;   // indexed by submesh
     bool any = false;   // at least one used slot
+    // KH_INSTANCING (26762): content identity, computed ONCE when the set is
+    // built (kh_material_set_hash). Every updateRender3D "material" builds a
+    // fresh set, so the pointer identifies an OBJECT, not a material; two
+    // objects with the same materials must batch, and this is what says so.
+    // Hashed: every slot's used flag, shader kind, user-shader path, five
+    // map paths, base colour, roughness, metalness, emissive, normal
+    // strength, cutoff, alpha mode and the five routes - every field
+    // kh_bind_material and kh_draw_textured read.
+    uint64_t hash = 0;
 };
+
+inline uint64_t kh_material_set_hash(const KhMaterialSet& khmh_s) {
+    uint64_t h = CryptoGenerator::FNV1A64_OFFSET;
+    auto mix = [&h](const void* p, size_t n) {
+        h = CryptoGenerator::fnv1a64_update(h, static_cast<const char*>(p), n);
+        h = CryptoGenerator::fnv1a64_update(h, "\xFF", 1);   // field separator
+    };
+    auto mixs = [&mix](const std::string& s) { mix(s.data(), s.size()); };
+    const uint32_t khmh_n = static_cast<uint32_t>(khmh_s.slots.size());
+    mix(&khmh_n, sizeof(khmh_n));
+
+    for (const KhMaterial& m : khmh_s.slots) {
+        const uint8_t khmh_u = m.used ? 1 : 0;
+        mix(&khmh_u, 1);
+        if (!m.used) continue;
+        mix(&m.shader, sizeof(m.shader));
+        mixs(m.user_shader);
+        for (int k = 0; k < 5; ++k) mixs(m.maps[k].path);
+        mix(m.base_color, sizeof(m.base_color));
+        mix(&m.roughness, sizeof(m.roughness));
+        mix(&m.metalness, sizeof(m.metalness));
+        mix(&m.emissive_intensity, sizeof(m.emissive_intensity));
+        mix(&m.normal_strength, sizeof(m.normal_strength));
+        mix(&m.cutoff, sizeof(m.cutoff));
+        mix(&m.alpha_mode, sizeof(m.alpha_mode));
+        mix(&m.route_occ, sizeof(m.route_occ));
+        mix(&m.route_rough, sizeof(m.route_rough));
+        mix(&m.route_metal, sizeof(m.route_metal));
+        mix(&m.route_alpha, sizeof(m.route_alpha));
+        mix(&m.route_gloss, sizeof(m.route_gloss));
+    }
+
+    return h;
+}
 
 inline bool kh_ends_with_ci(const std::string& s, const char* suffix) {
     const size_t sl = strlen(suffix);
@@ -709,6 +752,24 @@ struct Resources {
     ID3D11PixelShader*       ps_comp_tex = nullptr;   // PSComposite twin (per MSAA)
     ID3D11PixelShader*       ps_comp_arb_tex = nullptr;   // arb twin (per MSAA)
     ID3D11InputLayout*       layout_tex = nullptr;   // pos/nrm/uv/tangent (48-byte stride)
+    // KH_INSTANCING (26762): the instanced VS twins (VSMainInst for the
+    // flush, VSCompositeInst for the injection, each plain + textured), the
+    // two input layouts (mesh slot 0 + the 7-float4 per-instance slot 1;
+    // validated against the static blobs, serving the composite twins by
+    // the identical-signature contract layout_tex already relies on) and
+    // the per-pass instance stream rings ([0] flush / game thread, [1]
+    // injection / render thread - the CB ring's split, for the CB ring's
+    // reason). All NON-FATAL: absent twins draw instanced objects per
+    // object and instOn reads 0.
+    ID3D11VertexShader*      vs_inst = nullptr;
+    ID3D11VertexShader*      vs_inst_tex = nullptr;
+    ID3D11VertexShader*      vs_comp_inst = nullptr;
+    ID3D11VertexShader*      vs_comp_inst_tex = nullptr;
+    ID3D11InputLayout*       layout_inst = nullptr;
+    ID3D11InputLayout*       layout_inst_tex = nullptr;
+    ID3D11Buffer*            inst_vb[2] = {};
+    uint32_t                 inst_cursor[2] = {};   // next free record
+    bool                     inst_fresh[2] = { true, true };   // next map must DISCARD
     ID3D11SamplerState*      mat_sampler = nullptr;   // s0: anisotropic wrap
     std::vector<ID3D11Buffer*> mesh_vb;   // one VB per PUBLISHED registry mesh
                                                          // (48-byte textured vertex format; grows
@@ -970,6 +1031,17 @@ struct Resources {
         comp_depth_samples = 1;
         KH_SAFE_RELEASE(input_layout);
         KH_SAFE_RELEASE(vs_tex);
+        KH_SAFE_RELEASE(vs_inst);   // KH_INSTANCING
+        KH_SAFE_RELEASE(vs_inst_tex);
+        KH_SAFE_RELEASE(vs_comp_inst);
+        KH_SAFE_RELEASE(vs_comp_inst_tex);
+        KH_SAFE_RELEASE(layout_inst);
+        KH_SAFE_RELEASE(layout_inst_tex);
+        for (int khin_i = 0; khin_i < 2; ++khin_i) {
+            KH_SAFE_RELEASE(inst_vb[khin_i]);
+            inst_cursor[khin_i] = 0;
+            inst_fresh[khin_i] = true;
+        }
         KH_SAFE_RELEASE(ps_tex);
         KH_SAFE_RELEASE(vs_comp_tex);
         KH_SAFE_RELEASE(ps_comp_tex);
@@ -1387,6 +1459,17 @@ struct RenderObject {
                                 // MeshDef, not per instance) and the shadow
                                 // pass keeps its own level rule.
     int   blend_mode = 0;   // 0 normal, 1 additive, 2 multiply, 3 screen, 4 lighten, 5 darken
+    // KH_INSTANCING (26762): updateRender3D [h, "instanced", true]. An
+    // instanced object joins a BATCH with every other instanced object that
+    // shares its mesh, material set, blend mode, depth mode, lit params,
+    // twoSided, farVis, part and translucency; the batch draws with ONE
+    // DrawInstanced per (submesh, LOD level) from a per-instance stream that
+    // carries each object's centre, size, rotation and colour. Everything
+    // else about the object is unchanged: it culls, LODs (no crossfade),
+    // lifetimes, casts (per object, rule 1.44) and updates exactly as
+    // before; only the colour draw is shared. Per-object drawing returns
+    // whenever the instanced twins are absent or mode 482 is set.
+    bool  instanced = false;
     // FBX materials (updateRender3D "material"): immutable snapshot, swapped
     // copy-on-write under g_draw_list_mutex.
     std::shared_ptr<const KhMaterialSet> materials;
@@ -6082,15 +6165,25 @@ inline void kh_bind_material(ID3D11DeviceContext* ctx, ID3D11Device* dev,
 // alpha 0.996 in the shader, so a single alpha-mapped submesh - solid body,
 // glass window - occludes itself where it is solid and blends where it is
 // glass, however the artist split the mesh.
+// khum_inst_n / khum_inst_first (KH_INSTANCING, 26762): non-zero n turns
+// every submesh Draw into a DrawInstanced over that many records of the
+// bound slot-1 stream starting at first; 0 (both existing call sites) is
+// the per-object draw, byte for byte.
 inline uint32_t kh_draw_textured(ID3D11DeviceContext* ctx, ID3D11Device* dev,
                                  ConstantData& cbd, ID3D11Buffer* obj_cb,
                                  const KhMaterialSet& ms, int mid, bool ts_ordered,
                                  ID3D11RasterizerState*& bound_rs,
                                  int khum_ctx, ID3D11PixelShader* khum_builtin_ps,
-                                 int khum_lod, int khum_part) {
+                                 int khum_lod, int khum_part,
+                                 uint32_t khum_inst_n = 0, uint32_t khum_inst_first = 0) {
     static const KhMaterial khtx_default;   // unset slots draw with defaults
     const MeshDef& md = mesh_def(mid);
     uint32_t draws = 0;
+    auto khum_draw = [&](const MeshSubmesh& khum_sm) {
+        if (khum_inst_n) ctx->DrawInstanced(khum_sm.vertex_count, khum_inst_n, khum_sm.vertex_start, khum_inst_first);
+        else             ctx->Draw(khum_sm.vertex_count, khum_sm.vertex_start);
+        ++draws;
+    };
     ID3D11PixelShader* khum_bound = khum_builtin_ps;
     // Its cardinality and order match level 0's by construction - decimation
     // runs per submesh and never merges or drops one - and kh_mesh_cache_load
@@ -6144,21 +6237,373 @@ inline uint32_t kh_draw_textured(ID3D11DeviceContext* ctx, ID3D11Device* dev,
                 ctx->RSSetState(kh_rs_pick(g_res.rasterizer_front));
                 bound_rs = g_res.rasterizer_front;
             }
-            ctx->Draw(sm.vertex_count, sm.vertex_start);
-            ++draws;
+            khum_draw(sm);
             ctx->RSSetState(kh_rs_pick(g_res.rasterizer_cull));
             bound_rs = g_res.rasterizer_cull;
-            ctx->Draw(sm.vertex_count, sm.vertex_start);
-            ++draws;
+            khum_draw(sm);
         } else {
-            ctx->Draw(sm.vertex_count, sm.vertex_start);
-            ++draws;
+            khum_draw(sm);
         }
     }
 
     // Leave the caller's builtin bound: its PS trackers assume it.
     if (khum_bound != khum_builtin_ps) ctx->PSSetShader(khum_builtin_ps, nullptr, 0);
     return draws;
+}
+
+// KH_INSTANCING (26762) =====================================================
+// THE PURPOSE IS FILL, NOT FIDELITY: many objects sharing one mesh and one
+// material set drawing as one DrawInstanced per (submesh, LOD level) instead
+// of one Draw (and one CB upload, and one state walk) each. The design keeps
+// every per-object decision the colour loops already make and adds nothing
+// beside them:
+//
+// - THE STREAM. One KhInstRec per instance (112 B, the HLSL VSInst twin, IA
+//   slot 1, TEXCOORD4..10): world centre, the rebase-relative centre
+//   (double-subtracted on the CPU exactly as kh_fill_center_rel does - the
+//   fp32 jitter fix is per instance, not per batch), edge lengths, the three
+//   rotation rows (always filled; identity when unrotated) and the colour
+//   with the lifetime envelope applied. Two dynamic rings, one per pass
+//   (flush = game thread, injection = render thread), DISCARD on first use
+//   and on wrap, NO_OVERWRITE per batch - the CB ring's discipline applied
+//   to a vertex buffer, and NO_OVERWRITE on a vertex buffer needs no feature
+//   bit. A batch larger than the ring splits into ring-sized draws.
+//
+// - THE PLAN. Before each colour loop, kh_inst_plan_build groups the pass's
+//   instanced objects by key (mesh, material set, blend mode, depth mode,
+//   lit + ambient + diffuse, twoSided, farVis, part, translucency - every
+//   field a batch's shared CB or state depends on; size, rotation and colour
+//   are per instance and free to vary) and records each batch's members in
+//   the loop's VISITING order.
+//
+// - THE REPRESENTATIVE. The loop runs unchanged. The first member of a batch
+//   it reaches flows through every existing gate (cull, upload, routing,
+//   PS/VS/DSS/blend/rasterizer selection) and establishes the batch's state
+//   exactly as it would for itself; at its draw site, instead of its own
+//   Draw, kh_inst_issue gathers the members that are visible and share its
+//   route class (the far-keep / near-z verdicts the loop computed for it,
+//   asked of each member through the SAME lambda), buckets them by their
+//   own LOD level, writes the stream and issues the draws. Members are
+//   marked done and skipped on their own turn; a member the representative
+//   could not carry (a different route class) becomes the representative of
+//   what is left when the loop reaches it. So a batch whose instances
+//   straddle the far plane draws as two batches, each on the right path,
+//   with no second copy of the verdict anywhere.
+//
+// - WHAT A BATCH GIVES UP, deliberately: the LOD crossfade (instances snap
+//   between levels; blendCtl.w stays 0), the owner prepass (a batch owns no
+//   sample and tests only, like cutout), the perceptual composite (rule
+//   1.45: a multi-instance draw is the multi-layer case - translucent
+//   batches hardware-blend, far-to-near within the batch), the
+//   camera-inside-box back-face shortcut (a two-sided batch draws CullNone;
+//   the shortcut was a fill optimisation on one closed builtin), and
+//   overlays (mode Off keeps the UI-mask census identity; it draws per
+//   object). Casting is untouched: every proxy iterates the draw list per
+//   object (rule 1.44).
+//
+// Lanes: instOn, instBatches (batch draws issued), instDraws (DrawInstanced
+// calls), instInstances (records drawn), instDiscards (ring renames),
+// instFallbacks (instanced objects drawn per object: twins absent, mode
+// 482). Mode 482 = KH_INSTANCING_OFF (the A/B: the picture must not change).
+struct KhInstRec {
+    float pos[4];      // xyz = world centre (engine axes)
+    float rel[4];      // xyz = centre - rebase camera (double-subtracted); w = 1 armed
+    float size[4];     // xyz = edge lengths (engine axes)
+    float rot[3][4];   // engine-axes rotation rows; [0][3] = 1 (filled)
+    float col[4];      // colour, envelope applied
+};
+static_assert(sizeof(KhInstRec) == 112, "instance stream stride is a layout contract (layout_inst*, VSInst)");
+static constexpr uint32_t KH_INST_STRIDE = static_cast<uint32_t>(sizeof(KhInstRec));
+static constexpr uint32_t KH_INST_CAP = 16384u;   // records per ring (1.75 MB)
+static uint64_t g_inst_batches = 0;
+static uint64_t g_inst_draws = 0;
+static uint64_t g_inst_instances = 0;
+static uint64_t g_inst_discards = 0;
+static uint64_t g_inst_fallbacks = 0;
+
+inline bool kh_inst_eligible(const RenderObject& o) {
+    return o.instanced && !o.fullscreen && o.effect == 0 && o.mode != DepthMode::Off;
+}
+
+inline bool kh_inst_twins_on() {
+    return g_res.vs_inst && g_res.layout_inst && g_res.inst_vb[0] && g_res.inst_vb[1] &&
+           g_dbg_mode.load(std::memory_order_relaxed) != 482;
+}
+
+inline void kh_inst_fill(KhInstRec& r, const RenderObject& o, const float* cam, bool rebase) {
+    r.pos[0] = o.pos[0]; r.pos[1] = o.pos[2]; r.pos[2] = o.pos[1]; r.pos[3] = 0.0f;   // SQF [x,y,zASL] -> engine [x,zASL,y]
+
+    if (rebase) {   // kh_fill_center_rel's double subtraction, per instance
+        r.rel[0] = static_cast<float>(static_cast<double>(r.pos[0]) - static_cast<double>(cam[0]));
+        r.rel[1] = static_cast<float>(static_cast<double>(r.pos[1]) - static_cast<double>(cam[1]));
+        r.rel[2] = static_cast<float>(static_cast<double>(r.pos[2]) - static_cast<double>(cam[2]));
+        r.rel[3] = 1.0f;
+    } else {
+        r.rel[0] = r.rel[1] = r.rel[2] = r.rel[3] = 0.0f;
+    }
+
+    r.size[0] = o.size[0]; r.size[1] = o.size[2]; r.size[2] = o.size[1]; r.size[3] = 0.0f;   // SQF [x,y,z] -> engine [x,z,y]
+
+    for (int rr = 0; rr < 3; ++rr) {
+        r.rot[rr][0] = o.rot_m[rr * 3 + 0];
+        r.rot[rr][1] = o.rot_m[rr * 3 + 1];
+        r.rot[rr][2] = o.rot_m[rr * 3 + 2];
+        r.rot[rr][3] = 0.0f;
+    }
+
+    r.rot[0][3] = 1.0f;
+    memcpy(r.col, o.color, sizeof(r.col));
+}
+
+// Writes up to KH_INST_CAP records; returns the count written (0 on a
+// failed map, which re-DISCARDs the ring next time) and the first record's
+// index in khiw_first. A full ring wraps with a DISCARD (rename, never a
+// stall): every earlier draw of the pass already consumed its records.
+inline uint32_t kh_inst_ring_write(ID3D11DeviceContext* ctx, int khiw_ri, const KhInstRec* khiw_recs,
+                                   uint32_t khiw_n, uint32_t& khiw_first) {
+    ID3D11Buffer* khiw_buf = g_res.inst_vb[khiw_ri];
+    uint32_t& khiw_cur = g_res.inst_cursor[khiw_ri];
+    bool& khiw_fresh = g_res.inst_fresh[khiw_ri];
+    khiw_first = 0;
+    if (!khiw_buf || khiw_n == 0) return 0;
+    if (khiw_n > KH_INST_CAP) khiw_n = KH_INST_CAP;
+    if (khiw_cur + khiw_n > KH_INST_CAP) { khiw_cur = 0; khiw_fresh = true; }
+    D3D11_MAPPED_SUBRESOURCE khiw_m = {};
+    const D3D11_MAP khiw_mode = khiw_fresh ? D3D11_MAP_WRITE_DISCARD : D3D11_MAP_WRITE_NO_OVERWRITE;
+
+    if (FAILED(ctx->Map(khiw_buf, 0, khiw_mode, 0, &khiw_m))) {
+        khiw_fresh = true;
+        return 0;
+    }
+
+    if (khiw_fresh) g_inst_discards++;
+    khiw_fresh = false;
+    memcpy(static_cast<uint8_t*>(khiw_m.pData) + static_cast<size_t>(khiw_cur) * KH_INST_STRIDE,
+           khiw_recs, static_cast<size_t>(khiw_n) * KH_INST_STRIDE);
+    ctx->Unmap(khiw_buf, 0);
+    khiw_first = khiw_cur;
+    khiw_cur += khiw_n;
+    return khiw_n;
+}
+
+// The batch key: every object field a batch's SHARED constant block or
+// pipeline state is filled from. Compared lexicographically; two objects
+// with equal keys draw correctly from one CB fill and one state walk.
+struct KhInstKey {
+    int      mesh;
+    uint64_t mats;      // 0 = untextured; else the set's content hash (see KhMaterialSet::hash)
+    int      blend;
+    int      mode;
+    int      lit;
+    float    amb;
+    float    dif;
+    int      two_sided;
+    int      far_vis;
+    int      part;
+    int      transl;
+};
+
+inline KhInstKey kh_inst_key(const RenderObject& o) {
+    KhInstKey k;
+    k.mesh = mesh_id_clamp(o.mesh);
+    {   // content identity: objects with the SAME materials share a batch whatever set they hold
+        const KhMaterialSet* khik_ms = kh_obj_textured(o);
+        k.mats = khik_ms ? (khik_ms->hash | 1u) : 0u;   // |1 keeps a (vanishingly unlikely) zero hash distinct from "untextured"
+    }
+    k.blend = o.blend_mode;
+    k.mode = static_cast<int>(o.mode);
+    k.lit = o.lit ? 1 : 0;
+    k.amb = o.light_ambient;
+    k.dif = o.light_diffuse;
+    k.two_sided = o.two_sided ? 1 : 0;
+    k.far_vis = o.far_vis ? 1 : 0;
+    k.part = o.draw_part;
+    k.transl = (o.blend_mode == 0 && o.color[3] < 0.999f) ? 1 : 0;
+    return k;
+}
+
+inline int kh_inst_key_cmp(const KhInstKey& a, const KhInstKey& b) {
+    if (a.mesh != b.mesh) return a.mesh < b.mesh ? -1 : 1;
+    if (a.mats != b.mats) return a.mats < b.mats ? -1 : 1;
+    if (a.blend != b.blend) return a.blend < b.blend ? -1 : 1;
+    if (a.mode != b.mode) return a.mode < b.mode ? -1 : 1;
+    if (a.lit != b.lit) return a.lit < b.lit ? -1 : 1;
+    if (a.amb != b.amb) return a.amb < b.amb ? -1 : 1;
+    if (a.dif != b.dif) return a.dif < b.dif ? -1 : 1;
+    if (a.two_sided != b.two_sided) return a.two_sided < b.two_sided ? -1 : 1;
+    if (a.far_vis != b.far_vis) return a.far_vis < b.far_vis ? -1 : 1;
+    if (a.part != b.part) return a.part < b.part ? -1 : 1;
+    if (a.transl != b.transl) return a.transl < b.transl ? -1 : 1;
+    return 0;
+}
+
+struct KhInstPlan {
+    std::vector<int32_t>  batch_of;      // per mesh index: batch id, -1 = draws per object
+    std::vector<uint8_t>  done;          // per mesh index: carried by an issued batch draw
+    std::vector<uint32_t> batch_begin;   // per batch: first member in 'members'
+    std::vector<uint32_t> batch_n;       // per batch: member count
+    std::vector<uint32_t> members;       // mesh indices, batch-contiguous, visiting order within a batch
+    // build scratch
+    struct Ent { KhInstKey key; uint32_t rank; uint32_t idx; };
+    std::vector<Ent>      ents;
+    // issue scratch
+    std::vector<std::pair<uint64_t, uint32_t>> picked;   // (lod << 32 | far-to-near rank, mesh index)
+    std::vector<KhInstRec> recs;
+};
+
+// khip_order = the loop's visiting order (nullptr = natural). Groups by key;
+// members keep their visiting order inside a batch, so the first member the
+// loop reaches is the first in its member list.
+inline void kh_inst_plan_build(KhInstPlan& p, const std::vector<RenderObject>& meshes,
+                               const uint32_t* khip_order, size_t khip_n) {
+    p.batch_of.assign(meshes.size(), -1);
+    p.done.assign(meshes.size(), 0);
+    p.batch_begin.clear();
+    p.batch_n.clear();
+    p.members.clear();
+    p.ents.clear();
+
+    for (size_t khip_r = 0; khip_r < khip_n; ++khip_r) {
+        const uint32_t khip_i = khip_order ? khip_order[khip_r] : static_cast<uint32_t>(khip_r);
+        if (khip_i >= meshes.size()) continue;
+        const RenderObject& o = meshes[khip_i];
+        if (!kh_inst_eligible(o)) continue;
+        KhInstPlan::Ent e;
+        e.key = kh_inst_key(o);
+        e.rank = static_cast<uint32_t>(khip_r);
+        e.idx = khip_i;
+        p.ents.push_back(e);
+    }
+
+    if (p.ents.empty()) return;
+    std::stable_sort(p.ents.begin(), p.ents.end(), [](const KhInstPlan::Ent& a, const KhInstPlan::Ent& b) {
+        const int c = kh_inst_key_cmp(a.key, b.key);
+        return c != 0 ? c < 0 : a.rank < b.rank;
+    });
+
+    for (size_t khip_e = 0; khip_e < p.ents.size(); ++khip_e) {
+        const bool khip_new = khip_e == 0 || kh_inst_key_cmp(p.ents[khip_e - 1].key, p.ents[khip_e].key) != 0;
+
+        if (khip_new) {
+            p.batch_begin.push_back(static_cast<uint32_t>(p.members.size()));
+            p.batch_n.push_back(0);
+        }
+
+        p.batch_of[p.ents[khip_e].idx] = static_cast<int32_t>(p.batch_n.size() - 1);
+        p.batch_n.back()++;
+        p.members.push_back(p.ents[khip_e].idx);
+    }
+}
+
+// Issues the batch the representative khii_rep belongs to. PRECONDITIONS
+// (the caller's duty, exactly kh_draw_textured's): the representative's CB
+// uploaded, its PS bound, the INSTANCED VS + layout bound, the stream on IA
+// slot 1, blend + DSS set, khii_bound_rs the loop's tracker. khii_same
+// answers "does this member draw on the representative's path and is it
+// visible" - the loop's own cull and route verdicts, asked of the member.
+// Returns the DrawInstanced count; khii_inst_out the records drawn.
+template <class KhInstSame>
+inline uint32_t kh_inst_issue(ID3D11DeviceContext* ctx, ID3D11Device* dev, KhInstPlan& p,
+                              const std::vector<RenderObject>& meshes, uint32_t khii_rep,
+                              const float* cam, bool khii_rebase, int khii_ri,
+                              ConstantData& cbd, ID3D11Buffer* obj_cb,
+                              const KhMaterialSet* khii_txm, bool khii_ts_ordered,
+                              ID3D11RasterizerState*& khii_bound_rs,
+                              int khii_ctx, ID3D11PixelShader* khii_builtin_ps, int khii_part,
+                              KhInstSame khii_same, uint32_t& khii_inst_out) {
+    khii_inst_out = 0;
+    if (khii_rep >= p.batch_of.size() || p.batch_of[khii_rep] < 0) return 0;
+    const uint32_t khii_b = static_cast<uint32_t>(p.batch_of[khii_rep]);
+    const RenderObject& khii_ro = meshes[khii_rep];
+    const int khii_mid = mesh_id_clamp(khii_ro.mesh);
+    const MeshDef& khii_md = mesh_def(khii_mid);
+    p.picked.clear();
+
+    for (uint32_t khii_m = p.batch_begin[khii_b]; khii_m < p.batch_begin[khii_b] + p.batch_n[khii_b]; ++khii_m) {
+        const uint32_t khii_i = p.members[khii_m];
+        if (p.done[khii_i]) continue;
+        const RenderObject& khii_o = meshes[khii_i];
+        if (khii_i != khii_rep && !khii_same(khii_o)) continue;
+        p.done[khii_i] = 1;
+        // Per-instance LOD: the level the object would pick alone, no
+        // crossfade. A locked instance always draws level 0.
+        int khii_lvl = 0;
+        float khii_t = 0.0f;
+        const float khii_d2 = kh_mesh_dist_sq(khii_o, cam);
+        if (!khii_o.lod_lock) kh_lod_pick(khii_md, kh_lod_radius(khii_o), sqrtf(khii_d2), khii_lvl, khii_t);
+        khii_lvl = mesh_lod_clamp(khii_md, khii_lvl);
+        // Sort key: level, then far-to-near (matters for the translucent
+        // batch; harmless for the opaque one).
+        const uint32_t khii_far = 0xFFFFFFFFu - static_cast<uint32_t>(fminf(khii_d2, 4.0e9f));
+        p.picked.emplace_back((static_cast<uint64_t>(khii_lvl) << 32) | khii_far, khii_i);
+    }
+
+    if (p.picked.empty()) return 0;
+    std::stable_sort(p.picked.begin(), p.picked.end(),
+                     [](const std::pair<uint64_t, uint32_t>& a, const std::pair<uint64_t, uint32_t>& b) {
+                         return a.first < b.first;
+                     });
+
+    uint32_t khii_draws = 0;
+    size_t khii_at = 0;
+
+    while (khii_at < p.picked.size()) {
+        const int khii_lvl = static_cast<int>(p.picked[khii_at].first >> 32);
+        size_t khii_end = khii_at;
+        while (khii_end < p.picked.size() && static_cast<int>(p.picked[khii_end].first >> 32) == khii_lvl) ++khii_end;
+        // One level: fill, write in ring-sized chunks, draw each chunk.
+        p.recs.resize(khii_end - khii_at);
+        for (size_t khii_k = khii_at; khii_k < khii_end; ++khii_k)
+            kh_inst_fill(p.recs[khii_k - khii_at], meshes[p.picked[khii_k].second], cam, khii_rebase);
+
+        uint32_t khii_off = 0;
+        const uint32_t khii_total = static_cast<uint32_t>(p.recs.size());
+
+        while (khii_off < khii_total) {
+            uint32_t khii_first = 0;
+            const uint32_t khii_n = kh_inst_ring_write(ctx, khii_ri, p.recs.data() + khii_off, khii_total - khii_off, khii_first);
+            if (khii_n == 0) break;   // map failed: the rest of this level is lost for the frame (counted below)
+
+            if (khii_txm) {
+                khii_draws += kh_draw_textured(ctx, dev, cbd, obj_cb, *khii_txm, khii_mid, khii_ts_ordered,
+                                               khii_bound_rs, khii_ctx, khii_builtin_ps, khii_lvl, khii_part,
+                                               khii_n, khii_first);
+            } else {
+                UINT khii_ls = 0, khii_lc = 0;
+                mesh_lod_range(khii_md, khii_lvl, khii_ls, khii_lc);
+
+                if (khii_ts_ordered) {   // interiors of every instance, then exteriors over them
+                    if (khii_bound_rs != g_res.rasterizer_front) {
+                        ctx->RSSetState(kh_rs_pick(g_res.rasterizer_front));
+                        khii_bound_rs = g_res.rasterizer_front;
+                    }
+                    ctx->DrawInstanced(khii_lc, khii_n, khii_ls, khii_first);
+                    ctx->RSSetState(kh_rs_pick(g_res.rasterizer_cull));
+                    khii_bound_rs = g_res.rasterizer_cull;
+                    ctx->DrawInstanced(khii_lc, khii_n, khii_ls, khii_first);
+                    khii_draws += 2;
+                } else {
+                    ctx->DrawInstanced(khii_lc, khii_n, khii_ls, khii_first);
+                    khii_draws += 1;
+                }
+            }
+
+            {   // the geometry census, per instance
+                UINT khii_cs = 0, khii_cc = 0;
+                mesh_lod_range(khii_md, khii_lvl, khii_cs, khii_cc);
+                g_mesh_tris += static_cast<uint64_t>(khii_cc / 3u) * khii_n * (khii_ts_ordered ? 2u : 1u);
+            }
+            khii_inst_out += khii_n;
+            khii_off += khii_n;
+        }
+
+        khii_at = khii_end;
+    }
+
+    g_inst_batches++;
+    g_inst_draws += khii_draws;
+    g_inst_instances += khii_inst_out;
+    return khii_draws;
 }
 
 // The positional-optional conventions stand unchanged: nil (and the
@@ -6359,6 +6804,7 @@ inline bool kh_apply_material_update(RenderObject& obj, const game_value& val, s
 
     next.any = false;
     for (const auto& s : next.slots) if (s.used) { next.any = true; break; }
+    next.hash = kh_material_set_hash(next);   // KH_INSTANCING: the batch key's material identity
     obj.materials = std::make_shared<const KhMaterialSet>(std::move(next));
     return true;
 }
@@ -6562,11 +7008,15 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         { static_src.c_str(), "PSOwner",     "ps_5_0", khcb_rx_defines, 0 },   // was inline at the first post-gate ensure
         { static_src.c_str(), "VSMain",      "vs_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "VSMain",      "vs_5_0", khtx_defines,    0 },
+        { static_src.c_str(), "VSMainInst",  "vs_5_0", khcb_rx_defines, 0 },   // KH_INSTANCING twins
+        { static_src.c_str(), "VSMainInst",  "vs_5_0", khtx_defines,    0 },
         { static_src.c_str(), "VSMirror",    "vs_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "VSFullscreen","vs_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "VSSunDepth",  "vs_5_0", khcb_rx_defines, 0 },
         { khsp_comp_src.c_str(), "VSComposite", "vs_5_0", khsp_d0,  0 },
         { khsp_comp_src.c_str(), "VSComposite", "vs_5_0", khsp_d0t, 0 },
+        { khsp_comp_src.c_str(), "VSCompositeInst", "vs_5_0", khsp_d0,  0 },   // KH_INSTANCING twins
+        { khsp_comp_src.c_str(), "VSCompositeInst", "vs_5_0", khsp_d0t, 0 },
         // Last because it is the lightest of the speculative entries -
         // PSEffect does not call the shadow chain, which is why it was never
         // in 's heavy list.
@@ -6782,6 +7232,95 @@ inline std::string ensure_resources(ID3D11Device* dev) {
 
         if (khtx_vsb) khtx_vsb->Release();
         if (khtx_psb) khtx_psb->Release();
+    }
+
+    // KH_INSTANCING twins (NON-FATAL, like the textured twins above): the
+    // SAME static source, VSMainInst plain and KH_TEXTURED, each with its
+    // input layout - the mesh slot's elements plus the 7 per-instance
+    // float4s of VSInst on slot 1 - validated against its own blob and
+    // serving the composite twins (identical input signatures, as
+    // layout_tex serves both textured VS's). Then the two stream rings. Any
+    // failure releases the whole set: instOn reads 0 and every instanced
+    // object draws per object.
+    {
+        auto khin_make = [&](const D3D_SHADER_MACRO* khin_defs, bool khin_tex,
+                             ID3D11VertexShader** khin_vs, ID3D11InputLayout** khin_il) -> bool {
+            ID3DBlob* khin_b = nullptr;
+            const std::string khin_err = compile_shader(static_src.c_str(), "VSMainInst", "vs_5_0", khin_defs, &khin_b);
+
+            if (!khin_err.empty() || !khin_b) {
+                if (!khin_err.empty()) report_error_once_safe("KH instanced shaders: " + khin_err);
+                return false;
+            }
+
+            HRESULT khin_hr = dev->CreateVertexShader(khin_b->GetBufferPointer(), khin_b->GetBufferSize(), nullptr, khin_vs);
+
+            if (SUCCEEDED(khin_hr)) {
+                const D3D11_INPUT_ELEMENT_DESC khin_el[] = {
+                    { "POSITION", 0,  DXGI_FORMAT_R32G32B32_FLOAT,    0,  0, D3D11_INPUT_PER_VERTEX_DATA,   0 },
+                    { "NORMAL",   0,  DXGI_FORMAT_R32G32B32_FLOAT,    0, 12, D3D11_INPUT_PER_VERTEX_DATA,   0 },
+                    { "TEXCOORD", 0,  DXGI_FORMAT_R32G32_FLOAT,       0, 24, D3D11_INPUT_PER_VERTEX_DATA,   0 },
+                    { "TANGENT",  0,  DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D11_INPUT_PER_VERTEX_DATA,   0 },
+                    { "TEXCOORD", 4,  DXGI_FORMAT_R32G32B32A32_FLOAT, 1,  0, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+                    { "TEXCOORD", 5,  DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 16, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+                    { "TEXCOORD", 6,  DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 32, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+                    { "TEXCOORD", 7,  DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 48, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+                    { "TEXCOORD", 8,  DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 64, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+                    { "TEXCOORD", 9,  DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 80, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+                    { "TEXCOORD", 10, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 96, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+                };
+                static_assert(sizeof(khin_el) / sizeof(khin_el[0]) == 11, "2 or 4 mesh elements + 7 instance elements");
+                // Plain: POSITION/NORMAL then the 7 instance elements (the
+                // textured pair is skipped, not renumbered).
+                D3D11_INPUT_ELEMENT_DESC khin_plain[9];
+                khin_plain[0] = khin_el[0];
+                khin_plain[1] = khin_el[1];
+                for (int khin_k = 0; khin_k < 7; ++khin_k) khin_plain[2 + khin_k] = khin_el[4 + khin_k];
+                khin_hr = dev->CreateInputLayout(khin_tex ? khin_el : khin_plain, khin_tex ? 11u : 9u,
+                                                 khin_b->GetBufferPointer(), khin_b->GetBufferSize(), khin_il);
+            }
+
+            khin_b->Release();
+
+            if (FAILED(khin_hr)) {
+                KH_SAFE_RELEASE(*khin_vs);
+                KH_SAFE_RELEASE(*khin_il);
+                report_error_once_safe("KH instanced shaders: create " + hr_str(khin_hr));
+                return false;
+            }
+
+            return true;
+        };
+
+        bool khin_ok = khin_make(khcb_rx_defines, false, &g_res.vs_inst, &g_res.layout_inst);
+        if (khin_ok) khin_ok = khin_make(khtx_defines, true, &g_res.vs_inst_tex, &g_res.layout_inst_tex);
+
+        if (khin_ok) {
+            D3D11_BUFFER_DESC khin_bd = {};
+            khin_bd.ByteWidth = KH_INST_STRIDE * KH_INST_CAP;
+            khin_bd.Usage = D3D11_USAGE_DYNAMIC;
+            khin_bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+            khin_bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+            for (int khin_i = 0; khin_i < 2 && khin_ok; ++khin_i) {
+                g_res.inst_cursor[khin_i] = 0;
+                g_res.inst_fresh[khin_i] = true;
+                const HRESULT khin_hr = dev->CreateBuffer(&khin_bd, nullptr, &g_res.inst_vb[khin_i]);
+
+                if (FAILED(khin_hr)) {
+                    report_error_once_safe("KH instanced stream: create " + hr_str(khin_hr));
+                    khin_ok = false;
+                }
+            }
+        }
+
+        if (!khin_ok) {
+            KH_SAFE_RELEASE(g_res.vs_inst);
+            KH_SAFE_RELEASE(g_res.vs_inst_tex);
+            KH_SAFE_RELEASE(g_res.layout_inst);
+            KH_SAFE_RELEASE(g_res.layout_inst_tex);
+            for (int khin_i = 0; khin_i < 2; ++khin_i) KH_SAFE_RELEASE(g_res.inst_vb[khin_i]);
+        }
     }
 
     {
@@ -7658,6 +8197,8 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
         { comp_src.c_str(), "PSComposite", "ps_5_0", khtx_defines_arb, 0 },
         { comp_src.c_str(), "VSComposite", "vs_5_0", defines,          0 },
         { comp_src.c_str(), "VSComposite", "vs_5_0", khtx_defines,     0 },
+        { comp_src.c_str(), "VSCompositeInst", "vs_5_0", defines,      0 },   // KH_INSTANCING twins
+        { comp_src.c_str(), "VSCompositeInst", "vs_5_0", khtx_defines, 0 },
     };
     KhShaderMtScope khsm_scope(khsm_jobs, _countof(khsm_jobs));
     ID3DBlob* vs_blob = nullptr;
@@ -7694,6 +8235,8 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
     KH_SAFE_RELEASE(g_res.vs_comp_tex);
     KH_SAFE_RELEASE(g_res.ps_comp_tex);
     KH_SAFE_RELEASE(g_res.ps_comp_arb_tex);
+    KH_SAFE_RELEASE(g_res.vs_comp_inst);   // KH_INSTANCING
+    KH_SAFE_RELEASE(g_res.vs_comp_inst_tex);
     {
         // both textured tables are HOISTED to this function's top so the
         // KH_SHADER_MT batch can name them. One truth, same values.
@@ -7722,6 +8265,30 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
         if (khtx_vsb) khtx_vsb->Release();
         if (khtx_psb) khtx_psb->Release();
         if (khtx_pab) khtx_pab->Release();
+    }
+    // KH_INSTANCING: the injection's instanced VS pair (NON-FATAL). The
+    // layouts are the static unit's (identical input signatures); a missing
+    // pair sends the injection's instanced objects per object.
+    {
+        ID3DBlob* khin_b = nullptr;
+        std::string khin_err = compile_shader(comp_src.c_str(), "VSCompositeInst", "vs_5_0", defines, &khin_b);
+        if (khin_err.empty() && khin_b) {
+            if (FAILED(dev->CreateVertexShader(khin_b->GetBufferPointer(), khin_b->GetBufferSize(), nullptr, &g_res.vs_comp_inst)))
+                KH_SAFE_RELEASE(g_res.vs_comp_inst);
+            khin_b->Release();
+            khin_b = nullptr;
+        } else if (!khin_err.empty()) {
+            report_error_once_safe("KH instanced composite: " + khin_err);
+        }
+
+        khin_err = compile_shader(comp_src.c_str(), "VSCompositeInst", "vs_5_0", khtx_defines, &khin_b);
+        if (khin_err.empty() && khin_b) {
+            if (FAILED(dev->CreateVertexShader(khin_b->GetBufferPointer(), khin_b->GetBufferSize(), nullptr, &g_res.vs_comp_inst_tex)))
+                KH_SAFE_RELEASE(g_res.vs_comp_inst_tex);
+            khin_b->Release();
+        } else if (!khin_err.empty()) {
+            report_error_once_safe("KH instanced composite (textured): " + khin_err);
+        }
     }
 
     g_res.ps_composite_samples = g_res.comp_depth_samples;
@@ -8134,8 +8701,12 @@ static uint32_t g_sb_cb_off_max = 0;   // largest firstConstant seen at a captur
 struct StateBackup {
     ID3D11InputLayout*       input_layout = nullptr;
     D3D11_PRIMITIVE_TOPOLOGY topology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
-    ID3D11Buffer*            vb = nullptr;
-    UINT                     vb_stride = 0, vb_offset = 0;
+    // KH_INSTANCING (26762): TWO IA vertex slots. The instance stream binds
+    // slot 1, and the sun-depth pass has bound its own slot-1 stream under
+    // this backup since it went instanced - a slot we touch is a slot we
+    // save. Widen in the same edit that binds a third.
+    ID3D11Buffer*            vb[2] = { nullptr, nullptr };
+    UINT                     vb_stride[2] = { 0, 0 }, vb_offset[2] = { 0, 0 };
     ID3D11VertexShader*      vs = nullptr;
     ID3D11ClassInstance*     vs_insts[8] = {};
     UINT                     vs_inst_count = 8;
@@ -8172,7 +8743,7 @@ struct StateBackup {
     void capture(ID3D11DeviceContext* ctx) {
         ctx->IAGetInputLayout(&input_layout);
         ctx->IAGetPrimitiveTopology(&topology);
-        ctx->IAGetVertexBuffers(0, 1, &vb, &vb_stride, &vb_offset);
+        ctx->IAGetVertexBuffers(0, 2, vb, vb_stride, vb_offset);
         ctx->VSGetShader(&vs, vs_insts, &vs_inst_count);
         ctx->PSGetShader(&ps, ps_insts, &ps_inst_count);
         ctx->GSGetShader(&gs, nullptr, nullptr);
@@ -8208,7 +8779,7 @@ struct StateBackup {
     void restore(ID3D11DeviceContext* ctx) {
         ctx->IASetInputLayout(input_layout);
         ctx->IASetPrimitiveTopology(topology);
-        ctx->IASetVertexBuffers(0, 1, &vb, &vb_stride, &vb_offset);
+        ctx->IASetVertexBuffers(0, 2, vb, vb_stride, vb_offset);
         ctx->VSSetShader(vs, vs_inst_count ? vs_insts : nullptr, vs_inst_count);
         ctx->PSSetShader(ps, ps_inst_count ? ps_insts : nullptr, ps_inst_count);
         ctx->GSSetShader(gs, nullptr, 0);
@@ -8250,7 +8821,8 @@ struct StateBackup {
         ctx->OMSetBlendState(blend, blend_factor, sample_mask);
         ctx->RSSetState(rasterizer);
         KH_SAFE_RELEASE(input_layout);
-        KH_SAFE_RELEASE(vb);
+        KH_SAFE_RELEASE(vb[0]);
+        KH_SAFE_RELEASE(vb[1]);
         KH_SAFE_RELEASE(vs);
         for (UINT i = 0; i < vs_inst_count; ++i) KH_SAFE_RELEASE(vs_insts[i]);
         KH_SAFE_RELEASE(ps);
@@ -9681,7 +10253,7 @@ static uint32_t g_fk_veto_cand_n = 0;   // candidates staged at the last pass BE
                                             // campaign-43 handoff.
 // Build tag: monotonic, never reused, bumped once per shipped build (including
 // pure reverts). Keep it a constexpr int, not a #define.
-static constexpr int KH_BUILD_TAG = 26761;
+static constexpr int KH_BUILD_TAG = 26762;
 // Continuous at the near plane, so routing on/off never pops a fragment.
 static constexpr float KH_NEARZ_GAP_FRAC = 0.92f;
 // 3 = mode 203 - passthrough + absolute form.
@@ -30804,6 +31376,41 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     KhCullSet khr_cull;
     kh_cull_build(khr_cbf.view_proj, cam, khr_cull);
     khr_cull.back_on = true;   // KH_CULL_BACK: the colour pass never draws what is behind the camera
+    // PER-MESH ROUTE verdicts (far-keep, near-z gap), factored out of the
+    // loop so the instanced batch draw asks them of every member through the
+    // same code the representative was judged by (KH_INSTANCING, 26762).
+    // The loop's census lines stay where they were.
+    struct KhInjRoute { bool farkeep; bool nearz; float fk_edge; };
+    auto khr_route_of = [&](const RenderObject& khrv_o) -> KhInjRoute {
+        KhInjRoute khrv_r;
+        const float khr_mesh_r = 0.5f * sqrtf(khrv_o.size[0] * khrv_o.size[0] +
+                                              khrv_o.size[1] * khrv_o.size[1] +
+                                              khrv_o.size[2] * khrv_o.size[2]);
+        khrv_r.fk_edge = fmaxf(khr_acc_far - khr_mesh_r, 0.0f);
+        // KH_FAR_KEEP_INSIDE - (catalog ledger; mode 304 reverts to the
+        // far_vis-only condition).
+        const float khr_fk_reach = sqrtf(kh_mesh_dist_sq(khrv_o, cam)) + khr_mesh_r;
+        const bool khr_fk_inside =
+            g_far_keep_far > 0.0f && khr_fk_reach < g_far_keep_far &&
+            g_dbg_mode.load(std::memory_order_relaxed) != 304;
+        khrv_r.farkeep = khr_fk_fresh && (khrv_o.far_vis || khr_fk_inside) &&
+            kh_mesh_dist_sq(khrv_o, cam) > khrv_r.fk_edge * khrv_r.fk_edge;
+        // For z >= near the encode equals the world mapping, so routing
+        // on/off never pops. Farkeep excluded: disjoint by construction
+        // (beyond-far vs inside-near), and precedence keeps depthParams
+        // coherent.
+        khrv_r.nearz = khr_nz_on && !khrv_r.farkeep &&
+            kh_mesh_dist_sq(khrv_o, cam) <
+                (khr_nz_near + 2.0f) * (khr_nz_near + 2.0f);
+        return khrv_r;
+    };
+    // KH_INSTANCING (26762), injection edition: the pass verdict, the plan
+    // (natural order - this loop has no sort) and the slot-1 bind latch.
+    // TWIN at the flush.
+    const bool khr_inst_on = kh_inst_twins_on();
+    static KhInstPlan khr_inst_plan;   // render-thread scratch
+    bool khr_inst_vb_bound = false;
+    if (khr_inst_on) kh_inst_plan_build(khr_inst_plan, meshes, nullptr, meshes.size());
     // KH_MESH_TIMER, injection edition. Harvest FIRST - a slot armed by an
     // earlier injection is read before this one arms another - then bracket
     // the draw loop. RENDER-THREAD RING, touched nowhere else; the flush's
@@ -30814,7 +31421,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     const int khr_ts = kh_gpu_begin(ctx, g_res.ts_inj_disjoint, g_res.ts_inj_stamp,
                                     g_res.ts_inj_cursor, g_res.ts_inj_inflight);
 
-    for (const auto& o : meshes) {
+    for (size_t khr_oi = 0; khr_oi < meshes.size(); ++khr_oi) {
+        const RenderObject& o = meshes[khr_oi];
+        // KH_INSTANCING: carried by an earlier batch draw.
+        if (khr_inst_on && khr_inst_plan.done[khr_oi]) continue;
         ConstantData cbd = khr_cbf;
         cbd.fx_meta[2] = static_cast<float>(g_main_depth_w);
         cbd.fx_meta[3] = static_cast<float>(g_main_depth_h);
@@ -30914,18 +31524,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         cbd.fx0[0] = cam[0];
         cbd.fx0[1] = cam[1];
         cbd.fx0[2] = cam[2];
-        const float khr_mesh_r = 0.5f * sqrtf(o.size[0] * o.size[0] +
-                                              o.size[1] * o.size[1] +
-                                              o.size[2] * o.size[2]);
-        const float khr_fk_edge = fmaxf(khr_acc_far - khr_mesh_r, 0.0f);
-        // KH_FAR_KEEP_INSIDE - (catalog ledger; mode 304 reverts to the
-        // far_vis-only condition).
-        const float khr_fk_reach = sqrtf(kh_mesh_dist_sq(o, cam)) + khr_mesh_r;
-        const bool khr_fk_inside =
-            g_far_keep_far > 0.0f && khr_fk_reach < g_far_keep_far &&
-            g_dbg_mode.load(std::memory_order_relaxed) != 304;
-        const bool khr_mesh_farkeep = khr_fk_fresh && (o.far_vis || khr_fk_inside) &&
-            kh_mesh_dist_sq(o, cam) > khr_fk_edge * khr_fk_edge;
+        // PER-MESH ROUTE verdicts (khr_route_of, above the loop).
+        const KhInjRoute khr_rt = khr_route_of(o);
+        const float khr_fk_edge = khr_rt.fk_edge;
+        const bool khr_mesh_farkeep = khr_rt.farkeep;
         if (khr_mesh_farkeep && !o.far_vis) g_far_keep_inside_routes++;   // census
         if (!khr_mesh_farkeep &&
             kh_mesh_dist_sq(o, cam) > khr_fk_edge * khr_fk_edge) {
@@ -30933,13 +31535,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             else            g_far_clip_stale++;
             g_far_clip_acc_far = khr_acc_far;
         }
-        // For z >= near the encode equals the world mapping, so routing
-        // on/off never pops. Farkeep excluded: disjoint by construction
-        // (beyond-far vs inside-near), and precedence keeps depthParams
-        // coherent.
-        const bool khr_mesh_nearz = khr_nz_on && !khr_mesh_farkeep &&
-            kh_mesh_dist_sq(o, cam) <
-                (khr_nz_near + 2.0f) * (khr_nz_near + 2.0f);
+        const bool khr_mesh_nearz = khr_rt.nearz;   // (khr_route_of)
         // KH_TEXTURED routing: a material-carrying solid takes the textured
         // twin of EXACTLY the variant this draw would have used (plain /
         // guard / arb+farkeep) - the guard, FAR CONTRACT and SV_Depth
@@ -31296,7 +31892,56 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         // THE NO-LADDER BASELINE, ONCE PER OBJECT. Twin at the flush.
         g_mesh_tris_l0 += (mesh_base_vcount(khr_md) / 3u) * (khr_ts_ordered ? 2u : 1u);
 
-        for (int khr_li = 0; khr_li < (khr_lodx ? 2 : 1); ++khr_li) {
+        // KH_INSTANCING, injection edition: this object is its batch's
+        // representative - see the flush twin. The VS is the composite
+        // instanced pair when this draw took the composite VS, the static
+        // pair otherwise (the same routing as khr_want_vs). No owner prepass
+        // for a batch: it owns no sample and tests only (the LOD walk below
+        // runs zero iterations, which is where the prepass lives). Members
+        // must share BOTH route verdicts. TWIN at the flush.
+        int khr_lod_iters = khr_lodx ? 2 : 1;
+
+        if (khr_inst_on && khr_inst_plan.batch_of[khr_oi] >= 0) {
+            ID3D11VertexShader* khr_ivs =
+                khr_tx_on ? (khr_comp_vs ? g_res.vs_comp_inst_tex : g_res.vs_inst_tex)
+                          : (khr_comp_vs ? g_res.vs_comp_inst     : g_res.vs_inst);
+            ID3D11InputLayout*  khr_iil = khr_tx_on ? g_res.layout_inst_tex : g_res.layout_inst;
+
+            if (khr_ivs && khr_iil) {
+                if (khr_ivs != khr_bound_vs) { ctx->VSSetShader(khr_ivs, nullptr, 0); khr_bound_vs = khr_ivs; }
+                if (khr_iil != khr_bound_il) { ctx->IASetInputLayout(khr_iil); khr_bound_il = khr_iil; }
+
+                if (!khr_inst_vb_bound) {
+                    const UINT khr_is = KH_INST_STRIDE, khr_io = 0;
+                    ctx->IASetVertexBuffers(1, 1, &g_res.inst_vb[1], &khr_is, &khr_io);
+                    khr_inst_vb_bound = true;
+                }
+
+                if (o.two_sided && !khr_ts_ordered && khr_bound_rs != g_res.rasterizer) {
+                    ctx->RSSetState(kh_rs_pick(g_res.rasterizer));
+                    khr_bound_rs = g_res.rasterizer;
+                }
+
+                uint32_t khr_in = 0;
+                const uint32_t khr_id = kh_inst_issue(ctx, dev, khr_inst_plan, meshes, static_cast<uint32_t>(khr_oi),
+                    cam, khr_rebase_on, 1, cbd, g_res.composite_cb, khr_tx_on ? khr_txm : nullptr, khr_ts_ordered,
+                    khr_bound_rs, khr_tx_arb ? 2 : (guard ? 1 : 0), khr_bound_ps, 1,
+                    [&](const RenderObject& khrm_o) -> bool {
+                        float khrm_cc[3];
+                        kh_obj_center_engine(khrm_o, khrm_cc);
+                        if (!kh_mesh_visible(khr_cull, khrm_cc, kh_lod_radius(khrm_o))) return false;
+                        const KhInjRoute khrm_r = khr_route_of(khrm_o);
+                        return khrm_r.farkeep == khr_mesh_farkeep && khrm_r.nearz == khr_mesh_nearz;
+                    }, khr_in);
+                g_stats.composite_meshes += khr_id;
+                if (khr_tx_on) g_stats.textured_draws += khr_id;
+                khr_lod_iters = 0;   // the batch drew; no per-object level walk (and no owner prepass)
+            } else {
+                g_inst_fallbacks++;
+            }
+        }
+
+        for (int khr_li = 0; khr_li < khr_lod_iters; ++khr_li) {
             const int khr_lvl = khr_lod + khr_li;
 
             if (khr_lodx) {
@@ -35150,6 +35795,31 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     }
     const bool khf_frame_ok = kh_upload_frame_cb(ctx, g_res.frame_cb, khf_cbf);
 
+    // PER-MESH FAR-KEEP verdict (pass constants above), factored out of
+    // upload_cb so the instanced batch draw asks it of every member through
+    // the same code the representative was judged by (KH_INSTANCING, 26762).
+    // upload_cb still owns the census and the chain-pass exclusion.
+    auto khf_fk_verdict = [&](const RenderObject& khfv_o) -> bool {
+        const float khf_mesh_r = 0.5f * sqrtf(khfv_o.size[0] * khfv_o.size[0] +
+                                              khfv_o.size[1] * khfv_o.size[1] +
+                                              khfv_o.size[2] * khfv_o.size[2]);
+        const float khf_fk_edge = fmaxf(khf_acc_far - khf_mesh_r, 0.0f);
+        // KH_FAR_KEEP_INSIDE - (catalog ledger; mode 304 reverts to the
+        // far_vis-only condition).
+        const float khf_fk_reach = sqrtf(kh_mesh_dist_sq(khfv_o, cam)) + khf_mesh_r;
+        const bool khf_fk_inside =
+            g_far_keep_far > 0.0f && khf_fk_reach < g_far_keep_far &&
+            g_dbg_mode.load(std::memory_order_relaxed) != 304;
+        return khf_fk_fresh && (khfv_o.far_vis || khf_fk_inside) &&
+               kh_mesh_dist_sq(khfv_o, cam) > khf_fk_edge * khf_fk_edge;
+    };
+    // KH_INSTANCING (26762), flush edition. The plan is built after the
+    // draw order below; this is the pass verdict (twins present, 482 off)
+    // that every instancing decision on this pass reads, and the slot-1
+    // bind latch. TWIN at the injection.
+    const bool khf_inst_on = kh_inst_twins_on();
+    static KhInstPlan khf_inst_plan;   // game-thread scratch
+    bool khf_inst_vb_bound = false;
     // Hoisted per-object CB: the textured per-submesh path refills the
     // matParams lanes and re-uploads AFTER upload_cb returns, so the object
     // slice must outlive the lambda.
@@ -35238,7 +35908,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                            : (khdc_m == 364) ? 12.0f
                            : (khdc_m == 434) ? 0.0f : 9.0f;   // ...68/77/78
         }
+        // KH_INSTANCING: a batch draw hardware-blends (rule 1.45), so an
+        // instanced translucent never arms the perceptual composite.
         cbd.blend_ctl[0] = (khf_perceptual && !o.fullscreen && o.draw_part != 1 &&
+                            !(khf_inst_on && kh_inst_eligible(o)) &&
                             o.blend_mode == 0 && o.color[3] < 0.999f) ? 1.0f : 0.0f;   // KH_MAT_BLEND parts: never perceptual
         if (cbd.blend_ctl[0] >= 0.5f) g_pack_on_last = 1;   // film strip
         cbd.blend_ctl[1] = 150.0f;   // background-trust range (m); see the shader note
@@ -35295,20 +35968,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         // Unoccluded, never invisible. Without a fresh snapshot: guard stands
         // down.
         if (o.effect == 0) {
-            // PER-MESH FAR-KEEP verdict (pass constants above the lambda).
-            const float khf_mesh_r = 0.5f * sqrtf(o.size[0] * o.size[0] +
-                                                  o.size[1] * o.size[1] +
-                                                  o.size[2] * o.size[2]);
-            const float khf_fk_edge = fmaxf(khf_acc_far - khf_mesh_r, 0.0f);
-            // KH_FAR_KEEP_INSIDE - (catalog ledger; mode 304 reverts to the
-            // far_vis-only condition).
-            const float khf_fk_reach = sqrtf(kh_mesh_dist_sq(o, cam)) + khf_mesh_r;
-            const bool khf_fk_inside =
-                g_far_keep_far > 0.0f && khf_fk_reach < g_far_keep_far &&
-                g_dbg_mode.load(std::memory_order_relaxed) != 304;
-            khf_farkeep_draw = !chain_pass && khf_fk_fresh &&
-                (o.far_vis || khf_fk_inside) &&
-                kh_mesh_dist_sq(o, cam) > khf_fk_edge * khf_fk_edge;
+            // PER-MESH FAR-KEEP verdict (khf_fk_verdict, above the lambda).
+            khf_farkeep_draw = !chain_pass && khf_fk_verdict(o);
             if (khf_farkeep_draw && !o.far_vis) g_far_keep_inside_routes++;   // census
             const bool snap_fresh = (o.mode == DepthMode::Off) &&
                                     g_res.comp_depth_srv &&
@@ -35534,7 +36195,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // decide the order the layers land in. So a blend part neither arms
     // blendCtl.x nor demands the pre-mesh capture.
     for (const auto& o : meshes) {
-        if (!o.fullscreen && o.draw_part != 1 && o.blend_mode == 0 && o.color[3] < 0.999f) khf_perc_count++;
+        if (!o.fullscreen && o.draw_part != 1 && o.blend_mode == 0 && o.color[3] < 0.999f &&
+            !(khf_inst_on && kh_inst_eligible(o))) khf_perc_count++;   // KH_INSTANCING: batches never demand the capture
     }
 
     // DRAW ORDER (26760): the list order used to be the draw order, so two
@@ -35560,6 +36222,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                          });
         for (const auto& khf_t : khf_tail) khf_order.push_back(khf_t.second);
     }
+
+    // KH_INSTANCING: group this pass's instanced objects in the order the
+    // loop will visit them (the sorted tail included).
+    if (khf_inst_on) kh_inst_plan_build(khf_inst_plan, meshes, khf_order.data(), khf_order.size());
 
     khf_perceptual = khf_perc_count > 0;
     // Per-draw re-capture arms only with an overlap-capable set (2+); a lone
@@ -35622,6 +36288,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     for (const uint32_t khf_oi : khf_order) {
         const RenderObject& o = meshes[khf_oi];
+        // KH_INSTANCING: carried by an earlier batch draw (never an overlay:
+        // mode Off is not eligible, so the ov census identity holds).
+        if (khf_inst_on && khf_inst_plan.done[khf_oi]) continue;
         const bool ov = (o.effect == 0 && o.mode == DepthMode::Off);
         if (ov) g_mask.ov_listed++;   // reached the draw loop
         // Fullscreen passes have no world extent and are never culled.
@@ -35645,7 +36314,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         // no refresh is owed. The RTV is the live scene target (the same
         // source the pre-mesh capture used), now carrying every mesh drawn so
         // far this pass.
-        const bool khf_o_perc = khf_transl(o) && o.draw_part != 1;   // blend parts: hardware blend, no recapture
+        const bool khf_o_perc = khf_transl(o) && o.draw_part != 1 &&   // blend parts: hardware blend, no recapture
+                                !(khf_inst_on && kh_inst_eligible(o));   // KH_INSTANCING: batches too
 
         if (khf_perc_recapture && khf_o_perc && khf_perc_seen) {
             if (kh_scene_capture_timed(dev, ctx).empty()) {   // timed
@@ -35825,7 +36495,54 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         // see that block for the reasoning.
         g_mesh_tris_l0 += (mesh_base_vcount(khf_md) / 3u) * (khf_ts_ordered ? 2u : 1u);
 
-        for (int khf_li = 0; khf_li < (khf_lodx ? 2 : 1); ++khf_li) {
+        // KH_INSTANCING, flush edition: this object is its batch's
+        // representative. Its CB is up, its PS/DSS/blend are bound; swap in
+        // the instanced VS + layout, bind the stream once per pass, and draw
+        // the batch - every member that is visible and shares its far-keep
+        // verdict, at each member's own LOD level. A two-sided batch draws
+        // CullNone (the camera-inside shortcut is per object). Twins absent
+        // for this variant: the object draws per object and members follow
+        // when their turn comes (instFallbacks). TWIN at the injection.
+        int khf_lod_iters = khf_lodx ? 2 : 1;
+
+        if (khf_inst_on && khf_inst_plan.batch_of[khf_oi] >= 0) {
+            ID3D11VertexShader* khf_ivs = khf_tx_on ? g_res.vs_inst_tex : g_res.vs_inst;
+            ID3D11InputLayout*  khf_iil = khf_tx_on ? g_res.layout_inst_tex : g_res.layout_inst;
+
+            if (khf_ivs && khf_iil) {
+                if (khf_ivs != khf_bound_vs) { ctx->VSSetShader(khf_ivs, nullptr, 0); khf_bound_vs = khf_ivs; }
+                if (khf_iil != khf_bound_il) { ctx->IASetInputLayout(khf_iil); khf_bound_il = khf_iil; }
+
+                if (!khf_inst_vb_bound) {
+                    const UINT khf_is = KH_INST_STRIDE, khf_io = 0;
+                    ctx->IASetVertexBuffers(1, 1, &g_res.inst_vb[0], &khf_is, &khf_io);
+                    khf_inst_vb_bound = true;
+                }
+
+                if (o.two_sided && !khf_ts_ordered && khr_bound_rs != g_res.rasterizer) {
+                    ctx->RSSetState(kh_rs_pick(g_res.rasterizer));
+                    khr_bound_rs = g_res.rasterizer;
+                }
+
+                uint32_t khf_in = 0;
+                const uint32_t khf_id = kh_inst_issue(ctx, dev, khf_inst_plan, meshes, khf_oi, cam, khf_rebase_on, 0,
+                    khf_obj_cbd, g_res.constant_buffer, khf_tx_on ? khf_txm : nullptr, khf_ts_ordered, khr_bound_rs,
+                    0, g_res.ps_tex, o.draw_part == 1 ? 2 : 1,
+                    [&](const RenderObject& khfm_o) -> bool {
+                        float khfm_cc[3];
+                        kh_obj_center_engine(khfm_o, khfm_cc);
+                        if (!kh_mesh_visible(khf_cull, khfm_cc, kh_lod_radius(khfm_o))) return false;
+                        return khf_fk_verdict(khfm_o) == khf_farkeep_draw;
+                    }, khf_in);
+                if (khf_tx_on) g_stats.textured_draws += khf_id;
+                if (o.draw_part == 1) g_blend_part_draws += khf_id;
+                khf_lod_iters = 0;   // the batch drew; no per-object level walk
+            } else {
+                g_inst_fallbacks++;
+            }
+        }
+
+        for (int khf_li = 0; khf_li < khf_lod_iters; ++khf_li) {
             const int khf_lvl = khf_lod + khf_li;
 
             if (khf_lodx) {
@@ -37351,6 +38068,7 @@ inline void reset_stat_counters() {
     g_cbr_writes = 0; g_cbr_discards = 0; g_cbr_legacy = 0;   // KH_CB_RING (cursor/fresh are state)
     g_cbr_null_binds = 0;   // KH_CB_RING_NULLFIRST (the latch is state, not a counter)
     g_blend_part_draws = 0; g_blend_part_skips = 0;   // KH_MAT_BLEND
+    g_inst_batches = 0; g_inst_draws = 0; g_inst_instances = 0; g_inst_discards = 0; g_inst_fallbacks = 0;   // KH_INSTANCING (ring cursor/fresh are state)
     g_svs_skips_redundant = 0; g_svs_skip_misses = 0;   // KH_SVS_SKIP
     g_cull_back_rejects = 0;   // KH_CULL_BACK
     // the geometry census is per SESSION - a cumulative triangle count across

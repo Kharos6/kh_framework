@@ -140,6 +140,92 @@ float4 VSSunDepth(VSInSun i) : SV_Position
     return mul(float4(wp - sunOrigin.xyz, 1.0f), viewProj);
 }
 
+#if KH_TEXTURED
+// KH_CAST_ALPHA (26764) - ALPHA-AWARE CASTING, IN THE MAP. Both consumers of
+// the private sun-depth maps (the self kernels and the world cast through
+// PSMaskCast's SunShadowOcclusion) read the same texels, so alpha enters
+// once, here, and both agree by construction. A depth map holds no
+// intensity, so intensity is COVERAGE: a caster of alpha a writes depth into
+// a fraction a of the map's texels through a 4x4 ordered dither (hashed /
+// stippled shadows - the technique masked and translucent casters take in
+// shipping engines), and the receive kernels this renderer already runs
+// (the 3x3 receiver-plane taps, the soft compare, the moment pyramids)
+// average that coverage into a partial shadow of intensity ~ a. Cutout
+// clips at the material's cutoff and casts full; blend scales by the
+// texel's alpha; the object's colour alpha scales the whole caster (the
+// instance stream's isize.w). Texels at or above 0.996 cast solid (the
+// blend split's own threshold), below 0.004 cast nothing. The transform is
+// VSSunDepth's line for line; the uv rides along. No colour target: the
+// pass binds a DSV alone and this PS only clips.
+struct VSInSunA {
+    float3 pos : POSITION;
+    float3 nrm : NORMAL;
+    float2 uv : TEXCOORD0;
+    float4 ipos : TEXCOORD4;
+    float4 isize : TEXCOORD5;   // w = the caster's colour alpha (envelope applied)
+    float4 irot0 : TEXCOORD6;
+    float4 irot1 : TEXCOORD7;
+    float4 irot2 : TEXCOORD8;
+};
+struct VSOutSunA { float4 pos : SV_Position; float2 uv : TEXCOORD0; float alpha : TEXCOORD1; };
+
+VSOutSunA VSSunDepthA(VSInSunA i)
+{
+    VSOutSunA o;
+    float3 lp = i.pos * i.isize.xyz;
+    float3 wp = i.ipos.xyz + lp.x * i.irot0.xyz + lp.y * i.irot1.xyz + lp.z * i.irot2.xyz;
+    o.pos = mul(float4(wp - sunOrigin.xyz, 1.0f), viewProj);
+    o.uv = i.uv;
+    o.alpha = i.isize.w;
+    return o;
+}
+
+// 4x4 Bayer thresholds, (index + 0.5) / 16: every 4x4 window of map texels
+// covers exactly the requested fraction to a sixteenth, and a 3x3 kernel
+// reads it to within a ninth. Anchored to the map's texel grid.
+float KhSunDither(float2 khsd_px)
+{
+    static const float khsd_b[16] = { 0.0f, 8.0f, 2.0f, 10.0f, 12.0f, 4.0f, 14.0f, 6.0f,
+                                      3.0f, 11.0f, 1.0f, 9.0f, 15.0f, 7.0f, 13.0f, 5.0f };
+    int2 khsd_p = int2(khsd_px) & 3;
+    return (khsd_b[khsd_p.y * 4 + khsd_p.x] + 0.5f) / 16.0f;
+}
+
+void PSSunDepthA(VSOutSunA i)
+{
+    float khsa_a = i.alpha;
+    int khsa_mode = (int)matParams0.y;   // 0 opaque, 1 cutout, 2 blend (kh_bind_material)
+    // The material's alpha by its own route (diffuse.a by default; 1 when no
+    // map is bound), exactly the colour pass's sampling.
+    float khsa_t = KhMatRoute(matParams3.y, 1.0f, i.uv);
+    if (khsa_mode == 1) clip(khsa_t - matParams0.z);   // cutout: the cutoff kills, survivors cast full
+    else if (khsa_mode == 2) khsa_a *= khsa_t;          // blend: the texel's alpha scales the coverage
+    if (khsa_a >= 0.996f) return;                       // solid
+    clip(khsa_a - 0.004f);                              // transparent: casts nothing
+    clip(khsa_a - KhSunDither(i.pos.xy));               // partial: dithered coverage
+}
+
+// KH_FOOTPRINT_ALPHA (26766) - THE SEAM FOOTPRINT CARRIES DEPTH-WRITING
+// TEXELS ONLY. The footprint puts our meshes into the engine's shadow-volume
+// depth so its stencil count is measured at our surfaces. A translucent
+// texel writes no depth in the colour pass, so the engine's count at its
+// pixel must be measured at what is BEHIND it (the ground the player sees
+// through the glass) - a whole footprint made the engine count at the glass
+// and the ground behind inherited the glass's shadow (the shadow that
+// 'followed the surface'). This PS only clips: a cutout texel at its cutoff,
+// a blend texel below the colour draw's own 0.996 solid threshold; the depth
+// stays the raster's, exactly the null-PS footprint's. Whole translucent
+// objects never reach it (skipped at the list). The mirror prepass keeps
+// every mesh whole: that count is the glass's OWN verdict (rule 1.58).
+void PSInjDepthA(VSOut i)
+{
+    int khfa_mode = (int)matParams0.y;
+    float khfa_t = KhMatRoute(matParams3.y, 1.0f, i.uv);
+    if (khfa_mode == 1) clip(khfa_t - matParams0.z);
+    else if (khfa_mode == 2) clip(khfa_t - 0.996f);
+}
+#endif
+
 // Analytic mask cast: per-pixel ray-vs-AABB toward the sun, drawn into the
 // engine's screen-space shadow mask with multiply blending. castMat[0..2] =
 // view rows 0..2; castView[0] = view row 3 (translation); castView[1] =
@@ -606,6 +692,30 @@ float4 PSMain(VSOut i) : SV_Target
             float khStenU = (stenVol2.x >= 0.5f && KhVolMode() == 6)
                           ? KhVolSoftScene(khStenR, khStenP, KH_STEN_TOL_W(i.pos.w), 6)
                           : KhStenUnit(i.wpos, i.pos.xy, khStenG);
+            // KH_TRANSL_STEN_MIRROR (26765): A TRANSLUCENT TEXEL TAKES THE
+            // MIRROR VERDICT AT EVERY DISTANCE. The volume term above starts
+            // from a witness compare - the engine depth at this pixel must be
+            // this fragment's - and a translucent texel wrote no depth: the
+            // pixel holds whatever is BEHIND the glass, the witness fails,
+            // the 7x7 search finds no matching plane and the fallback answers
+            // with the background's stencil, which changes with the camera
+            // (the oscillation; a nearby engine volume pinning the background
+            // is why a shot 'fixed' it). The mirror counts the engine's
+            // volumes against OUR depth, glass included whole by the prepass,
+            // so its count at this pixel is the one measured AT the glass -
+            // the only such count there is. Solid texels keep the engine's
+            // exact count (and the ARB near fade above). A translucent texel
+            // = the blend material's translucent part (matParams0.y 2) or a
+            // whole translucent object on normal blend (the interpolated
+            // colour alpha below 0.999 at blend id 0). mirMeta.x 2 = mode
+            // 485, the A/B (the mirror still valid for the fade above).
+            // TWIN EDIT: PSMain and PSComposite carry the identical block.
+            if (mirMeta.x >= 0.5f && mirMeta.x < 1.5f &&
+                !(lighting0.y >= 23.5f && lighting0.y < 24.5f) &&
+                ((matParams0.y >= 1.5f && matParams0.y < 2.5f) ||
+                 (i.icol.a < 0.999f && bm == 0))) {
+                khStenU = KhMirUnit(i.pos.xy, mirMeta.y, mirMeta.z);
+            }
             float khStRf = (lighting0.y >= 42.5f && lighting0.y < 43.5f)
                          ? 1.0f : KhSunRangeFade(i.wpos);
             smf *= 1.0f - (1.0f - khStenU) * khStRf;

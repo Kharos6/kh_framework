@@ -580,6 +580,30 @@ float4 PSComposite(VSOutC i) : SV_Target
                 khStenU = lerp(khMirF, khStenU, khStenF);
             }
 #endif
+            // KH_TRANSL_STEN_MIRROR (26765): A TRANSLUCENT TEXEL TAKES THE
+            // MIRROR VERDICT AT EVERY DISTANCE. The volume term above starts
+            // from a witness compare - the engine depth at this pixel must be
+            // this fragment's - and a translucent texel wrote no depth: the
+            // pixel holds whatever is BEHIND the glass, the witness fails,
+            // the 7x7 search finds no matching plane and the fallback answers
+            // with the background's stencil, which changes with the camera
+            // (the oscillation; a nearby engine volume pinning the background
+            // is why a shot 'fixed' it). The mirror counts the engine's
+            // volumes against OUR depth, glass included whole by the prepass,
+            // so its count at this pixel is the one measured AT the glass -
+            // the only such count there is. Solid texels keep the engine's
+            // exact count (and the ARB near fade above). A translucent texel
+            // = the blend material's translucent part (matParams0.y 2) or a
+            // whole translucent object on normal blend (the interpolated
+            // colour alpha below 0.999 at blend id 0). mirMeta.x 2 = mode
+            // 485, the A/B (the mirror still valid for the fade above).
+            // TWIN EDIT: PSMain and PSComposite carry the identical block.
+            if (mirMeta.x >= 0.5f && mirMeta.x < 1.5f &&
+                !(lighting0.y >= 23.5f && lighting0.y < 24.5f) &&
+                ((matParams0.y >= 1.5f && matParams0.y < 2.5f) ||
+                 (i.icol.a < 0.999f && bm == 0))) {
+                khStenU = KhMirUnit(i.pos.xy, mirMeta.y, mirMeta.z);
+            }
             // After the near-collapse mirror lerp: the fade thins the final
             // verdict.
             float khStRf = (lighting0.y >= 42.5f && lighting0.y < 43.5f)

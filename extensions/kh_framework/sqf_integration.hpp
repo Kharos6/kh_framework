@@ -7317,6 +7317,15 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                             khd_m == 476 ||   // KH_SVS_SKIP_OFF: every seam pass re-injects
                             khd_m == 478 ||   // KH_CULL_BACK_OFF: disable the back-half cull
                             khd_m == 480 ||   // KH_CB_RING_OFF: per-object DISCARD uploads (the A/B; cbRingLegacy climbs)
+                            khd_m == 486 ||   // KH_FOOTPRINT_ALPHA_OFF: the seam footprint draws every caster whole again
+                                              // (the engine's count stops at the glass; the A/B for 26766)
+                            khd_m == 485 ||   // KH_TRANSL_STEN_MIRROR_OFF: translucent texels take the volume stencil term
+                                              // again (the background's verdict; the A/B for 26765's mirror override)
+                            khd_m == 484 ||   // KH_CAST_ALPHA_OFF: every sun-map caster draws whole (the 26763 casting;
+                                              // the A/B for alpha-aware casting - cutout/blend/colour alpha cast solid)
+                            khd_m == 483 ||   // KH_FLUSH_NEARZ_OFF: the flush's near-gap draws (perceptual translucents,
+                                              // flush-owned solids) go back to PSMain + the viewport clamp (the A/B for
+                                              // 26763's route; mode 185 still switches BOTH editions off)
                             khd_m == 482 ||   // KH_INSTANCING_OFF: every instanced object draws per object (the A/B;
                                               // the picture must not change; instFallbacks climbs, instBatches stays 0)
                             khd_m == 481 ||   // KH_CB_RING_NULLFIRST: force the null-bind between the ring's two Set1
@@ -8397,6 +8406,19 @@ static game_value get_render_stats_sqf() {
         // KH_MAT_BLEND (26760): flush translucent-part submesh draws, and
         // parts skipped for want of the textured twins (health: 0).
         out.push_back(kv("blendPartDraws", RenderIntegration::g_blend_part_draws));
+        // KH_BLEND_PART_INJ (26763): an injected object's translucent part is
+        // drawn by the injection (its tail; a batch in place), never the
+        // flush. Health: injBlendPartDraws ~ injections x blend submeshes
+        // (x2 twoSided, x2 mid-crossfade); blendPartDraws counts the flush's
+        // parts for objects it OWNS only (0 on a healthy composited session).
+        out.push_back(kv("injBlendPartDraws", RenderIntegration::g_inj_blend_part_draws));
+        // KH_FLUSH_NEARZ (26763): the near-gap route on the flush.
+        // flushNearzDraws = flush draws that took the ARB twin + gap viewport
+        // (also folded into nearzGapDraws, which now reads BOTH editions);
+        // flushNearzDenied = routed textured draws with no ps_comp_arb_tex
+        // (drew plain textured; should be 0 once the composite unit is up).
+        out.push_back(kv("flushNearzDraws",  RenderIntegration::g_flush_nearz_draws));
+        out.push_back(kv("flushNearzDenied", RenderIntegration::g_flush_nearz_denied));
         // KH_INSTANCING (26762): instOn 1 = the twins and both stream rings
         // exist and 482 is off. Health: instBatches = batch draws issued
         // (one per representative), instDraws = DrawInstanced calls (one per
@@ -8439,6 +8461,14 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("compositeAnomalySkips", RenderIntegration::g_stats.composite_anomaly_skips));
         out.push_back(kv("sunDepthPasses", RenderIntegration::g_stats.sun_depth_passes));
         out.push_back(kv("sunDepthCasters", RenderIntegration::g_stats.sun_depth_casters));
+        // KH_CAST_ALPHA (26764): castAlphaOn 1 = the alpha twins exist and 484
+        // is off. sunAlphaCasters = casters drawn by their alpha (per map
+        // render: base + every tier that fit them), sunAlphaDraws = their
+        // submesh draws. 0 / 0 on a scene without cutout, blend or colour
+        // alpha casters; under 484 both stay 0 and every caster casts solid.
+        out.push_back(kv("castAlphaOn",     RenderIntegration::kh_cast_alpha_on() ? 1ull : 0ull));
+        out.push_back(kv("sunAlphaCasters", RenderIntegration::g_sun_alpha_casters));
+        out.push_back(kv("sunAlphaDraws",   RenderIntegration::g_sun_alpha_draws));
         out.push_back(kv("sunJumpFlushes", RenderIntegration::g_stats.sun_jump_flushes));
         out.push_back(kv("castArmsLost", RenderIntegration::g_mask.cast_arms_lost));
 
@@ -8937,6 +8967,14 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("svArmSkips", RenderIntegration::g_svs_arm_skips));
         out.push_back(kv("svInjects", RenderIntegration::g_svs_injects));
         out.push_back(kv("svInjectDraws", RenderIntegration::g_svs_inject_draws));
+        // KH_FOOTPRINT_ALPHA (26766): footprintAlphaOn 1 = the clip-only PS +
+        // textured twins exist and 486 is off. svInjectAlphaSkips = whole
+        // translucent casters left out of the footprint (per seam),
+        // svInjectAlphaDraws = per-submesh alpha footprint draws (cutout /
+        // blend casters). Both 0 on a scene without them.
+        out.push_back(kv("footprintAlphaOn",   RenderIntegration::kh_footprint_alpha_on() ? 1ull : 0ull));
+        out.push_back(kv("svInjectAlphaSkips", RenderIntegration::g_svs_alpha_skips));
+        out.push_back(kv("svInjectAlphaDraws", RenderIntegration::g_svs_alpha_draws));
         out.push_back(kv("svFrameDupes", RenderIntegration::g_svs_frame_dupes));
         out.push_back(kv("svSkipProj", RenderIntegration::g_svs_skip_proj));
         out.push_back(kv("svSkipEmpty", RenderIntegration::g_svs_skip_empty));

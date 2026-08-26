@@ -593,7 +593,12 @@ struct KhMaterial {
     float emissive_intensity = 1.0f;
     float normal_strength = 1.0f;
     float cutoff = 0.5f;   // cutout alpha threshold
-    int alpha_mode = 0;   // 0 = opaque, 1 = cutout (clip in the PS)
+    int alpha_mode = 0;   // 0 = opaque, 1 = cutout (clip in the PS), 2 = blend
+                          // (KH_MAT_BLEND: solid texels draw opaque with
+                          // depth, the rest as the object's post-scene
+                          // translucent part - see kh_draw_textured). NO
+                          // material mode touches casting: an object casts
+                          // as a whole (the untextured proxies, like cutout).
     // User channel routes (slot*4+chan; -1 = slot-convention default):
     int route_occ = -1, route_rough = -1, route_metal = -1;
     int route_alpha = -1, route_gloss = -1;
@@ -711,6 +716,16 @@ struct Resources {
                                                          // dynamic-registration contract)
     ID3D11Buffer*            constant_buffer = nullptr;   // dynamic, per draw (game-thread flush): CBObj b0
     ID3D11Buffer*            composite_cb = nullptr;   // dynamic, per draw (render-thread injection): CBObj b0
+    // KH_CB_RING (26760): the per-object slices of the two buffers above ride
+    // a large dynamic ring each - WRITE_DISCARD once per wrap, WRITE_
+    // NO_OVERWRITE per slice, bound with the D3D11.1 offset setters. The two
+    // small buffers stay created: they are the legacy path (feature absent,
+    // mode 480) and the identity every upload site names. Keyed by the
+    // legacy buffer's address, not by thread: the park serialises every
+    // writer exactly as it serialises the buffers today.
+    ID3D11Buffer*            cb_ring[2] = {};   // [0] = constant_buffer's ring, [1] = composite_cb's
+    uint32_t                 cb_ring_cursor[2] = {};   // next free slice
+    bool                     cb_ring_fresh[2] = { true, true };   // next map must DISCARD
     // CB-split frame twins (b1): one per thread, same separation logic
     ID3D11Buffer*            frame_cb = nullptr;   // game thread (flush + Udriver)
     ID3D11Buffer*            composite_frame_cb = nullptr;   // render thread (injection, sun depth, mask cast)
@@ -1026,6 +1041,11 @@ struct Resources {
         KH_SAFE_RELEASE(castocc_tex);
         KH_SAFE_RELEASE(constant_buffer);
         KH_SAFE_RELEASE(composite_cb);
+        for (int khcr_i = 0; khcr_i < 2; ++khcr_i) {   // KH_CB_RING
+            KH_SAFE_RELEASE(cb_ring[khcr_i]);
+            cb_ring_cursor[khcr_i] = 0;
+            cb_ring_fresh[khcr_i] = true;
+        }
         KH_SAFE_RELEASE(frame_cb);
         KH_SAFE_RELEASE(composite_frame_cb);
         KH_SAFE_RELEASE(dss_test);
@@ -1348,9 +1368,12 @@ struct RenderObject {
     bool  rotated = false;   // false = identity (skip the matrix math)
 
     bool  caster_only = false;
-    bool  two_sided = true;   // true (default) = CullNone: faces visible
-                                // from inside too, winding-agnostic - the
-                                // historical behavior. false = back-face
+    bool  two_sided = true;   // true = CullNone: faces visible from inside
+                                // too, winding-agnostic - the historical
+                                // behavior and this struct's default; NOTE
+                                // addRender3D spawns FALSE (the script-side
+                                // default since the back-face cull landed;
+                                // 'twoSided' opts back in). false = back-face
                                 // culling: interior faces dropped (meshes
                                 // bake outward-front winding for exactly
                                 // this). Draw paths only; the sun-depth and
@@ -1382,6 +1405,12 @@ struct RenderObject {
     float light_diffuse = 0.60f;   // N.L-scaled fraction (ambient + diffuse ~ 1)
     bool  far_vis = false;
     uint64_t seq = 0;   // creation order (fullscreen pass chaining)
+    // KH_MAT_BLEND (26760): TRANSIENT, set only on the flush's staging copies -
+    // never by a script, never stored in g_draw_list. 0 = the whole mesh, 1 =
+    // the object's BLEND submeshes only (its post-scene translucent part), 2 =
+    // its opaque/cutout submeshes only (the flush owns the object this frame
+    // and its translucent part is a separate entry).
+    uint8_t draw_part = 0;
     DepthMode mode = DepthMode::TestOnly;
     bool  visible = true;
     bool  timed = false;
@@ -1691,6 +1720,19 @@ static RenderStats g_stats;
 // pairing, probe hits, streaks) are not touched by the arm; they die only
 // with the mission.
 static std::atomic<bool> g_stats_armed{ false };
+
+// KH_GPU_TIMER_GATE (26760): the five timestamp rings (fx chain, UI, capture,
+// mesh, injection) used to Begin/End on every flush and injection regardless
+// of arming - a handful of queries and their sync traffic per frame, paid by
+// every session forever so the *GpuUs lanes would be warm the instant stats
+// were read. The first getRenderStats call ARMS and returns only a status
+// pair; stats flow from call two - so arming the rings on g_stats_armed
+// loses nothing observable and idles them for the ordinary session. Only the
+// ARM decision is gated; every harvest still runs (they early-out on an idle
+// ring) so a slot armed before a disarm drains instead of leaking.
+inline bool kh_gpu_timers_on() {
+    return g_stats_armed.load(std::memory_order_relaxed);
+}
 
 // 152 = ENCODE THE BOUND-CB CENSUS PAIR (handoff 3.1): a POINTER-KEYED census
 // records every projection-shaped upload per buffer object (identity
@@ -2022,15 +2064,140 @@ inline void kh_fill_obj_rot(ConstantData& cbd, const float* rot_m) {
                                 // when the object is unrotated)
 }
 
+// KH_CB_RING (26760). Every object in every pass did a Map(WRITE_DISCARD) on
+// its 3.7 KB b0 slice - the colour pass, the owner prepass, the seam, the
+// mirror, the LOD crossfade's second upload, one per textured submesh: at
+// 300 objects that is ~1,200 renames a frame, each a fresh allocation in
+// the driver's rename pool. A DISCARD map is the expensive one; a
+// NO_OVERWRITE map into a region the GPU is not reading is a pointer
+// return. So: one 3.75 MB dynamic ring per legacy buffer, DISCARD once per
+// wrap (~1,024 slices - about once a frame at that load), NO_OVERWRITE per
+// slice, and the slice bound through VS/PSSetConstantBuffers1 at a 256-byte
+// aligned offset. The legacy per-object DISCARD path stays as the fallback
+// for a runtime without ConstantBufferOffsetting +
+// MapNoOverwriteOnDynamicConstantBuffer (D3D11.1, Win8+; the engine's own
+// b0 pool windows already depend on the former), for a context without
+// ID3D11DeviceContext1, and for mode 480 (KH_CB_RING_OFF, the A/B).
+//
+// The same-buffer / offset-only bind (the mask cast's restore names it): the
+// 1.1 docs describe the runtime's command-list EMULATION dropping an offset-
+// only SetConstantBuffers1, and the ring is that pattern on every slice. The
+// trigger is a deferred context on a driver without DriverCommandLists; the
+// immediate context is not emulated. KH_CB_RING_NULLFIRST latches the
+// documented null-bind workaround per context anyway (g_kh_ctx1_null_first,
+// mode 481 forces it), so the ring is correct on that runtime rather than
+// merely never meeting it.
+//
+// Why not one map per PASS: that needs the colour loops split into a record
+// phase and a replay phase (every draw's state binds are interleaved with
+// its CB fill, and kh_draw_textured refills matParams per submesh). The
+// rename count is the cost; this takes it from ~1,200 a frame to ~1.
+//
+// Slice = the object block rounded to 256 B (3,760 -> 3,840 = 240
+// constants; numConstants must be a multiple of 16 and the shader's 235
+// declared constants fit). The used-light trim stays: the head plus the
+// dlCtl-counted lights are written, the tail is stale-but-unread exactly as
+// today (the one sanctioned exception to write-what-you-bind).
+static constexpr uint32_t KH_CBR_STRIDE = static_cast<uint32_t>((KH_CBOBJ_BYTES + 255u) & ~static_cast<size_t>(255u));
+static constexpr uint32_t KH_CBR_SLICES = 1024u;
+static constexpr uint32_t KH_CBR_CONSTS = KH_CBR_STRIDE / 16u;   // 240
+static_assert(KH_CBR_STRIDE >= KH_CBOBJ_BYTES && (KH_CBR_CONSTS % 16u) == 0u && KH_CBR_CONSTS <= 4096u,
+              "KH_CB_RING slice must cover the object block, be a 16-constant multiple and fit one bind");
+static bool     g_cbr_supported = false;   // feature pair present on this device (ensure_resources)
+static uint64_t g_cbr_writes = 0;   // slices written through the ring
+static uint64_t g_cbr_discards = 0;   // DISCARD maps (first use + wraps)
+static uint64_t g_cbr_legacy = 0;   // uploads that took the per-object DISCARD path
+inline ID3D11DeviceContext1* kh_ctx1(ID3D11DeviceContext* ctx);   // defined with the dynamic-lights probe
+// KH_CB_RING_NULLFIRST (26761). The ring binds the SAME buffer every slice
+// with only firstConstant moving - exactly the shape the D3D11.1 docs warn
+// about under command-list EMULATION: the emulated SetConstantBuffers1 may
+// not apply an offset-only change, and the prescribed workaround is a plain
+// null bind between two Set1 calls. The documented trigger is a DEFERRED
+// context on a driver without native command lists
+// (D3D11_FEATURE_THREADING::DriverCommandLists FALSE); every ring upload
+// here goes through the engine's immediate context, so the latch reads
+// false in practice and the arm costs nothing. Latched per context at the
+// kh_ctx1 QI (the one place a context is first seen); mode 481 forces it on
+// any context (the A/B: the ring must survive the dance unchanged). Lane
+// cbRingNullBinds counts the extra binds; cbRingNullFirst publishes the latch.
+static bool     g_kh_ctx1_null_first = false;
+static uint64_t g_cbr_null_binds = 0;
+// ConstantBufferOffsetting ALONE (the ring needs the map bit too; a restore
+// does not). The 1.1 docs: the runtime DROPS a SetConstantBuffers1 call on a
+// driver without offsetting - so StateBackup's offset-aware restore must not
+// be attempted there, or the restore itself vanishes and our buffer stays
+// bound. On such a driver the engine cannot be binding windows either, so
+// the plain pair is exact. False until ensure_resources reads the caps
+// (the safe default: the pre-26761 plain pair).
+static bool     g_cb_offsetting = false;
+
 inline bool kh_upload_obj_cb(ID3D11DeviceContext* ctx, ID3D11Buffer* buf, const ConstantData& cbd) {
-    D3D11_MAPPED_SUBRESOURCE mapped = {};
-    if (FAILED(ctx->Map(buf, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
     const int khu_cap = static_cast<int>(sizeof(cbd.dl_lights) / (6 * 16));
     int khu_n = static_cast<int>(cbd.dl_ctl[1] + cbd.dl_ctl[2] + 0.5f);
     if (khu_n < 0) khu_n = 0;
     if (khu_n > khu_cap) khu_n = khu_cap;
-    memcpy(mapped.pData, &cbd, KH_CBOBJ_HEAD_BYTES + static_cast<size_t>(khu_n) * 6u * 16u);
+    const size_t khu_bytes = KH_CBOBJ_HEAD_BYTES + static_cast<size_t>(khu_n) * 6u * 16u;
+
+    // Ring route: the two per-object buffers only (the white placeholder
+    // keeps its own, by its no-borrowing contract).
+    const int khu_ri = (buf == g_res.constant_buffer) ? 0 : (buf == g_res.composite_cb) ? 1 : -1;
+    ID3D11DeviceContext1* khu_c1 = nullptr;
+    const int khu_dbg = g_dbg_mode.load(std::memory_order_relaxed);
+
+    if (khu_ri >= 0 && g_cbr_supported && g_res.cb_ring[khu_ri] &&
+        khu_dbg != 480 &&
+        (khu_c1 = kh_ctx1(ctx)) != nullptr) {
+        ID3D11Buffer* khu_ring = g_res.cb_ring[khu_ri];
+        uint32_t& khu_cur = g_res.cb_ring_cursor[khu_ri];
+        bool& khu_fresh = g_res.cb_ring_fresh[khu_ri];
+
+        if (khu_cur >= KH_CBR_SLICES) { khu_cur = 0; khu_fresh = true; }   // wrap: rename, never stall
+        D3D11_MAPPED_SUBRESOURCE khu_m = {};
+        const D3D11_MAP khu_mode = khu_fresh ? D3D11_MAP_WRITE_DISCARD : D3D11_MAP_WRITE_NO_OVERWRITE;
+
+        if (SUCCEEDED(ctx->Map(khu_ring, 0, khu_mode, 0, &khu_m))) {
+            if (khu_fresh) g_cbr_discards++;
+            khu_fresh = false;
+            memcpy(static_cast<uint8_t*>(khu_m.pData) + static_cast<size_t>(khu_cur) * KH_CBR_STRIDE,
+                   &cbd, khu_bytes);
+            ctx->Unmap(khu_ring, 0);
+            const UINT khu_first = khu_cur * KH_CBR_CONSTS;
+            const UINT khu_num = KH_CBR_CONSTS;
+            khu_c1->VSSetConstantBuffers1(0, 1, &khu_ring, &khu_first, &khu_num);
+            khu_c1->PSSetConstantBuffers1(0, 1, &khu_ring, &khu_first, &khu_num);
+            // KH_CB_RING_NULLFIRST: the documented emulation workaround - a
+            // plain null bind between two Set1 calls, both stages. Latched
+            // per context (kh_ctx1); mode 481 forces it. Set1 / null / Set1
+            // is the docs' exact sequence, kept verbatim.
+            if (g_kh_ctx1_null_first || khu_dbg == 481) {
+                ID3D11Buffer* khu_null = nullptr;
+                ctx->VSSetConstantBuffers(0, 1, &khu_null);
+                ctx->PSSetConstantBuffers(0, 1, &khu_null);
+                khu_c1->VSSetConstantBuffers1(0, 1, &khu_ring, &khu_first, &khu_num);
+                khu_c1->PSSetConstantBuffers1(0, 1, &khu_ring, &khu_first, &khu_num);
+                g_cbr_null_binds++;
+            }
+            khu_cur++;
+            g_cbr_writes++;
+            return true;
+        }
+        // A failed map falls through to the legacy buffer for THIS upload;
+        // the ring re-DISCARDs on its next use rather than trusting a region
+        // it never wrote.
+        khu_fresh = true;
+    }
+
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    if (FAILED(ctx->Map(buf, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
+    memcpy(mapped.pData, &cbd, khu_bytes);
     ctx->Unmap(buf, 0);
+    // The legacy buffer must be what b0 reads: a ring slice may still be
+    // bound there from the previous upload. Plain setters, both stages.
+    if (khu_ri >= 0 && g_cbr_supported && g_res.cb_ring[khu_ri]) {
+        ctx->VSSetConstantBuffers(0, 1, &buf);
+        ctx->PSSetConstantBuffers(0, 1, &buf);
+    }
+    g_cbr_legacy++;
     return true;
 }
 
@@ -4875,13 +5042,34 @@ inline void kh_obj_center_engine(const RenderObject& khc_o, float khc_out[3]) {
 // RECEIVING ITS OWN SHADOW.
 static constexpr int KH_SHADOW_LOD_LEVEL = 2;   // 427 restores it; NOT the default
 
+// The casting passes' level (KH_SHADOW_LOD; mode 427 arms the coarse level,
+// 422 restores 0) - one truth for mesh_shadow_range and the proxy draw.
+inline int kh_shadow_lod_level() {
+    return g_dbg_mode.load(std::memory_order_relaxed) == 427 ? KH_SHADOW_LOD_LEVEL : 0;
+}
+
 inline void mesh_shadow_range(int khs_mid, UINT& khs_start, UINT& khs_count) {
     const MeshDef& khs_d = mesh_def(khs_mid);
     // Ledger above and at
-    const int khs_l = g_dbg_mode.load(std::memory_order_relaxed) == 427
-                    ? KH_SHADOW_LOD_LEVEL : 0;
-    mesh_lod_range(khs_d, khs_l, khs_start, khs_count);
+    mesh_lod_range(khs_d, kh_shadow_lod_level(), khs_start, khs_count);
 }
+
+// KH_MAT_BLEND (26760): CASTING IS THE OBJECT'S, NOT THE MATERIAL'S. The
+// depth proxies (sun depth, seam footprint, mirror, prime) are untextured
+// and draw every caster whole - a blend material's translucent texels cast
+// exactly as a cutout's clipped texels do. A first cut masked blend
+// submeshes out of the proxies (with a castshadow opt-out): in the field a
+// "*" blend stim cast nothing and let stencil shadows through. Removed
+// whole; the proxies are byte-identical to 26759 again.
+static uint64_t g_blend_part_draws = 0;   // KH_MAT_BLEND: flush translucent-part submesh draws
+static uint64_t g_blend_part_skips = 0;   // parts skipped for want of the textured twins
+
+inline bool kh_obj_has_blend(const RenderObject& o) {
+    if (!o.materials || !o.materials->any) return false;
+    for (const KhMaterial& m : o.materials->slots) if (m.used && m.alpha_mode == 2) return true;
+    return false;
+}
+
 
 // The object's bounding-sphere radius in WORLD metres, from the rotated half
 // extents every draw path already computes for its own culling.
@@ -5864,7 +6052,7 @@ inline void kh_bind_material(ID3D11DeviceContext* ctx, ID3D11Device* dev,
     };
 
     cbd.mat_params0[0] = static_cast<float>(flags);
-    cbd.mat_params0[1] = m.alpha_mode == 1 ? 1.0f : 0.0f;
+    cbd.mat_params0[1] = static_cast<float>(m.alpha_mode);   // 0 opaque, 1 cutout, 2 blend (KH_MAT_BLEND)
     cbd.mat_params0[2] = m.cutoff;
     cbd.mat_params0[3] = m.normal_strength;
     cbd.mat_params1[0] = m.base_color[0];
@@ -5887,12 +6075,19 @@ inline void kh_bind_material(ID3D11DeviceContext* ctx, ID3D11Device* dev,
 // live. Per-submesh textured draws for one object. Fills matParams + binds
 // maps per submesh, re-uploads the object slice, and draws the range -
 // honoring the ordered two-pass when asked.
+// khum_part (KH_MAT_BLEND, 26760): 1 = the depth-writing draw (both colour
+// loops): every submesh, a blend material contributing its SOLID texels only
+// (matParams0.y = 3); 2 = the flush's post-scene translucent part: blend
+// submeshes only, their translucent texels (matParams0.y = 2). Split at
+// alpha 0.996 in the shader, so a single alpha-mapped submesh - solid body,
+// glass window - occludes itself where it is solid and blends where it is
+// glass, however the artist split the mesh.
 inline uint32_t kh_draw_textured(ID3D11DeviceContext* ctx, ID3D11Device* dev,
                                  ConstantData& cbd, ID3D11Buffer* obj_cb,
                                  const KhMaterialSet& ms, int mid, bool ts_ordered,
                                  ID3D11RasterizerState*& bound_rs,
                                  int khum_ctx, ID3D11PixelShader* khum_builtin_ps,
-                                 int khum_lod) {
+                                 int khum_lod, int khum_part) {
     static const KhMaterial khtx_default;   // unset slots draw with defaults
     const MeshDef& md = mesh_def(mid);
     uint32_t draws = 0;
@@ -5909,6 +6104,7 @@ inline uint32_t kh_draw_textured(ID3D11DeviceContext* ctx, ID3D11Device* dev,
         if (sm.vertex_count == 0) continue;
         const KhMaterial& mat = (si < ms.slots.size() && ms.slots[si].used)
                               ? ms.slots[si] : khtx_default;
+        if (khum_part == 2 && mat.alpha_mode != 2) continue;   // KH_MAT_BLEND: the translucent part is blend-only
         // khum_ctx names the caller's pipeline variant so the user twin
         // matches its builtin (flush / composite / composite-arb); an absent
         // or failed compile keeps builtin PBR - the mesh never blanks. USER
@@ -5938,6 +6134,9 @@ inline uint32_t kh_draw_textured(ID3D11DeviceContext* ctx, ID3D11Device* dev,
 
         // the substitute takes the DEFAULT material rather than the real one.
         kh_bind_material(ctx, dev, cbd, khum_white ? khtx_default : mat);
+        // KH_MAT_BLEND: the depth-writing draw takes a blend material's solid
+        // texels (mode 3); the part draw keeps mode 2 from the bind.
+        if (khum_part == 1 && !khum_white && mat.alpha_mode == 2) cbd.mat_params0[1] = 3.0f;
         if (!kh_upload_obj_cb(ctx, obj_cb, cbd)) break;
 
         if (ts_ordered) {   // interiors first, exteriors over them (the ordered contract)
@@ -6142,14 +6341,12 @@ inline bool kh_apply_material_update(RenderObject& obj, const game_value& val, s
                     if (pe[1].type_enum() != game_data_type::SCALAR) { err = "cutoff must be a number"; return false; }
                     mat.cutoff = static_cast<float>(pe[1]);
                 } else if (key == "alphamode") {
-                    if (pe[1].type_enum() != game_data_type::STRING) { err = "alphaMode must be \"opaque\" or \"cutout\""; return false; }
+                    if (pe[1].type_enum() != game_data_type::STRING) { err = "alphaMode must be \"opaque\", \"cutout\" or \"blend\""; return false; }
                     const std::string am = lower(static_cast<std::string>(pe[1]));
                     if (am == "opaque") mat.alpha_mode = 0;
                     else if (am == "cutout") mat.alpha_mode = 1;
-                    else if (am == "blend") {
-                        err = "alphaMode \"blend\" is not supported per-material yet - use the object color alpha for whole-object translucency";
-                        return false;
-                    } else { err = "alphaMode must be \"opaque\" or \"cutout\""; return false; }
+                    else if (am == "blend") mat.alpha_mode = 2;   // KH_MAT_BLEND (26760)
+                    else { err = "alphaMode must be \"opaque\", \"cutout\" or \"blend\""; return false; }
                 } else {
                     err = "unknown material param '" + key + "'";
                     return false;
@@ -6602,6 +6799,39 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         if (FAILED(hr)) { g_res.release(); return "Create frame CB " + hr_str(hr); }
         hr = dev->CreateBuffer(&bd, nullptr, &g_res.composite_frame_cb);
         if (FAILED(hr)) { g_res.release(); return "Create composite frame CB " + hr_str(hr); }
+        // KH_CB_RING: NON-FATAL. Both feature bits must be present (the
+        // offset setters ignore firstConstant/numConstants without the
+        // first; NO_OVERWRITE on a constant buffer is undefined without the
+        // second); a device without them keeps the per-object DISCARD path
+        // and cbRingOn reads 0.
+        {
+            D3D11_FEATURE_DATA_D3D11_OPTIONS khcr_opt = {};
+            const bool khcr_have = SUCCEEDED(dev->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS, &khcr_opt, sizeof(khcr_opt)));
+            g_cb_offsetting = khcr_have && khcr_opt.ConstantBufferOffsetting;   // StateBackup's restore gate
+            g_cbr_supported = khcr_have &&
+                khcr_opt.ConstantBufferOffsetting && khcr_opt.MapNoOverwriteOnDynamicConstantBuffer;
+
+            if (g_cbr_supported) {
+                D3D11_BUFFER_DESC khcr_bd = {};
+                khcr_bd.ByteWidth = KH_CBR_STRIDE * KH_CBR_SLICES;
+                khcr_bd.Usage = D3D11_USAGE_DYNAMIC;
+                khcr_bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+                khcr_bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+                for (int khcr_i = 0; khcr_i < 2; ++khcr_i) {
+                    g_res.cb_ring_cursor[khcr_i] = 0;
+                    g_res.cb_ring_fresh[khcr_i] = true;
+                    const HRESULT khcr_hr = dev->CreateBuffer(&khcr_bd, nullptr, &g_res.cb_ring[khcr_i]);
+
+                    if (FAILED(khcr_hr)) {
+                        for (int khcr_j = 0; khcr_j < 2; ++khcr_j) KH_SAFE_RELEASE(g_res.cb_ring[khcr_j]);
+                        g_cbr_supported = false;
+                        report_error_once_safe("KH cb ring: create " + hr_str(khcr_hr) + " (per-object uploads)");
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     {
@@ -7139,7 +7369,8 @@ inline std::string ensure_scene_capture(ID3D11Device* dev, ID3D11DeviceContext* 
 // keeps the bare call - the ring is single-threaded by contract).
 inline std::string kh_scene_capture_timed(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     const int khsc_i = g_res.ts_cap_cursor;
-    const bool khsc_arm = g_res.ts_cap_disjoint[khsc_i] && !g_res.ts_cap_inflight[khsc_i];
+    const bool khsc_arm = kh_gpu_timers_on() &&   // KH_GPU_TIMER_GATE
+                          g_res.ts_cap_disjoint[khsc_i] && !g_res.ts_cap_inflight[khsc_i];
 
     if (khsc_arm) {
         ctx->Begin(g_res.ts_cap_disjoint[khsc_i]);
@@ -7170,6 +7401,7 @@ static uint32_t g_inj_gpu_max = 0;
 
 inline int kh_gpu_begin(ID3D11DeviceContext* khg_ctx, ID3D11Query** khg_dj,
                         ID3D11Query* (*khg_st)[2], int khg_cur, bool* khg_fly) {
+    if (!kh_gpu_timers_on()) return -1;   // KH_GPU_TIMER_GATE (end takes -1 as a no-op)
     if (!khg_ctx || !khg_dj[khg_cur] || khg_fly[khg_cur]) return -1;
     if (!khg_st[khg_cur][0] || !khg_st[khg_cur][1]) return -1;
     khg_ctx->Begin(khg_dj[khg_cur]);
@@ -7886,8 +8118,17 @@ inline bool ensure_sun_depth4(ID3D11Device* dev) {   // outer band
 // StateBackup then captured with VSGetConstantBuffers and restored with
 // VSSetConstantBuffers - the non-1.1 pair, which has no offset argument - so
 // every restore reinstated each buffer AT OFFSET ZERO over its full range.
+// The 1.1 pair was measured (engSbCbOffMax 0 in the field), then dropped
+// from this struct while the mask cast's manual save set kept it; 26761
+// reinstates it here, unconditionally (mode 120 stays retired), because
+// the engine's b0 pool windows are offset binds by the ring's own premise
+// and a plain restore hands the pool back at offset zero. The three lanes
+// below are the pre-existing ones, live again: engSbCbOffRestores counts
+// slots restored through Set1, engSbCbPlainRestores the slots that could
+// not be (no offsetting, no context1, an empty slot), engSbCbOffMax the
+// largest firstConstant a capture ever saw.
 static uint64_t g_sb_cb_off_restores = 0;   // restores that reinstated offsets
-static uint64_t g_sb_cb_plain_restores = 0;   // restores that could not (or mode 120)
+static uint64_t g_sb_cb_plain_restores = 0;   // restores that could not (null slot / no context1 / no offsetting)
 static uint32_t g_sb_cb_off_max = 0;   // largest firstConstant seen at a capture
 
 struct StateBackup {
@@ -7904,12 +8145,16 @@ struct StateBackup {
     ID3D11GeometryShader*    gs = nullptr;
     ID3D11HullShader*        hs = nullptr;
     ID3D11DomainShader*      ds = nullptr;
-    // Widen this array and restore the offsets capture in the SAME edit that
-    // re-arms the bind, not afterwards. CB split: our passes bind b0 AND b1,
-    // so both slots save/restore. g_sb_cb_off_* stay published at 0 per the
-    // counters-never-die rule.
+    // CB split: our passes bind b0 AND b1, so both slots save/restore. The
+    // capture is OFFSET-AWARE through the cached context1 (kh_ctx1): the
+    // engine binds its b0 pool as windows, and a plain restore would hand
+    // each window back at offset zero over its full range. Widen these
+    // arrays and the offset pairs in the SAME edit that re-arms a bind.
     ID3D11Buffer*            vs_cbs[2] = { nullptr, nullptr };
     ID3D11Buffer*            ps_cbs[2] = { nullptr, nullptr };
+    UINT                     vs_cb_first[2] = { 0, 0 }, vs_cb_num[2] = { 0, 0 };
+    UINT                     ps_cb_first[2] = { 0, 0 }, ps_cb_num[2] = { 0, 0 };
+    bool                     cb_offsets = false;   // captured through context1
     // It is not: the mesh twins do not DECLARE it, but the effect unit binds
     // a Texture3D LUT lattice there and never nulls it, so a Texture2D
     // declared at t19 would read a type-mismatched SRV - zero - on exactly
@@ -7933,8 +8178,26 @@ struct StateBackup {
         ctx->GSGetShader(&gs, nullptr, nullptr);
         ctx->HSGetShader(&hs, nullptr, nullptr);
         ctx->DSGetShader(&ds, nullptr, nullptr);
-        ctx->VSGetConstantBuffers(0, 2, vs_cbs);
-        ctx->PSGetConstantBuffers(0, 2, ps_cbs);
+        // Offset-aware when the driver offsets AND the context is 1.1 (both
+        // true on the engine's immediate context with a WDDM 1.2+ driver);
+        // the plain pair otherwise - never both. The feature gate is the
+        // load-bearing half: a driver without offsetting DROPS Set1, so a
+        // restore through it would leave our buffer bound (see g_cb_offsetting).
+        ID3D11DeviceContext1* khsb_c1 = g_cb_offsetting ? kh_ctx1(ctx) : nullptr;
+
+        if (khsb_c1) {
+            khsb_c1->VSGetConstantBuffers1(0, 2, vs_cbs, vs_cb_first, vs_cb_num);
+            khsb_c1->PSGetConstantBuffers1(0, 2, ps_cbs, ps_cb_first, ps_cb_num);
+            cb_offsets = true;
+            for (UINT khsb_i = 0; khsb_i < 2; ++khsb_i) {
+                if (vs_cbs[khsb_i] && vs_cb_first[khsb_i] > g_sb_cb_off_max) g_sb_cb_off_max = vs_cb_first[khsb_i];
+                if (ps_cbs[khsb_i] && ps_cb_first[khsb_i] > g_sb_cb_off_max) g_sb_cb_off_max = ps_cb_first[khsb_i];
+            }
+        } else {
+            ctx->VSGetConstantBuffers(0, 2, vs_cbs);
+            ctx->PSGetConstantBuffers(0, 2, ps_cbs);
+            cb_offsets = false;
+        }
         ctx->PSGetShaderResources(0, _countof(ps_srvs), ps_srvs);
         ctx->PSGetSamplers(0, _countof(ps_samps), ps_samps);
         ctx->OMGetDepthStencilState(&dss, &stencil_ref);
@@ -7951,8 +8214,36 @@ struct StateBackup {
         ctx->GSSetShader(gs, nullptr, 0);
         ctx->HSSetShader(hs, nullptr, 0);
         ctx->DSSetShader(ds, nullptr, 0);
-        ctx->VSSetConstantBuffers(0, 2, vs_cbs);
-        ctx->PSSetConstantBuffers(0, 2, ps_cbs);
+        // Offset-aware restore, one slot at a time (the mask cast's
+        // discipline, verbatim): a slot captured with a window goes back
+        // through Set1; an empty slot, or a capture without context1, takes
+        // the plain setter. The same-buffer offset-only emulation bug cannot
+        // bite here: a pass that bound its {obj, frame} pair leaves OUR
+        // buffer in the slot (ring/legacy b0, frame b1), so the buffer
+        // changes at this call; a site that never touched the slot (the
+        // depth snapshot, the UI alpha clear) restores the window it read,
+        // which is no offset change at all.
+        {
+            ID3D11DeviceContext1* khsb_c1 = cb_offsets ? kh_ctx1(ctx) : nullptr;
+
+            for (UINT khsb_i = 0; khsb_i < 2; ++khsb_i) {
+                if (khsb_c1 && vs_cbs[khsb_i] && vs_cb_num[khsb_i] > 0) {
+                    khsb_c1->VSSetConstantBuffers1(khsb_i, 1, &vs_cbs[khsb_i], &vs_cb_first[khsb_i], &vs_cb_num[khsb_i]);
+                    g_sb_cb_off_restores++;
+                } else {
+                    ctx->VSSetConstantBuffers(khsb_i, 1, &vs_cbs[khsb_i]);
+                    g_sb_cb_plain_restores++;
+                }
+
+                if (khsb_c1 && ps_cbs[khsb_i] && ps_cb_num[khsb_i] > 0) {
+                    khsb_c1->PSSetConstantBuffers1(khsb_i, 1, &ps_cbs[khsb_i], &ps_cb_first[khsb_i], &ps_cb_num[khsb_i]);
+                    g_sb_cb_off_restores++;
+                } else {
+                    ctx->PSSetConstantBuffers(khsb_i, 1, &ps_cbs[khsb_i]);
+                    g_sb_cb_plain_restores++;
+                }
+            }
+        }
         ctx->PSSetShaderResources(0, _countof(ps_srvs), ps_srvs);
         ctx->PSSetSamplers(0, _countof(ps_samps), ps_samps);
         ctx->OMSetDepthStencilState(dss, stencil_ref);
@@ -9390,7 +9681,7 @@ static uint32_t g_fk_veto_cand_n = 0;   // candidates staged at the last pass BE
                                             // campaign-43 handoff.
 // Build tag: monotonic, never reused, bumped once per shipped build (including
 // pure reverts). Keep it a constexpr int, not a #define.
-static constexpr int KH_BUILD_TAG = 26760;
+static constexpr int KH_BUILD_TAG = 26761;
 // Continuous at the near plane, so routing on/off never pops a fragment.
 static constexpr float KH_NEARZ_GAP_FRAC = 0.92f;
 // 3 = mode 203 - passthrough + absolute form.
@@ -11960,8 +12251,12 @@ inline void ffr_frame_boundary() {
 // CONTEXT1 CACHE: dynlights sampling/acquire, the skybind harvest and the
 // cascade-binding harvest each ran a QueryInterface for ID3D11DeviceContext1
 // on EVERY invocation (~150-250/frame lit) against the SAME immediate
-// context. Render-thread use only; a context change (device-reset refresh)
-// re-QIs on the next call via the pointer mismatch.
+// context. Callers are the render thread mid-frame and the game thread
+// under the park (KH_CB_RING's uploads, StateBackup's 1.1 capture/restore,
+// 26760/26761) - never both at once, which is the park invariant, and both
+// hand in the same immediate context so the cache never thrashes. A context
+// change (device-reset refresh) re-QIs on the next call via the pointer
+// mismatch and re-latches g_kh_ctx1_null_first for the new context.
 static ID3D11DeviceContext1* g_kh_ctx1 = nullptr;
 static void*                 g_kh_ctx1_for = nullptr;
 
@@ -11975,6 +12270,23 @@ inline ID3D11DeviceContext1* kh_ctx1(ID3D11DeviceContext* ctx) {
 
     ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&g_kh_ctx1));
     g_kh_ctx1_for = g_kh_ctx1 ? static_cast<void*>(ctx) : nullptr;
+    // KH_CB_RING_NULLFIRST: the docs' own test, transcribed - a DEFERRED
+    // context whose driver reports no native command lists is the emulated
+    // runtime the offset-only bind can fail on. Immediate contexts latch
+    // false. Once per context; the flag lives beside the cache it belongs to.
+    g_kh_ctx1_null_first = false;
+
+    if (g_kh_ctx1 && g_kh_ctx1->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED) {
+        ID3D11Device* khc1_dev = nullptr;
+        g_kh_ctx1->GetDevice(&khc1_dev);
+
+        if (khc1_dev) {
+            D3D11_FEATURE_DATA_THREADING khc1_thr = {};
+            if (SUCCEEDED(khc1_dev->CheckFeatureSupport(D3D11_FEATURE_THREADING, &khc1_thr, sizeof(khc1_thr))) &&
+                !khc1_thr.DriverCommandLists) g_kh_ctx1_null_first = true;
+            khc1_dev->Release();
+        }
+    }
     return g_kh_ctx1;
 }
 
@@ -11985,6 +12297,7 @@ inline void kh_ctx1_release() {
     }
 
     g_kh_ctx1_for = nullptr;
+    g_kh_ctx1_null_first = false;
 }
 
 struct KhRt0DescEntry {
@@ -29645,29 +29958,18 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // Analytic terrain heightfield (t10, saved range; see thmParams).
     if (g_thm_valid && g_res.thm_srv) ctx->PSSetShaderResources(10, 1, &g_res.thm_srv);
 
-    // Failure demotes to the legacy hardware blend for the frame - counted,
-    // never fatal. Depth WRITE is the whole point: the engine's translucents
-    // must be able to depth-reject against these meshes.
-    bool khr_perceptual = false;
-
-    for (const auto& o : meshes) {
-        if (o.blend_mode == 0 && o.color[3] < 0.999f) { khr_perceptual = true; break; }
-    }
-
-    if (khr_perceptual) {
-        ID3D11Device* khr_dev = nullptr;
-        ctx->GetDevice(&khr_dev);
-        std::string khr_cap_err = khr_dev ? ensure_scene_capture(khr_dev, ctx) : std::string("no device");
-        if (khr_dev) khr_dev->Release();
-
-        if (khr_cap_err.empty()) {
-            ctx->PSSetShaderResources(3, 1, &g_res.scene_srv);
-            g_stats.perceptual_captures++;
-        } else {
-            khr_perceptual = false;
-            g_stats.effect_setup_fails++;
-        }
-    }
+    // NO PERCEPTUAL ARM ON THIS PASS (26761, removed whole). The staging
+    // loop above defers every normal-blend translucent to the flush (round
+    // 9: this pass's capture is mid-frame, pre-fog) and is_composite_eligible
+    // refuses them a second time, so the injection's mesh list holds no
+    // object that could ever arm blendCtl.x - the capture, the t3 bind and
+    // the perceptualCaptures increment that lived here were unreachable
+    // (perceptualCaptures 0 across every 26760 capture; the flush owns that
+    // lane and the blendCtl.x fill). The injection fills blendCtl.x = 0
+    // unconditionally at its CB fill; PSComposite's blendCtl.x branch stays
+    // cold by construction. Depth WRITE is the whole point of this pass:
+    // the engine's translucents must be able to depth-reject against these
+    // meshes.
 
     // Round 6: LESS_EQUAL + write for BOTH arms. The honest raw-space test is
     // the object authority again (months-stable); the arb variant beats
@@ -30590,8 +30892,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                            : (khdc_m == 364) ? 12.0f
                            : (khdc_m == 434) ? 0.0f : 9.0f;   // ...68/77/78
         }
-        cbd.blend_ctl[0] = (khr_perceptual && o.blend_mode == 0 && o.color[3] < 0.999f) ? 1.0f : 0.0f;
-        if (cbd.blend_ctl[0] >= 0.5f) g_pack_on_last = 1;   // film strip
+        // blendCtl.x: never on this pass (the perceptual arm was unreachable
+        // and is gone - see the pass head). The flush's twin fill is the
+        // only one that arms it, and the only one that latches g_pack_on_last.
+        cbd.blend_ctl[0] = 0.0f;
         cbd.blend_ctl[1] = 150.0f;   // background-trust range (m); see the shader note
         // blend_ctl[2]/[3] were unread by every shader, so this spends a lane
         // rather than changing the CB layout. KH_FARVIS_NO_VDIST:
@@ -31044,10 +31348,12 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             if (khr_tx_on) {
                 // Per-submesh textured draws: matParams filled + t14-t18
                 // rebound + the object slice re-uploaded per material range.
+                // KH_MAT_BLEND: part 1 - the injection never draws a blend
+                // submesh; the flush carries the object's translucent part.
                 const uint32_t khr_txd = kh_draw_textured(ctx, dev, cbd, g_res.composite_cb,
                                                           *khr_txm, mid, khr_ts_ordered, khr_bound_rs,
                                                           khr_tx_arb ? 2 : (guard ? 1 : 0), khr_bound_ps,
-                                                          khr_lvl);
+                                                          khr_lvl, 1);
                 g_stats.composite_meshes += khr_txd;
                 g_stats.textured_draws += khr_txd;
             } else {
@@ -33820,10 +34126,20 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                     // pre-tonemap chain - the correct domain for the scene
                     // half); only UI-mode passes are excluded.
                     if (!o.ui_only) fullscreen.emplace_back(o.seq, o);
-                } else if (!(comp_healthy && is_composite_eligible(o))) {
+                } else if (comp_healthy && is_composite_eligible(o)) {
                     // Composited meshes are drawn pre-translucent by the
                     // reorder hook; the flush stands down for them while
-                    // injections are actually happening.
+                    // injections are actually happening - except for the
+                    // object's BLEND submeshes (KH_MAT_BLEND), which the
+                    // injection refuses exactly as it defers every whole
+                    // translucent (the round-9 grey-window lesson: the
+                    // injection-time capture is mid-frame). They stage here
+                    // as the object's translucent part.
+                    if (kh_obj_has_blend(o)) {
+                        meshes.push_back(o);
+                        meshes.back().draw_part = 1;
+                    }
+                } else {
                     if (is_composite_eligible(o)) {
                         // injection missed the frame: the LATE post-scene
                         // draw carries it (the other rare-artifact correlate)
@@ -33840,7 +34156,19 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                             g_carry_pending_serial.store(ms_fs, std::memory_order_relaxed);
                         }
                     }
-                    meshes.push_back(o);
+                    // KH_MAT_BLEND: an object the flush owns this frame with
+                    // a blend material splits in two - its opaque part draws
+                    // in place, its translucent part joins the sorted tail.
+                    // Effect meshes and overlays keep their whole-object
+                    // draw (their PS never samples materials).
+                    if (o.effect == 0 && o.mode != DepthMode::Off && kh_obj_has_blend(o)) {
+                        meshes.push_back(o);
+                        meshes.back().draw_part = 2;
+                        meshes.push_back(o);
+                        meshes.back().draw_part = 1;
+                    } else {
+                        meshes.push_back(o);
+                    }
                 }
             }
 
@@ -34910,7 +35238,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                            : (khdc_m == 364) ? 12.0f
                            : (khdc_m == 434) ? 0.0f : 9.0f;   // ...68/77/78
         }
-        cbd.blend_ctl[0] = (khf_perceptual && !o.fullscreen && o.blend_mode == 0 && o.color[3] < 0.999f) ? 1.0f : 0.0f;
+        cbd.blend_ctl[0] = (khf_perceptual && !o.fullscreen && o.draw_part != 1 &&
+                            o.blend_mode == 0 && o.color[3] < 0.999f) ? 1.0f : 0.0f;   // KH_MAT_BLEND parts: never perceptual
         if (cbd.blend_ctl[0] >= 0.5f) g_pack_on_last = 1;   // film strip
         cbd.blend_ctl[1] = 150.0f;   // background-trust range (m); see the shader note
         // blend_ctl[2]/[3] were unread by every shader, so this spends a lane
@@ -35186,8 +35515,50 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     uint32_t khf_perc_count = 0;
 
+    // KH_MAT_BLEND: a translucent draw is a whole translucent object on
+    // normal blend OR an object's blend part (draw_part 1). One predicate
+    // for the sort; the capture demand below is the whole-object case only.
+    auto khf_transl = [](const RenderObject& o) -> bool {
+        return !o.fullscreen && (o.draw_part == 1 || (o.blend_mode == 0 && o.color[3] < 0.999f));
+    };
+    // BLEND PARTS ARE HARDWARE-BLENDED, NEVER PERCEPTUAL (26760, first field
+    // read). The perceptual composite lerps against the CAPTURE and writes
+    // opaque, so two fragments of ONE draw that overlap - the near and far
+    // walls of a tube - do not accumulate: the later triangle replaces the
+    // earlier, and the pixel shows whichever layer rasterised last. A whole
+    // translucent object is one hull composited once and gets away with it;
+    // a material part is exactly the multi-layer case, and no sort or
+    // recapture can refresh a capture between fragments of the same draw.
+    // SrcAlpha/InvSrcAlpha (blend_modes[0]) accumulates every layer by
+    // construction; the ordered two-sided pass and the far-to-near tail then
+    // decide the order the layers land in. So a blend part neither arms
+    // blendCtl.x nor demands the pre-mesh capture.
     for (const auto& o : meshes) {
-        if (!o.fullscreen && o.blend_mode == 0 && o.color[3] < 0.999f) khf_perc_count++;
+        if (!o.fullscreen && o.draw_part != 1 && o.blend_mode == 0 && o.color[3] < 0.999f) khf_perc_count++;
+    }
+
+    // DRAW ORDER (26760): the list order used to be the draw order, so two
+    // overlapping translucents composited in creation order. Now every
+    // non-translucent draw keeps its place, and the translucent draws form a
+    // tail sorted FAR TO NEAR by the OBB distance the loop already computes
+    // - the order a perceptual composite over the finished scene needs.
+    // Sorting is per draw (per object, or per object part), not per
+    // triangle: a self-overlapping translucent still relies on the ordered
+    // two-sided pass below.
+    static std::vector<uint32_t> khf_order;   // game-thread scratch
+    khf_order.clear();
+    {
+        static std::vector<std::pair<float, uint32_t>> khf_tail;
+        khf_tail.clear();
+        for (uint32_t khf_oi = 0; khf_oi < static_cast<uint32_t>(meshes.size()); ++khf_oi) {
+            if (khf_transl(meshes[khf_oi])) khf_tail.emplace_back(kh_mesh_dist_sq(meshes[khf_oi], cam), khf_oi);
+            else                            khf_order.push_back(khf_oi);
+        }
+        std::stable_sort(khf_tail.begin(), khf_tail.end(),
+                         [](const std::pair<float, uint32_t>& a, const std::pair<float, uint32_t>& b) {
+                             return a.first > b.first;   // farthest first
+                         });
+        for (const auto& khf_t : khf_tail) khf_order.push_back(khf_t.second);
     }
 
     khf_perceptual = khf_perc_count > 0;
@@ -35249,7 +35620,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     const int khf_ts = kh_gpu_begin(ctx, g_res.ts_msh_disjoint, g_res.ts_msh_stamp,
                                     g_res.ts_msh_cursor, g_res.ts_msh_inflight);
 
-    for (const auto& o : meshes) {
+    for (const uint32_t khf_oi : khf_order) {
+        const RenderObject& o = meshes[khf_oi];
         const bool ov = (o.effect == 0 && o.mode == DepthMode::Off);
         if (ov) g_mask.ov_listed++;   // reached the draw loop
         // Fullscreen passes have no world extent and are never culled.
@@ -35273,7 +35645,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         // no refresh is owed. The RTV is the live scene target (the same
         // source the pre-mesh capture used), now carrying every mesh drawn so
         // far this pass.
-        const bool khf_o_perc = !o.fullscreen && o.blend_mode == 0 && o.color[3] < 0.999f;
+        const bool khf_o_perc = khf_transl(o) && o.draw_part != 1;   // blend parts: hardware blend, no recapture
 
         if (khf_perc_recapture && khf_o_perc && khf_perc_seen) {
             if (kh_scene_capture_timed(dev, ctx).empty()) {   // timed
@@ -35310,6 +35682,11 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         const KhMaterialSet* khf_txm = kh_obj_textured(o);
         const bool khf_tx_on = khf_txm != nullptr && !khf_farkeep_draw &&
             g_res.ps_tex && g_res.vs_tex && g_res.layout_tex && g_res.mat_sampler;
+        // KH_MAT_BLEND: a translucent PART exists only through the textured
+        // twins - untextured, the mesh has no submesh table to split and no
+        // sampled alpha, so the part is skipped rather than drawn whole (the
+        // opaque part / injection already painted the mesh).
+        if (o.draw_part == 1 && !khf_tx_on) { g_blend_part_skips++; continue; }
         const int khf_ps_want = o.effect > 0 ? 1 : (khf_farkeep_draw ? 2 : (khf_tx_on ? 3 : 0));
 
         if (khf_ufx) {
@@ -35398,6 +35775,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         ID3D11DepthStencilState* dss =
             (khf_fx_arb_this)                ? g_res.dss_off :
             (o.mode == DepthMode::Off)       ? g_res.dss_off :
+            (o.draw_part == 1)               ? g_res.dss_test :   // KH_MAT_BLEND: a translucent part never writes depth
             (o.mode == DepthMode::TestWrite) ? g_res.dss_test_write :
             is_composite_eligible(o)         ? g_res.dss_test_write :
                                                g_res.dss_test;
@@ -35412,8 +35790,12 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             (g_dbg_mode.load(std::memory_order_relaxed) == 210
                  ? (kh_mesh_dist_sq(o, cam) > 9.0f)
                  : (kh_mesh_obb_dist_sq(o, cam) > 0.01f));
+        // KH_MAT_BLEND: a blend part on a two-sided object takes the ordered
+        // pass regardless of the object colour's alpha - interiors first,
+        // exteriors over them - the per-triangle sort a self-overlapping
+        // translucent submesh needs.
         const bool khf_ts_ordered = o.two_sided &&
-                                    o.blend_mode == 0 && o.color[3] < 0.999f &&
+                                    ((o.blend_mode == 0 && o.color[3] < 0.999f) || o.draw_part == 1) &&
                                     g_res.rasterizer_front != nullptr;
         ID3D11RasterizerState* khr_want_rs =
             khf_ts_ordered                    ? g_res.rasterizer_front :
@@ -35459,8 +35841,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             if (khf_tx_on) {
                 const uint32_t khf_txd = kh_draw_textured(ctx, dev, khf_obj_cbd, g_res.constant_buffer,
                                                           *khf_txm, mid, khf_ts_ordered, khr_bound_rs,
-                                                          0, g_res.ps_tex, khf_lvl);
+                                                          0, g_res.ps_tex, khf_lvl,
+                                                          o.draw_part == 1 ? 2 : 1);   // KH_MAT_BLEND part
                 g_stats.textured_draws += khf_txd;
+                if (o.draw_part == 1) g_blend_part_draws += khf_txd;
             } else {
                 UINT khf_ls = 0, khf_lc = 0;
                 mesh_lod_range(khf_md, khf_lvl, khf_ls, khf_lc);
@@ -35583,7 +35967,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             ctx->OMSetBlendState(nullptr, bf, 0xFFFFFFFF);   // opaque: compositing is in-shader
             // timestamps: arm this flush's ring slot if free.
             const int khts_slot = g_res.ts_cursor;
-            const bool khts_arm = g_res.ts_disjoint[khts_slot] && !g_res.ts_inflight[khts_slot];
+            const bool khts_arm = kh_gpu_timers_on() &&   // KH_GPU_TIMER_GATE
+                                  g_res.ts_disjoint[khts_slot] && !g_res.ts_inflight[khts_slot];
             int khts_pass_n = 0;
 
             if (khts_arm) {
@@ -36474,7 +36859,8 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     }
 
     const int khut_slot = g_res.ts_ui_cursor;
-    const bool khut_arm = g_res.ts_ui_disjoint[khut_slot] && !g_res.ts_ui_inflight[khut_slot];
+    const bool khut_arm = kh_gpu_timers_on() &&   // KH_GPU_TIMER_GATE
+                          g_res.ts_ui_disjoint[khut_slot] && !g_res.ts_ui_inflight[khut_slot];
     int khut_pass_n = 0;
 
     if (khut_arm) {
@@ -36962,6 +37348,9 @@ inline void reset_stat_counters() {
     g_castocc_builds = 0; g_castocc_falls = 0; g_castocc_cells = 0;   // KH_CAST_OCC
     g_castocc_reuses = 0;   // KH_CAST_OCC_ONCE (the key is not a counter; it stays)
     g_mesh_publish_defers = 0; g_mesh_publish_lands = 0;   // KH_MESH_PUBLISH_DEFER (the pending flag is state, not a counter)
+    g_cbr_writes = 0; g_cbr_discards = 0; g_cbr_legacy = 0;   // KH_CB_RING (cursor/fresh are state)
+    g_cbr_null_binds = 0;   // KH_CB_RING_NULLFIRST (the latch is state, not a counter)
+    g_blend_part_draws = 0; g_blend_part_skips = 0;   // KH_MAT_BLEND
     g_svs_skips_redundant = 0; g_svs_skip_misses = 0;   // KH_SVS_SKIP
     g_cull_back_rejects = 0;   // KH_CULL_BACK
     // the geometry census is per SESSION - a cumulative triangle count across

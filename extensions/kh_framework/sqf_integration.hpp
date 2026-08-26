@@ -7312,6 +7312,11 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                             khd_m == 474 ||   // KH_CAST_OCC_OFF: PSMaskCast scans every caster per pixel (slow; A/B only)
                             khd_m == 476 ||   // KH_SVS_SKIP_OFF: every seam pass re-injects
                             khd_m == 478 ||   // KH_CULL_BACK_OFF: disable the back-half cull
+                            khd_m == 480 ||   // KH_CB_RING_OFF: per-object DISCARD uploads (the A/B; cbRingLegacy climbs)
+                            khd_m == 481 ||   // KH_CB_RING_NULLFIRST: force the null-bind between the ring's two Set1
+                                              // calls on every slice (the documented command-list-emulation workaround,
+                                              // latched per context otherwise; the A/B that the ring survives the dance
+                                              // unchanged - cbRingNullBinds == cbRingWrites while on)
                             khd_m == 479 ||   // KH_CAST_REACH_X4: occ-grid reach x4 (26760 re-listed;
                                                               // the hpp read survived the 26758 strip and a
                                                               // mode that exists only in the hpp is dead.
@@ -8295,6 +8300,22 @@ static game_value get_render_stats_sqf() {
                              ? RenderIntegration::g_castocc_cells / RenderIntegration::g_castocc_builds
                              : 0));
         out.push_back(kv("castOccReuses",  RenderIntegration::g_castocc_reuses));   // KH_CAST_OCC_ONCE
+        // KH_CB_RING (26760): cbRingOn 1 = the offset-ring path is live.
+        // Health: cbRingDiscards << cbRingWrites (one DISCARD per ~1,024
+        // slices), cbRingLegacy = the white placeholder's draws only (mode
+        // 480 or an absent feature pair sends everything there).
+        out.push_back(kv("cbRingOn",       (RenderIntegration::g_cbr_supported && RenderIntegration::g_res.cb_ring[0]) ? 1ull : 0ull));
+        out.push_back(kv("cbRingWrites",   RenderIntegration::g_cbr_writes));
+        out.push_back(kv("cbRingDiscards", RenderIntegration::g_cbr_discards));
+        out.push_back(kv("cbRingLegacy",   RenderIntegration::g_cbr_legacy));
+        // KH_CB_RING_NULLFIRST (26761): cbRingNullFirst 1 = the cached
+        // context is deferred on a driver without native command lists (the
+        // documented emulation case) and every ring slice binds null between
+        // its two Set1 calls; 0 on the engine's immediate context, which is
+        // the expected read. cbRingNullBinds counts the extra binds (== the
+        // ring writes made while the latch or mode 481 is on).
+        out.push_back(kv("cbRingNullFirst", RenderIntegration::g_kh_ctx1_null_first ? 1ull : 0ull));
+        out.push_back(kv("cbRingNullBinds", RenderIntegration::g_cbr_null_binds));
         out.push_back(kv("svsSkips",       RenderIntegration::g_svs_skips_redundant));
         out.push_back(kv("svsSkipMisses",  RenderIntegration::g_svs_skip_misses));
         out.push_back(kv("cullBackRejects", RenderIntegration::g_cull_back_rejects));
@@ -8367,6 +8388,10 @@ static game_value get_render_stats_sqf() {
         // drawing as mesh 0 - the flush has not reached its head since.
         out.push_back(kv("meshPublishDefers", RenderIntegration::g_mesh_publish_defers));
         out.push_back(kv("meshPublishLands",  RenderIntegration::g_mesh_publish_lands));
+        // KH_MAT_BLEND (26760): flush translucent-part submesh draws, and
+        // parts skipped for want of the textured twins (health: 0).
+        out.push_back(kv("blendPartDraws", RenderIntegration::g_blend_part_draws));
+        out.push_back(kv("blendPartSkips", RenderIntegration::g_blend_part_skips));
         out.push_back(kv("fbxCacheHits", RenderIntegration::g_stats.fbx_cache_hits));
         out.push_back(kv("fbxCacheWrites", RenderIntegration::g_stats.fbx_cache_writes));
         out.push_back(kv("fbxCacheEvicts", RenderIntegration::g_stats.fbx_cache_evicts));
@@ -9582,11 +9607,14 @@ static game_value get_render_stats_sqf() {
             sprintf_s(khw_nm, "engWideSeen%d", khw_i);
             out.push_back(kv(khw_nm, RenderIntegration::g_svs_eng_wide_seen[khw_i]));
         }
-        // SETTLED, AND THE ANSWER IS THAT IT NEVER MATTERED. The 1.1 path is
-        // kept because it is correct rather than merely harmless, and mode
-        // 120 can be deleted in the next build that touches this struct.
-        // Recorded here rather than quietly dropped: a concern raised and
-        // then measured to zero is a result.
+        // SETTLED AT ZERO once, then the 1.1 pair had quietly left the struct
+        // while this note still said it was kept (the mask cast's manual save
+        // set was the only offset-aware restore). 26761 reinstates it in
+        // StateBackup unconditionally - mode 120 stays retired - so these
+        // three read live again: engSbCbOffRestores climbs with every pass
+        // that restores a windowed slot, engSbCbPlainRestores with the empty
+        // slots, engSbCbOffMax stays the field's answer to whether the engine
+        // ever binds a non-zero window at our restore sites.
         out.push_back(kv("engSbCbOffRestores", RenderIntegration::g_sb_cb_off_restores));
         out.push_back(kv("engSbCbPlainRestores", RenderIntegration::g_sb_cb_plain_restores));
         out.push_back(kv("engSbCbOffMax",
@@ -13284,7 +13312,7 @@ static void initialize_sqf_integration() {
 
     _sqf_update_render3d_array = intercept::client::host::register_sqf_command(
         "updateRender3D",
-        "[handle, property, value] or [[handle, property, value], ...]. Update a persistent 3D mesh object: position | size | rotation | mesh | material | mode | sceneRead | effect | params | lit | twoSided | farVis | lodLock | casterOnly | color | visible | blend | band | duration. Faults are reported; the batch form returns true only if every triple applied",
+        "[handle, property, value] or [[handle, property, value], ...]. Update a persistent 3D mesh object: position | size | rotation | mesh | material | mode | sceneRead | effect | params | lit | twoSided | farVis | lodLock | casterOnly | color | visible | blend | band | duration. material params: basecolor | roughness | metalness | emissiveintensity | normalstrength | cutoff | alphamode opaque|cutout|blend (blend: texels with alpha >= 0.996 draw solid with depth, the rest as a post-scene translucent part - hardware alpha, no depth write, back-to-front; casting is per object, never per material). Faults are reported; the batch form returns true only if every triple applied",
         userFunctionWrapper<update_render3d_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY

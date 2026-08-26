@@ -514,10 +514,28 @@ float4 PSMain(VSOut i) : SV_Target
     // normal keeps owning the receive gating below - shadow behavior stays in
     // parity with the untextured twin.
     KhMatSurf khtxS = KhSampleMat(i.uv);
-    if (matParams0.y >= 0.5f) clip(khtxS.alpha - matParams0.z);   // cutout kill
+    // matParams0.y = alpha mode: 0 opaque, 1 cutout, 2 = a blend material's
+    // TRANSLUCENT texels (the flush's post-scene part), 3 = the SAME blend
+    // material's OPAQUE texels (the ordinary depth-writing draw). KH_MAT_BLEND.
+    if (matParams0.y >= 0.5f && matParams0.y < 1.5f) clip(khtxS.alpha - matParams0.z);   // cutout kill
     // OPAQUE ALPHA CONTRACT (the whitish-see-through fix): sampled alpha
-    // NEVER reaches the blend - survivors draw at alpha 1 in BOTH modes.
-    khtxS.alpha = 1.0f;
+    // NEVER reaches the blend on the opaque and cutout modes - survivors
+    // draw at alpha 1. KH_MAT_BLEND (26760): a blend material is split at
+    // alpha 0.996 - texels at or above it are solid and draw in the opaque
+    // phase WITH depth (mode 3: the rest clipped, alpha forced 1), so a hull
+    // still occludes itself; texels below it draw in the translucent tail
+    // (mode 2: solid texels and fully transparent ones clipped, sampled
+    // alpha kept and fed to the SAME 'a' line as the object colour's alpha
+    // below, hardware-blended without a depth write).
+    if (matParams0.y >= 2.5f) {
+        clip(khtxS.alpha - 0.996f);
+        khtxS.alpha = 1.0f;
+    } else if (matParams0.y >= 1.5f) {
+        clip(khtxS.alpha - 0.004f);
+        if (khtxS.alpha >= 0.996f) discard;
+    } else {
+        khtxS.alpha = 1.0f;
+    }
     float3 khtxN;
     {
         float3 khtn = normalize(i.nrm);

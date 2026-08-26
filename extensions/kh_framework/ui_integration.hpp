@@ -817,6 +817,8 @@ public:
         if (shutting_down_.load(std::memory_order_acquire)) return false;
         if (initialized_.load(std::memory_order_acquire)) return true;
         should_stop_.store(false, std::memory_order_release);
+        ladder_reset(present_ladder_);   // KH_UI_HOOK_LADDER: fresh strikes per init
+        ladder_reset(wndproc_ladder_);
         worker_thread_ = std::thread(&UIFramework::worker_thread_func, this);
         auto start = std::chrono::steady_clock::now();
         constexpr auto timeout = std::chrono::seconds(10);
@@ -1364,14 +1366,19 @@ private:
             }
             
             worker_initialized_.store(true, std::memory_order_release);
-            install_present_hook();
 
-            MainThreadScheduler::instance().schedule([this]() {
-                install_wndproc_hook();
-            });
-                        
+            // KH_UI_HOOK_LADDER: both hooks go through the three-strike
+            // ensure, once per worker iteration (~16 ms), so a failed
+            // install retries at +1 s and +10 s before it is declared
+            // dead - the same shape as RenderIntegration's
+            // ensure_reorder_hook. Cheap early-out once installed.
+            ensure_present_hook();
+            ensure_wndproc_hook();
+
             // Main processing loop
             while (!should_stop_.load(std::memory_order_acquire)) {
+                ensure_present_hook();
+                ensure_wndproc_hook();
                 process_commands();
                 update_ultralight();
 
@@ -1877,6 +1884,113 @@ private:
     static std::atomic<bool> hook_installed_;
     static std::mutex hook_mutex_;
 
+    // KH_UI_HOOK_LADDER (26721): the three-strike install ladder, one per
+    // hook. TWIN of RenderIntegration's g_reorder_hook_* lanes and
+    // kh_reorder_hook_fail_round: a failed install is retried after 1 s,
+    // then after 10 s, then declared dead for the session with ONE
+    // report naming the phase, the MH status and the attempt count. The
+    // intermediate strikes are silent (a transient - window not up yet,
+    // swap chain refused - must not spam the RPT). Everything is atomic:
+    // the worker thread drives the Present ladder, the game thread runs
+    // the WndProc install. Self-contained: no render-side lane or build
+    // tag reads it; the third-strike report is the only observable. Session-scoped:
+    // never reset (a re-init after a failed ladder starts over via
+    // ladder_reset, called from the init path only).
+    struct HookLadder {
+        std::atomic<int32_t>  fail_count{0};   // failed rounds this ladder (0..3)
+        std::atomic<int32_t>  fail_phase{0};   // Present: 1 temp swap chain, 2 MinHook init, 3 CreateHook, 4 EnableHook
+                                                // WndProc: 1 no game window, 2 SetWindowLongPtr
+        std::atomic<int32_t>  status{0};   // MH_STATUS (Present) or GetLastError (WndProc) of the failing call
+        std::atomic<bool>     failed{false};   // third strike: permanent for the session
+        std::atomic<uint64_t> retry_ms{0};   // steady deadline of the next attempt (0 = none scheduled)
+        std::atomic<bool>     pending{false};   // WndProc only: an install is scheduled on the game thread
+    };
+
+    static HookLadder present_ladder_;
+    static HookLadder wndproc_ladder_;
+
+    static uint64_t ladder_now_ms() {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+
+    // An attempt is due when the ladder is alive and no retry deadline is
+    // pending or the deadline has passed.
+    static bool ladder_due(const HookLadder& l) {
+        if (l.failed.load(std::memory_order_acquire)) return false;
+        const uint64_t at = l.retry_ms.load(std::memory_order_acquire);
+        return at == 0 || ladder_now_ms() >= at;
+    }
+
+    static void ladder_success(HookLadder& l) {
+        l.fail_count.store(0, std::memory_order_release);   // a success clears the ladder
+        l.retry_ms.store(0, std::memory_order_release);
+    }
+
+    // The strike. 1st: retry in 1 s. 2nd: retry in 10 s. 3rd: dead, one
+    // report. Same intervals as kh_reorder_hook_fail_round.
+    static void ladder_fail_round(HookLadder& l, const char* what, const char* disabled) {
+        const int32_t n = l.fail_count.fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (n == 1) { l.retry_ms.store(ladder_now_ms() + 1000, std::memory_order_release); return; }
+        if (n == 2) { l.retry_ms.store(ladder_now_ms() + 10000, std::memory_order_release); return; }
+        l.failed.store(true, std::memory_order_release);
+        l.retry_ms.store(0, std::memory_order_release);
+
+        const std::string msg = std::string("KH - UI Framework: ") + what + " (phase "
+                              + std::to_string(l.fail_phase.load(std::memory_order_acquire)) + ", status "
+                              + std::to_string(l.status.load(std::memory_order_acquire)) + ", attempt "
+                              + std::to_string(n) + "); " + disabled;
+
+        MainThreadScheduler::instance().schedule([msg]() { report_error(msg); });
+    }
+
+    static void ladder_reset(HookLadder& l) {
+        l.fail_count.store(0, std::memory_order_release);
+        l.fail_phase.store(0, std::memory_order_release);
+        l.status.store(0, std::memory_order_release);
+        l.failed.store(false, std::memory_order_release);
+        l.retry_ms.store(0, std::memory_order_release);
+        l.pending.store(false, std::memory_order_release);
+    }
+
+    // Worker thread. Early-out once installed; otherwise one attempt per
+    // due deadline.
+    void ensure_present_hook() {
+        if (hook_installed_.load(std::memory_order_acquire)) return;
+
+        if (shutting_down_.load(std::memory_order_acquire) ||
+            should_stop_.load(std::memory_order_acquire)) return;
+
+        if (!ladder_due(present_ladder_)) return;
+        if (install_present_hook()) { ladder_success(present_ladder_); return; }
+        ladder_fail_round(present_ladder_, "Present hook install failed", "HTML rendering disabled");
+    }
+
+    // Worker thread schedules, game thread installs (the window's own
+    // thread must own the WndProc swap). 'pending' keeps exactly one
+    // install in flight so the scheduler is never flooded.
+    void ensure_wndproc_hook() {
+        if (original_wndproc_.load(std::memory_order_acquire)) return;
+
+        if (shutting_down_.load(std::memory_order_acquire) ||
+            should_stop_.load(std::memory_order_acquire)) return;
+            
+        if (wndproc_ladder_.pending.load(std::memory_order_acquire)) return;
+        if (!ladder_due(wndproc_ladder_)) return;
+        wndproc_ladder_.pending.store(true, std::memory_order_release);
+
+        MainThreadScheduler::instance().schedule([this]() {
+            if (!shutting_down_.load(std::memory_order_acquire) &&
+                !should_stop_.load(std::memory_order_acquire)) {
+                if (install_wndproc_hook()) ladder_success(wndproc_ladder_);
+                else ladder_fail_round(wndproc_ladder_, "WndProc (mouse/keyboard) hook install failed", "HTML input disabled");
+            }
+
+            wndproc_ladder_.pending.store(false, std::memory_order_release);
+        });
+    }
+
+
     std::vector<std::filesystem::path> find_html_ui_directories() {
         std::vector<std::filesystem::path> paths;
 
@@ -1976,12 +2090,17 @@ private:
         ComPtr<IDXGISwapChain> temp_swap_chain;
         D3D_FEATURE_LEVEL fl;
 
-        if (FAILED(D3D11CreateDeviceAndSwapChain(0, D3D_DRIVER_TYPE_HARDWARE, 0, 0, 0, 0, 
-            D3D11_SDK_VERSION, &sd, &temp_swap_chain, &dev, &fl, &ctx))) {
-            MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - UI Framework: Failed to create temp swap chain for hook");
-            });
+        // KH_UI_HOOK_LADDER: failures below record the phase and status
+        // and return false; the ladder (ensure_present_hook) decides when
+        // to retry and reports once, on the third strike. Nothing partial
+        // survives a failed attempt: the temp device/swap chain are ComPtr,
+        // a created-but-not-enabled hook is removed before returning.
+        const HRESULT khsc_hr = D3D11CreateDeviceAndSwapChain(0, D3D_DRIVER_TYPE_HARDWARE, 0, 0, 0, 0, 
+            D3D11_SDK_VERSION, &sd, &temp_swap_chain, &dev, &fl, &ctx);
 
+        if (FAILED(khsc_hr)) {
+            present_ladder_.fail_phase.store(1, std::memory_order_release);
+            present_ladder_.status.store(static_cast<int32_t>(khsc_hr), std::memory_order_release);
             instance_ptr_.store(nullptr, std::memory_order_release);
             return false;
         }
@@ -1989,31 +2108,30 @@ private:
         void** vtable = *(void***)temp_swap_chain.Get();
         void* present_addr = vtable[8];
 
-        // Only initialize MinHook once
+        // Only initialize MinHook once (framework ensure_minhook is bool-only:
+        // status -1 = unavailable, as the render side records it)
         if (!ensure_minhook()) {
-            MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - UI Framework: MinHook init failed");
-            });
-
+            present_ladder_.fail_phase.store(2, std::memory_order_release);
+            present_ladder_.status.store(-1, std::memory_order_release);
             instance_ptr_.store(nullptr, std::memory_order_release);
             return false;
         }
 
-        if (MH_CreateHook(present_addr, &hooked_present, (void**)&original_present_) != MH_OK) {
-            MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - UI Framework: Failed to create Present hook");
-            });
-
+        MH_STATUS khmh_st = MH_CreateHook(present_addr, &hooked_present, (void**)&original_present_);
+        
+        if (khmh_st != MH_OK) {
+            present_ladder_.fail_phase.store(3, std::memory_order_release);
+            present_ladder_.status.store(static_cast<int32_t>(khmh_st), std::memory_order_release);
             instance_ptr_.store(nullptr, std::memory_order_release);
             return false;
         }
 
-        if (MH_EnableHook(present_addr) != MH_OK) {
-            MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - UI Framework: Failed to enable Present hook");
-            });
+        khmh_st = MH_EnableHook(present_addr);
 
-            MH_RemoveHook(present_addr);
+        if (khmh_st != MH_OK) {
+            present_ladder_.fail_phase.store(4, std::memory_order_release);
+            present_ladder_.status.store(static_cast<int32_t>(khmh_st), std::memory_order_release);
+            MH_RemoveHook(present_addr);   // nothing partial survives the round
             instance_ptr_.store(nullptr, std::memory_order_release);
             return false;
         }
@@ -2147,29 +2265,22 @@ private:
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 
+    // Game thread (scheduled by ensure_wndproc_hook). KH_UI_HOOK_LADDER:
+    // failures record the phase and status and return false; the ladder
+    // retries and reports once, on the third strike. A missing window is
+    // the transient this ladder exists for.
     bool install_wndproc_hook() {
         if (original_wndproc_.load(std::memory_order_acquire)) return true;
         HWND hwnd = find_game_window();
 
         if (!hwnd) {
-            MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - UI Framework: Could not find game window for mouse hook");
-            });
-
+            wndproc_ladder_.fail_phase.store(1, std::memory_order_release);
+            wndproc_ladder_.status.store(0, std::memory_order_release);
             return false;
         }
 
         game_hwnd_.store(hwnd, std::memory_order_release);
         HWND stored_hwnd = hwnd;
-
-        if (!stored_hwnd) {
-            MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - UI Framework: Could not find game window for mouse hook");
-            });
-
-            return false;
-        }
-
         WNDPROC prev = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(stored_hwnd, GWLP_WNDPROC));
         original_wndproc_.store(prev, std::memory_order_release);
 
@@ -2179,12 +2290,10 @@ private:
 
         if (!actual_prev) {
             DWORD err = GetLastError();
-            original_wndproc_.store(nullptr, std::memory_order_release);
-
-            MainThreadScheduler::instance().schedule([err]() {
-                report_error("KH - UI Framework: Failed to hook WndProc, error: " + std::to_string(err));
-            });
-
+            original_wndproc_.store(nullptr, std::memory_order_release);   // nothing partial survives the round
+            game_hwnd_.store(nullptr, std::memory_order_release);
+            wndproc_ladder_.fail_phase.store(2, std::memory_order_release);
+            wndproc_ladder_.status.store(static_cast<int32_t>(err), std::memory_order_release);
             return false;
         }
         
@@ -2672,5 +2781,7 @@ UIFramework::PresentFn UIFramework::original_present_ = nullptr;
 void* UIFramework::hooked_present_addr_ = nullptr;
 std::atomic<bool> UIFramework::hook_installed_{false};
 std::mutex UIFramework::hook_mutex_;
+UIFramework::HookLadder UIFramework::present_ladder_;
+UIFramework::HookLadder UIFramework::wndproc_ladder_;
 std::atomic<WNDPROC> UIFramework::original_wndproc_{nullptr};
 std::atomic<HWND> UIFramework::game_hwnd_{nullptr};

@@ -25,10 +25,6 @@ enum class DepthMode : int {
 // 2.31 m in front of itself at 73 m.
 static constexpr float KH_BIAS_CLAMP = -4.0e-6f;
 
-static constexpr UINT KH_QUERY_POINTS_BASE = 1024;   // initial GPU capacity
-                                                     // the query set grows on demand (no point
-                                                     // cap)
-
 // DYNAMIC-REGISTRATION CONTRACT (FBX phase-1 groundwork; plan section 2): -
 // STORAGE: a block-chained pointer-slot table (KH_MESH_ROOT blocks of
 // KH_MESH_BLOCK entries, allocated on demand) - append-only, with STABLE
@@ -564,6 +560,24 @@ inline int mesh_id_clamp(int id) {
     return (id >= 0 && static_cast<uint32_t>(id) < mesh_count()) ? id : 0;
 }
 
+// GAME-THREAD lookup that also covers ids APPENDED but not yet PUBLISHED - an
+// .fbx whose publish kh_fbx_register deferred to the next flush park. The one
+// reader that takes append_mx, and it may: it runs on the appending thread
+// (the SQF handlers) and never on a draw path, so the "readers never take
+// it" rule for the render thread is untouched. Null when id is outside the
+// appended range; callers fall back to mesh 0 exactly as mesh_id_clamp does.
+// Consumers: kh_apply_native_size, kh_apply_material_update - the two
+// game-thread sites that size an object against its mesh and would otherwise
+// read the BOX's native size / submesh table for a deferred mesh.
+inline const MeshDef* kh_mesh_def_staged(int id) {
+    if (id < 0) return nullptr;
+    MeshStore& s = mesh_store();
+    std::lock_guard<std::mutex> g(s.append_mx);
+    const uint32_t khms_id = static_cast<uint32_t>(id);
+    if (khms_id >= s.appended) return nullptr;
+    return s.root[khms_id >> KH_MESH_BLOCK_SHIFT][khms_id & (KH_MESH_BLOCK - 1u)];
+}
+
 struct KhMaterialMap {
     std::string path;   // RESOLVED disk path ("" = slot empty)
 };
@@ -806,6 +820,12 @@ struct Resources {
     ID3D11Buffer*             locality_buf = nullptr;   // extended (>16) caster reach list
     ID3D11ShaderResourceView* locality_srv = nullptr;   // t2 at the mask cast fire
     UINT                      locality_cap = 0;   // casters the list holds
+    // KH_CAST_OCC: the caster-occupancy grid at t35. A world-XZ texture whose
+    // texel holds the min/max Y of every caster reach volume covering that
+    // column, so PSMaskCast's "is this point near a caster" gate is ONE Load
+    // instead of a per-pixel loop over every caster.
+    ID3D11Texture2D*          castocc_tex = nullptr;
+    ID3D11ShaderResourceView* castocc_srv = nullptr;
     bool                     initialized = false;
 
     // Scene HDR color capture (resolved copy of the bound RTV) --- ---
@@ -874,20 +894,6 @@ struct Resources {
     void*                     depth_res_identity = nullptr;   // identity only, never dereferenced
     UINT                      depth_sample_count = 0;
 
-    // Compute (depth queries / visibility)
-    ID3D11ComputeShader*      cs_visibility = nullptr;
-    ID3D11ComputeShader*      cs_sample_depth = nullptr;
-    UINT                      cs_compiled_for_samples = 0;   // recompile when MSAA count changes
-    ID3D11Buffer*             cs_constant_buffer = nullptr;
-    ID3D11Buffer*             points_buffer = nullptr;   // dynamic structured, CPU write
-    ID3D11ShaderResourceView* points_srv = nullptr;
-    UINT                      query_cap = 0;   // points the query set holds
-                                                          // (grows via ensure_query_buffers)
-    ID3D11Buffer*             output_buffer = nullptr;   // default structured, UAV
-    ID3D11UnorderedAccessView* output_uav = nullptr;
-    ID3D11Buffer*             staging_buffer = nullptr;   // synchronous readback (immediate commands)
-    ID3D11Buffer*             staging_async[2] = {};   // double-buffered async readback
-
     void release_bb_capture() {
         if (bb_tex) { bb_tex->Release(); bb_tex = nullptr; }
         if (bb_srv) { bb_srv->Release(); bb_srv = nullptr; }
@@ -925,12 +931,6 @@ struct Resources {
         depth_res_identity = nullptr;
         depth_sample_count = 0;
         g_eds_memo_res = nullptr;   // the fast-path key dies with the SRV
-    }
-
-    void release_compute_shaders() {
-        KH_SAFE_RELEASE(cs_visibility);
-        KH_SAFE_RELEASE(cs_sample_depth);
-        cs_compiled_for_samples = 0;
     }
 
     void release() {
@@ -1022,6 +1022,8 @@ struct Resources {
         KH_SAFE_RELEASE(locality_srv);
         KH_SAFE_RELEASE(locality_buf);
         locality_cap = 0;
+        KH_SAFE_RELEASE(castocc_srv);   // KH_CAST_OCC
+        KH_SAFE_RELEASE(castocc_tex);
         KH_SAFE_RELEASE(constant_buffer);
         KH_SAFE_RELEASE(composite_cb);
         KH_SAFE_RELEASE(frame_cb);
@@ -1095,20 +1097,10 @@ struct Resources {
         KH_SAFE_RELEASE(dss_white);
         white_tried = false;   // the device died; the next ensure may retry
         white_ready = false;
-        KH_SAFE_RELEASE(cs_constant_buffer);
-        KH_SAFE_RELEASE(points_buffer);
-        KH_SAFE_RELEASE(points_srv);
-        KH_SAFE_RELEASE(output_buffer);
-        KH_SAFE_RELEASE(output_uav);
-        KH_SAFE_RELEASE(staging_buffer);
-        KH_SAFE_RELEASE(staging_async[0]);
-        KH_SAFE_RELEASE(staging_async[1]);
-        query_cap = 0;
         release_bb_capture();
         release_fx_chain();
         release_scene_capture();
         release_depth_srv();
-        release_compute_shaders();
         initialized = false;
     }
 };
@@ -1577,13 +1569,6 @@ inline std::string make_render_uid() {
     return std::string("khr_") + UIDGenerator::generate();
 }
 
-static std::vector<float> g_query_points_pending;   // SQF coords, xyz triplets
-static bool     g_query_pending = false;
-static UINT     g_async_write_idx = 0;
-static UINT     g_async_inflight_count[2] = { 0, 0 };
-static std::vector<float> g_vis_results_cpu;   // float4 per point
-static UINT     g_vis_result_count = 0;
-static uint64_t g_vis_result_frame = 0;
 static uint64_t g_flush_frame = 0;
 static std::atomic<uint64_t> g_flush_frame_pub{0};
 
@@ -1828,10 +1813,6 @@ static const char* g_hlsl_effect2 =
 
 static const char* g_hlsl_effect3 =
 #include "hlsl/effect3.hlsl"
-;
-
-static const char* g_cs_hlsl =
-#include "hlsl/cs.hlsl"
 ;
 
 struct alignas(16) ConstantData {
@@ -2441,13 +2422,6 @@ inline int kh_fill_fk_veto(ConstantData& cbf, std::vector<KhFkVetoCand>& list,
 // Game-thread veto scratch for the flush (collected in flush_locked's staging
 // under the draw-list mutex, consumed before its frame upload).
 static std::vector<KhFkVetoCand> g_khf_veto_cands;
-
-struct alignas(16) CSConstantData {
-    float view_proj[4][4];
-    float depth_params[4];   // m22, m32, viewport MinDepth, viewport MaxDepth
-    float screen_count[4];   // width, height, count, unused
-    float pixel_query[4];   // x, y, unused, unused
-};
 
 inline std::string hr_str(HRESULT hr) {
     char b[16];
@@ -4748,7 +4722,27 @@ struct KhCullSet {
     float p[4][4] = {};   // left, right, bottom, top - normalised
     float bias[3] = {};   // add to a WORLD centre to reach the matrix's space
     bool  valid = false;
+    // KH_CULL_BACK: the four side planes all pass through the camera apex, so
+    // together they bound a DOUBLE cone - the frustum in front AND its mirror
+    // behind. A cluster directly behind the camera passes all four and is
+    // fully staged, uploaded and drawn.
+    //
+    // The question is only "is this object behind the camera", which has
+    // nothing to do with depth encoding - so it must NOT be asked with a near
+    // plane taken from the matrix's column 2 (that is the depth encode, and
+    // the injection re-encodes depth per object, which rejected objects that
+    // were plainly on screen). The four side normals point inward, so their
+    // sum points along the view direction: normalise it for the camera
+    // forward, and the apex is the camera position. Both are recovered here
+    // already and both are encode-independent. OFF for the seam / mirror cull
+    // (back_on stays false there): the mirror renders with a shorter near
+    // plane. Mode 478 disables.
+    float fwd[3] = {};
+    float apex[3] = {};
+    bool  back_ok = false;
+    bool  back_on = false;
 };
+static uint64_t g_cull_back_rejects = 0;   // objects the forward test found wholly behind the camera
 
 // Apex of the frustum: the point on planes 0, 1 and 2 at once. Cramer over
 // the 3x3 of normals; a singular system is a degenerate frustum and the
@@ -4806,6 +4800,19 @@ inline void kh_cull_build(const float khc_vp[4][4], const float khc_cam[3], KhCu
                                 khc_o.p[3][2] * khc_ap[2] + khc_o.p[3][3]);
     if (khc_res > g_cull_apex_max) g_cull_apex_max = khc_res;
     if (!(khc_res <= KH_CULL_APEX_TOL)) { g_cull_standdowns++; return; }
+    {   // KH_CULL_BACK: forward from the inward side normals; apex is the eye.
+        float khc_f[3] = { 0.0f, 0.0f, 0.0f };
+        for (int khc_i = 0; khc_i < 4; ++khc_i)
+            for (int khc_c = 0; khc_c < 3; ++khc_c) khc_f[khc_c] += khc_o.p[khc_i][khc_c];
+        const float khc_fl = sqrtf(khc_f[0] * khc_f[0] + khc_f[1] * khc_f[1] + khc_f[2] * khc_f[2]);
+        if (khc_fl > 1.0e-6f) {
+            for (int khc_c = 0; khc_c < 3; ++khc_c) khc_o.fwd[khc_c] = khc_f[khc_c] / khc_fl;
+            khc_o.apex[0] = khc_ap[0]; khc_o.apex[1] = khc_ap[1]; khc_o.apex[2] = khc_ap[2];
+            khc_o.back_ok = g_dbg_mode.load(std::memory_order_relaxed) != 478;
+        } else {
+            khc_o.back_ok = false;   // degenerate: the back half stays unculled
+        }
+    }
     // THE RECOVERED ORIGIN. The apex is the camera expressed in the matrix's
     // own space, so cam minus apex is the rebase this pass applied. Accept
     // only the two this file actually uses - none, and the camera - so a
@@ -4845,6 +4852,13 @@ inline bool kh_mesh_visible(const KhCullSet& khc_s, const float khc_ctr[3], floa
         const float khc_d = khc_s.p[khc_i][0] * khc_q[0] + khc_s.p[khc_i][1] * khc_q[1] +
                             khc_s.p[khc_i][2] * khc_q[2] + khc_s.p[khc_i][3];
         if (khc_d < -khc_b) return false;
+    }
+
+    if (khc_s.back_on && khc_s.back_ok) {   // KH_CULL_BACK: the mirror half of the double cone
+        const float khc_dn = khc_s.fwd[0] * (khc_q[0] - khc_s.apex[0]) +
+                             khc_s.fwd[1] * (khc_q[1] - khc_s.apex[1]) +
+                             khc_s.fwd[2] * (khc_q[2] - khc_s.apex[2]);
+        if (khc_dn < -khc_b) { g_cull_back_rejects++; return false; }
     }
 
     return true;
@@ -5120,6 +5134,18 @@ inline void kh_mesh_cache_trim() {
 
 // Registration tail shared by the ufbx import and the binary cache hit: name
 // the def, append, publish + GPU top-up under the park.
+// KH_MESH_PUBLISH_DEFER (26760): a publish kh_fbx_register could not park
+// for. Consumed at the head of flush_locked, which holds the park for its
+// whole body - the contract's safe point - and tops the VBs up in the same
+// window. Game thread both sides; the atomic only keeps the compiler honest
+// across the flush's hook re-entries. Census lanes: meshPublishDefers /
+// meshPublishLands (expect 0 / 0; a non-zero pair is a park that was refused
+// three times at an SQF call, which flush_frame's lockFailedFrames will
+// mirror).
+static std::atomic<bool> g_mesh_publish_pending{false};
+static uint64_t g_mesh_publish_defers = 0;
+static uint64_t g_mesh_publish_lands = 0;
+
 inline bool kh_fbx_register(MeshDef&& d, const std::string& path, int& out_id, std::string& err) {
     d.name = path;
     std::transform(d.name.begin(), d.name.end(), d.name.begin(), ::tolower);
@@ -5130,8 +5156,22 @@ inline bool kh_fbx_register(MeshDef&& d, const std::string& path, int& out_id, s
     // point, so no draw can race the count/buffer pair.
     const int id = kh_mesh_append(std::move(d));
     if (id < 0) { err = "mesh registry full"; return false; }
-    {
+    // (26760) ScopedGraphicsLock is a TIMED try (flush_frame's three-attempt
+    // loop is the precedent) and this site never read acquired(): a refused
+    // park ran kh_mesh_publish and the VB top-up UNPARKED, growing
+    // g_res.mesh_vb under a render thread that indexes it - the exact race
+    // the contract above forbids. Now: three attempts, and on exhaustion the
+    // publish is DEFERRED to the next flush_locked (g_mesh_publish_pending).
+    // The id is stable either way - append is the allocation, publish is
+    // only visibility - and the game-thread sizing sites read the appended
+    // def through kh_mesh_def_staged, so a deferred mesh still spawns at its
+    // native size. Until the publish lands, every draw path clamps the id to
+    // mesh 0 (mesh_id_clamp): one flush of box at most, never a hole.
+    bool khfb_published = false;
+
+    for (int khfb_try = 0; khfb_try < 3 && !khfb_published; ++khfb_try) {
         RVExtBridge::ScopedGraphicsLock khfb_lock;
+        if (!khfb_lock.acquired()) continue;
         kh_mesh_publish();
         ID3D11Device* dev = RVExtBridge::get_d3d_device();
 
@@ -5142,7 +5182,15 @@ inline bool kh_fbx_register(MeshDef&& d, const std::string& path, int& out_id, s
             // report and let the retry own it.
             if (!ve.empty()) report_error_once_safe("KH fbx '" + path + "': " + ve);
         }
+
+        khfb_published = true;
     }
+
+    if (!khfb_published) {
+        g_mesh_publish_pending.store(true, std::memory_order_relaxed);
+        g_mesh_publish_defers++;
+    }
+
     out_id = id;
     return true;
 }
@@ -5771,7 +5819,11 @@ inline int kh_fbx_mesh_id(const std::string& request, std::string& err) {
 // MATERIAL DRAW SUPPORT (both loops share these).
 
 inline void kh_apply_native_size(RenderObject& o) {
-    const MeshDef& md = mesh_def(mesh_id_clamp(o.mesh));
+    // Staged lookup (26760): a just-imported .fbx whose publish was deferred
+    // is appended but not published; mesh_id_clamp would hand back the BOX
+    // and the object would spawn at 1 m. Game thread only, like every caller.
+    const MeshDef* khn_sd = kh_mesh_def_staged(o.mesh);
+    const MeshDef& md = khn_sd ? *khn_sd : mesh_def(0);
 
     for (int k = 0; k < 3; ++k) {
         // Sign-free: |v| is the multiplier, and an exact 0 keeps its historic
@@ -5917,7 +5969,10 @@ inline uint32_t kh_draw_textured(ID3D11DeviceContext* ctx, ID3D11Device* dev,
 
 inline bool kh_apply_material_update(RenderObject& obj, const game_value& val, std::string& err) {
     if (val.type_enum() != game_data_type::ARRAY) { err = "value must be an array of material entries"; return false; }
-    const MeshDef& md = mesh_def(mesh_id_clamp(obj.mesh));
+    // Staged lookup (26760): see kh_apply_native_size - the submesh table
+    // must be the object's own mesh's, published or not.
+    const MeshDef* khum_sd = kh_mesh_def_staged(obj.mesh);
+    const MeshDef& md = khum_sd ? *khum_sd : mesh_def(0);
 
     // Copy-on-write base: the existing set (if any), sized to this mesh.
     KhMaterialSet next;
@@ -6109,77 +6164,6 @@ inline bool kh_apply_material_update(RenderObject& obj, const game_value& val, s
     for (const auto& s : next.slots) if (s.used) { next.any = true; break; }
     obj.materials = std::make_shared<const KhMaterialSet>(std::move(next));
     return true;
-}
-
-// Failure zeroes the capacity so the next ensure rebuilds from the base - the
-// fail direction is the stock error path, never a half-sized set. Query-point
-// GPU set, grow-on-demand: the points SRV, the results UAV and the
-// synchronous + async staging twins are sized TOGETHER so every dispatch path
-// sees one capacity.
-inline std::string ensure_query_buffers(ID3D11Device* dev, UINT need) {
-    if (need == 0) need = 1;
-    if (g_res.query_cap >= need && g_res.points_buffer) return "";
-    UINT khqb_cap = KH_QUERY_POINTS_BASE;
-    while (khqb_cap < need) khqb_cap *= 2;
-    KH_SAFE_RELEASE(g_res.points_srv);
-    KH_SAFE_RELEASE(g_res.points_buffer);
-    KH_SAFE_RELEASE(g_res.output_uav);
-    KH_SAFE_RELEASE(g_res.output_buffer);
-    KH_SAFE_RELEASE(g_res.staging_buffer);
-    KH_SAFE_RELEASE(g_res.staging_async[0]);
-    KH_SAFE_RELEASE(g_res.staging_async[1]);
-    g_async_inflight_count[0] = g_async_inflight_count[1] = 0;   // in-flight copies died with the buffers
-    g_res.query_cap = 0;
-    HRESULT khqb_hr = S_OK;
-
-    {   // Points input: dynamic structured buffer, CPU-writable, SRV
-        D3D11_BUFFER_DESC bd = {};
-        bd.ByteWidth = sizeof(float) * 4 * khqb_cap;
-        bd.Usage = D3D11_USAGE_DYNAMIC;
-        bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-        bd.StructureByteStride = sizeof(float) * 4;
-        khqb_hr = dev->CreateBuffer(&bd, nullptr, &g_res.points_buffer);
-        if (FAILED(khqb_hr)) return "Create points buffer " + hr_str(khqb_hr);
-        D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
-        sd.Format = DXGI_FORMAT_UNKNOWN;
-        sd.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-        sd.Buffer.NumElements = khqb_cap;
-        khqb_hr = dev->CreateShaderResourceView(g_res.points_buffer, &sd, &g_res.points_srv);
-        if (FAILED(khqb_hr)) return "Create points SRV " + hr_str(khqb_hr);
-    }
-
-    {   // Results output: default structured buffer with UAV + staging twins
-        D3D11_BUFFER_DESC bd = {};
-        bd.ByteWidth = sizeof(float) * 4 * khqb_cap;
-        bd.Usage = D3D11_USAGE_DEFAULT;
-        bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-        bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-        bd.StructureByteStride = sizeof(float) * 4;
-        khqb_hr = dev->CreateBuffer(&bd, nullptr, &g_res.output_buffer);
-        if (FAILED(khqb_hr)) return "Create output buffer " + hr_str(khqb_hr);
-        D3D11_UNORDERED_ACCESS_VIEW_DESC ud = {};
-        ud.Format = DXGI_FORMAT_UNKNOWN;
-        ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-        ud.Buffer.NumElements = khqb_cap;
-        khqb_hr = dev->CreateUnorderedAccessView(g_res.output_buffer, &ud, &g_res.output_uav);
-        if (FAILED(khqb_hr)) return "Create output UAV " + hr_str(khqb_hr);
-        bd.Usage = D3D11_USAGE_STAGING;
-        bd.BindFlags = 0;
-        bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        bd.MiscFlags = 0;
-        bd.StructureByteStride = 0;
-        khqb_hr = dev->CreateBuffer(&bd, nullptr, &g_res.staging_buffer);
-        if (FAILED(khqb_hr)) return "Create staging buffer " + hr_str(khqb_hr);
-        khqb_hr = dev->CreateBuffer(&bd, nullptr, &g_res.staging_async[0]);
-        if (FAILED(khqb_hr)) return "Create staging async 0 " + hr_str(khqb_hr);
-        khqb_hr = dev->CreateBuffer(&bd, nullptr, &g_res.staging_async[1]);
-        if (FAILED(khqb_hr)) return "Create staging async 1 " + hr_str(khqb_hr);
-    }
-
-    g_res.query_cap = khqb_cap;
-    return "";
 }
 
 // It is called only from the two deferral returns in ensure_resources, so a
@@ -6618,29 +6602,6 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         if (FAILED(hr)) { g_res.release(); return "Create frame CB " + hr_str(hr); }
         hr = dev->CreateBuffer(&bd, nullptr, &g_res.composite_frame_cb);
         if (FAILED(hr)) { g_res.release(); return "Create composite frame CB " + hr_str(hr); }
-    }
-
-    {
-        // This block is kept because ensure_resources is the earliest
-        // guaranteed pass and creating it twice is impossible - the ensure
-        // below early-returns on a live pointer. Both consumers of
-        // cs_constant_buffer (run_depth_compute, flush_dispatch_visibility)
-        // call ensure_compute_shaders first, so neither can now reach a null.
-        D3D11_BUFFER_DESC bd = {};
-        bd.ByteWidth = sizeof(CSConstantData);
-        bd.Usage = D3D11_USAGE_DYNAMIC;
-        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        hr = dev->CreateBuffer(&bd, nullptr, &g_res.cs_constant_buffer);
-        if (FAILED(hr)) { g_res.release(); return "Create CS CB " + hr_str(hr); }
-    }
-
-    // Query-point GPU set (points SRV + results UAV + staging twins): created
-    // at the base capacity here, grown on demand by the same helper from the
-    // dispatch paths (no point cap).
-    {
-        const std::string khqb_err = ensure_query_buffers(dev, KH_QUERY_POINTS_BASE);
-        if (!khqb_err.empty()) { g_res.release(); return khqb_err; }
     }
 
     {
@@ -7917,48 +7878,6 @@ inline bool ensure_sun_depth4(ID3D11Device* dev) {   // outer band
     return kh_sun_map_ensure(dev, kh_sun_out_size(), g_res.sun4_tex, g_res.sun4_dsv, g_res.sun4_srv);
 }
 
-inline std::string ensure_compute_shaders(ID3D11Device* dev) {
-    // THE COMPUTE PATH OWNS ITS OWN CONSTANT BUFFER.
-    if (!g_res.cs_constant_buffer) {
-        D3D11_BUFFER_DESC khcs_bd = {};
-        khcs_bd.ByteWidth = sizeof(CSConstantData);
-        khcs_bd.Usage = D3D11_USAGE_DYNAMIC;
-        khcs_bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        khcs_bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        const HRESULT khcs_hr = dev->CreateBuffer(&khcs_bd, nullptr, &g_res.cs_constant_buffer);
-        if (FAILED(khcs_hr)) return "Create CS CB " + hr_str(khcs_hr);
-    }
-    if (g_res.cs_visibility && g_res.cs_compiled_for_samples == g_res.depth_sample_count) return "";
-    g_res.release_compute_shaders();
-
-    const D3D_SHADER_MACRO defines[] = {
-        { "MSAA_DEPTH", g_res.depth_sample_count > 1 ? "1" : "0" },
-        { nullptr, nullptr }
-    };
-
-    ID3DBlob* blob = nullptr;
-    // KH_SHADER_MT: g_cs_hlsl is the file's largest single unit and it
-    // compiles twice. g_cs_hlsl is a global literal, so only the scope's
-    // lifetime matters here.
-    const KhShaderJob khsm_jobs[] = {
-        { g_cs_hlsl, "CSVisibility",  "cs_5_0", defines, 0 },
-        { g_cs_hlsl, "CSSampleDepth", "cs_5_0", defines, 0 },
-    };
-    KhShaderMtScope khsm_scope(khsm_jobs, _countof(khsm_jobs));
-    std::string err = compile_shader(g_cs_hlsl, "CSVisibility", "cs_5_0", defines, &blob);
-    if (!err.empty()) return err;
-    HRESULT hr = dev->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &g_res.cs_visibility);
-    blob->Release();
-    if (FAILED(hr)) return "CreateComputeShader(visibility) " + hr_str(hr);
-    err = compile_shader(g_cs_hlsl, "CSSampleDepth", "cs_5_0", defines, &blob);
-    if (!err.empty()) { g_res.release_compute_shaders(); return err; }
-    hr = dev->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &g_res.cs_sample_depth);
-    blob->Release();
-    if (FAILED(hr)) { g_res.release_compute_shaders(); return "CreateComputeShader(sampleDepth) " + hr_str(hr); }
-    g_res.cs_compiled_for_samples = g_res.depth_sample_count;
-    return "";
-}
-
 // Reading capture is what caught it, which is the same discipline that caught
 // the dbg_ctl block placement one build earlier. Pipeline state snapshot /
 // restore (only what we touch). Constant buffers are per-stage: b0 of BOTH VS
@@ -8092,40 +8011,6 @@ struct KhOmSave {
     }
 };
 
-// Compute-stage state snapshot (only what compute dispatches touch)
-struct ComputeStateBackup {
-    ID3D11ComputeShader*       cs = nullptr;
-    ID3D11ShaderResourceView*  srvs[2] = {};
-    ID3D11UnorderedAccessView* uav = nullptr;
-    ID3D11Buffer*              cb0 = nullptr;
-    ID3D11RenderTargetView*    rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
-    ID3D11DepthStencilView*    dsv = nullptr;
-
-    void capture(ID3D11DeviceContext* ctx) {
-        ctx->CSGetShader(&cs, nullptr, nullptr);
-        ctx->CSGetShaderResources(0, 2, srvs);
-        ctx->CSGetUnorderedAccessViews(0, 1, &uav);
-        ctx->CSGetConstantBuffers(0, 1, &cb0);
-        ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs, &dsv);
-    }
-
-    void restore(ID3D11DeviceContext* ctx) {
-        ctx->CSSetShader(cs, nullptr, 0);
-        ctx->CSSetShaderResources(0, 2, srvs);
-        UINT counts[1] = { static_cast<UINT>(-1) };
-        ctx->CSSetUnorderedAccessViews(0, 1, &uav, counts);
-        ctx->CSSetConstantBuffers(0, 1, &cb0);
-        ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs, dsv);
-        KH_SAFE_RELEASE(cs);
-        KH_SAFE_RELEASE(srvs[0]);
-        KH_SAFE_RELEASE(srvs[1]);
-        KH_SAFE_RELEASE(uav);
-        KH_SAFE_RELEASE(cb0);
-        for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) KH_SAFE_RELEASE(rtvs[i]);
-        KH_SAFE_RELEASE(dsv);
-    }
-};
-
 inline float effect_time_seconds();   // defined below; the snapshot
                                       // timestamp at the depth copy needs it
 
@@ -8235,142 +8120,6 @@ inline void mul_4x4(const float a[4][4], const float b[4][4], float out[4][4]) {
     for (int r = 0; r < 4; ++r)
         for (int c = 0; c < 4; ++c)
             out[r][c] = a[r][0]*b[0][c] + a[r][1]*b[1][c] + a[r][2]*b[2][c] + a[r][3]*b[3][c];
-}
-
-enum class ComputeKernel : int { Visibility = 0, SampleDepth = 1 };
-
-inline std::string run_depth_compute(ComputeKernel kernel, UINT count,
-                                     float pixel_x, float pixel_y,
-                                     float* out_results, UINT out_capacity) {
-    if (!RVExtBridge::is_initialized()) return "RVExtBridge not initialized";
-    ID3D11Device* dev = RVExtBridge::get_d3d_device();
-    ID3D11DeviceContext* ctx = RVExtBridge::get_d3d_device_context();
-    if (!dev || !ctx) return "device/context null";
-    RVExtBridge::ScopedGraphicsLock lock;
-    if (!lock.acquired()) return "SKIP: graphics lock not acquired";
-    // Everything this function actually consumes is created by
-    // ensure_depth_srv, ensure_compute_shaders (the CS CB included) and
-    // ensure_query_buffers, every one of them called below and every one
-    // self-sufficient, so the deferral is skipped past rather than returned.
-    std::string err = ensure_resources(dev);
-    if (!err.empty() &&
-        !(err == KH_SHADERS_COMPILING &&
-          g_dbg_mode.load(std::memory_order_relaxed) != 408)) return err;
-    UINT depth_w = 0, depth_h = 0;
-    err = ensure_depth_srv(dev, ctx, &depth_w, &depth_h);
-    if (!err.empty()) return "depth SRV: " + err;
-    err = ensure_compute_shaders(dev);
-    if (!err.empty()) return "compute: " + err;
-    RVExtBridge::ProjectionViewTransform pv = {};
-
-    if (!RVExtBridge::get_projection_view_transform(pv)) {
-        return "get_projection_view_transform failed";
-    }
-
-    // Viewport depth range for the depth-value remap
-    float min_d = 0.0f, max_d = 1.0f;
-
-    {
-        UINT n_vp = 1;
-        D3D11_VIEWPORT vp = {};
-        ctx->RSGetViewports(&n_vp, &vp);
-        if (n_vp >= 1) { min_d = vp.MinDepth; max_d = vp.MaxDepth; }
-    }
-
-    CSConstantData cbd = {};
-    mul_4x4(pv.view, pv.projection, cbd.view_proj);
-    cbd.depth_params[0] = pv.projection[2][2];
-    cbd.depth_params[1] = pv.projection[3][2];
-    cbd.depth_params[2] = min_d;
-    cbd.depth_params[3] = max_d;
-    cbd.screen_count[0] = static_cast<float>(depth_w);
-    cbd.screen_count[1] = static_cast<float>(depth_h);
-    cbd.screen_count[2] = static_cast<float>(count);
-    cbd.pixel_query[0] = pixel_x;
-    cbd.pixel_query[1] = pixel_y;
-
-    {
-        D3D11_MAPPED_SUBRESOURCE mapped = {};
-        if (!g_res.cs_constant_buffer) return "compute CB missing";
-        HRESULT hr = ctx->Map(g_res.cs_constant_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
-        if (FAILED(hr)) return "CS CB map " + hr_str(hr);
-        memcpy(mapped.pData, &cbd, sizeof(cbd));
-        ctx->Unmap(g_res.cs_constant_buffer, 0);
-    }
-
-    ComputeStateBackup backup;
-    backup.capture(ctx);
-
-    // Unbind OM so the depth resource may legally be bound as an SRV
-    ctx->OMSetRenderTargets(0, nullptr, nullptr);
-    ID3D11ShaderResourceView* srvs[2] = { g_res.depth_srv, g_res.points_srv };
-    ctx->CSSetShaderResources(0, 2, srvs);
-    UINT counts[1] = { 0 };
-    ctx->CSSetUnorderedAccessViews(0, 1, &g_res.output_uav, counts);
-    ctx->CSSetConstantBuffers(0, 1, &g_res.cs_constant_buffer);
-
-    UINT result_count;
-    if (kernel == ComputeKernel::Visibility) {
-        ctx->CSSetShader(g_res.cs_visibility, nullptr, 0);
-        ctx->Dispatch((count + 63) / 64, 1, 1);
-        result_count = count;
-    } else {
-        ctx->CSSetShader(g_res.cs_sample_depth, nullptr, 0);
-        ctx->Dispatch(1, 1, 1);
-        result_count = 1;
-    }
-
-    // Unbind our SRVs/UAV before restoring OM (avoids hazard warnings when
-    // the depth SRV and re-bound DSV briefly coexist)
-    ID3D11ShaderResourceView* null_srvs[2] = { nullptr, nullptr };
-    ctx->CSSetShaderResources(0, 2, null_srvs);
-    ID3D11UnorderedAccessView* null_uav = nullptr;
-    ctx->CSSetUnorderedAccessViews(0, 1, &null_uav, counts);
-    backup.restore(ctx);
-
-    // Readback
-    D3D11_BOX mesh = { 0, 0, 0, result_count * sizeof(float) * 4, 1, 1 };
-    ctx->CopySubresourceRegion(g_res.staging_buffer, 0, 0, 0, 0, g_res.output_buffer, 0, &mesh);
-    D3D11_MAPPED_SUBRESOURCE mapped = {};
-    HRESULT hr = ctx->Map(g_res.staging_buffer, 0, D3D11_MAP_READ, 0, &mapped);
-    if (FAILED(hr)) return "staging map " + hr_str(hr);
-    UINT to_copy = result_count * 4;
-    if (to_copy > out_capacity) to_copy = out_capacity;
-    memcpy(out_results, mapped.pData, to_copy * sizeof(float));
-    ctx->Unmap(g_res.staging_buffer, 0);
-    return "OK";
-}
-
-// Uploads SQF points (converted to engine space) into the points buffer.
-// Takes its own lock; the subsequent dispatch in run_depth_compute happens on
-// the same thread, so the buffer contents cannot be raced in between.
-inline std::string upload_query_points(const float* xyz_sqf, UINT count) {
-    ID3D11DeviceContext* ctx = RVExtBridge::get_d3d_device_context();
-    ID3D11Device* dev = RVExtBridge::get_d3d_device();
-    if (!dev || !ctx) return "device/context null";
-    RVExtBridge::ScopedGraphicsLock lock;
-    if (!lock.acquired()) return "SKIP: graphics lock not acquired";
-    std::string err = ensure_resources(dev);   // see run_depth_compute's
-    if (!err.empty() &&
-        !(err == KH_SHADERS_COMPILING &&
-          g_dbg_mode.load(std::memory_order_relaxed) != 408)) return err;
-    err = ensure_query_buffers(dev, count);   // grow-on-demand: no point cap
-    if (!err.empty()) return err;
-    D3D11_MAPPED_SUBRESOURCE mapped = {};
-    HRESULT hr = ctx->Map(g_res.points_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
-    if (FAILED(hr)) return "points map " + hr_str(hr);
-    float* dst = static_cast<float*>(mapped.pData);
-
-    for (UINT i = 0; i < count; ++i) {
-        // SQF [x, y, zASL] -> engine [x, zASL, y]
-        dst[i * 4 + 0] = xyz_sqf[i * 3 + 0];
-        dst[i * 4 + 1] = xyz_sqf[i * 3 + 2];
-        dst[i * 4 + 2] = xyz_sqf[i * 3 + 1];
-        dst[i * 4 + 3] = 1.0f;
-    }
-
-    ctx->Unmap(g_res.points_buffer, 0);
-    return "";
 }
 
 // General 4x4 inverse (cofactor expansion). Used to build invViewProj for
@@ -9641,7 +9390,7 @@ static uint32_t g_fk_veto_cand_n = 0;   // candidates staged at the last pass BE
                                             // campaign-43 handoff.
 // Build tag: monotonic, never reused, bumped once per shipped build (including
 // pure reverts). Keep it a constexpr int, not a #define.
-static constexpr int KH_BUILD_TAG = 26720;
+static constexpr int KH_BUILD_TAG = 26760;
 // Continuous at the near plane, so routing on/off never pops a fragment.
 static constexpr float KH_NEARZ_GAP_FRAC = 0.92f;
 // 3 = mode 203 - passthrough + absolute form.
@@ -21182,6 +20931,199 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
 // sim advances mid-frame; compositeAmbiguous ~70% is this phenomenon) - same
 // frame is not same rotation; any pairing must key on recent-exact windows,
 // never instant equality.
+// KH_CAST_OCC (26742): the caster-occupancy grid.
+//
+// PSMaskCast's reach test answers one question - "is this reconstructed world
+// point within reach of ANY caster" - and answered it by looping every caster
+// per pixel. That is O(casters x pixels), and it was the whole performance
+// problem: 301 props cost ~75 ms/frame while the actual shadow lookup
+// (SunShadowOcclusion) was already O(1) tier samples. Vanilla shadows
+// thousands of objects cheaply for exactly this reason - only this GATE
+// scaled with caster count.
+//
+// The grid is KH_OCC_N x KH_OCC_N over the casters' world XZ bounds. Each
+// texel holds (minY, maxY) across every caster whose reach volume covers that
+// column; empty texels hold (+big, -big) so the compare fails. The shader
+// does one Load and one Y-range compare - constant time in the caster count.
+//
+// CONSERVATIVE BY CONSTRUCTION: each caster is splatted over the full XZ and
+// Y extent of its reach volume, using the shader's own reach formula, so the
+// grid is a strict SUPERSET of the rounded-box test it replaces. It can never
+// refuse a point the loop admitted, so no shadow can be lost. It admits ~9%
+// extra points (the corners the rounded test trimmed); there
+// SunShadowOcclusion returns the authoritative verdict, as it does anywhere
+// else. The garbage-depth defence the gate was built for is khcNearOk, which
+// is untouched. Verified against the original test over 800k samples at 301
+// and 1200 casters: zero dropped. Mode 474 = KH_CAST_OCC_OFF (the per-pixel
+// scan, for A/B).
+static constexpr int KH_OCC_N = 256;
+// KH_CAST_OCC_SYQ (26760): buckets per unit of sin-elevation for the reuse
+// key - 1/64 is ~0.9 deg at the horizon, coarser overhead where reach barely
+// moves. See the quantisation note in kh_cast_occ_build.
+static constexpr float KH_OCC_SY_Q = 64.0f;
+static uint64_t g_castocc_builds = 0;
+static uint64_t g_castocc_falls = 0;
+static uint64_t g_castocc_cells = 0;   // occupied texels, summed over builds
+// KH_CAST_OCC_ONCE (26759): the grid depends only on the caster set, the sun
+// elevation and the two arms, none of which move between the ~9 fires of one
+// frame - and the caster set moves only when render_sun_depth commits. The
+// build (a 128 KB splat + a 512 KB dynamic upload) therefore runs once per
+// change, and a fire whose inputs match the last build re-arms the CB lanes
+// from the retained origin / cell and reuses the bound texture. The texture
+// itself is the validity witness: a device reset nulls it and forces a
+// rebuild, so no reset hook is needed. castOccReuses counts the reuses;
+// castOccBuilds keeps counting real builds, so a healthy dump reads
+// castOccBuilds << castOccReuses.
+static uint64_t g_castocc_reuses = 0;
+static uint64_t g_castocc_key = 0;   // FNV-1a over the last built inputs (0 = none)
+static float    g_castocc_lo[2] = {};   // retained grid origin XZ (engine axes)
+static float    g_castocc_inv = 0.0f;   // retained 1 / cell
+inline bool kh_cast_occ_build(ID3D11DeviceContext* khco_ctx, ConstantData& khco_cb) {
+    if (g_dbg_mode.load(std::memory_order_relaxed) == 474) return false;
+    const int khco_n = static_cast<int>(khco_cb.locality_meta[0]);
+    if (khco_n <= 0 || static_cast<size_t>(khco_n) * 6u > g_sun_locals.size()) return false;
+    const float khco_sy = fabsf(khco_cb.cast_view[2][1]);
+    // KH_CAST_OCC_SYQ (26760): 26759 keyed the grid on sy EXACT, so a sun
+    // that advances every frame (time acceleration, any skipTime-driven day)
+    // rebuilt once per frame - castOccBuilds ~ flushes, the 26759 handoff's
+    // own open item. The superset argument only needs the build's stretch >=
+    // the shader's, and stretch = 2 + 3 / max(sy, 0.15) is DECREASING in sy:
+    // a sy quantised DOWNWARD (floor to a 1/KH_OCC_SY_Q bucket) therefore
+    // yields a reach >= the exact one for every fire inside the bucket. Every
+    // reach and extent below is computed from khco_syq; the shader's
+    // castView[2].y stays exact. One rebuild per bucket crossing.
+    const float khco_syq = floorf(khco_sy * KH_OCC_SY_Q) / KH_OCC_SY_Q;
+    {   // KH_CAST_OCC_ONCE: same inputs as the last build -> reuse it.
+        const int32_t khco_mode = g_dbg_mode.load(std::memory_order_relaxed);
+        uint64_t khco_k = CryptoGenerator::fnv1a64_raw(g_sun_locals.data(),
+                                                       static_cast<size_t>(khco_n) * 6u * sizeof(float));
+        khco_k = CryptoGenerator::fnv1a64_update(khco_k, &khco_syq, sizeof(khco_syq));
+        khco_k = CryptoGenerator::fnv1a64_update(khco_k, &khco_mode, sizeof(khco_mode));
+        if (khco_k == 0) khco_k = 1;   // 0 is the empty sentinel
+        if (g_res.castocc_tex && g_res.castocc_srv && khco_k == g_castocc_key) {
+            khco_cb.cast_mat[0][3] = g_castocc_inv;   // armed (> 0) - lane note at the build tail
+            khco_cb.cast_mat[1][3] = g_castocc_lo[0];
+            khco_cb.cast_mat[2][3] = g_castocc_lo[1];
+            g_castocc_reuses++;
+            return true;
+        }
+        g_castocc_key = khco_k;   // provisional; cleared below on any failure
+    }
+    // KH_CAST_REACH_X4 (mode 479): the gate admits a pixel only within
+    // reach = min(|he| * stretch, max(600, |he| * 24)) of a caster, so a
+    // shadow longer than that is refused at a hard radius - which on screen
+    // reads as a straight, arbitrary slice through one mesh's shadow with no
+    // relation to geometry. That matches the remaining VR symptom, and it is
+    // NOT something 474 could test: the O(N) loop it restores uses this same
+    // formula. This multiplies the reach so the boundary moves; if the slice
+    // moves out or disappears, the reach is the cause and the fix is to
+    // derive it from the sun tier's actual coverage instead of a per-caster
+    // heuristic. Diagnostic only - it widens the gate, costing fill.
+    const float khco_reach_x =
+        (g_dbg_mode.load(std::memory_order_relaxed) == 479) ? 4.0f : 1.0f;
+    const float khco_stretch = 2.0f + 3.0f / (khco_syq > 0.15f ? khco_syq : 0.15f);
+
+    float khco_lo[2] = { 1.0e30f, 1.0e30f };
+    float khco_hi[2] = { -1.0e30f, -1.0e30f };
+    static std::vector<float> khco_r;   // per caster reach (render-thread scratch)
+    khco_r.assign(static_cast<size_t>(khco_n), 0.0f);
+    for (int i = 0; i < khco_n; ++i) {
+        const float* e = g_sun_locals.data() + static_cast<size_t>(i) * 6u;
+        const float khco_he = sqrtf(e[3] * e[3] + e[4] * e[4] + e[5] * e[5]);
+        const float khco_cap = 600.0f > khco_he * 24.0f ? 600.0f : khco_he * 24.0f;
+        khco_r[i] = (khco_he * khco_stretch < khco_cap ? khco_he * khco_stretch : khco_cap) * khco_reach_x;
+        const float khco_ex = e[3] + khco_r[i];
+        const float khco_ez = e[5] + khco_r[i];
+        if (e[0] - khco_ex < khco_lo[0]) khco_lo[0] = e[0] - khco_ex;
+        if (e[2] - khco_ez < khco_lo[1]) khco_lo[1] = e[2] - khco_ez;
+        if (e[0] + khco_ex > khco_hi[0]) khco_hi[0] = e[0] + khco_ex;
+        if (e[2] + khco_ez > khco_hi[1]) khco_hi[1] = e[2] + khco_ez;
+    }
+    const float khco_sp0 = khco_hi[0] - khco_lo[0];
+    const float khco_sp1 = khco_hi[1] - khco_lo[1];
+    if (!(khco_sp0 > 0.0f) || !(khco_sp1 > 0.0f)) { g_castocc_key = 0; return false; }
+    float khco_cell = (khco_sp0 > khco_sp1 ? khco_sp0 : khco_sp1) / KH_OCC_N;
+    if (!(khco_cell > 1.0e-4f)) khco_cell = 1.0e-4f;
+    const float khco_inv = 1.0f / khco_cell;
+
+    static std::vector<float> khco_grid;   // (minY, maxY) per texel
+    khco_grid.resize(static_cast<size_t>(KH_OCC_N) * KH_OCC_N * 2u);
+    for (size_t g = 0; g < khco_grid.size(); g += 2) { khco_grid[g] = 1.0e30f; khco_grid[g + 1] = -1.0e30f; }
+    for (int i = 0; i < khco_n; ++i) {
+        const float* e = g_sun_locals.data() + static_cast<size_t>(i) * 6u;
+        const float khco_rr = khco_r[i];
+        int khco_x0 = static_cast<int>(floorf((e[0] - e[3] - khco_rr - khco_lo[0]) * khco_inv));
+        int khco_x1 = static_cast<int>(floorf((e[0] + e[3] + khco_rr - khco_lo[0]) * khco_inv));
+        int khco_z0 = static_cast<int>(floorf((e[2] - e[5] - khco_rr - khco_lo[1]) * khco_inv));
+        int khco_z1 = static_cast<int>(floorf((e[2] + e[5] + khco_rr - khco_lo[1]) * khco_inv));
+        if (khco_x0 < 0) khco_x0 = 0;
+        if (khco_z0 < 0) khco_z0 = 0;
+        if (khco_x1 > KH_OCC_N - 1) khco_x1 = KH_OCC_N - 1;
+        if (khco_z1 > KH_OCC_N - 1) khco_z1 = KH_OCC_N - 1;
+        const float khco_y0 = e[1] - e[4] - khco_rr;
+        const float khco_y1 = e[1] + e[4] + khco_rr;
+        for (int z = khco_z0; z <= khco_z1; ++z) {
+            float* khco_row = khco_grid.data() + (static_cast<size_t>(z) * KH_OCC_N) * 2u;
+            for (int x = khco_x0; x <= khco_x1; ++x) {
+                if (khco_y0 < khco_row[x * 2]) khco_row[x * 2] = khco_y0;
+                if (khco_y1 > khco_row[x * 2 + 1]) khco_row[x * 2 + 1] = khco_y1;
+            }
+        }
+    }
+
+    if (!g_res.castocc_tex) {
+        ID3D11Device* khco_dev = nullptr;
+        khco_ctx->GetDevice(&khco_dev);
+        if (!khco_dev) { g_castocc_key = 0; return false; }
+        D3D11_TEXTURE2D_DESC khco_td = {};
+        khco_td.Width = KH_OCC_N;
+        khco_td.Height = KH_OCC_N;
+        khco_td.MipLevels = 1;
+        khco_td.ArraySize = 1;
+        khco_td.Format = DXGI_FORMAT_R32G32_FLOAT;
+        khco_td.SampleDesc.Count = 1;
+        khco_td.Usage = D3D11_USAGE_DYNAMIC;
+        khco_td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        khco_td.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        const bool khco_ok =
+            SUCCEEDED(khco_dev->CreateTexture2D(&khco_td, nullptr, &g_res.castocc_tex)) &&
+            SUCCEEDED(khco_dev->CreateShaderResourceView(g_res.castocc_tex, nullptr, &g_res.castocc_srv));
+        if (!khco_ok) { KH_SAFE_RELEASE(g_res.castocc_srv); KH_SAFE_RELEASE(g_res.castocc_tex); }
+        khco_dev->Release();
+        if (!g_res.castocc_srv) { g_castocc_key = 0; return false; }
+    }
+    D3D11_MAPPED_SUBRESOURCE khco_m = {};
+    if (FAILED(khco_ctx->Map(g_res.castocc_tex, 0, D3D11_MAP_WRITE_DISCARD, 0, &khco_m))) { g_castocc_key = 0; return false; }
+    for (int z = 0; z < KH_OCC_N; ++z) {
+        memcpy(static_cast<uint8_t*>(khco_m.pData) + static_cast<size_t>(z) * khco_m.RowPitch,
+               khco_grid.data() + static_cast<size_t>(z) * KH_OCC_N * 2u,
+               static_cast<size_t>(KH_OCC_N) * 2u * sizeof(float));
+    }
+    khco_ctx->Unmap(g_res.castocc_tex, 0);
+
+    uint64_t khco_used = 0;
+    for (size_t g = 0; g < khco_grid.size(); g += 2) if (khco_grid[g + 1] >= khco_grid[g]) khco_used++;
+    g_castocc_cells += khco_used;
+    g_castocc_builds++;
+    // LANES (26759 correction): castMat[0].w = 1/cell, and armed IS > 0;
+    // castMat[1].w / castMat[2].w = grid origin XZ. Three lanes that were
+    // never written, so the CB layout and its mirror tripwire are untouched.
+    // 26758 carried 1/cell in castView[2].w - but that lane is the CAST
+    // STRENGTH (mask_cast_engine writes g_shadow_map_strength there and the
+    // fire-clamp ladder zeroes it to suppress a fire; PSMaskCast's shade is
+    // 1 - hit * saturate(castView[2].w)). Writing it here after those fills
+    // replaced the strength with saturate(1/cell) and un-suppressed every
+    // clamped fire whenever the grid armed. castView[2].w is no longer
+    // touched by this function.
+    khco_cb.cast_mat[0][3] = khco_inv;
+    khco_cb.cast_mat[1][3] = khco_lo[0];
+    khco_cb.cast_mat[2][3] = khco_lo[1];
+    g_castocc_lo[0] = khco_lo[0];
+    g_castocc_lo[1] = khco_lo[1];
+    g_castocc_inv = khco_inv;
+    return true;
+}
+
 inline bool kh_upload_locality_ext(ID3D11DeviceContext* ctx) {
     const UINT khle_n = static_cast<UINT>(g_sun_locals.size() / 6);
     if (khle_n == 0) return false;
@@ -21802,6 +21744,8 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     ID3D11HullShader* old_hs = nullptr;
     ID3D11DomainShader* old_ds2 = nullptr;
     ID3D11RasterizerState* old_rs = nullptr;
+    ID3D11ShaderResourceView* khco_old_t35 = nullptr;   // KH_CAST_OCC: t35 sits past old_ps_srvs[33]
+    ctx->PSGetShaderResources(35, 1, &khco_old_t35);
     ctx->GSGetShader(&old_gs, nullptr, nullptr);
     ctx->HSGetShader(&old_hs, nullptr, nullptr);
     ctx->DSGetShader(&old_ds2, nullptr, nullptr);
@@ -22505,6 +22449,14 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
                 // behavior).
                 cbd.locality_meta[1] = 1.0f;
                 ctx->PSSetShaderResources(2, 1, &g_res.locality_srv);
+                // KH_CAST_OCC: build and bind the occupancy grid; the shader
+                // then gates in O(1). Any failure leaves the per-pixel scan.
+                if (kh_cast_occ_build(ctx, cbd)) {
+                    ctx->PSSetShaderResources(35, 1, &g_res.castocc_srv);
+                } else {
+                    cbd.cast_mat[0][3] = 0.0f;
+                    g_castocc_falls++;
+                }
             }
 
             // CB SPLIT: both slices (centerSize/sizeAxes ride b0; the cast
@@ -22622,6 +22574,8 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     ctx->HSSetShader(old_hs, nullptr, 0);
     ctx->DSSetShader(old_ds2, nullptr, 0);
     ctx->RSSetState(old_rs);
+    ctx->PSSetShaderResources(35, 1, &khco_old_t35);   // KH_CAST_OCC
+    KH_SAFE_RELEASE(khco_old_t35);
     g_ro.in_injection = false;
     KH_SAFE_RELEASE(old_vs_cb);
     KH_SAFE_RELEASE(old_vs_cb1);
@@ -22800,6 +22754,21 @@ static ID3D11ShaderResourceView* g_svs_post_srv = nullptr;
 static uint64_t g_svs_post_made = 0;   // post snapshots taken
 static uint64_t g_svs_post_skips = 0;   // post snapshot had no destination
 static uint64_t g_svs_post_binds = 0;   // post snapshot bound to our shaders
+// KH_SVS_SKIP: the seam inject fires many times a frame (svSeams), and every
+// one redraws EVERY visible caster into a volume depth target. Most of those
+// passes write bit-identical depth: same target, same view, same casters, no
+// clear in between - so the target already holds exactly what the pass would
+// write and the pass is pure waste. This signature covers every input the
+// injected depth depends on; when it matches the last COMPLETED inject the
+// pass is skipped. A skip happens only when the output would be identical, so
+// unlike drawing coarser proxies it has no silhouette to get wrong and cannot
+// flicker. Field: 49 skips vs 2.1 misses per flush, svInjectDraws 14,820 ->
+// 550. Mode 476 disables.
+static uint64_t g_depth_clear_serial = 0;   // bumped by hooked_clear_depthstencil
+static uint64_t g_svs_skip_sig = 0;         // signature of the last completed inject
+static bool     g_svs_skip_valid = false;
+static uint64_t g_svs_skips_redundant = 0;  // passes skipped
+static uint64_t g_svs_skip_misses = 0;      // passes that ran
 static uint64_t g_svs_frame_seq = 0;   // bumped once per seam frame boundary
 static uint64_t g_svs_prime_stamp = ~0ull;   // seq at the seam's publish
 static uint64_t g_comp_share_takes = 0;   // colour took the seam's camera
@@ -26839,6 +26808,47 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
     const bool khv_frame_ok = kh_upload_frame_cb(ctx, g_res.composite_frame_cb, khv_cbf);
     if (!khv_frame_ok) g_svs_fail_framecb++;   // was a silent path
 
+    {   // KH_SVS_SKIP: would this pass write anything the target does not
+        // already hold? The signature covers the target DSV, the depth-clear
+        // serial, the post-rebase view-proj, the rebase and grow arms, the
+        // viewport span, and the caster set (position, size, rotation, mesh
+        // and the mesh's VB identity) in list order. A match means an
+        // identical pass already landed and nothing has cleared or moved, so
+        // skipping writes the same bits. Checked AFTER the view and list are
+        // final and BEFORE any draw; the unwind mirrors the normal exit.
+        uint64_t khsk_h = CryptoGenerator::FNV1A64_OFFSET;   // house FNV-1a 64 (see kh_shader_cache_hash)
+        const uintptr_t khsk_dsv = reinterpret_cast<uintptr_t>(khv_old_dsv);
+        khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, &khsk_dsv, sizeof(khsk_dsv));
+        khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, &g_depth_clear_serial, sizeof(g_depth_clear_serial));
+        khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, khv_cbf.view_proj, sizeof(khv_cbf.view_proj));
+        khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, &khv_rebase_on, sizeof(khv_rebase_on));
+        khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, &khv_dbg_vp, sizeof(khv_dbg_vp));
+        khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, &khv_vp_lo, sizeof(khv_vp_lo));
+        khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, &khv_vp_hi, sizeof(khv_vp_hi));
+        for (const KhSvCaster& khsk_c : khv_list) {
+            khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, khsk_c.pos, sizeof(khsk_c.pos));
+            khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, khsk_c.size, sizeof(khsk_c.size));
+            khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, khsk_c.rot, sizeof(khsk_c.rot));
+            khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, &khsk_c.mesh, sizeof(khsk_c.mesh));
+            const uintptr_t khsk_vb = reinterpret_cast<uintptr_t>(g_res.mesh_vb[khsk_c.mesh]);
+            khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, &khsk_vb, sizeof(khsk_vb));
+        }
+        if (g_dbg_mode.load(std::memory_order_relaxed) != 476 &&
+            g_svs_skip_valid && g_svs_skip_sig == khsk_h) {
+            g_svs_skips_redundant++;
+            ctx->OMSetRenderTargets(4, khv_old_rtvs, khv_old_dsv);
+            if (khv_old_nvp > 0) ctx->RSSetViewports(khv_old_nvp, khv_old_vps);
+            backup.restore(ctx);
+            for (int khsk_r = 0; khsk_r < 4; ++khsk_r) KH_SAFE_RELEASE(khv_old_rtvs[khsk_r]);
+            KH_SAFE_RELEASE(khv_old_dsv);
+            g_ro.in_injection = khv_prev_inj;
+            return;
+        }
+        g_svs_skip_sig = khsk_h;
+        g_svs_skip_valid = false;   // proven again by the completed pass below
+        g_svs_skip_misses++;
+    }
+
     if (khv_frame_ok) {
         UINT khv_stride = sizeof(MeshVertex), khv_offset = 0;
         int khv_bound = -1;
@@ -26975,6 +26985,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
         }
     }
 
+    g_svs_skip_valid = true;   // KH_SVS_SKIP: this signature's pass completed
     ctx->OMSetRenderTargets(4, khv_old_rtvs, khv_old_dsv);
     if (khv_old_nvp > 0) ctx->RSSetViewports(khv_old_nvp, khv_old_vps);
     backup.restore(ctx);
@@ -30474,8 +30485,23 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // khr_cbf carries into VSComposite - and this pass's own camera. If that
     // matrix is rebased, or is a cycle latch, or belongs to another view, the
     // apex guard refuses and this pass culls nothing.
+    // KH_MESH_LOD: publish the pass's pixels-per-tangent HERE too. It was
+    // written in exactly one place - flush_locked - so on any frame the
+    // INJECTION drew the meshes and the flush did not reach that line,
+    // g_lod_proj_px stayed 0, kh_lod_pick's guard returned immediately, and
+    // EVERY object drew at level 0 regardless of distance. Field: meshTris ==
+    // meshTrisL0 exactly with props at 300 m; with this, 19x reduction. Same
+    // formula and the same viewport height the injection sets below.
+    {
+        const float khr_lod_h = static_cast<float>(g_main_depth_h);
+        if (khr_lod_h > 0.0f && pv.projection[1][1] > 0.0f) {
+            g_lod_proj_px = pv.projection[1][1] * khr_lod_h * 0.5f;
+        }
+    }
+
     KhCullSet khr_cull;
     kh_cull_build(khr_cbf.view_proj, cam, khr_cull);
+    khr_cull.back_on = true;   // KH_CULL_BACK: the colour pass never draws what is behind the camera
     // KH_MESH_TIMER, injection edition. Harvest FIRST - a slot armed by an
     // earlier injection is read before this one arms another - then bracket
     // the draw loop. RENDER-THREAD RING, touched nowhere else; the flush's
@@ -32785,6 +32811,7 @@ static void STDMETHODCALLTYPE hooked_omset_rts_and_uavs(ID3D11DeviceContext* sel
 static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* self, ID3D11DepthStencilView* dsv, UINT flags, FLOAT depth, UINT8 stencil) {
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && !g_ro.in_injection &&
         dsv && (flags & D3D11_CLEAR_DEPTH)) {
+        g_depth_clear_serial++;   // KH_SVS_SKIP: any depth clear invalidates a cached seam inject
         if (g_main_depth_identity && reorder_dsv_identity(dsv) == g_main_depth_identity) {
             // The engine clears the main scene depth on its render thread:
             // this is where that thread is identified for the tracking gate.
@@ -33334,103 +33361,28 @@ inline void ensure_reorder_hook() {
     kh_reorder_hook_fail_round("draw hook install failed");   // retry ladder
 }
 
-// Flush-internal async visibility dispatch. Assumes the graphics lock is
-// ALREADY HELD by the caller (flush_frame) - deliberately does not call
-// run_depth_compute, which takes its own lock. Dispatches the queued batch
-// and copies results into the write-side async staging buffer; no readback.
-
-inline bool flush_dispatch_visibility(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
-    UINT depth_w = 0, depth_h = 0;
-    if (!kh_ensure_ok("visibility depth SRV", ensure_depth_srv(dev, ctx, &depth_w, &depth_h))) return false;
-    if (!kh_ensure_ok("visibility compute shaders", ensure_compute_shaders(dev))) return false;
-
-    const UINT count = static_cast<UINT>(g_query_points_pending.size() / 3);
-    if (count == 0) return false;
-    if (!kh_ensure_ok("visibility query buffers", ensure_query_buffers(dev, count))) return false;   // grow-on-demand: no point cap
-
-    // Upload points (SQF -> engine space)
-    {
-        D3D11_MAPPED_SUBRESOURCE mapped = {};
-        if (FAILED(ctx->Map(g_res.points_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
-        float* dst = static_cast<float*>(mapped.pData);
-
-        for (UINT i = 0; i < count; ++i) {
-            dst[i * 4 + 0] = g_query_points_pending[i * 3 + 0];
-            dst[i * 4 + 1] = g_query_points_pending[i * 3 + 2];
-            dst[i * 4 + 2] = g_query_points_pending[i * 3 + 1];
-            dst[i * 4 + 3] = 1.0f;
-        }
-
-        ctx->Unmap(g_res.points_buffer, 0);
-    }
-
-    RVExtBridge::ProjectionViewTransform pv = {};
-    bool _pv_ok;
-
-    {
-        _pv_ok = RVExtBridge::get_projection_view_transform(pv);
-    }
-
-    if (!_pv_ok) return false;
-    CSConstantData cbd = {};
-    mul_4x4(pv.view, pv.projection, cbd.view_proj);
-    cbd.depth_params[0] = pv.projection[2][2];
-    cbd.depth_params[1] = pv.projection[3][2];
-
-    {
-        UINT n_vp = 1;
-        D3D11_VIEWPORT vp = {};
-        ctx->RSGetViewports(&n_vp, &vp);
-        cbd.depth_params[2] = (n_vp >= 1) ? vp.MinDepth : 0.0f;
-        cbd.depth_params[3] = (n_vp >= 1) ? vp.MaxDepth : 1.0f;
-    }
-
-    cbd.screen_count[0] = static_cast<float>(depth_w);
-    cbd.screen_count[1] = static_cast<float>(depth_h);
-    cbd.screen_count[2] = static_cast<float>(count);
-
-    {
-        D3D11_MAPPED_SUBRESOURCE mapped = {};
-        if (FAILED(ctx->Map(g_res.cs_constant_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
-        memcpy(mapped.pData, &cbd, sizeof(cbd));
-        ctx->Unmap(g_res.cs_constant_buffer, 0);
-    }
-
-    ComputeStateBackup backup;
-    backup.capture(ctx);
-    ctx->OMSetRenderTargets(0, nullptr, nullptr);   // DSV/SRV hazard
-    ID3D11ShaderResourceView* srvs[2] = { g_res.depth_srv, g_res.points_srv };
-    ctx->CSSetShaderResources(0, 2, srvs);
-    UINT counts[1] = { 0 };
-    ctx->CSSetUnorderedAccessViews(0, 1, &g_res.output_uav, counts);
-    ctx->CSSetConstantBuffers(0, 1, &g_res.cs_constant_buffer);
-    ctx->CSSetShader(g_res.cs_visibility, nullptr, 0);
-    ctx->Dispatch((count + 63) / 64, 1, 1);
-    ID3D11ShaderResourceView* null_srvs[2] = { nullptr, nullptr };
-    ctx->CSSetShaderResources(0, 2, null_srvs);
-    ID3D11UnorderedAccessView* null_uav = nullptr;
-    ctx->CSSetUnorderedAccessViews(0, 1, &null_uav, counts);
-    backup.restore(ctx);
-    D3D11_BOX mesh = { 0, 0, 0, count * sizeof(float) * 4, 1, 1 };
-
-    ctx->CopySubresourceRegion(g_res.staging_async[g_async_write_idx], 0, 0, 0, 0,
-                               g_res.output_buffer, 0, &mesh);
-
-    g_async_inflight_count[g_async_write_idx] = count;
-    g_async_write_idx ^= 1;
-    return true;
-}
-
-// Retained-mode flush: runs once per frame from the C++ Draw3D EH. Order: (1)
-// async result pump (2) async query dispatch (3) geometry, with the scene
-// captured at most ONCE per frame, shared by all scene-read objects. Fully
-// dormant (immediate return) when there is nothing to do.
+// Retained-mode flush: runs once per frame from the C++ Draw3D EH: geometry
+// then post-processing, with the scene captured at most ONCE per frame,
+// shared by all scene-read objects. Fully dormant (immediate return) when
+// there is nothing to do.
 
 // Runs the actual per-frame work. The graphics lock is ALREADY HELD by the
 // caller (flush_frame). Returns after counting the skip reason if the bound
 // targets are not the main scene's.
 inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     kh_ffr_sample_open_axes();   // once per flush, onto the open row
+    // KH_MESH_PUBLISH_DEFER: land a publish kh_fbx_register could not park
+    // for. This body holds the park end to end, so the publish and the VB
+    // top-up share one serialized window exactly as the register path's
+    // own park does. Ahead of every skip below on purpose: a frame the flush
+    // declines is still a parked frame, and the mesh must not wait for the
+    // gate to pass.
+    if (g_mesh_publish_pending.exchange(false, std::memory_order_relaxed)) {
+        kh_mesh_publish();
+        const std::string khmp_err = ensure_mesh_vbs(dev);
+        if (!khmp_err.empty()) report_error_once_safe("KH mesh publish: " + khmp_err);
+        g_mesh_publish_lands++;
+    }
     // The graphics lock is held for all of flush_locked, which PARKS the
     // render thread - the same invariant the injection relies on for
     // lock-free context use - so these plain stores can never be observed
@@ -33614,9 +33566,6 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     if (ffr_armed()) ffr_head().had_objects = has_objects ? 1 : 0;
 
-    const UINT read_idx = g_async_write_idx ^ 1;
-    const bool async_read_due = g_async_inflight_count[read_idx] > 0;
-
     // require a DSV AND require it to be the MAIN scene's depth resource, not
     // a PiP/mirror/UAV sub-pass. Drawing into a sub-pass both misses the
     // visible frame (flicker) and churns the depth SRV cache against the
@@ -33740,32 +33689,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     g_flush_frame_pub.store(g_flush_frame, std::memory_order_relaxed);   // T-machine re-arm gate
     g_stats.gate_passed++;
 
-    // (1) Async result pump: harvest an earlier frame's query, no stall
-    if (async_read_due) {
-        D3D11_MAPPED_SUBRESOURCE mapped = {};
-
-        HRESULT hr = ctx->Map(g_res.staging_async[read_idx], 0, D3D11_MAP_READ,
-                              D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
-
-        if (SUCCEEDED(hr)) {
-            const UINT n = g_async_inflight_count[read_idx];
-            g_vis_results_cpu.resize(static_cast<size_t>(n) * 4);
-            memcpy(g_vis_results_cpu.data(), mapped.pData, static_cast<size_t>(n) * 4 * sizeof(float));
-            ctx->Unmap(g_res.staging_async[read_idx], 0);
-            g_vis_result_count = n;
-            g_vis_result_frame = g_flush_frame;
-            g_async_inflight_count[read_idx] = 0;
-        }
-        // DXGI_ERROR_WAS_STILL_DRAWING: GPU not done - retry next frame
-    }
-
-    // (2) Async query dispatch (harvested in a later frame)
-    if (g_query_pending) {
-        flush_dispatch_visibility(dev, ctx);
-        g_query_pending = false;   // consumed either way; caller re-queues per batch
-    }
-
-    // (3) Geometry + post-processing
+    // Geometry + post-processing
     if (!has_objects) return;
 
     // Snapshot the visible objects under the mutex, draw without holding it.
@@ -35258,6 +35182,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // and this pass's own camera, as a local.
     KhCullSet khf_cull;
     kh_cull_build(view_proj, cam, khf_cull);
+    khf_cull.back_on = true;   // KH_CULL_BACK: twin of the injection
 
     uint32_t khf_perc_count = 0;
 
@@ -35965,7 +35890,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 // inside flush_locked.
 
 // Same body, same three consumers: the shadowvis fallback (; its gate kept),
-// the objectvis read , the key census .
+// the objectvis/objectdraw read , the key census .
 inline void stage_video_options() {
     try {
         const bool khsr_want_shadow = g_sun_range_src.load(std::memory_order_relaxed) != 2;
@@ -35986,7 +35911,8 @@ inline void stage_video_options() {
             }
             const bool khsr_is_shadow = !khsr_shadow_done && khsr_k.find("shadowvis") != std::string::npos;
             const bool khsr_is_obj = !khsr_obj_done &&
-                (khsr_k.find("objectvis") != std::string::npos);
+                (khsr_k.find("objectvis") != std::string::npos ||
+                 khsr_k.find("objectdraw") != std::string::npos);
             if (!khsr_is_shadow && !khsr_is_obj) continue;
             if (khsr_e.value.type_enum() == game_data_type::SCALAR) {
                 const float khsr_f = static_cast<float>(khsr_e.value);
@@ -36072,8 +35998,6 @@ inline void flush_frame() {
         g_ls.wanted.store(khum_lit, std::memory_order_relaxed);
     }
 
-    has_work = has_work || g_query_pending ||
-               g_async_inflight_count[0] > 0 || g_async_inflight_count[1] > 0;
     g_kh_track_wanted.store(has_work, std::memory_order_relaxed);
 
     if (!has_work) return;
@@ -37035,6 +36959,11 @@ inline void reset_stat_counters() {
     g_user_async_batches = 0; g_user_async_relost = 0; g_user_async_drops = 0;
     g_user_mat_white_draws = 0; g_user_settle_waits = 0;
     g_lod_build_ms = 0; g_lod_meshes = 0; g_lod_levels = 0; g_lod_fades = 0;
+    g_castocc_builds = 0; g_castocc_falls = 0; g_castocc_cells = 0;   // KH_CAST_OCC
+    g_castocc_reuses = 0;   // KH_CAST_OCC_ONCE (the key is not a counter; it stays)
+    g_mesh_publish_defers = 0; g_mesh_publish_lands = 0;   // KH_MESH_PUBLISH_DEFER (the pending flag is state, not a counter)
+    g_svs_skips_redundant = 0; g_svs_skip_misses = 0;   // KH_SVS_SKIP
+    g_cull_back_rejects = 0;   // KH_CULL_BACK
     // the geometry census is per SESSION - a cumulative triangle count across
     // missions is a number nobody can divide by anything.
     g_mesh_considered = 0; g_mesh_culled = 0; g_mesh_tris = 0; g_mesh_tris_l0 = 0;
@@ -37958,12 +37887,6 @@ inline void reset_retained_state() {
         g_draw_list.clear();
         g_next_seq = 0;   // creation order restarts with the list it orders
     }
-
-    g_query_pending = false;
-    g_query_points_pending.clear();
-    g_async_inflight_count[0] = 0;
-    g_async_inflight_count[1] = 0;
-    g_vis_result_count = 0;
 }
 
 inline void on_mission_start() {

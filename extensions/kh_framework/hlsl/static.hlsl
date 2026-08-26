@@ -233,6 +233,17 @@ Texture2D<float4> sceneColorTex : register(t3);
 // per caster, [2i] center / [2i+1] half extents, engine axes - the UNCAPPED
 // twin of the 16-pair CB list below.
 StructuredBuffer<float4> khrLocalityExt : register(t2);
+// KH_CAST_OCC: the caster-occupancy grid. The reach test below used to loop
+// EVERY caster per pixel - O(casters x pixels), the whole performance problem,
+// while the shadow lookup itself (SunShadowOcclusion) was already O(1). This
+// texture answers the same question in constant time: a world-XZ grid whose
+// texel holds (minY, maxY) over every caster reach volume covering that
+// column. castMat[0].w = 1 / cell size and armed IS > 0; castMat[1].w /
+// castMat[2].w = grid origin XZ. castView[2].w stays the cast STRENGTH (26758
+// briefly borrowed it for 1/cell, which overwrote the strength - 26759).
+// Strict SUPERSET of the loop, so no caster's shadow can be lost. Mode 474
+// disarms it.
+Texture2D<float2> khrCastOcc : register(t35);
 
 )HLSL" R"HLSL(
 // That guard was discarding a genuine stencil verdict wherever the TERRAIN
@@ -306,12 +317,21 @@ float4 PSMaskPrime(VSOut i) : SV_Target
             // count is no longer bounded by the CB layout.
             int lc = (int)localityMeta.x;
 
-            [loop] for (int li = 0; li < lc && !near_ok; ++li) {
-                float3 lce = khrLocalityExt[li * 2].xyz;
-                float3 lhe = khrLocalityExt[li * 2 + 1].xyz;
-                float lr = min(length(lhe) * stretch, max(600.0f, length(lhe) * 24.0f));
-                float3 ld = max(abs(pw - lce) - lhe, 0.0f);
-                if (dot(ld, ld) < lr * lr) near_ok = true;
+            if (castMat[0].w > 0.0f) {
+                // KH_CAST_OCC: constant time in the caster count.
+                int2 khoC = (int2)floor((pw.xz - float2(castMat[1].w, castMat[2].w)) * castMat[0].w);
+                if (khoC.x >= 0 && khoC.y >= 0 && khoC.x < 256 && khoC.y < 256) {
+                    float2 khoY = khrCastOcc.Load(int3(khoC, 0));
+                    if (pw.y >= khoY.x && pw.y <= khoY.y) near_ok = true;
+                }
+            } else {
+                [loop] for (int li = 0; li < lc && !near_ok; ++li) {
+                    float3 lce = khrLocalityExt[li * 2].xyz;
+                    float3 lhe = khrLocalityExt[li * 2 + 1].xyz;
+                    float lr = min(length(lhe) * stretch, max(600.0f, length(lhe) * 24.0f));
+                    float3 ld = max(abs(pw - lce) - lhe, 0.0f);
+                    if (dot(ld, ld) < lr * lr) near_ok = true;
+                }
             }
         } else if (localityMeta.x >= 0.5f && localityMeta.x <= 16.5f) {
             int lc = (int)localityMeta.x;

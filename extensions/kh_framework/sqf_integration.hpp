@@ -147,11 +147,7 @@ static registered_sqf_function _sqf_trigger_cba_event_array;
 static registered_sqf_function _sqf_process_cba_group_event;
 static registered_sqf_function _sqf_process_cba_array_event;
 static registered_sqf_function _sqf_process_cba_code_event;
-static registered_sqf_function _sqf_sample_scene_depth_array;
-static registered_sqf_function _sqf_gpu_visibility_array;
 static registered_sqf_function _sqf_remove_render_handler_string;
-static registered_sqf_function _sqf_queue_visibility_array;
-static registered_sqf_function _sqf_get_visibility_results;
 static registered_sqf_function _sqf_add_render3d_array;
 static registered_sqf_function _sqf_update_render3d_array;
 static registered_sqf_function _sqf_update_post_fx_array;
@@ -6128,118 +6124,23 @@ static void update_unit_states() {
 
 // SQF entry points
 
-// Uniform ARRAY error shape for the array-returning query commands (the same
-// pair-in-array idiom as [["status","armed"]]): success returns the data
-// array, failure returns [["error", <sentence>]] - one return type per
-// command, message preserved. Callers key on element 0's first field.
-static game_value kh_error_pairs(const std::string& msg) {
-    auto_array<game_value> pair;
-    pair.push_back(game_value("error"));
-    pair.push_back(game_value(msg));
-    auto_array<game_value> out;
-    out.push_back(game_value(std::move(pair)));
-    return game_value(std::move(out));
-}
-
-static game_value sample_scene_depth_sqf(game_value_parameter args) {
-    try {
-        auto& arr = args.to_array();
-        if (arr.size() < 2) return kh_error_pairs("usage: sampleSceneDepth [u, v]");
-        if (arr[0].type_enum() != game_data_type::SCALAR ||
-            arr[1].type_enum() != game_data_type::SCALAR) return kh_error_pairs("u and v must be numbers");
-        float u = static_cast<float>(arr[0]);
-        float v = static_cast<float>(arr[1]);
-
-        // Convert uv (0..1) to pixel coords against the live depth buffer
-        // dimensions, then run the single-pixel compute sample.
-        float results[4] = {};
-
-        std::string status = [&]() -> std::string {
-            ID3D11Device* dev = RVExtBridge::get_d3d_device();
-            ID3D11DeviceContext* ctx = RVExtBridge::get_d3d_device_context();
-            if (!dev || !ctx) return "device/context null";
-            UINT w = 0, h = 0;
-            {
-                RVExtBridge::ScopedGraphicsLock lock;
-                if (!lock.acquired()) return "SKIP: graphics lock not acquired";
-                std::string e = RenderIntegration::ensure_depth_srv(dev, ctx, &w, &h);
-                if (!e.empty()) return "depth SRV: " + e;
-            }
-            float px = u * static_cast<float>(w);
-            float py = v * static_cast<float>(h);
-            return RenderIntegration::run_depth_compute(RenderIntegration::ComputeKernel::SampleDepth, 0, px, py, results, 4);
-        }();
-
-        if (status != "OK") return kh_error_pairs(status);
-        auto_array<game_value> out;
-        out.push_back(game_value(results[2]));   // scene distance, meters
-        out.push_back(game_value(results[3]));   // raw depth buffer value
-        return game_value(std::move(out));
-    } catch (const std::exception& e) {
-        report_error(std::string("sampleSceneDepth: ") + e.what());
-        return kh_error_pairs(std::string("EXCEPTION: ") + e.what());
-    } catch (...) {
-        report_error("sampleSceneDepth: unknown exception");
-        return kh_error_pairs("EXCEPTION: unknown");
-    }
-}
-
-// Returns one entry per point: [status, pointDistM, sceneDistM] status: 1 =
-// visible, 0 = occluded by scene geometry, -1 = offscreen/behind camera Note:
-// like all depth-based tests, cannot account for particles (they do not write
-// depth).
-static game_value gpu_visibility_sqf(game_value_parameter args) {
-    try {
-        auto& arr = args.to_array();
-        UINT count = static_cast<UINT>(arr.size());
-        if (count == 0) return game_value(auto_array<game_value>());
-
-        std::vector<float> pts(count * 3);
-        for (UINT i = 0; i < count; ++i) {
-            if (arr[i].type_enum() != game_data_type::ARRAY) return kh_error_pairs("each point must be [x, y, zASL]");
-            auto& p = arr[i].to_array();
-            if (p.size() < 3 ||
-                p[0].type_enum() != game_data_type::SCALAR ||
-                p[1].type_enum() != game_data_type::SCALAR ||
-                p[2].type_enum() != game_data_type::SCALAR) return kh_error_pairs("each point must be [x, y, zASL]");
-            pts[i * 3 + 0] = static_cast<float>(p[0]);
-            pts[i * 3 + 1] = static_cast<float>(p[1]);
-            pts[i * 3 + 2] = static_cast<float>(p[2]);
-        }
-
-        std::string status = RenderIntegration::upload_query_points(pts.data(), count);
-        if (!status.empty()) return kh_error_pairs(status);
-
-        std::vector<float> results(count * 4);
-        status = RenderIntegration::run_depth_compute(RenderIntegration::ComputeKernel::Visibility, count, 0.0f, 0.0f,
-                                                      results.data(), count * 4);
-
-        if (status != "OK") return kh_error_pairs(status);
-        auto_array<game_value> out;
-        out.reserve(count);
-        for (UINT i = 0; i < count; ++i) {
-            auto_array<game_value> e;
-            e.push_back(game_value(results[i * 4 + 0]));   // status
-            e.push_back(game_value(results[i * 4 + 1]));   // point distance, m
-            e.push_back(game_value(results[i * 4 + 2]));   // scene distance at pixel, m
-            out.push_back(game_value(std::move(e)));
-        }
-        return game_value(std::move(out));
-    } catch (const std::exception& e) {
-        report_error(std::string("gpuVisibility: ") + e.what());
-        return kh_error_pairs(std::string("EXCEPTION: ") + e.what());
-    } catch (...) {
-        report_error("gpuVisibility: unknown exception");
-        return kh_error_pairs("EXCEPTION: unknown");
-    }
-}
-
-// Aspect ratio is always preserved - there is no box fit, so a model is never
-// squashed to a cube. addRender3D [[x,y,zASL], size, [r,g,b,a]?, mode?,
-// sceneRead?, effect?, fxParams?, band?, blend?, duration?, lit?, mesh?,
-// farVis?, rotation?, twoSided?] Adds a persistent mesh drawn every frame by
-// the internal Draw3D EH until removed.
-
+// KH_RENDER_ARGS (26759): the rendering commands' argument contract.
+//
+// 1. Every in-array argument fault is REPORTED through report_error (the
+//    sqf_integration convention every other command family follows) and the
+//    command then returns its failure value: "" from a creator, false from an
+//    updater. A plain-sentence return is invisible unless the caller reads it;
+//    report_error is not.
+// 2. Creators take EXACTLY their documented shape (an extra element is an
+//    error, not ignored), so a script written against an older shape fails
+//    loudly on its first call instead of silently rendering the wrong thing.
+// 3. addRender3D is [pos, rotation, mesh] and nothing else; every other mesh
+//    property has an updateRender3D twin and is set through it.
+// 4. updateRender3D / updatePostFX take one [handle, property, value] triple
+//    or an ARRAY of them (one call, many updates); the batch form returns true
+//    only when every triple applied, and each failed triple is reported on
+//    its own with its index.
+//
 // Rotation argument: nil = identity, a bare number = heading (yaw), or
 // [pitch, yaw, roll] degrees (ARMA sense - see kh_set_rotation). ONE parser
 // for addRender3D (slot 1, right after position) and updateRender3D
@@ -6262,372 +6163,7 @@ static bool kh_rotation_from_gv(const game_value& khrg_v, float& khrg_p, float& 
     return true;
 }
 
-static game_value add_render3d_sqf(game_value_parameter args) {
-    try {
-        auto& arr = args.to_array();
-        // 26720: rotation sits at slot 1 (right after position; nil = identity);
-        // every later slot moved up by one; lodLock appended at 15.
-        if (arr.size() < 3) return game_value("usage: addRender3D [[x,y,zASL], rotation, size, [r,g,b,a]?, mode?, sceneRead?, effect?, fxParams?, band?, blend?, duration?, lit?, mesh?, farVis?, twoSided?, lodLock?]");
-        RenderIntegration::RenderObject obj;
-        if (arr[0].type_enum() != game_data_type::ARRAY) return game_value("position must be [x, y, zASL]");
-        auto& pos = arr[0].to_array();
-        if (pos.size() < 3 ||
-            pos[0].type_enum() != game_data_type::SCALAR ||
-            pos[1].type_enum() != game_data_type::SCALAR ||
-            pos[2].type_enum() != game_data_type::SCALAR) return game_value("position must be [x, y, zASL]");
-        obj.pos[0] = static_cast<float>(pos[0]);
-        obj.pos[1] = static_cast<float>(pos[1]);
-        obj.pos[2] = static_cast<float>(pos[2]);
-
-        {
-            float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f;
-            if (!kh_rotation_from_gv(arr[1], khr_p, khr_y, khr_r))
-                return game_value("rotation must be nil, a number (yaw) or [pitch, yaw, roll] degrees");
-            RenderIntegration::kh_set_rotation(obj, khr_p, khr_y, khr_r);
-        }
-
-        if (!RenderIntegration::read_vec3_or_uniform(arr[2], obj.size_mul)) {
-            return game_value("size must be a number or [x, y, z] multipliers of the mesh's own size");
-        }
-
-        if (arr.size() > 3 && !arr[3].is_nil()) {
-            if (arr[3].type_enum() != game_data_type::ARRAY) return game_value("color must be [r, g, b, a] numbers");
-            auto& col = arr[3].to_array();
-            if ((col.size() > 0 && col[0].type_enum() != game_data_type::SCALAR) ||
-                (col.size() > 1 && col[1].type_enum() != game_data_type::SCALAR) ||
-                (col.size() > 2 && col[2].type_enum() != game_data_type::SCALAR) ||
-                (col.size() > 3 && col[3].type_enum() != game_data_type::SCALAR)) return game_value("color must be [r, g, b, a] numbers");
-            for (size_t i = 0; i < 4 && i < col.size(); ++i) obj.color[i] = static_cast<float>(col[i]);
-            RenderIntegration::kh_sanitize_color(obj.color);
-        }
-
-        if (arr.size() > 4 && !arr[4].is_nil()) {
-            if (arr[4].type_enum() != game_data_type::SCALAR) return game_value("mode must be a number (0 = test, 1 = test + write, 2 = overlay)");
-            int m = static_cast<int>(static_cast<float>(arr[4]));
-            if (m >= 0 && m <= 2) obj.mode = static_cast<RenderIntegration::DepthMode>(m);
-        }
-
-        if (arr.size() > 5 && !arr[5].is_nil()) {
-            if (arr[5].type_enum() != game_data_type::BOOL) return game_value("sceneRead must be a boolean");
-            obj.effect = static_cast<bool>(arr[5]) ? 2 : 0;   // sceneRead = tinted scene-read (colorgrade defaults)
-        }
-
-        const auto_array<game_value>* fx_params = nullptr;
-
-        if (arr.size() > 6 &&
-            !(arr[6].type_enum() == game_data_type::STRING && static_cast<std::string>(arr[6]).empty())) {
-            // empty string = slot skipped (placeholder to reach later args)
-            std::string khfx_path, khfx_err;
-            const int e = RenderIntegration::kh_effect_from_gv(arr[6], khfx_path, khfx_err);
-            if (e < 0) return game_value(khfx_err.empty() ? std::string("unknown effect") : khfx_err);
-            obj.effect = e;
-            obj.fx_shader = khfx_path;
-        }
-        if (arr.size() > 7 && !arr[7].is_nil()) {
-            if (arr[7].type_enum() != game_data_type::ARRAY) return game_value("fxParams must be an array of numbers");
-            fx_params = &arr[7].to_array();
-        }
-
-        if (!RenderIntegration::set_effect_params(obj, fx_params)) return game_value("fxParams entries must be numbers");
-
-        if (arr.size() > 8 && !arr[8].is_nil()) {
-            if (arr[8].type_enum() != game_data_type::ARRAY) return game_value("band must be [minDist, maxDist, falloff?] numbers");
-            auto& band = arr[8].to_array();
-            if ((band.size() > 0 && band[0].type_enum() != game_data_type::SCALAR) ||
-                (band.size() > 1 && band[1].type_enum() != game_data_type::SCALAR) ||
-                (band.size() > 2 && band[2].type_enum() != game_data_type::SCALAR)) return game_value("band must be [minDist, maxDist, falloff?] numbers");
-
-            if (band.size() >= 2) {
-                obj.banded = true;
-                obj.band_min = static_cast<float>(band[0]);
-                obj.band_max = static_cast<float>(band[1]);
-                if (band.size() >= 3) obj.band_falloff = static_cast<float>(band[2]);
-            }
-        }
-
-        if (arr.size() > 9 &&
-            !(arr[9].type_enum() == game_data_type::STRING && static_cast<std::string>(arr[9]).empty())) {
-            // empty string = slot skipped (the positional-placeholder
-            // convention, matching the effect slot): blend stays default
-            const int bm = RenderIntegration::blend_id_from_gv(arr[9]);
-            if (bm < 0) return game_value("unknown blend mode");
-            obj.blend_mode = bm;
-        }
-
-        if (arr.size() > 10) {
-            if (!RenderIntegration::parse_duration_gv(arr[10], obj)) {
-                return game_value("duration must be seconds or [fadeIn, hold, fadeOut]");
-            }
-        }
-
-        if (arr.size() > 11 && !arr[11].is_nil()) {
-            if (arr[11].type_enum() == game_data_type::BOOL) {
-                obj.lit = static_cast<bool>(arr[11]);
-            } else if (arr[11].type_enum() == game_data_type::ARRAY) {
-                auto& la = arr[11].to_array();
-                if ((la.size() > 0 && la[0].type_enum() != game_data_type::SCALAR) ||
-                    (la.size() > 1 && la[1].type_enum() != game_data_type::SCALAR)) return game_value("lit must be a boolean or [ambient, diffuse] numbers");
-                obj.lit = true;
-                if (la.size() >= 1) obj.light_ambient = static_cast<float>(la[0]);
-                if (la.size() >= 2) obj.light_diffuse = static_cast<float>(la[1]);
-
-            } else {
-                return game_value("lit must be a boolean or [ambient, diffuse] numbers");
-            }
-        }
-
-        if (arr.size() > 12) {
-            int mid = -1;
-
-            if (arr[12].type_enum() == game_data_type::STRING &&
-                RenderIntegration::kh_ends_with_ci(static_cast<std::string>(arr[12]), ".fbx")) {
-                // A ".fbx" path (case-insensitive suffix REQUIRED) in the
-                // mesh slot: resolved Documents-first then mod "rendering"
-                // folders, imported once (synchronous - the first spawn of a
-                // model pays the parse), cached thereafter.
-                std::string khfb_err;
-                mid = RenderIntegration::kh_fbx_mesh_id(static_cast<std::string>(arr[12]), khfb_err);
-                if (mid < 0) return game_value("fbx: " + khfb_err);
-            } else {
-                mid = RenderIntegration::mesh_id_from_gv(arr[12]);
-                if (mid < 0) return game_value("unknown mesh (builtin name, registry index, or a path ending .fbx)");
-            }
-
-            obj.mesh = mid;
-        }
-
-        // Native-size substitution AFTER the mesh is known: any size
-        // component <= 0 reads the mesh's native dimension (0 = native,
-        // negative = |value| x native) - the true-scale path for FBX.
-        RenderIntegration::kh_apply_native_size(obj);
-
-        if (arr.size() > 13 && !arr[13].is_nil()) {
-            if (arr[13].type_enum() != game_data_type::BOOL) return game_value("farVis must be a boolean");
-            obj.far_vis = static_cast<bool>(arr[13]);   // visible beyond max view distance
-        }
-
-        if (arr.size() > 14 && !arr[14].is_nil()) {
-            if (arr[14].type_enum() != game_data_type::BOOL) return game_value("twoSided must be a boolean");
-            obj.two_sided = static_cast<bool>(arr[14]);   // false = back-face culling
-        }
-
-        if (arr.size() > 15 && !arr[15].is_nil()) {
-            if (arr[15].type_enum() != game_data_type::BOOL) return game_value("lodLock must be a boolean");
-            obj.lod_lock = static_cast<bool>(arr[15]);   // KH_LOD_LOCK: this instance stays at level 0
-        }
-
-        return game_value(RenderIntegration::add_render_object(obj));
-    } catch (const std::exception& e) {
-        report_error(std::string("addRender3D: ") + e.what());
-        return game_value(std::string("EXCEPTION: ") + e.what());
-    } catch (...) {
-        report_error("addRender3D: unknown exception");
-        return game_value("EXCEPTION: unknown");
-    }
-}
-
-// 3D mesh objects (addRender3D) and fullscreen passes (addPostFX /
-// addLocalPostFX) share a handle space and several properties, but their
-// non-shared properties must not overlap: each command owns exactly its kind,
-// rejects the other's handles, and the genuinely common set lives in ONE
-// helper so the two can never drift.
-
-// Property set BOTH kinds own. Returns 1 = applied, 0 = recognized but the
-// value was invalid, -1 = not a shared property (fall through to the caller's
-// kind-specific set).
-static int kh_apply_shared_prop(RenderIntegration::RenderObject& obj,
-                                const std::string& prop, const game_value& val) {
-    using namespace RenderIntegration;
-
-    if (prop == "color") {
-        if (val.type_enum() != game_data_type::ARRAY) return 0;
-        auto& col = val.to_array();
-        if ((col.size() > 0 && col[0].type_enum() != game_data_type::SCALAR) ||
-            (col.size() > 1 && col[1].type_enum() != game_data_type::SCALAR) ||
-            (col.size() > 2 && col[2].type_enum() != game_data_type::SCALAR) ||
-            (col.size() > 3 && col[3].type_enum() != game_data_type::SCALAR)) return 0;
-        for (size_t i = 0; i < 4 && i < col.size(); ++i) obj.color[i] = static_cast<float>(col[i]);
-        RenderIntegration::kh_sanitize_color(obj.color);
-        return 1;
-    }
-
-    if (prop == "visible") {
-        if (val.type_enum() != game_data_type::BOOL) return 0;
-        obj.visible = static_cast<bool>(val);
-        return 1;
-    }
-
-    if (prop == "casterOnly") {
-        if (val.type_enum() != game_data_type::BOOL) return 0;
-        obj.caster_only = static_cast<bool>(val);
-        return 1;
-    }
-
-    if (prop == "params") {
-        if (val.type_enum() != game_data_type::ARRAY) return 0;
-        return set_effect_params(obj, &val.to_array()) ? 1 : 0;
-    }
-
-    if (prop == "blend") {
-        const int bm = blend_id_from_gv(val);
-        if (bm < 0) return 0;
-        obj.blend_mode = bm;
-        return 1;
-    }
-
-    if (prop == "band") {
-        if (val.type_enum() != game_data_type::ARRAY) return 0;
-        auto& band = val.to_array();
-        if ((band.size() > 0 && band[0].type_enum() != game_data_type::SCALAR) ||
-            (band.size() > 1 && band[1].type_enum() != game_data_type::SCALAR) ||
-            (band.size() > 2 && band[2].type_enum() != game_data_type::SCALAR)) return 0;
-
-        if (band.size() < 2) {
-            obj.banded = false;   // empty/short array clears the band
-        } else {
-            obj.banded = true;
-            obj.band_min = static_cast<float>(band[0]);
-            obj.band_max = static_cast<float>(band[1]);
-            if (band.size() >= 3) obj.band_falloff = static_cast<float>(band[2]);
-        }
-
-        return 1;
-    }
-
-    if (prop == "duration") {
-        if (!parse_duration_gv(val, obj)) return 0;
-        obj.birth_time = effect_time_seconds();   // re-arm from now
-        return 1;
-    }
-
-    return -1;
-}
-
-static game_value update_render3d_sqf(game_value_parameter args) {
-    try {
-        auto& arr = args.to_array();
-        if (arr.size() < 3) return game_value(false);
-        if (arr[0].type_enum() != game_data_type::STRING) return game_value(false);
-        if (arr[1].type_enum() != game_data_type::STRING) return game_value(false);
-        const std::string handle = static_cast<std::string>(arr[0]);
-        std::string prop = static_cast<std::string>(arr[1]);
-        std::transform(prop.begin(), prop.end(), prop.begin(), ::tolower);
-        std::lock_guard<std::mutex> g(RenderIntegration::g_draw_list_mutex);
-        auto it = RenderIntegration::g_draw_list.find(handle);
-        if (it == RenderIntegration::g_draw_list.end()) return game_value(false);
-        auto& obj = it->second;
-        if (obj.fullscreen) return game_value(false);   // that handle belongs to updatePostFX
-
-        const int shared = kh_apply_shared_prop(obj, prop, arr[2]);
-        if (shared >= 0) return game_value(shared == 1);
-
-        if (prop == "position") {
-            if (arr[2].type_enum() != game_data_type::ARRAY) return game_value(false);
-            auto& pos = arr[2].to_array();
-            if (pos.size() < 3 ||
-                pos[0].type_enum() != game_data_type::SCALAR ||
-                pos[1].type_enum() != game_data_type::SCALAR ||
-                pos[2].type_enum() != game_data_type::SCALAR) return game_value(false);
-            obj.pos[0] = static_cast<float>(pos[0]);
-            obj.pos[1] = static_cast<float>(pos[1]);
-            obj.pos[2] = static_cast<float>(pos[2]);
-        } else if (prop == "size" || prop == "scale") {
-            if (!RenderIntegration::read_vec3_or_uniform(arr[2], obj.size_mul)) return game_value(false);
-            RenderIntegration::kh_apply_native_size(obj);   // multiplier -> metres
-        } else if (prop == "rotation") {
-            float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f;
-            if (!kh_rotation_from_gv(arr[2], khr_p, khr_y, khr_r)) return game_value(false);
-            RenderIntegration::kh_set_rotation(obj, khr_p, khr_y, khr_r);
-        } else if (prop == "mesh") {
-            int mid = -1;
-
-            if (arr[2].type_enum() == game_data_type::STRING &&
-                RenderIntegration::kh_ends_with_ci(static_cast<std::string>(arr[2]), ".fbx")) {
-                std::string khfb_err;
-                mid = RenderIntegration::kh_fbx_mesh_id(static_cast<std::string>(arr[2]), khfb_err);
-                if (mid < 0) { report_error("updateRender3D mesh: " + khfb_err); return game_value(false); }
-            } else {
-                mid = RenderIntegration::mesh_id_from_gv(arr[2]);
-                if (mid < 0) return game_value(false);
-            }
-
-            obj.mesh = mid;
-            RenderIntegration::kh_apply_native_size(obj);
-        } else if (prop == "material") {
-            // "material" update: per-submesh shader + texture + channel
-            // assignments (format at kh_apply_material_update). Errors report
-            // the reason and return false.
-            std::string khmt_err;
-
-            if (!RenderIntegration::kh_apply_material_update(obj, arr[2], khmt_err)) {
-                report_error("updateRender3D material: " + khmt_err);
-                return game_value(false);
-            }
-        } else if (prop == "mode") {
-            if (arr[2].type_enum() != game_data_type::SCALAR) return game_value(false);
-            int m = static_cast<int>(static_cast<float>(arr[2]));
-            if (m < 0 || m > 2) return game_value(false);
-            obj.mode = static_cast<RenderIntegration::DepthMode>(m);
-        } else if (prop == "sceneread") {
-            if (arr[2].type_enum() != game_data_type::BOOL) return game_value(false);
-            obj.effect = static_cast<bool>(arr[2]) ? 2 : 0;
-            RenderIntegration::set_effect_params(obj, nullptr);
-        } else if (prop == "effect") {
-            std::string khfx_path, khfx_err;
-            const int e = RenderIntegration::kh_effect_from_gv(arr[2], khfx_path, khfx_err);
-            if (e < 0) return game_value(false);
-            obj.effect = e;
-            obj.fx_shader = khfx_path;
-            RenderIntegration::set_effect_params(obj, nullptr);
-        } else if (prop == "lit" || prop == "lighting") {
-            // BOOL toggles, ARRAY [ambient, diffuse] configures.
-            if (arr[2].type_enum() == game_data_type::ARRAY) {
-                auto& la = arr[2].to_array();
-
-                if ((la.size() > 0 && la[0].type_enum() != game_data_type::SCALAR) ||
-                    (la.size() > 1 && la[1].type_enum() != game_data_type::SCALAR)) return game_value(false);
-
-                if (la.size() < 1) {
-                    obj.lit = false;   // empty array disables the shading
-                } else {
-                    obj.lit = true;
-                    obj.light_ambient = static_cast<float>(la[0]);
-                    if (la.size() >= 2) obj.light_diffuse = static_cast<float>(la[1]);
-
-                }
-            } else if (arr[2].type_enum() == game_data_type::BOOL) {
-                obj.lit = static_cast<bool>(arr[2]);
-            } else {
-                return game_value(false);
-            }
-        } else if (prop == "twosided") {
-            if (arr[2].type_enum() != game_data_type::BOOL) return game_value(false);
-            obj.two_sided = static_cast<bool>(arr[2]);   // false = back-face culling
-        } else if (prop == "farvis") {
-            if (arr[2].type_enum() != game_data_type::BOOL) return game_value(false);
-            obj.far_vis = static_cast<bool>(arr[2]);   // visible beyond max view distance
-        } else if (prop == "lodlock") {
-            if (arr[2].type_enum() != game_data_type::BOOL) return game_value(false);
-            obj.lod_lock = static_cast<bool>(arr[2]);   // KH_LOD_LOCK: level 0, no transitions, this instance only
-        } else {
-            return game_value(false);
-        }
-
-        return game_value(true);
-    } catch (const std::exception& e) {
-        report_error(std::string("updateRender3D: ") + e.what());
-        return game_value(false);
-    } catch (...) {
-        report_error("updateRender3D: unknown exception");
-        return game_value(false);
-    }
-}
-
-// updatePostFX [handle, property, value] -> BOOL Fullscreen post-processing
-// passes ONLY (addPostFX / addLocalPostFX handles); 3D mesh objects belong to
-// updateRender3D. Returns false for unknown handles, 3D-object handles,
-// unknown properties, or invalid values.
-
+// UI phase argument: "SCENE" | "UI" | "BOTH" | bool ("" = positional skip).
 // Returns false for anything else.
 static bool kh_ui_phase_from_gv(const game_value& gv, bool& affect_ui, bool& ui_only) {
     if (gv.type_enum() == game_data_type::BOOL) {
@@ -6648,82 +6184,424 @@ static bool kh_ui_phase_from_gv(const game_value& gv, bool& affect_ui, bool& ui_
     return false;
 }
 
-static game_value update_post_fx_sqf(game_value_parameter args) {
+// Shared value parsers. Each returns false with a caller-facing sentence in
+// err; the caller prefixes the command (and property / element index) and
+// reports it. ONE parser per value shape so the creators and the updaters
+// cannot disagree about what a colour or a band looks like.
+static bool kh_rv_pos(const game_value& v, float out[3], std::string& err) {
+    if (v.type_enum() != game_data_type::ARRAY) { err = "position must be [x, y, zASL]"; return false; }
+    auto& pos = v.to_array();
+    if (pos.size() < 3 ||
+        pos[0].type_enum() != game_data_type::SCALAR ||
+        pos[1].type_enum() != game_data_type::SCALAR ||
+        pos[2].type_enum() != game_data_type::SCALAR) { err = "position must be [x, y, zASL]"; return false; }
+    out[0] = static_cast<float>(pos[0]);
+    out[1] = static_cast<float>(pos[1]);
+    out[2] = static_cast<float>(pos[2]);
+    return true;
+}
+
+static bool kh_rv_color(const game_value& v, RenderIntegration::RenderObject& obj, std::string& err) {
+    if (v.type_enum() != game_data_type::ARRAY) { err = "color must be [r, g, b, a] numbers"; return false; }
+    auto& col = v.to_array();
+    if (col.size() > 4) { err = "color must be [r, g, b, a] numbers"; return false; }
+    for (size_t i = 0; i < col.size(); ++i) {
+        if (col[i].type_enum() != game_data_type::SCALAR) { err = "color must be [r, g, b, a] numbers"; return false; }
+    }
+    for (size_t i = 0; i < 4 && i < col.size(); ++i) obj.color[i] = static_cast<float>(col[i]);
+    RenderIntegration::kh_sanitize_color(obj.color);
+    return true;
+}
+
+// [minDist, maxDist, falloff?]; fewer than two entries clears the band.
+static bool kh_rv_band(const game_value& v, RenderIntegration::RenderObject& obj, std::string& err) {
+    if (v.type_enum() != game_data_type::ARRAY) { err = "band must be [minDist, maxDist, falloff?] numbers ([] clears)"; return false; }
+    auto& band = v.to_array();
+    if (band.size() > 3) { err = "band must be [minDist, maxDist, falloff?] numbers ([] clears)"; return false; }
+    for (size_t i = 0; i < band.size(); ++i) {
+        if (band[i].type_enum() != game_data_type::SCALAR) { err = "band must be [minDist, maxDist, falloff?] numbers ([] clears)"; return false; }
+    }
+    if (band.size() < 2) {
+        obj.banded = false;
+    } else {
+        obj.banded = true;
+        obj.band_min = static_cast<float>(band[0]);
+        obj.band_max = static_cast<float>(band[1]);
+        if (band.size() >= 3) obj.band_falloff = static_cast<float>(band[2]);
+    }
+    return true;
+}
+
+static bool kh_rv_blend(const game_value& v, RenderIntegration::RenderObject& obj, std::string& err) {
+    const int bm = RenderIntegration::blend_id_from_gv(v);
+    if (bm < 0) { err = "blend must be normal | additive | multiply | screen | lighten | darken (or 0-5)"; return false; }
+    obj.blend_mode = bm;
+    return true;
+}
+
+static bool kh_rv_duration(const game_value& v, RenderIntegration::RenderObject& obj, std::string& err) {
+    if (!RenderIntegration::parse_duration_gv(v, obj)) { err = "duration must be seconds or [fadeIn, hold, fadeOut] ([] = permanent)"; return false; }
+    return true;
+}
+
+static bool kh_rv_params(const game_value& v, RenderIntegration::RenderObject& obj, std::string& err) {
+    if (v.is_nil()) return RenderIntegration::set_effect_params(obj, nullptr);
+    if (v.type_enum() != game_data_type::ARRAY) { err = "params must be an array of numbers (nil entries keep the default)"; return false; }
+    if (!RenderIntegration::set_effect_params(obj, &v.to_array())) { err = "params entries must be numbers (or nil to keep the default)"; return false; }
+    return true;
+}
+
+// builtin name / alias, registry index, or a path ending .fbx
+static bool kh_rv_mesh(const game_value& v, int& mid, std::string& err) {
+    if (v.type_enum() == game_data_type::STRING &&
+        RenderIntegration::kh_ends_with_ci(static_cast<std::string>(v), ".fbx")) {
+        std::string khfb_err;
+        mid = RenderIntegration::kh_fbx_mesh_id(static_cast<std::string>(v), khfb_err);
+        if (mid < 0) { err = "fbx: " + khfb_err; return false; }
+        return true;
+    }
+    mid = RenderIntegration::mesh_id_from_gv(v);
+    if (mid < 0) { err = "mesh must be a builtin name (box | steps | sphere | cylinder | cone | pyramid), a registry index, or a path ending .fbx"; return false; }
+    return true;
+}
+
+// effect name / id / .hlsl / .cube. want_fullscreen rejects 'solid' (0), which
+// a fullscreen pass cannot draw.
+static bool kh_rv_effect(const game_value& v, RenderIntegration::RenderObject& obj, bool want_fullscreen, std::string& err) {
+    std::string khfx_path, khfx_err;
+    const int e = RenderIntegration::kh_effect_from_gv(v, khfx_path, khfx_err);
+    if (e < 0) { err = khfx_err.empty() ? std::string("unknown effect (a builtin effect name / id, a .hlsl path, or a .cube path)") : khfx_err; return false; }
+    if (want_fullscreen && e == 0) { err = "a fullscreen pass needs an effect other than 'solid'"; return false; }
+    obj.effect = e;
+    obj.fx_shader = khfx_path;
+    RenderIntegration::set_effect_params(obj, nullptr);   // new effect, its defaults
+    return true;
+}
+
+static bool kh_rv_bool(const game_value& v, bool& out, const char* what, std::string& err) {
+    if (v.type_enum() != game_data_type::BOOL) { err = std::string(what) + " must be a boolean"; return false; }
+    out = static_cast<bool>(v);
+    return true;
+}
+
+// bool | [ambient, diffuse] | [] = off
+static bool kh_rv_lit(const game_value& v, RenderIntegration::RenderObject& obj, std::string& err) {
+    if (v.type_enum() == game_data_type::BOOL) {
+        obj.lit = static_cast<bool>(v);
+        return true;
+    }
+    if (v.type_enum() != game_data_type::ARRAY) { err = "lit must be a boolean or [ambient, diffuse] numbers ([] = off)"; return false; }
+    auto& la = v.to_array();
+    if (la.size() > 2) { err = "lit must be a boolean or [ambient, diffuse] numbers ([] = off)"; return false; }
+    for (size_t i = 0; i < la.size(); ++i) {
+        if (la[i].type_enum() != game_data_type::SCALAR) { err = "lit must be a boolean or [ambient, diffuse] numbers ([] = off)"; return false; }
+    }
+    if (la.size() < 1) {
+        obj.lit = false;
+    } else {
+        obj.lit = true;
+        obj.light_ambient = static_cast<float>(la[0]);
+        if (la.size() >= 2) obj.light_diffuse = static_cast<float>(la[1]);
+    }
+    return true;
+}
+
+static void kh_rv_report(const char* cmd, const std::string& msg) {
+    report_error(std::string(cmd) + ": " + msg);
+}
+
+// addRender3D [[x,y,zASL], rotation, mesh]. Everything else - size, color,
+// mode, sceneRead, effect, params, band, blend, duration, lit, farVis,
+// twoSided, lodLock, casterOnly, visible, material - is an updateRender3D
+// property. A spawned mesh starts as: size 1 (the mesh's native dimensions),
+// color [1,1,1,1], mode 1 (depth test + write), no effect, no params, no
+// band, blend normal, permanent, LIT, farVis false, twoSided false (back
+// faces culled), lodLock false. Aspect ratio is always preserved - there is
+// no box fit, so a model is never squashed to a cube. Returns the khr_
+// handle, or "" after reporting the fault.
+static game_value add_render3d_sqf(game_value_parameter args) {
     try {
         auto& arr = args.to_array();
-        if (arr.size() < 3) return game_value(false);
-        if (arr[0].type_enum() != game_data_type::STRING) return game_value(false);
-        if (arr[1].type_enum() != game_data_type::STRING) return game_value(false);
-        const std::string handle = static_cast<std::string>(arr[0]);
-        std::string prop = static_cast<std::string>(arr[1]);
-        std::transform(prop.begin(), prop.end(), prop.begin(), ::tolower);
-        std::lock_guard<std::mutex> g(RenderIntegration::g_draw_list_mutex);
-        auto it = RenderIntegration::g_draw_list.find(handle);
-        if (it == RenderIntegration::g_draw_list.end()) return game_value(false);
-        auto& obj = it->second;
-        if (!obj.fullscreen) return game_value(false);   // that handle belongs to updateRender3D
-        if (obj.affect_ui) RenderIntegration::kh_ui_driver_rehoist();   // back on top
+        std::string err;
+        if (arr.size() != 3) {
+            kh_rv_report("addRender3D", "expects exactly [[x, y, zASL], rotation, mesh] (" +
+                         std::to_string(arr.size()) + " elements given); every other property is set with updateRender3D");
+            return game_value("");
+        }
+        RenderIntegration::RenderObject obj;
+        if (!kh_rv_pos(arr[0], obj.pos, err)) { kh_rv_report("addRender3D", err); return game_value(""); }
 
-        const int shared = kh_apply_shared_prop(obj, prop, arr[2]);
-        if (shared >= 0) return game_value(shared == 1);
-
-        if (prop == "position") {
-            if (arr[2].type_enum() != game_data_type::ARRAY) return game_value(false);
-            auto& pos = arr[2].to_array();
-            if (pos.size() < 3 ||
-                pos[0].type_enum() != game_data_type::SCALAR ||
-                pos[1].type_enum() != game_data_type::SCALAR ||
-                pos[2].type_enum() != game_data_type::SCALAR) return game_value(false);
-            obj.pos[0] = static_cast<float>(pos[0]);
-            obj.pos[1] = static_cast<float>(pos[1]);
-            obj.pos[2] = static_cast<float>(pos[2]);
-        } else if (prop == "effect") {
-            std::string khfx_path, khfx_err;
-            const int e = RenderIntegration::kh_effect_from_gv(arr[2], khfx_path, khfx_err);
-            if (e <= 0) return game_value(false);   // a fullscreen pass without an effect is meaningless
-            obj.effect = e;
-            obj.fx_shader = khfx_path;
-            RenderIntegration::set_effect_params(obj, nullptr);
-        } else if (prop == "ui") {
-            // "SCENE"/"UI"/"BOTH" or the legacy boolean pair
-            if (!kh_ui_phase_from_gv(arr[2], obj.affect_ui, obj.ui_only)) return game_value(false);
-            // UI phase must start the overlay control driver explicitly -
-            // state stays dead otherwise (no passive activation).
-            if (obj.affect_ui) RenderIntegration::kh_ui_driver_rehoist();   // Uphase demanded
-        } else if (prop == "uispill") {
-            // Builtin gather effects are auto-classified; this bit exists so
-            // a custom.hlsl never needs coverage code.
-            if (arr[2].type_enum() != game_data_type::BOOL) return game_value(false);
-            obj.ui_spill = static_cast<bool>(arr[2]);
-        } else if (prop == "radius") {
-            if (!RenderIntegration::read_vec3_or_uniform(arr[2], obj.local_radius)) return game_value(false);
-        } else if (prop == "falloff") {
-            if (arr[2].type_enum() != game_data_type::SCALAR) return game_value(false);
-            obj.local_falloff = static_cast<float>(arr[2]);
-        } else if (prop == "localsphere") {
-            if (arr[2].type_enum() != game_data_type::ARRAY) return game_value(false);
-            auto& sp = arr[2].to_array();
-
-            if (sp.size() < 1) {
-                obj.localized = false;
-            } else {
-                obj.localized = true;
-                if (!RenderIntegration::read_vec3_or_uniform(sp[0], obj.local_radius)) return game_value(false);
-                if (sp.size() >= 2 && sp[1].type_enum() != game_data_type::SCALAR) return game_value(false);
-                if (sp.size() >= 2) obj.local_falloff = static_cast<float>(sp[1]);
+        {
+            float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f;
+            if (!kh_rotation_from_gv(arr[1], khr_p, khr_y, khr_r)) {
+                kh_rv_report("addRender3D", "rotation must be nil, a number (yaw) or [pitch, yaw, roll] degrees");
+                return game_value("");
             }
-        } else if (prop == "shape") {
-            const int sh = RenderIntegration::shape_id_from_gv(arr[2]);
-            if (sh < 0) return game_value(false);
-            obj.local_shape = sh;
-        } else if (prop == "inverse") {
-            if (arr[2].type_enum() != game_data_type::BOOL) return game_value(false);
-            obj.local_inverse = static_cast<bool>(arr[2]);   // KH_LOCAL_INVERSE: everything except the volume
-        } else {
-            return game_value(false);
+            RenderIntegration::kh_set_rotation(obj, khr_p, khr_y, khr_r);
         }
 
-        return game_value(true);
+        if (!arr[2].is_nil()) {   // nil = mesh 0 (box)
+            int mid = 0;
+            if (!kh_rv_mesh(arr[2], mid, err)) { kh_rv_report("addRender3D", err); return game_value(""); }
+            obj.mesh = mid;
+        }
+
+        // The spawn defaults (see the header note). size_mul is 1 by
+        // construction; kh_apply_native_size turns it into metres for the
+        // chosen mesh. Everything not listed keeps the RenderObject default.
+        obj.mode = RenderIntegration::DepthMode::TestWrite;
+        obj.lit = true;
+        obj.two_sided = false;
+        obj.effect = 0;
+        obj.fx_shader.clear();
+        RenderIntegration::set_effect_params(obj, nullptr);
+        RenderIntegration::kh_apply_native_size(obj);
+
+        return game_value(RenderIntegration::add_render_object(obj));
+    } catch (const std::exception& e) {
+        report_error(std::string("addRender3D: ") + e.what());
+        return game_value("");
+    } catch (...) {
+        report_error("addRender3D: unknown exception");
+        return game_value("");
+    }
+}
+
+// 3D mesh objects (addRender3D) and fullscreen passes (addPostFX /
+// addLocalPostFX) share a handle space and several properties, but their
+// non-shared properties must not overlap: each command owns exactly its kind,
+// rejects the other's handles, and the genuinely common set lives in ONE
+// helper so the two can never drift. prop arrives LOWER-CASED.
+
+// Property set BOTH kinds own. Returns 1 = applied, 0 = recognized but the
+// value was invalid (err set), -1 = not a shared property (fall through to
+// the caller's kind-specific set).
+static int kh_apply_shared_prop(RenderIntegration::RenderObject& obj,
+                                const std::string& prop, const game_value& val, std::string& err) {
+    if (prop == "color")   return kh_rv_color(val, obj, err) ? 1 : 0;
+    if (prop == "visible") { bool b = obj.visible; if (!kh_rv_bool(val, b, "visible", err)) return 0; obj.visible = b; return 1; }
+    // (26759) compared against the mixed-case literal "casterOnly" while the
+    // callers lower-case the property first, so it never matched and every
+    // casterOnly update returned false.
+    if (prop == "casteronly") { bool b = obj.caster_only; if (!kh_rv_bool(val, b, "casterOnly", err)) return 0; obj.caster_only = b; return 1; }
+    if (prop == "params" || prop == "fxparams") return kh_rv_params(val, obj, err) ? 1 : 0;
+    if (prop == "blend")   return kh_rv_blend(val, obj, err) ? 1 : 0;
+    if (prop == "band")    return kh_rv_band(val, obj, err) ? 1 : 0;
+    if (prop == "duration") {
+        if (!kh_rv_duration(val, obj, err)) return 0;
+        obj.birth_time = RenderIntegration::effect_time_seconds();   // re-arm from now
+        return 1;
+    }
+    return -1;
+}
+
+// updateRender3D's own set (the object is a mesh). Returns false with err.
+static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj,
+                                   const std::string& prop, const game_value& val, std::string& err) {
+    const int shared = kh_apply_shared_prop(obj, prop, val, err);
+    if (shared >= 0) return shared == 1;
+
+    if (prop == "position") return kh_rv_pos(val, obj.pos, err);
+    if (prop == "size" || prop == "scale") {
+        if (!RenderIntegration::read_vec3_or_uniform(val, obj.size_mul)) { err = "size must be a number or [x, y, z] multipliers of the mesh's own size"; return false; }
+        RenderIntegration::kh_apply_native_size(obj);   // multiplier -> metres
+        return true;
+    }
+    if (prop == "rotation") {
+        float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f;
+        if (!kh_rotation_from_gv(val, khr_p, khr_y, khr_r)) { err = "rotation must be nil, a number (yaw) or [pitch, yaw, roll] degrees"; return false; }
+        RenderIntegration::kh_set_rotation(obj, khr_p, khr_y, khr_r);
+        return true;
+    }
+    if (prop == "mesh") {
+        int mid = 0;
+        if (!kh_rv_mesh(val, mid, err)) return false;
+        obj.mesh = mid;
+        RenderIntegration::kh_apply_native_size(obj);
+        return true;
+    }
+    if (prop == "material") return RenderIntegration::kh_apply_material_update(obj, val, err);
+    if (prop == "mode") {
+        if (val.type_enum() != game_data_type::SCALAR) { err = "mode must be 0 (depth test), 1 (test + write) or 2 (overlay)"; return false; }
+        const int m = static_cast<int>(static_cast<float>(val));
+        if (m < 0 || m > 2) { err = "mode must be 0 (depth test), 1 (test + write) or 2 (overlay)"; return false; }
+        obj.mode = static_cast<RenderIntegration::DepthMode>(m);
+        return true;
+    }
+    if (prop == "sceneread") {
+        bool b = false;
+        if (!kh_rv_bool(val, b, "sceneRead", err)) return false;
+        obj.effect = b ? 2 : 0;   // tinted scene-read (colorgrade defaults)
+        obj.fx_shader.clear();
+        RenderIntegration::set_effect_params(obj, nullptr);
+        return true;
+    }
+    if (prop == "effect")   return kh_rv_effect(val, obj, false, err);
+    if (prop == "lit" || prop == "lighting") return kh_rv_lit(val, obj, err);
+    if (prop == "twosided") { bool b = obj.two_sided; if (!kh_rv_bool(val, b, "twoSided", err)) return false; obj.two_sided = b; return true; }
+    if (prop == "farvis")   { bool b = obj.far_vis;   if (!kh_rv_bool(val, b, "farVis", err))   return false; obj.far_vis = b;   return true; }
+    if (prop == "lodlock")  { bool b = obj.lod_lock;  if (!kh_rv_bool(val, b, "lodLock", err))  return false; obj.lod_lock = b;  return true; }
+
+    err = "unknown property (position | size | rotation | mesh | material | mode | sceneRead | effect | params | lit | twoSided | farVis | lodLock | casterOnly | color | visible | blend | band | duration)";
+    return false;
+}
+
+// updatePostFX's own set (the object is a fullscreen / local pass).
+static bool kh_apply_postfx_prop(RenderIntegration::RenderObject& obj,
+                                 const std::string& prop, const game_value& val, std::string& err) {
+    const int shared = kh_apply_shared_prop(obj, prop, val, err);
+    if (shared >= 0) return shared == 1;
+
+    if (prop == "position") return kh_rv_pos(val, obj.pos, err);
+    if (prop == "effect")   return kh_rv_effect(val, obj, true, err);
+    if (prop == "ui") {
+        if (!kh_ui_phase_from_gv(val, obj.affect_ui, obj.ui_only)) { err = "ui must be \"SCENE\", \"UI\", \"BOTH\", or a boolean"; return false; }
+        if (obj.affect_ui) RenderIntegration::kh_ui_driver_rehoist();   // UI phase demanded
+        return true;
+    }
+    if (prop == "uispill") { bool b = obj.ui_spill; if (!kh_rv_bool(val, b, "uiSpill", err)) return false; obj.ui_spill = b; return true; }
+    if (prop == "radius") {
+        if (!RenderIntegration::read_vec3_or_uniform(val, obj.local_radius)) { err = "radius must be a number or [x, y, z] metres"; return false; }
+        return true;
+    }
+    if (prop == "falloff") {
+        if (val.type_enum() != game_data_type::SCALAR) { err = "falloff must be a number (metres)"; return false; }
+        obj.local_falloff = static_cast<float>(val);
+        return true;
+    }
+    if (prop == "localsphere") {
+        if (val.type_enum() != game_data_type::ARRAY) { err = "localSphere must be [radius, falloff?] ([] = not localized)"; return false; }
+        auto& sp = val.to_array();
+        if (sp.size() > 2) { err = "localSphere must be [radius, falloff?] ([] = not localized)"; return false; }
+        if (sp.size() < 1) {
+            obj.localized = false;
+            return true;
+        }
+        float khls_r[3];
+        if (!RenderIntegration::read_vec3_or_uniform(sp[0], khls_r)) { err = "localSphere radius must be a number or [x, y, z] metres"; return false; }
+        if (sp.size() >= 2 && sp[1].type_enum() != game_data_type::SCALAR) { err = "localSphere falloff must be a number (metres)"; return false; }
+        obj.localized = true;
+        obj.local_radius[0] = khls_r[0]; obj.local_radius[1] = khls_r[1]; obj.local_radius[2] = khls_r[2];
+        if (sp.size() >= 2) obj.local_falloff = static_cast<float>(sp[1]);
+        return true;
+    }
+    if (prop == "shape") {
+        const int sh = RenderIntegration::shape_id_from_gv(val);
+        if (sh < 0) { err = "shape must be sphere | ellipsoid | cube | box (or 0 / 1)"; return false; }
+        obj.local_shape = sh;
+        return true;
+    }
+    if (prop == "inverse") { bool b = obj.local_inverse; if (!kh_rv_bool(val, b, "inverse", err)) return false; obj.local_inverse = b; return true; }
+
+    err = "unknown property (position | effect | params | ui | uiSpill | radius | falloff | localSphere | shape | inverse | color | visible | blend | band | duration)";
+    return false;
+}
+
+// One [handle, property, value] applied under the draw-list lock. Reports
+// every fault with the command name and, for a batch, the triple's index.
+static bool kh_update_one(const char* cmd, bool want_fullscreen,
+                          const game_value& triple, int index) {
+    const std::string where = index < 0 ? std::string() : (" [" + std::to_string(index) + "]");
+    if (triple.type_enum() != game_data_type::ARRAY) {
+        kh_rv_report(cmd, "element" + where + " must be [handle, property, value]");
+        return false;
+    }
+    auto& t = triple.to_array();
+    if (t.size() != 3) {
+        kh_rv_report(cmd, "element" + where + " must be [handle, property, value] (" + std::to_string(t.size()) + " elements given)");
+        return false;
+    }
+    if (t[0].type_enum() != game_data_type::STRING) { kh_rv_report(cmd, "handle" + where + " must be a string"); return false; }
+    if (t[1].type_enum() != game_data_type::STRING) { kh_rv_report(cmd, "property" + where + " must be a string"); return false; }
+    const std::string handle = static_cast<std::string>(t[0]);
+    std::string prop = static_cast<std::string>(t[1]);
+    std::transform(prop.begin(), prop.end(), prop.begin(), ::tolower);
+
+    // LOCK DISCIPLINE (26760). The value parsers may touch the disk: a
+    // first-seen .fbx runs the whole import (ufbx, the LOD ladder, tangents)
+    // and then PARKS the render thread to publish; .hlsl / .cube / material
+    // paths walk every mod's rendering folder on a cache miss. The render
+    // thread takes g_draw_list_mutex at five sites (the sun caster census,
+    // the mask cast, the seam inject, both injection staging loops), so
+    // parsing under it stalled the frame for the import's duration and -
+    // worse - inverted the park: the game thread waited for a render thread
+    // that was itself blocked on this mutex. The parsers therefore run on a
+    // COPY outside the lock, and the result is committed under a second,
+    // short lock. Sound because every writer to a draw-list entry is the
+    // game thread (the SQF handlers and the flush's expiry erase - all on
+    // this thread, so nothing can interleave between the two locks); the
+    // render thread only reads. The vanished-between-locks report below is
+    // therefore a tripwire, not an expected path.
+    RenderIntegration::RenderObject staged;
+    {
+        std::lock_guard<std::mutex> g(RenderIntegration::g_draw_list_mutex);
+        auto it = RenderIntegration::g_draw_list.find(handle);
+        if (it == RenderIntegration::g_draw_list.end()) {
+            kh_rv_report(cmd, "no render object with handle '" + handle + "'" + where);
+            return false;
+        }
+        if (it->second.fullscreen != want_fullscreen) {
+            kh_rv_report(cmd, "handle '" + handle + "'" + where + (want_fullscreen
+                         ? " is a mesh object - use updateRender3D"
+                         : " is a post-processing pass - use updatePostFX"));
+            return false;
+        }
+        staged = it->second;
+    }
+
+    std::string err;
+    const bool ok = want_fullscreen ? kh_apply_postfx_prop(staged, prop, t[2], err)
+                                    : kh_apply_render3d_prop(staged, prop, t[2], err);
+    if (!ok) {
+        kh_rv_report(cmd, "property '" + static_cast<std::string>(t[1]) + "'" + where + ": " + err);
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> g(RenderIntegration::g_draw_list_mutex);
+        auto it = RenderIntegration::g_draw_list.find(handle);
+        if (it == RenderIntegration::g_draw_list.end()) {
+            kh_rv_report(cmd, "render object '" + handle + "'" + where + " was removed while the update was being applied");
+            return false;
+        }
+        it->second = std::move(staged);
+    }
+    return true;
+}
+
+// [handle, property, value] or [[handle, property, value], ...]. The batch
+// form applies every triple it can and returns true only if all applied.
+static game_value kh_update_many(const char* cmd, bool want_fullscreen, const game_value& args) {
+    auto& arr = args.to_array();
+    if (arr.size() == 0) {
+        kh_rv_report(cmd, "expects [handle, property, value] or an array of them");
+        return game_value(false);
+    }
+    if (arr[0].type_enum() != game_data_type::ARRAY) {
+        return game_value(kh_update_one(cmd, want_fullscreen, args, -1));
+    }
+    bool all = true;
+    for (size_t i = 0; i < arr.size(); ++i) {
+        if (!kh_update_one(cmd, want_fullscreen, arr[i], static_cast<int>(i))) all = false;
+    }
+    return game_value(all);
+}
+
+static game_value update_render3d_sqf(game_value_parameter args) {
+    try {
+        return kh_update_many("updateRender3D", false, args);
+    } catch (const std::exception& e) {
+        report_error(std::string("updateRender3D: ") + e.what());
+        return game_value(false);
+    } catch (...) {
+        report_error("updateRender3D: unknown exception");
+        return game_value(false);
+    }
+}
+
+static game_value update_post_fx_sqf(game_value_parameter args) {
+    try {
+        return kh_update_many("updatePostFX", true, args);
     } catch (const std::exception& e) {
         report_error(std::string("updatePostFX: ") + e.what());
         return game_value(false);
@@ -6733,11 +6611,12 @@ static game_value update_post_fx_sqf(game_value_parameter args) {
     }
 }
 
-// removeRenderHandler handle -> BOOL (true if an object was removed)
-// removeRenderHandler "" or "all" -> BOOL (clears the entire draw list)
 static game_value remove_render_handler_sqf(game_value_parameter arg) {
     try {
-        if (arg.type_enum() != game_data_type::STRING) return game_value(false);
+        if (arg.type_enum() != game_data_type::STRING) {
+            kh_rv_report("removeRenderHandler", "handle must be a string ('' or 'all' removes every object)");
+            return game_value(false);
+        }
         const std::string handle = static_cast<std::string>(arg);
 
         if (handle.empty() || handle == "all") {
@@ -6745,7 +6624,11 @@ static game_value remove_render_handler_sqf(game_value_parameter arg) {
             return game_value(true);
         }
 
-        return game_value(RenderIntegration::remove_render_object(handle));
+        if (!RenderIntegration::remove_render_object(handle)) {
+            kh_rv_report("removeRenderHandler", "no render object with handle '" + handle + "'");
+            return game_value(false);
+        }
+        return game_value(true);
     } catch (const std::exception& e) {
         report_error(std::string("removeRenderHandler: ") + e.what());
         return game_value(false);
@@ -6755,167 +6638,81 @@ static game_value remove_render_handler_sqf(game_value_parameter arg) {
     }
 }
 
-static game_value queue_visibility_sqf(game_value_parameter args) {
-    try {
-        auto& arr = args.to_array();
-        UINT count = static_cast<UINT>(arr.size());
-        RenderIntegration::g_query_points_pending.resize(static_cast<size_t>(count) * 3);
-
-        for (UINT i = 0; i < count; ++i) {
-            if (arr[i].type_enum() != game_data_type::ARRAY) return game_value(-1.0f);   // invalid point shape
-            auto& p = arr[i].to_array();
-            if (p.size() < 3 ||
-                p[0].type_enum() != game_data_type::SCALAR ||
-                p[1].type_enum() != game_data_type::SCALAR ||
-                p[2].type_enum() != game_data_type::SCALAR) return game_value(-1.0f);   // invalid point shape
-            RenderIntegration::g_query_points_pending[i * 3 + 0] = static_cast<float>(p[0]);
-            RenderIntegration::g_query_points_pending[i * 3 + 1] = static_cast<float>(p[1]);
-            RenderIntegration::g_query_points_pending[i * 3 + 2] = static_cast<float>(p[2]);
-        }
-
-        RenderIntegration::g_query_pending = count > 0;
-        if (count > 0) RenderIntegration::ensure_draw_eh();   // the flush performs the dispatch
-        return game_value(static_cast<float>(count));
-    } catch (const std::exception& e) {
-        report_error(std::string("queueVisibility: ") + e.what());
-        return game_value(-1.0f);
-    } catch (...) {
-        report_error("queueVisibility: unknown exception");
-        return game_value(-1.0f);
-    }
-}
-
-// getVisibilityResults -> [ageInFrames, [[status, pointDistM,
-// sceneDistM],...]] status: 1 visible, 0 occluded, -1 offscreen/behind
-// camera. Results array is empty until the first queued batch completes.
-static game_value get_visibility_results_sqf() {
-    try {
-        auto_array<game_value> results;
-        results.reserve(RenderIntegration::g_vis_result_count);
-
-        for (UINT i = 0; i < RenderIntegration::g_vis_result_count; ++i) {
-            auto_array<game_value> e;
-            e.push_back(game_value(RenderIntegration::g_vis_results_cpu[i * 4 + 0]));
-            e.push_back(game_value(RenderIntegration::g_vis_results_cpu[i * 4 + 1]));
-            e.push_back(game_value(RenderIntegration::g_vis_results_cpu[i * 4 + 2]));
-            results.push_back(game_value(std::move(e)));
-        }
-
-        const float age = static_cast<float>(
-            RenderIntegration::g_flush_frame - RenderIntegration::g_vis_result_frame);
-
-        auto_array<game_value> out;
-        out.push_back(game_value(age));
-        out.push_back(game_value(std::move(results)));
-        return game_value(std::move(out));
-    } catch (...) {
-        report_error("getVisibilityResults: unknown exception");
-        return game_value(auto_array<game_value>());
-    }
-}
-
-// Outline, Pulse, Ssgi and Fogscatter sample the engine depth buffer per
-// pixel; on frames where they are active, mode-1 meshes do not write depth
-// (read-only DSV phase).
+// addPostFX [effect, params?, [r,g,b,a]?, band?, blend?, affectUI?, duration?]
+// Optional slots skip on nil ("" for blend / affectUI). Returns the khr_
+// handle, or "" after reporting the fault.
 static game_value add_postfx_sqf(game_value_parameter args) {
     try {
         auto& arr = args.to_array();
-        if (arr.size() < 1) return game_value("usage: addPostFX [effect, params?, [r,g,b,a]?, band?, blend?, affectUI?, duration?]");
+        std::string err;
+        if (arr.size() < 1 || arr.size() > 7) {
+            kh_rv_report("addPostFX", "expects [effect, params?, [r,g,b,a]?, band?, blend?, affectUI?, duration?] (" +
+                         std::to_string(arr.size()) + " elements given)");
+            return game_value("");
+        }
         RenderIntegration::RenderObject obj;
         obj.fullscreen = true;
         obj.mode = RenderIntegration::DepthMode::Off;
-        std::string khfx_path, khfx_err;
-        const int e = RenderIntegration::kh_effect_from_gv(arr[0], khfx_path, khfx_err);
-        if (e <= 0) return game_value(khfx_err.empty() ? std::string("unknown or non-fullscreen effect") : khfx_err);
-        obj.effect = e;
-        obj.fx_shader = khfx_path;
-        const auto_array<game_value>* fx_params = nullptr;
+        if (!kh_rv_effect(arr[0], obj, true, err)) { kh_rv_report("addPostFX", err); return game_value(""); }
 
-        if (arr.size() > 1 && !arr[1].is_nil()) {
-            if (arr[1].type_enum() != game_data_type::ARRAY) return game_value("params must be an array of numbers");
-            fx_params = &arr[1].to_array();
-        }
+        if (arr.size() > 1 && !arr[1].is_nil() &&
+            !kh_rv_params(arr[1], obj, err)) { kh_rv_report("addPostFX", err); return game_value(""); }
 
-        if (!RenderIntegration::set_effect_params(obj, fx_params)) return game_value("params entries must be numbers");
+        if (arr.size() > 2 && !arr[2].is_nil() &&
+            !kh_rv_color(arr[2], obj, err)) { kh_rv_report("addPostFX", err); return game_value(""); }
 
-        if (arr.size() > 2 && !arr[2].is_nil()) {
-            if (arr[2].type_enum() != game_data_type::ARRAY) return game_value("color must be [r, g, b, a] numbers");
-            auto& col = arr[2].to_array();
-            if ((col.size() > 0 && col[0].type_enum() != game_data_type::SCALAR) ||
-                (col.size() > 1 && col[1].type_enum() != game_data_type::SCALAR) ||
-                (col.size() > 2 && col[2].type_enum() != game_data_type::SCALAR) ||
-                (col.size() > 3 && col[3].type_enum() != game_data_type::SCALAR)) return game_value("color must be [r, g, b, a] numbers");
-            for (size_t i = 0; i < 4 && i < col.size(); ++i) obj.color[i] = static_cast<float>(col[i]);
-            RenderIntegration::kh_sanitize_color(obj.color);
-        }
+        if (arr.size() > 3 && !arr[3].is_nil() &&
+            !kh_rv_band(arr[3], obj, err)) { kh_rv_report("addPostFX", err); return game_value(""); }
 
-        if (arr.size() > 3 && !arr[3].is_nil()) {
-            if (arr[3].type_enum() != game_data_type::ARRAY) return game_value("band must be [minDist, maxDist, falloff?] numbers");
-            auto& band = arr[3].to_array();
-            if ((band.size() > 0 && band[0].type_enum() != game_data_type::SCALAR) ||
-                (band.size() > 1 && band[1].type_enum() != game_data_type::SCALAR) ||
-                (band.size() > 2 && band[2].type_enum() != game_data_type::SCALAR)) return game_value("band must be [minDist, maxDist, falloff?] numbers");
+        if (arr.size() > 4 && !arr[4].is_nil() &&
+            !(arr[4].type_enum() == game_data_type::STRING && static_cast<std::string>(arr[4]).empty()) &&
+            !kh_rv_blend(arr[4], obj, err)) { kh_rv_report("addPostFX", err); return game_value(""); }
 
-            if (band.size() >= 2) {
-                obj.banded = true;
-                obj.band_min = static_cast<float>(band[0]);
-                obj.band_max = static_cast<float>(band[1]);
-                if (band.size() >= 3) obj.band_falloff = static_cast<float>(band[2]);
-            }
-        }
-
-        if (arr.size() > 4 &&
-            !(arr[4].type_enum() == game_data_type::STRING && static_cast<std::string>(arr[4]).empty())) {
-            // empty string = slot skipped (the positional-placeholder
-            // convention, matching the effect slot): blend stays default
-            const int bm = RenderIntegration::blend_id_from_gv(arr[4]);
-            if (bm < 0) return game_value("unknown blend mode");
-            obj.blend_mode = bm;
-        }
-
-        if (arr.size() > 5 && !arr[5].is_nil()) {
-            // "SCENE"/"UI"/"BOTH" (empty = slot skipped) or the legacy
-            // boolean pair false=SCENE / true=BOTH
-            if (!kh_ui_phase_from_gv(arr[5], obj.affect_ui, obj.ui_only)) {
-                return game_value("affectUI must be \"SCENE\", \"UI\", \"BOTH\", or a boolean");
-            }
+        if (arr.size() > 5 && !arr[5].is_nil() &&
+            !kh_ui_phase_from_gv(arr[5], obj.affect_ui, obj.ui_only)) {
+            kh_rv_report("addPostFX", "affectUI must be \"SCENE\", \"UI\", \"BOTH\", or a boolean");
+            return game_value("");
         }
 
         if (obj.affect_ui) RenderIntegration::kh_ui_driver_rehoist();
 
-        if (arr.size() > 6) {
-            if (!RenderIntegration::parse_duration_gv(arr[6], obj)) {
-                return game_value("duration must be seconds or [fadeIn, hold, fadeOut]");
-            }
-        }
+        if (arr.size() > 6 && !arr[6].is_nil() &&
+            !kh_rv_duration(arr[6], obj, err)) { kh_rv_report("addPostFX", err); return game_value(""); }
 
         return game_value(RenderIntegration::add_render_object(obj));
     } catch (const std::exception& e) {
         report_error(std::string("addPostFX: ") + e.what());
-        return game_value(std::string("EXCEPTION: ") + e.what());
+        return game_value("");
     } catch (...) {
         report_error("addPostFX: unknown exception");
-        return game_value("EXCEPTION: unknown");
+        return game_value("");
     }
 }
 
 static game_value set_ssgi_scale_sqf(game_value_parameter arg) {
     try {
-        if (arg.type_enum() != game_data_type::SCALAR) return game_value(false);
+        if (arg.type_enum() != game_data_type::SCALAR) {
+            kh_rv_report("setSsgiScale", "scale must be a number (0.25 .. 2)");
+            return game_value(false);
+        }
         float khss = static_cast<float>(arg);
-        if (!(khss == khss)) return game_value(false);
+        if (!(khss == khss)) {
+            kh_rv_report("setSsgiScale", "scale must be a number (0.25 .. 2), not NaN");
+            return game_value(false);
+        }
         if (khss < 0.25f) khss = 0.25f;
         if (khss > 2.0f)  khss = 2.0f;
         RenderIntegration::g_khsg_scale = khss;
         return game_value(true);
     } catch (...) {
+        report_error("setSsgiScale: unknown exception");
         return game_value(false);
     }
 }
 
 static game_value set_render_debug_sqf(game_value_parameter arg) {
     try {
-        if (arg.type_enum() != game_data_type::SCALAR) return game_value(false);
+        if (arg.type_enum() != game_data_type::SCALAR) { kh_rv_report("setRenderDebug", "mode must be a number"); return game_value(false); }
         const int khd_m = static_cast<int>(static_cast<float>(arg));
         // 178 = witness farthest-plane revert (the slice returns), 179 =
         // depth-bias clamp revert (the render-through returns).
@@ -7512,6 +7309,14 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
         // and the gate only ever handed a 30-50 m caster's shadow on a near
         // mesh to the union. The A/B for that retirement.
                             khd_m == 463 ||
+                            khd_m == 474 ||   // KH_CAST_OCC_OFF: PSMaskCast scans every caster per pixel (slow; A/B only)
+                            khd_m == 476 ||   // KH_SVS_SKIP_OFF: every seam pass re-injects
+                            khd_m == 478 ||   // KH_CULL_BACK_OFF: disable the back-half cull
+                            khd_m == 479 ||   // KH_CAST_REACH_X4: occ-grid reach x4 (26760 re-listed;
+                                                              // the hpp read survived the 26758 strip and a
+                                                              // mode that exists only in the hpp is dead.
+                                                              // The probe that settles the slicing
+                                                              // hypothesis. Diagnostic; costs fill.)
         // 446 = KH_ABSENCE_WITNESS OFF - an ALIAS of the default since 26711
         // (the witness was retired when KH_SUN_PANCAKE made every tier map
         // complete by construction). Stays whitelisted: a stale script is not
@@ -7637,11 +7442,6 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
         // graphics lock, and a batch that spawned no worker at all is armed
         // rather than stood down.
                             khd_m == 407 ||
-        // 408 = KH_QUERY_DEFER REVERT - gpuVisibility and sampleSceneDepth
-        // treat the KH_SHADERS_COMPILING sentinel as a fatal error again and
-        // answer [["error","shaders compiling"]] for the whole cold-compile
-        // window, behaviour.
-                            khd_m == 408 ||
         // 406 = KH_SHADER_ASYNC OFF - ensure_resources BLOCKS the render
         // thread through the whole cold compile again, the pre-form.
                             khd_m == 406 ||
@@ -7924,7 +7724,6 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                                                               // gauged by svStenRejCold and
                                                               // svStenRejDims. Removal date: the
                                                               // scaffolding strip.
-                            khd_m == 109 ||   // THE VOLUME TRANSPORT. Reads the stencil
                             khd_m == 110 ||   // PAINT THE STENCIL COUNT - THE WRAP
                             khd_m == 111 ||   // PAINT THE FOOTPRINT RESIDUAL as a ladder
                             khd_m == 128 ||   // THE PROJECTION HALF. 127 shared the
@@ -7965,11 +7764,6 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                                                               // of the view block exists further into
                                                               // the 64 KB pool, engVerifyFail collapses
                                                               // on the right candidate.
-                            khd_m == 120 ||   // STATEBACKUP CONSTANT-BUFFER OFFSET REVERT.
-                                                              // Restores VS CBs through the plain
-                                                              // (non-1.1) setter, which drops the
-                                                              // engine's per-slot firstConstant - the
-                                                              // pre-behaviour.
                             khd_m == 119 ||   // REVERT TO THE PRE-MASK TRANSPORT.
                             khd_m == 116 ||   // INJECTION ON THE ENGINE'S OWN VIEW.
                             khd_m == 117 ||   // VISIBLE MESH ON THE ENGINE'S OWN VIEW
@@ -7999,31 +7793,6 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                             khd_m == 108 ||   // PRIME WITH 1.0 + DISOCCLUSION GUARD OFF
                                                               // Brings the halo back.
                             khd_m == 107 ||   // VISIBLE MESH IN ENGINE SPACE. Draws the
-                            khd_m == 106 ||   // DISOCCLUSION GUARD ON (opt-in). Defaulted
-                                                              // OFF because it did not move the halo:
-                                                              // the reprojected lookup is landing INSIDE
-                                                              // our footprint and the value there is
-                                                              // still wrong, so the footprint is not the
-                                                              // fault. Costs one extra Load per mesh
-                                                              // pixel, so it does not ride on the
-                                                              // default path unproven.
-                            khd_m == 105 ||   // RETIRED TO A NO-OP (the guard is off by)
-                                                              // default now - see mode 106). Was: guard
-                                                              // OFF exactly: reprojection with no
-                                                              // validity test on the reprojected texel.
-                                                              // 0 vs 105 vs 104 is the full ladder:
-                                                              // guarded reprojection, raw reprojection,
-                                                              // no reprojection.
-                            khd_m == 104 ||   // REPROJECTION OFF (raster lookup). The
-                                                              // The ring stores the ABSOLUTE transform
-                                                              // now and the subtraction is gone. If the
-                                                              // halo survives that, the aliasing is
-                                                              // inherent and 104 is the answer.
-                            khd_m == 103 ||   // RETIRED TO A NO-OP (reprojection is the)
-                                                              // Enabled three times now , a caster ghost
-                                                              // every time, the strip never once moved.
-                                                              // default now - see mode 104). Was:
-                                                              // opt-in.
                             khd_m == 102 ||   // INJECTION VIEW-ADOPTION OFF (opt-in).
                                                               // Pair with svSwingPxMean, which reads a
                                                               // tautological 0 whenever adoption is off.
@@ -8031,22 +7800,6 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                                                               // 100 the on-box stencil cut disappeared,
                                                               // so the injection DOES need the visible
                                                               // draw's view and was right.
-                            khd_m == 101 ||   // RETIRED TO A NO-OP (its revert is the)
-                                                              // default now - see mode 103). Was: HALF B
-                                                              // OFF - the mesh reads the mask at its own
-                                                              // raster position instead of reprojecting
-                                                              // through the injection's transform.
-                                                              // Restores the on-box stencil strip. Pair
-                                                              // with svReprojPxMean.
-                            khd_m == 100 ||   // RETIRED TO A NO-OP (its revert is the)
-                                                              // default now - see mode 102). Pair with
-                                                              // svSwingPxMean and svInjViewAdopts.
-                                                              // Neither half works alone: 83 (= half A)
-                                                              // fixed the cascade cut and left the
-                                                              // stencil strip; reprojection alone  only
-                                                              // added a ghost, because it was aligning
-                                                              // the lookup to a footprint that was
-                                                              // itself misplaced.
                             khd_m == 98 ||   // INJECTION DEPTH-CLIP REVERT. Restores
                             khd_m == 97 ||   // MASK CLAMP BOUND FORCED to the mask's
                                                               // fxMeta.zw is filled TWICE per object and
@@ -8067,13 +7820,6 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                                                               // the shading term - i.e. the two slivers
                                                               // are two faults. Neither 95 nor 96
                                                               // paints, so the geometry stays legible.
-                            khd_m == 94 ||   // STENCIL REPROJECTION ON (OPT-IN, and it)
-                                                              // does NOT fix the silhouette strip - it
-                                                              // is kept only because the machinery is
-                                                              // what measured the strip's cause OUT).
-                                                              // Modes 90, 91 and 92 are all retired
-                                                              // no-ops now: the default IS the raster
-                                                              // lookup.
                             khd_m == 93 ||   // DARK-STANDING HARD ESCAPE OFF. Restores
                                                               // the pre-behaviour where a sun-zero
                                                               // lighting standing under a live static
@@ -8083,17 +7829,6 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                                                               // (stops climbing) and blkStickyRejects
                                                               // (resumes climbing without bound).
                                                               // Diagnostic only.
-                            khd_m == 92 ||   // STENCIL REPROJECTION OFF. The default is
-                                                              // now EPOCH-MATCHED reprojection:
-                                                              // svPostAgeMax measured 1, so the mask the
-                                                              // mesh reads is one frame older than the
-                                                              // mesh, and the lookup uses the transform
-                                                              // stamped with the SNAPSHOT's epoch. 92
-                                                              // falls back to the raster position, which
-                                                              // restores the silhouette strip. Read
-                                                              // svReprojEpochHits / svReprojEpochMiss.
-                            khd_m == 91 ||   // STENCIL REPROJECTION ON - RETIRED (the)
-                            khd_m == 90 ||   // STENCIL REPROJECTION REVERT - RETIRED
                             khd_m == 89 ||   // INJECTION TESSELLATION REVERT. Leaves
                             khd_m == 80 ||   // INJECTION VIEWPORT REVERT. Restores
                                                               // MinDepth 0 / MaxDepth 1 in
@@ -8225,7 +7960,18 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                                                               // near floor forced to pass (look-down
                                                               // diagnostic)
                             khd_m == 28;   // REUSED: last-fire clamp with the camera
+        // The retired list is AUTHORITATIVE: the check below is !ok || dead,
+        // so a number here refuses even if the accept chain admits it. The
+        // twelve explicit accept entries that duplicated this list (90-92,
+        // 94, 100-106, 109, 120) were removed at 26760; the six inside the
+        // 129-221 accept RANGE (135, 147, 151, 169, 172, 213) stay covered
+        // by this precedence rather than by splitting the range.
         const bool khd_dead = khd_m == 397 ||
+                              // 408 = KH_QUERY_DEFER REVERT: its only readers
+                              // (run_depth_compute / upload_query_points) went
+                              // with the four visibility commands at 26759.
+                              // Retired, not recycled (rule 1.18).
+                              khd_m == 408 ||
                               khd_m == 90  || khd_m == 91  || khd_m == 92  ||
                               khd_m == 94  || khd_m == 100 || khd_m == 101 ||
                               khd_m == 103 || khd_m == 104 || khd_m == 105 ||
@@ -8246,10 +7992,14 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                               // was the live-atlas fallback. Removed, not
                               // recycled.
                               khd_m == 85;
-        if (!khd_ok || khd_dead) return game_value(false);
+        if (!khd_ok || khd_dead) {
+            kh_rv_report("setRenderDebug", "mode " + std::to_string(khd_m) + (khd_dead ? " is retired" : " is not a catalogued mode"));
+            return game_value(false);
+        }
         RenderIntegration::g_dbg_mode.store(khd_m, std::memory_order_relaxed);
         return game_value(true);
     } catch (...) {
+        report_error("setRenderDebug: unknown exception");
         return game_value(false);
     }
 }
@@ -8534,6 +8284,20 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("lodLevels", RenderIntegration::g_lod_levels));
         out.push_back(kv("lodBuildMs", RenderIntegration::g_lod_build_ms));
         out.push_back(kv("lodFades", RenderIntegration::g_lod_fades));
+        // The five kept optimisations. castOccFalls and svsSkipMisses are the
+        // health lanes: castOccFalls must stay 0 (a failure drops that fire
+        // back to the O(N) scan), and svsSkips + svsSkipMisses = svSeams.
+        // cullBackRejects counts objects dropped for being behind the camera.
+        out.push_back(kv("castOccBuilds",  RenderIntegration::g_castocc_builds));
+        out.push_back(kv("castOccFalls",   RenderIntegration::g_castocc_falls));
+        out.push_back(kv("castOccCellsAvg",
+                         RenderIntegration::g_castocc_builds
+                             ? RenderIntegration::g_castocc_cells / RenderIntegration::g_castocc_builds
+                             : 0));
+        out.push_back(kv("castOccReuses",  RenderIntegration::g_castocc_reuses));   // KH_CAST_OCC_ONCE
+        out.push_back(kv("svsSkips",       RenderIntegration::g_svs_skips_redundant));
+        out.push_back(kv("svsSkipMisses",  RenderIntegration::g_svs_skip_misses));
+        out.push_back(kv("cullBackRejects", RenderIntegration::g_cull_back_rejects));
         // CHANGED THE ACCOUNTING OF ALL FOUR AND THE HISTORIC NUMBERS DO NOT
         // COMPARE ACROSS IT. And meshConsidered stopped counting fullscreen
         // passes, which have no world extent and can never be culled, so the
@@ -8597,6 +8361,12 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("texMipMs", RenderIntegration::g_stats.tex_mip_ms));
         out.push_back(kv("texCacheLoadMs", RenderIntegration::g_stats.tex_cache_load_ms));
         out.push_back(kv("fbxImports", RenderIntegration::g_stats.fbx_imports));
+        // KH_MESH_PUBLISH_DEFER (26760): publishes kh_fbx_register could not
+        // park for (defers) and the flush parks that landed them (lands).
+        // Health: both 0. defers > lands means a deferred mesh is still
+        // drawing as mesh 0 - the flush has not reached its head since.
+        out.push_back(kv("meshPublishDefers", RenderIntegration::g_mesh_publish_defers));
+        out.push_back(kv("meshPublishLands",  RenderIntegration::g_mesh_publish_lands));
         out.push_back(kv("fbxCacheHits", RenderIntegration::g_stats.fbx_cache_hits));
         out.push_back(kv("fbxCacheWrites", RenderIntegration::g_stats.fbx_cache_writes));
         out.push_back(kv("fbxCacheEvicts", RenderIntegration::g_stats.fbx_cache_evicts));
@@ -11180,17 +10950,6 @@ static game_value get_render_stats_sqf() {
             out.push_back(kvf("meshVbCount", khrc_vb));
         }
 
-        // ASYNC VISIBILITY PIPELINE: queue depth + result freshness (the
-        // queueVisibility / getVisibilityResults pump; all game-thread state,
-        // same thread as this call).
-        out.push_back(kv("visQueuePending", RenderIntegration::g_query_pending ? 1u : 0u));
-        out.push_back(kv("visQueuePoints", static_cast<uint64_t>(RenderIntegration::g_query_points_pending.size() / 3)));
-        out.push_back(kv("visResultPoints", static_cast<uint64_t>(RenderIntegration::g_vis_result_count)));
-        out.push_back(kvf("visResultLagFrames", RenderIntegration::g_vis_result_frame != 0
-            ? static_cast<float>(RenderIntegration::g_flush_frame - RenderIntegration::g_vis_result_frame)
-            : -1.0f));
-        out.push_back(kv("visInflightA", static_cast<uint64_t>(RenderIntegration::g_async_inflight_count[0])));
-        out.push_back(kv("visInflightB", static_cast<uint64_t>(RenderIntegration::g_async_inflight_count[1])));
         out.push_back(kv("flushFrameOrdinal", RenderIntegration::g_flush_frame));
 
         // PRIVATE SUN-DEPTH MAP: validity, age and geometry (sunMapHalfDiag
@@ -12236,89 +11995,73 @@ static game_value dump_dynamic_lights_sqf() {
 }
 
 // Localized passes always sample the depth buffer (read-only DSV phase rules
-// apply).
+// apply). addLocalPostFX [[x,y,zASL], radius, falloff, effect, params?,
+// [r,g,b,a]?, shape?, blend?, duration?, inverse?]. Optional slots skip on
+// nil ("" for blend). Returns the khr_ handle, or "" after reporting the
+// fault.
 static game_value add_local_postfx_sqf(game_value_parameter args) {
     try {
         auto& arr = args.to_array();
-        if (arr.size() < 4) return game_value("usage: addLocalPostFX [[x,y,zASL], radius, falloff, effect, params?, [r,g,b,a]?, shape?, blend?, duration?, inverse?]");
+        std::string err;
+        if (arr.size() < 4 || arr.size() > 10) {
+            kh_rv_report("addLocalPostFX", "expects [[x, y, zASL], radius, falloff, effect, params?, [r,g,b,a]?, shape?, blend?, duration?, inverse?] (" +
+                         std::to_string(arr.size()) + " elements given)");
+            return game_value("");
+        }
         RenderIntegration::RenderObject obj;
         obj.fullscreen = true;
         obj.localized = true;
         obj.mode = RenderIntegration::DepthMode::Off;
-        if (arr[0].type_enum() != game_data_type::ARRAY) return game_value("position must be [x, y, zASL]");
-        auto& pos = arr[0].to_array();
-        if (pos.size() < 3 ||
-            pos[0].type_enum() != game_data_type::SCALAR ||
-            pos[1].type_enum() != game_data_type::SCALAR ||
-            pos[2].type_enum() != game_data_type::SCALAR) return game_value("position must be [x, y, zASL]");
-        obj.pos[0] = static_cast<float>(pos[0]);
-        obj.pos[1] = static_cast<float>(pos[1]);
-        obj.pos[2] = static_cast<float>(pos[2]);
+        if (!kh_rv_pos(arr[0], obj.pos, err)) { kh_rv_report("addLocalPostFX", err); return game_value(""); }
 
         if (!RenderIntegration::read_vec3_or_uniform(arr[1], obj.local_radius)) {
-            return game_value("radius must be a number or [x, y, z]");
+            kh_rv_report("addLocalPostFX", "radius must be a number or [x, y, z] metres");
+            return game_value("");
         }
 
-        if (arr[2].type_enum() != game_data_type::SCALAR) return game_value("falloff must be a number");
+        if (arr[2].type_enum() != game_data_type::SCALAR) {
+            kh_rv_report("addLocalPostFX", "falloff must be a number (metres)");
+            return game_value("");
+        }
         obj.local_falloff = static_cast<float>(arr[2]);
-        std::string khfx_path, khfx_err;
-        const int e = RenderIntegration::kh_effect_from_gv(arr[3], khfx_path, khfx_err);
-        if (e <= 0) return game_value(khfx_err.empty() ? std::string("unknown or non-fullscreen effect") : khfx_err);
-        obj.effect = e;
-        obj.fx_shader = khfx_path;
-        const auto_array<game_value>* fx_params = nullptr;
 
-        if (arr.size() > 4 && !arr[4].is_nil()) {
-            if (arr[4].type_enum() != game_data_type::ARRAY) return game_value("params must be an array of numbers");
-            fx_params = &arr[4].to_array();
-        }
+        if (!kh_rv_effect(arr[3], obj, true, err)) { kh_rv_report("addLocalPostFX", err); return game_value(""); }
 
-        if (!RenderIntegration::set_effect_params(obj, fx_params)) return game_value("params entries must be numbers");
+        if (arr.size() > 4 && !arr[4].is_nil() &&
+            !kh_rv_params(arr[4], obj, err)) { kh_rv_report("addLocalPostFX", err); return game_value(""); }
 
-        if (arr.size() > 5 && !arr[5].is_nil()) {
-            if (arr[5].type_enum() != game_data_type::ARRAY) return game_value("color must be [r, g, b, a] numbers");
-            auto& col = arr[5].to_array();
-            if ((col.size() > 0 && col[0].type_enum() != game_data_type::SCALAR) ||
-                (col.size() > 1 && col[1].type_enum() != game_data_type::SCALAR) ||
-                (col.size() > 2 && col[2].type_enum() != game_data_type::SCALAR) ||
-                (col.size() > 3 && col[3].type_enum() != game_data_type::SCALAR)) return game_value("color must be [r, g, b, a] numbers");
-            for (size_t i = 0; i < 4 && i < col.size(); ++i) obj.color[i] = static_cast<float>(col[i]);
-            RenderIntegration::kh_sanitize_color(obj.color);
-        }
+        if (arr.size() > 5 && !arr[5].is_nil() &&
+            !kh_rv_color(arr[5], obj, err)) { kh_rv_report("addLocalPostFX", err); return game_value(""); }
 
-        if (arr.size() > 6) {
+        if (arr.size() > 6 && !arr[6].is_nil()) {
             const int sh = RenderIntegration::shape_id_from_gv(arr[6]);
-            if (sh < 0) return game_value("unknown shape (sphere | cube)");
+            if (sh < 0) {
+                kh_rv_report("addLocalPostFX", "shape must be sphere | ellipsoid | cube | box (or 0 / 1)");
+                return game_value("");
+            }
             obj.local_shape = sh;
         }
 
-        if (arr.size() > 7 &&
-            !(arr[7].type_enum() == game_data_type::STRING && static_cast<std::string>(arr[7]).empty())) {
-            // empty string = slot skipped (the positional-placeholder
-            // convention, matching the effect slot): blend stays default
-            const int bm = RenderIntegration::blend_id_from_gv(arr[7]);
-            if (bm < 0) return game_value("unknown blend mode");
-            obj.blend_mode = bm;
-        }
+        if (arr.size() > 7 && !arr[7].is_nil() &&
+            !(arr[7].type_enum() == game_data_type::STRING && static_cast<std::string>(arr[7]).empty()) &&
+            !kh_rv_blend(arr[7], obj, err)) { kh_rv_report("addLocalPostFX", err); return game_value(""); }
 
-        if (arr.size() > 8) {
-            if (!RenderIntegration::parse_duration_gv(arr[8], obj)) {
-                return game_value("duration must be seconds or [fadeIn, hold, fadeOut]");
-            }
-        }
+        if (arr.size() > 8 && !arr[8].is_nil() &&
+            !kh_rv_duration(arr[8], obj, err)) { kh_rv_report("addLocalPostFX", err); return game_value(""); }
 
         if (arr.size() > 9 && !arr[9].is_nil()) {
-            if (arr[9].type_enum() != game_data_type::BOOL) return game_value("inverse must be a boolean");
-            obj.local_inverse = static_cast<bool>(arr[9]);   // KH_LOCAL_INVERSE: the effect reaches everything except the volume
+            bool b = false;
+            if (!kh_rv_bool(arr[9], b, "inverse", err)) { kh_rv_report("addLocalPostFX", err); return game_value(""); }
+            obj.local_inverse = b;   // KH_LOCAL_INVERSE: the effect reaches everything except the volume
         }
 
         return game_value(RenderIntegration::add_render_object(obj));
     } catch (const std::exception& e) {
         report_error(std::string("addLocalPostFX: ") + e.what());
-        return game_value(std::string("EXCEPTION: ") + e.what());
+        return game_value("");
     } catch (...) {
         report_error("addLocalPostFX: unknown exception");
-        return game_value("EXCEPTION: unknown");
+        return game_value("");
     }
 }
 
@@ -13523,48 +13266,17 @@ static void initialize_sqf_integration() {
         game_data_type::ARRAY
     );
 
-    _sqf_sample_scene_depth_array = intercept::client::host::register_sqf_command(
-        "sampleSceneDepth",
-        "Read the engine depth buffer at screen position [u, v]. Returns [sceneDistM, rawDepth]; on failure [[\"error\", reason]]",
-        userFunctionWrapper<sample_scene_depth_sqf>,
-        game_data_type::ARRAY,
-        game_data_type::ARRAY
-    );
-
-    _sqf_gpu_visibility_array = intercept::client::host::register_sqf_command(
-        "gpuVisibility",
-        "Synchronously test world points [[x,y,zASL], ...] (stalls the GPU; prefer queueVisibility for per-frame use). Returns [[status, pointDistM, sceneDistM], ...]; on failure [[\"error\", reason]]",
-        userFunctionWrapper<gpu_visibility_sqf>,
-        game_data_type::ARRAY,
-        game_data_type::ARRAY
-    );
-
     _sqf_remove_render_handler_string = intercept::client::host::register_sqf_command(
         "removeRenderHandler",
-        "Remove a retained render object (mesh or post-processing pass) by its khr_ handle; '' or 'all' removes every object",
+        "Remove a retained render object (mesh or post-processing pass) by its khr_ handle; '' or 'all' removes every object. Faults are reported; returns false",
         userFunctionWrapper<remove_render_handler_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING
     );
 
-    _sqf_queue_visibility_array = intercept::client::host::register_sqf_command(
-        "queueVisibility",
-        "Queue world points [[x,y,zASL], ...] for an async GPU depth-visibility test. Returns the queued count; -1 = invalid input",
-        userFunctionWrapper<queue_visibility_sqf>,
-        game_data_type::SCALAR,
-        game_data_type::ARRAY
-    );
-
-    _sqf_get_visibility_results = intercept::client::host::register_sqf_command(
-        "getVisibilityResults",
-        "Fetch the latest completed async visibility batch. Returns [ageInFrames, [[status, pointDistM, sceneDistM], ...]]",
-        userFunctionWrapper<get_visibility_results_sqf>,
-        game_data_type::ARRAY
-    );
-
     _sqf_add_render3d_array = intercept::client::host::register_sqf_command(
         "addRender3D",
-        "[[x,y,zASL], rotation, size, [r,g,b,a]?, mode?, sceneRead?, effect?, fxParams?, band?, blend?, duration?, lit?, mesh?, farVis?, twoSided?, lodLock?]. rotation = nil | yaw | [pitch, yaw, roll]. Returns the khr_ handle, or a plain error sentence",
+        "[[x,y,zASL], rotation, mesh]. rotation = nil | yaw | [pitch, yaw, roll]; mesh = builtin name | registry index | .fbx path (nil = box). Spawns lit, mode 1, size 1, white, back-face culled; set everything else with updateRender3D. Returns the khr_ handle, or '' after reporting the fault",
         userFunctionWrapper<add_render3d_sqf>,
         game_data_type::STRING,
         game_data_type::ARRAY
@@ -13572,7 +13284,7 @@ static void initialize_sqf_integration() {
 
     _sqf_update_render3d_array = intercept::client::host::register_sqf_command(
         "updateRender3D",
-        "[handle, property, value]. Update a persistent 3D mesh object",
+        "[handle, property, value] or [[handle, property, value], ...]. Update a persistent 3D mesh object: position | size | rotation | mesh | material | mode | sceneRead | effect | params | lit | twoSided | farVis | lodLock | casterOnly | color | visible | blend | band | duration. Faults are reported; the batch form returns true only if every triple applied",
         userFunctionWrapper<update_render3d_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY
@@ -13580,7 +13292,7 @@ static void initialize_sqf_integration() {
 
     _sqf_update_post_fx_array = intercept::client::host::register_sqf_command(
         "updatePostFX",
-        "[handle, property, value]. Update a fullscreen post-processing pass",
+        "[handle, property, value] or [[handle, property, value], ...]. Update a fullscreen / local post-processing pass: position | effect | params | ui | uiSpill | radius | falloff | localSphere | shape | inverse | color | visible | blend | band | duration. Faults are reported; the batch form returns true only if every triple applied",
         userFunctionWrapper<update_post_fx_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY
@@ -13588,7 +13300,7 @@ static void initialize_sqf_integration() {
 
     _sqf_add_postfx_array = intercept::client::host::register_sqf_command(
         "addPostFX",
-        "Create a persistent fullscreen post-processing pass",
+        "[effect, params?, [r,g,b,a]?, band?, blend?, affectUI?, duration?]. Create a persistent fullscreen post-processing pass. Returns the khr_ handle, or '' after reporting the fault",
         userFunctionWrapper<add_postfx_sqf>,
         game_data_type::STRING,
         game_data_type::ARRAY
@@ -13596,7 +13308,7 @@ static void initialize_sqf_integration() {
 
     _sqf_add_local_postfx_array = intercept::client::host::register_sqf_command(
         "addLocalPostFX",
-        "[[x,y,zASL], radius, falloff, effect, params?, [r,g,b,a]?, shape?, blend?, duration?, inverse?]. Create a persistent post-processing effect confined to a world-space volume (inverse = true: everywhere except it). Returns the khr_ handle, or a plain error sentence",
+        "[[x,y,zASL], radius, falloff, effect, params?, [r,g,b,a]?, shape?, blend?, duration?, inverse?]. Create a persistent post-processing effect confined to a world-space volume (inverse = true: everywhere except it). Returns the khr_ handle, or '' after reporting the fault",
         userFunctionWrapper<add_local_postfx_sqf>,
         game_data_type::STRING,
         game_data_type::ARRAY

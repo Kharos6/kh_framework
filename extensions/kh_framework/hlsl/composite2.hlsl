@@ -439,12 +439,19 @@ float4 PSComposite(VSOutC i) : SV_Target
     // (mode 2: solid texels and fully transparent ones clipped, sampled
     // alpha kept and fed to the SAME 'a' line as the object colour's alpha
     // below, hardware-blended without a depth write).
-    if (matParams0.y >= 2.5f) {
-        clip(khtxS.alpha - 0.996f);
-        khtxS.alpha = 1.0f;
-    } else if (matParams0.y >= 1.5f) {
-        clip(khtxS.alpha - 0.004f);
-        if (khtxS.alpha >= 0.996f) discard;
+    if (matParams0.y >= 1.5f) {   // KH_MAT_SPLIT_TEXEL (26768): one verdict per TEXEL, both parts. TWIN EDIT.
+        // KH_MAT_SPLIT_TOL (26769): the verdict tolerates compression. BC3/BC7
+        // alpha in a block that also holds transparent texels lands an opaque
+        // texel at ~0.93-0.98 - the rectangular bites, one block each. Solid
+        // is >= 0.9; a designed glass (0.3-0.6) still blends. TWIN EDIT.
+        const float khtxCls = KhMatRouteTexel(matParams3.y, 1.0f, i.uv);
+        if (matParams0.y >= 2.5f) {
+            clip(khtxCls - 0.9f);
+            khtxS.alpha = 1.0f;
+        } else {
+            if (khtxCls >= 0.9f) discard;
+            clip(khtxS.alpha - 0.004f);
+        }
     } else {
         khtxS.alpha = 1.0f;
     }

@@ -7317,6 +7317,33 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                             khd_m == 476 ||   // KH_SVS_SKIP_OFF: every seam pass re-injects
                             khd_m == 478 ||   // KH_CULL_BACK_OFF: disable the back-half cull
                             khd_m == 480 ||   // KH_CB_RING_OFF: per-object DISCARD uploads (the A/B; cbRingLegacy climbs)
+                            khd_m == 513 ||   // KH_FIRE_PV_LIVE OFF (26808, revert): the fire paints through g_ro.cycle_pv again however old the copy is. That source stalls for up to 26.6 s with no stale flag ever raised, and the frozen view mirrors it exactly, so this restores the shadow freeze. Read firePvLiveFires, cyclePvAgeMaxS and castFrozenAgeMaxS - the last two being equal is the bug.
+                            khd_m == 512 ||   // KH_FIRE_ERA_RECOVER OFF (26806, revert): the era guard goes back to refusing any live view more than 50 m from the frozen one, with no escape - and since the distance is measured FROM the incumbent, once the camera jumps past the bar it can never re-converge. Restores the permanent shadow freeze. Read fireEraRecovers, fireEraRejectRunMax, castFrozenDriftMaxM.
+                            khd_m == 511 ||   // KH_BLK_LIT_FLOOR OFF (26805, revert): a zero sun may be adopted again even while bright world content is demonstrably flowing, so a zero-sun candidate that waits out the persistence bar drives the standing to 0 and the meshes dim permanently. Read blkLitFloorHolds, blkAnchorSunL, blkAdoptRatioMin.
+                            khd_m == 510 ||   // KH_BLK_JUMP_PERSIST OFF (26804, revert): downward level changes inside a sun-jump window are adopted on the first frame again, with no persistence required, so time-skip recovery transients dim the meshes and the keel follows them down permanently. Read blkJumpDimHolds, blkAnchorSunL, blkKeelSl.
+                            khd_m == 509 ||   // KH_BLK_RATCHET OFF (26803, revert): starved adoptions may lower the sun level again even while the brightness witness says the world is still lit. Restores the dimming ratchet - each step clears the 0.5 bar, the product does not, and blkAnchorSunL walks down and stays down. Read blkRatchetHolds, blkAnchorSunL, blkKeelSl.
+                            khd_m == 508 ||   // KH_BLK_BRIGHT_STALL OFF (26802, revert): the zero-sun brightness witness goes back to a pure recency test, so an alt-tab or time skip - where nothing is uploading because nothing is rendering - reads as evidence the world went dark and a zero sun is admitted. Read blkBrightStallSaves and blkZeroSunAdmits.
+                            khd_m == 507 ||   // KH_BLK_JUMP_BRIGHT OFF (26800, revert): the zero-sun contradiction witness goes back to being muted unconditionally for 15 s after a sun jump, so transient zero-sun uploads during a time skip recovery are admitted again and the meshes re-dim 2-3 s after appearing to recover. Read blkZeroSunAdmits, blkDarkReadopts, blkJumpBrightRearms.
+                            khd_m == 506 ||   // KH_SUN_AXIS_STALL GRACE OFF (26799, revert): the sky witness is judged purely on wall-clock freshness again, so an alt-tab or time skip reads as a dead witness, the settle gate invalidates all five sun maps, and the world shadows FREEZE for the settle window. Read sunAxisStalls, sunAxisStallGraceFrames and castMapHolds.
+                            khd_m == 505 ||   // KH_SUN_AXIS_PREDICT OFF (26797, revert): the sun-map axis stops extrapolating the sky witness between its discrete refreshes. Between refreshes the slew converges, the axis stops changing, the sun map skip hash freezes and every world shadow STOPS while the real sun keeps moving. Restores that. Read sunAxisPredictFrames and sunAxisWitUpdates against flushes.
+                            khd_m == 504 ||   // KH_SUN_AXIS_WITNESSED OFF (26796, revert): keeps the axis slew but re-arms every publish-sun stability guard - the settle gate that invalidates all five sun maps, and the cast readiness travel and jump terms. Restores the accelerated-time freeze / vanish / return. Separates "was it the axis" from "was it the guards". Read castTravelWitnessAdmits and sunSettleHolds.
+                            khd_m == 503 ||   // KH_SUN_AXIS_LATCH OFF (26794, the bit-exact revert): the sun maps go back to rendering from the live per-frame axis, camera-driven derivation noise and all. Restores the drift. Read sunAxisWanderMaxDeg climbing back toward sunAxisLatchMaxDeg.
+                            khd_m == 502 ||   // KH_CAST_AXIS_LOCK (26793, A/B): render the sun maps from the LIVE DERIVED sun axis instead of the published (glided/held) one. The drift is (h/sy)*theta in the caster's height above the receiver, which is what an axis LAG looks like on the ground and why self shadows are clean. READ sunAxisGapMaxDeg FIRST: ~0 means this mode is an identity and proves nothing. Not a shipping candidate - an unfiltered axis wobbles.
+                            khd_m == 501 ||   // KH_ZDECODE_PROBE (26791): read the resolved depth the cast samples, at a caster's own pixel, beside that caster's true CPU-computed distance. Pure measurement, no behaviour change. Read zdpTrueM / zdpReadX / zdpErrM.
+                            khd_m == 500 ||   // KH_CAST_ZPLANE .y ONLY (26790, A/B): the mask cast reconstructs through the near/witness plane with NO fallback to .x. If the drift dies here, the silent per-pixel .x fallback was carrying a constant z bias into pw.
+                            khd_m == 499 ||   // KH_CAST_ZPLANE .x ONLY (26790, A/B): reconstruct through the far plane everywhere. Expected to make the drift markedly WORSE; that is the confirmation, and its size measures the bias.
+                            khd_m == 498 ||   // KH_CAST_REPROJ ON (26785, A/B): the mask cast solves for the source pixel so its shade lands where THIS frame shows that world point, instead of where the previous frame did. Removes the one-frame screen-space lag that is the shadow drift. Default OFF. Read castReprojFires.
+                            khd_m == 497 ||   // KH_CAST_REACH_DROP OFF (26784, A/B): the world cast's reach gate goes back to an isotropic radius priced on the caster's own extent, and the caster-eligibility segment back to 2*he_y/tan. Restores the 26783 cut and the altitude-driven caster loss. Read sunEligDropMaxM and sunLocalCount.
+                            khd_m == 496 ||   // KH_CAST_BIAS_CAP OFF (26783, A/B): the world cast's compare bias goes back to the uncapped texel price (hero/mid/outer/far = 2 / 8 / 32 / 200 mm, union ~85 mm). Restores the 26782 ladder and, with it, the 6x step at the 32 m outer/far handoff. Read sunFarBiasM against sunFarCastBiasM.
+                            khd_m == 494 ||   // KH_SUN_TIER_ANCHOR_LEGACY (26780, A/B): every sun tier rebased from the trio's anchor (the defect)
+                            khd_m == 495 ||   // KH_CAST_SEAM_VIEW_ON (26781, A/B): the mask cast takes the seam-captured view before the publication (26774-26779 path; pairs view N with depth N-1 - the rotation offset)
+                            khd_m == 493 ||   // (26774-26780 no-op since 26781: the seed is off by default; kept for whitelist stability)
+                            khd_m == 492 ||   // KH_SEAM_XFORM_GATE ON (26782 flip): refuse a seam candidate whose transform swings > 256 px; default off
+                            khd_m == 491 ||   // KH_SEAM_ALL_PASSES (26772, A/B): the footprint is injected into EVERY seam bind of the frame (implies 490)
+                            khd_m == 490 ||   // KH_SEAM_HALF_DIMS (26771, A/B): the seam prepass admits a depth target of exactly half the main dims (inconclusive: the half-res targets were post-process)
+                            khd_m == 489 ||   // KH_TRIG_FLOOR_ADAPT ON (26782 flip): the committed-cycle adaptive floor; default is the legacy constant 16
+                            khd_m == 488 ||   // KH_CASCBIND_WIDE (26768, A/B): the cascade-bind copy takes VS 0-7 and PS 0-7
+                            khd_m == 487 ||   // KH_COLD_HARVEST_ANY (26768, A/B): the cascade harvest reads any resource while the live table is empty
                             khd_m == 486 ||   // KH_FOOTPRINT_ALPHA_OFF: the seam footprint draws every caster whole again
                                               // (the engine's count stops at the glass; the A/B for 26766)
                             khd_m == 485 ||   // KH_TRANSL_STEN_MIRROR_OFF: translucent texels take the volume stencil term
@@ -9804,6 +9831,53 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("stageRejVis", static_cast<uint64_t>(RenderIntegration::g_stage_rej_vis)));
         out.push_back(kv("recvTermSkips", RenderIntegration::g_recv_term_skips));
         out.push_back(kv("recvStreamSkips", RenderIntegration::g_recv_stream_skips));
+        // KH_EMPTY_MAP_LANES (26767)
+        out.push_back(kv("missByFloor", RenderIntegration::g_ms_by_floor));
+        out.push_back(kv("missBySpan", RenderIntegration::g_ms_by_span));
+        out.push_back(kv("missSilent", RenderIntegration::g_ms_silent));
+        out.push_back(kv("missLastOpaque", static_cast<uint64_t>(RenderIntegration::g_ms_last_opaque)));
+        out.push_back(kv("injOpaqueMin", static_cast<uint64_t>(RenderIntegration::g_inj_opaque_min == 0xFFFFFFFFu ? 0u : RenderIntegration::g_inj_opaque_min)));
+        out.push_back(kv("injOpaqueLast", static_cast<uint64_t>(RenderIntegration::g_inj_opaque_last)));
+        out.push_back(kv("atlasDsvBinds", RenderIntegration::g_atlas_dsv_binds));
+        out.push_back(kv("liveScanCalls", RenderIntegration::g_live_scan_calls));
+        out.push_back(kv("liveScanSrcMiss", RenderIntegration::g_live_scan_src_miss));
+        out.push_back(kv("liveScanHold", RenderIntegration::g_live_scan_hold));
+        // KH_CASCBIND_WIDE (26768)
+        out.push_back(kv("cascBindVsMask", static_cast<uint64_t>(RenderIntegration::g_cascbind_vs_mask)));
+        out.push_back(kv("cascBindPsMask", static_cast<uint64_t>(RenderIntegration::g_cascbind_ps_mask)));
+        out.push_back(kv("cascBindMinSpan", static_cast<uint64_t>(RenderIntegration::g_cascbind_min_span == 0xFFFFFFFFu ? 0u : RenderIntegration::g_cascbind_min_span)));
+        out.push_back(kv("cascBindWidePicks", RenderIntegration::g_cascbind_wide_picks));
+        out.push_back(kv("cascBindSteps", RenderIntegration::g_cascbind_steps));
+        // KH_TRIG_FLOOR_ADAPT / KH_SEAM_DIMS_LANES (26769)
+        out.push_back(kv("trigFloorLast", static_cast<uint64_t>(RenderIntegration::g_trig_floor_last)));
+        out.push_back(kv("injOpaqueCommitMin", static_cast<uint64_t>(RenderIntegration::g_inj_opaque_commit_min == 0xFFFFFFFFu ? 0u : RenderIntegration::g_inj_opaque_commit_min)));
+        out.push_back(kv("injOpaqueCommitN", static_cast<uint64_t>(RenderIntegration::g_inj_opaque_commit_n)));
+        out.push_back(kv("svSkipDimsW", static_cast<uint64_t>(RenderIntegration::g_svs_skip_dims_w)));
+        out.push_back(kv("svSkipDimsH", static_cast<uint64_t>(RenderIntegration::g_svs_skip_dims_h)));
+        out.push_back(kv("mainDepthW", static_cast<uint64_t>(RenderIntegration::g_main_depth_w)));
+        out.push_back(kv("mainDepthH", static_cast<uint64_t>(RenderIntegration::g_main_depth_h)));
+        // KH_CASCBIND_SELF_FRESH / KH_SEAM_DIMS_LANES (26771)
+        out.push_back(kv("cascBindFreshReturns", RenderIntegration::g_cascbind_fresh_returns));
+        out.push_back(kv("svsDimsPass", RenderIntegration::g_svs_dims_pass));
+        out.push_back(kv("svsHalfAccepts", RenderIntegration::g_svs_half_accepts));
+        out.push_back(kv("svSeamReArms", RenderIntegration::g_svs_seam_rearms));
+        out.push_back(kv("svSeamSwingRejects", RenderIntegration::g_svs_inj_swing_rejects));
+        out.push_back(kvf("svSwingPxLast", RenderIntegration::g_svs_swing_px_last));
+        out.push_back(kv("castSeamViewFires", RenderIntegration::g_cast_seam_view_fires));   // KH_CAST_SEAM_VIEW (26774)
+        out.push_back(kv("castSeedRefPub", RenderIntegration::g_cast_seed_ref_pub));   // 26775
+        out.push_back(kv("castSeedRefSeam", RenderIntegration::g_cast_seed_ref_seam));
+        out.push_back(kvf("castSeedSeamLag", static_cast<float>(RenderIntegration::g_cast_seed_seam_lag)));
+        out.push_back(kv("castSeamHolds", RenderIntegration::g_cast_seam_holds));   // KH_CAST_SEAM_HOLD (26776)
+        out.push_back(kv("castSeamHoldExpired", RenderIntegration::g_cast_seam_hold_expired));
+        out.push_back(kv("svSeamViewInexact", RenderIntegration::g_svs_seam_view_inexact));   // KH_SEAM_VIEW_EXACT (26778)
+        out.push_back(kv("castSeamViewReuse", RenderIntegration::g_cast_seam_view_reuse));   // KH_CAST_SEAM_VIEW_FRAME (26779)
+        out.push_back(kvf("sunTierAnchorDxMaxM", RenderIntegration::g_sun_tier_anchor_dx_max));   // KH_SUN_TIER_ANCHOR (26780)
+        out.push_back(kv("svsSeamMainBinds", static_cast<uint64_t>(RenderIntegration::g_svs_seam_main)));
+        out.push_back(kv("svsMainW", static_cast<uint64_t>(RenderIntegration::g_svs_main_w)));
+        out.push_back(kv("svsMainH", static_cast<uint64_t>(RenderIntegration::g_svs_main_h)));
+        out.push_back(kvf("pubRejTmagMinM", RenderIntegration::g_pub_rej_tmag_min));
+        out.push_back(kvf("pubRejTmagMaxM", RenderIntegration::g_pub_rej_tmag_max));
+        out.push_back(kvf("pubRejTmagLastM", RenderIntegration::g_pub_rej_tmag_last));
         out.push_back(kv("recvWipes", RenderIntegration::g_recv_wipes));
         out.push_back(kv("sunJumpRefused", RenderIntegration::g_sun_jump_refused));
         out.push_back(kv("sunJumpStreamRefused", RenderIntegration::g_sun_jump_stream_refused));
@@ -10179,6 +10253,81 @@ static game_value get_render_stats_sqf() {
         out.push_back(kvf("sunMidBiasM",    RenderIntegration::g_sun_fit_bias[1]));
         out.push_back(kvf("sunOutBiasM",    RenderIntegration::g_sun_fit_bias[2]));
         out.push_back(kvf("sunFarBiasM",    RenderIntegration::g_sun_fit_bias[3]));
+        // KH_CAST_BIAS_CAP (26783). The four lanes above are what the SELF
+        // kernel floors on; these four are what the WORLD CAST actually
+        // compares with. Hero/mid/outer must read EQUAL to their twins above
+        // (the cap never binds there); sunFarCastBiasM should read the cap
+        // where sunFarBiasM reads ~0.2, and sunUnionCastBiasM the cap where
+        // sunUnionBiasM reads ~0.085. Mode 496 makes every pair equal again -
+        // that is the A/B, and the ladder step it restores is the splice.
+        out.push_back(kvf("sunHeroCastBiasM",  RenderIntegration::g_sun_fit_cbias[0]));
+        out.push_back(kvf("sunMidCastBiasM",   RenderIntegration::g_sun_fit_cbias[1]));
+        out.push_back(kvf("sunOutCastBiasM",   RenderIntegration::g_sun_fit_cbias[2]));
+        out.push_back(kvf("sunFarCastBiasM",   RenderIntegration::g_sun_fit_cbias[3]));
+        out.push_back(kvf("sunUnionBiasM",     RenderIntegration::g_sun_union_bias_m));
+        out.push_back(kvf("sunUnionCastBiasM", RenderIntegration::g_sun_union_cbias_m));
+        // KH_CAST_REACH_DROP / KH_SUN_ELIG_DROP (26784). sunEligDropMaxM is the
+        // worst caster-base-above-camera seen: 0 means every caster sits at or
+        // below the camera and both fixes are inert by construction. A large
+        // value with sunLocalCount now near the mesh count is the eligibility
+        // fix working. castOccAlongMaxM is the longest shadow the grid swept;
+        // castOccSweepSteps is what that cost (a rebuild, not per frame).
+        out.push_back(kvf("sunEligDropMaxM",  RenderIntegration::g_sun_elig_drop_max));
+        // KH_SUN_ELIG_DESCENT (26786): how far down its own shadow the closest-
+        // approach solve actually walked. Reads 0 under mode 497 and 0 when
+        // every caster sits at or below the camera; a large value beside a
+        // sunLocalCount near the mesh count is the fix carrying high casters.
+        out.push_back(kvf("sunEligDescentMaxM", RenderIntegration::g_sun_elig_descent_max));
+        // KH_BAND_REACH_DESCENT (26788): the tier up-sun gate. BandDropAdmits
+        // counts casters the drop term carried past it - these are the ones
+        // whose shadows land in a tier window from far up-sun, and every one of
+        // them was a shadow the tier used to answer LIT for. 0 with a spread
+        // cluster means the gate is not firing and the fix is inert.
+        out.push_back(kvf("sunBandDropMaxM",  RenderIntegration::g_sun_band_drop_max));
+        out.push_back(kv("sunBandDropAdmits", RenderIntegration::g_sun_band_drop_admits));
+        out.push_back(kvf("castOccAlongMaxM", RenderIntegration::g_castocc_along_max));
+        out.push_back(kv("castOccSweepSteps", RenderIntegration::g_castocc_steps));
+        // KH_CAST_REPROJ (26785): fires that carried this frame's view into the
+        // mask solve. 0 at every mode but 498 - that is the arm, not a fault.
+        out.push_back(kv("castReprojFires", RenderIntegration::g_cast_reproj_fires));
+        // KH_CAST_REPROJ_PAIR (26787): bridge adoptions HELD so the cast keeps
+        // the view that produced its depth. Must equal castReprojFires under
+        // 498 - if it reads 0 while castReprojFires climbs, the adoption is
+        // still overwriting the pair and the solve is an identity again.
+        out.push_back(kv("fireViewReprojHolds", RenderIntegration::g_fire_view_reproj_holds));
+        // KH_CAST_RESOLVE_VIEW (26789). castResolveDxMaxM IS THE INSTRUMENT
+        // THAT WAS MISSING: it is the camera gap between the view the cast
+        // reconstructs through and the live view. It must track camStepM (~1.2 m
+        // in the field). If it reads ~0 the two views are the same frame's, the
+        // solve is an identity, and nothing will change on screen - which is
+        // exactly what 26785 and 26787 did without saying so.
+        out.push_back(kv("castResolveCaptures", RenderIntegration::g_cast_resolve_captures));
+        // KH_CAST_ZPLANE (26790): fires under a forced depth plane. Equals the
+        // fire count under 499/500 and 0 everywhere else - the arm check.
+        out.push_back(kv("castZPlaneFires", RenderIntegration::g_cast_zplane_fires));
+        // KH_ZDECODE_PROBE (26791, mode 501). zdpTrueM is the caster's true
+        // view-axis distance, CPU-computed; zdpReadX is what the depth texture
+        // holds at that caster's own pixel - the number PSMaskCast uses AS a
+        // distance. zdpErrM is the difference and its SHAPE is the answer: a
+        // steady value across differing zdpTrueM is a constant bias, a value
+        // tracking zdpTrueM is a scale. zdpReadY should read 0 - the empty plane
+        // mode 500 exposed.
+        out.push_back(kvf("zdpTrueM",   RenderIntegration::g_zdp_true_m));
+        out.push_back(kvf("zdpReadX",   RenderIntegration::g_zdp_read_x));
+        out.push_back(kvf("zdpReadY",   RenderIntegration::g_zdp_read_y));
+        out.push_back(kvf("zdpErrM",    RenderIntegration::g_zdp_err_m));
+        out.push_back(kvf("zdpErrMinM", RenderIntegration::g_zdp_samples ? RenderIntegration::g_zdp_err_min : 0.0f));
+        out.push_back(kvf("zdpErrMaxM", RenderIntegration::g_zdp_samples ? RenderIntegration::g_zdp_err_max : 0.0f));
+        out.push_back(kvf("zdpErrMeanM", RenderIntegration::g_zdp_samples
+            ? static_cast<float>(RenderIntegration::g_zdp_err_sum / static_cast<double>(RenderIntegration::g_zdp_samples)) : 0.0f));
+        out.push_back(kvf("zdpPx",      RenderIntegration::g_zdp_px));
+        out.push_back(kvf("zdpPy",      RenderIntegration::g_zdp_py));
+        out.push_back(kv("zdpSamples",  RenderIntegration::g_zdp_samples));
+        out.push_back(kv("zdpIssues",   RenderIntegration::g_zdp_issues));
+        out.push_back(kv("zdpSkips",    RenderIntegration::g_zdp_skips));
+        out.push_back(kv("castResolvePairs",    RenderIntegration::g_cast_resolve_pairs));
+        out.push_back(kvf("castResolveDxM",     RenderIntegration::g_cast_resolve_dx_m));
+        out.push_back(kvf("castResolveDxMaxM",  RenderIntegration::g_cast_resolve_dx_max));
         // Relatches tracking the band render count means the latch is
         // thrashing and nothing was stabilised whatever the screen shows;
         // both reading 0 means no band was ever stretched above its floor at
@@ -10334,6 +10483,239 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("fireMaskSrvLast", static_cast<uint64_t>(RenderIntegration::g_fire_mask_srv_last)));
         out.push_back(kvf("fireFovMaxDelta", RenderIntegration::g_fov_max_delta));
         out.push_back(kvf("sunChurnMaxDeg", RenderIntegration::g_sun_churn_max_deg));
+        // KH_SUN_AXIS_CENSUS (26793). THE DRIFT'S SEPARATION LANES (rule 1.78).
+        // sunAxisGapMaxDeg is the angle between the axis our sun maps are
+        // rendered with (the published, glided, held sun) and the live
+        // derivation - the axis the engine's own shadows follow. sunAxisWander
+        // MaxDeg is how far the published axis has moved from where it started.
+        // sunAxisDriftAt100M converts the WORSE of the two into the units the
+        // screen is judged in: modelled ground displacement for a caster 100 m
+        // above its receiver, (h / sy) * theta. Compare it against what the
+        // field actually sees at that height. If BOTH angle lanes read ~0 the
+        // axis is acquitted and mode 502 cannot move a pixel.
+        out.push_back(kvf("sunAxisGapDeg", RenderIntegration::g_sun_axis_gap_deg));
+        out.push_back(kvf("sunAxisGapMaxDeg", RenderIntegration::g_sun_axis_gap_max_deg));
+        out.push_back(kvf("sunAxisWanderDeg", RenderIntegration::g_sun_axis_wander_deg));
+        out.push_back(kvf("sunAxisWanderMaxDeg", RenderIntegration::g_sun_axis_wander_max_deg));
+        out.push_back(kvf("sunAxisDriftAt100M", RenderIntegration::g_sun_axis_drift_100m));
+        out.push_back(kvf("sunAxisGapAtStepDeg", RenderIntegration::g_sun_axis_gap_at_step_deg));
+        out.push_back(kvf("sunAxisCamStepMaxM", RenderIntegration::g_sun_axis_cam_step_max_m));
+        out.push_back(kv("sunAxisSamples", RenderIntegration::g_sun_axis_samples));
+        // KH_SUN_AXIS_LATCH (26794) - THE VERIFICATION LANES.
+        // sunAxisLatchMaxDeg is the camera-driven derivation noise the latch
+        // ABSORBED: it should read close to the 3.48 deg sunAxisWanderMaxDeg
+        // showed before the latch existed, because that is the same wander,
+        // now stopped at the door instead of reaching the map. sunAxisWander
+        // MaxDeg is the AFTER picture and should collapse to skySunMotDeg
+        // scale. If LatchMax is large and WanderMax is small the latch is
+        // working; if BOTH are small the session had no motion and the run
+        // proves nothing; if WanderMax is still large the latch is being
+        // re-latched too often - read sunAxisLatchRelatches against
+        // sunAxisLatchHolds and sunAxisSkySinceDeg.
+        out.push_back(kv("sunAxisLatchHolds", RenderIntegration::g_sun_axis_latch_holds));
+        out.push_back(kv("sunAxisLatchRelatches", RenderIntegration::g_sun_axis_latch_relatches));
+        out.push_back(kvf("sunAxisLatchDeg", RenderIntegration::g_sun_axis_latch_deg));
+        out.push_back(kvf("sunAxisLatchMaxDeg", RenderIntegration::g_sun_axis_latch_max_deg));
+        out.push_back(kvf("sunAxisSkySinceDeg", RenderIntegration::g_sun_axis_sky_since_deg));
+        // KH_SUN_AXIS_SLEW / KH_CAST_TRAVEL_WITNESS (26795).
+        // sunAxisSlewMaxDegS is the fastest travel the witness ever demanded.
+        // At or above KH_SUN_AXIS_SLEW_DEG_S (2.0) the rate cap is CLIPPING
+        // and the axis is lagging the real sun - raise the cap. Well under it
+        // means the slew is tracking freely and no step can be visible.
+        // castTravelWitnessAdmits counts cast stand-downs the sky vouched for
+        // as real sun motion: nonzero ONLY under accelerated time, and each
+        // one is a shadow disappearance that no longer happens.
+        out.push_back(kvf("sunAxisSlewMaxDegS", RenderIntegration::g_sun_axis_slew_max_deg_s));
+        out.push_back(kv("castTravelWitnessAdmits", RenderIntegration::g_cast_travel_witness_admits));
+        // 26796: this now counts cast stand-downs the sky witness retired
+        // across BOTH the travel and jump terms. Read it with sunSettleHolds:
+        // a nonzero settleHolds with castReadyDrops 0 means the settle gate
+        // stamped but no longer took the shadows down, which is the fix
+        // working. castReadyDrops above 0 under accelerated time means a
+        // guard is still firing and I need to know which.
+        out.push_back(kv("sunAxisWitnessed", static_cast<uint64_t>(RenderIntegration::kh_sun_axis_witnessed() ? 1 : 0)));
+        // KH_SUN_AXIS_PREDICT (26797) - THE STOPPAGE LANES.
+        // sunAxisWitUpdates against flushes is the ONE number that matters: it
+        // is how often the sky witness actually CHANGES, i.e. how much real
+        // information we get per second. If it is far below the frame count the
+        // witness is chunky and prediction is doing the work; if it tracks the
+        // frame count the witness is smooth and any residual freeze is NOT the
+        // witness cadence and I need to look elsewhere.
+        // sunAxisPredictFrames is how many frames prediction supplied a target;
+        // sunAxisWitDiscards counts velocity estimates refused as jumps.
+        out.push_back(kv("sunAxisWitUpdates", RenderIntegration::g_sun_axis_wit_updates));
+        out.push_back(kv("sunAxisWitGapMs", RenderIntegration::g_sun_axis_wit_gap_ms));
+        out.push_back(kv("sunAxisPredictFrames", RenderIntegration::g_sun_axis_predict_frames));
+        out.push_back(kv("sunAxisWitDiscards", RenderIntegration::g_sun_axis_wit_discards));
+        out.push_back(kvf("sunAxisPredictDeg", RenderIntegration::g_sun_axis_predict_deg));
+        out.push_back(kvf("sunAxisPredictMaxDeg", RenderIntegration::g_sun_axis_predict_max_deg));
+        // KH_FIRE_NOPAINT_CENSUS (26798) - THE FREEZE, COUNTED.
+        // fireNoPaintRunMax is the length in FRAMES of the longest stretch
+        // the mask went unpainted, i.e. how long the world shadows actually
+        // held still. One or two frames is invisible; a run of thirty is the
+        // reported freeze. fireNoPaintMiss names the guard that starved it -
+        // read it against that guard's own counter, and if they disagree the
+        // snapshot is stale rather than the guard innocent.
+        out.push_back(kv("fireNoPaintFrames", RenderIntegration::g_fire_no_paint_frames));
+        out.push_back(kv("fireNoPaintRunMax", static_cast<uint64_t>(RenderIntegration::g_fire_no_paint_run_max)));
+        out.push_back(kv("fireNoPaintMiss", static_cast<uint64_t>(RenderIntegration::g_fire_no_paint_miss)));
+        // KH_SUN_AXIS_STALL (26799) - THE ALT-TAB / TIMESKIP FREEZE.
+        // sunAxisStalls counts frame gaps long enough to be an alt-tab or a
+        // time skip; sunAxisStallGraceFrames counts frames where the sky
+        // witness looked stale ONLY because of one. Before 26799 each of those
+        // frames let the settle gate invalidate all five sun maps, which held
+        // the cast for the whole 400 ms settle window - read castMapHolds and
+        // sunSettleHolds beside these. castMapHolds should now stay near zero
+        // across alt-tabs; if it does not, the sky is taking longer than
+        // KH_SUN_AXIS_STALL_GRACE_MS to re-upload and the grace needs widening.
+        out.push_back(kv("sunAxisStalls", RenderIntegration::g_sun_axis_stalls));
+        out.push_back(kv("sunAxisStallGraceFrames", RenderIntegration::g_sun_axis_stall_grace_frames));
+        out.push_back(kv("sunAxisStallMaxMs", RenderIntegration::g_sun_axis_stall_max_ms));
+        // KH_BLK_JUMP_BRIGHT (26800): frames where bright world content seen
+        // after a sun jump re-armed the zero-sun contradiction witness inside
+        // its mute window. Read against blkZeroSunAdmits and blkDarkReadopts:
+        // admits and re-adopts should fall by roughly this count. A skip into
+        // real night must leave this at zero - if it does not, the brightness
+        // stamp is firing on something that is not bright world content.
+        out.push_back(kv("blkJumpBrightRearms", RenderIntegration::g_blk_jump_bright_rearms));
+        // KH_SUN_NOLOCAL_CENSUS (26801) - THE LAST UNCOUNTED STAND-DOWN.
+        // sunNoLocalRunMaxS is the longest unbroken stretch the fit found no
+        // local caster, in SECONDS - i.e. how long the world shadows actually
+        // held still, because the fire returns without painting and the last
+        // mask stays up. sunNoLocalCamDistMax is how far the camera was from
+        // the nearest caster, and sunNoLocalSunY the sun elevation sine at the
+        // time. Low sunY with a large CamDist is the reported case: a long
+        // shadow is still on screen while its caster has fallen out of the
+        // camera-anchored fit.
+        out.push_back(kv("sunNoLocalFrames", RenderIntegration::g_sun_nolocal_frames));
+        out.push_back(kv("sunNoLocalHolds", RenderIntegration::g_sun_nolocal_holds));
+        out.push_back(kvf("sunNoLocalRunMaxS", RenderIntegration::g_sun_nolocal_run_max_s));
+        out.push_back(kvf("sunNoLocalCamDistM", RenderIntegration::g_sun_nolocal_camdist_m));
+        out.push_back(kvf("sunNoLocalCamDistMax", RenderIntegration::g_sun_nolocal_camdist_max));
+        out.push_back(kvf("sunNoLocalSunY", RenderIntegration::g_sun_nolocal_sun_y));
+        // KH_BLK_BRIGHT_AGE (26802) - THE DIMMING'S DECIDING LANE.
+        // A zero sun is admitted ONLY when the brightness witness has been
+        // quiet longer than KH_BLK_BRIGHT_RECENT_S (5 s). blkBrightAgeAdmitMin
+        // is the least stale it ever was at an admit. If that reads just over
+        // 5 s the window is merely too tight and the fix is a constant; if it
+        // reads far over, bright uploads genuinely stopped for a long time and
+        // a bigger constant would only hide it. blkBrightStallSaves counts
+        // admits already prevented by treating a stall as an explanation for
+        // the silence rather than as evidence of darkness.
+        out.push_back(kvf("blkBrightAgeAdmit", RenderIntegration::g_blk_bright_age_admit));
+        out.push_back(kvf("blkBrightAgeAdmitMin", RenderIntegration::g_blk_bright_age_admit_min));
+        out.push_back(kvf("blkBrightAgeAdmitMax", RenderIntegration::g_blk_bright_age_admit_max));
+        out.push_back(kv("blkBrightStallSaves", RenderIntegration::g_blk_bright_stall_saves));
+        // KH_BLK_RATCHET (26803) - THE DIMMING.
+        // blkRatchetHolds counts starved adoptions refused because they would
+        // have LOWERED the sun level while the world was still demonstrably
+        // lit. Each is one step of the ratchet that took blkAnchorSunL from
+        // 15.6 to 6.8 in the field pair. Read blkAnchorSunL and blkKeelSl over
+        // a long session: they should no longer walk monotonically down.
+        // blkRatchetRatioMin is the deepest single step refused - well above
+        // the old 0.5 bar is the whole point, since that is why they passed.
+        out.push_back(kv("blkRatchetHolds", RenderIntegration::g_blk_ratchet_holds));
+        out.push_back(kvf("blkRatchetRatioLast", RenderIntegration::g_blk_ratchet_ratio_last));
+        out.push_back(kvf("blkRatchetRatioMin", RenderIntegration::g_blk_ratchet_ratio_min));
+        // KH_BLK_JUMP_PERSIST (26804): downward level changes held inside a
+        // sun-jump window until they persisted. This is the door the field
+        // dimming now comes through - it appears ONLY after a time skip.
+        // Nonzero means transients were caught; a real night still lands, a
+        // few seconds later. blkJumpDimRatioMin is the deepest step refused.
+        out.push_back(kv("blkJumpDimHolds", RenderIntegration::g_blk_jump_dim_holds));
+        out.push_back(kvf("blkJumpDimRatioMin", RenderIntegration::g_blk_jump_dim_ratio_min));
+        // KH_BLK_LIT_FLOOR (26805) - THE LIGHTING GUARANTEE.
+        // blkLitFloorHolds counts zero-sun adoptions refused outright because
+        // bright content was demonstrably flowing at the time. Unlike every
+        // other guard this one has NO exemption - not the sun-jump window, not
+        // persistence, not starvation - because a lit world with a zero sun is
+        // a contradiction rather than a dim reading. blkLitFloorStd is the
+        // standing level it protected. On a genuine nightfall this must stay
+        // at or near zero: the brightness witness falls silent and the branch
+        // stops applying, which is what keeps this an invariant instead of a
+        // trap in permanent daylight.
+        out.push_back(kv("blkLitFloorHolds", RenderIntegration::g_blk_lit_floor_holds));
+        out.push_back(kvf("blkLitFloorStd", RenderIntegration::g_blk_lit_floor_std));
+        // 26807: the invariant is now KEEL-relative as well as absolute.
+        // blkLitFloorKeelMin is the deepest share of the keel refused. The
+        // adoptions that beat 26805 were at 0.0035, ~0.1 and 0.3498 of
+        // standing and arrived through blkStarvedDimConcedes - watch that
+        // counter beside this one.
+        out.push_back(kvf("blkLitFloorKeelR", RenderIntegration::g_blk_lit_floor_keel_r));
+        out.push_back(kvf("blkLitFloorKeelMin", RenderIntegration::g_blk_lit_floor_keel_min));
+        // KH_CYCLE_PV_CENSUS (26807) - THE FREEZE, ONE LAYER UPSTREAM.
+        // The era guard was refuted (fireViewEraRejects 0) and the bridge
+        // writes the frozen view on 92% of frames, yet the VALUE changes on
+        // 41% - so the source has stopped moving, not the copy.
+        // cyclePvChanges against flushes is the headline. cyclePvAgeMaxS is
+        // how long the source ever sat still and cyclePvCamDriftMaxM how far
+        // the camera travelled while it did: a large drift with a large age is
+        // a stalled publisher, and the fix belongs where cycle_pv is written.
+        out.push_back(kv("cyclePvChanges", RenderIntegration::g_cycle_pv_changes));
+        out.push_back(kvf("cyclePvAgeS", RenderIntegration::g_cycle_pv_age_s));
+        out.push_back(kvf("cyclePvAgeMaxS", RenderIntegration::g_cycle_pv_age_max_s));
+        out.push_back(kvf("cyclePvCamDriftM", RenderIntegration::g_cycle_pv_drift_m));
+        out.push_back(kvf("cyclePvCamDriftMaxM", RenderIntegration::g_cycle_pv_drift_max_m));
+        out.push_back(kvf("cyclePvCamDriftAgeS", RenderIntegration::g_cycle_pv_drift_age_s));
+        out.push_back(kv("cyclePvInvalidFrames", RenderIntegration::g_cycle_pv_invalid_frames));
+        out.push_back(kv("cyclePvStaleFrames", RenderIntegration::g_cycle_pv_stale_frames));
+        // KH_FIRE_PV_LIVE (26808) - THE FREEZE FIX.
+        // firePvLiveFires counts fires that refused a stalled cycle_pv copy
+        // and fetched the live transform instead. firePvLiveAgeMaxS is the
+        // oldest copy ever rejected - it should be comparable to the old
+        // cyclePvAgeMaxS (26.6 s in the field), and castFrozenAgeMaxS should
+        // now be far BELOW cyclePvAgeMaxS instead of tracking it exactly.
+        // That decoupling is the whole test: the two were identical to four
+        // decimals before this build. firePvLiveFails counts live fetches that
+        // failed, where the fire falls back to the stale copy as before.
+        out.push_back(kv("firePvLiveFires", RenderIntegration::g_fire_pv_live_fires));
+        out.push_back(kv("firePvLiveFails", RenderIntegration::g_fire_pv_live_fails));
+        out.push_back(kvf("firePvLiveAgeS", RenderIntegration::g_fire_pv_live_age_s));
+        out.push_back(kvf("firePvLiveAgeMaxS", RenderIntegration::g_fire_pv_live_age_max_s));
+        // KH_FIRE_PV_DELTA (26809) - THE DISCRIMINATOR.
+        // firePvLiveDeltaMaxM is the camera distance between the view the fire
+        // FETCHED and the stale copy it rejected. Near zero, with
+        // firePvLiveSame dominating firePvLiveMoved, means the ENGINE transform
+        // itself has stopped advancing - fetching harder cannot help and the
+        // next move is a second camera source. Non-trivial, with firePvLiveMoved
+        // dominating, means the fetch was good and something downstream is
+        // discarding it - our bug, and findable. firePvLiveBitdiff catches the
+        // case where only the ROTATION advanced, which the position delta would
+        // miss and which matters because the field reports the freeze is
+        // angle-dependent.
+        out.push_back(kvf("firePvLiveDeltaM", RenderIntegration::g_fire_pv_live_delta_m));
+        out.push_back(kvf("firePvLiveDeltaMaxM", RenderIntegration::g_fire_pv_live_delta_max_m));
+        out.push_back(kv("firePvLiveMoved", RenderIntegration::g_fire_pv_live_moved));
+        out.push_back(kv("firePvLiveSame", RenderIntegration::g_fire_pv_live_same));
+        out.push_back(kv("firePvLiveBitdiff", RenderIntegration::g_fire_pv_live_bitdiff));
+        // KH_CAST_FROZEN_CENSUS (26804) - THE SHADOW FREEZE, IN METRES.
+        // Every stand-down counter reads zero while the shadows sit still, so
+        // the mask is being repainted with unchanging content. castFrozenAgeMaxS
+        // is the longest the frozen view went unchanged; castFrozenDriftMaxM is
+        // how far the live camera had walked from the camera that view was taken
+        // at, and castFrozenDriftAgeS the age at that moment. A large drift is
+        // the freeze stated in metres: the mask is painting shadows for a
+        // viewpoint the player already left. castFrozenChanges against flushes
+        // says how often the pair refreshes at all.
+        out.push_back(kvf("castFrozenAgeS", RenderIntegration::g_cast_frozen_age_s));
+        out.push_back(kvf("castFrozenAgeMaxS", RenderIntegration::g_cast_frozen_age_max_s));
+        out.push_back(kv("castFrozenChanges", RenderIntegration::g_cast_frozen_changes));
+        out.push_back(kvf("castFrozenDriftM", RenderIntegration::g_cast_frozen_drift_m));
+        out.push_back(kvf("castFrozenDriftMaxM", RenderIntegration::g_cast_frozen_drift_max_m));
+        out.push_back(kvf("castFrozenDriftAgeS", RenderIntegration::g_cast_frozen_drift_age_s));
+        // KH_FIRE_ERA_RECOVER (26806) - THE FREEZE FIX.
+        // fireEraRecovers counts freezes broken: the era guard had refused the
+        // live view for KH_FIRE_ERA_RECOVER_N consecutive fires, which means
+        // the INCUMBENT frozen view was the stale one, so the live view was
+        // adopted anyway. fireEraRecoverDistM is how far gone the last one was
+        // and fireEraRejectDistMax the worst seen - compare against
+        // castFrozenDriftMaxM, which should now stay bounded instead of
+        // reaching kilometres. fireEraRejectRunMax above KH_FIRE_ERA_RECOVER_N
+        // would mean the escape is not firing and I have the wrong site.
+        out.push_back(kv("fireEraRecovers", RenderIntegration::g_fire_era_recovers));
+        out.push_back(kvf("fireEraRecoverDistM", RenderIntegration::g_fire_era_recover_dist_m));
+        out.push_back(kv("fireEraRejectRunMax", static_cast<uint64_t>(RenderIntegration::g_fire_era_reject_run_max)));
+        out.push_back(kvf("fireEraRejectDistMax", RenderIntegration::g_fire_era_reject_dist_max));
         out.push_back(kvf("camStepMaxM", RenderIntegration::g_cam_step_max));
         out.push_back(kvf("fireCamDeltaMaxM", RenderIntegration::g_fire_cam_delta_max));
         out.push_back(kvf("fireFreezeDyMaxM", RenderIntegration::g_fire_freeze_dy_max_m));

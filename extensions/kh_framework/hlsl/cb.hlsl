@@ -176,6 +176,32 @@ cbuffer CBObj : register(b0)
     // consumed volume copy was captured in. All-zero = stand down (the
     // consumer's w gate refuses to the raster tap).
     row_major float4x4 stenCycVp;
+    // KH_CAST_BIAS_CAP (26783). Appended at the tail: every existing offset
+    // in both blocks stays byte-identical and 2 float4 keeps
+    // KH_CBFRAME_BYTES % 16 == 0. THE WORLD CAST CARRIES ITS OWN COMPARE
+    // BIAS, SEPARATE FROM sunMeta*.z. sunMeta*.z is read by BOTH verdict
+    // chains; the self kernel floors on it and is healthy, so it may not
+    // move. The cast chain needs a SMALLER, capped bias for the coarse
+    // tiers and gets it here. x/y/z/w = hero / mid / outer / far, already
+    // normalized by that tier's own d2v. ZERO = fall back to that tier's
+    // sunMeta*.z, so any fill site that does not write these lanes (every
+    // mesh fill: the cast chain has no mesh-side caller - the 264
+    // precedent) behaves exactly as it did.
+    float4 sunCastBias;
+    // x = the UNION's cast bias (normalized by its own D); 0 = fall back to
+    // sunMeta.z. yzw free.
+    float4 sunCastBias2;
+    // KH_CAST_REPROJ (26785). THIS FRAME's world->view, paired with the
+    // FROZEN one the cast reconstructs through. The mask is painted at draw 0
+    // from the depth resolved at draw 465 of the PREVIOUS frame - the only
+    // depth that exists that early - so its shade is correct for the previous
+    // frame's screen and is then read by THIS frame's lit pass at draws
+    // 0..468, at pixels that no longer show the same world points. That is the
+    // whole of the drift, and it is why any camera motion triggers it. Pairing
+    // depth(N) with view(N) cannot fix it here: at draw 0 there IS no depth(N).
+    // This matrix lets the pass solve the reprojection instead. Zero = stand
+    // down (sunCastBias2.z is the arm).
+    row_major float4x4 castViewN;
 };
 )HLSL" R"HLSL(
 // THE CHUNK BOUNDARY IS HERE BECAUSE MSVC CAPS ONE STRING LITERAL TOKEN AT
@@ -820,6 +846,10 @@ float4 KhStenPaintU(float3 khpu_w, float2 khpu_raster, float khpu_sel)
 
 )HLSL" R"HLSL(   // Raw occlusion (0 lit.. 1 occluded), pre-strength. Bilinear 4-tap PCF:
 // one-texel-soft edges, and the acne band averages instead of flipping.
+// KH_CAST_BIAS_CAP (26783): the union tail now applies its own capped bias
+// inline, so this helper has no caller left. Body kept - fxc drops an
+// unreferenced function and the resolver harness gates on UNRESOLVED calls,
+// not unused ones - so that a revert is a one-line change.
 float z_bias(float z) { return z - sunMeta.z; }
 
 // ONE bilinear compare and ONE 5-tap soft compare for all five maps: the
@@ -951,6 +981,7 @@ float KhJw(float khjw_e)
 // there). khC_done = a verdict was returned; false = fall through with the
 // carry state updated in place. TWIN CONTRACT with KhSelfTier's ladder.
 float KhCastTier(Texture2D<float> khC_map, float4x4 khC_vp, float4 khC_meta, float3 khC_r,
+                 float khC_cb,   // KH_CAST_BIAS_CAP (26783): this tier's CAST bias; 0 = meta.z
                  bool khlf_on, bool khtb_on,
                  inout float khtb_occ, inout float khtb_w, out bool khC_done)
 {
@@ -961,7 +992,21 @@ float KhCastTier(Texture2D<float> khC_map, float4x4 khC_vp, float4 khC_meta, flo
         if (khC_u.x > 0.002f && khC_u.x < 0.998f &&
             khC_u.y > 0.002f && khC_u.y < 0.998f &&
             khC_c.z > 0.0f && khC_c.z < 1.0f) {
-            float khC_o = KhSunSoftT(khC_map, khC_meta.y, khC_u, khC_c.z - khC_meta.z);   // filtered
+            // KH_CAST_BIAS_CAP (26783). khC_meta.z is TEXEL-PRICED and the tier
+            // texels run 1 mm / 4 mm / 16 mm / 100 mm, so the compare bias ran
+            // 2 mm / 8 mm / 32 mm / 200 mm across the ladder. On the SELF chain
+            // that is covered by the receiver-normal offset, the hero-priced
+            // slope term and the metre-clamped receiver-plane gradient. THE CAST
+            // CHAIN HAS NONE OF THOSE - this line is its whole bias - so the far
+            // tier pushed every world shadow 200 mm sun-ward, which is
+            // bias / tan(elevation) of GROUND displacement: 0.2 m at 45 deg,
+            // 0.55 m at 20, 1.13 m at 10. The 32 m outer/far handoff therefore
+            // stepped the displacement 6x across a straight line in the sun
+            // plane. khC_cb is the same quantity capped in METRES (the
+            // KH_SLOPE_TW / KH_RPDB_GC idiom, fourth instance of a texel-priced
+            // world quantity); zero falls back to the legacy lane.
+            float khC_b = khC_cb > 0.0f ? khC_cb : khC_meta.z;
+            float khC_o = KhSunSoftT(khC_map, khC_meta.y, khC_u, khC_c.z - khC_b);   // filtered
             if (khC_o > 0.0001f || !khlf_on) {   // lit authoritative (the tier map is complete: KH_ABSENCE_WITNESS retired); code 42 falls through
                 if (khtb_occ >= 0.0f) { khC_done = true; return KhTbBlend(khC_o, khtb_occ, khtb_w); }
                 float khC_e = max(abs(khC_u.x - 0.5f), abs(khC_u.y - 0.5f)) * 2.0f;
@@ -996,13 +1041,13 @@ float SunShadowOcclusion(float3 wpos)
         const float3 khc_r = wpos - sunOrigin.xyz;   // KH_SUN_ANCHOR
         bool khc_done;
         float khc_v;
-        khc_v = KhCastTier(khSunDepth2, sunVP2, sunMeta2, khc_r, khlf_on, khtb_on, khtb_occ, khtb_w, khc_done);
+        khc_v = KhCastTier(khSunDepth2, sunVP2, sunMeta2, khc_r, sunCastBias.x, khlf_on, khtb_on, khtb_occ, khtb_w, khc_done);
         if (khc_done) return khc_v;
-        khc_v = KhCastTier(khSunDepth3, sunVP3, sunMeta3, khc_r, khlf_on, khtb_on, khtb_occ, khtb_w, khc_done);
+        khc_v = KhCastTier(khSunDepth3, sunVP3, sunMeta3, khc_r, sunCastBias.y, khlf_on, khtb_on, khtb_occ, khtb_w, khc_done);
         if (khc_done) return khc_v;
-        khc_v = KhCastTier(khSunDepth4, sunVP4, sunMeta4, khc_r, khlf_on, khtb_on, khtb_occ, khtb_w, khc_done);
+        khc_v = KhCastTier(khSunDepth4, sunVP4, sunMeta4, khc_r, sunCastBias.z, khlf_on, khtb_on, khtb_occ, khtb_w, khc_done);
         if (khc_done) return khc_v;
-        khc_v = KhCastTier(khSunDepth5, sunVP5, sunMeta5, khc_r, khlf_on, khtb_on, khtb_occ, khtb_w, khc_done);
+        khc_v = KhCastTier(khSunDepth5, sunVP5, sunMeta5, khc_r, sunCastBias.w, khlf_on, khtb_on, khtb_occ, khtb_w, khc_done);
         if (khc_done) return khc_v;
     }
 )HLSL" R"HLSL(   // CHUNK BOUNDARY - SIXTH C2026 CATCH OF THE CAMPAIGN
@@ -1015,11 +1060,16 @@ float SunShadowOcclusion(float3 wpos)
     if (c.z <= 0.0f)
         return (khtb_occ >= 0.0f) ? KhTbBlend(0.0f, khtb_occ, khtb_w) : 0.0f;
 
+    // KH_CAST_BIAS_CAP (26783): the union's CAST bias, capped in metres like
+    // the four tiers above. Zero falls back to sunMeta.z, which is what
+    // z_bias has always applied and what every un-filled site still gets.
+    const float khcu_b = sunCastBias2.x > 0.0f ? sunCastBias2.x : sunMeta.z;
+
     if (c.z >= 1.0f) return localityMeta.z >= 0.5f
-                          ? SunShadowCompareSoft(uv, 1.0f - sunMeta.z) : 0.0f;   // filtered
+                          ? SunShadowCompareSoft(uv, 1.0f - khcu_b) : 0.0f;   // filtered
 
     // KH_TIER_BLEND: the union answer resolves any carried band edge.
-    float khtb_un = SunShadowCompareSoft(uv, z_bias(c.z));   // filtered
+    float khtb_un = SunShadowCompareSoft(uv, c.z - khcu_b);   // filtered (z_bias, capped)
     return (khtb_occ >= 0.0f) ? KhTbBlend(khtb_un, khtb_occ, khtb_w) : khtb_un;
 }
 
@@ -1815,6 +1865,39 @@ float KhMatRoute(float route, float fallback, float2 uv)
     int r = (int)route;
     if (r < 0) return fallback;
     float4 s = KhMatFetch(r >> 2, uv);
+    int c = r & 3;
+    return c == 0 ? s.r : c == 1 ? s.g : c == 2 ? s.b : s.a;
+}
+
+// KH_MAT_SPLIT_TEXEL (26768) - THE BLEND SPLIT CLASSIFIES BY THE TEXEL'S
+// OWN ALPHA: a point fetch at mip 0 through the same route, never the
+// filtered sample. The filtered alpha averages a transparent neighbour into
+// an opaque texel wherever the footprint touches the window - the window's
+// rim at distance (the coarse mip is mostly glass) and along a uv seam
+// (the derivative jumps across it, so the hardware picks the coarsest mip
+// on exactly that line) - so such texels read below 0.996, left the opaque
+// pass, and the part pass, which blends by that same alpha and tests
+// against a depth the opaque pass never wrote there, could not cover them:
+// the 'mouse bites' through a solid hull. The blend keeps the filtered
+// alpha; only the VERDICT is per texel, and both passes (and the sun map,
+// and the footprint) reach the same verdict for the same uv by construction.
+float4 KhMatFetchTexel(int slot, float2 uv)
+{
+    uint kmt_w, kmt_h;
+    float2 kmt_t = frac(uv);   // the sampler wraps; so does this
+    if (slot == 0) { matDiffuse.GetDimensions(kmt_w, kmt_h);  return matDiffuse.Load(int3(int2(kmt_t * float2(kmt_w, kmt_h)), 0)); }
+    if (slot == 1) { matNormal.GetDimensions(kmt_w, kmt_h);   return matNormal.Load(int3(int2(kmt_t * float2(kmt_w, kmt_h)), 0)); }
+    if (slot == 2) { matOrm.GetDimensions(kmt_w, kmt_h);      return matOrm.Load(int3(int2(kmt_t * float2(kmt_w, kmt_h)), 0)); }
+    if (slot == 3) { matEmissive.GetDimensions(kmt_w, kmt_h); return matEmissive.Load(int3(int2(kmt_t * float2(kmt_w, kmt_h)), 0)); }
+    matSpecular.GetDimensions(kmt_w, kmt_h);
+    return matSpecular.Load(int3(int2(kmt_t * float2(kmt_w, kmt_h)), 0));
+}
+
+float KhMatRouteTexel(float route, float fallback, float2 uv)
+{
+    int r = (int)route;
+    if (r < 0) return fallback;
+    float4 s = KhMatFetchTexel(r >> 2, uv);
     int c = r & 3;
     return c == 0 ? s.r : c == 1 ? s.g : c == 2 ? s.b : s.a;
 }

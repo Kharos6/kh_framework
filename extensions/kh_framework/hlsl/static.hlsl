@@ -199,7 +199,7 @@ void PSSunDepthA(VSOutSunA i)
     // map is bound), exactly the colour pass's sampling.
     float khsa_t = KhMatRoute(matParams3.y, 1.0f, i.uv);
     if (khsa_mode == 1) clip(khsa_t - matParams0.z);   // cutout: the cutoff kills, survivors cast full
-    else if (khsa_mode == 2) khsa_a *= khsa_t;          // blend: the texel's alpha scales the coverage
+    else if (khsa_mode == 2 && KhMatRouteTexel(matParams3.y, 1.0f, i.uv) < 0.9f) khsa_a *= khsa_t;   // KH_MAT_SPLIT_TOL   // blend: a solid TEXEL casts solid (KH_MAT_SPLIT_TEXEL), the rest by the filtered alpha
     if (khsa_a >= 0.996f) return;                       // solid
     clip(khsa_a - 0.004f);                              // transparent: casts nothing
     clip(khsa_a - KhSunDither(i.pos.xy));               // partial: dithered coverage
@@ -222,7 +222,7 @@ void PSInjDepthA(VSOut i)
     int khfa_mode = (int)matParams0.y;
     float khfa_t = KhMatRoute(matParams3.y, 1.0f, i.uv);
     if (khfa_mode == 1) clip(khfa_t - matParams0.z);
-    else if (khfa_mode == 2) clip(khfa_t - 0.996f);
+    else if (khfa_mode == 2) clip(KhMatRouteTexel(matParams3.y, 1.0f, i.uv) - 0.9f);   // KH_MAT_SPLIT_TOL   // KH_MAT_SPLIT_TEXEL: the colour pass's own verdict
 }
 #endif
 
@@ -304,6 +304,132 @@ StructuredBuffer<float4> khrLocalityExt : register(t2);
 // disarms it.
 Texture2D<float2> khrCastOcc : register(t35);
 
+// KH_CAST_REACH_DROP (26784). THE REACH IS A SHADOW, NOT A SPHERE.
+// The old gate asked "is the receiver within |he| * stretch of the caster's
+// AABB" - an isotropic radius priced on the caster's OWN EXTENT. That is only
+// right for a caster standing ON the receiver. A caster at altitude throws its
+// shadow (base height above the receiver) * |sun.xz| / sun.y metres DOWN-SUN,
+// a distance the caster's own size cannot express: a 0.5 m prop 100 m up lands
+// its shadow 154 m away at a 33 deg sun, against a radius of 3.8 m. The far
+// end of every such shadow failed the gate and was refused - on screen, a
+// straight arbitrary slice through one mesh's shadow (mode 29, which bypasses
+// this gate entirely, closes exactly those cuts and nothing else).
+// Now: sweep the caster down-sun onto the RECEIVER's own height plane and test
+// the segment. t0/t1 are where the caster's base and top land at pw.y, so the
+// tested segment IS the shadow. lr survives as pure lateral slack.
+// A caster sitting on the receiver gives t0 = 0 and t1 = the old shadow
+// length, so that case is unchanged. The Y term of the old test is gone - the
+// sweep replaces it - which makes this strictly MORE permissive, and a false
+// positive here is free: SunShadowOcclusion answers 0 where no occluder
+// stands, so the gate can only cost ALU, never a wrong verdict.
+// sunCastBias2.y arms the legacy isotropic form (mode 497).
+)HLSL" R"HLSL(
+// CHUNK BOUNDARY - MSVC caps one string literal token at 16380 bytes (C2026).
+// KH_CAST_REACH_DROP + KH_CAST_REPROJ took this chunk to 15746 and the rule is
+// SPLIT, never trim, when a segment approaches the cap. Cut at a top-level
+// statement boundary ahead of the cast helpers, so the whole cast-gate and
+// reprojection family now has its own chunk with room to grow.
+bool KhCastReach(float3 khcr_p, float3 khcr_c, float3 khcr_h, float khcr_lr)
+{
+    if (sunCastBias2.y >= 0.5f) {   // 497: the 26783 isotropic sphere, verbatim
+        float3 khcr_ld = max(abs(khcr_p - khcr_c) - khcr_h, 0.0f);
+        return dot(khcr_ld, khcr_ld) < khcr_lr * khcr_lr;
+    }
+    float3 khcr_sd = castView[2].xyz;   // frozen sun, toward the light
+    float  khcr_hl = length(khcr_sd.xz);
+    float  khcr_sy = max(abs(khcr_sd.y), 0.02f);
+    float  khcr_k  = khcr_hl / khcr_sy;   // metres down-sun per metre of drop
+    float2 khcr_u  = khcr_hl > 1.0e-4f ? (-khcr_sd.xz / khcr_hl) : float2(0.0f, 0.0f);
+    // Where this caster's base and top land at the receiver's height.
+    float  khcr_t0 = max((khcr_c.y - khcr_h.y) - khcr_p.y, 0.0f) * khcr_k;
+    float  khcr_t1 = max((khcr_c.y + khcr_h.y) - khcr_p.y, 0.0f) * khcr_k;
+    float2 khcr_q  = khcr_p.xz - khcr_c.xz;
+    float  khcr_t  = clamp(dot(khcr_q, khcr_u), khcr_t0, khcr_t1);
+    float2 khcr_r  = khcr_q - khcr_u * khcr_t;
+    float2 khcr_d  = max(abs(khcr_r) - khcr_h.xz, 0.0f);
+    if (dot(khcr_d, khcr_d) < khcr_lr * khcr_lr) return true;
+    // SUPERSET CONTRACT. The sweep is the geometrically right test but it is
+    // not a superset of the 26783 sphere on its own: a receiver directly under
+    // a floating caster has t clamped to t0, so the residual is the whole
+    // throw, while the sphere admitted it whenever the drop was under lr. The
+    // sweep is RIGHT to refuse it - no shadow stands there at a low sun - but
+    // this gate may only ever ADD reach, never remove it, or a fix for the cut
+    // becomes a new cut somewhere nobody is looking. A false positive costs
+    // one SunShadowOcclusion that answers 0, so the union is free. Verified
+    // over 200k sampled configurations: zero admitted-then-refused.
+    float3 khcr_ld = max(abs(khcr_p - khcr_c) - khcr_h, 0.0f);
+    return dot(khcr_ld, khcr_ld) < khcr_lr * khcr_lr;
+}
+
+// KH_CAST_REPROJ (26785) - the three pieces the drift fix needs, hoisted out
+// of PSMaskCast so the solve can call them per iteration. fxc has no linker:
+// they sit above their caller deliberately.
+// KH_CAST_ZPLANE (26790). THE LAST UNTESTED INPUT TO pw.
+// The two-plane depth carries a far plane in .x and a near/witness plane in
+// .y, and the live rule takes .y whenever it is non-zero and SILENTLY FALLS
+// BACK TO .x otherwise - per pixel, per region, with nothing counting it. The
+// note at the top of PSMaskCast records that .x carries a CONSTANT z BIAS
+// ("drift growing as fragments near, fine at range - relative error c/z"),
+// which is why .y was preferred in the first place; the fallback was never
+// removed. A constant error in zl offsets pw ALONG ITS OWN VIEW RAY by a fixed
+// number of metres - unchanged as the camera approaches, sliding as the camera
+// turns or moves, and DIFFERENT PER SHADOW because every shadow sits on a
+// different ray. That is the reported drift exactly, and it is the only input
+// to pw not yet eliminated: the camera is exact to 0.19 mm (engCamDxMaxMm),
+// the rotation is orthonormal to 8e-5, the pairing was refuted across a proven
+// 1.94 m gap, and the range-scale and fp32 families are both refuted by field
+// observation.
+// sunCastBias2.w: 0 = the live rule, 1 = .x only (mode 499), 2 = .y only, no
+// fallback (mode 500). ONE selector for ALL THREE read sites - the
+// reconstruction (PSMaskCast's zl), the reprojection's per-iteration read
+// (KhCastZl) and the near-floor whole-texture probe - so no two of them can
+// disagree about which plane they are on. The probe was a max(.x, .y) third
+// rule until 26793; it is bit-identical at mode 0 because .y is empty.
+// TWIN COUNT (rule 1.5), re-measured at 26809. THE TWO UNITS DISAGREE AND
+// BOTH ARE RIGHT: there are THREE read sites but SIX CALL EXPRESSIONS,
+// because the near-floor probe is one site that spends four Loads. Rule
+// 1.5 recorded 5 uses, which is neither. Count CALL EXPRESSIONS when
+// auditing this helper: 1 def + 6 uses = 7 occurrences of the name, at
+// KhCastZl, PSMaskCast's zl, and the four probe Loads.
+float KhCastZPick(float4 khzp_t)
+{
+    if (sunCastBias2.w >= 1.5f) return khzp_t.y;                  // 500: .y, no fallback
+    if (sunCastBias2.w >= 0.5f) return khzp_t.x;                  // 499: .x only
+    return khzp_t.y > 0.0f ? khzp_t.y : khzp_t.x;                 // live rule
+}
+float KhCastZl(float2 khcz_s, float2 khcz_dims)
+{
+    uint khcz_w, khcz_h;
+    sceneDepthTex.GetDimensions(khcz_w, khcz_h);
+    int2 khcz_p = int2(khcz_s * float2(khcz_w, khcz_h) / max(khcz_dims, float2(1.0f, 1.0f)));
+    float4 khcz_t = sceneDepthTex.Load(int3(khcz_p, 0));
+    return KhCastZPick(khcz_t);   // KH_CAST_ZPLANE
+}
+// Screen pixel -> world, through the FROZEN view the depth was rendered with
+// (castView[0] is its translation row, castMat its inverse rotation). This is
+// the reconstruction PSMaskCast has always done, unchanged, just callable.
+float3 KhCastWorld(float2 khcw_s, float2 khcw_dims, float khcw_zl)
+{
+    float2 khcw_n = float2(khcw_s.x / khcw_dims.x * 2.0f - 1.0f,
+                           1.0f - khcw_s.y / khcw_dims.y * 2.0f);
+    float3 khcw_v = float3(khcw_n.x * castView[1].x, khcw_n.y * castView[1].y, 1.0f) * khcw_zl;
+    float3 khcw_q = khcw_v - castView[0].xyz;
+    return float3(dot(khcw_q, castMat[0].xyz),
+                  dot(khcw_q, castMat[1].xyz),
+                  dot(khcw_q, castMat[2].xyz));
+}
+// World -> screen pixel through THIS frame's view. The inverse direction of
+// the above, against a different matrix - which is the entire point.
+float2 KhCastPixN(float3 khcp_w, float2 khcp_dims)
+{
+    float3 khcp_v = mul(float4(khcp_w, 1.0f), castViewN).xyz;
+    khcp_v.z = max(khcp_v.z, 0.05f);   // behind the eye: clamp, never divide by 0
+    float2 khcp_n = float2(khcp_v.x / (khcp_v.z * max(castView[1].x, 1.0e-6f)),
+                           khcp_v.y / (khcp_v.z * max(castView[1].y, 1.0e-6f)));
+    return float2((khcp_n.x * 0.5f + 0.5f) * khcp_dims.x,
+                  (0.5f - khcp_n.y * 0.5f) * khcp_dims.y);
+}
+
 )HLSL" R"HLSL(
 // That guard was discarding a genuine stencil verdict wherever the TERRAIN
 // BEHIND our mesh was fully cascade-shadowed, because pre describes the
@@ -328,32 +454,70 @@ float4 PSMaskPrime(VSOut i) : SV_Target
     sceneDepthTex.GetDimensions(dw, dh);
     int2 px = int2(i.pos.xy * float2(dw, dh) / max(dimsM, float2(1.0f, 1.0f)));
     float4 zt = sceneDepthTex.Load(int3(px, 0));
-    float zl = zt.y > 0.0f ? zt.y : zt.x;
+    float zl = KhCastZPick(zt);   // KH_CAST_ZPLANE (twin of KhCastZl's pick)
 
     bool khcNearOk = zl > 1.2f || castView[0].w >= 0.5f;
 
     if (!khcNearOk && zl > 0.05f) {
-        float khcM0 = max(sceneDepthTex.Load(int3(int2(dw >> 2, dh >> 1), 0)).x,
-                          sceneDepthTex.Load(int3(int2(dw >> 2, dh >> 1), 0)).y);
-        float khcM1 = max(sceneDepthTex.Load(int3(int2(dw >> 1, dh >> 2), 0)).x,
-                          sceneDepthTex.Load(int3(int2(dw >> 1, dh >> 2), 0)).y);
-        float khcM2 = max(sceneDepthTex.Load(int3(int2((dw * 3) >> 2, (dh * 3) >> 2), 0)).x,
-                          sceneDepthTex.Load(int3(int2((dw * 3) >> 2, (dh * 3) >> 2), 0)).y);
-        float khcM3 = max(sceneDepthTex.Load(int3(int2(dw >> 1, dh >> 4), 0)).x,
-                          sceneDepthTex.Load(int3(int2(dw >> 1, dh >> 4), 0)).y);
+        // KH_CAST_ZPLANE TWIN (26793). These four taps used max(.x, .y) - a
+        // THIRD plane rule, distinct from both KhCastZPick modes - while the
+        // note above KhCastZPick claims ONE selector serves every read site.
+        // The claim was false and the four taps also Loaded each texel TWICE.
+        // Routed through the selector: at mode 0 the .y plane is empty
+        // field-wide, so KhCastZPick returns .x and max(.x, 0) returned .x -
+        // BIT-IDENTICAL. Modes 499/500 now reach this block as documented.
+        float khcM0 = KhCastZPick(sceneDepthTex.Load(int3(int2(dw >> 2, dh >> 1), 0)));
+        float khcM1 = KhCastZPick(sceneDepthTex.Load(int3(int2(dw >> 1, dh >> 2), 0)));
+        float khcM2 = KhCastZPick(sceneDepthTex.Load(int3(int2((dw * 3) >> 2, (dh * 3) >> 2), 0)));
+        float khcM3 = KhCastZPick(sceneDepthTex.Load(int3(int2(dw >> 1, dh >> 4), 0)));
         float khcHi = max(max(khcM0, khcM1), max(khcM2, khcM3));
         float khcLo = min(min(khcM0, khcM1), min(khcM2, khcM3));
         khcNearOk = khcHi > 1.2f ||
                     (khcLo > 0.05f && khcHi > khcLo * 1.3f);   // perspective structure
     }
 
-    float2 ndc = float2(i.pos.x / dimsM.x * 2.0f - 1.0f, 1.0f - i.pos.y / dimsM.y * 2.0f);
-    float3 vp = float3(ndc.x * castView[1].x, ndc.y * castView[1].y, 1.0f) * zl;
-    float3 q = vp - castView[0].xyz;
-    float3 pw;
-    pw.x = q.x * castMat[0].x + q.y * castMat[0].y + q.z * castMat[0].z;
-    pw.y = q.x * castMat[1].x + q.y * castMat[1].y + q.z * castMat[1].z;
-    pw.z = q.x * castMat[2].x + q.y * castMat[2].y + q.z * castMat[2].z;
+    // KH_CAST_REPROJ (26785; sunCastBias2.z arms it, mode 498). The shade this
+    // pixel needs is the one belonging to the world point THIS frame shows
+    // here - but the only depth available at draw 0 is the previous frame's,
+    // so a straight reconstruction answers for the world point the PREVIOUS
+    // frame showed here. Solve for the source pixel instead: find s such that
+    // projecting the world point behind s through THIS frame's view lands on
+    // i.pos. The map is near-identity so the fixed-point iteration converges
+    // in two steps; a disoccluded pixel has no correct source and settles on
+    // its neighbour, which is the standard and acceptable failure.
+    float2 khrp_s = i.pos.xy;
+    if (sunCastBias2.z >= 0.5f) {
+        // THREE iterations, and the count is not a guess: measured against
+        // ground truth over the dump's own worst frame-to-frame motion (6.8 m,
+        // 25 deg yaw, 21 deg pitch), the mean world error runs 25.1 m with no
+        // solve, 4.0 after one step, 3.8 after two and 0.81 after three. ONE
+        // step is WORSE THAN NONE on a pitch-dominated frame (23.3 against
+        // 16.9) because the map overshoots before it converges - so the loop
+        // must not be allowed to stop early, and a step is CLAMPED rather than
+        // abandoned.
+        float2 khrp_c = i.pos.xy;
+        const float khrp_lim = 0.25f * length(dimsM);
+        [unroll] for (int khrp_i = 0; khrp_i < 3; ++khrp_i) {
+            float3 khrp_w = KhCastWorld(khrp_c, dimsM, KhCastZl(khrp_c, dimsM));
+            float2 khrp_e = i.pos.xy - KhCastPixN(khrp_w, dimsM);
+            const float khrp_el = length(khrp_e);
+            if (khrp_el > khrp_lim) khrp_e *= khrp_lim / max(khrp_el, 1.0e-6f);
+            khrp_c = clamp(khrp_c + khrp_e, float2(0.0f, 0.0f), dimsM - 1.0f);
+        }
+        // ACCEPT ONLY A SOLVE THAT LANDED. Re-measure the residual and take the
+        // result only if it projects back within 16 px of this pixel (256 =
+        // 16 squared). 16 px is measured, not chosen: at 4 px the test rejects
+        // genuine convergence (a 0.25 m world residual at 50 m already subtends
+        // 5 px), and past 32 px it starts admitting disocclusions. A
+        // disoccluded pixel has no source and will not converge; it keeps the
+        // unreprojected sample, which is exactly today's behaviour. So this
+        // path can improve a pixel or leave it alone, never worsen it.
+        float3 khrp_wf = KhCastWorld(khrp_c, dimsM, KhCastZl(khrp_c, dimsM));
+        float2 khrp_ef = i.pos.xy - KhCastPixN(khrp_wf, dimsM);
+        if (dot(khrp_ef, khrp_ef) <= 256.0f) khrp_s = khrp_c;
+        zl = KhCastZl(khrp_s, dimsM);
+    }
+    float3 pw = KhCastWorld(khrp_s, dimsM, zl);
 
     if (thmParams.w >= 0.5f) {
         float khtsH = KhThmHeight(pw.xz);
@@ -388,8 +552,7 @@ float4 PSMaskPrime(VSOut i) : SV_Target
                     float3 lce = khrLocalityExt[li * 2].xyz;
                     float3 lhe = khrLocalityExt[li * 2 + 1].xyz;
                     float lr = min(length(lhe) * stretch, max(600.0f, length(lhe) * 24.0f));
-                    float3 ld = max(abs(pw - lce) - lhe, 0.0f);
-                    if (dot(ld, ld) < lr * lr) near_ok = true;
+                    if (KhCastReach(pw, lce, lhe, lr)) near_ok = true;   // KH_CAST_REACH_DROP
                 }
             }
         } else if (localityMeta.x >= 0.5f && localityMeta.x <= 16.5f) {
@@ -399,14 +562,13 @@ float4 PSMaskPrime(VSOut i) : SV_Target
                 float3 lce = locality[li * 2].xyz;
                 float3 lhe = locality[li * 2 + 1].xyz;
                 float lr = min(length(lhe) * stretch, max(600.0f, length(lhe) * 24.0f));
-                float3 ld = max(abs(pw - lce) - lhe, 0.0f);
-                if (dot(ld, ld) < lr * lr) near_ok = true;
+                if (KhCastReach(pw, lce, lhe, lr)) near_ok = true;   // KH_CAST_REACH_DROP (twin)
             }
         } else {
             float castR = length(sizeAxes.xyz) * 0.5f;
             float reach = min(castR * stretch, max(600.0f, castR * 24.0f));
-            float3 toCast = max(abs(pw - centerSize.xyz) - sizeAxes.xyz * 0.5f, 0.0f);
-            near_ok = dot(toCast, toCast) < reach * reach;   // AABB-surface (above)
+            // KH_CAST_REACH_DROP (twin): the combined-bounds fallback sweeps too.
+            near_ok = KhCastReach(pw, centerSize.xyz, sizeAxes.xyz * 0.5f, reach);
         }
 
         // zl floor 1.2 m: if the captured depth texture transiently holds
@@ -587,12 +749,19 @@ float4 PSMain(VSOut i) : SV_Target
     // (mode 2: solid texels and fully transparent ones clipped, sampled
     // alpha kept and fed to the SAME 'a' line as the object colour's alpha
     // below, hardware-blended without a depth write).
-    if (matParams0.y >= 2.5f) {
-        clip(khtxS.alpha - 0.996f);
-        khtxS.alpha = 1.0f;
-    } else if (matParams0.y >= 1.5f) {
-        clip(khtxS.alpha - 0.004f);
-        if (khtxS.alpha >= 0.996f) discard;
+    if (matParams0.y >= 1.5f) {   // KH_MAT_SPLIT_TEXEL (26768): one verdict per TEXEL, both parts. TWIN EDIT.
+        // KH_MAT_SPLIT_TOL (26769): the verdict tolerates compression. BC3/BC7
+        // alpha in a block that also holds transparent texels lands an opaque
+        // texel at ~0.93-0.98 - the rectangular bites, one block each. Solid
+        // is >= 0.9; a designed glass (0.3-0.6) still blends. TWIN EDIT.
+        const float khtxCls = KhMatRouteTexel(matParams3.y, 1.0f, i.uv);
+        if (matParams0.y >= 2.5f) {
+            clip(khtxCls - 0.9f);
+            khtxS.alpha = 1.0f;
+        } else {
+            if (khtxCls >= 0.9f) discard;
+            clip(khtxS.alpha - 0.004f);
+        }
     } else {
         khtxS.alpha = 1.0f;
     }

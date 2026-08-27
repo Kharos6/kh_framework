@@ -8,7 +8,19 @@
 R"HLSL(
 Texture2D<float4> sceneColor : register(t0);
 Texture2D<float4> khsgTex : register(t3);
-SamplerState khsgSamp : register(s1);   // linear CLAMP, bound only for the resolve draw
+// KH_FX_SAMP_S2 (26783): s2, NOT s1. The shared prefix (g_cb_hlsl) declares
+// khPfSamp at s1 unconditionally, and the prefix is compiled into THIS unit
+// too, so both objects claimed s1 in one assembly. It built only because fxc
+// drops an unreferenced resource and PSEffect happens not to reach khPfSamp -
+// which is reachable from KhPfProbe / KhPfProbe2 and nothing else. The day any
+// effect entry point calls a prefix helper that samples the moment pyramids,
+// fxc fails the whole unit with X4509 (overlapping register semantics) and
+// EVERY effect goes dark at once, with the error surfacing only at the
+// runtime ensure. A unit-local resource yields to the shared prefix, not the
+// other way round: the prefix is seen by four assemblies and this one is seen
+// by one. s2 is free in all four. C++ twin: the bind and the save/restore
+// bracket in the fx chain moved to slot 2 in the same build.
+SamplerState khsgSamp : register(s2);   // linear CLAMP, bound only for the resolve draw
 
 #if MSAA_DEPTH
 Texture2DMS<float> depthTex : register(t1);

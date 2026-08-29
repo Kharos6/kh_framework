@@ -10714,7 +10714,7 @@ static uint32_t g_fk_veto_cand_n = 0;   // candidates staged at the last pass BE
                                             // campaign-43 handoff.
 // Build tag: monotonic, never reused, bumped once per shipped build (including
 // pure reverts). Keep it a constexpr int, not a #define.
-static constexpr int KH_BUILD_TAG = 26879;
+static constexpr int KH_BUILD_TAG = 26883;
 // Continuous at the near plane, so routing on/off never pops a fragment.
 static constexpr float KH_NEARZ_GAP_FRAC = 0.92f;
 // 3 = mode 203 - passthrough + absolute form.
@@ -11951,6 +11951,85 @@ static uint64_t g_sun_jump_rate_refused = 0;   // storm refusals (forensics)
 // into 1.25 s retractions would be a new flicker class).
 static constexpr uint64_t KH_SUN_COLD_HOLD_MS = 1250;
 static constexpr uint64_t KH_SUN_FLAP_GRACE_MS = 500;
+// KH_LIGHT_RECON (26880) - THE PUBLISHED LIGHTING MAY NOT STAY STALE FOR MORE
+// THAN A SECOND, WHATEVER GATE IS HOLDING IT.
+//
+// Every value we publish (sun direction from the cascade axis, sun colour and
+// ambient from the lit block) is read from the engine's own uploads EVERY
+// FRAME; the seconds a skipTime or a 0 setOvercast took to land were spent
+// entirely in our arbitration - the 5-hold derived latch, 8-hold candidacy,
+// the 5 s jump cooldown, the sky-static refusal, the 1.25 s cold hold, the
+// block's 500 ms pending window and its collapse hold that waited for a sun
+// jump that never comes on a weather step. Each gate exists for a real
+// capture fault and none of them knows the cause of a change, so they can only
+// wait. This does not replace them: once a second it asks what the raw
+// samples have AGREED ON over the last window (a median - one poisoned frame
+// cannot move it, a real change owns it within a fraction of a second) and,
+// if the published state disagrees, publishes that consensus and counts the
+// gate as settled, so the maps re-render at once instead of paying the cold
+// hold a second time. Mode 584 is the revert. Lanes: reconChecks /
+// reconSunAdopts / reconBlkAdopts, and the latency lanes below, which are
+// the measurement this build otherwise lacks (rule 1.83).
+// 26883: 1000 -> 250. The period is a RATE LIMIT on overrides (each one
+// flags a sun jump and resets the probe), not a derived bound; 250 keeps at
+// most four per second while a real step lands on the first check after the
+// median turns. Per frame was refused: an engine lighting ramp would then
+// rebuild the maps every frame.
+static constexpr uint64_t KH_RECON_MS = 250;           // reconciliation period
+static constexpr uint64_t KH_RECON_WIN_MS = 1500;      // sample window the median is taken over
+static constexpr int      KH_RECON_MIN_N = 8;          // fewer agreeing samples than this: no verdict
+static constexpr float    KH_RECON_SUN_DEG = 1.0f;     // published vs consensus direction: adopt past this
+static constexpr int      KH_RECON_RING = 64;
+static float    g_rc_sun_ring[KH_RECON_RING][3] = {};  // raw skyward cascade axes (render thread pushes)
+static uint64_t g_rc_sun_ring_ms[KH_RECON_RING] = {};
+static uint32_t g_rc_sun_ring_n = 0;                   // total pushes (cursor = n % ring)
+// 26881: THE BLOCK RING IS FED AT THE PROBE, FROM THE RAW UPLOAD, BEFORE ANY
+// REGIME GATE. 26880 pushed the flush's candidate, which is the probe's
+// MIRROR (nb[8..18]) - and the probe's collapse hold (sun below 10% of the
+// standing sun with no direction jump inside 15 s) refuses the upload and
+// skips locator_capture, so the mirror freezes bright for the whole of a
+// sunlight -> overcast step and every downstream reader, this one included,
+// agreed with a value the engine had stopped sending (blkCollapseHolds
+// 27,569 in 2,662 flushes; blkLatMs 0 because the 'candidate' never
+// disagreed). The ring is larger because the probe sees several uploads per
+// frame and the window is priced in time.
+static constexpr int KH_RECON_BLK_RING = 256;
+static float    g_rc_blk_ring[KH_RECON_BLK_RING][6] = {};   // amb rgb, sun rgb - raw uploads (probe pushes)
+static uint64_t g_rc_blk_ring_ms[KH_RECON_BLK_RING] = {};
+static uint64_t g_rc_sun_settles = 0;                  // cold holds closed by the window's agreement
+static uint32_t g_rc_blk_ring_n = 0;
+static uint64_t g_rc_last_ms = 0;                      // last reconciliation pass
+static uint64_t g_rc_checks = 0;
+static uint64_t g_rc_sun_adopts = 0;
+static uint64_t g_rc_blk_adopts = 0;
+static uint64_t g_rc_sun_short = 0;                    // sun verdicts refused: too few samples in the window
+static uint64_t g_rc_blk_short = 0;
+// Latency lanes. sunPubLat: first raw cascade sample more than KH_RECON_SUN_DEG
+// from the published direction -> the publish that brought it back within
+// that. sunSettleLat: that publish -> kh_sun_settled(). blkLat: first
+// out-of-band block candidate -> adoption. *By: 1 = the existing gates,
+// 2 = reconciliation. Last and max, window-reset with the counters.
+static uint64_t g_rc_sun_lat_open_ms = 0;              // 0 = no disagreement open
+static uint64_t g_rc_sun_settle_open_ms = 0;
+static uint32_t g_rc_sun_pub_lat_ms = 0, g_rc_sun_pub_lat_max_ms = 0;
+static uint32_t g_rc_sun_settle_lat_ms = 0, g_rc_sun_settle_lat_max_ms = 0;
+static int      g_rc_sun_lat_by = 0;
+static uint64_t g_rc_blk_lat_open_ms = 0;
+static uint32_t g_rc_blk_lat_ms = 0, g_rc_blk_lat_max_ms = 0;
+static int      g_rc_blk_lat_by = 0;
+static bool     g_rc_sun_adopted_flag = false;         // set by the reconcile, read by the latency close
+// 26882: THE WINDOW IS THE RING, NOT KH_RECON_WIN_MS. The 26881 read showed
+// the probe applying ~6,500 uploads per second (the lit block is uploaded
+// per draw), so 256 entries span a few frames and 64 cascade samples a few
+// more; KH_RECON_WIN_MS only excludes a stale ring after a stall. A median
+// over a few frames' worth of uploads still cannot be moved by one poisoned
+// upload (1 in 256), which is the fault the gates were built for; it CAN be
+// moved by a whole foreign frame, which nothing in the field has shown.
+// The span is published (reconSunSpanMs / reconBlkSpanMs) rather than
+// assumed, so the next reader sees what the median was actually taken
+// over.
+static uint32_t g_rc_sun_span_ms = 0;                  // age of the oldest sample the last sun verdict used
+static uint32_t g_rc_blk_span_ms = 0;
 static uint64_t g_sun_valid_ms = 0;   // last (graced) validity rise / adopted jump
 static uint64_t g_sun_fell_ms = 0;   // last validity fall (flap grace)
 static bool     g_sun_ok_prev = false;
@@ -22069,6 +22148,22 @@ inline void kh_probe_std_refresh(CbColorProbe& khp, const float* f, uint32_t nf,
         const float khp_al = khp_b[8] + khp_b[9] + khp_b[10];
         const float khp_sl = khp_b[16] + khp_b[17] + khp_b[18];
         if (khp_sl > 1.0f) g_blk_bright_seen_t = khp_now;
+        {   // KH_LIGHT_RECON (26881): the raw block, ahead of every hold below
+            const uint32_t khrc_i = g_rc_blk_ring_n % static_cast<uint32_t>(KH_RECON_BLK_RING);
+            for (int khrc_c = 0; khrc_c < 3; ++khrc_c) {
+                g_rc_blk_ring[khrc_i][khrc_c] = khp_b[8 + khrc_c];
+                g_rc_blk_ring[khrc_i][3 + khrc_c] = khp_b[16 + khrc_c];
+            }
+            g_rc_blk_ring_ms[khrc_i] = steady_now_ms();
+            g_rc_blk_ring_n++;
+            if (g_pub_block_valid && g_rc_blk_lat_open_ms == 0) {
+                const float khrc_ral = g_pub_block_amb[0] + g_pub_block_amb[1] + g_pub_block_amb[2];
+                const float khrc_rsl = g_pub_block_sun[0] + g_pub_block_sun[1] + g_pub_block_sun[2];
+                if (!kh_blk_in_band(khp_al, khrc_ral) || !kh_blk_in_band(khp_sl, khrc_rsl)) {
+                    g_rc_blk_lat_open_ms = steady_now_ms();
+                }
+            }
+        }
 
         // ser 6629->6630 sun 17.235->13.751 at amb 1.44) with blkRegimeAdopts
         // 0 over 6938 flushes and 5.3M rejects - the standing never ADOPTS,
@@ -24229,6 +24324,19 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
                                  fabsf(wdir[2] - g_sun_dir_derived[2]);
 
                 if (g_sun_derived_samples < 1000000) g_sun_derived_samples++;
+                {   // KH_LIGHT_RECON: the raw sample, before any latch
+                    const uint32_t khrc_i = g_rc_sun_ring_n % static_cast<uint32_t>(KH_RECON_RING);
+                    g_rc_sun_ring[khrc_i][0] = wdir[0];
+                    g_rc_sun_ring[khrc_i][1] = wdir[1];
+                    g_rc_sun_ring[khrc_i][2] = wdir[2];
+                    g_rc_sun_ring_ms[khrc_i] = steady_now_ms();
+                    g_rc_sun_ring_n++;
+                    if (g_pub_valid && g_rc_sun_lat_open_ms == 0) {
+                        float khrc_dp = wdir[0] * g_pub_dir[0] + wdir[1] * g_pub_dir[1] + wdir[2] * g_pub_dir[2];
+                        khrc_dp = khrc_dp > 1.0f ? 1.0f : (khrc_dp < -1.0f ? -1.0f : khrc_dp);
+                        if (acosf(khrc_dp) * 57.29578f > KH_RECON_SUN_DEG) g_rc_sun_lat_open_ms = steady_now_ms();
+                    }
+                }
                 if (g_first_derived120_t < 0.0f && g_sun_derived_samples >= 120) {
                     g_first_derived120_t = effect_time_seconds();   // cold timeline
                 }
@@ -42477,6 +42585,177 @@ inline void ensure_reorder_hook() {
 // shared by all scene-read objects. Fully dormant (immediate return) when
 // there is nothing to do.
 
+// KH_LIGHT_RECON (26880) - see the declarations beside KH_SUN_COLD_HOLD_MS.
+// Called once per flush AFTER publish_world_lighting and the block adoption;
+// the render thread is parked, so the rings are read without a lock (the
+// same invariant every other flush-side read of render-thread state relies
+// on).
+inline float kh_rc_median(float* khrm_v, int khrm_n) {
+    for (int khrm_i = 1; khrm_i < khrm_n; ++khrm_i) {   // insertion sort: n <= 64
+        const float khrm_x = khrm_v[khrm_i];
+        int khrm_j = khrm_i - 1;
+        while (khrm_j >= 0 && khrm_v[khrm_j] > khrm_x) { khrm_v[khrm_j + 1] = khrm_v[khrm_j]; --khrm_j; }
+        khrm_v[khrm_j + 1] = khrm_x;
+    }
+    return khrm_v[khrm_n / 2];
+}
+
+inline void kh_lighting_reconcile() {
+    const uint64_t khrc_now = steady_now_ms();
+    const bool khrc_off = g_dbg_mode.load(std::memory_order_relaxed) == 584;
+
+    // Latency close, both lanes, every flush (measurement runs under 584 too).
+    if (g_rc_sun_lat_open_ms != 0 && g_pub_valid && g_rc_sun_ring_n > 0) {
+        const uint32_t khrc_l = (g_rc_sun_ring_n - 1u) % static_cast<uint32_t>(KH_RECON_RING);
+        float khrc_dp = g_rc_sun_ring[khrc_l][0] * g_pub_dir[0] +
+                        g_rc_sun_ring[khrc_l][1] * g_pub_dir[1] +
+                        g_rc_sun_ring[khrc_l][2] * g_pub_dir[2];
+        khrc_dp = khrc_dp > 1.0f ? 1.0f : (khrc_dp < -1.0f ? -1.0f : khrc_dp);
+        if (acosf(khrc_dp) * 57.29578f <= KH_RECON_SUN_DEG) {
+            g_rc_sun_pub_lat_ms = static_cast<uint32_t>(khrc_now - g_rc_sun_lat_open_ms);
+            if (g_rc_sun_pub_lat_ms > g_rc_sun_pub_lat_max_ms) g_rc_sun_pub_lat_max_ms = g_rc_sun_pub_lat_ms;
+            g_rc_sun_lat_by = g_rc_sun_adopted_flag ? 2 : 1;
+            g_rc_sun_adopted_flag = false;
+            g_rc_sun_lat_open_ms = 0;
+            g_rc_sun_settle_open_ms = khrc_now;
+        }
+    }
+    if (g_rc_sun_settle_open_ms != 0 && kh_sun_settled()) {
+        g_rc_sun_settle_lat_ms = static_cast<uint32_t>(khrc_now - g_rc_sun_settle_open_ms);
+        if (g_rc_sun_settle_lat_ms > g_rc_sun_settle_lat_max_ms) g_rc_sun_settle_lat_max_ms = g_rc_sun_settle_lat_ms;
+        g_rc_sun_settle_open_ms = 0;
+    }
+
+    if (khrc_off) return;
+    if (g_rc_last_ms != 0 && khrc_now - g_rc_last_ms < KH_RECON_MS) return;
+    g_rc_last_ms = khrc_now;
+    g_rc_checks++;
+
+    // SUN: consensus of the raw cascade axes in the window.
+    if (g_pub_valid && g_sun_valid && g_sun_dir_derived_valid) {
+        float khrc_x[KH_RECON_RING], khrc_y[KH_RECON_RING], khrc_z[KH_RECON_RING];
+        int khrc_n = 0;
+        const uint32_t khrc_lim = g_rc_sun_ring_n < static_cast<uint32_t>(KH_RECON_RING)
+                                ? g_rc_sun_ring_n : static_cast<uint32_t>(KH_RECON_RING);
+        uint64_t khrc_oldest = khrc_now;
+        for (uint32_t khrc_i = 0; khrc_i < khrc_lim; ++khrc_i) {
+            if (khrc_now - g_rc_sun_ring_ms[khrc_i] > KH_RECON_WIN_MS) continue;
+            if (g_rc_sun_ring_ms[khrc_i] < khrc_oldest) khrc_oldest = g_rc_sun_ring_ms[khrc_i];
+            khrc_x[khrc_n] = g_rc_sun_ring[khrc_i][0];
+            khrc_y[khrc_n] = g_rc_sun_ring[khrc_i][1];
+            khrc_z[khrc_n] = g_rc_sun_ring[khrc_i][2];
+            khrc_n++;
+        }
+        g_rc_sun_span_ms = static_cast<uint32_t>(khrc_now - khrc_oldest);
+        if (khrc_n < KH_RECON_MIN_N) {
+            g_rc_sun_short++;
+        } else {
+            float khrc_m[3] = { kh_rc_median(khrc_x, khrc_n), kh_rc_median(khrc_y, khrc_n), kh_rc_median(khrc_z, khrc_n) };
+            const float khrc_ml = sqrtf(khrc_m[0] * khrc_m[0] + khrc_m[1] * khrc_m[1] + khrc_m[2] * khrc_m[2]);
+            if (khrc_ml > 1.0e-6f) {
+                khrc_m[0] /= khrc_ml; khrc_m[1] /= khrc_ml; khrc_m[2] /= khrc_ml;
+                float khrc_dp = khrc_m[0] * g_pub_dir[0] + khrc_m[1] * g_pub_dir[1] + khrc_m[2] * g_pub_dir[2];
+                khrc_dp = khrc_dp > 1.0f ? 1.0f : (khrc_dp < -1.0f ? -1.0f : khrc_dp);
+                if (acosf(khrc_dp) * 57.29578f <= KH_RECON_SUN_DEG) {
+                    // 26881: the published direction already IS the window's
+                    // consensus, and the window is longer than the settle asks
+                    // for - so a cold hold still running from the gates' own
+                    // adoption (sunSettleLatMs 1266 in the 26880 read) has its
+                    // evidence already and is closed here.
+                    if (g_sun_valid_ms != 0 && khrc_now - g_sun_valid_ms < KH_SUN_COLD_HOLD_MS) {
+                        g_sun_valid_ms = khrc_now - KH_SUN_COLD_HOLD_MS;
+                        g_sun_unstable_ms = 0;
+                        g_rc_sun_settles++;
+                    }
+                } else {
+                    // Publish the consensus; seed the derived latch with it so the
+                    // glide does not pull back; count the move as settled - the
+                    // window already held this direction for the whole of
+                    // KH_RECON_WIN_MS, which is longer than the settle threshold
+                    // asks for.
+                    for (int khrc_c = 0; khrc_c < 3; ++khrc_c) {
+                        g_pub_dir[khrc_c] = khrc_m[khrc_c];
+                        g_sun_dir_derived[khrc_c] = khrc_m[khrc_c];
+                        g_sun_dir_engine[khrc_c] = khrc_m[khrc_c];
+                        g_sun_pub_prev[khrc_c] = khrc_m[khrc_c];
+                        g_cand_dir[khrc_c] = khrc_m[khrc_c];
+                    }
+                    g_cand_hold = 0;
+                    g_sun_snap_hold = 0;
+                    g_pub_boot = false;
+                    g_sun_jump_pending = true;          // one map rebuild per real move, as a jump
+                    g_sun_last_jump_ms = khrc_now;
+                    g_sun_unstable_ms = 0;
+                    if (g_sun_valid_ms == 0 || khrc_now - g_sun_valid_ms < KH_SUN_COLD_HOLD_MS) {
+                        g_sun_valid_ms = khrc_now - KH_SUN_COLD_HOLD_MS;
+                    }
+                    g_rc_sun_adopts++;
+                    g_rc_sun_adopted_flag = true;
+                }
+            }
+        }
+    }
+
+    // BLOCK: consensus of the coherent candidates in the window.
+    if (g_pub_block_valid) {
+        float khrc_l[6][KH_RECON_BLK_RING];
+        int khrc_n = 0;
+        const uint32_t khrc_lim = g_rc_blk_ring_n < static_cast<uint32_t>(KH_RECON_BLK_RING)
+                                ? g_rc_blk_ring_n : static_cast<uint32_t>(KH_RECON_BLK_RING);
+        uint64_t khrc_oldest = khrc_now;
+        for (uint32_t khrc_i = 0; khrc_i < khrc_lim; ++khrc_i) {
+            if (khrc_now - g_rc_blk_ring_ms[khrc_i] > KH_RECON_WIN_MS) continue;
+            if (g_rc_blk_ring_ms[khrc_i] < khrc_oldest) khrc_oldest = g_rc_blk_ring_ms[khrc_i];
+            for (int khrc_c = 0; khrc_c < 6; ++khrc_c) khrc_l[khrc_c][khrc_n] = g_rc_blk_ring[khrc_i][khrc_c];
+            khrc_n++;
+        }
+        g_rc_blk_span_ms = static_cast<uint32_t>(khrc_now - khrc_oldest);
+        if (khrc_n < KH_RECON_MIN_N) {
+            g_rc_blk_short++;
+        } else {
+            float khrc_m[6];
+            for (int khrc_c = 0; khrc_c < 6; ++khrc_c) khrc_m[khrc_c] = kh_rc_median(khrc_l[khrc_c], khrc_n);
+            const float khrc_al = khrc_m[0] + khrc_m[1] + khrc_m[2];
+            const float khrc_sl = khrc_m[3] + khrc_m[4] + khrc_m[5];
+            const float khrc_ral = g_pub_block_amb[0] + g_pub_block_amb[1] + g_pub_block_amb[2];
+            const float khrc_rsl = g_pub_block_sun[0] + g_pub_block_sun[1] + g_pub_block_sun[2];
+            // The same band the gates adopt within without a hold: only what
+            // THEY would have held is reconciled.
+            if (!kh_blk_in_band(khrc_al, khrc_ral) || !kh_blk_in_band(khrc_sl, khrc_rsl)) {
+                for (int khrc_c = 0; khrc_c < 3; ++khrc_c) {
+                    g_pub_block_amb[khrc_c] = khrc_m[khrc_c];
+                    g_pub_block_sun[khrc_c] = khrc_m[3 + khrc_c];
+                    // 26881: the PROBE's standing, anchor and mirror follow, so its
+                    // holds stop refusing the level the engine is now sending; and
+                    // the injection snapshot, which the flush adopts outright on
+                    // its next pass, follows too - otherwise it would publish the
+                    // old level back one flush later.
+                    g_light_probe.nb[8 + khrc_c] = khrc_m[khrc_c];
+                    g_light_probe.nb[16 + khrc_c] = khrc_m[3 + khrc_c];
+                    g_inj_blk_amb[khrc_c] = khrc_m[khrc_c];
+                    g_inj_blk_sun[khrc_c] = khrc_m[3 + khrc_c];
+                }
+                g_light_probe.std_amb_l = khrc_al;
+                g_light_probe.std_sun_l = khrc_sl;
+                g_light_probe.anch_amb_l = khrc_al;
+                g_light_probe.anch_sun_l = khrc_sl;
+                g_light_probe.pend_t = -1.0f;
+                g_light_probe.pend_amb_l = -1.0f;
+                g_light_probe.pend_sun_l = -1.0f;
+                g_inj_blk_ms = khrc_now;
+                g_blk_pend_ms = 0;
+                g_rc_blk_adopts++;
+                if (g_rc_blk_lat_open_ms != 0) {
+                    g_rc_blk_lat_ms = static_cast<uint32_t>(khrc_now - g_rc_blk_lat_open_ms);
+                    if (g_rc_blk_lat_ms > g_rc_blk_lat_max_ms) g_rc_blk_lat_max_ms = g_rc_blk_lat_ms;
+                    g_rc_blk_lat_by = 2;
+                    g_rc_blk_lat_open_ms = 0;
+                }
+            }
+        }
+    }
+}
+
 // Runs the actual per-frame work. The graphics lock is ALREADY HELD by the
 // caller (flush_frame). Returns after counting the skip reason if the bound
 // targets are not the main scene's.
@@ -42545,6 +42824,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             const float khb_sl = khb_sun[0] + khb_sun[1] + khb_sun[2];
             const float khb_ref_al = g_pub_block_amb[0] + g_pub_block_amb[1] + g_pub_block_amb[2];
             const float khb_ref_sl = g_pub_block_sun[0] + g_pub_block_sun[1] + g_pub_block_sun[2];
+            // (26881: the KH_LIGHT_RECON ring is fed at the probe now, not here - the
+            // candidate at this point is the probe's mirror, which its holds can freeze.)
             const bool khb_coh_off = g_dbg_mode.load(std::memory_order_relaxed) == 54;
             const bool khb_coh = khb_coh_off || khb_snap ||   // snapshot outranks the flapping standing
                 g_light_probe.std_sun_l < 0.0f ||
@@ -42649,9 +42930,16 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
                 g_pub_block_valid = true;
                 g_blk_pend_ms = 0;
+                if (g_rc_blk_lat_open_ms != 0) {   // KH_LIGHT_RECON latency: the gates adopted
+                    g_rc_blk_lat_ms = static_cast<uint32_t>(steady_now_ms() - g_rc_blk_lat_open_ms);
+                    if (g_rc_blk_lat_ms > g_rc_blk_lat_max_ms) g_rc_blk_lat_max_ms = g_rc_blk_lat_ms;
+                    g_rc_blk_lat_by = 1;
+                    g_rc_blk_lat_open_ms = 0;
+                }
             }
         }
     }
+    kh_lighting_reconcile();   // KH_LIGHT_RECON (26880): after the gates, once a second
 
     // Flush stamps: the serial keys the miss latch (once per flush); the
     // opaque count feeds the post-flush redraw census at the next clear.
@@ -46439,6 +46727,9 @@ inline void reset_stat_counters() {
     g_mod_tex_hits = 0;
     g_blk_jump_adopts = 0;
     g_blk_collapse_holds = 0;   // counter joins its siblings here
+    g_rc_checks = 0; g_rc_sun_adopts = 0; g_rc_blk_adopts = 0; g_rc_sun_settles = 0;   // KH_LIGHT_RECON
+    g_rc_sun_short = 0; g_rc_blk_short = 0;
+    g_rc_sun_pub_lat_max_ms = 0; g_rc_sun_settle_lat_max_ms = 0; g_rc_blk_lat_max_ms = 0;
     g_blk_blank_skips = 0;   // blank-guard census
     g_blk_starved_adopts = 0;   // starvation-path census
     g_ui_mask_clears = 0;   // UI-mask census (at KhUiMask)
@@ -47311,6 +47602,9 @@ inline void reset_session_state() {
     g_sun_dir_derived_valid = false;
     g_sun_dir_derived[0] = 0.0f; g_sun_dir_derived[1] = 1.0f; g_sun_dir_derived[2] = 0.0f;
     g_sun_derived_samples = 0;
+    g_rc_sun_ring_n = 0; g_rc_blk_ring_n = 0; g_rc_last_ms = 0;   // KH_LIGHT_RECON
+    g_rc_sun_lat_open_ms = 0; g_rc_sun_settle_open_ms = 0; g_rc_blk_lat_open_ms = 0;
+    g_rc_sun_adopted_flag = false;
     g_sun_jump_pending = false;
     g_skysun_ref_valid = false;
     g_skysun_ref[0] = g_skysun_ref[1] = g_skysun_ref[2] = 0.0f;

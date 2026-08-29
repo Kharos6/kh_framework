@@ -202,6 +202,27 @@ cbuffer CBObj : register(b0)
     // This matrix lets the pass solve the reprojection instead. Zero = stand
     // down (sunCastBias2.z is the arm).
     row_major float4x4 castViewN;
+    // KH_DL_SHADOW (26822). Appended at the tail; C++ twins dls_meta /
+    // dls_ctl / dls_face_slice / dls_spot_vp, same relative slots.
+    // The cube faces carry NO matrix: their basis is a fixed axis permutation
+    // and KhDlsShadow reconstructs face, uv and depth from the light-relative
+    // position directly.
+    float4 dlsMeta[8];     // xyz = light world position, w = far plane (0 = no map)
+    float4 dlsCtl[8];      // x = spot flag, y = bias const (m), z = spot slice, w = bias slope
+    // KH_DLS_FACE_FLAT (26826): slot * 6 + face. x = slice (-1 = none),
+    // y = normal-offset arm (replicated per light). C++ twin dls_face_slice.
+    float4 dlsFaceSlice[48];
+    row_major float4x4 dlsSpotVP[8];
+    // KH_DLS_RANGE (26879). Appended at the tail: every existing offset in
+    // both blocks stays byte-identical and one float4 keeps KH_CBFRAME_BYTES
+    // % 16 == 0. THE DYNAMIC-LIGHT SHADOWS OBEY THE SHADOW VIEW DISTANCE
+    // like the sun's do. xyz = the pass camera (engine axes), w =
+    // clamp(shadowVisibility, 8, 1000); 0 = no fade, which is the zeroed
+    // default, so any fill site that never writes this lane behaves exactly
+    // as it did (the 264 precedent). mirMeta.w could not carry it: the
+    // world-receive pass fills mirMeta.xyz with its own mask and has no
+    // sunOrigin. C++ twin dls_range, written by kh_dls_fill_cb.
+    float4 dlsRange;
 };
 )HLSL" R"HLSL(
 // THE CHUNK BOUNDARY IS HERE BECAUSE MSVC CAPS ONE STRING LITERAL TOKEN AT
@@ -553,6 +574,34 @@ float KhMirUnit(float2 khmu_px, float khmu_w, float khmu_h)
                        clamp(khmu_px.y, 0.0f, khmu_h - 1.0f));
     return (khMirSten.Load(int3(khmu_p, 0)).g != 0u) ? 0.0f : 1.0f;
 }
+// KH_DLS_WORLD_SELFDEPTH / _INFRONT / _VOLZ WERE REMOVED HERE (26849).
+//
+// Three helpers lived here between 26841 and 26845 - KhMirCovered, KhMirInFront
+// and KhMirZPair - all trying to answer "is one of our meshes in front of the
+// world surface at this pixel" by reading the mirror target that the vmir
+// prepass fills. None of them worked, and the reason was never the arithmetic:
+//
+//   26841  read the STENCIL plane, which the prepass clears to 0 and never
+//          writes. Inert on every pixel.
+//   26842  read the DEPTH plane and inverted it with projection[2][2]/[3][2].
+//          Wrong terms: the engine renders in depth PARTITIONS and the
+//          projection at the resolve is not the one the mask was drawn under.
+//   26844  carried the prepass's own matrix and compared in its depth space,
+//          which is partition-proof - but compared raw device depths with a
+//          fixed epsilon far larger than the values it had to separate.
+//   26845  compared in metres, and mode 540 showed the world side reading
+//          zero.
+//
+// The wall behind all four is VSMirror: it does not write the clip depth of the
+// matrix it is handed, it OVERWRITES z with its own near plane
+// (l22 = f/(f-0.05); z = l22*w - 0.05*l22, f from the engine's b2 block), and
+// does so CONDITIONALLY on four tests against engBlk. That plane is another
+// feature's private, frame-varying convention. It is not something a second
+// consumer can read safely, and the four builds spent proving that are the
+// reason KH_DLSW_MASK renders its own.
+//
+// KhMirUnit above is untouched - it has its own consumers and its own meaning.
+//
 // Receiver-distance fade at the shadow view distance, the engine-standard
 // semantics: the FRAGMENT's own distance from the camera (sunOrigin IS the
 // pass camera whenever mirMeta.w is armed - the fill guarantees the pairing)
@@ -1771,6 +1820,676 @@ float SolidMask(float3 wpos)
     return m;
 }
 
+// ===========================================================================
+// KH_DL_SHADOW (26822) - THE DYNAMIC-LIGHT SHADOW TERM.
+//
+// THE CUBE NEEDS NO MATRIX. KH_DLS_BASIS is an axis permutation with signs, so
+// for a light-relative point the face is the dominant axis, the depth is that
+// component, and the other two are the uv - all recoverable directly. Storing
+// 48 matrices would restate the permutation in 3 KB and add a way for the CPU
+// and the shader to disagree about it. Only the spot frustum is arbitrary, and
+// only the spot frustum is stored.
+//
+// THE BIAS IS APPLIED IN METRES, NOT IN DEPTH. These maps are perspective, so
+// a constant normalised bias is a different physical distance at every range -
+// tight at the near plane, useless at the far. Offsetting the RECEIVER's
+// distance before projecting keeps the bias a fixed number of centimetres
+// wherever the receiver stands, which is the KH_SLOPE_TW idiom applied to a
+// perspective map.
+//
+// A LIGHT WITH NO MAP ANSWERS LIT (1.0), and so does a face with no slice.
+// Faces are allocated only where a caster stands, so 'no slice' is the common
+// case and it means nothing occludes in that direction - a correct answer, not
+// a missing one. Every failure path in here returns 1.0 for the same reason:
+// the worst a bug can then do is fail to darken, never to darken wrongly.
+// ===========================================================================
+)HLSL" R"HLSL(
+// CHUNK BOUNDARY - MSVC caps one string literal token at 16380 bytes
+// (C2026). KH_DL_SHADOW took this chunk to 16342, leaving 38 bytes, and
+// the rule is SPLIT, never trim, when a segment approaches the cap. Cut at
+// a top-level statement boundary ahead of the light-shadow family so the
+// whole kernel - filter, reconstruction and both call sites - has its own
+// chunk with room to grow.
+// How much of a light's per-light AMBIENT survives full shadow. 1 = the 26822
+// behaviour (ambient never shadowed, so a pure-ambient light cannot cast);
+// 0 = the shadowed side goes fully black, darker than the light being absent.
+// Tune HERE, not per light: it is a look constant, not a per-light property,
+// and there is deliberately no debug mode for it - 514 already stands the
+// whole feature down and 519 the receive half, which is what an A/B needs.
+static const float KH_DLS_AMB_KEEP = 0.35f;
+// KH_DLS_BIAS_SLOPE_TEXEL (26876m). The slope term is priced in TEXELS, not
+// metres, so it scales with range exactly as the depth error it covers does.
+// 1.5 texels is the filter's own reach: one texel for the one the receiver sits
+// in, half for the bilinear footprint the soft filter reaches into - the same
+// 1.5 the receiver-normal offset above already uses, and deliberately the same
+// number rather than a second one to drift.
+static const float KH_DLS_SLOPE_TEXELS = 1.5f;
+// ~76 degrees. A clamp and not a floor: past this a receiver spans effectively
+// unbounded depth within one texel and NO finite bias is correct, so the right
+// answer is to let that sliver acne rather than lift the whole shadow off its
+// caster to prevent it.
+static const float KH_DLS_SLOPE_TAN_MAX = 4.0f;
+// KH_DLS_RPDB (26877). The gradient's clamp, in TEXEL-WIDTHS of depth per texel
+// of lateral step. It is the KH_RPDB_GC idiom (the sun's tiers clamp their own
+// gradient at 8 texels, metre-capped) and it is the only number in the new
+// path that is not derived - so it is a CLAMP on a computed quantity rather
+// than a bar standing in for one (rule 1.84). At 8, a receiver may be predicted
+// to fall away by eight texel-widths of depth across one texel, which is
+// tan(theta) = 8 or about 83 degrees; past that the sliver acnes.
+static const float KH_DLS_GRAD_TEXELS = 8.0f;
+// KH_DLS_NEAR_CAP (26878) - THE HLSL TWIN OF kh_dls_near, WHICH HAD DRIFTED.
+//
+// The C++ has clamped the near plane at KH_DLS_NEAR_CAP_M since 26876b
+// (far / KH_DLS_NEAR_RATIO, floored at KH_DLS_NEAR_M, capped at 25 cm) and
+// builds every face and spot matrix to that near. This file kept the uncapped
+// 26822 form - max(far / 300, 0.05) - at both of its readers, so for any light
+// whose map far exceeded 75 m the receiver's (a, c) were built to a DIFFERENT
+// near than the map was rasterised with. At far = 100 m a receiver at 30 m was
+// tested as if it stood at 24 m; at far = 200 m, at 12 m. Every reach up to
+// 75 m was bit-identical, which is why it hid. The 26877 bias derivation above
+// priced the depth format at n = 0.25, the C++ value the shader was not using.
+//
+// One reader for the rule, twin of kh_dls_near row for row; the three
+// constants are the C++ ones and change with them.
+static const float KH_DLS_NEAR_M     = 0.05f;
+static const float KH_DLS_NEAR_RATIO = 300.0f;
+static const float KH_DLS_NEAR_CAP_M = 0.25f;
+float KhDlsNear(float khn_far)
+{
+    return min(max(khn_far / KH_DLS_NEAR_RATIO, KH_DLS_NEAR_M), KH_DLS_NEAR_CAP_M);
+}
+// KH_DLS_RANGE (26879) - RECEIVER-DISTANCE FADE AT THE SHADOW VIEW DISTANCE,
+// the sun's own rule (KhSunRangeFade) on the light maps. The maps were never
+// bounded by the camera: kh_dls_select scores by camera distance but culls by
+// nothing, and the reach ceiling bounds the LIGHT's far plane, not the
+// receiver's distance from the eye - so a lamp's shadow on the ground drew at
+// any range while the sun's stopped at shadowVisibility. Same curve as the
+// sun's default (full until 94%, gone at 99.5%), applied ONCE inside
+// KhDlsShadow so every consumer - DynLights, KhDynLightsPBR, KhDlsWorldFactor,
+// the mesh probe, both mesh passes and the world receive - fades identically
+// (rule 1.5). Returns the SURVIVING fraction; 0 past the distance, 1 with the
+// lane unfilled. Mode 581 zeroes the lane at the fill (the A/B).
+float KhDlsRangeFade(float3 khrf_p)
+{
+    if (dlsRange.w <= 0.0f) return 1.0f;
+    const float khrf_d = length(khrf_p - dlsRange.xyz);
+    return 1.0f - smoothstep(0.94f * dlsRange.w, 0.995f * dlsRange.w, khrf_d);
+}
+// THE BIAS CONSTANTS WERE RE-DERIVED AT 26877, and the previous note asked for
+// exactly that. It said KH_DLS_BIAS_SLOPE (0.006/m) was compensating for the
+// missing slope term rather than for quantisation, and that it should be
+// re-derived from the map's actual depth resolution. Here is that derivation,
+// so the next reader can check it rather than trust it:
+//
+//   the maps are D32_FLOAT (kh_dls_ensure_maps), stored as a + c/z with
+//   a = f/(f-n) and c = -nf/(f-n), so d(stored)/dz = nf/((f-n) z^2) and one
+//   float ulp near stored ~ 1 is 2^-24. The metre-equivalent of one quantum is
+//   therefore  dz = 2^-24 (f-n) z^2 / (n f).
+//
+//   at f = 100, n = 0.25 (the KH_DLS_NEAR_CAP value): 0.21 mm at 30 m and
+//   2.4 mm at 100 m. The session worst case is f = 200, n = 0.25, z = 200:
+//   9.5 mm.
+//
+// 0.006/m priced 180 mm at 30 m against a requirement of 0.21 mm - a factor of
+// 850. The requirement is QUADRATIC in z and the term is linear, so the honest
+// linear cover is set by the far end: 1e-4/m gives 20 mm at 200 m against
+// 9.5 mm needed, and 3 mm at 30 m against 0.21 mm. Two-times margin where it is
+// tight, fourteen where it is not.
+//
+// The constant term is not about the depth format at all - it covers the
+// CASTER side, whose own surface tilts within a map texel and which no receiver
+// plane can model. One centimetre, which is a quarter of what it was and still
+// an order of magnitude above the format.
+//
+// BOTH ARE REVERTED TOGETHER BY MODE 573, and mode 574 arms the gradient while
+// KEEPING the old constants - so the build can say which of the two changes did
+// the work rather than shipping them as one indivisible move.
+
+Texture2DArray<float> khDlsMaps : register(t36);
+
+// PARITY WITH THE SUN FILTER (26823). The 26822 kernel took four POINT taps
+// and averaged the verdicts, which is a 2x2 box over one texel - the blockiness
+// reported from the field. These are KhSunBilinT / KhSunSoftT with the texture
+// swapped for an array slice and NOTHING ELSE CHANGED: same bilinear weights,
+// same 0.75-texel cross offset, same 5-tap average, same rule that a depth map
+// is compared BEFORE it is filtered (the average of two depths is not the depth
+// of the average). The sun and the lights therefore soften identically, which
+// is the whole point of reusing the form rather than writing a second one.
+// KH_DLS_MESHMODE (26876d, moved above KhDlsShadow at 26876m). The debug mode
+// as the MESH path sees it. dbgCtl.w does not carry it there - every mesh fill
+// writes an enumeration into that lane - so the mode rides dlsFaceSlice[].z,
+// which kh_dls_fill_cb writes across all 48 entries and nothing else writes at
+// all. Slot 0 is read because the value is replicated; it is not a statement
+// about slot 0 being live. Declared HERE rather than beside its other readers
+// because KhDlsShadow now reads it too and fxc has no linker pass.
+int KhDlsMeshDbg() { return (int)dlsFaceSlice[0].z; }
+
+// KH_DLS_RPDB (26877) - THE COMPARE IS BUILT PER TAP NOW, NOT ONCE.
+//
+// This took a single already-projected reference z and compared all four texels
+// against it. That is only correct for a receiver PARALLEL to the map plane;
+// on a tilted one the receiver's true depth differs at every texel of the
+// footprint, and the constant bias had to be large enough to cover the whole
+// spread. That is what the N.L divide (26822) and then the texel*tan term
+// (26876m) were each standing in for, and it is why neither could stop
+// peter-panning without over-biasing everything else.
+//
+// The sun does not do this: KhSelfTapT corrects the reference PER TAP by
+// d.x*g.x + d.y*g.y - the depth the receiver's own plane would have at that
+// texel - so its constant bias never has to cover the surface's tilt. This is
+// that arithmetic, on an array slice, in metres.
+//
+//   khb_zb  the receiver's BIASED face-axis depth in METRES (khd_z - khd_b)
+//   khb_tc  the RECEIVER's own uv in TEXELS. NEVER the filter's offset tap -
+//           the gradient origin has to stay put while the footprint moves, or
+//           the correction cancels the offset it is meant to accompany.
+//   khb_g   metres of face-axis depth per texel along +u / +v
+//   a/c/near  the face projection, applied per tap instead of once
+float KhDlsBilin(float khb_sz, float2 uv, float khb_slice,
+                 float khb_zb, float2 khb_tc, float2 khb_g,
+                 float khb_a, float khb_c, float khb_near)
+{
+    float2 tx = uv * khb_sz - 0.5f;
+    float2 f = frac(tx);
+    // KH_DLS_FLOOR (26876). floor, NOT truncate. int2() rounds toward zero
+    // while frac() is x - floor(x), so the two disagree wherever tx < 0 - and
+    // tx DOES go negative here: KhDlsFaceUV admits uv > 0.001, which at 1024 px
+    // is tx > 0.524, and KhDlsSoft then offsets the tap by -0.75 texel, reaching
+    // tx = -0.226. Across that sliver p0 read 0 while f read 0.77, so the lerp
+    // weighted texel 1 where it should have weighted texel 0 - the outermost
+    // texel of every cube face sampling its neighbour instead of itself.
+    //
+    // KhSunBilinT carries the identical line and is NOT touched: the sun path
+    // is out of scope by the operator's own scoping and works as intended. Its
+    // uv guard differs, so the sliver may not even be reachable there. Flagged,
+    // not fixed - see the handoff.
+    int2 p0 = int2(floor(tx));
+    int khb_s = (int)khb_slice;
+    int khb_mx = (int)khb_sz - 1;
+    // Tap order 0..3 = (0,0) (1,0) (0,1) (1,1), which is the o00/o10/o01/o11
+    // the lerp pair below has always consumed - the loop is a rewrite of four
+    // hand-written taps, not a reordering of them.
+    float4 khb_o;
+    [unroll] for (int khb_k = 0; khb_k < 4; ++khb_k) {
+        int2 khb_q = clamp(p0 + int2(khb_k & 1, khb_k >> 1),
+                           int2(0, 0), int2(khb_mx, khb_mx));
+        // Texel CENTRES sit at integer + 0.5 in this convention, and khb_tc is
+        // in the same one, so the difference is a signed count of texels.
+        float2 khb_d = (float2(khb_q) + 0.5f) - khb_tc;
+        float khb_zq = khb_zb + khb_d.x * khb_g.x + khb_d.y * khb_g.y;
+        float khb_ref = khb_a + khb_c / max(khb_zq, khb_near);
+        khb_o[khb_k] = (khb_ref > khDlsMaps.Load(int4(khb_q, khb_s, 0))) ? 1.0f : 0.0f;
+    }
+    return lerp(lerp(khb_o.x, khb_o.y, f.x), lerp(khb_o.z, khb_o.w, f.x), f.y);
+}
+)HLSL" R"HLSL(
+// CHUNK BOUNDARY (26877). SPLIT, never trim: the per-tap rewrite of KhDlsBilin
+// and the parameter list KhDlsSoft now threads took this segment to 14752, and
+// the receiver-plane note above KhDlsBilin is the record of why two builds each
+// replaced one stand-in with another. Cut at a top-level statement boundary
+// between the bilinear tap and the filter that calls it.
+// KH_DLS_PCF (26872). The 5-tap cross and two alternatives, selectable live.
+//
+// THE DEFAULT IS UNCHANGED AT MODE 0. 548 and 549 exist because the 545 capture
+// showed the ground rings are FINER than the projected texel trapezoids, and
+// nothing in the map lookup can have a sub-texel period - inside a texel the
+// stored depth is constant. This filter can: KhDlsBilin compares BINARY per
+// texel and then bilerps the four verdicts, so each tap is a ramp pinned to 0/1
+// at the corners, and five of those are summed at +/-0.75 TEXEL. An 0.75 offset
+// against a 1.0 grid beats with a period of exactly 3 texels - sub-texel
+// structure, sweeping through phase as the projected texel size varies across a
+// grazing surface, which draws concentric rings. Up close the trapezoids are
+// huge, the ramps stretch over many pixels, and the binary corners read as flat
+// bands with a soft fade instead of an edge. One mechanism, both symptoms.
+//
+//   548 SINGLE TAP - the diagnosis. No 5-tap sum, so no beat. If the rings
+//       change character or vanish (leaving hard aliased edges), the filter is
+//       the source. If they survive unchanged, it is not and this whole note
+//       is wrong.
+//   549 3x3 AT ONE TEXEL - the candidate cure. Nine taps on the grid's own
+//       period cannot beat with it, and nine verdicts give a genuinely graded
+//       penumbra instead of five ramps between binary corners.
+// HAZARD (recorded 26876, NOT fixed): dbgCtl.w DOES NOT CARRY THE DEBUG MODE ON
+// THE MESH PATH. kh_dls_world_pass writes dbg_ctl[3] = the raw setRenderDebug
+// mode, but every MESH fill site writes an ENUMERATION there instead (0..~13,
+// the mode-58/180/191/194 ladder). So 548, 549 and KhDlsShadow's 552 are
+// world-receive-only: on a mesh they can never compare true and the default
+// five-tap always runs.
+//
+// That is harmless for the ground rings, which are a world-pass artifact, and
+// it is why "548 leaves the rings unchanged" was still a valid reading. It is
+// NOT harmless as a habit - it is process failure 7 of the last campaign in a
+// quieter form, a mode that reaches half the consumers of a shared helper while
+// reading as though it reached both. Anything routed through dbgCtl.w in this
+// file must be checked against BOTH fill sites before its result is trusted.
+// The fix is a lane of our own, as KH_DLS_FACE_FLAT already did for mode 520's
+// arm; it is not taken here because these three modes are cures and reverts for
+// refuted hypotheses and are scheduled for deletion, and widening a mode's
+// reach on the way to deleting it is work in the wrong direction.
+// KH_DLS_RPDB (26877): khs_zb / khs_g / a / c / near replace the single
+// pre-projected z. khs_tc is computed ONCE here, from the unoffset receiver uv,
+// and handed to every tap - the five-tap cross and the 3x3 both move the
+// FOOTPRINT and must not move the gradient's origin with it.
+float KhDlsSoft(float khs_sz, float2 uv, float khs_slice,
+                float khs_zb, float2 khs_g,
+                float khs_a, float khs_c, float khs_near)
+{
+    const int khs_m = (int)dbgCtl.w;
+    const float2 khs_tc = uv * khs_sz;
+
+    if (khs_m == 548) return KhDlsBilin(khs_sz, uv, khs_slice, khs_zb, khs_tc,
+                                        khs_g, khs_a, khs_c, khs_near);
+
+    if (khs_m == 549) {
+        const float khs_t = 1.0f / max(khs_sz, 1.0f);
+        float khs_acc = 0.0f;
+        [unroll] for (int khs_y = -1; khs_y <= 1; ++khs_y) {
+            [unroll] for (int khs_x = -1; khs_x <= 1; ++khs_x) {
+                khs_acc += KhDlsBilin(khs_sz, uv + float2(khs_x, khs_y) * khs_t,
+                                      khs_slice, khs_zb, khs_tc, khs_g,
+                                      khs_a, khs_c, khs_near);
+            }
+        }
+        return khs_acc * (1.0f / 9.0f);
+    }
+
+    float khs_o = 0.75f / max(khs_sz, 1.0f);
+    return (KhDlsBilin(khs_sz, uv, khs_slice, khs_zb, khs_tc, khs_g, khs_a, khs_c, khs_near)
+          + KhDlsBilin(khs_sz, uv + float2( khs_o, 0.0f), khs_slice, khs_zb, khs_tc, khs_g, khs_a, khs_c, khs_near)
+          + KhDlsBilin(khs_sz, uv + float2(-khs_o, 0.0f), khs_slice, khs_zb, khs_tc, khs_g, khs_a, khs_c, khs_near)
+          + KhDlsBilin(khs_sz, uv + float2(0.0f,  khs_o), khs_slice, khs_zb, khs_tc, khs_g, khs_a, khs_c, khs_near)
+          + KhDlsBilin(khs_sz, uv + float2(0.0f, -khs_o), khs_slice, khs_zb, khs_tc, khs_g, khs_a, khs_c, khs_near)) * 0.2f;
+}
+
+// khd_nrm is the receiver's WORLD normal. 26822 took none, and that is the
+// strobe: the mesh shadowing ITSELF is the common case for a lamp beside a
+// prop, and a self-compare with only a constant bias ACNES - the receiver's own
+// depth crosses the map's by more than the bias wherever the surface slants
+// away, and every acne band crawls as anything moves. On screen that reads as
+// strobing, not as acne.
+//
+// The sun's self kernel has three defences here (KH_SUN_HERO_BASE's receiver-
+// normal offset, the hero-priced slope term, and the metre-clamped receiver-
+// plane gradient) and the cast chain's own note says it has NONE of them. This
+// kernel had none either. It now takes the first two, which are the ones that
+// matter for a self-compare:
+//
+//   NORMAL OFFSET - move the receiver off its own surface by the world size of
+//   a map texel at that range, so the sample lands on the surface rather than
+//   inside it. Priced in texels, not metres, so it scales with range exactly
+//   as the error it cancels does (the KH_SLOPE_TW idiom).
+//
+//   SLOPE-SCALED BIAS - a surface at a grazing angle to the light spans more
+//   depth per texel, so the bias divides by N.L. Clamped, or a silhouette
+//   grazing to zero would demand infinite bias and peter-pan the whole shadow.
+//
+// Mode 520 disarms both, which is the A/B: if the strobe returns under 520 and
+// not at default, it was acne.
+)HLSL" R"HLSL(
+// KH_DLS_FACEUV (26871). The face, slice and uv selection, lifted verbatim out
+// of KhDlsShadow so the banding instrument asks the SAME question the shadow
+// lookup asks instead of keeping a second copy to drift (rule 1.5). Returns
+// false where the lookup would have returned "lit" without sampling. Given its
+// own segment because KhDlsShadow's had 968 bytes left - SPLIT, never trim.
+// KH_DLS_RPDB (26877) ADDS THREE OUTPUTS, AND THEY ARE NOT DECORATION.
+//
+// The receiver-plane gradient needs the axes the uv is measured along, and this
+// is the only function that knows them - the cube branch below picks a face and
+// its (right, up) pair by inspecting the dominant component, and the spot
+// branch's pair lives inside dlsSpotVP's columns. Deriving them a second time
+// somewhere else is a copy that can drift from the face selection it has to
+// agree with (rule 1.5), so they come out of the selection itself.
+//
+//   khf_r / khf_u  the projection's right / up axes, LIGHT-RELATIVE (which is
+//                  world-parallel: dlsMeta.xyz is a translation, no rotation)
+//   khf_sx         the projection's lateral scale. 1 for a cube face, which is
+//                  exactly 90 degrees; 1/tan(fov/2) for a spot. One texel spans
+//                  2*z/(size*sx) metres laterally, so this is the lane that
+//                  stops a narrow spot being priced as a 90 degree face.
+// KH_DLS_FACE_SEAM (26878) - khf_sel. The handoff recorded a lit seam along
+// every cube face boundary a shadow crossed, with two independent
+// contributors. The first is a bias-ORDERING fault: the receiver-normal offset
+// displaced the position BEFORE the face was chosen, so a receiver within 1.5
+// texels of an edge could flip to the neighbouring face and land at uv ~0.0005
+// there. khf_sel is the UNOFFSET light-relative position and is now the only
+// input to the face choice; khf_p (offset) is what gets projected. The spot
+// branch has one frustum and never selected, so it ignores khf_sel. Callers
+// with no offset pass the same vector twice.
+bool KhDlsFaceUV(int khf_slot, float3 khf_p, float3 khf_sel, float khf_near, float khf_far,
+                 out float2 khf_uv, out float khf_z, out float khf_slice,
+                 out float3 khf_r, out float3 khf_u, out float khf_sx)
+{
+    khf_uv = float2(0.0f, 0.0f);
+    khf_z = 0.0f;
+    khf_slice = -1.0f;
+    khf_r = float3(1.0f, 0.0f, 0.0f);
+    khf_u = float3(0.0f, 1.0f, 0.0f);
+    khf_sx = 1.0f;
+
+    if (dlsCtl[khf_slot].x >= 0.5f) {
+        float4 khf_cl = mul(float4(khf_p, 1.0f), dlsSpotVP[khf_slot]);
+        if (khf_cl.w <= 1.0e-6f) return false;          // behind the spot
+        khf_uv = float2(0.5f + 0.5f * khf_cl.x / khf_cl.w,
+                        0.5f - 0.5f * khf_cl.y / khf_cl.w);
+        khf_z = khf_cl.w;
+        khf_slice = dlsCtl[khf_slot].z;
+        // Row-vector convention: clip.x = dot(p, column x), and kh_dls_spot_vp
+        // builds column x as right * s. So the column's DIRECTION is the right
+        // axis and its LENGTH is the lateral scale - one read gives both.
+        const float3 khf_cx = float3(dlsSpotVP[khf_slot][0].x,
+                                     dlsSpotVP[khf_slot][1].x,
+                                     dlsSpotVP[khf_slot][2].x);
+        const float3 khf_cy = float3(dlsSpotVP[khf_slot][0].y,
+                                     dlsSpotVP[khf_slot][1].y,
+                                     dlsSpotVP[khf_slot][2].y);
+        khf_sx = max(length(khf_cx), 1.0e-6f);
+        khf_r = khf_cx / khf_sx;
+        khf_u = khf_cy / max(length(khf_cy), 1.0e-6f);
+    } else {
+        // Dominant axis = the cube face. st is that face's (right, up) pair,
+        // read straight off KH_DLS_BASIS - the C++ table's twin.
+        // The face is chosen from khf_sel; z, st and the axes are read off
+        // khf_p on THAT face (KH_DLS_FACE_SEAM). khf_z is the signed depth
+        // along the chosen face's forward axis, which was abs(khf_p.*) while
+        // the same vector chose the face and is identical whenever it still
+        // does.
+        const float3 khf_ap = abs(khf_sel);
+        float2 khf_st;
+        int khf_face;
+        // khf_r / khf_u are the SAME permutation khf_st applies, written as
+        // vectors: st.x = dot(p, khf_r) and st.y = dot(p, khf_u) hold on every
+        // branch, and they reproduce KH_DLS_BASIS row for row (the C++ twin).
+        if (khf_ap.x >= khf_ap.y && khf_ap.x >= khf_ap.z) {
+            const bool khf_pos = khf_sel.x > 0.0f;
+            khf_z = khf_pos ? khf_p.x : -khf_p.x;
+            khf_face = khf_pos ? 0 : 1;
+            khf_st = khf_pos ? float2(-khf_p.z, khf_p.y)
+                             : float2( khf_p.z, khf_p.y);
+            khf_r = float3(0.0f, 0.0f, khf_pos ? -1.0f : 1.0f);
+            khf_u = float3(0.0f, 1.0f, 0.0f);
+        } else if (khf_ap.y >= khf_ap.z) {
+            const bool khf_pos = khf_sel.y > 0.0f;
+            khf_z = khf_pos ? khf_p.y : -khf_p.y;
+            khf_face = khf_pos ? 2 : 3;
+            khf_st = khf_pos ? float2(khf_p.x, -khf_p.z)
+                             : float2(khf_p.x,  khf_p.z);
+            khf_r = float3(1.0f, 0.0f, 0.0f);
+            khf_u = float3(0.0f, 0.0f, khf_pos ? -1.0f : 1.0f);
+        } else {
+            const bool khf_pos = khf_sel.z > 0.0f;
+            khf_z = khf_pos ? khf_p.z : -khf_p.z;
+            khf_face = khf_pos ? 4 : 5;
+            khf_st = khf_pos ? float2( khf_p.x, khf_p.y)
+                             : float2(-khf_p.x, khf_p.y);
+            khf_r = float3(khf_pos ? 1.0f : -1.0f, 0.0f, 0.0f);
+            khf_u = float3(0.0f, 1.0f, 0.0f);
+        }
+        if (khf_z <= khf_near) return false;            // inside the near plane
+        khf_uv = float2(0.5f + 0.5f * khf_st.x / khf_z,
+                        0.5f - 0.5f * khf_st.y / khf_z);
+        khf_slice = dlsFaceSlice[khf_slot * 6 + khf_face].x;
+    }
+
+    if (khf_slice < 0.0f) return false;                 // this face has no slice
+    if (khf_z >= khf_far) return false;                 // past the light's reach
+    // KH_DLS_FACE_SEAM (26878), the second contributor: this guard refused the
+    // outermost texel of every face, and the cube has no guard band to make
+    // up for it - so a receiver at the boundary answered LIT, one texel wide,
+    // six faces times four edges. The spot keeps the refusal: outside its one
+    // frustum there is genuinely no map, and lit is the right answer. The cube
+    // CLAMPS instead: six 90-degree faces tile the sphere, so the texel column
+    // at a face's edge is rasterised right up to the clip plane and is the
+    // correct sample for a receiver at that boundary to within one texel
+    // (KhDlsBilin already clamps its taps to the map for the same reason).
+    // Mode 580 restores the refusal on the cube - the A/B; the seam returns.
+    if (dlsCtl[khf_slot].x >= 0.5f || KhDlsMeshDbg() == 580) {
+        if (khf_uv.x <= 0.001f || khf_uv.x >= 0.999f ||
+            khf_uv.y <= 0.001f || khf_uv.y >= 0.999f) return false;
+    } else {
+        khf_uv = saturate(khf_uv);
+    }
+    return true;
+}
+
+// KH_DLS_RPDB (26877) - THE RECEIVER-PLANE DEPTH GRADIENT. THE SUN'S THIRD
+// DEFENCE, WHICH THIS KERNEL HAS BEEN STANDING IN FOR SINCE 26822.
+//
+// The note above KhDlsShadow has recorded since 26822 that the sun has three
+// defences against a self-compare and this kernel took two. 26822 stood in for
+// the missing one by dividing the whole bias by N.L; 26876m replaced that with
+// khd_texel * tan(theta), which is a better-shaped stand-in for the same
+// quantity. Both are the same admission: the bias has to cover how much the
+// receiver's depth CHANGES ACROSS THE FILTER FOOTPRINT, and neither knew that
+// number, so both bought it with peter-panning.
+//
+// The number is not hard to have. On a plane, depth is an affine function of
+// map position, so it can be corrected exactly instead of covered:
+//
+//   the cube face maps u = 0.5 + 0.5*sx*(p.r)/z, v = 0.5 - 0.5*sx*(p.u)/z, and
+//   the receiver plane is n.p = d. Substituting s = (2u-1)z/sx and
+//   t = (1-2v)z/sx and solving for z gives z = d / (n.r(2u-1)/sx +
+//   n.u(1-2v)/sx + n.f), so
+//
+//       dz/du = -2 (n.r) z^2 / (sx d)      dz/dv = +2 (n.u) z^2 / (sx d)
+//
+//   and per TEXEL that is the same over the map size. No N.L, no tangent, no
+//   clamp shaping the answer - the two dot products and z are the whole of it.
+//
+// WHY IT IS CLAMPED AND NOT FLOORED, which is the one judgement call here.
+// d = n.p goes to zero as the receiver turns edge-on to the light, and there
+// the plane genuinely spans unbounded depth inside one texel - no correction is
+// right, exactly as no bias was right for the 26876m tangent. So the gradient
+// is capped at KH_DLS_GRAD_TEXELS texel-widths of depth per texel of lateral
+// step, which is the KH_RPDB_GC idiom the sun's tiers already use, and that
+// sliver is allowed to acne rather than the whole shadow being lifted.
+//
+// The divide is guarded by MAGNITUDE, keeping d's sign: d is negative for a
+// receiver facing the light and positive for one facing away, and flipping it
+// would tilt the correction the wrong way on back faces rather than merely
+// scale it.
+float2 KhDlsGrad(float3 khg_p, float3 khg_n, float3 khg_r, float3 khg_u,
+                 float khg_z, float khg_sz, float khg_sx, float khg_texel)
+{
+    const float khg_d = dot(khg_n, khg_p);
+    const float khg_ad = max(abs(khg_d), 1.0e-4f);
+    const float khg_sd = (khg_d < 0.0f) ? -khg_ad : khg_ad;
+    const float khg_k = (khg_z * khg_z)
+                      / (max(khg_sz, 1.0f) * max(khg_sx, 1.0e-6f) * khg_sd);
+    const float2 khg_g = float2(-2.0f * dot(khg_n, khg_r),
+                                 2.0f * dot(khg_n, khg_u)) * khg_k;
+    const float khg_c = KH_DLS_GRAD_TEXELS * khg_texel;
+    return clamp(khg_g, -khg_c, khg_c);
+}
+)HLSL" R"HLSL(
+// KH_DLS_ZBIAS (26874). khd_zunc is the receiver's own depth UNCERTAINTY in
+// metres, supplied by the CALLER because only the caller knows how its position
+// was obtained. A mesh passes 0: its position is interpolated geometry and is
+// exact. The world-receive pass passes the measured per-pixel step in the
+// engine's linear depth, because its position is unprojected FROM that depth
+// and inherits whatever quantisation it carries.
+//
+// WHY: mode 550 painted that step and the field found BLACK PLATEAUS beside
+// WHITE CLIFFS - adjacent pixels decoding the identical depth, then jumping
+// 100 mm or more. KH_DLS_BIAS_M is 0.04, so the compare bias was 40 mm against
+// a receiver uncertainty of 100 mm+, and inside every plateau the test flips on
+// quantisation alone. Eight earlier hypotheses are refuted in the
+// KH_DLSW_BANDING ledger; this one is not a theory about the artifact, it is
+// two measured numbers in the wrong order.
+float KhDlsShadow(int khd_slot, float3 khd_wpos, float3 khd_nrm, float khd_zunc)
+{
+    if (khd_slot < 0 || khd_slot > 7) return 1.0f;
+    float4 khd_meta = dlsMeta[khd_slot];
+    if (khd_meta.w <= 0.0f) return 1.0f;               // no map for this light
+    // KH_DLS_RANGE (26879): past the shadow view distance the answer is lit
+    // and no texel is worth reading; inside the band the verdict is thinned
+    // at the return below, so the kernel itself is unchanged.
+    const float khd_rf = KhDlsRangeFade(khd_wpos);
+    if (khd_rf <= 0.0f) return 1.0f;
+
+    // Face-axis distance BEFORE the offset, only to price the texel: the
+    // dominant component is the face's depth axis, and one texel of a 90 degree
+    // face at distance z is 2z / size in world units.
+    const float3 khd_p0 = khd_wpos - khd_meta.xyz;
+    const float  khd_z0 = max(max(abs(khd_p0.x), abs(khd_p0.y)), abs(khd_p0.z));
+    uint khd_mw, khd_mh, khd_me;
+    khDlsMaps.GetDimensions(khd_mw, khd_mh, khd_me);
+    // AN UNBOUND ARRAY REPORTS ZERO DIMENSIONS. Without this the texel price
+    // below divides by max(0, 1) and returns 2z, displacing the receiver twice
+    // its own distance from the light - which is how a missing BINDING became a
+    // missing SHADOW in 26828. Answer lit and say nothing else; the bind is
+    // repaired at its source (KH_DLS_SRV_REBIND), this only refuses to compute
+    // nonsense from a resource that is not there.
+    if (khd_mw < 2u) return 1.0f;
+    const float  khd_texel = 2.0f * khd_z0 / max((float)khd_mw, 1.0f);
+    // THE ARM IS OUR OWN LANE, NOT lighting0.y. Code 83 there is already
+    // KH_SLOPE_TW (mode 457) and the ladder is contested across the whole
+    // renderer; dlsFaceSlice[].y is our own lane. A mode collision is
+    // silent and costs a build to find.
+    const int    khd_fbase = khd_slot * 6;
+    const bool   khd_off_on = dlsFaceSlice[khd_fbase].y >= 0.5f;
+    const float3 khd_n = normalize(khd_nrm);
+    // 1.5 texels: one to clear the texel the receiver sits in, half for the
+    // bilinear footprint the soft filter reaches into.
+    const float3 khd_p = khd_off_on ? (khd_p0 + khd_n * (khd_texel * 1.5f)) : khd_p0;
+    const float  khd_far = khd_meta.w;
+    const float  khd_near = KhDlsNear(khd_far);   // KH_DLS_NEAR_CAP twin (26878)
+    const float  khd_a = khd_far / (khd_far - khd_near);
+    const float  khd_c = -khd_near * khd_far / (khd_far - khd_near);
+
+    float2 khd_uv;
+    float  khd_z;      // receiver distance along the face axis, in METRES
+    float  khd_slice;
+    float3 khd_fr, khd_fu;   // KH_DLS_RPDB: the projection's axes and lateral
+    float  khd_fsx;          // scale, for the receiver-plane gradient
+    if (!KhDlsFaceUV(khd_slot, khd_p, khd_p0, khd_near, khd_far, khd_uv, khd_z, khd_slice,
+                     khd_fr, khd_fu, khd_fsx)) {
+        return 1.0f;
+    }
+
+    // Bias in metres, then project: constant centimetres at every range, and
+    // SLOPE-SCALED so a grazing surface gets the depth span its texel covers.
+    // The clamp at 0.25 stops a silhouette from demanding an unbounded bias,
+    // which would lift the shadow off its caster entirely.
+    // KH_DLS_BIAS_SLOPE_TEXEL (26876m) - THE LIGHT BLEED ALONG AN EDGE.
+    //
+    // 26822 divided the WHOLE metre bias by N.L with a 0.25 floor. That inflates
+    // every term, including the two that have nothing to do with slope, by up to
+    // 4x on a face turned edge-on to the lamp: at 15 m the compare bias reached
+    // 55 cm and at 30 m it reached 94 cm. A compare bias is a distance the
+    // receiver is pushed TOWARD the light before it is tested, so half a metre
+    // of it is half a metre of peter-panning - the shadow detaches from its own
+    // caster and light lands in a band hugging the silhouette. On a box lit from
+    // behind that band is a bright strip down the edge, which is the report.
+    //
+    // THE SUN DOES NOT DO THIS AND THAT IS THE REFERENCE. KhSelfTapT carries a
+    // receiver-plane gradient - per tap it corrects the reference depth by
+    // d.x*g.x + d.y*g.y, the depth the receiver's own plane would have at that
+    // texel - so its constant bias never has to cover the surface's tilt and
+    // never grows. The note above this kernel already recorded that the sun has
+    // three defences here and that this one took only two; the gradient is the
+    // one it skipped, and dividing by N.L was standing in for it.
+    //
+    // The stand-in is replaced with the quantity it was approximating. What a
+    // bias must actually cover is how much the receiver's depth CHANGES ACROSS
+    // THE FILTER FOOTPRINT, which is one texel in world metres times the surface
+    // tilt: khd_texel * tan(theta), with tan from the same N.L. That is priced
+    // in texels like every other term in this kernel (the KH_SLOPE_TW idiom), it
+    // scales with range exactly as the error it covers does, and it leaves the
+    // constant and range terms UNDIVIDED because neither is a slope.
+    //
+    // The tangent is clamped rather than floored, and the clamp is the honest
+    // part: at 90 degrees a receiver spans infinite depth in one texel and no
+    // finite bias is correct, so the surface is allowed to acne there rather
+    // than the whole shadow being lifted off its caster to prevent it.
+    //
+    // Mode 572 restores the 26822 divide.
+    // KH_DLS_RPDB (26877). The stand-in is GONE, not re-shaped: the filter now
+    // corrects its reference per tap by the receiver's own plane (KhDlsGrad,
+    // whose derivation sits with it), so the bias no longer has to cover the
+    // surface's tilt and the slope term has nothing left to do. What remains is
+    // the constant, the range term - both re-derived at their declarations - and
+    // one texel for the caster's own rasterisation.
+    //
+    //   572  the 26822 N.L divide (unchanged)
+    //   573  the 26876m texel*tan stand-in, gradient off. With the C++ twin
+    //        restoring the old constants this is bit-identical to 26876m.
+    //   574  gradient ON, old constants (C++ only - it does not reach here).
+    const int    khd_dbg = KhDlsMeshDbg();
+    const float3 khd_ldir = normalize(-khd_p);
+    const float  khd_ndl = khd_off_on ? max(dot(khd_n, khd_ldir), 0.05f) : 1.0f;
+    const float  khd_zu = (khd_dbg == 552) ? 0.0f : khd_zunc;
+    float khd_b;
+    float2 khd_g = float2(0.0f, 0.0f);
+
+    if (khd_dbg == 572) {
+        khd_b = (dlsCtl[khd_slot].y + dlsCtl[khd_slot].w * khd_z) / max(khd_ndl, 0.25f)
+              + (khd_off_on ? khd_texel : 0.0f) + khd_zu;
+    } else if (khd_dbg == 573) {
+        // tan(theta) between the surface and the light, clamped at ~76 degrees.
+        const float khd_tan = min(sqrt(max(1.0f - khd_ndl * khd_ndl, 0.0f))
+                                / max(khd_ndl, 1.0e-3f), KH_DLS_SLOPE_TAN_MAX);
+        khd_b = dlsCtl[khd_slot].y + dlsCtl[khd_slot].w * khd_z
+              + (khd_off_on ? khd_texel * (1.0f + KH_DLS_SLOPE_TEXELS * khd_tan) : 0.0f)
+              + khd_zu;
+    } else {
+        khd_b = dlsCtl[khd_slot].y + dlsCtl[khd_slot].w * khd_z
+              + (khd_off_on ? khd_texel : 0.0f) + khd_zu;
+        khd_g = KhDlsGrad(khd_p, khd_n, khd_fr, khd_fu, khd_z,
+                          (float)khd_mw, khd_fsx, khd_texel);
+    }
+
+    // The sun's own 5-tap soft compare, on an array slice. Returns OCCLUSION
+    // in the sun's convention (1 = blocked); this kernel's contract is LIT, so
+    // it is inverted once, here, rather than the filter being rewritten to a
+    // second convention that could drift from the sun's.
+    // The second GetDimensions this used to spend is gone: khd_mw is the same
+    // query, already made above to price the texel, and two reads of one
+    // resource are two things that can disagree (rule 1.5).
+    const float khd_occ = KhDlsSoft((float)khd_mw, khd_uv, khd_slice,
+                                    khd_z - khd_b, khd_g,
+                                    khd_a, khd_c, khd_near);
+    return saturate(1.0f - khd_occ * khd_rf);   // KH_DLS_RANGE: thinned, not cut
+}
+)HLSL" R"HLSL(
+// CHUNK BOUNDARY (26877). SPLIT, never trim: the receiver-plane gradient and
+// its two reverts took this segment to 15723, leaving 657 bytes, and this
+// chunk still carries DynLights and both mesh-side probes. Cut at a top-level
+// statement boundary immediately after KhDlsShadow, so the kernel keeps its own
+// chunk and the probes and the light loop keep theirs.
+// KH_DLSW_MESHPROBE (26876d, mode 560) - WHAT DOES THE MESH RECEIVE?
+//
+// Mode 558 exonerated the world pass for the see-through: on our mesh it
+// returns 1.0 at every pixel, either because the self-mask refused it (green)
+// or because the surface behind is sky and the depth test refused it first
+// (unchanged) - and a multiply by 1.0 writes nothing. Mode 539 agreed, painting
+// the mesh silhouette solid black. So whatever draws background structure onto
+// the vest is downstream of KhDlsShadow in the MESH kernels, and no lane can
+// see inside a pixel shader.
+//
+// This returns the strongest dynamic-light occlusion any casting light claims
+// at this point - 1 lit, 0 fully blocked - so ApplyLighting and KhApplyPBR can
+// paint it directly as greyscale. If the reported outline appears here, it is
+// the shadow lookup and the map or its bias owns it. If the surface comes back
+// FLAT WHITE while the outline is still visible in mode 0, the lookup claims
+// nothing at those pixels and the artifact is not the dynamic-light shadow at
+// all - which would also mean the mode-533 baseline needs re-taking.
+float KhDlsMeshProbe(float3 khpm_wpos, float3 khpm_nrm)
+{
+    if (dlCtl.x < 0.5f) return 1.0f;
+    const int khpm_n = (int)dlCtl.y + (int)dlCtl.z;
+    float khpm_m = 1.0f;
+
+    [loop] for (int khpm_i = 0; khpm_i < khpm_n; ++khpm_i) {
+        // The same slot lane the shading loops read, so this cannot disagree
+        // with them about which light casts (rule 1.5).
+        const int khpm_s = (int)dlLights[khpm_i * 6 + 5].z - 1;
+        if (khpm_s < 0) continue;
+        khpm_m = min(khpm_m, KhDlsShadow(khpm_s, khpm_wpos, khpm_nrm, 0.0f));
+    }
+
+    return khpm_m;
+}
+
 // Math is the lit-material disassembly VERBATIM - distance attenuation 1/(a0
 // + a1*d + a2*d^2) on the offset, scaled distance, the hard range fade, the
 // spot cone pow, and the per-light AMBIENT term accumulated without N.L (the
@@ -1820,8 +2539,44 @@ float3 DynLights(float3 wpos, float3 nrm)
             att *= (c > 0.0f) ? pow(c, dlLights[b + 3].w) : 0.0f;
         }
 
+        // KH_DL_SHADOW (26822). The slot rides in dlLights[b + 5].z, a lane
+        // NEITHER kernel has ever read (0 = no shadow, 1 + slot otherwise), so
+        // an unfilled site behaves exactly as it did - the 264 precedent.
+        // wpos is WORLD in every dlCtl mode, and dlsMeta is world, so the
+        // lookup does not care which decode the loop above used.
+        //
+        // THE SHADOW SCALES THE DIRECTIONAL TERM ONLY. dlLights[b + 3] is the
+        // per-light AMBIENT - the away-facing glow that makes A3 lights read on
+        // surfaces facing away from them - and a surface in shadow is still
+        // inside that glow. Multiplying it would black out the shadowed side
+        // completely, which is darker than the light being absent at all.
+        // Opacity therefore needs no separate control: what a shadow removes is
+        // exactly the contribution being blocked, so a dim light casts a faint
+        // shadow and a bright one a hard shadow, for free.
+        const float khs_sh = KhDlsShadow((int)dlLights[b + 5].z - 1, wpos, nrm, 0.0f);
+        // KH_DLS_AMBIENT_SHADOW (26827) - A PURE-AMBIENT LIGHT MUST STILL CAST.
+        //
+        // 26822 shadowed the DIRECTIONAL term only and left dlLights[b + 3],
+        // the per-light ambient, untouched. The reasoning held for a light with
+        // both: a surface in shadow is still inside the glow, and multiplying it
+        // blacks the shadowed side out darker than the light being absent.
+        //
+        // It does not hold for a light authored as ambient ONLY. The field
+        // found exactly that - setLightColor [0,0,0] with setLightAmbient
+        // [1,0.8,0.25] - where the diffuse the shadow scales is ZERO, so the
+        // shadow multiplies nothing and the light cannot cast at all. Gunfire
+        // lights carry a real diffuse and cast normally, which is why the two
+        // behaved differently despite both being points.
+        //
+        // So the ambient takes a PARTIAL shadow: in full shadow it keeps
+        // KH_DLS_AMB_KEEP of its value. A pure-ambient light now casts a
+        // visible, soft shadow; a light with both keeps the away-facing glow it
+        // is there to provide. Neither extreme is right, and the constant is the
+        // only honest way to say so.
+        const float khs_amb = lerp(KH_DLS_AMB_KEEP, 1.0f, khs_sh);
         float ndl = max(dot(n, L), 0.0f);
-        acc += (dlGlobal.xyz * dlLights[b + 2].xyz * ndl + dlLights[b + 3].xyz) * att;
+        acc += (dlGlobal.xyz * dlLights[b + 2].xyz * ndl * khs_sh
+              + dlLights[b + 3].xyz * khs_amb) * att;
     }
 
     return acc * dlGlobal.w;
@@ -1832,14 +2587,138 @@ float3 DynLights(float3 wpos, float3 nrm)
 // question at different granularities and must not stack). Sun/moon shading
 // for solid meshes (PSMain and PSComposite), opt-in per object via
 // lighting0.x.
+)HLSL" R"HLSL(
+// CHUNK BOUNDARY (26876f). Segment 22 reached 753 bytes of headroom once the
+// mesh-side probes landed in it. SPLIT, never trim - the probes are the only
+// instruments that have ever reached this path and their notes are why the
+// next reader will not re-derive which modes reach which consumer.
+// KH_DLSW_MESHLIFT (26876j) - THE PAINT HELPERS, WITH THE CLAMP TAKEN OUT.
+//
+// 568 shipped as pow(saturate(lc), 0.25) and that saturate voided the result.
+// A flashlit surface is HDR - lc runs well above 1 - so saturate clamped every
+// lit pixel to exactly 1 and the quarter power returned 1, which made 568 the
+// THIRD flat white paint in a row after 562 and 565. It could not have shown
+// faint structure whether or not it was there, and its negative means nothing.
+//
+// Reinhard first, THEN the lift: x/(1+x) maps the whole HDR range into 0..1
+// without discarding anything above 1, so a bright surface keeps its internal
+// variation instead of being flattened against the ceiling.
+float3 KhDlsLift(float3 khlf_c)
+{
+    return pow(max(khlf_c, 0.0f) / (1.0f + max(khlf_c, 0.0f)), 0.45f);
+}
+
+// KH_DLSW_MESHEDGE (26876j, mode 569). The artifact is described as an OUTLINE,
+// and an outline is a gradient. This high-passes the tonemapped result with the
+// 2x2 quad derivative and amplifies it, so any coherent edge in the mesh's
+// shaded colour is drawn as a bright curve on black - no clamp, no flattening,
+// and no dependence on the surface's absolute brightness, which is what defeated
+// every paint before it. The vest's weave will register too, as fine uniform
+// texture; a background silhouette registers as a long coherent line through it
+// and the two do not look alike.
+float3 KhDlsEdge(float3 khed_c)
+{
+    const float khed_t = dot(KhDlsLift(khed_c), float3(0.333f, 0.333f, 0.334f));
+    const float khed_e = (abs(ddx(khed_t)) + abs(ddy(khed_t))) * 24.0f;
+    return float3(saturate(khed_e), saturate(khed_e), saturate(khed_e));
+}
+
 float3 ApplyLighting(float3 base, float3 wpos, float3 nrm, float smf)
 {
+    // KH_DLSW_MESHPROBE twin 1/2 (mode 560). Above the lit gate deliberately:
+    // an unlit object still has to be able to show that it claims nothing.
+    if (KhDlsMeshDbg() == 560) {
+        const float khml_p = KhDlsMeshProbe(wpos, nrm);
+        return float3(khml_p, khml_p, khml_p);
+    }
+    // KH_DLSW_MESHLIGHT (26876e, mode 561) twin 1/2. 560 shows the SHADOW TERM
+    // alone; this shows the whole dynamic-light contribution - attenuation,
+    // cone, the per-light ambient and KH_DLS_AMB_KEEP included - with the
+    // material removed. Together they bracket the artifact: structure visible
+    // in 561 but not in 560 is in the dynamic-light SHADING rather than in the
+    // shadow lookup, and structure in neither is not in this system at all.
+    if (KhDlsMeshDbg() == 561) return DynLights(wpos, nrm);
+    // KH_DLSW_MESHFLAT (26876e, mode 562) twin 1/2 - THE TEST THE WORD ASKS FOR.
+    //
+    // The mesh returns FLAT WHITE. No lighting, no shadow, no normal, no
+    // texture, no albedo - one constant, from both shading entry points. Every
+    // input that could carry structure is gone, so if the world behind is still
+    // discernible through the mesh, nothing being COMPUTED is responsible: the
+    // mesh's pixels are being blended with what is behind them, and the fault
+    // is coverage or alpha rather than shading. That is what "see-through"
+    // literally means, and it has never been tested directly.
+    //
+    // Mode 519 already showed the artifact survives with every dynamic-light
+    // shadow switched off, so the shadow campaign's whole surface area is
+    // already excluded. This says whether ANY shading is involved.
+    if (KhDlsMeshDbg() == 562) return float3(1.0f, 1.0f, 1.0f);
+    // KH_DLSW_MESHSMF (26876f, mode 564) twin 1/2 - THE ONE SCREEN-SPACE INPUT
+    // THE MESH KERNELS STILL TAKE.
+    //
+    // 562 came back a clean flat white silhouette, so the mesh is not being
+    // blended with anything and the artifact is in SHADING. 519 already
+    // excluded every dynamic-light shadow. What is left in the shading path
+    // that could carry the shape of things BEHIND the mesh is smf, and it is
+    // the obvious candidate the moment you look at where it comes from: the
+    // caller builds it from the engine's received world shadow (khShadowMask
+    // and friends, t20-t22) and the mirror stencil, all read at THIS PIXEL in
+    // SCREEN SPACE - and the engine's mask does not contain our injected
+    // geometry, so at a pixel our mesh covers it describes the world behind it.
+    // That is the same class of fault KH_DLSW_SELFMASK fixed for the world
+    // pass, on the other side of the fence, and nothing has ever checked it
+    // from here.
+    //
+    // Painted greyscale: WHITE fully lit, BLACK fully shadowed. If the reported
+    // outline appears in this, smf is carrying the background and the fix is a
+    // self-mask on the mesh receive exactly as stage 4 has. Note this and 561
+    // are mutually exclusive - KhDynLightsPBR never reads smf - so whichever of
+    // the two shows the structure settles it outright.
+    if (KhDlsMeshDbg() == 564) return float3(smf, smf, smf);
     if (lighting0.x < 0.5f || lighting1.w < 0.5f) return base;
     float3 n = normalize(nrm);
     float ndl = saturate(dot(n, lighting1.xyz));
     float shadow = smf;   // per-pixel receive + self term (min-combined upstream)
     float3 direct = lighting2.rgb * (ndl * lighting0.w * shadow);
-    return base * (lightAmb.rgb * lighting0.z + direct + DynLights(wpos, nrm));
+    // KH_DLSW_MESHNODL (26876h, mode 567) twin 1/2 - THE COMPLEMENT OF 561.
+    //
+    // 561 showed the dynamic-light contribution alone and the field read
+    // structure in it. This shows everything EXCEPT it: sun, sky ambient,
+    // emissive, the material, the normal map, at full contrast. The two
+    // partition the shaded colour exactly, so between them the artifact has
+    // nowhere to hide. Structure here means the dynamic lights are innocent and
+    // 561's reading was the vest's own weave under a moving light; structure in
+    // 561 and NOT here confirms it.
+    //
+    // This is a real paint and not a flat one, which matters: 562 and 565 came
+    // back clean partly because there was nothing in them to be structured. A
+    // flat image is a weak negative and this is not one.
+    const float3 khal_dl = (KhDlsMeshDbg() == 567) ? float3(0.0f, 0.0f, 0.0f)
+                                                   : DynLights(wpos, nrm);
+    const float3 khal_out = base * (lightAmb.rgb * lighting0.z + direct + khal_dl);
+    // KH_DLSW_MESHLIFT (26876i, mode 568) twin 1/2 - THE SHIPPING PICTURE, LIFTED.
+    //
+    // A METHODOLOGICAL FIX, NOT A NEW HYPOTHESIS. 562 (flat white), 565 (flat
+    // white) and 567 (black at night) all came back "clean", and I read those
+    // as eliminations. They are not: a flat or black image has nothing in it
+    // that COULD be structured, so it cannot report faint structure either way.
+    // Only 564 was a real contrast test, and only that negative should carry
+    // weight. The artifact has been visible in exactly the modes where the mesh
+    // has tonal range - 0, 519, 561 - which is what you would expect of
+    // something faint whatever its cause.
+    //
+    // So this changes nothing about the shading and only tone-maps and lifts
+    // the result, stretching the range where a faint artifact lives while
+    // leaving the geometry, the lighting and every input exactly as they ship.
+    //
+    // 26876i SHIPPED THIS WITH saturate() IN FRONT OF THE LIFT AND THAT VOIDED
+    // IT. A flashlit surface is HDR, saturate clamped every lit pixel to 1, and
+    // the lift returned 1 - a third flat white paint after 562 and 565, from
+    // the exact mistake the note above was written to warn about. Corrected at
+    // 26876j to tone-map first (see KhDlsLift). The 26876i reading of 568 is
+    // VOID and must not be counted as an elimination.
+    if (KhDlsMeshDbg() == 568) return KhDlsLift(khal_out);
+    if (KhDlsMeshDbg() == 569) return KhDlsEdge(khal_out);
+    return khal_out;
 }
 
 )HLSL" R"HLSL(
@@ -2008,9 +2887,16 @@ float3 KhDynLightsPBR(float3 wpos, float3 nrm, float3 albedo, float3 F0, float r
             att *= (c > 0.0f) ? pow(c, dlLights[b + 3].w) : 0.0f;
         }
 
+        // KH_DL_SHADOW (26822) - TWIN of the DynLights site above, rule 1.5.
+        // Folding the term into diffI shadows the specular lobe with it, since
+        // KhGGXSpec is scaled by diffI: a highlight from a blocked light must
+        // go with the light. The per-light ambient stays outside, as there.
+        const float khs_sh = KhDlsShadow((int)dlLights[b + 5].z - 1, wpos, nrm, 0.0f);
+        // KH_DLS_AMBIENT_SHADOW twin (rule 1.5) - see the DynLights site.
+        const float khs_amb = lerp(KH_DLS_AMB_KEEP, 1.0f, khs_sh);
         float ndl = max(dot(n, L), 0.0f);
-        float3 diffI = dlGlobal.xyz * dlLights[b + 2].xyz * ndl;
-        float3 lit = albedo * (diffI * kdM + dlLights[b + 3].xyz);
+        float3 diffI = dlGlobal.xyz * dlLights[b + 2].xyz * ndl * khs_sh;
+        float3 lit = albedo * (diffI * kdM + dlLights[b + 3].xyz * khs_amb);
 
         if (specOn >= 0.5f) {   // uniform branch (mode verdict, not per-light)
             float3 khsF;
@@ -2026,6 +2912,26 @@ float3 KhDynLightsPBR(float3 wpos, float3 nrm, float3 albedo, float3 F0, float r
 )HLSL" R"HLSL(   // Compact GGX (Cook-Torrance specular + Lambert diffuse) fed IDENTICAL
 float3 KhApplyPBR(KhMatSurf m, float3 wpos, float3 n, float smf)
 {
+    // KH_DLSW_MESHPROBE twin 2/2 (mode 560) - see the ApplyLighting site.
+    if (KhDlsMeshDbg() == 560) {
+        const float khmp_p = KhDlsMeshProbe(wpos, n);
+        return float3(khmp_p, khmp_p, khmp_p);
+    }
+    // KH_DLSW_MESHLIGHT twin 2/2 (mode 561). WHITE albedo and a default F0
+    // deliberately: the question is whether the reported structure is in the
+    // LIGHT or in the MATERIAL, so the material must not be in the picture.
+    if (KhDlsMeshDbg() == 561) {
+        return KhDynLightsPBR(wpos, n, float3(1.0f, 1.0f, 1.0f),
+                              float3(0.04f, 0.04f, 0.04f), 0.5f, 0.0f);
+    }
+    // KH_DLSW_MESHFLAT twin 2/2 (mode 562) - see the ApplyLighting site. This
+    // is the twin that matters: the textured path is the one the vest takes,
+    // and it is the one whose normal map and albedo are still in the picture
+    // under 561.
+    if (KhDlsMeshDbg() == 562) return float3(1.0f, 1.0f, 1.0f);
+    // KH_DLSW_MESHSMF twin 2/2 (mode 564) - see the ApplyLighting site. This is
+    // the twin the vest takes.
+    if (KhDlsMeshDbg() == 564) return float3(smf, smf, smf);
     if (lighting0.x < 0.5f || lighting1.w < 0.5f) return m.albedo * m.occ + m.emissive;
     float rough = m.specOn >= 0.5f ? saturate(1.0f - m.gloss) : saturate(m.rough);
     rough = max(rough, 0.045f);
@@ -2043,10 +2949,215 @@ float3 KhApplyPBR(KhMatSurf m, float3 wpos, float3 n, float smf)
     // Dynamic lights: full radiance from KhDynLightsPBR (specular round) -
     // the Lambert lane inside is numerically the retired m.albedo *
     // DynLights(wpos, n) term at metal 0 (the parity anchor).
-    return m.albedo * amb + KhDynLightsPBR(wpos, n, m.albedo, F0, rough, metal) + direct + m.emissive;
+    // KH_DLSW_MESHNODL twin 2/2 (mode 567) - see the ApplyLighting site. This
+    // is the twin the vest takes.
+    const float3 khap_dl = (KhDlsMeshDbg() == 567)
+                         ? float3(0.0f, 0.0f, 0.0f)
+                         : KhDynLightsPBR(wpos, n, m.albedo, F0, rough, metal);
+    const float3 khap_out = m.albedo * amb + khap_dl + direct + m.emissive;
+    // KH_DLSW_MESHLIFT twin 2/2 (mode 568) - see the ApplyLighting site. This
+    // is the twin the vest takes.
+    if (KhDlsMeshDbg() == 568) return KhDlsLift(khap_out);
+    if (KhDlsMeshDbg() == 569) return KhDlsEdge(khap_out);
+    return khap_out;
 }
 #endif
 
+)HLSL" R"HLSL(
+// CHUNK BOUNDARY (26834). KH_DLS_WORLD's kernel and its rationale are ~10 KB,
+// and the segment that used to end here was 8.7 KB of a 16,380-byte MSVC token
+// - the two together overflow it (the gate caught this on the first attempt,
+// at 18,798). SPLIT, never trim: the boundary goes here rather than the
+// explanation being cut down, because the explanation is why the next person
+// does not re-derive the albedo-cancellation from scratch.
+//
+// Segment 20 - DynLights, KhDlsShadow and ApplyLighting - is still the largest
+// in this file at 968 bytes of headroom, and still has to be split before
+// anything is added to IT.
+// ---------------------------------------------------------------------------
+// KH_DLS_WORLD (26834) - THE WORLD RECEIVES OUR MESHES' DYNAMIC-LIGHT SHADOWS.
+//
+// Returns a per-channel MULTIPLY FACTOR for an already-shaded world pixel:
+// 1.0 = leave it alone, < 1 = this much of its light was blocked by one of our
+// meshes. The caller (PSDlsWorld) emits it under a dest*src blend at the scene
+// resolve, which is the one point in the frame where such a write both lands
+// after the world is drawn and still reaches the presented image (the whole of
+// the 26830-26833 probe campaign; see KH_DLS_PROBE_ATRESOLVE).
+//
+// WHY A FACTOR AND NOT A SUBTRACTION - THE ALBEDO CANCELS.
+//
+// The engine's lit shaders are forward and end with, verbatim from the shader
+// export (mul r0.xyz, r0.xyzx, r1.yzwy):
+//
+//     out = albedo * ( skyAmb*shadowMask + sun*NdL + Ldyn )
+//
+// so subtracting a blocked light's share needs albedo * Lblocked, and there is
+// no albedo target to read - the renderer is forward and the 424-shader export
+// contains exactly one MRT pixel shader, an 8-way depth decimate. That is what
+// the 26829 handoff section 8.2 called the blocker on option B. It dissolves in
+// ratio form:
+//
+//     out' = albedo * (Ltotal - Lblocked) = out * (1 - Lblocked/Ltotal)
+//
+// The albedo divides out. We never need it, and we never read the scene colour
+// either - the factor goes out as the pixel and the blend does the rest, which
+// is also why this dodges the "writes into the scene tail are invisible" class
+// entirely: we are not reading, we are blending into a target that the probe
+// proved composites.
+//
+// THE NUMERATOR IS EXACT. The per-light loop below is the engine's own dynamic
+// light function - confirmed instruction for instruction against the daytime
+// disassembly of its lit object shaders (cb11 stride 6, the same offset table,
+// the same 1e-4 guards, the same log/mul/exp cone pow, ambient accumulated
+// without N.L) - so the contribution we remove is the contribution the engine
+// added, and it cancels rather than approximating.
+//
+// TWIN (rule 1.5). This is the THIRD copy of that loop in this file, beside
+// DynLights and KhDynLightsPBR, and the fourth counting kh_dls_atten in the
+// C++. It is a copy and not a shared helper because the three differ in what
+// they ACCUMULATE, not in how they attenuate: DynLights sums shaded radiance,
+// the PBR kernel sums it through a BRDF, and this one needs the shaded AND
+// unshaded values side by side to difference them. Any edit to the attenuation
+// or the cone in one is an edit to all four. The offsets are the contract:
+// [b+0] position, [b+1] spot axis + cone threshold, [b+2] diffuse + cone
+// scale, [b+3] ambient + cone exponent, [b+4] offset + (a0,a1,a2),
+// [b+5] fade start + inverse width + OUR SHADOW SLOT.
+//
+// THE DENOMINATOR IS DELIBERATELY GENEROUS. Ltotal adds the engine's sky
+// ambient and sun terms to the dynamic total, with the SUN'S OWN SHADOW
+// ASSUMED FULLY LIT. We do not know the engine's per-pixel sun shadow here and
+// guessing it low would shrink the denominator and over-darken. Overstating it
+// can only shrink the factor's departure from 1, so every error in Ltotal
+// fails toward UNDER-darkening - the same rule KhDlsShadow already holds, where
+// the worst a bug can do is fail to darken. At night, which is the regime this
+// feature exists for, the dynamic term dominates and the approximation is
+// small; in daylight the sun term swamps it and the factor correctly goes to 1,
+// so a lamp's shadow fades out across the day cycle for free rather than
+// needing a gate.
+//
+// EVERY FAILURE PATH RETURNS 1.0, exactly as KhDlsShadow does.
+// khw_dbg (KH_DLSW_TEXEL, 26871) carries the first shadowing slot's texel
+// geometry out for the instrument in PSDlsWorld: xy = the shadow map uv this
+// pixel samples, z = one texel's edge in METRES at this receiver, w = 1 when
+// the pixel actually reaches a sample. Census only; it does not touch the
+// returned factor.
+// khw_nrel (KH_DLSW_NRM, 26876) is the CALLER'S CONFIDENCE IN khw_nrm, 0..1,
+// supplied for the same reason khw_zunc is: only the caller knows how its
+// normal was obtained. A mesh passes 1 - its normal is interpolated geometry
+// and is exact. The world pass passes the agreement between two baselines of
+// its depth-derived plane, because a plane fitted to a QUANTISED depth field
+// is not merely noisy, it collapses to the view axis inside every quantisation
+// plateau (the full mechanism is at KH_DLSW_NRM in PSDlsWorld).
+//
+// WHERE THE NORMAL IS NOT RESOLVED, N.L IS NOT ALLOWED TO DRIVE ANYTHING. The
+// term falls back to 1.0 - the facing prior - rather than to a measured-looking
+// number we do not have. That is the honest degenerate answer here: the pixels
+// that lose their normal are grazing, low-gradient ground under a lamp, and
+// "this surface faces the light" is overwhelmingly the truth there. It is also
+// applied to BOTH the numerator's diffuse and the denominator's sun, so the
+// ratio moves to the ambient-free limit rather than being pulled one way.
+float3 KhDlsWorldFactor(float3 khw_wpos, float3 khw_nrm, float khw_zunc,
+                        float khw_nrel, out float4 khw_dbg)
+{
+    khw_dbg = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    if (dlCtl.x < 0.5f) return float3(1.0f, 1.0f, 1.0f);
+    // MODE 3 ONLY. Modes 1/2 decode light positions relative to the camera
+    // through fxParams0/dlView, lanes this pass does not fill and must not
+    // pretend to - a camera-origin decode against a world position would place
+    // every light at the wrong end of the scene. The pool is merged in world
+    // space for mode 3, which is what the shipping path uses.
+    if (dlCtl.x < 2.5f) return float3(1.0f, 1.0f, 1.0f);
+
+    const int khw_pointN = (int)dlCtl.y;
+    const int khw_totalN = khw_pointN + (int)dlCtl.z;
+    const float3 khw_n = normalize(khw_nrm);
+
+    float3 khw_dyn = float3(0.0f, 0.0f, 0.0f);       // what the lights add here
+    float3 khw_blocked = float3(0.0f, 0.0f, 0.0f);   // ... and how much we take back
+
+    [loop] for (int khw_i = 0; khw_i < khw_totalN; ++khw_i) {
+        const int khw_b = khw_i * 6;
+        float3 khw_L = dlLights[khw_b + 0].xyz - khw_wpos;
+        const float khw_dist = length(khw_L);
+        khw_L /= khw_dist + 1e-4f;
+        const float khw_d = max(khw_dist * dlCtl.w - dlLights[khw_b + 4].x, 0.0f);
+        float khw_att = saturate(1.0f / (dot(dlLights[khw_b + 4].yzw,
+                                             float3(1.0f, khw_d, khw_d * khw_d)) + 1e-4f));
+        khw_att *= 1.0f - saturate((khw_dist * dlCtl.w - dlLights[khw_b + 5].x)
+                                   * dlLights[khw_b + 5].y);
+        if (khw_i >= khw_pointN) {
+            const float khw_c = saturate((dot(-dlLights[khw_b + 1].xyz, khw_L)
+                                          - dlLights[khw_b + 1].w) * dlLights[khw_b + 2].w);
+            khw_att *= (khw_c > 0.0f) ? pow(khw_c, dlLights[khw_b + 3].w) : 0.0f;
+        }
+        if (khw_att <= 0.0f) continue;
+
+        // KH_DLSW_NRM: the facing prior at khw_nrel 0, the measured N.L at 1.
+        const float  khw_ndl = lerp(1.0f, max(dot(khw_n, khw_L), 0.0f), khw_nrel);
+        const float3 khw_diff = dlGlobal.xyz * dlLights[khw_b + 2].xyz * khw_ndl;
+        const float3 khw_amb = dlLights[khw_b + 3].xyz;
+        khw_dyn += (khw_diff + khw_amb) * khw_att;
+
+        // The slot lane, written by kh_dls_fill_cb's twin in the C++ and read
+        // by nothing else. 0 = this light casts no shadow, which is the zeroed
+        // default and therefore the safe one.
+        const int khw_slot = (int)dlLights[khw_b + 5].z - 1;
+        if (khw_slot < 0) continue;
+        const float khw_sh = KhDlsShadow(khw_slot, khw_wpos, khw_n, khw_zunc);
+
+        // Gated on the instrument's own modes (26875): at mode 0 this block is
+        // pure cost - a KhDlsFaceUV per pixel per light for a value nothing
+        // reads. An instrument that bills the shipping path is a regression.
+        if (dbgCtl.w >= 544.5f && dbgCtl.w < 546.5f && khw_dbg.w < 0.5f) {
+            const float4 khw_dm = dlsMeta[khw_slot];
+            if (khw_dm.w > 0.0f) {
+                const float3 khw_dp = khw_wpos - khw_dm.xyz;
+                const float  khw_dz0 = max(max(abs(khw_dp.x), abs(khw_dp.y)), abs(khw_dp.z));
+                uint khw_mw, khw_mh, khw_me;
+                khDlsMaps.GetDimensions(khw_mw, khw_mh, khw_me);
+                float2 khw_duv; float khw_dz, khw_dsl;
+                // KH_DLS_RPDB (26877) widened KhDlsFaceUV. This is the census
+                // twin and wants none of the frame - scratch, discarded.
+                float3 khw_dfr, khw_dfu; float khw_dfsx;
+                const float khw_dfar = khw_dm.w;
+                const float khw_dnear = KhDlsNear(khw_dfar);   // KH_DLS_NEAR_CAP twin (26878)
+                if (khw_mw >= 2u &&
+                    KhDlsFaceUV(khw_slot, khw_dp, khw_dp, khw_dnear, khw_dfar,
+                                khw_duv, khw_dz, khw_dsl,
+                                khw_dfr, khw_dfu, khw_dfsx)) {
+                    khw_dbg = float4(khw_duv.x, khw_duv.y,
+                                     2.0f * khw_dz0 / max((float)khw_mw, 1.0f), 1.0f);
+                }
+            }
+        }
+        if (khw_sh >= 1.0f) continue;   // fully lit: nothing blocked, and the
+                                        // common case - skip the arithmetic
+        // Exactly the shading DynLights would have produced with the shadow
+        // applied, including the partial ambient a pure-ambient light needs to
+        // cast at all (KH_DLS_AMB_KEEP). The difference IS the blocked share.
+        const float3 khw_shaded = (khw_diff * khw_sh
+                                 + khw_amb * lerp(KH_DLS_AMB_KEEP, 1.0f, khw_sh)) * khw_att;
+        khw_blocked += max((khw_diff + khw_amb) * khw_att - khw_shaded, 0.0f);
+    }
+
+    khw_dyn *= dlGlobal.w;       // DynLights' trailing global scale, on both
+    khw_blocked *= dlGlobal.w;   // sides, so the ratio is scale-invariant
+    if (dot(khw_blocked, float3(1.0f, 1.0f, 1.0f)) <= 0.0f) return float3(1.0f, 1.0f, 1.0f);
+
+    // Ltotal: the engine's own combine, sun shadow assumed lit (see above).
+    const float3 khw_sky = lightAmb.rgb * lighting0.z;
+    // Same weighting as the numerator's N.L, and for the same reason: a normal
+    // the caller could not resolve may not band the denominator either. At
+    // khw_nrel 0 this reads full sun, which OVERSTATES Ltotal - and overstating
+    // Ltotal can only shrink the factor's departure from 1, which is the
+    // direction this kernel already fails in everywhere else.
+    const float3 khw_sun = lighting2.rgb *
+        (lerp(1.0f, max(dot(khw_n, lighting1.xyz), 0.0f), khw_nrel) * lighting0.w);
+    const float3 khw_total = khw_dyn + khw_sky + khw_sun;
+
+    return saturate(1.0f - khw_blocked / max(khw_total, 1e-4f));
+}
+)HLSL" R"HLSL(
 struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL;
 #if KH_TEXTURED
     float2 uv : TEXCOORD0; float4 tan : TANGENT;   // 48-byte lanes (layout_tex)

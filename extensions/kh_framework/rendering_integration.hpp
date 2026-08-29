@@ -676,6 +676,18 @@ inline bool kh_ends_with_ci(const std::string& s, const char* suffix) {
 static void* g_eds_memo_res = nullptr;
 static UINT  g_eds_memo_w = 0, g_eds_memo_h = 0;
 
+// KH_DL_SHADOW slice budget. 8 lights x 6 cube faces is the ceiling; the
+// array is grown to demand, never allocated to the ceiling (see dls_slices).
+static constexpr int KH_DLS_SLICES_MAX = 8 * 6;
+// 1024 (26823). A 512 slice spans a 90 degree face, so at a 40 m reach one
+// texel is 156 mm - blocky at any filter, which is what the field reported.
+// 1024 halves that to 78 mm and the per-face allocation pays for it: the
+// live set is ~6 slices, so 24 MB, against 48 MB for the 12 slices the same
+// lights needed before faces were culled. 2048 is another 4x memory for
+// another halving and is not obviously worth it - raise this, not the tap
+// count, if the field still reads coarse.
+static constexpr UINT KH_DLS_MAP_PX = 1024;   // per-slice edge
+
 struct Resources {
     // Mesh drawing
     ID3D11VertexShader*      vs = nullptr;
@@ -685,6 +697,7 @@ struct Resources {
     UINT                     ps_effect_samples = 0;   // depth MSAA count it was compiled for
     ID3D11VertexShader*      vs_composite = nullptr;   // injected-path VS (adds world position)
     ID3D11PixelShader*       ps_maskcast = nullptr;   // analytic mask cast (single-sample t0)
+    ID3D11PixelShader*       ps_dls_world = nullptr;   // KH_DLS_WORLD: dynamic-light world receive (single-sample t0)
     ID3D11PixelShader*       ps_maskprime = nullptr;   // writes lit over our footprint
     ID3D11PixelShader*       ps_inj_depth = nullptr;   // the footprint's own SV_Depth encode
     ID3D11PixelShader*       ps_inj_depth_a = nullptr;   // KH_FOOTPRINT_ALPHA (26766): the clip-only alpha footprint (KH_TEXTURED)
@@ -796,6 +809,36 @@ struct Resources {
     ID3D11DepthStencilState* dss_test_write = nullptr;   // LESS_EQUAL, write
     ID3D11DepthStencilState* dss_off = nullptr;   // depth disabled
     ID3D11BlendState*        blend_modes[6] = {};   // normal, additive, multiply, screen, lighten, darken
+    // KH_DLS_PROBE (26830). dest = dest * blendFactor, with the pixel shader's
+    // output DISCARDED (SrcBlend ZERO). The tint therefore rides the blend
+    // factor, not a constant buffer and not a shader - so the instrument adds
+    // no CB lane, no HLSL segment and no compile job, and cannot drift from
+    // anything it measures. blend_modes[2] cannot serve: it multiplies by
+    // SRC_COLOR, which would make the answer depend on whichever pixel shader
+    // happened to be reusable.
+    ID3D11BlendState*        dls_probe_blend = nullptr;
+    // KH_DLS_WORLD (26835). dest.rgb = dest.rgb * src.rgb, ALPHA UNTOUCHED and
+    // not even writable. 26834 reused blend_modes[2] for this and that was a
+    // defect: its alpha ops are SrcBlendAlpha ZERO / DestBlendAlpha
+    // INV_SRC_ALPHA, so a shader emitting alpha 1 drives destination alpha to
+    // dest*(1-1) = 0 across the WHOLE FRAME, every frame, at the resolve. The
+    // field saw it as an occasional colour wash that crawled toward the camera
+    // and faded. The write mask makes it impossible rather than merely
+    // unlikely - the probe's own blend already had this discipline and the
+    // shipping pass should never have been given anything weaker.
+    ID3D11BlendState*        dls_world_blend = nullptr;
+    // KH_DLSW_MASK (26847): the world pass's OWN occlusion mask - one
+    // R32_FLOAT screen target holding the linear view distance, in metres, of
+    // the nearest of our meshes at each pixel. Rendered with our matrix and our
+    // sentinel, read by nobody else; min_blend resolves overlapping meshes to
+    // the nearest with no depth-stencil target at all.
+    ID3D11Texture2D*          dlsw_tex = nullptr;
+    ID3D11RenderTargetView*   dlsw_rtv = nullptr;
+    ID3D11ShaderResourceView* dlsw_srv = nullptr;
+    UINT                      dlsw_w = 0, dlsw_h = 0;
+    ID3D11BlendState*         dlsw_min_blend = nullptr;   // dest = min(src, dest)
+    ID3D11VertexShader*       vs_dls_mask = nullptr;
+    ID3D11PixelShader*        ps_dls_mask = nullptr;
     ID3D11BlendState*        blend_ui_replace = nullptr;   // blend OFF, RGB-only write: builtin UI-phase
                                                         // passes composite AND coverage-mask
                                                         // entirely in-shader (centerSize.w = 2)
@@ -900,6 +943,18 @@ struct Resources {
     ID3D11VertexShader*       vs_sundepth_a = nullptr;
     ID3D11PixelShader*        ps_sundepth_a = nullptr;
     ID3D11InputLayout*        layout_sundepth_a = nullptr;   // + TEXCOORD0 (uv) on slot 0
+    // KH_DL_SHADOW (26815). ONE depth array for every casting light: a spot
+    // spends 1 slice, a point spends 6 (a cube unrolled). Slices GROW on
+    // demand rather than allocating the 8 x 6 worst case up front - the field
+    // reads dlsSpotN 8 / dlsPointN 0, so the common tree is 8 slices (8 MB at
+    // 512) against 48 (50 MB) for a case that has not once occurred. The sun's
+    // sun_instance_cap grow-on-demand is the precedent.
+    ID3D11RasterizerState*    dls_rast = nullptr;   // KH_DLS_DEPTHCLIP (26825)
+    ID3D11Texture2D*          dls_tex = nullptr;
+    ID3D11ShaderResourceView* dls_srv = nullptr;           // Texture2DArray, t36
+    ID3D11DepthStencilView*   dls_dsv[KH_DLS_SLICES_MAX] = {};   // one per slice
+    UINT                      dls_slices = 0;              // slices currently allocated
+    UINT                      dls_size = 0;                // edge, px
     ID3D11Buffer*             sun_instance_vb = nullptr;   // dynamic per-instance center/extents
     UINT                      sun_instance_cap = 0;   // instances the buffer holds
     ID3D11Buffer*             locality_buf = nullptr;   // extended (>16) caster reach list
@@ -1119,6 +1174,12 @@ struct Resources {
         KH_SAFE_RELEASE(layout_sundepth_a);
         KH_SAFE_RELEASE(sun_instance_vb);
         sun_instance_cap = 0;
+        KH_SAFE_RELEASE(dls_rast);   // KH_DLS_DEPTHCLIP
+        for (int khd_i = 0; khd_i < KH_DLS_SLICES_MAX; ++khd_i) KH_SAFE_RELEASE(dls_dsv[khd_i]);
+        KH_SAFE_RELEASE(dls_srv);   // KH_DL_SHADOW
+        KH_SAFE_RELEASE(dls_tex);
+        dls_slices = 0;
+        dls_size = 0;
         KH_SAFE_RELEASE(locality_srv);
         KH_SAFE_RELEASE(locality_buf);
         locality_cap = 0;
@@ -1137,6 +1198,15 @@ struct Resources {
         KH_SAFE_RELEASE(dss_test_write);
         KH_SAFE_RELEASE(dss_off);
         for (int i = 0; i < 6; ++i) KH_SAFE_RELEASE(blend_modes[i]);
+        KH_SAFE_RELEASE(dls_probe_blend);   // KH_DLS_PROBE
+        KH_SAFE_RELEASE(dls_world_blend);   // KH_DLS_WORLD
+        KH_SAFE_RELEASE(dlsw_srv);   // KH_DLSW_MASK
+        KH_SAFE_RELEASE(dlsw_rtv);
+        KH_SAFE_RELEASE(dlsw_tex);
+        KH_SAFE_RELEASE(dlsw_min_blend);
+        KH_SAFE_RELEASE(vs_dls_mask);
+        KH_SAFE_RELEASE(ps_dls_mask);
+        dlsw_w = dlsw_h = 0;
         KH_SAFE_RELEASE(blend_ui_replace);   // UI-mask set
         KH_SAFE_RELEASE(blend_ui_masked);
         KH_SAFE_RELEASE(blend_ui_spill);
@@ -1157,6 +1227,7 @@ struct Resources {
         own_w = own_h = own_samp = own_qual = 0;
         KH_SAFE_RELEASE(ps_maskprime);
         KH_SAFE_RELEASE(ps_maskcast);   // was created in init but
+        KH_SAFE_RELEASE(ps_dls_world);   // KH_DLS_WORLD
                                            // never released - one PS object (and its
                                            // old-device ref) leaked per engine reset,
                                            // and the re-init CreatePixelShader
@@ -1249,6 +1320,13 @@ struct KhUiMask {
 };
 static KhUiMask g_ui_mask;
 static std::atomic<bool> g_ui_mask_wanted{false};   // any visible UI-mode pass exists
+// KH_SVS_VOL_DEMAND (26878): any visible NON-fullscreen mesh exists. The
+// volume depth+stencil copy at the seam bracket serves the mesh stencil
+// receive and nothing else, and it ran every frame the hooks were up - a
+// full-screen depth+stencil CopyResource (~33 MB at 4K) in a session with
+// only post-FX passes and nothing that could ever read it. Recomputed in
+// flush_frame's demand loop beside the UI and lit flags.
+static std::atomic<bool> g_svs_mesh_wanted{false};
                                                     // The worker-record census remains
                                                     // retired.)
 
@@ -1616,22 +1694,32 @@ inline float kh_mesh_obb_dist_sq(const RenderObject& o, const float cam[3]) {
     return khb_acc;
 }
 
-inline float kh_mesh_dist_sq(const RenderObject& o, const float cam[3]) {
+// The same distance over the raw record (pos / size in SQF axes, rot_m,
+// rotated) - the DLSW mask picks its LOD from a SunCaster snapshot and must
+// land on the level the injection drew, so it runs this arithmetic and not a
+// copy of it (26878). kh_mesh_dist_sq is the RenderObject wrapper.
+inline float kh_mesh_dist_sq_of(const float* pos, const float* size, const float* rot_m,
+                                bool rotated, const float cam[3]) {
     const float c[3] = { cam[0], cam[2], cam[1] };   // engine -> SQF axes
+    const float hl[3] = { size[0] * 0.5f, size[2] * 0.5f, size[1] * 0.5f };
     float khs_he[3];
-    kh_world_half_extents(o, khs_he);   // engine axes
+    kh_rot_half_extents(hl, rot_m, rotated, khs_he);   // engine axes
     const float hs[3] = { khs_he[0], khs_he[2], khs_he[1] };   // > SQF axes
     float acc = 0.0f;
 
     for (int k = 0; k < 3; ++k) {
-        const float lo = o.pos[k] - hs[k];
-        const float hi = o.pos[k] + hs[k];
+        const float lo = pos[k] - hs[k];
+        const float hi = pos[k] + hs[k];
         const float p = c[k] < lo ? lo : (c[k] > hi ? hi : c[k]);
         const float d = c[k] - p;
         acc += d * d;
     }
 
     return acc;
+}
+
+inline float kh_mesh_dist_sq(const RenderObject& o, const float cam[3]) {
+    return kh_mesh_dist_sq_of(o.pos, o.size, o.rot_m, o.rotated, cam);
 }
 
 // Effect ids shared by meshes (localized, clipped to the mesh's screen
@@ -2141,6 +2229,41 @@ struct alignas(16) ConstantData {
     // for the mask cast's screen-space reprojection. 4 float4 keeps
     // KH_CBFRAME_BYTES % 16 == 0.
     float cast_view_n[4][4];
+    // KH_DL_SHADOW (26822). APPENDED AT THE TAIL like every pair before it:
+    // every existing offset in both blocks stays byte-identical, and 64 float4
+    // keeps KH_CBFRAME_BYTES % 16 == 0.
+    //
+    // NO CUBE MATRICES LIVE HERE, and that is the point. A cube face basis is
+    // a fixed axis permutation, so the shader derives the face, its uv and its
+    // depth from the light-relative position alone - 48 float4x4 (3 KB) of
+    // matrices would say nothing the permutation does not. Only the SPOT
+    // frustum is arbitrary and therefore stored.
+    float dls_meta[8][4];    // xyz = light world position (engine axes), w = far
+                             // plane (m). w == 0 is the stand-down: no map, and
+                             // the shader answers LIT, which is what a mesh
+                             // with no shadow map must look like.
+    float dls_ctl[8][4];     // x = 1 spot / 0 cube, y = compare bias constant
+                             // (metres), z = the spot's slice, w = bias slope
+                             // (per metre of range)
+    // KH_DLS_FACE_FLAT (26826). ONE float4 PER FACE, indexed slot*6 + face.
+    //
+    // This was dls_face0[8]/dls_face1[8] with the face selecting a COMPONENT -
+    // dlsFace0[slot][face] - which is a dynamic index into a constant-buffer
+    // float4's swizzle. The spot path reads dlsCtl[slot].z, a STATIC component,
+    // and the spot works while the cube does not: the two paths differ in
+    // exactly this and nothing else. A flat array is one dynamic ARRAY index
+    // and a static component, which is the form the rest of this shader already
+    // uses everywhere (shadowMats, bandMat, locality, dlLights).
+    //
+    // x = slice for this face (-1 = no slice: nothing occludes in that
+    // direction, a correct answer rather than a hole). y = the receiver-normal
+    // offset arm, replicated across the light's six entries so it can be read
+    // before the face is known. zw free.
+    float dls_face_slice[48][4];
+    float dls_spot_vp[8][4][4];
+    float dls_range[4];   // KH_DLS_RANGE (26879): xyz = pass camera (engine axes),
+                          // w = clamp(shadowVisibility, 8, 1000); 0 = no fade.
+                          // HLSL twin dlsRange; written by kh_dls_fill_cb.
 };
 
 // CB-split slice geometry: the object block ends where view_proj (the first
@@ -2512,6 +2635,11 @@ static float    g_jit_latch_t = -1.0f;   // effect time of the latch (s)
 
 inline float effect_time_seconds();
 inline void kh_msaa_toggle_wipe(unsigned int khtw_new);   // body after g_ls (23k+)
+// KH_DL_SHADOW (26822): body sits with the map state it reads (22.9k+), which
+// is far below the two mesh frame-CB fills that call it. Declared here, in
+// the same idiom as kh_msaa_toggle_wipe above - ConstantData is complete by
+// this point, so the signature is whole even though the body is not.
+inline void kh_dls_fill_cb(ConstantData& khf_cb);
 inline void kh_svs_mask_release(bool khm_scrub_vmir = true);   // body in the sv suite (41k+); the wipe calls it with false (vmir is device-scoped)
 inline uint64_t steady_now_ms();   // defined below (16.5k)
 inline void  mul_4x4(const float a[4][4], const float b[4][4], float out[4][4]);
@@ -5315,10 +5443,15 @@ inline bool kh_obj_has_blend(const RenderObject& o) {
 
 // The object's bounding-sphere radius in WORLD metres, from the rotated half
 // extents every draw path already computes for its own culling.
-inline float kh_lod_radius(const RenderObject& khl_o) {
+inline float kh_lod_radius_of(const float* size, const float* rot_m, bool rotated) {
+    const float khl_hl[3] = { size[0] * 0.5f, size[2] * 0.5f, size[1] * 0.5f };
     float khl_he[3];
-    kh_world_half_extents(khl_o, khl_he);
+    kh_rot_half_extents(khl_hl, rot_m, rotated, khl_he);
     return sqrtf(khl_he[0] * khl_he[0] + khl_he[1] * khl_he[1] + khl_he[2] * khl_he[2]);
+}
+
+inline float kh_lod_radius(const RenderObject& khl_o) {
+    return kh_lod_radius_of(khl_o.size, khl_o.rot_m, khl_o.rotated);
 }
 
 static constexpr size_t KH_FBX_VERT_CEIL = 0xFFFFFFFFull / sizeof(MeshVertex);
@@ -7174,6 +7307,9 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         { khsp_comp_src.c_str(), "PSComposite", "ps_5_0", khsp_d0t,  0 },
         { khsp_comp_src.c_str(), "PSComposite", "ps_5_0", khsp_d0ta, 0 },
         { static_src.c_str(), "PSMaskCast",  "ps_5_0", khcb_rx_defines, 0 },
+        { static_src.c_str(), "PSDlsWorld",  "ps_5_0", khcb_rx_defines, 0 },   // KH_DLS_WORLD
+        { static_src.c_str(), "VSDlsMask",   "vs_5_0", khcb_rx_defines, 0 },   // KH_DLSW_MASK
+        { static_src.c_str(), "PSDlsMask",   "ps_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "PSMaskPrime", "ps_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "PSInjDepth",  "ps_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "PSInjDepthA", "ps_5_0", khtx_defines,    0 },   // KH_FOOTPRINT_ALPHA
@@ -7301,6 +7437,43 @@ inline std::string ensure_resources(ID3D11Device* dev) {
             mc_blob->Release();
         } else if (!mc_err.empty()) {
             report_error_once_safe("KH maskcast shader: " + mc_err);   // render-thread-reachable
+        }
+    }
+
+    {   // mask-prime PS: non-fatal, exactly like the cast above. If it    {   // KH_DLS_WORLD receive PS: non-fatal, same contract as the cast
+        // above. A failed compile leaves ps_dls_world null, the pass refuses
+        // at its own guard and dlsWorldNoState counts it - the world simply
+        // does not receive dynamic-light shadows, which is exactly the 26833
+        // behaviour and not a broken frame.
+        ID3DBlob* khw_blob = nullptr;
+        const std::string khw_err = compile_shader(static_src.c_str(), "PSDlsWorld", "ps_5_0", khcb_rx_defines, &khw_blob);
+
+        if (khw_err.empty() && khw_blob) {
+            dev->CreatePixelShader(khw_blob->GetBufferPointer(), khw_blob->GetBufferSize(), nullptr, &g_res.ps_dls_world);
+            khw_blob->Release();
+        } else if (!khw_err.empty()) {
+            report_error_once_safe("KH dlsworld shader: " + khw_err);   // render-thread-reachable
+        }
+    }
+
+    {   // KH_DLSW_MASK shaders: non-fatal, same contract. A failed compile
+        // leaves them null, the mask pass refuses at its own guard, and the
+        // world pass falls back to no mask at all rather than to a wrong one.
+        ID3DBlob* khmv_b = nullptr;
+        const std::string khmv_e = compile_shader(static_src.c_str(), "VSDlsMask", "vs_5_0", khcb_rx_defines, &khmv_b);
+        if (khmv_e.empty() && khmv_b) {
+            dev->CreateVertexShader(khmv_b->GetBufferPointer(), khmv_b->GetBufferSize(), nullptr, &g_res.vs_dls_mask);
+            khmv_b->Release();
+        } else if (!khmv_e.empty()) {
+            report_error_once_safe("KH dlsmask VS: " + khmv_e);
+        }
+        ID3DBlob* khmp_b = nullptr;
+        const std::string khmp_e = compile_shader(static_src.c_str(), "PSDlsMask", "ps_5_0", khcb_rx_defines, &khmp_b);
+        if (khmp_e.empty() && khmp_b) {
+            dev->CreatePixelShader(khmp_b->GetBufferPointer(), khmp_b->GetBufferSize(), nullptr, &g_res.ps_dls_mask);
+            khmp_b->Release();
+        } else if (!khmp_e.empty()) {
+            report_error_once_safe("KH dlsmask PS: " + khmp_e);
         }
     }
 
@@ -7652,6 +7825,59 @@ inline std::string ensure_resources(ID3D11Device* dev) {
             bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
             hr = dev->CreateBlendState(&bd, &g_res.blend_modes[i]);
             if (FAILED(hr)) { g_res.release(); return "Create blend " + hr_str(hr); }
+        }
+
+        {   // KH_DLS_PROBE (26830): dest = dest * blendFactor. Not fatal if it
+            // fails - the probe stands down on a null and lanes it, because an
+            // instrument that can take the session down is worse than no
+            // instrument (rule 1.88: the stand-down needs a counter, and it has
+            // dlsProbeStateFails).
+            D3D11_BLEND_DESC khpb = {};
+            khpb.RenderTarget[0].BlendEnable = TRUE;
+            khpb.RenderTarget[0].SrcBlend = D3D11_BLEND_ZERO;
+            khpb.RenderTarget[0].DestBlend = D3D11_BLEND_BLEND_FACTOR;
+            khpb.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+            khpb.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
+            khpb.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;   // alpha untouched
+            khpb.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+            khpb.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+            if (FAILED(dev->CreateBlendState(&khpb, &g_res.dls_probe_blend))) {
+                g_res.dls_probe_blend = nullptr;
+            }
+        }
+
+        {   // KH_DLS_WORLD (26835): dest.rgb *= src.rgb, RGB write mask only.
+            D3D11_BLEND_DESC khwb = {};
+            khwb.RenderTarget[0].BlendEnable = TRUE;
+            khwb.RenderTarget[0].SrcBlend = D3D11_BLEND_ZERO;
+            khwb.RenderTarget[0].DestBlend = D3D11_BLEND_SRC_COLOR;
+            khwb.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+            khwb.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
+            khwb.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;   // alpha kept
+            khwb.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+            khwb.RenderTarget[0].RenderTargetWriteMask =
+                D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN |
+                D3D11_COLOR_WRITE_ENABLE_BLUE;   // never alpha
+            if (FAILED(dev->CreateBlendState(&khwb, &g_res.dls_world_blend))) {
+                g_res.dls_world_blend = nullptr;
+            }
+        }
+
+        {   // KH_DLSW_MASK (26847): dest = min(src, dest). The minimum of a set
+            // of distances is the nearest one, so this blend IS the depth test
+            // for the mask and no depth-stencil target is needed.
+            D3D11_BLEND_DESC khmb = {};
+            khmb.RenderTarget[0].BlendEnable = TRUE;
+            khmb.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+            khmb.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
+            khmb.RenderTarget[0].BlendOp = D3D11_BLEND_OP_MIN;
+            khmb.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+            khmb.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+            khmb.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_MIN;
+            khmb.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED;
+            if (FAILED(dev->CreateBlendState(&khmb, &g_res.dlsw_min_blend))) {
+                g_res.dlsw_min_blend = nullptr;
+            }
         }
 
         {   // builtin UI-phase state: blend OFF, RGB-only write - the
@@ -8965,7 +9191,8 @@ struct StateBackup {
     // declared at t19 would read a type-mismatched SRV - zero - on exactly
     // those frames where a.cube effect ran, and saturate(post / max(pre,
     // 1e-3)) would pin to 1.0 with nothing to show for it.
-    ID3D11ShaderResourceView* ps_srvs[35] = {};   // +t28; t29-31; +t32 (far band); +t33/t34 (owner map)
+    ID3D11ShaderResourceView* ps_srvs[37] = {};   // +t28; t29-31; +t32 (far band); +t33/t34 (owner map);
+                                                  // +t35 (cast occ) / t36 (dynamic-light depth array, 26878)
     ID3D11SamplerState*      ps_samps[2] = {};   // s0 material, s1 pyramid sampler
     ID3D11DepthStencilState* dss = nullptr;
     UINT                     stencil_ref = 0;
@@ -10487,7 +10714,7 @@ static uint32_t g_fk_veto_cand_n = 0;   // candidates staged at the last pass BE
                                             // campaign-43 handoff.
 // Build tag: monotonic, never reused, bumped once per shipped build (including
 // pure reverts). Keep it a constexpr int, not a #define.
-static constexpr int KH_BUILD_TAG = 26809;
+static constexpr int KH_BUILD_TAG = 26879;
 // Continuous at the near plane, so routing on/off never pops a fragment.
 static constexpr float KH_NEARZ_GAP_FRAC = 0.92f;
 // 3 = mode 203 - passthrough + absolute form.
@@ -13465,6 +13692,70 @@ struct FfrRecord {
     uint8_t  kh_live_served = 0;   // live cascades written (0 = gated/empty)
     int8_t   kh_sun_st = -1;   // 1 = fill never ran this row
     uint16_t kh_wipe_lo = 0;   // g_band_wipe_events low 16 bits
+    // KH_DL_TRACE (26851) - THE BLACK-MESH TIME SERIES.
+    //
+    // The 26850 counters say the mesh went dark 232 times across a 4.3 s window
+    // and that the nearest pooled light was then 1433 m from it while the
+    // camera sat 10 m from a lamp. What no counter can say is the SHAPE of that
+    // interval: whether the pool lost its near lights gradually or in one step,
+    // whether the loss leads or follows a window going down, and what the
+    // recovery looks like. The ring holds ~1024 frames, which spans the whole
+    // event and its recovery at once.
+    //
+    // dl_fill_n IS THE FAULT: 0 on a lit mesh is the black frame. Everything
+    // else here exists to say why that frame was 0.
+    uint16_t dl_fill_n = 0xFFFFu;   // lights delivered (0xFFFF = fill never ran)
+    uint16_t dl_pool_n = 0;
+    uint16_t dl_unanch = 0;   // windows that failed to decode this HARVEST
+    uint16_t dl_blind_run = 0;   // ... and the global consecutive-blind run.
+                                 // SEPARATE LANES BECAUSE THEY WERE ONE, AND IT
+                                 // MADE BOTH UNREADABLE: the fill wrote the run
+                                 // and the harvest wrote the per-frame count
+                                 // into the same field, so whichever ran last
+                                 // won and the published series was a mixture
+                                 // of two quantities with different units.
+    uint16_t dl_anch = 0;   // ... and windows that decoded
+    uint16_t dl_expired = 0;   // pool expiries this frame
+    uint8_t  dl_reason = 0xFFu;   // last stand-down reason (0xFF = none)
+    uint8_t  dl_win_down = 0;   // windows currently carrying a failure run
+    float    dl_near_m = -1.0f;   // nearest pooled light TO THE MESH
+    float    dl_reach_m = -1.0f;   // ... and the reach it needed
+    float    dl_obj_cam_m = -1.0f;   // mesh-to-camera distance. THE MISSING NUMBER:
+                                     // 1433 m of light separation means nothing
+                                     // until we know whether the mesh is beside
+                                     // the camera or a kilometre from it.
+    // KH_DL_ORIGINFLIP / KH_DL_HINTWATCH / KH_DL_STALL (26852). The 26851
+    // capture showed the pool losing every near light for 441 straight frames
+    // while windows kept anchoring 4-5 per frame, then recovering in ONE frame.
+    // Windows resolving is not the same as windows resolving CORRECTLY, and
+    // these lanes are the difference:
+    //
+    //   dlWinOx/Oz   the origin of the biggest window that anchored this
+    //                harvest. If it sits on a wrong grid point through the dark
+    //                interval and steps back at recovery, the fault is named.
+    //   dlOFlips     origin moves, cumulative. A step here at the leading edge
+    //                is the event; a step at recovery is the cure.
+    //   dlHintChg    memo writes, cumulative. The memo is sticky for the
+    //                session, so a write is rare and a write immediately before
+    //                the dark interval is the prime suspect.
+    //   dlStallMs    gap before this harvest. The alt-tab lane.
+    uint16_t dl_ohint_chg = 0;   // g_dl.hint_changes, low bits
+    uint16_t dl_oflips = 0;   // g_dl.origin_flips, low bits
+    uint32_t dl_stall_ms = 0;
+    float    dl_win_ox = 0.0f;
+    float    dl_win_oz = 0.0f;
+    uint16_t dl_win_lights = 0;   // that window's light count
+    // KH_DL_HINTWATCH / KH_DL_XCHECK, per harvest. dl_hint_hits against
+    // dl_derived says whether the origins in force this frame came through the
+    // sticky memo or a fresh scan; dl_xdis says whether the anchors disputed
+    // any of them. A dark interval with hits == derived and xdis rising is the
+    // memo resolving wrongly, which is the alt-tab switch expressing itself.
+    uint8_t  dl_hint_hits = 0;
+    uint8_t  dl_derived = 0;
+    uint8_t  dl_xdis = 0;
+    // KH_DL_TIEBREAK (26854), per harvest.
+    uint8_t  dl_ties = 0;    // ranking ties this harvest
+    uint8_t  dl_drift = 0;   // hint hits that moved a window's origin
 };
 
 static FfrRecord g_ffr[KH_FFR_RING];
@@ -15713,6 +16004,26 @@ static constexpr float    KH_DL_DERIVE_ROT_TOL = 0.03f;   // candidate rotation 
 // separates them; windows with only loose candidates go UNRESOLVED
 // (dark-safe), never flapping.
 static constexpr float    KH_DL_ORIGIN_RES_MAX = 0.03f;
+// KH_DL_ORIGIN_RES_KEEP (26856). The bar a candidate must clear to author.
+// 0.03 admitted an impostor whose origin moved a whole grid step every harvest
+// while the true candidate sat at exactly 0. 0.004 keeps the exact class with
+// room for fp noise and refuses the 0.008+ band the field impostors occupied;
+// KH_DL_ORIGIN_RES_MAX is retained as the far edge of the CUT band so those
+// refusals can be counted instead of merely not happening.
+// REVERTED TO KH_DL_ORIGIN_RES_MAX AT 26860. 0.004 was set at 26856 because
+// every impostor in the field then read 0.008-0.020 against a true candidate at
+// exactly 0.000, and the gap looked clean. It was not a gap, it was one
+// session: the SAME impostor structure (kind 0, slot 4, off 16) came back at
+// res 0.000977 - under the bar - while dlResWorstKept climbed to 0.00397,
+// meaning genuine candidates were sitting right against it too. The bar refused
+// 29,284 candidates and did not catch the one it existed for.
+//
+// That is rule 1.84: the residual was a proxy for "is this a real origin" and
+// it cannot resolve that question, because an impostor's residual is a property
+// of the garbage it happens to be reading and moves session to session. The
+// invariant is in the ranking now (see khd_offer) - a real origin DOES NOT
+// WANDER - and the bar goes back to admitting everything the arbiter allows.
+static constexpr float    KH_DL_ORIGIN_RES_KEEP = KH_DL_ORIGIN_RES_MAX;
 static constexpr uint32_t KH_DL_ANCHOR_N = 64;
 static constexpr uint64_t KH_DL_ANCHOR_TTL_MS = 60000;
 static constexpr float    KH_DL_ANCHOR_RES = 0.005f;
@@ -15724,6 +16035,17 @@ static constexpr uint32_t KH_DL_ARENA_BYTES = KH_DL_WIN_MAX * KH_DL_WIN_BYTES;
 // grows without bound - the TTL sweep keeps it at the live set.)
 static constexpr float    KH_DL_ORIGIN_Q = 100.0f;   // origin grid (3500/4500/3300 all fit)
 static constexpr uint64_t KH_DL_POOL_STALE_MS = 500;   // no-harvest expiry: mode-3 fills stand down
+// KH_DL_STALL (26852). A harvest gap past this is not a frame, it is a stall -
+// an alt-tab, a load, a time skip. Set well above the pool's own stale bar so a
+// merely slow frame never counts, and low enough that the ~1 s+ hitch an
+// alt-tab resume produces always does.
+static constexpr uint64_t KH_DL_STALL_MS = 600;
+// KH_DL_WINPROV table width. Deliberately WIDER than KH_DL_WIN_MAX: the window
+// table holds one harvest's distinct windows, while this one must remember them
+// across harvests as the engine cycles buffer addresses. Sized at four times
+// the window set so a recycle is an anomaly worth counting rather than the
+// steady state it was at 26851.
+static constexpr uint32_t KH_DL_WIN_SLOTS = KH_DL_WIN_MAX * 4u;
 // Real exposure adaptation moves smoothly harvest to harvest and PERSISTS, so
 // an out-of-band candidate must keep agreeing with itself for the confirm
 // window before it adopts; a sub-pass one-off cannot. Same debounce shape as
@@ -15732,9 +16054,48 @@ static constexpr float    KH_DL_REF_BAND = 1.5f;   // per-harvest ratio band
 static constexpr uint64_t KH_DL_REF_CONFIRM_MS = 400;   // persistent-jump adoption
 static constexpr uint64_t KH_DL_TTL_CAP_MS = 1500;   // proven ceiling (sparse worst case)
 static constexpr uint64_t KH_DL_TTL_FLOOR_MS = 250;   // safety floor (unproven cadence)
-static constexpr uint64_t KH_DL_TTL_DENSE_FLOOR_MS = 80;   // dense-evidence fast lane
+// KH_DL_TTL_DENSE_FLOOR_MS (26855): 80 -> 50. The tail a light with PROVEN
+// cadence gets after the engine stops emitting it, and therefore how long a
+// despawned light keeps lighting our meshes. It is a floor under
+// KH_DL_GAP_MULT x gap_max, so a light whose harvest cadence is genuinely
+// jittery still gets 2 x its own worst observed gap and is unaffected; this
+// only shortens the tail for lights arriving on a clean cadence, which is the
+// case where a long tail is pure lag. At the field's ~20 ms harvest period 50 ms
+// is two to three harvests - still two missed harvests of protection against
+// flicker, which is what the floor exists for.
+//
+// KH_DL_TTL_FLOOR_MS (250) is deliberately NOT touched: an unproven light -
+// a muzzle flash seen once or twice, never dense - keeps the long tail, which
+// is what makes sporadic lights visible at all rather than a one-frame blip.
+static constexpr uint64_t KH_DL_TTL_DENSE_FLOOR_MS = 50;   // dense-evidence fast lane
 static constexpr uint64_t KH_DL_GAP_MULT = 2;   // TTL = mult x worst observed gap
 static constexpr uint64_t KH_DL_GAP_MULT_WIDE = 6;   // the pre-multiplier
+// KH_DL_BLIND (26850). How long an unanchored window keeps the dense fast lane
+// shut. Sized to cover a short run of undecodable harvests (the field's runs
+// are 1-3 harvests, ~50 ms) with margin, and deliberately no longer than
+// KH_DL_TTL_FLOOR_MS - this rule may never make a light outlive the floor that
+// already applies to an unproven cadence, it only declines to use the FAST
+// lane on evidence we know is incomplete.
+// Still used by the dark ring's blind flag, which is census only.
+static constexpr uint64_t KH_DL_BLIND_GRACE_MS = 250;
+// How many of a window's records the origin arbiter probes. The engine's list
+// is not distance-sorted, so the arbiter asks whether ANY of them lands near
+// the capture camera; eight is far past the point where a correct origin has
+// shown itself and keeps the per-candidate cost flat.
+static constexpr uint32_t KH_DL_RANGE_PROBE = 8;
+// Two residuals this close are the same residual. Sized well under
+// KH_DL_ANCHOR_RES so a candidate that is merely GOOD never ties with one that
+// is exact; the case this exists for is res == 0.0f on both sides, which is
+// what every memo write in the field carried.
+static constexpr float KH_DL_RES_TIE = 1.0e-6f;
+// KH_DL_NEARRANK (26865). How much nearer a candidate must put the window's
+// closest light to the camera before proximity decides. Generous on purpose:
+// the separation this exists to catch is a whole grid step - the field's true
+// candidate put a light at 13.5 m against 264 m for the accepted one - so 50 m
+// sits far below anything real while staying well above the metre-scale jitter
+// of two candidates describing the SAME arrangement.
+static constexpr float KH_DL_NEAR_MARGIN_M = 50.0f;
+static constexpr float    KH_DL_ORIGIN_RANGE_M = 3000.0f;   // arbiter bar, both routes
 
 inline uint64_t kh_dl_gap_mult() {
     return g_dbg_mode.load(std::memory_order_relaxed) == 57 ? KH_DL_GAP_MULT_WIDE
@@ -15859,6 +16220,61 @@ struct DlM3Ring {   // mode-3 harvest ring (flicker forensics)
     float    scale = 0.0f;   // last anchored window's RAW cb10[2].x
 };
 
+// KH_DL_DARK (26850). One entry per lit-object fill that delivered NO dynamic
+// light, which is the state the mesh renders black in. Ringed rather than
+// counted alone because the fault is intermittent and camera-dependent: the
+// counters say how often, and these say WHEN and against WHAT pool, which is
+// what separates "the light genuinely went out" from "we stopped decoding the
+// window it was in".
+static constexpr uint32_t KH_DL_DARK_RING = 16;
+// KH_DL_HINTWATCH (26852) - THE MEMO IS STICKY FOR THE SESSION, SO WATCH WHEN
+// IT IS SET.
+//
+// dynlights_derive_origin writes vs_hint_* ONLY on a full-scan win, and the
+// hint fast-path RETURNS BEFORE the scan can ever run again. So the memo is
+// written a handful of times per session (15 in the last one, against 29,225
+// derivations) and is then self-confirming: every frame it re-validates its own
+// candidate, that candidate passes, and no better one is ever looked for.
+//
+// A memo that resolves to a WRONG origin therefore persists indefinitely, and
+// a wrong origin sitting exactly on the 100 m grid has residual zero - so
+// nothing downstream can convict it (rule 1.98, the third time this campaign).
+// The field reports the dark mesh appearing after an ALT-TAB, which is the
+// shape that fits: the resume frame is the one moment the constant buffers can
+// hold content from before a multi-second stall, one full scan runs against it,
+// and whatever it memoises is law until something makes the hint MISS.
+//
+// This ring records every write: what was memoised, what origin it produced,
+// and - the lane the alt-tab theory lives or dies on - how long the frame gap
+// before it was.
+static constexpr uint32_t KH_DL_HINT_RING = 16;
+
+struct DlHintRec {
+    uint64_t t_ms = 0;
+    uint32_t serial = 0;      // harvest number
+    uint8_t  kind = 0;        // 0 pure, 1 pair, 2 cam-triple, 3 obj-triple
+    int8_t   slot = -1;
+    int8_t   wslot = -1;
+    uint8_t  form = 0;
+    uint16_t off = 0;
+    uint16_t woff = 0;
+    float    ox = 0.0f, oz = 0.0f;   // the origin the new memo produced
+    float    res = -1.0f;
+    float    d_ox = 0.0f, d_oz = 0.0f;   // how far it MOVED from the previous memo
+    uint32_t stall_ms = 0;    // harvest gap immediately before this write
+};
+
+struct DlDarkRec {
+    uint64_t t_ms = 0;
+    uint16_t pool_n = 0;      // lights in the pool at the refusal
+    uint8_t  reason = 0;      // 0 pool empty, 1 pool stale, 2 nothing in reach
+    uint8_t  blind = 0;       // was a window unanchored inside the grace window
+    uint16_t unanch = 0;      // lists_unanchored delta over the last grace window
+    uint16_t pad = 0;
+    float    near_m = -1.0f;  // nearest pooled light to the mesh
+    float    reach_m = -1.0f; // ... and the reach it would have needed
+};
+
 struct DlPoolLight {
     float    rec[24] = {};   // the 6-float4 record VERBATIM (producer side)
                                   // +0 rewritten to absolute world
@@ -15871,6 +16287,15 @@ struct DlPoolLight {
     uint64_t first_ms = 0;   // census: first sight (lifetime)
     uint16_t gap_max_ms = 0;   // worst observed re-sight gap (cadence evidence)
     uint16_t sightings = 0;   // saturating sighting count
+    // KH_DL_WINPROV (26851) - WHICH WINDOW LAST CARRIED THIS LIGHT.
+    //
+    // The low half of the window buffer's address, purely as an identity. It
+    // exists to answer the one question the 26850 dumps could not: when a light
+    // expires, had its OWN window stopped decoding, or was the light simply no
+    // longer in a window that decoded fine? Those are "we lost it" and "the
+    // engine culled it", they are indistinguishable from the expiry alone, and
+    // they have opposite fixes.
+    uint32_t win_lo = 0;
 };
 
 struct DlRingEntry {
@@ -15931,6 +16356,9 @@ struct DynLightsState {
     uint32_t anchor_n = 0;
     uint64_t anchor_admits = 0;   // ULP-class derivations admitted to the table
     uint64_t anchor_res_rejects = 0;   // derived origins good enough to shade, not to testify
+    uint64_t anchor_ghost_drops = 0;   // KH_DL_GHOST: anchors convicted by the live pool
+    float    anchor_ghost_dx = 0.0f;   // ... and the grid offset of the last one,
+    float    anchor_ghost_dz = 0.0f;   //     which names the size of the origin error
     // derivation-candidate recon ring (every validate-pass from the full
     // scans, LOOSE ones included: the constant landscape)
     DlCandRec cand_ring[256] = {};
@@ -15958,6 +16386,23 @@ struct DynLightsState {
     uint32_t fill_min_n = 0xFFFFFFFFu;
     uint32_t fill_max_n = 0;
     uint64_t pool_spot_flips = 0;   // point<->spot reclassification on update
+    // KH_DL_DARK (26850) - THE STAND-DOWNS THAT MADE THE MESH BLACK.
+    //
+    // Every mode-3 refusal below used to return in silence, and a fill that
+    // returns writes NO dlCtl - so the shader's dlCtl.x reads 0, DynLights
+    // returns float3(0,0,0), and the mesh takes no dynamic light at all. That
+    // is the reported fault, and it was invisible from a dump because nothing
+    // counted it (rule 1.88).
+    uint64_t fill_no_pool = 0;   // refused: the pool is empty
+    uint64_t fill_no_reach = 0;   // refused: no pooled light reaches this mesh
+    uint64_t fill_dark = 0;   // total lit-object fills that delivered nothing
+    uint32_t fill_dark_pool_n = 0;   // pool size at the last one
+    float    fill_dark_near_m = -1.0f;   // nearest pooled light at the last one
+    float    fill_dark_reach_m = -1.0f;   // ... and that light's reach + half-diagonal
+    float    fill_dark_first_s = -1.0f;   // effect time of the first / last dark fill
+    float    fill_dark_last_s = -1.0f;
+    DlDarkRec dark_ring[KH_DL_DARK_RING] = {};
+    uint32_t dark_head = 0;
     uint64_t win_aux = 0;   // windows classified AUX (divergent pass globals)
     uint64_t aux_adds = 0;   // lights first seen only through an aux window
     uint64_t aux_refreshes = 0;   // aux sightings that refreshed a stamp only
@@ -15983,6 +16428,133 @@ struct DynLightsState {
     uint64_t origin_pool_votes = 0;   // windows resolved by pool voting (propagation)
     uint64_t origin_vote_ambiguous = 0;   // votes refused for lattice ambiguity (no clear majority)
     uint64_t vs_range_prunes = 0;   // candidates pruned by the range arbiter at selection
+    // KH_DL_HINTWATCH (26852) census for the memo above.
+    uint64_t hint_changes = 0;   // full-scan writes of the memo
+    uint64_t hint_set_ms = 0;   // when the CURRENT memo was written
+    uint32_t hint_set_stall_ms = 0;   // ... and the harvest gap right before it
+    uint32_t hint_set_serial = 0;
+    float    hint_ox = 0.0f, hint_oz = 0.0f;   // origin the current memo produced
+    float    hint_move_ox = 0.0f, hint_move_oz = 0.0f;   // last memo's origin JUMP
+    DlHintRec hint_ring[KH_DL_HINT_RING] = {};
+    uint32_t hint_head = 0;
+    // KH_DL_STALL (26852). Harvest-to-harvest wall gaps. An alt-tab, a load or
+    // a time skip all show here, and the question is whether a memo write or an
+    // origin flip sits immediately after one.
+    uint64_t last_harvest_ms = 0;
+    uint64_t stalls_seen = 0;   // gaps past KH_DL_STALL_MS
+    uint32_t stall_max_ms = 0;
+    uint32_t stall_last_ms = 0;
+    uint64_t stall_last_at_ms = 0;
+    // KH_DL_ORIGINFLIP (26852). Per-window resolved origin, and every time one
+    // MOVES. A window whose origin steps by a grid multiple and stays there is
+    // the fault: it keeps anchoring, keeps authoring, and puts its lights
+    // somewhere they are not.
+    float    win_ox[KH_DL_WIN_SLOTS] = {};
+    float    win_oz[KH_DL_WIN_SLOTS] = {};
+    uint32_t win_lights[KH_DL_WIN_SLOTS] = {};
+    uint32_t win_flips[KH_DL_WIN_SLOTS] = {};
+    uint8_t  win_oset[KH_DL_WIN_SLOTS] = {};
+    // KH_DL_XCHECK (26853) - DOES THE ANCHOR TABLE AGREE WITH THE DERIVATION?
+    //
+    // THE MEASUREMENT THAT DE-RISKS THE FIX. The proposed cure is to reject a
+    // derived origin the anchors contradict - running the pool vote as a
+    // CONFIRMATION rather than only as a fallback. That touches the path every
+    // light flows through, so it is measured first: the vote runs here as a
+    // shadow on windows that already derived successfully, and changes nothing.
+    //
+    // If disagreements cluster in the dark intervals and vanish outside them,
+    // the cure is proven before it ships and its false-positive rate is known
+    // from xcheckAgree. If they are everywhere, the vote is too weak to gate on
+    // and the fix has to come from somewhere else - which is worth knowing
+    // BEFORE shipping it rather than after (the self-mask lesson).
+    // KH_DL_TIEBREAK (26854). How often the residual ranking cannot decide, and
+    // what decided it instead. tie_arbitrary is the old behaviour surviving:
+    // non-zero means candidates still tie with nothing to separate them, and
+    // the winner is still loop order.
+    uint64_t tie_seen = 0;
+    uint64_t tie_continuity = 0;   // resolved by this window's previous origin
+    uint64_t tie_corrob = 0;   // resolved by anchor corroboration
+    uint64_t tie_arbitrary = 0;   // nothing separated them; first offered kept
+    uint64_t tie_overturns = 0;   // a tie-break CHANGED the winner
+    uint64_t hint_drift = 0;   // hint hits whose origin left the window's last
+    uint64_t hint_drift_rescans = 0;   // ... and were refused, forcing a rescan
+    // KH_DL_ORIGINNEAR (26862) - THE SIGNAL THAT CAN ACTUALLY CONVICT A WRONG
+    // ORIGIN, MEASURED BEFORE ANY BAR IS SET ON IT.
+    //
+    // The engine culls its dynamic-light list to the camera, so a CORRECT
+    // origin necessarily places at least one of a window's lights near the
+    // camera. A wrong grid origin displaces them all by the error. That is a
+    // property of the engine's behaviour rather than a proxy for it, which is
+    // what the residual, the anchors and continuity all failed to be.
+    //
+    // khd_range_ok already asks this question but with a 3000 m bound, and the
+    // field's wrong origins park lights at 1436 m - comfortably inside it. The
+    // separation looks large (correct origins in that scene put lights at 7 to
+    // 500 m) but I have guessed two bars this campaign and been wrong twice, so
+    // this build MEASURES the distribution and sets nothing. origin_near_last
+    // is the nearest probed record under the accepted origin; the min/max
+    // bracket the range actually observed.
+    uint64_t forget_fires = 0;   // KH_DL_FORGET (mode 542) manual re-acquisitions
+    uint64_t near_wins = 0;   // KH_DL_NEARRANK: proximity overturned the leader
+    uint64_t near_holds = 0;   // ... and where it defended the leader instead
+    float    origin_near_last = -1.0f;
+    float    origin_near_min = -1.0f;
+    float    origin_near_max = -1.0f;
+    uint64_t origin_near_n = 0;
+    float    hint_drift_dx = 0.0f, hint_drift_dz = 0.0f;
+    uint64_t xcheck_voted = 0;   // derived windows the anchors could vote on
+    uint64_t xcheck_agree = 0;
+    uint64_t xcheck_disagree = 0;
+    uint64_t xcheck_novote = 0;   // anchors had nothing to say
+    float    xdis_der[2] = {};   // last disagreement: what the DERIVATION said
+    float    xdis_vote[2] = {};   // ... and what the ANCHORS said
+    uint32_t xdis_lights = 0;
+    uint64_t xdis_last_ms = 0;
+    uint64_t origin_flips = 0;
+    float    flip_from[2] = {};
+    float    flip_to[2] = {};
+    uint32_t flip_lights = 0;   // how many lights the flipped window carried
+    uint64_t flip_last_ms = 0;
+    uint64_t win_slot_evictions = 0;   // KH_DL_WINPROV table thrash (see below)
+    // KH_DL_WINHINT (26856) - THE MEMO IS PER WINDOW NOW, NOT PER SESSION.
+    //
+    // It was one global tuple, and dynlights_derive_origin runs once PER WINDOW,
+    // so the last window to finish a full scan overwrote whatever the previous
+    // one had learned. The 26855 field ring caught it outright: at harvest 876,
+    // 881, 883, 886, 887 and 888 there are TWO writes in the SAME harvest -
+    //
+    //     kind 3, slot 0, off 52   residual 0.000   a stable origin
+    //     kind 0, slot 4, off 16   residual 0.008 - 0.020, and an origin that
+    //                              MOVED EVERY HARVEST: (1500,5300), (3500,4300),
+    //                              (4500,5300), (4500,4300), (3500,3300)
+    //
+    // - so a window whose only candidate is that wandering impostor was
+    // overwriting the memo of the window that had the exact answer. The good
+    // window then took the fast path against the impostor's tuple on the next
+    // harvest and committed a wrong origin without ever rescanning. Every
+    // origin in that ring is 1-3 km off in z, and 72% of that session's fills
+    // delivered no light at all (fillNoReach 946 of 1320).
+    //
+    // Residual ordering cannot fix this: the two writes come from DIFFERENT
+    // windows, so they never meet inside one ranking to be compared. The memo
+    // has to be keyed the way the thing it describes is keyed - by window.
+    // The per-window table is already there, already keyed on the same weak
+    // buffer identity, and dlWinEvictions read 0, so it is stable enough to
+    // hold this.
+    uint8_t  win_hint_set[KH_DL_WIN_SLOTS] = {};
+    uint8_t  win_hint_kind[KH_DL_WIN_SLOTS] = {};
+    int32_t  win_hint_slot[KH_DL_WIN_SLOTS] = {};
+    uint32_t win_hint_off[KH_DL_WIN_SLOTS] = {};
+    uint8_t  win_hint_form[KH_DL_WIN_SLOTS] = {};
+    int32_t  win_hint_wslot[KH_DL_WIN_SLOTS] = {};
+    uint32_t win_hint_woff[KH_DL_WIN_SLOTS] = {};
+    uint8_t  win_hint_wform[KH_DL_WIN_SLOTS] = {};
+    uint64_t hint_cross_writes = 0;   // memo writes that would have CHANGED the
+                                      // global tuple while another window owned
+                                      // it - the poisoning, counted
+    uint64_t res_impostors = 0;   // candidates refused by the tightened residual
+    float    res_worst_kept = 0.0f;   // worst residual still admitted
+    // The globals stay as "last committed", for the dump and the hint ring only.
     uint8_t  vs_hint_kind = 0;   // winning route: 0 pure, 1 pair, 2 cam-triple, 3 obj-triple
     int32_t  vs_hint_slot = -1;   // memoized MODEL-VIEW find (session-scoped)
     uint32_t vs_hint_off = 0;   // float offset within the slot block
@@ -15995,6 +16567,33 @@ struct DynLightsState {
     uint64_t win_table_full = 0;   // ninth+ distinct window in one frame
     uint64_t lists_anchored = 0;   // windows whose origin resolved (derivation)
     uint64_t lists_unanchored = 0;   // windows with no resolvable origin (dropped)
+    // KH_DL_BLIND (26850): harvests we KNOW were incomplete, and what that
+    // knowledge saved. blind_last_ms is behaviour state and does not reset
+    // with the stats (rule 1.89).
+    uint64_t blind_last_ms = 0;   // last harvest that left a window unanchored
+    uint64_t blind_harvests = 0;   // how many such harvests
+    uint64_t blind_holds = 0;   // RETIRED 26855; published at 0 (lane order is
+                                // a dump contract). dlBlindHolds reading 0
+                                // forever now means the rule cannot fire, not
+                                // that it did not.
+    uint32_t blind_run = 0;   // current consecutive run
+    uint32_t blind_run_max = 0;   // worst run this window
+    // KH_DL_WINPROV (26851). Per-window decode-failure runs, keyed on the same
+    // weak buffer identity DlWindowMeta uses. The global blind flag turned out
+    // to be a LEVEL and not an event - it read 83% of harvests because two
+    // windows fail permanently - so it cannot say whether any PARTICULAR light
+    // lost its source. These can.
+    uint32_t win_fail_lo[KH_DL_WIN_SLOTS] = {};
+    uint32_t win_fail_run[KH_DL_WIN_SLOTS] = {};
+    uint32_t win_fail_max[KH_DL_WIN_SLOTS] = {};
+    // THE DISCRIMINATOR, AND THE REASON THIS BUILD IS AN INSTRUMENT AND NOT A
+    // FIX. Expiries whose own window was failing to decode at the moment they
+    // were dropped, against those whose window was decoding fine. Near zero on
+    // the first means the pool is behaving correctly and the engine culled the
+    // lights; tracking dlPoolExpired means our decode is killing live lights.
+    // The two have opposite fixes and no dump so far can tell them apart.
+    uint64_t sight_win_down = 0;
+    uint64_t sight_win_up = 0;
     uint64_t pool_added = 0;   // new lights entering the pool
     uint64_t pool_updated = 0;   // re-sighted lights refreshed in place
     uint64_t pool_expired = 0;   // TTL expiries (light off / gone / moved away)
@@ -16025,6 +16624,7 @@ struct DynLightsState {
     uint32_t ring_head = 0;
 };
 static DynLightsState g_dl;
+static bool g_dl_forget_latch = false;   // KH_DL_FORGET: edge trigger for mode 542
 
 // Per-draw variability census (render thread; armed by the dump): sampled
 // slot-11 window identities per frame - the distinct (buffer, offset) count
@@ -16346,6 +16946,82 @@ inline void dl_cand_record(const DlWindowMeta& khd_m, uint8_t khd_kind, int32_t 
     khd_c.ydelta = khd_yd;
 }
 
+// MOVED UP AT 26859. fxc has no linker and neither does a single-TU header:
+// these two sat BELOW dynlights_derive_origin, and 26856 added a call to
+// kh_dl_win_slot from inside it (the per-window memo lookup) - which did not
+// compile. They belong beside kh_dl_win_origin_of, above every caller, and the
+// three are kept together so the next edit cannot separate them again.
+// KH_DL_WINPROV (26851). Slot for a window's failure run, keyed on the same
+// weak buffer identity DlWindowMeta already dedupes on. The table is exactly as
+// wide as the window table, so a slot is always available; the oldest-by-run
+// entry is recycled if the engine ever cycles more buffers than that.
+inline uint32_t kh_dl_win_slot(const void* khw_buf) {
+    const uint32_t khw_lo = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(khw_buf));
+
+    for (uint32_t khw_i = 0; khw_i < KH_DL_WIN_SLOTS; ++khw_i) {
+        if (g_dl.win_fail_lo[khw_i] == khw_lo) return khw_i;
+    }
+
+    for (uint32_t khw_i = 0; khw_i < KH_DL_WIN_SLOTS; ++khw_i) {
+        if (g_dl.win_fail_lo[khw_i] == 0) {
+            g_dl.win_fail_lo[khw_i] = khw_lo;
+            g_dl.win_fail_run[khw_i] = 0;
+            g_dl.win_fail_max[khw_i] = 0;
+            return khw_i;
+        }
+    }
+
+    // THE TABLE THRASHED AND SAID NOTHING, WHICH IS WHY dlWinFailRunMax READ 1.
+    //
+    // The last capture had dlWinTracked pinned at the table width with seven
+    // windows live, so the engine was cycling buffer addresses faster than the
+    // table could hold them and every recycle silently reset a run to zero. A
+    // failure run that is reset by bookkeeping is not a measurement, and both
+    // dlSightWinDown and dlSightWinUp inherited the error. The table is wider
+    // than the window set now, and the recycle COUNTS itself, so a future
+    // reading either has no evictions behind it or is known not to be trusted.
+    g_dl.win_slot_evictions++;
+    uint32_t khw_worst = 0;
+
+    for (uint32_t khw_i = 1; khw_i < KH_DL_WIN_SLOTS; ++khw_i) {
+        if (g_dl.win_fail_run[khw_i] > g_dl.win_fail_run[khw_worst]) khw_worst = khw_i;
+    }
+
+    g_dl.win_fail_lo[khw_worst] = khw_lo;
+    g_dl.win_fail_run[khw_worst] = 0;
+    g_dl.win_fail_max[khw_worst] = 0;
+    return khw_worst;
+}
+
+// Is the window that last carried this light currently failing to decode?
+inline bool kh_dl_win_down(uint32_t khw_lo) {
+    if (khw_lo == 0) return false;
+
+    for (uint32_t khw_i = 0; khw_i < KH_DL_WIN_SLOTS; ++khw_i) {
+        if (g_dl.win_fail_lo[khw_i] == khw_lo) return g_dl.win_fail_run[khw_i] > 0;
+    }
+
+    return false;
+}
+
+// KH_DL_TIEBREAK (26854). Read-only: the origin this window resolved to last
+// harvest, if it has one. Deliberately NOT kh_dl_win_slot, which allocates -
+// the ranking must be able to ask the question without changing the table.
+inline bool kh_dl_win_origin_of(const void* khp_buf, float& khp_ox, float& khp_oz) {
+    const uint32_t khp_lo = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(khp_buf));
+    if (khp_lo == 0) return false;
+
+    for (uint32_t khp_i = 0; khp_i < KH_DL_WIN_SLOTS; ++khp_i) {
+        if (g_dl.win_fail_lo[khp_i] == khp_lo && g_dl.win_oset[khp_i]) {
+            khp_ox = g_dl.win_ox[khp_i];
+            khp_oz = g_dl.win_oz[khp_i];
+            return true;
+        }
+    }
+
+    return false;
+}
+
 inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& khd_m, int khd_side,
                                     const float* khd_recs, uint32_t khd_rec_n,
                                     float& khd_ox, float& khd_oz, float& khd_res,
@@ -16366,28 +17042,67 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
 
     // Applied at candidate SELECTION and in the hint - impostors die at
     // candidacy and can never lock in.
-    const float* khd_rec0 = nullptr;
+    //
+    // THE ARBITER ASKS ABOUT THE NEAREST RECORD, NOT ABOUT RECORD ZERO, AND
+    // THAT DIFFERENCE IS THE CAMERA-ANGLE DEPENDENCE IN THE BLACK-MESH REPORT.
+    //
+    // The invariant the arbiter is reaching for is: the engine culls its light
+    // list to the camera, so a CORRECT origin places at least one of a window's
+    // lights near the capture camera, and a WRONG one places them all far away.
+    // "record 0 is within 3 km" was a bar standing in for that invariant (rule
+    // 1.84), and the two part company the moment the list does not happen to
+    // begin with a near light - which nothing guarantees, because the engine's
+    // list is not distance-sorted and its membership and ORDER are a function
+    // of where the camera is looking.
+    //
+    // The field session carried lights out to 3.50 km (dlsCamDistMaxM 3495.47)
+    // against a 3 km bar. So a window whose first entry happened to be one of
+    // those far lamps had EVERY candidate origin pruned at selection,
+    // khd_have_nz stayed false, the derivation returned nothing, and the window
+    // authored nothing - while the same lights in a different order resolved
+    // perfectly. Turn the camera, the order changes, the fault appears or
+    // clears, and nothing in the dump says why. That is the reported symptom
+    // exactly: position- and angle-dependent, intermittent, self-healing when
+    // you move, and absent in whole sessions.
+    //
+    // Testing the MINIMUM removes the ordering dependence and is a STRICTER
+    // test of the origin at the same bar, because a wrong origin now has to put
+    // every probed light far away rather than only the first one.
+    float khd_rxz[KH_DL_RANGE_PROBE][3];   // x, y, z - Y is needed to match anchors
+    uint32_t khd_rn = 0;
 
-    for (uint32_t i = 0; i < khd_rec_n; ++i) {
+    for (uint32_t i = 0; i < khd_rec_n && khd_rn < KH_DL_RANGE_PROBE; ++i) {
         const float* khd_rr = khd_recs + i * 24;
 
         if (dl_finite(khd_rr[0]) && dl_finite(khd_rr[1]) && dl_finite(khd_rr[2])) {
-            khd_rec0 = khd_rr;
-            break;
+            khd_rxz[khd_rn][0] = khd_rr[0];
+            khd_rxz[khd_rn][1] = khd_rr[1];
+            khd_rxz[khd_rn][2] = khd_rr[2];
+            khd_rn++;
         }
     }
 
-    auto khd_range_ok = [&](float khd_cox, float khd_coz) {
-        if (!khd_rec0) return true;
-        const float khd_rx = khd_cox + khd_rec0[0] - khd_bcam[0];
-        const float khd_rz = khd_coz + khd_rec0[2] - khd_bcam[2];
+    // How near this origin puts the window's CLOSEST light to the capture
+    // camera. Negative when the window carries no usable record.
+    auto khd_near_of = [&](float khd_cox, float khd_coz) {
+        float khd_best = -1.0f;
 
-        if (khd_rx * khd_rx + khd_rz * khd_rz > 3000.0f * 3000.0f) {
-            g_dl.vs_range_prunes++;
-            return false;
+        for (uint32_t i = 0; i < khd_rn; ++i) {
+            const float khd_rx = khd_cox + khd_rxz[i][0] - khd_bcam[0];
+            const float khd_rz = khd_coz + khd_rxz[i][2] - khd_bcam[2];
+            const float khd_d2 = khd_rx * khd_rx + khd_rz * khd_rz;
+            if (khd_best < 0.0f || khd_d2 < khd_best) khd_best = khd_d2;
         }
 
-        return true;
+        return khd_best < 0.0f ? -1.0f : sqrtf(khd_best);
+    };
+
+    auto khd_range_ok = [&](float khd_cox, float khd_coz) {
+        if (khd_rn == 0) return true;
+        const float khd_nr = khd_near_of(khd_cox, khd_coz);
+        if (khd_nr >= 0.0f && khd_nr <= KH_DL_ORIGIN_RANGE_M) return true;
+        g_dl.vs_range_prunes++;
+        return false;
     };
 
     // best-candidate accumulators: RESIDUAL is the rank (the origin-flap
@@ -16401,10 +17116,88 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
     bool khd_have_nz = false, khd_have_z = false;
     float khd_z_res = 1.0e9f;
 
+    // KH_DL_TIEBREAK (26854) - THE RANKING HAD A TIE IT COULD NOT BREAK, AND
+    // LOOP ORDER WAS DECIDING IT.
+    //
+    // The old test was `res < khd_b_res`, strict, so the FIRST candidate to
+    // arrive at a given residual won and every later equal one was discarded.
+    // Every candidate in the field's hint ring carried res == 0 EXACTLY - a
+    // grid-aligned origin has zero residual whether it is the right grid point
+    // or the wrong one, so the residual is structurally incapable of separating
+    // them (rule 1.98). What actually chose the winner was slot order, then
+    // offset order, then which W block came first - and which of those a window
+    // offers depends on what the engine happened to bind, which changes with
+    // the camera.
+    //
+    // MEASURED, session 26853: the memo alternated between offset 4 and offset
+    // 52 (same slot, same wslot, both res 0) nine times, and each alternation
+    // moved the resolved origin by whole grid steps. Frame 260 committed the
+    // wrong one; 240 ms later - KH_DL_TTL_FLOOR_MS is 250 - fifteen pool
+    // lights expired together because their window's records no longer landed
+    // where they had, and the mesh went black for 143 frames. It relit ONE
+    // frame after the memo changed back at frame 414. Both edges of the
+    // blackout are pinned to this tie.
+    //
+    // So a tie is now broken by evidence instead of by iteration:
+    //
+    //   1. CONTINUITY. The origin this window resolved to last harvest. That
+    //      window held 3500,6300 for a hundred seconds before the flip. This is
+    //      safe against a legitimate re-base because it only chooses among
+    //      candidates OFFERED THIS FRAME - if the engine really moved the
+    //      window's origin, the old one is not on the table to stick to.
+    //   2. CORROBORATION. How many of the window's own records land on a known
+    //      anchor under this origin. The anchor table cannot detect the fault
+    //      on its own (it is written from the same derivation, so it drifts in
+    //      lockstep - dlXcheckDisagree saw none of this episode), but as a
+    //      TIE-BREAK it is sound: it is asking which of two candidates agrees
+    //      with what we already surveyed, not whether the winner is right.
+    //   3. Neither: keep the first offered, exactly as before, and count it.
+    //
+    // Ties are only scored in the tie path, so the common case pays one float
+    // compare and the probe stays off the hot path.
+    float khd_prev_ox = 0.0f, khd_prev_oz = 0.0f;
+    const bool khd_prev_ok = kh_dl_win_origin_of(khd_m.buf, khd_prev_ox, khd_prev_oz);
+
+    auto khd_corrob = [&](float ox, float oz) {
+        uint32_t khc_n = 0;
+
+        for (uint32_t i = 0; i < khd_rn; ++i) {
+            const float khc_x = ox + khd_rxz[i][0];
+            const float khc_y = khd_rxz[i][1];
+            const float khc_z = oz + khd_rxz[i][2];
+
+            for (uint32_t a = 0; a < g_dl.anchor_n; ++a) {
+                if (fabsf(g_dl.anchor_pos[a][0] - khc_x) < KH_DL_MATCH_M &&
+                    fabsf(g_dl.anchor_pos[a][1] - khc_y) < KH_DL_MATCH_M &&
+                    fabsf(g_dl.anchor_pos[a][2] - khc_z) < KH_DL_MATCH_M) {
+                    khc_n++;
+                    break;
+                }
+            }
+        }
+
+        return khc_n;
+    };
+
     auto khd_offer = [&](float ox, float oz, float res, uint8_t kind,
                          int32_t slot, uint32_t off, uint8_t form,
                          int32_t wslot, uint32_t woff, uint8_t wform) {
-        if (res > KH_DL_ORIGIN_RES_MAX) return;   // impostor class: never authors
+        // A WANDERING STRUCTURE IS NOT AN ORIGIN, AND ITS RESIDUAL SAYS SO.
+        //
+        // KH_DL_ORIGIN_RES_MAX was 0.03 and admitted the kind-0 impostor at
+        // 0.008 - 0.020 alongside the true candidate at EXACTLY 0.000. Across
+        // both field rings every genuine derivation reads 0.000 and every
+        // impostor 0.008 or worse, so the separation is clean and the bar sat
+        // in the wrong half of it. res_impostors counts what the tighter bar
+        // refuses and res_worst_kept records the worst residual still admitted,
+        // so a legitimate candidate landing in the cut band SAYS SO rather than
+        // quietly disappearing (rule 1.88).
+        if (res > KH_DL_ORIGIN_RES_KEEP) {
+            if (res <= KH_DL_ORIGIN_RES_MAX) g_dl.res_impostors++;
+            return;   // impostor class: never authors
+        }
+
+        if (res > g_dl.res_worst_kept) g_dl.res_worst_kept = res;
         if (!khd_range_ok(ox, oz)) return;   // structural impostors die here
 
         if (ox == 0.0f && oz == 0.0f) {
@@ -16413,7 +17206,142 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
             return;
         }
 
-        if (!khd_have_nz || res < khd_b_res) {
+        // CONTINUITY OUTRANKS RESIDUAL (26860), NOT JUST ON TIES.
+        //
+        // At 26854 continuity only broke exact ties, on the reasoning that a
+        // better residual is better evidence. The field refuted that: the
+        // impostor at kind 0 / slot 4 / off 16 carried res 0.000977 against a
+        // true candidate at 0.000, which is NOT a tie - so the ranking took the
+        // impostor on residual and the window's origin flipped 2000 m in z. The
+        // 8-light window carrying the near cluster sat at oz 4300 through the
+        // whole blackout and returned to 6300 when it recovered.
+        //
+        // A residual says how well a candidate SNAPS TO THE GRID. Both of these
+        // snap perfectly - a wrong grid point is still a grid point - so the
+        // quantity cannot separate them and no threshold on it ever will. What
+        // does separate them is in the per-window flip counts: the windows
+        // holding a true origin read 0 flips, the ones taken by the impostor
+        // read 12 to 55. A REAL ORIGIN DOES NOT WANDER.
+        //
+        // So continuity is now the primary key and residual the tiebreak within
+        // it. This cannot lock in a wrong origin: it only chooses among
+        // candidates OFFERED THIS FRAME, so if the engine genuinely re-bases the
+        // window, the old origin is not on the table to prefer.
+        // CONTINUITY IS A TIEBREAK AGAIN (26862). PROMOTING IT WAS A REGRESSION.
+        //
+        // 26860 made the window's previous origin outrank residual outright, on
+        // the reasoning that a real origin does not wander. That reasoning is
+        // still correct and it is still not a safe RANKING rule, because it
+        // defends whatever was acquired FIRST - including a wrong acquisition -
+        // and acquisition happens at startup or after a stall, exactly when
+        // there is no history and the choice is least reliable.
+        //
+        // The field build went dark 5.5 s in and NEVER recovered: every window
+        // pinned at flips 0, seven of eight on a wrong grid point, the two
+        // carrying the near clusters 2000 m out in z, and the pool starved at
+        // 1436 m from a mesh sitting next to the camera. Before the promotion
+        // the origins churned and the churn eventually stumbled onto the right
+        // answer - not a fix, but recoverable. After it, wrong is permanent.
+        // Permanent-wrong is strictly worse than intermittent-wrong: it takes
+        // the whole feature out and it blocks every other investigation.
+        //
+        // So continuity returns to breaking exact ties, where it cannot outvote
+        // evidence. The underlying problem it was reaching for is untouched and
+        // is NOT a ranking problem: no signal in this pipeline can currently
+        // tell a wrong grid origin from a right one. The residual cannot (both
+        // snap to the grid exactly). The anchors cannot (they are written from
+        // the same derivation, and dlXcheckDisagree read 1 in 2646 while every
+        // origin was wrong). Continuity cannot (it only preserves). The one
+        // signal that CAN is the engine's own culling - it emits lights near
+        // the camera, so an origin placing every light kilometres away is
+        // refused by construction - and that is what dlOriginNearM measures.
+        // KH_DL_NEARRANK (26865) - THE ENGINE'S OWN CULLING AS THE RANKING KEY,
+        // AND THE FIRST NON-CIRCULAR SIGNAL THIS DERIVATION HAS EVER HAD.
+        //
+        // Everything tried before was derived from our own output and could
+        // therefore agree with a wrong answer indefinitely. The residual cannot
+        // separate two grid points, because a WRONG one snaps to the grid
+        // exactly as well as the right one - every field ring shows the impostor
+        // at res 0.000-0.002 beside the truth at 0.000. The anchor table is
+        // written FROM accepted origins, so corroboration votes for what it
+        // already believes: it decided 674 of 941 ties while every origin was
+        // wrong, and dlXcheckDisagree read 0 throughout. Continuity only
+        // preserves, and promoting it at 26860 locked the wrong answer in
+        // permanently. Even the full amnesia at 26864 reproduced the same
+        // origin, because with no history the choice falls to loop order.
+        //
+        // THE CAMERA IS NOT DERIVED FROM US. The engine culls its light list to
+        // the camera - a light it deems irrelevant is not in the window at all -
+        // so a CORRECT origin must place at least one of the window's lights
+        // near the camera, and a wrong one displaces every light by the error.
+        // Measured on the field capture: the accepted origins put their nearest
+        // light at 264 m and their last at 1433 m, while the same records under
+        // the single grid correction the winOrigins table implies put a light at
+        // 13.5 m with a natural falloff behind it (86, 91, 104, 166, 196, 291).
+        // A hundredfold separation, on a quantity neither candidate can move.
+        //
+        // Proximity is therefore the primary key, residual the tiebreak within
+        // it, and the margin keeps ordinary noise from flapping the choice - a
+        // candidate must be MATERIALLY nearer, not merely nearer. Mode 543
+        // reverts to residual-primary, because promoting a key with no escape
+        // hatch is precisely what made 26860 a regression that could only be
+        // diagnosed by shipping again.
+        bool khd_take = false;
+        const bool khd_nrank = g_dbg_mode.load(std::memory_order_relaxed) != 543;
+        const float khd_nr_new = khd_nrank ? khd_near_of(ox, oz) : -1.0f;
+        const float khd_nr_old = (khd_nrank && khd_have_nz)
+                               ? khd_near_of(khd_b_ox, khd_b_oz) : -1.0f;
+        const bool khd_near_decides =
+            khd_nrank && khd_have_nz && khd_nr_new >= 0.0f && khd_nr_old >= 0.0f &&
+            fabsf(khd_nr_new - khd_nr_old) > KH_DL_NEAR_MARGIN_M;
+
+        if (!khd_have_nz) {
+            khd_take = true;
+        } else if (ox == khd_b_ox && oz == khd_b_oz) {
+            return;   // same origin by another route: nothing to decide
+        } else if (khd_near_decides) {
+            khd_take = khd_nr_new < khd_nr_old;
+            if (khd_take) { g_dl.near_wins++; g_dl.tie_overturns++; }
+            else g_dl.near_holds++;
+        } else if (res < khd_b_res - KH_DL_RES_TIE) {
+            khd_take = true;   // better residual wins
+        } else if (res <= khd_b_res + KH_DL_RES_TIE) {
+            const bool khd_cont_new = khd_prev_ok && ox == khd_prev_ox && oz == khd_prev_oz;
+            const bool khd_cont_old = khd_prev_ok &&
+                                      khd_b_ox == khd_prev_ox && khd_b_oz == khd_prev_oz;
+
+            if (khd_cont_new != khd_cont_old) {
+                g_dl.tie_continuity++;
+                khd_take = khd_cont_new;
+                if (khd_take) g_dl.tie_overturns++;
+                khd_have_nz = true;
+                if (khd_take) {
+                    khd_b_ox = ox; khd_b_oz = oz; khd_b_res = res;
+                    khd_b_kind = kind;
+                    khd_b_slot = slot; khd_b_off = off; khd_b_form = form;
+                    khd_b_wslot = wslot; khd_b_woff = woff; khd_b_wform = wform;
+                }
+                return;
+            }
+            g_dl.tie_seen++;
+
+            {
+                const uint32_t khd_cn = khd_corrob(ox, oz);
+                const uint32_t khd_co = khd_corrob(khd_b_ox, khd_b_oz);
+
+                if (khd_cn != khd_co) {
+                    g_dl.tie_corrob++;
+                    khd_take = khd_cn > khd_co;
+                } else {
+                    g_dl.tie_arbitrary++;
+                    khd_take = res < khd_b_res;   // the old rule, unchanged
+                }
+            }
+
+            if (khd_take) g_dl.tie_overturns++;
+        }
+
+        if (khd_take) {
             khd_have_nz = true;
             khd_b_ox = ox; khd_b_oz = oz; khd_b_res = res;
             khd_b_kind = kind;
@@ -16425,13 +17353,26 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
     float khd_tox, khd_toz, khd_tres;
 
     // memoized fast path (non-zero winners only ever memoize)
-    if (g_dl.vs_hint_slot >= 0 && g_dl.vs_hint_slot < static_cast<int32_t>(KH_DL_VS_SLOTS)) {
-        const uint32_t khd_mfl = khd_m.vs_bytes[g_dl.vs_hint_slot] / 4u;
+    // KH_DL_WINHINT (26856): THIS WINDOW'S memo, not the session's. See the
+    // note on win_hint_* - a shared tuple let one window's impostor overwrite
+    // another window's exact answer, and the fast path then reproduced it
+    // without ever rescanning.
+    const uint32_t khd_ws = kh_dl_win_slot(khd_m.buf);
+    const uint8_t  khd_h_kind  = g_dl.win_hint_set[khd_ws] ? g_dl.win_hint_kind[khd_ws]  : 0;
+    const int32_t  khd_h_slot  = g_dl.win_hint_set[khd_ws] ? g_dl.win_hint_slot[khd_ws]  : -1;
+    const uint32_t khd_h_off   = g_dl.win_hint_set[khd_ws] ? g_dl.win_hint_off[khd_ws]   : 0;
+    const uint8_t  khd_h_form  = g_dl.win_hint_set[khd_ws] ? g_dl.win_hint_form[khd_ws]  : 0;
+    const int32_t  khd_h_wslot = g_dl.win_hint_set[khd_ws] ? g_dl.win_hint_wslot[khd_ws] : -1;
+    const uint32_t khd_h_woff  = g_dl.win_hint_set[khd_ws] ? g_dl.win_hint_woff[khd_ws]  : 0;
+    const uint8_t  khd_h_wform = g_dl.win_hint_set[khd_ws] ? g_dl.win_hint_wform[khd_ws] : 0;
+
+    if (khd_h_slot >= 0 && khd_h_slot < static_cast<int32_t>(KH_DL_VS_SLOTS)) {
+        const uint32_t khd_mfl = khd_m.vs_bytes[khd_h_slot] / 4u;
         bool khd_hit = false;
 
-        if (g_dl.vs_hint_kind == 2) {
-            if (g_dl.vs_hint_off + 4 <= khd_mfl) {
-                const float* khd_t = khd_block(g_dl.vs_hint_slot) + g_dl.vs_hint_off;
+        if (khd_h_kind == 2) {
+            if (khd_h_off + 4 <= khd_mfl) {
+                const float* khd_t = khd_block(khd_h_slot) + khd_h_off;
 
                 if (dl_finite(khd_t[0]) && dl_finite(khd_t[1]) && dl_finite(khd_t[2]) &&
                     dl_origin_validate(khd_bcam[0] - khd_t[0], khd_bcam[1] - khd_t[1],
@@ -16443,18 +17384,18 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
                     khd_hit = true;
                 }
             }
-        } else if (g_dl.vs_hint_kind == 3 && g_dl.vs_hint_wslot >= 0 &&
-                   g_dl.vs_hint_wslot < static_cast<int32_t>(KH_DL_VS_SLOTS)) {
-            const uint32_t khd_wfl = khd_m.vs_bytes[g_dl.vs_hint_wslot] / 4u;
+        } else if (khd_h_kind == 3 && khd_h_wslot >= 0 &&
+                   khd_h_wslot < static_cast<int32_t>(KH_DL_VS_SLOTS)) {
+            const uint32_t khd_wfl = khd_m.vs_bytes[khd_h_wslot] / 4u;
 
-            if (g_dl.vs_hint_off + 4 <= khd_mfl &&
-                g_dl.vs_hint_woff + dl_form_floats(g_dl.vs_hint_wform) <= khd_wfl) {
-                const float* khd_t = khd_block(g_dl.vs_hint_slot) + g_dl.vs_hint_off;
+            if (khd_h_off + 4 <= khd_mfl &&
+                khd_h_woff + dl_form_floats(khd_h_wform) <= khd_wfl) {
+                const float* khd_t = khd_block(khd_h_slot) + khd_h_off;
                 float khd_vw[4][4];
 
                 if (dl_finite(khd_t[0]) && dl_finite(khd_t[1]) && dl_finite(khd_t[2]) &&
-                    dl_cand_structure(khd_block(g_dl.vs_hint_wslot) + g_dl.vs_hint_woff,
-                                      g_dl.vs_hint_wform, khd_vw) &&
+                    dl_cand_structure(khd_block(khd_h_wslot) + khd_h_woff,
+                                      khd_h_wform, khd_vw) &&
                     dl_rot_identity(khd_vw) &&
                     dl_origin_validate(khd_vw[3][0] - khd_t[0], khd_vw[3][1] - khd_t[1],
                                        khd_vw[3][2] - khd_t[2], true, 0.5f, 0.25f,
@@ -16465,19 +17406,19 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
                     khd_hit = true;
                 }
             }
-        } else if (g_dl.vs_hint_kind == 1 && g_dl.vs_hint_wslot >= 0 &&
-                   g_dl.vs_hint_wslot < static_cast<int32_t>(KH_DL_VS_SLOTS)) {
-            const uint32_t khd_wfl = khd_m.vs_bytes[g_dl.vs_hint_wslot] / 4u;
+        } else if (khd_h_kind == 1 && khd_h_wslot >= 0 &&
+                   khd_h_wslot < static_cast<int32_t>(KH_DL_VS_SLOTS)) {
+            const uint32_t khd_wfl = khd_m.vs_bytes[khd_h_wslot] / 4u;
 
-            if (g_dl.vs_hint_off + dl_form_floats(g_dl.vs_hint_form) <= khd_mfl &&
-                g_dl.vs_hint_woff + dl_form_floats(g_dl.vs_hint_wform) <= khd_wfl) {
+            if (khd_h_off + dl_form_floats(khd_h_form) <= khd_mfl &&
+                khd_h_woff + dl_form_floats(khd_h_wform) <= khd_wfl) {
                 float khd_vm[4][4], khd_vw[4][4];
 
-                if (dl_cand_structure(khd_block(g_dl.vs_hint_slot) + g_dl.vs_hint_off,
-                                      g_dl.vs_hint_form, khd_vm) &&
+                if (dl_cand_structure(khd_block(khd_h_slot) + khd_h_off,
+                                      khd_h_form, khd_vm) &&
                     dl_rot_matches(khd_vm, khd_bcols) &&
-                    dl_cand_structure(khd_block(g_dl.vs_hint_wslot) + g_dl.vs_hint_woff,
-                                      g_dl.vs_hint_wform, khd_vw) &&
+                    dl_cand_structure(khd_block(khd_h_wslot) + khd_h_woff,
+                                      khd_h_wform, khd_vw) &&
                     dl_rot_identity(khd_vw)) {
                     float khd_cam[3];
                     extract_camera_pos(khd_vm, khd_cam);
@@ -16497,12 +17438,44 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
             }
         }
 
+        // A DRIFTING HIT IS NOT A HIT (26860). IT NOW FALLS THROUGH TO A
+        // RESCAN INSTEAD OF BEING TRUSTED.
+        //
+        // 26854 added dlHintDrift as a census with the note that IF it climbed,
+        // the next step was exactly this. It climbed: 150 hits moved their
+        // window's origin in the field session, and because a hit returns here
+        // the full scan never ran to reconsider - so a window whose memo had
+        // settled on the wandering impostor reproduced a fresh wrong origin
+        // every harvest, forever, with the ranking fix unable to reach it.
+        //
+        // The rule is the same invariant the ranking now uses: a real origin
+        // does not wander. If the memo produces an origin this window has not
+        // held before, the memo has stopped describing this window and the
+        // cheap answer is not worth having. Falling through costs one full scan
+        // on that harvest and lets the ranking - where continuity is now the
+        // primary key - re-pick the stable candidate. If the scan then finds
+        // nothing the window authors NOTHING, which is the right outcome: a
+        // window with no trustworthy origin should be refused, not decorated
+        // with a wrong one (rule 1.91).
+        if (khd_hit) {
+            float khh_px = 0.0f, khh_pz = 0.0f;
+
+            if (kh_dl_win_origin_of(khd_m.buf, khh_px, khh_pz) &&
+                (khh_px != khd_tox || khh_pz != khd_toz)) {
+                g_dl.hint_drift++;
+                g_dl.hint_drift_dx = khd_tox - khh_px;
+                g_dl.hint_drift_dz = khd_toz - khh_pz;
+                g_dl.hint_drift_rescans++;
+                khd_hit = false;   // fall through to the full scan
+            }
+        }
+
         if (khd_hit) {
             khd_ox = khd_tox;
             khd_oz = khd_toz;
             khd_res = khd_tres;
-            khd_slot_out = g_dl.vs_hint_slot;
-            khd_wslot_out = g_dl.vs_hint_wslot;
+            khd_slot_out = khd_h_slot;
+            khd_wslot_out = khd_h_wslot;
             g_dl.vs_hint_hits++;
             g_dl.vs_valid++;
             return true;
@@ -16637,11 +17610,98 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
     }
 
     if (khd_have_nz) {
+        {   // KH_DL_ORIGINNEAR: how near the winning origin puts this window's
+            // closest light to the capture camera. Census only.
+            float khd_nr = -1.0f;
+
+            for (uint32_t i = 0; i < khd_rn; ++i) {
+                const float khd_ex = khd_b_ox + khd_rxz[i][0] - khd_bcam[0];
+                const float khd_ez = khd_b_oz + khd_rxz[i][2] - khd_bcam[2];
+                const float khd_ed = sqrtf(khd_ex * khd_ex + khd_ez * khd_ez);
+                if (khd_nr < 0.0f || khd_ed < khd_nr) khd_nr = khd_ed;
+            }
+
+            if (khd_nr >= 0.0f) {
+                g_dl.origin_near_last = khd_nr;
+                if (g_dl.origin_near_min < 0.0f || khd_nr < g_dl.origin_near_min) {
+                    g_dl.origin_near_min = khd_nr;
+                }
+                if (khd_nr > g_dl.origin_near_max) g_dl.origin_near_max = khd_nr;
+                g_dl.origin_near_n++;
+            }
+        }
         khd_ox = khd_b_ox;
         khd_oz = khd_b_oz;
         khd_res = khd_b_res;
         khd_slot_out = khd_b_slot;
         khd_wslot_out = khd_b_wslot;
+        // KH_DL_HINTWATCH: this is the ONLY place the memo is written, and it
+        // runs a handful of times a session. Record what is being committed and
+        // what came immediately before it - the stall lane is the one the
+        // alt-tab report stands or falls on.
+        {
+            const bool khd_changed = g_dl.vs_hint_kind != khd_b_kind ||
+                                     g_dl.vs_hint_slot != khd_b_slot ||
+                                     g_dl.vs_hint_off != khd_b_off ||
+                                     g_dl.vs_hint_form != khd_b_form ||
+                                     g_dl.vs_hint_wslot != khd_b_wslot ||
+                                     g_dl.vs_hint_woff != khd_b_woff ||
+                                     g_dl.vs_hint_wform != khd_b_wform;
+            const float khd_mvx = khd_b_ox - g_dl.hint_ox;
+            const float khd_mvz = khd_b_oz - g_dl.hint_oz;
+            DlHintRec& khd_hr = g_dl.hint_ring[g_dl.hint_head % KH_DL_HINT_RING];
+            khd_hr = DlHintRec{};
+            khd_hr.t_ms = steady_now_ms();
+            khd_hr.serial = static_cast<uint32_t>(g_dl.serial);
+            khd_hr.kind = khd_b_kind;
+            khd_hr.slot = static_cast<int8_t>(khd_b_slot);
+            khd_hr.wslot = static_cast<int8_t>(khd_b_wslot);
+            khd_hr.form = khd_b_form;
+            khd_hr.off = static_cast<uint16_t>(khd_b_off);
+            khd_hr.woff = static_cast<uint16_t>(khd_b_woff);
+            khd_hr.ox = khd_b_ox;
+            khd_hr.oz = khd_b_oz;
+            khd_hr.res = khd_b_res;
+            khd_hr.d_ox = khd_changed ? khd_mvx : 0.0f;
+            khd_hr.d_oz = khd_changed ? khd_mvz : 0.0f;
+            khd_hr.stall_ms = g_dl.stall_last_ms;
+            g_dl.hint_head++;
+            if (khd_changed) {
+                g_dl.hint_changes++;
+                g_dl.hint_move_ox = khd_mvx;
+                g_dl.hint_move_oz = khd_mvz;
+            }
+            g_dl.hint_set_ms = khd_hr.t_ms;
+            g_dl.hint_set_serial = khd_hr.serial;
+            g_dl.hint_set_stall_ms = g_dl.stall_last_ms;
+            g_dl.hint_ox = khd_b_ox;
+            g_dl.hint_oz = khd_b_oz;
+        }
+        // KH_DL_WINHINT: commit to THIS WINDOW's slot. The globals below are
+        // kept only as "last committed", for the dump and the hint ring -
+        // nothing reads them to make a decision any more.
+        //
+        // hint_cross_writes counts the poisoning that used to happen right
+        // here: a write whose tuple differs from the global one, which under
+        // the old scheme overwrote whatever another window had learned. Expect
+        // it to be substantial and to mean nothing - it is the size of the
+        // bullet this build dodges, not a fault in it.
+        if (g_dl.vs_hint_slot >= 0 &&
+            (g_dl.vs_hint_kind != khd_b_kind || g_dl.vs_hint_slot != khd_b_slot ||
+             g_dl.vs_hint_off != khd_b_off || g_dl.vs_hint_wslot != khd_b_wslot ||
+             g_dl.vs_hint_woff != khd_b_woff)) {
+            g_dl.hint_cross_writes++;
+        }
+
+        g_dl.win_hint_set[khd_ws] = 1;
+        g_dl.win_hint_kind[khd_ws] = khd_b_kind;
+        g_dl.win_hint_slot[khd_ws] = khd_b_slot;
+        g_dl.win_hint_off[khd_ws] = khd_b_off;
+        g_dl.win_hint_form[khd_ws] = khd_b_form;
+        g_dl.win_hint_wslot[khd_ws] = khd_b_wslot;
+        g_dl.win_hint_woff[khd_ws] = khd_b_woff;
+        g_dl.win_hint_wform[khd_ws] = khd_b_wform;
+
         g_dl.vs_hint_kind = khd_b_kind;
         g_dl.vs_hint_slot = khd_b_slot;
         g_dl.vs_hint_off = khd_b_off;
@@ -16704,8 +17764,87 @@ inline void dynlights_anchor_upsert(float khd_x, float khd_y, float khd_z, uint6
     g_dl.anchor_stamp[khd_slot] = khd_now;
 }
 
+// KH_DL_GHOST (26850) - A WRONG ORIGIN IS ADMITTED AS TRUTH, AND THE RESIDUAL
+// GATE IS STRUCTURALLY BLIND TO IT.
+//
+// An origin error is a pure X/Z translation by a whole number of
+// KH_DL_ORIGIN_Q steps. A light decoded under the wrong origin therefore lands
+// at the SAME height, exactly ON the grid, with residual ZERO - so
+// KH_DL_ANCHOR_RES (0.005) waves it through and dynlights_anchor_upsert files
+// it as exogenous surveying truth. That is rule 1.98 in its purest form: the
+// threshold cannot resolve the quantity it is being asked to test, because the
+// error it must catch is an exact multiple of the grid the residual is
+// measured against. anchorResRejects read 0 all session while the table was a
+// third ghosts - the gate was not merely permissive, it was inert.
+//
+// FIELD EVIDENCE (the session in dump2/dump3): 19 of 64 anchor slots held the
+// live pool's OWN lights at exactly z - 2000 m - twenty grid steps - written
+// in two bursts 22 ms apart. The consequence is not cosmetic. The anchor table
+// is the only ground truth dynlights_pool_vote has, and the vote is the only
+// fallback when the derivation misses; with a ghost twin for a third of the
+// pool, every window the vote "rescued" that session was thrown straight back
+// out by the range backstop (originPoolVotes 89, originRangeRejects 89 - the
+// fallback recovered nothing at all).
+//
+// THE POOL IS THE CORROBORATION. A pool record is re-sighted every harvest and
+// carries its sighting count; an anchor is written once and never revisited.
+// So an anchor that disagrees with a LIVE pool light by a whole number of grid
+// steps, at the same height, is not a second lamp - it is this lamp decoded
+// wrong, and the two are mutually exclusive claims about one light. Drop the
+// anchor, never the pool.
+//
+// The test is deliberately narrow (same Y within the match radius; BOTH axis
+// offsets within the match radius of a grid multiple; not the zero offset,
+// which is the light itself). Measured against the field table it convicted
+// 19 of 19 ghosts and zero of the 45 legitimate entries. If it ever does
+// misfire the cost is one voter fewer, while the cost of keeping a ghost is a
+// poisoned fallback - the asymmetry is why it is written to err this way.
+
+inline bool dynlights_anchor_ghost(const float* khg_a) {
+    for (uint32_t khg_p = 0; khg_p < g_dl.pool_n; ++khg_p) {
+        const DlPoolLight& khg_e = g_dl.pool[khg_p];
+        // ONLY A CORROBORATED LIGHT MAY CONVICT AN ANCHOR.
+        //
+        // Without this the rule can destroy both sides of a poisoning. If a bad
+        // origin ever reaches the POOL as well as the table, the real light and
+        // its ghost are both pool entries, each sits a whole grid step from the
+        // other's anchor, and the sweep drops the real anchor and the ghost
+        // alike - trading a poisoned table for an empty one, which takes the
+        // vote out entirely.
+        //
+        // Sighting count breaks the symmetry, and it is the right discriminator
+        // rather than a convenient one: a real lamp is re-sighted every harvest
+        // and carries hundreds of sightings, while a wrong-origin entry is
+        // written by the handful of harvests that misdecoded and then expires
+        // inside a second. The asymmetry is the whole reason this fault
+        // persists - the pool ages a ghost out in under a second while the
+        // anchor table holds it for sixty - so the pool is reliably the clean
+        // copy by the time this runs, and requiring dense evidence keeps it
+        // that way even when it is not.
+        if (khg_e.sightings < KH_DL_DENSE_SIGHTS) continue;
+        const float* khg_r = khg_e.rec;
+        if (fabsf(khg_r[1] - khg_a[1]) > KH_DL_MATCH_M) continue;   // different height: different light
+        const float khg_dx = khg_r[0] - khg_a[0];
+        const float khg_dz = khg_r[2] - khg_a[2];
+        const float khg_sx = floorf(khg_dx / KH_DL_ORIGIN_Q + 0.5f) * KH_DL_ORIGIN_Q;
+        const float khg_sz = floorf(khg_dz / KH_DL_ORIGIN_Q + 0.5f) * KH_DL_ORIGIN_Q;
+        if (khg_sx == 0.0f && khg_sz == 0.0f) continue;   // same place: this IS the light
+        if (fabsf(khg_dx - khg_sx) > KH_DL_MATCH_M) continue;   // off-grid: unrelated
+        if (fabsf(khg_dz - khg_sz) > KH_DL_MATCH_M) continue;
+        g_dl.anchor_ghost_dx = khg_sx;   // publish the offset: it names the
+        g_dl.anchor_ghost_dz = khg_sz;   // size of the origin error in metres
+        return true;
+    }
+
+    return false;
+}
+
+// khd_shadow: run purely as a CENSUS against a window that already derived an
+// origin. It must not touch the ambiguity lane, or the cross-check below would
+// silently rewrite the number the real fallback publishes.
 inline bool dynlights_pool_vote(const float* khd_l, uint32_t khd_total,
-                                float& khd_ox, float& khd_oz, DlWinReport& khd_rep) {
+                                float& khd_ox, float& khd_oz, DlWinReport& khd_rep,
+                                bool khd_shadow = false) {
     if (g_dl.anchor_n == 0 || khd_total == 0) return false;
     float khd_cox[8], khd_coz[8], khd_cres[8];
     uint32_t khd_cv[8], khd_cn = 0;
@@ -16776,7 +17915,7 @@ inline bool dynlights_pool_vote(const float* khd_l, uint32_t khd_total,
     const bool khd_lone = khd_cn == 1 && khd_cres[khd_best] <= 0.005f;
 
     if (!khd_clear && !khd_lone) {
-        g_dl.origin_vote_ambiguous++;
+        if (!khd_shadow) g_dl.origin_vote_ambiguous++;
         return false;
     }
 
@@ -16791,6 +17930,108 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
     g_dl.win_report_n = 0;
     const uint64_t khd_now = steady_now_ms();
     const uint64_t khd_anchored0 = g_dl.lists_anchored;
+    const uint64_t khd_unanch0 = g_dl.lists_unanchored;
+    // KH_DL_HINTWATCH: hits versus scans THIS harvest. A wrong origin reached
+    // through the memo and a wrong origin reached through a full scan have
+    // different fixes - invalidate the memo, or fix the scan's ranking - and
+    // the session totals cannot separate them at the moment it happens.
+    const uint64_t khd_hh0 = g_dl.vs_hint_hits;
+    const uint64_t khd_vs0 = g_dl.vs_valid;
+    const uint64_t khd_xd0 = g_dl.xcheck_disagree;
+    const uint64_t khd_ti0 = g_dl.tie_seen;
+    const uint64_t khd_hd0 = g_dl.hint_drift;
+    {   // KH_DL_FORGET (26862, mode 542) - MANUAL RE-ACQUISITION.
+        //
+        // A window that locks onto a wrong origin currently has no way out
+        // inside a session: the memo hits every harvest, the anchors agree with
+        // it, and the pool starves. The field session went dark at 5.5 s and
+        // stayed dark, which does not merely lose dynamic lights - it blocks
+        // every other investigation, because the visual tasks cannot be
+        // photographed on a mesh that is receiving nothing.
+        //
+        // So: setting dbgMode 542 clears every per-window memo and origin once,
+        // forcing a full re-acquisition on the next harvest. It is EDGE
+        // TRIGGERED - flip to 542 and back to 0 to fire it again - so it is a
+        // button rather than a state, and holding the mode does not thrash the
+        // derivation every frame.
+        //
+        // This is a workaround and is labelled as one. Re-acquisition can land
+        // on the same wrong origin; it is a lottery ticket, not a fix. The fix
+        // needs a signal that can convict a wrong origin outright, which is
+        // what KH_DL_ORIGINNEAR is being measured for.
+        const bool khd_forget = g_dbg_mode.load(std::memory_order_relaxed) == 542;
+
+        // 26863 CLEARED THE MEMO AND THE ORIGINS AND LEFT THE EVIDENCE THAT
+        // PRODUCED THEM. THAT IS WHY IT DID NOTHING.
+        //
+        // dynlights_anchor_upsert writes the anchor table FROM accepted
+        // origins, and khd_corrob - the tie-break - reads that same table. So a
+        // wrong origin anchors its lights at wrong world positions, and those
+        // anchors then corroborate the wrong origin on the next harvest. The
+        // field caught it exactly: corroboration decided 675 of 946 ties, and
+        // the 14-light window reproduced (3500,4300) with flips 0 across 3234
+        // harvests AND two forced forgets. Re-acquisition was never a lottery -
+        // it was deterministic, because the evidence it consults was written by
+        // the answer it was re-deriving.
+        //
+        // So the button now takes the anchors and the pool with it. That makes
+        // it real amnesia and, more usefully, a DISCRIMINATOR: if a window
+        // still lands on the same origin with no memo, no remembered origin, no
+        // anchors and no pool, then nothing circular is holding it and the
+        // derivation is genuinely producing that answer from the window's own
+        // contents - which moves the fault into the candidate set and off the
+        // evidence entirely. Those two have completely different fixes and
+        // nothing measured so far separates them.
+        //
+        // The same circularity is why dlXcheckDisagree has read ~0 all campaign
+        // while every origin was wrong: that cross-check compares the
+        // derivation against anchors written by the derivation, so it could
+        // never have disagreed. It is not a witness and should not be read as
+        // one.
+        if (khd_forget && !g_dl_forget_latch) {
+            g_dl_forget_latch = true;
+            memset(g_dl.win_hint_set, 0, sizeof(g_dl.win_hint_set));
+            memset(g_dl.win_oset, 0, sizeof(g_dl.win_oset));
+            g_dl.vs_hint_slot = -1;
+            g_dl.vs_hint_wslot = -1;
+            g_dl.anchor_n = 0;   // the corroboration the re-derivation would consult
+            memset(g_dl.anchor_pos, 0, sizeof(g_dl.anchor_pos));
+            memset(g_dl.anchor_stamp, 0, sizeof(g_dl.anchor_stamp));
+            g_dl.pool_n = 0;   // and the positions it would be matched against
+            g_dl.forget_fires++;
+        } else if (!khd_forget) {
+            g_dl_forget_latch = false;
+        }
+    }
+
+    // KH_DL_STALL (26852) - HOW LONG SINCE THE LAST HARVEST.
+    //
+    // The field reports the dark mesh appearing after an ALT-TAB, and an
+    // alt-tab is not a slow frame - it is a multi-second gap during which the
+    // game is paused and the engine's constant buffers keep whatever they last
+    // held. The resume harvest is therefore the one moment a full scan can run
+    // against content that no longer describes this frame, and the memo it
+    // writes is law for the rest of the session (see KH_DL_HINTWATCH).
+    //
+    // Recorded here, before anything reads it, so a memo write or an origin
+    // flip in the SAME harvest can be attributed to the stall that preceded it.
+    // A coincidence in the field is not a mechanism, but it is a lead, and this
+    // is what turns it into a number either way.
+    {
+        const uint64_t khd_gap = (g_dl.last_harvest_ms != 0 &&
+                                  khd_now >= g_dl.last_harvest_ms)
+                               ? khd_now - g_dl.last_harvest_ms : 0;
+        g_dl.stall_last_ms = khd_gap > 0xFFFFFFFFu ? 0xFFFFFFFFu
+                                                   : static_cast<uint32_t>(khd_gap);
+
+        if (khd_gap >= KH_DL_STALL_MS) {
+            g_dl.stalls_seen++;
+            g_dl.stall_last_at_ms = khd_now;
+            if (g_dl.stall_last_ms > g_dl.stall_max_ms) g_dl.stall_max_ms = g_dl.stall_last_ms;
+        }
+
+        g_dl.last_harvest_ms = khd_now;
+    }
     float khd_best_lum = -1.0f;
     float khd_best_g[3] = { 1.0f, 1.0f, 1.0f };
     float khd_best_s = 1.0f;
@@ -16799,11 +18040,19 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
     const uint64_t khd_expired0 = g_dl.pool_expired;
     const uint64_t khd_flips0 = g_dl.pool_spot_flips;
 
-    {   // anchor-table sweep: long TTL, movers-only concern
+    {   // anchor-table sweep: long TTL, movers-only concern, and since 26850
+        // a RECONCILIATION against the pool - see dynlights_anchor_ghost. The
+        // 60 s TTL alone cannot clear a ghost, because a ghost is written once
+        // and then sits in the table outliving the fault that made it.
         uint32_t khd_ak = 0;
 
         for (uint32_t a = 0; a < g_dl.anchor_n; ++a) {
             if (khd_now - g_dl.anchor_stamp[a] > KH_DL_ANCHOR_TTL_MS) continue;
+
+            if (dynlights_anchor_ghost(g_dl.anchor_pos[a])) {
+                g_dl.anchor_ghost_drops++;
+                continue;
+            }
 
             if (khd_ak != a) {
                 g_dl.anchor_pos[khd_ak][0] = g_dl.anchor_pos[a][0];
@@ -16818,25 +18067,75 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
         g_dl.anchor_n = khd_ak;
     }
 
+    // KH_DL_BLIND (26850, RETIRED 26855) - A RULE BUILT ON A FAULT THAT WAS NOT
+    // THERE.
+    //
+    // It read: while a recent harvest left a window unresolved, hold every
+    // light on the slow floor, because silence during a decode gap is not
+    // evidence the light went out. The reasoning is sound and the fault it was
+    // aimed at was imaginary - 26854 traced the dark mesh to the origin
+    // RANKING, with both edges of the blackout pinned to a memo change and the
+    // onset lagging it by exactly one TTL. Expiry was downstream of the real
+    // fault, not the cause of it.
+    //
+    // It also never turned off. blind_last_ms was refreshed on 83% of harvests
+    // because two windows fail permanently, so the grace window was
+    // continuously open and the flag was a LEVEL rather than an event - which
+    // is why it cost every despawn in the game 170 ms of extra tail and read as
+    // a half-second lag in the field.
+    //
+    // The counters stay (they are free, and the dark ring reads blind_run);
+    // only the behaviour is gone. Kept as a note rather than deleted because
+    // the reasoning will look correct again to the next reader, and the thing
+    // worth recording is that it WAS correct and still measured nothing.
+
     {   // TTL sweep first: compact out entries not re-sighted in time
         uint32_t khd_keep = 0;
 
         for (uint32_t i = 0; i < g_dl.pool_n; ++i) {
             const DlPoolLight& khd_e = g_dl.pool[i];
             uint64_t khd_ttl;
+            bool khd_fast = false;
 
             if (khd_e.gap_max_ms == 0) {
                 khd_ttl = KH_DL_TTL_FLOOR_MS;   // single sighting: no cadence evidence yet
             } else {
                 khd_ttl = kh_dl_gap_mult() * static_cast<uint64_t>(khd_e.gap_max_ms);
-                const uint64_t khd_floor = kh_dl_dense(khd_e.sightings, khd_e.gap_max_ms)
-                                         ? KH_DL_TTL_DENSE_FLOOR_MS : KH_DL_TTL_FLOOR_MS;
+                khd_fast = kh_dl_dense(khd_e.sightings, khd_e.gap_max_ms);
+                // KH_DL_BLIND WAS HERE, AND IT WAS ANSWERING THE WRONG QUESTION
+                // (26855). It forced every light onto the slow floor while any
+                // window had failed to decode recently, on the theory that the
+                // dark mesh came from lights expiring during a decode gap. It
+                // did not: 26854 traced the fault to the origin ranking, and
+                // both edges of the blackout to a memo change. Meanwhile
+                // khd_blind read TRUE on 83% of harvests - two windows fail
+                // permanently, so the flag was a LEVEL, not an event - and the
+                // cost was paid on every despawn in the game. A light that
+                // should have gone dark in 80 ms took 250, which is the
+                // half-second lag reported from the field.
+                //
+                // The lane it was reaching for is still the right one to think
+                // with, but a rule that never turns off is not a rule, it is a
+                // constant. The blind counters stay published as census (they
+                // cost nothing and the dark ring reads them); only the
+                // BEHAVIOUR is gone.
+                const uint64_t khd_floor = khd_fast ? KH_DL_TTL_DENSE_FLOOR_MS
+                                                    : KH_DL_TTL_FLOOR_MS;
                 if (khd_ttl < khd_floor) khd_ttl = khd_floor;
                 if (khd_ttl > KH_DL_TTL_CAP_MS) khd_ttl = KH_DL_TTL_CAP_MS;
             }
 
             if (khd_now - khd_e.stamp > khd_ttl) {
                 g_dl.pool_expired++;
+                // KH_DL_WINPROV: MEASURE, DO NOT ACT. This build deliberately
+                // does not change what expires - it only records whether the
+                // window that last carried this light was down at the moment it
+                // was dropped. Shipping a fix for a hypothesis these dumps
+                // cannot separate is the mistake the self-mask campaign already
+                // paid for; one capture with this lane settles it, and the fix
+                // is two lines once the answer is known.
+                if (kh_dl_win_down(khd_e.win_lo)) g_dl.sight_win_down++;
+                else g_dl.sight_win_up++;
 
                 if (g_diag_armed.load(std::memory_order_relaxed)) {   // census
                     DlExpiry& khd_x = g_dl_exp[g_dl_exp_head];
@@ -16957,6 +18256,13 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
                 khd_rep.pool_vote = 1;
             } else {
                 g_dl.lists_unanchored++;   // origin unresolved: authors nothing
+                {   // KH_DL_WINPROV: this window is down, per window
+                    const uint32_t khd_ws = kh_dl_win_slot(khd_m.buf);
+                    if (g_dl.win_fail_run[khd_ws] < 0xFFFFFFFFu) g_dl.win_fail_run[khd_ws]++;
+                    if (g_dl.win_fail_run[khd_ws] > g_dl.win_fail_max[khd_ws]) {
+                        g_dl.win_fail_max[khd_ws] = g_dl.win_fail_run[khd_ws];
+                    }
+                }
                 continue;
             }
         }
@@ -16966,17 +18272,87 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
         // kilometers from the capture camera convicts the ORIGIN, whatever
         // route produced it. Applied to both routes; anchors cannot normally
         // trip it, and a tripped window authors nothing.
+        // Record zero here too, and for the same reason it was wrong inside
+        // the derivation: this backstop convicted a correct origin whenever the
+        // window's FIRST light was a distant one. Same invariant, same probe -
+        // if any of the window's lights lands near the capture camera the
+        // origin is plausible, and only if none of them does is it convicted.
         if (khd_total > 0 && g_dl.arena_view_ok[khd_side]) {
-            const float khd_r0x = khd_o_x + khd_l[0] - g_dl.arena_cam[khd_side][0];
-            const float khd_r0z = khd_o_z + khd_l[2] - g_dl.arena_cam[khd_side][2];
+            bool khd_near = false;
+            uint32_t khd_probed = 0;
 
-            if (khd_r0x * khd_r0x + khd_r0z * khd_r0z > 3000.0f * 3000.0f) {
+            for (uint32_t khd_i = 0; khd_i < khd_total &&
+                                     khd_probed < KH_DL_RANGE_PROBE && !khd_near; ++khd_i) {
+                const float* khd_rr = khd_l + khd_i * 24;
+                if (!dl_finite(khd_rr[0]) || !dl_finite(khd_rr[2])) continue;
+                khd_probed++;
+                const float khd_r0x = khd_o_x + khd_rr[0] - g_dl.arena_cam[khd_side][0];
+                const float khd_r0z = khd_o_z + khd_rr[2] - g_dl.arena_cam[khd_side][2];
+
+                if (khd_r0x * khd_r0x + khd_r0z * khd_r0z <=
+                    KH_DL_ORIGIN_RANGE_M * KH_DL_ORIGIN_RANGE_M) {
+                    khd_near = true;
+                }
+            }
+
+            if (khd_probed > 0 && !khd_near) {
                 g_dl.origin_range_rejects++;
                 continue;
             }
         }
 
+        {   // KH_DL_XCHECK (26853): the anchors' opinion of an origin the
+            // derivation already committed to. CENSUS ONLY - the verdict is not
+            // consulted, nothing is rejected, and the frame is bit-identical
+            // with this block removed.
+            float khx_vx = 0.0f, khx_vz = 0.0f;
+            DlWinReport khx_scratch;
+            khx_scratch = DlWinReport{};
+
+            if (dynlights_pool_vote(khd_l, khd_total, khx_vx, khx_vz, khx_scratch, true)) {
+                g_dl.xcheck_voted++;
+
+                if (khx_vx != khd_o_x || khx_vz != khd_o_z) {
+                    g_dl.xcheck_disagree++;
+                    g_dl.xdis_der[0] = khd_o_x;
+                    g_dl.xdis_der[1] = khd_o_z;
+                    g_dl.xdis_vote[0] = khx_vx;
+                    g_dl.xdis_vote[1] = khx_vz;
+                    g_dl.xdis_lights = khd_total;
+                    g_dl.xdis_last_ms = khd_now;
+                } else {
+                    g_dl.xcheck_agree++;
+                }
+            } else {
+                g_dl.xcheck_novote++;
+            }
+        }
         g_dl.lists_anchored++;   // origin resolved (name kept; source is the derivation)
+        {   // KH_DL_WINPROV / KH_DL_ORIGINFLIP: this window is back up, and this
+            // is the origin it resolved to. A window that keeps anchoring but
+            // MOVES its origin by a grid multiple is the shape the last capture
+            // pointed at: it never counts as unanchored, it authors every
+            // frame, and it puts its lights where they are not.
+            const uint32_t khd_ws = kh_dl_win_slot(khd_m.buf);
+            g_dl.win_fail_run[khd_ws] = 0;
+            g_dl.win_lights[khd_ws] = khd_total;
+
+            if (g_dl.win_oset[khd_ws] &&
+                (g_dl.win_ox[khd_ws] != khd_o_x || g_dl.win_oz[khd_ws] != khd_o_z)) {
+                g_dl.origin_flips++;
+                if (g_dl.win_flips[khd_ws] < 0xFFFFFFFFu) g_dl.win_flips[khd_ws]++;
+                g_dl.flip_from[0] = g_dl.win_ox[khd_ws];
+                g_dl.flip_from[1] = g_dl.win_oz[khd_ws];
+                g_dl.flip_to[0] = khd_o_x;
+                g_dl.flip_to[1] = khd_o_z;
+                g_dl.flip_lights = khd_total;
+                g_dl.flip_last_ms = khd_now;
+            }
+
+            g_dl.win_ox[khd_ws] = khd_o_x;
+            g_dl.win_oz[khd_ws] = khd_o_z;
+            g_dl.win_oset[khd_ws] = 1;
+        }
         khd_rep.origin_ok = 1;
         khd_rep.ox = khd_o_x;
         khd_rep.oz = khd_o_z;
@@ -17042,6 +18418,7 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
                 khd_ax.gap_max_ms = kh_dl_gap_mark(khd_ax.gap_max_ms, khd_gap);
                 if (khd_ax.sightings < 0xFFFF) khd_ax.sightings++;
                 khd_ax.stamp = khd_now;
+                khd_ax.win_lo = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(khd_m.buf));
                 g_dl.aux_refreshes++;
                 continue;
             } else {
@@ -17071,6 +18448,7 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
             khd_pl.rec[1] = khd_wy;
             khd_pl.rec[2] = khd_wz;
             khd_pl.spot = khd_spot_new;
+            khd_pl.win_lo = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(khd_m.buf));
             khd_pl.aux = khd_main ? 0 : 1;   // a main sighting upgrades aux content
             if (khd_derived_ok) {
                 khd_pl.derived = 1;   // upgrade-only provenance (diagnostics)
@@ -17085,6 +18463,68 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
 
             khd_pl.stamp = khd_now;
         }
+    }
+
+    // KH_DL_BLIND: publish this harvest's own confidence for the NEXT sweep to
+    // read. Set after the window loop and never inside it, so it describes a
+    // completed harvest rather than a partial one - and stamped only on the
+    // failing side, because a run of clean harvests must be able to close the
+    // grace window again.
+    if (ffr_armed()) {   // KH_DL_TRACE: this harvest's decode verdict
+        FfrRecord& khd_fr = ffr_head();
+        const uint64_t khd_da = g_dl.lists_anchored - khd_anchored0;
+        const uint64_t khd_du = g_dl.lists_unanchored - khd_unanch0;
+        const uint64_t khd_de = g_dl.pool_expired - khd_expired0;
+        khd_fr.dl_anch = static_cast<uint16_t>(khd_da > 0xFFFFu ? 0xFFFFu : khd_da);
+        khd_fr.dl_unanch = static_cast<uint16_t>(khd_du > 0xFFFFu ? 0xFFFFu : khd_du);
+        khd_fr.dl_expired = static_cast<uint16_t>(khd_de > 0xFFFFu ? 0xFFFFu : khd_de);
+        khd_fr.dl_ohint_chg = static_cast<uint16_t>(g_dl.hint_changes & 0xFFFFu);
+        khd_fr.dl_oflips = static_cast<uint16_t>(g_dl.origin_flips & 0xFFFFu);
+        khd_fr.dl_stall_ms = g_dl.stall_last_ms;
+        // THE WINDOW THAT MOVED, NOT THE BIGGEST ONE.
+        //
+        // At 26853 this followed the window carrying the most lights, and that
+        // window's origin sat at 3500,6300 unchanged through the entire
+        // blackout - so the lane read "nothing happened" while the 15-light
+        // window beside it flipped and took the near cluster with it. Watching
+        // the largest window was watching the wrong one; the interesting window
+        // is the one whose origin most recently CHANGED, and it falls back to
+        // the largest only when nothing has flipped at all.
+        uint32_t khd_bw = 0, khd_bn = 0, khd_bf = 0;
+
+        for (uint32_t khd_wi = 0; khd_wi < KH_DL_WIN_SLOTS; ++khd_wi) {
+            if (!g_dl.win_oset[khd_wi]) continue;
+
+            if (g_dl.win_flips[khd_wi] > khd_bf ||
+                (khd_bf == 0 && g_dl.win_lights[khd_wi] > khd_bn)) {
+                if (g_dl.win_flips[khd_wi] > khd_bf) khd_bf = g_dl.win_flips[khd_wi];
+                khd_bn = g_dl.win_lights[khd_wi];
+                khd_bw = khd_wi;
+            }
+        }
+
+        khd_fr.dl_win_ox = g_dl.win_ox[khd_bw];
+        khd_fr.dl_win_oz = g_dl.win_oz[khd_bw];
+        khd_fr.dl_win_lights = static_cast<uint16_t>(khd_bn > 0xFFFFu ? 0xFFFFu : khd_bn);
+        const uint64_t khd_dhh = g_dl.vs_hint_hits - khd_hh0;
+        const uint64_t khd_dvs = g_dl.vs_valid - khd_vs0;
+        const uint64_t khd_dxd = g_dl.xcheck_disagree - khd_xd0;
+        khd_fr.dl_hint_hits = static_cast<uint8_t>(khd_dhh > 255u ? 255u : khd_dhh);
+        khd_fr.dl_derived = static_cast<uint8_t>(khd_dvs > 255u ? 255u : khd_dvs);
+        khd_fr.dl_xdis = static_cast<uint8_t>(khd_dxd > 255u ? 255u : khd_dxd);
+        const uint64_t khd_dti = g_dl.tie_seen - khd_ti0;
+        const uint64_t khd_dhd = g_dl.hint_drift - khd_hd0;
+        khd_fr.dl_ties = static_cast<uint8_t>(khd_dti > 255u ? 255u : khd_dti);
+        khd_fr.dl_drift = static_cast<uint8_t>(khd_dhd > 255u ? 255u : khd_dhd);
+    }
+
+    if (g_dl.lists_unanchored > khd_unanch0) {
+        g_dl.blind_last_ms = khd_now;
+        g_dl.blind_harvests++;
+        if (g_dl.blind_run < 0xFFFFFFFFu) g_dl.blind_run++;
+        if (g_dl.blind_run > g_dl.blind_run_max) g_dl.blind_run_max = g_dl.blind_run;
+    } else {
+        g_dl.blind_run = 0;
     }
 
     if (khd_best_lum > 0.0f) {   // empty harvests keep the last reference
@@ -17467,9 +18907,1018 @@ inline void dynlights_acquire(ID3D11DeviceContext* ctx, const float view[4][4]) 
     khd_b11->Release();
 }
 
+// ---------------------------------------------------------------------------
+// KH_DL_SHADOW (stage 1 of 4) - WHICH LIGHTS CAST.
+//
+// RULE 1.78, DELIBERATELY. This publishes the separation BEFORE anything
+// renders a map or moves a pixel, because the whole feature rests on one
+// unproven assumption: that a STABLE casting set can be picked at all from a
+// pool that is TTL-swept and re-matched by position on every harvest. If the
+// slots churn, every shadow this feature later draws swaps its light mid-
+// frame and strobes, and no amount of map-side work repairs that. dlsChurnMax
+// answers it in one dump, for the cost of one build.
+//
+// SLOTS ARE KEYED ON POSITION, NEVER ON POOL INDEX. g_dl.pool is uncapped,
+// TTL-swept and COMPACTED (pool_n = keep), so a pool index names a DIFFERENT
+// light after any sweep - binding a shadow map to an index would re-point it
+// at another light silently. Same 1 m radius the pool itself uses to decide a
+// light has been re-sighted (KH_DL_MATCH_M), so the two agree by construction.
+//
+// HYSTERESIS, NOT A BAR (rule 1.84/1.85). A sitting light is ousted only by a
+// challenger that beats it by KH_DLS_OUST_FRAC. Two lights of near-equal
+// brightness would otherwise trade one slot every frame - a ratchet seen from
+// the other side, and invisible to any guard that examines one swap alone.
+//
+// THE SCORE IS NOT DISTANCE-WEIGHTED, and that is a decision, not an omission.
+// The contract is 'the brightest lights cast'. Folding in camera distance would
+// make the casting SET follow the view, which is precisely the class that cost
+// the sun campaign six builds (camera-driven noise in a quantity that must not
+// follow the camera). Brightness is a property of the light; distance is a
+// property of where you stand.
+//
+// Mode 514 stands the whole selection down - no slot is ever filled, so every
+// consumer downstream reads 'no shadow'. That is this feature's ownership test
+// (rule 1.82) and its bit-exact revert.
+// ---------------------------------------------------------------------------
+static constexpr uint32_t KH_DLS_MAX = 8;             // shadow-casting lights (the cap)
+static constexpr float    KH_DLS_MATCH_M = 1.0f;      // same-light radius; mirrors KH_DL_MATCH_M
+static constexpr float    KH_DLS_OUST_FRAC = 1.25f;   // a challenger must beat the sitting light by this
+static constexpr uint64_t KH_DLS_TTL_MS = 500;        // slot expiry once a light stops being re-sighted
+
+struct KhDlsSlot {
+    float    pos[3] = {};      // engine axes - THE SLOT'S IDENTITY
+    float    score = 0.0f;     // luminance it holds the slot on
+    float    reach = 0.0f;     // hard-fade reach (m); stage 2 sizes the map with it
+    uint8_t  spot = 0;         // 0 = point (omni), 1 = spot (single frustum)
+    uint8_t  live = 0;
+    uint64_t stamp = 0;        // last pass this slot was re-matched
+};
+
+static KhDlsSlot g_dls[KH_DLS_MAX];
+static uint32_t  g_dls_n = 0;           // live slots after the last pass
+static uint64_t  g_dls_frame = 0;       // once-per-frame guard (twin call sites)
+
+// Census. All window-scoped and reset with the stats (rule 1.89) except the
+// slot table itself, which is behaviour state: clearing it would re-admit from
+// scratch at every reset and hand the next window a fresh churn spike (1.80).
+static uint64_t g_dls_selects = 0;      // passes run
+static uint64_t g_dls_cands = 0;        // pool lights actually considered
+static uint64_t g_dls_holds = 0;        // slot re-matched to the SAME light (the healthy case)
+static uint64_t g_dls_admits = 0;       // light took a FREE slot
+static uint64_t g_dls_evicts = 0;       // light ousted a dimmer sitting light
+static uint64_t g_dls_expires = 0;      // slot dropped: its light stopped being re-sighted
+static uint64_t g_dls_refused = 0;      // challenger refused by the hysteresis margin
+static uint32_t g_dls_churn = 0;        // slots whose occupant CHANGED, last pass
+static uint32_t g_dls_churn_max = 0;    // worst in the window - THE lane this build exists for
+static uint32_t g_dls_n_last = 0;
+static uint32_t g_dls_n_max = 0;
+static uint32_t g_dls_pool_max = 0;     // largest pool seen (is the 8-cap even binding?)
+static float    g_dls_score_hi = -1.0f; // brightest admitted
+static float    g_dls_score_lo = -1.0f; // dimmest admitted - the cut line
+static float    g_dls_score_cut = -1.0f;// brightest REFUSED - see the note at the scan
+
+// Rec.709 luminance of the diffuse lobe plus the per-light ambient. Both are
+// what the light SPENDS; the ambient lane is what makes A3 lights read on
+// away-facing surfaces (see the DynLights note), so a light with a large
+// ambient and a small diffuse is still a bright light in this scene.
+// This is what the light spends AT SOURCE. What it DELIVERS is below.
+inline float kh_dls_lum(const DlPoolLight& khs_l) {
+    const float khs_d = 0.2126f * khs_l.rec[8]  + 0.7152f * khs_l.rec[9]  + 0.0722f * khs_l.rec[10];
+    const float khs_a = 0.2126f * khs_l.rec[12] + 0.7152f * khs_l.rec[13] + 0.0722f * khs_l.rec[14];
+    return khs_d + khs_a;
+}
+
+// DynLights' distance attenuation, VERBATIM in the C++ (twin contract with the
+// shader kernel): 1/(a0 + a1*d + a2*d^2) on the OFFSET, scaled distance, then
+// the hard range fade. Reproduced rather than approximated because a selection
+// that disagrees with the shading about how far a light carries would pick
+// lights the shader has already faded to nothing.
+inline float kh_dls_atten(const DlPoolLight& kha_l, float kha_dist, float kha_scale) {
+    const float kha_sd = kha_dist * kha_scale;
+    const float kha_d  = kha_sd - kha_l.rec[16] > 0.0f ? kha_sd - kha_l.rec[16] : 0.0f;
+    float kha_a = 1.0f / (kha_l.rec[17] + kha_l.rec[18] * kha_d
+                        + kha_l.rec[19] * kha_d * kha_d + 1.0e-4f);
+    if (kha_a > 1.0f) kha_a = 1.0f;
+    if (kha_a < 0.0f) kha_a = 0.0f;
+    float kha_f = (kha_sd - kha_l.rec[20]) * kha_l.rec[21];
+    if (kha_f > 1.0f) kha_f = 1.0f;
+    if (kha_f < 0.0f) kha_f = 0.0f;
+    return kha_a * (1.0f - kha_f);
+}
+
+// KH_DLS_CAMDIST (26821) - THE DISTANCE IS CAMERA -> LIGHT.
+//
+// 26814 ranked on intensity delivered AT THE NEAREST CASTER, and argued against
+// camera distance on the grounds that a camera-dependent casting SET pops
+// shadows in and out as the player turns - the class the sun campaign spent six
+// builds removing. That argument was about the sun AXIS, where a camera-driven
+// error produces continuous ground drift with no correct value to converge on.
+// It does not transfer: this is a discrete PRIORITY over a fixed budget, every
+// candidate is a legitimate choice, and the eight nearest the viewer are the
+// eight whose shadows are actually on screen. Ranking by caster distance can
+// spend the whole budget on lights behind the player.
+//
+// It is also cheaper - a light-to-camera distance is three subtractions,
+// against a walk of the draw list per light.
+//
+// THE POP RISK IS REAL AND IS HANDLED ELSEWHERE, NOT DENIED HERE: the 1.25x
+// oust margin means a light must beat the sitting one by 25% to take its slot,
+// so a slow approach does not trade slots at the crossover, and dlsChurnMax is
+// the lane that would show it if it did. Mode 518 reverts to caster distance.
+//
+// The RELEVANCE GATE still measures light-to-CASTER, and deliberately so: that
+// gate answers "can this light cast at all", which has nothing to do with where
+// the camera stands. A light with no caster in reach produces an empty map from
+// every viewpoint.
+//
+// KH_DLS_DELIVERED - THE SCORE IS INTENSITY AT THAT DISTANCE, NOT AT SOURCE.
+//
+// "The 8 most intense and closest lights" is one quantity, not two that need
+// weighing against each other: how much light actually reaches the nearest
+// thing that can cast. A 2000-unit lamp 90 m from any of our meshes delivers
+// less than a 300-unit lamp two metres away, and it is the second one whose
+// shadow you would actually see. Multiplying luminance by the light's OWN
+// attenuation at that distance gives that number directly, with no invented
+// weighting constant to tune - the falloff curve is the engine's, not ours.
+//
+// It is also the right number for the shadow's OPACITY, which stage 3 has to
+// modulate by the light anyway: the darkness of a dynamic-light shadow is
+// exactly the contribution being blocked. Ranking and shading then agree by
+// construction instead of by coincidence.
+//
+// STILL CAMERA-INDEPENDENT. The distance is light-to-CASTER, a property of the
+// world. Ranking on light-to-camera would pop shadows in and out as the player
+// turns - the class the sun campaign spent six builds removing.
+//
+// Mode 516 reverts to raw source luminance (the 26811 score), keeping the
+// relevance gate. That is the A/B for this change on its own.
+inline float kh_dls_score(const DlPoolLight& khs_l, float khs_dist, float khs_scale) {
+    const float khs_lum = kh_dls_lum(khs_l);
+    if (khs_dist < 0.0f) return khs_lum;   // no distance available: rank on source alone
+    if (g_dbg_mode.load(std::memory_order_relaxed) == 516) return khs_lum;
+    return khs_lum * kh_dls_atten(khs_l, khs_dist, khs_scale);
+}
+
+// Camera on the render thread, in engine axes. Returns false when the engine
+// has not published a view - on which the score falls back to source luminance
+// rather than to a zeroed camera, because a camera at the world origin would
+// rank every light by its distance from (0,0,0) and be confidently wrong.
+inline bool kh_dls_camera(float khc_out[3]) {
+    if (!g_ro.cycle_pv_valid) return false;
+    extract_camera_pos(g_ro.cycle_pv.view, khc_out);
+    return khc_out[0] == khc_out[0] && khc_out[1] == khc_out[1] && khc_out[2] == khc_out[2];
+}
+
+// KH_DLS_REACH_EFF (26818) - THE FIELD SHIPPED A LIGHT WITH REACH 7e19 m.
+//
+// The hard-fade term is rec[20] + 1/rec[21], and a light authored with NO
+// range fade leaves the inverse width at ~1e-20, so that expression returns
+// 7e19 metres. Everything downstream then breaks quietly: the far plane is
+// 7e19, the ratio-bound near plane is 2.3e17, every real caster sits behind
+// the near plane, and the face cull's far test admits the entire world. The
+// capture found the matching symptom - slices holding no usable depth.
+//
+// fill_dynlights_cb culls on the same expression and does not care, because a
+// too-generous cull only costs it a light in the list. A SHADOW MAP cares: the
+// far plane IS the depth range.
+//
+// So bound it by what the light can actually light. The attenuation is
+// 1/(a0 + a1 d + a2 d^2); solve for where that falls below one 8-bit level and
+// beyond that the light contributes less than a quantisation step, so nothing
+// out there can cast a shadow anyone could see. This is the engine's own
+// falloff, not a constant of ours - the same reasoning as the delivered-
+// intensity score, and it needs no tuning.
+//
+// The absolute ceiling underneath it is a backstop for a light with a1 = a2 = 0
+// (no distance falloff at all), which no solve can bound. dlsReachCapped
+// counts every time either bound binds.
+static constexpr float KH_DLS_REACH_MIN_M = 1.0f;  // a degenerate reach never yields a zero far plane
+static constexpr float KH_DLS_REACH_MAX_M = 600.0f;   // backstop, no-falloff lights
+static constexpr float KH_DLS_ATTEN_FLOOR = 255.0f;   // 1/255 = one 8-bit level
+static uint64_t g_dls_reach_capped = 0;
+static uint64_t g_dls_skip_forced = 0;   // KH_DLS_SKIP_OFF: rebuilds forced by mode 517
+// KH_DLS_CAMDIST lanes. camMiss non-zero means the engine published no view and
+// the ranking silently fell back to caster distance - worth knowing, because
+// the set would then not follow the player at all.
+// PENDING (26829, unresolved): the mesh has twice gone FULLY BLACK for a
+// while at night, correlated with camera position, recovering on its own.
+// Not reproduced since. dlsRenderNoSlot cannot cause it (an empty selection
+// publishes w = 0, which reads LIT), and fill_dynlights_cb is unchanged from
+// the 26766 baseline, so the LIGHTING path is not ours. A normal spotlight
+// with real brightness was also reported dark, which points away from
+// KH_DLS_AMB_KEEP alone. Prime suspect is slot churn driven by the camera
+// ranking below: if a slot changes hands to a light whose map is not yet
+// correct for it, the receiver can read fully occluded. Discriminators are
+// mode 519 (receive off) and mode 518 (ranking off) TAKEN WHILE DARK.
+// See section 7.1 of the 26829 handoff.
+static uint64_t g_dls_cam_frames = 0;
+static uint64_t g_dls_cam_miss = 0;
+static float    g_dls_cam_dist_max = -1.0f;
+static float    g_dls_reach_raw_max = -1.0f;   // the UNCLAMPED value, so the fault stays visible
+// KH_DLS_REACH_RADIANCE (26876b) lanes.
+static float    g_dls_reach_peak_max = -1.0f;  // delivered-radiance multiplier on the floor
+static float    g_dls_reach_ceiling_m = -1.0f; // the sun-parity ceiling in force
+static uint64_t g_dls_reach_sun_capped = 0;    // lights held at that ceiling
+
+// KH_DLS_REACH_CENSUS (26830) - THIS FUNCTION IS PURE, AND HAS TO BE.
+//
+// It used to write dlsReachCapped and dlsReachRawMax from its own body, and it
+// has FOUR call expressions per pass (two on the re-match path, two on the
+// admit path), so the counter measured CALLS, not lights. The 26829 field dump
+// convicts it outright: dlsReachCapped 23410 against dlsCands 20342 - more
+// cappings than candidates ever examined, which is only possible if a light is
+// counted more than once. A census may not perturb the quantity it measures
+// (rule 1.80), and a lane that cannot be read is not a lane (1.88).
+//
+// The reach VALUE is unchanged - same expression, same bounds, same order of
+// operations - so this is a census fix and not a behaviour change. The census
+// now happens exactly once per light, in the distance loop that already exists
+// to give the score, the admission gate and the hold test ONE source (the
+// kh_dls_caster_dist idiom: one source, three readers). The four sites below
+// read that cache instead of recomputing, which also drops three sqrt-and-solve
+// evaluations per light per pass.
+// KH_DLS_REACH_RADIANCE (26876b) - THE FLOOR WAS PRICED FOR A LAMP OF UNIT
+// BRIGHTNESS, AND THAT IS WHY THE SHADOW HAD A HARD EDGE IN MID-AIR.
+//
+// 26818 solves for where the attenuation falls below one 8-bit level and calls
+// everything past it invisible. The reasoning is right and the arithmetic is
+// incomplete: attenuation is not what reaches the eye. DynLights computes
+// att * (dlGlobal.xyz * diffuse * N.L + ambient) * dlGlobal.w, so a light whose
+// diffuse and script intensity multiply out to 20 is still delivering eight
+// 8-bit levels at the distance where att alone has fallen to 1/255. The field
+// dump says exactly this: dlsReachMaxM 41.5 against dlsReachRawMax 100, capped
+// on 4190 of 4190 tests, while the flashlight in the same screenshot plainly
+// lights a church far beyond 41 m. KhDlsFaceUV then refuses every receiver past
+// the far plane and answers LIT, and a far plane is a plane - so its
+// intersection with a wall is a STRAIGHT LINE, which is the sharp slice the
+// field reported and the shape no attenuation curve could produce.
+//
+// So price the floor against what the light actually delivers. kh_dls_lum is
+// already the source radiance this file uses for the admission score; multiply
+// it by the same two global lanes the shader multiplies by, and require the
+// PRODUCT to fall below one level rather than the attenuation alone. Still the
+// engine's own numbers, still nothing to tune.
+//
+// PARITY IS THE CEILING (the operator's ask). Beyond the distance at which the
+// sun's cascades stop shadowing, a dynamic light's shadow is a lone artefact in
+// a world that has stopped casting - so the reach is bounded by g_sun_range,
+// clamped exactly as every other consumer of that lane clamps it. That is both
+// the parity the feature was missing and the bound that keeps a 1024 px cube
+// face from being smeared across a kilometre.
+//
+// Mode 557 restores the 26818 unit-radiance floor and the blind 600 m backstop.
+inline float kh_dls_reach_peak(const DlPoolLight& khp_l) {
+    // The two global lanes DynLights applies outside the per-light sum. Rec.709
+    // through kh_dls_lum for the source, so this cannot disagree with the
+    // score about which light is bright.
+    const float khp_gd = (g_dl.main_ref_valid &&
+                          (g_dl.main_gdiff[0] > 0.0f || g_dl.main_gdiff[1] > 0.0f ||
+                           g_dl.main_gdiff[2] > 0.0f))
+                       ? (0.2126f * g_dl.main_gdiff[0] + 0.7152f * g_dl.main_gdiff[1] +
+                          0.0722f * g_dl.main_gdiff[2])
+                       : 1.0f;
+    const uint32_t khp_bits = g_dl_intensity_bits.load(std::memory_order_relaxed);
+    float khp_int = 1.0f;
+    memcpy(&khp_int, &khp_bits, sizeof(khp_int));
+    if (!(khp_int > 0.0f) || khp_int != khp_int) khp_int = 1.0f;
+    const float khp_p = kh_dls_lum(khp_l) * khp_gd * khp_int;
+    // Never below 1: a dim light must not get a SHORTER reach than 26818 gave
+    // it, or this becomes a regression for the lights that were already right.
+    return (khp_p > 1.0f && khp_p == khp_p) ? khp_p : 1.0f;
+}
+
+// The distance past which nothing else in the frame is casting either.
+inline float kh_dls_reach_ceiling() {
+    if (g_dbg_mode.load(std::memory_order_relaxed) == 557) return KH_DLS_REACH_MAX_M;
+    const float khc_s = fminf(fmaxf(g_sun_range.load(std::memory_order_relaxed), 8.0f), 1000.0f);
+    return khc_s < KH_DLS_REACH_MAX_M ? khc_s : KH_DLS_REACH_MAX_M;
+}
+
+inline float kh_dls_reach(const DlPoolLight& khs_l) {
+    const float khs_inv = khs_l.rec[21];
+    const float khs_ceil = kh_dls_reach_ceiling();
+    float khs_r = khs_l.rec[20] + (khs_inv > 1.0e-6f ? 1.0f / khs_inv : 0.0f);
+    if (!(khs_r > 0.0f) || khs_r != khs_r) khs_r = khs_ceil;   // nan/degenerate
+    // (26818's khs_r0 snapshot is deleted here: it was assigned and never
+    // read, and the census half is the thing that actually reports the raw
+    // value. Dead code is the same liability as a dead instrument.)
+
+    // Where does the DELIVERED contribution fall below one 8-bit level?
+    const float khs_peak = (g_dbg_mode.load(std::memory_order_relaxed) == 557)
+                         ? 1.0f : kh_dls_reach_peak(khs_l);
+    const float khs_a0 = khs_l.rec[17], khs_a1 = khs_l.rec[18], khs_a2 = khs_l.rec[19];
+    const float khs_t = KH_DLS_ATTEN_FLOOR * khs_peak - khs_a0;
+    if (khs_t > 0.0f) {
+        float khs_d = -1.0f;
+        if (khs_a2 > 1.0e-9f) {
+            khs_d = (-khs_a1 + sqrtf(khs_a1 * khs_a1 + 4.0f * khs_a2 * khs_t)) / (2.0f * khs_a2);
+        } else if (khs_a1 > 1.0e-9f) {
+            khs_d = khs_t / khs_a1;
+        }
+        if (khs_d > 0.0f) {
+            // that solve is in ATTENUATED distance; undo the offset and the
+            // global distance scale to get metres, exactly as DynLights does.
+            const float khs_sc = (g_dl.main_ref_valid && g_dl.main_scale > 1.0e-6f)
+                               ? g_dl.main_scale : 1.0f;
+            const float khs_m = (khs_d + khs_l.rec[16]) / khs_sc;
+            if (khs_m > 0.0f && khs_m < khs_r) khs_r = khs_m;
+        }
+    }
+    if (khs_r > khs_ceil) khs_r = khs_ceil;
+    if (khs_r < KH_DLS_REACH_MIN_M) khs_r = KH_DLS_REACH_MIN_M;
+    return khs_r;
+}
+
+// The census half, called ONCE PER LIGHT PER PASS from the distance loop.
+// Recomputes the raw (pre-bound) reach rather than taking it as an argument so
+// the two cannot drift: the bound test has to compare against the same
+// expression kh_dls_reach starts from, and passing it in would let a future
+// caller hand it something else.
+inline void kh_dls_reach_census(const DlPoolLight& khc_l, float khc_bounded) {
+    const float khc_inv = khc_l.rec[21];
+    float khc_raw = khc_l.rec[20] + (khc_inv > 1.0e-6f ? 1.0f / khc_inv : 0.0f);
+    if (!(khc_raw > 0.0f) || khc_raw != khc_raw) khc_raw = KH_DLS_REACH_MAX_M;
+    if (khc_raw > g_dls_reach_raw_max) g_dls_reach_raw_max = khc_raw;
+    if (khc_bounded < khc_raw) g_dls_reach_capped++;
+    // KH_DLS_REACH_RADIANCE census. dlsReachPeakMax is the delivered-radiance
+    // multiplier the floor is now priced against - 1.0 means it is doing
+    // nothing and the reach is the 26818 value, so a reading of 1.0 alongside a
+    // sliced shadow means the slice is NOT this bound and the hunt moves on.
+    // dlsReachCeilM is the sun-parity ceiling, and dlsReachSunCapped counts the
+    // lights it actually binds: non-zero says a light wanted to reach further
+    // than the world's other shadows do and was held to parity.
+    const float khc_peak = kh_dls_reach_peak(khc_l);
+    if (khc_peak > g_dls_reach_peak_max) g_dls_reach_peak_max = khc_peak;
+    const float khc_ceil = kh_dls_reach_ceiling();
+    g_dls_reach_ceiling_m = khc_ceil;
+    if (khc_bounded >= khc_ceil - 1.0e-3f) g_dls_reach_sun_capped++;
+}
+
+// KH_DL_SHADOW stage 2b map lanes.
+static uint64_t g_dls_map_allocs = 0;    // depth-array (re)allocations - should settle at 1
+static uint64_t g_dls_map_fails = 0;     // ensure/upload/map failures (any non-zero is a defect)
+static uint64_t g_dls_map_short = 0;     // slices exhausted before every light was served
+static uint64_t g_dls_face_over = 0;     // a face whose caster count exceeded the sun instance buffer
+static uint32_t g_dls_slices_used = 0;   // slices actually consumed last pass
+// KH_DLS_SPOT_WHY (26816). dlsSpotWide told us every spot fell back to the
+// cube and nothing more, which cost a build. A stand-down needs a REASON, not
+// just a count (rule 1.88): these separate "the pool entry vanished" from "the
+// cone is too wide for one frustum", and publish the actual cone so the cap
+// can be set from measurement instead of from a guess.
+// EXACTLY THE NEXT TWO ARE SESSION-SCOPED AND NEVER RESET (deliberate, and not
+// a rule-1.89 breach): g_dls_faces_built_total and g_dls_map_epoch. The window
+// lanes answer "is it building NOW"; after a stats reset in a static scene the
+// honest answer is no, and dlsFacesBuilt 0 then cannot distinguish "correctly
+// skipping" from "never once worked". Those two survive the reset so that
+// question has an answer without perturbing the thing being measured (clearing
+// the skip keys at reset would force rebuilds that would not otherwise happen -
+// rule 1.80).
+//
+// THE THREE KH_DLS_SPOT_WHY LANES BELOW THEM ARE WINDOW-SCOPED AND ARE RESET
+// with the stats, like every other census here. Naming both groups explicitly
+// because the paragraph above used to say "these two" while sitting on top of
+// five declarations, which reads as though all five survive - a comment
+// asserting an invariant is a claim, not a fact (rule 1.73), and this one
+// claimed the opposite of the reset block.
+static uint64_t g_dls_faces_built_total = 0;   // SESSION-scoped
+static uint64_t g_dls_map_epoch = 0;       // SESSION-scoped: depth-array creations this session
+static uint64_t g_dls_spot_nosrc = 0;      // window-scoped: no pool entry matched the slot position
+static float    g_dls_spot_cone_min = 2.0f;   // window-scoped: smallest cone cos-threshold (widest cone)
+static float    g_dls_spot_fov_max = -1.0f;   // window-scoped: widest RAW cone angle seen, degrees
+
+// KH_DLS_RELEVANCE (stage 2b prerequisite) - A LIGHT WITH NOTHING TO CAST MAY
+// NOT HOLD A SLOT.
+//
+// THE FIELD FORCED THIS. The first mode-0 dump read dlsScoreLo == dlsScoreCut
+// == 242.016 - a DEAD TIE at the cut line, to six figures - with dlsPoolMax 42
+// competing for 8 slots. That is a scene full of IDENTICAL fixtures, and among
+// identical fixtures brightness cannot rank anything: the 8th and the 9th are
+// the same light, and which one casts was decided by pool order. Two identical
+// lamps side by side, one casting and one not, is a visible defect and no
+// amount of tuning the score or the margin fixes it, because the inputs are
+// equal by construction.
+//
+// So the tie breaks on the only criterion that is both MEANINGFUL and
+// CAMERA-INDEPENDENT: does this light actually have one of our meshes inside
+// its reach? Our meshes are the only occluders this feature draws, so a light
+// with none cannot darken anything - its map is six faces (or one frustum) of
+// guaranteed-empty depth, rendered while a light that DOES have casters waits
+// behind it. This is not a heuristic; it is the difference between a map that
+// can produce a shadow and one that provably cannot.
+//
+// DELIBERATELY NOT DISTANCE-TO-CAMERA, which would have broken the tie just as
+// well and is the obvious reach. A camera-dependent casting SET pops shadows in
+// and out as the player turns, and it re-introduces exactly the class the sun
+// campaign spent six builds removing. Distance to our CASTERS is a property of
+// the world, not of where you stand.
+//
+// HYSTERESIS, as everywhere else here: admission needs a caster inside reach,
+// but a SITTING light keeps its slot out to reach * KH_DLS_HOLD_SLACK. A mesh
+// drifting across the boundary would otherwise take the slot up and down every
+// frame - the churn this whole stage-1 census exists to prevent.
+//
+// Mode 515 disarms the gate (every light is relevant again, the 26809 tie).
+static constexpr float KH_DLS_HOLD_SLACK = 1.10f;   // hold margin on the caster test
+static uint64_t g_dls_no_caster = 0;      // admissions refused: nothing in range to cast
+static uint64_t g_dls_lost_caster = 0;    // slots released: the last caster left range
+static uint64_t g_dls_caster_tests = 0;   // light-mesh pairs tested (the cost lane)
+
+// Nearest SURFACE distance from this light to any of our meshes, or -1 when
+// there is none at all. One walk per light per pass, cached by the caller -
+// the score, the admission gate and the hold test all read the same number, so
+// they cannot disagree about which lights are eligible (rule 1.5 in spirit:
+// one source, three readers).
+inline float kh_dls_caster_dist(const float* khr_lp) {
+    float khr_best = -1.0f;
+    for (const auto& khr_kv : g_draw_list) {
+        const RenderObject& khr_o = khr_kv.second;
+        if (khr_o.mode == DepthMode::Off) continue;   // an overlay casts nothing
+        float khr_he[3];
+        kh_world_half_extents(khr_o, khr_he);   // ENGINE axes
+        // RenderObject::pos is SQF [x, y, zASL]; engine is [x, zASL, y] - the
+        // same swizzle fill_dynlights_cb applies to reach the same space.
+        const float khr_c[3] = { khr_o.pos[0], khr_o.pos[2], khr_o.pos[1] };
+        // Surface distance, not centre distance: a large mesh whose centre is
+        // out of range can still have a corner lit, and that corner casts.
+        const float khr_dx = fmaxf(fabsf(khr_c[0] - khr_lp[0]) - khr_he[0], 0.0f);
+        const float khr_dy = fmaxf(fabsf(khr_c[1] - khr_lp[1]) - khr_he[1], 0.0f);
+        const float khr_dz = fmaxf(fabsf(khr_c[2] - khr_lp[2]) - khr_he[2], 0.0f);
+        g_dls_caster_tests++;
+        const float khr_d2 = khr_dx * khr_dx + khr_dy * khr_dy + khr_dz * khr_dz;
+        if (khr_best < 0.0f || khr_d2 < khr_best) khr_best = khr_d2;
+    }
+    return khr_best < 0.0f ? -1.0f : sqrtf(khr_best);
+}
+
+// Eligible to hold a slot? khr_d is the cached nearest-caster distance.
+inline bool kh_dls_relevant(float khr_d, float khr_reach) {
+    if (g_dbg_mode.load(std::memory_order_relaxed) == 515) return true;   // gate off
+    return khr_d >= 0.0f && khr_d <= khr_reach;
+}
+
+// TWIN (rule 1.5): 1 definition + 2 call expressions, both immediately ahead of
+// a render_sun_depth call. It is NOT called from inside render_sun_depth: that
+// function returns early without a sun, and dynamic lights matter most at
+// night - the selection may not depend on the sun existing. The frame guard
+// below makes the second call of a frame free, so the two sites cannot
+// double-count.
+inline void kh_dls_select() {
+    if (g_dls_frame == g_topo_cycles) return;   // once per frame, whoever arrives first
+    g_dls_frame = g_topo_cycles;
+
+    // Mode 514: wholesale stand-down. Slots cleared, nothing selected.
+    if (g_dbg_mode.load(std::memory_order_relaxed) == 514) {
+        for (uint32_t khs_s = 0; khs_s < KH_DLS_MAX; ++khs_s) g_dls[khs_s].live = 0;
+        g_dls_n = 0;
+        g_dls_n_last = 0;
+        return;
+    }
+
+    const uint64_t khs_now = steady_now_ms();
+    g_dls_selects++;
+
+    const uint32_t khs_pn = g_dl.pool_n;
+    if (khs_pn > g_dls_pool_max) g_dls_pool_max = khs_pn;
+
+    // 1. EXPIRE. A slot is never held on the strength of a stale sighting:
+    //    silence is not evidence the light is still burning (rule 1.86).
+    for (uint32_t khs_s = 0; khs_s < KH_DLS_MAX; ++khs_s) {
+        if (g_dls[khs_s].live && khs_now - g_dls[khs_s].stamp > KH_DLS_TTL_MS) {
+            g_dls[khs_s].live = 0;
+            g_dls_expires++;
+        }
+    }
+
+    static std::vector<uint8_t> khs_used;   // render-thread scratch (the khco_r idiom)
+    khs_used.assign(static_cast<size_t>(khs_pn), 0);
+    // TWO distances per light, and they answer different questions.
+    //   khs_cdist - CAMERA to light. The ranking metric (KH_DLS_CAMDIST): the
+    //               eight nearest the viewer are the eight whose shadows are on
+    //               screen.
+    //   khs_dist  - light to nearest CASTER. The admission gate only: can this
+    //               light cast anything at all, from any viewpoint.
+    // Both are computed once per light per pass and read by everything below,
+    // so no two consumers can disagree about either.
+    static std::vector<float> khs_dist, khs_cdist, khs_reach;
+    khs_dist.assign(static_cast<size_t>(khs_pn), -1.0f);
+    khs_cdist.assign(static_cast<size_t>(khs_pn), -1.0f);
+    // KH_DLS_REACH_CENSUS: one reach per light, computed here and read by all
+    // four sites below, so the lane counts lights and the value cannot differ
+    // between the admission gate and the map that gets built for it.
+    khs_reach.assign(static_cast<size_t>(khs_pn), KH_DLS_REACH_MIN_M);
+    float khs_cam[3];
+    const bool khs_cam_ok = kh_dls_camera(khs_cam) &&
+                            g_dbg_mode.load(std::memory_order_relaxed) != 518;
+    if (khs_cam_ok) g_dls_cam_frames++; else g_dls_cam_miss++;
+    for (uint32_t khs_i = 0; khs_i < khs_pn; ++khs_i) {
+        const DlPoolLight& khs_pl = g_dl.pool[khs_i];
+        khs_dist[khs_i] = kh_dls_caster_dist(khs_pl.rec);
+        khs_reach[khs_i] = kh_dls_reach(khs_pl);
+        kh_dls_reach_census(khs_pl, khs_reach[khs_i]);   // ONCE per light (rule 1.80)
+        if (khs_cam_ok) {
+            const float khs_dx = khs_pl.rec[0] - khs_cam[0];
+            const float khs_dy = khs_pl.rec[1] - khs_cam[1];
+            const float khs_dz = khs_pl.rec[2] - khs_cam[2];
+            khs_cdist[khs_i] = sqrtf(khs_dx * khs_dx + khs_dy * khs_dy + khs_dz * khs_dz);
+            if (khs_cdist[khs_i] > g_dls_cam_dist_max) g_dls_cam_dist_max = khs_cdist[khs_i];
+        } else {
+            // Mode 518, or no published view: rank on caster distance, the
+            // 26814 behaviour, so the revert is exact.
+            khs_cdist[khs_i] = khs_dist[khs_i];
+        }
+    }
+    const float khs_scale = (g_dl.main_ref_valid && g_dl.main_scale > 1.0e-6f)
+                          ? g_dl.main_scale : 1.0f;
+    uint8_t  khs_filled[KH_DLS_MAX] = {};
+    uint32_t khs_churn = 0;
+
+    // 2. RE-MATCH IN PLACE. This is the step that survives a pool sweep: a
+    //    light that is still there refreshes the slot it already holds, so the
+    //    slot -> light binding does not move even though its pool index did.
+    for (uint32_t khs_i = 0; khs_i < khs_pn; ++khs_i) {
+        const DlPoolLight& khs_l = g_dl.pool[khs_i];
+        for (uint32_t khs_s = 0; khs_s < KH_DLS_MAX; ++khs_s) {
+            if (!g_dls[khs_s].live || khs_filled[khs_s]) continue;
+            const float khs_dx = khs_l.rec[0] - g_dls[khs_s].pos[0];
+            const float khs_dy = khs_l.rec[1] - g_dls[khs_s].pos[1];
+            const float khs_dz = khs_l.rec[2] - g_dls[khs_s].pos[2];
+            if (khs_dx * khs_dx + khs_dy * khs_dy + khs_dz * khs_dz >
+                KH_DLS_MATCH_M * KH_DLS_MATCH_M) continue;
+            g_dls[khs_s].pos[0] = khs_l.rec[0];
+            g_dls[khs_s].pos[1] = khs_l.rec[1];
+            g_dls[khs_s].pos[2] = khs_l.rec[2];
+            g_dls[khs_s].score = kh_dls_score(khs_l, khs_cdist[khs_i], khs_scale);
+            g_dls[khs_s].reach = khs_reach[khs_i];   // KH_DLS_REACH_CENSUS cache
+            g_dls[khs_s].spot = khs_l.spot;
+            // KH_DLS_RELEVANCE: hold out to the slack radius. Losing the last
+            // caster releases the slot rather than rendering an empty map for
+            // the rest of the TTL, but the slack keeps a mesh hovering on the
+            // boundary from taking the slot up and down.
+            if (!kh_dls_relevant(khs_dist[khs_i],
+                                 khs_reach[khs_i] * KH_DLS_HOLD_SLACK)) {
+                g_dls[khs_s].live = 0;
+                g_dls_lost_caster++;
+                khs_used[khs_i] = 1;   // not a candidate again this pass
+                break;
+            }
+            g_dls[khs_s].stamp = khs_now;
+            khs_filled[khs_s] = 1;
+            khs_used[khs_i] = 1;
+            g_dls_holds++;
+            break;
+        }
+    }
+
+    // 3. ADMIT / EVICT, BRIGHTEST FIRST. Picking the max each round instead of
+    //    sorting keeps this allocation-free; the bound is KH_DLS_MAX x pool and
+    //    the pool is tens of entries. Brightest-first matters: it stops a dim
+    //    light taking the last free slot and then having to be ousted (which
+    //    the margin would refuse) while a brighter one waits behind it.
+    // Bounded by the POOL, not by the slot count: a light skipped for having
+    // nothing to cast must not consume one of the eight chances to fill a slot,
+    // or a scene whose brightest fixtures are all far from our meshes would
+    // leave every slot empty while eligible lights sat unexamined.
+    uint32_t khs_admitted = 0;
+    for (uint32_t khs_r = 0; khs_r < khs_pn && khs_admitted < KH_DLS_MAX; ++khs_r) {
+        uint32_t khs_best = 0xFFFFFFFFu;
+        float    khs_bs = -1.0f;
+        for (uint32_t khs_i = 0; khs_i < khs_pn; ++khs_i) {
+            if (khs_used[khs_i]) continue;
+            const float khs_sc = kh_dls_score(g_dl.pool[khs_i], khs_cdist[khs_i], khs_scale);
+            if (khs_sc > khs_bs) { khs_bs = khs_sc; khs_best = khs_i; }
+        }
+        if (khs_best == 0xFFFFFFFFu) break;   // pool exhausted
+        khs_used[khs_best] = 1;
+        g_dls_cands++;
+
+        const DlPoolLight& khs_l = g_dl.pool[khs_best];
+        // KH_DLS_RELEVANCE: nothing in range to cast -> not a candidate. Skip
+        // rather than break: the next light down may well have casters.
+        if (!kh_dls_relevant(khs_dist[khs_best], khs_reach[khs_best])) {
+            g_dls_no_caster++;
+            continue;
+        }
+        uint32_t khs_free = KH_DLS_MAX;
+        for (uint32_t khs_s = 0; khs_s < KH_DLS_MAX; ++khs_s) {
+            if (!g_dls[khs_s].live) { khs_free = khs_s; break; }
+        }
+
+        uint32_t khs_take = KH_DLS_MAX;
+        if (khs_free < KH_DLS_MAX) {
+            khs_take = khs_free;
+            g_dls_admits++;
+        } else {
+            uint32_t khs_w = 0;
+            for (uint32_t khs_s = 1; khs_s < KH_DLS_MAX; ++khs_s) {
+                if (g_dls[khs_s].score < g_dls[khs_w].score) khs_w = khs_s;
+            }
+            if (khs_bs > g_dls[khs_w].score * KH_DLS_OUST_FRAC) {
+                khs_take = khs_w;
+                g_dls_evicts++;
+            } else {
+                g_dls_refused++;
+                // RELEASE THE CLAIM before breaking. The cut scan below skips
+                // every used entry, so leaving this one marked would report the
+                // SECOND-brightest refusal as the cut line - an off-by-one rank
+                // in the only number this lane exists to produce. Caught by the
+                // brute force (rule 1.83), not by reading.
+                khs_used[khs_best] = 0;
+                break;   // everything after this is dimmer still
+            }
+        }
+
+        g_dls[khs_take].pos[0] = khs_l.rec[0];
+        g_dls[khs_take].pos[1] = khs_l.rec[1];
+        g_dls[khs_take].pos[2] = khs_l.rec[2];
+        g_dls[khs_take].score = khs_bs;
+        g_dls[khs_take].reach = khs_reach[khs_best];   // KH_DLS_REACH_CENSUS cache
+        g_dls[khs_take].spot = khs_l.spot;
+        g_dls[khs_take].stamp = khs_now;
+        g_dls[khs_take].live = 1;
+        khs_filled[khs_take] = 1;
+        khs_churn++;
+        khs_admitted++;
+    }
+
+    // 4. THE CUT LINE. The brightest light that did NOT get a slot. The gap
+    //    between this and dlsScoreLo is what the 8-light cap actually costs: a
+    //    wide gap means 8 is comfortable, a near-tie means the chosen set is
+    //    arbitrary and the CAP is the thing to raise - not the margin, and not
+    //    the score. Read this before tuning anything here.
+    float khs_cut = -1.0f;
+    for (uint32_t khs_i = 0; khs_i < khs_pn; ++khs_i) {
+        if (khs_used[khs_i]) continue;
+        const float khs_sc = kh_dls_score(g_dl.pool[khs_i], khs_cdist[khs_i], khs_scale);
+        if (khs_sc > khs_cut) khs_cut = khs_sc;
+    }
+    g_dls_score_cut = khs_cut;
+
+    uint32_t khs_n = 0;
+    float khs_hi = -1.0f, khs_lo = -1.0f;
+    for (uint32_t khs_s = 0; khs_s < KH_DLS_MAX; ++khs_s) {
+        if (!g_dls[khs_s].live) continue;
+        khs_n++;
+        if (khs_hi < 0.0f || g_dls[khs_s].score > khs_hi) khs_hi = g_dls[khs_s].score;
+        if (khs_lo < 0.0f || g_dls[khs_s].score < khs_lo) khs_lo = g_dls[khs_s].score;
+    }
+    g_dls_n = khs_n;
+    g_dls_n_last = khs_n;
+    if (khs_n > g_dls_n_max) g_dls_n_max = khs_n;
+    g_dls_score_hi = khs_hi;
+    g_dls_score_lo = khs_lo;
+    g_dls_churn = khs_churn;
+    if (khs_churn > g_dls_churn_max) g_dls_churn_max = khs_churn;
+}
+
+// Which shadow slot, if any, this pool light holds. Stage 2/3 carry the answer
+// per object in dlLights[b + 5].z (0 = none, 1 + slot otherwise - the zeroed
+// default is 'no shadow', the 264 precedent). Returns -1 for no slot.
+inline int kh_dls_slot_of(const DlPoolLight& khs_l) {
+    for (uint32_t khs_s = 0; khs_s < KH_DLS_MAX; ++khs_s) {
+        if (!g_dls[khs_s].live) continue;
+        const float khs_dx = khs_l.rec[0] - g_dls[khs_s].pos[0];
+        const float khs_dy = khs_l.rec[1] - g_dls[khs_s].pos[1];
+        const float khs_dz = khs_l.rec[2] - g_dls[khs_s].pos[2];
+        if (khs_dx * khs_dx + khs_dy * khs_dy + khs_dz * khs_dz <=
+            KH_DLS_MATCH_M * KH_DLS_MATCH_M) return static_cast<int>(khs_s);
+    }
+    return -1;
+}
+
+// ---------------------------------------------------------------------------
+// KH_DL_SHADOW (stage 2a) - THE GEOMETRY. Face matrices, per-face culling and
+// the skip hash. No resource, no draw, no pixel: this is the part where a
+// mistake is invisible until the field, so it ships measured (rule 1.83) and
+// ahead of the passes that will consume it.
+//
+// ANCHORED AT THE LIGHT, exactly like KH_SUN_ANCHOR anchors at sunOrigin. The
+// matrices below expect LIGHT-RELATIVE positions (wpos - slot.pos). A dynamic
+// light sits at world scale where fp32 spacing is ~8 mm, and a shadow map is a
+// depth comparison - the one place that jitter reads as acne. Subtracting the
+// light first costs one vector and removes the whole class.
+//
+// A CUBE FACE ROTATION IS AN AXIS PERMUTATION WITH SIGNS, which is what makes
+// the cull below exact rather than conservative: an axis-aligned box maps to an
+// axis-aligned box under it, with no bounding slack introduced. That is worth
+// more than it looks - a conservative cull that overstates by a corner would
+// re-admit casters the union already covers and quietly undo the saving.
+// ---------------------------------------------------------------------------
+static constexpr int   KH_DLS_FACES = 6;
+// NEAR IS RATIO-BOUND, NOT FIXED, and that is a measured decision. Depth
+// resolution in a perspective map goes as far/near: at a fixed 5 cm near a
+// 300 m light resolves 12 CENTIMETRES per 24-bit depth step at 90% of range,
+// which is acne on every surface out there, while a 20 m light wastes its
+// whole range on the first metre. Holding far/near at KH_DLS_NEAR_RATIO gives
+// every light the SAME depth quality whatever its reach - 0.6 mm at 60 m,
+// 2.9 mm at 300 m - so one compare bias serves the whole set instead of one
+// per reach band. The floor still applies: a light closer than the near plane
+// to a caster clips it, so the ratio may not push near out arbitrarily.
+static constexpr float KH_DLS_NEAR_M = 0.05f;      // absolute floor (5 cm)
+static constexpr float KH_DLS_NEAR_RATIO = 300.0f; // far / near ceiling
+
+// ONE near-plane rule for the face matrices, the spot matrix and the cull.
+// Rule 1.5 in miniature: three readers, and a map built to a different near
+// than the cull tests against is a caster refused at a plane the raster would
+// have accepted.
+// KH_DLS_NEAR_CAP (26876b). The ratio rule alone was safe only while the far
+// plane was short. KH_DLS_REACH_RADIANCE lengthens it - a bright light now
+// reaches its real distance rather than a distance priced for a unit-radiance
+// lamp - and far/300 grows with it: at 41 m the near plane sat at 0.14 m, at
+// 200 m the same rule puts it at 0.67 m. The note above already warned that a
+// caster closer to the light than the near plane is CLIPPED, and a flashlight
+// with a mesh hanging off the same player is exactly that geometry, so raising
+// far without this cap would have deleted the shadow it was meant to extend.
+//
+// The principle is that near must sit below the smallest caster-to-light
+// distance the system can produce. That distance is measurable in kh_dls_render
+// (it walks the caster set with the light position in hand) and this helper
+// cannot see it - so the cap is a stand-in, and it is the honest kind: it binds
+// ONLY above far = 75 m, so every reach this build shipped before is
+// bit-identical, and the fix if it ever bites is to pass the measured nearest
+// caster in rather than to move the number (rule 1.84).
+static constexpr float KH_DLS_NEAR_CAP_M = 0.25f;
+inline float kh_dls_near(float khn_far) {
+    float khn_r = khn_far / KH_DLS_NEAR_RATIO;
+    if (khn_r > KH_DLS_NEAR_CAP_M) khn_r = KH_DLS_NEAR_CAP_M;
+    return khn_r > KH_DLS_NEAR_M ? khn_r : KH_DLS_NEAR_M;
+}
+// FIELD MEASUREMENT, 26829 (recorded, NOT acted on). dlsSpotFovMaxDeg 170 with
+// dlsSpotConeMin 0.0871558 (= cos 85 deg) against dlsSpotFrusta 0 /
+// dlsSpotWide 768: this cap refuses EVERY spot the field actually ships, so
+// every one of them pays six cube slices instead of one frustum.
+//
+// Raising it is NOT obviously the win it looks like, and that is why this is a
+// comment and not an edit. A 170 deg perspective frustum puts tan(85) = 11.4
+// into the projection scale, so the map's angular resolution collapses toward
+// the cone edge exactly where a wide spot does most of its lighting, while a
+// cube face is a well-conditioned 90 deg at the same 1024 px. Six good slices
+// may genuinely beat one bad one; the cost is known and the quality is not.
+// Settle it by measurement before touching the constant - render one field
+// spot both ways and compare the shadow edge - not by reasoning from the
+// slice count, which only prices one side of the trade.
+static constexpr float KH_DLS_SPOT_FOV_MAX = 2.792527f;   // 160 deg; wider falls back to the cube
+
+// Cube basis, D3D face order (+X -X +Y -Y +Z -Z), right/up/forward per face.
+// Written out rather than derived so the table can be read against the D3D
+// docs directly; a sign error here is a shadow on the wrong side of the world.
+static const float KH_DLS_BASIS[6][9] = {
+    {  0.0f, 0.0f,-1.0f,   0.0f, 1.0f, 0.0f,   1.0f, 0.0f, 0.0f },   // +X
+    {  0.0f, 0.0f, 1.0f,   0.0f, 1.0f, 0.0f,  -1.0f, 0.0f, 0.0f },   // -X
+    {  1.0f, 0.0f, 0.0f,   0.0f, 0.0f,-1.0f,   0.0f, 1.0f, 0.0f },   // +Y
+    {  1.0f, 0.0f, 0.0f,   0.0f, 0.0f, 1.0f,   0.0f,-1.0f, 0.0f },   // -Y
+    {  1.0f, 0.0f, 0.0f,   0.0f, 1.0f, 0.0f,   0.0f, 0.0f, 1.0f },   // +Z
+    { -1.0f, 0.0f, 0.0f,   0.0f, 1.0f, 0.0f,   0.0f, 0.0f,-1.0f },   // -Z
+};
+
+// Row-vector world(light-relative) -> clip, 90 deg square perspective. Same
+// convention as sunVP: v * VP, translation in row 3. Translation is ZERO here
+// because the input is already light-relative - that is the anchor.
+inline void kh_dls_face_vp(int khf_face, float khf_far, float khf_out[16]) {
+    const float* khf_b = KH_DLS_BASIS[khf_face < 0 ? 0 : (khf_face > 5 ? 5 : khf_face)];
+    const float  khf_n = kh_dls_near(khf_far);
+    const float  khf_f = khf_far > khf_n * 2.0f ? khf_far : khf_n * 2.0f;
+    const float  khf_a = khf_f / (khf_f - khf_n);
+    const float  khf_c = -khf_n * khf_f / (khf_f - khf_n);
+    for (int khf_i = 0; khf_i < 3; ++khf_i) {
+        khf_out[khf_i * 4 + 0] = khf_b[0 + khf_i];        // right
+        khf_out[khf_i * 4 + 1] = khf_b[3 + khf_i];        // up
+        khf_out[khf_i * 4 + 2] = khf_b[6 + khf_i] * khf_a;// forward, depth-scaled
+        khf_out[khf_i * 4 + 3] = khf_b[6 + khf_i];        // forward -> w
+    }
+    khf_out[12] = 0.0f; khf_out[13] = 0.0f; khf_out[14] = khf_c; khf_out[15] = 0.0f;
+}
+
+// A spot needs ONE frustum, not six. Half-angle is acos(cone cos-threshold) -
+// the same lane DynLights compares against, so the map cannot cover less than
+// the cone that will sample it. Returns false when the cone is too wide to be
+// a single frustum, and the caller falls back to the cube.
+inline bool kh_dls_spot_vp(const float* khs_dir, float khs_cone_cos, float khs_far,
+                           float khs_out[16], float* khs_fov_out) {
+    const float khs_l = sqrtf(khs_dir[0] * khs_dir[0] + khs_dir[1] * khs_dir[1] + khs_dir[2] * khs_dir[2]);
+    if (!(khs_l > 1.0e-4f)) return false;
+    const float khs_cc = khs_cone_cos < -0.999f ? -0.999f : (khs_cone_cos > 0.999f ? 0.999f : khs_cone_cos);
+    // THE CAP JUDGES THE CONE, NOT THE GUARD BAND (26816). 26815 applied the
+    // 1.15 guard first and then rejected against the cap, so a cone of 140
+    // degrees - comfortably renderable in one frustum - was measured as 161
+    // and thrown to the cube. That is a gate refusing on a quantity it
+    // invented. Reject on the RAW cone; let the guard band yield to the cap
+    // when it does not fit, since a slightly tight guard costs the outermost
+    // texel row while a needless cube costs six passes.
+    const float khs_raw = 2.0f * acosf(khs_cc);
+    if (khs_raw > KH_DLS_SPOT_FOV_MAX) return false;   // genuinely too wide for one frustum
+    float khs_fov = khs_raw * 1.15f;
+    if (khs_fov > KH_DLS_SPOT_FOV_MAX) khs_fov = KH_DLS_SPOT_FOV_MAX;
+    if (khs_fov < 0.12f) khs_fov = 0.12f;
+    if (khs_fov_out) *khs_fov_out = khs_fov;
+
+    // forward = the spot axis; any stable perpendicular for right/up.
+    const float khs_fx = khs_dir[0] / khs_l, khs_fy = khs_dir[1] / khs_l, khs_fz = khs_dir[2] / khs_l;
+    float khs_ux = 0.0f, khs_uy = 1.0f, khs_uz = 0.0f;
+    if (fabsf(khs_fy) > 0.99f) { khs_ux = 1.0f; khs_uy = 0.0f; khs_uz = 0.0f; }
+    // right = up x forward, then up = forward x right (both re-orthonormalized)
+    float khs_rx = khs_uy * khs_fz - khs_uz * khs_fy;
+    float khs_ry = khs_uz * khs_fx - khs_ux * khs_fz;
+    float khs_rz = khs_ux * khs_fy - khs_uy * khs_fx;
+    const float khs_rl = sqrtf(khs_rx * khs_rx + khs_ry * khs_ry + khs_rz * khs_rz);
+    if (!(khs_rl > 1.0e-5f)) return false;
+    khs_rx /= khs_rl; khs_ry /= khs_rl; khs_rz /= khs_rl;
+    khs_ux = khs_fy * khs_rz - khs_fz * khs_ry;
+    khs_uy = khs_fz * khs_rx - khs_fx * khs_rz;
+    khs_uz = khs_fx * khs_ry - khs_fy * khs_rx;
+
+    const float khs_n = kh_dls_near(khs_far);
+    const float khs_f = khs_far > khs_n * 2.0f ? khs_far : khs_n * 2.0f;
+    const float khs_s = 1.0f / tanf(khs_fov * 0.5f);
+    const float khs_a = khs_f / (khs_f - khs_n);
+    const float khs_c = -khs_n * khs_f / (khs_f - khs_n);
+    const float khs_r3[3] = { khs_rx, khs_ry, khs_rz };
+    const float khs_u3[3] = { khs_ux, khs_uy, khs_uz };
+    const float khs_f3[3] = { khs_fx, khs_fy, khs_fz };
+    for (int khs_i = 0; khs_i < 3; ++khs_i) {
+        khs_out[khs_i * 4 + 0] = khs_r3[khs_i] * khs_s;
+        khs_out[khs_i * 4 + 1] = khs_u3[khs_i] * khs_s;
+        khs_out[khs_i * 4 + 2] = khs_f3[khs_i] * khs_a;
+        khs_out[khs_i * 4 + 3] = khs_f3[khs_i];
+    }
+    khs_out[12] = 0.0f; khs_out[13] = 0.0f; khs_out[14] = khs_c; khs_out[15] = 0.0f;
+    return true;
+}
+
+// Per-face cull. khc_c / khc_he are the caster's centre and half-extents in
+// ENGINE AXES; khc_lp is the light. Exact for the cube (the basis is an axis
+// permutation, so the box stays axis-aligned in face space) and conservative
+// for nothing, because nothing is approximated.
+//
+// The frustum in face space is |x| <= z, |y| <= z, near <= z <= far. A box is
+// refused only when it lies WHOLLY outside one plane, which is the standard
+// rule and the only one that cannot refuse a caster it should keep.
+inline bool kh_dls_face_keep(int khc_face, const float* khc_lp,
+                             const float* khc_c, const float* khc_he, float khc_far) {
+    const float* khc_b = KH_DLS_BASIS[khc_face];
+    const float khc_rel[3] = { khc_c[0] - khc_lp[0], khc_c[1] - khc_lp[1], khc_c[2] - khc_lp[2] };
+    float khc_lo[3], khc_hi[3];
+    for (int khc_k = 0; khc_k < 3; ++khc_k) {
+        const float* khc_ax = khc_b + khc_k * 3;
+        const float  khc_ctr = khc_rel[0] * khc_ax[0] + khc_rel[1] * khc_ax[1] + khc_rel[2] * khc_ax[2];
+        // |axis| dotted with the half-extents: the box's own extent on this
+        // axis. Signs do not matter to an extent, so fabsf is exact here.
+        const float  khc_ext = fabsf(khc_ax[0]) * khc_he[0]
+                             + fabsf(khc_ax[1]) * khc_he[1]
+                             + fabsf(khc_ax[2]) * khc_he[2];
+        khc_lo[khc_k] = khc_ctr - khc_ext;
+        khc_hi[khc_k] = khc_ctr + khc_ext;
+    }
+    // FP32 PAD ON THE TWO DEPTH PLANES. The cull works in metres; the raster
+    // works in clip space, and the two disagree by up to 4.5 mm at a 60 m far
+    // plane (brute-forced, rule 1.83). Unpadded, that hands the raster a
+    // caster the cull already refused - the exact shape of a gate that is
+    // right on average and wrong at the seam. The pad costs a handful of
+    // casters whose nearest point is past the light's ZERO-CONTRIBUTION reach,
+    // so they cannot darken anything even when kept: the error is free in one
+    // direction and a missing shadow in the other.
+    const float khc_pad = khc_far * 1.0e-3f + 0.01f;
+    if (khc_hi[2] < kh_dls_near(khc_far) - khc_pad) return false;   // wholly behind the near plane
+    if (khc_lo[2] > khc_far + khc_pad) return false;         // wholly past the reach
+    if (khc_lo[0] > khc_hi[2]) return false;       // wholly outside +x
+    if (khc_hi[0] < -khc_hi[2]) return false;      // wholly outside -x
+    if (khc_lo[1] > khc_hi[2]) return false;       // wholly outside +y
+    if (khc_hi[1] < -khc_hi[2]) return false;      // wholly outside -y
+    return true;
+}
+
+// The skip hash, modelled on render_sun_depth's union hash and covering the
+// same class of change: every caster's transform and identity, plus the LIGHT's
+// own position and reach. A light that moves changes the hash and forces a
+// re-render that frame, exactly as a moving mesh does for the union - so
+// animation is covered by construction and does not need a separate arm.
+//
+// The debug mode rides in the hash for the same reason the occupancy grid puts
+// it there: an A/B toggle must not be served a map built under the other mode.
+// khh_casters is the WHOLE caster set's hash, computed ONCE per frame and
+// shared by every light: the set is the same for all of them, and hashing it
+// eight times would be eight walks of 300 casters to reach the same number.
+// khh_slice0 IS PART OF THE KEY (26817). Slices are handed out in live-slot
+// order, so a light dying above another light SHIFTS that light's slice down -
+// with every other hashed input unchanged. The key matched, the pass skipped,
+// and the surviving light's slice now held the DEAD light's depth: shadows
+// from a lamp that is no longer there, cast in the shape of one that is. The
+// map's identity includes WHERE it lives, not just what is in it.
+// khh_mask joins the key in 26820: which FACES hold a slice is now caster-
+// dependent, so a caster leaving one face relayouts this light's slices with
+// every other input unchanged - the same aliasing 26817 closed for slice0.
+// KH_DLS_SPOT_KEY (26879). khh_spot_vp is the spot's frustum (16 floats;
+// nullptr for a cube light). It carries the DIRECTION and CONE the key never
+// held: pos / reach / spot flag / faces were the whole identity, so a spot
+// that turned in place (a flashlight, a turret) kept its map while
+// kh_dls_fill_cb published the NEW frustum against it. The cube's faces
+// depend on far alone, which reach already keys.
+inline uint64_t kh_dls_light_hash(const KhDlsSlot& khh_s, uint32_t khh_face_n,
+                                  uint32_t khh_slice0, uint8_t khh_mask,
+                                  uint64_t khh_casters, const float* khh_spot_vp) {
+    uint64_t khh_k = CryptoGenerator::fnv1a64_update(CryptoGenerator::FNV1A64_OFFSET,
+                                                     &khh_casters, sizeof(khh_casters));
+    if (khh_spot_vp) khh_k = CryptoGenerator::fnv1a64_update(khh_k, khh_spot_vp, sizeof(float) * 16);
+    khh_k = CryptoGenerator::fnv1a64_update(khh_k, &khh_slice0, sizeof(khh_slice0));
+    khh_k = CryptoGenerator::fnv1a64_update(khh_k, &khh_mask, sizeof(khh_mask));
+    khh_k = CryptoGenerator::fnv1a64_update(khh_k, khh_s.pos, sizeof(khh_s.pos));
+    khh_k = CryptoGenerator::fnv1a64_update(khh_k, &khh_s.reach, sizeof(khh_s.reach));
+    khh_k = CryptoGenerator::fnv1a64_update(khh_k, &khh_s.spot, sizeof(khh_s.spot));
+    khh_k = CryptoGenerator::fnv1a64_update(khh_k, &khh_face_n, sizeof(khh_face_n));
+    const int32_t khh_m = g_dbg_mode.load(std::memory_order_relaxed);
+    khh_k = CryptoGenerator::fnv1a64_update(khh_k, &khh_m, sizeof(khh_m));
+    if (khh_k == 0) khh_k = 1;   // 0 is the empty sentinel
+    return khh_k;
+}
+
+// The far plane a slot's maps are built to. Floored so a degenerate reach never// The far plane a slot's maps are built to. Floored so a degenerate reach never
+// mints a zero far plane (which would collapse the depth range and make every
+// compare answer the same thing).
+inline float kh_dls_far(const KhDlsSlot& khf_s) {
+    return khf_s.reach > KH_DLS_REACH_MIN_M ? khf_s.reach : KH_DLS_REACH_MIN_M;
+}
+
+// Stage-2a census. Reset with the stats (rule 1.89); the key lane is
+// dlsFaceCullFrac - how much of the 48-face worst case the cull actually
+// removes. If that reads near zero the cube array is costing full price and
+// the next move is the cull, not the resolution.
+static uint64_t g_dls_faces_built = 0;     // faces that had at least one caster
+static uint64_t g_dls_faces_empty = 0;     // faces culled to nothing (free)
+static uint64_t g_dls_face_casters = 0;    // caster-face pairs kept
+static uint64_t g_dls_face_tests = 0;      // caster-face pairs tested
+static uint64_t g_dls_spot_frusta = 0;     // spots served by ONE frustum
+static uint64_t g_dls_spot_wide = 0;       // spots too wide, fell back to the cube
+static uint64_t g_dls_hash_skips = 0;      // whole lights reused unchanged
+static uint64_t g_dls_hash_builds = 0;     // whole lights rebuilt
+static uint64_t g_dls_keys[KH_DLS_MAX] = {};   // per-slot skip key (state, not a lane)
+
 // Zeroed lanes (mode 0 / stale / empty / rejected) stand the shader down -
 // cbd is zero-initialized by both callers, so standing down is the default,
 // never an action. Fills the dynamic-lights lanes of a draw constant block.
+// KH_DL_DARK (26850) - RECORD A FILL THAT DELIVERED NOTHING.
+//
+// Every mode-3 refusal in fill_dynlights_cb returns WITHOUT writing dl_ctl, and
+// the caller's ConstantData is zero-initialised - so the shader reads
+// dlCtl.x == 0 and DynLights returns float3(0,0,0). A refused fill and a fill
+// that found no lights are therefore indistinguishable on screen from the
+// dynamic-light feature being switched off, for that whole mesh.
+//
+// That is the black-mesh fault, and until now not one of those three returns
+// left a trace (rule 1.88): the dump could show a healthy pool, healthy
+// harvests and a mesh rendering black, with nothing in between to read. The
+// counters say how often and the ring says when, against what pool, and
+// whether we were BLIND at the time - which is what separates "the light
+// genuinely went out" from "we stopped decoding the window it was in", the two
+// hypotheses this fault has always sat between.
+// KH_DL_TRACE (26851). One row per frame, written by the fill itself, so the
+// trace records what the MESH actually received rather than what the pool
+// contained. Called on every mode-3 fill, delivering or not.
+inline void kh_dl_trace_fill(uint32_t kht_out, uint32_t kht_pool_n,
+                             float kht_near_m, float kht_reach_m,
+                             float kht_obj_cam_m, uint8_t kht_reason) {
+    if (!ffr_armed()) return;
+    FfrRecord& kht_r = ffr_head();
+    kht_r.dl_fill_n = kht_out > 0xFFFEu ? 0xFFFEu : static_cast<uint16_t>(kht_out);
+    kht_r.dl_pool_n = kht_pool_n > 0xFFFFu ? 0xFFFFu : static_cast<uint16_t>(kht_pool_n);
+    kht_r.dl_near_m = kht_near_m;
+    kht_r.dl_reach_m = kht_reach_m;
+    kht_r.dl_obj_cam_m = kht_obj_cam_m;
+    kht_r.dl_reason = kht_reason;
+    kht_r.dl_blind_run = g_dl.blind_run > 0xFFFFu ? 0xFFFFu
+                                                  : static_cast<uint16_t>(g_dl.blind_run);
+    uint32_t kht_down = 0;
+
+    for (uint32_t kht_i = 0; kht_i < KH_DL_WIN_SLOTS; ++kht_i) {
+        if (g_dl.win_fail_lo[kht_i] != 0 && g_dl.win_fail_run[kht_i] > 0) kht_down++;
+    }
+
+    kht_r.dl_win_down = static_cast<uint8_t>(kht_down);
+}
+
+inline void kh_dl_note_dark(uint8_t khn_reason, uint32_t khn_pool_n,
+                            float khn_near_m, float khn_reach_m) {
+    g_dl.fill_dark++;
+    g_dl.fill_dark_pool_n = static_cast<uint32_t>(khn_pool_n);
+    g_dl.fill_dark_near_m = khn_near_m;
+    g_dl.fill_dark_reach_m = khn_reach_m;
+    const float khn_t = effect_time_seconds();
+    if (g_dl.fill_dark_first_s < 0.0f) g_dl.fill_dark_first_s = khn_t;
+    g_dl.fill_dark_last_s = khn_t;
+
+    const uint64_t khn_now = steady_now_ms();
+    DlDarkRec& khn_r = g_dl.dark_ring[g_dl.dark_head % KH_DL_DARK_RING];
+    khn_r = DlDarkRec{};
+    khn_r.t_ms = khn_now;
+    khn_r.pool_n = khn_pool_n > 0xFFFFu ? 0xFFFFu : static_cast<uint16_t>(khn_pool_n);
+    khn_r.reason = khn_reason;
+    khn_r.blind = (g_dl.blind_last_ms != 0 && khn_now >= g_dl.blind_last_ms &&
+                   khn_now - g_dl.blind_last_ms <= KH_DL_BLIND_GRACE_MS) ? 1 : 0;
+    khn_r.unanch = g_dl.blind_run > 0xFFFFu ? 0xFFFFu
+                                            : static_cast<uint16_t>(g_dl.blind_run);
+    khn_r.near_m = khn_near_m;
+    khn_r.reach_m = khn_reach_m;
+    g_dl.dark_head++;
+}
+
 inline void fill_dynlights_cb(ConstantData& cbd, const RenderObject& o) {
     const int khd_mode = g_dl_mode.load(std::memory_order_relaxed);
     if (khd_mode <= 0) return;
@@ -17478,8 +19927,40 @@ inline void fill_dynlights_cb(ConstantData& cbd, const RenderObject& o) {
     memcpy(&khd_int, &khd_bits, sizeof(khd_int));
 
     if (khd_mode == 3) {
-        if (g_dl.pool_n == 0) return;
-        if (steady_now_ms() - g_dl.pool_stamp > KH_DL_POOL_STALE_MS) { g_dl.stale_skips++; return; }
+        // The three refusals below are the black-mesh state, so each one is
+        // now counted and ringed - see kh_dl_note_dark. None of them writes
+        // dl_ctl, which is exactly why they were invisible.
+        // THE MESH-TO-CAMERA DISTANCE, MEASURED ONCE AND CARRIED INTO EVERY
+        // TRACE ROW. The 26850 dumps reported a nearest light 1433 m from the
+        // mesh while the camera sat 10 m from a lamp, and there is no lane in
+        // the build that says which of those two facts is the strange one -
+        // a mesh a kilometre away is CORRECTLY dark, and a mesh beside the
+        // camera is not. Without this number both readings stay available and
+        // neither can be ruled out.
+        float khd_objcam = -1.0f;
+        {
+            float khd_camp[3];
+            if (kh_dls_camera(khd_camp)) {
+                const float khd_ox = o.pos[0] - khd_camp[0];
+                const float khd_oy = o.pos[2] - khd_camp[1];
+                const float khd_oz2 = o.pos[1] - khd_camp[2];
+                khd_objcam = sqrtf(khd_ox * khd_ox + khd_oy * khd_oy + khd_oz2 * khd_oz2);
+            }
+        }
+
+        if (g_dl.pool_n == 0) {
+            g_dl.fill_no_pool++;
+            kh_dl_note_dark(0, 0, -1.0f, -1.0f);
+            kh_dl_trace_fill(0, 0, -1.0f, -1.0f, khd_objcam, 0);
+            return;
+        }
+
+        if (steady_now_ms() - g_dl.pool_stamp > KH_DL_POOL_STALE_MS) {
+            g_dl.stale_skips++;
+            kh_dl_note_dark(1, g_dl.pool_n, -1.0f, -1.0f);
+            kh_dl_trace_fill(0, g_dl.pool_n, -1.0f, -1.0f, khd_objcam, 1);
+            return;
+        }
         // mesh center + half diagonal, engine axes (SQF [x,y,zASL] -> engine
         // [x, zASL, y])
         const float khd_c[3] = { o.pos[0], o.pos[2], o.pos[1] };
@@ -17491,6 +19972,13 @@ inline void fill_dynlights_cb(ConstantData& cbd, const RenderObject& o) {
         uint32_t khd_sel[KH_DL_MAX_LIGHTS];
         float khd_dst[KH_DL_MAX_LIGHTS];
         uint32_t khd_n = 0;
+        // The nearest pooled light and the reach it would have needed: with
+        // these two numbers a refusal names its own cause. near >> reach is a
+        // mesh that has simply walked out of every lamp's range - correct and
+        // uninteresting. near <= reach with nothing selected is impossible, and
+        // near close to reach across a blackout is the pool having lost the one
+        // light that mattered, which is the fault.
+        float khd_near = -1.0f, khd_near_reach = -1.0f;
 
         for (uint32_t i = 0; i < g_dl.pool_n; ++i) {
             const DlPoolLight& khd_pl = g_dl.pool[i];
@@ -17502,6 +19990,12 @@ inline void fill_dynlights_cb(ConstantData& cbd, const RenderObject& o) {
             const float khd_inv = khd_pl.rec[21];
             const float khd_reach = (khd_pl.rec[20] + (khd_inv > 1.0e-6f ? 1.0f / khd_inv : 0.0f))
                                   / khd_scale;
+
+            if (khd_near < 0.0f || khd_d < khd_near) {
+                khd_near = khd_d;
+                khd_near_reach = khd_reach + khd_half;
+            }
+
             if (khd_d > khd_reach + khd_half) continue;   // contributes exactly zero
             uint32_t khd_j = khd_n < KH_DL_MAX_LIGHTS ? khd_n : KH_DL_MAX_LIGHTS;
 
@@ -17521,7 +20015,13 @@ inline void fill_dynlights_cb(ConstantData& cbd, const RenderObject& o) {
             }
         }
 
-        if (khd_n == 0) return;
+        if (khd_n == 0) {
+            g_dl.fill_no_reach++;
+            kh_dl_note_dark(2, g_dl.pool_n, khd_near, khd_near_reach);
+            kh_dl_trace_fill(0, g_dl.pool_n, khd_near, khd_near_reach, khd_objcam, 2);
+            return;
+        }
+
         // points first, then spots - two packing passes
         uint32_t khd_out = 0, khd_pn = 0;
 
@@ -17530,6 +20030,15 @@ inline void fill_dynlights_cb(ConstantData& cbd, const RenderObject& o) {
                 const DlPoolLight& khd_pl = g_dl.pool[khd_sel[k]];
                 if ((khd_pl.spot != 0) != (khd_pass == 1)) continue;
                 memcpy(cbd.dl_lights[khd_out * 6], khd_pl.rec, KH_DL_LIGHT_BYTES);
+                // KH_DL_SHADOW (26822): which shadow slot, if any, this light
+                // holds. 0 = none. Written AFTER the memcpy because the record
+                // is copied verbatim from cb11 and that lane carries whatever
+                // the engine left there - it may never be assumed zero.
+                // dlLights[b + 5].z is read by neither kernel before this
+                // build, so a site that does not write it stands the shadow
+                // down rather than aliasing another light's map.
+                cbd.dl_lights[khd_out * 6 + 5][2] =
+                    static_cast<float>(kh_dls_slot_of(khd_pl) + 1);
                 khd_out++;
                 if (khd_pass == 0) khd_pn++;
             }
@@ -17552,6 +20061,11 @@ inline void fill_dynlights_cb(ConstantData& cbd, const RenderObject& o) {
         }
 
         cbd.dl_global[3] = khd_int;
+        // The healthy path is traced too - a time series in which only the
+        // failures appear cannot show what recovery looks like, and recovery is
+        // half of what the capture is for.
+        kh_dl_trace_fill(khd_out, g_dl.pool_n, khd_near, khd_near_reach,
+                         khd_objcam, 0xFFu);
         g_dl.fill_calls++;
         g_dl.fill_last_n = khd_out;
         if (khd_out < g_dl.fill_min_n) g_dl.fill_min_n = khd_out;
@@ -17575,6 +20089,14 @@ inline void fill_dynlights_cb(ConstantData& cbd, const RenderObject& o) {
     cbd.dl_global[3] = khd_int;
     memcpy(cbd.dl_view, g_dl.view_cols, sizeof(cbd.dl_view));
     memcpy(cbd.dl_lights, g_dl.lights, static_cast<size_t>(khd_n) * KH_DL_LIGHT_BYTES);
+    // KH_DL_SHADOW (26822): the legacy mirror has no slot mapping - its list is
+    // the engine's own, not the pool the selection ran over - so the slot lane
+    // is CLEARED rather than left holding the engine bytes the memcpy brought
+    // in. Uncleared, a stray value there would point a light at an unrelated
+    // light's shadow map. Modes 1/2 are diagnostics; they simply do not cast.
+    for (uint32_t khd_z = 0; khd_z < khd_n; ++khd_z) {
+        cbd.dl_lights[khd_z * 6 + 5][2] = 0.0f;
+    }
 }
 
 // Session reset for the mirror (device objects are release_shadow_device_
@@ -17641,6 +20163,57 @@ inline void dynlights_reset_session() {
     g_dl.anchor_n = 0;
     g_dl.anchor_admits = 0;
     g_dl.anchor_res_rejects = 0;
+    g_dl.anchor_ghost_drops = 0;
+    g_dl.anchor_ghost_dx = 0.0f;
+    g_dl.anchor_ghost_dz = 0.0f;
+    g_dl.blind_last_ms = 0;
+    g_dl.sight_win_down = 0;
+    g_dl.sight_win_up = 0;
+    g_dl.hint_changes = 0; g_dl.hint_set_ms = 0; g_dl.hint_set_stall_ms = 0;
+    g_dl.hint_set_serial = 0; g_dl.hint_ox = 0.0f; g_dl.hint_oz = 0.0f;
+    g_dl.hint_move_ox = 0.0f; g_dl.hint_move_oz = 0.0f;
+    memset(g_dl.hint_ring, 0, sizeof(g_dl.hint_ring));
+    g_dl.hint_head = 0;
+    g_dl.last_harvest_ms = 0; g_dl.stalls_seen = 0;
+    g_dl.stall_max_ms = 0; g_dl.stall_last_ms = 0; g_dl.stall_last_at_ms = 0;
+    memset(g_dl.win_ox, 0, sizeof(g_dl.win_ox));
+    memset(g_dl.win_oz, 0, sizeof(g_dl.win_oz));
+    memset(g_dl.win_lights, 0, sizeof(g_dl.win_lights));
+    memset(g_dl.win_flips, 0, sizeof(g_dl.win_flips));
+    memset(g_dl.win_oset, 0, sizeof(g_dl.win_oset));
+    g_dl.tie_seen = 0; g_dl.tie_continuity = 0; g_dl.tie_corrob = 0;
+    g_dl.tie_arbitrary = 0; g_dl.tie_overturns = 0;
+    g_dl.hint_drift = 0; g_dl.hint_drift_dx = 0.0f; g_dl.hint_drift_dz = 0.0f;
+    g_dl.hint_drift_rescans = 0;
+    g_dl.near_wins = 0; g_dl.near_holds = 0;
+    g_dl.origin_near_last = -1.0f; g_dl.origin_near_min = -1.0f;
+    g_dl.origin_near_max = -1.0f; g_dl.origin_near_n = 0;
+    g_dl.xcheck_voted = 0; g_dl.xcheck_agree = 0;
+    g_dl.xcheck_disagree = 0; g_dl.xcheck_novote = 0;
+    g_dl.xdis_der[0] = g_dl.xdis_der[1] = 0.0f;
+    g_dl.xdis_vote[0] = g_dl.xdis_vote[1] = 0.0f;
+    g_dl.xdis_lights = 0; g_dl.xdis_last_ms = 0;
+    g_dl.origin_flips = 0; g_dl.flip_lights = 0; g_dl.flip_last_ms = 0;
+    g_dl.flip_from[0] = g_dl.flip_from[1] = 0.0f;
+    g_dl.flip_to[0] = g_dl.flip_to[1] = 0.0f;
+    g_dl.win_slot_evictions = 0;
+    memset(g_dl.win_fail_lo, 0, sizeof(g_dl.win_fail_lo));
+    memset(g_dl.win_fail_run, 0, sizeof(g_dl.win_fail_run));
+    memset(g_dl.win_fail_max, 0, sizeof(g_dl.win_fail_max));
+    g_dl.blind_harvests = 0;
+    g_dl.blind_holds = 0;
+    g_dl.blind_run = 0;
+    g_dl.blind_run_max = 0;
+    g_dl.fill_no_pool = 0;
+    g_dl.fill_no_reach = 0;
+    g_dl.fill_dark = 0;
+    g_dl.fill_dark_pool_n = 0;
+    g_dl.fill_dark_near_m = -1.0f;
+    g_dl.fill_dark_reach_m = -1.0f;
+    g_dl.fill_dark_first_s = -1.0f;
+    g_dl.fill_dark_last_s = -1.0f;
+    memset(g_dl.dark_ring, 0, sizeof(g_dl.dark_ring));
+    g_dl.dark_head = 0;
     memset(g_dl.cand_ring, 0, sizeof(g_dl.cand_ring));
     g_dl.cand_head = 0;
     memset(g_dl.m3_ring, 0, sizeof(g_dl.m3_ring));
@@ -17667,6 +20240,19 @@ inline void dynlights_reset_session() {
     g_dl.vs_triple_valid = 0;
     g_dl.vs_zero_origins = 0;
     g_dl.vs_nonzero_origins = 0;
+    g_dl.hint_cross_writes = 0;
+    g_dl.res_impostors = 0;
+    g_dl.res_worst_kept = 0.0f;
+    memset(g_dl.win_hint_set, 0, sizeof(g_dl.win_hint_set));
+    memset(g_dl.win_hint_kind, 0, sizeof(g_dl.win_hint_kind));
+    memset(g_dl.win_hint_off, 0, sizeof(g_dl.win_hint_off));
+    memset(g_dl.win_hint_form, 0, sizeof(g_dl.win_hint_form));
+    memset(g_dl.win_hint_woff, 0, sizeof(g_dl.win_hint_woff));
+    memset(g_dl.win_hint_wform, 0, sizeof(g_dl.win_hint_wform));
+    for (uint32_t khh_i = 0; khh_i < KH_DL_WIN_SLOTS; ++khh_i) {
+        g_dl.win_hint_slot[khh_i] = -1;
+        g_dl.win_hint_wslot[khh_i] = -1;
+    }
     g_dl.vs_hint_kind = 0;
     g_dl.vs_hint_slot = -1;
     g_dl.vs_hint_off = 0;
@@ -17939,6 +20525,7 @@ inline void fill_lighting_frame_cb(ConstantData& cbd) {
                             g_sun4_map_vp, g_sun4_map_bias, g_sun4_half_diag, g_sun4_map_size);
         kh_fill_sun_tier_cb(g_sun_tier_anchor[3], cbd.sun_vp5, cbd.sun_meta5, g_sun5_map_valid,
                             g_sun5_map_vp, g_sun5_map_bias, g_sun5_half_diag, g_sun5_map_size);   // FAR band, same clock
+        kh_dls_fill_cb(cbd);   // KH_DL_SHADOW twin 1/2 - beside the sun tiers, same frame CB
         // KH_SELF_PREFILTER arms (mode 357 = classic taps everywhere; a band
         // whose convert did not complete stays classic on its own - the flag
         // pairs render AND convert).
@@ -20605,6 +23192,227 @@ struct ShadowMaskState {
 };
 
 static ShadowMaskState g_mask;
+// KH_DLSW_DEPTHFMT (26867). The DXGI format of the depth actually adopted into
+// g_mask.cast_depth. Declared HERE, beside the state it describes and above the
+// adoption site that writes it - not down with the other g_dlsw_* lanes, which
+// all sit past 39000 and would put this one 15,000 lines after its only writer.
+// fxc has no linker and neither does a single-TU header (this is the second
+// ordering break of the campaign; the first was kh_dl_win_slot at 26859).
+static int g_dlsw_depth_fmt = -1;
+// KH_DLSW_BANDING (26870) - THE LEDGER FOR THE GROUND-SHADOW RINGS, INCLUDING
+// SIX REFUTED HYPOTHESES. READ THIS BEFORE PROPOSING A SEVENTH.
+//
+// SYMPTOM: fine concentric rings on ground shadowed by a dynamic light, with a
+// vertical seam through them, worsening as the camera lies down toward the
+// surface until the shadow washes out.
+//
+// REFUTED, each by a measurement rather than an argument:
+//   fov              dlswFovRatio 1.000 on both axes
+//   viewport         dlswVpMismatch 0, viewport 3840x2160 == cast_dims
+//   depth precision  dlswDepthFmt 41 = R32_FLOAT; no quantisation at any range
+//   frozen view      field: the artifact is identical standing perfectly still
+//   reconstruction   mode 531 stable and welded to the ground
+//   receiver normal  *** STRUCK AT 26876. THIS ENTRY WAS NEVER A REFUTATION
+//                    AND IT COST THE REST OF THE CAMPAIGN. *** It read: mode
+//                    520 disables every use of the normal, khd_p's offset and
+//                    khd_ndl's N.L floor being its only two readers, and the
+//                    rings survive 520 unchanged.
+//
+//                    THE PARENTHESIS IS THE ERROR. Those are the only two
+//                    readers INSIDE KhDlsShadow, which is what 520's arm
+//                    (dlsFaceSlice[].y) gates. KhDlsWorldFactor reads the SAME
+//                    normal in three more places 520 has never reached: the
+//                    per-light khw_ndl, the copy of it inside khw_dyn, and the
+//                    sun's N.L in the denominator. So 520 surviving says the
+//                    shadow LOOKUP is innocent. It says nothing whatever about
+//                    the normal, and it was read as saying the opposite for
+//                    six builds - which is rule 1.73 in its most expensive
+//                    form, because the claim was mine and the measurement was
+//                    real. A measurement can be sound and its SCOPE still be
+//                    wrong; check what a mode actually reaches before you let
+//                    it close a hypothesis.
+//
+//                    26869 replaced the ddx/ddy normal with one-sided
+//                    differences and 26870 reverted it on this bad reading.
+//                    26876 goes back, for cause - see KH_DLSW_NRM below.
+//
+// I also misread mode 531 for two rounds. It paints frac(world), which on real
+// terrain at grazing incidence produces irregular contour rings by design; I
+// took those as evidence of a quantised reconstruction and dropped a live
+// hypothesis on it. The debug mode was working.
+//
+// KH_DLSW_TEXEL (26871) MEASURES THE ONE REMAINING CANDIDATE. Mode 545 paints
+// the shadow map's texel grid as a checkerboard in map space - if the rings ARE
+// texels they land on that checker exactly, and if they cut across it they are
+// not. Mode 546 paints how many SCREEN pixels one texel spans, over three
+// decades (red 0-8, green 0-64, blue 0-512), taking the world size of a pixel
+// from the reconstruction's own derivatives. That ratio is the quantity whose
+// growth matches the report: the map does not get finer as the camera lies
+// down, so it rises without bound while nothing else in the pass changes.
+// KhDlsFaceUV exists so both modes ask the SAME question the shadow lookup
+// asks, rather than keeping a second copy of the face arithmetic (rule 1.5).
+//
+// Neither mode changes a pixel of the shipping path, and NOTHING is being fixed
+// on this hypothesis until they are read. Six hypotheses have already been
+// refuted here; a seventh gets measured before it gets built.
+//
+// HYPOTHESIS SEVEN (map resolution) IS REFUTED, BY THE INSTRUMENT BUILT FOR IT.
+// Mode 545 paints the projected texel grid, and the field capture shows the
+// trapezoids clearly - with the banding VISIBLE INSIDE THEM, finer than the
+// grid. Nothing in the map lookup can have a sub-texel period: the stored depth
+// is constant within a texel. So the resolution is not the cause, and 546
+// reading 8-64 screen pixels per texel says only that the map is coarse here,
+// which it is, and which is not the same thing.
+//
+// HYPOTHESIS EIGHT, AND IT IS THE FIRST WITH A SUB-TEXEL MECHANISM.
+// KhDlsBilin compares BINARY against each texel and then bilerps the four
+// verdicts, so a tap is a ramp pinned to 0 or 1 at the corners. KhDlsSoft sums
+// five of those at +/-0.75 TEXEL. An 0.75 offset against a 1.0 grid beats at
+// exactly three texels - sub-texel, and sweeping through phase as the projected
+// texel size varies across a grazing surface, which is a concentric ring
+// generator. Up close the trapezoids are huge, the ramps stretch over many
+// pixels, and the binary corners read as flat bands with a soft fade rather
+// than an edge: one mechanism, both reported symptoms, at the right scale.
+//
+// HYPOTHESIS EIGHT IS REFUTED. Mode 548 drops to a single bilinear tap - no
+// five-tap sum, no beat - and the field reports the fine banding UNCHANGED. The
+// filter is innocent and mode 549 is now a cure for nothing; delete both with
+// this note if nine lands.
+//
+// HYPOTHESIS NINE, REACHED BY ELIMINATION RATHER THAN INSIGHT. What 548 leaves
+// is one bilinear tap: four binary compares of the receiver depth against four
+// CONSTANT texel depths. Inside a texel nothing else varies. So a band that
+// survives 548 at sub-texel scale means the RECEIVER DEPTH is banded, and that
+// traces straight back to khw_zl.
+//
+// Item 6 above checked the depth FORMAT and found R32_FLOAT. It never checked
+// the CONTENT, and a 32-bit float carries a quantised value perfectly well if
+// whatever wrote it rounded first - the engine resolves its own depth buffer
+// into that texture. On a grazing surface near the camera the depth changes
+// very little per pixel, so many pixels land on one plateau and the steps are
+// wide; further out the gradient steepens and they compress out of sight. That
+// is "worse the closer you are", and it is the one prediction a format check
+// could not have made.
+//
+// NINE IS REFUTED TOO (26875). The field reports mode 0 and mode 552
+// INDISTINGUISHABLE, so the uncertainty term changes nothing visible and the
+// rings are not this compare being flipped by receiver-depth error. The
+// measurement below still stands - the depth really does arrive in plateaus -
+// but it is not what draws them. The term is back to 0 and its two extra depth
+// Loads are gone; khd_zunc stays plumbed for the next attempt.
+//
+// HYPOTHESIS TEN (26876) - THE NORMAL, PROPERLY SCOPED THIS TIME. It is the
+// first candidate whose predicted SHAPE matches the report rather than merely
+// its severity, and the first that explains the fade and the rings with one
+// mechanism.
+//
+// Nine measured that the depth arrives in plateaus separated by cliffs. Nine
+// then asked what that does to the COMPARE, and the answer was nothing. It
+// never asked what it does to the NORMAL, because entry six above had closed
+// the normal off. It does something much worse there than add noise.
+//
+// KhCastWorld builds v = (ndc.x*fovx, ndc.y*fovy, 1) * zl. Inside a plateau zl
+// is CONSTANT across the 2x2 quad, so the reconstructed surface is the plane
+// z = const in view space and its normal is the VIEW AXIS - not noisy, not
+// approximately right, but a specific wrong answer that points at the camera.
+// At each cliff the depth jump dominates and the normal snaps back toward the
+// true surface. The normal therefore alternates between "at the camera" and
+// "correct", switching exactly on the iso-depth contours of the quantised
+// field, and khw_ndl swings with it.
+//
+// THE SHAPE IS THE EVIDENCE. Iso-zl contours of a ground plane in screen space
+// are conics, nested, and symmetric about the plane containing the view axis.
+// That is concentric rings with ONE STRAIGHT SEAM on the symmetry axis - the
+// field's report including the seam, which no other candidate has produced at
+// all. It is also camera-locked, and nothing in a shadow map is: the map has
+// never heard of the camera. That alone separates ten from one through nine,
+// every one of which lived in the map.
+//
+// THE FADE IS THE SAME MECHANISM. As the camera lies down, zl changes less per
+// pixel, plateaus widen, and more pixels read N = view axis. A near-horizontal
+// view axis against a lamp overhead gives dot(N, L) -> 0, khw_diff -> 0, and
+// the blocked share collapses - the shadow washes out as the camera
+// approaches, which is exactly what the field has reported from the start and
+// what "worse close up" has always meant.
+//
+// THE FIX IS A BASELINE, NOT A FILTER, and that distinction is why this is not
+// hypothesis eight again. Quantisation is a fixed step in metres; the true
+// depth difference across a stencil grows with the stencil. Sampling the plane
+// over KH_DLSW_NRM_R pixels rather than one improves signal-to-quantisation by
+// that factor with no constant to guess (rule 1.84). The plane is measured at
+// TWO baselines and their agreement is carried into KhDlsWorldFactor as
+// khw_nrel; where the two disagree the normal is not resolved and is not
+// allowed to drive N.L. That witness is dimensionless and self-calibrating -
+// it needs no knowledge of the quantisation step, which is the thing nine
+// measured and could not act on.
+//
+// THE PREDICTION, COMMITTED BEFORE THE BUILD (sec.6's one unambiguous win):
+// mode 554 paints khw_nrel, and its BLACK regions must coincide with the rings
+// and must SPREAD as the camera lowers. If 554 comes back white across banded
+// ground, the normal is resolved after all and ten is refuted on the same
+// screenshot that would have confirmed it. Mode 553 reverts the whole thing.
+//
+// THE SEE-THROUGH IS NOT THIS PASS (26876d, MEASURED, NOT ARGUED).
+//
+// Mode 558 paints where the world pass actually writes. On our meshes the
+// field capture is GREEN or unchanged everywhere and RED nowhere: green is the
+// self-mask refusing the pixel, unchanged is the depth test refusing it first
+// because the surface behind is SKY, and both of those return exactly 1.0.
+// A multiply by 1.0 writes nothing. Mode 539 agrees independently - the mesh
+// silhouette paints solid black, the mask's "genuinely in front" verdict.
+//
+// Two instruments, two mechanisms, same answer: stage 4 cannot be drawing the
+// background structure reported on the vest. Note also what 558 makes visible
+// as a by-product - the GREEN/unchanged boundary ON our mesh traces the tree
+// and hillline behind it, because that boundary is just "is the surface behind
+// this pixel sky or geometry". It looks exactly like the reported artifact and
+// is not it; both sides return 1.0. That coincidence is worth knowing about
+// before someone reads the next capture.
+//
+// The 3x3 mask dilation (26876b, reverted 26876c) is the other half of the
+// proof: dilating by a full pixel in every direction would have swallowed any
+// one-texel registration residue, and the see-through did not move. The leak is
+// not at the boundary and it is not in the interior. It is not here.
+//
+// Next: mode 560 paints KhDlsShadow's verdict on the mesh itself, and mode 519
+// stands the whole mesh receive down for a zero-build A/B.
+//
+// ORIGINAL 26874 NOTE, KEPT BECAUSE THE MEASUREMENT IS SOUND EVEN THOUGH THE
+// CONCLUSION WAS WRONG. Mode 550 painted the step and the
+// field found BLACK PLATEAUS BESIDE WHITE CLIFFS: adjacent pixels decoding the
+// IDENTICAL depth, then jumping 100 mm or more. A continuous field cannot do
+// that between neighbours - it is a plateau and a cliff, which is quantisation,
+// and the ring pattern rides on it.
+//
+// The arithmetic then finishes it. KH_DLS_BIAS_M is 0.04 - a 40 mm compare bias
+// against a receiver uncertainty of 100 mm or more. Inside every plateau the
+// test flips on quantisation alone. That is not a theory about the artifact; it
+// is two measured numbers in the wrong order, and it predicts the whole shape
+// of the report: the plateaus are widest close in on a grazing surface, where
+// depth changes least per pixel, so the banding worsens as the camera
+// approaches and the stretched steps read as a fade rather than an edge.
+//
+// KH_DLS_ZBIAS (26874) adds the measured step to the bias, and ONLY on the
+// world path - both mesh call sites pass 0, because a mesh's position is
+// interpolated geometry and carries no such error. Where the depth is precise
+// the term is a fraction of a millimetre and changes nothing. Mode 552 reverts.
+//
+// The lesson worth keeping: item 6 checked dlswDepthFmt, found R32_FLOAT, and I
+// wrote the depth off as precise. The FORMAT was never the question - the
+// CONTENT was, and a 32-bit float carries a pre-rounded value perfectly well.
+// Four rounds were spent downstream of that mistake.
+//
+// FOR REFERENCE, THE RESOLUTION ARITHMETIC. KH_DLS_MAP_PX is 1024 per cube face
+// at a 90 degree fov, so khd_texel = 2*z0/1024 - the shader's own pricing. That
+// is 2 cm at 10 m from the light and 8 cm at 40 m, and on a surface at grazing
+// incidence the GROUND footprint is that divided by sin(angle): at 5 degrees,
+// 22 cm and 90 cm respectively. The map does not get finer as the camera lies
+// down, so the ratio of texel footprint to screen pixel grows without bound,
+// which is the one mechanism so far whose severity scales the way the field
+// reports. The vertical seam in the 520 capture is consistent with a cube-face
+// boundary. That is a description of the resolution the feature has, not a
+// defect in it - so the honest next step is to MEASURE the projected texel
+// footprint per pixel before anyone changes a filter or a map size.
 
 inline void ffr_fold_late_deltas() {
     if (!ffr_armed()) return;   // diagnostics arming: see g_diag_armed
@@ -21749,6 +24557,29 @@ inline void resolve_pair_capture(ID3D11DeviceContext* ctx) {
                                         const int df = static_cast<int>(dd2.Format);
                                         depth_ok = dd2.Width == static_cast<UINT>(g_mask.cast_dims[0]) &&
                                                    (df == 39 || df == 40 || df == 41 || df == 46 || df == 54);
+                                        // KH_DLSW_DEPTHFMT (26867). WHICH of the
+                                        // accepted formats we are actually handed
+                                        // has never been published, and it decides
+                                        // whether the reconstruction can be
+                                        // precise at all. 39/40/41 are 32-bit and
+                                        // fine. 54 is R16_FLOAT - a 10-bit
+                                        // mantissa, so roughly 6 cm of quantum at
+                                        // 100 m and 25 cm at 300 m - and 46 is
+                                        // R24_UNORM, coarse in absolute metres
+                                        // once normalised over a large far plane.
+                                        //
+                                        // Mode 531 shows IRREGULAR RINGS rather
+                                        // than a clean 1 m grid, and they worsen as
+                                        // the camera closes on the surface. That is
+                                        // the signature of a quantised zl: on a
+                                        // grazing plane the depth changes slowly
+                                        // across pixels, so each quantisation step
+                                        // spans many pixels and paints a wide band,
+                                        // and the bands compress out of sight with
+                                        // distance. It is the reconstruction being
+                                        // banded, not the shadow kernel, because
+                                        // 531 is the raw world position.
+                                        if (depth_ok) g_dlsw_depth_fmt = df;
                                         dt->Release();
                                     }
 
@@ -21873,6 +24704,7 @@ struct SunCaster {
     float alpha;
     std::shared_ptr<const KhMaterialSet> mats;
     bool alpha_caster;
+    bool lod_lock;   // KH_LOD_LOCK, carried so the DLSW mask can pick the drawn level (26878)
 };
 static uint64_t g_sun_alpha_casters = 0;   // KH_CAST_ALPHA: casters drawn by their alpha (per map render)
 static uint64_t g_sun_alpha_draws = 0;   // KH_CAST_ALPHA: their submesh draws
@@ -21886,6 +24718,35 @@ inline bool kh_mat_set_has_alpha(const KhMaterialSet* khma_s) {
 inline bool kh_cast_alpha_on() {
     return g_res.vs_sundepth_a && g_res.ps_sundepth_a && g_res.layout_sundepth_a &&
            g_dbg_mode.load(std::memory_order_relaxed) != 484;
+}
+
+// ONE caster record from a draw-list object (26878). render_sun_depth built
+// this inline; kh_dls_frame needs the identical record for the light maps
+// and the DLSW mask, and two builders would be a twin (rule 1.5). The
+// eligibility and range tests stay with each caller - they differ on
+// purpose - only the record does not.
+inline SunCaster kh_sun_caster_of(const RenderObject& o) {
+    SunCaster c;
+    memcpy(c.pos, o.pos, sizeof(c.pos));
+    memcpy(c.size, o.size, sizeof(c.size));
+    memcpy(c.rot, o.rot_m, sizeof(c.rot));
+    c.rotated = o.rotated;
+    c.mesh = mesh_id_clamp(o.mesh);
+    c.lod_lock = o.lod_lock;
+    // KH_CAST_ALPHA: the caster's alpha (colour alpha x lifetime envelope, an
+    // expired object casts nothing until the flush erases it) quantised to
+    // 1/64, its alpha-carrying material set, and the verdict.
+    {
+        bool khsc_exp = false;
+        const float khsc_env = lifetime_envelope(o, effect_time_seconds(), khsc_exp);
+        float khsc_a = khsc_exp ? 0.0f : o.color[3] * khsc_env;
+        khsc_a = khsc_a < 0.0f ? 0.0f : (khsc_a > 1.0f ? 1.0f : khsc_a);
+        c.alpha = floorf(khsc_a * 64.0f + 0.5f) / 64.0f;
+        const KhMaterialSet* khsc_ms = kh_obj_textured(o);
+        c.mats = kh_mat_set_has_alpha(khsc_ms) ? o.materials : std::shared_ptr<const KhMaterialSet>();
+        c.alpha_caster = kh_cast_alpha_on() && (c.alpha < 0.999f || c.mats);
+    }
+    return c;
 }
 
 // Draws every alpha caster in khsa_set into the bound sun DSV: the alpha
@@ -21964,6 +24825,964 @@ inline uint64_t kh_sun_draw_alpha(ID3D11DeviceContext* ctx, const std::vector<Su
     khsa_dev->Release();
     g_sun_alpha_casters += khsa_n;
     return khsa_n;
+}
+
+// ---------------------------------------------------------------------------
+// KH_DL_SHADOW (stage 2b, 26815) - THE MAPS.
+//
+// NO SHADER CHANGE. VSSunDepth already transforms an instanced caster by
+// viewProj after subtracting sunOrigin, which is exactly a light-anchored
+// depth pass - so the light maps reuse the sun's vertex shader, input layout,
+// instance buffer and pipeline state verbatim by running INSIDE the sun's own
+// render lambda. cb.hlsl and static.hlsl are untouched by this build; the
+// first shader edit is stage 3.
+//
+// The consequence worth stating: every property the sun's depth pass already
+// has - the alpha-coverage dither, the shadow LOD, the mesh-run batching -
+// applies to these maps for free, and cannot drift from the sun's version
+// because it IS the sun's version.
+// ---------------------------------------------------------------------------
+static float    g_dls_vp[KH_DLS_MAX][6][16] = {};   // per slot, per face: world(light-rel) -> clip
+static uint32_t g_dls_slice0[KH_DLS_MAX] = {};      // first array slice this slot owns
+static uint32_t g_dls_facen[KH_DLS_MAX] = {};       // SLICES this slot owns; 0 = no map
+// KH_DLS_FACE_ALLOC (26820). A cube face with no caster in it cannot produce a
+// shadow, so it is not given a slice at all - previously it took one, was
+// cleared every frame, and answered 'lit' forever. Field: 5 of 12 faces empty
+// EVERY frame, a 42% standing waste in slices, clears and memory.
+//
+// The face -> slice map is therefore NOT slot*6 + face. Stage 3 must read this
+// table; 0xFFFF means the face has no map, which the shader reads as 'nothing
+// occludes in that direction' - the correct answer, not a missing one.
+static uint16_t g_dls_faceslice[KH_DLS_MAX][6] = {};
+static uint8_t  g_dls_facemask[KH_DLS_MAX] = {};    // which faces got a slice
+// EXPLICIT, because the face count no longer implies the geometry. Before
+// 26820 a slot with one slice WAS a spot; now a cube light whose casters sit
+// in a single face also has one, and the render pass used the count to decide
+// whether to run the face cull at all. Read that way, such a light would admit
+// every caster in the scene into one face. The kind of coupling that only
+// breaks once the neighbouring code changes - so it is named, not inferred.
+static uint8_t  g_dls_isspot[KH_DLS_MAX] = {};      // 1 = single spot frustum, not a cube
+static const uint16_t KH_DLS_FACE_NONE = 0xFFFFu;
+// KH_DLS_FACE_HOLD (26823) - THE STROBE.
+//
+// 26820 refused a slice to any cube face with no caster in it, and the field
+// found the consequence immediately: with a MOVING light, a face gains and
+// loses its caster every few frames, its slice appears and disappears with it,
+// and a receiver shaded through that face flips between shadowed and lit. That
+// is the strobing - not a map fault, not a publish fault, an ALLOCATION that
+// follows a boundary the eye can see across.
+//
+// The dump named it without naming it: dlsFacesBuilt and dlsHashSkips summed to
+// exactly lights x frames, so the pass ran and published every frame; the only
+// thing left changing was WHICH FACES HELD A SLICE.
+//
+// So a face keeps its slice for KH_DLS_FACE_HOLD frames after its last caster
+// leaves - the same hysteresis KH_DLS_HOLD_SLACK gives the slot table, for the
+// same reason. An empty face costs one clear and answers lit, so holding it is
+// cheap; losing it mid-motion is a visible flicker.
+static constexpr uint32_t KH_DLS_FACE_HOLD = 15;
+static uint32_t g_dls_face_hold[KH_DLS_MAX][6] = {};
+static uint8_t  g_dls_prev_mask[KH_DLS_MAX] = {};
+static uint64_t g_dls_mask_flaps = 0;     // face-mask changes (the strobe lane)
+static uint64_t g_dls_face_held = 0;      // faces kept alive by the hysteresis
+static uint64_t g_dls_faces_culled = 0;             // faces refused a slice (the saving)
+static uint64_t g_dls_slices_saved = 0;             // slices not allocated because of it
+static float    g_dls_mapfar[KH_DLS_MAX] = {};      // the far plane its matrices were built to
+static uint64_t g_dls_map_valid = 0;                // bitmask of slots with a usable map
+
+// Grow the depth array to hold khde_want slices. Recreated on growth (a
+// Texture2DArray cannot be extended), so the count only ever climbs and the
+// steady state is one allocation.
+// TWIN TRIPWIRE. KH_DLS_SLICES_MAX is declared above Resources, before
+// KH_DLS_MAX exists, so the two are written independently and nothing checks
+// they agree. Raising the light cap without raising the slice budget would
+// silently truncate the casting set at the slice loop (dlsMapShort), which
+// reads as 'some lights just do not cast' and nothing else.
+static_assert(KH_DLS_SLICES_MAX == static_cast<int>(KH_DLS_MAX) * KH_DLS_FACES,
+              "KH_DLS_SLICES_MAX must be KH_DLS_MAX * KH_DLS_FACES");
+
+inline bool kh_dls_ensure_maps(ID3D11Device* khde_dev, UINT khde_want) {
+    if (!khde_dev || khde_want == 0) return false;
+    // ROUND UP TO A WHOLE CUBE (26823). The field read dlsMapEpoch 5 - five
+    // recreations of a multi-megabyte array in 365 frames - because the slice
+    // demand tracks the face mask exactly, so one face appearing grew the array
+    // by one and rebuilt the lot. Quantising to 6 makes the count stable across
+    // any mask change within a light, and bounds the recreations to eight for
+    // the whole session.
+    khde_want = ((khde_want + 5u) / 6u) * 6u;
+    if (khde_want > static_cast<UINT>(KH_DLS_SLICES_MAX)) khde_want = KH_DLS_SLICES_MAX;
+    if (g_res.dls_tex && g_res.dls_slices >= khde_want && g_res.dls_size == KH_DLS_MAP_PX) return true;
+
+    for (int khde_i = 0; khde_i < KH_DLS_SLICES_MAX; ++khde_i) KH_SAFE_RELEASE(g_res.dls_dsv[khde_i]);
+    KH_SAFE_RELEASE(g_res.dls_srv);
+    KH_SAFE_RELEASE(g_res.dls_tex);
+    g_res.dls_slices = 0;
+    g_res.dls_size = 0;
+
+    D3D11_TEXTURE2D_DESC khde_td = {};
+    khde_td.Width = KH_DLS_MAP_PX;
+    khde_td.Height = KH_DLS_MAP_PX;
+    khde_td.MipLevels = 1;
+    khde_td.ArraySize = khde_want;
+    khde_td.Format = DXGI_FORMAT_R32_TYPELESS;   // D32 for the DSV, R32F for the SRV
+    khde_td.SampleDesc.Count = 1;
+    khde_td.Usage = D3D11_USAGE_DEFAULT;
+    khde_td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(khde_dev->CreateTexture2D(&khde_td, nullptr, &g_res.dls_tex))) return false;
+
+    for (UINT khde_s = 0; khde_s < khde_want; ++khde_s) {
+        D3D11_DEPTH_STENCIL_VIEW_DESC khde_dd = {};
+        khde_dd.Format = DXGI_FORMAT_D32_FLOAT;
+        khde_dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
+        khde_dd.Texture2DArray.FirstArraySlice = khde_s;
+        khde_dd.Texture2DArray.ArraySize = 1;
+        if (FAILED(khde_dev->CreateDepthStencilView(g_res.dls_tex, &khde_dd, &g_res.dls_dsv[khde_s]))) {
+            for (UINT khde_k = 0; khde_k < khde_s; ++khde_k) KH_SAFE_RELEASE(g_res.dls_dsv[khde_k]);
+            KH_SAFE_RELEASE(g_res.dls_tex);
+            return false;
+        }
+    }
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC khde_sd = {};
+    khde_sd.Format = DXGI_FORMAT_R32_FLOAT;
+    khde_sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+    khde_sd.Texture2DArray.MipLevels = 1;
+    khde_sd.Texture2DArray.ArraySize = khde_want;
+    if (FAILED(khde_dev->CreateShaderResourceView(g_res.dls_tex, &khde_sd, &g_res.dls_srv))) {
+        for (UINT khde_k = 0; khde_k < khde_want; ++khde_k) KH_SAFE_RELEASE(g_res.dls_dsv[khde_k]);
+        KH_SAFE_RELEASE(g_res.dls_tex);
+        return false;
+    }
+
+    g_res.dls_slices = khde_want;
+    g_res.dls_size = KH_DLS_MAP_PX;
+    g_dls_map_allocs++;
+    g_dls_map_epoch++;
+    // EVERY SKIP KEY DIES WITH THE TEXTURE (26817). The slices in a freshly
+    // created array hold nothing - not even a clear - and the keys describe
+    // the array that was just released. Left standing, every light would match
+    // its old key, skip, and sample uninitialised depth for as long as the
+    // scene stayed still. A cache key that outlives the cache is not a cache.
+    for (uint32_t khde_k = 0; khde_k < KH_DLS_MAX; ++khde_k) g_dls_keys[khde_k] = 0;
+    return true;
+}
+
+// KH_DL_SHADOW (26822) - publish the maps to the shader.
+//
+// FILLED ONLY AT THE MESH FRAME-CB SITES, and deliberately: the zeroed default
+// is dls_meta[i].w == 0, which the kernel reads as 'no map, answer lit'. Any
+// site that does not fill these lanes therefore behaves exactly as it did
+// before this build - the same 264 precedent the cast-bias lanes ride on.
+//
+// The face -> slice table is g_dls_faceslice, NOT slot*6+face: faces are only
+// allocated where a caster stands (KH_DLS_FACE_ALLOC), so the mapping is
+// caster-dependent and has to be carried rather than computed.
+// KH_DLS_RPDB (26877) - RE-DERIVED, AND THE PREVIOUS NOTE ASKED FOR EXACTLY
+// THIS. The full derivation lives beside KH_DLS_GRAD_TEXELS in cb.hlsl, with
+// the shader that consumes it; the short of it is that the maps are D32_FLOAT,
+// one quantum is 0.21 mm at 30 m and 9.5 mm at the session's worst case, and
+// 0.006/m was pricing 180 mm at 30 m. It was covering the missing receiver
+// plane, not the depth format, and the receiver plane is now modelled.
+//
+// The LEGACY pair is kept, not deleted: mode 573 is the revert and it has to
+// restore BOTH halves or it is not a revert (rule 1.82), and mode 574 arms the
+// gradient while keeping these - which is the A/B that says which of the two
+// changes did the work. Deleting them would make that question unanswerable.
+static constexpr float KH_DLS_BIAS_M = 0.01f;      // constant compare bias (m)
+static constexpr float KH_DLS_BIAS_SLOPE = 0.0001f; // plus this per metre of range
+static constexpr float KH_DLS_BIAS_M_LEGACY = 0.04f;       // 26876m, mode 573/574
+static constexpr float KH_DLS_BIAS_SLOPE_LEGACY = 0.006f;  // 26876m, mode 573/574
+static uint64_t g_dls_state_restores = 0;   // KH_DLS_STATE_RESTORE: brackets closed
+// KH_DLS_SRV_BIND census. D3D11 silently unbinds a shader resource whose
+// texture is bound as a DEPTH TARGET - which our own render pass does to this
+// very array. If the mesh bind site already ran this frame, t36 is left NULL
+// and every Load returns 0, i.e. the NEAR plane, i.e. fully occluded. Counting
+// the binds against the render calls says whether that ordering happens.
+static uint64_t g_dls_srv_binds = 0;
+static uint64_t g_dls_srv_rebinds = 0;   // re-binds issued BY the render pass
+static uint64_t g_dls_rast_fails = 0;   // KH_DLS_DEPTHCLIP: state creation failures
+// KH_DLS_PUBLISH_WHY (26825). cbSlots/cbFills read 0.885 in the field - on 11.5%
+// of fills NOTHING was published - and skips+builds summed to 531 against 600
+// flushes, so on 69 frames the render processed no light at all. Neither number
+// says WHY, which is rule 1.88 again. These split it.
+static uint64_t g_dls_fill_empty = 0;    // fills that published zero slots
+static uint64_t g_dls_render_calls = 0;  // kh_dls_render entries
+static uint64_t g_dls_render_noslot = 0; // ... that returned with no live slot
+static uint64_t g_dls_render_noneed = 0; // ... that resolved zero faces
+static uint64_t g_dls_pub_notvalid = 0;  // slot live but no map that frame
+static uint64_t g_dls_cb_fills = 0;
+static uint64_t g_dls_cb_slots = 0;   // slot-fills published (lit slots x fills)
+static float    g_dls_range_m = 0.0f;   // KH_DLS_RANGE: the shadow view distance in force (0 = fade off)
+static uint64_t g_dls_range_nocam = 0;  // KH_DLS_RANGE: fills with no camera - the fade stood down
+
+// KH_DLS_WORLD (26834) - the light pool for the WORLD pass.
+//
+// PLACED HERE, BESIDE kh_dls_fill_cb, AND NOT WITH THE SELECTION CODE. It
+// reads g_dls_map_valid, which is written by the render pass and declared with
+// the map state four thousand lines below the selector - a static read by an
+// inline function must be DECLARED ABOVE IT in a single translation unit, and
+// the first cut of this build put the function at the selector and would not
+// compile (C2065). These two fills are twins in every other sense too: the
+// world pass calls both, back to back, and both refuse a slot whose map is not
+// valid this frame, so keeping them adjacent is how they stay agreeing.
+//
+// fill_dynlights_cb is per-OBJECT: it selects the nearest KH_DL_MAX_LIGHTS to
+// that object's centre and packs them. The world pass has no centre - it
+// shades every pixel on screen - so it cannot use that selection, and picking
+// "nearest the camera" would make a light's shadow appear and vanish as the
+// player turned, the exact class the sun campaign spent six builds removing.
+//
+// It does not need to select at all. Only lights HOLDING A SHADOW SLOT can
+// darken anything here, there are at most KH_DLS_MAX = 8 of them, and the CB
+// has room for KH_DL_MAX_LIGHTS. So take exactly the casting set: every light
+// with a slot, points first then spots to match the kernel's pointN/spotN
+// split. The result is camera-independent by construction and is the same set
+// the meshes are shadowed by, so the world and the meshes cannot disagree
+// about which lights cast.
+//
+// Records are copied VERBATIM from the pool - they are the engine's own cb11
+// bytes - and the slot lane is written after the copy for the same reason
+// fill_dynlights_cb does it: that lane carries whatever the engine left there
+// and may never be assumed zero.
+inline void kh_dls_fill_dl_world(ConstantData& khd_cb) {
+    // Same three gates fill_dynlights_cb's mode-3 branch opens with, and for
+    // the same reasons: only the absolute-world decode is meaningful here (the
+    // kernel refuses the others anyway), an empty pool has nothing to say, and
+    // a STALE pool describes lights that may no longer burn - reading it would
+    // darken the world under a lamp that has gone out.
+    if (g_dl_mode.load(std::memory_order_relaxed) != 3) return;
+    if (g_dl.pool_n == 0) return;
+    if (steady_now_ms() - g_dl.pool_stamp > KH_DL_POOL_STALE_MS) return;
+
+    uint32_t khd_out = 0, khd_pn = 0;
+    for (int khd_pass = 0; khd_pass < 2; ++khd_pass) {
+        for (uint32_t khd_i = 0; khd_i < g_dl.pool_n && khd_out < KH_DL_MAX_LIGHTS; ++khd_i) {
+            const DlPoolLight& khd_pl = g_dl.pool[khd_i];
+            if ((khd_pl.spot != 0) != (khd_pass == 1)) continue;
+            const int khd_slot = kh_dls_slot_of(khd_pl);
+            if (khd_slot < 0) continue;   // not casting: it cannot block anything
+            if ((g_dls_map_valid & (1ull << static_cast<uint32_t>(khd_slot))) == 0ull) continue;
+            memcpy(khd_cb.dl_lights[khd_out * 6], khd_pl.rec, KH_DL_LIGHT_BYTES);
+            khd_cb.dl_lights[khd_out * 6 + 5][2] = static_cast<float>(khd_slot + 1);
+            khd_out++;
+            if (khd_pass == 0) khd_pn++;
+        }
+    }
+    if (khd_out == 0) return;   // dl_ctl.x stays 0 and the kernel stands down
+
+    khd_cb.dl_ctl[0] = 3.0f;   // absolute world positions
+    khd_cb.dl_ctl[1] = static_cast<float>(khd_pn);
+    khd_cb.dl_ctl[2] = static_cast<float>(khd_out - khd_pn);
+    khd_cb.dl_ctl[3] = (g_dl.main_ref_valid && g_dl.main_scale > 1.0e-6f)
+                     ? g_dl.main_scale : 1.0f;
+    if (g_dl.main_ref_valid &&
+        (g_dl.main_gdiff[0] > 0.0f || g_dl.main_gdiff[1] > 0.0f || g_dl.main_gdiff[2] > 0.0f)) {
+        khd_cb.dl_global[0] = g_dl.main_gdiff[0];
+        khd_cb.dl_global[1] = g_dl.main_gdiff[1];
+        khd_cb.dl_global[2] = g_dl.main_gdiff[2];
+    } else {
+        khd_cb.dl_global[0] = 1.0f;
+        khd_cb.dl_global[1] = 1.0f;
+        khd_cb.dl_global[2] = 1.0f;
+    }
+    // The user-facing intensity, exactly as fill_dynlights_cb reads it - the
+    // world must not be darkened by a share of light the meshes were never
+    // given.
+    {
+        const uint32_t khd_bits = g_dl_intensity_bits.load(std::memory_order_relaxed);
+        float khd_int = 1.0f;
+        memcpy(&khd_int, &khd_bits, sizeof(khd_int));
+        khd_cb.dl_global[3] = khd_int;
+    }
+}
+inline void kh_dls_fill_cb(ConstantData& khf_cb) {
+    const int khf_m = g_dbg_mode.load(std::memory_order_relaxed);
+    // 514 stands the whole feature down. 519 stands down the RECEIVE half only:
+    // the maps still render and still cost, but nothing is published, so every
+    // slot reads w == 0 and the kernel answers lit. That separates a fault in
+    // the kernel from a fault in the maps without a second gate in the shader -
+    // 'no map' already means exactly this, and a second way to say it is a
+    // second thing that can disagree.
+    if (khf_m == 514 || khf_m == 519) return;
+    g_dls_cb_fills++;
+    // KH_DLS_RANGE (26879) - ONE fill for every consumer (both mesh passes,
+    // the mask cast, the world receive all come through here). The rule is
+    // every other g_sun_range consumer's clamp; the camera is the cycle's
+    // (kh_dls_camera, the same one kh_dls_select scores against), and the
+    // world pass overrides xyz with its own reconstruction camera after this
+    // call. No camera = no fade (shadows at full to any range), counted, and
+    // mode 581 is the off switch.
+    {
+        float khf_cam[3];
+        if (khf_m != 581 && kh_dls_camera(khf_cam)) {
+            khf_cb.dls_range[0] = khf_cam[0];
+            khf_cb.dls_range[1] = khf_cam[1];
+            khf_cb.dls_range[2] = khf_cam[2];
+            khf_cb.dls_range[3] = fminf(fmaxf(
+                g_sun_range.load(std::memory_order_relaxed), 8.0f), 1000.0f);
+            g_dls_range_m = khf_cb.dls_range[3];
+        } else {
+            khf_cb.dls_range[3] = 0.0f;
+            g_dls_range_m = 0.0f;
+            if (khf_m != 581) g_dls_range_nocam++;
+        }
+    }
+    // KH_DLS_MESHMODE (26876d) - THE MESH PATH CAN FINALLY SEE A DEBUG MODE.
+    //
+    // 26876 recorded this as a hazard and declined to fix it; 558 has now made
+    // it worth fixing. dbgCtl.w carries the raw setRenderDebug mode ONLY on the
+    // world pass - every mesh fill site writes a small enumeration there
+    // instead (the 58/180/191/194 ladder) - so 548, 549 and 552 were silently
+    // world-receive-only, and any future mode routed through dbgCtl.w would be
+    // too. That is process failure 7 with no way to notice it: the mode reaches
+    // half its consumers and reads as though it reached both.
+    //
+    // dlsFaceSlice[].z is our own lane, declared free, and this fill is the
+    // ONLY writer of that array - so there is no ladder to collide with and no
+    // other owner to negotiate with, which is exactly why 26826 put the mode-520
+    // arm in .y rather than in lighting0.y. Written unconditionally across all
+    // 48 entries, above the per-slot loop, so a refused slot carries it too: an
+    // instrument that only works when the thing it is instrumenting is healthy
+    // is not an instrument.
+    //
+    // The zeroed default is mode 0, so every site that does not call this fill
+    // behaves exactly as before (the 264 precedent).
+    // GATED ON A MODE BEING SET AT ALL (26876e). At mode 0 this wrote 0.0f over
+    // a zeroed default - inert, and provably so: the lane has exactly one
+    // reader and one writer, both added with it. But "provably inert" is an
+    // ARGUMENT, and the field reported a regression in the build that added it.
+    // The argument is still correct (static.hlsl, which holds the whole edge
+    // fix, is byte-identical across those two builds) - and an argument is not
+    // what should stand between a shipping path and an instrument. Now the
+    // shipping path is not touched at all, so mode 0 is bit-identical to the
+    // build that worked by construction rather than by reasoning. Process
+    // failure 4 of the last campaign: an instrument that bills the shipping
+    // path is a regression, and this is the cheap form of that discipline.
+    if (khf_m != 0) {
+        const float khf_mf = static_cast<float>(khf_m);
+        for (int khf_dz = 0; khf_dz < static_cast<int>(KH_DLS_MAX) * KH_DLS_FACES; ++khf_dz) {
+            khf_cb.dls_face_slice[khf_dz][2] = khf_mf;
+        }
+    }
+    bool khf_any = false;
+    for (uint32_t khf_s = 0; khf_s < KH_DLS_MAX; ++khf_s) {
+        // A slot is publishable only if it is live AND actually has a map this
+        // frame. g_dls_map_valid is set by the render pass, so a light selected
+        // but not rendered (slice budget, a failed upload) publishes w = 0 and
+        // reads as lit rather than sampling a slice that holds another light.
+        const bool khf_ok = g_dls[khf_s].live &&
+                            (g_dls_map_valid & (1ull << khf_s)) != 0ull &&
+                            g_dls_facen[khf_s] > 0;
+        if (!khf_ok) {
+            khf_cb.dls_meta[khf_s][3] = 0.0f;
+            for (int khf_z = 0; khf_z < 6; ++khf_z) {
+                khf_cb.dls_face_slice[static_cast<int>(khf_s) * 6 + khf_z][0] = -1.0f;
+            }
+            if (g_dls[khf_s].live) g_dls_pub_notvalid++;   // selected, but no map
+            continue;
+        }
+
+        khf_cb.dls_meta[khf_s][0] = g_dls[khf_s].pos[0];
+        khf_cb.dls_meta[khf_s][1] = g_dls[khf_s].pos[1];
+        khf_cb.dls_meta[khf_s][2] = g_dls[khf_s].pos[2];
+        khf_cb.dls_meta[khf_s][3] = g_dls_mapfar[khf_s];
+
+        khf_cb.dls_ctl[khf_s][0] = g_dls_isspot[khf_s] ? 1.0f : 0.0f;
+        // KH_DLS_RPDB (26877). 573 (gradient off) and 574 (gradient on, old
+        // constants) both take the legacy pair; every other mode takes the
+        // re-derived one. Hoisted out of the loop would be one branch instead
+        // of eight, but the loop is eight iterations and the lane is the
+        // clearer place to read the rule - and khf_m is already in hand.
+        const bool khf_bias_legacy = (khf_m == 573 || khf_m == 574);
+        khf_cb.dls_ctl[khf_s][1] = khf_bias_legacy ? KH_DLS_BIAS_M_LEGACY
+                                                   : KH_DLS_BIAS_M;
+        khf_cb.dls_ctl[khf_s][2] = g_dls_isspot[khf_s]
+                                 ? static_cast<float>(g_dls_faceslice[khf_s][0]) : 0.0f;
+        khf_cb.dls_ctl[khf_s][3] = khf_bias_legacy ? KH_DLS_BIAS_SLOPE_LEGACY
+                                                   : KH_DLS_BIAS_SLOPE;
+
+        // KH_DLS_FACE_FLAT: slot * 6 + face, one float4 each. The arm is
+        // replicated across all six because the shader reads it before it knows
+        // which face it wants.
+        const float khf_arm = (khf_m == 520) ? 0.0f : 1.0f;
+        for (int khf_f = 0; khf_f < 6; ++khf_f) {
+            const uint16_t khf_sl = g_dls_faceslice[khf_s][khf_f];
+            const int khf_i = static_cast<int>(khf_s) * 6 + khf_f;
+            khf_cb.dls_face_slice[khf_i][0] = (khf_sl == KH_DLS_FACE_NONE)
+                                            ? -1.0f : static_cast<float>(khf_sl);
+            khf_cb.dls_face_slice[khf_i][1] = khf_arm;
+        }
+
+        if (g_dls_isspot[khf_s]) {
+            memcpy(khf_cb.dls_spot_vp[khf_s], g_dls_vp[khf_s][0],
+                   sizeof(khf_cb.dls_spot_vp[khf_s]));
+        }
+        g_dls_cb_slots++;
+        khf_any = true;
+    }
+    if (!khf_any) g_dls_fill_empty++;
+}
+
+// Render every casting light's depth. Called from INSIDE the sun's render
+// lambda, where the vertex shader, input layout, rasteriser, depth state and
+// instance buffer are already bound for exactly this kind of pass.
+//
+// khdr_casters is the sun's own caster set - the same meshes, so a mesh that
+// casts a sun shadow casts a light shadow, with no second selection to drift.
+// KH_DLSW_MASK (26847) - THE CASTER SET, SNAPSHOT FOR THE WORLD PASS.
+//
+// The world pass fires at the scene resolve, roughly a thousand draws after
+// the sun lambda, and the caster vector that kh_dls_render walks does not
+// exist there. Rather than re-derive it - a second selection that could drift
+// from the first, which is the failure this campaign's whole slot machinery
+// exists to prevent - the set is copied ONCE where it is already correct.
+//
+// Same frame, same thread, and by construction the same meshes that rendered
+// into the light maps: a mesh that casts is a mesh that masks, with no way for
+// the two to disagree.
+// UNCAPPED (26850). The snapshot was a fixed 64-entry array with an overflow
+// lane, and a caster past the cap was silently not masked - it kept casting a
+// shadow into the light maps while the world pass no longer knew its pixels
+// were ours, which is the SMEAR this mask exists to remove, restored for
+// exactly the meshes over the limit. There is no resource reason for a bound
+// here: the set is a plain CPU copy of a vector the caller already holds, one
+// draw per entry, and g_dls_render's own caster list is uncapped. So the cap
+// is gone rather than raised - a number chosen for no measured reason is not
+// improved by choosing a bigger one.
+//
+// The vector is cleared, never freed, so the steady state allocates nothing
+// after the first frame at a given caster count. Written in kh_dls_render
+// (flush, render thread parked) and read in kh_dlsw_mask_render (render
+// thread, at the resolve) - the same single-writer/later-reader ordering the
+// array had, so no reallocation can be observed mid-read.
+//
+// g_dlsw_caster_over stays declared and stays published at 0: lane order is a
+// dump contract, and dlsMaskOver reading 0 forever is now a statement that
+// the cap cannot fire rather than that it did not.
+struct KhDlswCaster { float pos[3]; float size[3]; float rot[9]; bool rotated; int mesh; bool lod_lock; };
+static std::vector<KhDlswCaster> g_dlsw_casters;
+static uint64_t     g_dlsw_caster_over = 0;   // retired with the cap; published at 0
+
+inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
+                          const std::vector<SunCaster>& khdr_casters) {
+    g_dls_map_valid = 0;
+    // The caster-set hash the per-light skip keys on. Computed HERE since 26878
+    // - the one caller used to build it beside the call, and a hash built at
+    // the call site is a second copy of what this function's key means.
+    uint64_t khdr_chash = CryptoGenerator::FNV1A64_OFFSET;
+    for (const SunCaster& khdl_c : khdr_casters) {
+        khdr_chash = CryptoGenerator::fnv1a64_update(khdr_chash, khdl_c.pos, sizeof(khdl_c.pos));
+        khdr_chash = CryptoGenerator::fnv1a64_update(khdr_chash, khdl_c.size, sizeof(khdl_c.size));
+        khdr_chash = CryptoGenerator::fnv1a64_update(khdr_chash, khdl_c.rot, sizeof(khdl_c.rot));
+        khdr_chash = CryptoGenerator::fnv1a64_update(khdr_chash, &khdl_c.mesh, sizeof(khdl_c.mesh));
+        khdr_chash = CryptoGenerator::fnv1a64_update(khdr_chash, &khdl_c.alpha, sizeof(khdl_c.alpha));
+    }
+    // KH_DLSW_MASK: snapshot the caster set for the world pass, before any of
+    // this function's early returns - the mask is still wanted on a frame where
+    // the maps are skipped or no light is casting, and a stale set would mask
+    // where a mesh no longer is.
+    {
+        g_dlsw_casters.clear();
+        g_dlsw_casters.reserve(khdr_casters.size());
+        for (const SunCaster& khsc : khdr_casters) {
+            g_dlsw_casters.emplace_back();
+            KhDlswCaster& khsd = g_dlsw_casters.back();
+            memcpy(khsd.pos, khsc.pos, sizeof(khsd.pos));
+            memcpy(khsd.size, khsc.size, sizeof(khsd.size));
+            memcpy(khsd.rot, khsc.rot, sizeof(khsd.rot));
+            khsd.rotated = khsc.rotated;
+            khsd.mesh = khsc.mesh;
+            khsd.lod_lock = khsc.lod_lock;
+        }
+    }
+    // KH_DLS_SKIP_OFF (mode 517, 26819) - REBUILD EVERY LIGHT EVERY FRAME.
+    //
+    // Not a fix: a capture instrument. The pass hash-skips a static scene, so
+    // a RenderDoc frame taken at rest legitimately contains ZERO light-map
+    // draws and the matrices cannot be read out of it - which is exactly what
+    // the 26816 capture hit. Changing the scene to force a rebuild only widens
+    // the window to ONE frame, which is not something a human can hit with a
+    // capture key, and spawning a second mesh does not help because the set is
+    // constant again on the very next frame.
+    //
+    // 517 stands the skip down entirely, so EVERY frame is a build frame and
+    // any capture lands on one. It is deliberately expensive - it is also the
+    // honest worst-case GPU measurement for this feature, which is what an
+    // animated scene would cost anyway (skips go to ~0 when casters move), so
+    // reading injGpuMaxUs under 517 prices the animation case for free.
+    const int khdr_dbg = g_dbg_mode.load(std::memory_order_relaxed);
+    if (khdr_dbg == 514) {
+        for (uint32_t khdr_s = 0; khdr_s < KH_DLS_MAX; ++khdr_s) g_dls_facen[khdr_s] = 0;
+        return;   // whole feature down
+    }
+    g_dls_render_calls++;
+    if (!khdr_ctx || g_dls_n == 0) { g_dls_render_noslot++; return; }
+
+    // RESOLVE FIRST, BUDGET SECOND (26816). 26815 budgeted on the ASSUMPTION
+    // that a spot spends one slice, then discovered per light that the spot
+    // matrix had failed and the cube needed six - so the budget said 2 and the
+    // render wanted 12, dlsMapShort fired on the first light and NOT ONE FACE
+    // EVER RENDERED. The budget may not guess at a quantity the resolve
+    // decides; resolve every light's face count and matrices up front, then
+    // allocate to the total that actually results.
+    UINT khdr_need = 0;
+    for (uint32_t khdr_s = 0; khdr_s < KH_DLS_MAX; ++khdr_s) {
+        g_dls_facen[khdr_s] = 0;
+        g_dls_facemask[khdr_s] = 0;
+        g_dls_isspot[khdr_s] = 0;
+        for (int khdr_z = 0; khdr_z < KH_DLS_FACES; ++khdr_z) {
+            g_dls_faceslice[khdr_s][khdr_z] = KH_DLS_FACE_NONE;
+        }
+        if (!g_dls[khdr_s].live) continue;
+        const KhDlsSlot& khdr_l = g_dls[khdr_s];
+        const float khdr_far = kh_dls_far(khdr_l);
+        uint32_t khdr_fn = 0;
+
+        if (khdr_l.spot) {
+            const DlPoolLight* khdr_src = nullptr;
+            for (uint32_t khdr_p = 0; khdr_p < g_dl.pool_n; ++khdr_p) {
+                const DlPoolLight& khdr_c = g_dl.pool[khdr_p];
+                const float khdr_dx = khdr_c.rec[0] - khdr_l.pos[0];
+                const float khdr_dy = khdr_c.rec[1] - khdr_l.pos[1];
+                const float khdr_dz = khdr_c.rec[2] - khdr_l.pos[2];
+                if (khdr_dx * khdr_dx + khdr_dy * khdr_dy + khdr_dz * khdr_dz <=
+                    KH_DLS_MATCH_M * KH_DLS_MATCH_M) { khdr_src = &khdr_c; break; }
+            }
+            if (!khdr_src) {
+                g_dls_spot_nosrc++;
+            } else {
+                // Census the cone whatever the outcome: the cap has to be set
+                // from what the field actually ships, not from a guess.
+                const float khdr_cc = khdr_src->rec[7];
+                if (khdr_cc < g_dls_spot_cone_min) g_dls_spot_cone_min = khdr_cc;
+                const float khdr_ccl = khdr_cc < -0.999f ? -0.999f : (khdr_cc > 0.999f ? 0.999f : khdr_cc);
+                const float khdr_deg = 2.0f * acosf(khdr_ccl) * 57.2957795f;
+                if (khdr_deg > g_dls_spot_fov_max) g_dls_spot_fov_max = khdr_deg;
+                float khdr_fov = 0.0f;
+                if (kh_dls_spot_vp(khdr_src->rec + 4, khdr_cc, khdr_far,
+                                   g_dls_vp[khdr_s][0], &khdr_fov)) {
+                    khdr_fn = 1;
+                    g_dls_spot_frusta++;
+                } else {
+                    g_dls_spot_wide++;
+                }
+            }
+        }
+        if (khdr_fn == 1) {
+            g_dls_facemask[khdr_s] = 1u;   // the spot's single frustum
+            g_dls_isspot[khdr_s] = 1;
+        } else {
+            // CUBE: build all six matrices, then keep only the faces that
+            // actually contain a caster. The test is kh_dls_face_keep - the
+            // same function the render pass uses to gather the batch - so the
+            // allocation and the draw cannot disagree about which faces matter.
+            uint8_t khdr_mask = 0;
+            for (int khdr_f = 0; khdr_f < KH_DLS_FACES; ++khdr_f) {
+                kh_dls_face_vp(khdr_f, khdr_far, g_dls_vp[khdr_s][khdr_f]);
+                bool khdr_any = false;
+                for (const SunCaster& khdr_c : khdr_casters) {
+                    const float khdr_ctr[3] = { khdr_c.pos[0], khdr_c.pos[2], khdr_c.pos[1] };
+                    const float khdr_hl[3] = { khdr_c.size[0] * 0.5f, khdr_c.size[2] * 0.5f,
+                                               khdr_c.size[1] * 0.5f };
+                    float khdr_he[3];
+                    kh_rot_half_extents(khdr_hl, khdr_c.rot, khdr_c.rotated, khdr_he);
+                    g_dls_face_tests++;
+                    if (kh_dls_face_keep(khdr_f, g_dls[khdr_s].pos, khdr_ctr, khdr_he, khdr_far)) {
+                        khdr_any = true;
+                        break;
+                    }
+                }
+                if (khdr_any) {
+                    khdr_mask |= static_cast<uint8_t>(1u << khdr_f);
+                    g_dls_face_hold[khdr_s][khdr_f] = KH_DLS_FACE_HOLD;
+                } else if (g_dls_face_hold[khdr_s][khdr_f] > 0) {
+                    // KH_DLS_FACE_HOLD: empty now, but recently occupied. Keep
+                    // the slice so a caster crossing the face boundary does not
+                    // take the shadow with it.
+                    g_dls_face_hold[khdr_s][khdr_f]--;
+                    khdr_mask |= static_cast<uint8_t>(1u << khdr_f);
+                    g_dls_face_held++;
+                } else {
+                    g_dls_faces_culled++;
+                    g_dls_slices_saved++;
+                }
+            }
+            g_dls_facemask[khdr_s] = khdr_mask;
+            khdr_fn = 0;
+            for (int khdr_f = 0; khdr_f < KH_DLS_FACES; ++khdr_f) {
+                if (khdr_mask & (1u << khdr_f)) khdr_fn++;
+            }
+        }
+        g_dls_facen[khdr_s] = khdr_fn;
+        g_dls_mapfar[khdr_s] = khdr_far;
+        if (g_dls_facemask[khdr_s] != g_dls_prev_mask[khdr_s]) g_dls_mask_flaps++;
+        g_dls_prev_mask[khdr_s] = g_dls_facemask[khdr_s];
+        khdr_need += khdr_fn;
+    }
+    if (khdr_need == 0) { g_dls_render_noneed++; return; }   // before the bracket opens
+
+    ID3D11Device* khdr_dev = nullptr;
+    khdr_ctx->GetDevice(&khdr_dev);
+    if (!khdr_dev) return;
+    const bool khdr_ok = kh_dls_ensure_maps(khdr_dev, khdr_need);
+    khdr_dev->Release();
+    if (!khdr_ok) { g_dls_map_fails++; return; }
+
+    // KH_DLS_DEPTHCLIP (26825) - THE INHERITED STATE IS WRONG FOR A PERSPECTIVE
+    // MAP, and this is the cost of the shortcut that made stage 2b free.
+    //
+    // Running inside the sun's lambda inherits its vertex shader, layout,
+    // instance buffer AND rasteriser - which was the whole saving. But the sun
+    // renders an ORTHOGRAPHIC map, where DepthClipEnable = FALSE is correct and
+    // deliberate: a caster outside the near plane should be kept, not clipped.
+    //
+    // On a PERSPECTIVE map the same flag is destructive. Geometry nearer than
+    // the near plane is not clipped, it is CLAMPED to depth 0 - and 0 is the
+    // near plane, the closest value there is, so it occludes everything behind
+    // it. Near here is far/300, about 14 cm for a 41 m lamp, so a caster that
+    // brushes the light writes 0 across its whole footprint and the map reads
+    // FULLY OCCLUDED. That is a mesh going black.
+    //
+    // The sun's depth bias comes with it and is priced for the sun's ortho
+    // texel; this kernel does its bias in metres in the shader, so a second
+    // one in raster units is an unknown offset on top. Both are replaced here
+    // and the sun's state is restored after the passes.
+    // KH_DLS_STATE_RESTORE (26827) - THE STROBE, AND WHY 517 KILLED IT ENTIRELY.
+    //
+    // This pass retargets (OMSetRenderTargets to a depth slice) and re-viewports
+    // (to the map edge) and restored NEITHER. On a SKIPPED frame it does neither
+    // - the reuse path continues before both - so the difference between skip
+    // and rebuild is exactly "did we leave the pipeline pointed somewhere else".
+    //
+    // That is the whole shape of the report: shadows look right until something
+    // forces a rebuild (a light moving, a gunfire light entering the set), then
+    // the frame after runs with our 1024x1024 viewport and a depth-only target,
+    // and the shadow disappears for that frame. Under mode 517 EVERY frame is a
+    // rebuild, so it disappears permanently - which is what made this visible
+    // rather than intermittent, and is why 517 was the useful test.
+    //
+    // The capture had already ruled out the two other candidates: the slices
+    // hold real depth under 517, and every publish lane reads clean. A pass that
+    // produces the right maps and publishes them correctly, yet breaks what
+    // comes after it, can only be leaving state behind.
+    //
+    // khsh_one has the same hazard and answers it with the standalone bracket;
+    // this is that bracket, scoped to our passes. Get* AddRefs, so every saved
+    // pointer is owned here and released.
+    ID3D11RenderTargetView* khdr_prev_rtv[8] = {};
+    ID3D11DepthStencilView* khdr_prev_dsv = nullptr;
+    D3D11_VIEWPORT          khdr_prev_vp[16] = {};
+    UINT                    khdr_prev_nvp = 16;
+    khdr_ctx->OMGetRenderTargets(8, khdr_prev_rtv, &khdr_prev_dsv);
+    khdr_ctx->RSGetViewports(&khdr_prev_nvp, khdr_prev_vp);
+    ID3D11RasterizerState* khdr_prev_rs = nullptr;
+    if (!g_res.dls_rast) {
+        ID3D11Device* khdr_rd = nullptr;
+        khdr_ctx->GetDevice(&khdr_rd);
+        if (khdr_rd) {
+            D3D11_RASTERIZER_DESC khdr_rsd = {};
+            khdr_rsd.FillMode = D3D11_FILL_SOLID;
+            khdr_rsd.CullMode = D3D11_CULL_NONE;   // as the sun: thin and alpha casters
+            khdr_rsd.DepthClipEnable = TRUE;       // THE FIX
+            khdr_rsd.DepthBias = 0;                // the bias is done in metres, in-shader
+            khdr_rsd.SlopeScaledDepthBias = 0.0f;
+            khdr_rsd.DepthBiasClamp = 0.0f;
+            khdr_rsd.MultisampleEnable = FALSE;
+            if (FAILED(khdr_rd->CreateRasterizerState(&khdr_rsd, &g_res.dls_rast))) {
+                g_res.dls_rast = nullptr;
+                g_dls_rast_fails++;
+            }
+            khdr_rd->Release();
+        }
+    }
+    if (g_res.dls_rast) {
+        khdr_ctx->RSGetState(&khdr_prev_rs);   // the sun's, restored below
+        khdr_ctx->RSSetState(g_res.dls_rast);
+    }
+
+    UINT khdr_slice = 0;
+    for (uint32_t khdr_s = 0; khdr_s < KH_DLS_MAX; ++khdr_s) {
+        if (!g_dls[khdr_s].live) continue;
+        const KhDlsSlot& khdr_l = g_dls[khdr_s];
+        const uint32_t khdr_fn = g_dls_facen[khdr_s];
+        const float khdr_far = g_dls_mapfar[khdr_s];
+        if (khdr_fn == 0) continue;
+        // Unreachable once the resolve above sets the budget - kept as the
+        // tripwire that says so, since the alternative failure is silent.
+        if (khdr_slice + khdr_fn > g_res.dls_slices) { g_dls_map_short++; break; }
+
+        // UNION-STYLE SKIP. Same contract as render_sun_depth's union hash: a
+        // caster that moves, or the light itself moving, changes the key and
+        // forces a rebuild that frame. Skipping reuses the slices untouched,
+        // so the matrices must be republished either way - they are state, not
+        // output of the render.
+        const uint64_t khdr_key = kh_dls_light_hash(khdr_l, khdr_fn, khdr_slice,
+                                                    g_dls_facemask[khdr_s], khdr_chash,
+                                                    g_dls_isspot[khdr_s] ? g_dls_vp[khdr_s][0] : nullptr);   // KH_DLS_SPOT_KEY
+        // Mode 517 refuses the skip outright. Putting the mode in the hash (as
+        // it already is) would NOT do this: it changes the key once and then
+        // the new key is stable, so the pass would skip again from the second
+        // frame on - the one-frame window this mode exists to remove.
+        const bool khdr_reuse = (khdr_key == g_dls_keys[khdr_s]) && khdr_dbg != 517;
+        if (khdr_dbg == 517) g_dls_skip_forced++;
+
+        g_dls_slice0[khdr_s] = khdr_slice;
+        g_dls_map_valid |= (1ull << khdr_s);
+
+        if (khdr_reuse) {
+            // The maps are reused, but the face -> slice table is STATE that
+            // every consumer reads, so it is republished on the skip path too.
+            UINT khdr_rs = khdr_slice;
+            for (uint32_t khdr_f = 0; khdr_f < KH_DLS_FACES; ++khdr_f) {
+                if (g_dls_facemask[khdr_s] & (1u << khdr_f)) {
+                    g_dls_faceslice[khdr_s][khdr_f] = static_cast<uint16_t>(khdr_rs++);
+                }
+            }
+            g_dls_hash_skips++;
+            khdr_slice += khdr_fn;
+            continue;
+        }
+        g_dls_keys[khdr_s] = khdr_key;
+        g_dls_hash_builds++;
+
+        UINT khdr_next = khdr_slice;
+        for (uint32_t khdr_f = 0; khdr_f < KH_DLS_FACES; ++khdr_f) {
+            if (!(g_dls_facemask[khdr_s] & (1u << khdr_f))) continue;
+            const UINT khdr_sl = khdr_next++;
+            g_dls_faceslice[khdr_s][khdr_f] = static_cast<uint16_t>(khdr_sl);
+            ID3D11DepthStencilView* khdr_dsv = g_res.dls_dsv[khdr_sl];
+            if (!khdr_dsv) continue;
+
+            // Cull to this face. A face with nothing in it is CLEARED and left
+            // - a stale map is worse than an empty one, because an empty map
+            // answers 'lit' and a stale one answers with last frame's world.
+            static std::vector<const SunCaster*> khdr_keep;   // render-thread scratch
+            khdr_keep.clear();
+            for (const SunCaster& khdr_c : khdr_casters) {
+                const float khdr_ctr[3] = { khdr_c.pos[0], khdr_c.pos[2], khdr_c.pos[1] };
+                const float khdr_hl[3] = { khdr_c.size[0] * 0.5f, khdr_c.size[2] * 0.5f,
+                                           khdr_c.size[1] * 0.5f };
+                float khdr_he[3];
+                kh_rot_half_extents(khdr_hl, khdr_c.rot, khdr_c.rotated, khdr_he);
+                g_dls_face_tests++;
+                const bool khdr_in = g_dls_isspot[khdr_s]
+                    ? true   // a spot is one frustum: the reach gate already admitted it
+                    : kh_dls_face_keep(static_cast<int>(khdr_f), khdr_l.pos,
+                                       khdr_ctr, khdr_he, khdr_far);
+                if (khdr_in) khdr_keep.push_back(&khdr_c);
+            }
+
+            khdr_ctx->ClearDepthStencilView(khdr_dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
+            if (khdr_keep.empty()) { g_dls_faces_empty++; continue; }
+            if (khdr_keep.size() > static_cast<size_t>(g_res.sun_instance_cap)) {
+                g_dls_face_over++;   // the sun's buffer sizes the batch; skip rather than overrun
+                continue;
+            }
+
+            ConstantData khdr_obj = {};
+            ConstantData khdr_cbf = {};
+            memcpy(khdr_cbf.view_proj, g_dls_vp[khdr_s][khdr_f], sizeof(khdr_cbf.view_proj));
+            // The matrices are LIGHT-relative; VSSunDepth subtracts sunOrigin
+            // from every vertex, so the light IS the anchor for this pass.
+            khdr_cbf.sun_origin[0] = khdr_l.pos[0];
+            khdr_cbf.sun_origin[1] = khdr_l.pos[1];
+            khdr_cbf.sun_origin[2] = khdr_l.pos[2];
+            if (!kh_upload_frame_cb(khdr_ctx, g_res.composite_frame_cb, khdr_cbf) ||
+                !kh_upload_obj_cb(khdr_ctx, g_res.composite_cb, khdr_obj)) {
+                g_dls_map_fails++;
+                continue;
+            }
+
+            khdr_ctx->OMSetRenderTargets(0, nullptr, khdr_dsv);
+            {
+                D3D11_VIEWPORT khdr_vpt = {};
+                khdr_vpt.Width = static_cast<FLOAT>(g_res.dls_size);
+                khdr_vpt.Height = static_cast<FLOAT>(g_res.dls_size);
+                khdr_vpt.MaxDepth = 1.0f;
+                khdr_ctx->RSSetViewports(1, &khdr_vpt);
+            }
+
+            D3D11_MAPPED_SUBRESOURCE khdr_im = {};
+            if (FAILED(khdr_ctx->Map(g_res.sun_instance_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &khdr_im))) {
+                g_dls_map_fails++;
+                continue;
+            }
+            float* khdr_out = static_cast<float*>(khdr_im.pData);
+            for (const SunCaster* khdr_c : khdr_keep) {
+                khdr_out[0] = khdr_c->pos[0];
+                khdr_out[1] = khdr_c->pos[2];
+                khdr_out[2] = khdr_c->pos[1];
+                khdr_out[3] = 0.0f;
+                khdr_out[4] = khdr_c->size[0];
+                khdr_out[5] = khdr_c->size[2];
+                khdr_out[6] = khdr_c->size[1];
+                khdr_out[7] = khdr_c->alpha;
+                for (int khdr_rr = 0; khdr_rr < 3; ++khdr_rr) {
+                    khdr_out[8 + khdr_rr * 4 + 0] = khdr_c->rot[khdr_rr * 3 + 0];
+                    khdr_out[8 + khdr_rr * 4 + 1] = khdr_c->rot[khdr_rr * 3 + 1];
+                    khdr_out[8 + khdr_rr * 4 + 2] = khdr_c->rot[khdr_rr * 3 + 2];
+                    khdr_out[8 + khdr_rr * 4 + 3] = 0.0f;
+                }
+                khdr_out += 20;
+            }
+            khdr_ctx->Unmap(g_res.sun_instance_vb, 0);
+
+            ID3D11Buffer* khdr_vbs[2] = { nullptr, g_res.sun_instance_vb };
+            UINT khdr_str[2] = { sizeof(MeshVertex), sizeof(float) * 20 };
+            UINT khdr_off[2] = { 0, 0 };
+            size_t khdr_first = 0;
+            while (khdr_first < khdr_keep.size()) {
+                const int khdr_mid = khdr_keep[khdr_first]->mesh;
+                size_t khdr_last = khdr_first + 1;
+                while (khdr_last < khdr_keep.size() && khdr_keep[khdr_last]->mesh == khdr_mid) ++khdr_last;
+                khdr_vbs[0] = g_res.mesh_vb[khdr_mid];
+                khdr_ctx->IASetVertexBuffers(0, 2, khdr_vbs, khdr_str, khdr_off);
+                UINT khdr_ls = 0, khdr_lc = 0;
+                mesh_shadow_range(khdr_mid, khdr_ls, khdr_lc);
+                khdr_ctx->DrawInstanced(khdr_lc, static_cast<UINT>(khdr_last - khdr_first),
+                                        khdr_ls, static_cast<UINT>(khdr_first));
+                khdr_first = khdr_last;
+            }
+
+            g_dls_faces_built++;
+            g_dls_faces_built_total++;
+            g_dls_face_casters += static_cast<uint64_t>(khdr_keep.size());
+        }
+
+        khdr_slice += khdr_fn;
+    }
+    g_dls_slices_used = khdr_slice;
+    // Hand the sun back exactly what it had. Every Get* above AddRef'd, so each
+    // saved pointer is owned here and must be released whether or not it was
+    // used - a restore that leaks is a restore that eventually kills the device.
+    if (g_res.dls_rast) {
+        khdr_ctx->RSSetState(khdr_prev_rs);
+        KH_SAFE_RELEASE(khdr_prev_rs);
+    }
+    khdr_ctx->OMSetRenderTargets(8, khdr_prev_rtv, khdr_prev_dsv);
+    // KH_DLS_SRV_REBIND (26829) - RETIRED AT 26878. This pass binds slices of
+    // the array as depth targets, and D3D11 silently unbinds an SRV whose
+    // texture becomes a depth target, which is how 26828's shadows VANISHED
+    // (a null SRV reports zero dimensions and the texel price became 2z). The
+    // cure then was to re-bind t36 here and let it leak past the sun bracket
+    // to the mesh draws. t36 is now inside StateBackup's saved range and every
+    // consumer binds it inside its own bracket (injection, flush, world pass),
+    // so a re-bind here would be overwritten by the bracket's restore before
+    // any consumer ran. dlsSrvRebinds stays published and reads 0.
+    if (khdr_prev_nvp > 0) khdr_ctx->RSSetViewports(khdr_prev_nvp, khdr_prev_vp);
+    for (int khdr_r = 0; khdr_r < 8; ++khdr_r) KH_SAFE_RELEASE(khdr_prev_rtv[khdr_r]);
+    KH_SAFE_RELEASE(khdr_prev_dsv);
+    g_dls_state_restores++;
+}
+
+// KH_DLS_FRAME (26878) - THE LIGHT MAPS RENDER ON THEIR OWN BRACKET.
+//
+// From 26815 to 26877 kh_dls_render was called from inside render_sun_depth's
+// tier lambda, inheriting the sun's pipeline state and - unintentionally -
+// every gate in front of it: the axis settle/witness gate, the null-sun
+// return, the era arms, and the sun's camera-range caster cull with its
+// down-sun elongation. A frame with no settled sun or moon axis rendered no
+// light maps at all, so a lamp's shadow came and went with a witness it has
+// nothing to do with, and in daylight it depended on which era arm was set.
+// The inputs of a dynamic-light shadow are the light pool and our casters;
+// neither is the sun's.
+//
+// This is the one call site now. It builds the sun-depth pipeline itself (the
+// same binds the lambda's standalone bracket makes), collects casters by
+// LIGHT REACH rather than by sun range - a mesh is a caster for these maps
+// iff it can fall inside some live slot's far plane, which is also exactly the
+// set the world pass's self-mask needs, since KhDlsFaceUV refuses everything
+// past that plane - and hands off to kh_dls_render unchanged. Once per cycle,
+// whichever of the two mesh passes arrives first (the injection, or the flush
+// fallback on a frame the injection did not run), the same twin rule as
+// kh_dls_select.
+//
+// Stand-downs are explicit: a refused frame publishes NO valid map, exactly
+// as mode 514 does, so a stale array can never be read against fresh
+// matrices.
+static uint64_t g_dls_frame_cycle = ~0ull;      // once-per-cycle guard (state, not a lane)
+static uint64_t g_dls_frame_calls = 0;          // brackets opened
+static uint64_t g_dls_frame_no_state = 0;       // refused: sun-depth pipeline objects missing
+static uint64_t g_dls_frame_casters = 0;        // casters collected (sum)
+static uint64_t g_dls_frame_reach_culls = 0;    // eligible objects outside every live slot's reach
+inline void kh_dls_frame(ID3D11DeviceContext* khdf_ctx) {
+    if (!khdf_ctx) return;
+    if (g_dls_frame_cycle == g_topo_cycles) return;
+    g_dls_frame_cycle = g_topo_cycles;
+    g_dls_frame_calls++;
+
+    static std::vector<SunCaster> khdf_casters;   // scratch; both callers hold the graphics lock
+    khdf_casters.clear();
+
+    const int khdf_dm = g_dbg_mode.load(std::memory_order_relaxed);
+    if (khdf_dm != 514 && g_dls_n > 0) {
+        std::lock_guard<std::mutex> lk(g_draw_list_mutex);
+        for (const auto& kv : g_draw_list) {
+            const RenderObject& o = kv.second;
+            if (o.fullscreen || o.mode == DepthMode::Off) continue;   // the sun's eligibility rule
+            if (!o.visible && !o.caster_only) continue;
+            const float khdf_ce[3] = { o.pos[0], o.pos[2], o.pos[1] };   // engine axes
+            float khdf_he[3];
+            kh_world_half_extents(o, khdf_he);
+            const float khdf_hd = sqrtf(khdf_he[0] * khdf_he[0] + khdf_he[1] * khdf_he[1] +
+                                        khdf_he[2] * khdf_he[2]);
+            bool khdf_near = false;
+            for (uint32_t khdf_s = 0; khdf_s < KH_DLS_MAX && !khdf_near; ++khdf_s) {
+                if (!g_dls[khdf_s].live) continue;
+                const float khdf_lim = kh_dls_far(g_dls[khdf_s]) + khdf_hd;
+                const float khdf_dx = khdf_ce[0] - g_dls[khdf_s].pos[0];
+                const float khdf_dy = khdf_ce[1] - g_dls[khdf_s].pos[1];
+                const float khdf_dz = khdf_ce[2] - g_dls[khdf_s].pos[2];
+                khdf_near = khdf_dx * khdf_dx + khdf_dy * khdf_dy + khdf_dz * khdf_dz <= khdf_lim * khdf_lim;
+            }
+            if (!khdf_near) { g_dls_frame_reach_culls++; continue; }
+            khdf_casters.push_back(kh_sun_caster_of(o));
+        }
+    }
+    g_dls_frame_casters += khdf_casters.size();
+
+    const bool khdf_state = g_res.vs_sundepth && g_res.layout_sundepth && g_res.sun_instance_vb &&
+                            g_res.dss_test_write && g_res.rast_sun &&
+                            g_res.composite_cb && g_res.composite_frame_cb;
+    if (!khdf_state) g_dls_frame_no_state++;
+    if (!khdf_state || khdf_casters.empty()) {
+        // Nothing to render into, or nothing that could cast: the 514
+        // stand-down. No valid map means every consumer answers LIT and the
+        // world pass refuses at dlsWorldNoSlot, which is the correct picture
+        // for a frame with no caster in any light's reach - and it costs no
+        // bracket and no clears. The per-light skip keys are untouched, so a
+        // caster returning to the same place next frame reuses its slices.
+        g_dls_map_valid = 0;
+        for (uint32_t khdf_s = 0; khdf_s < KH_DLS_MAX; ++khdf_s) g_dls_facen[khdf_s] = 0;
+        g_dlsw_casters.clear();
+        return;
+    }
+
+    // The standalone sun bracket, minus the tiers: own-draw exclusion, full
+    // state save, the depth-only instanced pipeline. kh_dls_render saves and
+    // restores its own targets, viewport and rasteriser; StateBackup restores
+    // both vertex-buffer slots and t36.
+    const bool khdf_pinj = g_ro.in_injection;
+    g_ro.in_injection = true;
+    StateBackup khdf_bk;
+    khdf_bk.capture(khdf_ctx);
+    khdf_ctx->IASetInputLayout(g_res.layout_sundepth);
+    khdf_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    khdf_ctx->VSSetShader(g_res.vs_sundepth, nullptr, 0);
+    khdf_ctx->PSSetShader(nullptr, nullptr, 0);
+    khdf_ctx->GSSetShader(nullptr, nullptr, 0);
+    khdf_ctx->HSSetShader(nullptr, nullptr, 0);
+    khdf_ctx->DSSetShader(nullptr, nullptr, 0);
+    ID3D11Buffer* khdf_cbs[2] = { g_res.composite_cb, g_res.composite_frame_cb };
+    khdf_ctx->VSSetConstantBuffers(0, 2, khdf_cbs);
+    khdf_ctx->PSSetConstantBuffers(0, 2, khdf_cbs);
+    khdf_ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);
+    khdf_ctx->RSSetState(g_res.rast_sun);   // dls_rast supersedes it inside (KH_DLS_DEPTHCLIP)
+
+    kh_dls_render(khdf_ctx, khdf_casters);
+
+    khdf_bk.restore(khdf_ctx);
+    g_ro.in_injection = khdf_pinj;
 }
 
 inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
@@ -22191,27 +26010,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                     }
                 }
             }
-            SunCaster c;
-            memcpy(c.pos, o.pos, sizeof(c.pos));
-            memcpy(c.size, o.size, sizeof(c.size));
-            memcpy(c.rot, o.rot_m, sizeof(c.rot));
-            c.rotated = o.rotated;
-            c.mesh = mesh_id_clamp(o.mesh);
-            // KH_CAST_ALPHA: the caster's alpha (colour alpha x lifetime
-            // envelope, an expired object casts nothing until the flush
-            // erases it) quantised to 1/64, its alpha-carrying material set,
-            // and the verdict.
-            {
-                bool khsc_exp = false;
-                const float khsc_env = lifetime_envelope(o, effect_time_seconds(), khsc_exp);
-                float khsc_a = khsc_exp ? 0.0f : o.color[3] * khsc_env;
-                khsc_a = khsc_a < 0.0f ? 0.0f : (khsc_a > 1.0f ? 1.0f : khsc_a);
-                c.alpha = floorf(khsc_a * 64.0f + 0.5f) / 64.0f;
-                const KhMaterialSet* khsc_ms = kh_obj_textured(o);
-                c.mats = kh_mat_set_has_alpha(khsc_ms) ? o.materials : std::shared_ptr<const KhMaterialSet>();
-                c.alpha_caster = kh_cast_alpha_on() && (c.alpha < 0.999f || c.mats);
-            }
-            casters.push_back(c);
+            casters.push_back(kh_sun_caster_of(o));   // one record builder (26878)
         }
     }
 
@@ -22907,6 +26706,11 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         if (khsh_ok2) memcpy(g_sun_tier_anchor[2], g_sun_anchor_now, sizeof(g_sun_anchor_now));
         if (khsh_ok3) memcpy(g_sun_tier_anchor[3], g_sun_anchor_now, sizeof(g_sun_anchor_now));
         memcpy(g_sun_cam_anchor, g_sun_anchor_now, sizeof(g_sun_cam_anchor));
+
+        // KH_DL_SHADOW (26815 - 26877): the light maps rendered HERE, inside
+        // this lambda, and so behind every gate in front of it. Moved to
+        // kh_dls_frame at 26878, which the two mesh passes call right after
+        // this function returns - whatever it returned.
 
         if (khsh_standalone) {
             ctx->OMSetRenderTargets(4, khsh_rt, khsh_od);
@@ -25341,6 +29145,10 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     if (sun_map && g_sun3_map_valid && g_res.sun3_srv) ctx->PSSetShaderResources(26, 1, &g_res.sun3_srv);
     if (sun_map && g_sun4_map_valid && g_res.sun4_srv) ctx->PSSetShaderResources(27, 1, &g_res.sun4_srv);
     if (sun_map && g_sun5_map_valid && g_res.sun5_srv) ctx->PSSetShaderResources(32, 1, &g_res.sun5_srv);
+    // KH_DL_SHADOW (26822 - 26877): t36 was bound HERE, unrestored, and that
+    // leak was what fed the injection's mesh draws. PSMaskCast never reads it.
+    // Since 26878 each consumer binds t36 inside its own bracket; this fire
+    // binds only what it reads.
     if (g_res.thm_srv) ctx->PSSetShaderResources(10, 1, &g_res.thm_srv);   // terrain snap
                                                                            // (full-table restore covers it)
 
@@ -25551,6 +29359,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
                                 g_sun4_map_vp, g_sun4_map_bias, g_sun4_half_diag, g_sun4_map_size);
             kh_fill_sun_tier_cb(g_sun_tier_anchor[3], cbd.sun_vp5, cbd.sun_meta5, g_sun5_map_valid,
                                 g_sun5_map_vp, g_sun5_map_bias, g_sun5_half_diag, g_sun5_map_size);   // FAR band
+            kh_dls_fill_cb(cbd);   // KH_DL_SHADOW twin 2/2
             // KH_CAST_BIAS_CAP (26783): the CAST chain's own compare bias, one
             // lane per tier plus the union. FILLED ONLY HERE, and deliberately
             // so: SunShadowOcclusion / KhCastTier are reachable from PSMaskCast
@@ -30013,6 +33822,14 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
     // because engRot carries no translation, and a refusal is the historic
     // path rather than a guess.
     kh_fill_sten_proj(khv_cbf, khv_pv.projection);
+    // KH_DLS_WORLD_INFRONT: the depth terms of the projection this prepass is
+    // about to render the mirror with. The world pass inverts the mirror's
+    // depth through exactly these, so the two cannot disagree about which
+    // depth partition the mask was drawn in.
+    // (26843-26845 captured the mirror's projection terms and matrix here for
+    // the world pass's self-mask. Removed at 26849: the mask renders its own
+    // target now - see KH_DLSW_MASK - and reading this one was never viable,
+    // because VSMirror overwrites z with a conditional near plane of its own.)
     // (mode 174): arm the engine-matrix transform for THIS draw only. The
     // flush mesh pass never sets it, so cycle B is untouched.
     {
@@ -31858,7 +35675,9 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // is the sole snapshot producer again; round 6 removed the arb path's
     // need for any snapshot at all.
 
+    kh_dls_select();   // KH_DL_SHADOW twin 1/2 - ahead of the sun, never inside it
     render_sun_depth(ctx);
+    kh_dls_frame(ctx);   // KH_DLS_FRAME twin 1/2 - after the sun, never inside it (26878)
 
     RVExtBridge::ProjectionViewTransform pv = {};
     float khiv_live[9];
@@ -33011,6 +36830,15 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     if (g_res.samp_pf) ctx->PSSetSamplers(1, 1, &g_res.samp_pf);
     // Analytic terrain heightfield (t10, saved range; see thmParams).
     if (g_thm_valid && g_res.thm_srv) ctx->PSSetShaderResources(10, 1, &g_res.thm_srv);
+    // KH_DL_SHADOW: the light depth array at t36, inside the saved range since
+    // 26878 and bound by the pass that reads it (TWIN: the flush binds it the
+    // same way). Bound whenever it exists - per-light validity lives in
+    // dls_meta[i].w, not in whether the SRV is present, so an unbound slot
+    // would be a SECOND way to say 'no shadow' and the two could disagree.
+    if (g_res.dls_srv) {
+        ctx->PSSetShaderResources(36, 1, &g_res.dls_srv);
+        g_dls_srv_binds++;
+    }
 
     // NO PERCEPTUAL ARM ON THIS PASS (26761, removed whole). The staging
     // loop above defers every normal-blend translucent to the flush (round
@@ -34737,6 +38565,460 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
 
 }
 
+// ---------------------------------------------------------------------------
+// KH_DLS_PROBE (26830) - WHERE IN THE FRAME CAN WE WRITE?
+//
+// Stage 4 (world receive) needs a screen-space pass that survives to the
+// presented image. The 26829 topology says the obvious place does not work:
+//
+//     topoInject 890 | maskSrvLastD 3013 | topoLastSceneRt 3016 | topoDraws 3856
+//
+// maskSrvLastD is the engine binding its own shadow mask as an SRV - the
+// signature of a LIT WORLD DRAW - at draw 3013. So the lit pass runs from
+// early frame to ~3013 and our injection at 890 sits INSIDE it, not after it.
+// Our meshes survive that only because they write depth and win the test; a
+// fullscreen multiply writes no depth and would be painted over by the ~2100
+// lit draws that follow.
+//
+// The other end is worse: the note at g_topo_scene_tex_id records that writes
+// into the latched scene colour AFTER the pass never reached the presented
+// image, across five instrumented field rounds, and this dump re-confirms the
+// mechanism is still unexplained (topoSceneSrv 0, topoSceneCopy 0, the only
+// resolve being the mid-scene R32F utility at 2025).
+//
+// So the write point is not known, and it may NOT be argued - rule 1.77, and
+// re-proposing the refuted tail without new evidence is rule 5. This is the
+// instrument that settles it, in the 1.95 shape: make the invisible thing
+// CONSTANT and look at it. One fullscreen multiply per cycle, at an ordinal
+// chosen by policy, tinted so hard it cannot be mistaken for fog or nightfall.
+//
+// WHAT IT DELIBERATELY DOES NOT DO. It does not retarget, re-viewport, or
+// touch a depth-stencil view: it multiplies WHATEVER IS BOUND, in whatever
+// viewport is current, which is the whole question. It binds no SRV, uploads
+// no constant buffer, and compiles no shader - the tint rides the blend
+// factor (see Resources::dls_probe_blend), so the pixel shader's output is
+// discarded and any pixel shader will do. That keeps the instrument's failure
+// surface to one blend state, which matters: an instrument you have to debug
+// tells you nothing about the thing you were measuring.
+//
+// ORDINALS ARE READ FROM THE PREVIOUS CYCLE (g_topo_pub), never this one -
+// this cycle's totals do not exist yet at the draw we have to fire on. The
+// topology is stable frame to frame in a static view and the policies are
+// coarse, so a one-cycle lag costs nothing; a moving camera that changes the
+// draw count moves the target with it, which is the correct behaviour.
+//
+// THE PROBE IS A REVERT-SHAPED FEATURE INVERTED: default (mode 0) is OFF and
+// costs nothing at all. It exists only under its own modes.
+//
+//   521  fire at the injection ordinal          - THE CONTROL. Expected to be
+//                                                 overpainted by later lit
+//                                                 draws. If 521 tints the
+//                                                 whole screen, this whole
+//                                                 analysis is wrong and the
+//                                                 cheap path is open.
+//   522  fire at the last main-DSV draw         - the last draw with scene
+//                                                 depth bound: the end of the
+//                                                 lit pass. THE CANDIDATE.
+//   523  fire at the last scene-colour draw     - the end of colour writes into
+//                                                 the latched target. Equal to
+//                                                 522 in the 26829 dump; they
+//                                                 may part at night, which is
+//                                                 why both exist.
+//   524  fire at the first resolve sweep        - the near tail. Bounds the
+//                                                 refuted region from below.
+//   525  fire at the last tracked draw          - the absolute tail. Expected
+//                                                 null; if it is not, the
+//                                                 26766-era refutation was
+//                                                 about a different target and
+//                                                 needs re-opening.
+//
+// READ IT BY EYE, NOT BY LANE: the lanes say the pass FIRED, they cannot say
+// the pixels ARRIVED. That is the one question only the screen can answer, and
+// it is exactly why this is a tint and not a counter.
+//
+// COST: gated on g_stats_armed, because it keys on g_topo.draws and that
+// counter only advances while the topology census is armed. Documented rather
+// than worked around - a probe that fired on an unarmed ordinal would be
+// firing on a number that was not counting.
+// ---------------------------------------------------------------------------
+static constexpr int KH_DLS_PROBE_MODE_LO = 521;
+static constexpr int KH_DLS_PROBE_MODE_HI = 529;
+// ---------------------------------------------------------------------------
+// KH_DLS_PROBE_ATRESOLVE (26833, mode 529) - STOP AIMING BY ORDINAL.
+//
+// THE LADDER SETTLED IT. Mode 527 fired all eight bands, ~748 times each, every
+// one onto the latched scene resource with none refused - and the screenshot,
+// measured rather than eyeballed, carried a tint in EXACTLY ONE COLUMN, with
+// step discontinuities at that column's own two edges and nowhere else:
+//
+//     band  target   B/R in a sky strip      resolve at 2133
+//       0      973        2.31
+//       1     1278        2.27
+//       2     1584        2.27
+//       3     1890       66.58   <-- the only survivor
+//       4     2195        2.36        (past the resolve)
+//       5     2501        2.35
+//       6     2807        2.37
+//       7     3113        2.39
+//
+// So the write point is a WINDOW with two different walls:
+//
+//   UPPER WALL - THE RESOLVE. Bands 4-7 all sit past d_resolve_first and none
+//   survives. Writes into the multisampled scene target after it has been
+//   resolved cannot reach the presented image, which is also the whole of the
+//   26766-era "tail" refutation, finally explained rather than inherited.
+//
+//   LOWER WALL - OVERPAINT. Bands 0-2 sit before the resolve and still do not
+//   survive, because the engine is still drawing the world and buries them.
+//   This is the same effect that left mode 521 tinting only the terrain: fire
+//   early and you are painted over by everything drawn after you.
+//
+// The window is therefore "as late as possible, but before the resolve", and
+// it is NARROW - one eighth of the frame was enough to hold it and to miss it
+// on either side.
+//
+// WHICH IS WHY AN ORDINAL CANNOT BE THE AIM. Every ordinal policy here reads
+// the PREVIOUS cycle's topology, and the resolve moves: 1390, 1863, 2133,
+// 2192, 2202, 2311 across the sessions so far, and frame to frame within a
+// session as the draw count breathes. Mode 528 aims 32 draws before it and is
+// visibly better than anything else - the field reports it "paints much more
+// of the screen, more consistent" - but it still flickers, and it flickers for
+// a reason no margin can fix: sometimes last cycle's number lands past this
+// cycle's resolve and the write is simply lost.
+//
+// So bind to the EVENT, not to a count. hooked_resolvesubresource already
+// identifies this exact resolve - source is the latched scene texture, on the
+// render thread, outside our own injection - and it is census-only today. Fire
+// there, immediately BEFORE passing the resolve through, and the pass lands at
+// the last possible moment in the frame, every frame, with no ordinal, no
+// margin, and nothing to drift. That is the flicker's cure, not a reduction of
+// it.
+//
+// This is also the shape the sun path already uses and the parity the field
+// asked for: mask_cast_engine does not guess a draw index either - it fires on
+// an observed engine event (the mask bind) and paints into what the engine is
+// about to consume. Same discipline, different consumer.
+// ---------------------------------------------------------------------------
+static uint64_t g_dls_probe_resolve_fires = 0;   // fires from inside the resolve hook
+static uint64_t g_dls_probe_resolve_seen = 0;    // scene-texture resolves observed
+static uint64_t g_dls_probe_resolve_cycle = 0;   // once-per-cycle guard (state, not a lane)
+// KH_DLS_PROBE_LADDER (26832) - EIGHT ORDINALS IN ONE SCREENSHOT.
+//
+// 26831 left a contradiction that no single-ordinal probe can resolve: mode
+// 521 tints the frame from draw ~880, and modes 522/523/526 fire onto the SAME
+// latched scene resource (dlsProbeRtScene 340/340, 122/122, 117/117 - every
+// fire on target, none refused) and show NOTHING. Same resource, same code
+// path, same blend, opposite outcome. Something between those ordinals ends
+// the target's contribution to the presented image.
+//
+// The dumps name a candidate: topoResolveFirst, the engine's one resolve of
+// the latched scene texture, sits between them EVERY time and at a strikingly
+// stable fraction of the scene-draw range -
+//
+//     mode 0   inject  862 | resolve 1863 | lastSceneRt 2730   (68%)
+//     526      inject  652 | resolve 1390 | lastSceneRt 2046   (68%)
+//     522      inject  970 | resolve 2192 | lastSceneRt 3177   (69%)
+//     523      inject  963 | resolve 2202 | lastSceneRt 3177   (69%)
+//
+// - with every visible probe before it and every invisible probe after it.
+// That is a hypothesis with a clean prediction, and it must be MEASURED, not
+// adopted: the correlation is over four points and the resolve is not the only
+// thing that happens in that window.
+//
+// So bisect. Eight probes in one cycle, each restricted to its own VERTICAL
+// COLUMN of the screen, at eight ordinals spread from the injection to the end
+// of scene-colour writing. The screenshot is then a filmstrip read left to
+// right: columns tint while the write still reaches the screen and stop when
+// it does not, and the boundary column names the ordinal to within an eighth
+// of the frame. One session instead of eight.
+//
+// COLUMNS, NOT ROWS, and that is not cosmetic: a horizontal band lands
+// entirely on sky or entirely on ground, so a null band would be ambiguous
+// between "the write died" and "there was nothing there to tint". Every column
+// crosses the full vertical extent of the scene, so all eight sample the same
+// mix of terrain, buildings and sky and can be compared against each other.
+//
+// PER-BAND FIRE COUNTS ARE MANDATORY, not decoration. A band that never fired
+// and a band whose write did not survive look identical on screen - that is
+// precisely the 26830 failure, where dlsProbeNoRt 148/150 read as a null
+// result and was not one. dlsProbeBandN says which of the two happened.
+static constexpr int KH_DLS_PROBE_BANDS = 8;
+// KH_DLS_PROBE_MARGIN (26831). Aim this many draws EARLIER than the measured
+// end of scene-colour writing, for mode 526. The topology jitters by a few
+// draws frame to frame (26830 field: topoLastSceneRt 2856-2923 across six
+// night dumps) and the target is read from the PREVIOUS cycle, so aiming
+// exactly at the last scene draw overshoots whenever the next frame is
+// shorter - and an overshoot means the render target is already gone and the
+// probe refuses. Undershooting costs only the handful of draws that paint
+// over us; overshooting costs the whole measurement. The asymmetry decides it.
+static constexpr uint32_t KH_DLS_PROBE_MARGIN = 32;
+// Strong blue, and DARK on two channels: a multiply this saturated cannot be
+// confused with nightfall, fog, or a colour grade. Alpha is left alone by the
+// blend description - touching it would perturb the UI-mask machinery.
+static constexpr FLOAT KH_DLS_PROBE_TINT[4] = { 0.25f, 0.25f, 1.0f, 1.0f };
+
+static uint64_t g_dls_probe_fires = 0;        // passes actually drawn
+static uint64_t g_dls_probe_missed = 0;       // cycles whose target ordinal never arrived
+static uint64_t g_dls_probe_rt_scene = 0;     // ... fired while RT0 was the latched scene colour
+static uint64_t g_dls_probe_rt_foreign = 0;   // ... fired onto some other colour target
+static uint64_t g_dls_probe_no_rt = 0;        // refused: nothing bound to write to
+static uint64_t g_dls_probe_state_fails = 0;  // refused: probe resources missing
+static uint32_t g_dls_probe_target = 0;       // ordinal aimed at, this cycle
+static uint32_t g_dls_probe_at = 0;           // ordinal actually fired at
+static uint64_t g_dls_probe_cycle = 0;        // once-per-cycle guard
+static uint64_t g_dls_probe_armed_cycles = 0; // cycles with a usable (non-zero) target
+static uint64_t g_dls_probe_waited = 0;       // draws passed waiting for the scene target to be bound
+// KH_DLS_PROBE_LADDER state + census. _fired is per-cycle arming (state), _fires
+// is the window census (a lane).
+static uint32_t g_dls_probe_band_target[KH_DLS_PROBE_BANDS] = {};
+static uint8_t  g_dls_probe_band_fired[KH_DLS_PROBE_BANDS] = {};
+static uint64_t g_dls_probe_band_fires[KH_DLS_PROBE_BANDS] = {};
+// KH_DLS_PROBE_RTDESC (26832). What we are ACTUALLY painting into, sampled at
+// every fire. If the late ordinals bind the same resource through a different
+// view - a half-resolution target, a different array slice, a resolved
+// single-sample copy - the identity test (g_topo_rt0_scene, a RESOURCE
+// compare) would report "the scene target" and be right, while the pixels went
+// somewhere that is never presented. That would explain the whole
+// contradiction without any resolve being involved, so it is measured rather
+// than assumed. Sample counts differing between an early and a late fire is
+// the signature to look for.
+static uint32_t g_dls_probe_rt_w = 0;
+static uint32_t g_dls_probe_rt_h = 0;
+static uint32_t g_dls_probe_rt_samples = 0;
+static void*    g_dls_probe_rtv_seen[8] = {};
+static uint32_t g_dls_probe_rtv_ids = 0;   // distinct RTV pointers seen at fire time
+
+// The ordinal this policy wants, measured on the PREVIOUS completed cycle.
+// Returns 0 for "no opinion", which stands the probe down for the cycle
+// rather than firing at draw 0 - a zero here means the topology census has not
+// published yet, and firing at the head of the frame would answer a question
+// nobody asked.
+inline uint32_t kh_dls_probe_target(int khp_mode) {
+    switch (khp_mode) {
+        case 521: return g_topo_pub.d_inject;
+        case 522: return g_topo_pub.d_last_main_dsv;
+        case 523: return g_topo_pub.d_last_scene_rt;
+        case 524: return g_topo_pub.d_first_sweep;
+        case 525: return g_topo_pub.draws;
+        case 526: return g_topo_pub.d_last_scene_rt > KH_DLS_PROBE_MARGIN
+                       ? g_topo_pub.d_last_scene_rt - KH_DLS_PROBE_MARGIN : 1u;
+        // 528 - THE PREDICTION UNDER TEST. Fire just before the engine's one
+        // resolve of the latched scene texture. If the resolve is what ends
+        // the target's contribution, this is the LAST useful write point in
+        // the frame and should tint everything drawn up to it - terrain,
+        // buildings, trees - where 526 tints nothing at all.
+        case 528: return g_topo_pub.d_resolve_first > KH_DLS_PROBE_MARGIN
+                       ? g_topo_pub.d_resolve_first - KH_DLS_PROBE_MARGIN : 0u;
+        default:  return 0;
+    }
+}
+
+// KH_DLS_PROBE_SCENELOCK (26831) - DOES THIS POLICY REQUIRE THE SCENE TARGET?
+//
+// THE 26830 FIELD RESULT FORCED THIS, and it is rule 1.87 exactly: when a
+// guard refuses, ask which side is stale. Modes 522 and 523 reported
+// dlsProbeNoRt 148/150 and 218/220 - the probe refused on almost every cycle
+// because NOTHING WAS BOUND to write to - and the screen showed nothing. Read
+// as "the write point does not work", that is a wrong and expensive
+// conclusion. The truth is that 26830 fired STRICTLY AFTER the target draw,
+// and the engine unbinds its colour target immediately after the last
+// scene-colour draw, so the probe was aiming into a one-draw hole where the
+// target no longer existed.
+//
+// So the ordinal alone is not a sufficient aim. These policies want "the last
+// moment the scene colour is still bound", which is a condition on the
+// BINDING, not on a draw count: fire at the first draw at-or-after the target
+// where RT0 actually is the latched scene colour. The ordinal chooses roughly
+// when, the binding decides exactly where, and an overshoot now shows up as
+// dlsProbeMissed instead of as a silent null.
+//
+// 524 and 525 are deliberately EXEMPT. They probe the tail, where the scene
+// target is by definition no longer bound - requiring it would stand them down
+// permanently and destroy the only evidence they exist to gather. 26830 already
+// answered them: both fired onto foreign targets (dlsProbeRtForeign 237 and
+// 119, dlsProbeRtScene 3 and 0) and both showed nothing, which is the old tail
+// refutation reproduced rather than a new fault.
+inline bool kh_dls_probe_needs_scene(int khp_mode) {
+    return khp_mode == 521 || khp_mode == 522 || khp_mode == 523 ||
+           khp_mode == 526 || khp_mode == 527 || khp_mode == 528;
+}
+
+// One fullscreen multiply into the currently bound target. Every piece of
+// pipeline state this touches is inside StateBackup's save set (input layout,
+// topology, both IA slots, all five shader stages, the CB windows, the SRV
+// table, samplers, depth-stencil + ref, blend + factor + mask, rasteriser), so
+// the bracket is closed by construction rather than by inspection - rule 1.90,
+// and the reason this reuses StateBackup instead of hand-rolling a save.
+// khp_band < 0 draws the whole viewport; 0..KH_DLS_PROBE_BANDS-1 restricts the
+// raster to that vertical column by narrowing the VIEWPORT. The fullscreen
+// triangle is unchanged - clip space still covers everything - and the
+// viewport clips it, so banding costs one extra RSSetViewports pair and no
+// second shader. Viewports are NOT part of StateBackup's save set, so this
+// function saves and restores them itself (rule 1.90: the site that changes
+// state owes the restore).
+inline void kh_dls_probe_fire(ID3D11DeviceContext* khp_ctx, int khp_band) {
+    if (!khp_ctx) return;
+    if (!g_res.vs_fullscreen || !g_res.ps_white || !g_res.rasterizer ||
+        !g_res.dss_off || !g_res.dls_probe_blend) {
+        g_dls_probe_state_fails++;
+        return;
+    }
+
+    // A colour target must actually be bound, or the draw is a silent no-op
+    // and the lane would claim a fire that painted nothing (rule 1.91: refuse
+    // what is absent, do not compute from it).
+    ID3D11RenderTargetView* khp_rtv = nullptr;
+    khp_ctx->OMGetRenderTargets(1, &khp_rtv, nullptr);
+    if (!khp_rtv) { g_dls_probe_no_rt++; return; }
+    // KH_DLS_PROBE_RTDESC: what is this, really? Sampled every fire so an
+    // early and a late fire can be compared directly.
+    {
+        ID3D11Resource* khp_res = nullptr;
+        khp_rtv->GetResource(&khp_res);
+        if (khp_res) {
+            ID3D11Texture2D* khp_t2 = nullptr;
+            if (SUCCEEDED(khp_res->QueryInterface(__uuidof(ID3D11Texture2D),
+                                                  reinterpret_cast<void**>(&khp_t2))) && khp_t2) {
+                D3D11_TEXTURE2D_DESC khp_td = {};
+                khp_t2->GetDesc(&khp_td);
+                g_dls_probe_rt_w = khp_td.Width;
+                g_dls_probe_rt_h = khp_td.Height;
+                g_dls_probe_rt_samples = khp_td.SampleDesc.Count;
+                khp_t2->Release();
+            }
+            khp_res->Release();
+        }
+        bool khp_known = false;
+        for (uint32_t khp_i = 0; khp_i < g_dls_probe_rtv_ids; ++khp_i) {
+            if (g_dls_probe_rtv_seen[khp_i] == static_cast<void*>(khp_rtv)) { khp_known = true; break; }
+        }
+        if (!khp_known && g_dls_probe_rtv_ids < 8) {
+            g_dls_probe_rtv_seen[g_dls_probe_rtv_ids++] = static_cast<void*>(khp_rtv);
+        }
+    }
+    khp_rtv->Release();   // OMGet AddRef'd; the binding itself is left alone
+
+    StateBackup khp_bk;
+    khp_bk.capture(khp_ctx);
+
+    UINT khp_nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    D3D11_VIEWPORT khp_ovp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    khp_ctx->RSGetViewports(&khp_nvp, khp_ovp);
+    bool khp_vp_set = false;
+    if (khp_band >= 0 && khp_nvp > 0 && khp_ovp[0].Width > 0.0f) {
+        D3D11_VIEWPORT khp_bv = khp_ovp[0];
+        const FLOAT khp_w = khp_ovp[0].Width / static_cast<FLOAT>(KH_DLS_PROBE_BANDS);
+        khp_bv.TopLeftX = khp_ovp[0].TopLeftX + khp_w * static_cast<FLOAT>(khp_band);
+        khp_bv.Width = khp_w;
+        khp_ctx->RSSetViewports(1, &khp_bv);
+        khp_vp_set = true;
+    }
+
+    khp_ctx->IASetInputLayout(nullptr);
+    khp_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    khp_ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
+    khp_ctx->PSSetShader(g_res.ps_white, nullptr, 0);   // output discarded by SrcBlend ZERO
+    khp_ctx->GSSetShader(nullptr, nullptr, 0);
+    khp_ctx->HSSetShader(nullptr, nullptr, 0);
+    khp_ctx->DSSetShader(nullptr, nullptr, 0);
+    khp_ctx->OMSetDepthStencilState(g_res.dss_off, 0);
+    khp_ctx->OMSetBlendState(g_res.dls_probe_blend, KH_DLS_PROBE_TINT, 0xFFFFFFFF);
+    khp_ctx->RSSetState(g_res.rasterizer);
+    khp_ctx->Draw(3, 0);
+
+    if (khp_vp_set && khp_nvp > 0) khp_ctx->RSSetViewports(khp_nvp, khp_ovp);
+    khp_bk.restore(khp_ctx);   // restore() also releases every saved ref - it
+                               // owns the whole bracket, unlike KhOmSave which
+                               // splits restore from release. Calling a
+                               // release() here would not compile, and adding
+                               // one would double-release.
+
+    g_dls_probe_fires++;
+    if (g_topo_rt0_valid && g_topo_rt0_scene) g_dls_probe_rt_scene++;
+    else                                      g_dls_probe_rt_foreign++;
+}
+
+// Called immediately after topo_note_draw, never inside it: a census may not
+// perturb the quantity it measures (rule 1.80), and this one paints.
+inline void kh_dls_probe_note(ID3D11DeviceContext* khp_ctx) {
+    const int khp_mode = g_dbg_mode.load(std::memory_order_relaxed);
+    if (khp_mode < KH_DLS_PROBE_MODE_LO || khp_mode > KH_DLS_PROBE_MODE_HI) return;
+
+    if (g_dls_probe_cycle != g_topo_cycles) {
+        // New cycle: re-aim, and bank whether the last one ever arrived.
+        if (g_dls_probe_target != 0 && g_dls_probe_at == 0) g_dls_probe_missed++;
+        g_dls_probe_cycle = g_topo_cycles;
+        g_dls_probe_target = kh_dls_probe_target(khp_mode);
+        g_dls_probe_at = 0;
+        if (g_dls_probe_target != 0) g_dls_probe_armed_cycles++;
+
+        // KH_DLS_PROBE_LADDER: eight ordinals spread across the span that
+        // actually matters - from our injection (known to reach the screen) to
+        // the end of scene-colour writing (known not to). Band 0 sits at the
+        // injection and is the POSITIVE CONTROL: if column 0 is blank the
+        // instrument is broken and no other column means anything.
+        if (khp_mode == 527) {
+            const uint32_t khp_lo = g_topo_pub.d_inject;
+            const uint32_t khp_hi = g_topo_pub.d_last_scene_rt;
+            for (int khp_b = 0; khp_b < KH_DLS_PROBE_BANDS; ++khp_b) {
+                g_dls_probe_band_fired[khp_b] = 0;
+                g_dls_probe_band_target[khp_b] =
+                    (khp_hi > khp_lo)
+                    ? khp_lo + static_cast<uint32_t>(
+                          (static_cast<uint64_t>(khp_hi - khp_lo) *
+                           static_cast<uint64_t>(khp_b)) /
+                          static_cast<uint64_t>(KH_DLS_PROBE_BANDS - 1))
+                    : 0u;
+            }
+        }
+    }
+
+    if (khp_mode == 527) {
+        // Every band that has come due and has the scene target bound fires
+        // now. Several may land on the same draw when the targets crowd
+        // together; each is its own column, so they do not overlap on screen.
+        if (!(g_topo_rt0_valid && g_topo_rt0_scene)) { g_dls_probe_waited++; return; }
+        for (int khp_b = 0; khp_b < KH_DLS_PROBE_BANDS; ++khp_b) {
+            if (g_dls_probe_band_fired[khp_b]) continue;
+            if (g_dls_probe_band_target[khp_b] == 0) continue;
+            if (g_topo.draws < g_dls_probe_band_target[khp_b]) continue;
+            g_dls_probe_band_fired[khp_b] = 1;
+            g_dls_probe_band_fires[khp_b]++;
+            kh_dls_probe_fire(khp_ctx, khp_b);
+        }
+        return;
+    }
+
+    if (g_dls_probe_target == 0) return;          // no published topology yet
+    if (g_dls_probe_at != 0) return;              // already fired this cycle
+
+    // THE HOOK IS PRE-DRAW (reorder_pre_draw): when g_topo.draws reads N, the
+    // engine's draw N has not executed yet, so firing here lands immediately
+    // BEFORE draw N and draw N then paints its own footprint over us. One
+    // draw's worth of overpaint is the price, and it is the right price -
+    // 26830 tried to dodge it by firing strictly after the target and landed
+    // in the hole where the target had already been unbound (see
+    // kh_dls_probe_needs_scene).
+    if (g_topo.draws < g_dls_probe_target) return;
+
+    // SCENE-LOCKED POLICIES WAIT FOR THE BINDING, not just the count. The
+    // ordinal says roughly when; RT0's identity says exactly where. Waiting
+    // costs nothing and is counted, so a policy that never finds its target
+    // is visible as dlsProbeWaited climbing with dlsProbeFires flat, rather
+    // than as an unexplained blank screen.
+    if (kh_dls_probe_needs_scene(khp_mode) &&
+        !(g_topo_rt0_valid && g_topo_rt0_scene)) {
+        g_dls_probe_waited++;
+        return;
+    }
+
+    g_dls_probe_at = g_topo.draws;   // set BEFORE the draw: a failed fire must
+                                     // not re-arm on every later draw of the
+                                     // cycle and stack multiplies (the 240x
+                                     // lesson at g_mask_cast_fired).
+    kh_dls_probe_fire(khp_ctx, -1);   // whole viewport
+}
+
 // Frame-topology census, per tracked draw (armed only - see FrameTopo).
 inline void topo_note_draw() {
     ++g_topo.draws;
@@ -35376,6 +39658,7 @@ inline void kh_svs_eng_sweep(ID3D11DeviceContext* khw_ctx) {
 }
 
 static uint64_t g_svs_vol_copy_held = 0;   // later-bracket copies held (first-bracket latch)
+static uint64_t g_svs_vol_copy_nomesh = 0;   // KH_SVS_VOL_DEMAND: refused, no mesh could read it
 
 inline void kh_svs_vol_copy(ID3D11DeviceContext* khc_ctx) {
     if (g_svs_vol_seq == g_svs_frame_seq &&
@@ -35387,6 +39670,20 @@ inline void kh_svs_vol_copy(ID3D11DeviceContext* khc_ctx) {
     if (!khc_ctx || g_ro.in_injection) { g_svs_vol_copy_skips++; return; }
     if (!kh_svs_vol_on()) { g_svs_vol_copy_skips++; return; }
     if (!g_svs_vol_src) { g_svs_vol_copy_skips++; return; }
+    // KH_SVS_VOL_DEMAND (26878). No visible mesh, no reader: the copy is
+    // refused and the primed flag is DROPPED, so kh_svs_vol_ready cannot hand
+    // a mesh that appears next frame a copy from before it existed (readiness
+    // never checked the epoch, only that a copy had happened once). The
+    // demand is computed on the game thread a frame ahead of the bracket, so
+    // the first frame a mesh draws already has a fresh copy; if it ever does
+    // not, the injection reads not-ready and draws that mesh without the
+    // volume term for one frame, counted at svVolRejCold. Mode 119 behaviour,
+    // in the one case where 119 is what a post-FX-only session wants.
+    if (!g_svs_mesh_wanted.load(std::memory_order_relaxed)) {
+        g_svs_vol_copy_nomesh++;
+        g_svs_vol_primed = false;
+        return;
+    }
 
     ID3D11Device* khc_dev = nullptr;
     khc_ctx->GetDevice(&khc_dev);
@@ -35933,7 +40230,10 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
         mask_cast_engine(self);
 
         // Frame-topology census (armed diagnostics only; see FrameTopo).
-        if (g_stats_armed.load(std::memory_order_relaxed)) topo_note_draw();
+        if (g_stats_armed.load(std::memory_order_relaxed)) {
+            topo_note_draw();
+            kh_dls_probe_note(self);   // KH_DLS_PROBE - after the census, never inside it
+        }
 
         // Dynamic-lights per-draw sampler: every 16th engine draw reads the
         // slot-11 window identity - the distinct-window census, and, for the
@@ -36107,6 +40407,1024 @@ static void STDMETHODCALLTYPE hooked_copysubresourceregion(ID3D11DeviceContext* 
     g_orig_copysubresourceregion(self, dst, dst_sub, dx, dy, dz, src, src_sub, box);
 }
 
+// ---------------------------------------------------------------------------
+// KH_DLS_WORLD (26834) - STAGE 4. THE GAME ENVIRONMENT RECEIVES OUR MESHES'
+// DYNAMIC-LIGHT SHADOWS.
+//
+// One fullscreen multiply into the scene colour at the resolve, emitting
+// KhDlsWorldFactor: how much of each light's contribution our meshes blocked
+// at that pixel, divided by everything lighting it. The albedo cancels in that
+// ratio, which is what makes this reachable at all on a forward renderer with
+// no G-buffer (see the kernel's note in cb.hlsl).
+//
+// WHY HERE. The 26830-26833 probe campaign measured the only window in the
+// frame where such a write survives, and it has two walls: the engine's
+// resolve of the scene texture above it (nothing written after it is ever
+// presented - which is also the 26766-era "tail" refutation, explained at
+// last), and overpaint by the world draws themselves below it. Firing from
+// inside the resolve hook lands on the upper wall exactly, every frame, with
+// no draw ordinal to drift - the 527 ladder proved that any ordinal aim
+// flickers, because the resolve itself moves (1390, 1863, 2133, 2192, 2202,
+// 2311 across sessions).
+//
+// DEPTH IS THIS FRAME'S, AND SO IS THE VIEW. The sun's world cast pairs a
+// stale snapshot with a frozen view and reprojects, because it fires at draw 0
+// where this frame's depth does not exist yet. That constraint is absent here:
+// at the resolve the world is drawn, so the live depth is snapshotted
+// immediately before the draw and the live view goes in the same CB. No
+// freeze, no reprojection, no drift class. This is the ONE place this pass
+// deliberately diverges from the sun path; everything that decides WHERE a
+// shadow falls - the caster set, the eight maps, KhDlsShadow, its filter, its
+// bias, its fail-to-lit rule - is shared with the mesh receive.
+//
+// FAIL-SAFE IN EVERY DIRECTION. A missing shader, a failed snapshot, a failed
+// upload or a stand-down mode all return before the draw, and the frame is
+// then bit-identical to 26833. The factor itself is saturated into [0,1], and
+// KhDlsWorldFactor's denominator is deliberately overstated, so the worst a
+// live bug can do is fail to darken.
+//
+// COST: one fullscreen pass plus one depth resolve per frame, at mode 0.
+// Mode 533 stands the whole stage down and is the ownership test (rule 1.82).
+static constexpr int KH_DLS_WORLD_OFF_MODE = 533;
+static uint64_t g_dls_world_fires = 0;        // passes drawn
+static uint64_t g_dls_world_no_state = 0;     // refused: shader/blend/depth resources missing
+static uint64_t g_dls_world_no_slot = 0;      // refused: no light holds a shadow slot
+static uint64_t g_dls_world_snap_fails = 0;   // (retired with the 26837 snapshot; kept published at 0)
+static uint64_t g_dls_world_no_depth = 0;     // refused: the engine's linear depth is not adopted yet
+static uint64_t g_dls_world_frozen = 0;       // fills that used the FROZEN cast view (the default)
+static uint64_t g_dls_world_selfmask = 0;      // fills that armed the our-meshes stencil
+static uint64_t g_dls_world_selfmask_miss = 0; // ... and fills with no mask available
+static uint64_t g_dlsw_mask_draws = 0;         // KH_DLSW_MASK: caster draws into our own mask
+// KH_DLSW_MASKREG (26876): which matrix pair the mask was drawn with. These two
+// must sum to dlswMaskOk + dlswMaskFail, and dlswMaskFrozen must read 0 at any
+// mode but 555 - a non-zero there means the revert is arming itself.
+static uint64_t g_dlsw_mask_live = 0;          // engine view(N) x engine projection
+static uint64_t g_dlsw_mask_frozen = 0;        // mode 555: frozen view x derived projection
+// KH_DLSW_RTFMT (26876): the blend target this pass multiplies into, which the
+// task-3 ledger has wanted since 26862 and which nothing has ever read. -1 =
+// never sampled. The format is the DXGI enum; RtIsScene is 1 when the bound
+// RTV's resource is the scene texture the resolve names, 0 when it is something
+// else - the pass has always painted into "whatever was bound" and never once
+// checked that the target was the one the probe campaign validated.
+static int      g_dlsw_rt_fmt = -1;
+static int      g_dlsw_rt_dim = -1;
+static uint64_t g_dlsw_rt_is_scene = 0;
+static uint64_t g_dlsw_rt_not_scene = 0;
+static int      g_dlsw_resolve_fmt = -1;       // the fmt argument of the resolve we fire on
+static uint64_t g_dlsw_mask_ok = 0;            // frames the mask rendered and was used
+static uint64_t g_dlsw_mask_fail = 0;          // frames it could not, and the pass ran unmasked
+static uint64_t g_dls_world_upload_fails = 0; // refused: a constant-buffer upload failed
+static uint64_t g_dls_world_no_rt = 0;        // refused: no colour target bound
+static uint64_t g_dls_world_cycle = 0;        // once-per-cycle guard (state, not a lane)
+// KH_DLS_WORLD_FILL (26836). The reconstruction inputs, published as they were
+// actually written. 534 proved the buffers ARRIVE; it cannot prove they contain
+// the right numbers, and a wrong fov scale or a wrong screen size produces a
+// plausible-looking but wrongly-scaled world position - which is exactly the
+// class 531 is struggling to show. These make the fill checkable arithmetically
+// instead of by staring at colours.
+static float    g_dls_world_fov[2] = { -1.0f, -1.0f };   // castView[1].xy, tan(fov/2)
+// KH_DLSW_FOVCHECK (26858). The fov actually used, the fov the engine's own
+// projection implies, and their ratio. A ratio that is not 1 means the mask is
+// scaled differently from the geometry it is meant to cover, AND the
+// reconstruction is building its view ray with the wrong opening angle.
+// KH_DLSW_VIEWPORT (26861). The viewport actually bound when the world pass
+// draws. This pass never SETS one - it inherits whatever the engine left at the
+// resolve - and every screen-space index in it assumes i.pos.xy is in cast_dims
+// space: KhDlsMaskInFront clamps straight against the mask's dims with no
+// rescale, and KhCastZl rescales from cast_dims to the depth texture. If the
+// inherited viewport is not cast_dims, i.pos.xy is in a different space than
+// both assume, and the mask lands scaled and offset from the mesh - which is a
+// STATIC displacement, exactly the shape left over after the frozen-view and
+// fov theories were both refuted.
+static float    g_dlsw_vp[2] = { -1.0f, -1.0f };
+static uint64_t g_dlsw_vp_mismatch = 0;
+static uint64_t g_dlsw_vp_agree = 0;
+static float    g_dlsw_fov_chosen[2] = { -1.0f, -1.0f };
+static float    g_dlsw_fov_derived[2] = { -1.0f, -1.0f };
+static float    g_dlsw_fov_ratio[2] = { -1.0f, -1.0f };
+static uint64_t g_dlsw_fov_mismatch = 0;
+static uint64_t g_dlsw_fov_agree = 0;
+// KH_DLSW_FOVPX (26876): the same disagreement expressed in SCREEN PIXELS at
+// the frame edge, which is the unit the artifact it was built to catch is
+// measured in. The ratio lane could not do that job - see the bar below.
+static float    g_dlsw_fov_px[2] = { -1.0f, -1.0f };
+static float    g_dls_world_dims[2] = { -1.0f, -1.0f };  // castView[1].zw, the screen size used
+static uint64_t g_dls_world_fov_engine = 0;   // fills that took the engine's cast_fov
+static uint64_t g_dls_world_fov_derived = 0;  // ... and fills that fell back to 1/proj
+static float    g_dls_world_cam[3] = {};      // the camera the reconstruction anchored to
+
+// KH_DLSW_MASK (26847) - render our meshes' distance into our own target.
+//
+// Returns true when the mask is usable this frame. Everything about it is ours:
+// the matrix, the sentinel, the units (METRES, linear view distance) and the
+// reader. Nothing here depends on another feature's depth convention, which is
+// the whole reason it exists - see the shader note for what borrowing the
+// mirror's plane cost.
+//
+// *** THE PARAGRAPH THAT STOOD HERE IS WRONG AND IS KEPT ONLY AS A WARNING. ***
+// It said the matrix is "built from the SAME inputs the reconstruction uses, so
+// the mask and the world surface cannot disagree about where a pixel is", and
+// instructed the next reader never to reintroduce a local fov preference. The
+// second half was answering a real 26849 defect; the first half was a claim
+// about the wrong pair of things, and it is what hid the white rim.
+//
+// This mask does not have to agree with the RECONSTRUCTION. It has to agree
+// with the ENGINE'S RASTERISATION OF OUR MESH, because the question it answers
+// is which pixels of the colour target are already covered by that mesh. The
+// caller therefore hands in the engine's own view and projection for this
+// frame, and the near and far planes are no longer ours to choose - taking the
+// engine's means this mask clips exactly where the engine's draw of the same
+// geometry clipped. The value written is still the clip w, not the clip z, so
+// the z terms still decide only what is clipped and never what is stored.
+//
+// The 26849 lesson survives in the form that was actually true: do not let this
+// function pick its own matrix. It takes what the caller resolves, and the
+// caller resolves it ONCE - see KH_DLSW_MASKREG at the call site for why that
+// is now the live pair and not the frozen one.
+// KH_DLSW_MASKREG (26876): the caller now hands in a full PROJECTION, not a
+// reconstructed fov pair. See the ledger at the call site - the short of it is
+// that this mask has to land where the ENGINE rasterised our mesh, and the only
+// matrix guaranteed to do that is the one the engine drew it with.
+inline bool kh_dlsw_mask_render(ID3D11DeviceContext* khm_ctx,
+                                const float khm_view[16], const float khm_proj_in[16],
+                                UINT khm_w, UINT khm_h) {
+    if (!khm_ctx || khm_w < 2 || khm_h < 2) return false;
+    if (!g_res.vs_dls_mask || !g_res.ps_dls_mask || !g_res.dlsw_min_blend ||
+        !g_res.input_layout || !g_res.dss_off || !g_res.rasterizer ||
+        !g_res.composite_cb || !g_res.composite_frame_cb) return false;
+    if (g_dlsw_casters.empty()) return false;
+    if (!khm_proj_in) return false;
+    // A degenerate projection scales the mesh to nothing or to infinity; either
+    // way the mask would be wrong rather than absent, and a wrong mask is the
+    // failure this whole path exists to remove (rule 1.91).
+    if (!(fabsf(khm_proj_in[0]) > 1.0e-6f) || !(fabsf(khm_proj_in[5]) > 1.0e-6f)) return false;
+    // VSDlsMask stores clip w as the view distance, which is only a distance
+    // if proj[11] (the w row) is +1: a projection with w = -z would make every
+    // stored value negative, KhDlsMaskInFront would read "no mesh" everywhere,
+    // and this function would still return true and count dlswMaskOk - a
+    // silent success. Refused instead; the caller counts it as a mask failure
+    // and the pass runs unmasked, which is the honest degradation (26878).
+    if (!(khm_proj_in[11] > 0.0f)) return false;
+
+    if (!g_res.dlsw_tex || g_res.dlsw_w != khm_w || g_res.dlsw_h != khm_h) {
+        KH_SAFE_RELEASE(g_res.dlsw_srv);
+        KH_SAFE_RELEASE(g_res.dlsw_rtv);
+        KH_SAFE_RELEASE(g_res.dlsw_tex);
+        g_res.dlsw_w = g_res.dlsw_h = 0;
+        ID3D11Device* khm_dev = nullptr;
+        khm_ctx->GetDevice(&khm_dev);
+        if (!khm_dev) return false;
+        D3D11_TEXTURE2D_DESC khm_td = {};
+        khm_td.Width = khm_w;
+        khm_td.Height = khm_h;
+        khm_td.MipLevels = 1;
+        khm_td.ArraySize = 1;
+        khm_td.Format = DXGI_FORMAT_R32_FLOAT;   // metres, not a depth format
+        khm_td.SampleDesc.Count = 1;             // single-sample: the mask is a
+                                                 // per-pixel question, and the
+                                                 // world pass reads it per pixel
+        khm_td.Usage = D3D11_USAGE_DEFAULT;
+        khm_td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        bool khm_ok = SUCCEEDED(khm_dev->CreateTexture2D(&khm_td, nullptr, &g_res.dlsw_tex));
+        if (khm_ok) khm_ok = SUCCEEDED(khm_dev->CreateRenderTargetView(g_res.dlsw_tex, nullptr, &g_res.dlsw_rtv));
+        if (khm_ok) khm_ok = SUCCEEDED(khm_dev->CreateShaderResourceView(g_res.dlsw_tex, nullptr, &g_res.dlsw_srv));
+        khm_dev->Release();
+        if (!khm_ok) {
+            KH_SAFE_RELEASE(g_res.dlsw_srv);
+            KH_SAFE_RELEASE(g_res.dlsw_rtv);
+            KH_SAFE_RELEASE(g_res.dlsw_tex);
+            return false;
+        }
+        g_res.dlsw_w = khm_w;
+        g_res.dlsw_h = khm_h;
+    }
+
+    // view * proj, row-vector. The projection is the CALLER'S now - previously
+    // this rebuilt one from the fov pair with an invented near/far, and an
+    // invented projection is only equal to the engine's for a textbook
+    // perspective matrix. The z terms still decide only what gets CLIPPED and
+    // never what gets stored (we store clip w), so taking the engine's own
+    // terms means the mask clips exactly where the engine's draw of the same
+    // mesh clipped, which is the registration this pass needs.
+    float khm_proj[4][4];
+    memcpy(khm_proj, khm_proj_in, sizeof(khm_proj));
+    float khm_v[4][4];
+    memcpy(khm_v, khm_view, sizeof(khm_v));
+    float khm_vp[4][4];
+    mul_4x4(khm_v, khm_proj, khm_vp);
+
+    ConstantData khm_frm = {};
+    memcpy(khm_frm.view_proj, khm_vp, sizeof(khm_frm.view_proj));
+
+    // KH_DLSW_MASKREBASE (26876e) - THE LAST OF THE REGISTRATION RESIDUE.
+    //
+    // 26876a matched the mask's VIEW and PROJECTION to the engine's and the
+    // white rim went from obvious to faint. What it did not match is the
+    // ARITHMETIC. KhVsCore transforms our meshes through the REBASED path when
+    // centerRel.w is armed - centerRel + rotate(local) against a viewProj whose
+    // translation row has the camera folded in - precisely so the world-
+    // absolute magnitude never reaches an fp32 multiply. VSDlsMask meanwhile
+    // built centerSize + rotate(local) and multiplied that by the ABSOLUTE
+    // matrix. Same geometry, same matrix, different evaluation order, and at
+    // the ~7 km world coordinates this session runs at that is a sub-pixel
+    // disagreement - which is exactly the shape of what is left: a faint,
+    // partly dashed line that appears only where the two roundings happen to
+    // land on opposite sides of a pixel boundary.
+    //
+    // This is the whole reason centerRel exists (see its note at the CB), and
+    // the mask is the one consumer of that geometry that never adopted it. The
+    // rebase is done with the SAME two helpers the mesh fill uses rather than
+    // a second copy, so the two cannot drift (rule 1.5).
+    float khm_cam[3] = { 0.0f, 0.0f, 0.0f };
+    extract_camera_pos(reinterpret_cast<const float(*)[4]>(khm_view), khm_cam);
+    const bool khm_reb = kh_rebase_vp(khm_frm, khm_cam);
+
+    // THE FULL BRACKET, AND 26847 DID NOT HAVE IT - THAT WAS THE PULSE.
+    //
+    // This pass sets an input layout, a topology, five shader stages, a
+    // depth-stencil state, a blend state and a rasteriser, and 26847 saved only
+    // the render targets and the viewport. Worse, it runs BEFORE the world
+    // pass's own StateBackup capture, so that capture recorded OUR polluted
+    // pipeline as "the engine's" and faithfully restored it at the end of the
+    // frame - handing every engine draw after the resolve our mask shaders and
+    // our min-blend. The field saw it exactly as the 26834 alpha bug looked: an
+    // intermittent colour pulse across the frame.
+    //
+    // This is the failure the mask fire's own note records ("every engine
+    // VERTEX shader after the fire read our mesh cbd as its constants"), made
+    // twice in one campaign. A pass that changes pipeline state owes the
+    // restore, and StateBackup is what owes it here.
+    StateBackup khm_bk;
+    khm_bk.capture(khm_ctx);
+    KhOmSave khm_om;
+    khm_om.capture(khm_ctx);
+    UINT khm_nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    D3D11_VIEWPORT khm_ovp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    khm_ctx->RSGetViewports(&khm_nvp, khm_ovp);
+
+    // THE SENTINEL IS THE CLEAR. Every pixel starts further away than anything
+    // can be, so min-blending a caster in always wins and an untouched pixel
+    // reads as "no mesh" without a second channel to say so.
+    // Uploaded INSIDE the bracket: kh_upload_frame_cb discards and rewrites
+    // composite_frame_cb, and the bracket's restore puts the engine's binding
+    // back afterwards.
+    if (!kh_upload_frame_cb(khm_ctx, g_res.composite_frame_cb, khm_frm)) {
+        khm_om.restore(khm_ctx);
+        khm_om.release();
+        khm_bk.restore(khm_ctx);
+        return false;
+    }
+
+    const FLOAT khm_far4[4] = { 1.0e30f, 1.0e30f, 1.0e30f, 1.0e30f };
+    khm_ctx->OMSetRenderTargets(1, &g_res.dlsw_rtv, nullptr);
+    khm_ctx->ClearRenderTargetView(g_res.dlsw_rtv, khm_far4);
+    D3D11_VIEWPORT khm_vp2 = {};
+    khm_vp2.Width = static_cast<FLOAT>(khm_w);
+    khm_vp2.Height = static_cast<FLOAT>(khm_h);
+    khm_vp2.MaxDepth = 1.0f;
+    khm_ctx->RSSetViewports(1, &khm_vp2);
+
+    // B1 CARRIES viewProj, AND 26847 NEVER BOUND IT - THAT WAS THE EMPTY MASK.
+    //
+    // kh_upload_frame_cb uploads and deliberately does not bind (unlike
+    // kh_upload_obj_cb, which binds b0 itself). So VSDlsMask read whatever the
+    // engine had in b1, transformed every vertex by a foreign matrix, and put
+    // the geometry nowhere near the target - which is why mode 540 came back
+    // pure green: the world distance was fine and the mask channel was empty on
+    // every pixel.
+    // b0 AND b1 since 26878, like every other draw site: kh_upload_obj_cb
+    // re-binds b0 on the ring path but NOT on the legacy DISCARD path, so
+    // binding b1 alone left b0 to whatever the engine had there on a device
+    // without the ring.
+    ID3D11Buffer* khm_cbs[2] = { g_res.composite_cb, g_res.composite_frame_cb };
+    khm_ctx->VSSetConstantBuffers(0, 2, khm_cbs);
+    khm_ctx->PSSetConstantBuffers(0, 2, khm_cbs);
+    khm_ctx->IASetInputLayout(g_res.input_layout);
+    khm_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    khm_ctx->VSSetShader(g_res.vs_dls_mask, nullptr, 0);
+    khm_ctx->PSSetShader(g_res.ps_dls_mask, nullptr, 0);
+    khm_ctx->GSSetShader(nullptr, nullptr, 0);
+    khm_ctx->HSSetShader(nullptr, nullptr, 0);
+    khm_ctx->DSSetShader(nullptr, nullptr, 0);
+    khm_ctx->OMSetDepthStencilState(g_res.dss_off, 0);
+    const FLOAT khm_bf[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    khm_ctx->OMSetBlendState(g_res.dlsw_min_blend, khm_bf, 0xFFFFFFFF);
+    khm_ctx->RSSetState(g_res.rasterizer);
+
+    const UINT khm_stride = sizeof(MeshVertex), khm_off = 0;
+    int khm_bound = -1;
+    uint32_t khm_drawn = 0;
+    for (size_t khm_i = 0; khm_i < g_dlsw_casters.size(); ++khm_i) {
+        const KhDlswCaster& khm_c = g_dlsw_casters[khm_i];
+        // THE SIZE TEST IS NOT OPTIONAL, AND BOTH SIBLING CASTER LOOPS DO IT.
+        //
+        // khm_c.mesh comes from mesh_id_clamp, which bounds against the
+        // PUBLISHED REGISTRY (mesh_count) - not against mesh_vb. Those two are
+        // equal only while ensure_mesh_vbs keeps up, and it RETURNS EARLY on an
+        // empty mesh or a failed CreateBuffer, while flush_locked's publish
+        // block only REPORTS that error and carries on - after kh_mesh_publish
+        // has already raised the published count. So mesh_vb.size() <
+        // mesh_count() is a reachable state, and indexing on the registry id
+        // inside it is an out-of-bounds vector read handing a garbage pointer
+        // to IASetVertexBuffers.
+        //
+        // kh_mesh_publish's own note - that the top-up "lands in the same
+        // serialized window before any draw indexes the new id" - holds only
+        // when the top-up SUCCEEDS. It is a claim, not a guarantee (rule 1.73),
+        // and the two loops that already draw this same caster set (the
+        // KH_SVS_PRIME loop and the world-mesh path) both test the size first.
+        // This one was the odd one out (rule 1.91: an absent resource is
+        // REFUSED, not computed from).
+        if (khm_c.mesh < 0 ||
+            static_cast<size_t>(khm_c.mesh) >= g_res.mesh_vb.size() ||
+            !g_res.mesh_vb[khm_c.mesh]) continue;
+        ConstantData khm_obj = {};
+        // SQF [x, y, zASL] -> engine [x, zASL, y], the same swizzle every other
+        // consumer of a caster applies.
+        khm_obj.center_size[0] = khm_c.pos[0];
+        khm_obj.center_size[1] = khm_c.pos[2];
+        khm_obj.center_size[2] = khm_c.pos[1];
+        khm_obj.size_axes[0] = khm_c.size[0];
+        khm_obj.size_axes[1] = khm_c.size[2];
+        khm_obj.size_axes[2] = khm_c.size[1];
+        // ALWAYS THE ROTATION, NEVER NULL. kh_fill_obj_rot dereferences its
+        // argument unconditionally, and an unrotated caster carries an identity
+        // in rot[] anyway - the vmir prepass passes c.rot flat for the same
+        // reason. 26847's conditional would have dereferenced null the first
+        // time an unrotated mesh cast.
+        kh_fill_obj_rot(khm_obj, khm_c.rot);
+        // Armed only when the matrix above actually rebased: the two must never
+        // disagree, or the vertex would be camera-relative against an absolute
+        // matrix and the mask would land a whole camera vector away.
+        if (khm_reb) kh_fill_center_rel(khm_obj, khm_cam);
+        if (!kh_upload_obj_cb(khm_ctx, g_res.composite_cb, khm_obj)) break;
+        if (khm_c.mesh != khm_bound) {
+            khm_ctx->IASetVertexBuffers(0, 1, &g_res.mesh_vb[khm_c.mesh], &khm_stride, &khm_off);
+            khm_bound = khm_c.mesh;
+        }
+        // KH_DLSW_MASKLOD (26878). This drew "the FULL mesh, not the shadow
+        // LOD", on the ground that a decimated silhouette would leak the
+        // world's shading around the edges of the real one - and the real one
+        // is whatever the injection DREW, which is the level kh_lod_pick
+        // chose, not level 0. At any range where that level was not 0 the
+        // mask's silhouette was a different mesh from the one the engine
+        // rasterised - a registration error no matrix could close. Same pick,
+        // same inputs (the pass camera, the object's radius, its lock), and
+        // during a fade both levels are drawn as the injection draws them, so
+        // the mask covers their union. The shadow LOD is still not used here.
+        {
+            const MeshDef& khm_md = mesh_def(khm_c.mesh);
+            int   khm_lvl = 0;
+            float khm_lt = 0.0f;
+            if (!khm_c.lod_lock) {
+                kh_lod_pick(khm_md, kh_lod_radius_of(khm_c.size, khm_c.rot, khm_c.rotated),
+                            sqrtf(kh_mesh_dist_sq_of(khm_c.pos, khm_c.size, khm_c.rot, khm_c.rotated, khm_cam)),
+                            khm_lvl, khm_lt);
+            }
+            const int khm_iters = (khm_lt > 0.0f && g_dbg_mode.load(std::memory_order_relaxed) != 419) ? 2 : 1;
+            for (int khm_it = 0; khm_it < khm_iters; ++khm_it) {
+                UINT khm_ls = 0, khm_lc = 0;
+                mesh_lod_range(khm_md, mesh_lod_clamp(khm_md, khm_lvl + khm_it), khm_ls, khm_lc);
+                if (khm_lc == 0) continue;
+                khm_ctx->Draw(khm_lc, khm_ls);
+            }
+        }
+        khm_drawn++;
+    }
+
+    if (khm_nvp > 0) khm_ctx->RSSetViewports(khm_nvp, khm_ovp);
+    khm_om.restore(khm_ctx);
+    khm_om.release();
+    khm_bk.restore(khm_ctx);   // shaders, layout, blend, DSS, raster, CBs
+    g_dlsw_mask_draws += khm_drawn;
+    return khm_drawn > 0;
+}
+
+inline void kh_dls_world_pass_body(ID3D11DeviceContext* khw_ctx) {
+    const int khw_mode = g_dbg_mode.load(std::memory_order_relaxed);
+    // 533 stands stage 4 down; 514 stands the WHOLE dynamic-light shadow
+    // feature down and must take this with it, or the ownership test would
+    // leave the world still darkened by maps nobody is rendering.
+    if (khw_mode == KH_DLS_WORLD_OFF_MODE || khw_mode == 514) return;
+
+    // A light must actually hold a slot AND have a map, or there is nothing to
+    // subtract and the pass is a fullscreen multiply by 1.
+    if (g_dls_n == 0 || g_dls_map_valid == 0ull) { g_dls_world_no_slot++; return; }
+
+    if (!g_res.ps_dls_world || !g_res.vs_fullscreen || !g_res.rasterizer ||
+        !g_res.dss_off || !g_res.dls_world_blend || !g_res.composite_cb ||
+        !g_res.composite_frame_cb) {
+        g_dls_world_no_state++;
+        return;
+    }
+
+    ID3D11RenderTargetView* khw_rtv = nullptr;
+    khw_ctx->OMGetRenderTargets(1, &khw_rtv, nullptr);
+    if (!khw_rtv) { g_dls_world_no_rt++; return; }
+
+    // KH_DLSW_RTFMT (26876) - MEASURE THE TARGET. IT WAS ALWAYS IN OUR HAND.
+    //
+    // The task-3 ledger's third suggested step is "check the blend target
+    // format", called there the strongest untested candidate, and it has stayed
+    // untested through nine hypotheses while THIS POINTER sat in a local that
+    // was null-checked and dropped. One GetDesc answers it.
+    //
+    // The arithmetic that makes it worth a lane: this pass emits under
+    // dest.rgb *= src.rgb, so the factor is written to the target and rounded
+    // to the target's precision BEFORE the multiply. A factor that lives near
+    // 1.0 therefore steps by the target's own quantum. R8G8B8A8_UNORM steps by
+    // 1/255. R11G11B10_FLOAT carries a 6-bit mantissa near 1.0 and steps by
+    // 1/64, which would band a smooth gradient on its own and would band it
+    // WORST where the gradient is shallowest, i.e. up close. R16G16B16A16_FLOAT
+    // steps by about 1/2048 and largely exonerates the theory. Three different
+    // worlds, one enum, no shader edit and no risk - which is why this is
+    // measured in the same build as the fix rather than after it, so the next
+    // reader can tell which of the two changes did the work.
+    //
+    // RtIsScene is the second half and is not decoration. This pass draws into
+    // whatever RTV happens to be bound at the resolve and has never verified
+    // that it is the target the 26830-26833 probe validated. The probe proved a
+    // write HERE reaches the screen; it did not prove the binding is stable
+    // across every map, weather and post chain.
+    {
+        D3D11_RENDER_TARGET_VIEW_DESC khw_rd = {};
+        khw_rtv->GetDesc(&khw_rd);
+        g_dlsw_rt_fmt = static_cast<int>(khw_rd.Format);
+        g_dlsw_rt_dim = static_cast<int>(khw_rd.ViewDimension);
+        ID3D11Resource* khw_rres = nullptr;
+        khw_rtv->GetResource(&khw_rres);
+        if (khw_rres) {
+            // Weak identity only: compared, never dereferenced, and released
+            // immediately - the g_coldlock_cand_res discipline.
+            if (g_topo_scene_tex_id && static_cast<void*>(khw_rres) == g_topo_scene_tex_id) {
+                g_dlsw_rt_is_scene++;
+            } else {
+                g_dlsw_rt_not_scene++;
+            }
+            khw_rres->Release();
+        }
+    }
+    khw_rtv->Release();
+
+    // THE ENGINE'S OWN LINEAR DEPTH, AND NOTHING ELSE. 26834-26836 bound
+    // g_res.comp_depth_srv here and re-resolved it every frame, and that was
+    // the whole of the reconstruction failure: comp_depth_srv is OUR resolve of
+    // the raw depth-stencil buffer, so it carries 0..1 device depth, while
+    // KhCastZl and KhCastWorld are written for METRES - KhCastWorld scales a
+    // view ray by zl directly, and PSMaskCast's own near test reads zl > 1.2f.
+    // Feeding them a 0..1 value collapses every pixel onto the camera, which is
+    // exactly the ungridded smooth ramp mode 531 kept showing and the red
+    // (order-1) verdict mode 535 returned.
+    //
+    // g_mask.cast_depth is the texture the shipping cast actually uses: the
+    // ENGINE'S live resolved LINEAR depth, adopted by identity at the resolve
+    // sweep and validated there as a screen-sized single-channel float. Its
+    // dims pair with it (g_mask.cast_dims) and so does the fov (cast_fov), so
+    // all three inputs now come from one source instead of three.
+    //
+    // No snapshot, no resolve, no extra fullscreen pass: the engine has already
+    // produced this and the cast has read it for hundreds of builds.
+    if (!g_mask.cast_depth || g_mask.cast_dims[0] < 2.0f || g_mask.cast_dims[1] < 2.0f) {
+        g_dls_world_no_depth++;
+        return;
+    }
+
+    // ---- constants -------------------------------------------------------
+    ConstantData khw_obj = {};
+    ConstantData khw_frm = {};
+
+    // The engine's dynamic-light pool, in the same lanes DynLights reads.
+    // fill_dynlights_cb is the mesh path's filler and needs a RenderObject; the
+    // pool merge it depends on is already published for this frame, so the
+    // lanes are copied from the last mesh fill's source rather than re-derived
+    // - one source, and the world cannot disagree with the meshes about which
+    // lights exist or which of them cast.
+    kh_dls_fill_dl_world(khw_obj);
+    kh_dls_fill_cb(khw_frm);   // dls_meta / dls_ctl / dls_face_slice / dls_spot_vp
+
+    // Engine sun + sky, for KhDlsWorldFactor's denominator only.
+    if (g_pub_block_valid) {
+        khw_obj.lighting2[0] = g_pub_block_sun[0];
+        khw_obj.lighting2[1] = g_pub_block_sun[1];
+        khw_obj.lighting2[2] = g_pub_block_sun[2];
+        khw_obj.light_amb[0] = g_pub_block_amb[0];
+        khw_obj.light_amb[1] = g_pub_block_amb[1];
+        khw_obj.light_amb[2] = g_pub_block_amb[2];
+    }
+    khw_obj.lighting0[2] = 1.0f;   // ambient scale: the world's own, not an object's
+    khw_obj.lighting0[3] = 1.0f;   // sun intensity
+    khw_obj.lighting1[0] = g_sun_dir_engine[0];
+    khw_obj.lighting1[1] = g_sun_dir_engine[1];
+    khw_obj.lighting1[2] = g_sun_dir_engine[2];
+    khw_obj.dbg_ctl[2] = 1.0f;                              // the pass's arm
+    khw_obj.dbg_ctl[3] = static_cast<float>(khw_mode);      // debug views
+
+    // KH_DLS_WORLD_SELFMASK (26838) - DO NOT PAINT ON OUR OWN MESHES.
+    //
+    // The engine's linear depth does not contain our injected geometry, so at a
+    // pixel covered by one of our meshes the reconstruction returns the WORLD
+    // BEHIND IT - and the shadow computed for that world point was then painted
+    // over the mesh itself. The field saw it as the vest's own shadow smeared
+    // across its lower half, projected as though it lay on the ground behind.
+    //
+    // The mask for this already exists and is already consumed elsewhere:
+    // khMirSten at t28, our meshes' stencil, read through KhMirUnit. Reusing it
+    // means the world pass and the translucency path agree about which pixels
+    // are ours by construction rather than by two separate definitions.
+    //
+    // Our meshes are not left unlit by this - they take their dynamic-light
+    // shadows from KhDlsShadow in the mesh kernels (stage 3), which is the
+    // correct term for a surface we actually drew. This pass is world receive
+    // and the world is what it should touch.
+    // ARMED ONLY UNDER MODE 538 NOW (26840). 26838 shipped this on by default
+    // and the field measured it doing NOTHING: dlsWorldSelfMask read 239 of 239
+    // frames, and mode 538 - which disarms the shader-side test - was
+    // indistinguishable from default. A mask that is armed every frame and
+    // changes no pixel is reporting "not ours" everywhere, so it is dead weight
+    // in the shipping path, and dead weight added in the same build as a
+    // reported regression is the first thing to take back out. Default is now
+    // exactly the 26837 configuration, which the field confirmed working.
+    //
+    // The likely reason it is inert: khMirSten's SRV is X24_TYPELESS_G8_UINT,
+    // so KhMirUnit reads the STENCIL plane, while the vmir prepass draws our
+    // meshes depth-only with a null pixel shader and vmirDssRef reads 0. Mode
+    // 539 paints the mask and settles that outright.
+    // KH_DLSW_MASK (26847): OUR OWN mask, rendered here, in metres. The vmir
+    // mirror is no longer consulted - its depth plane is another feature's
+    // conditional convention and three builds proved it unusable from here.
+    // Mode 538 stands the mask down, which is the A/B and brings the smear
+    // back.
+    // *** THE 26850 HOIST BELOW WAS REVERSED AT 26876. READ BOTH. ***
+    //
+    // 26850 wrote: "ONE VIEW AND ONE FOV, CHOSEN ONCE, FOR BOTH CONSUMERS",
+    // arguing that the mask projects WORLD -> PIXEL, the reconstruction maps
+    // PIXEL -> WORLD, and being inverse directions of one map they must share a
+    // view and an fov or they cannot land on the same pixel. It then made the
+    // reconstruction the reference and had the mask follow it, and gated the
+    // mask on khw_frozen so it could never be drawn in a frame the
+    // reconstruction was not using.
+    //
+    // The premise is sound and the conclusion does not follow, which is why it
+    // survived a full campaign. They ARE inverse directions of one map - but
+    // they are not asking about the same THING, and the map they each need
+    // belongs to the thing:
+    //
+    //   the reconstruction consumes the engine's LINEAR DEPTH, which at our
+    //   hook is frame N-1 (measured, 26838: frozen showed no drift, live did).
+    //   Its map is view(N-1). Unchanged - that measurement stands and the
+    //   fov preference it fixed stands with it.
+    //
+    //   the mask consumes nothing of ours at all. It asks which pixels of the
+    //   COLOUR TARGET we are about to multiply are already covered by our mesh,
+    //   and that target is frame N, rasterised by the engine with view(N) and
+    //   the engine's own projection. Its map is view(N).
+    //
+    // Tying the mask to the reconstruction's frame therefore did not align it
+    // with anything - it aligned it with the wrong picture, and 26850's own
+    // closing line ("the cost of a misregistered mask is a wrong verdict that
+    // looks like a shadow bug somewhere else") turned out to be a description
+    // of what the hoist itself was doing.
+    //
+    // The gate on khw_frozen goes with it: the mask no longer needs the freeze
+    // to have produced a usable inverse, because it no longer borrows the
+    // freeze's frame. It is now available on every fire, including mode 537.
+    // Rule 1.91 is still honoured - a mask that cannot be built is refused,
+    // counted at dlswMaskFail, and the cost of refusing is still the smear.
+    // THE PROJECTION-VIEW PAIR IS FETCHED HERE, ABOVE THE MASK, AND NOT BELOW
+    // IT. The mask needs the engine's own matrices (KH_DLSW_MASKREG), so the
+    // fetch has to precede it; and its failure is a refusal for the WHOLE pass,
+    // so refusing before the mask has drawn is also the cheaper order. The
+    // early return moved with it - previously the mask had already rendered by
+    // the time the fetch could fail, which spent a full caster pass on a frame
+    // that was about to stand down.
+    RVExtBridge::ProjectionViewTransform khw_pv = {};
+    bool khw_pv_ok = RVExtBridge::get_projection_view_transform(khw_pv);
+    if (!khw_pv_ok && g_ro.cycle_pv_valid) { khw_pv = g_ro.cycle_pv; khw_pv_ok = true; }
+    if (!khw_pv_ok) { g_dls_world_upload_fails++; return; }
+
+    const bool khw_live = (khw_mode == 537);
+    const bool khw_frozen = !khw_live && g_fire_lock_valid &&
+                            g_fire_cast_inv_valid;
+    float khw_fov[2] = { 0.0f, 0.0f };
+    bool  khw_fov_ok = false;
+    if (khw_frozen && g_fire_fov2[0] > 1.0e-6f && g_fire_fov2[1] > 1.0e-6f) {
+        khw_fov[0] = g_fire_fov2[0];
+        khw_fov[1] = g_fire_fov2[1];
+        khw_fov_ok = true;
+    } else if (g_mask.cast_fov_valid && g_mask.cast_fov[0] > 1.0e-6f &&
+               g_mask.cast_fov[1] > 1.0e-6f) {
+        khw_fov[0] = g_mask.cast_fov[0];
+        khw_fov[1] = g_mask.cast_fov[1];
+        khw_fov_ok = true;
+    }
+
+    // KH_DLSW_MASKREG (26876) - THE MASK REGISTERS WITH THE FRAMEBUFFER, NOT
+    // WITH THE RECONSTRUCTION. THIS IS THE WHITE RIM.
+    //
+    // The block above hoisted one view and one fov "for both consumers", on the
+    // stated ground that the mask and the reconstruction are inverse directions
+    // of the same map and so must share inputs. That is true of the MAP and
+    // false of the JOB, and the difference is the artifact:
+    //
+    //   the RECONSTRUCTION turns a depth texel into a world point. The depth is
+    //   the engine's linear depth, which at our hook is frame N-1 (the field
+    //   measured this at 26838: frozen showed no drift, live did). It needs
+    //   view(N-1). Unchanged below - that measurement stands.
+    //
+    //   the MASK answers "did the engine draw our mesh at this pixel". That is
+    //   a question about the COLOUR TARGET we are about to multiply, which is
+    //   frame N, rasterised with view(N) and the engine's own projection. It
+    //   needs view(N).
+    //
+    // Handing the mask view(N-1) displaces it from the mesh the engine actually
+    // drew by one frame of camera motion, and handing it a projection rebuilt
+    // from the fov pair displaces it again by whatever that reconstruction is
+    // not. Both displace the mask OUTWARD on one side, and an outward mask
+    // REFUSES pixels that are really world: those pixels keep their unshadowed
+    // brightness while the shadow around them is darkened, which is a bright
+    // line hugging the silhouette, dashed wherever the error is sub-pixel and
+    // only crosses a pixel boundary intermittently. That is task 2 exactly,
+    // including the dashes and the stair-steps.
+    //
+    // The fov census is why this went unseen: dlswFovRatio 1.000 was read as
+    // exoneration, but its mismatch bar is ONE PERCENT, and one percent of a
+    // 1920 px half-width is NINETEEN PIXELS. A gate that cannot resolve a
+    // pixel cannot clear a one-pixel artifact (rule 1.98, the campaign's own
+    // most load-bearing rule, applied to the instrument this time).
+    //
+    // Mode 555 reverts to the frozen view and the derived projection.
+    khw_frm.mir_meta[0] = 0.0f;
+    if (khw_mode != 538) {
+        const bool khw_mask_rev = (khw_mode == 555);
+        float khw_mv[16] = {};
+        float khw_mp[16] = {};
+        bool  khw_mok = false;
+
+        if (khw_mask_rev) {
+            // The 26875 pair, verbatim, for the A/B.
+            if (khw_frozen && khw_fov_ok) {
+                memcpy(khw_mv, g_fire_view2, sizeof(khw_mv));
+                const float khw_mn = 0.05f, khw_mf = 5000.0f;
+                khw_mp[0]  = 1.0f / khw_fov[0];
+                khw_mp[5]  = 1.0f / khw_fov[1];
+                khw_mp[10] = khw_mf / (khw_mf - khw_mn);
+                khw_mp[11] = 1.0f;
+                khw_mp[14] = -khw_mn * khw_mf / (khw_mf - khw_mn);
+                khw_mok = true;
+                g_dlsw_mask_frozen++;
+            }
+        } else {
+            // The matrices the engine drew this frame with. No freeze gate:
+            // the mask no longer depends on the freeze having produced a usable
+            // inverse, because it no longer borrows the reconstruction's frame.
+            memcpy(khw_mv, &khw_pv.view[0][0], sizeof(khw_mv));
+            memcpy(khw_mp, &khw_pv.projection[0][0], sizeof(khw_mp));
+            khw_mok = true;
+            g_dlsw_mask_live++;
+        }
+
+        if (khw_mok &&
+            kh_dlsw_mask_render(khw_ctx, khw_mv, khw_mp,
+                                static_cast<UINT>(g_mask.cast_dims[0]),
+                                static_cast<UINT>(g_mask.cast_dims[1]))) {
+            khw_frm.mir_meta[0] = 1.0f;
+            khw_frm.mir_meta[1] = static_cast<float>(g_res.dlsw_w);
+            khw_frm.mir_meta[2] = static_cast<float>(g_res.dlsw_h);
+            g_dls_world_selfmask++;
+            g_dlsw_mask_ok++;
+        } else {
+            g_dls_world_selfmask_miss++;
+            g_dlsw_mask_fail++;
+        }
+    } else {
+        g_dls_world_selfmask_miss++;
+    }
+
+    // ---- this frame's view, in the lanes KhCastZl / KhCastWorld read -------
+    // castView[1].xy is the fov scale, .zw the screen dims; castMat is the
+    // INVERSE rotation; castView[0].xyz the view translation row; and
+    // castView[2].xyz the camera, for the normal's facing test.
+    {
+        float khw_cam[3] = { 0.0f, 0.0f, 0.0f };
+        // khw_pv is resolved above the mask now; this block only consumes it.
+        extract_camera_pos(khw_pv.view, khw_cam);
+
+        // KH_DLS_WORLD_FROZEN (26838) - THE FROZEN VIEW IS THE CORRECT PARTNER,
+        // AND THE FIELD SAID SO.
+        //
+        // 26837 shipped this the other way round and asked the question as an
+        // A/B, because g_mask.cast_depth is the engine's LIVE resolved depth
+        // and our hook fires ~1870 draws after draw 0, so this frame's view
+        // LOOKED like the right partner. It is not: the field reported visible
+        // drift under camera motion at mode 0 and NO drift under 537. The
+        // engine's linear depth is therefore still the frame the cast froze
+        // against by the time we reach the resolve, and pairing it with a newer
+        // view is the 26792 drift class exactly - reconstructed points off by
+        // distance x the rotation between frames, only while turning.
+        //
+        // So the frozen view is now the default and mode 537 keeps the live one
+        // as the revert, which is the honest way round: the shipping value is
+        // the measured one and the A/B still exists to re-measure it. This also
+        // restores full parity with PSMaskCast, which reconstructs through
+        // exactly these four inputs.
+        //
+        // The lag this inherits is real and is the sun cast's own: it is a
+        // frame behind under motion. The reprojection that answers it
+        // (KH_CAST_REPROJ) is available and NOT taken here yet - one thing at a
+        // time, and the drift it would correct is currently invisible.
+        //
+        // khw_live / khw_frozen are decided ABOVE the mask now, not here - the
+        // mask has to know which frame it is drawing into before it draws.
+        if (khw_frozen) g_dls_world_frozen++;
+
+        for (int khw_r = 0; khw_r < 3; ++khw_r) {
+            khw_frm.cast_view[0][khw_r] = khw_frozen ? g_fire_view2[12 + khw_r]
+                                                     : khw_pv.view[3][khw_r];
+            if (khw_frozen) {
+                // The cast's own inverse, cofactor-derived in double and
+                // laid out for KhCastWorld's row dots.
+                khw_frm.cast_mat[khw_r][0] = g_fire_cast_inv[khw_r * 3 + 0];
+                khw_frm.cast_mat[khw_r][1] = g_fire_cast_inv[khw_r * 3 + 1];
+                khw_frm.cast_mat[khw_r][2] = g_fire_cast_inv[khw_r * 3 + 2];
+            } else {
+                // Inverse rotation of a row-vector orthonormal view is its
+                // transpose, which is what KhCastWorld's three dots expect -
+                // the same value the cofactor solve returns for an orthonormal
+                // R, and the cast's ortho-defect lane says it is one.
+                khw_frm.cast_mat[khw_r][0] = khw_pv.view[khw_r][0];
+                khw_frm.cast_mat[khw_r][1] = khw_pv.view[khw_r][1];
+                khw_frm.cast_mat[khw_r][2] = khw_pv.view[khw_r][2];
+            }
+            khw_frm.cast_mat[khw_r][3] = 0.0f;   // KH_CAST_OCC lane hygiene (26793)
+        }
+        khw_frm.cast_view[0][3] = 1.0f;
+        // THE FOV SCALE COMES FROM THE ENGINE WHEN WE HAVE IT. KhCastWorld
+        // multiplies NDC x by castView[1].x, so this lane is tan(fovX/2), and
+        // the shipping cast reads it from the engine's own constant block
+        // (g_mask.cast_fov, the floats at 176/177) rather than deriving it.
+        // Prefer that same source: it is the value the reconstruction has been
+        // validated against in the field, and a projection-derived equivalent
+        // is only equal for a textbook perspective matrix. The derivation is
+        // the fallback for a cold frame where the block has not been seen yet,
+        // and 1.0 behind that so the pass degrades to a wrong scale rather
+        // than a divide by zero.
+        // Both branches of that preference are resolved ONCE above, into
+        // khw_fov / khw_fov_ok, because the mask consumes the same pair. The
+        // lane split is unchanged: a chosen fov counts as fovEngine, the
+        // 1/projection fallback as fovDerived.
+        if (khw_fov_ok) {
+            khw_frm.cast_view[1][0] = khw_fov[0];
+            khw_frm.cast_view[1][1] = khw_fov[1];
+            g_dls_world_fov_engine++;
+        } else {
+            g_dls_world_fov_derived++;
+            khw_frm.cast_view[1][0] = (khw_pv.projection[0][0] != 0.0f)
+                                    ? 1.0f / khw_pv.projection[0][0] : 1.0f;
+            khw_frm.cast_view[1][1] = (khw_pv.projection[1][1] != 0.0f)
+                                    ? 1.0f / khw_pv.projection[1][1] : 1.0f;
+        }
+        khw_frm.cast_view[1][2] = g_mask.cast_dims[0];   // pairs with cast_depth
+        khw_frm.cast_view[1][3] = g_mask.cast_dims[1];
+        // The camera the normal's facing test uses must come from the SAME
+        // view the reconstruction did, or the two disagree about which way is
+        // toward the eye. Derived by the reconstruction's own algebra rather
+        // than taken from elsewhere: with zl = 0, KhCastWorld reduces to
+        // (-translation) dotted through the inverse rotation, which is the
+        // camera in world space.
+        if (khw_frozen) {
+            for (int khw_r = 0; khw_r < 3; ++khw_r) {
+                khw_cam[khw_r] = -(khw_frm.cast_view[0][0] * khw_frm.cast_mat[khw_r][0] +
+                                   khw_frm.cast_view[0][1] * khw_frm.cast_mat[khw_r][1] +
+                                   khw_frm.cast_view[0][2] * khw_frm.cast_mat[khw_r][2]);
+            }
+        }
+        khw_frm.cast_view[2][0] = khw_cam[0];
+        khw_frm.cast_view[2][1] = khw_cam[1];
+        khw_frm.cast_view[2][2] = khw_cam[2];
+        // KH_DLS_WORLD_INFRONT (26842): the two projection terms that invert
+        // the mirror target's device depth back to a view distance
+        // (z = B / (device - A)), so the self-mask can ask whether our mesh is
+        // IN FRONT of the world surface rather than merely projecting onto it.
+        // Taken from the LIVE projection either way: the mirror prepass renders
+        // under the scene's own projection, and the frozen view differs from it
+        // in rotation and translation, not in the depth terms.
+        // castViewN, cast_view[2].w and mir_meta.w carried the mirror's matrix
+        // and depth terms between 26843 and 26845. KH_DLSW_MASK renders its own
+        // target in metres, so none of them is needed and all three are left at
+        // their zeroed default.
+
+        {   // KH_DLSW_VIEWPORT (26861): read-only, changes nothing.
+            UINT khw_nvp = 1;
+            D3D11_VIEWPORT khw_vp = {};
+            khw_ctx->RSGetViewports(&khw_nvp, &khw_vp);
+
+            if (khw_nvp > 0 && khw_vp.Width > 0.0f) {
+                g_dlsw_vp[0] = khw_vp.Width;
+                g_dlsw_vp[1] = khw_vp.Height;
+
+                if (fabsf(khw_vp.Width - g_mask.cast_dims[0]) > 0.5f ||
+                    fabsf(khw_vp.Height - g_mask.cast_dims[1]) > 0.5f) {
+                    g_dlsw_vp_mismatch++;
+                } else {
+                    g_dlsw_vp_agree++;
+                }
+            }
+        }
+
+        // KH_DLSW_FOVCHECK (26858) - THE ONE SHARED INPUT NOBODY HAS CHECKED.
+        //
+        // castView[1].xy is the fov scale. AS OF 26876 IT HAS ONLY ONE CONSUMER:
+        // KhCastWorld builds the view ray with it, so a wrong value warps the
+        // reconstructed ground into a cone. The mask is no longer the second -
+        // it takes the engine's own projection now (KH_DLSW_MASKREG), which is
+        // precisely the displacement this census was built to detect and could
+        // not resolve. The check is kept because the reconstruction still
+        // depends on the lane, and because a divergence here is now a clean
+        // statement about the engine's constant block alone rather than a
+        // shared symptom.
+        //
+        // 26858 WROTE "ONE CAUSE, ALL THREE OPEN ARTEFACTS" HERE. Half right,
+        // and worth keeping as a record of how a good instrument can still be
+        // read wrong. The white rim and the background bleeding through ARE the
+        // two edges of a displaced mask, and 26876 removes that displacement at
+        // its source instead of measuring it. The ground banding is NOT a
+        // warped reconstruction: mode 531 shows the reconstruction welded and
+        // correct, and the rings are the NORMAL derived from it collapsing
+        // inside the depth's quantisation plateaus (KH_DLSW_BANDING, hypothesis
+        // ten). Two causes, three artefacts.
+        //
+        // The "STATIC error" observation stands and still matters: the artefact
+        // does not go away when the camera stops, which is what refuted the
+        // frozen-view theory then and is also why the rim cannot be a frame of
+        // camera motion alone. A sub-pixel projection difference is static, and
+        // it is dashed rather than continuous because it only crosses a pixel
+        // boundary in places - which is the shape the field reported.
+        //
+        // The value comes from the engine's constant block (f[176]/f[177],
+        // adopted at the resolve sweep). The engine's ACTUAL projection sits
+        // right here in khw_pv and is already used by the derived fallback
+        // above; the two have simply never been compared. So compare them every
+        // frame and change nothing. Ratio 1 exonerates the fov and all three
+        // artefacts need another explanation; anything else names it.
+        {
+            const float khw_dvx = (khw_pv.projection[0][0] != 0.0f)
+                                ? 1.0f / khw_pv.projection[0][0] : 0.0f;
+            const float khw_dvy = (khw_pv.projection[1][1] != 0.0f)
+                                ? 1.0f / khw_pv.projection[1][1] : 0.0f;
+            g_dlsw_fov_chosen[0] = khw_frm.cast_view[1][0];
+            g_dlsw_fov_chosen[1] = khw_frm.cast_view[1][1];
+            g_dlsw_fov_derived[0] = khw_dvx;
+            g_dlsw_fov_derived[1] = khw_dvy;
+            g_dlsw_fov_ratio[0] = (khw_dvx > 1.0e-6f)
+                                ? khw_frm.cast_view[1][0] / khw_dvx : -1.0f;
+            g_dlsw_fov_ratio[1] = (khw_dvy > 1.0e-6f)
+                                ? khw_frm.cast_view[1][1] / khw_dvy : -1.0f;
+
+            // A THRESHOLD MUST BE ABLE TO RESOLVE THE QUANTITY IT TESTS (rule
+            // 1.98). This gate was built to catch a fov error that displaces
+            // the mask, and it judged a RATIO against 1%. One percent of a
+            // 1920 px half-width is 19 PIXELS, so dlswFovRatio 1.000 and
+            // dlswFovAgree at full count were consistent with a mask displaced
+            // by nineteen pixels - and were read all campaign as exonerating
+            // the fov for a ONE PIXEL rim. The bar could not resolve the
+            // artifact by three orders of magnitude.
+            //
+            // Priced in pixels at the frame edge instead, where the error is
+            // largest and where the rim was reported, and set at a fifth of a
+            // pixel: below that the two projections cannot disagree about which
+            // pixel a silhouette falls in. The lane is published either way, so
+            // the number is readable rather than just the verdict.
+            const float khw_hw = 0.5f * ((g_mask.cast_dims[0] > 1.0f) ? g_mask.cast_dims[0] : 1.0f);
+            const float khw_hh = 0.5f * ((g_mask.cast_dims[1] > 1.0f) ? g_mask.cast_dims[1] : 1.0f);
+            g_dlsw_fov_px[0] = (g_dlsw_fov_ratio[0] > 0.0f)
+                             ? fabsf(g_dlsw_fov_ratio[0] - 1.0f) * khw_hw : -1.0f;
+            g_dlsw_fov_px[1] = (g_dlsw_fov_ratio[1] > 0.0f)
+                             ? fabsf(g_dlsw_fov_ratio[1] - 1.0f) * khw_hh : -1.0f;
+            if (g_dlsw_fov_px[0] > 0.2f || g_dlsw_fov_px[1] > 0.2f) {
+                g_dlsw_fov_mismatch++;
+            } else {
+                g_dlsw_fov_agree++;
+            }
+        }
+
+        g_dls_world_fov[0] = khw_frm.cast_view[1][0];
+        g_dls_world_fov[1] = khw_frm.cast_view[1][1];
+        g_dls_world_dims[0] = khw_frm.cast_view[1][2];
+        g_dls_world_dims[1] = khw_frm.cast_view[1][3];
+        g_dls_world_cam[0] = khw_cam[0];
+        g_dls_world_cam[1] = khw_cam[1];
+        g_dls_world_cam[2] = khw_cam[2];
+    }
+
+    // ---- draw -------------------------------------------------------------
+    // CAPTURE BEFORE THE UPLOADS, not after: kh_upload_obj_cb BINDS b0 as part
+    // of uploading, so a capture taken afterwards would save our own binding
+    // as the engine's and restore it at the end - leaving the engine's vertex
+    // shaders reading our constants for the rest of the frame. That is the
+    // exact failure recorded at the mask fire's manual save ("every engine
+    // VERTEX shader after the fire read our mesh cbd as its constants - the
+    // last-fired mesh's COLOR tinted all particles").
+    // KH_DLS_RANGE (26879): the fade measures from the camera THIS pass
+    // reconstructs against (frozen or live, whichever cast_view[2] carries),
+    // not the cycle's - one camera per pass, as the sun's mask cast has.
+    if (khw_frm.dls_range[3] > 0.0f) {
+        khw_frm.dls_range[0] = khw_frm.cast_view[2][0];
+        khw_frm.dls_range[1] = khw_frm.cast_view[2][1];
+        khw_frm.dls_range[2] = khw_frm.cast_view[2][2];
+    }
+
+    StateBackup khw_bk;
+    khw_bk.capture(khw_ctx);
+
+    // B0 AND B1 BOUND AS (0, 2), BEFORE THE UPLOADS - the order every other
+    // site uses (26879). The 26834 bug was a plain b0 bind AFTER the upload:
+    // on a ring device kh_upload_obj_cb binds a 256-byte-aligned SLICE of
+    // cb_ring[1] through VS/PSSetConstantBuffers1, and re-binding
+    // composite_cb at offset zero afterwards pointed the shader at a buffer
+    // the frame's data was never written into (dbgCtl.z 0, the pass returned
+    // 1.0 everywhere, dlsWorldFires 551 of 551). 26835 answered by binding
+    // ONLY b1 - and its note claimed the legacy route 'binds it plainly'. It
+    // does not: kh_upload_obj_cb's legacy path binds b0 only when the ring is
+    // SUPPORTED and the map failed; on a device without the 11.1 ring
+    // (g_cbr_supported false) it never binds, so b0 was the engine's here and
+    // the pass was the same silent white it was at 26834, on the other class
+    // of machine. The mask render received the (0, 2) fix at 26878; this pass
+    // did not. Binding first and uploading second is correct on both routes:
+    // the ring path then re-binds its slice over this, the legacy path relies
+    // on it. StateBackup saved both slots offset-aware and restores both.
+    ID3D11Buffer* khw_cbs[2] = { g_res.composite_cb, g_res.composite_frame_cb };
+    khw_ctx->VSSetConstantBuffers(0, 2, khw_cbs);
+    khw_ctx->PSSetConstantBuffers(0, 2, khw_cbs);
+    if (!kh_upload_obj_cb(khw_ctx, g_res.composite_cb, khw_obj) ||
+        !kh_upload_frame_cb(khw_ctx, g_res.composite_frame_cb, khw_frm)) {
+        g_dls_world_upload_fails++;
+        khw_bk.restore(khw_ctx);   // the bracket is open: close it
+        return;
+    }
+
+    khw_ctx->PSSetShaderResources(0, 1, &g_mask.cast_depth);   // engine linear depth
+    if (g_res.dls_srv) khw_ctx->PSSetShaderResources(36, 1, &g_res.dls_srv);
+    if (khw_frm.mir_meta[0] >= 0.5f && g_res.dlsw_srv) {
+        khw_ctx->PSSetShaderResources(37, 1, &g_res.dlsw_srv);   // KH_DLSW_MASK, metres
+    }
+    khw_ctx->IASetInputLayout(nullptr);
+    khw_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    khw_ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
+    khw_ctx->PSSetShader(g_res.ps_dls_world, nullptr, 0);
+    khw_ctx->GSSetShader(nullptr, nullptr, 0);
+    khw_ctx->HSSetShader(nullptr, nullptr, 0);
+    khw_ctx->DSSetShader(nullptr, nullptr, 0);
+    khw_ctx->OMSetDepthStencilState(g_res.dss_off, 0);
+    // dest * src, with a unit blend factor: unlike the probe, the FACTOR here
+    // is the pixel shader's output, so SRC_COLOR is the multiplier and the
+    // blend factor must not participate.
+    const FLOAT khw_bf[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    khw_ctx->OMSetBlendState(g_res.dls_world_blend, khw_bf, 0xFFFFFFFF);
+    khw_ctx->RSSetState(g_res.rasterizer);
+    khw_ctx->Draw(3, 0);
+
+    // t0 held the depth SRV; the engine rebinds that resource as a DSV
+    // immediately after the resolve, and a lingering SRV over it would be
+    // force-nulled with a debug-layer warning storm. The full-table restore
+    // below covers it, but the null is explicit for the same reason
+    // snapshot_composite_depth does it explicitly.
+    // t36 is inside StateBackup's saved range since 26878 (ps_srvs[37]); it
+    // was outside it for six builds and was nulled here for that reason. The
+    // null stays, like t0's and t28's, so the pass leaves no shader resource
+    // of ours bound anywhere. t37 is still past the range and owes its null.
+    ID3D11ShaderResourceView* khw_null = nullptr;
+    khw_ctx->PSSetShaderResources(0, 1, &khw_null);
+    khw_ctx->PSSetShaderResources(37, 1, &khw_null);   // outside StateBackup's t0..t36 (rule 1.101)
+    khw_ctx->PSSetShaderResources(36, 1, &khw_null);   // inside it since 26878; explicit like t0 and t28
+    khw_bk.restore(khw_ctx);
+    g_dls_world_fires++;
+}
+
+// KH_DLSW_OWNDRAW (26878). Every other render-thread self pass sets
+// g_ro.in_injection around its draws; this one did not, so the mask's
+// OMSetRenderTargets / blend / depth-state sets and its per-caster Draws, plus
+// the fullscreen Draw(3), flowed through the hooks as ENGINE draws -
+// mask_cast_engine, shadow_note_draw, mask_note_draw, the topology census,
+// the dynamic-light sampler, and on a cycle the injection skipped, the opaque
+// census itself. The state restores self-healed the flags; the censuses did
+// not. The resolve hook evaluates !g_ro.in_injection before it calls here, so
+// the flag is raised inside, not around the call.
+inline void kh_dls_world_pass(ID3D11DeviceContext* khw_ctx) {
+    if (!khw_ctx) return;
+    const bool khw_pinj = g_ro.in_injection;
+    g_ro.in_injection = true;
+    kh_dls_world_pass_body(khw_ctx);
+    g_ro.in_injection = khw_pinj;
+}
+
+// KH_DLS_PROBE_ATRESOLVE (26833) MADE THIS HOOK ACTIVE UNDER MODE 529 ONLY.
+// The note below is still true at every other mode, and deliberately so: this
+// remains census-only unless the probe mode is set. What changed is that the
+// resolve turned out to be the UPPER WALL of the only window in the frame where
+// a write into the scene target still reaches the screen (see
+// KH_DLS_PROBE_ATRESOLVE), so it is the one event worth firing on - and firing
+// on the event rather than on a draw count is what removes the flicker.
+//
 // This hook is census-only: it stamps the resolve draw indices when armed and
 // passes the resolve through - it never composites. RESOLVE-POINT
 // SCENE-TEXTURE CENSUS (tail composite RETIRED/PARKED).
@@ -36119,7 +41437,46 @@ static void STDMETHODCALLTYPE hooked_resolvesubresource(ID3D11DeviceContext* sel
             if (g_topo.d_resolve_first == 0) g_topo.d_resolve_first = g_topo.draws;
             g_topo.d_resolve_last = g_topo.draws;
         }
+        // KH_DLSW_RTFMT (26876): the resolve's own format argument, which has
+        // been a parameter of this hook since it was written and has never been
+        // read. It names the scene texture's format independently of whatever
+        // RTV is bound, so the two lanes corroborate each other - and a
+        // disagreement between them is itself the finding.
+        g_dlsw_resolve_fmt = static_cast<int>(fmt);
 
+        // KH_DLS_PROBE_ATRESOLVE (mode 529): paint immediately BEFORE the
+        // resolve passes through, which is the last moment this frame that a
+        // write into the scene target can still reach the presented image.
+        //
+        // ONCE PER CYCLE. d_resolve_first and d_resolve_last read equal in
+        // every field dump so far, i.e. one resolve per cycle - but "so far" is
+        // not a guarantee, and a second resolve would paint a second multiply
+        // over the first and darken the frame quadratically. The guard makes
+        // that impossible rather than unlikely (the 240x lesson at
+        // g_mask_cast_fired, which is exactly this mistake made once already).
+        //
+        // NOT gated on g_stats_armed, unlike the census above: the ordinal
+        // policies need the topology counter and this one does not, so the
+        // instrument works whether or not diagnostics are armed. The lanes
+        // still need a dump to read, but the PICTURE - which is the actual
+        // result here - does not.
+        if (g_dbg_mode.load(std::memory_order_relaxed) == 529) {
+            g_dls_probe_resolve_seen++;
+            if (g_dls_probe_resolve_cycle != g_topo_cycles) {
+                g_dls_probe_resolve_cycle = g_topo_cycles;
+                g_dls_probe_resolve_fires++;
+                kh_dls_probe_fire(self, -1);
+            }
+        } else if (g_dls_world_cycle != g_topo_cycles) {
+            // KH_DLS_WORLD (26834) - STAGE 4, THE SHIPPING PASS. Same moment
+            // the 529 probe proved, same once-per-cycle guard and for the same
+            // reason: a second resolve would stack a second multiply and
+            // darken the frame quadratically. 529 takes precedence so the
+            // instrument and the feature can never both paint in one frame and
+            // be mistaken for each other.
+            g_dls_world_cycle = g_topo_cycles;
+            kh_dls_world_pass(self);
+        }
     }
 
     kh_dcopy_note(src);   // KH_DEPTH_COPY_CENSUS
@@ -37646,7 +43003,11 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // the pass saves/restores its own RT + viewport state, and
     // g_sun_map_rendered_frame makes this a no-op whenever the injection
     // already ran this frame.
-    if (!injected_since_last_flush && khf_any_lit) render_sun_depth(ctx);
+    kh_dls_select();   // KH_DL_SHADOW twin 2/2 (frame-guarded; free if twin 1 already ran)
+    if (!injected_since_last_flush && khf_any_lit) {
+        render_sun_depth(ctx);
+        kh_dls_frame(ctx);   // KH_DLS_FRAME twin 2/2 (frame-guarded; free if twin 1 already ran)
+    }
 
     const bool khs_nothing_late = meshes.empty() && fullscreen.empty();
     if (khs_nothing_late && khf_ffr_eligible == 0) return;
@@ -38195,6 +43556,15 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     if (g_res.samp_pf) ctx->PSSetSamplers(1, 1, &g_res.samp_pf);
     // Analytic terrain heightfield (t10, saved range) - the flush twin.
     if (g_thm_valid && g_res.thm_srv) ctx->PSSetShaderResources(10, 1, &g_res.thm_srv);
+    // KH_DL_SHADOW: the light depth array at t36, TWIN of the injection's
+    // bind and inside this pass's StateBackup range. 26878 recorded this
+    // bind as present; it was not - the fallback path rendered the maps in
+    // kh_dls_frame and then KhDlsShadow's GetDimensions guard read an
+    // unbound slot and answered lit (26879).
+    if (g_res.dls_srv) {
+        ctx->PSSetShaderResources(36, 1, &g_res.dls_srv);
+        g_dls_srv_binds++;
+    }
     // WORLD-SHADOW RECEIVE, flush edition (the translucent-receive fix):
     // PSMain has carried the full band/live receive code since round 7, but
     // this pass never bound its textures - so every flush-drawn mesh
@@ -39971,20 +45341,23 @@ inline void flush_frame() {
                                     // Both demand flags now recompute HERE,
                                     // before any early-out, in the one loop.
         bool khum_lit = false;   // any visible lit mesh (shadow-live demand)
+        bool khum_mesh = false;   // any visible mesh at all (volume-copy demand, 26878)
 
         for (const auto& khum_kv : g_draw_list) {
             if (!khum_kv.second.visible) continue;
 
             if (khum_kv.second.fullscreen) {
                 if (khum_kv.second.affect_ui) khum_wanted = true;
-            } else if (khum_kv.second.lit) {
-                khum_lit = true;
+            } else {
+                khum_mesh = true;
+                if (khum_kv.second.lit) khum_lit = true;
             }
 
             if (khum_wanted && khum_lit) break;
         }
 
         g_ui_mask_wanted.store(khum_wanted, std::memory_order_relaxed);
+        g_svs_mesh_wanted.store(khum_mesh, std::memory_order_relaxed);
         // FSAA REQUIREMENT (290 disables): the lit demand stands the whole
         // shadow-live ecosystem down at 1x through the existing master-demand
         // gates - atlas tracking, upload scans, sweeps, band capture, cast,
@@ -40961,6 +46334,82 @@ inline void reset_stat_counters() {
     g_cast_reproj_fires = 0; g_fire_view_reproj_holds = 0;   // KH_CAST_REPROJ
     g_cast_resolve_captures = 0; g_cast_resolve_pairs = 0;   // KH_CAST_RESOLVE_VIEW
     g_cast_zplane_fires = 0;   // KH_CAST_ZPLANE
+    // KH_DL_SHADOW (rule 1.89): the LANES reset with the window. g_dls[],
+    // g_dls_n and g_dls_frame are behaviour state and are deliberately NOT
+    // cleared - dropping the slot table would re-admit every light from
+    // scratch and hand the next window a churn spike that never happened.
+    g_dls_selects = 0; g_dls_cands = 0; g_dls_holds = 0; g_dls_admits = 0;
+    g_dls_evicts = 0; g_dls_expires = 0; g_dls_refused = 0;
+    g_dls_churn = 0; g_dls_churn_max = 0; g_dls_n_max = 0; g_dls_pool_max = 0;
+    g_dls_score_hi = -1.0f; g_dls_score_lo = -1.0f; g_dls_score_cut = -1.0f;
+    // Stage 2a lanes. g_dls_keys[] is NOT cleared: it is the skip state,
+    // and dropping it would force a full rebuild of every light at the
+    // next reset and report that cost as though it were normal.
+    g_dls_faces_built = 0; g_dls_faces_empty = 0; g_dls_face_casters = 0;
+    g_dls_face_tests = 0; g_dls_spot_frusta = 0; g_dls_spot_wide = 0;
+    g_dls_hash_skips = 0; g_dls_hash_builds = 0;
+    g_dls_no_caster = 0; g_dls_lost_caster = 0; g_dls_caster_tests = 0;
+    g_dls_map_allocs = 0; g_dls_map_fails = 0; g_dls_map_short = 0;
+    g_dls_face_over = 0; g_dls_faces_culled = 0; g_dls_slices_saved = 0;
+    g_dls_spot_nosrc = 0; g_dls_spot_cone_min = 2.0f; g_dls_spot_fov_max = -1.0f;
+    g_dls_reach_capped = 0; g_dls_reach_raw_max = -1.0f; g_dls_skip_forced = 0;
+    g_dls_reach_peak_max = -1.0f; g_dls_reach_ceiling_m = -1.0f;
+    g_dls_reach_sun_capped = 0;   // rule 1.89, and 26876a forgot it once already
+    g_dls_cam_frames = 0; g_dls_cam_miss = 0; g_dls_cam_dist_max = -1.0f;
+    g_dls_cb_fills = 0; g_dls_cb_slots = 0;
+    g_dls_mask_flaps = 0; g_dls_face_held = 0;
+    g_dls_fill_empty = 0; g_dls_render_calls = 0; g_dls_render_noslot = 0;
+    g_dls_render_noneed = 0; g_dls_pub_notvalid = 0; g_dls_rast_fails = 0;
+    g_dls_state_restores = 0; g_dls_srv_binds = 0; g_dls_srv_rebinds = 0;
+    g_dls_range_nocam = 0;   // KH_DLS_RANGE
+    g_dls_frame_calls = 0; g_dls_frame_no_state = 0; g_dls_frame_casters = 0;   // KH_DLS_FRAME (26878)
+    g_dls_frame_reach_culls = 0;
+    // KH_DLS_PROBE lanes reset with the window. g_dls_probe_cycle / _target /
+    // _at are the once-per-cycle ARMING STATE, not counters: clearing them
+    // mid-cycle would re-arm a probe that had already fired and stack a second
+    // multiply on the same frame.
+    g_dls_probe_fires = 0; g_dls_probe_missed = 0;
+    g_dls_probe_rt_scene = 0; g_dls_probe_rt_foreign = 0;
+    g_dls_probe_no_rt = 0; g_dls_probe_state_fails = 0;
+    g_dls_probe_armed_cycles = 0; g_dls_probe_waited = 0;
+    // KH_DLS_PROBE_LADDER: the per-band FIRE COUNTS are lanes and reset;
+    // g_dls_probe_band_fired[] and _band_target[] are per-cycle arming state
+    // and must not (clearing them mid-cycle would re-fire a band that had
+    // already painted and double-multiply that column).
+    for (int khp_b = 0; khp_b < KH_DLS_PROBE_BANDS; ++khp_b) g_dls_probe_band_fires[khp_b] = 0;
+    g_dls_probe_rt_w = 0; g_dls_probe_rt_h = 0; g_dls_probe_rt_samples = 0;
+    g_dls_probe_rtv_ids = 0;
+    // KH_DLS_PROBE_ATRESOLVE lanes reset with the window;
+    // g_dls_probe_resolve_cycle is the once-per-cycle arming state and must not.
+    g_dls_probe_resolve_fires = 0; g_dls_probe_resolve_seen = 0;
+    // KH_DLS_WORLD lanes reset with the window; g_dls_world_cycle is the
+    // once-per-cycle arming state and must not (clearing it mid-cycle would
+    // let the pass paint a second time on the same frame).
+    g_dls_world_fires = 0; g_dls_world_no_state = 0; g_dls_world_no_slot = 0;
+    g_dls_world_snap_fails = 0; g_dls_world_upload_fails = 0; g_dls_world_no_rt = 0;
+    g_dls_world_fov_engine = 0; g_dls_world_fov_derived = 0;
+    g_dls_world_no_depth = 0; g_dls_world_frozen = 0;
+    g_dls_world_selfmask = 0; g_dls_world_selfmask_miss = 0;
+    g_dlsw_mask_draws = 0; g_dlsw_mask_ok = 0; g_dlsw_mask_fail = 0;
+    g_dlsw_fov_mismatch = 0; g_dlsw_fov_agree = 0;
+    // 26876 SHIPPED THESE WITHOUT A RESET AND THE FIRST DUMP CAUGHT IT: rule
+    // 1.89, a census resets with the stat window. dlswMaskLive read 7888
+    // against dlsWorldFires 246 - a 32x ratio that looks exactly like a pass
+    // firing many times per frame, which is a real fault this build could
+    // plausibly have had. It did not; the lane was simply free-running while
+    // its neighbours were not, and a lane that cannot be compared with the
+    // lanes beside it is worse than absent because it invites a hunt.
+    g_dlsw_mask_live = 0; g_dlsw_mask_frozen = 0;
+    g_dlsw_rt_is_scene = 0; g_dlsw_rt_not_scene = 0;
+    g_dlsw_vp_mismatch = 0; g_dlsw_vp_agree = 0;
+    g_dlsw_caster_over = 0;
+    for (int khp_r = 0; khp_r < 8; ++khp_r) g_dls_probe_rtv_seen[khp_r] = nullptr;
+    // g_dls_face_hold[] and g_dls_prev_mask[] are hysteresis STATE: clearing
+    // them would drop every face at the next reset and strobe once on purpose.
+    // g_dls_slices_used, g_dls_keys[], g_dls_vp/slice0/facen/mapfar and
+    // g_dls_map_valid are MAP STATE, not counters: clearing them would drop
+    // every light's skip key and force a full rebuild at the next reset,
+    // reporting that cost as though it were the normal cadence.
     g_zdp_true_m = -1.0f; g_zdp_read_x = 0.0f; g_zdp_read_y = 0.0f;   // KH_ZDECODE_PROBE
     g_zdp_err_m = -1.0f; g_zdp_err_min = 1.0e9f; g_zdp_err_max = -1.0e9f;
     g_zdp_err_sum = 0.0; g_zdp_samples = 0; g_zdp_issues = 0; g_zdp_skips = 0;
@@ -41279,6 +46728,7 @@ inline void reset_stat_counters() {
     g_svs_vol_rej_ms = 0; g_svs_vol_rej_shape = 0; g_svs_vol_rej_fmt = 0;
     g_svs_vol_rej_dims = 0; g_svs_vol_rej_cold = 0;
     g_svs_vol_copy_made = 0; g_svs_vol_copy_fails = 0; g_svs_vol_copy_skips = 0;
+    g_svs_vol_copy_nomesh = 0;   // KH_SVS_VOL_DEMAND (26878)
     g_svs_vol_sten_binds = 0;
     g_svs_sten_src = 0; g_svs_om_rtv_max = 0; g_svs_vol_arm_max = 0;
     // counters only. Same rule, same reason, as g_svs_post_seq .
@@ -41438,6 +46888,34 @@ inline void reset_stat_counters() {
     g_band_stage_wait_ms = -1.0f; g_band_stage_wait_max_ms = 0.0f;
     g_blk_incoh_holds = 0; g_dl_gap_decays = 0;
     g_arb_near_denied = 0; g_arb_near_flips = 0;
+    // KH_DL_DARK / KH_DL_BLIND / KH_DL_GHOST census (26850). Rule 1.89: these
+    // are lanes and reset with the window. g_dl.blind_last_ms is BEHAVIOUR
+    // state - the grace window an in-flight blackout is relying on - and is
+    // deliberately absent here, as is g_dl.anchor_* content, which is surveying
+    // knowledge rather than a count.
+    g_dl.fill_no_pool = 0; g_dl.fill_no_reach = 0; g_dl.fill_dark = 0;
+    g_dl.fill_dark_pool_n = 0;
+    g_dl.fill_dark_near_m = -1.0f; g_dl.fill_dark_reach_m = -1.0f;
+    g_dl.fill_dark_first_s = -1.0f; g_dl.fill_dark_last_s = -1.0f;
+    for (uint32_t khk_i = 0; khk_i < KH_DL_DARK_RING; ++khk_i) g_dl.dark_ring[khk_i] = DlDarkRec{};
+    g_dl.dark_head = 0;
+    g_dl.blind_harvests = 0; g_dl.blind_holds = 0; g_dl.blind_run_max = 0;
+    g_dl.sight_win_down = 0; g_dl.sight_win_up = 0;
+    g_dl.hint_changes = 0; g_dl.origin_flips = 0; g_dl.win_slot_evictions = 0;
+    g_dl.stalls_seen = 0; g_dl.stall_max_ms = 0;
+    g_dl.hint_cross_writes = 0; g_dl.res_impostors = 0; g_dl.res_worst_kept = 0.0f;
+    g_dl.tie_seen = 0; g_dl.tie_continuity = 0; g_dl.tie_corrob = 0;
+    g_dl.tie_arbitrary = 0; g_dl.tie_overturns = 0;
+    g_dl.hint_drift = 0; g_dl.hint_drift_dx = 0.0f; g_dl.hint_drift_dz = 0.0f;
+    g_dl.hint_drift_rescans = 0;
+    g_dl.xcheck_voted = 0; g_dl.xcheck_agree = 0;
+    g_dl.xcheck_disagree = 0; g_dl.xcheck_novote = 0;
+    for (uint32_t khw_i = 0; khw_i < KH_DL_WIN_SLOTS; ++khw_i) {
+        g_dl.win_fail_max[khw_i] = 0;
+        g_dl.win_flips[khw_i] = 0;
+    }
+    g_dl.anchor_ghost_drops = 0;
+    g_dl.anchor_ghost_dx = 0.0f; g_dl.anchor_ghost_dz = 0.0f;
     // expiry census
     for (uint32_t khx_i = 0; khx_i < KH_DL_EXP_RING; ++khx_i) g_dl_exp[khx_i] = DlExpiry{};
     g_dl_exp_head = 0; g_dl_exp_n = 0;

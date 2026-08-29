@@ -444,6 +444,957 @@ float4 PSMaskPrime(VSOut i) : SV_Target
     float khpm_v = (dbgCtl.w >= 0.5f && dbgCtl.w < 1.5f) ? 1.0f : KH_PRIME_V;   // mode 108
     return float4(khpm_v, khpm_v, khpm_v, 1.0f);
 }
+)HLSL" R"HLSL(
+// ---------------------------------------------------------------------------
+// KH_DLSW_MASK (26847) - THE WORLD PASS'S OWN OCCLUSION MASK.
+//
+// Three builds tried to decide "is one of our meshes in front of the world
+// surface at this pixel" by reading the mirror target's depth plane, and all
+// three failed the same way. Mode 540 named the reason: VSMirror does not write
+// the clip depth of the matrix it is handed, it OVERWRITES z with its own near
+// plane (l22 = f/(f-0.05); z = l22*w - 0.05*l22, f out of the engine's b2
+// block) and does so CONDITIONALLY, on four tests against engBlk. Its plane is
+// another feature's private convention, it changes shape frame to frame, and
+// nothing obliges it to keep doing either.
+//
+// So this pass stops borrowing and renders its own. The mask is a single
+// R32_FLOAT target holding the LINEAR VIEW DISTANCE, in metres, of the nearest
+// of our meshes at every pixel - the same quantity KhCastZl already returns for
+// the world, so the comparison is metres against metres with no convention to
+// get wrong, no near/far to recover, and no depth partition to track. It is
+// drawn with OUR matrix, cleared to OUR sentinel, and read by nobody else.
+//
+// NEAREST WITHOUT A DEPTH BUFFER: the target clears to a huge sentinel and the
+// draws blend with D3D11_BLEND_OP_MIN, so overlapping meshes resolve to the
+// closest surface with no depth-stencil target, no depth state and no z-fight.
+// The minimum of a set of distances is the nearest one, which is exactly the
+// question, so the blend IS the depth test here.
+struct VSOutDM { float4 pos : SV_Position; float dist : TEXCOORD0; };
+
+VSOutDM VSDlsMask(VSIn i)
+{
+    // KH_DLSW_MASKREBASE (26876e). The same object transform every mesh draw in
+    // this file uses - INCLUDING the fp32 rebase, which this shader did not
+    // take until now. KhVsCore transforms centerRel + rotate(local) against a
+    // viewProj with the camera folded into its translation row whenever
+    // centerRel.w is armed; building the absolute position instead and
+    // multiplying by the absolute matrix is the same geometry evaluated in a
+    // different order, and at kilometre-scale world coordinates the two round
+    // differently by a fraction of a pixel. That fraction is the faint rim.
+    //
+    // The zeroed default (centerRel.w = 0) keeps the absolute path, so any
+    // caller that does not rebase is unaffected - the same contract KhVsCore
+    // honours (the 264 precedent).
+    const float3 khdm_l = KhRotate(i.pos * sizeAxes.xyz);
+    float3 khdm_w = (centerRel.w > 0.5f) ? (centerRel.xyz + khdm_l)
+                                         : (centerSize.xyz + khdm_l);
+    float4 khdm_c = mul(float4(khdm_w, 1.0f), viewProj);
+    VSOutDM o;
+    o.pos = khdm_c;
+    // w of a perspective clip position IS the view-space distance along the
+    // forward axis - the same quantity KhCastZl returns for the world surface.
+    o.dist = khdm_c.w;
+    return o;
+}
+
+float4 PSDlsMask(VSOutDM i) : SV_Target
+{
+    return float4(i.dist, 0.0f, 0.0f, 0.0f);
+}
+
+// The mask, read back by the world pass. The sentinel means no mesh covers it.
+Texture2D<float> khDlsMask : register(t37);
+// khdw_zl is the world surface's distance at the same pixel. Both are metres.
+// The margin is half a percent of range - 5 cm at 10 m - which absorbs the
+// rasterisation difference between this mask and the engine's own depth
+// without ever reaching the scale of a real occlusion.
+// KH_DLSW_MASKDILATE (26876b) WAS TRIED HERE AND REVERTED AT 26876c.
+//
+// It refused a pixel if ANY texel of the 3x3 neighbourhood held one of our
+// meshes in front, on the theory that the residual see-through was our
+// rasterisation and the engine's disagreeing at the boundary texel. It was
+// shipped without measuring that, and it cost a build: the see-through did NOT
+// change, so the leak is not at the boundary, and the dilation added exactly
+// the bright one-pixel ring around our meshes that its own note predicted as
+// the trade. A trade that pays nothing is not a trade. RULE 1.83, broken by me,
+// in the same campaign that recorded it twice.
+//
+// What it did prove is worth keeping: the leak is NOT a one-texel registration
+// residue. Mode 539 (mask verdict) and mode 558 (what this pass actually
+// writes) are the two instruments that can say where it IS, and neither has
+// been read yet. Nothing further gets built here until one of them is.
+// KH_DLSW_MASKOWN (26877) - THE MASK ANSWERS COVERAGE, NOT A DEPTH RACE.
+//
+// THE QUESTION THIS FUNCTION EXISTS TO ANSWER IS "DID THE ENGINE DRAW OUR MESH
+// AT THIS PIXEL". A finite value in the mask answers that exactly and by
+// construction: our own rasteriser wrote it, through the engine's own view and
+// projection (KH_DLSW_MASKREG) and the engine's own rebase (KH_DLSW_MASKREBASE),
+// with the sentinel meaning nothing of ours is here.
+//
+// The trailing compare answers a DIFFERENT question - "is our mesh in front of
+// the world surface" - and it answers it by racing two independently produced
+// quantities against each other with a half-percent margin: our mask's clip w,
+// taken this frame under the engine's matrices, against the engine's linear
+// depth, which at our hook is the PREVIOUS frame's, reached through KhCastZl's
+// rescale and KhCastZPick's plane rule. Nothing binds those two together. Every
+// way that race can go wrong has the same signature, and it is the reported
+// artifact word for word: the pixels where it goes wrong are decided by the
+// depth of the WORLD GEOMETRY behind our mesh, so the region it fails over has
+// the SHAPE of that geometry, it PARALLAXES with that geometry rather than with
+// our mesh, and what gets painted there is the world's own shadow factor -
+// which at night, fully blocked, is BLACK.
+//
+// That is the see-through, whatever the specific disagreement turns out to be,
+// and this is the reason to stop guessing between the candidates: they all
+// travel through this one comparison, so removing the comparison removes the
+// class. Rule 1.83 is not being broken here - the fix is not aimed at an
+// unmeasured hypothesis, it deletes the input every live hypothesis needs.
+//
+// THE COST IS KNOWN AND WAS ACCEPTED ONCE ALREADY. Without the compare, a mesh
+// that sinks into terrain masks the pixels where it is BURIED as well as the
+// ones where it is visible, so the shadow gets a bite taken out of it at the
+// intersection. 26846 shipped exactly that trade in exactly these words - "a
+// visibly smaller fault than painting the world's shading across the whole
+// mesh" - and the field confirmed it working at 26841. 26847 added the compare
+// back on top of a mask that had just been made registration-exact, at which
+// point it was buying a case that no longer needed buying.
+//
+// *** SHIPPED AS THE DEFAULT AT 26877 AND TAKEN BACK OUT AT 26877a. THE NOTE
+// *** ABOVE IS KEPT BECAUSE THE REASONING IS STILL SOUND AND THE CONCLUSION WAS
+// *** STILL WRONG - RULE 1.83, BROKEN BY ME, IN THE BUILD AFTER I WROTE IT UP.
+//
+// It did not fix the see-through, and it cost the thing its own note predicted:
+// a mesh half underground masked its BURIED pixels too, so the shadow it casts
+// on the terrain was clipped away along the ground line. That is a regression
+// of a fault fixed long ago, and it is the 26876b lesson repeated - a trade
+// that pays nothing is not a trade.
+//
+// What the failed trade DID buy is worth keeping: the depth race is not the
+// carrier. Removing it entirely changed nothing about the artifact, which is a
+// far stronger statement than any paint mode has made about this route, and it
+// leaves the world pass's mask exonerated by construction rather than by a
+// screenshot reading of 558.
+//
+// Default is the 26847 compare again, bit-identical. Mode 575 now ARMS the
+// coverage-only rule rather than reverting it, so the measurement stays
+// available and costs nothing.
+#define KH_DLSW_MASKOWN (dbgCtl.w >= 574.5f && dbgCtl.w < 575.5f)
+#define KH_DLSW_MASKDEPTH (!KH_DLSW_MASKOWN)
+bool KhDlsMaskInFront(float2 khdw_px, float khdw_w, float khdw_h, float khdw_zl)
+{
+    int2 khdw_p = int2(clamp(khdw_px.x, 0.0f, khdw_w - 1.0f),
+                       clamp(khdw_px.y, 0.0f, khdw_h - 1.0f));
+    const float khdw_d = khDlsMask.Load(int3(khdw_p, 0));
+    if (!(khdw_d > 0.0f) || khdw_d > 1.0e29f) return false;   // no mesh here
+    if (KH_DLSW_MASKDEPTH) return khdw_d < khdw_zl * 0.995f;   // the 26847 rule
+    return true;
+}
+
+// KH_DLSW_MASKCOV (26876f) - THE LAST OF THE RIM IS MULTISAMPLING, NOT
+// REGISTRATION, AND THE DUMP SAYS SO OUTRIGHT.
+//
+// dlswRtDim reads 6 = TEXTURE2DMS and the scene runs 8 depth samples. So the
+// target this pass multiplies into is MULTISAMPLED, our fullscreen triangle
+// covers every sample of every pixel, and the pixel shader runs at PIXEL
+// frequency - one factor written to all eight samples.
+//
+// At a silhouette pixel some of those samples belong to our mesh and some to
+// the world behind it. A binary mask has to choose for all of them at once: it
+// says "ours", the pass refuses, and the world samples in that pixel keep their
+// full unshadowed brightness while every neighbouring pixel is darkened. That
+// is the rim, and no amount of matching matrices can remove it - 26876a matched
+// the view and projection, 26876e matched the fp32 rebase, and each took a bite
+// out of it because each reduced the DISAGREEMENT, but the all-or-nothing
+// decision is structural and survives perfect registration.
+//
+// The framebuffer pixel holds c = a*mesh + (1-a)*world for coverage a, and what
+// we want is a*mesh + (1-a)*world*f. With one multiply the best available is
+// g = a + (1-a)*f, which is exact when the mesh and the world behind it carry
+// similar radiance and errs gently when they do not. So the mask returns
+// COVERAGE rather than a verdict, and the factor is blended toward 1 by it.
+//
+// The coverage estimate is a 3x3 box over the binary mask, which is a real
+// approximation and worth naming: it cannot see subpixel coverage, so it ramps
+// over about three pixels instead of one. That trades a one-pixel step at FULL
+// amplitude for a three-pixel gradient at a third of it, which is the direction
+// the eye forgives. Exact elimination needs the mask itself to carry coverage -
+// an MSAA or supersampled mask target - and that is memory this has not been
+// shown to be worth yet.
+//
+// This is NOT the 26876b dilation returning. That refused whole pixels it was
+// not sure about, which is what put a hard bright ring around our meshes. This
+// refuses them PARTIALLY, in proportion, which is the thing dilation should
+// have been all along.
+//
+// Mode 563 restores the binary verdict exactly: it returns 1 or 0, the
+// interior early-out still fires on 1, and a 0 blends nothing.
+)HLSL" R"HLSL(
+// CHUNK BOUNDARY (26876f). SPLIT, never trim: the note above KhDlsMaskCov is
+// the record of why three builds each removed part of the rim without removing
+// it, and it is shorter than a fourth build spent rediscovering that.
+float KhDlsMaskCov(float2 khmc_px, float khmc_w, float khmc_h, float khmc_zl)
+{
+    if (dbgCtl.w >= 562.5f && dbgCtl.w < 563.5f) {
+        return KhDlsMaskInFront(khmc_px, khmc_w, khmc_h, khmc_zl) ? 1.0f : 0.0f;
+    }
+
+    const int2 khmc_c = int2(clamp(khmc_px.x, 0.0f, khmc_w - 1.0f),
+                             clamp(khmc_px.y, 0.0f, khmc_h - 1.0f));
+    const int2 khmc_mx = int2((int)khmc_w - 1, (int)khmc_h - 1);
+    float khmc_n = 0.0f;
+
+    [unroll] for (int khmc_j = -1; khmc_j <= 1; ++khmc_j) {
+        [unroll] for (int khmc_i = -1; khmc_i <= 1; ++khmc_i) {
+            const int2 khmc_p = clamp(khmc_c + int2(khmc_i, khmc_j),
+                                      int2(0, 0), khmc_mx);
+            const float khmc_d = khDlsMask.Load(int3(khmc_p, 0));
+            if (!(khmc_d > 0.0f) || khmc_d > 1.0e29f) continue;
+            // KH_DLSW_MASKOWN (26877, DEFAULT REVERTED AT 26877a). The centre
+            // pixel's own world distance is the reference again, which is the
+            // 26847 form verbatim; mode 575 arms the coverage-only rule. See
+            // the note above KhDlsMaskInFront for why it was tried and what
+            // trying it proved.
+            if (!KH_DLSW_MASKDEPTH || khmc_d < khmc_zl * 0.995f) khmc_n += 1.0f;
+        }
+    }
+
+    return khmc_n * (1.0f / 9.0f);
+}
+
+// KH_DLSW_NRM (26876). One plane tap at a chosen pixel radius, for the
+// two-baseline normal in PSDlsWorld. Returns the two world-space central
+// differences, or false when any of the four taps is not a surface.
+//
+// R IS IN PIXELS AND THAT IS THE POINT. The engine's linear depth is quantised
+// with a step fixed in METRES, so the true depth difference across the stencil
+// grows with R while the quantisation does not. Widening the stencil buys
+// signal-to-quantisation directly, with no constant to guess.
+//
+// THE COST OF WIDENING is that a stencil straddling a real edge fits a plane
+// across it. That is why the taps are REFUSED rather than clamped when one
+// lands on sky or off the depth (rule 1.91) and why the caller keeps the 2x2
+// quad derivative as the fallback: near a silhouette the narrow answer is the
+// honest one, and the caller is told so through khw_nrel.
+static const float KH_DLSW_NRM_R = 3.0f;        // base baseline, pixels
+// KH_DLSW_NRM_FLAT (26876b): the SECOND-DIFFERENCE bound that decides whether
+// the stencil is looking at ONE surface. For any plane, zl(+r) + zl(-r) - 2*zl
+// is exactly zero whatever the plane's slope, so this test is blind to
+// orientation and sensitive only to the neighbourhood breaking - which is the
+// question. Quantisation leaves a residue of about one step (~100 mm measured),
+// so the bound is relative to range and set well above that and well below a
+// cliff: 2% of range is 0.6 m of curvature across the stencil at 30 m, which no
+// continuous surface produces and every silhouette does.
+static const float KH_DLSW_NRM_FLAT = 0.02f;
+// The agreement floor for the two baselines. Dimensionless - it compares two
+// unit normals, so it is not a bar standing in for a length (rule 1.84), and it
+// needs no knowledge of the quantisation step. cos(8 deg): two baselines that
+// disagree by more than that are not describing one plane.
+static const float KH_DLSW_NRM_AGREE = 0.990f;
+
+// KH_DLSW_ONESIDED (26876c) - THE NORMAL AT A DEPTH DISCONTINUITY.
+//
+// Every version of this pass so far has had NO valid normal at a silhouette,
+// and has only ever chosen which way to be wrong. A 2x2 quad derivative there
+// straddles the cliff and returns a plane belonging to neither surface; 26876a
+// answered that by refusing and applying the facing prior, which over-darkened
+// and drew a DARK outline; 26876b answered it by trusting the straddling
+// derivative, which draws a BRIGHT one. The field has now reported both, on
+// game geometry and on ours, and they are the same defect seen from two sides.
+//
+// The centre pixel is not ambiguous - it belongs to exactly one surface. Only
+// the DIFFERENCE is, and only because it was taken across the cliff. So take it
+// on the side that stays home: per axis, compare the two neighbours' depths
+// against the centre's and keep the nearer one. On a continuous surface both
+// sides agree and this is the central difference to within a quantisation step;
+// at a cliff it is the one-sided difference along the surface the centre is on.
+// No prior, no threshold, no choice about which way to be wrong.
+//
+// 26869 BUILT THIS AND 26870 DELETED IT, on the reading that mode 520 had
+// refuted the normal. That reading was struck at 26876 (KH_DLSW_BANDING entry
+// six): 520 only ever disarmed the normal inside KhDlsShadow, never inside the
+// factor. The code was right and the reason for removing it was not.
+bool KhDlswOneSided(float2 kho_px, float2 kho_dims, float kho_zc, float3 kho_w,
+                    out float3 kho_dx, out float3 kho_dy)
+{
+    const float kho_zpx = KhCastZl(kho_px + float2(1.0f, 0.0f), kho_dims);
+    const float kho_znx = KhCastZl(kho_px - float2(1.0f, 0.0f), kho_dims);
+    const float kho_zpy = KhCastZl(kho_px + float2(0.0f, 1.0f), kho_dims);
+    const float kho_zny = KhCastZl(kho_px - float2(0.0f, 1.0f), kho_dims);
+    const bool kho_vpx = (kho_zpx > 0.05f) && (kho_zpx < 8000.0f);
+    const bool kho_vnx = (kho_znx > 0.05f) && (kho_znx < 8000.0f);
+    const bool kho_vpy = (kho_zpy > 0.05f) && (kho_zpy < 8000.0f);
+    const bool kho_vny = (kho_zny > 0.05f) && (kho_zny < 8000.0f);
+    if (!(kho_vpx || kho_vnx) || !(kho_vpy || kho_vny)) return false;
+
+    // Keep the side whose depth is nearer the centre's - that is the side that
+    // did not cross the cliff. Signs are chosen so both differences still point
+    // along +x and +y, or the cross product would flip at every edge.
+    const bool kho_usex = kho_vpx && (!kho_vnx ||
+                          abs(kho_zpx - kho_zc) <= abs(kho_znx - kho_zc));
+    const bool kho_usey = kho_vpy && (!kho_vny ||
+                          abs(kho_zpy - kho_zc) <= abs(kho_zny - kho_zc));
+    kho_dx = kho_usex
+           ? KhCastWorld(kho_px + float2(1.0f, 0.0f), kho_dims, kho_zpx) - kho_w
+           : kho_w - KhCastWorld(kho_px - float2(1.0f, 0.0f), kho_dims, kho_znx);
+    kho_dy = kho_usey
+           ? KhCastWorld(kho_px + float2(0.0f, 1.0f), kho_dims, kho_zpy) - kho_w
+           : kho_w - KhCastWorld(kho_px - float2(0.0f, 1.0f), kho_dims, kho_zny);
+    return true;
+}
+
+bool KhDlswPlane(float2 khp_px, float2 khp_dims, float khp_r, float khp_zc,
+                 out float3 khp_dx, out float3 khp_dy)
+{
+    khp_dx = float3(0.0f, 0.0f, 0.0f);
+    khp_dy = float3(0.0f, 0.0f, 0.0f);
+    const float khp_zpx = KhCastZl(khp_px + float2(khp_r, 0.0f), khp_dims);
+    const float khp_znx = KhCastZl(khp_px - float2(khp_r, 0.0f), khp_dims);
+    const float khp_zpy = KhCastZl(khp_px + float2(0.0f, khp_r), khp_dims);
+    const float khp_zny = KhCastZl(khp_px - float2(0.0f, khp_r), khp_dims);
+    // The same window PSDlsWorld admits for its own centre pixel, so a tap can
+    // never contribute a surface the pass itself would have refused.
+    if (!(khp_zpx > 0.05f) || khp_zpx > 8000.0f) return false;
+    if (!(khp_znx > 0.05f) || khp_znx > 8000.0f) return false;
+    if (!(khp_zpy > 0.05f) || khp_zpy > 8000.0f) return false;
+    if (!(khp_zny > 0.05f) || khp_zny > 8000.0f) return false;
+    // ONE SURFACE, OR NONE. A stencil straddling a silhouette fits a plane
+    // across the gap and returns a normal belonging to neither side, and the
+    // caller must know that rather than be handed it. Refused, not clamped
+    // (rule 1.91) - the caller falls back to the narrowest measurement it has.
+    const float khp_cx = abs(khp_zpx + khp_znx - 2.0f * khp_zc);
+    const float khp_cy = abs(khp_zpy + khp_zny - 2.0f * khp_zc);
+    if (max(khp_cx, khp_cy) > KH_DLSW_NRM_FLAT * khp_zc) return false;
+    khp_dx = KhCastWorld(khp_px + float2(khp_r, 0.0f), khp_dims, khp_zpx)
+           - KhCastWorld(khp_px - float2(khp_r, 0.0f), khp_dims, khp_znx);
+    khp_dy = KhCastWorld(khp_px + float2(0.0f, khp_r), khp_dims, khp_zpy)
+           - KhCastWorld(khp_px - float2(0.0f, khp_r), khp_dims, khp_zny);
+    return true;
+}
+)HLSL" R"HLSL(
+// ---------------------------------------------------------------------------
+// KH_DLS_WORLD (26834) - the world-receive pass for dynamic-light shadows.
+//
+// Fullscreen, fired from the scene-resolve hook, emitting a MULTIPLY FACTOR
+// under a dest*src blend. All the lighting arithmetic lives in
+// KhDlsWorldFactor beside DynLights; this shader's only job is to turn a
+// screen pixel into a world position and a normal.
+//
+// DEPTH AND VIEW ARE BOTH THIS FRAME'S, and that is the one place this pass
+// deliberately does NOT copy the sun's world cast. PSMaskCast reconstructs
+// through a FROZEN view because it paints at draw 0, where - as the note at
+// castViewN says outright - there IS no depth for this frame yet, so it must
+// pair depth(N-1) with view(N-1) and then reproject. This pass fires at the
+// resolve, two thirds of the way through the frame and after the world is
+// drawn, so the live depth is complete and is snapshotted immediately before
+// the draw. Pairing depth(N) with view(N) removes the whole reprojection
+// class rather than compensating for it. Everything else - the caster set,
+// the eight light maps, KhDlsShadow, its filter, its bias, its fail-to-lit
+// rule - is shared with the mesh receive by construction.
+//
+// THE NORMAL IS RECONSTRUCTED FROM THE DEPTH FIELD, because the engine is
+// forward and exposes no normal buffer (confirmed: 424 shaders in the export,
+// one MRT pixel shader, an 8-way depth decimate). Screen-space derivatives of
+// the reconstructed world position give the surface plane directly. This is
+// noisy at silhouettes, where ddx/ddy straddle a depth discontinuity and the
+// cross product swings wildly - so the result is only ever used for an N.L
+// term and for KhDlsShadow's normal offset, both of which degrade to a
+// slightly wrong shade rather than to a wrong occlusion verdict, and the
+// factor is clamped to [0,1] regardless.
+// KH_DLS_WORLD_STAGE (26835, mode 534) - WHY IS NOTHING HAPPENING?
+//
+// 26834 fired this pass on EVERY cycle with zero refusals - dlsWorldFires 551
+// of 551 cycles, NoState/NoSlot/SnapFails/UploadFails/NoRt all 0 - and mode
+// 531, which paints every pixel of the screen unconditionally, showed nothing
+// at all. Those two facts cannot both be true unless something between the
+// draw and the pixel is eating the result, and no lane can see inside a pixel
+// shader. Every early exit here returns 1.0, which under a multiply blend is
+// INVISIBLE, so a shader that bails on its first line and a shader that never
+// ran look identical on screen. That is the 26830 trap again, one level down.
+//
+// Mode 534 makes each exit paint a DIFFERENT FLAT COLOUR instead of 1.0, so a
+// single screenshot names the stage that is failing, per pixel:
+//
+//   RED     the arm lane is not reaching the shader (dbgCtl.z < 0.5) - the
+//           constant buffer is not arriving, or not at b0
+//   GREEN   the arm arrived but castView[1].zw carries no screen dimensions -
+//           CBFrame is not arriving, or not at b1
+//   BLUE    both buffers arrived and the DEPTH is unusable at this pixel -
+//           the snapshot is empty, or the plane pick is wrong
+//   YELLOW  everything decoded; this pixel reached the lighting kernel
+//
+// If the screen stays untinted even under 534, the pixel shader is not running
+// or its output is not landing, and the fault is in the C++ pass rather than
+// anywhere below this line. That is the one outcome no colour can express, and
+// it is the most useful thing 534 can tell us.
+#define KH_DLSW_STAGE (dbgCtl.w >= 533.5f && dbgCtl.w < 534.5f)
+float4 PSDlsWorld(VSOut i) : SV_Target
+{
+    // dbgCtl.z arms this pass; a zeroed lane is a no-op multiply, so any site
+    // that does not fill it behaves exactly as it did (the 264 precedent).
+    if (dbgCtl.z < 0.5f) {
+        // The stage view cannot read dbgCtl.w here either if the buffer is the
+        // problem - so it is tested LAST, and a red screen with no mode set is
+        // still the honest answer for "no constants".
+        return KH_DLSW_STAGE ? float4(1.0f, 0.0f, 0.0f, 1.0f)
+                             : float4(1.0f, 1.0f, 1.0f, 1.0f);
+    }
+
+    const float2 khw_dims = float2(castView[1].z, castView[1].w);
+    if (khw_dims.x < 2.0f || khw_dims.y < 2.0f) {
+        return KH_DLSW_STAGE ? float4(0.0f, 1.0f, 0.0f, 1.0f)
+                             : float4(1.0f, 1.0f, 1.0f, 1.0f);
+    }
+
+    const float khw_zl = KhCastZl(i.pos.xy, khw_dims);
+    // Sky and anything the depth pass never wrote: no surface, nothing to
+    // shadow. The far plane reads as a huge or zero zl depending on the
+    // encoding, so both ends are refused.
+    if (!(khw_zl > 0.05f) || khw_zl > 8000.0f) {
+        return KH_DLSW_STAGE ? float4(0.0f, 0.0f, 1.0f, 1.0f)
+                             : float4(1.0f, 1.0f, 1.0f, 1.0f);
+    }
+    if (KH_DLSW_STAGE) return float4(1.0f, 1.0f, 0.0f, 1.0f);
+
+    // KH_DLSW_ZL (26836, mode 535) - WHAT IS zl, NUMERICALLY?
+    //
+    // 534 came back yellow everywhere: both buffers arrive, the dimensions
+    // arrive, and every pixel decodes a zl inside (0.05, 8000). But the 531
+    // grid showed NO 1 m tiling on the ground - just a smooth gradient - and a
+    // smooth gradient is what you get when the reconstructed world position
+    // barely changes across the screen. That happens when zl is SMALL: with a
+    // tiny view ray, q = v - camera is dominated by the camera term and every
+    // pixel maps to nearly the same world point.
+    //
+    // The suspicion is therefore that the snapshot holds RAW DEPTH in 0..1
+    // rather than the linear metres KhCastWorld's ray scaling requires. That
+    // would also pass 534's range test, which is why 534 could not see it.
+    //
+    // This paints the MAGNITUDE of zl in three overlapping decades, so one
+    // screenshot reads it off without a capture:
+    //   mostly RED    zl is order 1        -> raw 0..1 depth, not metres
+    //   mostly GREEN  zl is order 100      -> metres, as KhCastWorld expects
+    //   mostly BLUE   zl is order 1000+    -> metres but far, or unbounded
+    //   black         zl is order 0.01     -> effectively zero
+    // The red channel is frac() so a metre-scale zl also gives it fine
+    // structure; a raw-depth zl gives a smooth ramp instead. Shape as well as
+    // hue, in case the magnitudes overlap.
+    if (dbgCtl.w >= 534.5f && dbgCtl.w < 535.5f) {
+        return float4(frac(khw_zl), saturate(khw_zl / 100.0f),
+                      saturate(khw_zl / 1000.0f), 1.0f);
+    }
+
+    // KH_DLSW_SELFMASK (26838) - OUR OWN MESHES ARE NOT THE WORLD.
+    //
+    // The engine's linear depth does not contain our injected geometry, so at a
+    // pixel our mesh covers, khw_zl is the distance to the world BEHIND it and
+    // the world position below belongs to the ground, not to the mesh. Shading
+    // that and painting it here put the vest's own shadow across the vest, laid
+    // out as though it were on the ground behind - which is exactly what it
+    // was, drawn in the wrong place.
+    //
+    // khMirSten is our meshes' stencil, the same mask the translucency path
+    // reads, so the two cannot disagree about which pixels are ours.
+    // KhMirUnit returns 0 where a mesh covers the pixel. Returning 1.0 leaves
+    // those pixels to the mesh kernels, which shadow them properly through
+    // KhDlsShadow with the mesh's own surface and normal.
+    //
+    // Mode 538 disarms this, which is the A/B: if the smear returns under 538
+    // and not at default, the mask is what removed it.
+    // KH_DLSW_MASKVIEW (26839, mode 539) - IS THE MASK MARKING ANYTHING?
+    //
+    // 26838 armed this mask on every frame (dlsWorldSelfMask 239 of 239) and it
+    // changed NOTHING - mode 538, which disarms it, was indistinguishable from
+    // default. A mask that is armed and has no effect is a mask that reports
+    // "not ours" at every pixel, and there is a plain reason it might: the SRV
+    // is X24_TYPELESS_G8_UINT, so KhMirUnit reads the STENCIL plane, while the
+    // vmir prepass draws our meshes DEPTH-ONLY with a null pixel shader. If
+    // nothing writes stencil there, the plane is zero everywhere and the mask
+    // is inert.
+    //
+    // Rather than assume that, paint it: BLACK where the mask says a pixel is
+    // ours, WHITE elsewhere. Under a multiply blend that is unmissable.
+    //   a black silhouette of the meshes -> the mask works, and the shadow
+    //     showing through the vest is the MESH'S OWN TRANSLUCENCY, not this
+    //     pass painting on it - the ground behind is legitimately visible and
+    //     there is nothing here to fix
+    //   an all-white screen            -> the stencil plane is empty and this
+    //     mask cannot isolate our meshes; the isolation has to come from
+    //     somewhere else
+    // Those two have opposite fixes, which is why guessing between them is
+    // worth one build to avoid.
+    // OUR OWN MESHES ARE NOT THE WORLD, and the mask now reads the plane the
+    // prepass writes (see KhMirCovered). The engine's linear depth does not
+    // contain our injected geometry, so at a pixel one of our meshes covers,
+    // khw_zl is the distance to the world BEHIND it - and shading that put the
+    // GROUND'S shadow onto the mesh, which is why the vest looked see-through
+    // exactly where the world behind it would have been lit.
+    //
+    // Those pixels are left alone: the mesh kernels shadow them through
+    // KhDlsShadow with the mesh's own surface and normal, which is the right
+    // term for a surface we actually drew.
+    const float3 khw_w = KhCastWorld(i.pos.xy, khw_dims, khw_zl);
+
+    // Plane of the surface from the reconstructed field. The sign is fixed by
+    // making the normal face the eye; castView[2].xyz is this pass's camera.
+    //
+    // 26869 REPLACED THIS WITH ONE-SIDED DIFFERENCES AND 26870 TOOK IT BACK
+    // OUT, on the reading that "mode 520 refutes the receiver normal". THAT
+    // READING WAS WRONG, AND IT COST THE WHOLE TASK-3 CAMPAIGN (rule 1.73).
+    //
+    // 520 disarms the normal inside KhDlsShadow ONLY - dlsFaceSlice[].y gates
+    // khd_off_on, whose two readers are the offset at khd_p and the N.L floor
+    // at khd_ndl. It does not reach KhDlsWorldFactor, which reads this same
+    // normal in THREE more places 520 never touched: khw_ndl on every light's
+    // diffuse, the same term inside khw_dyn, and the sun's N.L in the
+    // denominator. So "the rings survive 520" says the shadow LOOKUP is
+    // innocent. It says nothing at all about the normal, and the ledger's
+    // hypothesis 5 must be struck.
+    //
+    // KH_DLSW_NRM (26876) - WHY THE NORMAL IS THE RING SOURCE.
+    //
+    // Mode 550 measured the engine's linear depth arriving in PLATEAUS beside
+    // 100 mm CLIFFS. Feed a quantised field to a 2x2 quad derivative and the
+    // reconstructed plane is not noisy - it is WRONG IN A SPECIFIC DIRECTION.
+    // KhCastWorld builds v = (ndc.x*fovx, ndc.y*fovy, 1) * zl, so inside a
+    // plateau zl is CONSTANT across the quad and the reconstructed surface is
+    // the plane z = const in view space. Its normal is the VIEW AXIS. At every
+    // cliff the depth jump dominates instead and the normal snaps back toward
+    // the true surface. The normal therefore alternates between "pointing at
+    // the camera" and "correct", switching exactly on the iso-depth contours of
+    // the quantised field.
+    //
+    // THE SHAPE FOLLOWS. Iso-zl contours of a ground plane in screen space are
+    // conics, nested, symmetric about the plane containing the view axis - so
+    // they paint CONCENTRIC RINGS WITH ONE STRAIGHT SEAM ON THE SYMMETRY AXIS,
+    // which is the field's report verbatim, seam included. Nothing in a shadow
+    // MAP lookup can produce that shape; the map knows nothing about the
+    // camera, and these contours are camera-locked.
+    //
+    // THE FADE FOLLOWS TOO, from the same mechanism. As the camera lies down
+    // toward the surface, zl changes less per pixel, the plateaus widen, and a
+    // larger and larger fraction of pixels sit in a plateau reading N = view
+    // axis. A near-horizontal view axis against a lamp overhead gives
+    // dot(N, L) -> 0, so khw_diff -> 0 and the blocked share collapses: the
+    // shadow washes out precisely as the camera approaches. One mechanism, both
+    // symptoms, and it explains why nine hypotheses aimed at the map all missed.
+    //
+    // THE FIX IS A BASELINE, NOT A FILTER. Quantisation is a fixed step in
+    // metres; the true depth difference across the stencil grows with the
+    // stencil. So sample the plane over KH_DLSW_NRM_R pixels instead of one and
+    // the signal-to-quantisation ratio improves by that factor directly, with
+    // no assumption about the step's size - which matters, because we have
+    // never measured it and rule 1.84 says not to stand a bar where a
+    // principle belongs.
+    //
+    // AND IT REPORTS ITS OWN CONFIDENCE. The plane is measured at TWO baselines
+    // and their agreement is khw_nrel. On a genuinely resolved surface the two
+    // agree closely whatever the surface is doing; on a staircase they do not,
+    // because each baseline lands on a different tread. That is a dimensionless
+    // self-calibrating witness - it needs no depth constant and no knowledge of
+    // the quantisation step, which is exactly what hypothesis 9 lacked.
+    // khw_nrel is carried into the factor, where a normal we cannot resolve
+    // stops being allowed to drive N.L.
+    //
+    // Mode 553 reverts to the 2x2 derivative and an unweighted N.L - the A/B.
+    // Mode 554 paints khw_nrel. Mode 520 is unchanged and still means what it
+    // always meant, which is now correctly scoped to the lookup.
+    const bool khw_nrev = (dbgCtl.w >= 552.5f && dbgCtl.w < 553.5f);
+)HLSL" R"HLSL(
+    // KH_DLSW_REACHCUT (26878) - THE FULLSCREEN PASS STOPS PAYING FOR PIXELS
+    // NO LIGHT CAN REACH.
+    //
+    // Everything below this line - the two plane fits and the one-sided
+    // fallback (8-12 depth Loads), the 3x3 coverage read (9 more) and the
+    // per-light kernel - only matters where some casting light's map can
+    // answer. KhDlsFaceUV refuses every receiver whose face-axis depth is at
+    // or past that light's far plane, and the face-axis depth is the largest
+    // absolute component of the light-relative position, which is at least
+    // |p| / sqrt(3). So a pixel farther than sqrt(3) * far from EVERY casting
+    // light cannot be shadowed by any of them, KhDlsWorldFactor returns 1
+    // there by construction, and the multiply is a no-op. One reconstructed
+    // position (already in hand) and at most eight distance compares decide
+    // that, before the first extra Load. The 5% widening covers the 1.5-texel
+    // receiver-normal offset KhDlsShadow applies before its own reach test
+    // (at most 3 / size of the distance, i.e. ~1.2% at a 256 map).
+    //
+    // MODE 0 ONLY, by design: every instrument in this shader paints from
+    // inputs computed below, and an instrument that goes white outside the
+    // light radii would be a different instrument. Any set mode is therefore
+    // the off switch (rule 1.82) and the paint modes keep their full-frame
+    // view; the identity argument above is what makes this a pure cost cut.
+    if (dbgCtl.w < 0.5f && dlCtl.x >= 2.5f) {
+        // KH_DLS_RANGE (26879): the same identity one step earlier. Past
+        // 99.5% of the shadow view distance KhDlsRangeFade returns 0 and
+        // KhDlsShadow answers lit for every light, so the multiply is a
+        // no-op there too; one length against the pass camera decides it
+        // before the per-light loop. dlsRange.w 0 (lane unfilled, mode 581)
+        // falls through to the reach test exactly as before.
+        if (dlsRange.w > 0.0f) {
+            const float3 khw_rr = khw_w - dlsRange.xyz;
+            const float  khw_rl = 0.995f * dlsRange.w;
+            if (dot(khw_rr, khw_rr) >= khw_rl * khw_rl) return float4(1.0f, 1.0f, 1.0f, 1.0f);
+        }
+        const int khw_rn = (int)dlCtl.y + (int)dlCtl.z;
+        bool khw_reach = false;
+        [loop] for (int khw_ri = 0; khw_ri < khw_rn && !khw_reach; ++khw_ri) {
+            const int khw_rs = (int)dlLights[khw_ri * 6 + 5].z - 1;
+            if (khw_rs < 0) continue;
+            const float khw_rf = dlsMeta[khw_rs].w * 1.05f;
+            if (khw_rf <= 0.0f) continue;
+            const float3 khw_rd = khw_w - dlsMeta[khw_rs].xyz;
+            khw_reach = dot(khw_rd, khw_rd) < 3.0f * khw_rf * khw_rf;
+        }
+        if (!khw_reach) return float4(1.0f, 1.0f, 1.0f, 1.0f);
+    }
+
+    float3 khw_dx = ddx(khw_w);
+    float3 khw_dy = ddy(khw_w);
+    float khw_nrel = 1.0f;
+
+    if (!khw_nrev) {
+        // Two baselines. The taps are central differences, so each spans 2R
+        // pixels of depth signal against one quantisation step.
+        // KH_DLSW_NRM_FALLBACK (26876b) - WHAT "UNRESOLVED" IS ALLOWED TO MEAN.
+        //
+        // 26876a set khw_nrel to 0 on EVERY failure of the wide fit, and the
+        // field found the cost immediately: a thin dark outline wherever
+        // shadowed world geometry meets the SKY. At such a pixel the wide taps
+        // land on sky, the fit is refused, rel goes to 0, and the factor falls
+        // back to the FACING PRIOR - N.L = 1, maximum darkening - on the one
+        // class of pixel where the prior has no business being applied. The
+        // prior was reasoned for grazing ground under a lamp, and a silhouette
+        // is not that.
+        //
+        // The error was letting one number mean two different things. There are
+        // two ways to fail to resolve a normal and they want OPPOSITE answers:
+        //
+        //   THE NEIGHBOURHOOD IS NOT ONE SURFACE (a sky tap, a silhouette, the
+        //   frame edge). Nothing about the prior applies. Retreat to the
+        //   narrowest measurement still available and TRUST IT - that is
+        //   exactly the 26875 behaviour, which had no rim of its own here.
+        //
+        //   THE NEIGHBOURHOOD IS ONE SURFACE AND THE FIT STILL WOBBLES. The
+        //   only thing left that can do that is quantisation, and that is the
+        //   case the prior was built for.
+        //
+        // So rel now falls below 1 in exactly ONE circumstance: both stencils
+        // agree the neighbourhood is planar, and their normals still disagree.
+        // Every refusal retreats instead, at full confidence. KhDlswPlane's
+        // second-difference test is what makes the distinction available - it
+        // is blind to slope and sensitive only to the surface breaking.
+        const float khw_r1 = KH_DLSW_NRM_R;
+        const float khw_r2 = KH_DLSW_NRM_R * 2.0f;
+        float3 khw_ax, khw_ay, khw_bx, khw_by;
+        const bool khw_ok1 = KhDlswPlane(i.pos.xy, khw_dims, khw_r1, khw_zl, khw_ax, khw_ay);
+        const bool khw_ok2 = KhDlswPlane(i.pos.xy, khw_dims, khw_r2, khw_zl, khw_bx, khw_by);
+
+        if (khw_ok1 && khw_ok2) {
+            // The WIDE pair shades: best signal-to-quantisation of the two.
+            khw_dx = khw_bx;
+            khw_dy = khw_by;
+            const float3 khw_n1 = cross(khw_ax, khw_ay);
+            const float3 khw_n2 = cross(khw_bx, khw_by);
+            const float khw_l1 = length(khw_n1);
+            const float khw_l2 = length(khw_n2);
+            if (khw_l1 > 1e-12f && khw_l2 > 1e-12f) {
+                // Unsigned: the two planes may be wound oppositely without
+                // disagreeing about the surface they describe.
+                const float khw_ag = abs(dot(khw_n1 / khw_l1, khw_n2 / khw_l2));
+                khw_nrel = saturate((khw_ag - KH_DLSW_NRM_AGREE) /
+                                    (1.0f - KH_DLSW_NRM_AGREE));
+            } else {
+                khw_nrel = 0.0f;
+            }
+        } else if (khw_ok1) {
+            // Planar at R, broken by 2R: an edge sits between the two. The
+            // narrow fit is a real measurement of a real surface, so it is
+            // used AS MEASURED - no prior, no darkening it did not earn.
+            khw_dx = khw_ax;
+            khw_dy = khw_ay;
+            khw_nrel = 1.0f;
+        } else {
+            // Broken inside R: a silhouette. The 2x2 quad derivative taken
+            // above straddles it and belongs to neither surface - that is the
+            // pixel-wide outline, dark under 26876a's prior and bright under
+            // 26876b's trust. Take the difference on the side that stays on
+            // the centre's own surface instead, and it is a real measurement
+            // again. Only if even that fails (an isolated pixel with no valid
+            // neighbour on some axis) does the quad derivative stand.
+            float3 khw_ox, khw_oy;
+            const bool khw_orev = (dbgCtl.w >= 558.5f && dbgCtl.w < 559.5f);
+            if (!khw_orev &&
+                KhDlswOneSided(i.pos.xy, khw_dims, khw_zl, khw_w, khw_ox, khw_oy)) {
+                khw_dx = khw_ox;
+                khw_dy = khw_oy;
+            }
+            khw_nrel = 1.0f;
+        }
+    }
+
+    float3 khw_n = cross(khw_dx, khw_dy);
+    const float khw_nl = length(khw_n);
+    if (!(khw_nl > 1e-9f)) return float4(1.0f, 1.0f, 1.0f, 1.0f);
+    khw_n /= khw_nl;
+    const float3 khw_eye = castView[2].xyz - khw_w;
+    if (dot(khw_n, khw_eye) < 0.0f) khw_n = -khw_n;
+
+    // KH_DLSW_NRMVIEW (26876, mode 554) - HOW MUCH OF THE SCREEN HAS A NORMAL?
+    //
+    // WHITE where the two baselines agree and N.L is trusted, BLACK where they
+    // do not and the factor falls back to the facing prior. The prediction this
+    // is here to check: the black regions must coincide with the rings, and
+    // must SPREAD as the camera lies down. If they do not - if 554 is white
+    // across the banded ground - the normal is resolved after all and this
+    // whole note is wrong, which is worth one screenshot to find out.
+    if (dbgCtl.w >= 553.5f && dbgCtl.w < 554.5f) {
+        return float4(khw_nrel, khw_nrel, khw_nrel, 1.0f);
+    }
+
+    // KH_DLS_WORLD_SHOW (mode 531): the reconstruction itself, as colour, so a
+    // wrong world position is visible as a wrong pattern instead of as a
+    // subtly wrong shadow. Metre-scale fract on each axis - a correct
+    // reconstruction paints a stable 1 m grid that stays welded to the ground
+    // as the camera moves, and a broken one swims or shears.
+    // OUR OWN MESHES ARE NOT THE WORLD - tested AFTER the reconstruction now,
+    // because KhMirInFront projects the world position into the mirror's own
+    // depth space (the KhVolZ idiom) and therefore needs khw_w.
+    //
+    // Moving it here also removes a hazard flagged at 26842: the mask used to
+    // return BEFORE ddx/ddy were taken for the normal, so the derivative
+    // neighbourhood straddled a divergent branch at every mask boundary. The
+    // reconstruction is a handful of instructions and runs on pixels we may
+    // then discard, which is the right trade for well-defined derivatives.
+    if (dbgCtl.w >= 538.5f && dbgCtl.w < 539.5f) {
+        if (mirMeta.x < 0.5f) return float4(1.0f, 0.0f, 0.0f, 1.0f);   // not armed at all
+        // BLACK where a mesh is genuinely in front and the pixel is refused,
+        // BLUE where a mesh merely projects here but sits BEHIND the visible
+        // world - the buried and clipping parts, which must still receive.
+        // BLACK where our mask says a mesh is genuinely in front and the pixel
+        // is refused; BLUE where the mask holds a mesh distance but it is
+        // BEHIND the visible world (the buried and clipping parts, which must
+        // still receive); WHITE where no mesh covers the pixel at all.
+        const float khv_md = khDlsMask.Load(int3(int2(clamp(i.pos.xy,
+                                 float2(0.0f, 0.0f),
+                                 float2(mirMeta.y - 1.0f, mirMeta.z - 1.0f))), 0));
+        const bool khv_cov = (khv_md > 0.0f) && (khv_md < 1.0e29f);
+        const bool khv_frt = KhDlsMaskInFront(i.pos.xy, mirMeta.y, mirMeta.z, khw_zl);
+        if (khv_frt) return float4(0.0f, 0.0f, 0.0f, 1.0f);
+        if (khv_cov) return float4(0.0f, 0.0f, 1.0f, 1.0f);
+        return float4(1.0f, 1.0f, 1.0f, 1.0f);
+    }
+
+    // KH_DLSW_MIRZ (26845, mode 540) - THE TEST'S OWN OPERANDS.
+    //
+    // Three builds produced the identical picture from three different
+    // comparisons, which means the comparison was never the thing to look at -
+    // its inputs were. This paints them: RED is our MESH'S distance from the
+    // mirror depth, GREEN is the WORLD SURFACE'S distance from the same
+    // projection, both scaled over 50 m, BLUE marks a mesh pixel.
+    //   red and green both present and DIFFERING over the mesh -> the operands
+    //     are good and only the margin is in question
+    //   red flat, black or pinned      -> the mirror depth is not what it seems
+    //   green flat or pinned           -> castViewN is not the mirror's matrix
+    //   magenta (red, no green)        -> the world projection failed entirely
+    // Whichever it is, it is visible rather than inferred, and it ends the
+    // guessing this mask has cost.
+    if (dbgCtl.w >= 539.5f && dbgCtl.w < 540.5f) {
+        if (mirMeta.x < 0.5f) return float4(1.0f, 0.0f, 0.0f, 1.0f);
+        // RED our mesh's distance from OUR mask, GREEN the world surface's
+        // distance, both over 50 m; BLUE marks a covered pixel. Red and green
+        // both present and differing over the mesh is the healthy reading.
+        const float khz_m = khDlsMask.Load(int3(int2(clamp(i.pos.xy,
+                                float2(0.0f, 0.0f),
+                                float2(mirMeta.y - 1.0f, mirMeta.z - 1.0f))), 0));
+        const bool khz_cov = (khz_m > 0.0f) && (khz_m < 1.0e29f);
+        return float4(khz_cov ? saturate(khz_m / 50.0f) : 0.0f,
+                      saturate(khw_zl / 50.0f), khz_cov ? 1.0f : 0.0f, 1.0f);
+    }
+
+)HLSL" R"HLSL(
+    // CHUNK BOUNDARY (26846). The note below is long because it records why
+    // three builds failed against the mirror's depth plane, and that reasoning
+    // is the thing that stops a fourth. SPLIT, never trim.
+    // COVERAGE, NOT THE DEPTH TEST (26846) - AND THIS IS A RETREAT ON PURPOSE.
+    //
+    // Three builds tried to decide whether our mesh is IN FRONT of the world
+    // surface by comparing against the mirror target's depth plane, and mode
+    // 540 finally showed why none of them could: the world side read ZERO
+    // (magenta everywhere - red present, green absent), and VSMirror explains
+    // it. That shader does NOT write the clip depth of the matrix it is given.
+    // It OVERWRITES z with its own near plane:
+    //
+    //     l22 = f / (f - 0.05);   z = l22 * w - 0.05 * l22
+    //
+    // where f is derived from the engine's b2 block - so the plane's A and B
+    // terms are l22 and -0.05*l22, NOT projection[2][2] and [3][2], which is
+    // what every attempt fed it. Worse, the remap is CONDITIONAL on four tests
+    // against engBlk, so on some frames it is that convention and on others it
+    // is the plain one, and a reader has to know which.
+    //
+    // That is not a plane to build a shipping test on: its semantics belong to
+    // another feature, are conditional, and can change without this code being
+    // told. So the default goes back to COVERAGE, which the field confirmed
+    // working at 26841 - it over-masks where a mesh sinks into terrain, taking
+    // a bite out of the shadow at the intersection, and that is a visibly
+    // smaller fault than painting the world's shading across the whole mesh.
+    //
+    // MODE 541 DOES NOT EXIST (corrected 26876, rule 1.73). The sentence that
+    // stood here said "mode 541 keeps the depth test for whoever finishes it".
+    // It is wired nowhere in this shader, nowhere in the C++, and it is not in
+    // set_render_debug_sqf's whitelist - so setting it would have silently done
+    // nothing, which is process failure 7 of the last campaign repeated as a
+    // comment. The mirror-depth route was ABANDONED, not parked: doing it would
+    // mean replicating VSMirror's conditional remap exactly, and the pass now
+    // has its OWN depth-only mask with semantics nobody else owns, which is the
+    // better of the two answers anyway.
+    // KH_DLSW_MASK (26847): our own mask, in metres, against the world
+    // surface's distance in metres. Both sides are the same quantity produced
+    // by machinery we own, so there is no convention, no partition and no
+    // remap to be wrong about - which is what the three mirror-based attempts
+    // each foundered on in a different way.
+    // KH_DLSW_TOUCH (26876b, mode 558) - DOES THIS PASS TOUCH OUR MESH AT ALL?
+    //
+    // The see-through has two candidate sources that look identical on a lit
+    // surface and have opposite fixes: this pass leaking past the self-mask, or
+    // the MESH receive path (KhDlsShadow inside DynLights / KhDynLightsPBR)
+    // shading the mesh oddly on its own. No lane can separate them, because the
+    // question is per-pixel and the answer is a colour.
+    //
+    //   GREEN  the self-mask refused this pixel - the world pass did not write
+    //          here, so anything visible on it belongs to the mesh kernels
+    //   RED    the world pass darkened this pixel. Red ON THE MESH is a mask
+    //          leak and this pass owns the artifact
+    //   BLACK  the pass ran and left the pixel alone
+    //
+    // If the vest comes back solid green and the outline is still there, stage
+    // 4 is exonerated and the next build looks at stage 3 - which would also
+    // mean the operator's mode-533 reading has drifted again and is worth
+    // re-taking. One screenshot decides it either way.
+    const bool khw_touch = (dbgCtl.w >= 557.5f && dbgCtl.w < 558.5f);
+    // KH_DLSW_MASKCOV: coverage, not a verdict. A pixel our mesh fully covers
+    // still returns here untouched - the interior is bit-identical to every
+    // build before this - and only the boundary, where coverage is partial,
+    // reaches the kernel and is blended back toward 1 in proportion below.
+    // KH_DLSW_MASKCOVVIEW (26877, mode 576) - PAINT THE COVERAGE THE PASS USED.
+    //
+    // The one number nothing has ever shown. 539 paints the BINARY verdict, 558
+    // paints where the pass wrote, 563 reverts the coverage to a verdict - and
+    // between them they can say "the mask covers the mesh" without ever saying
+    // BY HOW MUCH, which is the quantity the shipping path actually multiplies
+    // by. On our mesh the interior must be pure white and only the silhouette
+    // may be grey. Any grey INSIDE the mesh is the leak, drawn at its own exact
+    // footprint, and its shape names the cause: the outline of background
+    // geometry is the depth race (fixed by default at 26877, reverted by 575),
+    // a uniform wash is a mask that is scaled or offset, and holes that follow
+    // our own geometry are a caster missing from the mask's set.
+    float khw_cov = 0.0f;
+    const bool khw_covview = (dbgCtl.w >= 575.5f && dbgCtl.w < 576.5f);
+    if (mirMeta.x >= 0.5f) {
+        khw_cov = KhDlsMaskCov(i.pos.xy, mirMeta.y, mirMeta.z, khw_zl);
+        if (khw_covview) return float4(khw_cov, khw_cov, khw_cov, 1.0f);
+        if (khw_cov >= 0.999f) {
+            return khw_touch ? float4(0.0f, 1.0f, 0.0f, 1.0f)
+                             : float4(1.0f, 1.0f, 1.0f, 1.0f);
+        }
+    } else if (khw_covview) {
+        return float4(1.0f, 0.0f, 0.0f, 1.0f);   // mask not armed at all
+    }
+
+    if (dbgCtl.w >= 530.5f && dbgCtl.w < 531.5f) {
+        return float4(frac(khw_w.x), frac(khw_w.y), frac(khw_w.z), 1.0f);
+    }
+    // KH_DLSW_COARSE (26836, mode 536): the same reconstruction at a 100 m
+    // scale. A 1 m grid is invisible if the world position is wrong by orders
+    // of magnitude, or if it barely varies - both look like "no grid". At 100 m
+    // a CORRECT reconstruction still paints broad bands that stay welded to the
+    // ground as the camera moves, and a collapsed one paints a smooth
+    // screen-locked ramp. Comparing 531 against 536 separates "wrong scale"
+    // from "wrong entirely".
+    if (dbgCtl.w >= 535.5f && dbgCtl.w < 536.5f) {
+        return float4(frac(khw_w.x * 0.01f), frac(khw_w.y * 0.01f),
+                      frac(khw_w.z * 0.01f), 1.0f);
+    }
+
+    // KH_DLS_ZBIAS (26874) PASSED THE MEASURED DEPTH STEP HERE AND 26875 PUT
+    // IT BACK TO ZERO. Mode 550 showed the engine depth arriving in plateaus
+    // (identical neighbours, then 100 mm cliffs) against a 40 mm KH_DLS_BIAS_M,
+    // so covering the step looked like arithmetic rather than a theory. The
+    // field then reported mode 0 and mode 552 INDISTINGUISHABLE - the term
+    // changes nothing visible, so whatever draws the rings is not this compare
+    // being flipped by receiver-depth error. Hypothesis nine, refuted like the
+    // eight before it (KH_DLSW_BANDING ledger).
+    //
+    // The two extra depth Loads are gone with it; the khd_zunc parameter is
+    // kept only so the next attempt has the channel already plumbed, and mode
+    // 552 is now a no-op that should be deleted alongside it.
+    float4 khw_tx;
+    float3 khw_f = KhDlsWorldFactor(khw_w, khw_n, 0.0f, khw_nrel, khw_tx);
+    // KH_DLSW_MASKCOV: g = a + (1-a)*f. At coverage 0 this is f exactly, so
+    // every pixel with none of our mesh in it is untouched; at the boundary it
+    // withholds darkening in proportion to how much of the pixel is ours.
+    khw_f = lerp(khw_f, float3(1.0f, 1.0f, 1.0f), khw_cov);
+
+    // KH_DLSW_ZLSTEP (26873, instrument 550) - IS zl ITSELF QUANTISED?
+    //
+    // 548 left one bilinear tap: four binary compares of the receiver depth
+    // against four CONSTANT texel depths. Inside a texel nothing varies but the
+    // receiver depth, so a surviving sub-texel band means that depth is banded.
+    // dlswDepthFmt 41 checked the CONTAINER (R32_FLOAT) and not the CONTENT - a
+    // 32-bit float carries a quantised value perfectly well if whatever wrote
+    // it rounded first.
+    //
+    // This paints the per-pixel STEP in zl, over three decades: red 0-1 mm,
+    // green 0-1 cm, blue 0-10 cm. A continuous depth field paints a smooth dim
+    // wash that brightens with distance. A quantised one paints BLACK PLATEAUS
+    // separated by bright step lines, and if those lines are the rings, nine is
+    // the answer. Uses the same zl the shadow compare uses, one pixel apart.
+    if (dbgCtl.w >= 549.5f && dbgCtl.w < 550.5f) {
+        const float khw_sx = abs(KhCastZl(i.pos.xy + float2(1.0f, 0.0f), khw_dims) - khw_zl);
+        const float khw_sy = abs(KhCastZl(i.pos.xy + float2(0.0f, 1.0f), khw_dims) - khw_zl);
+        const float khw_s = max(khw_sx, khw_sy);
+        return float4(saturate(khw_s * 1000.0f), saturate(khw_s * 100.0f),
+                      saturate(khw_s * 10.0f), 1.0f);
+    }
+
+    // KH_DLSW_TEXEL (26871, instruments 545 and 546). Does the ring pattern
+    // coincide with the shadow map's own texel grid, and does its severity
+    // track the texel's screen footprint? Ledger at KH_DLSW_BANDING in the C++.
+    if (dbgCtl.w >= 544.5f && dbgCtl.w < 546.5f) {
+        if (khw_tx.w < 0.5f) return float4(1.0f, 1.0f, 1.0f, 1.0f);   // no sample here
+        uint khw_mw, khw_mh, khw_me;
+        khDlsMaps.GetDimensions(khw_mw, khw_mh, khw_me);
+        if (dbgCtl.w < 545.5f) {
+            // 545: the texel grid itself, as a checkerboard in map space. If
+            // the rings ARE texels they land on this checker exactly.
+            const float2 khw_tc = khw_tx.xy * (float)khw_mw;
+            const float khw_ck = fmod(floor(khw_tc.x) + floor(khw_tc.y), 2.0f);
+            return float4(khw_ck, khw_ck, khw_ck, 1.0f);
+        }
+        // 546: how many SCREEN pixels one texel spans, over 0..8. The world
+        // size of a pixel comes from the reconstruction's own derivatives, so
+        // this is the ratio that grows without bound as the camera lies down
+        // toward a surface while the map stays at KH_DLS_MAP_PX.
+        const float khw_pw = max(max(length(ddx(khw_w)), length(ddy(khw_w))), 1.0e-6f);
+        const float khw_r = khw_tx.z / khw_pw;
+        return float4(saturate(khw_r / 8.0f), saturate(khw_r / 64.0f),
+                      saturate(khw_r / 512.0f), 1.0f);
+    }
+
+    // KH_DLS_WORLD_AMP (mode 532): the same verdict, exaggerated. The honest
+    // factor is often a gentle darkening that is hard to judge against a night
+    // scene; this squares the departure from 1 so the shadow's SHAPE and
+    // EDGES can be checked against the mesh's own shadow before the magnitude
+    // is trusted. Never a shipping value.
+    if (dbgCtl.w >= 531.5f && dbgCtl.w < 532.5f) {
+        return float4(saturate(1.0f - (1.0f - khw_f) * 3.0f), 1.0f);
+    }
+    if (khw_touch) {
+        const bool khw_dark = (khw_f.r < 0.999f || khw_f.g < 0.999f || khw_f.b < 0.999f);
+        return khw_dark ? float4(1.0f, 0.0f, 0.0f, 1.0f)
+                        : float4(0.0f, 0.0f, 0.0f, 1.0f);
+    }
+    return float4(khw_f, 1.0f);
+}
 )HLSL" R"HLSL(float4 PSMaskCast(VSOut i) : SV_Target
 {
     // The field then produced the.x signature of a CONSTANT z BIAS (drift
@@ -636,6 +1587,35 @@ VSOut VSFullscreen(uint vid : SV_VertexID)
 
 float4 PSMain(VSOut i) : SV_Target
 {
+    // KH_DLSW_MESHFIRST (26876k, mode 570) - IS OUR FRAGMENT EVEN GETTING THERE?
+    //
+    // THE FIRST STATEMENT IN THE SHADER, ABOVE EVERY DISCARD, CLIP AND GUARD,
+    // AND THAT PLACEMENT IS THE WHOLE POINT. Every probe before this one - 560,
+    // 561, 562, 564, 565, 566, 567, 568, 569 - sits AFTER the LOD dither
+    // discard, ClipEdgeSliver, ClipOwnNear, the far-contract discards, the
+    // owner-map reject and the punch-through guard. Not one of them could
+    // report a pixel that never reached the shading code, so the entire
+    // elimination so far has been blind to exactly the failure the field is now
+    // describing: not a faint tint but the background objects appearing THROUGH
+    // the mesh as filled black shapes, parallaxing with those objects.
+    //
+    // A filled silhouette in the shape of background geometry is what you get
+    // when our fragments STOP BEING WRITTEN there - discarded above, or losing
+    // the depth test to that geometry - and what shows instead is the world
+    // behind, which at night in shadow is black. That is a coverage failure
+    // wearing the costume of a shading bug, and no amount of paint applied
+    // after the guards can distinguish the two.
+    //
+    // Solid magenta = our fragment reached the target at every pixel of the
+    // mesh, so the black shapes are written by something DOWNSTREAM and the
+    // hunt moves to the world pass, the blend or the engine's own post.
+    // Black shapes inside the magenta = our fragments are not arriving, and the
+    // cause is above this line: one of those discards, or the depth test.
+    // Either answer eliminates half of everything left, which is more than the
+    // last five builds managed between them.
+    if (KhDlsMeshDbg() == 570) {
+        return float4(1.0f, 0.0f, 1.0f, 1.0f);
+    }
     // blendCtl.w carries this fragment's dither threshold and the ZEROED
     // DEFAULT IS OFF, so every fill site that never heard of LODs keeps
     // drawing whole. KH_MESH_LOD CROSSFADE
@@ -736,6 +1716,35 @@ float4 PSMain(VSOut i) : SV_Target
     // normal keeps owning the receive gating below - shadow behavior stays in
     // parity with the untextured twin.
     KhMatSurf khtxS = KhSampleMat(i.uv);
+    // KH_DLSW_MESHALPHAMODE (26876l, mode 571) - THE TEXTURED PATH'S OWN CLIP,
+    // READ BEFORE IT FIRES. TWIN EDIT: PSMain and PSComposite.
+    //
+    // The field found the artifact happens ONLY on PBR meshes - an untextured
+    // primitive in the same scene is clean. That is the sharpest fact in this
+    // whole investigation, because the textured path contains a discard the
+    // untextured path does not run at all: the cutout clip on the line below,
+    // and the blend-split clips after it. A clip punches HOLES, holes show the
+    // world behind, and the world behind at night in shadow is BLACK - filled
+    // black shapes of the background geometry, parallaxing with it, exactly as
+    // reported and nothing like the faint tint I spent five builds chasing.
+    //
+    // Mode 565 could not see this: it paints khtxS.alpha AFTER the opaque
+    // contract has forced it to 1, so it reported white on a surface whose raw
+    // texture alpha may be full of holes. This paints the raw values, above
+    // every clip.
+    //
+    //   RED   = matParams0.y / 4, the alpha MODE. 0 black = opaque and no clip
+    //           runs; 0.25 = CUTOUT and the clip below is live; 0.5 / 0.75 =
+    //           the two halves of a blend material, both of which clip.
+    //   GREEN = the raw sampled alpha, before the opaque contract forces it.
+    //   BLUE  = matParams0.z, the cutout threshold. Green darker than blue
+    //           anywhere is a texel the clip is about to kill.
+    //
+    // Red black everywhere means the material is opaque, no clip runs, and this
+    // hypothesis is dead on one screenshot.
+    if (KhDlsMeshDbg() == 571) {
+        return float4(matParams0.y * 0.25f, khtxS.alpha, matParams0.z, 1.0f);
+    }
     // matParams0.y = alpha mode: 0 opaque, 1 cutout, 2 = a blend material's
     // TRANSLUCENT texels (the flush's post-scene part), 3 = the SAME blend
     // material's OPAQUE texels (the ordinary depth-writing draw). KH_MAT_BLEND.
@@ -775,6 +1784,46 @@ float4 PSMain(VSOut i) : SV_Target
             float3 khtb = cross(khtn, khtt) * i.tanw.w;
             khtxN = normalize(khtt * khtxS.nrmT.x + khtb * khtxS.nrmT.y + khtn * khtxS.nrmT.z);
         } else khtxN = khtn;   // degenerate tangent: geometric normal
+        // KH_DLSW_MESHGEOM (26877a, mode 577) - THE BISECT THE OPERATOR'S OWN
+        // OBSERVATION ASKS FOR. TWIN EDIT: PSMain and PSComposite carry this
+        // identically.
+        //
+        // The field reports the see-through is visible ONLY where the NORMAL
+        // MAP darkens the surface at that viewing angle - not where the mesh is
+        // directly lit, and not at all on an untextured primitive. That is the
+        // first clue anyone has had that separates the textured path from the
+        // untextured one by something other than "it has a texture", and the
+        // previous handoff already named this probe as the obvious next bisect
+        // and recorded that it did not exist.
+        //
+        // This drops the MAPPED normal and shades the textured path with the
+        // GEOMETRIC one, changing nothing else - same material, same albedo,
+        // same roughness, same alpha, same shadow, same lighting. It splits the
+        // two readings of the clue, which have opposite fixes:
+        //
+        // *** FIELD RESULT: ARTIFACT GONE. Recorded here because the two
+        // *** FOLLOW-UPS THAT ANSWER WERE READ INTO BOTH FAILED, and the next
+        // *** reader needs the failures more than the hypothesis.
+        //
+        // 578 gave the dynamic-light shadow QUERY the geometric normal while
+        // the shading kept the mapped one: INDISTINGUISHABLE FROM MODE 0. So
+        // KhDlsShadow's receiver-normal offset is not the carrier, and that
+        // whole branch - the 8.8 cm per-texel displacement of the query point -
+        // is refuted, not merely untested. Reverted.
+        //
+        // 579 gave the smf SHADOW GATE (dot(khShN, lighting1) > 0.01) the
+        // geometric normal: DID NOT FIX THE SEE-THROUGH AND BROKE THE SUN.
+        // With the gate uniform over a face, every pixel of a lit mesh reached
+        // the screen-space world-shadow term instead of only the texels past
+        // the terminator, so the world's cascade shadow printed across our
+        // meshes at full strength in daylight. The gate was MASKING the carrier,
+        // not being it. Reverted, and sun/moon was out of scope to begin with.
+        //
+        // What survives: 577 cures it, so the mapped normal IS in the chain,
+        // and neither of its two geometric consumers is the route. That leaves
+        // the SHADING consumers - N.L, the GGX lobe, the per-light ambient -
+        // and whatever the value they scale is carrying.
+        if (KhDlsMeshDbg() == 577) khtxN = normalize(i.nrm);
     }
 #endif
     float smf = 1.0f;
@@ -1092,6 +2141,38 @@ float4 PSMain(VSOut i) : SV_Target
 #else
     float a = i.icol.a * SolidMask(i.wpos);
 #endif
+    // KH_DLSW_MESHALPHA (26876g, mode 565) - THE OPACITY, SPLIT INTO ITS THREE
+    // FACTORS. TWIN EDIT: PSMain and PSComposite carry this identically.
+    //
+    // 562 (flat white), 564 (smf), 519 (no dynamic-light shadow) and 558/539
+    // (the world pass) between them exclude blending, the screen-space shadow
+    // chain, the whole shadow feature and stage 4. What survives that is a hard
+    // constraint rather than a hunch: background structure can only reach our
+    // mesh's colour through a SCREEN-SPACE READ OF A BUFFER CONTAINING THE
+    // BACKGROUND, and there is exactly one left in this shader - the perceptual
+    // composite below, which Loads sceneColorTex at our own pixel and lerps by
+    // this alpha. At a = 1 that lerp is an exact identity round trip and leaks
+    // nothing. Below 1 it mixes the pre-mesh scene capture into our surface in
+    // proportion, which is the reported artifact word for word.
+    //
+    // It also explains why 562 looked clean without clearing the route: at
+    // flat white, lc is 1.0 and a small scene contribution is swamped, while in
+    // mode 0 the shadowed parts of the mesh are DARK and the same contribution
+    // is large in relative terms - "faint, and worse where the surface is
+    // darker" is exactly what a fixed-fraction mix of a night scene looks like.
+    //
+    // RED = the object colour alpha, GREEN = the material alpha, BLUE =
+    // SolidMask. Their product is the lerp weight. Any channel below white
+    // names its own culprit, which is why this paints the factors and not the
+    // product (the handoff records what checking the container instead of the
+    // content cost last time).
+    if (KhDlsMeshDbg() == 565) {
+#if KH_TEXTURED
+        return float4(i.icol.a, khtxS.alpha, SolidMask(i.wpos), 1.0f);
+#else
+        return float4(i.icol.a, 1.0f, SolidMask(i.wpos), 1.0f);
+#endif
+    }
     if (bm == 1 || bm == 3) return float4(lc * a, 1.0f);
     if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), lc, a), 1.0f);
     if (bm == 4) return float4(lc * a, 1.0f);
@@ -1115,7 +2196,12 @@ float4 PSMain(VSOut i) : SV_Target
         float3 scn = sceneColorTex.Load(int3(int2(i.pos.xy), 0)).rgb;
         float3 ts = scn / (1.0f + scn);
         float3 tl = lc / (1.0f + lc);
-        float3 tm = lerp(ts, tl, a);
+        // KH_DLSW_MESHOPAQUE (26876g, mode 566): force the mix to full
+        // opacity. At weight 1 the Reinhard round trip is an exact identity and
+        // the scene capture cannot contribute, so if the see-through vanishes
+        // under 566 this Load is the carrier and the fix is upstream, in
+        // whichever factor of the alpha is short of 1. TWIN of PSComposite.
+        float3 tm = lerp(ts, tl, (KhDlsMeshDbg() == 566) ? 1.0f : a);
         return float4(tm / max(1.0f - tm, 0.0039f), 1.0f);   // cap ~HDR 255
     }
 

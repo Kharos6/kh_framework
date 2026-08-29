@@ -7317,6 +7317,66 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
                             khd_m == 476 ||   // KH_SVS_SKIP_OFF: every seam pass re-injects
                             khd_m == 478 ||   // KH_CULL_BACK_OFF: disable the back-half cull
                             khd_m == 480 ||   // KH_CB_RING_OFF: per-object DISCARD uploads (the A/B; cbRingLegacy climbs)
+                            khd_m == 552 ||   // KH_DLS_ZBIAS REVERT (26874, A/B): the world-receive shadow compare drops the receiver-depth uncertainty term from its bias, restoring the 26873 behaviour. Default adds it because mode 550 measured the engine linear depth that this pass unprojects its receiver position FROM, and found it arriving in PLATEAUS - adjacent pixels decoding the identical depth, then jumping 100 mm or more - while KH_DLS_BIAS_M is 0.04, a 40 mm bias against a 100 mm+ receiver uncertainty. Inside every plateau the compare therefore flipped on quantisation alone, which is the fine banding, and the plateaus are widest close in on a grazing surface where depth changes least per pixel, which is why it worsens as you approach and reads as a fade. The term is the step measured one pixel apart in that same depth field: a fraction of a millimetre where the depth is precise, growing to exactly cover the step where it is not. Only the WORLD receive passes it; both mesh sites pass 0, because a mesh's position is interpolated geometry and exact. Run 552 and expect the banding to return. Eight other hypotheses were refuted first and are listed in the KH_DLSW_BANDING ledger.
+                            khd_m == 555 ||   // KH_DLSW_MASKREG REVERT (26876, A/B): the self-owned mask goes back to being drawn with the FROZEN cast view and a projection rebuilt from the fov pair, which is the 26875 default. Run it and expect the white rim along the mesh silhouette to come back. Default now draws the mask with the engine's OWN view and projection for this frame - the matrices it actually rasterised our mesh with. The two jobs were conflated: the RECONSTRUCTION turns a depth texel into a world point and needs the frozen view because the engine's linear depth is frame N-1 there (measured at 26838 and unchanged), while the MASK answers "did the engine draw our mesh at this pixel", which is a question about the colour target we are about to multiply - frame N, view N. Feeding the mask view(N-1) displaces it by a frame of camera motion and feeding it a rebuilt projection displaces it again; both push it OUTWARD on one side, and an outward mask refuses pixels that are really world, so those keep their unshadowed brightness while the shadow around them darkens. That is the rim, and it is dashed wherever the error is sub-pixel and only crosses a pixel boundary now and then. Read dlswFovPxX/Y beside this - the old 1% ratio gate could not resolve a pixel and read as exoneration for six builds.
+                            khd_m == 554 ||   // KH_DLSW_NRM CONFIDENCE (26876, instrument, RUN THIS FIRST): paints how much the world-receive pass trusts its own surface normal - WHITE where two independently sized plane fits of the reconstructed depth agree and N.L is used as measured, BLACK where they disagree and the term falls back to the facing prior. THE PREDICTION THIS EXISTS TO TEST, committed before the build: the black regions must COINCIDE with the ground rings, and must SPREAD across the screen as the camera lies down toward the surface. If they do, hypothesis ten holds and the banding is the normal collapsing inside the quantisation plateaus of the engine's linear depth, not anything in the shadow map. If 554 comes back WHITE across banded ground, ten is refuted on the same screenshot and the KH_DLSW_BANDING ledger gains an eleventh entry. Note that mode 520 never reached this: it disarms the normal inside KhDlsShadow only, and the factor reads the same normal in three more places - which is why entry six of that ledger was struck at 26876.
+                            khd_m == 558 ||   // KH_DLSW_TOUCH (26876b, instrument): paints WHERE the world-receive pass actually writes, so the residual see-through can be attributed instead of guessed at. GREEN = the self-mask refused this pixel and the pass wrote nothing, so anything still visible there belongs to the MESH receive path (KhDlsShadow inside DynLights / KhDynLightsPBR). RED = the pass darkened this pixel; red anywhere on our mesh is a mask leak and stage 4 owns it. BLACK = the pass ran and left the pixel alone. This exists because the two candidate sources look identical on a lit surface and have opposite fixes, and no counter can separate them - the question is per-pixel. If the vest comes back solid green with the background outline still visible on it, the world pass is exonerated, and the mode-533 baseline reading should be re-taken before anything else is built.
+                            khd_m == 557 ||   // KH_DLS_REACH_RADIANCE REVERT (26876b, A/B): the shadow map far plane goes back to being solved against a UNIT-radiance lamp and bounded by the blind 600 m backstop instead of the sun's shadow range. Expect the sharp straight slice across distant shadowed geometry to return. Default prices the floor against what the light DELIVERS - attenuation times the source luminance times the engine's global diffuse multiplier times the script intensity - because attenuation alone is not what reaches the eye: a light whose diffuse and intensity multiply out to 20 still delivers eight 8-bit levels where attenuation alone has fallen to one. The field dump measured dlsReachMaxM 41.5 against dlsReachRawMax 100, capped on 4190 of 4190 tests, while the same flashlight plainly lit a church well past 41 m; KhDlsFaceUV refuses every receiver past the far plane and answers LIT, and a far plane is a PLANE, so its intersection with a wall is a straight line - which is the slice, and a shape no attenuation curve can draw. The reach is then bounded by g_sun_range rather than 600 m, which is the parity the feature was missing: past the distance the sun cascades stop shadowing, a lone dynamic-light shadow is an artefact. Read dlsReachPeakMax (1.0 means the new pricing is doing nothing), dlsReachCeilM and dlsReachSunCapped.
+                            khd_m == 580 ||   // KH_DLS_FACE_SEAM REVERT (26878, A/B): restores the uv refusal at the outermost texel of every CUBE face in KhDlsFaceUV. Default since 26878 clamps instead (the six faces tile, so the edge texel is the correct sample), and chooses the face from the UNOFFSET receiver position so the normal offset can no longer flip a receiver onto the neighbouring face. Both were the handoff's "lit seam wherever a shadow crosses a face boundary". Under 580 the seam returns; if it does not, the seam was never this and the note in cb.hlsl is wrong.
+                            khd_m == 581 ||   // KH_DLS_RANGE OFF (26879, A/B): the dynamic-light shadows stop obeying the shadow view distance - dlsRange.w is zeroed at the fill, so KhDlsShadow neither fades nor refuses past clamp(shadowVisibility, 8, 1000) and PSDlsWorld's range cut falls through. Default since 26879 fades exactly as the sun's self term does (full until 94%, gone at 99.5%), on both mesh passes and the world receive through one helper. If a shadow still cuts hard at that distance under 581, the cut is not this rule.
+                            khd_m == 577 ||   // KH_DLSW_MESHGEOM (26877a, A/B, RUN THIS FIRST): shades the TEXTURED path with the GEOMETRIC normal instead of the mapped one, changing nothing else - same albedo, same roughness, same alpha, same shadow, same lights, same everything. It exists because of the field's own observation that the see-through is visible ONLY where the normal map darkens the surface at that viewing angle, never where the mesh is directly lit, and never on an untextured primitive: that is the first thing anyone has found that separates the textured path from the untextured one by something other than the presence of a texture, and the previous handoff had already named this bisect as the obvious next one and recorded that it did not exist. The two possible answers have opposite fixes and each kills half the remaining surface area. ARTIFACT GONE means the mapped normal is in the causal chain rather than merely revealing something, and everything it feeds becomes suspect at once - KhDlsShadow's receiver-normal offset most of all, which displaces the shadow sample by 1.5 texels along that normal, about 9 cm at 30 m, in a direction the normal map picks per texel. ARTIFACT SURVIVES means the normal map is only a REVEALER: it creates regions where the mesh's own contribution is near zero, and something of CONSTANT ABSOLUTE amplitude becomes visible there while being swamped everywhere else - which rules out a proportional carrier, and a dest*src multiply blend is exactly a proportional carrier, so it would exonerate the world-receive pass on physical grounds rather than on a screenshot reading of 558. Run it in the same view as the artifact, against mode 0.
+                            khd_m == 576 ||   // KH_DLSW_MASKCOVVIEW (26877, instrument, RUN THIS FOR THE SEE-THROUGH): paints, over the whole screen, the COVERAGE the world-receive pass actually multiplies by - WHITE fully ours and refused, BLACK not ours at all, grey in between - taken before the interior early-out so nothing is hidden. Red means the mask was not armed this frame. This is the one number the pass has never shown: 539 paints the binary verdict, 558 paints where the pass wrote, 563 reverts the coverage to a verdict, and between them they can say the mask covers our mesh without ever saying by how much. On our mesh the INTERIOR must be pure white and only the silhouette may be grey. Any grey inside the mesh is the leak drawn at its exact footprint, and its shape names the cause outright: the outline of background geometry is the depth race that 26877 removed by default (set 575 to bring it back and confirm), a uniform wash over the whole mesh is a mask that is scaled or offset from where the engine rasterised it - though note that route is already measured shut, dlswVpMismatch reading 0 with the viewport at 3840x2160 exactly equal to cast_dims, so re-read the lane in the same session before believing it rather than assuming it - and holes that follow our own geometry rather than the background's mean a caster is missing from the mask's set, which is a C++ question in kh_dls_render's snapshot rather than a shader one. Take it in the same view as the artifact, at mode 0 first so you know what you are looking for.
+                            khd_m == 575 ||   // KH_DLSW_MASKOWN (26877, SHIPPED AS DEFAULT AND TAKEN BACK OUT AT 26877a; now an OPT-IN measurement): arms the coverage-only self-mask in the world-receive pass - a pixel counts as ours whenever our mesh was RASTERISED there, with no depth comparison at all. Default is the 26847 rule again, bit-identical: ours only if our mesh's recorded distance is under 99.5% of the world surface's distance at that pixel. THIS WAS SHIPPED AS THE DEFAULT AT 26877 AND IT WAS THE WRONG CALL - it did not touch the see-through and it cost exactly the regression its own note predicted, a mesh half underground masking its BURIED pixels as well as its visible ones, so the shadow it casts on the terrain gets clipped away along the ground line. That fault was fixed long ago and this brought it back; rule 1.83, broken in the build after it was written up, and the 26876b lesson repeated - a trade that pays nothing is not a trade. What the failed trade did buy is worth more than it cost: removing the comparison ENTIRELY changed nothing about the artifact, which exonerates the depth race by construction rather than by a screenshot reading of 558, and that is a stronger statement than any paint mode has made about this route. The reasoning for why the comparison is unsound stands and is kept in the shader - it races our mask's clip w from this frame against the engine's linear depth from the previous one, with a half-percent margin and nothing binding them - so if a future artifact ever does have that signature, this mode is the one-key test. Keep it; it is now cheap and it is measured. The compare answers a different question, and it answers it by racing two independently produced quantities with a half-percent margin: our mask's clip w, written this frame under the engine's own view and projection, against the engine's linear depth, which at our hook is the PREVIOUS frame's and arrives through a rescale and a plane-pick rule. Nothing binds those two together, and every way the race can go wrong has one signature - the pixels it fails over are chosen by the depth of the WORLD GEOMETRY behind our mesh, so the failed region has that geometry's SHAPE, parallaxes with it rather than with our mesh, and receives the world's own shadow factor, which at night fully blocked is BLACK. That is the report word for word, which is why the comparison is removed rather than a particular disagreement being chased: every surviving candidate travels through it. The cost is known and was accepted once before - without the compare a mesh that sinks into terrain masks its BURIED pixels too, so the shadow gets a bite taken out of it at the intersection, which is precisely the trade 26846 shipped and the field confirmed at 26841, before 26847 added the compare back on top of a mask that had just been made registration-exact and no longer needed it. If the see-through survives 575 AND default identically, this whole route is exonerated and 576 will show a white mesh interior, at which point the artifact is downstream of this pass entirely.
+                            khd_m == 574 ||   // KH_DLS_RPDB HALF-REVERT (26877, A/B, RUN THIS SECOND): the receiver-plane gradient stays ARMED but the compare bias constants go back to the 26876m pair - KH_DLS_BIAS_M 0.04 m and KH_DLS_BIAS_SLOPE 0.006 per metre of range. It exists so the build can say which of two simultaneous changes did the work, which is the question a combined edit normally makes unanswerable. Default ships both halves: the gradient, which removes the need for the bias to cover the surface's tilt at all, and the constants re-derived from the map's actual depth resolution now that they no longer have to. If 574 looks like default, the constants were doing nothing and the gradient is the whole result; if 574 still shows the bright strip, the constants were the load-bearing half and the gradient alone was not enough. Either answer is worth a screenshot before the instrumentation for this campaign is stripped. The derivation the new constants come from is written out at KH_DLS_BIAS_M in the C++ and reproduced beside KH_DLS_GRAD_TEXELS in the shader: the maps are D32_FLOAT, so one depth quantum is 0.21 mm at 30 m and 9.5 mm at the session's worst case of 200 m, against 0.006 per metre pricing 180 mm at 30 m - a factor of 850, which is what said the constant was covering the missing receiver plane rather than the depth format.
+                            khd_m == 573 ||   // KH_DLS_RPDB REVERT (26877, A/B, RUN THIS FIRST IF THE BLEED IS BACK): the dynamic-light shadow compare goes back to the 26876m form in full - one already-projected reference depth for all four bilinear taps, the texel*tan(theta) slope stand-in, and the old bias constants. Together with the C++ twin that restores those constants this is bit-identical to 26876m, so it is the honest A/B for the whole change. Default takes the sun's THIRD defence, which this kernel has been standing in for since 26822 and which the note above KhDlsShadow has admitted to since then: KhSelfTapT corrects its reference PER TAP by d.x*g.x + d.y*g.y, the depth the receiver's own plane would have at that texel, so its constant bias never has to cover the surface's tilt and never grows. A single reference is only correct for a receiver parallel to the map plane; on a tilted one the true depth differs at every texel of the footprint, and both 26822's N.L divide and 26876m's texel*tan bought that spread with peter-panning - 63 cm of it at 30 m on a face turned edge-on to the lamp, which is wider than the box it was supposed to be shadowing. The gradient is not a fit or an estimate: on a plane, depth is an affine function of map position, so dz/du and dz/dv fall straight out of the face projection and the receiver normal, and the derivation is written out at KhDlsGrad. It is CLAMPED at KH_DLS_GRAD_TEXELS rather than floored, for the same reason 26876m clamped its tangent: at grazing incidence the plane genuinely spans unbounded depth inside one texel and no correction is right, so that sliver is allowed to acne instead of the whole shadow lifting off its caster. Watch for acne on grazing surfaces under default - if it appears, the clamp is the number to look at, not the constants, and 574 will tell you which half to blame.
+                            khd_m == 572 ||   // KH_DLS_BIAS_SLOPE_TEXEL REVERT (26876m, A/B): the dynamic-light shadow compare bias goes back to dividing the WHOLE metre bias by N.L with a 0.25 floor. Expect the bright strip of leaked light along the edges of our meshes to return. That divide inflated every term - including the constant and the range term, neither of which is a slope - by up to 4x on a face turned edge-on to the lamp: 55 cm of bias at 15 m, 94 cm at 30 m. A compare bias is a distance the receiver is pushed TOWARD the light before being tested, so that is half a metre of peter-panning, the shadow detaches from its own caster, and light lands in a band hugging the silhouette - a bright strip down the edge of a box lit from behind. The sun does not do this: KhSelfTapT carries a receiver-plane gradient, correcting each tap by the depth the receiver's own plane would have at that texel, so its constant bias never has to cover the surface's tilt and never grows. The note above KhDlsShadow already recorded that the sun has three defences and that this kernel took only two; the gradient is the one it skipped and the N.L divide was standing in for it. 26876m replaced that divide with one texel in world metres times tan(theta), which is a better-shaped stand-in for the same missing quantity; 26877 removed the stand-in entirely and took the gradient itself. Mode 573 is that revert and is the one to reach for if the bleed is BACK; this mode goes one step further back and should only be needed to reproduce the original report.
+                            khd_m == 571 ||   // KH_DLSW_MESHALPHAMODE (26876l, instrument, RUN THIS WITH 570): paints the textured path's raw alpha state BEFORE any clip fires. RED = the alpha mode over 4 (black = opaque and NO clip runs, 0.25 = cutout and the clip is live, 0.5 / 0.75 = the two halves of a blend material, both of which clip). GREEN = the raw sampled texture alpha, before the opaque contract forces it to 1. BLUE = the cutout threshold; green darker than blue anywhere is a texel the clip is about to kill. The field's finding that this happens ONLY on PBR meshes and never on an untextured primitive is what makes this the place to look: the textured path runs a cutout clip and two blend-split clips that the untextured path never reaches at all, a clip punches holes, holes show the world behind, and the world behind at night in shadow is BLACK - filled black shapes of the background geometry, parallaxing with it, which is the report exactly. Mode 565 could not see any of this because it paints the alpha AFTER the opaque contract has forced it to 1. If RED comes back black everywhere the material is opaque, no clip runs, and this dies on one screenshot; if it comes back 0.25 or higher, read GREEN against BLUE to see the holes being cut.
+                            khd_m == 570 ||   // KH_DLSW_MESHFIRST (26876k, instrument, RUN THIS - IT SUPERSEDES THE REST): our meshes return solid MAGENTA from the FIRST STATEMENT of the pixel shader, above every discard, clip and guard. That placement is the point. Every probe before it - 560, 561, 562, 564, 565, 566, 567, 568, 569 - sits after the LOD crossfade dither discard, ClipEdgeSliver, ClipOwnNear, the far-contract discards, the owner-map reject and the punch-through guard, so not one of them could report a pixel that never reached the shading code at all. The description of the artifact as filled BLACK shapes of the background objects, parallaxing with those objects, is what a COVERAGE failure looks like: our fragments stop being written there - discarded above, or losing the depth test to that geometry - and what shows instead is the world behind, which at night in shadow is black. SOLID MAGENTA means our fragment reached the target at every pixel and the black shapes are written by something downstream (the world pass, the blend, or the engine's own post). BLACK SHAPES INSIDE THE MAGENTA mean our fragments are not arriving and the cause is above that line - one of the discards, or the depth test - at which point the LOD crossfade dither (blendCtl.w), the owner-map reject (shadowMeta2.zw, whose own paint is mode 441) and the punch-through guard (fxParams1) are the three to bisect, in that order.
+                            khd_m == 569 ||   // KH_DLSW_MESHEDGE (26876j, instrument, RUN THIS): high-passes our meshes' shaded colour with the 2x2 quad derivative and amplifies it, drawing any coherent edge as a bright curve on black. The artifact is described as an OUTLINE and an outline is a gradient, so this measures the thing directly instead of hoping it survives a tone curve. It does not depend on the surface's absolute brightness, which is precisely what voided 562, 565, 567 and the first 568 - all four painted the mesh flat or black and so could not report faint structure either way. The vest's own weave registers as fine uniform texture; a background silhouette registers as a long coherent line through it, and the two are not easy to confuse. If no coherent line appears here while the see-through is visible at mode 0, then the artifact is not a gradient in our mesh's shaded colour at all, and every remaining hypothesis inside this shader is wrong.
+                            khd_m == 568 ||   // KH_DLSW_MESHLIFT (26876i, instrument, RUN THIS): the shipping picture with a quarter-power gamma lift on our meshes and NOTHING ELSE CHANGED - same geometry, same lighting, same material, same shadow, same inputs. It stretches the dark end, where a faint artifact lives, so the see-through can be seen clearly enough to localise and photograph instead of being inferred. This exists to correct a flaw in my own elimination, not to test a new idea: 562 and 565 painted the mesh FLAT WHITE and 567 painted it BLACK at night, and I counted all three as clearing their suspects. They do not clear anything about faint structure - an image with no tonal range cannot report the presence or absence of something faint. Only 564 was a genuine contrast test, and the artifact has been visible in exactly the modes where the mesh has tonal range (0, 519, 561), which is what a faint artifact does whatever causes it. Use this to get a zoomed capture of the artifact itself; pair it with mode 514, which stands the whole dynamic-light shadow feature down, to re-take the baseline that the 519 result showed has drifted.
+                            khd_m == 567 ||   // KH_DLSW_MESHNODL (26876h, A/B, THE COMPLEMENT OF 561): our meshes are shaded normally with the DYNAMIC LIGHT contribution removed and nothing else changed - sun, sky ambient, emissive, material, normal map, all at full contrast. 561 painted the dynamic-light contribution alone; this paints everything except it, so the two partition the shaded colour exactly and the artifact has nowhere to hide between them. Structure visible HERE means the dynamic lights are innocent and what 561 showed was the vest's own weave under a moving light. Structure in 561 and NOT here confirms the dynamic-light shading and narrows to attenuation, the cone, the per-light ambient or the mapped normal. Run this before anything else is built: 565 and 566 have just cleared the mesh's opacity and the perceptual composite, which means every screen-space read in the mesh pixel shader is now excluded, and background structure cannot enter a colour except through one - so either something in that elimination is wrong, or what is being seen is not a copy of the background at all. Worth pairing with a free observation: STRAFE. Structure that stays welded to the world as the camera moves is world-space or light-space; structure that slides with the view is screen-space, and after 565/566 there should be no screen-space route left to slide.
+                            khd_m == 566 ||   // KH_DLSW_MESHOPAQUE (26876g, A/B, RUN THIS WITH 565): forces the perceptual composite on our meshes to full opacity. At weight 1 the Reinhard round trip (tonemap, lerp, invert) is an exact identity, so the pre-mesh scene capture cannot contribute a single bit. If the see-through VANISHES under 566, that sceneColorTex Load is the carrier and the fix is upstream in whichever factor of the alpha is short of 1 - read 565 to see which. If it SURVIVES 566, the last screen-space read in the mesh shader is cleared too and the artifact is not in this shader at all.
+                            khd_m == 565 ||   // KH_DLSW_MESHALPHA (26876g, instrument, RUN THIS FIRST): paints our meshes' opacity split into its three factors - RED the object colour alpha, GREEN the material alpha, BLUE SolidMask - whose product is the weight the perceptual composite lerps by. Any channel below white names its own culprit. This is reached by elimination and the elimination is now tight: 562 (flat white) cleared blending and coverage, 564 (smf) cleared the screen-space shadow chain, 519 cleared every dynamic-light shadow, and 558 with 539 cleared the world-receive pass. Background structure can only reach our mesh's colour through a screen-space read of a buffer that CONTAINS the background, and after that elimination exactly one remains in this shader: the perceptual composite Loads sceneColorTex at our own pixel and lerps by this alpha. At alpha 1 that lerp is an exact identity and leaks nothing; below 1 it mixes the pre-mesh scene into our surface in proportion. It also explains why 562 read clean without clearing the route - at flat white the mesh is blown out and a small scene contribution is swamped, while in mode 0 the shadowed parts are dark and the same fixed fraction is large in relative terms, which is "faint, and worse where the surface is darker" exactly.
+                            khd_m == 564 ||   // KH_DLSW_MESHSMF (26876f, instrument, RUN THIS NEXT FOR THE SEE-THROUGH): paints our meshes with smf, the per-pixel shadow factor the mesh shading is handed - WHITE fully lit, BLACK fully shadowed, nothing else drawn. 562 came back a clean flat white silhouette, which means the mesh is not being blended with anything behind it and the artifact is in SHADING; 519 already excluded every dynamic-light shadow. What remains in the shading path that could carry the shape of things BEHIND the mesh is smf, because of where it comes from: the caller builds it from the engine's received world shadow (khShadowMask and its pre/post pair, t20-t22) and the mirror stencil, all read at this pixel in SCREEN SPACE - and the engine's mask does not contain our injected geometry, so at a pixel our mesh covers it describes the WORLD BEHIND IT. That is precisely the fault KH_DLSW_SELFMASK fixed for the world-receive pass, seen from the other side of the fence, and it has never been checked from the mesh side. If the outline appears in this paint, smf is the carrier and the fix is a self-mask on the mesh receive exactly as stage 4 has one. This mode and 561 are mutually exclusive - KhDynLightsPBR never reads smf - so whichever of the two shows the structure settles it outright.
+                            khd_m == 563 ||   // KH_DLSW_MASKCOV REVERT (26876f, A/B): the world pass goes back to a BINARY self-mask verdict per pixel. Expect the pixel-wide bright rim where our mesh meets a shadow to return at full amplitude. Default treats the mask as COVERAGE instead: the blend target is multisampled (dlswRtDim 6 = TEXTURE2DMS, 8 samples) and this pass runs at pixel frequency, so one factor is written to all eight samples of a pixel - and at a silhouette some of those samples are our mesh and some are the world behind. A binary mask must choose for all of them at once, refuses, and the world samples in that pixel keep full brightness while every neighbour is darkened. That is structural and survives perfect registration, which is why matching the view and projection (26876a) and then the fp32 rebase (26876e) each only reduced it. The framebuffer holds c = a*mesh + (1-a)*world, so the best a single multiply can do is g = a + (1-a)*f, and that is what default now writes, with a estimated from a 3x3 box over the mask. The estimate cannot see subpixel coverage, so it ramps over about three pixels rather than one - a three-pixel gradient at a third amplitude instead of a one-pixel step at full amplitude. Fully covered interior pixels are bit-identical to every previous build. Exact elimination needs the mask target itself to carry coverage (MSAA or supersampled), which is memory this has not been shown to be worth.
+                            khd_m == 562 ||   // KH_DLSW_MESHFLAT (26876e, instrument, RUN THIS NEXT): our meshes return FLAT WHITE. No lighting, no shadow, no normal, no normal map, no texture, no albedo - one constant, from both shading entry points. Every input that could carry structure is removed, so the question it answers is binary: if the world behind is STILL discernible through the mesh, then nothing being computed is responsible and the mesh's pixels are being blended with what is behind them - the fault is coverage or alpha, not shading. If the mesh comes back a clean flat white silhouette with no trace of the background, the artifact IS in shading, and 561 (which keeps the normal map and the albedo) against 560 (the shadow term alone) says which half. This is the test the word "see-through" literally asks for and it has never been run. Note what is already excluded: mode 519 showed the artifact survives with every dynamic-light shadow switched off, mode 558 showed the world-receive pass writes 1.0 on every pixel of our meshes, and mode 539 agreed - so the entire dynamic-light SHADOW surface area, stage 3 and stage 4 alike, is already ruled out.
+                            khd_m == 561 ||   // KH_DLSW_MESHLIGHT (26876e, instrument, RUN THIS WITH 560): paints our meshes with the WHOLE dynamic-light contribution and nothing else - attenuation, spot cone, the per-light ambient and KH_DLS_AMB_KEEP included - against a WHITE albedo and a default F0, so the material is out of the picture entirely. It brackets 560: 560 is the shadow TERM alone, this is the shading that term feeds. Structure visible in 561 but NOT in 560 is in the dynamic-light shading rather than in the shadow lookup, which points at the ambient/AMB_KEEP path or the attenuation rather than at the map. Structure visible in NEITHER, while still visible at mode 0, means the reported outline is not in this system at all and belongs to the material or to the engine's own shading - at which point the mode-533 baseline reading has drifted and needs re-taking before another build is spent here.
+                            khd_m == 560 ||   // KH_DLSW_MESHPROBE (26876d, instrument, RUN THIS FOR THE SEE-THROUGH): paints, ON OUR MESHES, the strongest dynamic-light occlusion any casting light claims at each pixel - WHITE fully lit, BLACK fully blocked, greys in between. Nothing else is shaded, so the surface shows the shadow lookup and only the shadow lookup. Mode 558 has already exonerated the world-receive pass: on our mesh it returns 1.0 at every pixel, either because the self-mask refused it or because the surface behind is sky and the depth test refused it first, and a multiply by 1.0 writes nothing - 539 agreed, painting the mesh silhouette solid black. So the see-through is downstream of KhDlsShadow in the MESH kernels. If the reported outline appears in this paint, the lookup owns it and the next question is the map, its bias or the spot frustum's uv window. If the surface comes back FLAT WHITE while the outline is still visible at mode 0, the lookup claims nothing at those pixels, the artifact is not the dynamic-light shadow at all, and the mode-533 baseline reading needs re-taking before anything further is built. Note this is the first mode ever to reach the mesh receive path: dbgCtl.w carries the raw mode only on the world pass, so it rides dlsFaceSlice[].z instead (KH_DLS_MESHMODE) - which also means 548, 549 and 552 were world-receive-only all along.
+                            khd_m == 559 ||   // KH_DLSW_ONESIDED REVERT (26876c, A/B): the world-receive pass goes back to taking its normal from the raw 2x2 quad derivative wherever the wide plane fit is refused. Expect the pixel-wide outline to return wherever ANY geometry silhouette - game or ours - sits beside a dynamic-light shadow. Default takes the difference one-sided on the side that stays on the centre pixel's own surface: per axis, the two neighbours' depths are compared against the centre's and the nearer is kept, which on a continuous surface is the central difference to within a quantisation step and at a cliff is the difference along the surface the centre actually belongs to. The outline was never two bugs - a quad derivative straddling a depth discontinuity returns a plane belonging to NEITHER side, and every build so far only chose which way to be wrong with it: 26876a refused and applied the facing prior, which over-darkened and drew a DARK line; 26876b trusted the straddling derivative, which draws a BRIGHT one. The centre pixel was never ambiguous, only the difference was, and only because it was taken across the cliff. NOTE that mode 556 (the 3x3 mask dilation) is GONE at 26876c, not renumbered: it was shipped against an unmeasured hypothesis, did not change the see-through, and added a bright ring of its own around our meshes. Setting 556 now does nothing.
+                            khd_m == 553 ||   // KH_DLSW_NRM REVERT (26876, A/B): the world-receive pass goes back to taking its surface normal from a 2x2 quad derivative of the reconstructed world position, unweighted. Run it and expect the concentric ground rings and the close-range fade to return together, because they are one mechanism. KhCastWorld builds its view ray as (ndc.x*fovx, ndc.y*fovy, 1) scaled by the linear depth, so inside a quantisation plateau - where mode 550 measured adjacent pixels decoding the IDENTICAL depth before jumping 100 mm - the depth is constant across the quad and the reconstructed surface is the plane z = const in view space, whose normal is the VIEW AXIS. Not noise: a specific wrong answer pointing at the camera, alternating with the true normal at every depth cliff, switching on the iso-depth contours of the field. Those contours are conics on a ground plane, nested and symmetric about the plane holding the view axis, which is concentric rings with one straight seam - the report verbatim. The same collapse kills the shadow up close: a near-horizontal view axis against a lamp overhead drives dot(N,L) to zero and the blocked share with it. Default fits the plane at two pixel baselines instead of one, which buys signal against a quantisation step fixed in metres, and carries their agreement into the factor so an unresolved normal cannot drive N.L at all. Read mode 554 for that confidence directly.
+                            khd_m == 550 ||   // KH_DLSW_ZLSTEP (26873, instrument, RUN THIS): paints the per-pixel STEP in the engine linear depth the world-receive pass reconstructs from, over three decades - RED ramps 0-1 mm, GREEN 0-1 cm, BLUE 0-10 cm, black meaning two neighbouring pixels decoded the IDENTICAL depth. A continuous depth field paints a dim wash that brightens smoothly with distance. A QUANTISED one paints black plateaus separated by bright step lines, and if those lines are the ground rings then the banding is depth quantisation in the CONTENT of the engine's depth - which dlswDepthFmt could never have shown, because it reports the container (41 = R32_FLOAT) and a 32-bit float carries a pre-rounded value perfectly well. This is hypothesis nine; eight are already refuted in the KH_DLSW_BANDING ledger (fov, viewport, frozen view, reconstruction, receiver normal, depth format, map resolution, PCF filter). It is reached by elimination rather than by insight: mode 548 leaves a single bilinear tap comparing the receiver depth against four CONSTANT texel depths, so inside one texel the only thing that can still vary is that depth, and the banding survives 548 unchanged. Expect the plateaus to be widest close in on a grazing surface, where depth changes least per pixel, which is also where the artifact is worst.
+                            khd_m == 549 ||   // KH_DLS_PCF 3x3 (26872, CANDIDATE FIX, A/B against default): the dynamic-light shadow filter takes nine taps on the map's OWN texel period instead of five at 0.75 of a texel. Taps on the grid period cannot beat with the grid, and nine verdicts give a genuinely graded penumbra instead of five ramps pinned to binary corners. This is the proposed cure for the ground banding and the close-range fade; run it against default on the same patch and the same angle. Costs nine Loads per light per pixel where the current filter costs five, so judge the frame cost too, not only the picture. If 548 shows the filter is NOT the source, this mode is pointless and should be deleted with it.
+                            khd_m == 548 ||   // KH_DLS_PCF SINGLE TAP (26872, DIAGNOSIS, RUN THIS FIRST): the dynamic-light shadow filter drops to one bilinear tap - no five-tap sum, so no beat between the tap offset and the texel grid. Expect it to look WORSE in absolute terms, with hard aliased shadow edges; that is not the point. The question is whether the fine banding CHANGES CHARACTER OR VANISHES. Mode 545 showed the ground rings are finer than the projected texel trapezoids, and nothing in the map lookup can have a sub-texel period because the stored depth is constant inside a texel - but this filter can, because KhDlsBilin compares binary per texel and then bilerps the four verdicts, and KhDlsSoft sums five of those at +/-0.75 texel. An 0.75 offset against a 1.0 grid beats with a period of exactly three texels, and the projected texel size varies smoothly across a grazing surface so that beat sweeps through phase and draws concentric rings. If the rings survive 548 unchanged, the filter is innocent and hypothesis eight joins the other seven in the KH_DLSW_BANDING ledger.
+                            khd_m == 546 ||   // KH_DLSW_TEXEL FOOTPRINT (26871, instrument): paints how many SCREEN pixels one dynamic-light shadow map texel spans at each pixel of the world-receive pass, over three decades - RED ramps 0-8, GREEN 0-64, BLUE 0-512, and white means a texel covers hundreds of pixels. The world size of a screen pixel is taken from the reconstruction's own derivatives, so this is the true projected ratio rather than an estimate. KH_DLS_MAP_PX is 1024 per cube face at 90 degrees, so a texel is 2*z0/1024 in metres - 2 cm at 10 m from the light, 8 cm at 40 m - and on a surface at grazing incidence the ground footprint is that divided by the sine of the angle: 22 cm and 90 cm respectively at 5 degrees. The map does not get finer as the camera lies down toward a surface, so this ratio grows without bound while nothing else in the pass changes, which is the only mechanism found so far whose severity scales the way the banding report does. Read beside 545: if the rings sit on the texel checker AND this reads high where they are worst, the banding is the map's resolution and not a defect in the filter.
+                            khd_m == 545 ||   // KH_DLSW_TEXEL GRID (26871, instrument, RUN THIS FIRST): paints the dynamic-light shadow map's own texel grid as a black-and-white checkerboard in map space, at the world-receive pass. White where the pass takes no sample at all. This answers one question and no other: do the concentric rings on shadowed ground COINCIDE with shadow map texels, or do they cut across them? If they land on the checker the banding is the map's resolution projected onto a grazing surface; if they cut across it, the resolution is innocent and the fault is downstream in the compare or the filter. Six hypotheses have already been refuted for this artifact - fov (dlswFovRatio 1.000), viewport (dlswVpMismatch 0), depth precision (dlswDepthFmt 41 = R32_FLOAT), the frozen view (identical standing still), the reconstruction (mode 531 stable and welded) and the receiver normal (mode 520 disables every use of it and the rings survive unchanged) - so this one is being MEASURED before anything is built on it. Shares KhDlsFaceUV with the real shadow lookup so it cannot drift from the question it is asking.
+                            khd_m == 543 ||   // KH_DL_NEARRANK REVERT (26865, A/B): candidate origins go back to being ranked by RESIDUAL alone instead of by how near they place the window's closest light to the camera. Default ranks on proximity because it is the only signal in this derivation not derived from our own output: the residual cannot separate two grid points (a wrong one snaps exactly as well as the right one - every field ring shows the impostor at res 0.000-0.002 beside the truth at 0.000), the anchor table is written FROM accepted origins so corroboration votes for what it already believes (it decided 674 of 941 ties while every origin was wrong, with dlXcheckDisagree at 0 throughout), continuity only preserves what it is given (promoting it at 26860 locked wrong origins in permanently), and even full amnesia at 26864 reproduced the same wrong answer because with no history the choice falls to loop order. The engine culls its light list to the camera, so a correct origin must place a light near it: measured, the accepted origins put their nearest at 264 m and their last at 1433 m while the same records under the implied grid correction put one at 13.5 m with a natural falloff behind it. Run 543 if the shadows or the light receive change for the worse and compare dlOriginNearMin between the two - expect single-digit metres at default and hundreds under 543.
+                            khd_m == 542 ||   // KH_DL_FORGET (26862, WORKAROUND, edge triggered): clears every per-window derivation memo and every remembered window origin ONCE, forcing a full re-acquisition on the next harvest. Set 542, then set 0 again to re-arm it - it is a button, not a state, so holding the mode does not thrash the derivation every frame. Built because a window that locks onto a wrong grid origin has no way out inside a session: the memo hits every harvest so the full scan never reconsiders, the anchor table agrees with it because the anchors were written from that same derivation (dlXcheckDisagree read 1 in 2646 while every origin was wrong), and the pool starves - the field session went dark 5.5 s in with all eight windows pinned at flips 0, seven of them on a wrong grid point, the two carrying the near clusters 2000 m out in z, and the nearest pooled light 1436 m from a mesh sitting beside the camera. That does not merely lose dynamic lights, it blocks every other investigation, because the remaining visual tasks cannot be photographed on a mesh receiving nothing. THIS IS NOT A FIX AND MUST NOT BE TREATED AS ONE: re-acquisition can land on the same wrong origin, so it is a lottery ticket, not a repair. The repair needs a signal capable of convicting a displaced origin outright, which is what dlOriginNearMin/Max is being measured for - the residual cannot do it (a wrong grid point snaps to the grid exactly as well as the right one), the anchors cannot (same derivation), and continuity cannot (26860 promoted it above residual and it locked the wrong origins in permanently, which is the regression this mode exists to work around). Watch dlForgetFires to confirm it actually fired.
+                            khd_m == 540 ||   // KH_DLS_WORLD DISTANCE PAIR (26845, instrument, RUN THIS IF 539 IS STILL WRONG): paints the two numbers the self-mask actually compares, instead of its verdict. RED is our MESH'S distance inverted from the mirror depth, GREEN is the WORLD SURFACE'S distance taken straight from the mirror's projection, both scaled over 50 m; BLUE marks a pixel one of our meshes covers. Red and green both present and clearly DIFFERING over the mesh means the operands are sound and only the margin is in question. Red flat, black or pinned means the mirror depth is not what it seems. Green flat or pinned means castViewN is not carrying the mirror's matrix. Magenta - red with no green - means the world projection failed outright. Built because three consecutive builds produced an identical picture from three different comparisons, which means the comparison was never the thing to look at; its inputs were, and nothing published could show them.
+                            khd_m == 539 ||   // KH_DLS_WORLD MASK VIEW (26842, instrument): paints the self-mask - BLACK where one of our meshes is genuinely IN FRONT of the visible surface and the pixel is refused, BLUE where a mesh merely projects onto the pixel but sits BEHIND the world (the buried and clipping parts, which must still receive their shadow), WHITE where no mesh is involved, and solid RED if the mask was never armed. Blue standing where 26841 painted black IS the 26842 fix, visible in one screenshot. ORIGINAL NOTE (26839): paints the our-meshes mask itself - BLACK where khMirSten says a pixel belongs to one of our meshes, WHITE elsewhere, and solid RED if the mask was never armed. 26838 armed this mask on every frame (dlsWorldSelfMask 239 of 239) and it changed nothing at all - mode 538, which disarms it, was indistinguishable from default - and a mask that is armed yet has no effect is one reporting "not ours" everywhere. There is a plain candidate reason: the SRV is X24_TYPELESS_G8_UINT so KhMirUnit reads the STENCIL plane, while the vmir prepass draws our meshes DEPTH-ONLY with a null pixel shader, which may never write stencil. A black mesh silhouette means the mask works and the shadow seen through the vest is the MESH'S OWN TRANSLUCENCY showing the lit ground behind - correct behaviour, nothing to fix. An all-white screen means the stencil plane is empty and the isolation must come from somewhere else. The two have opposite fixes.
+                            khd_m == 538 ||   // KH_DLS_WORLD SELF-MASK OFF (26847, A/B): the world pass stops skipping pixels our meshes occlude, so the world's shading is painted across the mesh again. The mask is now OUR OWN - a single R32_FLOAT screen target holding the linear view distance in METRES of the nearest of our meshes, rendered from the caster set with our matrix and our sentinel, min-blended so overlapping meshes resolve to the nearest with no depth buffer. Both sides of the test are then metres produced by machinery we own, with no depth convention, partition or remap to be wrong about - which is what the three mirror-based attempts each foundered on differently. ORIGINAL NOTE (26842): the world-receive pass stops skipping pixels our meshes occlude, so the ground-behind's shadow is painted onto the mesh again. The mask reads the DEPTH plane of the mirror target (the plane the prepass actually writes; its stencil is cleared to 0 and never touched, which is why the 26838-26839 stencil test was inert on every pixel) and inverts it back to a view distance through the projection terms, so it refuses a pixel only when a mesh is genuinely NEARER than the world surface - not merely projecting onto it. ORIGINAL NOTE (26841): the world-receive pass stops skipping pixels covered by our own meshes. The mask now reads the DEPTH plane of the mirror target instead of its stencil - the prepass clears (depth 1.0, stencil 0) and draws our meshes DEPTH-ONLY with a null pixel shader, so stencil is never written and the 26838-26839 test on it was inert on every pixel, which is exactly what the field measured. Depth below 1.0 is a pixel one of our meshes covers. With the mask working, the ground-behind's shadow is no longer painted onto the mesh - the effect the field described as the vest going see-through exactly where the world behind it would have been lit. Turn this on to bring that back, and read mode 539 to see the mask itself. ORIGINAL NOTE (26838): arms the our-meshes stencil test in the world-receive pass. It is off by default because the field measured it doing nothing - dlsWorldSelfMask read 239 of 239 frames while disarming it changed no pixel - and dead weight shipped in the same build as a reported regression is the first thing to take back out. Default is now exactly the 26837 configuration the field confirmed working. Read mode 539 to see whether the mask marks anything at all before trusting this. ORIGINAL NOTE (26838, A/B): the world-receive pass stops skipping pixels covered by our own meshes. The engine's linear depth does not contain our injected geometry, so at a pixel one of our meshes covers, the reconstruction returns the world BEHIND it - and 26837 shaded that and painted it over the mesh, which the field saw as the vest's own shadow smeared across its lower half, laid out as though it lay on the ground behind. It was exactly that, drawn in the wrong place. Default reads khMirSten, our meshes' stencil and the same mask the translucency path uses, and leaves those pixels to the mesh kernels which shadow them properly with the mesh's own surface and normal. If the smear returns under 538 and not at default, the mask is what removed it.
+                            khd_m == 537 ||   // KH_DLS_WORLD LIVE VIEW (26838, A/B, was the 26837 default): the world-receive pass reconstructs through THIS frame's view instead of the frozen one the sun cast uses. 26837 shipped the live view on the reasoning that our hook fires ~1870 draws after draw 0, so the engine's live linear depth should already hold frame N - and the field refuted it: visible drift under camera motion at mode 0, none under the frozen view. The engine's depth is still the frame the cast froze against by the time we reach the resolve, so the frozen view is now the default and this mode is the revert. Turn it on to re-measure that verdict; expect the drift to return.
+                            khd_m == 536 ||   // KH_DLS_WORLD COARSE GRID (26836, instrument): the world-position reconstruction at a 100 m scale instead of 531's 1 m. A 1 m grid is invisible both when the position is wrong by orders of magnitude AND when it barely varies, and those two look identical on screen; at 100 m a correct reconstruction still paints broad bands welded to the ground as the camera moves, while a collapsed one paints a smooth screen-locked ramp that slides with the view. Run it beside 531 to separate "wrong scale" from "wrong entirely".
+                            khd_m == 535 ||   // KH_DLS_WORLD ZL MAGNITUDE (26836, instrument, RUN THIS FIRST): paints what the depth decode actually returns, in three overlapping decades - RED means zl is order 1 (RAW 0..1 DEPTH, not the linear metres KhCastWorld's ray scaling needs), GREEN means order 100 (metres, correct), BLUE means order 1000+, black means effectively zero. 534 proved every pixel decodes a zl inside its (0.05, 8000) range test, which a raw-depth value passes just as happily as a metre one - so the range test cannot tell them apart and this can. A small zl collapses the reconstruction toward the camera position, which is exactly the smooth ungridded gradient 531 showed.
+                            khd_m == 534 ||   // KH_DLS_WORLD STAGE VIEW (26835, instrument, RUN THIS FIRST IF NOTHING SHOWS): every early exit in the world-receive pixel shader paints a flat colour instead of the invisible 1.0, so one screenshot names the stage that is failing, per pixel. RED = the arm lane never reached the shader (the constant buffer is not arriving at b0). GREEN = the arm arrived but the screen dimensions did not (CBFrame is not arriving at b1). BLUE = both buffers arrived and the DEPTH is unusable at that pixel. YELLOW = everything decoded and the pixel reached the lighting kernel. An UNTINTED screen under 534 is the loudest result of all: it means the pixel shader is not running or its output is not landing, and the fault is in the C++ pass rather than the shader. Built because 26834 fired on 551 of 551 cycles with every refusal lane at zero and still showed nothing - every exit returning 1.0 makes "bailed on line one" and "never ran" look identical under a multiply blend.
+                            khd_m == 533 ||   // KH_DLS_WORLD OFF (26834, THE OWNERSHIP TEST for stage 4, rule 1.82): the game environment stops receiving dynamic-light shadows from our meshes. The pass does not run at all, so the frame is bit-identical to 26833 and the terrain, buildings and props go back to being lit as though our meshes were not there. Mesh-on-mesh receive (stage 3) is untouched and still works. If an artifact survives 533 it is NOT stage 4's; if it dies under 533 it is. Mode 514 stands this down too, along with the rest of the feature.
+                            khd_m == 532 ||   // KH_DLS_WORLD AMPLIFIED (26834, A/B, never a shipping value): the world-receive factor with its departure from 1 tripled, so the shadow's SHAPE and EDGES can be judged against the mesh's own shadow before its magnitude is trusted. The honest factor is often a gentle darkening that is hard to read against a night scene; this makes the geometry unambiguous. If the amplified shadow lands where the mesh's shadow lands, the reconstruction and the maps agree and only the strength is in question.
+                            khd_m == 531 ||   // KH_DLS_WORLD RECONSTRUCTION VIEW (26834, the first thing to check): paints the reconstructed WORLD POSITION as a 1 m colour grid instead of the shadow factor - frac(x), frac(y), frac(z) per channel. A correct reconstruction is a stable grid welded to the ground that slides smoothly as the camera moves; a broken one swims, shears at silhouettes, or does not move with the world at all. Depth decode and the view pairing are the riskiest part of this pass, so this is the mode to run BEFORE trusting any shadow it draws.
+                            khd_m == 529 ||   // KH_DLS_PROBE AT THE RESOLVE ITSELF (26833, instrument, THE FLICKER CURE): fires the write-point probe from INSIDE the ResolveSubresource hook, immediately before the engine resolves the latched scene texture - no draw ordinal, no margin, no reading of last frame's topology. The 527 ladder proved the write point is a narrow window with two walls: the resolve above it (bands 4-7, all past d_resolve_first, all dead) and overpaint by remaining world draws below it (bands 0-2, all buried). Only band 3 survived, and only on some frames, because every ordinal policy aims using the PREVIOUS cycle's numbers while the resolve itself moves (1390, 1863, 2133, 2192, 2202, 2311 across sessions). Binding to the event instead of the count removes the drift entirely rather than shrinking it. Expect a stable tint over terrain AND objects, with no flicker as the camera moves. Guarded to one fire per cycle so a second resolve could never stack a second multiply. Read dlsProbeResolveFires against dlsProbeResolveSeen: if Seen exceeds Fires the engine resolves more than once per cycle and the guard is doing real work.
+                            khd_m == 528 ||   // KH_DLS_PROBE @ JUST BEFORE THE SCENE RESOLVE (26832, instrument, THE PREDICTION): fires 32 draws before topoResolveFirst - the engine's single resolve of the latched scene texture. In every 26831 dump the resolve sat between the probes that WORKED and the probes that did not, at a stable 68-69% of the scene-draw range (inject 862 / resolve 1863 / lastSceneRt 2730, and three more like it). If the resolve is what ends the target's contribution to the presented image, 528 is the LAST useful write point in the frame and should tint terrain, buildings and trees alike, where 526 tints nothing. If 528 is also blank the resolve is a bystander and the ladder (527) locates the real boundary.
+                            khd_m == 527 ||   // KH_DLS_PROBE LADDER (26832, instrument, ONE SCREENSHOT ANSWERS IT): fires EIGHT probes per frame, each restricted to its own vertical column, at eight ordinals spread evenly from the injection to the end of scene-colour writing. Read the screenshot left to right like a filmstrip: columns tint while a write at that ordinal still reaches the screen and stop when it does not, so the first blank column names the cutoff to within an eighth of the frame. Column 0 sits at the injection and is the POSITIVE CONTROL - if it is blank the instrument is broken and nothing else in the shot means anything. Columns, not rows, so every band crosses the same mix of terrain, buildings and sky. ALWAYS check dlsProbeBand0..7 before believing a blank column: a band that never fired and a band whose write did not survive look identical on screen, which is exactly how 26830's null result fooled us.
+                            khd_m == 526 ||   // KH_DLS_PROBE @ LAST SCENE-COLOUR DRAW, MINUS A MARGIN (26831, instrument, THE RECOMMENDED CANDIDATE): fires the write-point probe 32 draws before the previous cycle's topoLastSceneRt, and then waits for RT0 to actually BE the latched scene colour before drawing. 26830's 522/523 aimed exactly at the last scene draw, overshot whenever the next frame was a few draws shorter, and refused on 148 of 150 and 218 of 220 cycles with nothing bound to paint - which read as a null result and was not one. Undershooting costs only the handful of world draws that paint back over us; overshooting costs the whole measurement, so this aims early on purpose. If 526 tints the frame and the buildings and trees stay tinted too, this is where stage 4's darkening pass belongs. Read dlsProbeWaited against dlsProbeFires.
+                            khd_m == 525 ||   // KH_DLS_PROBE @ LAST TRACKED DRAW (26830, instrument): fires the write-point probe at the last draw of the previous cycle - the absolute tail. Expected to show NOTHING: the note at g_topo_scene_tex_id records that writes into the latched scene colour after the pass never reached the presented image across five instrumented field rounds. If 525 DOES tint the screen, that refutation was about a different target and stage 4 gets a much easier write point than the topology suggests. Read it by eye; the lanes only say the pass fired.
+                            khd_m == 524 ||   // KH_DLS_PROBE @ FIRST RESOLVE SWEEP (26830, instrument): fires the write-point probe at the first sweep draw of the previous cycle (topoFirstSweep, 3086 in the 26829 dump) - the NEAR tail, just past the end of scene-colour writes. Bounds the refuted region from below: if 523 tints and 524 does not, the boundary sits between the last colour draw and the sweep, and that is where stage 4's pass has to live.
+                            khd_m == 523 ||   // KH_DLS_PROBE @ LAST SCENE-COLOUR DRAW (26830, instrument): fires the write-point probe at topoLastSceneRt of the previous cycle - the last draw that wrote the latched scene colour target. Equal to 522 in the 26829 daytime dump (both 3016); they may part at night, which is why both modes exist. THE CANDIDATE, alongside 522.
+                            khd_m == 522 ||   // KH_DLS_PROBE @ LAST LIT DRAW (26830, instrument): fires the write-point probe at topoLastMainDsv of the previous cycle - the last draw with the main scene depth bound, i.e. the end of the engine's lit pass. THE CANDIDATE write point for stage 4 world-receive. If the screen goes blue here and not under 521, the darkening pass belongs at this ordinal and the campaign proceeds.
+                            khd_m == 521 ||   // KH_DLS_PROBE @ INJECTION (26830, instrument, THE CONTROL): fires a fullscreen multiply at our own injection ordinal (topoInject, 890 in the 26829 dump) and tints the frame hard blue. The 26829 topology says the engine is still doing lit world draws until ~3013, so this SHOULD be painted over and show little or nothing - our meshes survive there only because they write depth, which a fullscreen pass does not. If 521 tints the whole screen anyway, the lit-pass reading is wrong and the cheap write point was available all along. Costs one fullscreen multiply per frame; requires stats armed (the probe keys on the topology draw counter).
+                            khd_m == 520 ||   // KH_DLS_NORMAL_OFFSET OFF (26824, A/B): disarms the receiver-normal offset and the slope-scaled bias in the dynamic-light kernel, leaving only the constant metre bias 26822 shipped with. A lamp beside a prop makes the mesh shadow ITSELF, and a self-compare with only a constant bias acnes wherever the surface slants - the bands crawl as anything moves, which reads as STROBING rather than as acne. If the strobe returns under 520 and not at default, that was it.
+                            khd_m == 519 ||   // KH_DL_SHADOW RECEIVE OFF (26822, revert): the mesh kernels stop sampling the dynamic-light shadow maps. Selection and the map render still run, so the lanes stay live and the cost stays paid - this isolates the RECEIVE half from the produce half. If an artifact survives 519 but dies under 514, it is in the maps; if it dies under 519, it is in the kernel.
+                            khd_m == 518 ||   // KH_DLS_CAMDIST OFF (26821, revert): shadow-slot ranking measures distance from the light to the nearest CASTER again, instead of from the CAMERA. Default ranks by camera distance - the eight nearest the viewer are the eight whose shadows are on screen, and caster distance can spend the whole budget on lights behind the player. The relevance gate stays caster-based either way (it answers "can this cast at all", which does not depend on where you stand). Watch dlsChurnMax: camera ranking is the only mode where walking can trade slots.
+                            khd_m == 517 ||   // KH_DLS_SKIP_OFF (26819, CAPTURE INSTRUMENT, expensive): the dynamic-light shadow pass stops hash-skipping and rebuilds every light every frame. A static scene legitimately renders ZERO light-map draws, so a RenderDoc capture taken at rest cannot read the matrices out; changing the scene only opens a ONE-FRAME window nobody can hit with a capture key. Under 517 every frame is a build frame. Also the honest worst-case GPU price for this feature - read injGpuMaxUs here to price the animated case. Do not ship enabled.
+                            khd_m == 516 ||   // KH_DLS_DELIVERED OFF (revert): shadow-slot ranking goes back to SOURCE luminance instead of luminance attenuated at the nearest caster. The relevance gate stays on. Default answers "8 most intense AND closest" as ONE number - what the light actually delivers where something can cast - so a dim near lamp outranks a brilliant distant one. 516 restores the 26811 pure-brightness pick. Lighting is unaffected either way: all 32 lights still shade every mesh.
+                            khd_m == 515 ||   // KH_DLS_RELEVANCE OFF (revert): a dynamic light may hold a shadow slot again with none of our meshes inside its reach. The field found dlsScoreLo == dlsScoreCut == 242.016 - a DEAD TIE among identical fixtures - so brightness alone cannot rank them and the slot went to whichever the pool listed first. Default breaks that tie on whether the light HAS a caster; 515 restores the arbitrary pick. Read dlsNoCaster and dlsLostCaster.
+                            khd_m == 514 ||   // KH_DL_SHADOW OFF (stage 1, ownership test per rule 1.82): no dynamic light is ever selected to cast, so every slot stays empty and every downstream consumer reads 'no shadow'. This is the bit-exact revert for the whole feature - if an artifact survives 514 it is NOT ours. Read dlsChurnMax first: if it is non-zero at mode 0 the slot set is unstable and any shadow this feature draws will strobe.
                             khd_m == 513 ||   // KH_FIRE_PV_LIVE OFF (26808, revert): the fire paints through g_ro.cycle_pv again however old the copy is. That source stalls for up to 26.6 s with no stale flag ever raised, and the frozen view mirrors it exactly, so this restores the shadow freeze. Read firePvLiveFires, cyclePvAgeMaxS and castFrozenAgeMaxS - the last two being equal is the bug.
                             khd_m == 512 ||   // KH_FIRE_ERA_RECOVER OFF (26806, revert): the era guard goes back to refusing any live view more than 50 m from the frozen one, with no escape - and since the distance is measured FROM the incumbent, once the camera jumps past the bar it can never re-converge. Restores the permanent shadow freeze. Read fireEraRecovers, fireEraRejectRunMax, castFrozenDriftMaxM.
                             khd_m == 511 ||   // KH_BLK_LIT_FLOOR OFF (26805, revert): a zero sun may be adopted again even while bright world content is demonstrably flowing, so a zero-sun candidate that waits out the persistence bar drives the standing to 0 and the meshes dim permanently. Read blkLitFloorHolds, blkAnchorSunL, blkAdoptRatioMin.
@@ -9231,6 +9291,11 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("svVolCopyMade", RenderIntegration::g_svs_vol_copy_made));
         out.push_back(kv("svVolCopyFails", RenderIntegration::g_svs_vol_copy_fails));
         out.push_back(kv("svVolCopySkips", RenderIntegration::g_svs_vol_copy_skips));
+        // KH_SVS_VOL_DEMAND (26878): frames the copy was refused because no
+        // visible mesh existed to read it. In a post-FX-only session this is
+        // the frame count and svVolCopyMade stays flat; with a mesh on screen
+        // it must read 0.
+        out.push_back(kv("svVolCopyNoMesh", RenderIntegration::g_svs_vol_copy_nomesh));
         out.push_back(kv("svVolCreateFails", RenderIntegration::g_svs_vol_create_fails));
         out.push_back(kv("svVolRejMs", RenderIntegration::g_svs_vol_rej_ms));
         out.push_back(kv("svVolRejShape", RenderIntegration::g_svs_vol_rej_shape));
@@ -11219,6 +11284,756 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("dlOriginPoolVotes", RenderIntegration::g_dl.origin_pool_votes));
         out.push_back(kv("dlOriginVoteAmbiguous", RenderIntegration::g_dl.origin_vote_ambiguous));
         out.push_back(kv("dlAnchorTableN", static_cast<uint64_t>(RenderIntegration::g_dl.anchor_n)));
+        // KH_DL_DARK (26850) - THE BLACK-MESH LANES. READ dlFillDark FIRST.
+        //
+        // Every mode-3 refusal in fill_dynlights_cb returns WITHOUT writing
+        // dl_ctl, and the caller's ConstantData is zeroed - so the shader reads
+        // dlCtl.x == 0 and DynLights returns black for that whole mesh. A
+        // refusal is therefore indistinguishable on screen from the feature
+        // being off, and until this build none of them was counted at all.
+        //
+        //   dlFillDark 0            the mesh never lost its lights this window
+        //   dlFillNoReach climbing  the pool lost the light that mattered -
+        //                           the fault. Read dlFillDarkNearM against
+        //                           dlFillDarkReachM: near ~ reach means the
+        //                           light SHOULD have been in range and is
+        //                           simply no longer in the pool.
+        //   dlFillNoPool climbing   the pool emptied outright
+        //   dlFillStale climbing    harvests stopped arriving (see dlAcquires)
+        //
+        // near >> reach is the honest case - the mesh has walked out of every
+        // lamp's range - and is not a fault.
+        out.push_back(kv("dlFillDark", RenderIntegration::g_dl.fill_dark));
+        out.push_back(kv("dlFillNoPool", RenderIntegration::g_dl.fill_no_pool));
+        out.push_back(kv("dlFillNoReach", RenderIntegration::g_dl.fill_no_reach));
+        out.push_back(kv("dlFillStale", RenderIntegration::g_dl.stale_skips));
+        out.push_back(kv("dlFillDarkPoolN",
+                         static_cast<uint64_t>(RenderIntegration::g_dl.fill_dark_pool_n)));
+        out.push_back(kvf("dlFillDarkNearM", RenderIntegration::g_dl.fill_dark_near_m));
+        out.push_back(kvf("dlFillDarkReachM", RenderIntegration::g_dl.fill_dark_reach_m));
+        out.push_back(kvf("dlFillDarkFirstS", RenderIntegration::g_dl.fill_dark_first_s));
+        out.push_back(kvf("dlFillDarkLastS", RenderIntegration::g_dl.fill_dark_last_s));
+        // KH_DL_BLIND (26850). Harvests that left a window unresolved, and the
+        // dense-lane expiries that knowledge refused. dlBlindHolds > 0 with
+        // dlFillDark 0 is this rule doing its job: lights that WOULD have been
+        // dropped on evidence we knew was incomplete, and the blackout that
+        // would have followed, did not happen. dlBlindRunMax is the longest run
+        // of consecutive undecodable harvests - if it approaches
+        // KH_DL_BLIND_GRACE_MS worth of frames the grace window is too short.
+        out.push_back(kv("dlBlindHarvests", RenderIntegration::g_dl.blind_harvests));
+        // RETIRED 26855: the rule this counted is gone (it never turned off,
+        // and it was aimed at a fault 26854 located elsewhere). Published at 0.
+        out.push_back(kv("dlBlindHolds", RenderIntegration::g_dl.blind_holds));
+        out.push_back(kv("dlBlindRunMax",
+                         static_cast<uint64_t>(RenderIntegration::g_dl.blind_run_max)));
+        // KH_DL_GHOST (26850). Anchors convicted by a corroborated pool light of
+        // being the SAME light under a wrong origin. Non-zero means the
+        // derivation is producing whole-grid-step errors that the residual gate
+        // cannot see (rule 1.98) - dlAnchorGhostDx/Dz name the size of the error
+        // in metres, and they will be exact multiples of KH_DL_ORIGIN_Q. The
+        // field session that motivated this carried 19 of 64 slots at dz -2000.
+        // KH_DL_WINPROV (26851) - THE DISCRIMINATOR. READ THESE TWO TOGETHER.
+        //
+        // Every pool expiry is attributed to whether the window that last
+        // carried that light was itself failing to decode at the moment it was
+        // dropped:
+        //
+        //   dlSightWinUp dominant    the window was decoding fine and the light
+        //                            was simply no longer in it. The ENGINE
+        //                            culled it, the expiry is correct, and the
+        //                            black mesh is a range/selection question
+        //                            rather than a decode one.
+        //   dlSightWinDown dominant  we stopped decoding the light's own source
+        //                            while it was still burning. Then the
+        //                            expiry policy is not the fault and the fix
+        //                            is to suspend aging per window.
+        //
+        // These have opposite fixes and no dump before this one could tell them
+        // apart - dlBlindHarvests read 83% because two windows fail
+        // PERMANENTLY, so the global flag is a level and not an event.
+        // KH_DL_HINTWATCH / KH_DL_STALL (26852) - THE ALT-TAB LANES.
+        //
+        // The derivation memo (vs_hint_*) is written ONLY on a full-scan win
+        // and the fast path returns before the scan can run again, so it is
+        // written a handful of times a session and is then law. A memo that
+        // resolves to a wrong-but-grid-aligned origin therefore persists until
+        // something makes it MISS - which is the duration the dark mesh has.
+        //
+        //   dlHintChanges     should be single digits. Each one is a chance to
+        //                     have committed the wrong candidate.
+        //   dlHintStallMs     THE LEAD. The harvest gap immediately before the
+        //                     CURRENT memo was written. A multi-second value
+        //                     here means the memo now in force was chosen on
+        //                     the frame after a stall - an alt-tab resume,
+        //                     where the constant buffers still hold content
+        //                     from before the pause. Small or zero acquits the
+        //                     alt-tab theory outright.
+        //   dlHintMoveOx/Oz   how far the origin JUMPED at the last memo
+        //                     change. Exact multiples of 100 are the signature.
+        //   dlStallsSeen      gaps past KH_DL_STALL_MS at all. Zero with a
+        //                     reported alt-tab means the detector is wrong, not
+        //                     that the alt-tab did not happen.
+        // KH_DL_WINHINT (26856). The memo is per WINDOW now. dlHintCross is how
+        // often a write would have overwritten another window's tuple under the
+        // old shared scheme - the 26855 ring caught two windows writing in the
+        // same harvest, one of them an impostor whose origin moved a grid step
+        // every frame, and 72% of that session's fills delivered no light.
+        // Expect this to be large and to mean nothing: it measures the fault
+        // that no longer has an effect.
+        //
+        // dlResImpostors counts candidates refused by the tightened residual bar
+        // (0.03 -> 0.004); dlResWorstKept is the worst residual still admitted.
+        // Every genuine derivation in the field reads exactly 0, so worstKept
+        // should stay near 0 - if it creeps toward 0.004 the bar is cutting
+        // into something real and wants re-examining rather than trusting.
+        out.push_back(kv("dlHintCross", RenderIntegration::g_dl.hint_cross_writes));
+        out.push_back(kv("dlResImpostors", RenderIntegration::g_dl.res_impostors));
+        out.push_back(kvf("dlResWorstKept", RenderIntegration::g_dl.res_worst_kept));
+        out.push_back(kv("dlHintChanges", RenderIntegration::g_dl.hint_changes));
+        out.push_back(kv("dlHintStallMs",
+                         static_cast<uint64_t>(RenderIntegration::g_dl.hint_set_stall_ms)));
+        out.push_back(kv("dlHintSerial",
+                         static_cast<uint64_t>(RenderIntegration::g_dl.hint_set_serial)));
+        out.push_back(kvf("dlHintOx", RenderIntegration::g_dl.hint_ox));
+        out.push_back(kvf("dlHintOz", RenderIntegration::g_dl.hint_oz));
+        out.push_back(kvf("dlHintMoveOx", RenderIntegration::g_dl.hint_move_ox));
+        out.push_back(kvf("dlHintMoveOz", RenderIntegration::g_dl.hint_move_oz));
+        out.push_back(kv("dlStallsSeen", RenderIntegration::g_dl.stalls_seen));
+        out.push_back(kv("dlStallMaxMs",
+                         static_cast<uint64_t>(RenderIntegration::g_dl.stall_max_ms)));
+        // KH_DL_ORIGINFLIP (26852). A window that keeps anchoring but MOVES its
+        // origin authors every frame and puts its lights where they are not -
+        // it never shows up as unanchored, which is why 26851 could see the
+        // pool lose its near lights while dlAnch held steady at 4-5. The
+        // from/to pair names the jump; grid multiples convict it.
+        // KH_DL_XCHECK (26853) - THE FIX, MEASURED BEFORE IT IS SHIPPED.
+        //
+        // The proposed cure is to reject a derived origin the anchor table
+        // contradicts. That gates the path every light flows through, so it
+        // runs here as a SHADOW first and changes nothing.
+        //
+        //   dlXcheckDisagree ~0 outside dark intervals and rising inside one
+        //     -> the cure works and dlXcheckAgree gives its false-positive rate
+        //   disagreements everywhere
+        //     -> the vote is too weak to gate on, and the fix must come from
+        //        elsewhere. Better to learn that here than from the field.
+        //   dlXcheckNovote dominant
+        //     -> the anchors have no opinion on these windows and the cure
+        //        cannot help at all
+        //
+        // dlXdisDerX/Z against dlXdisVoteX/Z is the last disagreement in full:
+        // what the derivation committed to, and where the anchors say the
+        // lights actually are. A grid-multiple gap between them is the fault.
+        // KH_DL_TIEBREAK (26854) - THE FAULT ITSELF, AND WHAT NOW DECIDES IT.
+        //
+        // The origin ranking used a strict `<` on residual, so among candidates
+        // that tied the FIRST one offered won and loop order picked the origin.
+        // Every memo write in the 26853 field ring carried res == 0 exactly: a
+        // grid-aligned origin has zero residual whether the grid point is right
+        // or wrong, so the residual cannot separate them (rule 1.98). The memo
+        // alternated between offset 4 and offset 52, frame 260 committed the
+        // wrong one, fifteen pool lights expired 240 ms later - the TTL floor
+        // is 250 - and the mesh was black for 143 frames until the memo
+        // changed back, when it relit in ONE frame.
+        //
+        //   dlTieSeen        how often the ranking genuinely cannot decide
+        //   dlTieContinuity  broken by the window's own previous origin
+        //   dlTieCorrob      broken by anchor corroboration
+        //   dlTieArbitrary   NOTHING separated them and loop order still won.
+        //                    This is the old behaviour surviving; if it is a
+        //                    large share of dlTieSeen the fix is not covering
+        //                    the case that mattered.
+        //   dlTieOverturns   ties where the break CHANGED the winner - the
+        //                    number of times this fix actually did something
+        //
+        // dlHintDrift is the residual risk the fix does NOT cover: the ranking
+        // stops a bad memo being committed, but a hint HIT returns before the
+        // scan and cannot reconsider one already in force. Zero means the
+        // ranking was enough; climbing means a drifting hit needs to fall
+        // through to a rescan, and dlHintDriftDx/Dz will be grid multiples.
+        out.push_back(kv("dlTieSeen", RenderIntegration::g_dl.tie_seen));
+        out.push_back(kv("dlTieContinuity", RenderIntegration::g_dl.tie_continuity));
+        out.push_back(kv("dlTieCorrob", RenderIntegration::g_dl.tie_corrob));
+        out.push_back(kv("dlTieArbitrary", RenderIntegration::g_dl.tie_arbitrary));
+        out.push_back(kv("dlTieOverturns", RenderIntegration::g_dl.tie_overturns));
+        // dlHintDriftRescans (26860): drifting hits refused and sent back
+        // through the full scan. Non-zero is the rule working - a settled memo
+        // that started producing wandering origins is no longer trusted just
+        // because it is cheap. If it is large AND dlListsUnanchored rises with
+        // it, the rescans are finding nothing and windows are being refused
+        // rather than fixed, which is safe but means the ranking still cannot
+        // see the true candidate in those windows.
+        out.push_back(kv("dlHintDrift", RenderIntegration::g_dl.hint_drift));
+        out.push_back(kv("dlHintDriftRescans", RenderIntegration::g_dl.hint_drift_rescans));
+        // KH_DL_ORIGINNEAR (26862) - MEASURED, NOT ACTED ON.
+        //
+        // How near the ACCEPTED origin puts a window's closest light to the
+        // capture camera. The engine culls its light list to the camera, so a
+        // correct origin has to put something close; a wrong grid origin
+        // displaces everything by the error. khd_range_ok already asks this at
+        // 3000 m, and the field's wrong origins sat at 1436 m - inside it.
+        //
+        // dlOriginNearMin should sit in the low tens of metres in a healthy
+        // session. If dlOriginNearMax is also small, the 3000 m bound can come
+        // down to something that convicts a displaced origin outright, and that
+        // is the first signal in this pipeline capable of it - the residual
+        // cannot (both grid points snap exactly), the anchors cannot (written
+        // from the same derivation), continuity cannot (it only preserves).
+        // No bar is set from it yet: two guessed bars have already been wrong.
+        out.push_back(kvf("dlOriginNearLast", RenderIntegration::g_dl.origin_near_last));
+        out.push_back(kvf("dlOriginNearMin", RenderIntegration::g_dl.origin_near_min));
+        out.push_back(kvf("dlOriginNearMax", RenderIntegration::g_dl.origin_near_max));
+        out.push_back(kv("dlOriginNearN", RenderIntegration::g_dl.origin_near_n));
+        out.push_back(kv("dlForgetFires", RenderIntegration::g_dl.forget_fires));
+        // KH_DL_NEARRANK (26865). Proximity to the camera now RANKS candidate
+        // origins, ahead of residual. dlNearWins counts where it overturned the
+        // leader, dlNearHolds where it defended one. Read them beside
+        // dlOriginNearMin: if the ranking is working, min should fall to single
+        // digit metres (the field's correct candidate put a light at 13.5 m
+        // against 264 m for the one actually accepted). Mode 543 reverts to
+        // residual-primary for a clean A/B.
+        out.push_back(kv("dlNearWins", RenderIntegration::g_dl.near_wins));
+        out.push_back(kv("dlNearHolds", RenderIntegration::g_dl.near_holds));
+        out.push_back(kvf("dlHintDriftDx", RenderIntegration::g_dl.hint_drift_dx));
+        out.push_back(kvf("dlHintDriftDz", RenderIntegration::g_dl.hint_drift_dz));
+        out.push_back(kv("dlXcheckVoted", RenderIntegration::g_dl.xcheck_voted));
+        out.push_back(kv("dlXcheckAgree", RenderIntegration::g_dl.xcheck_agree));
+        out.push_back(kv("dlXcheckDisagree", RenderIntegration::g_dl.xcheck_disagree));
+        out.push_back(kv("dlXcheckNovote", RenderIntegration::g_dl.xcheck_novote));
+        out.push_back(kvf("dlXdisDerX", RenderIntegration::g_dl.xdis_der[0]));
+        out.push_back(kvf("dlXdisDerZ", RenderIntegration::g_dl.xdis_der[1]));
+        out.push_back(kvf("dlXdisVoteX", RenderIntegration::g_dl.xdis_vote[0]));
+        out.push_back(kvf("dlXdisVoteZ", RenderIntegration::g_dl.xdis_vote[1]));
+        out.push_back(kv("dlXdisLights",
+                         static_cast<uint64_t>(RenderIntegration::g_dl.xdis_lights)));
+        out.push_back(kv("dlOriginFlips", RenderIntegration::g_dl.origin_flips));
+        out.push_back(kvf("dlFlipFromX", RenderIntegration::g_dl.flip_from[0]));
+        out.push_back(kvf("dlFlipFromZ", RenderIntegration::g_dl.flip_from[1]));
+        out.push_back(kvf("dlFlipToX", RenderIntegration::g_dl.flip_to[0]));
+        out.push_back(kvf("dlFlipToZ", RenderIntegration::g_dl.flip_to[1]));
+        out.push_back(kv("dlFlipLights",
+                         static_cast<uint64_t>(RenderIntegration::g_dl.flip_lights)));
+        // Non-zero means the provenance table recycled a slot and the two
+        // dlSightWin* lanes below are NOT trustworthy - that is exactly what
+        // made them read 146/1426 at 26851 (rule 1.73: a lane is a claim).
+        out.push_back(kv("dlWinEvictions", RenderIntegration::g_dl.win_slot_evictions));
+        out.push_back(kv("dlSightWinDown", RenderIntegration::g_dl.sight_win_down));
+        out.push_back(kv("dlSightWinUp", RenderIntegration::g_dl.sight_win_up));
+        {   // worst decode-failure run per window slot, longest first
+            uint64_t khw_worst = 0, khw_live = 0;
+
+            for (uint32_t khw_i = 0; khw_i < RenderIntegration::KH_DL_WIN_MAX; ++khw_i) {
+                if (RenderIntegration::g_dl.win_fail_lo[khw_i] == 0) continue;
+                khw_live++;
+                if (RenderIntegration::g_dl.win_fail_max[khw_i] > khw_worst) {
+                    khw_worst = RenderIntegration::g_dl.win_fail_max[khw_i];
+                }
+            }
+
+            out.push_back(kv("dlWinTracked", khw_live));
+            out.push_back(kv("dlWinFailRunMax", khw_worst));
+        }
+        out.push_back(kv("dlAnchorGhostDrops", RenderIntegration::g_dl.anchor_ghost_drops));
+        out.push_back(kvf("dlAnchorGhostDx", RenderIntegration::g_dl.anchor_ghost_dx));
+        out.push_back(kvf("dlAnchorGhostDz", RenderIntegration::g_dl.anchor_ghost_dz));
+        {
+            // KH_DL_SHADOW (stage 1) - WHICH LIGHTS CAST, and how steadily.
+            //
+            // READ dlsChurnMax FIRST. It is the number this whole build exists
+            // to produce (rule 1.78). Slots are keyed on POSITION, not on pool
+            // index, because g_dl.pool is TTL-swept and COMPACTED - an index
+            // names a different light after any sweep. If the keying works,
+            // churn settles to 0 once the set is warm and stays there through
+            // sweeps. A churn that keeps ticking means the maps built in stage
+            // 2 would swap light mid-frame and every shadow would strobe, and
+            // no amount of map-side work repairs that.
+            //
+            // dlsSelects AGAINST FLUSHES is the second thing to read: the pass
+            // is frame-guarded on g_topo_cycles (main-depth clears), so if this
+            // reads about HALF the flushes that counter is not advancing every
+            // frame and the hook needs a different clock - not a bigger TTL.
+            //
+            // dlsScoreLo vs dlsScoreCut is what the 8-light cap COSTS: Lo is the
+            // dimmest light that got in, Cut is the brightest that did not. A
+            // wide gap means 8 is comfortable. A near-tie means the chosen set
+            // is arbitrary and the CAP is the thing to raise - not the margin
+            // (KH_DLS_OUST_FRAC) and not the score, both of which are working
+            // correctly in that case and will only hide the problem if tuned.
+            //
+            // dlsHolds should dominate dlsAdmits + dlsEvicts by orders of
+            // magnitude in a settled scene: a hold is a slot re-matched to the
+            // SAME light, which is the healthy steady state.
+            out.push_back(kv("dlsSelects", RenderIntegration::g_dls_selects));
+            out.push_back(kv("dlsCands", RenderIntegration::g_dls_cands));
+            out.push_back(kv("dlsHolds", RenderIntegration::g_dls_holds));
+            out.push_back(kv("dlsAdmits", RenderIntegration::g_dls_admits));
+            out.push_back(kv("dlsEvicts", RenderIntegration::g_dls_evicts));
+            out.push_back(kv("dlsExpires", RenderIntegration::g_dls_expires));
+            out.push_back(kv("dlsRefused", RenderIntegration::g_dls_refused));
+            out.push_back(kv("dlsChurnMax", static_cast<uint64_t>(RenderIntegration::g_dls_churn_max)));
+            out.push_back(kv("dlsNLast", static_cast<uint64_t>(RenderIntegration::g_dls_n_last)));
+            out.push_back(kv("dlsNMax", static_cast<uint64_t>(RenderIntegration::g_dls_n_max)));
+            out.push_back(kv("dlsPoolMax", static_cast<uint64_t>(RenderIntegration::g_dls_pool_max)));
+            out.push_back(kvf("dlsScoreHi", RenderIntegration::g_dls_score_hi));
+            out.push_back(kvf("dlsScoreLo", RenderIntegration::g_dls_score_lo));
+            out.push_back(kvf("dlsScoreCut", RenderIntegration::g_dls_score_cut));
+            // The live set, split by type. Stage 2 sizes its work off this
+            // split: a spot is ONE frustum, a point is omnidirectional and
+            // costs six faces, so dlsSpotN against dlsPointN is what decides
+            // whether the map budget is 8 passes or 48.
+            {
+                uint64_t khs_p = 0, khs_s = 0;
+                float    khs_reach_max = 0.0f;
+                for (uint32_t khs_i = 0; khs_i < RenderIntegration::KH_DLS_MAX; ++khs_i) {
+                    if (!RenderIntegration::g_dls[khs_i].live) continue;
+                    if (RenderIntegration::g_dls[khs_i].spot) khs_s++; else khs_p++;
+                    if (RenderIntegration::g_dls[khs_i].reach > khs_reach_max) {
+                        khs_reach_max = RenderIntegration::g_dls[khs_i].reach;
+                    }
+                }
+                out.push_back(kv("dlsPointN", khs_p));
+                out.push_back(kv("dlsSpotN", khs_s));
+                out.push_back(kvf("dlsReachMaxM", khs_reach_max));
+            }
+            // KH_DL_SHADOW stage 2a - THE GEOMETRY'S OWN LANES.
+            //
+            // dlsFaceTests vs dlsFaceCasters is the cull's yield. A cube is
+            // six faces and a caster typically touches one or two, so the
+            // kept fraction should sit near 20% (brute-forced at 20.1% over
+            // uniformly placed casters). If it reads near 100% the cull is
+            // not firing and the cube array is paying full price - look at
+            // the cull, not the resolution.
+            //
+            // dlsHashSkips vs dlsHashBuilds is the union-skip precedent
+            // applied per light. Static scene: skips should dominate. When
+            // meshes animate the caster hash changes every frame and skips
+            // go to ~0 BY DESIGN - the same corollary the sun union carries.
+            // That is the frame budget to watch, not a fault.
+            //
+            // dlsSpotWide counts spots too wide for a single frustum that
+            // fell back to the full cube. Each one costs six faces instead
+            // of one, so a high count is where the face budget went.
+            out.push_back(kv("dlsFacesBuilt", RenderIntegration::g_dls_faces_built));
+            out.push_back(kv("dlsFacesEmpty", RenderIntegration::g_dls_faces_empty));
+            out.push_back(kv("dlsFaceCasters", RenderIntegration::g_dls_face_casters));
+            out.push_back(kv("dlsFaceTests", RenderIntegration::g_dls_face_tests));
+            out.push_back(kv("dlsSpotFrusta", RenderIntegration::g_dls_spot_frusta));
+            out.push_back(kv("dlsSpotWide", RenderIntegration::g_dls_spot_wide));
+            out.push_back(kv("dlsHashSkips", RenderIntegration::g_dls_hash_skips));
+            out.push_back(kv("dlsHashBuilds", RenderIntegration::g_dls_hash_builds));
+            // KH_DL_SHADOW stage 2b - THE MAPS.
+            // dlsMapAllocs should settle at 1: the depth array grows to the
+            // live set once and stays. Climbing means the slice demand is
+            // oscillating (a point light appearing and leaving) and the
+            // array is being rebuilt - 8 to 48 slices is a 42 MB realloc.
+            // dlsMapFails must be 0. Any non-zero is a real defect: an
+            // ensure that failed, a CB upload that failed, or a Map that
+            // failed - each one leaves a light with a CLEARED map, which
+            // reads as fully lit rather than as an error.
+            // dlsMapShort is slices exhausted before every light was served.
+            // Non-zero means the casting set was silently truncated - the
+            // static_assert guards the constant, this guards the runtime.
+            // dlsSlicesUsed against dlsSpotN + 6*dlsPointN is the check that
+            // the spot path is actually taking one slice and not six.
+            out.push_back(kv("dlsMapAllocs", RenderIntegration::g_dls_map_allocs));
+            out.push_back(kv("dlsMapFails", RenderIntegration::g_dls_map_fails));
+            out.push_back(kv("dlsMapShort", RenderIntegration::g_dls_map_short));
+            out.push_back(kv("dlsFaceOver", RenderIntegration::g_dls_face_over));
+            out.push_back(kv("dlsSlicesUsed", static_cast<uint64_t>(RenderIntegration::g_dls_slices_used)));
+            // KH_DLS_SPOT_WHY (26816). dlsSpotWide alone cost a build: it said
+            // every spot fell back to the cube and nothing about why. These
+            // split the reasons and publish the CONE, so the cap can be set
+            // from what the field ships instead of from a guess (rule 1.88 -
+            // a stand-down with no counter is invisible).
+            // dlsSpotFovMaxDeg is the widest RAW cone seen. If it sits under
+            // 160 and dlsSpotWide is still climbing, the fallback is
+            // dlsSpotNoSrc instead - the pool entry vanished between select
+            // and render, which is a matching problem, not a cone problem.
+            out.push_back(kv("dlsSpotNoSrc", RenderIntegration::g_dls_spot_nosrc));
+            out.push_back(kvf("dlsSpotConeMin", RenderIntegration::g_dls_spot_cone_min));
+            out.push_back(kvf("dlsSpotFovMaxDeg", RenderIntegration::g_dls_spot_fov_max));
+            // KH_DLS_REACH_EFF (26818). The field shipped a light whose
+            // hard-fade reach read 7e19 m, which put the far plane - and
+            // therefore the whole depth range - beyond any real geometry.
+            // dlsReachRawMax is the UNCLAMPED value, kept visible so the
+            // authoring fault does not disappear behind the fix; dlsReachMaxM
+            // beside it is what the maps were actually built to.
+            // dlsReachCapped counts the bindings. Non-zero is normal in a
+            // scene with unfaded lights, NOT a fault.
+            out.push_back(kv("dlsReachCapped", RenderIntegration::g_dls_reach_capped));
+            out.push_back(kvf("dlsReachRawMax", RenderIntegration::g_dls_reach_raw_max));
+            out.push_back(kv("dlsSkipForced", RenderIntegration::g_dls_skip_forced));
+            // KH_DLS_FACE_ALLOC (26820). A cube face with no caster in it is
+            // refused a slice entirely - it was previously allocated, cleared
+            // every frame and could only ever answer "lit". Field at 26819:
+            // 5 of 12 faces empty EVERY frame. dlsSlicesSaved against
+            // dlsSlicesUsed is the standing saving; dlsFacesCulled is the
+            // per-frame count. Both climbing is HEALTHY, not a fault.
+            out.push_back(kv("dlsFacesCulled", RenderIntegration::g_dls_faces_culled));
+            out.push_back(kv("dlsSlicesSaved", RenderIntegration::g_dls_slices_saved));
+            // KH_DLS_CAMDIST (26821). dlsCamMiss non-zero means the engine
+            // published no view and the ranking fell back to caster distance
+            // - the set would then not follow the player at all, which looks
+            // like "the wrong lights cast" and nothing else.
+            out.push_back(kv("dlsCamFrames", RenderIntegration::g_dls_cam_frames));
+            out.push_back(kv("dlsCamMiss", RenderIntegration::g_dls_cam_miss));
+            out.push_back(kvf("dlsCamDistMaxM", RenderIntegration::g_dls_cam_dist_max));
+            // KH_DL_SHADOW stage 3 (26822). dlsCbFills is mesh frame-CB fills
+            // that published the maps; dlsCbSlots is how many LIT slots those
+            // fills carried. dlsCbSlots / dlsCbFills should equal dlsNLast -
+            // a lower ratio means slots were selected but had no usable map
+            // that frame and correctly published w = 0 (read as lit).
+            out.push_back(kv("dlsCbFills", RenderIntegration::g_dls_cb_fills));
+            out.push_back(kv("dlsCbSlots", RenderIntegration::g_dls_cb_slots));
+            // KH_DLS_FACE_HOLD (26823) - THE STROBE LANE. dlsMaskFlaps counts
+            // face-mask CHANGES: a face gaining or losing its slice is a
+            // shadow appearing or vanishing for everything shaded through it,
+            // and with a moving light that flapped every few frames. Should
+            // now sit near zero while a light moves steadily; climbing means
+            // KH_DLS_FACE_HOLD is too short for the speed being flown.
+            // dlsFaceHeld is faces kept alive by the hysteresis - the cost of
+            // the fix, in slices.
+            out.push_back(kv("dlsMaskFlaps", RenderIntegration::g_dls_mask_flaps));
+            out.push_back(kv("dlsFaceHeld", RenderIntegration::g_dls_face_held));
+            // KH_DLS_PUBLISH_WHY (26825). The field read cbSlots/cbFills 0.885
+            // - 11.5% of fills published NOTHING - and skips+builds 531 against
+            // 600 flushes, so 69 frames rendered no light at all. Neither said
+            // why. dlsRenderNoSlot is the selection standing empty;
+            // dlsRenderNoNeed is every face resolving away; dlsPubNotValid is a
+            // slot SELECTED but with no map that frame (published w = 0, so it
+            // reads lit - a shadow that vanishes, not one that goes wrong).
+            // dlsRastFails must be 0: a failed rasteriser state means the pass
+            // fell back to the SUN's, which has depth clip OFF and clamps a
+            // near caster to depth 0 - fully occluded, i.e. a black mesh.
+            out.push_back(kv("dlsFillEmpty", RenderIntegration::g_dls_fill_empty));
+            out.push_back(kv("dlsRenderCalls", RenderIntegration::g_dls_render_calls));
+            out.push_back(kv("dlsRenderNoSlot", RenderIntegration::g_dls_render_noslot));
+            out.push_back(kv("dlsRenderNoNeed", RenderIntegration::g_dls_render_noneed));
+            out.push_back(kv("dlsPubNotValid", RenderIntegration::g_dls_pub_notvalid));
+            out.push_back(kv("dlsRastFails", RenderIntegration::g_dls_rast_fails));
+            // dlsStateRestores MUST equal dlsRenderCalls: the 26827 bracket
+            // saves and restores the render targets, viewport and rasteriser
+            // this pass changes. A shortfall means a path returns without
+            // closing it and the frame AFTER a rebuild runs pointed at a
+            // depth slice. (Absent from the 26827 dump because the lane was
+            // never wired - the counter existed and nothing published it.)
+            // dlsSrvBinds / dlsSrvRebinds: D3D11 unbinds an SRV whose texture
+            // becomes a depth target, which our own pass does to this array.
+            // If Rebinds is much lower than RenderCalls, t36 is left NULL
+            // after a rebuild and every Load returns 0 - the near plane.
+            out.push_back(kv("dlsStateRestores", RenderIntegration::g_dls_state_restores));
+            out.push_back(kv("dlsSrvBinds", RenderIntegration::g_dls_srv_binds));
+            out.push_back(kv("dlsSrvRebinds", RenderIntegration::g_dls_srv_rebinds));
+            // KH_DLS_FRAME (26878): the light maps' own bracket. dlsFrameCalls
+            // counts cycles it ran (one per frame whichever mesh pass arrived
+            // first); NoState is the pipeline-missing stand-down; Casters is
+            // the summed reach-culled caster count; ReachCulls is how many
+            // eligible objects fell outside every live slot's far plane.
+            // dlsSrvRebinds is retired and reads 0 by construction.
+            out.push_back(kv("dlsFrameCalls", RenderIntegration::g_dls_frame_calls));
+            out.push_back(kv("dlsFrameNoState", RenderIntegration::g_dls_frame_no_state));
+            out.push_back(kv("dlsFrameCasters", RenderIntegration::g_dls_frame_casters));
+            out.push_back(kv("dlsFrameReachCulls", RenderIntegration::g_dls_frame_reach_culls));
+            // KH_DLS_RANGE (26879): the shadow view distance the light-map
+            // fade is measured against this fill (0 = fade off: mode 581, or
+            // no camera). dlsRangeNoCam counts fills where the cycle camera
+            // was unavailable and the fade stood down - shadows then draw to
+            // any range, which is the safe degenerate but should read 0.
+            out.push_back(kvf("dlsRangeM", RenderIntegration::g_dls_range_m));
+            out.push_back(kv("dlsRangeNoCam", RenderIntegration::g_dls_range_nocam));
+            // KH_DLS_PROBE (26830) - the stage-4 write-point instrument.
+            // THESE LANES CANNOT ANSWER THE QUESTION. They say the pass fired,
+            // at which ordinal, and onto what kind of target; whether the
+            // pixels REACHED THE SCREEN is visible only on the screen, which
+            // is why the probe is a hard blue tint and not a counter. Read
+            // them to confirm the instrument was actually running before
+            // trusting a null result - a probe that never fired and a write
+            // point that does not work look identical from the sofa.
+            //   dlsProbeTarget  the ordinal it aimed at (from the PREVIOUS
+            //                   cycle's topology; 0 = nothing published yet)
+            //   dlsProbeAt      where it actually fired. Should equal Target,
+            //                   or exceed it slightly when the cycle's draw
+            //                   count moved.
+            //   dlsProbeMissed  cycles whose target ordinal never arrived -
+            //                   the frame got shorter. Persistent misses mean
+            //                   the policy is aiming past the end of the frame.
+            //   dlsProbeRtScene vs dlsProbeRtForeign: was the bound target the
+            //                   latched scene colour, or something else? A
+            //                   fire onto a foreign target explains a null
+            //                   result without indicting the write point.
+            //   dlsProbeNoRt    refused, nothing bound to write to.
+            //   dlsProbeStateFails  refused, probe resources missing (the
+            //                   blend state failed to create). Non-zero here
+            //                   means every other lane is meaningless.
+            out.push_back(kv("dlsProbeFires", RenderIntegration::g_dls_probe_fires));
+            out.push_back(kv("dlsProbeMissed", RenderIntegration::g_dls_probe_missed));
+            out.push_back(kv("dlsProbeRtScene", RenderIntegration::g_dls_probe_rt_scene));
+            out.push_back(kv("dlsProbeRtForeign", RenderIntegration::g_dls_probe_rt_foreign));
+            out.push_back(kv("dlsProbeNoRt", RenderIntegration::g_dls_probe_no_rt));
+            out.push_back(kv("dlsProbeStateFails", RenderIntegration::g_dls_probe_state_fails));
+            out.push_back(kv("dlsProbeArmedCycles", RenderIntegration::g_dls_probe_armed_cycles));
+            // dlsProbeWaited (26831): draws passed at-or-after the target
+            // while the latched scene colour was NOT the bound target. High
+            // and climbing with dlsProbeFires flat means the aim overshot the
+            // end of scene-colour writing and the probe never found anything
+            // to paint - the 26830 failure, now visible as a number instead of
+            // as a blank screen.
+            out.push_back(kv("dlsProbeWaited", RenderIntegration::g_dls_probe_waited));
+            // KH_DLS_PROBE_LADDER (26832). Per-band fire counts, mode 527.
+            // MANDATORY reading alongside the screenshot: a column that never
+            // fired is indistinguishable on screen from a column whose write
+            // did not survive, and mistaking the first for the second is the
+            // 26830 failure repeated. All eight should read within one of each
+            // other; a band reading 0 while its neighbours fired means its
+            // ordinal never came due, not that the write point is dead there.
+            {
+                static const char* khpb_names[8] = {
+                    "dlsProbeBand0", "dlsProbeBand1", "dlsProbeBand2", "dlsProbeBand3",
+                    "dlsProbeBand4", "dlsProbeBand5", "dlsProbeBand6", "dlsProbeBand7"
+                };
+                static const char* khpt_names[8] = {
+                    "dlsProbeBandD0", "dlsProbeBandD1", "dlsProbeBandD2", "dlsProbeBandD3",
+                    "dlsProbeBandD4", "dlsProbeBandD5", "dlsProbeBandD6", "dlsProbeBandD7"
+                };
+                for (int khpb_i = 0; khpb_i < RenderIntegration::KH_DLS_PROBE_BANDS; ++khpb_i) {
+                    out.push_back(kv(khpb_names[khpb_i],
+                                     RenderIntegration::g_dls_probe_band_fires[khpb_i]));
+                    out.push_back(kv(khpt_names[khpb_i],
+                                     static_cast<uint64_t>(RenderIntegration::g_dls_probe_band_target[khpb_i])));
+                }
+            }
+            // KH_DLS_PROBE_RTDESC (26832): the description of whatever was
+            // bound at the LAST fire. dlsProbeRtSamples is the one to watch -
+            // if an early fire reports a multisampled target and a late one
+            // reports single-sample, the identity test was matching the same
+            // RESOURCE through two different views and the pixels went
+            // somewhere that is never presented. dlsProbeRtvIds counts
+            // distinct render-target VIEWS seen at fire time: more than one
+            // says the same thing.
+            out.push_back(kv("dlsProbeRtW", static_cast<uint64_t>(RenderIntegration::g_dls_probe_rt_w)));
+            out.push_back(kv("dlsProbeRtH", static_cast<uint64_t>(RenderIntegration::g_dls_probe_rt_h)));
+            out.push_back(kv("dlsProbeRtSamples", static_cast<uint64_t>(RenderIntegration::g_dls_probe_rt_samples)));
+            out.push_back(kv("dlsProbeRtvIds", static_cast<uint64_t>(RenderIntegration::g_dls_probe_rtv_ids)));
+            // The engine's own resolve of the latched scene texture, republished
+            // beside the probe lanes so the target ordinal and the resolve can be
+            // compared without cross-referencing the topology block.
+            out.push_back(kv("dlsProbeResolveD", static_cast<uint64_t>(RenderIntegration::g_topo_pub.d_resolve_first)));
+            // KH_DLS_PROBE_ATRESOLVE (26833, mode 529). dlsProbeResolveSeen
+            // counts scene-texture resolves observed; dlsProbeResolveFires
+            // counts the ones that actually painted. Fires should equal the
+            // cycle count exactly - a shortfall means some cycles resolve
+            // without our hook seeing it, and Seen > Fires means the engine
+            // resolves more than once per cycle and the once-per-cycle guard
+            // is preventing a stacked multiply.
+            out.push_back(kv("dlsProbeResolveFires", RenderIntegration::g_dls_probe_resolve_fires));
+            out.push_back(kv("dlsProbeResolveSeen", RenderIntegration::g_dls_probe_resolve_seen));
+            // KH_DLS_WORLD (26834) - stage 4, the world-receive pass.
+            // dlsWorldFires should equal the cycle count whenever a light is
+            // casting; every other lane here is a REFUSAL and should read 0 in
+            // a healthy session. They separate the reasons the pass stood down
+            // so a blank result is never ambiguous - the lesson the probe
+            // campaign paid for twice.
+            //   dlsWorldNoSlot   no light held a shadow slot with a live map.
+            //                    Expected and correct when nothing is casting;
+            //                    if it is high while dlsNLast > 0, selection
+            //                    and the map render disagree.
+            //   dlsWorldNoState  the receive shader, blend or CB is missing -
+            //                    usually a failed shader compile. Non-zero
+            //                    here means the feature never ran at all.
+            //   dlsWorldSnapFails  the depth snapshot failed, so there was no
+            //                    surface to reconstruct.
+            //   dlsWorldUploadFails  a constant-buffer upload or the view
+            //                    lookup failed.
+            //   dlsWorldNoRt     nothing bound to paint into at the resolve.
+            out.push_back(kv("dlsWorldFires", RenderIntegration::g_dls_world_fires));
+            out.push_back(kv("dlsWorldNoSlot", RenderIntegration::g_dls_world_no_slot));
+            out.push_back(kv("dlsWorldNoState", RenderIntegration::g_dls_world_no_state));
+            out.push_back(kv("dlsWorldSnapFails", RenderIntegration::g_dls_world_snap_fails));
+            out.push_back(kv("dlsWorldUploadFails", RenderIntegration::g_dls_world_upload_fails));
+            out.push_back(kv("dlsWorldNoRt", RenderIntegration::g_dls_world_no_rt));
+            // dlsWorldNoDepth (26837): the engine's linear depth SRV
+            // (g_mask.cast_depth) is not adopted yet, so there is nothing to
+            // reconstruct from. It is adopted at the resolve sweep like every
+            // other mask input, so a few refusals during warm-up are expected
+            // and a persistently climbing count means the adoption never
+            // happened - the same condition the sun cast reports as
+            // castMisses 41. dlsWorldFrozen counts fills that used the cast's
+            // frozen view (mode 537 only; 0 at every other mode).
+            out.push_back(kv("dlsWorldNoDepth", RenderIntegration::g_dls_world_no_depth));
+            out.push_back(kv("dlsWorldFrozen", RenderIntegration::g_dls_world_frozen));
+            // KH_DLS_WORLD_SELFMASK (26838). dlsWorldSelfMask should track the
+            // fire count: it is the our-meshes stencil being available and
+            // armed. dlsWorldSelfMaskMiss counts frames with no mask, where the
+            // pass paints everywhere and our meshes can take their own shadow
+            // smeared across them - a few during warm-up are expected, a
+            // persistent count means the mirror stencil is not being produced
+            // and the smear will be visible whenever a mesh is on screen.
+            out.push_back(kv("dlsWorldSelfMask", RenderIntegration::g_dls_world_selfmask));
+            out.push_back(kv("dlsWorldSelfMaskMiss", RenderIntegration::g_dls_world_selfmask_miss));
+            // KH_DLSW_MASK (26847): the world pass's OWN occlusion mask.
+            // dlsMaskOk should equal the fire count once a caster exists;
+            // dlsMaskFail counts frames it could not render and the pass ran
+            // unmasked (the mesh then takes the world's shading across it, the
+            // 26837 artifact). dlsMaskDraws is caster draws - roughly the
+            // caster count per frame. dlsMaskOver counted casters dropped at
+            // the old 64-entry cap; the cap was REMOVED at 26850 (the snapshot
+            // is a vector now) and the lane is retained, published at 0, only
+            // because lane order is a dump contract. A dropped caster kept
+            // casting into the light maps while the world pass no longer knew
+            // its pixels were ours - the smear this mask exists to remove,
+            // restored for exactly the meshes over the limit.
+            out.push_back(kv("dlsMaskOk", RenderIntegration::g_dlsw_mask_ok));
+            out.push_back(kv("dlsMaskFail", RenderIntegration::g_dlsw_mask_fail));
+            out.push_back(kv("dlsMaskDraws", RenderIntegration::g_dlsw_mask_draws));
+            // KH_DLSW_FOVCHECK (26858) - READ dlswFovRatioX/Y FIRST.
+        //
+        // The fov in castView[1].xy feeds the reconstruction's view ray AND the
+        // self-mask's projection, so a wrong value warps the ground (banding)
+        // and displaces the mask (white rim on one edge, background bleeding
+        // through on the other) at the same time - one cause, three artefacts,
+        // and static rather than motion-dependent, which is what the field saw.
+        //
+        //   ratio == 1        the fov is exonerated. All three need another
+        //                     explanation and this lane can be retired.
+        //   ratio != 1        the mask is scaled differently from the geometry
+        //                     it covers. The value IS the scale error, and the
+        //                     fix is to feed both consumers the derived fov.
+        //
+        // Chosen comes from the engine's constant block; derived comes from
+        // 1/projection[0][0] on the engine's own matrix, which is the angle it
+        // actually rasterised with.
+        // KH_DLSW_VIEWPORT (26861). The world pass inherits its viewport and
+        // every screen-space index in it assumes i.pos.xy is in cast_dims
+        // space. dlswVpMismatch > 0 means it is not, and the self-mask is
+        // scaled and offset from the mesh it is meant to cover - the remaining
+        // shape after the frozen-view and fov theories were both refuted.
+        // KH_DLSW_DEPTHFMT (26867). The DXGI format of the engine depth the
+        // reconstruction unprojects. 39/40/41 are 32-bit and precise; 54 is
+        // R16_FLOAT (10-bit mantissa, ~6 cm quantum at 100 m, ~25 cm at 300 m)
+        // and 46 is R24_UNORM, coarse in absolute metres over a large far
+        // plane. Mode 531 shows irregular rings that worsen up close, which is
+        // a quantised zl rather than a shadow-kernel fault - this names the
+        // quantiser if there is one.
+        out.push_back(kv("dlswDepthFmt",
+                         static_cast<uint64_t>(RenderIntegration::g_dlsw_depth_fmt < 0
+                                               ? 0 : RenderIntegration::g_dlsw_depth_fmt)));
+        out.push_back(kvf("dlswVpW", RenderIntegration::g_dlsw_vp[0]));
+        out.push_back(kvf("dlswVpH", RenderIntegration::g_dlsw_vp[1]));
+        out.push_back(kv("dlswVpMismatch", RenderIntegration::g_dlsw_vp_mismatch));
+        out.push_back(kv("dlswVpAgree", RenderIntegration::g_dlsw_vp_agree));
+        out.push_back(kvf("dlswFovChosenX", RenderIntegration::g_dlsw_fov_chosen[0]));
+        out.push_back(kvf("dlswFovChosenY", RenderIntegration::g_dlsw_fov_chosen[1]));
+        out.push_back(kvf("dlswFovDerivedX", RenderIntegration::g_dlsw_fov_derived[0]));
+        out.push_back(kvf("dlswFovDerivedY", RenderIntegration::g_dlsw_fov_derived[1]));
+        out.push_back(kvf("dlswFovRatioX", RenderIntegration::g_dlsw_fov_ratio[0]));
+        out.push_back(kvf("dlswFovRatioY", RenderIntegration::g_dlsw_fov_ratio[1]));
+        out.push_back(kv("dlswFovMismatch", RenderIntegration::g_dlsw_fov_mismatch));
+        out.push_back(kv("dlswFovAgree", RenderIntegration::g_dlsw_fov_agree));
+        // KH_DLSW_FOVPX (26876) - READ THESE, NOT THE RATIO. The mismatch gate
+        // above judged the ratio against 1%, and 1% of a 1920 px half-width is
+        // NINETEEN PIXELS - so dlswFovRatio 1.000 with dlswFovAgree at full
+        // count was consistent with a mask displaced by nineteen pixels, and
+        // was read as exonerating the fov for a ONE PIXEL rim for six builds.
+        // A threshold must be able to resolve the quantity it tests (rule
+        // 1.98); these are that quantity, in the unit the artifact is reported
+        // in. The gate is now a fifth of a pixel. Anything above ~0.5 here and
+        // the mask cannot agree with the engine about which pixel a silhouette
+        // falls in, which is the white rim.
+        out.push_back(kvf("dlswFovPxX", RenderIntegration::g_dlsw_fov_px[0]));
+        out.push_back(kvf("dlswFovPxY", RenderIntegration::g_dlsw_fov_px[1]));
+        // KH_DLSW_MASKREG (26876): which matrix pair drew the self-mask. These
+        // two must sum to dlswMaskOk + dlswMaskFail, and dlswMaskFrozen must
+        // read 0 at any mode but 555 - non-zero there means the revert is
+        // arming itself, which is the shape of process failure 7.
+        out.push_back(kv("dlswMaskLive", RenderIntegration::g_dlsw_mask_live));
+        out.push_back(kv("dlswMaskFrozen", RenderIntegration::g_dlsw_mask_frozen));
+        // KH_DLSW_RTFMT (26876) - THE BLEND TARGET, MEASURED AT LAST. The
+        // task-3 ledger called this the strongest untested candidate at 26862
+        // and it stayed untested through nine hypotheses while the RTV sat in a
+        // local that was null-checked and dropped. This pass emits under
+        // dest.rgb *= src.rgb, so the factor is rounded to the TARGET's
+        // precision before the multiply, and a factor living near 1.0 steps by
+        // that target's quantum: 28 = R8G8B8A8_UNORM steps by 1/255, 26 =
+        // R11G11B10_FLOAT carries a 6-bit mantissa near 1.0 and steps by 1/64
+        // (which would band a shallow gradient on its own, worst where it is
+        // shallowest, i.e. up close), 10 = R16G16B16A16_FLOAT steps by ~1/2048
+        // and largely clears the theory. dlswRtIsScene counts fires where the
+        // bound target really is the scene texture the resolve names -
+        // dlswRtNotScene above zero means this pass has been painting into
+        // something the 26830-26833 probe never validated. dlswResolveFmt is
+        // the resolve call's own format argument and corroborates the first
+        // independently; a disagreement between them is itself the finding.
+        out.push_back(kv("dlswRtFmt",
+                         static_cast<uint64_t>(RenderIntegration::g_dlsw_rt_fmt < 0
+                                               ? 0 : RenderIntegration::g_dlsw_rt_fmt)));
+        out.push_back(kv("dlswRtDim",
+                         static_cast<uint64_t>(RenderIntegration::g_dlsw_rt_dim < 0
+                                               ? 0 : RenderIntegration::g_dlsw_rt_dim)));
+        out.push_back(kv("dlswRtIsScene", RenderIntegration::g_dlsw_rt_is_scene));
+        out.push_back(kv("dlswRtNotScene", RenderIntegration::g_dlsw_rt_not_scene));
+        out.push_back(kv("dlswResolveFmt",
+                         static_cast<uint64_t>(RenderIntegration::g_dlsw_resolve_fmt < 0
+                                               ? 0 : RenderIntegration::g_dlsw_resolve_fmt)));
+        out.push_back(kv("dlsMaskOver", RenderIntegration::g_dlsw_caster_over));
+        // KH_DLS_REACH_RADIANCE (26876b). dlsReachPeakMax is the delivered-
+        // radiance multiplier the attenuation floor is now priced against;
+        // 1.0 means it is doing nothing and the reach is the 26818 value, so
+        // 1.0 beside a still-sliced shadow means the slice is NOT this bound.
+        // dlsReachCeilM is the sun-parity ceiling in force (g_sun_range,
+        // clamped as every other consumer clamps it) and dlsReachSunCapped
+        // counts the lights held at it.
+        out.push_back(kvf("dlsReachPeakMax", RenderIntegration::g_dls_reach_peak_max));
+        out.push_back(kvf("dlsReachCeilM", RenderIntegration::g_dls_reach_ceiling_m));
+        out.push_back(kv("dlsReachSunCapped", RenderIntegration::g_dls_reach_sun_capped));
+            // KH_DLS_WORLD_INFRONT (26843): the projection depth terms the
+            // mirror prepass rendered with, which the self-mask inverts its
+            // depth through. Both reading 0 means the prepass never ran and the
+            // mask degrades to plain coverage (the 26841 behaviour, which
+            // over-masks where a mesh sinks into terrain). These are captured
+            // at the prepass rather than read at the resolve because the engine
+            // renders in depth partitions and the two projections differ - the
+            // 26842 fault, which showed as a distance-dependent cutoff.
+            // KH_DLS_WORLD_FILL (26836): the reconstruction inputs as written.
+            // 534 proves the constant buffers ARRIVE; only these say whether
+            // they contain the right numbers. dlsWorldDimsW/H must match the
+            // render target (a mismatch scales the NDC and skews the whole
+            // reconstruction), and dlsWorldFovX should be tan(fovX/2) - around
+            // 0.4 to 1.0 for normal fields of view. A value far outside that,
+            // or dlsWorldFovDerived climbing instead of dlsWorldFovEngine,
+            // means the fov lane is the fault rather than the depth.
+            out.push_back(kvf("dlsWorldFovX", RenderIntegration::g_dls_world_fov[0]));
+            out.push_back(kvf("dlsWorldFovY", RenderIntegration::g_dls_world_fov[1]));
+            out.push_back(kvf("dlsWorldDimsW", RenderIntegration::g_dls_world_dims[0]));
+            out.push_back(kvf("dlsWorldDimsH", RenderIntegration::g_dls_world_dims[1]));
+            out.push_back(kv("dlsWorldFovEngine", RenderIntegration::g_dls_world_fov_engine));
+            out.push_back(kv("dlsWorldFovDerived", RenderIntegration::g_dls_world_fov_derived));
+            out.push_back(kvf("dlsWorldCamX", RenderIntegration::g_dls_world_cam[0]));
+            out.push_back(kvf("dlsWorldCamY", RenderIntegration::g_dls_world_cam[1]));
+            out.push_back(kvf("dlsWorldCamZ", RenderIntegration::g_dls_world_cam[2]));
+            out.push_back(kv("dlsProbeTarget", static_cast<uint64_t>(RenderIntegration::g_dls_probe_target)));
+            out.push_back(kv("dlsProbeAt", static_cast<uint64_t>(RenderIntegration::g_dls_probe_at)));
+            // SESSION-SCOPED (never reset). dlsFacesBuilt is window-scoped, so
+            // in a static scene after a stats reset it correctly reads 0 while
+            // every light skips - and 0 then cannot distinguish "skipping as
+            // designed" from "never once rendered". These answer that.
+            // dlsFacesBuiltTotal > 0 proves the pass has worked at least once.
+            // dlsMapEpoch is depth-array creations: 1 is healthy, climbing
+            // means the slice demand oscillates and a multi-MB array is being
+            // rebuilt (every skip key is dropped on each, by design).
+            out.push_back(kv("dlsFacesBuiltTotal", RenderIntegration::g_dls_faces_built_total));
+            out.push_back(kv("dlsMapEpoch", RenderIntegration::g_dls_map_epoch));
+            // KH_DLS_RELEVANCE. dlsNoCaster is admissions refused because the
+            // light had none of our meshes inside its reach - it could not
+            // have darkened anything, so its map would have been empty. A
+            // large count is healthy in a big scene: it is the tie-break
+            // working. dlsLostCaster is slots RELEASED when the last caster
+            // left; if that climbs while dlsChurnMax does too, a mesh is
+            // hovering on the boundary and KH_DLS_HOLD_SLACK is too tight.
+            // dlsCasterTests is the cost: pool x draw-list per pass.
+            out.push_back(kv("dlsNoCaster", RenderIntegration::g_dls_no_caster));
+            out.push_back(kv("dlsLostCaster", RenderIntegration::g_dls_lost_caster));
+            out.push_back(kv("dlsCasterTests", RenderIntegration::g_dls_caster_tests));
+        }
         {
             // Band-layout census (the 132 m band session): the widest valid
             // band's span and the layout's total reach - the receive decode
@@ -11723,6 +12538,65 @@ static game_value dump_render_trace_sqf() {
         names.push_back(game_value("khLiveServed"));   // live cascades written (0 = gated/empty)
         names.push_back(game_value("khSunSt"));   // 0 cold 1 unstable 2 settled -1 no fill
         names.push_back(game_value("khWipeLo"));   // wipe counter low bits
+        // KH_DL_TRACE (26851) - the black-mesh time series, APPENDED AT THE
+        // TAIL because the row is a positional contract.
+        //
+        // dlFillN is the fault: 0 on a lit mesh is a black frame; 65535 means
+        // the fill never ran for that row at all. Read the interval, not a
+        // single row - the question these lanes exist to answer is what the
+        // loss and the RECOVERY look like in sequence:
+        //
+        //   dlObjCamM      the number the 26850 dumps were missing entirely. A
+        //                  mesh a kilometre from the camera is CORRECTLY dark;
+        //                  a mesh beside it is not, and the 1433 m nearest-light
+        //                  reading means opposite things in the two cases.
+        //   dlNearM/ReachM near <= reach with dlFillN 0 is impossible; near just
+        //                  above reach across the whole interval is the pool
+        //                  having lost the one light that mattered.
+        //   dlUnanch       windows that failed to decode this frame. If this
+        //                  RISES before dlFillN falls, the decode leads and the
+        //                  pool follows - our fault. If dlFillN falls first, the
+        //                  engine culled the lights and the decode is innocent.
+        //   dlExpired      pool expiries on this frame. A step here at the
+        //                  leading edge is the batch loss the expiry ring
+        //                  already showed at 271 ms tails.
+        //   dlWinDown      windows carrying a live failure run at the fill.
+        names.push_back(game_value("dlFillN"));
+        names.push_back(game_value("dlPoolN"));
+        names.push_back(game_value("dlNearM"));
+        names.push_back(game_value("dlReachM"));
+        names.push_back(game_value("dlObjCamM"));
+        names.push_back(game_value("dlUnanch"));
+        names.push_back(game_value("dlAnch"));
+        names.push_back(game_value("dlExpired"));
+        names.push_back(game_value("dlWinDown"));
+        names.push_back(game_value("dlReason"));
+        // KH_DL_ORIGINFLIP / KH_DL_HINTWATCH / KH_DL_STALL (26852), appended at
+        // the tail. dlWinOx/Oz is the origin of the biggest window that
+        // anchored this harvest - watch it across the dark interval and the
+        // recovery. dlStallMs beside a step in dlOFlips or dlHintChg is the
+        // alt-tab lead, caught per frame instead of inferred.
+        names.push_back(game_value("dlBlindRun"));
+        names.push_back(game_value("dlHintChg"));
+        names.push_back(game_value("dlOFlips"));
+        names.push_back(game_value("dlStallMs"));
+        names.push_back(game_value("dlWinOx"));
+        names.push_back(game_value("dlWinOz"));
+        names.push_back(game_value("dlWinLights"));
+        // KH_DL_HINTWATCH / KH_DL_XCHECK per harvest. dlHintHits == dlDerived
+        // through a dark interval means every origin in force came through the
+        // sticky memo rather than a fresh scan - the alt-tab switch expressing
+        // itself at a camera angle. dlXdis rising inside the interval and flat
+        // outside it is the cure proving itself.
+        names.push_back(game_value("dlHintHits"));
+        names.push_back(game_value("dlDerived"));
+        names.push_back(game_value("dlXdis"));
+        // KH_DL_TIEBREAK (26854). dlTies rising through an interval where
+        // dlWinOx/Oz also moves is the ranking being asked the question that
+        // used to be answered by loop order; dlDrift is a memo already in force
+        // moving a window's origin, which the ranking cannot reach.
+        names.push_back(game_value("dlTies"));
+        names.push_back(game_value("dlDrift"));
 
         // fieldsN/frameN are the machine's own numbers riding every dump, so
         // alignment can never again be a hand-count debate. THE COUNT IS
@@ -11944,6 +12818,28 @@ static game_value dump_render_trace_sqf() {
             f.push_back(game_value(static_cast<float>(r.kh_live_served)));
             f.push_back(game_value(static_cast<float>(r.kh_sun_st)));
             f.push_back(game_value(static_cast<float>(r.kh_wipe_lo)));
+            f.push_back(game_value(static_cast<float>(r.dl_fill_n)));
+            f.push_back(game_value(static_cast<float>(r.dl_pool_n)));
+            f.push_back(game_value(r.dl_near_m));
+            f.push_back(game_value(r.dl_reach_m));
+            f.push_back(game_value(r.dl_obj_cam_m));
+            f.push_back(game_value(static_cast<float>(r.dl_unanch)));
+            f.push_back(game_value(static_cast<float>(r.dl_anch)));
+            f.push_back(game_value(static_cast<float>(r.dl_expired)));
+            f.push_back(game_value(static_cast<float>(r.dl_win_down)));
+            f.push_back(game_value(static_cast<float>(r.dl_reason)));
+            f.push_back(game_value(static_cast<float>(r.dl_blind_run)));
+            f.push_back(game_value(static_cast<float>(r.dl_ohint_chg)));
+            f.push_back(game_value(static_cast<float>(r.dl_oflips)));
+            f.push_back(game_value(static_cast<float>(r.dl_stall_ms)));
+            f.push_back(game_value(r.dl_win_ox));
+            f.push_back(game_value(r.dl_win_oz));
+            f.push_back(game_value(static_cast<float>(r.dl_win_lights)));
+            f.push_back(game_value(static_cast<float>(r.dl_hint_hits)));
+            f.push_back(game_value(static_cast<float>(r.dl_derived)));
+            f.push_back(game_value(static_cast<float>(r.dl_xdis)));
+            f.push_back(game_value(static_cast<float>(r.dl_ties)));
+            f.push_back(game_value(static_cast<float>(r.dl_drift)));
             if (khtr_nrow == 0) khtr_nrow = static_cast<uint32_t>(f.size());
             frames.push_back(game_value(std::move(f)));
         }
@@ -12006,6 +12902,24 @@ static game_value dump_render_trace_sqf() {
 
 static game_value dump_dynamic_lights_sqf() {
     try {
+        // THIS DUMP PUBLISHES expiryRing, SO IT MUST ARM THE RECORDER THAT
+        // FILLS IT (26857).
+        //
+        // The expiry census at the TTL sweep is gated on g_diag_armed, which
+        // only getRenderStats and dumpRenderTrace ever set. So a session where
+        // the operator ran dumpDynamicLights ALONE published an expiryRing that
+        // was structurally guaranteed to be empty - dlExpN 0 against
+        // poolExpired 458 in the field, twice, while the despawn-latency
+        // question it exists to answer went unanswered both times.
+        //
+        // A dump that publishes a ring and does not arm it is not a quiet
+        // instrument, it is a misleading one: the empty ring reads as "no
+        // expiries happened", which is the opposite of what it meant. Arming
+        // here is silent and idempotent; the FIRST dump after arming is still
+        // empty, because the ring fills from this point on, so the reading to
+        // trust is the second.
+        RenderIntegration::g_diag_armed.store(true, std::memory_order_relaxed);
+
         if (!RenderIntegration::g_dl_recon.exchange(true, std::memory_order_relaxed)) {
             // Arm: census on; counters/mirror zeroed under the lock so the
             // session starts clean. A failed lock still arms - the state then
@@ -12455,6 +13369,155 @@ static game_value dump_dynamic_lights_sqf() {
 
             out.push_back(kva("expiryRing", std::move(khx_rows)));
         }
+
+        // KH_DL_DARK (26850) - WHEN THE MESH WENT BLACK, AND AGAINST WHAT.
+        //
+        // The counters in getRenderStats say how often; this says when. The
+        // fault is intermittent and camera-dependent, so a timestamped history
+        // is what separates the two hypotheses it has always sat between:
+        //
+        //   blind = 1  we had stopped decoding the window the light was in, and
+        //              the light was still burning. That is the fault.
+        //   blind = 0  with nearM >> reachM, the mesh simply walked out of
+        //              range and this entry is correct behaviour.
+        //
+        // unanch is the run of consecutive undecodable harvests standing at the
+        // moment of the refusal - it should be 0 on a healthy dump, and a
+        // non-zero value beside blind = 1 is the whole causal chain in one row.
+        {   // [tMs, poolN, reason(0 empty/1 stale/2 no reach), blind, unanchRun,
+            //  nearM, reachM]
+            auto_array<game_value> khk_rows;
+
+            for (uint32_t khk_i = 0; khk_i < RenderIntegration::KH_DL_DARK_RING; ++khk_i) {
+                const uint32_t khk_k =
+                    (khd_snap.dark_head + khk_i) % RenderIntegration::KH_DL_DARK_RING;
+                const RenderIntegration::DlDarkRec& khk_e = khd_snap.dark_ring[khk_k];
+                if (khk_e.t_ms == 0) continue;   // unfilled slot
+                auto_array<game_value> khk_r;
+                khk_r.push_back(game_value(static_cast<float>(khk_e.t_ms)));
+                khk_r.push_back(game_value(static_cast<float>(khk_e.pool_n)));
+                khk_r.push_back(game_value(static_cast<float>(khk_e.reason)));
+                khk_r.push_back(game_value(static_cast<float>(khk_e.blind)));
+                khk_r.push_back(game_value(static_cast<float>(khk_e.unanch)));
+                khk_r.push_back(game_value(khk_e.near_m));
+                khk_r.push_back(game_value(khk_e.reach_m));
+                khk_rows.push_back(game_value(std::move(khk_r)));
+            }
+
+            out.push_back(kva("darkRing", std::move(khk_rows)));
+        }
+
+        out.push_back(kv("fillDark", static_cast<float>(khd_snap.fill_dark)));
+        out.push_back(kv("fillNoPool", static_cast<float>(khd_snap.fill_no_pool)));
+        out.push_back(kv("fillNoReach", static_cast<float>(khd_snap.fill_no_reach)));
+        out.push_back(kv("blindHarvests", static_cast<float>(khd_snap.blind_harvests)));
+        out.push_back(kv("blindHolds", static_cast<float>(khd_snap.blind_holds)));
+        out.push_back(kv("blindRunMax", static_cast<float>(khd_snap.blind_run_max)));
+        {   // KH_DL_HINTWATCH ring: [tMs, serial, kind, slot, off, wslot, woff,
+            //  ox, oz, res, dOx, dOz, stallMs]
+            //
+            // Every write of the derivation memo. Read dOx/dOz and stallMs
+            // together: a memo change that MOVED the origin by a grid multiple,
+            // on a harvest that followed a multi-second gap, is the alt-tab
+            // mechanism caught in the act. A change with dOx/dOz zero is a
+            // harmless re-commit of the same candidate.
+            auto_array<game_value> khh_rows;
+
+            for (uint32_t khh_i = 0; khh_i < RenderIntegration::KH_DL_HINT_RING; ++khh_i) {
+                const uint32_t khh_k =
+                    (khd_snap.hint_head + khh_i) % RenderIntegration::KH_DL_HINT_RING;
+                const RenderIntegration::DlHintRec& khh_e = khd_snap.hint_ring[khh_k];
+                if (khh_e.t_ms == 0) continue;
+                auto_array<game_value> khh_r;
+                khh_r.push_back(game_value(static_cast<float>(khh_e.t_ms)));
+                khh_r.push_back(game_value(static_cast<float>(khh_e.serial)));
+                khh_r.push_back(game_value(static_cast<float>(khh_e.kind)));
+                khh_r.push_back(game_value(static_cast<float>(khh_e.slot)));
+                khh_r.push_back(game_value(static_cast<float>(khh_e.off)));
+                khh_r.push_back(game_value(static_cast<float>(khh_e.wslot)));
+                khh_r.push_back(game_value(static_cast<float>(khh_e.woff)));
+                khh_r.push_back(game_value(khh_e.ox));
+                khh_r.push_back(game_value(khh_e.oz));
+                khh_r.push_back(game_value(khh_e.res));
+                khh_r.push_back(game_value(khh_e.d_ox));
+                khh_r.push_back(game_value(khh_e.d_oz));
+                khh_r.push_back(game_value(static_cast<float>(khh_e.stall_ms)));
+                khh_rows.push_back(game_value(std::move(khh_r)));
+            }
+
+            out.push_back(kva("hintRing", std::move(khh_rows)));
+        }
+        {   // per-window resolved origin: [winLo, nLights, ox, oz, flips, failRun]
+            //
+            // One row per window the engine has shown us. The near cluster is
+            // the big window; if its origin here is not the one the pool's own
+            // lights imply, that single row is the whole fault.
+            auto_array<game_value> kho_rows;
+
+            for (uint32_t kho_i = 0; kho_i < RenderIntegration::KH_DL_WIN_SLOTS; ++kho_i) {
+                if (!khd_snap.win_oset[kho_i]) continue;
+                auto_array<game_value> kho_r;
+                kho_r.push_back(hex64(static_cast<uint64_t>(khd_snap.win_fail_lo[kho_i])));
+                kho_r.push_back(game_value(static_cast<float>(khd_snap.win_lights[kho_i])));
+                kho_r.push_back(game_value(khd_snap.win_ox[kho_i]));
+                kho_r.push_back(game_value(khd_snap.win_oz[kho_i]));
+                kho_r.push_back(game_value(static_cast<float>(khd_snap.win_flips[kho_i])));
+                kho_r.push_back(game_value(static_cast<float>(khd_snap.win_fail_run[kho_i])));
+                kho_rows.push_back(game_value(std::move(kho_r)));
+            }
+
+            out.push_back(kva("winOrigins", std::move(kho_rows)));
+        }
+        out.push_back(kv("hintCross", static_cast<float>(khd_snap.hint_cross_writes)));
+        out.push_back(kv("resImpostors", static_cast<float>(khd_snap.res_impostors)));
+        out.push_back(kv("resWorstKept", khd_snap.res_worst_kept));
+        out.push_back(kv("hintChanges", static_cast<float>(khd_snap.hint_changes)));
+        out.push_back(kv("hintStallMs", static_cast<float>(khd_snap.hint_set_stall_ms)));
+        out.push_back(kv("stallsSeen", static_cast<float>(khd_snap.stalls_seen)));
+        out.push_back(kv("stallMaxMs", static_cast<float>(khd_snap.stall_max_ms)));
+        out.push_back(kv("originFlips", static_cast<float>(khd_snap.origin_flips)));
+        out.push_back(kv("tieSeen", static_cast<float>(khd_snap.tie_seen)));
+        out.push_back(kv("tieContinuity", static_cast<float>(khd_snap.tie_continuity)));
+        out.push_back(kv("tieCorrob", static_cast<float>(khd_snap.tie_corrob)));
+        out.push_back(kv("tieArbitrary", static_cast<float>(khd_snap.tie_arbitrary)));
+        out.push_back(kv("tieOverturns", static_cast<float>(khd_snap.tie_overturns)));
+        out.push_back(kv("hintDrift", static_cast<float>(khd_snap.hint_drift)));
+        out.push_back(kv("hintDriftRescans", static_cast<float>(khd_snap.hint_drift_rescans)));
+        out.push_back(kv("originNearLast", khd_snap.origin_near_last));
+        out.push_back(kv("originNearMin", khd_snap.origin_near_min));
+        out.push_back(kv("originNearMax", khd_snap.origin_near_max));
+        out.push_back(kv("forgetFires", static_cast<float>(khd_snap.forget_fires)));
+        out.push_back(kv("nearWins", static_cast<float>(khd_snap.near_wins)));
+        out.push_back(kv("nearHolds", static_cast<float>(khd_snap.near_holds)));
+        out.push_back(kv("xcheckVoted", static_cast<float>(khd_snap.xcheck_voted)));
+        out.push_back(kv("xcheckAgree", static_cast<float>(khd_snap.xcheck_agree)));
+        out.push_back(kv("xcheckDisagree", static_cast<float>(khd_snap.xcheck_disagree)));
+        out.push_back(kv("xcheckNovote", static_cast<float>(khd_snap.xcheck_novote)));
+        out.push_back(kv("winEvictions", static_cast<float>(khd_snap.win_slot_evictions)));
+        out.push_back(kv("sightWinDown", static_cast<float>(khd_snap.sight_win_down)));
+        out.push_back(kv("sightWinUp", static_cast<float>(khd_snap.sight_win_up)));
+        {   // per-window decode health: [winLo, failRun, failMax]
+            auto_array<game_value> khw_rows;
+
+            // KH_DL_WIN_SLOTS, not KH_DL_WIN_MAX. This loop was written before
+            // the table was widened at 26852 and then kept the old bound, so it
+            // published the first 8 of 32 slots and silently dropped the rest -
+            // the 26853 dump showed 12 windows in winOrigins against 8 here,
+            // which is how the truncation was caught.
+            for (uint32_t khw_i = 0; khw_i < RenderIntegration::KH_DL_WIN_SLOTS; ++khw_i) {
+                if (khd_snap.win_fail_lo[khw_i] == 0) continue;
+                auto_array<game_value> khw_r;
+                khw_r.push_back(hex64(static_cast<uint64_t>(khd_snap.win_fail_lo[khw_i])));
+                khw_r.push_back(game_value(static_cast<float>(khd_snap.win_fail_run[khw_i])));
+                khw_r.push_back(game_value(static_cast<float>(khd_snap.win_fail_max[khw_i])));
+                khw_rows.push_back(game_value(std::move(khw_r)));
+            }
+
+            out.push_back(kva("winHealth", std::move(khw_rows)));
+        }
+        out.push_back(kv("anchorGhostDrops", static_cast<float>(khd_snap.anchor_ghost_drops)));
+        out.push_back(kv("anchorGhostDx", khd_snap.anchor_ghost_dx));
+        out.push_back(kv("anchorGhostDz", khd_snap.anchor_ghost_dz));
 
         return game_value(std::move(out));
     } catch (...) {

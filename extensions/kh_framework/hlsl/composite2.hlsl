@@ -57,6 +57,41 @@ float4 PSComposite(VSOutC i, out float khaODepth : SV_Depth) : SV_Target
 float4 PSComposite(VSOutC i) : SV_Target
 #endif
 {
+    // KH_DLSW_MESHFIRST (26876k, mode 570) - IS OUR FRAGMENT EVEN GETTING THERE?
+    //
+    // THE FIRST STATEMENT IN THE SHADER, ABOVE EVERY DISCARD, CLIP AND GUARD,
+    // AND THAT PLACEMENT IS THE WHOLE POINT. Every probe before this one - 560,
+    // 561, 562, 564, 565, 566, 567, 568, 569 - sits AFTER the LOD dither
+    // discard, ClipEdgeSliver, ClipOwnNear, the far-contract discards, the
+    // owner-map reject and the punch-through guard. Not one of them could
+    // report a pixel that never reached the shading code, so the entire
+    // elimination so far has been blind to exactly the failure the field is now
+    // describing: not a faint tint but the background objects appearing THROUGH
+    // the mesh as filled black shapes, parallaxing with those objects.
+    //
+    // A filled silhouette in the shape of background geometry is what you get
+    // when our fragments STOP BEING WRITTEN there - discarded above, or losing
+    // the depth test to that geometry - and what shows instead is the world
+    // behind, which at night in shadow is black. That is a coverage failure
+    // wearing the costume of a shading bug, and no amount of paint applied
+    // after the guards can distinguish the two.
+    //
+    // Solid magenta = our fragment reached the target at every pixel of the
+    // mesh, so the black shapes are written by something DOWNSTREAM and the
+    // hunt moves to the world pass, the blend or the engine's own post.
+    // Black shapes inside the magenta = our fragments are not arriving, and the
+    // cause is above this line: one of those discards, or the depth test.
+    // Either answer eliminates half of everything left, which is more than the
+    // last five builds managed between them.
+    if (KhDlsMeshDbg() == 570) {
+#if KH_ARB_DEPTH
+        // The depth output is mandatory on this variant: leaving it unwritten
+        // makes the fragment's depth undefined, which would itself change what
+        // survives the test and corrupt the very thing being measured.
+        khaODepth = i.pos.z;
+#endif
+        return float4(1.0f, 0.0f, 1.0f, 1.0f);
+    }
     // blendCtl.w carries this fragment's dither threshold and the ZEROED
     // DEFAULT IS OFF, so every fill site that never heard of LODs keeps
     // drawing whole. KH_MESH_LOD CROSSFADE
@@ -426,6 +461,40 @@ float4 PSComposite(VSOutC i) : SV_Target
     // normal keeps owning the receive gating below - shadow behavior stays in
     // parity with the untextured twin.
     KhMatSurf khtxS = KhSampleMat(i.uv);
+    // KH_DLSW_MESHALPHAMODE (26876l, mode 571) - THE TEXTURED PATH'S OWN CLIP,
+    // READ BEFORE IT FIRES. TWIN EDIT: PSMain and PSComposite.
+    //
+    // The field found the artifact happens ONLY on PBR meshes - an untextured
+    // primitive in the same scene is clean. That is the sharpest fact in this
+    // whole investigation, because the textured path contains a discard the
+    // untextured path does not run at all: the cutout clip on the line below,
+    // and the blend-split clips after it. A clip punches HOLES, holes show the
+    // world behind, and the world behind at night in shadow is BLACK - filled
+    // black shapes of the background geometry, parallaxing with it, exactly as
+    // reported and nothing like the faint tint I spent five builds chasing.
+    //
+    // Mode 565 could not see this: it paints khtxS.alpha AFTER the opaque
+    // contract has forced it to 1, so it reported white on a surface whose raw
+    // texture alpha may be full of holes. This paints the raw values, above
+    // every clip.
+    //
+    //   RED   = matParams0.y / 4, the alpha MODE. 0 black = opaque and no clip
+    //           runs; 0.25 = CUTOUT and the clip below is live; 0.5 / 0.75 =
+    //           the two halves of a blend material, both of which clip.
+    //   GREEN = the raw sampled alpha, before the opaque contract forces it.
+    //   BLUE  = matParams0.z, the cutout threshold. Green darker than blue
+    //           anywhere is a texel the clip is about to kill.
+    //
+    // Red black everywhere means the material is opaque, no clip runs, and this
+    // hypothesis is dead on one screenshot.
+    if (KhDlsMeshDbg() == 571) {
+#if KH_ARB_DEPTH
+        // Mandatory on this variant - an unwritten SV_Depth is undefined and
+        // would change what survives the test, corrupting the measurement.
+        khaODepth = i.pos.z;
+#endif
+        return float4(matParams0.y * 0.25f, khtxS.alpha, matParams0.z, 1.0f);
+    }
     // matParams0.y = alpha mode: 0 opaque, 1 cutout, 2 = a blend material's
     // TRANSLUCENT texels (the flush's post-scene part), 3 = the SAME blend
     // material's OPAQUE texels (the ordinary depth-writing draw). KH_MAT_BLEND.
@@ -465,6 +534,46 @@ float4 PSComposite(VSOutC i) : SV_Target
             float3 khtb = cross(khtn, khtt) * i.tanw.w;
             khtxN = normalize(khtt * khtxS.nrmT.x + khtb * khtxS.nrmT.y + khtn * khtxS.nrmT.z);
         } else khtxN = khtn;   // degenerate tangent: geometric normal
+        // KH_DLSW_MESHGEOM (26877a, mode 577) - THE BISECT THE OPERATOR'S OWN
+        // OBSERVATION ASKS FOR. TWIN EDIT: PSMain and PSComposite carry this
+        // identically.
+        //
+        // The field reports the see-through is visible ONLY where the NORMAL
+        // MAP darkens the surface at that viewing angle - not where the mesh is
+        // directly lit, and not at all on an untextured primitive. That is the
+        // first clue anyone has had that separates the textured path from the
+        // untextured one by something other than "it has a texture", and the
+        // previous handoff already named this probe as the obvious next bisect
+        // and recorded that it did not exist.
+        //
+        // This drops the MAPPED normal and shades the textured path with the
+        // GEOMETRIC one, changing nothing else - same material, same albedo,
+        // same roughness, same alpha, same shadow, same lighting. It splits the
+        // two readings of the clue, which have opposite fixes:
+        //
+        // *** FIELD RESULT: ARTIFACT GONE. Recorded here because the two
+        // *** FOLLOW-UPS THAT ANSWER WERE READ INTO BOTH FAILED, and the next
+        // *** reader needs the failures more than the hypothesis.
+        //
+        // 578 gave the dynamic-light shadow QUERY the geometric normal while
+        // the shading kept the mapped one: INDISTINGUISHABLE FROM MODE 0. So
+        // KhDlsShadow's receiver-normal offset is not the carrier, and that
+        // whole branch - the 8.8 cm per-texel displacement of the query point -
+        // is refuted, not merely untested. Reverted.
+        //
+        // 579 gave the smf SHADOW GATE (dot(khShN, lighting1) > 0.01) the
+        // geometric normal: DID NOT FIX THE SEE-THROUGH AND BROKE THE SUN.
+        // With the gate uniform over a face, every pixel of a lit mesh reached
+        // the screen-space world-shadow term instead of only the texels past
+        // the terminator, so the world's cascade shadow printed across our
+        // meshes at full strength in daylight. The gate was MASKING the carrier,
+        // not being it. Reverted, and sun/moon was out of scope to begin with.
+        //
+        // What survives: 577 cures it, so the mapped normal IS in the chain,
+        // and neither of its two geometric consumers is the route. That leaves
+        // the SHADING consumers - N.L, the GGX lobe, the per-light ambient -
+        // and whatever the value they scale is carrying.
+        if (KhDlsMeshDbg() == 577) khtxN = normalize(i.nrm);
     }
 #endif
 )HLSL" R"HLSL(    float smf = 1.0f;
@@ -837,6 +946,38 @@ float4 PSComposite(VSOutC i) : SV_Target
 #else
     float a = i.icol.a * SolidMask(i.wpos);
 #endif
+    // KH_DLSW_MESHALPHA (26876g, mode 565) - THE OPACITY, SPLIT INTO ITS THREE
+    // FACTORS. TWIN EDIT: PSMain and PSComposite carry this identically.
+    //
+    // 562 (flat white), 564 (smf), 519 (no dynamic-light shadow) and 558/539
+    // (the world pass) between them exclude blending, the screen-space shadow
+    // chain, the whole shadow feature and stage 4. What survives that is a hard
+    // constraint rather than a hunch: background structure can only reach our
+    // mesh's colour through a SCREEN-SPACE READ OF A BUFFER CONTAINING THE
+    // BACKGROUND, and there is exactly one left in this shader - the perceptual
+    // composite below, which Loads sceneColorTex at our own pixel and lerps by
+    // this alpha. At a = 1 that lerp is an exact identity round trip and leaks
+    // nothing. Below 1 it mixes the pre-mesh scene capture into our surface in
+    // proportion, which is the reported artifact word for word.
+    //
+    // It also explains why 562 looked clean without clearing the route: at
+    // flat white, lc is 1.0 and a small scene contribution is swamped, while in
+    // mode 0 the shadowed parts of the mesh are DARK and the same contribution
+    // is large in relative terms - "faint, and worse where the surface is
+    // darker" is exactly what a fixed-fraction mix of a night scene looks like.
+    //
+    // RED = the object colour alpha, GREEN = the material alpha, BLUE =
+    // SolidMask. Their product is the lerp weight. Any channel below white
+    // names its own culprit, which is why this paints the factors and not the
+    // product (the handoff records what checking the container instead of the
+    // content cost last time).
+    if (KhDlsMeshDbg() == 565) {
+#if KH_TEXTURED
+        return float4(i.icol.a, khtxS.alpha, SolidMask(i.wpos), 1.0f);
+#else
+        return float4(i.icol.a, 1.0f, SolidMask(i.wpos), 1.0f);
+#endif
+    }
     if (bm == 1 || bm == 3) return float4(lc * a, 1.0f);
     if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), lc, a), 1.0f);
     if (bm == 4) return float4(lc * a, 1.0f);
@@ -852,7 +993,8 @@ float4 PSComposite(VSOutC i) : SV_Target
     }
 
     if (blendCtl.x >= 0.5f) {
-        float khb_a = (sceneZ > blendCtl.y) ? 1.0f : a;
+        // KH_DLSW_MESHOPAQUE twin (mode 566) - see the PSMain site.
+        float khb_a = (KhDlsMeshDbg() == 566 || sceneZ > blendCtl.y) ? 1.0f : a;
         float3 scn = sceneColorTex.Load(int3(int2(i.pos.xy), 0)).rgb;
         float3 ts = scn / (1.0f + scn);
         float3 tl = lc / (1.0f + lc);

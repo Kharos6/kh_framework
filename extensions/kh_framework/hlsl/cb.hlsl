@@ -2909,6 +2909,80 @@ float3 KhDynLightsPBR(float3 wpos, float3 nrm, float3 albedo, float3 F0, float r
     return acc * dlGlobal.w;
 }
 
+// KH_PBR_AMBIENT (26879) - WHAT A METAL SEES WHEN THE SUN IS NOT ON IT.
+//
+// KhApplyPBR's ambient was albedo * lightAmb, nothing else: no ambient
+// specular, and no (1 - metal) on the diffuse. A metal has no diffuse albedo,
+// so the moment the direct term died (smf 0, overcast, dusk) it went flat
+// grey-brown - painted plastic - while the dynamic lights (KhDynLightsPBR)
+// already had GGX and looked right. This is the split-sum ambient the direct
+// term already implies, in one helper reached by both pixel twins through
+// KhApplyPBR (rule 1.5).
+//
+//   THE DOME. There is no reflection target and this binds none. The only
+//   ambient radiance lane whose units are PROVEN against the direct term is
+//   lightAmb (the lit block's own ambient, the same block lighting2 comes
+//   from). fogSky is (1,1,1,1) at every mesh fill - a validity flag, not
+//   gradient points - and fogSkyCol is the fog target, which the 302 probe
+//   recorded as arriving unscaled against the lit block; neither is used.
+//   So the dome is the ambient over the sky hemisphere and KH_PBR_GROUND of
+//   it below the horizon (terrain returns a fraction of the sky's light;
+//   0.35 is a look constant like KH_DLS_AMB_KEEP, stated here rather than
+//   dressed as a measurement), a short smoothstep across the horizon, and
+//   a blur toward the dome MEAN by roughness^2 (a rough surface integrates
+//   the dome; a mirror sees one direction). Evaluated along R = reflect(-V,
+//   N). No fill site changes and no lane is added.
+//
+//   THE BRDF. Karis's analytic split-sum fit (UE4 mobile): F0*A + B from
+//   roughness and N.V. Cheap, and its known failure is the one the field
+//   would report as 'everything looks slightly wet' - that is a wrong A/B
+//   or a missing (1 - metal), not a tuning problem.
+//
+//   ENERGY. Ambient diffuse becomes albedo * amb * (1 - metal) * (1 - F_amb),
+//   F_amb the roughness-aware Schlick at N.V, so the two ambient terms share
+//   the light instead of stacking. m.occ scales both; smf touches NEITHER -
+//   a shadow blocks the sun, not the sky.
+//
+// vOk is KhDynLightsPBR's rule: fxParams0 carries the camera on the solid
+// mesh paths and a zeroed camera cannot give N.V, so the ambient falls back
+// to the 26878 form (bit-identical: amb * occ first, then albedo) rather
+// than shading from a made-up view vector. Mode 582 forces that fallback -
+// the A/B. Definition here, in KhDynLightsPBR's segment, because KhApplyPBR
+// calls it and fxc has no linker.
+static const float KH_PBR_GROUND = 0.35f;
+float3 KhPbrAmbient(float3 khpa_n, float3 khpa_v, bool khpa_vOk, float khpa_rough,
+                    float3 khpa_F0, float khpa_metal, float3 khpa_albedo,
+                    float3 khpa_amb, float khpa_occ)
+{
+    const float3 khpa_ambo = khpa_amb * khpa_occ;
+    if (!khpa_vOk || KhDlsMeshDbg() == 582) return khpa_albedo * khpa_ambo;
+
+    const float khpa_ndv = saturate(dot(khpa_n, khpa_v));
+    // Karis env BRDF (F0 * A + B).
+    const float4 khpa_c0 = float4(-1.0f, -0.0275f, -0.572f, 0.022f);
+    const float4 khpa_c1 = float4(1.0f, 0.0425f, 1.04f, -0.04f);
+    const float4 khpa_r = khpa_rough * khpa_c0 + khpa_c1;
+    const float  khpa_a004 = min(khpa_r.x * khpa_r.x, exp2(-9.28f * khpa_ndv)) * khpa_r.x + khpa_r.y;
+    const float2 khpa_AB = float2(-1.04f, 1.04f) * khpa_a004 + khpa_r.zw;
+    const float3 khpa_envBRDF = khpa_F0 * khpa_AB.x + khpa_AB.y;
+
+    // The dome along the reflection vector, blurred toward its mean.
+    const float3 khpa_R = reflect(-khpa_v, khpa_n);
+    const float  khpa_sky = smoothstep(-0.15f, 0.15f, khpa_R.y);
+    const float3 khpa_dome = khpa_amb * lerp(KH_PBR_GROUND, 1.0f, khpa_sky);
+    const float3 khpa_mean = khpa_amb * (0.5f * (1.0f + KH_PBR_GROUND));
+    const float3 khpa_env = lerp(khpa_dome, khpa_mean, khpa_rough * khpa_rough);
+
+    // Roughness-aware Schlick at N.V: what the surface reflects of the sky
+    // is what the diffuse does not get.
+    const float3 khpa_Fr = max(float3(1.0f - khpa_rough, 1.0f - khpa_rough, 1.0f - khpa_rough), khpa_F0);
+    const float3 khpa_Famb = khpa_F0 + (khpa_Fr - khpa_F0) * pow(1.0f - khpa_ndv, 5.0f);
+
+    const float3 khpa_diff = khpa_albedo * khpa_ambo * (1.0f - khpa_metal) * (1.0f - khpa_Famb);
+    const float3 khpa_spec = khpa_env * khpa_envBRDF * khpa_occ;
+    return khpa_diff + khpa_spec;
+}
+
 )HLSL" R"HLSL(   // Compact GGX (Cook-Torrance specular + Lambert diffuse) fed IDENTICAL
 float3 KhApplyPBR(KhMatSurf m, float3 wpos, float3 n, float smf)
 {
@@ -2945,7 +3019,39 @@ float3 KhApplyPBR(KhMatSurf m, float3 wpos, float3 n, float smf)
     float3 spec = KhGGXSpec(n, v, l, rough, F0, F);
     float3 kd = (1.0f - F) * (1.0f - metal);
     float3 direct = lighting2.rgb * (lighting0.w * ndl * smf) * (kd * m.albedo + spec);
-    float3 amb = lightAmb.rgb * lighting0.z * m.occ;
+    // KH_PBR_OVERCAST (26879) - THE SUN THROUGH CLOUD IS A WIDE HIGHLIGHT.
+    //
+    // Under overcast the lit block's sun colour falls to a fraction of its
+    // ambient, so the GGX lobe above - which rides lighting2 - is gone, yet
+    // the bright patch of cloud around the sun still puts one broad, soft
+    // highlight on a metal. This is that patch: the same GGX toward
+    // lighting1, with the roughness floored (an area light, not a point),
+    // radiance the AMBIENT's (the cloud is sky, and cannot be brighter than
+    // the sky lane says), weighted by how dim the sun is against the
+    // ambient. The weight is DERIVED, not a bar (rule 1.84): 1 - sun/amb,
+    // saturated, from the two lanes of the one block - it is exactly zero
+    // whenever the sun outshines its ambient, so a clear day is bit-for-bit
+    // unchanged, and it grows continuously as cloud thickens. Attenuated by
+    // ndl and smf like every other direct term: our own casters block the
+    // cloud-sun as they block the sun. Refused while the block is cold
+    // (lightAmb.w 0: both lanes read 1, the ratio means nothing) and by the
+    // zeroed-camera rule below. Mode 583 is the A/B.
+    const bool  khov_vOk = dot(fxParams0.xyz, fxParams0.xyz) >= 1.0f;
+    const float khov_sun = max(lighting2.r, max(lighting2.g, lighting2.b));
+    const float khov_amb = max(lightAmb.r, max(lightAmb.g, lightAmb.b));
+    const float khov_w = (lightAmb.w >= 0.5f && khov_vOk && KhDlsMeshDbg() != 583)
+                       ? saturate(1.0f - khov_sun / max(khov_amb, 1.0e-4f)) : 0.0f;
+    float3 khov = float3(0.0f, 0.0f, 0.0f);
+    if (khov_w > 0.0f) {
+        float3 khov_F;
+        khov = KhGGXSpec(n, v, l, max(rough, 0.6f), F0, khov_F)
+             * (lightAmb.rgb * lighting0.z) * (khov_w * ndl * smf);
+    }
+    // KH_PBR_AMBIENT (26879): the split-sum ambient (diffuse with (1 - metal)
+    // and Fresnel, plus the dome's specular) replaces albedo * amb; see the
+    // helper. smf is not passed - the sky is not shadowed by our casters.
+    const float3 amb = KhPbrAmbient(n, v, khov_vOk, rough, F0, metal, m.albedo,
+                                    lightAmb.rgb * lighting0.z, m.occ);
     // Dynamic lights: full radiance from KhDynLightsPBR (specular round) -
     // the Lambert lane inside is numerically the retired m.albedo *
     // DynLights(wpos, n) term at metal 0 (the parity anchor).
@@ -2954,7 +3060,7 @@ float3 KhApplyPBR(KhMatSurf m, float3 wpos, float3 n, float smf)
     const float3 khap_dl = (KhDlsMeshDbg() == 567)
                          ? float3(0.0f, 0.0f, 0.0f)
                          : KhDynLightsPBR(wpos, n, m.albedo, F0, rough, metal);
-    const float3 khap_out = m.albedo * amb + khap_dl + direct + m.emissive;
+    const float3 khap_out = amb + khap_dl + direct + khov + m.emissive;
     // KH_DLSW_MESHLIFT twin 2/2 (mode 568) - see the ApplyLighting site. This
     // is the twin the vest takes.
     if (KhDlsMeshDbg() == 568) return KhDlsLift(khap_out);

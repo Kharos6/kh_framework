@@ -1,10 +1,4 @@
-// vmir_cs.hlsl - plain HLSL, embedded in the DLL as RCDATA resource KH_VMIR_CS_HLSL by
-// kh_shaders.rc (next to rendering_integration.hpp) and loaded at first use
-// by kh_hlsl_src, which strips CR before the source is hashed for the shader
-// cache, so the cache key does not depend on the checkout's line endings.
-// Units are assembled by C++ concatenation of these resources, exactly as the
-// old raw-string splice did; there is no #include and no size cap. Any edit
-// here changes this unit's shader cache key (one cold recompile per user).
+// vmir_cs.hlsl - RCDATA resource in kh_shaders.rc, concatenated into its unit by C++ (no #include). Any edit changes the unit's shader cache key.
 
 ByteAddressBuffer khmc_in : register(t0);
 RWByteAddressBuffer khmc_out : register(u0);
@@ -44,4 +38,3 @@ void CSMirB2(uint3 khmc_id : SV_DispatchThreadID)
         khmc_out.Store(khmc_r2 * 16 + 12, asuint(khmc_ww));
     }
 }
-

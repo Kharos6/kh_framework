@@ -1,44 +1,34 @@
-// effect.hlsl - plain HLSL, embedded in the DLL as RCDATA resource KH_EFFECT_HLSL by
-// kh_shaders.rc (next to rendering_integration.hpp) and loaded at first use
-// by kh_hlsl_src, which strips CR before the source is hashed for the shader
-// cache, so the cache key does not depend on the checkout's line endings.
-// Units are assembled by C++ concatenation of these resources, exactly as the
-// old raw-string splice did; there is no #include and no size cap. Any edit
-// here changes this unit's shader cache key (one cold recompile per user).
+// Effect.hlsl - RCDATA resource in kh_shaders.rc, concatenated into its unit by C++ (no #include). Any edit changes the unit's shader cache key.
 
 Texture2D<float4> sceneColor : register(t0);
 Texture2D<float4> khsgTex : register(t3);
-// KH_FX_SAMP_S2 (26783): s2, NOT s1. The shared prefix (g_cb_hlsl) declares
-// khPfSamp at s1 unconditionally, and the prefix is compiled into THIS unit
-// too, so both objects claimed s1 in one assembly. It built only because fxc
-// drops an unreferenced resource and PSEffect happens not to reach khPfSamp -
-// which is reachable from KhPfProbe / KhPfProbe2 and nothing else. The day any
-// effect entry point calls a prefix helper that samples the moment pyramids,
-// fxc fails the whole unit with X4509 (overlapping register semantics) and
-// EVERY effect goes dark at once, with the error surfacing only at the
-// runtime ensure. A unit-local resource yields to the shared prefix, not the
-// other way round: the prefix is seen by four assemblies and this one is seen
-// by one. s2 is free in all four. C++ twin: the bind and the save/restore
-// bracket in the fx chain moved to slot 2 in the same build.
-SamplerState khsgSamp : register(s2);   // linear CLAMP, bound only for the resolve draw
+// KH_FX_SAMP_S2: s2, not s1. The shared prefix (g_cb_hlsl) declares khPfSamp at
+// s1 unconditionally, and the prefix is compiled into this unit too, so both
+// objects claimed s1 in one assembly. It built only because fxc drops an
+// unreferenced resource and PSEffect happens not to reach khPfSamp - effect
+// entry point calls a prefix helper that samples the moment pyramids, fxc fails
+// the whole unit with X4509 (overlapping register semantics) and every effect
+// goes dark at once, with the error surfacing only at the runtime ensure. C++
+// twin.
+SamplerState khsgSamp : register(s2);   // Linear clamp, bound only for the resolve draw.
 
 #if MSAA_DEPTH
 Texture2DMS<float> depthTex : register(t1);
 float LoadDepthPS(int2 px) { return depthTex.Load(px, 0); }
 #else
-// the snapshot is two-plane now; this pass wants the farthest,.x, which is
-// what it has always received. Declaration only.
+// The snapshot is two-plane now, which is what it has always received.
+// Declaration only.
 Texture2D<float2> depthTex : register(t1);
 float LoadDepthPS(int2 px) { return depthTex.Load(int3(px, 0)).x; }
 #endif
 
 Texture2D<float> khArbSnap : register(t2);
 
-// Bound at t19 only for LUT passes - t19 is RESERVED for this unit
-// codebase-wide (it is inside StateBackup's widened save range, so the
-// engine's own bind is restored after every flush). Sampled with integer
-// Loads only (tetrahedral interpolation in the effect branch - no sampler, no
-// half-texel bias to manage).
+// Bound at t19 only for LUT passes - t19 is reserved for this unit
+// codebase-wide (it is inside StateBackup's widened save range, so the engine's
+// own bind is restored after every flush). Sampled with integer Loads only
+// (tetrahedral interpolation in the effect branch - no sampler, no half-texel
+// bias to manage).
 Texture3D<float4> khLut : register(t19);
 float3 KhLutV(int3 p) { return khLut.Load(int4(p, 0)).rgb; }
 
@@ -64,10 +54,10 @@ float LinDepth(float raw)
 {
     float ndcZ = (raw - depthParams.z) / max(depthParams.w - depthParams.z, 1e-6f);
     float denom = ndcZ - depthParams.x;
-    // At/beyond the far plane the denominator crosses zero and flips sign.
-    // Sky pixels sit at the depth-CLEAR value (1.0), which is beyond the
-    // viewport depth range entirely - treat everything past the far plane as
-    // "very far" instead of returning a negative distance.
+    // At/beyond the far plane the denominator crosses zero and flips sign. Sky
+    // pixels sit at the depth-clear value (1.0), which is beyond the viewport
+    // depth range entirely - treat everything past the far plane as "very far"
+    // instead of returning a negative distance.
     if (denom > -1e-7f) return 1e9f;
     float d = depthParams.y / denom;
     return d > 0.0f ? d : 1e9f;
@@ -75,7 +65,7 @@ float LinDepth(float raw)
 
 float Hash(float2 p) { return frac(sin(dot(p, float2(12.9898f, 78.233f))) * 43758.5453f); }
 
-// quality-package helpers
+// Quality-package helpers.
 float2 Hash2(float2 p)
 {
     return float2(Hash(p), Hash(p + float2(41.13f, 7.77f)));
@@ -93,13 +83,13 @@ float4 KhRainLayer(float2 q, float tt, float2 grid, float seedOfs,
     float x = (n.y - 0.5f) * 0.55f;
     x += (0.42f - abs(x)) * sin(tt * 0.7f + n.z * 6.2832f)
          * 0.4f * (1.0f - saturate(stretch * 1.4f));
-    // Drop y: a descending cycle with a linger-then-fall ease (drops hold,
-    // then slip - the real-glass cadence).
+    // Drop y: a descending cycle with a linger-then-fall ease (drops hold, then
+    // slip - the real-glass cadence).
     float cyc = frac(tt * (0.10f + n.z * 0.07f) + n.x * 7.31f);
     float py = pow(cyc, 0.65f);
-    float aniso = grid.x / grid.y;   // cell tallness in q-space
+    float aniso = grid.x / grid.y;   // Cell tallness in q-space.
     float2 du = float2(f.x - 0.5f - x, (f.y - py) * aniso);
-    du.y *= 1.0f / (1.0f + stretch * 0.9f);   // elongate along the fall (halved)
+    du.y *= 1.0f / (1.0f + stretch * 0.9f);   // Elongate along the fall (halved).
     float r0 = 0.085f + n.y * 0.06f;
     float len = length(du);
     float drop = smoothstep(r0, r0 * 0.55f, len);
@@ -118,16 +108,7 @@ float4 KhRainLayer(float2 q, float tt, float2 grid, float seedOfs,
     return float4(nrm, saturate(drop + beads * 0.6f), saturate(trail + beads));
 }
 
-// Per-pixel world position from the depth buffer + inverse view-projection
-float3 WorldPos(int2 px, float2 uv)
-{
-    float raw = LoadDepthPS(px);
-    float ndcZ = (raw - depthParams.z) / max(depthParams.w - depthParams.z, 1e-6f);
-    float4 ndc = float4(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f, ndcZ, 1.0f);
-    float4 wp = mul(ndc, invViewProj);
-    return wp.xyz / wp.w;
-}
-
+// Per-pixel world position from the depth buffer + inverse view-projection.
 float KhEncFence()
 {
     float khef_den = 1.0f - depthParams.x;
@@ -154,12 +135,10 @@ float3 KhgVpos(float2 vp_px, float vp_d, float2 vp_res, float vp_m00, float vp_m
                   vp_d);
 }
 
-
-
-// fxParams1 / fxParams2 are SYSTEM lanes for effect 23: the chain loop packs
-// up to two aggregated fog-pass records [startDist, endDist, skyAmount,
-// opacity] (kh_fogscatter_pack - the CPU mirror; zeroed lanes = no pass, and
-// every other fill site leaves them zeroed, so the loop is cold there).
+// fxParams1 / fxParams2 are system lanes for effect 23: the chain loop packs up
+// to two aggregated fog-pass records [startDist, endDist, skyAmount, opacity]
+// (kh_fogscatter_pack - the CPU mirror; zeroed lanes = no pass, and every other
+// fill site leaves them zeroed, so the loop is cold there).
 
 float KhFsFog(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float fs_m11)
 {
@@ -167,15 +146,14 @@ float KhFsFog(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float fs_m1
 
     if (fogParams.w >= 0.5f && depthParams.y < -1.0e-3f)
     {
-        // the encode pair's far fence (m32 gate above guarantees the
-        // standard-z shape: 1 - m22 < 0, m32 < 0 -> positive fence)
+        // The encode pair's far fence (m32 gate above guarantees the standard-z
+        // shape: 1 - m22 < 0, m32 < 0 -> positive fence).
         float fs_fden = 1.0f - depthParams.x;
         float fs_far = fs_fden < -1.0e-7f ? depthParams.y / fs_fden : 20000.0f;
         float fs_de = min(fs_d, clamp(fs_far, 500.0f, 100000.0f) * 0.999f);
         float fs_distM = length(KhgVpos(fs_px, fs_de, fs_res, fs_m00, fs_m11));
-        // height at the clamped distance (WorldPos's own ndc form, fed the
-        // ANALYTIC ndcZ of fs_de - immune to the beyond-far mirror and to
-        // raw-depth teeter by construction)
+        // Height at the clamped distance: the analytic ndcZ of fs_de, immune to
+        // the beyond-far mirror and to raw-depth teeter by construction.
         float2 fs_uv = (fs_px + 0.5f) / fs_res;
         float4 fs_nd = float4(fs_uv.x * 2.0f - 1.0f, 1.0f - fs_uv.y * 2.0f,
                               depthParams.x + depthParams.y / max(fs_de, 1.0f), 1.0f);
@@ -186,9 +164,6 @@ float KhFsFog(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float fs_m1
 
         if (fogEngine.w >= 0.5f)
         {
-            // TWIN PARITY. w = 2 is set ONLY under mode 61, so outside that
-            // mode this line is byte-identical to and needs no revert of its
-            // own.
             float fs_ramp = fogEngine.w >= 1.5f
                           ? 1.0f
                           : saturate((fogEngine.y - fs_distM) * fogEngine.z);
@@ -207,9 +182,9 @@ float KhFsFog(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float fs_m1
         fs_s = 1.0f - saturate(fs_tr);
     }
 
-    // KH fog passes (effect-13 MATH TWIN - the same LINEAR-depth ramp and the
-    // same skyAmount rule; edit both or neither), opacity- scaled, combined
-    // as independent media.
+    // KH fog passes (effect-13 math twin - the same linear-depth ramp and the
+    // same skyAmount rule; edit both or neither), opacity- scaled, combined as
+    // independent media.
     float fs_fence = KhEncFence();
 
     [unroll] for (int fs_i = 0; fs_i < 2; ++fs_i)
@@ -221,7 +196,7 @@ float KhFsFog(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float fs_m1
             float fs_w = saturate((min(fs_d, fs_fence) - fs_fence * 0.98f)
                                   / max(fs_fence * 0.019f, 1.0f));
             fs_f = lerp(fs_f, saturate(fs_e.z), fs_w);
-            if (fs_d > 1e8f) fs_f = saturate(fs_e.z);   // belt (the feather already lands here)
+            if (fs_d > 1e8f) fs_f = saturate(fs_e.z);   // Belt (the feather already lands here).
             fs_s = 1.0f - (1.0f - fs_s) * (1.0f - fs_f * fs_e.w);
         }
     }
@@ -229,10 +204,10 @@ float KhFsFog(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float fs_m1
     return saturate(fs_s);
 }
 
-// CPU twin: the chain loops' pending append (kh_fuse_append; the fusible set
-// {1 invert, 2 colorgrade, 3 vignette, 5 grain}, never localized / banded /
-// spill / LUT / custom, is enforced THERE, so this path carries no masks).
-// POINT-OP PASS FUSION.
+// CPU twin: the chain loops' pending append (kh_fuse_append; the fusible set {1
+// invert, 2 colorgrade, 3 vignette, 5 grain}, never localized / banded / spill
+// / LUT / custom, is enforced there, so this path carries no masks). Point-OP
+// pass fusion.
 float3 KhFusePoint(int id, float3 c, float2 uv, float2 pos, float t,
                    float4 p0, float4 p1, float4 col)
 {
@@ -280,11 +255,11 @@ float3 KhFusePoint(int id, float3 c, float2 uv, float2 pos, float t,
     return c;
 }
 
-// Fused-stage composite: the packing tail's blend algebra VERBATIM over the
-// running value, plus - write-window lanes only - the coverage destination
-// lerp in its exact pre-composite position (the masked lane's order; spill
-// stage-0 completes its own algebra BEFORE this runs, and appended stages are
-// never spill-classified).
+// Fused-stage composite: the packing tail's blend algebra verbatim over the
+// running value, plus - write-window lanes only - the coverage destination lerp
+// in its exact pre-composite position (the masked lane's order; spill stage-0
+// completes its own algebra before this runs, and appended stages are never
+// spill-classified).
 float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float t)
 {
     int n = (int)fuseMeta.x;
@@ -337,10 +312,10 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         }
     }
 
-    // It never compiled: the effect shader builds LAZILY and no effect mesh
-    // had spawned since the arb round landed, so the X3004 surfaced only when
-    // the perceptual path first requested the chain. FAR-FRAME ANALYTIC
-    // ARBITRATION (flush/effect edition; the sec 2.4 mirror).
+    // It never compiled: the effect shader builds lazily and no effect mesh had
+    // spawned since the arb round landed, so the X3004 surfaced only when the
+    // perceptual path first requested the chain. Far-frame analytic arbitration
+    // (flush/effect edition; the sec 2.4 mirror).
     if (localParams1.z >= 0.5f) {
         int2 khaPx = clamp(int2(i.pos.xy), int2(0, 0),
                            int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
@@ -360,11 +335,12 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         }
     }
 
-    if (effect == 1)   // Invert: (1 - scene) * tint
+    if (effect == 1)   // Invert: (1 - scene) * tint.
     {
         outc = (1.0f - saturate(scene)) * color.rgb;
     }
-    else if (effect == 2)   // ColorGrade: [saturation, contrast, brightness, gamma], tint = color.rgb
+    else if (effect == 2)   // colorGrade: [saturation, contrast, brightness, gamma], tint =
+                            // Color.rgb.
     {
         float3 c = scene * color.rgb * fxParams0.z;
         float l = Luma(c);
@@ -373,20 +349,20 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         c = pow(max(c, 0.0f), fxParams0.w);
         outc = c;
     }
-    else if (effect == 3)   // Vignette: [startRadius, softness], color = edge color
+    else if (effect == 3)   // Vignette: [startRadius, softness], color = edge color.
     {
         float d = distance(uv, float2(0.5f, 0.5f)) * 1.4142f;
         float v = smoothstep(fxParams0.x, fxParams0.x + max(fxParams0.y, 1e-3f), d);
         outc = lerp(scene, color.rgb, v);
     }
-    else if (effect == 4)   // Chromatic aberration: [strengthPx], radial
+    else if (effect == 4)   // Chromatic aberration: [strengthPx], radial.
     {
         float2 off = (uv - 0.5f) * fxParams0.x;
         float r = SampleScene(int2(i.pos.xy + off)).r;
         float b = SampleScene(int2(i.pos.xy - off)).b;
         outc = float3(r, scene.g, b);
     }
-    else if (effect == 5)   // Film grain: [amount, fps, grainSizePx, lumaResponse, chroma]
+    else if (effect == 5)   // Film grain: [amount, fps, grainSizePx, lumaResponse, chroma].
     {
         // Filmic grain: smooth value noise with spatial extent (not per-pixel
         // salt), triangular amplitude distribution, response peaking in the
@@ -405,7 +381,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         float n11 = Hash(ip + float2(1, 1) + seed);
         float nv = lerp(lerp(n00, n10, fp.x), lerp(n01, n11, fp.x), fp.y);
         float nf = Hash(gp * 2.13f + seed + 17.0f);
-        float g = (nv + nf) * 0.5f - 0.5f;   // triangular-ish, signed
+        float g = (nv + nf) * 0.5f - 0.5f;   // Triangular-ish, signed.
 
         float3 gc = g.xxx;
         if (fxParams1.x > 0.001f)
@@ -419,14 +395,14 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         float resp = lerp(1.0f, 4.0f * luma * (1.0f - luma) * 0.9f + 0.1f, fxParams0.w);
         outc = scene + gc * fxParams0.x * resp;
     }
-    else if (effect == 6)   // Sharpen: [strength]
+    else if (effect == 6)   // Sharpen: [strength].
     {
         float3 s = scene * (1.0f + 4.0f * fxParams0.x)
                  - fxParams0.x * (SampleScene(px + int2(1, 0)) + SampleScene(px - int2(1, 0))
                                 + SampleScene(px + int2(0, 1)) + SampleScene(px - int2(0, 1)));
         outc = max(s, 0.0f);
     }
-    else if (effect == 7)   // Gaussian-ish blur: [radiusPx]
+    else if (effect == 7)   // Gaussian-ish blur: [radiusPx].
     {
         int r = max((int)fxParams0.x, 1);
         float3 acc = scene * 0.25f;
@@ -436,7 +412,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
               + SampleScene(px + int2(r, -r)) + SampleScene(px + int2(-r, r))) * 0.0625f;
         outc = acc;
     }
-    else if (effect == 8)   // Bloom: [threshold, intensity, radiusPx]
+    else if (effect == 8)   // Bloom: [threshold, intensity, radiusPx].
     {
         int r = max((int)fxParams0.z, 1);
         float3 acc = 0.0f;
@@ -445,14 +421,15 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
             acc += max(SampleScene(px + int2(ox, oy) * r) - fxParams0.x, 0.0f);
         outc = scene + acc / 25.0f * fxParams0.y;
     }
-    else if (effect == 9)   // Distortion: [amplitudePx, frequency, speed]
+    else if (effect == 9)   // Distortion: [amplitudePx, frequency, speed].
     {
         float2 off = float2(sin(uv.y * fxParams0.y * 6.2832f + t * fxParams0.z),
                             cos(uv.x * fxParams0.y * 6.2832f + t * fxParams0.z)) * fxParams0.x;
         outc = SampleScene(int2(i.pos.xy + off));
     }
 
-        else if (effect == 10)   // Outline: [depthEdgeScale, lumEdgeScale, sceneDarken, glowBoost], color = edge
+        else if (effect == 10)   // Outline: [depthEdgeScale, lumEdgeScale, sceneDarken, glowBoost],
+                                 // Color = edge.
     {
         float dC = LinDepth(LoadDepthPS(px));
         float dX = LinDepth(LoadDepthPS(px + int2(1, 0))) - dC;
@@ -464,12 +441,12 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         float edge = saturate(depthEdge + lumEdge);
         outc = scene * fxParams0.z + color.rgb * edge * fxParams0.w;
     }
-    else if (effect == 11)   // Pulse: p0.xyz = center (engine space), p0.w = radius; p1 = [bandWidth, intensity]
+    else if (effect == 11)   // Pulse: p0.xyz = center (engine space), p0.w = radius; p1 =
+                             // [bandWidth, intensity].
     {
-        // Fenced reconstruction + the fence feather keep the ring CONTINUOUS:
-        // sky (clamped TO the fence) lands at feather zero, and a ring band
-        // never reaches fence distances in normal use, so visible output is
-        // unchanged.
+        // Fenced reconstruction + the fence feather keep the ring continuous:
+        // Sky (clamped to the fence) lands at feather zero, and a ring band
+        // never reaches fence distances in normal use.
         float khpl_d;
         float dist = distance(KhWorldPosFenced(px, uv, khpl_d), fxParams0.xyz);
         float band = max(fxParams1.x, 0.01f);
@@ -479,9 +456,9 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         ring *= 1.0f - saturate((khpl_d - khpl_f * 0.98f) / max(khpl_f * 0.019f, 1.0f));
         outc = scene + color.rgb * ring * fxParams1.y;
     }
-    else if (effect == 12)   // Halation: [threshold, intensity, radiusPx], color = glow tint (warm)
+    else if (effect == 12)   // Halation: [threshold, intensity, radiusPx], color = glow tint
+                             // (warm).
     {
-        // full-res gather everywhere (pyramid family retired).
         int r = max((int)fxParams0.z, 1);
         const int2 dirs[8] = { int2(1,0), int2(-1,0), int2(0,1), int2(0,-1),
                                int2(1,1), int2(-1,1), int2(1,-1), int2(-1,-1) };
@@ -492,24 +469,27 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
             acc += max(SampleScene(px + dirs[k2] * r * 2) - fxParams0.x, 0.0f) * 0.035f;
         outc = scene + acc * color.rgb * fxParams0.y;
     }
-    else if (effect == 13)   // Distance fog: [startDist m, endDist m, skyAmount 0..1], color = fog color
+    else if (effect == 13)   // Distance fog: [startDist m, endDist m, skyAmount 0.1], color = fog
+                             // Color.
     {
-        // skyAmount = 1 with endDist inside the fence - every practical
-        // config - is output-identical. TWIN EDIT at KhFsFog's fog-pass loop.
+        // skyAmount = 1 with endDist inside the fence - every practical config
+        // - is output-identical. Twin edit at KhFsFog's fog-pass loop.
         float d = LinDepth(LoadDepthPS(px));
         float f = saturate((d - fxParams0.x) / max(fxParams0.y - fxParams0.x, 1.0f));
         float khfg_f = KhEncFence();
         float khfg_w = saturate((min(d, khfg_f) - khfg_f * 0.98f) / max(khfg_f * 0.019f, 1.0f));
         f = lerp(f, saturate(fxParams0.z), khfg_w);
-        if (d > 1e8f) f = saturate(fxParams0.z);   // sky/far-plane pixels (belt; the feather already lands here)
+        if (d > 1e8f) f = saturate(fxParams0.z);   // Sky/far-plane pixels (belt; the feather
+                                                   // Already lands here).
         outc = lerp(scene, color.rgb, f);
     }
-    else if (effect == 14)   // Lens flare, image-based: [threshold, intensity, ghostCount, ghostSpacing] + [haloRadius, haloIntensity,
+    else if (effect == 14)   // Lens flare, image-based: [threshold, intensity, ghostCount,
+                             // ghostSpacing] + [haloRadius, haloIntensity.
     {
-        // Bright pixels anywhere in the capture spawn a "ghost" train
-        // mirrored through screen center, plus a halo ring - the sun,
-        // headlights and explosions all flare automatically. The HDR capture
-        // makes the threshold physically meaningful (sun >> white walls).
+        // Bright pixels anywhere in the capture spawn a "ghost" train mirrored
+        // through screen center, plus a halo ring - the sun, headlights and
+        // explosions all flare automatically. The HDR capture makes the
+        // threshold physically meaningful (sun >> white walls).
         float2 cuv = float2(0.5f, 0.5f);
         float2 ghostVec = (cuv - uv) * fxParams0.w;
         int nGhosts = clamp((int)fxParams0.z, 1, 8);
@@ -534,12 +514,12 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         outc = scene + acc * color.rgb * fxParams0.y;
     }
 
-        else if (effect == 15)   // Anamorphic streak: [threshold, intensity, lengthPx, falloffPow] + [vertical 0/1]; color = tint
+        else if (effect == 15)   // Anamorphic streak: [threshold, intensity, lengthPx, falloffPow]
+                                 // + [vertical 0/1]; color = tint.
     {
         float3 acc = 0.0f;
         float total = 0.0f;
 
-        // full-res gather everywhere (pyramid family retired).
         [unroll] for (int k = 1; k <= 16; ++k)
         {
             float t = (float)k / 16.0f;
@@ -554,7 +534,8 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         acc /= max(total, 1.0f);
         outc = scene + acc * color.rgb * fxParams0.y;
     }
-    else if (effect == 16)   // Sun flare, source-aware: p0.xyz = direction (engine space), p0.w = size;
+    else if (effect == 16)   // Sun flare, source-aware: p0.xyz = direction (engine space), p0.w =
+                             // Size;
     {
         // The direction projects as a point at infinity (w component 0); the
         // flare fades via per-pixel depth occlusion at the source: sky =
@@ -568,10 +549,6 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
                 float2 spos = float2(sndc.x * 0.5f + 0.5f, 0.5f - sndc.y * 0.5f);
                 int2 sp = int2(saturate(spos) * float2(fxMeta.z, fxMeta.w));
                 float vis = 0.0f;
-                // VERDICT-CONTINUITY (the doctrine WATCH item, closed): each
-                // tap's sky verdict was a hard > 1e8 cut - horizon terrain
-                // teetering at the far sentinel flipped taps in 1/25 steps,
-                // several together under the churn.
                 float khsf_f = KhEncFence();
                 [unroll] for (int oy = -2; oy <= 2; ++oy)
                 [unroll] for (int ox = -2; ox <= 2; ++ox)
@@ -607,7 +584,8 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         }
     }
 
-        else if (effect == 17)   // Glitch: [intensity, speed, sliceAmountPx, sliceBands] + [colorSplitPx, blockAmount, noiseAmount, burstiness]
+        else if (effect == 17)   // Glitch: [intensity, speed, sliceAmountPx, sliceBands] +
+                                 // [colorSplitPx, blockAmount, noiseAmount, burstiness].
     {
         float speed = max(fxParams0.y, 0.1f);
         float tf = floor(t * speed);
@@ -618,14 +596,14 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
 
         float2 suv = i.pos.xy;
 
-        // Horizontal slice displacement: few large tears, many small ones
+        // Horizontal slice displacement: few large tears, many small ones.
         float bands = max(fxParams0.w, 1.0f);
         float band = floor(uv.y * bands);
         float bh = (Hash(float2(band, tf)) - 0.5f) * 2.0f;
         bh = sign(bh) * pow(abs(bh), 3.0f);
         suv.x += bh * fxParams0.z * drive;
 
-        // Block corruption: coarse grid cells randomly displaced
+        // Block corruption: coarse grid cells randomly displaced.
         if (fxParams1.y > 0.001f)
         {
             float2 cell = floor(uv * float2(24.0f, 14.0f));
@@ -637,14 +615,14 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
             }
         }
 
-        // RGB channel split along the tear axis
+        // RGB channel split along the tear axis.
         float split = fxParams1.x * drive;
         float3 col;
         col.r = SampleScene(int2(suv + float2(split, 0.0f))).r;
         col.g = SampleScene(int2(suv)).g;
         col.b = SampleScene(int2(suv - float2(split, 0.0f))).b;
 
-        // Interference lines + static
+        // Interference lines + static.
         if (fxParams1.z > 0.001f)
         {
             float ln = Hash(float2(floor(i.pos.y * 0.5f), tf * 2.3f));
@@ -656,9 +634,9 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
 
         outc = max(col, 0.0f);
     }
-     else if (effect == 18)   // clarity: [strength, radiusPx]
+     else if (effect == 18)   // Clarity: [strength, radiusPx].
     {
-        // Wide-radius local contrast on LUMA ONLY (chroma-preserving by
+        // Wide-radius local contrast on luma only (chroma-preserving by
         // construction: the scene is rescaled by L'/L, so saturation never
         // moves). Two-ring 12-tap base estimate; the detail term is
         // soft-limited so strong edges do not halo.
@@ -679,17 +657,17 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         }
 
         float detail = lC - lB;
-        detail = detail / (1.0f + 2.5f * abs(detail));   // soft limiter (anti-halo)
+        detail = detail / (1.0f + 2.5f * abs(detail));   // Soft limiter (anti-halo).
         float scale = (lC + fxParams0.x * detail * 2.2f) / max(lC, 1e-3f);
         outc = scene * clamp(scale, 0.3f, 3.0f);
     }
-    else if (effect == 19)   // deband: [threshold(1/255), rangePx, grain(1/255)]
+    else if (effect == 19)   // Deband: [threshold(1/255), rangePx, grain(1/255)].
     {
         // Gradient debanding (the mpv/flyguy family): average four taps on a
         // hash-rotated cross within range; adopt the average only where it
-        // stays inside the threshold (real edges never do). Triangular-PDF
-        // grain breaks residual quantization. STATIC noise (temporally inert;
-        // no TAA exists to launder animation).
+        // stays inside the threshold (real edges never do). Triangular-pdf
+        // grain breaks residual quantization. Static noise (temporally inert;
+        // no taa exists to launder animation).
         float2 h = Hash2(i.pos.xy);
         float ang = h.x * 6.2832f;
         float rad = (0.3f + 0.7f * h.y) * max(fxParams0.y, 2.0f);
@@ -706,7 +684,8 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         outc += tri * (fxParams0.z / 255.0f);
         outc = max(outc, 0.0f);
     }
-    else if (effect == 20)   // rainlens: [intensity, speed, condensation, refract]; fx1 = SYSTEM camera velocity
+    else if (effect == 20)   // Rainlens: [intensity, speed, condensation, refract]; fx1 = system
+                             // Camera velocity.
     {
         float aspect = fxMeta.z / max(fxMeta.w, 1.0f);
         float2 q = float2(uv.x * aspect, uv.y);
@@ -715,7 +694,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         float tt = fxParams1.w * max(fxParams0.y, 0.0f);
         float windBase = clamp(-fxParams1.x * 0.055f, -0.5f, 0.5f);
         float wind = windBase + (q.x / aspect - 0.5f) * fwdK * 0.6f;
-        // small-splatter retune: finer grids, smaller drops, slower cadence,
+        // Small-splatter retune: finer grids, smaller drops, slower cadence,
         // gentler refraction (constants in KhRainLayer and below) - the
         // requested "small splatters, slight motion".
         float4 L1 = KhRainLayer(q, tt,          float2(6.0f, 1.4f), 0.0f,
@@ -725,8 +704,8 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         float drop  = max(L1.z, L2.z * 0.85f);
         float trail = max(L1.w, L2.w * 0.8f);
         float2 nrm  = L1.xy + L2.xy * 0.7f;
-        // Condensation film: blurred, faintly lifted scene; wiped by trails
-        // and punched through by the drops themselves.
+        // Condensation film: blurred, faintly lifted scene; wiped by trails and
+        // punched through by the drops themselves.
         float fogAmt = saturate(fxParams0.z) * saturate(0.25f + inten);
         float3 fogC = 0.0f;
 
@@ -737,8 +716,8 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         }
 
         fogC = lerp(fogC, Luma(fogC).xxx, 0.12f) * 1.02f;
-        // Fine static condensation droplets (twinkle in with the film,
-        // cleared where trails wiped).
+        // Fine static condensation droplets (twinkle in with the film, cleared
+        // where trails wiped).
         float2 sid = floor(q * 34.0f);
         float sn = Hash(sid);
         float2 sf = frac(q * 34.0f) - 0.5f;
@@ -764,7 +743,8 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         col = lerp(col, scene * 0.985f, saturate(trail * (1.0f - drop) * 0.55f) * fogAmt);
         outc = col;
     }
-    else if (effect == 21)   // crt: [curvature, scanlines, lineCount, maskStrength] + [aberrationPx, flicker, rollingBand, cornerRadius] +
+    else if (effect == 21)   // Crt: [curvature, scanlines, lineCount, maskStrength] +
+                             // [aberrationPx, flicker, rollingBand, cornerRadius] +.
     {
         float khc_curv = max(fxParams0.x, 0.0f);
         float2 khc_cc = uv - 0.5f;
@@ -775,11 +755,11 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         float khc_phase = khc_duv.y * khc_lines + t * fxParams2.x;
         float khc_line = floor(khc_phase);
 
-        // TRACKING WOBBLE (fxParams2.y, px): each scanline row shifts
+        // Tracking wobble (fxParams2.y, px): each scanline row shifts
         // horizontally by a per-line random jitter requantized at 24 Hz (the
-        // loose-sync read) plus a slow per-line sway. ONLY the picture
-        // wobbles: the tube mask and the grille live on the glass and stay
-        // put by construction.
+        // loose-sync read) plus a slow per-line sway. Only the picture wobbles:
+        // The tube mask and the grille live on the glass and stay put by
+        // construction.
         float khc_wob = ((Hash(float2(khc_line * 0.173f, floor(t * 24.0f) * 0.71f)) - 0.5f)
                        + 0.35f * sin(t * 2.3f + khc_line * 0.61f)) * fxParams2.y;
 
@@ -792,17 +772,16 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         khc_col.b = SampleScene(int2(khc_dpx - khc_fpx)).b;
 
         // Beam scanlines over the distorted picture: the beam profile is a
-        // shaped sine whose exponent NARROWS in the shadows and WIDENS toward
+        // shaped sine whose exponent narrows in the shadows and widens toward
         // the highlights (phosphor blooming), and the 1.32 gain recovers the
-        // average level the dark gaps remove. the profile rides the shared
+        // average level the dark gaps remove. The profile rides the shared
         // raster phase.
         float khc_lum = saturate(Luma(khc_col));
         float khc_beam = pow(abs(sin(khc_phase * 3.14159265f)),
                              lerp(2.2f, 0.65f, khc_lum));
         khc_col *= lerp(1.0f, khc_beam * 1.32f, saturate(fxParams0.y));
 
-        // Aperture grille: RGB triad fixed to SCREEN columns, with a matching
-        // gain so full mask strength keeps the average level.
+        // Aperture grille
         float khc_mk = saturate(fxParams0.w);
         int khc_m = (int)fmod(i.pos.x, 3.0f);
         float3 khc_tri = khc_m == 0 ? float3(1.0f, 0.45f, 0.45f)
@@ -827,9 +806,9 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         khc_col *= 1.0f + khc_fl * (khc_hum * 0.04f + khc_spark * 0.05f);
 
         // Phosphor tint, then the tube face: rounded-rectangle mask in the
-        // DISTORTED space (out-of-range refraction lands outside it by
-        // construction - the bezel is black), with a ~2 px feathered edge and
-        // a soft glass falloff into the corners.
+        // distorted space (out-of-range refraction lands outside it by
+        // construction - the bezel is black), with a ~2 px feathered edge and a
+        // soft glass falloff into the corners.
         khc_col *= color.rgb;
         float khc_cr = clamp(fxParams1.w, 0.003f, 0.5f);
         float2 khc_q = abs(khc_duv - 0.5f);
@@ -840,4 +819,3 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         khc_tube *= 1.0f - smoothstep(0.0f, khc_cr, khc_cd) * 0.35f;
         outc = khc_col * khc_tube;
     }
-

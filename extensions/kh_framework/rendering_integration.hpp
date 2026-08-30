@@ -5270,8 +5270,11 @@ inline void kh_voc_face(KhVisOcc& khvf_o, const float khvf_p[4][2], float khvf_z
 // write fragments nearer than their geometry (the far-arb terrain clamp);
 // khvo_far / khvo_cut bound a farVis-off occluder to where its own far
 // contract cannot discard it (the khObjCut / far-clamp discards). khvo_skip
-// answers "does this object draw through an SV_Depth route whose written
-// depth is not its geometric depth" - those neither occlude nor get culled.
+// answers "may this object fail to depth-write, or displace, a pixel the
+// grid would count as covered" - at the call site that is the SV_Depth
+// routes (which neither occlude nor get culled) and any box the
+// below-terrain discard could eat fragments from (kh_voc_buried; those are
+// still culled, since extra discards on a hidden object only help).
 template <class KhVocSkip>
 inline void kh_vis_occ_build(KhVisOcc& khvo, const std::vector<RenderObject>& khvo_m,
                              const float khvo_vp[4][4], const KhCullSet& khvo_cull,
@@ -10147,6 +10150,93 @@ static int                   g_thm_auto_retry = 0;
 static UINT                  g_thmf_dim = 0;   // fine-pass dims/cell (state 1).
 static float                 g_thmf_cell = 0.0f;
 
+// KH_VOC_BURIAL (26907) - the occlusion culler's burial filter. Whenever the
+// heightfield lanes are armed (kh_fill_occ, g_thm_valid), PSComposite
+// discards any fragment whose terrain clearance sits below -thmMeta.z
+// (KH_THM_BIAS_M) - so a box partly below the analytic terrain can lose
+// covered pixels the occlusion grid counted as depth-written. This is the one
+// arm of that discard the march's ray monotonicity does not close: an
+// occluder's marched clearance bounds the deeper object's from above (a march
+// discard on the occluder implies one on the object at the same pixel), but a
+// burial at the occluder's OWN footprint implies nothing about the object.
+// The check reads a coarse max snapshot of EXACTLY the uploaded grid
+// (g_voc_thm_*, published in kh_thm_upload with the render thread parked and
+// read on the render thread outside the flush - never the autobuild's
+// in-flight staging, which refines concurrently on the game thread). It takes
+// the max over every fine node the footprint's bilinear support can touch
+// (node maxima bound the bilinear surface; the coarse cells are maxima of
+// node maxima) and clears a candidate only when its lowest point provably
+// rides above every discard line under the footprint. Every unknown - no
+// snapshot while the lanes are armed, NaN geometry, an unaffordable footprint
+// - answers 'buried' = not an occluder (1.172 / 1.91): an absent occluder can
+// only under-cull, never hole the image.
+static constexpr UINT KH_VOC_THM_DS = 8;      // Fine nodes per coarse max cell.
+static constexpr int  KH_VOC_THM_CAP = 4096;  // Coarse cells per query; wider refuses.
+static std::vector<float> g_voc_thm_max;
+static UINT  g_voc_thm_w = 0;                 // Coarse dims.
+static UINT  g_voc_thm_h = 0;
+static UINT  g_voc_thm_fw = 0;                // Fine dims (the texture's).
+static UINT  g_voc_thm_fh = 0;
+static float g_voc_thm_origin[2] = {};
+static float g_voc_thm_cell = 0.0f;           // Fine cell (the texture's).
+static bool  g_voc_thm_valid = false;
+
+inline bool kh_voc_buried(const RenderObject& khvb_o) {
+    if (!g_thm_valid) return false;   // Discard lanes inert (kh_fill_occ): nothing to defend.
+    if (!g_voc_thm_valid || !(g_voc_thm_cell > 0.0f) ||
+        g_voc_thm_fw == 0 || g_voc_thm_fh == 0) {
+        return true;   // Armed discard, no certificate: refuse (1.91).
+    }
+    float khvb_c[3];
+    kh_obj_center_engine(khvb_o, khvb_c);
+    float khvb_he[3];
+    kh_world_half_extents(khvb_o, khvb_he);
+    const float khvb_inv = 1.0f / g_voc_thm_cell;
+    const float khvb_gx0 = (khvb_c[0] - khvb_he[0] - g_voc_thm_origin[0]) * khvb_inv;
+    const float khvb_gx1 = (khvb_c[0] + khvb_he[0] - g_voc_thm_origin[0]) * khvb_inv;
+    const float khvb_gz0 = (khvb_c[2] - khvb_he[2] - g_voc_thm_origin[1]) * khvb_inv;
+    const float khvb_gz1 = (khvb_c[2] + khvb_he[2] - g_voc_thm_origin[1]) * khvb_inv;
+    if (!(khvb_gx0 <= khvb_gx1) || !(khvb_gz0 <= khvb_gz1) ||
+        !(khvb_gx1 - khvb_gx0 < 1.0e7f) || !(khvb_gz1 - khvb_gz0 < 1.0e7f)) {
+        return true;   // NaN / absurd extents: refuse before any int cast.
+    }
+    // KhThmHeight answers -1e6 outside the grid = no discard evidence there,
+    // so a footprint fully outside cannot be eaten.
+    if (khvb_gx1 < -1.0f || khvb_gz1 < -1.0f ||
+        khvb_gx0 > static_cast<float>(g_voc_thm_fw) ||
+        khvb_gz0 > static_cast<float>(g_voc_thm_fh)) {
+        return false;
+    }
+    // Fine-node range under the footprint plus one node each way (the
+    // bilinear support of a sample at g touches floor(g) and floor(g) + 1),
+    // clamped in float so the casts stay in range.
+    const float khvb_fx = static_cast<float>(g_voc_thm_fw - 1);
+    const float khvb_fz = static_cast<float>(g_voc_thm_fh - 1);
+    const int khvb_x0 = static_cast<int>(fmaxf(floorf(khvb_gx0) - 1.0f, 0.0f));
+    const int khvb_x1 = static_cast<int>(fminf(floorf(khvb_gx1) + 1.0f, khvb_fx));
+    const int khvb_z0 = static_cast<int>(fmaxf(floorf(khvb_gz0) - 1.0f, 0.0f));
+    const int khvb_z1 = static_cast<int>(fminf(floorf(khvb_gz1) + 1.0f, khvb_fz));
+    const int khvb_cx0 = khvb_x0 / static_cast<int>(KH_VOC_THM_DS);
+    const int khvb_cx1 = khvb_x1 / static_cast<int>(KH_VOC_THM_DS);
+    const int khvb_cz0 = khvb_z0 / static_cast<int>(KH_VOC_THM_DS);
+    const int khvb_cz1 = khvb_z1 / static_cast<int>(KH_VOC_THM_DS);
+    if ((khvb_cx1 - khvb_cx0 + 1) * (khvb_cz1 - khvb_cz0 + 1) > KH_VOC_THM_CAP) {
+        return true;   // Too wide to certify at this budget: refuse (1.172).
+    }
+    float khvb_hmax = -1.0e6f;
+    for (int khvb_cz = khvb_cz0; khvb_cz <= khvb_cz1; ++khvb_cz) {
+        const float* khvb_row = g_voc_thm_max.data() +
+                                static_cast<size_t>(khvb_cz) * g_voc_thm_w;
+        for (int khvb_cx = khvb_cx0; khvb_cx <= khvb_cx1; ++khvb_cx) {
+            if (khvb_row[khvb_cx] > khvb_hmax) khvb_hmax = khvb_row[khvb_cx];
+        }
+    }
+    // Buried-possible when the box's lowest point could sit below the discard
+    // line anywhere under the footprint; 5 cm of FP headroom over the
+    // shader's strict compare (clearance < -KH_THM_BIAS_M discards).
+    return khvb_c[1] - khvb_he[1] < khvb_hmax - KH_THM_BIAS_M + 0.05f;
+}
+
 // Fills the overhaul's CB tail: guard space/options + the snapshot's own matrix
 // for the reprojection lane. Call at both paths' guard fills.
 inline void kh_fill_occ(ConstantData& cbd) {
@@ -10204,6 +10294,35 @@ inline std::string kh_thm_upload(ID3D11Device* dev) {
     g_thml_cell = g_thm_cell;
     g_thml_w = g_thm_w;
     g_thml_h = g_thm_h;
+    // KH_VOC_BURIAL: coarse max snapshot of exactly the grid just uploaded
+    // (render thread parked here, so the culler's reader never races the
+    // autobuild's staging refinement). A failure leaves the snapshot invalid,
+    // which the reader treats as 'refuse every occluder' - conservative.
+    try {
+        const UINT khvb_cw = (g_thm_w + KH_VOC_THM_DS - 1) / KH_VOC_THM_DS;
+        const UINT khvb_ch = (g_thm_h + KH_VOC_THM_DS - 1) / KH_VOC_THM_DS;
+        g_voc_thm_max.assign(static_cast<size_t>(khvb_cw) * khvb_ch, -1.0e6f);
+        for (UINT khvb_y = 0; khvb_y < g_thm_h; ++khvb_y) {
+            const float* khvb_src = g_thm_data.data() +
+                                    static_cast<size_t>(khvb_y) * g_thm_w;
+            float* khvb_dst = g_voc_thm_max.data() +
+                              static_cast<size_t>(khvb_y / KH_VOC_THM_DS) * khvb_cw;
+            for (UINT khvb_x = 0; khvb_x < g_thm_w; ++khvb_x) {
+                float& khvb_s = khvb_dst[khvb_x / KH_VOC_THM_DS];
+                if (khvb_src[khvb_x] > khvb_s) khvb_s = khvb_src[khvb_x];
+            }
+        }
+        g_voc_thm_w = khvb_cw;
+        g_voc_thm_h = khvb_ch;
+        g_voc_thm_fw = g_thm_w;
+        g_voc_thm_fh = g_thm_h;
+        g_voc_thm_origin[0] = g_thm_origin[0];
+        g_voc_thm_origin[1] = g_thm_origin[1];
+        g_voc_thm_cell = g_thm_cell;
+        g_voc_thm_valid = true;
+    } catch (...) {
+        g_voc_thm_valid = false;
+    }
     g_thm_valid = true;
     return "";
 }
@@ -21474,6 +21593,18 @@ inline bool kh_svs_vol_ensure(ID3D11Device* khe_dev) {
 inline bool kh_svs_vol_ready() {
     if (g_svs_vol_depth_srv == nullptr || g_svs_vol_sten_srv == nullptr) return false;
     if (!g_svs_vol_primed) {  return false; }
+    // KH_SVS_VOL_FRESH (26907) - the raster-tap transport is exact only when
+    // the copy and the reader share a frame; on a frame where the engine drew
+    // no volumes (no bracket, no fresh copy) the previous copy is one camera
+    // motion stale, and sampling it at this frame's raster pixel would offset
+    // the shadow by that motion. Refuse the term instead: one frame of absent
+    // term (usually a frame with nothing occluding anyway) beats one frame of
+    // displaced shadow, and the reprojection walk that once compensated for
+    // this was the measured 30 px halo. One gate, every consumer:
+    // kh_svs_unit_on IS this function in volume mode, so maskMeta.w, the
+    // stenVol2.x arm and both t23/t24 binds drop together and no split
+    // verdict can arm the shader against unbound or stale sources.
+    if (g_svs_vol_seq != g_svs_frame_seq) { return false; }
 
     if (!g_main_depth_w || !g_main_depth_h ||
         g_svs_vol_w != static_cast<uint32_t>(g_main_depth_w) ||
@@ -25051,7 +25182,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                      khr_acc_far, g_obj_vis.load(std::memory_order_relaxed),
                      [&](const RenderObject& khvs_o) -> bool {
                          const KhInjRoute khvs_r = khr_route_of(khvs_o);
-                         return khvs_r.farkeep || khvs_r.nearz;
+                         return khvs_r.farkeep || khvs_r.nearz || kh_voc_buried(khvs_o);
                      });
     // The pass's one visibility truth: the material ensure, the plan's emit
     // and the per-object loop all call this same lambda, so a bucket's
@@ -26605,20 +26736,43 @@ inline void kh_dls_world_pass_body(ID3D11DeviceContext* khw_ctx) {
     kh_dls_fill_dl_world(khw_obj);
     kh_dls_fill_cb(khw_frm);   // dls_meta / dls_ctl / dls_face_slice / dls_spot_vp.
 
-    // Engine sun + sky, for KhDlsWorldFactor's denominator only.
+    // Engine sun + sky, for KhDlsWorldFactor's denominator only. These are
+    // FRAME-half lanes - lighting1 / lighting2 / lightAmb sit past view_proj
+    // in ConstantData - and the frame CB uploads from khw_frm, so writing
+    // them to khw_obj parked them in the never-uploaded frame tail of the
+    // object struct. The shader then summed Ltotal with a ZERO sun and sky,
+    // the factor collapsed to the dynamics-only ratio, and a shadow painted
+    // near-black regardless of how dim its light was or how bright the day
+    // (the ratio is brightness-invariant). Night - where the dynamic term IS
+    // the total - was the one regime that could not show it, and is where the
+    // feature was built and probed. lighting0[2]/[3] are OBJECT-half and stay
+    // on khw_obj.
+    // The else arm is fill_lighting_frame_cb's fallback, twinned (rule 1.5):
+    // an unharvested block reads white, which overstates Ltotal and fails
+    // toward under-darkening - the kernel's stated direction - never toward
+    // black.
     if (g_pub_block_valid) {
-        khw_obj.lighting2[0] = g_pub_block_sun[0];
-        khw_obj.lighting2[1] = g_pub_block_sun[1];
-        khw_obj.lighting2[2] = g_pub_block_sun[2];
-        khw_obj.light_amb[0] = g_pub_block_amb[0];
-        khw_obj.light_amb[1] = g_pub_block_amb[1];
-        khw_obj.light_amb[2] = g_pub_block_amb[2];
+        khw_frm.lighting2[0] = g_pub_block_sun[0];
+        khw_frm.lighting2[1] = g_pub_block_sun[1];
+        khw_frm.lighting2[2] = g_pub_block_sun[2];
+        khw_frm.light_amb[0] = g_pub_block_amb[0];
+        khw_frm.light_amb[1] = g_pub_block_amb[1];
+        khw_frm.light_amb[2] = g_pub_block_amb[2];
+        khw_frm.light_amb[3] = 1.0f;
+    } else {
+        khw_frm.lighting2[0] = 1.0f;
+        khw_frm.lighting2[1] = 1.0f;
+        khw_frm.lighting2[2] = 1.0f;
+        khw_frm.light_amb[0] = 1.0f;
+        khw_frm.light_amb[1] = 1.0f;
+        khw_frm.light_amb[2] = 1.0f;
+        khw_frm.light_amb[3] = 0.0f;
     }
     khw_obj.lighting0[2] = 1.0f;   // Ambient scale: the world's own, not an object's.
     khw_obj.lighting0[3] = 1.0f;
-    khw_obj.lighting1[0] = g_sun_dir_engine[0];
-    khw_obj.lighting1[1] = g_sun_dir_engine[1];
-    khw_obj.lighting1[2] = g_sun_dir_engine[2];
+    khw_frm.lighting1[0] = g_sun_dir_engine[0];
+    khw_frm.lighting1[1] = g_sun_dir_engine[1];
+    khw_frm.lighting1[2] = g_sun_dir_engine[2];
 
     // KH_DLS_WORLD_SELFMASK - do not paint on our own meshes. The mask projects world
     // -> pixel and the reconstruction maps pixel -> world; being inverse directions
@@ -30532,6 +30686,13 @@ inline void reset_session_state() {
     g_thm_cell = 0.0f;
     g_thm_dirty = false;
     g_thm_valid = false;
+    g_voc_thm_max.clear();
+    g_voc_thm_max.shrink_to_fit();
+    g_voc_thm_w = g_voc_thm_h = 0;
+    g_voc_thm_fw = g_voc_thm_fh = 0;
+    g_voc_thm_origin[0] = g_voc_thm_origin[1] = 0.0f;
+    g_voc_thm_cell = 0.0f;
+    g_voc_thm_valid = false;
     g_thml_origin[0] = g_thml_origin[1] = 0.0f;
     g_thml_cell = 0.0f;
     g_thml_w = g_thml_h = 0;

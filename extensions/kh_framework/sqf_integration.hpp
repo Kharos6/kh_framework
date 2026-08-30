@@ -6273,7 +6273,7 @@ static bool kh_rv_effect(const game_value& v, RenderIntegration::RenderObject& o
     if (e < 0) { err = khfx_err.empty() ? std::string("unknown effect (a builtin effect name / id, a .hlsl path, or a .cube path)") : khfx_err; return false; }
     if (want_fullscreen && e == 0) { err = "a fullscreen pass needs an effect other than 'solid'"; return false; }
     obj.effect = e;
-    obj.fx_shader = khfx_path;
+    obj.fx_shader = RenderIntegration::kh_intern_str(khfx_path);   // KH_FX_INTERN.
     RenderIntegration::set_effect_params(obj, nullptr);   // New effect, its defaults.
     return true;
 }
@@ -6352,7 +6352,7 @@ static game_value add_render3d_sqf(game_value_parameter args) {
         obj.lit = true;
         obj.two_sided = false;
         obj.effect = 0;
-        obj.fx_shader.clear();
+        obj.fx_shader = nullptr;
         RenderIntegration::set_effect_params(obj, nullptr);
         RenderIntegration::kh_apply_native_size(obj);
 
@@ -6431,7 +6431,7 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj,
         bool b = false;
         if (!kh_rv_bool(val, b, "sceneRead", err)) return false;
         obj.effect = b ? 2 : 0;   // Tinted scene-read (colorgrade defaults).
-        obj.fx_shader.clear();
+        obj.fx_shader = nullptr;
         RenderIntegration::set_effect_params(obj, nullptr);
         return true;
     }
@@ -6440,12 +6440,7 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj,
     if (prop == "twosided") { bool b = obj.two_sided; if (!kh_rv_bool(val, b, "twoSided", err)) return false; obj.two_sided = b; return true; }
     if (prop == "farvis")   { bool b = obj.far_vis;   if (!kh_rv_bool(val, b, "farVis", err))   return false; obj.far_vis = b;   return true; }
     if (prop == "lodlock")  { bool b = obj.lod_lock;  if (!kh_rv_bool(val, b, "lodLock", err))  return false; obj.lod_lock = b;  return true; }
-    // KH_INSTANCING: updateRender3D [h, "instanced", true]. Default false (the
-    // renderObject default; addRender3D sets nothing). See the field's note in
-    // renderObject for what a batch shares and gives up.
-    if (prop == "instanced") { bool b = obj.instanced; if (!kh_rv_bool(val, b, "instanced", err)) return false; obj.instanced = b; return true; }
-
-    err = "unknown property (position | size | rotation | mesh | material | mode | sceneRead | effect | params | lit | twoSided | farVis | lodLock | instanced | casterOnly | color | visible | blend | band | duration)";
+    err = "unknown property (position | size | rotation | mesh | material | mode | sceneRead | effect | params | lit | twoSided | farVis | lodLock | casterOnly | color | visible | blend | band | duration)";
     return false;
 }
 
@@ -6555,14 +6550,10 @@ static bool kh_update_one(const char* cmd, bool want_fullscreen,
         return false;
     }
 
-    {
-        std::lock_guard<std::mutex> g(RenderIntegration::g_draw_list_mutex);
-        auto it = RenderIntegration::g_draw_list.find(handle);
-        if (it == RenderIntegration::g_draw_list.end()) {
-            kh_rv_report(cmd, "render object '" + handle + "'" + where + " was removed while the update was being applied");
-            return false;
-        }
-        it->second = std::move(staged);
+    // KH_SCENE: the write-back marks the slot dirty for the live scene.
+    if (!RenderIntegration::update_render_object(handle, std::move(staged))) {
+        kh_rv_report(cmd, "render object '" + handle + "'" + where + " was removed while the update was being applied");
+        return false;
     }
     return true;
 }
@@ -6769,6 +6760,8 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("injectedMeshes", static_cast<float>(s.composite_meshes)));
         out.push_back(kv("texturedDraws", static_cast<float>(s.textured_draws)));
         out.push_back(kv("fbxImports", static_cast<float>(s.fbx_imports)));
+        out.push_back(kv("meshesReleased", static_cast<float>(s.meshes_released)));
+        out.push_back(kv("texturesReleased", static_cast<float>(s.textures_released)));
         out.push_back(kv("shaderCacheHits", static_cast<float>(RenderIntegration::g_shader_cache_hits.load(std::memory_order_relaxed))));
         out.push_back(kv("shaderCacheMisses", static_cast<float>(RenderIntegration::g_shader_cache_misses.load(std::memory_order_relaxed))));
         out.push_back(kv("lockRetries", static_cast<float>(s.lock_retries)));

@@ -284,11 +284,12 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
 }
  float4 PSEffect(VSOut i) : SV_Target
 {
+    KhObjLoad(i.iobj0, i.iobj1);   // KH_OBJBUF: effect meshes draw per object (the CB lanes).
     // Fullscreen passes are inert by construction (w = 1 -> ndc far below 1),
     // and zeroed/degenerate depthParams stand the test down via the m32 gate.
-    if (shadowMeta2.x < 0.5f && depthParams.y < -1.0e-3f &&
+    if (khObjFarVis < 0.5f && depthParams.y < -1.0e-3f &&
         depthParams.x + depthParams.y / max(i.pos.w, 1.0e-4f) > 1.0f) discard;
-    if (shadowMeta2.x < 0.5f && shadowMeta2.y > 0.0f && i.pos.w > shadowMeta2.y) discard;
+    if (khObjFarVis < 0.5f && khObjCut > 0.0f && i.pos.w > khObjCut) discard;
     int2  px = int2(i.pos.xy);
     float2 uv = i.pos.xy / float2(fxMeta.z, fxMeta.w);
     int   effect = (int)fxMeta.x;

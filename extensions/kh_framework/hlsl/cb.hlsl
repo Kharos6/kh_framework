@@ -31,11 +31,16 @@ cbuffer CBObj : register(b0)
     float4 blendCtl;   // x = 1: normal-blend translucent mesh with the scene capture bound this
                        // Inject - the packing composites in Reinhard space against t3 and writes
                        // opaque.
-    float4 matParams0;   // KH_TEXTURED material head: map-bound flags.
-    float4 matParams1;   // Alpha mode, cutoff, normal strength / base.
-    float4 matParams2;   // Color + roughness / metalness, emissive.
-    float4 matParams3;   // Intensity + channel routes see the material block after ApplyLighting.
-                         // Zeroed and unread on every untextured fill site.
+    float4 matCtl;   // KH_MAT_TABLE: x = this draw's material table index (base + submesh
+                     // slot; the non-instanced VS lanes carry it), y = the submesh slot (the
+                     // instanced VS adds it to the instance's own base), z = 1 when x is uniform
+                     // for every instance (the default set bound for a slot the set does not
+                     // carry, or the white substitute), w = per-draw
+                     // alpha-mode override (>= 0 replaces the table's mode: the blend split's
+                     // opaque part draws with 3). Zeroed and unread on every untextured fill.
+    float4 matPad1;   // Former matParams1..3: kept for the CB layout (234 float4), unread.
+    float4 matPad2;
+    float4 matPad3;
     float4 khFarSplit;   // Far-keep split: xy = the frame pair.
     float4 fuseMeta;
     float4 fuseStage[12];
@@ -155,6 +160,13 @@ cbuffer CBObj : register(b0)
     // carry it: the world-receive pass fills mirMeta.xyz with its own mask and
     // has no sunOrigin. C++ twin dls_range, written by kh_dls_fill_cb.
     float4 dlsRange;
+    // KH_OBJBUF (C++ twins kh_pass / kh_pass_obj, appended identically).
+    // khPass.xyz = the pass's rebase camera (engine axes), w = 1 arms the bucket
+    // vertex path's rebase (twin of centerRel.w). khPassObj.x = the engine object
+    // view distance (the farVis-off cut for bucket instances, twin of
+    // shadowMeta2.y); yzw free. Zero wherever no bucket draws.
+    float4 khPass;
+    float4 khPassObj;
 };
  
 cbuffer CBEngView : register(b2)
@@ -171,6 +183,52 @@ cbuffer CBEngView2 : register(b4)
 {
     float4 engBlk2[15];
 };
+
+// KH_OBJBUF: the object record buffer (C++ twin KhObjRec, 6 float4), one per
+// live-scene slot, read by every bucket vertex shader through the lane's slot
+// (VSInst.islot). Engine axes. size.w = farVis flag, rot0.w = 1 (filled),
+// rot1.w = lit ambient fraction, rot2.w = lit diffuse fraction; col carries no
+// lifetime envelope (the lane's alpha does).
+struct KhObjRec { float4 pos; float4 size; float4 rot0; float4 rot1; float4 rot2; float4 col; };
+StructuredBuffer<KhObjRec> khObjs : register(t39);
+
+// KH_OBJBUF: the per-object lanes a bucket varies per instance and the CB
+// carried per draw. Filled by the vertex shader into two flat interpolants
+// (VSOut.iobj0/1, per-object path from the CB lanes, bucket path from the
+// record + lane) and loaded by every mesh pixel shader at entry (KhObjLoad);
+// the mesh lighting / far contract / owner / dither reads below use these,
+// never lighting0.zw, shadowMeta2.xyz or blendCtl.zw directly. Declared for
+// every variant.
+static float khObjAmb = 0.0f;      // lighting0.z twin: base-colour fraction kept in shadow.
+static float khObjDif = 0.0f;      // lighting0.w twin: n.L-scaled fraction.
+static float khObjFarVis = 0.0f;   // shadowMeta2.x / blendCtl.z twin: far-visibility clamp flag.
+static float khObjCut = 0.0f;      // shadowMeta2.y twin: object view-distance cut (m, 0 = off).
+static float khObjOwner = 0.0f;    // shadowMeta2.z twin: 1 + (slot mod 4096), the owner-map id.
+static float khObjDither = 0.0f;   // blendCtl.w twin: the LOD crossfade dither for this draw.
+void KhObjLoad(float4 khol_a, float4 khol_b)
+{
+    khObjAmb = khol_a.x;
+    khObjDif = khol_a.y;
+    khObjFarVis = khol_a.z;
+    khObjCut = khol_a.w;
+    khObjOwner = khol_b.x;
+    khObjDither = khol_b.y;
+}
+// The vertex side: the CB lanes (per-object draws)...
+void KhObjLanesCb(out float4 khoc_a, out float4 khoc_b)
+{
+    khoc_a = float4(lighting0.z, lighting0.w, shadowMeta2.x, shadowMeta2.y);
+    khoc_b = float4(shadowMeta2.z, blendCtl.w, 0.0f, 0.0f);
+}
+// ...or the record + lane (bucket draws). The owner id is derived from the
+// slot exactly as the C++ per-object fill derives it, so the two never share
+// one; the cut is the pass's object view distance for a farVis-off instance.
+void KhObjLanesRec(KhObjRec khor_r, uint khor_slot, float khor_dither, out float4 khor_a, out float4 khor_b)
+{
+    khor_a = float4(khor_r.rot1.w, khor_r.rot2.w, khor_r.size.w,
+                    (khor_r.size.w > 0.5f) ? 0.0f : khPassObj.x);
+    khor_b = float4((float)(1u + (khor_slot & 4095u)), khor_dither, 0.0f, 0.0f);
+}
 
 #define KH_RPDB_GC_M 0.008f
 #define KH_HERO_TEXEL_M 0.001f
@@ -1340,26 +1398,71 @@ float3 ApplyLighting(float3 base, float3 wpos, float3 nrm, float smf)
     if (lighting0.x < 0.5f || lighting1.w < 0.5f) return base;
     float3 n = normalize(nrm);
     float ndl = saturate(dot(n, lighting1.xyz));
-    float3 direct = lighting2.rgb * (ndl * lighting0.w * smf);   // Per-pixel receive + self term
-                                                                 // (min-combined upstream).
-    return base * (lightAmb.rgb * lighting0.z + direct + DynLights(wpos, nrm));
+    float3 direct = lighting2.rgb * (ndl * khObjDif * smf);   // Per-pixel receive + self term
+                                                              // (min-combined upstream).
+    return base * (lightAmb.rgb * khObjAmb + direct + DynLights(wpos, nrm));
 }
 
+// KH_MAT_TABLE: the material lanes every reader names as matParams0..3. In the
+// textured variants KhMatLoad fills them from the table entry; the untextured
+// variants never load and read them at zero - the same value the zeroed CB
+// lanes carried there before the table (the mirror-mask gate in PSMain /
+// PSComposite reads matParams0.y in both).
+static float4 matParams0 = 0.0f, matParams1 = 0.0f, matParams2 = 0.0f, matParams3 = 0.0f;
+
 #if KH_TEXTURED
-Texture2D<float4> matDiffuse  : register(t14);
-Texture2D<float4> matNormal   : register(t15);
-Texture2D<float4> matOrm      : register(t16);
-Texture2D<float4> matEmissive : register(t17);
-Texture2D<float4> matSpecular : register(t18);
+// KH_MAT_PAGES: every material map is a layer of a texture page (a
+// Texture2DArray of textures sharing width, height, format and mip count);
+// the page is bound per draw at t14-t18, the layer comes from the material
+// table entry. Materials whose maps live in the same pages batch across one
+// instanced draw (the instance stream carries the material base).
+Texture2DArray<float4> matDiffuse  : register(t14);
+Texture2DArray<float4> matNormal   : register(t15);
+Texture2DArray<float4> matOrm      : register(t16);
+Texture2DArray<float4> matEmissive : register(t17);
+Texture2DArray<float4> matSpecular : register(t18);
 SamplerState matSamp : register(s0);
+
+// KH_MAT_TABLE: one entry per material-set slot, C++ twin KhGpuMat (6 float4).
+// p0..p3 are the former matParams0..3 lanes unchanged (map-bound flags, alpha
+// mode, cutoff, normal strength / base colour, roughness / metalness, emissive
+// intensity, occ route, rough route / metal route, alpha route, gloss route,
+// spec workflow); lay0 = diffuse/normal/orm/emissive layers, lay1.x = specular.
+struct KhGpuMat { float4 p0; float4 p1; float4 p2; float4 p3; float4 lay0; float4 lay1; };
+StructuredBuffer<KhGpuMat> khMats : register(t38);
+
+// The per-pixel material lanes (declared for every variant, above this
+// block). KhMatLoad fills them from the table entry once per pixel (the index
+// rides the VS interpolant, flat per draw or per instance).
+static float4 khMatLay0 = 0.0f, khMatLay1 = 0.0f;
+void KhMatLoad(uint khml_ix)
+{
+    KhGpuMat khml_m = khMats[khml_ix];
+    matParams0 = khml_m.p0;
+    matParams1 = khml_m.p1;
+    matParams2 = khml_m.p2;
+    matParams3 = khml_m.p3;
+    khMatLay0 = khml_m.lay0;
+    khMatLay1 = khml_m.lay1;
+    if (matCtl.w >= 0.0f) matParams0.y = matCtl.w;   // The draw's alpha-mode override.
+}
+float KhMatLayer(int slot)
+{
+    if (slot == 0) return khMatLay0.x;
+    if (slot == 1) return khMatLay0.y;
+    if (slot == 2) return khMatLay0.z;
+    if (slot == 3) return khMatLay0.w;
+    return khMatLay1.x;
+}
 
 float4 KhMatFetch(int slot, float2 uv)
 {
-    if (slot == 0) return matDiffuse.Sample(matSamp, uv);
-    if (slot == 1) return matNormal.Sample(matSamp, uv);
-    if (slot == 2) return matOrm.Sample(matSamp, uv);
-    if (slot == 3) return matEmissive.Sample(matSamp, uv);
-    return matSpecular.Sample(matSamp, uv);
+    float3 khmf_c = float3(uv, KhMatLayer(slot));
+    if (slot == 0) return matDiffuse.Sample(matSamp, khmf_c);
+    if (slot == 1) return matNormal.Sample(matSamp, khmf_c);
+    if (slot == 2) return matOrm.Sample(matSamp, khmf_c);
+    if (slot == 3) return matEmissive.Sample(matSamp, khmf_c);
+    return matSpecular.Sample(matSamp, khmf_c);
 }
 
 float KhMatRoute(float route, float fallback, float2 uv)
@@ -1382,14 +1485,15 @@ float KhMatRoute(float route, float fallback, float2 uv)
 // could not cover them: the 'mouse bites' through a solid hull.
 float4 KhMatFetchTexel(int slot, float2 uv)
 {
-    uint kmt_w, kmt_h;
+    uint kmt_w, kmt_h, kmt_n;
     float2 kmt_t = frac(uv);   // The sampler wraps; so does this.
-    if (slot == 0) { matDiffuse.GetDimensions(kmt_w, kmt_h);  return matDiffuse.Load(int3(int2(kmt_t * float2(kmt_w, kmt_h)), 0)); }
-    if (slot == 1) { matNormal.GetDimensions(kmt_w, kmt_h);   return matNormal.Load(int3(int2(kmt_t * float2(kmt_w, kmt_h)), 0)); }
-    if (slot == 2) { matOrm.GetDimensions(kmt_w, kmt_h);      return matOrm.Load(int3(int2(kmt_t * float2(kmt_w, kmt_h)), 0)); }
-    if (slot == 3) { matEmissive.GetDimensions(kmt_w, kmt_h); return matEmissive.Load(int3(int2(kmt_t * float2(kmt_w, kmt_h)), 0)); }
-    matSpecular.GetDimensions(kmt_w, kmt_h);
-    return matSpecular.Load(int3(int2(kmt_t * float2(kmt_w, kmt_h)), 0));
+    int kmt_l = (int)KhMatLayer(slot);
+    if (slot == 0) { matDiffuse.GetDimensions(kmt_w, kmt_h, kmt_n);  return matDiffuse.Load(int4(int2(kmt_t * float2(kmt_w, kmt_h)), kmt_l, 0)); }
+    if (slot == 1) { matNormal.GetDimensions(kmt_w, kmt_h, kmt_n);   return matNormal.Load(int4(int2(kmt_t * float2(kmt_w, kmt_h)), kmt_l, 0)); }
+    if (slot == 2) { matOrm.GetDimensions(kmt_w, kmt_h, kmt_n);      return matOrm.Load(int4(int2(kmt_t * float2(kmt_w, kmt_h)), kmt_l, 0)); }
+    if (slot == 3) { matEmissive.GetDimensions(kmt_w, kmt_h, kmt_n); return matEmissive.Load(int4(int2(kmt_t * float2(kmt_w, kmt_h)), kmt_l, 0)); }
+    matSpecular.GetDimensions(kmt_w, kmt_h, kmt_n);
+    return matSpecular.Load(int4(int2(kmt_t * float2(kmt_w, kmt_h)), kmt_l, 0));
 }
 
 float KhMatRouteTexel(float route, float fallback, float2 uv)
@@ -1410,17 +1514,17 @@ KhMatSurf KhSampleMat(float2 uv)
 {
     KhMatSurf s;
     int flags = (int)matParams0.x;
-    float4 dif = (flags & 1) ? matDiffuse.Sample(matSamp, uv) : float4(1.0f, 1.0f, 1.0f, 1.0f);
+    float4 dif = (flags & 1) ? matDiffuse.Sample(matSamp, float3(uv, khMatLay0.x)) : float4(1.0f, 1.0f, 1.0f, 1.0f);
     s.albedo = dif.rgb * matParams1.xyz;
     s.alpha = KhMatRoute(matParams3.y, 1.0f, uv);
-    s.nrmT = (flags & 2) ? (matNormal.Sample(matSamp, uv).xyz * 2.0f - 1.0f) : float3(0.0f, 0.0f, 1.0f);
+    s.nrmT = (flags & 2) ? (matNormal.Sample(matSamp, float3(uv, khMatLay0.y)).xyz * 2.0f - 1.0f) : float3(0.0f, 0.0f, 1.0f);
     s.nrmT.xy *= matParams0.w;
     s.occ = KhMatRoute(matParams2.z, 1.0f, uv);
     s.rough = KhMatRoute(matParams2.w, matParams1.w, uv);
     s.metal = KhMatRoute(matParams3.x, matParams2.x, uv);
-    s.emissive = ((flags & 8) ? matEmissive.Sample(matSamp, uv).rgb : float3(0.0f, 0.0f, 0.0f)) * matParams2.y;
+    s.emissive = ((flags & 8) ? matEmissive.Sample(matSamp, float3(uv, khMatLay0.w)).rgb : float3(0.0f, 0.0f, 0.0f)) * matParams2.y;
     s.specOn = matParams3.w;
-    float4 spc = (flags & 16) ? matSpecular.Sample(matSamp, uv) : float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float4 spc = (flags & 16) ? matSpecular.Sample(matSamp, float3(uv, khMatLay1.x)) : float4(0.0f, 0.0f, 0.0f, 0.0f);
     s.specF0 = spc.rgb;
     s.gloss = KhMatRoute(matParams3.z, spc.a, uv);
     return s;
@@ -1585,7 +1689,7 @@ float3 KhApplyPBR(KhMatSurf m, float3 wpos, float3 n, float smf)
     float3 F;
     float3 spec = KhGGXSpec(n, v, l, rough, F0, F);
     float3 kd = (1.0f - F) * (1.0f - metal);
-    float3 direct = lighting2.rgb * (lighting0.w * ndl * smf) * (kd * m.albedo + spec);
+    float3 direct = lighting2.rgb * (khObjDif * ndl * smf) * (kd * m.albedo + spec);
     // KH_PBR_OVERCAST - the sun through cloud is A wide highlight. Under
     // overcast the lit block's sun colour falls to a fraction of its ambient,
     // so the GGX lobe above - which rides lighting2 - is gone, yet the bright
@@ -1603,13 +1707,13 @@ float3 KhApplyPBR(KhMatSurf m, float3 wpos, float3 n, float smf)
     if (khov_w > 0.0f) {
         float3 khov_F;
         khov = KhGGXSpec(n, v, l, max(rough, 0.6f), F0, khov_F)
-             * (lightAmb.rgb * lighting0.z) * (khov_w * ndl * smf);
+             * (lightAmb.rgb * khObjAmb) * (khov_w * ndl * smf);
     }
     // KH_PBR_AMBIENT: the split-sum ambient (diffuse with (1 - metal) and
     // Fresnel, plus the dome's specular) replaces albedo * amb; see the helper.
     // smf is not passed - the sky is not shadowed by our casters.
     const float3 amb = KhPbrAmbient(n, v, khov_vOk, rough, F0, metal, m.albedo,
-                                    lightAmb.rgb * lighting0.z, m.occ);
+                                    lightAmb.rgb * khObjAmb, m.occ);
     return amb + KhDynLightsPBR(wpos, n, m.albedo, F0, rough, metal) + direct + khov + m.emissive;
 }
 #endif
@@ -1792,8 +1896,13 @@ struct VSOut { float4 pos : SV_Position; float3 wpos : TEXCOORD0; float3 nrm : T
     // across a triangle by construction - every vertex of a draw carries the
     // same value - so the interpolation is exact.
     float4 icol : TEXCOORD5;
+    // KH_OBJBUF: the per-object lanes (KhObjLoad at every mesh PS entry). Flat
+    // per draw or per instance by construction.
+    nointerpolation float4 iobj0 : TEXCOORD7;   // amb, dif, farVis, cut.
+    nointerpolation float4 iobj1 : TEXCOORD8;   // owner id, dither, 0, 0.
 #if KH_TEXTURED
     float2 uv : TEXCOORD2; float4 tanw : TEXCOORD3;   // World tangent + handedness.
+    nointerpolation uint matIx : TEXCOORD6;   // KH_MAT_TABLE: this draw's / instance's entry.
 #endif
 };
 
@@ -1804,16 +1913,12 @@ struct VSOut { float4 pos : SV_Position; float3 wpos : TEXCOORD0; float3 nrm : T
 // once and the four entry points (VSMain / VSMainInst in the static unit,
 // VSComposite / VSCompositeInst in the composite unit) are wrappers that only
 // Choose the source. khRotateR is KhRotate's rotated branch over explicit rows;
+// KH_OBJBUF: the 16-byte lane (C++ twin KhInstLane): the object's record slot,
+// the LOD crossfade dither for this draw, the instance's final colour alpha
+// (envelope applied) and its material table base.
 struct VSInst {
-    float4 ipos  : TEXCOORD4;    // xyz = world centre (engine axes).
-    float4 irel  : TEXCOORD5;    // xyz = centre minus the pass's rebase camera (double-subtracted
-                                 // On the CPU); w = 1 armed.
-    float4 isize : TEXCOORD6;    // xyz = edge lengths (engine axes).
-    float4 irot0 : TEXCOORD7;    // Engine-axes rotation rows (row-vector), always filled (identity
-                                 // When unrotated).
-    float4 irot1 : TEXCOORD8;
-    float4 irot2 : TEXCOORD9;
-    float4 icol  : TEXCOORD10;   // Object colour, lifetime envelope applied.
+    uint   islot : TEXCOORD4;
+    float3 ilane : TEXCOORD5;    // x = dither, y = alpha, z = material base.
 };
 
 float3 KhRotateR(float3 p, float3 r0, float3 r1, float3 r2)

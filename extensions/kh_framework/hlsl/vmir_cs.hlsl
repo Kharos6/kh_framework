@@ -9,7 +9,7 @@ void CSMirB2(uint3 khmc_id : SV_DispatchThreadID)
     [unroll] for (uint khmc_i = 0; khmc_i < 16; ++khmc_i) {
         khmc_m[khmc_i] = asfloat(khmc_in.Load(khmc_i * 4));
     }
-    // kh_vpx_decode twin: least-squares m22 over the top three rows.
+    // Least-squares m22 over the top three rows.
     float khmc_num = 0.0f, khmc_den = 0.0f;
     [unroll] for (uint khmc_r = 0; khmc_r < 3; ++khmc_r) {
         khmc_num += khmc_m[khmc_r * 4 + 2] * khmc_m[khmc_r * 4 + 3];

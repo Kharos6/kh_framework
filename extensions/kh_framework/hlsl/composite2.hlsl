@@ -3,8 +3,11 @@
 struct VSOutC { float4 pos : SV_Position; float3 wpos : TEXCOORD0; float3 nrm : TEXCOORD1;
     float3 wrel : TEXCOORD4;   // KH_SELF_REL_INTERP (at VSOut).
     float4 icol : TEXCOORD5;   // KH_INSTANCING: the object colour interpolant (at VSOut).
+    nointerpolation float4 iobj0 : TEXCOORD7;   // KH_OBJBUF (at VSOut).
+    nointerpolation float4 iobj1 : TEXCOORD8;
 #if KH_TEXTURED
     float2 uv : TEXCOORD2; float4 tanw : TEXCOORD3;   // World tangent + handedness.
+    nointerpolation uint matIx : TEXCOORD6;   // KH_MAT_TABLE (at VSOut).
 #endif
 };
 
@@ -21,25 +24,32 @@ VSOutC VSComposite(VSIn i)
     KhVsCore(i.pos, i.nrm, centerSize.xyz, centerRel.xyz, centerRel.w, sizeAxes.xyz,
              khvR0, khvR1, khvR2, o.pos, o.wpos, o.wrel, o.nrm);
     o.icol = color;
+    KhObjLanesCb(o.iobj0, o.iobj1);   // KH_OBJBUF: the CB's per-object lanes.
 #if KH_TEXTURED
     o.uv = i.uv;
     // Tangents are covariant (transform like positions, not normals): per-axis
     // scale then the object rotation, renormalized. The handedness sign rides
     // untouched in w.
     o.tanw = float4(normalize(KhRotateR(i.tan.xyz * sizeAxes.xyz, khvR0, khvR1, khvR2)), i.tan.w);
+    o.matIx = (uint)matCtl.x;   // KH_MAT_TABLE: the draw's entry.
 #endif
     return o;
 }
 
+// KH_OBJBUF: twin of VSMainInst (static unit) - the record at the lane's slot.
 VSOutC VSCompositeInst(VSIn i, VSInst n)
 {
     VSOutC o;
-    KhVsCore(i.pos, i.nrm, n.ipos.xyz, n.irel.xyz, n.irel.w, n.isize.xyz,
-             n.irot0.xyz, n.irot1.xyz, n.irot2.xyz, o.pos, o.wpos, o.wrel, o.nrm);
-    o.icol = n.icol;
+    KhObjRec r = khObjs[n.islot];
+    precise float3 khvRel = r.pos.xyz - khPass.xyz;
+    KhVsCore(i.pos, i.nrm, r.pos.xyz, khvRel, khPass.w, r.size.xyz,
+             r.rot0.xyz, r.rot1.xyz, r.rot2.xyz, o.pos, o.wpos, o.wrel, o.nrm);
+    o.icol = float4(r.col.rgb, n.ilane.y);
+    KhObjLanesRec(r, n.islot, n.ilane.x, o.iobj0, o.iobj1);
 #if KH_TEXTURED
     o.uv = i.uv;
-    o.tanw = float4(normalize(KhRotateR(i.tan.xyz * n.isize.xyz, n.irot0.xyz, n.irot1.xyz, n.irot2.xyz)), i.tan.w);
+    o.tanw = float4(normalize(KhRotateR(i.tan.xyz * r.size.xyz, r.rot0.xyz, r.rot1.xyz, r.rot2.xyz)), i.tan.w);
+    o.matIx = (matCtl.z >= 0.5f) ? (uint)matCtl.x : (uint)(n.ilane.z + matCtl.y);   // KH_MAT_TABLE.
 #endif
     return o;
 }
@@ -50,23 +60,24 @@ float4 PSComposite(VSOutC i, out float khaODepth : SV_Depth) : SV_Target
 float4 PSComposite(VSOutC i) : SV_Target
 #endif
 {
-    if (blendCtl.w != 0.0f) {
+    KhObjLoad(i.iobj0, i.iobj1);   // KH_OBJBUF: the per-object lanes, per draw or per instance.
+    if (khObjDither != 0.0f) {
         float khlD = frac(52.9829189f * frac(dot(i.pos.xy, float2(0.06711056f, 0.00583715f))));
-        if (blendCtl.w > 0.0f) { if (khlD >= blendCtl.w) discard; }
-        else if (khlD < -blendCtl.w) discard;
+        if (khObjDither > 0.0f) { if (khlD >= khObjDither) discard; }
+        else if (khlD < -khObjDither) discard;
     }
     ClipEdgeSliver(i.wpos, i.nrm);   // Degenerate edge-on fragments (fireflies).
     ClipOwnNear(i.pos.w);   // Our own near plane. Twin call.
-    if (shadowMeta2.x < 0.5f && depthParams.y < -1.0e-3f &&
+    if (khObjFarVis < 0.5f && depthParams.y < -1.0e-3f &&
         depthParams.x + depthParams.y / max(i.pos.w, 1.0e-4f) > 1.0f) discard;
-    if (shadowMeta2.x < 0.5f && shadowMeta2.y > 0.0f && i.pos.w > shadowMeta2.y) discard;
+    if (khObjFarVis < 0.5f && khObjCut > 0.0f && i.pos.w > khObjCut) discard;
     // Rejecting here - before the scene read, the analytic clamp, five shadow
     // tiers and PBR - is the early-Z this SV_Depth (late-Z) variant can never
     // get from the hardware. The injection's own owner map says whether another
     // admitted mesh already holds every sample of this pixel strictly nearer.
     // Lanes zero on every non-injection fill.
-    if (shadowMeta2.w > 0.5f && shadowMeta2.z > 0.5f &&
-        KhOwnerRejects(i.pos.xy, i.pos.z, shadowMeta2.z, shadowMeta2.w)) {
+    if (shadowMeta2.w > 0.5f && khObjOwner > 0.5f &&
+        KhOwnerRejects(i.pos.xy, i.pos.z, khObjOwner, shadowMeta2.w)) {
         // SV_Depth is mandatory on every path of the arb variant, so the raster
         // value is written before leaving.
 #if KH_ARB_DEPTH
@@ -231,6 +242,7 @@ float4 PSComposite(VSOutC i) : SV_Target
     // cutout-clip, then build the mapped shading normal. The geometric normal
     // keeps owning the receive gating below - shadow behavior stays in parity
     // with the untextured twin.
+    KhMatLoad(i.matIx);   // KH_MAT_TABLE: the lanes below read from the entry.
     KhMatSurf khtxS = KhSampleMat(i.uv);
 
     // matParams0.y = alpha mode
@@ -379,7 +391,7 @@ float4 PSComposite(VSOutC i) : SV_Target
             khaFbA   = distM - khaFbB;
             khaFbRef = khaFbLay;
         }
-        if (fogEngine.w >= 0.5f && fogEngine.w < 1.5f && blendCtl.z < 0.5f)
+        if (fogEngine.w >= 0.5f && fogEngine.w < 1.5f && khObjFarVis < 0.5f)
             trans = saturate((fogEngine.y - khaFbA) * fogEngine.z);
 
         if (fogParams.w >= 0.5f) {

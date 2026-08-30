@@ -12,25 +12,35 @@ VSOut VSMain(VSIn i)
     KhVsCore(i.pos, i.nrm, centerSize.xyz, centerRel.xyz, centerRel.w, sizeAxes.xyz,
              khvR0, khvR1, khvR2, o.pos, o.wpos, o.wrel, o.nrm);
     o.icol = color;
+    KhObjLanesCb(o.iobj0, o.iobj1);   // KH_OBJBUF: the CB's per-object lanes.
 #if KH_TEXTURED
     o.uv = i.uv;
     // Tangents are covariant (transform like positions, not normals): per-axis
     // scale then the object rotation, renormalized. The handedness sign rides
     // untouched in w.
     o.tanw = float4(normalize(KhRotateR(i.tan.xyz * sizeAxes.xyz, khvR0, khvR1, khvR2)), i.tan.w);
+    o.matIx = (uint)matCtl.x;   // KH_MAT_TABLE: the draw's entry.
 #endif
     return o;
 }
 
+// KH_OBJBUF: the bucket wrapper - the record at the lane's slot supplies what
+// the CB supplies above; the rebase-relative centre is the record centre
+// minus the pass camera (khPass), a correctly rounded float difference, kept
+// precise so it is never re-associated into the absolute path.
 VSOut VSMainInst(VSIn i, VSInst n)
 {
     VSOut o;
-    KhVsCore(i.pos, i.nrm, n.ipos.xyz, n.irel.xyz, n.irel.w, n.isize.xyz,
-             n.irot0.xyz, n.irot1.xyz, n.irot2.xyz, o.pos, o.wpos, o.wrel, o.nrm);
-    o.icol = n.icol;
+    KhObjRec r = khObjs[n.islot];
+    precise float3 khvRel = r.pos.xyz - khPass.xyz;
+    KhVsCore(i.pos, i.nrm, r.pos.xyz, khvRel, khPass.w, r.size.xyz,
+             r.rot0.xyz, r.rot1.xyz, r.rot2.xyz, o.pos, o.wpos, o.wrel, o.nrm);
+    o.icol = float4(r.col.rgb, n.ilane.y);
+    KhObjLanesRec(r, n.islot, n.ilane.x, o.iobj0, o.iobj1);
 #if KH_TEXTURED
     o.uv = i.uv;
-    o.tanw = float4(normalize(KhRotateR(i.tan.xyz * n.isize.xyz, n.irot0.xyz, n.irot1.xyz, n.irot2.xyz)), i.tan.w);
+    o.tanw = float4(normalize(KhRotateR(i.tan.xyz * r.size.xyz, r.rot0.xyz, r.rot1.xyz, r.rot2.xyz)), i.tan.w);
+    o.matIx = (matCtl.z >= 0.5f) ? (uint)matCtl.x : (uint)(n.ilane.z + matCtl.y);   // KH_MAT_TABLE.
 #endif
     return o;
 }
@@ -40,30 +50,29 @@ VSOut VSMainInst(VSIn i, VSInst n)
 // would discard must never own a sample (the LOD crossfade's complementary
 // dither is the load-bearing one: without it the finer level owns the pixels it
 // dithers out and the coarser level holes).
-void PSOwner(float4 khow_pos : SV_Position, float3 khow_wpos : TEXCOORD0,
-             float3 khow_nrm : TEXCOORD1, out uint khow_out : SV_Target)
+void PSOwner(VSOut i, out uint khow_out : SV_Target)
 {
-    if (blendCtl.w != 0.0f) {
-        float khlD = frac(52.9829189f * frac(dot(khow_pos.xy, float2(0.06711056f, 0.00583715f))));
-        if (blendCtl.w > 0.0f) { if (khlD >= blendCtl.w) discard; }
-        else if (khlD < -blendCtl.w) discard;
+    KhObjLoad(i.iobj0, i.iobj1);   // KH_OBJBUF: per draw or per instance.
+    if (khObjDither != 0.0f) {
+        float khlD = frac(52.9829189f * frac(dot(i.pos.xy, float2(0.06711056f, 0.00583715f))));
+        if (khObjDither > 0.0f) { if (khlD >= khObjDither) discard; }
+        else if (khlD < -khObjDither) discard;
     }
-    ClipEdgeSliver(khow_wpos, khow_nrm);
-    ClipOwnNear(khow_pos.w);
-    if (shadowMeta2.x < 0.5f && depthParams.y < -1.0e-3f &&
-        depthParams.x + depthParams.y / max(khow_pos.w, 1.0e-4f) > 1.0f) discard;
-    if (shadowMeta2.x < 0.5f && shadowMeta2.y > 0.0f && khow_pos.w > shadowMeta2.y) discard;
-    khow_out = KhOwnerPack(khow_pos.z, shadowMeta2.z);
+    ClipEdgeSliver(i.wpos, i.nrm);
+    ClipOwnNear(i.pos.w);
+    if (khObjFarVis < 0.5f && depthParams.y < -1.0e-3f &&
+        depthParams.x + depthParams.y / max(i.pos.w, 1.0e-4f) > 1.0f) discard;
+    if (khObjFarVis < 0.5f && khObjCut > 0.0f && i.pos.w > khObjCut) discard;
+    khow_out = KhOwnerPack(i.pos.z, khObjOwner);
 }
 
+// KH_OBJBUF: the sun-depth stream is the same lane the colour buckets use;
+// the record supplies centre, size and rotation.
 struct VSInSun {
     float3 pos : POSITION;
     float3 nrm : NORMAL;
-    float4 ipos : TEXCOORD4;
-    float4 isize : TEXCOORD5;
-    float4 irot0 : TEXCOORD6;
-    float4 irot1 : TEXCOORD7;
-    float4 irot2 : TEXCOORD8;
+    uint   islot : TEXCOORD4;
+    float3 ilane : TEXCOORD5;   // y = the caster's alpha (envelope applied, KH_CAST_ALPHA).
 };
 
 struct VSInMir { float3 pos : POSITION; };
@@ -93,8 +102,9 @@ float4 VSMirror(VSInMir i) : SV_Position
 }
 float4 VSSunDepth(VSInSun i) : SV_Position
 {
-    float3 lp = i.pos * i.isize.xyz;
-    float3 wp = i.ipos.xyz + lp.x * i.irot0.xyz + lp.y * i.irot1.xyz + lp.z * i.irot2.xyz;
+    KhObjRec r = khObjs[i.islot];
+    float3 lp = i.pos * r.size.xyz;
+    float3 wp = r.pos.xyz + lp.x * r.rot0.xyz + lp.y * r.rot1.xyz + lp.z * r.rot2.xyz;
     return mul(float4(wp - sunOrigin.xyz, 1.0f), viewProj);
 }
 
@@ -107,22 +117,20 @@ struct VSInSunA {
     float3 pos : POSITION;
     float3 nrm : NORMAL;
     float2 uv : TEXCOORD0;
-    float4 ipos : TEXCOORD4;
-    float4 isize : TEXCOORD5;   // w = the caster's colour alpha (envelope applied).
-    float4 irot0 : TEXCOORD6;
-    float4 irot1 : TEXCOORD7;
-    float4 irot2 : TEXCOORD8;
+    uint   islot : TEXCOORD4;   // KH_OBJBUF (the plain twin's lane).
+    float3 ilane : TEXCOORD5;   // y = the caster's colour alpha (envelope applied).
 };
 struct VSOutSunA { float4 pos : SV_Position; float2 uv : TEXCOORD0; float alpha : TEXCOORD1; };
 
 VSOutSunA VSSunDepthA(VSInSunA i)
 {
     VSOutSunA o;
-    float3 lp = i.pos * i.isize.xyz;
-    float3 wp = i.ipos.xyz + lp.x * i.irot0.xyz + lp.y * i.irot1.xyz + lp.z * i.irot2.xyz;
+    KhObjRec r = khObjs[i.islot];
+    float3 lp = i.pos * r.size.xyz;
+    float3 wp = r.pos.xyz + lp.x * r.rot0.xyz + lp.y * r.rot1.xyz + lp.z * r.rot2.xyz;
     o.pos = mul(float4(wp - sunOrigin.xyz, 1.0f), viewProj);
     o.uv = i.uv;
-    o.alpha = i.isize.w;
+    o.alpha = i.ilane.y;
     return o;
 }
 
@@ -139,6 +147,7 @@ float KhSunDither(float2 khsd_px)
 
 void PSSunDepthA(VSOutSunA i)
 {
+    KhMatLoad((uint)matCtl.x);   // KH_MAT_TABLE: per-submesh draw, the CB lane.
     float khsa_a = i.alpha;
     int khsa_mode = (int)matParams0.y;   // 0 opaque, 1 cutout, 2 blend (kh_bind_material).
     // The material's alpha by its own route (diffuse.a by default; 1 when no
@@ -161,6 +170,7 @@ void PSSunDepthA(VSOutSunA i)
 // the list).
 void PSInjDepthA(VSOut i)
 {
+    KhMatLoad(i.matIx);   // KH_MAT_TABLE.
     int khfa_mode = (int)matParams0.y;
     float khfa_t = KhMatRoute(matParams3.y, 1.0f, i.uv);
     if (khfa_mode == 1) clip(khfa_t - matParams0.z);
@@ -737,28 +747,30 @@ VSOut VSFullscreen(uint vid : SV_VertexID)
     o.wrel = float3(0.0f, 0.0f, 0.0f);   // (fullscreen path: no self sampling).
     o.icol = color;   // KH_INSTANCING: every VSOut carries the colour lane (PSEffect reads the CB
                       // Directly).
+    KhObjLanesCb(o.iobj0, o.iobj1);   // KH_OBJBUF: every VSOut carries the object lanes too.
     return o;
 }
 
 float4 PSMain(VSOut i) : SV_Target
 {
-    if (blendCtl.w != 0.0f) {
+    KhObjLoad(i.iobj0, i.iobj1);   // KH_OBJBUF: the per-object lanes, per draw or per instance.
+    if (khObjDither != 0.0f) {
         float khlD = frac(52.9829189f * frac(dot(i.pos.xy, float2(0.06711056f, 0.00583715f))));
-        if (blendCtl.w > 0.0f) { if (khlD >= blendCtl.w) discard; }
-        else if (khlD < -blendCtl.w) discard;
+        if (khObjDither > 0.0f) { if (khlD >= khObjDither) discard; }
+        else if (khlD < -khObjDither) discard;
     }
     ClipEdgeSliver(i.wpos, i.nrm);   // Degenerate edge-on fragments (fireflies).
     ClipOwnNear(i.pos.w);   // Our own near plane. Twin call.
-    if (shadowMeta2.x < 0.5f && depthParams.y < -1.0e-3f &&
+    if (khObjFarVis < 0.5f && depthParams.y < -1.0e-3f &&
         depthParams.x + depthParams.y / max(i.pos.w, 1.0e-4f) > 1.0f) discard;
     // Twin: PSMain / PSComposite / PSEffect / PSOwner. The shared tail below is
     // kept as two copies on purpose: PSComposite interleaves KH_ARB_DEPTH blocks
     // and a khb_a lane through it, so a KhShadeTail() helper fails the site-text
     // proof (rule 1.133). Decided 26892; revisit only with a shading change.
-    if (shadowMeta2.x < 0.5f && shadowMeta2.y > 0.0f && i.pos.w > shadowMeta2.y) discard;
+    if (khObjFarVis < 0.5f && khObjCut > 0.0f && i.pos.w > khObjCut) discard;
     // Identical block; inert on the flush path where the lanes are zero.
-    if (shadowMeta2.w > 0.5f && shadowMeta2.z > 0.5f &&
-        KhOwnerRejects(i.pos.xy, i.pos.z, shadowMeta2.z, shadowMeta2.w)) {
+    if (shadowMeta2.w > 0.5f && khObjOwner > 0.5f &&
+        KhOwnerRejects(i.pos.xy, i.pos.z, khObjOwner, shadowMeta2.w)) {
         discard;
         return float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
@@ -795,6 +807,7 @@ float4 PSMain(VSOut i) : SV_Target
     // cutout-clip, then build the mapped shading normal. The geometric normal
     // keeps owning the receive gating below - shadow behavior stays in parity
     // with the untextured twin.
+    KhMatLoad(i.matIx);   // KH_MAT_TABLE: the lanes below read from the entry.
     KhMatSurf khtxS = KhSampleMat(i.uv);
     if (matParams0.y >= 0.5f && matParams0.y < 1.5f) clip(khtxS.alpha - matParams0.z);   // Cutout kill.
     // Opaque alpha contract: sampled alpha never reaches the blend on the
@@ -916,7 +929,7 @@ float4 PSMain(VSOut i) : SV_Target
             khaFbA   = distM - khaFbB;
             khaFbRef = khaFbLay;
         }
-        if (fogEngine.w >= 0.5f && fogEngine.w < 1.5f && blendCtl.z < 0.5f)
+        if (fogEngine.w >= 0.5f && fogEngine.w < 1.5f && khObjFarVis < 0.5f)
             trans = saturate((fogEngine.y - khaFbA) * fogEngine.z);
 
         if (fogParams.w >= 0.5f) {

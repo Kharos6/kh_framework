@@ -1,11 +1,11 @@
-// g_hlsl_composite2 - HLSL source, spliced into rendering_integration.hpp as
-// C++ raw string tokens via #include. Lines that close and immediately reopen
-// the raw string are MSVC C2026 chunk boundaries (16380-byte string-token
-// cap): SPLIT, never trim, when a segment approaches the cap. Any edit to
-// segment bytes changes this unit's shader cache key (one cold recompile per
-// user). Keep CRLF line endings. Never spell raw-string open/close tokens
-// inside comments - the gate scripts scan for them textually.
-R"HLSL(
+// composite2.hlsl - plain HLSL, embedded in the DLL as RCDATA resource KH_COMPOSITE2_HLSL by
+// kh_shaders.rc (next to rendering_integration.hpp) and loaded at first use
+// by kh_hlsl_src, which strips CR before the source is hashed for the shader
+// cache, so the cache key does not depend on the checkout's line endings.
+// Units are assembled by C++ concatenation of these resources, exactly as the
+// old raw-string splice did; there is no #include and no size cap. Any edit
+// here changes this unit's shader cache key (one cold recompile per user).
+
 struct VSOutC { float4 pos : SV_Position; float3 wpos : TEXCOORD0; float3 nrm : TEXCOORD1;
     float3 wrel : TEXCOORD4;   // KH_SELF_REL_INTERP (at VSOut)
     float4 icol : TEXCOORD5;   // KH_INSTANCING: the object colour interpolant (at VSOut)
@@ -50,7 +50,7 @@ VSOutC VSCompositeInst(VSIn i, VSInst n)
     return o;
 }
 
-)HLSL" R"HLSL(
+ 
 #if KH_ARB_DEPTH
 float4 PSComposite(VSOutC i, out float khaODepth : SV_Depth) : SV_Target
 #else
@@ -182,7 +182,7 @@ float4 PSComposite(VSOutC i) : SV_Target
             // far-arbiter relative offset; fxParams1.z remains the absolute
             // cap.
             float khaCh = abs(fxParams1.w);
-)HLSL" R"HLSL(   // KH_SNAP_REPROJECT (snapCam.w arms; mode 330 = 0 = the)
+    // KH_SNAP_REPROJECT (snapCam.w arms; mode 330 = 0 = the)
             bool   khaSc   = sceneClear;
             float  khaSz   = sceneZ;
             float  khaRefD = khaD;
@@ -263,7 +263,7 @@ float4 PSComposite(VSOutC i) : SV_Target
                     khaTerrW = (khaSh > -1.0e5f)
                              ? saturate((khaTe - khaTd) / max(khaTrw, 1.0e-4f))
                              : (khaTerr ? 1.0f : 0.0f);
-)HLSL" R"HLSL(                }
+                 }
 
                 bool khaHardC = (dbgCtl.z >= 2.5f && dbgCtl.z < 3.5f);
                 bool khaUpC   = !khaHardC && !(dbgCtl.z >= 1.5f && dbgCtl.z < 2.5f);
@@ -320,7 +320,7 @@ float4 PSComposite(VSOutC i) : SV_Target
             if (khaF <= 1.0f) {
                 khaNdc = khaF;
             } else if (khFarSplit.w >= 1.5f) {
-)HLSL" R"HLSL(   // CHUNK BOUNDARY - the KH_FRAME_CLAMP ledger took this
+    // CHUNK BOUNDARY - the KH_FRAME_CLAMP ledger took this
                 // KH_FRAME_CLAMP - (mode 314 arms; catalog ledger). khaF > 1,
                 // and the solid orange/red regions are khaF <= 1.
                 khaNdc = 1.0f;
@@ -331,7 +331,7 @@ float4 PSComposite(VSOutC i) : SV_Target
         }
         khaODepth = clamp(depthParams.z + (depthParams.w - depthParams.z) * khaNdc,
                           depthParams.z, depthParams.w);
-)HLSL" R"HLSL(
+ 
         // KH_FAR_TIE_BREAK - (mode 316 reverts). Beyond-far fragments do not
         // encode wrongly; they SATURATE. VISUAL 27 ENDED THE SEARCH.
         if (khaNdc >= 1.0f && !(dbgCtl.z >= 3.5f && dbgCtl.z < 4.5f))
@@ -397,7 +397,7 @@ float4 PSComposite(VSOutC i) : SV_Target
 
     }
 
-)HLSL" R"HLSL(    if (occ) discard;
+     if (occ) discard;
 
     // DEBUG VISUAL 15: PAINTER FORENSICS - post-guard, post-everything:
     // whichever path actually OWNS a pixel declares itself. PSComposite (the
@@ -576,7 +576,7 @@ float4 PSComposite(VSOutC i) : SV_Target
         if (KhDlsMeshDbg() == 577) khtxN = normalize(i.nrm);
     }
 #endif
-)HLSL" R"HLSL(    float smf = 1.0f;
+     float smf = 1.0f;
     float  khStenZ = KhVolZ(i.wpos);
     float2 khStenG = float2(ddx(khStenZ), ddy(khStenZ));
     // An unguarded reference kills ps_composite and the box never draws;
@@ -650,7 +650,7 @@ float4 PSComposite(VSOutC i) : SV_Target
         // terms, so no expression is split. PSMain's twin segment is well
         // under budget and is deliberately NOT split - the twins differ in
         // whitespace only.
-)HLSL" R"HLSL(
+ 
         if (dbgCtl.x >= 30.5f && dbgCtl.x < 31.5f)   // VISUAL 31
             return KhPfProbe2(i.wpos, i.wrel, khBiasN);
         if (dbgCtl.x >= 29.5f && dbgCtl.x < 30.5f)   // VISUAL 30
@@ -755,7 +755,7 @@ float4 PSComposite(VSOutC i) : SV_Target
 
         if (maskMeta.z >= 0.5f) return KhStenPaintU(i.wpos, i.pos.xy, maskMeta.z);
 
-)HLSL" R"HLSL(   // CHUNK BOUNDARY - the visual-23 ledger took PSComposite's
+    // CHUNK BOUNDARY - the visual-23 ledger took PSComposite's
     // segment 500 B past the 16380-byte MSVC token cap (C2026), caught by the
     // sweep gate exactly as 's did on PSMain's twin one build earlier. It
     // returns FLAT MAGENTA with alpha 1 from BEFORE the atmospheric block -
@@ -819,7 +819,7 @@ float4 PSComposite(VSOutC i) : SV_Target
         // The exponential-lambda era and its spectral fog approximation are
         // retired: the engine's spectral vectors extinguish LIGHTING, not
         // fog.
-)HLSL" R"HLSL(   // CHUNK BOUNDARY - FIFTH C2026 CATCH OF THIS
+    // CHUNK BOUNDARY - FIFTH C2026 CATCH OF THIS
         // CAMPAIGN, and the first outside the shared block.
         float trans = 1.0f;
         // KH_FARVIS_NO_VDIST - (mode 322 reverts; catalog ledger).
@@ -867,7 +867,7 @@ float4 PSComposite(VSOutC i) : SV_Target
         // builds were shipped and reverted on them. trans 1 = fully clear.
         // BLACK <=0.01, navy <=0.05, blue <=0.1, cyan <=0.25, green <=0.5,
         // yellow <=0.75, orange <=0.9, red <=0.99, WHITE > 0.99.
-)HLSL" R"HLSL(   // CHUNK BOUNDARY - the visual-14 pass legend took this
+    // CHUNK BOUNDARY - the visual-14 pass legend took this
         // MSVC caps one string literal token at 16380 bytes; splitting at a
         // statement boundary costs nothing at runtime and buys the next edit
         // room. segment to 98.5%% with 241 B free. PSMain's twin segment is
@@ -981,7 +981,7 @@ float4 PSComposite(VSOutC i) : SV_Target
     if (bm == 1 || bm == 3) return float4(lc * a, 1.0f);
     if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), lc, a), 1.0f);
     if (bm == 4) return float4(lc * a, 1.0f);
-)HLSL" R"HLSL(    if (bm == 5) return float4(lerp(float3(65504.0f, 65504.0f, 65504.0f), lc, a), 1.0f);
+     if (bm == 5) return float4(lerp(float3(65504.0f, 65504.0f, 65504.0f), lc, a), 1.0f);
 
     // Simple transparency per the spec is a DISPLAY- space mix, so: sample
     // the pre-mesh scene capture at this pixel, blend in Reinhard space,
@@ -1004,4 +1004,4 @@ float4 PSComposite(VSOutC i) : SV_Target
 
     return float4(lc, a);
 }
-)HLSL"
+

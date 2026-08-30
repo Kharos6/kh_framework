@@ -82,6 +82,20 @@ echo Setting up output directory...
 if exist output_x64 rd /s /q output_x64
 mkdir output_x64
 
+REM Compile the shader resources (26884: the HLSL ships inside the DLL as
+REM RCDATA, see kh_shaders.rc beside rendering_integration.hpp). rc.exe is
+REM on PATH after vcvars64; the .res is linked in below. Fail here rather
+REM than ship a DLL whose every shader compile reports hlslResMissing.
+echo Compiling shader resources...
+rc /nologo /fo output_x64\kh_shaders.res kh_shaders.rc
+if not exist output_x64\kh_shaders.res (
+    echo ================================
+    echo RESOURCE COMPILE FAILED - kh_shaders.rc / hlsl\*.hlsl
+    echo ================================
+    pause
+    exit /b 1
+)
+
 REM Build the DLL
 echo Compiling...
 cl /LD /arch:AVX /O2 /Ob3 /GL /MT /std:c++20 /EHsc /TP /Gy /Gw /GS- ^
@@ -99,6 +113,7 @@ cl /LD /arch:AVX /O2 /Ob3 /GL /MT /std:c++20 /EHsc /TP /Gy /Gw /GS- ^
     /Fo:output_x64\ ^
     /Fd:output_x64\kh_framework_x64.pdb ^
     /link /MACHINE:X64 ^
+    output_x64\kh_shaders.res ^
     /LTCG ^
     /OPT:REF /OPT:ICF /OPT:LBR ^
     /DELAYLOAD:vcomp140.dll ^

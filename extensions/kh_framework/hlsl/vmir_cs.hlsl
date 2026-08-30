@@ -1,11 +1,11 @@
-// g_vmir_cs_hlsl - HLSL source, spliced into rendering_integration.hpp as
-// C++ raw string tokens via #include. Lines that close and immediately reopen
-// the raw string are MSVC C2026 chunk boundaries (16380-byte string-token
-// cap): SPLIT, never trim, when a segment approaches the cap. Any edit to
-// segment bytes changes this unit's shader cache key (one cold recompile per
-// user). Keep CRLF line endings. Never spell raw-string open/close tokens
-// inside comments - the gate scripts scan for them textually.
-R"HLSL(
+// vmir_cs.hlsl - plain HLSL, embedded in the DLL as RCDATA resource KH_VMIR_CS_HLSL by
+// kh_shaders.rc (next to rendering_integration.hpp) and loaded at first use
+// by kh_hlsl_src, which strips CR before the source is hashed for the shader
+// cache, so the cache key does not depend on the checkout's line endings.
+// Units are assembled by C++ concatenation of these resources, exactly as the
+// old raw-string splice did; there is no #include and no size cap. Any edit
+// here changes this unit's shader cache key (one cold recompile per user).
+
 ByteAddressBuffer khmc_in : register(t0);
 RWByteAddressBuffer khmc_out : register(u0);
 [numthreads(1, 1, 1)]
@@ -44,4 +44,4 @@ void CSMirB2(uint3 khmc_id : SV_DispatchThreadID)
         khmc_out.Store(khmc_r2 * 16 + 12, asuint(khmc_ww));
     }
 }
-)HLSL"
+

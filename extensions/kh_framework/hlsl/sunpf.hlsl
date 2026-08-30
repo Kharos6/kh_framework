@@ -1,11 +1,11 @@
-// g_hlsl_sunpf - HLSL source, spliced into rendering_integration.hpp as
-// C++ raw string tokens via #include. Lines that close and immediately reopen
-// the raw string are MSVC C2026 chunk boundaries (16380-byte string-token
-// cap): SPLIT, never trim, when a segment approaches the cap. Any edit to
-// segment bytes changes this unit's shader cache key (one cold recompile per
-// user). Keep CRLF line endings. Never spell raw-string open/close tokens
-// inside comments - the gate scripts scan for them textually.
-R"HLSL(
+// sunpf.hlsl - plain HLSL, embedded in the DLL as RCDATA resource KH_SUNPF_HLSL by
+// kh_shaders.rc (next to rendering_integration.hpp) and loaded at first use
+// by kh_hlsl_src, which strips CR before the source is hashed for the shader
+// cache, so the cache key does not depend on the checkout's line endings.
+// Units are assembled by C++ concatenation of these resources, exactly as the
+// old raw-string splice did; there is no #include and no size cap. Any edit
+// here changes this unit's shader cache key (one cold recompile per user).
+
 Texture2D<float> khpf_src : register(t0);
 struct VSOPf { float4 pos : SV_Position; };
 VSOPf VSPf(uint vid : SV_VertexID)
@@ -38,4 +38,4 @@ float4 PSPfMip(VSOPf i) : SV_Target
     float2 khpfm_m = 0.25f * (khpfm_a + khpfm_b + khpfm_c + khpfm_d);
     return float4(khpfm_m.x, khpfm_m.y, 0.0f, 0.0f);
 }
-)HLSL"
+

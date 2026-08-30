@@ -1,11 +1,11 @@
-// g_hlsl_effect - HLSL source, spliced into rendering_integration.hpp as
-// C++ raw string tokens via #include. Lines that close and immediately reopen
-// the raw string are MSVC C2026 chunk boundaries (16380-byte string-token
-// cap): SPLIT, never trim, when a segment approaches the cap. Any edit to
-// segment bytes changes this unit's shader cache key (one cold recompile per
-// user). Keep CRLF line endings. Never spell raw-string open/close tokens
-// inside comments - the gate scripts scan for them textually.
-R"HLSL(
+// effect.hlsl - plain HLSL, embedded in the DLL as RCDATA resource KH_EFFECT_HLSL by
+// kh_shaders.rc (next to rendering_integration.hpp) and loaded at first use
+// by kh_hlsl_src, which strips CR before the source is hashed for the shader
+// cache, so the cache key does not depend on the checkout's line endings.
+// Units are assembled by C++ concatenation of these resources, exactly as the
+// old raw-string splice did; there is no #include and no size cap. Any edit
+// here changes this unit's shader cache key (one cold recompile per user).
+
 Texture2D<float4> sceneColor : register(t0);
 Texture2D<float4> khsgTex : register(t3);
 // KH_FX_SAMP_S2 (26783): s2, NOT s1. The shared prefix (g_cb_hlsl) declares
@@ -154,8 +154,8 @@ float3 KhgVpos(float2 vp_px, float vp_d, float2 vp_res, float vp_m00, float vp_m
                   vp_d);
 }
 
-)HLSL"
-R"HLSL(
+
+
 // fxParams1 / fxParams2 are SYSTEM lanes for effect 23: the chain loop packs
 // up to two aggregated fog-pass records [startDist, endDist, skyAmount,
 // opacity] (kh_fogscatter_pack - the CPU mirror; zeroed lanes = no pass, and
@@ -307,7 +307,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
     }
     return v;
 }
-)HLSL" R"HLSL(float4 PSEffect(VSOut i) : SV_Target
+ float4 PSEffect(VSOut i) : SV_Target
 {
     // Fullscreen passes are inert by construction (w = 1 -> ndc far below 1),
     // and zeroed/degenerate depthParams stand the test down via the m32 gate.
@@ -451,8 +451,8 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
                             cos(uv.x * fxParams0.y * 6.2832f + t * fxParams0.z)) * fxParams0.x;
         outc = SampleScene(int2(i.pos.xy + off));
     }
-)HLSL"
-    R"HLSL(    else if (effect == 10)   // Outline: [depthEdgeScale, lumEdgeScale, sceneDarken, glowBoost], color = edge
+
+        else if (effect == 10)   // Outline: [depthEdgeScale, lumEdgeScale, sceneDarken, glowBoost], color = edge
     {
         float dC = LinDepth(LoadDepthPS(px));
         float dX = LinDepth(LoadDepthPS(px + int2(1, 0))) - dC;
@@ -533,8 +533,8 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         acc += max(SampleScene(int2(saturate(huv) * float2(fxMeta.z, fxMeta.w))) - fxParams0.x, 0.0f) * hw * fxParams1.y;
         outc = scene + acc * color.rgb * fxParams0.y;
     }
-)HLSL"
-    R"HLSL(    else if (effect == 15)   // Anamorphic streak: [threshold, intensity, lengthPx, falloffPow] + [vertical 0/1]; color = tint
+
+        else if (effect == 15)   // Anamorphic streak: [threshold, intensity, lengthPx, falloffPow] + [vertical 0/1]; color = tint
     {
         float3 acc = 0.0f;
         float total = 0.0f;
@@ -656,7 +656,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
 
         outc = max(col, 0.0f);
     }
-)HLSL" R"HLSL(    else if (effect == 18)   // clarity: [strength, radiusPx]
+     else if (effect == 18)   // clarity: [strength, radiusPx]
     {
         // Wide-radius local contrast on LUMA ONLY (chroma-preserving by
         // construction: the scene is rescaled by L'/L, so saturation never
@@ -840,4 +840,4 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         khc_tube *= 1.0f - smoothstep(0.0f, khc_cr, khc_cd) * 0.35f;
         outc = khc_col * khc_tube;
     }
-)HLSL"
+

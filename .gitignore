@@ -5,6 +5,7 @@
 *.exp
 *.ini
 *.ts3_plugin
+*.res
 .hemttout
 .vscode
 releases/

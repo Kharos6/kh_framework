@@ -1,11 +1,11 @@
-// g_hlsl_depth_resolve - HLSL source, spliced into rendering_integration.hpp as
-// C++ raw string tokens via #include. Lines that close and immediately reopen
-// the raw string are MSVC C2026 chunk boundaries (16380-byte string-token
-// cap): SPLIT, never trim, when a segment approaches the cap. Any edit to
-// segment bytes changes this unit's shader cache key (one cold recompile per
-// user). Keep CRLF line endings. Never spell raw-string open/close tokens
-// inside comments - the gate scripts scan for them textually.
-R"HLSL(
+// depth_resolve.hlsl - plain HLSL, embedded in the DLL as RCDATA resource KH_DEPTH_RESOLVE_HLSL by
+// kh_shaders.rc (next to rendering_integration.hpp) and loaded at first use
+// by kh_hlsl_src, which strips CR before the source is hashed for the shader
+// cache, so the cache key does not depend on the checkout's line endings.
+// Units are assembled by C++ concatenation of these resources, exactly as the
+// old raw-string splice did; there is no #include and no size cap. Any edit
+// here changes this unit's shader cache key (one cold recompile per user).
+
 #if MSAA_DEPTH
 Texture2DMS<float> resolveSrc : register(t0);
 #else
@@ -38,4 +38,4 @@ float2 PSDepthResolve(float4 pos : SV_Position) : SV_Target
     return float2(d, d);
 #endif
 }
-)HLSL"
+

@@ -1,11 +1,11 @@
-// g_hlsl_effect2 - HLSL source, spliced into rendering_integration.hpp as
-// C++ raw string tokens via #include. Lines that close and immediately reopen
-// the raw string are MSVC C2026 chunk boundaries (16380-byte string-token
-// cap): SPLIT, never trim, when a segment approaches the cap. Any edit to
-// segment bytes changes this unit's shader cache key (one cold recompile per
-// user). Keep CRLF line endings. Never spell raw-string open/close tokens
-// inside comments - the gate scripts scan for them textually.
-R"HLSL(    else if (effect == 22)   // ssgi: [intensity, radiusM, samples 4..32, normalBias] + [falloffPow, saturation, maxDistM (0 = off),
+// effect2.hlsl - plain HLSL, embedded in the DLL as RCDATA resource KH_EFFECT2_HLSL by
+// kh_shaders.rc (next to rendering_integration.hpp) and loaded at first use
+// by kh_hlsl_src, which strips CR before the source is hashed for the shader
+// cache, so the cache key does not depend on the checkout's line endings.
+// Units are assembled by C++ concatenation of these resources, exactly as the
+// old raw-string splice did; there is no #include and no size cap. Any edit
+// here changes this unit's shader cache key (one cold recompile per user).
+    else if (effect == 22)   // ssgi: [intensity, radiusM, samples 4..32, normalBias] + [falloffPow, saturation, maxDistM (0 = off),
     {
         // Grain-style time seeds are FORBIDDEN in this branch - a static
         // frame renders bit-identical, so all shimmer sources reduce to real
@@ -88,10 +88,10 @@ R"HLSL(    else if (effect == 22)   // ssgi: [intensity, radiusM, samples 4..32,
                 float3 khg_acc = float3(0.0f, 0.0f, 0.0f);
                 float khg_ib = 0.0f;   // on-screen tap count
 
-)HLSL"
+
 // (single-literal split - C2026 16,380-byte cap; adjacent literals
 // concatenate, so the chain and census are unchanged.)
-R"HLSL(
+
                 // GAP CONVICTION (field: screen-anchored black gaps, "low res
                 // / pixelated", camera-following): the jittered ladder let
                 // stratum-0 radii dip inside the 2 px self-sample floor
@@ -136,8 +136,8 @@ R"HLSL(
                     float khg_ndl = khg_ph / khg_d;
                     khg_ndl = saturate((khg_ndl - khg_bias) / max(1.0f - khg_bias, 1e-3f));
                     if (khg_ndl <= 0.0f) continue;
-)HLSL"
-R"HLSL(
+
+
                     float khg_occ = 1.0f;
 
                     [unroll] for (int khg_o = 1; khg_o <= 2; ++khg_o)
@@ -197,8 +197,8 @@ R"HLSL(
                                  + khsgTex.SampleLevel(khsgSamp, khg_uv2 - khg_tx, khg_mip).rgb
                                  + khsgTex.SampleLevel(khsgSamp, khg_uv2 + float2( khg_tx.x, -khg_tx.y), khg_mip).rgb
                                  + khsgTex.SampleLevel(khsgSamp, khg_uv2 + float2(-khg_tx.x,  khg_tx.y), khg_mip).rgb);
-)HLSL"
-R"HLSL(
+
+
                     float khg_tg = frac(52.9829189f * frac(0.06711056f * (float)khg_sp.x
                                                          + 0.00583715f * (float)khg_sp.y));
                     float khg_tg2 = frac(52.9829189f * frac(0.06711056f * ((float)khg_sp.x + 5.588238f)
@@ -279,11 +279,11 @@ R"HLSL(
         }
         outc = fxParams2.y > 0.5f ? khr_gi : scene + khr_gi;
     }
-)HLSL"
+
 // (the a-trous pre-smooth rides its own literal - the C2026 single-literal
 // discipline; adjacent literals concatenate, so the chain grows by one and
 // the census by one.)
-R"HLSL(    else if (effect == 25)
+    else if (effect == 25)
     {
         int khat_sp = (int)clamp(localParams0.x >= 0.5f ? localParams0.x : 2.0f, 1.0f, 4.0f);
         // the scaled-grid -> full-grid factor (local0.y; the gather's twin
@@ -342,4 +342,4 @@ R"HLSL(    else if (effect == 25)
                       + khsgTex.SampleLevel(khsgSamp, khpd_uv + float2(-khpd_tx.x,  khpd_tx.y), 0.0f).rgb);
         return float4(khpd_c, 1.0f);
     }
-)HLSL"
+

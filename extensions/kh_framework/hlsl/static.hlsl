@@ -1,11 +1,11 @@
-// g_hlsl_static - HLSL source, spliced into rendering_integration.hpp as
-// C++ raw string tokens via #include. Lines that close and immediately reopen
-// the raw string are MSVC C2026 chunk boundaries (16380-byte string-token
-// cap): SPLIT, never trim, when a segment approaches the cap. Any edit to
-// segment bytes changes this unit's shader cache key (one cold recompile per
-// user). Keep CRLF line endings. Never spell raw-string open/close tokens
-// inside comments - the gate scripts scan for them textually.
-R"HLSL(
+// static.hlsl - plain HLSL, embedded in the DLL as RCDATA resource KH_STATIC_HLSL by
+// kh_shaders.rc (next to rendering_integration.hpp) and loaded at first use
+// by kh_hlsl_src, which strips CR before the source is hashed for the shader
+// cache, so the cache key does not depend on the checkout's line endings.
+// Units are assembled by C++ concatenation of these resources, exactly as the
+// old raw-string splice did; there is no #include and no size cap. Any edit
+// here changes this unit's shader cache key (one cold recompile per user).
+
 // KH_INSTANCING (26762): both entry points are wrappers over KhVsCore (the
 // shared prefix) - the per-object one hands in the CB lanes, the instanced
 // one the stream's. TWIN: VSComposite / VSCompositeInst carry the identical
@@ -103,7 +103,7 @@ struct VSInSun {
     float4 irot2 : TEXCOORD8;
 };
 
-)HLSL" R"HLSL(   // CHUNK BOUNDARY (precedent; chunks concatenate).
+    // CHUNK BOUNDARY (precedent; chunks concatenate).
 // x/y/w come from OUR viewProj through the SAME khvTp rebase path that draws
 // the visible box - the one space that is correct for our meshes by
 // construction ('s lesson: the engine's b2 position space is not
@@ -323,7 +323,7 @@ Texture2D<float2> khrCastOcc : register(t35);
 // positive here is free: SunShadowOcclusion answers 0 where no occluder
 // stands, so the gate can only cost ALU, never a wrong verdict.
 // sunCastBias2.y arms the legacy isotropic form (mode 497).
-)HLSL" R"HLSL(
+ 
 // CHUNK BOUNDARY - MSVC caps one string literal token at 16380 bytes (C2026).
 // KH_CAST_REACH_DROP + KH_CAST_REPROJ took this chunk to 15746 and the rule is
 // SPLIT, never trim, when a segment approaches the cap. Cut at a top-level
@@ -430,7 +430,7 @@ float2 KhCastPixN(float3 khcp_w, float2 khcp_dims)
                   (0.5f - khcp_n.y * 0.5f) * khcp_dims.y);
 }
 
-)HLSL" R"HLSL(
+ 
 // That guard was discarding a genuine stencil verdict wherever the TERRAIN
 // BEHIND our mesh was fully cascade-shadowed, because pre describes the
 // background (we never write linear depth) while our band receive describes
@@ -444,7 +444,7 @@ float4 PSMaskPrime(VSOut i) : SV_Target
     float khpm_v = (dbgCtl.w >= 0.5f && dbgCtl.w < 1.5f) ? 1.0f : KH_PRIME_V;   // mode 108
     return float4(khpm_v, khpm_v, khpm_v, 1.0f);
 }
-)HLSL" R"HLSL(
+ 
 // ---------------------------------------------------------------------------
 // KH_DLSW_MASK (26847) - THE WORLD PASS'S OWN OCCLUSION MASK.
 //
@@ -628,7 +628,7 @@ bool KhDlsMaskInFront(float2 khdw_px, float khdw_w, float khdw_h, float khdw_zl)
 //
 // Mode 563 restores the binary verdict exactly: it returns 1 or 0, the
 // interior early-out still fires on 1, and a 0 blends nothing.
-)HLSL" R"HLSL(
+ 
 // CHUNK BOUNDARY (26876f). SPLIT, never trim: the note above KhDlsMaskCov is
 // the record of why three builds each removed part of the rim without removing
 // it, and it is shorter than a fourth build spent rediscovering that.
@@ -770,7 +770,7 @@ bool KhDlswPlane(float2 khp_px, float2 khp_dims, float khp_r, float khp_zc,
            - KhCastWorld(khp_px - float2(0.0f, khp_r), khp_dims, khp_zny);
     return true;
 }
-)HLSL" R"HLSL(
+ 
 // ---------------------------------------------------------------------------
 // KH_DLS_WORLD (26834) - the world-receive pass for dynamic-light shadows.
 //
@@ -999,7 +999,7 @@ float4 PSDlsWorld(VSOut i) : SV_Target
     // Mode 554 paints khw_nrel. Mode 520 is unchanged and still means what it
     // always meant, which is now correctly scoped to the lookup.
     const bool khw_nrev = (dbgCtl.w >= 552.5f && dbgCtl.w < 553.5f);
-)HLSL" R"HLSL(
+ 
     // KH_DLSW_REACHCUT (26878) - THE FULLSCREEN PASS STOPS PAYING FOR PIXELS
     // NO LIGHT CAN REACH.
     //
@@ -1210,7 +1210,7 @@ float4 PSDlsWorld(VSOut i) : SV_Target
                       saturate(khw_zl / 50.0f), khz_cov ? 1.0f : 0.0f, 1.0f);
     }
 
-)HLSL" R"HLSL(
+ 
     // CHUNK BOUNDARY (26846). The note below is long because it records why
     // three builds failed against the mirror's depth plane, and that reasoning
     // is the thing that stops a fourth. SPLIT, never trim.
@@ -1395,7 +1395,7 @@ float4 PSDlsWorld(VSOut i) : SV_Target
     }
     return float4(khw_f, 1.0f);
 }
-)HLSL" R"HLSL(float4 PSMaskCast(VSOut i) : SV_Target
+ float4 PSMaskCast(VSOut i) : SV_Target
 {
     // The field then produced the.x signature of a CONSTANT z BIAS (drift
     // growing as fragments near, fine at range - relative error c/z), the
@@ -1544,7 +1544,7 @@ float4 PSDlsWorld(VSOut i) : SV_Target
         float3 sds = float3(
             abs(sd.x) > 1e-6f ? sd.x : 1e-6f,
             abs(sd.y) > 1e-6f ? sd.y : 1e-6f,
-)HLSL" R"HLSL(            abs(sd.z) > 1e-6f ? sd.z : 1e-6f);
+             abs(sd.z) > 1e-6f ? sd.z : 1e-6f);
         float3 inv = 1.0f / sds;
         float3 bmin = centerSize.xyz - sizeAxes.xyz * 0.5f;
         float3 bmax = centerSize.xyz + sizeAxes.xyz * 0.5f;
@@ -1706,7 +1706,7 @@ float4 PSMain(VSOut i) : SV_Target
 
         return float4(1.0f, 1.0f, 1.0f, 0.15f);
     }
-)HLSL" R"HLSL(
+ 
 
     int bm = (int)sizeAxes.w;
 #if KH_TEXTURED
@@ -1832,7 +1832,7 @@ float4 PSMain(VSOut i) : SV_Target
     // Taken here, outside the divergent N.L branch, for the same quad-op
     // legality as the pair above. TWIN EDIT: PSMain and PSComposite carry the
     // identical line.
-)HLSL" R"HLSL(   // THE SLICE IS A UNITS MISMATCH BETWEEN WHAT WE WRITE AND WHAT WE
+    // THE SLICE IS A UNITS MISMATCH BETWEEN WHAT WE WRITE AND WHAT WE
     // PSMain writes no depth: the raster tap reads i.pos.z. (PSComposite's
     // ARB variant declares SV_Depth and carries the khaODepth note - the one
     // place the twins legitimately differ.)
@@ -1877,7 +1877,7 @@ float4 PSMain(VSOut i) : SV_Target
     float3 khShN = normalize(i.nrm);
 #endif
     if (lighting0.x >= 0.5f && dot(khShN, lighting1.xyz) > 0.01f) {
-)HLSL" R"HLSL(   // MODE 167 (lighting0.y == 3): cascade receive forced lit
+    // MODE 167 (lighting0.y == 3): cascade receive forced lit
         // the split's cascade arm. TWIN EDIT: PSMain and PSComposite
         // identical.
         if (lighting0.y < 2.5f || lighting0.y >= 3.5f) {
@@ -2000,7 +2000,7 @@ float4 PSMain(VSOut i) : SV_Target
         if (khef >= 0.95f)  return float4(1.0f, 1.0f, 0.0f, 1.0f);
         return float4(0.0f, 0.4f, 1.0f, 1.0f);
     }
-)HLSL" R"HLSL(   // CHUNK BOUNDARY - the visual-25 ledger took PSMain's
+    // CHUNK BOUNDARY - the visual-25 ledger took PSMain's
     // segment 906 B past the 16380-byte MSVC token cap (C2026). Third catch
     // by the sweep gate in three builds; the visual ladders are prose-heavy
     // and this segment is now the one to watch.
@@ -2031,7 +2031,7 @@ float4 PSMain(VSOut i) : SV_Target
         float distM = i.pos.w;
         float hgt = i.wpos.y;
         float camY = fogColor.w;
-)HLSL" R"HLSL(   // CHUNK BOUNDARY - FIFTH C2026 CATCH OF THIS
+    // CHUNK BOUNDARY - FIFTH C2026 CATCH OF THIS
         // CAMPAIGN, and the first outside the shared block.
         float trans = 1.0f;
         // KH_FARVIS_NO_VDIST - (mode 322 reverts; catalog ledger).
@@ -2126,7 +2126,7 @@ float4 PSMain(VSOut i) : SV_Target
                          max(khaWp + khaWs, 1.0e-5f);
         }
 
-)HLSL" R"HLSL(   // CHUNK BOUNDARY - the visual-22 ledger took this segment
+    // CHUNK BOUNDARY - the visual-22 ledger took this segment
         // At full optical depth our mesh paints exactly fog_target and
         // nothing else, so a silhouette can only exist if fog_target differs
         // from what the engine leaves on the pixels around it. Deliberately
@@ -2207,4 +2207,3 @@ float4 PSMain(VSOut i) : SV_Target
 
     return float4(lc, a);
 }
-)HLSL"

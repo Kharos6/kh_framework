@@ -1,11 +1,11 @@
-// g_cb_hlsl - HLSL source, spliced into rendering_integration.hpp as
-// C++ raw string tokens via #include. Lines that close and immediately reopen
-// the raw string are MSVC C2026 chunk boundaries (16380-byte string-token
-// cap): SPLIT, never trim, when a segment approaches the cap. Any edit to
-// segment bytes changes this unit's shader cache key (one cold recompile per
-// user). Keep CRLF line endings. Never spell raw-string open/close tokens
-// inside comments - the gate scripts scan for them textually.
-R"HLSL(
+// cb.hlsl - plain HLSL, embedded in the DLL as RCDATA resource KH_CB_HLSL by
+// kh_shaders.rc (next to rendering_integration.hpp) and loaded at first use
+// by kh_hlsl_src, which strips CR before the source is hashed for the shader
+// cache, so the cache key does not depend on the checkout's line endings.
+// Units are assembled by C++ concatenation of these resources, exactly as the
+// old raw-string splice did; there is no #include and no size cap. Any edit
+// here changes this unit's shader cache key (one cold recompile per user).
+
 cbuffer CBObj : register(b0)
 {
     float4 centerSize;   // xyz = world center (engine space), w = edge length
@@ -79,7 +79,7 @@ cbuffer CBObj : register(b0)
                           // inv-width.y
 };
 
-)HLSL" R"HLSL(cbuffer CBFrame : register(b1)
+ cbuffer CBFrame : register(b1)
 {
     row_major float4x4 viewProj;   // REBASED on the two mesh passes
                                       // (see centerRel); absolute elsewhere
@@ -224,7 +224,7 @@ cbuffer CBObj : register(b0)
     // sunOrigin. C++ twin dls_range, written by kh_dls_fill_cb.
     float4 dlsRange;
 };
-)HLSL" R"HLSL(
+ 
 // THE CHUNK BOUNDARY IS HERE BECAUSE MSVC CAPS ONE STRING LITERAL TOKEN AT
 // 16380 BYTES (C2026: "string too big, trailing characters truncated"). The
 // rotation lands and nothing improves, because the rotation was never the
@@ -294,7 +294,7 @@ cbuffer CBEngView2 : register(b4)
 // sub-frame lag has 2x headroom while a recoil-rotated basis puts the centre
 // off screen entirely. THE BAR IS DELIBERATELY WIDE - stenVol2.w, filled at
 // 0.5 NDC, which is a quarter of the screen.
-)HLSL" R"HLSL(
+ 
 // CHUNK BOUNDARY - MSVC caps one string literal token at 16380 bytes and
 // KhEngTry took this one to 16616. THE ROWS ARE PASSED AS float4, NEVER AS A
 // MATRIX. verify_hlsl_size.py caught it before the compiler did, which is the
@@ -381,7 +381,7 @@ bool KhFkVetoHit(float3 cam, float3 wpos, float selfId)
     }
     return false;
 }
-)HLSL" R"HLSL(
+ 
 // Heightfield occlusion is marched CAMERA->FRAGMENT: per-pixel, temporally
 // stable (the flicker has no input to feed on), altitude- and LOD-
 // independent. Do not swap in a screen-space variant.
@@ -504,7 +504,7 @@ float KhStenRatioSub(float khsp_post, float khsp_pre)
     return 1.0f - saturate(khsp_pre - khsp_post);
 }
 
-)HLSL" R"HLSL(
+ 
 // Under rotation they do not, and the mesh shader was Loading the mask at its
 // OWN raster position, so at every silhouette edge a strip of the mesh read
 // the verdict belonging to the background behind it. THE REGISTRATION FIX.
@@ -563,7 +563,7 @@ float4 KhStenPaint4(float2 khsp_xy, float khsp_sel)
     return float4(khsp_s, khsp_s, khsp_s, 1.0f);
 }
 
-)HLSL" R"HLSL(
+ 
 Texture2D<float> khVolDepth : register(t23);
 Texture2D<uint2> khVolSten  : register(t24);
 // Same shadowed semantics as KhVolShadowed's default arm (count != 0).
@@ -697,7 +697,7 @@ float KhVolSoft(float2 khf_r, float khf_z, float khf_gx, float khf_gy, float khf
     return khf_s / khf_w;
 }
 
-)HLSL" R"HLSL(   // KH_MESH_OWNER_PREPASS helpers (shared header; see the block's own comment)
+    // KH_MESH_OWNER_PREPASS helpers (shared header; see the block's own comment)
 // MOVED into the shared header g_cb_hlsl - put this in g_hlsl_static, which
 // the composite and effect units never see; every composite compile failed on
 // X3004 'KhOwnerRejects' for two builds (compFailStreak 8/8) and the
@@ -769,7 +769,7 @@ float KhVolResidual(float4 khvr_s)
     return abs(khVolDepth.Load(int3(KhVolPx(khvr_s.xy), 0)) - khvr_s.z);
 }
 
-)HLSL" R"HLSL(
+ 
 // WHAT A MAGENTA READING MEANS: != 0 is the wrong test, the count needs a
 // signed reading (or the engine resolve's own comparison replicated), and
 // this transport must not become the default until it does. THE FOOTPRINT
@@ -893,7 +893,7 @@ float4 KhStenPaintU(float3 khpu_w, float2 khpu_raster, float khpu_sel)
     return KhStenPaint4(KhStenSel(khpu_w, khpu_raster), khpu_sel);
 }
 
-)HLSL" R"HLSL(   // Raw occlusion (0 lit.. 1 occluded), pre-strength. Bilinear 4-tap PCF:
+    // Raw occlusion (0 lit.. 1 occluded), pre-strength. Bilinear 4-tap PCF:
 // one-texel-soft edges, and the acne band averages instead of flipping.
 // KH_CAST_BIAS_CAP (26783): the union tail now applies its own capped bias
 // inline, so this helper has no caller left. Body kept - fxc drops an
@@ -934,7 +934,7 @@ float KhSunSoftT(Texture2D<float> khcs_m, float khcs_sz, float2 uv, float z)
 float SunShadowCompareBilin(float2 uv, float z) { return KhSunBilinT(khSunDepth, sunMeta.y, uv, z); }
 float SunShadowCompareSoft(float2 uv, float z)  { return KhSunSoftT(khSunDepth, sunMeta.y, uv, z); }
 
-)HLSL" R"HLSL(
+ 
 // The cross-fade now spans the outer 40% of every window - hero 80 cm, mid
 // 3.2 m, outer 12.8 m - one helper, all nine blend sites (cast chain, self
 // kernel, contact carries). KhJw shares this curve: continuity holds.
@@ -1099,7 +1099,7 @@ float SunShadowOcclusion(float3 wpos)
         khc_v = KhCastTier(khSunDepth5, sunVP5, sunMeta5, khc_r, sunCastBias.w, khlf_on, khtb_on, khtb_occ, khtb_w, khc_done);
         if (khc_done) return khc_v;
     }
-)HLSL" R"HLSL(   // CHUNK BOUNDARY - SIXTH C2026 CATCH OF THE CAMPAIGN
+    // CHUNK BOUNDARY - SIXTH C2026 CATCH OF THE CAMPAIGN
     float4 c = mul(float4(wpos - sunOrigin.xyz, 1.0f), sunVP);   // ortho: w = 1 (KH_SUN_ANCHOR)
     float2 uv = float2(0.5f + 0.5f * c.x, 0.5f - 0.5f * c.y);
     // KH_TIER_BLEND: a carried band verdict resolves against WHATEVER the
@@ -1125,7 +1125,7 @@ float SunShadowOcclusion(float3 wpos)
 // Soft variant for the SELF term: five bilinear taps in a +/-0.75-texel
 // diamond - a ~2.5-texel penumbra, 'very slightly smoothed' rather than the
 // bilinear's hard 1-texel ramp. The world CAST keeps the single tap:
-)HLSL" R"HLSL(   // its edges land on engine-lit ground where the engine's own shadows are
+    // its edges land on engine-lit ground where the engine's own shadows are
 // It was the five-tap soft kernel the old offset/fade/escape self term
 // called, and KH_SELF_RPDB replaced that term - so it had no caller left
 // anywhere. SunShadowCompareBilin stays - the world CAST (SunShadowOcclusion
@@ -1161,7 +1161,7 @@ float KhSelfTapT(Texture2D<float> khst_m, float2 khst_t, float2 khst_g, float kh
 }
 // the HERO-map twin (t25). Identical arithmetic, different texture.
 
-)HLSL" R"HLSL(   // CHUNK BOUNDARY (C2026) - the shared self tier gets its own segment
+    // CHUNK BOUNDARY (C2026) - the shared self tier gets its own segment
 // ONE self tier for the four camera-anchored bands. Derived from the mid
 // tier, which carries every branch; the real per-tier differences are the
 // parameters: map / moment pyramid / matrix / meta, the pf arm (far has no
@@ -1345,7 +1345,7 @@ float KhSelfTier(Texture2D<float> khT_map, Texture2D<float2> khT_pf, float4x4 kh
     return 0.0f;
 }
 
-)HLSL" R"HLSL(   // CHUNK BOUNDARY (C2026)
+    // CHUNK BOUNDARY (C2026)
 float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
                                out float4 khcf)
 {
@@ -1418,7 +1418,7 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
                        khwr, n, ndl, khno_k, khgs, khcl, khcc_on, khcc_clr, khtb_on, khlfs_off, khct_on,
                        khtb_occ, khtb_w, khla_g, khla_w, khcf, kh4_in, kh4_cert, khT_done);
     if (khT_done) return khT_v;
-)HLSL" R"HLSL(   // KH_SUN_FAR_BAND self tier (own segment)
+    // KH_SUN_FAR_BAND self tier (own segment)
     // KH_FAR_SELF_GATE - RETIRED (26719). The far tier used to run only
     // when outer did not contain the fragment, or carried a verdict, or
     // certified it: the gate existed because an outer map could be
@@ -1441,7 +1441,7 @@ float SunShadowOcclusionSelfEx(float3 wpos, float3 wrel, float3 nrm,
                            khtb_occ, khtb_w, khla_g, khla_w, khcf, khT_scr_in, khT_scr_cert, khT_done);
         if (khT_done) return khT_v;
     }
-)HLSL" R"HLSL(   // KH_SELF_RPDB - receiver-plane depth bias; in C++.
+    // KH_SELF_RPDB - receiver-plane depth bias; in C++.
     float khsr_iR0 = length(float3(sunVP[0].x, sunVP[1].x, sunVP[2].x));
     float khsr_no = khno_k * 2.0f / (max(sunMeta.y, 1.0f) * max(khsr_iR0, 1e-6f));
     float4 khsr_c = mul(float4(khwr + n * khsr_no, 1.0f), sunVP);   // ortho: w = 1
@@ -1546,7 +1546,7 @@ float SunShadowFactorSelf(float3 wpos, float3 wrel, float3 nrm)
                 * KhSunRangeFade(wpos);
 }
 
-)HLSL" R"HLSL(   // CHUNK BOUNDARY - visual 19 took this segment 719 B past the
+    // CHUNK BOUNDARY - visual 19 took this segment 719 B past the
 // 16380-byte MSVC token cap (C2026). Splitting here costs nothing at runtime.
 // The LAW still holds across the split: chunks concatenate, so SunSelfProbe's
 // body still precedes its call sites in every assembly.
@@ -1689,7 +1689,7 @@ float4 KhPfProbe2(float3 wpos, float3 wrel, float3 nrm)
                   saturate((1.0f - khpq_gs) * 12.0f),
                   saturate((1.0f - khpq_gl) * 12.0f), 1.0f);
 }
-)HLSL" R"HLSL(   // CHUNK BOUNDARY (precedent; chunks concatenate)
+    // CHUNK BOUNDARY (precedent; chunks concatenate)
 // the tier-probe visual took this segment past the 16380-byte MSVC token
 // cap).
 
@@ -1770,7 +1770,7 @@ void ClipEdgeSliver(float3 wpos, float3 nrm)
     float khes_ulp = max(max(abs(wpos.x), abs(wpos.y)), abs(wpos.z)) * 1.2e-7f;
     float khes_q2 = khes_ulp * khes_ulp * 16.0f;
     if (dot(khes_dx, khes_dx) < khes_q2 || dot(khes_dy, khes_dy) < khes_q2) return;
-)HLSL" R"HLSL(   // CLOSE-RANGE STAND-DOWN (renderstats18 + the corner discriminator:
+    // CLOSE-RANGE STAND-DOWN (renderstats18 + the corner discriminator:
     // 'looking up clips at a corner edge, not at a side' - face-on nv~1 never
     // clips, but standing near a face's own PLANE, the natural corner
     // posture, puts a LARGE REAL face at true grazing incidence, and this
@@ -1843,7 +1843,7 @@ float SolidMask(float3 wpos)
 // a missing one. Every failure path in here returns 1.0 for the same reason:
 // the worst a bug can then do is fail to darken, never to darken wrongly.
 // ===========================================================================
-)HLSL" R"HLSL(
+ 
 // CHUNK BOUNDARY - MSVC caps one string literal token at 16380 bytes
 // (C2026). KH_DL_SHADOW took this chunk to 16342, leaving 38 bytes, and
 // the rule is SPLIT, never trim, when a segment approaches the cap. Cut at
@@ -2022,7 +2022,7 @@ float KhDlsBilin(float khb_sz, float2 uv, float khb_slice,
     }
     return lerp(lerp(khb_o.x, khb_o.y, f.x), lerp(khb_o.z, khb_o.w, f.x), f.y);
 }
-)HLSL" R"HLSL(
+ 
 // CHUNK BOUNDARY (26877). SPLIT, never trim: the per-tap rewrite of KhDlsBilin
 // and the parameter list KhDlsSoft now threads took this segment to 14752, and
 // the receiver-plane note above KhDlsBilin is the record of why two builds each
@@ -2125,7 +2125,7 @@ float KhDlsSoft(float khs_sz, float2 uv, float khs_slice,
 //
 // Mode 520 disarms both, which is the A/B: if the strobe returns under 520 and
 // not at default, it was acne.
-)HLSL" R"HLSL(
+ 
 // KH_DLS_FACEUV (26871). The face, slice and uv selection, lifted verbatim out
 // of KhDlsShadow so the banding instrument asks the SAME question the shadow
 // lookup asks instead of keeping a second copy to drift (rule 1.5). Returns
@@ -2300,7 +2300,7 @@ float2 KhDlsGrad(float3 khg_p, float3 khg_n, float3 khg_r, float3 khg_u,
     const float khg_c = KH_DLS_GRAD_TEXELS * khg_texel;
     return clamp(khg_g, -khg_c, khg_c);
 }
-)HLSL" R"HLSL(
+ 
 // KH_DLS_ZBIAS (26874). khd_zunc is the receiver's own depth UNCERTAINTY in
 // metres, supplied by the CALLER because only the caller knows how its position
 // was obtained. A mesh passes 0: its position is interpolated geometry and is
@@ -2450,7 +2450,7 @@ float KhDlsShadow(int khd_slot, float3 khd_wpos, float3 khd_nrm, float khd_zunc)
                                     khd_a, khd_c, khd_near);
     return saturate(1.0f - khd_occ * khd_rf);   // KH_DLS_RANGE: thinned, not cut
 }
-)HLSL" R"HLSL(
+ 
 // CHUNK BOUNDARY (26877). SPLIT, never trim: the receiver-plane gradient and
 // its two reverts took this segment to 15723, leaving 657 bytes, and this
 // chunk still carries DynLights and both mesh-side probes. Cut at a top-level
@@ -2587,7 +2587,7 @@ float3 DynLights(float3 wpos, float3 nrm)
 // question at different granularities and must not stack). Sun/moon shading
 // for solid meshes (PSMain and PSComposite), opt-in per object via
 // lighting0.x.
-)HLSL" R"HLSL(
+ 
 // CHUNK BOUNDARY (26876f). Segment 22 reached 753 bytes of headroom once the
 // mesh-side probes landed in it. SPLIT, never trim - the probes are the only
 // instruments that have ever reached this path and their notes are why the
@@ -2721,7 +2721,7 @@ float3 ApplyLighting(float3 base, float3 wpos, float3 nrm, float smf)
     return khal_out;
 }
 
-)HLSL" R"HLSL(
+ 
 #if KH_TEXTURED
 Texture2D<float4> matDiffuse  : register(t14);
 Texture2D<float4> matNormal   : register(t15);
@@ -2983,7 +2983,7 @@ float3 KhPbrAmbient(float3 khpa_n, float3 khpa_v, bool khpa_vOk, float khpa_roug
     return khpa_diff + khpa_spec;
 }
 
-)HLSL" R"HLSL(   // Compact GGX (Cook-Torrance specular + Lambert diffuse) fed IDENTICAL
+    // Compact GGX (Cook-Torrance specular + Lambert diffuse) fed IDENTICAL
 float3 KhApplyPBR(KhMatSurf m, float3 wpos, float3 n, float smf)
 {
     // KH_DLSW_MESHPROBE twin 2/2 (mode 560) - see the ApplyLighting site.
@@ -3069,7 +3069,7 @@ float3 KhApplyPBR(KhMatSurf m, float3 wpos, float3 n, float smf)
 }
 #endif
 
-)HLSL" R"HLSL(
+ 
 // CHUNK BOUNDARY (26834). KH_DLS_WORLD's kernel and its rationale are ~10 KB,
 // and the segment that used to end here was 8.7 KB of a 16,380-byte MSVC token
 // - the two together overflow it (the gate caught this on the first attempt,
@@ -3263,7 +3263,7 @@ float3 KhDlsWorldFactor(float3 khw_wpos, float3 khw_nrm, float khw_zunc,
 
     return saturate(1.0f - khw_blocked / max(khw_total, 1e-4f));
 }
-)HLSL" R"HLSL(
+ 
 struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL;
 #if KH_TEXTURED
     float2 uv : TEXCOORD0; float4 tan : TANGENT;   // 48-byte lanes (layout_tex)
@@ -3470,7 +3470,7 @@ float BandLoad(int t, int2 px)
 // verdict from the path tint: the band path owns 100% of the shading, and its
 // POINT taps printed the shadow map's dithered foliage raw - the stipple, and
 // each dither cluster as a circle-with-dot. A)
-)HLSL" R"HLSL(   // 2x2 weighted compare resolves every dither cell to its smooth
+    // 2x2 weighted compare resolves every dither cell to its smooth
 // coverage fraction, exactly like the engine's 16-tap sample_c tier).
 float BandCmpBilin(int t, float2 pos, float z)
 {
@@ -3507,7 +3507,7 @@ float ShadowBandIndex(float3 wpos)
     return -1.0f;
 }
 
-)HLSL" R"HLSL(   // CHUNK BOUNDARY - the content probe took this segment to 105%%.
+    // CHUNK BOUNDARY - the content probe took this segment to 105%%.
 // MSVC caps one string literal token at 16380 bytes; splitting at a function
 // boundary costs nothing at runtime. VISUAL 18 - WHAT THE SEALED TILE
 // ACTUALLY HOLDS. Debug-only; nothing on the shading path calls this.
@@ -3537,7 +3537,7 @@ float4 ShadowBandContent(float3 wpos)
             if (khbc_c) khbc_e += 0.25f;
             if ((z - d) * shadowMeta.y > 0.0f) khbc_o += 0.25f;
         }
-)HLSL" R"HLSL(   // CHUNK BOUNDARY - the hue table took this segment past
+    // CHUNK BOUNDARY - the hue table took this segment past
         // 16380 B. Split, do not trim. Statement boundary, costs nothing at
         // runtime. NINE SATURATED HUES, NO BRIGHTNESS ENCODING.
         if (q == 0) {
@@ -3662,7 +3662,7 @@ float ShadowBandFactor(float3 wpos)
     // slowly toward the cascade's far edge shows the shadow banding in
     // correctly, but at any normal speed it SNAPS into existence, and the
     // same edge is where a fast dolly makes it flicker out.
-)HLSL" R"HLSL(   // CHUNK BOUNDARY - the fade-anchor ledger took this segment
+    // CHUNK BOUNDARY - the fade-anchor ledger took this segment
     // past 16380 B. Split, do not trim. Arithmetically this barely moves for
     // the measured table - 0.10 x 248.567 = 24.86 m against 0.164 x 120.380 =
     // 19.74 m - which is itself the finding: the estimate was close, and it
@@ -3725,4 +3725,3 @@ float KhHazeT(float khaz_d, float khaz_wposY, float khaz_camY, float khaz_layerY
     return min(exp(-khaz_I * khaz_b), 1.0f);
 }
 
-)HLSL"

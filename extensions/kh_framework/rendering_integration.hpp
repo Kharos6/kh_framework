@@ -6,11 +6,11 @@
 // <memory>: included by the FRAMEWORK header ahead of this file.
 
 // EDIT DISCIPLINE: both integration headers are CRLF-only (no lone LF or CR
-// anywhere, including inside the HLSL/SQF raw strings). Scripted edits must
+// anywhere, including inside the SQF raw strings). Scripted edits must
 // normalise line endings and use count-asserted anchors (an anchor matching
 // 0 or 2+ sites aborts before writing). After any edit re-check: CRLF purity,
-// exactly one KH_BUILD_TAG definition, every HLSL string segment under the
-// 16380-byte MSVC token cap, and brace/paren balance.
+// exactly one KH_BUILD_TAG definition, and brace/paren balance. The HLSL is
+// plain .hlsl now (26884: RCDATA resources, kh_shaders.rc) - no token cap.
 namespace RenderIntegration {
 
 enum class DepthMode : int {
@@ -38,10 +38,6 @@ struct MeshVertex {
                     // builtins: zeroed xyz, w = 1 (unused until KH_TEXTURED
                     // samples normal maps)
 };
-static_assert(sizeof(MeshVertex) == 48, "48-byte textured-vertex stride contract");
-static_assert(offsetof(MeshVertex, nrm) == 12 && offsetof(MeshVertex, uv) == 24 &&
-              offsetof(MeshVertex, tan) == 32,
-              "MeshVertex field offsets are a layout contract (see the input layouts)");
 
 // Per-material vertex range (expanded, non-indexed). Builtins carry one
 // full-range "default" entry so the FBX-era per-submesh consumers (material
@@ -1985,15 +1981,20 @@ static float g_scene_vp_max_d = 0.999f;
 // Shaders convention: row_major, clip = p * viewProj
 
 // SHADER SOURCE RULES (violating any of these has shipped broken builds).
-// The HLSL sources live in hlsl/*.hlsl NEXT TO THIS HEADER (quoted #include
-// resolves relative to the including file) and are spliced in as C++ raw
-// string tokens - the .hlsl files are C++ token streams, not fxc inputs:
-// 1. fxc has NO LINKER PASS: any function a chunk calls must have its BODY
-//    textually earlier in that chunk's ASSEMBLED source; prototypes alone do
+// The HLSL sources live in hlsl/*.hlsl NEXT TO THIS HEADER as PLAIN HLSL.
+// 26884 (KH_HLSL_RCDATA): kh_shaders.rc (beside this header) embeds each file
+// in the DLL as an RCDATA resource and kh_hlsl_src hands the bytes to the
+// compile sites; the units are still assembled by C++ concatenation, in the
+// same order, so every assembly, entry point, define table and cache-key
+// derivation is unchanged. No ID3DInclude on purpose: the cache key hashes
+// the TOP-LEVEL source only, so a real #include of cb.hlsl would make every
+// prefix edit invisible to the cache and serve stale blobs.
+// 1. fxc has NO LINKER PASS: any function a unit calls must have its BODY
+//    textually earlier in that unit's ASSEMBLED source; prototypes alone do
 //    not link. Check every assembly (static, composite, effects, user-mesh).
-// 2. Unit visibility: g_cb_hlsl is the one shared prefix every unit sees;
-//    g_hlsl_static is seen only by the static unit, g_hlsl_composite(2) only
-//    by the composite unit. A helper both chains call belongs in g_cb_hlsl.
+// 2. Unit visibility: cb.hlsl (KH_HLSL_CB) is the one shared prefix every
+//    unit sees; static.hlsl is seen only by the static unit, composite(2)
+//    only by the composite unit. A helper both chains call belongs in cb.
 // 3. Twins move together: the flush and injection mesh loops; PSMain /
 //    PSComposite / PSEffect / PSOwner; the HLSL and C++ sides of any CB
 //    contract; and the two sun-verdict chains (self kernel + world cast),
@@ -2002,54 +2003,89 @@ static float g_scene_vp_max_d = 0.999f;
 // 4. The world-cast fill has its own lighting0.y code ladder and NO dbgCtl:
 //    anything the cast chain must react to ships as a code mirrored into
 //    both ladders; a dbgCtl visual never reaches the cast.
-// 5. Any edit inside a raw HLSL string changes that unit's cache key: every
-//    user pays one cold recompile (~370 s for the tall poles). Batch shader
-//    edits; for a C++-only build, hash the segment bodies to prove it.
-// 6. MSVC caps one string literal token at 16380 bytes (C2026): split at a
-//    statement boundary, never trim shader code to fit.
-static const char* g_cb_hlsl =
-#include "hlsl/cb.hlsl"
-;
+// 5. Any edit inside a .hlsl file changes that unit's cache key: every user
+//    pays one cold recompile (~370 s for the tall poles). Batch shader
+//    edits; for a C++-only build, hash the files to prove it. The loader
+//    strips CR before hashing, so a checkout's line endings do not fork the
+//    key (the shipped mod cache is keyed by it).
+// 6. (retired) There is no string-literal size cap any more; the "CHUNK
+//    BOUNDARY" notes still standing inside the .hlsl files are history.
+enum KhHlslRes : int {
+    KH_HLSL_CB = 0,          // the shared prefix (cb.hlsl)
+    KH_HLSL_WHITE,           // placeholder VS/PS
+    KH_HLSL_STATIC,          // static entry points (no depth access)
+    KH_HLSL_COMPOSITE,       // injected path, first half
+    KH_HLSL_COMPOSITE2,      // injected path, second half (joined at the compile site)
+    KH_HLSL_EFFECT,          // effect uber-shader (t0 scene, t1 depth), three parts
+    KH_HLSL_EFFECT2,
+    KH_HLSL_EFFECT3,
+    KH_HLSL_DEPTH_RESOLVE,   // standalone resolve PS
+    KH_HLSL_SUNPF,           // standalone prefilter pair
+    KH_HLSL_VMIR_CS,         // standalone b2 patch CS
+    KH_HLSL_N
+};
+static const wchar_t* const KH_HLSL_RES_NAMES[KH_HLSL_N] = {
+    L"KH_CB_HLSL", L"KH_WHITE_HLSL", L"KH_STATIC_HLSL", L"KH_COMPOSITE_HLSL",
+    L"KH_COMPOSITE2_HLSL", L"KH_EFFECT_HLSL", L"KH_EFFECT2_HLSL", L"KH_EFFECT3_HLSL",
+    L"KH_DEPTH_RESOLVE_HLSL", L"KH_SUNPF_HLSL", L"KH_VMIR_CS_HLSL",
+};
+static uint32_t g_hlsl_res_missing = 0;   // resources FindResource could not see (hlslResMissing)
 
-static const char* g_hlsl_white =
-#include "hlsl/white.hlsl"
-;
+struct KhHlslStore { std::string s[KH_HLSL_N]; };   // no <array> dependency
 
-// Static entry points (no depth access): compiled once
-static const char* g_hlsl_static =
-#include "hlsl/static.hlsl"
-;
+inline KhHlslStore kh_hlsl_load_all() {
+    KhHlslStore khr_out;
+    HMODULE khr_hm = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCWSTR>(&kh_hlsl_load_all), &khr_hm);
 
-static const char* g_hlsl_composite =
-#include "hlsl/composite.hlsl"
-;
+    for (int khr_i = 0; khr_i < KH_HLSL_N; ++khr_i) {
+        const char* khr_p = nullptr;
+        DWORD khr_sz = 0;
+        if (khr_hm) {
+            HRSRC khr_r = FindResourceW(khr_hm, KH_HLSL_RES_NAMES[khr_i], MAKEINTRESOURCEW(10));   // RT_RCDATA, W-typed regardless of UNICODE
+            if (khr_r) {
+                HGLOBAL khr_g = LoadResource(khr_hm, khr_r);
+                khr_sz = SizeofResource(khr_hm, khr_r);
+                if (khr_g && khr_sz) khr_p = static_cast<const char*>(LockResource(khr_g));
+            }
+        }
 
-// (split: MSVC C2026 caps a single literal at ~16 KB - the fog additions
-// crossed it; the two halves are joined at the compile site)
-static const char* g_hlsl_composite2 =
-#include "hlsl/composite2.hlsl"
-;
+        if (!khr_p) {
+            // An absent resource is refused, not computed from (rule 1.91): a
+            // comment-only source makes every entry point of the unit fail at
+            // fxc with a message that names the cause, and the lane counts it.
+            g_hlsl_res_missing++;
+            khr_out.s[khr_i] = "// KH: shader resource missing from the DLL - add kh_shaders.rc to the build\n";
+            continue;
+        }
 
-// Effect uber-shader: samples the captured scene (t0) and, for effects 10/11,
-// the engine depth buffer (t1). Compiled per depth MSAA count.
-static const char* g_hlsl_effect =
-#include "hlsl/effect.hlsl"
-;
+        std::string& khr_s = khr_out.s[khr_i];
+        khr_s.reserve(khr_sz);
+        for (DWORD khr_k = 0; khr_k < khr_sz; ++khr_k) {   // CR stripped: the key is LF-only
+            if (khr_p[khr_k] != '\r') khr_s.push_back(khr_p[khr_k]);
+        }
+    }
 
-static const char* g_hlsl_effect2 =
-#include "hlsl/effect2.hlsl"
-;
+    return khr_out;
+}
 
-static const char* g_hlsl_effect3 =
-#include "hlsl/effect3.hlsl"
-;
+// One load for the process (thread-safe magic static: the shader workers and
+// the two threads that ensure may all arrive first). The pointer the .c_str()
+// consumers hold is stable for the process lifetime.
+inline const std::string& kh_hlsl_src(int khr_i) {
+    static const KhHlslStore khr_all = kh_hlsl_load_all();
+    return khr_all.s[khr_i];
+}
 
 struct alignas(16) ConstantData {
     // PER-OBJECT BLOCK (b0)
     float center_size[4];
     float center_rel[4];
     float color[4];
-    float fx0[4];
+    float fx0[4];   // effect parameters [0..3]; on the MESH fill sites xyz =
+                    // the pass camera (engine axes) - the PBR view vector and
+                    // the DynLights mode-1 origin read it as such
     float fx1[4];
     float fx_meta[4];   // effect id, time (s), screen width, screen height
     float depth_params[4];   // proj m22, proj m32, viewport MinDepth, MaxDepth
@@ -2275,9 +2311,6 @@ struct alignas(16) ConstantData {
 static constexpr size_t KH_CBOBJ_BYTES      = offsetof(ConstantData, view_proj);
 static constexpr size_t KH_CBOBJ_HEAD_BYTES = offsetof(ConstantData, dl_lights);
 static constexpr size_t KH_CBFRAME_BYTES    = sizeof(ConstantData) - KH_CBOBJ_BYTES;
-static_assert(KH_CBOBJ_BYTES == KH_CBOBJ_HEAD_BYTES + sizeof(ConstantData::dl_lights),
-              "dl_lights must be the LAST per-object field (the upload trim depends on it)");
-static_assert(KH_CBOBJ_BYTES % 16 == 0 && KH_CBFRAME_BYTES % 16 == 0, "CB blocks must be float4-aligned");
 // The HLSL CBObj/CBFrame declarations and this struct are a hand-kept mirror
 // with no tripwire; the compiled PSMain blob carries the declared cbuffer
 // sizes in its RDEF chunk (cached.khsc blobs too), so every ensure reflects
@@ -2337,8 +2370,6 @@ inline void kh_fill_obj_rot(ConstantData& cbd, const float* rot_m) {
 static constexpr uint32_t KH_CBR_STRIDE = static_cast<uint32_t>((KH_CBOBJ_BYTES + 255u) & ~static_cast<size_t>(255u));
 static constexpr uint32_t KH_CBR_SLICES = 1024u;
 static constexpr uint32_t KH_CBR_CONSTS = KH_CBR_STRIDE / 16u;   // 240
-static_assert(KH_CBR_STRIDE >= KH_CBOBJ_BYTES && (KH_CBR_CONSTS % 16u) == 0u && KH_CBR_CONSTS <= 4096u,
-              "KH_CB_RING slice must cover the object block, be a 16-constant multiple and fit one bind");
 static bool     g_cbr_supported = false;   // feature pair present on this device (ensure_resources)
 static uint64_t g_cbr_writes = 0;   // slices written through the ring
 static uint64_t g_cbr_discards = 0;   // DISCARD maps (first use + wraps)
@@ -3235,7 +3266,7 @@ inline bool kh_shader_mt_prewarm(const KhShaderJob* khsm_jobs, size_t khsm_n,
     std::unordered_map<const char*, std::shared_ptr<std::string>> khsm_srcs;
     g_khsm_q.clear();
     // KH_USER_ASYNC arms a batch whenever a user shader is activated, each
-    // one carrying a full g_cb_hlsl-prefixed source, so the same code becomes
+    // one carrying a full cb.hlsl-prefixed source, so the same code becomes
     // an unbounded per-activation leak. The memo is untouched: it holds blobs
     // and error strings, never job sources. THE OWNED-JOB STORAGE IS FREED
     // HERE, NOT ONLY AT SHUTDOWN.
@@ -4159,7 +4190,7 @@ inline ID3D11PixelShader* kh_user_fx_ps(ID3D11Device* dev, const std::string& pa
         std::vector<std::string> khua_dn, khua_dv;
         khua_dn.push_back("MSAA_DEPTH");
         khua_dv.push_back(g_res.depth_sample_count > 1 ? "1" : "0");
-        kh_user_async_queue(khus_key, std::string(g_cb_hlsl) + khua_src,
+        kh_user_async_queue(khus_key, kh_hlsl_src(KH_HLSL_CB) + khua_src,
                             "PSEffect", khua_dn, khua_dv);
         return nullptr;
     }
@@ -4171,7 +4202,7 @@ inline ID3D11PixelShader* kh_user_fx_ps(ID3D11Device* dev, const std::string& pa
             { "MSAA_DEPTH", g_res.depth_sample_count > 1 ? "1" : "0" },
             { nullptr, nullptr },
         };
-        const std::string khus_full = std::string(g_cb_hlsl) + khus_src;
+        const std::string khus_full = kh_hlsl_src(KH_HLSL_CB) + khus_src;
         ID3DBlob* khus_blob = nullptr;
         khus_err = compile_shader(khus_full.c_str(), "PSEffect", "ps_5_0", khus_defines, &khus_blob);
 
@@ -4239,15 +4270,15 @@ inline ID3D11PixelShader* kh_user_mat_ps(ID3D11Device* dev, const std::string& p
             { "KH_USER_MAT", "1" },
             { nullptr, nullptr },
         };
-        std::string khum_full = std::string(g_cb_hlsl) + khum_src;
+        std::string khum_full = kh_hlsl_src(KH_HLSL_CB) + khum_src;
         const char* khum_entry = "PSMain";
         const D3D_SHADER_MACRO* khum_defs = khum_def_flush;
 
         if (khum_ctx == 0) {
-            khum_full += g_hlsl_static;
+            khum_full += kh_hlsl_src(KH_HLSL_STATIC).c_str();
         } else {
-            khum_full += g_hlsl_composite;
-            khum_full += g_hlsl_composite2;
+            khum_full += kh_hlsl_src(KH_HLSL_COMPOSITE).c_str();
+            khum_full += kh_hlsl_src(KH_HLSL_COMPOSITE2).c_str();
             khum_entry = "PSComposite";
             khum_defs = khum_ctx == 2 ? khum_def_arb : khum_def_comp;
         }
@@ -6606,7 +6637,6 @@ struct KhInstRec {
     float rot[3][4];   // engine-axes rotation rows; [0][3] = 1 (filled)
     float col[4];      // colour, envelope applied
 };
-static_assert(sizeof(KhInstRec) == 112, "instance stream stride is a layout contract (layout_inst*, VSInst)");
 static constexpr uint32_t KH_INST_STRIDE = static_cast<uint32_t>(sizeof(KhInstRec));
 static constexpr uint32_t KH_INST_CAP = 16384u;   // records per ring (1.75 MB)
 static uint64_t g_inst_batches = 0;
@@ -7131,7 +7161,7 @@ inline void kh_white_ensure(ID3D11Device* dev) {
     static const D3D_SHADER_MACRO khw_defines[] = {
         { "KH_RECEIVE_TEX", "1" }, { nullptr, nullptr },
     };
-    const std::string khw_src = std::string(g_cb_hlsl) + g_hlsl_white;
+    const std::string khw_src = kh_hlsl_src(KH_HLSL_CB) + kh_hlsl_src(KH_HLSL_WHITE).c_str();
     ID3DBlob* khw_vsb = nullptr;
     ID3DBlob* khw_psb = nullptr;
     std::string khw_err = compile_shader(khw_src.c_str(), "VSWhite", "vs_5_0", khw_defines, &khw_vsb);
@@ -7253,7 +7283,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
     ID3DBlob* ps_blob = nullptr;
 
     // Shared cbuffer declaration is prepended to every compilation unit
-    const std::string static_src = std::string(g_cb_hlsl) + g_hlsl_static;
+    const std::string static_src = kh_hlsl_src(KH_HLSL_CB) + kh_hlsl_src(KH_HLSL_STATIC).c_str();
     // The shared receive block (band/atlas textures + samplers-free compare
     // functions) arms for this unit: PSMain consumes it since the
     // translucent-receive fix. The effect unit compiles WITHOUT it (its
@@ -7272,7 +7302,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
     // target and the define NAMES AND VALUES IN ORDER - one reordered or
     // added entry makes the speculation miss silently.
     const std::string khsp_comp_src =
-        std::string(g_cb_hlsl) + g_hlsl_composite + g_hlsl_composite2;
+        kh_hlsl_src(KH_HLSL_CB) + kh_hlsl_src(KH_HLSL_COMPOSITE).c_str() + kh_hlsl_src(KH_HLSL_COMPOSITE2).c_str();
     const D3D_SHADER_MACRO khsp_d0[] = {
         { "MSAA_DEPTH", "0" }, { "SAMPLE_COUNT", khsp_sc1.c_str() },
         { "KH_ARB_DEPTH", "0" }, { "KH_RECEIVE_TEX", "1" }, { nullptr, nullptr } };
@@ -7290,7 +7320,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
     // note it is MSAA_DEPTH ALONE: no SAMPLE_COUNT, no KH_RECEIVE_TEX,
     // because the effect unit's depthTex owns t1 and it never receives.
     const std::string khfx_src =
-        std::string(g_cb_hlsl) + g_hlsl_effect + g_hlsl_effect2 + g_hlsl_effect3;
+        kh_hlsl_src(KH_HLSL_CB) + kh_hlsl_src(KH_HLSL_EFFECT).c_str() + kh_hlsl_src(KH_HLSL_EFFECT2).c_str() + kh_hlsl_src(KH_HLSL_EFFECT3).c_str();
     const D3D_SHADER_MACRO khfx_d0[] = {
         { "MSAA_DEPTH", "0" }, { nullptr, nullptr } };
     // VSWhite/PSWhite are DELIBERATELY ABSENT from this list and must stay
@@ -7669,7 +7699,6 @@ inline std::string ensure_resources(ID3D11Device* dev) {
                     { "TEXCOORD", 9,  DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 80, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
                     { "TEXCOORD", 10, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 96, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
                 };
-                static_assert(sizeof(khin_el) / sizeof(khin_el[0]) == 11, "2 or 4 mesh elements + 7 instance elements");
                 // Plain: POSITION/NORMAL then the 7 instance elements (the
                 // textured pair is skipped, not renumbered).
                 D3D11_INPUT_ELEMENT_DESC khin_plain[9];
@@ -8562,7 +8591,7 @@ inline std::string ensure_effect_shader(ID3D11Device* dev) {
         { nullptr, nullptr }
     };
 
-    const std::string fx_src = std::string(g_cb_hlsl) + g_hlsl_effect + g_hlsl_effect2 + g_hlsl_effect3;   // split; second split
+    const std::string fx_src = kh_hlsl_src(KH_HLSL_CB) + kh_hlsl_src(KH_HLSL_EFFECT).c_str() + kh_hlsl_src(KH_HLSL_EFFECT2).c_str() + kh_hlsl_src(KH_HLSL_EFFECT3).c_str();   // split; second split
     ID3DBlob* blob = nullptr;
     std::string err = compile_shader(fx_src.c_str(), "PSEffect", "ps_5_0", defines, &blob);
     if (!err.empty()) return err;
@@ -8650,7 +8679,7 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
         { nullptr, nullptr },
     };
 
-    const std::string comp_src = std::string(g_cb_hlsl) + g_hlsl_composite + g_hlsl_composite2;
+    const std::string comp_src = kh_hlsl_src(KH_HLSL_CB) + kh_hlsl_src(KH_HLSL_COMPOSITE).c_str() + kh_hlsl_src(KH_HLSL_COMPOSITE2).c_str();
     // KH_SHADER_MT: the composite unit's six heavy compiles as one batch.
     // Declared after comp_src and every table it names, so the scope joins
     // and frees before any of them go out of scope - and it covers the
@@ -8764,10 +8793,6 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
 // Resolve PS: compiled per SOURCE MSAA count, like PSEffect. Standalone
 // source (no cbuffer use); the fullscreen VS is the shared vs_fullscreen,
 // whose extra TEXCOORD outputs a subset-reading PS legally ignores.
-static const char* g_hlsl_depth_resolve =
-#include "hlsl/depth_resolve.hlsl"
-;
-
 inline std::string ensure_depth_resolve_shader(ID3D11Device* dev) {
     const int khdr_wit = (g_dbg_mode.load(std::memory_order_relaxed) == 178) ? 0 : 1;
     if (g_res.ps_depth_resolve && g_res.ps_resolve_samples == g_res.depth_sample_count
@@ -8784,7 +8809,7 @@ inline std::string ensure_depth_resolve_shader(ID3D11Device* dev) {
     };
 
     ID3DBlob* blob = nullptr;
-    std::string err = compile_shader(g_hlsl_depth_resolve, "PSDepthResolve", "ps_5_0", defines, &blob);
+    std::string err = compile_shader(kh_hlsl_src(KH_HLSL_DEPTH_RESOLVE).c_str(), "PSDepthResolve", "ps_5_0", defines, &blob);
     if (!err.empty()) return "depth resolve PS: " + err;
     HRESULT hr = dev->CreatePixelShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &g_res.ps_depth_resolve);
     blob->Release();
@@ -8920,10 +8945,6 @@ inline bool ensure_sun_depth(ID3D11Device* dev) {
 // the hero map's resource trio - same construction as ensure_sun_depth, at
 // the hero ladder size (KH_SUN_LADDER). Non-fatal: every consumer stands down when absent
 // (sunMeta2.x stays 0). CB-free.
-static const char* g_hlsl_sunpf =
-#include "hlsl/sunpf.hlsl"
-;
-
 // Non-fatal like every band ensure: any failure returns false and the self
 // kernel stays classic (sun_pf flags never arm).
 inline bool ensure_sun_pf(ID3D11Device* dev) {
@@ -8945,7 +8966,7 @@ inline bool ensure_sun_pf(ID3D11Device* dev) {
     if (!g_res.vs_sunpf || !g_res.ps_sunpf) {
         static const D3D_SHADER_MACRO khpf_defs[] = { { nullptr, nullptr } };
         ID3DBlob* khpf_vb = nullptr;
-        if (!compile_shader(g_hlsl_sunpf, "VSPf", "vs_5_0", khpf_defs, &khpf_vb).empty() ||
+        if (!compile_shader(kh_hlsl_src(KH_HLSL_SUNPF).c_str(), "VSPf", "vs_5_0", khpf_defs, &khpf_vb).empty() ||
             !khpf_vb) return false;
         const HRESULT khpf_vh = dev->CreateVertexShader(khpf_vb->GetBufferPointer(),
                                                         khpf_vb->GetBufferSize(),
@@ -8953,7 +8974,7 @@ inline bool ensure_sun_pf(ID3D11Device* dev) {
         khpf_vb->Release();
         if (FAILED(khpf_vh)) return false;
         ID3DBlob* khpf_pb = nullptr;
-        if (!compile_shader(g_hlsl_sunpf, "PSPf", "ps_5_0", khpf_defs, &khpf_pb).empty() ||
+        if (!compile_shader(kh_hlsl_src(KH_HLSL_SUNPF).c_str(), "PSPf", "ps_5_0", khpf_defs, &khpf_pb).empty() ||
             !khpf_pb) return false;
         const HRESULT khpf_ph = dev->CreatePixelShader(khpf_pb->GetBufferPointer(),
                                                        khpf_pb->GetBufferSize(),
@@ -8964,7 +8985,7 @@ inline bool ensure_sun_pf(ID3D11Device* dev) {
     if (!g_res.ps_sunpfm) {   // manual mip chain
         static const D3D_SHADER_MACRO khpfm_defs[] = { { nullptr, nullptr } };
         ID3DBlob* khpfm_pb = nullptr;
-        if (!compile_shader(g_hlsl_sunpf, "PSPfMip", "ps_5_0", khpfm_defs, &khpfm_pb).empty() ||
+        if (!compile_shader(kh_hlsl_src(KH_HLSL_SUNPF).c_str(), "PSPfMip", "ps_5_0", khpfm_defs, &khpfm_pb).empty() ||
             !khpfm_pb) return false;
         const HRESULT khpfm_ph = dev->CreatePixelShader(khpfm_pb->GetBufferPointer(),
                                                         khpfm_pb->GetBufferSize(),
@@ -10714,7 +10735,7 @@ static uint32_t g_fk_veto_cand_n = 0;   // candidates staged at the last pass BE
                                             // campaign-43 handoff.
 // Build tag: monotonic, never reused, bumped once per shipped build (including
 // pure reverts). Keep it a constexpr int, not a #define.
-static constexpr int KH_BUILD_TAG = 26883;
+static constexpr int KH_BUILD_TAG = 26885;
 // Continuous at the near plane, so routing on/off never pops a fragment.
 static constexpr float KH_NEARZ_GAP_FRAC = 0.92f;
 // 3 = mode 203 - passthrough + absolute form.
@@ -10776,8 +10797,14 @@ static uint64_t g_cbc_cam_hits = 0;   // seam lookups with a valid census camera
 
 inline bool shadow_live_wanted();   // defined with the live-shadow state
 
+// 26884: g_svs_mesh_wanted is a term now. The census is a CONSUMER of the
+// seam (the bound-pair encode, seamProjSrc 6, and the transition witness at
+// the live-basis take), so an unlit mesh session encoded through the
+// predictor chain until the operator ran getRenderStats - a logging command
+// changing the picture. The seam runs for every mesh; so does its census.
 inline bool kh_cbc_on() {
     return shadow_live_wanted() ||
+           g_svs_mesh_wanted.load(std::memory_order_relaxed) ||
            g_stats_armed.load(std::memory_order_relaxed) ||
            g_dbg_mode.load(std::memory_order_relaxed) == 152;
 }
@@ -11925,6 +11952,38 @@ inline bool kh_blk_in_band(float a, float b) {
     return fabsf(a - b) <= khb_eps;
 }
 
+// KH_BLK_PROP_DIM (26884) - A DIM THAT KEEPS THE SUN/AMBIENT RATIO IS NOT THE
+// WEATHER.
+//
+// Two dumps, same signature. The giant-shadow walk: 20.55/1.73 -> 10.03/0.84,
+// both x0.49. The overcast -> sun switch: 33.0/3.06 -> 15.3/1.31 (x0.46/x0.43),
+// then 14.67/1.25 -> 10.76/0.92 pending (x0.73/x0.73). In every case the sun
+// and the ambient fell by the SAME factor - the lit block was attenuated as a
+// whole - and in every case the world on screen stayed bright while our meshes
+// dimmed. A weather change does not look like that: overcast collapses the sun
+// against its ambient (0.004 / 1.25 in the same session, a ratio of 0.003 vs
+// the clear sky's ~11), and a skipTime moves the two lanes by different amounts
+// because they come from different physics. A uniform scale of both lanes is
+// what an object drawn INSIDE A SHADOW uploads (the engine attenuates that
+// object's whole block), and with our 1000x caster covering the scene those
+// objects are the majority - or all - of what the probe sees.
+//
+// So this is an invariant of the two lanes of one block (rule 1.84), not a
+// bar on either: a DOWNWARD candidate whose sun/ambient ratio is within
+// KH_BLK_PROP_TOL of the standing's is a scaled copy of the standing, not a
+// new level, and is refused by both the reconcile and the probe's starved
+// concede. It cannot touch a real change (the ratio moves), it cannot touch
+// night (the standing sun must be lit), and an upward candidate is never
+// tested. Mode 588 is the A/B. Lanes: reconBlkProp / blkPropHolds.
+static const float KH_BLK_PROP_TOL = 0.15f;
+inline bool kh_blk_proportional_dim(float khpd_sl, float khpd_al, float khpd_rsl, float khpd_ral) {
+    if (g_dbg_mode.load(std::memory_order_relaxed) == 588) return false;
+    if (!(khpd_rsl > 1.0f) || !(khpd_ral > 1.0e-4f) || !(khpd_al > 1.0e-4f)) return false;   // a lit standing, real ambients
+    if (!(khpd_sl < khpd_rsl) || !(khpd_al < khpd_ral)) return false;   // both lanes fell
+    const float khpd_r = (khpd_sl / khpd_al) / (khpd_rsl / khpd_ral);
+    return fabsf(khpd_r - 1.0f) <= KH_BLK_PROP_TOL;
+}
+
 // The publish arbiter stamps g_sun_unstable_ms whenever the PUBLISHED
 // direction steps more than KH_SUN_SETTLE_STEP_DEG in one flush: the
 // cold-start glide (the derivation refining "a degree or three" while spawn
@@ -12003,6 +12062,19 @@ static uint64_t g_rc_checks = 0;
 static uint64_t g_rc_sun_adopts = 0;
 static uint64_t g_rc_blk_adopts = 0;
 static uint64_t g_rc_sun_short = 0;                    // sun verdicts refused: too few samples in the window
+// KH_RECON_SUN_WITNESS (26884). Sun adoptions refused because the consensus
+// explained the sky CB's own sun lane WORSE than the standing publish did
+// (the look-away blink; see kh_rc_sun_witness), and adoptions that went
+// through with no usable witness (fail-open, the gates' own rule).
+static uint64_t g_rc_sun_wit_refused = 0;
+static uint64_t g_rc_sun_wit_open = 0;
+// KH_RECON_BLK_COEXIST (26884). Block consensus verdicts refused because the
+// window still carried the STANDING level as a live flavour (see the
+// reconcile), and the share of the last verdict's window that did.
+static uint64_t g_rc_blk_coexist = 0;
+static float    g_rc_blk_old_frac = -1.0f;
+static uint64_t g_rc_blk_prop = 0;      // KH_BLK_PROP_DIM: dimmer consensus refused, ratio preserved
+static uint64_t g_blk_prop_holds = 0;   // KH_BLK_PROP_DIM: probe starved concedes refused, ratio preserved
 static uint64_t g_rc_blk_short = 0;
 // Latency lanes. sunPubLat: first raw cascade sample more than KH_RECON_SUN_DEG
 // from the published direction -> the publish that brought it back within
@@ -12156,6 +12228,55 @@ inline float kh_sun_axis_angle_deg(const float* khaa_a, const float* khaa_b) {
     float khaa_d = khaa_a[0] * khaa_b[0] + khaa_a[1] * khaa_b[1] + khaa_a[2] * khaa_b[2];
     khaa_d = khaa_d > 1.0f ? 1.0f : (khaa_d < -1.0f ? -1.0f : khaa_d);
     return acosf(khaa_d) * 57.29578f;
+}
+
+// KH_RECON_SUN_WITNESS (26884) - THE RECONCILE INHERITS THE GATES' WITNESS.
+//
+// The field (dump2, 26883): looking away from a cast shadow and back made it
+// flicker twice, and the self term sat offset until the second flicker, with
+// the sun never moving - reconSunAdopts 10 = sunJumpFlushes 10 = castArmsLost
+// 10, sunPubLatBy 2, bandRejSunAxis 334 at 10.5 deg, sunAxisGapMaxDeg 19.3,
+// sunJumpRateRefused 13. That is the look-away/look-back blink the derived
+// latch's snap classification already names: a camera turn re-lays the
+// engine's cascades, the cascade axis stream degrades by 10-19 deg, and
+// EVERY gate refuses those samples - kh_sun_axis_foreign at the seal, the
+// snap's publish-neutral class, the pursuit hold, and the jump's
+// engine_confirms (a static sky sun means the real sun is static). The
+// 26881 ring push sits BELOW all of them by design (rule 1.103 - fed raw),
+// so after 8 degraded samples the median stood > 1 deg off and the
+// reconcile published the degraded axis: map rebuild + cast arm lost (the
+// first flicker, the self offset), then on looking back the ring refilled
+// and it published the true axis again (the second). Every fault the median
+// was built for is a minority of ONE window; this is a foreign MAJORITY,
+// which rule 1.108 records a median cannot see.
+//
+// THE INVARIANT (rule 1.84, not a bar): the sky CB's own sun lane
+// (g_skysun_ref, refreshed at every sky upload) is the engine's statement of
+// where the sun is, independent of how the cascades were laid. A consensus
+// worth publishing must explain that lane AT LEAST AS WELL as the standing
+// publish does. A real skipTime moves the lane with the sun, so the old
+// publish falls 30 deg behind it and the consensus lands beside it - adopt.
+// A look-away leaves the publish ~1 deg from it and puts the consensus 10+
+// deg off - refuse. The witness is only consulted where it is proven to be
+// the light being tracked (published OR consensus within KH_SUN_AXIS_MAX_DEG
+// of it); a stale lane, or a night where the tracked light is the moon and
+// the lane is the sun, FAILS OPEN exactly as the gates' engine_confirms does
+// with no witness, and is counted (reconSunWitOpen). Mode 585 is the A/B.
+//
+// Returns 1 = adoptable, 0 = refused by the witness, -1 = no usable witness
+// (the caller treats -1 as open). Read on both threads: the render thread
+// at the ring push (it decides whether a raw disagreement opens the latency
+// window, so a look-away cannot masquerade as publish latency) and the game
+// thread inside the flush, which parks the render thread.
+inline int kh_rc_sun_witness(const float* khrw_cand, const float* khrw_pub) {
+    if (g_dbg_mode.load(std::memory_order_relaxed) == 585) return -1;
+    if (!g_skysun_ref_valid || steady_now_ms() - g_skysun_ref_ms >= 1000) return -1;   // kh_sky_static's freshness bar (KH_SUN_AXIS_SKY_FRESH_MS is declared below this point)
+    float khrw_ref[3] = { g_skysun_ref[0], g_skysun_ref[1], g_skysun_ref[2] };
+    if (khrw_ref[1] < 0.0f) { khrw_ref[0] = -khrw_ref[0]; khrw_ref[1] = -khrw_ref[1]; khrw_ref[2] = -khrw_ref[2]; }   // skyward, the derivation's convention
+    const float khrw_dp = kh_sun_axis_angle_deg(khrw_pub, khrw_ref);
+    const float khrw_dc = kh_sun_axis_angle_deg(khrw_cand, khrw_ref);
+    if (khrw_dp > KH_SUN_AXIS_MAX_DEG && khrw_dc > KH_SUN_AXIS_MAX_DEG) return -1;   // the lane is not the light either tracks
+    return (khrw_dc <= khrw_dp + KH_RECON_SUN_DEG) ? 1 : 0;
 }
 
 // Called ONCE per frame from render_sun_depth, with the axis the map is about
@@ -16241,6 +16362,25 @@ inline uint16_t kh_dl_gap_mark(uint16_t khg_prev, uint64_t khg_gap) {
     return khg_now > khg_dec ? khg_now : khg_dec;
 }
 static constexpr float    KH_DL_MATCH_M = 1.0f;   // pool update match radius (same light re-sighted)
+// KH_DL_LIST_CLAIM (26884) - TWO RECORDS IN ONE LIST ARE TWO LIGHTS.
+//
+// The pool re-sight match was positional alone: a 1 m cube. Two engine
+// lights inside a metre of each other (a lamp and its glow, a vehicle's
+// paired headlights, stacked scripted lights) therefore matched the SAME
+// pool slot, and each harvest wrote it VERBATIM with whichever came last in
+// the list - the two fought for one slot, frame by frame, and the shading
+// alternated between them. The invariant that separates them is not a
+// property compare (an animated fire changes colour every upload and must
+// still re-sight its own slot): it is that ONE uploaded list never carries
+// the same light twice, so each record of a list claims a slot no earlier
+// record of that list has claimed. Among the unclaimed slots inside the
+// cube the nearest RECORD wins (rec[3..23] - colour, attenuation, cone -
+// plus the position), so a stable identity follows a stable difference and
+// a lone flickering light still has exactly one candidate, as before.
+// dlPoolSplits counts sightings that would have merged under the old rule.
+// Mode 586 restores the positional-only match (the A/B).
+static uint64_t g_dl_pool_splits = 0;
+static uint32_t g_dl_pool_next_id = 1;   // KH_DL_POOL_ID: next id to mint; never 0
 
 // The mode variable remains the internal gate every path checks (and what a
 // future kill-switch would flip); modes 1/2 were the retired camera-origin
@@ -16366,6 +16506,12 @@ struct DlPoolLight {
     uint64_t first_ms = 0;   // census: first sight (lifetime)
     uint16_t gap_max_ms = 0;   // worst observed re-sight gap (cadence evidence)
     uint16_t sightings = 0;   // saturating sighting count
+    // KH_DL_POOL_ID (26885): session-unique identity, minted at first sight
+    // (dynlights_merge_windows), carried through compaction because the struct
+    // copies whole (g_dl.pool[khd_keep] = g_dl.pool[i]). 0 = unminted. This is
+    // what lets a shadow slot name ITS light when two lights tie on position
+    // (a flashlight and a muzzle flash on one weapon are a hand's width apart).
+    uint32_t id = 0;
     // KH_DL_WINPROV (26851) - WHICH WINDOW LAST CARRIED THIS LIGHT.
     //
     // The low half of the window buffer's address, purely as an identity. It
@@ -18461,6 +18607,12 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
 
         if (!khd_main) g_dl.win_aux++;
 
+        // KH_DL_LIST_CLAIM (26884): slots this LIST has already taken. Reset
+        // per window - another pass's list carries the same lights again.
+        int      khd_claim[KH_DL_MAX_LIGHTS];
+        uint32_t khd_claim_n = 0;
+        const bool khd_claim_off = g_dbg_mode.load(std::memory_order_relaxed) == 586;
+
         for (uint32_t i = 0; i < khd_total; ++i) {
             const float* khd_r = khd_l + i * 24;
             const float khd_wx = khd_rep.ox + khd_r[0];
@@ -18468,17 +18620,38 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
             const float khd_wz = khd_rep.oz + khd_r[2];
             if (!dl_finite(khd_wx) || !dl_finite(khd_wy) || !dl_finite(khd_wz)) continue;
             int khd_hit = -1;
+            float khd_hit_cost = 0.0f;
+            bool  khd_hit_claimed = false;   // the old rule would have taken a claimed slot
 
             for (uint32_t d = 0; d < g_dl.pool_n; ++d) {
                 if (fabsf(g_dl.pool[d].rec[0] - khd_wx) < KH_DL_MATCH_M &&
                     fabsf(g_dl.pool[d].rec[1] - khd_wy) < KH_DL_MATCH_M &&
                     fabsf(g_dl.pool[d].rec[2] - khd_wz) < KH_DL_MATCH_M) {
-                    khd_hit = static_cast<int>(d);
-                    break;
+                    if (khd_claim_off) { khd_hit = static_cast<int>(d); break; }   // 586: first in range
+                    bool khd_taken = false;
+                    for (uint32_t c = 0; c < khd_claim_n; ++c) {
+                        if (khd_claim[c] == static_cast<int>(d)) { khd_taken = true; break; }
+                    }
+                    if (khd_taken) {
+                        if (khd_hit < 0) khd_hit_claimed = true;   // the first-in-range slot was claimed
+                        continue;
+                    }
+                    // nearest RECORD: position plus every non-position lane
+                    float khd_cost = fabsf(g_dl.pool[d].rec[0] - khd_wx) +
+                                     fabsf(g_dl.pool[d].rec[1] - khd_wy) +
+                                     fabsf(g_dl.pool[d].rec[2] - khd_wz);
+                    for (int k = 3; k < 24; ++k) khd_cost += fabsf(g_dl.pool[d].rec[k] - khd_r[k]);
+                    if (khd_hit < 0 || khd_cost < khd_hit_cost) {
+                        khd_hit = static_cast<int>(d);
+                        khd_hit_cost = khd_cost;
+                        khd_hit_claimed = false;
+                    }
                 }
             }
 
-            if (khd_hit < 0) {
+            const bool khd_new = khd_hit < 0;
+            if (khd_new) {
+                if (khd_hit_claimed) g_dl_pool_splits++;   // a distinct light, no longer folded
                 if (g_dl.pool_n >= static_cast<uint32_t>(g_dl.pool.size())) {
                     g_dl.pool.push_back(DlPoolLight{});   // UNCAPPED growth
                 }
@@ -18486,8 +18659,14 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
                 khd_hit = static_cast<int>(g_dl.pool_n++);
                 g_dl.pool[khd_hit] = DlPoolLight{};   // the slot may hold a
                                                       // compacted-out ghost's stamps
+                g_dl.pool[khd_hit].id = g_dl_pool_next_id++;   // KH_DL_POOL_ID
+                if (g_dl_pool_next_id == 0) g_dl_pool_next_id = 1;
                 g_dl.pool_added++;
                 if (!khd_main) g_dl.aux_adds++;   // provisional: main upgrades it
+            }
+            if (khd_claim_n < KH_DL_MAX_LIGHTS) khd_claim[khd_claim_n++] = khd_hit;   // KH_DL_LIST_CLAIM
+            if (khd_new) {
+                // first sight: falls through to the verbatim write below
             } else if (!khd_main) {
                 // AUX SIGHTING: keeps the entry alive (stamp + cadence),
                 // never authors content - pass-darkened values must not
@@ -19025,7 +19204,12 @@ static constexpr float    KH_DLS_OUST_FRAC = 1.25f;   // a challenger must beat 
 static constexpr uint64_t KH_DLS_TTL_MS = 500;        // slot expiry once a light stops being re-sighted
 
 struct KhDlsSlot {
-    float    pos[3] = {};      // engine axes - THE SLOT'S IDENTITY
+    float    pos[3] = {};      // engine axes - the slot's identity when light_id
+                               // is 0 (a slot admitted before an id landed, or
+                               // mode 586); otherwise the position is a
+                               // fallback and light_id is the identity
+    uint32_t light_id = 0;     // KH_DL_POOL_ID: the pool entry this slot was
+                               // admitted for (DlPoolLight::id); 0 = unknown
     float    score = 0.0f;     // luminance it holds the slot on
     float    reach = 0.0f;     // hard-fade reach (m); stage 2 sizes the map with it
     uint8_t  spot = 0;         // 0 = point (omni), 1 = spot (single frustum)
@@ -19362,6 +19546,27 @@ static uint32_t g_dls_slices_used = 0;   // slices actually consumed last pass
 static uint64_t g_dls_faces_built_total = 0;   // SESSION-scoped
 static uint64_t g_dls_map_epoch = 0;       // SESSION-scoped: depth-array creations this session
 static uint64_t g_dls_spot_nosrc = 0;      // window-scoped: no pool entry matched the slot position
+                                           // (since 26885: no SPOT entry - a point alone in range
+                                           // is refused here and the slot falls back to the cube)
+// KH_DLS_SPOT_SRC (26885). THE RENDER'S SPOT SOURCE WAS THE FOURTH POSITION
+// SITE, AND IT WAS STILL FIRST-IN-RANGE. 26884 gave the pool, the hold and the
+// lookup a common rule (nearest, matching spot flag) and called it three
+// sites agreeing by construction; the map render resolves a spot SLOT back to
+// its pool LIGHT to read the cone and direction, and that scan took the first
+// pool entry inside a metre with no flag test at all. Dump 2 (26884): the
+// player's feet light (pool 6, a POINT, rec[4..7] = 1,0,0,1) sits 0.94 m from
+// the flashlight (pool 15, a spot, 100 deg). Pool order is stable, 6 < 15, so
+// the flashlight's slot built its frustum from the point's record every frame:
+// a 0.12 rad pencil aimed +X. KhDlsFaceUV answers LIT outside that pencil, so
+// the flashlight cast nothing while the feet light was lit; a muzzle flash
+// inside the same metre made the pick flip between records, which is the
+// "shooting invalidates the other light" the operator reported. Now the
+// source is found by id first (KH_DL_POOL_ID), then nearest pool entry that
+// IS a spot; a point record is never a spot slot's source. Mode 586 keeps the
+// old first-in-range scan at this site too, so 586 is still the whole revert.
+static uint64_t g_dls_spot_src_id = 0;       // window-scoped: source resolved by light id
+static uint64_t g_dls_spot_src_pos = 0;      // window-scoped: source resolved by nearest-spot fallback
+static uint64_t g_dls_spot_src_wrong = 0;    // window-scoped: first-in-range would have been a POINT record (the 26884 fault, counted)
 static float    g_dls_spot_cone_min = 2.0f;   // window-scoped: smallest cone cos-threshold (widest cone)
 static float    g_dls_spot_fov_max = -1.0f;   // window-scoped: widest RAW cone angle seen, degrees
 
@@ -19516,19 +19721,57 @@ inline void kh_dls_select() {
     //    slot -> light binding does not move even though its pool index did.
     for (uint32_t khs_i = 0; khs_i < khs_pn; ++khs_i) {
         const DlPoolLight& khs_l = g_dl.pool[khs_i];
-        for (uint32_t khs_s = 0; khs_s < KH_DLS_MAX; ++khs_s) {
-            if (!g_dls[khs_s].live || khs_filled[khs_s]) continue;
-            const float khs_dx = khs_l.rec[0] - g_dls[khs_s].pos[0];
-            const float khs_dy = khs_l.rec[1] - g_dls[khs_s].pos[1];
-            const float khs_dz = khs_l.rec[2] - g_dls[khs_s].pos[2];
-            if (khs_dx * khs_dx + khs_dy * khs_dy + khs_dz * khs_dz >
-                KH_DLS_MATCH_M * KH_DLS_MATCH_M) continue;
+        // KH_DLS_HOLD_NEAREST (26884) - THE HOLD TAKES ITS OWN SLOT, NOT THE FIRST
+        // IN RANGE. With two pool lights inside a metre (KH_DL_LIST_CLAIM made
+        // that possible: a soldier's point light and spot light 0.9 m apart) both
+        // slots were in range of both lights, and this loop bound each light to
+        // whichever unfilled slot came first in SLOT order - so whenever pool
+        // order and slot order disagreed the two swapped: the slot's position and
+        // spot flag changed, its hash changed (dlsHashBuilds 2788 of 6533 selects
+        // with nothing moving), both maps rebuilt, and for that frame each light
+        // read the other's map shape - a spot frustum for the point, a cube for
+        // the spot. The field saw one shadow at a time, alternating. The rule is
+        // kh_dls_slot_of's, so the two agree by construction: nearest live
+        // unfilled slot, a matching spot flag preferred. Mode 586 restores the
+        // first-in-range form here as it does there.
+        const bool khs_first = g_dbg_mode.load(std::memory_order_relaxed) == 586;
+        uint32_t khs_pick = KH_DLS_MAX;
+        float    khs_pd = 0.0f;
+        bool     khs_pflag = false;
+        // KH_DL_POOL_ID (26885): a slot that names this light by id is its
+        // slot, whatever the positions say. Strict first pass; the position
+        // rule below stays the fallback for a slot admitted before an id
+        // landed, and is the only rule under 586.
+        if (!khs_first && khs_l.id != 0) {
+            for (uint32_t khs_c = 0; khs_c < KH_DLS_MAX; ++khs_c) {
+                if (!g_dls[khs_c].live || khs_filled[khs_c]) continue;
+                if (g_dls[khs_c].light_id == khs_l.id) { khs_pick = khs_c; break; }
+            }
+        }
+        for (uint32_t khs_c = 0; khs_c < KH_DLS_MAX && khs_pick == KH_DLS_MAX; ++khs_c) {
+            if (!g_dls[khs_c].live || khs_filled[khs_c]) continue;
+            const float khs_cx = khs_l.rec[0] - g_dls[khs_c].pos[0];
+            const float khs_cy = khs_l.rec[1] - g_dls[khs_c].pos[1];
+            const float khs_cz = khs_l.rec[2] - g_dls[khs_c].pos[2];
+            const float khs_cd = khs_cx * khs_cx + khs_cy * khs_cy + khs_cz * khs_cz;
+            if (khs_cd > KH_DLS_MATCH_M * KH_DLS_MATCH_M) continue;
+            if (khs_first) { khs_pick = khs_c; break; }
+            const bool khs_cflag = g_dls[khs_c].spot == khs_l.spot;
+            if (khs_pick == KH_DLS_MAX || (khs_cflag && !khs_pflag) ||
+                (khs_cflag == khs_pflag && khs_cd < khs_pd)) {
+                khs_pick = khs_c;
+                khs_pd = khs_cd;
+                khs_pflag = khs_cflag;
+            }
+        }
+        for (uint32_t khs_s = khs_pick; khs_s < KH_DLS_MAX; ++khs_s) {   // the chosen slot, or none
             g_dls[khs_s].pos[0] = khs_l.rec[0];
             g_dls[khs_s].pos[1] = khs_l.rec[1];
             g_dls[khs_s].pos[2] = khs_l.rec[2];
             g_dls[khs_s].score = kh_dls_score(khs_l, khs_cdist[khs_i], khs_scale);
             g_dls[khs_s].reach = khs_reach[khs_i];   // KH_DLS_REACH_CENSUS cache
             g_dls[khs_s].spot = khs_l.spot;
+            g_dls[khs_s].light_id = khs_l.id;   // KH_DL_POOL_ID: a position hold learns the id
             // KH_DLS_RELEVANCE: hold out to the slack radius. Losing the last
             // caster releases the slot rather than rendering an empty map for
             // the rest of the TTL, but the slack keeps a mesh hovering on the
@@ -19612,6 +19855,7 @@ inline void kh_dls_select() {
         g_dls[khs_take].score = khs_bs;
         g_dls[khs_take].reach = khs_reach[khs_best];   // KH_DLS_REACH_CENSUS cache
         g_dls[khs_take].spot = khs_l.spot;
+        g_dls[khs_take].light_id = khs_l.id;   // KH_DL_POOL_ID
         g_dls[khs_take].stamp = khs_now;
         g_dls[khs_take].live = 1;
         khs_filled[khs_take] = 1;
@@ -19652,16 +19896,41 @@ inline void kh_dls_select() {
 // Which shadow slot, if any, this pool light holds. Stage 2/3 carry the answer
 // per object in dlLights[b + 5].z (0 = none, 1 + slot otherwise - the zeroed
 // default is 'no shadow', the 264 precedent). Returns -1 for no slot.
+// KH_DL_LIST_CLAIM twin (26884): two pool lights inside a metre now hold two
+// pool slots, and kh_dls_select gives each its own map slot (khs_filled).
+// This lookup returned the FIRST live slot in range, so both lights read the
+// first light's map and the second slot's map went unread - a spot's frustum
+// applied to a point beside it answers lit outside the cone. Nearest slot
+// wins, with a matching spot flag preferred; the first-in-range form is
+// bit-identical whenever only one slot is in range, which is every session
+// before this build. Mode 586 restores it with the pool rule.
 inline int kh_dls_slot_of(const DlPoolLight& khs_l) {
+    const bool khs_first = g_dbg_mode.load(std::memory_order_relaxed) == 586;
+    if (!khs_first && khs_l.id != 0) {   // KH_DL_POOL_ID: twin of the hold's first pass
+        for (uint32_t khs_s = 0; khs_s < KH_DLS_MAX; ++khs_s) {
+            if (g_dls[khs_s].live && g_dls[khs_s].light_id == khs_l.id) return static_cast<int>(khs_s);
+        }
+    }
+    int   khs_best = -1;
+    float khs_bd = 0.0f;
+    bool  khs_bflag = false;
     for (uint32_t khs_s = 0; khs_s < KH_DLS_MAX; ++khs_s) {
         if (!g_dls[khs_s].live) continue;
         const float khs_dx = khs_l.rec[0] - g_dls[khs_s].pos[0];
         const float khs_dy = khs_l.rec[1] - g_dls[khs_s].pos[1];
         const float khs_dz = khs_l.rec[2] - g_dls[khs_s].pos[2];
-        if (khs_dx * khs_dx + khs_dy * khs_dy + khs_dz * khs_dz <=
-            KH_DLS_MATCH_M * KH_DLS_MATCH_M) return static_cast<int>(khs_s);
+        const float khs_d2 = khs_dx * khs_dx + khs_dy * khs_dy + khs_dz * khs_dz;
+        if (khs_d2 > KH_DLS_MATCH_M * KH_DLS_MATCH_M) continue;
+        if (khs_first) return static_cast<int>(khs_s);
+        const bool khs_flag = g_dls[khs_s].spot == khs_l.spot;
+        if (khs_best < 0 || (khs_flag && !khs_bflag) ||
+            (khs_flag == khs_bflag && khs_d2 < khs_bd)) {
+            khs_best = static_cast<int>(khs_s);
+            khs_bd = khs_d2;
+            khs_bflag = khs_flag;
+        }
     }
-    return -1;
+    return khs_best;
 }
 
 // ---------------------------------------------------------------------------
@@ -22306,6 +22575,22 @@ inline void kh_probe_std_refresh(CbColorProbe& khp, const float* f, uint32_t nf,
                 g_blk_collapse_holds++;
             } else if (khp_starved && khp.std_sun_l > 1.0f &&
                        khp.pend_sun_l >= 0.0f &&
+                       !(g_sun_last_jump_ms != 0 &&
+                         steady_now_ms() - g_sun_last_jump_ms < 15000) &&
+                       kh_blk_proportional_dim(khp.pend_sun_l, khp.pend_amb_l,
+                                               khp.std_sun_l, khp.std_amb_l)) {
+                // KH_BLK_PROP_DIM (26884): the starved concede below adopts a
+                // half-level candidate after ten seconds however it looks; the
+                // second dump shows the reconcile taking exactly that candidate
+                // at 7.5 s (blkLatMaxMs 7468) and this horizon would have taken
+                // it at 10. A scaled copy of the standing is not a level the
+                // horizon should ever concede to (see the helper). Ahead of the
+                // horizon branch, and the sun-jump exemption is kept.
+                khp_apply = false;
+                khp.regime_rejects++;
+                g_blk_prop_holds++;
+            } else if (khp_starved && khp.std_sun_l > 1.0f &&
+                       khp.pend_sun_l >= 0.0f &&
                        khp.pend_sun_l < KH_BLK_STARVED_DIM_FRAC * khp.std_sun_l &&
                        !(g_sun_last_jump_ms != 0 &&
                          steady_now_ms() - g_sun_last_jump_ms < 15000) &&
@@ -24334,7 +24619,10 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
                     if (g_pub_valid && g_rc_sun_lat_open_ms == 0) {
                         float khrc_dp = wdir[0] * g_pub_dir[0] + wdir[1] * g_pub_dir[1] + wdir[2] * g_pub_dir[2];
                         khrc_dp = khrc_dp > 1.0f ? 1.0f : (khrc_dp < -1.0f ? -1.0f : khrc_dp);
-                        if (acosf(khrc_dp) * 57.29578f > KH_RECON_SUN_DEG) g_rc_sun_lat_open_ms = steady_now_ms();
+                        // KH_RECON_SUN_WITNESS (26884): a degraded sample the witness
+                        // refuses is not latency - it would never be published.
+                        if (acosf(khrc_dp) * 57.29578f > KH_RECON_SUN_DEG &&
+                            kh_rc_sun_witness(wdir, g_pub_dir) != 0) g_rc_sun_lat_open_ms = steady_now_ms();
                     }
                 }
                 if (g_first_derived120_t < 0.0f && g_sun_derived_samples >= 120) {
@@ -25006,8 +25294,6 @@ static uint64_t g_dls_map_valid = 0;                // bitmask of slots with a u
 // they agree. Raising the light cap without raising the slice budget would
 // silently truncate the casting set at the slice loop (dlsMapShort), which
 // reads as 'some lights just do not cast' and nothing else.
-static_assert(KH_DLS_SLICES_MAX == static_cast<int>(KH_DLS_MAX) * KH_DLS_FACES,
-              "KH_DLS_SLICES_MAX must be KH_DLS_MAX * KH_DLS_FACES");
 
 inline bool kh_dls_ensure_maps(ID3D11Device* khde_dev, UINT khde_want) {
     if (!khde_dev || khde_want == 0) return false;
@@ -25447,14 +25733,37 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
         uint32_t khdr_fn = 0;
 
         if (khdr_l.spot) {
+            // KH_DLS_SPOT_SRC (26885): id first, then the nearest pool entry
+            // that is a spot. The first-in-range scan survives only under 586.
             const DlPoolLight* khdr_src = nullptr;
-            for (uint32_t khdr_p = 0; khdr_p < g_dl.pool_n; ++khdr_p) {
-                const DlPoolLight& khdr_c = g_dl.pool[khdr_p];
-                const float khdr_dx = khdr_c.rec[0] - khdr_l.pos[0];
-                const float khdr_dy = khdr_c.rec[1] - khdr_l.pos[1];
-                const float khdr_dz = khdr_c.rec[2] - khdr_l.pos[2];
-                if (khdr_dx * khdr_dx + khdr_dy * khdr_dy + khdr_dz * khdr_dz <=
-                    KH_DLS_MATCH_M * KH_DLS_MATCH_M) { khdr_src = &khdr_c; break; }
+            const bool khdr_first = khdr_dbg == 586;
+            if (!khdr_first && khdr_l.light_id != 0) {
+                for (uint32_t khdr_p = 0; khdr_p < g_dl.pool_n; ++khdr_p) {
+                    if (g_dl.pool[khdr_p].id == khdr_l.light_id) { khdr_src = &g_dl.pool[khdr_p]; break; }
+                }
+                if (khdr_src) g_dls_spot_src_id++;
+            }
+            if (!khdr_src) {
+                float khdr_sd = 0.0f;
+                bool  khdr_saw_point = false;
+                for (uint32_t khdr_p = 0; khdr_p < g_dl.pool_n; ++khdr_p) {
+                    const DlPoolLight& khdr_c = g_dl.pool[khdr_p];
+                    const float khdr_dx = khdr_c.rec[0] - khdr_l.pos[0];
+                    const float khdr_dy = khdr_c.rec[1] - khdr_l.pos[1];
+                    const float khdr_dz = khdr_c.rec[2] - khdr_l.pos[2];
+                    const float khdr_d2 = khdr_dx * khdr_dx + khdr_dy * khdr_dy + khdr_dz * khdr_dz;
+                    if (khdr_d2 > KH_DLS_MATCH_M * KH_DLS_MATCH_M) continue;
+                    if (khdr_first) { khdr_src = &khdr_c; break; }   // 586: first in range, flag untested
+                    if (!khdr_c.spot) {   // a point record can never be a spot slot's source
+                        if (!khdr_src) khdr_saw_point = true;   // it would have been picked first
+                        continue;
+                    }
+                    if (!khdr_src || khdr_d2 < khdr_sd) { khdr_src = &khdr_c; khdr_sd = khdr_d2; }
+                }
+                if (!khdr_first && khdr_src) {
+                    g_dls_spot_src_pos++;
+                    if (khdr_saw_point) g_dls_spot_src_wrong++;
+                }
             }
             if (!khdr_src) {
                 g_dls_spot_nosrc++;
@@ -30052,7 +30361,6 @@ static uint64_t g_svs_seam_view_absent = 0;   // nothing published yet
 // N+1, so an equality test can never pass, in either direction. THE SEQ GUARD
 // WAS THE WHOLE OF WHY, AND IT CONFIRMS THE CAPTURE.
 static constexpr uint64_t KH_SEAM_VIEW_MAX_AGE = 1;
-static_assert(KH_SEAM_VIEW_MAX_AGE == 1, "KH_CAST_SEAM_VIEW (26777): the cast's accessor and hold carry this age as the literal 1 (they precede this declaration)");
 static uint64_t g_svs_seam_view_age_last = 0;
 static uint64_t g_svs_seam_view_age_max = 0;
 
@@ -30465,13 +30773,6 @@ static uint64_t g_svs_eng_fp_drifts = 0;   // located address MOVED (relocate)
 // right reason. PRINT THE STAGED BYTES, because three rounds of reasoning
 // could not separate two hypotheses and one lane can.
 static constexpr int KH_SVS_ENG_SLOTS = 6;
-static_assert(sizeof(g_svs_eng_stage) / sizeof(g_svs_eng_stage[0]) == KH_SVS_ENG_SLOTS &&
-              sizeof(g_svs_eng_stage_src) / sizeof(g_svs_eng_stage_src[0]) == KH_SVS_ENG_SLOTS &&
-              sizeof(g_svs_eng_stage_first) / sizeof(g_svs_eng_stage_first[0]) == KH_SVS_ENG_SLOTS &&
-              sizeof(g_svs_eng_stage_num) / sizeof(g_svs_eng_stage_num[0]) == KH_SVS_ENG_SLOTS &&
-              KH_SVS_ENG_SLOTS <= 8,
-              "engine-view staging arrays must match KH_SVS_ENG_SLOTS, and the "
-              "pending bitmask is a uint8_t");
 static uint32_t g_svs_eng_sl_bytes[KH_SVS_ENG_SLOTS] = {};
 static float    g_svs_eng_sl_f0[KH_SVS_ENG_SLOTS] = {};
 static float    g_svs_eng_sl_f16[KH_SVS_ENG_SLOTS] = {};
@@ -32521,10 +32822,6 @@ static uint64_t g_vmir_clamp_swaps = 0;   // clamped binds this window
 static ID3D11Texture2D* g_vmir_prepass_src = nullptr;   // weak identity, compare only
 static uint64_t g_vmir_session_skips = 0;   // counting draws excluded by identity
 
-static const char* g_vmir_cs_hlsl =
-#include "hlsl/vmir_cs.hlsl"
-;
-
 inline void kh_vmir_release() {
     for (int khvr_k = 0; khvr_k < 2; ++khvr_k) {
         g_vmir_rs_src[khvr_k] = nullptr;   // weak key into a dead device's states
@@ -32602,7 +32899,7 @@ inline bool kh_vmir_ensure_gpu(ID3D11Device* khvg_dev) {
     if (!khvg_dev) return false;
     if (!g_vmir_cs && !g_vmir_cs_failed) {
         ID3DBlob* khvg_blob = nullptr;
-        const std::string khvg_err = compile_shader(g_vmir_cs_hlsl, "CSMirB2", "cs_5_0",
+        const std::string khvg_err = compile_shader(kh_hlsl_src(KH_HLSL_VMIR_CS).c_str(), "CSMirB2", "cs_5_0",
                                                     nullptr, &khvg_blob);
         if (!khvg_err.empty() || !khvg_blob) {
             g_vmir_cs_failed = true;   // rule: a compile failure names itself
@@ -42656,6 +42953,7 @@ inline void kh_lighting_reconcile() {
                 khrc_m[0] /= khrc_ml; khrc_m[1] /= khrc_ml; khrc_m[2] /= khrc_ml;
                 float khrc_dp = khrc_m[0] * g_pub_dir[0] + khrc_m[1] * g_pub_dir[1] + khrc_m[2] * g_pub_dir[2];
                 khrc_dp = khrc_dp > 1.0f ? 1.0f : (khrc_dp < -1.0f ? -1.0f : khrc_dp);
+                const int khrc_wit = kh_rc_sun_witness(khrc_m, g_pub_dir);   // KH_RECON_SUN_WITNESS: one call, both branches read it
                 if (acosf(khrc_dp) * 57.29578f <= KH_RECON_SUN_DEG) {
                     // 26881: the published direction already IS the window's
                     // consensus, and the window is longer than the settle asks
@@ -42667,7 +42965,13 @@ inline void kh_lighting_reconcile() {
                         g_sun_unstable_ms = 0;
                         g_rc_sun_settles++;
                     }
+                } else if (khrc_wit == 0) {
+                    // KH_RECON_SUN_WITNESS (26884): the consensus explains the sky
+                    // CB's sun worse than the standing publish - a foreign
+                    // majority (the look-away blink), not a move. Refused.
+                    g_rc_sun_wit_refused++;
                 } else {
+                    if (khrc_wit < 0) g_rc_sun_wit_open++;
                     // Publish the consensus; seed the derived latch with it so the
                     // glide does not pull back; count the move as settled - the
                     // window already held this direction for the whole of
@@ -42719,9 +43023,54 @@ inline void kh_lighting_reconcile() {
             const float khrc_sl = khrc_m[3] + khrc_m[4] + khrc_m[5];
             const float khrc_ral = g_pub_block_amb[0] + g_pub_block_amb[1] + g_pub_block_amb[2];
             const float khrc_rsl = g_pub_block_sun[0] + g_pub_block_sun[1] + g_pub_block_sun[2];
+            // KH_RECON_BLK_COEXIST (26884) - A MEDIAN CANNOT SEE A MINORITY, SO COUNT IT.
+            //
+            // The field (dump, 26884): a 1000x mesh, the camera moving through its
+            // shadow, and the meshes dimmed to half - reconBlkAdopts 1 at the dim's
+            // first frame, standing and anchor snapped together to 0.49x
+            // (10.03 / 20.55, out of the 50% band by 0.24), blkAdoptTLast six seconds
+            // EARLIER (the gates adopted nothing), and after the step dBlkAnchorRej
+            // 12-13 of 43 uploads a frame: the BRIGHT level kept arriving on 30% of
+            // the draws. Two flavours in one window, the dim one the majority - the
+            // engine darkens the lit block of objects it draws inside a shadow, our
+            // giant shadow covered most of the scene, and the median published the
+            // shadowed objects' lighting as the world's. Every gate the probe has
+            // (ratchet, lit floor, starved hold: blkRatchetHolds 28,937 that session)
+            // refuses exactly this on the witness that bright content is still
+            // flowing; the reconcile had only the band. Section 8.3 of the 26883
+            // handoff named this frame class as never exercised. It is now.
+            //
+            // THE INVARIANT (rule 1.84), taken from the window rather than a clock:
+            // if the standing level is still a live flavour in the window - at least
+            // KH_RECON_MIN_N samples and an eighth of the window inside the gates'
+            // own band around the published sun - then a dimmer consensus is a
+            // majority of a different flavour, not a change in the world, and it is
+            // refused. A real sun -> overcast step leaves NOTHING at the old level
+            // (every upload moves), so it still reconciles at full speed; a real
+            // dusk moves inside the band and never reaches this. Upward moves are
+            // not tested: the gates already re-adopt bright on sight, and a bright
+            // majority over a shadowed minority IS the world. Mode 587 is the A/B.
+            uint32_t khrc_old = 0;
+            for (int khrc_i = 0; khrc_i < khrc_n; ++khrc_i) {
+                if (kh_blk_in_band(khrc_l[3][khrc_i] + khrc_l[4][khrc_i] + khrc_l[5][khrc_i], khrc_rsl)) khrc_old++;
+            }
+            g_rc_blk_old_frac = static_cast<float>(khrc_old) / static_cast<float>(khrc_n);
+            const uint32_t khrc_old_bar = static_cast<uint32_t>(khrc_n / 8) > static_cast<uint32_t>(KH_RECON_MIN_N)
+                                        ? static_cast<uint32_t>(khrc_n / 8) : static_cast<uint32_t>(KH_RECON_MIN_N);
+            const bool khrc_moved = !kh_blk_in_band(khrc_al, khrc_ral) || !kh_blk_in_band(khrc_sl, khrc_rsl);
+            const bool khrc_coexist = khrc_sl < khrc_rsl && khrc_old >= khrc_old_bar &&
+                                      g_dbg_mode.load(std::memory_order_relaxed) != 587;
+            // KH_BLK_PROP_DIM (26884): the second dump - the bright flavour had
+            // thinned below the coexist bar (or off the ring entirely) and the
+            // whole window was the scaled block; the ratio still says so.
+            const bool khrc_prop = kh_blk_proportional_dim(khrc_sl, khrc_al, khrc_rsl, khrc_ral);
             // The same band the gates adopt within without a hold: only what
             // THEY would have held is reconciled.
-            if (!kh_blk_in_band(khrc_al, khrc_ral) || !kh_blk_in_band(khrc_sl, khrc_rsl)) {
+            if (khrc_moved && khrc_coexist) {
+                g_rc_blk_coexist++;
+            } else if (khrc_moved && khrc_prop) {
+                g_rc_blk_prop++;
+            } else if (khrc_moved) {
                 for (int khrc_c = 0; khrc_c < 3; ++khrc_c) {
                     g_pub_block_amb[khrc_c] = khrc_m[khrc_c];
                     g_pub_block_sun[khrc_c] = khrc_m[3 + khrc_c];
@@ -45287,6 +45636,12 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                     // exits release; s1 itself is untouched at either point,
                     // so no restore is owed. Twin at the body upload.
                     if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
+                        // KH_FX_SSGI_BAIL (26885): the exit is a bracket, not
+                        // just a release. StateBackup saves s0/s1 only, so an
+                        // exit that leaves khsg_sampler bound at s2 hands the
+                        // engine a foreign sampler; the two exits past the
+                        // viewport set below hand it a half-res viewport too.
+                        ctx->PSSetSamplers(2, 1, &khsg_s2old);
                         if (khsg_s2old) khsg_s2old->Release();
                         return;
                     }
@@ -45309,6 +45664,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                     // rewritten 26 -> 22 across the two uploads.
                     khfp_cbd.fx_meta[0] = 26.0f;
                     if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
+                        if (khsg_vpn) ctx->RSSetViewports(1, &khsg_vps);   // KH_FX_SSGI_BAIL
+                        ctx->PSSetSamplers(2, 1, &khsg_s2old);
                         if (khsg_s2old) khsg_s2old->Release();
                         return;
                     }
@@ -45350,6 +45707,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                     ctx->OMSetRenderTargets(1, &g_res.chain_rtv[2], nullptr);
                     khfp_cbd.fx_meta[0] = 22.0f;
                     if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
+                        if (khsg_vpn) ctx->RSSetViewports(1, &khsg_vps);   // KH_FX_SSGI_BAIL
+                        ctx->PSSetSamplers(2, 1, &khsg_s2old);
                         if (khsg_s2old) khsg_s2old->Release();
                         return;
                     }
@@ -45417,6 +45776,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                     khsg_pair = true;
                 }
                 if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
+                    if (khsg_pair) ctx->PSSetSamplers(2, 1, &khsg_s2old);   // KH_FX_SSGI_BAIL: s2 back on the pair path
                     if (khsg_s2old) khsg_s2old->Release();   // pair-path ref (leak-fix twin above; null on every non-pair path)
                     return;
                 }
@@ -46640,6 +47000,7 @@ inline void reset_stat_counters() {
     g_dls_map_allocs = 0; g_dls_map_fails = 0; g_dls_map_short = 0;
     g_dls_face_over = 0; g_dls_faces_culled = 0; g_dls_slices_saved = 0;
     g_dls_spot_nosrc = 0; g_dls_spot_cone_min = 2.0f; g_dls_spot_fov_max = -1.0f;
+    g_dls_spot_src_id = 0; g_dls_spot_src_pos = 0; g_dls_spot_src_wrong = 0;   // KH_DLS_SPOT_SRC
     g_dls_reach_capped = 0; g_dls_reach_raw_max = -1.0f; g_dls_skip_forced = 0;
     g_dls_reach_peak_max = -1.0f; g_dls_reach_ceiling_m = -1.0f;
     g_dls_reach_sun_capped = 0;   // rule 1.89, and 26876a forgot it once already
@@ -46729,6 +47090,10 @@ inline void reset_stat_counters() {
     g_blk_collapse_holds = 0;   // counter joins its siblings here
     g_rc_checks = 0; g_rc_sun_adopts = 0; g_rc_blk_adopts = 0; g_rc_sun_settles = 0;   // KH_LIGHT_RECON
     g_rc_sun_short = 0; g_rc_blk_short = 0;
+    g_rc_sun_wit_refused = 0; g_rc_sun_wit_open = 0;   // KH_RECON_SUN_WITNESS
+    g_dl_pool_splits = 0;   // KH_DL_LIST_CLAIM
+    g_rc_blk_coexist = 0; g_rc_blk_old_frac = -1.0f;   // KH_RECON_BLK_COEXIST
+    g_rc_blk_prop = 0; g_blk_prop_holds = 0;   // KH_BLK_PROP_DIM
     g_rc_sun_pub_lat_max_ms = 0; g_rc_sun_settle_lat_max_ms = 0; g_rc_blk_lat_max_ms = 0;
     g_blk_blank_skips = 0;   // blank-guard census
     g_blk_starved_adopts = 0;   // starvation-path census

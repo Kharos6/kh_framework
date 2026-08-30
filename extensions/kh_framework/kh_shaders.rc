@@ -1,0 +1,22 @@
+// kh_shaders.rc - embeds the HLSL sources into the DLL as raw RCDATA
+// resources. Sits NEXT TO rendering_integration.hpp; the paths are relative
+// to this file (rc.exe resolves them against the .rc's own directory), so
+// the hlsl/ folder keeps its place. Add this file to the DLL project the same
+// way any .rc is added (it compiles with rc.exe and links as a resource);
+// no other build change is needed.
+//
+// One entry per unit, named exactly as KH_HLSL_RES_NAMES lists them in
+// rendering_integration.hpp (kh_hlsl_src). A name here without a twin there
+// is dead weight; a name there without a twin here is reported at the first
+// compile (hlslResMissing) and that unit's shaders never build.
+KH_CB_HLSL            RCDATA "hlsl/cb.hlsl"
+KH_WHITE_HLSL         RCDATA "hlsl/white.hlsl"
+KH_STATIC_HLSL        RCDATA "hlsl/static.hlsl"
+KH_COMPOSITE_HLSL     RCDATA "hlsl/composite.hlsl"
+KH_COMPOSITE2_HLSL    RCDATA "hlsl/composite2.hlsl"
+KH_EFFECT_HLSL        RCDATA "hlsl/effect.hlsl"
+KH_EFFECT2_HLSL       RCDATA "hlsl/effect2.hlsl"
+KH_EFFECT3_HLSL       RCDATA "hlsl/effect3.hlsl"
+KH_DEPTH_RESOLVE_HLSL RCDATA "hlsl/depth_resolve.hlsl"
+KH_SUNPF_HLSL         RCDATA "hlsl/sunpf.hlsl"
+KH_VMIR_CS_HLSL       RCDATA "hlsl/vmir_cs.hlsl"

@@ -1,11 +1,11 @@
-// g_hlsl_effect3 - HLSL source, spliced into rendering_integration.hpp as
-// C++ raw string tokens via #include. Lines that close and immediately reopen
-// the raw string are MSVC C2026 chunk boundaries (16380-byte string-token
-// cap): SPLIT, never trim, when a segment approaches the cap. Any edit to
-// segment bytes changes this unit's shader cache key (one cold recompile per
-// user). Keep CRLF line endings. Never spell raw-string open/close tokens
-// inside comments - the gate scripts scan for them textually.
-R"HLSL(    else if (effect == 23)   // fogscatter: [intensity, maxRadiusPx (0 = auto), samples 4..24];
+// effect3.hlsl - plain HLSL, embedded in the DLL as RCDATA resource KH_EFFECT3_HLSL by
+// kh_shaders.rc (next to rendering_integration.hpp) and loaded at first use
+// by kh_hlsl_src, which strips CR before the source is hashed for the shader
+// cache, so the cache key does not depend on the checkout's line endings.
+// Units are assembled by C++ concatenation of these resources, exactly as the
+// old raw-string splice did; there is no #include and no size cap. Any edit
+// here changes this unit's shader cache key (one cold recompile per user).
+    else if (effect == 23)   // fogscatter: [intensity, maxRadiusPx (0 = auto), samples 4..24];
     {
         float2 khfs_res = float2(fxMeta.z, fxMeta.w);
         float khfs_m00 = max(length(float3(viewProj[0].x, viewProj[1].x, viewProj[2].x)), 1e-6f);
@@ -51,7 +51,7 @@ R"HLSL(    else if (effect == 23)   // fogscatter: [intensity, maxRadiusPx (0 = 
 
         outc = khfs_acc / max(khfs_ws, 1e-4f);
     }
-)HLSL" R"HLSL(    else if (effect == 101)   // 3D LUT grade (.cube, effect KH_EFFECT_LUT): [strength]
+     else if (effect == 101)   // 3D LUT grade (.cube, effect KH_EFFECT_LUT): [strength]
     {
         // Input is clamped to the LUT's [0,1] domain (display-referred.cube
         // semantics; the loader resamples non-identity domains onto [0,1], so
@@ -160,7 +160,7 @@ R"HLSL(    else if (effect == 23)   // fogscatter: [intensity, maxRadiusPx (0 = 
         else if (bm == 3) comp = scene + outc * a - scene * outc * a;   // screen
         else if (bm == 4) comp = max(scene, mixed);   // lighten
         else if (bm == 5) comp = min(scene, mixed);   // darken
-)HLSL" R"HLSL(        else              comp = mixed;   // normal
+         else              comp = mixed;   // normal
 
         if (centerSize.w > 1.5f) {
             float4 khuRaw = sceneColor.Load(int3(clamp(px, int2(0, 0),
@@ -187,4 +187,4 @@ R"HLSL(    else if (effect == 23)   // fogscatter: [intensity, maxRadiusPx (0 = 
     if (bm == 4 || bm == 5) return float4(lerp(scene, outc, color.a), 1.0f);   // lighten, darken (MAX/MIN op)
     return float4(outc, color.a);   // normal (alpha lerp)
 }
-)HLSL"
+

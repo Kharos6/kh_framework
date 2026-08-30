@@ -18,9 +18,6 @@ enum class DepthMode : int {
     Off = 2,
 };
 
-static constexpr float KH_BIAS_CLAMP = -4.0e-6f;
-
-
 struct MeshVertex {
     float pos[3];   // Offset 0 (contract: never moves - both input layouts).
     float nrm[3];   // Offset 12 (contract: never moves).
@@ -838,12 +835,6 @@ struct Resources {
     ID3D11RasterizerState*    rast_sun_lo_pk = nullptr;
     // The injection'S own rasterizer.
     ID3D11RasterizerState*    rast_inject = nullptr;
-    ID3D11RasterizerState*    rasterizer_ub = nullptr;
-    ID3D11RasterizerState*    rasterizer_cull_ub = nullptr;
-    ID3D11RasterizerState*    rasterizer_front_ub = nullptr;
-    ID3D11RasterizerState*    rasterizer_b = nullptr;
-    ID3D11RasterizerState*    rasterizer_cull_b = nullptr;
-    ID3D11RasterizerState*    rasterizer_front_b = nullptr;
     ID3D11VertexShader*       vs_sundepth = nullptr;
     ID3D11InputLayout*        layout_sundepth = nullptr;   // Mesh slot 0 + per-instance slot 1.
     // KH_CAST_ALPHA: the alpha-aware twins (the same instanced transform with
@@ -1039,12 +1030,6 @@ struct Resources {
         KH_SAFE_RELEASE(rast_sun_pk);   // KH_SUN_PANCAKE twins.
         KH_SAFE_RELEASE(rast_sun_lo_pk);
         KH_SAFE_RELEASE(rast_inject);
-        KH_SAFE_RELEASE(rasterizer_b);
-        KH_SAFE_RELEASE(rasterizer_cull_b);
-        KH_SAFE_RELEASE(rasterizer_front_b);
-        KH_SAFE_RELEASE(rasterizer_ub);
-        KH_SAFE_RELEASE(rasterizer_cull_ub);
-        KH_SAFE_RELEASE(rasterizer_front_ub);
         KH_SAFE_RELEASE(vs_sundepth);
         KH_SAFE_RELEASE(layout_sundepth);
         KH_SAFE_RELEASE(vs_sundepth_a);
@@ -1542,9 +1527,8 @@ inline bool kh_fsaa_world_standdown() {
     return g_scene_depth_samples == 1;
 }
 
-// Pointer compare, no allocation, and it falls through to the clamped state
-// whenever a twin failed to create, so a creation failure makes the mode a
-// silent no-op instead of a null bind.
+// Identity today: the bias-clamp twins it once selected between were modes.
+// The call sites stay so a future rasterizer switch has one seam.
 inline ID3D11RasterizerState* kh_rs_pick(ID3D11RasterizerState* khrs_in) {
     return khrs_in;
 }
@@ -6836,15 +6820,9 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         rd.FillMode = D3D11_FILL_SOLID;
         rd.CullMode = D3D11_CULL_NONE;   // Visible from inside too.
         rd.MultisampleEnable = TRUE;   // Scene targets are MSAA per video settings.
-        rd.DepthBias = -32;   // Units of 1/2^24 for D24 buffers.
-        // 1.0 overcorrected at grazing angles (mesh faces near edge-on to the
-        // camera): the slope-scaled offset gets large and varies per pixel, so
-        // intersection contours with world geometry crawled. The constant -32
-        // term carries the anti-shimmer duty; keep only a light slope
-        // component.
-        rd.SlopeScaledDepthBias = -0.25f;
+        // No scene bias: the engine-depth tie duty moved to the shaders' own
+        // near/far contracts (a -32 / -0.25 pair crawled at grazing angles).
         rd.DepthBias = 0;
-
         rd.SlopeScaledDepthBias = 0.0f;
         rd.DepthBiasClamp = 0.0f;
         // The far plane's contract moves to a per-fragment PS test (see the far
@@ -6863,25 +6841,6 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         rd.CullMode = D3D11_CULL_FRONT;
         hr = dev->CreateRasterizerState(&rd, &g_res.rasterizer_front);
         if (FAILED(hr)) { g_res.release(); return "Create front rasterizer " + hr_str(hr); }
-        rd.DepthBias = -32;
-        rd.SlopeScaledDepthBias = -0.25f;
-        rd.DepthBiasClamp = KH_BIAS_CLAMP;
-        rd.CullMode = D3D11_CULL_NONE;
-        dev->CreateRasterizerState(&rd, &g_res.rasterizer_b);
-        rd.CullMode = D3D11_CULL_BACK;
-        dev->CreateRasterizerState(&rd, &g_res.rasterizer_cull_b);
-        rd.CullMode = D3D11_CULL_FRONT;
-        dev->CreateRasterizerState(&rd, &g_res.rasterizer_front_b);
-        rd.DepthBiasClamp = 0.0f;
-        rd.CullMode = D3D11_CULL_NONE;
-        dev->CreateRasterizerState(&rd, &g_res.rasterizer_ub);
-        rd.CullMode = D3D11_CULL_BACK;
-        dev->CreateRasterizerState(&rd, &g_res.rasterizer_cull_ub);
-        rd.CullMode = D3D11_CULL_FRONT;
-        dev->CreateRasterizerState(&rd, &g_res.rasterizer_front_ub);
-        rd.DepthBias = 0;
-        rd.SlopeScaledDepthBias = 0.0f;
-        rd.DepthBiasClamp = KH_BIAS_CLAMP;
         // Sun-depth pass rasterizer: the scene bias above exists to win
         // marginal ties against engine depth; in our own private map it would
         // only carve the acne band deeper. Plain CullNone - and it stays
@@ -8917,8 +8876,6 @@ static constexpr int KH_VT_OMSETRENDERTARGETS    = 33;
 static constexpr int KH_VT_OMSETRTS_AND_UAVS     = 34;
 static constexpr int KH_VT_OMSETBLENDSTATE       = 35;
 static constexpr int KH_VT_OMSETDEPTHSTENCIL     = 36;
-static constexpr int KH_VT_COPYSUBRESOURCEREGION = 46;
-static constexpr int KH_VT_COPYRESOURCE          = 47;
 static constexpr int KH_VT_RESOLVESUBRESOURCE    = 57;
 static constexpr int KH_VT_UPDATESUBRESOURCE     = 48;
 static constexpr int KH_VT_CLEARDEPTHSTENCIL     = 53;
@@ -8950,10 +8907,6 @@ static FnClearDepthStencilView   g_orig_clear_depthstencil = nullptr;
 static FnMap                     g_orig_map = nullptr;
 static FnUnmap                   g_orig_unmap = nullptr;
 static FnUpdateSubresource       g_orig_updatesubresource = nullptr;
-typedef void (STDMETHODCALLTYPE* FnCopyResource)(ID3D11DeviceContext*, ID3D11Resource*, ID3D11Resource*);
-typedef void (STDMETHODCALLTYPE* FnCopySubresourceRegion)(ID3D11DeviceContext*, ID3D11Resource*, UINT, UINT, UINT, UINT, ID3D11Resource*, UINT, const D3D11_BOX*);
-static FnCopyResource            g_orig_copyresource = nullptr;
-static FnCopySubresourceRegion   g_orig_copysubresourceregion = nullptr;
 typedef void (STDMETHODCALLTYPE* FnResolveSubresource)(ID3D11DeviceContext*, ID3D11Resource*, UINT, ID3D11Resource*, UINT, DXGI_FORMAT);
 static FnResolveSubresource      g_orig_resolvesubresource = nullptr;
 
@@ -9014,7 +8967,7 @@ static float    g_far_keep_m22 = 0.0f;
 static float    g_far_keep_m32 = 0.0f;
 static float    g_far_keep_far = -1.0f;
 static uint64_t g_far_keep_ms = 0;
-static constexpr int KH_BUILD_TAG = 26893;
+static constexpr int KH_BUILD_TAG = 26894;
 // Continuous at the near plane, so routing on/off never pops a fragment.
 static constexpr float KH_NEARZ_GAP_FRAC = 0.92f;
 // Keyed by the buffer object pointer, compared opaquely (never dereferenced,
@@ -23368,25 +23321,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // The carried take camera is per pass.
     g_comp_cam_take_ok = false;
 
-    // The premise test. Identity is by pointer, taken while both references are
-    // alive.
-    if (ctx) {
-        ID3D11DepthStencilView* khcd_dsv = nullptr;
-        ctx->OMGetRenderTargets(0, nullptr, &khcd_dsv);
-
-        if (!khcd_dsv) {
-        } else {
-            ID3D11Resource* khcd_r = nullptr;
-            khcd_dsv->GetResource(&khcd_r);
-
-            if (khcd_r) {
-                khcd_r->Release();
-            }
-
-            khcd_dsv->Release();
-        }
-    }
-
     if (kh_fsaa_world_standdown()) {  return; }
 
     const float snapshot_now = effect_time_seconds();
@@ -25830,11 +25764,11 @@ inline void kh_reorder_trigger(ID3D11DeviceContext* self) {
         }
         const float khsn_sl = khsn_sun[0] + khsn_sun[1] + khsn_sun[2];
         const float khsn_al = khsn_amb[0] + khsn_amb[1] + khsn_amb[2];
-        const bool khsn_off = khsn_ring;
-        if (!khsn_off && g_light_probe.anch_sun_l >= 0.0f &&
-            !(kh_probe_anchor_band(khsn_sl, g_light_probe.anch_sun_l) &&
-              kh_probe_anchor_band(khsn_al, g_light_probe.anch_amb_l))) {
-        } else {
+        // Commit unless a ring-less pick lands outside the anchor band (the
+        // refusal arm; its diagnostics were modes).
+        if (khsn_ring || g_light_probe.anch_sun_l < 0.0f ||
+            (kh_probe_anchor_band(khsn_sl, g_light_probe.anch_sun_l) &&
+             kh_probe_anchor_band(khsn_al, g_light_probe.anch_amb_l))) {
         // Cold or stale (> 1 s) commits outright: skipTime and mission starts
         // stay instant. Slew per channel, sums preserved in ratio (scale whole
         // rgb triplets by the slew-limited sum ratio).
@@ -25851,8 +25785,7 @@ inline void kh_reorder_trigger(ID3D11DeviceContext* self) {
                 const float khsl_ra = fmaxf(khsl_na, 0.02f) / fmaxf(khsl_pa, 0.02f);
                 const float khsl_rs = fmaxf(khsl_ns, 0.02f) / fmaxf(khsl_ps, 0.02f);
                 const bool khsl_regime = khsl_ra > 3.0f || khsl_ra < 0.333333f || khsl_rs > 3.0f || khsl_rs < 0.333333f;
-                if (khsl_regime) {
-                } else {
+                if (!khsl_regime) {
                 const float khsl_ca = khsl_r * fmaxf(khsl_pa, 0.02f);
                 const float khsl_cs = khsl_r * fmaxf(khsl_ps, 0.02f);
                 float khsl_ta = khsl_pa + fmaxf(-khsl_ca, fminf(khsl_ca, khsl_na - khsl_pa));
@@ -26039,16 +25972,6 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
     }
 
     kh_reorder_trigger(self);
-}
-
-static void STDMETHODCALLTYPE hooked_copyresource(ID3D11DeviceContext* self, ID3D11Resource* dst, ID3D11Resource* src) {
-
-    g_orig_copyresource(self, dst, src);
-}
-
-static void STDMETHODCALLTYPE hooked_copysubresourceregion(ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dst_sub, UINT dx, UINT dy, UINT dz, ID3D11Resource* src, UINT src_sub, const D3D11_BOX* box) {
-
-    g_orig_copysubresourceregion(self, dst, dst_sub, dx, dy, dz, src, src_sub, box);
 }
 
 // KH_DLS_WORLD - stage 4. The game environment receives our meshes'
@@ -26563,7 +26486,8 @@ static void STDMETHODCALLTYPE hooked_resolvesubresource(ID3D11DeviceContext* sel
 }
 
 static void STDMETHODCALLTYPE hooked_pssetshaderresources(ID3D11DeviceContext* self, UINT start, UINT n, ID3D11ShaderResourceView* const* srvs) {
-    if (reorder_on_render_thread() &&
+    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&   // Context first (rule 1.144).
+        reorder_on_render_thread() &&
         !g_ro.in_injection && g_ls.atlas_tex && srvs) {
         // The engine binds the shadow atlas at t15 (from its own resolve
         // shader) - inspect only that slot.
@@ -26761,6 +26685,8 @@ static void STDMETHODCALLTYPE hooked_omset_rts_and_uavs(ID3D11DeviceContext* sel
 
 static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* self, ID3D11DepthStencilView* dsv, UINT flags, FLOAT depth, UINT8 stencil) {
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && !g_ro.in_injection &&
+        !g_kh_flush_active.load(std::memory_order_relaxed) &&   // Own-state exclusion: the flush's
+                                                                  // sun / DLS / owner clears are ours.
         dsv && (flags & D3D11_CLEAR_DEPTH)) {
         g_depth_clear_serial++;   // KH_SVS_SKIP: any depth clear invalidates a cached seam inject.
         if (g_main_depth_identity && reorder_dsv_identity(dsv) == g_main_depth_identity) {
@@ -27004,8 +26930,6 @@ inline void ensure_reorder_hook() {
         { KH_VT_MAP,                  reinterpret_cast<void*>(&hooked_map),                     reinterpret_cast<void**>(&g_orig_map) },
         { KH_VT_UNMAP,                reinterpret_cast<void*>(&hooked_unmap),                   reinterpret_cast<void**>(&g_orig_unmap) },
         { KH_VT_UPDATESUBRESOURCE,    reinterpret_cast<void*>(&hooked_updatesubresource),      reinterpret_cast<void**>(&g_orig_updatesubresource) },
-        { KH_VT_COPYRESOURCE,         reinterpret_cast<void*>(&hooked_copyresource),           reinterpret_cast<void**>(&g_orig_copyresource) },
-        { KH_VT_COPYSUBRESOURCEREGION, reinterpret_cast<void*>(&hooked_copysubresourceregion), reinterpret_cast<void**>(&g_orig_copysubresourceregion) },
         { KH_VT_RESOLVESUBRESOURCE,   reinterpret_cast<void*>(&hooked_resolvesubresource),     reinterpret_cast<void**>(&g_orig_resolvesubresource) },
     };
 
@@ -27953,16 +27877,24 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     StateBackup backup;
     backup.capture(ctx);
 
-    // Depth-sampling effects: swap in the read-only DSV so the depth SRV may
-    // legally be bound at PS t1 while depth testing continues to work. Side
-    // effect while active: depth writes are disabled for the whole phase, so
-    // are present.
+    // Depth-sampling effects: the read-only DSV is swapped in so the live
+    // depth SRV may legally sit at PS t1 while depth testing continues to
+    // work. The swap is per draw, not per phase: it lands when the scene/depth
+    // pair is bound (effect meshes, then the fullscreen chain) and the real
+    // DSV returns for any depth-writing solid that follows, so a TestWrite
+    // mesh keeps its depth write on frames that also carry a depth effect.
+    // The depth SRV is never bound while the writable DSV is (t1 = atlas on
+    // the solid category), so the runtime never sees the hazard pair.
     KhOmSave khf_om;
-
-    if (depth_fx_ready) {
-        khf_om.capture(ctx);
-        khf_om.set_with_dsv(ctx, g_res.depth_dsv_ro);
-    }
+    bool khf_om_captured = false;
+    bool khf_dsv_ro = false;
+    auto khf_dsv_swap = [&](bool khfd_ro) {
+        if (!depth_fx_ready || khfd_ro == khf_dsv_ro) return;
+        if (!khf_om_captured) { khf_om.capture(ctx); khf_om_captured = true; }
+        if (khfd_ro) khf_om.set_with_dsv(ctx, g_res.depth_dsv_ro);
+        else         khf_om.restore(ctx);
+        khf_dsv_ro = khfd_ro;
+    };
 
     UINT stride = sizeof(MeshVertex), offset = 0;
     int bound_mesh = 0;
@@ -27986,7 +27918,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         depth_fx_ready ? g_res.depth_srv : nullptr
     };
 
-    ctx->PSSetShaderResources(0, 2, ps_srvs);
+    // t1 stays empty until the first pair consumer swaps the DSV (see
+    // khf_dsv_swap): the writable DSV is bound at this point.
+    ID3D11ShaderResourceView* khf_srvs_init[2] = { ps_srvs[0], nullptr };
+    ctx->PSSetShaderResources(0, 2, khf_srvs_init);
     // Flush-time proven depth snapshot for the effect-mesh arbitration (t2,
     // inside the StateBackup saved range; harmless when nothing arms - PSEffect
     // reads it only behind the local1.z gate).
@@ -28743,6 +28678,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                     shadow_live_ensure_srv() ? g_ls.atlas_srv : nullptr;
                 ctx->PSSetShaderResources(1, 1, &khf_atlas);
             } else {
+                khf_dsv_swap(true);   // Read-only depth before the depth SRV lands at t1.
                 ctx->PSSetShaderResources(0, 2, ps_srvs);
             }
             khf_srv_cat = khf_srv_want;
@@ -28765,6 +28701,15 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             (o.mode == DepthMode::TestWrite) ? g_res.dss_test_write :
             is_composite_eligible(o)         ? g_res.dss_test_write :
                                                g_res.dss_test;
+
+        // Read-only DSV reconciliation: a pair consumer (depth at t1) cannot
+        // write the depth it reads, so its write arm is a plain test - the
+        // exact effect the read-only view already had on it; a solid that
+        // writes takes the real DSV back (t1 is the atlas there, no hazard).
+        if (khf_dsv_ro && dss == g_res.dss_test_write) {
+            if (khf_srv_cat == 1) dss = g_res.dss_test;
+            else                  khf_dsv_swap(false);
+        }
 
         if (dss != khf_bound_dss) {
             ctx->OMSetDepthStencilState(dss, 0);
@@ -28903,6 +28848,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     if (khr_bound_rs != g_res.rasterizer) ctx->RSSetState(g_res.rasterizer);
 
     if (!fullscreen.empty() && effects_ready) {
+        khf_dsv_swap(true);   // The chain samples live depth; its OM save must hold the read-only view.
         std::string chain_err = meshes.empty() ? "" : kh_scene_capture_timed(dev, ctx);
         if (chain_err.empty()) chain_err = ensure_fx_chain(dev);
 
@@ -29170,10 +29116,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         }
     }
 
-    if (depth_fx_ready) {
-        khf_om.restore(ctx);
-    }
-
+    if (khf_om_captured) khf_om.restore(ctx);
     khf_om.release();
     backup.restore(ctx);
 }
@@ -29704,6 +29647,10 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     ID3D11RenderTargetView* khup_bb_rtv = nullptr;
     ID3D11DepthStencilView* khup_bb_dsv = nullptr;   // nullptr by the gate; carried for symmetry.
     ctx->OMGetRenderTargets(1, &khup_bb_rtv, &khup_bb_dsv);
+    // The gate verified slot 0 and the DSV only; the single-slot rebinds below
+    // null slots 1-7, so the full set is captured here and restored at the tail.
+    KhOmSave khup_om;
+    khup_om.capture(ctx);
 
     bool                      khuf_live = false;
     ConstantData              khuf_cbd;
@@ -29920,6 +29867,8 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     if (khup_bb_rtv) khup_bb_rtv->Release();
     if (khup_bb_dsv) khup_bb_dsv->Release();
+    khup_om.restore(ctx);
+    khup_om.release();
     if (n_saved_vp > 0) ctx->RSSetViewports(n_saved_vp, saved_vp);
     backup.restore(ctx);
     bb->Release();

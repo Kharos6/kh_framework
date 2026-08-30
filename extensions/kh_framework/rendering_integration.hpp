@@ -812,8 +812,6 @@ struct Resources {
     ID3D11ShaderResourceView* sun_pf_scr_srvm[12] = {};
     ID3D11PixelShader*        ps_sunpfm = nullptr;
     ID3D11BlendState*         blend_pf = nullptr;
-    ID3D11Texture2D*          pf_stage_mu = nullptr;
-    ID3D11Texture2D*          pf_stage_st = nullptr;
     ID3D11SamplerState*       samp_pf = nullptr;   // linear-clamp; s1 on both mesh paths.
     ID3D11VertexShader*       vs_sunpf = nullptr;
     ID3D11PixelShader*        ps_sunpf = nullptr;
@@ -1011,8 +1009,6 @@ struct Resources {
         KH_SAFE_RELEASE(vs_sunpf);
         KH_SAFE_RELEASE(blend_pf);
         KH_SAFE_RELEASE(samp_pf);
-        KH_SAFE_RELEASE(pf_stage_mu);
-        KH_SAFE_RELEASE(pf_stage_st);
         KH_SAFE_RELEASE(rast_sun);
         KH_SAFE_RELEASE(rast_sun_lo);
         KH_SAFE_RELEASE(rast_sun_pk);   // KH_SUN_PANCAKE twins.
@@ -3028,8 +3024,7 @@ inline ID3D11ShaderResourceView* kh_tex_resolve(ID3D11Device* dev, ID3D11DeviceC
         e.srv = kh_load_stb(dev, ctx, path, srgb, err);
     }
 
-    if (e.srv) {
-    } else {
+    if (!e.srv) {
         e.failed = true;
         if (kh_ends_with_ci(path, ".tga")) {
             err += " - if the file opens elsewhere, re-export as uncompressed true-color 24/32-bit TGA";
@@ -5148,7 +5143,6 @@ inline bool kh_fbx_import(const std::string& path, int& out_id, std::string& err
         MeshDef khmc_d;
         const bool khmc_hit = kh_mesh_cache_load(khmc_hash, khmc_d);
         if (khmc_hit) {
-            const uint64_t khmc_rt0 = steady_now_ms();
             const bool khmc_ok = kh_fbx_register(std::move(khmc_d), path, out_id, err);
             return khmc_ok;
         }
@@ -5306,7 +5300,6 @@ inline bool kh_fbx_import(const std::string& path, int& out_id, std::string& err
     // s note still applies and is why the writer takes g_khsm_trim_mu: an FBX
     // import can land while a KH_SHADER_MT batch is writing.khsc blobs into the
     // same folder, and the trim enumerates and deletes.
-    const uint64_t khmc_rt0 = steady_now_ms();
     const bool khmc_ok = kh_fbx_register(std::move(d), path, out_id, err);
     // Queued only on success: an unregistered mesh has no published id, and the
     // writer reads the mesh by id.
@@ -5782,10 +5775,6 @@ inline uint32_t kh_inst_issue(ID3D11DeviceContext* ctx, ID3D11Device* dev, KhIns
                 }
             }
 
-            {   // The geometry census, per instance.
-                UINT khii_cs = 0, khii_cc = 0;
-                mesh_lod_range(khii_md, khii_lvl, khii_cs, khii_cc);
-            }
             khii_inst_out += khii_n;
             khii_off += khii_n;
         }
@@ -7392,11 +7381,6 @@ static UINT g_sun3_map_size = KH_SUN_MID_BASE;
 static UINT g_sun4_map_size = KH_SUN_OUT_BASE;
 static UINT g_sun5_map_size = KH_SUN_FAR_BASE;
 // The tiers bind the clamp twins (rast_sun*_pk); the union keeps the clip forms.
-// 1 = the tier pass last bound a clamp twin; 0 = a null twin fell through to clip.
-// Falsifier: new acne or leak at a pancaked near plane means z = 0 is meeting the
-// compare-bias floor (khT_b) or the moment pyramid's mean/variance (KhPfMu) -
-// instrument before stacking a bias change on top.
-static std::atomic<int32_t> g_sun_pancake_on{0};
 // One pick for the union site and the tier site. khrs_clamp selects the clamp
 // twin of whatever the mode picked, falling through to that clip form when the
 // twin is null.
@@ -7560,17 +7544,6 @@ inline bool ensure_sun_pf(ID3D11Device* dev) {
                                                      &g_res.sun_pf_scr_srvm[khpf_m])))
                 return false;
         }
-    }
-    if (!g_res.pf_stage_mu) {
-        D3D11_TEXTURE2D_DESC tg = {};
-        tg.Width = 1; tg.Height = 1; tg.MipLevels = 1; tg.ArraySize = 1;
-        tg.Format = DXGI_FORMAT_R32G32_FLOAT;
-        tg.SampleDesc.Count = 1;
-        tg.Usage = D3D11_USAGE_STAGING;
-        tg.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        dev->CreateTexture2D(&tg, nullptr, &g_res.pf_stage_mu);
-        tg.Format = DXGI_FORMAT_R32_TYPELESS;
-        dev->CreateTexture2D(&tg, nullptr, &g_res.pf_stage_st);
     }
     return true;
 }
@@ -10516,6 +10489,9 @@ inline bool kh_rescue_window_open() {
 static ID3D11DeviceContext1* g_kh_ctx1 = nullptr;
 static void*                 g_kh_ctx1_for = nullptr;
 
+// Unlocked cache: its callers are the flush (game thread, under the graphics
+// lock) and the render-thread passes, which the park invariant serializes. A
+// third thread (a shader worker, for one) must not call this.
 inline ID3D11DeviceContext1* kh_ctx1(ID3D11DeviceContext* ctx) {
     if (g_kh_ctx1 && g_kh_ctx1_for == static_cast<void*>(ctx)) return g_kh_ctx1;
 
@@ -10940,11 +10916,8 @@ inline void kh_sun_pf_convert(ID3D11DeviceContext* ctx) {
         g_sun_pf_valid[0] = false; g_sun_pf_valid[1] = false; g_sun_pf_valid[2] = false;
         return;
     }
-    ID3D11RenderTargetView* khpc_rt[4] = {};
-    ID3D11DepthStencilView* khpc_od = nullptr;
-    // OMSetRenderTargets(4,..) nulls every slot it does not name: an engine RTV
-    // bound at slots 4.7 here would be silently dropped.
-    ctx->OMGetRenderTargets(4, khpc_rt, &khpc_od);
+    KhOmSave khpc_om;   // Full OM set in, full OM set out (rule: never a slot-0/4 save).
+    khpc_om.capture(ctx);
     UINT khpc_nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
     D3D11_VIEWPORT khpc_ovp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
     ctx->RSGetViewports(&khpc_nvp, khpc_ovp);
@@ -11022,9 +10995,8 @@ inline void kh_sun_pf_convert(ID3D11DeviceContext* ctx) {
     }
 
     // RTs, viewports, topology, layout, shaders.
-    ctx->OMSetRenderTargets(4, khpc_rt, khpc_od);
-    for (int khpc_r = 0; khpc_r < 4; ++khpc_r) KH_SAFE_RELEASE(khpc_rt[khpc_r]);
-    KH_SAFE_RELEASE(khpc_od);
+    khpc_om.restore(ctx);
+    khpc_om.release();
     if (khpc_nvp > 0) ctx->RSSetViewports(khpc_nvp, khpc_ovp);
     ctx->IASetPrimitiveTopology(khpc_topo);
     ctx->IASetInputLayout(khpc_il);
@@ -11075,12 +11047,6 @@ static ID3D11Texture2D*          g_fire_snap_tex = nullptr;
 static ID3D11ShaderResourceView* g_fire_snap_srv = nullptr;
 static bool        g_fire_snap_live = false;   // Last freeze rode the snapshot.
 
-// .x is the near-offset encoding carrying a constant z bias; .y is empty across the
-// texture, so the 'prefer .y' rule never selects it.
-static ID3D11Texture2D* g_zdp_stage = nullptr;
-inline void kh_zdecode_release() {
-    if (g_zdp_stage) { g_zdp_stage->Release(); g_zdp_stage = nullptr; }
-}
 // per-fire live-VS-frozen view delta (instrument): at every fire, the camera of
 // the engine's most recent view publication against the frozen camera.
 static uint32_t g_fire_count_frame = 0;
@@ -11094,7 +11060,6 @@ static const float KH_FIRE_PV_STALE_S = 0.25f;
 static constexpr uint32_t KH_FIRE_ERA_RECOVER_N = 4;   // Consecutive refusals that earn adoption.
 static uint32_t g_fire_era_reject_run = 0;
 static constexpr uint64_t KH_CAST_READY_QUIET_MS = 1500;
-static constexpr float KH_CAST_READY_SNAP_PUB_DEG = 1.0f;   // Snap classification bar (deg).
 static constexpr uint64_t KH_CAST_READY_DWELL_MS = 1500;   // continuous-health dwell before the
                                                            // Latch.
 static bool     g_cast_ready = false;   // The latch: casts allowed.
@@ -11307,11 +11272,6 @@ inline bool kh_band_pair_coherent(const float* khpc_vc, const float* khpc_fv) {
     return false;
 }
 static float    g_band_cap_fv_age_max_ms = 0.0f;
-// Shared landing bookkeeping (render thread only).
-inline void kh_seal_land_note(int khsl_slot, float khsl_now, float khsl_esc_t,
-                              uint64_t khsl_esc_cycle, const float* khsl_old,
-                              const float* khsl_vc);
-
 // Gated on a plain bool, so the steady-state cost is one load.
 inline void kh_band_stage_commit(ID3D11DeviceContext* ctx) {
     if (!g_ls.stage_any) return;
@@ -11366,8 +11326,6 @@ inline void kh_band_stage_commit(ID3D11DeviceContext* ctx) {
         memcpy(b.sm, b.stage_sm, sizeof(b.sm));
         memcpy(b.border, b.stage_border, sizeof(b.border));
 
-        float khsl_old[12];   // The vcol being replaced.
-        memcpy(khsl_old, b.vcol, sizeof(khsl_old));
         if (!kh_band_view_native(g_ls.frame_view, true)) {
             khsc_any = true;
             continue;
@@ -11394,7 +11352,6 @@ inline void kh_band_stage_commit(ID3D11DeviceContext* ctx) {
             }
         }
 
-        kh_seal_land_note(khsc_i, khsc_now, b.esc_t, b.esc_cycle, khsl_old, b.vcol);
         kh_weld_note(b.vcol, khwn_code);
         b.esc_t = -1.0f;
 
@@ -11537,7 +11494,6 @@ inline void kh_msaa_toggle_wipe(unsigned int khtw_new) {
 }
 
 static uint64_t  g_topo_cycles = 0;
-static void*     g_topo_color_seen[8] = {};   // per-cycle distinct color identities.
 static void*     g_topo_scene_tex_id = nullptr;   // Latched scene texture identity
                                                   // (copy/resolve-hook source compares).
 static bool g_mask_cast_fired = false;   // One analytic pass per frame
@@ -12892,7 +12848,6 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
             if (!dl_finite(khd_wx) || !dl_finite(khd_wy) || !dl_finite(khd_wz)) continue;
             int khd_hit = -1;
             float khd_hit_cost = 0.0f;
-            bool  khd_hit_claimed = false;
 
             for (uint32_t d = 0; d < g_dl.pool_n; ++d) {
                 if (fabsf(g_dl.pool[d].rec[0] - khd_wx) < KH_DL_MATCH_M &&
@@ -12903,11 +12858,7 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
                     for (uint32_t c = 0; c < khd_claim_n; ++c) {
                         if (khd_claim[c] == static_cast<int>(d)) { khd_taken = true; break; }
                     }
-                    if (khd_taken) {
-                        if (khd_hit < 0) khd_hit_claimed = true;   // The first-in-range slot was
-                                                                   // Claimed.
-                        continue;
-                    }
+                    if (khd_taken) continue;   // The first-in-range slot was claimed.
                     // Nearest record: position plus every non-position lane.
                     float khd_cost = fabsf(g_dl.pool[d].rec[0] - khd_wx) +
                                      fabsf(g_dl.pool[d].rec[1] - khd_wy) +
@@ -12916,7 +12867,6 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
                     if (khd_hit < 0 || khd_cost < khd_hit_cost) {
                         khd_hit = static_cast<int>(d);
                         khd_hit_cost = khd_cost;
-                        khd_hit_claimed = false;
                     }
                 }
             }
@@ -13063,7 +13013,6 @@ inline void dynlights_publish(const uint8_t* khd_p, int khd_s) {
     memcpy(&khd_pc_i, khd_p + 0, 4);
     memcpy(&khd_sc_i, khd_p + 16, 4);
     uint32_t khd_pc = 0, khd_sc = 0;
-    uint8_t khd_as_float = 0;
 
     if (khd_pc_i >= 0 && khd_pc_i <= 1024 && khd_sc_i >= 0 && khd_sc_i <= 1024) {
         khd_pc = static_cast<uint32_t>(khd_pc_i);
@@ -13076,7 +13025,6 @@ inline void dynlights_publish(const uint8_t* khd_p, int khd_s) {
             khd_pf == floorf(khd_pf) && khd_sf == floorf(khd_sf)) {
             khd_pc = static_cast<uint32_t>(khd_pf);
             khd_sc = static_cast<uint32_t>(khd_sf);
-            khd_as_float = 1;
         } else {
             return;
         }
@@ -13520,7 +13468,6 @@ inline void kh_dls_select() {
     const float khs_scale = (g_dl.main_ref_valid && g_dl.main_scale > 1.0e-6f)
                           ? g_dl.main_scale : 1.0f;
     uint8_t  khs_filled[KH_DLS_MAX] = {};
-    uint32_t khs_churn = 0;
 
     // 2. RE-MATCH IN PLACE. This is the step that survives a pool sweep: a
     //    light that is still there refreshes the slot it already holds, so the
@@ -13640,7 +13587,6 @@ inline void kh_dls_select() {
         g_dls[khs_take].stamp = khs_now;
         g_dls[khs_take].live = 1;
         khs_filled[khs_take] = 1;
-        khs_churn++;
         khs_admitted++;
     }
 
@@ -13895,19 +13841,6 @@ inline void fill_dynlights_cb(ConstantData& cbd, const RenderObject& o) {
     memcpy(&khd_int, &khd_bits, sizeof(khd_int));
 
     if (khd_mode == 3) {
-        // Published because no writer of dl_ctl exposes it; with this number both
-        // readings stay available.
-        float khd_objcam = -1.0f;
-        {
-            float khd_camp[3];
-            if (kh_dls_camera(khd_camp)) {
-                const float khd_ox = o.pos[0] - khd_camp[0];
-                const float khd_oy = o.pos[2] - khd_camp[1];
-                const float khd_oz2 = o.pos[1] - khd_camp[2];
-                khd_objcam = sqrtf(khd_ox * khd_ox + khd_oy * khd_oy + khd_oz2 * khd_oz2);
-            }
-        }
-
         if (g_dl.pool_n == 0) {
             return;
         }
@@ -14833,43 +14766,6 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
                     bs.pending_view = false;
                     continue;
                 }
-                {
-                    bool khcv_ok = !bs.vcol_bridge;
-                    for (int khcv_j = 0; khcv_ok && khcv_j < 3; ++khcv_j) {
-                        const float* khcv_v = &bs.vcol[khcv_j * 4];
-                        const float khcv_n = sqrtf(khcv_v[0] * khcv_v[0] +
-                                                   khcv_v[1] * khcv_v[1] +
-                                                   khcv_v[2] * khcv_v[2]);
-                        if (!(khcv_n > 0.9f && khcv_n < 1.1f)) khcv_ok = false;
-                    }
-                    float khcc_d = bs.vcol[8] * fv[2] + bs.vcol[9] * fv[6] +
-                                   bs.vcol[10] * fv[10];
-                    khcc_d = khcc_d > 1.0f ? 1.0f : (khcc_d < -1.0f ? -1.0f : khcc_d);
-                    // |t_old - t_new| between two world-space views is rotation times the |C| lever
-                    // arm, not a camera distance.
-                    float khcc_m = -1.0f;
-                    {
-                        float khcc_a[3] = { 0.0f, 0.0f, 0.0f };
-                        for (int khcc_j = 0; khcc_j < 3; ++khcc_j) {
-                            const float* khcc_v = &bs.vcol[khcc_j * 4];
-                            khcc_a[0] -= khcc_v[3] * khcc_v[0];
-                            khcc_a[1] -= khcc_v[3] * khcc_v[1];
-                            khcc_a[2] -= khcc_v[3] * khcc_v[2];
-                        }
-                        float khcc_b[3];
-                        if (khcv_ok &&
-                            kh_view_camera_exact(reinterpret_cast<const float(*)[4]>(fv), khcc_b)) {
-                            const float khcc_dx = khcc_a[0] - khcc_b[0];
-                            const float khcc_dy = khcc_a[1] - khcc_b[1];
-                            const float khcc_dz = khcc_a[2] - khcc_b[2];
-                            const float khcc_q = sqrtf(khcc_dx * khcc_dx +
-                                                       khcc_dy * khcc_dy +
-                                                       khcc_dz * khcc_dz);
-                            if (khcc_q == khcc_q) khcc_m = khcc_q;
-                        }
-                    }
-                }
-
                 // Bridge provisionals are exempt: they cannot finalize and
                 // never serve unfinalized, so refusing would only starve them.
                 // Pick census (always on): every accepted overwrite, classified
@@ -15514,18 +15410,15 @@ inline void shadow_live_finalize_cycle() {
     e.tile[3] = (vp.TopLeftY + vp.Height) * inv - texel;
     if (e.tile[2] <= e.tile[0] || e.tile[3] <= e.tile[1]) return;
     float khlp_cam[3] = { g_ls.cam[0], g_ls.cam[1], g_ls.cam[2] };
-    int   khlp_src = 0;
     const float khlp_now = effect_time_seconds();
     float khlp_c[3];
     if (g_ls.frame_view_valid && g_ls.frame_view_time >= 0.0f &&
         khlp_now - g_ls.frame_view_time < 0.05f &&
         kh_view_camera_exact(reinterpret_cast<const float(*)[4]>(g_ls.frame_view), khlp_c)) {
         khlp_cam[0] = khlp_c[0]; khlp_cam[1] = khlp_c[1]; khlp_cam[2] = khlp_c[2];
-        khlp_src = 1;
     } else if (g_ro.cycle_pv_valid &&
                kh_view_camera_exact(g_ro.cycle_pv.view, khlp_c)) {
         khlp_cam[0] = khlp_c[0]; khlp_cam[1] = khlp_c[1]; khlp_cam[2] = khlp_c[2];
-        khlp_src = 2;
     }
     e.cam[0] = khlp_cam[0];
     e.cam[1] = khlp_cam[1];
@@ -15699,17 +15592,6 @@ inline bool shadow_probe_target(ID3D11DepthStencilView* dsv) {
     tex->GetDesc(&td);
     shadow_live_consider_atlas(tex, td);
     const bool is_atlas = static_cast<void*>(tex) == g_ls.atlas_identity;
-
-    D3D11_DEPTH_STENCIL_VIEW_DESC vd = {};
-    dsv->GetDesc(&vd);
-    uint32_t slice = 0;
-
-    if (vd.ViewDimension == D3D11_DSV_DIMENSION_TEXTURE2DARRAY) {
-        slice = vd.Texture2DArray.FirstArraySlice;
-    } else if (vd.ViewDimension == D3D11_DSV_DIMENSION_TEXTURE2DMSARRAY) {
-        slice = vd.Texture2DMSArray.FirstArraySlice;
-    }
-
     tex->Release();   // The desc is already copied out.
 
     return is_atlas;
@@ -15821,11 +15703,6 @@ static ShadowMaskState g_mask;
 
 inline void kh_svs_mask_release(bool khm_scrub_vmir);   // Default on the 11.6k decl.
 inline void kh_vmir_release();   // KH_VOL_MIRROR (defined with its statics).
-// Same arrangement for the content-probe stagings.
-inline void kh_prb_release();
-inline void kh_vpx_release();
-inline void kh_vpx_capture(ID3D11DeviceContext*);
-inline void kh_vpx_capture_draw(ID3D11DeviceContext*);
 
 inline void release_shadow_device_state() {
     // Mask SRV, the latched mask candidate, the pre-resolve snapshot texture +
@@ -15833,8 +15710,6 @@ inline void release_shadow_device_state() {
     // device. See kh_svs_mask_release - the swap half of that function is what
     // mask adoption calls, and it deliberately does none of this.
     kh_svs_mask_release();
-    kh_prb_release();   // Probe stagings die with the device.
-    kh_vpx_release();   // So does the volume-pass pair staging.
     kh_ctx1_release();   // Cached context1 interface the device.
     g_rt0_desc_n = 0;   // RT0 desc cache = weak identities; wholesale evict.
     g_rt0_desc_next = 0;
@@ -15877,7 +15752,6 @@ inline void release_shadow_device_state() {
     if (g_mask.cast_dss) { g_mask.cast_dss->Release(); g_mask.cast_dss = nullptr; }
     g_mask.rt_is_resolve = false;
     g_topo_scene_tex_id = nullptr;
-    memset(g_topo_color_seen, 0, sizeof(g_topo_color_seen));
     g_mask.atlas_bound = false;
     g_mask.engine_mask_failed = false;
     g_mask.cast_states_failed = false;
@@ -15931,7 +15805,6 @@ inline void release_shadow_device_state() {
     if (g_fire_lock) { g_fire_lock->Release(); g_fire_lock = nullptr; }
     if (g_fire_snap_srv) { g_fire_snap_srv->Release(); g_fire_snap_srv = nullptr; }
     if (g_fire_snap_tex) { g_fire_snap_tex->Release(); g_fire_snap_tex = nullptr; }
-    kh_zdecode_release();   // KH_ZDECODE_PROBE: staging dies with the snapshot it reads.
     g_fire_snap_live = false;
     g_fire_lock_valid = false;
     g_fire_refreeze_pending = false;
@@ -15966,60 +15839,6 @@ inline void release_shadow_device_state() {
     g_sky_probe = CbColorProbe{};
     skybind_release();
     cascbind_release();
-}
-
-// KH_SEAL_LAND_CENSUS body (declared with its globals; needs g_topo_cycles and
-// g_ro, which are declared after the stage-commit site).
-inline void kh_seal_land_note(int khsl_slot, float khsl_now, float khsl_esc_t,
-                              uint64_t khsl_esc_cycle, const float* khsl_old,
-                              const float* khsl_vc) {
-    auto khsl_cam_of = [](const float* khsl_v, float* khsl_c) -> bool {
-        khsl_c[0] = khsl_c[1] = khsl_c[2] = 0.0f;
-        for (int khsl_j = 0; khsl_j < 3; ++khsl_j) {
-            const float* khsl_a = &khsl_v[khsl_j * 4];
-            const float khsl_n = sqrtf(khsl_a[0] * khsl_a[0] + khsl_a[1] * khsl_a[1] +
-                                       khsl_a[2] * khsl_a[2]);
-            if (!(khsl_n > 0.9f && khsl_n < 1.1f)) return false;
-            khsl_c[0] -= khsl_a[3] * khsl_a[0];
-            khsl_c[1] -= khsl_a[3] * khsl_a[1];
-            khsl_c[2] -= khsl_a[3] * khsl_a[2];
-        }
-        return true;
-    };
-    float khsl_cn[3], khsl_co[3];
-    const bool khsl_okn = khsl_cam_of(khsl_vc, khsl_cn);
-    const bool khsl_oko = khsl_cam_of(khsl_old, khsl_co);
-    // (i) reseal step: how far the baked camera jumped at this landing.
-    if (khsl_okn && khsl_oko) {
-        const float khsl_dx = khsl_cn[0] - khsl_co[0];
-        const float khsl_dy = khsl_cn[1] - khsl_co[1];
-        const float khsl_dz = khsl_cn[2] - khsl_co[2];
-    }
-    // Read against the standing basis offset. (ii) seal-side split proxy:
-    // Committed vcol camera/forward against this cycle's injection basis.
-    if (khsl_okn && g_ro.cycle_pv_valid) {
-        float khsl_ci[3];
-        extract_camera_pos(g_ro.cycle_pv.view, khsl_ci);
-        const float khsl_dx = khsl_cn[0] - khsl_ci[0];
-        const float khsl_dy = khsl_cn[1] - khsl_ci[1];
-        const float khsl_dz = khsl_cn[2] - khsl_ci[2];
-        const float khsl_d = sqrtf(khsl_dx * khsl_dx + khsl_dy * khsl_dy + khsl_dz * khsl_dz);
-        // Forward axes: vcol column 2 = (vc[8], vc[9], vc[10]); cycle_pv.view
-        // row-vector col 2.
-        float khsl_f = khsl_vc[8] * g_ro.cycle_pv.view[0][2] + khsl_vc[9] * g_ro.cycle_pv.view[1][2] +
-                       khsl_vc[10] * g_ro.cycle_pv.view[2][2];
-        khsl_f = khsl_f > 1.0f ? 1.0f : (khsl_f < -1.0f ? -1.0f : khsl_f);
-    }
-    if (khsl_esc_t >= 0.0f && khsl_now - khsl_esc_t < 5.0f) {
-        float khsl_cdx = -1.0f;
-        if (khsl_okn) {
-            const float khsl_dx = khsl_cn[0] - g_ls.cam[0];
-            const float khsl_dy = khsl_cn[1] - g_ls.cam[1];
-            const float khsl_dz = khsl_cn[2] - g_ls.cam[2];
-            const float khsl_d = sqrtf(khsl_dx * khsl_dx + khsl_dy * khsl_dy + khsl_dz * khsl_dz);
-            if (khsl_d == khsl_d && khsl_d < 1.0e6f) khsl_cdx = khsl_d;
-        }
-    }
 }
 
 inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off, uint32_t nf) {
@@ -16320,15 +16139,12 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
         const bool khsv_nat = !fv || kh_band_view_native(g_ls.frame_view, true);
         // Seals born on it are complete at capture; the completion machinery
         // never runs.
-        float khsl_old[12];   // The vcol being replaced.
-        memcpy(khsl_old, b.vcol, sizeof(khsl_old));
         for (int c = 0; c < 3; ++c) {
             for (int r = 0; r < 4; ++r) {
                 b.vcol[c * 4 + r] = (fv && khsv_nat) ? g_ls.frame_view[r * 4 + c]
                                        : g_ro.cycle_pv.view[r][c];
             }
         }
-        kh_seal_land_note(slot, now, b.esc_t, b.esc_cycle, khsl_old, b.vcol);
         b.esc_t = -1.0f;
 
         b.pending_view = true;
@@ -16422,20 +16238,6 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
                     }
 
                     if (g_sun_snap_hold >= 5) {
-                        float khsn_dp = wdir[0] * g_sun_dir_derived[0] +
-                                        wdir[1] * g_sun_dir_derived[1] +
-                                        wdir[2] * g_sun_dir_derived[2];
-                        khsn_dp = khsn_dp > 1.0f ? 1.0f : (khsn_dp < -1.0f ? -1.0f : khsn_dp);
-                        bool khsn_neutral = false;
-
-                        if (g_pub_valid) {
-                            float khsn_pp = wdir[0] * g_pub_dir[0] +
-                                            wdir[1] * g_pub_dir[1] +
-                                            wdir[2] * g_pub_dir[2];
-                            khsn_pp = khsn_pp > 1.0f ? 1.0f : (khsn_pp < -1.0f ? -1.0f : khsn_pp);
-                            khsn_neutral = acosf(khsn_pp) * 57.29578f < KH_CAST_READY_SNAP_PUB_DEG;
-                        }
-
                         g_sun_snap_hold = 0;
                         g_sun_dir_derived[0] = wdir[0];
                         g_sun_dir_derived[1] = wdir[1];
@@ -16489,7 +16291,6 @@ inline void resolve_pair_capture(ID3D11DeviceContext* ctx) {
         }
 
         g_ls.resolve_window--;
-        bool any_capture = false;
 
         for (int b = 0; b < 18; ++b) {
             if (!bufs[b]) continue;
@@ -16600,12 +16401,6 @@ inline void resolve_pair_capture(ID3D11DeviceContext* ctx) {
                                         g_mask.engine_mask_rtv->Release();
                                     }
                                     g_mask.engine_mask_rtv = rtv0;
-
-                                    {   // Resource identity (weak, never dereferenced).
-                                        ID3D11Resource* khmr = nullptr;
-                                        rtv0->GetResource(&khmr);
-                                        if (khmr) khmr->Release();
-                                    }
                                 } else {
                                     rtv0->Release();   // Duplicate or failed identity.
                                 }
@@ -16645,9 +16440,7 @@ inline void resolve_pair_capture(ID3D11DeviceContext* ctx) {
                         }
                         }
 
-                        const uint64_t before = g_ls.band_captures + g_ls.band_bail_time + g_ls.band_bail_slot;
                         band_capture(ctx, f, 180, nf);
-                        if (g_ls.band_captures + g_ls.band_bail_time + g_ls.band_bail_slot != before) any_capture = true;
                     }
                 }
             }
@@ -17022,7 +16815,6 @@ inline void kh_dls_fill_cb(ConstantData& khf_cb) {
     }
     // KH_DLS_MESHMODE: dlsFaceSlice[].z is our own lane and this fill is its only
     // writer, so the mesh path's arm lives there rather than in lighting0.y.
-    bool khf_any = false;
     for (uint32_t khf_s = 0; khf_s < KH_DLS_MAX; ++khf_s) {
         // A slot is publishable only if it is live and actually has a map this
         // frame. g_dls_map_valid is set by the render pass, so a light selected
@@ -17066,7 +16858,6 @@ inline void kh_dls_fill_cb(ConstantData& khf_cb) {
             memcpy(khf_cb.dls_spot_vp[khf_s], g_dls_vp[khf_s][0],
                    sizeof(khf_cb.dls_spot_vp[khf_s]));
         }
-        khf_any = true;
     }
 }
 
@@ -17123,15 +16914,13 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
             // KH_DLS_SPOT_SRC: id first, then the nearest pool entry that is a
             // spot. The first-in-range scan survives only under 586.
             const DlPoolLight* khdr_src = nullptr;
-            const bool khdr_first = false;
-            if (!khdr_first && khdr_l.light_id != 0) {
+            if (khdr_l.light_id != 0) {
                 for (uint32_t khdr_p = 0; khdr_p < g_dl.pool_n; ++khdr_p) {
                     if (g_dl.pool[khdr_p].id == khdr_l.light_id) { khdr_src = &g_dl.pool[khdr_p]; break; }
                 }
             }
             if (!khdr_src) {
                 float khdr_sd = 0.0f;
-                bool  khdr_saw_point = false;
                 for (uint32_t khdr_p = 0; khdr_p < g_dl.pool_n; ++khdr_p) {
                     const DlPoolLight& khdr_c = g_dl.pool[khdr_p];
                     const float khdr_dx = khdr_c.rec[0] - khdr_l.pos[0];
@@ -17139,16 +16928,11 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
                     const float khdr_dz = khdr_c.rec[2] - khdr_l.pos[2];
                     const float khdr_d2 = khdr_dx * khdr_dx + khdr_dy * khdr_dy + khdr_dz * khdr_dz;
                     if (khdr_d2 > KH_DLS_MATCH_M * KH_DLS_MATCH_M) continue;
-                    if (khdr_first) { khdr_src = &khdr_c; break; }
-                    if (!khdr_c.spot) {   // A point record can never be a spot slot's source.
-                        if (!khdr_src) khdr_saw_point = true;
-                        continue;
-                    }
+                    if (!khdr_c.spot) continue;   // A point record can never be a spot slot's source.
                     if (!khdr_src || khdr_d2 < khdr_sd) { khdr_src = &khdr_c; khdr_sd = khdr_d2; }
                 }
             }
-            if (!khdr_src) {
-            } else {
+            if (khdr_src) {
                 const float khdr_cc = khdr_src->rec[7];
                 float khdr_fov = 0.0f;
                 if (kh_dls_spot_vp(khdr_src->rec + 4, khdr_cc, khdr_far,
@@ -17608,23 +17392,6 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     }
 
     if (!casters.empty()) g_sun_map_no_local = false;   // At least one local caster.
-    {
-        if (g_sun_map_no_local) {
-            if (cam_valid) {
-                float khnl_best = -1.0f;
-                for (const auto& khnl_kv : g_draw_list) {   // Keyed container: .second is the
-                                                            // Object.
-                    const RenderObject& khnl_o = khnl_kv.second;
-                    const float khnl_dx = khnl_o.pos[0] - cam_e[0];
-                    const float khnl_dy = khnl_o.pos[1] - cam_e[1];
-                    const float khnl_dz = khnl_o.pos[2] - cam_e[2];
-                    const float khnl_d = sqrtf(khnl_dx * khnl_dx + khnl_dy * khnl_dy +
-                                               khnl_dz * khnl_dz);
-                    if (khnl_best < 0.0f || khnl_d < khnl_best) khnl_best = khnl_d;
-                }
-            }
-        }
-    }
     if (casters.empty()) return false;
 
     // The hash commits only at render success below, so a failed render can
@@ -17702,8 +17469,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         // envelope for all bands (one capture/restore, up to three clears +
         // draw sets inside it).
         StateBackup khsh_bk;
-        ID3D11RenderTargetView* khsh_rt[4] = {};
-        ID3D11DepthStencilView* khsh_od = nullptr;
+        KhOmSave khsh_om;
         UINT khsh_nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
         D3D11_VIEWPORT khsh_ovp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
         const bool khsh_pinj = g_ro.in_injection;
@@ -17720,9 +17486,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             // into the engine's next draws every skip frame: the sky-splat /
             // black-flicker field report on.
             ctx->IAGetVertexBuffers(1, 1, &khsh_ovb1, &khsh_ovb1_stride, &khsh_ovb1_offset);
-            // OMSetRenderTargets(4,..) nulls every slot it does not name: an
-            // engine RTV bound at slots 4.7 here would be silently dropped.
-            ctx->OMGetRenderTargets(4, khsh_rt, &khsh_od);
+            khsh_om.capture(ctx);   // Full OM set (8 RTVs + DSV).
             ctx->RSGetViewports(&khsh_nvp, khsh_ovp);
             ctx->IASetInputLayout(g_res.layout_sundepth);
             ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -17741,8 +17505,6 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             // actually bound (a null twin falls through).
             {
                 ID3D11RasterizerState* khsh_rs = kh_sun_rs_pick(true);
-                g_sun_pancake_on.store(khsh_rs != kh_sun_rs_pick(false) ? 1 : 0,
-                                       std::memory_order_relaxed);
                 ctx->RSSetState(khsh_rs);
             }
         }
@@ -18094,13 +17856,12 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         // so behind every gate in front of it.
 
         if (khsh_standalone) {
-            ctx->OMSetRenderTargets(4, khsh_rt, khsh_od);
+            khsh_om.restore(ctx);
             if (khsh_nvp > 0) ctx->RSSetViewports(khsh_nvp, khsh_ovp);
             ctx->IASetVertexBuffers(1, 1, &khsh_ovb1, &khsh_ovb1_stride, &khsh_ovb1_offset);
             KH_SAFE_RELEASE(khsh_ovb1);
             khsh_bk.restore(ctx);
-            for (int khsh_r4 = 0; khsh_r4 < 4; ++khsh_r4) KH_SAFE_RELEASE(khsh_rt[khsh_r4]);
-            KH_SAFE_RELEASE(khsh_od);
+            khsh_om.release();
             g_ro.in_injection = khsh_pinj;
         }
     };
@@ -18210,7 +17971,6 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         hf[0] = hf[1] = hf[2] = khsu_rng / 1.7320508f;
         constexpr float KH_SUN_GROW_CAP = 3500.0f;   // enclosing-radius ceiling (~7 km span).
         const float khsg_h = KH_SUN_GROW_CAP / 1.7320508f;
-        bool khsg_grew = false;
 
         for (int khsg_k = 0; khsg_k < 3; ++khsg_k) {
             const float khsg_cl = fmaxf(mn[khsg_k], ctr[khsg_k] - khsg_h);
@@ -18218,8 +17978,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             if (khsg_cl > khsg_ch) continue;   // Capped caster box empty on this axis.
             float khsg_lo = ctr[khsg_k] - hf[khsg_k];
             float khsg_hi = ctr[khsg_k] + hf[khsg_k];
-            if (khsg_cl < khsg_lo) { khsg_lo = khsg_cl; khsg_grew = true; }
-            if (khsg_ch > khsg_hi) { khsg_hi = khsg_ch; khsg_grew = true; }
+            if (khsg_cl < khsg_lo) khsg_lo = khsg_cl;
+            if (khsg_ch > khsg_hi) khsg_hi = khsg_ch;
             ctr[khsg_k] = (khsg_lo + khsg_hi) * 0.5f;
             hf[khsg_k] = (khsg_hi - khsg_lo) * 0.5f;
         }
@@ -18403,11 +18163,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     ID3D11Buffer* old_vb1 = nullptr;
     UINT old_vb1_stride = 0, old_vb1_offset = 0;
     ctx->IAGetVertexBuffers(1, 1, &old_vb1, &old_vb1_stride, &old_vb1_offset);
-    ID3D11RenderTargetView* old_rtvs[4] = {};
-    ID3D11DepthStencilView* old_dsv = nullptr;
-    // OMSetRenderTargets(4,..) nulls every slot it does not name: an engine RTV
-    // bound at slots 4.7 here would be silently dropped.
-    ctx->OMGetRenderTargets(4, old_rtvs, &old_dsv);
+    KhOmSave khsd_om;   // Full OM set (8 RTVs + DSV).
+    khsd_om.capture(ctx);
     UINT old_nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
     D3D11_VIEWPORT old_vps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
     ctx->RSGetViewports(&old_nvp, old_vps);
@@ -18549,15 +18306,12 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
 
     khsh_render_cams(true);
 
-    ctx->OMSetRenderTargets(4, old_rtvs, old_dsv);
+    khsd_om.restore(ctx);
     if (old_nvp > 0) ctx->RSSetViewports(old_nvp, old_vps);
     ctx->IASetVertexBuffers(1, 1, &old_vb1, &old_vb1_stride, &old_vb1_offset);
     KH_SAFE_RELEASE(old_vb1);
     backup.restore(ctx);
-
-    for (int r4 = 0; r4 < 4; ++r4) KH_SAFE_RELEASE(old_rtvs[r4]);
-
-    KH_SAFE_RELEASE(old_dsv);
+    khsd_om.release();
     g_ro.in_injection = prev_inj;
 
     // Every in-map caster for the fire's per-pixel reach test (engine axes; no
@@ -18734,7 +18488,6 @@ inline bool kh_cast_occ_build(ID3D11DeviceContext* khco_ctx, ConstantData& khco_
     // garbage-depth damage bound the Y test exists for survives intact.
     const float khco_step = khco_cell * 0.5f;
     const float khco_kinv = khco_k > 1.0e-6f ? (1.0f / khco_k) : 0.0f;
-    uint64_t khco_steps = 0;
     for (int i = 0; i < khco_n; ++i) {
         const float* e = g_sun_locals.data() + static_cast<size_t>(i) * 6u;
         const float khco_rr = khco_r[i];
@@ -18777,7 +18530,6 @@ inline bool kh_cast_occ_build(ID3D11DeviceContext* khco_ctx, ConstantData& khco_
                     if (khco_y1 > khco_row[x * 2 + 1]) khco_row[x * 2 + 1] = khco_y1;
                 }
             }
-            khco_steps++;
         }
     }
 
@@ -18811,8 +18563,6 @@ inline bool kh_cast_occ_build(ID3D11DeviceContext* khco_ctx, ConstantData& khco_
     }
     khco_ctx->Unmap(g_res.castocc_tex, 0);
 
-    uint64_t khco_used = 0;
-    for (size_t g = 0; g < khco_grid.size(); g += 2) if (khco_grid[g + 1] >= khco_grid[g]) khco_used++;
     // castMat[0].w = 1/cell (armed is > 0); castMat[1].w / castMat[2].w = grid origin
     // XZ - three lanes no other writer uses, so the CB layout is untouched. Not
     // castView[2].w: that lane is the cast strength (mask_cast_engine writes
@@ -19045,7 +18795,6 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
                            khep_pt > 0.004363f ||
                            khep_d > 0.012f) &&
                           khep_d < KH_LATCH_JUMP_M;
-        bool khep_via_bridge = false;
 
         if (!khep_moved) {
             RVExtBridge::ProjectionViewTransform khep_pv = {};
@@ -19066,7 +18815,6 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
                      khep_bpt > 0.004363f ||
                      khep_bd > 0.012f) && khep_bd < KH_LATCH_JUMP_M) {
                     khep_moved = true;
-                    khep_via_bridge = true;
                     khep_d = khep_bd;
                     khep_yd = khep_byd;
                 }
@@ -19543,19 +19291,6 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
                 }
 
                 g_fire_cast_inv_valid = true;
-                const double khoi_t[3] = { g_fire_view2[12], g_fire_view2[13], g_fire_view2[14] };
-                double khoi_sk2 = 0.0;
-
-                for (int khoi_j = 0; khoi_j < 3; ++khoi_j) {
-                    const double khoi_ct = -(khoi_t[0] * (khoi_c[khoi_j][0] / khoi_det) +
-                                             khoi_t[1] * (khoi_c[khoi_j][1] / khoi_det) +
-                                             khoi_t[2] * (khoi_c[khoi_j][2] / khoi_det));
-                    const double khoi_cT = -(khoi_t[0] * khoi_r[khoi_j][0] +
-                                             khoi_t[1] * khoi_r[khoi_j][1] +
-                                             khoi_t[2] * khoi_r[khoi_j][2]);
-                    khoi_sk2 += (khoi_ct - khoi_cT) * (khoi_ct - khoi_cT);
-                }
-
             }
         }
         g_fire_lock_valid = true;
@@ -20007,64 +19742,6 @@ static float    g_khlt_ref_cam[3] = {};   // Last bound-refused live camera.
 static bool     g_khlt_ref_ok = false;
 static float    g_khlt_lp[3] = {};
 static bool     g_khlt_lp_ok = false;
-// The seam has ridden the live fetch's scale terms; the visible box never has,
-// so through a zoom the two are exactly one frame apart in scale and the
-// engine's shadow verdicts leak across the silhouette. The seam's encode is
-// overridden by the engine's own sniffed pair whenever the arbitration chain
-// disagrees with it. The space check. Clip.w of a perspective transform is the
-// view depth, and we know the box centre's true distance from the camera
-// exactly.
-static float g_vpx_ctr[3] = { 0.0f, 0.0f, 0.0f };   // Box centre, engine axes.
-static float g_vpx_cam[3] = { 0.0f, 0.0f, 0.0f };   // Camera at the injection.
-static bool  g_vpx_geo_ok = false;
-
-static const int KH_VPXR_N = 4;
-static float    g_vpxr_vp[KH_VPXR_N][16] = {};
-static uint32_t g_vpxr_ser[KH_VPXR_N] = {};
-
-inline const float* kh_vpx_ref_find(uint32_t khr_ser) {
-    if (khr_ser == 0u) return nullptr;
-    for (int khr_i = 0; khr_i < KH_VPXR_N; ++khr_i) {
-        if (g_vpxr_ser[khr_i] == khr_ser) {  return g_vpxr_vp[khr_i]; }
-    }
-    return nullptr;
-}
-
-// Screen distance, in pixels of the main depth target, between one world point
-// projected through two row-vector view-projections.
-inline float kh_vpx_swing_px(const float* khr_a, const float* khr_b,
-                             const float* khr_wc) {
-    if (!g_main_depth_w || !g_main_depth_h) return -1.0f;
-    float khr_sx[2], khr_sy[2];
-
-    for (int khr_k = 0; khr_k < 2; ++khr_k) {
-        const float* khr_m = khr_k == 0 ? khr_a : khr_b;
-        float khr_c[4];
-
-        for (int khr_j = 0; khr_j < 4; ++khr_j) {
-            khr_c[khr_j] = khr_m[12 + khr_j]
-                         + khr_wc[0] * khr_m[0 + khr_j]
-                         + khr_wc[1] * khr_m[4 + khr_j]
-                         + khr_wc[2] * khr_m[8 + khr_j];
-        }
-
-        if (!(khr_c[3] > 0.05f)) return -1.0f;
-        khr_sx[khr_k] = (khr_c[0] / khr_c[3] * 0.5f + 0.5f) *
-                        static_cast<float>(g_main_depth_w);
-        khr_sy[khr_k] = (0.5f - khr_c[1] / khr_c[3] * 0.5f) *
-                        static_cast<float>(g_main_depth_h);
-    }
-
-    const float khr_dx = khr_sx[0] - khr_sx[1];
-    const float khr_dy = khr_sy[0] - khr_sy[1];
-    const float khr_d = sqrtf(khr_dx * khr_dx + khr_dy * khr_dy);
-    const float khr_diag = sqrtf(
-        static_cast<float>(g_main_depth_w) * static_cast<float>(g_main_depth_w) +
-        static_cast<float>(g_main_depth_h) * static_cast<float>(g_main_depth_h));
-    if (!(khr_d == khr_d) || khr_d > khr_diag) return -1.0f;
-    return khr_d;
-}
-
 // Seam draws issued with an enlarged footprint, and the factor used.
 
 static float    g_svs_prime_cam[3] = {};
@@ -21015,7 +20692,7 @@ inline bool kh_vmir_patch_b2(ID3D11DeviceContext* khvp_ctx) {
 
 // Engine dss / rasterizer / shaders / IA are never touched - the stencil
 // arithmetic stays the engine's own.
-static ID3D11RenderTargetView* g_vmir_sv_rtvs[4] = {};
+static ID3D11RenderTargetView* g_vmir_sv_rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
 static ID3D11DepthStencilView* g_vmir_sv_dsv = nullptr;
 static D3D11_VIEWPORT g_vmir_sv_vps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
 static UINT g_vmir_sv_nvp = 0;
@@ -21026,15 +20703,15 @@ static bool g_vmir_sv_b2_off_ok = false;
 
 inline bool kh_vmir_begin(ID3D11DeviceContext* khvb_ctx) {
     ID3D11UnorderedAccessView* khvb_uavs[8] = {};
-    khvb_ctx->OMGetRenderTargetsAndUnorderedAccessViews(4, g_vmir_sv_rtvs, &g_vmir_sv_dsv,
-                                                        0, 8, khvb_uavs);
+    khvb_ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, g_vmir_sv_rtvs, &g_vmir_sv_dsv);
+    khvb_ctx->OMGetRenderTargetsAndUnorderedAccessViews(0, nullptr, nullptr, 0, 8, khvb_uavs);   // UAV probe only.
     uint32_t khvb_un = 0;
     for (UINT khvb_i = 0; khvb_i < 8; ++khvb_i) {
         if (khvb_uavs[khvb_i]) khvb_un++;
         KH_SAFE_RELEASE(khvb_uavs[khvb_i]);
     }
     if (khvb_un > 0) {
-        for (int khvb_r = 0; khvb_r < 4; ++khvb_r) KH_SAFE_RELEASE(g_vmir_sv_rtvs[khvb_r]);
+        for (int khvb_r = 0; khvb_r < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++khvb_r) KH_SAFE_RELEASE(g_vmir_sv_rtvs[khvb_r]);
         KH_SAFE_RELEASE(g_vmir_sv_dsv);
         return false;
     }
@@ -21104,8 +20781,8 @@ inline bool kh_vmir_begin(ID3D11DeviceContext* khvb_ctx) {
 inline void kh_vmir_end(ID3D11DeviceContext* khvn_ctx) {
     khvn_ctx->RSSetState(g_vmir_sv_rs);   // Engine clip state back first.
     KH_SAFE_RELEASE(g_vmir_sv_rs);
-    khvn_ctx->OMSetRenderTargets(4, g_vmir_sv_rtvs, g_vmir_sv_dsv);
-    for (int khvn_r = 0; khvn_r < 4; ++khvn_r) KH_SAFE_RELEASE(g_vmir_sv_rtvs[khvn_r]);
+    khvn_ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, g_vmir_sv_rtvs, g_vmir_sv_dsv);
+    for (int khvn_r = 0; khvn_r < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++khvn_r) KH_SAFE_RELEASE(g_vmir_sv_rtvs[khvn_r]);
     KH_SAFE_RELEASE(g_vmir_sv_dsv);
     if (g_vmir_sv_nvp > 0) khvn_ctx->RSSetViewports(g_vmir_sv_nvp, g_vmir_sv_vps);
     ID3D11DeviceContext1* khvn_c1 = g_vmir_sv_b2_off_ok ? kh_ctx1(khvn_ctx) : nullptr;
@@ -21118,10 +20795,6 @@ inline void kh_vmir_end(ID3D11DeviceContext* khvn_ctx) {
 }
 
 inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint32_t khv_h) {
-    // Taken first, before this function touches any state, so the b2 we copy is
-    // the engine's - the transform its shadow-volume draws on either side of us
-    // are consuming.
-    kh_vpx_capture(ctx);
     if (!ctx) return;
 
     // Scan before stage, deliberately: the scan reads the previous frame's
@@ -21197,24 +20870,6 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
     // The source the footprint actually rasterises from, per frame. Boundary
     // override ranks above the 133 share because it runs after it.
 
-    if (g_ls.frame_view_valid) {
-        // The angle between the rotation we ended up with and the rotation
-        // g_ls.frame_view held at this instant. This is the discriminator
-        // between "adoption refused" and "frame_view itself moved".
-        const float* khv_fv = g_ls.frame_view;
-        float khv_ax[3] = { khv_pv.view[0][0], khv_pv.view[1][0], khv_pv.view[2][0] };
-        float khv_fx[3] = { khv_fv[0], khv_fv[4], khv_fv[8] };
-        float khv_la = sqrtf(khv_ax[0] * khv_ax[0] + khv_ax[1] * khv_ax[1] + khv_ax[2] * khv_ax[2]);
-        float khv_lf = sqrtf(khv_fx[0] * khv_fx[0] + khv_fx[1] * khv_fx[1] + khv_fx[2] * khv_fx[2]);
-
-        if (khv_la > 1.0e-6f && khv_lf > 1.0e-6f) {
-            float khv_d = (khv_ax[0] * khv_fx[0] + khv_ax[1] * khv_fx[1] +
-                           khv_ax[2] * khv_fx[2]) / (khv_la * khv_lf);
-            if (khv_d > 1.0f) khv_d = 1.0f;
-            if (khv_d < -1.0f) khv_d = -1.0f;
-        }
-    }
-
     if (g_ro.engine_proj_valid) {
         khv_pv.projection[2][2] = g_ro.engine_m22;
         khv_pv.projection[3][2] = g_ro.engine_m32;
@@ -21222,12 +20877,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
 
     RVExtBridge::ProjectionViewTransform khlt_live = {};
 
-    if (!RVExtBridge::get_projection_view_transform(khlt_live)) {
-    } else {
-        {
-            float khfd_c[3];
-            extract_camera_pos(khlt_live.view, khfd_c);
-        }
+    if (RVExtBridge::get_projection_view_transform(khlt_live)) {
         float khlt_ac[3];
         float khlt_lc[3];   // The translation anchor the take builds on.
         float khlt_vc[3];   // The camera the bridge holds at this instant.
@@ -21269,8 +20919,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
         float khlt_d = sqrtf(khlt_dx * khlt_dx + khlt_dy * khlt_dy +
                                    khlt_dz * khlt_dz);
 
-        if (khlt_d > KH_LATCH_JUMP_M) {
-        } else {
+        if (khlt_d <= KH_LATCH_JUMP_M) {
             // A foreign one-frame flicker never confirms - ser 3642 vanished on
             // its next frame.
             bool khlt_take = true;
@@ -21567,7 +21216,6 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
         ctx->PSGetConstantBuffers(0, 4, khcb_ps);
 
         const KhCbCensusEntry* khcb_best = nullptr;
-        uint8_t khcb_mask = 0;
 
         for (int khcb_i = 0; khcb_i < 8; ++khcb_i) {
             ID3D11Buffer* khcb_b =
@@ -21576,7 +21224,6 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
             const KhCbCensusEntry* khcb_e = kh_cbc_find(khcb_b);
 
             if (khcb_e) {
-                khcb_mask |= static_cast<uint8_t>(1u << khcb_i);
                 if (!khcb_best || khcb_e->ms > khcb_best->ms) khcb_best = khcb_e;
             }
         }
@@ -21709,11 +21356,9 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
 
     StateBackup backup;
     backup.capture(ctx);
-    ID3D11RenderTargetView* khv_old_rtvs[4] = {};
-    ID3D11DepthStencilView* khv_old_dsv = nullptr;
-    // OMSetRenderTargets(4,..) nulls every slot it does not name: an engine RTV
-    // bound at slots 4.7 here would be silently dropped.
-    ctx->OMGetRenderTargets(4, khv_old_rtvs, &khv_old_dsv);
+    KhOmSave khv_om;   // Full OM set (8 RTVs + DSV); the DSV is reused below.
+    khv_om.capture(ctx);
+    ID3D11DepthStencilView* const khv_old_dsv = khv_om.dsv;
     UINT khv_old_nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
     D3D11_VIEWPORT khv_old_vps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
     ctx->RSGetViewports(&khv_old_nvp, khv_old_vps);
@@ -21810,11 +21455,10 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
             khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, &khsk_vb, sizeof(khsk_vb));
         }
         if (g_svs_skip_valid && g_svs_skip_sig == khsk_h) {
-            ctx->OMSetRenderTargets(4, khv_old_rtvs, khv_old_dsv);
+            khv_om.restore(ctx);
             if (khv_old_nvp > 0) ctx->RSSetViewports(khv_old_nvp, khv_old_vps);
             backup.restore(ctx);
-            for (int khsk_r = 0; khsk_r < 4; ++khsk_r) KH_SAFE_RELEASE(khv_old_rtvs[khsk_r]);
-            KH_SAFE_RELEASE(khv_old_dsv);
+            khv_om.release();
             g_ro.in_injection = khv_prev_inj;
             return;
         }
@@ -21972,13 +21616,10 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
     }
 
     g_svs_skip_valid = true;   // KH_SVS_SKIP: this signature's pass completed.
-    ctx->OMSetRenderTargets(4, khv_old_rtvs, khv_old_dsv);
+    khv_om.restore(ctx);
     if (khv_old_nvp > 0) ctx->RSSetViewports(khv_old_nvp, khv_old_vps);
     backup.restore(ctx);
-
-    for (int r4 = 0; r4 < 4; ++r4) KH_SAFE_RELEASE(khv_old_rtvs[r4]);
-
-    KH_SAFE_RELEASE(khv_old_dsv);
+    khv_om.release();
     g_ro.in_injection = khv_prev_inj;
 }
 
@@ -22401,490 +22042,6 @@ inline void kh_fill_haze(ConstantData& khz_cb) {
     khz_cb.fog_sky_col[3] = g_light_probe.nb[50] + g_light_probe.nb[53];
 }
 
-struct KhPrbState {
-    // Stash (written at the injection, consumed at the flush).
-    bool  stash_valid = false;
-    float px_ctr = -1.0f, py_ctr = -1.0f;
-    float px_gnd = -1.0f, py_gnd = -1.0f;
-    float px_bot = -1.0f, py_bot = -1.0f;   // lower-quarter pixel (the mid-clip locale).
-    float m22 = 0.0f, m32 = 0.0f;
-    // in-flight copy (written at the flush, mapped next flush).
-    bool  depth_pending = false;
-    bool  vol_pending = false;
-    ID3D11Texture2D* stg_depth = nullptr;   // 3x1 R32G32_FLOAT (ctr, gnd, bot).
-    ID3D11Texture2D* stg_vol = nullptr;   // 1x1 staging, volume copy's format.
-    uint32_t stg_vol_fmt = 0;
-    ID3D11Texture2D* stg_pre = nullptr;   // 1x1 staging, live-depth format.
-    uint32_t stg_pre_fmt = 0;
-    bool  pre_pending = false;
-};
-static KhPrbState g_prb;
-
-// Engine 0.2236 everywhere, our injection 0.81643: a capture cannot confirm the
-// fix on the frames that matter.
-static const int KH_VPX_CH = 2;   // 0 = injection instant, 1 = counting draw.
-static ID3D11Buffer* g_vpx_stage[KH_VPX_CH] = { nullptr, nullptr };
-static bool     g_vpx_pending[KH_VPX_CH] = { false, false };
-static uint32_t g_vpx_issue_serial[KH_VPX_CH] = { 0, 0 };
-static uint32_t g_vpx_draw_mark = 0xFFFFFFFFu;   // Frame the draw channel last fired.
-
-inline void kh_vpx_release() {
-    for (int khx_i = 0; khx_i < KH_VPX_CH; ++khx_i) {
-        if (g_vpx_stage[khx_i]) { g_vpx_stage[khx_i]->Release(); g_vpx_stage[khx_i] = nullptr; }
-        g_vpx_pending[khx_i] = false;
-    }
-    g_vpx_draw_mark = 0xFFFFFFFFu;
-}
-
-// For a receiver at w < near, the volume boundary faces between the fragment
-// and the near plane are clipped out of existence in the engine's volume pass -
-// the distinguishing information never rasterizes.
-
-// One 64-byte GPU-side copy of the engine's bound VS b2 into channel khx_ch.
-inline void kh_vpx_grab(ID3D11DeviceContext* khx_ctx, int khx_ch) {
-    if (!khx_ctx || khx_ch < 0 || khx_ch >= KH_VPX_CH || g_vpx_pending[khx_ch]) return;
-
-    ID3D11Buffer* khx_src = nullptr;
-    khx_ctx->VSGetConstantBuffers(2, 1, &khx_src);
-    if (!khx_src) {  return; }
-
-    D3D11_BUFFER_DESC khx_sd = {};
-    khx_src->GetDesc(&khx_sd);
-
-    if (khx_sd.ByteWidth < 64) { khx_src->Release();  return; }
-
-    ID3D11Device* khx_dev = nullptr;
-    khx_ctx->GetDevice(&khx_dev);
-
-    if (khx_dev) {
-        if (!g_vpx_stage[khx_ch]) {
-            D3D11_BUFFER_DESC khx_bd = {};
-            khx_bd.ByteWidth = 64;
-            khx_bd.Usage = D3D11_USAGE_STAGING;
-            khx_bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-            if (FAILED(khx_dev->CreateBuffer(&khx_bd, nullptr, &g_vpx_stage[khx_ch]))) {
-                g_vpx_stage[khx_ch] = nullptr;
-            }
-        }
-
-        if (g_vpx_stage[khx_ch]) {
-            D3D11_BOX khx_box = { 0, 0, 0, 64, 1, 1 };
-            khx_ctx->CopySubresourceRegion(g_vpx_stage[khx_ch], 0, 0, 0, 0,
-                                           khx_src, 0, &khx_box);
-            g_vpx_pending[khx_ch] = true;
-            g_vpx_issue_serial[khx_ch] =
-                0u;
-        }
-
-        khx_dev->Release();
-    }
-
-    khx_src->Release();
-}
-
-inline void kh_vpx_capture(ID3D11DeviceContext* khx_ctx) { kh_vpx_grab(khx_ctx, 0); }
-
-// Channel 1: the first engine counting draw of the frame, which is the instant
-// whose b2 the shadow volumes actually consume.
-inline void kh_vpx_capture_draw(ID3D11DeviceContext* khx_ctx) {
-    const uint32_t khx_f = static_cast<uint32_t>(g_svs_frame_seq);
-    if (g_vpx_draw_mark == khx_f) return;   // Once per frame, at the first one.
-    g_vpx_draw_mark = khx_f;
-    kh_vpx_grab(khx_ctx, 1);
-}
-
-// Recover (m22, m32) from a view-projection: VP[r][3] == V[r][2] and, for r < 3
-// where V[r][3] is 0, VP[r][2] == V[r][2]*m22 - so m22 is the least-squares
-// ratio of column 2 to column 3 over the top three rows and m32 = VP[3][2] -
-// VP[3][3]*m22. Exact to nine digits on a synthetic V*P.
-inline bool kh_vpx_decode(const float* khx_f, float& khx_m22, float& khx_m32,
-                          float& khx_wcol) {
-    double khx_num = 0.0, khx_den = 0.0;
-
-    for (int khx_r = 0; khx_r < 3; ++khx_r) {
-        const double khx_c2 = khx_f[khx_r * 4 + 2];
-        const double khx_c3 = khx_f[khx_r * 4 + 3];
-        khx_num += khx_c2 * khx_c3;
-        khx_den += khx_c3 * khx_c3;
-    }
-
-    khx_wcol = static_cast<float>(sqrt(khx_den));
-    if (!(khx_den > 1.0e-12) || !(khx_wcol > 0.90f && khx_wcol < 1.10f)) return false;
-    khx_m22 = static_cast<float>(khx_num / khx_den);
-    if (!(fabsf(khx_m22) > 1.0e-9f)) return false;
-    khx_m32 = khx_f[14] - khx_f[15] * khx_m22;
-    return true;
-}
-
-inline void kh_vpx_flush(ID3D11DeviceContext* khx_ctx) {
-    if (!khx_ctx) return;
-
-    for (int khx_ch = 0; khx_ch < KH_VPX_CH; ++khx_ch) {
-        if (!g_vpx_pending[khx_ch] || !g_vpx_stage[khx_ch]) continue;
-
-        D3D11_MAPPED_SUBRESOURCE khx_m = {};
-        const HRESULT khx_hr = khx_ctx->Map(g_vpx_stage[khx_ch], 0, D3D11_MAP_READ,
-                                            D3D11_MAP_FLAG_DO_NOT_WAIT, &khx_m);
-
-        if (khx_hr == DXGI_ERROR_WAS_STILL_DRAWING) {  continue; }
-        if (FAILED(khx_hr)) { g_vpx_pending[khx_ch] = false;  continue; }
-
-        float khx_f[16];
-        memcpy(khx_f, khx_m.pData, sizeof(khx_f));
-        khx_ctx->Unmap(g_vpx_stage[khx_ch], 0);
-        g_vpx_pending[khx_ch] = false;
-
-        float khx_m22 = 0.0f, khx_m32 = 0.0f, khx_wcol = -1.0f;
-        if (!kh_vpx_decode(khx_f, khx_m22, khx_m32, khx_wcol)) {
-            continue;
-        }
-
-        // Which space does this matrix expect? Clip.w is the view depth, so the
-        // transform of the box centre must reproduce the centre's known
-        // distance from the camera.
-
-        // The age, in trace rows, between the row that issued this copy and the
-        // row publishing it. Without this the alternating near classes make two
-        // different alignments fit the same data - which is exactly what made
-        // the reading ambiguous.
-
-        float khx_swing = -1.0f;
-        if (g_vpx_geo_ok) {
-            const float* khx_ref = kh_vpx_ref_find(g_vpx_issue_serial[khx_ch]);
-            if (khx_ref) {
-                const float khx_rel[3] = { g_vpx_ctr[0] - g_vpx_cam[0],
-                                           g_vpx_ctr[1] - g_vpx_cam[1],
-                                           g_vpx_ctr[2] - g_vpx_cam[2] };
-                khx_swing = kh_vpx_swing_px(khx_f, khx_ref, khx_rel);
-            }
-        }
-    }
-}
-
-inline void kh_prb_release() {
-    KH_SAFE_RELEASE(g_prb.stg_depth);
-    KH_SAFE_RELEASE(g_prb.stg_vol);
-    KH_SAFE_RELEASE(g_prb.stg_pre);
-    g_prb.stg_pre_fmt = 0;
-    g_prb.pre_pending = false;
-    g_prb.stg_vol_fmt = 0;
-    g_prb.stash_valid = false;
-    g_prb.depth_pending = false;
-    g_prb.vol_pending = false;
-}
-
-// At the injection, with pv final for depth purposes: project the box centre
-// and the below-box ground point through the painted transform and stash
-// everything the flush-time sampler and next-frame decoder need. Row-vector
-// convention throughout (world = p * V * P), matching every other consumer of
-// pv in this TU.
-inline void kh_prb_stash(ID3D11DeviceContext* ctx,
-                         const RVExtBridge::ProjectionViewTransform& pv,
-                         const float khpb_pos[3], const float khpb_size[3]) {
-    g_prb.stash_valid = false;
-
-    if (!ctx) return;
-
-    D3D11_VIEWPORT khpb_vp = {};
-    UINT khpb_nvp = 1;
-    ctx->RSGetViewports(&khpb_nvp, &khpb_vp);
-    if (khpb_nvp == 0 || khpb_vp.Width < 8.0f || khpb_vp.Height < 8.0f) {
-        return;
-    }
-
-    // SQF [x, y, zASL] -> engine axes {x, z, y} (the staging loop's own
-    // conversion); ground point 2 m below the bottom face.
-    const float khpb_me[3] = { khpb_pos[0], khpb_pos[2], khpb_pos[1] };
-    const float khpb_half_h = khpb_size[2] * 0.5f;
-    const float khpb_gd[3] = { khpb_me[0],
-                               khpb_me[1] - khpb_half_h - 2.0f,
-                               khpb_me[2] };
-
-    float khpb_cam[3];
-    extract_camera_pos(pv.view, khpb_cam);
-    const float khpb_dx = khpb_me[0] - khpb_cam[0];
-    const float khpb_dy = khpb_me[1] - khpb_cam[1];
-    const float khpb_dz = khpb_me[2] - khpb_cam[2];
-    const float khpb_dist = sqrtf(khpb_dx * khpb_dx + khpb_dy * khpb_dy +
-                                  khpb_dz * khpb_dz);
-    g_vpx_ctr[0] = khpb_me[0]; g_vpx_ctr[1] = khpb_me[1]; g_vpx_ctr[2] = khpb_me[2];
-    g_vpx_cam[0] = khpb_cam[0]; g_vpx_cam[1] = khpb_cam[1]; g_vpx_cam[2] = khpb_cam[2];
-    g_vpx_geo_ok = (khpb_dist > 0.01f);
-
-    auto khpb_project = [&](const float khpb_p[3], float& khpb_px,
-                            float& khpb_py) -> bool {
-        float khpb_v[4];
-        for (int khpb_j = 0; khpb_j < 4; ++khpb_j) {
-            khpb_v[khpb_j] = khpb_p[0] * pv.view[0][khpb_j] +
-                             khpb_p[1] * pv.view[1][khpb_j] +
-                             khpb_p[2] * pv.view[2][khpb_j] +
-                             pv.view[3][khpb_j];
-        }
-        float khpb_c[4];
-        for (int khpb_j = 0; khpb_j < 4; ++khpb_j) {
-            khpb_c[khpb_j] = khpb_v[0] * pv.projection[0][khpb_j] +
-                             khpb_v[1] * pv.projection[1][khpb_j] +
-                             khpb_v[2] * pv.projection[2][khpb_j] +
-                             khpb_v[3] * pv.projection[3][khpb_j];
-        }
-        if (khpb_c[3] <= 1.0e-4f) return false;   // Behind / at the camera.
-        const float khpb_nx = khpb_c[0] / khpb_c[3];
-        const float khpb_ny = khpb_c[1] / khpb_c[3];
-        khpb_px = (khpb_nx * 0.5f + 0.5f) * khpb_vp.Width + khpb_vp.TopLeftX;
-        khpb_py = (0.5f - khpb_ny * 0.5f) * khpb_vp.Height + khpb_vp.TopLeftY;
-        return khpb_px >= khpb_vp.TopLeftX + 1.0f &&
-               khpb_px <= khpb_vp.TopLeftX + khpb_vp.Width - 2.0f &&
-               khpb_py >= khpb_vp.TopLeftY + 1.0f &&
-               khpb_py <= khpb_vp.TopLeftY + khpb_vp.Height - 2.0f;
-    };
-
-    const float khpb_bt[3] = { khpb_me[0],
-                               khpb_me[1] - khpb_half_h * 0.5f,
-                               khpb_me[2] };
-
-    float khpb_pcx, khpb_pcy, khpb_pgx, khpb_pgy, khpb_pbx, khpb_pby;
-    if (!khpb_project(khpb_me, khpb_pcx, khpb_pcy)) {
-        return;
-    }
-    // Pre-seed with the centre pixel: a behind-camera projection leaves its
-    // outputs untouched, and the centre is the safe stand-in.
-    khpb_pgx = khpb_pcx; khpb_pgy = khpb_pcy;
-    khpb_pbx = khpb_pcx; khpb_pby = khpb_pcy;
-    khpb_project(khpb_gd, khpb_pgx, khpb_pgy);   // Clamped at copy time.
-    khpb_project(khpb_bt, khpb_pbx, khpb_pby);
-
-    g_prb.px_ctr = khpb_pcx; g_prb.py_ctr = khpb_pcy;
-    g_prb.px_gnd = khpb_pgx; g_prb.py_gnd = khpb_pgy;
-    g_prb.px_bot = khpb_pbx; g_prb.py_bot = khpb_pby;
-    g_prb.m22 = pv.projection[2][2];
-    g_prb.m32 = pv.projection[3][2];
-    g_prb.stash_valid = true;
-
-    // Mid-scene by design: pre-us content is the question. Mapped next flush
-    // with the others; single-sample sources only.
-    if (!g_prb.pre_pending) {
-        ID3D11DepthStencilView* khpb_dsv = nullptr;
-        ctx->OMGetRenderTargets(0, nullptr, &khpb_dsv);
-
-        if (khpb_dsv) {
-            ID3D11Resource* khpb_res = nullptr;
-            khpb_dsv->GetResource(&khpb_res);
-            ID3D11Texture2D* khpb_tex = nullptr;
-
-            if (khpb_res &&
-                SUCCEEDED(khpb_res->QueryInterface(__uuidof(ID3D11Texture2D),
-                                                   reinterpret_cast<void**>(&khpb_tex)))) {
-                D3D11_TEXTURE2D_DESC khpb_dd = {};
-                khpb_tex->GetDesc(&khpb_dd);
-
-                if (khpb_dd.SampleDesc.Count == 1 && khpb_dd.ArraySize == 1) {
-                    ID3D11Device* khpb_dev = nullptr;
-                    ctx->GetDevice(&khpb_dev);
-
-                    if (khpb_dev) {
-                        if (g_prb.stg_pre &&
-                            g_prb.stg_pre_fmt != static_cast<uint32_t>(khpb_dd.Format)) {
-                            KH_SAFE_RELEASE(g_prb.stg_pre);
-                        }
-
-                        if (!g_prb.stg_pre) {
-                            D3D11_TEXTURE2D_DESC khpb_sd = {};
-                            khpb_sd.Width = 1;
-                            khpb_sd.Height = 1;
-                            khpb_sd.MipLevels = 1;
-                            khpb_sd.ArraySize = 1;
-                            khpb_sd.Format = khpb_dd.Format;
-                            khpb_sd.SampleDesc.Count = 1;
-                            khpb_sd.Usage = D3D11_USAGE_STAGING;
-                            khpb_sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-                            if (SUCCEEDED(khpb_dev->CreateTexture2D(&khpb_sd, nullptr,
-                                                                    &g_prb.stg_pre))) {
-                                g_prb.stg_pre_fmt = static_cast<uint32_t>(khpb_dd.Format);
-                            } else {
-                                g_prb.stg_pre = nullptr;
-                            }
-                        }
-
-                        if (g_prb.stg_pre) {
-                            const uint32_t khpb_bx = g_prb.px_bot < 0.0f ? 0
-                                : (static_cast<uint32_t>(g_prb.px_bot) >= khpb_dd.Width
-                                       ? khpb_dd.Width - 1
-                                       : static_cast<uint32_t>(g_prb.px_bot));
-                            const uint32_t khpb_by = g_prb.py_bot < 0.0f ? 0
-                                : (static_cast<uint32_t>(g_prb.py_bot) >= khpb_dd.Height
-                                       ? khpb_dd.Height - 1
-                                       : static_cast<uint32_t>(g_prb.py_bot));
-                            D3D11_BOX khpb_bb = { khpb_bx, khpb_by, 0,
-                                                  khpb_bx + 1, khpb_by + 1, 1 };
-                            ctx->CopySubresourceRegion(g_prb.stg_pre, 0, 0, 0, 0,
-                                                       khpb_tex, 0, &khpb_bb);
-                            g_prb.pre_pending = true;
-                        }
-
-                        khpb_dev->Release();
-                    }
-                }
-
-                khpb_tex->Release();
-            }
-
-            if (khpb_res) khpb_res->Release();
-            khpb_dsv->Release();
-        }
-    }
-}
-
-inline void kh_prb_flush(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
-    if (!dev || !ctx) return;
-
-    // 1 map + publish the in-flight samples.
-    if (g_prb.depth_pending && g_prb.stg_depth) {
-        D3D11_MAPPED_SUBRESOURCE khpf_m = {};
-        const HRESULT khpf_hr = ctx->Map(g_prb.stg_depth, 0, D3D11_MAP_READ,
-                                         D3D11_MAP_FLAG_DO_NOT_WAIT, &khpf_m);
-
-        if (khpf_hr == DXGI_ERROR_WAS_STILL_DRAWING) {
-        } else if (SUCCEEDED(khpf_hr)) {
-            ctx->Unmap(g_prb.stg_depth, 0);
-            g_prb.depth_pending = false;
-
-        } else {
-            g_prb.depth_pending = false;   // Map refused: drop, count.
-        }
-    }
-
-    if (g_prb.vol_pending && g_prb.stg_vol) {
-        D3D11_MAPPED_SUBRESOURCE khpf_m = {};
-        const HRESULT khpf_hr = ctx->Map(g_prb.stg_vol, 0, D3D11_MAP_READ,
-                                         D3D11_MAP_FLAG_DO_NOT_WAIT, &khpf_m);
-
-        if (khpf_hr == DXGI_ERROR_WAS_STILL_DRAWING) {
-        } else if (SUCCEEDED(khpf_hr)) {
-            const uint32_t* khpf_vp = static_cast<const uint32_t*>(khpf_m.pData);
-            const uint32_t khpf_v = khpf_vp[0];
-            ctx->Unmap(g_prb.stg_vol, 0);
-            g_prb.vol_pending = false;
-
-        } else {
-            g_prb.vol_pending = false;
-        }
-    }
-
-    if (g_prb.pre_pending && g_prb.stg_pre) {
-        D3D11_MAPPED_SUBRESOURCE khpf_m = {};
-        const HRESULT khpf_hr = ctx->Map(g_prb.stg_pre, 0, D3D11_MAP_READ,
-                                         D3D11_MAP_FLAG_DO_NOT_WAIT, &khpf_m);
-
-        if (khpf_hr == DXGI_ERROR_WAS_STILL_DRAWING) {
-        } else if (SUCCEEDED(khpf_hr)) {
-            float khpf_pz = -1.0f;
-            const uint32_t khpf_fmt = g_prb.stg_pre_fmt;
-
-            if (khpf_fmt == 39 /*R32_TYPELESS*/ || khpf_fmt == 40 /*D32_FLOAT*/ ||
-                khpf_fmt == 41 /*R32_FLOAT*/) {
-                khpf_pz = *static_cast<const float*>(khpf_m.pData);
-            } else {
-                const uint32_t khpf_v = *static_cast<const uint32_t*>(khpf_m.pData);
-                khpf_pz = static_cast<float>(khpf_v & 0x00FFFFFFu) / 16777215.0f;
-            }
-
-            ctx->Unmap(g_prb.stg_pre, 0);
-            g_prb.pre_pending = false;
-
-        } else {
-            g_prb.pre_pending = false;
-        }
-    }
-
-    // 2 issue this frame's copies from the stashed pixel.
-    if (!g_prb.stash_valid) return;
-    g_prb.stash_valid = false;   // One flush consumes one stash.
-
-    if (g_prb.depth_pending || g_prb.vol_pending) {
-        return;
-    }
-
-    if (!g_res.comp_depth_tex || g_res.comp_depth_w == 0) {
-        return;
-    }
-
-    if (!g_prb.stg_depth) {
-        D3D11_TEXTURE2D_DESC khpf_sd = {};
-        khpf_sd.Width = 3;
-        khpf_sd.Height = 1;
-        khpf_sd.MipLevels = 1;
-        khpf_sd.ArraySize = 1;
-        // Must match comp_depth_tex's format or the copy is dropped.
-        khpf_sd.Format = DXGI_FORMAT_R32G32_FLOAT;
-        khpf_sd.SampleDesc.Count = 1;
-        khpf_sd.Usage = D3D11_USAGE_STAGING;
-        khpf_sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        if (FAILED(dev->CreateTexture2D(&khpf_sd, nullptr, &g_prb.stg_depth))) {
-            g_prb.stg_depth = nullptr;
-            return;
-        }
-    }
-
-    const uint32_t khpf_cw = g_res.comp_depth_w, khpf_ch = g_res.comp_depth_h;
-    auto khpf_clamp = [](float khpf_v, uint32_t khpf_n) -> uint32_t {
-        if (khpf_v < 0.0f) return 0;
-        const uint32_t khpf_i = static_cast<uint32_t>(khpf_v);
-        return khpf_i >= khpf_n ? khpf_n - 1 : khpf_i;
-    };
-    const uint32_t khpf_cx = khpf_clamp(g_prb.px_ctr, khpf_cw);
-    const uint32_t khpf_cy = khpf_clamp(g_prb.py_ctr, khpf_ch);
-    const uint32_t khpf_gx = khpf_clamp(g_prb.px_gnd, khpf_cw);
-    const uint32_t khpf_gy = khpf_clamp(g_prb.py_gnd, khpf_ch);
-    const uint32_t khpf_bx = khpf_clamp(g_prb.px_bot, khpf_cw);
-    const uint32_t khpf_by = khpf_clamp(g_prb.py_bot, khpf_ch);
-
-    D3D11_BOX khpf_b = { khpf_cx, khpf_cy, 0, khpf_cx + 1, khpf_cy + 1, 1 };
-    ctx->CopySubresourceRegion(g_prb.stg_depth, 0, 0, 0, 0,
-                               g_res.comp_depth_tex, 0, &khpf_b);
-    khpf_b = { khpf_gx, khpf_gy, 0, khpf_gx + 1, khpf_gy + 1, 1 };
-    ctx->CopySubresourceRegion(g_prb.stg_depth, 0, 1, 0, 0,
-                               g_res.comp_depth_tex, 0, &khpf_b);
-    khpf_b = { khpf_bx, khpf_by, 0, khpf_bx + 1, khpf_by + 1, 1 };
-    ctx->CopySubresourceRegion(g_prb.stg_depth, 0, 2, 0, 0,
-                               g_res.comp_depth_tex, 0, &khpf_b);
-    g_prb.depth_pending = true;
-
-    // Volume copy: same dims as the main depth by the readiness gates; the
-    // stash pixel is directly reusable.
-    if (g_svs_vol_tex && g_svs_vol_w == khpf_cw && g_svs_vol_h == khpf_ch) {
-        if (g_prb.stg_vol && g_prb.stg_vol_fmt != g_svs_vol_fmt) {
-            KH_SAFE_RELEASE(g_prb.stg_vol);
-        }
-
-        if (!g_prb.stg_vol) {
-            D3D11_TEXTURE2D_DESC khpf_vd = {};
-            khpf_vd.Width = 2;
-            khpf_vd.Height = 1;
-            khpf_vd.MipLevels = 1;
-            khpf_vd.ArraySize = 1;
-            khpf_vd.Format = static_cast<DXGI_FORMAT>(g_svs_vol_fmt);
-            khpf_vd.SampleDesc.Count = 1;
-            khpf_vd.Usage = D3D11_USAGE_STAGING;
-            khpf_vd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-            if (SUCCEEDED(dev->CreateTexture2D(&khpf_vd, nullptr, &g_prb.stg_vol))) {
-                g_prb.stg_vol_fmt = g_svs_vol_fmt;
-            } else {
-                g_prb.stg_vol = nullptr;
-            }
-        }
-
-        if (g_prb.stg_vol) {
-            khpf_b = { khpf_cx, khpf_cy, 0, khpf_cx + 1, khpf_cy + 1, 1 };
-            ctx->CopySubresourceRegion(g_prb.stg_vol, 0, 0, 0, 0,
-                                       g_svs_vol_tex, 0, &khpf_b);
-            khpf_b = { khpf_gx, khpf_gy, 0, khpf_gx + 1, khpf_gy + 1, 1 };
-            ctx->CopySubresourceRegion(g_prb.stg_vol, 0, 1, 0, 0,
-                                       g_svs_vol_tex, 0, &khpf_b);
-            g_prb.vol_pending = true;
-        }
-    }
-}
-
 // KH_MESH_OWNER_PREPASS: (re)create the owner map to match the injection DSV's
 // dims and sample pattern.
 inline bool kh_owner_ensure(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& kho_td) {
@@ -23008,10 +22165,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     kh_dls_frame(ctx);   // KH_DLS_FRAME twin 1/2 - after the sun, never inside it.
 
     RVExtBridge::ProjectionViewTransform pv = {};
-    float khiv_live[9];
     float khiv_live_near = -1.0f;
-    float khiv_live_far = -1.0f;
-    bool  khiv_live_ok = false;
 
     if (g_ro.cycle_pv_valid) {
         pv = g_ro.cycle_pv;
@@ -23026,15 +22180,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             kh_cam_of(live.view, khlp_vc);
             const float khlp_d2 = latch_cam_dist_sq(khlp_lc, khlp_vc);
 
-            for (int khiv_r = 0; khiv_r < 3; ++khiv_r) {
-                for (int khiv_c = 0; khiv_c < 3; ++khiv_c) {
-                    khiv_live[khiv_r * 3 + khiv_c] = live.view[khiv_r][khiv_c];
-                }
-            }
             khiv_live_near = (fabsf(live.projection[2][2]) > 1.0e-9f)
                            ? (-live.projection[3][2] / live.projection[2][2]) : -1.0f;
-            khiv_live_far = kh_enc_far(live.projection[2][2], live.projection[3][2]);
-            khiv_live_ok = true;
 
             // In-band refresh / exclusive-pending adoption.
             if (khiv_live_near > 0.0f) {
@@ -23108,13 +22255,11 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             bool  khcf_ok = khcf_sx == khcf_sx && khcf_sy == khcf_sy &&
                             khcf_lx > 1.0e-6f && khcf_ly > 1.0e-6f &&
                             khcf_sx > 1.0e-6f && khcf_sy > 1.0e-6f;
-            float khcf_r = -1.0f;
 
             if (khcf_ok) {
                 const float khcf_rx = khcf_sx / khcf_lx;
                 const float khcf_ry = khcf_sy / khcf_ly;
                 const float khcf_hi = khcf_rx > khcf_ry ? khcf_rx : khcf_ry;
-                khcf_r = khcf_rx;
                 // Aspect preserved, to 1 pct of the larger ratio.
                 if (fabsf(khcf_rx - khcf_ry) > 0.01f * khcf_hi) khcf_ok = false;
                 // And inside the foreign-window line, both ways.
@@ -23140,7 +22285,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     {
         uint8_t khav_path = 0;
         float khav_age_ms = -1.0f;
-        bool khsv_took = false;   // Seam view copied into pv this frame.
             kh_adopt_frame_view(pv, &khav_path, &khav_age_ms);
 
 
@@ -23218,7 +22362,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 g_comp_cam_take[2] = static_cast<float>(khsr_useq[2]);
                 g_comp_cam_take_ok = true;
 
-                khsv_took = true;
             }
         }
 
@@ -23255,13 +22398,9 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
 
     const bool khr_slot_band = snap_slot_near >= KH_INJ_SLOT_NEAR_MIN;
     const bool khr_slot_sane_far = kh_enc_far(snap_slot_m22, snap_slot_m32) <= KH_ENC_FAR_MAX;
-    bool khr_inj_band_rej = false;
     uint8_t khr_enc_src = measured ? 1 : 0;
     bool khr_far_phase = false;   // Far pair is this phase's truth (set at the far-inject branch).
 
-    if (snap_slot_near > 0.0f && !(khr_slot_band && khr_slot_sane_far)) {
-        khr_inj_band_rej = true;
-    }
 
     if (snap_world_valid) {
         // Parity by construction: this is the pair the world opaques we
@@ -23384,10 +22523,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     g_inj_enc_ms = steady_now_ms();
     memcpy(g_inj_view, &pv.view[0][0], sizeof(g_inj_view));
     g_inj_view_ms = g_inj_enc_ms;
-
-    if (!meshes.empty()) {
-        kh_prb_stash(ctx, pv, meshes[0].pos, meshes[0].size);
-    }
 
     static bool khr_arb_prev_armed = false;   // Injection site is render-thread-only.
 
@@ -24014,37 +23149,13 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             }
         }
 
-        // The gap arithmetic, done in-build rather than left to a reader. A
-        // slot holds content for [near - D, far - D] from the live camera, so
-        // consecutive slots leave a hole when the drift difference exceeds the
-        // authored overlap. A slot with an unrecoverable camera is skipped
-        // rather than guessed at.
-        {
-            float khgp_worst = -1.0e9f;
-            int   khgp_which = -1;
-            for (int khgp_i = 0; khgp_i + 1 < 8; ++khgp_i) {
-                if (!(g_band_tab_far[khgp_i] > 0.0f) ||
-                    !(g_band_tab_near[khgp_i + 1] > 0.0f)) continue;
-                if (g_band_tab_cdx[khgp_i] < 0.0f ||
-                    g_band_tab_cdx[khgp_i + 1] < 0.0f) continue;
-                const float khgp_g =
-                    (g_band_tab_near[khgp_i + 1] - g_band_tab_cdx[khgp_i + 1]) -
-                    (g_band_tab_far[khgp_i]      - g_band_tab_cdx[khgp_i]);
-                if (khgp_g > khgp_worst) { khgp_worst = khgp_g; khgp_which = khgp_i; }
-            }
-            // Latch the whole table at the worst frame. A few-frame artifact is
-            // invisible to a last-frame snapshot.
-        }
-
         if (band_any && kh_sun_settled() &&
             (g_atlas_frame_cur || g_atlas_frame_prev)) {   // sun-settle gate + atlas.
             khr_cbf.mask_meta[0] = 1.0f;   // Stream liveness: the receive.
         }
         if (band_any && g_ls.atlas_size > 0) {
-            float khud_su = -1.0f, khud_sv = -1.0f;
             float khud_p[3] = { 0.0f, 0.0f, 0.0f };
             float khud_n0 = 0.0f;   // Sealed |sm row0|^2 (atlas-uv/m)^2.
-            float khud_sn = 0.0f;
             int   khud_slot = -1;
             for (int khud_b = 0; khud_b < 8 && khud_slot < 0; ++khud_b) {
                 const auto& khud_bs = g_ls.band[order[khud_b]];
@@ -24088,15 +23199,12 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                                          khud_bs.sm[1] * khud_bs.sm[1] +
                                          khud_bs.sm[2] * khud_bs.sm[2];
                     if (khud_q > 1.0e-18f) {
-                        khud_su = khud_u; khud_sv = khud_v;
                         khud_slot = order[khud_b];
                         khud_n0 = khud_q;
-                        khud_sn = sqrtf(khud_q);
                     }
                 }
             }
             if (khud_slot >= 0) {
-                float khud_lu = -1.0f, khud_lv = -1.0f;
                 uint64_t khud_best = 0;
                 for (uint32_t khud_i = 0; khud_i < g_ls.count; ++khud_i) {
                     const LiveShadowEntry& khud_e = g_ls.entries[khud_i];
@@ -24120,7 +23228,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                         khud_uu > khud_e.tile[2] + 2.0f * khud_ew ||
                         khud_vv < khud_e.tile[1] - 2.0f * khud_eh ||
                         khud_vv > khud_e.tile[3] + 2.0f * khud_eh) continue;
-                    khud_lu = khud_uu; khud_lv = khud_vv;
                     khud_best = khud_e.stamp;
                 }
             }
@@ -24463,27 +23570,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             g_inj_dp[2] = cbd.depth_params[2];
             g_inj_dp[3] = cbd.depth_params[3];
             g_inj_dp_valid = true;
-            if (khr_far_arb && &o == &meshes[0] && g_snap_pair_src != 0 &&
-                g_snap_cam_valid && g_thm_valid) {
-                // SQF [x, y, zASL] -> engine (x, zASL, y); engine-y half extent
-                // is the SQF z half size.
-                const float khaj_ref[3] = { o.pos[0], o.pos[2] - 0.5f * o.size[2], o.pos[1] };
-                const float khaj_dx = khaj_ref[0] - cam[0];
-                const float khaj_dy = khaj_ref[1] - cam[1];
-                const float khaj_dz = khaj_ref[2] - cam[2];
-                const float khaj_D = sqrtf(khaj_dx * khaj_dx + khaj_dy * khaj_dy + khaj_dz * khaj_dz);
-                if (khaj_D > 1.0f && khaj_D < 1.0e5f) {
-                    // Decode error: raw written under the snapshot pair, read
-                    // with ours.
-                    const float khaj_raw = g_snap_pair[0] + g_snap_pair[1] / khaj_D;
-                    const float khaj_den = khaj_raw - cbd.depth_params[0];
-                    float khaj_ep = 0.0f;
-                    if (khaj_den < -1.0e-7f) {
-                        const float khaj_z = cbd.depth_params[1] / khaj_den;
-                        khaj_ep = (khaj_z > 0.0f) ? (khaj_z - khaj_D) : 0.0f;
-                    }
-                }
-            }
         } else {
             // No depth copy this frame: the plain-pipeline fallback PS now
             // carries the same guard contract, so stand it down explicitly -
@@ -25034,9 +24120,9 @@ inline void kh_svs_prime_mask(ID3D11DeviceContext* ctx) {
     g_ro.in_injection = true;
     StateBackup khp_bk;
     khp_bk.capture(ctx);
-    ID3D11RenderTargetView* khp_old_rtvs[4] = {};
-    ID3D11DepthStencilView* khp_old_dsv = nullptr;
-    ctx->OMGetRenderTargets(4, khp_old_rtvs, &khp_old_dsv);
+    KhOmSave khp_om;   // Full OM set (8 RTVs + DSV); the DSV is rebound below.
+    khp_om.capture(ctx);
+    ID3D11DepthStencilView* const khp_old_dsv = khp_om.dsv;
     UINT khp_nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
     D3D11_VIEWPORT khp_old_vps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
     ctx->RSGetViewports(&khp_nvp, khp_old_vps);
@@ -25136,11 +24222,10 @@ inline void kh_svs_prime_mask(ID3D11DeviceContext* ctx) {
 
     }
 
-    ctx->OMSetRenderTargets(4, khp_old_rtvs, khp_old_dsv);
+    khp_om.restore(ctx);
     if (khp_nvp > 0) ctx->RSSetViewports(khp_nvp, khp_old_vps);
     khp_bk.restore(ctx);
-    for (int r = 0; r < 4; ++r) KH_SAFE_RELEASE(khp_old_rtvs[r]);
-    KH_SAFE_RELEASE(khp_old_dsv);
+    khp_om.release();
     g_ro.in_injection = khp_prev;
 }
 
@@ -25448,10 +24533,8 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
     // our depth when the stencil counting reads it.
     kh_volume_seam_pump(self);
 
-    // Count this draw after the pump.
+    // The mirror-pass survey, after the pump, armed only.
     if (g_svs_vol_dsv_now && !g_ro.in_injection) {
-        kh_vpx_capture_draw(self);
-        // The mirror-pass survey, same instant, armed only.
         {
             const uint32_t khmr_f = static_cast<uint32_t>(g_svs_frame_seq);
             // Frame-seq alone could not separate them - both sessions share the
@@ -27102,7 +26185,6 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     const bool khf_pub_valid = g_inj_enc_ms != 0 && g_inj_enc_near > 0.0f;
     bool khf_inj_pair = khf_pub_valid && injected_since_last_flush;
-    bool khf_inj_hold = false;
     bool khf_latch_far = false;
 
     if (!khf_inj_pair && khf_pub_valid) {
@@ -27122,7 +26204,6 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 0.25f * fmaxf(fabsf(khf_pv_m221), 1e-6f);
 
             if (khf_far_agree) {
-                khf_inj_hold = true;
                 khf_inj_pair = true;
             } else {
                 khf_latch_far = true;
@@ -27225,10 +26306,6 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                                   fabsf(pv.projection[2][2]) > 1.0e-6f &&
                                   g_snap_vp_hi > g_snap_vp_lo;
             }
-            // Behind the snapshot's own success so the probe never reads a
-            // stale resolve.
-            kh_prb_flush(dev, ctx);
-            kh_vpx_flush(ctx);   // Decode last frame's b2 into this row.
         }
     }
 
@@ -29202,7 +28279,6 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     bool                      khuf_live = false;
     ConstantData              khuf_cbd;
-    int                       khuf_effect = 0;
     ID3D11ShaderResourceView* khuf_lut = nullptr;
 
     auto khuf_flush = [&](bool khuf_final) {
@@ -29405,7 +28481,6 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
         } else {
             khuf_cbd = cbd;
-            khuf_effect = o.effect;
             khuf_lut = khu_lut;
             khuf_live = true;
         }
@@ -29540,7 +28615,6 @@ inline void reset_stat_counters() {
     g_fire_count_frame = 0;
     g_fire_clamp_painted = 0;
     g_svs_post_made = 0;
-    for (int khrs_i = 0; khrs_i < KH_VPXR_N; ++khrs_i) g_vpxr_ser[khrs_i] = 0u;
     g_comp_cam_take_ok = false;
     g_svs_seam_view_valid = false; g_svs_seam_view_seq = 0;
     g_sun_band_reach[0] = g_sun_band_reach[1] = g_sun_band_reach[2] = -1.0f;
@@ -29569,8 +28643,6 @@ inline void reset_stat_counters() {
     g_khlt_lp_ok = false;
     g_khlt_ref_ok = false;
     g_far_keep_m22 = 0.0f; g_far_keep_m32 = 0.0f; g_far_keep_far = -1.0f; g_far_keep_ms = 0;
-    kh_prb_release();
-    kh_vpx_release();
     g_ls.band_captures = 0;
     g_ls.band_bail_slot = 0; g_ls.band_bail_time = 0;
 }
@@ -29696,8 +28768,6 @@ inline void reset_session_state() {
     g_khlt_ref_ok = false;
     g_far_keep_m22 = 0.0f; g_far_keep_m32 = 0.0f; g_far_keep_far = -1.0f; g_far_keep_ms = 0;
 
-    kh_prb_release();
-    kh_vpx_release();
 
 
     g_khfx_pair_near = -1.0f; g_khfx_cand_near = -1.0f; g_khfx_pair_ms = 0;

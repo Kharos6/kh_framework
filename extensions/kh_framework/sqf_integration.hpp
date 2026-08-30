@@ -6757,7 +6757,6 @@ static game_value get_render_stats_sqf() {
 
         const RenderIntegration::RenderStats& s = RenderIntegration::g_stats;
         auto_array<game_value> out;
-        out.push_back(kv("buildTag", static_cast<float>(RenderIntegration::KH_BUILD_TAG)));
         out.push_back(kv("objects", static_cast<float>(khrs_objects)));
         out.push_back(kv("meshObjects", static_cast<float>(khrs_meshes)));
         out.push_back(kv("fullscreenEffects", static_cast<float>(khrs_fullscreen)));
@@ -6825,7 +6824,6 @@ static game_value dump_render_trace_sqf() {
         }
 
         auto_array<game_value> out;
-        out.push_back(kv("buildTag", static_cast<float>(RenderIntegration::KH_BUILD_TAG)));
         out.push_back(kv("locked", khrt_got ? 1.0f : 0.0f));
         out.push_back(kv("frameCycles", static_cast<float>(khrt_cycles)));
         out.push_back(kv("depthClears", static_cast<float>(khrt_clears)));
@@ -6884,7 +6882,6 @@ static game_value dump_dynamic_lights_sqf() {
         }
 
         auto_array<game_value> out;
-        out.push_back(kv("buildTag", static_cast<float>(RenderIntegration::KH_BUILD_TAG)));
         out.push_back(kv("locked", khd_got ? 1.0f : 0.0f));
         out.push_back(kv("mode", static_cast<float>(RenderIntegration::g_dl_mode.load(std::memory_order_relaxed))));
         out.push_back(kv("valid", khd_snap.valid ? 1.0f : 0.0f));

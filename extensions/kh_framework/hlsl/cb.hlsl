@@ -1505,28 +1505,102 @@ float KhMatRouteTexel(float route, float fallback, float2 uv)
     return c == 0 ? s.r : c == 1 ? s.g : c == 2 ? s.b : s.a;
 }
 
+// KH_MAT_DIVERGENT - WHY THE SURFACE TAPS EVERY MAP, ALWAYS, AND ONCE.
+//
+// Before KH_MAT_TABLE the matParams / layer lanes were CBObj fields. A
+// cbuffer read is wave-uniform: the driver keeps it in a scalar register and
+// every branch on it is a scalar branch the whole wave takes together, so
+// KhMatFetch's slot chain issued ONE sample and an absent map issued NONE.
+//
+// They are per-pixel now - KhMatLoad fills them from khMats[matIx], and matIx
+// is an interpolant the compiler cannot prove uniform - so every branch on
+// them is divergent flow. A FILTERED sample needs implicit derivatives, which
+// are not available in divergent flow, so fxc hoists every arm of the chain
+// at compile time regardless of what the wave does at runtime: five fetches
+// per KhMatFetch call. KhSampleMat made five such calls (alpha, occ, rough,
+// metal, gloss) on top of its own four guarded samples - about 29 filtered
+// fetches per textured pixel where the pre-table shader paid two or three.
+// That is a per-pixel cost, so it scales with how much of the screen the mesh
+// covers and stacks with every mesh drawn over the same pixels.
+//
+// One tap set, selected by ALU: bounded at five fetches per pixel however the
+// lanes divide, and cheaper than the pre-table shader for any material
+// carrying more than one map. Tapping a slot whose map is absent costs
+// nothing that matters - kh_bind_material leaves that page's SRV null and a
+// null SRV reads zero, and the flag and route tests below still decide what
+// the value MEANS, exactly as they did.
+//
+// This applies to the FILTERED path only. KhMatFetchTexel's chain is Loads,
+// which carry no derivative, so fxc has no reason to hoist it and a wave
+// whose matIx agrees still runs one arm - hoisting it by hand would make it
+// five Loads and five GetDimensions where it pays for one of each. It is left
+// exactly as it was, and so are KhMatFetch / KhMatRoute, whose two callers
+// (PSSunDepthA, PSInjDepthA) fetch once.
+struct KhMatTaps { float4 t0; float4 t1; float4 t2; float4 t3; float4 t4; };
+
+KhMatTaps KhMatTapAll(float2 uv)
+{
+    KhMatTaps khmt;
+    khmt.t0 = matDiffuse.Sample(matSamp, float3(uv, khMatLay0.x));
+    khmt.t1 = matNormal.Sample(matSamp, float3(uv, khMatLay0.y));
+    khmt.t2 = matOrm.Sample(matSamp, float3(uv, khMatLay0.z));
+    khmt.t3 = matEmissive.Sample(matSamp, float3(uv, khMatLay0.w));
+    khmt.t4 = matSpecular.Sample(matSamp, float3(uv, khMatLay1.x));
+    return khmt;
+}
+
+// Slot select over a taken tap set - a chain of movc, no fetch, no flow. Slot
+// numbering is KhMatFetch's, so the route lanes decode identically.
+float4 KhMatPick(KhMatTaps khmp, int slot)
+{
+    return slot == 0 ? khmp.t0
+         : slot == 1 ? khmp.t1
+         : slot == 2 ? khmp.t2
+         : slot == 3 ? khmp.t3
+                     : khmp.t4;
+}
+
+// KhMatRoute's decode over an already-taken tap set: the same lane encoding
+// (slot = r >> 2, channel = r & 3), the same negative-is-unrouted fallback,
+// no fetch of its own.
+float KhMatRouteTap(KhMatTaps khmr, float route, float fallback)
+{
+    int r = (int)route;
+    if (r < 0) return fallback;
+    float4 s = KhMatPick(khmr, r >> 2);
+    int c = r & 3;
+    return c == 0 ? s.r : c == 1 ? s.g : c == 2 ? s.b : s.a;
+}
+
 struct KhMatSurf {
     float3 albedo; float alpha; float3 nrmT; float occ; float rough;
     float metal; float3 emissive; float3 specF0; float gloss; float specOn;
 };
 
+// KH_MAT_DIVERGENT: one tap set for the whole surface. Nine fetch sites
+// became five taps; the flag guards and the five routes are selects over
+// them. Every value is the one the guarded form produced - the guards still
+// decide what an absent map means (white diffuse, flat normal, no emissive,
+// no specular), they just no longer decide whether a fetch happens, which
+// from per-pixel lanes they could not do anyway.
 KhMatSurf KhSampleMat(float2 uv)
 {
     KhMatSurf s;
+    KhMatTaps khsm_m = KhMatTapAll(uv);
     int flags = (int)matParams0.x;
-    float4 dif = (flags & 1) ? matDiffuse.Sample(matSamp, float3(uv, khMatLay0.x)) : float4(1.0f, 1.0f, 1.0f, 1.0f);
+    float4 dif = (flags & 1) ? khsm_m.t0 : float4(1.0f, 1.0f, 1.0f, 1.0f);
     s.albedo = dif.rgb * matParams1.xyz;
-    s.alpha = KhMatRoute(matParams3.y, 1.0f, uv);
-    s.nrmT = (flags & 2) ? (matNormal.Sample(matSamp, float3(uv, khMatLay0.y)).xyz * 2.0f - 1.0f) : float3(0.0f, 0.0f, 1.0f);
+    s.alpha = KhMatRouteTap(khsm_m, matParams3.y, 1.0f);
+    s.nrmT = (flags & 2) ? (khsm_m.t1.xyz * 2.0f - 1.0f) : float3(0.0f, 0.0f, 1.0f);
     s.nrmT.xy *= matParams0.w;
-    s.occ = KhMatRoute(matParams2.z, 1.0f, uv);
-    s.rough = KhMatRoute(matParams2.w, matParams1.w, uv);
-    s.metal = KhMatRoute(matParams3.x, matParams2.x, uv);
-    s.emissive = ((flags & 8) ? matEmissive.Sample(matSamp, float3(uv, khMatLay0.w)).rgb : float3(0.0f, 0.0f, 0.0f)) * matParams2.y;
+    s.occ = KhMatRouteTap(khsm_m, matParams2.z, 1.0f);
+    s.rough = KhMatRouteTap(khsm_m, matParams2.w, matParams1.w);
+    s.metal = KhMatRouteTap(khsm_m, matParams3.x, matParams2.x);
+    s.emissive = ((flags & 8) ? khsm_m.t3.rgb : float3(0.0f, 0.0f, 0.0f)) * matParams2.y;
     s.specOn = matParams3.w;
-    float4 spc = (flags & 16) ? matSpecular.Sample(matSamp, float3(uv, khMatLay1.x)) : float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float4 spc = (flags & 16) ? khsm_m.t4 : float4(0.0f, 0.0f, 0.0f, 0.0f);
     s.specF0 = spc.rgb;
-    s.gloss = KhMatRoute(matParams3.z, spc.a, uv);
+    s.gloss = KhMatRouteTap(khsm_m, matParams3.z, spc.a);
     return s;
 }
 

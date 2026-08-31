@@ -820,16 +820,13 @@ struct Resources {
     ID3D11PixelShader*       ps_maskprime = nullptr;   // Writes lit over our footprint.
     ID3D11PixelShader*       ps_inj_depth_a = nullptr;   // KH_FOOTPRINT_ALPHA: the clip-only alpha
                                                          // Footprint (KH_TEXTURED).
-    // Recreated whenever the injection DSV's dims/samples move
-    // (kh_owner_ensure); released with the device like everything here.
-    ID3D11PixelShader*        ps_owner = nullptr;
-    ID3D11Texture2D*          own_tex = nullptr;
-    ID3D11RenderTargetView*   own_rtv = nullptr;
-    ID3D11ShaderResourceView* own_srv = nullptr;
-    ID3D11Texture2D*          own_dsv_tex = nullptr;
-    ID3D11DepthStencilView*   own_dsv = nullptr;
-    ID3D11DepthStencilState*  dss_owner = nullptr;
-    UINT own_w = 0, own_h = 0, own_samp = 0, own_qual = 0;
+    // KH_MESH_OWNER_PREPASS is gone; its five device objects, its
+    // depth-stencil state and its pixel shader went with it (see the
+    // injection). The HLSL - PSOwner, KhOwnerPack, KhOwnerRejects, khOwnMs /
+    // khOwnSs - is deliberately left in place and inert: shadowMeta2.zw are
+    // never written non-zero now, so the test is unreachable, no .hlsl byte
+    // moves, and restoring the feature is one block of C++ rather than a
+    // shader campaign.
     ID3D11PixelShader*       ps_composite = nullptr;   // PSMain + the opaque.
     ID3D11PixelShader*       ps_composite_arb = nullptr;   // Arb variant: + SV_Depth analytic
                                                            // Terrain clamp.
@@ -1256,14 +1253,6 @@ struct Resources {
         KH_SAFE_RELEASE(ps_dbg_cov);
         KH_SAFE_RELEASE(ps_cov_fix);
         KH_SAFE_RELEASE(ps_inj_depth_a);
-        KH_SAFE_RELEASE(ps_owner);
-        KH_SAFE_RELEASE(own_srv);
-        KH_SAFE_RELEASE(own_rtv);
-        KH_SAFE_RELEASE(own_tex);
-        KH_SAFE_RELEASE(own_dsv);
-        KH_SAFE_RELEASE(own_dsv_tex);
-        KH_SAFE_RELEASE(dss_owner);
-        own_w = own_h = own_samp = own_qual = 0;
         KH_SAFE_RELEASE(ps_maskprime);
         KH_SAFE_RELEASE(ps_maskcast);
         KH_SAFE_RELEASE(ps_dls_world);   // KH_DLS_WORLD never released - one PS object (and its
@@ -2091,7 +2080,9 @@ struct alignas(16) ConstantData {
     float lighting0[4];   // x = lit flag, z = ambient, w = diffuse. Codes 72 and up are the free
                           // Ones.
     float shadow_meta2[4];   // x = far-visibility clamp flag (per object). y = object view-distance
-                             // Cut (m, 0 = off), w = owner-map sample count (0 = absent).
+                             // Cut (m, 0 = off), w = owner-map sample count - always 0 since
+                             // KH_MESH_OWNER_PREPASS was removed, which is what keeps
+                             // KhOwnerRejects unreachable. z likewise.
     float obj_rot[3][4];   // [0][3] = 1 marks filled (the zeroed default reads as identity
                            // in-shader - auxiliary fills stay correct).
     float blend_ctl[4];   // x = perceptual-composite enable (inject fill).
@@ -3449,6 +3440,21 @@ inline bool kh_tex_page_place(ID3D11Device* dev, ID3D11DeviceContext* ctx,
     khpp_p.used_n++;
     khpp_e.page = khpp_pg;
     khpp_e.layer = khpp_l;
+    // KH_MAT_PAGES: a placement is a table-invalidating event whether or not
+    // it grew the page. kh_mat_gpu_ensure bakes a set's flags, routes and
+    // layers once and then early-returns on gpu.base >= 0 forever, so this
+    // counter is the only thing that can make it look again. With the bump
+    // living in kh_tex_page_grow alone, only the FIRST map of a given
+    // (w, h, mips, format) class - the one that creates the page - refreshed
+    // the table; every later map dropped into a free layer and its flag bit
+    // was never set. Under KH_TEX_ASYNC that is the common case: the first
+    // draw resolves every map to a pending entry and the real layers arrive
+    // over the following frames. The result is a material stuck with what it
+    // had at first draw - roughness, metalness, occlusion and gloss fall back
+    // to their scalars and the specular lobe disappears while diffuse and
+    // normal look correct. One truth: every path that changes what a table
+    // entry would say bumps here.
+    ++g_tex_page_gen;
     return true;
 }
 
@@ -6247,7 +6253,7 @@ inline ID3D11ShaderResourceView* kh_tex_create(ID3D11Device* dev, const KhTexBlo
 // khtb_from_cache tells the caller which arm produced the blob.
 inline bool kh_tex_blob_load(const std::string& path, bool srgb,
                              std::shared_ptr<KhTexBlob>& khtb_out, bool& khtb_from_cache,
-                             std::string& err, bool khtb_force = false) {
+                             std::string& err, bool khtb_force) {
     khtb_from_cache = false;
     std::vector<uint8_t> khtc_bytes;
     try {
@@ -6289,7 +6295,7 @@ inline ID3D11ShaderResourceView* kh_tex_load_cached(ID3D11Device* dev, const std
     handled = true;
     std::shared_ptr<KhTexBlob> khtc_b;
     bool khtc_fc = false;
-    if (!kh_tex_blob_load(path, srgb, khtc_b, khtc_fc, err)) return nullptr;
+    if (!kh_tex_blob_load(path, srgb, khtc_b, khtc_fc, err, false)) return nullptr;
     ID3D11ShaderResourceView* khtc_srv = kh_tex_create(dev, *khtc_b, err);
     if (!khtc_srv && khtc_fc) {   // A corrupt-but-valid-looking cache file: decode from the source.
         khtc_b.reset();
@@ -6396,6 +6402,30 @@ inline void kh_texldr_stop() {
     g_khtl_running = false;
 }
 
+// KH_TEX_ASYNC: the pump's corrupt-cache retry, and only that. kh_texldr_queue
+// stands a worker up on demand, which is right for a first-sight resolve and
+// wrong here - the retry is a continuation of work the loader already
+// accepted, so once the loader is stopped (mission end, engine reset) it must
+// die with it rather than start a thread behind the teardown. The running test
+// and the push happen under ONE lock acquisition: a separate alive() call
+// followed by kh_texldr_queue would only narrow the window, since a stop can
+// land between the two and the queue would then resurrect the worker. A stop
+// that lands after the push is fine and is the existing contract - it clears
+// the queue, and the post-join clear drops any result. Forced by construction,
+// so there is no force argument to get wrong at the call site. 1.178: the
+// single-decoder construction is re-proven at every new caller, and this is
+// the caller that must never create the decoder.
+inline bool kh_texldr_requeue(const std::string& khtr_key, const std::string& khtr_path, bool khtr_srgb) {
+    {
+        std::lock_guard<std::mutex> khtr_l(g_khtl_mu);
+        if (!g_khtl_running || g_khtl_abort.load(std::memory_order_relaxed)) return false;
+        KhTexLoadJob khtr_j = { khtr_key, khtr_path, khtr_srgb, true };
+        g_khtl_q.push_back(std::move(khtr_j));
+    }
+    g_khtl_cv.notify_one();
+    return true;
+}
+
 inline bool kh_texldr_queue(const std::string& khtl_key, const std::string& khtl_path, bool khtl_srgb, bool khtl_force) {
     if (!kh_texldr_start()) return false;
     {
@@ -6445,7 +6475,7 @@ inline void kh_tex_async_pump(ID3D11DeviceContext* ctx, ID3D11Device* dev) {
                 // failure lands in the failed arm below and the retry
                 // terminates. The entry stays pending: defaults for another
                 // frame or two.
-                if (kh_texldr_queue(khtp_d.key, khtp_d.path, khtp_d.srgb, true)) {
+                if (kh_texldr_requeue(khtp_d.key, khtp_d.path, khtp_d.srgb)) {
                     khtp_e.last_use_ms = GetTickCount64();
                     continue;
                 }
@@ -7297,7 +7327,10 @@ inline void kh_inst_plan_emit(ID3D11DeviceContext* ctx, ID3D11Device* dev, KhIns
 // exactly kh_draw_textured's): the representative's CB uploaded, its PS bound,
 // the instanced VS + layout bound, the lane ring on IA slot 1, blend + dss set,
 // khid_bound_rs the loop's tracker. khid_pre(lvl, first, n) runs before each
-// range's colour draw (the injection's owner prepass; a no-op elsewhere).
+// range's colour draw. Its one consumer was the owner prepass, which is gone;
+// every caller passes kh_inst_pre_none today. The hook stays because it is the
+// only seam a per-range pass can hang on without the range walk leaking into
+// the loop.
 // Returns the draw count; khid_inst_out the lanes drawn.
 template <class KhInstPre>
 inline uint32_t kh_inst_draw(ID3D11DeviceContext* ctx, ID3D11Device* dev, const KhInstPlan& p,
@@ -7763,8 +7796,6 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         { static_src.c_str(), "PSDlsMask",   "ps_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "PSMaskPrime", "ps_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "PSInjDepthA", "ps_5_0", khtx_defines,    0 },
-        { static_src.c_str(), "PSOwner",     "ps_5_0", khcb_rx_defines, 0 },
-                                                                               // post-gate ensure.
         { static_src.c_str(), "VSMain",      "vs_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "VSMain",      "vs_5_0", khtx_defines,    0 },
         { static_src.c_str(), "VSMainInst",  "vs_5_0", khcb_rx_defines, 0 },   // KH_INSTANCING twins.
@@ -7837,7 +7868,6 @@ inline std::string ensure_resources(ID3D11Device* dev) {
 
     // Non-fatal entry points: each consumer gates on its pointer.
     kh_ps_optional(dev, static_src, "PSInjDepthA", khtx_defines, &g_res.ps_inj_depth_a, "KH inject-depth alpha shader: ");   // KH_FOOTPRINT_ALPHA (KH_TEXTURED for KhMatRoute).
-    kh_ps_optional(dev, static_src, "PSOwner", khcb_rx_defines, &g_res.ps_owner, "KH owner-prepass shader: ");   // KH_MESH_OWNER_PREPASS: null stands the prepass down.
     kh_ps_optional(dev, static_src, "PSMaskCast", khcb_rx_defines, &g_res.ps_maskcast, "KH maskcast shader: ");   // Analytic mask cast.
     kh_ps_optional(dev, static_src, "PSDlsWorld", khcb_rx_defines, &g_res.ps_dls_world, "KH dlsworld shader: ");   // KH_DLS_WORLD receive.
     kh_vs_optional(dev, static_src, "VSDlsMask", khcb_rx_defines, &g_res.vs_dls_mask, "KH dlsmask VS: ");   // KH_DLSW_MASK pair: a failed
@@ -8119,15 +8149,6 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
         hr = dev->CreateDepthStencilState(&dd, &g_res.dss_test_write);
         if (FAILED(hr)) { g_res.release(); return "Create DSS(write) " + hr_str(hr); }
-        {   // KH_MESH_OWNER_PREPASS: strict less so the first-drawn of a depth tie owns the sample
-            // (LESS_EQUAL would hand a coincident stack to its last member and defeat the point).
-            D3D11_DEPTH_STENCIL_DESC khod = {};
-            khod.DepthEnable = TRUE;
-            khod.DepthFunc = D3D11_COMPARISON_LESS;
-            khod.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
-            khod.StencilEnable = FALSE;
-            if (FAILED(dev->CreateDepthStencilState(&khod, &g_res.dss_owner))) g_res.dss_owner = nullptr;
-        }
         dd.DepthEnable = FALSE;
         dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
         hr = dev->CreateDepthStencilState(&dd, &g_res.dss_off);
@@ -10260,6 +10281,14 @@ inline std::string kh_thm_upload(ID3D11Device* dev) {
     KH_SAFE_RELEASE(g_res.thm_srv);
     KH_SAFE_RELEASE(g_res.thm_tex);
     g_thm_valid = false;
+    // KH_VOC_BURIAL: the snapshot certifies THIS texture, so it dies with it.
+    // Every early return below (incomplete grid, failed texture, failed SRV)
+    // leaves g_thm_valid false, and kh_voc_buried's first line makes that
+    // answer 'not buried' before it ever reads the snapshot - so a stale
+    // g_voc_thm_valid was unreachable rather than harmless. That is
+    // correctness by luck, coupled through two tests in another function.
+    // Clearing here makes it correctness by construction.
+    g_voc_thm_valid = false;
 
     if (g_thm_w == 0 || g_thm_h == 0 ||
         g_thm_data.size() < static_cast<size_t>(g_thm_w) * g_thm_h) {
@@ -21593,18 +21622,25 @@ inline bool kh_svs_vol_ensure(ID3D11Device* khe_dev) {
 inline bool kh_svs_vol_ready() {
     if (g_svs_vol_depth_srv == nullptr || g_svs_vol_sten_srv == nullptr) return false;
     if (!g_svs_vol_primed) {  return false; }
-    // KH_SVS_VOL_FRESH (26907) - the raster-tap transport is exact only when
-    // the copy and the reader share a frame; on a frame where the engine drew
-    // no volumes (no bracket, no fresh copy) the previous copy is one camera
-    // motion stale, and sampling it at this frame's raster pixel would offset
-    // the shadow by that motion. Refuse the term instead: one frame of absent
-    // term (usually a frame with nothing occluding anyway) beats one frame of
-    // displaced shadow, and the reprojection walk that once compensated for
-    // this was the measured 30 px halo. One gate, every consumer:
-    // kh_svs_unit_on IS this function in volume mode, so maskMeta.w, the
-    // stenVol2.x arm and both t23/t24 binds drop together and no split
-    // verdict can arm the shader against unbound or stale sources.
-    if (g_svs_vol_seq != g_svs_frame_seq) { return false; }
+    // KH_SVS_VOL_FRESH (26907) - REMOVED. The gate here was
+    // 'if (g_svs_vol_seq != g_svs_frame_seq) return false', on the claim that
+    // the copy and the reader share a frame and that a copy from an earlier
+    // frame is one camera motion stale. The claim is false, and the code
+    // around it says so: the copy runs from kh_svs_vol_copy on the
+    // g_svs_bracket == 1 arm, which the RT classifier sets at the engine's
+    // stencil-mask RTV bind, while the reader is inject_composited_meshes off
+    // the opaque reorder trigger - opposite sides of the frame. Cross-frame
+    // consumption is the transport's contract, which is why g_svs_vol_primed
+    // is sticky rather than per frame and why kh_svs_vol_copy's own
+    // no-mesh-wanted guard drops it to stop 'a mesh that appears next frame'
+    // reading 'a copy from before it existed'. With the gate standing,
+    // kh_svs_unit_on IS this function (kh_svs_vol_on is constant true), so
+    // maskMeta.w, the stenVol2.x arm and both t23/t24 binds dropped together
+    // on every frame whose mask bind lands after the trigger - the engine's
+    // stencil shadows stopped landing on every mesh, builtin and FBX alike.
+    // g_svs_vol_seq stays live: kh_svs_vol_copy still uses it as its own
+    // once-per-epoch guard. If displaced-shadow staleness is ever OBSERVED
+    // (1.83), bound it against a measured epoch lag, not against equality.
 
     if (!g_main_depth_w || !g_main_depth_h ||
         g_svs_vol_w != static_cast<uint32_t>(g_main_depth_w) ||
@@ -23761,46 +23797,55 @@ inline void kh_fill_haze(ConstantData& khz_cb) {
     khz_cb.fog_sky_col[3] = g_light_probe.nb[50] + g_light_probe.nb[53];
 }
 
-// KH_MESH_OWNER_PREPASS: (re)create the owner map to match the injection DSV's
-// dims and sample pattern.
-inline bool kh_owner_ensure(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& kho_td) {
-    if (!dev || kho_td.Width == 0 || kho_td.Height == 0) return false;
-    if (g_res.own_rtv && g_res.own_srv && g_res.own_dsv &&
-        g_res.own_w == kho_td.Width && g_res.own_h == kho_td.Height &&
-        g_res.own_samp == kho_td.SampleDesc.Count && g_res.own_qual == kho_td.SampleDesc.Quality) return true;
-    KH_SAFE_RELEASE(g_res.own_srv);
-    KH_SAFE_RELEASE(g_res.own_rtv);
-    KH_SAFE_RELEASE(g_res.own_tex);
-    KH_SAFE_RELEASE(g_res.own_dsv);
-    KH_SAFE_RELEASE(g_res.own_dsv_tex);
-    g_res.own_w = g_res.own_h = g_res.own_samp = g_res.own_qual = 0;
-    D3D11_TEXTURE2D_DESC kho_c = {};
-    kho_c.Width = kho_td.Width; kho_c.Height = kho_td.Height;
-    kho_c.MipLevels = 1; kho_c.ArraySize = 1;
-    kho_c.Format = DXGI_FORMAT_R32_UINT;
-    kho_c.SampleDesc = kho_td.SampleDesc;
-    kho_c.Usage = D3D11_USAGE_DEFAULT;
-    kho_c.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    if (FAILED(dev->CreateTexture2D(&kho_c, nullptr, &g_res.own_tex))) return false;
-    if (FAILED(dev->CreateRenderTargetView(g_res.own_tex, nullptr, &g_res.own_rtv)) ||
-        FAILED(dev->CreateShaderResourceView(g_res.own_tex, nullptr, &g_res.own_srv))) {
-        KH_SAFE_RELEASE(g_res.own_srv); KH_SAFE_RELEASE(g_res.own_rtv); KH_SAFE_RELEASE(g_res.own_tex);
-        return false;
-    }
-    D3D11_TEXTURE2D_DESC kho_d = kho_c;
-    kho_d.Format = DXGI_FORMAT_D32_FLOAT;
-    kho_d.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-    if (FAILED(dev->CreateTexture2D(&kho_d, nullptr, &g_res.own_dsv_tex)) ||
-        FAILED(dev->CreateDepthStencilView(g_res.own_dsv_tex, nullptr, &g_res.own_dsv))) {
-        KH_SAFE_RELEASE(g_res.own_dsv); KH_SAFE_RELEASE(g_res.own_dsv_tex);
-        KH_SAFE_RELEASE(g_res.own_srv); KH_SAFE_RELEASE(g_res.own_rtv); KH_SAFE_RELEASE(g_res.own_tex);
-        return false;
-    }
-    g_res.own_w = kho_td.Width; g_res.own_h = kho_td.Height;
-    g_res.own_samp = kho_td.SampleDesc.Count; g_res.own_qual = kho_td.SampleDesc.Quality;
-    return true;
-}
-
+// KH_MESH_OWNER_PREPASS - REMOVED, and why.
+//
+// The map was a software stand-in for early-Z, which the hardware turns off on
+// the SV_Depth route: composite2's KH_ARB_DEPTH variant displaces a fragment
+// by up to KH_FAR_ARB_GUARD_BASE metres of view depth, so the LESS_EQUAL test
+// can no longer order two of our own meshes against each other.
+//
+// It was retired on measurements, not on argument, and the arguments that
+// looked strongest were wrong - recorded here so nobody re-runs them:
+//
+//  - PSOwner packed KhOwnerPack(i.pos.z, ...), the RASTERIZED depth, so the
+//    map never ordered arb depths at all. What it did was geometric occlusion
+//    culling among our own meshes, per sample - and KH_VIS_OCC already does
+//    that per object on the CPU for free. The map's only unique contribution
+//    was the PARTIALLY overlapping case, which is the small one: with meshes
+//    stacked in one spot KH_VIS_OCC removes the fully hidden majority.
+//  - the read side (KhOwnerRejects, one Texture2DMS.Load per sample) measured
+//    FREE: disabling it changed nothing.
+//  - skipping the two clears made the frame WORSE, because a full-surface
+//    clear is what leaves an MSAA target in its fast-cleared / compressed
+//    state; without it every write is read-modify-write on expanded samples.
+//  - the cost was the prepass RASTERIZATION into a surface that clones the
+//    engine DSV: 3840x2160 at 8x here, 530 MB of colour + depth writes per
+//    covering mesh per frame. Disabling that draw alone restored the framerate.
+//
+// The gate was also measuring the wrong thing. The prepass's cost scales with
+// COVERAGE and its benefit with OVERDRAW, but it armed on meshes.size() >= 2,
+// so two barely-overlapping meshes paid full price for almost no rejection.
+// If it is ever restored, arm it on measured overlap (kh_vis_occ_build already
+// rasterizes footprints into a 96x54 grid; counting multiply-covered cells is
+// nearly free), never on a count.
+//
+// Two repairs were costed and rejected. Conservative depth output restores
+// early-Z rejection only when it points AGAINST the depth function - with
+// LESS_EQUAL the hardware wants SV_DepthGreaterEqual, and this clamp only ever
+// pulls NEARER, which is SV_DepthLessEqual. And a coverage-qualified
+// single-sample map does not exist: SV_Coverage needs MSAA rasterization, and
+// ForcedSampleCount into a 1-sample target requires a NULL depth-stencil view
+// with the depth test off - but that depth test IS how the nearest object wins
+// the pixel.
+//
+// What is left behind: our meshes no longer skip shading where one partially
+// covers another (ordinary overdraw), and on far-arb frames a mesh whose clamp
+// pulled it further than its neighbour's can win a pixel it is geometrically
+// behind. That needs two meshes BOTH within KH_FAR_ARB_CONTACT_H (6 m) of the
+// terrain - the clamp ramps to zero above it - both behind the analytic
+// terrain at the shared pixel, and overlapping on screen. If it ever shows,
+// bounding the clamp so our own meshes cannot reorder each other is the
+// smaller change, and it should be designed against the repro.
 inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
 
     // The carried take camera is per pass.
@@ -24645,52 +24690,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // authority again (months-stable); the arb variant beats terrain LOD via
     // its SV_Depth clamp, not always.
     ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);
-    // Arm the owner map against the DSV this injection draws into: same dims,
-    // same sample pattern, cleared to 'no owner'. The engine's bound RTVs/DSV
-    // are held for the per-draw restore and released at the epilogue. A
-    // reversed viewport (MinDepth > MaxDepth) stands the map down rather than
-    // owning the wrong end of it.
-    bool khr_own_on = false;
-    UINT khr_own_samp = 0;
-    ID3D11RenderTargetView* khr_own_saved_rtv[8] = {};
-    ID3D11DepthStencilView* khr_own_saved_dsv = nullptr;
-    // KH_OWNER_SOLO_SKIP: KhOwnerRejects returns false whenever the owner id is
-    // the fragment's own, so with one composited mesh (its LOD pair shares the
-    // id) the map can reject nothing - the prepass is pure cost. Two or more:
-    // The map orders ARB depths the depth test cannot, so it stays.
-    if (meshes.size() >= 2 && g_res.ps_owner && g_res.dss_owner && khr_pass_vp.MinDepth <= khr_pass_vp.MaxDepth) {
-        ctx->OMGetRenderTargets(8, khr_own_saved_rtv, &khr_own_saved_dsv);
-        if (khr_own_saved_dsv) {
-            ID3D11Resource* khr_own_res = nullptr;
-            khr_own_saved_dsv->GetResource(&khr_own_res);
-            ID3D11Texture2D* khr_own_t2 = nullptr;
-            if (khr_own_res) {
-                khr_own_res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&khr_own_t2));
-                khr_own_res->Release();
-            }
-            if (khr_own_t2) {
-                D3D11_TEXTURE2D_DESC khr_own_td = {};
-                khr_own_t2->GetDesc(&khr_own_td);
-                khr_own_t2->Release();
-                if (kh_owner_ensure(dev, khr_own_td)) {
-                    khr_own_samp = khr_own_td.SampleDesc.Count;
-                    khr_own_on = khr_own_samp >= 1;
-                }
-            }
-        }
-        if (khr_own_on) {
-            const FLOAT khr_own_zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-            ctx->ClearRenderTargetView(g_res.own_rtv, khr_own_zero);
-            ctx->ClearDepthStencilView(g_res.own_dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
-            ID3D11ShaderResourceView* khr_own_srvs[2] = {
-                khr_own_samp > 1 ? g_res.own_srv : nullptr,
-                khr_own_samp > 1 ? nullptr : g_res.own_srv };
-            ctx->PSSetShaderResources(33, 2, khr_own_srvs);
-        } else {
-            for (int khr_oi = 0; khr_oi < 8; ++khr_oi) KH_SAFE_RELEASE(khr_own_saved_rtv[khr_oi]);
-            KH_SAFE_RELEASE(khr_own_saved_dsv);
-        }
-    }
     ctx->RSSetState(kh_rs_pick(g_res.rasterizer));
     ID3D11RasterizerState* khr_bound_rs = g_res.rasterizer;
     int khr_bound_bm = -1;
@@ -25407,12 +25406,14 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             if (!khr_vis(o)) {  continue; }
         }
 
-        // KH_MESH_OWNER_PREPASS lanes: the object's id for the owner draw and
-        // the test, and the map's sample count.
-        // KH_OBJBUF: 1 + (live-scene slot mod 4096) - the bucket VS derives the
-        // same id from its lane, so a per-object draw and a bucket never share one.
-        cbd.shadow_meta2[2] = khr_own_on ? static_cast<float>(1u + (o.slot & 4095u)) : 0.0f;
-        cbd.shadow_meta2[3] = khr_own_on ? static_cast<float>(khr_own_samp) : 0.0f;
+        // KH_MESH_OWNER_PREPASS is removed, and these two lanes are how the
+        // shader half stays inert: KhOwnerRejects is gated on shadowMeta2.w,
+        // so zeroing both here makes it unreachable in every mesh pixel shader
+        // without touching a line of HLSL. The bucket vertex path still derives
+        // an owner id into iobj1.x from its record slot - also unread, for the
+        // same reason. Restoring the feature means restoring these fills.
+        cbd.shadow_meta2[2] = 0.0f;
+        cbd.shadow_meta2[3] = 0.0f;
         if (!khr_frame_ok || !kh_upload_obj_cb(ctx, g_res.composite_cb, cbd)) continue;
         // The flat CULL_BACK force cured the smear but erased twoSided
         // semantics on arb frames (interior faces never drew, and at the
@@ -25468,50 +25469,11 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         // KH_BUCKETS, injection edition: this object is its bucket's
         // representative - see the flush twin. The VS is the composite
         // instanced pair when this draw took the composite VS, the static pair
-        // otherwise (the same routing as khr_want_vs). The bucket's ranges were
-        // emitted before the loop; the owner prepass runs per range through
-        // khr_owner_draw, instanced, so a bucket owns its samples exactly as a
-        // per-object draw does (the per-object LOD walk below runs zero
-        // iterations). Members share both route verdicts by key. Twin at the flush.
+        // otherwise (the same routing as khr_want_vs). The bucket's ranges
+        // were emitted before the loop, so the per-object LOD walk below runs
+        // zero iterations. Members share both route verdicts by key. Twin at
+        // the flush.
         int khr_lod_iters = khr_lodx ? 2 : 1;
-
-        // Same CB, VS, layout, VB range, rasterizer and viewport as the
-        // colour draw that follows (parity is the contract - a face the
-        // colour pass culls must not own a sample), only PS/OM/dss/blend
-        // swap for one draw. Cutout and user-shader materials skip the
-        // draw: their PS may discard pixels the owner PS cannot predict, so
-        // they test but never own. khr_on == 0: the per-object draw of the
-        // level; else the bucket's emitted range (KH_BUCKETS).
-        auto khr_owner_draw = [&](int khr_ol, uint32_t khr_on, uint32_t khr_of) {
-            if (!khr_own_on) return;
-            bool khr_own_cast = true;
-            if (khr_tx_on && khr_txm) {
-                for (const KhMaterial& khr_om : khr_txm->slots) {
-                    if (khr_om.used && (khr_om.alpha_mode != 0 || khr_om.shader != 0)) { khr_own_cast = false; break; }
-                }
-            }
-            if (!khr_own_cast) return;
-            UINT khr_os = 0, khr_oc = 0;
-            mesh_lod_range(khr_md, khr_ol, khr_os, khr_oc);
-            ID3D11ShaderResourceView* khr_own_null[2] = {};
-            ctx->PSSetShaderResources(33, 2, khr_own_null);   // RTV hazard: unbind before
-                                                              // writing.
-            ctx->OMSetRenderTargets(1, &g_res.own_rtv, g_res.own_dsv);
-            ctx->OMSetDepthStencilState(g_res.dss_owner, 0);
-            ctx->OMSetBlendState(nullptr, bf, 0xFFFFFFFF);   // Integer RT: blending must be
-                                                             // Off.
-            ctx->PSSetShader(g_res.ps_owner, nullptr, 0);
-            if (khr_on) ctx->DrawIndexedInstanced(khr_oc, khr_on, khr_os, 0, khr_of);
-            else        ctx->DrawIndexed(khr_oc, khr_os, 0);
-            ctx->PSSetShader(khr_bound_ps, nullptr, 0);
-            ctx->OMSetBlendState(g_res.blend_modes[o.blend_mode], bf, 0xFFFFFFFF);
-            ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);
-            ctx->OMSetRenderTargets(8, khr_own_saved_rtv, khr_own_saved_dsv);
-            ID3D11ShaderResourceView* khr_own_srvs[2] = {
-                khr_own_samp > 1 ? g_res.own_srv : nullptr,
-                khr_own_samp > 1 ? nullptr : g_res.own_srv };
-            ctx->PSSetShaderResources(33, 2, khr_own_srvs);
-        };
 
         if (khr_inst_on && khr_inst_plan.batch_of[khr_oi] >= 0) {
             ID3D11VertexShader* khr_ivs =
@@ -25535,12 +25497,12 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 }
 
                 // KH_BUCKETS: the bucket's ranges were emitted before the loop
-                // (the cull, LOD and route verdicts are in the plan); the owner
-                // prepass runs per range, instanced, ahead of the colour draw.
+                // (the cull, LOD and route verdicts are in the plan), so this
+                // draws them and nothing runs ahead of the colour draw.
                 uint32_t khr_in = 0;
                 const uint32_t khr_id = kh_inst_draw(ctx, dev, khr_inst_plan, meshes, static_cast<uint32_t>(khr_oi),
                     cbd, g_res.composite_cb, khr_tx_on ? khr_txm : nullptr, khr_ts_ordered,
-                    khr_bound_rs, khr_tx_arb ? 2 : (guard ? 1 : 0), khr_bound_ps, 1, khr_owner_draw, khr_in);
+                    khr_bound_rs, khr_tx_arb ? 2 : (guard ? 1 : 0), khr_bound_ps, 1, kh_inst_pre_none, khr_in);
                 g_stats.composite_meshes += khr_id;
                 if (khr_tx_on) g_stats.textured_draws += khr_id;
                 // KH_BLEND_PART_INJ: the batch's translucent part - the same
@@ -25579,7 +25541,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 if (!kh_upload_obj_cb(ctx, g_res.composite_cb, cbd)) break;
             }
 
-            khr_owner_draw(khr_lvl, 0u, 0u);   // KH_MESH_OWNER_PREPASS, per-object edition.
             if (khr_tx_on) {
                 // Per-submesh textured draws: matParams filled + t14-t18
                 // rebound + the object slice re-uploaded per material range.
@@ -25697,12 +25658,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);
     }
 
-    if (khr_own_on) {   // The map's SRVs off, the held engine views released.
-        ID3D11ShaderResourceView* khr_own_null[2] = {};
-        ctx->PSSetShaderResources(33, 2, khr_own_null);
-        for (int khr_oi = 0; khr_oi < 8; ++khr_oi) KH_SAFE_RELEASE(khr_own_saved_rtv[khr_oi]);
-        KH_SAFE_RELEASE(khr_own_saved_dsv);
-    }
     if (n_saved_vp > 0) ctx->RSSetViewports(n_saved_vp, saved_vp);
 
     {

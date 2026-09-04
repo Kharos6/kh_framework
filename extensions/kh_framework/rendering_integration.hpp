@@ -363,6 +363,138 @@ inline void bake(std::vector<MeshVertex>& v) {
 // triangle collapse. The index stream is a 1:1 image of the input order, so
 // every submesh / level range set in triangle-vertex units is already the
 // index range and nothing is renumbered. Idempotent on an already-welded def.
+// KH_MESH_CACHE_ORDER. Forsyth's linear-speed vertex cache optimisation
+// (2006), applied to every submesh range of every level after the weld, and a
+// first-use vertex remap behind it. The triangle set of every range is
+// unchanged - only the order the triangles are listed in, and the numbering of
+// the vertices - so every pass draws the same geometry; what moves is the
+// post-transform cache hit rate (dump3: 10.7 M vertex-shader invocations for
+// 4.1 M triangles on the injection alone, 2.6 per triangle, which is no reuse
+// at all; a cache-ordered list runs near 0.7). Runs once per mesh at the
+// weld, so a cached mesh carries the order (KH_MESH_CACHE_VERSION 5).
+static constexpr uint32_t KH_MCO_CACHE   = 32u;   // Modelled FIFO depth.
+inline float kh_mco_cache_score(uint32_t khmc_p) {
+    if (khmc_p >= KH_MCO_CACHE) return 0.0f;
+    if (khmc_p < 3u) return 0.75f;   // The last triangle's own vertices: a flat score, so
+                                     // a strip does not chase itself.
+    const float khmc_s = 1.0f - (static_cast<float>(khmc_p) - 3.0f) / (static_cast<float>(KH_MCO_CACHE) - 3.0f);
+    return powf(khmc_s, 1.5f);
+}
+inline float kh_mco_valence_score(uint32_t khmv_n) {
+    if (khmv_n == 0u) return -1.0f;
+    return 2.0f * powf(static_cast<float>(khmv_n), -0.5f);
+}
+// One index range [khmo_s, khmo_s + khmo_c), a multiple of 3.
+inline void kh_mco_range(uint32_t* khmo_ix, uint32_t khmo_c, uint32_t khmo_vn) {
+    const uint32_t khmo_tn = khmo_c / 3u;
+    if (khmo_tn < 2u || khmo_vn == 0u) return;
+    for (uint32_t i = 0; i < khmo_c; ++i) if (khmo_ix[i] >= khmo_vn) return;   // Never touch a bad stream.
+    std::vector<uint32_t> khmo_deg(khmo_vn, 0u);          // Remaining triangles per vertex.
+    for (uint32_t i = 0; i < khmo_c; ++i) ++khmo_deg[khmo_ix[i]];
+    std::vector<uint32_t> khmo_off(khmo_vn + 1u, 0u);     // Vertex -> its triangle list.
+    for (uint32_t v = 0; v < khmo_vn; ++v) khmo_off[v + 1u] = khmo_off[v] + khmo_deg[v];
+    std::vector<uint32_t> khmo_adj(khmo_c);
+    {
+        std::vector<uint32_t> khmo_fill(khmo_off.begin(), khmo_off.end() - 1);
+        for (uint32_t t = 0; t < khmo_tn; ++t)
+            for (uint32_t k = 0; k < 3u; ++k) khmo_adj[khmo_fill[khmo_ix[t * 3u + k]]++] = t;
+    }
+    std::vector<uint32_t> khmo_cpos(khmo_vn, KH_MCO_CACHE);   // Cache position (>= CACHE = out).
+    std::vector<float>    khmo_vsc(khmo_vn, 0.0f);
+    for (uint32_t v = 0; v < khmo_vn; ++v)
+        khmo_vsc[v] = kh_mco_cache_score(KH_MCO_CACHE) + kh_mco_valence_score(khmo_deg[v]);
+    std::vector<float>   khmo_tsc(khmo_tn, 0.0f);
+    std::vector<uint8_t> khmo_done(khmo_tn, 0u);
+    for (uint32_t t = 0; t < khmo_tn; ++t)
+        khmo_tsc[t] = khmo_vsc[khmo_ix[t * 3u]] + khmo_vsc[khmo_ix[t * 3u + 1u]] + khmo_vsc[khmo_ix[t * 3u + 2u]];
+    std::vector<uint32_t> khmo_out;
+    khmo_out.reserve(khmo_c);
+    std::vector<uint32_t> khmo_cache;   // Most recent first.
+    khmo_cache.reserve(KH_MCO_CACHE + 3u);
+    uint32_t khmo_scan = 0;   // Fallback cursor over the triangle list.
+    int64_t  khmo_best = -1;
+    float    khmo_best_s = -1.0e30f;
+    for (uint32_t t = 0; t < khmo_tn; ++t) if (khmo_tsc[t] > khmo_best_s) { khmo_best_s = khmo_tsc[t]; khmo_best = t; }
+    for (uint32_t khmo_emit = 0; khmo_emit < khmo_tn; ++khmo_emit) {
+        if (khmo_best < 0) {   // Nothing in the cache neighbourhood: the best-scoring triangle left
+                               // (a full scan, rare: once per exhausted region).
+            while (khmo_scan < khmo_tn && khmo_done[khmo_scan]) ++khmo_scan;
+            if (khmo_scan >= khmo_tn) break;
+            khmo_best_s = -1.0e30f;
+            for (uint32_t u = khmo_scan; u < khmo_tn; ++u) {
+                if (khmo_done[u]) continue;
+                const float s = khmo_vsc[khmo_ix[u * 3u]] + khmo_vsc[khmo_ix[u * 3u + 1u]] + khmo_vsc[khmo_ix[u * 3u + 2u]];
+                if (s > khmo_best_s) { khmo_best_s = s; khmo_best = u; }
+            }
+        }
+        const uint32_t t = static_cast<uint32_t>(khmo_best);
+        khmo_done[t] = 1u;
+        for (uint32_t k = 0; k < 3u; ++k) {
+            const uint32_t v = khmo_ix[t * 3u + k];
+            khmo_out.push_back(v);
+            --khmo_deg[v];
+            // Move v to the cache front (a FIFO of positions; the LRU model of the paper).
+            size_t khmo_at = khmo_cache.size();
+            for (size_t c = 0; c < khmo_cache.size(); ++c) if (khmo_cache[c] == v) { khmo_at = c; break; }
+            if (khmo_at < khmo_cache.size()) khmo_cache.erase(khmo_cache.begin() + static_cast<std::ptrdiff_t>(khmo_at));
+            khmo_cache.insert(khmo_cache.begin(), v);
+        }
+        // Re-score every vertex in the cache (positions moved), drop the overflow.
+        for (size_t c = 0; c < khmo_cache.size(); ++c) {
+            const uint32_t v = khmo_cache[c];
+            khmo_cpos[v] = static_cast<uint32_t>(c);
+            khmo_vsc[v] = kh_mco_cache_score(khmo_cpos[v]) + kh_mco_valence_score(khmo_deg[v]);
+        }
+        while (khmo_cache.size() > KH_MCO_CACHE) {
+            const uint32_t v = khmo_cache.back();
+            khmo_cache.pop_back();
+            khmo_cpos[v] = KH_MCO_CACHE;
+            khmo_vsc[v] = kh_mco_cache_score(KH_MCO_CACHE) + kh_mco_valence_score(khmo_deg[v]);
+        }
+        // Re-score the triangles touching the cache and pick the next best among them.
+        khmo_best = -1; khmo_best_s = -1.0e30f;
+        for (size_t c = 0; c < khmo_cache.size(); ++c) {
+            const uint32_t v = khmo_cache[c];
+            for (uint32_t a = khmo_off[v]; a < khmo_off[v + 1u]; ++a) {
+                const uint32_t u = khmo_adj[a];
+                if (khmo_done[u]) continue;
+                const float s = khmo_vsc[khmo_ix[u * 3u]] + khmo_vsc[khmo_ix[u * 3u + 1u]] + khmo_vsc[khmo_ix[u * 3u + 2u]];
+                khmo_tsc[u] = s;
+                if (s > khmo_best_s) { khmo_best_s = s; khmo_best = u; }
+            }
+        }
+    }
+    if (khmo_out.size() != khmo_c) return;   // Defensive: leave the stream as it was.
+    memcpy(khmo_ix, khmo_out.data(), khmo_c * sizeof(uint32_t));
+}
+inline void kh_mesh_cache_order(MeshDef& khmo_d) {
+    if (khmo_d.indices.empty() || khmo_d.verts.empty()) return;
+    const uint32_t khmo_vn = static_cast<uint32_t>(khmo_d.verts.size());
+    const uint32_t khmo_in = static_cast<uint32_t>(khmo_d.indices.size());
+    // The submesh ranges of every level, each ordered on its own.
+    for (int khmo_l = 0; khmo_l <= static_cast<int>(khmo_d.lod_n); ++khmo_l) {
+        const std::vector<MeshSubmesh>& khmo_tab = khmo_l == 0 ? khmo_d.submeshes : khmo_d.lod_sub[khmo_l - 1];
+        for (const MeshSubmesh& khmo_sm : khmo_tab) {
+            if (khmo_sm.index_count < 6u || khmo_sm.index_count % 3u != 0u) continue;
+            if (khmo_sm.index_start > khmo_in || khmo_sm.index_count > khmo_in - khmo_sm.index_start) continue;
+            kh_mco_range(khmo_d.indices.data() + khmo_sm.index_start, khmo_sm.index_count, khmo_vn);
+        }
+    }
+    // First-use vertex order: the vertex fetch walks forward with the index stream.
+    std::vector<uint32_t> khmo_map(khmo_vn, 0xFFFFFFFFu);
+    uint32_t khmo_next = 0;
+    for (uint32_t i = 0; i < khmo_in; ++i) {
+        const uint32_t v = khmo_d.indices[i];
+        if (v >= khmo_vn) return;   // A bad stream: the triangle order above still stands.
+        if (khmo_map[v] == 0xFFFFFFFFu) khmo_map[v] = khmo_next++;
+    }
+    for (uint32_t v = 0; v < khmo_vn; ++v) if (khmo_map[v] == 0xFFFFFFFFu) khmo_map[v] = khmo_next++;   // Unreferenced verts last.
+    std::vector<MeshVertex> khmo_nv(khmo_vn);
+    for (uint32_t v = 0; v < khmo_vn; ++v) khmo_nv[khmo_map[v]] = khmo_d.verts[v];
+    khmo_d.verts.swap(khmo_nv);
+    for (uint32_t i = 0; i < khmo_in; ++i) khmo_d.indices[i] = khmo_map[khmo_d.indices[i]];
+}
+
 inline void kh_mesh_weld(MeshDef& khmw_d) {
     if (!khmw_d.indices.empty() || khmw_d.verts.empty()) return;
     struct KhMwKey {
@@ -394,6 +526,7 @@ inline void kh_mesh_weld(MeshDef& khmw_d) {
 
     khmw_d.verts.swap(khmw_unique);
     khmw_d.verts.shrink_to_fit();
+    kh_mesh_cache_order(khmw_d);   // KH_MESH_CACHE_ORDER: the same triangles, in cache order.
 }
 
 // Ordering: a block-pointer store sequences before the publish release-store
@@ -820,13 +953,11 @@ struct Resources {
     ID3D11PixelShader*       ps_maskprime = nullptr;   // Writes lit over our footprint.
     ID3D11PixelShader*       ps_inj_depth_a = nullptr;   // KH_FOOTPRINT_ALPHA: the clip-only alpha
                                                          // Footprint (KH_TEXTURED).
-    // KH_MESH_OWNER_PREPASS is gone; its five device objects, its
+    // KH_MESH_OWNER_PREPASS is gone: its five device objects, its
     // depth-stencil state and its pixel shader went with it (see the
-    // injection). The HLSL - PSOwner, KhOwnerPack, KhOwnerRejects, khOwnMs /
-    // khOwnSs - is deliberately left in place and inert: shadowMeta2.zw are
-    // never written non-zero now, so the test is unreachable, no .hlsl byte
-    // moves, and restoring the feature is one block of C++ rather than a
-    // shader campaign.
+    // injection), and the HLSL half (PSOwner, the owner pack / reject test,
+    // the t33 / t34 owner maps) went in the cleanup campaign. shadowMeta2.zw
+    // stay in the layout, always zero, and nothing reads them.
     ID3D11PixelShader*       ps_composite = nullptr;   // PSMain + the opaque.
     ID3D11PixelShader*       ps_composite_arb = nullptr;   // Arb variant: + SV_Depth analytic
                                                            // Terrain clamp.
@@ -980,10 +1111,10 @@ struct Resources {
     ID3D11DepthStencilView* sun5_dsv = nullptr;
     ID3D11ShaderResourceView* sun5_srv = nullptr;
     // [0]=hero [1]=mid [2]=outer.
-    ID3D11Texture2D*          sun_pf_tex[3] = {};
-    ID3D11RenderTargetView*   sun_pf_rtv[3] = {};
-    ID3D11ShaderResourceView* sun_pf_srv[3] = {};
-    ID3D11RenderTargetView*   sun_pf_rtvm[3][12] = {};
+    ID3D11Texture2D*          sun_pf_tex[4] = {};   // KH_FAR_PF: [3] = the far tier's.
+    ID3D11RenderTargetView*   sun_pf_rtv[4] = {};
+    ID3D11ShaderResourceView* sun_pf_srv[4] = {};
+    ID3D11RenderTargetView*   sun_pf_rtvm[4][12] = {};
     ID3D11Texture2D*          sun_pf_scr = nullptr;
     ID3D11ShaderResourceView* sun_pf_scr_srvm[12] = {};
     ID3D11PixelShader*        ps_sunpfm = nullptr;
@@ -1005,6 +1136,10 @@ struct Resources {
     ID3D11VertexShader*       vs_sundepth_a = nullptr;
     ID3D11PixelShader*        ps_sundepth_a = nullptr;
     ID3D11InputLayout*        layout_sundepth_a = nullptr;   // TEXCOORD0 (uv) on slot 0.
+    // KH_CAST_DISSOLVE twins: the opaque sun-depth VS/PS that dither far
+    // caster fragments out (same input as VSSunDepth: layout_sundepth).
+    ID3D11VertexShader*       vs_sundepth_d = nullptr;
+    ID3D11PixelShader*        ps_sundepth_d = nullptr;
     // One depth array for every casting light: a spot spends 1 slice, a point
     // spends 6 (a cube unrolled).
     ID3D11RasterizerState*    dls_rast = nullptr;
@@ -1015,6 +1150,16 @@ struct Resources {
     UINT                      dls_size = 0;
     ID3D11Buffer*             sun_instance_vb = nullptr;
     UINT                      sun_instance_cap = 0;   // Instances the buffer holds.
+    // KH_SEAM_INST: the seam transport's instanced twins. Both entry points
+    // take the sun ladder's lane shape, so layout_sundepth binds them and no
+    // new input layout exists; the seam gates on that layout being present.
+    // Non-fatal - absent, both loops draw per caster exactly as they did.
+    ID3D11VertexShader*       vs_seam_inst = nullptr;     // VSSeamInst   (loop A footprint).
+    ID3D11VertexShader*       vs_mirror_inst = nullptr;   // VSMirrorInst (loop B prepass).
+    // One buffer, both loops: loop A's lanes at [0, nA), loop B's at
+    // [nA, nA + nB), written by a single WRITE_DISCARD map per frame.
+    ID3D11Buffer*             seam_instance_vb = nullptr;
+    UINT                      seam_instance_cap = 0;   // Lanes the buffer holds.
     ID3D11Buffer*             locality_buf = nullptr;   // Extended (>16) caster reach list.
     ID3D11ShaderResourceView* locality_srv = nullptr;   // t2 at the mask cast fire.
     UINT                      locality_cap = 0;   // Casters the list holds.
@@ -1185,7 +1330,7 @@ struct Resources {
         KH_SAFE_RELEASE(sun5_dsv);
         KH_SAFE_RELEASE(sun5_tex);
         // Released here: nothing else owns the pyramid resources.
-        for (int khpf_i = 0; khpf_i < 3; ++khpf_i) {
+        for (int khpf_i = 0; khpf_i < 4; ++khpf_i) {
             KH_SAFE_RELEASE(sun_pf_srv[khpf_i]);
             KH_SAFE_RELEASE(sun_pf_rtv[khpf_i]);
             KH_SAFE_RELEASE(sun_pf_tex[khpf_i]);
@@ -1210,8 +1355,14 @@ struct Resources {
         KH_SAFE_RELEASE(vs_sundepth_a);
         KH_SAFE_RELEASE(ps_sundepth_a);
         KH_SAFE_RELEASE(layout_sundepth_a);
+        KH_SAFE_RELEASE(vs_sundepth_d);
+        KH_SAFE_RELEASE(ps_sundepth_d);
         KH_SAFE_RELEASE(sun_instance_vb);
         sun_instance_cap = 0;
+        KH_SAFE_RELEASE(vs_seam_inst);   // KH_SEAM_INST.
+        KH_SAFE_RELEASE(vs_mirror_inst);
+        KH_SAFE_RELEASE(seam_instance_vb);
+        seam_instance_cap = 0;
         KH_SAFE_RELEASE(dls_rast);
         for (int khd_i = 0; khd_i < KH_DLS_SLICES_MAX; ++khd_i) KH_SAFE_RELEASE(dls_dsv[khd_i]);
         KH_SAFE_RELEASE(dls_srv);
@@ -1994,7 +2145,7 @@ static float g_scene_vp_max_d = 0.999f;
 // 2. cb.hlsl is the one shared prefix; static.hlsl is seen only by the static unit,
 //    composite(2) only by the composite unit. A helper both chains call goes in cb.
 // 3. Twins move together: the flush and injection mesh loops; PSMain / PSComposite /
-//    PSEffect / PSOwner; the HLSL and C++ sides of any CB contract; the two
+//    PSEffect; the HLSL and C++ sides of any CB contract; the two
 //    sun-verdict chains (self kernel + world cast) sharing KhTbBlend.
 // 4. Any .hlsl edit changes that unit's cache key (a cold recompile, ~370 s for the
 //    tall poles): batch shader edits.
@@ -2080,9 +2231,8 @@ struct alignas(16) ConstantData {
     float lighting0[4];   // x = lit flag, z = ambient, w = diffuse. Codes 72 and up are the free
                           // Ones.
     float shadow_meta2[4];   // x = far-visibility clamp flag (per object). y = object view-distance
-                             // Cut (m, 0 = off), w = owner-map sample count - always 0 since
-                             // KH_MESH_OWNER_PREPASS was removed, which is what keeps
-                             // KhOwnerRejects unreachable. z likewise.
+                             // Cut (m, 0 = off). zw: layout-preserving, always 0, unread
+                             // (the owner map is gone from the HLSL too).
     float obj_rot[3][4];   // [0][3] = 1 marks filled (the zeroed default reads as identity
                            // in-shader - auxiliary fills stay correct).
     float blend_ctl[4];   // x = perceptual-composite enable (inject fill).
@@ -2114,7 +2264,9 @@ struct alignas(16) ConstantData {
     float inv_view_proj[4][4];   // Always the absolute inverse of the live encode (WorldPos depth
                                  // Reconstruction).
     float lighting1[4];   // Xyz = unit vector toward the light (engine axes), w = valid flag.
-    float lighting2[4];   // Rgb = light color (max-component normalized), w = shadow-map strength.
+    float lighting2[4];   // Rgb = the engine's sun colour in HDR scene units, copied straight from the
+                          // published lighting block (KH_LIGHT_BASE; (1,1,1) before the first publish),
+                          // w = shadow-map strength.
     float shadow_meta[4];   // Count, compare sign, bias, atlas size.
     float shadow_tiles[8][4];   // per-cascade atlas UV rects.
     float shadow_mats[24][4];   // per-cascade 4x3 sampling transforms.
@@ -2170,7 +2322,7 @@ struct alignas(16) ConstantData {
     // Existing offsets stay byte-identical, 1 float4 keeps KH_CBFRAME_BYTES %
     // 16 == 0. x = mask valid this frame, y/z = mask dims (px). w free.
     float mir_meta[4];
-    float sun_origin[4];
+    float sun_origin[4];   // xyz = the sun anchor; w = the far tier's prefilter arm (KH_FAR_PF).
     // x = engine below-layer extinction (block nb[51]), y = armed, z = clamp
     // fallback selector, w free. KH_CBFRAME_BYTES % 16 == 0 - one float4
     // preserves it.
@@ -2191,7 +2343,7 @@ struct alignas(16) ConstantData {
     // cluster size, so it may not move. Zero = the shader falls back to
     // sun_meta*[2], which is what every mesh fill site leaves here.
     float sun_cast_bias[4];    // Hero, mid, outer, far (normalized).
-    float sun_cast_bias2[4];   // x = union (normalized); yzw free.
+    float sun_cast_bias2[4];   // x = union (normalized); yzw unread.
     // No cube matrices live here, and that is the point. Only the spot frustum
     // is arbitrary and therefore stored.
     float dls_meta[8][4];    // Xyz = light world position (engine axes), w = far plane (m). w == 0
@@ -2253,7 +2405,7 @@ inline void kh_fill_obj_rot(ConstantData& cbd, const float* rot_m) {
 
 // A discard map is the expensive one; a NO_OVERWRITE map into a region the GPU is
 // not reading is a pointer return. Slice = the object block rounded to 256 B
-// (3,760 -> 3,840 = 240 constants; numConstants must be a multiple of 16).
+// (3,744 -> 3,840 = 240 constants; numConstants must be a multiple of 16).
 static constexpr uint32_t KH_CBR_STRIDE = static_cast<uint32_t>((KH_CBOBJ_BYTES + 255u) & ~static_cast<size_t>(255u));
 static constexpr uint32_t KH_CBR_SLICES = 1024u;
 static constexpr uint32_t KH_CBR_CONSTS = KH_CBR_STRIDE / 16u;
@@ -2348,6 +2500,93 @@ inline bool kh_upload_frame_cb(ID3D11DeviceContext* ctx, ID3D11Buffer* buf, cons
 // on its own running-value pixel plus uniforms), never spill-classified, never
 // depth consumers, and never t19 binders.
 static constexpr int KH_FUSE_MAX = 3;   // Extra stages riding one draw.
+
+// KH_VIS_MEMO: the pass visibility predicate is evaluated three times per
+// object per pass - once by kh_mat_ensure_all, once by kh_inst_plan_emit and
+// once by the per-object loop - with identical arguments and, by the twin
+// contract, an identical answer. The third of those that costs anything is
+// kh_vis_occ_hidden: eight projections plus up to KH_VOC_TEST_PX grid reads.
+// Memoise per object for the duration of the pass. Every reference handed to
+// the predicate comes from the pass's own contiguous mesh vector, so the
+// object's index is its offset in that vector - the same assumption the emit /
+// loop twin contract already rests on. Out-of-range (an object that is not a
+// member) falls through to a live evaluation, so the memo can only ever be a
+// cache, never a different answer. Measured 3x fewer occlusion tests.
+struct KhVisMemo {
+    const RenderObject* base = nullptr;
+    size_t n = 0;
+    std::vector<uint8_t> mark;   // 0 unknown, 1 visible, 2 hidden.
+    void begin(const std::vector<RenderObject>& khm_v) {
+        base = khm_v.data();
+        n = khm_v.size();
+        mark.assign(n, 0u);
+    }
+    // Returns the cached verdict, or computes it through khm_f and caches it.
+    template <class KhVisFn>
+    bool get(const RenderObject& khm_o, KhVisFn khm_f) {
+        // The null test precedes the subtraction deliberately: forming
+        // &khm_o - nullptr is undefined, not merely useless.
+        if (!base) return khm_f(khm_o);
+        const size_t khm_i = static_cast<size_t>(&khm_o - base);
+        if (khm_i >= n) return khm_f(khm_o);   // Not a member: evaluate live.
+        const uint8_t khm_m = mark[khm_i];
+        if (khm_m != 0u) return khm_m == 1u;
+        const bool khm_r = khm_f(khm_o);
+        mark[khm_i] = khm_r ? 1u : 2u;
+        return khm_r;
+    }
+};
+static KhVisMemo g_vis_memo_inj;    // Render thread (the injection).
+static KhVisMemo g_vis_memo_flush;  // Game thread under the graphics lock.
+
+// KH_MESH_ORDER: the back-to-front ordering both colour passes need.
+// std::sort over the vector itself moved 288-byte RenderObjects - ~34,500
+// moves at 3,001 meshes, about 10 MB of memmove per pass per frame - and
+// recomputed kh_mesh_dist_sq inside the comparator, so the OBB distance ran
+// O(n log n) times instead of O(n). Sort a 12-byte key instead: one distance
+// per object, one pass to permute. Measured 3.4x on a 3,001-box scene.
+// The order is identical - same group rule, same tie behaviour - because the
+// comparator below is the old one with its two kh_mesh_dist_sq calls replaced
+// by the values they would have returned.
+struct KhOrdKey {
+    float    d;   // kh_mesh_dist_sq to the pass camera.
+    uint32_t g;   // 0 opaque solid, 1 translucent/effect, 2 depth-Off.
+    uint32_t i;   // Index into the mesh vector.
+};
+inline uint32_t kh_ord_group(const RenderObject& kho_o) {
+    return kho_o.mode == DepthMode::Off ? 2u
+         : (!kho_o.fullscreen && kho_o.effect == 0 && kho_o.blend_mode == 0 &&
+            kho_o.color[3] >= 0.999f) ? 0u : 1u;
+}
+// Scratch, reused across frames and both passes (never concurrently - the
+// flush holds the graphics lock, which parks the render thread).
+static std::vector<KhOrdKey>      g_ord_keys;
+static std::vector<RenderObject>  g_ord_tmp;
+inline void kh_mesh_order(std::vector<RenderObject>& kho_m, const float kho_cam[3]) {
+    const size_t kho_n = kho_m.size();
+    if (kho_n < 2) return;
+    g_ord_keys.clear();
+    g_ord_keys.reserve(kho_n);
+
+    for (uint32_t kho_i = 0; kho_i < static_cast<uint32_t>(kho_n); ++kho_i) {
+        KhOrdKey kho_k;
+        kho_k.d = kh_mesh_dist_sq(kho_m[kho_i], kho_cam);   // Once per object, not per compare.
+        kho_k.g = kh_ord_group(kho_m[kho_i]);
+        kho_k.i = kho_i;
+        g_ord_keys.push_back(kho_k);
+    }
+
+    std::sort(g_ord_keys.begin(), g_ord_keys.end(),
+              [](const KhOrdKey& kho_a, const KhOrdKey& kho_b) {
+                  if (kho_a.g != kho_b.g) return kho_a.g < kho_b.g;
+                  if (kho_a.g != 0u) return kho_a.d > kho_b.d;   // Translucent: back to front.
+                  return kho_a.d < kho_b.d;                      // Opaque: front to back.
+              });
+    g_ord_tmp.clear();
+    g_ord_tmp.reserve(kho_n);
+    for (const KhOrdKey& kho_k : g_ord_keys) g_ord_tmp.push_back(std::move(kho_m[kho_k.i]));
+    kho_m.swap(g_ord_tmp);
+}
 
 inline bool kh_fuse_appendable(const RenderObject& o) {
     return (o.effect == 1 || o.effect == 2 || o.effect == 3 ||
@@ -5447,14 +5686,6 @@ inline bool kh_vis_occ_hidden(const KhVisOcc& khvh_o, const RenderObject& o) {
 }
 
 
-inline int kh_shadow_lod_level() {
-    return 0;
-}
-
-inline void mesh_shadow_range(int khs_mid, UINT& khs_start, UINT& khs_count) {
-    const MeshDef& khs_d = mesh_def(khs_mid);
-    mesh_lod_range(khs_d, kh_shadow_lod_level(), khs_start, khs_count);
-}
 
 // KH_MAT_BLEND: casting is the object'S, not the material'S. The depth proxies
 // (sun depth, seam footprint, mirror, prime) are untextured and draw every
@@ -5480,11 +5711,43 @@ inline float kh_lod_radius(const RenderObject& khl_o) {
     return kh_lod_radius_of(khl_o.size, khl_o.rot_m, khl_o.rotated);
 }
 
+// KH_SHADOW_LOD_DRAWN. Every depth-only pass that re-draws the scene's meshes
+// - the sun tiers and the union, the alpha casters, the dynamic-light maps,
+// the seam footprint, the mirror prepass and the prime - took level 0 through
+// kh_shadow_lod_level() (a stub returning 0), whatever the colour pass drew.
+// With 3,000 PBR meshes that was 357 M indices a frame into the sun maps and
+// 160 M into each seam loop (dump3: sunDepth 6.5-13 ms, seamInject 10 ms,
+// seamPrepass 5 ms) against the 12 M the injection itself drew. The dlsw
+// mask already argued the rule this adopts: "the real one is whatever the
+// injection drew, which is the level kh_lod_pick chose, not level 0." The
+// level is the colour pass's own pick for this object at this camera - the
+// finer half of a fade, 0 under a lock - so a map holds the silhouette the
+// player sees (the self term compares a surface against a map of the same
+// geometry: the consistent choice, not merely the cheap one), and every run
+// groups on (mesh, level). g_lod_proj_px unpublished reads as level 0, i.e.
+// exactly what shipped before.
+inline int kh_drawn_lod(int khdl_mid, const float* khdl_pos, const float* khdl_size, const float* khdl_rot,
+                        bool khdl_rotated, bool khdl_lock, const float khdl_cam[3]) {
+    if (khdl_lock) return 0;
+    const MeshDef& khdl_md = mesh_def(khdl_mid);
+    if (khdl_md.lod_n == 0) return 0;
+    int   khdl_lvl = 0;
+    float khdl_t = 0.0f;
+    kh_lod_pick(khdl_md, kh_lod_radius_of(khdl_size, khdl_rot, khdl_rotated),
+                sqrtf(kh_mesh_dist_sq_of(khdl_pos, khdl_size, khdl_rot, khdl_rotated, khdl_cam)),
+                khdl_lvl, khdl_t);
+    return mesh_lod_clamp(khdl_md, khdl_lvl);
+}
+inline void mesh_lod_range_of(int khlr_mid, int khlr_lvl, UINT& khlr_s, UINT& khlr_c) {
+    mesh_lod_range(mesh_def(khlr_mid), khlr_lvl, khlr_s, khlr_c);
+}
+
 static constexpr size_t KH_FBX_VERT_CEIL = 0xFFFFFFFFull / sizeof(MeshVertex);
 
 static constexpr uint64_t KH_MESH_CACHE_MAX_BYTES = 1024ull * 1024ull * 1024ull;
 static constexpr uint32_t KH_MESH_CACHE_MAGIC = 0x434D484Bu;   // "khmc" little-endian.
-static constexpr uint32_t KH_MESH_CACHE_VERSION = 4;   // 4 = KH_MESH_INDEXED: welded verts +
+static constexpr uint32_t KH_MESH_CACHE_VERSION = 5;   // 5 = KH_MESH_CACHE_ORDER: the welded stream in
+                                                       // vertex-cache order; 4 = KH_MESH_INDEXED: welded verts +
                                                        // index stream; 3 = KH_LOD_TOPO: cached ladders
                                                        // Regenerate.
 
@@ -6928,8 +7191,11 @@ inline uint32_t kh_draw_textured(ID3D11DeviceContext* ctx, ID3D11Device* dev,
     const MeshDef& md = mesh_def(mid);
     uint32_t draws = 0;
     auto khum_draw = [&](const MeshSubmesh& khum_sm) {
-        if (khum_inst_n) ctx->DrawIndexedInstanced(khum_sm.index_count, khum_inst_n, khum_sm.index_start, 0, khum_inst_first);
-        else             ctx->DrawIndexed(khum_sm.index_count, khum_sm.index_start, 0);
+        if (khum_inst_n) {
+            ctx->DrawIndexedInstanced(khum_sm.index_count, khum_inst_n, khum_sm.index_start, 0, khum_inst_first);
+        } else {
+            ctx->DrawIndexed(khum_sm.index_count, khum_sm.index_start, 0);
+        }
         ++draws;
     };
     ID3D11PixelShader* khum_bound = khum_builtin_ps;
@@ -7225,7 +7491,12 @@ inline void kh_inst_plan_build(KhInstPlan& p, const std::vector<RenderObject>& m
 // KH_BUCKETS: the cull walk. For every bucket, every member: the pass's own
 // visibility verdict (khie_visible), the level the object would pick alone
 // with its crossfade (a fading object is emitted at both levels, complementary
-// dither), sorted by level then far-to-near; the whole stream is written to
+// dither), sorted by level then by distance - KH_BUCKET_NTF: near-to-far for
+// a normal-blend bucket (opaque solids under LESS_EQUAL + write: the near
+// instance lands first and the hardware's early-Z rejects the far ones it
+// hides, which the far-to-near order this replaced never let it do - every
+// hidden instance shaded in full), far-to-near for the other blend modes, as
+// before (the order the per-object translucent path keeps); the whole stream is written to
 // the ring once and each bucket records its (level, first, n) ranges. Members
 // are marked done except the representative, which the per-object loop still
 // reaches and draws the bucket at. Preconditions: the pass's material sets
@@ -7259,10 +7530,13 @@ inline void kh_inst_plan_emit(ID3D11DeviceContext* ctx, ID3D11Device* dev, KhIns
             if (!o.lod_lock) kh_lod_pick(*khie_md, kh_lod_radius(o), sqrtf(khie_d2), khie_lvl, khie_t);
             khie_lvl = mesh_lod_clamp(*khie_md, khie_lvl);
             const bool khie_x = khie_t > 0.0f && khie_lvl < static_cast<int>(khie_md->lod_n);
-            // Far-to-near rank in the low 31 bits; bit 31 = the coarser half of a
-            // crossfade pair (the pair is complementary per pixel, so the order
-            // between the two halves is free).
-            const uint32_t khie_far = (0x7FFFFFFFu - (static_cast<uint32_t>(fminf(khie_d2, 2.0e9f)) & 0x7FFFFFFFu));
+            // Distance rank in the low 31 bits (KH_BUCKET_NTF: ascending for a
+            // normal-blend bucket, descending otherwise; the bucket key carries
+            // the blend mode, so one rule holds for every member); bit 31 = the
+            // coarser half of a crossfade pair (the pair is complementary per
+            // pixel, so the order between the two halves is free).
+            const uint32_t khie_dq = static_cast<uint32_t>(fminf(khie_d2, 2.0e9f)) & 0x7FFFFFFFu;
+            const uint32_t khie_far = (o.blend_mode == 0) ? khie_dq : (0x7FFFFFFFu - khie_dq);
             p.picked.emplace_back((static_cast<uint64_t>(khie_lvl) << 32) | khie_far, khie_i);
             if (khie_x) p.picked.emplace_back((static_cast<uint64_t>(khie_lvl + 1) << 32) | khie_far | 0x80000000u, khie_i);
         }
@@ -7801,10 +8075,17 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         { static_src.c_str(), "VSMainInst",  "vs_5_0", khcb_rx_defines, 0 },   // KH_INSTANCING twins.
         { static_src.c_str(), "VSMainInst",  "vs_5_0", khtx_defines,    0 },
         { static_src.c_str(), "VSMirror",    "vs_5_0", khcb_rx_defines, 0 },
+        // KH_SEAM_INST: both tables must match the ensure_* twin byte for byte
+        // (the memo key is an FNV over source, entry, target and the defines in
+        // order), or the speculation misses silently and these compile serially.
+        { static_src.c_str(), "VSSeamInst",   "vs_5_0", khcb_rx_defines, 0 },
+        { static_src.c_str(), "VSMirrorInst", "vs_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "VSFullscreen","vs_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "VSSunDepth",  "vs_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "VSSunDepthA", "vs_5_0", khtx_defines,    0 },   // KH_CAST_ALPHA twins.
         { static_src.c_str(), "PSSunDepthA", "ps_5_0", khtx_defines,    0 },
+        { static_src.c_str(), "VSSunDepthD", "vs_5_0", khcb_rx_defines, 0 },   // KH_CAST_DISSOLVE twins.
+        { static_src.c_str(), "PSSunDepthD", "ps_5_0", khcb_rx_defines, 0 },
         { khsp_comp_src.c_str(), "VSComposite", "vs_5_0", khsp_d0,  0 },
         { khsp_comp_src.c_str(), "VSComposite", "vs_5_0", khsp_d0t, 0 },
         { khsp_comp_src.c_str(), "VSCompositeInst", "vs_5_0", khsp_d0,  0 },   // KH_INSTANCING twins.
@@ -7898,6 +8179,33 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         }
     }
 
+    {   // KH_SEAM_INST: the seam transport's instanced twins. Both consume the
+        // sun ladder's lane shape (VSInSeam mirrors VSInSun), so they bind
+        // g_res.layout_sundepth and create no layout of their own. Non-fatal:
+        // either one absent leaves that loop on its per-caster path.
+        ID3D11VertexShader** const khsi_out[2] = { &g_res.vs_seam_inst, &g_res.vs_mirror_inst };
+        const char* const khsi_ent[2] = { "VSSeamInst", "VSMirrorInst" };
+
+        for (int khsi_i = 0; khsi_i < 2; ++khsi_i) {
+            ID3DBlob* khsi_blob = nullptr;
+            const std::string khsi_err = compile_shader(static_src.c_str(), khsi_ent[khsi_i],
+                                                        "vs_5_0", khcb_rx_defines, &khsi_blob);
+
+            if (khsi_err.empty() && khsi_blob) {
+                if (FAILED(dev->CreateVertexShader(khsi_blob->GetBufferPointer(),
+                                                   khsi_blob->GetBufferSize(),
+                                                   nullptr, khsi_out[khsi_i]))) {
+                    *khsi_out[khsi_i] = nullptr;
+                }
+            } else if (!khsi_err.empty()) {
+                report_error_once_safe(std::string("KH seam instanced VS (") + khsi_ent[khsi_i] +
+                                       ") - that loop stays per caster: " + khsi_err);
+            }
+
+            if (khsi_blob) khsi_blob->Release();
+        }
+    }
+
     {   // KH_CAST_ALPHA twins: the alpha-aware sun-depth VS/PS + their layout (mesh slot 0 with the
         // uv, the same per-instance slot 1). non-fatal: absent, every caster draws whole. Compiled
         // KH_TEXTURED for KhMatRoute (the material alpha by its route).
@@ -7933,6 +8241,29 @@ inline std::string ensure_resources(ID3D11Device* dev) {
 
         if (khsa_vb) khsa_vb->Release();
         if (khsa_pb) khsa_pb->Release();
+    }
+
+    {   // KH_CAST_DISSOLVE twins. Non-fatal: absent, far casters draw whole.
+        ID3DBlob* khsd_vb = nullptr;
+        ID3DBlob* khsd_pb = nullptr;
+        std::string khsd_err = compile_shader(static_src.c_str(), "VSSunDepthD", "vs_5_0", khcb_rx_defines, &khsd_vb);
+        if (khsd_err.empty()) khsd_err = compile_shader(static_src.c_str(), "PSSunDepthD", "ps_5_0", khcb_rx_defines, &khsd_pb);
+
+        if (khsd_err.empty() && khsd_vb && khsd_pb) {
+            HRESULT khsd_hr = dev->CreateVertexShader(khsd_vb->GetBufferPointer(), khsd_vb->GetBufferSize(), nullptr, &g_res.vs_sundepth_d);
+            if (SUCCEEDED(khsd_hr)) khsd_hr = dev->CreatePixelShader(khsd_pb->GetBufferPointer(), khsd_pb->GetBufferSize(), nullptr, &g_res.ps_sundepth_d);
+
+            if (FAILED(khsd_hr)) {
+                KH_SAFE_RELEASE(g_res.vs_sundepth_d);
+                KH_SAFE_RELEASE(g_res.ps_sundepth_d);
+                report_error_once_safe("KH sun-depth dissolve shaders: create " + hr_str(khsd_hr));
+            }
+        } else if (!khsd_err.empty()) {
+            report_error_once_safe("KH sun-depth dissolve shaders: " + khsd_err);
+        }
+
+        if (khsd_vb) khsd_vb->Release();
+        if (khsd_pb) khsd_pb->Release();
     }
 
     hr = dev->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &g_res.vs);
@@ -9038,9 +9369,9 @@ inline bool ensure_sun_pf(ID3D11Device* dev) {
         khpfm_pb->Release();
         if (FAILED(khpfm_ph)) return false;
     }
-    const UINT khpf_sz[3] = {   // KH_SUN_LADDER: runtime, half the map.
-        kh_sun_hero_size() / 2u, kh_sun_mid_size() / 2u, kh_sun_out_size() / 2u };
-    for (int khpf_i = 0; khpf_i < 3; ++khpf_i) {
+    const UINT khpf_sz[4] = {   // KH_SUN_LADDER: runtime, half the map. KH_FAR_PF: [3] the far tier.
+        kh_sun_hero_size() / 2u, kh_sun_mid_size() / 2u, kh_sun_out_size() / 2u, kh_sun_far_size() / 2u };
+    for (int khpf_i = 0; khpf_i < 4; ++khpf_i) {
         if (g_res.sun_pf_tex[khpf_i] && g_res.sun_pf_rtv[khpf_i] &&
             g_res.sun_pf_srv[khpf_i] && g_res.sun_pf_rtvm[khpf_i][1]) {
             D3D11_TEXTURE2D_DESC khpf_have = {};
@@ -9232,9 +9563,9 @@ struct StateBackup {
     // type-mismatched (zero) SRV on exactly the frames a .cube effect ran.
     ID3D11ShaderResourceView* ps_srvs[39] = {};   // t0-t38: +t37 (dlsw mask), +t38 (KH_MAT_TABLE).
     ID3D11ShaderResourceView* vs_srv39 = nullptr;   // KH_OBJBUF: the object record buffer's VS slot.
-                                                  // t28; t29-31; +t32 (far band); +t33/t34 (owner
-                                                  // Map); +t35 (cast occ) / t36 (dynamic-light
-                                                  // depth array,).
+                                                  // t28; t29-31; +t32 (far band); t33/t34 free
+                                                  // (owner map gone); +t35 (cast occ) / t36
+                                                  // (dynamic-light depth array).
     ID3D11SamplerState*      ps_samps[2] = {};   // s0 material, s1 pyramid sampler.
     ID3D11DepthStencilState* dss = nullptr;
     UINT                     stencil_ref = 0;
@@ -10132,7 +10463,6 @@ inline float kh_far_arb_contact() {
 static constexpr float KH_FAR_ARB_GUARD_REL  = 0.02f;
 static constexpr float KH_FAR_ARB_NEAR_MIN = 5.0f;
 static constexpr float KH_FAR_ARB_NEAR_HOLD = 2.0f;
-// Motion-hold trigger constants (rot/speed/drift/linger)
 
 // occlusion-guard snapshot state + runtime config (the overhaul; see
 // snapshot_composite_depth).
@@ -10604,7 +10934,6 @@ static KhCbCensusEntry g_cbc[KH_CBC_N];
 
 inline bool shadow_live_wanted();   // Defined with the live-shadow state.
 
-// The seam runs for every mesh; so does its census.
 inline bool kh_cbc_on() {
     return shadow_live_wanted() || g_svs_mesh_wanted.load(std::memory_order_relaxed);
 }
@@ -10670,56 +10999,31 @@ inline float kh_enc_far(float m22, float m32) {
     return khf > 0.0f ? khf : 1e9f;
 }
 
-// Teleports/camera cuts re-adopt through the debounce: once the accepted camera
-// has gone quiet (> KH_LATCH_STALE_MS without a matching latch - the world's
-// own clears refresh the stamp every frame, so a persistent foreign camera can
-// never reach the debounce), a candidate that confirms a recently held one (>=
-// KH_LATCH_RING_MS older: cross-cycle, so a twice-clearing foreign pass cannot
-// self-confirm within one frame) adopts.
+// KH_LATCH_FOLD (post-trust): the clear adopts the bridge PV every cycle. The
+// teleport debounce that stood here (50 m jump bar, a two-slot ring confirmed
+// across >= 150 ms, a 1 s loss timer) existed for a foreign camera publishing
+// at the clear (a PiP pass). It was measured across three day
+// runs with camera switches and PiP active: it refused a foreign publish
+// never, delayed every real switch ~120-150 ms, and put its held camera
+// 92 deg mean / 116 deg max into the cascade consensus (the whole of the
+// "cascade departure on camera switches"; the standing-lane hold, Src 4,
+// covers the one-frame departure that remains). Folded. Kept:
+// KH_LATCH_JUMP_M as the distance class the injection, the fire and the seam
+// still classify against, and the last boundary camera + its step.
+// PiP does not render our meshes today; when it does, the camera-identity
+// question returns with that campaign.
 static constexpr float    KH_LATCH_JUMP_M   = 50.0f;
-static constexpr uint64_t KH_LATCH_STALE_MS = 150;
-static constexpr uint64_t KH_LATCH_RING_MS  = 5;
-static constexpr uint64_t KH_LATCH_LOST_MS  = 1000;
-static float    g_latch_cam[3] = {};   // Last accepted latch camera.
+static float    g_latch_cam[3] = {};   // Last boundary camera.
 static bool     g_latch_cam_valid = false;
-static uint64_t g_latch_accept_ms = 0;   // Stamp of the last accept.
-static float    g_latch_ring[2][3] = {};   // Held candidates (teleport debounce).
-static uint64_t g_latch_ring_ms[2] = {};
-static int      g_latch_ring_n = 0;
-static int      g_latch_ring_w = 0;
-// The gate'S verdict, published. Boundary-written on the accept/hold branches,
-// read on the render thread by the same-cycle consumers.
-static bool     g_latch_held_cycle = false;
-static float    g_cam_step_m = -1.0f;   // Accepted latch-camera step this frame (m) 0 on holds.
+static float    g_cam_step_m = -1.0f;   // Boundary-camera step this frame (m).
 static RVExtBridge::ProjectionViewTransform g_boundary_pv = {};
 static bool     g_boundary_pv_valid = false;
 static float    g_boundary_t = -1.0f;
-// Exclusive-persistence shape (kh_probe_std_refresh's proven design): an
-// in-band sample refreshes the reference and kills any pending; an out-of-band
-// value adopts only after 500 ms of exclusivity - a mid-frame foreign
-// publication (the 0.07 window the bridge occasionally hands the injection) can
-// never confirm, while a real partition change adopts in half a second.
-static float    g_live_near_ref = -1.0f;
-static float    g_live_ref_m22 = 0.0f;
-static float    g_live_ref_m32 = 0.0f;
-static uint64_t g_live_ref_ms = 0;
-static float    g_live_near_pend = -1.0f;
-static uint64_t g_live_pend_ms = 0;
-
 inline float latch_cam_dist_sq(const float a[3], const float b[3]) {
     const float dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
     return dx * dx + dy * dy + dz * dz;
 }
 
-// Continuity verdict for a candidate view; the clear-time latch owns adoption +
-// the debounce, while the stale-latch retry uses this simple form so it cannot
-// import a foreign mid-frame publish.
-inline bool latch_view_continuous(const float view[4][4]) {
-    if (!g_latch_cam_valid) return true;
-    float khc_c[3];
-    extract_camera_pos(view, khc_c);
-    return latch_cam_dist_sq(khc_c, g_latch_cam) <= KH_LATCH_JUMP_M * KH_LATCH_JUMP_M;
-}
 // The last fog color/enable actually written into a CB game or render thread
 // writes at fill; stats read.
 // 1 = never filled since load.
@@ -11020,7 +11324,7 @@ inline uint32_t proj_upload_byte_width(ID3D11Resource* res) {
 // publishes the staged state inside flush_locked, where the graphics lock parks
 // the render thread - the same invariant the injection already relies on for
 // lock-free context use - so the render-thread consumers (composited-path
-// shading, the recon scan) read plain globals that can never be observed
+// shading) read plain globals that can never be observed
 // mid-write.
 
 typedef HRESULT (WINAPI* FnD3DDisassemble)(const void*, SIZE_T, UINT, const char*, void**);
@@ -11041,15 +11345,8 @@ static bool  g_fog_staged_valid = false;
 static float g_fog_staged[3] = { 0.0f, 0.0f, 0.0f };
 static bool  g_fog_valid = false;
 static float g_fog[3] = { 0.0f, 0.0f, 0.0f };
-// Sun direction derived from the engine's own cascade matrices (the SM's depth
-// row is the light axis in view space; fold through the view rotation's
-// transpose to world). Preferred over the script-fetched direction when fresh:
-// Pure engine truth, no SQF in the loop.
-static bool  g_sun_dir_derived_valid = false;
-static float g_sun_dir_derived[3] = { 0.0f, 1.0f, 0.0f };
-
-// Natural time never trips this per-frame threshold - slow drift is covered by
-// the staleness expiry in shadow_live_frame_reset instead.
+// A raw publish stepping past KH_SRAW_JUMP_DEG (kh_sun_raw_frame): the clear
+// hook resets the union's map hash on it so the re-fit is unconditional.
 static bool g_sun_jump_pending = false;
 static float g_skysun_ref[3] = { 0, 0, 0 };
 static bool  g_skysun_ref_valid = false;
@@ -11065,17 +11362,32 @@ inline bool kh_sky_static() {
            steady_now_ms() - g_skysun_ref_ms < 1000 &&
            g_skysun_mot_deg >= 0.0f && g_skysun_mot_deg < 0.3f;
 }
+// KH_SKY_LANE: the sun lane's two predicates, the one truth for every reader
+// (the publish's witness and hold, the sky fallback, the map latch's target,
+// the witness test). FRESH: the sky block was uploaded inside the window.
+// OK: fresh AND a light above the horizon - the engine keeps writing the sun
+// lane all night (the moon consensus read 125-130
+// deg from its skyward flip, i.e. 50-55 deg from the set sun itself),
+// and a lane at or below KH_SUN_AXIS_LANE_MIN_Y is not the light anything
+// shadows with. Tested on the RAW lane: there is no skyward flip anywhere any
+// more, because a below-horizon sun flipped skyward is the anti-solar point,
+// which at full moon sits within the witness bar of the moon consensus and
+// would have published as 'the witnessed lane'.
+static constexpr uint64_t KH_SUN_AXIS_SKY_FRESH_MS = 1000;
+static constexpr float    KH_SUN_AXIS_LANE_MIN_Y = 0.10f;
+inline bool kh_sun_axis_lane_fresh(uint64_t khlf_now) {
+    return g_skysun_ref_valid && (khlf_now - g_skysun_ref_ms) < KH_SUN_AXIS_SKY_FRESH_MS;
+}
+inline bool kh_sun_axis_lane_ok(uint64_t khlo_now) {
+    return kh_sun_axis_lane_fresh(khlo_now) && g_skysun_ref[1] > KH_SUN_AXIS_LANE_MIN_Y;
+}
 static bool g_atlas_frame_cur = false;
 static bool g_atlas_frame_prev = false;
 
-static uint32_t g_sun_derived_samples = 0;
-
+// The published sun direction (skyward, unit, engine axes): written by
+// kh_sun_raw_frame at the main depth clear, mirrored into g_sun_dir_engine.
 static bool  g_pub_valid = false;
-static bool     g_pub_boot = false;   // Current publish is bootstrap-sourced.
-static float    g_sun_boot_dir[3] = {};   // Latest eligible sky sun (skyward, unit).
 static float g_pub_dir[3] = {};
-static float g_cand_dir[3] = {};
-static int   g_cand_hold = 0;
 
 static bool  g_pub_block_valid = false;
 // The failure directions are asymmetric: a refused publish leaves the previous
@@ -11088,199 +11400,343 @@ static float g_band_tab_cdx[8]   = { -1,-1,-1,-1,-1,-1,-1,-1 };
 // worst-gap frame, latched once and kept.
 
 
-static constexpr int      KH_NB_SLOTS = 8;
-static constexpr uint32_t KH_NB_DECAY = 4096;
-static int32_t  g_nb_key[KH_NB_SLOTS] = {};   // 0 = empty.
-static uint32_t g_nb_cnt[KH_NB_SLOTS] = {};
-static uint32_t g_nb_notes = 0;
-
-inline void kh_near_base_note(float khnb_v) {
-    // Sanity only - anything outside this cannot be a near plane at all.
-    if (!(khnb_v > 0.001f && khnb_v < 20.0f)) return;
-
-    const int32_t khnb_k = static_cast<int32_t>(khnb_v * 10000.0f + 0.5f);
-    int khnb_hit = -1, khnb_free = -1, khnb_min = 0;
-
-    for (int i = 0; i < KH_NB_SLOTS; ++i) {
-        if (g_nb_key[i] == khnb_k) { khnb_hit = i; break; }
-        if (g_nb_key[i] == 0 && khnb_free < 0) khnb_free = i;
-        if (g_nb_cnt[i] < g_nb_cnt[khnb_min]) khnb_min = i;
-    }
-
-    if (khnb_hit >= 0) {
-        if (g_nb_cnt[khnb_hit] < 0x40000000u) g_nb_cnt[khnb_hit]++;
-    } else if (khnb_free >= 0) {
-        g_nb_key[khnb_free] = khnb_k; g_nb_cnt[khnb_free] = 1;
-    } else if (g_nb_cnt[khnb_min] == 0) {
-        g_nb_key[khnb_min] = khnb_k; g_nb_cnt[khnb_min] = 1;
-    } else {
-        for (int i = 0; i < KH_NB_SLOTS; ++i) if (g_nb_cnt[i]) g_nb_cnt[i]--;
-    }
-
-    if (++g_nb_notes >= KH_NB_DECAY) {
-        g_nb_notes = 0;
-        for (int i = 0; i < KH_NB_SLOTS; ++i) {
-            g_nb_cnt[i] >>= 1;
-            if (g_nb_cnt[i] == 0) g_nb_key[i] = 0;
-        }
-    }
-}
-
 static float g_pub_block_amb[3] = {};
 static float g_pub_block_sun[3] = {};
-// KH_BLK_JUMP_BRIGHT: bright world content after a sun jump re-arms the contradiction
-// witness inside its 15 s mute window (zero on a skip into real night).
-// KH_BLK_RATCHET: starved adoptions refused because they would lower the sun level
-// while the world is demonstrably lit. KH_BLK_JUMP_PERSIST: downward level changes
-// held during a sun-jump window until they persist (a real night clears it, a
-// time-skip transient does not). KH_BLK_LIT_FLOOR: a lit world cannot have a zero
-// sun - a contradiction test, not a tuning bar.
-static const float KH_BLK_LIT_SUN_FLOOR = 0.05f;
-static const float KH_BLK_LIT_KEEL_FRAC = 0.60f;   // And no lower than this share of the keel.
-static const float KH_BLK_JUMP_DIM_PERSIST_S = 3.0f;
-// The decisive lane for the residual dimming. A zero sun is admitted only when
-// the brightness witness has gone quiet for KH_BLK_BRIGHT_RECENT_S. These
-// record how stale it was each time that happened. Far over the bar means
-// bright uploads genuinely stopped flowing for a long time, which is a
-// different problem and must not be papered over by a bigger constant.
-static const float KH_BLK_KEEL_RATE = 0.02f;
-static float    g_blk_keel_sl        = -1.0f;   // Session state: the keel itself.
-static float    g_blk_keel_t         = -1.0f;   // Session state: last update stamp.
-static uint64_t g_blk_keel_snap_mark = 0;
-// What every regime adoption replaced, and after how long a gap.
-// Constants and the reasoning that sizes them live at the hold branch in the
-// locator.
-static const float KH_BLK_STARVED_DIM_FRAC   = 0.5f;   // dim bar vs the displaced standing.
-static const float KH_BLK_STARVED_DIM_HOLD_S = 10.0f;
-static const float KH_BLK_SDH_WINDOW_GAP_S   = 2.0f;   // A stale window re-opens fresh.
-// Effect-time seconds, the fill's own clock.
-static const float KH_BLK_BRIGHT_RECENT_S = 5.0f;
-static float g_blk_bright_seen_t = -1.0f;
-static float    g_blk_sdh_first = -1.0f;   // Session state: current hold window's open edge.
-static float    g_blk_sdh_last  = -1.0f;   // Session state: last hold in the window.
-
-// A window whose last hold is older than KH_BLK_SDH_WINDOW_GAP_S re-opens
-// fresh, so separated events never pool their ages toward a spurious concede.
-inline bool kh_blk_sdh_window_holds(float khsd_now) {
-    if (g_blk_sdh_first < 0.0f ||
-        (g_blk_sdh_last >= 0.0f &&
-         khsd_now - g_blk_sdh_last > KH_BLK_SDH_WINDOW_GAP_S)) {
-        g_blk_sdh_first = khsd_now;
-    }
-    g_blk_sdh_last = khsd_now;
-    const float khsd_held = khsd_now - g_blk_sdh_first;
-    if (khsd_held > KH_BLK_STARVED_DIM_HOLD_S) {
-        g_blk_sdh_first = -1.0f;
-        g_blk_sdh_last = -1.0f;
-        return false;
-    }
-    return true;
-}
-// Latched at the darkest frame.
-static constexpr float    KH_BLK_ERR_MAX = 0.02f;   // Healthy at rest ~0.0006; poisoned 0.137.
-static constexpr uint64_t KH_BLK_CONFIRM_MS = 500;
-static float    g_blk_pend_amb_l = -1.0f;
-static float    g_blk_pend_sun_l = -1.0f;
-static uint64_t g_blk_pend_ms = 0;
-static float    g_blk_mode_census_v[4] = { -999.0f, -999.0f, -999.0f, -999.0f };
-static uint64_t g_blk_mode_census_n[4] = {};
-// Gradual dusk drifts in-band and never enters the jump path; cloud transitions
-// hold the standing values indefinitely, so boxes stay lit.
-static float    g_inj_blk_amb[3] = { -1.0f, -1.0f, -1.0f };
-static float    g_inj_blk_sun[3] = { -1.0f, -1.0f, -1.0f };
-static uint64_t g_inj_blk_ms = 0;
-static float    g_blk_ring[4][8] = {};
-static uint32_t g_blk_ring_next = 0;
-static uint32_t g_blk_ring_count = 0;
-static uint64_t g_blk_anchor_snaps = 0;   // Anchor snaps on regime adoption.
-// So a contradiction that has held continuously for 2 s escapes - and only ever
-// into a bright incoming flavor, never into another dark one, which is what
-// keeps this from being a new ping-pong. The bounded escape.
-static float    g_blk_dark_contra_first = -1.0f;   // When the current window opened.
-static constexpr float KH_BLK_DARK_RESEED_FRAC = 0.5f;
-
 // Luminance-band agreement with an absolute epsilon so night-small values
 // cannot ratio-flap: |a - b| <= max(half the larger, 0.02).
-inline bool kh_blk_in_band(float a, float b) {
-    const float m = a > b ? a : b;
-    const float khb_eps = 0.5f * m > 0.02f ? 0.5f * m : 0.02f;
-    return fabsf(a - b) <= khb_eps;
+
+inline bool kh_probe_lum_band(float a, float b);   // Defined with the locator (the 15% band).
+
+// ============================ KH_LIGHT_BASE =============================
+// THE lighting publish. What the engine does, measured: it uploads the same
+// lighting block many times per
+// frame - five per-pass variants in an empty map, one per DRAW in a full one
+// or at night - and every variant is the one scene lighting scaled DOWN per
+// object (sun and/or ambient at 0.3 - 0.8 of the brightest, in fixed ratios,
+// grouped by object). Picking among them by luminance with holds was the
+// dimming and the staleness in one: each upload disagreed with the pending
+// seeded by the previous, the standing went stale for up to half a minute,
+// and a time skip waited on it. Picking the upload that owned the most draws
+// followed the camera (a 30% step as the 0.7x group came into view).
+// The rule that holds: each admitted upload owns the main-scene draws issued
+// until the next one (g_blko_draws, reorder_pre_draw, our own draws excluded);
+// uploads in one luminance band (kh_probe_lum_band) form a cluster whose draws
+// sum and whose member uploads count; at the main depth clear of a world
+// cycle (kh_probe_world_cycle) the BRIGHTEST cluster holding at least
+// KH_BLKO_BASE_SHARE of the frame's lit MEMBERS publishes (KH_BLKO_MEMBER
+// below: the draw share was a camera signal both ways) - attenuation only
+// ever goes down, so that is the unattenuated lighting. A standing base is
+// kept down to KH_BLKO_BASE_KEEP (admission hold; a base half-scrolled off
+// screen must not drop out, and a 2-upload outlier must never get in). One
+// frame of latency, no band on time, no
+// clock, no hold that a skip has to wait out. A non-world cycle (PiP,
+// secondary clear) keeps the standing publish.
+static constexpr int   KH_BLKO_MAX = 16;
+static constexpr float KH_BLKO_BASE_SHARE = 0.10f;   // Admission share of the frame's lit members (KH_BLKO_MEMBER).
+static constexpr float KH_BLKO_BASE_KEEP  = 0.05f;   // A standing base is kept down to this member share.
+struct KhBlkOwn { float amb[3]; float sun[3]; uint32_t draws; uint32_t at; uint8_t flag;
+                  uint32_t members; uint32_t rep_draws; float al; float sl; };
+static uint64_t g_blko_draws = 0;          // Main-scene draws, monotonic.
+static KhBlkOwn g_blko_cur[KH_BLKO_MAX] = {};   // The open frame's clusters.
+static int      g_blko_n = 0;
+static uint64_t g_blko_open_draws = 0;     // g_blko_draws when the last upload landed.
+static bool     g_blko_open = false;
+static int      g_blko_open_i = -1;        // Cluster the open span belongs to.
+static float    g_blko_open_amb[3] = {};   // The open span's own values (a cluster member).
+static float    g_blko_open_sun[3] = {};
+static KhBlkOwn g_blko_last[KH_BLKO_MAX] = {};  // The last closed frame's table.
+static uint64_t g_blko_overflow = 0;       // Uploads refused: more than KH_BLKO_MAX clusters in a frame.
+
+inline void kh_blk_owner_close_span() {
+    if (!g_blko_open) return;
+    g_blko_open = false;
+    if (g_blko_open_i < 0 || g_blko_open_i >= g_blko_n) return;
+    const uint64_t khoc_d64 = g_blko_draws >= g_blko_open_draws ? g_blko_draws - g_blko_open_draws : 0;
+    const uint32_t khoc_d = static_cast<uint32_t>(khoc_d64 > 0xFFFFFFFFull ? 0xFFFFFFFFull : khoc_d64);
+    KhBlkOwn& khoc_e = g_blko_cur[g_blko_open_i];
+    khoc_e.draws += khoc_d;
+    if (khoc_d > khoc_e.rep_draws || khoc_e.members == 1) {   // The member that owned the most itself represents.
+        khoc_e.rep_draws = khoc_d;
+        memcpy(khoc_e.amb, g_blko_open_amb, sizeof(khoc_e.amb));
+        memcpy(khoc_e.sun, g_blko_open_sun, sizeof(khoc_e.sun));
+    }
 }
-
-// KH_BLK_PROP_DIM - a dim that keeps the sun/ambient ratio is not the weather but
-// a scaled copy of the standing block (an invariant of the two lanes, not a bar):
-// a downward candidate whose ratio is within KH_BLK_PROP_TOL of the standing's is
-// refused. A real change moves the ratio, night has no lit standing sun, and an
-// upward candidate is never refused.
-static const float KH_BLK_PROP_TOL = 0.15f;
-inline bool kh_blk_proportional_dim(float khpd_sl, float khpd_al, float khpd_rsl, float khpd_ral) {
-    if (!(khpd_rsl > 1.0f) || !(khpd_ral > 1.0e-4f) || !(khpd_al > 1.0e-4f)) return false;   // A lit standing, real ambients.
-    if (!(khpd_sl < khpd_rsl) || !(khpd_al < khpd_ral)) return false;
-    const float khpd_r = (khpd_sl / khpd_al) / (khpd_rsl / khpd_ral);
-    return fabsf(khpd_r - 1.0f) <= KH_BLK_PROP_TOL;
+// Every admitted upload: the previous span closes, this upload joins its
+// cluster (or opens one) and owns from here. State only.
+inline void kh_blk_owner_note(const float* khon_b, uint8_t khon_flag) {
+    kh_blk_owner_close_span();
+    const float khon_al = khon_b[8] + khon_b[9] + khon_b[10];
+    const float khon_sl = khon_b[16] + khon_b[17] + khon_b[18];
+    int khon_i = -1;
+    for (int khon_k = 0; khon_k < g_blko_n; ++khon_k) {
+        if (((g_blko_cur[khon_k].flag ^ khon_flag) & 2u) != 0u) continue;   // Zero never merges with lit.
+        if (kh_probe_lum_band(khon_sl, g_blko_cur[khon_k].sl) && kh_probe_lum_band(khon_al, g_blko_cur[khon_k].al)) { khon_i = khon_k; break; }
+    }
+    if (khon_i < 0) {
+        if (g_blko_n >= KH_BLKO_MAX) { ++g_blko_overflow; g_blko_open_i = -1; return; }
+        khon_i = g_blko_n++;
+        KhBlkOwn& khon_e = g_blko_cur[khon_i];
+        memset(&khon_e, 0, sizeof(khon_e));
+        khon_e.at = static_cast<uint32_t>(g_blko_draws); khon_e.flag = khon_flag;
+        khon_e.al = khon_al; khon_e.sl = khon_sl;   // The cluster's band is anchored on its first member.
+    }
+    KhBlkOwn& khon_c = g_blko_cur[khon_i];
+    ++khon_c.members;
+    khon_c.flag |= khon_flag;
+    for (int khon_k = 0; khon_k < 3; ++khon_k) { g_blko_open_amb[khon_k] = khon_b[8 + khon_k]; g_blko_open_sun[khon_k] = khon_b[16 + khon_k]; }
+    g_blko_open_i = khon_i;
+    g_blko_open_draws = g_blko_draws;
+    g_blko_open = true;
 }
-
-static constexpr float    KH_SUN_SETTLE_STEP_DEG = 0.15f;
-static constexpr uint64_t KH_SUN_SETTLE_MS = 400;
-static constexpr float    KH_SUN_GLIDE_MAX_STEP_DEG = 0.12f;
-static float    g_sun_pub_prev[3] = {};   // Published dir at the previous flush.
-static bool     g_sun_pub_prev_valid = false;
-static uint64_t g_sun_unstable_ms = 0;   // Last publish step beyond the threshold.
-static constexpr uint64_t KH_SUN_JUMP_COOLDOWN_MS = 5000;
-static uint64_t g_sun_last_jump_ms = 0;   // Last adopted jump (rate limiter).
-
-static constexpr uint64_t KH_SUN_COLD_HOLD_MS = 1250;
-static constexpr uint64_t KH_SUN_FLAP_GRACE_MS = 500;
-// KH_LIGHT_RECON - the published lighting may not stay stale for more than a second,
-// whatever gate is holding it: every published value is read from the engine's own
-// uploads every frame, so any lag is our own arbitration (latches, holds, cooldowns).
-static constexpr uint64_t KH_RECON_MS = 250;
-static constexpr uint64_t KH_RECON_WIN_MS = 1500;      // Sample window the median is taken over.
-static constexpr int      KH_RECON_MIN_N = 8;          // Fewer agreeing samples than this: no
-                                                       // Verdict.
-static constexpr float    KH_RECON_SUN_DEG = 1.0f;     // Published vs consensus direction: adopt
-                                                       // Past this.
-static constexpr int      KH_RECON_RING = 64;
-static float    g_rc_sun_ring[KH_RECON_RING][3] = {};   // Raw skyward cascade axes (render thread
-static uint64_t g_rc_sun_ring_ms[KH_RECON_RING] = {};
-static uint32_t g_rc_sun_ring_n = 0;                   // Total pushes (cursor = n % ring).
-static constexpr int KH_RECON_BLK_RING = 256;
-static float    g_rc_blk_ring[KH_RECON_BLK_RING][6] = {};   // amb rgb, sun rgb - raw uploads (probe
-                                                            // Pushes).
-static uint64_t g_rc_blk_ring_ms[KH_RECON_BLK_RING] = {};
-static uint32_t g_rc_blk_ring_n = 0;
-static uint64_t g_rc_last_ms = 0;
-// Sun adoptions refused because the consensus explained the sky CB's own sun lane
-// worse than the standing publish did (see kh_rc_sun_witness), and adoptions that
-// went through with no usable witness (fail-open). Block consensus verdicts refused
-// because the window still carried the standing level as a live flavour, and the
-// share of the last verdict's window that did. *By: 1 = the gates, 2 = reconciliation.
-static uint64_t g_rc_sun_lat_open_ms = 0;              // 0 = no disagreement open.
-static uint64_t g_rc_sun_settle_open_ms = 0;
-static uint64_t g_rc_blk_lat_open_ms = 0;
-// The window is the ring, not KH_RECON_WIN_MS. KH_RECON_WIN_MS only excludes a
-// stale ring after a stall.
-static uint64_t g_sun_valid_ms = 0;   // Last (graced) validity rise / adopted jump.
-static uint64_t g_sun_fell_ms = 0;   // Last validity fall (flap grace).
-static bool     g_sun_ok_prev = false;
-
-inline bool kh_sun_settled() {
-    const uint64_t khs_now = steady_now_ms();
-    if (g_sun_valid_ms == 0 || khs_now - g_sun_valid_ms < KH_SUN_COLD_HOLD_MS) return false;
-    return g_sun_unstable_ms == 0 ||
-           khs_now - g_sun_unstable_ms >= KH_SUN_SETTLE_MS;
+// One admitted upload of the locked block (khba_b = the block base, lanes
+// 8-10 ambient, 16-18 sun, 36-38 fog; khba_avail = floats readable from it):
+// its ownership span.
+inline void kh_blk_note_admitted(const float* khba_b, uint32_t khba_avail, bool khba_world) {
+    const float khba_al = khba_b[8] + khba_b[9] + khba_b[10];
+    const float khba_sl = khba_b[16] + khba_b[17] + khba_b[18];
+    const float khba_fl = khba_avail > 38 ? khba_b[36] + khba_b[37] + khba_b[38] : 1.0f;
+    const bool khba_zero = khba_al < 1.0e-6f && khba_sl < 1.0e-6f && khba_fl < 1.0e-6f;
+    const uint8_t khba_flag = static_cast<uint8_t>((khba_world ? 1u : 0u) | (khba_zero ? 2u : 0u));
+    kh_blk_owner_note(khba_b, khba_flag);
 }
+// The main depth clear: close the frame, publish the brightest substantial
+// cluster's representative.
+inline bool kh_probe_world_cycle();   // Defined with the locator.
+inline void kh_blk_owner_frame() {
+    kh_blk_owner_close_span();
+    g_blko_open_i = -1;
+    if (g_blko_n == 0) return;
+    uint32_t khof_owned = 0;
+    uint32_t khof_memb = 0;   // KH_BLKO_MEMBER: lit members, the second share's denominator.
+    int khof_max = -1; uint32_t khof_max_d = 0;   // The draw-count winner: the fallback when no cluster clears the bar.
+    for (int khof_i = 0; khof_i < g_blko_n; ++khof_i) {
+        if (g_blko_cur[khof_i].flag & 2u) continue;
+        khof_owned += g_blko_cur[khof_i].draws;
+        khof_memb += g_blko_cur[khof_i].members;
+        if (khof_max < 0 || g_blko_cur[khof_i].draws > khof_max_d) { khof_max = khof_i; khof_max_d = g_blko_cur[khof_i].draws; }
+    }
+    int khof_pick = -1;
+    if (khof_owned > 0) {
+        const float khof_bar_m = KH_BLKO_BASE_SHARE * static_cast<float>(khof_memb);
+        for (int khof_i = 0; khof_i < g_blko_n; ++khof_i) {
+            const KhBlkOwn& khof_e = g_blko_cur[khof_i];
+            if (khof_e.flag & 2u) continue;   // All-zero is a clear, never a base.
+            if (static_cast<float>(khof_e.members) < khof_bar_m) continue;
+            if (khof_pick < 0) { khof_pick = khof_i; continue; }
+            const KhBlkOwn& khof_p = g_blko_cur[khof_pick];
+            const float khof_hi = khof_e.sl > khof_p.sl ? khof_e.sl : khof_p.sl;
+            if (fabsf(khof_e.sl - khof_p.sl) <= 0.01f * khof_hi + 1.0e-3f) {   // The same sun (an ambient-only variant): the one that draws more is the lighting, not the lift.
+                if (khof_e.draws > khof_p.draws || (khof_e.draws == khof_p.draws && khof_e.sl > khof_p.sl)) khof_pick = khof_i;
+            } else if (khof_e.sl > khof_p.sl) {
+                khof_pick = khof_i;
+            }
+        }
+        if (g_pub_block_valid) {   // Admission hold: a standing base at least as bright stays down to KH_BLKO_BASE_KEEP.
+            // The first cluster in table order that sits in band with the standing publish is the
+            // one judged; two clusters can both be in band with it while distinct from each other,
+            // in which case table order (first opened) decides.
+            const float khof_pal = g_pub_block_amb[0] + g_pub_block_amb[1] + g_pub_block_amb[2];
+            const float khof_psl = g_pub_block_sun[0] + g_pub_block_sun[1] + g_pub_block_sun[2];
+            for (int khof_i = 0; khof_i < g_blko_n; ++khof_i) {
+                const KhBlkOwn& khof_e = g_blko_cur[khof_i];
+                if (khof_e.flag & 2u) continue;
+                if (!kh_probe_lum_band(khof_psl, khof_e.sl) || !kh_probe_lum_band(khof_pal, khof_e.al)) continue;
+                if (khof_i != khof_pick && static_cast<float>(khof_e.members) >= KH_BLKO_BASE_KEEP * static_cast<float>(khof_memb) &&
+                    (khof_pick < 0 || khof_e.sl >= g_blko_cur[khof_pick].sl)) { khof_pick = khof_i; }
+                break;
+            }
+        }
+        if (khof_pick < 0) khof_pick = khof_max;   // Nothing clears the member bar (many near-equal clusters): the largest owner.
+    }
+    memcpy(g_blko_last, g_blko_cur, sizeof(KhBlkOwn) * static_cast<size_t>(g_blko_n));
+    if (khof_pick >= 0 && kh_probe_world_cycle()) {
+        const KhBlkOwn& khof_w = g_blko_cur[khof_pick];
+        for (int khof_c = 0; khof_c < 3; ++khof_c) { g_pub_block_amb[khof_c] = khof_w.amb[khof_c]; g_pub_block_sun[khof_c] = khof_w.sun[khof_c]; }
+        g_pub_block_valid = true;
+    }
+    g_blko_n = 0;
+}
+// ============================ KH_SUN_RAW ==============================
+// THE sun direction publish, the shadow twin of KH_LIGHT_BASE. Every shadow
+// chain (the private sun maps behind the self term and the world cast, the
+// union re-fit, the engine's band table) rebuilds within a frame once its
+// inputs move; the lag behind a time skip lived in ONE input, the published
+// direction, and in the filters that once sat between the engine's cascade
+// axes and it (the publish sat > 1 deg from the engine's own axis for up to
+// 396 ms, mean 127; the settle / cold hold stood nothing down - the whole
+// symptom was direction lag). All of it is gone.
+//
+// The engine states its light axis twice per frame: the cascade sampling
+// matrices' depth row (one direction for every cascade of the cycle, spread
+// <= 0.03 deg - the direction it actually shadows with, the moon at night)
+// and the sky CB's sun lane (world space, day only). band_capture samples the
+// cascade axis of every capture, ahead of its reseal throttle; at the main
+// depth clear kh_sun_raw_frame takes the cycle's median (one frame of latency
+// by construction, 1.217; world cycles only - the same structural bar as
+// KH_LIGHT_BASE, so a non-world pass's cascades never publish) and publishes:
+//   - the SKY LANE when it is fresh and the consensus witnesses it (within
+//     KH_SRAW_LANE_WIT_DEG, the same light): it is fold-free and lands the
+//     frame the sun moves, while the engine's own cascade axis converges on a
+//     new sun over ~0.7 s and departs from it for a frame or two during
+//     camera moves (measured: every such departure identical under a fold
+//     through the cycle's own later view - the engine's, not ours);
+//   - the STANDING LANE (KH_SRAW_LANE_HOLD, Src 4) when the lane is above the
+//     floor, did not step since the previous close that named it (Src 3 or 4
+//     as that close's candidate - a refused non-world close counts too, since
+//     the lane's own step is the test, not the publish) (<=
+//     KH_SRAW_LANE_STILL_DEG) and the consensus left it: on a flick or a camera
+//     switch the cascade axis leaves an unmoved lane by 17-121 deg for one to
+//     three frames (and for as long as the clear's camera latch holds the
+//     previous camera after a switch), and the shading direction followed it
+//     until this rule. A sun that did not move did not move; a level rule on
+//     the lane's own step, not a clock. Measured on a day run with camera
+//     switches: 276 held publishes of 1,833, no jumps left (from 4-22 per
+//     run, all departures), the maps and the shading on one axis, picture
+//     unchanged by eye.
+//   - the CASCADE CONSENSUS otherwise (night, or the lane is not the light
+//     the cascades track and did not just stand still).
+//   - the sky lane alone after KH_SRAW_SKY_FALLBACK_MS with no cascade at all
+//     (shadows off in the video options).
+// A published step past KH_SRAW_JUMP_DEG is a jump: g_sun_jump_pending resets
+// the union's map hash at the same clear. No level rule, no clock: the cascade
+// axis measured 0.001 deg mean / < 1 deg max frame-to-frame while the sky
+// stood still, so nothing here smooths. The sun maps render
+// from this publish too (KH_SUN_AXIS_FOLD retired the sky-witness latch that
+// sat between; the standing-lane hold is what keeps the switch-frame
+// departure out of both).
+inline float kh_rc_median(float* khrm_v, int khrm_n) {   // Insertion sort: n <= KH_SRAW_CYC.
+    for (int khrm_i = 1; khrm_i < khrm_n; ++khrm_i) {
+        const float khrm_x = khrm_v[khrm_i];
+        int khrm_j = khrm_i - 1;
+        while (khrm_j >= 0 && khrm_v[khrm_j] > khrm_x) { khrm_v[khrm_j + 1] = khrm_v[khrm_j]; --khrm_j; }
+        khrm_v[khrm_j + 1] = khrm_x;
+    }
+    return khrm_v[khrm_n / 2];
+}
+static constexpr int      KH_SRAW_CYC = 16;      // Samples one cycle holds (8 cascades measured).
+static constexpr float    KH_SRAW_JUMP_DEG = 1.0f;   // A published step past this is a jump (the union re-fits unconditionally).
+static constexpr uint64_t KH_SRAW_SKY_FALLBACK_MS = 1000;   // No cascade sample this long: the sky lane publishes.
+static constexpr float    KH_SRAW_LANE_WIT_DEG = 10.0f;     // = KH_SUN_AXIS_MAX_DEG: the lane is the tracked light within this.
+                                                            // (Freshness and the horizon floor: kh_sun_axis_lane_fresh / _ok.)
+static float    g_sraw_cyc[KH_SRAW_CYC][3] = {};   // The open cycle's raw axes (world, skyward, unit).
+static int      g_sraw_cyc_n = 0;
+static uint64_t g_sraw_last_sample_ms = 0;   // Last cascade sample (the sky fallback's clock).
+static float    g_sraw_last_imm[3] = {};    // The last cycle's cascade consensus itself.
+static bool     g_sraw_last_imm_valid = false;
+static uint8_t  g_sraw_last_src = 0;        // 0 none, 1 cascade consensus, 2 sky lane (fallback), 3 sky lane (witnessed), 4 sky lane (held).
+static float    g_sraw_sky_prev[3] = {};    // The lane at the previous close (its own step per publish).
+static bool     g_sraw_sky_prev_valid = false;
+static float    g_sraw_sky_step_deg = -1.0f;   // How far the lane moved since the previous close (-1 = no fresh lane).
+static float    g_sraw_pub_gap_deg = -1.0f;   // Consensus vs the standing publish at the close (pre-publish).
+static float    g_sraw_sky_gap_deg = -1.0f;   // Consensus vs the sky lane (skyward), -1 = no fresh lane.
+static constexpr float KH_SRAW_LANE_STILL_DEG = 0.05f;   // KH_SRAW_LANE_HOLD: a lane step under this is 'did not move'.
 
-static float    g_sun_snap_cand[3] = {};
-static uint32_t g_sun_snap_hold = 0;
-static constexpr uint64_t KH_SUN_PUB_TRAVEL_WIN_MS = 500;
-static constexpr float    KH_SUN_PUB_TRAVEL_DEG = 0.3f;
-static float    g_sun_pub_travel_ref[3] = {};   // Published dir at the window open.
-static uint64_t g_sun_pub_travel_ref_ms = 0;   // window-open stamp (0 = no window yet).
-static uint64_t g_sun_pub_travel_ms = 0;   // Last tripping window (the latch's sun quiet term).
-static float    g_first_sun_settled_t = -1.0f;
-static float    g_first_derived120_t = -1.0f;
-static float    g_first_bandcap_t = -1.0f;
+inline float kh_sraw_angle_deg(const float* khsa_a, const float* khsa_b) {
+    float khsa_d = khsa_a[0] * khsa_b[0] + khsa_a[1] * khsa_b[1] + khsa_a[2] * khsa_b[2];
+    khsa_d = khsa_d > 1.0f ? 1.0f : (khsa_d < -1.0f ? -1.0f : khsa_d);
+    return acosf(khsa_d) * 57.29578f;
+}
+// One raw cascade axis (world, already skyward and unit) from the capture site.
+inline void kh_sun_raw_note(const float* khsn_w) {
+    g_sraw_last_sample_ms = steady_now_ms();
+    if (g_sraw_cyc_n >= KH_SRAW_CYC) return;
+    g_sraw_cyc[g_sraw_cyc_n][0] = khsn_w[0];
+    g_sraw_cyc[g_sraw_cyc_n][1] = khsn_w[1];
+    g_sraw_cyc[g_sraw_cyc_n][2] = khsn_w[2];
+    ++g_sraw_cyc_n;
+}
+inline bool kh_probe_world_cycle();   // Defined with the locator.
+// At the main depth clear (render thread, like g_pub_block_*: the injection
+// reads on this thread, the flush under the park), before g_ro.cycle_vp_*
+// resets (the ended cycle's viewport is the world test) and before the
+// sun-jump block consumes g_sun_jump_pending.
+inline void kh_sun_raw_frame() {
+    const uint64_t khsf_now = steady_now_ms();
+    const bool khsf_world = kh_probe_world_cycle();
+    float khsf_m[3] = { 0.0f, 0.0f, 0.0f };
+    uint8_t khsf_src = 0;
+    const int khsf_n = g_sraw_cyc_n;
+    g_sraw_cyc_n = 0;
+    if (khsf_n > 0) {
+        float khsf_x[KH_SRAW_CYC], khsf_y[KH_SRAW_CYC], khsf_z[KH_SRAW_CYC];
+        for (int khsf_i = 0; khsf_i < khsf_n; ++khsf_i) {
+            khsf_x[khsf_i] = g_sraw_cyc[khsf_i][0];
+            khsf_y[khsf_i] = g_sraw_cyc[khsf_i][1];
+            khsf_z[khsf_i] = g_sraw_cyc[khsf_i][2];
+        }
+        khsf_m[0] = kh_rc_median(khsf_x, khsf_n);
+        khsf_m[1] = kh_rc_median(khsf_y, khsf_n);
+        khsf_m[2] = kh_rc_median(khsf_z, khsf_n);
+        const float khsf_l = sqrtf(khsf_m[0] * khsf_m[0] + khsf_m[1] * khsf_m[1] + khsf_m[2] * khsf_m[2]);
+        if (khsf_l > 1.0e-6f) {
+            khsf_m[0] /= khsf_l; khsf_m[1] /= khsf_l; khsf_m[2] /= khsf_l;
+            if (khsf_m[1] < 0.0f) { khsf_m[0] = -khsf_m[0]; khsf_m[1] = -khsf_m[1]; khsf_m[2] = -khsf_m[2]; }
+            khsf_src = 1;
+        }
+    } else if (kh_sun_axis_lane_ok(khsf_now) &&
+               (g_sraw_last_sample_ms == 0 || khsf_now - g_sraw_last_sample_ms >= KH_SRAW_SKY_FALLBACK_MS)) {
+        khsf_m[0] = g_skysun_ref[0]; khsf_m[1] = g_skysun_ref[1]; khsf_m[2] = g_skysun_ref[2];
+        khsf_src = 2;   // A lane above the floor; below it the standing publish stays (the sun has set).
+    }
+    // The open disagreement closes when the publish is back within the bar
+    // (this frame's publish, below; a refused cycle leaves it open).
+    if (khsf_src == 0) return;   // Nothing this cycle: the standing publish stays.
+    if (khsf_src == 1) {
+        g_sraw_last_imm[0] = khsf_m[0]; g_sraw_last_imm[1] = khsf_m[1]; g_sraw_last_imm[2] = khsf_m[2];
+        g_sraw_last_imm_valid = true;
+        // Wobble: the consensus step from the previous sampled cycle while the sky lane held still.
+        g_sraw_sky_gap_deg = -1.0f;
+        if (kh_sun_axis_lane_fresh(khsf_now)) {
+            const float khsf_s[3] = { g_skysun_ref[0], g_skysun_ref[1], g_skysun_ref[2] };   // Raw: no flip (KH_SKY_LANE).
+            const bool  khsf_s_ok = khsf_s[1] > KH_SUN_AXIS_LANE_MIN_Y;
+            g_sraw_sky_gap_deg = kh_sraw_angle_deg(khsf_m, khsf_s);   // At night: the moon against the set sun (> 90 deg).
+            g_sraw_sky_step_deg = g_sraw_sky_prev_valid ? kh_sraw_angle_deg(khsf_s, g_sraw_sky_prev) : 0.0f;
+            g_sraw_sky_prev[0] = khsf_s[0]; g_sraw_sky_prev[1] = khsf_s[1]; g_sraw_sky_prev[2] = khsf_s[2];
+            g_sraw_sky_prev_valid = true;
+            // The witnessed lane is the axis, fold-free.
+            if (g_sraw_sky_gap_deg <= KH_SRAW_LANE_WIT_DEG && khsf_s_ok) {
+                khsf_m[0] = khsf_s[0]; khsf_m[1] = khsf_s[1]; khsf_m[2] = khsf_s[2];
+                khsf_src = 3;
+            } else if (khsf_s_ok &&
+                       (g_sraw_last_src == 3 || g_sraw_last_src == 4) &&
+                       g_sraw_sky_step_deg >= 0.0f && g_sraw_sky_step_deg <= KH_SRAW_LANE_STILL_DEG) {
+                // KH_SRAW_LANE_HOLD: the lane stood still since the previous close that
+                // named it (g_sraw_last_src is stored before the world test, so a refused
+                // close counts); the consensus left it, the sun did not (Src 4).
+                khsf_m[0] = khsf_s[0]; khsf_m[1] = khsf_s[1]; khsf_m[2] = khsf_s[2];
+                khsf_src = 4;
+            }
+        } else {
+            g_sraw_sky_step_deg = -1.0f;
+            g_sraw_sky_prev_valid = false;
+        }
+    }
+    g_sraw_last_src = khsf_src;
+    g_sraw_pub_gap_deg = g_pub_valid ? kh_sraw_angle_deg(khsf_m, g_pub_dir) : -1.0f;
+    if (khsf_src != 2 && !khsf_world) {   // Refused: the consensus stands off the publish until a world cycle lands.
+        // Opened here and nowhere else: a publishing cycle closes any open latency below in
+        // the same call, so opening it there too logged a 0 ms event on every jump.
+        return;
+    }
+    // Publish. The step against the standing publish is the jump test.
+    const float khsf_step = g_pub_valid ? g_sraw_pub_gap_deg : 0.0f;
+    g_pub_dir[0] = khsf_m[0]; g_pub_dir[1] = khsf_m[1]; g_pub_dir[2] = khsf_m[2];
+    g_sun_dir_engine[0] = khsf_m[0]; g_sun_dir_engine[1] = khsf_m[1]; g_sun_dir_engine[2] = khsf_m[2];
+    g_pub_valid = true;
+    g_sun_valid = true;
+    if (khsf_step > KH_SRAW_JUMP_DEG) {
+        g_sun_jump_pending = true;   // The clear hook's jump block consumes it right after this call.
+    }
+}
+// KH_SUN_RAW end.
+
+// The night flapping has no second writer. KH_SKY_LANE_SCAN (one night run,
+// 10,565 sky-block captures with the consensus unwitnessed) tested every float
+// triple of the sky upload against the moon consensus: two offsets ever hit,
+// the best (67, a row-16.w / row-17.xy scalar coincidence) on 392 captures at a
+// 6 deg gap - no lane. The engine does not state the moon direction in the sky
+// block; at night the cascade consensus IS the axis, departures included, and
+// the scan went out with the question (1.244).
 
 inline const float* kh_shadow_sun() {
     if (g_sun_valid) return g_sun_dir_engine;
@@ -11288,290 +11744,23 @@ inline const float* kh_shadow_sun() {
 }
 
 // Caller supplies the axis already rotated into world space; fail-open
-// everywhere the comparison is not trustworthy (cold, unsettled, no published
+// everywhere the comparison is not trustworthy (no published
 // sun).
 static constexpr float KH_SUN_AXIS_MAX_DEG = 10.0f;
-static constexpr float KH_SUN_AXIS_COLD_DEG = 6.0f;
 
-// KH_SUN_AXIS_CENSUS - the drift's lane. In an orthographic sun projection every
-// translation-class error (texel snap, anchor rebase, a held map's stale centre)
-// applies to occluder and receiver alike and cancels; the one class that does not
-// is an angular error in the sun axis, because occluder and receiver sit at
-// different up-sun distances (d_o = h / sy, d_r ~ 0). So the gap is our published
-// axis against the axis the engine's own shadows follow.
-static float    g_sun_axis_gap_deg = -1.0f;
-static float    g_sun_axis_gap_max_deg = 0.0f;
-// Declared here rather than with the rest of the latch group below: the drift
-// lane in kh_sun_axis_census reads them, and fxc has a linker but this header
-// does not - definition must precede use.
-static bool     g_sun_axis_latch_valid = false;
-static float    g_sun_axis_sky_since_deg = -1.0f;   // Current tracking error against the witness.
 
-inline float kh_sun_axis_angle_deg(const float* khaa_a, const float* khaa_b) {
-    float khaa_d = khaa_a[0] * khaa_b[0] + khaa_a[1] * khaa_b[1] + khaa_a[2] * khaa_b[2];
-    khaa_d = khaa_d > 1.0f ? 1.0f : (khaa_d < -1.0f ? -1.0f : khaa_d);
-    return acosf(khaa_d) * 57.29578f;
-}
-
-// The sky CB's own sun lane (g_skysun_ref, refreshed at every sky upload) is the
-// engine's statement of where the sun is, independent of how the cascades were
-// laid; a consensus worth publishing must explain it at least as well as the
-// standing publish does. Consulted only where it is proven to be the light being
-// tracked (within KH_SUN_AXIS_MAX_DEG); a stale lane, or a night where the tracked
-// light is the moon, fails open. Returns 1 = adoptable, 0 = refused, -1 = no usable
-// witness (treated as open). Read on the render thread at the ring push and on the
-// game thread inside the flush, which parks the render thread.
-inline int kh_rc_sun_witness(const float* khrw_cand, const float* khrw_pub) {
-    if (!g_skysun_ref_valid || steady_now_ms() - g_skysun_ref_ms >= 1000) return -1;   // kh_sky_static's freshness bar
-                                                                                       // (KH_SUN_AXIS_SKY_FRESH_MS is
-                                                                                       // declared below this point).
-    float khrw_ref[3] = { g_skysun_ref[0], g_skysun_ref[1], g_skysun_ref[2] };
-    if (khrw_ref[1] < 0.0f) { khrw_ref[0] = -khrw_ref[0]; khrw_ref[1] = -khrw_ref[1]; khrw_ref[2] = -khrw_ref[2]; }   // Skyward, the derivation's
-                                                                                                                      // Convention.
-    const float khrw_dp = kh_sun_axis_angle_deg(khrw_pub, khrw_ref);
-    const float khrw_dc = kh_sun_axis_angle_deg(khrw_cand, khrw_ref);
-    if (khrw_dp > KH_SUN_AXIS_MAX_DEG && khrw_dc > KH_SUN_AXIS_MAX_DEG) return -1;   // The lane is not the light
-                                                                                     // Either tracks.
-    return (khrw_dc <= khrw_dp + KH_RECON_SUN_DEG) ? 1 : 0;
-}
-
-// Called once per frame from render_sun_depth, with the axis the map is about
-// to be rendered with and the camera it is about to be anchored at.
-inline void kh_sun_axis_census(const float* khac_pub, const float* khac_cam, bool khac_cam_valid) {
-    if (!khac_pub) return;
-    if (g_sun_dir_derived_valid) {
-        g_sun_axis_gap_deg = kh_sun_axis_angle_deg(khac_pub, g_sun_dir_derived);
-        if (g_sun_axis_gap_deg > g_sun_axis_gap_max_deg) {
-            g_sun_axis_gap_max_deg = g_sun_axis_gap_deg;
-        }
-    }
-    // Priced on tracking error - how far the axis sits from the source it follows -
-    // since that is the only part of the angle that produces ground displacement. A
-    // lane that screams at a healthy system is worse than no lane.
-    {
-        float khac_err = g_sun_axis_gap_max_deg;
-        if (g_sun_axis_latch_valid && g_sun_axis_sky_since_deg > khac_err) {
-            khac_err = g_sun_axis_sky_since_deg;
-        }
-    }
-}
-
-// Drift tracks wander linearly ((h / sy) * theta), so a parked camera is stable at
-// any angle and only motion drifts; the axis need not be piecewise constant. Caster
-// positions are untouched: render_sun_depth rebuilds and re-renders every frame, so
-// a moving mesh re-rasterises on the next pass.
-static constexpr float    KH_SUN_AXIS_SLEW_DEG_S = 2.0f;    // Rate floor (deg/s).
-static constexpr float    KH_SUN_AXIS_SLEW_GAIN = 8.0f;    // Proportional catch-up (1/s);
-                                                           // KH_SUN_AXIS_PREDICT: the sky witness refreshes only when the engine re-uploads
-                                                           // its sky constants, so the axis is tracked to the witness's predicted position
-                                                           // (steady-state lag = travel_rate / gain). Hard-capped both ways and corrected by
-                                                           // the next real sample: prediction leads by at most KH_SUN_AXIS_PREDICT_MAX_DEG,
-                                                           // and a velocity above KH_SUN_AXIS_PREDICT_MAX_DEG_S is a discontinuity, not
-                                                           // extrapolated.
-static constexpr float    KH_SUN_AXIS_PREDICT_MAX_DEG = 2.0f;     // Absolute safety ceiling on the
-                                                                  // Lead.
-static constexpr uint64_t KH_SUN_AXIS_PREDICT_MAX_MS = 250;       // And never extrapolate older
-                                                                  // Than this.
-static uint64_t g_sun_axis_wit_gap_ms = 0;   // Last observed inter-refresh interval.
-static constexpr float    KH_SUN_AXIS_PREDICT_MAX_DEG_S = 5.0f;   // Above this it is a jump, not
-                                                                  // Travel.
-static float    g_sun_axis_wit_prev[3] = {};
-static uint64_t g_sun_axis_wit_prev_ms = 0;
-static bool     g_sun_axis_wit_prev_valid = false;
-static float    g_sun_axis_wit_vel[3] = {};     // per-second derivative of the witness direction.
-static bool     g_sun_axis_wit_vel_valid = false;
-
-// Advances khp_out to the witness's predicted direction for this instant.
-// Returns false when there is nothing to predict from, in which case khp_out is
-// left holding the raw witness.
-inline bool kh_sun_axis_predict(float khp_out[3], uint64_t khp_now) {
-    khp_out[0] = g_skysun_ref[0];
-    khp_out[1] = g_skysun_ref[1];
-    khp_out[2] = g_skysun_ref[2];
-
-    // A refresh is a change in the witness, not a new timestamp: the sky CB is
-    // re-uploaded far more often than its sun actually moves.
-    const bool khp_moved = !g_sun_axis_wit_prev_valid ||
-        g_skysun_ref[0] != g_sun_axis_wit_prev[0] ||
-        g_skysun_ref[1] != g_sun_axis_wit_prev[1] ||
-        g_skysun_ref[2] != g_sun_axis_wit_prev[2];
-
-    if (khp_moved) {
-        if (g_sun_axis_wit_prev_valid && khp_now > g_sun_axis_wit_prev_ms) {
-            const float khp_dt = static_cast<float>(khp_now - g_sun_axis_wit_prev_ms) * 0.001f;
-            const float khp_deg = kh_sun_axis_angle_deg(g_skysun_ref, g_sun_axis_wit_prev);
-            g_sun_axis_wit_gap_ms = khp_now - g_sun_axis_wit_prev_ms;
-            if (khp_dt > 1.0e-4f && khp_deg / khp_dt <= KH_SUN_AXIS_PREDICT_MAX_DEG_S) {
-                g_sun_axis_wit_vel[0] = (g_skysun_ref[0] - g_sun_axis_wit_prev[0]) / khp_dt;
-                g_sun_axis_wit_vel[1] = (g_skysun_ref[1] - g_sun_axis_wit_prev[1]) / khp_dt;
-                g_sun_axis_wit_vel[2] = (g_skysun_ref[2] - g_sun_axis_wit_prev[2]) / khp_dt;
-                g_sun_axis_wit_vel_valid = true;
-            } else {
-                g_sun_axis_wit_vel_valid = false;   // A jump: correct to it, never extrapolate it.
-            }
-        }
-        g_sun_axis_wit_prev[0] = g_skysun_ref[0];
-        g_sun_axis_wit_prev[1] = g_skysun_ref[1];
-        g_sun_axis_wit_prev[2] = g_skysun_ref[2];
-        g_sun_axis_wit_prev_valid = true;   // Without this every frame reads as a refresh.
-        g_sun_axis_wit_prev_ms = khp_now;
-        return g_sun_axis_wit_vel_valid;
-    }
-
-    if (!g_sun_axis_wit_vel_valid) return false;
-
-    // Time cap, not an angle cap. Bound the extrapolation age instead, at twice
-    // the last observed refresh interval, and it degrades the same way at every
-    // rate. The degree ceiling below stays purely as a safety net.
-    const uint64_t khp_age_ms = khp_now - g_sun_axis_wit_prev_ms;
-    uint64_t khp_bar = (g_sun_axis_wit_gap_ms != 0) ? (g_sun_axis_wit_gap_ms * 2u)
-                                                    : KH_SUN_AXIS_PREDICT_MAX_MS;
-    if (khp_bar > KH_SUN_AXIS_PREDICT_MAX_MS) khp_bar = KH_SUN_AXIS_PREDICT_MAX_MS;
-    if (khp_age_ms > khp_bar) return false;
-    const float khp_age = static_cast<float>(khp_age_ms) * 0.001f;
-    if (khp_age <= 0.0f) return false;
-
-    float khp_p[3] = {
-        g_skysun_ref[0] + g_sun_axis_wit_vel[0] * khp_age,
-        g_skysun_ref[1] + g_sun_axis_wit_vel[1] * khp_age,
-        g_skysun_ref[2] + g_sun_axis_wit_vel[2] * khp_age,
-    };
-    const float khp_l = sqrtf(khp_p[0] * khp_p[0] + khp_p[1] * khp_p[1] + khp_p[2] * khp_p[2]);
-    if (khp_l < 1.0e-6f) return false;
-    khp_p[0] /= khp_l; khp_p[1] /= khp_l; khp_p[2] /= khp_l;
-
-    // Past it the witness has gone quiet for longer than the estimate is worth
-    // trusting, so stop advancing and wait to be corrected.
-    const float khp_lead = kh_sun_axis_angle_deg(khp_p, g_skysun_ref);
-    if (khp_lead > KH_SUN_AXIS_PREDICT_MAX_DEG) return false;
-
-    khp_out[0] = khp_p[0]; khp_out[1] = khp_p[1]; khp_out[2] = khp_p[2];
-    return true;
-}
-
-static constexpr float    KH_SUN_AXIS_SNAP_DEG = 5.0f;      // Past this it is a discontinuity, not
-                                                            // Travel.
-static constexpr uint64_t KH_SUN_AXIS_SKY_FRESH_MS = 1000;   // Same freshness bar the witness uses.
-static float    g_sun_axis_latch[3] = {};
-static uint64_t g_sun_axis_slew_ms = 0;
-
-inline const float* kh_sun_axis_latched(const float* khal_cand) {
-    if (!khal_cand) return khal_cand;
-
-    const uint64_t khal_now = steady_now_ms();
-    const bool khal_sky_ok = g_skysun_ref_valid &&
-        (khal_now - g_skysun_ref_ms) < KH_SUN_AXIS_SKY_FRESH_MS;
-    // The witness when we have one; the candidate is the fail-open target and
-    // is snapped to, never slewed to, so a lost witness costs nothing.
-    // KH_SUN_AXIS_PREDICT: the witness refreshes in discrete steps, so track
-    // its predicted position for this instant rather than its last sample -
-    // otherwise the slew converges between refreshes, the axis stops changing,
-    // and the sun map's skip hash freezes the shadows in place.
-    float khal_pred[3];
-    const float* khal_tgt = khal_cand;
-    if (khal_sky_ok) {
-        kh_sun_axis_predict(khal_pred, khal_now);   // Leaves the raw witness on refusal.
-        khal_tgt = khal_pred;
-    }
-
-    // Noise census: how far the candidate is from the axis we will use.
-
-    if (!g_sun_axis_latch_valid || !khal_sky_ok) {
-        g_sun_axis_latch[0] = khal_tgt[0];
-        g_sun_axis_latch[1] = khal_tgt[1];
-        g_sun_axis_latch[2] = khal_tgt[2];
-        g_sun_axis_latch_valid = true;
-        g_sun_axis_slew_ms = khal_now;
-        g_sun_axis_sky_since_deg = 0.0f;
-        return g_sun_axis_latch;
-    }
-
-    const float khal_err = kh_sun_axis_angle_deg(khal_tgt, g_sun_axis_latch);
-    g_sun_axis_sky_since_deg = khal_err;
-
-    // dt clamped: a stall, a load screen or a first frame must not authorise an
-    // unbounded step.
-    uint64_t khal_dms = khal_now - g_sun_axis_slew_ms;
-    if (khal_dms > 250) khal_dms = 250;
-    g_sun_axis_slew_ms = khal_now;
-    const float khal_dt = static_cast<float>(khal_dms) * 0.001f;
-
-    if (khal_err >= KH_SUN_AXIS_SNAP_DEG) {
-        g_sun_axis_latch[0] = khal_tgt[0];
-        g_sun_axis_latch[1] = khal_tgt[1];
-        g_sun_axis_latch[2] = khal_tgt[2];
-        return g_sun_axis_latch;
-    }
-
-    if (khal_err > 1.0e-6f) {
-        // Rate floor plus a proportional catch-up term: an epsilon slew every frame would
-        // break the skip hash every frame and re-render every caster for invisible motion.
-        // At 480x time acceleration the lag is 0.25 deg (0.21 m at h = 100 m).
-        const float khal_step = fmaxf(KH_SUN_AXIS_SLEW_DEG_S,
-                                      khal_err * KH_SUN_AXIS_SLEW_GAIN) * khal_dt;
-        float khal_t = (khal_step >= khal_err) ? 1.0f : (khal_step / khal_err);
-        if (khal_t < 0.0f) khal_t = 0.0f;
-        // Normalised lerp: the step is a small fraction of a degree, where it
-        // is indistinguishable from a slerp and cannot produce a zero vector.
-        float khal_n[3] = {
-            g_sun_axis_latch[0] + (khal_tgt[0] - g_sun_axis_latch[0]) * khal_t,
-            g_sun_axis_latch[1] + (khal_tgt[1] - g_sun_axis_latch[1]) * khal_t,
-            g_sun_axis_latch[2] + (khal_tgt[2] - g_sun_axis_latch[2]) * khal_t,
-        };
-        const float khal_l = sqrtf(khal_n[0] * khal_n[0] + khal_n[1] * khal_n[1] + khal_n[2] * khal_n[2]);
-        if (khal_l > 1.0e-6f) {
-            g_sun_axis_latch[0] = khal_n[0] / khal_l;
-            g_sun_axis_latch[1] = khal_n[1] / khal_l;
-            g_sun_axis_latch[2] = khal_n[2] / khal_l;
-        }
-    }
-
-    return g_sun_axis_latch;
-}
-
-// True when the sun maps' axis is being driven by the camera-independent sky
-// witness rather than by the published sun. This is the predicate that retires
-// a whole family of guards.
-static constexpr uint64_t KH_SUN_AXIS_STALL_MS = 250;         // No live frame is this long.
-static constexpr uint64_t KH_SUN_AXIS_STALL_GRACE_MS = 500;   // Benefit of the doubt after one.
-static uint64_t g_sun_axis_frame_ms = 0;
-static uint64_t g_sun_axis_stall_until_ms = 0;
-
-// Once per frame, before anything asks kh_sun_axis_witnessed.
-inline void kh_sun_axis_note_frame(uint64_t khsf_now) {
-    if (g_sun_axis_frame_ms != 0) {
-        const uint64_t khsf_gap = khsf_now - g_sun_axis_frame_ms;
-        if (khsf_gap >= KH_SUN_AXIS_STALL_MS) {
-            g_sun_axis_stall_until_ms = khsf_now + KH_SUN_AXIS_STALL_GRACE_MS;
-        }
-    }
-    g_sun_axis_frame_ms = khsf_now;
-}
-
+// Before the first publish the maps and the cast may go on the sky lane
+// alone (KH_SKY_LANE: fresh and above the horizon). Both callers test
+// `!g_sun_valid && !kh_sun_axis_witnessed()`, so this decides only the cold
+// second; the former latch-validity and stall-grace terms went with the
+// latch (KH_SUN_AXIS_FOLD).
 inline bool kh_sun_axis_witnessed() {
-    if (!g_sun_axis_latch_valid || !g_skysun_ref_valid) return false;
-    const uint64_t khaw_now = steady_now_ms();
-    if ((khaw_now - g_skysun_ref_ms) < KH_SUN_AXIS_SKY_FRESH_MS) return true;
-    // Stale by the clock - but if we just came back from a stall, the clock is
-    // measuring the stall, not the witness.
-    if (khaw_now < g_sun_axis_stall_until_ms) {
-        return true;
-    }
-    return false;
+    return g_skysun_ref_valid && kh_sun_axis_lane_ok(steady_now_ms());
 }
 
 inline bool kh_sun_axis_foreign(float khsx_x, float khsx_y, float khsx_z, float* khsx_out_deg) {
     const float* khsx_ps = kh_shadow_sun();
-    bool khsx_boot = false;
-
-    if (!khsx_ps) {
-        if (g_sun_boot_dir[1] > 0.10f) {
-            khsx_ps = g_sun_boot_dir;
-            khsx_boot = true;
-        } else {
-            return false;   // Truly nothing to compare against.
-        }
-    }
+    if (!khsx_ps) return false;   // Nothing published yet: nothing to compare against.
 
     const float khsx_n = sqrtf(khsx_x * khsx_x + khsx_y * khsx_y + khsx_z * khsx_z);
     if (khsx_n < 1e-6f) return false;
@@ -11581,221 +11770,21 @@ inline bool kh_sun_axis_foreign(float khsx_x, float khsx_y, float khsx_z, float*
     khsx_d = khsx_d > 1.0f ? 1.0f : (khsx_d < -1.0f ? -1.0f : khsx_d);
     const float khsx_deg = acosf(khsx_d) * 57.29578f;
     if (khsx_out_deg) *khsx_out_deg = khsx_deg;
-    const bool khsx_cold = khsx_boot || !kh_sun_settled();
-    const float khsx_bar = khsx_cold ? KH_SUN_AXIS_COLD_DEG : KH_SUN_AXIS_MAX_DEG;
-
-    if (khsx_deg > khsx_bar) {
+    if (khsx_deg > KH_SUN_AXIS_MAX_DEG) {
         return true;
     }
 
     return false;
 }
 
+// Once per flush, under the park: the direction is already published (the
+// clear hook's kh_sun_raw_frame); the flush carries the fog and mirrors the
+// validity. The former stack here (a 120-sample maturity, an 8-flush
+// candidate hold, a 5 s cooldown, a 0.12 deg / frame glide, the settle and
+// cold hold, the sky bootstrap and the travel window) was measured as the
+// whole shadow lag (396 ms max / 127 mean) and removed.
 inline void publish_world_lighting() {
-    const bool khsb_derived_ok = g_sun_dir_derived_valid && g_sun_derived_samples >= 120;
-    // Elevation floor 0.10 on skyward y - the derivation's own convention -
-    // keeps night and the deep low-sun clamp regime on today's cold path
-    // exactly; a moving sky (kh_sky_static false) never bootstraps.
-    bool khsb_boot_live = false;
-
-    // Ownership guard: the bootstrap may seed a cold publish or continue its
-    // own era, never repossess one the derivation has owned - a mid-session
-    // derived-validity dip must go inert exactly as it always did, not glide
-    // the publish toward the sky lanes and back.
-    if (!khsb_derived_ok && (!g_pub_valid || g_pub_boot) && kh_sky_static()) {
-        float khsb_d[3] = { g_skysun_ref[0], g_skysun_ref[1], g_skysun_ref[2] };
-        if (khsb_d[1] < 0.0f) { khsb_d[0] = -khsb_d[0]; khsb_d[1] = -khsb_d[1]; khsb_d[2] = -khsb_d[2]; }
-
-        if (khsb_d[1] > 0.10f) {
-            g_sun_boot_dir[0] = khsb_d[0];
-            g_sun_boot_dir[1] = khsb_d[1];
-            g_sun_boot_dir[2] = khsb_d[2];
-            khsb_boot_live = true;
-        }
-    }
-
-    const bool sun_ok = khsb_derived_ok || khsb_boot_live;
-    const float* khsb_src = khsb_derived_ok ? g_sun_dir_derived : g_sun_boot_dir;
-
-    if (sun_ok) {
-
-        if (!g_pub_valid) {
-            g_pub_dir[0] = khsb_src[0];
-            g_pub_dir[1] = khsb_src[1];
-            g_pub_dir[2] = khsb_src[2];
-            g_pub_valid = true;
-            g_pub_boot = !khsb_derived_ok;
-        } else {
-            const float dp = g_pub_dir[0] * khsb_src[0] +
-                             g_pub_dir[1] * khsb_src[1] +
-                             g_pub_dir[2] * khsb_src[2];
-
-            // Bootstrap handover: the first flushes where the matured
-            // derivation replaces the bootstrap source.
-            if (g_pub_boot && khsb_derived_ok) {
-                const float khsb_hd = dp > 1.0f ? 1.0f : (dp < -1.0f ? -1.0f : dp);
-                if (khsb_hd >= 0.99998134f) g_pub_boot = false;
-            }
-
-            if (dp >= 0.99863f) {
-                g_cand_hold = 0;
-                // Small-angle equivalence: the post-pursuit step is fraction *
-                // (full angle between published and derived), both unit
-                // vectors, so capping the fraction caps the step. dp is the
-                // glide-path guarantee (>= 0.99863, <= 3 deg), keeping acosf
-                // well-conditioned here.
-                float khs_frac = 0.25f;
-                // Hold whenever the sky itself is static and the pursuit target
-                // has left the published direction past the map's own maturity
-                // threshold territory: chasing wobble while the real sun stands
-                // still is exactly what the far-cut and the blackout were made
-                // of.
-                if (kh_sky_static() && !g_pub_boot) {
-                    float khsw_pd = g_pub_dir[0] * khsb_src[0] +
-                                    g_pub_dir[1] * khsb_src[1] +
-                                    g_pub_dir[2] * khsb_src[2];
-                    khsw_pd = khsw_pd > 1.0f ? 1.0f : (khsw_pd < -1.0f ? -1.0f : khsw_pd);
-
-                    if (khsw_pd < 0.99998134f) {
-                        khs_frac = 0.0f;   // Hold: += 0, clamp census untouched.
-                    }
-                }
-                const float khs_dp_cl = dp > 1.0f ? 1.0f : dp;
-                const float khs_full_deg = acosf(khs_dp_cl) * 57.29578f;
-
-                if (khs_full_deg * khs_frac > KH_SUN_GLIDE_MAX_STEP_DEG) {
-                    khs_frac = KH_SUN_GLIDE_MAX_STEP_DEG / khs_full_deg;
-                }
-
-                g_pub_dir[0] += (khsb_src[0] - g_pub_dir[0]) * khs_frac;
-                g_pub_dir[1] += (khsb_src[1] - g_pub_dir[1]) * khs_frac;
-                g_pub_dir[2] += (khsb_src[2] - g_pub_dir[2]) * khs_frac;
-                const float pl = sqrtf(g_pub_dir[0] * g_pub_dir[0] +
-                                       g_pub_dir[1] * g_pub_dir[1] +
-                                       g_pub_dir[2] * g_pub_dir[2]);
-
-                if (pl > 1e-6f) {
-                    g_pub_dir[0] /= pl;
-                    g_pub_dir[1] /= pl;
-                    g_pub_dir[2] /= pl;
-                }
-            } else {
-                const float dc = g_cand_dir[0] * khsb_src[0] +
-                                 g_cand_dir[1] * khsb_src[1] +
-                                 g_cand_dir[2] * khsb_src[2];
-
-                if (g_cand_hold > 0 && dc >= 0.99863f) {
-                    g_cand_hold++;
-                } else {
-                    g_cand_dir[0] = khsb_src[0];
-                    g_cand_dir[1] = khsb_src[1];
-                    g_cand_dir[2] = khsb_src[2];
-                    g_cand_hold = 1;
-                }
-
-                if (g_cand_hold >= 8) {
-                    if (g_sun_last_jump_ms != 0 &&
-                        steady_now_ms() - g_sun_last_jump_ms < KH_SUN_JUMP_COOLDOWN_MS) {
-                        g_cand_hold = 0;
-                    } else {
-                        bool engine_confirms = true;
-                        if (kh_sky_static() && !g_pub_boot) engine_confirms = false;
-
-                        const bool khj_stream_live = g_atlas_frame_cur || g_atlas_frame_prev;
-
-                        if (engine_confirms && khj_stream_live) {
-                            g_pub_dir[0] = g_cand_dir[0];
-                            g_pub_dir[1] = g_cand_dir[1];
-                            g_pub_dir[2] = g_cand_dir[2];
-                            g_cand_hold = 0;
-                            g_sun_jump_pending = true;   // Exactly one jump per real move.
-                            g_sun_last_jump_ms = steady_now_ms();
-                            g_sun_valid_ms = g_sun_last_jump_ms;   // Cold hold restarts: the new
-                                                                   // Direction re-settles.
-                            g_pub_boot = false;   // Adoption ends the bootstrap era.
-                        } else {
-                            g_cand_hold = 0;
-                        }
-                    }
-                }
-            }
-        }
-
-        g_sun_dir_engine[0] = g_pub_dir[0];
-        g_sun_dir_engine[1] = g_pub_dir[1];
-        g_sun_dir_engine[2] = g_pub_dir[2];
-
-        // sun-settle stamp: a published step beyond the threshold marks the
-        // direction unstable; consumers hold until it stays put for
-        // KH_SUN_SETTLE_MS (see the gate's state block).
-        if (g_sun_pub_prev_valid) {
-            float khs_sp = g_pub_dir[0] * g_sun_pub_prev[0] +
-                           g_pub_dir[1] * g_sun_pub_prev[1] +
-                           g_pub_dir[2] * g_sun_pub_prev[2];
-            khs_sp = khs_sp > 1.0f ? 1.0f : (khs_sp < -1.0f ? -1.0f : khs_sp);
-
-            if (acosf(khs_sp) * 57.29578f > KH_SUN_SETTLE_STEP_DEG) {
-                g_sun_unstable_ms = steady_now_ms();
-            }
-        }
-
-        g_sun_pub_prev[0] = g_pub_dir[0];
-        g_sun_pub_prev[1] = g_pub_dir[1];
-        g_sun_pub_prev[2] = g_pub_dir[2];
-        g_sun_pub_prev_valid = true;
-
-        // Runs under the park like every other publish consumer.
-        {
-            const uint64_t kht_now = steady_now_ms();
-
-            if (g_sun_pub_travel_ref_ms == 0) {
-                g_sun_pub_travel_ref[0] = g_pub_dir[0];
-                g_sun_pub_travel_ref[1] = g_pub_dir[1];
-                g_sun_pub_travel_ref[2] = g_pub_dir[2];
-                g_sun_pub_travel_ref_ms = kht_now;
-            } else if (kht_now - g_sun_pub_travel_ref_ms >= KH_SUN_PUB_TRAVEL_WIN_MS) {
-                float kht_dp = g_pub_dir[0] * g_sun_pub_travel_ref[0] +
-                               g_pub_dir[1] * g_sun_pub_travel_ref[1] +
-                               g_pub_dir[2] * g_sun_pub_travel_ref[2];
-                kht_dp = kht_dp > 1.0f ? 1.0f : (kht_dp < -1.0f ? -1.0f : kht_dp);
-
-                if (acosf(kht_dp) * 57.29578f > KH_SUN_PUB_TRAVEL_DEG) {
-                    // The sun never moved: the engine's own sky-CB sun is the
-                    // live witness, and per the bridge-veto doctrine a
-                    // persistence-shaped detector may not outrank it.
-                    bool khtw_stamp = true;
-
-                    if (kh_sky_static()) {
-                        khtw_stamp = false;
-                    }
-
-                    if (khtw_stamp) g_sun_pub_travel_ms = kht_now;
-                }
-
-                g_sun_pub_travel_ref[0] = g_pub_dir[0];
-                g_sun_pub_travel_ref[1] = g_pub_dir[1];
-                g_sun_pub_travel_ref[2] = g_pub_dir[2];
-                g_sun_pub_travel_ref_ms = kht_now;
-            }
-        }
-    }
-
-    // cold-hold edge tracking: stamp the (graced) validity rise; a fall only
-    // notes its time - a sub-grace flap keeps the running hold.
-    if (sun_ok && !g_sun_ok_prev) {
-        const uint64_t khs_now = steady_now_ms();
-
-        if (!(g_sun_fell_ms != 0 && khs_now - g_sun_fell_ms < KH_SUN_FLAP_GRACE_MS)) {
-            g_sun_valid_ms = khs_now;
-        }
-    } else if (!sun_ok && g_sun_ok_prev) {
-        g_sun_fell_ms = steady_now_ms();
-    }
-
-    g_sun_ok_prev = sun_ok;
-
-    g_sun_valid = sun_ok;
-    if (g_first_sun_settled_t < 0.0f && kh_sun_settled()) g_first_sun_settled_t = effect_time_seconds();
+    g_sun_valid = g_pub_valid;
     g_fog_valid = g_fog_staged_valid;
     g_fog[0] = g_fog_staged[0];
     g_fog[1] = g_fog_staged[1];
@@ -11875,7 +11864,10 @@ struct LiveShadowState {
         // receive term must not consume. Cleared when the true same-frame view
         // completes the seal.
         bool  vcol_bridge = false;
-        float pending_since = 0.0f;   // Fallback: complete from the bridge after 100 ms.
+        float pending_since = 0.0f;   // When the seal went pending. (The former 100 ms bridge
+                                      // fallback is gone: a pending older than 50 ms at the next
+                                      // frame view is invalidated by the epoch guard, so it could
+                                      // never fire.)
         float sm[12] = {};   // PSC_ShadowmapMatrix rows (float4x3).
         float vcol[12] = {};   // View matrix columns 0.2 (world->view, row-vector conv).
         float border[4] = {};   // x = near, y = far, z = dead (always 0).
@@ -11891,8 +11883,6 @@ struct LiveShadowState {
         float    stage_sm[12] = {};
         float    stage_border[4] = {};
         float    stage_since = 0.0f;
-        float    esc_t = -1.0f;   // effect_time_seconds at the escape.
-        uint64_t esc_cycle = 0;   // g_topo_cycles at the escape.
         float    stage_view[12] = {};
         bool     stage_view_ok = false;
         // vcol layout (columns), like stage_view above.
@@ -11907,7 +11897,6 @@ struct LiveShadowState {
     uint64_t band_captures = 0;
     bool     stage_any = false;   // Cheap per-draw gate for the commit.
     uint64_t band_bail_slot = 0;   // Both slots hold nearer bands.
-    uint64_t band_bail_time = 0;
     bool resolve_seen_since_cast = false;
     bool view_published_this_frame = false;   // Dual gate for the cast arm.
     float last_publish_rot_err = 1.0f;   // rot agreement of the last accepted publish.
@@ -11915,8 +11904,6 @@ struct LiveShadowState {
     // genuinely off-axis era never does and still starves - at most one window
     // late.
     uint64_t pub_exact_ms = 0;   // 0 = no exact publication yet.
-    uint64_t pub_any_ms = 0;   // Stamp of any family-passing view publication (exact or not): the
-                               // Lit gate's stream-liveness input.
     uint64_t pub_fresh_ms = 0;
     float band_last_reject[4] = {};   // Last border quad rejected by sanity.
     uint32_t resolve_window = 0;   // Qualifying draws remaining after an atlas-pass exit.
@@ -12029,17 +12016,7 @@ inline bool kh_adopt_frame_view(RVExtBridge::ProjectionViewTransform& pv,
 struct CbColorProbe {
     float    last_mode = 0.0f;   // 1 = standard layout 2 = the altitude/atmospheric variant
                                  // (different lane semantics - black-box green-flicker lesson;
-                                 // mirror refresh is gated on mode 1).
-    float    last_std_time = -1.0f;
-    float    std_amb_l = -1.0f;   // Standing flavor luminances (-1 = none yet).
-    float    std_sun_l = -1.0f;
-    float    pend_amb_l = -1.0f;
-    float    pend_sun_l = -1.0f;
-    float    pend_t = -1.0f;   // Pending start (-1 = no pending).
-    float    pend_seen = -1.0f;   // Last sighting agreeing with the pending.
-    float    anch_amb_l = -1.0f;   // Slow anchor (at).
-    float    anch_sun_l = -1.0f;
-    float    anch_t = -1.0f;   // Cluster reference for the lum band.
+                                 // the mirror refresh is gated on it).
     ID3D11Resource* buf = nullptr;   // Locked upload location (weak identity).
     uint32_t off = 0;   // Float index of the decay anchor lane.
     uint32_t floats = 0;   // CB size (floats) at lock time.
@@ -12059,12 +12036,12 @@ static CbColorProbe g_light_probe;
 
 static CbColorProbe g_sky_probe;
 
-// sky-candidate forensics (two sessions locked instantly, two never - a blind
-// anchor iteration is off the table): every scanned upload with nf >= 72 is
-// scored against the anchor conditions as a bitmask (1 = row15 positive-small,
-// 2 = blue >= red, 4 = row17 ascending, 8 = row17 bounded, 16 = row14 sane, 32
-// = row17 exact (0.25, 0.75, 3.5)); the best scorer's first 96 floats are
-// mirrored.
+// Sky-candidate forensics, diagnostic only (the lock itself is settled and
+// closed; this scorer is kept for the dump, not because a session is expected
+// to miss it): every scanned upload with nf >= 72 is scored against the anchor
+// conditions as a bitmask (1 = row15 positive-small, 2 = blue >= red, 4 =
+// row17 ascending, 8 = row17 bounded, 16 = row14 sane, 32 = row17 exact
+// (0.25, 0.75, 3.5)); the best scorer's first 96 floats are mirrored.
 
 inline bool locator_sky_anchor(const float* f, uint32_t nf) {
     if (nf < 72) return false;
@@ -12129,7 +12106,7 @@ static ID3D11Resource* g_coldlock_cand_res = nullptr;   // Injection cold-adopti
 static uint32_t g_coldlock_cand_off = 0;
 
 // Flush serial (game thread, under the graphics lock): once-per-flush key for
-// the miss latch and the flush-side census stamps.
+// the miss latch.
 static std::atomic<uint64_t> g_cc_flush_serial{0};   // Ticks once per flush_locked.
 
 static std::atomic<uint32_t> g_cc_flush_opaques{0xFFFFFFFFu};   // Sentinel = no flush yet.
@@ -12249,6 +12226,10 @@ struct KhRt0DescEntry {
     UINT     w = 0;
 };
 static KhRt0DescEntry g_rt0_desc[32] = {};
+
+
+
+
 static uint32_t g_rt0_desc_n = 0;
 static uint32_t g_rt0_desc_next = 0;
 
@@ -12469,51 +12450,15 @@ static bool  g_sun_map_rendered_frame = false;   // This frame's pass already ra
 // has its own 0.25 s window). 1 s rides out transient miss bursts without
 // flicker; beyond it the self term stands down - unlit-correct beats black.
 static constexpr float KH_SUN_MAP_SELF_MAX_AGE_S = 1.0f;
-static constexpr uint64_t KH_LIT_EXACT_WINDOW_MS = 1000;
-static constexpr uint64_t KH_LIT_RISE_MS = 300;
-static constexpr uint64_t KH_LIT_ANY_SLACK_MS = 250;
-// SILENCE_MS classifies the stream as silent-vs- active for the hold rule.
-static constexpr float    KH_LIT_FRESH_ERR = 0.20f;
-static constexpr uint64_t KH_LIT_SILENCE_MS = 600;
-static uint64_t g_lit_gate_since_ms = 0;   // When the exact-ok state last rose (single owner:
-                                           // kh_lit_gate_publish).
-static uint8_t  g_lit_gate_pub = 0;   // The frame's gate verdict: published under
-                                      // The park, consumed by both fill paths and the film strip -
-                                      // exact by construction.
-
-// The single per-frame gate evaluation.
-inline void kh_lit_gate_publish() {
-    const uint64_t khl_gate_now = steady_now_ms();
-    // Stream terms: silence holds once ever-healthy; an active stream must be producing
-    // healthy-class (0.20-bar) publications, latest-word or within the 1 s window.
-    const bool khl_stream_silent = g_ls.pub_any_ms == 0 ||
-        khl_gate_now - g_ls.pub_any_ms > KH_LIT_SILENCE_MS;
-    const bool khl_fresh_latest = g_ls.pub_fresh_ms != 0 &&
-        g_ls.pub_fresh_ms + KH_LIT_ANY_SLACK_MS >= g_ls.pub_any_ms;
-    const bool khl_fresh_recent = g_ls.pub_fresh_ms != 0 &&
-        khl_gate_now - g_ls.pub_fresh_ms < KH_LIT_EXACT_WINDOW_MS;
-    const bool khl_stream_ok = khl_stream_silent
-        ? g_ls.pub_fresh_ms != 0
-        : (khl_fresh_latest || khl_fresh_recent);
-    // Consumers shade through the grace with the persisted published direction.
-    const bool khl_sun_graced = g_sun_valid ||
-        (g_sun_fell_ms != 0 && khl_gate_now - g_sun_fell_ms < KH_SUN_FLAP_GRACE_MS);
-
-    const bool khl_exact_ok = khl_sun_graced && khl_stream_ok;
-
-    if (!khl_exact_ok) {
-        g_lit_gate_since_ms = 0;
-    } else if (g_lit_gate_since_ms == 0) {
-        g_lit_gate_since_ms = khl_gate_now;
-    }
-
-    // Round-5 rise debounce: the exact-ok state must stand KH_LIT_RISE_MS
-    // before the gate lifts - a re-convergence shows as one clean unlit hold
-    // instead of a four-stage light show.
-    g_lit_gate_pub = (khl_exact_ok && g_lit_gate_since_ms != 0 &&
-                      khl_gate_now - g_lit_gate_since_ms >= KH_LIT_RISE_MS) ? 1 : 0;
-}
-
+// The lit flag is structural: lighting1.w = g_sun_valid (the sun has been
+// published this session; it never falls). The former gate ANDed a view-
+// stream health test (a 0.20-bar publication within 1 s, or silence after one)
+// and a 300 ms rise debounce; four runs counted the stream terms
+// refusing only in the cold window before the first view lock (586 flushes in
+// one run, 1 in another, 0 drops afterwards in any run) and a cold run at the
+// structural flag was validated by eye. The shading never depended on the view
+// lock: the direction and the colours publish at the depth clear. Folded.
+static constexpr float    KH_LIT_FRESH_ERR = 0.20f;   // The 'fresh' publication bar (pub_fresh_ms; kh_recv_health, band_capture, the cast).
 static bool  g_sun_map_valid = false;   // Pass produced a usable map.
 static bool  g_sun_map_cam_anchor = false;   // Union fit was camera anchored (default) vs caster-
                                              // Anchored (241 / camera-less).
@@ -12614,17 +12559,31 @@ inline void kh_fill_sun_tier_cb(const float* khft_anchor,   // KH_SUN_TIER_ANCHO
     khft_meta[2] = khft_bias;
     khft_meta[3] = khft_half_diag;
 }
-static bool g_sun_pf_valid[3] = { false, false, false };
+static bool g_sun_pf_valid[4] = { false, false, false, false };   // KH_FAR_PF: [3] the far tier.
+// KH_SUN_TIER_KEY. Each camera tier's render is a function of its inputs -
+// the caster hash, the sun, the snapped centre (double; the sun-axis
+// component is unsnapped, so any camera motion re-keys), the window, the
+// size, the reach latch, the dissolve range and the instance capacity - and
+// the tiers rendered every call regardless ("Camera bands
+// render every call"): with the camera still, 3,696 instances a frame drawn
+// into four maps that could not differ from the previous frame's. A tier
+// whose key matches its last completed render keeps every static it left
+// (vp, bias, half-diag, valid, anchor, pyramid) and renders nothing. A
+// skipped tier is not a fresh map: the convert reads pf_fresh, not pf_valid,
+// and the anchor stamp follows the render, not the call.
+static bool     g_sun_pf_fresh[4] = { false, false, false, false };   // Rendered since the last convert.
+static uint64_t g_sun_tier_key[4] = { 0, 0, 0, 0 };
+static bool     g_sun_tier_key_ok[4] = { false, false, false, false };
 
 // A failed step clears the band flag; the kernel stays classic there.
 inline void kh_sun_pf_convert(ID3D11DeviceContext* ctx) {
-    const uint64_t khpc_mark = g_sun2_renders + g_sun3_renders + g_sun4_renders;
+    const uint64_t khpc_mark = g_sun2_renders + g_sun3_renders + g_sun4_renders + g_sun5_renders;   // KH_FAR_PF.
     static uint64_t khpc_done = ~0ull;
     if (khpc_done == khpc_mark) return;   // Once per fresh map set (twin call sites).
     khpc_done = khpc_mark;
     if (!g_res.vs_sunpf || !g_res.ps_sunpf || !g_res.ps_sunpfm ||
         !g_res.sun_pf_scr) {
-        g_sun_pf_valid[0] = false; g_sun_pf_valid[1] = false; g_sun_pf_valid[2] = false;
+        g_sun_pf_valid[0] = false; g_sun_pf_valid[1] = false; g_sun_pf_valid[2] = false; g_sun_pf_valid[3] = false;
         return;
     }
     KhOmSave khpc_om;   // Full OM set in, full OM set out (rule: never a slot-0/4 save).
@@ -12658,18 +12617,20 @@ inline void kh_sun_pf_convert(ID3D11DeviceContext* ctx) {
     ctx->VSSetShader(g_res.vs_sunpf, nullptr, 0);
     ID3D11ShaderResourceView* khpc_null = nullptr;
 
-    const bool khpc_bv[3] = { g_sun2_map_valid, g_sun3_map_valid, g_sun4_map_valid };
-    ID3D11ShaderResourceView* const khpc_dep[3] = { g_res.sun2_srv, g_res.sun3_srv, g_res.sun4_srv };
-    UINT khpc_sz[3] = { 0, 0, 0 };   // KH_SUN_LADDER: the pyramid's own size, never the wanted one.
-    for (int khpc_k = 0; khpc_k < 3; ++khpc_k) {
+    const bool khpc_bv[4] = { g_sun2_map_valid, g_sun3_map_valid, g_sun4_map_valid, g_sun5_map_valid };
+    ID3D11ShaderResourceView* const khpc_dep[4] = { g_res.sun2_srv, g_res.sun3_srv, g_res.sun4_srv, g_res.sun5_srv };
+    UINT khpc_sz[4] = { 0, 0, 0, 0 };   // KH_SUN_LADDER: the pyramid's own size, never the wanted one.
+    for (int khpc_k = 0; khpc_k < 4; ++khpc_k) {
         if (!g_res.sun_pf_tex[khpc_k]) continue;
         D3D11_TEXTURE2D_DESC khpc_td = {};
         g_res.sun_pf_tex[khpc_k]->GetDesc(&khpc_td);
         khpc_sz[khpc_k] = khpc_td.Width;
     }
 
-    for (int khpc_i = 0; khpc_i < 3; ++khpc_i) {
+    for (int khpc_i = 0; khpc_i < 4; ++khpc_i) {
         if (!g_sun_pf_valid[khpc_i]) continue;   // Band did not render fresh.
+        if (!g_sun_pf_fresh[khpc_i]) continue;   // KH_SUN_TIER_KEY: the standing pyramid stands.
+        g_sun_pf_fresh[khpc_i] = false;
         if (khpc_sz[khpc_i] == 0) { g_sun_pf_valid[khpc_i] = false; continue; }
         g_sun_pf_valid[khpc_i] = false;   // Proven again by completion below.
         if (!khpc_bv[khpc_i] || !khpc_dep[khpc_i] ||
@@ -12754,9 +12715,6 @@ static float g_fire_dims2[2] = {};
 static float g_fire_view2[16] = {};
 static float g_fire_sun2[3] = {};   // Live per re-fire while it re-publishes.
 static bool  g_fire_lock_valid = false;
-static ID3D11Texture2D*          g_fire_snap_tex = nullptr;
-static ID3D11ShaderResourceView* g_fire_snap_srv = nullptr;
-static bool        g_fire_snap_live = false;   // Last freeze rode the snapshot.
 
 // per-fire live-VS-frozen view delta (instrument): at every fire, the camera of
 // the engine's most recent view publication against the frozen camera.
@@ -12776,9 +12734,10 @@ static constexpr uint64_t KH_CAST_READY_DWELL_MS = 1500;   // continuous-health 
 static bool     g_cast_ready = false;   // The latch: casts allowed.
 static uint64_t g_cast_ready_since_ms = 0;   // Dwell start (0 = dwell not running).
 // Both call sites sit inside 'if (fresh frame_view || cycle_pv_valid)': with
-// neither view source the provenance block never runs and the seal/commit proceeds
-// unverified. A band seal stores the same-frame view (vcol) with the cascade; the
-// deferred-view path completes that seal when the true view arrives.
+// neither view source the provenance block never runs - by design, not an
+// omission: a band seal stores the same-frame view (vcol) with the cascade, and
+// the deferred-view path completes that seal when the true view arrives, so a
+// seal taken with no view source is finished, not trusted blind. Closed.
 static float g_cascbind_feed_t = -1.0f;   // Stamped at every harvest feed.
 // These lanes decompose the same comparison into height and orientation. The
 // last fire cannot be identified while it is happening, so the index is learned
@@ -12795,7 +12754,6 @@ static bool     g_fire_mask_srv_now = false;   // This fire: engine mask SRV-bou
 
 // cast_misses is only written while the fire is armed, so on a frame that never
 // arms it holds whatever the last armed frame left behind - stale forever.
-// Dwell term census (task 2B).
 static uint32_t g_view_drop_path = 0;   // 0 none, 1 reject streak, 2 health miss.
 static float    g_view_drop_bar = -1.0f;   // The bar it failed (0.02 + min(md, 0.3)).
 
@@ -12807,7 +12765,6 @@ static constexpr uint64_t KH_PUB_DROP_HOLD_MS  = 2000ull;
 static uint64_t g_view_drop_hyst_since = 0;   // Stamp of the first hold of a run.
 static uint64_t g_view_relock_wide_cycle = 0;   // Topo cycle of the last wide-bar agreement.
 
-
 inline void kh_view_lock_acquired(uint32_t khvl_path);
 
 
@@ -12816,9 +12773,18 @@ inline void kh_view_lock_acquired(uint32_t khvl_path);
 // the bridge-provisional guard and the sun-axis refusal are written on. The cold
 // escape hatch lets a slot take its first seal on a dead view source, and the
 // receive warm-up gate keys only on first_capture_time.
-static constexpr int KH_BAND_STAGE_POOL = 4;
+// KH_BAND_POOL_8 (post-trust): one staging back buffer per band. With four,
+// a reseal of every band every frame (the reseal-throttle rip) filled the
+// pool at the first four cascade resolves and the other four bands missed
+// it every frame - one fell through to the in-place path per flush, three
+// kept a seal whose window no longer matched their capture (stale content
+// after a caster moved; a window that no longer covered the view after a
+// look-back, so the shadow vanished until the next miss-free capture). The
+// throttle had hidden the miss by spreading reseals over 250 ms. Costs four
+// more atlas-sized textures.
+static constexpr int KH_BAND_STAGE_POOL = 8;
 inline int kh_band_pool_n() {
-    return 4;
+    return KH_BAND_STAGE_POOL;
 }
 
 struct KhBandStageTex {
@@ -12889,8 +12855,8 @@ inline void kh_band_pool_ensure_n(int khbe_want) {
 
 // A candidate seal view whose camera sits farther than KH_LATCH_JUMP_M-class
 // distance from the cycle latch camera is a foreign render and must never be
-// committed into a band seal: the completion census has been reading such
-// commits at 853-1479 m for four sessions.
+// committed into a band seal: such commits were measured at 853-1479 m over
+// four sessions.
 // Candidate view (16 floats, view layout) vs the cycle latch camera; true = ok.
 inline bool kh_band_view_native(const float* khfv_v, bool khfv_count) {
     if (!g_ro.cycle_pv_valid) return true;   // No reference: cannot judge, admit.
@@ -12904,41 +12870,14 @@ inline bool kh_band_view_native(const float* khfv_v, bool khfv_count) {
     if (!(khfv_d == khfv_d) || khfv_d <= 50.0f) return true;
     return false;
 }
-// Judges the pair: the capture-time view (vcol column layout) against the welding
-// view (row layout), same 50 m bar; it can only refuse what it can measure
-// (undecodable admits). A completion may not switch sources: same source within
-// the 25 ms window is millimetres-to-centimetres, cross-source is 1.6 m plus.
-// Cumulative twin of the per-row lanes, flip welds only.
-static uint64_t g_band_fall_flush = ~0ull;   // Flush of the last allowed fall-through.
-// In ordinary play this sits at ~0: every tier reseals far inside the bound. Worst
-// weld of the row wins the per-row lanes; unjudgeable welds record nothing.
-inline void kh_weld_note(const float* khwn_vc, float khwn_code) {
-    if (g_inj_view_ms == 0 || steady_now_ms() - g_inj_view_ms >= 50) return;
-    float khwn_a[3] = { 0.0f, 0.0f, 0.0f };
-    for (int khwn_j = 0; khwn_j < 3; ++khwn_j) {
-        const float* khwn_v = &khwn_vc[khwn_j * 4];
-        const float khwn_n = sqrtf(khwn_v[0] * khwn_v[0] +
-                                   khwn_v[1] * khwn_v[1] +
-                                   khwn_v[2] * khwn_v[2]);
-        if (!(khwn_n > 0.9f && khwn_n < 1.1f)) return;
-        khwn_a[0] -= khwn_v[3] * khwn_v[0];
-        khwn_a[1] -= khwn_v[3] * khwn_v[1];
-        khwn_a[2] -= khwn_v[3] * khwn_v[2];
-    }
-    float khwn_b[3];
-    if (!kh_view_camera_exact(reinterpret_cast<const float(*)[4]>(g_inj_view),
-                              khwn_b)) return;
-    const float khwn_dx = khwn_a[0] - khwn_b[0];
-    const float khwn_dy = khwn_a[1] - khwn_b[1];
-    const float khwn_dz = khwn_a[2] - khwn_b[2];
-    const float khwn_d = sqrtf(khwn_dx * khwn_dx + khwn_dy * khwn_dy +
-                               khwn_dz * khwn_dz);
-    if (!(khwn_d == khwn_d)) return;
-    // Forward axes: vcol column 2 vs the injection view's row-major z row.
-    float khwn_f = khwn_vc[8] * g_inj_view[2] + khwn_vc[9] * g_inj_view[6] +
-                   khwn_vc[10] * g_inj_view[10];
-    khwn_f = khwn_f > 1.0f ? 1.0f : (khwn_f < -1.0f ? -1.0f : khwn_f);
-}
+// The pair judge (kh_band_pair_coherent below): the capture-time view (vcol
+// column layout) against the welding view (row layout), same 50 m bar; it can
+// only refuse what it can measure (undecodable admits). A completion may not
+// switch sources: same source within the 25 ms window is
+// millimetres-to-centimetres, cross-source is 1.6 m plus.
+// (kh_weld_note stood here: the weld census's lanes were ripped in the trust
+// campaign and the body kept computing two camera decodes per commit into
+// nothing. Gone with its two call sites.)
 // gap-returning form (-1 = unjudgeable/admit); counting at the site.
 inline float kh_band_source_gap(const float* khss_vc, const float* khss_fv) {
     float khss_a[3] = { 0.0f, 0.0f, 0.0f };
@@ -12961,6 +12900,9 @@ inline float kh_band_source_gap(const float* khss_vc, const float* khss_fv) {
     if (!(khss_d == khss_d)) return -1.0f;
     return khss_d;
 }
+
+static uint64_t g_band_fall_flush = ~0ull;   // Flush of the last allowed fall-through.
+// gap-returning form (-1 = unjudgeable/admit); counting at the site.
 inline bool kh_band_pair_coherent(const float* khpc_vc, const float* khpc_fv) {
     float khpc_a[3] = { 0.0f, 0.0f, 0.0f };
     for (int khpc_j = 0; khpc_j < 3; ++khpc_j) {   // Decode the capture camera.
@@ -12982,7 +12924,6 @@ inline bool kh_band_pair_coherent(const float* khpc_vc, const float* khpc_fv) {
     if (!(khpc_d == khpc_d) || khpc_d <= 50.0f) return true;
     return false;
 }
-static float    g_band_cap_fv_age_max_ms = 0.0f;
 // Gated on a plain bool, so the steady-state cost is one load.
 inline void kh_band_stage_commit(ID3D11DeviceContext* ctx) {
     if (!g_ls.stage_any) return;
@@ -12993,7 +12934,6 @@ inline void kh_band_stage_commit(ID3D11DeviceContext* ctx) {
     if (g_boundary_t >= 0.0f && g_ls.frame_view_time < g_boundary_t) return;
 
     const float khsc_now = effect_time_seconds();
-    const bool khsc_qok = g_ls.last_publish_rot_err <= 1e-3f;
     bool khsc_any = false;
 
     for (int khsc_i = 0; khsc_i < 8; ++khsc_i) {
@@ -13014,16 +12954,30 @@ inline void kh_band_stage_commit(ID3D11DeviceContext* ctx) {
         }
 
         if (g_boundary_t >= 0.0f && b.stage_since >= g_boundary_t) {
-            khsc_any = true;   // Staged this cycle: its view has not arrived.
+            // Staged this cycle - which is EVERY stage (bandStageInCycle ==
+            // bandStageCaptures): the engine resolves its cascades at the end
+            // of the cycle, after our injection, for the frame that follows,
+            // and the commit at the next cycle's first draws pairs that atlas
+            // with the next cycle's view. KH_STAGE_INCYCLE (an in-cycle commit,
+            // one run) paired it with the CURRENT view instead and put a
+            // moving offset into the received shadows for frames - the
+            // cross-pair the receive-V2 doctrine is written against. Retired;
+            // the wait stands.
+            khsc_any = true;
             continue;
         }
 
         const bool khsc_aged = khsc_now - b.stage_since > 0.05f;
 
-        if (!khsc_qok && !khsc_aged) {
-            khsc_any = true;
-            continue;
-        }
+        // KH_STAGE_COMMIT_NATIVE (post-trust): the commit used to wait here for
+        // the frame view to agree with the bridge PV to 1e-3 in rotation
+        // unless the stage had aged. Counted across two day runs
+        // with flicks: 0 attempts held of 25,000 commits - the bar never fired
+        // (1.187). The family and camera identity of the pairing view are
+        // tested below (kh_band_view_native, the pair coherence); the bar is
+        // gone. The rare flick frame that remains is the view publish landing
+        // after the injection on that frame (the commit's early return above:
+        // no pairing view yet), which no bar can close.
 
         if (khsc_aged) {
             g_band_pool[khsc_p].busy = false;
@@ -13032,10 +12986,6 @@ inline void kh_band_stage_commit(ID3D11DeviceContext* ctx) {
             b.last_time = 0.0f;   // Let the next sweep re-stage.
             continue;
         }
-
-        float khwn_code = 4.0f;
-        memcpy(b.sm, b.stage_sm, sizeof(b.sm));
-        memcpy(b.border, b.stage_border, sizeof(b.border));
 
         if (!kh_band_view_native(g_ls.frame_view, true)) {
             khsc_any = true;
@@ -13052,9 +13002,14 @@ inline void kh_band_stage_commit(ID3D11DeviceContext* ctx) {
             b.last_time = 0.0f;
             continue;
         }
+        // The front band adopts the stage's matrices only here, once the stage
+        // is known to land: adopting them above the two tests left a refused
+        // or mixed stage's sm on a band whose texture never swapped.
+        memcpy(b.sm, b.stage_sm, sizeof(b.sm));
+        memcpy(b.border, b.stage_border, sizeof(b.border));
+
         if (b.stage_first_ok) {
             memcpy(b.vcol, b.stage_first, sizeof(b.vcol));
-            khwn_code = 8.0f;   // 8 = stage-first weld.
         } else {
             for (int c = 0; c < 3; ++c) {
                 for (int r = 0; r < 4; ++r) {
@@ -13062,9 +13017,6 @@ inline void kh_band_stage_commit(ID3D11DeviceContext* ctx) {
                 }
             }
         }
-
-        kh_weld_note(b.vcol, khwn_code);
-        b.esc_t = -1.0f;
 
         // Swap, do not copy: the back buffer was filled at the resolve that
         // paired this sm, so its content is the content that sm describes. The
@@ -13089,7 +13041,6 @@ inline void kh_band_stage_commit(ID3D11DeviceContext* ctx) {
         b.last_time = khsc_now;
         g_ls.band_captures++;
         if (g_ls.first_capture_time < 0.0f) g_ls.first_capture_time = khsc_now;
-        if (g_first_bandcap_t < 0.0f) g_first_bandcap_t = khsc_now;
     }
 
     g_ls.stage_any = khsc_any;
@@ -13107,8 +13058,7 @@ inline bool kh_recv_health() {
     const bool khrh_ok = g_ls.view_src_valid &&
                          g_ls.pub_fresh_ms != 0 &&
                          steady_now_ms() - g_ls.pub_fresh_ms <= 1000 &&
-                         g_sun_dir_derived_valid &&
-                         g_sun_derived_samples >= 120;
+                         g_sun_valid;
 
     if (!khrh_ok) { g_recv_health_since_ms = 0; return false; }
 
@@ -13176,6 +13126,13 @@ static uint64_t g_sun_churn_prev_ms = 0;
 static std::vector<float> g_sun_locals;   // in-map casters, 6 floats each: center xyz + half
                                           // Extents xyz (engine axes) - uncapped.
 static int   g_sun_local_count = 0;   // Valid entries above (render thread, like the rest).
+// KH_CASTOCC_KEYSER: bumped wherever g_sun_locals is rewritten. The occupancy
+// memo's key is an FNV over the whole array - 65 KB at 2,792 casters - and it
+// ran on all nine of the pass's fires every frame, including the eight where
+// nothing had changed since the first. Measured 0.851 ms a frame, which was
+// most of what castOcc still cost after the incremental path landed. With a
+// serial the hash runs once per actual rewrite instead of once per fire.
+static uint64_t g_sun_locals_serial = 0;
 
 static bool g_mask_cast_arm = false;
 // KH_CAST_RESOLVE_VIEW: the view current at the engine's depth resolve - the
@@ -13196,7 +13153,7 @@ inline void kh_msaa_toggle_wipe(unsigned int khtw_new) {
     g_ls.cache_valid = false;
     g_ls.atlas_last_seen = -1.0f;
     g_ls.view_src_valid = false;
-    g_ls.pub_any_ms = 0; g_ls.pub_fresh_ms = 0; g_ls.pub_exact_ms = 0;
+    g_ls.pub_fresh_ms = 0; g_ls.pub_exact_ms = 0;
     g_ls.count = 0; g_ls.newest = -1;
     for (uint32_t khtw_i = 0; khtw_i < 16; ++khtw_i) g_ls.cb_reg[khtw_i].buf = nullptr;
     g_ls.resolve_window = 0;
@@ -13233,7 +13190,9 @@ static constexpr uint32_t KH_DL_ARR_BYTES = KH_DL_MAX_LIGHTS * KH_DL_LIGHT_BYTES
 static constexpr uint32_t KH_DL_STAGE_BYTES = KH_DL_CTL_BYTES + KH_DL_ARR_BYTES;
 static constexpr uint32_t KH_DL_RING = 16;
 static constexpr uint64_t KH_DL_STALE_MS = 500;   // Mirror expiry: fills stand down.
-static constexpr uint32_t KH_DL_WIN_MAX = 8;   // Distinct per-draw windows captured per frame.
+static constexpr uint32_t KH_DL_WIN_MAX = 16;   // Distinct per-draw windows captured per frame
+                                                 // (8 -> 16: at every-draw sampling 8 saturated
+                                                 // on 375 of 477 harvests).
 static constexpr uint32_t KH_DL_VS_SLOTS = 13;   // VS cb slots captured (0.12).
 static constexpr uint32_t KH_DL_VS_CONSTS = 80;   // Constants per slot (view fits anywhere in 80).
 static constexpr uint32_t KH_DL_VS_BYTES = KH_DL_VS_CONSTS * 16;
@@ -13262,12 +13221,8 @@ static constexpr uint64_t KH_DL_POOL_STALE_MS = 500;
 // remember windows across harvests as the engine cycles buffer addresses; four
 // times the window set so a recycle is an anomaly worth counting.
 static constexpr uint32_t KH_DL_WIN_SLOTS = KH_DL_WIN_MAX * 4u;
-// Real exposure adaptation moves smoothly harvest to harvest and persists, so
-// an out-of-band candidate must keep agreeing with itself for the confirm
-// window before it adopts; a sub-pass one-off cannot. Same debounce shape as
-// the latch continuity gate - one design language.
-static constexpr float    KH_DL_REF_BAND = 1.5f;
-static constexpr uint64_t KH_DL_REF_CONFIRM_MS = 400;
+// (The exposure reference's band and confirm were folded post-trust:
+// KH_DL_REF_FOLD, at the reference adoption in dynlights_merge_windows.)
 static constexpr uint64_t KH_DL_TTL_CAP_MS = 1500;   // Proven ceiling (sparse worst case).
 static constexpr uint64_t KH_DL_TTL_FLOOR_MS = 250;   // Safety floor (unproven cadence).
 // KH_DL_TTL_DENSE_FLOOR_MS: The tail a light with proven cadence gets after the
@@ -13330,11 +13285,142 @@ static uint32_t g_dl_pool_next_id = 1;   // KH_DL_POOL_ID: next id to mint; neve
 static std::atomic<int>      g_dl_mode{3};
 static std::atomic<uint32_t> g_dl_intensity_bits{0x3F800000u};   // Float bits, default 1.0.
 
+// KH_DL_CPU (post-trust, the readback frame). The engine's constant buffers are
+// shadowed on the CPU at the Unmap / UpdateSubresource hooks - the path the sky
+// and lighting blocks have always taken - and the light sampler reads each
+// draw's cb10 / cb11 / VS windows from those shadows instead of copying them on
+// the GPU. Two things follow. The harvest at the injection merges what was
+// drawn since the last injection - the span (the GPU arena was a frame behind:
+// filled during a frame, mapped at the next injection). And the capture is
+// complete: an upload is keyed on the shadow's write generation, so every list
+// the engine uploaded in the span is seen, not the first bind of each buffer
+// identity (the arena's key: cb11 is DISCARD-mapped for nearly every draw,
+// cb11MapsDiscard / cb11Distinct, and the arena saw ~9 of them, dlWinMax).
+// Completeness is what lets presence replace the TTL (KH_DL_SEQ, in
+// dynlights_merge_windows).
+static constexpr uint32_t KH_DL_WIN_MAX_CPU = 64;   // Windows per span (authoring + routine).
+// KH_DL_PRESENCE: the engine uploads a distinct list for nearly every draw
+// (~3,200 a frame at night), so a window per upload is not a design. A pool
+// light's presence is decided without one: the origin the last harvest
+// resolved for the upload's buffer puts the record in world and the re-sight's
+// 1 m cube names the light (dynlights_presence_upload). Every upload gets that
+// pass; a window is made only on the routine quota below (the brightness
+// reference, the anchors, the per-buffer origin), for a buffer with no origin
+// yet, or when the upload carries a record no pool light matches (a light to
+// author).
+static constexpr uint32_t KH_DL_WIN_ROUTINE = 8;
+// KH_DL_UNPL: the validating run authored ~56 windows a harvest and the harvest
+// could place almost none of them (dlWinUnresolved ~ dlWinAuthor): the same
+// unplaceable records, a full VS scan each, every frame. A record the harvest
+// could not place (no origin by derivation or vote; the range backstop) is
+// remembered by its raw list-frame position, quantized to a metre, for
+// KH_DL_UNPL_KEEP harvests; an upload whose unknown records are all remembered
+// earns no author window until that lapses. Presence is untouched (it runs
+// before this), and so is any placeable light.
+static constexpr uint32_t KH_DL_UNPL_N = 256;     // Table entries (open addressing, 8-slot probe).
+static constexpr uint32_t KH_DL_UNPL_KEEP = 16;   // Harvests a note stands (~a quarter second).
+static constexpr uint32_t KH_CBS_N = 512;           // Shadow table entries (open addressing).
+static constexpr uint32_t KH_CBS_PROBE = 16;        // Probe run; the LRU of a full run is recycled.
+struct KhCbShadow {
+    void*    id = nullptr;   // Weak identity (the resource pointer), compare only.
+    uint32_t bytes = 0;      // Bytes held: the buffer's width, capped at the scratch size.
+    uint32_t gen = 0;        // Write generation: the global counter at the last capture (never 0 once written).
+    // KH_DL_PRESENCE: the (generation, first constant, span) the sampler last
+    // processed this buffer at - the O(1) 'same upload again' test, since a
+    // span carries thousands of uploads and the window list holds 64.
+    uint32_t pres_gen = 0;
+    uint32_t pres_first = 0;
+    uint64_t pres_seq = 0;
+    std::vector<uint8_t> data;
+};
+static KhCbShadow g_cbs[KH_CBS_N];
+static uint32_t   g_cbs_gen = 0;    // The global write counter (LRU clock and generation).
+
+inline bool kh_dl_cpu_wanted() {
+    return g_dl_mode.load(std::memory_order_relaxed) > 0 &&
+           g_ls.wanted.load(std::memory_order_relaxed);
+}
+inline uint32_t kh_cbs_hash(const void* khch_id) {
+    uint64_t khch_h = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(khch_id));
+    khch_h ^= khch_h >> 33;
+    khch_h *= 0xff51afd7ed558ccdull;
+    khch_h ^= khch_h >> 33;
+    return static_cast<uint32_t>(khch_h) & (KH_CBS_N - 1);
+}
+// Read side (the sampler, render thread): the shadow of a buffer, or nullptr.
+// Entries are never cleared singly (only whole-table, at reset), so an empty
+// slot ends the probe.
+inline KhCbShadow* kh_cbs_find(const void* khcf_id) {
+    if (!khcf_id) return nullptr;
+    uint32_t khcf_i = kh_cbs_hash(khcf_id);
+    for (uint32_t khcf_k = 0; khcf_k < KH_CBS_PROBE; ++khcf_k) {
+        KhCbShadow& khcf_e = g_cbs[khcf_i];
+        if (khcf_e.id == khcf_id) return &khcf_e;
+        if (!khcf_e.id) return nullptr;
+        khcf_i = (khcf_i + 1) & (KH_CBS_N - 1);
+    }
+    return nullptr;
+}
+// Write side (the hooks, render thread): copy the upload into the buffer's
+// shadow and return it, so the scanners walk the shadow instead of the scratch.
+inline const void* kh_cbs_write(void* khcw_id, const void* khcw_src, uint32_t& khcw_bytes) {
+    if (!khcw_id || !khcw_src || khcw_bytes == 0) return nullptr;
+    if (khcw_bytes > KH_UPLOAD_SCRATCH_BYTES) khcw_bytes = KH_UPLOAD_SCRATCH_BYTES;
+    uint32_t khcw_i = kh_cbs_hash(khcw_id);
+    KhCbShadow* khcw_slot = nullptr;
+    KhCbShadow* khcw_lru = nullptr;
+    for (uint32_t khcw_k = 0; khcw_k < KH_CBS_PROBE; ++khcw_k) {
+        KhCbShadow& khcw_e = g_cbs[khcw_i];
+        if (khcw_e.id == khcw_id) { khcw_slot = &khcw_e; break; }
+        if (!khcw_e.id) { khcw_slot = &khcw_e; break; }
+        if (!khcw_lru || khcw_e.gen < khcw_lru->gen) khcw_lru = &khcw_e;
+        khcw_i = (khcw_i + 1) & (KH_CBS_N - 1);
+    }
+    if (!khcw_slot) {
+        if (!khcw_lru) return nullptr;
+        khcw_slot = khcw_lru;   // The run is full: the least recently written identity is recycled.
+    }
+    if (khcw_slot->data.size() < khcw_bytes) khcw_slot->data.resize(khcw_bytes);
+    memcpy(khcw_slot->data.data(), khcw_src, khcw_bytes);
+    if (khcw_slot->id != khcw_id) khcw_slot->pres_gen = 0;   // A recycled entry forgets its key.
+    khcw_slot->id = khcw_id;
+    khcw_slot->bytes = khcw_bytes;
+    if (++g_cbs_gen == 0) ++g_cbs_gen;
+    khcw_slot->gen = g_cbs_gen;
+    return khcw_slot->data.data();
+}
+inline void kh_cbs_clear() {
+    for (uint32_t khcc_i = 0; khcc_i < KH_CBS_N; ++khcc_i) {
+        g_cbs[khcc_i].id = nullptr;
+        g_cbs[khcc_i].bytes = 0;
+        g_cbs[khcc_i].gen = 0;
+        g_cbs[khcc_i].pres_gen = 0;
+        g_cbs[khcc_i].pres_first = 0;
+        g_cbs[khcc_i].pres_seq = 0;
+        std::vector<uint8_t>().swap(g_cbs[khcc_i].data);
+    }
+}
+// Every captured upload, in the hooks: the shadow when the CPU capture wants
+// the buffer, the scratch otherwise (the scanners read either).
+inline const void* kh_upload_capture(ID3D11Resource* khuc_res, const void* khuc_src, uint32_t& khuc_bytes) {
+    if (kh_dl_cpu_wanted()) {
+        const void* khuc_p = kh_cbs_write(static_cast<void*>(khuc_res), khuc_src, khuc_bytes);
+        if (khuc_p) return khuc_p;
+    }
+    return kh_upload_scratch(khuc_src, khuc_bytes);
+}
+
 struct DlWindowMeta {
     void*    buf = nullptr;   // Weak identity (dedupe key with first).
     uint32_t first = 0;
     uint32_t bytes11 = 0;   // Lights bytes actually copied.
     uint16_t vs_bytes[KH_DL_VS_SLOTS] = {};   // VS constants copied per slot (0 = absent).
+    // KH_DL_CPU: the cb11 shadow's write generation (0 = a GPU-arena window),
+    // the content hash of ctl + lights (the per-harvest dedupe) and the
+    // harvest this window belongs to (KH_DL_SEQ).
+    uint32_t gen = 0;
+    uint64_t chash = 0;
+    uint64_t seq = 0;
 };
 
 struct DlPoolLight {
@@ -13350,8 +13436,14 @@ struct DlPoolLight {
     // what lets a shadow slot name its light when two lights tie on position (a
     // flashlight and a muzzle flash on one weapon are a hand's width apart).
     uint32_t id = 0;
-    // KH_DL_WINPROV - which window last carried this light. The low half of the
-    // window buffer's address, purely as an identity.
+    // KH_DL_SEQ: the newest harvest whose span (the draws between two
+    // injections) carried this light. Presence at harvest N is seq == N. The
+    // depth-clear cycle was the key at first; the engine clears the main depth
+    // many times a frame at night (11 clears per injection measured),
+    // so no window ever belonged to the cycle that harvested it and every
+    // light dropped every harvest. A harvest span is the one boundary the
+    // harvest itself owns.
+    uint64_t seq = 0;
 };
 
 struct DlRingEntry {
@@ -13382,8 +13474,14 @@ struct DynLightsState {
     ID3D11Buffer* arena[2] = {};
     uint8_t  arena_inflight[2] = {};
     int      arena_write = 0;
-    DlWindowMeta win_meta[2][KH_DL_WIN_MAX] = {};
+    DlWindowMeta win_meta[2][KH_DL_WIN_MAX_CPU] = {};   // KH_DL_CPU: the CPU cap bounds both.
     uint32_t win_count[2] = {};
+    std::vector<uint8_t> cpu_arena[2];   // KH_DL_CPU: the same window layout, CPU-resident.
+    uint8_t  side_miss[2] = {};          // KH_DL_CPU: a draw this side could not capture whole.
+    uint32_t side_uploads[2] = {};       // KH_DL_PRESENCE: uploads seen this side.
+    uint64_t harvest_seq = 0;            // KH_DL_SEQ: harvests so far; uploads are tagged with the next.
+    int32_t  unpl_q[KH_DL_UNPL_N][3] = {};   // KH_DL_UNPL: quantized list-frame positions...
+    uint64_t unpl_seq[KH_DL_UNPL_N] = {};    // ...and the harvest that noted them (0 = empty).
     float    arena_view[2][12] = {};   // Frame view columns latched at the side's first capture.
     float    arena_cam[2][3] = {};   // Bridge true-world camera, same latch.
     uint8_t  arena_view_ok[2] = {};
@@ -13402,9 +13500,6 @@ struct DynLightsState {
     float    main_gdiff[3] = { 1.0f, 1.0f, 1.0f };
     float    main_scale = 1.0f;
     uint8_t  main_ref_valid = 0;
-    float    ref_pend_g[3] = {};
-    float    ref_pend_s = 0.0f;
-    uint64_t ref_pend_ms = 0;
     // An alt-tab, a load or a time skip all show here, and the question is
     // whether a memo write or an origin flip sits immediately after one.
     uint64_t last_harvest_ms = 0;
@@ -13426,9 +13521,6 @@ struct DynLightsState {
     int32_t  win_hint_wslot[KH_DL_WIN_SLOTS] = {};
     uint32_t win_hint_woff[KH_DL_WIN_SLOTS] = {};
     uint8_t  win_hint_wform[KH_DL_WIN_SLOTS] = {};
-    // KH_DL_BLIND: harvests known incomplete, and what that knowledge saved.
-    // blind_last_ms is behaviour state and does not reset with the stats. Per-window
-    // decode-failure runs, keyed on the weak buffer identity dlWindowMeta uses.
     uint32_t win_fail_lo[KH_DL_WIN_SLOTS] = {};
     uint32_t win_fail_run[KH_DL_WIN_SLOTS] = {};
     uint32_t win_fail_max[KH_DL_WIN_SLOTS] = {};
@@ -13441,12 +13533,370 @@ static DynLightsState g_dl;
 // per frame - the distinct buffer, offset count answers the per-draw culling
 // question one global visible list vs lists culled per draw, folded at the
 // frame boundary main clear.
-static uint32_t g_dl_cd_ctr = 0;
 static void*    g_dl_cd_bufs[8] = {};
 static uint32_t g_dl_cd_first[8] = {};
 static uint32_t g_dl_cd_n = 0;
 
 inline bool dl_finite(float v) { return v == v && v < 1.0e30f && v > -1.0e30f; }
+
+// Defined with the window table below (kh_dl_win_slot's group); the presence
+// pass reads the origin the last harvest resolved for a buffer.
+inline bool kh_dl_win_origin_of(const void* khp_buf, float& khp_ox, float& khp_oz);
+
+// KH_DL_UNPL: the unplaceable-record table. Keyed on the raw list-frame
+// position at metre resolution (the same light lands on the same key while
+// the origin stands; a flip re-keys it and the note lapses).
+inline uint32_t kh_dl_unpl_slot(const int32_t khu_q[3], bool khu_insert, uint64_t khu_seq) {
+    uint32_t khu_h = static_cast<uint32_t>(khu_q[0]) * 73856093u ^
+                     static_cast<uint32_t>(khu_q[1]) * 19349663u ^
+                     static_cast<uint32_t>(khu_q[2]) * 83492791u;
+    khu_h &= KH_DL_UNPL_N - 1;
+    uint32_t khu_oldest = khu_h;
+
+    for (uint32_t k = 0; k < 8; ++k) {
+        const uint32_t i = (khu_h + k) & (KH_DL_UNPL_N - 1);
+        if (g_dl.unpl_seq[i] != 0 &&
+            g_dl.unpl_q[i][0] == khu_q[0] && g_dl.unpl_q[i][1] == khu_q[1] && g_dl.unpl_q[i][2] == khu_q[2]) {
+            if (khu_insert) g_dl.unpl_seq[i] = khu_seq;
+            return i;
+        }
+        if (g_dl.unpl_seq[i] == 0) {
+            if (!khu_insert) return KH_DL_UNPL_N;
+            g_dl.unpl_q[i][0] = khu_q[0]; g_dl.unpl_q[i][1] = khu_q[1]; g_dl.unpl_q[i][2] = khu_q[2];
+            g_dl.unpl_seq[i] = khu_seq;
+            return i;
+        }
+        if (g_dl.unpl_seq[i] < g_dl.unpl_seq[khu_oldest]) khu_oldest = i;
+    }
+
+    if (!khu_insert) return KH_DL_UNPL_N;
+    g_dl.unpl_q[khu_oldest][0] = khu_q[0]; g_dl.unpl_q[khu_oldest][1] = khu_q[1]; g_dl.unpl_q[khu_oldest][2] = khu_q[2];
+    g_dl.unpl_seq[khu_oldest] = khu_seq;
+    return khu_oldest;
+}
+inline void kh_dl_unpl_key(const float* khu_r, int32_t khu_q[3]) {
+    khu_q[0] = static_cast<int32_t>(floorf(khu_r[0]));
+    khu_q[1] = static_cast<int32_t>(floorf(khu_r[1]));
+    khu_q[2] = static_cast<int32_t>(floorf(khu_r[2]));
+}
+// Is this record one the harvest recently could not place?
+inline bool kh_dl_unpl_recent(const float* khu_r, uint64_t khu_now_seq) {
+    int32_t khu_q[3];
+    kh_dl_unpl_key(khu_r, khu_q);
+    const uint32_t i = kh_dl_unpl_slot(khu_q, false, 0);
+    if (i >= KH_DL_UNPL_N) return false;
+    return khu_now_seq <= g_dl.unpl_seq[i] + KH_DL_UNPL_KEEP;
+}
+// Note every finite record of an unplaced window.
+inline void kh_dl_unpl_note(const float* khu_l, uint32_t khu_n, uint64_t khu_seq) {
+    for (uint32_t i = 0; i < khu_n; ++i) {
+        const float* khu_r = khu_l + i * 24;
+        if (!dl_finite(khu_r[0]) || !dl_finite(khu_r[1]) || !dl_finite(khu_r[2])) continue;
+        int32_t khu_q[3];
+        kh_dl_unpl_key(khu_r, khu_q);
+        kh_dl_unpl_slot(khu_q, true, khu_seq);
+    }
+}
+
+// KH_DL_PRESENCE: one upload's records against the pool. The primary test is
+// the harvest's own: the origin the last harvest resolved for this buffer
+// identity (kh_dl_win_origin_of) puts the record in absolute world, and the
+// re-sight's 1 m cube (KH_DL_MATCH_M) names the pool light. A buffer with no
+// origin yet - or a record the origin test misses (an origin gone stale on a
+// 100 m flip) - falls back to the origin-free grid test (height within 0.25,
+// x / z a 100 m multiple apart within the vote's residual). KH_DL_PRES_CLAIM:
+// the merge's KH_DL_LIST_CLAIM rule holds here too - a record claims the ONE
+// nearest candidate by position plus every non-position lane (colour,
+// attenuation: an orange flash and a white flashlight a hand's width apart
+// are two lights), and never a light an earlier record of this list claimed.
+// Stamping every candidate in the cube kept a muzzle flash alive on a
+// flashlight's records until the flashlight went off. The claim stamps the
+// light and lifts its harvest serial. Returns how many finite records matched
+// nothing and the harvest has not recently failed to place (khp_unpl counts
+// those) - the lights to author. Unmatched records are binned by their best
+// residual.
+inline uint32_t dynlights_presence_upload(const void* khp_buf,
+                                          const uint8_t* khp_ctl, const uint8_t* khp_l,
+                                          uint32_t khp_bytes11, uint64_t khp_seq,
+                                          uint64_t khp_now,
+                                          uint32_t& khp_unpl, uint32_t& khp_hit_n) {   // KH_DL_UNPL: recently unplaceable / matched.
+    int32_t khp_pc_i = 0, khp_sc_i = 0;
+    memcpy(&khp_pc_i, khp_ctl + 0, 4);
+    memcpy(&khp_sc_i, khp_ctl + 16, 4);
+    if (khp_pc_i < 0 || khp_pc_i > 1024 || khp_sc_i < 0 || khp_sc_i > 1024) return 0;
+    uint32_t khp_total = static_cast<uint32_t>(khp_pc_i) + static_cast<uint32_t>(khp_sc_i);
+    if (khp_total > KH_DL_MAX_LIGHTS) khp_total = KH_DL_MAX_LIGHTS;
+    const uint32_t khp_avail = khp_bytes11 / KH_DL_LIGHT_BYTES;
+    if (khp_total > khp_avail) khp_total = khp_avail;
+    float khp_ox = 0.0f, khp_oz = 0.0f;
+    const bool khp_origin = kh_dl_win_origin_of(khp_buf, khp_ox, khp_oz);
+    uint32_t khp_unknown = 0, khp_hits = 0;
+    khp_unpl = 0;
+    khp_hit_n = 0;
+    int      khp_claim[KH_DL_MAX_LIGHTS];   // KH_DL_PRES_CLAIM: pool lights this list has claimed.
+    uint32_t khp_claim_n = 0;
+
+    for (uint32_t i = 0; i < khp_total; ++i) {
+        const float* khp_r = reinterpret_cast<const float*>(khp_l + i * KH_DL_LIGHT_BYTES);
+        if (!dl_finite(khp_r[0]) || !dl_finite(khp_r[1]) || !dl_finite(khp_r[2])) continue;
+        float khp_best = -1.0f;   // Census: the best grid residual among y-compatible pool lights.
+        int   khp_pick = -1;      // The claim: nearest candidate by position + every other lane.
+        float khp_pick_cost = 0.0f;
+        bool  khp_pick_grid = false;
+
+        for (uint32_t d = 0; d < g_dl.pool_n; ++d) {
+            const DlPoolLight& khp_pl = g_dl.pool[d];
+            bool  khp_same = false;
+            bool  khp_grid = false;
+            float khp_dpos = 0.0f;
+
+            if (khp_origin) {   // The harvest's transform, the re-sight's cube.
+                const float khp_ax = fabsf(khp_pl.rec[0] - (khp_ox + khp_r[0]));
+                const float khp_ay = fabsf(khp_pl.rec[1] - khp_r[1]);
+                const float khp_az = fabsf(khp_pl.rec[2] - (khp_oz + khp_r[2]));
+                if (khp_ax < KH_DL_MATCH_M && khp_ay < KH_DL_MATCH_M && khp_az < KH_DL_MATCH_M) {
+                    khp_same = true;
+                    khp_dpos = khp_ax + khp_ay + khp_az;
+                }
+            }
+
+            if (!khp_same && fabsf(khp_pl.rec[1] - khp_r[1]) <= 0.25f) {   // Grid test / census.
+                float khp_dx = khp_pl.rec[0] - khp_r[0];
+                khp_dx -= KH_DL_ORIGIN_Q * floorf(khp_dx / KH_DL_ORIGIN_Q + 0.5f);
+                float khp_dz = khp_pl.rec[2] - khp_r[2];
+                khp_dz -= KH_DL_ORIGIN_Q * floorf(khp_dz / KH_DL_ORIGIN_Q + 0.5f);
+                const float khp_res = fabsf(khp_dx) > fabsf(khp_dz) ? fabsf(khp_dx) : fabsf(khp_dz);
+                if (khp_best < 0.0f || khp_res < khp_best) khp_best = khp_res;
+
+                if (khp_res <= KH_DL_ORIGIN_RES_MAX) {   // The fallback: no origin, or an origin gone stale on a flip.
+                    khp_same = true;
+                    khp_grid = true;
+                    khp_dpos = fabsf(khp_dx) + fabsf(khp_pl.rec[1] - khp_r[1]) + fabsf(khp_dz);
+                }
+            }
+
+            if (!khp_same) continue;
+            bool khp_taken = false;
+            for (uint32_t c = 0; c < khp_claim_n; ++c) {
+                if (khp_claim[c] == static_cast<int>(d)) { khp_taken = true; break; }
+            }
+            if (khp_taken) continue;   // An earlier record of this list is that light.
+            float khp_cost = khp_dpos;
+            for (int k = 3; k < 24; ++k) khp_cost += fabsf(khp_pl.rec[k] - khp_r[k]);
+            if (khp_pick < 0 || khp_cost < khp_pick_cost) {
+                khp_pick = static_cast<int>(d);
+                khp_pick_cost = khp_cost;
+                khp_pick_grid = khp_grid;
+            }
+        }
+
+        if (khp_pick >= 0) {
+            DlPoolLight& khp_pl = g_dl.pool[khp_pick];
+            if (khp_claim_n < KH_DL_MAX_LIGHTS) khp_claim[khp_claim_n++] = khp_pick;
+            // A sighting, priced as the aux re-sight prices one (the gap mark
+            // and the count feed the TTL branch: incomplete harvests).
+            if (khp_pl.stamp != 0) {
+                const uint64_t khp_gap = khp_now >= khp_pl.stamp ? khp_now - khp_pl.stamp : 0;
+                khp_pl.gap_max_ms = kh_dl_gap_mark(khp_pl.gap_max_ms, khp_gap);
+                if (khp_pl.sightings < 0xFFFF) khp_pl.sightings++;
+            }
+            khp_pl.stamp = khp_now;
+            if (khp_seq > khp_pl.seq) khp_pl.seq = khp_seq;
+        }
+
+        if (khp_pick >= 0) {
+            ++khp_hits;
+        } else {
+            if (kh_dl_unpl_recent(khp_r, khp_seq)) ++khp_unpl; else ++khp_unknown;
+        }
+    }
+
+    khp_hit_n = khp_hits;
+
+    return khp_unknown;
+}
+
+// KH_DL_CPU: one draw's cb10 / cb11 / VS windows, read from the shadows into
+// the span's CPU arena. Same layout as the GPU arena, so the merge is shared.
+// The upload key is (buffer, first, shadow generation): a later DISCARD into
+// the same identity is a new upload. Identical content (ctl + lights) within a
+// span is one. A draw the capture cannot see whole marks the side incomplete,
+// which sends this harvest to the TTL sweep instead of presence.
+inline void dynlights_sample_draw_cpu(ID3D11DeviceContext1* khd_c1, ID3D11Buffer* khd_b11,
+                                      UINT khd_f11, UINT khd_n11) {
+    const int khd_w = g_dl.arena_write;
+    if (g_dl.win_count[khd_w] > 0 && g_dl.win_meta[khd_w][0].gen == 0) {
+        // A mode switch mid-span: the side holds GPU-arena windows whose bytes
+        // are not in the CPU arena. Start the side over.
+        g_dl.win_count[khd_w] = 0;
+        memset(g_dl.win_meta[khd_w], 0, sizeof(g_dl.win_meta[khd_w]));
+        g_dl.side_miss[khd_w] = 0;
+        g_dl.side_uploads[khd_w] = 0;
+    }
+    KhCbShadow* khd_s11 = kh_cbs_find(khd_b11);
+    if (!khd_s11) {
+        g_dl.side_miss[khd_w] = 1;
+        return;
+    }
+    // KH_DL_SEQ: every upload from here to the next injection belongs to the
+    // harvest that injection runs. The keys below are scoped to that harvest:
+    // a first draw of the span that binds the very same upload as the last
+    // draw of the previous span (the engine did not re-upload across the
+    // injection) is this span's evidence, not a duplicate (1.263).
+    const uint64_t khd_seq = g_dl.harvest_seq + 1;
+
+    // KH_DL_PRESENCE: the same upload, already processed this span (window or
+    // presence pass alike) - one compare on the shadow, no list walk.
+    if (khd_s11->pres_gen == khd_s11->gen && khd_s11->pres_first == khd_f11 &&
+        khd_s11->pres_seq == khd_seq) {
+        return;
+    }
+
+    ID3D11Buffer* khd_b10 = nullptr;
+    UINT khd_f10 = 0, khd_n10 = 0;
+    khd_c1->PSGetConstantBuffers1(10, 1, &khd_b10, &khd_f10, &khd_n10);
+    if (!khd_b10) {
+        return;
+    }
+    const KhCbShadow* khd_s10 = kh_cbs_find(khd_b10);
+    khd_b10->Release();   // Identity taken; the shadow is what is read.
+    const uint32_t khd_off10 = khd_f10 * 16u;
+    const uint32_t khd_off11 = khd_f11 * 16u;
+    if (!khd_s10 || khd_off10 + KH_DL_CTL_BYTES > khd_s10->bytes) {
+        g_dl.side_miss[khd_w] = 1;
+        return;
+    }
+    if (khd_off11 >= khd_s11->bytes) {
+        g_dl.side_miss[khd_w] = 1;
+        return;
+    }
+    uint32_t khd_want11 = KH_DL_ARR_BYTES;
+    if (khd_n11 > 0 && khd_n11 * 16u < khd_want11) khd_want11 = khd_n11 * 16u;
+    if (khd_off11 + khd_want11 > khd_s11->bytes) khd_want11 = khd_s11->bytes - khd_off11;
+    khd_want11 -= khd_want11 % KH_DL_LIGHT_BYTES;
+    const uint8_t* khd_p10 = khd_s10->data.data() + khd_off10;
+    const uint8_t* khd_p11 = khd_s11->data.data() + khd_off11;
+
+    // Content: ctl + the counted records (the merge reads the counts the same
+    // way; an implausible count hashes the whole copied window).
+    uint32_t khd_hn = khd_want11;
+    {
+        int32_t khd_pc_i = 0, khd_sc_i = 0;
+        memcpy(&khd_pc_i, khd_p10 + 0, 4);
+        memcpy(&khd_sc_i, khd_p10 + 16, 4);
+        if (khd_pc_i >= 0 && khd_pc_i <= 1024 && khd_sc_i >= 0 && khd_sc_i <= 1024) {
+            const uint32_t khd_cn = (static_cast<uint32_t>(khd_pc_i) + static_cast<uint32_t>(khd_sc_i)) * KH_DL_LIGHT_BYTES;
+            if (khd_cn < khd_hn) khd_hn = khd_cn;
+        }
+    }
+    uint64_t khd_h = CryptoGenerator::FNV1A64_OFFSET;
+    khd_h = CryptoGenerator::fnv1a64_update(khd_h, reinterpret_cast<const char*>(khd_p10), KH_DL_CTL_BYTES);
+    if (khd_hn > 0) {
+        khd_h = CryptoGenerator::fnv1a64_update(khd_h, reinterpret_cast<const char*>(khd_p11), khd_hn);
+    }
+    // This upload is processed from here on, whatever becomes of it below.
+    khd_s11->pres_gen = khd_s11->gen;
+    khd_s11->pres_first = khd_f11;
+    khd_s11->pres_seq = khd_seq;
+    ++g_dl.side_uploads[khd_w];
+
+    for (uint32_t i = 0; i < g_dl.win_count[khd_w]; ++i) {   // Identical content: its twin did the work.
+        if (g_dl.win_meta[khd_w][i].seq == khd_seq && g_dl.win_meta[khd_w][i].chash == khd_h) {
+            return;
+        }
+    }
+
+    // KH_DL_PRESENCE: the records against the pool, no window needed.
+    uint32_t khd_unpl = 0, khd_hit_n = 0;
+    uint32_t khd_unknown = dynlights_presence_upload(static_cast<const void*>(khd_b11),
+                                                     khd_p10, khd_p11, khd_want11,
+                                                     khd_seq,
+                                                     steady_now_ms(), khd_unpl, khd_hit_n);
+    // KH_DL_UNPL: a note may not starve a light of the window that could place
+    // it - an upload carrying two known lights clears the vote's bar, so its
+    // noted records author as unknown ones do.
+    if (khd_unpl > 0 && khd_hit_n >= 2) { khd_unknown += khd_unpl; khd_unpl = 0; }
+
+    // A window authors: the routine quota (reference, anchors, origin
+    // bookkeeping), a buffer identity the harvest has not placed yet (its
+    // uploads cannot be judged until it has an origin), or a record the pool
+    // does not know.
+    float khd_ox = 0.0f, khd_oz = 0.0f;
+    const bool khd_routine = g_dl.win_count[khd_w] < KH_DL_WIN_ROUTINE ||
+                             !kh_dl_win_origin_of(static_cast<const void*>(khd_b11), khd_ox, khd_oz);
+    if (!khd_routine && khd_unknown == 0) {
+        return;
+    }
+    if (g_dl.win_count[khd_w] >= KH_DL_WIN_MAX_CPU) {
+        // Refused: an unknown record waits for a window next span. Not an
+        // incomplete harvest - presence saw the upload.
+        return;
+    }
+    if (g_dl.cpu_arena[khd_w].size() < static_cast<size_t>(KH_DL_WIN_MAX_CPU) * KH_DL_WIN_BYTES) {
+        g_dl.cpu_arena[khd_w].assign(static_cast<size_t>(KH_DL_WIN_MAX_CPU) * KH_DL_WIN_BYTES, static_cast<uint8_t>(0));
+    }
+
+    if (g_dl.win_count[khd_w] == 0) {   // The side's view, as the arena latches it.
+        if (g_ro.cycle_pv_valid) {
+            for (int khd_k = 0; khd_k < 3; ++khd_k) {
+                g_dl.arena_view[khd_w][khd_k * 4 + 0] = g_ro.cycle_pv.view[0][khd_k];
+                g_dl.arena_view[khd_w][khd_k * 4 + 1] = g_ro.cycle_pv.view[1][khd_k];
+                g_dl.arena_view[khd_w][khd_k * 4 + 2] = g_ro.cycle_pv.view[2][khd_k];
+                g_dl.arena_view[khd_w][khd_k * 4 + 3] = 0.0f;
+            }
+            extract_camera_pos(g_ro.cycle_pv.view, g_dl.arena_cam[khd_w]);
+            g_dl.arena_view_ok[khd_w] = 1;
+        } else {
+            g_dl.arena_view_ok[khd_w] = 0;
+        }
+    }
+
+    const uint32_t khd_slot = g_dl.win_count[khd_w];
+    uint8_t* khd_dst = g_dl.cpu_arena[khd_w].data() + static_cast<size_t>(khd_slot) * KH_DL_WIN_BYTES;
+    memcpy(khd_dst, khd_p10, KH_DL_CTL_BYTES);
+    if (khd_want11 > 0) memcpy(khd_dst + KH_DL_CTL_BYTES, khd_p11, khd_want11);
+
+    DlWindowMeta& khd_meta = g_dl.win_meta[khd_w][khd_slot];
+    khd_meta.buf = static_cast<void*>(khd_b11);
+    khd_meta.first = khd_f11;
+    khd_meta.bytes11 = khd_want11;
+    khd_meta.gen = khd_s11->gen;
+    khd_meta.chash = khd_h;
+    khd_meta.seq = khd_seq;
+
+    ID3D11Buffer* khd_vsb[KH_DL_VS_SLOTS] = {};
+    UINT khd_vsf[KH_DL_VS_SLOTS] = {}, khd_vsn[KH_DL_VS_SLOTS] = {};
+    khd_c1->VSGetConstantBuffers1(0, KH_DL_VS_SLOTS, khd_vsb, khd_vsf, khd_vsn);
+    uint8_t* khd_vs_dst = khd_dst + KH_DL_STAGE_BYTES;
+
+    for (uint32_t khd_vs = 0; khd_vs < KH_DL_VS_SLOTS; ++khd_vs) {
+        khd_meta.vs_bytes[khd_vs] = 0;
+
+        if (khd_vsb[khd_vs]) {
+            const KhCbShadow* khd_sv = kh_cbs_find(khd_vsb[khd_vs]);
+            const uint32_t khd_voff = khd_vsf[khd_vs] * 16u;
+
+            if (!khd_sv) {
+            } else if (khd_voff < khd_sv->bytes) {
+                uint32_t khd_vwant = KH_DL_VS_BYTES;
+                if (khd_vsn[khd_vs] > 0 && khd_vsn[khd_vs] * 16u < khd_vwant) khd_vwant = khd_vsn[khd_vs] * 16u;
+                if (khd_voff + khd_vwant > khd_sv->bytes) khd_vwant = khd_sv->bytes - khd_voff;
+                khd_vwant &= ~15u;
+
+                if (khd_vwant >= 64u) {   // At least one 4x4.
+                    memcpy(khd_vs_dst, khd_sv->data.data() + khd_voff, khd_vwant);
+                    khd_meta.vs_bytes[khd_vs] = static_cast<uint16_t>(khd_vwant);
+                }
+            }
+
+            khd_vsb[khd_vs]->Release();
+        }
+
+        khd_vs_dst += KH_DL_VS_BYTES;
+    }
+
+    g_dl.win_count[khd_w] = khd_slot + 1;
+}
 
 inline void dynlights_sample_draw(ID3D11DeviceContext* ctx) {
     ID3D11DeviceContext1* khd_c1 = kh_ctx1(ctx);
@@ -13476,9 +13926,23 @@ inline void dynlights_sample_draw(ID3D11DeviceContext* ctx) {
         }
     }
 
+    if (kh_dl_cpu_wanted()) {   // KH_DL_CPU: the shadows, the span's arena.
+        dynlights_sample_draw_cpu(khd_c1, khd_b11, khd_f11, khd_n11);
+        khd_b11->Release();
+        return;
+    }
+
     // Arena capture: only when this window is new to the write side.
     const int khd_w = g_dl.arena_write;
     bool khd_have = false;
+    if (g_dl.win_count[khd_w] > 0 && g_dl.win_meta[khd_w][0].gen != 0) {
+        // KH_DL_CPU: a mode switch mid-span the other way - the side holds CPU
+        // windows whose bytes are not in the GPU arena. Start the side over.
+        g_dl.win_count[khd_w] = 0;
+        memset(g_dl.win_meta[khd_w], 0, sizeof(g_dl.win_meta[khd_w]));
+        g_dl.side_miss[khd_w] = 0;
+        g_dl.side_uploads[khd_w] = 0;
+    }
 
     for (uint32_t i = 0; i < g_dl.win_count[khd_w]; ++i) {
         if (g_dl.win_meta[khd_w][i].buf == static_cast<void*>(khd_b11) &&
@@ -14330,16 +14794,54 @@ inline bool dynlights_pool_vote(const float* khd_l, uint32_t khd_total,
     return true;
 }
 
+// The TTL sweep: compact out entries not re-sighted in time. The whole sweep
+// for the GPU arena; the fallback for a CPU harvest the sampler knows was
+// incomplete (KH_DL_SEQ, below).
+inline void dynlights_pool_sweep_ttl(uint64_t khd_now) {
+    uint32_t khd_keep = 0;
+
+    for (uint32_t i = 0; i < g_dl.pool_n; ++i) {
+        const DlPoolLight& khd_e = g_dl.pool[i];
+        uint64_t khd_ttl;
+        bool khd_fast = false;
+
+        if (khd_e.gap_max_ms == 0) {
+            khd_ttl = KH_DL_TTL_FLOOR_MS;   // Single sighting: no cadence evidence yet.
+        } else {
+            khd_ttl = kh_dl_gap_mult() * static_cast<uint64_t>(khd_e.gap_max_ms);
+            khd_fast = kh_dl_dense(khd_e.sightings, khd_e.gap_max_ms);
+            // Not gated on decode failures elsewhere: a rule that never turns off is a
+            // constant, and forcing every light onto the slow floor while any window is
+            // undecoded answers the wrong question.
+            const uint64_t khd_floor = khd_fast ? KH_DL_TTL_DENSE_FLOOR_MS
+                                                : KH_DL_TTL_FLOOR_MS;
+            if (khd_ttl < khd_floor) khd_ttl = khd_floor;
+            if (khd_ttl > KH_DL_TTL_CAP_MS) khd_ttl = KH_DL_TTL_CAP_MS;
+        }
+
+        if (khd_now - khd_e.stamp > khd_ttl) {
+            // KH_DL_WINPROV: measure, do not act.
+            continue;
+        }
+
+        if (khd_keep != i) g_dl.pool[khd_keep] = g_dl.pool[i];
+        khd_keep++;
+    }
+
+    g_dl.pool_n = khd_keep;
+}
+
 // Origin recovery + persistent union merge for one harvested arena side.
 inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
     const uint64_t khd_now = steady_now_ms();
-    {
-        const uint64_t khd_gap = (g_dl.last_harvest_ms != 0 &&
-                                  khd_now >= g_dl.last_harvest_ms)
-                               ? khd_now - g_dl.last_harvest_ms : 0;
-
-        g_dl.last_harvest_ms = khd_now;
-    }
+    // KH_DL_SEQ: presence sweeps after the merge (a re-sight must land on its
+    // own entry). The TTL sweep runs only on an incomplete harvest (below):
+    // this function is reached through dynlights_harvest_arena's CPU branch,
+    // whose gate is dynlights_acquire's own, so khd_pres is true whenever it
+    // runs at mode 0; the former !khd_pres sweep was the retired GPU-arena
+    // path's and never executed.
+    const bool khd_pres = kh_dl_cpu_wanted();
+    g_dl.last_harvest_ms = khd_now;
     float khd_best_lum = -1.0f;
     float khd_best_g[3] = { 1.0f, 1.0f, 1.0f };
     float khd_best_s = 1.0f;
@@ -14372,44 +14874,11 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
     // light on the slow floor, because silence during a decode gap is not
     // evidence the light went out.
 
-    {   // TTL sweep first: compact out entries not re-sighted in time.
-        uint32_t khd_keep = 0;
-
-        for (uint32_t i = 0; i < g_dl.pool_n; ++i) {
-            const DlPoolLight& khd_e = g_dl.pool[i];
-            uint64_t khd_ttl;
-            bool khd_fast = false;
-
-            if (khd_e.gap_max_ms == 0) {
-                khd_ttl = KH_DL_TTL_FLOOR_MS;   // Single sighting: no cadence evidence yet.
-            } else {
-                khd_ttl = kh_dl_gap_mult() * static_cast<uint64_t>(khd_e.gap_max_ms);
-                khd_fast = kh_dl_dense(khd_e.sightings, khd_e.gap_max_ms);
-                // Not gated on decode failures elsewhere: a rule that never turns off is a
-                // constant, and forcing every light onto the slow floor while any window is
-                // undecoded answers the wrong question.
-                const uint64_t khd_floor = khd_fast ? KH_DL_TTL_DENSE_FLOOR_MS
-                                                    : KH_DL_TTL_FLOOR_MS;
-                if (khd_ttl < khd_floor) khd_ttl = khd_floor;
-                if (khd_ttl > KH_DL_TTL_CAP_MS) khd_ttl = KH_DL_TTL_CAP_MS;
-            }
-
-            if (khd_now - khd_e.stamp > khd_ttl) {
-                // KH_DL_WINPROV: measure, do not act.
-
-                continue;
-            }
-
-            if (khd_keep != i) g_dl.pool[khd_keep] = g_dl.pool[i];
-            khd_keep++;
-        }
-
-        g_dl.pool_n = khd_keep;
-    }
 
     const uint32_t khd_wn = g_dl.win_count[khd_side];
+    const uint32_t khd_cap = kh_dl_cpu_wanted() ? KH_DL_WIN_MAX_CPU : KH_DL_WIN_MAX;
 
-    for (uint32_t w = 0; w < khd_wn && w < KH_DL_WIN_MAX; ++w) {
+    for (uint32_t w = 0; w < khd_wn && w < khd_cap; ++w) {
         const DlWindowMeta& khd_m = g_dl.win_meta[khd_side][w];
         const uint8_t* khd_p = khd_base + w * KH_DL_WIN_BYTES;
         float khd_ctl[16];
@@ -14441,17 +14910,10 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
             khd_total = khd_avail;
         }
 
-        {   // main-pass reference candidates: brightest ctl this harvest.
-            const float khd_lum = khd_ctl[12] + khd_ctl[13] + khd_ctl[14];
-
-            if (dl_finite(khd_lum) && khd_lum > khd_best_lum) {
-                khd_best_lum = khd_lum;
-                khd_best_g[0] = khd_ctl[12];
-                khd_best_g[1] = khd_ctl[13];
-                khd_best_g[2] = khd_ctl[14];
-                khd_best_s = khd_ctl[8];
-            }
-        }
+        // KH_DL_REF_PLACED: the reference candidacy moved below the origin test
+        // (it stood here, reading every window).
+        const float khd_lum = khd_ctl[12] + khd_ctl[13] + khd_ctl[14];
+        bool khd_ref_seen = false;   // Set once this window reaches candidacy.
 
         if (khd_total == 0) continue;
         const float* khd_l = reinterpret_cast<const float*>(khd_p + KH_DL_CTL_BYTES);
@@ -14476,6 +14938,9 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
                     if (g_dl.win_fail_run[khd_ws] > g_dl.win_fail_max[khd_ws]) {
                         g_dl.win_fail_max[khd_ws] = g_dl.win_fail_run[khd_ws];
                     }
+                }
+                if (khd_pres) {
+                    kh_dl_unpl_note(khd_l, khd_total, g_dl.harvest_seq);   // KH_DL_UNPL.
                 }
                 continue;
             }
@@ -14507,7 +14972,25 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
             }
 
             if (khd_probed > 0 && !khd_near) {
+                if (khd_pres) {
+                    kh_dl_unpl_note(khd_l, khd_total, g_dl.harvest_seq);   // KH_DL_UNPL.
+                }
                 continue;
+            }
+        }
+
+        {   // main-pass reference candidates: brightest ctl this harvest, among
+            // the windows the harvest placed (KH_DL_REF_PLACED). A window whose
+            // camera could not be placed is not the main pass; its globals do
+            // not set the main pass's reference.
+            khd_ref_seen = true;
+
+            if (dl_finite(khd_lum) && khd_lum > khd_best_lum) {
+                khd_best_lum = khd_lum;
+                khd_best_g[0] = khd_ctl[12];
+                khd_best_g[1] = khd_ctl[13];
+                khd_best_g[2] = khd_ctl[14];
+                khd_best_s = khd_ctl[8];
             }
         }
 
@@ -14603,6 +15086,7 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
                 khd_ax.gap_max_ms = kh_dl_gap_mark(khd_ax.gap_max_ms, khd_gap);
                 if (khd_ax.sightings < 0xFFFF) khd_ax.sightings++;
                 khd_ax.stamp = khd_now;
+                if (khd_m.seq > khd_ax.seq) khd_ax.seq = khd_m.seq;   // KH_DL_SEQ.
                 continue;
             }
 
@@ -14634,53 +15118,57 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
             }
 
             khd_pl.stamp = khd_now;
+            if (khd_m.seq > khd_pl.seq) khd_pl.seq = khd_m.seq;   // KH_DL_SEQ.
         }
     }
 
     if (khd_best_lum > 0.0f) {   // Empty harvests keep the last reference.
-        // In-band vs the standing reference adopts (tracks adaptation);
-        // out-of-band holds and must agree with itself across the confirm
-        // window to adopt.
-        const float khd_cand_l = khd_best_g[0] + khd_best_g[1] + khd_best_g[2];
-        const float khd_ref_l  = g_dl.main_gdiff[0] + g_dl.main_gdiff[1] + g_dl.main_gdiff[2];
-        const bool khd_l_ok = !g_dl.main_ref_valid ||
-            (khd_cand_l <= khd_ref_l * KH_DL_REF_BAND &&
-             khd_ref_l  <= khd_cand_l * KH_DL_REF_BAND);
-        const bool khd_s_ok = !g_dl.main_ref_valid ||
-            (khd_best_s > 1.0e-6f && g_dl.main_scale > 1.0e-6f &&
-             khd_best_s <= g_dl.main_scale * KH_DL_REF_BAND &&
-             g_dl.main_scale <= khd_best_s * KH_DL_REF_BAND);
-        bool khd_adopt = khd_l_ok && khd_s_ok;
+        // KH_DL_REF_FOLD (post-trust): the brightest ctl of the harvest IS the
+        // main-pass reference. The 1.5x band and the 400 ms self-agreement
+        // confirm that stood here (the latch continuity gate's debounce shape)
+        // never opened a pending in four night runs (~6,000 harvests), so the
+        // sub-pass one-off it guarded against has not been seen, and the pool's
+        // brightness has read steady at night since. Closed; the pending was
+        // ripped with its guard.
+        g_dl.main_gdiff[0] = khd_best_g[0];
+        g_dl.main_gdiff[1] = khd_best_g[1];
+        g_dl.main_gdiff[2] = khd_best_g[2];
+        g_dl.main_scale = khd_best_s;
+        g_dl.main_ref_valid = 1;
+    }
 
-        if (!khd_adopt) {
-            const float khd_pl = g_dl.ref_pend_g[0] + g_dl.ref_pend_g[1] + g_dl.ref_pend_g[2];
-            const bool khd_agree = g_dl.ref_pend_ms != 0 &&
-                khd_pl > 0.0f && g_dl.ref_pend_s > 1.0e-6f && khd_best_s > 1.0e-6f &&
-                khd_cand_l <= khd_pl * KH_DL_REF_BAND && khd_pl <= khd_cand_l * KH_DL_REF_BAND &&
-                khd_best_s <= g_dl.ref_pend_s * KH_DL_REF_BAND &&
-                g_dl.ref_pend_s <= khd_best_s * KH_DL_REF_BAND;
 
-            if (khd_agree && khd_now - g_dl.ref_pend_ms >= KH_DL_REF_CONFIRM_MS) {
-                khd_adopt = true;   // A persistent new exposure level.
-            } else {
-                if (!khd_agree) {
-                    g_dl.ref_pend_g[0] = khd_best_g[0];
-                    g_dl.ref_pend_g[1] = khd_best_g[1];
-                    g_dl.ref_pend_g[2] = khd_best_g[2];
-                    g_dl.ref_pend_s = khd_best_s;
-                    g_dl.ref_pend_ms = khd_now;
+    if (khd_pres) {
+        // KH_DL_SEQ: presence. This harvest holds every upload drawn since the
+        // last injection (the span), tagged with this harvest's serial. When
+        // the capture was complete - every draw that bound cb11 found its
+        // shadows and the span produced at least one list - a pool light no
+        // upload of the span carried is gone, at this injection. A light whose
+        // last appearance was in the previous frame's post-injection draws
+        // lasts one harvest more: those draws are in this span. An incomplete
+        // harvest takes the TTL sweep instead, as before. A window the harvest
+        // could not place is counted (dlWinUnresolved), not a gate: presence
+        // stamped its pool lights at the draw, with or without a window.
+        const uint64_t khd_c = g_dl.harvest_seq;
+        const bool khd_complete = !g_dl.side_miss[khd_side] && g_dl.side_uploads[khd_side] > 0;
+
+        if (!khd_complete) {
+            dynlights_pool_sweep_ttl(khd_now);
+        } else {
+            uint32_t khd_keep = 0;
+
+            for (uint32_t i = 0; i < g_dl.pool_n; ++i) {
+                const DlPoolLight& khd_e = g_dl.pool[i];
+
+                if (khd_e.seq != khd_c) {
+                    continue;
                 }
 
+                if (khd_keep != i) g_dl.pool[khd_keep] = g_dl.pool[i];
+                khd_keep++;
             }
-        }
 
-        if (khd_adopt) {
-            g_dl.main_gdiff[0] = khd_best_g[0];
-            g_dl.main_gdiff[1] = khd_best_g[1];
-            g_dl.main_gdiff[2] = khd_best_g[2];
-            g_dl.main_scale = khd_best_s;
-            g_dl.main_ref_valid = 1;
-            g_dl.ref_pend_ms = 0;
+            g_dl.pool_n = khd_keep;
         }
     }
 
@@ -14692,6 +15180,25 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
 // un-harvested copies are never overwritten), then flip sides so this frame's
 // sampler writes the freshly drained buffer.
 inline void dynlights_harvest_arena(ID3D11DeviceContext* ctx) {
+    if (kh_dl_cpu_wanted()) {
+        // KH_DL_CPU: the windows drawn since the last injection are CPU-resident
+        // - merge them now, the span's own. No flip, no Map, no in-flight side.
+        // A side holding GPU-arena windows (a mode switch mid-span) is skipped.
+        const int khd_w = g_dl.arena_write;
+        const bool khd_gpu_side = g_dl.win_count[khd_w] > 0 && g_dl.win_meta[khd_w][0].gen == 0;
+        ++g_dl.harvest_seq;   // KH_DL_SEQ: this span's serial; the uploads were tagged with it.
+
+        if (!khd_gpu_side) {
+            dynlights_merge_windows(g_dl.cpu_arena[khd_w].empty() ? nullptr : g_dl.cpu_arena[khd_w].data(), khd_w);
+        }
+
+        g_dl.win_count[khd_w] = 0;
+        memset(g_dl.win_meta[khd_w], 0, sizeof(g_dl.win_meta[khd_w]));
+        g_dl.side_miss[khd_w] = 0;
+        g_dl.side_uploads[khd_w] = 0;
+        return;
+    }
+
     const int khd_r = g_dl.arena_write ^ 1;
 
     if (g_dl.arena_inflight[khd_r] && g_dl.arena[khd_r]) {
@@ -14808,7 +15315,7 @@ inline void dynlights_publish(const uint8_t* khd_p, int khd_s) {
 
 // Runs inside an accepted injection on the render thread (never on
 // anomalous/rescue cycles - the caller gates). Harvest first, so a completed
-// copy publishes before this frame's cbd fills read the mirror; then census the
+// copy publishes before this frame's cbd fills read the mirror; then read the
 // live slot bindings and issue this frame's copy into a free staging slot.
 inline void dynlights_acquire(ID3D11DeviceContext* ctx, const float view[4][4]) {
     if (g_dl_mode.load(std::memory_order_relaxed) <= 0 ||
@@ -14819,7 +15326,7 @@ inline void dynlights_acquire(ID3D11DeviceContext* ctx, const float view[4][4]) 
     dynlights_harvest_arena(ctx);
 
     // (1) harvest completed copies (DO_NOT_WAIT: a stalled copy retries at the
-    // next injection; the hash census flags any ordering surprise).
+    // next injection).
     for (int khd_s = 0; khd_s < 2; ++khd_s) {
         if (!g_dl.inflight[khd_s] || !g_dl.staging[khd_s]) continue;
         D3D11_MAPPED_SUBRESOURCE khd_m = {};
@@ -14831,7 +15338,7 @@ inline void dynlights_acquire(ID3D11DeviceContext* ctx, const float view[4][4]) 
         g_dl.inflight[khd_s] = 0;
     }
 
-    // (2) live slot census + this frame's copy.
+    // (2) live slot bindings + this frame's copy.
     ID3D11DeviceContext1* khd_c1 = kh_ctx1(ctx);
     if (!khd_c1) {  return; }
     ID3D11Buffer* khd_b10 = nullptr;
@@ -14844,6 +15351,45 @@ inline void dynlights_acquire(ID3D11DeviceContext* ctx, const float view[4][4]) 
     if (!khd_b10 || !khd_b11) {
         if (khd_b10) khd_b10->Release();
         if (khd_b11) khd_b11->Release();
+        return;
+    }
+
+    if (kh_dl_cpu_wanted()) {
+        // KH_DL_CPU: the trigger window publishes from the shadows
+        // now, not from a staging copy read back a frame later.
+        const KhCbShadow* khd_s10 = kh_cbs_find(khd_b10);
+        const KhCbShadow* khd_s11 = kh_cbs_find(khd_b11);
+        const uint32_t khd_off10 = khd_f10 * 16u;
+        const uint32_t khd_off11 = khd_f11 * 16u;
+        khd_b10->Release();
+        khd_b11->Release();
+        if (!khd_s10 || !khd_s11 ||
+            khd_off10 + KH_DL_CTL_BYTES > khd_s10->bytes || khd_off11 >= khd_s11->bytes) {
+            return;
+        }
+        uint32_t khd_want11 = KH_DL_ARR_BYTES;
+        if (khd_n11 > 0 && khd_n11 * 16u < khd_want11) khd_want11 = khd_n11 * 16u;
+        if (khd_off11 + khd_want11 > khd_s11->bytes) khd_want11 = khd_s11->bytes - khd_off11;
+        khd_want11 -= khd_want11 % KH_DL_LIGHT_BYTES;
+        static uint8_t khd_stage[KH_DL_STAGE_BYTES];   // Render thread only.
+        memcpy(khd_stage, khd_s10->data.data() + khd_off10, KH_DL_CTL_BYTES);
+        if (khd_want11 > 0) memcpy(khd_stage + KH_DL_CTL_BYTES, khd_s11->data.data() + khd_off11, khd_want11);
+        g_dl.slot_bytes11[0] = khd_want11;
+
+        if (view) {
+            for (int khd_k = 0; khd_k < 3; ++khd_k) {
+                g_dl.pending_view[0][khd_k * 4 + 0] = view[0][khd_k];
+                g_dl.pending_view[0][khd_k * 4 + 1] = view[1][khd_k];
+                g_dl.pending_view[0][khd_k * 4 + 2] = view[2][khd_k];
+                g_dl.pending_view[0][khd_k * 4 + 3] = 0.0f;
+            }
+            extract_camera_pos(view, g_dl.pending_cam[0]);
+            g_dl.pending_view_ok[0] = 1;
+        } else {
+            g_dl.pending_view_ok[0] = 0;
+        }
+
+        dynlights_publish(khd_stage, 0);
         return;
     }
 
@@ -15015,9 +15561,9 @@ inline bool kh_dls_camera(float khc_out[3]) {
 static constexpr float KH_DLS_REACH_MIN_M = 1.0f;   // A degenerate reach never yields a zero far
 static constexpr float KH_DLS_REACH_MAX_M = 600.0f;
 static constexpr float KH_DLS_ATTEN_FLOOR = 255.0f;   // 1/255 = one 8-bit level.
-// Pending (unresolved): the mesh has gone fully black at night, correlated with
-// camera position, recovering on its own; a bright spotlight was also reported
-// dark, which points away from KH_DLS_AMB_KEEP alone (KH_DLS_REACH_RADIANCE lanes).
+// CLOSED: the night blackout once reported here (a mesh going fully black with
+// camera position, a bright spotlight reading dark) has not recurred since the
+// reach was priced against delivered radiance below. Not an open item.
 
 // So price the floor against what the light actually delivers. kh_dls_lum is
 // already the source radiance this file uses for the admission score; multiply
@@ -15141,8 +15687,15 @@ inline void kh_dls_select() {
 
     const uint32_t khs_pn = g_dl.pool_n;
 
-    // 1. EXPIRE. A slot is never held on the strength of a stale sighting:
-    //    silence is not evidence the light is still burning.
+    // 1. EXPIRE - KH_DLS_POOL_KEY (post-trust). A slot used to live KH_DLS_TTL_MS
+    //    (500) after its light's last re-match, so a despawned light's SHADOW
+    //    outlived its shading by ten times once the pool followed the engine
+    //    at ~50 ms (KH_DL_DENSE). The pool is the slot table's only source and
+    //    already carries the engine's own expiry; a slot whose light is no
+    //    longer in the pool has nothing to render and releases below, after
+    //    the re-match (step 2) has given every pool light its chance to claim
+    //    it. KH_DLS_TTL_MS stays as the backstop against a pool that stopped
+    //    harvesting (dlFillStale's case).
     for (uint32_t khs_s = 0; khs_s < KH_DLS_MAX; ++khs_s) {
         if (g_dls[khs_s].live && khs_now - g_dls[khs_s].stamp > KH_DLS_TTL_MS) {
             g_dls[khs_s].live = 0;
@@ -15241,6 +15794,14 @@ inline void kh_dls_select() {
         }
     }
 
+    // KH_DLS_POOL_KEY: a live slot no pool light re-matched this pass holds a
+    // light the pool has expired (or one that left the hold radius, which step
+    // 2 released already): release it now, and count it.
+    for (uint32_t khs_s = 0; khs_s < KH_DLS_MAX; ++khs_s) {
+        if (g_dls[khs_s].live && !khs_filled[khs_s]) {
+            g_dls[khs_s].live = 0;
+        }
+    }
     // 3. ADMIT / EVICT, BRIGHTEST FIRST. Picking the max each round instead of
     //    sorting keeps this allocation-free; the bound is KH_DLS_MAX x pool and
     //    the pool is tens of entries. Brightest-first matters: it stops a dim
@@ -15572,7 +16133,6 @@ inline void fill_dynlights_cb(ConstantData& cbd, const RenderObject& o) {
         uint32_t khd_sel[KH_DL_MAX_LIGHTS];
         float khd_dst[KH_DL_MAX_LIGHTS];
         uint32_t khd_n = 0;
-        float khd_near = -1.0f, khd_near_reach = -1.0f;
 
         for (uint32_t i = 0; i < g_dl.pool_n; ++i) {
             const DlPoolLight& khd_pl = g_dl.pool[i];
@@ -15584,11 +16144,6 @@ inline void fill_dynlights_cb(ConstantData& cbd, const RenderObject& o) {
             const float khd_inv = khd_pl.rec[21];
             const float khd_reach = (khd_pl.rec[20] + (khd_inv > 1.0e-6f ? 1.0f / khd_inv : 0.0f))
                                   / khd_scale;
-
-            if (khd_near < 0.0f || khd_d < khd_near) {
-                khd_near = khd_d;
-                khd_near_reach = khd_reach + khd_half;
-            }
 
             if (khd_d > khd_reach + khd_half) continue;
             uint32_t khd_j = khd_n < KH_DL_MAX_LIGHTS ? khd_n : KH_DL_MAX_LIGHTS;
@@ -15691,7 +16246,7 @@ inline void dynlights_reset_session() {
 
     memset(g_dl.ring, 0, sizeof(g_dl.ring));
     g_dl.ring_head = 0;
-    g_dl_cd_ctr = 0; g_dl_cd_n = 0;
+    g_dl_cd_n = 0;
 
     memset(g_dl_cd_bufs, 0, sizeof(g_dl_cd_bufs));
     memset(g_dl_cd_first, 0, sizeof(g_dl_cd_first));
@@ -15701,6 +16256,15 @@ inline void dynlights_reset_session() {
     g_dl.arena_write = 0;
     memset(g_dl.win_meta, 0, sizeof(g_dl.win_meta));
     g_dl.win_count[0] = g_dl.win_count[1] = 0;
+    for (int khd_s = 0; khd_s < 2; ++khd_s) {   // KH_DL_CPU.
+        std::vector<uint8_t>().swap(g_dl.cpu_arena[khd_s]);
+        g_dl.side_miss[khd_s] = 0;
+        g_dl.side_uploads[khd_s] = 0;
+    }
+    g_dl.harvest_seq = 0;
+    memset(g_dl.unpl_q, 0, sizeof(g_dl.unpl_q));   // KH_DL_UNPL.
+    memset(g_dl.unpl_seq, 0, sizeof(g_dl.unpl_seq));
+    kh_cbs_clear();
     g_dl.pool.clear();
     g_dl.pool.shrink_to_fit();
     g_dl.pool_n = 0;
@@ -15708,8 +16272,6 @@ inline void dynlights_reset_session() {
     g_dl.main_gdiff[0] = g_dl.main_gdiff[1] = g_dl.main_gdiff[2] = 1.0f;
     g_dl.main_scale = 1.0f;
     g_dl.main_ref_valid = 0;
-    g_dl.ref_pend_g[0] = g_dl.ref_pend_g[1] = g_dl.ref_pend_g[2] = 0.0f;
-    g_dl.ref_pend_s = 0.0f; g_dl.ref_pend_ms = 0;
 
     memset(g_dl.anchor_pos, 0, sizeof(g_dl.anchor_pos));
     memset(g_dl.anchor_stamp, 0, sizeof(g_dl.anchor_stamp));
@@ -15742,10 +16304,7 @@ inline void dynlights_reset_session() {
 
 }
 
-// Debug visual 14 replaces it.
-// The private sun-depth tiers and the dynamic-light shadow slots, into the
-// frame CB. Two fill sites: the frame build (gated on map freshness) and the
-// mask cast's own template.
+
 inline void kh_fill_sun_tiers_cb(ConstantData& cbd) {
     kh_sun_rebase_vp(&cbd.sun_vp[0][0], g_sun_map_vp, g_sun_map_anchor, g_sun_anchor_now);
     cbd.sun_meta[0] = g_sun_map_cam_anchor ? 2.0f : 1.0f;
@@ -15769,36 +16328,11 @@ inline void fill_lighting_frame_cb(ConstantData& cbd) {
     cbd.lighting1[0] = g_sun_dir_engine[0];
     cbd.lighting1[1] = g_sun_dir_engine[1];
     cbd.lighting1[2] = g_sun_dir_engine[2];
-    cbd.lighting1[3] = g_lit_gate_pub ? 1.0f : 0.0f;
-    const bool khzs_sunz = g_pub_block_valid &&
-                           g_pub_block_sun[0] == 0.0f &&
-                           g_pub_block_sun[1] == 0.0f &&
-                           g_pub_block_sun[2] == 0.0f;
-    const float khzs_now = effect_time_seconds();
-    // KH_BLK_JUMP_BRIGHT - the post-timeskip re-dimming. The zero-sun contradiction
-    // witness is muted for 15 s after a sun jump (a timeskip into night is a real
-    // zero-sun transition), but an unconditional mute admits the engine's settling
-    // transients too. Bright content re-arms it; a skip into real night never sees
-    // bright content and still reaches zero.
-    const float khzs_jump_age = (g_sun_last_jump_ms != 0)
-        ? static_cast<float>(steady_now_ms() - g_sun_last_jump_ms) * 0.001f : -1.0f;
-    const bool khzs_bright_since_jump = khzs_jump_age >= 0.0f && g_blk_bright_seen_t >= 0.0f && g_blk_bright_seen_t > (khzs_now - khzs_jump_age);
-    const bool khzs_jump = g_sun_last_jump_ms != 0 &&
-                           steady_now_ms() - g_sun_last_jump_ms < 15000 &&
-                           !khzs_bright_since_jump;
-    // KH_BLK_BRIGHT_STALL: the brightness witness is a recency stamp, so it
-    // goes stale whenever uploads stop flowing - including across an alt-tab or
-    // a time skip, where nothing is flowing because nothing is rendering. That
-    // silence is not evidence that the world went dark, and treating it as
-    // evidence admits a zero sun and dims the meshes.
-    const bool khzs_stall = steady_now_ms() < g_sun_axis_stall_until_ms;
-    const bool khzs_fresh = g_blk_bright_seen_t >= 0.0f &&
-                            (khzs_now - g_blk_bright_seen_t < KH_BLK_BRIGHT_RECENT_S ||
-                             khzs_stall);
-    const bool khzs_contra = khzs_fresh && !khzs_jump;
-    const bool khzs_dark = g_light_probe.std_sun_l >= 0.0f && g_light_probe.std_sun_l <= 0.5f && !khzs_contra;
-    const bool khzs_zero = khzs_sunz && !khzs_dark;
-    if (g_pub_block_valid && !khzs_zero) {
+    cbd.lighting1[3] = g_sun_valid ? 1.0f : 0.0f;   // Structural: the sun is published (see KH_LIT_FRESH_ERR's note).
+    // KH_LIGHT_BASE: the published block is the engine's own base lighting,
+    // republished every world frame (kh_blk_owner_frame). No override sits
+    // between it and the shader: a zero sun is night.
+    if (g_pub_block_valid) {
         cbd.lighting2[0] = g_pub_block_sun[0];
         cbd.lighting2[1] = g_pub_block_sun[1];
         cbd.lighting2[2] = g_pub_block_sun[2];
@@ -15816,29 +16350,6 @@ inline void fill_lighting_frame_cb(ConstantData& cbd) {
         cbd.light_amb[3] = 0.0f;
     }
     cbd.lighting2[3] = g_shadow_map_strength;
-
-    {
-        const float khkl_std = g_light_probe.std_sun_l;
-        const float khkl_now = effect_time_seconds();
-        if (khkl_std > 1.0e-6f) {
-            if (g_blk_anchor_snaps != g_blk_keel_snap_mark) {
-                g_blk_keel_snap_mark = g_blk_anchor_snaps;
-                g_blk_keel_sl = khkl_std;
-            }
-            if (g_blk_keel_sl <= 0.0f) {
-                g_blk_keel_sl = khkl_std;
-            } else if (g_blk_keel_t >= 0.0f && khkl_now > g_blk_keel_t) {
-                const float khkl_dt = khkl_now - g_blk_keel_t;
-                const float khkl_r  = KH_BLK_KEEL_RATE *
-                                      (khkl_dt < 1.0f ? khkl_dt : 1.0f);
-                float khkl_f = khkl_std / g_blk_keel_sl;
-                if (khkl_f > 1.0f + khkl_r) khkl_f = 1.0f + khkl_r;
-                if (khkl_f < 1.0f - khkl_r) khkl_f = 1.0f - khkl_r;
-                g_blk_keel_sl *= khkl_f;
-            }
-            g_blk_keel_t = khkl_now;
-        }
-    }
 
     const bool khl_map_fresh = g_sun_map_valid && g_sun_map_time >= 0.0f &&
         effect_time_seconds() - g_sun_map_time < KH_SUN_MAP_SELF_MAX_AGE_S;
@@ -15871,6 +16382,7 @@ inline void fill_lighting_frame_cb(ConstantData& cbd) {
             cbd.sun_pf[0] = g_sun2_map_valid && g_sun_pf_valid[0] ? 1.0f : 0.0f;
             cbd.sun_pf[1] = g_sun3_map_valid && g_sun_pf_valid[1] ? 1.0f : 0.0f;
             cbd.sun_pf[2] = g_sun4_map_valid && g_sun_pf_valid[2] ? 1.0f : 0.0f;
+            cbd.sun_origin[3] = g_sun5_map_valid && g_sun_pf_valid[3] ? 1.0f : 0.0f;   // KH_FAR_PF: the far arm.
         }
     }
 
@@ -15910,7 +16422,7 @@ inline void fill_lighting_frame_cb(ConstantData& cbd) {
 
     // The zeroed count short-circuits the shader; the table re-enters the frame
     // the hold expires.
-    if (!kh_sun_settled()) return;
+    if (!g_sun_valid) return;
 
     // shadow_meta[0] (the count) is written last, after the table lands.
     uint32_t out_i = 0;
@@ -16265,7 +16777,6 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
                     g_lock_churn_ms_v = steady_now_ms();   // lock-settle: hold the cast through the
                                                            // Rebuild.
                     g_ls.pub_exact_ms = steady_now_ms();
-                    g_ls.pub_any_ms = g_ls.pub_exact_ms;   // Relock counts as a publication.
                     g_ls.pub_fresh_ms = g_ls.pub_exact_ms;
                 }
             }
@@ -16311,8 +16822,7 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
                     }
 
                     g_ls.last_publish_rot_err = e_rot;   // Cold fire quality gate.
-                    g_ls.pub_any_ms = steady_now_ms();   // Stream liveness (lit gate).
-                    if (e_rot <= KH_LIT_FRESH_ERR) g_ls.pub_fresh_ms = g_ls.pub_any_ms;
+                    if (e_rot <= KH_LIT_FRESH_ERR) g_ls.pub_fresh_ms = steady_now_ms();
                     if (e_rot <= 1e-3f) g_ls.pub_exact_ms = steady_now_ms();
                 }
             }
@@ -16507,8 +17017,6 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
                 }
                 // Bridge provisionals are exempt: they cannot finalize and
                 // never serve unfinalized, so refusing would only starve them.
-                // Pick census (always on): every accepted overwrite, classified
-                // by the provisional-vs-completing camera gap.
                 for (int c = 0; c < 3; ++c) {
                     for (int r = 0; r < 4; ++r) {
                         bs.vcol[c * 4 + r] = fv[r * 4 + c];
@@ -16517,8 +17025,6 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
 
                 bs.pending_view = false;
                 bs.vcol_bridge = false;
-                kh_weld_note(bs.vcol, 6.0f);
-
             }
 
             if (g_ls.last_publish_rot_err <= 1e-3f && kh_band_view_native(fv, false)) {
@@ -16627,220 +17133,30 @@ inline bool kh_probe_world_cycle() {
            (g_ro.cycle_vp_min <= 0.3f && g_ro.cycle_vp_max >= 0.7f);
 }
 
-// 15% luminance band - tight enough to separate the two observed
-// standard-flavor regimes (0.822 vs 1.174 amb-lum: 30% apart) that the adoption
-// side's 50% band deliberately merges.
+// 15% luminance band with an absolute 0.02 floor: the cluster test of
+// KH_LIGHT_BASE and the flavour census (night-small values must not
+// ratio-flap into separate clusters).
 inline bool kh_probe_lum_band(float a, float b) {
     const float khp_m = a > b ? a : b;
     const float khp_eps = 0.15f * khp_m > 0.02f ? 0.15f * khp_m : 0.02f;
     return fabsf(a - b) <= khp_eps;
 }
 
-inline bool kh_probe_anchor_band(float a, float b) {
-    const float khpa_m = a > b ? a : b;
-    // 4% excludes it; real drift rides the 5%/s anchor tracking and never nears
-    // the band edge.
-    const float khpa_eps = 0.04f * khpa_m > 0.02f ? 0.04f * khpa_m : 0.02f;
-    return fabsf(a - b) <= khpa_eps;
-}
-
-// The interleaved foreign writer can therefore never land (the world writer
-// keeps re-arming the standing flavor every frame), while a real lighting
-// change (skipTime, overcast roll) moves every writer to the new level, the
-// standing flavor goes silent, and the new level adopts in 500 ms.
-inline void kh_probe_std_refresh(CbColorProbe& khp, const float* f, uint32_t nf, float khp_now) {
+// The block mirror (nb): every admitted non-zero standard-layout upload
+// refreshes it in full. Its readers are the fog / haze lanes (40+); the
+// amb / sun lanes are published by KH_LIGHT_BASE from the uploads
+// themselves, not from here. A block that is all-zero (amb, sun, fog) is
+// a clear, not lighting, and is refused.
+inline void kh_probe_mirror_refresh(CbColorProbe& khp, const float* f, uint32_t nf) {
     if (khp.off >= 40 && khp.off - 40 + 38 < nf) {
         const float* khpz_b = f + (khp.off - 40);
         const float khpz_al = khpz_b[8] + khpz_b[9] + khpz_b[10];
         const float khpz_sl = khpz_b[16] + khpz_b[17] + khpz_b[18];
         const float khpz_fl = khpz_b[36] + khpz_b[37] + khpz_b[38];
-
-        if (khpz_al < 1.0e-6f && khpz_sl < 1.0e-6f && khpz_fl < 1.0e-6f) {
-            return;
-        }
-    }
-
-    bool khp_apply = true;
-    bool khp_adopted = false;   // This apply came through a regime adoption.
-
-    // Refuse it instead; cold (no standing yet) keeps the unconditional first
-    // capture.
-    if (khp.std_amb_l >= 0.0f && !(khp.off >= 40 && khp.off - 40 + 18 < nf)) {
-        return;
-    }
-
-    if (khp.off >= 40 && khp.off - 40 + 18 < nf && khp.std_amb_l >= 0.0f) {
-        const float* khp_b = f + (khp.off - 40);
-        const float khp_al = khp_b[8] + khp_b[9] + khp_b[10];
-        const float khp_sl = khp_b[16] + khp_b[17] + khp_b[18];
-        if (khp_sl > 1.0f) g_blk_bright_seen_t = khp_now;
-        {   // KH_LIGHT_RECON: the raw block, ahead of every hold below.
-            const uint32_t khrc_i = g_rc_blk_ring_n % static_cast<uint32_t>(KH_RECON_BLK_RING);
-            for (int khrc_c = 0; khrc_c < 3; ++khrc_c) {
-                g_rc_blk_ring[khrc_i][khrc_c] = khp_b[8 + khrc_c];
-                g_rc_blk_ring[khrc_i][3 + khrc_c] = khp_b[16 + khrc_c];
-            }
-            g_rc_blk_ring_ms[khrc_i] = steady_now_ms();
-            g_rc_blk_ring_n++;
-            if (g_pub_block_valid && g_rc_blk_lat_open_ms == 0) {
-                const float khrc_ral = g_pub_block_amb[0] + g_pub_block_amb[1] + g_pub_block_amb[2];
-                const float khrc_rsl = g_pub_block_sun[0] + g_pub_block_sun[1] + g_pub_block_sun[2];
-                if (!kh_blk_in_band(khp_al, khrc_ral) || !kh_blk_in_band(khp_sl, khrc_rsl)) {
-                    g_rc_blk_lat_open_ms = steady_now_ms();
-                }
-            }
-        }
-
-        const float khan_ra = khp.anch_amb_l >= 0.0f ? khp.anch_amb_l : khp.std_amb_l;
-        const float khan_rs = khp.anch_sun_l >= 0.0f ? khp.anch_sun_l : khp.std_sun_l;
-
-        // Real night: witness below horizon, predicate never engages,
-        // bit-identical. The sticky guard protects the pending from third
-        // flavors only; nothing protected it from the ruling flavor itself.
-        if (kh_probe_anchor_band(khp_al, khan_ra) &&   // 8% - see the band's.
-            kh_probe_anchor_band(khp_sl, khan_rs)) {
-            const bool khkc_jump = g_sun_last_jump_ms != 0 &&
-                steady_now_ms() - g_sun_last_jump_ms < 15000;
-            const bool khp_kill_contra = khp.std_sun_l >= 0.0f && khp.std_sun_l < 0.1f && khp.pend_t >= 0.0f && khp.pend_sun_l > 1.0f && g_blk_bright_seen_t >= 0.0f && khp_now - g_blk_bright_seen_t < KH_BLK_BRIGHT_RECENT_S && !khkc_jump;
-            if (khp_kill_contra) {
-            } else {
-                khp.pend_t = -1.0f;   // Standing flavor still live: pending dies.
-                khp.pend_seen = -1.0f;
-            }
-        } else {
-            if (kh_probe_lum_band(khp_al, khp.std_amb_l) &&
-                kh_probe_lum_band(khp_sl, khp.std_sun_l)) {
-            }
-            const bool khp_agree = khp.pend_t >= 0.0f &&
-                kh_probe_lum_band(khp_al, khp.pend_amb_l) &&
-                kh_probe_lum_band(khp_sl, khp.pend_sun_l);
-
-            if (khp_agree) khp.pend_seen = khp_now;
-            const bool khp_starved = khp.last_std_time >= 0.0f &&
-                khp_now - khp.last_std_time > 2.0f;
-            // The starvation rescue keys on the standing going unseen, but a
-            // wrong dark flavor can itself upload every frame - standing
-            // "alive", every interleaved third flavor re-seeds the pending, the
-            // bright world flavor never survives its 500 ms bar, and a sun-dark
-            // standing rules a lit world forever.
-            const bool khp_dark_contra = khp.std_sun_l >= 0.0f && khp.std_sun_l < 0.1f &&
-                khp.pend_t >= 0.0f && khp.pend_sun_l > 1.0f &&
-                kh_sky_static() && fabsf(g_skysun_ref[1]) > 0.10f;
-            // The contradiction window, not the per-upload count.
-            if (khp_dark_contra) {
-                if (g_blk_dark_contra_first < 0.0f) g_blk_dark_contra_first = khp_now;
-            } else {
-                g_blk_dark_contra_first = -1.0f;
-            }
-            const bool khp_dark_escape = khp_dark_contra && khp_sl > 1.0f && g_blk_dark_contra_first >= 0.0f && khp_now - g_blk_dark_contra_first > 2.0f;
-
-            if (!khp_agree) {
-                if (khp_dark_escape) {
-                    // khp_apply is left alone so the apply below runs, which is
-                    // how the adoption branch signals success. Only a bright
-                    // incoming flavor can get here.
-                    khp_adopted = true;   // Anchor snaps at the apply tail.
-                    g_blk_dark_contra_first = -1.0f;
-                } else if ((khp_starved || khp_dark_contra) && khp.pend_t >= 0.0f && khp.pend_seen >= 0.0f &&
-                    khp_now - khp.pend_seen < 0.35f) {
-                    khp_apply = false;
-                } else if (khp_dark_contra && (khp_sl < 1.0f ||
-                            (khp.pend_sun_l > 1.0f &&
-                             khp_sl < khp.pend_sun_l * KH_BLK_DARK_RESEED_FRAC))) {
-                    khp_apply = false;
-                } else {
-                    khp.pend_amb_l = khp_al;
-                    khp.pend_sun_l = khp_sl;
-                    khp.pend_t = khp_now;
-                    khp.pend_seen = khp_now;
-                    khp_apply = false;
-                }
-            } else if (khp_now - khp.pend_t < 0.5f) {
-                khp_apply = false;
-            } else if (khp.std_sun_l > 1.0f && khp_sl < 0.1f * khp.std_sun_l &&
-                       !(g_sun_last_jump_ms != 0 &&
-                         steady_now_ms() - g_sun_last_jump_ms < 15000)) {
-                // Persistence alone cannot split a skipTime night from the
-                // cloud-deck blend; the sun-jump witness can.
-                khp_apply = false;
-            } else if (khp_starved && khp.std_sun_l > 1.0f &&
-                       khp.pend_sun_l >= 0.0f &&
-                       !(g_sun_last_jump_ms != 0 &&
-                         steady_now_ms() - g_sun_last_jump_ms < 15000) &&
-                       kh_blk_proportional_dim(khp.pend_sun_l, khp.pend_amb_l,
-                                               khp.std_sun_l, khp.std_amb_l)) {
-                // A scaled copy of the standing is not a level the horizon
-                // should ever concede to (see the helper). Ahead of the horizon
-                // branch, and the sun-jump exemption is kept.
-                khp_apply = false;
-            } else if (khp_starved && khp.std_sun_l > 1.0f && khp.pend_sun_l >= 0.0f && khp.pend_sun_l < KH_BLK_STARVED_DIM_FRAC * khp.std_sun_l && !(g_sun_last_jump_ms != 0 &&
-                         steady_now_ms() - g_sun_last_jump_ms < 15000) && kh_blk_sdh_window_holds(khp_now)) {
-                // The rescue's premise - the unseen standing is dead - holds; its corollary -
-                // the first resumer is the world's lighting - is measured false.
-                khp_apply = false;
-            } else if (khp.pend_sun_l >= 0.0f && (khp.pend_sun_l < KH_BLK_LIT_SUN_FLOOR ||
-                        (g_blk_keel_sl > 1.0f &&
-                         khp.pend_sun_l < KH_BLK_LIT_KEEL_FRAC * g_blk_keel_sl)) && khp.std_sun_l > 1.0f && g_blk_bright_seen_t >= 0.0f && khp_now - g_blk_bright_seen_t < KH_BLK_BRIGHT_RECENT_S) {
-                // The lighting guarantee. Every guard before this one is a
-                // heuristic with an escape: the ratchet bar exempts the sun-jump
-                // window, the persistence bar expires after three seconds. The
-                // witness is what makes this an invariant rather than a floor
-                // that would trap us in permanent daylight.
-                khp_apply = false;
-            } else if (g_sun_last_jump_ms != 0 && steady_now_ms() - g_sun_last_jump_ms < 15000 && khp.pend_sun_l >= 0.0f && khp.pend_sun_l < khp.std_sun_l && khp_now - khp.pend_t < KH_BLK_JUMP_DIM_PERSIST_S) {
-                // The last dimming door. So during the jump window a downward
-                // candidate must hold its value for KH_BLK_JUMP_DIM_PERSIST_S
-                // before it is adopted, instead of being waved through on the
-                // first frame.
-                khp_apply = false;
-            } else if (khp_starved && khp.pend_sun_l >= 0.0f && khp.pend_sun_l < khp.std_sun_l && g_blk_bright_seen_t >= 0.0f && khp_now - g_blk_bright_seen_t < KH_BLK_BRIGHT_RECENT_S && !(g_sun_last_jump_ms != 0 &&
-                         steady_now_ms() - g_sun_last_jump_ms < 15000)) {
-                // The dimming. The guard above refuses a starved candidate
-                // below half the standing. Every one clears the 0.5 bar.
-                khp_apply = false;
-            } else {
-                khp_adopted = true;
-            }
-        }
-    }
-
-    if (!khp_apply) {
-        const uint32_t khfg_base = khp.off >= 40 ? khp.off - 40 : 0;
-        if (khp.std_amb_l >= 0.0f &&   // A mirror exists to patch.
-            khfg_base == khp.nb_base &&   // Same window as the capture.
-            khfg_base + 56 <= nf) {
-            uint32_t khfg_mode = 0;
-            memcpy(&khfg_mode, &f[khfg_base + 44], sizeof(khfg_mode));
-            if (khfg_mode == 1u || khfg_mode == 3u) {
-                memcpy(khp.nb + 36, f + khfg_base + 36, 20 * sizeof(float));
-            }
-        }
-        return;
+        if (khpz_al < 1.0e-6f && khpz_sl < 1.0e-6f && khpz_fl < 1.0e-6f) return;
     }
     locator_capture(khp, f, nf, 56);
     khp.meta = static_cast<int>(khp.off - khp.nb_base);
-    khp.last_std_time = khp_now;
-    khp.std_amb_l = khp.nb[8] + khp.nb[9] + khp.nb[10];
-    khp.std_sun_l = khp.nb[16] + khp.nb[17] + khp.nb[18];
-    // Under 258 the anchor shadows the standing so a live un-revert never acts
-    // on a stale reference.
-    if (khp.anch_sun_l < 0.0f || khp_adopted) {
-        khp.anch_amb_l = khp.std_amb_l;
-        khp.anch_sun_l = khp.std_sun_l;
-        khp.anch_t = khp_now;
-        if (khp_adopted) g_blk_anchor_snaps++;
-    } else {
-        const float khan_dt = (khp.anch_t >= 0.0f && khp_now > khp.anch_t)
-                            ? (khp_now - khp.anch_t) : 0.0f;
-        khp.anch_t = khp_now;
-        const float khan_r = 0.05f * khan_dt;
-        const float khan_da = khp.std_amb_l - khp.anch_amb_l;
-        const float khan_ca = khan_r * fmaxf(khp.anch_amb_l, 0.02f);
-        khp.anch_amb_l += fmaxf(-khan_ca, fminf(khan_ca, khan_da));
-        const float khan_ds = khp.std_sun_l - khp.anch_sun_l;
-        const float khan_cs = khan_r * fmaxf(khp.anch_sun_l, 0.02f);
-        khp.anch_sun_l += fmaxf(-khan_cs, fminf(khan_cs, khan_ds));
-    }
 }
 
 inline void locator_note_upload(ID3D11Resource* res, const void* data, uint32_t bytes) {
@@ -16888,44 +17204,19 @@ inline void locator_note_upload(ID3D11Resource* res, const void* data, uint32_t 
             // consumer keeps the last-known standard lanes up high.
             const uint32_t mode_i = g_light_probe.off - 25;
 
-            if (mode_i < nf) {
-                g_light_probe.last_mode = f[mode_i];
-                // Four value slots name what the lane actually carries.
-                const float khml_v = f[mode_i];
-                for (int khml_i = 0; khml_i < 4; ++khml_i) {
-                    if (g_blk_mode_census_v[khml_i] == khml_v) {
-                        g_blk_mode_census_n[khml_i]++; break;
-                    }
-                    if (g_blk_mode_census_n[khml_i] == 0) {
-                        g_blk_mode_census_v[khml_i] = khml_v;
-                        g_blk_mode_census_n[khml_i] = 1; break;
-                    }
-                }
-            }
+            if (mode_i < nf) g_light_probe.last_mode = f[mode_i];
 
-            // What makes this safe to test: admitted uploads face the full
-            // arbitration - anchor band, pending, exclusivity - so garbage
-            // luminance is band-rejected exactly like a foreign cluster, while
-            // a sane FSAA-off standard block wearing lane-15 == 2 passes and
-            // lights the meshes.
+            // KH_LIGHT_BASE: every standard-layout upload is
+            // an admitted upload - recorded and given its ownership span.
             if (mode_i < nf && f[mode_i] == 1.0f &&
                 g_light_probe.off >= 40 && g_light_probe.off - 40 + 18 < nf) {
-                const float* khcr_b = f + (g_light_probe.off - 40);
-                float* khcr_e = g_blk_ring[g_blk_ring_next];
-                khcr_e[0] = khcr_b[8];  khcr_e[1] = khcr_b[9];  khcr_e[2] = khcr_b[10];
-                khcr_e[3] = khcr_b[16]; khcr_e[4] = khcr_b[17]; khcr_e[5] = khcr_b[18];
-                khcr_e[6] = khcr_e[0] + khcr_e[1] + khcr_e[2];
-                khcr_e[7] = khcr_e[3] + khcr_e[4] + khcr_e[5];
-                g_blk_ring_next = (g_blk_ring_next + 1u) & 3u;
-                if (g_blk_ring_count < 4) g_blk_ring_count++;
+                kh_blk_note_admitted(f + (g_light_probe.off - 40), nf - (g_light_probe.off - 40), kh_probe_world_cycle());
             }
 
             const bool khml_adm = f[mode_i] == 1.0f;
 
             if (mode_i < nf && khml_adm && kh_probe_world_cycle()) {
-                // world-cycle pre-filter + the deciding exclusive-persistence
-                // arbitration (kh_probe_std_refresh).
-                kh_probe_std_refresh(g_light_probe, f, nf, effect_time_seconds());
+                kh_probe_mirror_refresh(g_light_probe, f, nf);   // The fog-lane mirror.
             }
         }
     }
@@ -16976,10 +17267,13 @@ inline void locator_note_upload(ID3D11Resource* res, const void* data, uint32_t 
             const uint32_t mode_i2 = g_light_probe.off - 25;
 
             if (mode_i2 < nf) g_light_probe.last_mode = f[mode_i2];
+            if (mode_i2 < nf && f[mode_i2] == 1.0f &&
+                g_light_probe.off >= 40 && g_light_probe.off - 40 + 18 < nf) {   // KH_LIGHT_BASE twin.
+                kh_blk_note_admitted(f + (g_light_probe.off - 40), nf - (g_light_probe.off - 40), kh_probe_world_cycle());
+            }
 
             if (mode_i2 < nf && f[mode_i2] == 1.0f && kh_probe_world_cycle()) {
-                // World gate + regime arbitration (see kh_probe_std_refresh).
-                kh_probe_std_refresh(g_light_probe, f, nf, now);
+                kh_probe_mirror_refresh(g_light_probe, f, nf);
             }
             break;
         }
@@ -17465,7 +17759,10 @@ inline void release_shadow_device_state() {
         if (g_dl.arena[khd_s]) { g_dl.arena[khd_s]->Release(); g_dl.arena[khd_s] = nullptr; }
         g_dl.arena_inflight[khd_s] = 0;
         g_dl.win_count[khd_s] = 0;
+        g_dl.side_miss[khd_s] = 0;   // KH_DL_CPU (the meta is wiped below).
+        g_dl.side_uploads[khd_s] = 0;
     }
+    kh_cbs_clear();   // KH_DL_CPU: the shadows are keyed on device buffers.
 
     memset(g_dl.win_meta, 0, sizeof(g_dl.win_meta));
     g_dl.pool_n = 0;   // Pool positions are pod but the stamp must not lie.
@@ -17542,9 +17839,6 @@ inline void release_shadow_device_state() {
 
     // Frozen fire + private sun map.
     if (g_fire_lock) { g_fire_lock->Release(); g_fire_lock = nullptr; }
-    if (g_fire_snap_srv) { g_fire_snap_srv->Release(); g_fire_snap_srv = nullptr; }
-    if (g_fire_snap_tex) { g_fire_snap_tex->Release(); g_fire_snap_tex = nullptr; }
-    g_fire_snap_live = false;
     g_fire_lock_valid = false;
     g_fire_refreeze_pending = false;
 
@@ -17558,6 +17852,11 @@ inline void release_shadow_device_state() {
     g_sun_pf_valid[0] = false;
     g_sun_pf_valid[1] = false;
     g_sun_pf_valid[2] = false;   // Band validity flags above.
+    g_sun_pf_valid[3] = false;   // KH_FAR_PF.
+    for (int khtk_i = 0; khtk_i < 4; ++khtk_i) {   // KH_SUN_TIER_KEY.
+        g_sun_pf_fresh[khtk_i] = false;
+        g_sun_tier_key_ok[khtk_i] = false;
+    }
     g_sun_map_rendered_frame = false;
     g_sun_map_no_local = false;
     g_sun_map_hash = 0;
@@ -17567,6 +17866,8 @@ inline void release_shadow_device_state() {
     g_sun_local_count = 0;
     g_sun_locals.clear();
     g_sun_locals.shrink_to_fit();
+    ++g_sun_locals_serial;   // KH_CASTOCC_KEYSER: every rewrite bumps it, so the
+                             // key memo never rests on a second invariant.
 
     // Weak identities the render hooks compare against.
     g_main_depth_identity = nullptr;
@@ -17578,6 +17879,53 @@ inline void release_shadow_device_state() {
     g_sky_probe = CbColorProbe{};
     skybind_release();
     cascbind_release();
+}
+
+// KH_BAND_RECV_SKIP. A band seal is consumed by ShadowBandFactor alone, and
+// only for a mesh pixel whose view-z (through the seal's own frozen view)
+// falls in the seal's [near, far). A resolve whose band no live mesh reaches
+// therefore seals nothing anyone reads, and a 3,000-cube scene paid the
+// atlas copy for it eight times a frame regardless (0.16 ms each). The test
+// below replays the shader's range test on the CPU over the
+// scene grid's loose cell bounds (mesh objects only, visible or not, grown by
+// the cell's largest enclosing radius - conservative on every axis), and a
+// capture is skipped only when NO cell reaches the range under every view
+// the seal could carry: the incoming capture's (the fresh frame view and the
+// bridge PV both, whichever the stage would take) and the slot's standing
+// seal and pending stage (what the table serves until a new capture lands).
+// A skipped slot keeps its seal - the shader never samples it - and its
+// freshness clock is touched so the 4 s expiry cannot invalidate a band the
+// meshes merely left, which would move the far fade (ShadowBandFactor's
+// max-far) onto the next band. Nothing else in the capture path changes: the
+// sun-raw derivation above the seal section still samples every resolve.
+// Bounded by receive_warmed so the warm-up clock still keys on the first
+// capture of a session.
+static constexpr float KH_BAND_RECV_SLACK_M = 1.0f;   // On top of the cells' loose bounds.
+// The view's z column as (x, y, z, t): vz = dot(p, xyz) + t. Column layout
+// (vcol / stage_view): [8..11]; row layout (frame_view): [2], [6], [10], [14].
+inline bool kh_band_cells_reach(const float khbr_z[4], float khbr_near, float khbr_far) {
+    for (const auto& khbr_kv : g_scene.grid) {
+        const KhSceneCell& khbr_c = khbr_kv.second;
+        if (khbr_c.slots.empty()) continue;
+        const int32_t khbr_cx = static_cast<int32_t>(static_cast<uint32_t>(khbr_kv.first >> 32));
+        const int32_t khbr_cz = static_cast<int32_t>(static_cast<uint32_t>(khbr_kv.first & 0xFFFFFFFFu));
+        const float khbr_r = khbr_c.rmax + KH_BAND_RECV_SLACK_M;
+        const float khbr_x0 = static_cast<float>(khbr_cx) * KH_SCENE_CELL_M - khbr_r;
+        const float khbr_x1 = static_cast<float>(khbr_cx + 1) * KH_SCENE_CELL_M + khbr_r;
+        const float khbr_z0 = static_cast<float>(khbr_cz) * KH_SCENE_CELL_M - khbr_r;
+        const float khbr_z1 = static_cast<float>(khbr_cz + 1) * KH_SCENE_CELL_M + khbr_r;
+        const float khbr_y0 = khbr_c.ymin - khbr_r;
+        const float khbr_y1 = khbr_c.ymax + khbr_r;
+        const float khbr_ctr[3] = { 0.5f * (khbr_x0 + khbr_x1), 0.5f * (khbr_y0 + khbr_y1), 0.5f * (khbr_z0 + khbr_z1) };
+        const float khbr_hx = 0.5f * (khbr_x1 - khbr_x0);
+        const float khbr_hy = 0.5f * (khbr_y1 - khbr_y0);
+        const float khbr_hz = 0.5f * (khbr_z1 - khbr_z0);
+        const float khbr_vz = khbr_ctr[0] * khbr_z[0] + khbr_ctr[1] * khbr_z[1] + khbr_ctr[2] * khbr_z[2] + khbr_z[3];
+        const float khbr_ext = fabsf(khbr_z[0]) * khbr_hx + fabsf(khbr_z[1]) * khbr_hy + fabsf(khbr_z[2]) * khbr_hz;
+        if (khbr_vz + khbr_ext >= khbr_near && khbr_vz - khbr_ext < khbr_far) return true;
+    }
+
+    return false;
 }
 
 inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off, uint32_t nf) {
@@ -17623,83 +17971,46 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
         // Promiscuity, lockout, wrong-family tracking) remains available as -
         // never by skipping work. View source: the bridge PV.
         if (!g_ro.cycle_pv_valid && !g_ls.frame_view_valid) {  return; }
-        // Big-jump bypass: a large window move (look-away/look-back) must
-        // reseal immediately.
-        const bool big_jump = b.valid &&
-            (fabsf(sm[3] - b.sm[3]) > 0.08f || fabsf(sm[7] - b.sm[7]) > 0.08f);
-        // rotation-delta reseal: the cascade grid rotates with the view; a
-        // frozen copy requantizes shadow edges by up to a texel at each reseal
-        // - at 4 Hz that is a visible discrete hop proportional to turn rate
-        // (the received-side "step-dance"; the engine never freezes, so it
-        // spreads the same shimmer into per-frame dust).
-        bool grid_turned = false;
-        bool grid_flung = false;
-
-        if (b.valid) {
-            float n_new = sqrtf(sm[0] * sm[0] + sm[1] * sm[1] + sm[2] * sm[2]);
-            float n_old = sqrtf(b.sm[0] * b.sm[0] + b.sm[1] * b.sm[1] + b.sm[2] * b.sm[2]);
-
-            if (n_new > 1e-12f && n_old > 1e-12f) {
-                const float d = (sm[0] * b.sm[0] + sm[1] * b.sm[1] + sm[2] * b.sm[2]) / (n_new * n_old);
-                grid_turned = d < 0.9999995f;   // ~0.06 deg of grid rotation.
-                // grid_turned only shortens the interval, 0.25 s -> 0.10 s; it
-                // never bypasses it.
-            }
-        }
-        // The dancing foliage taught us the frozen- copy truth: received
-        // content can never be fresher than the reseal rate, and RV vegetation
-        // both animates (wind) and RE-orients with the camera (leaf planes are
-        // partially camera- facing) - so its shadows genuinely evolve per
-        // frame, and copies serve that evolution in steps.
-        float khbd_d = -1.0f;
+        // KH_SUN_RAW: the raw cascade axis of every capture, ahead of the reseal
+        // throttle below - the light direction the engine shadows this frame with.
+        // Folded through the fresh frame view when the publish is live, the bridge
+        // PV otherwise (measured identical to a fold through the cycle's own later
+        // view; that deferred re-fold instrument is retired).
         {
-            float khbd_c[3] = { 0.0f, 0.0f, 0.0f };
-            bool  khbd_ok = true;
-            for (int khbd_j = 0; khbd_j < 3; ++khbd_j) {
-                const float* khbd_v = &b.vcol[khbd_j * 4];
-                const float khbd_n = sqrtf(khbd_v[0] * khbd_v[0] +
-                                           khbd_v[1] * khbd_v[1] +
-                                           khbd_v[2] * khbd_v[2]);
-                if (!(khbd_n > 0.9f && khbd_n < 1.1f)) { khbd_ok = false; break; }
-                khbd_c[0] -= khbd_v[3] * khbd_v[0];
-                khbd_c[1] -= khbd_v[3] * khbd_v[1];
-                khbd_c[2] -= khbd_v[3] * khbd_v[2];
+            const bool khsr_fv = g_ls.frame_view_valid && g_ls.frame_view_time >= 0.0f &&
+                                 now - g_ls.frame_view_time < 0.05f &&
+                                 g_ls.pub_fresh_ms != 0 &&
+                                 steady_now_ms() - g_ls.pub_fresh_ms <= 1000;
+            const float* khsr_r2 = sm + 8;
+            float khsr_w[3];
+            for (int khsr_c = 0; khsr_c < 3; ++khsr_c) {
+                khsr_w[khsr_c] = khsr_fv
+                    ? g_ls.frame_view[khsr_c * 4 + 0] * khsr_r2[0] +
+                      g_ls.frame_view[khsr_c * 4 + 1] * khsr_r2[1] +
+                      g_ls.frame_view[khsr_c * 4 + 2] * khsr_r2[2]
+                    : g_ro.cycle_pv.view[khsr_c][0] * khsr_r2[0] +
+                      g_ro.cycle_pv.view[khsr_c][1] * khsr_r2[1] +
+                      g_ro.cycle_pv.view[khsr_c][2] * khsr_r2[2];
             }
-            if (khbd_ok) {
-                const float khbd_dx = khbd_c[0] - g_ls.cam[0];
-                const float khbd_dy = khbd_c[1] - g_ls.cam[1];
-                const float khbd_dz = khbd_c[2] - g_ls.cam[2];
-                const float khbd_m = sqrtf(khbd_dx * khbd_dx +
-                                           khbd_dy * khbd_dy + khbd_dz * khbd_dz);
-                if (khbd_m == khbd_m && khbd_m < 1.0e6f) khbd_d = khbd_m;
-            }
-        }
-        const float khbd_k = 0.045f;
-        const bool khbd_over = b.valid && khbd_d >= 0.0f && border[1] > border[0] && khbd_d > khbd_k * (border[1] - border[0]);
-        if (khbd_over && b.esc_t < 0.0f) {
-            b.esc_t = now;
-            b.esc_cycle = g_topo_cycles;
-        }
-        bool khly_over = false;
-        if (b.valid && border[1] > border[0]) {
-            const float khly_w = border[1] - border[0];
-            if (fabsf(border[0] - b.border[0]) > 0.02f * khly_w ||
-                fabsf(border[1] - b.border[1]) > 0.02f * khly_w) {
-                khly_over = true;
-                if (b.esc_t < 0.0f) { b.esc_t = now; b.esc_cycle = g_topo_cycles; }
+            const float khsr_n = sqrtf(khsr_w[0] * khsr_w[0] + khsr_w[1] * khsr_w[1] + khsr_w[2] * khsr_w[2]);
+            if (khsr_n > 1.0e-6f) {
+                khsr_w[0] /= khsr_n; khsr_w[1] /= khsr_n; khsr_w[2] /= khsr_n;
+                if (khsr_w[1] < 0.0f) { khsr_w[0] = -khsr_w[0]; khsr_w[1] = -khsr_w[1]; khsr_w[2] = -khsr_w[2]; }
+                kh_sun_raw_note(khsr_w);
             }
         }
-        const bool near_band = border[0] < 10.0f || khbd_over || khly_over;
-        // A staleness offset shrinks ~5x under this arm; a registration offset
-        // does not move. Engagement lane below; mode 0 identical.
-        const float min_interval = near_band ? 0.05f : (grid_turned ? 0.10f : 0.25f);
-
-        bool khbt_moved = false;
-
-        // Field on 209: null, and it is A clean one. So the reseal throttle is
-        // not what holds the cascade off our box after a flick.
-        if (b.valid && !big_jump && !khbt_moved && !grid_flung &&
-            now - b.last_time < min_interval) { g_ls.band_bail_time++; return; }
+        // KH_RESEAL_FOLD (post-trust, second and final): the reseal throttle
+        // stood here (0.25 s, 0.10 s while the grid turned, 0.05 s near; a
+        // big-jump bypass; a grid-rotation test; camera-escape stamps). It was
+        // ripped once and restored after the receive flickered without it; the
+        // flicker was the FOUR-deep staging pool starving four of eight bands
+        // at per-frame reseals (KH_BAND_POOL_8 at the pool). With one back
+        // buffer per band the bypass (one day run on the failure list:
+        // casters moving and deleted, walking toward and away from cast
+        // shadows, look-away / look-back, a slow turn at a shadow edge) sealed
+        // 18,152 of 18,152 stages with 0 pool misses and 0 restages at
+        // gpuMs_bandCapture 0.16 / cpuMs_bandCommit 0.17, and the received
+        // shadows follow their casters by eye. Every capture reseals.
 
         bool khbx_foreign = false;
 
@@ -17734,7 +18045,42 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
             }
         }
 
-        if (!khbx_foreign) {
+        // KH_BAND_RECV_SKIP (see kh_band_cells_reach).
+        bool khrs_skip = false;
+
+        if (!khbx_foreign && g_ls.receive_warmed) {
+            kh_scene_sync();   // KH_SCENE: the live grid, this frame's adds included.
+            bool khrs_reach = false;
+            const bool khrs_fvf = g_ls.frame_view_valid && g_ls.frame_view_time >= 0.0f &&
+                                  now - g_ls.frame_view_time < 0.05f;
+
+            if (khrs_fvf) {   // The incoming capture, through the fresh frame view.
+                const float khrs_z[4] = { g_ls.frame_view[2], g_ls.frame_view[6], g_ls.frame_view[10], g_ls.frame_view[14] };
+                khrs_reach = kh_band_cells_reach(khrs_z, border[0], border[1]);
+            }
+
+            if (!khrs_reach) {   // ...and through the bridge PV (the fallback view).
+                const float khrs_z[4] = { g_ro.cycle_pv.view[0][2], g_ro.cycle_pv.view[1][2],
+                                          g_ro.cycle_pv.view[2][2], g_ro.cycle_pv.view[3][2] };
+                khrs_reach = kh_band_cells_reach(khrs_z, border[0], border[1]);
+            }
+
+            if (!khrs_reach && b.valid) {   // The standing seal the table keeps serving.
+                khrs_reach = kh_band_cells_reach(b.vcol + 8, b.border[0], b.border[1]);
+            }
+
+            if (!khrs_reach && b.stage_valid && b.stage_view_ok) {   // The pending stage.
+                khrs_reach = kh_band_cells_reach(b.stage_view + 8, b.stage_border[0], b.stage_border[1]);
+            }
+
+            khrs_skip = !khrs_reach;
+
+            if (khrs_skip) {
+                if (b.valid) b.last_time = now;   // A seal the meshes left is not a stale seal.
+            }
+        }
+
+        if (!khbx_foreign && !khrs_skip) {
 
         if (!b.tex) {
             D3D11_TEXTURE2D_DESC td = {};
@@ -17869,12 +18215,6 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
 
         const bool fv = g_ls.frame_view_valid && g_ls.frame_view_time >= 0.0f &&
                         now - g_ls.frame_view_time < 0.05f;
-        // Order census: the frame view's age at this capture.
-        if (fv) {
-            const float khoc_ms = (now - g_ls.frame_view_time) * 1000.0f;
-            if (khoc_ms > g_band_cap_fv_age_max_ms) g_band_cap_fv_age_max_ms = khoc_ms;
-        }
-
         const bool khsv_nat = !fv || kh_band_view_native(g_ls.frame_view, true);
         // Seals born on it are complete at capture; the completion machinery
         // never runs.
@@ -17884,7 +18224,6 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
                                        : g_ro.cycle_pv.view[r][c];
             }
         }
-        b.esc_t = -1.0f;
 
         b.pending_view = true;
         b.vcol_bridge  = !fv;
@@ -17895,116 +18234,10 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
         b.last_time = now;
         b.valid = true;
         g_ls.band_captures++;
-        if (g_first_bandcap_t < 0.0f) g_first_bandcap_t = now;
 
         }   // End !khdf_staged (immediate path).
 
         }   // End !khbx_foreign (seal section).
-
-        const bool khdg_ok = g_ls.frame_view_valid && g_ls.frame_view_time >= 0.0f &&
-                             now - g_ls.frame_view_time < 0.05f &&
-                             g_ls.pub_fresh_ms != 0 &&
-                             steady_now_ms() - g_ls.pub_fresh_ms <= 1000;
-        // A starved warm-up becomes a normal one while a poisoned frozen view still
-        // cannot steer the latch: the bridge never freezes.
-        const bool khdg_bridge = !khdg_ok && g_ro.cycle_pv_valid;
-
-        if (khdg_ok || khdg_bridge) {
-            const float* r2 = sm + 8;
-            const float* V = g_ls.frame_view;   // world->view (row-major rows = world axes in view
-                                                // Space).
-            float wdir[3];
-
-            for (int c = 0; c < 3; ++c) {   // R^T * r2 (bridge twin = the khbx block's proven
-                                            // Indexing).
-                wdir[c] = khdg_ok
-                    ? V[c * 4 + 0] * r2[0] + V[c * 4 + 1] * r2[1] + V[c * 4 + 2] * r2[2]
-                    : g_ro.cycle_pv.view[c][0] * r2[0] +
-                      g_ro.cycle_pv.view[c][1] * r2[1] +
-                      g_ro.cycle_pv.view[c][2] * r2[2];
-            }
-
-            const float n2 = sqrtf(wdir[0] * wdir[0] + wdir[1] * wdir[1] + wdir[2] * wdir[2]);
-
-            if (n2 > 1e-6f) {
-                for (int c = 0; c < 3; ++c) wdir[c] /= n2;
-                if (wdir[1] < 0.0f) { wdir[0] = -wdir[0]; wdir[1] = -wdir[1]; wdir[2] = -wdir[2]; }
-                const float dd = fabsf(wdir[0] - g_sun_dir_derived[0]) +
-                                 fabsf(wdir[1] - g_sun_dir_derived[1]) +
-                                 fabsf(wdir[2] - g_sun_dir_derived[2]);
-
-                if (g_sun_derived_samples < 1000000) g_sun_derived_samples++;
-                {   // KH_LIGHT_RECON: the raw sample, before any latch.
-                    const uint32_t khrc_i = g_rc_sun_ring_n % static_cast<uint32_t>(KH_RECON_RING);
-                    g_rc_sun_ring[khrc_i][0] = wdir[0];
-                    g_rc_sun_ring[khrc_i][1] = wdir[1];
-                    g_rc_sun_ring[khrc_i][2] = wdir[2];
-                    g_rc_sun_ring_ms[khrc_i] = steady_now_ms();
-                    g_rc_sun_ring_n++;
-                    if (g_pub_valid && g_rc_sun_lat_open_ms == 0) {
-                        float khrc_dp = wdir[0] * g_pub_dir[0] + wdir[1] * g_pub_dir[1] + wdir[2] * g_pub_dir[2];
-                        khrc_dp = khrc_dp > 1.0f ? 1.0f : (khrc_dp < -1.0f ? -1.0f : khrc_dp);
-                        if (acosf(khrc_dp) * 57.29578f > KH_RECON_SUN_DEG &&
-                            kh_rc_sun_witness(wdir, g_pub_dir) != 0) g_rc_sun_lat_open_ms = steady_now_ms();
-                    }
-                }
-                if (g_first_derived120_t < 0.0f && g_sun_derived_samples >= 120) {
-                    g_first_derived120_t = effect_time_seconds();
-                }
-
-                if (!g_sun_dir_derived_valid) {
-                    g_sun_dir_derived[0] = wdir[0];
-                    g_sun_dir_derived[1] = wdir[1];
-                    g_sun_dir_derived[2] = wdir[2];
-                } else if (dd > 0.05f && g_sun_derived_samples > 120) {
-                    // A real skipTime repeats the same new direction on every
-                    // subsequent cascade finalize, so five consecutive agreeing
-                    // samples adopt within a fraction of a second; a one-off
-                    // poison sample never repeats and is refused (any small-dd
-                    // sample in between proves the latch fine and clears the
-                    // hold).
-                    const float khsn_dc = fabsf(wdir[0] - g_sun_snap_cand[0]) +
-                                          fabsf(wdir[1] - g_sun_snap_cand[1]) +
-                                          fabsf(wdir[2] - g_sun_snap_cand[2]);
-
-                    if (g_sun_snap_hold > 0 && khsn_dc < 0.05f) {
-                        g_sun_snap_hold++;
-                    } else {
-                        g_sun_snap_cand[0] = wdir[0];
-                        g_sun_snap_cand[1] = wdir[1];
-                        g_sun_snap_cand[2] = wdir[2];
-                        g_sun_snap_hold = 1;
-                    }
-
-                    if (g_sun_snap_hold >= 5) {
-                        g_sun_snap_hold = 0;
-                        g_sun_dir_derived[0] = wdir[0];
-                        g_sun_dir_derived[1] = wdir[1];
-                        g_sun_dir_derived[2] = wdir[2];
-                    }
-                } else if (dd > 0.004f) {
-                    g_sun_snap_hold = 0;   // A small-dd sample: the latch is fine.
-                    // Glide 25% per sample instead of hopping the full 0.25-deg step, which is a
-                    // visible per-hop shadow jump under refit churn.
-                    g_sun_dir_derived[0] += (wdir[0] - g_sun_dir_derived[0]) * 0.25f;
-                    g_sun_dir_derived[1] += (wdir[1] - g_sun_dir_derived[1]) * 0.25f;
-                    g_sun_dir_derived[2] += (wdir[2] - g_sun_dir_derived[2]) * 0.25f;
-                    const float gl = sqrtf(g_sun_dir_derived[0] * g_sun_dir_derived[0] +
-                                           g_sun_dir_derived[1] * g_sun_dir_derived[1] +
-                                           g_sun_dir_derived[2] * g_sun_dir_derived[2]);
-
-                    if (gl > 1e-6f) {
-                        g_sun_dir_derived[0] /= gl;
-                        g_sun_dir_derived[1] /= gl;
-                        g_sun_dir_derived[2] /= gl;
-                    }
-                } else {
-                    g_sun_snap_hold = 0;   // noise-still sample: the latch is fine.
-                }
-
-                g_sun_dir_derived_valid = true;
-            }
-        }
 
     }
 }
@@ -18235,6 +18468,11 @@ inline void mask_classify_rt(UINT n, ID3D11RenderTargetView* const* rtvs) {
     }
 
     res->Release();
+    for (uint32_t khmc_i = 0; khmc_i < g_rt0_desc_n; ++khmc_i) {
+        if (g_rt0_desc[khmc_i].res == static_cast<void*>(res)) {
+            break;
+        }
+    }
     if (khcr_fmt == 0) return;
     g_mask.rt_fmt_ok =
         (khcr_fmt == static_cast<uint32_t>(DXGI_FORMAT_R8_UNORM) ||
@@ -18243,7 +18481,15 @@ inline void mask_classify_rt(UINT n, ID3D11RenderTargetView* const* rtvs) {
          khcr_fmt == static_cast<uint32_t>(DXGI_FORMAT_R16_TYPELESS) ||
          khcr_fmt == static_cast<uint32_t>(DXGI_FORMAT_R16_FLOAT));
     g_mask.rt_w = khcr_w;
-    g_mask.rt_is_resolve = khcr_w >= 1280 && g_mask.rt_fmt_ok;
+    g_mask.rt_is_resolve = khcr_w >= 1280 &&
+                           g_mask.rt_fmt_ok;
+    if (g_mask.rt_is_resolve) {
+        for (uint32_t khmt_i = 0; khmt_i < g_rt0_desc_n; ++khmt_i) {
+            if (g_rt0_desc[khmt_i].res == static_cast<void*>(res)) {
+                break;
+            }
+        }
+    }
 }
 
 // Entirely our pipeline, which is what makes mesh-shaped cast shadows and
@@ -18263,6 +18509,7 @@ struct SunCaster {
     const KhMaterialSet* mats;   // Pool-owned (KH_MAT_POOL); the grave wall outlives this list.
     bool alpha_caster;
     bool lod_lock;   // KH_LOD_LOCK, carried so the dlsw mask can pick the drawn level.
+    int  lod;        // KH_SHADOW_LOD_DRAWN: the level this pass draws (kh_drawn_lod at the list build).
 };
 
 inline bool kh_mat_set_has_alpha(const KhMaterialSet* khma_s) {
@@ -18275,12 +18522,74 @@ inline bool kh_cast_alpha_on() {
     return g_res.vs_sundepth_a && g_res.ps_sundepth_a && g_res.layout_sundepth_a;
 }
 
+// KH_CAST_DISSOLVE: the opaque sun-depth state. With a camera-anchored map,
+// the twins present, AND a caster that actually reaches the fade band, the
+// dissolving pair; otherwise the depth-only pair (no pixel shader at all).
+// KH_CAST_DISSOLVE_GATE: g_sun_dissolve_now is decided once per
+// render_sun_depth from the whole caster list - a superset of every tier's
+// set and the union's - so a scene with nothing near the band pays nothing.
+static constexpr float KH_SUN_FADE_START_CPP = 0.72f;   // Twin of the shader's KH_SUN_FADE_START.
+static bool g_sun_dissolve_now = false;
+
+inline bool kh_cast_dissolve_on() {
+    return g_sun_dissolve_now && g_res.vs_sundepth_d && g_res.ps_sundepth_d &&
+           (g_sun_anchor_now[0] != 0.0f || g_sun_anchor_now[1] != 0.0f || g_sun_anchor_now[2] != 0.0f);
+}
+
+// Does any caster's box reach past KH_SUN_FADE_START of the range from the
+// anchor, horizontally or vertically? Conservative: the box's XZ half-diagonal
+// and its full Y half-extent are added to the centre offset.
+inline bool kh_cast_set_reaches_band(const std::vector<SunCaster>& khcb_set, float khcb_rng) {
+    const float khcb_lim = KH_SUN_FADE_START_CPP * khcb_rng;
+
+    for (size_t khcb_i = 0; khcb_i < khcb_set.size(); ++khcb_i) {
+        const SunCaster& c = khcb_set[khcb_i];
+        // size is the SQF-order full extent (kh_mesh_dist_sq_of's convention);
+        // the whole half-diagonal is added on both axes - conservative.
+        const float khcb_hl[3] = { c.size[0] * 0.5f, c.size[2] * 0.5f, c.size[1] * 0.5f };
+        float khcb_he[3];
+        kh_rot_half_extents(khcb_hl, c.rot, c.rotated, khcb_he);
+        const float khcb_d = sqrtf(khcb_he[0] * khcb_he[0] + khcb_he[1] * khcb_he[1] + khcb_he[2] * khcb_he[2]);
+        // KH_DISSOLVE_GATE_AXES: c.pos is SQF order [x, north, up] (a memcpy of
+        // RenderObject::pos); the anchor is engine order [x, up, north]. The
+        // first cut compared pos[2] (up) against anchor[2] (north) and pos[1]
+        // (north) against anchor[1] (up), so the vertical term was a northing
+        // minus an altitude - thousands of metres, past the band on every
+        // frame - and the gate never once said false. Swizzled like every
+        // other consumer of a SunCaster's pos ({pos[0], pos[2], pos[1]}).
+        const float khcb_dx = c.pos[0] - g_sun_anchor_now[0];
+        const float khcb_dz = c.pos[1] - g_sun_anchor_now[2];
+        const float khcb_h = sqrtf(khcb_dx * khcb_dx + khcb_dz * khcb_dz) + khcb_d;
+        const float khcb_v = fabsf(c.pos[2] - g_sun_anchor_now[1]) + khcb_d;
+        if (khcb_h > khcb_lim || khcb_v > khcb_lim) return true;
+    }
+
+    return false;
+}
+
+inline void kh_sun_bind_opaque(ID3D11DeviceContext* khbo_ctx) {
+    if (kh_cast_dissolve_on()) {
+        khbo_ctx->VSSetShader(g_res.vs_sundepth_d, nullptr, 0);
+        khbo_ctx->PSSetShader(g_res.ps_sundepth_d, nullptr, 0);
+    } else {
+        khbo_ctx->VSSetShader(g_res.vs_sundepth, nullptr, 0);
+        khbo_ctx->PSSetShader(nullptr, nullptr, 0);
+    }
+}
+
+// The range the maps' dissolve fades over: the lane every fade consumer reads
+// (mirMeta.w), clamped the way the fire fills it.
+inline float kh_cast_dissolve_range() {
+    return kh_cast_dissolve_on()
+         ? fminf(fmaxf(g_sun_range.load(std::memory_order_relaxed), 8.0f), 1000.0f) : 0.0f;
+}
+
 // One caster record from a draw-list object. render_sun_depth built this
 // inline; kh_dls_frame needs the identical record for the light maps and the
 // dlsw mask, and two builders would be a twin. The eligibility and
 // range tests stay with each caller - they differ on purpose - only the record
 // does not.
-inline SunCaster kh_sun_caster_of(const RenderObject& o) {
+inline SunCaster kh_sun_caster_of(const RenderObject& o, const float khsc_cam[3]) {
     SunCaster c;
     memcpy(c.pos, o.pos, sizeof(c.pos));
     memcpy(c.size, o.size, sizeof(c.size));
@@ -18289,6 +18598,7 @@ inline SunCaster kh_sun_caster_of(const RenderObject& o) {
     c.mesh = mesh_id_clamp(o.mesh);
     c.slot = o.slot;
     c.lod_lock = o.lod_lock;
+    c.lod = kh_drawn_lod(c.mesh, c.pos, c.size, c.rot, c.rotated, c.lod_lock, khsc_cam);   // KH_SHADOW_LOD_DRAWN.
     // KH_CAST_ALPHA: the caster's alpha (colour alpha x lifetime envelope, an
     // expired object casts nothing until the flush erases it) quantised to
     // 1/64, its alpha-carrying material set, and the verdict.
@@ -18326,7 +18636,6 @@ inline uint64_t kh_sun_draw_alpha(ID3D11DeviceContext* ctx, const std::vector<Su
     ID3D11Buffer* khsa_vbs[2] = { nullptr, khsa_inst_vb };
     const UINT khsa_strides[2] = { sizeof(MeshVertex), KH_INST_STRIDE };
     const UINT khsa_offsets[2] = { 0, 0 };
-    const int khsa_lvl = kh_shadow_lod_level();
     int khsa_bound_mesh = -1;
     uint64_t khsa_n = 0;
 
@@ -18347,11 +18656,11 @@ inline uint64_t kh_sun_draw_alpha(ID3D11DeviceContext* ctx, const std::vector<Su
             kh_bind_material(ctx, khsa_dev, khsa_cbd, nullptr, 0);
             if (!kh_upload_obj_cb(ctx, g_res.composite_cb, khsa_cbd)) break;
             UINT khsa_ls = 0, khsa_lc = 0;
-            mesh_shadow_range(c.mesh, khsa_ls, khsa_lc);
+            mesh_lod_range_of(c.mesh, c.lod, khsa_ls, khsa_lc);   // KH_SHADOW_LOD_DRAWN.
             ctx->DrawIndexedInstanced(khsa_lc, 1, khsa_ls, 0, static_cast<UINT>(khsa_i));
         } else {   // Per submesh of the shadow level, the material bound.
             const MeshDef& khsa_md = mesh_def(c.mesh);
-            const std::vector<MeshSubmesh>& khsa_tab = mesh_lod_submeshes(khsa_md, khsa_lvl);
+            const std::vector<MeshSubmesh>& khsa_tab = mesh_lod_submeshes(khsa_md, c.lod);   // KH_SHADOW_LOD_DRAWN.
             bool khsa_ok = true;
 
             for (size_t khsa_s = 0; khsa_s < khsa_tab.size() && khsa_ok; ++khsa_s) {
@@ -18371,8 +18680,7 @@ inline uint64_t kh_sun_draw_alpha(ID3D11DeviceContext* ctx, const std::vector<Su
 
     // The opaque sun state again, for whatever draws next at this site.
     ctx->IASetInputLayout(g_res.layout_sundepth);
-    ctx->VSSetShader(g_res.vs_sundepth, nullptr, 0);
-    ctx->PSSetShader(nullptr, nullptr, 0);
+    kh_sun_bind_opaque(ctx);   // KH_CAST_DISSOLVE.
     khsa_dev->Release();
     return khsa_n;
 }
@@ -18476,7 +18784,7 @@ inline bool kh_dls_ensure_maps(ID3D11Device* khde_dev, UINT khde_want) {
 // carried rather than computed.
 static constexpr float KH_DLS_BIAS_M = 0.01f;      // Constant compare bias (m).
 static constexpr float KH_DLS_BIAS_SLOPE = 0.0001f;   // Plus this per metre of range.
-// KH_DLS_SRV_BIND census. D3D11 silently unbinds a shader resource whose texture
+// KH_DLS_SRV_BIND. D3D11 silently unbinds a shader resource whose texture
 // is bound as a depth target - which our own render pass does to this array. If
 // the mesh bind site already ran this frame, t36 is left null and every Load
 // returns 0 (the near plane, fully occluded). Counting binds against renders says
@@ -18616,6 +18924,7 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
         khdr_chash = CryptoGenerator::fnv1a64_update(khdr_chash, khdl_c.rot, sizeof(khdl_c.rot));
         khdr_chash = CryptoGenerator::fnv1a64_update(khdr_chash, &khdl_c.mesh, sizeof(khdl_c.mesh));
         khdr_chash = CryptoGenerator::fnv1a64_update(khdr_chash, &khdl_c.alpha, sizeof(khdl_c.alpha));
+        khdr_chash = CryptoGenerator::fnv1a64_update(khdr_chash, &khdl_c.lod, sizeof(khdl_c.lod));   // KH_SHADOW_LOD_DRAWN.
     }
     {
         g_dlsw_casters.clear();
@@ -18875,13 +19184,15 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
             size_t khdr_first = 0;
             while (khdr_first < khdr_keep.size()) {
                 const int khdr_mid = khdr_keep[khdr_first]->mesh;
+                const int khdr_lod = khdr_keep[khdr_first]->lod;   // KH_SHADOW_LOD_DRAWN.
                 size_t khdr_last = khdr_first + 1;
-                while (khdr_last < khdr_keep.size() && khdr_keep[khdr_last]->mesh == khdr_mid) ++khdr_last;
+                while (khdr_last < khdr_keep.size() && khdr_keep[khdr_last]->mesh == khdr_mid &&
+                       khdr_keep[khdr_last]->lod == khdr_lod) ++khdr_last;
                 khdr_vbs[0] = g_res.mesh_vb[khdr_mid];
                 khdr_ctx->IASetVertexBuffers(0, 2, khdr_vbs, khdr_str, khdr_off);
                 khdr_ctx->IASetIndexBuffer(g_res.mesh_ib[khdr_mid], DXGI_FORMAT_R32_UINT, 0);
                 UINT khdr_ls = 0, khdr_lc = 0;
-                mesh_shadow_range(khdr_mid, khdr_ls, khdr_lc);
+                mesh_lod_range_of(khdr_mid, khdr_lod, khdr_ls, khdr_lc);   // KH_SHADOW_LOD_DRAWN.
                 khdr_ctx->DrawIndexedInstanced(khdr_lc, static_cast<UINT>(khdr_last - khdr_first),
                                                khdr_ls, 0, static_cast<UINT>(khdr_first));
                 khdr_first = khdr_last;
@@ -18906,7 +19217,7 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
 }
 
 // KH_DLS_FRAME - the light maps render on their own bracket, free of the sun
-// pass's gates (axis settle/witness, null-sun return, era arms, the sun's caster
+// pass's gates (validity/witness, null-sun return, era arms, the sun's caster
 // cull). Once per cycle, whichever mesh pass arrives first (the injection, or the
 // flush fallback on a frame the injection did not run) - the kh_dls_select rule.
 static uint64_t g_dls_frame_cycle = ~0ull;      // once-per-cycle guard (state, not a lane).
@@ -18963,7 +19274,7 @@ inline void kh_dls_frame(ID3D11DeviceContext* khdf_ctx) {
                 khdf_near = khdf_dx * khdf_dx + khdf_dy * khdf_dy + khdf_dz * khdf_dz <= khdf_lim * khdf_lim;
             }
             if (!khdf_near) {  continue; }
-            khdf_casters.push_back(kh_sun_caster_of(o));
+            khdf_casters.push_back(kh_sun_caster_of(o, g_sun_anchor_now));   // KH_SHADOW_LOD_DRAWN: this frame's camera.
         }
     }
 
@@ -19012,11 +19323,10 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     if (g_sun_map_rendered_frame) return g_sun_map_valid;
     g_sun_map_rendered_frame = true;
 
-    // sun-settle gate: no self/cast map from a moving sun - absent beats swinging.
-    // Validity drops so frozen consumers stand down too; the map re-renders the frame
-    // after the direction settles. KH_SUN_AXIS_SLEW renders from the sky witness,
-    // which the publish machinery does not touch.
-    if (!kh_sun_settled() && !kh_sun_axis_witnessed()) {
+    // No published sun and no sky witness: no self / cast map. Validity drops so
+    // frozen consumers stand down too; the map renders the frame either arrives.
+    // Before the first publish the sky lane alone may carry them (kh_sun_axis_witnessed).
+    if (!g_sun_valid && !kh_sun_axis_witnessed()) {
         g_sun_map_valid = false;
         g_sun2_map_valid = false;
         g_sun3_map_valid = false;
@@ -19032,13 +19342,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     // shadow against - and changes nothing else.
     const float* sun = kh_shadow_sun();
 
-    // KH_SUN_AXIS_STALL: note the frame gap before any gate consults the
-    // witness, so an alt-tab or time skip is recognised as a stall rather than
-    // read as a dead sky.
-    kh_sun_axis_note_frame(steady_now_ms());
-
-    sun = kh_sun_axis_latched(sun);
-
+    // KH_SUN_AXIS_FOLD: the maps render from the publish itself.
     if (!sun) return false;
 
     float cam_e[3] = { 0.0f, 0.0f, 0.0f };
@@ -19057,12 +19361,6 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             cam_valid = true;
         }
     }
-
-    // KH_SUN_AXIS_CENSUS: once per frame, with the axis this frame's maps are
-    // about to be rendered with and the camera they are about to be anchored
-    // at. Census takes its own scratch and writes nothing the render reads
-    //.
-    kh_sun_axis_census(sun, cam_e, cam_valid);
 
     // Camera-less flushes anchor at the origin - which is the world-absolute
     // behaviour, correct by construction.
@@ -19100,7 +19398,11 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                 const float hd = sqrtf(he0[0] * he0[0] + he0[1] * he0[1] + he0[2] * he0[2]);
                 const float lim = khsr_rad + hd;
 
-                if (dx * dx + dy * dy + dz * dz > lim * lim) {
+                // KH_SUN_RANGE_CYL: cylinder, matching KhSunRangeFade.
+                // As a sphere this refused casters whose shadow lands on
+                // ground the shader still asks about, and the refusal is a
+                // cliff where the fade is a ramp.
+                if (dx * dx + dz * dz > lim * lim || fabsf(dy) > lim) {
                     // The sole guard is the sy > 1e-4 horizon test below, which
                     // is a validity floor, not a length cap - at sy 1e-4 the
                     // reach is ~2e4 x height, well inside fp32, and the reach
@@ -19108,7 +19410,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                     // tested at the same lim with the vertical extent as slack.
                     bool khsr_in = false;
 
-                    if (g_sun_valid) {
+                    if (g_sun_valid) {   // The reach rescue needs a published sun.
                         const float khsr_sx = g_sun_dir_engine[0];
                         const float khsr_sy = g_sun_dir_engine[1];
                         const float khsr_sz = g_sun_dir_engine[2];
@@ -19121,18 +19423,48 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                                                                       // Drop.
                             const float khsr_ux = -khsr_sx / khsr_hl;   // Shadow runs opposite.
                             const float khsr_uz = -khsr_sz / khsr_hl;
-                            const float khsr_span = 2.0f * he0[1] + khsr_drop;
+                            // KH_SUN_ELIG_SPAN: + lim. Without it the ray
+                            // stops 2 * he.y below the camera and every
+                            // receiver deeper than that is invisible to the
+                            // test - which at a low sun is (camera AGL) * k
+                            // of missing horizontal reach, and is the shadow
+                            // pop-in. A receiver inside the shadow view
+                            // distance is at most lim below the camera, so
+                            // this is the tight bound, not a slack one.
+                            // Verified against the swept-box ground truth:
+                            // 41.4% of in-range shadows missed before, 8.3%
+                            // after, and zero extra casters admitted.
+                            const float khsr_span = 2.0f * he0[1] + khsr_drop + lim;
                             const float khsr_ay = dy - he0[1];   // Camera -> caster base, vertical.
                             const float khsr_h = dx * khsr_ux + dz * khsr_uz;
-                            float khsr_s = (khsr_ay - khsr_k * khsr_h) /
-                                           (khsr_k * khsr_k + 1.0f);
-                            khsr_s = khsr_s < 0.0f ? 0.0f
-                                   : (khsr_s > khsr_span ? khsr_span : khsr_s);
-                            const float khsr_rx = dx + khsr_ux * khsr_k * khsr_s;
-                            const float khsr_rz = dz + khsr_uz * khsr_k * khsr_s;
-                            const float khsr_ry = khsr_ay - khsr_s;
-                            khsr_in = khsr_rx * khsr_rx + khsr_ry * khsr_ry + khsr_rz * khsr_rz
-                                      <= lim * lim;
+                            // KH_SUN_ELIG_BAND: the shadow is a band, not a
+                            // line, and on a cylinder the horizontal and
+                            // vertical tests are independent given s - so the
+                            // exact answer is an interval intersection, not a
+                            // distance minimised at one chosen s. Picking s
+                            // first and judging after loses every caster whose
+                            // shadow satisfies both tests at DIFFERENT s.
+                            // Horizontal: |q + u*k*s| <= lim is a quadratic in
+                            // s; its roots bound where the shadow is in range
+                            // laterally, and no root means it never is.
+                            const float khsr_qa = khsr_k * khsr_k;
+                            const float khsr_qb = 2.0f * khsr_k * khsr_h;
+                            const float khsr_qc = dx * dx + dz * dz - lim * lim;
+                            const float khsr_disc = khsr_qb * khsr_qb - 4.0f * khsr_qa * khsr_qc;
+                            if (khsr_disc >= 0.0f && khsr_qa > 1.0e-12f) {
+                                const float khsr_rt = sqrtf(khsr_disc);
+                                float khsr_lo = (-khsr_qb - khsr_rt) / (2.0f * khsr_qa);
+                                float khsr_hi = (-khsr_qb + khsr_rt) / (2.0f * khsr_qa);
+                                // Vertical: at s the band spans
+                                // [ay - s, ay - s + 2he], so it reaches the
+                                // camera's +-lim window exactly on this range.
+                                if (khsr_lo < 0.0f) khsr_lo = 0.0f;
+                                if (khsr_lo < khsr_ay - lim) khsr_lo = khsr_ay - lim;
+                                if (khsr_hi > khsr_span) khsr_hi = khsr_span;
+                                const float khsr_vhi = khsr_ay + 2.0f * he0[1] + lim;
+                                if (khsr_hi > khsr_vhi) khsr_hi = khsr_vhi;
+                                khsr_in = khsr_lo <= khsr_hi;
+                            }
                         }
                     }
 
@@ -19143,18 +19475,21 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                     }
                 }
             }
-            casters.push_back(kh_sun_caster_of(o));
+            casters.push_back(kh_sun_caster_of(o, cam_e));   // KH_SHADOW_LOD_DRAWN.
         }
     }
 
     if (!casters.empty()) g_sun_map_no_local = false;   // At least one local caster.
     if (casters.empty()) return false;
+    g_sun_dissolve_now = cam_valid && kh_cast_set_reaches_band(casters, khsr_rad);   // KH_CAST_DISSOLVE_GATE.
 
     // The hash commits only at render success below, so a failed render can
     // never let a stale map vouch for new inputs. (Failure-exonerated
     // re-application: this block sits after the derived-sun guard and provably
     // never executed in the corrupted sessions.).
     uint64_t input_hash = CryptoGenerator::FNV1A64_OFFSET;
+    uint64_t khsh_caster_key = 0;   // KH_SUN_TIER_KEY: the caster hash (set with khsm_caster_hash).
+    bool     khsh_did[4] = { false, false, false, false };   // KH_SUN_TIER_KEY: tiers that rendered this call.
     auto khsh_render_cams = [&](bool khsh_standalone) -> void {
         if (!cam_valid || casters.empty()) {
             g_sun2_map_valid = false;
@@ -19173,10 +19508,9 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             g_sun5_map_valid = false;
             return;
         }
-        // per-band enable: a mode stands one band down (239 hero / 242 mid /
-        // 244 outer) and only that band - its resources are not even ensured,
-        // its meta stays zeroed, and both consumers fall through to the next
-        // tier. Resource failure degrades the same way, per band, non-fatally.
+        // Per-band ensure: a band whose resources fail is stood down alone -
+        // its meta stays zeroed and both consumers fall through to the next
+        // tier - so resource failure degrades per band, non-fatally.
         const bool khsh_core = g_res.vs_sundepth && g_res.layout_sundepth &&
                                g_res.sun_instance_vb && g_res.obj_srv;   // KH_OBJBUF.
         const bool khsh_ok0 = khsh_core && ensure_sun_depth2(khsh_dev);
@@ -19246,8 +19580,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             ctx->RSGetViewports(&khsh_nvp, khsh_ovp);
             ctx->IASetInputLayout(g_res.layout_sundepth);
             ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            ctx->VSSetShader(g_res.vs_sundepth, nullptr, 0);
-            ctx->PSSetShader(nullptr, nullptr, 0);
+            kh_sun_bind_opaque(ctx);   // KH_CAST_DISSOLVE.
             ctx->GSSetShader(nullptr, nullptr, 0);
             ctx->HSSetShader(nullptr, nullptr, 0);
             ctx->DSSetShader(nullptr, nullptr, 0);
@@ -19279,8 +19612,6 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                             ID3D11ShaderResourceView* khsh_pf_srv,
                             UINT khsh_pf_size, int khsh_pf_idx,
                             bool& khsh_out_pf) -> void {
-            khsh_out_valid = false;   // Proven true only by a completed render.
-            khsh_out_pf = false;   // Proven true only by a completed convert.
             double khsh_dctr[3] = { 0.0, 0.0, 0.0 };
             bool   khsh_dsnap = false;
 
@@ -19307,6 +19638,35 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             khsh_ctr[0] = static_cast<float>(khsh_dctr[0]);
             khsh_ctr[1] = static_cast<float>(khsh_dctr[1]);
             khsh_ctr[2] = static_cast<float>(khsh_dctr[2]);
+
+            // KH_SUN_TIER_KEY: everything below is a function of these.
+            uint64_t khtk = CryptoGenerator::FNV1A64_OFFSET;
+            {
+                auto khtk_f = [&khtk](const void* p, size_t n) {
+                    khtk = CryptoGenerator::fnv1a64_update(khtk, p, n);
+                };
+                khtk_f(&khsh_caster_key, sizeof(khsh_caster_key));
+                khtk_f(sun, 12);
+                khtk_f(khsh_dctr, sizeof(khsh_dctr));
+                khtk_f(&khsh_half, sizeof(khsh_half));
+                khtk_f(&khsh_dep, sizeof(khsh_dep));
+                khtk_f(&khsh_size, sizeof(khsh_size));
+                khtk_f(g_sun_anchor_now, sizeof(g_sun_anchor_now));
+                khtk_f(&g_sun_fwd_held[khsh_pf_idx], sizeof(g_sun_fwd_held[khsh_pf_idx]));
+                const float khtk_dis = kh_cast_dissolve_range();
+                khtk_f(&khtk_dis, sizeof(khtk_dis));
+                khtk_f(&g_res.sun_instance_cap, sizeof(g_res.sun_instance_cap));
+                if (khtk == 0) khtk = 1;
+            }
+
+            if (khsh_out_valid &&
+                g_sun_tier_key_ok[khsh_pf_idx] && g_sun_tier_key[khsh_pf_idx] == khtk) {
+                return;   // The standing map is this call's map.
+            }
+
+            g_sun_tier_key_ok[khsh_pf_idx] = false;   // Proven again by a completed render.
+            khsh_out_valid = false;   // Proven true only by a completed render.
+            khsh_out_pf = false;   // Proven true only by a completed convert.
 
             static std::vector<SunCaster> khsh_set;
             khsh_set.clear();
@@ -19345,7 +19705,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                 if (khsh_lat > khsh_r2 + khsh_er) continue;   // Ortho clips it laterally.
                 if (khsh_ds > khsr_rad + khsh_er) {
                     float khsh_slim = khsr_rad + khsh_er;
-                    if (g_sun_valid) {
+                    if (g_sun_valid) {   // The reach rescue needs a published sun (twin).
                         const float khsh_ssx = g_sun_dir_engine[0];
                         const float khsh_ssy = g_sun_dir_engine[1];
                         const float khsh_ssz = g_sun_dir_engine[2];
@@ -19354,8 +19714,20 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                         if (khsh_shl > 1.0e-4f && khsh_ssy > 1.0e-4f) {
                             float khsh_sdrop = khsh_dx[1] - khsh_he[1];
                             if (khsh_sdrop < 0.0f) khsh_sdrop = 0.0f;
+                            // KH_SUN_TIER_SLIM: + khsr_rad inside the drop.
+                            // The throw has to reach the RECEIVER, and the
+                            // receiver is the ground - up to the shadow view
+                            // distance below the camera, not level with it.
+                            // Without the term the bound is short by
+                            // (camera AGL) / sin(elevation), which is 482 m
+                            // at a 5 degree sun with the camera 42 m up, and
+                            // the caster is dropped from the tier while its
+                            // shadow lands inside the tier's window. Twin of
+                            // KH_SUN_ELIG_SPAN, which had the same
+                            // camera-is-not-the-receiver error one layer up.
                             const float khsh_slen = khsr_rad + khsh_er
-                                                  + (khsh_sdrop + 2.0f * khsh_er) / khsh_ssy;
+                                                  + (khsh_sdrop + khsr_rad
+                                                     + 2.0f * khsh_er) / khsh_ssy;
                             if (khsh_slen > khsh_slim) khsh_slim = khsh_slen;
                         }
                     }
@@ -19454,6 +19826,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             khsh_cbf.sun_origin[0] = g_sun_anchor_now[0];
             khsh_cbf.sun_origin[1] = g_sun_anchor_now[1];
             khsh_cbf.sun_origin[2] = g_sun_anchor_now[2];
+            khsh_cbf.mir_meta[3] = kh_cast_dissolve_range();   // KH_CAST_DISSOLVE.
 
             if (kh_upload_frame_cb(ctx, g_res.composite_frame_cb, khsh_cbf) &&
                 kh_upload_obj_cb(ctx, g_res.composite_cb, khsh_obj)) {
@@ -19468,7 +19841,9 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                 }
 
                 std::sort(khsh_set.begin(), khsh_set.end(),
-                          [](const SunCaster& a, const SunCaster& b) { return a.mesh < b.mesh; });
+                          [](const SunCaster& a, const SunCaster& b) {
+                              return a.mesh != b.mesh ? a.mesh < b.mesh : a.lod < b.lod;   // KH_SHADOW_LOD_DRAWN.
+                          });
                 D3D11_MAPPED_SUBRESOURCE khsh_im = {};
 
                 if (SUCCEEDED(ctx->Map(g_res.sun_instance_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &khsh_im))) {
@@ -19493,14 +19868,16 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                     while (khsh_first < khsh_set.size()) {
                         if (khsh_set[khsh_first].alpha_caster) { ++khsh_first; continue; }
                         const int khsh_mid = khsh_set[khsh_first].mesh;
+                        const int khsh_lod = khsh_set[khsh_first].lod;   // KH_SHADOW_LOD_DRAWN.
                         size_t khsh_last = khsh_first + 1;
                         while (khsh_last < khsh_set.size() && khsh_set[khsh_last].mesh == khsh_mid &&
+                               khsh_set[khsh_last].lod == khsh_lod &&
                                !khsh_set[khsh_last].alpha_caster) ++khsh_last;
                         khsh_vbs[0] = g_res.mesh_vb[khsh_mid];
                         ctx->IASetVertexBuffers(0, 2, khsh_vbs, khsh_strides, khsh_offsets);
                         ctx->IASetIndexBuffer(g_res.mesh_ib[khsh_mid], DXGI_FORMAT_R32_UINT, 0);
                         UINT khsh_ls = 0, khsh_lc = 0;
-                        mesh_shadow_range(khsh_mid, khsh_ls, khsh_lc);
+                        mesh_lod_range_of(khsh_mid, khsh_lod, khsh_ls, khsh_lc);   // KH_SHADOW_LOD_DRAWN.
                         ctx->DrawIndexedInstanced(khsh_lc,
                                                   static_cast<UINT>(khsh_last - khsh_first), khsh_ls, 0,
                                                   static_cast<UINT>(khsh_first));
@@ -19526,6 +19903,10 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                     (void)khsh_pf_ok; (void)khsh_dep_srv; (void)khsh_pf_rtv;
                     (void)khsh_pf_srv; (void)khsh_pf_size; (void)khsh_pf_idx;
                     khsh_out_pf = khsh_out_valid;   // Fresh map => convert due.
+                    g_sun_pf_fresh[khsh_pf_idx] = true;   // KH_SUN_TIER_KEY.
+                    g_sun_tier_key[khsh_pf_idx] = khtk;
+                    g_sun_tier_key_ok[khsh_pf_idx] = true;
+                    khsh_did[khsh_pf_idx] = true;
                 }
             }
         };
@@ -19578,24 +19959,43 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                                g_res.sun4_srv, g_res.sun_pf_rtv[2],
                                g_res.sun_pf_srv[2], kh_sun_out_size() / 2u, 2,
                                g_sun_pf_valid[2]);
-        // No moment pyramid (the far texel is already the minified scale the
-        // pyramids exist to reach; nulls keep the convert inert - pf index 3 is
-        // never read by kh_sun_pf_convert, which walks 0.2). KH_SUN_FAR_BAND:
-        // Half = the range itself (khsr_rad, no ladder scale - the window is
-        // the range), depth = 6x half.
-        bool khsh_far_pf = false;
-        if (khsh_ok3) khsh_one(khsr_rad, khsr_rad * 6.0f, kh_sun_far_size(),
+        // KH_FAR_PF: the far tier converts a moment pyramid like the three
+        // camera tiers above it. It used to have none ('the far texel is
+        // already the minified scale'), but the self kernel then fell back to
+        // nine sparse taps across a footprint up to 17 x 17 texels - exactly
+        // the undersampling that shimmers as the map re-rasterizes under a
+        // moving sun. KH_SUN_FAR_BAND:
+        // KH_FAR_TIER_DOMAIN: half = range * (sin e + cos e), depth = 6x range.
+        // The receiver domain is the fade's cylinder (range across, +-range
+        // tall); in the sun plane that projects to range * (sin e + cos e)
+        // max-norm, up to 1.41x the range. A window of plain 'range' put the
+        // domain's rim in the tier's edge band (0.75..0.98) and handed it to
+        // the union, which under-covered by the same factor - in-range
+        // receivers blended to lit as the camera moved: the pop-in. The far
+        // tier is the last camera tier and now answers its whole window
+        // (cb.hlsl: KhCastTier/KhSelfTier 'last').
+        // KH_FAR_FIT_STEP: (sin e + cos e) runs 1 .. 1.41 across a day, and
+        // read live it resized the far window - and its texel, and the
+        // whole-texel snap grid - every frame the sun moved: the far tier's
+        // edges crawled under an accelerated clock with the camera still.
+        // Quantized up to 1/8 steps: four crossings a day, a stable grid
+        // between them, never smaller than the live fit.
+        const float khsh_far_f = fabsf(sun[1]) + sqrtf(fmaxf(1.0f - sun[1] * sun[1], 0.0f));
+        const float khsh_far_half = khsr_rad * (ceilf(khsh_far_f * 8.0f) * 0.125f);
+        if (khsh_ok3) khsh_one(khsh_far_half, khsr_rad * 6.0f, kh_sun_far_size(),
                                g_res.sun5_dsv, g_sun5_map_vp, g_sun5_map_bias,
                                g_sun5_cast_bias,
                                g_sun5_half_diag, g_sun5_map_valid,
                                g_sun5_renders, g_sun5_casters, g_sun_band_reach[3],
-                               g_res.sun5_srv, nullptr,
-                               nullptr, kh_sun_far_size() / 2u, 3,
-                               khsh_far_pf);
-        if (khsh_ok0) memcpy(g_sun_tier_anchor[0], g_sun_anchor_now, sizeof(g_sun_anchor_now));
-        if (khsh_ok1) memcpy(g_sun_tier_anchor[1], g_sun_anchor_now, sizeof(g_sun_anchor_now));
-        if (khsh_ok2) memcpy(g_sun_tier_anchor[2], g_sun_anchor_now, sizeof(g_sun_anchor_now));
-        if (khsh_ok3) memcpy(g_sun_tier_anchor[3], g_sun_anchor_now, sizeof(g_sun_anchor_now));
+                               g_res.sun5_srv, g_res.sun_pf_rtv[3],
+                               g_res.sun_pf_srv[3], kh_sun_far_size() / 2u, 3,
+                               g_sun_pf_valid[3]);
+        // KH_SUN_TIER_KEY: the anchor a tier's stored vp is relative to is the
+        // one it RENDERED with; a skipped tier keeps its stamp (the fill rebases).
+        if (khsh_ok0 && khsh_did[0]) memcpy(g_sun_tier_anchor[0], g_sun_anchor_now, sizeof(g_sun_anchor_now));
+        if (khsh_ok1 && khsh_did[1]) memcpy(g_sun_tier_anchor[1], g_sun_anchor_now, sizeof(g_sun_anchor_now));
+        if (khsh_ok2 && khsh_did[2]) memcpy(g_sun_tier_anchor[2], g_sun_anchor_now, sizeof(g_sun_anchor_now));
+        if (khsh_ok3 && khsh_did[3]) memcpy(g_sun_tier_anchor[3], g_sun_anchor_now, sizeof(g_sun_anchor_now));
         memcpy(g_sun_cam_anchor, g_sun_anchor_now, sizeof(g_sun_cam_anchor));
 
         // KH_DL_SHADOW : the light maps rendered here, inside this lambda, and
@@ -19625,6 +20025,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             fnv(c.rot, sizeof(c.rot));   // Rotating a caster re-renders.
             fnv(&c.mesh, sizeof(c.mesh));
             fnv(&c.alpha, sizeof(c.alpha));   // KH_CAST_ALPHA: a fade re-renders (1/64 steps).
+            fnv(&c.lod, sizeof(c.lod));   // KH_SHADOW_LOD_DRAWN: a level change re-renders.
             const uint64_t khsc_mh = c.mats ? c.mats->hash : 0ull;
             fnv(&khsc_mh, sizeof(khsc_mh));   // A material change re-renders.
             const uint8_t khsc_ac = c.alpha_caster ? 1 : 0;
@@ -19632,6 +20033,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         }
 
         khsm_caster_hash = input_hash;
+        khsh_caster_key = khsm_caster_hash;   // KH_SUN_TIER_KEY.
         fnv(sun, 12);
         if (cam_valid) {
             const int32_t khsm_cell[3] = {
@@ -19789,7 +20191,9 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                               khsl_cd[2] * sun[2];
         const float khsl_cl2 = khsl_cd[0] * khsl_cd[0] + khsl_cd[1] * khsl_cd[1] +
                                khsl_cd[2] * khsl_cd[2] - khsl_cs * khsl_cs;
-        float khsl_need = (khsl_cl2 > 0.0f ? sqrtf(khsl_cl2) : 0.0f) + khsl_rng;
+        // KH_FAR_TIER_DOMAIN: the camera's cylinder reaches sqrt(2) * range
+        // radially in the sun plane (tight at 45 deg), not 'range'.
+        float khsl_need = (khsl_cl2 > 0.0f ? sqrtf(khsl_cl2) : 0.0f) + khsl_rng * 1.4142136f;
 
         for (const auto& khsl_c : casters) {
             const float khsl_ce[3] = { khsl_c.pos[0], khsl_c.pos[2], khsl_c.pos[1] };
@@ -19929,8 +20333,12 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
 
     ctx->IASetInputLayout(instanced ? g_res.layout_sundepth : g_res.input_layout);
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ctx->VSSetShader(instanced ? g_res.vs_sundepth : g_res.vs, nullptr, 0);
-    ctx->PSSetShader(nullptr, nullptr, 0);
+    if (instanced) {
+        kh_sun_bind_opaque(ctx);   // KH_CAST_DISSOLVE.
+    } else {
+        ctx->VSSetShader(g_res.vs, nullptr, 0);
+        ctx->PSSetShader(nullptr, nullptr, 0);
+    }
     ctx->GSSetShader(nullptr, nullptr, 0);
     ctx->HSSetShader(nullptr, nullptr, 0);
     ctx->DSSetShader(nullptr, nullptr, 0);
@@ -19942,6 +20350,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     khsd_cbf.sun_origin[0] = g_sun_anchor_now[0];
     khsd_cbf.sun_origin[1] = g_sun_anchor_now[1];
     khsd_cbf.sun_origin[2] = g_sun_anchor_now[2];
+    khsd_cbf.mir_meta[3] = kh_cast_dissolve_range();   // KH_CAST_DISSOLVE.
     const bool khsd_frame_ok = kh_upload_frame_cb(ctx, g_res.composite_frame_cb, khsd_cbf);
     ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);
     // One load feeds both tests: the two arms cannot disagree about the mode.
@@ -19957,7 +20366,9 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     }
     if (instanced) {
         std::sort(casters.begin(), casters.end(),
-                  [](const SunCaster& a, const SunCaster& b) { return a.mesh < b.mesh; });
+                  [](const SunCaster& a, const SunCaster& b) {
+                      return a.mesh != b.mesh ? a.mesh < b.mesh : a.lod < b.lod;   // KH_SHADOW_LOD_DRAWN.
+                  });
 
         bool filled = false;
         D3D11_MAPPED_SUBRESOURCE im = {};
@@ -19992,15 +20403,17 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                 // the tier twin).
                 if (casters[first].alpha_caster) { ++first; continue; }
                 const int mid = casters[first].mesh;
+                const int khmc_lod = casters[first].lod;   // KH_SHADOW_LOD_DRAWN.
                 size_t last = first + 1;
-                while (last < casters.size() && casters[last].mesh == mid && !casters[last].alpha_caster) ++last;
+                while (last < casters.size() && casters[last].mesh == mid && casters[last].lod == khmc_lod &&
+                       !casters[last].alpha_caster) ++last;
                 vbs[0] = g_res.mesh_vb[mid];
                 ctx->IASetVertexBuffers(0, 2, vbs, strides, offsets);
                 ctx->IASetIndexBuffer(g_res.mesh_ib[mid], DXGI_FORMAT_R32_UINT, 0);
                 // KH_SHADOW_LOD twin - the mask cast is a casting pass exactly
                 // as the sun depth is.
                 UINT khmc_ls = 0, khmc_lc = 0;
-                mesh_shadow_range(mid, khmc_ls, khmc_lc);
+                mesh_lod_range_of(mid, khmc_lod, khmc_ls, khmc_lc);   // KH_SHADOW_LOD_DRAWN.
                 ctx->DrawIndexedInstanced(khmc_lc,
                                           static_cast<UINT>(last - first), khmc_ls, 0,
                                           static_cast<UINT>(first));
@@ -20036,7 +20449,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             // KH_SHADOW_LOD: the per-caster fallback takes the same level as
             // the instanced path, or the two disagree on silhouette.
             UINT khsf_ls = 0, khsf_lc = 0;
-            mesh_shadow_range(c.mesh, khsf_ls, khsf_lc);
+            mesh_lod_range_of(c.mesh, c.lod, khsf_ls, khsf_lc);   // KH_SHADOW_LOD_DRAWN.
             ctx->DrawIndexed(khsf_lc, khsf_ls, 0);
         }
     }
@@ -20068,6 +20481,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     }
 
     g_sun_local_count = static_cast<int>(casters.size());
+    ++g_sun_locals_serial;   // KH_CASTOCC_KEYSER.
 
     memcpy(g_sun_map_vp, lvp, sizeof(g_sun_map_vp));
     memcpy(g_sun_map_anchor, g_sun_anchor_now, sizeof(g_sun_map_anchor));
@@ -20127,153 +20541,606 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
 // question - "is this reconstructed world point within reach of any caster" -
 // and answered it by looping every caster per pixel. It can never refuse a
 // point the loop admitted, so no shadow can be lost.
-static constexpr int KH_OCC_N = 256;
-// KH_CAST_REACH_DROP: lateral pad on every swept stamp, in metres of grid cell.
-// The march steps by half a cell; a full cell of pad guarantees consecutive
-// stamps overlap however small the caster.
-static constexpr float KH_OCC_SWEEP_PAD = 8.0f;
-// See the quantisation note in kh_cast_occ_build.
+// KH_OCC_N_HALF: 256 -> 128. Coarsening is unconditionally conservative - a
+// bigger cell holds the union of the stamps over a bigger area, so its band is
+// WIDER, and a wider band admits more receivers. It can cost the shader work;
+// it cannot make the grid refuse a receiver the loop would admit. Verified that
+// way at four sun elevations: every cell the 256 grid admits, the 128 grid
+// admits too, zero exceptions.
+//
+// Cells stamped go as N^2 while the step count is unchanged (dt is the caster's
+// own extent, far larger than a cell either way), so this is a measured
+// 3.4-4.5x on the rebuild - the half of the cost the step fix did not reach.
+// The trade is real and lands on the mask cast: a coarser reject test lets
+// more pixels through to the expensive path. That pass is 0.19 ms x 9 fires
+// against 4.2 ms of total GPU, so there is room, but watch it.
+static constexpr int KH_OCC_N = 128;
+// KH_CASTOCC_DOMAIN. The grid covers the RECEIVER domain, not the caster set.
+//
+// Receivers are the pixels KhSunRangeFade leaves non-zero: a vertical cylinder
+// of radius 0.995 * shadowVisibility about sunOrigin (= g_sun_anchor_now, the
+// camera), +-0.995 * range tall. Everything the grid does is derived from that:
+//
+//   floor   the deepest receiver, camera.y - range. Not the union fit's box:
+//           that box is centred between the camera window and the caster AABB,
+//           so an elevated caster set (the rescued cloud in dump1: hero reach
+//           1416 m at a 300 m range) lifts its centre and 'centre - min(hf, R)'
+//           lands ABOVE the ground. Every sweep then stopped where the caster's
+//           top ray crossed that plane, and the ground past it read refused -
+//           the hard cut-off, uniform in distance because the plane is one
+//           height for every caster.
+//   clip    each sweep is intersected with the domain disc before it is
+//           stamped, so a caster whose shadow never enters the range never
+//           touches the extent, and the far cloud's 2-3 km sweeps stop paying
+//           for cells nobody reads. The extent is then ~2 * (range + slack)
+//           whatever the caster set, which is what makes the cells fine.
+//   band    the grid is stamped for a BAND of suns, not one: elevation
+//           [syq - 1/64, syq + 2/64] (the shallowest slope prices the reach,
+//           the steepest the window bottom) and +-0.5 deg of azimuth (the
+//           stamp widens by t * tan(0.5 deg)). The quantised slope of one
+//           bucket walked the window off the true ray at ~1.4 km of throw, and
+//           every bucket edge the frozen sun crossed forced a full rebuild
+//           (18 in one minute measured, 17 ms each).
+//   slack   the camera may move up to max(0.35 R, 40 m) (capped at 250) from
+//           the built centre, horizontally and downward, before the grid is
+//           rebuilt; the disc and the floor carry that slack.
+//
+// The lateral / vertical slack is a flat KH_OCC_SLACK_M around the EXACT swept
+// box. The per-caster loop (KhCastReach, the <= 16 caster path)
+// keeps its stretch-priced lr - a sphere-era reach that runs to 24 x the
+// half-diagonal at a low sun - so the grid is no longer a superset of the
+// loop's inflated admission, only of the truth: the two can differ only where
+// the loop admits a receiver the sun map answers 0 on.
+// Certified by /home/claude/bench/occ2.py: 0 missed of 125,194 shadowed
+// in-domain receivers over 108 (range x elevation x camera height x cloud)
+// cells, each sampled across the whole sun band, azimuth band and camera
+// slack the grid claims.
 static constexpr float KH_OCC_SY_Q = 64.0f;
-// KH_CAST_OCC_ONCE: the grid depends only on the caster set, the sun elevation
-// and the two arms, none of which move between the ~9 fires of one frame - and
-// the caster set moves only when render_sun_depth commits.
-static uint64_t g_castocc_key = 0;   // FNV-1a over the last built inputs (0 = none).
+static constexpr float KH_OCC_SLACK_M = 6.0f;        // Around the exact sweep, lateral and vertical.
+static constexpr float KH_OCC_AZ_TAN = 0.0087269f;   // tan(0.5 deg): widening and hysteresis.
+static constexpr float KH_OCC_AZ_COS = 0.9999619f;   // cos(0.5 deg).
+static constexpr float KH_OCC_CAM_SLACK = 0.50f;     // Of the range; clamped [40, 250] m.
+static uint64_t g_castocc_key = 0;   // FNV-1a over (locals, range) of the last build (0 = none).
 static float    g_castocc_lo[2] = {};   // Retained grid origin XZ (engine axes).
 static float    g_castocc_inv = 0.0f;   // Retained 1 / cell.
+static constexpr int KH_OCC_ADD_MAX = 256;      // Additions worth stamping one by one.
+static constexpr int KH_OCC_STALE = 4;          // Rebuild past built > n + n/KH_OCC_STALE.
+static constexpr float KH_OCC_EXTENT_PAD = 0.10f;
+static std::vector<float>    g_castocc_grid;    // (minY, maxY) per texel, retained.
+static std::vector<uint64_t> g_castocc_set;     // Sorted per-caster hashes of the built set.
+static std::vector<uint32_t> g_castocc_addi;    // Scratch: indices of the additions.
+static float    g_castocc_cell = 0.0f;
+// KH_CASTOCC_DOMAIN: the sun band the grid was stamped for, derived once per
+// build from the fire's frozen sun and retained with the grid.
+struct KhOccSun {
+    float sy_lo, sy_hi;       // Elevation band, sun.y.
+    float k_hi;               // Metres down-sun per metre of drop at the SHALLOWEST sun.
+    float slope_lo, slope_hi; // Drop per metre down-sun: shallowest, steepest.
+    float ux, uz;             // Down-sun unit (xz) at the band centre.
+};
+// The built envelope: what the retained grid still covers.
+static KhOccSun g_castocc_sunb = {};
+static float    g_castocc_dom[3] = {};      // Domain centre (engine axes) the grid was built about.
+static float    g_castocc_slack = 0.0f;     // Camera slack (m); 0 = no retained grid.
+static float    g_castocc_rdom = 0.0f;      // Disc radius the sweeps were clipped to.
+static float    g_castocc_floor = 0.0f;     // Receiver floor the sweeps were marched to.
+
+inline uint64_t kh_castocc_hash1(const float* khch_e) {
+    return CryptoGenerator::fnv1a64_raw(khch_e, 6u * sizeof(float));
+}
+
+inline KhOccSun kh_castocc_sun(const float* khos_sun) {   // Toward the light.
+    KhOccSun khos_o;
+    const float khos_sy = fabsf(khos_sun[1]);
+    const float khos_hl = sqrtf(khos_sun[0] * khos_sun[0] + khos_sun[2] * khos_sun[2]);
+    const float khos_syq = floorf(khos_sy * KH_OCC_SY_Q) / KH_OCC_SY_Q;
+    khos_o.sy_lo = khos_syq - 1.0f / KH_OCC_SY_Q;
+    if (khos_o.sy_lo < 0.02f) khos_o.sy_lo = 0.02f;
+    khos_o.sy_hi = khos_syq + 2.0f / KH_OCC_SY_Q;
+    if (khos_o.sy_hi > 1.0f) khos_o.sy_hi = 1.0f;
+    const float khos_hl_hi = sqrtf(fmaxf(1.0f - khos_o.sy_lo * khos_o.sy_lo, 0.0f));
+    const float khos_hl_lo = sqrtf(fmaxf(1.0f - khos_o.sy_hi * khos_o.sy_hi, 0.0f));
+    khos_o.k_hi = khos_hl_hi / khos_o.sy_lo;
+    khos_o.slope_lo = khos_o.sy_lo / fmaxf(khos_hl_hi, 1.0e-6f);
+    khos_o.slope_hi = khos_o.sy_hi / fmaxf(khos_hl_lo, 1.0e-6f);
+    khos_o.ux = khos_hl > 1.0e-4f ? (-khos_sun[0] / khos_hl) : 0.0f;
+    khos_o.uz = khos_hl > 1.0e-4f ? (-khos_sun[2] / khos_hl) : 0.0f;
+    return khos_o;
+}
+
+inline float kh_castocc_slack_of(float khcs_r) {
+    float khcs_s = KH_OCC_CAM_SLACK * khcs_r;
+    if (khcs_s < 40.0f) khcs_s = 40.0f;
+    if (khcs_s > 250.0f) khcs_s = 250.0f;
+    return khcs_s;
+}
+
+// One caster's sweep, clipped to the domain disc. on = false means no part
+// of the swept shadow can reach a receiver the fade keeps, so the caster is
+// neither stamped nor counted in the extent.
+struct KhOccSweep { float hu, top, base, ta, tb, w0; bool on; };
+// KH_CASTOCC_PRE. The full rebuild stamps every caster's sweep into a fresh
+// grid in one call - 2.4 M cell writes for 3,000 casters, 7.6 ms on the render
+// thread - and it fires the moment the camera leaves the built slack disc
+// (twice in a 1,058-frame run, each a hitch frame). The
+// rebuild is a pure function of (locals, range, domain, sun band, floor), so
+// it can be computed AHEAD of need: once the camera is past KH_OCC_PRE_START
+// of the slack from the built domain, a second grid is built about the
+// camera's CURRENT position, KH_OCC_PRE_PER_FIRE casters per fire, while the
+// retained grid keeps serving (its envelope still covers). When the pending
+// grid completes it is committed at the next fire it covers - the same
+// envelope test the retained grid must pass - and becomes the retained one.
+// What the shader sees at any fire is, as before, a grid whose envelope
+// covers that fire; only the moment the work is done moves. A camera that
+// outruns the pre-build (past the full slack before it lands) takes the
+// synchronous rebuild exactly as today; a pending grid whose locals, sun band
+// or domain no longer fit is dropped, never committed.
+static constexpr float KH_OCC_PRE_START = 0.5f;   // Of the slack: start the pre-build here.
+static constexpr int   KH_OCC_PRE_PER_FIRE = 192; // Casters stamped per fire (~0.5 ms at 3,000).
+struct KhOccPending {
+    bool     active = false;
+    bool     done = false;
+    uint64_t key = 0;
+    int      n = 0;
+    int      next = 0;
+    KhOccSun sb = {};
+    float    dom[3] = {};
+    float    slack = 0.0f, rdom = 0.0f, floor = 0.0f, rng = 0.0f;
+    float    lo[2] = {};
+    float    cell = 0.0f, inv = 0.0f;
+    std::vector<KhOccSweep> sw;
+    std::vector<float>      grid;
+};
+static KhOccPending g_castocc_pre;
+static bool     g_castocc_pre_noreach = false;   // Phase 0 found no sweep in the pending domain...
+static float    g_castocc_pre_noreach_dom[3] = {};   // ...about this domain; retry once the camera moves.
+
+inline KhOccSweep kh_castocc_sweep(const float* khcw_e, const KhOccSun& khcw_s,
+                                   const float* khcw_dom, float khcw_rdom, float khcw_floor) {
+    KhOccSweep khcw_o = {};
+    const float khcw_hx = khcw_e[3], khcw_hy = khcw_e[4], khcw_hz = khcw_e[5];
+    khcw_o.hu = fabsf(khcw_s.ux) * khcw_hx + fabsf(khcw_s.uz) * khcw_hz;   // Box half-extent along u.
+    khcw_o.top = khcw_e[1] + khcw_hy;
+    khcw_o.base = khcw_e[1] - khcw_hy;
+    // The top ray reaches the floor at (top - floor) * k, plus the box's own
+    // down-sun face.
+    const float khcw_drop = khcw_o.top - khcw_floor;
+    const float khcw_al = (khcw_drop > 0.0f ? khcw_drop : 0.0f) * khcw_s.k_hi + khcw_o.hu;
+    khcw_o.w0 = (khcw_hx > khcw_hz ? khcw_hx : khcw_hz) + KH_OCC_SLACK_M;
+    const float khcw_wmax = khcw_o.w0 + (khcw_al + khcw_o.hu) * KH_OCC_AZ_TAN;
+    // Disc clip: |c + u t - dom| <= rdom + wmax * sqrt(2), a quadratic in t.
+    const float khcw_qx = khcw_e[0] - khcw_dom[0];
+    const float khcw_qz = khcw_e[2] - khcw_dom[2];
+    const float khcw_rc = khcw_rdom + khcw_wmax * 1.4142136f;
+    const float khcw_b = 2.0f * (khcw_qx * khcw_s.ux + khcw_qz * khcw_s.uz);
+    const float khcw_c = khcw_qx * khcw_qx + khcw_qz * khcw_qz - khcw_rc * khcw_rc;
+    const float khcw_disc = khcw_b * khcw_b - 4.0f * khcw_c;
+    if (khcw_disc < 0.0f) return khcw_o;   // The sweep line misses the domain.
+    const float khcw_rt = sqrtf(khcw_disc);
+    const float khcw_tin = (-khcw_b - khcw_rt) * 0.5f;
+    const float khcw_tout = (-khcw_b + khcw_rt) * 0.5f;
+    khcw_o.ta = -khcw_o.hu > khcw_tin ? -khcw_o.hu : khcw_tin;
+    khcw_o.tb = khcw_al < khcw_tout ? khcw_al : khcw_tout;
+    khcw_o.on = khcw_o.ta <= khcw_o.tb;
+    return khcw_o;
+}
+
+// The XZ box a sweep's stamps will touch, for the extent and the fit test.
+inline void kh_castocc_box(const float* khcb_e, const KhOccSun& khcb_s, const KhOccSweep& khcb_w,
+                           float khcb_lo[2], float khcb_hi[2]) {
+    const float khcb_wa = khcb_w.w0 + (khcb_w.tb + khcb_w.hu) * KH_OCC_AZ_TAN;
+    const float khcb_ex = khcb_e[3] + KH_OCC_SLACK_M + khcb_wa;
+    const float khcb_ez = khcb_e[5] + KH_OCC_SLACK_M + khcb_wa;
+    const float khcb_ax = khcb_e[0] + khcb_s.ux * khcb_w.ta, khcb_az = khcb_e[2] + khcb_s.uz * khcb_w.ta;
+    const float khcb_bx = khcb_e[0] + khcb_s.ux * khcb_w.tb, khcb_bz = khcb_e[2] + khcb_s.uz * khcb_w.tb;
+    khcb_lo[0] = (khcb_ax < khcb_bx ? khcb_ax : khcb_bx) - khcb_ex;
+    khcb_hi[0] = (khcb_ax > khcb_bx ? khcb_ax : khcb_bx) + khcb_ex;
+    khcb_lo[1] = (khcb_az < khcb_bz ? khcb_az : khcb_bz) - khcb_ez;
+    khcb_hi[1] = (khcb_az > khcb_bz ? khcb_az : khcb_bz) + khcb_ez;
+}
+
+inline bool kh_castocc_fits(const float* khcf_e, const KhOccSun& khcf_s, const KhOccSweep& khcf_w,
+                            const float* khcf_lo, float khcf_cell, float khcf_inv) {
+    if (!khcf_w.on) return true;   // Nothing to stamp always fits.
+    float khcf_b0[2], khcf_b1[2];
+    kh_castocc_box(khcf_e, khcf_s, khcf_w, khcf_b0, khcf_b1);
+    const float khcf_gx = (khcf_b0[0] - khcf_cell - khcf_lo[0]) * khcf_inv;
+    const float khcf_gz = (khcf_b0[1] - khcf_cell - khcf_lo[1]) * khcf_inv;
+    const float khcf_gx1 = (khcf_b1[0] + khcf_cell - khcf_lo[0]) * khcf_inv;
+    const float khcf_gz1 = (khcf_b1[1] + khcf_cell - khcf_lo[1]) * khcf_inv;
+    return khcf_gx >= 0.0f && khcf_gz >= 0.0f &&
+           khcf_gx1 <= static_cast<float>(KH_OCC_N) - 1.0f &&
+           khcf_gz1 <= static_cast<float>(KH_OCC_N) - 1.0f;
+}
+
+// Stamp one clipped sweep. Steps every max(w0, cell/2) along u from ta to tb;
+// each step writes a block of +-(h + slack + pad + widening) cells whose y
+// window is the exact shadow band over the step's own t range at the band's
+// extreme slopes, plus the slack. The last step is open-bottomed: past the
+// floor there is no receiver, and past tb no cell is written.
+inline void kh_castocc_stamp(const float* khcs_e, const KhOccSun& khcs_s, const KhOccSweep& khcs_w,
+                             const float* khcs_lo, float khcs_cell, float khcs_inv,
+                             float* khcs_grid) {   // KH_CASTOCC_PRE: the retained or the pending grid.
+    if (!khcs_w.on) return;
+    const float khcs_hx = khcs_e[3], khcs_hz = khcs_e[5];
+    const float khcs_dtw = khcs_w.w0 > khcs_cell ? khcs_w.w0 : khcs_cell;   // KH_OCC_COST: one cell per step.
+    int khcs_ns = static_cast<int>(ceilf((khcs_w.tb - khcs_w.ta) / (khcs_dtw > 1.0e-4f ? khcs_dtw : 1.0e-4f)));
+    if (khcs_ns < 0) khcs_ns = 0;
+    if (khcs_ns > 4 * KH_OCC_N) khcs_ns = 4 * KH_OCC_N;
+    const float khcs_dt = khcs_ns > 0 ? ((khcs_w.tb - khcs_w.ta) / static_cast<float>(khcs_ns)) : 0.0f;
+    const float khcs_pad = khcs_cell > 0.5f * khcs_dt ? khcs_cell : 0.5f * khcs_dt;
+
+    for (int khcs_si = 0; khcs_si <= khcs_ns; ++khcs_si) {
+        const float khcs_t = khcs_w.ta + khcs_dt * static_cast<float>(khcs_si);
+        float khcs_wid = (khcs_t + khcs_dt + khcs_pad + khcs_w.hu) * KH_OCC_AZ_TAN;
+        if (khcs_wid < 0.0f) khcs_wid = 0.0f;
+        const float khcs_cx = khcs_e[0] + khcs_s.ux * khcs_t;
+        const float khcs_cz = khcs_e[2] + khcs_s.uz * khcs_t;
+        const float khcs_rx = khcs_hx + KH_OCC_SLACK_M + khcs_pad + khcs_wid;
+        const float khcs_rz = khcs_hz + KH_OCC_SLACK_M + khcs_pad + khcs_wid;
+        int khcs_x0 = static_cast<int>(floorf((khcs_cx - khcs_rx - khcs_lo[0]) * khcs_inv));
+        int khcs_x1 = static_cast<int>(floorf((khcs_cx + khcs_rx - khcs_lo[0]) * khcs_inv));
+        int khcs_z0 = static_cast<int>(floorf((khcs_cz - khcs_rz - khcs_lo[1]) * khcs_inv));
+        int khcs_z1 = static_cast<int>(floorf((khcs_cz + khcs_rz - khcs_lo[1]) * khcs_inv));
+        if (khcs_x0 < 0) khcs_x0 = 0;
+        if (khcs_z0 < 0) khcs_z0 = 0;
+        if (khcs_x1 > KH_OCC_N - 1) khcs_x1 = KH_OCC_N - 1;
+        if (khcs_z1 > KH_OCC_N - 1) khcs_z1 = KH_OCC_N - 1;
+        if (khcs_x1 < khcs_x0 || khcs_z1 < khcs_z0) continue;
+        const float khcs_y0 = (khcs_si == khcs_ns)
+                            ? -1.0e30f
+                            : khcs_w.base - (khcs_t + khcs_dt + khcs_pad + khcs_w.hu) * khcs_s.slope_hi
+                              - KH_OCC_SLACK_M;
+        float khcs_tt = khcs_t - khcs_pad - khcs_w.hu;
+        if (khcs_tt < 0.0f) khcs_tt = 0.0f;
+        const float khcs_y1 = khcs_w.top - khcs_tt * khcs_s.slope_lo + KH_OCC_SLACK_M + 1.0e-3f;
+
+
+        for (int khcs_z = khcs_z0; khcs_z <= khcs_z1; ++khcs_z) {
+            float* khcs_row = khcs_grid + (static_cast<size_t>(khcs_z) * KH_OCC_N) * 2u;
+
+            for (int khcs_x = khcs_x0; khcs_x <= khcs_x1; ++khcs_x) {
+                if (khcs_y0 < khcs_row[khcs_x * 2]) khcs_row[khcs_x * 2] = khcs_y0;
+                if (khcs_y1 > khcs_row[khcs_x * 2 + 1]) khcs_row[khcs_x * 2 + 1] = khcs_y1;
+            }
+        }
+    }
+}
+
+inline bool kh_castocc_upload(ID3D11DeviceContext* khcu_ctx) {
+    D3D11_MAPPED_SUBRESOURCE khcu_m = {};
+    if (FAILED(khcu_ctx->Map(g_res.castocc_tex, 0, D3D11_MAP_WRITE_DISCARD, 0, &khcu_m))) return false;
+
+    for (int khcu_z = 0; khcu_z < KH_OCC_N; ++khcu_z) {
+        memcpy(static_cast<uint8_t*>(khcu_m.pData) + static_cast<size_t>(khcu_z) * khcu_m.RowPitch,
+               g_castocc_grid.data() + static_cast<size_t>(khcu_z) * KH_OCC_N * 2u,
+               static_cast<size_t>(KH_OCC_N) * 2u * sizeof(float));
+    }
+
+    khcu_ctx->Unmap(g_res.castocc_tex, 0);
+    return true;
+}
+
+// Every failure return leaves NO retained grid (the 6.3.6 note: a rewritten
+// g_castocc_grid under stale lo/inv/cell was a live hazard).
+inline bool kh_castocc_fail() {
+    g_castocc_pre.active = false;   // KH_CASTOCC_PRE.
+    g_castocc_key = 0;
+    g_castocc_set.clear();
+    g_castocc_slack = 0.0f;
+    return false;
+}
+
+// KH_CASTOCC_PRE: one fire's share of the pre-build, on the hit path (the
+// retained grid covers this fire and is what this fire serves). Starts a
+// pending grid once the camera is past KH_OCC_PRE_START of the slack, stamps
+// KH_OCC_PRE_PER_FIRE casters per call, and commits the completed grid on the
+// first fire its own envelope covers. Every quantity is the rebuild's own
+// arithmetic about the pending domain.
+inline void kh_castocc_pre_step(ID3D11DeviceContext* khpp_ctx, int khpp_n, uint64_t khpp_key,
+                                const float* khpp_dom, const float* khpp_sun, float khpp_rng) {
+    KhOccPending& khpp_p = g_castocc_pre;
+
+    if (khpp_p.active && (khpp_p.key != khpp_key || khpp_p.n != khpp_n)) {   // The locals moved.
+        khpp_p.active = false;
+    }
+
+    if (!khpp_p.active) {
+        const float khpp_dx = khpp_dom[0] - g_castocc_dom[0];
+        const float khpp_dz = khpp_dom[2] - g_castocc_dom[2];
+        const float khpp_far = KH_OCC_PRE_START * g_castocc_slack;
+        if (khpp_dx * khpp_dx + khpp_dz * khpp_dz <= khpp_far * khpp_far &&
+            khpp_dom[1] >= g_castocc_dom[1] - khpp_far) {
+            return;   // The retained grid has room to spare.
+        }
+        if (g_castocc_pre_noreach) {   // A no-reach attempt is not retried until the camera moves.
+            const float khpp_nx = khpp_dom[0] - g_castocc_pre_noreach_dom[0];
+            const float khpp_ny = khpp_dom[1] - g_castocc_pre_noreach_dom[1];
+            const float khpp_nz = khpp_dom[2] - g_castocc_pre_noreach_dom[2];
+            const float khpp_nr = 0.1f * g_castocc_slack;
+            if (khpp_nx * khpp_nx + khpp_ny * khpp_ny + khpp_nz * khpp_nz <= khpp_nr * khpp_nr) return;
+            g_castocc_pre_noreach = false;
+        }
+
+        // Phase 0: the sweeps and the extent about the pending domain.
+        khpp_p.key = khpp_key;
+        khpp_p.n = khpp_n;
+        khpp_p.sb = kh_castocc_sun(khpp_sun);
+        khpp_p.slack = kh_castocc_slack_of(khpp_rng);
+        khpp_p.rdom = 0.995f * khpp_rng + khpp_p.slack;
+        khpp_p.floor = khpp_dom[1] - khpp_rng - khpp_p.slack;
+        khpp_p.rng = khpp_rng;
+        khpp_p.dom[0] = khpp_dom[0]; khpp_p.dom[1] = khpp_dom[1]; khpp_p.dom[2] = khpp_dom[2];
+        float khpp_lo[2] = { 1.0e30f, 1.0e30f };
+        float khpp_hi[2] = { -1.0e30f, -1.0e30f };
+        khpp_p.sw.resize(static_cast<size_t>(khpp_n));
+
+        for (int i = 0; i < khpp_n; ++i) {
+            const float* e = g_sun_locals.data() + static_cast<size_t>(i) * 6u;
+            khpp_p.sw[static_cast<size_t>(i)] = kh_castocc_sweep(e, khpp_p.sb, khpp_p.dom, khpp_p.rdom, khpp_p.floor);
+            const KhOccSweep& khpp_w = khpp_p.sw[static_cast<size_t>(i)];
+            if (!khpp_w.on) continue;
+            float khpp_b0[2], khpp_b1[2];
+            kh_castocc_box(e, khpp_p.sb, khpp_w, khpp_b0, khpp_b1);
+            if (khpp_b0[0] < khpp_lo[0]) khpp_lo[0] = khpp_b0[0];
+            if (khpp_b0[1] < khpp_lo[1]) khpp_lo[1] = khpp_b0[1];
+            if (khpp_b1[0] > khpp_hi[0]) khpp_hi[0] = khpp_b1[0];
+            if (khpp_b1[1] > khpp_hi[1]) khpp_hi[1] = khpp_b1[1];
+        }
+
+        if (khpp_lo[0] > khpp_hi[0]) {   // No sweep reaches the pending domain: nothing to pre-build.
+            g_castocc_pre_noreach = true;
+            g_castocc_pre_noreach_dom[0] = khpp_dom[0]; g_castocc_pre_noreach_dom[1] = khpp_dom[1]; g_castocc_pre_noreach_dom[2] = khpp_dom[2];
+            return;
+        }
+        {   // KH_CASTOCC_PAD, as the rebuild pads.
+            const float khpp_g0 = (khpp_hi[0] - khpp_lo[0]) * KH_OCC_EXTENT_PAD;
+            const float khpp_g1 = (khpp_hi[1] - khpp_lo[1]) * KH_OCC_EXTENT_PAD;
+            khpp_lo[0] -= khpp_g0; khpp_hi[0] += khpp_g0;
+            khpp_lo[1] -= khpp_g1; khpp_hi[1] += khpp_g1;
+        }
+        const float khpp_sp0 = khpp_hi[0] - khpp_lo[0];
+        const float khpp_sp1 = khpp_hi[1] - khpp_lo[1];
+        if (!(khpp_sp0 > 0.0f) || !(khpp_sp1 > 0.0f)) return;
+        float khpp_cell = (khpp_sp0 > khpp_sp1 ? khpp_sp0 : khpp_sp1) / KH_OCC_N;
+        if (!(khpp_cell > 1.0e-4f)) khpp_cell = 1.0e-4f;
+        khpp_p.lo[0] = khpp_lo[0]; khpp_p.lo[1] = khpp_lo[1];
+        khpp_p.cell = khpp_cell;
+        khpp_p.inv = 1.0f / khpp_cell;
+        khpp_p.grid.resize(static_cast<size_t>(KH_OCC_N) * KH_OCC_N * 2u);
+        for (size_t g = 0; g < khpp_p.grid.size(); g += 2) { khpp_p.grid[g] = 1.0e30f; khpp_p.grid[g + 1] = -1.0e30f; }
+        khpp_p.next = 0;
+        khpp_p.done = false;
+        khpp_p.active = true;
+        return;   // The stamping begins next fire.
+    }
+
+    if (!khpp_p.done) {   // Phase 1: a slice of the stamps.
+        int khpp_end = khpp_p.next + KH_OCC_PRE_PER_FIRE;
+        if (khpp_end > khpp_p.n) khpp_end = khpp_p.n;
+
+        for (int i = khpp_p.next; i < khpp_end; ++i) {
+            const float* e = g_sun_locals.data() + static_cast<size_t>(i) * 6u;
+            kh_castocc_stamp(e, khpp_p.sb, khpp_p.sw[static_cast<size_t>(i)], khpp_p.lo,
+                             khpp_p.cell, khpp_p.inv, khpp_p.grid.data());
+        }
+
+        khpp_p.next = khpp_end;
+        if (khpp_p.next >= khpp_p.n) khpp_p.done = true;
+        if (!khpp_p.done) return;
+    }
+
+    // Complete: commit only into an envelope that covers THIS fire (the
+    // retained grid's own admission, about the pending domain).
+    {
+        const float khpp_sy = fabsf(khpp_sun[1]);
+        const float khpp_shl = sqrtf(khpp_sun[0] * khpp_sun[0] + khpp_sun[2] * khpp_sun[2]);
+        const float khpp_ux = khpp_shl > 1.0e-4f ? (-khpp_sun[0] / khpp_shl) : 0.0f;
+        const float khpp_uz = khpp_shl > 1.0e-4f ? (-khpp_sun[2] / khpp_shl) : 0.0f;
+        const bool khpp_bucket = khpp_sy >= khpp_p.sb.sy_lo && khpp_sy <= khpp_p.sb.sy_hi;
+        const bool khpp_az = (khpp_ux * khpp_p.sb.ux + khpp_uz * khpp_p.sb.uz) >= KH_OCC_AZ_COS;
+        const float khpp_dx = khpp_dom[0] - khpp_p.dom[0];
+        const float khpp_dz = khpp_dom[2] - khpp_p.dom[2];
+        const bool khpp_cam = khpp_dx * khpp_dx + khpp_dz * khpp_dz <= khpp_p.slack * khpp_p.slack;
+        const bool khpp_floor = khpp_dom[1] >= khpp_p.dom[1] - khpp_p.slack;
+
+        if (!(khpp_bucket && khpp_az && khpp_cam && khpp_floor)) {
+            khpp_p.active = false;
+            return;
+        }
+    }
+
+    g_castocc_grid.swap(khpp_p.grid);   // The pending grid becomes the retained one.
+    khpp_p.active = false;
+
+    if (!kh_castocc_upload(khpp_ctx)) {   // The rebuild's own failure rule: no retained grid.
+        kh_castocc_fail();
+        return;
+    }
+
+    g_castocc_lo[0] = khpp_p.lo[0];
+    g_castocc_lo[1] = khpp_p.lo[1];
+    g_castocc_inv = khpp_p.inv;
+    g_castocc_cell = khpp_p.cell;
+    g_castocc_sunb = khpp_p.sb;
+    g_castocc_dom[0] = khpp_p.dom[0]; g_castocc_dom[1] = khpp_p.dom[1]; g_castocc_dom[2] = khpp_p.dom[2];
+    g_castocc_slack = khpp_p.slack;
+    g_castocc_rdom = khpp_p.rdom;
+    g_castocc_floor = khpp_p.floor;
+    g_castocc_key = khpp_p.key;
+    g_castocc_set.clear();
+    g_castocc_set.reserve(static_cast<size_t>(khpp_p.n));
+
+    for (int khpp_s = 0; khpp_s < khpp_p.n; ++khpp_s) {
+        g_castocc_set.push_back(kh_castocc_hash1(g_sun_locals.data() + static_cast<size_t>(khpp_s) * 6u));
+    }
+
+    std::sort(g_castocc_set.begin(), g_castocc_set.end());
+}
+
 inline bool kh_cast_occ_build(ID3D11DeviceContext* khco_ctx, ConstantData& khco_cb) {
     const int khco_n = static_cast<int>(khco_cb.locality_meta[0]);
     if (khco_n <= 0 || static_cast<size_t>(khco_n) * 6u > g_sun_locals.size()) return false;
-    const float khco_sy = fabsf(khco_cb.cast_view[2][1]);
-    // KH_CAST_OCC_SYQ: Every reach and extent below is computed from khco_syq;
-    // the shader's castView[2].y stays exact. One rebuild per bucket crossing.
-    const float khco_syq = floorf(khco_sy * KH_OCC_SY_Q) / KH_OCC_SY_Q;
+    // The domain: the same centre and range the fill hands the fade
+    // (sunOrigin / mirMeta.w), read here from their sources, not the CB.
+    const float khco_rng = fminf(fmaxf(g_sun_range.load(std::memory_order_relaxed), 8.0f), 1000.0f);
+    const float khco_dom[3] = { g_sun_anchor_now[0], g_sun_anchor_now[1], g_sun_anchor_now[2] };
+    const float* khco_sun = khco_cb.cast_view[2];   // The fire's frozen sun.
+    const float khco_sy = fabsf(khco_sun[1]);
+    const float khco_shl = sqrtf(khco_sun[0] * khco_sun[0] + khco_sun[2] * khco_sun[2]);
+    const float khco_ux = khco_shl > 1.0e-4f ? (-khco_sun[0] / khco_shl) : 0.0f;
+    const float khco_uz = khco_shl > 1.0e-4f ? (-khco_sun[2] / khco_shl) : 0.0f;
+    uint64_t khco_k;
     {
-        uint64_t khco_k = CryptoGenerator::fnv1a64_raw(g_sun_locals.data(),
-                                                       static_cast<size_t>(khco_n) * 6u * sizeof(float));
-        khco_k = CryptoGenerator::fnv1a64_update(khco_k, &khco_syq, sizeof(khco_syq));
-        if (khco_k == 0) khco_k = 1;   // 0 is the empty sentinel.
-        if (g_res.castocc_tex && g_res.castocc_srv && khco_k == g_castocc_key) {
-            khco_cb.cast_mat[0][3] = g_castocc_inv;   // Armed (> 0) - lane note at the build tail.
-            khco_cb.cast_mat[1][3] = g_castocc_lo[0];
-            khco_cb.cast_mat[2][3] = g_castocc_lo[1];
-            return true;
-        }
-        g_castocc_key = khco_k;   // Provisional; cleared below on any failure.
-    }
-    const float khco_reach_x = 1.0f;
-    const float khco_stretch = 2.0f + 3.0f / (khco_syq > 0.15f ? khco_syq : 0.15f);
+        static uint64_t khco_kc = 0;
+        static uint64_t khco_kc_ser = ~0ull;
+        static float    khco_kc_rng = -1.0f;
+        static int      khco_kc_n = -1;
 
+        if (khco_kc_ser == g_sun_locals_serial && khco_kc_rng == khco_rng && khco_kc_n == khco_n) {
+            khco_k = khco_kc;
+        } else {
+            khco_k = CryptoGenerator::fnv1a64_raw(g_sun_locals.data(),
+                                                  static_cast<size_t>(khco_n) * 6u * sizeof(float));
+            khco_k = CryptoGenerator::fnv1a64_update(khco_k, &khco_rng, sizeof(khco_rng));
+            if (khco_k == 0) khco_k = 1;   // 0 is the empty sentinel.
+            khco_kc = khco_k;
+            khco_kc_ser = g_sun_locals_serial;
+            khco_kc_rng = khco_rng;
+            khco_kc_n = khco_n;
+        }
+    }
+    // KH_CASTOCC_DOMAIN: does the retained envelope still cover this fire?
+    const bool khcw_state = g_res.castocc_tex && g_res.castocc_srv && !g_castocc_set.empty() &&
+                            g_castocc_slack > 0.0f && g_castocc_inv > 0.0f && g_castocc_cell > 0.0f &&
+                            g_castocc_grid.size() == static_cast<size_t>(KH_OCC_N) * KH_OCC_N * 2u;
+    const bool khcw_bucket = khco_sy >= g_castocc_sunb.sy_lo && khco_sy <= g_castocc_sunb.sy_hi;
+    const bool khcw_az = (khco_ux * g_castocc_sunb.ux + khco_uz * g_castocc_sunb.uz) >= KH_OCC_AZ_COS;
+    const float khcw_dx = khco_dom[0] - g_castocc_dom[0];
+    const float khcw_dz = khco_dom[2] - g_castocc_dom[2];
+    const bool khcw_cam = khcw_dx * khcw_dx + khcw_dz * khcw_dz <= g_castocc_slack * g_castocc_slack;
+    const bool khcw_floor = khco_dom[1] >= g_castocc_dom[1] - g_castocc_slack;
+    const bool khcw_env = khcw_state && khcw_bucket && khcw_az && khcw_cam && khcw_floor;
+
+    if (khcw_env && khco_k == g_castocc_key) {
+        kh_castocc_pre_step(khco_ctx, khco_n, khco_k, khco_dom, khco_sun, khco_rng);   // KH_CASTOCC_PRE: the next grid, a slice at a time; may commit.
+        khco_cb.cast_mat[0][3] = g_castocc_inv;   // Armed (> 0) - lane note at the build tail.
+        khco_cb.cast_mat[1][3] = g_castocc_lo[0];
+        khco_cb.cast_mat[2][3] = g_castocc_lo[1];
+        return true;
+    }
+    g_castocc_key = khco_k;   // Provisional; cleared below on any failure.
+
+    const bool khcw_fresh = g_castocc_set.size() <= static_cast<size_t>(khco_n) +
+                                                    static_cast<size_t>(khco_n) / KH_OCC_STALE;
+    if (khcw_env && khcw_fresh) {
+        g_castocc_addi.clear();
+
+        for (int khci_i = 0; khci_i < khco_n; ++khci_i) {
+            const uint64_t khci_h = kh_castocc_hash1(g_sun_locals.data() + static_cast<size_t>(khci_i) * 6u);
+
+            if (!std::binary_search(g_castocc_set.begin(), g_castocc_set.end(), khci_h)) {
+                g_castocc_addi.push_back(static_cast<uint32_t>(khci_i));
+            }
+        }
+
+        if (g_castocc_addi.size() <= static_cast<size_t>(KH_OCC_ADD_MAX)) {
+            // Additions are swept in the BUILT envelope: its sun band, its
+            // domain disc, its floor - the retained cells were.
+            bool khci_ok = true;
+
+            for (size_t khci_j = 0; khci_j < g_castocc_addi.size() && khci_ok; ++khci_j) {
+                const float* khci_e = g_sun_locals.data() + static_cast<size_t>(g_castocc_addi[khci_j]) * 6u;
+                const KhOccSweep khci_w = kh_castocc_sweep(khci_e, g_castocc_sunb, g_castocc_dom,
+                                                           g_castocc_rdom, g_castocc_floor);
+                khci_ok = kh_castocc_fits(khci_e, g_castocc_sunb, khci_w, g_castocc_lo,
+                                          g_castocc_cell, g_castocc_inv);
+            }
+
+            if (khci_ok) {
+                for (size_t khci_j = 0; khci_j < g_castocc_addi.size(); ++khci_j) {
+                    const float* khci_e = g_sun_locals.data() + static_cast<size_t>(g_castocc_addi[khci_j]) * 6u;
+                    const KhOccSweep khci_w = kh_castocc_sweep(khci_e, g_castocc_sunb, g_castocc_dom,
+                                                               g_castocc_rdom, g_castocc_floor);
+                    kh_castocc_stamp(khci_e, g_castocc_sunb, khci_w, g_castocc_lo,
+                                     g_castocc_cell, g_castocc_inv, g_castocc_grid.data());
+                }
+
+                if (g_castocc_addi.empty() || kh_castocc_upload(khco_ctx)) {
+                    const size_t khci_was = g_castocc_set.size();
+
+                    for (size_t khci_j = 0; khci_j < g_castocc_addi.size(); ++khci_j) {
+                        g_castocc_set.push_back(
+                            kh_castocc_hash1(g_sun_locals.data() + static_cast<size_t>(g_castocc_addi[khci_j]) * 6u));
+                    }
+
+                    std::sort(g_castocc_set.begin() + khci_was, g_castocc_set.end());
+                    std::inplace_merge(g_castocc_set.begin(),
+                                       g_castocc_set.begin() + khci_was, g_castocc_set.end());
+
+
+                    khco_cb.cast_mat[0][3] = g_castocc_inv;
+                    khco_cb.cast_mat[1][3] = g_castocc_lo[0];
+                    khco_cb.cast_mat[2][3] = g_castocc_lo[1];
+                    return true;
+                }
+
+                return kh_castocc_fail();
+            }
+        }
+    }
+    // Full rebuild about THIS fire's envelope.
+    if (g_castocc_pre.active) {   // KH_CASTOCC_PRE: outrun; the rebuild is the truth now.
+        g_castocc_pre.active = false;
+    }
+    const KhOccSun khco_sb = kh_castocc_sun(khco_sun);
+    const float khco_slack = kh_castocc_slack_of(khco_rng);
+    const float khco_rdom = 0.995f * khco_rng + khco_slack;
+    const float khco_floor = khco_dom[1] - khco_rng - khco_slack;   // KH_CASTOCC_FLOOR: the deepest receiver.
     float khco_lo[2] = { 1.0e30f, 1.0e30f };
     float khco_hi[2] = { -1.0e30f, -1.0e30f };
-    static std::vector<float> khco_r;   // Per caster reach (render-thread scratch).
-    khco_r.assign(static_cast<size_t>(khco_n), 0.0f);
-    // KH_CAST_REACH_DROP: the grid must sweep with the shader. The grid is an
-    // accelerator and its contract is superset-or- nothing. The sweep needs a
-    // floor to stop at: the union window's own bottom, which is camera-anchored
-    // and never shallower than shadowVisibility / sqrt(3) below the camera.
-    const float khco_hl = sqrtf(khco_cb.cast_view[2][0] * khco_cb.cast_view[2][0] +
-                                khco_cb.cast_view[2][2] * khco_cb.cast_view[2][2]);
-    const float khco_syd = khco_syq > 0.02f ? khco_syq : 0.02f;
-    const float khco_k = khco_hl / khco_syd;   // Metres down-sun per metre of drop.
-    const float khco_ux = khco_hl > 1.0e-4f ? (-khco_cb.cast_view[2][0] / khco_hl) : 0.0f;
-    const float khco_uz = khco_hl > 1.0e-4f ? (-khco_cb.cast_view[2][2] / khco_hl) : 0.0f;
-    const float khco_floor = g_sun_map_bounds[1] - g_sun_map_bounds[4];
-    static std::vector<float> khco_a;   // Per caster sweep length (render-thread scratch).
-    khco_a.assign(static_cast<size_t>(khco_n), 0.0f);
-    float khco_amax = 0.0f;
+    static std::vector<KhOccSweep> khco_sw;   // Per caster (render-thread scratch).
+    khco_sw.resize(static_cast<size_t>(khco_n));
     for (int i = 0; i < khco_n; ++i) {
         const float* e = g_sun_locals.data() + static_cast<size_t>(i) * 6u;
-        const float khco_he = sqrtf(e[3] * e[3] + e[4] * e[4] + e[5] * e[5]);
-        const float khco_cap = 600.0f > khco_he * 24.0f ? 600.0f : khco_he * 24.0f;
-        khco_r[i] = (khco_he * khco_stretch < khco_cap ? khco_he * khco_stretch : khco_cap) * khco_reach_x;
-        // How far the top of this caster's shadow travels before it reaches the floor:
-        // the caster's own extent plus the drop term.
-        const float khco_drop = (e[1] + e[4]) - khco_floor;
-        khco_a[i] = (khco_drop > 0.0f ? khco_drop : 0.0f) * khco_k;
-        if (khco_a[i] > khco_amax) khco_amax = khco_a[i];
-        // KH_OCC_SWEEP_PAD: the march is discrete, so every stamp is widened by
-        // a cell and the extent has to carry that widening or the outermost
-        // stamps clamp against the rim and lose their edge.
-        const float khco_ex = e[3] + khco_r[i] + KH_OCC_SWEEP_PAD;
-        const float khco_ez = e[5] + khco_r[i] + KH_OCC_SWEEP_PAD;
-        const float khco_sx = e[0] + khco_ux * khco_a[i];
-        const float khco_sz = e[2] + khco_uz * khco_a[i];
-        const float khco_n0 = (e[0] < khco_sx ? e[0] : khco_sx) - khco_ex;
-        const float khco_n1 = (e[2] < khco_sz ? e[2] : khco_sz) - khco_ez;
-        const float khco_x1v = (e[0] > khco_sx ? e[0] : khco_sx) + khco_ex;
-        const float khco_z1v = (e[2] > khco_sz ? e[2] : khco_sz) + khco_ez;
-        if (khco_n0 < khco_lo[0]) khco_lo[0] = khco_n0;
-        if (khco_n1 < khco_lo[1]) khco_lo[1] = khco_n1;
-        if (khco_x1v > khco_hi[0]) khco_hi[0] = khco_x1v;
-        if (khco_z1v > khco_hi[1]) khco_hi[1] = khco_z1v;
+        khco_sw[static_cast<size_t>(i)] = kh_castocc_sweep(e, khco_sb, khco_dom, khco_rdom, khco_floor);
+        const KhOccSweep& khco_w = khco_sw[static_cast<size_t>(i)];
+        if (!khco_w.on) continue;
+        float khco_b0[2], khco_b1[2];
+        kh_castocc_box(e, khco_sb, khco_w, khco_b0, khco_b1);
+        if (khco_b0[0] < khco_lo[0]) khco_lo[0] = khco_b0[0];
+        if (khco_b0[1] < khco_lo[1]) khco_lo[1] = khco_b0[1];
+        if (khco_b1[0] > khco_hi[0]) khco_hi[0] = khco_b1[0];
+        if (khco_b1[1] > khco_hi[1]) khco_hi[1] = khco_b1[1];
+    }
+    if (khco_lo[0] > khco_hi[0]) return kh_castocc_fail();   // No sweep reaches the domain: the
+                                                             // Shader's grid arm stays 0.
+    {   // KH_CASTOCC_PAD: rim headroom so an arriving caster can still be an
+        // addition instead of a rebuild.
+        const float khco_g0 = (khco_hi[0] - khco_lo[0]) * KH_OCC_EXTENT_PAD;
+        const float khco_g1 = (khco_hi[1] - khco_lo[1]) * KH_OCC_EXTENT_PAD;
+        khco_lo[0] -= khco_g0; khco_hi[0] += khco_g0;
+        khco_lo[1] -= khco_g1; khco_hi[1] += khco_g1;
     }
     const float khco_sp0 = khco_hi[0] - khco_lo[0];
     const float khco_sp1 = khco_hi[1] - khco_lo[1];
-    if (!(khco_sp0 > 0.0f) || !(khco_sp1 > 0.0f)) { g_castocc_key = 0; return false; }
+    if (!(khco_sp0 > 0.0f) || !(khco_sp1 > 0.0f)) return kh_castocc_fail();
     float khco_cell = (khco_sp0 > khco_sp1 ? khco_sp0 : khco_sp1) / KH_OCC_N;
     if (!(khco_cell > 1.0e-4f)) khco_cell = 1.0e-4f;
     const float khco_inv = 1.0f / khco_cell;
 
-    static std::vector<float> khco_grid;   // (minY, maxY) per texel.
-    khco_grid.resize(static_cast<size_t>(KH_OCC_N) * KH_OCC_N * 2u);
-    for (size_t g = 0; g < khco_grid.size(); g += 2) { khco_grid[g] = 1.0e30f; khco_grid[g + 1] = -1.0e30f; }
-    // KH_CAST_REACH_DROP: march each caster's shadow down-sun in half- cell
-    // steps and stamp the receiver height band that belongs to each step,
-    // instead of one box carrying the caster's own Y range. At step t the
-    // receiver height that this caster shadows is (base - t / k), so the band
-    // stays tight: the grid gains the sweep without becoming a blanket, and the
-    // garbage-depth damage bound the Y test exists for survives intact.
-    const float khco_step = khco_cell * 0.5f;
-    const float khco_kinv = khco_k > 1.0e-6f ? (1.0f / khco_k) : 0.0f;
+    g_castocc_grid.resize(static_cast<size_t>(KH_OCC_N) * KH_OCC_N * 2u);   // KH_CASTOCC_INCR: retained.
+    for (size_t g = 0; g < g_castocc_grid.size(); g += 2) { g_castocc_grid[g] = 1.0e30f; g_castocc_grid[g + 1] = -1.0e30f; }
     for (int i = 0; i < khco_n; ++i) {
         const float* e = g_sun_locals.data() + static_cast<size_t>(i) * 6u;
-        const float khco_rr = khco_r[i];
-        const float khco_al = khco_a[i];
-        int khco_ns = static_cast<int>(khco_al / (khco_step > 1.0e-4f ? khco_step : 1.0e-4f));
-        if (khco_ns < 0) khco_ns = 0;
-        if (khco_ns > 4 * KH_OCC_N) khco_ns = 4 * KH_OCC_N;   // Bounded work per caster.
-        const float khco_dt = khco_ns > 0 ? (khco_al / static_cast<float>(khco_ns)) : 0.0f;
-        for (int khco_si = 0; khco_si <= khco_ns; ++khco_si) {
-            const float khco_t = khco_dt * static_cast<float>(khco_si);
-            const float khco_cx = e[0] + khco_ux * khco_t;
-            const float khco_cz = e[2] + khco_uz * khco_t;
-            const float khco_pad = khco_cell;
-            int khco_x0 = static_cast<int>(floorf((khco_cx - e[3] - khco_rr - khco_pad - khco_lo[0]) * khco_inv));
-            int khco_x1 = static_cast<int>(floorf((khco_cx + e[3] + khco_rr + khco_pad - khco_lo[0]) * khco_inv));
-            int khco_z0 = static_cast<int>(floorf((khco_cz - e[5] - khco_rr - khco_pad - khco_lo[1]) * khco_inv));
-            int khco_z1 = static_cast<int>(floorf((khco_cz + e[5] + khco_rr + khco_pad - khco_lo[1]) * khco_inv));
-            if (khco_x0 < 0) khco_x0 = 0;
-            if (khco_z0 < 0) khco_z0 = 0;
-            if (khco_x1 > KH_OCC_N - 1) khco_x1 = KH_OCC_N - 1;
-            if (khco_z1 > KH_OCC_N - 1) khco_z1 = KH_OCC_N - 1;
-            // The receiver height this step shadows, plus the caster's own
-            // vertical span and the lateral slack as the band.
-            const float khco_yc = (e[1] - e[4]) - khco_t * khco_kinv;
-            // The last step opens the band downward: a receiver below where the
-            // sweep stopped is still shadowed by this caster, and the sweep
-            // stops at the union window's floor, not at the world's. The upper
-            // band carries the same pad as the lateral stamps, which is what
-            // makes the grid a proven superset of the shader loop (400k sampled
-            // receivers, zero admitted-by-loop-refused-by-grid).
-            const float khco_y0 = (khco_si == khco_ns)
-                                ? -1.0e30f
-                                : (khco_yc - khco_rr - (khco_dt + khco_pad) * khco_kinv);
-            const float khco_y1 = (khco_si == 0 ? (e[1] + e[4]) : khco_yc)
-                                + khco_rr + khco_pad * khco_kinv + 1.0e-3f;
-            for (int z = khco_z0; z <= khco_z1; ++z) {
-                float* khco_row = khco_grid.data() + (static_cast<size_t>(z) * KH_OCC_N) * 2u;
-                for (int x = khco_x0; x <= khco_x1; ++x) {
-                    if (khco_y0 < khco_row[x * 2]) khco_row[x * 2] = khco_y0;
-                    if (khco_y1 > khco_row[x * 2 + 1]) khco_row[x * 2 + 1] = khco_y1;
-                }
-            }
-        }
+        kh_castocc_stamp(e, khco_sb, khco_sw[static_cast<size_t>(i)], khco_lo, khco_cell, khco_inv,
+                         g_castocc_grid.data());
     }
 
     if (!g_res.castocc_tex) {
         ID3D11Device* khco_dev = nullptr;
         khco_ctx->GetDevice(&khco_dev);
-        if (!khco_dev) { g_castocc_key = 0; return false; }
+        if (!khco_dev) return kh_castocc_fail();
         D3D11_TEXTURE2D_DESC khco_td = {};
         khco_td.Width = KH_OCC_N;
         khco_td.Height = KH_OCC_N;
@@ -20289,28 +21156,30 @@ inline bool kh_cast_occ_build(ID3D11DeviceContext* khco_ctx, ConstantData& khco_
             SUCCEEDED(khco_dev->CreateShaderResourceView(g_res.castocc_tex, nullptr, &g_res.castocc_srv));
         if (!khco_ok) { KH_SAFE_RELEASE(g_res.castocc_srv); KH_SAFE_RELEASE(g_res.castocc_tex); }
         khco_dev->Release();
-        if (!g_res.castocc_srv) { g_castocc_key = 0; return false; }
+        if (!g_res.castocc_srv) return kh_castocc_fail();
     }
-    D3D11_MAPPED_SUBRESOURCE khco_m = {};
-    if (FAILED(khco_ctx->Map(g_res.castocc_tex, 0, D3D11_MAP_WRITE_DISCARD, 0, &khco_m))) { g_castocc_key = 0; return false; }
-    for (int z = 0; z < KH_OCC_N; ++z) {
-        memcpy(static_cast<uint8_t*>(khco_m.pData) + static_cast<size_t>(z) * khco_m.RowPitch,
-               khco_grid.data() + static_cast<size_t>(z) * KH_OCC_N * 2u,
-               static_cast<size_t>(KH_OCC_N) * 2u * sizeof(float));
-    }
-    khco_ctx->Unmap(g_res.castocc_tex, 0);
+    if (!kh_castocc_upload(khco_ctx)) return kh_castocc_fail();
 
-    // castMat[0].w = 1/cell (armed is > 0); castMat[1].w / castMat[2].w = grid origin
-    // XZ - three lanes no other writer uses, so the CB layout is untouched. Not
-    // castView[2].w: that lane is the cast strength (mask_cast_engine writes
-    // g_shadow_map_strength there, the fire-clamp ladder zeroes it, and PSMaskCast
-    // shades 1 - hit * saturate(castView[2].w)).
     khco_cb.cast_mat[0][3] = khco_inv;
     khco_cb.cast_mat[1][3] = khco_lo[0];
     khco_cb.cast_mat[2][3] = khco_lo[1];
     g_castocc_lo[0] = khco_lo[0];
     g_castocc_lo[1] = khco_lo[1];
     g_castocc_inv = khco_inv;
+    g_castocc_cell = khco_cell;
+    g_castocc_sunb = khco_sb;   // The envelope, committed with the grid.
+    g_castocc_dom[0] = khco_dom[0]; g_castocc_dom[1] = khco_dom[1]; g_castocc_dom[2] = khco_dom[2];
+    g_castocc_slack = khco_slack;
+    g_castocc_rdom = khco_rdom;
+    g_castocc_floor = khco_floor;
+    g_castocc_set.clear();
+    g_castocc_set.reserve(static_cast<size_t>(khco_n));
+
+    for (int khco_s = 0; khco_s < khco_n; ++khco_s) {
+        g_castocc_set.push_back(kh_castocc_hash1(g_sun_locals.data() + static_cast<size_t>(khco_s) * 6u));
+    }
+
+    std::sort(g_castocc_set.begin(), g_castocc_set.end());
     return true;
 }
 
@@ -20395,10 +21264,41 @@ inline float kh_epoch_yaw_dot(const float* khyd_a, const float* khyd_b) {
 // uses for the same reason. one-frame camera extrapolation 2504-3439 and have
 // not happened yet.
 
-// KH_CAST_SEAM_VIEW: defined with the seam statics (they sit after this
-// function); the cast asks for this frame's seam-captured camera view.
-inline bool kh_svs_seam_view_this_frame(float khsv_out[16]);
-static bool     g_cast_seam_view_this_fire = false;   // Set at the seed, read at the bridge.
+
+// Is the engine's shadow mask bound as a shader resource right now (PS t0-t32
+// or VS t0-t32)? The fire's clamp paint keys on it: our paint must land before
+// the engine reads the mask. Read at the fire's entry, before any state moves
+// (the same bindings the save below captures).
+inline bool kh_fire_mask_srv_bound(ID3D11DeviceContext* khfb_ctx) {
+    if (!g_mask.engine_mask_rtv) return false;
+    ID3D11Resource* khfb_mask = nullptr;
+    g_mask.engine_mask_rtv->GetResource(&khfb_mask);
+    if (!khfb_mask) return false;
+    ID3D11ShaderResourceView* khfb_ps[33] = {};
+    ID3D11ShaderResourceView* khfb_vs[33] = {};
+    khfb_ctx->PSGetShaderResources(0, _countof(khfb_ps), khfb_ps);
+    khfb_ctx->VSGetShaderResources(0, _countof(khfb_vs), khfb_vs);
+    bool khfb_hit = false;
+
+    for (int si = 0; si < 66 && !khfb_hit; ++si) {   // 33 slots per stage.
+        ID3D11ShaderResourceView* sv = si < static_cast<int>(_countof(khfb_ps)) ? khfb_ps[si]
+                                                                                : khfb_vs[si - 33];
+        if (!sv) continue;
+        ID3D11Resource* sr = nullptr;
+        sv->GetResource(&sr);
+        if (sr == khfb_mask) khfb_hit = true;
+        if (sr) sr->Release();
+    }
+
+    for (int si = 0; si < static_cast<int>(_countof(khfb_ps)); ++si) {
+        KH_SAFE_RELEASE(khfb_ps[si]);
+        KH_SAFE_RELEASE(khfb_vs[si]);
+    }
+
+    khfb_mask->Release();
+    return khfb_hit;
+}
+
 inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
 
     // Baseline resolve-keyed re-fires are restored verbatim; do not gate this
@@ -20429,21 +21329,27 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
 
     if (!g_mask_cast_arm || g_mask_cast_fired) return;
     g_ls.resolve_seen_since_cast = false;
-    if (!g_res.initialized || !g_res.ps_maskcast || !g_res.vs_fullscreen || !g_res.composite_cb) {  return; }
-    if (!g_mask.cast_depth) {  return; }
-    if (!g_mask.cast_fov_valid) {  return; }
-    if (g_mask.engine_mask_failed) {  return; }
-    if (!g_ls.frame_view_valid) {  return; }
+    if (!g_res.initialized || !g_res.ps_maskcast || !g_res.vs_fullscreen || !g_res.composite_cb) {
+        return;
+    }
+    if (!g_mask.cast_depth) { return; }
+    if (!g_mask.cast_fov_valid) { return; }
+    if (g_mask.engine_mask_failed) { return; }
+    if (!g_ls.frame_view_valid) { return; }
     // Populated maps publish at draw ~2 and never hold.
 
     // No timestamp epoch gate here: the view CB re-uploads ~164x/frame, so a
     // timestamp can never carry epoch identity, and a hold would starve cold arms.
 
     if (g_ls.pub_exact_ms == 0 ||
-        steady_now_ms() - g_ls.pub_exact_ms > 250) {  return; }
+        steady_now_ms() - g_ls.pub_exact_ms > 250) {
+        return;
+    }
     // Steady state saturates this within one frame.
-    if (g_mask.sweep_settle < g_mask.sweep_need) {  return; }
-    if (!kh_sun_settled() && !kh_sun_axis_witnessed()) {
+    if (g_mask.sweep_settle < g_mask.sweep_need) {
+        return;
+    }
+    if (!g_sun_valid && !kh_sun_axis_witnessed()) {
         g_cast_ready = false;
         g_cast_ready_since_ms = 0;   // Readiness dwell restarts after the sun re-settles.
         return;
@@ -20453,7 +21359,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         g_cast_ready_since_ms = 0;
         return;
     }
-    // Absent beats swinging (the sun-settle gate's own doctrine); at a healthy
+    // Absent beats swinging (the null-sun return's own doctrine); at a healthy
     // cold this adds at most 1 s to a first cast already 8-10 s out (the churn
     // clock and the cold pipeline run concurrently), and a settled steady state
     // never stamps.
@@ -20469,19 +21375,10 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     const uint64_t khcr_now = steady_now_ms();
     const bool khcr_q_churn =
         (g_lock_churn_ms_v == 0 || khcr_now - g_lock_churn_ms_v >= KH_CAST_READY_QUIET_MS);
-    // The accelerated-time disappearance. The travel term stands the whole cast
-    // down whenever the published sun moves more than KH_SUN_PUB_TRAVEL_DEG in
-    // Its window, and it cannot tell why it moved.
-    const bool khcr_wit = kh_sun_axis_witnessed();
-    bool khcr_q_travel =
-        (g_sun_pub_travel_ms == 0 || khcr_now - g_sun_pub_travel_ms >= KH_CAST_READY_QUIET_MS);
-    bool khcr_q_jump =
-        (g_sun_last_jump_ms == 0 || khcr_now - g_sun_last_jump_ms >= KH_CAST_READY_QUIET_MS);
-    if (khcr_wit) {
-        khcr_q_travel = true;
-        khcr_q_jump = true;
-    }
-    const bool khcr_stable = khcr_q_churn && khcr_q_travel && khcr_q_jump;
+    // The former travel / jump quiet terms (a sun move stood the cast down for
+    // KH_CAST_READY_QUIET_MS) are gone: a raw publish moves only when the
+    // engine's own axis moved, and the cast must move with it.
+    const bool khcr_stable = khcr_q_churn;
 
     if (!khcr_stable) {
         g_cast_ready = false;
@@ -20643,160 +21540,13 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     // Map path: a valid sun map implies casters existed this frame (the pass
     // refuses to render without any) - no snapshot needed.
     if (!sun_map && ncb == 0) {  return; }
-    g_ro.in_injection = true;
-    ID3D11RenderTargetView* old_rtvs[8] = {};
-    ID3D11DepthStencilView* old_dsv = nullptr;
-    ID3D11UnorderedAccessView* old_uavs[8] = {};
-    ctx->OMGetRenderTargets(8, old_rtvs, &old_dsv);
-    ctx->OMGetRenderTargetsAndUnorderedAccessViews(0, nullptr, nullptr, 0, 8, old_uavs);
-    int khf_uav_n = 0, khf_uav_lo = 8;
-
-    for (int ui = 0; ui < 8; ++ui) {
-        if (old_uavs[ui]) {
-            khf_uav_n++;
-            if (ui < khf_uav_lo) khf_uav_lo = ui;
-        }
-    }
-
-    UINT old_nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
-    D3D11_VIEWPORT old_vps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
-    ctx->RSGetViewports(&old_nvp, old_vps);
-    ID3D11VertexShader* old_vs = nullptr;
-    ID3D11PixelShader* old_ps = nullptr;
-    ID3D11InputLayout* old_il = nullptr;
-    D3D11_PRIMITIVE_TOPOLOGY old_topo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
-    ID3D11Buffer* old_cb = nullptr;
-    ID3D11BlendState* old_blend = nullptr;
-    FLOAT old_bf[4] = {};
-    UINT old_bmask = 0xFFFFFFFF;
-    ID3D11DepthStencilState* old_dss = nullptr;
-    UINT old_sref = 0;
-    ctx->VSGetShader(&old_vs, nullptr, nullptr);
-    ctx->PSGetShader(&old_ps, nullptr, nullptr);
-    ctx->IAGetInputLayout(&old_il);
-    ctx->IAGetPrimitiveTopology(&old_topo);
-    UINT old_cb_first = 0, old_cb_num = 0;
-    UINT old_vs_cb_first = 0, old_vs_cb_num = 0;
-    ID3D11Buffer* old_cb1 = nullptr;
-    ID3D11Buffer* old_vs_cb1 = nullptr;
-    UINT old_cb1_first = 0, old_cb1_num = 0;
-    UINT old_vs_cb1_first = 0, old_vs_cb1_num = 0;
-    ID3D11DeviceContext1* khf_ctx1 = nullptr;
-    ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&khf_ctx1));
-    ID3D11Buffer* old_vs_cb = nullptr;
-
-    if (khf_ctx1) {
-        khf_ctx1->PSGetConstantBuffers1(0, 1, &old_cb, &old_cb_first, &old_cb_num);
-        khf_ctx1->VSGetConstantBuffers1(0, 1, &old_vs_cb, &old_vs_cb_first, &old_vs_cb_num);
-        khf_ctx1->PSGetConstantBuffers1(1, 1, &old_cb1, &old_cb1_first, &old_cb1_num);
-        khf_ctx1->VSGetConstantBuffers1(1, 1, &old_vs_cb1, &old_vs_cb1_first, &old_vs_cb1_num);
-
-    } else {
-        ctx->PSGetConstantBuffers(0, 1, &old_cb);
-        ctx->VSGetConstantBuffers(0, 1, &old_vs_cb);   // The fire sets VS b0.
-        ctx->PSGetConstantBuffers(1, 1, &old_cb1);
-        ctx->VSGetConstantBuffers(1, 1, &old_vs_cb1);
-    }
-    // Restored below: every engine vertex shader after the fire would otherwise read
-    // our mesh cbd as its constants (the fire runs past the engine's last natural
-    // VS-b0 rebind before the particle pass).
-    ctx->OMGetBlendState(&old_blend, old_bf, &old_bmask);
-    ctx->OMGetDepthStencilState(&old_dss, &old_sref);
-    // Widened 16 -> 28 with the cascade build. Array size is the save range
-    // here too: capture, restore, scan and release all follow.
-    ID3D11ShaderResourceView* old_ps_srvs[33] = {};   // t28; +t32 (far band; t29-31 unbound on this
-                                                      // Path but saved for width parity).
-    ID3D11ShaderResourceView* old_vs_srvs[33] = {};   // Widened with the PS table.
-    ctx->PSGetShaderResources(0, _countof(old_ps_srvs), old_ps_srvs);   // Width, not a literal.
-    ctx->VSGetShaderResources(0, _countof(old_vs_srvs), old_vs_srvs);
-
-    g_fire_mask_srv_now = false;   // per-fire (at the statics).
-
-    if (g_mask.engine_mask_rtv) {
-        ID3D11Resource* khf_mask_res = nullptr;
-        g_mask.engine_mask_rtv->GetResource(&khf_mask_res);
-
-        if (khf_mask_res) {
-            for (int si = 0; si < 66; ++si) {   // 33 slots per stage.
-                ID3D11ShaderResourceView* sv = si < static_cast<int>(_countof(old_ps_srvs)) ? old_ps_srvs[si]
-                                                       : old_vs_srvs[si - 33];
-                if (!sv) continue;
-                ID3D11Resource* sr = nullptr;
-                sv->GetResource(&sr);
-
-                if (sr == khf_mask_res) {
-                    g_fire_mask_srv_now = true;
-                    if (sr) sr->Release();
-                    break;
-                }
-
-                if (sr) sr->Release();
-            }
-
-            khf_mask_res->Release();
-        }
-    }
-    // Saved here, nulled below, restored with the rest.
-    ID3D11GeometryShader* old_gs = nullptr;
-    ID3D11HullShader* old_hs = nullptr;
-    ID3D11DomainShader* old_ds2 = nullptr;
-    ID3D11RasterizerState* old_rs = nullptr;
-    ID3D11ShaderResourceView* khco_old_t35 = nullptr;   // KH_CAST_OCC: t35 sits past
-                                                        // old_ps_srvs[33].
-    ctx->PSGetShaderResources(35, 1, &khco_old_t35);
-    ctx->GSGetShader(&old_gs, nullptr, nullptr);
-    ctx->HSGetShader(&old_hs, nullptr, nullptr);
-    ctx->DSGetShader(&old_ds2, nullptr, nullptr);
-    ctx->RSGetState(&old_rs);
-    ctx->OMSetRenderTargets(1, &g_mask.engine_mask_rtv, nullptr);
-    D3D11_VIEWPORT vpn = {};
-    vpn.Width = g_mask.cast_dims[0];
-    vpn.Height = g_mask.cast_dims[1];
-    vpn.MaxDepth = 1.0f;
-    ctx->RSSetViewports(1, &vpn);
-    ctx->IASetInputLayout(nullptr);
-    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
-    ctx->PSSetShader(g_res.ps_maskcast, nullptr, 0);   // Engine linear depth: single-sample.
-    ctx->GSSetShader(nullptr, nullptr, 0);
-    ctx->HSSetShader(nullptr, nullptr, 0);
-    ctx->DSSetShader(nullptr, nullptr, 0);
-    // The standard SV_VertexID fullscreen triangle is clockwise in
-    // render-target space - the default front face - so CullBack never rejects
-    // it; DepthClip is moot at z = 0. Default rasterizer: solid fill, scissor
-    // off.
-    ctx->RSSetState(nullptr);
-    // CB split: b0 = per-object, b1 = per-frame; both slices upload per fire
-    // below (the ad-hoc backup saves/restores both slots).
-    ID3D11Buffer* khmc_cbs[2] = { g_res.composite_cb, g_res.composite_frame_cb };
-    ctx->VSSetConstantBuffers(0, 2, khmc_cbs);
-    ctx->PSSetConstantBuffers(0, 2, khmc_cbs);
-    const FLOAT bfm[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
-    ctx->OMSetBlendState(g_mask.min_blend, bfm, 0xFFFFFFFF);
-    ctx->OMSetDepthStencilState(g_mask.cast_dss, 0);
     if (!g_fire_lock_valid) {   // frame's first fire: freeze the inputs.
-        g_fire_snap_live = false;
-
-        if (g_fire_snap_live) {
-            g_fire_lock = g_fire_snap_srv;
-            g_fire_lock->AddRef();
-        } else {
-            g_fire_lock = g_mask.cast_depth;
-            g_fire_lock->AddRef();
-        }
+        g_fire_lock = g_mask.cast_depth;   // The live cast depth is the frozen input.
+        g_fire_lock->AddRef();
         g_fire_fov2[0] = g_mask.cast_fov[0];
         g_fire_fov2[1] = g_mask.cast_fov[1];
         g_fire_dims2[0] = g_mask.cast_dims[0];
         g_fire_dims2[1] = g_mask.cast_dims[1];
-        // KH_CAST_SEAM_VIEW (off). That stale view is the
-        // drift, the slice, the absence.
-        g_cast_seam_view_this_fire = false;
-        if (g_ls.view_published_this_frame) {
-        } else {
-            float khcs_scratch[16];
-            if (!kh_svs_seam_view_this_frame(khcs_scratch)) {
-            }
-        }
         // KH_CAST_SEAM_VIEW_FRAME . Off. Populated maps never seed. Turns it
         // on. The carried frame_view published at ~457 of N-1 is viewN-1: a
         // consistent pair, world-correct, with only a uniform screen-space lag.
@@ -20823,8 +21573,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
 
         if (g_ro.cycle_pv_stale) {
             RVExtBridge::ProjectionViewTransform khfe_pv = {};
-            if (RVExtBridge::get_projection_view_transform(khfe_pv) &&
-                latch_view_continuous(khfe_pv.view)) {
+            if (RVExtBridge::get_projection_view_transform(khfe_pv)) {   // KH_LATCH_FOLD: no continuity gate.
                 if (g_ro.cycle_pv_valid) {
                     memcpy(&khfe_pv.projection[0][0], &g_ro.cycle_pv.projection[0][0],
                            sizeof(khfe_pv.projection));
@@ -20836,10 +21585,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
             }
         }
 
-        if (g_cast_seam_view_this_fire) {
-            // KH_CAST_SEAM_VIEW: the seam view is this frame's; the cycle pv is
-            // the last trigger's - the bridge must not steer back to it.
-        } else if (g_ro.cycle_pv_valid && !g_ro.cycle_pv_stale) {
+        if (g_ro.cycle_pv_valid && !g_ro.cycle_pv_stale) {
             // The freeze. It updated faithfully, from something that had
             // stopped moving.
             float khpl_view[16];
@@ -20856,13 +21602,6 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
                     }
 
                     khpl_live = true;
-                    // The discriminator: near zero across the session means (a); non-trivial means (b).
-                    {
-                        float khpd_a[3], khpd_b[3];
-                        extract_camera_pos(
-                            reinterpret_cast<const float(*)[4]>(khpl_view), khpd_a);
-                        extract_camera_pos(g_ro.cycle_pv.view, khpd_b);
-                    }
                 }
             }
 
@@ -21034,6 +21773,134 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
 
     }
 
+    // KH_MASKCAST_NOPAINT. The fire replays per engine resolve (~9 a frame at
+    // 8 cascades: the re-fire cadence above, untouched), but the clamp paint
+    // below hands the strength lane (castView[2].w) to exactly ONE fire per
+    // frame - the first with the mask SRV-bound, else the frame's last - and
+    // zeroes it on every other. PSMaskCast's output is 1 - hit * saturate(w),
+    // so a zero lane paints 1.0 into a MIN blend: bit-for-bit nothing, at the
+    // full 4K pixel cost (0.16 ms x 9 fires on the 3,000-cube scene, 8 of
+    // them this no-op). The decision is taken here, on the same
+    // inputs the fill reads, and a fire that would not paint skips the draw,
+    // the state save and the occupancy build. Everything the fire is FOR
+    // besides the paint - the arm / fired latch, the freeze (already taken
+    // above), the per-frame fire count the clamp target learns from - has
+    // already happened or happens here.
+    g_fire_mask_srv_now = kh_fire_mask_srv_bound(ctx);   // per-fire (at the statics).
+    g_fire_count_frame++;
+    {
+        const bool khnp_last = (g_fire_count_frame >= g_fire_clamp_target);
+        const bool khnp_paint = g_fire_clamp_painted == 0 && (g_fire_mask_srv_now || khnp_last);
+
+        if (!khnp_paint) {
+            return;
+        }
+    }
+    g_ro.in_injection = true;
+    ID3D11RenderTargetView* old_rtvs[8] = {};
+    ID3D11DepthStencilView* old_dsv = nullptr;
+    ID3D11UnorderedAccessView* old_uavs[8] = {};
+    ctx->OMGetRenderTargets(8, old_rtvs, &old_dsv);
+    ctx->OMGetRenderTargetsAndUnorderedAccessViews(0, nullptr, nullptr, 0, 8, old_uavs);
+    int khf_uav_n = 0, khf_uav_lo = 8;
+
+    for (int ui = 0; ui < 8; ++ui) {
+        if (old_uavs[ui]) {
+            khf_uav_n++;
+            if (ui < khf_uav_lo) khf_uav_lo = ui;
+        }
+    }
+
+    UINT old_nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    D3D11_VIEWPORT old_vps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    ctx->RSGetViewports(&old_nvp, old_vps);
+    ID3D11VertexShader* old_vs = nullptr;
+    ID3D11PixelShader* old_ps = nullptr;
+    ID3D11InputLayout* old_il = nullptr;
+    D3D11_PRIMITIVE_TOPOLOGY old_topo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    ID3D11Buffer* old_cb = nullptr;
+    ID3D11BlendState* old_blend = nullptr;
+    FLOAT old_bf[4] = {};
+    UINT old_bmask = 0xFFFFFFFF;
+    ID3D11DepthStencilState* old_dss = nullptr;
+    UINT old_sref = 0;
+    ctx->VSGetShader(&old_vs, nullptr, nullptr);
+    ctx->PSGetShader(&old_ps, nullptr, nullptr);
+    ctx->IAGetInputLayout(&old_il);
+    ctx->IAGetPrimitiveTopology(&old_topo);
+    UINT old_cb_first = 0, old_cb_num = 0;
+    UINT old_vs_cb_first = 0, old_vs_cb_num = 0;
+    ID3D11Buffer* old_cb1 = nullptr;
+    ID3D11Buffer* old_vs_cb1 = nullptr;
+    UINT old_cb1_first = 0, old_cb1_num = 0;
+    UINT old_vs_cb1_first = 0, old_vs_cb1_num = 0;
+    ID3D11DeviceContext1* khf_ctx1 = nullptr;
+    ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&khf_ctx1));
+    ID3D11Buffer* old_vs_cb = nullptr;
+
+    if (khf_ctx1) {
+        khf_ctx1->PSGetConstantBuffers1(0, 1, &old_cb, &old_cb_first, &old_cb_num);
+        khf_ctx1->VSGetConstantBuffers1(0, 1, &old_vs_cb, &old_vs_cb_first, &old_vs_cb_num);
+        khf_ctx1->PSGetConstantBuffers1(1, 1, &old_cb1, &old_cb1_first, &old_cb1_num);
+        khf_ctx1->VSGetConstantBuffers1(1, 1, &old_vs_cb1, &old_vs_cb1_first, &old_vs_cb1_num);
+
+    } else {
+        ctx->PSGetConstantBuffers(0, 1, &old_cb);
+        ctx->VSGetConstantBuffers(0, 1, &old_vs_cb);   // The fire sets VS b0.
+        ctx->PSGetConstantBuffers(1, 1, &old_cb1);
+        ctx->VSGetConstantBuffers(1, 1, &old_vs_cb1);
+    }
+    // Restored below: every engine vertex shader after the fire would otherwise read
+    // our mesh cbd as its constants (the fire runs past the engine's last natural
+    // VS-b0 rebind before the particle pass).
+    ctx->OMGetBlendState(&old_blend, old_bf, &old_bmask);
+    ctx->OMGetDepthStencilState(&old_dss, &old_sref);
+    // Widened 16 -> 28 with the cascade build. Array size is the save range
+    // here too: capture, restore, scan and release all follow.
+    ID3D11ShaderResourceView* old_ps_srvs[33] = {};   // t28; +t32 (far band; t29-31 unbound on this
+                                                      // Path but saved for width parity).
+    ID3D11ShaderResourceView* old_vs_srvs[33] = {};   // Widened with the PS table.
+    ctx->PSGetShaderResources(0, _countof(old_ps_srvs), old_ps_srvs);   // Width, not a literal.
+    ctx->VSGetShaderResources(0, _countof(old_vs_srvs), old_vs_srvs);
+
+    // Saved here, nulled below, restored with the rest.
+    ID3D11GeometryShader* old_gs = nullptr;
+    ID3D11HullShader* old_hs = nullptr;
+    ID3D11DomainShader* old_ds2 = nullptr;
+    ID3D11RasterizerState* old_rs = nullptr;
+    ID3D11ShaderResourceView* khco_old_t35 = nullptr;   // KH_CAST_OCC: t35 sits past
+                                                        // old_ps_srvs[33].
+    ctx->PSGetShaderResources(35, 1, &khco_old_t35);
+    ctx->GSGetShader(&old_gs, nullptr, nullptr);
+    ctx->HSGetShader(&old_hs, nullptr, nullptr);
+    ctx->DSGetShader(&old_ds2, nullptr, nullptr);
+    ctx->RSGetState(&old_rs);
+    ctx->OMSetRenderTargets(1, &g_mask.engine_mask_rtv, nullptr);
+    D3D11_VIEWPORT vpn = {};
+    vpn.Width = g_mask.cast_dims[0];
+    vpn.Height = g_mask.cast_dims[1];
+    vpn.MaxDepth = 1.0f;
+    ctx->RSSetViewports(1, &vpn);
+    ctx->IASetInputLayout(nullptr);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
+    ctx->PSSetShader(g_res.ps_maskcast, nullptr, 0);   // Engine linear depth: single-sample.
+    ctx->GSSetShader(nullptr, nullptr, 0);
+    ctx->HSSetShader(nullptr, nullptr, 0);
+    ctx->DSSetShader(nullptr, nullptr, 0);
+    // The standard SV_VertexID fullscreen triangle is clockwise in
+    // render-target space - the default front face - so CullBack never rejects
+    // it; DepthClip is moot at z = 0. Default rasterizer: solid fill, scissor
+    // off.
+    ctx->RSSetState(nullptr);
+    // CB split: b0 = per-object, b1 = per-frame; both slices upload per fire
+    // below (the ad-hoc backup saves/restores both slots).
+    ID3D11Buffer* khmc_cbs[2] = { g_res.composite_cb, g_res.composite_frame_cb };
+    ctx->VSSetConstantBuffers(0, 2, khmc_cbs);
+    ctx->PSSetConstantBuffers(0, 2, khmc_cbs);
+    const FLOAT bfm[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    ctx->OMSetBlendState(g_mask.min_blend, bfm, 0xFFFFFFFF);
+    ctx->OMSetDepthStencilState(g_mask.cast_dss, 0);
     // Pristine set the fire's viewport from live g_mask.cast_dims per paint
     // while PSMaskCast addresses pixels through the frozen dims (dimsM =
     // castView[1].zw) against the frozen depth SRV: whenever the live pair
@@ -21060,7 +21927,6 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         extract_camera_pos(reinterpret_cast<const float(*)[4]>(g_fire_view2), khlv_b);
     }
 
-    g_fire_count_frame++;
     ctx->PSSetShaderResources(0, 1, &g_fire_lock);   // Frozen: identical replay per batch.
     if (sun_map && g_res.sun_srv) ctx->PSSetShaderResources(11, 1, &g_res.sun_srv);
     if (sun_map && g_sun2_map_valid && g_res.sun2_srv) ctx->PSSetShaderResources(25, 1, &g_res.sun2_srv);
@@ -21152,6 +22018,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
             cbd.sun_cast_bias[3]  = g_sun5_map_valid ? g_sun5_cast_bias : 0.0f;
             cbd.sun_cast_bias2[0] = g_sun_map_cast_bias;   // The union (sunMeta.x gates its use).
             cbd.locality_meta[0] = static_cast<float>(g_sun_local_count);
+            cbd.locality_meta[3] = static_cast<float>(KH_OCC_N);   // KH_OCC_N_LANE.
             // See the shader gate.
             cbd.locality_meta[2] = (g_sun_map_render_time >= 0.0f &&
                                     effect_time_seconds() - g_sun_map_render_time > 0.5f)
@@ -21378,8 +22245,7 @@ static void*    g_svs_rtv_seen[8] = {};
 static uint32_t g_svs_rtv_seen_n = 0;
 // A rule cannot fire on a bind it never sees. This engine records on deferred
 // contexts; if the prepass binds land somewhere we do not watch, that buffer is
-// never marked and no rule can help. depth-bind census. Pure read, no
-// behaviour.
+// never marked and no rule can help. Pure read, no behaviour.
 static void*    g_svs_cls_id[8] = {};
 static uint8_t  g_svs_cls_srv[8] = {};
 static uint32_t g_svs_cls_n = 0;
@@ -21423,6 +22289,20 @@ static uint8_t  g_svs_bracket = 0;
 // list whole.
 struct KhSvCaster {
     float pos[3]; float size[3]; float rot[9]; bool rotated; int mesh;
+    int  lod;        // KH_SHADOW_LOD_DRAWN: the level the footprint draws (the injection's own pick,
+                     // taken once the pass camera is known, below the list build).
+    bool lod_lock;   // KH_LOD_LOCK, carried for that pick.
+    // KH_SEAM_CULL: inside the footprint's own frustum (the pass camera's,
+    // kh_cull_build over the pass's view-proj, padded sphere). The footprint
+    // loop is a screen-space depth write through that very matrix, so an
+    // object outside its frustum contributes nothing and is not drawn there.
+    // The mirror prepass and the prime draw the list whole, as before.
+    bool a_vis;
+    // KH_SEAM_INST: the live-scene slot this caster was built from, which is
+    // the index the instanced entry points read khObjs at. The record already
+    // carries centre, extents and rotation - the same values copied above -
+    // so the lane needs nothing else.
+    uint32_t slot;
     float alpha;
     const KhMaterialSet* mats;   // Pool-owned (KH_MAT_POOL); the grave wall outlives this list.
     bool alpha_caster;
@@ -21432,6 +22312,13 @@ inline bool kh_footprint_alpha_on() {
     return g_res.ps_inj_depth_a && g_res.vs_tex && g_res.layout_tex;
 }
 static std::vector<KhSvCaster> g_svs_caster_list;
+// KH_SEAM_INST: the seam's instance plan, kept across frames so the two
+// loops never allocate. g_svs_inst_ord holds indices into the caster list,
+// mesh-major: [0, inst_a) is loop A's opaque footprint set and
+// [inst_a, inst_a + inst_b) is loop B's, which is every caster. The lanes
+// are written straight into the mapped buffer in this order, so the index
+// into this array IS the StartInstanceLocation of the draw that covers it.
+static std::vector<uint32_t>   g_svs_inst_ord;
 static float    g_svs_prime_vp[4][4] = {};
 
 // They do not have to be traded. The intra-frame gap has never been measured by
@@ -21442,17 +22329,6 @@ static uint64_t g_svs_seam_view_seq = 0;
 static bool     g_svs_seam_view_valid = false;
 static bool     g_svs_seam_view_fresh = false;
 static bool     g_svs_seam_view_cam_exact = false;   // KH_SEAM_VIEW_EXACT: swing <= 4 px at
-inline bool kh_svs_seam_view_this_frame(float khsv_out[16]) {
-    // The contract below - the seam publishes under seq N and the frame clock
-    // already reads N+1 by the time anything consumes it, so "this frame" is
-    // Lag <= KH_SEAM_VIEW_MAX_AGE (1), never equality.
-    if (!g_svs_seam_view_valid || !g_svs_seam_view_cam_exact) return false;
-    const int64_t khsv_lag = static_cast<int64_t>(g_svs_frame_seq) - static_cast<int64_t>(g_svs_seam_view_seq);
-    if (khsv_lag < 0 || khsv_lag > int64_t(1) /* == KH_SEAM_VIEW_MAX_AGE, declared later; asserted at its definition */) return false;
-    memcpy(khsv_out, &g_svs_seam_view[0][0], sizeof(float) * 16);   // Same layout as frame_view
-                                                                    // (row*4+col).
-    return true;
-}
 
 // The seam publishes under seq N and the colour pass reads g_svs_frame_seq ==
 // N+1, so an equality test can never pass, in either direction.
@@ -21651,9 +22527,6 @@ inline bool kh_svs_vol_ready() {
     return true;
 }
 // If it reads ~0 the two passes never disagreed and reprojection is a no-op.
-
-// A frame census against a 4 px bar, plus the running mean, of how far the view
-// swing actually moved our footprint.
 
 static bool     g_svs_prime_ready = false;
 
@@ -21963,7 +22836,7 @@ inline void kh_fill_sten_reproj(ConstantData& khs_cbd) {
 
 
 // The lock is (buffer identity, float offset), compared opaquely and never
-// dereferenced - the cbc census's pointer rules.
+// dereferenced.
 struct KhEngCamCand {
     float   v[3] = {};   // Sighted value (bit-exact key).
     void*   res = nullptr;   // First sighting's buffer identity (opaque).
@@ -22410,6 +23283,81 @@ inline bool kh_vmir_ensure_gpu(ID3D11Device* khvg_dev) {
     return true;
 }
 
+// KH_MIR_CPU - the measured fix for the frame-756 hitch.
+//
+// The hitch snapshot named it outright: on the worst frame of the session the
+// mirror Dispatch alone took 148.255 ms of a 152.463 ms frame while every other
+// slot on that same frame was normal (inject 0.93, mirrorIn 0.005, mirrorOut
+// 0.003, mirrorReissue 0.017). One Dispatch(1,1,1) over 64 bytes cannot BE 148
+// ms of work - it is a graphics -> compute transition on the immediate context,
+// which splits the command buffer and drains whatever the engine has in flight.
+// Deeper queue (moving camera, dense view) means longer drain, which is exactly
+// why it tracks movement.
+//
+// CSMirB2 is a pure function of b2's first 64 bytes and about thirty flops, so
+// the arithmetic does not need the GPU at all. What it needs is those bytes on
+// the CPU, and the upload funnel above already carries every engine constant
+// upload we ask it for. So: learn which resource is bound at VS b2, snapshot it
+// at its upload, and patch on the CPU.
+//
+// The gate is deliberately strict - same resource AND same frame - because a
+// stale b2 would misplace the mirror mask. If it does not hold, the Dispatch
+// path runs exactly as it does today, so the worst case of this change is that
+// nothing changes. mirCpuFrames / mirCsFrames say which path actually ran.
+struct KhB2Snap {
+    void*    res = nullptr;
+    uint64_t frame = 0;
+    bool     valid = false;
+    float    m[16] = {};
+};
+static KhB2Snap g_b2_snap;
+static void*    g_b2_learn = nullptr;   // The resource last seen bound at VS b2.
+
+inline void kh_b2_snap_note(ID3D11Resource* khb_res, const void* khb_d, uint32_t khb_n) {
+    if (!g_b2_learn || static_cast<void*>(khb_res) != g_b2_learn) return;
+    if (!khb_d || khb_n < 64u) return;
+    memcpy(g_b2_snap.m, khb_d, 64);
+    g_b2_snap.res = g_b2_learn;
+    g_b2_snap.frame = g_svs_frame_seq;
+    g_b2_snap.valid = true;
+}
+
+// The C++ twin of CSMirB2 (vmir_cs.hlsl). Same order of operations, same
+// constants, same refusal conditions - where the shader falls back to passing z
+// through untouched, so does this. Columns 0, 1 and 3 are copied verbatim and
+// only column 2 is recombined, exactly as the shader's Store loop does.
+inline void kh_mir_patch_cpu(const float khm_in[16], float khm_out[16]) {
+    float khm_num = 0.0f, khm_den = 0.0f;
+
+    for (int khm_r = 0; khm_r < 3; ++khm_r) {
+        khm_num += khm_in[khm_r * 4 + 2] * khm_in[khm_r * 4 + 3];
+        khm_den += khm_in[khm_r * 4 + 3] * khm_in[khm_r * 4 + 3];
+    }
+
+    const float khm_w = sqrtf(khm_den);
+    bool  khm_ok = khm_den > 1.0e-12f && khm_w > 0.90f && khm_w < 1.10f;
+    const float khm_m22 = khm_ok ? khm_num / khm_den : 0.0f;
+    khm_ok = khm_ok && fabsf(khm_m22) > 1.0e-9f;
+    const float khm_m32 = khm_in[14] - khm_in[15] * khm_m22;
+    const float khm_n = khm_ok ? (-khm_m32 / khm_m22) : -1.0f;
+    khm_ok = khm_ok && khm_n > 0.0f && khm_m22 > 1.0f + 1.0e-6f && khm_m32 < -1.0e-6f;
+    const float khm_f = khm_ok ? (khm_n * khm_m22 / (khm_m22 - 1.0f)) : 0.0f;
+    khm_ok = khm_ok && khm_f > 0.06f;
+    const float khm_l22 = khm_ok ? (khm_f / (khm_f - 0.05f)) : 0.0f;
+    const float khm_l32 = -0.05f * khm_l22;
+    const float khm_a = khm_ok ? (khm_l32 / khm_m32) : 1.0f;
+    const float khm_b = khm_ok ? (khm_l22 - khm_m22 * khm_a) : 0.0f;
+
+    for (int khm_r2 = 0; khm_r2 < 4; ++khm_r2) {
+        const float khm_z = khm_in[khm_r2 * 4 + 2];
+        const float khm_ww = khm_in[khm_r2 * 4 + 3];
+        khm_out[khm_r2 * 4 + 0] = khm_in[khm_r2 * 4 + 0];
+        khm_out[khm_r2 * 4 + 1] = khm_in[khm_r2 * 4 + 1];
+        khm_out[khm_r2 * 4 + 2] = khm_ok ? (khm_a * khm_z + khm_b * khm_ww) : khm_z;
+        khm_out[khm_r2 * 4 + 3] = khm_ww;
+    }
+}
+
 // CS stage state is saved and restored - the engine may own it mid-frame.
 inline bool kh_vmir_patch_b2(ID3D11DeviceContext* khvp_ctx) {
     ID3D11Buffer* khvp_b2 = nullptr;
@@ -22418,8 +23366,27 @@ inline bool kh_vmir_patch_b2(ID3D11DeviceContext* khvp_ctx) {
     D3D11_BUFFER_DESC khvp_bd = {};
     khvp_b2->GetDesc(&khvp_bd);
     if (khvp_bd.ByteWidth < 64) { khvp_b2->Release(); return false; }
+    // KH_MIR_CPU: learn which resource is bound at b2 so the upload funnel
+    // starts snapshotting it. Costs nothing and is what makes the fast path
+    // below reachable from the second frame on.
+    g_b2_learn = static_cast<void*>(khvp_b2);
+
+    // The fast path: no CopySubresourceRegion off a buffer the engine is still
+    // renaming, no Dispatch, no CopyResource - one UpdateSubresource of 64
+    // bytes. Taken only when the snapshot is of THIS resource and THIS frame.
+    if (g_b2_snap.valid && g_b2_snap.res == static_cast<void*>(khvp_b2) &&
+        g_b2_snap.frame == g_svs_frame_seq) {
+        float khvp_patched[16];
+        kh_mir_patch_cpu(g_b2_snap.m, khvp_patched);
+        khvp_ctx->UpdateSubresource(g_vmir_b2_patch, 0, nullptr, khvp_patched, 0, 0);
+        khvp_b2->Release();
+        return true;
+    }
+
     D3D11_BOX khvp_box = { 0, 0, 0, 64, 1, 1 };
-    khvp_ctx->CopySubresourceRegion(g_vmir_b2_src, 0, 0, 0, 0, khvp_b2, 0, &khvp_box);
+    {
+        khvp_ctx->CopySubresourceRegion(g_vmir_b2_src, 0, 0, 0, 0, khvp_b2, 0, &khvp_box);
+    }
     khvp_b2->Release();
 
     ID3D11ComputeShader* khvp_old_cs = nullptr;
@@ -22433,7 +23400,9 @@ inline bool kh_vmir_patch_b2(ID3D11DeviceContext* khvp_ctx) {
     khvp_ctx->CSSetShaderResources(0, 1, &g_vmir_b2_src_srv);
     UINT khvp_keep = ~0u;
     khvp_ctx->CSSetUnorderedAccessViews(0, 1, &g_vmir_b2_out_uav, &khvp_keep);
-    khvp_ctx->Dispatch(1, 1, 1);
+    {
+        khvp_ctx->Dispatch(1, 1, 1);
+    }
 
     khvp_ctx->CSSetShader(khvp_old_cs, nullptr, 0);
     khvp_ctx->CSSetShaderResources(0, 1, &khvp_old_srv);
@@ -22442,7 +23411,9 @@ inline bool kh_vmir_patch_b2(ID3D11DeviceContext* khvp_ctx) {
     KH_SAFE_RELEASE(khvp_old_srv);
     KH_SAFE_RELEASE(khvp_old_uav);
 
-    khvp_ctx->CopyResource(g_vmir_b2_patch, g_vmir_b2_out);
+    {
+        khvp_ctx->CopyResource(g_vmir_b2_patch, g_vmir_b2_out);
+    }
     return true;
 }
 
@@ -22569,11 +23540,15 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
             // visible, depth-participating geometry only.
             if (o.fullscreen || !o.visible || o.mode == DepthMode::Off) continue;
             KhSvCaster c;
+            c.slot = khsc_i;   // KH_SEAM_INST: khObjs index for the instanced twins.
             memcpy(c.pos, o.pos, sizeof(c.pos));
             memcpy(c.size, o.size, sizeof(c.size));
             memcpy(c.rot, o.rot_m, sizeof(c.rot));
             c.rotated = o.rotated;
             c.mesh = mesh_id_clamp(o.mesh);
+            c.lod = 0;   // KH_SHADOW_LOD_DRAWN: picked below, once khv_cam exists.
+            c.lod_lock = o.lod_lock;
+            c.a_vis = true;   // KH_SEAM_CULL: decided below, once the pass matrix is final.
             {   // KH_FOOTPRINT_ALPHA (the sun census's recipe).
                 bool khsv_exp = false;
                 const float khsv_env = lifetime_envelope(o, effect_time_seconds(), khsv_exp);
@@ -22601,7 +23576,6 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
     // The engine's camera projection for this frame.
     RVExtBridge::ProjectionViewTransform khv_pv = {};
     bool khv_have = false;
-    bool khv_basis_fresh = false;   // The live basis take engaged.
 
     if (g_ro.cycle_pv_valid) { khv_pv = g_ro.cycle_pv; khv_have = true; }
     float khv_live_near = -1.0f;
@@ -22822,7 +23796,6 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
                     khv_pv.view[khlr_r][3] = 0.0f;
                 }
                 khlr_basis = true;
-                khv_basis_fresh = true;
             }
 
             // Rebuild whenever the basis moved or the camera did, from the
@@ -22996,7 +23969,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
             const float khcb_age = static_cast<float>(
                 steady_now_ms() - khcb_best->ms);
 
-            // Age-bounded so a stalled census can never encode stale measured
+            // Age-bounded so a stalled entry can never encode stale measured
             // 0-1 ms; Cold no witness available passes: a cold gate must not
             // block the first encode, and the chain beneath is no better armed.
             bool khcb_class_ok = true;
@@ -23040,7 +24013,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
         }
     }
 
-    g_svs_seam_view_fresh = khv_basis_fresh || !g_latch_held_cycle;
+    g_svs_seam_view_fresh = true;   // KH_LATCH_FOLD: the cycle PV is never a held camera now.
     memcpy(g_svs_seam_view, &khv_pv.view[0][0], sizeof(g_svs_seam_view));
     g_svs_seam_view_seq = g_svs_frame_seq;
     // The cast seed may take this view only when it is the camera: swing <= 4
@@ -23178,16 +24151,42 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
     if (!kh_view_camera_exact(khv_pv.view, khv_cam, &khv_cam_rt)) {
         extract_camera_pos(khv_pv.view, khv_cam);
     }
+    for (KhSvCaster& khsl_c : khv_list) {   // KH_SHADOW_LOD_DRAWN: the level the injection draws at this camera.
+        khsl_c.lod = kh_drawn_lod(khsl_c.mesh, khsl_c.pos, khsl_c.size, khsl_c.rot, khsl_c.rotated,
+                                  khsl_c.lod_lock, khv_cam);
+    }
     const bool khv_engcam = kh_engcam_consume(khv_pv.view, khv_cam);
     const bool khv_rebase_on = khv_engcam ? kh_rebase_vp_engcam(khv_cbf, khv_pv.view, khv_pv.projection) : kh_rebase_vp_exact(khv_cbf, khv_pv.view, khv_pv.projection, khv_cam);
     // The rebase mutates view_proj in place, so cache the post-rebase matrix,
     // not the raw one stashed above.
     memcpy(g_svs_prime_vp, khv_cbf.view_proj, sizeof(g_svs_prime_vp));
+    {   // KH_SEAM_CULL: the footprint loop's visibility, through the final matrix.
+        KhCullSet khsv_cull;
+        kh_cull_build(khv_cbf.view_proj, khv_cam, khsv_cull);
+        for (KhSvCaster& khsv_c : khv_list) {
+            const float khsv_ctr[3] = { khsv_c.pos[0], khsv_c.pos[2], khsv_c.pos[1] };   // Engine axes.
+            khsv_c.a_vis = kh_mesh_visible(khsv_cull, khsv_ctr,
+                                           kh_lod_radius_of(khsv_c.size, khsv_c.rot, khsv_c.rotated));
+        }
+    }
     memcpy(g_svs_prime_cam, khv_cam, sizeof(g_svs_prime_cam));
     g_svs_prime_rebase = khv_rebase_on;
     // The publish belongs here, not at the swing site. Gated on the rebase.
     g_svs_prime_vp_lo = khv_vp_lo;
     g_svs_prime_vp_hi = khv_vp_hi;
+    // KH_SEAM_INST: the rebase arm for the RECORD path. The per-object entries
+    // read centerRel, filled per mesh below; the instanced entries read khPass
+    // and nothing fills it per mesh, so it has to be a frame lane. Leaving it
+    // zeroed does not disable instancing - it makes KhVsCore take the absolute
+    // branch against a viewProj that IS rebased, displacing every instance by
+    // the whole camera vector. THIS MUST STAY ABOVE kh_upload_frame_cb: the
+    // frame half is copied to the GPU exactly once per pass (1.191), and the
+    // mirror prepass re-uploads this same struct verbatim, so one write serves
+    // both loops.
+    khv_cbf.kh_pass[0] = khv_cam[0];
+    khv_cbf.kh_pass[1] = khv_cam[1];
+    khv_cbf.kh_pass[2] = khv_cam[2];
+    khv_cbf.kh_pass[3] = khv_rebase_on ? 1.0f : 0.0f;
     const bool khv_frame_ok = kh_upload_frame_cb(ctx, g_res.composite_frame_cb, khv_cbf);
 
     {   // The signature covers the target DSV, the depth-clear serial, the post-rebase view-proj,
@@ -23207,6 +24206,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
             khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, khsk_c.size, sizeof(khsk_c.size));
             khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, khsk_c.rot, sizeof(khsk_c.rot));
             khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, &khsk_c.mesh, sizeof(khsk_c.mesh));
+            khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, &khsk_c.lod, sizeof(khsk_c.lod));   // KH_SHADOW_LOD_DRAWN.
             const uintptr_t khsk_vb = reinterpret_cast<uintptr_t>(g_res.mesh_vb[khsk_c.mesh]);
             khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, &khsk_vb, sizeof(khsk_vb));
         }
@@ -23222,6 +24222,100 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
         g_svs_skip_valid = false;   // Proven again by the completed pass below.
     }
 
+    // KH_SEAM_INST: the instance plan for both loops, built once. Loop A takes
+    // the opaque footprint casters (the alpha ones need a material bound per
+    // submesh and stay per object, exactly as kh_sun_draw_alpha does for the
+    // sun ladder); loop B takes every caster, as it always did. Both are sorted
+    // mesh-major so a run of one mesh collapses to a single DrawIndexedInstanced.
+    // Sorting is safe here: both loops are depth-only with LESS_EQUAL and no
+    // blending, so submission order does not reach the result, and the skip
+    // signature above was already hashed in list order.
+    bool     khv_inst_ok = false;
+    uint32_t khv_inst_a = 0;   // Loop A's lane count.
+    uint32_t khv_inst_b = 0;   // Loop B's lane count.
+    {
+        khv_inst_ok = g_res.vs_seam_inst && g_res.vs_mirror_inst &&
+                      g_res.layout_sundepth && g_res.obj_srv && !khv_list.empty();
+
+        if (khv_inst_ok) {
+            // The records the instanced entries read at t39. kh_scene_sync ran at
+            // the scan above and refilled the CPU mirror for every dirty slot;
+            // this is what brings the GPU copy up to it. The seam cannot rely on
+            // the sun ladder having synced first - it may not have run this frame.
+            khv_inst_ok = kh_objbuf_sync(ctx);
+        }
+
+        if (khv_inst_ok) {
+            const uint32_t khv_n = static_cast<uint32_t>(khv_list.size());
+            g_svs_inst_ord.clear();
+            g_svs_inst_ord.reserve(static_cast<size_t>(khv_n) * 2u);
+
+            for (uint32_t khv_i = 0; khv_i < khv_n; ++khv_i) {
+                if (!khv_list[khv_i].alpha_caster && khv_list[khv_i].a_vis) g_svs_inst_ord.push_back(khv_i);   // KH_SEAM_CULL.
+            }
+
+            khv_inst_a = static_cast<uint32_t>(g_svs_inst_ord.size());
+            for (uint32_t khv_i = 0; khv_i < khv_n; ++khv_i) g_svs_inst_ord.push_back(khv_i);
+            khv_inst_b = khv_n;
+            const std::vector<KhSvCaster>& khv_src = khv_list;
+            auto khv_bymesh = [&khv_src](uint32_t khv_x, uint32_t khv_y) {   // (mesh, level): KH_SHADOW_LOD_DRAWN.
+                return khv_src[khv_x].mesh != khv_src[khv_y].mesh ? khv_src[khv_x].mesh < khv_src[khv_y].mesh
+                                                                  : khv_src[khv_x].lod < khv_src[khv_y].lod;
+            };
+            std::stable_sort(g_svs_inst_ord.begin(), g_svs_inst_ord.begin() + khv_inst_a, khv_bymesh);
+            std::stable_sort(g_svs_inst_ord.begin() + khv_inst_a, g_svs_inst_ord.end(), khv_bymesh);
+
+            const UINT khv_need = static_cast<UINT>(khv_inst_a + khv_inst_b);
+
+            if (khv_need > g_res.seam_instance_cap) {   // Grow-only, doubling (the sun buffer's shape).
+                ID3D11Device* khv_idev = nullptr;
+                ctx->GetDevice(&khv_idev);
+
+                if (khv_idev) {
+                    KH_SAFE_RELEASE(g_res.seam_instance_vb);
+                    UINT khv_cap = g_res.seam_instance_cap > 128 ? g_res.seam_instance_cap : 128;
+                    while (khv_cap < khv_need) khv_cap *= 2;
+                    D3D11_BUFFER_DESC khv_ibd = {};
+                    khv_ibd.ByteWidth = khv_cap * KH_INST_STRIDE;
+                    khv_ibd.Usage = D3D11_USAGE_DYNAMIC;
+                    khv_ibd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+                    khv_ibd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+                    if (SUCCEEDED(khv_idev->CreateBuffer(&khv_ibd, nullptr, &g_res.seam_instance_vb))) {
+                        g_res.seam_instance_cap = khv_cap;
+                    } else {
+                        g_res.seam_instance_cap = 0;
+                    }
+
+                    khv_idev->Release();
+                }
+            }
+
+            khv_inst_ok = g_res.seam_instance_vb && khv_need <= g_res.seam_instance_cap;
+        }
+
+        if (khv_inst_ok) {   // One WRITE_DISCARD for both loops' lanes.
+            D3D11_MAPPED_SUBRESOURCE khv_im = {};
+
+            if (SUCCEEDED(ctx->Map(g_res.seam_instance_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &khv_im))) {
+                KhInstLane* khv_lane = static_cast<KhInstLane*>(khv_im.pData);
+
+                for (uint32_t khv_i = 0; khv_i < khv_inst_a + khv_inst_b; ++khv_i) {
+                    const KhSvCaster& khv_c = khv_list[g_svs_inst_ord[khv_i]];
+                    khv_lane->slot = khv_c.slot;   // KH_OBJBUF: the record index.
+                    khv_lane->dither = 0.0f;       // Unread by both seam entry points.
+                    khv_lane->alpha = khv_c.alpha;
+                    khv_lane->mat_base = 0.0f;
+                    ++khv_lane;
+                }
+
+                ctx->Unmap(g_res.seam_instance_vb, 0);
+            } else {
+                khv_inst_ok = false;   // Both loops fall back to their per-caster path.
+            }
+        }
+    }
+
     if (khv_frame_ok) {
         UINT khv_stride = sizeof(MeshVertex), khv_offset = 0;
         int khv_bound = -1;
@@ -23234,7 +24328,57 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
         ID3D11Device* khv_dev = nullptr;
         ctx->GetDevice(&khv_dev);
 
+        // KH_SEAM_CB_HOIST: ConstantData is 9,072 bytes and this loop ran
+        // once per caster - 3001 of them - so the zero-fill alone was ~27 MB
+        // a frame here and again in the mirror prepass below. Hoisted: every
+        // field the body reads (center_size, size_axes, obj_rot, and
+        // center_rel under the loop-invariant khv_rebase_on) is rewritten on
+        // every iteration, so nothing carries over into a draw - except
+        // mat_ctl, which only kh_bind_material writes (the alpha path) and
+        // which that path zeroes again on its way out, so an opaque caster
+        // after it uploads the same zeroed lanes it did per-iteration.
+        ConstantData khv_obj = {};
+
+        if (khv_inst_ok) {   // KH_SEAM_INST: one draw per mesh run, not per caster.
+            ID3D11Buffer* khv_ivb[2] = { nullptr, g_res.seam_instance_vb };
+            const UINT khv_istr[2] = { sizeof(MeshVertex), KH_INST_STRIDE };
+            const UINT khv_ioff[2] = { 0, 0 };
+            ctx->IASetInputLayout(g_res.layout_sundepth);   // VSInSeam mirrors VSInSun.
+            ctx->VSSetShader(g_res.vs_seam_inst, nullptr, 0);
+            kh_objbuf_bind(ctx);   // KH_OBJBUF: t39, the records the lane indexes.
+            uint32_t khv_first = 0;
+
+            while (khv_first < khv_inst_a) {
+                const int khv_mid = khv_list[g_svs_inst_ord[khv_first]].mesh;
+                const int khv_lod = khv_list[g_svs_inst_ord[khv_first]].lod;   // KH_SHADOW_LOD_DRAWN.
+                uint32_t khv_last = khv_first + 1;
+
+                while (khv_last < khv_inst_a &&
+                       khv_list[g_svs_inst_ord[khv_last]].mesh == khv_mid &&
+                       khv_list[g_svs_inst_ord[khv_last]].lod == khv_lod) ++khv_last;
+
+                khv_ivb[0] = g_res.mesh_vb[khv_mid];
+                ctx->IASetVertexBuffers(0, 2, khv_ivb, khv_istr, khv_ioff);
+                ctx->IASetIndexBuffer(g_res.mesh_ib[khv_mid], DXGI_FORMAT_R32_UINT, 0);
+                // The run's level range, exactly as the per-caster draw below takes
+                // it (KH_SHADOW_LOD_DRAWN: the level the injection drew).
+                UINT khv_is = 0, khv_ic = 0;
+                mesh_lod_range_of(khv_mid, khv_lod, khv_is, khv_ic);
+                ctx->DrawIndexedInstanced(khv_ic, khv_last - khv_first, khv_is, 0, khv_first);
+                khv_first = khv_last;
+            }
+
+            // Back to the opaque per-object footprint state for the alpha casters.
+            ctx->IASetInputLayout(g_res.input_layout);
+            ctx->VSSetShader(g_res.vs, nullptr, 0);
+        }
+
         for (const auto& c : khv_list) {
+            // KH_SEAM_INST: the opaque set went out instanced above. The partition
+            // is exact - alpha_caster is false for every lane that was written -
+            // so no caster is drawn twice and none is dropped.
+            if (!c.a_vis) continue;   // KH_SEAM_CULL: outside the footprint's frustum.
+            if (khv_inst_ok && !c.alpha_caster) continue;
             if (c.alpha_caster && c.alpha < 0.999f) {  continue; }   // Writes no depth in the colour
             const bool khv_want_alpha = c.alpha_caster && c.mats && khv_dev;
 
@@ -23252,7 +24396,6 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
                 khv_bound = c.mesh;
             }
 
-            ConstantData khv_obj = {};
             khv_obj.depth_params[2] = khv_vp_lo;
             khv_obj.depth_params[3] = khv_vp_hi;
             khv_obj.fx_meta[0] = 0.0f;
@@ -23264,6 +24407,10 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
             // under any displacement up to that margin. We never read those
             // Texels; only the engine s own ground shading does. Grow the
             // footprint instead of aligning it.
+            // KH_SEAM_INST: this is 1.0 and the instanced twin reads the record's
+            // extents with no grow lane, so the two agree exactly. Raising it
+            // needs a matching lane on the instance stream or the two paths
+            // rasterise different footprints.
             float khv_grow = 1.0f;
             khv_obj.size_axes[0] = c.size[0] * khv_grow;
             khv_obj.size_axes[1] = c.size[2] * khv_grow;
@@ -23285,6 +24432,8 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
                     if (!khv_ok) break;
                     ctx->DrawIndexed(khv_sm.index_count, khv_sm.index_start, 0);
                 }
+                memset(khv_obj.mat_ctl, 0, sizeof(khv_obj.mat_ctl));   // KH_SEAM_CB_HOIST: the
+                                                                       // only lanes this path dirties.
 
                 if (!khv_ok) {  break; }
                 continue;
@@ -23294,7 +24443,11 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
                 break;
             }
 
-            ctx->DrawIndexed(mesh_index_count(c.mesh), 0, 0);
+            {   // KH_SHADOW_LOD_DRAWN.
+                UINT khsl_is = 0, khsl_ic = 0;
+                mesh_lod_range_of(c.mesh, c.lod, khsl_is, khsl_ic);
+                ctx->DrawIndexed(khsl_ic, khsl_is, 0);
+            }
         }
 
         if (khv_alpha_bound) {   // The opaque footprint state again (the mirror prepass below
@@ -23322,7 +24475,9 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
             ctx->GetDevice(&khvm_dev);
             bool khvm_ok = false;
             if (khvm_dev) {
-                khvm_ok = kh_vmir_ensure_targets(khvm_dev) && kh_vmir_ensure_gpu(khvm_dev);
+                {
+                    khvm_ok = kh_vmir_ensure_targets(khvm_dev) && kh_vmir_ensure_gpu(khvm_dev);
+                }
                 khvm_dev->Release();
             }
             if (khvm_ok && g_vmir_vs) {
@@ -23340,28 +24495,65 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
                     khvm_vp.MaxDepth = 1.0f;
                     ctx->RSSetViewports(1, &khvm_vp);
                     ctx->PSSetShader(nullptr, nullptr, 0);
-                    ctx->VSSetShader(g_vmir_vs, nullptr, 0);
-                    UINT khvm_stride = sizeof(MeshVertex), khvm_offset = 0;
-                    int khvm_bound = -1;
-                    for (const auto& c : khv_list) {
-                        if (c.mesh != khvm_bound) {
-                            ctx->IASetVertexBuffers(0, 1, &g_res.mesh_vb[c.mesh],
-                                                    &khvm_stride, &khvm_offset);
-                            ctx->IASetIndexBuffer(g_res.mesh_ib[c.mesh], DXGI_FORMAT_R32_UINT, 0);
-                            khvm_bound = c.mesh;
+
+                    if (khv_inst_ok) {   // KH_SEAM_INST: one draw per mesh run, not per caster.
+                        ID3D11Buffer* khvm_ivb[2] = { nullptr, g_res.seam_instance_vb };
+                        const UINT khvm_istr[2] = { sizeof(MeshVertex), KH_INST_STRIDE };
+                        const UINT khvm_ioff[2] = { 0, 0 };
+                        ctx->IASetInputLayout(g_res.layout_sundepth);
+                        ctx->VSSetShader(g_res.vs_mirror_inst, nullptr, 0);
+                        kh_objbuf_bind(ctx);   // KH_OBJBUF: t39, the records the lane indexes.
+                        uint32_t khvm_first = 0;
+
+                        while (khvm_first < khv_inst_b) {
+                            // Loop B's lanes sit at [khv_inst_a, khv_inst_a + khv_inst_b) in
+                            // the one buffer, so every run index carries that base.
+                            const int khvm_mid = khv_list[g_svs_inst_ord[khv_inst_a + khvm_first]].mesh;
+                            const int khvm_lod = khv_list[g_svs_inst_ord[khv_inst_a + khvm_first]].lod;   // KH_SHADOW_LOD_DRAWN.
+                            uint32_t khvm_last = khvm_first + 1;
+
+                            while (khvm_last < khv_inst_b &&
+                                   khv_list[g_svs_inst_ord[khv_inst_a + khvm_last]].mesh == khvm_mid &&
+                                   khv_list[g_svs_inst_ord[khv_inst_a + khvm_last]].lod == khvm_lod) ++khvm_last;
+
+                            khvm_ivb[0] = g_res.mesh_vb[khvm_mid];
+                            ctx->IASetVertexBuffers(0, 2, khvm_ivb, khvm_istr, khvm_ioff);
+                            ctx->IASetIndexBuffer(g_res.mesh_ib[khvm_mid], DXGI_FORMAT_R32_UINT, 0);
+                            UINT khvm_is = 0, khvm_ic = 0;
+                            mesh_lod_range_of(khvm_mid, khvm_lod, khvm_is, khvm_ic);   // KH_SHADOW_LOD_DRAWN.
+                            ctx->DrawIndexedInstanced(khvm_ic, khvm_last - khvm_first, khvm_is, 0,
+                                                      khv_inst_a + khvm_first);
+                            khvm_first = khvm_last;
                         }
+                    } else {
+                        ctx->VSSetShader(g_vmir_vs, nullptr, 0);
+                        UINT khvm_stride = sizeof(MeshVertex), khvm_offset = 0;
+                        int khvm_bound = -1;
+                        // KH_SEAM_CB_HOIST: see the twin above.
                         ConstantData khvm_obj = {};
-                        khvm_obj.center_size[0] = c.pos[0];
-                        khvm_obj.center_size[1] = c.pos[2];   // SQF -> engine axes.
-                        khvm_obj.center_size[2] = c.pos[1];
-                        khvm_obj.size_axes[0] = c.size[0];
-                        khvm_obj.size_axes[1] = c.size[2];
-                        khvm_obj.size_axes[2] = c.size[1];
-                        kh_fill_obj_rot(khvm_obj, c.rot);
-                        if (khv_rebase_on) kh_fill_center_rel(khvm_obj, khv_cam);
-                        if (!kh_upload_obj_cb(ctx, g_res.composite_cb, khvm_obj)) break;
-                        ctx->DrawIndexed(mesh_index_count(c.mesh), 0, 0);
-                    }
+                        for (const auto& c : khv_list) {
+                            if (c.mesh != khvm_bound) {
+                                ctx->IASetVertexBuffers(0, 1, &g_res.mesh_vb[c.mesh],
+                                                        &khvm_stride, &khvm_offset);
+                                ctx->IASetIndexBuffer(g_res.mesh_ib[c.mesh], DXGI_FORMAT_R32_UINT, 0);
+                                khvm_bound = c.mesh;
+                            }
+                            khvm_obj.center_size[0] = c.pos[0];
+                            khvm_obj.center_size[1] = c.pos[2];   // SQF -> engine axes.
+                            khvm_obj.center_size[2] = c.pos[1];
+                            khvm_obj.size_axes[0] = c.size[0];
+                            khvm_obj.size_axes[1] = c.size[2];
+                            khvm_obj.size_axes[2] = c.size[1];
+                            kh_fill_obj_rot(khvm_obj, c.rot);
+                            if (khv_rebase_on) kh_fill_center_rel(khvm_obj, khv_cam);
+                            if (!kh_upload_obj_cb(ctx, g_res.composite_cb, khvm_obj)) break;
+                            {   // KH_SHADOW_LOD_DRAWN.
+                                UINT khsl_is = 0, khsl_ic = 0;
+                                mesh_lod_range_of(c.mesh, c.lod, khsl_is, khsl_ic);
+                                ctx->DrawIndexed(khsl_ic, khsl_is, 0);
+                            }
+                        }
+                    }   // KH_SEAM_INST: the per-caster path this replaced.
                     g_vmir_prepass_stamp = static_cast<uint32_t>(g_svs_frame_seq);
                     g_vmir_mask_time = effect_time_seconds();
                     g_vmir_prepass_src = g_svs_vol_src;
@@ -23420,7 +24612,7 @@ inline void kh_volume_seam_track(ID3D11DeviceContext* ctx, ID3D11DepthStencilVie
             }
         }
 
-        // Mask candidate latch + ordering census.
+        // Mask candidate latch.
         if (khv_cls == 0) {
 
             if (khv_has_rtv && rtvs && rtvs[0]) {
@@ -23512,8 +24704,7 @@ inline void kh_volume_seam_track(ID3D11DeviceContext* ctx, ID3D11DepthStencilVie
     }
 
     {
-        // Mask without our depth in the buffer would answer nothing. The same
-        // mistake, made again, for the modes.
+        // Mask without our depth in the buffer would answer nothing.
         if (!kh_svs_inject_armed()) {
             return;
         }
@@ -23600,13 +24791,18 @@ inline bool kh_upload_hook_wanted(ID3D11DeviceContext* self, ID3D11Resource* res
            !g_ro.in_injection &&
            g_kh_track_wanted.load(std::memory_order_relaxed) &&
            (kh_cbc_on() ||
+            kh_dl_cpu_wanted() ||   // KH_DL_CPU: every constant buffer the engine maps.
             kh_engcam_on() ||
             (!g_ro.engine_proj_valid && g_ro.cycle_pv_valid) || shadow_live_wanted() ||
-            (g_proj_locator.valid && res == g_proj_locator.buf));
+            (g_proj_locator.valid && res == g_proj_locator.buf) ||
+            // KH_MIR_CPU: the b2 the mirror patch reads. One extra buffer,
+            // uploaded a handful of times a frame; nullptr until learned.
+            (g_b2_learn && static_cast<void*>(res) == g_b2_learn));
 }
 
 // Every scanner that reads a captured upload, in the order both hooks ran them.
 inline void kh_upload_scan(ID3D11Resource* res, const void* khus_d, uint32_t khus_n) {
+    kh_b2_snap_note(res, khus_d, khus_n);   // KH_MIR_CPU (no-op until b2 is learned).
     proj_scan_upload(res, khus_d, khus_n);
     shadow_live_upload(khus_d, khus_n);
     locator_note_upload(res, khus_d, khus_n);   // fog/sun color locators (read-only).
@@ -23666,7 +24862,7 @@ static void STDMETHODCALLTYPE hooked_unmap(ID3D11DeviceContext* self, ID3D11Reso
                 // the original Unmap below runs. One WC read into the scratch
                 // (KH_UPLOAD_SCRATCH); the scanners walk the cached copy.
                 uint32_t khus_n = p.bytes;
-                const void* khus_d = kh_upload_scratch(p.data, khus_n);
+                const void* khus_d = kh_upload_capture(res, p.data, khus_n);   // KH_DL_CPU.
                 kh_upload_scan(res, khus_d, khus_n);
                 p = ProjPendingMap{};
                 break;
@@ -23684,7 +24880,7 @@ static void STDMETHODCALLTYPE hooked_updatesubresource(ID3D11DeviceContext* self
 
         if (bytes != 0) {
             uint32_t khus_n = bytes;
-            const void* khus_d = kh_upload_scratch(data, khus_n);
+            const void* khus_d = kh_upload_capture(res, data, khus_n);   // KH_DL_CPU.
             kh_upload_scan(res, khus_d, khus_n);
         }
     }
@@ -23873,8 +25069,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // (serial + stats), which is what the flush's stand-down keys on.
     uint32_t khr_elig_n = 0;
     bool     khc_any_caster = false;
-    kh_scene_sync();
-    kh_objbuf_sync(ctx);   // KH_OBJBUF: the records this pass's buckets index.
+    {
+        kh_scene_sync();
+        kh_objbuf_sync(ctx);   // KH_OBJBUF: the records this pass's buckets index.
+    }
 
     {
         for (uint32_t khsc_i = 0; khsc_i < g_scene.objs.size(); ++khsc_i) {
@@ -23922,7 +25120,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     kh_dls_frame(ctx);   // KH_DLS_FRAME twin 1/2 - after the sun, never inside it.
 
     RVExtBridge::ProjectionViewTransform pv = {};
-    float khiv_live_near = -1.0f;
 
     if (g_ro.cycle_pv_valid) {
         pv = g_ro.cycle_pv;
@@ -23930,45 +25127,12 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         RVExtBridge::ProjectionViewTransform live = {};
 
         if (RVExtBridge::get_projection_view_transform(live)) {
-            // Render thread throughout: g_latch_accept_ms is boundary-written
-            // on this same thread.
+            // Render thread throughout: the boundary camera is written on this
+            // same thread.
             float khlp_lc[3], khlp_vc[3];
             kh_cam_of(pv.view, khlp_lc);
             kh_cam_of(live.view, khlp_vc);
             const float khlp_d2 = latch_cam_dist_sq(khlp_lc, khlp_vc);
-
-            khiv_live_near = (fabsf(live.projection[2][2]) > 1.0e-9f)
-                           ? (-live.projection[3][2] / live.projection[2][2]) : -1.0f;
-
-            // In-band refresh / exclusive-pending adoption.
-            if (khiv_live_near > 0.0f) {
-                const uint64_t khlr_now = steady_now_ms();
-                const float khlr_hi = fmaxf(khiv_live_near, g_live_near_ref);
-
-                if (g_live_near_ref > 0.0f &&
-                    fabsf(khiv_live_near - g_live_near_ref) <= 0.15f * khlr_hi) {
-                    g_live_near_ref = khiv_live_near;
-                    g_live_ref_m22 = live.projection[2][2];
-                    g_live_ref_m32 = live.projection[3][2];
-                    g_live_ref_ms = khlr_now;
-                    g_live_near_pend = -1.0f;
-                } else {
-                    const float khlr_ph = fmaxf(khiv_live_near, g_live_near_pend);
-                    const bool khlr_agree = g_live_near_pend > 0.0f &&
-                        fabsf(khiv_live_near - g_live_near_pend) <= 0.15f * khlr_ph;
-
-                    if (!khlr_agree) {
-                        g_live_near_pend = khiv_live_near;
-                        g_live_pend_ms = khlr_now;
-                    } else if (khlr_now - g_live_pend_ms >= 500) {
-                        g_live_near_ref = khiv_live_near;
-                        g_live_ref_m22 = live.projection[2][2];
-                        g_live_ref_m32 = live.projection[3][2];
-                        g_live_ref_ms = khlr_now;
-                        g_live_near_pend = -1.0f;
-                    }
-                }
-            }
 
             if (khlp_d2 > KH_LATCH_JUMP_M * KH_LATCH_JUMP_M) {
                 // Prefer the clear-time boundary sample - frame-
@@ -24155,7 +25319,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
 
     const bool khr_slot_band = snap_slot_near >= KH_INJ_SLOT_NEAR_MIN;
     const bool khr_slot_sane_far = kh_enc_far(snap_slot_m22, snap_slot_m32) <= KH_ENC_FAR_MAX;
-    uint8_t khr_enc_src = measured ? 1 : 0;
     bool khr_far_phase = false;   // Far pair is this phase's truth (set at the far-inject branch).
 
 
@@ -24164,11 +25327,9 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         // depth-test against last rendered under.
         pv.projection[2][2] = snap_world_m22;
         pv.projection[3][2] = snap_world_m32;
-        khr_enc_src = 5;
     } else if (snap_slot_near > 0.0f && khr_slot_band && khr_slot_sane_far) {
         pv.projection[2][2] = snap_slot_m22;
         pv.projection[3][2] = snap_slot_m32;
-        khr_enc_src = 2;
     } else if (khr_keep_fresh) {
         const float khr_pv_near = fabsf(pv.projection[2][2]) > 1e-9f
                                 ? (-pv.projection[3][2] / pv.projection[2][2]) : -1.0f;
@@ -24179,7 +25340,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         if (khr_keep_agrees || !khr_pv_in_band) {
             pv.projection[2][2] = g_slot_keep_m22;
             pv.projection[3][2] = g_slot_keep_m32;
-            khr_enc_src = 3;
         }
     }
 
@@ -24236,36 +25396,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         // supervisor quarantine below holds (safety paths are not training
         // paths) and the end-of-draw bookkeeping counts this as a rescue, not
         // an injection.
-    }
-
-    {
-        const float khtg_near = fabsf(pv.projection[2][2]) > 1e-9f
-                              ? (-pv.projection[3][2] / pv.projection[2][2]) : -1.0f;
-
-        // The gate remains only as the backstop for latch-cold cycles.
-        if (khr_enc_src != 5 &&
-            g_live_near_ref > 0.0f && khtg_near > 0.0f &&
-            g_live_ref_ms != 0 && steady_now_ms() - g_live_ref_ms < 1000 &&
-            khtg_near < 0.25f * g_live_near_ref) {
-            bool khov_veto = false;
-
-            if (measured) {
-                const float khov_wit =
-                    kh_enc_pair_near(g_ro.engine_m22, g_ro.engine_m32);
-                khov_veto = khov_wit > 0.0f &&
-                            fabsf(khtg_near - khov_wit) <= 0.10f * khov_wit;
-            } else if (g_khbl_stable > 0.0f) {
-                khov_veto = fabsf(khtg_near - g_khbl_stable) <=
-                            0.10f * g_khbl_stable;
-            }
-
-            if (khov_veto) {
-            } else {
-                pv.projection[2][2] = g_live_ref_m22;
-                pv.projection[3][2] = g_live_ref_m32;
-                khr_enc_src = 4;
-            }
-        }
     }
 
     const float inject_near = fabsf(pv.projection[2][2]) > 1e-9f
@@ -24513,20 +25643,9 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // Translucent-correct ordering among our own meshes: back to front by the
     // camera's distance to each object's world bounds (nearest point of the
     // AABB).
-    std::sort(meshes.begin(), meshes.end(),
-              [&cam](const RenderObject& a, const RenderObject& b) {
-                  const int khs_ag = a.mode == DepthMode::Off ? 2
-                      : (!a.fullscreen && a.effect == 0 && a.blend_mode == 0 &&
-                         a.color[3] >= 0.999f) ? 0 : 1;
-                  const int khs_bg = b.mode == DepthMode::Off ? 2
-                      : (!b.fullscreen && b.effect == 0 && b.blend_mode == 0 &&
-                         b.color[3] >= 0.999f) ? 0 : 1;
-                  if (khs_ag != khs_bg) return khs_ag < khs_bg;
-                  const float khs_ad = kh_mesh_dist_sq(a, cam);
-                  const float khs_bd = kh_mesh_dist_sq(b, cam);
-                  if (khs_ag != 0) return khs_ad > khs_bd;
-                  return khs_ad < khs_bd;
-              });
+    {   // KH_MESH_ORDER: key sort, same order, one distance per object.
+        kh_mesh_order(meshes, cam);
+    }
 
     StateBackup backup;
     backup.capture(ctx);
@@ -24609,7 +25728,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     D3D11_VIEWPORT khr_nz_vp = khr_pass_vp;
     const float khr_nz_gap_lo = khr_pass_vp.MinDepth * KH_NEARZ_GAP_FRAC;
     if (khr_nz_on) khr_nz_vp.MinDepth = khr_nz_gap_lo;
-    kh_near_base_note(khr_nz_near);
     bool khr_gapvp_bound = false;   // per-draw swap state (khr_bound_rs pattern).
     ctx->GSSetShader(nullptr, nullptr, 0);
     ctx->HSSetShader(nullptr, nullptr, 0);
@@ -24670,6 +25788,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     if (g_sun2_map_valid && g_sun_pf_valid[0] && g_res.sun_pf_srv[0]) ctx->PSSetShaderResources(29, 1, &g_res.sun_pf_srv[0]);
     if (g_sun3_map_valid && g_sun_pf_valid[1] && g_res.sun_pf_srv[1]) ctx->PSSetShaderResources(30, 1, &g_res.sun_pf_srv[1]);
     if (g_sun4_map_valid && g_sun_pf_valid[2] && g_res.sun_pf_srv[2]) ctx->PSSetShaderResources(31, 1, &g_res.sun_pf_srv[2]);
+    if (g_sun5_map_valid && g_sun_pf_valid[3] && g_res.sun_pf_srv[3]) ctx->PSSetShaderResources(20, 1, &g_res.sun_pf_srv[3]);   // KH_FAR_PF.
     if (g_res.samp_pf) ctx->PSSetSamplers(1, 1, &g_res.samp_pf);
     // Analytic terrain heightfield (t10, saved range; see thmParams).
     if (g_thm_valid && g_res.thm_srv) ctx->PSSetShaderResources(10, 1, &g_res.thm_srv);
@@ -24699,7 +25818,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // this template; the frame region rides along for the CPU-side echoes, but only
     // the object slice uploads per draw. Deliberate twin of the flush build
     // (khf_cbf): same band-table loop, but this copy interleaves the g_band_tab_*
-    // publication, the sun-range publication and the gap census. A shared helper
+    // publication and the sun-range publication. A shared helper
     // would need a mode flag and eight out-params.
     ConstantData khr_cbf = {};
     memcpy(khr_cbf.view_proj, view_proj, sizeof(khr_cbf.view_proj));
@@ -24729,8 +25848,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     }
     {
         bool band_any = false;
-        uint8_t khrb_n = 0, khrb_why = 0;
-        float   khrb_near = -1.0f, khrb_age = -1.0f, khrb_cdx = -1.0f;
         // finest-first: order slots by near edge ascending, so the shader's
         // first containing band holds the finest content in the engine's
         // overlap (crossfade) zones. bandBorder.w encodes valid + which
@@ -24755,31 +25872,29 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         for (int b = 0; b < 8; ++b) {
             const auto& bs = g_ls.band[order[b]];
             khr_cbf.band_border[b][3] = 0.0f;
-            if (!bs.valid || !bs.srv) { khrb_why |= 1; continue; }
+            if (!bs.valid || !bs.srv) { continue; }
 
             // Absent beats offset: the receive term stands down for
             // KH_RECEIVE_WARMUP_S after the first capture.
             if (!g_ls.receive_warmed) {
                 if (g_ls.first_capture_time < 0.0f ||
                     effect_time_seconds() - g_ls.first_capture_time < KH_RECEIVE_WARMUP_S) {
-                     khrb_why |= 2;
                     continue;
                 }
                 g_ls.receive_warmed = true;
             }
 
-            if (!kh_recv_health()) {  khrb_why |= 4; continue; }
+            if (!kh_recv_health()) { continue; }
 
             // Absent beats offset; the band re-enters the moment its seal
             // completes. spawn-window guard: a pending band whose provisional
             // view is the bridge fallback pairs cross-convention - the
             // initial-shadow drift.
-            if (bs.pending_view && bs.vcol_bridge) {  khrb_why |= 8; continue; }
+            if (bs.pending_view && bs.vcol_bridge) {  continue; }
 
             // A pending band's vcol belongs to the epoch before the sm sitting
             // next to it - the completion that pairs them has not run yet.
             if (bs.pending_view) {
-                 khrb_why |= 16;
                 continue;
             }
 
@@ -24790,11 +25905,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             if (!(bs.border[1] > bs.border[0]) || bs.border[0] < 0.0f ||
                 bs.border[1] > 4000.0f) {
                 g_ls.band[order[b]].valid = false;   // The next resolve reseals sanely.
-                 khrb_why |= 32;
                 continue;
             }
 
-            if (bs.border[0] < prev_far - 0.5f && bs.border[1] < prev_far * 1.25f + 1.0f) { khrb_why |= 64; continue; }
+            if (bs.border[0] < prev_far - 0.5f && bs.border[1] < prev_far * 1.25f + 1.0f) { continue; }
             prev_far = bs.border[1];
             // The shader's own rule, replayed on the CPU for the caster centre:
             // finest-first, first slot whose view-z straddles the point and
@@ -24812,37 +25926,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             khr_cbf.band_border[b][2] = bs.border[2];
             khr_cbf.band_border[b][3] = 1.0f + static_cast<float>(order[b]);
             band_any = true;
-            if (khrb_n < 255) khrb_n++;
-            if (khrb_near < 0.0f || bs.border[0] < khrb_near) {
-                khrb_near = bs.border[0];
-                khrb_age = bs.last_time > 0.0f
-                         ? (effect_time_seconds() - bs.last_time) * 1000.0f : -1.0f;
-                // The band's own baked camera, out of its view columns (rows
-                // are orthonormal; origin = -sum(v[3] * v[0.2])).
-                float khrc_c[3] = { 0.0f, 0.0f, 0.0f };
-                bool  khrc_ok = true;
-                for (int khrc_j = 0; khrc_j < 3; ++khrc_j) {
-                    const float* khrc_v = &bs.vcol[khrc_j * 4];
-                    const float khrc_n = sqrtf(khrc_v[0] * khrc_v[0] +
-                                               khrc_v[1] * khrc_v[1] +
-                                               khrc_v[2] * khrc_v[2]);
-                    if (!(khrc_n > 0.9f && khrc_n < 1.1f)) { khrc_ok = false; break; }
-                    khrc_c[0] -= khrc_v[3] * khrc_v[0];
-                    khrc_c[1] -= khrc_v[3] * khrc_v[1];
-                    khrc_c[2] -= khrc_v[3] * khrc_v[2];
-                }
-                if (khrc_ok) {
-                    const float khrc_dx = khrc_c[0] - cam[0];
-                    const float khrc_dy = khrc_c[1] - cam[1];
-                    const float khrc_dz = khrc_c[2] - cam[2];
-                    const float khrc_d = sqrtf(khrc_dx * khrc_dx +
-                                               khrc_dy * khrc_dy +
-                                               khrc_dz * khrc_dz);
-                    khrb_cdx = (khrc_d == khrc_d) ? khrc_d : -1.0f;
-                } else {
-                    khrb_cdx = -1.0f;
-                }
-            }
             // Pure read per committed slot, in the shader's own consumption
             // order.
             if (b >= 0 && b < 8) {
@@ -24888,8 +25971,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             }
         }
 
-        if (band_any && kh_sun_settled() &&
-            (g_atlas_frame_cur || g_atlas_frame_prev)) {   // sun-settle gate + atlas.
+        if (band_any && g_sun_valid &&
+            (g_atlas_frame_cur || g_atlas_frame_prev)) {   // Published sun + live atlas.
             khr_cbf.mask_meta[0] = 1.0f;   // Stream liveness: the receive.
         }
         if (band_any && g_ls.atlas_size > 0) {
@@ -25108,8 +26191,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                                // Camera.
     // per-mesh route verdicts (far-keep, near-z gap), factored out of the loop
     // so the bucket plan keys every member through the same code the
-    // representative is judged by (KH_BUCKETS: route is part of the key). The
-    // loop's census lines stay where they were.
+    // representative is judged by (KH_BUCKETS: route is part of the key).
     struct KhInjRoute { bool farkeep; bool nearz; float fk_edge; };
     auto khr_route_of = [&](const RenderObject& khrv_o) -> KhInjRoute {
         KhInjRoute khrv_r;
@@ -25188,7 +26270,9 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // representative can never be admitted by one test and dropped by
     // another (the emit/loop twin contract), and every emitted lane's set
     // was ensured.
-    auto khr_vis = [&](const RenderObject& khrv_o) -> bool {
+    // KH_VIS_MEMO: the verdict, computed at most once per object per pass.
+    g_vis_memo_inj.begin(meshes);
+    auto khr_vis_calc = [&](const RenderObject& khrv_o) -> bool {
         float khrv_cc[3];
         kh_obj_center_engine(khrv_o, khrv_cc);
         if (!kh_mesh_visible(khr_cull, khrv_cc, kh_lod_radius(khrv_o))) return false;
@@ -25197,6 +26281,9 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             if (!khrv_r.farkeep && !khrv_r.nearz && kh_vis_occ_hidden(khr_occ, khrv_o)) return false;
         }
         return true;
+    };
+    auto khr_vis = [&](const RenderObject& khrv_o) -> bool {
+        return g_vis_memo_inj.get(khrv_o, khr_vis_calc);
     };
     if (khr_inst_on) {
         kh_mat_ensure_all(ctx, dev, meshes, khr_vis);   // KH_MAT_TABLE: bases fixed before any lane is written.
@@ -25406,12 +26493,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             if (!khr_vis(o)) {  continue; }
         }
 
-        // KH_MESH_OWNER_PREPASS is removed, and these two lanes are how the
-        // shader half stays inert: KhOwnerRejects is gated on shadowMeta2.w,
-        // so zeroing both here makes it unreachable in every mesh pixel shader
-        // without touching a line of HLSL. The bucket vertex path still derives
-        // an owner id into iobj1.x from its record slot - also unread, for the
-        // same reason. Restoring the feature means restoring these fills.
+        // KH_MESH_OWNER_PREPASS is removed on both sides now (the HLSL owner
+        // test went in the cleanup campaign); these two lanes are kept zero
+        // for the layout and nothing reads them. iobj1.x is 0 on both vertex
+        // paths for the same reason.
         cbd.shadow_meta2[2] = 0.0f;
         cbd.shadow_meta2[3] = 0.0f;
         if (!khr_frame_ok || !kh_upload_obj_cb(ctx, g_res.composite_cb, cbd)) continue;
@@ -25600,9 +26685,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // exact state its solid drew with (PS/VS/layout/viewport/VB from the
     // stage), dss_test, the object's blend state (normal: eligibility),
     // interiors-then-exteriors when twoSided, else back-face culled. The LOD
-    // crossfade is honoured (blendCtl.w per level, as the main loop). The owner
-    // SRVs (t33/34) are whatever the last solid left bound - the complete map.
-    // dss goes back to the pass default afterwards so the restore below sees
+    // crossfade is honoured (blendCtl.w per level, as the main loop). dss goes
+    // back to the pass default afterwards so the restore below sees
     // the state it expects.
     if (!khr_parts.empty()) {
         khr_parts_order.resize(khr_parts.size());
@@ -25991,7 +27075,11 @@ inline void kh_svs_prime_mask(ID3D11DeviceContext* ctx) {
                 break;
             }
 
-            ctx->DrawIndexed(mesh_index_count(c.mesh), 0, 0);
+            {   // KH_SHADOW_LOD_DRAWN.
+                UINT khsl_is = 0, khsl_ic = 0;
+                mesh_lod_range_of(c.mesh, c.lod, khsl_is, khsl_ic);
+                ctx->DrawIndexed(khsl_ic, khsl_is, 0);
+            }
         }
 
         if (khp_q) {
@@ -26177,106 +27265,6 @@ inline void kh_reorder_trigger(ID3D11DeviceContext* self) {
         }
     }
 
-    if (g_light_probe.valid) {
-        float khsn_amb[3]; float khsn_sun[3];
-        const bool khsn_ring = g_blk_ring_count > 0 && g_inj_blk_ms != 0 && g_inj_blk_sun[0] >= 0.0f;
-        if (khsn_ring) {
-            const float khsn_pa = g_inj_blk_amb[0] + g_inj_blk_amb[1] + g_inj_blk_amb[2];
-            const float khsn_ps = g_inj_blk_sun[0] + g_inj_blk_sun[1] + g_inj_blk_sun[2];
-            int khsn_best = -1; float khsn_bd = 1e30f;
-            // No in-band candidate = the raw nearest stands, byte-for-byte
-            // (anchor lag must not freeze us). Among in-band entries
-            // nearest-to-previous still picks the phase; the band picks the
-            // cluster - a division of labour without refusal semantics.
-            int khsn_bestb = -1; float khsn_bdb = 1e30f;
-            const bool khsn_ab = g_light_probe.anch_sun_l >= 0.0f && g_light_probe.anch_amb_l >= 0.0f;
-            for (uint32_t khsn_i = 0; khsn_i < g_blk_ring_count; ++khsn_i) {
-                const float* khsn_e = g_blk_ring[khsn_i];
-                const float khsn_da = fabsf(khsn_e[6] - khsn_pa) / fmaxf(fmaxf(khsn_e[6], khsn_pa), 0.02f);
-                const float khsn_ds = fabsf(khsn_e[7] - khsn_ps) / fmaxf(fmaxf(khsn_e[7], khsn_ps), 0.02f);
-                const float khsn_d = khsn_da + khsn_ds;
-                if (khsn_d < khsn_bd) { khsn_bd = khsn_d; khsn_best = static_cast<int>(khsn_i); }
-                if (khsn_ab &&
-                    kh_probe_anchor_band(khsn_e[7], g_light_probe.anch_sun_l) &&
-                    kh_probe_anchor_band(khsn_e[6], g_light_probe.anch_amb_l) &&
-                    khsn_d < khsn_bdb) {
-                    khsn_bdb = khsn_d; khsn_bestb = static_cast<int>(khsn_i);
-                }
-            }
-            bool khsn_starve = false;
-            if (khsn_bestb >= 0) {
-                khsn_best = khsn_bestb;
-            } else if (khsn_ab) {
-                // Starvation VS drift: the ring is homogeneous and out of the
-                // anchor band. Mirror out of band with the anchor = a real
-                // change in flight - the raw nearest tracks it (behaviour,
-                // preserved).
-                const float khsn_ma = g_light_probe.nb[8] + g_light_probe.nb[9] + g_light_probe.nb[10];
-                const float khsn_ms = g_light_probe.nb[16] + g_light_probe.nb[17] + g_light_probe.nb[18];
-                if (kh_probe_anchor_band(khsn_ms, g_light_probe.anch_sun_l) && kh_probe_anchor_band(khsn_ma, g_light_probe.anch_amb_l)) {
-                    khsn_starve = true;
-                }
-            }
-            if (khsn_starve) {   // Hold the mirror (the ring-empty path's source).
-                khsn_amb[0] = g_light_probe.nb[8];  khsn_amb[1] = g_light_probe.nb[9];  khsn_amb[2] = g_light_probe.nb[10];
-                khsn_sun[0] = g_light_probe.nb[16]; khsn_sun[1] = g_light_probe.nb[17]; khsn_sun[2] = g_light_probe.nb[18];
-            } else {
-            const float* khsn_w = g_blk_ring[khsn_best];
-            khsn_amb[0] = khsn_w[0]; khsn_amb[1] = khsn_w[1]; khsn_amb[2] = khsn_w[2];
-            khsn_sun[0] = khsn_w[3]; khsn_sun[1] = khsn_w[4]; khsn_sun[2] = khsn_w[5];
-            }
-        } else {
-            khsn_amb[0] = g_light_probe.nb[8];  khsn_amb[1] = g_light_probe.nb[9];  khsn_amb[2] = g_light_probe.nb[10];
-            khsn_sun[0] = g_light_probe.nb[16]; khsn_sun[1] = g_light_probe.nb[17]; khsn_sun[2] = g_light_probe.nb[18];
-        }
-        const float khsn_sl = khsn_sun[0] + khsn_sun[1] + khsn_sun[2];
-        const float khsn_al = khsn_amb[0] + khsn_amb[1] + khsn_amb[2];
-        // Commit unless a ring-less pick lands outside the anchor band (the
-        // refusal arm; its diagnostics were modes).
-        if (khsn_ring || g_light_probe.anch_sun_l < 0.0f ||
-            (kh_probe_anchor_band(khsn_sl, g_light_probe.anch_sun_l) &&
-             kh_probe_anchor_band(khsn_al, g_light_probe.anch_amb_l))) {
-        // Cold or stale (> 1 s) commits outright: skipTime and mission starts
-        // stay instant. Slew per channel, sums preserved in ratio (scale whole
-        // rgb triplets by the slew-limited sum ratio).
-        {
-            const uint64_t khsl_now = steady_now_ms();
-            const bool khsl_on = g_inj_blk_ms != 0 && khsl_now > g_inj_blk_ms && (khsl_now - g_inj_blk_ms) < 1000 && g_inj_blk_sun[0] >= 0.0f;
-            if (khsl_on) {
-                const float khsl_dt = (khsl_now - g_inj_blk_ms) * 0.001f;
-                const float khsl_r = 0.25f * khsl_dt;
-                float khsl_pa = g_inj_blk_amb[0] + g_inj_blk_amb[1] + g_inj_blk_amb[2];
-                float khsl_ps = g_inj_blk_sun[0] + g_inj_blk_sun[1] + g_inj_blk_sun[2];
-                float khsl_na = khsn_amb[0] + khsn_amb[1] + khsn_amb[2];
-                float khsl_ns = khsn_sun[0] + khsn_sun[1] + khsn_sun[2];
-                const float khsl_ra = fmaxf(khsl_na, 0.02f) / fmaxf(khsl_pa, 0.02f);
-                const float khsl_rs = fmaxf(khsl_ns, 0.02f) / fmaxf(khsl_ps, 0.02f);
-                const bool khsl_regime = khsl_ra > 3.0f || khsl_ra < 0.333333f || khsl_rs > 3.0f || khsl_rs < 0.333333f;
-                if (!khsl_regime) {
-                const float khsl_ca = khsl_r * fmaxf(khsl_pa, 0.02f);
-                const float khsl_cs = khsl_r * fmaxf(khsl_ps, 0.02f);
-                float khsl_ta = khsl_pa + fmaxf(-khsl_ca, fminf(khsl_ca, khsl_na - khsl_pa));
-                float khsl_ts = khsl_ps + fmaxf(-khsl_cs, fminf(khsl_cs, khsl_ns - khsl_ps));
-                if (khsl_na > 1e-6f && fabsf(khsl_ta - khsl_na) > 1e-6f * khsl_na) {
-                    const float khsl_fa = khsl_ta / khsl_na;
-                    khsn_amb[0] *= khsl_fa; khsn_amb[1] *= khsl_fa; khsn_amb[2] *= khsl_fa;
-                }
-                if (khsl_ns > 1e-6f && fabsf(khsl_ts - khsl_ns) > 1e-6f * khsl_ns) {
-                    const float khsl_fs = khsl_ts / khsl_ns;
-                    khsn_sun[0] *= khsl_fs; khsn_sun[1] *= khsl_fs; khsn_sun[2] *= khsl_fs;
-                }
-                }
-            }
-        }
-        g_inj_blk_amb[0] = khsn_amb[0];
-        g_inj_blk_amb[1] = khsn_amb[1];
-        g_inj_blk_amb[2] = khsn_amb[2];
-        g_inj_blk_sun[0] = khsn_sun[0];
-        g_inj_blk_sun[1] = khsn_sun[1];
-        g_inj_blk_sun[2] = khsn_sun[2];
-        g_inj_blk_ms = steady_now_ms();
-        }
-    }
     g_ro.in_injection = true;
     inject_composited_meshes(self);
     g_ro.in_injection = false;
@@ -26341,6 +27329,10 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
     // a cold window).
     if (!g_kh_track_wanted.load(std::memory_order_relaxed)) return;
 
+    // KH_LIGHT_BASE: a main-scene draw issued while the current lighting
+    // block is live. Not g_ro.opaque_draws - that one stops at the injection.
+    if (!g_ro.in_injection && g_ro.dsv_main && (!g_ro.blend_translucent || !g_ro.dss_nowrite)) ++g_blko_draws;
+
     if (!g_ro.in_injection) {
         kh_band_stage_commit(self);   // Land staged seals before the injection.
         shadow_note_draw(self);
@@ -26348,8 +27340,13 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
         mask_cast_engine(self);
 
         if (g_dl_mode.load(std::memory_order_relaxed) > 0 &&
-            g_ls.wanted.load(std::memory_order_relaxed) &&
-            ((++g_dl_cd_ctr & 15u) == 0)) {
+            g_ls.wanted.load(std::memory_order_relaxed)) {
+            // KH_DL_DENSE: every draw's cb11, not every 16th. Measured on one
+            // night run: pool-harvests carried on their TTL
+            // alone 33 pct -> 2.9 pct, the longest tail after a light's last
+            // sighting 1,183 -> 280 ms, the cadence mark at expiry 35 ms mean. The
+            // per-window dedupe and the arena cap bound the copies; the cost per
+            // draw is one PSGetConstantBuffers1 and a <= KH_DL_WIN_MAX compare.
             dynlights_sample_draw(self);
         }
     }
@@ -26371,11 +27368,8 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
             if (g_ro.cycle_pv_stale && g_ro.opaque_draws < 8) {
                 RVExtBridge::ProjectionViewTransform khl_pv = {};
 
-                // Continuity-gated like the clear latch: a mid-frame repair
-                // fetch can hold the same foreign publish the gate exists to
-                // refuse (rejected = stay stale, retry).
-                if (RVExtBridge::get_projection_view_transform(khl_pv) &&
-                    latch_view_continuous(khl_pv.view)) {
+                // KH_LATCH_FOLD: no continuity gate (the clear has none either).
+                if (RVExtBridge::get_projection_view_transform(khl_pv)) {
                     // The fresh view is what every consumer needs; the
                     // kept-previous projection stays.
                     if (g_ro.cycle_pv_valid) {
@@ -26905,7 +27899,7 @@ inline void kh_dls_world_pass_body(ID3D11DeviceContext* khw_ctx) {
 // The resolve hook evaluates !g_ro.in_injection before it calls here, so the flag
 // is raised inside, not around the call. Without it the mask's OM/blend/depth
 // sets, its per-caster Draws and the fullscreen Draw(3) would flow through the
-// hooks as engine draws and feed every census.
+// hooks as engine draws.
 inline void kh_dls_world_pass(ID3D11DeviceContext* khw_ctx) {
     if (!khw_ctx) return;
     const bool khw_pinj = g_ro.in_injection;
@@ -26914,8 +27908,7 @@ inline void kh_dls_world_pass(ID3D11DeviceContext* khw_ctx) {
     g_ro.in_injection = khw_pinj;
 }
 
-// This hook is census-only: it stamps the resolve draw indices when armed and
-// passes the resolve through - it never composites.
+// This hook passes the resolve through - it never composites.
 static void STDMETHODCALLTYPE hooked_resolvesubresource(ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dst_sub, ID3D11Resource* src, UINT src_sub, DXGI_FORMAT fmt) {
     if (src && g_topo_scene_tex_id &&
         static_cast<void*>(src) == g_topo_scene_tex_id &&
@@ -26981,13 +27974,6 @@ static void STDMETHODCALLTYPE hooked_pssetshaderresources(ID3D11DeviceContext* s
             }
         }
     }
-
-    // Foreign RT0, no DSV: scene-phase binds never pay the GetResource loop -
-    // slots 0-15, its own small budget.
-
-    // Pure read: classify each bound view, record array-dimension ones, pass
-    // through untouched. Budgeted and memoized per frame; behind the arm, so an
-    // unarmed session pays a single atomic load.
 
     g_orig_pssetshaderresources(self, start, n, srvs);
 }
@@ -27146,20 +28132,19 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
             g_boundary_t = effect_time_seconds();
             kh_volume_seam_frame_reset();   // One injection per frame.
 
-            // post-flush redraw census: a clear-less world redraw after the
+            // post-flush redraw: a clear-less world redraw after the
             // flush shows up as opaques drawn past the flush's stamp (normal
             // frames end at ~the stamp: translucents draw after the flush,
             // opaques do not). Field-proven detector for the accepted repaint
-            // residual.
-            {
-
-                g_cc_flush_opaques.store(0xFFFFFFFFu, std::memory_order_relaxed);
-            }
+            // residual; the sentinel re-arms it per frame.
+            g_cc_flush_opaques.store(0xFFFFFFFFu, std::memory_order_relaxed);
 
             g_topo_cycles++;
 
             // A depth clear of the main scene buffer marks the new frame:
             // Injection re-arms and the phase evidence resets.
+            kh_blk_owner_frame();   // KH_LIGHT_BASE: the ended frame's base lighting publishes.
+            kh_sun_raw_frame();   // KH_SUN_RAW: the ended frame's sun direction publishes.
             g_ro.injected = false;
             // Census: fold the ended cycle, open the next.
             g_ro.frame_cycles++;
@@ -27175,25 +28160,43 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
             g_ro.world_pair_valid = false;   // world-phase pair latch is per-cycle.
 
             if (g_sun_jump_pending) {
-                // Wipe band seals and the live cascade table; both relearn
-                // within a few frames from the engine's own re-rendered
-                // cascades.
+                // A raw publish stepped past KH_SRAW_JUMP_DEG. The band seals are
+                // NOT wiped (the former wipe was measured as nothing but a few
+                // frames of absent bands: each seal re-pairs at its next capture,
+                // which is every capture since KH_RESEAL_FOLD); the union's map hash
+                // resets below.
                 g_sun_jump_pending = false;
 
-                for (int b = 0; b < 8; ++b) {
-                    g_ls.band[b].valid = false;
-                    g_ls.band[b].pending_view = false;
-                    memset(g_ls.band[b].sm, 0, sizeof(g_ls.band[b].sm));
-                    memset(g_ls.band[b].border, 0, sizeof(g_ls.band[b].border));
-                    g_ls.band[b].last_time = 0.0f;
-                }
-
-                g_mask.sweep_settle = 0;   // The stream's content just changed sun.
-                g_mask.sweep_need = 10;   // skip-type transitions run transitional resolves for
-                                          // Several sweeps, exactly like a boundary re-engage - the
-                                          // post-skip overcast fired into them.
-                g_sun_map_valid = false;
-                g_sun2_map_valid = false;   // And so is the hero's.
+                // KH_SUN_JUMP_KEEP: this used to zero sweep_settle and demand
+                // 10 sweeps back. maskArmZeroFrames 21 against sweepResetSun 21
+                // - identical, with fov 0 and gap 3 - so this reset, and only
+                // this reset, was costing a frame of world cast every time it
+                // fired. A frame with no world cast is a frame with no
+                // world-cast shadows, and that is the flicker.
+                //
+                // sweep_settle counts coherent sweeps of the ENGINE'S MASK
+                // STREAM, and a sun change does not make that stream
+                // incoherent. The two things that do - a > 0.25 s resolve gap
+                // and a > 10% fov move - are detected at their own site, every
+                // sweep, independently of this one. What a sun change
+                // invalidates is OUR sun maps - which the hash reset below
+                // re-fits WITHOUT clearing validity (see KH_SUN_JUMP_HOLD).
+                //
+                // The original comment recorded a real defect: a post-skip
+                // overcast firing into the transitional resolves. If a
+                // whole-screen overcast reappears on a time skip, THIS is the
+                // change that did it - restore the sweep_settle reset and take
+                // the flicker back.
+                // KH_SUN_JUMP_HOLD: the mask cast fires at draw 0, BEFORE
+                // render_sun_depth runs at the injection. Clearing validity
+                // here left that fire without a map for one frame, and it
+                // took the 64-caster analytic fallback instead - 1641 mapped
+                // shadows swapped for 64 hard boxes, once per jump
+                // (sweepResetSun 14/min in dump1). The union's hash already
+                // carries the sun, so the re-fit needs no invalidation; the
+                // hash reset below only makes it unconditional. Last frame's
+                // map, a degree or so stale, ships for exactly one fire.
+                g_sun_map_hash = 0;
             }
 
             shadow_live_frame_reset();
@@ -27241,70 +28244,18 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
             if (RVExtBridge::get_projection_view_transform(pv)) {
                 g_boundary_pv = pv;
                 g_boundary_pv_valid = true;
-                // Teleports adopt via the debounce.
-                const uint64_t khc_now = steady_now_ms();
+                // KH_LATCH_FOLD: adopt (see the note at KH_LATCH_JUMP_M).
                 float khc_cam[3];
                 extract_camera_pos(pv.view, khc_cam);
-                bool khc_accept = !g_latch_cam_valid ||
-                    latch_cam_dist_sq(khc_cam, g_latch_cam) <=
-                        KH_LATCH_JUMP_M * KH_LATCH_JUMP_M;
-
-                if (!khc_accept && khc_now - g_latch_accept_ms > KH_LATCH_LOST_MS) {
-                    khc_accept = true;
-                }
-
-                if (!khc_accept && khc_now - g_latch_accept_ms > KH_LATCH_STALE_MS) {
-                    for (int khc_i = 0; khc_i < g_latch_ring_n; ++khc_i) {
-                        if (khc_now - g_latch_ring_ms[khc_i] >= KH_LATCH_RING_MS &&
-                            latch_cam_dist_sq(khc_cam, g_latch_ring[khc_i]) <=
-                                KH_LATCH_JUMP_M * KH_LATCH_JUMP_M) {
-                            khc_accept = true;   // cross-cycle confirmation: a real move.
-                            break;
-                        }
-                    }
-                    if (!khc_accept) {
-                        const float khct_c2 = latch_cam_dist_sq(khc_cam, g_latch_cam);
-                        for (int khc_i = 0; khc_i < g_latch_ring_n; ++khc_i) {
-                            if (khc_now - g_latch_ring_ms[khc_i] < KH_LATCH_RING_MS) continue;
-                            const float khct_r2 =
-                                latch_cam_dist_sq(g_latch_ring[khc_i], g_latch_cam);
-                            if (!(khct_c2 > khct_r2) || !(khct_r2 > 0.0f)) continue;
-                            const float khct_d =
-                                (khc_cam[0] - g_latch_cam[0]) * (g_latch_ring[khc_i][0] - g_latch_cam[0]) +
-                                (khc_cam[1] - g_latch_cam[1]) * (g_latch_ring[khc_i][1] - g_latch_cam[1]) +
-                                (khc_cam[2] - g_latch_cam[2]) * (g_latch_ring[khc_i][2] - g_latch_cam[2]);
-                            if (khct_d > 0.0f) {
-                                khc_accept = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                if (khc_accept) {
-                    g_cam_step_m = g_latch_cam_valid
-                                 ? sqrtf(latch_cam_dist_sq(khc_cam, g_latch_cam)) : 0.0f;
-                    g_ro.cycle_pv = pv;
-                    g_ro.cycle_pv_valid = true;
-                    g_ro.cycle_pv_stale = false;
-                    g_latch_cam[0] = khc_cam[0];
-                    g_latch_cam[1] = khc_cam[1];
-                    g_latch_cam[2] = khc_cam[2];
-                    g_latch_cam_valid = true;
-                    g_latch_accept_ms = khc_now;
-                    g_latch_ring_n = 0;
-                    g_latch_ring_w = 0;
-                    g_latch_held_cycle = false;
-                } else {
-                    g_latch_ring[g_latch_ring_w][0] = khc_cam[0];
-                    g_latch_ring[g_latch_ring_w][1] = khc_cam[1];
-                    g_latch_ring[g_latch_ring_w][2] = khc_cam[2];
-                    g_latch_ring_ms[g_latch_ring_w] = khc_now;
-                    g_latch_ring_w ^= 1;
-                    if (g_latch_ring_n < 2) g_latch_ring_n++;
-                    g_latch_held_cycle = true;
-                    g_cam_step_m = 0.0f;   // Held: the latch camera did not move.
-                }
+                g_cam_step_m = g_latch_cam_valid
+                             ? sqrtf(latch_cam_dist_sq(khc_cam, g_latch_cam)) : 0.0f;
+                g_ro.cycle_pv = pv;
+                g_ro.cycle_pv_valid = true;
+                g_ro.cycle_pv_stale = false;
+                g_latch_cam[0] = khc_cam[0];
+                g_latch_cam[1] = khc_cam[1];
+                g_latch_cam[2] = khc_cam[2];
+                g_latch_cam_valid = true;
 
             } else {
                 g_ro.cycle_pv_stale = true;
@@ -27425,165 +28376,6 @@ inline void ensure_reorder_hook() {
 // by all scene-read objects. Fully dormant (immediate return) when there is
 // nothing to do.
 
-// KH_LIGHT_RECON - see the declarations beside KH_SUN_COLD_HOLD_MS. Called once
-// per flush after publish_world_lighting and the block adoption; the render
-// thread is parked, so the rings are read without a lock (the same invariant
-// every other flush-side read of render-thread state relies on).
-inline float kh_rc_median(float* khrm_v, int khrm_n) {
-    for (int khrm_i = 1; khrm_i < khrm_n; ++khrm_i) {   // Insertion sort: n <= 64.
-        const float khrm_x = khrm_v[khrm_i];
-        int khrm_j = khrm_i - 1;
-        while (khrm_j >= 0 && khrm_v[khrm_j] > khrm_x) { khrm_v[khrm_j + 1] = khrm_v[khrm_j]; --khrm_j; }
-        khrm_v[khrm_j + 1] = khrm_x;
-    }
-    return khrm_v[khrm_n / 2];
-}
-
-inline void kh_lighting_reconcile() {
-    const uint64_t khrc_now = steady_now_ms();
-
-    // Latency close, both lanes, every flush (measurement runs under 584 too).
-    if (g_rc_sun_lat_open_ms != 0 && g_pub_valid && g_rc_sun_ring_n > 0) {
-        const uint32_t khrc_l = (g_rc_sun_ring_n - 1u) % static_cast<uint32_t>(KH_RECON_RING);
-        float khrc_dp = g_rc_sun_ring[khrc_l][0] * g_pub_dir[0] +
-                        g_rc_sun_ring[khrc_l][1] * g_pub_dir[1] +
-                        g_rc_sun_ring[khrc_l][2] * g_pub_dir[2];
-        khrc_dp = khrc_dp > 1.0f ? 1.0f : (khrc_dp < -1.0f ? -1.0f : khrc_dp);
-        if (acosf(khrc_dp) * 57.29578f <= KH_RECON_SUN_DEG) {
-            g_rc_sun_lat_open_ms = 0;
-            g_rc_sun_settle_open_ms = khrc_now;
-        }
-    }
-    if (g_rc_sun_settle_open_ms != 0 && kh_sun_settled()) {
-        g_rc_sun_settle_open_ms = 0;
-    }
-
-    if (g_rc_last_ms != 0 && khrc_now - g_rc_last_ms < KH_RECON_MS) return;
-    g_rc_last_ms = khrc_now;
-
-    // Sun: consensus of the raw cascade axes in the window.
-    if (g_pub_valid && g_sun_valid && g_sun_dir_derived_valid) {
-        float khrc_x[KH_RECON_RING], khrc_y[KH_RECON_RING], khrc_z[KH_RECON_RING];
-        int khrc_n = 0;
-        const uint32_t khrc_lim = g_rc_sun_ring_n < static_cast<uint32_t>(KH_RECON_RING)
-                                ? g_rc_sun_ring_n : static_cast<uint32_t>(KH_RECON_RING);
-        uint64_t khrc_oldest = khrc_now;
-        for (uint32_t khrc_i = 0; khrc_i < khrc_lim; ++khrc_i) {
-            if (khrc_now - g_rc_sun_ring_ms[khrc_i] > KH_RECON_WIN_MS) continue;
-            if (g_rc_sun_ring_ms[khrc_i] < khrc_oldest) khrc_oldest = g_rc_sun_ring_ms[khrc_i];
-            khrc_x[khrc_n] = g_rc_sun_ring[khrc_i][0];
-            khrc_y[khrc_n] = g_rc_sun_ring[khrc_i][1];
-            khrc_z[khrc_n] = g_rc_sun_ring[khrc_i][2];
-            khrc_n++;
-        }
-        if (khrc_n < KH_RECON_MIN_N) {
-        } else {
-            float khrc_m[3] = { kh_rc_median(khrc_x, khrc_n), kh_rc_median(khrc_y, khrc_n), kh_rc_median(khrc_z, khrc_n) };
-            const float khrc_ml = sqrtf(khrc_m[0] * khrc_m[0] + khrc_m[1] * khrc_m[1] + khrc_m[2] * khrc_m[2]);
-            if (khrc_ml > 1.0e-6f) {
-                khrc_m[0] /= khrc_ml; khrc_m[1] /= khrc_ml; khrc_m[2] /= khrc_ml;
-                float khrc_dp = khrc_m[0] * g_pub_dir[0] + khrc_m[1] * g_pub_dir[1] + khrc_m[2] * g_pub_dir[2];
-                khrc_dp = khrc_dp > 1.0f ? 1.0f : (khrc_dp < -1.0f ? -1.0f : khrc_dp);
-                const int khrc_wit = kh_rc_sun_witness(khrc_m, g_pub_dir);
-                if (acosf(khrc_dp) * 57.29578f <= KH_RECON_SUN_DEG) {
-                    if (g_sun_valid_ms != 0 && khrc_now - g_sun_valid_ms < KH_SUN_COLD_HOLD_MS) {
-                        g_sun_valid_ms = khrc_now - KH_SUN_COLD_HOLD_MS;
-                        g_sun_unstable_ms = 0;
-                    }
-                } else if (khrc_wit == 0) {
-                    // KH_RECON_SUN_WITNESS: the consensus explains the sky CB's
-                    // sun worse than the standing publish - a foreign majority
-                    // (the look-away blink), not a move.
-                } else {
-                    for (int khrc_c = 0; khrc_c < 3; ++khrc_c) {
-                        g_pub_dir[khrc_c] = khrc_m[khrc_c];
-                        g_sun_dir_derived[khrc_c] = khrc_m[khrc_c];
-                        g_sun_dir_engine[khrc_c] = khrc_m[khrc_c];
-                        g_sun_pub_prev[khrc_c] = khrc_m[khrc_c];
-                        g_cand_dir[khrc_c] = khrc_m[khrc_c];
-                    }
-                    g_cand_hold = 0;
-                    g_sun_snap_hold = 0;
-                    g_pub_boot = false;
-                    g_sun_jump_pending = true;          // One map rebuild per real move, as a jump.
-                    g_sun_last_jump_ms = khrc_now;
-                    g_sun_unstable_ms = 0;
-                    if (g_sun_valid_ms == 0 || khrc_now - g_sun_valid_ms < KH_SUN_COLD_HOLD_MS) {
-                        g_sun_valid_ms = khrc_now - KH_SUN_COLD_HOLD_MS;
-                    }
-                }
-            }
-        }
-    }
-
-    // Block: consensus of the coherent candidates in the window.
-    if (g_pub_block_valid) {
-        float khrc_l[6][KH_RECON_BLK_RING];
-        int khrc_n = 0;
-        const uint32_t khrc_lim = g_rc_blk_ring_n < static_cast<uint32_t>(KH_RECON_BLK_RING)
-                                ? g_rc_blk_ring_n : static_cast<uint32_t>(KH_RECON_BLK_RING);
-        uint64_t khrc_oldest = khrc_now;
-        for (uint32_t khrc_i = 0; khrc_i < khrc_lim; ++khrc_i) {
-            if (khrc_now - g_rc_blk_ring_ms[khrc_i] > KH_RECON_WIN_MS) continue;
-            if (g_rc_blk_ring_ms[khrc_i] < khrc_oldest) khrc_oldest = g_rc_blk_ring_ms[khrc_i];
-            for (int khrc_c = 0; khrc_c < 6; ++khrc_c) khrc_l[khrc_c][khrc_n] = g_rc_blk_ring[khrc_i][khrc_c];
-            khrc_n++;
-        }
-        if (khrc_n < KH_RECON_MIN_N) {
-        } else {
-            float khrc_m[6];
-            for (int khrc_c = 0; khrc_c < 6; ++khrc_c) khrc_m[khrc_c] = kh_rc_median(khrc_l[khrc_c], khrc_n);
-            const float khrc_al = khrc_m[0] + khrc_m[1] + khrc_m[2];
-            const float khrc_sl = khrc_m[3] + khrc_m[4] + khrc_m[5];
-            const float khrc_ral = g_pub_block_amb[0] + g_pub_block_amb[1] + g_pub_block_amb[2];
-            const float khrc_rsl = g_pub_block_sun[0] + g_pub_block_sun[1] + g_pub_block_sun[2];
-            // The invariant, taken from the window rather than a
-            // clock: if the standing level is still a live flavour in the
-            // window - at least KH_RECON_MIN_N samples and an eighth of the
-            // window inside the gates' own band around the published sun - then
-            // a dimmer consensus is a majority of a different flavour, not a
-            // change in the world, and it is refused. So it still reconciles at
-            // full speed; a real dusk moves inside the band and never reaches
-            // this.
-            uint32_t khrc_old = 0;
-            for (int khrc_i = 0; khrc_i < khrc_n; ++khrc_i) {
-                if (kh_blk_in_band(khrc_l[3][khrc_i] + khrc_l[4][khrc_i] + khrc_l[5][khrc_i], khrc_rsl)) khrc_old++;
-            }
-            const uint32_t khrc_old_bar = static_cast<uint32_t>(khrc_n / 8) > static_cast<uint32_t>(KH_RECON_MIN_N)
-                                        ? static_cast<uint32_t>(khrc_n / 8) : static_cast<uint32_t>(KH_RECON_MIN_N);
-            const bool khrc_moved = !kh_blk_in_band(khrc_al, khrc_ral) || !kh_blk_in_band(khrc_sl, khrc_rsl);
-            const bool khrc_coexist = khrc_sl < khrc_rsl && khrc_old >= khrc_old_bar;
-            const bool khrc_prop = kh_blk_proportional_dim(khrc_sl, khrc_al, khrc_rsl, khrc_ral);
-            // The same band the gates adopt within without a hold: only what
-            // they would have held is reconciled.
-            if (khrc_moved && khrc_coexist) {
-            } else if (khrc_moved && khrc_prop) {
-            } else if (khrc_moved) {
-                for (int khrc_c = 0; khrc_c < 3; ++khrc_c) {
-                    g_pub_block_amb[khrc_c] = khrc_m[khrc_c];
-                    g_pub_block_sun[khrc_c] = khrc_m[3 + khrc_c];
-                    g_light_probe.nb[8 + khrc_c] = khrc_m[khrc_c];
-                    g_light_probe.nb[16 + khrc_c] = khrc_m[3 + khrc_c];
-                    g_inj_blk_amb[khrc_c] = khrc_m[khrc_c];
-                    g_inj_blk_sun[khrc_c] = khrc_m[3 + khrc_c];
-                }
-                g_light_probe.std_amb_l = khrc_al;
-                g_light_probe.std_sun_l = khrc_sl;
-                g_light_probe.anch_amb_l = khrc_al;
-                g_light_probe.anch_sun_l = khrc_sl;
-                g_light_probe.pend_t = -1.0f;
-                g_light_probe.pend_amb_l = -1.0f;
-                g_light_probe.pend_sun_l = -1.0f;
-                g_inj_blk_ms = khrc_now;
-                g_blk_pend_ms = 0;
-                if (g_rc_blk_lat_open_ms != 0) {
-                    g_rc_blk_lat_open_ms = 0;
-                }
-            }
-        }
-    }
-}
-
 // Runs the actual per-frame work. The graphics lock is already held by the
 // caller (flush_frame). Returns after counting the skip reason if the bound
 // targets are not the main scene's.
@@ -27606,118 +28398,15 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // thread - the same invariant the injection relies on for lock-free context
     // use - so these plain stores can never be observed mid-write. Publish this
     // frame's staged world lighting for the render-thread consumers
-    // (composited-path shading, shadow recon).
+    // (composited-path shading).
     publish_world_lighting();
 
-    kh_lit_gate_publish();
-
-    {
-        const bool khb_geom_ok = g_light_probe.hits > 0 && g_light_probe.meta == 40;
-        // Variant-lane adoption stays impossible (the capture never runs on mode 2), and
-        // the continuity band + err gate + confirm window keep guarding content. Gate on
-        // the mirror's own refresh recency; last_mode stays as the fast path.
-        const bool khb_mode_ok = (g_light_probe.last_mode >= 0.5f &&
-                                  g_light_probe.last_mode < 1.5f) ||
-                                 (g_light_probe.last_std_time >= 0.0f &&
-                                  effect_time_seconds() - g_light_probe.last_std_time < 2.0f);
-        const float khb_err_bar = KH_BLK_ERR_MAX +
-                                  0.02f * fmaxf(g_cam_step_m, 0.0f) +
-                                  1.0e-3f * fabsf(g_ls.cam[1]);
-        const bool khb_err_ok = g_light_probe.last_err >= 0.0f &&
-                                g_light_probe.last_err <= khb_err_bar;
-
-        // The two lanes are sampled at different instants of the frame (std at
-        // the clear on the render thread, this block at the flush on the game
-        // thread), so what the divergence measures is that nb holds a different
-        // flavor at the flush than the one the arbitration certified at the
-        // clear - the mirror is being overwritten inside the frame by content
-        // that never earned standing.
-        if (khb_geom_ok && khb_mode_ok && khb_err_ok) {
-            float khb_amb[3], khb_sun[3];
-
-            const bool khb_snap = g_inj_blk_ms != 0 && g_inj_blk_sun[0] >= 0.0f && steady_now_ms() - g_inj_blk_ms < 1000;
-
-            for (int khc = 0; khc < 3; ++khc) {
-                khb_amb[khc] = khb_snap ? g_inj_blk_amb[khc] : g_light_probe.nb[8 + khc];
-                khb_sun[khc] = khb_snap ? g_inj_blk_sun[khc] : g_light_probe.nb[16 + khc];
-            }
-
-            const float khb_al = khb_amb[0] + khb_amb[1] + khb_amb[2];
-            const float khb_sl = khb_sun[0] + khb_sun[1] + khb_sun[2];
-            const float khb_ref_al = g_pub_block_amb[0] + g_pub_block_amb[1] + g_pub_block_amb[2];
-            const float khb_ref_sl = g_pub_block_sun[0] + g_pub_block_sun[1] + g_pub_block_sun[2];
-            const bool khb_coh = khb_snap || g_light_probe.std_sun_l < 0.0f || (fabsf(khb_al - g_light_probe.std_amb_l) <= 1.0e-3f * fmaxf(fabsf(khb_al), 1.0f) && fabsf(khb_sl - g_light_probe.std_sun_l) <= 1.0e-3f * fmaxf(fabsf(khb_sl), 1.0f));
-
-
-            bool khb_adopt = khb_coh &&
-                (khb_snap ||
-                 !g_pub_block_valid ||
-                 (kh_blk_in_band(khb_al, khb_ref_al) && kh_blk_in_band(khb_sl, khb_ref_sl)));
-
-            if (!khb_adopt && khb_coh) {
-                const uint64_t khb_now = steady_now_ms();
-                const bool khb_agree = g_blk_pend_ms != 0 &&
-                    kh_blk_in_band(khb_al, g_blk_pend_amb_l) &&
-                    kh_blk_in_band(khb_sl, g_blk_pend_sun_l);
-
-                const bool khb_collapse = khb_ref_sl > 1.0f &&
-                                          khb_sl < 0.1f * khb_ref_sl;
-                const bool khb_jump_wit = g_sun_last_jump_ms != 0 &&
-                    khb_now - g_sun_last_jump_ms < 15000;
-
-                if (khb_agree && khb_now - g_blk_pend_ms >= KH_BLK_CONFIRM_MS &&
-                    (!khb_collapse || khb_jump_wit)) {
-                    khb_adopt = true;
-                } else {
-                    if (!khb_agree) {
-                        g_blk_pend_amb_l = khb_al;
-                        g_blk_pend_sun_l = khb_sl;
-                        g_blk_pend_ms = khb_now;
-                    }
-
-                }
-            }
-
-            // Spawn a few seconds later and the window never opens. Sunset
-            // moves the standing flavour with it and never trips this. Never
-            // black, never stale-by-more-than-one-publish, never invented. The
-            // cold-start black box: A published dark block, not AN unpublished
-            // one.
-            if (khb_adopt && g_light_probe.std_sun_l > 0.5f) {
-                const float khb_cand_sl =
-                    0.2126f * khb_sun[0] + 0.7152f * khb_sun[1] + 0.0722f * khb_sun[2];
-                const float khb_cand_al =
-                    0.2126f * khb_amb[0] + 0.7152f * khb_amb[1] + 0.0722f * khb_amb[2];
-
-                // At 0.40 the gate catches ordinary publishes and the box sticks dark; 0.10
-                // passes them and leaves the rare black frame.
-                const float khb_bar = 0.10f;
-
-                if (khb_cand_sl < khb_bar * g_light_probe.std_sun_l &&
-                    (g_light_probe.std_amb_l <= 0.0f ||
-                     khb_cand_al < khb_bar * g_light_probe.std_amb_l)) {
-                    khb_adopt = false;
-                }
-            }
-
-            if (khb_adopt) {
-                for (int khc = 0; khc < 3; ++khc) {
-                    g_pub_block_amb[khc] = khb_amb[khc];
-                    g_pub_block_sun[khc] = khb_sun[khc];
-                }
-
-                g_pub_block_valid = true;
-                g_blk_pend_ms = 0;
-                if (g_rc_blk_lat_open_ms != 0) {   // KH_LIGHT_RECON latency: the gates adopted.
-                    g_rc_blk_lat_open_ms = 0;
-                }
-            }
-        }
-    }
-    kh_lighting_reconcile();   // KH_LIGHT_RECON: after the gates, once a second.
+    // The lighting block AND the sun direction are published at the main depth
+    // clear (kh_blk_owner_frame, kh_sun_raw_frame), not here: nothing on the
+    // flush arbitrates either; the lit flag is g_sun_valid itself.
 
     // Flush stamps: the serial keys the miss latch (once per flush); the opaque
-    // count feeds the post-flush redraw census at the next clear.
+    // count feeds the post-flush redraw check at the next clear.
     g_cc_flush_serial.fetch_add(1, std::memory_order_relaxed);
     g_cc_flush_opaques.store(g_ro.opaque_draws, std::memory_order_relaxed);
 
@@ -27966,15 +28655,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     if (khf_sparse_live && RVExtBridge::get_projection_view_transform(pv)) {
     } else if (g_ro.cycle_pv_valid) {
-        pv = g_ro.cycle_pv;
-        // Below KH_LATCH_JUMP_M the latch is never held, g_latch_held_cycle is
-        // false. The comment directly above already argues the case: on frames
-        // with no landing "the flush draw is the only image and freshness
-        // wins", and khf_sparse_live acts on that - but only when the scene is
-        // draw-sparse.
-        if (g_latch_held_cycle && g_boundary_pv_valid) {
-            memcpy(&pv.view[0][0], &g_boundary_pv.view[0][0], sizeof(pv.view));
-        }
+        pv = g_ro.cycle_pv;   // KH_LATCH_FOLD: the boundary camera, never a held one.
     } else if (!RVExtBridge::get_projection_view_transform(pv)) {
         return;
     }
@@ -28390,6 +29071,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     if (g_sun2_map_valid && g_sun_pf_valid[0] && g_res.sun_pf_srv[0]) ctx->PSSetShaderResources(29, 1, &g_res.sun_pf_srv[0]);
     if (g_sun3_map_valid && g_sun_pf_valid[1] && g_res.sun_pf_srv[1]) ctx->PSSetShaderResources(30, 1, &g_res.sun_pf_srv[1]);
     if (g_sun4_map_valid && g_sun_pf_valid[2] && g_res.sun_pf_srv[2]) ctx->PSSetShaderResources(31, 1, &g_res.sun_pf_srv[2]);
+    if (g_sun5_map_valid && g_sun_pf_valid[3] && g_res.sun_pf_srv[3]) ctx->PSSetShaderResources(20, 1, &g_res.sun_pf_srv[3]);   // KH_FAR_PF.
     if (g_res.samp_pf) ctx->PSSetSamplers(1, 1, &g_res.samp_pf);
     // Analytic terrain heightfield (t10, saved range) - the flush twin.
     if (g_thm_valid && g_res.thm_srv) ctx->PSSetShaderResources(10, 1, &g_res.thm_srv);
@@ -28441,8 +29123,6 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     fill_lighting_frame_cb(khf_cbf);
     {
         bool band_any = false;
-        uint8_t khrb_n = 0, khrb_why = 0;
-        float   khrb_near = -1.0f, khrb_age = -1.0f, khrb_cdx = -1.0f;
         // finest-first: order slots by near edge ascending, so the shader's
         // first containing band holds the finest content in the engine's
         // overlap (crossfade) zones. bandBorder.w encodes valid + which
@@ -28467,31 +29147,29 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         for (int b = 0; b < 8; ++b) {
             const auto& bs = g_ls.band[order[b]];
             khf_cbf.band_border[b][3] = 0.0f;
-            if (!bs.valid || !bs.srv) { khrb_why |= 1; continue; }
+            if (!bs.valid || !bs.srv) { continue; }
 
             // Absent beats offset: the receive term stands down for
             // KH_RECEIVE_WARMUP_S after the first capture.
             if (!g_ls.receive_warmed) {
                 if (g_ls.first_capture_time < 0.0f ||
                     effect_time_seconds() - g_ls.first_capture_time < KH_RECEIVE_WARMUP_S) {
-                     khrb_why |= 2;
                     continue;
                 }
                 g_ls.receive_warmed = true;
             }
 
-            if (!kh_recv_health()) {  khrb_why |= 4; continue; }
+            if (!kh_recv_health()) { continue; }
 
             // Absent beats offset; the band re-enters the moment its seal
             // completes. spawn-window guard: a pending band whose provisional
             // view is the bridge fallback pairs cross-convention - the
             // initial-shadow drift.
-            if (bs.pending_view && bs.vcol_bridge) {  khrb_why |= 8; continue; }
+            if (bs.pending_view && bs.vcol_bridge) {  continue; }
 
             // A pending band's vcol belongs to the epoch before the sm sitting
             // next to it - the completion that pairs them has not run yet.
             if (bs.pending_view) {
-                 khrb_why |= 16;
                 continue;
             }
 
@@ -28502,11 +29180,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             if (!(bs.border[1] > bs.border[0]) || bs.border[0] < 0.0f ||
                 bs.border[1] > 4000.0f) {
                 g_ls.band[order[b]].valid = false;   // The next resolve reseals sanely.
-                 khrb_why |= 32;
                 continue;
             }
 
-            if (bs.border[0] < prev_far - 0.5f && bs.border[1] < prev_far * 1.25f + 1.0f) { khrb_why |= 64; continue; }
+            if (bs.border[0] < prev_far - 0.5f && bs.border[1] < prev_far * 1.25f + 1.0f) { continue; }
             prev_far = bs.border[1];
 
             memcpy(khf_cbf.band_mat[b * 3 + 0], bs.sm + 0, 16);
@@ -28520,43 +29197,12 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             khf_cbf.band_border[b][2] = bs.border[2];
             khf_cbf.band_border[b][3] = 1.0f + static_cast<float>(order[b]);
             band_any = true;
-            if (khrb_n < 255) khrb_n++;
-            if (khrb_near < 0.0f || bs.border[0] < khrb_near) {
-                khrb_near = bs.border[0];
-                khrb_age = bs.last_time > 0.0f
-                         ? (effect_time_seconds() - bs.last_time) * 1000.0f : -1.0f;
-                // The band's own baked camera, out of its view columns (rows
-                // are orthonormal; origin = -sum(v[3] * v[0.2])).
-                float khrc_c[3] = { 0.0f, 0.0f, 0.0f };
-                bool  khrc_ok = true;
-                for (int khrc_j = 0; khrc_j < 3; ++khrc_j) {
-                    const float* khrc_v = &bs.vcol[khrc_j * 4];
-                    const float khrc_n = sqrtf(khrc_v[0] * khrc_v[0] +
-                                               khrc_v[1] * khrc_v[1] +
-                                               khrc_v[2] * khrc_v[2]);
-                    if (!(khrc_n > 0.9f && khrc_n < 1.1f)) { khrc_ok = false; break; }
-                    khrc_c[0] -= khrc_v[3] * khrc_v[0];
-                    khrc_c[1] -= khrc_v[3] * khrc_v[1];
-                    khrc_c[2] -= khrc_v[3] * khrc_v[2];
-                }
-                if (khrc_ok) {
-                    const float khrc_dx = khrc_c[0] - cam[0];
-                    const float khrc_dy = khrc_c[1] - cam[1];
-                    const float khrc_dz = khrc_c[2] - cam[2];
-                    const float khrc_d = sqrtf(khrc_dx * khrc_dx +
-                                               khrc_dy * khrc_dy +
-                                               khrc_dz * khrc_dz);
-                    khrb_cdx = (khrc_d == khrc_d) ? khrc_d : -1.0f;
-                } else {
-                    khrb_cdx = -1.0f;
-                }
-            }
         }
 
-        if (band_any && kh_sun_settled() &&
-            (g_atlas_frame_cur || g_atlas_frame_prev)) {   // sun-settle gate + atlas.
+        if (band_any && g_sun_valid &&
+            (g_atlas_frame_cur || g_atlas_frame_prev)) {   // Published sun + live atlas.
             khf_cbf.mask_meta[0] = 1.0f;   // Stream liveness: the receive.
-        }   // Stands down while the system converges or the cascade stream is dead.
+        }   // Stands down before the first publish or while the cascade stream is dead.
         khf_cbf.mask_meta[3] = kh_svs_unit_on() ? 1.0f : 0.0f;
         // The engine-view arm, flush twin.
         kh_fill_sten_proj(khf_cbf, pv.projection);
@@ -28885,20 +29531,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     // Front-to-back lets each opaque lay depth that the ones behind it then
     // fail, so an occluded fragment never enters the shadow ladder.
-    std::sort(meshes.begin(), meshes.end(),
-              [&cam](const RenderObject& a, const RenderObject& b) {
-                  const int khs_ag = a.mode == DepthMode::Off ? 2
-                      : (!a.fullscreen && a.effect == 0 && a.blend_mode == 0 &&
-                         a.color[3] >= 0.999f) ? 0 : 1;
-                  const int khs_bg = b.mode == DepthMode::Off ? 2
-                      : (!b.fullscreen && b.effect == 0 && b.blend_mode == 0 &&
-                         b.color[3] >= 0.999f) ? 0 : 1;
-                  if (khs_ag != khs_bg) return khs_ag < khs_bg;
-                  const float khs_ad = kh_mesh_dist_sq(a, cam);
-                  const float khs_bd = kh_mesh_dist_sq(b, cam);
-                  if (khs_ag != 0) return khs_ad > khs_bd;
-                  return khs_ad < khs_bd;
-              });
+    {   // KH_MESH_ORDER: key sort, same order, one distance per object.
+        kh_mesh_order(meshes, cam);
+    }
 
     KhCullSet khf_cull;
     kh_cull_build(view_proj, cam, khf_cull);
@@ -28907,10 +29542,16 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // an injection concern: only there does the pass-wide depth-write
     // contract make a cull provably output-identical). The material ensure,
     // the plan's emit and the per-object loop all call this same lambda.
-    auto khf_vis = [&](const RenderObject& khfv_o) -> bool {
+    // KH_VIS_MEMO: the injection's twin. Cheaper here (frustum only - occlusion
+    // culling is an injection concern) but still asked three times per object.
+    g_vis_memo_flush.begin(meshes);
+    auto khf_vis_calc = [&](const RenderObject& khfv_o) -> bool {
         float khfv_cc[3];
         kh_obj_center_engine(khfv_o, khfv_cc);
         return kh_mesh_visible(khf_cull, khfv_cc, kh_lod_radius(khfv_o));
+    };
+    auto khf_vis = [&](const RenderObject& khfv_o) -> bool {
+        return g_vis_memo_flush.get(khfv_o, khf_vis_calc);
     };
 
     uint32_t khf_perc_count = 0;
@@ -29308,6 +29949,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         khf_obj_cbd.blend_ctl[3] = 0.0f;   // Never leaks into the next object.
     }
 
+
     // Restore the parked pass's own viewport (the scene depth-range override
     // above covered only the mesh draws; the chain and every later consumer see
     // the original binding).
@@ -29595,7 +30237,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 // render-thread-visible globals happens inside flush_locked.
 
 // Same body, same three consumers: the shadowvis fallback (its gate kept), the
-// objectvis/objectdraw read, the key census.
+// objectvis/objectdraw read, the key scan.
 inline void stage_video_options() {
     try {
         const bool khsr_want_shadow = g_sun_range_src.load(std::memory_order_relaxed) != 2;
@@ -30454,10 +31096,11 @@ inline void ensure_draw_eh() {
 
 inline void reset_stat_counters() {
     g_stats = RenderStats{};
+    g_castocc_set.clear(); g_castocc_slack = 0.0f;
+    g_castocc_pre.active = false; g_castocc_pre_noreach = false;   // KH_CASTOCC_PRE.
+                                    // Otherwise, which reads as a huge number
+                                    // Against a freshly reset frame count.
     g_sun_churn_prev_ms = 0;
-    g_sun_axis_gap_deg = -1.0f; g_sun_axis_gap_max_deg = 0.0f;
-    g_sun_axis_sky_since_deg = -1.0f;
-    g_sun_axis_wit_gap_ms = 0;
     g_cam_step_m = -1.0f;
     g_fire_count_frame = 0;
     g_fire_clamp_painted = 0;
@@ -30472,7 +31115,6 @@ inline void reset_stat_counters() {
         g_dl.win_flips[khw_i] = 0;
     }
     g_topo_cycles = 0;
-    g_band_cap_fv_age_max_ms = 0.0f;
     g_inj_dp_valid = false;
     g_inj_dp[0] = g_inj_dp[1] = g_inj_dp[2] = g_inj_dp[3] = 0.0f;
     for (int khbt_r = 0; khbt_r < 8; ++khbt_r) {
@@ -30491,7 +31133,7 @@ inline void reset_stat_counters() {
     g_khlt_ref_ok = false;
     g_far_keep_m22 = 0.0f; g_far_keep_m32 = 0.0f; g_far_keep_far = -1.0f; g_far_keep_ms = 0;
     g_ls.band_captures = 0;
-    g_ls.band_bail_slot = 0; g_ls.band_bail_time = 0;
+    g_ls.band_bail_slot = 0;
 }
 
 // Device objects and locator/probe state go through release_shadow_device_state
@@ -30502,15 +31144,6 @@ inline void reset_session_state() {
     reset_stat_counters();
     kh_ui_mask_reset();   // Learned backbuffers, phase machine, demand flag.
     g_kh_track_wanted.store(false, std::memory_order_relaxed);   // Recomputes at the next flush.
-    g_sun_pub_prev_valid = false;   // The settle tracker restarts with the session.
-    g_sun_unstable_ms = 0;
-    g_sun_valid_ms = 0;
-    g_sun_last_jump_ms = 0;
-    g_sun_pub_travel_ref[0] = g_sun_pub_travel_ref[1] = g_sun_pub_travel_ref[2] = 0.0f;
-    g_sun_pub_travel_ref_ms = 0;   // publish-travel detector restarts with the session.
-    g_sun_pub_travel_ms = 0;
-    g_sun_fell_ms = 0;
-    g_sun_ok_prev = false;
     g_dbg_mode.store(0, std::memory_order_relaxed);
 
     {   // Error dedupe the session (a fresh session re-reports).
@@ -30522,12 +31155,6 @@ inline void reset_session_state() {
     g_sun_union_rad_held = -1.0f;
     g_sun_union_lat_held = -1.0f;
     for (int khfl_i = 0; khfl_i < 4; ++khfl_i) g_sun_fwd_held[khfl_i] = -1.0f;
-    // The walk keel is continuity - a new mission re-seeds from its own first
-    // standing sample and inherits no other mission's baseline.
-    g_blk_keel_sl = -1.0f; g_blk_keel_t = -1.0f; g_blk_keel_snap_mark = 0;
-    g_blk_sdh_first = -1.0f; g_blk_sdh_last = -1.0f;
-    g_blk_bright_seen_t = -1.0f;
-
       g_ls.wipe_deferred = false;
     // Cleared here, re-armed by the first stage_video_options.
     g_obj_vis.store(0.0f, std::memory_order_relaxed);
@@ -30539,37 +31166,30 @@ inline void reset_session_state() {
     g_lock_churn_ms_v = 0;   // lock-settle: a fresh session starts unheld.
     g_cast_ready = false;   // Readiness latch: a fresh session re-dwells.
     g_cast_ready_since_ms = 0;
-    g_sun_snap_cand[0] = g_sun_snap_cand[1] = g_sun_snap_cand[2] = 0.0f;
-    g_sun_snap_hold = 0;
-     g_first_sun_settled_t = -1.0f;
-    g_first_derived120_t = -1.0f; g_first_bandcap_t = -1.0f;
     g_recv_health_ok = false; g_recv_health_since_ms = 0;
 
     g_ls.pub_rej_streak = 0; g_ls.view_src_miss = 0;
     g_ls.last_publish_rot_err = 1.0f;
     g_ls.pub_exact_ms = 0;
-    g_ls.pub_any_ms = 0;
     g_ls.pub_fresh_ms = 0;
-    g_lit_gate_since_ms = 0;
-    g_lit_gate_pub = 0;   // The published verdict; reset per session.
 
     g_ls.cam[0] = g_ls.cam[1] = g_ls.cam[2] = 0.0f;
     g_ls.stamp_counter = 0;
-    // Published / staged / derived lighting and its debounce latch.
+    // Published / staged lighting.
     g_sun_valid = false;
     g_sun_dir_engine[0] = 0.0f; g_sun_dir_engine[1] = 1.0f; g_sun_dir_engine[2] = 0.0f;
-    g_sun_dir_derived_valid = false;
-    g_sun_dir_derived[0] = 0.0f; g_sun_dir_derived[1] = 1.0f; g_sun_dir_derived[2] = 0.0f;
-    g_sun_derived_samples = 0;
-    g_rc_sun_ring_n = 0; g_rc_blk_ring_n = 0; g_rc_last_ms = 0;
-    g_rc_sun_lat_open_ms = 0; g_rc_sun_settle_open_ms = 0; g_rc_blk_lat_open_ms = 0;
+    g_blko_draws = 0; g_blko_n = 0; g_blko_open = false; g_blko_open_i = -1;   // KH_LIGHT_BASE.
+    g_sraw_cyc_n = 0;
+    g_sraw_last_sample_ms = 0; g_sraw_last_imm_valid = false;
+    g_sraw_last_src = 0; g_sraw_pub_gap_deg = -1.0f; g_sraw_sky_gap_deg = -1.0f;
+    g_sraw_sky_prev_valid = false; g_sraw_sky_step_deg = -1.0f; g_sraw_sky_prev[0] = g_sraw_sky_prev[1] = g_sraw_sky_prev[2] = 0.0f;
     g_sun_jump_pending = false;
     g_skysun_ref_valid = false;
     g_skysun_ref[0] = g_skysun_ref[1] = g_skysun_ref[2] = 0.0f;
     g_skysun_ref_ms = 0;
     g_skysun_mot_ref_ms = 0; g_skysun_mot_deg = -1.0f;
-    g_pub_valid = false; g_cand_hold = 0;
-    g_pub_boot = false;   // Adoption ends the bootstrap.
+    g_pub_valid = false;
+    g_pub_dir[0] = g_pub_dir[1] = g_pub_dir[2] = 0.0f;
     g_fog_staged_valid = false; g_fog_valid = false;
 
     for (int k = 0; k < 3; ++k) { g_fog[k] = 0.0f; g_fog_staged[k] = 0.0f; }
@@ -30578,15 +31198,6 @@ inline void reset_session_state() {
     g_pub_block_valid = false;
     g_pub_block_amb[0] = g_pub_block_amb[1] = g_pub_block_amb[2] = 0.0f;
     g_pub_block_sun[0] = g_pub_block_sun[1] = g_pub_block_sun[2] = 0.0f;
-    g_blk_pend_amb_l = -1.0f; g_blk_pend_sun_l = -1.0f; g_blk_pend_ms = 0;
-    // The injection snapshot + continuity ring survived missions - old-mission
-    // lighting flavors biased the new mission's first ~1 s (bounded, but a
-    // reset must reproduce cold start exactly).
-    g_inj_blk_amb[0] = g_inj_blk_amb[1] = g_inj_blk_amb[2] = -1.0f;
-    g_inj_blk_sun[0] = g_inj_blk_sun[1] = g_inj_blk_sun[2] = -1.0f;
-    g_inj_blk_ms = 0;
-    memset(g_blk_ring, 0, sizeof(g_blk_ring));
-    g_blk_ring_next = 0; g_blk_ring_count = 0;
     g_prewarm_cand_res = nullptr; g_prewarm_cand_off = 0;
     g_coldlock_cand_res = nullptr; g_coldlock_cand_off = 0;
     g_last_pv_ms = 0;
@@ -30595,8 +31206,6 @@ inline void reset_session_state() {
     g_slot_keep_near = -1.0f; g_slot_keep_ms = 0;
     g_latch_cam_valid = false;
     g_latch_cam[0] = g_latch_cam[1] = g_latch_cam[2] = 0.0f;
-    g_latch_accept_ms = 0;
-    g_latch_ring_n = 0; g_latch_ring_w = 0;
     g_reorder_target_ctx.store(nullptr, std::memory_order_relaxed);
     g_ro = ReorderState{};
     g_rescue_frame_count = 0;
@@ -30621,8 +31230,6 @@ inline void reset_session_state() {
     g_khfx_verdict_serial = ~0ull; g_khfx_verdict_held = false;
     g_boundary_pv_valid = false;   // Session teardown: no stale cross-mission sample.
     g_boundary_t = -1.0f;
-    g_live_near_ref = -1.0f; g_live_ref_m22 = 0.0f; g_live_ref_m32 = 0.0f;
-    g_live_ref_ms = 0; g_live_near_pend = -1.0f; g_live_pend_ms = 0;
     g_carry_pending_serial.store(0, std::memory_order_relaxed);
     g_sr = ShadowReconState{};
     g_reorder_render_tid.store(0, std::memory_order_relaxed);

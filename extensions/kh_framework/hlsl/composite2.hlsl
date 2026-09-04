@@ -45,7 +45,7 @@ VSOutC VSCompositeInst(VSIn i, VSInst n)
     KhVsCore(i.pos, i.nrm, r.pos.xyz, khvRel, khPass.w, r.size.xyz,
              r.rot0.xyz, r.rot1.xyz, r.rot2.xyz, o.pos, o.wpos, o.wrel, o.nrm);
     o.icol = float4(r.col.rgb, n.ilane.y);
-    KhObjLanesRec(r, n.islot, n.ilane.x, o.iobj0, o.iobj1);
+    KhObjLanesRec(r, n.ilane.x, o.iobj0, o.iobj1);
 #if KH_TEXTURED
     o.uv = i.uv;
     o.tanw = float4(normalize(KhRotateR(i.tan.xyz * r.size.xyz, r.rot0.xyz, r.rot1.xyz, r.rot2.xyz)), i.tan.w);
@@ -71,22 +71,6 @@ float4 PSComposite(VSOutC i) : SV_Target
     if (khObjFarVis < 0.5f && depthParams.y < -1.0e-3f &&
         depthParams.x + depthParams.y / max(i.pos.w, 1.0e-4f) > 1.0f) discard;
     if (khObjFarVis < 0.5f && khObjCut > 0.0f && i.pos.w > khObjCut) discard;
-    // Rejecting here - before the scene read, the analytic clamp, five shadow
-    // tiers and PBR - is the early-Z this SV_Depth (late-Z) variant can never
-    // get from the hardware. The injection's own owner map says whether another
-    // admitted mesh already holds every sample of this pixel strictly nearer.
-    // Lanes zero on every non-injection fill.
-    if (shadowMeta2.w > 0.5f && khObjOwner > 0.5f &&
-        KhOwnerRejects(i.pos.xy, i.pos.z, khObjOwner, shadowMeta2.w)) {
-        // SV_Depth is mandatory on every path of the arb variant, so the raster
-        // value is written before leaving.
-#if KH_ARB_DEPTH
-        khaODepth = i.pos.z;
-#endif
-
-        discard;
-        return float4(0.0f, 0.0f, 0.0f, 0.0f);
-    }
     int2 px = clamp(int2(i.pos.xy), int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
     float rawS = GuardSceneRaw(px);
     bool sceneClear = (rawS <= 0.000001f || rawS >= 0.999999f);
@@ -316,7 +300,13 @@ float4 PSComposite(VSOutC i) : SV_Target
         // so no expression is split. PSMain's twin segment is well under budget
         // and is deliberately not split - the twins differ in whitespace only.
  
-        smf = min(smf, SunShadowFactorSelf(i.wpos, i.wrel, khBiasN));
+        // KH_SELF_SKIP_DARK: a pixel the received term already darkens to 0
+        // cannot get darker - min(0, x) = 0 - so the self ladder (the four
+        // tiers, their rings and pyramids: the costliest term in this shader)
+        // is not consulted for it. Exact: the only value it could contribute
+        // is discarded by the min. A plain if, as the N.L branch around it is,
+        // so the gradient hoisting fxc does for that branch applies here too.
+        if (smf > 0.0f) smf = min(smf, SunShadowFactorSelf(i.wpos, i.wrel, khBiasN));
         if (maskMeta.w >= 0.5f) {
             float khStenU = KhStenUnit(i.pos.xy);
             // On PSMain it is the effect ID, so the fade is not applied there

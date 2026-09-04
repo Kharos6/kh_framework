@@ -36,7 +36,7 @@ VSOut VSMainInst(VSIn i, VSInst n)
     KhVsCore(i.pos, i.nrm, r.pos.xyz, khvRel, khPass.w, r.size.xyz,
              r.rot0.xyz, r.rot1.xyz, r.rot2.xyz, o.pos, o.wpos, o.wrel, o.nrm);
     o.icol = float4(r.col.rgb, n.ilane.y);
-    KhObjLanesRec(r, n.islot, n.ilane.x, o.iobj0, o.iobj1);
+    KhObjLanesRec(r, n.ilane.x, o.iobj0, o.iobj1);
 #if KH_TEXTURED
     o.uv = i.uv;
     o.tanw = float4(normalize(KhRotateR(i.tan.xyz * r.size.xyz, r.rot0.xyz, r.rot1.xyz, r.rot2.xyz)), i.tan.w);
@@ -45,25 +45,37 @@ VSOut VSMainInst(VSIn i, VSInst n)
     return o;
 }
 
-// Twin contract: every discard the colour pass applies up to and including the
-// view-distance cut is applied here identically - a fragment the colour pass
-// would discard must never own a sample (the LOD crossfade's complementary
-// dither is the load-bearing one: without it the finer level owns the pixels it
-// dithers out and the coarser level holes).
-void PSOwner(VSOut i, out uint khow_out : SV_Target)
+// KH_SEAM_INST: the stencil-volume seam transport's instance stream. The seam
+// submitted one DrawIndexed per caster in each of its two loops - 6,002 draws
+// and 6,002 constant-buffer uploads a frame at 3,001 meshes - where the
+// structurally identical sun-depth ladder does the same work in one instanced
+// draw per mesh. The lane is the sun ladder's own (KhInstLane / VSInSun): the
+// record slot on TEXCOORD4, dither/alpha/matBase on TEXCOORD5, so
+// layout_sundepth binds both entry points below unchanged. NORMAL is declared
+// to keep that layout's slot-0 shape and is unread by the mirror twin.
+struct VSInSeam {
+    float3 pos : POSITION;
+    float3 nrm : NORMAL;
+    uint   islot : TEXCOORD4;
+    float3 ilane : TEXCOORD5;
+};
+
+// KH_SEAM_INST: loop A's twin - the footprint into the engine's volume buffer.
+// The per-object entry for this pass is VSMain, so this calls the same
+// KhVsCore and takes the same stenVol2.z = 3 remap; only the lane source
+// differs (record + khPass instead of the CB's centreSize/sizeAxes/objRot and
+// centerRel). The rebase arm is khPass.w, NOT centerRel.w - the CB's per-object
+// lane is never filled on an instanced draw, so the C++ side must fill khPass
+// for this pass or the absolute branch is taken against a rebased viewProj.
+float4 VSSeamInst(VSInSeam i) : SV_Position
 {
-    KhObjLoad(i.iobj0, i.iobj1);   // KH_OBJBUF: per draw or per instance.
-    if (khObjDither != 0.0f) {
-        float khlD = frac(52.9829189f * frac(dot(i.pos.xy, float2(0.06711056f, 0.00583715f))));
-        if (khObjDither > 0.0f) { if (khlD >= khObjDither) discard; }
-        else if (khlD < -khObjDither) discard;
-    }
-    ClipEdgeSliver(i.wpos, i.nrm);
-    ClipOwnNear(i.pos.w);
-    if (khObjFarVis < 0.5f && depthParams.y < -1.0e-3f &&
-        depthParams.x + depthParams.y / max(i.pos.w, 1.0e-4f) > 1.0f) discard;
-    if (khObjFarVis < 0.5f && khObjCut > 0.0f && i.pos.w > khObjCut) discard;
-    khow_out = KhOwnerPack(i.pos.z, khObjOwner);
+    KhObjRec r = khObjs[i.islot];
+    precise float3 khsi_rel = r.pos.xyz - khPass.xyz;
+    float4 khsi_pos;
+    float3 khsi_wpos, khsi_wrel, khsi_nrm;
+    KhVsCore(i.pos, i.nrm, r.pos.xyz, khsi_rel, khPass.w, r.size.xyz,
+             r.rot0.xyz, r.rot1.xyz, r.rot2.xyz, khsi_pos, khsi_wpos, khsi_wrel, khsi_nrm);
+    return khsi_pos;
 }
 
 // KH_OBJBUF: the sun-depth stream is the same lane the colour buckets use;
@@ -76,12 +88,14 @@ struct VSInSun {
 };
 
 struct VSInMir { float3 pos : POSITION; };
-float4 VSMirror(VSInMir i) : SV_Position
+// KH_SEAM_INST: the mirror prepass's clip transform, factored so the
+// per-object entry and its instanced twin cannot drift. Takes the position in
+// the visible box's own space, then rebuilds the projection with the near
+// plane at 0.05 from the live b2 low pair - deliberately NOT KhVsCore's
+// stenVol2.z = 3 remap, which recovers the engine's own z instead. The two
+// seam loops rasterise into different spaces and this is the difference.
+float4 KhMirClip(float3 khmv_tp)
 {
-    float3 khmv_wp = centerSize.xyz + KhRotate(i.pos * sizeAxes.xyz);
-    float3 khmv_tp = (centerRel.w > 0.5f)
-                   ? (centerRel.xyz + KhRotate(i.pos * sizeAxes.xyz))
-                   : khmv_wp;
     float4 khmv_c = mul(float4(khmv_tp, 1.0f), viewProj);
     float3 khmv_c2 = float3(engBlk[0].z, engBlk[1].z, engBlk[2].z);
     float3 khmv_c3 = float3(engBlk[0].w, engBlk[1].w, engBlk[2].w);
@@ -100,12 +114,77 @@ float4 VSMirror(VSInMir i) : SV_Position
     }
     return khmv_c;
 }
+float4 VSMirror(VSInMir i) : SV_Position
+{
+    float3 khmv_l = KhRotate(i.pos * sizeAxes.xyz);
+    float3 khmv_wp = centerSize.xyz + khmv_l;
+    return KhMirClip((centerRel.w > 0.5f) ? (centerRel.xyz + khmv_l) : khmv_wp);
+}
+
+// KH_SEAM_INST: loop B's twin. KhRotate's rotated branch over the record's own
+// rows - kh_objrec_fill always writes rot0.w = 1 and identity rows for an
+// unrotated object, so the CB entry's objRot0.w gate has no instanced
+// equivalent to take.
+float4 VSMirrorInst(VSInSeam i) : SV_Position
+{
+    KhObjRec r = khObjs[i.islot];
+    float3 khmi_l = KhRotateR(i.pos * r.size.xyz, r.rot0.xyz, r.rot1.xyz, r.rot2.xyz);
+    float3 khmi_wp = r.pos.xyz + khmi_l;
+    precise float3 khmi_rel = r.pos.xyz - khPass.xyz;
+    return KhMirClip((khPass.w > 0.5f) ? (khmi_rel + khmi_l) : khmi_wp);
+}
 float4 VSSunDepth(VSInSun i) : SV_Position
 {
     KhObjRec r = khObjs[i.islot];
     float3 lp = i.pos * r.size.xyz;
     float3 wp = r.pos.xyz + lp.x * r.rot0.xyz + lp.y * r.rot1.xyz + lp.z * r.rot2.xyz;
     return mul(float4(wp - sunOrigin.xyz, 1.0f), viewProj);
+}
+
+// KH_CAST_DISSOLVE - the engine's rule for far casters, in the map. An object
+// past the shadow distance does not cast; instead of dropping it whole, each
+// CASTER FRAGMENT is dithered out by its own distance from the camera
+// (sunOrigin, the anchor of every sun map) over the same band as the range
+// fade (KH_SUN_FADE_START .. 0.995 of mirMeta.w). Per fragment, so the far
+// corner of a mesh dissolves before its near one, and the receiver's soft
+// filter turns the dither into a smooth fade. A nearer occluder still writes
+// its depth whatever a farther one does, so unlike a depth-gap fade this
+// cannot lighten a doubly-shadowed spot. Both consumers of the maps (self
+// kernels and the world cast) read the same texels, so both agree.
+// mirMeta.w = 0 (a caster-anchored map, no camera) leaves every fragment.
+struct VSOutSunD { float4 pos : SV_Position; float3 wp : TEXCOORD0; };
+
+VSOutSunD VSSunDepthD(VSInSun i)
+{
+    VSOutSunD o;
+    KhObjRec r = khObjs[i.islot];
+    float3 lp = i.pos * r.size.xyz;
+    float3 wp = r.pos.xyz + lp.x * r.rot0.xyz + lp.y * r.rot1.xyz + lp.z * r.rot2.xyz;
+    o.pos = mul(float4(wp - sunOrigin.xyz, 1.0f), viewProj);
+    o.wp = wp;
+    return o;
+}
+
+// KH_DISSOLVE_DITHER: 4x4 Bayer, 16 levels - the SAME period as the alpha
+// twin's, on purpose. The receiver's soft filter (five bilinear taps) spans a
+// ~4x4 texel footprint, so a period-4 pattern is averaged whole by every
+// footprint and the map reads as a uniform coverage; an 8x8 pattern was
+// averaged in part, which speckled, and at far-tier texel sizes the speckle
+// shimmered with the camera. The map windows move in whole texels, so the
+// pattern is fixed in the world and does not crawl.
+float KhSunDitherMap(float2 khdm_px)
+{
+    static const float khdm_b[16] = { 0.0f, 8.0f, 2.0f, 10.0f, 12.0f, 4.0f, 14.0f, 6.0f,
+                                      3.0f, 11.0f, 1.0f, 9.0f, 15.0f, 7.0f, 13.0f, 5.0f };
+    int2 khdm_p = int2(khdm_px) & 3;
+    return (khdm_b[khdm_p.y * 4 + khdm_p.x] + 0.5f) / 16.0f;
+}
+
+void PSSunDepthD(VSOutSunD i)
+{
+    if (mirMeta.w < 0.5f) return;
+    float khsd_f = KhSunRangeFadeAt(i.wp, sunOrigin.xyz);
+    clip(khsd_f - KhSunDitherMap(i.pos.xy));
 }
 
 #if KH_TEXTURED
@@ -120,7 +199,8 @@ struct VSInSunA {
     uint   islot : TEXCOORD4;   // KH_OBJBUF (the plain twin's lane).
     float3 ilane : TEXCOORD5;   // y = the caster's colour alpha (envelope applied).
 };
-struct VSOutSunA { float4 pos : SV_Position; float2 uv : TEXCOORD0; float alpha : TEXCOORD1; };
+struct VSOutSunA { float4 pos : SV_Position; float2 uv : TEXCOORD0; float alpha : TEXCOORD1;
+                   float3 wp : TEXCOORD2; };   // wp: KH_CAST_DISSOLVE.
 
 VSOutSunA VSSunDepthA(VSInSunA i)
 {
@@ -131,6 +211,7 @@ VSOutSunA VSSunDepthA(VSInSunA i)
     o.pos = mul(float4(wp - sunOrigin.xyz, 1.0f), viewProj);
     o.uv = i.uv;
     o.alpha = i.ilane.y;
+    o.wp = wp;
     return o;
 }
 
@@ -156,6 +237,18 @@ void PSSunDepthA(VSOutSunA i)
     if (khsa_mode == 1) clip(khsa_t - matParams0.z);   // Cutout: the cutoff kills, survivors cast
                                                        // Full.
     else if (khsa_mode == 2 && KhMatRouteTexel(matParams3.y, 1.0f, i.uv) < 0.9f) khsa_a *= khsa_t;
+    // KH_CAST_DISSOLVE in the alpha twin: the distance band multiplies INTO
+    // the coverage and one dither decides, so a translucent caster dissolves
+    // with distance exactly as an opaque one does and the two dithers never
+    // interfere (two clips on the same pattern would compose as a min, not a
+    // product). Inside the band the original path is bit-identical.
+    float khsa_f = (mirMeta.w >= 0.5f) ? KhSunRangeFadeAt(i.wp, sunOrigin.xyz) : 1.0f;
+    if (khsa_f < 0.9999f) {
+        float khsa_c = khsa_a * khsa_f;
+        clip(khsa_c - 0.004f);
+        clip(khsa_c - KhSunDitherMap(i.pos.xy));
+        return;
+    }
     if (khsa_a >= 0.996f) return;                       // Solid.
     clip(khsa_a - 0.004f);                              // Transparent: casts nothing.
     clip(khsa_a - KhSunDither(i.pos.xy));               // Partial: dithered coverage.
@@ -459,29 +552,11 @@ bool KhDlswPlane(float2 khp_px, float2 khp_dims, float khp_r, float khp_zc,
 // slightly wrong shade rather than to a wrong occlusion verdict, and the
 // factor is clamped to [0,1] regardless.
 //
-// 26834 fired this pass on EVERY cycle with zero refusals - dlsWorldFires 551
-// of 551 cycles, NoState/NoSlot/SnapFails/UploadFails/NoRt all 0 - and mode
-// 531, which paints every pixel of the screen unconditionally, showed nothing
-// at all. Those two facts cannot both be true unless something between the
-// draw and the pixel is eating the result, and no lane can see inside a pixel
-// shader. Every early exit here returns 1.0, which under a multiply blend is
-// INVISIBLE, so a shader that bails on its first line and a shader that never
-// ran look identical on screen. That is the 26830 trap again, one level down.
-//
-// Mode 534 makes each exit paint a DIFFERENT FLAT COLOUR instead of 1.0, so a
-// single screenshot names the stage that is failing, per pixel:
-//
-//           constant buffer is not arriving, or not at b0
-//   GREEN   the arm arrived but castView[1].zw carries no screen dimensions -
-//           CBFrame is not arriving, or not at b1
-//   BLUE    both buffers arrived and the DEPTH is unusable at this pixel -
-//           the snapshot is empty, or the plane pick is wrong
-//   YELLOW  everything decoded; this pixel reached the lighting kernel
-//
-// If the screen stays untinted even under 534, the pixel shader is not running
-// or its output is not landing, and the fault is in the C++ pass rather than
-// anywhere below this line. That is the one outcome no colour can express, and
-// it is the most useful thing 534 can tell us.
+// Every early exit below returns 1.0, which under the multiply blend is
+// invisible - a shader that bails on its first line and one that never ran
+// look identical on screen. The per-exit flat-colour paint that once
+// disambiguated them (a retired mode) is gone with the catalog; the pass
+// is proven landing and this shape is settled.
 float4 PSDlsWorld(VSOut i) : SV_Target
 {
     const float2 khw_dims = float2(castView[1].z, castView[1].w);
@@ -647,7 +722,6 @@ float4 PSDlsWorld(VSOut i) : SV_Target
     }
 
     float hit = 0.0f;
-
     if (sunMeta.x >= 0.5f) {
         bool near_ok = false;
         float stretch = 2.0f + 3.0f / max(abs(castView[2].y), 0.15f);
@@ -657,8 +731,15 @@ float4 PSDlsWorld(VSOut i) : SV_Target
 
             if (castMat[0].w > 0.0f) {
                 // KH_CAST_OCC: constant time in the caster count.
+                // KH_OCC_N_LANE: the bound comes from the CB, not a literal. It
+                // was 256 here and KH_OCC_N in the C++ that sizes the texture,
+                // with nothing tying the two together - change one and the
+                // shader reads outside the grid or ignores part of it, silently.
+                // Zero means an unwritten lane, which reads as the old literal.
+                int khoN = (int)localityMeta.w;
+                if (khoN <= 0) khoN = 256;
                 int2 khoC = (int2)floor((pw.xz - float2(castMat[1].w, castMat[2].w)) * castMat[0].w);
-                if (khoC.x >= 0 && khoC.y >= 0 && khoC.x < 256 && khoC.y < 256) {
+                if (khoC.x >= 0 && khoC.y >= 0 && khoC.x < khoN && khoC.y < khoN) {
                     float2 khoY = khrCastOcc.Load(int3(khoC, 0));
                     if (pw.y >= khoY.x && pw.y <= khoY.y) near_ok = true;
                 }
@@ -694,12 +775,15 @@ float4 PSDlsWorld(VSOut i) : SV_Target
         // era-independent overcast mode).
         if (near_ok && khcNearOk) {
             hit = SunShadowOcclusion(pw);   // Near floor: whole-texture verdict above.
-            hit *= KhSunRangeFade(pw);   // Range fade (at the helper).
+            // KH_SUN_FADE_WIDE: the fade is measured from the FROZEN fire
+            // camera (castMat * -castView[0]), the same view pw came from,
+            // not sunOrigin (this frame's camera). With the two a frame of
+            // motion apart the band moved under the shadows every frame.
+            float3 khfc = float3(dot(-castView[0].xyz, castMat[0].xyz),
+                                 dot(-castView[0].xyz, castMat[1].xyz),
+                                 dot(-castView[0].xyz, castMat[2].xyz));
+            hit *= KhSunRangeFadeAt(pw, khfc);   // Range fade (at the helper).
         }
-
-        // What remains is either a wrong pw reaching a correct sun-map test, or
-        // our paint never reaching the screen on those frames at all, because
-        // fireMaskSrvFires runs at 0.27 per cycle against fireClampPaints at.
 
     } else {
         // AABB-shaped by construction.
@@ -763,17 +847,11 @@ float4 PSMain(VSOut i) : SV_Target
     ClipOwnNear(i.pos.w);   // Our own near plane. Twin call.
     if (khObjFarVis < 0.5f && depthParams.y < -1.0e-3f &&
         depthParams.x + depthParams.y / max(i.pos.w, 1.0e-4f) > 1.0f) discard;
-    // Twin: PSMain / PSComposite / PSEffect / PSOwner. The shared tail below is
+    // Twin: PSMain / PSComposite / PSEffect. The shared tail below is
     // kept as two copies on purpose: PSComposite interleaves KH_ARB_DEPTH blocks
     // and a khb_a lane through it, so a KhShadeTail() helper fails the site-text
     // proof (rule 1.133). Decided 26892; revisit only with a shading change.
     if (khObjFarVis < 0.5f && khObjCut > 0.0f && i.pos.w > khObjCut) discard;
-    // Identical block; inert on the flush path where the lanes are zero.
-    if (shadowMeta2.w > 0.5f && khObjOwner > 0.5f &&
-        KhOwnerRejects(i.pos.xy, i.pos.z, khObjOwner, shadowMeta2.w)) {
-        discard;
-        return float4(0.0f, 0.0f, 0.0f, 0.0f);
-    }
     // Punch-through / overlay-occlusion guard, flush-path edition: the same
     // contract as PSComposite's. The CPU arms tight margins only for
     // single-sample snapshots, matching this texture's declaration, so MSAA
@@ -872,7 +950,13 @@ float4 PSMain(VSOut i) : SV_Target
             if (maskMeta.x >= 0.5f) smf = ShadowBandFactor(i.wrel + sunOrigin.xyz);
             else                    smf = ShadowMapFactor(i.wpos);   // Yzw re-lettered (were zero).
         }
-        smf = min(smf, SunShadowFactorSelf(i.wpos, i.wrel, khBiasN));
+        // KH_SELF_SKIP_DARK: a pixel the received term already darkens to 0
+        // cannot get darker - min(0, x) = 0 - so the self ladder (the four
+        // tiers, their rings and pyramids: the costliest term in this shader)
+        // is not consulted for it. Exact: the only value it could contribute
+        // is discarded by the min. A plain if, as the N.L branch around it is,
+        // so the gradient hoisting fxc does for that branch applies here too.
+        if (smf > 0.0f) smf = min(smf, SunShadowFactorSelf(i.wpos, i.wrel, khBiasN));
         if (maskMeta.w >= 0.5f) {
             float khStenU = KhStenUnit(i.pos.xy);
             // The volume term above starts from a witness compare - the engine

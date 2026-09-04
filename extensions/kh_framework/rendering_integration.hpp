@@ -1526,6 +1526,8 @@ inline void kh_ui_mask_learn(void* id, UINT w, UINT h) {
 // same quiescence guarantee.
 inline void release_shadow_device_state();
 inline void reset_session_state();
+// Forward: KH_PIP_DEVRESET - the PIP state is declared with the PIP block.
+inline void kh_pip_reset();
 
 // Forward: the render-thread identity check lives with the reorder state.
 inline bool reorder_on_render_thread();
@@ -17854,6 +17856,12 @@ inline void release_shadow_device_state() {
     g_atlas_srv_count = 0;
     g_proj_locator = ProjLocator{};
     kh_engcam_device_reset();
+    // KH_PIP_DEVRESET: the classification cache keys on depth identities and
+    // RTV pointers, cur_identity is one, and the template belongs to the old
+    // device's frame. A recycled address after a device reset would otherwise
+    // fire the injection into a foreign RGBA16F pass, or hold PIP off until the
+    // cache happened to evict. g_pip_seen re-arms at the next classified pass.
+    kh_pip_reset();
     for (int p = 0; p < 8; ++p) g_proj_pending[p] = ProjPendingMap{};
     g_light_probe = CbColorProbe{};
     g_sky_probe = CbColorProbe{};
@@ -25132,6 +25140,13 @@ inline void kh_pip_inject(ID3D11DeviceContext* ctx) {
         cbd.blend_ctl[3] = 0.0f;
         memcpy(cbd.color, o.color, sizeof(cbd.color));
         cbd.fx0[0] = cam[0]; cbd.fx0[1] = cam[1]; cbd.fx0[2] = cam[2];
+        // KH_PIP_GUARD_OFF: PSMain's punch-through guard arms on fxParams1.x
+        // below 1e8 and reads the depth witness at t0 - which is the engine's
+        // own binding here, never ours. The zeroed template only survived it
+        // because a zero depthParams makes KhSceneMeters answer 1e9; the
+        // injection disarms it by value, and so does this pass.
+        cbd.fx1[0] = 1e9f;
+        cbd.fx1[1] = 0.0f;
         kh_fill_local_band_cb(cbd, o);
         fill_lighting_obj_cb(cbd, o);
 

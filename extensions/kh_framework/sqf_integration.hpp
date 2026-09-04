@@ -6836,6 +6836,8 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("flushes", static_cast<float>(s.flushes)));
         out.push_back(kv("uiFlushes", static_cast<float>(s.ui_flushes)));
         out.push_back(kv("injections", static_cast<float>(s.composite_injections)));
+        out.push_back(kv("pipInjections", static_cast<float>(s.pip_injections)));   // KH_PIP.
+        out.push_back(kv("pipMeshes", static_cast<float>(s.pip_meshes)));
         out.push_back(kv("injectedMeshes", static_cast<float>(s.composite_meshes)));
         out.push_back(kv("texturedDraws", static_cast<float>(s.textured_draws)));
         out.push_back(kv("fbxImports", static_cast<float>(s.fbx_imports)));

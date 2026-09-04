@@ -271,6 +271,29 @@ void PSInjDepthA(VSOut i)
                                                                                        // KH_MAT_SPLIT_TEXEL: the colour
                                                                                        // pass's own verdict.
 }
+
+// KH_DLSW_MASK_ALPHA - the world pass's self-mask carries depth-writing texels
+// only: KH_FOOTPRINT_ALPHA's rule, applied to the other consumer that drew our
+// meshes alpha-blind. A cutout hole or a blend material's translucent texel
+// writes no depth in the colour pass, so the surface at its pixel is whatever
+// is behind it - the ground seen through a fence, or through glass - and that
+// surface must receive the dynamic-light shadow exactly like the ground beside
+// it. A whole-silhouette mask marked the pixel as ours, KhDlsMaskCov exempted
+// it, and the world behind the texel drew unshadowed while the texel itself
+// carried the in-shader shadow: the lit scenery 'seen through' a shadowed
+// surface, most visible where the texel is darkest. The verdict is the colour
+// pass's own (PSInjDepthA's lines, per texel); survivors write the view
+// distance PSDlsMask writes (SV_Position.w is the clip w, the same quantity
+// VSDlsMask stores - PSComposite reads it as metres the same way).
+float4 PSDlsMaskA(VSOut i) : SV_Target
+{
+    KhMatLoad(i.matIx);   // KH_MAT_TABLE.
+    int khma_mode = (int)matParams0.y;
+    float khma_t = KhMatRoute(matParams3.y, 1.0f, i.uv);
+    if (khma_mode == 1) clip(khma_t - matParams0.z);
+    else if (khma_mode == 2) clip(KhMatRouteTexel(matParams3.y, 1.0f, i.uv) - 0.9f);   // KH_MAT_SPLIT_TOL.
+    return float4(i.pos.w, 0.0f, 0.0f, 0.0f);
+}
 #endif
 
 // Analytic mask cast: per-pixel ray-vs-AABB toward the sun, drawn into the
@@ -406,6 +429,11 @@ float4 PSDlsMask(VSOutDM i) : SV_Target
 }
 
 // The mask, read back by the world pass. The sentinel means no mesh covers it.
+// KH_DLSW_MASK_ALPHA: it carries our depth-writing texels only - an alpha
+// caster is drawn through PSDlsMaskA with its material bound, an invisible
+// (casterOnly) or whole-translucent object is not drawn at all - so 'nearer
+// than the world' means 'our surface is what the eye sees here' and nothing
+// else.
 Texture2D<float> khDlsMask : register(t37);
 // khdw_zl is the world surface's distance at the same pixel. Both are metres.
 // Every way that race can go wrong has the same signature, and it is the
@@ -530,15 +558,16 @@ bool KhDlswPlane(float2 khp_px, float2 khp_dims, float khp_r, float khp_zc,
 // khDlsWorldFactor beside DynLights; this shader's only job is to turn a
 // screen pixel into a world position and a normal.
 //
-// DEPTH AND VIEW ARE BOTH THIS FRAME'S, and that is the one place this pass
-// deliberately does NOT copy the sun's world cast. PSMaskCast reconstructs
-// through a FROZEN view because it paints at draw 0, where - as the note at
-// castViewN says outright - there IS no depth for this frame yet, so it must
-// pair depth(N-1) with view(N-1) and then reproject. This pass fires at the
-// resolve, two thirds of the way through the frame and after the world is
-// drawn, so the live depth is complete and is snapshotted immediately before
-// the draw. Pairing depth(N) with view(N) removes the whole reprojection
-// class rather than compensating for it. Everything else - the caster set,
+// THE DEPTH IS THE ENGINE'S OWN RESOLVED LINEAR DEPTH (g_mask.cast_depth,
+// adopted by identity at the resolve sweep - no snapshot of ours), and the
+// view is the frame's; that is the one place this pass deliberately does NOT
+// copy the sun's world cast. PSMaskCast reconstructs through a FROZEN view
+// because it paints at draw 0, where - as the note at castViewN says outright
+// - there IS no depth for this frame yet, so it must pair depth(N-1) with
+// view(N-1) and then reproject. This pass fires at the resolve, two thirds of
+// the way through the frame and after the world is drawn. Pairing the engine's
+// depth with the view it was drawn under removes the whole reprojection class
+// rather than compensating for it. Everything else - the caster set,
 // the eight light maps, KhDlsShadow, its filter, its bias, its fail-to-lit
 // rule - is shared with the mesh receive by construction.
 //

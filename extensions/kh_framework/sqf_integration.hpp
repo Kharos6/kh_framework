@@ -158,8 +158,6 @@ static registered_sqf_function _sqf_set_render_debug;
 static registered_sqf_function _sqf_reset_render_stats;
 static registered_sqf_function _sqf_set_ssgi_scale;
 static registered_sqf_function _sqf_flush_ui_render;
-static registered_sqf_function _sqf_dump_render_trace;
-static registered_sqf_function _sqf_dump_dynamic_lights;
 
 struct kh_command_variant {
     std::string source;
@@ -6714,10 +6712,28 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
     }
 }
 
-// Render health counters. A small, always-live set of broad numbers; nothing
-// here arms or resets anything on read.
+// Render statistics. KH_STATS_ARMED: collection is off until the first
+// getRenderStats call, which arms it and returns the merged record with the
+// counters at zero (statsArmed 0 = this call armed them); every later call
+// reports what accumulated since. resetRenderStats zeroes the counters and
+// disarms collection again. The record is the union of the former
+// getRenderStats / dumpRenderTrace / dumpDynamicLights outputs: the counters
+// and hook state, then the render-thread frame trace and the dynamic-light
+// state copied under one graphics-lock acquisition (the render thread parked)
+// and formatted after release. Trace keys keep their old names (camera = the
+// latched cycle camera); the dynamic-light keys carry a dl prefix; the two
+// former 'locked' rows are one 'traceLocked'.
 static game_value reset_render_stats_sqf() {
     try {
+        // Best effort park so the zeroing cannot tear against a render-thread
+        // increment; a lock that never comes still resets (the counters are
+        // relaxed 64-bit words, a torn count is the worst case).
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            RVExtBridge::ScopedGraphicsLock lock;
+            if (!lock.acquired()) continue;
+            RenderIntegration::reset_stat_counters();
+            return game_value(true);
+        }
         RenderIntegration::reset_stat_counters();
         return game_value(true);
     } catch (...) {
@@ -6733,8 +6749,17 @@ static game_value get_render_stats_sqf() {
             pair.push_back(game_value(v));
             return game_value(std::move(pair));
         };
+        auto kva = [](const char* k, auto_array<game_value>&& v) {
+            auto_array<game_value> pair;
+            pair.push_back(game_value(k));
+            pair.push_back(game_value(std::move(v)));
+            return game_value(std::move(pair));
+        };
 
-        uint32_t khrs_objects = 0, khrs_meshes = 0, khrs_fullscreen = 0, khrs_textured = 0, khrs_lit = 0;
+        // Arm on first call. The counters read below are zero on that call.
+        const bool khrs_was_armed = RenderIntegration::g_stats_armed.exchange(true, std::memory_order_relaxed);
+
+        uint32_t khrs_objects = 0, khrs_meshes = 0, khrs_fullscreen = 0, khrs_textured = 0, khrs_lit = 0, khrs_casters = 0;
         {
             std::lock_guard<std::mutex> g(RenderIntegration::g_draw_list_mutex);
             for (const auto& khrs_kv : RenderIntegration::g_draw_list) {
@@ -6743,59 +6768,22 @@ static game_value get_render_stats_sqf() {
                 if (o.fullscreen) ++khrs_fullscreen; else ++khrs_meshes;
                 if (o.materials) ++khrs_textured;
                 if (o.lit) ++khrs_lit;
+                if (RenderIntegration::kh_shadow_active(o)) ++khrs_casters;
             }
         }
 
-        const RenderIntegration::RenderStats& s = RenderIntegration::g_stats;
-        auto_array<game_value> out;
-        out.push_back(kv("objects", static_cast<float>(khrs_objects)));
-        out.push_back(kv("meshObjects", static_cast<float>(khrs_meshes)));
-        out.push_back(kv("fullscreenEffects", static_cast<float>(khrs_fullscreen)));
-        out.push_back(kv("texturedObjects", static_cast<float>(khrs_textured)));
-        out.push_back(kv("litObjects", static_cast<float>(khrs_lit)));
-        out.push_back(kv("meshDefs", static_cast<float>(RenderIntegration::mesh_count())));
-        out.push_back(kv("flushes", static_cast<float>(s.flushes)));
-        out.push_back(kv("uiFlushes", static_cast<float>(s.ui_flushes)));
-        out.push_back(kv("injections", static_cast<float>(s.composite_injections)));
-        out.push_back(kv("injectedMeshes", static_cast<float>(s.composite_meshes)));
-        out.push_back(kv("texturedDraws", static_cast<float>(s.textured_draws)));
-        out.push_back(kv("fbxImports", static_cast<float>(s.fbx_imports)));
-        out.push_back(kv("meshesReleased", static_cast<float>(s.meshes_released)));
-        out.push_back(kv("texturesReleased", static_cast<float>(s.textures_released)));
-        out.push_back(kv("shaderCacheHits", static_cast<float>(RenderIntegration::g_shader_cache_hits.load(std::memory_order_relaxed))));
-        out.push_back(kv("shaderCacheMisses", static_cast<float>(RenderIntegration::g_shader_cache_misses.load(std::memory_order_relaxed))));
-        out.push_back(kv("lockRetries", static_cast<float>(s.lock_retries)));
-        out.push_back(kv("lockFailedFrames", static_cast<float>(s.lock_failed_frames)));
-        out.push_back(kv("hookActive", RenderIntegration::g_reorder_hook_active.load(std::memory_order_relaxed) ? 1.0f : 0.0f));
-        out.push_back(kv("hookFailed", RenderIntegration::g_reorder_hook_failed ? 1.0f : 0.0f));
-        return game_value(std::move(out));
-    } catch (...) {
-        report_error("getRenderStats: unknown exception");
-        return game_value(auto_array<game_value>());
-    }
-}
-
-// One record of the current render-thread frame state, copied under the
-// graphics lock (parking the render thread) and formatted after release.
-static game_value dump_render_trace_sqf() {
-    try {
-        auto kv = [](const char* k, float v) {
-            auto_array<game_value> pair;
-            pair.push_back(game_value(k));
-            pair.push_back(game_value(v));
-            return game_value(std::move(pair));
-        };
-        auto kva = [](const char* k, auto_array<game_value>&& v) {
-            auto_array<game_value> pair;
-            pair.push_back(game_value(k));
-            pair.push_back(game_value(std::move(v)));
-            return game_value(std::move(pair));
-        };
-
+        // One park for the trace and the dynamic-light snapshot.
         uint64_t khrt_cycles = 0, khrt_clears = 0, khrt_flush_frame = 0;
         uint32_t khrt_opaques = 0, khrt_samples = 0, khrt_cw = 0, khrt_ch = 0, khrt_cs = 0;
         bool khrt_injected = false, khrt_pv = false, khrt_main = false, khrt_tid = false, khrt_got = false;
         float khrt_cam[3] = {};
+        bool khd_valid = false, khd_view_valid = false;
+        uint32_t khd_point_n = 0, khd_spot_n = 0, khd_pool_n = 0;
+        float khd_cam[3] = {};
+        static std::vector<float> khd_lights;   // point_n + spot_n records x 24.
+        static std::vector<float> khd_pool;     // pool_n x 4: x, y, z, spot.
+        khd_lights.clear();
+        khd_pool.clear();
 
         for (int attempt = 0; attempt < 4 && !khrt_got; ++attempt) {
             RVExtBridge::ScopedGraphicsLock lock;
@@ -6813,17 +6801,60 @@ static game_value dump_render_trace_sqf() {
             khrt_main = RenderIntegration::g_main_depth_identity != nullptr;
             khrt_tid = RenderIntegration::g_reorder_render_tid.load(std::memory_order_relaxed) != 0;
             for (int i = 0; i < 3; ++i) khrt_cam[i] = RenderIntegration::g_latch_cam[i];
+
+            const RenderIntegration::DynLightsState& khd = RenderIntegration::g_dl;
+            khd_valid = khd.valid;
+            khd_view_valid = khd.view_valid;
+            khd_point_n = khd.point_n;
+            khd_spot_n = khd.spot_n;
+            khd_pool_n = khd.pool_n < khd.pool.size() ? khd.pool_n : static_cast<uint32_t>(khd.pool.size());
+            for (int i = 0; i < 3; ++i) khd_cam[i] = khd.cam[i];
+            uint32_t khd_n = khd_point_n + khd_spot_n;
+            if (khd_n > RenderIntegration::KH_DL_MAX_LIGHTS) khd_n = RenderIntegration::KH_DL_MAX_LIGHTS;
+            khd_lights.assign(khd.lights, khd.lights + static_cast<size_t>(khd_n) * 24u);
+            khd_pool.reserve(static_cast<size_t>(khd_pool_n) * 4u);
+            for (uint32_t i = 0; i < khd_pool_n; ++i) {
+                const RenderIntegration::DlPoolLight& p = khd.pool[i];
+                khd_pool.push_back(p.rec[0]);
+                khd_pool.push_back(p.rec[1]);
+                khd_pool.push_back(p.rec[2]);
+                khd_pool.push_back(static_cast<float>(p.spot));
+            }
             khrt_got = true;
         }
 
+        const RenderIntegration::RenderStats& s = RenderIntegration::g_stats;
         auto_array<game_value> out;
-        out.push_back(kv("locked", khrt_got ? 1.0f : 0.0f));
+        out.push_back(kv("statsArmed", khrs_was_armed ? 1.0f : 0.0f));
+        out.push_back(kv("objects", static_cast<float>(khrs_objects)));
+        out.push_back(kv("meshObjects", static_cast<float>(khrs_meshes)));
+        out.push_back(kv("fullscreenEffects", static_cast<float>(khrs_fullscreen)));
+        out.push_back(kv("texturedObjects", static_cast<float>(khrs_textured)));
+        out.push_back(kv("litObjects", static_cast<float>(khrs_lit)));
+        out.push_back(kv("shadowActiveObjects", static_cast<float>(khrs_casters)));
+        out.push_back(kv("meshDefs", static_cast<float>(RenderIntegration::mesh_count())));
+        out.push_back(kv("flushes", static_cast<float>(s.flushes)));
+        out.push_back(kv("uiFlushes", static_cast<float>(s.ui_flushes)));
+        out.push_back(kv("injections", static_cast<float>(s.composite_injections)));
+        out.push_back(kv("injectedMeshes", static_cast<float>(s.composite_meshes)));
+        out.push_back(kv("texturedDraws", static_cast<float>(s.textured_draws)));
+        out.push_back(kv("fbxImports", static_cast<float>(s.fbx_imports)));
+        out.push_back(kv("meshesReleased", static_cast<float>(s.meshes_released)));
+        out.push_back(kv("texturesReleased", static_cast<float>(s.textures_released)));
+        out.push_back(kv("shaderCacheHits", static_cast<float>(RenderIntegration::g_shader_cache_hits.load(std::memory_order_relaxed))));
+        out.push_back(kv("shaderCacheMisses", static_cast<float>(RenderIntegration::g_shader_cache_misses.load(std::memory_order_relaxed))));
+        out.push_back(kv("lockRetries", static_cast<float>(s.lock_retries)));
+        out.push_back(kv("lockFailedFrames", static_cast<float>(s.lock_failed_frames)));
+        out.push_back(kv("hookActive", RenderIntegration::g_reorder_hook_active.load(std::memory_order_relaxed) ? 1.0f : 0.0f));
+        out.push_back(kv("hookFailed", RenderIntegration::g_reorder_hook_failed ? 1.0f : 0.0f));
+
+        // The frame trace (formerly dumpRenderTrace).
+        out.push_back(kv("traceLocked", khrt_got ? 1.0f : 0.0f));
         out.push_back(kv("frameCycles", static_cast<float>(khrt_cycles)));
         out.push_back(kv("depthClears", static_cast<float>(khrt_clears)));
         out.push_back(kv("flushFrame", static_cast<float>(khrt_flush_frame)));
         out.push_back(kv("opaqueDraws", static_cast<float>(khrt_opaques)));
         out.push_back(kv("injectedThisCycle", khrt_injected ? 1.0f : 0.0f));
-        out.push_back(kv("hookActive", RenderIntegration::g_reorder_hook_active.load(std::memory_order_relaxed) ? 1.0f : 0.0f));
         out.push_back(kv("renderThreadKnown", khrt_tid ? 1.0f : 0.0f));
         out.push_back(kv("mainDepthKnown", khrt_main ? 1.0f : 0.0f));
         out.push_back(kv("sceneDepthSamples", static_cast<float>(khrt_samples)));
@@ -6840,82 +6871,41 @@ static game_value dump_render_trace_sqf() {
             for (int i = 0; i < 3; ++i) cam.push_back(game_value(khrt_cam[i]));
             out.push_back(kva("camera", std::move(cam)));
         }
-        return game_value(std::move(out));
-    } catch (...) {
-        report_error("dumpRenderTrace: unknown exception");
-        return game_value(auto_array<game_value>());
-    }
-}
 
-// The dynamic-light state as the renderer holds it now: the active light
-// records (24 floats each, engine layout) and the merged absolute-world pool.
-// Copied under the graphics lock, formatted after release.
-static game_value dump_dynamic_lights_sqf() {
-    try {
-        auto kv = [](const char* k, float v) {
-            auto_array<game_value> pair;
-            pair.push_back(game_value(k));
-            pair.push_back(game_value(v));
-            return game_value(std::move(pair));
-        };
-        auto kva = [](const char* k, auto_array<game_value>&& v) {
-            auto_array<game_value> pair;
-            pair.push_back(game_value(k));
-            pair.push_back(game_value(std::move(v)));
-            return game_value(std::move(pair));
-        };
-
-        static RenderIntegration::DynLightsState khd_snap;
-        bool khd_got = false;
-        for (int attempt = 0; attempt < 4 && !khd_got; ++attempt) {
-            RVExtBridge::ScopedGraphicsLock lock;
-            if (!lock.acquired()) continue;
-            khd_snap = RenderIntegration::g_dl;
-            khd_got = true;
-        }
-
-        auto_array<game_value> out;
-        out.push_back(kv("locked", khd_got ? 1.0f : 0.0f));
-        out.push_back(kv("mode", static_cast<float>(RenderIntegration::g_dl_mode.load(std::memory_order_relaxed))));
-        out.push_back(kv("valid", khd_snap.valid ? 1.0f : 0.0f));
-        out.push_back(kv("pointN", static_cast<float>(khd_snap.point_n)));
-        out.push_back(kv("spotN", static_cast<float>(khd_snap.spot_n)));
-        out.push_back(kv("poolN", static_cast<float>(khd_snap.pool_n)));
-        out.push_back(kv("viewValid", khd_snap.view_valid ? 1.0f : 0.0f));
+        // The dynamic-light state (formerly dumpDynamicLights).
+        out.push_back(kv("dlValid", khd_valid ? 1.0f : 0.0f));
+        out.push_back(kv("dlPointN", static_cast<float>(khd_point_n)));
+        out.push_back(kv("dlSpotN", static_cast<float>(khd_spot_n)));
+        out.push_back(kv("dlPoolN", static_cast<float>(khd_pool_n)));
+        out.push_back(kv("dlViewValid", khd_view_valid ? 1.0f : 0.0f));
         {
             auto_array<game_value> cam;
-            for (int i = 0; i < 3; ++i) cam.push_back(game_value(khd_snap.cam[i]));
-            out.push_back(kva("camera", std::move(cam)));
+            for (int i = 0; i < 3; ++i) cam.push_back(game_value(khd_cam[i]));
+            out.push_back(kva("dlCamera", std::move(cam)));
         }
         {
             auto_array<game_value> lights;
-            uint32_t khd_n = khd_snap.point_n + khd_snap.spot_n;
-            if (khd_n > RenderIntegration::KH_DL_MAX_LIGHTS) khd_n = RenderIntegration::KH_DL_MAX_LIGHTS;
-            for (uint32_t i = 0; i < khd_n; ++i) {
+            const size_t khd_n = khd_lights.size() / 24u;
+            for (size_t i = 0; i < khd_n; ++i) {
                 auto_array<game_value> rec;
-                for (int f = 0; f < 24; ++f) rec.push_back(game_value(khd_snap.lights[i * 24 + f]));
+                for (size_t f = 0; f < 24; ++f) rec.push_back(game_value(khd_lights[i * 24 + f]));
                 lights.push_back(game_value(std::move(rec)));
             }
-            out.push_back(kva("lights", std::move(lights)));
+            out.push_back(kva("dlLights", std::move(lights)));
         }
         {
             auto_array<game_value> pool;
-            const uint32_t khd_pn = khd_snap.pool_n < khd_snap.pool.size()
-                                  ? khd_snap.pool_n : static_cast<uint32_t>(khd_snap.pool.size());
-            for (uint32_t i = 0; i < khd_pn; ++i) {
-                const RenderIntegration::DlPoolLight& p = khd_snap.pool[i];
+            const size_t khd_pn = khd_pool.size() / 4u;
+            for (size_t i = 0; i < khd_pn; ++i) {
                 auto_array<game_value> e;
-                e.push_back(game_value(p.rec[0]));
-                e.push_back(game_value(p.rec[1]));
-                e.push_back(game_value(p.rec[2]));
-                e.push_back(game_value(static_cast<float>(p.spot)));
+                for (size_t f = 0; f < 4; ++f) e.push_back(game_value(khd_pool[i * 4 + f]));
                 pool.push_back(game_value(std::move(e)));
             }
-            out.push_back(kva("pool", std::move(pool)));
+            out.push_back(kva("dlPool", std::move(pool)));
         }
         return game_value(std::move(out));
     } catch (...) {
-        report_error("dumpDynamicLights: unknown exception");
+        report_error("getRenderStats: unknown exception");
         return game_value(auto_array<game_value>());
     }
 }
@@ -8243,14 +8233,14 @@ static void initialize_sqf_integration() {
 
     _sqf_get_render_stats = intercept::client::host::register_sqf_command(
         "getRenderStats",
-        "Basic render counters: object counts, flushes, injections, cache hits, lock and hook state. Always live; nothing is armed",
+        "Render statistics: counters and hook state, the render-thread frame trace and the dynamic-light state. The first call arms collection (statsArmed 0) and reports zero counters; later calls report what accumulated since",
         userFunctionWrapper<get_render_stats_sqf>,
         game_data_type::ARRAY
     );
 
     _sqf_reset_render_stats = intercept::client::host::register_sqf_command(
         "resetRenderStats",
-        "Re-zero the render counters without restarting the session. Returns true",
+        "Zero the render counters and disarm collection until the next getRenderStats. Returns true",
         userFunctionWrapper<reset_render_stats_sqf>,
         game_data_type::BOOL
     );
@@ -8279,20 +8269,6 @@ static void initialize_sqf_integration() {
         "Renders all UI-affecting passes",
         userFunctionWrapper<flush_ui_render_sqf>,
         game_data_type::BOOL
-    );
-
-    _sqf_dump_render_trace = intercept::client::host::register_sqf_command(
-        "dumpRenderTrace",
-        "One record of the current render-thread frame state (cycle, draws, injection, depth target, camera)",
-        userFunctionWrapper<dump_render_trace_sqf>,
-        game_data_type::ARRAY
-    );
-
-    _sqf_dump_dynamic_lights = intercept::client::host::register_sqf_command(
-        "dumpDynamicLights",
-        "Current dynamic-light state: counts, camera, the active light records and the merged world pool",
-        userFunctionWrapper<dump_dynamic_lights_sqf>,
-        intercept::types::game_data_type::ARRAY
     );
 
     g_compiled_sqf_generic_call = sqf::compile(R"(setReturnValue (call _thisFunction);)");

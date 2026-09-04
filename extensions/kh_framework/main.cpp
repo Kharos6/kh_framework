@@ -115,7 +115,7 @@ void intercept::pre_init() {
         clean_lua_state();
         KHDataManager::instance().flush_all();
         MainThreadScheduler::instance().clear();
-        RenderIntegration::on_mission_start();
+        RenderIntegration::rendering_integration_reset();
         
         if (AIFramework::instance().is_initialized()) {
             try {
@@ -278,7 +278,7 @@ void intercept::mission_ended() {
     
     KHDataManager::instance().flush_all();
     MainThreadScheduler::instance().clear();
-    RenderIntegration::on_mission_end();
+    RenderIntegration::rendering_integration_reset();
     
     if (AIFramework::instance().is_initialized()) {
         try {

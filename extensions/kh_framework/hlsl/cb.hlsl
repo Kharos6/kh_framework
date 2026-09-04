@@ -637,15 +637,23 @@ float SunShadowOcclusion(float3 wpos)
 // texture is the only thing that ever differed between the per-map twins, and
 // fxc resolves a resource parameter at inlining, so this costs nothing and
 // cannot drift.
-float KhSelfTapT(Texture2D<float> khst_m, float2 khst_t, float2 khst_g, float khst_z, float khst_b, float khst_w, float2 khst_o)
+// KH_SELF_TAP_CLAMP: the texel is clamped on BOTH sides to the map (khst_sz is
+// the map edge in texels, the caller's meta.y). The old max() clamped the low
+// side only: a footprint ring reaching past the far edge fed Load an
+// out-of-range texel, which returns 0 - the nearest depth - so every such tap
+// read as occluded. Inside the map the clamp is the identity; at the rim the
+// edge texel answers instead of a phantom occluder, the same rule KhDlsBilin
+// already applies to the light maps.
+float KhSelfTapT(Texture2D<float> khst_m, float khst_sz, float2 khst_t, float2 khst_g, float khst_z, float khst_b, float khst_w, float2 khst_o)
 {
     float2 khst_tc = khst_t + khst_o - 0.5f;   // Fractional offsets land on the corners.
     float2 khst_f0 = floor(khst_tc);
     float2 khst_fr = khst_tc - khst_f0;
     int2   khst_p0 = int2(khst_f0);
+    int2   khst_mx = int2((int)khst_sz - 1, (int)khst_sz - 1);
     float4 khst_c;
     [unroll] for (int khst_k = 0; khst_k < 4; ++khst_k) {
-        int2 khst_q = max(khst_p0 + int2(khst_k & 1, khst_k >> 1), int2(0, 0));
+        int2 khst_q = clamp(khst_p0 + int2(khst_k & 1, khst_k >> 1), int2(0, 0), khst_mx);
         float2 khst_d = (float2(khst_q) + 0.5f) - khst_t;
         float khst_e = khst_z + khst_d.x * khst_g.x + khst_d.y * khst_g.y - khst_b;
         float khst_s = khst_m.Load(int3(khst_q, 0));
@@ -729,11 +737,11 @@ float KhSelfTier(Texture2D<float> khT_map, Texture2D<float2> khT_pf, float4x4 kh
             // clamp to sp = 1 - and pays the four diagonals on the grazing
             // and distant footprints, which is exactly where the corner
             // clip was cutting notches into diagonal shadow edges.
-            float khT_ctr = KhSelfTapT(khT_map, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 0,  0));
-            float khT_cr4 = KhSelfTapT(khT_map, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 0, -1) * khT_sp)
-                          + KhSelfTapT(khT_map, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2(-1,  0) * khT_sp)
-                          + KhSelfTapT(khT_map, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 1,  0) * khT_sp)
-                          + KhSelfTapT(khT_map, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 0,  1) * khT_sp);
+            float khT_ctr = KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 0,  0));
+            float khT_cr4 = KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 0, -1) * khT_sp)
+                          + KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2(-1,  0) * khT_sp)
+                          + KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 1,  0) * khT_sp)
+                          + KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 0,  1) * khT_sp);
             float khT_un = khT_ctr + khT_cr4;
             float khT_res;
             [branch] if (khT_sp <= 1.5f &&
@@ -741,10 +749,10 @@ float KhSelfTier(Texture2D<float> khT_map, Texture2D<float2> khT_pf, float4x4 kh
                 khT_res = khT_ctr;   // Unanimous: the mean IS the centre.
             } else {
                 float khT_rng = khT_cr4
-                              + KhSelfTapT(khT_map, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2(-1, -1) * khT_sp)
-                              + KhSelfTapT(khT_map, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 1, -1) * khT_sp)
-                              + KhSelfTapT(khT_map, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2(-1,  1) * khT_sp)
-                              + KhSelfTapT(khT_map, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 1,  1) * khT_sp);
+                              + KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2(-1, -1) * khT_sp)
+                              + KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 1, -1) * khT_sp)
+                              + KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2(-1,  1) * khT_sp)
+                              + KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 1,  1) * khT_sp);
                 khT_res = (khT_ctr + khT_rng) / 9.0f;
             }
             if (khT_pfArm >= 0.5f) {
@@ -889,15 +897,15 @@ float SunShadowOcclusionSelf(float3 wrel, float3 nrm)
                 ? 1.0f
                 : clamp(0.5f * max(khsr_fw.x, khsr_fw.y), 1.0f, 8.0f);
     float khsr_sw = max(2.0f * khsr_gs, khsr_tw) * khsr_iD;   // Clamped slack.
-    float khsr_ctr = KhSelfTapT(khSunDepth, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 0,  0));
-    float khsr_rng = KhSelfTapT(khSunDepth, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2(-1, -1) * khsr_sp)
-                   + KhSelfTapT(khSunDepth, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 0, -1) * khsr_sp)
-                   + KhSelfTapT(khSunDepth, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 1, -1) * khsr_sp)
-                   + KhSelfTapT(khSunDepth, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2(-1,  0) * khsr_sp)
-                   + KhSelfTapT(khSunDepth, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 1,  0) * khsr_sp)
-                   + KhSelfTapT(khSunDepth, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2(-1,  1) * khsr_sp)
-                   + KhSelfTapT(khSunDepth, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 0,  1) * khsr_sp)
-                   + KhSelfTapT(khSunDepth, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 1,  1) * khsr_sp);
+    float khsr_ctr = KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 0,  0));
+    float khsr_rng = KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2(-1, -1) * khsr_sp)
+                   + KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 0, -1) * khsr_sp)
+                   + KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 1, -1) * khsr_sp)
+                   + KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2(-1,  0) * khsr_sp)
+                   + KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 1,  0) * khsr_sp)
+                   + KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2(-1,  1) * khsr_sp)
+                   + KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 0,  1) * khsr_sp)
+                   + KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 1,  1) * khsr_sp);
     float khsr_fd = 1.0f;
     if (sunMeta.x >= 1.5f) {
         float khsr_e = max(abs(khsr_uv.x - 0.5f), abs(khsr_uv.y - 0.5f)) * 2.0f;

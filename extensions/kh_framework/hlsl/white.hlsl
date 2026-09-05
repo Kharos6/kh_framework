@@ -1,4 +1,4 @@
-// White.hlsl - RCDATA resource in kh_shaders.rc, concatenated into its unit by C++ (no #include). Any edit changes the unit's shader cache key.
+// white.hlsl - concatenated after cb.hlsl into the white unit (no #include). Any edit changes the unit's shader cache key.
 
 struct VSOutW { float4 pos : SV_Position; };
 

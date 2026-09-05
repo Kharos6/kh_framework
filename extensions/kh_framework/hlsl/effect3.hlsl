@@ -1,4 +1,5 @@
-// effect3.hlsl - RCDATA resource in kh_shaders.rc, concatenated into its unit by C++ (no #include). Any edit changes the unit's shader cache key.
+// effect3.hlsl - the tail of the effect unit (no #include). Any edit changes
+// the unit's shader cache key.
     else if (effect == 23)   // Fogscatter
     {
         float2 khfs_res = float2(fxMeta.z, fxMeta.w);
@@ -27,10 +28,9 @@
             float khfs_an = khfs_kp * 2.3999632f + khfs_rot + (khfs_k & 1) * 3.14159265f;
             float khfs_sr = max(sqrt((khfs_kp + khfs_ig2) / khfs_hn) * khfs_rm, 1.0f);
             int2 khfs_sp = int2(float2(px) + 0.5f + float2(cos(khfs_an), sin(khfs_an)) * khfs_sr);
-            // Off-screen taps are absent information (the ssgi normalization
-            // finding): skipping them leaves the closing sum-normalization to
-            // renormalize, so edge receivers lean on their surviving weights
-            // instead of dimming.
+            // Off-screen taps are absent information: skipping them leaves the
+            // closing sum-normalization to renormalize, so edge receivers lean
+            // on their surviving weights instead of dimming.
             if (khfs_sp.x < 0 || khfs_sp.y < 0 ||
                 khfs_sp.x >= (int)fxMeta.z || khfs_sp.y >= (int)fxMeta.w) continue;
             float khfs_sd = LinDepth(LoadDepthPS(khfs_sp));
@@ -47,20 +47,19 @@
     }
      else if (effect == 101)   // 3D LUT grade (.cube, effect KH_EFFECT_LUT): [strength].
     {
-        // Input is clamped to the LUT's [0,1] domain (display-referred.cube
-        // semantics; the loader resamples non-identity domains onto [0,1], so
-        // No domain math lives here). getDimensions keeps the branch CB-free.
+        // Input is clamped to the LUT's [0,1] domain (the loader resamples
+        // non-identity domains onto [0,1], so no domain math lives here).
+        // GetDimensions keeps the branch CB-free.
         uint khlW, khlH, khlD;
         khLut.GetDimensions(khlW, khlH, khlD);
 
         if (khlW >= 2)
         {
-            // The write window consumes post-tonemap LDR already - direct
-            // lookup is correct there - so the sandwich keys on the phase
-            // discriminator (scene lanes w <= 1.0; the LUT never rides the
-            // custom 1.25 or spill 3 lanes). Encode -> LUT -> decode puts the
-            // lookup where the artist designed it and hands the tonemap a
-            // linear result.
+            // The write window consumes post-tonemap LDR already (direct lookup
+            // is correct there), so the sandwich keys on the phase
+            // discriminator (scene lanes w <= 1.0). Encode -> LUT -> decode
+            // puts the lookup where the artist designed it and hands the
+            // tonemap a linear result.
             bool khlSand = fxParams0.y < 0.5f ? (centerSize.w < 1.5f)
                                               : (fxParams0.y >= 1.5f);
             float3 khlIn = saturate(scene);
@@ -94,15 +93,12 @@
                        + (khlG - khlR) * KhLutV(khlI0 + int3(0, 1, 1)) + khlR * khlV111;
 
             // Decode the graded result back to linear when sandwiched (negative
-            // lattice values - legal in .cube - clamp before the pow; the
-            // strength lerp below then mixes in the scene's own space either
-            // way).
+            // lattice values are legal in .cube; clamp before the pow).
             if (khlSand) khlOut = pow(max(khlOut, 0.0f), 2.2f);
 
-            // Color.rgb tints after the grade (parity with the builtin family's
-            // tint role); strength lerps against the untouched scene before the
-            // localization/band masks, which then multiply in as everywhere
-            // else.
+            // color.rgb tints after the grade; strength lerps against the
+            // untouched scene before the localization/band masks, which
+            // multiply in as everywhere else.
             outc = lerp(scene, khlOut * color.rgb, saturate(fxParams0.x));
         }
     }
@@ -116,18 +112,16 @@
                  ? max(nd3.x, max(nd3.y, nd3.z))   // Cube (Chebyshev).
                  : length(nd3);   // Sphere/ellipsoid.
         float mask = 1.0f - smoothstep(1.0f, 1.0f + max(localParams1.x, 0.001f), nd);
-        // KH_LOCAL_INVERSE: localRadii.w >= 0.5 complements the mask - the
-        // effect reaches everything except the volume, the falloff band
-        // included, the sky (fenced depth, nd >> 1) included. C++ twin
+        // localRadii.w >= 0.5 complements the mask - the effect reaches
+        // everything except the volume, falloff band and sky included. C++ twin
         // local_radii[3] (addLocalPostFX 'inverse').
         if (localRadii.w >= 0.5f) mask = 1.0f - mask;
         outc = lerp(scene, outc, mask);
     }
 
-    // Camera-distance band mask: full strength for scene distances within [min,
-    // max], fading over 'falloff' meters at both edges. Max <= 0 means
-    // unbounded far (sky included). Combines multiplicatively with the
-    // world-space localization mask above.
+    // Camera-distance band mask: full strength within [min, max], fading over
+    // 'falloff' metres at both edges; max <= 0 = unbounded far (sky included).
+    // Multiplies with the localization mask.
     if (bandParams.w > 0.5f)
     {
         float d = LinDepth(LoadDepthPS(px));

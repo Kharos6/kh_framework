@@ -1,14 +1,13 @@
-// effect2.hlsl - RCDATA resource in kh_shaders.rc, concatenated into its unit by C++ (no #include). Any edit changes the unit's shader cache key.
+// effect2.hlsl - continues effect.hlsl's effect chain in the effect unit (no
+// #include). Any edit changes the unit's shader cache key.
     else if (effect == 22)   // Ssgi
     {
         // Grain-style time seeds are forbidden in this branch - a static frame
-        // renders bit-identical, so all shimmer sources reduce to real
-        // scene/camera change;. Normals come from the smaller-delta side per
-        // axis (the silhouette-safe reconstruction - a naive derivative cross
-        // Paints edge pixels with cross-object normals);. Normalization is by
-        // tap count, never by surviving weight: a sparse valid set dims instead
-        // of amplifying lone taps (weight-sum division turns one surviving
-        // bright tap into a full-strength sparkling pixel).
+        // renders bit-identical, so all shimmer reduces to real scene/camera
+        // change. Normals come from the smaller-delta side per axis (a naive
+        // derivative cross paints edge pixels with cross-object normals).
+        // Normalization is by tap count, never by surviving weight (weight-sum
+        // division turns one surviving bright tap into a sparkling pixel).
         float3 khg_b = float3(0.0f, 0.0f, 0.0f);
         // The resolve upsamples the result depth-guided at full res.
         float khg_inv = localParams0.y >= 0.25f ? localParams0.y : 2.0f;
@@ -21,10 +20,8 @@
         if (khg_cd < 1e8f && khg_rng > 0.001f && depthParams.y < -1.0e-3f)
         {
             float2 khg_res = float2(fxMeta.z, fxMeta.w);
-            // Reconstruct in view space (KhgVpos: pixel + linear depth through
-            // the recovered projection diagonal), which is camera-relative by
-            // construction - magnitudes never exceed the far plane, so the
-            // cancellation cannot occur.
+            // Reconstruct in view space (KhgVpos), camera-relative by
+            // construction, so no world-scale cancellation occurs.
             float khg_m00 = max(length(float3(viewProj[0].x, viewProj[1].x, viewProj[2].x)), 1e-6f);
             float khg_m11 = max(length(float3(viewProj[0].y, viewProj[1].y, viewProj[2].y)), 1e-6f);
             float3 khg_P = KhgVpos(float2(khg_fpx), khg_cd, khg_res, khg_m00, khg_m11);   // Full-res space.
@@ -52,10 +49,9 @@
                 khg_N /= khg_nl;
                 float3 khg_rd = khg_P / max(length(khg_P), 1e-4f);
                 if (dot(khg_N, khg_rd) > 0.0f) khg_N = -khg_N;
-                // Grazing confidence, per-pixel-ray form. Window lowered
-                // (0.02..0.10 -> 0.008..0.05) - the bilateral resolve now eats
-                // the reconstruction noise this fade guarded against, so
-                // true-grazing distant ground keeps more of its bounce.
+                // Grazing confidence, per-pixel-ray form; the bilateral resolve
+                // eats the reconstruction noise this fade guards against, so
+                // the window is narrow.
                 float khg_conf = smoothstep(0.008f, 0.05f, abs(dot(khg_N, khg_rd)));
                 float khg_rad = max(fxParams0.y, 0.1f);
                 // 2048 is a sanity ceiling, not a design point.
@@ -73,21 +69,18 @@
                 float3 khg_acc = float3(0.0f, 0.0f, 0.0f);
                 float khg_ib = 0.0f;
 
-                // Gap conviction (field: screen-anchored black gaps, "low res /
-                // pixelated", camera-following): the jittered ladder let
-                // stratum-0 radii dip inside the 2 px self-sample floor
-                // whenever a pixel's ig2 rolled small, so each pixel randomly
-                // lost its dominant nearby taps - per-pixel admission variance,
-                // exactly the gap texture.
+                // Stratum-0 radii must never dip inside the 2 px self-sample
+                // floor, or each pixel randomly loses its dominant nearby taps
+                // (screen-anchored black gaps).
                 float khg_hn = (float)((khg_n + 1) >> 1);
                 [loop] for (int khg_k = 0; khg_k < khg_n; ++khg_k)
                 {
                     int khg_kp = khg_k >> 1;
                     float khg_an = khg_kp * 2.3999632f + khg_rot + (khg_k & 1) * 3.14159265f;
                     // A golden-ratio offset per stratum decorrelates the bands:
-                    // Still position-only (seedless doctrine), still one tap
-                    // per annulus; the rings collapse into isotropic variance
-                    // the smoothing chain already eats.
+                    // still position-only (seedless), one tap per annulus; the
+                    // rings collapse into isotropic variance the smoothing
+                    // chain eats.
                     float khg_igk = frac(khg_ig2 + khg_kp * 0.61803399f);
                     float khg_sr = max(sqrt((khg_kp + khg_igk) / khg_hn) * khg_spx, 2.05f);   // Jitter; floor clamp;
                                                                                               // per-stratum.
@@ -106,10 +99,8 @@
                     float khg_d = length(khg_v);
                     if (khg_d < 1e-4f || khg_d > khg_rad) continue;
                     float khg_ph = dot(khg_N, khg_v);
-                    // Smooth fade over [pfl, 2 pfl] instead of a hard cut -
-                    // admission cliffs re-roll under 1 px content motion (a
-                    // flicker term); the ramp is the same guard with a stable
-                    // derivative.
+                    // Smooth fade over [pfl, 2 pfl] instead of a hard cut:
+                    // admission cliffs re-roll under 1 px content motion.
                     float khg_pw = smoothstep(khg_pfl, khg_pfl * 2.0f, khg_ph);
                     if (khg_pw <= 0.0f) continue;
                     float khg_ndl = khg_ph / khg_d;
@@ -131,7 +122,7 @@
 
                     if (khg_occ <= 0.001f) continue;
                     // Genuine lateral transport from deeper samples carries a
-                    // positive dot and never needed it.
+                    // positive dot.
                     float khg_sl = 0.08f + min(khg_sd * 0.0005f, 0.24f);
                     float khg_ce = dot(khg_S, khg_v) / (max(length(khg_S), 1e-4f) * khg_d);   // Proxy (fallback).
 
@@ -192,9 +183,8 @@
                 khg_gi = max(lerp(float3(khg_gl, khg_gl, khg_gl), khg_gi,
                                   max(fxParams1.y, 0.0f)), 0.0f);
                 // Receiver-albedo proxy: bounce lands tinted by the surface it
-                // lights (scene chroma over a luma floor) reload at full res -
-                // the head's 'scene' sampled the half grid's coordinates (the
-                // top- left quadrant), a wrong-texel tint on every receiver.
+                // lights (scene chroma over a luma floor), reloaded at full res
+                // (the head's 'scene' sampled the half grid's coordinates).
                 float3 khg_scn = SampleScene(khg_fpx);
                 float3 khg_alb = khg_scn / (Luma(khg_scn) + 0.3f);
                 khg_b = khg_gi * lerp(float3(1.0f, 1.0f, 1.0f), khg_alb, saturate(fxParams2.x))
@@ -211,7 +201,7 @@
         if (khr_cd < 1e8f)
         {
             float khr_f = KhEncFence();   // Continuity belt below.
-            float khr_sp = fxParams2.w > 0.5f ? clamp(fxParams2.w, 1.0f, 8.0f) : 3.0f;   // Auto widened (banding report).
+            float khr_sp = fxParams2.w > 0.5f ? clamp(fxParams2.w, 1.0f, 8.0f) : 3.0f;   // Auto width.
             float khr_ws = 0.0f;
             [unroll] for (int khr_j = -2; khr_j <= 2; ++khr_j)
             [unroll] for (int khr_i = -2; khr_i <= 2; ++khr_i)
@@ -224,19 +214,17 @@
                 float khr_dz = abs(khr_d - khr_cd) / (khr_cd * 0.06f + 0.05f);
                 float khr_w = exp(-0.125f * (khr_i * khr_i + khr_j * khr_j))
                             * exp(-khr_dz * khr_dz);
-                // Gather is half-res - full-res depth guiding half-res radiance
-                // = joint bilateral upsample. Normalized coords are resolution-
-                // independent, so the full-res uv addresses the half-res
-                // texture exactly.
+                // Gather is half-res: full-res depth guiding half-res radiance
+                // = joint bilateral upsample. Normalized coords are
+                // resolution-independent, so the full-res uv addresses the
+                // half-res texture exactly.
                 khr_gi += khsgTex.SampleLevel(khsgSamp,
                               (float2(khr_p) + 0.5f) / float2(fxMeta.z, fxMeta.w), 0.0f).rgb * khr_w;
                 khr_ws += khr_w;
             }
             khr_gi = khr_ws > 1e-4f ? khr_gi / khr_ws : float3(0.0f, 0.0f, 0.0f);
-            // With maxDistM live (default 300) it is already zero out here;
-            // with maxDistM = 0 the silhouette on/off cliff - resolved bounce
-            // vs the sky branch's hard zero - had the verdict teeter to feed
-            // on.
+            // Fade before the fence so the silhouette against the sky branch's
+            // hard zero has nothing to teeter on.
             khr_gi *= 1.0f - saturate((khr_cd - khr_f * 0.98f)
                                       / max(khr_f * 0.019f, 1.0f));
             float khr_ig = frac(52.9829189f * frac(0.06711056f * i.pos.x
@@ -288,11 +276,10 @@
     }
     else if (effect == 26)
     {
-        // Radiance pyramid seed (internal id, the group's first draw: setPostFX
-        // validates <= KH_MAX_EFFECT = 23, so 24/25/26 stay unreachable from
-        // SQF; the flush synthesizes this ahead of the gather). i.pos spans the
-        // scaled grid, so the full-frame uv rebuilds through the local0.y
-        // factor (the gather's twin lane).
+        // Radiance pyramid seed (internal id: setPostFX validates <=
+        // KH_MAX_EFFECT, so 24/25/26 stay unreachable from SQF; the flush
+        // synthesizes this ahead of the gather). i.pos spans the scaled grid,
+        // so the full-frame uv rebuilds through the local0.y factor.
         float khrs_inv = localParams0.y >= 0.25f ? localParams0.y : 2.0f;
         float2 khrs_uv = i.pos.xy * khrs_inv / float2(fxMeta.z, fxMeta.w);
         return float4(sceneColor.SampleLevel(khsgSamp, khrs_uv, 0.0f).rgb, 1.0f);

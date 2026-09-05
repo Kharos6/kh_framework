@@ -5,8 +5,8 @@
 // FBX/texture third-party units (ufbx, mikktspace, stb_image) + <fstream>/
 // <memory>: included by the framework header ahead of this file.
 
-// Both integration headers are CRLF-only, tab-free ASCII; edits are count-asserted
-// scripted substitutions. Shaders are plain .hlsl RCDATA resources (kh_shaders.rc).
+// Both integration headers are CRLF-only, tab-free ASCII. Shaders are plain
+// .hlsl RCDATA resources (kh_shaders.rc).
 namespace RenderIntegration {
 
 enum class DepthMode : int {
@@ -19,37 +19,32 @@ struct MeshVertex {
     float pos[3];   // Offset 0 (contract: never moves - both input layouts).
     float nrm[3];   // Offset 12 (contract: never moves).
     float uv[2];   // Offset 24 - texture lane (builtins carry usable UVs).
-    float tan[4];   // Offset 32 - tangent xyz, handedness w (mikktspace) builtins: zeroed xyz, w =
-                    // 1 (unused until KH_TEXTURED samples normal maps).
+    float tan[4];   // Offset 32 - tangent xyz, handedness w (mikktspace); builtins zeroed xyz, w = 1.
 };
 
-// KH_MESH_INDEXED: per-material index range into MeshDef::indices (a
-// triangle list over the welded vertex set). Builtins carry one full-range
-// "default" entry so the per-submesh consumers (material binds, ranged draws)
-// need no builtin special case. Every draw is DrawIndexed(index_count,
-// index_start, 0): the indices are absolute, base vertex is always 0.
+// Per-material index range into MeshDef::indices. Builtins carry one full-range
+// "default" entry so no consumer special-cases them. Every draw is
+// DrawIndexed(index_count, index_start, 0): indices are absolute, base vertex
+// 0.
 struct MeshSubmesh {
     std::string name;
     uint32_t index_start = 0;
     uint32_t index_count = 0;
 };
 
-// Submesh count is invariant across levels by construction: decimation runs per
-// submesh and never merges or drops one, so a material slot index addresses the
-// same surface at every level and kh_draw_textured needs no per-level material
-// bookkeeping. Five decimated levels plus the base, six in all.
+// Submesh count is invariant across LOD levels (decimation runs per submesh,
+// never merges or drops one), so a material slot index addresses the same
+// surface at every level.
 static constexpr int KH_LOD_MAX = 5;   // 6 total with level 0.
 
 struct MeshDef {
     std::string name;   // Primary name (SQF mesh selector, lower-case).
     std::string alias;   // Accepted alternative ("" = none).
-    // Welded unique vertices + a triangle-list index stream laid out
-    // [level 0][level 1]...[level lod_n]. The builders (meshgen, FBX import,
-    // kh_lod_build) work on an expanded triangle list in verts with every
-    // range in triangle-vertex units; kh_mesh_weld then dedups verts and
-    // fills indices, and because it preserves order the ranges are index
-    // ranges from that point on without renumbering. indices.empty() marks
-    // the pre-weld (expanded) form; no published mesh is ever in it.
+    // Welded vertices + a triangle-list index stream laid out [level 0][level
+    // 1]...[level lod_n]. Builders produce an expanded triangle list in verts
+    // with ranges in triangle-vertex units; kh_mesh_weld dedups and fills
+    // indices preserving order, so the ranges become index ranges unchanged.
+    // indices.empty() = pre-weld form; never published.
     std::vector<MeshVertex> verts;
     std::vector<uint32_t>   indices;
     std::vector<MeshSubmesh> submeshes;
@@ -75,10 +70,8 @@ inline void quad(std::vector<MeshVertex>& v,
     const float* corners[6] = { a, b, c, a, c, d };
     const int    uvi[6]     = { 0, 1, 2, 0, 2, 3 };
 
-    // Analytic tangent: the uv u axis runs a->b, the v axis a->d, so T =
-    // normalize(b - a) and the handedness sign is the agreement of cross(N, T)
-    // with the v direction - flat builtins carry a proper tbn and normal maps
-    // decode on them exactly as on FBX imports.
+    // Analytic tangent: T = normalize(b - a) (the uv u axis); handedness = sign
+    // of cross(N, T) . (d - a).
     float khq_t[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
     const float khq_tl = sqrtf(khq_t[0] * khq_t[0] + khq_t[1] * khq_t[1] + khq_t[2] * khq_t[2]);
 
@@ -108,10 +101,8 @@ inline void quad(std::vector<MeshVertex>& v,
     }
 }
 
-// One triangle with per-vertex normals and UVs - the smooth-shaded generators
-// (sphere/cylinder/cone) build from this. bake's winding test reads the first
-// vertex's normal, which agrees in sign with the face normal for any sane
-// smooth tessellation.
+// Triangle with per-vertex normals and UVs (the smooth generators). bake's
+// winding test reads the first vertex's normal.
 inline void tri(std::vector<MeshVertex>& v,
                 const float a[3], const float na[3], const float ua[2],
                 const float b[3], const float nb[3], const float ub[2],
@@ -199,9 +190,8 @@ inline void block(std::vector<MeshVertex>& v, const float mn[3], const float mx[
 // per-vertex normals, caps and flat faces carry face normals; UVs are the
 // conventional wraps.
 
-// Pole rows emit one zero-area triangle per slice; bake's winding test sees a
-// zero cross product there and leaves them - harmless, never rasterized. UV
-// sphere, radius 0.5.
+// UV sphere, radius 0.5. Pole rows emit one zero-area triangle per slice;
+// harmless, never rasterized.
 inline void uv_sphere(std::vector<MeshVertex>& v, int stacks, int slices) {
     const float khms_pi = 3.14159265358979f;
 
@@ -315,21 +305,18 @@ inline void pyramid(std::vector<MeshVertex>& v) {
     }
 }
 
-// Bake an authored arma-axes mesh into the engine's runtime layout: 1 axis
-// conversion - arma local [x, y, z] east, north, up becomes engine local [x, z,
-// y], the same swap every SQF position/size fill performs - and 2 winding
-// normalization: the two-axis swap flips handedness, so each triangle is
-// reordered until crossb-a, c-a points along its stored outward normal.
+// Bake an arma-axes mesh into the engine layout: arma [x, y, z] (east, north,
+// up) -> engine [x, z, y] (the same swap every SQF position/size fill
+// performs), then reorder each triangle so cross(b-a, c-a) points along its
+// stored normal (the swap flips handedness).
 inline void bake(std::vector<MeshVertex>& v) {
     for (auto& mv : v) {
         const float py = mv.pos[1]; mv.pos[1] = mv.pos[2]; mv.pos[2] = py;
         const float ny = mv.nrm[1]; mv.nrm[1] = mv.nrm[2]; mv.nrm[2] = ny;
         const float ty = mv.tan[1]; mv.tan[1] = mv.tan[2]; mv.tan[2] = ty;
-        // The y/z swap is an improper transform (det -1): cross products flip
-        // sign under it, so the shader's bitangent reconstruction B = w *
-        // cross(N, T) needs the handedness sign negated to keep pointing along
-        // +v. Applies uniformly - builtin analytic tangents and mikktspace
-        // output both author pre-bake.
+        // The y/z swap has det -1, so the shader's bitangent B = w * cross(N,
+        // T) needs w negated. Applies to builtin and mikktspace tangents alike
+        // (both author pre-bake).
         mv.tan[3] = -mv.tan[3];
     }
 
@@ -356,22 +343,11 @@ inline void bake(std::vector<MeshVertex>& v) {
 
 }
 
-// KH_MESH_INDEXED: expanded triangle list -> welded vertices + indices. Exact
-// 48-byte match is the weld key (position, normal, uv, tangent): a vertex that
-// differs in any attribute stays a separate vertex, so shading is unchanged
-// and only the true duplicates that the expanded form carried per adjacent
-// triangle collapse. The index stream is a 1:1 image of the input order, so
-// every submesh / level range set in triangle-vertex units is already the
-// index range and nothing is renumbered. Idempotent on an already-welded def.
-// KH_MESH_CACHE_ORDER. Forsyth's linear-speed vertex cache optimisation
-// (2006), applied to every submesh range of every level after the weld, and a
-// first-use vertex remap behind it. The triangle set of every range is
-// unchanged - only the order the triangles are listed in, and the numbering of
-// the vertices - so every pass draws the same geometry; what moves is the
-// post-transform cache hit rate (dump3: 10.7 M vertex-shader invocations for
-// 4.1 M triangles on the injection alone, 2.6 per triangle, which is no reuse
-// at all; a cache-ordered list runs near 0.7). Runs once per mesh at the
-// weld, so a cached mesh carries the order (KH_MESH_CACHE_VERSION 5).
+// Weld key: an exact 48-byte match (position, normal, uv, tangent), so shading
+// is unchanged; the index stream mirrors input order, so every triangle-vertex
+// range is already the index range. Idempotent. Then Forsyth's vertex-cache
+// order per submesh range per level plus a first-use vertex remap, baked into
+// the mesh cache (KH_MESH_CACHE_VERSION).
 static constexpr uint32_t KH_MCO_CACHE   = 32u;   // Modelled FIFO depth.
 inline float kh_mco_cache_score(uint32_t khmc_p) {
     if (khmc_p >= KH_MCO_CACHE) return 0.0f;
@@ -529,10 +505,9 @@ inline void kh_mesh_weld(MeshDef& khmw_d) {
     kh_mesh_cache_order(khmw_d);   // KH_MESH_CACHE_ORDER: the same triangles, in cache order.
 }
 
-// Ordering: a block-pointer store sequences before the publish release-store
-// that first covers it, so every reader that can see an id (acquire on the
-// count) sees its block. Mesh store (contract in the header block above):
-// block-chained slot table, append-only, release-published count.
+// Mesh store: block-chained slot table, append-only, release-published count. A
+// block-pointer store sequences before the publish release-store, so any reader
+// that can see an id (acquire on the count) sees its block.
 static constexpr uint32_t KH_MESH_BLOCK_SHIFT = 8;
 static constexpr uint32_t KH_MESH_BLOCK = 1u << KH_MESH_BLOCK_SHIFT;   // 256 meshes per block.
 static constexpr uint32_t KH_MESH_ROOT = 4096;
@@ -556,11 +531,9 @@ struct MeshStore {
 
 inline MeshStore& mesh_store() {
     static MeshStore s;
-    // Builtins register inside this second static's one-time init: it runs
-    // exactly once (thread-safe by the language) and happens-before every
-    // return, so no lock is needed here and no consumer can observe a partial
-    // table. Do not call kh_mesh_append from this lambda - it re-enters
-    // mesh_store mid-init.
+    // Builtins register inside this static's one-time init (thread-safe,
+    // happens-before every return; no lock). Do not call kh_mesh_append from
+    // this lambda - it re-enters mesh_store mid-init.
     static const bool khms_init = []() {   // s' has static storage: no capture needed.
         auto khms_add = [](const char* khms_name, const char* khms_alias,
                              std::vector<MeshVertex>&& khms_verts) {
@@ -588,10 +561,9 @@ inline MeshStore& mesh_store() {
             khms_add("box", "cube", std::move(v));
         }
 
-        // "steps" - a 3-step staircase ascending toward +y (north). Concave on
-        // purpose: with a low sun from the open side each riser shadows the
-        // tread below it - the self-shadowing test case the private sun-depth
-        // Map exists for. Arma axes: x east, y north, z up.
+        // "steps": 3-step staircase ascending toward +y (north), concave so
+        // each riser shadows the tread below (the self-shadowing test case).
+        // Arma axes.
         {
             std::vector<MeshVertex> v;
             const float t = 1.0f / 3.0f;
@@ -639,17 +611,16 @@ inline MeshStore& mesh_store() {
     return s;
 }
 
-// The published mesh count - the bound every consumer uses (never the raw
-// append count, never a container size).
+// The published mesh count - the bound every consumer uses, never the raw
+// append count.
 inline uint32_t mesh_count() {
     return mesh_store().published.load(std::memory_order_acquire);
 }
 
-// Slot access. id must already be bounded by the published count (mesh_id_clamp
-// / mesh_id_from_gv) - this does not re-check the bound. KH_MESH_FREE: a
-// released slot is a null tombstone (ids are never reused); it resolves to
-// mesh 0 here so a stale id held by a per-frame caster list built before the
-// release still reads a valid def rather than a null pointer.
+// id must already be bounded by the published count (mesh_id_clamp /
+// mesh_id_from_gv). A released slot is a null tombstone (ids never reused) and
+// resolves to mesh 0, so a stale id in a per-frame caster list still reads a
+// valid def.
 inline const MeshDef& mesh_def(int id) {
     const uint32_t khmd_id = static_cast<uint32_t>(id);
     const MeshDef* khmd_p = mesh_store().root[khmd_id >> KH_MESH_BLOCK_SHIFT][khmd_id & (KH_MESH_BLOCK - 1u)];
@@ -676,14 +647,10 @@ inline int kh_mesh_append(MeshDef&& def) {
     return static_cast<int>(s.appended++);
 }
 
-// KH_MESH_FREE: the CPU half of a release. The slot becomes a null tombstone
-// (the id is never reused, so the published bound and every "id < count"
-// guard keep their meaning; mesh_def folds it to mesh 0 and mesh_id_clamp to
-// 0). The def is handed back to the caller, who parks it with the GPU objects
-// in Resources::mesh_grave and lets kh_mesh_grave_sweep delete the lot at a
-// later flush - one release point, at the park, instead of an inline delete
-// wherever the release was requested. Game thread, render thread parked, id
-// already verified alive and unreferenced by the caller.
+// CPU half of a release: the slot becomes a null tombstone (id never reused).
+// The def is handed back and parked with the GPU objects in
+// Resources::mesh_grave for kh_mesh_grave_sweep. Game thread, render thread
+// parked, id verified alive and unreferenced by the caller.
 inline MeshDef* kh_mesh_tombstone(int id) {
     MeshStore& s = mesh_store();
     std::lock_guard<std::mutex> g(s.append_mx);
@@ -695,11 +662,9 @@ inline MeshDef* kh_mesh_tombstone(int id) {
     return khmt_d;
 }
 
-// Must run only while the render thread is parked (the flush park): the
-// release-store here is the visibility edge mesh_count's acquire pairs with,
-// and the park guarantees the GPU top-up (ensure_mesh_vbs, reached through
-// ensure_resources) lands in the same serialized window before any draw indexes
-// the new id.
+// Only while the render thread is parked: the release-store is the visibility
+// edge mesh_count's acquire pairs with, and the park guarantees ensure_mesh_vbs
+// lands before any draw indexes the new id.
 inline uint32_t kh_mesh_publish() {
     MeshStore& s = mesh_store();
     std::lock_guard<std::mutex> g(s.append_mx);
@@ -742,20 +707,15 @@ inline UINT mesh_index_count(int id) {
     return static_cast<UINT>(mesh_base_icount(mesh_def(id)));
 }
 
-// Registry-bounds clamp shared by every draw path: an out-of-range id (stale
-// handle data / a not-yet-published registration) or a released id
-// (KH_MESH_FREE tombstone) degrades to mesh 0 instead of reading past the
-// published range or into a freed slot.
+// Clamp shared by every draw path: an out-of-range or released id degrades to
+// mesh 0.
 inline int mesh_id_clamp(int id) {
     return kh_mesh_alive(id) ? id : 0;
 }
 
-// game-thread lookup that also covers ids appended but not yet published - an
-// .fbx whose publish kh_fbx_register deferred to the next flush park. The one
-// reader that takes append_mx, and it may: it runs on the appending thread (the
-// SQF handlers) and never on a draw path, so the "readers never take it" rule
-// for the render thread is untouched. Null when id is outside the appended
-// range; callers fall back to mesh 0 exactly as mesh_id_clamp does.
+// Game-thread lookup that also covers ids appended but not yet published. The
+// one reader that takes append_mx - never on a draw path. Null outside the
+// appended range; callers fall back to mesh 0.
 inline const MeshDef* kh_mesh_def_staged(int id) {
     if (id < 0) return nullptr;
     MeshStore& s = mesh_store();
@@ -780,8 +740,7 @@ struct KhMaterial {
     float emissive_intensity = 1.0f;
     float normal_strength = 1.0f;
     float cutoff = 0.5f;
-    int alpha_mode = 0;   // No material mode touches casting: an object casts as a whole (the
-                          // Untextured proxies, like cutout).
+    int alpha_mode = 0;   // No material mode touches casting: an object casts as a whole.
     // User channel routes (slot*4+chan; -1 = slot-convention default)
     int route_occ = -1, route_rough = -1, route_metal = -1;
     int route_alpha = -1, route_gloss = -1;
@@ -790,12 +749,8 @@ struct KhMaterial {
 struct KhMaterialSet {
     std::vector<KhMaterial> slots;
     bool any = false;   // At least one used slot.
-    // KH_INSTANCING: content identity, computed once when the set is built
-    // (kh_material_set_hash) and the KH_MAT_POOL intern key, so two objects
-    // with the same materials share one set and batch. Hashed:
-    // Every slot's used flag, shader kind, user-shader path, five map paths,
-    // base colour, roughness, metalness, emissive, normal strength, cutoff,
-    // alpha mode and the five routes - every field kh_bind_material and
+    // Content hash (kh_material_set_hash): the KH_MAT_POOL intern key and the
+    // instancing batch key. Covers every field kh_bind_material and
     // kh_draw_textured read.
     uint64_t hash = 0;
     // KH_MAT_TABLE: the set's GPU state, filled by kh_mat_gpu_ensure at first
@@ -845,14 +800,10 @@ inline uint64_t kh_material_set_hash(const KhMaterialSet& khmh_s) {
     return h;
 }
 
-// KH_MAT_POOL: material sets are interned by content hash and owned by the
-// pool, so a RenderObject carries a raw pointer and stays trivially copyable.
-// A set stays alive while any object carries it (flush_frame notes the
-// reference every flush) and for KH_MAT_GC_IDLE_MS after the last note; the
-// release goes through a two-flush grave like the meshes so a per-frame
-// caster list built before the release drains first. Game thread only
-// (intern from the script side, note + GC at the flush); render-thread readers
-// only dereference pointers they were handed by the live scene.
+// Material sets are interned by content hash and pool-owned, so a RenderObject
+// carries a raw pointer and stays trivially copyable. A set lives while any
+// object references it (noted each flush) plus KH_MAT_GC_IDLE_MS, then goes
+// through a two-flush grave like the meshes. Game thread only.
 static constexpr uint64_t KH_MAT_GC_IDLE_MS = 120000;
 struct KhMatPoolEntry { std::unique_ptr<KhMaterialSet> set; uint64_t last_ref_ms; };
 struct KhMatGrave { std::unique_ptr<KhMaterialSet> set; uint64_t flush_at; };
@@ -935,9 +886,6 @@ static UINT g_eds_memo_h = 0;
 // KH_DL_SHADOW slice budget. 8 lights x 6 cube faces is the ceiling; the array
 // is grown to demand, never allocated to the ceiling (see dls_slices).
 static constexpr int KH_DLS_SLICES_MAX = 8 * 6;
-// 1024 halves that to 78 mm and the per-face allocation pays for it: the live
-// set is ~6 slices, so 24 MB, against 48 MB for the 12 slices the same lights
-// needed before faces were culled.
 static constexpr UINT KH_DLS_MAP_PX = 1024;
 
 struct Resources {
@@ -953,11 +901,6 @@ struct Resources {
     ID3D11PixelShader*       ps_maskprime = nullptr;   // Writes lit over our footprint.
     ID3D11PixelShader*       ps_inj_depth_a = nullptr;   // KH_FOOTPRINT_ALPHA: the clip-only alpha
                                                          // Footprint (KH_TEXTURED).
-    // KH_MESH_OWNER_PREPASS is gone: its five device objects, its
-    // depth-stencil state and its pixel shader went with it (see the
-    // injection), and the HLSL half (PSOwner, the owner pack / reject test,
-    // the t33 / t34 owner maps) went in the cleanup campaign. shadowMeta2.zw
-    // stay in the layout, always zero, and nothing reads them.
     ID3D11PixelShader*       ps_composite = nullptr;   // PSMain + the opaque.
     ID3D11PixelShader*       ps_composite_arb = nullptr;   // Arb variant: + SV_Depth analytic
                                                            // Terrain clamp.
@@ -978,30 +921,27 @@ struct Resources {
     ID3D11Texture2D*          thm_tex = nullptr;
     ID3D11ShaderResourceView* thm_srv = nullptr;
     ID3D11InputLayout*       input_layout = nullptr;
-    // Its own shaders, layout, buffers and states, deliberately: everything
-    // ensure_resources builds is built below the async gate, so the placeholder
-    // cannot borrow any of it without inheriting the very dependency it exists
-    // to escape. Seven small device objects, released with the device like
-    // everything else in this struct.
+    // Deliberately its own shaders, layout, buffers and states: everything else
+    // ensure_resources builds sits below the async gate the placeholder exists
+    // to escape.
     ID3D11VertexShader*      vs_white = nullptr;
     ID3D11PixelShader*       ps_white = nullptr;
     ID3D11InputLayout*       layout_white = nullptr;
     ID3D11Buffer*            white_obj_cb = nullptr;   // b0, CBObj slice.
     ID3D11Buffer*            white_frame_cb = nullptr;   // b1, CBFrame slice.
-    ID3D11RasterizerState*   rast_white = nullptr;   // rasterizer': same bias, same DepthClipEnable
-                                                     // False, so the placeholder sits where the
-                                                     // real mesh will.
+    // Same bias, same DepthClipEnable false, so the placeholder sits where the
+    // real mesh will.
+    ID3D11RasterizerState*   rast_white = nullptr;
     ID3D11DepthStencilState* dss_white = nullptr;   // LESS_EQUAL, write all.
     bool                     white_tried = false;   // One compile attempt per device.
     bool                     white_ready = false;
     ID3D11RasterizerState*   rasterizer_cull = nullptr;   // back-face-culling twin of 'rasterizer'
                                                           // (twoSided = false objects; same
                                                           // biases).
-    ID3D11RasterizerState*   rasterizer_front = nullptr;   // front-culling twin: pass 1 of the
-                                                           // two-sided-translucent ordered draw ---
-                                                           // KH_TEXTURED twins (FBX materials): the
-                                                           // same shader sources compiled once more
-                                                           // with KH_TEXTURED=1.
+    // front-culling twin: pass 1 of the two-sided-translucent ordered draw.
+    // Below: the KH_TEXTURED twins, the same sources compiled with
+    // KH_TEXTURED=1.
+    ID3D11RasterizerState*   rasterizer_front = nullptr;
     ID3D11VertexShader*      vs_tex = nullptr;   // VSMain twin (flush).
     ID3D11PixelShader*       ps_tex = nullptr;   // PSMain twin.
     ID3D11VertexShader*      vs_comp_tex = nullptr;   // VSComposite twin (injection).
@@ -1027,10 +967,9 @@ struct Resources {
     ID3D11Buffer*             obj_sb = nullptr;
     ID3D11ShaderResourceView* obj_srv = nullptr;
     uint32_t                  obj_cap = 0;   // Records the buffer holds.
-    // KH_MESH_FREE: the release wall. A freed mesh's VB/IB and def wait here
-    // for two flushes so a per-frame list built before the release (sun /
-    // DLS / seam casters) drains before the objects go; swept by
-    // kh_mesh_grave_sweep at the flush, emptied wholesale by release().
+    // Release wall: a freed mesh's VB/IB/def wait two flushes so per-frame
+    // caster lists built before the release drain first. Swept by
+    // kh_mesh_grave_sweep.
     struct KhMeshGrave { ID3D11Buffer* vb; ID3D11Buffer* ib; MeshDef* def; uint64_t flush_at; };
     std::vector<KhMeshGrave>   mesh_grave;
     std::vector<ID3D11Buffer*> mesh_ib;   // KH_MESH_INDEXED: the R32_UINT index buffer twin of
@@ -1056,17 +995,10 @@ struct Resources {
     ID3D11DepthStencilState* dss_test = nullptr;   // LESS_EQUAL, no write.
     ID3D11DepthStencilState* dss_test_write = nullptr;   // LESS_EQUAL, write.
     ID3D11DepthStencilState* dss_off = nullptr;
-    ID3D11BlendState*        blend_modes[6] = {};   // Normal, additive, multiply, screen, lighten,
-                                                    // Darken: dest = dest * blendFactor with the PS output discarded (SrcBlend zero), so
-                                                    // the tint rides the blend factor - no CB lane, no shader. blend_modes[2] cannot
-                                                    // serve: it multiplies by SRC_COLOR and would depend on the bound pixel shader.
-                                                    // Alpha is not writable (write mask), so it cannot drift.
+    ID3D11BlendState*        blend_modes[6] = {};   // Normal, additive, multiply, screen, lighten, darken.
     ID3D11BlendState*        dls_world_blend = nullptr;
-    // KH_DLSW_MASK: the world pass's own occlusion mask - one R32_FLOAT screen
-    // target holding the linear view distance, in metres, of the nearest of our
-    // meshes at each pixel. Rendered with our matrix and our sentinel, read by
-    // nobody else; min_blend resolves overlapping meshes to the nearest with no
-    // depth-stencil target at all.
+    // World-pass occlusion mask: R32_FLOAT linear view distance (m) of our
+    // nearest mesh per pixel; min_blend resolves overlaps, no depth target.
     ID3D11Texture2D*          dlsw_tex = nullptr;
     ID3D11RenderTargetView*   dlsw_rtv = nullptr;
     ID3D11ShaderResourceView* dlsw_srv = nullptr;
@@ -1090,20 +1022,19 @@ struct Resources {
     DXGI_FORMAT               pip_depth_fmt = DXGI_FORMAT_UNKNOWN;
     ID3D11BlendState*        blend_ui_replace = nullptr;   // Blend off, RGB-only write: builtin
                                                            // UI-phase.
-    ID3D11BlendState*        blend_ui_masked = nullptr;   // Custom user FX only (their shaders
-                                                          // Cannot be assumed coverage-aware) -
-                                                          // hardware-lerps the chain-composited
-                                                          // output by coverage; no glow spill for
-                                                          // custom, by contract.
+    // Custom user FX only: hardware-lerps the chain-composited output by
+    // coverage (their shaders cannot be assumed coverage-aware); no glow spill
+    // for custom.
+    ID3D11BlendState*        blend_ui_masked = nullptr;
     ID3D11BlendState*        blend_ui_spill = nullptr;
-    ID3D11BlendState*        blend_alpha_zero = nullptr;   // Blend off, alpha-only write mask
-                                                           // (the).
+    ID3D11BlendState*        blend_alpha_zero = nullptr;   // Blend off, alpha-only write mask.
     ID3D11PixelShader*       ps_alpha_zero = nullptr;
     ID3D11Texture2D*          cov_hist_tex = nullptr;   // last-sane coverage history (full).
-    ID3D11ShaderResourceView* cov_hist_srv = nullptr;   // Backbuffer copy taken post-correction,
-                                                        // So.
-    UINT                      cov_hist_w = 0;   // By induction its alpha is always sane.
-    UINT                      cov_hist_h = 0;   // The substitute mask for poison frames.
+    // Backbuffer copy taken post-correction: by induction its alpha is always
+    // sane; the substitute mask for poison frames.
+    ID3D11ShaderResourceView* cov_hist_srv = nullptr;
+    UINT                      cov_hist_w = 0;
+    UINT                      cov_hist_h = 0;
     uint32_t                  cov_hist_fmt = 0;
     ID3D11PixelShader*       ps_cov_fix = nullptr;
     ID3D11PixelShader*       ps_dbg_cov = nullptr;   // Coverage debug view.
@@ -1164,10 +1095,8 @@ struct Resources {
     UINT                      dls_size = 0;
     ID3D11Buffer*             sun_instance_vb = nullptr;
     UINT                      sun_instance_cap = 0;   // Instances the buffer holds.
-    // KH_SEAM_INST: the seam transport's instanced twins. Both entry points
-    // take the sun ladder's lane shape, so layout_sundepth binds them and no
-    // new input layout exists; the seam gates on that layout being present.
-    // Non-fatal - absent, both loops draw per caster exactly as they did.
+    // Seam transport instanced twins; both take layout_sundepth's lane shape.
+    // Non-fatal: absent, both loops draw per caster.
     ID3D11VertexShader*       vs_seam_inst = nullptr;     // VSSeamInst   (loop A footprint).
     ID3D11VertexShader*       vs_mirror_inst = nullptr;   // VSMirrorInst (loop B prepass).
     // One buffer, both loops: loop A's lanes at [0, nA), loop B's at
@@ -1185,7 +1114,6 @@ struct Resources {
     ID3D11ShaderResourceView* castocc_srv = nullptr;
     bool                     initialized = false;
 
-    // Scene HDR color capture (resolved copy of the bound RTV) --- ---
     // Post-tonemap backbuffer capture (UI-affecting passes).
     ID3D11Texture2D*          bb_tex = nullptr;
     ID3D11ShaderResourceView* bb_srv = nullptr;
@@ -1198,9 +1126,8 @@ struct Resources {
     ID3D11RenderTargetView*   ui_chain_rtv = nullptr;
     ID3D11ShaderResourceView* ui_chain_srv = nullptr;
 
-    // Fullscreen-chain ping-pong targets (single-sample, scene format). The
-    // chain runs on these instead of re-resolving the MSAA scene per pass: one
-    // Resolve per frame regardless of pass count. Widened 2 -> 3.
+    // Fullscreen-chain ping-pong targets (single-sample, scene format): one
+    // scene Resolve per frame regardless of pass count.
     ID3D11Texture2D*          chain_tex[5] = {};   // [3] = a-trous sibling of [2]; [4] = fp16
                                                    // Radiance pyramid.
     ID3D11RenderTargetView*   chain_rtv[5] = {};
@@ -1209,15 +1136,10 @@ struct Resources {
     ID3D11RenderTargetView*   khsg_mip_rtv[13] = {};
     ID3D11ShaderResourceView* khsg_mip_srv[13] = {};
     int                       khsg_pyr_levels = 0;
-    // linear-clamp sampler for the resolve's bilinear upsample of the half-res
-    // gather (KH_FX_SAMP_S2: s2 - the shared prefix owns s1; bound only for
-    // that draw with the prior binding saved/restored - StateBackup covers s0
-    // only).
+    // Linear-clamp sampler for the ssgi resolve upsample at s2 (the shared
+    // prefix owns s1); bound only for that draw with the prior binding
+    // saved/restored (StateBackup covers s0-s1 only).
     ID3D11SamplerState*       khsg_sampler = nullptr;
-    // Read back donotflush 2+ frames later; a slot still in flight is skipped,
-    // never reused hot.
-    // Two rings, not one, by design: one per thread (the threading contract at
-    // flush_frame). Settled; no measurement is owed.
     ID3D11Texture2D*          scene_tex = nullptr;
     ID3D11ShaderResourceView* scene_srv = nullptr;
     UINT                      scene_w = 0, scene_h = 0;
@@ -1431,10 +1353,7 @@ struct Resources {
         KH_SAFE_RELEASE(ps_inj_depth_a);
         KH_SAFE_RELEASE(ps_maskprime);
         KH_SAFE_RELEASE(ps_maskcast);
-        KH_SAFE_RELEASE(ps_dls_world);   // KH_DLS_WORLD never released - one PS object (and its
-                                         // old-device ref) leaked per engine reset, and the re-init
-                                         // createPixelShader overwrote the stale pointer without
-                                         // releasing it.
+        KH_SAFE_RELEASE(ps_dls_world);
 
         KH_SAFE_RELEASE(cov_hist_srv);
         KH_SAFE_RELEASE(cov_hist_tex);
@@ -1479,11 +1398,10 @@ struct KhUiMask {
     // The UI-phase-thread machine's frame token - QPC at the last compose
     // detection. Thread-local to the UI-phase thread.
     long long phase_tick = 0;
-    long long phase_arm_tick = 0;   // The current arm's stamp (the).
-    uint64_t phase_arm_ordinal = 0;   // scene-flush ordinal at the arm (the ordinal re-arm gate's
-                                      // Anchor).
+    long long phase_arm_tick = 0;   // The current arm's stamp.
+    uint64_t phase_arm_ordinal = 0;   // scene-flush ordinal at the arm (the ordinal re-arm gate's anchor).
     uint64_t ord_seen = 0;   // Last ordinal value.
-    long long ord_tick = 0;   // When it last changed (QPC; the).
+    long long ord_tick = 0;   // When it last changed (QPC).
     long long bnd_ema_ticks = 0;   // Boundary cadence ema (QPC ticks).
     long long bnd_tick = 0;   // Last learned-surface boundary.
     uint64_t compose_serial = 0;
@@ -1496,15 +1414,13 @@ static std::atomic<bool> g_ui_mask_wanted{false};   // Any visible UI-mode pass 
 // flush_frame's demand loop beside the UI and lit flags.
 static std::atomic<bool> g_svs_mesh_wanted{false};
 
-// Set/cleared strictly inside the graphics-lock scope, so every other submission
-// thread is parked whenever it is true. Atomic so a hook body cannot cache it;
-// relaxed stores compile to plain moves on x86-64.
+// Set/cleared only inside the graphics-lock scope (every other submission
+// thread parked). Atomic so a hook body cannot cache it.
 static std::atomic<bool> g_kh_flush_active{false};
 // Recursion guard for the UI-phase-thread injection (the clear's own Draw
 // re-enters the hooks on that thread). Deliberately separate from
 // g_ro.in_injection, which belongs to the render thread.
-static std::atomic<bool> g_ui_mask_injecting{false};   // T-side writer, render-thread readers (same
-                                                       // Note).
+static std::atomic<bool> g_ui_mask_injecting{false};
 static std::atomic<bool> g_kh_track_wanted{false};
 // Sticky until a sane reading (min < 32).
 
@@ -1543,10 +1459,8 @@ inline void kh_ui_mask_learn(void* id, UINT w, UINT h) {
     if (g_ui_mask.bb_n < 4) g_ui_mask.bb_n++;
 }
 
-// Releases every shadow/mask/fire device object living outside Resources (that
-// state is declared much later in this header, so only the prototype can exist
-// this early). Invoked from the reset hook alongside g_res.release, under the
-// same quiescence guarantee.
+// Releases every shadow/mask/fire device object living outside Resources
+// (declared later; prototype only here).
 inline void release_shadow_device_state();
 inline void reset_session_state();
 // Forward: KH_PIP_DEVRESET - the PIP state is declared with the PIP block.
@@ -1588,18 +1502,18 @@ static void __stdcall on_engine_reset() {
 
 struct RenderObject {
     int   effect = 0;   // 0 = solid color; >0 = screen-space effect (see EffectId).
-    float fx[12] = {};   // Effect parameters effect-specific, see set_effect_params. Widened 8 ->
-                         // 12 fxParams2; wire-compatible - shorter script arrays keep zero/default
-                         // tails.
+    // Effect parameters, effect-specific (set_effect_params); shorter script
+    // arrays keep zero/default tails.
+    float fx[12] = {};
     const std::string* fx_shader = nullptr;   // Interned resolved user.hlsl path (nullptr =
                                               // builtin; consumed only when effect == KH_EFFECT_CUSTOM)
                                               // - or the resolved .cube path when effect ==
                                               // KH_EFFECT_LUT (same slot, same rule). kh_fx_shader_of.
     bool  fullscreen = false;   // True = fullscreen triangle (post-processing pass), size unused.
-    bool  affect_ui = false;   // Fullscreen passes: true = render post-tonemap over the composited
-                               // Frame (Uincluded).
-    bool  ui_only = false;   // UI" phase enum: with affect_ui, mask the pass by the Meaningless
-                             // Without affect_ui.
+    // Fullscreen passes: true = render post-tonemap over the composited frame
+    // (UI included).
+    bool  affect_ui = false;
+    bool  ui_only = false;   // With affect_ui: mask the pass to the UI phase. Meaningless without affect_ui.
     bool  ui_spill = false;
     bool  localized = false;   // Fullscreen pass masked to a world-space sphere around pos.
     bool  local_inverse = false;   // KH_LOCAL_INVERSE: the mask complemented.
@@ -1623,20 +1537,17 @@ struct RenderObject {
     bool  rotated = false;   // False = identity (skip the matrix math).
 
     bool  caster_only = false;
-    bool  two_sided = true;   // Note addRender3D spawns false (the script-side default since the
-                              // back-face cull landed;.
-    bool  lod_lock = false;   // KH_LOD_LOCK: this instance always draws level 0 - kh_lod_pick is
-                              // Skipped at both colour loops (twins), so no crossfade and no
-                              // transition ever.
+    bool  two_sided = true;   // addRender3D spawns false (the script-side default).
+    // This instance always draws level 0 - kh_lod_pick is skipped at both
+    // colour loops, so no crossfade.
+    bool  lod_lock = false;
     int   blend_mode = 0;   // 0 normal, 1 additive, 2 multiply, 3 screen, 4 lighten, 5 darken.
-    // KH_BUCKETS: every opaque solid mesh object (effect 0, depth mode not
-    // Off, not a normal-blend translucent) draws through a bucket - one
-    // DrawIndexedInstanced per (mesh, LOD level, material pages, blend mode,
-    // depth mode, lit, twoSided, part, injection route) - from the object
-    // record buffer (KhObjRec, t39) and a 16-byte per-instance lane. The
-    // per-object CB path remains for translucents and effect meshes only.
-    // FBX materials (updateRender3D "material"): an interned, pool-owned set
-    // (KH_MAT_POOL); updates intern a new set and swap the pointer.
+    // Every opaque solid (effect 0, depth not Off, not a normal-blend
+    // translucent) draws through a bucket: one DrawIndexedInstanced per (mesh,
+    // LOD, material pages, blend, depth mode, lit, twoSided, part, route) from
+    // the object record buffer (t39) + a 16-byte instance lane. The per-object
+    // CB path serves translucents and effect meshes only. Materials: an
+    // interned pool-owned set; updates swap the pointer.
     const KhMaterialSet* materials = nullptr;
     // KH_SCENE: this object's slot in the live scene, assigned by
     // add_render_object and carried through every copy the script side makes.
@@ -1648,10 +1559,9 @@ struct RenderObject {
     float light_diffuse = 0.60f;   // n.L-scaled fraction (ambient + diffuse ~ 1).
     bool  far_vis = false;
     uint64_t seq = 0;   // Creation order (fullscreen pass chaining).
-    // KH_MAT_BLEND: transient, set only on the flush's staging copies - never
-    // by a script, never stored in g_draw_list. KH_BLEND_PART_INJ: an injected
-    // object's part is drawn by the injection itself; the flush stages a part
-    // entry only for an object it owns.
+    // Transient, set only on the flush's staging copies, never stored. An
+    // injected object's part is drawn by the injection; the flush stages a part
+    // only for objects it owns.
     uint8_t draw_part = 0;
     DepthMode mode = DepthMode::TestOnly;
     bool  visible = true;
@@ -1758,10 +1668,8 @@ inline float kh_mesh_obb_dist_sq(const RenderObject& o, const float cam[3]) {
     return khb_acc;
 }
 
-// The same distance over the raw record (pos / size in SQF axes, rot_m,
-// rotated) - the dlsw mask picks its LOD from a SunCaster snapshot and must
-// land on the level the injection drew, so it runs this arithmetic and not a
-// copy of it. kh_mesh_dist_sq is the RenderObject wrapper.
+// Same distance over the raw record: the dlsw mask picks its LOD from a
+// SunCaster snapshot and must land on the level the injection drew.
 inline float kh_mesh_dist_sq_of(const float* pos, const float* size, const float* rot_m,
                                 bool rotated, const float cam[3]) {
     const float c[3] = { cam[0], cam[2], cam[1] };   // Engine -> SQF axes.
@@ -1794,10 +1702,6 @@ enum class EffectId : int {
     Grain = 5, Sharpen = 6, Blur = 7, Bloom = 8, Distortion = 9,
     Outline = 10, Pulse = 11, Halation = 12, Fog = 13,
     LensFlare = 14, Anamorphic = 15, SunFlare = 16, Glitch = 17,
-    // Post-process AO reconstructs through the live depth encode, and the
-    // engine's encode churn on ambiguous frames made it flicker structurally,
-    // because the engine's own SSAO runs inside the pipeline where the encode
-    // is never ambiguous.
     Clarity = 18, Deband = 19, RainLens = 20,
     // CRT tube simulation.
     Crt = 21,
@@ -1805,26 +1709,20 @@ enum class EffectId : int {
     Fogscatter = 23,
 };
 
-// 23 = fogscatter took the last public slot below the ssgi resolve.
 static constexpr int KH_MAX_EFFECT = 23;
 // User effect sentinel: RenderObject.effect for a custom ".hlsl" pass
 // (fx_shader carries the resolved path).
 static constexpr int KH_EFFECT_CUSTOM = 100;
-// The lattice binds at t19 (the effect unit's khLut slot) and the builtin uber
-// shader applies it - no user PS is involved, so the KH_EFFECT_CUSTOM resolve
-// sites never see this id. User LUT sentinel: RenderObject.effect for a ".cube"
-// 3D-LUT grade (fx_shader carries the resolved path - the .hlsl slot's exact
-// rule).
+// LUT sentinel: a ".cube" 3D-LUT grade; fx_shader carries the resolved path.
+// The lattice binds at t19 and the builtin uber shader applies it, so
+// KH_EFFECT_CUSTOM resolve sites never see this id.
 static constexpr int KH_EFFECT_LUT = 101;
 
 // Rain state: written only inside the lock-held flush, read only at CB fill
 // sites inside serialized windows - no atomics needed.
 static float    g_rain_vel[3] = {};
-// Speed must be integrated, never multiplied: this phase accumulates dt *
-// factor from the smoothed velocity each flush and rides fxParams1.w; the
-// shader multiplies it only by the user's speed param (a deliberate,
-// user-caused jump). Bounded integrand - no teleport spike; float32 keeps
-// sub-ms granularity for hours.
+// Integrated, never multiplied: accumulates dt * factor per flush and rides
+// fxParams1.w; the shader multiplies only by the user's speed param.
 static float    g_rain_phase = 0.0f;
 static float    g_rain_prev_cam[3] = {};
 static bool     g_rain_prev_valid = false;
@@ -1833,9 +1731,8 @@ static uint64_t g_rain_prev_us = 0;
 static std::unordered_map<std::string, RenderObject> g_draw_list;
 static std::mutex g_draw_list_mutex;
 
-// KH_SCENE: every object is trivially copyable so the live-scene sync below is
-// a memcpy per dirty object and nothing else. The two members that used to
-// break this (the shader path string, the material shared_ptr) are interned.
+// Every object is trivially copyable so the live-scene sync is a memcpy per
+// dirty object; the string / material members are interned pointers.
 static_assert(std::is_trivially_copyable<RenderObject>::value, "RenderObject must stay a POD snapshot (KH_SCENE)");
 
 inline const std::string& kh_fx_shader_of(const RenderObject& o) {
@@ -1843,18 +1740,14 @@ inline const std::string& kh_fx_shader_of(const RenderObject& o) {
     return o.fx_shader ? *o.fx_shader : khfs_none;
 }
 
-// KH_SCENE: the live scene. g_draw_list stays the script-facing authority
-// (handle-keyed, mutated under g_draw_list_mutex); the walkers read this
-// index-stable copy of it instead, synced dirty-only by kh_scene_sync. Every
-// mutation of g_draw_list goes through the four functions at the end of the
-// header (add / update / remove / clear) plus the flush's expiry erase, each of
-// which marks the slot dirty; a slot is reused only after the live side has
-// seen its death. Readers: the render thread mid-frame and the game thread
-// under the park - the park invariant serializes them, so the live vectors
-// carry no lock (the same contract as g_res). The two pre-lock game-thread
-// walks (flush_frame's demand census, flush_ui_frame's has_work) stay on
-// g_draw_list under the mutex on purpose: they run while the render thread
-// may be inside a walker.
+// The live scene. g_draw_list is the script-facing authority (under
+// g_draw_list_mutex); the walkers read this index-stable copy, synced
+// dirty-only by kh_scene_sync. Every g_draw_list mutation goes through add /
+// update / remove / clear plus the flush's expiry erase, each marking the slot
+// dirty; a slot is reused only after the live side has seen its death. The park
+// serializes the readers, so the live vectors carry no lock. The pre-lock
+// game-thread walks (flush_frame's demand census, flush_ui_frame's has_work)
+// stay on g_draw_list under the mutex on purpose.
 static constexpr uint32_t KH_SCENE_NONE = 0xFFFFFFFFu;
 static constexpr float    KH_SCENE_CELL_M = 64.0f;   // Grid cell edge, engine x / z.
 
@@ -1940,14 +1833,10 @@ inline void kh_scene_grid_insert(uint32_t khgi_slot, const RenderObject& o) {
     khgi_it->second.slots.push_back(khgi_slot);
 }
 
-// KH_OBJBUF: the GPU object record, HLSL twin KhObjRec (cb.hlsl, t39). One per
-// live-scene slot, engine axes. Everything a bucket's instanced vertex shader
-// needs that is a property of the object rather than of the pass: centre,
-// edge lengths, the rotation rows, colour (envelope excluded - it rides the
-// lane), farVis and the lit ambient / diffuse fractions. Rebuilt from the
-// live copy inside kh_scene_sync for every dirty slot and uploaded as ranges
-// by kh_objbuf_sync; the CPU mirror is what the cull walks read (through
-// g_scene, the same data one struct earlier).
+// GPU object record, HLSL twin KhObjRec (t39). One per live-scene slot, engine
+// axes: what a bucket's instanced VS needs per object (centre, edge lengths,
+// rotation rows, colour without envelope, farVis, lit fractions). Rebuilt in
+// kh_scene_sync per dirty slot, uploaded as ranges by kh_objbuf_sync.
 struct KhObjRec {
     float pos[4];    // xyz = centre (engine axes); w = 0.
     float size[4];   // xyz = edge lengths (engine axes); w = farVis flag.
@@ -2017,11 +1906,10 @@ inline void kh_scene_sync() {
     ++g_scene.gen;
 }
 
-// KH_OBJBUF: brings the GPU buffer up to the mirror. Under the park, after
-// kh_scene_sync, before any bucket draw of the pass. Grows by doubling with a
-// whole upload; otherwise one UpdateSubresource per run of consecutive dirty
-// slots (a whole upload when more than half the slots moved). Every write
-// carries a box, so the upload hook never scans it. False = no buffer.
+// Brings the GPU buffer up to the mirror: under the park, after kh_scene_sync,
+// before any bucket draw. Grows by doubling; otherwise one UpdateSubresource
+// per dirty run (whole upload past half). Every write carries a box. False = no
+// buffer.
 inline bool kh_objbuf_sync(ID3D11DeviceContext* ctx) {
     const uint32_t khob_n = static_cast<uint32_t>(g_objbuf_cpu.size());
     if (khob_n == 0 || !ctx) return false;
@@ -2109,8 +1997,6 @@ inline std::string make_render_uid() {
 static uint64_t g_flush_frame = 0;
 static std::atomic<uint64_t> g_flush_frame_pub{0};
 
-// Visible flicker.
-
 struct RenderStats {
     uint64_t flushes = 0;   // Flush attempts with work queued.
     uint64_t lock_retries = 0;   // Individual failed lock acquisitions.
@@ -2124,8 +2010,9 @@ struct RenderStats {
     uint64_t textured_draws = 0;   // per-submesh textured draws issued (KH_TEXTURED).
     uint64_t meshes_released = 0;   // KH_MESH_FREE: registry meshes released by the idle GC.
     uint64_t textures_released = 0;   // KH_TEX_GC: cached texture views released idle.
-    uint64_t fbx_imports = 0;   // Fbx files ufbx-parsed + registered misses of both the id map and
-                                // The binary mesh cache.
+    // FBX files parsed + registered (misses of both the id map and the binary
+    // mesh cache).
+    uint64_t fbx_imports = 0;
     // Private sun-depth map (mesh-shaped cast + self-shadowing).
 };
 static RenderStats g_stats;
@@ -2137,31 +2024,19 @@ static std::atomic<bool> g_stats_armed{ false };
 inline bool kh_stats_on() { return g_stats_armed.load(std::memory_order_relaxed); }
 inline void kh_stat(uint64_t& khst_c) { if (kh_stats_on()) ++khst_c; }
 inline void kh_stat_add(uint64_t& khst_c, uint64_t khst_n) { if (kh_stats_on()) khst_c += khst_n; }
-// KH_FLUSH_SERIAL: the live flush count the mesh / material graves and the
-// band fall-through dedupe key on. Never reset and never gated - it is a
-// mechanism, not a statistic; g_stats.flushes is the reported twin.
+// The live flush count the graves and the band dedupe key on. Never reset - a
+// mechanism, not a statistic.
 static uint64_t g_flush_serial = 0;
 
-
-// setRenderDebug: 0 is the only mode, by design. No readback or debug-view
-// modes are planned or pending; the stats surface (getRenderStats) is the
-// whole diagnostic contract. Closed.
+// setRenderDebug: 0 is the only mode; reserved for future debug views.
 static std::atomic<int> g_dbg_mode{ 0 };
 
 static uint32_t g_scene_depth_samples = 0;   // sampleDesc.Count of the adopted main depth.
-// INTENTIONAL LIMITATION: at FSAA 1x (a single-sample main depth) every world
-// mesh stands down - the flush and the injection both - while fullscreen
-// passes keep running. The mesh integration is built and validated against
-// the engine's multisampled scene path only. This is the shipped behaviour,
-// not an open question; do not extend the mesh path to 1x without a campaign.
+// INTENTIONAL: at FSAA 1x (single-sample main depth) every world mesh stands
+// down - flush and injection - while fullscreen passes keep running. The mesh
+// path is validated against the multisampled scene only.
 inline bool kh_fsaa_world_standdown() {
     return g_scene_depth_samples == 1;
-}
-
-// Identity today: the bias-clamp twins it once selected between were modes.
-// The call sites stay so a future rasterizer switch has one seam.
-inline ID3D11RasterizerState* kh_rs_pick(ID3D11RasterizerState* khrs_in) {
-    return khrs_in;
 }
 
 static const char* const KH_SHADERS_COMPILING = "shaders compiling";
@@ -2188,18 +2063,13 @@ static float g_scene_vp_max_d = 0.999f;
 
 // Shaders convention: row_major, clip = p * viewProj.
 
-// The HLSL sources are plain .hlsl resources concatenated per unit; no ID3DInclude
-// on purpose, since the cache key hashes the assembled top-level source and a real
-// #include would hide prefix edits from it. Rules:
-// 1. fxc has no linker pass: a function's body must appear textually before its
-//    caller in the unit's assembled source.
-// 2. cb.hlsl is the one shared prefix; static.hlsl is seen only by the static unit,
-//    composite(2) only by the composite unit. A helper both chains call goes in cb.
-// 3. Twins move together: the flush and injection mesh loops; PSMain / PSComposite /
-//    PSEffect; the HLSL and C++ sides of any CB contract; the two
-//    sun-verdict chains (self kernel + world cast) sharing KhTbBlend.
-// 4. Any .hlsl edit changes that unit's cache key (a cold recompile, ~370 s for the
-//    tall poles): batch shader edits.
+// HLSL sources are concatenated per unit; no #include, since the cache key
+// hashes the assembled source. Rules: fxc has no linker pass, so a function
+// body must precede its caller in the unit; cb.hlsl is the shared prefix (a
+// helper both chains need goes there); twins move together (flush / injection
+// mesh loops, PSMain / PSComposite / PSEffect, the HLSL and C++ sides of the
+// CB, the two sun-verdict chains); any .hlsl edit changes that unit's cache
+// key, so batch shader edits.
 enum KhHlslRes : int {
     KH_HLSL_CB = 0,          // The shared prefix (cb.hlsl).
     KH_HLSL_WHITE,
@@ -2269,7 +2139,7 @@ struct alignas(16) ConstantData {
     float center_size[4];
     float center_rel[4];
     float color[4];
-    float fx0[4];   // Effect parameters [0.3]; on the mesh fill sites xyz =.
+    float fx0[4];   // Effect parameters [0..3]; on the mesh fill sites xyz = the camera.
     float fx1[4];
     float fx_meta[4];   // Effect id, time (s), screen width, screen height.
     float depth_params[4];
@@ -2279,27 +2149,21 @@ struct alignas(16) ConstantData {
     float local_radii[4];   // Xyz = mask radii (engine axes).
     float band0[4];   // x = band min (m), y = band max (m, <=0 unbounded), z = falloff (m), w =
                       // Banded flag.
-    float lighting0[4];   // x = lit flag, z = ambient, w = diffuse. Codes 72 and up are the free
-                          // Ones.
-    float shadow_meta2[4];   // x = far-visibility clamp flag (per object). y = object view-distance
-                             // Cut (m, 0 = off). zw: layout-preserving, always 0, unread
-                             // (the owner map is gone from the HLSL too).
+    float lighting0[4];   // x = lit flag, z = ambient, w = diffuse.
+    // x = far-visibility clamp flag (per object), y = object view-distance cut
+    // (m, 0 = off); zw unread.
+    float shadow_meta2[4];
     float obj_rot[3][4];   // [0][3] = 1 marks filled (the zeroed default reads as identity
                            // in-shader - auxiliary fills stay correct).
     float blend_ctl[4];   // x = perceptual-composite enable (inject fill).
     float mat_ctl[4];   // KH_MAT_TABLE (HLSL twin matCtl): x = table index (base + slot) for the
                         // non-instanced VS, y = slot for the instanced VS, w = alpha-mode override
                         // (-1 none). The material lanes themselves live in the table (KhGpuMat).
-    float mat_pad1[4];   // Former mat_params1..3; layout-preserving, unread.
-    float mat_pad2[4];
-    float mat_pad3[4];
     float kh_far_split[4];   // far-keep split: x/y = frame pair.
     float fuse_meta[4];
     float fuse_stage[12][4];
-    // The effect-parameter interface widened 8 -> 12. fx2 sits here (the append
-    // region) rather than beside fx0/fx1 to honor the append-only block
-    // discipline; HLSL twin fxParams2, same relative slot. Zeroed on every fill
-    // site except the two chain-pass fills.
+    // fx2 sits in the append region (append-only block discipline); HLSL twin
+    // fxParams2. Zeroed on every fill site except the chain-pass fills.
     float fx2[4];
     float dl_ctl[4];   // x = mode (0 off / 1 camera-relative world / 2 view space / 3 absolute
                        // Pool), y = point count, z = spot count, w = distance scale.
@@ -2307,11 +2171,11 @@ struct alignas(16) ConstantData {
                           // (g_dl_intensity_bits) - DynLights scales its whole sum by w, so a zero
                           // here is 'lights off', never a padding lane.
     float dl_view[3][4];
-    float dl_lights[192][4];   // 32 lights x 6 float4, engine cb11. Last per-object field by
-                               // Contract: the obj upload trims to the used-light prefix. per-frame
-                               // block (b1).
-    float view_proj[4][4];   // Rebased on the two mesh passes see center_rel; absolute at every
-                             // Other site.
+    // 32 lights x 6 float4, engine cb11. Last per-object field by contract: the
+    // obj upload trims to the used-light prefix. The per-frame block (b1)
+    // starts at view_proj.
+    float dl_lights[192][4];
+    float view_proj[4][4];   // Rebased on the two mesh passes (see center_rel); absolute at every other site.
     float inv_view_proj[4][4];   // Inverse of the live encode for the depth reconstruction:
                                  // of the rotation-only view when fx_cam.w = 1 (the shader adds
                                  // fx_cam.xyz back), absolute when fx_cam.w = 0 (KH_FX_CAM_REL).
@@ -2338,9 +2202,9 @@ struct alignas(16) ConstantData {
     float sun_vp[4][4];   // row-vector world -> sun-depth clip.
     float sun_meta[4];   // x = valid, y = map size (px), z = compare bias (normalized depth
                          // units), w = shadow-map strength.
-    float locality_meta[4];   // x = per-caster locality pair count; y = 1 -> the uncapped t2
-                              // structured-buffer list carries them; z = sun map older than
-                              // 0.5 s (the filtered-compare gate); w never written.
+    // x = per-caster locality pair count; y = 1 -> the uncapped t2 list carries
+    // them; z = sun map older than 0.5 s (the filtered-compare gate).
+    float locality_meta[4];
     float locality[32][4];   // [2i] = center.xyz, [2i+1] = half extents.xyz.
     float light_amb[4];   // Rgb = engine ambient (HDR) or (1,1,1) cold; w = engine mode.
     float fog_engine[4];   // x = density scale (blk 41), y = fog end (blk 48) z = inv ramp range
@@ -2357,11 +2221,12 @@ struct alignas(16) ConstantData {
     float fk_veto[40][4];   // 8 x 5 float4 per-OBB records.
     // The volume transport. HLSL twins stenVol / stenVol2 (mirror contract,
     // same relative slot).
-    float sten_vol[4];   // x/y = the injection's viewport MinDepth/MaxDepth for the epoch
-                         // stenReproj came from (window-z reconstruction); z/w = the volume copy's
-                         // own dimensions - deliberately not fxMeta.zw.
-    float sten_vol2[4];   // x = transport arm (1 = read the volume stencil); z = KhVsCore vertex
-                          // path selector (3 = the seam prepass); y/w never written.
+    // x/y = the injection's viewport MinDepth/MaxDepth for the epoch stenReproj
+    // came from; z/w = the volume copy's own dimensions (not fxMeta.zw).
+    float sten_vol[4];
+    // x = transport arm (1 = read the volume stencil); z = KhVsCore vertex path
+    // selector (3 = the seam prepass).
+    float sten_vol2[4];
     float sten_proj[4][4];
     // Hero sun map - HLSL twins sunVP2 / sunMeta2 (mirror contract).
     float sun_vp2[4][4];   // World -> hero sun-depth clip (row-vector).
@@ -2371,13 +2236,11 @@ struct alignas(16) ConstantData {
     float sun_meta3[4];   // x = valid, y = map size (px), z = compare bias, w = half-diag (m).
     float sun_vp4[4][4];   // World -> outer-band sun-depth clip (t27).
     float sun_meta4[4];   // x = valid, y = map size (px), z = compare bias, w = half-diag (m).
-    // Existing offsets stay byte-identical, 1 float4 keeps KH_CBFRAME_BYTES %
-    // 16 == 0. x = mask valid this frame, y/z = mask dims (px). w free.
+    // x = mask valid this frame, y/z = mask dims (px), w free.
     float mir_meta[4];
     float sun_origin[4];   // xyz = the sun anchor; w = the far tier's prefilter arm (KH_FAR_PF).
     // x = engine below-layer extinction (block nb[51]), y = armed, z = clamp
-    // fallback selector, w free. KH_CBFRAME_BYTES % 16 == 0 - one float4
-    // preserves it.
+    // fallback selector, w free.
     float fog_below[4];
     float fog_uw[4];
     float fog_uw_grad[4];
@@ -2388,63 +2251,52 @@ struct alignas(16) ConstantData {
     // HLSL twin appended identically.
     float sun_vp5[4][4];
     float sun_meta5[4];
-    // KH_CAST_BIAS_CAP: HLSL twins sunCastBias / sunCastBias2, appended
-    // identically. The world cast's own compare bias, one lane per tier plus
-    // the union. Deliberately not sun_meta*[2]: that lane feeds the self kernel
-    // too (KhSelfTier floors on it) and self-shadowing is healthy at every
-    // cluster size, so it may not move. Zero = the shader falls back to
-    // sun_meta*[2], which is what every mesh fill site leaves here.
+    // World cast compare bias, one lane per tier plus the union (HLSL twins
+    // sunCastBias / sunCastBias2). Deliberately not sun_meta*[2]: that lane
+    // feeds the self kernel too and may not move. Zero = the shader falls back
+    // to sun_meta*[2], which every mesh fill site leaves here.
     float sun_cast_bias[4];    // Hero, mid, outer, far (normalized).
-    float sun_cast_bias2[4];   // x = union (normalized); yzw unread.
+    float sun_cast_bias2[4];   // x = union (normalized).
     // No cube matrices live here, and that is the point. Only the spot frustum
     // is arbitrary and therefore stored.
-    float dls_meta[8][4];    // Xyz = light world position (engine axes), w = far plane (m). w == 0
-                             // Is the stand-down: no map, and the shader answers lit, which is what
-                             // a mesh with no shadow map must look like.
+    // xyz = light world position (engine axes), w = far plane (m); w == 0 = no
+    // map, the shader answers lit.
+    float dls_meta[8][4];
     float dls_ctl[8][4];     // x = 1 spot / 0 cube, y = compare bias constant (metres), z = the
                              // spot's slice, w = bias slope (per metre of range).
-    // One float4 per face, indexed slot*6 + face. A flat array is one dynamic
-    // array index and a static component, which is the form the rest of this
-    // shader already uses everywhere (shadowMats, bandMat, locality, dlLights).
-    // x = slice for this face (-1 = no slice: nothing occludes in that
-    // direction, a correct answer rather than a hole). y = the receiver-normal
+    // One float4 per face, indexed slot*6 + face. x = slice for this face (-1 =
+    // no slice: nothing occludes in that direction). y = the receiver-normal
     // offset arm, replicated across the light's six entries so it can be read
-    // Before the face is known. Zw free.
+    // before the face is known. zw free.
     float dls_face_slice[48][4];
     float dls_spot_vp[8][4][4];
-    float dls_range[4];   // KH_DLS_RANGE: xyz = pass camera (engine axes), w =
-                          // Clamp(shadowVisibility, 8, 1000); 0 = no fade. HLSL twin dlsRange;
-                          // written by kh_dls_fill_cb.
-    // KH_OBJBUF: the bucket pass lanes (HLSL twins khPass / khPassObj, appended
-    // identically). khPass.xyz = the pass's rebase camera (engine axes), w = 1
-    // arms the instanced vertex path's rebase (twin of centerRel.w; the
-    // instanced VS subtracts the camera itself - a float difference of two
-    // floats is correctly rounded, exactly what kh_fill_center_rel's double
-    // detour produced). khPassObj.x = the engine object view distance (the
-    // farVis-off cut, twin of shadowMeta2.y); yzw free. Zero on every fill
-    // site that draws no bucket.
+    // xyz = pass camera (engine axes), w = clamp(shadowVisibility, 8, 1000); 0
+    // = no fade. Written by kh_dls_fill_cb.
+    float dls_range[4];
+    // Bucket pass lanes (HLSL twins khPass / khPassObj). khPass.xyz = the
+    // pass's rebase camera (engine axes), w = 1 arms the instanced vertex
+    // path's rebase (the instanced VS subtracts the camera itself). khPassObj.x
+    // = the engine object view distance (the farVis-off cut); yzw free. Zero on
+    // every fill site that draws no bucket.
     float kh_pass[4];
     float kh_pass_obj[4];
-    // KH_FX_CAM_REL: xyz = the camera the effect unit's inverse view-projection
-    // is relative to (engine axes), w = 1 arms it - KhWorldPosFenced adds xyz
-    // back after the camera-relative reconstruction. w = 0 (the zeroed
-    // default): the inverse is absolute and nothing is added - the old
-    // contract, kept for fill sites that do not set the lane.
+    // xyz = the camera the effect unit's inverse view-projection is relative to
+    // (engine axes), w = 1 arms it - every invViewProj reader adds xyz back. w
+    // = 0: the inverse is absolute and nothing is added.
     float fx_cam[4];
 };
 
 // CB-split slice geometry: the object block ends where view_proj (the first
 // frame field) begins; dl_lights must close the object block. The shader light
-// loop is bounded by the counts written in the head, so the unwritten tail is
-// unread by construction - the one sanctioned exception to write-what-you-bind.
+// loop is bounded by the counts in the head, so the unwritten tail is unread by
+// construction.
 
 static constexpr size_t KH_CBOBJ_BYTES      = offsetof(ConstantData, view_proj);
 static constexpr size_t KH_CBOBJ_HEAD_BYTES = offsetof(ConstantData, dl_lights);
 static constexpr size_t KH_CBFRAME_BYTES    = sizeof(ConstantData) - KH_CBOBJ_BYTES;
-// The HLSL CBObj/CBFrame declarations and this struct are a hand-kept mirror
-// with no tripwire; the compiled PSMain blob carries the declared cbuffer sizes
-// in its RDEF chunk (cached.khsc blobs too), so every ensure reflects them and
-// publishes the comparison.
+// The HLSL CBObj/CBFrame declarations and this struct are a hand-kept mirror;
+// every ensure reflects the compiled PSMain's cbuffer sizes and publishes the
+// comparison.
 static uint32_t g_cb_mirror_obj_b = 0;
 static uint32_t g_cb_mirror_frame_b = 0;
 static bool     g_cb_mirror_bad = false;
@@ -2461,26 +2313,24 @@ inline void kh_fill_obj_rot(ConstantData& cbd, const float* rot_m) {
     cbd.obj_rot[0][3] = 1.0f;   // khRotate engages identity matrix when the object is unrotated.
 }
 
-// A discard map is the expensive one; a NO_OVERWRITE map into a region the GPU is
-// not reading is a pointer return. Slice = the object block rounded to 256 B
-// (3,744 -> 3,840 = 240 constants; numConstants must be a multiple of 16).
+// A NO_OVERWRITE map into a region the GPU is not reading is a pointer return.
+// Slice = the object block rounded to 256 B (numConstants must be a multiple of
+// 16).
 static constexpr uint32_t KH_CBR_STRIDE = static_cast<uint32_t>((KH_CBOBJ_BYTES + 255u) & ~static_cast<size_t>(255u));
 static constexpr uint32_t KH_CBR_SLICES = 1024u;
 static constexpr uint32_t KH_CBR_CONSTS = KH_CBR_STRIDE / 16u;
 static bool     g_cbr_supported = false;   // Feature pair present on this device
                                            // (ensure_resources).
-inline ID3D11DeviceContext1* kh_ctx1(ID3D11DeviceContext* ctx);   // Defined with the dynamic-lights
-                                                                  // The ring binds the same buffer every slice with only firstConstant moving - the
-                                                                  // shape the D3D11.1 docs warn about under command-list emulation, where an
-                                                                  // offset-only SetConstantBuffers1 may not apply and a null bind between two Set1
-                                                                  // calls is the prescribed workaround. The trigger is a deferred context on a driver
-                                                                  // without native command lists; every upload here uses the immediate context, so
-                                                                  // the latch reads false in practice.
+// The ring binds the same buffer every slice with only firstConstant moving -
+// the shape the D3D11.1 docs warn about under command-list emulation, where an
+// offset-only SetConstantBuffers1 may not apply and a null bind between two
+// Set1 calls is the workaround. The trigger is a deferred context on a driver
+// without native command lists; every upload here uses the immediate context.
+inline ID3D11DeviceContext1* kh_ctx1(ID3D11DeviceContext* ctx);
 static bool     g_kh_ctx1_null_first = false;
-// The runtime drops SetConstantBuffers1 on a driver without offsetting, so
-// StateBackup's offset-aware restore must not be attempted there or our buffer
-// stays bound. Such a driver cannot bind windows either, so the plain pair is
-// exact. False until ensure_resources reads the caps.
+// A driver without offsetting drops SetConstantBuffers1, so StateBackup's
+// offset-aware restore must not be attempted there or our buffer stays bound.
+// False until ensure_resources reads the caps.
 static bool     g_cb_offsetting = false;
 
 // Contract: the slice is uploaded only through dlLights[n*6] (n = dlCtl.y + dlCtl.z);
@@ -2535,7 +2385,7 @@ inline bool kh_upload_obj_cb(ID3D11DeviceContext* ctx, ID3D11Buffer* buf, const 
     if (FAILED(ctx->Map(buf, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
     memcpy(mapped.pData, &cbd, khu_bytes);
     ctx->Unmap(buf, 0);
-    // The legacy buffer must be what b0 reads: a ring slice may still be bound
+    // The plain buffer must be what b0 reads: a ring slice may still be bound
     // there from the previous upload. Plain setters, both stages.
     if (khu_ri >= 0 && g_cbr_supported && g_res.cb_ring[khu_ri]) {
         ctx->VSSetConstantBuffers(0, 1, &buf);
@@ -2552,24 +2402,16 @@ inline bool kh_upload_frame_cb(ID3D11DeviceContext* ctx, ID3D11Buffer* buf, cons
     return true;
 }
 
-// Append rules (the exactness contract): followers must be builtin point ops
-// from the fixed set {1 invert, 2 colorgrade, 3 vignette, 5 grain} and never
-// localized or banded; those four are point ops (each output pixel depends only
-// on its own running-value pixel plus uniforms), never spill-classified, never
-// depth consumers, and never t19 binders.
+// Append rules: followers must be builtin point ops from {1 invert, 2
+// colorgrade, 3 vignette, 5 grain} and never localized or banded - point ops
+// that are never spill-classified, never depth consumers, never t19 binders.
 static constexpr int KH_FUSE_MAX = 3;   // Extra stages riding one draw.
 
-// KH_VIS_MEMO: the pass visibility predicate is evaluated three times per
-// object per pass - once by kh_mat_ensure_all, once by kh_inst_plan_emit and
-// once by the per-object loop - with identical arguments and, by the twin
-// contract, an identical answer. The third of those that costs anything is
-// kh_vis_occ_hidden: eight projections plus up to KH_VOC_TEST_PX grid reads.
-// Memoise per object for the duration of the pass. Every reference handed to
-// the predicate comes from the pass's own contiguous mesh vector, so the
-// object's index is its offset in that vector - the same assumption the emit /
-// loop twin contract already rests on. Out-of-range (an object that is not a
-// member) falls through to a live evaluation, so the memo can only ever be a
-// cache, never a different answer. Measured 3x fewer occlusion tests.
+// The pass visibility predicate is evaluated three times per object per pass
+// (kh_mat_ensure_all, kh_inst_plan_emit, the per-object loop) with identical
+// arguments; memoise it for the pass. An object's index is its offset in the
+// pass's contiguous mesh vector; out-of-range falls through to a live
+// evaluation, so the memo is only ever a cache.
 struct KhVisMemo {
     const RenderObject* base = nullptr;
     size_t n = 0;
@@ -2597,15 +2439,9 @@ struct KhVisMemo {
 static KhVisMemo g_vis_memo_inj;    // Render thread (the injection).
 static KhVisMemo g_vis_memo_flush;  // Game thread under the graphics lock.
 
-// KH_MESH_ORDER: the back-to-front ordering both colour passes need.
-// std::sort over the vector itself moved 288-byte RenderObjects - ~34,500
-// moves at 3,001 meshes, about 10 MB of memmove per pass per frame - and
-// recomputed kh_mesh_dist_sq inside the comparator, so the OBB distance ran
-// O(n log n) times instead of O(n). Sort a 12-byte key instead: one distance
-// per object, one pass to permute. Measured 3.4x on a 3,001-box scene.
-// The order is identical - same group rule, same tie behaviour - because the
-// comparator below is the old one with its two kh_mesh_dist_sq calls replaced
-// by the values they would have returned.
+// Back-to-front ordering both colour passes need. Sort a 12-byte key (one
+// distance per object) and permute once, rather than sorting 288-byte objects
+// with the OBB distance recomputed in the comparator.
 struct KhOrdKey {
     float    d;   // kh_mesh_dist_sq to the pass camera.
     uint32_t g;   // 0 opaque solid, 1 translucent/effect, 2 depth-Off.
@@ -2666,9 +2502,9 @@ inline bool kh_fuse_append(ConstantData& cbd, const RenderObject& o) {
     return true;
 }
 
-// Mesh-borne fogscatter never routes here: its lanes stay the zeroed defaults,
-// So a mesh footprint scatters by the engine fog alone. Fog scattering pack,
-// CPU side (HLSL twin: KhFsFog's fog-pass lanes - the mirror contract).
+// Fog scattering pack, CPU side (HLSL twin: KhFsFog's fog-pass lanes).
+// Mesh-borne fogscatter never routes here: its lanes stay zeroed, so a mesh
+// footprint scatters by the engine fog alone.
 inline void kh_fogscatter_pack(ConstantData& cbd,
                                const std::vector<std::pair<uint64_t, RenderObject>>& khfs_list) {
     memset(cbd.fx1, 0, sizeof(cbd.fx1));
@@ -2715,8 +2551,8 @@ inline bool kh_rebase_vp(ConstantData& cbd, const float* cam3) {
 inline bool kh_rebase_vp_exact(ConstantData& khx_cbd, const float khx_view[4][4],
                                const float khx_proj[4][4], const float* khx_cam) {
     // Same stand-down as kh_rebase_vp, evaluated first so the armed verdict is
-    // identical between the two paths under every mode (the caller mirrors this
-    // bool into center_rel and the two must never disagree).
+    // identical between the two paths (the caller mirrors it into center_rel;
+    // the two must never disagree).
     if (khx_cam[0] * khx_cam[0] + khx_cam[1] * khx_cam[1] +
         khx_cam[2] * khx_cam[2] < 1.0f) return false;
 
@@ -2728,9 +2564,9 @@ inline bool kh_rebase_vp_exact(ConstantData& khx_cbd, const float khx_view[4][4]
         for (int khx_c = 0; khx_c < 4; ++khx_c)
             khx_v[khx_r][khx_c] = static_cast<double>(khx_view[khx_r][khx_c]);
 
-    // For an origin that is this matrix's camera the result is ~0 to double
-    // precision, so the world-absolute magnitude never reaches an fp32 store at
-    // all. Row 3 of the view, camera folded, in double.
+    // Row 3 of the view with the camera folded, in double: for an origin that
+    // is this matrix's camera the result is ~0, so the world-absolute magnitude
+    // never reaches an fp32 store.
     for (int khx_c = 0; khx_c < 4; ++khx_c) {
         khx_v[3][khx_c] += static_cast<double>(khx_cam[0]) * khx_v[0][khx_c]
                          + static_cast<double>(khx_cam[1]) * khx_v[1][khx_c]
@@ -2751,9 +2587,8 @@ inline bool kh_rebase_vp_exact(ConstantData& khx_cbd, const float khx_view[4][4]
     return true;
 }
 
-// Per-object rebase twin: center minus the pass camera, subtracted in double
-// (both operands promote exactly; the difference rounds once). Requires
-// center_size already filled with the engine-axes center.
+// Per-object rebase twin: center minus the pass camera, subtracted in double.
+// Requires center_size already filled with the engine-axes center.
 inline void kh_fill_center_rel(ConstantData& cbd, const float* cam3) {
     cbd.center_rel[0] = static_cast<float>(static_cast<double>(cbd.center_size[0]) - static_cast<double>(cam3[0]));
     cbd.center_rel[1] = static_cast<float>(static_cast<double>(cbd.center_size[1]) - static_cast<double>(cam3[1]));
@@ -2787,17 +2622,13 @@ inline bool kh_rebase_vp_engcam(ConstantData& khe_cbd, const float khe_view[4][4
     return true;
 }
 
-
 inline float effect_time_seconds();
-inline void kh_msaa_toggle_wipe(unsigned int khtw_new);   // Body after g_ls (23k+).
-// KH_DL_SHADOW: body sits with the map state it reads (22.9k+), which is far
-// below the two mesh frame-CB fills that call it. Declared here, in the same
-// idiom as kh_msaa_toggle_wipe above - ConstantData is complete by this point,
-// so the signature is whole even though the body is not.
+inline void kh_msaa_toggle_wipe(unsigned int khtw_new);
+// Body sits with the DLS map state it reads, far below the two frame-CB fills
+// that call it.
 inline void kh_dls_fill_cb(ConstantData& khf_cb);
-inline void kh_svs_mask_release(bool khm_scrub_vmir = true);   // Body in the sv suite (41k+); the
-                                                               // Wipe calls it with false (vmir is
-                                                               // device-scoped).
+// Body in the seam suite; the wipe calls it with false (vmir is device-scoped).
+inline void kh_svs_mask_release(bool khm_scrub_vmir = true);
 inline uint64_t steady_now_ms();
 inline void  mul_4x4(const float a[4][4], const float b[4][4], float out[4][4]);
 
@@ -2921,13 +2752,10 @@ inline void kh_mod_cache_append(std::vector<std::filesystem::path>& khma_out,
     } catch (...) {}
 }
 
-// These flags join the shader cache hash, and must: the cache is content-
-// addressed over source+entry+target+defines, so without folding the flags an
-// arm's blob would be stored under the default's key and served to a later
-// default run - a silently wrong shader. Every hash in this header is
-// CryptoGenerator's FNV-1a 64 (standard offset basis): the on-disk cache keys
-// (khmc / .khsc / .khtc) and the in-memory change hashes alike. Field-separated
-// where fields concatenate.
+// These flags join the shader cache hash: the cache is content-addressed over
+// source+entry+target+defines, so without them a differently-flagged blob would
+// be served under the same key. Every hash here is CryptoGenerator's FNV-1a 64,
+// field-separated.
 inline uint32_t kh_shader_flags() {
     return 0;
 }
@@ -2942,10 +2770,9 @@ inline uint64_t kh_shader_cache_hash(const char* src, const char* entry, const c
     };
     mix(src); mix(entry); mix(target);
     for (const D3D_SHADER_MACRO* d = defines; d && d->Name; ++d) { mix(d->Name); mix(d->Definition); }
-    // The compile flags are part of the identity - see KH_SHADER_FLAGS. Word
-    // mixes, not byte updates: the flags and the salt fold in as whole values.
+    // The compile flags are part of the identity; folded in as whole values.
     h ^= static_cast<uint64_t>(kh_shader_flags()); h *= CryptoGenerator::FNV1A64_PRIME;
-    h ^= 26481ull; h *= CryptoGenerator::FNV1A64_PRIME;   // belt+braces: version salt literal
+    h ^= 26481ull; h *= CryptoGenerator::FNV1A64_PRIME;
     return h;
 }
 
@@ -2964,10 +2791,8 @@ static constexpr uint32_t KH_SHADER_CACHE_VERSION = 1;
 static std::atomic<uint64_t> g_shader_cache_hits{0};
 static std::atomic<uint64_t> g_shader_cache_misses{0};
 
-// Every existing call, every error string, every non-fatal fallback and every
-// early return is untouched - a memo miss simply compiles inline exactly as it
-// does today, so a job list that drifts out of step with its ensure costs speed
-// and can never cost correctness.
+// A memo miss compiles inline exactly as before, so a job list that drifts out
+// of step with its ensure costs speed, never correctness.
 struct KhShaderJob {
     const char* src;
     const char* entry;
@@ -2986,7 +2811,7 @@ static std::condition_variable g_khsm_cv;
 static std::unordered_map<uint64_t, KhShaderMemo> g_khsm_map;
 static std::vector<KhShaderJob> g_khsm_q;   // Built before any worker starts.
 static std::atomic<size_t> g_khsm_next{0};
-// THE CONTAINER IS DELIBERATELY NEVER DESTRUCTED.
+// Deliberately never destructed (detached workers may outlive static teardown).
 static std::vector<std::thread>& g_khsm_thr = *(new std::vector<std::thread>());
 static bool g_khsm_active = false;   // A batch is live (caller thread only).
 static std::atomic<int> g_khsm_live{0};
@@ -3006,103 +2831,80 @@ struct KhShaderLive {
 };
 static std::mutex g_khsm_trim_mu;   // kh_mesh_cache_trim is not re-entrant.
 
-static std::atomic<uint64_t> g_khsu_slowest_ms{0};   // Longest single unit = the pool's bound.
-
-// Called from workers as well as the caller: atomics only, nothing that can
-// throw.
-inline void kh_shader_census_note(const char* khsu_entry, const char* khsu_target,
-                                  const D3D_SHADER_MACRO* khsu_def, uint64_t khsu_hash,
-                                  uint32_t khsu_ms, bool khsu_hit) {
-    (void)khsu_entry; (void)khsu_target; (void)khsu_def; (void)khsu_hash;
-    if (khsu_hit) return;
-    uint64_t khsu_prev = g_khsu_slowest_ms.load(std::memory_order_relaxed);
-    while (khsu_ms > khsu_prev &&
-           !g_khsu_slowest_ms.compare_exchange_weak(khsu_prev, khsu_ms)) {}
-}
 
 inline std::string kh_shader_compile_raw(const char* src, const char* entry, const char* target,
                                          const D3D_SHADER_MACRO* defines, ID3DBlob** out_blob) {
     ID3DBlob* err_blob = nullptr;
 
-    const bool khsc_on = true;
-    const uint64_t khsc_h = khsc_on ? kh_shader_cache_hash(src, entry, target, defines) : 0;
-    const std::filesystem::path khsc_p = khsc_on ? kh_shader_cache_file(khsc_h)
-                                                 : std::filesystem::path();
+    const uint64_t khsc_h = kh_shader_cache_hash(src, entry, target, defines);
+    const std::filesystem::path khsc_p = kh_shader_cache_file(khsc_h);
 
-    if (khsc_on) {
-        // Index 0 is the Documents copy and is the only one we touch for the
-        // lru - a mod folder may sit on read-only media and is not under our
-        // budget in any case. KH_MOD_CACHE: ours first, then every mod that
-        // ships this blob.
-        std::vector<std::filesystem::path> khsc_cand;
-        if (!khsc_p.empty()) khsc_cand.push_back(khsc_p);
-        kh_mod_cache_append(khsc_cand, kh_cache_file_name("khs_", khsc_h, ".khsc"));
+    // Index 0 is the Documents copy and the only one the lru touches (a mod
+    // folder may be read-only). Ours first, then every mod that ships this
+    // blob.
+    std::vector<std::filesystem::path> khsc_cand;
+    if (!khsc_p.empty()) khsc_cand.push_back(khsc_p);
+    kh_mod_cache_append(khsc_cand, kh_cache_file_name("khs_", khsc_h, ".khsc"));
 
-        for (size_t khsc_ci = 0; khsc_ci < khsc_cand.size(); ++khsc_ci) {
-            const bool khsc_own = khsc_ci == 0 && !khsc_p.empty();
+    for (size_t khsc_ci = 0; khsc_ci < khsc_cand.size(); ++khsc_ci) {
+        const bool khsc_own = khsc_ci == 0 && !khsc_p.empty();
 
-            try {
-                std::ifstream khsc_f(khsc_cand[khsc_ci], std::ios::binary);
-                if (khsc_f) {
-                    struct { uint32_t magic, ver; uint64_t hash, size; } khsc_hdr = {};
-                    khsc_f.read(reinterpret_cast<char*>(&khsc_hdr), sizeof(khsc_hdr));
-                    if (khsc_f.gcount() == sizeof(khsc_hdr) &&
-                        khsc_hdr.magic == KH_SHADER_CACHE_MAGIC &&
-                        khsc_hdr.ver == KH_SHADER_CACHE_VERSION &&
-                        khsc_hdr.hash == khsc_h &&
-                        khsc_hdr.size > 0 && khsc_hdr.size < (64ull << 20)) {
-                        ID3DBlob* khsc_b = nullptr;
-                        if (SUCCEEDED(D3DCreateBlob(static_cast<SIZE_T>(khsc_hdr.size), &khsc_b))) {
-                            khsc_f.read(static_cast<char*>(khsc_b->GetBufferPointer()),
-                                        static_cast<std::streamsize>(khsc_hdr.size));
-                            bool khsc_dxbc = false;
-                            if (khsc_f.gcount() == static_cast<std::streamsize>(khsc_hdr.size) &&
-                                khsc_hdr.size >= 32) {
-                                const uint8_t* khsc_pb = static_cast<const uint8_t*>(khsc_b->GetBufferPointer());
-                                uint32_t khsc_tot = 0;
-                                memcpy(&khsc_tot, khsc_pb + 24, sizeof(khsc_tot));
-                                khsc_dxbc = khsc_pb[0] == 'D' && khsc_pb[1] == 'X' &&
-                                            khsc_pb[2] == 'B' && khsc_pb[3] == 'C' &&
-                                            khsc_tot == static_cast<uint32_t>(khsc_hdr.size);
-                            }
-                            if (khsc_f.gcount() == static_cast<std::streamsize>(khsc_hdr.size) && !khsc_dxbc) {
-                                khsc_f.close();
-                                if (khsc_own) {   // Ours only; a mod's copy is not our budget.
-                                    std::error_code khsc_rm;
-                                    std::filesystem::remove(khsc_cand[khsc_ci], khsc_rm);
-                                }
-                            }
-                            if (khsc_dxbc) {
-                                khsc_f.close();
-
-                                if (khsc_own) {
-                                    std::error_code khsc_ec;
-                                    std::filesystem::last_write_time(
-                                        khsc_cand[khsc_ci],
-                                        std::filesystem::file_time_type::clock::now(), khsc_ec);
-                                }
-
-                                *out_blob = khsc_b;
-                                if (kh_stats_on()) g_shader_cache_hits.fetch_add(1, std::memory_order_relaxed);
-                                kh_shader_census_note(entry, target, defines, khsc_h, 0, true);
-                                return "";   // Cache hit - no compile.
-                            }
-                            khsc_b->Release();
+        try {
+            std::ifstream khsc_f(khsc_cand[khsc_ci], std::ios::binary);
+            if (khsc_f) {
+                struct { uint32_t magic, ver; uint64_t hash, size; } khsc_hdr = {};
+                khsc_f.read(reinterpret_cast<char*>(&khsc_hdr), sizeof(khsc_hdr));
+                if (khsc_f.gcount() == sizeof(khsc_hdr) &&
+                    khsc_hdr.magic == KH_SHADER_CACHE_MAGIC &&
+                    khsc_hdr.ver == KH_SHADER_CACHE_VERSION &&
+                    khsc_hdr.hash == khsc_h &&
+                    khsc_hdr.size > 0 && khsc_hdr.size < (64ull << 20)) {
+                    ID3DBlob* khsc_b = nullptr;
+                    if (SUCCEEDED(D3DCreateBlob(static_cast<SIZE_T>(khsc_hdr.size), &khsc_b))) {
+                        khsc_f.read(static_cast<char*>(khsc_b->GetBufferPointer()),
+                                    static_cast<std::streamsize>(khsc_hdr.size));
+                        bool khsc_dxbc = false;
+                        if (khsc_f.gcount() == static_cast<std::streamsize>(khsc_hdr.size) &&
+                            khsc_hdr.size >= 32) {
+                            const uint8_t* khsc_pb = static_cast<const uint8_t*>(khsc_b->GetBufferPointer());
+                            uint32_t khsc_tot = 0;
+                            memcpy(&khsc_tot, khsc_pb + 24, sizeof(khsc_tot));
+                            khsc_dxbc = khsc_pb[0] == 'D' && khsc_pb[1] == 'X' &&
+                                        khsc_pb[2] == 'B' && khsc_pb[3] == 'C' &&
+                                        khsc_tot == static_cast<uint32_t>(khsc_hdr.size);
                         }
+                        if (khsc_f.gcount() == static_cast<std::streamsize>(khsc_hdr.size) && !khsc_dxbc) {
+                            khsc_f.close();
+                            if (khsc_own) {   // Ours only; a mod's copy is not our budget.
+                                std::error_code khsc_rm;
+                                std::filesystem::remove(khsc_cand[khsc_ci], khsc_rm);
+                            }
+                        }
+                        if (khsc_dxbc) {
+                            khsc_f.close();
+
+                            if (khsc_own) {
+                                std::error_code khsc_ec;
+                                std::filesystem::last_write_time(
+                                    khsc_cand[khsc_ci],
+                                    std::filesystem::file_time_type::clock::now(), khsc_ec);
+                            }
+
+                            *out_blob = khsc_b;
+                            if (kh_stats_on()) g_shader_cache_hits.fetch_add(1, std::memory_order_relaxed);
+                            return "";   // Cache hit - no compile.
+                        }
+                        khsc_b->Release();
                     }
                 }
-            } catch (...) {}   // Any doubt is a miss; the next candidate or the compile.
-        }
+            }
+        } catch (...) {}   // Any doubt is a miss; the next candidate or the compile.
     }
 
     if (kh_stats_on()) g_shader_cache_misses.fetch_add(1, std::memory_order_relaxed);
-    const uint64_t khsc_t0 = steady_now_ms();
     const uint32_t khsc_fl = kh_shader_flags();
     HRESULT hr = D3DCompile(src, strlen(src), "kh_render", defines, nullptr,
                             entry, target, khsc_fl, 0, out_blob, &err_blob);
-    const uint64_t khsc_dt = steady_now_ms() - khsc_t0;
-    kh_shader_census_note(entry, target, defines, khsc_h,
-                          static_cast<uint32_t>(khsc_dt), false);
 
     if (FAILED(hr)) {
         std::string msg = std::string(entry) + " compile failed " + hr_str(hr);
@@ -3120,13 +2922,11 @@ inline std::string kh_shader_compile_raw(const char* src, const char* entry, con
 
     // Cache write-through (best-effort; a failed write costs nothing), then the
     // shared trim - models and shaders under one 1 GiB.
-    if (khsc_on && !khsc_p.empty() && *out_blob) {
-        // Written to a private temp name and renamed into place: the reader
-        // validates header+size, so a torn final file only costs a miss, but
-        // two processes sharing the cache dir could otherwise each read the
-        // other's half-written blob and both recompile. Rename replaces on
-        // Windows; a sharing violation (reader holding the file) leaves the
-        // existing file and drops the temp.
+    if (!khsc_p.empty() && *out_blob) {
+        // Written to a private temp name and renamed into place so two
+        // processes sharing the cache dir never read each other's half-written
+        // blob. A sharing violation leaves the existing file and drops the
+        // temp.
         const std::filesystem::path khsc_tmp = khsc_p.string() + ".tmp" +
             std::to_string(static_cast<unsigned long>(GetCurrentProcessId()));
         bool khsc_wrote = false;
@@ -3207,12 +3007,10 @@ inline void kh_shader_mt_worker() {
     }
 }
 
-// KH_PREWARM_ABANDON: a batch that was built but never got a worker is torn
-// down here - map entries this call inserted (and, as the refused-pool path
-// always did, any memo the map held), the owned sources, the queue. No worker
-// exists at either call site (g_khsm_thr is empty, g_khsm_live is 0 on
-// entry), so the map is touched without the lock exactly as the refused-pool
-// path does. The caller compiles inline, which is always correct.
+// A batch that was built but never got a worker is torn down here: the map
+// (this call's entries and, as the refused-pool path always did, any memo it
+// held), the owned sources, the queue. No worker exists at either call site, so
+// the map is touched without the lock. The caller compiles inline.
 inline void kh_shader_mt_abandon() {
     for (auto& khsm_kv : g_khsm_map) {
         if (khsm_kv.second.blob) khsm_kv.second.blob->Release();
@@ -3229,8 +3027,7 @@ inline bool kh_shader_mt_prewarm(const KhShaderJob* khsm_jobs, size_t khsm_n,
     if (!khsm_jobs || khsm_n == 0) return false;
     if (g_khsm_active) return false;
     // A detached worker from a previous session may still be reading the queue
-    // and the owned-job storage. Refusing here is what makes that detach safe;
-    // the caller then compiles inline, which is always correct.
+    // and the owned-job storage; refusing here is what makes that detach safe.
     if (g_khsm_live.load(std::memory_order_acquire) > 0) return false;
     g_khsa_abort.store(false, std::memory_order_relaxed);
     unsigned khsm_hw = std::thread::hardware_concurrency();
@@ -3240,11 +3037,9 @@ inline bool kh_shader_mt_prewarm(const KhShaderJob* khsm_jobs, size_t khsm_n,
     try {
     std::unordered_map<const char*, std::shared_ptr<std::string>> khsm_srcs;
     g_khsm_q.clear();
-    // KH_USER_ASYNC arms a batch whenever a user shader is activated, each one
-    // carrying a full cb.hlsl-prefixed source, so the same code becomes an
-    // unbounded per-activation leak. The memo is untouched: it holds blobs and
-    // error strings, never job sources. The owned-job storage is freed here,
-    // not only at shutdown.
+    // The owned-job storage is freed here, not only at shutdown: user-shader
+    // batches each carry a full cb.hlsl-prefixed source. The memo holds blobs
+    // and error strings only.
     g_khsm_own.clear();
     g_khsm_q.reserve(khsm_n);
     {
@@ -3321,16 +3116,12 @@ inline bool kh_shader_mt_prewarm(const KhShaderJob* khsm_jobs, size_t khsm_n,
     }
     return true;
     } catch (...) {
-        // KH_PREWARM_ABANDON. Every throw site above precedes the spawn loop
-        // (the loop catches its own), so a throw here means map entries with
-        // no worker to finish them. Claiming ownership was right for the
-        // scoped caller (its destructor joins nothing and clears) and wrong
-        // for kh_shader_async_gate, which has no destructor: the hold would
-        // have scanned those never-done entries every flush, forever, with
-        // white placeholders for every mesh - the unbounded hold 1.316
-        // forbids. Tear it down and refuse; both callers then compile inline.
-        // The spawned-worker branch is unreachable today and kept only so a
-        // future throw after the spawn cannot orphan a live thread.
+        // Every throw site above precedes the spawn loop, so a throw here means
+        // map entries with no worker to finish them; kh_shader_async_gate has
+        // no destructor and would scan them every flush forever with white
+        // placeholders. Tear down and refuse; both callers compile inline. The
+        // spawned-worker branch is unreachable today and kept so a future throw
+        // after the spawn cannot orphan a live thread.
         if (g_khsm_thr.empty()) {
             kh_shader_mt_abandon();
             return false;
@@ -3340,10 +3131,8 @@ inline bool kh_shader_mt_prewarm(const KhShaderJob* khsm_jobs, size_t khsm_n,
     }
 }
 
-// Join every worker, then release every blob the batch produced that no call
-// site consumed - a conditional ensure path can legitimately skip a unit the
-// pool compiled anyway, and those blobs die here. Only the memo's lifetime
-// widens, and a memo is a map of blobs, not a thread.
+// Join every worker, then release every blob no call site consumed (a
+// conditional ensure can legitimately skip a unit the pool compiled).
 inline void kh_shader_mt_finish(bool khsm_keep_memo = false) {
     for (std::thread& khsm_t : g_khsm_thr) {
         if (khsm_t.joinable()) {
@@ -3382,9 +3171,8 @@ struct KhShaderMtScope {
 
 static int      g_khsa_state = 0;   // 0 idle, 1 compiling, 2 done.
 
-// The poll below needs no source at all, so it runs first and the strings are
-// never built on a deferred frame. The hold is split out of the gate and it
-// costs nothing to ask.
+// The poll needs no source, so it runs before the strings are built on a
+// deferred frame.
 inline bool kh_shader_async_hold() {
     if (g_khsa_state == 2) return false;
     if (g_khsa_state == 0) {
@@ -3423,14 +3211,11 @@ inline bool kh_shader_async_gate(const KhShaderJob* khsa_jobs, size_t khsa_n) {
 inline void kh_shader_mt_shutdown(bool khss_wait) {
     g_khsa_abort.store(true, std::memory_order_relaxed);
     const uint64_t khss_t0 = steady_now_ms();
-    // The detach is documented safe on that path, so the reset paths do not
-    // wait at all. It buys exactly one thing - the chance to join instead of
-    // detach when a compile happens to be nearly done - and it pays for it by
-    // holding whatever lock the caller holds. INTENTIONAL: both mission-end
-    // callers hold the graphics lock on the game thread, so a mission ended
-    // during a cold prewarm hitches for the tail of the slowest job (the
-    // effect unit runs to seconds), bounded here. A shorter bound trades
-    // that hitch for a detached worker on a cold cache; not worth it.
+    // INTENTIONAL: both mission-end callers hold the graphics lock on the game
+    // thread, so a mission ended during a cold prewarm hitches for the tail of
+    // the slowest job (the effect unit runs to seconds), bounded here. The
+    // reset paths do not wait at all. A shorter bound trades the hitch for a
+    // detached worker on a cold cache.
     const uint64_t khss_bound = khss_wait ? 5000u : 0u;
     while (khss_bound && g_khsm_live.load(std::memory_order_acquire) > 0 &&
            steady_now_ms() - khss_t0 < khss_bound) {
@@ -3448,8 +3233,7 @@ inline void kh_shader_mt_shutdown(bool khss_wait) {
     g_khsa_state = 0;
 }
 
-// The memo-aware front door. Identical signature, identical contract, identical
-// return strings.
+// The memo-aware front door; identical contract to kh_shader_compile_raw.
 inline std::string compile_shader(const char* src, const char* entry, const char* target,
                                   const D3D_SHADER_MACRO* defines, ID3DBlob** out_blob) {
     const uint64_t khsm_h = kh_shader_cache_hash(src, entry, target, defines);
@@ -3494,11 +3278,9 @@ inline std::string compile_shader(const char* src, const char* entry, const char
     return kh_shader_compile_raw(src, entry, target, defines, out_blob);
 }
 
-// This probe answers "is it ready" and never blocks - absent or unfinished both
-// read as false, and the caller keeps its fallback for another frame. khsm_gone
-// distinguishes "still compiling" from "never queued / already taken", which is
-// what lets the pump re-arm a request whose memo entry was cleared under it by
-// a teardown.
+// Never blocks: absent or unfinished both read as false. khsm_gone
+// distinguishes "still compiling" from "never queued / already taken", which
+// lets the pump re-arm a request whose memo entry was cleared by a teardown.
 inline bool kh_shader_memo_try_take(uint64_t khsm_h, ID3DBlob** khsm_out,
                                     std::string& khsm_err, bool& khsm_gone) {
     khsm_gone = false;
@@ -3512,11 +3294,9 @@ inline bool kh_shader_memo_try_take(uint64_t khsm_h, ID3DBlob** khsm_out,
     return true;
 }
 
-// A unit another thread is still compiling is left done-able and swept by the
-// same call next time; it is never erased mid-flight, because a worker holds a
-// reference to its node. Used when a pending request is abandoned - a device
-// reset, an MSAA change, a cache release - so an unconsumed blob cannot outlive
-// the request that asked for it.
+// A unit still compiling is left for the next sweep (a worker holds its node).
+// Used when a pending request is abandoned (device reset, MSAA change, cache
+// release) so an unconsumed blob cannot outlive its request.
 inline void kh_shader_memo_discard(uint64_t khsm_h) {
     std::lock_guard<std::mutex> khsm_l(g_khsm_mu);
     auto khsm_it = g_khsm_map.find(khsm_h);
@@ -3526,10 +3306,9 @@ inline void kh_shader_memo_discard(uint64_t khsm_h) {
     g_khsm_map.erase(khsm_it);
 }
 
-// Called from both mesh paths. Safe without its own lock: the game-thread
-// caller holds the graphics lock (which parks the render thread) and the
-// render-thread caller runs inside an engine draw - the two never overlap.
-// See the threading contract at flush_frame. Do not change.
+// Called from both mesh paths. Safe without a lock: the game-thread caller
+// holds the graphics lock (render thread parked) and the render-thread caller
+// runs inside an engine draw; the two never overlap. Do not change.
 inline std::string ensure_mesh_vbs(ID3D11Device* dev) {
     const uint32_t khmv_n = mesh_count();
     if (g_res.mesh_ib.size() > g_res.mesh_vb.size()) g_res.mesh_ib.resize(g_res.mesh_vb.size());
@@ -3542,8 +3321,8 @@ inline std::string ensure_mesh_vbs(ID3D11Device* dev) {
             continue;
         }
         const MeshDef& khmv_md = mesh_def(khmv_id);
-        // Empty geometry cannot make a buffer; registration must reject it
-        // (phase-2 contract) - fail loudly rather than publish a hole.
+        // Empty geometry cannot make a buffer; registration must reject it -
+        // fail loudly rather than publish a hole.
         if (khmv_md.verts.empty() || khmv_md.indices.empty()) return "mesh '" + khmv_md.name + "': empty geometry";
         D3D11_BUFFER_DESC bd = {};
         bd.ByteWidth = static_cast<UINT>(khmv_md.verts.size() * sizeof(MeshVertex));
@@ -3607,8 +3386,8 @@ public:
             } catch (...) {}
         }
 
-        // Bare-filename fallback (the.gguf behavior): scan every root
-        // recursively for the name alone.
+        // Bare-filename fallback: scan every root recursively for the name
+        // alone.
         if (resolved.empty()) {
             try {
                 const std::string fname = std::filesystem::path(request).filename().string();
@@ -3633,19 +3412,13 @@ private:
     }
 };
 
-// Threading contract: resolution happens only inside the serialized graphics
-// windows (the injection on the render thread, or a lock-held flush with the
-// render thread parked) - the same mutual exclusion every g_res mutation relies
-// on - so the map needs no lock of its own; entries hold device objects,
-// released by kh_tex_cache_release from the engine-reset hook and at the
-// mission-end full destroy (the CPU-side map survives nothing: reloads come
-// from disk, which is the correct source after a device loss and matches the
-// fresh-process contract across missions).
-// KH_MAT_PAGES: a page is a Texture2DArray holding every loaded texture of one
-// (width, height, mips, format) class as layers; a material map resolves to
-// (page, layer). Pages grow by doubling (the used layers are copied over) and
-// die when their last layer is freed. Page ids are stable indices into
-// g_tex_pages (a dead page keeps its slot with tex == nullptr).
+// Resolution happens only inside the serialized graphics windows (the
+// injection, or a lock-held flush), so the map needs no lock; entries hold
+// device objects, released by kh_tex_cache_release at reset and mission end
+// (reloads come from disk). A page is a Texture2DArray of every loaded texture
+// of one (width, height, mips, format) class; a map resolves to (page, layer).
+// Pages grow by doubling and die when their last layer is freed; page ids are
+// stable indices into g_tex_pages.
 struct KhTexPage {
     ID3D11Texture2D* tex = nullptr;
     ID3D11ShaderResourceView* srv = nullptr;
@@ -3763,20 +3536,11 @@ inline bool kh_tex_page_place(ID3D11Device* dev, ID3D11DeviceContext* ctx,
     khpp_p.used_n++;
     khpp_e.page = khpp_pg;
     khpp_e.layer = khpp_l;
-    // KH_MAT_PAGES: a placement is a table-invalidating event whether or not
-    // it grew the page. kh_mat_gpu_ensure bakes a set's flags, routes and
-    // layers once and then early-returns on gpu.base >= 0 forever, so this
-    // counter is the only thing that can make it look again. With the bump
-    // living in kh_tex_page_grow alone, only the FIRST map of a given
-    // (w, h, mips, format) class - the one that creates the page - refreshed
-    // the table; every later map dropped into a free layer and its flag bit
-    // was never set. Under KH_TEX_ASYNC that is the common case: the first
-    // draw resolves every map to a pending entry and the real layers arrive
-    // over the following frames. The result is a material stuck with what it
-    // had at first draw - roughness, metalness, occlusion and gloss fall back
-    // to their scalars and the specular lobe disappears while diffuse and
-    // normal look correct. One truth: every path that changes what a table
-    // entry would say bumps here.
+    // Every path that changes what a table entry would say bumps this counter:
+    // kh_mat_gpu_ensure bakes a set once and early-returns on gpu.base >= 0, so
+    // a placement into a free layer (the common async case) must invalidate the
+    // table exactly as a page grow does, or the material stays stuck with its
+    // first-draw scalars.
     ++g_tex_page_gen;
     return true;
 }
@@ -3935,10 +3699,9 @@ inline KhTexRef kh_tex_ref_of(const KhTexEntry& khtr_e) {
     return khtr_r;
 }
 
-// The g_tex_cache key: lower-cased path + colour space (a map may be bound in
-// both). kh_tex_slot_srgb is the per-slot rule (diffuse / emissive / specular
-// are colour data; normal / orm linear) - kh_mat_gpu_fill resolves by it and
-// kh_tex_cache_gc keeps live sets' layers by it.
+// Cache key: lower-cased path + colour space (a map may be bound in both).
+// kh_tex_slot_srgb is the per-slot rule: diffuse / emissive / specular are
+// colour data, normal / orm linear.
 inline std::string kh_tex_cache_key(const std::string& khtk_path, bool khtk_srgb) {
     std::string khtk_key = khtk_path;
     std::transform(khtk_key.begin(), khtk_key.end(), khtk_key.begin(), ::tolower);
@@ -3949,9 +3712,8 @@ inline bool kh_tex_slot_srgb(int khts_slot) {
     return khts_slot == 0 || khts_slot == 3 || khts_slot == 4;
 }
 
-// KH_TEX_ASYNC: defined with the loader worker below (it needs the blob and
-// disk-cache helpers, which live after this point). Precedent: the
-// effect_time_seconds forward declaration.
+// Defined with the loader worker below (it needs the blob and disk-cache
+// helpers).
 inline bool kh_texldr_queue(const std::string& khtl_key, const std::string& khtl_path, bool khtl_srgb, bool khtl_force);
 
 inline KhTexRef kh_tex_resolve(ID3D11Device* dev, ID3D11DeviceContext* ctx,
@@ -3961,17 +3723,13 @@ inline KhTexRef kh_tex_resolve(ID3D11Device* dev, ID3D11DeviceContext* ctx,
     auto it = g_tex_cache.find(key);
     if (it != g_tex_cache.end()) { it->second.last_use_ms = GetTickCount64(); return kh_tex_ref_of(it->second); }
 
-    // KH_TEX_ASYNC: a first sight is a disk read plus a decode and a mip
-    // build, and it used to run right here, inside a draw hook - the
-    // streaming hitch. Hand it to the loader worker and answer 'absent': the
-    // material draws its defaults for a frame or two (the user-shader
-    // compile-white doctrine), kh_tex_async_pump places finished results at
-    // the pass heads, and the page-generation bump refills every table entry
-    // that names them. The pending state is simply a cache entry with no page
-    // and failed clear: a re-resolve refreshes it without re-queueing, the GC
-    // ages it like any other, and a released cache drops the late result at
-    // the pump by key miss. A loader that cannot start falls through to the
-    // synchronous path below, byte-for-byte the old behavior.
+    // A first sight is a disk read + decode + mip build: hand it to the loader
+    // worker and answer 'absent' (the material draws defaults for a frame or
+    // two; kh_tex_async_pump places finished results at the pass heads and the
+    // page-generation bump refills the table). A pending entry has no page and
+    // failed clear: a re-resolve refreshes it without re-queueing, the GC ages
+    // it, a released cache drops the late result by key miss. A loader that
+    // cannot start falls through to the synchronous path.
     if (kh_texldr_queue(key, path, srgb, false)) {
         KhTexEntry khtr_p;
         khtr_p.last_use_ms = GetTickCount64();
@@ -4020,7 +3778,6 @@ inline KhTexRef kh_tex_resolve(ID3D11Device* dev, ID3D11DeviceContext* ctx,
     return kh_tex_ref_of(e);
 }
 
-// FBX import (ufbx).
 struct KhUserShaderEntry {
     ID3D11PixelShader* ps = nullptr;
     bool failed = false;
@@ -4045,15 +3802,14 @@ struct KhUserReq {
 static std::vector<KhUserReq> g_user_req;
 static size_t g_user_req_seen = 0;   // Queue size at the previous pump.
 static int    g_user_req_settle = 0;   // Consecutive pumps the queue held still.
-// The cap exists so a scene registering a material every frame cannot starve
-// the queue forever - it arms anyway and the next batch collects the rest.
+// The cap keeps a scene registering a material every frame from starving the
+// queue: it arms anyway and the next batch collects the rest.
 static constexpr int KH_USER_SETTLE_PUMPS = 2;
 static constexpr int KH_USER_SETTLE_CAP   = 16;
 static int g_user_req_waits = 0;   // Consecutive pumps declined; the cap.
 static bool g_user_batch_own = false;
-// An overflowing request is simply not recorded, so the getter returns nullptr,
-// the caller keeps its fallback, and the next frame asks again - a retry costs
-// one map lookup, never a compile.
+// An overflowing request is not recorded: the getter returns nullptr, the
+// caller keeps its fallback, the next frame asks again.
 static constexpr size_t KH_USER_REQ_MAX = 32;
 
 inline std::vector<D3D_SHADER_MACRO> kh_user_req_macros(const KhUserReq& khur) {
@@ -4068,10 +3824,8 @@ inline std::vector<D3D_SHADER_MACRO> kh_user_req_macros(const KhUserReq& khur) {
     return khur_m;
 }
 
-// Called from the cache release, which the device-reset path and the
-// mission-end path both reach - so a blob compiled against a dead device can
-// never be handed to CreatePixelShader, and an unconsumed unit cannot sit in
-// the memo for the rest of the session.
+// Called from the cache release (device reset and mission end), so a blob
+// compiled against a dead device is never handed to CreatePixelShader.
 inline void kh_user_shader_purge_pending() {
     g_user_batch_own = false;
     g_user_req_seen = 0;   // The settle state the queue.
@@ -4089,10 +3843,9 @@ inline void kh_user_shader_cache_release() {
     g_user_ps_cache.clear();
 }
 
-// It never blocks and it never nests. The pump. Once per flush, on the render
-// thread, under the lock - the same serialized window the cache map itself
-// stands on, so g_user_req needs no lock for the same reason g_user_ps_cache
-// does not.
+// The pump: once per flush, on the game thread under the lock - the same
+// serialized window the cache map stands on, so g_user_req needs no lock
+// either. Never blocks, never nests.
 inline void kh_user_shader_pump(ID3D11Device* dev) {
     if (!dev || g_user_req.empty()) return;
     for (KhUserReq& khur : g_user_req) {
@@ -4127,9 +3880,7 @@ inline void kh_user_shader_pump(ID3D11Device* dev) {
     for (const KhUserReq& khur : g_user_req) if (!khur.armed) { khup_any = true; break; }
     if (!khup_any) { g_user_req_seen = g_user_req.size(); g_user_req_settle = 0; return; }
     // Wait for the queue to stop growing so one material's contexts batch
-    // together instead of serialising behind each other. A growing queue resets
-    // the count; a still one advances it; the cap arms regardless so nothing
-    // can starve.
+    // together; a growing queue resets the count, the cap arms regardless.
     if (g_user_req_waits < KH_USER_SETTLE_CAP) {
         const size_t khup_now = g_user_req.size();
         g_user_req_waits++;
@@ -4166,9 +3917,8 @@ inline void kh_user_shader_pump(ID3D11Device* dev) {
     for (KhUserReq& khur : g_user_req) khur.armed = true;
 }
 
-// Retire the batch once every unit in it has landed. Mirrors
-// kh_shader_async_hold's finish, and keeps the memo - the getters have not
-// consumed their blobs yet, and finish(false) would free them.
+// Retire the batch once every unit has landed, keeping the memo (the getters
+// have not consumed their blobs yet).
 inline void kh_user_shader_reap() {
     if (!g_user_batch_own) return;   // Ours, or nobody's business.
     if (!g_khsm_active) { g_user_batch_own = false; return; }
@@ -4184,9 +3934,8 @@ inline void kh_user_shader_reap() {
     g_user_batch_own = false;
 }
 
-// Never blocks - a unit still in flight reads as not-ready and the caller keeps
-// its fallback for another frame. A failure latches exactly as the synchronous
-// path latched it, so a broken.hlsl reports once and is never re-queued.
+// Never blocks - a unit in flight reads as not-ready. A failure latches, so a
+// broken .hlsl reports once and is never re-queued.
 inline ID3D11PixelShader* kh_user_async_take(ID3D11Device* dev, const std::string& khua_key,
                                              const std::string& path, const char* khua_what) {
     auto khua_it = g_user_ps_cache.find(khua_key);
@@ -4197,9 +3946,8 @@ inline ID3D11PixelShader* kh_user_async_take(ID3D11Device* dev, const std::strin
     std::string khua_err;
     bool khua_gone = false;
     if (!kh_shader_memo_try_take(khua_e.hash, &khua_blob, khua_err, khua_gone)) {
-        // Not ready, or the entry was cleared under us. Either way we keep
-        // waiting: the pump re-arms a lost request, bounded by its retry count,
-        // and the caller keeps its fallback meanwhile.
+        // Not ready, or the entry was cleared under us; the pump re-arms a lost
+        // request, bounded by its retry count.
         return nullptr;
     }
     khua_e.pending = false;
@@ -4224,9 +3972,8 @@ inline ID3D11PixelShader* kh_user_async_take(ID3D11Device* dev, const std::strin
     return khua_e.ps;
 }
 
-// Record a request and mark the entry pending. Returns false when the queue is
-// full - the caller then simply does not cache anything, so the next frame asks
-// again and the retry costs one map lookup rather than a compile.
+// Record a request and mark the entry pending. False when the queue is full:
+// nothing is cached and the next frame asks again.
 inline bool kh_user_async_queue(std::string khuq_key, std::string khuq_full,
                                 const char* khuq_entry,
                                 const std::vector<std::string>& khuq_dn,
@@ -4258,9 +4005,8 @@ inline bool kh_user_shader_source(const std::string& path, std::string& out, std
 }
 
 // Custom post-processing PS for a resolved user path (nullptr = absent or
-// latched failure; the caller skips the pass). Keyed per live depth MSAA count
-// - the same recompile trigger the builtin effect shader obeys; stale-sample
-// entries idle in the map until the release.
+// latched failure; the caller skips the pass). Keyed per live depth MSAA count,
+// like the builtin effect shader.
 inline ID3D11PixelShader* kh_user_fx_ps(ID3D11Device* dev, const std::string& path) {
     if (!dev || path.empty()) return nullptr;
     // The cold miss path std:moves the buffer into the map; the next call's
@@ -4274,9 +4020,8 @@ inline ID3D11PixelShader* kh_user_fx_ps(ID3D11Device* dev, const std::string& pa
     auto khus_it = g_user_ps_cache.find(khus_key);
     if (khus_it != g_user_ps_cache.end())
         return kh_user_async_take(dev, khus_key, path, "effect");
-    // The compile is queued and this returns nullptr; the caller already skips
-    // the pass on nullptr, so the frame renders correctly and picks the shader
-    // up the frame it lands.
+    // The compile is queued and this returns nullptr; the caller skips the pass
+    // this frame and picks the shader up when it lands.
     std::string khua_src, khua_err;
     if (!kh_user_shader_source(path, khua_src, khua_err)) {
         KhUserShaderEntry khua_e;
@@ -4295,9 +4040,9 @@ inline ID3D11PixelShader* kh_user_fx_ps(ID3D11Device* dev, const std::string& pa
 }
 
 // Custom material PS for a resolved user path and pipeline variant (khum_ctx: 0
-// flush/static twin, 1 composite guard twin, 2 composite arb twin - the exact
-// define sets of the builtin textured twins plus KH_USER_MAT). nullptr =
-// absent/failed: the caller keeps builtin PBR.
+// flush/static twin, 1 composite guard twin, 2 composite arb twin - the builtin
+// textured define sets plus KH_USER_MAT). nullptr = absent/failed: the caller
+// keeps builtin PBR.
 inline ID3D11PixelShader* kh_user_mat_ps(ID3D11Device* dev, const std::string& path, int khum_ctx) {
     if (!dev || path.empty()) return nullptr;
     const UINT khum_samp = khum_ctx > 0 ? g_res.comp_depth_samples : 0;
@@ -4352,9 +4097,8 @@ inline ID3D11PixelShader* kh_user_mat_ps(ID3D11Device* dev, const std::string& p
             khum_entry = "PSComposite";
             khum_defs = khum_ctx == 2 ? khum_def_arb : khum_def_comp;
         }
-        // KH_USER_ASYNC, and this is the site that mattered. The caller keeps
-        // builtin PBR on nullptr, so queueing costs one frame of builtin
-        // shading per material instead of a multi-minute freeze.
+        // Queued: the caller keeps builtin PBR on nullptr, so this costs a
+        // frame of builtin shading per material instead of a freeze.
         std::vector<std::string> khua_dn, khua_dv;
         for (const D3D_SHADER_MACRO* khua_d = khum_defs; khua_d && khua_d->Name; ++khua_d) {
             khua_dn.push_back(khua_d->Name);
@@ -4453,9 +4197,8 @@ inline bool kh_parse_cube_lut(const std::string& text, std::vector<float>& out_r
             continue;
         }
 
-        // Anything else must be a data row: three floats. Unknown keywords land
-        // here and fail the strtof progression check - the error names the
-        // line.
+        // Anything else must be a data row of three floats; unknown keywords
+        // fail the strtof progression and the error names the line.
         char* khcl_p = const_cast<char*>(khcl_s);
 
         for (int khcl_c = 0; khcl_c < 3; ++khcl_c) {
@@ -4616,10 +4359,9 @@ inline ID3D11ShaderResourceView* kh_user_lut_srv(ID3D11Device* dev, const std::s
     return khlu_e.srv;
 }
 
-// KH_PIP_FX: the cache alone, for the render thread - the flush loads a LUT
-// the first time its pass draws in the main view; a PIP fire before that
-// skips the pass rather than reading a file inside an engine hook. Twin of
-// the key built above.
+// The cache alone, for the render thread: the flush loads a LUT the first time
+// its pass draws in the main view; a PIP fire before that skips the pass rather
+// than reading a file inside an engine hook.
 inline ID3D11ShaderResourceView* kh_user_lut_cached(const std::string& path) {
     if (path.empty()) return nullptr;
     std::string khlc_key("lut|");
@@ -4669,10 +4411,8 @@ inline void kh_gen_tangents(std::vector<MeshVertex>& v) {
     genTangSpaceDefault(&ctx);
 }
 
-// Per submesh, never across one. Two materials are never welded together, so a
-// level's submesh table has the same cardinality and the same order as level
-// 0's and a material slot index addresses one surface at every level.
-// KH_MESH_LOD automatic levels of detail for imported models.
+// Automatic LOD for imported models. Decimation runs per submesh, never across
+// one, so a level's submesh table has level 0's cardinality and order.
 static constexpr size_t KH_LOD_MIN_TRIS   = 32;
 static constexpr size_t KH_LOD_FLOOR_TRIS = 12;
 
@@ -4708,10 +4448,9 @@ inline double q_eval(const Q& khq_q, double khq_x, double khq_y, double khq_z) {
            2.0 * khq_q.m[8] * khq_z + khq_q.m[9];
 }
 
-// Minimiser of the quadric: solve the 3x3 gradient system. Returns false on a
-// singular or ill-conditioned system, in which case the caller falls back to
-// the best of the two endpoints and the midpoint - the standard, and the one
-// that cannot produce a wild vertex on a degenerate neighbourhood.
+// Minimiser of the quadric: solve the 3x3 gradient system. False on a singular
+// or ill-conditioned system; the caller then takes the best of the two
+// endpoints and the midpoint.
 inline bool q_min(const Q& khq_q, double khq_o[3]) {
     const double khq_a[3][3] = {
         { khq_q.m[0], khq_q.m[1], khq_q.m[2] },
@@ -4722,8 +4461,8 @@ inline bool q_min(const Q& khq_q, double khq_o[3]) {
         khq_a[0][0] * (khq_a[1][1] * khq_a[2][2] - khq_a[1][2] * khq_a[2][1]) -
         khq_a[0][1] * (khq_a[1][0] * khq_a[2][2] - khq_a[1][2] * khq_a[2][0]) +
         khq_a[0][2] * (khq_a[1][0] * khq_a[2][1] - khq_a[1][1] * khq_a[2][0]);
-    // KH_LOD_TOPO: the singularity test is relative to the quadric's own scale; an
-    // absolute epsilon passes near-singular systems on unit-size low-poly meshes.
+    // The singularity test is relative to the quadric's own scale; an absolute
+    // epsilon passes near-singular systems on unit-size low-poly meshes.
     const double khq_s = (khq_a[0][0] + khq_a[1][1] + khq_a[2][2]) / 3.0;
     if (!(khq_s > 0.0) || !(fabs(khq_det) > 1.0e-6 * khq_s * khq_s * khq_s)) return false;
     const double khq_r[3] = { -khq_q.m[3], -khq_q.m[6], -khq_q.m[8] };
@@ -4743,9 +4482,9 @@ inline bool q_min(const Q& khq_q, double khq_o[3]) {
 struct Tri { uint32_t v[3]; bool live; };
 struct Cand { double cost; uint32_t a, b; uint64_t sa, sb; };
 
-// A binary heap over std::vector via push_heap/pop_heap, comparator inverted so
-// the cheapest collapse comes off the top (this header declares no includes of
-// its own, so no std::priority_queue).
+// Heap via push_heap/pop_heap with an inverted comparator so the cheapest
+// collapse comes off the top (no std::priority_queue: this header declares no
+// includes).
 struct CandWorse {
     bool operator()(const Cand& khc_x, const Cand& khc_y) const { return khc_x.cost > khc_y.cost; }
 };
@@ -4761,17 +4500,14 @@ inline void tri_normal(const double khn_p0[3], const double khn_p1[3], const dou
 
 }
 
-// Decimate one expanded triangle soup to khld_target triangles or fewer.
-// Returns the decimated soup; on any structural refusal it returns a copy of
-// the input, so a caller can always use the result and a refusal simply means
+// Decimate one expanded triangle soup to khld_target triangles or fewer. On any
+// structural refusal returns a copy of the input, so a refusal simply means
 // "this level is the previous one".
 inline std::vector<MeshVertex> kh_lod_decimate(const std::vector<MeshVertex>& khld_src,
                                                size_t khld_target, double khld_cost_cap = 0.0) {
-    // khld_cost_cap (KH_LOD_TOPO): the largest collapse cost this level may
-    // spend (quadric units: area x metres squared); 0 = unbounded, the
-    // behaviour. The heap is cheapest-first, so the first candidate over the
-    // cap ends the level: a low-poly mesh stops where its shape would start to
-    // go, instead of at a triangle count.
+    // khld_cost_cap: the largest collapse cost this level may spend (quadric
+    // units); 0 = unbounded. The heap is cheapest-first, so the first candidate
+    // over the cap ends the level.
     const size_t khld_ntri = khld_src.size() / 3;
     if (khld_ntri < KH_LOD_MIN_TRIS || khld_target >= khld_ntri) return khld_src;
 
@@ -4785,9 +4521,8 @@ inline std::vector<MeshVertex> kh_lod_decimate(const std::vector<MeshVertex>& kh
     };
     struct KeyHash {
         size_t operator()(const Key& khk_k) const {
-            // word-wise FNV mix (one quantised coordinate per step), not the
-            // byte stream: in-memory only, but the weld's candidate order
-            // follows this map, so it is not swapped for the byte form.
+            // Word-wise FNV over quantised coordinates; the weld's candidate
+            // order follows this map.
             uint64_t khk_h = CryptoGenerator::FNV1A64_OFFSET;
 
             for (int khk_i = 0; khk_i < 3; ++khk_i) {
@@ -4804,11 +4539,11 @@ inline std::vector<MeshVertex> kh_lod_decimate(const std::vector<MeshVertex>& kh
     };
     std::unordered_map<Key, uint32_t, KeyHash> khld_map;
     std::vector<double> khld_pos;   // 3 per welded vertex.
-    std::vector<MeshVertex> khld_attr;   // Attribute donor per welded vertex (kept for the weld;
-                                         // Output reads the wedges).
-    // KH_LOD_TOPO - weld by position, keep the wedges. Otherwise every hard edge and
-    // uv seam splits the mesh into disconnected pieces whose split edges read as open
-    // boundaries, each decimated alone with a one-sided quadric.
+    // Attribute donor per welded vertex (kept for the weld; output reads the
+    // wedges).
+    std::vector<MeshVertex> khld_attr;
+    // Weld by position, keep the wedges: otherwise every hard edge and uv seam
+    // splits the mesh into pieces whose split edges read as open boundaries.
     std::vector<MeshVertex> khld_wedge;   // 3 per accepted triangle: the corner's own attributes.
     std::vector<khlod::Tri> khld_tri;
     khld_map.reserve(khld_src.size());
@@ -4912,9 +4647,9 @@ inline std::vector<MeshVertex> kh_lod_decimate(const std::vector<MeshVertex>& kh
     }
 
     // Boundary constraint: a plane through the open edge, perpendicular to its
-    // triangle, weighted heavily. This defends silhouettes, uv seams and hard
-    // creases without locking them - locking them outright is what makes a
-    // seam-heavy model refuse to reach the low levels at all.
+    // triangle, weighted heavily. Defends silhouettes, seams and creases
+    // without locking them (locking makes seam-heavy models refuse to reach low
+    // levels).
     for (size_t khld_t = 0; khld_t < khld_tri.size(); ++khld_t) {
         const uint32_t* khld_v = khld_tri[khld_t].v;
         double khld_n[3];
@@ -4956,11 +4691,9 @@ inline std::vector<MeshVertex> kh_lod_decimate(const std::vector<MeshVertex>& kh
     std::vector<khlod::Cand> khld_pq2;
     const khlod::CandWorse khld_worse;
 
-    // KH_LOD_TOPO: the optimal point is admitted only inside the edge's own
-    // reach (the sphere of radius |ab| about the midpoint); a conditioned solve
-    // that still lands outside it is a solve of the wrong system (a crease or
-    // boundary vertex whose planes agree along a line), and the
-    // endpoints/midpoint pick takes over as it always did.
+    // The optimal point is admitted only inside the edge's own reach (sphere of
+    // radius |ab| about the midpoint); a solve landing outside is a solve of
+    // the wrong system, and the endpoints/midpoint pick takes over.
     auto khld_near_edge = [&](uint32_t khn_a, uint32_t khn_b, const double khn_p[3]) -> bool {
         const double khn_e[3] = { khld_pos[khn_b * 3] - khld_pos[khn_a * 3],
                                   khld_pos[khn_b * 3 + 1] - khld_pos[khn_a * 3 + 1],
@@ -5019,8 +4752,8 @@ inline std::vector<MeshVertex> kh_lod_decimate(const std::vector<MeshVertex>& kh
 
     size_t khld_live = khld_tri.size();
     uint64_t khld_ver = 1;
-    // The heap holds every candidate ever pushed; a bound on pops is what stops
-    // a pathological mesh spinning, and it is generous by design.
+    // A bound on pops is what stops a pathological mesh spinning; generous by
+    // design.
     size_t khld_budget = khld_tri.size() * 32 + 4096;
 
     while (khld_live > khld_target && !khld_pq2.empty() && khld_budget-- > 0) {
@@ -5035,9 +4768,8 @@ inline std::vector<MeshVertex> kh_lod_decimate(const std::vector<MeshVertex>& kh
         double khld_p[3];
         khld_place(khld_a, khld_b, khld_p);
 
-        // Flip rejection. A collapse that turns a triangle inside out is a
-        // visible fold, and the quadric cost cannot see it - this is the one
-        // check that separates a usable decimator from a mangler.
+        // Flip rejection: a collapse that turns a triangle inside out is a
+        // visible fold the quadric cost cannot see.
         bool khld_flip = false;
 
         for (int khld_s = 0; khld_s < 2 && !khld_flip; ++khld_s) {
@@ -5151,17 +4883,15 @@ inline std::vector<MeshVertex> kh_lod_decimate(const std::vector<MeshVertex>& kh
     return khld_out;
 }
 
-// Build levels 1.KH_LOD_MAX onto a finished, baked MeshDef. Idempotent by its
-// own guard, non-fatal in every direction: any level that refuses to shrink
-// simply ends the ladder and lod_n names what actually exists.
+// Build levels 1..KH_LOD_MAX onto a baked MeshDef. Idempotent; any level that
+// refuses to shrink ends the ladder and lod_n names what exists.
 inline void kh_lod_build(MeshDef& khlb_d) {
     if (khlb_d.lod_n) return;
     if (khlb_d.submeshes.empty() || khlb_d.verts.empty()) return;
     if (!khlb_d.indices.empty()) return;   // Expanded form only (kh_mesh_weld runs after).
     const uint32_t khlb_base = static_cast<uint32_t>(khlb_d.verts.size());
     // The ladder halves the triangle count per level, which is why the
-    // screen-size selector below is a log2 - level k is the level whose density
-    // suits half the pixels level k-1 suited.
+    // screen-size selector is a log2.
     std::vector<std::vector<MeshVertex>> khlb_cur(khlb_d.submeshes.size());
 
     for (size_t khlb_s = 0; khlb_s < khlb_d.submeshes.size(); ++khlb_s) {
@@ -5170,12 +4900,10 @@ inline void kh_lod_build(MeshDef& khlb_d) {
                                 khlb_d.verts.begin() + khlb_sm.index_start + khlb_sm.index_count);
     }
 
-    // KH_LOD_TOPO: per-submesh error budget. Quadric cost is area x distance
-    // squared, so a vertex moved d off its faces costs about (local area) x
-    // d^2; the budget lets a level move a vertex by tol_l (priced at the draw
-    // site below) against six mean faces (a typical valence). A high-poly mesh
-    // never meets it (halving is cheaper than that); a low-poly one halts early
-    // and the 90% check below ends its ladder there.
+    // Per-submesh error budget: quadric cost is area x distance squared, so the
+    // budget lets a level move a vertex by tol_l against six mean faces. A
+    // high-poly mesh never meets it; a low-poly one halts early and the 90%
+    // check ends its ladder.
     std::vector<double> khlb_area(khlb_cur.size(), 0.0), khlb_diag(khlb_cur.size(), 0.0);
     for (size_t khlb_s = 0; khlb_s < khlb_cur.size(); ++khlb_s) {
         const std::vector<MeshVertex>& khlb_v = khlb_cur[khlb_s];
@@ -5242,24 +4970,19 @@ inline void kh_lod_build(MeshDef& khlb_d) {
         khlb_cur.swap(khlb_next);
     }
 
-    // Level 0 runs from index 0 up to lod_istart of level 1 - see
-    // mesh_base_icount. With nothing built the base is the whole stream and
-    // lod_n reading 0 says exactly that.
+    // Level 0 runs from index 0 up to lod_istart of level 1 (mesh_base_icount);
+    // with nothing built the base is the whole stream.
     if (khlb_d.lod_n == 0) return;
-    if (khlb_d.lod_istart[0] != khlb_base) khlb_d.lod_n = 0;   // Unreachable; the invariant,
-                                                              // Asserted.
+    if (khlb_d.lod_istart[0] != khlb_base) khlb_d.lod_n = 0;   // Unreachable; the invariant is asserted.
 }
 
-// khl_t comes back in the open interval - never 0, never 1 - because both
-// endpoints mean "not fading" to the shader and a fade that reaches them has a
-// level drawing nothing. KH_MESH_LOD selection screen size first, range second.
+// LOD selection: screen size first, range second. khl_t comes back in the open
+// interval - both endpoints mean "not fading" to the shader.
 static constexpr float KH_LOD_REF_PX    = 320.0f;   // half-height px where level 0 ends.
 static constexpr float KH_LOD_DIST_BIAS = 0.35f;   // Levels per log2 of the range term.
 static constexpr float KH_LOD_DIST_REF  = 100.0f;
 static constexpr float KH_LOD_FADE      = 0.30f;   // Fraction of a level spent crossfading.
-// Published once per flush on the game thread with the render thread parked -
-// the publish_world_lighting contract exactly - so the injection reads it
-// lock-free on the render thread like every other staged scalar.
+// Published once per flush under the park, read lock-free by the injection.
 static float g_lod_proj_px = 0.0f;
 
 inline void kh_lod_pick(const MeshDef& khl_d, float khl_radius, float khl_dist,
@@ -5289,23 +5012,20 @@ inline void kh_lod_pick(const MeshDef& khl_d, float khl_radius, float khl_dist,
     khl_t = khl_p;
 }
 
-// The dither value blendCtl.w takes for one half of a crossfade pair.
-// khl_second false = the finer level, fading out below the threshold; true =
-// the coarser level, fading in at or above it. Complementary at every pixel,
-// which is the property the twins depend on.
+// The dither value blendCtl.w takes for one half of a crossfade pair:
+// khl_second false = the finer level fading out, true = the coarser fading in.
+// Complementary at every pixel.
 inline float kh_lod_dither(float khl_t, bool khl_second) {
     if (!(khl_t > 0.0f)) return 0.0f;
     const float khl_v = 1.0f - khl_t;
     return khl_second ? -khl_v : khl_v;
 }
 
-// The frustum test this renderer has never had. Published like g_lod_proj_px:
-// Built once per flush on the game thread under the park, read lock-free by the
-// injection on the render thread.
+// Frustum culling. Built once per flush under the park, read lock-free by the
+// injection.
 
-// The apex is recoverable from the planes themselves - three of them intersect
-// there - so the build solves for it, and the offset between that apex and the
-// camera is the pass's rebase origin, whatever it happens to be.
+// The apex is recoverable from the planes (three intersect there); its offset
+// from the camera is the pass's rebase origin.
 static constexpr float KH_CULL_APEX_TOL   = 1.0f;   // 4th-plane residual at the apex, m.
 static constexpr float KH_CULL_ORIGIN_TOL = 4.0f;   // Recovered origin must be 0 or the camera.
 static constexpr float KH_CULL_PAD        = 2.0f;   // Radius pad: fp32 at 7.5 km, and cheap.
@@ -5314,21 +5034,18 @@ struct KhCullSet {
     float p[4][4] = {};   // Left, right, bottom, top - normalised.
     float bias[3] = {};   // Add to a world centre to reach the matrix's space.
     bool  valid = false;
-    // KH_CULL_BACK: the four side planes all pass through the camera apex, so
-    // together they bound a double cone - the frustum in front and its mirror
-    // behind. A cluster directly behind the camera passes all four and is fully
-    // staged, uploaded and drawn. The question is only "is this object behind
-    // the camera", which has nothing to do with depth encoding - so it must not
-    // be asked with a near plane taken from the matrix's column 2.
+    // The four side planes pass through the apex, so they bound a double cone -
+    // the frustum and its mirror behind. "Is this object behind the camera"
+    // must not be asked with a near plane from the matrix's column 2 (depth
+    // encoding is unrelated).
     float fwd[3] = {};
     float apex[3] = {};
     bool  back_ok = false;
     bool  back_on = false;
 };
 
-// Apex of the frustum: the point on planes 0, 1 and 2 at once. Cramer over the
-// 3x3 of normals; a singular system is a degenerate frustum and the caller
-// stands down.
+// Apex: the point on planes 0, 1, 2 at once (Cramer). A singular system is a
+// degenerate frustum; the caller stands down.
 inline bool kh_cull_apex(const KhCullSet& khc_s, float khc_a[3]) {
     const float khc_m[3][3] = {
         { khc_s.p[0][0], khc_s.p[0][1], khc_s.p[0][2] },
@@ -5372,9 +5089,8 @@ inline void kh_cull_build(const float khc_vp[4][4], const float khc_cam[3], KhCu
         for (int khc_c = 0; khc_c < 4; ++khc_c) khc_o.p[khc_i][khc_c] /= khc_l;
     }
 
-    // The apex. Solve it, then check the fourth plane passes through it - a
-    // real perspective frustum has exactly one, and a matrix that does not
-    // produce one is not a frustum we may cull against.
+    // Solve the apex, then check the fourth plane passes through it - a matrix
+    // that does not produce one is not a frustum we may cull against.
     float khc_ap[3];
     if (!kh_cull_apex(khc_o, khc_ap)) {  return; }
     const float khc_res = fabsf(khc_o.p[3][0] * khc_ap[0] + khc_o.p[3][1] * khc_ap[1] +
@@ -5393,8 +5109,8 @@ inline void kh_cull_build(const float khc_vp[4][4], const float khc_cam[3], KhCu
             khc_o.back_ok = false;   // Degenerate: the back half stays unculled.
         }
     }
-    // The recovered origin. Accept only the two this file actually uses - none,
-    // and the camera - so a cycle latch or a foreign view still cannot cull.
+    // The recovered origin. Accept only none and the camera, so a cycle latch
+    // or a foreign view still cannot cull.
     const float khc_ac[3] = { khc_ap[0] - khc_cam[0], khc_ap[1] - khc_cam[1],
                               khc_ap[2] - khc_cam[2] };
     const float khc_dabs = sqrtf(khc_ac[0] * khc_ac[0] + khc_ac[1] * khc_ac[1] +
@@ -5440,13 +5156,10 @@ inline bool kh_mesh_visible(const KhCullSet& khc_s, const float khc_ctr[3], floa
     return true;
 }
 
-// The object's centre in engine axes - the same swap every fill site makes.
-// KH_SCENE grid query: every live mesh slot in a cell whose loose bounds
-// (cell footprint, the cell's y span, padded by its largest object radius +
-// KH_CULL_PAD) can meet the frustum. Conservative by construction - the
-// precise kh_mesh_visible test still runs per object - so the only effect
-// is that objects in cells wholly outside the view are never visited. An
-// invalid cull set returns everything.
+// Grid query: every live mesh slot in a cell whose loose bounds (footprint, y
+// span, padded by its largest object radius + KH_CULL_PAD) can meet the
+// frustum. Conservative; kh_mesh_visible still runs per object. An invalid cull
+// set returns everything.
 inline void kh_scene_grid_query(const KhCullSet& khq_s, std::vector<uint32_t>& khq_out) {
     khq_out.clear();
     for (const auto& khq_kv : g_scene.grid) {
@@ -5481,9 +5194,8 @@ inline void kh_scene_grid_query(const KhCullSet& khq_s, std::vector<uint32_t>& k
     }
 }
 
-// KH_SCENE_GRID: every live mesh slot in a cell whose loose bounds can meet
-// the engine-axes box [khb_mn, khb_mx] (the same padding rule as the frustum
-// query). Conservative; the caller's per-object test still runs.
+// Every live mesh slot in a cell whose loose bounds can meet the engine-axes
+// box (same padding rule). Conservative.
 inline void kh_scene_grid_query_box(const float khb_mn[3], const float khb_mx[3], std::vector<uint32_t>& khb_out) {
     khb_out.clear();
     for (const auto& khb_kv : g_scene.grid) {
@@ -5504,24 +5216,14 @@ inline void kh_obj_center_engine(const RenderObject& khc_o, float khc_out[3]) {
     khc_out[2] = khc_o.pos[1];
 }
 
-// The defect is the one thing the text above never considered: A mesh receiving
-// its own shadow.
-
-// ============================== KH_VIS_OCC ==============================
-// Conservative CPU occlusion culling for the injection colour pass (the one
-// pass that depth-writes every solid by contract, so a fully hidden object
-// provably contributed zero pixels there - culling it is output-identical).
-// Occluders are builtin-box opaques only (the OBB is the hull, nothing to
-// inscribe); their front faces rasterize inner-conservatively (a pixel counts
-// only when its whole cell is inside the projected quad) into a small grid of
-// per-pixel occluder depths, each face at its own farthest-corner camera
-// distance (an upper bound on the front surface anywhere on the face). An
-// object is hidden when every grid cell its projected AABB touches carries an
-// occluder strictly nearer than the object's nearest possible point. Every
-// guard fails toward 'visible'. Occluders enter the buffer regardless of
-// their own cull verdict: hiding is transitive under the full-footprint test
-// (whatever culled the occluder is nearer still over the same pixels), so the
-// nearest cover at any pixel is always drawn.
+// KH_VIS_OCC: conservative CPU occlusion culling for the injection colour pass
+// (the one pass that depth-writes every solid). Occluders are builtin-box
+// opaques only; their front faces rasterize inner-conservatively into a small
+// grid of occluder depths at their farthest-corner camera distance. An object
+// is hidden when every cell its projected AABB touches holds an occluder
+// strictly nearer than its nearest possible point. Every guard fails toward
+// 'visible'. Occluders enter regardless of their own verdict (hiding is
+// transitive).
 static constexpr int   KH_VOC_W = 96;
 static constexpr int   KH_VOC_H = 54;
 static constexpr int   KH_VOC_MAX = 16;           // Occluders per pass.
@@ -5559,10 +5261,9 @@ inline bool kh_voc_project(const KhVisOcc& khvp_o, const float khvp_w[3], float&
     return true;
 }
 
-// Inner-conservative quad rasterization: a cell counts only when all four of
-// its corners are inside every edge (per edge, the corner that minimizes the
-// edge function). Edge signs are normalized against the centroid, so winding
-// never matters; a near-degenerate quad stands the face down.
+// Inner-conservative quad rasterization: a cell counts only when all four
+// corners are inside every edge. Edge signs normalized against the centroid, so
+// winding never matters; a near-degenerate quad stands the face down.
 inline void kh_voc_face(KhVisOcc& khvf_o, const float khvf_p[4][2], float khvf_z, int& khvf_budget) {
     float khvf_cx = 0.0f, khvf_cy = 0.0f;
     float khvf_mnx = khvf_p[0][0], khvf_mxx = khvf_p[0][0];
@@ -5608,15 +5309,12 @@ inline void kh_voc_face(KhVisOcc& khvf_o, const float khvf_p[4][2], float khvf_z
     }
 }
 
-// Occluder pick + rasterize. khvo_margin covers passes whose pixel shaders may
-// write fragments nearer than their geometry (the far-arb terrain clamp);
-// khvo_far / khvo_cut bound a farVis-off occluder to where its own far
-// contract cannot discard it (the khObjCut / far-clamp discards). khvo_skip
-// answers "may this object fail to depth-write, or displace, a pixel the
-// grid would count as covered" - at the call site that is the SV_Depth
-// routes (which neither occlude nor get culled) and any box the
-// below-terrain discard could eat fragments from (kh_voc_buried; those are
-// still culled, since extra discards on a hidden object only help).
+// Occluder pick + rasterize. khvo_margin covers passes whose PS may write
+// nearer than their geometry (far-arb terrain clamp); khvo_far / khvo_cut bound
+// a farVis-off occluder to where its far contract cannot discard it. khvo_skip
+// = "may this object fail to depth-write a pixel the grid would count": the
+// SV_Depth routes and any box the below-terrain discard could eat fragments
+// from (kh_voc_buried).
 template <class KhVocSkip>
 inline void kh_vis_occ_build(KhVisOcc& khvo, const std::vector<RenderObject>& khvo_m,
                              const float khvo_vp[4][4], const KhCullSet& khvo_cull,
@@ -5782,12 +5480,8 @@ inline bool kh_vis_occ_hidden(const KhVisOcc& khvh_o, const RenderObject& o) {
     return true;
 }
 
-
-
-// KH_MAT_BLEND: casting is the object'S, not the material'S. The depth proxies
-// (sun depth, seam footprint, mirror, prime) are untextured and draw every
-// caster whole - a blend material's translucent texels cast exactly as a
-// cutout's clipped texels do.
+// Casting is the object's, not the material's: the depth proxies (sun depth,
+// seam footprint, mirror, prime) are untextured and draw every caster whole.
 
 inline bool kh_obj_has_blend(const RenderObject& o) {
     if (!o.materials || !o.materials->any) return false;
@@ -5808,21 +5502,11 @@ inline float kh_lod_radius(const RenderObject& khl_o) {
     return kh_lod_radius_of(khl_o.size, khl_o.rot_m, khl_o.rotated);
 }
 
-// KH_SHADOW_LOD_DRAWN. Every depth-only pass that re-draws the scene's meshes
-// - the sun tiers and the union, the alpha casters, the dynamic-light maps,
-// the seam footprint, the mirror prepass and the prime - took level 0 through
-// kh_shadow_lod_level() (a stub returning 0), whatever the colour pass drew.
-// With 3,000 PBR meshes that was 357 M indices a frame into the sun maps and
-// 160 M into each seam loop (dump3: sunDepth 6.5-13 ms, seamInject 10 ms,
-// seamPrepass 5 ms) against the 12 M the injection itself drew. The dlsw
-// mask already argued the rule this adopts: "the real one is whatever the
-// injection drew, which is the level kh_lod_pick chose, not level 0." The
-// level is the colour pass's own pick for this object at this camera - the
-// finer half of a fade, 0 under a lock - so a map holds the silhouette the
-// player sees (the self term compares a surface against a map of the same
-// geometry: the consistent choice, not merely the cheap one), and every run
-// groups on (mesh, level). g_lod_proj_px unpublished reads as level 0, i.e.
-// exactly what shipped before.
+// Every depth-only pass that re-draws the scene's meshes (sun tiers, alpha
+// casters, DLS maps, seam footprint, mirror prepass, prime) draws the level the
+// colour pass picked for this object at this camera - the finer half of a fade,
+// 0 under a lock - so a map holds the silhouette the player sees and every run
+// groups on (mesh, level). g_lod_proj_px unpublished reads as level 0.
 inline int kh_drawn_lod(int khdl_mid, const float* khdl_pos, const float* khdl_size, const float* khdl_rot,
                         bool khdl_rotated, bool khdl_lock, const float khdl_cam[3]) {
     if (khdl_lock) return 0;
@@ -5843,12 +5527,11 @@ static constexpr size_t KH_FBX_VERT_CEIL = 0xFFFFFFFFull / sizeof(MeshVertex);
 
 static constexpr uint64_t KH_MESH_CACHE_MAX_BYTES = 1024ull * 1024ull * 1024ull;
 static constexpr uint32_t KH_MESH_CACHE_MAGIC = 0x434D484Bu;   // "khmc" little-endian.
-static constexpr uint32_t KH_MESH_CACHE_VERSION = 5;   // 5 = KH_MESH_CACHE_ORDER: the welded stream in
-                                                       // vertex-cache order; 4 = KH_MESH_INDEXED: welded verts +
-                                                       // index stream; 3 = KH_LOD_TOPO: cached ladders
-                                                       // Regenerate.
+// 5 = welded stream in vertex-cache order; 4 = welded verts + index stream; 3 =
+// LOD ladders. Cached meshes at older versions regenerate.
+static constexpr uint32_t KH_MESH_CACHE_VERSION = 5;
 
-// Documents unavailable or creation failed - the cache silently disables and
+// Documents unavailable or creation failed: the cache silently disables and
 // every load is a plain import.
 inline const std::filesystem::path& kh_mesh_cache_dir() {
     static const std::filesystem::path khmc_dir = []() {
@@ -5872,11 +5555,10 @@ inline std::filesystem::path kh_mesh_cache_file(uint64_t khmc_hash) {
     return kh_mesh_cache_dir() / kh_cache_file_name("khm_", khmc_hash, ".khmc");
 }
 
-// Full-validation load; true = khmc_d carries the compiled mesh and the file's
-// write time was touched (the lru term). Any structural doubt is a miss. One
-// candidate's worth of load. khmc_own says whether the file is the Documents
-// copy - only that one gets the lru touch, and only that one is under the
-// trim's budget.
+// Full-validation load; true = khmc_d carries the mesh and the file's write
+// time was touched (the lru term). Any structural doubt is a miss. khmc_own =
+// the Documents copy: only that one gets the lru touch and is under the trim
+// budget.
 inline bool kh_mesh_cache_load_one(const std::filesystem::path& khmc_p, bool khmc_own,
                                    uint64_t khmc_hash, MeshDef& khmc_d) {
     try {
@@ -5910,8 +5592,8 @@ inline bool kh_mesh_cache_load_one(const std::filesystem::path& khmc_p, bool khm
         if (!khmc_rd(khmc_d.indices.data(), static_cast<size_t>(khmc_ni) * sizeof(uint32_t))) return false;
         for (uint32_t khmc_ix : khmc_d.indices) if (khmc_ix >= khmc_nv) return false;
         khmc_d.submeshes.resize(khmc_ns);
-        // One submesh table, read in place and range-checked against the vertex
-        // count. Shared by level 0 and every LOD level below.
+        // One submesh table, range-checked against the vertex count. Shared by
+        // level 0 and every LOD level.
         auto khmc_tab = [&](std::vector<MeshSubmesh>& khmc_t) -> bool {
             for (uint32_t khmc_i = 0; khmc_i < khmc_ns; ++khmc_i) {
                 uint32_t khmc_nl = 0;
@@ -5928,11 +5610,9 @@ inline bool kh_mesh_cache_load_one(const std::filesystem::path& khmc_p, bool khm
             return true;
         };
         if (!khmc_tab(khmc_d.submeshes)) return false;
-        // KH_MESH_LOD block. lod_n, then per level the whole-mesh range and a
-        // submesh table of the same cardinality as level 0 - that invariant is
-        // what lets a material slot index address one surface at every level,
-        // so it is validated here rather than assumed. Any structural doubt is
-        // a miss and the model re-imports.
+        // LOD block: lod_n, then per level the whole-mesh range and a submesh
+        // table of level 0's cardinality - validated here rather than assumed.
+        // Any doubt is a miss.
         uint32_t khmc_ln = 0;
         if (!khmc_rd(&khmc_ln, 4) || khmc_ln > static_cast<uint32_t>(KH_LOD_MAX)) return false;
         khmc_d.lod_n = static_cast<uint8_t>(khmc_ln);
@@ -5961,9 +5641,9 @@ inline bool kh_mesh_cache_load_one(const std::filesystem::path& khmc_p, bool khm
     } catch (...) { return false; }
 }
 
-// A partially filled MeshDef from a rejected candidate is discarded, never
-// carried forward. Full-validation load across every candidate: the Documents
-// copy first, then every mod that ships this model's compiled form.
+// Full-validation load across every candidate: the Documents copy first, then
+// every mod that ships the compiled form. A partially filled MeshDef from a
+// rejected candidate is never carried forward.
 inline bool kh_mesh_cache_load(uint64_t khmc_hash, MeshDef& khmc_d) {
     std::vector<std::filesystem::path> khmc_cand;
     const bool khmc_docs = !kh_mesh_cache_dir().empty();
@@ -6018,10 +5698,8 @@ inline void kh_mesh_cache_store(uint64_t khmc_hash, const MeshDef& khmc_d) {
             }
         };
         khmc_tab(khmc_d.submeshes);
-        // The LOD block. A level whose table cardinality disagrees with level 0
-        // is not written at all - the reader validates the same invariant, and
-        // writing something the reader would reject is how a cache starts lying
-        // about what it holds.
+        // A level whose table cardinality disagrees with level 0 is not written
+        // at all; the reader validates the same invariant.
         uint32_t khmc_ln = khmc_d.lod_n;
 
         for (uint32_t khmc_k = 0; khmc_k < khmc_ln; ++khmc_k) {
@@ -6040,9 +5718,8 @@ inline void kh_mesh_cache_store(uint64_t khmc_hash, const MeshDef& khmc_d) {
     } catch (...) {}
 }
 
-// Oldest-first (least-recently-used, via the hit-touch above) eviction down to
-// the cap. Runs after every store; a fresh write carries the newest time and is
-// naturally spared.
+// Least-recently-used eviction down to the cap, after every store; a fresh
+// write carries the newest time.
 inline void kh_mesh_cache_trim() {
     try {
         const std::filesystem::path& khmc_dir = kh_mesh_cache_dir();
@@ -6084,13 +5761,10 @@ inline void kh_mesh_cache_trim() {
     } catch (...) {}
 }
 
-// Registration tail shared by the ufbx import and the binary cache hit: name
-// the def, append, publish + GPU top-up under the park. KH_MESH_PUBLISH_DEFER:
-// A publish kh_fbx_register could not park for. Consumed at the head of
-// flush_locked, which holds the park for its whole body - the contract's safe
-// point - and tops the VBs up in the same window. Game thread both sides; the
-// atomic only keeps the compiler honest across the flush's hook re-entries.
-// KH_MESH_FREE reference notes (the GC below kh_mesh_cache_queue consumes them).
+// Registration tail shared by the ufbx import and the cache hit: name the def,
+// append, publish + GPU top-up under the park. A publish kh_fbx_register could
+// not park for is deferred to the head of flush_locked. Game thread both sides.
+// Reference notes below feed the mesh GC.
 static std::vector<uint64_t> g_mesh_last_ref;   // Per id, GetTickCount64 of the last reference note.
 
 // Game thread. Called for every object of every flush (visible or not: an
@@ -6109,14 +5783,13 @@ inline bool kh_fbx_register(MeshDef&& d, const std::string& path, int& out_id, s
     std::transform(d.name.begin(), d.name.end(), d.name.begin(), ::tolower);
     d.alias = "";
 
-    // Section-2 publication: append (invisible) unlocked, then publish + GPU
-    // top-up with the render thread parked - the contract's required safe
-    // point, so no draw can race the count/buffer pair.
+    // Append (invisible) unlocked, then publish + GPU top-up with the render
+    // thread parked, so no draw can race the count/buffer pair.
     const int id = kh_mesh_append(std::move(d));
     if (id < 0) { err = "mesh registry full"; return false; }
     kh_mesh_note_ref(id);   // KH_MESH_FREE: the idle window starts at import, not at 0.
-    // Until the publish lands, every draw path clamps the id to mesh 0
-    // (mesh_id_clamp): one flush of box at most, never a hole.
+    // Until the publish lands every draw path clamps the id to mesh 0: one
+    // flush of box at most.
     bool khfb_published = false;
 
     for (int khfb_try = 0; khfb_try < 3 && !khfb_published; ++khfb_try) {
@@ -6127,9 +5800,8 @@ inline bool kh_fbx_register(MeshDef&& d, const std::string& path, int& out_id, s
 
         if (dev) {
             const std::string ve = ensure_mesh_vbs(dev);
-            // Failure is non-fatal here: the id is published and every draw
-            // path re-runs ensure_mesh_vbs (and skips the frame on error) -
-            // report and let the retry own it.
+            // Non-fatal: the id is published and every draw path re-runs
+            // ensure_mesh_vbs; report and let the retry own it.
             if (!ve.empty()) report_error_once_safe("KH fbx '" + path + "': " + ve);
         }
 
@@ -6144,11 +5816,8 @@ inline bool kh_fbx_register(MeshDef&& d, const std::string& path, int& out_id, s
     return true;
 }
 
-// kh_mesh_append stores new MeshDef(std:move(def)) at session lifetime - v1 has
-// no unregistration - and the MeshDef is immutable after publication by its own
-// contract. So a published id names a block that never moves and never dies,
-// and the writer reads it without a lock for the same reason every draw path
-// indexes it without one.
+// A published MeshDef never moves and never dies (session lifetime, immutable
+// after publication), so the writer reads it without a lock.
 struct KhTexBlob {   // KH_TEX_CACHE: one decoded RGBA8 texture, every mip level.
     uint32_t w = 0, h = 0, mips = 0;
     bool srgb = false;
@@ -6180,10 +5849,8 @@ inline void kh_mesh_cache_writer() {
             g_khmw_q.erase(g_khmw_q.begin());
         }
         try {
-            // Bounds re-checked against the published count on this thread: the
-            // id was published before it was queued, and the count only ever
-            // grows, so this can only pass - it is here so a future
-            // unregistration cannot turn a stale id into a wild read.
+            // Bounds re-checked against the published count on this thread so a
+            // future unregistration cannot turn a stale id into a wild read.
             if (khmw_j.tex) {   // KH_TEX_CACHE write (defined below; same thread, same trim).
                 kh_tex_cache_store(khmw_j.hash, *khmw_j.tex);
                 std::lock_guard<std::mutex> khmw_tl(g_khsm_trim_mu);
@@ -6199,9 +5866,8 @@ inline void kh_mesh_cache_writer() {
     }
 }
 
-// Started on first use, never restarted per import. A spawn failure is
-// non-fatal and falls back to writing inline, exactly as a single-core machine
-// takes no shader pool.
+// Started on first use. A spawn failure is non-fatal and falls back to writing
+// inline.
 inline bool kh_mesh_cache_writer_start() {
     std::lock_guard<std::mutex> khmw_l(g_khmw_mu);
     if (g_khmw_running) return true;
@@ -6215,9 +5881,7 @@ inline bool kh_mesh_cache_writer_start() {
     return true;
 }
 
-// Unlike a shader worker this thread is always interruptible between jobs - it
-// holds no multi-minute call - so it is joined, never detached, and there is no
-// bounded-wait compromise to make. Teardown.
+// Interruptible between jobs (no multi-minute call), so joined, never detached.
 inline void kh_mesh_cache_writer_stop() {
     {
         std::lock_guard<std::mutex> khmw_l(g_khmw_mu);
@@ -6245,16 +5909,12 @@ inline void kh_mesh_cache_queue(uint64_t khmw_h, int khmw_id) {
     }
     g_khmw_cv.notify_one();
 }
-// Textures went through stb decode + GenerateMips on every session (and mipless
-// whenever no context was available).
-// KH_MESH_FREE / KH_TEX_GC: session VRAM is no longer monotonic. A registry
-// mesh that no render object has referenced for KH_MESH_GC_IDLE_MS is released
-// (def + VB + IB) by kh_mesh_gc at the flush. Textures follow the same idle rule through
-// kh_tex_cache_gc. Everything below runs on the game thread inside flush_locked
-// with the render thread parked, which is
-// the same serialization every g_res mutation relies on. Ids are never reused:
-// a freed slot is a tombstone that mesh_id_clamp folds to 0 and a by-path
-// lookup (kh_fbx_mesh_id) re-imports from the disk cache.
+// Session VRAM is not monotonic: a registry mesh no object referenced for
+// KH_MESH_GC_IDLE_MS is released (def + VB + IB) by kh_mesh_gc at the flush;
+// textures follow through kh_tex_cache_gc. Everything below runs inside
+// flush_locked with the render thread parked. Ids are never reused: a freed
+// slot is a tombstone mesh_id_clamp folds to 0; a by-path lookup re-imports
+// from the disk cache.
 static constexpr uint64_t KH_MESH_GC_IDLE_MS = 120000;
 static constexpr uint64_t KH_TEX_GC_IDLE_MS  = 180000;
 static constexpr uint64_t KH_MESH_GRAVE_FLUSHES = 2;   // The release wall, in flushes.
@@ -6298,9 +5958,9 @@ inline void kh_mesh_grave_sweep() {
     }
 }
 
-// Under the park, once per flush: idle imported meshes go. The reference
-// notes are refreshed by flush_frame before this runs, so "idle" means no
-// object has carried the id for the whole window.
+// Under the park, once per flush. The reference notes are refreshed by
+// flush_frame before this runs, so "idle" means no object carried the id for
+// the whole window.
 inline void kh_mesh_gc() {
     const uint64_t khgc_now = GetTickCount64();
     const uint32_t khgc_n = mesh_count();
@@ -6314,8 +5974,8 @@ inline void kh_mesh_gc() {
     }
 }
 
-// Under the park, once per flush: idle material sets go through the grave
-// (KH_MAT_POOL). References are noted by flush_frame's census every flush.
+// Under the park, once per flush: idle material sets go through the grave.
+// References are noted by flush_frame's census.
 inline void kh_material_gc() {
     const uint64_t khmg_now = GetTickCount64();
     const KhMaterialSet* khmg_pin = kh_default_material_set();   // Interns on first call: before the lock.
@@ -6344,12 +6004,9 @@ inline void kh_material_gc() {
 inline void kh_tex_cache_gc() {
     const uint64_t khtg_now = GetTickCount64();
     bool khtg_any = false;
-    // A resolve is the only refresh of last_use_ms and a set resolves its maps
-    // only when its table entries are built, so a texture in continuous use
-    // reads idle here. Before the sweep, touch every entry a pool set still
-    // names (the pool is the live material population: kh_material_gc, just
-    // above, has already graved the idle sets). Done only when something has
-    // actually aged out, so the steady state pays nothing.
+    // A resolve is the only refresh of last_use_ms, so a texture in continuous
+    // use reads idle here; before the sweep, touch every entry a pool set still
+    // names. Done only when something has aged out.
     {
         bool khtg_aged = false;
         for (const auto& khtg_kv : g_tex_cache) {
@@ -6398,9 +6055,8 @@ inline uint64_t kh_tex_hash(const std::vector<uint8_t>& khtc_bytes, bool khtc_sr
     if (khtc_srgb) khtc_h ^= 0x9E3779B97F4A7C15ull;   // The two colour spaces are two textures.
     return khtc_h;
 }
-// SRGB <-> linear tables: 256 -> float for the decode, 4096 -> byte for the
-// encode (12-bit linear quantisation is below the 8-bit sRGB step everywhere
-// but the darkest few codes, where a box average is already noise).
+// sRGB <-> linear tables: 256 -> float for the decode, 4096 -> byte for the
+// encode.
 inline const float* kh_tex_s2l() {
     static float khtc_t[256];
     static bool khtc_init = false;
@@ -6427,8 +6083,8 @@ inline const uint8_t* kh_tex_l2s() {
     }
     return khtc_t;
 }
-// Full chain from level 0 (RGBA8, pitch w*4). 2x2 box; an odd edge repeats its
-// last texel (clamp), the textbook choice for non-power-of-two sources.
+// Full mip chain from level 0 (RGBA8). 2x2 box; an odd edge repeats its last
+// texel.
 inline void kh_tex_build_mips(KhTexBlob& khtc_b, const uint8_t* khtc_px, uint32_t khtc_w, uint32_t khtc_h, bool khtc_srgb) {
     khtc_b.w = khtc_w; khtc_b.h = khtc_h; khtc_b.srgb = khtc_srgb;
     khtc_b.level_off.clear();
@@ -6490,8 +6146,8 @@ inline void kh_tex_build_mips(KhTexBlob& khtc_b, const uint8_t* khtc_px, uint32_
         khtc_sw = khtc_dw; khtc_sh = khtc_dh;
     }
 }
-// Full-validation load (the mesh cache's discipline: any structural doubt is a
-// miss). khtc_own = the Documents copy: lru-touched, under the trim budget.
+// Full-validation load (any structural doubt is a miss). khtc_own = the
+// Documents copy: lru-touched, under the trim budget.
 inline bool kh_tex_cache_load_one(const std::filesystem::path& khtc_p, bool khtc_own,
                                   uint64_t khtc_hash, bool khtc_srgb, KhTexBlob& khtc_b) {
     try {
@@ -6605,12 +6261,11 @@ inline ID3D11ShaderResourceView* kh_tex_create(ID3D11Device* dev, const KhTexBlo
     if (FAILED(khtc_hr)) { err = "CreateSRV(mipped) " + hr_str(khtc_hr); return nullptr; }
     return khtc_srv;
 }
-// KH_TEX_ASYNC: the CPU half of the first-sight load - disk read, content
-// hash, disk-cache probe, else decode + CPU mips (+ the cache-store queue).
-// No device and no context, so the loader worker runs exactly this
-// off-thread. khtb_force skips the disk-cache probe: the corrupt-cache retry
-// (a cached blob whose texture create fails re-decodes from the source).
-// khtb_from_cache tells the caller which arm produced the blob.
+// CPU half of the first-sight load: disk read, content hash, disk-cache probe,
+// else decode + CPU mips (+ cache-store queue). No device, no context, so the
+// loader worker runs exactly this. khtb_force skips the probe (the
+// corrupt-cache retry); khtb_from_cache tells the caller which arm produced the
+// blob.
 inline bool kh_tex_blob_load(const std::string& path, bool srgb,
                              std::shared_ptr<KhTexBlob>& khtb_out, bool& khtb_from_cache,
                              std::string& err, bool khtb_force) {
@@ -6664,14 +6319,10 @@ inline ID3D11ShaderResourceView* kh_tex_load_cached(ID3D11Device* dev, const std
     return khtc_srv;
 }
 
-// ============================== KH_TEX_ASYNC ==============================
-// The texture loader worker: disk + CPU only (file bytes, cache probe, stbi
-// decode, CPU mips) - it never touches the device or a context, so it is
-// engine-reset-safe without a stop (a reset clears g_tex_cache and the pump
-// drops the late results by key miss). The device half - texture create and
-// page placement - runs in kh_tex_async_pump at the pass heads, under the
-// park like every other g_tex_cache writer. Lifecycle clones the mesh cache
-// writer: lazy start, joined at mission end (no worker outlives a mission).
+// KH_TEX_ASYNC: the texture loader worker is disk + CPU only (never touches the
+// device), so it is engine-reset-safe without a stop. The device half - create
+// and page placement - runs in kh_tex_async_pump at the pass heads under the
+// park. Lazy start, joined at mission end.
 struct KhTexLoadJob { std::string key; std::string path; bool srgb; bool force; };
 struct KhTexLoadDone {
     std::string key;
@@ -6740,9 +6391,8 @@ inline bool kh_texldr_start() {
     return true;
 }
 
-// Interruptible between jobs (no multi-minute call), so joined, never
-// detached - the mesh cache writer's teardown, verbatim. Queued and finished
-// results hold no device objects; dropping them is a plain destructor.
+// Joined, never detached (interruptible between jobs). Queued and finished
+// results hold no device objects.
 inline void kh_texldr_stop() {
     {
         std::lock_guard<std::mutex> khtl_l(g_khtl_mu);
@@ -6754,27 +6404,17 @@ inline void kh_texldr_stop() {
     g_khtl_cv.notify_all();
     if (g_khtl_thr.joinable()) { try { g_khtl_thr.join(); } catch (...) {} }
     std::lock_guard<std::mutex> khtl_l2(g_khtl_mu);
-    // A worker mid-job at the clear above pushes its result before it sees
-    // the abort; this post-join clear is the one that makes 'no result
-    // outlives the stop' true. (The job queue needs no twin: the worker only
-    // pops it.)
+    // A worker mid-job at the clear above pushes its result before it sees the
+    // abort; this post-join clear makes 'no result outlives the stop' true.
     g_khtl_done.clear();
     g_khtl_running = false;
 }
 
-// KH_TEX_ASYNC: the pump's corrupt-cache retry, and only that. kh_texldr_queue
-// stands a worker up on demand, which is right for a first-sight resolve and
-// wrong here - the retry is a continuation of work the loader already
-// accepted, so once the loader is stopped (mission end, engine reset) it must
-// die with it rather than start a thread behind the teardown. The running test
-// and the push happen under ONE lock acquisition: a separate alive() call
-// followed by kh_texldr_queue would only narrow the window, since a stop can
-// land between the two and the queue would then resurrect the worker. A stop
-// that lands after the push is fine and is the existing contract - it clears
-// the queue, and the post-join clear drops any result. Forced by construction,
-// so there is no force argument to get wrong at the call site. 1.178: the
-// single-decoder construction is re-proven at every new caller, and this is
-// the caller that must never create the decoder.
+// The pump's corrupt-cache retry, and only that. Unlike kh_texldr_queue it must
+// NOT stand a worker up: once the loader is stopped the retry dies with it. The
+// running test and the push happen under one lock acquisition, so a stop cannot
+// land between them and resurrect the worker. Forced by construction. This
+// caller must never create the decoder.
 inline bool kh_texldr_requeue(const std::string& khtr_key, const std::string& khtr_path, bool khtr_srgb) {
     {
         std::lock_guard<std::mutex> khtr_l(g_khtl_mu);
@@ -6797,12 +6437,10 @@ inline bool kh_texldr_queue(const std::string& khtl_key, const std::string& khtl
     return true;
 }
 
-// The device half: create + page-place up to four finished loads, at the pass
-// heads, before kh_mat_ensure_all - a placement grows a page and bumps the
-// page generation, so every base is re-fixed before any lane is written (the
-// KH_MAT_TABLE contract). Under the park, like every g_tex_cache writer. A
-// key the cache no longer holds (release / GC / re-resolve raced) drops its
-// result on the floor.
+// The device half: create + page-place up to four finished loads at the pass
+// heads, before kh_mat_ensure_all (a placement bumps the page generation, so
+// every base is re-fixed before any lane is written). Under the park. A key the
+// cache no longer holds drops its result.
 static constexpr size_t KH_TEXLDR_PUMP_MAX = 4;
 inline void kh_tex_async_pump(ID3D11DeviceContext* ctx, ID3D11Device* dev) {
     if (!ctx || !dev) return;
@@ -6826,15 +6464,11 @@ inline void kh_tex_async_pump(ID3D11DeviceContext* ctx, ID3D11Device* dev) {
             if (!khtp_d.dds.empty()) khtp_srv = kh_load_dds(dev, khtp_d.dds, khtp_d.srgb, khtp_err);
             else if (khtp_d.blob)   khtp_srv = kh_tex_create(dev, *khtp_d.blob, khtp_err);
             else                    khtp_err = "empty result";
-            if (!khtp_srv && khtp_d.from_cache) {   // Corrupt-cache retry, the load_cached twin -
-                // re-queued to the worker as a force job (skips the probe),
-                // never an in-pass stbi decode: the worker stays the only
-                // decoder while it lives, and the pass head stays free of
-                // exactly the first-sight cost this feature removes. The
-                // forced result returns with from_cache clear, so a second
-                // failure lands in the failed arm below and the retry
-                // terminates. The entry stays pending: defaults for another
-                // frame or two.
+            if (!khtp_srv && khtp_d.from_cache) {   // Corrupt-cache retry, the load_cached twin.
+                // Re-queued to the worker as a force job (skips the probe),
+                // never an in-pass decode: the worker stays the only decoder. A
+                // second failure lands in the failed arm and the retry
+                // terminates.
                 if (kh_texldr_requeue(khtp_d.key, khtp_d.path, khtp_d.srgb)) {
                     khtp_e.last_use_ms = GetTickCount64();
                     continue;
@@ -6857,9 +6491,8 @@ inline void kh_tex_async_pump(ID3D11DeviceContext* ctx, ID3D11Device* dev) {
 }
 
 inline bool kh_fbx_import(const std::string& path, int& out_id, std::string& err) {
-    // One read, three consumers (cache round): the file bytes feed the content
-    // hash, the binary-cache probe, and - on a miss - ufbx itself
-    // (ufbx_load_memory), so hashing costs no second disk pass.
+    // One read, three consumers: the file bytes feed the content hash, the
+    // cache probe and, on a miss, ufbx_load_memory.
     std::vector<uint8_t> khmc_bytes;
     {
         std::ifstream khmc_in(path, std::ios::binary);
@@ -6869,7 +6502,6 @@ inline bool kh_fbx_import(const std::string& path, int& out_id, std::string& err
     }
     if (khmc_bytes.empty()) { err = "empty file"; return false; }
     const uint64_t khmc_hash = CryptoGenerator::fnv1a64_raw(khmc_bytes.data(), khmc_bytes.size());
-    // The first timing this path has ever had.
     {
         MeshDef khmc_d;
         const bool khmc_hit = kh_mesh_cache_load(khmc_hash, khmc_d);
@@ -7025,13 +6657,12 @@ inline bool kh_fbx_import(const std::string& path, int& out_id, std::string& err
         kh_lod_build(d);
     }
     kh_mesh_weld(d);   // KH_MESH_INDEXED: every level welded at once, ranges unchanged.
-    // Persist the compiled result (post-tangent, post-bake: a cache hit skips
-    // ufbx, triangulation, mikktspace and the bake), then keep the cache under
-    // its cap.
+    // Persist the compiled result (post-tangent, post-bake), then keep the
+    // cache under its cap.
     kh_stat(g_stats.fbx_imports);
-    // s note still applies and is why the writer takes g_khsm_trim_mu: an FBX
-    // import can land while a KH_SHADER_MT batch is writing.khsc blobs into the
-    // same folder, and the trim enumerates and deletes.
+    // The writer takes g_khsm_trim_mu: an FBX import can land while a shader
+    // batch writes .khsc blobs into the same folder, and the trim enumerates
+    // and deletes.
     const bool khmc_ok = kh_fbx_register(std::move(d), path, out_id, err);
     // Queued only on success: an unregistered mesh has no published id, and the
     // writer reads the mesh by id.
@@ -7072,8 +6703,8 @@ inline int kh_fbx_mesh_id(const std::string& request, std::string& err) {
 
 inline void kh_apply_native_size(RenderObject& o) {
     // Staged lookup: a just-imported .fbx whose publish was deferred is
-    // appended but not published; mesh_id_clamp would hand back the box and the
-    // object would spawn at 1 m. Game thread only, like every caller.
+    // appended but not published; mesh_id_clamp would hand back the box. Game
+    // thread only.
     const MeshDef* khn_sd = kh_mesh_def_staged(o.mesh);
     const MeshDef& md = khn_sd ? *khn_sd : mesh_def(0);
 
@@ -7091,22 +6722,16 @@ inline const KhMaterialSet* kh_obj_textured(const RenderObject& o) {
          ? o.materials : nullptr;
 }
 
-// Flags reflect what actually resolved (a missing/broken texture drops its bit,
-// and every route degrades to the same no-map default the shader uses), so the
-// shader never samples a null view. Fill the matParams CB block + bind t14-t18
-// For one material. SRGB per slot: diffuse/emissive/specular color data,
-// normal/orm linear.
-// KH_MAT_TABLE: the C++ twin of KhGpuMat (cb.hlsl) - the former matParams0..3
-// lanes, unchanged, plus the page layers of the five maps.
+// C++ twin of KhGpuMat (cb.hlsl): the material lanes plus the page layers of
+// the five maps.
 struct KhGpuMat { float p0[4]; float p1[4]; float p2[4]; float p3[4]; float lay0[4]; float lay1[4]; };
 static std::vector<KhGpuMat> g_mat_gpu_cpu;   // The table's CPU shadow, one entry per set slot.
 static bool g_mat_gpu_dirty = false;
 static uint32_t g_mat_gpu_page_gen = 0;   // The g_tex_page_gen the table was built against.
 
-// One slot's entry from the resolved maps. Flags reflect what actually
-// resolved (a missing/broken texture drops its bit, and every route degrades
-// to the same no-map default the shader uses), so the shader never samples a
-// null layer.
+// One slot's entry. Flags reflect what actually resolved (a missing texture
+// drops its bit; every route degrades to the shader's no-map default), so the
+// shader never samples a null layer.
 inline void kh_mat_gpu_fill(ID3D11DeviceContext* ctx, ID3D11Device* dev, const KhMaterial& m,
                             KhGpuMat& khmf_g, KhMaterialSet::Gpu::PageSet& khmf_pages) {
     int flags = 0;
@@ -7170,9 +6795,9 @@ inline void kh_mat_gpu_ensure(ID3D11DeviceContext* ctx, ID3D11Device* dev, const
             kh_mat_gpu_fill(ctx, dev, khme_m, khme_g, khme_s.gpu.pages[khme_i]);
             g_mat_gpu_cpu.push_back(khme_g);
             // Batch identity: the pages bound per slot, the alpha mode (the
-            // representative's material decides the blend split and the part
-            // skip for every member) and the shader kind. Layers, colours,
-            // cutoffs and routes ride the table, so they do not split batches.
+            // representative's material decides the blend split for every
+            // member) and the shader kind. Layers, colours, cutoffs and routes
+            // ride the table and do not split batches.
             for (int khme_p = 0; khme_p < 5; ++khme_p) {
                 const uintptr_t khme_v = reinterpret_cast<uintptr_t>(khme_s.gpu.pages[khme_i].p[khme_p]);
                 khme_sig = CryptoGenerator::fnv1a64_update(khme_sig, &khme_v, sizeof(khme_v));
@@ -7185,8 +6810,10 @@ inline void kh_mat_gpu_ensure(ID3D11DeviceContext* ctx, ID3D11Device* dev, const
                 khme_sig = CryptoGenerator::fnv1a64_update(khme_sig, khme_m.user_shader.data(), khme_m.user_shader.size());
             }
         }
-        if (khme_gen0 != g_tex_page_gen) {   // A load grew a page mid-fill: the entries above name
-            g_mat_gpu_dirty = true;          // the old SRVs. Round again; the top clears the table.
+        // A load grew a page mid-fill: the entries above name the old SRVs.
+        // Round again; the top clears the table.
+        if (khme_gen0 != g_tex_page_gen) {
+            g_mat_gpu_dirty = true;
             continue;
         }
         khme_s.gpu.base = khme_base;
@@ -7234,17 +6861,14 @@ inline bool kh_mat_gpu_upload(ID3D11DeviceContext* ctx, ID3D11Device* dev) {
     return g_res.mat_srv != nullptr;
 }
 
-// Per-draw material bind: the slot's pages at t14-t18, the table at t38, and
-// the matCtl lanes. set == nullptr binds the one-slot default set (colour-only
-// draws, the white substitute). khbm_mode >= 0 overrides the alpha mode for
-// this draw (the blend split's opaque part, 3).
+// Per-draw material bind: the slot's pages at t14-t18, the table at t38, the
+// matCtl lanes. set == nullptr binds the one-slot default set. khbm_mode >= 0
+// overrides the alpha mode for this draw (the blend split's opaque part, 3).
 inline void kh_bind_material(ID3D11DeviceContext* ctx, ID3D11Device* dev,
                              ConstantData& cbd, const KhMaterialSet* khbm_set, size_t khbm_slot,
                              float khbm_mode = -1.0f) {
-    // A slot the set does not carry (a mesh with more submeshes than the set was
-    // built for) draws the default material, as it always did; that bind is
-    // uniform across an instanced batch (matCtl.z), since the members' own
-    // bases would index past their sets.
+    // A slot the set does not carry draws the default material; that bind is
+    // uniform across an instanced batch (matCtl.z).
     bool khbm_uniform = false;
     if (!khbm_set || khbm_slot >= (khbm_set->slots.empty() ? 1 : khbm_set->slots.size())) {
         khbm_set = kh_default_material_set(); khbm_slot = 0; khbm_uniform = true;
@@ -7271,12 +6895,11 @@ inline float kh_mat_inst_base(ID3D11DeviceContext* ctx, ID3D11Device* dev, const
     return khib_set->gpu.base >= 0 ? static_cast<float>(khib_set->gpu.base) : 0.0f;
 }
 
-// Per-submesh textured draws for one object: fills matParams + binds maps per
-// submesh, re-uploads the object slice and draws the range, honoring the ordered
-// two-pass when asked. Preconditions (the caller's duty): textured VS/PS/layout
-// bound, VB + blend + dss set, cbd fully filled, textured StateBackup range live.
-// khum_part (KH_MAT_BLEND): 1 = the depth-writing draw (every submesh; a blend
-// material contributes its solid texels only, matParams0.y = 3);
+// Per-submesh textured draws for one object: binds per submesh, re-uploads the
+// object slice, draws the range, honouring the ordered two-pass when asked.
+// Preconditions: textured VS/PS/layout bound, VB + blend + dss set, cbd filled.
+// khum_part: 1 = the depth-writing draw (a blend material contributes its solid
+// texels only, matParams0.y = 3);
 inline uint32_t kh_draw_textured(ID3D11DeviceContext* ctx, ID3D11Device* dev,
                                  ConstantData& cbd, ID3D11Buffer* obj_cb,
                                  const KhMaterialSet& ms, int mid, bool ts_ordered,
@@ -7296,11 +6919,9 @@ inline uint32_t kh_draw_textured(ID3D11DeviceContext* ctx, ID3D11Device* dev,
         ++draws;
     };
     ID3D11PixelShader* khum_bound = khum_builtin_ps;
-    // Its cardinality and order match level 0's by construction - decimation
-    // runs per submesh and never merges or drops one - and kh_mesh_cache_load
-    // validates that rather than trusting it, which is why si still addresses
-    // the right material slot at every level with no per-level bookkeeping
-    // here. KH_MESH_LOD: the level's own submesh table.
+    // The level's own submesh table; its cardinality and order match level 0's
+    // (validated at cache load), so si addresses the right material slot at
+    // every level.
     const std::vector<MeshSubmesh>& khum_tab = mesh_lod_submeshes(md, khum_lod);
 
     for (size_t si = 0; si < khum_tab.size(); ++si) {
@@ -7308,14 +6929,13 @@ inline uint32_t kh_draw_textured(ID3D11DeviceContext* ctx, ID3D11Device* dev,
         if (sm.index_count == 0) continue;
         const KhMaterial& mat = (si < ms.slots.size() && ms.slots[si].used)
                               ? ms.slots[si] : khtx_default;
-        if (khum_part == 2 && mat.alpha_mode != 2) continue;   // KH_MAT_BLEND: the translucent part
-                                                               // User material shader: per-submesh PS selection. khum_ctx names the caller's
-                                                               // pipeline variant so the user twin matches its builtin (flush / composite /
-                                                               // composite-arb); an absent or failed compile keeps builtin PBR - the mesh never blanks.
+        // The translucent part. User material shader: per-submesh PS selection;
+        // khum_ctx names the caller's pipeline variant so the user twin matches
+        // its builtin; an absent or failed compile keeps builtin PBR.
+        if (khum_part == 2 && mat.alpha_mode != 2) continue;
         ID3D11PixelShader* khum_want = khum_builtin_ps;
-        // A submesh that asked for a user shader and has not got one yet - or
-        // never will, because it failed to compile - draws flat white, not
-        // builtin PBR.
+        // A submesh that asked for a user shader and has not got one (pending
+        // or failed) draws flat white, not builtin PBR.
         bool khum_white = false;
 
         if (mat.shader == 1 && !mat.user_shader.empty()) {
@@ -7340,11 +6960,11 @@ inline uint32_t kh_draw_textured(ID3D11DeviceContext* ctx, ID3D11Device* dev,
 
         if (ts_ordered) {   // Interiors first, exteriors over them (the ordered contract).
             if (bound_rs != g_res.rasterizer_front) {
-                ctx->RSSetState(kh_rs_pick(g_res.rasterizer_front));
+                ctx->RSSetState(g_res.rasterizer_front);
                 bound_rs = g_res.rasterizer_front;
             }
             khum_draw(sm);
-            ctx->RSSetState(kh_rs_pick(g_res.rasterizer_cull));
+            ctx->RSSetState(g_res.rasterizer_cull);
             bound_rs = g_res.rasterizer_cull;
             khum_draw(sm);
         } else {
@@ -7357,14 +6977,12 @@ inline uint32_t kh_draw_textured(ID3D11DeviceContext* ctx, ID3D11Device* dev,
     return draws;
 }
 
-// KH_BUCKETS: one KhInstLane per instance (16 B, the HLSL VSInst twin, IA slot
-// 1, TEXCOORD4 uint + TEXCOORD5 float3): the object's live-scene slot (the
-// vertex shader reads the record from the object buffer at t39), the LOD
-// crossfade dither for this draw, the instance's final colour alpha (lifetime
-// envelope applied) and the material table base of its set. Two dynamic rings,
-// one per pass (flush = game thread, injection = render thread), discard on
-// first use and on wrap, NO_OVERWRITE per pass write. The sun-depth and
-// dynamic-light depth passes consume the same lane through their own ring.
+// One KhInstLane per instance (16 B; HLSL VSInst, IA slot 1, TEXCOORD4 uint +
+// TEXCOORD5 float3): the live-scene slot (the VS reads the record from t39),
+// the LOD dither, the final alpha (envelope applied) and the material table
+// base. Two dynamic rings, one per pass thread, discard on first use and wrap,
+// NO_OVERWRITE per write. The sun-depth and DLS passes consume the same lane
+// through their own ring.
 struct KhInstLane {
     uint32_t slot;
     float    dither;
@@ -7375,11 +6993,9 @@ static_assert(sizeof(KhInstLane) == 16, "KhInstLane is one float4 (HLSL VSInst t
 static constexpr uint32_t KH_INST_STRIDE = static_cast<uint32_t>(sizeof(KhInstLane));
 static constexpr uint32_t KH_INST_CAP = 65536u;   // Lanes per ring (1 MB).
 
-// Bucket eligibility: an opaque solid mesh object. Normal-blend translucents
-// keep the per-object path (perceptual composite, back-to-front order);
-// effect meshes and depth-Off objects too.
-// A localized / banded mesh reads its own mask lanes (SolidMask: the mask
-// centre is the object's position), so it draws per object.
+// Bucket eligibility: an opaque solid mesh. Normal-blend translucents, effect
+// meshes and depth-Off objects keep the per-object path; a localized / banded
+// mesh reads its own mask lanes, so it draws per object.
 inline bool kh_inst_eligible(const RenderObject& o) {
     return !o.fullscreen && o.effect == 0 && o.mode != DepthMode::Off &&
            !(o.blend_mode == 0 && o.color[3] < 0.999f) && !o.localized && !o.banded;
@@ -7396,10 +7012,9 @@ inline void kh_inst_lane_fill(KhInstLane& l, const RenderObject& o, float khil_d
     l.mat_base = khil_mat_base;
 }
 
-// Writes up to KH_INST_CAP lanes; returns the count written (0 on a failed
-// map, which re-DISCARDs the ring next time) and the first lane's index in
-// khiw_first. A full ring wraps with a discard (rename, never a stall): every
-// earlier draw of the pass already consumed its lanes.
+// Writes up to KH_INST_CAP lanes; returns the count (0 on a failed map, which
+// re-DISCARDs the ring next time) and the first lane's index. A full ring wraps
+// with a discard: every earlier draw of the pass already consumed its lanes.
 inline uint32_t kh_inst_ring_write(ID3D11DeviceContext* ctx, int khiw_ri, const KhInstLane* khiw_recs,
                                    uint32_t khiw_n, uint32_t& khiw_first) {
     ID3D11Buffer* khiw_buf = g_res.inst_vb[khiw_ri];
@@ -7427,9 +7042,8 @@ inline uint32_t kh_inst_ring_write(ID3D11DeviceContext* ctx, int khiw_ri, const 
 }
 
 // The bucket key: every object field a bucket's shared constant block or
-// pipeline state is filled from. What varies per instance rides the record
-// (colour, rotation, size, farVis, ambient / diffuse fractions) or the lane
-// (dither, alpha, material base) and is deliberately absent here.
+// pipeline state is filled from. What varies per instance rides the record or
+// the lane and is deliberately absent here.
 struct KhInstKey {
     int      mesh;
     uint64_t mats;      // 0 = untextured; else the set's page signature (KhMaterialSet::Gpu).
@@ -7445,16 +7059,17 @@ struct KhInstKey {
                         // mesh's nearest set in mode 3, and the bucket uploads the representative's.
 };
 
-// The pass fills route / aux through kh_inst_plan_build's functor. A set not
-// yet uploaded keys on its content hash; the passes ensure every set before
-// planning (kh_mat_ensure_all), so that is a fallback only.
+// route / aux are filled by kh_inst_plan_build's functor. A set not yet
+// uploaded keys on its content hash (fallback only; the passes ensure every set
+// before planning).
 inline KhInstKey kh_inst_key(const RenderObject& o) {
     KhInstKey k;
     k.mesh = mesh_id_clamp(o.mesh);
     {
         const KhMaterialSet* khik_ms = kh_obj_textured(o);
-        k.mats = khik_ms ? ((khik_ms->gpu.base >= 0 ? khik_ms->gpu.page_sig : khik_ms->hash) | 1u) : 0u;   // |1 keeps a (vanishingly unlikely) zero
-                                                        // Hash distinct from "untextured".
+        // |1 keeps a (vanishingly unlikely) zero hash distinct from
+        // "untextured".
+        k.mats = khik_ms ? ((khik_ms->gpu.base >= 0 ? khik_ms->gpu.page_sig : khik_ms->hash) | 1u) : 0u;
     }
     k.blend = o.blend_mode;
     k.mode = static_cast<int>(o.mode);
@@ -7479,16 +7094,10 @@ inline int kh_inst_key_cmp(const KhInstKey& a, const KhInstKey& b) {
     return 0;
 }
 
-// KH_MAT_TABLE: every material set a pass will draw is uploaded before the
-// pass plans - a first-sight texture load grows a page and rebuilds the table,
-// which would leave any base already written into a lane stale. After this no
-// draw of the pass can move a base (the bases only move on a page or pool
-// change, and those happen at the flush head or on a first-sight load).
-// Bounded: each extra round is a page grow. KH_TEX_ASYNC: only the sets the
-// pass will actually draw - khme_vis is the pass's own visibility predicate,
-// the same one the plan's emit and the per-object loop test, so every emitted
-// lane's set is still ensured here (the contract above) and a culled object's
-// first-sight resolve costs the pass nothing.
+// Every material set a pass will draw is uploaded before the pass plans: a
+// first-sight load grows a page and rebuilds the table, which would leave a
+// base already written into a lane stale. khme_vis is the pass's own visibility
+// predicate, so a culled object's first-sight resolve costs the pass nothing.
 template <class KhMatVis>
 inline void kh_mat_ensure_all(ID3D11DeviceContext* ctx, ID3D11Device* dev,
                               const std::vector<RenderObject>& meshes, KhMatVis khme_vis) {
@@ -7518,9 +7127,9 @@ struct KhInstPlan {
                                          // Bucket.
     struct Ent { KhInstKey key; uint32_t rank; uint32_t idx; };
     std::vector<Ent>      ents;
-    // KH_BUCKETS: the emission. Per bucket the representative (the first
-    // visible member in visiting order; the loop draws the bucket when it
-    // reaches it) and its ranges. Filled by kh_inst_plan_emit.
+    // The emission: per bucket the representative (the first visible member in
+    // visiting order; the loop draws the bucket when it reaches it) and its
+    // ranges.
     std::vector<uint32_t> rep;           // Per bucket; KH_SCENE_NONE = nothing visible.
     std::vector<uint32_t> range_begin;   // Per bucket: first range.
     std::vector<uint32_t> range_n;       // Per bucket: range count.
@@ -7533,9 +7142,8 @@ struct KhInstPlan {
 };
 
 // khip_order = the loop's visiting order (nullptr = natural). Groups by key;
-// members keep their visiting order inside a bucket, so the first member the
-// loop reaches is the first in its member list. khip_route(o, key) fills the
-// pass's per-object key lanes (route bits, the dynamic-light identity).
+// members keep their visiting order inside a bucket. khip_route(o, key) fills
+// the pass's per-object key lanes.
 template <class KhInstRoute>
 inline void kh_inst_plan_build(KhInstPlan& p, const std::vector<RenderObject>& meshes,
                                const uint32_t* khip_order, size_t khip_n, KhInstRoute khip_route) {
@@ -7585,19 +7193,14 @@ inline void kh_inst_plan_build(KhInstPlan& p, const std::vector<RenderObject>& m
     }
 }
 
-// KH_BUCKETS: the cull walk. For every bucket, every member: the pass's own
-// visibility verdict (khie_visible), the level the object would pick alone
-// with its crossfade (a fading object is emitted at both levels, complementary
-// dither), sorted by level then by distance - KH_BUCKET_NTF: near-to-far for
-// a normal-blend bucket (opaque solids under LESS_EQUAL + write: the near
-// instance lands first and the hardware's early-Z rejects the far ones it
-// hides, which the far-to-near order this replaced never let it do - every
-// hidden instance shaded in full), far-to-near for the other blend modes, as
-// before (the order the per-object translucent path keeps); the whole stream is written to
-// the ring once and each bucket records its (level, first, n) ranges. Members
-// are marked done except the representative, which the per-object loop still
-// reaches and draws the bucket at. Preconditions: the pass's material sets
-// ensured (kh_mat_ensure_all), the envelope folded into every colour alpha.
+// The cull walk: per bucket, per member - the pass's visibility verdict, the
+// level it would pick alone with its crossfade (a fading object is emitted at
+// both levels, complementary dither), sorted by level then distance
+// (near-to-far for a normal-blend bucket so early-Z rejects hidden instances;
+// far-to-near for the other blend modes). The stream is written to the ring
+// once; each bucket records its (level, first, n) ranges. Members are marked
+// done except the representative. Preconditions: material sets ensured,
+// envelope folded into every colour alpha.
 template <class KhInstVisible>
 inline void kh_inst_plan_emit(ID3D11DeviceContext* ctx, ID3D11Device* dev, KhInstPlan& p,
                               const std::vector<RenderObject>& meshes, const float* cam, int khie_ri,
@@ -7627,11 +7230,10 @@ inline void kh_inst_plan_emit(ID3D11DeviceContext* ctx, ID3D11Device* dev, KhIns
             if (!o.lod_lock) kh_lod_pick(*khie_md, kh_lod_radius(o), sqrtf(khie_d2), khie_lvl, khie_t);
             khie_lvl = mesh_lod_clamp(*khie_md, khie_lvl);
             const bool khie_x = khie_t > 0.0f && khie_lvl < static_cast<int>(khie_md->lod_n);
-            // Distance rank in the low 31 bits (KH_BUCKET_NTF: ascending for a
-            // normal-blend bucket, descending otherwise; the bucket key carries
-            // the blend mode, so one rule holds for every member); bit 31 = the
-            // coarser half of a crossfade pair (the pair is complementary per
-            // pixel, so the order between the two halves is free).
+            // Distance rank in the low 31 bits (ascending for a normal-blend
+            // bucket, descending otherwise); bit 31 = the coarser half of a
+            // crossfade pair (complementary per pixel, so the order between
+            // halves is free).
             const uint32_t khie_dq = static_cast<uint32_t>(fminf(khie_d2, 2.0e9f)) & 0x7FFFFFFFu;
             const uint32_t khie_far = (o.blend_mode == 0) ? khie_dq : (0x7FFFFFFFu - khie_dq);
             p.picked.emplace_back((static_cast<uint64_t>(khie_lvl) << 32) | khie_far, khie_i);
@@ -7692,25 +7294,18 @@ inline void kh_inst_plan_emit(ID3D11DeviceContext* ctx, ID3D11Device* dev, KhIns
     }
 }
 
-// Draws the bucket the representative khid_rep belongs to: one
-// DrawIndexedInstanced per emitted range (per LOD level), the textured
-// per-submesh path when khid_txm is set. Preconditions (the caller's duty,
-// exactly kh_draw_textured's): the representative's CB uploaded, its PS bound,
-// the instanced VS + layout bound, the lane ring on IA slot 1, blend + dss set,
-// khid_bound_rs the loop's tracker. khid_pre(lvl, first, n) runs before each
-// range's colour draw. Its one consumer was the owner prepass, which is gone;
-// every caller passes kh_inst_pre_none today. The hook stays because it is the
-// only seam a per-range pass can hang on without the range walk leaking into
-// the loop.
-// Returns the draw count; khid_inst_out the lanes drawn.
-template <class KhInstPre>
+// Draws the bucket khid_rep belongs to: one DrawIndexedInstanced per emitted
+// range (per LOD level), the textured per-submesh path when khid_txm is set.
+// Preconditions (kh_draw_textured's): the representative's CB uploaded, its PS
+// bound, the instanced VS + layout bound, the lane ring on IA slot 1, blend +
+// dss set. Returns the draw count; khid_inst_out the lanes drawn.
 inline uint32_t kh_inst_draw(ID3D11DeviceContext* ctx, ID3D11Device* dev, const KhInstPlan& p,
                              const std::vector<RenderObject>& meshes, uint32_t khid_rep,
                              ConstantData& cbd, ID3D11Buffer* obj_cb,
                              const KhMaterialSet* khid_txm, bool khid_ts_ordered,
                              ID3D11RasterizerState*& khid_bound_rs,
                              int khid_ctx, ID3D11PixelShader* khid_builtin_ps, int khid_part,
-                             KhInstPre khid_pre, uint32_t& khid_inst_out) {
+                             uint32_t& khid_inst_out) {
     khid_inst_out = 0;
     if (khid_rep >= p.batch_of.size() || p.batch_of[khid_rep] < 0) return 0;
     const uint32_t khid_b = static_cast<uint32_t>(p.batch_of[khid_rep]);
@@ -7723,7 +7318,6 @@ inline uint32_t kh_inst_draw(ID3D11DeviceContext* ctx, ID3D11Device* dev, const 
     for (uint32_t khid_k = 0; khid_k < p.range_n[khid_b]; ++khid_k) {
         const KhInstRange& khid_r = p.ranges[p.range_begin[khid_b] + khid_k];
         if (khid_r.n == 0) continue;
-        khid_pre(khid_r.lvl, khid_r.first, khid_r.n);
 
         if (khid_txm) {
             khid_draws += kh_draw_textured(ctx, dev, cbd, obj_cb, *khid_txm, khid_mid, khid_ts_ordered,
@@ -7735,11 +7329,11 @@ inline uint32_t kh_inst_draw(ID3D11DeviceContext* ctx, ID3D11Device* dev, const 
 
             if (khid_ts_ordered) {   // Interiors of every instance, then exteriors over them.
                 if (khid_bound_rs != g_res.rasterizer_front) {
-                    ctx->RSSetState(kh_rs_pick(g_res.rasterizer_front));
+                    ctx->RSSetState(g_res.rasterizer_front);
                     khid_bound_rs = g_res.rasterizer_front;
                 }
                 ctx->DrawIndexedInstanced(khid_lc, khid_r.n, khid_ls, 0, khid_r.first);
-                ctx->RSSetState(kh_rs_pick(g_res.rasterizer_cull));
+                ctx->RSSetState(g_res.rasterizer_cull);
                 khid_bound_rs = g_res.rasterizer_cull;
                 ctx->DrawIndexedInstanced(khid_lc, khid_r.n, khid_ls, 0, khid_r.first);
                 khid_draws += 2;
@@ -7755,11 +7349,9 @@ inline uint32_t kh_inst_draw(ID3D11DeviceContext* ctx, ID3D11Device* dev, const 
     return khid_draws;
 }
 
-inline void kh_inst_pre_none(int, uint32_t, uint32_t) {}
-
-// Nil (and the documented "" placeholders) skip a slot and keep its default
-// exactly where they always did - but a present value of the wrong type is a
-// hard error now, never a silent zero-cast. updateRender3D "material" parser.
+// updateRender3D "material" parser. Nil and "" skip a slot and keep its
+// default; a present value of the wrong type is a hard error, never a silent
+// zero-cast.
 
 inline bool kh_apply_material_update(RenderObject& obj, const game_value& val, std::string& err) {
     if (val.type_enum() != game_data_type::ARRAY) { err = "value must be an array of material entries"; return false; }
@@ -7957,10 +7549,9 @@ inline bool kh_apply_material_update(RenderObject& obj, const game_value& val, s
     return true;
 }
 
-// It is called only from the two deferral returns in ensure_resources, so a
-// warm-cache session that never defers never creates any of it. non-fatal like
-// PSInjDepthA: a failure leaves it null and the mirror prepass self-gates dark
-// for the session. KH_WHITE_PREVIEW.
+// KH_WHITE_PREVIEW: the placeholder pair, built only from the deferral returns
+// in ensure_resources (a warm-cache session never creates it). Non-fatal: a
+// failure leaves it null.
 
 inline void kh_white_ensure(ID3D11Device* dev) {
     if (!dev || g_res.white_tried) return;
@@ -7994,9 +7585,8 @@ inline void kh_white_ensure(ID3D11Device* dev) {
                                         nullptr, &g_res.ps_white);
     }
     if (SUCCEEDED(khw_hr)) {
-        // VSWhite takes VSIn, whose untextured form declares position and
-        // normal, and described position only on the reasoning that the body
-        // reads i.pos alone.
+        // VSWhite takes VSIn (position + normal); the layout describes position
+        // only since the body reads i.pos alone.
         const D3D11_INPUT_ELEMENT_DESC khw_il[] = {
             { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D11_INPUT_PER_VERTEX_DATA, 0 },
             { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
@@ -8058,8 +7648,7 @@ inline void kh_white_ensure(ID3D11Device* dev) {
 
 static ID3D11VertexShader* g_vmir_vs = nullptr;
 // Non-fatal shader creation: a failed compile is reported once and leaves the
-// slot null (every consumer gates on the pointer); the create's HRESULT is not
-// consulted, exactly as the seven inline ladders this replaces did not.
+// slot null; every consumer gates on the pointer.
 inline void kh_ps_optional(ID3D11Device* dev, const std::string& src, const char* entry,
                            const D3D_SHADER_MACRO* defs, ID3D11PixelShader** out, const char* label) {
     ID3DBlob* blob = nullptr;
@@ -8084,15 +7673,12 @@ inline void kh_vs_optional(ID3D11Device* dev, const std::string& src, const char
 }
 
 inline std::string ensure_resources(ID3D11Device* dev) {
-    // The mod "cache" scan is a magic static and the one call that walks mod
-    // folders on disk must not happen first on a shader worker, whose
-    // reentrancy into ModFolderSearcher we do not own. KH_MOD_CACHE priming.
-    // This site runs on the game or render thread, always before any pool arms,
-    // and costs one guard load per call after the first.
+    // The mod cache scan is a magic static that walks mod folders on disk; it
+    // must not first run on a shader worker (ModFolderSearcher reentrancy).
+    // This site runs on the game or render thread before any pool arms.
     kh_mod_cache_dirs();
-    // Initialized fast path still tops up mesh VBs: after kh_mesh_publish
-    // (park-scoped by contract) the very next ensure - which every draw path
-    // performs before indexing mesh_vb - creates the new buffers.
+    // The initialized fast path still tops up mesh VBs: after kh_mesh_publish
+    // the very next ensure creates the new buffers.
     if (g_res.initialized) return ensure_mesh_vbs(dev);
 
     // The deferral is asked before anything is built. A deferred frame arms the
@@ -8109,11 +7695,10 @@ inline std::string ensure_resources(ID3D11Device* dev) {
     ID3DBlob* vs_fs_blob = nullptr;
     ID3DBlob* ps_blob = nullptr;
 
-    // Shared cbuffer declaration is prepended to every compilation unit.
     const std::string static_src = kh_hlsl_src(KH_HLSL_CB) + kh_hlsl_src(KH_HLSL_STATIC).c_str();
-    // The shared receive block (band/atlas textures + samplers-free compare
-    // functions) arms for this unit: The effect unit compiles without it (its
-    // depthTex owns t1).
+    // The shared receive block (band/atlas textures + compare functions) arms
+    // for this unit; the effect unit compiles without it (its depthTex owns
+    // t1).
     static const D3D_SHADER_MACRO khcb_rx_defines[] = {
         { "KH_RECEIVE_TEX", "1" }, { nullptr, nullptr },
     };
@@ -8123,9 +7708,9 @@ inline std::string ensure_resources(ID3D11Device* dev) {
     };
     const std::string khsp_sc1 = "1";
     // Every define table in this speculation list must match its ensure_* twin
-    // byte for byte: the cache/memo key is an FNV over source, entry, target
-    // and the define names and values in order - one reordered or added entry
-    // makes the speculation miss silently.
+    // byte for byte: the memo key is an FNV over source, entry, target and the
+    // defines in order - one reordered or added entry makes the speculation
+    // miss silently.
     const std::string khsp_comp_src =
         kh_hlsl_src(KH_HLSL_CB) + kh_hlsl_src(KH_HLSL_COMPOSITE).c_str() + kh_hlsl_src(KH_HLSL_COMPOSITE2).c_str();
     const D3D_SHADER_MACRO khsp_d0[] = {
@@ -8141,25 +7726,18 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         { "MSAA_DEPTH", "0" }, { "SAMPLE_COUNT", khsp_sc1.c_str() },
         { "KH_ARB_DEPTH", "1" }, { "KH_RECEIVE_TEX", "1" },
         { "KH_TEXTURED", "1" }, { nullptr, nullptr } };
-    // The define table must match ensure_effect_shader's byte for byte, and
-    // note it is MSAA_DEPTH alone: no SAMPLE_COUNT, no KH_RECEIVE_TEX, because
-    // the effect unit's depthTex owns t1 and it never receives.
+    // Must match ensure_effect_shader byte for byte: MSAA_DEPTH alone (no
+    // SAMPLE_COUNT, no KH_RECEIVE_TEX - the effect unit never receives).
     const std::string khfx_src =
         kh_hlsl_src(KH_HLSL_CB) + kh_hlsl_src(KH_HLSL_EFFECT).c_str() + kh_hlsl_src(KH_HLSL_EFFECT2).c_str() + kh_hlsl_src(KH_HLSL_EFFECT3).c_str();
     const D3D_SHADER_MACRO khfx_d0[] = {
         { "MSAA_DEPTH", "0" }, { nullptr, nullptr } };
-    // KH_PREWARM_ALL: the rest of the core set rides this one batch, so the
-    // first post FX, the first depth snapshot, the first sun prefilter and the
-    // first mirror prepass are memo hits whichever of meshes / post FX the
-    // scene holds first. Each table is its ensure's twin byte for byte:
-    // ensure_effect_shader (MSAA_DEPTH alone - both values, the main depth's
-    // build whichever its count and the PIP's), ensure_depth_resolve_shader
-    // (the adopted count, WIT_NEAREST 1 - source nulled while the count is
-    // unknown, a UI flush ahead of the scene flush, and the prewarm skips a
-    // null source; that one then compiles inline), ensure_sun_pf (an empty
-    // table) and kh_vmir_ensure_gpu (null) - the cache hash reads those two
-    // alike. The composite unit needs nothing more: its snapshot is always
-    // single-sample, so the khsp_d0* entries above are its whole key set.
+    // The rest of the core set rides this batch so the first post FX, depth
+    // snapshot, sun prefilter and mirror prepass are memo hits. Twins:
+    // ensure_effect_shader (both MSAA_DEPTH values: the main depth's and the
+    // PIP's), ensure_depth_resolve_shader (the adopted count; source nulled
+    // while unknown, and the prewarm skips a null source), ensure_sun_pf (empty
+    // table), kh_vmir_ensure_gpu (null) - the hash reads those two alike.
     const D3D_SHADER_MACRO khfx_d1[] = {
         { "MSAA_DEPTH", "1" }, { nullptr, nullptr } };
     const std::string khpw_sc = std::to_string(g_res.depth_sample_count > 0 ? g_res.depth_sample_count : 1);
@@ -8170,15 +7748,13 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         { nullptr, nullptr } };
     static const D3D_SHADER_MACRO khpw_none[] = { { nullptr, nullptr } };
     const char* khpw_dr_src = g_res.depth_sample_count > 0 ? kh_hlsl_src(KH_HLSL_DEPTH_RESOLVE).c_str() : nullptr;
-    // VSWhite/PSWhite are deliberately absent from this list and must stay
-    // absent: kh_white_ensure compiles them on the render thread inside the
-    // graphics lock, and compile_shader blocks on its condition variable for
-    // any key present-but-not-done - queueing them here deadlocks that path.
+    // VSWhite/PSWhite must stay absent from this list: kh_white_ensure compiles
+    // them on the render thread inside the graphics lock, and compile_shader
+    // blocks on any key present-but-not-done - queueing them here deadlocks
+    // that path.
     const KhShaderJob khsp_jobs[] = {
-        // The ten this function actually consumes, heaviest first.
         { static_src.c_str(), "PSMain",      "ps_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "PSMain",      "ps_5_0", khtx_defines,    0 },
-        // The composite matrix, speculative, on the cores that would idle.
         { khsp_comp_src.c_str(), "PSComposite", "ps_5_0", khsp_d0,   0 },
         { khsp_comp_src.c_str(), "PSComposite", "ps_5_0", khsp_d0a,  0 },
         { khsp_comp_src.c_str(), "PSComposite", "ps_5_0", khsp_d0t,  0 },
@@ -8195,9 +7771,6 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         { static_src.c_str(), "VSMainInst",  "vs_5_0", khcb_rx_defines, 0 },   // KH_INSTANCING twins.
         { static_src.c_str(), "VSMainInst",  "vs_5_0", khtx_defines,    0 },
         { static_src.c_str(), "VSMirror",    "vs_5_0", khcb_rx_defines, 0 },
-        // KH_SEAM_INST: both tables must match the ensure_* twin byte for byte
-        // (the memo key is an FNV over source, entry, target and the defines in
-        // order), or the speculation misses silently and these compile serially.
         { static_src.c_str(), "VSSeamInst",   "vs_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "VSMirrorInst", "vs_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "VSFullscreen","vs_5_0", khcb_rx_defines, 0 },
@@ -8210,9 +7783,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         { khsp_comp_src.c_str(), "VSComposite", "vs_5_0", khsp_d0t, 0 },
         { khsp_comp_src.c_str(), "VSCompositeInst", "vs_5_0", khsp_d0,  0 },   // KH_INSTANCING twins.
         { khsp_comp_src.c_str(), "VSCompositeInst", "vs_5_0", khsp_d0t, 0 },
-        // The lightest of the assembled units (PSEffect has no shadow chain).
         { khfx_src.c_str(), "PSEffect", "ps_5_0", khfx_d0, 0 },
-        // KH_PREWARM_ALL (tables above).
         { khfx_src.c_str(), "PSEffect", "ps_5_0", khfx_d1, 0 },
         { khpw_dr_src, "PSDepthResolve", "ps_5_0", khpw_dr, 0 },
         { kh_hlsl_src(KH_HLSL_SUNPF).c_str(),   "VSPf",    "vs_5_0", khpw_none, 0 },
@@ -8220,8 +7791,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         { kh_hlsl_src(KH_HLSL_SUNPF).c_str(),   "PSPfMip", "ps_5_0", khpw_none, 0 },
         { kh_hlsl_src(KH_HLSL_VMIR_CS).c_str(), "CSMirB2", "cs_5_0", nullptr,   0 },
     };
-    const size_t khsp_n = _countof(khsp_jobs) -
-        (0u);
+    const size_t khsp_n = _countof(khsp_jobs);
     if (kh_shader_async_gate(khsp_jobs, khsp_n)) {
         kh_white_ensure(dev);   // The arming frame gets a placeholder too.
         return KH_SHADERS_COMPILING;
@@ -8249,9 +7819,9 @@ inline std::string ensure_resources(ID3D11Device* dev) {
     if (!err.empty()) { vs_blob->Release(); return err; }
     err = compile_shader(static_src.c_str(), "PSMain", "ps_5_0", khcb_rx_defines, &ps_blob);
     if (!err.empty()) { vs_blob->Release(); vs_fs_blob->Release(); return err; }
-    {   // KH_CB_MIRROR_GAUGE: reflect the blob just compiled or served from .khsc and compare the
-        // Declared cbuffer sizes to the C++ split. Non-fatal in every direction: a failed reflect
-        // publishes Refl 2.
+    // Reflect the blob just compiled or served from .khsc and compare the
+    // declared cbuffer sizes to the C++ split. Non-fatal.
+    {
         ID3D11ShaderReflection* khcm_r = nullptr;
         if (ps_blob && SUCCEEDED(D3DReflect(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(),
                                             __uuidof(ID3D11ShaderReflection),
@@ -8307,10 +7877,10 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         }
     }
 
-    {   // KH_SEAM_INST: the seam transport's instanced twins. Both consume the
-        // sun ladder's lane shape (VSInSeam mirrors VSInSun), so they bind
-        // g_res.layout_sundepth and create no layout of their own. Non-fatal:
-        // either one absent leaves that loop on its per-caster path.
+    // The seam transport's instanced twins. Both consume the sun ladder's lane
+    // shape (VSInSeam mirrors VSInSun), so they bind g_res.layout_sundepth.
+    // Non-fatal: either one absent leaves that loop on its per-caster path.
+    {
         ID3D11VertexShader** const khsi_out[2] = { &g_res.vs_seam_inst, &g_res.vs_mirror_inst };
         const char* const khsi_ent[2] = { "VSSeamInst", "VSMirrorInst" };
 
@@ -8334,9 +7904,10 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         }
     }
 
-    {   // KH_CAST_ALPHA twins: the alpha-aware sun-depth VS/PS + their layout (mesh slot 0 with the
-        // uv, the same per-instance slot 1). non-fatal: absent, every caster draws whole. Compiled
-        // KH_TEXTURED for KhMatRoute (the material alpha by its route).
+    // The alpha-aware sun-depth VS/PS + their layout (mesh slot 0 with the uv,
+    // the same per-instance slot 1). Non-fatal: absent, every caster draws
+    // whole. Compiled KH_TEXTURED for KhMatRoute.
+    {
         ID3DBlob* khsa_vb = nullptr;
         ID3DBlob* khsa_pb = nullptr;
         std::string khsa_err = compile_shader(static_src.c_str(), "VSSunDepthA", "vs_5_0", khtx_defines, &khsa_vb);
@@ -8417,10 +7988,9 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         if (!khmv_err.empty()) { g_res.release(); return khmv_err; }
     }
 
+    // KH_TEXTURED static twins (non-fatal): the same source with KH_TEXTURED=1.
     // The 4-element layout is validated against the textured VS blob and serves
-    // both textured VS's (identical input signatures). KH_TEXTURED static twins
-    // (non-fatal): the same static source with KH_TEXTURED=1 gives the
-    // VSMain/PSMain material variants.
+    // both textured VS's (identical input signatures).
     {
         // khtx_defines is hoisted to the top of this function (beside
         // khcb_rx_defines) so the KH_SHADER_MT batch can reference it.
@@ -8469,12 +8039,10 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         if (khtx_psb) khtx_psb->Release();
     }
 
-    // KH_INSTANCING twins (non-fatal, like the textured twins above): the same
-    // static source, VSMainInst plain and KH_TEXTURED, each with its input
-    // layout - the mesh slot's elements plus the 7 per-instance float4s of
-    // VSInst on slot 1 - validated against its own blob and serving the
-    // composite twins (identical input signatures, as layout_tex serves both
-    // textured VS's). Then the two stream rings.
+    // Instancing twins (non-fatal): VSMainInst plain and KH_TEXTURED, each with
+    // its layout (the mesh slot's elements plus VSInst on slot 1), also serving
+    // the composite twins (identical input signatures). Then the two stream
+    // rings.
     {
         auto khin_make = [&](const D3D_SHADER_MACRO* khin_defs, bool khin_tex,
                              ID3D11VertexShader** khin_vs, ID3D11InputLayout** khin_il) -> bool {
@@ -8552,8 +8120,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
 
     {
         D3D11_BUFFER_DESC bd = {};
-        bd.ByteWidth = static_cast<UINT>(KH_CBOBJ_BYTES);   // CB split: b0 carries the object block
-                                                            // Only.
+        bd.ByteWidth = static_cast<UINT>(KH_CBOBJ_BYTES);   // b0 carries the object block only.
         bd.Usage = D3D11_USAGE_DYNAMIC;
         bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -8675,9 +8242,10 @@ inline std::string ensure_resources(ID3D11Device* dev) {
             }
         }
 
-        {   // Builtin UI-phase state: blend off, RGB-only write - the shader composites and
-            // coverage-masks in-shader (with the gather family source-masked for spill) and returns
-            // the finished frame. The mask channel survives for chaining.
+        // Builtin UI-phase state: blend off, RGB-only write - the shader
+        // composites and coverage-masks in-shader and returns the finished
+        // frame. The mask channel survives for chaining.
+        {
             D3D11_BLEND_DESC brp = {};
             brp.RenderTarget[0].BlendEnable = FALSE;
             brp.RenderTarget[0].RenderTargetWriteMask =
@@ -8752,8 +8320,8 @@ inline std::string ensure_resources(ID3D11Device* dev) {
             const std::string khcf_err = compile_shader(
                 "Texture2D khCap : register(t0);"
                 "Texture2D khHist : register(t1);"
-                // Fractions are A contract: the effect shader's guard and the
-                // CPU forensic strips sample the same 8 anchors.
+                // The 8 anchor fractions are a contract: the effect shader's
+                // guard samples the same ones.
                 "float4 main(float4 pos : SV_Position) : SV_Target"
                 "{ uint khW, khH; khCap.GetDimensions(khW, khH);"
                 "  float khM = 1.0f;"
@@ -8796,45 +8364,40 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         rd.FillMode = D3D11_FILL_SOLID;
         rd.CullMode = D3D11_CULL_NONE;   // Visible from inside too.
         rd.MultisampleEnable = TRUE;   // Scene targets are MSAA per video settings.
-        // No scene bias: the engine-depth tie duty moved to the shaders' own
-        // near/far contracts (a -32 / -0.25 pair crawled at grazing angles).
+        // No scene bias: the engine-depth tie duty lives in the shaders' own
+        // near/far contracts (a bias pair crawls at grazing angles).
         rd.DepthBias = 0;
         rd.SlopeScaledDepthBias = 0.0f;
         rd.DepthBiasClamp = 0.0f;
-        // The far plane's contract moves to a per-fragment PS test (see the far
-        // contract block in PSMain/PSComposite/PSEffect) so farVis-off objects
-        // still pop at max view distance exactly as before.
+        // The far plane's contract is a per-fragment PS test (the far contract
+        // block in PSMain/PSComposite/PSEffect), so farVis-off objects still
+        // pop at max view distance.
         rd.DepthClipEnable = FALSE;
         hr = dev->CreateRasterizerState(&rd, &g_res.rasterizer);
         if (FAILED(hr)) { g_res.release(); return "Create rasterizer " + hr_str(hr); }
-        // Back-face-culling twin for twoSided = false objects: identical biases
-        // (same engine-depth tie duty), only the cull mode differs. Meshes bake
-        // outward-front winding, so CULL_BACK drops exactly the interior-facing
-        // triangles.
+        // Back-face-culling twin for twoSided = false: only the cull mode
+        // differs. Meshes bake outward-front winding, so CULL_BACK drops
+        // exactly the interior-facing triangles.
         rd.CullMode = D3D11_CULL_BACK;
         hr = dev->CreateRasterizerState(&rd, &g_res.rasterizer_cull);
         if (FAILED(hr)) { g_res.release(); return "Create cull rasterizer " + hr_str(hr); }
         rd.CullMode = D3D11_CULL_FRONT;
         hr = dev->CreateRasterizerState(&rd, &g_res.rasterizer_front);
         if (FAILED(hr)) { g_res.release(); return "Create front rasterizer " + hr_str(hr); }
-        // Sun-depth pass rasterizer: the scene bias above exists to win
-        // marginal ties against engine depth; in our own private map it would
-        // only carve the acne band deeper. Plain CullNone - and it stays
-        // cullNone regardless of twoSided: an open (culled) mesh must still
-        // cast the full closed-surface shadow.
+        // Sun-depth rasterizer: no scene bias (in our own map it would only
+        // carve the acne band deeper). Stays CullNone regardless of twoSided:
+        // an open mesh must still cast the full closed-surface shadow.
         rd.CullMode = D3D11_CULL_NONE;
         // The slope bias lives here and only here.
         rd.DepthBias = 16;
         rd.SlopeScaledDepthBias = 3.0f;
-        rd.DepthBiasClamp = 0.0f;   // That argument is the union's only, and they bind the clamp
-                                    // Twins minted below (KH_SUN_PANCAKE).
+        rd.DepthBiasClamp = 0.0f;   // The union's only; the tiers bind the clamp twins minted below.
         rd.DepthClipEnable = TRUE;
         hr = dev->CreateRasterizerState(&rd, &g_res.rast_sun);
         if (FAILED(hr)) { g_res.release(); return "Create sun rasterizer " + hr_str(hr); }
-        // KH_SUN_PANCAKE: each sun state's clamp twin is minted from the same
-        // desc with DepthClipEnable false, immediately after its clip form, so
-        // the pair cannot drift. Non-fatal, the 227 shape: a null twin falls
-        // through to clip at kh_sun_rs_pick.
+        // Each sun state's clamp twin is minted from the same desc with
+        // DepthClipEnable false, so the pair cannot drift. Non-fatal: a null
+        // twin falls through to clip at kh_sun_rs_pick.
         auto khpk_twin = [&](ID3D11RasterizerState** khpk_out, const char* khpk_what) {
             rd.DepthClipEnable = FALSE;
             if (FAILED(dev->CreateRasterizerState(&rd, khpk_out))) {
@@ -8868,10 +8431,8 @@ inline std::string ensure_resources(ID3D11Device* dev) {
     return "";
 }
 
-// Scene HDR color capture. The bound RTV cannot be sampled while bound, so the
-// scene is resolved (MSAA) or copied (non-MSAA) into an owned single-sample
-// texture + SRV. Called once per flush when any scene-read object exists; if
-// scene-reading common, hoist to one capture per frame.
+// Scene HDR colour capture: the bound RTV cannot be sampled while bound, so the
+// scene is resolved (MSAA) or copied into an owned single-sample texture + SRV.
 
 static float g_khsg_scale = 0.5f;
 static int   g_khsg_w = 0;   // Exact scaled dims (viewport + bounds truth).
@@ -8905,8 +8466,7 @@ inline std::string ensure_fx_chain(ID3D11Device* dev) {
         td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
         td.SampleDesc.Count = 1;
         td.SampleDesc.Quality = 0;
-        // ([3], the a-trous pre-smooth target, is [2]'s exact sibling - same
-        // half grid, same fp16 rationale.).
+        // [3] is [2]'s a-trous sibling: same half grid, same fp16.
         if (i >= 2) {
             td.Width  = khsg_sw;
             td.Height = khsg_sh;
@@ -8968,10 +8528,9 @@ inline std::string ensure_fx_chain(ID3D11Device* dev) {
 }
 
 // Capture core, parameterized on the source RTV: the flush/injection call it
-// through the wrapper below with the bound target; the tail composite calls it
-// directly with the latched scene RTV, because the bound target at the sweep is
-// the engine's shadow mask, not the scene. The caller keeps ownership of the
-// RTV reference.
+// with the bound target; the tail composite calls it with the latched scene RTV
+// (the bound target at the sweep is the engine's shadow mask). The caller keeps
+// ownership of the RTV reference.
 inline std::string ensure_scene_capture_from(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                                              ID3D11RenderTargetView* rtv) {
     if (!rtv) return "no RTV";
@@ -9032,15 +8591,13 @@ inline std::string ensure_scene_capture(ID3D11Device* dev, ID3D11DeviceContext* 
     return err;
 }
 
-// Game-thread flush_locked call sites only (the render-thread rehoist site
-// keeps the bare call - the ring is single-threaded by contract).
+// Game-thread flush_locked call sites only.
 inline std::string kh_scene_capture_timed(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     return ensure_scene_capture(dev, ctx);
 }
 
-// A begin that returns -1 makes the matching end do nothing, so a pass with
-// early exits needs no close bookkeeping. KH_MESH_TIMER the geometry passes get
-// A clock.
+// Geometry pass clock. A begin that returns -1 makes the matching end do
+// nothing, so a pass with early exits needs no close bookkeeping.
 
 inline std::string ensure_depth_srv(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                                     UINT* out_width, UINT* out_height) {
@@ -9116,9 +8673,9 @@ inline std::string ensure_depth_srv(ID3D11Device* dev, ID3D11DeviceContext* ctx,
         return "Create depth SRV " + hr_str(hr);
     }
 
-    // Read-only DSV over the same resource: D3D11 permits the depth SRV to be
-    // sampled in a pixel shader while a READ_ONLY DSV is bound, so depth
-    // testing keeps working during depth-sampling effects (writes disabled).
+    // Read-only DSV over the same resource: D3D11 permits sampling the depth
+    // SRV while a READ_ONLY DSV is bound, so depth testing keeps working during
+    // depth-sampling effects.
     {
         DXGI_FORMAT dsv_fmt = DXGI_FORMAT_UNKNOWN;
         UINT ro_flags = D3D11_DSV_READ_ONLY_DEPTH;
@@ -9151,8 +8708,8 @@ inline std::string ensure_depth_srv(ID3D11Device* dev, ID3D11DeviceContext* ctx,
     return "";
 }
 
-// The effect pixel shader samples the engine depth buffer, whose MSAA count
-// follows video settings - compiled (and recompiled on change) per count.
+// Samples the engine depth buffer, whose MSAA count follows video settings:
+// compiled per count.
 inline std::string ensure_effect_shader(ID3D11Device* dev) {
     if (g_res.ps_effect && g_res.ps_effect_samples == g_res.depth_sample_count) return "";
     if (g_res.ps_effect) { g_res.ps_effect->Release(); g_res.ps_effect = nullptr; }
@@ -9173,13 +8730,11 @@ inline std::string ensure_effect_shader(ID3D11Device* dev) {
     return "";
 }
 
-// Injected-path shaders, compiled for the current depth MSAA count (mirrors
-// ensure_effect_shader).
+// Injected-path shaders, compiled per depth MSAA count.
 static uint64_t g_comp_fail_streak = 0;
-static float    g_comp_next_retry = 0.0f;   // Backoff: a failed compile must not retry per
-                                            // Injection - a ~170 ms D3DCompile every frame is a
-                                            // framerate collapse, and the silent guard=false
-                                            // fallback removes shadow shading too.
+// Backoff: a failed compile must not retry per injection (a D3DCompile every
+// frame is a framerate collapse).
+static float    g_comp_next_retry = 0.0f;
 static std::string g_comp_last_err;
 
 inline std::string ensure_composite_shader(ID3D11Device* dev) {
@@ -9188,7 +8743,6 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
         return "";
     }
 
-    // self-contained clock: effect_time_seconds is defined later in the file.
     LARGE_INTEGER _bo_q, _bo_f;
     QueryPerformanceCounter(&_bo_q);
     QueryPerformanceFrequency(&_bo_f);
@@ -9198,10 +8752,8 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
     if (g_res.vs_composite) { g_res.vs_composite->Release(); g_res.vs_composite = nullptr; }
     if (g_res.ps_composite) { g_res.ps_composite->Release(); g_res.ps_composite = nullptr; }
     if (g_res.ps_composite_arb) { g_res.ps_composite_arb->Release(); g_res.ps_composite_arb = nullptr; }
-    // KH_COMP_TWIN_RELEASE: the textured and instanced twins go with the base
-    // three, here, not after the base compiles succeed. No consumer could reach
-    // them - every twin read is gated on guard or ps_composite_arb, both down
-    // for the streak, the unit is whole or absent.
+    // The textured and instanced twins go with the base three: every twin read
+    // is gated on guard or ps_composite_arb, so the unit is whole or absent.
     KH_SAFE_RELEASE(g_res.vs_comp_tex);
     KH_SAFE_RELEASE(g_res.ps_comp_tex);
     KH_SAFE_RELEASE(g_res.ps_comp_arb_tex);
@@ -9245,10 +8797,9 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
     };
 
     const std::string comp_src = kh_hlsl_src(KH_HLSL_CB) + kh_hlsl_src(KH_HLSL_COMPOSITE).c_str() + kh_hlsl_src(KH_HLSL_COMPOSITE2).c_str();
-    // KH_SHADER_MT: the composite unit's six heavy compiles as one batch.
-    // Declared after comp_src and every table it names, so the scope joins and
-    // frees before any of them go out of scope - and it covers the comp_fail
-    // early returns, which is the reason it is raii.
+    // The composite unit's six heavy compiles as one batch. Declared after
+    // comp_src and every table it names so the scope joins and frees before
+    // they go out of scope; covers the comp_fail early returns.
     const KhShaderJob khsm_jobs[] = {
         { comp_src.c_str(), "PSComposite", "ps_5_0", defines,          0 },
         { comp_src.c_str(), "PSComposite", "ps_5_0", defines_arb,      0 },
@@ -9319,11 +8870,10 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
         if (khtx_psb) khtx_psb->Release();
         if (khtx_pab) khtx_pab->Release();
     }
-    // KH_BUCKETS: the injection's instanced VS pair (non-fatal). The layouts
-    // are the static unit's (identical input signatures). A missing twin stands
-    // the injection's bucketing down whole (khr_inst_on gates on both), so every
-    // object draws per object - never a bucket whose members were marked done
-    // with no twin to draw them (1.91).
+    // The injection's instanced VS pair (non-fatal); layouts are the static
+    // unit's (identical input signatures). A missing twin stands the
+    // injection's bucketing down whole (khr_inst_on gates on both) - never a
+    // bucket whose members were marked done with no twin to draw them.
     {
         ID3DBlob* khin_b = nullptr;
         std::string khin_err = compile_shader(comp_src.c_str(), "VSCompositeInst", "vs_5_0", defines, &khin_b);
@@ -9350,9 +8900,8 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
     return "";
 }
 
-// Resolve PS: compiled per source MSAA count, like PSEffect. Standalone source
-// (no cbuffer use); the fullscreen VS is the shared vs_fullscreen, whose extra
-// texcoord outputs a subset-reading PS legally ignores.
+// Resolve PS, compiled per source MSAA count. Standalone source; the shared
+// vs_fullscreen's extra texcoord outputs a subset-reading PS legally ignores.
 inline std::string ensure_depth_resolve_shader(ID3D11Device* dev) {
     const int khdr_wit = 1;
     if (g_res.ps_depth_resolve && g_res.ps_resolve_samples == g_res.depth_sample_count
@@ -9380,13 +8929,11 @@ inline std::string ensure_depth_resolve_shader(ID3D11Device* dev) {
 }
 
 static constexpr UINT KH_SUN_DEPTH_BASE = 4096;   // The union map (KH_SUN_LADDER).
-// Bounding the fit is what bounds the texel size, the locality reach and the
-// normal-offset all at once. Casters beyond this camera radius stay out of the
-// sun-depth fit (no self-shadow, no cast) - the same distance behavior the
-// engine's own object shadows have.
-// The depth window extends 12 m sun-ward so out-of-window occluders still cast
-// in. Do not lower the ladder without re-pricing the offset floor in
-// millimetres.
+// Bounding the fit bounds the texel size, the locality reach and the
+// normal-offset at once. Casters beyond this camera radius stay out of the
+// sun-depth fit (no self-shadow, no cast), like the engine's own object
+// shadows. The depth window extends 12 m sun-ward so out-of-window occluders
+// still cast in. Do not lower the ladder without re-pricing the offset floor.
 static constexpr UINT  KH_SUN_HERO_BASE = 4096;
 static constexpr float KH_SUN_HERO_HALF = 2.0f;
 static constexpr float KH_SUN_HERO_DEPTH = 12.0f;
@@ -9398,11 +8945,8 @@ static constexpr float KH_SUN_OUT_HALF  = 32.0f;
 static constexpr float KH_SUN_OUT_DEPTH = 192.0f;
 // The union remains behind it for the beyond-far presence test and anything
 // outside the range window.
-static constexpr UINT KH_SUN_FAR_BASE = 4096;   // 12 cm texels over the 500 m fit already; not on
-                                                // The ladder.
-// KH_SUN_LADDER: sizes are runtime. The default is the 4096 ladder the offset
-// leaks on thin geometry there see KH_SUN_HERO_BASE. The far band is not on the
-// ladder.
+static constexpr UINT KH_SUN_FAR_BASE = 4096;   // 12 cm texels over the 500 m fit; not on the ladder.
+// Sizes are runtime; the far band is not on the ladder.
 static std::atomic<uint32_t> g_sun_size_div{1};
 inline UINT kh_sun_depth_size() { return KH_SUN_DEPTH_BASE / g_sun_size_div.load(std::memory_order_relaxed); }
 inline UINT kh_sun_hero_size()  { return KH_SUN_HERO_BASE  / g_sun_size_div.load(std::memory_order_relaxed); }
@@ -9419,10 +8963,9 @@ static UINT g_sun2_map_size = KH_SUN_HERO_BASE;
 static UINT g_sun3_map_size = KH_SUN_MID_BASE;
 static UINT g_sun4_map_size = KH_SUN_OUT_BASE;
 static UINT g_sun5_map_size = KH_SUN_FAR_BASE;
-// The tiers bind the clamp twins (rast_sun*_pk); the union keeps the clip forms.
-// One pick for the union site and the tier site. khrs_clamp selects the clamp
-// twin of whatever the mode picked, falling through to that clip form when the
-// twin is null.
+// The tiers bind the clamp twins (rast_sun*_pk); the union keeps the clip
+// forms. khrs_clamp selects the clamp twin, falling through to the clip form
+// when the twin is null.
 inline ID3D11RasterizerState* kh_sun_rs_pick(bool khrs_clamp) {
     ID3D11RasterizerState* khrs_clip;
     ID3D11RasterizerState* khrs_pk;
@@ -9440,17 +8983,15 @@ inline bool kh_sun_map_ensure(ID3D11Device* dev, UINT khsm_size,
                               ID3D11DepthStencilView*& khsm_dsv,
                               ID3D11ShaderResourceView*& khsm_srv);   // Defined with the bands.
 
-// KH_SUN_LADDER: the union takes the same width check as the four tiers, so a size
-// flip recreates it too (an unrecreated map under a larger viewport reads out of
-// bounds = occluded). One GetDesc at the default, the tiers' cost.
+// The union takes the same width check as the tiers, so a size flip recreates
+// it too (an unrecreated map under a larger viewport reads out of bounds =
+// occluded).
 inline bool ensure_sun_depth(ID3D11Device* dev) {
     return kh_sun_map_ensure(dev, kh_sun_depth_size(), g_res.sun_tex, g_res.sun_dsv, g_res.sun_srv);
 }
 
-// The hero map's resource trio - same construction as ensure_sun_depth, at the
-// hero ladder size (KH_SUN_LADDER). Non-fatal: every consumer stands down when
-// absent (sunMeta2.x stays 0). Non-fatal like every band ensure: any failure
-// returns false and the self kernel stays classic (sun_pf flags never arm).
+// Non-fatal like every band ensure: any failure returns false and the self
+// kernel stays classic (sun_pf flags never arm).
 inline bool ensure_sun_pf(ID3D11Device* dev) {
     if (!g_res.samp_pf) {
         D3D11_SAMPLER_DESC sp = {};
@@ -9587,10 +9128,9 @@ inline bool ensure_sun_pf(ID3D11Device* dev) {
     return true;
 }
 
-// One map ensure for every private sun map (union + the four camera-anchored
-// bands): R32_TYPELESS texture, D32 DSV, R32 SRV, square, single-sample. The
-// per-band twins differed only in size and resource triple. Non-fatal: a failed
-// band stands itself down (its meta stays 0) and the chain falls through.
+// One map ensure for every private sun map: R32_TYPELESS texture, D32 DSV, R32
+// SRV, square, single-sample. Non-fatal: a failed band stands itself down (meta
+// stays 0).
 inline bool kh_sun_map_ensure(ID3D11Device* dev, UINT khsm_size,
                               ID3D11Texture2D*& khsm_tex,
                               ID3D11DepthStencilView*& khsm_dsv,
@@ -9650,18 +9190,13 @@ inline bool ensure_sun_depth4(ID3D11Device* dev) {
 }
 
 // Pipeline state snapshot / restore (only what we touch). Constant buffers are
-// per-stage: b0 of both VS and PS is set and restored.
-
-// The engine's b0 pool windows are offset binds by the ring's own premise and a
-// plain restore hands the pool back at offset zero.
+// per-stage: b0/b1 of both VS and PS.
 
 struct StateBackup {
     ID3D11InputLayout*       input_layout = nullptr;
     D3D11_PRIMITIVE_TOPOLOGY topology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
-    // KH_INSTANCING: two IA vertex slots. The instance stream binds slot 1, and
-    // the sun-depth pass has bound its own slot-1 stream under this backup
-    // since it went instanced - a slot we touch is a slot we save. Widen in the
-    // same edit that binds a third.
+    // Two IA vertex slots: the instance stream binds slot 1. A slot we touch is
+    // a slot we save; widen in the same edit that binds a third.
     ID3D11Buffer*            vb[2] = { nullptr, nullptr };
     UINT                     vb_stride[2] = { 0, 0 }, vb_offset[2] = { 0, 0 };
     ID3D11Buffer*            ib = nullptr;   // KH_MESH_INDEXED: every mesh pass binds an IB.
@@ -9676,24 +9211,21 @@ struct StateBackup {
     ID3D11GeometryShader*    gs = nullptr;
     ID3D11HullShader*        hs = nullptr;
     ID3D11DomainShader*      ds = nullptr;
-    // CB split: our passes bind b0 and b1, so both slots save/restore. The
-    // capture is offset-aware through the cached context1 (kh_ctx1): the engine
-    // binds its b0 pool as windows, and a plain restore would hand each window
-    // back at offset zero over its full range. Widen these arrays and the
-    // offset pairs in the same edit that re-arms a bind.
+    // Our passes bind b0 and b1. The capture is offset-aware through context1:
+    // the engine binds its b0 pool as windows, and a plain restore would hand
+    // each window back at offset zero. Widen these arrays and the offset pairs
+    // in the same edit that re-arms a bind.
     ID3D11Buffer*            vs_cbs[2] = { nullptr, nullptr };
     ID3D11Buffer*            ps_cbs[2] = { nullptr, nullptr };
     UINT                     vs_cb_first[2] = { 0, 0 }, vs_cb_num[2] = { 0, 0 };
     UINT                     ps_cb_first[2] = { 0, 0 }, ps_cb_num[2] = { 0, 0 };
     bool                     cb_offsets = false;
-    // t19 is inside the saved range on purpose: the effect unit binds a Texture3D LUT
-    // there and never nulls it, so a Texture2D declared at t19 would read a
-    // type-mismatched (zero) SRV on exactly the frames a .cube effect ran.
-    ID3D11ShaderResourceView* ps_srvs[39] = {};   // t0-t38: +t37 (dlsw mask), +t38 (KH_MAT_TABLE).
+    // t19 is inside the saved range on purpose: the effect unit binds a
+    // Texture3D LUT there and never nulls it.
+    // t0-t38. Beyond the mesh set: t25-t28 sun maps, t29-t31 pyramids, t32 far
+    // band, t35 cast occupancy, t36 DLS array, t37 dlsw mask, t38 material table.
+    ID3D11ShaderResourceView* ps_srvs[39] = {};
     ID3D11ShaderResourceView* vs_srv39 = nullptr;   // KH_OBJBUF: the object record buffer's VS slot.
-                                                  // t28; t29-31; +t32 (far band); t33/t34 free
-                                                  // (owner map gone); +t35 (cast occ) / t36
-                                                  // (dynamic-light depth array).
     ID3D11SamplerState*      ps_samps[2] = {};   // s0 material, s1 pyramid sampler.
     ID3D11DepthStencilState* dss = nullptr;
     UINT                     stencil_ref = 0;
@@ -9714,12 +9246,10 @@ struct StateBackup {
         ctx->GSGetShader(&gs, nullptr, nullptr);
         ctx->HSGetShader(&hs, nullptr, nullptr);
         ctx->DSGetShader(&ds, nullptr, nullptr);
-        // Offset-aware when the driver offsets and the context is 1.1 (both
-        // true on the engine's immediate context with a wddm 1.2+ driver); the
-        // plain pair otherwise - never both. The feature gate is the
-        // load-bearing half: a driver without offsetting drops Set1, so a
-        // restore through it would leave our buffer bound (see
-        // g_cb_offsetting).
+        // Offset-aware when the driver offsets and the context is 1.1; the
+        // plain pair otherwise, never both. A driver without offsetting drops
+        // Set1, so a restore through it would leave our buffer bound
+        // (g_cb_offsetting).
         ID3D11DeviceContext1* khsb_c1 = g_cb_offsetting ? kh_ctx1(ctx) : nullptr;
 
         if (khsb_c1) {
@@ -9753,13 +9283,9 @@ struct StateBackup {
         ctx->GSSetShader(gs, nullptr, 0);
         ctx->HSSetShader(hs, nullptr, 0);
         ctx->DSSetShader(ds, nullptr, 0);
-        // Offset-aware restore, one slot at a time (the mask cast's discipline,
-        // verbatim): a slot captured with a window goes back through Set1; an
-        // empty slot, or a capture without context1, takes the plain setter. A
-        // pass that bound its {obj, frame} pair leaves our buffer in the slot,
-        // so the buffer changes at this call; a site that never touched the
-        // slot (the depth snapshot, the UI alpha clear) restores the window it
-        // read, which is no offset change at all.
+        // Offset-aware restore, one slot at a time: a slot captured with a
+        // window goes back through Set1; an empty slot, or a capture without
+        // context1, takes the plain setter.
         {
             ID3D11DeviceContext1* khsb_c1 = cb_offsets ? kh_ctx1(ctx) : nullptr;
 
@@ -9808,10 +9334,10 @@ struct StateBackup {
     }
 };
 
-// OMSetRenderTargets(N,..) nulls every slot it does not name, so a get/set pair
-// that carries only slot 0 silently drops any engine multi-target bind behind
-// our draw. Every flush-side target swap goes through this: full slot set in,
-// full slot set out.
+// OMSetRenderTargets(N, ..) nulls every slot it does not name, so a get/set
+// pair carrying only slot 0 would drop an engine multi-target bind. Every
+// flush-side target swap goes through this: full slot set in, full slot set
+// out.
 
 struct KhOmSave {
     ID3D11RenderTargetView* rtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
@@ -9819,8 +9345,8 @@ struct KhOmSave {
     void capture(ID3D11DeviceContext* ctx) {
         ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, &dsv);
     }
-    // Rebind the saved targets under a different depth view (the read-only DSV
-    // swap): the colour set is untouched, only the DSV moves.
+    // Rebind the saved targets under a different depth view: only the DSV
+    // moves.
     void set_with_dsv(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* khom_dsv) {
         ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, khom_dsv);
     }
@@ -9834,13 +9360,11 @@ struct KhOmSave {
     }
 };
 
-inline float effect_time_seconds();   // Defined below; the snapshot timestamp at the depth copy
-                                      // Needs it.
+inline float effect_time_seconds();   // Defined below; the snapshot timestamp needs it.
 
-// Runs on the game thread at flush time, render thread parked - the same
-// context-use invariant as the flush draws. The caller has already verified the
-// bound DSV is the main scene depth. Returns "" on success (comp_depth_srv then
-// holds this frame's completed scene depth).
+// Game thread at flush time, render thread parked. The caller has verified the
+// bound DSV is the main scene depth. "" on success (comp_depth_srv then holds
+// this frame's completed scene depth).
 inline std::string snapshot_composite_depth(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // Live depth as SRV (identity-cached; also feeds the compute queries).
     UINT dw = 0, dh = 0;
@@ -9863,9 +9387,7 @@ inline std::string snapshot_composite_depth(ID3D11Device* dev, ID3D11DeviceConte
         cd.Height = dh;
         cd.MipLevels = 1;
         cd.ArraySize = 1;
-        // Every existing reader takes.x and is unaffected; the one site that
-        // already read.y takes max(x,.y), and nearest <= farthest always, so it
-        // still yields.x.
+        // Two-plane: readers take .x; the one .y reader takes max(.x, .y).
         cd.Format = DXGI_FORMAT_R32G32_FLOAT;
         cd.SampleDesc.Count = 1;
         cd.Usage = D3D11_USAGE_DEFAULT;
@@ -9892,9 +9414,8 @@ inline std::string snapshot_composite_depth(ID3D11Device* dev, ID3D11DeviceConte
         g_res.comp_depth_samples = 1;   // Guard shader compiles single-sample from here on.
     }
 
-    // Replacing the OM targets first also unbinds the live depth DSV, which
-    // makes its SRV legally bindable at t0 with no hazard null-out; everything
-    // touched is restored below.
+    // Replacing the OM targets first unbinds the live depth DSV, which makes
+    // its SRV legally bindable at t0.
     StateBackup backup;
     backup.capture(ctx);
     KhOmSave khs_om;
@@ -9923,9 +9444,8 @@ inline std::string snapshot_composite_depth(ID3D11Device* dev, ID3D11DeviceConte
     ctx->RSSetState(g_res.rasterizer);
     ctx->Draw(3, 0);
 
-    // Unbind t0 before the engine rebinds the live depth as a DSV - a lingering
-    // SRV over the depth resource would be force-nulled with a debug-layer
-    // warning storm.
+    // Unbind t0 before the engine rebinds the live depth as a DSV (a lingering
+    // SRV would be force-nulled with a debug-layer warning storm).
     ID3D11ShaderResourceView* khs_null_srv = nullptr;
     ctx->PSSetShaderResources(0, 1, &khs_null_srv);
 
@@ -10071,9 +9591,9 @@ inline bool read_vec3_or_uniform(const game_value& gv, float out[3]) {
 inline int effect_id_from_gv(const game_value& gv) {
     if (gv.type_enum() == game_data_type::SCALAR) {
         int id = static_cast<int>(static_cast<float>(gv));
-        return (id >= 0 && id <= KH_MAX_EFFECT) ? id : -1;   // 18.20 = clarity/deband/rainlens
-                                                             // (compacted); 21 = crt; 22 = ssgi; 23
-                                                             // = fogscatter.
+        // 18..20 = clarity/deband/rainlens; 21 = crt; 22 = ssgi; 23 =
+        // fogscatter.
+        return (id >= 0 && id <= KH_MAX_EFFECT) ? id : -1;
     }
 
     if (gv.type_enum() != game_data_type::STRING) return -1;
@@ -10132,9 +9652,9 @@ inline int kh_effect_from_gv(const game_value& gv, std::string& out_hlsl, std::s
 }
 
 // Writes effect parameters into obj.fx with per-effect defaults for omitted
-// values. Pulse positions arrive as SQF [x, y, zASL] and are converted to
-// engine space here. Returns false if a provided entry is a non-number (nil
-// entries keep the default, the params-convention skip).
+// values; Pulse positions arrive as SQF [x, y, zASL] and convert to engine
+// space here. False if a provided entry is a non-number (nil keeps the
+// default).
 inline bool set_effect_params(RenderObject& obj, const auto_array<game_value>* params) {
     static const float defaults[KH_MAX_EFFECT + 1][12] = {
         {},
@@ -10171,9 +9691,8 @@ inline bool set_effect_params(RenderObject& obj, const auto_array<game_value>* p
         { 1.0f, 0.0f, 12.0f },
     };
 
-    // LUT default row (the sentinel sits outside the table): strength = 1 - the
-    // zero-default the custom sentinel takes would be a silent no-op here (the
-    // shader lerps by fx[0]).
+    // LUT default row: strength = 1 (a zero default would be a silent no-op;
+    // the shader lerps by fx[0]).
     static const float khlut_defaults[12] = { 1.0f };
     const int e = (obj.effect >= 0 && obj.effect <= KH_MAX_EFFECT) ? obj.effect : 0;
     memcpy(obj.fx, obj.effect == KH_EFFECT_LUT ? khlut_defaults : defaults[e], sizeof(obj.fx));
@@ -10242,14 +9761,13 @@ inline float lifetime_envelope(const RenderObject& o, float now, bool& expired) 
     return 0.0f;
 }
 
-// Camera position in engine space, extracted from the view matrix (row-vector
-// convention: eye_i = -sum_j T_j * R[i][j]).
+// Camera position in engine space from the view matrix (row-vector convention:
+// eye_i = -sum_j T_j * R[i][j]).
 
 inline void kh_white_draw(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     if (!dev || !ctx || !g_res.white_ready) return;
-    // Runs inside the flush's serialized window like every ensure_mesh_vbs caller; a
-    // failure costs the objects whose buffers are missing, not the pass (the per-object
-    // bounds test below).
+    // Runs inside the flush's serialized window; a failure costs the objects
+    // whose buffers are missing, not the pass.
     ensure_mesh_vbs(dev);
     if (g_res.mesh_vb.empty()) return;
 
@@ -10280,7 +9798,7 @@ inline void kh_white_draw(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     ID3D11Buffer* khw_cbs[2] = { g_res.white_obj_cb, g_res.white_frame_cb };
     ctx->VSSetConstantBuffers(0, 2, khw_cbs);
     ctx->PSSetConstantBuffers(0, 2, khw_cbs);
-    ctx->RSSetState(kh_rs_pick(g_res.rast_white));
+    ctx->RSSetState(g_res.rast_white);
     ctx->OMSetDepthStencilState(g_res.dss_white, 0);
     ctx->OMSetBlendState(nullptr, khw_bf, 0xFFFFFFFF);
 
@@ -10303,7 +9821,7 @@ inline void kh_white_draw(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         khw_cbd.size_axes[2] = khw_o.size[1];
         kh_fill_obj_rot(khw_cbd, khw_o.rot_m);
         // VSWhite takes the absolute branch, matching the unrebased viewProj
-        // built above. Stated because the pair must agree.
+        // built above; the pair must agree.
         if (!kh_upload_obj_cb(ctx, g_res.white_obj_cb, khw_cbd)) break;
 
         if (khw_mid != khw_bound_mesh) {
@@ -10324,10 +9842,6 @@ inline void extract_camera_pos(const float view[4][4], float out[3]) {
     }
 }
 
-// But two consumers do not read it, they rebuild a translation row with it: c:=
-// -t. It never accumulated; it re-rolls on every new orientation and then holds
-// the last roll. The transpose is not the inverse, and at map coordinates that
-// is half A metre.
 inline bool kh_view_camera_exact(const float khcx_view[4][4], float khcx_out[3],
                                  float* khcx_out_err = nullptr) {
     const double a = khcx_view[0][0], b = khcx_view[0][1], c = khcx_view[0][2];
@@ -10387,8 +9901,6 @@ inline void kh_cam_of(const float khco_v[4][4], float khco_out[3]) {
     }
 }
 
-// Field on in third person only, a fast camera move makes the box track the
-// camera for a frame or two before snapping back.
 inline void kh_cam_of_site(const float khco_v[4][4], float khco_out[3],
                            int khco_site) {
     kh_cam_of(khco_v, khco_out);
@@ -10398,9 +9910,7 @@ inline bool kh_view_camera_exact_d(const float khcd_view[4][4], double khcd_out[
                                    float* khcd_out_err = nullptr) {
     float khcd_f[3];
     if (!kh_view_camera_exact(khcd_view, khcd_f, khcd_out_err)) return false;
-    // Recompute in double from the float answer's own inputs would lose the
-    // point; kh_view_camera_exact already worked in double and only the store
-    // narrowed.
+    // kh_view_camera_exact already worked in double; only the store narrowed.
     khcd_out[0] = khcd_f[0];
     khcd_out[1] = khcd_f[1];
     khcd_out[2] = khcd_f[2];
@@ -10409,15 +9919,15 @@ inline bool kh_view_camera_exact_d(const float khcd_view[4][4], double khcd_out[
 
 // State hooks (OMSetBlendState / OMSetDepthStencilState / OMSetRenderTargets)
 // maintain three booleans; state objects are classified live via GetDesc on
-// every set - deliberately never memoized by pointer (see the no-memoization
-// note below: reused addresses would inherit stale classifications).
+// every set, never memoized by pointer (reused addresses would inherit stale
+// classifications).
 
 static std::atomic<bool>     g_reorder_hook_active{false};
 static bool                  g_reorder_hook_failed = false;
 static std::atomic<void*>    g_reorder_target_ctx{nullptr};   // Immediate context to act on.
-static int32_t  g_reorder_hook_mh_status = 0;   // MH_STATUS of the failing call 0 = MH_OK / none 1
-                                                // = init phase, status unavailable through the
-                                                // framework's bool-only ensure_minhook.
+// MH_STATUS of the failing call (0 = MH_OK / none; 1 = init phase, status
+// unavailable).
+static int32_t  g_reorder_hook_mh_status = 0;
 static int32_t  g_reorder_hook_fail_phase = 0;   // 0 none, 1 MinHook init, 2 CreateHook, 3
                                                  // enableHook.
 static int32_t  g_reorder_hook_fail_slot = -1;   // Spec index of the failing hook (-1 = none / init
@@ -10434,9 +9944,8 @@ static std::atomic<uint64_t> g_composite_inject_serial{0};
 static RVExtBridge::ProjectionViewTransform g_last_pv = {};
 static uint64_t g_last_pv_ms = 0;
 
-// The locator's validity blinks on exactly the foreign-pass frames, so the
-// anomaly gate keys on ever-proven-this-session instead. Cleared only with the
-// session.
+// The locator's validity blinks on foreign-pass frames, so the anomaly gate
+// keys on ever-proven-this-session. Cleared only with the session.
 static bool g_proj_locator_ever = false;
 
 inline uint64_t steady_now_ms() {
@@ -10517,11 +10026,9 @@ inline void kh_fx_depth_pair_guard(ConstantData& cbd, uint64_t khfx_serial) {
                             ? khfx_n / g_khfx_cand_near
                             : g_khfx_cand_near / khfx_n;
         if (khfx_cr <= 1.25f) {
-            // Reaching here with a valid bridge read means the bridge fell
-            // through the band above = it contradicts the candidate -
-            // persistence proves foreignness can repeat, not genuineness. Veto:
-            // Keep holding (the hold path below runs; cand refreshes; holds
-            // tick).
+            // A valid bridge read that fell through the band above contradicts
+            // the candidate; persistence proves foreignness can repeat, not
+            // genuineness. Keep holding.
             if (khfx_bok) {
             } else {
                 memcpy(g_khfx_pair, cbd.depth_params, sizeof(g_khfx_pair));
@@ -10540,8 +10047,8 @@ inline void kh_fx_depth_pair_guard(ConstantData& cbd, uint64_t khfx_serial) {
 }
 
 // The composited path counts as healthy while injections are actually
-// happening; outside that window (menus, install failure, pipeline change)
-// eligible meshes revert to the post-scene flush path.
+// happening; outside that window eligible meshes revert to the post-scene flush
+// path.
 inline bool composite_path_healthy() {
     const uint64_t last = g_composite_last_inject_ms.load(std::memory_order_relaxed);
     return last != 0 && (steady_now_ms() - last) < 500;
@@ -10552,40 +10059,33 @@ inline bool is_composite_eligible(const RenderObject& o) {
            o.blend_mode == 0 && o.color[3] >= 0.999f;
 }
 
-// KH_SHADOW_ACTIVE: the one rule for whether an object takes part in shadowing
-// at all - casting into the sun / dynamic-light maps and the world cast, and
-// counting as shadow demand. An unlit mesh is shaded without lighting, so it
-// neither receives nor casts (effect meshes are unlit by construction: PSEffect
-// applies no lighting). casterOnly admits an invisible object as a caster; an
-// invisible object without it is out of the scene entirely. Every caster
-// gather and every demand census reads this, never the fields directly.
+// The one rule for whether an object takes part in shadowing (casting into the
+// sun / DLS maps and the world cast, counting as demand). An unlit mesh neither
+// receives nor casts (effect meshes are unlit by construction). casterOnly
+// admits an invisible object as a caster. Every caster gather and demand census
+// reads this, never the fields directly.
 inline bool kh_shadow_active(const RenderObject& o) {
     return !o.fullscreen && o.effect == 0 && o.lit && o.mode != DepthMode::Off &&
            (o.visible || o.caster_only);
 }
 
-// A genuine scene issues a large number of opaque draws between its depth clear
-// and its first translucent; anomaly passes (late re-clears, preview renders,
-// UI-phase blending) issue almost none. Requiring this many opaque main-scene
-// draws before an injection can fire rejects those single-frame mistimings
-// outright.
+// A genuine scene issues many opaque draws between its depth clear and its
+// first translucent; anomaly passes (late re-clears, previews, UI blending)
+// issue almost none. Requiring this many rejects those mistimings.
 static constexpr uint32_t KH_REORDER_MIN_OPAQUE_DRAWS = 128;
 // The relative term must exceed the worst-case reconstruction error from
-// near-plane coefficient uncertainty (d_est = d_true * n_used / n_true -
-// relative, not absolute), so the guard can never falsely clip a mesh that is
-// genuinely in front.
+// near-plane uncertainty (d_est = d_true * n_used / n_true - relative, not
+// absolute), so the guard never falsely clips a mesh genuinely in front.
 static constexpr float KH_COMPOSITE_GUARD_BASE = 0.5f;
 static constexpr float KH_COMPOSITE_GUARD_REL = 0.25f;
 static constexpr float KH_COMPOSITE_GUARD_BASE_MEASURED = 0.25f;
 static constexpr float KH_COMPOSITE_GUARD_REL_MEASURED = 0.02f;
 static constexpr float KH_FAR_ARB_GUARD_BASE = 15.0f;
 // The hardware LESS_EQUAL test is the object authority; terrain is beaten
-// analytically: the arb pixel shader writes SV_Depth, pulling the fragment in
-// front of the terrain-LOD band only where the analytic terrain says it is visible
-// and only within the contact band below (clearance-ramped: zero offset above the
-// band, so object comparisons stay raw-exact everywhere it matters).
-static constexpr float KH_FAR_ARB_CONTACT_H = 6.0f;   // Clearance (m) below which the LOD fight
-                                                      // Exists.
+// analytically: the arb PS writes SV_Depth, pulling the fragment in front of
+// the terrain-LOD band only where the analytic terrain says it is visible and
+// only within the contact band below (clearance-ramped: zero offset above it).
+static constexpr float KH_FAR_ARB_CONTACT_H = 6.0f;   // Clearance (m) below which the LOD fight exists.
 // The sign of this lane carries the occluder-identity gate to the composite
 // pull. The shader reads abs for the ramp and tests the sign for the gate.
 inline float kh_far_arb_contact() {
@@ -10597,7 +10097,7 @@ static constexpr float KH_FAR_ARB_GUARD_REL  = 0.02f;
 static constexpr float KH_FAR_ARB_NEAR_MIN = 5.0f;
 static constexpr float KH_FAR_ARB_NEAR_HOLD = 2.0f;
 
-// occlusion-guard snapshot state + runtime config (the overhaul; see
+// Occlusion-guard snapshot state + runtime config (see
 // snapshot_composite_depth).
 static constexpr uint32_t KH_SNAP_MAX_AGE_MS = 500;   // Injection freshness gate (health window).
 static uint64_t g_snap_serial = 0;   // Completed snapshots (0 = never).
@@ -10625,7 +10125,7 @@ static float                 g_thml_origin[2] = {};   // Live meta (park-publish
 static float                 g_thml_cell = 0.0f;
 static UINT g_thml_w = 0;
 static UINT g_thml_h = 0;
-// zero-setup terrain acquisition: at the flush prelude (game thread, pre-lock)
+// Zero-setup terrain acquisition: at the flush prelude (game thread, pre-lock)
 // the builder acquires the heightfield by itself.
 static int                   g_thm_auto_state = 0;   // 0 idle / 1 refining / 2 done / 3 failed.
 static size_t                g_thm_auto_cursor = 0;
@@ -10633,26 +10133,15 @@ static int                   g_thm_auto_retry = 0;
 static UINT                  g_thmf_dim = 0;   // fine-pass dims/cell (state 1).
 static float                 g_thmf_cell = 0.0f;
 
-// KH_VOC_BURIAL (26907) - the occlusion culler's burial filter. Whenever the
-// heightfield lanes are armed (kh_fill_occ, g_thm_valid), PSComposite
-// discards any fragment whose terrain clearance sits below -thmMeta.z
-// (KH_THM_BIAS_M) - so a box partly below the analytic terrain can lose
-// covered pixels the occlusion grid counted as depth-written. This is the one
-// arm of that discard the march's ray monotonicity does not close: an
-// occluder's marched clearance bounds the deeper object's from above (a march
-// discard on the occluder implies one on the object at the same pixel), but a
-// burial at the occluder's OWN footprint implies nothing about the object.
-// The check reads a coarse max snapshot of EXACTLY the uploaded grid
-// (g_voc_thm_*, published in kh_thm_upload with the render thread parked and
-// read on the render thread outside the flush - never the autobuild's
-// in-flight staging, which refines concurrently on the game thread). It takes
-// the max over every fine node the footprint's bilinear support can touch
-// (node maxima bound the bilinear surface; the coarse cells are maxima of
-// node maxima) and clears a candidate only when its lowest point provably
-// rides above every discard line under the footprint. Every unknown - no
-// snapshot while the lanes are armed, NaN geometry, an unaffordable footprint
-// - answers 'buried' = not an occluder (1.172 / 1.91): an absent occluder can
-// only under-cull, never hole the image.
+// KH_VOC_BURIAL: with the heightfield lanes armed PSComposite discards
+// fragments whose terrain clearance sits below -thmMeta.z, so a box partly
+// below the terrain can lose pixels the occlusion grid counted as
+// depth-written. The check reads a coarse max snapshot of exactly the uploaded
+// grid (g_voc_thm_*, published under the park - never the autobuild's staging),
+// takes the max over every fine node the footprint's bilinear support touches,
+// and clears a candidate only when its lowest point provably rides above every
+// discard line. Every unknown answers 'buried' = not an occluder (under-cull
+// only).
 static constexpr UINT KH_VOC_THM_DS = 8;      // Fine nodes per coarse max cell.
 static constexpr int  KH_VOC_THM_CAP = 4096;  // Coarse cells per query; wider refuses.
 static std::vector<float> g_voc_thm_max;
@@ -10667,7 +10156,7 @@ inline bool kh_voc_buried(const RenderObject& khvb_o) {
     if (!g_thm_valid) return false;   // Discard lanes inert (kh_fill_occ): nothing to defend.
     if (!g_voc_thm_valid || !(g_voc_thm_cell > 0.0f) ||
         g_voc_thm_fw == 0 || g_voc_thm_fh == 0) {
-        return true;   // Armed discard, no certificate: refuse (1.91).
+        return true;   // Armed discard, no certificate: refuse.
     }
     float khvb_c[3];
     kh_obj_center_engine(khvb_o, khvb_c);
@@ -10689,9 +10178,9 @@ inline bool kh_voc_buried(const RenderObject& khvb_o) {
         khvb_gz0 > static_cast<float>(g_voc_thm_fh)) {
         return false;
     }
-    // Fine-node range under the footprint plus one node each way (the
-    // bilinear support of a sample at g touches floor(g) and floor(g) + 1),
-    // clamped in float so the casts stay in range.
+    // Fine-node range under the footprint plus one node each way (the bilinear
+    // support of a sample at g touches floor(g) and floor(g) + 1), clamped in
+    // float so the casts stay in range.
     const float khvb_fx = static_cast<float>(g_voc_thm_fw - 1);
     const float khvb_fz = static_cast<float>(g_voc_thm_fh - 1);
     const int khvb_x0 = static_cast<int>(fmaxf(floorf(khvb_gx0) - 1.0f, 0.0f));
@@ -10703,7 +10192,7 @@ inline bool kh_voc_buried(const RenderObject& khvb_o) {
     const int khvb_cz0 = khvb_z0 / static_cast<int>(KH_VOC_THM_DS);
     const int khvb_cz1 = khvb_z1 / static_cast<int>(KH_VOC_THM_DS);
     if ((khvb_cx1 - khvb_cx0 + 1) * (khvb_cz1 - khvb_cz0 + 1) > KH_VOC_THM_CAP) {
-        return true;   // Too wide to certify at this budget: refuse (1.172).
+        return true;   // Too wide to certify at this budget: refuse.
     }
     float khvb_hmax = -1.0e6f;
     for (int khvb_cz = khvb_cz0; khvb_cz <= khvb_cz1; ++khvb_cz) {
@@ -10714,13 +10203,13 @@ inline bool kh_voc_buried(const RenderObject& khvb_o) {
         }
     }
     // Buried-possible when the box's lowest point could sit below the discard
-    // line anywhere under the footprint; 5 cm of FP headroom over the
-    // shader's strict compare (clearance < -KH_THM_BIAS_M discards).
+    // line anywhere under the footprint; 5 cm of headroom over the shader's
+    // strict compare.
     return khvb_c[1] - khvb_he[1] < khvb_hmax - KH_THM_BIAS_M + 0.05f;
 }
 
-// Fills the overhaul's CB tail: guard space/options + the snapshot's own matrix
-// for the reprojection lane. Call at both paths' guard fills.
+// Fills the guard CB tail: guard space/options + the snapshot's own matrix for
+// the reprojection lane. Call at both paths' guard fills.
 inline void kh_fill_occ(ConstantData& cbd) {
     if (!g_thm_valid) return;   // Heightfield lanes stay zeroed = lane inert.
     cbd.thm_params[0] = g_thml_origin[0];
@@ -10733,8 +10222,8 @@ inline void kh_fill_occ(ConstantData& cbd) {
     cbd.thm_meta[3] = KH_THM_MIN_DIST_M;
 }
 
-// Heightfield GPU upload: runs at the flush (game thread, render parked) once
-// the CPU grid is complete. One immutable texture per ingest.
+// Heightfield GPU upload at the flush (game thread, render parked) once the CPU
+// grid is complete. One immutable texture per ingest.
 inline std::string kh_thm_upload(ID3D11Device* dev) {
     if (!g_thm_dirty) return "";
     g_thm_dirty = false;
@@ -10742,21 +10231,16 @@ inline std::string kh_thm_upload(ID3D11Device* dev) {
     KH_SAFE_RELEASE(g_res.thm_srv);
     KH_SAFE_RELEASE(g_res.thm_tex);
     g_thm_valid = false;
-    // KH_VOC_BURIAL: the snapshot certifies THIS texture, so it dies with it.
-    // Every early return below (incomplete grid, failed texture, failed SRV)
-    // leaves g_thm_valid false, and kh_voc_buried's first line makes that
-    // answer 'not buried' before it ever reads the snapshot - so a stale
-    // g_voc_thm_valid was unreachable rather than harmless. That is
-    // correctness by luck, coupled through two tests in another function.
-    // Clearing here makes it correctness by construction.
+    // The burial snapshot certifies THIS texture, so it dies with it here, not
+    // by luck through the early returns below.
     g_voc_thm_valid = false;
 
     if (g_thm_w == 0 || g_thm_h == 0 ||
         g_thm_data.size() < static_cast<size_t>(g_thm_w) * g_thm_h) {
         return "heightfield incomplete";
     }
-    // (Caller context: flush_locked, render thread parked - the live meta below
-    // may therefore be published with plain stores.).
+    // Caller: flush_locked, render thread parked, so the live meta below is
+    // published with plain stores.
 
     D3D11_TEXTURE2D_DESC td = {};
     td.Width = g_thm_w;
@@ -10784,10 +10268,9 @@ inline std::string kh_thm_upload(ID3D11Device* dev) {
     g_thml_cell = g_thm_cell;
     g_thml_w = g_thm_w;
     g_thml_h = g_thm_h;
-    // KH_VOC_BURIAL: coarse max snapshot of exactly the grid just uploaded
-    // (render thread parked here, so the culler's reader never races the
-    // autobuild's staging refinement). A failure leaves the snapshot invalid,
-    // which the reader treats as 'refuse every occluder' - conservative.
+    // Coarse max snapshot of exactly the grid just uploaded (render thread
+    // parked, so the culler's reader never races the autobuild's staging). A
+    // failure leaves the snapshot invalid = refuse every occluder.
     try {
         const UINT khvb_cw = (g_thm_w + KH_VOC_THM_DS - 1) / KH_VOC_THM_DS;
         const UINT khvb_ch = (g_thm_h + KH_VOC_THM_DS - 1) / KH_VOC_THM_DS;
@@ -10831,8 +10314,7 @@ inline void kh_thm_autobuild_step() {
     try {
         if (g_thm_auto_state == 0) {
             // Path A: the framework's native-resolution terrain matrix,
-            // point-sampled to <= 1025 per side - full resolution in one step,
-            // nothing to refine.
+            // point-sampled to <= 1025 per side; nothing to refine.
             if (!g_terrain_matrix.empty() && g_terrain_grid_width > 0.0f) {
                 const size_t khb_src = g_terrain_matrix.size();
                 const size_t khb_stride = (khb_src + 1024) / 1025 > 0 ? (khb_src + 1024) / 1025 : 1;
@@ -10860,8 +10342,8 @@ inline void kh_thm_autobuild_step() {
                 return;
             }
 
-            // Path B, step 1: synchronous coarse seed (65 x 65) - terrain
-            // occlusion goes live at the very next flush.
+            // Path B, step 1: synchronous coarse seed (65 x 65); terrain
+            // occlusion goes live at the next flush.
             const float khb_ws = static_cast<float>(sqf::world_size());
 
             if (khb_ws <= 1.0f) {
@@ -10937,9 +10419,8 @@ inline void kh_thm_autobuild_step() {
 }
 
 // Injection attempts per scene frame: the live-DSV verification can transiently
-// mismatch; retrying on subsequent translucent draws (instead of standing down
-// for the frame) prevents single-frame blink-outs, and the cap bounds the retry
-// cost.
+// mismatch; retrying on later translucent draws prevents single-frame
+// blink-outs, and the cap bounds the cost.
 static constexpr uint32_t KH_REORDER_MAX_INJECT_ATTEMPTS = 16;
 
 // ID3D11DeviceContext vtable slots (d3d11.h declaration order).
@@ -10991,10 +10472,10 @@ static FnCopyResource            g_orig_copyresource = nullptr;   // KH_PIP_FX_C
 typedef void (STDMETHODCALLTYPE* FnResolveSubresource)(ID3D11DeviceContext*, ID3D11Resource*, UINT, ID3D11Resource*, UINT, DXGI_FORMAT);
 static FnResolveSubresource      g_orig_resolvesubresource = nullptr;
 
-// Equally critical: the injection must never acquire the bridge graphics lock.
-// No lock is needed either: game-thread context use only ever happens while the
-// render thread is parked, so the two can never actually overlap; the dedicated
-// composite constant buffer removes the last shared-resource concern.
+// The injection must never acquire the bridge graphics lock, and needs no lock:
+// game-thread context use only ever happens while the render thread is parked;
+// the dedicated composite constant buffer removes the last shared-resource
+// concern.
 static std::atomic<uint32_t> g_reorder_render_tid{0};
 
 inline bool reorder_on_render_thread() {
@@ -11031,19 +10512,18 @@ struct ReorderState {
     bool  world_pair_valid = false;
     uint16_t frame_cycles = 0;   // depth-clear cycles this frame.
     uint32_t opaques_since_inject = 0;
-    // Frame-scoped risk flag for the hybrid guarantee: set when an anomalous
-    // (slot-silent) cycle is seen at an injection attempt; consumed by the
-    // flush, which then also draws the meshes late that frame - identical
-    // overdraw if the injection survived, fill-in if a foreign pass erased it.
+    // Set when an anomalous (slot-silent) cycle is seen at an injection
+    // attempt; consumed by the flush, which then also draws the meshes late
+    // that frame - identical overdraw if the injection survived, fill-in if a
+    // foreign pass erased it.
     bool anomaly_seen = false;
 };
 static ReorderState g_ro;
 
-// The one thing an exception may not do is leave a COM vtable call. Every hook
-// wraps its own work (never the forwarded engine call) and lands here: the
-// injection latch is dropped so the next draw is tracked again, and the event
-// is reported once. std::bad_alloc from a scene sync growing a vector is the
-// realistic tenant; the frame it hit draws without us.
+// An exception may not leave a COM vtable call. Every hook wraps its own work
+// (never the forwarded engine call) and lands here: the injection latch is
+// dropped so the next draw is tracked again, and the event is reported once.
+// The frame it hit draws without us.
 static std::atomic<uint64_t> g_hook_exceptions{0};
 static inline void kh_hook_except() {
     g_ro.in_injection = false;
@@ -11052,7 +10532,7 @@ static inline void kh_hook_except() {
     }
 }
 // Render-thread writes; game-thread reads are park-ordered by the flush's
-// graphics lock, the same contract as every other g_ro consumer.
+// graphics lock, like every other g_ro consumer.
 static float    g_slot_keep_m22 = 0.0f;
 static float    g_slot_keep_m32 = 0.0f;
 static float    g_slot_keep_near = -1.0f;
@@ -11063,9 +10543,9 @@ static float    g_far_keep_far = -1.0f;
 static uint64_t g_far_keep_ms = 0;
 // Continuous at the near plane, so routing on/off never pops a fragment.
 static constexpr float KH_NEARZ_GAP_FRAC = 0.92f;
-// Keyed by the buffer object pointer, compared opaquely (never dereferenced,
-// never AddRef'd: a destroyed buffer simply stops matching, and a recycled
-// pointer re-records on its next upload before any draw can bind it stale).
+// Keyed by the buffer object pointer, compared opaquely (never dereferenced or
+// AddRef'd: a destroyed buffer stops matching; a recycled pointer re-records on
+// its next upload before any draw can bind it stale).
 struct KhCbCensusEntry {
     void*    buf = nullptr;
     float    m22 = 0.0f;
@@ -11128,16 +10608,14 @@ static constexpr float KH_CAM_NEAR_MAX = 15.0f;
 
 static constexpr float KH_ENC_FAR_MAX = 50000.0f;
 
-
 // Near from a forward-encode pair (ndc = m22 + m32/d): near = -m32/m22.
 inline float kh_enc_pair_near(float khn_m22, float khn_m32) {
     return fabsf(khn_m22) > 1e-9f ? (-khn_m32 / khn_m22) : -1.0f;
 }
 
-// A cold gate must not block the first encode.
 // Far plane from a forward-encode pair (ndc = m22 + m32/d): far is where ndc
 // reaches 1. Degenerate and non-physical pairs return 1e9 - always above the
-// Ceiling, i.e. Refused.
+// ceiling, i.e. refused.
 inline float kh_enc_far(float m22, float m32) {
     const float khd = 1.0f - m22;
     if (fabsf(khd) < 1e-7f) return 1e9f;
@@ -11145,19 +10623,9 @@ inline float kh_enc_far(float m22, float m32) {
     return khf > 0.0f ? khf : 1e9f;
 }
 
-// KH_LATCH_FOLD (post-trust): the clear adopts the bridge PV every cycle. The
-// teleport debounce that stood here (50 m jump bar, a two-slot ring confirmed
-// across >= 150 ms, a 1 s loss timer) existed for a foreign camera publishing
-// at the clear (a PiP pass). It was measured across three day
-// runs with camera switches and PiP active: it refused a foreign publish
-// never, delayed every real switch ~120-150 ms, and put its held camera
-// 92 deg mean / 116 deg max into the cascade consensus (the whole of the
-// "cascade departure on camera switches"; the standing-lane hold, Src 4,
-// covers the one-frame departure that remains). Folded. Kept:
-// KH_LATCH_JUMP_M as the distance class the injection, the fire and the seam
-// still classify against, and the last boundary camera + its step.
-// PiP does not render our meshes today; when it does, the camera-identity
-// question returns with that campaign.
+// The clear adopts the bridge PV every cycle; no teleport debounce (a held
+// camera puts the wrong camera into the cascade consensus). KH_LATCH_JUMP_M is
+// the distance class the injection, the fire and the seam classify against.
 static constexpr float    KH_LATCH_JUMP_M   = 50.0f;
 static float    g_latch_cam[3] = {};   // Last boundary camera.
 static bool     g_latch_cam_valid = false;
@@ -11170,9 +10638,8 @@ inline float latch_cam_dist_sq(const float a[3], const float b[3]) {
     return dx * dx + dy * dy + dz * dz;
 }
 
-// The last fog color/enable actually written into a CB game or render thread
-// writes at fill; stats read.
-// 1 = never filled since load.
+// The last fog colour actually written into a CB (fill-site writes; stats
+// read). -1 = never filled.
 static float    g_fog_uw_col[3] = { -1.0f, -1.0f, -1.0f };
 
 inline void* reorder_dsv_identity(ID3D11DepthStencilView* dsv) {
@@ -11194,9 +10661,6 @@ inline void* reorder_dsv_identity(ID3D11DepthStencilView* dsv) {
     return id;
 }
 
-// A v1 sniffer hunted the engine's combined view-projection and found nothing:
-// A camera-relative renderer never uploads that matrix in world space.
-
 struct ProjLocator {
     ID3D11Resource* buf = nullptr;   // Identity only - never dereferenced.
     uint32_t float_offset = 0;
@@ -11215,12 +10679,12 @@ static ProjPendingMap g_proj_pending[8];
 inline bool proj_near_zero(float v) { return fabsf(v) < 1e-6f; }
 
 // Persisted last captured m32: the continuity anchor for measurement-mode
-// acceptance (see below).
+// acceptance.
 static float g_proj_last_m32 = 0.0f;
 
 // Tests a 16-float window for the row-vector D3D perspective layout [ sx 0 0 0
 // / 0 sy 0 0 / jx jy m22 1 / 0 0 m32 0 ] and its transpose. Structure, sx, sy
-// and m22 must always match the latch tightly (stable frame to frame).
+// and m22 must match the latch tightly.
 inline float proj_slot_probe(const float* w, float* out_m22, float* out_m32) {
     const float sx = g_ro.cycle_pv.projection[0][0];
     const float sy = g_ro.cycle_pv.projection[1][1];
@@ -11286,10 +10750,9 @@ inline bool proj_try_window(const float* w, bool discovery) {
             const float n_prev = fabsf(g_ro.engine_m22) > 1e-9f ? (-g_ro.engine_m32 / g_ro.engine_m22) : 0.0f;
             const float n_new  = fabsf(w[10]) > 1e-9f ? (-w[14] / w[10]) : 0.0f;
 
-            // near-plane shift mid-frame: a partition boundary the
-            // viewport-range check misses (the look-up slice: one injection
-            // spent in the far partition, the near partition - whose near plane
-            // clips less - never got its own draw).
+            // Near-plane shift mid-frame: a partition boundary the
+            // viewport-range check misses (the near partition, whose near plane
+            // clips less, needs its own draw).
             if (g_ro.engine_proj_valid && g_ro.injected &&
                 n_prev > 1e-4f && fabsf(n_new - n_prev) > 0.05f * n_prev) {
                 g_ro.injected = false;
@@ -11346,18 +10809,14 @@ inline void proj_scan_upload(ID3D11Resource* res, const void* data, uint32_t byt
                 khcb_f + g_proj_locator.float_offset, &khcb_m22, &khcb_m32);
         }
 
-        uint32_t khcb_off = g_proj_locator.float_offset;
 
         if (khcb_near <= 0.0f && g_proj_locator.float_offset != 0 && khcb_n >= 16) {
             khcb_near = proj_slot_probe(khcb_f, &khcb_m22, &khcb_m32);
-            khcb_off = 0;
         }
 
-        // Foreign buffers never enter the table and still resolve as misses,
-        // exactly as before.
+        // Foreign buffers never enter the table and resolve as misses.
         if (khcb_near > 0.0f && !(khcb_near >= KH_CAM_NEAR_MIN && khcb_near <= KH_CAM_NEAR_MAX)) {
         } else if (khcb_near > 0.0f) {
-            (void)khcb_off;
             kh_cbc_note(res, khcb_m22, khcb_m32, nullptr);
         }
     }
@@ -11378,9 +10837,8 @@ inline void proj_scan_upload(ID3D11Resource* res, const void* data, uint32_t byt
                 g_ro.slot_m22 = p22;
                 g_ro.slot_m32 = p32;
 
-                // So the keep cached a late-frame viewmodel upload and fed it
-                // to every silent frame for 250 ms - a poison reservoir the
-                // per-cycle slot never was.
+                // A late-frame viewmodel upload must not be cached into the
+                // keep: it would feed every silent frame for 250 ms.
                 if (pnear >= KH_CAM_NEAR_MIN && pnear <= KH_CAM_NEAR_MAX &&
                     kh_enc_far(p22, p32) <= KH_ENC_FAR_MAX) {
                     g_slot_keep_m22 = p22;
@@ -11388,11 +10846,9 @@ inline void proj_scan_upload(ID3D11Resource* res, const void* data, uint32_t byt
                     g_slot_keep_near = pnear;
                     g_slot_keep_ms = steady_now_ms();
                     // Re-adoption at >= 0.999x keeps the stamp fresh while the
-                    // deep partition still uploads; once it stops (view
-                    // distance reduced, weather change), the hold goes stale
-                    // and the next in-band pair - however shallow - takes over,
-                    // so the keep can never serve a far the engine no longer
-                    // runs.
+                    // deep partition still uploads; once it stops the hold goes
+                    // stale and the next in-band pair takes over, so the keep
+                    // never serves a far the engine no longer runs.
                     {
                         const float khfk_far = kh_enc_far(p22, p32);
                         if (khfk_far >= g_far_keep_far * 0.999f ||
@@ -11434,10 +10890,9 @@ inline void proj_scan_upload(ID3D11Resource* res, const void* data, uint32_t byt
     }
 }
 
-// One plain copy into a cached scratch; every scanner reads the copy. No streaming
-// loads: movntdqa from WC memory may return stale bytes until the writer's WC
-// buffers drain. Render thread only (both callers gate on reorder_on_render_thread);
-// 64 KiB is the D3D11 constant-buffer cap.
+// One plain copy into a cached scratch; every scanner reads the copy. No
+// streaming loads: movntdqa from WC memory may return stale bytes. Render
+// thread only; 64 KiB is the D3D11 constant-buffer cap.
 static constexpr uint32_t KH_UPLOAD_SCRATCH_BYTES = 65536u;
 static alignas(64) uint8_t g_upload_scratch[KH_UPLOAD_SCRATCH_BYTES];
 inline const void* kh_upload_scratch(const void* khus_src, uint32_t& khus_bytes) {
@@ -11449,9 +10904,9 @@ inline const void* kh_upload_scratch(const void* khus_src, uint32_t& khus_bytes)
 // Returns the buffer's byte width when it is a plausibly-sized constant buffer,
 // 0 otherwise.
 inline uint32_t proj_upload_byte_width(ID3D11Resource* res) {
-    // The dimension enum guarantees the static_cast; GetDesc stays (the width
-    // must be truth, never a cache: a recycled buffer pointer with a stale
-    // cached width would let the scanners read past a smaller mapping).
+    // GetDesc stays (the width must be truth, never a cache: a recycled buffer
+    // pointer with a stale cached width would let the scanners read past a
+    // smaller mapping).
     D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
     res->GetType(&dim);
     if (dim != D3D11_RESOURCE_DIMENSION_BUFFER) return 0;
@@ -11467,32 +10922,27 @@ inline uint32_t proj_upload_byte_width(ID3D11Resource* res) {
 }
 
 // Once per flush the game thread stages the fog (stage_world_lighting) and
-// publishes the staged state inside flush_locked, where the graphics lock parks
-// the render thread - the same invariant the injection already relies on for
-// lock-free context use - so the render-thread consumers (composited-path
-// shading) read plain globals that can never be observed
-// mid-write.
+// publishes it inside flush_locked with the render thread parked, so the
+// render-thread consumers read plain globals never observed mid-write.
 
 typedef HRESULT (WINAPI* FnD3DDisassemble)(const void*, SIZE_T, UINT, const char*, void**);
 
 static bool  g_sun_valid = false;
 static float g_sun_dir_engine[3] = { 0.0f, 1.0f, 0.0f };   // Unit vector toward the light, engine
                                                            // Axes.
-// Ambient light (SQF-staged alongside the sun, elems 4-5 of the lighting
-// command: [r,g,b] color and brightness). The shadow's color/depth derive from
-// it: lit = ambient + sun, shadowed = ambient, so the per-channel factor is
+// Ambient light (elems 4-5 of the lighting command: [r,g,b] and brightness).
+// lit = ambient + sun, shadowed = ambient, so the per-channel factor is
 // amb/(amb+sun).
 
-// Game-thread staging (written and read on the game thread only) --- Fog:
-// Fetched on the game thread alongside getLighting (fogParams is an SQF-side
-// getter; the extension self-fetches - no user SQF involved). RV's fog: density
-// decays exponentially with height above fogBase.
+// Game-thread staging. Fog is fetched alongside getLighting (the extension
+// self-fetches fogParams). RV's fog density decays exponentially with height
+// above fogBase.
 static bool  g_fog_staged_valid = false;
 static float g_fog_staged[3] = { 0.0f, 0.0f, 0.0f };
 static bool  g_fog_valid = false;
 static float g_fog[3] = { 0.0f, 0.0f, 0.0f };
-// A raw publish stepping past KH_SRAW_JUMP_DEG (kh_sun_raw_frame): the clear
-// hook resets the union's map hash on it so the re-fit is unconditional.
+// A raw publish stepping past KH_SRAW_JUMP_DEG: the clear hook resets the
+// union's map hash so the re-fit is unconditional.
 static bool g_sun_jump_pending = false;
 static float g_skysun_ref[3] = { 0, 0, 0 };
 static bool  g_skysun_ref_valid = false;
@@ -11508,17 +10958,11 @@ inline bool kh_sky_static() {
            steady_now_ms() - g_skysun_ref_ms < 1000 &&
            g_skysun_mot_deg >= 0.0f && g_skysun_mot_deg < 0.3f;
 }
-// KH_SKY_LANE: the sun lane's two predicates, the one truth for every reader
-// (the publish's witness and hold, the sky fallback, the map latch's target,
-// the witness test). FRESH: the sky block was uploaded inside the window.
-// OK: fresh AND a light above the horizon - the engine keeps writing the sun
-// lane all night (the moon consensus read 125-130
-// deg from its skyward flip, i.e. 50-55 deg from the set sun itself),
-// and a lane at or below KH_SUN_AXIS_LANE_MIN_Y is not the light anything
-// shadows with. Tested on the RAW lane: there is no skyward flip anywhere any
-// more, because a below-horizon sun flipped skyward is the anti-solar point,
-// which at full moon sits within the witness bar of the moon consensus and
-// would have published as 'the witnessed lane'.
+// The sun lane's two predicates. FRESH: the sky block was uploaded inside the
+// window. OK: fresh AND above the horizon - the engine writes the sun lane all
+// night, and a lane at or below KH_SUN_AXIS_LANE_MIN_Y is not the light
+// anything shadows with (a below-horizon sun flipped skyward is the anti-solar
+// point, which at full moon would pass the moon witness).
 static constexpr uint64_t KH_SUN_AXIS_SKY_FRESH_MS = 1000;
 static constexpr float    KH_SUN_AXIS_LANE_MIN_Y = 0.10f;
 inline bool kh_sun_axis_lane_fresh(uint64_t khlf_now) {
@@ -11536,13 +10980,9 @@ static bool  g_pub_valid = false;
 static float g_pub_dir[3] = {};
 
 static bool  g_pub_block_valid = false;
-// The failure directions are asymmetric: a refused publish leaves the previous
-// good block standing (never black, never stale by more than one publish).
+// A refused publish leaves the previous good block standing (never black, never
+// stale by more than one publish).
 static float g_band_tab_far[8]   = { -1,-1,-1,-1,-1,-1,-1,-1 };
-// The artifact is a few frames long; a last-frame snapshot will essentially
-// never contain it. Do not RE-open this as A bug. The table as it stood on the
-// worst-gap frame, latched once and kept.
-
 
 static float g_pub_block_amb[3] = {};
 static float g_pub_block_sun[3] = {};
@@ -11551,30 +10991,16 @@ static float g_pub_block_sun[3] = {};
 
 inline bool kh_probe_lum_band(float a, float b);   // Defined with the locator (the 15% band).
 
-// ============================ KH_LIGHT_BASE =============================
-// THE lighting publish. What the engine does, measured: it uploads the same
-// lighting block many times per
-// frame - five per-pass variants in an empty map, one per DRAW in a full one
-// or at night - and every variant is the one scene lighting scaled DOWN per
-// object (sun and/or ambient at 0.3 - 0.8 of the brightest, in fixed ratios,
-// grouped by object). Picking among them by luminance with holds was the
-// dimming and the staleness in one: each upload disagreed with the pending
-// seeded by the previous, the standing went stale for up to half a minute,
-// and a time skip waited on it. Picking the upload that owned the most draws
-// followed the camera (a 30% step as the 0.7x group came into view).
-// The rule that holds: each admitted upload owns the main-scene draws issued
-// until the next one (g_blko_draws, reorder_pre_draw, our own draws excluded);
-// uploads in one luminance band (kh_probe_lum_band) form a cluster whose draws
-// sum and whose member uploads count; at the main depth clear of a world
-// cycle (kh_probe_world_cycle) the BRIGHTEST cluster holding at least
-// KH_BLKO_BASE_SHARE of the frame's lit MEMBERS publishes (KH_BLKO_MEMBER
-// below: the draw share was a camera signal both ways) - attenuation only
-// ever goes down, so that is the unattenuated lighting. A standing base is
-// kept down to KH_BLKO_BASE_KEEP (admission hold; a base half-scrolled off
-// screen must not drop out, and a 2-upload outlier must never get in). One
-// frame of latency, no band on time, no
-// clock, no hold that a skip has to wait out. A non-world cycle (PiP,
-// secondary clear) keeps the standing publish.
+// KH_LIGHT_BASE: the lighting publish. The engine uploads the same lighting
+// block many times per frame, every variant the one scene lighting scaled DOWN
+// per object (0.3 - 0.8 of the brightest). Each admitted upload owns the
+// main-scene draws issued until the next (g_blko_draws, our draws excluded);
+// uploads in one luminance band (kh_probe_lum_band) form a cluster; at the main
+// depth clear of a world cycle the BRIGHTEST cluster holding at least
+// KH_BLKO_BASE_SHARE of the lit members publishes (attenuation only goes down).
+// A standing base is kept down to KH_BLKO_BASE_KEEP. No clock, no hold.
+// Non-world cycles keep the standing publish. Picking by luminance with holds,
+// or by draw share, follows the camera - do not reintroduce.
 static constexpr int   KH_BLKO_MAX = 16;
 static constexpr float KH_BLKO_BASE_SHARE = 0.10f;   // Admission share of the frame's lit members (KH_BLKO_MEMBER).
 static constexpr float KH_BLKO_BASE_KEEP  = 0.05f;   // A standing base is kept down to this member share.
@@ -11631,9 +11057,8 @@ inline void kh_blk_owner_note(const float* khon_b, uint8_t khon_flag) {
     g_blko_open_draws = g_blko_draws;
     g_blko_open = true;
 }
-// One admitted upload of the locked block (khba_b = the block base, lanes
-// 8-10 ambient, 16-18 sun, 36-38 fog; khba_avail = floats readable from it):
-// its ownership span.
+// One admitted upload of the locked block (khba_b = the block base: lanes 8-10
+// ambient, 16-18 sun, 36-38 fog; khba_avail = floats readable from it).
 inline void kh_blk_note_admitted(const float* khba_b, uint32_t khba_avail, bool khba_world) {
     const float khba_al = khba_b[8] + khba_b[9] + khba_b[10];
     const float khba_sl = khba_b[16] + khba_b[17] + khba_b[18];
@@ -11675,9 +11100,9 @@ inline void kh_blk_owner_frame() {
             }
         }
         if (g_pub_block_valid) {   // Admission hold: a standing base at least as bright stays down to KH_BLKO_BASE_KEEP.
-            // The first cluster in table order that sits in band with the standing publish is the
-            // one judged; two clusters can both be in band with it while distinct from each other,
-            // in which case table order (first opened) decides.
+            // The first cluster in table order in band with the standing
+            // publish is the one judged; two clusters can both be in band with
+            // it while distinct from each other.
             const float khof_pal = g_pub_block_amb[0] + g_pub_block_amb[1] + g_pub_block_amb[2];
             const float khof_psl = g_pub_block_sun[0] + g_pub_block_sun[1] + g_pub_block_sun[2];
             for (int khof_i = 0; khof_i < g_blko_n; ++khof_i) {
@@ -11699,54 +11124,20 @@ inline void kh_blk_owner_frame() {
     }
     g_blko_n = 0;
 }
-// ============================ KH_SUN_RAW ==============================
-// THE sun direction publish, the shadow twin of KH_LIGHT_BASE. Every shadow
-// chain (the private sun maps behind the self term and the world cast, the
-// union re-fit, the engine's band table) rebuilds within a frame once its
-// inputs move; the lag behind a time skip lived in ONE input, the published
-// direction, and in the filters that once sat between the engine's cascade
-// axes and it (the publish sat > 1 deg from the engine's own axis for up to
-// 396 ms, mean 127; the settle / cold hold stood nothing down - the whole
-// symptom was direction lag). All of it is gone.
-//
-// The engine states its light axis twice per frame: the cascade sampling
-// matrices' depth row (one direction for every cascade of the cycle, spread
-// <= 0.03 deg - the direction it actually shadows with, the moon at night)
-// and the sky CB's sun lane (world space, day only). band_capture samples the
-// cascade axis of every capture, ahead of its reseal throttle; at the main
-// depth clear kh_sun_raw_frame takes the cycle's median (one frame of latency
-// by construction, 1.217; world cycles only - the same structural bar as
-// KH_LIGHT_BASE, so a non-world pass's cascades never publish) and publishes:
-//   - the SKY LANE when it is fresh and the consensus witnesses it (within
-//     KH_SRAW_LANE_WIT_DEG, the same light): it is fold-free and lands the
-//     frame the sun moves, while the engine's own cascade axis converges on a
-//     new sun over ~0.7 s and departs from it for a frame or two during
-//     camera moves (measured: every such departure identical under a fold
-//     through the cycle's own later view - the engine's, not ours);
-//   - the STANDING LANE (KH_SRAW_LANE_HOLD, Src 4) when the lane is above the
-//     floor, did not step since the previous close that named it (Src 3 or 4
-//     as that close's candidate - a refused non-world close counts too, since
-//     the lane's own step is the test, not the publish) (<=
-//     KH_SRAW_LANE_STILL_DEG) and the consensus left it: on a flick or a camera
-//     switch the cascade axis leaves an unmoved lane by 17-121 deg for one to
-//     three frames (and for as long as the clear's camera latch holds the
-//     previous camera after a switch), and the shading direction followed it
-//     until this rule. A sun that did not move did not move; a level rule on
-//     the lane's own step, not a clock. Measured on a day run with camera
-//     switches: 276 held publishes of 1,833, no jumps left (from 4-22 per
-//     run, all departures), the maps and the shading on one axis, picture
-//     unchanged by eye.
-//   - the CASCADE CONSENSUS otherwise (night, or the lane is not the light
-//     the cascades track and did not just stand still).
-//   - the sky lane alone after KH_SRAW_SKY_FALLBACK_MS with no cascade at all
-//     (shadows off in the video options).
-// A published step past KH_SRAW_JUMP_DEG is a jump: g_sun_jump_pending resets
-// the union's map hash at the same clear. No level rule, no clock: the cascade
-// axis measured 0.001 deg mean / < 1 deg max frame-to-frame while the sky
-// stood still, so nothing here smooths. The sun maps render
-// from this publish too (KH_SUN_AXIS_FOLD retired the sky-witness latch that
-// sat between; the standing-lane hold is what keeps the switch-frame
-// departure out of both).
+// KH_SUN_RAW: the sun direction publish. The engine states its light axis twice
+// per frame: the cascade sampling matrices' depth row (the direction it
+// actually shadows with; the moon at night) and the sky CB's sun lane (world
+// space, day only). band_capture samples the cascade axis of every capture; at
+// the main depth clear kh_sun_raw_frame takes the cycle's median (world cycles
+// only) and publishes: the SKY LANE when fresh and within KH_SRAW_LANE_WIT_DEG
+// of the consensus (it lands the frame the sun moves; the cascade axis
+// converges over ~0.7 s and departs during camera moves); the STANDING LANE
+// (Src 4) when the lane did not step since the previous close that named it (<=
+// KH_SRAW_LANE_STILL_DEG) but the consensus left it (on a flick or camera
+// switch the cascade axis leaves an unmoved lane by tens of degrees for 1-3
+// frames); the CASCADE CONSENSUS otherwise (night); the sky lane alone after
+// KH_SRAW_SKY_FALLBACK_MS with no cascade (shadows off). A step past
+// KH_SRAW_JUMP_DEG resets the union's map hash. Nothing here smooths.
 inline float kh_rc_median(float* khrm_v, int khrm_n) {   // Insertion sort: n <= KH_SRAW_CYC.
     for (int khrm_i = 1; khrm_i < khrm_n; ++khrm_i) {
         const float khrm_x = khrm_v[khrm_i];
@@ -11787,10 +11178,9 @@ inline void kh_sun_raw_note(const float* khsn_w) {
     ++g_sraw_cyc_n;
 }
 inline bool kh_probe_world_cycle();   // Defined with the locator.
-// At the main depth clear (render thread, like g_pub_block_*: the injection
-// reads on this thread, the flush under the park), before g_ro.cycle_vp_*
-// resets (the ended cycle's viewport is the world test) and before the
-// sun-jump block consumes g_sun_jump_pending.
+// At the main depth clear (render thread), before g_ro.cycle_vp_* resets (the
+// ended cycle's viewport is the world test) and before the sun-jump block
+// consumes g_sun_jump_pending.
 inline void kh_sun_raw_frame() {
     const uint64_t khsf_now = steady_now_ms();
     const bool khsf_world = kh_probe_world_cycle();
@@ -11839,9 +11229,10 @@ inline void kh_sun_raw_frame() {
             } else if (khsf_s_ok &&
                        (g_sraw_last_src == 3 || g_sraw_last_src == 4) &&
                        g_sraw_sky_step_deg >= 0.0f && g_sraw_sky_step_deg <= KH_SRAW_LANE_STILL_DEG) {
-                // KH_SRAW_LANE_HOLD: the lane stood still since the previous close that
-                // named it (g_sraw_last_src is stored before the world test, so a refused
-                // close counts); the consensus left it, the sun did not (Src 4).
+                // Standing-lane hold: the lane stood still since the previous
+                // close that named it (g_sraw_last_src is stored before the
+                // world test, so a refused close counts); the consensus left
+                // it, the sun did not (Src 4).
                 khsf_m[0] = khsf_s[0]; khsf_m[1] = khsf_s[1]; khsf_m[2] = khsf_s[2];
                 khsf_src = 4;
             }
@@ -11853,8 +11244,8 @@ inline void kh_sun_raw_frame() {
     g_sraw_last_src = khsf_src;
     g_sraw_pub_gap_deg = g_pub_valid ? kh_sraw_angle_deg(khsf_m, g_pub_dir) : -1.0f;
     if (khsf_src != 2 && !khsf_world) {   // Refused: the consensus stands off the publish until a world cycle lands.
-        // Opened here and nowhere else: a publishing cycle closes any open latency below in
-        // the same call, so opening it there too logged a 0 ms event on every jump.
+        // Opened here only: a publishing cycle closes any open latency in the
+        // same call.
         return;
     }
     // Publish. The step against the standing publish is the jump test.
@@ -11869,30 +11260,22 @@ inline void kh_sun_raw_frame() {
 }
 // KH_SUN_RAW end.
 
-// The night flapping has no second writer. KH_SKY_LANE_SCAN (one night run,
-// 10,565 sky-block captures with the consensus unwitnessed) tested every float
-// triple of the sky upload against the moon consensus: two offsets ever hit,
-// the best (67, a row-16.w / row-17.xy scalar coincidence) on 392 captures at a
-// 6 deg gap - no lane. The engine does not state the moon direction in the sky
-// block; at night the cascade consensus IS the axis, departures included, and
-// the scan went out with the question (1.244).
+// The engine does not state the moon direction in the sky block (every float
+// triple of the sky upload was tested against the moon consensus; no lane). At
+// night the cascade consensus IS the axis, departures included.
 
 inline const float* kh_shadow_sun() {
     if (g_sun_valid) return g_sun_dir_engine;
     return nullptr;
 }
 
-// Caller supplies the axis already rotated into world space; fail-open
-// everywhere the comparison is not trustworthy (no published
-// sun).
+// Caller supplies the axis already rotated into world space; fail-open wherever
+// the comparison is not trustworthy (no published sun).
 static constexpr float KH_SUN_AXIS_MAX_DEG = 10.0f;
 
-
-// Before the first publish the maps and the cast may go on the sky lane
-// alone (KH_SKY_LANE: fresh and above the horizon). Both callers test
-// `!g_sun_valid && !kh_sun_axis_witnessed()`, so this decides only the cold
-// second; the former latch-validity and stall-grace terms went with the
-// latch (KH_SUN_AXIS_FOLD).
+// Before the first publish the maps and the cast may go on the sky lane alone
+// (fresh and above the horizon). Both callers test `!g_sun_valid &&
+// !kh_sun_axis_witnessed()`, so this decides only the cold second.
 inline bool kh_sun_axis_witnessed() {
     return g_skysun_ref_valid && kh_sun_axis_lane_ok(steady_now_ms());
 }
@@ -11916,12 +11299,10 @@ inline bool kh_sun_axis_foreign(float khsx_x, float khsx_y, float khsx_z, float*
     return false;
 }
 
-// Once per flush, under the park: the direction is already published (the
-// clear hook's kh_sun_raw_frame); the flush carries the fog and mirrors the
-// validity. The former stack here (a 120-sample maturity, an 8-flush
-// candidate hold, a 5 s cooldown, a 0.12 deg / frame glide, the settle and
-// cold hold, the sky bootstrap and the travel window) was measured as the
-// whole shadow lag (396 ms max / 127 mean) and removed.
+// Once per flush, under the park: the direction is already published (the clear
+// hook's kh_sun_raw_frame); the flush carries the fog and mirrors the validity.
+// No maturity, hold, cooldown or glide here - every such filter was measured as
+// pure shadow lag.
 inline void publish_world_lighting() {
     g_sun_valid = g_pub_valid;
     g_fog_valid = g_fog_staged_valid;
@@ -11931,10 +11312,10 @@ inline void publish_world_lighting() {
 }
 
 // Per frame, per cascade cycle: latch that matrix from the upload
-// (locator-cached offset, recon-style rediscovery on miss), snapshot the bound
-// viewport at the cycle's next draw as the cascade's atlas tile, and hand the
-// table to the composited mesh shader, which then performs the engine's own
-// shadow compare for our pixels.
+// (locator-cached offset, rediscovery on miss), snapshot the bound viewport at
+// the cycle's next draw as the cascade's atlas tile, and hand the table to the
+// composited mesh shader, which performs the engine's own shadow compare for
+// our pixels.
 static constexpr uint32_t KH_LIVE_MAX_CASCADES = 8;
 
 struct LiveShadowEntry {
@@ -11950,8 +11331,7 @@ struct LiveShadowEntry {
 static constexpr float KH_RECEIVE_WARMUP_S = 2.0f;
 
 // The uv/z bounds cannot see this: the ortho depth range spans far more than
-// the view slice, so z passes on a fragment the slice never contained. The
-// content for that region was never rendered into any live tile.
+// the view slice, so z passes on a fragment the slice never contained.
 
 struct LiveShadowState {
     std::atomic<bool> wanted{ false };   // Game thread: any lit object exists.
@@ -11975,49 +11355,39 @@ struct LiveShadowState {
     float    pending_m[12] = {};
     // Decoded from the small block per commit: its second 4x3 is a pure
     // camera-yaw rotation R with translation t2 = (0.30, -1.59, 0.01) - an
-    // eye-height-shaped origin offset applied in yaw-rotated space.
+    // eye-height-shaped origin offset in yaw-rotated space.
     struct CbRecord { void* buf = nullptr; uint32_t floats = 0; uint64_t seq = 0; float data[512]; };
     CbRecord cb_reg[16];
     uint32_t cb_reg_next = 0;
     uint64_t cb_reg_seq = 0;   // Recency: which record was written last.
-    // Pass-scoped stash of the last window-shaped matrix accepted during an
-    // atlas pass: the engine's cascade CB exceeds the registry's size gate, so
-    // the registry never held it. The test-window choke point sees every
-    // candidate at any size.
     // Persistent cascade table: the engine re-renders (and re-uploads the
-    // transform for) a cascade only when it needs updating - round-robin, on
-    // demand - so a per-frame table is empty on most frames. Entries are keyed
-    // by scale (each cascade has a distinct extent) and replaced in place when
-    // their cascade re-renders.
+    // transform for) a cascade only when it needs updating, so a per-frame
+    // table is empty on most frames. Entries are keyed by scale (each cascade
+    // has a distinct extent) and replaced in place. The engine's cascade CB
+    // exceeds the registry's size gate, so the pass-scoped stash of the last
+    // window-shaped matrix is what holds it.
     LiveShadowEntry entries[KH_LIVE_MAX_CASCADES] = {};
     uint32_t count = 0;
-    bool     wipe_deferred = false;   // KH_LIVE_WIPE_DEFER: door 4 marked the table suspect; the
-                                      // First commit prunes it.
+    bool     wipe_deferred = false;   // The table was marked suspect; the first commit prunes it.
     uint64_t stamp_counter = 0;
     int      newest = -1;   // Entry index of the last finalize.
     struct BandSlot {
         bool  valid = false;
         bool  pending_view = false;
         // The provisional vcol came from the bridge fallback (no engine view
-        // published yet - the spawn window): a cross-convention pairing the
-        // receive term must not consume. Cleared when the true same-frame view
-        // completes the seal.
+        // published yet): a cross-convention pairing the receive term must not
+        // consume. Cleared when the true same-frame view completes the seal.
         bool  vcol_bridge = false;
-        float pending_since = 0.0f;   // When the seal went pending. (The former 100 ms bridge
-                                      // fallback is gone: a pending older than 50 ms at the next
-                                      // frame view is invalidated by the epoch guard, so it could
-                                      // never fire.)
+        float pending_since = 0.0f;   // When the seal went pending.
         float sm[12] = {};   // PSC_ShadowmapMatrix rows (float4x3).
         float vcol[12] = {};   // View matrix columns 0.2 (world->view, row-vector conv).
-        float border[4] = {};   // x = near, y = far, z = dead (always 0).
+        float border[4] = {};   // x = near, y = far.
         float last_time = 0.0f;
         ID3D11Texture2D*          tex = nullptr;
         ID3D11ShaderResourceView* srv = nullptr;
-        // The slot keeps serving its previous complete seal meanwhile, so it is
-        // never half-built and the consumer never has to choose between an
-        // Offset pair and no pair at all. Deferred capture. The sm/border a
-        // sweep produced, held out of the live triple until the view that pairs
-        // with it arrives.
+        // Deferred capture: the sm/border a sweep produced, held out of the
+        // live triple until the view that pairs with it arrives. The slot keeps
+        // serving its previous complete seal meanwhile.
         bool     stage_valid = false;
         float    stage_sm[12] = {};
         float    stage_border[4] = {};
@@ -12026,8 +11396,8 @@ struct LiveShadowState {
         bool     stage_view_ok = false;
         // vcol layout (columns), like stage_view above.
         bool     stage_pair_ok = false;
-        // KH_BAND_STAGE_FIRST: the first exact native publish accepted after
-        // This band's own stage, no source filter and no boundary guard.
+        // The first exact native publish accepted after this band's own stage,
+        // no source filter and no boundary guard.
         float    stage_first[12] = {};
         bool     stage_first_ok = false;
         int      stage_pool = -1;   // Claimed back buffer (-1 = none).
@@ -12040,8 +11410,7 @@ struct LiveShadowState {
     bool view_published_this_frame = false;   // Dual gate for the cast arm.
     float last_publish_rot_err = 1.0f;   // rot agreement of the last accepted publish.
     // A healthy lock re-proves exactness within the window continuously; a
-    // genuinely off-axis era never does and still starves - at most one window
-    // late.
+    // genuinely off-axis era never does and starves - at most one window late.
     uint64_t pub_exact_ms = 0;   // 0 = no exact publication yet.
     uint64_t pub_fresh_ms = 0;
     float band_last_reject[4] = {};   // Last border quad rejected by sanity.
@@ -12079,9 +11448,8 @@ struct LiveShadowState {
 static LiveShadowState g_ls;
 
 // Rotation only: the mesh passes adopt fv's rotation whenever it is
-// frame-fresh; the latch remains the authority when it is not (cold start, lock
-// dropped, no publish this frame). The supervisor's truth/health reference
-// stays the pre-adoption latch (independence: a wrong lock must not
+// frame-fresh; the latch remains the authority when it is not. The supervisor's
+// truth/health reference stays the pre-adoption latch (a wrong lock must not
 // self-certify through its own adopted publishes).
 static float    g_inj_view[16] = {};
 static uint64_t g_inj_view_ms = 0;
@@ -12127,10 +11495,9 @@ inline bool kh_adopt_frame_view(RVExtBridge::ProjectionViewTransform& pv,
         return true;
     }
 
-    // Latch camera first - extracted before any mutation. Through the honest
-    // inverse, not the transpose. Below that threshold the rebuild runs and
-    // carries the residual, which in Zeus is decimetres rather than mm because
-    // |t| is the absolute map position.
+    // Latch camera first, extracted before any mutation, through the honest
+    // inverse (not the transpose: |t| is the absolute map position, so the
+    // transpose is decimetres off).
     float khav_camf[3];
     kh_cam_of_site(pv.view, khav_camf, 1);
     const double khav_cam[3] = { khav_camf[0], khav_camf[1], khav_camf[2] };
@@ -12153,9 +11520,9 @@ inline bool kh_adopt_frame_view(RVExtBridge::ProjectionViewTransform& pv,
 }
 
 struct CbColorProbe {
-    float    last_mode = 0.0f;   // 1 = standard layout 2 = the altitude/atmospheric variant
-                                 // (different lane semantics - black-box green-flicker lesson;
-                                 // the mirror refresh is gated on it).
+    // 1 = standard layout, 2 = the altitude/atmospheric variant (different lane
+    // semantics; the mirror refresh is gated on it).
+    float    last_mode = 0.0f;
     ID3D11Resource* buf = nullptr;   // Locked upload location (weak identity).
     uint32_t off = 0;   // Float index of the decay anchor lane.
     uint32_t floats = 0;   // CB size (floats) at lock time.
@@ -12165,22 +11532,17 @@ struct CbColorProbe {
     uint64_t hits = 0;   // Anchor confirmations (health: climbs steadily).
     float    last_err = 0.0f;   // altitude-lane residual at the last confirmation.
     float    last_confirm = 0.0f;   // Wall clock of the last confirmation (expiry).
-    float    nb[96] = {};   // Live block mirror render thread writes game thread reads -
-                            // Diagnostics and the fog-chroma consumer, under the park invariant
-                            // like everything else.
+    float    nb[96] = {};   // Live block mirror (render thread writes, game thread reads under the park).
 };
 static CbColorProbe g_light_probe;
 
-// Lamp probe: same machinery, planted-truth fingerprint.
-
 static CbColorProbe g_sky_probe;
 
-// Sky-candidate forensics, diagnostic only (the lock itself is settled and
-// closed; this scorer is kept for the dump, not because a session is expected
-// to miss it): every scanned upload with nf >= 72 is scored against the anchor
-// conditions as a bitmask (1 = row15 positive-small, 2 = blue >= red, 4 =
-// row17 ascending, 8 = row17 bounded, 16 = row14 sane, 32 = row17 exact
-// (0.25, 0.75, 3.5)); the best scorer's first 96 floats are mirrored.
+// Sky-candidate forensics, diagnostic only: every scanned upload with nf >= 72
+// is scored against the anchor conditions as a bitmask (1 = row15
+// positive-small, 2 = blue >= red, 4 = row17 ascending, 8 = row17 bounded, 16 =
+// row14 sane, 32 = row17 exact (0.25, 0.75, 3.5)); the best scorer's first 96
+// floats are mirrored.
 
 inline bool locator_sky_anchor(const float* f, uint32_t nf) {
     if (nf < 72) return false;
@@ -12206,9 +11568,8 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
 inline void locator_note_upload(ID3D11Resource* res, const void* data, uint32_t bytes);
 
 // At each injection, before our own state touches slot 0, the plausible-size
-// bound PS CBs are copied to staging and read back a frame later - DO_NOT_WAIT,
-// never a stall - and the contents feed the same anchor and mirror as the
-// upload path.
+// bound PS CBs are copied to staging and read back a frame later (DO_NOT_WAIT),
+// feeding the same anchor and mirror as the upload path.
 struct SkyBindProbe {
     ID3D11Buffer* staging[16] = {};   // 0-7 = PS slots, 8-15 = VS slots.
     uint32_t      bytes[16] = {};
@@ -12217,14 +11578,13 @@ struct SkyBindProbe {
     uint16_t      pending = 0;   // Bitmask: staging[i] holds an unread copy.
 };
 static SkyBindProbe g_skybind;
-// Runs only while unlocked - a healthy session never executes a line of it -
-// and the slot is age-bounded so a stale matrix cannot sit there winning after
-// the camera has moved on.
+// Runs only while unlocked; the slot is age-bounded so a stale matrix cannot
+// sit there winning after the camera moved on.
 static constexpr uint64_t KH_RING_BEST_MAX_CYCLES = 120ull;   // ~2 s at 60 fps.
 static bool     g_ring_best_valid = false;
-// For the whole cold-cache compile window. The shadow acquisition chain stands
-// down while it is set, and the first gate-passed frame after it clears is
-// treated as the session's frame one.
+// For the whole cold-cache compile window: the shadow acquisition chain stands
+// down while set, and the first gate-passed frame after it clears is treated as
+// the session's frame one.
 static std::atomic<bool> g_acq_hold{false};
 static float    g_ring_best_er = 0.0f;   // Its score at admission.
 static const void* g_ring_best_res = nullptr;
@@ -12233,10 +11593,9 @@ static uint32_t g_ring_best_orient = 1;
 static uint64_t g_ring_best_cycle = 0;
 static float    g_ring_best_m[16] = {};
 static float    g_pub_first = -1.0f;   // Cold publish-window epoch (hoisted static; session-reset).
-// non-owning by contract. This and g_coldlock_cand_res below are identity keys,
-// never dereferenced: no AddRef, no Release, compared only against
-// g_ls.vc_ring[].res and nulled at session reset. If you ever need the contents
-// behind one of these, take a reference at the point of use; do not promote the
+// Identity keys, never dereferenced: no AddRef, no Release, compared only
+// against g_ls.vc_ring[].res and nulled at session reset. If you need the
+// contents behind one, take a reference at the point of use; do not promote the
 // key.
 static ID3D11Resource* g_prewarm_cand_res = nullptr;
 static uint32_t g_prewarm_cand_off = 0;
@@ -12250,39 +11609,33 @@ static std::atomic<uint64_t> g_cc_flush_serial{0};   // Ticks once per flush_loc
 
 static std::atomic<uint32_t> g_cc_flush_opaques{0xFFFFFFFFu};   // Sentinel = no flush yet.
 
-// What remains is why the injection missed: no trigger (attempts 0), anomalous
-// skip (silent slot - possibly the engine skipping redundant CB uploads on
-// static sky frames), or the pv race. Latched once per missed frame at the
-// first fallback mesh.
+// Why the injection missed: no trigger (attempts 0), anomalous skip (silent
+// slot), or the pv race. Latched once per missed frame at the first fallback
+// mesh.
 static float    g_inj_enc_m22 = 0.0f;
 static float    g_inj_enc_m32 = 0.0f;
 static float    g_inj_enc_near = -1.0f;
 static uint64_t g_inj_enc_ms = 0;
 static constexpr float KH_INJ_SLOT_NEAR_MIN = KH_CAM_NEAR_MIN;
-// The receive probe stands itself down on entries it never harvested
-// (KH_CASCBIND_SELF_FRESH). The mask paint lands after the lit pass on maps whose
-// readers precede the locator's publication; seeding this frame's view onto last
-// frame's depth is wrong by construction and is off.
-// KH_TRIG_FLOOR_ADAPT: the floor prices off committed injections.
+// The receive probe stands itself down on entries it never harvested. Seeding
+// this frame's view onto last frame's depth is wrong by construction and is
+// off. The trigger floor prices off committed injections.
 static uint64_t g_ms_flush_serial = 0;
-
 
 // Serial-matched carry latch: the flush stores its serial when it carries a
 // missed frame; the rescue window is exactly that frame's post-flush tail,
 // self-closing when the next flush ticks the serial.
 static std::atomic<uint64_t> g_carry_pending_serial{0};
-// First failing gate counts. After a rescue, the injection re-arms while the
-// serial-matched window is still open, so a later repainting partition's own
-// trigger repaints again; the window self-closes at the next flush and healthy
-// frames can never open it, so steady-state behavior is untouched.
+// First failing gate counts. After a rescue the injection re-arms while the
+// serial-matched window is open, so a later repainting partition's own trigger
+// repaints again; the window self-closes at the next flush and healthy frames
+// never open it.
 static constexpr uint32_t KH_RESCUE_MAX_PER_FRAME = 4;
 static uint32_t g_rescue_frame_count = 0;   // Rescues this frame (boundary reset).
 
-// Healthy frames are never carried, so no size floor is needed; a rescue that
-// fires early in the repainting partition writes world-range depth, which
-// defends against far-pinned partitions outright and yields only where a
-// near-pinned partition genuinely drew. Functional (not diagnostic): gates the
-// sky-span trigger path and the injection's rescue take.
+// Functional, not diagnostic: gates the sky-span trigger path and the
+// injection's rescue take. Healthy frames are never carried; a rescue early in
+// the repainting partition writes world-range depth.
 inline bool kh_rescue_window_open() {
     const uint64_t khr_cfs = g_cc_flush_serial.load(std::memory_order_relaxed);
 
@@ -12306,19 +11659,14 @@ inline bool kh_rescue_window_open() {
     return true;
 }
 
-// CONTEXT1 cache: dynlights sampling/acquire, the skybind harvest and the
-// cascade-binding harvest each ran a QueryInterface for ID3D11DeviceContext1 on
-// every invocation (~150-250/frame lit) against the same immediate context.
-// Callers are the render thread mid-frame and the game thread under the park
-// (KH_CB_RING's uploads, StateBackup's 1.1 capture/restore, /) - never both at
-// once, which is the park invariant, and both hand in the same immediate
-// context so the cache never thrashes.
+// Cached ID3D11DeviceContext1 for the immediate context. Callers are the render
+// thread mid-frame and the game thread under the park - never both at once -
+// and both hand in the same immediate context.
 static ID3D11DeviceContext1* g_kh_ctx1 = nullptr;
 static void*                 g_kh_ctx1_for = nullptr;
 
-// Unlocked cache: its callers are the flush (game thread, under the graphics
-// lock) and the render-thread passes, which the park invariant serializes. A
-// third thread (a shader worker, for one) must not call this.
+// Unlocked cache: its callers are serialized by the park invariant. A third
+// thread (a shader worker, for one) must not call this.
 inline ID3D11DeviceContext1* kh_ctx1(ID3D11DeviceContext* ctx) {
     if (g_kh_ctx1 && g_kh_ctx1_for == static_cast<void*>(ctx)) return g_kh_ctx1;
 
@@ -12329,10 +11677,9 @@ inline ID3D11DeviceContext1* kh_ctx1(ID3D11DeviceContext* ctx) {
 
     ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&g_kh_ctx1));
     g_kh_ctx1_for = g_kh_ctx1 ? static_cast<void*>(ctx) : nullptr;
-    // KH_CB_RING_NULLFIRST: the docs' own test, transcribed - a deferred
-    // context whose driver reports no native command lists is the emulated
-    // runtime the offset-only bind can fail on. Immediate contexts latch false.
-    // Once per context; the flag lives beside the cache it belongs to.
+    // A deferred context whose driver reports no native command lists is the
+    // emulated runtime the offset-only bind can fail on. Immediate contexts
+    // latch false. Once per context.
     g_kh_ctx1_null_first = false;
 
     if (g_kh_ctx1 && g_kh_ctx1->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED) {
@@ -12365,9 +11712,6 @@ struct KhRt0DescEntry {
     UINT     w = 0;
 };
 static KhRt0DescEntry g_rt0_desc[32] = {};
-
-
-
 
 static uint32_t g_rt0_desc_n = 0;
 static uint32_t g_rt0_desc_next = 0;
@@ -12408,7 +11752,6 @@ inline void skybind_step(ID3D11DeviceContext* ctx) {
         // scan the upload hooks feed - ring admission when unlocked, lock
         // maintenance when the window covers the locked location.
         if (i >= 8 && g_skybind.src[i]) {
-            // This path did not, and one of its two callsites is the injection.
             if (g_ro.in_injection) {
             } else {
                 shadow_view_scan(g_skybind.src[i], f, g_skybind.bytes[i], g_skybind.base_fl[i]);
@@ -12419,13 +11762,12 @@ inline void skybind_step(ID3D11DeviceContext* ctx) {
     }
 
     // Phase two: stage fresh copies. Two independent wants: a stale sky mirror
-    // (fog work) or an unlocked view (the harvest). Idles fully when both are
+    // (fog) or an unlocked view (the harvest). Idles fully when both are
     // satisfied.
     const bool want_sky_stage = !(g_sky_probe.valid &&
         effect_time_seconds() - g_sky_probe.last_confirm < 5.0f);
-    // The view lock's only consumer is the lit shadow cast - demand-gate the
-    // stage so unlit sessions stop staging VS copies every 8th opaque draw
-    // forever.
+    // The view lock's only consumer is the lit shadow cast; demand-gate the
+    // stage so unlit sessions stop staging VS copies forever.
     const bool want_view_stage = !g_ls.view_src_valid && shadow_live_wanted();
     if (!want_sky_stage && !want_view_stage) return;
 
@@ -12448,9 +11790,9 @@ inline void skybind_step(ID3D11DeviceContext* ctx) {
     for (int i = 0; i < 16; ++i) {
         if (!bufs[i]) continue;
 
-        // VS slots: never at the injection (our own CB is bound there - the
-        // never-self-learn rule), and only while the view wants feeding; PS
-        // slots only while the sky wants feeding.
+        // VS slots: never at the injection (our own CB is bound there - never
+        // self-learn), and only while the view wants feeding; PS slots only
+        // while the sky wants feeding.
         const bool stage_ok = i < 8 ? want_sky_stage
                                     : (want_view_stage && !g_ro.in_injection);
 
@@ -12528,10 +11870,9 @@ inline bool locator_zero_anchor(const float* f, uint32_t i, uint32_t nf,
 // Planted-light position at f[i.i+2]: world or camera-relative, 0.75 m per
 // lane. The relative test stands down when the plant sits too close to the
 // camera (a near-zero relative triple would anchor on the world's most common
-// float) - the procedure plants the light a few meters out.
+// float).
 
-// meta is the caller's field now (the lamp probe stores the match space there;
-// v1 of this helper silently clobbered it with off - nb_base).
+// meta is the caller's field (the lamp probe stores the match space there).
 inline void locator_capture(CbColorProbe& pr, const float* f, uint32_t nf, uint32_t win) {
     if (win > 96) win = 96;
 
@@ -12580,47 +11921,32 @@ inline void locator_capture(CbColorProbe& pr, const float* f, uint32_t nf, uint3
 static float g_shadow_map_strength = 1.0f;   // 0 disables the map term.
 static float g_shadow_map_bias = 0.0015f;   // In the transform's depth units.
 static float g_shadow_map_sign = 1.0f;   // +1 standard depth, -1 reversed.
-// vp/bias/bounds are only meaningful while valid; both flags reset at the main
-// depth clear so a stale sun matrix is never served. Private sun-depth map
-// state (render thread writes at its pass; the game-thread flush reads under
-// the park invariant, like everything else here).
+// Private sun-depth map state (render thread writes at its pass; the flush
+// reads under the park). vp/bias/bounds are meaningful only while valid; both
+// flags reset at the main depth clear so a stale matrix is never served.
 static bool  g_sun_map_rendered_frame = false;   // This frame's pass already ran.
 // Self-term staleness ceiling (fill_lighting_frame_cb's age gate; the cast fire
-// has its own 0.25 s window). 1 s rides out transient miss bursts without
-// flicker; beyond it the self term stands down - unlit-correct beats black.
+// has its own 0.25 s window). 1 s rides out miss bursts without flicker; beyond
+// it the self term stands down.
 static constexpr float KH_SUN_MAP_SELF_MAX_AGE_S = 1.0f;
-// The lit flag is structural: lighting1.w = g_sun_valid (the sun has been
-// published this session; it never falls). The former gate ANDed a view-
-// stream health test (a 0.20-bar publication within 1 s, or silence after one)
-// and a 300 ms rise debounce; four runs counted the stream terms
-// refusing only in the cold window before the first view lock (586 flushes in
-// one run, 1 in another, 0 drops afterwards in any run) and a cold run at the
-// structural flag was validated by eye. The shading never depended on the view
-// lock: the direction and the colours publish at the depth clear. Folded.
+// The lit flag is structural: lighting1.w = g_sun_valid (published this
+// session; never falls). The shading never depended on the view lock: direction
+// and colours publish at the depth clear.
 static constexpr float    KH_LIT_FRESH_ERR = 0.20f;   // The 'fresh' publication bar (pub_fresh_ms; kh_recv_health, band_capture, the cast).
 static bool  g_sun_map_valid = false;   // Pass produced a usable map.
-static bool  g_sun_map_cam_anchor = false;   // Union fit was camera anchored (default) vs caster-
-                                             // Anchored (241 / camera-less).
-static float g_sun_map_render_time = -1.0f;   // Trivial re-renders (the derived sun wobbling
-                                              // sub-settle under a fast look - jitterlog2's 11-23
-                                              // frame bursts at 0.22 deg total churn) do not reset
-                                              // it.
+// Union fit was camera-anchored (default) vs caster-anchored (camera-less).
+static bool  g_sun_map_cam_anchor = false;
+static float g_sun_map_render_time = -1.0f;   // Not reset by sub-settle sun wobble.
 static uint64_t g_sun_mat_chash = 0;   // Caster hash at the last maturity reset.
 static float    g_sun_mat_sun[3] = {};   // Derived sun at the last maturity reset.
-static float g_sun_map_time = -1.0f;   // When it was produced the fire consumes last frame's map;
-                                       // 0.25 s staleness bounds fallback frames.
+// When it was produced (the fire consumes last frame's map; 0.25 s staleness
+// bounds fallback frames).
+static float g_sun_map_time = -1.0f;
 static bool  g_sun_map_no_local = false;   // Casters exist, none within the fit.
-// That is why four builds of freeze-hunting kept landing on other things. The
-// stale mask persists because the fire returns without painting.
 static float g_sun_map_vp[16] = {};   // row-vector world -> sun clip.
 static float g_sun_anchor_now[3] = {};
 static float g_sun_map_anchor[3] = {};
 static float g_sun_cam_anchor[3] = {};
-// Frozen while standing (permanent offset), a jump on its next render
-// (flicker), a splice where a mesh straddles two tiers on different cadences,
-// and never for the meshes in the tiers that render every frame - the near
-// ones. 3-4 meshes beside the player never leave those tiers;. 301 spread out
-// always do.
 static float g_sun_tier_anchor[4][3] = {};   // Tiers 2.5, stamped only when that tier rendered.
 // Rebase src (built about src_anchor) so it is relative to dst_anchor.
 inline void kh_sun_rebase_vp(float khsr_dst[16], const float* khsr_src,
@@ -12682,9 +12008,9 @@ static uint64_t g_sun5_renders = 0;
 static uint64_t g_sun5_casters = 0;
 
 // The four camera-anchored bands fill CBFrame identically (rebased VP + meta:
-// Valid, size, bias, half-diag); one helper keeps the flush and injection fills
-// - twins by rule - from drifting. A stood-down band leaves its lanes at the
-// zeroed default, which the shader reads as 'no map'.
+// valid, size, bias, half-diag); one helper keeps the flush and injection fills
+// from drifting. A stood-down band leaves its lanes zeroed, which the shader
+// reads as 'no map'.
 inline void kh_fill_sun_tier_cb(const float* khft_anchor,   // KH_SUN_TIER_ANCHOR: the anchor this
                                                             // Tier rendered with.
                                 float khft_vp[4][4], float khft_meta[4], bool khft_valid,
@@ -12699,17 +12025,12 @@ inline void kh_fill_sun_tier_cb(const float* khft_anchor,   // KH_SUN_TIER_ANCHO
     khft_meta[3] = khft_half_diag;
 }
 static bool g_sun_pf_valid[4] = { false, false, false, false };   // KH_FAR_PF: [3] the far tier.
-// KH_SUN_TIER_KEY. Each camera tier's render is a function of its inputs -
-// the caster hash, the sun, the snapped centre (double; the sun-axis
-// component is unsnapped, so any camera motion re-keys), the window, the
-// size, the reach latch, the dissolve range and the instance capacity - and
-// the tiers rendered every call regardless ("Camera bands
-// render every call"): with the camera still, 3,696 instances a frame drawn
-// into four maps that could not differ from the previous frame's. A tier
-// whose key matches its last completed render keeps every static it left
-// (vp, bias, half-diag, valid, anchor, pyramid) and renders nothing. A
-// skipped tier is not a fresh map: the convert reads pf_fresh, not pf_valid,
-// and the anchor stamp follows the render, not the call.
+// Each camera tier's render is a function of its inputs (caster hash, sun,
+// snapped centre with the sun-axis component unsnapped, window, size, reach
+// latch, dissolve range, instance capacity). A tier whose key matches its last
+// completed render keeps every static it left and renders nothing. A skipped
+// tier is not a fresh map: the convert reads pf_fresh, not pf_valid, and the
+// anchor stamp follows the render.
 static bool     g_sun_pf_fresh[4] = { false, false, false, false };   // Rendered since the last convert.
 static uint64_t g_sun_tier_key[4] = { 0, 0, 0, 0 };
 static bool     g_sun_tier_key_ok[4] = { false, false, false, false };
@@ -12827,18 +12148,16 @@ inline void kh_sun_pf_convert(ID3D11DeviceContext* ctx) {
 }
 // 1 = the band never fitted.
 static float    g_sun_band_reach[4] = { -1.0f, -1.0f, -1.0f, -1.0f };   // [3] = far.
-// khsh_out_reach / khsh_out_casters are written only inside the completed-render
-// block, so with valid false they are stale from the last completing frame. The
-// lanes below are stamped at the admission loop, which every call runs before any
-// exit, so they describe the pose that was evaluated.
+// khsh_out_reach / khsh_out_casters are written only inside the
+// completed-render block, so with valid false they are stale from the last
+// completing frame. The lanes below are stamped at the admission loop, which
+// every call runs before any exit.
 static constexpr float KH_BAND_BIAS_TEXELS = 2.0f;
-// KH_CAST_BIAS_CAP - texel-priced like KH_BAND_BIAS_TEXELS above (ladder texels
-// run 1 / 4 / 16 / 100 mm hero..far at shadowVisibility 200). The cast cannot
-// acne (the receiver is never in our map), so this bias only absorbs the caster's
-// own stored depth error.
+// Texel-priced like KH_BAND_BIAS_TEXELS (ladder texels run 1 / 4 / 16 / 100 mm
+// hero..far). The cast cannot acne (the receiver is never in our map), so this
+// bias only absorbs the caster's own stored depth error.
 static constexpr float KH_CAST_BIAS_CAP_M = 0.04f;
-// Read them side by side: equal on hero/mid/outer (the cap never binds there).
-// 1 = the cast fill never ran.
+// -1 = the cast fill never ran.
 static constexpr float KH_BAND_FWD_SLACK = 1.25f;
 static constexpr float KH_BAND_FWD_DROP  = 1.60f;   // re-latch tighter past this.
 static float    g_sun_fwd_held[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
@@ -12855,34 +12174,30 @@ static float g_fire_view2[16] = {};
 static float g_fire_sun2[3] = {};   // Live per re-fire while it re-publishes.
 static bool  g_fire_lock_valid = false;
 
-// per-fire live-VS-frozen view delta (instrument): at every fire, the camera of
-// the engine's most recent view publication against the frozen camera.
+// Per-fire live-vs-frozen view delta (instrument): the camera of the engine's
+// most recent view publication against the frozen camera.
 static uint32_t g_fire_count_frame = 0;
 static uint64_t g_lock_churn_ms_v = 0;   // Last lock-churn event (adoption / wipe / relock / forced
                                          // Drop); 0 = never.
-// KH_FIRE_ERA_RECOVER: the era guard's escape. Consecutive refusals mean the
-// incumbent is the stale one, not the candidate, so recovery is bounded instead
-// of never. KH_FIRE_PV_LIVE: the fire refuses to paint through a cycle_pv copy
-// older than this when a live transform can be fetched instead.
+// The era guard's escape: consecutive refusals mean the incumbent is the stale
+// one, so recovery is bounded. KH_FIRE_PV_STALE_S: the fire refuses to paint
+// through a cycle_pv copy older than this when a live transform can be fetched.
 static const float KH_FIRE_PV_STALE_S = 0.25f;
 static constexpr uint32_t KH_FIRE_ERA_RECOVER_N = 4;   // Consecutive refusals that earn adoption.
 static uint32_t g_fire_era_reject_run = 0;
 static constexpr uint64_t KH_CAST_READY_QUIET_MS = 1500;
-static constexpr uint64_t KH_CAST_READY_DWELL_MS = 1500;   // continuous-health dwell before the
-                                                           // Latch.
+static constexpr uint64_t KH_CAST_READY_DWELL_MS = 1500;   // Continuous-health dwell before the latch.
 static bool     g_cast_ready = false;   // The latch: casts allowed.
 static uint64_t g_cast_ready_since_ms = 0;   // Dwell start (0 = dwell not running).
 // Both call sites sit inside 'if (fresh frame_view || cycle_pv_valid)': with
-// neither view source the provenance block never runs - by design, not an
-// omission: a band seal stores the same-frame view (vcol) with the cascade, and
-// the deferred-view path completes that seal when the true view arrives, so a
-// seal taken with no view source is finished, not trusted blind. Closed.
+// neither view source the provenance block never runs, by design - a band seal
+// stores the same-frame view with the cascade, and the deferred-view path
+// completes that seal when the true view arrives.
 static float g_cascbind_feed_t = -1.0f;   // Stamped at every harvest feed.
-// These lanes decompose the same comparison into height and orientation. The
-// last fire cannot be identified while it is happening, so the index is learned
-// from the previous frame and self-corrects: a frame that ends with no paint at
-// all lowers the target immediately (never below 1), and any frame that paints
-// re-learns the target from its own final count.
+// The last fire cannot be identified while it is happening, so the index is
+// learned from the previous frame and self-corrects: a frame ending with no
+// paint lowers the target (never below 1); any frame that paints re-learns it
+// from its own final count.
 static uint32_t g_fire_clamp_target = 1;   // Learned index of the frame's last fire.
 static uint32_t g_fire_clamp_painted = 0;   // Paints carried this frame.
 static float    g_cycle_pv_prev[4][4] = {};
@@ -12892,35 +12207,25 @@ static float    g_cycle_pv_age_s = -1.0f;
 static bool     g_fire_mask_srv_now = false;   // This fire: engine mask SRV-bound at the save.
 
 // cast_misses is only written while the fire is armed, so on a frame that never
-// arms it holds whatever the last armed frame left behind - stale forever.
+// arms it holds the last armed frame's value.
 static uint32_t g_view_drop_path = 0;   // 0 none, 1 reject streak, 2 health miss.
 static float    g_view_drop_bar = -1.0f;   // The bar it failed (0.02 + min(md, 0.3)).
 
 static constexpr float    KH_PUB_DROP_HYST     = 1.5f;
-// The valve is a clock, not a count. Any count-based valve fires inside one
-// frame and the hysteresis becomes a no-op. Two seconds of continuously-soft
-// rejection is a genuinely standing disagreement and drops.
+// The valve is a clock, not a count: a count-based valve fires inside one frame
+// and the hysteresis becomes a no-op. Two seconds of continuous soft rejection
+// is a standing disagreement and drops.
 static constexpr uint64_t KH_PUB_DROP_HOLD_MS  = 2000ull;
 static uint64_t g_view_drop_hyst_since = 0;   // Stamp of the first hold of a run.
 static uint64_t g_view_relock_wide_cycle = 0;   // Topo cycle of the last wide-bar agreement.
 
 inline void kh_view_lock_acquired(uint32_t khvl_path);
 
-
-// The pair ends up one frame apart and wpos -> view -> shadow UV is offset by
-// exactly that camera step. Absent beats offset - the doctrine the warm-up gate,
-// the bridge-provisional guard and the sun-axis refusal are written on. The cold
-// escape hatch lets a slot take its first seal on a dead view source, and the
-// receive warm-up gate keys only on first_capture_time.
-// KH_BAND_POOL_8 (post-trust): one staging back buffer per band. With four,
-// a reseal of every band every frame (the reseal-throttle rip) filled the
-// pool at the first four cascade resolves and the other four bands missed
-// it every frame - one fell through to the in-place path per flush, three
-// kept a seal whose window no longer matched their capture (stale content
-// after a caster moved; a window that no longer covered the view after a
-// look-back, so the shadow vanished until the next miss-free capture). The
-// throttle had hidden the miss by spreading reseals over 250 ms. Costs four
-// more atlas-sized textures.
+// One staging back buffer per band: with fewer, per-frame reseals fill the pool
+// at the first resolves and the other bands keep a seal whose window no longer
+// matches their capture. A seal taken on a view one frame apart is offset by
+// exactly that camera step; absent beats offset. The cold escape hatch lets a
+// slot take its first seal on a dead view source.
 static constexpr int KH_BAND_STAGE_POOL = 8;
 inline int kh_band_pool_n() {
     return KH_BAND_STAGE_POOL;
@@ -12934,9 +12239,8 @@ struct KhBandStageTex {
 
 static KhBandStageTex g_band_pool[KH_BAND_STAGE_POOL];
 
-// Also clears every slot's staging, because a staged capture whose back buffer
-// just died must not commit. Device-object teardown twin for the band textures
-// (atlas desc change and device reset both call it).
+// Also clears every slot's staging: a staged capture whose back buffer just
+// died must not commit. Called on atlas desc change and device reset.
 inline void kh_band_pool_release() {
     for (int khbp_k = 0; khbp_k < KH_BAND_STAGE_POOL; ++khbp_k) {
         if (g_band_pool[khbp_k].srv) { g_band_pool[khbp_k].srv->Release(); g_band_pool[khbp_k].srv = nullptr; }
@@ -12952,9 +12256,8 @@ inline void kh_band_pool_release() {
     g_ls.stage_any = false;
 }
 
-// Desc comes from the live atlas exactly as the ensure block builds it;
-// non-fatal, a failed create leaves the slot null and the caller's miss path
-// stands.
+// Desc comes from the live atlas; non-fatal, a failed create leaves the slot
+// null and the miss path stands.
 inline void kh_band_pool_ensure_n(int khbe_want) {
     if (!g_ls.atlas_tex) return;
     if (khbe_want > KH_BAND_STAGE_POOL) khbe_want = KH_BAND_STAGE_POOL;
@@ -12994,9 +12297,7 @@ inline void kh_band_pool_ensure_n(int khbe_want) {
 
 // A candidate seal view whose camera sits farther than KH_LATCH_JUMP_M-class
 // distance from the cycle latch camera is a foreign render and must never be
-// committed into a band seal: such commits were measured at 853-1479 m over
-// four sessions.
-// Candidate view (16 floats, view layout) vs the cycle latch camera; true = ok.
+// committed into a band seal. true = ok.
 inline bool kh_band_view_native(const float* khfv_v, bool khfv_count) {
     if (!g_ro.cycle_pv_valid) return true;   // No reference: cannot judge, admit.
     float khfv_c[3], khfv_r[3];
@@ -13009,15 +12310,11 @@ inline bool kh_band_view_native(const float* khfv_v, bool khfv_count) {
     if (!(khfv_d == khfv_d) || khfv_d <= 50.0f) return true;
     return false;
 }
-// The pair judge (kh_band_pair_coherent below): the capture-time view (vcol
-// column layout) against the welding view (row layout), same 50 m bar; it can
-// only refuse what it can measure (undecodable admits). A completion may not
-// switch sources: same source within the 25 ms window is
-// millimetres-to-centimetres, cross-source is 1.6 m plus.
-// (kh_weld_note stood here: the weld census's lanes were ripped in the trust
-// campaign and the body kept computing two camera decodes per commit into
-// nothing. Gone with its two call sites.)
-// gap-returning form (-1 = unjudgeable/admit); counting at the site.
+// The pair judge: the capture-time view (vcol column layout) against the
+// welding view (row layout), same 50 m bar; it can only refuse what it can
+// measure (undecodable admits). A completion may not switch sources: same
+// source within the 25 ms window is centimetres, cross-source is metres.
+// Gap-returning form (-1 = unjudgeable/admit).
 inline float kh_band_source_gap(const float* khss_vc, const float* khss_fv) {
     float khss_a[3] = { 0.0f, 0.0f, 0.0f };
     for (int khss_j = 0; khss_j < 3; ++khss_j) {
@@ -13093,30 +12390,22 @@ inline void kh_band_stage_commit(ID3D11DeviceContext* ctx) {
         }
 
         if (g_boundary_t >= 0.0f && b.stage_since >= g_boundary_t) {
-            // Staged this cycle - which is EVERY stage (bandStageInCycle ==
-            // bandStageCaptures): the engine resolves its cascades at the end
-            // of the cycle, after our injection, for the frame that follows,
-            // and the commit at the next cycle's first draws pairs that atlas
-            // with the next cycle's view. KH_STAGE_INCYCLE (an in-cycle commit,
-            // one run) paired it with the CURRENT view instead and put a
-            // moving offset into the received shadows for frames - the
-            // cross-pair the receive-V2 doctrine is written against. Retired;
-            // the wait stands.
+            // Staged this cycle, always: the engine resolves its cascades at
+            // the end of the cycle, after our injection, for the frame that
+            // follows, so the commit at the next cycle's first draws pairs that
+            // atlas with the next cycle's view. An in-cycle commit pairs it
+            // with the CURRENT view and offsets the received shadows.
             khsc_any = true;
             continue;
         }
 
         const bool khsc_aged = khsc_now - b.stage_since > 0.05f;
 
-        // KH_STAGE_COMMIT_NATIVE (post-trust): the commit used to wait here for
-        // the frame view to agree with the bridge PV to 1e-3 in rotation
-        // unless the stage had aged. Counted across two day runs
-        // with flicks: 0 attempts held of 25,000 commits - the bar never fired
-        // (1.187). The family and camera identity of the pairing view are
-        // tested below (kh_band_view_native, the pair coherence); the bar is
-        // gone. The rare flick frame that remains is the view publish landing
-        // after the injection on that frame (the commit's early return above:
-        // no pairing view yet), which no bar can close.
+        // The family and camera identity of the pairing view are tested below
+        // (kh_band_view_native, the pair coherence); no rotation-agreement bar
+        // against the bridge PV (it never fired). The rare flick frame that
+        // remains is the view publish landing after the injection (the early
+        // return above), which no bar can close.
 
         if (khsc_aged) {
             g_band_pool[khsc_p].busy = false;
@@ -13142,8 +12431,8 @@ inline void kh_band_stage_commit(ID3D11DeviceContext* ctx) {
             continue;
         }
         // The front band adopts the stage's matrices only here, once the stage
-        // is known to land: adopting them above the two tests left a refused
-        // or mixed stage's sm on a band whose texture never swapped.
+        // is known to land: adopting above the two tests leaves a refused
+        // stage's sm on a band whose texture never swapped.
         memcpy(b.sm, b.stage_sm, sizeof(b.sm));
         memcpy(b.border, b.stage_border, sizeof(b.border));
 
@@ -13158,8 +12447,8 @@ inline void kh_band_stage_commit(ID3D11DeviceContext* ctx) {
         }
 
         // Swap, do not copy: the back buffer was filled at the resolve that
-        // paired this sm, so its content is the content that sm describes. The
-        // retiring front texture becomes the pool's next back buffer.
+        // paired this sm. The retiring front texture becomes the pool's next
+        // back buffer.
         {
             ID3D11Texture2D* khsc_t = b.tex;
             ID3D11ShaderResourceView* khsc_s = b.srv;
@@ -13188,10 +12477,8 @@ static constexpr uint64_t KH_RECV_HEALTH_DWELL_MS = 500ull;
 static bool     g_recv_health_ok = false;   // one-way latch (session state).
 static uint64_t g_recv_health_since_ms = 0;   // Dwell start (0 = not running).
 
-// It is a one-way latch: mid-session lock churn must not blink the world shadow
-// out, and the forced-drop path already wipes the tables itself. Absent beats
-// foreign - the same doctrine the warm-up gate, the band prov guard and the
-// sun-axis refusal are all written on.
+// A one-way latch: mid-session lock churn must not blink the world shadow out,
+// and the forced-drop path wipes the tables itself. Absent beats foreign.
 inline bool kh_recv_health() {
     if (g_recv_health_ok) return true;
     const bool khrh_ok = g_ls.view_src_valid &&
@@ -13218,15 +12505,6 @@ inline bool kh_recv_health() {
     return true;
 }
 
-// The backstop is the only remaining option once fire 1 has missed, and it is
-// structurally precarious every time it is used: one fire inside the read window
-// substitutes for a backstop paint that would otherwise repeat unchanged.
-
-// Two candidate repairs these lanes separate: the bar admits the impostor (tighten
-// it), or the winner must beat the runner-up decisively (the two-consecutive-
-// boundary rule re-arms whenever the winner changes, so a contested ring can hold
-// a correct candidate out indefinitely).
-
 // Called from every site that sets view_src_valid true, after the new identity
 // is in place.
 inline void kh_view_lock_acquired(uint32_t khvl_path) {
@@ -13238,45 +12516,38 @@ inline void kh_view_lock_acquired(uint32_t khvl_path) {
     g_view_relock_wide_cycle = 0;
 }
 
-// Mute stays as the fallback whenever the re-freeze cannot be taken. per-fire
-// RE-freeze (dbg 36). This re-runs the whole proven freeze block (continuity +
-// era guards, ortho inverse, depth snapshot) at the re-fire's own stream
-// position, and paints full strength.
+// Per-fire re-freeze: re-runs the whole freeze block (continuity + era guards,
+// ortho inverse, depth snapshot) at the re-fire's own stream position and
+// paints full strength. Mute is the fallback whenever the re-freeze cannot be
+// taken.
 static float    g_fire_refreeze_view[16] = {};   // Bridge view captured at the re-fire.
 static bool     g_fire_refreeze_pending = false;   // Consumed by the freeze block below.
 
-// A backstop paint lands at the end of frame N and is read early in frame N+1; if
-// frame N+1 rebinds the mask as an RT before those reads, that paint never
-// existed. Static blocks never transition or flicker and need no carry; the
-// flicker and the double are the same motion (motion-gated carry). The engine
-// consumes its matrix camera-relatively; the mesh transform uses the
-// self-consistent (R, t) pair forward; the fire is the one world-absolute inverse
-// consumer (PSMaskCast reconstructs pw = q).
+// A backstop paint lands at the end of frame N and is read early in frame N+1;
+// if N+1 rebinds the mask as an RT before those reads, that paint never
+// existed. The engine consumes its matrix camera-relatively; the fire is the
+// one world-absolute inverse consumer (PSMaskCast reconstructs pw = q).
 static float    g_fire_cast_inv[9] = {};   // R^{-1} laid out for castMat row-dots.
 static bool     g_fire_cast_inv_valid = false;   // Freeze produced a sane inverse.
-// A motion-churned derivation through a slow-rehashing map oscillates the
-// shadow position during motion and settles at rest (the duplicate's envelope);
-// cumulative rotation bias = the permanent offset; degenerate look-down cascade
-// geometry = the temporary pitch offset. One root, three symptoms; the churn
-// guard below is the settled answer, validated by eye under motion. Closed.
+// Churn guard: a motion-churned derivation through a slow-rehashing map
+// oscillates the shadow position during motion; cumulative rotation bias = a
+// permanent offset. Validated by eye under motion.
 static float    g_sun_churn_prev[3] = {};   // Published sun ~1 s ago.
 static uint64_t g_sun_churn_prev_ms = 0;
 
-static std::vector<float> g_sun_locals;   // in-map casters, 6 floats each: center xyz + half
-                                          // Extents xyz (engine axes) - uncapped.
+// In-map casters, 6 floats each: center xyz + half extents xyz (engine axes) -
+// uncapped.
+static std::vector<float> g_sun_locals;
 static int   g_sun_local_count = 0;   // Valid entries above (render thread, like the rest).
-// KH_CASTOCC_KEYSER: bumped wherever g_sun_locals is rewritten. The occupancy
-// memo's key is an FNV over the whole array - 65 KB at 2,792 casters - and it
-// ran on all nine of the pass's fires every frame, including the eight where
-// nothing had changed since the first. Measured 0.851 ms a frame, which was
-// most of what castOcc still cost after the incremental path landed. With a
-// serial the hash runs once per actual rewrite instead of once per fire.
+// Bumped wherever g_sun_locals is rewritten: the occupancy memo's key is an FNV
+// over the whole array, so with a serial the hash runs once per rewrite instead
+// of once per fire.
 static uint64_t g_sun_locals_serial = 0;
 
 static bool g_mask_cast_arm = false;
-// KH_CAST_RESOLVE_VIEW: the view current at the engine's depth resolve - the
-// one view that pairs with the depth the cast samples. Stamped at the resolve
-// sweep, consumed a frame later at the fire.
+// The view current at the engine's depth resolve - the one view that pairs with
+// the depth the cast samples. Stamped at the resolve sweep, consumed a frame
+// later at the fire.
 static std::atomic<bool> g_mission_destroy_pending{ false };
 
 inline void kh_msaa_toggle_wipe(unsigned int khtw_new) {
@@ -13306,21 +12577,17 @@ static void*     g_topo_scene_tex_id = nullptr;   // Latched scene texture ident
 static bool g_mask_cast_fired = false;   // One analytic pass per frame
 
 inline bool shadow_live_wanted() {
-    // g_sun_valid is deliberately not a term anymore: the live capture is what
-    // produces the derived direction, so gating capture on direction validity
-    // would deadlock the warm-up. Direction-dependent consumers all gate
-    // individually (lighting1.w, kh_shadow_sun's nullptr).
+    // g_sun_valid is deliberately not a term: the live capture is what produces
+    // the derived direction, so gating capture on direction validity would
+    // deadlock the warm-up. Direction-dependent consumers gate individually.
     return g_ls.wanted.load(std::memory_order_relaxed) && g_shadow_map_strength > 0.0f;
 }
 
-// Provenance (night-capture disassembly, PS-PixelShader_194/195 + 22 siblings;
-// DYNAMIC_LIGHTS_RECON.md holds the dossier): the engine's non-sun lighting is
-// per-pixel in the lit material shaders, driven by two PS constant buffers -
-// cb10[4] (control: [0].x point count and [1].x spot count as raw INT bit
-// patterns - the loop bound compare is ige, an integer op - [2].x global
-// distance scale, [3].xyz global diffuse multiplier) and cb11[192] (32 lights x
-// 6 float4, points first, spots appended; per-record layout in the HLSL cbuffer
-// comment).
+// Provenance (disassembly of the lit material shaders): the engine's non-sun
+// lighting is per-pixel, driven by PS cb10[4] (control: [0].x point count and
+// [1].x spot count as raw INT bit patterns, [2].x global distance scale,
+// [3].xyz global diffuse multiplier) and cb11[192] (32 lights x 6 float4,
+// points first, spots appended; record layout in the HLSL cbuffer comment).
 
 static constexpr uint32_t KH_DL_MAX_LIGHTS = 32;   // cb11 capacity (192 / 6).
 static constexpr uint32_t KH_DL_LIGHT_BYTES = 6 * 16;
@@ -13330,8 +12597,6 @@ static constexpr uint32_t KH_DL_STAGE_BYTES = KH_DL_CTL_BYTES + KH_DL_ARR_BYTES;
 static constexpr uint32_t KH_DL_RING = 16;
 static constexpr uint64_t KH_DL_STALE_MS = 500;   // Mirror expiry: fills stand down.
 static constexpr uint32_t KH_DL_WIN_MAX = 16;   // Distinct per-draw windows captured per frame
-                                                 // (8 -> 16: at every-draw sampling 8 saturated
-                                                 // on 375 of 477 harvests).
 static constexpr uint32_t KH_DL_VS_SLOTS = 13;   // VS cb slots captured (0.12).
 static constexpr uint32_t KH_DL_VS_CONSTS = 80;   // Constants per slot (view fits anywhere in 80).
 static constexpr uint32_t KH_DL_VS_BYTES = KH_DL_VS_CONSTS * 16;
@@ -13340,12 +12605,9 @@ static constexpr float    KH_DL_DERIVE_GRID_TOL = 1.0f;   // Origin must sit on 
 static constexpr float    KH_DL_DERIVE_ROT_TOL = 0.03f;   // Candidate rotation vs the frame view.
 // Windows with only loose candidates go unresolved (dark-safe), never flapping.
 static constexpr float    KH_DL_ORIGIN_RES_MAX = 0.03f;
-// The bar a candidate must clear to author. 0.03 admitted an impostor whose
-// origin moved a whole grid step every harvest while the true candidate sat at
-// exactly 0. The invariant is in the ranking now (see khd_offer) - a real
-// origin does not wander - and the bar goes back to admitting everything the
-// arbiter allows.
-static constexpr float    KH_DL_ORIGIN_RES_KEEP = KH_DL_ORIGIN_RES_MAX;
+// The bar a candidate must clear to author. The invariant that a real origin
+// does not wander is in the ranking (khd_offer), so the bar admits everything
+// the arbiter allows.
 static constexpr uint32_t KH_DL_ANCHOR_N = 64;
 static constexpr uint64_t KH_DL_ANCHOR_TTL_MS = 60000;
 static constexpr float    KH_DL_ANCHOR_RES = 0.005f;
@@ -13354,29 +12616,22 @@ static constexpr uint32_t KH_DL_WIN_BYTES = KH_DL_STAGE_BYTES + KH_DL_WIN_VS_BYT
 static constexpr uint32_t KH_DL_ARENA_BYTES = KH_DL_WIN_MAX * KH_DL_WIN_BYTES;
 static constexpr float    KH_DL_ORIGIN_Q = 100.0f;   // Origin grid (3500/4500/3300 all fit).
 static constexpr uint64_t KH_DL_POOL_STALE_MS = 500;
-// A harvest gap past this is a stall (alt-tab, load, time skip), not a frame: well
-// above the pool's stale bar, below the ~1 s hitch an alt-tab resume produces.
-// KH_DL_WINPROV table width: wider than KH_DL_WIN_MAX because this table must
-// remember windows across harvests as the engine cycles buffer addresses; four
-// times the window set so a recycle is an anomaly worth counting.
+// A harvest gap past this is a stall (alt-tab, load, time skip), not a frame.
+// KH_DL_WIN_SLOTS: wider than KH_DL_WIN_MAX because this table remembers
+// windows across harvests as the engine cycles buffer addresses.
 static constexpr uint32_t KH_DL_WIN_SLOTS = KH_DL_WIN_MAX * 4u;
-// (The exposure reference's band and confirm were folded post-trust:
-// KH_DL_REF_FOLD, at the reference adoption in dynlights_merge_windows.)
 static constexpr uint64_t KH_DL_TTL_CAP_MS = 1500;   // Proven ceiling (sparse worst case).
 static constexpr uint64_t KH_DL_TTL_FLOOR_MS = 250;   // Safety floor (unproven cadence).
-// KH_DL_TTL_DENSE_FLOOR_MS: The tail a light with proven cadence gets after the
-// engine stops emitting it, and therefore how long a despawned light keeps
-// lighting our meshes. KH_DL_TTL_FLOOR_MS (250) is deliberately not touched: an
-// unproven light - a muzzle flash seen once or twice, never dense - keeps the
-// long tail, which is what makes sporadic lights visible at all rather than a
-// one-frame blip.
+// The tail a light with proven cadence gets after the engine stops emitting it
+// - how long a despawned light keeps lighting our meshes. KH_DL_TTL_FLOOR_MS
+// stays long: an unproven light (a muzzle flash seen once) keeps the long tail,
+// which is what makes sporadic lights visible rather than a one-frame blip.
 static constexpr uint64_t KH_DL_TTL_DENSE_FLOOR_MS = 50;
 static constexpr uint64_t KH_DL_GAP_MULT = 2;   // TTL = mult x worst observed gap.
-// How long an unanchored window keeps the dense fast lane shut. How many of a
-// window's records the origin arbiter probes. The engine's list is not
-// distance-sorted, so the arbiter asks whether any of them lands near the
-// capture camera; eight is far past the point where a correct origin has shown
-// itself and keeps the per-candidate cost flat.
+// How long an unanchored window keeps the dense fast lane shut.
+// KH_DL_RANGE_PROBE: how many of a window's records the origin arbiter probes
+// (the engine's list is not distance-sorted; eight is far past where a correct
+// origin shows itself).
 static constexpr uint32_t KH_DL_RANGE_PROBE = 8;
 // Two residuals this close are the same residual.
 static constexpr float KH_DL_RES_TIE = 1.0e-6f;
@@ -13395,14 +12650,12 @@ inline bool kh_dl_dense(uint16_t khdn_sightings, uint16_t khdn_gap) {
     return khdn_sightings >= KH_DL_DENSE_SIGHTS;
 }
 // A lifetime maximum never decays: one unlucky early gap would price an entry's
-// tail at GAP_MULT x that gap for its whole life and bar it from the dense fast
-// lane. The high-water mark is the transient tail.
+// tail for its whole life. The high-water mark is the transient tail.
 static constexpr uint32_t KH_DL_GAP_DECAY_NUM = 7;   // Mark *= 7/8 per sighting.
 static constexpr uint32_t KH_DL_GAP_DECAY_DEN = 8;
 
-// Always >= the most recent gap, so the TTL can never fall below GAP_MULT
-// re-sight intervals. Cadence mark update: max(this gap, the decayed previous
-// mark).
+// Cadence mark update: max(this gap, the decayed previous mark), so the TTL
+// never falls below GAP_MULT re-sight intervals.
 inline uint16_t kh_dl_gap_mark(uint16_t khg_prev, uint64_t khg_gap) {
     if (khg_gap >= 60000) return khg_prev;   // out-of-era stamp: no evidence.
     const uint16_t khg_now = static_cast<uint16_t>(khg_gap);
@@ -13413,51 +12666,37 @@ inline uint16_t kh_dl_gap_mark(uint16_t khg_prev, uint64_t khg_gap) {
 }
 static constexpr float    KH_DL_MATCH_M = 1.0f;   // Pool update match radius (same light
                                                   // re-sighted).
-// KH_DL_LIST_CLAIM - two records in one list are two lights. The pool re-sight
-// match was positional alone: a 1 m cube. The invariant that separates them is
-// not a property compare (an animated fire changes colour every upload and must
-// still re-sight its own slot): it is that one uploaded list never carries the
+// Two records in one list are two lights: one uploaded list never carries the
 // same light twice, so each record of a list claims a slot no earlier record of
-// that list has claimed.
+// that list has claimed. Not a property compare (an animated fire changes
+// colour every upload and must still re-sight its own slot).
 static uint32_t g_dl_pool_next_id = 1;   // KH_DL_POOL_ID: next id to mint; never 0.
 
-// Dynamic lights are baseline: there is no mode and no off switch. The pool is
-// merged in absolute world space (dlCtl.x = 3 in the shader, the only decode
-// the shipping path ever used); intensity is the one script-facing control.
+// Dynamic lights are baseline: no mode, no off switch. The pool is merged in
+// absolute world space (dlCtl.x = 3 in the shader); intensity is the one
+// script-facing control.
 static std::atomic<uint32_t> g_dl_intensity_bits{0x3F800000u};   // Float bits, default 1.0.
 
-// KH_DL_CPU (post-trust, the readback frame). The engine's constant buffers are
-// shadowed on the CPU at the Unmap / UpdateSubresource hooks - the path the sky
-// and lighting blocks have always taken - and the light sampler reads each
-// draw's cb10 / cb11 / VS windows from those shadows instead of copying them on
-// the GPU. Two things follow. The harvest at the injection merges what was
-// drawn since the last injection - the span (the GPU arena was a frame behind:
-// filled during a frame, mapped at the next injection). And the capture is
-// complete: an upload is keyed on the shadow's write generation, so every list
-// the engine uploaded in the span is seen, not the first bind of each buffer
-// identity (the arena's key: cb11 is DISCARD-mapped for nearly every draw,
-// cb11MapsDiscard / cb11Distinct, and the arena saw ~9 of them, dlWinMax).
-// Completeness is what lets presence replace the TTL (KH_DL_SEQ, in
-// dynlights_merge_windows).
+// The engine's constant buffers are shadowed on the CPU at the Unmap /
+// UpdateSubresource hooks; the light sampler reads each draw's cb10 / cb11 / VS
+// windows from those shadows. The harvest at the injection merges what was
+// drawn since the last injection (the span), keyed on the shadow's write
+// generation, so every list the engine uploaded is seen (cb11 is DISCARD-mapped
+// for nearly every draw). That completeness is what lets presence replace the
+// TTL.
 static constexpr uint32_t KH_DL_WIN_MAX_CPU = 64;   // Windows per span (authoring + routine).
-// KH_DL_PRESENCE: the engine uploads a distinct list for nearly every draw
-// (~3,200 a frame at night), so a window per upload is not a design. A pool
-// light's presence is decided without one: the origin the last harvest
-// resolved for the upload's buffer puts the record in world and the re-sight's
-// 1 m cube names the light (dynlights_presence_upload). Every upload gets that
-// pass; a window is made only on the routine quota below (the brightness
-// reference, the anchors, the per-buffer origin), for a buffer with no origin
-// yet, or when the upload carries a record no pool light matches (a light to
-// author).
+// The engine uploads a distinct list for nearly every draw, so a window per
+// upload is not a design. Presence is decided without one: the origin the last
+// harvest resolved for the upload's buffer puts the record in world and the
+// re-sight cube names the light (dynlights_presence_upload). A window is made
+// only on the routine quota, for a buffer with no origin yet, or when the
+// upload carries a record no pool light matches.
 static constexpr uint32_t KH_DL_WIN_ROUTINE = 8;
-// KH_DL_UNPL: the validating run authored ~56 windows a harvest and the harvest
-// could place almost none of them (dlWinUnresolved ~ dlWinAuthor): the same
-// unplaceable records, a full VS scan each, every frame. A record the harvest
-// could not place (no origin by derivation or vote; the range backstop) is
+// A record the harvest could not place (no origin by derivation or vote) is
 // remembered by its raw list-frame position, quantized to a metre, for
 // KH_DL_UNPL_KEEP harvests; an upload whose unknown records are all remembered
-// earns no author window until that lapses. Presence is untouched (it runs
-// before this), and so is any placeable light.
+// earns no author window until that lapses. Presence and placeable lights are
+// untouched.
 static constexpr uint32_t KH_DL_UNPL_N = 256;     // Table entries (open addressing, 8-slot probe).
 static constexpr uint32_t KH_DL_UNPL_KEEP = 16;   // Harvests a note stands (~a quarter second).
 static constexpr uint32_t KH_CBS_N = 512;           // Shadow table entries (open addressing).
@@ -13466,9 +12705,8 @@ struct KhCbShadow {
     void*    id = nullptr;   // Weak identity (the resource pointer), compare only.
     uint32_t bytes = 0;      // Bytes held: the buffer's width, capped at the scratch size.
     uint32_t gen = 0;        // Write generation: the global counter at the last capture (never 0 once written).
-    // KH_DL_PRESENCE: the (generation, first constant, span) the sampler last
-    // processed this buffer at - the O(1) 'same upload again' test, since a
-    // span carries thousands of uploads and the window list holds 64.
+    // The (generation, first constant, span) the sampler last processed this
+    // buffer at - the O(1) 'same upload again' test.
     uint32_t pres_gen = 0;
     uint32_t pres_first = 0;
     uint64_t pres_seq = 0;
@@ -13487,9 +12725,8 @@ inline uint32_t kh_cbs_hash(const void* khch_id) {
     khch_h ^= khch_h >> 33;
     return static_cast<uint32_t>(khch_h) & (KH_CBS_N - 1);
 }
-// Read side (the sampler, render thread): the shadow of a buffer, or nullptr.
-// Entries are never cleared singly (only whole-table, at reset), so an empty
-// slot ends the probe.
+// Read side (the sampler, render thread). Entries are never cleared singly
+// (only whole-table at reset), so an empty slot ends the probe.
 inline KhCbShadow* kh_cbs_find(const void* khcf_id) {
     if (!khcf_id) return nullptr;
     uint32_t khcf_i = kh_cbs_hash(khcf_id);
@@ -13502,7 +12739,7 @@ inline KhCbShadow* kh_cbs_find(const void* khcf_id) {
     return nullptr;
 }
 // Write side (the hooks, render thread): copy the upload into the buffer's
-// shadow and return it, so the scanners walk the shadow instead of the scratch.
+// shadow and return it, so the scanners walk the shadow.
 inline const void* kh_cbs_write(void* khcw_id, const void* khcw_src, uint32_t& khcw_bytes) {
     if (!khcw_id || !khcw_src || khcw_bytes == 0) return nullptr;
     if (khcw_bytes > KH_UPLOAD_SCRATCH_BYTES) khcw_bytes = KH_UPLOAD_SCRATCH_BYTES;
@@ -13541,7 +12778,7 @@ inline void kh_cbs_clear() {
     }
 }
 // Every captured upload, in the hooks: the shadow when the CPU capture wants
-// the buffer, the scratch otherwise (the scanners read either).
+// the buffer, the scratch otherwise.
 inline const void* kh_upload_capture(ID3D11Resource* khuc_res, const void* khuc_src, uint32_t& khuc_bytes) {
     if (kh_dl_cpu_wanted()) {
         const void* khuc_p = kh_cbs_write(static_cast<void*>(khuc_res), khuc_src, khuc_bytes);
@@ -13555,9 +12792,9 @@ struct DlWindowMeta {
     uint32_t first = 0;
     uint32_t bytes11 = 0;   // Lights bytes actually copied.
     uint16_t vs_bytes[KH_DL_VS_SLOTS] = {};   // VS constants copied per slot (0 = absent).
-    // KH_DL_CPU: the cb11 shadow's write generation (0 = a GPU-arena window),
-    // the content hash of ctl + lights (the per-harvest dedupe) and the
-    // harvest this window belongs to (KH_DL_SEQ).
+    // The cb11 shadow's write generation (0 = a GPU-arena window), the content
+    // hash of ctl + lights (per-harvest dedupe) and the harvest this window
+    // belongs to.
     uint32_t gen = 0;
     uint64_t chash = 0;
     uint64_t seq = 0;
@@ -13570,19 +12807,13 @@ struct DlPoolLight {
     uint64_t stamp = 0;   // Last re-sight (persistence TTL).
     uint16_t gap_max_ms = 0;   // Worst observed re-sight gap (cadence evidence).
     uint16_t sightings = 0;
-    // KH_DL_POOL_ID: session-unique identity, minted at first sight
-    // (dynlights_merge_windows), carried through compaction because the struct
-    // copies whole (g_dl.pool[khd_keep] = g_dl.pool[i]). 0 = unminted. This is
-    // what lets a shadow slot name its light when two lights tie on position (a
-    // flashlight and a muzzle flash on one weapon are a hand's width apart).
+    // Session-unique identity, minted at first sight, carried through
+    // compaction. 0 = unminted. Lets a shadow slot name its light when two
+    // lights tie on position (a flashlight and a muzzle flash on one weapon).
     uint32_t id = 0;
-    // KH_DL_SEQ: the newest harvest whose span (the draws between two
-    // injections) carried this light. Presence at harvest N is seq == N. The
-    // depth-clear cycle was the key at first; the engine clears the main depth
-    // many times a frame at night (11 clears per injection measured),
-    // so no window ever belonged to the cycle that harvested it and every
-    // light dropped every harvest. A harvest span is the one boundary the
-    // harvest itself owns.
+    // The newest harvest whose span carried this light; presence at harvest N
+    // is seq == N. The depth-clear cycle is not usable as the key: the engine
+    // clears the main depth many times a frame at night.
     uint64_t seq = 0;
 };
 
@@ -13634,23 +12865,21 @@ struct DynLightsState {
     float    anchor_pos[KH_DL_ANCHOR_N][3] = {};
     uint64_t anchor_stamp[KH_DL_ANCHOR_N] = {};
     uint32_t anchor_n = 0;
-    // derivation-candidate recon ring (every validate-pass from the full scans,
-    // loose ones included: the constant landscape).
+    // Derivation-candidate recon ring (every validate-pass from the full
+    // scans).
     uint64_t pool_stamp = 0;
     float    main_gdiff[3] = { 1.0f, 1.0f, 1.0f };
     float    main_scale = 1.0f;
     uint8_t  main_ref_valid = 0;
-    // An alt-tab, a load or a time skip all show here, and the question is
-    // whether a memo write or an origin flip sits immediately after one.
     // Per-window resolved origin.
     float    win_ox[KH_DL_WIN_SLOTS] = {};
     float    win_oz[KH_DL_WIN_SLOTS] = {};
     uint8_t  win_oset[KH_DL_WIN_SLOTS] = {};
-    // The pool vote runs as a confirmation, not only as a fallback: the engine culls
-    // its light list to the camera, so a correct origin places at least one of a
-    // window's lights near the camera and a wrong one displaces them all. Keyed per
-    // window: dynlights_derive_origin runs once per window, and a shared tuple would
-    // let the last window to finish a full scan overwrite what another had learned.
+    // The pool vote runs as a confirmation, not only a fallback: the engine
+    // culls its light list to the camera, so a correct origin places at least
+    // one of a window's lights near the camera and a wrong one displaces them
+    // all. Keyed per window: a shared tuple would let the last window to finish
+    // overwrite another's.
     uint8_t  win_hint_set[KH_DL_WIN_SLOTS] = {};
     uint8_t  win_hint_kind[KH_DL_WIN_SLOTS] = {};
     int32_t  win_hint_slot[KH_DL_WIN_SLOTS] = {};
@@ -13666,10 +12895,8 @@ struct DynLightsState {
 };
 static DynLightsState g_dl;
 
-// Per-draw variability census render thread, sampled slot-11 window identities
-// per frame - the distinct buffer, offset count answers the per-draw culling
-// question one global visible list vs lists culled per draw, folded at the
-// frame boundary main clear.
+// Per-draw variability census (render thread): sampled slot-11 window
+// identities per frame, folded at the main clear.
 static void*    g_dl_cd_bufs[8] = {};
 static uint32_t g_dl_cd_first[8] = {};
 static uint32_t g_dl_cd_n = 0;
@@ -13680,9 +12907,9 @@ inline bool dl_finite(float v) { return v == v && v < 1.0e30f && v > -1.0e30f; }
 // pass reads the origin the last harvest resolved for a buffer.
 inline bool kh_dl_win_origin_of(const void* khp_buf, float& khp_ox, float& khp_oz);
 
-// KH_DL_UNPL: the unplaceable-record table. Keyed on the raw list-frame
-// position at metre resolution (the same light lands on the same key while
-// the origin stands; a flip re-keys it and the note lapses).
+// The unplaceable-record table, keyed on the raw list-frame position at metre
+// resolution (the same light lands on the same key while the origin stands; a
+// flip re-keys it and the note lapses).
 inline uint32_t kh_dl_unpl_slot(const int32_t khu_q[3], bool khu_insert, uint64_t khu_seq) {
     uint32_t khu_h = static_cast<uint32_t>(khu_q[0]) * 73856093u ^
                      static_cast<uint32_t>(khu_q[1]) * 19349663u ^
@@ -13735,23 +12962,14 @@ inline void kh_dl_unpl_note(const float* khu_l, uint32_t khu_n, uint64_t khu_seq
     }
 }
 
-// KH_DL_PRESENCE: one upload's records against the pool. The primary test is
-// the harvest's own: the origin the last harvest resolved for this buffer
-// identity (kh_dl_win_origin_of) puts the record in absolute world, and the
-// re-sight's 1 m cube (KH_DL_MATCH_M) names the pool light. A buffer with no
-// origin yet - or a record the origin test misses (an origin gone stale on a
-// 100 m flip) - falls back to the origin-free grid test (height within 0.25,
-// x / z a 100 m multiple apart within the vote's residual). KH_DL_PRES_CLAIM:
-// the merge's KH_DL_LIST_CLAIM rule holds here too - a record claims the ONE
-// nearest candidate by position plus every non-position lane (colour,
-// attenuation: an orange flash and a white flashlight a hand's width apart
-// are two lights), and never a light an earlier record of this list claimed.
-// Stamping every candidate in the cube kept a muzzle flash alive on a
-// flashlight's records until the flashlight went off. The claim stamps the
-// light and lifts its harvest serial. Returns how many finite records matched
-// nothing and the harvest has not recently failed to place (khp_unpl counts
-// those) - the lights to author. Unmatched records are binned by their best
-// residual.
+// One upload's records against the pool. Primary: the origin the last harvest
+// resolved for this buffer identity puts the record in world; the re-sight's
+// KH_DL_MATCH_M cube names the pool light. No origin yet, or a miss: the
+// origin-free grid test (height within 0.25, x / z a 100 m multiple apart
+// within the vote's residual). A record claims the ONE nearest candidate by
+// position plus every non-position lane, never a light an earlier record of
+// this list claimed. Returns the count of finite records that matched nothing
+// and are not recently-unplaceable - the lights to author.
 inline uint32_t dynlights_presence_upload(const void* khp_buf,
                                           const uint8_t* khp_ctl, const uint8_t* khp_l,
                                           uint32_t khp_bytes11, uint64_t khp_seq,
@@ -13830,8 +13048,7 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
         if (khp_pick >= 0) {
             DlPoolLight& khp_pl = g_dl.pool[khp_pick];
             if (khp_claim_n < KH_DL_MAX_LIGHTS) khp_claim[khp_claim_n++] = khp_pick;
-            // A sighting, priced as the aux re-sight prices one (the gap mark
-            // and the count feed the TTL branch: incomplete harvests).
+            // A sighting, priced as the aux re-sight prices one.
             if (khp_pl.stamp != 0) {
                 const uint64_t khp_gap = khp_now >= khp_pl.stamp ? khp_now - khp_pl.stamp : 0;
                 khp_pl.gap_max_ms = kh_dl_gap_mark(khp_pl.gap_max_ms, khp_gap);
@@ -13853,18 +13070,17 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
     return khp_unknown;
 }
 
-// KH_DL_CPU: one draw's cb10 / cb11 / VS windows, read from the shadows into
-// the span's CPU arena. Same layout as the GPU arena, so the merge is shared.
-// The upload key is (buffer, first, shadow generation): a later DISCARD into
-// the same identity is a new upload. Identical content (ctl + lights) within a
-// span is one. A draw the capture cannot see whole marks the side incomplete,
-// which sends this harvest to the TTL sweep instead of presence.
+// One draw's cb10 / cb11 / VS windows, read from the shadows into the span's
+// CPU arena (same layout as the GPU arena, so the merge is shared). Upload key:
+// (buffer, first, shadow generation). Identical content within a span is one. A
+// draw the capture cannot see whole marks the side incomplete, which sends this
+// harvest to the TTL sweep instead of presence.
 inline void dynlights_sample_draw_cpu(ID3D11DeviceContext1* khd_c1, ID3D11Buffer* khd_b11,
                                       UINT khd_f11, UINT khd_n11) {
     const int khd_w = g_dl.arena_write;
     if (g_dl.win_count[khd_w] > 0 && g_dl.win_meta[khd_w][0].gen == 0) {
         // A mode switch mid-span: the side holds GPU-arena windows whose bytes
-        // are not in the CPU arena. Start the side over.
+        // are not in the CPU arena. Start over.
         g_dl.win_count[khd_w] = 0;
         memset(g_dl.win_meta[khd_w], 0, sizeof(g_dl.win_meta[khd_w]));
         g_dl.side_miss[khd_w] = 0;
@@ -13875,15 +13091,14 @@ inline void dynlights_sample_draw_cpu(ID3D11DeviceContext1* khd_c1, ID3D11Buffer
         g_dl.side_miss[khd_w] = 1;
         return;
     }
-    // KH_DL_SEQ: every upload from here to the next injection belongs to the
-    // harvest that injection runs. The keys below are scoped to that harvest:
-    // a first draw of the span that binds the very same upload as the last
-    // draw of the previous span (the engine did not re-upload across the
-    // injection) is this span's evidence, not a duplicate (1.263).
+    // Every upload from here to the next injection belongs to the harvest that
+    // injection runs. A first draw of the span that binds the same upload as
+    // the last draw of the previous span is this span's evidence, not a
+    // duplicate.
     const uint64_t khd_seq = g_dl.harvest_seq + 1;
 
-    // KH_DL_PRESENCE: the same upload, already processed this span (window or
-    // presence pass alike) - one compare on the shadow, no list walk.
+    // The same upload, already processed this span - one compare on the shadow,
+    // no list walk.
     if (khd_s11->pres_gen == khd_s11->gen && khd_s11->pres_first == khd_f11 &&
         khd_s11->pres_seq == khd_seq) {
         return;
@@ -13949,15 +13164,13 @@ inline void dynlights_sample_draw_cpu(ID3D11DeviceContext1* khd_c1, ID3D11Buffer
                                                      khd_p10, khd_p11, khd_want11,
                                                      khd_seq,
                                                      steady_now_ms(), khd_unpl, khd_hit_n);
-    // KH_DL_UNPL: a note may not starve a light of the window that could place
-    // it - an upload carrying two known lights clears the vote's bar, so its
-    // noted records author as unknown ones do.
+    // A note may not starve a light of the window that could place it: an
+    // upload carrying two known lights clears the vote's bar, so its noted
+    // records author as unknown ones do.
     if (khd_unpl > 0 && khd_hit_n >= 2) { khd_unknown += khd_unpl; khd_unpl = 0; }
 
-    // A window authors: the routine quota (reference, anchors, origin
-    // bookkeeping), a buffer identity the harvest has not placed yet (its
-    // uploads cannot be judged until it has an origin), or a record the pool
-    // does not know.
+    // A window authors on: the routine quota, a buffer identity the harvest has
+    // not placed yet, or a record the pool does not know.
     float khd_ox = 0.0f, khd_oz = 0.0f;
     const bool khd_routine = g_dl.win_count[khd_w] < KH_DL_WIN_ROUTINE ||
                              !kh_dl_win_origin_of(static_cast<const void*>(khd_b11), khd_ox, khd_oz);
@@ -14073,8 +13286,8 @@ inline void dynlights_sample_draw(ID3D11DeviceContext* ctx) {
     const int khd_w = g_dl.arena_write;
     bool khd_have = false;
     if (g_dl.win_count[khd_w] > 0 && g_dl.win_meta[khd_w][0].gen != 0) {
-        // KH_DL_CPU: a mode switch mid-span the other way - the side holds CPU
-        // windows whose bytes are not in the GPU arena. Start the side over.
+        // A mode switch mid-span the other way: the side holds CPU windows
+        // whose bytes are not in the GPU arena. Start over.
         g_dl.win_count[khd_w] = 0;
         memset(g_dl.win_meta[khd_w], 0, sizeof(g_dl.win_meta[khd_w]));
         g_dl.side_miss[khd_w] = 0;
@@ -14206,11 +13419,10 @@ inline void dynlights_sample_draw(ID3D11DeviceContext* ctx) {
     khd_b11->Release();
 }
 
-// Structural affine test shared by the derivation, in four packings (the 4x3
-// forms joined after a field census found zero world-matrix candidates: the
-// Transform form codes: 0 = 4x4, row-vector convention ((0,0,0,1) column
-// Checked); 1 = 4x4 transposed / HLSL column-major default (lane checked);
-// 2 = 4x3 in 3 registers, rows [a, b, c, t] (the shadow_mats convention).
+// Structural affine test shared by the derivation. Form codes: 0 = 4x4
+// row-vector ((0,0,0,1) column checked); 1 = 4x4 transposed / HLSL column-major
+// (lane checked); 2 = 4x3 in 3 registers, rows [a, b, c, t] (the shadow_mats
+// convention).
 inline uint32_t dl_form_floats(uint8_t khd_form) { return khd_form == 2 ? 12u : 16u; }
 
 inline bool dl_cand_structure(const float* khd_mf, uint8_t khd_form, float (&khd_v)[4][4]) {
@@ -14285,8 +13497,7 @@ inline bool dl_rot_identity(const float (&khd_v)[4][4]) {
 }
 
 // The frame-structure proof shared by every route: bare triples must be
-// near-exact - a random constant must not fake a camera. Rejects log the Y
-// delta.
+// near-exact - a random constant must not fake a camera.
 inline bool dl_origin_validate(float khd_ex, float khd_ey, float khd_ez, bool khd_pair,
                                float khd_ytol, float khd_gtol,
                                float& khd_ox, float& khd_oz, float& khd_res) {
@@ -14309,13 +13520,11 @@ inline bool dl_origin_validate(float khd_ex, float khd_ey, float khd_ez, bool kh
     return true;
 }
 
-// Moved up. Fxc has no linker and neither does a single-TU header: these
-// two sat below dynlights_derive_origin, and added a call to kh_dl_win_slot
-// from inside it (the per-window memo lookup) - which did not compile. They
-// belong beside kh_dl_win_origin_of, above every caller, and the three are kept
-// together so the next edit cannot separate them again. The table is exactly as
-// wide as the window table, so a slot is always available; the oldest-by-run
-// entry is recycled if the engine ever cycles more buffers than that.
+// These three sit together, above every caller (dynlights_derive_origin needs
+// the per-window memo lookup, and a single-TU header has no linker); keep them
+// together. The table is as wide as the window table, so a slot is always
+// available; the oldest-by-run entry is recycled if the engine cycles more
+// buffers than that.
 inline uint32_t kh_dl_win_slot(const void* khw_buf) {
     const uint32_t khw_lo = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(khw_buf));
 
@@ -14342,9 +13551,9 @@ inline uint32_t kh_dl_win_slot(const void* khw_buf) {
     return khw_worst;
 }
 
-// Read-only: the origin this window resolved to last harvest, if it has one.
-// Deliberately not kh_dl_win_slot, which allocates - the ranking must be able
-// to ask the question without changing the table.
+// Read-only: the origin this window resolved to last harvest. Deliberately not
+// kh_dl_win_slot, which allocates - the ranking must ask without changing the
+// table.
 inline bool kh_dl_win_origin_of(const void* khp_buf, float& khp_ox, float& khp_oz) {
     const uint32_t khp_lo = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(khp_buf));
     if (khp_lo == 0) return false;
@@ -14376,11 +13585,11 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
         return reinterpret_cast<const float*>(khd_vs_base + khd_s * KH_DL_VS_BYTES);
     };
 
-    // Applied at candidate selection and in the hint - impostors die at candidacy and
-    // never lock in. The invariant: the engine culls its light list to the camera, so a
-    // correct origin places at least one of a window's lights near the capture camera
-    // and a wrong one places them all far away. No 'record 0 is near' shortcut: the
-    // engine's list is not distance-sorted and its order follows the view.
+    // Applied at candidate selection and in the hint, so impostors die at
+    // candidacy. The invariant: the engine culls its light list to the camera,
+    // so a correct origin places at least one of a window's lights near the
+    // capture camera and a wrong one places them all far away. No 'record 0 is
+    // near' shortcut: the list is not distance-sorted.
     float khd_rxz[KH_DL_RANGE_PROBE][3];   // x, y, z - Y is needed to match anchors.
     uint32_t khd_rn = 0;
 
@@ -14417,10 +13626,9 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
         return false;
     };
 
-    // Residual is the rank (the origin-flap lesson: the matrix-over-triple
-    // preference let 0.29 m impostors outrank 0.002 m truth); the authorship
-    // ceiling gates every offer; zero-origin tracked separately (the degeneracy
-    // bin).
+    // Residual is the rank (a matrix-over-triple preference let 0.29 m
+    // impostors outrank 0.002 m truth); the authorship ceiling gates every
+    // offer; zero-origin tracked separately (the degeneracy bin).
     float khd_b_ox = 0.0f, khd_b_oz = 0.0f, khd_b_res = 1.0e9f;
     int32_t khd_b_slot = -1, khd_b_wslot = -1;
     uint32_t khd_b_off = 0, khd_b_woff = 0;
@@ -14428,13 +13636,11 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
     bool khd_have_nz = false, khd_have_z = false;
     float khd_z_res = 1.0e9f;
 
-    // A strict '<' would let slot order, then offset order, then W-block order choose
-    // among equal residuals - all of which change with the camera. Ties are broken by
-    // evidence instead: 1. CONTINUITY - the origin this window resolved to last
-    // harvest (safe against a real re-base: only candidates offered THIS frame can
-    // win). 2. CORROBORATION - how many of the window's own records land on a known
-    // anchor under this origin. 3. Neither: keep the first offered and count it. Only
-    // the tie path scores, so the common case pays one float compare.
+    // A strict '<' would let slot order choose among equal residuals, which
+    // changes with the camera. Ties break by evidence: 1. CONTINUITY - the
+    // origin this window resolved to last harvest (only candidates offered THIS
+    // frame can win). 2. CORROBORATION - how many of the window's records land
+    // on a known anchor. 3. Neither: keep the first offered.
     float khd_prev_ox = 0.0f, khd_prev_oz = 0.0f;
     const bool khd_prev_ok = kh_dl_win_origin_of(khd_m.buf, khd_prev_ox, khd_prev_oz);
 
@@ -14462,9 +13668,9 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
     auto khd_offer = [&](float ox, float oz, float res, uint8_t kind,
                          int32_t slot, uint32_t off, uint8_t form,
                          int32_t wslot, uint32_t woff, uint8_t wform) {
-        // A wandering structure is not an origin, and its residual says so (the impostor
-        // class lands at 0.008-0.020 against the true candidate at 0.000).
-        if (res > KH_DL_ORIGIN_RES_KEEP) {
+        // A wandering structure is not an origin, and its residual says so
+        // (impostors land at 0.008-0.020 against the true candidate at 0.000).
+        if (res > KH_DL_ORIGIN_RES_MAX) {
             return;   // Never authors.
         }
 
@@ -14476,13 +13682,10 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
             return;
         }
 
-        // The engine culls its light list to the camera - a light it deems
-        // irrelevant is not in the window at all - so a correct origin must
-        // place at least one of the window's lights near the camera, and a
-        // wrong one displaces every light by the error. Proximity is therefore
-        // the primary key, residual the tiebreak within it, and the margin
-        // keeps ordinary noise from flapping the choice - a candidate must be
-        // materially nearer, not merely nearer.
+        // The engine culls its light list to the camera, so a correct origin
+        // must place at least one of the window's lights near it and a wrong
+        // one displaces every light. Proximity is the primary key, residual the
+        // tiebreak, and the margin keeps noise from flapping the choice.
         bool khd_take = false;
         const bool khd_nrank = true;
         const float khd_nr_new = khd_nrank ? khd_near_of(ox, oz) : -1.0f;
@@ -14541,8 +13744,8 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
 
     float khd_tox, khd_toz, khd_tres;
 
-    // Memoized fast path (non-zero winners only ever memoize) KH_DL_WINHINT:
-    // This window'S memo, not the session's.
+    // Memoized fast path (non-zero winners only): this window's memo, not the
+    // session's.
     const uint32_t khd_ws = kh_dl_win_slot(khd_m.buf);
     const uint8_t  khd_h_kind  = g_dl.win_hint_set[khd_ws] ? g_dl.win_hint_kind[khd_ws]  : 0;
     const int32_t  khd_h_slot  = g_dl.win_hint_set[khd_ws] ? g_dl.win_hint_slot[khd_ws]  : -1;
@@ -14610,10 +13813,9 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
             }
         }
 
-        // A drifting hit is not A hit. The rule is the same invariant the
-        // ranking now uses: a real origin does not wander. If the memo produces
-        // an origin this window has not held before, the memo has stopped
-        // describing this window and the cheap answer is not worth having.
+        // A drifting hit is not a hit: a real origin does not wander. If the
+        // memo produces an origin this window has not held before, it has
+        // stopped describing this window.
         if (khd_hit) {
             float khh_px = 0.0f, khh_pz = 0.0f;
 
@@ -14746,8 +13948,7 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
     }
 
     if (khd_have_nz) {
-        {   // KH_DL_ORIGINNEAR: how near the winning origin puts this window's closest light to the
-            // Capture camera.
+        {   // How near the winning origin puts this window's closest light to the capture camera.
             float khd_nr = -1.0f;
 
             for (uint32_t i = 0; i < khd_rn; ++i) {
@@ -14762,8 +13963,7 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
         khd_res = khd_b_res;
         khd_slot_out = khd_b_slot;
         khd_wslot_out = khd_b_wslot;
-        // Record what is being committed and what came immediately before it -
-        // the stall lane is the one the alt-tab report stands or falls on.
+        // Record what is being committed and what came immediately before it.
 
         g_dl.win_hint_set[khd_ws] = 1;
         g_dl.win_hint_kind[khd_ws] = khd_b_kind;
@@ -14780,7 +13980,7 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
     if (khd_have_z && khd_range_ok(0.0f, 0.0f)) {
         // The true-world degeneracy: accepted only alone, never memoized, and
         // only when it places this list near the camera like any other
-        // candidate (the range arbiter applies to everyone).
+        // candidate.
         khd_ox = 0.0f;
         khd_oz = 0.0f;
         khd_res = khd_z_res;
@@ -14825,19 +14025,15 @@ inline void dynlights_anchor_upsert(float khd_x, float khd_y, float khd_z, uint6
     g_dl.anchor_stamp[khd_slot] = khd_now;
 }
 
-// A pool record is re-sighted every harvest and carries its sighting count; an
-// anchor is written once and never revisited. Drop the anchor, never the pool.
+// A pool record is re-sighted every harvest; an anchor is written once and
+// never revisited. Drop the anchor, never the pool.
 
 inline bool dynlights_anchor_ghost(const float* khg_a) {
     for (uint32_t khg_p = 0; khg_p < g_dl.pool_n; ++khg_p) {
         const DlPoolLight& khg_e = g_dl.pool[khg_p];
-        // Only A corroborated light may convict AN anchor. Without this the
-        // rule can destroy both sides of a poisoning. If a bad origin ever
-        // reaches the pool as well as the table, the real light and its ghost
-        // are both pool entries, each sits a whole grid step from the other's
-        // anchor, and the sweep drops the real anchor and the ghost alike -
-        // trading a poisoned table for an empty one, which takes the vote out
-        // entirely.
+        // Only a corroborated light may convict an anchor: otherwise a bad
+        // origin reaching both the pool and the table lets the sweep drop the
+        // real anchor and the ghost alike, taking the vote out entirely.
         if (khg_e.sightings < KH_DL_DENSE_SIGHTS) continue;
         const float* khg_r = khg_e.rec;
         if (fabsf(khg_r[1] - khg_a[1]) > KH_DL_MATCH_M) continue;   // Different height: different
@@ -14855,7 +14051,7 @@ inline bool dynlights_anchor_ghost(const float* khg_a) {
     return false;
 }
 
-// It must not touch the ambiguity lane, or the cross-check below would silently
+// Must not touch the ambiguity lane, or the cross-check below would silently
 // rewrite the number the real fallback publishes.
 inline bool dynlights_pool_vote(const float* khd_l, uint32_t khd_total,
                                 float& khd_ox, float& khd_oz) {
@@ -14868,8 +14064,8 @@ inline bool dynlights_pool_vote(const float* khd_l, uint32_t khd_total,
         if (!dl_finite(khd_r[0]) || !dl_finite(khd_r[1]) || !dl_finite(khd_r[2])) continue;
 
         for (uint32_t d = 0; d < g_dl.anchor_n; ++d) {
-            // The lattice lesson stands: anchors are derivation-written only -
-            // exogenous truth, never the vote's own output.
+            // Anchors are derivation-written only - exogenous truth, never the
+            // vote's own output.
             if (fabsf(g_dl.anchor_pos[d][1] - khd_r[1]) > 0.25f) continue;   // Same light: identical Y.
             const float khd_ex = g_dl.anchor_pos[d][0] - khd_r[0];
             const float khd_ez = g_dl.anchor_pos[d][2] - khd_r[2];
@@ -14929,9 +14125,8 @@ inline bool dynlights_pool_vote(const float* khd_l, uint32_t khd_total,
     return true;
 }
 
-// The TTL sweep: compact out entries not re-sighted in time. The whole sweep
-// for the GPU arena; the fallback for a CPU harvest the sampler knows was
-// incomplete (KH_DL_SEQ, below).
+// The TTL sweep: compact out entries not re-sighted in time. The fallback for a
+// harvest the sampler knows was incomplete.
 inline void dynlights_pool_sweep_ttl(uint64_t khd_now) {
     uint32_t khd_keep = 0;
 
@@ -14945,9 +14140,9 @@ inline void dynlights_pool_sweep_ttl(uint64_t khd_now) {
         } else {
             khd_ttl = kh_dl_gap_mult() * static_cast<uint64_t>(khd_e.gap_max_ms);
             khd_fast = kh_dl_dense(khd_e.sightings, khd_e.gap_max_ms);
-            // Not gated on decode failures elsewhere: a rule that never turns off is a
-            // constant, and forcing every light onto the slow floor while any window is
-            // undecoded answers the wrong question.
+            // Not gated on decode failures elsewhere: forcing every light onto
+            // the slow floor while any window is undecoded answers the wrong
+            // question.
             const uint64_t khd_floor = khd_fast ? KH_DL_TTL_DENSE_FLOOR_MS
                                                 : KH_DL_TTL_FLOOR_MS;
             if (khd_ttl < khd_floor) khd_ttl = khd_floor;
@@ -14969,12 +14164,9 @@ inline void dynlights_pool_sweep_ttl(uint64_t khd_now) {
 // Origin recovery + persistent union merge for one harvested arena side.
 inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
     const uint64_t khd_now = steady_now_ms();
-    // KH_DL_SEQ: presence sweeps after the merge (a re-sight must land on its
-    // own entry). The TTL sweep runs only on an incomplete harvest (below):
-    // this function is reached through dynlights_harvest_arena's CPU branch,
-    // whose gate is dynlights_acquire's own, so khd_pres is true whenever it
-    // runs at mode 0; the former !khd_pres sweep was the retired GPU-arena
-    // path's and never executed.
+    // Presence sweeps after the merge (a re-sight must land on its own entry).
+    // The TTL sweep runs only on an incomplete harvest; khd_pres is true
+    // whenever this runs.
     const bool khd_pres = kh_dl_cpu_wanted();
     float khd_best_lum = -1.0f;
     float khd_best_g[3] = { 1.0f, 1.0f, 1.0f };
@@ -15003,11 +14195,6 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
 
         g_dl.anchor_n = khd_ak;
     }
-
-    // It read: while a recent harvest left a window unresolved, hold every
-    // light on the slow floor, because silence during a decode gap is not
-    // evidence the light went out.
-
 
     const uint32_t khd_wn = g_dl.win_count[khd_side];
     const uint32_t khd_cap = kh_dl_cpu_wanted() ? KH_DL_WIN_MAX_CPU : KH_DL_WIN_MAX;
@@ -15044,8 +14231,6 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
             khd_total = khd_avail;
         }
 
-        // KH_DL_REF_PLACED: the reference candidacy moved below the origin test
-        // (it stood here, reading every window).
         const float khd_lum = khd_ctl[12] + khd_ctl[13] + khd_ctl[14];
         bool khd_ref_seen = false;   // Set once this window reaches candidacy.
 
@@ -15077,13 +14262,11 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
             }
         }
 
-        // Range backstop (the (0,0) poisoning lesson): visible-light lists are
-        // camera-culled by construction, so a decoded record landing kilometers
-        // from the capture camera convicts the origin, whatever route produced
-        // it. Applied to both routes; anchors cannot normally trip it, and a
-        // tripped window authors nothing. Same invariant, same probe - if any
-        // of the window's lights lands near the capture camera the origin is
-        // plausible, and only if none of them does is it convicted.
+        // Range backstop: visible-light lists are camera-culled by
+        // construction, so a decoded record landing kilometres from the capture
+        // camera convicts the origin, whatever route produced it. If any of the
+        // window's lights lands near the camera the origin is plausible; only
+        // if none does is it convicted.
         if (khd_total > 0 && g_dl.arena_view_ok[khd_side]) {
             bool khd_near = false;
             uint32_t khd_probed = 0;
@@ -15110,10 +14293,10 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
             }
         }
 
-        {   // main-pass reference candidates: brightest ctl this harvest, among
-            // the windows the harvest placed (KH_DL_REF_PLACED). A window whose
-            // camera could not be placed is not the main pass; its globals do
-            // not set the main pass's reference.
+        // Main-pass reference candidates: brightest ctl this harvest, among the
+        // windows the harvest placed. A window whose camera could not be placed
+        // is not the main pass.
+        {
             khd_ref_seen = true;
 
             if (dl_finite(khd_lum) && khd_lum > khd_best_lum) {
@@ -15125,9 +14308,10 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
             }
         }
 
-        {   // A window that keeps anchoring but moves its origin by a grid multiple is the shape
-            // The last capture pointed at: it never counts as unanchored, it authors every frame,
-            // and it puts its lights where they are not.
+        // A window that keeps anchoring but moves its origin by a grid multiple
+        // is the last capture's shape: it never counts as unanchored and puts
+        // its lights where they are not.
+        {
             const uint32_t khd_ws = kh_dl_win_slot(khd_m.buf);
             g_dl.win_fail_run[khd_ws] = 0;
             g_dl.win_ox[khd_ws] = khd_o_x;
@@ -15154,8 +14338,8 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
             }
         }
 
-        // KH_DL_LIST_CLAIM: slots this list has already taken. Reset per window
-        // - another pass's list carries the same lights again.
+        // Slots this list has already claimed. Reset per window - another
+        // pass's list carries the same lights again.
         int      khd_claim[KH_DL_MAX_LIGHTS];
         uint32_t khd_claim_n = 0;
 
@@ -15172,7 +14356,6 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
                 if (fabsf(g_dl.pool[d].rec[0] - khd_wx) < KH_DL_MATCH_M &&
                     fabsf(g_dl.pool[d].rec[1] - khd_wy) < KH_DL_MATCH_M &&
                     fabsf(g_dl.pool[d].rec[2] - khd_wz) < KH_DL_MATCH_M) {
-// 586: first in range.
                     bool khd_taken = false;
                     for (uint32_t c = 0; c < khd_claim_n; ++c) {
                         if (khd_claim[c] == static_cast<int>(d)) { khd_taken = true; break; }
@@ -15215,10 +14398,10 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
                 continue;
             }
 
-            // Re-sight (main-pass, or first sight via aux) writes the whole record verbatim -
-            // live color/attenuation (animated fires keep flickering), freshest position, and
-            // no folded globals: baking any pass's cb10 into shared records makes the pass
-            // alternation flap per light.
+            // Re-sight writes the whole record verbatim - live
+            // colour/attenuation (animated fires keep flickering), freshest
+            // position, no folded globals (baking any pass's cb10 into shared
+            // records makes the pass alternation flap per light).
             DlPoolLight& khd_pl = g_dl.pool[khd_hit];
             const uint8_t khd_spot_new = i >= khd_pc ? 1 : 0;
 
@@ -15248,13 +14431,7 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
     }
 
     if (khd_best_lum > 0.0f) {   // Empty harvests keep the last reference.
-        // KH_DL_REF_FOLD (post-trust): the brightest ctl of the harvest IS the
-        // main-pass reference. The 1.5x band and the 400 ms self-agreement
-        // confirm that stood here (the latch continuity gate's debounce shape)
-        // never opened a pending in four night runs (~6,000 harvests), so the
-        // sub-pass one-off it guarded against has not been seen, and the pool's
-        // brightness has read steady at night since. Closed; the pending was
-        // ripped with its guard.
+        // The brightest ctl of the harvest IS the main-pass reference.
         g_dl.main_gdiff[0] = khd_best_g[0];
         g_dl.main_gdiff[1] = khd_best_g[1];
         g_dl.main_gdiff[2] = khd_best_g[2];
@@ -15262,18 +14439,14 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
         g_dl.main_ref_valid = 1;
     }
 
-
     if (khd_pres) {
-        // KH_DL_SEQ: presence. This harvest holds every upload drawn since the
-        // last injection (the span), tagged with this harvest's serial. When
-        // the capture was complete - every draw that bound cb11 found its
-        // shadows and the span produced at least one list - a pool light no
-        // upload of the span carried is gone, at this injection. A light whose
-        // last appearance was in the previous frame's post-injection draws
-        // lasts one harvest more: those draws are in this span. An incomplete
-        // harvest takes the TTL sweep instead, as before. A window the harvest
-        // could not place is counted (dlWinUnresolved), not a gate: presence
-        // stamped its pool lights at the draw, with or without a window.
+        // Presence: this harvest holds every upload drawn since the last
+        // injection, tagged with its serial. When the capture was complete, a
+        // pool light no upload of the span carried is gone at this injection (a
+        // light last seen in the previous frame's post-injection draws lasts
+        // one harvest more: those draws are in this span). An incomplete
+        // harvest takes the TTL sweep. An unplaced window is counted, not a
+        // gate.
         const uint64_t khd_c = g_dl.harvest_seq;
         const bool khd_complete = !g_dl.side_miss[khd_side] && g_dl.side_uploads[khd_side] > 0;
 
@@ -15301,14 +14474,13 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
 }
 
 // Arena lifecycle at the injection: harvest the previous frame's captures
-// (DO_NOT_WAIT; a stall retries next injection without flipping, so
-// un-harvested copies are never overwritten), then flip sides so this frame's
-// sampler writes the freshly drained buffer.
+// (DO_NOT_WAIT; a stall retries next injection without flipping), then flip
+// sides.
 inline void dynlights_harvest_arena(ID3D11DeviceContext* ctx) {
     if (kh_dl_cpu_wanted()) {
-        // KH_DL_CPU: the windows drawn since the last injection are CPU-resident
-        // - merge them now, the span's own. No flip, no Map, no in-flight side.
-        // A side holding GPU-arena windows (a mode switch mid-span) is skipped.
+        // The windows drawn since the last injection are CPU-resident: merge
+        // them now. No flip, no Map. A side holding GPU-arena windows (a mode
+        // switch mid-span) is skipped.
         const int khd_w = g_dl.arena_write;
         const bool khd_gpu_side = g_dl.win_count[khd_w] > 0 && g_dl.win_meta[khd_w][0].gen == 0;
         ++g_dl.harvest_seq;   // KH_DL_SEQ: this span's serial; the uploads were tagged with it.
@@ -15439,18 +14611,17 @@ inline void dynlights_publish(const uint8_t* khd_p, int khd_s) {
 }
 
 // Runs inside an accepted injection on the render thread (never on
-// anomalous/rescue cycles - the caller gates). Harvest first, so a completed
-// copy publishes before this frame's cbd fills read the mirror; then read the
-// live slot bindings and issue this frame's copy into a free staging slot.
+// anomalous/rescue cycles). Harvest first, so a completed copy publishes before
+// this frame's cbd fills read the mirror; then issue this frame's copy into a
+// free staging slot.
 inline void dynlights_acquire(ID3D11DeviceContext* ctx, const float view[4][4]) {
     if (!g_ls.wanted.load(std::memory_order_relaxed)) return;
 
-    // (0) arena lifecycle: harvest the previous frame's per-draw window
-    // captures (origin recovery + pool merge for mode 3), then flip.
+    // (0) harvest the previous frame's per-draw window captures, then flip.
     dynlights_harvest_arena(ctx);
 
-    // (1) harvest completed copies (DO_NOT_WAIT: a stalled copy retries at the
-    // next injection).
+    // (1) harvest completed copies (DO_NOT_WAIT: a stalled copy retries next
+    // injection).
     for (int khd_s = 0; khd_s < 2; ++khd_s) {
         if (!g_dl.inflight[khd_s] || !g_dl.staging[khd_s]) continue;
         D3D11_MAPPED_SUBRESOURCE khd_m = {};
@@ -15479,8 +14650,8 @@ inline void dynlights_acquire(ID3D11DeviceContext* ctx, const float view[4][4]) 
     }
 
     if (kh_dl_cpu_wanted()) {
-        // KH_DL_CPU: the trigger window publishes from the shadows
-        // now, not from a staging copy read back a frame later.
+        // The trigger window publishes from the shadows, not from a staging
+        // copy read back a frame later.
         const KhCbShadow* khd_s10 = kh_cbs_find(khd_b10);
         const KhCbShadow* khd_s11 = kh_cbs_find(khd_b11);
         const uint32_t khd_off10 = khd_f10 * 16u;
@@ -15580,7 +14751,7 @@ inline void dynlights_acquire(ID3D11DeviceContext* ctx, const float view[4][4]) 
     g_dl.inflight[khd_w] = 1;
 
     // View columns + camera captured with the list: the space decode and the
-    // plant comparison must use the frame'S own view, not a later one.
+    // plant comparison must use the frame's own view.
     if (view) {
         for (int khd_k = 0; khd_k < 3; ++khd_k) {
             g_dl.pending_view[khd_w][khd_k * 4 + 0] = view[0][khd_k];
@@ -15599,11 +14770,10 @@ inline void dynlights_acquire(ID3D11DeviceContext* ctx, const float view[4][4]) 
     khd_b11->Release();
 }
 
-// KH_DL_SHADOW (stage 1 of 4) - which lights cast. Slots are keyed on position,
-// never on pool index: g_dl.pool is TTL-swept and compacted, so an index names a
-// different light after any sweep. The contract is 'the brightest lights cast';
-// folding in camera distance would make the casting set follow the view, and a
-// quantity that must not follow the camera may not be camera-driven.
+// KH_DL_SHADOW stage 1 - which lights cast. Slots are keyed on position, never
+// on pool index (the pool is TTL-swept and compacted). The contract is 'the
+// brightest lights cast'; folding in camera distance would make the casting set
+// follow the view.
 static constexpr uint32_t KH_DLS_MAX = 8;             // shadow-casting lights (the cap).
 static constexpr float    KH_DLS_MATCH_M = 1.0f;      // same-light radius; mirrors KH_DL_MATCH_M.
 static constexpr float    KH_DLS_OUST_FRAC = 1.25f;   // A challenger must beat the sitting light by
@@ -15626,24 +14796,22 @@ static KhDlsSlot g_dls[KH_DLS_MAX];
 static uint32_t  g_dls_n = 0;
 static uint64_t  g_dls_frame = 0;       // once-per-frame guard (twin call sites).
 
-// All window-scoped and reset with the stats except the slot table
-// itself, which is behaviour state: clearing it would re-admit from scratch at
-// every reset and hand the next window a fresh churn spike (1.80).
+// All window-scoped and reset with the stats except the slot table itself,
+// which is behaviour state: clearing it would re-admit from scratch at every
+// reset.
 
-// rec.709 luminance of the diffuse lobe plus the per-light ambient. Both are
-// what the light spends; the ambient lane is what makes A3 lights read on
-// away-facing surfaces (see the DynLights note), so a light with a large
-// ambient and a small diffuse is still a bright light in this scene. This is
-// what the light spends at source. What it delivers is below.
+// rec.709 luminance of the diffuse lobe plus the per-light ambient - what the
+// light spends at source (the ambient lane is what makes A3 lights read on
+// away-facing surfaces). What it delivers is below.
 inline float kh_dls_lum(const DlPoolLight& khs_l) {
     const float khs_d = 0.2126f * khs_l.rec[8]  + 0.7152f * khs_l.rec[9]  + 0.0722f * khs_l.rec[10];
     const float khs_a = 0.2126f * khs_l.rec[12] + 0.7152f * khs_l.rec[13] + 0.0722f * khs_l.rec[14];
     return khs_d + khs_a;
 }
 
-// DynLights' distance attenuation, verbatim in the C++ (twin contract with the
-// shader kernel): 1/(a0 + a1*d + a2*d^2) on the offset, scaled distance, then
-// the hard range fade.
+// DynLights' distance attenuation, verbatim (twin contract with the shader
+// kernel): 1/(a0 + a1*d + a2*d^2) on the offset, scaled distance, then the hard
+// range fade.
 inline float kh_dls_atten(const DlPoolLight& kha_l, float kha_dist, float kha_scale) {
     const float kha_sd = kha_dist * kha_scale;
     const float kha_d  = kha_sd - kha_l.rec[16] > 0.0f ? kha_sd - kha_l.rec[16] : 0.0f;
@@ -15657,18 +14825,17 @@ inline float kh_dls_atten(const DlPoolLight& kha_l, float kha_dist, float kha_sc
     return kha_a * (1.0f - kha_f);
 }
 
-// KH_DLS_CAMDIST - the distance is camera -> light. Ranking by caster distance
-// can spend the whole budget on lights behind the player.
+// The distance is camera -> light: ranking by caster distance can spend the
+// whole budget on lights behind the player.
 inline float kh_dls_score(const DlPoolLight& khs_l, float khs_dist, float khs_scale) {
     const float khs_lum = kh_dls_lum(khs_l);
     if (khs_dist < 0.0f) return khs_lum;   // No distance available: rank on source alone.
     return khs_lum * kh_dls_atten(khs_l, khs_dist, khs_scale);
 }
 
-// Camera on the render thread, in engine axes. Returns false when the engine
-// has not published a view - on which the score falls back to source luminance
-// rather than to a zeroed camera, because a camera at the world origin would
-// rank every light by its distance from (0,0,0) and be confidently wrong.
+// Camera on the render thread, engine axes. False when the engine has not
+// published a view - the score then falls back to source luminance rather than
+// a zeroed camera (a camera at the origin would rank confidently wrong).
 inline bool kh_dls_camera(float khc_out[3]) {
     if (!g_ro.cycle_pv_valid) return false;
     extract_camera_pos(g_ro.cycle_pv.view, khc_out);
@@ -15676,27 +14843,18 @@ inline bool kh_dls_camera(float khc_out[3]) {
 }
 
 // The hard-fade term is rec[20] + 1/rec[21], and a light authored with no range
-// fade leaves the inverse width at ~1e-20, so that expression returns 7e19
-// metres. Everything downstream then breaks quietly: the far plane is 7e19, the
-// ratio-bound near plane is 2.3e17, every real caster sits behind the near
-// plane, and the face cull's far test admits the entire world. A shadow map
-// cares: the far plane is the depth range. So bound it by what the light can
-// actually light.
+// fade leaves the inverse width at ~1e-20, so that returns 7e19 metres - and
+// the far plane, the near plane and the face cull all break quietly. Bound it
+// by what the light can actually light.
 static constexpr float KH_DLS_REACH_MIN_M = 1.0f;   // A degenerate reach never yields a zero far
 static constexpr float KH_DLS_REACH_MAX_M = 600.0f;
 static constexpr float KH_DLS_ATTEN_FLOOR = 255.0f;   // 1/255 = one 8-bit level.
-// CLOSED: the night blackout once reported here (a mesh going fully black with
-// camera position, a bright spotlight reading dark) has not recurred since the
-// reach was priced against delivered radiance below. Not an open item.
 
-// So price the floor against what the light actually delivers. kh_dls_lum is
-// already the source radiance this file uses for the admission score; multiply
-// it by the same two global lanes the shader multiplies by, and require the
-// product to fall below one level rather than the attenuation alone.
+// Price the floor against what the light delivers: kh_dls_lum times the same
+// two global lanes the shader multiplies by, falling below one level.
 inline float kh_dls_reach_peak(const DlPoolLight& khp_l) {
-    // The two global lanes DynLights applies outside the per-light sum. rec.709
-    // through kh_dls_lum for the source, so this cannot disagree with the score
-    // about which light is bright.
+    // The two global lanes DynLights applies outside the per-light sum; rec.709
+    // through kh_dls_lum so this cannot disagree with the score.
     const float khp_gd = (g_dl.main_ref_valid &&
                           (g_dl.main_gdiff[0] > 0.0f || g_dl.main_gdiff[1] > 0.0f ||
                            g_dl.main_gdiff[2] > 0.0f))
@@ -15723,7 +14881,6 @@ inline float kh_dls_reach(const DlPoolLight& khs_l) {
     const float khs_ceil = kh_dls_reach_ceiling();
     float khs_r = khs_l.rec[20] + (khs_inv > 1.0e-6f ? 1.0f / khs_inv : 0.0f);
     if (!(khs_r > 0.0f) || khs_r != khs_r) khs_r = khs_ceil;
-    // Dead code is the same liability as a dead instrument.
 
     const float khs_peak = kh_dls_reach_peak(khs_l);
     const float khs_a0 = khs_l.rec[17], khs_a1 = khs_l.rec[18], khs_a2 = khs_l.rec[19];
@@ -15736,7 +14893,7 @@ inline float kh_dls_reach(const DlPoolLight& khs_l) {
             khs_d = khs_t / khs_a1;
         }
         if (khs_d > 0.0f) {
-            // That solve is in attenuated distance; undo the offset and the
+            // The solve is in attenuated distance; undo the offset and the
             // global distance scale to get metres, exactly as DynLights does.
             const float khs_sc = (g_dl.main_ref_valid && g_dl.main_scale > 1.0e-6f)
                                ? g_dl.main_scale : 1.0f;
@@ -15749,27 +14906,19 @@ inline float kh_dls_reach(const DlPoolLight& khs_l) {
     return khs_r;
 }
 
-// Recomputes the raw (pre-bound) reach rather than taking it as an argument so
-// the two cannot drift: the bound test has to compare against the same
-// expression kh_dls_reach starts from, and passing it in would let a future
-// caller hand it something else.
+// Recomputes the raw reach rather than taking it as an argument so the bound
+// test compares against the same expression kh_dls_reach starts from.
 
-// KH_DL_SHADOW stage 2b map lanes. The pool, the hold and the lookup share one
-// rule (nearest, matching spot flag): a point record is never a spot slot's
-// source, so a flashlight and a nearby point light cannot swap records.
+// Stage 2b map lanes. The pool, the hold and the lookup share one rule
+// (nearest, matching spot flag): a point record is never a spot slot's source.
 
-// Our meshes are the only occluders this feature draws, so a light with none
-// cannot darken anything - its map is six faces (or one frustum) of
-// guaranteed-empty depth, rendered while a light that does have casters waits
-// behind it. This is not a heuristic; it is the difference between a map that
-// can produce a shadow and one that provably cannot.
+// Our meshes are the only occluders this feature draws, so a light with none in
+// range cannot darken anything - its map is guaranteed-empty depth.
 static constexpr float KH_DLS_HOLD_SLACK = 1.10f;   // Hold margin on the caster test.
 
 // Nearest surface distance from this light to any of our meshes, or -1 when
-// there is none at all. One walk per light per pass, cached by the caller - the
-// score, the admission gate and the hold test all read the same number, so they
-// cannot disagree about which lights are eligible (one
-// source, three readers).
+// none. One walk per light per pass, cached by the caller: the score, the
+// admission gate and the hold test read the same number.
 inline float kh_dls_caster_dist(const float* khr_lp) {
     float khr_best = -1.0f;
     kh_scene_sync();   // KH_SCENE.
@@ -15798,28 +14947,22 @@ inline bool kh_dls_relevant(float khr_d, float khr_reach) {
     return khr_d >= 0.0f && khr_d <= khr_reach;
 }
 
-// 1 definition + 2 call expressions, both immediately ahead of a render_sun_depth
-// call - not inside it, which returns early without a sun, while dynamic lights
-// matter most at night. The frame guard makes the second call of a frame free.
+// Called immediately ahead of render_sun_depth - not inside it, which returns
+// early without a sun, while dynamic lights matter most at night. The frame
+// guard makes the second call free.
 inline void kh_dls_select() {
     if (g_dls_frame == g_topo_cycles) return;   // Once per frame, whoever arrives first.
     g_dls_frame = g_topo_cycles;
-
-    // Slots cleared, nothing selected.
 
     const uint64_t khs_now = steady_now_ms();
 
     const uint32_t khs_pn = g_dl.pool_n;
 
-    // 1. EXPIRE - KH_DLS_POOL_KEY (post-trust). A slot used to live KH_DLS_TTL_MS
-    //    (500) after its light's last re-match, so a despawned light's SHADOW
-    //    outlived its shading by ten times once the pool followed the engine
-    //    at ~50 ms (KH_DL_DENSE). The pool is the slot table's only source and
-    //    already carries the engine's own expiry; a slot whose light is no
-    //    longer in the pool has nothing to render and releases below, after
-    //    the re-match (step 2) has given every pool light its chance to claim
-    //    it. KH_DLS_TTL_MS stays as the backstop against a pool that stopped
-    //    harvesting (dlFillStale's case).
+    // 1. EXPIRE. The pool is the slot table's only source and carries the
+    // engine's own expiry; a slot whose light is no longer in the pool releases
+    // below, after the re-match (step 2) has given every pool light its chance.
+    // KH_DLS_TTL_MS stays as the backstop against a pool that stopped
+    // harvesting.
     for (uint32_t khs_s = 0; khs_s < KH_DLS_MAX; ++khs_s) {
         if (g_dls[khs_s].live && khs_now - g_dls[khs_s].stamp > KH_DLS_TTL_MS) {
             g_dls[khs_s].live = 0;
@@ -15828,14 +14971,10 @@ inline void kh_dls_select() {
 
     static std::vector<uint8_t> khs_used;   // render-thread scratch (the khco_r idiom).
     khs_used.assign(static_cast<size_t>(khs_pn), 0);
-    // TWO distances per light, and they answer different questions.
-    //   khs_cdist - CAMERA to light. The ranking metric (KH_DLS_CAMDIST): the
-    //               eight nearest the viewer are the eight whose shadows are on
-    //               screen.
-    //   khs_dist  - light to nearest CASTER. The admission gate only: can this
-    //               light cast anything at all, from any viewpoint.
-    // Both are computed once per light per pass and read by everything below,
-    // so no two consumers can disagree about either.
+    // Two distances per light: khs_cdist = CAMERA to light, the ranking metric
+    // (the nearest to the viewer are the ones whose shadows are on screen);
+    // khs_dist = light to nearest CASTER, the admission gate only. Both
+    // computed once per light per pass and read by everything below.
     static std::vector<float> khs_dist, khs_cdist, khs_reach;
     khs_dist.assign(static_cast<size_t>(khs_pn), -1.0f);
     khs_cdist.assign(static_cast<size_t>(khs_pn), -1.0f);
@@ -15859,22 +14998,19 @@ inline void kh_dls_select() {
                           ? g_dl.main_scale : 1.0f;
     uint8_t  khs_filled[KH_DLS_MAX] = {};
 
-    // 2. RE-MATCH IN PLACE. This is the step that survives a pool sweep: a
-    //    light that is still there refreshes the slot it already holds, so the
-    //    slot -> light binding does not move even though its pool index did.
+    // 2. RE-MATCH IN PLACE: a light still there refreshes the slot it already
+    // holds, so the slot -> light binding survives a pool sweep.
     for (uint32_t khs_i = 0; khs_i < khs_pn; ++khs_i) {
         const DlPoolLight& khs_l = g_dl.pool[khs_i];
-        // KH_DLS_HOLD_NEAREST - the hold takes its own slot, not the first in
-        // range. The rule is kh_dls_slot_of's, so the two agree by
-        // construction: nearest live unfilled slot, a matching spot flag
-        // preferred.
+        // The hold takes its own slot, not the first in range: kh_dls_slot_of's
+        // rule (nearest live unfilled slot, matching spot flag preferred), so
+        // the two agree by construction.
         uint32_t khs_pick = KH_DLS_MAX;
         float    khs_pd = 0.0f;
         bool     khs_pflag = false;
-        // KH_DL_POOL_ID: a slot that names this light by id is its slot,
-        // whatever the positions say. Strict first pass; the position rule
-        // below stays the fallback for a slot admitted before an id landed, and
-        // is the only rule under 586.
+        // A slot that names this light by id is its slot, whatever the
+        // positions say. The position rule below stays the fallback for a slot
+        // admitted before an id landed.
         if (khs_l.id != 0) {
             for (uint32_t khs_c = 0; khs_c < KH_DLS_MAX; ++khs_c) {
                 if (!g_dls[khs_c].live || khs_filled[khs_c]) continue;
@@ -15918,23 +15054,18 @@ inline void kh_dls_select() {
         }
     }
 
-    // KH_DLS_POOL_KEY: a live slot no pool light re-matched this pass holds a
-    // light the pool has expired (or one that left the hold radius, which step
-    // 2 released already): release it now, and count it.
+    // A live slot no pool light re-matched this pass holds an expired light (or
+    // one that left the hold radius): release and count it.
     for (uint32_t khs_s = 0; khs_s < KH_DLS_MAX; ++khs_s) {
         if (g_dls[khs_s].live && !khs_filled[khs_s]) {
             g_dls[khs_s].live = 0;
         }
     }
-    // 3. ADMIT / EVICT, BRIGHTEST FIRST. Picking the max each round instead of
-    //    sorting keeps this allocation-free; the bound is KH_DLS_MAX x pool and
-    //    the pool is tens of entries. Brightest-first matters: it stops a dim
-    //    light taking the last free slot and then having to be ousted (which
-    //    the margin would refuse) while a brighter one waits behind it.
-    // Bounded by the POOL, not by the slot count: a light skipped for having
-    // nothing to cast must not consume one of the eight chances to fill a slot,
-    // or a scene whose brightest fixtures are all far from our meshes would
-    // leave every slot empty while eligible lights sat unexamined.
+    // 3. ADMIT / EVICT, brightest first (max-per-round, allocation-free).
+    // Brightest-first stops a dim light taking the last slot and then having to
+    // be ousted while a brighter one waits. Bounded by the POOL, not the slot
+    // count: a light skipped for having nothing to cast must not consume one of
+    // the chances to fill a slot.
     uint32_t khs_admitted = 0;
     for (uint32_t khs_r = 0; khs_r < khs_pn && khs_admitted < KH_DLS_MAX; ++khs_r) {
         uint32_t khs_best = 0xFFFFFFFFu;
@@ -15948,8 +15079,7 @@ inline void kh_dls_select() {
         khs_used[khs_best] = 1;
 
         const DlPoolLight& khs_l = g_dl.pool[khs_best];
-        // KH_DLS_RELEVANCE: nothing in range to cast -> not a candidate. Skip
-        // rather than break: the next light down may well have casters.
+        // Nothing in range to cast -> not a candidate. Skip rather than break.
         if (!kh_dls_relevant(khs_dist[khs_best], khs_reach[khs_best])) {
             continue;
         }
@@ -15988,7 +15118,7 @@ inline void kh_dls_select() {
         khs_admitted++;
     }
 
-    // 4. THE CUT LINE. The brightest light that did NOT get a slot. Read this
+    // 4. THE CUT LINE: the brightest light that did NOT get a slot. Read this
     // before tuning anything here.
     float khs_cut = -1.0f;
     for (uint32_t khs_i = 0; khs_i < khs_pn; ++khs_i) {
@@ -16008,10 +15138,9 @@ inline void kh_dls_select() {
     g_dls_n = khs_n;
 }
 
-// Which shadow slot, if any, this pool light holds; -1 for none. Each light gets
-// its own map slot (kh_dls_select's khs_filled): two lights in range must not
-// read the first light's map, since a spot's frustum applied to a point beside
-// it answers lit outside the cone.
+// Which shadow slot this pool light holds; -1 for none. Each light gets its own
+// slot: a spot's frustum applied to a point beside it answers lit outside the
+// cone.
 inline int kh_dls_slot_of(const DlPoolLight& khs_l) {
     if (khs_l.id != 0) {   // KH_DL_POOL_ID: twin of the hold's first pass.
         for (uint32_t khs_s = 0; khs_s < KH_DLS_MAX; ++khs_s) {
@@ -16039,45 +15168,36 @@ inline int kh_dls_slot_of(const DlPoolLight& khs_l) {
     return khs_best;
 }
 
-// KH_DL_SHADOW (stage 2a) - the geometry. Face matrices, per-face culling and
-// The skip hash. Anchored at the light, exactly like KH_SUN_ANCHOR anchors at
-// sunOrigin. The matrices below expect light-relative positions (wpos -
-// slot.pos). A dynamic light sits at world scale where fp32 spacing is ~8 mm,
-// and a shadow map is a depth comparison - the one place that jitter reads as
-// acne. A cube face rotation is AN axis permutation with signs, which is what
-// makes the cull below exact rather than conservative: an axis-aligned box maps
-// to an axis-aligned box under it, with no bounding slack introduced.
+// Stage 2a - the geometry: face matrices, per-face culling, the skip hash.
+// Anchored at the light: the matrices expect light-relative positions (wpos -
+// slot.pos), since world-scale fp32 spacing (~8 mm) reads as acne in a depth
+// compare. A cube face rotation is an axis permutation with signs, which makes
+// the cull exact: an axis-aligned box maps to an axis-aligned box.
 static constexpr int   KH_DLS_FACES = 6;
 // Holding far/near at KH_DLS_NEAR_RATIO gives every light the same depth
-// quality whatever its reach - 0.6 mm at 60 m, 2.9 mm at 300 m - so one compare
-// bias serves the whole set instead of one per reach band. The floor still
-// applies: a light closer than the near plane to a caster clips it, so the
-// ratio may not push near out arbitrarily.
+// quality whatever its reach, so one compare bias serves the whole set. The
+// floor still applies: a light closer than the near plane to a caster clips it.
 static constexpr float KH_DLS_NEAR_M = 0.05f;      // Absolute floor (5 cm).
 static constexpr float KH_DLS_NEAR_RATIO = 300.0f;   // Far / near ceiling.
 
-// One near-plane rule for the face matrices, the spot matrix and the cull: a map
-// built to a different near than the cull tests against is a caster refused at a
-// plane the raster would have accepted. Near must sit below the smallest
-// caster-to-light distance the system can produce; the ratio rule alone is safe
-// only with a short far plane, hence the cap.
+// One near-plane rule for the face matrices, the spot matrix and the cull: a
+// map built to a different near than the cull tests against is a caster refused
+// at a plane the raster would have accepted. Near must sit below the smallest
+// caster-to-light distance the system can produce, hence the cap.
 static constexpr float KH_DLS_NEAR_CAP_M = 0.25f;
 inline float kh_dls_near(float khn_far) {
     float khn_r = khn_far / KH_DLS_NEAR_RATIO;
     if (khn_r > KH_DLS_NEAR_CAP_M) khn_r = KH_DLS_NEAR_CAP_M;
     return khn_r > KH_DLS_NEAR_M ? khn_r : KH_DLS_NEAR_M;
 }
-// Raising it is not obviously the win it looks like, and that is why this is a
-// comment and not an edit. Six good slices may genuinely beat one bad one; the
-// cost is known and the quality is not. Settle it by measurement before
-// touching the constant - render one field spot both ways and compare the
-// shadow edge - not by reasoning from the slice count, which only prices one
-// side of the trade.
+// Raising it is not obviously a win (six good slices may beat one bad one);
+// settle by measurement - render one field spot both ways - before touching the
+// constant.
 static constexpr float KH_DLS_SPOT_FOV_MAX = 2.792527f;   // 160 deg; wider falls back to the cube.
 
 // Cube basis, D3D face order (+X -X +Y -Y +Z -Z), right/up/forward per face.
-// Written out rather than derived so the table can be read against the D3D docs
-// directly; a sign error here is a shadow on the wrong side of the world.
+// Written out so the table can be read against the D3D docs; a sign error here
+// is a shadow on the wrong side of the world.
 static const float KH_DLS_BASIS[6][9] = {
     {  0.0f, 0.0f,-1.0f,   0.0f, 1.0f, 0.0f,   1.0f, 0.0f, 0.0f },
     {  0.0f, 0.0f, 1.0f,   0.0f, 1.0f, 0.0f,  -1.0f, 0.0f, 0.0f },
@@ -16088,8 +15208,8 @@ static const float KH_DLS_BASIS[6][9] = {
 };
 
 // Row-vector world(light-relative) -> clip, 90 deg square perspective. Same
-// convention as sunVP: v * VP, translation in row 3. Translation is zero here
-// because the input is already light-relative - that is the anchor.
+// convention as sunVP (v * VP, translation in row 3); translation is zero
+// because the input is already light-relative.
 inline void kh_dls_face_vp(int khf_face, float khf_far, float khf_out[16]) {
     const float* khf_b = KH_DLS_BASIS[khf_face < 0 ? 0 : (khf_face > 5 ? 5 : khf_face)];
     const float  khf_n = kh_dls_near(khf_far);
@@ -16105,19 +15225,18 @@ inline void kh_dls_face_vp(int khf_face, float khf_far, float khf_out[16]) {
     khf_out[12] = 0.0f; khf_out[13] = 0.0f; khf_out[14] = khf_c; khf_out[15] = 0.0f;
 }
 
-// A spot needs one frustum, not six. Half-angle is acos(cone cos-threshold) -
-// the same lane DynLights compares against, so the map cannot cover less than
-// the cone that will sample it. Returns false when the cone is too wide to be a
-// single frustum, and the caller falls back to the cube.
+// A spot needs one frustum, not six. Half-angle is acos(cone cos-threshold),
+// the lane DynLights compares against, so the map cannot cover less than the
+// cone that samples it. False when the cone is too wide for a single frustum;
+// the caller falls back to the cube.
 inline bool kh_dls_spot_vp(const float* khs_dir, float khs_cone_cos, float khs_far,
                            float khs_out[16], float* khs_fov_out) {
     const float khs_l = sqrtf(khs_dir[0] * khs_dir[0] + khs_dir[1] * khs_dir[1] + khs_dir[2] * khs_dir[2]);
     if (!(khs_l > 1.0e-4f)) return false;
     const float khs_cc = khs_cone_cos < -0.999f ? -0.999f : (khs_cone_cos > 0.999f ? 0.999f : khs_cone_cos);
-    // The cap judges the cone, not the guard band. That is a gate refusing on a
-    // quantity it invented. Reject on the raw cone; let the guard band yield to
-    // the cap when it does not fit, since a slightly tight guard costs the
-    // outermost texel row while a needless cube costs six passes.
+    // Reject on the raw cone; let the guard band yield to the cap when it does
+    // not fit (a slightly tight guard costs the outermost texel row; a needless
+    // cube costs six passes).
     const float khs_raw = 2.0f * acosf(khs_cc);
     if (khs_raw > KH_DLS_SPOT_FOV_MAX) return false;   // Genuinely too wide for one frustum.
     float khs_fov = khs_raw * 1.15f;
@@ -16161,11 +15280,8 @@ inline bool kh_dls_spot_vp(const float* khs_dir, float khs_cone_cos, float khs_f
 
 // Per-face cull. khc_c / khc_he are the caster's centre and half-extents in
 // engine axes; khc_lp is the light. Exact for the cube (the basis is an axis
-// permutation, so the box stays axis-aligned in face space) and conservative
-// for nothing, because nothing is approximated. The frustum in face space is
-// |x| <= z, |y| <= z, near <= z <= far. A box is refused only when it lies
-// wholly outside one plane, which is the standard rule and the only one that
-// cannot refuse a caster it should keep.
+// permutation). Frustum in face space: |x| <= z, |y| <= z, near <= z <= far. A
+// box is refused only when wholly outside one plane.
 inline bool kh_dls_face_keep(int khc_face, const float* khc_lp,
                              const float* khc_c, const float* khc_he, float khc_far) {
     const float* khc_b = KH_DLS_BASIS[khc_face];
@@ -16174,20 +15290,17 @@ inline bool kh_dls_face_keep(int khc_face, const float* khc_lp,
     for (int khc_k = 0; khc_k < 3; ++khc_k) {
         const float* khc_ax = khc_b + khc_k * 3;
         const float  khc_ctr = khc_rel[0] * khc_ax[0] + khc_rel[1] * khc_ax[1] + khc_rel[2] * khc_ax[2];
-        // axis| dotted with the half-extents: the box's own extent on this
-        // axis. Signs do not matter to an extent, so fabsf is exact here.
+        // |axis| dotted with the half-extents: the box's own extent on this
+        // axis.
         const float  khc_ext = fabsf(khc_ax[0]) * khc_he[0]
                              + fabsf(khc_ax[1]) * khc_he[1]
                              + fabsf(khc_ax[2]) * khc_he[2];
         khc_lo[khc_k] = khc_ctr - khc_ext;
         khc_hi[khc_k] = khc_ctr + khc_ext;
     }
-    // FP32 pad on the two depth planes. Unpadded, that hands the raster a
-    // caster the cull already refused - the exact shape of a gate that is right
-    // on average and wrong at the seam. The pad costs a handful of casters
-    // whose nearest point is past the light's zero-contribution reach, so they
-    // cannot darken anything even when kept: the error is free in one direction
-    // and a missing shadow in the other.
+    // FP32 pad on the two depth planes; unpadded, the cull can refuse a caster
+    // the raster would accept. The pad only keeps casters past the light's
+    // zero-contribution reach, which cannot darken anything.
     const float khc_pad = khc_far * 1.0e-3f + 0.01f;
     if (khc_hi[2] < kh_dls_near(khc_far) - khc_pad) return false;   // Wholly behind the near plane.
     if (khc_lo[2] > khc_far + khc_pad) return false;         // Wholly past the reach.
@@ -16198,12 +15311,9 @@ inline bool kh_dls_face_keep(int khc_face, const float* khc_lp,
     return true;
 }
 
-// A light that moves changes the hash and forces a re-render that frame,
-// exactly as a moving mesh does for the union - so animation is covered by
-// construction and does not need a separate arm. It carries the direction and
-// cone the key never held, so a spot that turned in place (a flashlight, a
-// turret) kept its map while kh_dls_fill_cb published the new frustum against
-// it.
+// A light that moves changes the hash and forces a re-render, exactly as a
+// moving mesh does for the union. Carries the direction and cone too, so a spot
+// that turns in place re-renders.
 inline uint64_t kh_dls_light_hash(const KhDlsSlot& khh_s, uint32_t khh_face_n,
                                   uint32_t khh_slice0, uint8_t khh_mask,
                                   uint64_t khh_casters, const float* khh_spot_vp) {
@@ -16220,9 +15330,8 @@ inline uint64_t kh_dls_light_hash(const KhDlsSlot& khh_s, uint32_t khh_face_n,
     return khh_k;
 }
 
-// The far plane a slot's maps are built to. Floored so a degenerate
-// reach never mints a zero far plane (which would collapse the depth range and
-// make every compare answer the same thing).
+// The far plane a slot's maps are built to; floored so a degenerate reach never
+// mints a zero far plane.
 inline float kh_dls_far(const KhDlsSlot& khf_s) {
     return khf_s.reach > KH_DLS_REACH_MIN_M ? khf_s.reach : KH_DLS_REACH_MIN_M;
 }
@@ -16327,8 +15436,8 @@ inline void fill_dynlights_cb(ConstantData& cbd, const RenderObject& o) {
     }
 }
 
-// Session reset for the mirror (device objects are release_shadow_device_
-// state's job; this clears the PODs, the censuses and the ring).
+// Session reset for the mirror: clears the PODs, the censuses and the ring
+// (device objects are release_shadow_device_state's job).
 inline void dynlights_reset_session() {
     g_dl.valid = false;
     g_dl.point_n = g_dl.spot_n = 0;
@@ -16397,7 +15506,6 @@ inline void dynlights_reset_session() {
 
 }
 
-
 inline void kh_fill_sun_tiers_cb(ConstantData& cbd) {
     kh_sun_rebase_vp(&cbd.sun_vp[0][0], g_sun_map_vp, g_sun_map_anchor, g_sun_anchor_now);
     cbd.sun_meta[0] = g_sun_map_cam_anchor ? 2.0f : 1.0f;
@@ -16422,9 +15530,9 @@ inline void fill_lighting_frame_cb(ConstantData& cbd) {
     cbd.lighting1[1] = g_sun_dir_engine[1];
     cbd.lighting1[2] = g_sun_dir_engine[2];
     cbd.lighting1[3] = g_sun_valid ? 1.0f : 0.0f;   // Structural: the sun is published (see KH_LIT_FRESH_ERR's note).
-    // KH_LIGHT_BASE: the published block is the engine's own base lighting,
-    // republished every world frame (kh_blk_owner_frame). No override sits
-    // between it and the shader: a zero sun is night.
+    // The published block is the engine's own base lighting, republished every
+    // world frame. No override sits between it and the shader: a zero sun is
+    // night.
     if (g_pub_block_valid) {
         cbd.lighting2[0] = g_pub_block_sun[0];
         cbd.lighting2[1] = g_pub_block_sun[1];
@@ -16447,8 +15555,8 @@ inline void fill_lighting_frame_cb(ConstantData& cbd) {
     const bool khl_map_fresh = g_sun_map_valid && g_sun_map_time >= 0.0f &&
         effect_time_seconds() - g_sun_map_time < KH_SUN_MAP_SELF_MAX_AGE_S;
 
-    // KH_SUN_ANCHOR: one origin for every sun matrix in this template, set
-    // unconditionally before any of them fills.
+    // One origin for every sun matrix in this template, set before any of them
+    // fills.
     cbd.sun_origin[0] = g_sun_anchor_now[0];
     cbd.sun_origin[1] = g_sun_anchor_now[1];
     cbd.sun_origin[2] = g_sun_anchor_now[2];
@@ -16467,9 +15575,9 @@ inline void fill_lighting_frame_cb(ConstantData& cbd) {
     }
 
     if (khl_map_fresh) {
-        // KH_SUN_ANCHOR: the union matrix may be older than this flush's anchor
-        // (hash-skip frames) - rebase it algebraically so every matrix in this
-        // block shares cbd.sun_origin (set above, unconditionally).
+        // The union matrix may be older than this flush's anchor (hash-skip
+        // frames): rebase it algebraically so every matrix in this block shares
+        // cbd.sun_origin.
         kh_fill_sun_tiers_cb(cbd);
         {
             cbd.sun_pf[0] = g_sun2_map_valid && g_sun_pf_valid[0] ? 1.0f : 0.0f;
@@ -16525,9 +15633,8 @@ inline void fill_lighting_frame_cb(ConstantData& cbd) {
     cbd.shadow_meta[3] = static_cast<float>(g_ls.atlas_size);
     // shadowMeta2 is per-object (the far-vis flag) and fills in
     // fill_lighting_obj_cb. Its yzw stays zero: each entry's camera origin is
-    // folded into its translation below, so the shader's (wpos - meta2.yzw)
-    // consumes absolute world positions and per-entry staleness cannot
-    // misregister.
+    // folded into its translation, so the shader consumes absolute world
+    // positions and per-entry staleness cannot misregister.
 
     for (uint32_t i = 0; i < n && out_i < KH_LIVE_MAX_CASCADES; ++i, ++out_i) {
         const LiveShadowEntry& e = g_ls.entries[order[i]];
@@ -16548,10 +15655,8 @@ inline void fill_lighting_frame_cb(ConstantData& cbd) {
 
 }
 
-// CB-split (object half): the per-object lighting lanes, the localization mask
-// and the camera-distance band lanes, identical on all three fill sites
-// (injection, flush, UI flush). The far clamp is filled here for lit and unlit
-// objects alike.
+// Object half: the localization mask and the camera-distance band lanes,
+// identical on all three fill sites (injection, flush, UI flush).
 inline void kh_fill_local_band_cb(ConstantData& cbd, const RenderObject& o) {
     cbd.local0[0] = o.pos[0];
     cbd.local0[1] = o.pos[2];
@@ -16571,7 +15676,7 @@ inline void kh_fill_local_band_cb(ConstantData& cbd, const RenderObject& o) {
 }
 
 // Colour + the twelve effect parameters, with the rain lens's system lanes
-// overriding fx1 (flush and UI-flush fill sites).
+// overriding fx1.
 inline void kh_fill_fx_params_cb(ConstantData& cbd, const RenderObject& o) {
     memcpy(cbd.color, o.color, sizeof(cbd.color));
     memcpy(cbd.fx0, o.fx, sizeof(cbd.fx0));
@@ -16585,10 +15690,9 @@ inline void kh_fill_fx_params_cb(ConstantData& cbd, const RenderObject& o) {
     }
 }
 
-// depthParams.zw: the trigger draw's own viewport depth range when it was seen
-// this cycle, else the scene's; a poisoned range garbles the linearization for
-// every pixel (the guard's false discards, the cast's overcast), so it is
-// sanitised to the scene's here on all three fill sites.
+// depthParams.zw: the trigger draw's own viewport depth range when seen this
+// cycle, else the scene's; a poisoned range garbles the linearization for every
+// pixel, so it is sanitised on all three fill sites.
 inline void kh_fill_depth_range_cb(ConstantData& cbd) {
     cbd.depth_params[2] = g_ro.trig_vp_valid ? g_ro.trig_vp_min : g_scene_vp_min_d;
     cbd.depth_params[3] = g_ro.trig_vp_valid ? g_ro.trig_vp_max : g_scene_vp_max_d;
@@ -16599,12 +15703,11 @@ inline void kh_fill_depth_range_cb(ConstantData& cbd) {
     }
 }
 
-// KH_BUCKETS: the identity of the dynamic-light block fill_dynlights_cb would
-// upload for this object - a hash over the lanes it writes (control, global,
-// view rows and the used light prefix). 0 unless the object is lit and the
-// mode is the per-mesh cull (3), the only case the block depends on the
-// object; two lit objects bucket together exactly when they would upload the
-// same block. Scratch is thread-local: a pass runs on one thread at a time.
+// The identity of the dynamic-light block fill_dynlights_cb would upload for
+// this object - a hash over the lanes it writes. 0 unless the object is lit and
+// the mode is the per-mesh cull (3); two lit objects bucket together exactly
+// when they would upload the same block. Scratch is thread-local: a pass runs
+// on one thread at a time.
 inline uint64_t kh_dl_bucket_hash(const RenderObject& o) {
     if (!o.lit) return 0;
     static thread_local ConstantData khdh_c;
@@ -16630,9 +15733,8 @@ inline void fill_lighting_obj_cb(ConstantData& cbd, const RenderObject& o) {
     cbd.lighting0[2] = o.light_ambient;
     cbd.lighting0[3] = o.light_diffuse;
     cbd.shadow_meta2[0] = o.far_vis ? 1.0f : 0.0f;
-    // 0 when never read - the shader treats 0 as no cut. 303 already stands the
-    // whole far contract down: a farVis-off object is sliced at the engine's
-    // object view distance.
+    // 0 when never read - the shader treats 0 as no cut. A farVis-off object is
+    // sliced at the engine's object view distance.
     cbd.shadow_meta2[1] = o.far_vis ? 0.0f : g_obj_vis.load(std::memory_order_relaxed);
     if (o.lit) fill_dynlights_cb(cbd, o);
 }
@@ -16659,11 +15761,9 @@ inline float shadow_axis_abs_cos(float ax, float ay, float az) {
     return fabsf(d) / sqrtf(len2);
 }
 
-// Cleared at every frame boundary (shadow_live_frame_reset) and on atlas
-// adoption, so a destroyed view whose address gets reused by an unrelated SRV
-// can never inherit a stale classification beyond the frame it died in - the
-// same reuse hazard that bans long-lived pointer memoization everywhere else in
-// this machinery.
+// Cleared at every frame boundary and on atlas adoption, so a destroyed view
+// whose address is reused can never inherit a stale classification beyond the
+// frame it died in.
 static void* g_atlas_srv_cache[8] = {};
 static uint32_t g_atlas_srv_count = 0;
 
@@ -16702,11 +15802,9 @@ inline void shadow_live_consider_atlas(ID3D11Texture2D* tex, const D3D11_TEXTURE
 
     void* id = static_cast<void*>(tex);
     if (id == g_ls.atlas_identity) {  return; }
-    // Keep the largest' alone made the hold a one-way latch: a mid-session
-    // shadow-quality change recreates the engine atlas, and a
-    // same-size-or-smaller successor could never displace the held one - a dead
-    // texture kept alive while every resolve stopped matching it (cast and
-    // receive quietly starve). grow-or-recover adoption.
+    // Grow-or-recover adoption: 'keep the largest' alone is a one-way latch - a
+    // mid-session shadow-quality change recreates the engine atlas and a
+    // same-size-or-smaller successor could never displace the held one.
     const float now_at = effect_time_seconds();
     const bool held_dead = g_ls.atlas_tex && (now_at - g_ls.atlas_last_seen > 3.0f);
     if (g_ls.atlas_tex && td.Width <= g_ls.atlas_size && !held_dead) {
@@ -16741,14 +15839,13 @@ inline bool shadow_live_test_window(const float* w) {
     const float n2 = r2[0] * r2[0] + r2[1] * r2[1] + r2[2] * r2[2];
     if (n0 < 1e-12f || n1 < 1e-12f || n2 < 1e-12f) return false;
 
-    // Scale window: every genuine sampling transform observed sits at 1/160.
-    // 1/24 per meter (plus a 1/600 long-range one); [1/1000, 1/8] keeps that
-    // family with margin and rejects the 1/2.2-scale look-alikes that slipped
-    // under a bare <0.5 ceiling.
+    // Scale window: every genuine sampling transform observed sits at 1/160 ..
+    // 1/24 per metre (plus a 1/600 long-range one); [1/1000, 1/8] keeps that
+    // family with margin and rejects the 1/2.2-scale look-alikes.
     if (n0 > 0.015625f || n1 > 0.015625f) {
         return false; }   // uv scale <= 1/8.
     if (n0 < 1e-7f || n1 < 1e-7f) {
-        return false; }   // Low sun stretches extents // uv scale >= 1/1000.
+        return false; }   // Low sun stretches extents; uv scale >= 1/1000.
     // Depth scale within a factor ~20 of the uv scale (observed ~0.5-2x).
     if (n2 < 0.0025f * n0 || n2 > 400.0f * n0) {
         return false; }
@@ -16799,26 +15896,21 @@ inline bool shadow_view_shaped(const float* w) {
 
 inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t bytes, uint32_t base_off = 0) {
     // base_off (floats): nonzero when the data is a window into the buffer (the
-    // binding-readback path) - offsets stored and matched below are canonical
+    // binding-readback path); offsets stored and matched below are canonical
     // buffer offsets, so both supply paths feed one lock.
     if (!reorder_on_render_thread() || bytes < 64 || !res) return;
 
     if (g_acq_hold.load(std::memory_order_relaxed)) {   return; }
 
     // Locked fast path: with a source locked, the publish branch requires res
-    // == view_src_res and the admission branch requires the lock to be absent -
-    // for every foreign resource the whole offset loop is already a guaranteed
-    // no-op (~1,600 uploads x 49 compares per frame of pure waste).
+    // == view_src_res and the admission branch requires no lock, so for every
+    // foreign resource the offset loop is a guaranteed no-op.
     if (g_ls.view_src_valid && res != g_ls.view_src_res) {  return; }
     const float* f = static_cast<const float*>(data);
     const uint32_t nf = bytes / 4;
 
     for (uint32_t off = 0; off + 16 <= nf && off <= 192; off += 4) {
         const float* w = f + off;
-
-        // Pure observation: no branch below reads it, and it runs only while
-        // armed, locked, and before this cycle's first accept - the only window
-        // the question is about.
 
         // A genuinely wrong first lock never passes it.
         if (!g_ls.view_src_valid && res == g_ls.view_src_res &&
@@ -16906,9 +15998,10 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
                         }
                     }
 
-                    // Family filter only: non-view families differ by >>1. A tighter bar is
-                    // speed-fragile (the bridge lags a frame; a fast spin exceeds it, reads stall,
-                    // the health check evicts the lock and seals fall to the skewed fallback).
+                    // Family filter only: non-view families differ by >> 1. A
+                    // tighter bar is speed-fragile (the bridge lags a frame; a
+                    // fast spin exceeds it and the health check evicts the
+                    // lock).
                     if (e_rot > 0.35f) {
 
                         continue;
@@ -17028,9 +16121,9 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
             if (g_ls.frame_view_valid) {
                 memcpy(g_ls.prev_view, g_ls.frame_view, sizeof(g_ls.prev_view));
                 g_ls.prev_view_valid = true;
-                // KH_BAND_ALT_PROVISIONAL: when the incoming publish crosses
-                // sources, the outgoing frame_view is the other source's
-                // freshest statement - latch it.
+                // When the incoming publish crosses sources, the outgoing
+                // frame_view is the other source's freshest statement - latch
+                // it.
                 float khav_a[3], khav_b[3];
                 if (kh_view_camera_exact(reinterpret_cast<const float(*)[4]>(g_ls.frame_view), khav_a) &&
                     kh_view_camera_exact(reinterpret_cast<const float(*)[4]>(fv), khav_b)) {
@@ -17066,12 +16159,9 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
                     continue;
                 }
 
-                // receive-V2 epoch guard: a pending seal older than this frame
-                // would pair a cross-frame view - the permanent receive offset
-                // (the same epoch-mixing disease the cast had). Invalidate
-                // instead; the next resolve reseals with a same-frame pair.
-                // This also retires the 100 ms bridge fallback (stale pendings
-                // die at 50 ms, before it fires).
+                // Epoch guard: a pending seal older than this frame would pair
+                // a cross-frame view - a permanent receive offset. Invalidate;
+                // the next resolve reseals with a same-frame pair.
                 if (g_ls.frame_view_time - bs.pending_since > 0.05f) {
                     bs.valid = false;
                     bs.pending_view = false;
@@ -17098,10 +16188,9 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
                 if (!kh_band_view_native(fv, true)) {   // Foreign publish never completes a seal.
                     continue;
                 }
-                // Absent beats offset: invalidate (the epoch guard's exact
-                // shape) and the next resolve reseals coherent. Is the
-                // capture's own view; a completing publish >50 m from it would
-                // weld sm(A) to view(B).
+                // Absent beats offset: invalidate and the next resolve reseals
+                // coherent. A completing publish > 50 m from the capture's own
+                // view would weld sm(A) to view(B).
                 if (!bs.vcol_bridge &&
                     !kh_band_pair_coherent(bs.vcol, fv)) {
                     bs.valid = false;
@@ -17150,10 +16239,8 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
         }
 
         if (!g_ls.view_src_valid && shadow_view_shaped(w)) {
-            // A tab-out stalls uploads past the health limit the true view
-            // could never survive in the ring long enough to relearn, and
-            // everything downstream froze camera-following cast, 91% incomplete
-            // seals.
+            // A tab-out stalls uploads past the health limit; the true view
+            // must be able to relearn from the ring afterwards.
             const float tmag_r = fabsf(w[12]) + fabsf(w[13]) + fabsf(w[14]);
             const float tmag_c = fabsf(w[3]) + fabsf(w[7]) + fabsf(w[11]);
 
@@ -17227,8 +16314,8 @@ inline bool kh_probe_world_cycle() {
 }
 
 // 15% luminance band with an absolute 0.02 floor: the cluster test of
-// KH_LIGHT_BASE and the flavour census (night-small values must not
-// ratio-flap into separate clusters).
+// KH_LIGHT_BASE and the flavour census (night-small values must not ratio-flap
+// into separate clusters).
 inline bool kh_probe_lum_band(float a, float b) {
     const float khp_m = a > b ? a : b;
     const float khp_eps = 0.15f * khp_m > 0.02f ? 0.15f * khp_m : 0.02f;
@@ -17236,10 +16323,9 @@ inline bool kh_probe_lum_band(float a, float b) {
 }
 
 // The block mirror (nb): every admitted non-zero standard-layout upload
-// refreshes it in full. Its readers are the fog / haze lanes (40+); the
-// amb / sun lanes are published by KH_LIGHT_BASE from the uploads
-// themselves, not from here. A block that is all-zero (amb, sun, fog) is
-// a clear, not lighting, and is refused.
+// refreshes it in full. Its readers are the fog / haze lanes (40+); amb / sun
+// are published by KH_LIGHT_BASE from the uploads themselves. An all-zero block
+// (amb, sun, fog) is a clear, not lighting, and is refused.
 inline void kh_probe_mirror_refresh(CbColorProbe& khp, const float* f, uint32_t nf) {
     if (khp.off >= 40 && khp.off - 40 + 38 < nf) {
         const float* khpz_b = f + (khp.off - 40);
@@ -17265,8 +16351,7 @@ inline void locator_note_upload(ID3D11Resource* res, const void* data, uint32_t 
     const uint32_t nf = nf_full > 4096 ? 4096 : nf_full;
 
     // References: decay from the staged fog (nonzero even with fog off - RV's
-    // default is 0.014), altitude from the injection-recorded render camera
-    // (valid once the first injection has run).
+    // default is 0.014), altitude from the injection-recorded render camera.
     const float decay = g_fog[1];
     const float cam_alt = g_ls.cam[1];
     const bool ref_ok = g_fog_valid && decay > 1.0e-4f && cam_alt != 0.0f;
@@ -17292,15 +16377,15 @@ inline void locator_note_upload(ID3D11Resource* res, const void* data, uint32_t 
             g_light_probe.hits++;
             g_light_probe.last_err = fabsf(f[g_light_probe.off + 12] + cam_alt);
             g_light_probe.last_confirm = effect_time_seconds();
-            // Confirms still stamp (the buffer is the block - no expiry churn),
-            // but the mirror only refreshes on the standard layout, so every
-            // consumer keeps the last-known standard lanes up high.
+            // Confirms still stamp (the buffer is the block), but the mirror
+            // only refreshes on the standard layout, so every consumer keeps
+            // the last-known standard lanes.
             const uint32_t mode_i = g_light_probe.off - 25;
 
             if (mode_i < nf) g_light_probe.last_mode = f[mode_i];
 
-            // KH_LIGHT_BASE: every standard-layout upload is
-            // an admitted upload - recorded and given its ownership span.
+            // Every standard-layout upload is an admitted upload - recorded and
+            // given its ownership span.
             if (mode_i < nf && f[mode_i] == 1.0f &&
                 g_light_probe.off >= 40 && g_light_probe.off - 40 + 18 < nf) {
                 kh_blk_note_admitted(f + (g_light_probe.off - 40), nf - (g_light_probe.off - 40), kh_probe_world_cycle());
@@ -17316,8 +16401,6 @@ inline void locator_note_upload(ID3D11Resource* res, const void* data, uint32_t 
 
     const float now = effect_time_seconds();
 
-    // The gate's cost rationale never applied here, and a hit is a 384-byte
-    // memcpy.
     if (nf >= 72) {
         if (g_sky_probe.valid && now - g_sky_probe.last_confirm > 60.0f) {
             g_sky_probe.valid = false;   // Freshness flag only: the mirror and hits persist -
@@ -17336,7 +16419,7 @@ inline void locator_note_upload(ID3D11Resource* res, const void* data, uint32_t 
     }
 
     // Attempt window (~120 ms each second): expiry, then the unlocked light
-    // scan (hundreds of uploads per attempt, negligible).
+    // scan.
     if (now - floorf(now) >= 0.12f) return;
 
     if (g_light_probe.valid && now - g_light_probe.last_confirm > 30.0f) {
@@ -17344,7 +16427,6 @@ inline void locator_note_upload(ID3D11Resource* res, const void* data, uint32_t 
         g_light_probe.buf = nullptr;
     }
 
-    // The ring-CB lesson it carried moved with it.
     const bool want_light = !g_light_probe.valid && ref_ok;
     if (!want_light) return;
 
@@ -17443,8 +16525,7 @@ inline void shadow_live_on_draw(ID3D11DeviceContext* ctx) {
 inline void shadow_live_finalize_cycle() {
     if (!g_ls.pending_valid || !g_ls.pending_vp_valid || g_ls.atlas_size == 0) {
         // Priority order matches the condition; the atlas term is tested first
-        // because it is the only one that can latch stale across cycles rather
-        // than merely miss one.
+        // because it is the only one that can latch stale across cycles.
         g_ls.pending_valid = false;
         g_ls.pending_bytes = 0;
         g_ls.pending_vp_valid = false;
@@ -17461,10 +16542,9 @@ inline void shadow_live_finalize_cycle() {
     vp.Width = g_ls.pending_vp[2];
     vp.Height = g_ls.pending_vp[3];
 
-    // Refuse the commit and keep the table. The derivation deliberately still
-    // samples every window (in band_capture): if the published sun ever locked
-    // wrong, derivation keeps measuring truth and the confirmation-held snap +
-    // jump arbiter recover it - no deadlock.
+    // Refuse the commit and keep the table. The derivation still samples every
+    // window (band_capture): if the published sun ever locked wrong, derivation
+    // keeps measuring truth and the snap + jump arbiter recover it.
     {
         const float* khlx_r2 = g_ls.pending_m + 8;
         const float khlx_now = effect_time_seconds();
@@ -17472,8 +16552,8 @@ inline void shadow_live_finalize_cycle() {
                              khlx_now - g_ls.frame_view_time < 0.05f;
 
         if (!(khlx_fv || g_ro.cycle_pv_valid)) {
-            // 37 = pristine skip the test entirely rather than rotating through
-            // an invalid latch.
+            // Pristine: skip the test entirely rather than rotating through an
+            // invalid latch.
             return;
         } else {
             float khlx_w[3];
@@ -17498,7 +16578,7 @@ inline void shadow_live_finalize_cycle() {
 
     // Slot selection: same cascade = same scale (each cascade's extent is
     // distinct); a re-render replaces its entry in place. New scales append; a
-    // full table evicts the stalest entry.
+    // full table evicts the stalest.
     const float* pm = g_ls.pending_m;
     const float pn0 = pm[0] * pm[0] + pm[1] * pm[1] + pm[2] * pm[2];
     if (g_ls.wipe_deferred) {   // KH_LIVE_WIPE_DEFER: the deferred door-4 wipe lands here.
@@ -17556,20 +16636,18 @@ inline void shadow_live_finalize_cycle() {
 
 }
 
-// Cascade binding harvest (upload-dark disease, third victim, third application
-// of the cure), shadow_live_upload never received a single cascade-family
-// upload while the general hooks ran millions of light-probe confirmations.
+// Cascade binding harvest: the cascade-family upload never reaches the general
+// upload hooks, so it is harvested from the bound buffers instead.
 struct CascBindProbe {
     ID3D11Buffer* staging[4] = {};
     uint32_t      bytes[4] = {};
     uint8_t       pending = 0;
 };
 static CascBindProbe g_cascbind;
-// These masks say which VS/PS slots 0-7 held any buffer at that moment (or'd
-// over the session).
+// Which VS/PS slots 0-7 held any buffer at that moment (or'd over the session).
 
-// Chooses the four buffers the staging copy reads from. Default = VS slots
-// first four bound windows of 64 B or more across VS 0-7 then PS 0-7.
+// Chooses the four buffers the staging copy reads from: the first four bound
+// windows of 64 B or more across VS 0-7 then PS 0-7.
 inline void kh_cascbind_select(ID3D11Buffer* (&khcs_vs)[8], UINT (&khcs_vf)[8], UINT (&khcs_vn)[8],
                                ID3D11Buffer* (&khcs_ps)[8], UINT (&khcs_pf)[8], UINT (&khcs_pn)[8],
                                bool khcs_wide,
@@ -17726,10 +16804,9 @@ inline bool shadow_probe_target(ID3D11DepthStencilView* dsv) {
 // Frame boundary (main depth clear): publish the size, start a new table.
 inline void shadow_live_frame_reset() {
     // The table persists - entries stay valid until their cascade re-renders
-    // and replaces them - with one exception, learned from the time-change
-    // field test: a cascade-layout change (sun elevation swings alter the
-    // count; 8 -> 5 observed) orphans slots that will never re-render, shadows
-    // visibly drift and never heal.
+    // and replaces them - with one exception: a cascade-layout change (sun
+    // elevation swings alter the count; 8 -> 5 observed) orphans slots that
+    // will never re-render, and shadows drift and never heal.
     const float now_fr = effect_time_seconds();
 
     float freshest = -1e9f;
@@ -17784,10 +16861,9 @@ struct ShadowMaskState {
     float  cold_first_stage = -1.0f;   // First flush that staged >= 1 mesh for injection.
     float  cold_first_trigger = -1.0f;   // First entry into the trigger body (past silent guards).
     ID3D11BlendState*       min_blend = nullptr;   // Out = min(dst, src).
-    // Priming states. min_blend cannot be reused: it is out = min(dst, src), so
-    // min(x, 1.0) = x and a priming write would be a silent no-op. cast_dss
-    // cannot be reused either - it is depth-off and fullscreen, while priming
-    // must land exactly on our own footprint.
+    // Priming states. min_blend cannot be reused (out = min(dst, src), so a
+    // priming write would be a no-op); cast_dss cannot either (depth-off and
+    // fullscreen, while priming must land exactly on our own footprint).
     ID3D11BlendState*       prime_blend = nullptr;
     ID3D11DepthStencilState* prime_dss = nullptr;   // Depth LESS_EQUAL, no write.
     bool                    prime_states_failed = false;
@@ -17801,9 +16877,7 @@ struct ShadowMaskState {
     float cast_fov[4] = {};
     bool  cast_fov_valid = false;
     // Shadow-distance re-engages, time skips and sun<->moon swaps interleave
-    // transitional passes whose captures misregister the reconstruction - the
-    // boundary overcast flash, the offset shadow on return, the two-direction
-    // duplicates.
+    // transitional passes whose captures misregister the reconstruction.
     float    sweep_last_time = -1.0f;
     uint32_t sweep_settle = 0;   // Coherent sweeps since a discontinuity.
     uint32_t sweep_need = 3;   // Sweeps required before firing:
@@ -17812,36 +16886,30 @@ struct ShadowMaskState {
 };
 
 static ShadowMaskState g_mask;
-// The DXGI format of the depth adopted into g_mask.cast_depth. The receiver depth
-// (khw_zl) arrives quantised: the engine resolves its own depth into this texture
-// already rounded, so on a grazing surface near the camera many pixels share one
-// plateau separated by cliffs. A normal reconstructed from the 2x2 quad inside a
-// plateau is the view axis, not the surface - a camera-locked, conic-contoured
-// wrong answer that ring-bands N.L and washes out as the camera lies down. The
-// world pass therefore measures the plane over KH_DLSW_NRM_R pixels at two
-// baselines and carries their agreement into KhDlsWorldFactor as khw_nrel; where
-// they disagree the normal may not drive N.L. The shadow lookup itself is not the
-// cause (nothing in a map lookup has a sub-texel period), and the compare bias
-// KH_DLS_BIAS_M must exceed the receiver uncertainty or plateaus flip the test.
-// Resolution arithmetic: KH_DLS_MAP_PX = 1024 per cube face at 90 degrees gives
-// khd_texel = 2*z0/1024 (2 cm at 10 m, 8 cm at 40 m), divided by sin(incidence)
-// on the ground.
+// The DXGI format of the depth adopted into g_mask.cast_depth. The receiver
+// depth arrives quantised: on a grazing surface near the camera many pixels
+// share one plateau, so a normal from the 2x2 quad inside a plateau is the view
+// axis, not the surface. The world pass measures the plane over KH_DLSW_NRM_R
+// pixels at two baselines and carries their agreement into KhDlsWorldFactor
+// (khw_nrel); where they disagree the normal may not drive N.L. KH_DLS_BIAS_M
+// must exceed the receiver uncertainty or plateaus flip the compare. Texel:
+// 2*z0/KH_DLS_MAP_PX at 90 degrees, divided by sin(incidence).
 
-inline void kh_svs_mask_release(bool khm_scrub_vmir);   // Default on the 11.6k decl.
+inline void kh_svs_mask_release(bool khm_scrub_vmir);   // Default on the earlier declaration.
 inline void kh_vmir_release();   // KH_VOL_MIRROR (defined with its statics).
 
 inline void release_shadow_device_state() {
-    // Mask SRV, the latched mask candidate, the pre-resolve snapshot texture +
-    // SRV, the pending-copy arm and every weak seam identity die with the
-    // device. See kh_svs_mask_release - the swap half of that function is what
-    // mask adoption calls, and it deliberately does none of this.
+    // Mask SRV, the latched mask candidate, the pre-resolve snapshot + SRV, the
+    // pending-copy arm and every weak seam identity die with the device.
+    // kh_svs_mask_release's swap half is what mask adoption calls, and it
+    // deliberately does none of this.
     kh_svs_mask_release();
     kh_ctx1_release();   // Cached context1 interface the device.
     g_rt0_desc_n = 0;   // RT0 desc cache = weak identities; wholesale evict.
     g_rt0_desc_next = 0;
     memset(g_rt0_desc, 0, sizeof(g_rt0_desc));
 
-    // dynamic-lights mirror machinery (device objects + weak identities; the
+    // Dynamic-lights mirror machinery (device objects + weak identities; the
     // pod censuses survive until the session reset).
     for (int khd_s = 0; khd_s < 2; ++khd_s) {
         if (g_dl.staging[khd_s]) { g_dl.staging[khd_s]->Release(); g_dl.staging[khd_s] = nullptr; }
@@ -17967,11 +17035,10 @@ inline void release_shadow_device_state() {
     g_atlas_srv_count = 0;
     g_proj_locator = ProjLocator{};
     kh_engcam_device_reset();
-    // KH_PIP_DEVRESET: the classification cache keys on depth identities and
-    // RTV pointers, and the template belongs to the old device's frame. A
-    // recycled address after a device reset would otherwise
-    // fire the injection into a foreign RGBA16F pass, or hold PIP off until the
-    // cache happened to evict. g_pip_seen re-arms at the next classified pass.
+    // The PIP classification cache keys on depth identities and RTV pointers,
+    // and the template belongs to the old device's frame; a recycled address
+    // after a device reset would fire the injection into a foreign pass.
+    // g_pip_seen re-arms at the next classified pass.
     kh_pip_reset();
     for (int p = 0; p < 8; ++p) g_proj_pending[p] = ProjPendingMap{};
     g_light_probe = CbColorProbe{};
@@ -17980,25 +17047,14 @@ inline void release_shadow_device_state() {
     cascbind_release();
 }
 
-// KH_BAND_RECV_SKIP. A band seal is consumed by ShadowBandFactor alone, and
-// only for a mesh pixel whose view-z (through the seal's own frozen view)
-// falls in the seal's [near, far). A resolve whose band no live mesh reaches
-// therefore seals nothing anyone reads, and a 3,000-cube scene paid the
-// atlas copy for it eight times a frame regardless (0.16 ms each). The test
-// below replays the shader's range test on the CPU over the
-// scene grid's loose cell bounds (mesh objects only, visible or not, grown by
-// the cell's largest enclosing radius - conservative on every axis), and a
-// capture is skipped only when NO cell reaches the range under every view
-// the seal could carry: the incoming capture's (the fresh frame view and the
-// bridge PV both, whichever the stage would take) and the slot's standing
-// seal and pending stage (what the table serves until a new capture lands).
-// A skipped slot keeps its seal - the shader never samples it - and its
-// freshness clock is touched so the 4 s expiry cannot invalidate a band the
-// meshes merely left, which would move the far fade (ShadowBandFactor's
-// max-far) onto the next band. Nothing else in the capture path changes: the
-// sun-raw derivation above the seal section still samples every resolve.
-// Bounded by receive_warmed so the warm-up clock still keys on the first
-// capture of a session.
+// KH_BAND_RECV_SKIP: a band seal is read by ShadowBandFactor only for mesh
+// pixels whose view-z falls in [near, far), so a resolve whose band no live
+// mesh reaches seals nothing anyone reads. Replays the shader's range test on
+// the CPU over the scene grid's loose cell bounds (conservative); a capture is
+// skipped only when NO cell reaches the range under every view the seal could
+// carry. A skipped slot keeps its seal and its freshness clock is touched (the
+// expiry must not move the far fade onto the next band). The sun-raw derivation
+// above still samples every resolve.
 static constexpr float KH_BAND_RECV_SLACK_M = 1.0f;   // On top of the cells' loose bounds.
 // The view's z column as (x, y, z, t): vz = dot(p, xyz) + t. Column layout
 // (vcol / stage_view): [8..11]; row layout (frame_view): [2], [6], [10], [14].
@@ -18066,15 +17122,11 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
     {
         auto& b = g_ls.band[slot];
         const float now = effect_time_seconds();
-        // The upload-matching latch (three designs, three pathologies:
-        // Promiscuity, lockout, wrong-family tracking) remains available as -
-        // never by skipping work. View source: the bridge PV.
+        // View source: the bridge PV.
         if (!g_ro.cycle_pv_valid && !g_ls.frame_view_valid) {  return; }
-        // KH_SUN_RAW: the raw cascade axis of every capture, ahead of the reseal
-        // throttle below - the light direction the engine shadows this frame with.
-        // Folded through the fresh frame view when the publish is live, the bridge
-        // PV otherwise (measured identical to a fold through the cycle's own later
-        // view; that deferred re-fold instrument is retired).
+        // KH_SUN_RAW: the raw cascade axis of every capture, ahead of the seal
+        // - the light direction the engine shadows this frame with. Folded
+        // through the fresh frame view when live, the bridge PV otherwise.
         {
             const bool khsr_fv = g_ls.frame_view_valid && g_ls.frame_view_time >= 0.0f &&
                                  now - g_ls.frame_view_time < 0.05f &&
@@ -18098,18 +17150,9 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
                 kh_sun_raw_note(khsr_w);
             }
         }
-        // KH_RESEAL_FOLD (post-trust, second and final): the reseal throttle
-        // stood here (0.25 s, 0.10 s while the grid turned, 0.05 s near; a
-        // big-jump bypass; a grid-rotation test; camera-escape stamps). It was
-        // ripped once and restored after the receive flickered without it; the
-        // flicker was the FOUR-deep staging pool starving four of eight bands
-        // at per-frame reseals (KH_BAND_POOL_8 at the pool). With one back
-        // buffer per band the bypass (one day run on the failure list:
-        // casters moving and deleted, walking toward and away from cast
-        // shadows, look-away / look-back, a slow turn at a shadow edge) sealed
-        // 18,152 of 18,152 stages with 0 pool misses and 0 restages at
-        // gpuMs_bandCapture 0.16 / cpuMs_bandCommit 0.17, and the received
-        // shadows follow their casters by eye. Every capture reseals.
+        // Every capture reseals; no throttle (with one back buffer per band,
+        // per-frame reseals cost 0.16 ms GPU / 0.17 ms CPU and never miss the
+        // pool).
 
         bool khbx_foreign = false;
 
@@ -18120,7 +17163,7 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
 
             if (!(khbx_fv || g_ro.cycle_pv_valid)) {
                 khbx_foreign = true;
-// 37 = pristine.
+// Pristine: no view source at all.
             } else if (!khbx_fv && !g_ls.view_src_valid && b.last_time > 0.0f) {
                 khbx_foreign = true;
             } else {
@@ -18210,9 +17253,9 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
                 }
             }
 
-            // The staging back buffers share the band desc exactly -
-            // copyResource demands it, and the commit swaps them into band
-            // slots, so they must remain interchangeable for the session.
+            // The staging back buffers share the band desc exactly
+            // (CopyResource demands it, and the commit swaps them into band
+            // slots).
             const int khbp_n = kh_band_pool_n();   // Only create what is used.
             for (int khbp_k = 0; khbp_k < khbp_n; ++khbp_k) {
                 if (g_band_pool[khbp_k].tex) continue;
@@ -18245,7 +17288,7 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
             if (b.valid) {
                 // The immediate path must not run either way: on a pool miss
                 // the slot's existing complete seal stands and the next sweep
-                // retries (last_time is left alone so the throttle allows it).
+                // retries.
                 khdf_staged = true;
                 int khdf_p = b.stage_pool;   // re-sweep of a slot already staged.
 
@@ -18261,7 +17304,6 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
                 }
 
                 if (khdf_p < 0 || !g_band_pool[khdf_p].tex) {
-                    // One fall-through per flush (347 = uncapped).
                     if (g_band_fall_flush != g_flush_serial) {
                         g_band_fall_flush = g_flush_serial;
                         khdf_staged = false;   // The immediate path below.
@@ -18303,10 +17345,8 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
             }
         }
 
-        // Wrapped, not re-indented (same convention as the khbx_foreign block
-        // above): a staged capture must still fall through to the sun
-        // derivation below, which is measurement, not consumption, and has
-        // always sampled every window this function sees.
+        // A staged capture must still fall through to the sun derivation below,
+        // which is measurement, not consumption.
         if (!khdf_staged) {
 
         memcpy(b.sm, sm, sizeof(b.sm));
@@ -18343,13 +17383,12 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
 
 // At a resolve draw: the bound PS CBs are looked up in the registry; a
 // sampling-family matrix found there is the transform for the atlas content
-// this very draw samples. If it's the finest scale, seal the pair right here:
-// Copy the atlas and store the matrix together.
+// this draw samples. If it's the finest scale, seal the pair: copy the atlas
+// and store the matrix together.
 inline void resolve_pair_capture(ID3D11DeviceContext* ctx) {
     if (!shadow_live_wanted() || !g_ls.atlas_tex) return;
-    // The original 0.7 query never saw it: every 'resolve hit' this code has
-    // ever processed came from the small VS-side block instead. RV binds
-    // constants at varying slots: scan PS b0.b7 and VS b0.b3.
+    // RV binds constants at varying slots: scan PS b0..b7 and VS b0..b3 (every
+    // resolve hit comes from the small VS-side block).
     ID3D11Buffer* bufs[18] = {};
     ctx->PSGetConstantBuffers(0, 14, bufs);
     ctx->VSGetConstantBuffers(0, 4, bufs + 14);
@@ -18592,15 +17631,14 @@ inline void mask_classify_rt(UINT n, ID3D11RenderTargetView* const* rtvs) {
 }
 
 // Entirely our pipeline, which is what makes mesh-shaped cast shadows and
-// concave self-shadowing possible at all: our geometry never enters the
-// engine's atlas, and the analytic slab could only ever cast an AABB.
+// concave self-shadowing possible: our geometry never enters the engine's
+// atlas.
 
-// KH_CAST_ALPHA: the caster record, at namespace scope so the alpha draw helper
-// Can take it. Alpha = the object's colour alpha with the lifetime envelope,
-// quantised to 1/64 (the input hash reads it: a fade re-renders the map, a
-// sub-quantum wobble does not); mats = the object's material set when any used
-// slot is cutout or blend, else null; alpha_caster = alpha below 1 or mats
-// present, and the alpha twins exist, instanced batch exactly as before.
+// The caster record, at namespace scope so the alpha draw helper can take it.
+// alpha = colour alpha x lifetime envelope, quantised to 1/64 (the input hash
+// reads it: a fade re-renders the map, a sub-quantum wobble does not); mats =
+// the material set when any used slot is cutout or blend, else null;
+// alpha_caster = alpha below 1 or mats present, and the alpha twins exist.
 struct SunCaster {
     float pos[3]; float size[3]; float rot[9]; bool rotated; int mesh;
     uint32_t slot;   // KH_OBJBUF: the live-scene slot (the lane's index into the record buffer).
@@ -18622,12 +17660,11 @@ inline bool kh_cast_alpha_on() {
     return g_res.vs_sundepth_a && g_res.ps_sundepth_a && g_res.layout_sundepth_a;
 }
 
-// KH_CAST_DISSOLVE: the opaque sun-depth state. With a camera-anchored map,
-// the twins present, AND a caster that actually reaches the fade band, the
-// dissolving pair; otherwise the depth-only pair (no pixel shader at all).
-// KH_CAST_DISSOLVE_GATE: g_sun_dissolve_now is decided once per
-// render_sun_depth from the whole caster list - a superset of every tier's
-// set and the union's - so a scene with nothing near the band pays nothing.
+// The opaque sun-depth state: with a camera-anchored map, the twins present AND
+// a caster that reaches the fade band, the dissolving pair; otherwise the
+// depth-only pair (no pixel shader). g_sun_dissolve_now is decided once per
+// render_sun_depth from the whole caster list, so a scene with nothing near the
+// band pays nothing.
 static constexpr float KH_SUN_FADE_START_CPP = 0.72f;   // Twin of the shader's KH_SUN_FADE_START.
 static bool g_sun_dissolve_now = false;
 
@@ -18637,26 +17674,23 @@ inline bool kh_cast_dissolve_on() {
 }
 
 // Does any caster's box reach past KH_SUN_FADE_START of the range from the
-// anchor, horizontally or vertically? Conservative: the box's XZ half-diagonal
-// and its full Y half-extent are added to the centre offset.
+// anchor? Conservative: the box's XZ half-diagonal and its full Y half-extent
+// are added to the centre offset.
 inline bool kh_cast_set_reaches_band(const std::vector<SunCaster>& khcb_set, float khcb_rng) {
     const float khcb_lim = KH_SUN_FADE_START_CPP * khcb_rng;
 
     for (size_t khcb_i = 0; khcb_i < khcb_set.size(); ++khcb_i) {
         const SunCaster& c = khcb_set[khcb_i];
-        // size is the SQF-order full extent (kh_mesh_dist_sq_of's convention);
-        // the whole half-diagonal is added on both axes - conservative.
+        // size is the SQF-order full extent; the whole half-diagonal is added
+        // on both axes.
         const float khcb_hl[3] = { c.size[0] * 0.5f, c.size[2] * 0.5f, c.size[1] * 0.5f };
         float khcb_he[3];
         kh_rot_half_extents(khcb_hl, c.rot, c.rotated, khcb_he);
         const float khcb_d = sqrtf(khcb_he[0] * khcb_he[0] + khcb_he[1] * khcb_he[1] + khcb_he[2] * khcb_he[2]);
-        // KH_DISSOLVE_GATE_AXES: c.pos is SQF order [x, north, up] (a memcpy of
-        // RenderObject::pos); the anchor is engine order [x, up, north]. The
-        // first cut compared pos[2] (up) against anchor[2] (north) and pos[1]
-        // (north) against anchor[1] (up), so the vertical term was a northing
-        // minus an altitude - thousands of metres, past the band on every
-        // frame - and the gate never once said false. Swizzled like every
-        // other consumer of a SunCaster's pos ({pos[0], pos[2], pos[1]}).
+        // c.pos is SQF order [x, north, up]; the anchor is engine order [x, up,
+        // north]. Swizzle ({pos[0], pos[2], pos[1]}) like every other consumer
+        // of a SunCaster's pos, or the vertical term compares a northing
+        // against an altitude.
         const float khcb_dx = c.pos[0] - g_sun_anchor_now[0];
         const float khcb_dz = c.pos[1] - g_sun_anchor_now[2];
         const float khcb_h = sqrtf(khcb_dx * khcb_dx + khcb_dz * khcb_dz) + khcb_d;
@@ -18684,11 +17718,9 @@ inline float kh_cast_dissolve_range() {
          ? fminf(fmaxf(g_sun_range.load(std::memory_order_relaxed), 8.0f), 1000.0f) : 0.0f;
 }
 
-// One caster record from a draw-list object. render_sun_depth built this
-// inline; kh_dls_frame needs the identical record for the light maps and the
-// dlsw mask, and two builders would be a twin. The eligibility and
-// range tests stay with each caller - they differ on purpose - only the record
-// does not.
+// One caster record from a draw-list object, shared by render_sun_depth and
+// kh_dls_frame. The eligibility and range tests stay with each caller (they
+// differ on purpose).
 inline SunCaster kh_sun_caster_of(const RenderObject& o, const float khsc_cam[3]) {
     SunCaster c;
     memcpy(c.pos, o.pos, sizeof(c.pos));
@@ -18700,9 +17732,9 @@ inline SunCaster kh_sun_caster_of(const RenderObject& o, const float khsc_cam[3]
     c.lod_lock = o.lod_lock;
     c.visible = o.visible;   // KH_DLSW_MASK_ALPHA.
     c.lod = kh_drawn_lod(c.mesh, c.pos, c.size, c.rot, c.rotated, c.lod_lock, khsc_cam);   // KH_SHADOW_LOD_DRAWN.
-    // KH_CAST_ALPHA: the caster's alpha (colour alpha x lifetime envelope, an
-    // expired object casts nothing until the flush erases it) quantised to
-    // 1/64, its alpha-carrying material set, and the verdict.
+    // The caster's alpha (colour alpha x lifetime envelope; an expired object
+    // casts nothing) quantised to 1/64, its alpha-carrying material set, and
+    // the verdict.
     {
         bool khsc_exp = false;
         const float khsc_env = lifetime_envelope(o, effect_time_seconds(), khsc_exp);
@@ -18716,18 +17748,13 @@ inline SunCaster kh_sun_caster_of(const RenderObject& o, const float khsc_cam[3]
     return c;
 }
 
-// Draws every alpha caster in khsa_set into the bound sun DSV: the alpha twins
+// Draws every alpha caster in khsa_set into the bound sun DSV: alpha twins
 // bound, one instance each from the pass's stream (record index = position in
-// the set - the stream was filled in set order), an untextured caster whole
-// with its colour alpha, a textured one per submesh of the shadow LOD level
-// with its material bound (kh_bind_material fills the mat lanes the PS reads
-// and binds t14-t18; the object slice is the pass's template plus those lanes).
-// Depth state, rasterizer and viewport are the pass's. Leaves the opaque sun
-// state bound again (the tier block binds it once for every tier).
-// KH_DLS_ALPHA: the body is one template over the set's element type - the sun
-// ladder hands it the caster vector, the light maps hand it their per-face
-// pointer list - so the two cannot drift. The instance index is the position
-// in the set either way (both streams are filled in set order).
+// the set), an untextured caster whole with its colour alpha, a textured one
+// per submesh of the shadow LOD with its material bound. Depth state,
+// rasterizer and viewport are the pass's; leaves the opaque sun state bound
+// again. One template over the set's element type (the sun ladder hands a
+// caster vector, the light maps a per-face pointer list).
 inline const SunCaster& kh_sa_at(const SunCaster& khsa_c) { return khsa_c; }
 inline const SunCaster& kh_sa_at(const SunCaster* khsa_c) { return *khsa_c; }
 template <class KhSaSet>
@@ -18797,49 +17824,39 @@ inline uint64_t kh_sun_draw_alpha(ID3D11DeviceContext* ctx, const std::vector<Su
     return kh_sun_draw_alpha_t(ctx, khsa_set, khsa_tpl, khsa_inst_vb);
 }
 
-// KH_DL_SHADOW (stage 2b,) - the maps. No shader change. Every property the
-// sun's depth pass has - the shadow LOD, the mesh-run batching and, since
-// KH_DLS_ALPHA, the alpha-coverage dither (the per-face keep list is
-// partitioned opaque-first and its alpha tail goes through
-// kh_sun_draw_alpha_t under the light's own frame CB: sunOrigin is the light,
-// viewProj the face, mirMeta.w zero so no dissolve) - applies to these maps
-// and cannot drift from the sun's version because it is the sun's version.
-// Until KH_DLS_ALPHA the alpha casters went through the opaque instanced run
-// here, so a cutout mesh cast a solid light shadow while this comment already
-// claimed the dither.
+// Stage 2b - the maps. Every property the sun's depth pass has (the shadow LOD,
+// the mesh-run batching, the alpha-coverage dither: the per-face keep list is
+// partitioned opaque-first and its alpha tail goes through kh_sun_draw_alpha_t
+// under the light's own frame CB - sunOrigin the light, viewProj the face,
+// mirMeta.w zero) applies here because it is the sun's version.
 static float    g_dls_vp[KH_DLS_MAX][6][16] = {};   // Per slot, per face: world(light-rel) -> clip.
 static uint32_t g_dls_facen[KH_DLS_MAX] = {};       // Slices this slot owns; 0 = no map.
-// The face -> slice map is therefore not slot*6 + face. Stage 3 must read this
-// table; 0xFFFF means the face has no map, which the shader reads as 'nothing
-// occludes in that direction' - the correct answer, not a missing one.
+// The face -> slice map is not slot*6 + face. Stage 3 must read this table;
+// 0xFFFF = the face has no map, which the shader reads as 'nothing occludes in
+// that direction'.
 static uint16_t g_dls_faceslice[KH_DLS_MAX][6] = {};
 static uint8_t  g_dls_facemask[KH_DLS_MAX] = {};    // Which faces got a slice.
-// Read that way, such a light would admit every caster in the scene into one
-// face. The kind of coupling that only breaks once the neighbouring code
-// changes - so it is named, not inferred.
+// Named, not inferred: a spot read as a cube would admit every caster in the
+// scene into one face.
 static uint8_t  g_dls_isspot[KH_DLS_MAX] = {};      // 1 = single spot frustum, not a cube.
 static const uint16_t KH_DLS_FACE_NONE = 0xFFFFu;
-// KH_DLS_FACE_HOLD - the strobe. So a face keeps its slice for KH_DLS_FACE_HOLD
-// frames after its last caster leaves - the same hysteresis KH_DLS_HOLD_SLACK
-// gives the slot table, for the same reason. An empty face costs one clear and
-// answers lit, so holding it is cheap; losing it mid-motion is a visible
-// flicker.
+// A face keeps its slice for KH_DLS_FACE_HOLD frames after its last caster
+// leaves - the same hysteresis KH_DLS_HOLD_SLACK gives the slot table. An empty
+// face costs one clear; losing it mid-motion is a visible flicker.
 static constexpr uint32_t KH_DLS_FACE_HOLD = 15;
 static uint32_t g_dls_face_hold[KH_DLS_MAX][6] = {};
 static float    g_dls_mapfar[KH_DLS_MAX] = {};      // The far plane its matrices were built to.
 static uint64_t g_dls_map_valid = 0;                // Bitmask of slots with a usable map.
 
 // Grow the depth array to hold khde_want slices. Recreated on growth (a
-// texture2DArray cannot be extended), so the count only ever climbs and the
-// Steady state is one allocation. Twin tripwire. KH_DLS_SLICES_MAX is declared
-// above Resources, before KH_DLS_MAX exists, so the two are written
-// independently and nothing checks they agree.
+// Texture2DArray cannot be extended), so the count only climbs.
+// KH_DLS_SLICES_MAX is declared above Resources, before KH_DLS_MAX exists;
+// nothing checks they agree.
 
 inline bool kh_dls_ensure_maps(ID3D11Device* khde_dev, UINT khde_want) {
     if (!khde_dev || khde_want == 0) return false;
-    // Round up to A whole cube. Quantising to 6 makes the count stable across
-    // any mask change within a light, and bounds the recreations to eight for
-    // the whole session.
+    // Round up to a whole cube: stable across any mask change within a light,
+    // and bounds the recreations to eight per session.
     khde_want = ((khde_want + 5u) / 6u) * 6u;
     if (khde_want > static_cast<UINT>(KH_DLS_SLICES_MAX)) khde_want = KH_DLS_SLICES_MAX;
     if (g_res.dls_tex && g_res.dls_slices >= khde_want && g_res.dls_size == KH_DLS_MAP_PX) return true;
@@ -18887,33 +17904,29 @@ inline bool kh_dls_ensure_maps(ID3D11Device* khde_dev, UINT khde_want) {
 
     g_res.dls_slices = khde_want;
     g_res.dls_size = KH_DLS_MAP_PX;
-    // Every skip key dies with the texture: a fresh array holds nothing, and a key
-    // that outlived it would let every light skip and sample uninitialised depth.
+    // Every skip key dies with the texture: a key that outlived it would let
+    // every light skip and sample uninitialised depth.
     for (uint32_t khde_k = 0; khde_k < KH_DLS_MAX; ++khde_k) g_dls_keys[khde_k] = 0;
     return true;
 }
 
-// KH_DL_SHADOW - publish the maps to the shader. Filled only at the mesh
-// frame-CB sites, and deliberately: the zeroed default is dls_meta[i].w == 0,
-// which the kernel reads as 'no map, answer lit'. The face -> slice table is
-// g_dls_faceslice, not slot*6+face: faces are only allocated where a caster
-// stands (KH_DLS_FACE_ALLOC), so the mapping is caster-dependent and has to be
-// carried rather than computed.
+// Publish the maps to the shader. Filled only at the mesh frame-CB sites,
+// deliberately: the zeroed default dls_meta[i].w == 0 reads as 'no map, answer
+// lit'. The face -> slice table is g_dls_faceslice, not slot*6+face: faces are
+// allocated only where a caster stands, so the mapping is carried, not
+// computed.
 static constexpr float KH_DLS_BIAS_M = 0.01f;      // Constant compare bias (m).
 static constexpr float KH_DLS_BIAS_SLOPE = 0.0001f;   // Plus this per metre of range.
-// KH_DLS_SRV_BIND. D3D11 silently unbinds a shader resource whose texture
-// is bound as a depth target - which our own render pass does to this array. If
-// the mesh bind site already ran this frame, t36 is left null and every Load
-// returns 0 (the near plane, fully occluded). Counting binds against renders says
-// whether that ordering happens.
+// D3D11 silently unbinds a shader resource whose texture is bound as a depth
+// target - which our own render pass does to this array. If the mesh bind site
+// already ran this frame, t36 is left null and every Load returns 0 (fully
+// occluded).
 
-// Reads g_dls_map_valid (written by the render pass, declared with the map state
-// below the selector), so it must be declared above its readers. Twin of
-// fill_dynlights_cb: the world pass calls both back to back, and both refuse a
-// slot whose map is not valid this frame. fill_dynlights_cb is per-object (nearest
-// KH_DL_MAX_LIGHTS to the object's centre). Records are the engine's own cb11
-// bytes copied verbatim; the slot lane is written after the copy because the
-// engine may have left anything there.
+// Reads g_dls_map_valid (written by the render pass), so it must be declared
+// above its readers. Twin of fill_dynlights_cb: the world pass calls both back
+// to back, and both refuse a slot whose map is not valid this frame. Records
+// are the engine's own cb11 bytes copied verbatim; the slot lane is written
+// after the copy.
 inline void kh_dls_fill_dl_world(ConstantData& khd_cb) {
     if (g_dl.pool_n == 0) return;
     if (steady_now_ms() - g_dl.pool_stamp > KH_DL_POOL_STALE_MS) return;
@@ -18949,9 +17962,7 @@ inline void kh_dls_fill_dl_world(ConstantData& khd_cb) {
         khd_cb.dl_global[1] = 1.0f;
         khd_cb.dl_global[2] = 1.0f;
     }
-    // The user-facing intensity, exactly as fill_dynlights_cb reads it - the
-    // world must not be darkened by a share of light the meshes were never
-    // given.
+    // The user-facing intensity, exactly as fill_dynlights_cb reads it.
     {
         const uint32_t khd_bits = g_dl_intensity_bits.load(std::memory_order_relaxed);
         float khd_int = 1.0f;
@@ -18960,10 +17971,10 @@ inline void kh_dls_fill_dl_world(ConstantData& khd_cb) {
     }
 }
 inline void kh_dls_fill_cb(ConstantData& khf_cb) {
-    // KH_DLS_RANGE - one fill for every consumer (both mesh passes, the mask cast, the
-    // world receive). The rule is every other g_sun_range consumer's clamp; the camera
-    // is the cycle's (kh_dls_camera, the one kh_dls_select scores against); the world
-    // pass overrides xyz with its own reconstruction camera after this call.
+    // One fill for every consumer (both mesh passes, the mask cast, the world
+    // receive). The rule is every other g_sun_range consumer's clamp; the
+    // camera is the cycle's; the world pass overrides xyz with its own
+    // reconstruction camera after this call.
     {
         float khf_cam[3];
         if (kh_dls_camera(khf_cam)) {
@@ -18976,13 +17987,13 @@ inline void kh_dls_fill_cb(ConstantData& khf_cb) {
             khf_cb.dls_range[3] = 0.0f;
         }
     }
-    // KH_DLS_MESHMODE: dlsFaceSlice[].z is our own lane and this fill is its only
-    // writer, so the mesh path's arm lives there rather than in lighting0.y.
+    // dlsFaceSlice[].z is our own lane and this fill is its only writer, so the
+    // mesh path's arm lives there.
     for (uint32_t khf_s = 0; khf_s < KH_DLS_MAX; ++khf_s) {
-        // A slot is publishable only if it is live and actually has a map this
-        // frame. g_dls_map_valid is set by the render pass, so a light selected
-        // but not rendered (slice budget, a failed upload) publishes w = 0 and
-        // reads as lit rather than sampling a slice that holds another light.
+        // A slot is publishable only if live and actually mapped this frame: a
+        // light selected but not rendered (slice budget, failed upload)
+        // publishes w = 0 and reads as lit rather than sampling another light's
+        // slice.
         const bool khf_ok = g_dls[khf_s].live &&
                             (g_dls_map_valid & (1ull << khf_s)) != 0ull &&
                             g_dls_facen[khf_s] > 0;
@@ -19005,9 +18016,8 @@ inline void kh_dls_fill_cb(ConstantData& khf_cb) {
                                  ? static_cast<float>(g_dls_faceslice[khf_s][0]) : 0.0f;
         khf_cb.dls_ctl[khf_s][3] = KH_DLS_BIAS_SLOPE;
 
-        // KH_DLS_FACE_FLAT: slot * 6 + face, one float4 each. The arm is
-        // replicated across all six because the shader reads it before it knows
-        // which face it wants.
+        // slot * 6 + face, one float4 each. The arm is replicated across all
+        // six because the shader reads it before it knows which face it wants.
         const float khf_arm = 1.0f;
         for (int khf_f = 0; khf_f < 6; ++khf_f) {
             const uint16_t khf_sl = g_dls_faceslice[khf_s][khf_f];
@@ -19024,8 +18034,7 @@ inline void kh_dls_fill_cb(ConstantData& khf_cb) {
     }
 }
 
-// Uncapped. The vector is cleared, never freed, so the steady state allocates
-// nothing after the first frame at a given caster count.
+// Uncapped; cleared, never freed.
 struct KhDlswCaster {
     float pos[3]; float size[3]; float rot[9]; bool rotated; int mesh; bool lod_lock;
     // KH_DLSW_MASK_ALPHA: the mask's own lanes, copied from the SunCaster.
@@ -19048,8 +18057,8 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
         khdr_chash = CryptoGenerator::fnv1a64_update(khdr_chash, &khdl_c.mesh, sizeof(khdl_c.mesh));
         khdr_chash = CryptoGenerator::fnv1a64_update(khdr_chash, &khdl_c.alpha, sizeof(khdl_c.alpha));
         khdr_chash = CryptoGenerator::fnv1a64_update(khdr_chash, &khdl_c.lod, sizeof(khdl_c.lod));   // KH_SHADOW_LOD_DRAWN.
-        // KH_DLS_ALPHA: the map now depends on the material and the verdict,
-        // exactly as the union hash does.
+        // The map depends on the material and the verdict, exactly as the union
+        // hash does.
         const uint64_t khdl_mh = khdl_c.mats ? khdl_c.mats->hash : 0ull;
         khdr_chash = CryptoGenerator::fnv1a64_update(khdr_chash, &khdl_mh, sizeof(khdl_mh));
         const uint8_t khdl_ac = khdl_c.alpha_caster ? 1 : 0;
@@ -19075,9 +18084,8 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
     }
     if (!khdr_ctx || g_dls_n == 0) {  return; }
 
-    // Resolve first, budget second. The budget may not guess at a quantity the
-    // resolve decides; resolve every light's face count and matrices up front,
-    // then allocate to the total that actually results.
+    // Resolve first, budget second: resolve every light's face count and
+    // matrices up front, then allocate to the total that results.
     UINT khdr_need = 0;
     for (uint32_t khdr_s = 0; khdr_s < KH_DLS_MAX; ++khdr_s) {
         g_dls_facen[khdr_s] = 0;
@@ -19092,8 +18100,7 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
         uint32_t khdr_fn = 0;
 
         if (khdr_l.spot) {
-            // KH_DLS_SPOT_SRC: id first, then the nearest pool entry that is a
-            // spot. The first-in-range scan survives only under 586.
+            // id first, then the nearest pool entry that is a spot.
             const DlPoolLight* khdr_src = nullptr;
             if (khdr_l.light_id != 0) {
                 for (uint32_t khdr_p = 0; khdr_p < g_dl.pool_n; ++khdr_p) {
@@ -19127,9 +18134,9 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
             g_dls_isspot[khdr_s] = 1;
         } else {
             // Cube: build all six matrices, then keep only the faces that
-            // actually contain a caster. The test is kh_dls_face_keep - the
-            // same function the render pass uses to gather the batch - so the
-            // allocation and the draw cannot disagree about which faces matter.
+            // contain a caster. The test is kh_dls_face_keep - the same
+            // function the render pass uses - so allocation and draw cannot
+            // disagree.
             uint8_t khdr_mask = 0;
             for (int khdr_f = 0; khdr_f < KH_DLS_FACES; ++khdr_f) {
                 kh_dls_face_vp(khdr_f, khdr_far, g_dls_vp[khdr_s][khdr_f]);
@@ -19174,10 +18181,10 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
     khdr_dev->Release();
     if (!khdr_ok) {  return; }
 
-    // KH_DLS_DEPTHCLIP: the sun renders an orthographic map where DepthClipEnable =
-    // false is correct (a caster outside the near plane is kept). On a perspective map
-    // the same flag is destructive: geometry nearer than the near plane is clamped to
-    // depth 0 - the closest value there is - and occludes everything behind it.
+    // The sun renders an orthographic map where DepthClipEnable = false is
+    // correct. On a perspective map the same flag is destructive: geometry
+    // nearer than the near plane clamps to depth 0 and occludes everything
+    // behind it.
     ID3D11RenderTargetView* khdr_prev_rtv[8] = {};
     ID3D11DepthStencilView* khdr_prev_dsv = nullptr;
     D3D11_VIEWPORT          khdr_prev_vp[16] = {};
@@ -19217,18 +18224,15 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
         if (khdr_fn == 0) continue;
         if (khdr_slice + khdr_fn > g_res.dls_slices) {  break; }
 
-        // union-style skip. Same contract as render_sun_depth's union hash: a
-        // caster that moves, or the light itself moving, changes the key and
-        // forces a rebuild that frame. Skipping reuses the slices untouched, so
-        // the matrices must be republished either way - they are state, not
-        // output of the render.
+        // Union-style skip: a caster or the light moving changes the key and
+        // forces a rebuild. Skipping reuses the slices, so the matrices must be
+        // republished either way - they are state, not output.
         const uint64_t khdr_key = kh_dls_light_hash(khdr_l, khdr_fn, khdr_slice,
                                                     g_dls_facemask[khdr_s], khdr_chash,
                                                     g_dls_isspot[khdr_s] ? g_dls_vp[khdr_s][0] : nullptr);
-        // Putting the mode in the hash (as it already is) would not do this: it
-        // changes the key once and then the new key is stable, so the pass
-        // would skip again from the second frame on - the one-frame window this
-        // mode exists to remove.
+        // Putting the mode in the hash would not do this: the new key is stable
+        // from the second frame on, so the pass would skip again - the
+        // one-frame window this exists to remove.
         const bool khdr_reuse = (khdr_key == g_dls_keys[khdr_s]);
 
         g_dls_map_valid |= (1ull << khdr_s);
@@ -19255,11 +18259,11 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
             ID3D11DepthStencilView* khdr_dsv = g_res.dls_dsv[khdr_sl];
             if (!khdr_dsv) continue;
 
-            // Cull to this face. KH_DLS_ALPHA: partitioned opaque-first - the
-            // instanced mesh runs below cover [0, khdr_opq) and the alpha tail
-            // [khdr_opq, n) draws per caster through the alpha twins; the
-            // instance stream is written in this order, so the alpha draw's
-            // start-instance (its position in the list) lands on its own lane.
+            // Cull to this face. Partitioned opaque-first: the instanced runs
+            // cover [0, khdr_opq) and the alpha tail [khdr_opq, n) draws per
+            // caster through the alpha twins; the instance stream is written in
+            // this order, so an alpha draw's start-instance lands on its own
+            // lane.
             static std::vector<const SunCaster*> khdr_keep;
             khdr_keep.clear();
             size_t khdr_opq = 0;
@@ -19342,8 +18346,7 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
             if (khdr_opq < khdr_keep.size()) {   // KH_DLS_ALPHA: the alpha tail, the sun's own draw.
                 kh_sun_draw_alpha_t(khdr_ctx, khdr_keep, khdr_obj, g_res.sun_instance_vb);
                 // Back to this bracket's opaque state (kh_sun_bind_opaque may
-                // have chosen the dissolve twins; harmless here at mirMeta.w =
-                // 0, but this pass declared the plain pair and keeps it).
+                // have chosen the dissolve twins).
                 khdr_ctx->VSSetShader(g_res.vs_sundepth, nullptr, 0);
                 khdr_ctx->PSSetShader(nullptr, nullptr, 0);
             }
@@ -19353,9 +18356,7 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
         khdr_slice += khdr_fn;
     }
     // Hand the sun back exactly what it had. Every Get* above AddRef'd, so each
-    // saved pointer is owned here and must be released whether or not it was
-    // used - a restore that leaks is a restore that eventually kills the
-    // device.
+    // saved pointer must be released whether or not it was used.
     if (g_res.dls_rast) {
         khdr_ctx->RSSetState(khdr_prev_rs);
         KH_SAFE_RELEASE(khdr_prev_rs);
@@ -19366,10 +18367,9 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
     KH_SAFE_RELEASE(khdr_prev_dsv);
 }
 
-// KH_DLS_FRAME - the light maps render on their own bracket, free of the sun
-// pass's gates (validity/witness, null-sun return, era arms, the sun's caster
-// cull). Once per cycle, whichever mesh pass arrives first (the injection, or the
-// flush fallback on a frame the injection did not run) - the kh_dls_select rule.
+// The light maps render on their own bracket, free of the sun pass's gates.
+// Once per cycle, whichever mesh pass arrives first (the injection, or the
+// flush fallback) - the kh_dls_select rule.
 static uint64_t g_dls_frame_cycle = ~0ull;      // once-per-cycle guard (state, not a lane).
 inline void kh_dls_frame(ID3D11DeviceContext* khdf_ctx) {
     if (!khdf_ctx) return;
@@ -19381,10 +18381,9 @@ inline void kh_dls_frame(ID3D11DeviceContext* khdf_ctx) {
 
     if (g_dls_n > 0) {
         kh_scene_sync();   // KH_SCENE: live walk by reference, no copy.
-        // KH_SCENE_GRID: the reach test below is a sphere per light, so the walk
-        // visits only the cells the union of those spheres can touch (the
-        // per-object test is unchanged; the grid pads by each cell's largest
-        // object radius, which covers the half-diagonal the test adds).
+        // The reach test is a sphere per light, so the walk visits only the
+        // cells the union of those spheres can touch (the grid pads by each
+        // cell's largest object radius).
         static std::vector<uint32_t> khdf_cand;
         {
             float khdf_mn[3] = { 0.0f, 0.0f, 0.0f }, khdf_mx[3] = { 0.0f, 0.0f, 0.0f };
@@ -19431,9 +18430,9 @@ inline void kh_dls_frame(ID3D11DeviceContext* khdf_ctx) {
                             g_res.dss_test_write && g_res.rast_sun && g_res.obj_srv &&   // KH_OBJBUF.
                             g_res.composite_cb && g_res.composite_frame_cb;
     if (!khdf_state || khdf_casters.empty()) {
-        // Nothing to render into, or nothing that could cast: the 514
-        // stand-down. The per-light skip keys are untouched, so a caster
-        // returning to the same place next frame reuses its slices.
+        // Nothing to render into, or nothing that could cast. The per-light
+        // skip keys are untouched, so a caster returning next frame reuses its
+        // slices.
         g_dls_map_valid = 0;
         for (uint32_t khdf_s = 0; khdf_s < KH_DLS_MAX; ++khdf_s) g_dls_facen[khdf_s] = 0;
         g_dlsw_casters.clear();
@@ -19472,9 +18471,9 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     if (g_sun_map_rendered_frame) return g_sun_map_valid;
     g_sun_map_rendered_frame = true;
 
-    // No published sun and no sky witness: no self / cast map. Validity drops so
-    // frozen consumers stand down too; the map renders the frame either arrives.
-    // Before the first publish the sky lane alone may carry them (kh_sun_axis_witnessed).
+    // No published sun and no sky witness: no self / cast map; validity drops
+    // so frozen consumers stand down too. Before the first publish the sky lane
+    // alone may carry them.
     if (!g_sun_valid && !kh_sun_axis_witnessed()) {
         g_sun_map_valid = false;
         g_sun2_map_valid = false;
@@ -19486,9 +18485,9 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     g_sun_map_no_local = false;
     if (!ctx) return false;
 
-    // 502 renders the maps from the live derivation - the axis the engine's own
-    // cascades are built from, which is the reference the eye compares our
-    // shadow against - and changes nothing else.
+    // The maps render from the live derivation - the axis the engine's own
+    // cascades are built from, the reference the eye compares our shadow
+    // against.
     const float* sun = kh_shadow_sun();
 
     // KH_SUN_AXIS_FOLD: the maps render from the publish itself.
@@ -19511,8 +18510,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         }
     }
 
-    // Camera-less flushes anchor at the origin - which is the world-absolute
-    // behaviour, correct by construction.
+    // Camera-less flushes anchor at the origin (world-absolute), correct by
+    // construction.
     if (cam_valid) {
         g_sun_anchor_now[0] = cam_e[0];
         g_sun_anchor_now[1] = cam_e[1];
@@ -19546,16 +18545,12 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                 const float hd = sqrtf(he0[0] * he0[0] + he0[1] * he0[1] + he0[2] * he0[2]);
                 const float lim = khsr_rad + hd;
 
-                // KH_SUN_RANGE_CYL: cylinder, matching KhSunRangeFade.
-                // As a sphere this refused casters whose shadow lands on
-                // ground the shader still asks about, and the refusal is a
-                // cliff where the fade is a ramp.
+                // Cylinder, matching KhSunRangeFade: a sphere refuses casters
+                // whose shadow lands on ground the shader still asks about.
                 if (dx * dx + dz * dz > lim * lim || fabsf(dy) > lim) {
-                    // The sole guard is the sy > 1e-4 horizon test below, which
-                    // is a validity floor, not a length cap - at sy 1e-4 the
-                    // reach is ~2e4 x height, well inside fp32, and the reach
-                    // feeds only this eligibility test, never the map fit -
-                    // tested at the same lim with the vertical extent as slack.
+                    // The sole guard is the sy > 1e-4 horizon test below (a
+                    // validity floor, not a length cap); the reach feeds only
+                    // this eligibility test, never the map fit.
                     bool khsr_in = false;
 
                     if (g_sun_valid) {   // The reach rescue needs a published sun.
@@ -19571,30 +18566,22 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                                                                       // Drop.
                             const float khsr_ux = -khsr_sx / khsr_hl;   // Shadow runs opposite.
                             const float khsr_uz = -khsr_sz / khsr_hl;
-                            // KH_SUN_ELIG_SPAN: + lim. Without it the ray
-                            // stops 2 * he.y below the camera and every
-                            // receiver deeper than that is invisible to the
-                            // test - which at a low sun is (camera AGL) * k
-                            // of missing horizontal reach, and is the shadow
-                            // pop-in. A receiver inside the shadow view
-                            // distance is at most lim below the camera, so
-                            // this is the tight bound, not a slack one.
-                            // Verified against the swept-box ground truth:
-                            // 41.4% of in-range shadows missed before, 8.3%
-                            // after, and zero extra casters admitted.
+                            // + lim: without it the ray stops 2 * he.y below
+                            // the camera and every receiver deeper than that is
+                            // invisible to the test (at a low sun, (camera AGL)
+                            // * k of missing reach - the shadow pop-in). A
+                            // receiver inside the shadow view distance is at
+                            // most lim below the camera, so this is the tight
+                            // bound.
                             const float khsr_span = 2.0f * he0[1] + khsr_drop + lim;
                             const float khsr_ay = dy - he0[1];   // Camera -> caster base, vertical.
                             const float khsr_h = dx * khsr_ux + dz * khsr_uz;
-                            // KH_SUN_ELIG_BAND: the shadow is a band, not a
-                            // line, and on a cylinder the horizontal and
-                            // vertical tests are independent given s - so the
-                            // exact answer is an interval intersection, not a
-                            // distance minimised at one chosen s. Picking s
-                            // first and judging after loses every caster whose
-                            // shadow satisfies both tests at DIFFERENT s.
-                            // Horizontal: |q + u*k*s| <= lim is a quadratic in
-                            // s; its roots bound where the shadow is in range
-                            // laterally, and no root means it never is.
+                            // The shadow is a band, not a line, and on a
+                            // cylinder the horizontal and vertical tests are
+                            // independent given s, so the exact answer is an
+                            // interval intersection. Horizontal: |q + u*k*s| <=
+                            // lim is a quadratic in s; no root means never in
+                            // range.
                             const float khsr_qa = khsr_k * khsr_k;
                             const float khsr_qb = 2.0f * khsr_k * khsr_h;
                             const float khsr_qc = dx * dx + dz * dz - lim * lim;
@@ -19632,9 +18619,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     g_sun_dissolve_now = cam_valid && kh_cast_set_reaches_band(casters, khsr_rad);   // KH_CAST_DISSOLVE_GATE.
 
     // The hash commits only at render success below, so a failed render can
-    // never let a stale map vouch for new inputs. (Failure-exonerated
-    // re-application: this block sits after the derived-sun guard and provably
-    // never executed in the corrupted sessions.).
+    // never let a stale map vouch for new inputs.
     uint64_t input_hash = CryptoGenerator::FNV1A64_OFFSET;
     uint64_t khsh_caster_key = 0;   // KH_SUN_TIER_KEY: the caster hash (set with khsm_caster_hash).
     bool     khsh_did[4] = { false, false, false, false };   // KH_SUN_TIER_KEY: tiers that rendered this call.
@@ -19656,9 +18641,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             g_sun5_map_valid = false;
             return;
         }
-        // Per-band ensure: a band whose resources fail is stood down alone -
-        // its meta stays zeroed and both consumers fall through to the next
-        // tier - so resource failure degrades per band, non-fatally.
+        // Per-band ensure: a band whose resources fail is stood down alone
+        // (meta zeroed, both consumers fall through to the next tier).
         const bool khsh_core = g_res.vs_sundepth && g_res.layout_sundepth &&
                                g_res.sun_instance_vb && g_res.obj_srv;   // KH_OBJBUF.
         const bool khsh_ok0 = khsh_core && ensure_sun_depth2(khsh_dev);
@@ -19666,8 +18650,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         const bool khsh_ok2 = khsh_core && ensure_sun_depth4(khsh_dev);
         const bool khsh_ok3 = khsh_core && ensure_sun_depth5(khsh_dev);
         // The moment pyramids + convert pair. Non-fatal: a failed ensure leaves
-        // every band classic (sun_pf flags stay false).
-        const bool khsh_pf_ok = ensure_sun_pf(khsh_dev);
+        // every band classic.
+        ensure_sun_pf(khsh_dev);
         khsh_dev->Release();
         if (!khsh_ok0) g_sun2_map_valid = false;
         if (!khsh_ok1) g_sun3_map_valid = false;
@@ -19675,8 +18659,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         if (!khsh_ok3) g_sun5_map_valid = false;
         if (!khsh_ok0 && !khsh_ok1 && !khsh_ok2 && !khsh_ok3) return;
 
-        // Sun basis - same construction as the union fit, once for all bands
-        // (they share the sun; only the footprint differs).
+        // Sun basis, once for all bands (they share the sun; only the footprint
+        // differs).
         const float khsh_f[3] = { -sun[0], -sun[1], -sun[2] };
         float khsh_up[3] = { 0.0f, 1.0f, 0.0f };
         if (fabsf(khsh_f[1]) > 0.99f) { khsh_up[0] = 1.0f; khsh_up[1] = 0.0f; }
@@ -19702,10 +18686,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             khsh_f[0] * khsh_r3[1] - khsh_f[1] * khsh_r3[0],
         };
 
-
         // State envelope: own on union-skip frames, the union's otherwise - one
-        // envelope for all bands (one capture/restore, up to three clears +
-        // draw sets inside it).
+        // envelope for all bands.
         StateBackup khsh_bk;
         KhOmSave khsh_om;
         UINT khsh_nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
@@ -19718,11 +18700,10 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         if (khsh_standalone) {
             g_ro.in_injection = true;
             khsh_bk.capture(ctx);
-            // VB slot 1 is outside StateBackup's coverage - the union pass
-            // saves it explicitly for exactly this reason, and the standalone
-            // pass must too. Missing this leaked our mesh + instance buffers
-            // into the engine's next draws every skip frame: the sky-splat /
-            // black-flicker field report on.
+            // VB slot 1 is outside StateBackup's coverage; the union pass saves
+            // it explicitly and the standalone pass must too, or our mesh +
+            // instance buffers leak into the engine's next draws on every skip
+            // frame.
             ctx->IAGetVertexBuffers(1, 1, &khsh_ovb1, &khsh_ovb1_stride, &khsh_ovb1_offset);
             khsh_om.capture(ctx);   // Full OM set (8 RTVs + DSV).
             ctx->RSGetViewports(&khsh_nvp, khsh_ovp);
@@ -19737,16 +18718,15 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             // KH_SUN_PS_CB: the PS stage too. Twin: the base map below.
             ctx->PSSetConstantBuffers(0, 2, khsh_cbs);
             ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);
-            // Twin of the union site through kh_sun_rs_pick. KH_SUN_PANCAKE:
-            // The tiers bind the clamp twin of the picked clamp twin was
-            // actually bound (a null twin falls through).
+            // Twin of the union site through kh_sun_rs_pick: the tiers bind the
+            // clamp twin (a null twin falls through).
             {
                 ID3D11RasterizerState* khsh_rs = kh_sun_rs_pick(true);
                 ctx->RSSetState(khsh_rs);
             }
         }
 
-        // The hero body, parameterized - one band per call. Outputs land in the
+        // The hero body, parameterized - one band per call; outputs land in the
         // band's own statics through the reference parameters.
         auto khsh_one = [&](float khsh_half, float khsh_dep, UINT khsh_size,
                             ID3D11DepthStencilView* khsh_dsv,
@@ -19755,10 +18735,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                             float& khsh_out_hd, bool& khsh_out_valid,
                             uint64_t& khsh_out_renders, uint64_t& khsh_out_casters,
                             float& khsh_out_reach,
-                            ID3D11ShaderResourceView* khsh_dep_srv,
-                            ID3D11RenderTargetView* khsh_pf_rtv,
-                            ID3D11ShaderResourceView* khsh_pf_srv,
-                            UINT khsh_pf_size, int khsh_pf_idx,
+                            int khsh_pf_idx,
                             bool& khsh_out_pf) -> void {
             double khsh_dctr[3] = { 0.0, 0.0, 0.0 };
             bool   khsh_dsnap = false;
@@ -19777,8 +18754,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             const double khsh_dsr = floor(khsh_dpr / khsh_dtex) * khsh_dtex - khsh_dpr;
             const double khsh_dsu = floor(khsh_dpu / khsh_dtex) * khsh_dtex - khsh_dpu;
             // The snapped centre stays double into the eye and the translation
-            // row below - collapsing to float here would re-quantise at the
-            // very ulp this block exists to beat.
+            // row - collapsing to float here re-quantises at the very ulp this
+            // block exists to beat.
             khsh_dctr[0] = khsh_dc[0] + khsh_dsr * khsh_dr3[0] + khsh_dsu * khsh_du3[0];
             khsh_dctr[1] = khsh_dc[1] + khsh_dsr * khsh_dr3[1] + khsh_dsu * khsh_du3[1];
             khsh_dctr[2] = khsh_dc[2] + khsh_dsr * khsh_dr3[2] + khsh_dsu * khsh_du3[2];
@@ -19832,16 +18809,14 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                                             khsh_he[2] * khsh_he[2]);
 
                 // Sun-axis split: khsh_ds is how far up-sun the caster sits
-                // (sun[] points toward the sun - the eye below rides it),
-                // khsh_lat is the offset the ortho clips on (the per-axis max -
-                // the radial form under 447; see below).
+                // (sun[] points toward the sun), khsh_lat the offset the ortho
+                // clips on (per-axis max).
                 const float khsh_ds = khsh_dx[0] * sun[0] + khsh_dx[1] * sun[1] +
                                       khsh_dx[2] * sun[2];
-                // Band admission NORM: the band footprint is a square in the
-                // sun plane, +-r2 along r3 and u3, so the lateral clip must use
-                // the same per-axis max norm - a radial (disc) test misses
-                // casters in the corners (radial up to r2*sqrt(2)) whose
-                // Silhouettes land inside the window. Er (enclosing radius)
+                // Band admission norm: the footprint is a square in the sun
+                // plane (+-r2 along r3 and u3), so the lateral clip uses the
+                // per-axis max norm - a radial test misses casters in the
+                // corners whose silhouettes land inside the window. er
                 // over-bounds the per-axis extent conservatively.
                 const float khsh_lu = fabsf(khsh_dx[0] * khsh_r3[0] +
                                             khsh_dx[1] * khsh_r3[1] +
@@ -19862,17 +18837,13 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                         if (khsh_shl > 1.0e-4f && khsh_ssy > 1.0e-4f) {
                             float khsh_sdrop = khsh_dx[1] - khsh_he[1];
                             if (khsh_sdrop < 0.0f) khsh_sdrop = 0.0f;
-                            // KH_SUN_TIER_SLIM: + khsr_rad inside the drop.
-                            // The throw has to reach the RECEIVER, and the
-                            // receiver is the ground - up to the shadow view
-                            // distance below the camera, not level with it.
-                            // Without the term the bound is short by
-                            // (camera AGL) / sin(elevation), which is 482 m
-                            // at a 5 degree sun with the camera 42 m up, and
-                            // the caster is dropped from the tier while its
-                            // shadow lands inside the tier's window. Twin of
-                            // KH_SUN_ELIG_SPAN, which had the same
-                            // camera-is-not-the-receiver error one layer up.
+                            // + khsr_rad inside the drop: the throw must reach
+                            // the RECEIVER, i.e. the ground up to the shadow
+                            // view distance below the camera; without it the
+                            // bound is short by (camera AGL) / sin(elevation)
+                            // and the caster is dropped while its shadow lands
+                            // inside the window. Twin of the eligibility span
+                            // above.
                             const float khsh_slen = khsr_rad + khsh_er
                                                   + (khsh_sdrop + khsr_rad
                                                      + 2.0f * khsh_er) / khsh_ssy;
@@ -19889,8 +18860,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
 
             // Entered only above the floor, so a band whose window was never
             // stretched is bit-exact. khsh_fwd is a maximum over every admitted
-            // caster and it sizes khsh_d2v, so this number is how much one
-            // member of the set costs all the others in depth precision.
+            // caster and sizes khsh_d2v: this is how much one member costs all
+            // the others in depth precision.
             if (khsh_fwd > khsh_dep) {
                 float& khsh_hold = g_sun_fwd_held[khsh_pf_idx];
 
@@ -19948,13 +18919,11 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             const float khsh_bcm = khsh_bcx > fabsf(khsh_ctr[2]) ? khsh_bcx : fabsf(khsh_ctr[2]);
             const float khsh_bulp = nextafterf(khsh_bcm, 3.0e38f) - khsh_bcm;
             const float khsh_bfl = 4.0f * khsh_bulp;
-            // KH_BAND_BIAS_TEXELS: the texel term is a multiple of the tier's
-            // own texel and the ulp term is a floor under it, which is what it
-            // should always have been.
+            // The texel term is a multiple of the tier's own texel; the ulp
+            // term is a floor under it.
             const float khsh_bk = KH_BAND_BIAS_TEXELS;
             const float khsh_bbw = khsh_tex * khsh_bk > khsh_bfl ? khsh_tex * khsh_bk : khsh_bfl;
-            // KH_CAST_BIAS_CAP: the same quantity, capped in metres for the
-            // cast chain only.
+            // The same quantity, capped in metres for the cast chain only.
             const float khsh_ccap = KH_CAST_BIAS_CAP_M;
             const float khsh_ctw = khsh_tex * khsh_bk < khsh_ccap ? khsh_tex * khsh_bk : khsh_ccap;
             const float khsh_cbw = khsh_ctw > khsh_bfl ? khsh_ctw : khsh_bfl;
@@ -19969,8 +18938,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             ConstantData khsh_obj = {};
             ConstantData khsh_cbf = {};
             memcpy(khsh_cbf.view_proj, khsh_lvp, sizeof(khsh_cbf.view_proj));
-            // KH_SUN_ANCHOR: the matrix above is anchor-relative; VSSunDepth
-            // subtracts the same anchor from every vertex.
+            // The matrix above is anchor-relative; VSSunDepth subtracts the
+            // same anchor from every vertex.
             khsh_cbf.sun_origin[0] = g_sun_anchor_now[0];
             khsh_cbf.sun_origin[1] = g_sun_anchor_now[1];
             khsh_cbf.sun_origin[2] = g_sun_anchor_now[2];
@@ -20044,12 +19013,9 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                     khsh_out_casters = static_cast<uint64_t>(khsh_set.size());
                     // Arming lane: the reach this fit actually took.
                     khsh_out_reach = khsh_fwd;
-                    // At this site the t0 SRV bind silently delivered a foreign
-                    // kilometre-scale texture (CPU-proven: pyramid mu
-                    // 2630-2752) while the RTV and shader sets took. The band
-                    // renders here; freshness is all this site marks.
-                    (void)khsh_pf_ok; (void)khsh_dep_srv; (void)khsh_pf_rtv;
-                    (void)khsh_pf_srv; (void)khsh_pf_size; (void)khsh_pf_idx;
+                    // The band renders here; freshness is all this site marks
+                    // (the pyramid convert happens at the flush's proven
+                    // binds).
                     khsh_out_pf = khsh_out_valid;   // Fresh map => convert due.
                     g_sun_pf_fresh[khsh_pf_idx] = true;   // KH_SUN_TIER_KEY.
                     g_sun_tier_key[khsh_pf_idx] = khtk;
@@ -20075,8 +19041,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         khls_s = khsr_rad / 200.0f;
         if (khls_s < 1.0f) khls_s = 1.0f;
         if (khls_s > 5.0f) khls_s = 5.0f;
-        // KH_SUN_LADDER: the ensures above guarantee each texture is the wanted
-        // size; record it as the rendered size for the CB fills.
+        // The ensures above guarantee each texture is the wanted size; record
+        // it as the rendered size for the CB fills.
         if (khsh_ok0) g_sun2_map_size = kh_sun_hero_size();
         if (khsh_ok1) g_sun3_map_size = kh_sun_mid_size();
         if (khsh_ok2) g_sun4_map_size = kh_sun_out_size();
@@ -20086,8 +19052,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                                g_sun2_cast_bias,
                                g_sun2_half_diag, g_sun2_map_valid,
                                g_sun2_renders, g_sun2_casters, g_sun_band_reach[0],
-                               g_res.sun2_srv, g_res.sun_pf_rtv[0],
-                               g_res.sun_pf_srv[0], kh_sun_hero_size() / 2u, 0,
+                               0,
                                g_sun_pf_valid[0]);
         if (khsh_ok1) khsh_one(KH_SUN_MID_HALF * khls_s, KH_SUN_MID_DEPTH * khls_s,
                                kh_sun_mid_size(),
@@ -20095,8 +19060,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                                g_sun3_cast_bias,
                                g_sun3_half_diag, g_sun3_map_valid,
                                g_sun3_renders, g_sun3_casters, g_sun_band_reach[1],
-                               g_res.sun3_srv, g_res.sun_pf_rtv[1],
-                               g_res.sun_pf_srv[1], kh_sun_mid_size() / 2u, 1,
+                               1,
                                g_sun_pf_valid[1]);
         if (khsh_ok2) khsh_one(KH_SUN_OUT_HALF * khls_s, KH_SUN_OUT_DEPTH * khls_s,
                                kh_sun_out_size(),
@@ -20104,30 +19068,15 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                                g_sun4_cast_bias,
                                g_sun4_half_diag, g_sun4_map_valid,
                                g_sun4_renders, g_sun4_casters, g_sun_band_reach[2],
-                               g_res.sun4_srv, g_res.sun_pf_rtv[2],
-                               g_res.sun_pf_srv[2], kh_sun_out_size() / 2u, 2,
+                               2,
                                g_sun_pf_valid[2]);
-        // KH_FAR_PF: the far tier converts a moment pyramid like the three
-        // camera tiers above it. It used to have none ('the far texel is
-        // already the minified scale'), but the self kernel then fell back to
-        // nine sparse taps across a footprint up to 17 x 17 texels - exactly
-        // the undersampling that shimmers as the map re-rasterizes under a
-        // moving sun. KH_SUN_FAR_BAND:
-        // KH_FAR_TIER_DOMAIN: half = range * (sin e + cos e), depth = 6x range.
-        // The receiver domain is the fade's cylinder (range across, +-range
-        // tall); in the sun plane that projects to range * (sin e + cos e)
-        // max-norm, up to 1.41x the range. A window of plain 'range' put the
-        // domain's rim in the tier's edge band (0.75..0.98) and handed it to
-        // the union, which under-covered by the same factor - in-range
-        // receivers blended to lit as the camera moved: the pop-in. The far
-        // tier is the last camera tier and now answers its whole window
-        // (cb.hlsl: KhCastTier/KhSelfTier 'last').
-        // KH_FAR_FIT_STEP: (sin e + cos e) runs 1 .. 1.41 across a day, and
-        // read live it resized the far window - and its texel, and the
-        // whole-texel snap grid - every frame the sun moved: the far tier's
-        // edges crawled under an accelerated clock with the camera still.
-        // Quantized up to 1/8 steps: four crossings a day, a stable grid
-        // between them, never smaller than the live fit.
+        // The far tier converts a moment pyramid like the camera tiers (sparse
+        // taps shimmer under a moving sun). Domain: half = range * (sin e + cos
+        // e), depth = 6x range - the fade's cylinder projects to that max-norm
+        // in the sun plane; plain 'range' under-covers in-range receivers. The
+        // far tier answers its whole window (cb.hlsl: KhCastTier/KhSelfTier
+        // 'last'). The factor is quantized to 1/8 steps: read live it resizes
+        // the window and its snap grid every frame the sun moves.
         const float khsh_far_f = fabsf(sun[1]) + sqrtf(fmaxf(1.0f - sun[1] * sun[1], 0.0f));
         const float khsh_far_half = khsr_rad * (ceilf(khsh_far_f * 8.0f) * 0.125f);
         if (khsh_ok3) khsh_one(khsh_far_half, khsr_rad * 6.0f, kh_sun_far_size(),
@@ -20135,19 +19084,18 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                                g_sun5_cast_bias,
                                g_sun5_half_diag, g_sun5_map_valid,
                                g_sun5_renders, g_sun5_casters, g_sun_band_reach[3],
-                               g_res.sun5_srv, g_res.sun_pf_rtv[3],
-                               g_res.sun_pf_srv[3], kh_sun_far_size() / 2u, 3,
+                               3,
                                g_sun_pf_valid[3]);
-        // KH_SUN_TIER_KEY: the anchor a tier's stored vp is relative to is the
-        // one it RENDERED with; a skipped tier keeps its stamp (the fill rebases).
+        // The anchor a tier's stored vp is relative to is the one it RENDERED
+        // with; a skipped tier keeps its stamp (the fill rebases).
         if (khsh_ok0 && khsh_did[0]) memcpy(g_sun_tier_anchor[0], g_sun_anchor_now, sizeof(g_sun_anchor_now));
         if (khsh_ok1 && khsh_did[1]) memcpy(g_sun_tier_anchor[1], g_sun_anchor_now, sizeof(g_sun_anchor_now));
         if (khsh_ok2 && khsh_did[2]) memcpy(g_sun_tier_anchor[2], g_sun_anchor_now, sizeof(g_sun_anchor_now));
         if (khsh_ok3 && khsh_did[3]) memcpy(g_sun_tier_anchor[3], g_sun_anchor_now, sizeof(g_sun_anchor_now));
         memcpy(g_sun_cam_anchor, g_sun_anchor_now, sizeof(g_sun_cam_anchor));
 
-        // KH_DL_SHADOW : the light maps rendered here, inside this lambda, and
-        // so behind every gate in front of it.
+        // The light maps rendered here, inside this lambda, behind every gate
+        // in front of it.
 
         if (khsh_standalone) {
             khsh_om.restore(ctx);
@@ -20210,8 +19158,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
 
     if (instanced) {
         // Grow-only dynamic instance buffer: one 16-byte KhInstLane per caster
-        // (KH_OBJBUF: slot + dither/alpha/matBase; centre, extents and rotation
-        // live in the record buffer the lane's slot indexes).
+        // (centre, extents and rotation live in the record buffer the lane's
+        // slot indexes).
         const UINT need = static_cast<UINT>(casters.size());
 
         if (need > g_res.sun_instance_cap) {
@@ -20296,12 +19244,12 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     }
     const float khsf_rad = khsf_rad_use;
     const float R_dep = khsf_rad + 1.0f;
-    // KH_SUN_UNION_LAT_FIT: R is refined (only ever downward) after the sun
-    // basis exists below - it needs the sun plane to measure in.
+    // R is refined (only ever downward) after the sun basis exists below - it
+    // needs the sun plane to measure in.
     float R = khsf_rad > 1.0e-4f ? khsf_rad * 1.02f : R_dep;
 
-    // Ortho sun basis (row-vector convention, like every matrix here). The
-    // light looks opposite the "toward the light" direction.
+    // Ortho sun basis (row-vector convention). The light looks opposite the
+    // "toward the light" direction.
     const float f[3] = { -sun[0], -sun[1], -sun[2] };
     float up_hint[3] = { 0.0f, 1.0f, 0.0f };
     if (fabsf(f[1]) > 0.99f) { up_hint[0] = 1.0f; up_hint[1] = 0.0f; }
@@ -20326,8 +19274,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         const float khsl_rng = fminf(fmaxf(
             g_sun_range.load(std::memory_order_relaxed), 8.0f), 1000.0f);
         // Camera window term: its cell centre's lateral offset from the
-        // committed (possibly growth-moved) centre, plus the range - the
-        // enclosing-sphere bound of the camera box about its own centre.
+        // committed centre, plus the range.
         const float khsl_cc[3] = {
             floorf(cam_e[0] * 0.5f) * 2.0f + 1.0f,
             floorf(cam_e[1] * 0.5f) * 2.0f + 1.0f,
@@ -20339,8 +19286,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                               khsl_cd[2] * sun[2];
         const float khsl_cl2 = khsl_cd[0] * khsl_cd[0] + khsl_cd[1] * khsl_cd[1] +
                                khsl_cd[2] * khsl_cd[2] - khsl_cs * khsl_cs;
-        // KH_FAR_TIER_DOMAIN: the camera's cylinder reaches sqrt(2) * range
-        // radially in the sun plane (tight at 45 deg), not 'range'.
+        // The camera's cylinder reaches sqrt(2) * range radially in the sun
+        // plane, not 'range'.
         float khsl_need = (khsl_cl2 > 0.0f ? sqrtf(khsl_cl2) : 0.0f) + khsl_rng * 1.4142136f;
 
         for (const auto& khsl_c : casters) {
@@ -20374,8 +19321,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             khsl_use = g_sun_union_lat_held;
         }
         // Apply only when it genuinely refines - the latch slack can push the
-        // held value past the sphere in dense-lateral scenes, where the sphere
-        // price is already the honest one.
+        // held value past the sphere in dense-lateral scenes.
         if (khsl_use > 1.0e-4f && khsl_use * 1.02f < R) R = khsl_use * 1.02f;
     }
 
@@ -20400,8 +19346,6 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         ctr[1] = static_cast<float>(khut_n[1]);
         ctr[2] = static_cast<float>(khut_n[2]);
     }
-    // Depth-domain behaviour is byte- identical to whatever the lateral extent
-    // does.
     const float eye[3] = {
         ctr[0] + sun[0] * (R_dep + 1.0f),
         ctr[1] + sun[1] * (R_dep + 1.0f),
@@ -20414,10 +19358,9 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     view[0][0] = r3[0]; view[0][1] = u3[0]; view[0][2] = f[0];
     view[1][0] = r3[1]; view[1][1] = u3[1]; view[1][2] = f[1];
     view[2][0] = r3[2]; view[2][1] = u3[2]; view[2][2] = f[2];
-    // KH_SUN_ANCHOR: the translation row measures from the anchor, not the
-    // world origin - the shader subtracts the same anchor from wpos, so the
-    // mapping is identical while the fp products shrink from world magnitude to
-    // fit magnitude.
+    // The translation row measures from the anchor, not the world origin - the
+    // shader subtracts the same anchor from wpos, so the fp products shrink
+    // from world magnitude to fit magnitude.
     const float khse_a[3] = { eye[0] - g_sun_anchor_now[0],
                               eye[1] - g_sun_anchor_now[1],
                               eye[2] - g_sun_anchor_now[2] };
@@ -20436,9 +19379,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     mul_4x4(view, proj, lvp);
 
     // Compare bias, deliberately small: the world cast cannot acne (the ground
-    // is never in our map, so it never compares against itself), and the self
-    // term's acne is handled geometrically by the receiver- normal offset +
-    // grazing fade.
+    // is never in our map), and the self term's acne is handled geometrically
+    // by the receiver-normal offset + grazing fade.
     const float texel_world = (2.0f * R) / static_cast<float>(kh_sun_depth_size());
     // The floor is fp32 world precision, not depth-buffer precision.
     const float khsb_cx = fabsf(ctr[0]) > fabsf(ctr[1]) ? fabsf(ctr[0]) : fabsf(ctr[1]);
@@ -20446,9 +19388,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     const float khsb_ulp = nextafterf(khsb_cm, 3.0e38f) - khsb_cm;
     const float khsb_floor = 4.0f * khsb_ulp;
     const float bias_world = texel_world * 0.5f > khsb_floor ? texel_world * 0.5f : khsb_floor;
-    // KH_CAST_BIAS_CAP: the union's cast bias, capped in metres like the four
-    // tiers, so the far->union step at shadowVisibility reads the same bias on
-    // both sides.
+    // The union's cast bias, capped in metres like the four tiers, so the
+    // far->union step reads the same bias on both sides.
     const float khsu_ccap = KH_CAST_BIAS_CAP_M;
     const float khsu_ctw = texel_world * 0.5f < khsu_ccap ? texel_world * 0.5f : khsu_ccap;
     const float cast_bias_world = khsu_ctw > khsb_floor ? khsu_ctw : khsb_floor;
@@ -20503,13 +19444,11 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);
     // One load feeds both tests: the two arms cannot disagree about the mode.
     {
-        // A thin wall puts the back face millimetres behind the front, the
-        // 16/3.0 bias exceeds the thickness and light leaks straight through;
-        // open or single-sided meshes store no back face at all and everything
-        // Behind them reads lit. Twin of the band pass (khsh_one) through
-        // kh_sun_rs_pick. The union stays on the clip form (khrs_clamp false):
-        // Its ortho volume is fitted around the caster set, so the fitting
-        // argument holds here and only here (KH_SUN_PANCAKE).
+        // A large slope bias leaks light through thin walls (the back face is
+        // millimetres behind the front); open meshes store no back face at all.
+        // Twin of the band pass through kh_sun_rs_pick. The union stays on the
+        // clip form (khrs_clamp false): its ortho volume is fitted around the
+        // caster set, so the fitting argument holds here only.
         ctx->RSSetState(kh_sun_rs_pick(false));
     }
     if (instanced) {
@@ -20547,8 +19486,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             size_t first = 0;
 
             while (first < casters.size()) {
-                // KH_CAST_ALPHA: an alpha caster is not in an opaque run (see
-                // the tier twin).
+                // An alpha caster is not in an opaque run.
                 if (casters[first].alpha_caster) { ++first; continue; }
                 const int mid = casters[first].mesh;
                 const int khmc_lod = casters[first].lod;   // KH_SHADOW_LOD_DRAWN.
@@ -20558,8 +19496,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                 vbs[0] = g_res.mesh_vb[mid];
                 ctx->IASetVertexBuffers(0, 2, vbs, strides, offsets);
                 ctx->IASetIndexBuffer(g_res.mesh_ib[mid], DXGI_FORMAT_R32_UINT, 0);
-                // KH_SHADOW_LOD twin - the mask cast is a casting pass exactly
-                // as the sun depth is.
+                // The mask cast is a casting pass exactly as the sun depth is:
+                // same shadow LOD.
                 UINT khmc_ls = 0, khmc_lc = 0;
                 mesh_lod_range_of(mid, khmc_lod, khmc_ls, khmc_lc);   // KH_SHADOW_LOD_DRAWN.
                 ctx->DrawIndexedInstanced(khmc_lc,
@@ -20572,7 +19510,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         }
     } else {
         // Per-caster fallback (instancing unavailable): one constant upload +
-        // draw each - correct at any count, just not cheap.
+        // draw each.
         UINT stride = sizeof(MeshVertex), offset = 0;
         int bound_mesh = -1;
 
@@ -20594,8 +19532,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
 
             kh_fill_obj_rot(cbd, c.rot);   // Object rotation (VSMain path).
             if (!kh_upload_obj_cb(ctx, g_res.composite_cb, cbd)) break;   // CB split: object slice.
-            // KH_SHADOW_LOD: the per-caster fallback takes the same level as
-            // the instanced path, or the two disagree on silhouette.
+            // The per-caster fallback takes the same level as the instanced
+            // path, or the two disagree on silhouette.
             UINT khsf_ls = 0, khsf_lc = 0;
             mesh_lod_range_of(c.mesh, c.lod, khsf_ls, khsf_lc);   // KH_SHADOW_LOD_DRAWN.
             ctx->DrawIndexed(khsf_lc, khsf_ls, 0);
@@ -20612,9 +19550,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     khsd_om.release();
     g_ro.in_injection = prev_inj;
 
-    // Every in-map caster for the fire's per-pixel reach test (engine axes; no
-    // count cap - <=16 rides the CB list, more ride the t2 structured-buffer
-    // twin at the fire).
+    // Every in-map caster for the fire's per-pixel reach test (engine axes; <=
+    // 16 ride the CB list, more ride the t2 structured-buffer twin).
     g_sun_locals.clear();
 
     for (const auto& c : casters) {
@@ -20646,7 +19583,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     g_sun_map_time = effect_time_seconds();
 
     // A sub-settle sun wobble re-renders the map (float-exact hash) but must
-    // Not de-mature it.
+    // not de-mature it.
     {
         const float khsm_dot = sun[0] * g_sun_mat_sun[0] +
                                sun[1] * g_sun_mat_sun[1] +
@@ -20659,10 +19596,9 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             const bool khsm_drift = khsm_dot < 0.99996192f;
             const bool khsm_calm = khsm_drift && !khsm_big && kh_sky_static();
 
-            // The roll already covers a sub-3-degree sun drift that arrives
-            // while the sky witness is static: the map re-rendered correctly at
-            // every step, so it is proven wobble and must not disarm the
-            // far-plane presence test.
+            // The roll already covers a sub-3-degree sun drift while the sky
+            // witness is static: proven wobble, must not disarm the far-plane
+            // presence test.
             const bool khsm_ccalm = khsm_cchg && !khsm_new && !khsm_big && !khsm_drift && kh_sky_static();
 
             if (khsm_new || (khsm_cchg && !khsm_ccalm) || khsm_big ||
@@ -20685,65 +19621,23 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     return true;
 }
 
-// KH_CAST_OCC: the caster-occupancy grid. PSMaskCast's reach test answers one
-// question - "is this reconstructed world point within reach of any caster" -
-// and answered it by looping every caster per pixel. It can never refuse a
-// point the loop admitted, so no shadow can be lost.
-// KH_OCC_N_HALF: 256 -> 128. Coarsening is unconditionally conservative - a
-// bigger cell holds the union of the stamps over a bigger area, so its band is
-// WIDER, and a wider band admits more receivers. It can cost the shader work;
-// it cannot make the grid refuse a receiver the loop would admit. Verified that
-// way at four sun elevations: every cell the 256 grid admits, the 128 grid
-// admits too, zero exceptions.
-//
-// Cells stamped go as N^2 while the step count is unchanged (dt is the caster's
-// own extent, far larger than a cell either way), so this is a measured
-// 3.4-4.5x on the rebuild - the half of the cost the step fix did not reach.
-// The trade is real and lands on the mask cast: a coarser reject test lets
-// more pixels through to the expensive path. That pass is 0.19 ms x 9 fires
-// against 4.2 ms of total GPU: the headroom is measured and the trade stands.
-// Settled at 128.
+// KH_CAST_OCC: the caster-occupancy grid. PSMaskCast's reach test ("is this
+// world point within reach of any caster") reads one cell instead of looping
+// every caster per pixel. A coarser cell holds the union of the stamps over a
+// larger area, so it can never refuse a point the loop admits - no shadow can
+// be lost, only more pixels reach the expensive path.
 static constexpr int KH_OCC_N = 128;
-// KH_CASTOCC_DOMAIN. The grid covers the RECEIVER domain, not the caster set.
-//
-// Receivers are the pixels KhSunRangeFade leaves non-zero: a vertical cylinder
-// of radius 0.995 * shadowVisibility about sunOrigin (= g_sun_anchor_now, the
-// camera), +-0.995 * range tall. Everything the grid does is derived from that:
-//
-//   floor   the deepest receiver, camera.y - range. Not the union fit's box:
-//           that box is centred between the camera window and the caster AABB,
-//           so an elevated caster set (the rescued cloud in dump1: hero reach
-//           1416 m at a 300 m range) lifts its centre and 'centre - min(hf, R)'
-//           lands ABOVE the ground. Every sweep then stopped where the caster's
-//           top ray crossed that plane, and the ground past it read refused -
-//           the hard cut-off, uniform in distance because the plane is one
-//           height for every caster.
-//   clip    each sweep is intersected with the domain disc before it is
-//           stamped, so a caster whose shadow never enters the range never
-//           touches the extent, and the far cloud's 2-3 km sweeps stop paying
-//           for cells nobody reads. The extent is then ~2 * (range + slack)
-//           whatever the caster set, which is what makes the cells fine.
-//   band    the grid is stamped for a BAND of suns, not one: elevation
-//           [syq - 1/64, syq + 2/64] (the shallowest slope prices the reach,
-//           the steepest the window bottom) and +-0.5 deg of azimuth (the
-//           stamp widens by t * tan(0.5 deg)). The quantised slope of one
-//           bucket walked the window off the true ray at ~1.4 km of throw, and
-//           every bucket edge the frozen sun crossed forced a full rebuild
-//           (18 in one minute measured, 17 ms each).
-//   slack   the camera may move up to max(0.35 R, 40 m) (capped at 250) from
-//           the built centre, horizontally and downward, before the grid is
-//           rebuilt; the disc and the floor carry that slack.
-//
-// The lateral / vertical slack is a flat KH_OCC_SLACK_M around the EXACT swept
-// box. The per-caster loop (KhCastReach, the <= 16 caster path)
-// keeps its stretch-priced lr - a sphere-era reach that runs to 24 x the
-// half-diagonal at a low sun - so the grid is no longer a superset of the
-// loop's inflated admission, only of the truth: the two can differ only where
-// the loop admits a receiver the sun map answers 0 on.
-// Certified by /home/claude/bench/occ2.py: 0 missed of 125,194 shadowed
-// in-domain receivers over 108 (range x elevation x camera height x cloud)
-// cells, each sampled across the whole sun band, azimuth band and camera
-// slack the grid claims.
+// KH_CASTOCC_DOMAIN: the grid covers the RECEIVER domain (the pixels
+// KhSunRangeFade leaves non-zero: a vertical cylinder of radius 0.995 * range
+// about the camera, +-0.995 * range tall), not the caster set. floor = camera.y
+// - range (the deepest receiver). Each sweep is clipped to the domain disc
+// before stamping, so the extent is ~2 * (range + slack) whatever the caster
+// set. The grid is stamped for a BAND of suns (elevation [syq - 1/64, syq +
+// 2/64], +-0.5 deg azimuth) so a slowly moving sun does not force a rebuild at
+// every bucket edge, and the camera may move max(0.35 R, 40 m) (capped 250)
+// from the built centre before one. The <= 16 caster loop (KhCastReach) keeps
+// its own inflated reach; the grid is a superset of the truth, not of that
+// loop.
 static constexpr float KH_OCC_SY_Q = 64.0f;
 static constexpr float KH_OCC_SLACK_M = 6.0f;        // Around the exact sweep, lateral and vertical.
 static constexpr float KH_OCC_AZ_TAN = 0.0087269f;   // tan(0.5 deg): widening and hysteresis.
@@ -20759,8 +19653,8 @@ static std::vector<float>    g_castocc_grid;    // (minY, maxY) per texel, retai
 static std::vector<uint64_t> g_castocc_set;     // Sorted per-caster hashes of the built set.
 static std::vector<uint32_t> g_castocc_addi;    // Scratch: indices of the additions.
 static float    g_castocc_cell = 0.0f;
-// KH_CASTOCC_DOMAIN: the sun band the grid was stamped for, derived once per
-// build from the fire's frozen sun and retained with the grid.
+// The sun band the grid was stamped for, derived once per build from the fire's
+// frozen sun and retained with the grid.
 struct KhOccSun {
     float sy_lo, sy_hi;       // Elevation band, sun.y.
     float k_hi;               // Metres down-sun per metre of drop at the SHALLOWEST sun.
@@ -20804,26 +19698,17 @@ inline float kh_castocc_slack_of(float khcs_r) {
     return khcs_s;
 }
 
-// One caster's sweep, clipped to the domain disc. on = false means no part
-// of the swept shadow can reach a receiver the fade keeps, so the caster is
-// neither stamped nor counted in the extent.
+// One caster's sweep, clipped to the domain disc. on = false means no part of
+// the swept shadow can reach a receiver the fade keeps: neither stamped nor
+// counted in the extent.
 struct KhOccSweep { float hu, top, base, ta, tb, w0; bool on; };
-// KH_CASTOCC_PRE. The full rebuild stamps every caster's sweep into a fresh
-// grid in one call - 2.4 M cell writes for 3,000 casters, 7.6 ms on the render
-// thread - and it fires the moment the camera leaves the built slack disc
-// (twice in a 1,058-frame run, each a hitch frame). The
-// rebuild is a pure function of (locals, range, domain, sun band, floor), so
-// it can be computed AHEAD of need: once the camera is past KH_OCC_PRE_START
-// of the slack from the built domain, a second grid is built about the
-// camera's CURRENT position, KH_OCC_PRE_PER_FIRE casters per fire, while the
-// retained grid keeps serving (its envelope still covers). When the pending
-// grid completes it is committed at the next fire it covers - the same
-// envelope test the retained grid must pass - and becomes the retained one.
-// What the shader sees at any fire is, as before, a grid whose envelope
-// covers that fire; only the moment the work is done moves. A camera that
-// outruns the pre-build (past the full slack before it lands) takes the
-// synchronous rebuild exactly as today; a pending grid whose locals, sun band
-// or domain no longer fit is dropped, never committed.
+// KH_CASTOCC_PRE: a full rebuild fires the moment the camera leaves the built
+// slack disc (a hitch frame). The rebuild is a pure function of (locals, range,
+// domain, sun band, floor), so once the camera is past KH_OCC_PRE_START of the
+// slack a second grid is built about the CURRENT camera, KH_OCC_PRE_PER_FIRE
+// casters per fire, and committed at the next fire its envelope covers. A
+// camera that outruns it takes the synchronous rebuild; a pending grid whose
+// inputs no longer fit is dropped.
 static constexpr float KH_OCC_PRE_START = 0.5f;   // Of the slack: start the pre-build here.
 static constexpr int   KH_OCC_PRE_PER_FIRE = 192; // Casters stamped per fire (~0.5 ms at 3,000).
 struct KhOccPending {
@@ -20904,9 +19789,8 @@ inline bool kh_castocc_fits(const float* khcf_e, const KhOccSun& khcf_s, const K
 
 // Stamp one clipped sweep. Steps every max(w0, cell/2) along u from ta to tb;
 // each step writes a block of +-(h + slack + pad + widening) cells whose y
-// window is the exact shadow band over the step's own t range at the band's
-// extreme slopes, plus the slack. The last step is open-bottomed: past the
-// floor there is no receiver, and past tb no cell is written.
+// window is the exact shadow band over the step's t range at the band's extreme
+// slopes. The last step is open-bottomed: past the floor there is no receiver.
 inline void kh_castocc_stamp(const float* khcs_e, const KhOccSun& khcs_s, const KhOccSweep& khcs_w,
                              const float* khcs_lo, float khcs_cell, float khcs_inv,
                              float* khcs_grid) {   // KH_CASTOCC_PRE: the retained or the pending grid.
@@ -20944,7 +19828,6 @@ inline void kh_castocc_stamp(const float* khcs_e, const KhOccSun& khcs_s, const 
         if (khcs_tt < 0.0f) khcs_tt = 0.0f;
         const float khcs_y1 = khcs_w.top - khcs_tt * khcs_s.slope_lo + KH_OCC_SLACK_M + 1.0e-3f;
 
-
         for (int khcs_z = khcs_z0; khcs_z <= khcs_z1; ++khcs_z) {
             float* khcs_row = khcs_grid + (static_cast<size_t>(khcs_z) * KH_OCC_N) * 2u;
 
@@ -20970,8 +19853,8 @@ inline bool kh_castocc_upload(ID3D11DeviceContext* khcu_ctx) {
     return true;
 }
 
-// Every failure return leaves NO retained grid (the 6.3.6 note: a rewritten
-// g_castocc_grid under stale lo/inv/cell was a live hazard).
+// Every failure return leaves NO retained grid (a rewritten grid under stale
+// lo/inv/cell is a live hazard).
 inline bool kh_castocc_fail() {
     g_castocc_pre.active = false;   // KH_CASTOCC_PRE.
     g_castocc_key = 0;
@@ -20980,9 +19863,8 @@ inline bool kh_castocc_fail() {
     return false;
 }
 
-// KH_CASTOCC_PRE: one fire's share of the pre-build, on the hit path (the
-// retained grid covers this fire and is what this fire serves). Starts a
-// pending grid once the camera is past KH_OCC_PRE_START of the slack, stamps
+// One fire's share of the pre-build, on the hit path. Starts a pending grid
+// once the camera is past KH_OCC_PRE_START of the slack, stamps
 // KH_OCC_PRE_PER_FIRE casters per call, and commits the completed grid on the
 // first fire its own envelope covers. Every quantity is the rebuild's own
 // arithmetic about the pending domain.
@@ -21079,8 +19961,7 @@ inline void kh_castocc_pre_step(ID3D11DeviceContext* khpp_ctx, int khpp_n, uint6
         if (!khpp_p.done) return;
     }
 
-    // Complete: commit only into an envelope that covers THIS fire (the
-    // retained grid's own admission, about the pending domain).
+    // Complete: commit only into an envelope that covers THIS fire.
     {
         const float khpp_sy = fabsf(khpp_sun[1]);
         const float khpp_shl = sqrtf(khpp_sun[0] * khpp_sun[0] + khpp_sun[2] * khpp_sun[2]);
@@ -21130,8 +20011,8 @@ inline void kh_castocc_pre_step(ID3D11DeviceContext* khpp_ctx, int khpp_n, uint6
 inline bool kh_cast_occ_build(ID3D11DeviceContext* khco_ctx, ConstantData& khco_cb) {
     const int khco_n = static_cast<int>(khco_cb.locality_meta[0]);
     if (khco_n <= 0 || static_cast<size_t>(khco_n) * 6u > g_sun_locals.size()) return false;
-    // The domain: the same centre and range the fill hands the fade
-    // (sunOrigin / mirMeta.w), read here from their sources, not the CB.
+    // The domain: the same centre and range the fill hands the fade (sunOrigin
+    // / mirMeta.w), read from their sources, not the CB.
     const float khco_rng = fminf(fmaxf(g_sun_range.load(std::memory_order_relaxed), 8.0f), 1000.0f);
     const float khco_dom[3] = { g_sun_anchor_now[0], g_sun_anchor_now[1], g_sun_anchor_now[2] };
     const float* khco_sun = khco_cb.cast_view[2];   // The fire's frozen sun.
@@ -21195,7 +20076,7 @@ inline bool kh_cast_occ_build(ID3D11DeviceContext* khco_ctx, ConstantData& khco_
 
         if (g_castocc_addi.size() <= static_cast<size_t>(KH_OCC_ADD_MAX)) {
             // Additions are swept in the BUILT envelope: its sun band, its
-            // domain disc, its floor - the retained cells were.
+            // domain disc, its floor.
             bool khci_ok = true;
 
             for (size_t khci_j = 0; khci_j < g_castocc_addi.size() && khci_ok; ++khci_j) {
@@ -21226,7 +20107,6 @@ inline bool kh_cast_occ_build(ID3D11DeviceContext* khco_ctx, ConstantData& khco_
                     std::sort(g_castocc_set.begin() + khci_was, g_castocc_set.end());
                     std::inplace_merge(g_castocc_set.begin(),
                                        g_castocc_set.begin() + khci_was, g_castocc_set.end());
-
 
                     khco_cb.cast_mat[0][3] = g_castocc_inv;
                     khco_cb.cast_mat[1][3] = g_castocc_lo[0];
@@ -21386,10 +20266,10 @@ inline bool kh_upload_locality_ext(ID3D11DeviceContext* ctx) {
     return true;
 }
 
-// Near-vertical looks fall back to the up vector's heading, which yaw still
-// swings; a fully degenerate pair reports no yaw evidence (dot 1) and leaves
-// the translation term in charge. Both matrices are the world-space camera
-// basis rows the freeze already relies on ([4.6] up, [8.10] forward).
+// Near-vertical looks fall back to the up vector's heading; a fully degenerate
+// pair reports no yaw evidence (dot 1) and leaves the translation term in
+// charge. Both matrices are the world-space camera basis rows ([4..6] up,
+// [8..10] forward).
 inline float kh_epoch_yaw_dot(const float* khyd_a, const float* khyd_b) {
     float khyd_ax = khyd_a[8];
     float khyd_az = khyd_a[10];
@@ -21408,16 +20288,11 @@ inline float kh_epoch_yaw_dot(const float* khyd_a, const float* khyd_b) {
     return khyd_d > 1.0f ? 1.0f : (khyd_d < -1.0f ? -1.0f : khyd_d);
 }
 
-// We do not have that camera, but we have this frame's and the last one's, and
-// a one-frame linear advance is what every reprojection scheme in the industry
-// uses for the same reason. one-frame camera extrapolation 2504-3439 and have
-// not happened yet.
-
+// One-frame linear camera extrapolation, as every reprojection scheme uses.
 
 // Is the engine's shadow mask bound as a shader resource right now (PS t0-t32
 // or VS t0-t32)? The fire's clamp paint keys on it: our paint must land before
-// the engine reads the mask. Read at the fire's entry, before any state moves
-// (the same bindings the save below captures).
+// the engine reads the mask. Read at the fire's entry, before any state moves.
 inline bool kh_fire_mask_srv_bound(ID3D11DeviceContext* khfb_ctx) {
     if (!g_mask.engine_mask_rtv) return false;
     ID3D11Resource* khfb_mask = nullptr;
@@ -21450,27 +20325,22 @@ inline bool kh_fire_mask_srv_bound(ID3D11DeviceContext* khfb_ctx) {
 
 inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
 
-    // Baseline resolve-keyed re-fires are restored verbatim; do not gate this
-    // Cadence again without new capture-level evidence. Starved the fire on
-    // look-down frames.
+    // Resolve-keyed re-fires stay ungated: gating this cadence starved the fire
+    // on look-down frames.
 
     if (!ctx) return;
 
-    // Placed here, at the top of the per-draw fire, so it cannot run at the
-    // frame boundary - the partitioned-frame overcast is the one real objection
-    // and that is where it lived. Every guard below is untouched; this only
-    // removes the wait for a publish whose data the freeze discards anyway.
+    // Placed at the top of the per-draw fire so it cannot run at the frame
+    // boundary (the partitioned-frame overcast lived there). Only removes the
+    // wait for a publish whose data the freeze discards anyway.
     if (!g_mask_cast_fired && !g_mask_cast_arm && g_ro.cycle_pv_valid && !g_ro.cycle_pv_stale && !g_ls.phase_on_atlas) {
         g_mask_cast_arm = true;
     }
     if (g_mask_cast_fired && g_ls.resolve_seen_since_cast && g_ls.frame_view_valid) {
         // Evidence predating a cascade phase is cleared at atlas entry; a
-        // mid-frame atlas re-entry re-earns its evidence at its own resolves,
-        // so legitimate per-batch re-firing is untouched.
+        // mid-frame atlas re-entry re-earns its evidence at its own resolves.
         if (g_ls.phase_on_atlas) {
         } else {
-            // Stood the per-batch re-fire down under dbg 23, for the SRV-keyed
-            // arm.
             g_mask_cast_arm = true;
             g_mask_cast_fired = false;
         }
@@ -21485,10 +20355,10 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     if (!g_mask.cast_fov_valid) { return; }
     if (g_mask.engine_mask_failed) { return; }
     if (!g_ls.frame_view_valid) { return; }
-    // Populated maps publish at draw ~2 and never hold.
 
-    // No timestamp epoch gate here: the view CB re-uploads ~164x/frame, so a
-    // timestamp can never carry epoch identity, and a hold would starve cold arms.
+    // No timestamp epoch gate: the view CB re-uploads ~164x/frame, so a
+    // timestamp can never carry epoch identity, and a hold would starve cold
+    // arms.
 
     if (g_ls.pub_exact_ms == 0 ||
         steady_now_ms() - g_ls.pub_exact_ms > 250) {
@@ -21508,25 +20378,20 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         g_cast_ready_since_ms = 0;
         return;
     }
-    // Absent beats swinging (the null-sun return's own doctrine); at a healthy
-    // cold this adds at most 1 s to a first cast already 8-10 s out (the churn
-    // clock and the cold pipeline run concurrently), and a settled steady state
-    // never stamps.
+    // Absent beats swinging: at a healthy cold this adds at most 1 s to a first
+    // cast already seconds out, and a settled steady state never stamps.
     if (g_lock_churn_ms_v != 0 && steady_now_ms() - g_lock_churn_ms_v < 1000) {
         return;
     }
 
-    // Two cold/mid-session artifact classes survived the per-condition ladder
-    // above because each gate releases the instant its own condition clears,
-    // while the system is still converging: (2) the rectangle (the 'cut-off
-    // shadow') - the AABB slab fallback firing whenever the private sun map is
-    // stale, indistinguishable from a warm-up state by design.
+    // The rectangle (the 'cut-off shadow') is the AABB slab fallback firing
+    // whenever the private sun map is stale - indistinguishable from a warm-up
+    // state by design.
     const uint64_t khcr_now = steady_now_ms();
     const bool khcr_q_churn =
         (g_lock_churn_ms_v == 0 || khcr_now - g_lock_churn_ms_v >= KH_CAST_READY_QUIET_MS);
-    // The former travel / jump quiet terms (a sun move stood the cast down for
-    // KH_CAST_READY_QUIET_MS) are gone: a raw publish moves only when the
-    // engine's own axis moved, and the cast must move with it.
+    // No travel / jump quiet term: a raw publish moves only when the engine's
+    // own axis moved, and the cast must move with it.
     const bool khcr_stable = khcr_q_churn;
 
     if (!khcr_stable) {
@@ -21545,9 +20410,9 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         g_cast_ready = true;
     }
 
-    // Slab retirement: fire only through a fresh private sun map (same
-    // freshness bar the fire body uses). Absent beats a rectangle; the arm
-    // survives and the next fresh map fires.
+    // Fire only through a fresh private sun map (the fire body's freshness
+    // bar). Absent beats a rectangle; the arm survives and the next fresh map
+    // fires.
     const bool khcr_map_fresh = g_sun_map_valid &&
                                 g_sun_map_time >= 0.0f &&
                                 effect_time_seconds() - g_sun_map_time < 0.25f;
@@ -21612,8 +20477,8 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         g_mask.cold_first_cast = static_cast<float>(effect_time_seconds() - g_mask.cold_t0);
     }
 
-    // Never a lost fire. Render (or reuse) this frame's private sun-depth map
-    // first: the fire consumes it for mesh-shaped casts.
+    // Render (or reuse) this frame's private sun-depth map first: the fire
+    // consumes it for mesh-shaped casts.
     const bool map_fresh = g_sun_map_valid &&
                            g_sun_map_time >= 0.0f &&
                            effect_time_seconds() - g_sun_map_time < 0.25f;
@@ -21669,14 +20534,13 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
             if (ncb >= 64) break;
             const RenderObject& o = g_scene.objs[khsc_i];
             // Casters are world-space meshes only: fullscreen passes carry
-            // default pos/size (a phantom 1 m shadow at the map origin), hidden
-            // objects must not shadow the world they are hidden from, meshes
-            // remain casters - they are real volumes.
+            // default pos/size (a phantom 1 m shadow at the map origin); hidden
+            // objects must not shadow the world they are hidden from.
             if (o.fullscreen || !o.visible || o.mode == DepthMode::Off) continue;
             memcpy(centries[ncb].pos, o.pos, 12);
             // Slab entries stay SQF-ordered (the fill below swaps); a rotated
-            // mesh contributes its enclosing extents so the analytic AABB slab
-            // remains conservative.
+            // mesh contributes its enclosing extents so the AABB slab stays
+            // conservative.
             float khc_he[3];
             kh_world_half_extents(o, khc_he);
             centries[ncb].size[0] = khc_he[0] * 2.0f;   // SQF order.
@@ -21687,7 +20551,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     }
 
     // Map path: a valid sun map implies casters existed this frame (the pass
-    // refuses to render without any) - no snapshot needed.
+    // refuses to render without any).
     if (!sun_map && ncb == 0) {  return; }
     if (!g_fire_lock_valid) {   // frame's first fire: freeze the inputs.
         g_fire_lock = g_mask.cast_depth;   // The live cast depth is the frozen input.
@@ -21696,14 +20560,13 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         g_fire_fov2[1] = g_mask.cast_fov[1];
         g_fire_dims2[0] = g_mask.cast_dims[0];
         g_fire_dims2[1] = g_mask.cast_dims[1];
-        // KH_CAST_SEAM_VIEW_FRAME . Off. Populated maps never seed. Turns it
-        // on. The carried frame_view published at ~457 of N-1 is viewN-1: a
-        // consistent pair, world-correct, with only a uniform screen-space lag.
+        // Seed the seam view from the carried frame_view: a consistent pair
+        // with only a uniform screen-space lag.
                 memcpy(g_fire_view2, g_ls.frame_view, sizeof(g_fire_view2));
 
         // Taken here, while g_fire_view2 still holds the engine's own render
-        // view and before the bridge adoption below replaces it: this is the
-        // only point where both members of the pair exist at once.
+        // view and before the bridge adoption replaces it: the only point where
+        // both members of the pair exist at once.
 
         if (g_ro.cycle_pv_valid) {
             float khev_a[3];
@@ -21735,8 +20598,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         }
 
         if (g_ro.cycle_pv_valid && !g_ro.cycle_pv_stale) {
-            // The freeze. It updated faithfully, from something that had
-            // stopped moving.
+            // The freeze.
             float khpl_view[16];
             bool khpl_live = false;
 
@@ -21761,18 +20623,18 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
             } else {
                 extract_camera_pos(g_ro.cycle_pv.view, khfe_bc);
             }
-            // frame_view[r*4+c] == cycle_pv.view[r][c] elementwise (the seal
-            // vcol dual-source fill is the standing proof).
+            // frame_view[r*4+c] == cycle_pv.view[r][c] elementwise.
             extract_camera_pos(reinterpret_cast<const float(*)[4]>(g_fire_view2), khfe_pc);
             const float khfe_dx = khfe_pc[0] - khfe_bc[0];
             const float khfe_dy = khfe_pc[1] - khfe_bc[1];
             const float khfe_dz = khfe_pc[2] - khfe_bc[2];
             const float khfe_d = sqrtf(khfe_dx * khfe_dx + khfe_dy * khfe_dy + khfe_dz * khfe_dz);
 
-            // The shadow freeze. khfe_d is the distance between the incumbent frozen camera
-            // and the live one. The era guard refuses the bridge past 50 m so a foreign bridge
-            // never steers the fire, but refusing leaves the incumbent in place; the escape
-            // below is what lets a genuine jump re-converge.
+            // The shadow freeze. khfe_d is the distance between the incumbent
+            // frozen camera and the live one. The era guard refuses the bridge
+            // past 50 m so a foreign bridge never steers the fire, but refusing
+            // leaves the incumbent in place; the escape below lets a genuine
+            // jump re-converge.
             if (khfe_d <= KH_LATCH_JUMP_M) {   // Era guard: a foreign bridge never steers the fire.
                 g_fire_era_reject_run = 0;
                 for (int khfe_r = 0; khfe_r < 4; ++khfe_r) {
@@ -21801,8 +20663,8 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         }
 
         // Era-guarded against the publish camera exactly like the bridge
-        // adoption it replaces - a foreign sample never steers the fire - and a
-        // refusal falls back to the epoch just adopted.
+        // adoption - a foreign sample never steers the fire - and a refusal
+        // falls back to the epoch just adopted.
 
         if (g_fire_refreeze_pending) {
             g_fire_refreeze_pending = false;
@@ -21866,8 +20728,8 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
             }
         }
 
-        // The engine erases the mask every frame, so a ghost is never stale paint.
-        // Once per freeze; re-fires replay it.
+        // The engine erases the mask every frame, so a ghost is never stale
+        // paint. Once per freeze; re-fires replay it.
         {
             const double khoi_r[3][3] = {
                 { g_fire_view2[0], g_fire_view2[1], g_fire_view2[2] },
@@ -21922,19 +20784,12 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
 
     }
 
-    // KH_MASKCAST_NOPAINT. The fire replays per engine resolve (~9 a frame at
-    // 8 cascades: the re-fire cadence above, untouched), but the clamp paint
-    // below hands the strength lane (castView[2].w) to exactly ONE fire per
-    // frame - the first with the mask SRV-bound, else the frame's last - and
-    // zeroes it on every other. PSMaskCast's output is 1 - hit * saturate(w),
-    // so a zero lane paints 1.0 into a MIN blend: bit-for-bit nothing, at the
-    // full 4K pixel cost (0.16 ms x 9 fires on the 3,000-cube scene, 8 of
-    // them this no-op). The decision is taken here, on the same
-    // inputs the fill reads, and a fire that would not paint skips the draw,
-    // the state save and the occupancy build. Everything the fire is FOR
-    // besides the paint - the arm / fired latch, the freeze (already taken
-    // above), the per-frame fire count the clamp target learns from - has
-    // already happened or happens here.
+    // KH_MASKCAST_NOPAINT: the fire replays per engine resolve, but the clamp
+    // paint hands the strength lane (castView[2].w) to exactly ONE fire per
+    // frame (the first with the mask SRV-bound, else the frame's last) and
+    // zeroes it elsewhere; a zero lane paints 1.0 into a MIN blend, i.e.
+    // nothing at full pixel cost, so such a fire skips the draw, the state save
+    // and the occupancy build.
     g_fire_mask_srv_now = kh_fire_mask_srv_bound(ctx);   // per-fire (at the statics).
     g_fire_count_frame++;
     {
@@ -21984,8 +20839,8 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     UINT old_cb1_first = 0, old_cb1_num = 0;
     UINT old_vs_cb1_first = 0, old_vs_cb1_num = 0;
     // The cached ID3D11DeviceContext1, and only where the driver honours the
-    // offset setters: StateBackup's rule (a Set1 the runtime drops leaves our
-    // buffer bound), applied here too instead of a private QueryInterface per fire.
+    // offset setters (StateBackup's rule: a Set1 the runtime drops leaves our
+    // buffer bound).
     ID3D11DeviceContext1* khf_ctx1 = g_cb_offsetting ? kh_ctx1(ctx) : nullptr;
     ID3D11Buffer* old_vs_cb = nullptr;
 
@@ -22001,15 +20856,16 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         ctx->PSGetConstantBuffers(1, 1, &old_cb1);
         ctx->VSGetConstantBuffers(1, 1, &old_vs_cb1);
     }
-    // Restored below: every engine vertex shader after the fire would otherwise read
-    // our mesh cbd as its constants (the fire runs past the engine's last natural
-    // VS-b0 rebind before the particle pass).
+    // Restored below: every engine vertex shader after the fire would otherwise
+    // read our mesh cbd as its constants (the fire runs past the engine's last
+    // natural VS-b0 rebind).
     ctx->OMGetBlendState(&old_blend, old_bf, &old_bmask);
     ctx->OMGetDepthStencilState(&old_dss, &old_sref);
-    // Widened 16 -> 28 with the cascade build. Array size is the save range
-    // here too: capture, restore, scan and release all follow.
-    ID3D11ShaderResourceView* old_ps_srvs[33] = {};   // t28; +t32 (far band; t29-31 unbound on this
-                                                      // Path but saved for width parity).
+    // Array size is the save range: capture, restore, scan and release all
+    // follow it.
+    // t28; +t32 (far band; t29-31 unbound on this path but saved for width
+    // parity).
+    ID3D11ShaderResourceView* old_ps_srvs[33] = {};
     ID3D11ShaderResourceView* old_vs_srvs[33] = {};   // Widened with the PS table.
     ctx->PSGetShaderResources(0, _countof(old_ps_srvs), old_ps_srvs);   // Width, not a literal.
     ctx->VSGetShaderResources(0, _countof(old_vs_srvs), old_vs_srvs);
@@ -22039,26 +20895,22 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     ctx->GSSetShader(nullptr, nullptr, 0);
     ctx->HSSetShader(nullptr, nullptr, 0);
     ctx->DSSetShader(nullptr, nullptr, 0);
-    // The standard SV_VertexID fullscreen triangle is clockwise in
-    // render-target space - the default front face - so CullBack never rejects
-    // it; DepthClip is moot at z = 0. Default rasterizer: solid fill, scissor
-    // off.
+    // The SV_VertexID fullscreen triangle is clockwise in render-target space,
+    // so CullBack never rejects it; DepthClip is moot at z = 0. Default
+    // rasterizer: solid fill, scissor off.
     ctx->RSSetState(nullptr);
-    // CB split: b0 = per-object, b1 = per-frame; both slices upload per fire
-    // below (the ad-hoc backup saves/restores both slots).
+    // b0 = per-object, b1 = per-frame; both slices upload per fire below (the
+    // ad-hoc backup saves/restores both slots).
     ID3D11Buffer* khmc_cbs[2] = { g_res.composite_cb, g_res.composite_frame_cb };
     ctx->VSSetConstantBuffers(0, 2, khmc_cbs);
     ctx->PSSetConstantBuffers(0, 2, khmc_cbs);
     const FLOAT bfm[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
     ctx->OMSetBlendState(g_mask.min_blend, bfm, 0xFFFFFFFF);
     ctx->OMSetDepthStencilState(g_mask.cast_dss, 0);
-    // Pristine set the fire's viewport from live g_mask.cast_dims per paint
-    // while PSMaskCast addresses pixels through the frozen dims (dimsM =
-    // castView[1].zw) against the frozen depth SRV: whenever the live pair
-    // diverged mid-frame, later repaints rasterized on one grid and
-    // reconstructed on another - scaled/offset darkening, last-paint- wins
-    // ghost/drift under motion, and the engine's taa blending the coherent
-    // early paint in as the simultaneous anchored copy.
+    // The fire's viewport must come from the frozen dims (dimsM =
+    // castView[1].zw), never the live g_mask.cast_dims: whenever the live pair
+    // diverges mid-frame, later repaints rasterize on one grid and reconstruct
+    // on another - scaled darkening and ghosting under motion.
     {
 
         if (g_fire_dims2[0] <= 0.0f || g_fire_dims2[1] <= 0.0f) {
@@ -22084,8 +20936,8 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     if (sun_map && g_sun3_map_valid && g_res.sun3_srv) ctx->PSSetShaderResources(26, 1, &g_res.sun3_srv);
     if (sun_map && g_sun4_map_valid && g_res.sun4_srv) ctx->PSSetShaderResources(27, 1, &g_res.sun4_srv);
     if (sun_map && g_sun5_map_valid && g_res.sun5_srv) ctx->PSSetShaderResources(32, 1, &g_res.sun5_srv);
-    // t36 is not bound here: PSMaskCast never reads it, and each consumer binds it
-    // inside its own bracket. This fire binds only what it reads.
+    // t36 is not bound here: PSMaskCast never reads it. This fire binds only
+    // what it reads.
     if (g_res.thm_srv) ctx->PSSetShaderResources(10, 1, &g_res.thm_srv);   // Terrain snap (full-table
                                                                            // Restore covers it).
 
@@ -22094,11 +20946,10 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
             memcpy(cbd.cast_mat[r], g_fire_view2 + r * 4, 16);
         }
 
-        // KH_CAST_OCC lane hygiene. The memcpy above writes four floats per row, so
-        // cast_mat[r][3] lands the view matrix's fourth column - the occupancy grid's arm
-        // and origin lanes (castMat[0].w > 0 arms the shader's O(1) path; [1].w / [2].w
-        // are the grid origin XZ). A row-vector view matrix carries 0 there and the
-        // <=16-caster branch leaves localityMeta.y at 0; both are enforced here.
+        // Lane hygiene: the memcpy above writes four floats per row, so
+        // cast_mat[r][3] lands the view matrix's fourth column - the occupancy
+        // grid's arm and origin lanes (castMat[0].w > 0 arms the shader's O(1)
+        // path; [1].w / [2].w are the grid origin XZ). Both are enforced here.
         cbd.cast_mat[0][3] = 0.0f;
         cbd.cast_mat[1][3] = 0.0f;
         cbd.cast_mat[2][3] = 0.0f;
@@ -22130,15 +20981,12 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
                 cbd.cast_view[2][3] = 0.0f;
             }
         }
-        // One field session decides.
-        kh_fill_occ(cbd);   // terrain-snap lanes (24 = snap off; zeroed = shader no-op).
-        // KH_SUN_ANCHOR: one origin for every sun matrix this fill carries (the
-        // cast tier chain consumes sunVP2/3/4 here); the matrices are rebased
-        // to it at their own fills below.
+        kh_fill_occ(cbd);   // terrain-snap lanes (zeroed = shader no-op).
+        // One origin for every sun matrix this fill carries; the matrices are
+        // rebased to it at their own fills below.
         cbd.sun_origin[0] = g_sun_anchor_now[0];
         cbd.sun_origin[1] = g_sun_anchor_now[1];
         cbd.sun_origin[2] = g_sun_anchor_now[2];
-        // The cast chain is this fill's consumer - the side never faded.
         if (g_sun_anchor_now[0] != 0.0f || g_sun_anchor_now[1] != 0.0f ||
              g_sun_anchor_now[2] != 0.0f) {
             cbd.mir_meta[3] = fminf(fmaxf(
@@ -22147,10 +20995,9 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     };
 
     if (sun_map) {
-        // mesh-shaped cast: one fullscreen test against the sun-depth map
-        // covers every caster at once - the map already holds them all.
-        // centerSize/sizeAxes carry the combined caster bounds (already engine
-        // axes) for the shader's locality clamp.
+        // Mesh-shaped cast: one fullscreen test against the sun-depth map
+        // covers every caster at once. centerSize/sizeAxes carry the combined
+        // caster bounds (engine axes) for the shader's locality clamp.
         {
             ConstantData cbd = {};
             fill_frame(cbd);
@@ -22161,8 +21008,8 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
             cbd.size_axes[1] = g_sun_map_bounds[4] * 2.0f;
             cbd.size_axes[2] = g_sun_map_bounds[5] * 2.0f;
             kh_fill_sun_tiers_cb(cbd);
-            // KH_CAST_BIAS_CAP: the cast chain's own compare bias, one lane per
-            // tier plus the union.
+            // The cast chain's own compare bias, one lane per tier plus the
+            // union.
             cbd.sun_cast_bias[0]  = g_sun2_map_valid ? g_sun2_cast_bias : 0.0f;
             cbd.sun_cast_bias[1]  = g_sun3_map_valid ? g_sun3_cast_bias : 0.0f;
             cbd.sun_cast_bias[2]  = g_sun4_map_valid ? g_sun4_cast_bias : 0.0f;
@@ -22187,12 +21034,11 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
                 }
             } else if (g_sun_local_count > 16 && kh_upload_locality_ext(ctx)) {
                 // Uncapped t2 twin; failure leaves meta.y = 0 and the shader
-                // takes the combined-bounds fallback (the pre-extension >16
-                // behavior).
+                // takes the combined-bounds fallback.
                 cbd.locality_meta[1] = 1.0f;
                 ctx->PSSetShaderResources(2, 1, &g_res.locality_srv);
-                // KH_CAST_OCC: build and bind the occupancy grid; the shader
-                // then gates in O(1). Any failure leaves the per-pixel scan.
+                // Build and bind the occupancy grid; the shader then gates in
+                // O(1). Any failure leaves the per-pixel scan.
                 if (kh_cast_occ_build(ctx, cbd)) {
                     ctx->PSSetShaderResources(35, 1, &g_res.castocc_srv);
                 } else {
@@ -22200,8 +21046,8 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
                 }
             }
 
-            // CB split: both slices (centerSize/sizeAxes ride b0; the cast
-            // matrices, sun map + locality list ride b1).
+            // Both slices (centerSize/sizeAxes ride b0; the cast matrices, sun
+            // map + locality list ride b1).
             if (!kh_upload_obj_cb(ctx, g_res.composite_cb, cbd) ||
                 !kh_upload_frame_cb(ctx, g_res.composite_frame_cb, cbd)) {
             } else {
@@ -22209,8 +21055,8 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
             }
         }
     } else {
-        // AABB slab fallback: one fullscreen test per caster, exactly the
-        // pre-map behavior (zeroed sunMeta selects the shader's slab path).
+        // AABB slab fallback: one fullscreen test per caster (zeroed sunMeta
+        // selects the shader's slab path).
         for (uint32_t bi = 0; bi < ncb; ++bi) {
             ConstantData cbd = {};
             fill_frame(cbd);
@@ -22228,8 +21074,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     }
 
     // The engine's own layout satisfies the API's slot rule (UAV start >= RTV
-    // count); a driver-rejected call would degrade to the historical behavior,
-    // never worse.
+    // count); a driver-rejected call degrades to no UAV restore, never worse.
     if (khf_uav_n > 0) {
         int khf_uav_hi = 0;
 
@@ -22343,7 +21188,7 @@ inline void mask_note_draw(ID3D11DeviceContext* ctx) {
     }
 }
 
-// Lazy SRV over the atlas; typeless depth formats map to their color-read
+// Lazy SRV over the atlas; typeless depth formats map to their colour-read
 // equivalents. Render thread (injection) only.
 inline bool shadow_live_ensure_srv() {
     if (g_ls.atlas_srv) return true;
@@ -22381,21 +21226,18 @@ inline bool shadow_live_ensure_srv() {
     return true;
 }
 
-// That depth buffer is never read as a shader resource anywhere in the frame,
-// and after the volume pass its only remaining consumer is the resolve quad.
 // OM-binding tracking for the recon: keeps phase_active / target_identity
 // current.
 static void*    g_svs_prev_dsv = nullptr;   // Identity of the previous OM depth bind.
 static bool     g_svs_prev_had_rtv = false;
 
-// Seam-target stability. The set is tiny (8), cleared at the frame boundary, and
+// Seam-target stability. The set is tiny, cleared at the frame boundary, and
 // holds identity tokens that are compared and never dereferenced.
 static void*    g_svs_rtv_seen[8] = {};
 static uint32_t g_svs_rtv_seen_n = 0;
-// A rule cannot fire on a bind it never sees. This engine records on deferred
-// contexts; a prepass bind landing on one would go unmarked. Accepted
-// limitation by design (pure read, no behaviour); every tested session marks
-// its prepass through the immediate context. Closed.
+// Accepted limitation: this engine records on deferred contexts, so a prepass
+// bind landing on one would go unmarked. Every tested session marks its prepass
+// through the immediate context.
 static void*    g_svs_cls_id[8] = {};
 static uint8_t  g_svs_cls_srv[8] = {};
 static uint32_t g_svs_cls_n = 0;
@@ -22408,13 +21250,12 @@ static ID3D11ShaderResourceView* g_svs_mask_srv = nullptr;
 static uint32_t g_svs_mask_w = 0;
 static uint32_t g_svs_mask_h = 0;
 static uint32_t g_svs_mask_fmt = 0;
-// Mask capture decoupled. Locating the mask has nothing to do with whether we
-// inject.
+// Mask capture is decoupled from injection.
 static ID3D11Texture2D* g_svs_mask_cand = nullptr;
 // The mask has two writers - eight cascade resolves and one stencil-volume
-// resolve - and only the second one knows about our box, because our injection
-// writes depth only and the cascade half is resolved against the linear-depth
-// target we deliberately do not touch. The pre-resolve snapshot.
+// resolve - and only the second knows about our box (our injection writes depth
+// only; the cascade half is resolved against the linear-depth target we do not
+// touch). The pre-resolve snapshot.
 static ID3D11Texture2D*          g_svs_pre_tex = nullptr;
 static ID3D11ShaderResourceView* g_svs_pre_srv = nullptr;
 static uint32_t g_svs_pre_w = 0;
@@ -22423,35 +21264,30 @@ static uint32_t g_svs_pre_fmt = 0;
 static ID3D11Texture2D*          g_svs_post_tex = nullptr;
 static ID3D11ShaderResourceView* g_svs_post_srv = nullptr;
 static uint64_t g_svs_post_made = 0;
-// Most of those passes write bit-identical depth: same target, same view, same
-// casters, no clear in between - so the target already holds exactly what the
-// pass would write and the pass is pure waste. This signature covers every
-// input the injected depth depends on; when it matches the last completed
-// inject the pass is skipped. A skip happens only when the output would be
-// identical, so unlike drawing coarser proxies it has no silhouette to get
-// wrong and cannot flicker.
+// Most seam passes write bit-identical depth (same target, view, casters, no
+// clear between). This signature covers every input the injected depth depends
+// on; when it matches the last completed inject the pass is skipped. A skip
+// happens only when the output would be identical, so it cannot flicker.
 static uint64_t g_depth_clear_serial = 0;
 static uint64_t g_svs_skip_sig = 0;         // Signature of the last completed inject.
 static bool     g_svs_skip_valid = false;
 static uint64_t g_svs_frame_seq = 0;   // Bumped once per seam frame boundary.
 static uint8_t  g_svs_bracket = 0;
-// Only the footprint loop reads these: the mirror prepass and the prime draw the
-// list whole.
+// Only the footprint loop reads these: the mirror prepass and the prime draw
+// the list whole.
 struct KhSvCaster {
     float pos[3]; float size[3]; float rot[9]; bool rotated; int mesh;
     int  lod;        // KH_SHADOW_LOD_DRAWN: the level the footprint draws (the injection's own pick,
                      // taken once the pass camera is known, below the list build).
     bool lod_lock;   // KH_LOD_LOCK, carried for that pick.
-    // KH_SEAM_CULL: inside the footprint's own frustum (the pass camera's,
-    // kh_cull_build over the pass's view-proj, padded sphere). The footprint
-    // loop is a screen-space depth write through that very matrix, so an
-    // object outside its frustum contributes nothing and is not drawn there.
-    // The mirror prepass and the prime draw the list whole, as before.
+    // Inside the footprint's own frustum (the pass camera's, padded sphere):
+    // the footprint loop is a screen-space depth write through that matrix, so
+    // an object outside its frustum contributes nothing there. The mirror
+    // prepass and the prime draw the list whole.
     bool a_vis;
-    // KH_SEAM_INST: the live-scene slot this caster was built from, which is
-    // the index the instanced entry points read khObjs at. The record already
-    // carries centre, extents and rotation - the same values copied above -
-    // so the lane needs nothing else.
+    // The live-scene slot this caster was built from - the index the instanced
+    // entry points read khObjs at. The record carries centre, extents and
+    // rotation, so the lane needs nothing else.
     uint32_t slot;
     float alpha;
     const KhMaterialSet* mats;   // Pool-owned (KH_MAT_POOL); the grave wall outlives this list.
@@ -22462,17 +21298,16 @@ inline bool kh_footprint_alpha_on() {
     return g_res.ps_inj_depth_a && g_res.vs_tex && g_res.layout_tex;
 }
 static std::vector<KhSvCaster> g_svs_caster_list;
-// KH_SEAM_INST: the seam's instance plan, kept across frames so the two
-// loops never allocate. g_svs_inst_ord holds indices into the caster list,
-// mesh-major: [0, inst_a) is loop A's opaque footprint set and
-// [inst_a, inst_a + inst_b) is loop B's, which is every caster. The lanes
-// are written straight into the mapped buffer in this order, so the index
-// into this array IS the StartInstanceLocation of the draw that covers it.
+// The seam's instance plan, kept across frames so the two loops never allocate.
+// g_svs_inst_ord holds indices into the caster list, mesh-major: [0, inst_a) is
+// loop A's opaque footprint set and [inst_a, inst_a + inst_b) is loop B's
+// (every caster). The lanes are written into the mapped buffer in this order,
+// so the index into this array IS the StartInstanceLocation.
 static std::vector<uint32_t>   g_svs_inst_ord;
 static float    g_svs_prime_vp[4][4] = {};
 
-// They do not have to be traded, by design: the seam view is per epoch and the
-// intra-frame gap is inside its tolerance in every tested session. Closed.
+// The seam view is per epoch; the intra-frame gap is inside its tolerance by
+// design.
 
 static float    g_svs_seam_view[4][4] = {};
 static uint64_t g_svs_seam_view_seq = 0;
@@ -22480,7 +21315,7 @@ static bool     g_svs_seam_view_valid = false;
 static bool     g_svs_seam_view_fresh = false;
 
 // The seam publishes under seq N and the colour pass reads g_svs_frame_seq ==
-// N+1, so an equality test can never pass, in either direction.
+// N+1, so an equality test can never pass.
 static constexpr uint64_t KH_SEAM_VIEW_MAX_AGE = 1;
 
 static float    g_khpe_p1 = -1.0f;   // Predictor base (spike-guarded committed near).
@@ -22491,10 +21326,10 @@ static uint64_t g_khpe_upd_ms = 0;   // Steady ms of the last base update (fresh
 static float    g_khpe_skip1 = -1.0f;   // Last spike-skipped commit (the rebase escape).
 static float    g_khbl_stable = -1.0f;   // Stable committed baseline (2 consecutive within 2%).
 static float    g_khbl_prev = -1.0f;
-// Base = return-to-baseline live accepts (seamProjSrc 5); Rebase = predictor
-// re-bases off two agreeing out-of-band commits; RefGuard = corridor referee
-// substitutions (polluted committed reference); NoRef = live refused solely for
-// want of a fresh committed reference. File-scope: dies with the session.
+// Base = return-to-baseline live accepts; Rebase = predictor re-bases off two
+// agreeing out-of-band commits; RefGuard = corridor referee substitutions;
+// NoRef = live refused solely for want of a fresh committed reference. Dies
+// with the session.
 static float    g_khlt_prev[3] = {};
 static bool     g_khlt_prev_ok = false;
 static float    g_khlt_prev_step = 0.0f;
@@ -22504,7 +21339,6 @@ static float    g_khlt_ref_cam[3] = {};   // Last bound-refused live camera.
 static bool     g_khlt_ref_ok = false;
 static float    g_khlt_lp[3] = {};
 static bool     g_khlt_lp_ok = false;
-// Seam draws issued with an enlarged footprint, and the factor used.
 
 static float    g_svs_prime_cam[3] = {};
 static bool     g_svs_prime_rebase = false;
@@ -22535,8 +21369,8 @@ inline void kh_fill_sten_proj(ConstantData& khp_cbd, const float khp_proj[4][4])
     }
 }
 
-// Deliberate toggle: constant true with several sites, kept as a
-// function so the volume transport can be switched off in one place.
+// Deliberate toggle: constant true, kept as a function so the volume transport
+// can be switched off in one place.
 inline bool kh_svs_vol_on() {
     return true;
 }
@@ -22554,10 +21388,8 @@ inline void kh_svs_vol_src_release() {
     g_svs_vol_src_id = nullptr;
 }
 
-// First, that branch is cached: the texture pointer only exists inside the
-// `khv_cls < 0` cold path and is released immediately, so a latch there fires
-// once per identity per device and can never re-latch after a rebuild. The
-// latch point is the bracket'S own arm, and that is not AN ordinal.
+// The latch fires once per identity per device (the texture pointer only exists
+// inside the `khv_cls < 0` cold path) and can never re-latch after a rebuild.
 inline void kh_svs_vol_latch(ID3D11DepthStencilView* khl_dsv, void* khl_id) {
     if (!khl_dsv || !khl_id) return;
     if (g_svs_vol_src && g_svs_vol_src_id == khl_id) return;   // Steady state: one compare.
@@ -22576,9 +21408,8 @@ inline void kh_svs_vol_latch(ID3D11DepthStencilView* khl_dsv, void* khl_id) {
     kh_svs_vol_release();   // The copy's shape follows the source's.
 }
 
-// The copy destination, created from the source's own desc rather than from any
-// assumption about the scene's shape. Rebuilt on any shape change, released on
-// device reset.
+// The copy destination, created from the source's own desc. Rebuilt on any
+// shape change, released on device reset.
 inline bool kh_svs_vol_ensure(ID3D11Device* khe_dev) {
     if (!khe_dev || !g_svs_vol_src) return false;
     D3D11_TEXTURE2D_DESC khe_sd = {};
@@ -22592,7 +21423,7 @@ inline bool kh_svs_vol_ensure(ID3D11Device* khe_dev) {
     kh_svs_vol_release();
 
     // MSAA would force Texture2DMS in the shader and forbid the copy to a
-    // non-MS destination outright. Refused, loudly, with its own lane.
+    // non-MS destination. Refused, loudly, with its own lane.
     if (khe_sd.SampleDesc.Count != 1) {  return false; }
     if (khe_sd.ArraySize != 1 || khe_sd.MipLevels != 1) {  return false; }
 
@@ -22644,25 +21475,14 @@ inline bool kh_svs_vol_ensure(ID3D11Device* khe_dev) {
 inline bool kh_svs_vol_ready() {
     if (g_svs_vol_depth_srv == nullptr || g_svs_vol_sten_srv == nullptr) return false;
     if (!g_svs_vol_primed) {  return false; }
-    // KH_SVS_VOL_FRESH (26907) - REMOVED. The gate here was
-    // 'if (g_svs_vol_seq != g_svs_frame_seq) return false', on the claim that
-    // the copy and the reader share a frame and that a copy from an earlier
-    // frame is one camera motion stale. The claim is false, and the code
-    // around it says so: the copy runs from kh_svs_vol_copy on the
-    // g_svs_bracket == 1 arm, which the RT classifier sets at the engine's
-    // stencil-mask RTV bind, while the reader is inject_composited_meshes off
-    // the opaque reorder trigger - opposite sides of the frame. Cross-frame
-    // consumption is the transport's contract, which is why g_svs_vol_primed
-    // is sticky rather than per frame and why kh_svs_vol_copy's own
-    // no-mesh-wanted guard drops it to stop 'a mesh that appears next frame'
-    // reading 'a copy from before it existed'. With the gate standing,
-    // kh_svs_unit_on IS this function (kh_svs_vol_on is constant true), so
-    // maskMeta.w, the stenVol2.x arm and both t23/t24 binds dropped together
-    // on every frame whose mask bind lands after the trigger - the engine's
-    // stencil shadows stopped landing on every mesh, builtin and FBX alike.
-    // g_svs_vol_seq stays live: kh_svs_vol_copy still uses it as its own
-    // once-per-epoch guard. If displaced-shadow staleness is ever OBSERVED
-    // (1.83), bound it against a measured epoch lag, not against equality.
+    // No same-frame gate here, deliberately: the copy runs at the engine's
+    // stencil-mask RTV bind and the reader is inject_composited_meshes off the
+    // opaque trigger - opposite sides of the frame. Cross-frame consumption is
+    // the transport's contract (g_svs_vol_primed is sticky; kh_svs_vol_copy's
+    // no-mesh-wanted guard drops it). A same-frame gate silently dropped
+    // maskMeta.w, the stenVol2.x arm and the t23/t24 binds whenever the mask
+    // bind landed after the trigger. If staleness is ever observed, bound it
+    // against a measured epoch lag, not equality.
 
     if (!g_main_depth_w || !g_main_depth_h ||
         g_svs_vol_w != static_cast<uint32_t>(g_main_depth_w) ||
@@ -22672,7 +21492,6 @@ inline bool kh_svs_vol_ready() {
 
     return true;
 }
-// If it reads ~0 the two passes never disagreed and reprojection is a no-op.
 
 static bool     g_svs_prime_ready = false;
 
@@ -22682,14 +21501,13 @@ inline void kh_svs_mask_swap_release() {
     g_svs_mask_w = 0; g_svs_mask_h = 0; g_svs_mask_fmt = 0;
 }
 
-// It holds an AddRef'd texture between the bind that latched it and the frame
-// boundary that consumes it, and the old function never released it, which is
-// precisely the failure the reset banner above exists to prevent.
+// The latched mask candidate holds an AddRef'd texture between the bind that
+// latched it and the frame boundary that consumes it; it must be released here
+// or a device reset keeps a dead device alive.
 inline void kh_svs_mask_release(bool khm_scrub_vmir) {
     kh_svs_mask_swap_release();
-    // The volume transport's resources die here too - the copy, both its views
-    // and the AddRef'd source. Same lesson, same window: a texture held across
-    // a reset keeps a dead device alive.
+    // The volume transport's resources die here too - the copy, both views and
+    // the AddRef'd source.
     kh_svs_vol_release();
     if (khm_scrub_vmir) kh_vmir_release();
     kh_svs_vol_src_release();
@@ -22721,19 +21539,19 @@ inline bool kh_svs_sten_ready() {
     return true;
 }
 
-// The demand gate: deliberate toggle, constant true, kept as a function so the
-// feature can be switched off in one place. Gated on the mode, not on readiness:
-// the snapshot textures are created inside kh_svs_pre_ensure, which only runs from
-// kh_svs_mask_snap, so a readiness gate would never open.
+// Demand gate: deliberate toggle, constant true, kept as a function so the
+// feature can be switched off in one place. Gated on the mode, not on
+// readiness: the snapshot textures are created inside kh_svs_pre_ensure, which
+// only runs from kh_svs_mask_snap, so a readiness gate would never open.
 inline bool kh_svs_feature_on() {
     return true;
 }
 
-// The two artifacts get separate arms: the multiply reads a mask our depth never
-// touched, so injection, snapshots and multiply arm independently.
+// The two artifacts get separate arms: the multiply reads a mask our depth
+// never touched, so injection, snapshots and multiply arm independently.
 inline bool kh_svs_inject_armed() {
     if (kh_svs_feature_on()) return true;
-    return   // Lesson, kept: a mode must be wired into every site it needs.
+    return   // A mode must be wired into every site it needs.
            false;
 }
 
@@ -22755,10 +21573,9 @@ inline bool kh_svs_unit_on() {
     return kh_svs_sten_on();
 }
 
-// Rebuilt whenever the mask's shape or format moves, on the same terms the SRV
-// is - the mask identity is weak, so the only safe assumption is that it can
-// change. Destination for the snapshot: a clone of the mask desc, minus the
-// render target bind it does not need.
+// Destination for the snapshot: a clone of the mask desc minus the render
+// target bind. Rebuilt whenever the mask's shape or format moves (the mask
+// identity is weak).
 inline bool kh_svs_clone_one(ID3D11Device* khv_dev, ID3D11Texture2D** khv_tex,
                              ID3D11ShaderResourceView** khv_srv) {
     D3D11_TEXTURE2D_DESC khv_td = {};
@@ -22796,7 +21613,7 @@ inline bool kh_svs_clone_one(ID3D11Device* khv_dev, ID3D11Texture2D** khv_tex,
 
 // Both ends of the bracket, created and dropped together: a ratio with only one
 // snapshot alive is not a ratio, and kh_svs_sten_ready refuses on either being
-// null rather than letting the shader divide by an unbound texture.
+// null.
 inline bool kh_svs_pre_ensure(ID3D11Device* khv_dev) {
     if (!khv_dev || !g_svs_mask_w || !g_svs_mask_h) return false;
 
@@ -22829,8 +21646,7 @@ inline bool kh_svs_pre_ensure(ID3D11Device* khv_dev) {
 }
 
 // Source is whatever the adopted mask SRV views, so there is no second weak
-// pointer to keep alive and no way for the source and the identity that armed
-// the copy to disagree.
+// pointer to keep alive.
 inline void kh_svs_mask_snap(ID3D11DeviceContext* khv_ctx, bool khv_is_post) {
     if (!khv_ctx || !g_svs_mask_srv) {
         return;
@@ -22859,7 +21675,6 @@ inline void kh_svs_mask_snap(ID3D11DeviceContext* khv_ctx, bool khv_is_post) {
         g_svs_post_made++;
     }
 }
-// The capture asked a question ten builds of matrix work never did.
 static bool     g_svs_vol_dsv_now = false;
 static bool     g_svs_injected_frame = false;
 
@@ -22869,7 +21684,6 @@ inline void kh_volume_seam_frame_reset() {
     // A copy armed at a resolve bind that no draw followed.
     if (g_svs_bracket != 0) { g_svs_bracket = 0;  }
     g_svs_vol_dsv_now = false;
-    // The locator's per-frame attempt budget.
     g_svs_prime_ready = false;
     g_svs_frame_seq++;   // Epoch clock for the snapshot age.
     if (g_svs_mask_cand) {
@@ -22912,8 +21726,8 @@ inline void kh_volume_seam_frame_reset() {
 inline bool kh_svs_prime_states(ID3D11Device* khp_dev) {
     if (!khp_dev || g_mask.prime_states_failed) return false;
 
-    // Ahead of the early-out below, because the states are created once and
-    // this must still get its chance on that first call.
+    // Ahead of the early-out below: the states are created once and this must
+    // still get its chance on that first call.
     if (!g_mask.prime_occl_failed && !g_mask.prime_occl[0]) {
         D3D11_QUERY_DESC khp_qd = {};
         khp_qd.Query = D3D11_QUERY_OCCLUSION;
@@ -22968,9 +21782,9 @@ inline bool kh_svs_prime_wanted() {
     return kh_svs_snap_wanted();
 }
 
-// Worse than the default: a noisy halo on the stencil shadow and on our own
-// mesh, because a per-pixel read offset makes smf itself noisy. Do not build
-// Another mode on this. Reprojection fill, one truth for both CB editions.
+// Reprojection fill, one truth for both CB editions. A per-pixel read offset
+// makes smf itself noisy (a halo on the stencil shadow and on our mesh); do not
+// build another mode on this.
 inline void kh_fill_sten_reproj(ConstantData& khs_cbd) {
     const bool khs_vol = kh_svs_vol_on() && kh_svs_vol_ready();
     khs_cbd.sten_vol[0] = 0.0f;
@@ -22979,7 +21793,6 @@ inline void kh_fill_sten_reproj(ConstantData& khs_cbd) {
     khs_cbd.sten_vol[3] = static_cast<float>(g_svs_vol_h);
     khs_cbd.sten_vol2[0] = khs_vol ? 1.0f : 0.0f;
 }
-
 
 // The lock is (buffer identity, float offset), compared opaquely and never
 // dereferenced.
@@ -22995,8 +21808,8 @@ static uint64_t g_engcam_cand_seq = ~0ull;   // g_svs_frame_seq of the table.
 static void*    g_engcam_res = nullptr;
 static int32_t  g_engcam_off = -1;   // Locked float offset (-1 = none).
 // The locked buffer is a ring CB serving several shader layouts: a single
-// last-sighting slot lets a foreign layout's upload evict the camera row after it
-// arrived this frame, dropping the lock with no candidate table to re-lock from.
+// last-sighting slot lets a foreign layout's upload evict the camera row after
+// it arrived this frame.
 static float    g_engcam_vals[4][3] = {};   // Distinct sightings at the lock, this frame.
 static uint32_t g_engcam_vals_n = 0;
 static uint64_t g_engcam_val_seq = ~0ull;   // Frame stamp of the set.
@@ -23007,9 +21820,9 @@ static float    g_engcam_ref[3] = {};   // Last recovered camera (coarse).
 static bool     g_engcam_ref_ok = false;   // Scan gate only - never decides.
 
 inline bool kh_engcam_on() {
-    // The locator is default demand. g_kh_track_wanted still gates the whole
-    // funnel upstream - no meshes, no cost - and the locked path is an identity
-    // compare plus one 16-byte read. Deliberate toggle.
+    // The locator is default demand: g_kh_track_wanted gates the whole funnel
+    // upstream, and the locked path is an identity compare plus one 16-byte
+    // read. Deliberate toggle.
     return true;
 }
 
@@ -23049,7 +21862,7 @@ inline void kh_engcam_device_reset() {
 }
 
 // The scan half: called beside locator_note_upload on every tracked upload.
-// Render thread, like the rest of the funnel. Read-only on the upload.
+// Render thread. Read-only on the upload.
 inline void kh_engcam_scan(ID3D11Resource* khes_res, const void* khes_data,
                            uint32_t khes_bytes) {
     if (!kh_engcam_on() || !khes_res || !khes_data || khes_bytes < 16) return;
@@ -23105,10 +21918,9 @@ inline void kh_engcam_scan(ID3D11Resource* khes_res, const void* khes_data,
         g_engcam_cand_seq = khes_cur;
     }
 
-    // It never decides - criterion 3 does, at consume, against the same frame's
-    // recovery. Coarse proximity gate (table hygiene only): 2 m plus 8x the
-    // accepted latch step covers any legitimate motion including teleport
-    // frames (the step itself is huge there).
+    // Coarse proximity gate (table hygiene only; criterion 3 decides at
+    // consume): 2 m plus 8x the accepted latch step covers any legitimate
+    // motion including teleport frames.
     const float khes_step = g_cam_step_m > 0.0f ? g_cam_step_m : 0.0f;
     const float khes_gate = 2.0f + 8.0f * khes_step;
 
@@ -23178,8 +21990,7 @@ inline bool kh_engcam_consume(const float khec_view[4][4], float khec_cam[3]) {
         extract_camera_pos(khec_view, khec_rec);
     }
 
-    // Near-origin stand-down, parity with the rebase family (and the jitter is
-    // identically zero there anyway).
+    // Near-origin stand-down, parity with the rebase family.
     if (khec_rec[0] * khec_rec[0] + khec_rec[1] * khec_rec[1] +
         khec_rec[2] * khec_rec[2] < 1.0f) return false;
 
@@ -23267,11 +22078,9 @@ static bool     g_vmir_pending = false;   // Set per counting draw, consumed by 
 static bool     g_vmir_frame_ok = false;   // This frame's patch + prepass both landed.
 static uint32_t g_vmir_mark2 = 0;
 static uint32_t g_vmir_prepass_stamp = 0;   // Frame seq of the last prepass.
-// Our 0.05 near shrank the hole from ~0.8 m to 5 cm; depth clamp closes it:
-// With DepthClipEnable false the sub-near cap fragments clamp to z = 0, fail
-// the GREATER_EQUAL test (a surface in front of the receiver must not count as
-// behind) and the balance is exact - the textbook z-fail companion (the reason
-// NV_depth_clamp exists).
+// Depth clamp closes the near-plane hole: with DepthClipEnable false the
+// sub-near cap fragments clamp to z = 0, fail the GREATER_EQUAL test and the
+// balance is exact - the textbook z-fail companion.
 static ID3D11RasterizerState* g_vmir_rs_src[2] = {};   // Engine RS the clone shadows.
 static ID3D11RasterizerState* g_vmir_rs_clamp[2] = {};   // Same desc, DepthClipEnable false.
 static ID3D11RasterizerState* g_vmir_sv_rs = nullptr;
@@ -23429,27 +22238,12 @@ inline bool kh_vmir_ensure_gpu(ID3D11Device* khvg_dev) {
     return true;
 }
 
-// KH_MIR_CPU - the measured fix for the frame-756 hitch.
-//
-// The hitch snapshot named it outright: on the worst frame of the session the
-// mirror Dispatch alone took 148.255 ms of a 152.463 ms frame while every other
-// slot on that same frame was normal (inject 0.93, mirrorIn 0.005, mirrorOut
-// 0.003, mirrorReissue 0.017). One Dispatch(1,1,1) over 64 bytes cannot BE 148
-// ms of work - it is a graphics -> compute transition on the immediate context,
-// which splits the command buffer and drains whatever the engine has in flight.
-// Deeper queue (moving camera, dense view) means longer drain, which is exactly
-// why it tracks movement.
-//
-// CSMirB2 is a pure function of b2's first 64 bytes and about thirty flops, so
-// the arithmetic does not need the GPU at all. What it needs is those bytes on
-// the CPU, and the upload funnel above already carries every engine constant
-// upload we ask it for. So: learn which resource is bound at VS b2, snapshot it
-// at its upload, and patch on the CPU.
-//
-// The gate is deliberately strict - same resource AND same frame - because a
-// stale b2 would misplace the mirror mask. If it does not hold, the Dispatch
-// path runs exactly as it does today, so the worst case of this change is that
-// nothing changes. mirCpuFrames / mirCsFrames say which path actually ran.
+// KH_MIR_CPU: a Dispatch(1,1,1) on the immediate context is a graphics ->
+// compute transition that drains the engine's in-flight work (measured at 148
+// ms on a dense frame). CSMirB2 is a pure function of b2's first 64 bytes, so:
+// learn which resource is bound at VS b2, snapshot it at its upload, patch on
+// the CPU. Strict gate (same resource AND same frame) because a stale b2
+// misplaces the mask; otherwise the Dispatch path runs.
 struct KhB2Snap {
     void*    res = nullptr;
     uint64_t frame = 0;
@@ -23468,10 +22262,10 @@ inline void kh_b2_snap_note(ID3D11Resource* khb_res, const void* khb_d, uint32_t
     g_b2_snap.valid = true;
 }
 
-// The C++ twin of CSMirB2 (vmir_cs.hlsl). Same order of operations, same
-// constants, same refusal conditions - where the shader falls back to passing z
-// through untouched, so does this. Columns 0, 1 and 3 are copied verbatim and
-// only column 2 is recombined, exactly as the shader's Store loop does.
+// The C++ twin of CSMirB2 (vmir_cs.hlsl): same order of operations, same
+// constants, same refusal conditions (where the shader passes z through
+// untouched, so does this). Columns 0, 1 and 3 are copied verbatim; only column
+// 2 is recombined.
 inline void kh_mir_patch_cpu(const float khm_in[16], float khm_out[16]) {
     float khm_num = 0.0f, khm_den = 0.0f;
 
@@ -23512,14 +22306,12 @@ inline bool kh_vmir_patch_b2(ID3D11DeviceContext* khvp_ctx) {
     D3D11_BUFFER_DESC khvp_bd = {};
     khvp_b2->GetDesc(&khvp_bd);
     if (khvp_bd.ByteWidth < 64) { khvp_b2->Release(); return false; }
-    // KH_MIR_CPU: learn which resource is bound at b2 so the upload funnel
-    // starts snapshotting it. Costs nothing and is what makes the fast path
-    // below reachable from the second frame on.
+    // Learn which resource is bound at b2 so the upload funnel starts
+    // snapshotting it; makes the fast path reachable from the second frame on.
     g_b2_learn = static_cast<void*>(khvp_b2);
 
-    // The fast path: no CopySubresourceRegion off a buffer the engine is still
-    // renaming, no Dispatch, no CopyResource - one UpdateSubresource of 64
-    // bytes. Taken only when the snapshot is of THIS resource and THIS frame.
+    // The fast path: one UpdateSubresource of 64 bytes. Taken only when the
+    // snapshot is of THIS resource and THIS frame.
     if (g_b2_snap.valid && g_b2_snap.res == static_cast<void*>(khvp_b2) &&
         g_b2_snap.frame == g_svs_frame_seq) {
         float khvp_patched[16];
@@ -23683,8 +22475,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
             if (!g_scene.alive[khsc_i]) continue;
             const RenderObject& o = g_scene.objs[khsc_i];
             // The footprint serves our receivers' stencil term: visible, lit,
-            // world-space, depth-participating geometry only (an unlit mesh
-            // reads no stencil term, a casterOnly invisible one has no pixels).
+            // world-space, depth-participating geometry only.
             if (!o.visible || !kh_shadow_active(o)) continue;
             KhSvCaster c;
             c.slot = khsc_i;   // KH_SEAM_INST: khObjs index for the instanced twins.
@@ -23742,10 +22533,8 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
     // overwrite the rotation.
     kh_adopt_frame_view(khv_pv);
 
-    // Which publication the injection read.
-
     // The source the footprint actually rasterises from, per frame. Boundary
-    // override ranks above the 133 share because it runs after it.
+    // override ranks above the share because it runs after it.
 
     if (g_ro.engine_proj_valid) {
         khv_pv.projection[2][2] = g_ro.engine_m22;
@@ -23767,7 +22556,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
             khlt_lc[1] = khv_latch_cam[1];
             khlt_lc[2] = khv_latch_cam[2];
         } else {
-            khlt_lc[0] = khlt_ac[0];   // 159 revert / no latch: form.
+            khlt_lc[0] = khlt_ac[0];   // No latch: absolute form.
             khlt_lc[1] = khlt_ac[1];
             khlt_lc[2] = khlt_ac[2];
         }
@@ -23778,7 +22567,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
             khlt_cc[1] = khlt_lc[1] + (khlt_vc[1] - g_khlt_lp[1]);
             khlt_cc[2] = khlt_lc[2] + (khlt_vc[2] - g_khlt_lp[2]);
         } else {
-            khlt_cc[0] = khlt_vc[0];   // 158 revert / cold: absolute form.
+            khlt_cc[0] = khlt_vc[0];   // Cold: absolute form.
             khlt_cc[1] = khlt_vc[1];
             khlt_cc[2] = khlt_vc[2];
         }
@@ -23791,14 +22580,13 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
         const float khlt_dx = khlt_cc[0] - khlt_lc[0];
         const float khlt_dy = khlt_cc[1] - khlt_lc[1];
         const float khlt_dz = khlt_cc[2] - khlt_lc[2];
-        // Not const - the retry below rewrites it so the existing refusal test
+        // Not const - the retry below rewrites it so the refusal test
         // downstream sees the second sample's delta.
         float khlt_d = sqrtf(khlt_dx * khlt_dx + khlt_dy * khlt_dy +
                                    khlt_dz * khlt_dz);
 
         if (khlt_d <= KH_LATCH_JUMP_M) {
-            // A foreign one-frame flicker never confirms - ser 3642 vanished on
-            // its next frame.
+            // A foreign one-frame flicker never confirms.
             bool khlt_take = true;
             {
                 float khlt_sm = 0.0f;
@@ -23916,7 +22704,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
                 g_khlt_prev_ok = true;
                 // The applied-step ring, same unconditional bookkeeping as
                 // prev_step - refusal streaks and genuine rest both write
-                // zeros, so the window drains honestly.
+                // zeros.
                 g_khlt_step_ring[g_khlt_step_ring_i & 3u] = khlt_sm;
                 g_khlt_step_ring_i++;
             }
@@ -23946,8 +22734,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
             }
 
             // Rebuild whenever the basis moved or the camera did, from the
-            // bounded camera through the current basis, double precision, the
-            // publish path's own convention.
+            // bounded camera through the current basis, double precision.
             if (khlr_basis || khlt_ud > 1.0e-6f) {
                 const double khlt_cam[3] = {
                     static_cast<double>(khlt_take ? khlt_cc[0] : khlt_lc[0]),
@@ -23988,11 +22775,8 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
             }
 
             // Mid-frame publications carry other windows' projections; the
-            // colour pass never eats them raw (its arbitration and reference
-            // chain filter exactly this churn), and my ungated take fed them
-            // straight into the footprint's depth encode. The depth pair, same
-            // instant. The FP breathing is the projection wearing the same
-            // one-frame lag.
+            // colour pass filters them, and an ungated take here feeds them
+            // straight into the footprint's depth encode.
             const float khlp_n = kh_enc_pair_near(
                 khlt_live.projection[2][2], khlt_live.projection[3][2]);
             const bool khlp_sane =
@@ -24013,7 +22797,6 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
                 khlp_sn == khlp_sn && khlp_sn > 0.0f &&
                 kh_enc_far(g_ro.engine_m22, g_ro.engine_m32) <= KH_ENC_FAR_MAX;
 
-            // And never worse than today's flat hold on a true edge.
             if (khlp_comm_ok && g_inj_enc_ms != g_khpe_ms) {
                 g_khpe_ms = g_inj_enc_ms;
                 const float khpe_c = g_inj_enc_near;
@@ -24083,8 +22866,8 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
     }
 
     // The engine uploads frame k+1's projection into the bound b2 before our
-    // pre-clear seam runs; identity reads it where Value arbitration
-    // structurally cannot. Folds the encode to default below.
+    // pre-clear seam runs; identity reads it where value arbitration
+    // structurally cannot.
     if (kh_cbc_on()) {
         ID3D11Buffer* khcb_vs[4] = {};
         ID3D11Buffer* khcb_ps[4] = {};
@@ -24116,9 +22899,8 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
             const float khcb_age = static_cast<float>(
                 steady_now_ms() - khcb_best->ms);
 
-            // Age-bounded so a stalled entry can never encode stale measured
-            // 0-1 ms; Cold no witness available passes: a cold gate must not
-            // block the first encode, and the chain beneath is no better armed.
+            // Age-bounded so a stalled entry can never encode stale; a cold
+            // gate must not block the first encode.
             bool khcb_class_ok = true;
 
             if (khcb_near > 0.0f) {
@@ -24139,9 +22921,9 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
                 }
 
                 // A pulse return agrees with the stable baseline by definition;
-                // the zoom poison 0.010 sits at 0.14x of it and still fails the
-                // floor. Same 10 percent agreement bar the chain's own baseline
-                // acceptance uses.
+                // the zoom poison sits at 0.14x of it and fails the floor. Same
+                // 10 percent agreement bar the chain's baseline acceptance
+                // uses.
                 if (!khcb_agree && g_khbl_stable > 0.0f) {
                     khcb_any_wit = true;
                     if (fabsf(khcb_near - g_khbl_stable) <=
@@ -24175,7 +22957,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
     memcpy(g_svs_prime_vp, khv_vp_m, sizeof(g_svs_prime_vp));
     // The absolute copy survives the rebase below.
 
-    // Both matrices are absolute here - the rebase has not run yet - so a plain
+    // Both matrices are absolute here (the rebase has not run yet), so a plain
     // projection of one caster centre through each is the honest comparison.
     float khv_swing_gate = -1.0f;
     if (!khv_list.empty() && g_ro.cycle_pv_valid && g_main_depth_w && g_main_depth_h) {
@@ -24220,12 +23002,9 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
 
     // The seam pass is identified by its transform: its b2 must agree with the
     // cycle view. A candidate whose swing exceeds the threshold is refused
-    // here, before any state is touched, and the frame stays unmarked so later
-    // binds of the frame are tried in turn. A genuine seam pass swings a few
-    // pixels.
-    // Off by default (492 = on). The gate is a correct idea with no field
-    // benefit and a real downside if a genuine seam pass ever swings past 256
-    // px: the footprint (the stencil-volume depth) would be refused.
+    // before any state is touched, and the frame stays unmarked so later binds
+    // are tried. A genuine seam pass swings a few pixels. Off by default: no
+    // field benefit, and a genuine pass past 256 px would be refused.
     const bool khv_prev_inj = g_ro.in_injection;
     g_ro.in_injection = true;
 
@@ -24239,8 +23018,8 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
     ctx->RSGetViewports(&khv_old_nvp, khv_old_vps);
 
     // Depth target only - the engine's own, exactly as it bound it. Dropping
-    // the render target is what keeps the paired linear-depth colour buffer
-    // (which the cascade resolves read) out of this entirely.
+    // the render target keeps the paired linear-depth colour buffer (which the
+    // cascade resolves read) out of this entirely.
     ctx->OMSetRenderTargets(0, nullptr, khv_old_dsv);
 
     float khv_vp_lo = g_ro.trig_vp_valid ? g_ro.trig_vp_min : g_scene_vp_min_d;
@@ -24274,8 +23053,8 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
     const bool khv_rs_own = khv_rs_have;
     if (khv_rs_own) ctx->RSSetState(khv_rs);
 
-    // Our passes never touch b2+ again, so the engine's own binds there are
-    // never disturbed and never need restoring.
+    // Our passes never touch b2+, so the engine's binds there are never
+    // disturbed.
     ID3D11Buffer* khv_cbs[2] = { g_res.composite_cb, g_res.composite_frame_cb };
     ctx->VSSetConstantBuffers(0, 2, khv_cbs);
     ctx->PSSetConstantBuffers(0, 2, khv_cbs);
@@ -24286,11 +23065,10 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
     // and the rebase to be armed below - the shader re-checks centerRel.w
     // because engRot carries no translation.
     kh_fill_sten_proj(khv_cbf, khv_pv.projection);
-    // KH_DLS_WORLD_INFRONT: the depth terms of the projection this prepass renders the
-    // mirror with. The world pass inverts the mirror's depth through exactly these, so
-    // the two agree on the depth partition. VSMirror overwrites z with its own
-    // conditional near plane, so the depth cannot be read back instead. The flush
-    // mesh pass never sets it (cycle B untouched).
+    // The depth terms of the projection this prepass renders the mirror with.
+    // The world pass inverts the mirror's depth through exactly these. VSMirror
+    // overwrites z with its own conditional near plane, so the depth cannot be
+    // read back instead. The flush mesh pass never sets it.
     khv_cbf.sten_vol2[2] = 3.0f;
     float khv_cam[3] = {};
     float khv_cam_rt = -1.0f;
@@ -24303,8 +23081,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
     }
     const bool khv_engcam = kh_engcam_consume(khv_pv.view, khv_cam);
     const bool khv_rebase_on = khv_engcam ? kh_rebase_vp_engcam(khv_cbf, khv_pv.view, khv_pv.projection) : kh_rebase_vp_exact(khv_cbf, khv_pv.view, khv_pv.projection, khv_cam);
-    // The rebase mutates view_proj in place, so cache the post-rebase matrix,
-    // not the raw one stashed above.
+    // The rebase mutates view_proj in place, so cache the post-rebase matrix.
     memcpy(g_svs_prime_vp, khv_cbf.view_proj, sizeof(g_svs_prime_vp));
     {   // KH_SEAM_CULL: the footprint loop's visibility, through the final matrix.
         KhCullSet khsv_cull;
@@ -24320,24 +23097,22 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
     // The publish belongs here, not at the swing site. Gated on the rebase.
     g_svs_prime_vp_lo = khv_vp_lo;
     g_svs_prime_vp_hi = khv_vp_hi;
-    // KH_SEAM_INST: the rebase arm for the RECORD path. The per-object entries
-    // read centerRel, filled per mesh below; the instanced entries read khPass
-    // and nothing fills it per mesh, so it has to be a frame lane. Leaving it
-    // zeroed does not disable instancing - it makes KhVsCore take the absolute
-    // branch against a viewProj that IS rebased, displacing every instance by
-    // the whole camera vector. THIS MUST STAY ABOVE kh_upload_frame_cb: the
-    // frame half is copied to the GPU exactly once per pass (1.191), and the
-    // mirror prepass re-uploads this same struct verbatim, so one write serves
-    // both loops.
+    // The rebase arm for the RECORD path: the instanced entries read khPass,
+    // which nothing fills per mesh, so it is a frame lane. Left zeroed,
+    // KhVsCore takes the absolute branch against a rebased viewProj and
+    // displaces every instance by the camera vector. MUST STAY ABOVE
+    // kh_upload_frame_cb: the frame half is copied once per pass and the mirror
+    // prepass re-uploads this same struct verbatim.
     khv_cbf.kh_pass[0] = khv_cam[0];
     khv_cbf.kh_pass[1] = khv_cam[1];
     khv_cbf.kh_pass[2] = khv_cam[2];
     khv_cbf.kh_pass[3] = khv_rebase_on ? 1.0f : 0.0f;
     const bool khv_frame_ok = kh_upload_frame_cb(ctx, g_res.composite_frame_cb, khv_cbf);
 
-    {   // The signature covers the target DSV, the depth-clear serial, the post-rebase view-proj,
-        // The rebase and grow arms, the viewport span, and the caster set (position, size,
-        // rotation, mesh and the mesh's VB identity) in list order.
+    // The signature covers the target DSV, the depth-clear serial, the
+    // post-rebase view-proj, the rebase and grow arms, the viewport span, and
+    // the caster set in list order.
+    {
         uint64_t khsk_h = CryptoGenerator::FNV1A64_OFFSET;   // House FNV-1a 64 (see
                                                              // kh_shader_cache_hash).
         const uintptr_t khsk_dsv = reinterpret_cast<uintptr_t>(khv_old_dsv);
@@ -24368,14 +23143,11 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
         g_svs_skip_valid = false;   // Proven again by the completed pass below.
     }
 
-    // KH_SEAM_INST: the instance plan for both loops, built once. Loop A takes
-    // the opaque footprint casters (the alpha ones need a material bound per
-    // submesh and stay per object, exactly as kh_sun_draw_alpha does for the
-    // sun ladder); loop B takes every caster, as it always did. Both are sorted
-    // mesh-major so a run of one mesh collapses to a single DrawIndexedInstanced.
-    // Sorting is safe here: both loops are depth-only with LESS_EQUAL and no
-    // blending, so submission order does not reach the result, and the skip
-    // signature above was already hashed in list order.
+    // The instance plan for both loops, built once: loop A the opaque footprint
+    // casters (alpha ones need a material per submesh and stay per object),
+    // loop B every caster. Both sorted mesh-major so a run of one mesh is one
+    // DrawIndexedInstanced. Safe: both loops are depth-only LESS_EQUAL with no
+    // blending, and the skip signature was hashed in list order.
     bool     khv_inst_ok = false;
     uint32_t khv_inst_a = 0;   // Loop A's lane count.
     uint32_t khv_inst_b = 0;   // Loop B's lane count.
@@ -24384,10 +23156,9 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
                       g_res.layout_sundepth && g_res.obj_srv && !khv_list.empty();
 
         if (khv_inst_ok) {
-            // The records the instanced entries read at t39. kh_scene_sync ran at
-            // the scan above and refilled the CPU mirror for every dirty slot;
-            // this is what brings the GPU copy up to it. The seam cannot rely on
-            // the sun ladder having synced first - it may not have run this frame.
+            // The records the instanced entries read at t39. kh_scene_sync ran
+            // at the scan above; this brings the GPU copy up to it. The seam
+            // cannot rely on the sun ladder having synced first.
             khv_inst_ok = kh_objbuf_sync(ctx);
         }
 
@@ -24466,23 +23237,18 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
         UINT khv_stride = sizeof(MeshVertex), khv_offset = 0;
         int khv_bound = -1;
 
-        // KH_FOOTPRINT_ALPHA: the alpha casters take the textured VS + layout
-        // and the clip-only PS, per submesh with the material bound; the
-        // whole-object translucent ones are skipped. State flips per caster
-        // (khv_alpha_bound) and the opaque footprint state returns at the end.
+        // The alpha casters take the textured VS + layout and the clip-only PS,
+        // per submesh with the material bound; the whole-object translucent
+        // ones are skipped. State flips per caster (khv_alpha_bound) and the
+        // opaque footprint state returns at the end.
         bool khv_alpha_bound = false;
         ID3D11Device* khv_dev = nullptr;
         ctx->GetDevice(&khv_dev);
 
-        // KH_SEAM_CB_HOIST: ConstantData is 9,072 bytes and this loop ran
-        // once per caster - 3001 of them - so the zero-fill alone was ~27 MB
-        // a frame here and again in the mirror prepass below. Hoisted: every
-        // field the body reads (center_size, size_axes, obj_rot, and
-        // center_rel under the loop-invariant khv_rebase_on) is rewritten on
-        // every iteration, so nothing carries over into a draw - except
-        // mat_ctl, which only kh_bind_material writes (the alpha path) and
-        // which that path zeroes again on its way out, so an opaque caster
-        // after it uploads the same zeroed lanes it did per-iteration.
+        // Hoisted out of the per-caster loop (ConstantData is 9 KB). Every
+        // field the body reads is rewritten each iteration; mat_ctl is written
+        // only by kh_bind_material (the alpha path), which zeroes it again on
+        // its way out.
         ConstantData khv_obj = {};
 
         if (khv_inst_ok) {   // KH_SEAM_INST: one draw per mesh run, not per caster.
@@ -24506,8 +23272,8 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
                 khv_ivb[0] = g_res.mesh_vb[khv_mid];
                 ctx->IASetVertexBuffers(0, 2, khv_ivb, khv_istr, khv_ioff);
                 ctx->IASetIndexBuffer(g_res.mesh_ib[khv_mid], DXGI_FORMAT_R32_UINT, 0);
-                // The run's level range, exactly as the per-caster draw below takes
-                // it (KH_SHADOW_LOD_DRAWN: the level the injection drew).
+                // The run's level range, exactly as the per-caster draw below
+                // takes it (the level the injection drew).
                 UINT khv_is = 0, khv_ic = 0;
                 mesh_lod_range_of(khv_mid, khv_lod, khv_is, khv_ic);
                 ctx->DrawIndexedInstanced(khv_ic, khv_last - khv_first, khv_is, 0, khv_first);
@@ -24520,12 +23286,13 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
         }
 
         for (const auto& c : khv_list) {
-            // KH_SEAM_INST: the opaque set went out instanced above. The partition
-            // is exact - alpha_caster is false for every lane that was written -
-            // so no caster is drawn twice and none is dropped.
+            // The opaque set went out instanced above. The partition is exact -
+            // alpha_caster is false for every lane written - so no caster is
+            // drawn twice and none is dropped.
             if (!c.a_vis) continue;   // KH_SEAM_CULL: outside the footprint's frustum.
             if (khv_inst_ok && !c.alpha_caster) continue;
-            if (c.alpha_caster && c.alpha < 0.999f) {  continue; }   // Writes no depth in the colour
+            // Writes no depth in the colour pass: not drawn.
+            if (c.alpha_caster && c.alpha < 0.999f) {  continue; }
             const bool khv_want_alpha = c.alpha_caster && c.mats && khv_dev;
 
             if (khv_want_alpha != khv_alpha_bound) {
@@ -24550,13 +23317,10 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
             khv_obj.center_size[1] = c.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y].
             khv_obj.center_size[2] = c.pos[1];
             // A footprint drawn a few percent larger covers the visible box
-            // under any displacement up to that margin. We never read those
-            // Texels; only the engine s own ground shading does. Grow the
-            // footprint instead of aligning it.
-            // KH_SEAM_INST: this is 1.0 and the instanced twin reads the record's
-            // extents with no grow lane, so the two agree exactly. Raising it
-            // needs a matching lane on the instance stream or the two paths
-            // rasterise different footprints.
+            // under any displacement up to that margin (only the engine's
+            // ground shading reads those texels). This is 1.0 and the instanced
+            // twin reads the record's extents with no grow lane; raising it
+            // needs a matching lane on the instance stream.
             float khv_grow = 1.0f;
             khv_obj.size_axes[0] = c.size[0] * khv_grow;
             khv_obj.size_axes[1] = c.size[2] * khv_grow;
@@ -24610,10 +23374,9 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
     }
 
     // Grafted at the instant the footprint already draws at, inside the same
-    // state envelope - the tail below restores everything this block touches
-    // (OM, viewports, PS via backup, frame/obj CBs re-uploaded by every later
-    // consumer). Runs whether or not the footprint's frame CB landed: the
-    // mirror uploads its own frame slice.
+    // state envelope - the tail below restores everything this block touches.
+    // Runs whether or not the footprint's frame CB landed: the mirror uploads
+    // its own frame slice.
     {
         bool khvm_go = !khv_list.empty();
         if (khvm_go) {
@@ -24628,8 +23391,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
             }
             if (khvm_ok && g_vmir_vs) {
                 // The frame CB uploads verbatim - VSMirror takes x/y/w from
-                // this matrix (the visible box's own space) and remaps z
-                // through the live-b2 low pair itself.
+                // this matrix and remaps z through the live-b2 low pair itself.
                 if (kh_upload_frame_cb(ctx, g_res.composite_frame_cb, khv_cbf)) {
                     ctx->ClearDepthStencilView(g_vmir_dsv,
                         D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
@@ -24652,8 +23414,9 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
                         uint32_t khvm_first = 0;
 
                         while (khvm_first < khv_inst_b) {
-                            // Loop B's lanes sit at [khv_inst_a, khv_inst_a + khv_inst_b) in
-                            // the one buffer, so every run index carries that base.
+                            // Loop B's lanes sit at [khv_inst_a, khv_inst_a +
+                            // khv_inst_b) in the one buffer, so every run index
+                            // carries that base.
                             const int khvm_mid = khv_list[g_svs_inst_ord[khv_inst_a + khvm_first]].mesh;
                             const int khvm_lod = khv_list[g_svs_inst_ord[khv_inst_a + khvm_first]].lod;   // KH_SHADOW_LOD_DRAWN.
                             uint32_t khvm_last = khvm_first + 1;
@@ -24716,8 +23479,8 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
     g_ro.in_injection = khv_prev_inj;
 }
 
-// Runs on every OM depth bind, before the live-shadow gate, because the seam
-// has nothing to do with whether cascades are wanted.
+// Runs on every OM depth bind, before the live-shadow gate: the seam has
+// nothing to do with whether cascades are wanted.
 inline void kh_volume_seam_track(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* dsv,
                                  bool dsv_is_main, UINT n, ID3D11RenderTargetView* const* rtvs) {
     g_svs_vol_dsv_now = false;
@@ -24841,10 +23604,9 @@ inline void kh_volume_seam_track(ID3D11DeviceContext* ctx, ID3D11DepthStencilVie
         return;
     }
 
-    // The shader-resource discriminator: the colour pass's depth is typeless and
-    // SRV-readable so post-process can sample it; the volume buffer is write/test-only
-    // and is never read as an SRV anywhere in the frame. An ordinal cannot identify
-    // a resource.
+    // The shader-resource discriminator: the colour pass's depth is typeless
+    // and SRV-readable; the volume buffer is write/test-only and never read as
+    // an SRV anywhere in the frame. An ordinal cannot identify a resource.
     if (khv_td.BindFlags & D3D11_BIND_SHADER_RESOURCE) {
         return;
     }
@@ -24855,16 +23617,14 @@ inline void kh_volume_seam_track(ID3D11DeviceContext* ctx, ID3D11DepthStencilVie
             return;
         }
     }
-    // Classification survived - this DSV is the volume buffer, so the draws
-    // that follow are counting draws until the next bind.
+    // This DSV is the volume buffer, so the draws that follow are counting
+    // draws until the next bind.
     g_svs_vol_dsv_now = true;
 
     if (g_svs_injected_frame) {
           return;
 
     }
-
-    // Selected (intention).
 
     g_svs_pending = true;
     g_svs_pend_w = khv_td.Width;
@@ -24873,7 +23633,7 @@ inline void kh_volume_seam_track(ID3D11DeviceContext* ctx, ID3D11DepthStencilVie
 
 inline void shadow_track_targets(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* dsv, bool dsv_is_main,
                                  UINT n, ID3D11RenderTargetView* const* rtvs) {
-    // Seam tracking runs first and unconditionally - it is independent of
+    // Seam tracking runs first and unconditionally - independent of
     // shadow_live_wanted, which gates the cascade machinery below.
     kh_volume_seam_track(ctx, dsv, dsv_is_main, n, rtvs);
     if (!shadow_live_wanted()) {
@@ -24929,12 +23689,8 @@ inline void shadow_note_draw(ID3D11DeviceContext* ctx) {
 // The upload funnel's admission, shared by the Unmap and UpdateSubresource
 // hooks: render thread, tracked context, outside the injection, and some
 // consumer wants the bytes (the CB pointer census, the engine-camera locator,
-// the projection locator or the live-shadow scanners). Evaluation order is the
-// original's.
-// KH_PIP: a PIP pass has been classified this session (kh_pip_track_targets).
-// The PIP camera is harvested from the engine's uploads (kh_pip_note_upload,
-// in kh_upload_scan), so once a PIP pass exists the scan must run even in a
-// session none of the other scanners want (no lit object, no live shadows).
+// the projection locator, the live-shadow scanners, or the PIP harvest once a
+// PIP pass has been classified this session).
 static bool g_pip_seen = false;
 
 inline bool kh_upload_hook_wanted(ID3D11DeviceContext* self, ID3D11Resource* res) {
@@ -24947,76 +23703,35 @@ inline bool kh_upload_hook_wanted(ID3D11DeviceContext* self, ID3D11Resource* res
             kh_engcam_on() ||
             (!g_ro.engine_proj_valid && g_ro.cycle_pv_valid) || shadow_live_wanted() ||
             (g_proj_locator.valid && res == g_proj_locator.buf) ||
-            // KH_MIR_CPU: the b2 the mirror patch reads. One extra buffer,
-            // uploaded a handful of times a frame; nullptr until learned.
+            // The b2 the mirror patch reads. One extra buffer, uploaded a
+            // handful of times a frame; nullptr until learned.
             (g_b2_learn && static_cast<void*>(res) == g_b2_learn));
 }
 
-// Every scanner that reads a captured upload, in the order both hooks ran them.
-// ============================================================================
-// KH_PIP - our meshes in the engine's PIP (render-to-texture) cameras.
-//
-// What a capture with a PIP display live showed (frame 2030): the PIP camera
-// is a full scene pass on its own depth target (D24S8, single-sample) with
-// an HDR colour target (R16G16B16A16_FLOAT, single-sample), rendered FIRST in
-// the frame - before the prepass we inject depth into, the sun atlas and the
-// main pass - with its own opaque run (769 of 1653 draws) before its first
-// blended draw, and the scene depth viewport (0.011..0.999). Nothing of ours
-// reads that pass: the frame boundary is the main depth clear, the census
-// counts main-DSV draws only, the injection's camera is the bridge's (the
-// main camera), and the locked view harvest rejects any view rotated away
-// from it. So our meshes were absent from every PIP display by construction.
-//
-// The engine's per-view constant block is the same in both passes and
-// unmistakable (buffer b2 at the sampled draws): floats 0..15 a rebase origin
-// (1,0,0,X / 0,1,0,0 / 0,0,1,Z / 0,0,0,0), 16..27 the 3x4 view [R | -R.cam]
-// on rebased positions, 28..31 the rebased camera (w = 1), 56..59 the
-// absolute camera (w = 1). The projection is buffer b0 floats 0..15 in the
-// row-vector shape (m00 0 0 0 / 0 m11 0 0 / 0 0 m22 1 / 0 0 m32 0). Both are
-// re-uploaded per view, ahead of that view's draws, so the LAST such uploads
-// seen before a PIP draw are the PIP camera's. That is the harvest.
-//
-// The pass is recognised at the OM hook: a depth target that is not the main
-// one, with RGBA16F single-sample colour bound that is not the main scene
-// texture. Its depth clear opens a PIP cycle; opaque draws on it are counted;
-// the first blended draw after KH_PIP_MIN_OPAQUES fires one injection per
-// cycle: the main injection's finished frame template from the previous
-// main pass (the PIP renders before this frame's main pass) with the
-// view-dependent lanes replaced (camera-relative view x projection, camera,
-// screen size) and every screen-space lane disarmed (depth witness, band
-// table, volume stencil transport, mirror, scene snapshot). The world-space
-// products - the sun ladder, the DLS maps, the terrain field, lighting - are
-// shared as they are. Draws are the static pair (VSMain / PSMain and the
-// textured twins), depth-tested and written into the PIP's own targets under
-// its own viewport; the injection's own exclusion flag covers them.
-//
-// KH_PIP_FX: the localized fullscreen passes (addLocalPostFX) are drawn into
-// the PIP too. The flush applies them to the main view over the finished
-// scene, masked by the world position it reconstructs from the main depth, so
-// a pass centred away from a mirror never reaches what the mirror shows. Here
-// they run when the ENGINE COPIES THE PIP COLOUR TARGET OUT
-// (KH_PIP_FX_COPY, hooked_copyresource): the capture showed the engine copy
-// it after its last draw and then overwrite it from that copy in its post
-// pass, so anything drawn at the OM leave was drawn into a target already
-// consumed; the first copy of a cycle is the engine's own opaque boundary.
-// The leave (kh_pip_track_targets) stays as the fallback for a PIP that is
-// never copied - kept by design for a PIP the engine does not copy; every
-// tested PIP is copied and takes the hook. The passes go through the same
-// PSEffect over a copy of the PIP's colour target (t0, re-copied per pass:
-// each pass reads the last) and
-// a copy of its depth (t1), with the PIP camera's rotation inverted and the
-// camera itself in fxCam (KH_FX_CAM_REL) so the mask lands on the world the
-// PIP sees, under the PIP's own viewport captured during the pass
-// (KH_PIP_FX_LEAVE_VP; at the leave the next pass's may already be bound),
-// RGB only (the PIP's alpha is the engine's). A draw-count trigger cannot
-// replace either: the PIP interleaves true translucents among its opaques in
-// distance order, so what had been drawn at "the first translucent" moved
-// with the camera.
-// Only what the flush's own
-// passes need without the main view: the SSGI chain (sized to the main
-// scene) and user shaders (compiled against the main depth's MSAA state) are
-// left to the main view; a LUT pass runs once the flush has loaded its file.
-// ============================================================================
+// KH_PIP - our meshes in the engine's PIP cameras. A PIP is a full scene pass
+// on its own depth (D24S8) and HDR colour (RGBA16F) targets, both
+// single-sample, rendered BEFORE the main pass. Engine per-view block (VS b2):
+// floats 0..15 rebase origin (1,0,0,X / 0,1,0,0 / 0,0,1,Z / 0,0,0,0), 16..27
+// the 3x4 view [R | -R.cam] on rebased positions, 28..31 rebased camera (w =
+// 1), 56..59 absolute camera (w = 1). Projection: b0 floats 0..15, row-vector
+// (m00 0 0 0 / 0 m11 0 0 / 0 0 m22 1 / 0 0 m32 0). Both are re-uploaded per
+// view ahead of its draws, so the last such uploads before a PIP draw are the
+// PIP camera's. The pass is recognised at the OM hook (non-main depth + RGBA16F
+// single-sample colour that is not the scene texture); its depth clear opens a
+// cycle, opaques are counted, and the first blended draw after
+// KH_PIP_MIN_OPAQUES fires one injection: the previous main pass's frame
+// template with the view lanes replaced and every screen-space lane disarmed
+// (depth witness, band table, volume stencil, mirror, snapshot); world-space
+// products (sun ladder, DLS maps, terrain, lighting) are shared. KH_PIP_FX:
+// localized fullscreen passes run in the PIP when the engine COPIES THE PIP
+// COLOUR TARGET OUT (hooked_copyresource) - it copies after its last draw and
+// overwrites the target from that copy in its post pass, so anything drawn at
+// the OM leave is lost; the leave stays as the fallback for a PIP that is never
+// copied. They run through PSEffect over copies of the PIP colour (t0,
+// re-copied per pass) and depth (t1), with the PIP camera in fxCam, under the
+// PIP's own viewport captured during the pass, RGB only. The SSGI chain and
+// user shaders stay main-view only; a LUT pass runs once the flush has loaded
+// its file.
 static constexpr uint32_t KH_PIP_MIN_OPAQUES = 32;     // Opaque draws on the PIP depth before a fire.
 static constexpr uint32_t KH_PIP_TPL_MAX_CYCLES = 2;   // A template older than this is stale.
 
@@ -25053,8 +23768,8 @@ inline void kh_pip_reset() {
     g_pip_seen = false;
 }
 
-// The two engine blocks by signature (see the header note). Cheap: a handful
-// of exact compares before anything else.
+// The two engine blocks by signature (see the KH_PIP note). A handful of exact
+// compares before anything else.
 inline void kh_pip_note_upload(ID3D11Resource* res, const void* data, uint32_t bytes) {
     if (!res || !data || bytes < 64) return;
     if (res == static_cast<ID3D11Resource*>(g_res.composite_cb) ||
@@ -25099,11 +23814,9 @@ inline void kh_pip_note_upload(ID3D11Resource* res, const void* data, uint32_t b
 }
 
 // At every OM set on the render thread, after g_ro.dsv_main is known.
-// KH_PIP_FX: PSEffect against a single-sample depth. The main build follows
-// the main depth's sample count (ensure_effect_shader); the PIP depth is
-// single-sample in every capture, and a multisampled one stands the pass down
-// below rather than reading it through the wrong declaration. The prewarm
-// table carries this exact define set, so the cache is warm.
+// KH_PIP_FX: PSEffect against a single-sample depth; a multisampled PIP depth
+// stands the pass down rather than reading it through the wrong declaration.
+// The prewarm table carries this exact define set.
 inline std::string kh_pip_fx_shader(ID3D11Device* dev) {
     if (g_res.ps_effect_pip) return "";
     if (g_res.ps_effect_pip_tried) return "PIP effect shader unavailable";
@@ -25119,12 +23832,11 @@ inline std::string kh_pip_fx_shader(ID3D11Device* dev) {
     return "";
 }
 
-// KH_PIP_FX: the PIP's depth, copied into a texture of ours the effect reads
-// at t1. A copy rather than an SRV on the engine's texture: the PIP depth
-// carries whatever bind flags the engine gave it, a copy needs none of them,
-// and the read-only-DSV swap the flush does for the main depth is not needed
-// when the source stays bound as it was. Same typeless format (CopyResource's
-// rule), the SRV typed as ensure_depth_srv types the main one.
+// The PIP's depth, copied into a texture of ours the effect reads at t1. A copy
+// rather than an SRV on the engine's texture: the PIP depth carries whatever
+// bind flags the engine gave it, and the source stays bound as it was. Same
+// typeless format (CopyResource's rule), the SRV typed as ensure_depth_srv
+// types the main one.
 inline bool kh_pip_fx_depth(ID3D11Device* khpd_dev, ID3D11DeviceContext* khpd_ctx, ID3D11DepthStencilView* khpd_dsv) {
     ID3D11Resource* khpd_res = nullptr;
     khpd_dsv->GetResource(&khpd_res);
@@ -25184,14 +23896,12 @@ inline bool kh_pip_fx_depth(ID3D11Device* khpd_dev, ID3D11DeviceContext* khpd_ct
     return khpd_ok;
 }
 
-// KH_PIP_FX: the passes, into the PIP's colour target while it is bound. Called
-// from hooked_copyresource (KH_PIP_FX_COPY: the engine's own copy of the
-// target, before it) and, as the fallback for a PIP that is never copied, from
-// kh_pip_track_targets at the binding that leaves the pass. One attempt per
-// PIP cycle (fx_done, set first: our own copies below re-enter the copy hook
-// and must not fire). The gate is the pass itself - the opaque count the mesh
-// injection fires on - not the injection: a scene of fullscreen passes and no
-// meshes never injects, and its passes are exactly what the PIP is missing.
+// The passes, into the PIP's colour target while bound. Called from
+// hooked_copyresource (before the engine's copy) and, for a PIP that is never
+// copied, from kh_pip_track_targets at the leave. One attempt per PIP cycle
+// (fx_done set first: our own copies re-enter the copy hook). Gated on the pass
+// itself (the opaque count), not the injection: a scene of fullscreen passes
+// and no meshes never injects.
 inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
     g_pip.fx_done = true;
     if (g_pip.opaques < KH_PIP_MIN_OPAQUES || !g_pip.vp_valid) return;   // A real pass, its viewport known.
@@ -25200,9 +23910,9 @@ inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
     if (!g_res.vs_fullscreen || !g_res.dss_off || !g_res.rasterizer ||
         !g_res.composite_cb || !g_res.composite_frame_cb) return;
 
-    // The passes: the flush's fullscreen set narrowed to the localized ones
-    // (a global pass already reaches the mirror through the main view), in
-    // creation order, the envelope folded into the alpha as the flush does.
+    // The flush's fullscreen set narrowed to the localized ones (a global pass
+    // already reaches the mirror through the main view), in creation order, the
+    // envelope folded into the alpha.
     static std::vector<std::pair<uint64_t, RenderObject>> khpf_list;
     khpf_list.clear();
     const float khpf_now = effect_time_seconds();
@@ -25281,10 +23991,9 @@ inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
         return;
     }
 
-    // The PIP camera, as kh_pip_inject builds it: the rotation rows on
-    // camera-relative positions. KH_FX_CAM_REL: the inverse is of exactly that
-    // (rotation x projection - small numbers, exact in fp32) and fxCam carries
-    // the PIP camera the shader adds back.
+    // The PIP camera as kh_pip_inject builds it: the rotation rows on
+    // camera-relative positions. The inverse is of exactly that (small numbers,
+    // exact in fp32) and fxCam carries the PIP camera the shader adds back.
     float khpf_v[4][4] = {};
     for (int r = 0; r < 3; ++r)
         for (int c = 0; c < 3; ++c)
@@ -25312,14 +24021,11 @@ inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
     memset(khpf_cbf.sten_vol2, 0, sizeof(khpf_cbf.sten_vol2));
     memset(khpf_cbf.mir_meta, 0, sizeof(khpf_cbf.mir_meta));
 
-    // The PIP's viewport: the screen size every pass's uv and pixel index
-    // assume, and the depth range its depth was encoded through.
-    // KH_PIP_FX_LEAVE_VP: the pass's own, captured during it; what is bound
-    // now may already be the next pass's. ASSUMPTION, held by every tested
-    // PIP: TopLeftX / TopLeftY are 0. PSEffect clamps int2(SV_Position.xy)
-    // to [0, fxMeta.zw), so an offset PIP viewport would fold its right and
-    // bottom edges; a new PIP kind that renders offset would need the origin
-    // carried in a lane and subtracted in the shader.
+    // The PIP's viewport: the screen size every pass's uv assumes and the depth
+    // range its depth was encoded through - the pass's own, captured during it.
+    // ASSUMPTION, held by every tested PIP: TopLeftX / TopLeftY are 0 (PSEffect
+    // clamps int2(SV_Position.xy) to [0, fxMeta.zw)); an offset PIP would need
+    // the origin carried in a lane and subtracted in the shader.
     const D3D11_VIEWPORT khpf_vp = g_pip.vp;
     if (khpf_vp.Width < 2.0f || khpf_vp.Height < 2.0f) {
         khpf_rt->Release();
@@ -25349,8 +24055,7 @@ inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
         ctx->OMSetDepthStencilState(g_res.dss_off, 0);
         const FLOAT khpf_bf[4] = { 0, 0, 0, 0 };
         // Compositing is in-shader (the flush's rule); RGB only - the PIP's
-        // alpha (0.5 on its sky in the capture) is the engine's, read by its
-        // post pass, and the packing tail writes 1.
+        // alpha is the engine's, read by its post pass.
         ctx->OMSetBlendState(g_res.blend_ui_replace ? g_res.blend_ui_replace : nullptr, khpf_bf, 0xFFFFFFFF);
         ctx->RSSetState(g_res.rasterizer);
         ctx->PSSetShaderResources(1, 1, &g_res.pip_depth_srv);
@@ -25399,9 +24104,9 @@ inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
 }
 
 inline void kh_pip_track_targets(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv) {
-    // KH_PIP_FX: the binding that leaves a PIP pass (off, or another PIP's
-    // RT0) draws the passes into it first - the PIP's targets are still
-    // bound, this hook runs ahead of the engine's call.
+    // The binding that leaves a PIP pass (off, or another PIP's RT0) draws the
+    // passes into it first - the PIP's targets are still bound, this hook runs
+    // ahead of the engine's call.
     const bool khpt_was = g_pip.on;
     void* const khpt_was_rtv = g_pip.cur_rtv;
     if (!dsv || g_ro.dsv_main || !g_main_depth_identity || n < 1 || !rtvs || !rtvs[0]) {
@@ -25448,9 +24153,8 @@ inline void kh_pip_track_targets(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderT
     if (khpt_pip) { g_pip.w = khpt_w; g_pip.h = khpt_h; g_pip_seen = true; }
 }
 
-// A depth clear on a non-main target opens a PIP cycle (the PIP clears its
-// depth ahead of its draws; whether the target is a PIP one is decided at
-// the OM hook, which precedes the draws).
+// A depth clear on a non-main target opens a PIP cycle (whether the target is a
+// PIP one is decided at the OM hook, which precedes the draws).
 inline void kh_pip_on_clear() {
     g_pip.opaques = 0;
     g_pip.injected = false;
@@ -25472,9 +24176,9 @@ inline void kh_pip_inject(ID3D11DeviceContext* ctx) {
     StateBackup khpi_bk;
     khpi_bk.capture(ctx);
 
-    // Camera-relative view (the camera at the origin; center_rel carries the
-    // offset per object) times the harvested projection: the rebased contract
-    // the two mesh passes already draw under.
+    // Camera-relative view (camera at the origin; center_rel carries the offset
+    // per object) times the harvested projection: the rebased contract the two
+    // mesh passes draw under.
     float khpi_v[4][4] = {};
     for (int r = 0; r < 3; ++r)
         for (int c = 0; c < 3; ++c)
@@ -25488,13 +24192,11 @@ inline void kh_pip_inject(ID3D11DeviceContext* ctx) {
     mul_4x4(khpi_v, khpi_p, khpi_cbf.view_proj);
     khpi_cbf.snap_cam[3] = 0.0f;                              // No scene snapshot here.
     memset(khpi_cbf.mask_meta, 0, sizeof(khpi_cbf.mask_meta));   // No band table, no mask stream.
-    // KH_PIP_ATLAS_OFF: with the band table off PSMain's received term falls
-    // to ShadowMapFactor, the engine atlas at t1 scaled by lighting2.w - the
-    // atlas receive strength, 0 until the atlas view lock engages and 1 after.
-    // The atlas is not bound here (it is the main view's), and an unbound t1
-    // reads as fully occluded: the meshes went ambient-only the moment the
-    // lock came up. The engine's own shadows on our meshes are not received
-    // in a PIP pass; ours (the sun ladder, the DLS maps) are.
+    // With the band table off PSMain's received term falls to ShadowMapFactor -
+    // the engine atlas at t1 scaled by lighting2.w. The atlas is not bound here
+    // (it is the main view's) and an unbound t1 reads as fully occluded, so the
+    // strength is zeroed: the engine's own shadows on our meshes are not
+    // received in a PIP pass; ours (the sun ladder, the DLS maps) are.
     khpi_cbf.lighting2[3] = 0.0f;
     memset(khpi_cbf.sten_vol2, 0, sizeof(khpi_cbf.sten_vol2));   // No volume transport; the plain vertex path.
     memset(khpi_cbf.mir_meta, 0, sizeof(khpi_cbf.mir_meta));     // No mirror.
@@ -25531,7 +24233,7 @@ inline void kh_pip_inject(ID3D11DeviceContext* ctx) {
     if (g_res.samp_pf) ctx->PSSetSamplers(1, 1, &g_res.samp_pf);
     if (g_thm_valid && g_res.thm_srv) ctx->PSSetShaderResources(10, 1, &g_res.thm_srv);
     ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);
-    ctx->RSSetState(kh_rs_pick(g_res.rasterizer));
+    ctx->RSSetState(g_res.rasterizer);
     ID3D11RasterizerState* khpi_bound_rs = g_res.rasterizer;
     const FLOAT khpi_bf[4] = { 0, 0, 0, 0 };
     int khpi_bound_bm = -1;
@@ -25552,12 +24254,10 @@ inline void kh_pip_inject(ID3D11DeviceContext* ctx) {
         const int mid = mesh_id_clamp(o.mesh);
         if (mid < 0 || static_cast<size_t>(mid) >= g_res.mesh_vb.size() || !g_res.mesh_vb[mid]) continue;
 
-        // KH_PIP_CULL: bounding sphere against the PIP camera's frustum, in
-        // view space (rel = engine-order position minus the camera, through
-        // the view rows), with the harvested projection's x / y scales as the
-        // side planes and the near plane at z = 0. Every object drew before
-        // this (3001 per PIP frame against the main pass's 119); a mirror
-        // sees a few.
+        // Bounding sphere against the PIP camera's frustum, in view space (rel
+        // = engine-order position minus the camera, through the view rows),
+        // with the harvested projection's x / y scales as the side planes and
+        // the near plane at z = 0.
         {
             const float khpc_rel[3] = { o.pos[0] - cam[0], o.pos[2] - cam[1], o.pos[1] - cam[2] };
             const float khpc_r = kh_lod_radius_of(o.size, o.rot_m, o.rotated);
@@ -25590,15 +24290,12 @@ inline void kh_pip_inject(ID3D11DeviceContext* ctx) {
         kh_fill_obj_rot(cbd, o.rot_m);
         cbd.blend_ctl[0] = 0.0f;
         cbd.blend_ctl[1] = 150.0f;
-        cbd.blend_ctl[2] = o.far_vis ? 1.0f : 0.0f;
         cbd.blend_ctl[3] = 0.0f;
         memcpy(cbd.color, o.color, sizeof(cbd.color));
         cbd.fx0[0] = cam[0]; cbd.fx0[1] = cam[1]; cbd.fx0[2] = cam[2];
-        // KH_PIP_GUARD_OFF: PSMain's punch-through guard arms on fxParams1.x
-        // below 1e8 and reads the depth witness at t0 - which is the engine's
-        // own binding here, never ours. The zeroed template only survived it
-        // because a zero depthParams makes KhSceneMeters answer 1e9; the
-        // injection disarms it by value, and so does this pass.
+        // PSMain's punch-through guard arms on fxParams1.x below 1e8 and reads
+        // the depth witness at t0 - the engine's own binding here, never ours.
+        // Disarm it by value, as the injection does.
         cbd.fx1[0] = 1e9f;
         cbd.fx1[1] = 0.0f;
         kh_fill_local_band_cb(cbd, o);
@@ -25628,7 +24325,7 @@ inline void kh_pip_inject(ID3D11DeviceContext* ctx) {
             khpi_drawn += kh_draw_textured(ctx, dev, cbd, g_res.composite_cb, *khpi_txm, mid, false,
                                            khpi_bound_rs, 0, g_res.ps_tex, khpi_lvl, 1);
             if (khpi_bound_rs != g_res.rasterizer) {
-                ctx->RSSetState(kh_rs_pick(g_res.rasterizer));
+                ctx->RSSetState(g_res.rasterizer);
                 khpi_bound_rs = g_res.rasterizer;
             }
         } else {
@@ -25653,8 +24350,8 @@ inline void kh_pip_pre_draw(ID3D11DeviceContext* ctx) {
     if (g_ro.blend_translucent) {
         if (!g_pip.injected && g_pip.opaques >= KH_PIP_MIN_OPAQUES) kh_pip_inject(ctx);
     } else if (!g_ro.dss_nowrite) {
-        // KH_PIP_FX_LEAVE_VP: the pass's viewport, read once at the draw that
-        // makes it a real pass; the leave (kh_pip_fx) draws under it.
+        // The pass's viewport, read once at the draw that makes it a real pass;
+        // kh_pip_fx draws under it.
         if (++g_pip.opaques == KH_PIP_MIN_OPAQUES) {
             UINT khpp_n = 1;
             D3D11_VIEWPORT khpp_vp = {};
@@ -25664,7 +24361,6 @@ inline void kh_pip_pre_draw(ID3D11DeviceContext* ctx) {
         }
     }
 }
-// KH_PIP end.
 
 inline void kh_upload_scan(ID3D11Resource* res, const void* khus_d, uint32_t khus_n) {
     kh_b2_snap_note(res, khus_d, khus_n);   // KH_MIR_CPU (no-op until b2 is learned).
@@ -25716,8 +24412,8 @@ static void STDMETHODCALLTYPE hooked_unmap(ID3D11DeviceContext* self, ID3D11Reso
         for (auto& p : g_proj_pending) {
             if (p.res == res) {
                 // The engine has finished writing; the pointer is valid until
-                // the original Unmap below runs. One WC read into the scratch
-                // (KH_UPLOAD_SCRATCH); the scanners walk the cached copy.
+                // the original Unmap below runs. One WC read into the scratch;
+                // the scanners walk the cached copy.
                 uint32_t khus_n = p.bytes;
                 const void* khus_d = kh_upload_capture(res, p.data, khus_n);   // KH_DL_CPU.
                 kh_upload_scan(res, khus_d, khus_n);
@@ -25731,12 +24427,11 @@ static void STDMETHODCALLTYPE hooked_unmap(ID3D11DeviceContext* self, ID3D11Reso
     g_orig_unmap(self, res, sub);
 }
 
-// KH_PIP_FX_COPY: the engine copies the PIP colour target out with
-// CopyResource - mid-pass for its translucents' capture and after the last
-// draw for its post pass, which then overwrites the target from that copy.
-// The passes run here, before the copy, so the copy carries them; the first
-// copy of a cycle is the engine's own opaque boundary (fx_done gates the
-// rest). The bound RT0 is compared by resource, not by view.
+// KH_PIP_FX_COPY: the engine copies the PIP colour target out with CopyResource
+// (mid-pass for its translucents, and after the last draw for its post pass,
+// which overwrites the target from that copy). The passes run here, before the
+// copy, so the copy carries them; the first copy of a cycle is the engine's
+// opaque boundary. RT0 is compared by resource, not by view.
 static void STDMETHODCALLTYPE hooked_copyresource(ID3D11DeviceContext* self, ID3D11Resource* dst, ID3D11Resource* src) {
     try {
     if (src && g_pip.on && !g_pip.fx_done && g_pip.opaques >= KH_PIP_MIN_OPAQUES &&
@@ -25779,9 +24474,8 @@ static void STDMETHODCALLTYPE hooked_updatesubresource(ID3D11DeviceContext* self
 }
 
 // The bridge's graphics lock parks the render thread while the game thread uses
-// the context, so game-thread context use can never overlap this function's
-// execution; acquiring that lock from the render thread deadlocks the game (the
-// holder is waiting for this very thread to park).
+// the context, so game-thread context use can never overlap this function;
+// acquiring that lock from the render thread deadlocks the game.
 inline void shadow_view_prewarm() {
     if (g_ls.view_src_valid || !g_ro.cycle_pv_valid) return;
     const uint32_t vcn = g_ls.vc_n < 16 ? g_ls.vc_n : 16;
@@ -25811,7 +24505,7 @@ inline void shadow_view_prewarm() {
         }
     }
 
-    if (best_i < 0 || best_rot >= 0.03f) return;   // Impostors 0.048 and 0.132; truth scores ~0.00.
+    if (best_i < 0 || best_rot >= 0.03f) return;   // Impostors score ~0.05-0.13, the truth ~0.00.
     const float* m = g_ls.vc_ring[best_i].m;
     float tmag = 0.0f;
 
@@ -25848,9 +24542,9 @@ inline void shadow_view_prewarm() {
 
 }
 
-// Modes 1 and 3 share that case; anything else is a model this code has never
-// seen and we stand down rather than guess. Engine distance haze fill (one
-// truth; injection and flush both call it).
+// Engine distance haze fill (one truth; injection and flush both call it).
+// Modes 1 and 3 share the case; anything else is a model this code has never
+// seen and we stand down.
 inline void kh_fill_haze(ConstantData& khz_cb) {
     khz_cb.haze_pars[0] = 0.0f;
     khz_cb.haze_pars[1] = 0.0f;
@@ -25870,7 +24564,7 @@ inline void kh_fill_haze(ConstantData& khz_cb) {
     const float khz_fal = g_sky_probe.nb[58];
 
     // Finite, positive, and inside the range an atmosphere can occupy. Absent
-    // beats wrong, the file's own doctrine.
+    // beats wrong.
     if (!(khz_den > 0.0f && khz_den < 1.0f) ||
         !(khz_fal > 1.0e-6f && khz_fal < 1.0e-1f) ||
         !(khz_ref > -1.0e4f && khz_ref < 1.0e4f)) {  return; }
@@ -25883,55 +24577,17 @@ inline void kh_fill_haze(ConstantData& khz_cb) {
     khz_cb.fog_sky_col[3] = g_light_probe.nb[50] + g_light_probe.nb[53];
 }
 
-// KH_MESH_OWNER_PREPASS - REMOVED, and why.
-//
-// The map was a software stand-in for early-Z, which the hardware turns off on
-// the SV_Depth route: composite2's KH_ARB_DEPTH variant displaces a fragment
-// by up to KH_FAR_ARB_GUARD_BASE metres of view depth, so the LESS_EQUAL test
-// can no longer order two of our own meshes against each other.
-//
-// It was retired on measurements, not on argument, and the arguments that
-// looked strongest were wrong - recorded here so nobody re-runs them:
-//
-//  - PSOwner packed KhOwnerPack(i.pos.z, ...), the RASTERIZED depth, so the
-//    map never ordered arb depths at all. What it did was geometric occlusion
-//    culling among our own meshes, per sample - and KH_VIS_OCC already does
-//    that per object on the CPU for free. The map's only unique contribution
-//    was the PARTIALLY overlapping case, which is the small one: with meshes
-//    stacked in one spot KH_VIS_OCC removes the fully hidden majority.
-//  - the read side (KhOwnerRejects, one Texture2DMS.Load per sample) measured
-//    FREE: disabling it changed nothing.
-//  - skipping the two clears made the frame WORSE, because a full-surface
-//    clear is what leaves an MSAA target in its fast-cleared / compressed
-//    state; without it every write is read-modify-write on expanded samples.
-//  - the cost was the prepass RASTERIZATION into a surface that clones the
-//    engine DSV: 3840x2160 at 8x here, 530 MB of colour + depth writes per
-//    covering mesh per frame. Disabling that draw alone restored the framerate.
-//
-// The gate was also measuring the wrong thing. The prepass's cost scales with
-// COVERAGE and its benefit with OVERDRAW, but it armed on meshes.size() >= 2,
-// so two barely-overlapping meshes paid full price for almost no rejection.
-// If it is ever restored, arm it on measured overlap (kh_vis_occ_build already
-// rasterizes footprints into a 96x54 grid; counting multiply-covered cells is
-// nearly free), never on a count.
-//
-// Two repairs were costed and rejected. Conservative depth output restores
-// early-Z rejection only when it points AGAINST the depth function - with
-// LESS_EQUAL the hardware wants SV_DepthGreaterEqual, and this clamp only ever
-// pulls NEARER, which is SV_DepthLessEqual. And a coverage-qualified
-// single-sample map does not exist: SV_Coverage needs MSAA rasterization, and
-// ForcedSampleCount into a 1-sample target requires a NULL depth-stencil view
-// with the depth test off - but that depth test IS how the nearest object wins
-// the pixel.
-//
-// What is left behind: our meshes no longer skip shading where one partially
-// covers another (ordinary overdraw), and on far-arb frames a mesh whose clamp
-// pulled it further than its neighbour's can win a pixel it is geometrically
-// behind. That needs two meshes BOTH within KH_FAR_ARB_CONTACT_H (6 m) of the
-// terrain - the clamp ramps to zero above it - both behind the analytic
-// terrain at the shared pixel, and overlapping on screen. If it ever shows,
-// bounding the clamp so our own meshes cannot reorder each other is the
-// smaller change, and it should be designed against the repro.
+// No owner prepass: the KH_ARB_DEPTH variant writes SV_Depth, which disables
+// early-Z, so LESS_EQUAL cannot order two of our meshes against each other on
+// far-arb frames. A software depth prepass was tried and retired (its
+// rasterization into a clone of the MSAA engine DSV cost more than any overdraw
+// it saved; KH_VIS_OCC already culls the fully hidden majority). If ever
+// restored, arm it on measured overlap, never on a mesh count; conservative
+// depth output cannot help (the clamp pulls NEARER). What remains: ordinary
+// overdraw, and on far-arb frames a mesh whose clamp pulled it further than a
+// neighbour's can win a pixel it is behind (both within KH_FAR_ARB_CONTACT_H of
+// the terrain, both behind it, overlapping). If it shows, bound the clamp so
+// our meshes cannot reorder each other.
 inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
 
     // The carried take camera is per pass.
@@ -25951,12 +24607,11 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     static std::vector<uint32_t> khr_cand;   // KH_SCENE: grid pre-cull candidates.
     static std::vector<uint32_t> khr_elig;   // KH_SCENE: every eligible slot, pre-cull independent.
     khr_elig.clear();
-    // KH_SCENE: the eligible set is walked twice - once whole (veto, the
-    // "anything eligible at all" verdicts, the near-clearance minimum), once
-    // through the grid so the copies below are only of objects whose cell
-    // can meet this cycle's frustum. The whole-set verdicts keep their old
-    // meaning: an injection with every eligible mesh off-screen still lands
-    // (serial + stats), which is what the flush's stand-down keys on.
+    // The eligible set is walked twice - once whole (veto, the "anything
+    // eligible" verdicts, the near-clearance minimum), once through the grid so
+    // the copies below are only of objects whose cell can meet this cycle's
+    // frustum. An injection with every eligible mesh off-screen still lands
+    // (serial + stats), which the flush's stand-down keys on.
     uint32_t khr_elig_n = 0;
     bool     khc_any_caster = false;
     {
@@ -25982,8 +24637,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             bool expired = false;
             const float env = lifetime_envelope(o, snapshot_now, expired);
             if (expired) {  continue; }   // The Draw3D flush owns the erasure.
-            // Measure before extending the SV_Depth clamp to PSMain; do not
-            // Extend it speculatively: translucents never take the mid-frame slot.
+            // Translucents never take the mid-frame slot. Measure before
+            // extending the SV_Depth clamp to PSMain.
             if (!(o.blend_mode == 0 && o.color[3] * env >= 0.999f)) {  continue; }
             ++khr_elig_n;
             khr_elig.push_back(khsc_i);
@@ -26003,7 +24658,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     ID3D11Device* dev = RVExtBridge::get_d3d_device();
     if (!dev) {  return; }
     if (!kh_ensure_ok("injection resources", ensure_resources(dev))) {  return; }
-
 
     kh_dls_select();   // KH_DL_SHADOW twin 1/2 - ahead of the sun, never inside it.
     render_sun_depth(ctx);
@@ -26025,11 +24679,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             const float khlp_d2 = latch_cam_dist_sq(khlp_lc, khlp_vc);
 
             if (khlp_d2 > KH_LATCH_JUMP_M * KH_LATCH_JUMP_M) {
-                // Prefer the clear-time boundary sample - frame-
-                // setup-synchronous, the latch's own charter restored at speed.
-                // The mid-frame live fetch (~one frame ahead; the lognew9
-                // residual) remains only as the fallback for the rare cycle
-                // whose boundary fetch failed.
+                // Prefer the clear-time boundary sample
+                // (frame-setup-synchronous); the mid-frame live fetch (~one
+                // frame ahead) is only the fallback for a cycle whose boundary
+                // fetch failed.
                 if (g_boundary_pv_valid) {
                     memcpy(&pv.view[0][0], &g_boundary_pv.view[0][0], sizeof(pv.view));
                 } else {
@@ -26044,8 +24697,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             const float n_live  = (fabsf(m22_live)  > 1e-9f) ? (-m32_live  / m22_live)  : 0.0f;
 
             // On disagreement the latch is the suspect: on sky-heavy frames it
-            // belongs to a partition/aux pass whose huge near plane sliced the
-            // injected mesh (the look-up clip).
+            // belongs to a partition/aux pass whose huge near plane slices the
+            // injected mesh.
             if (fabsf(n_latch - n_live) > 1e-4f ||
                 (kh_enc_far(m22_latch, m32_latch) > KH_ENC_FAR_MAX &&
                  kh_enc_far(m22_live, m32_live) <= KH_ENC_FAR_MAX)) {
@@ -26054,11 +24707,9 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             }
 
             // The live fetch's scale terms are frame k+1's and the cycle
-            // latch's are frame k's; the seam has taken the live pair and this
-            // pass never has; so the footprint is rasterised at the zoom the
-            // engine's volume pass computes with while the visible box is
-            // rasterised at the previous frame's, and the two diverge radially
-            // by the whole per-frame FOV delta - up to 17.75 pct on these rows.
+            // latch's are frame k's; the seam has taken the live pair, so the
+            // footprint and the visible box must rasterise at the same zoom or
+            // they diverge radially by the per-frame FOV delta.
             const float khcf_lx = g_ro.cycle_pv.projection[0][0];
             const float khcf_ly = g_ro.cycle_pv.projection[1][1];
             const float khcf_sx = live.projection[0][0];
@@ -26098,15 +24749,12 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         float khav_age_ms = -1.0f;
             kh_adopt_frame_view(pv, &khav_path, &khav_age_ms);
 
-
         const bool khsv_fresh_ok = g_svs_seam_view_fresh;
         if (khsv_fresh_ok) {
             if (!g_svs_seam_view_valid) {
             } else if (g_svs_frame_seq < g_svs_seam_view_seq ||
                        g_svs_frame_seq - g_svs_seam_view_seq > KH_SEAM_VIEW_MAX_AGE) {
             } else {
-                // Default + 135 + 136 rebuild; 134/142 keep the whole-view copy
-                // in the else branch below.
                 const double khsr_c[3] = {
                     -((double)pv.view[3][0] * pv.view[0][0] +
                       (double)pv.view[3][1] * pv.view[0][1] +
@@ -26117,11 +24765,9 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                     -((double)pv.view[3][0] * pv.view[2][0] +
                       (double)pv.view[3][1] * pv.view[2][1] +
                       (double)pv.view[3][2] * pv.view[2][2]) };
-                // 135: adopt the basis, keep our camera. 136: keep our basis,
-                // adopt the seam camera. The rebuild below is shared - only
-                // which camera feeds it differs.
-                // The rebuild is where the offset came from. Two corrections,
-                // and neither has a tolerance to tune: (a) the honest inverse.
+                // Adopt the seam basis, keep our camera; the rebuild below is
+                // shared. Two corrections, neither with a tolerance to tune:
+                // (a) the honest inverse,
                 float khsr_rt_err = -1.0f;
                 double khsr_cx[3] = { khsr_c[0], khsr_c[1], khsr_c[2] };
                 bool khsr_cx_ok = false;
@@ -26176,14 +24822,11 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             }
         }
 
-        // And which one the composite read.
-
     }
 
     // The meshes then rasterize with the true dynamic near plane of the frame
     // being rendered - the one scalar the bridge can never pin down - and the
-    // guard reconstructs scene distance with the same truth, so its margins
-    // tighten from race-absorbing to precision-absorbing.
+    // guard reconstructs scene distance with the same truth.
     const bool measured = g_ro.engine_proj_valid;
 
     // State snapshot: injection decisions read the telltale once. The engine
@@ -26211,10 +24854,9 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     const bool khr_slot_sane_far = kh_enc_far(snap_slot_m22, snap_slot_m32) <= KH_ENC_FAR_MAX;
     bool khr_far_phase = false;   // Far pair is this phase's truth (set at the far-inject branch).
 
-
     if (snap_world_valid) {
-        // Parity by construction: this is the pair the world opaques we
-        // depth-test against last rendered under.
+        // Parity by construction: the pair the world opaques we depth-test
+        // against last rendered under.
         pv.projection[2][2] = snap_world_m22;
         pv.projection[3][2] = snap_world_m32;
     } else if (snap_slot_near > 0.0f && khr_slot_band && khr_slot_sane_far) {
@@ -26234,8 +24876,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     }
 
     // A following camera partition still gets its own injection via the
-    // partition-change re-arm ("an earlier far-partition draw is corrected by
-    // the nearer re-draw").
+    // partition-change re-arm.
     if (snap_slot_near > 0.0f && khr_bridge_near > 1e-4f &&
         khr_slot_sane_far &&   // celestial-class slots never arm the far phase.
         snap_slot_near > 1.5f * khr_bridge_near) {
@@ -26276,25 +24917,24 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
 
     if (khr_anomalous) {
         // Failure direction: an even-later partition erases it again - never a
-        // new artifact on healthy frames, which cannot satisfy (a) or (b).
+        // new artifact on healthy frames.
         if (!kh_rescue_window_open()) {
             g_ro.injected = false;
             g_ro.inject_attempts = 0;
             return;
         }
         // Rescue proceeds: khr_anomalous stays true, so the view-source
-        // supervisor quarantine below holds (safety paths are not training
-        // paths) and the end-of-draw bookkeeping counts this as a rescue, not
-        // an injection.
+        // supervisor quarantine below holds and the end-of-draw bookkeeping
+        // counts a rescue, not an injection.
     }
 
     const float inject_near = fabsf(pv.projection[2][2]) > 1e-9f
                             ? (-pv.projection[3][2] / pv.projection[2][2]) : -1.0f;
 
     // Deliberately below the far-phase and anomalous skip returns, so an
-    // aborted attempt can never re-publish over a real landing's pair - and
-    // re-published by any later proceeding attempt/repaint this frame, so the
-    // flush always carries with the last painter's encode.
+    // aborted attempt never re-publishes over a real landing's pair;
+    // re-published by any later proceeding attempt this frame, so the flush
+    // carries the last painter's encode.
     g_inj_enc_m22 = pv.projection[2][2];
     g_inj_enc_m32 = pv.projection[3][2];
     g_inj_enc_near = inject_near;
@@ -26309,18 +24949,15 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         khr_far_phase = true;
     }
 
-    // Accepted injections only. Rescue (anomalous) cycles are quarantined - a
-    // foreign pass's slot bindings are exactly the poison the CPU validation
-    // exists to keep out, and safety paths are not training paths.
+    // Accepted injections only. Rescue cycles are quarantined: a foreign pass's
+    // slot bindings are exactly the poison the CPU validation keeps out.
     if (!khr_anomalous) dynlights_acquire(ctx, pv.view);
 
     float view_proj[4][4];
     mul_4x4(pv.view, pv.projection, view_proj);
-    // Quarantine: never on anomalous cycles - those are exactly the moments
-    // this frame's pv is least trustworthy, and a supervisor taught by them
-    // mis-locks (world-sliding shadows). Supervise the view source: lock the
-    // upload location whose contents equal the proven view used for the meshes
-    // this frame. Safety paths are not training paths.
+    // Supervise the view source: lock the upload location whose contents equal
+    // the proven view used for the meshes this frame. Never on anomalous cycles
+    // - a supervisor taught by them mis-locks (world-sliding shadows).
     if (!khr_anomalous) {
         const float* truth = khav_latch_view;
         const uint32_t vcn = g_ls.vc_n < 16 ? g_ls.vc_n : 16;
@@ -26330,8 +24967,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
 
         if (!g_ls.view_src_valid && (vcn > 0 || khrb_ok)) {
             // Argmin, not first-passing: pick the closest candidate and report
-            // its error - zero-lock runs then tell us the true convention gap
-            // instead of guessing tolerances.
+            // its error.
             int best_i = -1, best_k = 0;
             float best_rot = 1e9f, best_tr = 1e9f;
 
@@ -26362,9 +24998,9 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 }
             }
 
-            // It is copied into ring slot 0 so every downstream consumer -
-            // convention classification, tmag gate, cold confirm, adoption -
-            // runs on the identical code path it always has.
+            // Copied into ring slot 0 so every downstream consumer (convention
+            // classification, tmag gate, cold confirm, adoption) runs on the
+            // identical code path.
             if (khrb_ok) {
                 float khrb_e = 0.0f;
                 float khrb_tr = 0.0f;
@@ -26395,9 +25031,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 }
             }
 
-            // Lock bar: the cold lock has no reference and accepts 0.05.
-            // RE-locks (a prior lock existed and was evicted, usually by
-            // fast-flight bridge lag) must beat 0.02.
+            // Lock bar: the cold lock has no reference and accepts 0.05;
+            // re-locks must beat 0.02.
             const float lock_bar = g_ls.view_locks == 0 ? 0.05f : 0.02f;
 
             const bool exact_lock = best_rot < 1e-3f;
@@ -26423,8 +25058,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
 
                 const bool relative = tmag < 10.0f;
 
-                // RE- locks keep the tighter 0.02 bar and adopt immediately (a
-                // lock dropped mid-flight must not wait an extra frame).
+                // Re-locks keep the tighter bar and adopt immediately (a lock
+                // dropped mid-flight must not wait an extra frame).
                 bool cold_confirmed = true;
 
                 if (g_ls.view_locks == 0) {
@@ -26493,8 +25128,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         cam[1] = g_comp_cam_take[1];
         cam[2] = g_comp_cam_take[2];
     } else if (kh_view_camera_exact(pv.view, cam)) {
-        // No take this frame (148, absent/stale seam view): still take the
-        // camera honestly rather than through the transpose.
+        // No take this frame: still take the camera honestly rather than
+        // through the transpose.
     } else {
         extract_camera_pos(pv.view, cam);
     }
@@ -26503,10 +25138,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     g_ls.cam[1] = cam[1];
     g_ls.cam[2] = cam[2];
 
-    // KH_SCENE: the grid pre-cull, against the view this pass will draw with
-    // (pv.view is final here; the seam take / boundary swaps above are in) and
-    // the same cam the precise test below (khr_cull) is built from. The copies
-    // into meshes are only of objects whose cell can meet that frustum; the
+    // The grid pre-cull, against the view this pass will draw with (pv.view is
+    // final here) and the same cam the precise test below is built from. The
     // eligibility predicate is the staging walk's, against the same
     // snapshot_now. An invalid cull set returns every cell.
     {
@@ -26529,10 +25162,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         }
     }
 
-    // KH_MESH_SORT, injection edition - the twin never wrote.
     // Translucent-correct ordering among our own meshes: back to front by the
-    // camera's distance to each object's world bounds (nearest point of the
-    // AABB).
+    // camera's distance to each object's world bounds.
     {   // KH_MESH_ORDER: key sort, same order, one distance per object.
         kh_mesh_order(meshes, cam);
     }
@@ -26542,10 +25173,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     kh_objbuf_bind(ctx);   // KH_OBJBUF: VS t39 for every bucket draw (restored with the backup).
 
     // The meshes' stored depth must be encoded through the same range the
-    // surrounding scene geometry used, or every comparison skews - the mesh
-    // beats opaque walls it sits behind, or loses to the skydome it sits in
-    // front of, worst for near fragments where a min-depth offset is a huge
-    // world-space error (hence flicker worsening close to the mesh).
+    // surrounding scene geometry used, or every comparison skews - worst for
+    // near fragments, where a min-depth offset is a huge world-space error.
     UINT n_saved_vp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
     D3D11_VIEWPORT saved_vp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
     ctx->RSGetViewports(&n_saved_vp, saved_vp);
@@ -26574,7 +25203,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     const bool guard = khs_snap_ok && kh_ensure_ok("composite shader", ensure_composite_shader(dev));
 
     // Fail-safe direction: heightfield or arb shader down => stock LESS_EQUAL
-    // path (the bite, never a new artifact).
+    // path (the known bite, never a new artifact).
     const bool khr_far_arb = khr_far_phase && g_thm_valid &&
                              kh_ensure_ok("composite shader", ensure_composite_shader(dev)) &&
                              g_res.ps_composite_arb != nullptr;
@@ -26608,9 +25237,9 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                               steady_now_ms() - g_far_keep_ms < 250 &&
                               khr_acc_far > 0.0f && khr_acc_far < 1.0e8f &&
                               g_far_keep_far > khr_acc_far * 1.05f;
-    // Fail direction: disarmed = the stock path, the known artifact, never a
-    // new one. Arms only with the arb shader compiled, a sane near, and a real
-    // sub-floor gap to open (MinDepth 0 has none).
+    // Fail direction: disarmed = the stock path. Arms only with the arb shader
+    // compiled, a sane near, and a real sub-floor gap to open (MinDepth 0 has
+    // none).
     const float khr_nz_A = pv.projection[2][2];
     const float khr_nz_B = pv.projection[3][2];
     const float khr_nz_near = (khr_nz_A > 1.0e-6f) ? (-khr_nz_B / khr_nz_A) : 0.0f;
@@ -26631,10 +25260,9 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     ctx->VSSetConstantBuffers(0, 2, khr_cbs);
     ctx->PSSetConstantBuffers(0, 2, khr_cbs);
     if (g_res.comp_depth_srv) ctx->PSSetShaderResources(0, 1, &g_res.comp_depth_srv);
-    // Bound together whenever any consumer is armed - the raw-mask paint (71),
-    // either sten paint (73/74) or the sten multiply (75) - because the ratio
-    // needs both textures and a half-bound pair is exactly the
-    // silent-wrong-answer shape this feature is built to avoid.
+    // Bound together whenever any consumer is armed: the ratio needs both
+    // textures, and a half-bound pair is the silent-wrong-answer shape this
+    // feature avoids.
     if (kh_svs_sten_on()) {
         if (g_svs_pre_srv) {
             ctx->PSSetShaderResources(21, 1, &g_svs_pre_srv);
@@ -26644,23 +25272,21 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             ctx->PSSetShaderResources(22, 1, &g_svs_post_srv);
         }
     }
-    // The volume copy'S two planes (t23/t24), on their own arm. Both slots are
-    // inside StateBackup's saved range. Twin: the flush
-    // path carries the identical block.
+    // The volume copy's two planes (t23/t24), on their own arm; both inside
+    // StateBackup's saved range. Twin: the flush carries the identical block.
     if (kh_svs_vol_ready()) {
         ID3D11ShaderResourceView* khr_vol[2] = { g_svs_vol_depth_srv, g_svs_vol_sten_srv };
         ctx->PSSetShaderResources(23, 2, khr_vol);
     }
-    // Null-safe: mirMeta.x = 0 short-circuits the shader, so an absent mask
-    // never reads a stale bind. KH_VOL_MIRROR: the mirror stencil at t28
-    // (inside StateBackup's saved range). Twin: the flush path carries
-    // the identical block (same convention as the t23/t24 pair directly above).
+    // The mirror stencil at t28 (inside StateBackup's saved range). mirMeta.x =
+    // 0 short-circuits the shader, so an absent mask never reads a stale bind.
+    // Twin: the flush carries the identical block.
     if (g_vmir_srv && g_vmir_mask_time >= 0.0f) {
         ctx->PSSetShaderResources(28, 1, &g_vmir_srv);
     }
-    // Shadow atlas for the per-pixel map compare (harmless when the table is
-    // empty: shadowMeta.x = 0 short-circuits the shader). Slot t1 is inside the
-    // StateBackup's saved SRV range.
+    // Shadow atlas for the per-pixel map compare (shadowMeta.x = 0
+    // short-circuits the shader when the table is empty). t1 is inside
+    // StateBackup's saved range.
     if (guard && shadow_live_ensure_srv()) ctx->PSSetShaderResources(1, 1, &g_ls.atlas_srv);
     for (UINT bslot = 0; bslot < 8; ++bslot) {
         if (g_ls.band[bslot].valid && g_ls.band[bslot].srv) {
@@ -26682,46 +25308,41 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     if (g_res.samp_pf) ctx->PSSetSamplers(1, 1, &g_res.samp_pf);
     // Analytic terrain heightfield (t10, saved range; see thmParams).
     if (g_thm_valid && g_res.thm_srv) ctx->PSSetShaderResources(10, 1, &g_res.thm_srv);
-    // KH_DL_SHADOW: the light depth array at t36, inside the saved range and
-    // bound by the pass that reads it (twin: the flush binds it the same way).
-    // Bound whenever it exists - per-light validity lives in dls_meta[i].w, not
-    // in whether the SRV is present, so an unbound slot would be a second way
-    // to say 'no shadow' and the two could disagree.
+    // The light depth array at t36, bound by the pass that reads it (twin: the
+    // flush). Bound whenever it exists - per-light validity lives in
+    // dls_meta[i].w, so an unbound slot would be a second way to say 'no
+    // shadow' and the two could disagree.
     if (g_res.dls_srv) {
         ctx->PSSetShaderResources(36, 1, &g_res.dls_srv);
     }
 
-    // The injection fills blendCtl.x = 0 unconditionally at its CB fill;
-    // PSComposite's blendCtl.x branch stays cold by construction. The engine's
-    // translucents must be able to depth-reject against these meshes.
+    // The injection fills blendCtl.x = 0 unconditionally; PSComposite's
+    // blendCtl.x branch stays cold. The engine's translucents must be able to
+    // depth-reject against these meshes.
 
-    // LESS_EQUAL + write for both arms. The honest raw-space test is the object
-    // authority again (months-stable); the arb variant beats terrain LOD via
-    // its SV_Depth clamp, not always.
+    // LESS_EQUAL + write for both arms: the honest raw-space test is the object
+    // authority; the arb variant beats terrain LOD via its SV_Depth clamp.
     ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);
-    ctx->RSSetState(kh_rs_pick(g_res.rasterizer));
+    ctx->RSSetState(g_res.rasterizer);
     ID3D11RasterizerState* khr_bound_rs = g_res.rasterizer;
     int khr_bound_bm = -1;
     const FLOAT bf[4] = { 0, 0, 0, 0 };
 
-    // CB split - per-pass frame build (injection edition). Each object starts from
-    // this template; the frame region rides along for the CPU-side echoes, but only
-    // the object slice uploads per draw. Deliberate twin of the flush build
-    // (khf_cbf): same band-table loop, but this copy interleaves the g_band_tab_*
-    // publication and the sun-range publication. A shared helper
-    // would need a mode flag and eight out-params.
+    // Per-pass frame build (injection edition). Each object starts from this
+    // template; only the object slice uploads per draw. Deliberate twin of the
+    // flush build (khf_cbf); this copy also interleaves the g_band_tab_* and
+    // sun-range publications.
     ConstantData khr_cbf = {};
     memcpy(khr_cbf.view_proj, view_proj, sizeof(khr_cbf.view_proj));
 
-    // cam here is deliberately not always pv.view's own camera - it may be the
-    // seam's take or the share - and the fold cancels against
-    // kh_fill_center_rel for any origin.
+    // cam is deliberately not always pv.view's own camera (it may be the seam's
+    // take), and the fold cancels against kh_fill_center_rel for any origin.
     const bool khr_rebase_on = khcs_engcam
                              ? kh_rebase_vp_engcam(khr_cbf, pv.view, pv.projection)
                              : kh_rebase_vp_exact(khr_cbf, pv.view, pv.projection, cam);
     fill_lighting_frame_cb(khr_cbf);
-    // KH_SNAP_REPROJECT frame fields (arb PS consumer; every other pass ignores
-    // them).
+    // Snapshot reprojection frame fields (arb PS consumer; every other pass
+    // ignores them).
     if (g_snap_vp_valid && khr_far_arb) {
         memcpy(khr_cbf.snap_vp, g_snap_vp, sizeof(khr_cbf.snap_vp));
         khr_cbf.snap_meta[0] = g_snap_pair[0];
@@ -26731,17 +25352,16 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         khr_cbf.snap_cam[0] = g_snap_cam[0];
         khr_cbf.snap_cam[1] = g_snap_cam[1];
         khr_cbf.snap_cam[2] = g_snap_cam[2];
-        // 333 = 0.25 m margin.
         khr_cbf.snap_cam[3] = 1.0f;
     } else {
         khr_cbf.snap_cam[3] = 0.0f;   // The zeroed template already says so; explicit.
     }
     {
         bool band_any = false;
-        // finest-first: order slots by near edge ascending, so the shader's
+        // Finest-first: order slots by near edge ascending, so the shader's
         // first containing band holds the finest content in the engine's
-        // overlap (crossfade) zones. bandBorder.w encodes valid + which
-        // physical texture slot to sample (1 + index).
+        // overlap zones. bandBorder.w encodes valid + which physical texture
+        // slot to sample (1 + index).
         int order[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
 
         for (int a = 0; a < 7; ++a) {
@@ -26776,14 +25396,13 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
 
             if (!kh_recv_health()) { continue; }
 
-            // Absent beats offset; the band re-enters the moment its seal
-            // completes. spawn-window guard: a pending band whose provisional
-            // view is the bridge fallback pairs cross-convention - the
-            // initial-shadow drift.
+            // Spawn-window guard: a pending band whose provisional view is the
+            // bridge fallback pairs cross-convention; the band re-enters the
+            // moment its seal completes.
             if (bs.pending_view && bs.vcol_bridge) {  continue; }
 
             // A pending band's vcol belongs to the epoch before the sm sitting
-            // next to it - the completion that pairs them has not run yet.
+            // next to it.
             if (bs.pending_view) {
                 continue;
             }
@@ -26791,7 +25410,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             // Twin dedupe: near inside the previous band's range and far not
             // meaningfully beyond it = a partition duplicate of the same range;
             // two twins alternate seal content and the shader's winner
-            // flip-flops (the range flicker).
+            // flip-flops.
             if (!(bs.border[1] > bs.border[0]) || bs.border[0] < 0.0f ||
                 bs.border[1] > 4000.0f) {
                 g_ls.band[order[b]].valid = false;   // The next resolve reseals sanely.
@@ -26800,11 +25419,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
 
             if (bs.border[0] < prev_far - 0.5f && bs.border[1] < prev_far * 1.25f + 1.0f) { continue; }
             prev_far = bs.border[1];
-            // The shader's own rule, replayed on the CPU for the caster centre:
-            // finest-first, first slot whose view-z straddles the point and
-            // whose uv/z land in bounds. Pure observation, once per consumed
-            // slot, and it stops at the first winner exactly as the shader
-            // does.
             memcpy(khr_cbf.band_mat[b * 3 + 0], bs.sm + 0, 16);
             memcpy(khr_cbf.band_mat[b * 3 + 1], bs.sm + 4, 16);
             memcpy(khr_cbf.band_mat[b * 3 + 2], bs.sm + 8, 16);
@@ -26816,8 +25430,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             khr_cbf.band_border[b][2] = bs.border[2];
             khr_cbf.band_border[b][3] = 1.0f + static_cast<float>(order[b]);
             band_any = true;
-            // Pure read per committed slot, in the shader's own consumption
-            // order.
+            // Pure read per committed slot, in the shader's consumption order.
             if (b >= 0 && b < 8) g_band_tab_far[b] = bs.border[1];
         }
 
@@ -26839,93 +25452,13 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             (g_atlas_frame_cur || g_atlas_frame_prev)) {   // Published sun + live atlas.
             khr_cbf.mask_meta[0] = 1.0f;   // Stream liveness: the receive.
         }
-        if (band_any && g_ls.atlas_size > 0) {
-            float khud_p[3] = { 0.0f, 0.0f, 0.0f };
-            float khud_n0 = 0.0f;   // Sealed |sm row0|^2 (atlas-uv/m)^2.
-            int   khud_slot = -1;
-            for (int khud_b = 0; khud_b < 8 && khud_slot < 0; ++khud_b) {
-                const auto& khud_bs = g_ls.band[order[khud_b]];
-                if (!khud_bs.valid || !khud_bs.srv || khud_bs.vcol_bridge) continue;
-                if (!(khud_bs.border[1] > khud_bs.border[0])) continue;
-                bool  khud_ok = true;
-                float khud_c[3] = { 0.0f, 0.0f, 0.0f };
-                for (int khud_j = 0; khud_j < 3; ++khud_j) {
-                    const float* khud_v = &khud_bs.vcol[khud_j * 4];
-                    const float khud_n = sqrtf(khud_v[0] * khud_v[0] +
-                                               khud_v[1] * khud_v[1] +
-                                               khud_v[2] * khud_v[2]);
-                    if (!(khud_n > 0.9f && khud_n < 1.1f)) { khud_ok = false; break; }
-                    khud_c[0] -= khud_v[3] * khud_v[0];
-                    khud_c[1] -= khud_v[3] * khud_v[1];
-                    khud_c[2] -= khud_v[3] * khud_v[2];
-                }
-                if (!khud_ok) continue;
-                const float khud_mid = 0.5f * (khud_bs.border[0] + khud_bs.border[1]);
-                for (int khud_r = 0; khud_r < 3; ++khud_r) {
-                    khud_p[khud_r] = khud_c[khud_r] + khud_mid * khud_bs.vcol[8 + khud_r];
-                }
-                float khud_vx = 0.0f, khud_vy = 0.0f, khud_vz = 0.0f;
-                for (int khud_r = 0; khud_r < 3; ++khud_r) {
-                    const float khud_w = khud_p[khud_r];
-                    khud_vx += khud_w * khud_bs.vcol[0 + khud_r];
-                    khud_vy += khud_w * khud_bs.vcol[4 + khud_r];
-                    khud_vz += khud_w * khud_bs.vcol[8 + khud_r];
-                }
-                khud_vx += khud_bs.vcol[3]; khud_vy += khud_bs.vcol[7]; khud_vz += khud_bs.vcol[11];
-                if (!(khud_vz >= khud_bs.border[0] && khud_vz < khud_bs.border[1])) continue;
-                const float khud_u = khud_vx * khud_bs.sm[0] + khud_vy * khud_bs.sm[1] +
-                                     khud_vz * khud_bs.sm[2] + khud_bs.sm[3];
-                const float khud_v = khud_vx * khud_bs.sm[4] + khud_vy * khud_bs.sm[5] +
-                                     khud_vz * khud_bs.sm[6] + khud_bs.sm[7];
-                const float khud_z = khud_vx * khud_bs.sm[8] + khud_vy * khud_bs.sm[9] +
-                                     khud_vz * khud_bs.sm[10] + khud_bs.sm[11];
-                if (khud_u > 0.001f && khud_u < 0.999f && khud_v > 0.001f &&
-                    khud_v < 0.999f && khud_z > 0.001f && khud_z < 0.999f) {
-                    const float khud_q = khud_bs.sm[0] * khud_bs.sm[0] +
-                                         khud_bs.sm[1] * khud_bs.sm[1] +
-                                         khud_bs.sm[2] * khud_bs.sm[2];
-                    if (khud_q > 1.0e-18f) {
-                        khud_slot = order[khud_b];
-                        khud_n0 = khud_q;
-                    }
-                }
-            }
-            if (khud_slot >= 0) {
-                uint64_t khud_best = 0;
-                for (uint32_t khud_i = 0; khud_i < g_ls.count; ++khud_i) {
-                    const LiveShadowEntry& khud_e = g_ls.entries[khud_i];
-                    if (khud_e.stamp <= khud_best) continue;
-                    const float khud_ew = khud_e.tile[2] - khud_e.tile[0];
-                    const float khud_eh = khud_e.tile[3] - khud_e.tile[1];
-                    if (!(khud_ew > 1.0e-6f && khud_eh > 1.0e-6f)) continue;
-                    const float khud_m0 = khud_e.m[0] * khud_e.m[0] +
-                                          khud_e.m[1] * khud_e.m[1] +
-                                          khud_e.m[2] * khud_e.m[2];
-                    if (fabsf(khud_m0 - khud_n0) > 0.2f * khud_n0) continue;
-                    float khud_uu = khud_e.m[3], khud_vv = khud_e.m[7];
-                    for (int khud_r = 0; khud_r < 3; ++khud_r) {
-                        const float khud_rel = khud_p[khud_r] - khud_e.cam[khud_r];
-                        khud_uu += khud_e.m[0 + khud_r] * khud_rel;
-                        khud_vv += khud_e.m[4 + khud_r] * khud_rel;
-                    }
-                    if (!(khud_uu == khud_uu && khud_vv == khud_vv)) continue;
-                    // Sanity: within two tile-widths of the entry's own rect.
-                    if (khud_uu < khud_e.tile[0] - 2.0f * khud_ew ||
-                        khud_uu > khud_e.tile[2] + 2.0f * khud_ew ||
-                        khud_vv < khud_e.tile[1] - 2.0f * khud_eh ||
-                        khud_vv > khud_e.tile[3] + 2.0f * khud_eh) continue;
-                    khud_best = khud_e.stamp;
-                }
-            }
-        }
         khr_cbf.mask_meta[3] = kh_svs_unit_on() ? 1.0f : 0.0f;
         // The engine-view arm for the visible mesh.
         kh_fill_sten_proj(khr_cbf, pv.projection);
         kh_fill_sten_reproj(khr_cbf);
 
-        // engine-mask depth-gated receive: registration-exact shadows (units,
-        // clouds, everything the engine resolves) on mesh surfaces within the
-        // depth margin of world geometry.
+        // Engine-mask depth-gated receive: registration-exact engine shadows on
+        // mesh surfaces within the depth margin of world geometry.
 
         const float khr_cam_y =
             (g_ls.cam[0] * g_ls.cam[0] + g_ls.cam[1] * g_ls.cam[1] +
@@ -26933,13 +25466,11 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
           : (cam[0] * cam[0] + cam[1] * cam[1] + cam[2] * cam[2] >= 1.0f)
              ? cam[1] : 0.0f;
         // The altitude the fog block ships: clamped at the layer, never below
-        // it. The true camera altitude ships on the default path because the
-        // branch needs it to split the ray at the layer; clamping it would
-        // erase the very quantity the split consumes.
+        // it. The true camera altitude ships on the default path because that
+        // branch splits the ray at the layer.
         const float khr_fog_cam_y = khr_cam_y;
-        // fogBelow: x = the engine's below-layer extinction (block nb[51],
-        // cb5[12].w in the export - captured, read for the first time here), y
-        // = armed, z = the 324 clamp selector.
+        // fogBelow: x = the engine's below-layer extinction (block nb[51]), y =
+        // armed, z = the clamp selector.
         khr_cbf.fog_below[0] = (g_light_probe.hits > 0) ? g_light_probe.nb[51] : 0.0f;
         khr_cbf.fog_below[1] = 1.0f;
         khr_cbf.fog_below[2] = 0.0f;
@@ -26953,10 +25484,9 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             khr_cbf.fog_params[2] = g_fog[2];
             khr_cbf.fog_params[3] = khr_fog_on ? 1.0f : 0.0f;
 
-            // Fog decoupled from the block lock (settings- independence), so a
-            // degenerate staged decay (setFog with decay 0 can never anchor the
-            // probe) or the pre-lock cold window left the mesh unfogged in a
-            // fogged world - a mismatch, not a delay.
+            // Fog is decoupled from the block lock, so a degenerate staged
+            // decay or the pre-lock cold window does not leave the mesh
+            // unfogged in a fogged world.
             if (g_light_probe.hits > 0 && g_light_probe.meta == 40) {
                 const float* e = g_light_probe.nb + 36;
 
@@ -26997,10 +25527,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 khr_cbf.fog_sky_col[0] = g_sky_probe.nb[4];
                 khr_cbf.fog_sky_col[1] = g_sky_probe.nb[5];
                 khr_cbf.fog_sky_col[2] = g_sky_probe.nb[6];
-                // KH_FOG_UW_TARGET: the below-layer convergence colour.
-                // nb[28.30] = cb0[7] (the sky fog colour the export's r3
-                // builds), nb[68.70] = cb0[17] (its elevation gradient). Both
-                // are pure captures - no arithmetic, no choice - and they are
+                // The below-layer convergence colour: nb[28..30] = the sky fog
+                // colour, nb[68..70] = its elevation gradient. Pure captures,
                 // inert unless the shader is below the layer.
                 khr_cbf.fog_uw[0] = g_sky_probe.nb[28];
                 khr_cbf.fog_uw[1] = g_sky_probe.nb[29];
@@ -27015,7 +25543,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 g_fog_uw_col[2] = khr_cbf.fog_uw[2];
             }
 
-
             // Camera altitude (engine Y-up), clamped at the fog layer.
             khr_cbf.fog_color[3] = khr_fog_cam_y;
         }
@@ -27023,14 +25550,14 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // Heightfield lanes, both arms - the terrain lane never depends on the
     // depth lane's arming state.
     kh_fill_occ(khr_cbf);
-    // Far-keep-cold passes leave the zeroed template: veto dark.
-    uint32_t khr_fk_count = 0;   // c8 lane: routed draws this injection.
     uint64_t khr_fk_slot_seq[8] = {};
+    // A far-keep-cold pass leaves the zeroed template: fkVetoMeta.x = 0 = veto
+    // dark.
     if (khr_fk_fresh) {
         kh_fill_fk_veto(khr_cbf, khr_veto_cands, cam, khr_acc_far, khr_fk_slot_seq);
     }
-    // KH_OBJBUF pass lanes: the rebase camera the bucket VS subtracts (armed
-    // exactly when the per-object path arms centerRel) and the farVis-off cut.
+    // Pass lanes: the rebase camera the bucket VS subtracts (armed exactly when
+    // the per-object path arms centerRel) and the farVis-off cut.
     khr_cbf.kh_pass[0] = cam[0]; khr_cbf.kh_pass[1] = cam[1]; khr_cbf.kh_pass[2] = cam[2];
     khr_cbf.kh_pass[3] = khr_rebase_on ? 1.0f : 0.0f;
     khr_cbf.kh_pass_obj[0] = g_obj_vis.load(std::memory_order_relaxed);
@@ -27041,12 +25568,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         g_pip.tpl_cycle = g_topo_cycles;
     }
 
-    // KH_MESH_LOD: publish the pass's pixels-per-tangent here too. It was
-    // written in exactly one place - flush_locked - so on any frame the
-    // injection drew the meshes and the flush did not reach that line,
-    // g_lod_proj_px stayed 0, kh_lod_pick's guard returned immediately, and
-    // every object drew at level 0 regardless of distance. Same formula and the
-    // same viewport height the injection sets below.
+    // Publish the pass's pixels-per-tangent here too: on a frame the injection
+    // draws and the flush never reaches its own publish, g_lod_proj_px would
+    // stay 0 and every object would draw at level 0. Same formula, same
+    // viewport height as below.
     {
         const float khr_lod_h = static_cast<float>(g_main_depth_h);
         if (khr_lod_h > 0.0f && pv.projection[1][1] > 0.0f) {
@@ -27058,9 +25583,9 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     kh_cull_build(khr_cbf.view_proj, cam, khr_cull);
     khr_cull.back_on = true;   // KH_CULL_BACK: the colour pass never draws what is behind the
                                // Camera.
-    // per-mesh route verdicts (far-keep, near-z gap), factored out of the loop
-    // so the bucket plan keys every member through the same code the
-    // representative is judged by (KH_BUCKETS: route is part of the key).
+    // Per-mesh route verdicts (far-keep, near-z gap), factored out so the
+    // bucket plan keys every member through the same code the representative is
+    // judged by (route is part of the key).
     struct KhInjRoute { bool farkeep; bool nearz; float fk_edge; };
     auto khr_route_of = [&](const RenderObject& khrv_o) -> KhInjRoute {
         KhInjRoute khrv_r;
@@ -27073,46 +25598,34 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         khrv_r.farkeep = khr_fk_fresh && (khrv_o.far_vis || khr_fk_inside) &&
             kh_mesh_dist_sq(khrv_o, cam) > khrv_r.fk_edge * khrv_r.fk_edge;
         // For z >= near the encode equals the world mapping, so routing on/off
-        // Never pops. farkeep excluded: disjoint by construction (beyond-far vs
-        // inside-near), and precedence keeps depthParams coherent.
+        // never pops. farkeep excluded: disjoint by construction, and
+        // precedence keeps depthParams coherent.
         khrv_r.nearz = khr_nz_on && !khrv_r.farkeep &&
             kh_mesh_dist_sq(khrv_o, cam) <
                 (khr_nz_near + 2.0f) * (khr_nz_near + 2.0f);
         return khrv_r;
     };
-    // KH_BUCKETS, injection edition: the pass verdict, the plan + emission
-    // (natural order - this loop has no sort) and the slot-1 bind latch. Twin
-    // at the flush.
-    // 1.91: this pass routes buckets through the composite instanced twins
-    // (guard / arb / far-keep / near-gap - per object, so no pass-level subset
-    // is safe), and those compile non-fatally in ensure_composite_shader. A
-    // missing twin would strand a bucket's members: the emission marks every
-    // member done, the representative falls back to its per-object draw, and
-    // the rest draw nowhere. Absent either twin, the whole pass draws per
-    // object. The flush's gate stays kh_inst_twins_on(): it binds only the
-    // static twins, which ensure_resources creates all-or-nothing.
+    // Buckets, injection edition: the pass verdict, the plan + emission
+    // (natural order) and the slot-1 bind latch. This pass routes buckets
+    // through the composite instanced twins, which compile non-fatally; absent
+    // either twin the whole pass draws per object (a missing twin would strand
+    // a bucket's members). The flush's gate stays kh_inst_twins_on(): the
+    // static twins are all-or-nothing.
     const bool khr_inst_on = kh_inst_twins_on() &&
                              g_res.vs_comp_inst != nullptr && g_res.vs_comp_inst_tex != nullptr;
     static KhInstPlan khr_inst_plan;
     bool khr_inst_vb_bound = false;
-    // KH_TEX_ASYNC: finished background loads land here, before any base is
-    // fixed or lane written (a placement bumps the page generation and the
-    // ensure below re-fixes every base).
+    // Finished background loads land here, before any base is fixed or lane
+    // written (a placement bumps the page generation and the ensure below
+    // re-fixes every base).
     kh_tex_async_pump(ctx, dev);
-    // KH_VIS_OCC, injection edition: this pass depth-writes every solid by
-    // contract (the dss bind above), so an object hidden behind opaque
-    // in-pass boxes provably contributed zero pixels - culling it is
-    // output-identical. SV_Depth routes are excluded on both sides (their
-    // written depth is not their geometric depth), and on far-arb frames the
-    // terrain clamp may pull any fragment up to the guard nearer, so the
-    // test carries that as a margin. The clamp's cap is metres of VIEW DEPTH
-    // (khaD, from i.pos.w) while the grid compares EUCLIDEAN camera
-    // distances, and on a ray theta off the view axis one view-depth metre
-    // is 1/cos(theta) Euclidean metres - so the margin carries the
-    // frustum-corner secant, sqrt(1 + tan^2(fovx/2) + tan^2(fovy/2)), read
-    // from the same projection khr_cbf.view_proj was built from (rebasing
-    // moves translation only). A projection whose scales cannot be read
-    // cannot bound the secant and reads as 'never cull' (1.172).
+    // Occlusion cull, injection edition: this pass depth-writes every solid, so
+    // a hidden object provably contributed zero pixels. SV_Depth routes are
+    // excluded on both sides; on far-arb frames the terrain clamp may pull any
+    // fragment up to the guard nearer, so that is a margin. The cap is metres
+    // of VIEW DEPTH while the grid compares EUCLIDEAN distances, so the margin
+    // carries the frustum-corner secant sqrt(1 + tan^2(fovx/2) + tan^2(fovy/2))
+    // from the pass projection; unreadable scales read as 'never cull'.
     float khr_occ_margin = 0.0f;
     if (khr_far_arb) {
         const float khr_opx = fabsf(pv.projection[0][0]);
@@ -27134,12 +25647,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                          const KhInjRoute khvs_r = khr_route_of(khvs_o);
                          return khvs_r.farkeep || khvs_r.nearz || kh_voc_buried(khvs_o);
                      });
-    // The pass's one visibility truth: the material ensure, the plan's emit
-    // and the per-object loop all call this same lambda, so a bucket's
-    // representative can never be admitted by one test and dropped by
-    // another (the emit/loop twin contract), and every emitted lane's set
-    // was ensured.
-    // KH_VIS_MEMO: the verdict, computed at most once per object per pass.
+    // The pass's one visibility truth: the material ensure, the plan's emit and
+    // the per-object loop all call this same lambda, so a bucket's
+    // representative can never be admitted by one test and dropped by another,
+    // and every emitted lane's set was ensured. Memoised per object per pass.
     g_vis_memo_inj.begin(meshes);
     auto khr_vis_calc = [&](const RenderObject& khrv_o) -> bool {
         float khrv_cc[3];
@@ -27167,8 +25678,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                                }
                                khrp_k.aux = kh_dl_bucket_hash(khrp_o);
                            });
-        // KH_BUCKETS: the cull walk, once, against the pass's own frustum; the
-        // whole stream lands in the ring here.
+        // The cull walk, once, against the pass's own frustum; the whole stream
+        // lands in the ring here.
         kh_inst_plan_emit(ctx, dev, khr_inst_plan, meshes, cam, 1, khr_vis);
     }
     // KH_BLEND_PART_INJ - the translucent part draws where the solid draws.
@@ -27188,21 +25699,19 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         float dist2;
     };
     static std::vector<KhInjPart> khr_parts;
-    static std::vector<uint32_t> khr_parts_order;   // The far-to-near order, sorted by index (a
-                                                    // std::stable_sort on the records themselves
-                                                    // wants an aligned_storage temporary and MSVC
-                                                    // refuses the extended alignment; the records
-                                                    // never move).
+    // The far-to-near order, sorted by index (a stable_sort on the records
+    // themselves wants an aligned_storage temporary MSVC refuses; the records
+    // never move).
+    static std::vector<uint32_t> khr_parts_order;
     khr_parts.clear();
-    // KH_MESH_TIMER, injection edition. Harvest first - a slot armed by an
-    // earlier injection is read before this one arms another - then bracket the
-    // draw loop. render-thread ring, touched nowhere else; the flush's own ring
-    // is a separate object for exactly that reason.
+    // Timer, injection edition: harvest first (a slot armed by an earlier
+    // injection is read before this one arms another), then bracket the draw
+    // loop. Render-thread ring; the flush's ring is a separate object.
 
     for (size_t khr_oi = 0; khr_oi < meshes.size(); ++khr_oi) {
         const RenderObject& o = meshes[khr_oi];
-        // KH_BUCKETS: carried by its bucket's draw at the representative, or
-        // culled by the emission's walk (only the representative stays undone).
+        // Carried by its bucket's draw at the representative, or culled by the
+        // emission's walk (only the representative stays undone).
         if (khr_inst_on && khr_inst_plan.done[khr_oi]) continue;
         ConstantData cbd = khr_cbf;
         cbd.fx_meta[2] = static_cast<float>(g_main_depth_w);
@@ -27210,8 +25719,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         cbd.center_size[0] = o.pos[0];
         cbd.center_size[1] = o.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y].
         cbd.center_size[2] = o.pos[1];
-        // FP32 jitter rebase: per-object arm mirrors the pass verdict (see
-        // kh_rebase_vp - one without the other is the wrong-space landmine).
+        // Per-object rebase arm mirrors the pass verdict (one without the other
+        // is the wrong-space landmine).
         if (khr_rebase_on) kh_fill_center_rel(cbd, cam);
         cbd.size_axes[0] = o.size[0];   // SQF [x,y,z] sizes -> engine [x,z,y].
         cbd.size_axes[1] = o.size[2];
@@ -27221,14 +25730,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         // blendCtl.x: never on this pass (see the pass head).
         cbd.blend_ctl[0] = 0.0f;
         cbd.blend_ctl[1] = 150.0f;   // background-trust range (m); see the shader note.
-        // blend_ctl[2]/[3] were unread by every shader, so this spends a lane
-        // rather than changing the CB layout. KH_FARVIS_NO_VDIST: blend_ctl[2]
-        // is the farVis flag the fog block reads as blendCtl.z.
-        cbd.blend_ctl[2] = o.far_vis ? 1.0f : 0.0f;
-        // Written here so the lane is never inherited from the previous
-        // object's fade - the draw loop arms it per level and clears it again
-        // on the way out. KH_MESH_LOD: blend_ctl[3] is the crossfade dither and
-        // off is zero.
+        // blend_ctl[3] is the crossfade dither; written here so it is never
+        // inherited from the previous object's fade.
         cbd.blend_ctl[3] = 0.0f;
         memcpy(cbd.color, o.color, sizeof(cbd.color));
         // The camera (engine space) serves both the guard's true fragment
@@ -27240,10 +25743,9 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         const KhInjRoute khr_rt = khr_route_of(o);
         const bool khr_mesh_farkeep = khr_rt.farkeep;
         const bool khr_mesh_nearz = khr_rt.nearz;
-        // KH_TEXTURED routing: a material-carrying solid takes the textured
-        // twin of exactly the variant this draw would have used (plain / guard
-        // / arb+farkeep) - the guard, far contract and SV_Depth machinery ride
-        // along by the same-source-one-define contract.
+        // Textured routing: a material-carrying solid takes the textured twin
+        // of exactly the variant this draw would have used (plain / guard /
+        // arb+farkeep).
         const KhMaterialSet* khr_txm = kh_obj_textured(o);
         const bool khr_tx_arb = khr_far_arb || khr_mesh_farkeep || khr_mesh_nearz;
         const bool khr_comp_vs = guard || khr_far_arb || khr_mesh_farkeep || khr_mesh_nearz;
@@ -27279,7 +25781,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 khr_bound_il = khr_want_il;
             }
         }
-        if (khr_mesh_farkeep) {  ++khr_fk_count; }   // c8: + frame lane.
         // Band / local-volume mask inputs (same conversion as the flush).
         kh_fill_local_band_cb(cbd, o);
         fill_lighting_obj_cb(cbd, o);
@@ -27297,9 +25798,9 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             // The classic tiers return only as the no-heightfield terrain
             // backstop.
             if (khr_far_arb) {
-                // fxParams1.zw carry the analytic depth clamp instead - offset
-                // cap (the LOD margin) + the contact-band height its ramp
-                // closes over; thm owns terrain in the same shader pass.
+                // fxParams1.zw carry the analytic depth clamp: offset cap (the
+                // LOD margin) + the contact-band height its ramp closes over;
+                // thm owns terrain in the same pass.
                 cbd.fx1[0] = 1e9f;
                 cbd.fx1[1] = 0.0f;
                 cbd.fx1[2] = KH_FAR_ARB_GUARD_BASE;
@@ -27311,12 +25812,12 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 cbd.fx1[0] = exact_encode ? KH_COMPOSITE_GUARD_BASE_MEASURED : KH_COMPOSITE_GUARD_BASE;
                 cbd.fx1[1] = exact_encode ? KH_COMPOSITE_GUARD_REL_MEASURED : KH_COMPOSITE_GUARD_REL;
             }
-            // per-mesh far-keep override (pass constants at the PS bind; after
-            // every standard fill so it wins): the far keep's pair for the
-            // encode, guard dormant, arb clamp lanes armed - the arb PS writes
-            // SV_Depth from exactly these.
+            // Per-mesh far-keep override (after every standard fill so it
+            // wins): the far keep's pair for the encode, guard dormant, arb
+            // clamp lanes armed - the arb PS writes SV_Depth from exactly
+            // these.
             if (khr_mesh_farkeep) {
-                // far-keep split: the frame pair rides along so in-far
+                // Far-keep split: the frame pair rides along so in-far
                 // fragments stay engine-exact; the keep pair owns only the
                 // beyond-far side.
                 cbd.kh_far_split[0] = cbd.depth_params[0];
@@ -27347,34 +25848,26 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             g_inj_dp[3] = cbd.depth_params[3];
             g_inj_dp_valid = true;
         } else {
-            // No depth copy this frame: the plain-pipeline fallback PS now
-            // carries the same guard contract, so stand it down explicitly -
-            // zero margins with invalid depth is the invisible-geometry
-            // landmine.
+            // No depth copy this frame: the fallback PS carries the same guard
+            // contract, so stand it down explicitly - zero margins with invalid
+            // depth is the invisible-geometry landmine.
             cbd.fx1[0] = 1e9f;
         }
         // A failed pass-level frame upload stands every draw down - fail dark,
-        // never stale-frame draws. CB split: object slice only (the frame slice
-        // went up before the loop).
+        // never stale-frame draws. Object slice only (the frame slice went up
+        // before the loop).
         if (!o.fullscreen) {
-            // KH_MESH_CULL + KH_VIS_OCC: the same khr_vis the plan's emit ran,
-            // so a bucket representative that was emitted always draws here.
+            // The same khr_vis the plan's emit ran, so a bucket representative
+            // that was emitted always draws here.
             if (!khr_vis(o)) {  continue; }
         }
 
-        // KH_MESH_OWNER_PREPASS is removed on both sides now (the HLSL owner
-        // test went in the cleanup campaign); these two lanes are kept zero
-        // for the layout and nothing reads them. iobj1.x is 0 on both vertex
-        // paths for the same reason.
-        cbd.shadow_meta2[2] = 0.0f;
-        cbd.shadow_meta2[3] = 0.0f;
         if (!khr_frame_ok || !kh_upload_obj_cb(ctx, g_res.composite_cb, cbd)) continue;
-        // The flat CULL_BACK force cured the smear but erased twoSided
-        // semantics on arb frames (interior faces never drew, and at the
-        // chronic pose nearly every frame is an arb frame).
+        // twoSided semantics must survive arb frames: a flat CULL_BACK force
+        // erases interior faces there.
         const bool khr_cam_outside = mesh_id_clamp(o.mesh) == 0 && ((kh_mesh_obb_dist_sq(o, cam) > 0.01f));
-        // Any shader kind (scene-read effect 2 included: it alpha-lerps on
-        // normal blend just like PSMain).
+        // Any shader kind (a scene-read effect alpha-lerps on normal blend just
+        // like PSMain).
         const bool khr_ts_ordered = o.two_sided &&
                                     o.blend_mode == 0 && o.color[3] < 0.999f &&
                                     g_res.rasterizer_front != nullptr;
@@ -27383,7 +25876,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             (o.two_sided && !khr_cam_outside)  ? g_res.rasterizer : g_res.rasterizer_cull;
 
         if (khr_want_rs != khr_bound_rs) {
-            ctx->RSSetState(kh_rs_pick(khr_want_rs));
+            ctx->RSSetState(khr_want_rs);
             khr_bound_rs = khr_want_rs;
         }
 
@@ -27405,28 +25898,22 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             khr_bound_bm = o.blend_mode;
         }
 
-        // KH_MESH_LOD, injection edition. A frame with no flush behind it
-        // therefore selects level 0 for everything rather than guessing a
-        // projection scale, which is the same fail-whole direction the rest of
-        // this path takes.
+        // A frame with no flush behind it selects level 0 for everything rather
+        // than guessing a projection scale.
         const MeshDef& khr_md = mesh_def(mid);
         int khr_lod = 0;
         float khr_lodt = 0.0f;
-        // KH_LOD_LOCK: a locked instance never picks - level 0, no fade. Twin
-        // at the flush.
+        // A locked instance never picks - level 0, no fade. Twin at the flush.
         if (!o.lod_lock) kh_lod_pick(khr_md, kh_lod_radius(o), sqrtf(kh_mesh_dist_sq(o, cam)), khr_lod, khr_lodt);
         const bool khr_lodx = khr_lodt > 0.0f;
-        // Without a ladder this object is one draw at level 0 - never two - so
-        // the term belongs here and not inside the crossfade loop below. The
-        // no-ladder baseline, once per object. Twin at the flush.
+        // Without a ladder this object is one draw at level 0, so the term
+        // belongs here, not inside the crossfade loop. Twin at the flush.
 
-        // KH_BUCKETS, injection edition: this object is its bucket's
-        // representative - see the flush twin. The VS is the composite
-        // instanced pair when this draw took the composite VS, the static pair
-        // otherwise (the same routing as khr_want_vs). The bucket's ranges
-        // were emitted before the loop, so the per-object LOD walk below runs
-        // zero iterations. Members share both route verdicts by key. Twin at
-        // the flush.
+        // This object is its bucket's representative (see the flush twin). The
+        // VS is the composite instanced pair when this draw took the composite
+        // VS, the static pair otherwise. The bucket's ranges were emitted
+        // before the loop, so the per-object LOD walk runs zero iterations.
+        // Members share both route verdicts by key.
         int khr_lod_iters = khr_lodx ? 2 : 1;
 
         if (khr_inst_on && khr_inst_plan.batch_of[khr_oi] >= 0) {
@@ -27446,30 +25933,28 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 }
 
                 if (o.two_sided && !khr_ts_ordered && khr_bound_rs != g_res.rasterizer) {
-                    ctx->RSSetState(kh_rs_pick(g_res.rasterizer));
+                    ctx->RSSetState(g_res.rasterizer);
                     khr_bound_rs = g_res.rasterizer;
                 }
 
-                // KH_BUCKETS: the bucket's ranges were emitted before the loop
-                // (the cull, LOD and route verdicts are in the plan), so this
-                // draws them and nothing runs ahead of the colour draw.
+                // The bucket's ranges were emitted before the loop (cull, LOD
+                // and route verdicts are in the plan), so this draws them.
                 uint32_t khr_in = 0;
                 const uint32_t khr_id = kh_inst_draw(ctx, dev, khr_inst_plan, meshes, static_cast<uint32_t>(khr_oi),
                     cbd, g_res.composite_cb, khr_tx_on ? khr_txm : nullptr, khr_ts_ordered,
-                    khr_bound_rs, khr_tx_arb ? 2 : (guard ? 1 : 0), khr_bound_ps, 1, kh_inst_pre_none, khr_in);
+                    khr_bound_rs, khr_tx_arb ? 2 : (guard ? 1 : 0), khr_bound_ps, 1, khr_in);
                 kh_stat_add(g_stats.composite_meshes, khr_id);
                 if (khr_tx_on) kh_stat_add(g_stats.textured_draws, khr_id);
-                // KH_BLEND_PART_INJ: the batch's translucent part - the same
-                // gathered set, part 2, dss_test, hardware blend, the ordered
-                // pass when twoSided (else back-face culled), far-to-near
-                // inside the batch by the gather's sort. In place: the batch is
-                // one hull of many instances and its own order is the one that
-                // matters.
+                // The batch's translucent part: the same gathered set, part 2,
+                // dss_test, hardware blend, the ordered pass when twoSided
+                // (else back-face culled), far-to-near inside the batch by the
+                // gather's sort. In place: the batch is one hull of many
+                // instances and its own order is the one that matters.
                 if (khr_tx_on && khr_txm && khr_in > 0 && kh_obj_has_blend(o)) {
                     const bool khr_pts = o.two_sided && g_res.rasterizer_front != nullptr;
 
                     if (!khr_pts && khr_bound_rs != g_res.rasterizer_cull) {
-                        ctx->RSSetState(kh_rs_pick(g_res.rasterizer_cull));
+                        ctx->RSSetState(g_res.rasterizer_cull);
                         khr_bound_rs = g_res.rasterizer_cull;
                     }
 
@@ -27477,13 +25962,12 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                     uint32_t khr_pin = 0;
                     const uint32_t khr_pid = kh_inst_draw(ctx, dev, khr_inst_plan, meshes, static_cast<uint32_t>(khr_oi),
                         cbd, g_res.composite_cb, khr_txm, khr_pts,
-                        khr_bound_rs, khr_tx_arb ? 2 : (guard ? 1 : 0), khr_bound_ps, 2, kh_inst_pre_none, khr_pin);
+                        khr_bound_rs, khr_tx_arb ? 2 : (guard ? 1 : 0), khr_bound_ps, 2, khr_pin);
                     ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);
                     kh_stat_add(g_stats.composite_meshes, khr_pid);
                     kh_stat_add(g_stats.textured_draws, khr_pid);
                 }
-                khr_lod_iters = 0;   // The batch drew; no per-object level walk (and no owner
-                                     // Prepass).
+                khr_lod_iters = 0;   // The batch drew; no per-object level walk.
             }
         }
 
@@ -27496,10 +25980,9 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             }
 
             if (khr_tx_on) {
-                // Per-submesh textured draws: matParams filled + t14-t18
-                // rebound + the object slice re-uploaded per material range.
-                // KH_MAT_BLEND: part 1 - the injection never draws a blend
-                // submesh; the flush carries the object's translucent part.
+                // Per-submesh textured draws. Part 1 - the injection never
+                // draws a blend submesh; the flush carries the object's
+                // translucent part.
                 const uint32_t khr_txd = kh_draw_textured(ctx, dev, cbd, g_res.composite_cb,
                                                           *khr_txm, mid, khr_ts_ordered, khr_bound_rs,
                                                           khr_tx_arb ? 2 : (guard ? 1 : 0), khr_bound_ps,
@@ -27511,7 +25994,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 mesh_lod_range(khr_md, khr_lvl, khr_ls, khr_lc);
 
                 if (khr_ts_ordered && khr_bound_rs != g_res.rasterizer_front) {
-                    ctx->RSSetState(kh_rs_pick(g_res.rasterizer_front));
+                    ctx->RSSetState(g_res.rasterizer_front);
                     khr_bound_rs = g_res.rasterizer_front;
                 }
 
@@ -27519,7 +26002,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 kh_stat(g_stats.composite_meshes);
 
                 if (khr_ts_ordered) {   // Pass 2: front faces over the interior.
-                    ctx->RSSetState(kh_rs_pick(g_res.rasterizer_cull));
+                    ctx->RSSetState(g_res.rasterizer_cull);
                     khr_bound_rs = g_res.rasterizer_cull;
                     ctx->DrawIndexed(khr_lc, khr_ls, 0);
                     kh_stat(g_stats.composite_meshes);
@@ -27529,9 +26012,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
 
         cbd.blend_ctl[3] = 0.0f;   // Never leaks into the next object.
 
-        // KH_BLEND_PART_INJ: stage this object's translucent part for the tail.
-        // The CB is the slice the solid draw uploaded; the dither lane is
-        // cleared.
+        // Stage this object's translucent part for the tail. The CB is the
+        // slice the solid draw uploaded; the dither lane is cleared.
         if (khr_lod_iters > 0 && khr_tx_on && khr_txm && kh_obj_has_blend(o)) {
             KhInjPart khp;
             khp.oi = static_cast<uint32_t>(khr_oi);
@@ -27550,13 +26032,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         }
     }
 
-    // KH_BLEND_PART_INJ: the tail. Every staged part, far to near, under the
-    // exact state its solid drew with (PS/VS/layout/viewport/VB from the
-    // stage), dss_test, the object's blend state (normal: eligibility),
-    // interiors-then-exteriors when twoSided, else back-face culled. The LOD
-    // crossfade is honoured (blendCtl.w per level, as the main loop). dss goes
-    // back to the pass default afterwards so the restore below sees
-    // the state it expects.
+    // The tail: every staged part, far to near, under the exact state its solid
+    // drew with, dss_test, the object's blend state, interiors-then-exteriors
+    // when twoSided, else back-face culled. The LOD crossfade is honoured. dss
+    // goes back to the pass default afterwards.
     if (!khr_parts.empty()) {
         khr_parts_order.resize(khr_parts.size());
         for (uint32_t khp_i = 0; khp_i < static_cast<uint32_t>(khr_parts.size()); ++khp_i) khr_parts_order[khp_i] = khp_i;
@@ -27584,7 +26063,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             }
 
             if (!khp.ts_ordered && khr_bound_rs != g_res.rasterizer_cull) {
-                ctx->RSSetState(kh_rs_pick(g_res.rasterizer_cull));
+                ctx->RSSetState(g_res.rasterizer_cull);
                 khr_bound_rs = g_res.rasterizer_cull;
             }
 
@@ -27641,7 +26120,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
 
 // Resources may lag one frame at spawn (ensure_resources is game-thread); a
 // missing resource leaves the phase at 2, mask_valid false, and the UI-phase
-// flush skips - the designed fail-safe, never a wrong clear.
+// flush skips - the designed fail-safe.
 inline void kh_ui_mask_clear_alpha(ID3D11DeviceContext* ctx) {
     if (!g_res.ps_alpha_zero || !g_res.blend_alpha_zero ||
         !g_res.vs_fullscreen || !g_res.dss_off || !g_res.rasterizer) return;
@@ -27764,8 +26243,8 @@ inline void kh_ui_mask_thread_draw(ID3D11DeviceContext* ctx) {
         g_ui_mask.applied_serial == g_ui_mask.compose_serial;
     const bool kht_frame_stale =
         (kht_now.QuadPart - g_ui_mask.phase_arm_tick) > (kht_qpf * 50) / 1000;
-    // The 50 ms failsafe overrides exactly as it does for the consumption gate
-    // (menus where Draw3D stalls: degraded 20 Hz arming, never a deadlock).
+    // The 50 ms failsafe overrides exactly as for the consumption gate (menus
+    // where Draw3D stalls: degraded 20 Hz arming, never a deadlock).
     const uint64_t kht_ord = g_flush_frame_pub.load(std::memory_order_relaxed);
     const bool kht_ord_advanced = kht_ord != g_ui_mask.phase_arm_ordinal;
     if (g_ui_mask.ord_tick == 0 || kht_ord != g_ui_mask.ord_seen) {
@@ -27860,16 +26339,15 @@ inline void kh_svs_prime_mask(ID3D11DeviceContext* ctx) {
     ctx->RSGetViewports(&khp_nvp, khp_old_vps);
 
     // The engine's own depth target stays bound: it still holds the depth the
-    // injection wrote (the capture reads z0.97484 at the resolve), so the
-    // LESS_EQUAL test lands the write on exactly our surface.
+    // injection wrote, so the LESS_EQUAL test lands the write on exactly our
+    // surface.
     ctx->OMSetRenderTargets(1, &g_mask.engine_mask_rtv, khp_old_dsv);
     D3D11_VIEWPORT khp_vp = {};
     khp_vp.Width = static_cast<float>(g_svs_mask_w);
     khp_vp.Height = static_cast<float>(g_svs_mask_h);
-    // Reading g_ro.trig_vp live here put the priming pass in a different
-    // window-z space than the depth it is testing against - benign on the
-    // default path because the trigger cannot fire between the volume pass
-    // injection's own sanity guard rejected the live pair and this did not.
+    // Use the latched priming range: reading g_ro.trig_vp live here puts the
+    // priming pass in a different window-z space than the depth it tests
+    // against.
     khp_vp.MinDepth = g_svs_prime_vp_lo;
     khp_vp.MaxDepth = g_svs_prime_vp_hi;
     ctx->RSSetViewports(1, &khp_vp);
@@ -27936,9 +26414,6 @@ inline void kh_svs_prime_mask(ID3D11DeviceContext* ctx) {
             khp_obj.size_axes[2] = c.size[1];
             kh_fill_obj_rot(khp_obj, c.rot);
             if (g_svs_prime_rebase) kh_fill_center_rel(khp_obj, g_svs_prime_cam);
-            // dbg_ctl lives in the object block - it is declared ahead of
-            // view_proj, so the split puts it there - and the frame upload
-            // would never have carried it.
 
             if (!kh_upload_obj_cb(ctx, g_res.composite_cb, khp_obj)) {
                 break;
@@ -27966,7 +26441,6 @@ inline void kh_svs_prime_mask(ID3D11DeviceContext* ctx) {
     g_ro.in_injection = khp_prev;
 }
 
-
 inline void kh_svs_vol_copy(ID3D11DeviceContext* khc_ctx) {
     if (g_svs_vol_seq == g_svs_frame_seq) {
         return;
@@ -27975,9 +26449,9 @@ inline void kh_svs_vol_copy(ID3D11DeviceContext* khc_ctx) {
     if (!khc_ctx || g_ro.in_injection) {  return; }
     if (!kh_svs_vol_on()) {  return; }
     if (!g_svs_vol_src) {  return; }
-    // No visible mesh, no reader: the copy is refused and the primed flag dropped, so
-    // kh_svs_vol_ready cannot hand a mesh that appears next frame a copy from before
-    // it existed.
+    // No visible mesh, no reader: the copy is refused and the primed flag
+    // dropped, so kh_svs_vol_ready cannot hand a mesh that appears next frame a
+    // copy from before it existed.
     if (!g_svs_mesh_wanted.load(std::memory_order_relaxed)) {
         g_svs_vol_primed = false;
         return;
@@ -28015,22 +26489,22 @@ inline void kh_svs_vol_copy(ID3D11DeviceContext* khc_ctx) {
 inline void kh_volume_seam_pump(ID3D11DeviceContext* ctx) {
     if (g_ro.in_injection) return;
 
-    // The copy is pumped separately from the injection: two independent things must
-    // not share an arm (a mask hunt gated behind the injection arming never finds it).
+    // The copy is pumped separately from the injection: a mask hunt gated
+    // behind the injection arming never finds it.
     if (g_svs_bracket == 1) {
         g_svs_bracket = 2;
 
-        // The volume copy first and on its own arm. Same position requirement
+        // The volume copy first and on its own arm: same position requirement
         // as pre (after the counting draws, before the resolve), separate
-        // demand gate, separate lanes - and separately deletable.
+        // demand gate, separate lanes.
         kh_svs_vol_copy(ctx);
         // The bracket is the stencil resolve, a 4-vertex fullscreen quad with
         // no view matrix to read.
 
         if (kh_svs_snap_wanted()) {
-            // Prime first, then snapshot. This is the only point in the frame
-            // that is after the engine's mask clear and all eight cascade
-            // resolves, and before pre is read.
+            // Prime first, then snapshot: the only point in the frame that is
+            // after the engine's mask clear and all eight cascade resolves, and
+            // before pre is read.
             if (kh_svs_prime_wanted()) kh_svs_prime_mask(ctx);
             kh_svs_mask_snap(ctx, false);
         }
@@ -28047,13 +26521,12 @@ inline void kh_reorder_trigger(ID3D11DeviceContext* self) {
 
     // Mistiming rejection: a real scene issues a wall of opaque draws between
     // its depth clear and its translucent phase; late re-clears and
-    // preview/overlay passes mostly do not - without this, such passes could
-    // pull the injection into a completed frame and paint the meshes over
-    // everything. The floors below are settled by test; nothing is pending.
+    // preview/overlay passes do not - without this, such passes could pull the
+    // injection into a completed frame and paint the meshes over everything.
     const bool khr_floor_keep = g_slot_keep_near > 0.0f && g_slot_keep_ms != 0 &&
                                 steady_now_ms() - g_slot_keep_ms < 250;
     // The floor is relative to what this map's accepted cycles show. A
-    // populated map never leaves 16 (its cycles run in the thousands).
+    // populated map never leaves 16.
     uint32_t khr_floor_rel = KH_REORDER_MIN_OPAQUE_DRAWS / 8;
     const uint32_t min_opaques = (g_ro.engine_proj_valid || khr_floor_keep)
                                ? khr_floor_rel
@@ -28079,8 +26552,8 @@ inline void kh_reorder_trigger(ID3D11DeviceContext* self) {
             if (!kh_rescue_window_open()) return;
         } else {
             // The passing trigger's range is the encode range: the world's
-            // translucents depth-test correctly through it against the
-            // opaque-written depth, so the meshes must encode through it too.
+            // translucents depth-test through it against the opaque-written
+            // depth, so the meshes must encode through it too.
             g_ro.trig_vp_min = vp.MinDepth;
             g_ro.trig_vp_max = vp.MaxDepth;
             g_ro.trig_vp_valid = true;
@@ -28090,10 +26563,10 @@ inline void kh_reorder_trigger(ID3D11DeviceContext* self) {
     if (g_ro.inject_attempts >= KH_REORDER_MAX_INJECT_ATTEMPTS) return;
     ++g_ro.inject_attempts;
 
-    // Authoritative verification at each attempt: confirm the live depth
-    // binding is the main scene's before committing. On mismatch, correct the
-    // tracking and retry on a later qualifying draw this frame - standing down
-    // entirely would blank the meshes for the whole frame over a transient.
+    // Verification at each attempt: confirm the live depth binding is the main
+    // scene's before committing. On mismatch, correct the tracking and retry on
+    // a later qualifying draw - standing down entirely would blank the meshes
+    // for the whole frame over a transient.
     {
         ID3D11DepthStencilView* live_dsv = nullptr;
         self->OMGetRenderTargets(0, nullptr, &live_dsv);
@@ -28112,10 +26585,9 @@ inline void kh_reorder_trigger(ID3D11DeviceContext* self) {
 
     g_ro.injected = true;
 
-    // Identity only, never dereferenced; forgotten at device reset with the
-    // other weak identities. Frame-topology census: stamp the accept and latch
-    // the scene color RT0 identity (the injection draws into it - the one
-    // moment it is known to be bound).
+    // Frame-topology census: stamp the accept and latch the scene colour RT0
+    // identity (the injection draws into it - the one moment it is known to be
+    // bound). Identity only, never dereferenced.
 
     {
         ID3D11RenderTargetView* kht_rtv = nullptr;
@@ -28144,14 +26616,11 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
         return;
     }
     if (!reorder_on_render_thread()) {   // Our own game-thread draws must not be tracked.
-        // The count includes our own flush draws (a handful per frame); the
-        // render thread's thousands dominate whenever this gate is the actual
-        // blocker.
 
-        // Our own flush draws are excluded by g_kh_flush_active (lock-scoped,
-        // so never racing), the clear's own draw by the injecting guard, and
-        // the whole path by the render-thread identity existing - during the
-        // cold window every render-thread draw lands in this bail.
+        // Our own flush draws are excluded by g_kh_flush_active (lock-scoped),
+        // the clear's own draw by the injecting guard, and the whole path by
+        // the render-thread identity existing - during the cold window every
+        // render-thread draw lands in this bail.
         if (!g_kh_flush_active && !g_ui_mask_injecting &&
             g_reorder_render_tid.load(std::memory_order_relaxed) != 0 &&
             g_ui_mask_wanted.load(std::memory_order_relaxed)) {
@@ -28161,9 +26630,9 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
         return;
     }
 
-    // Deferred seam injection, performed on the render thread only and before
-    // this draw - which is the first volume draw, so the buffer still carries
-    // our depth when the stencil counting reads it.
+    // Deferred seam injection, render thread only and before this draw - the
+    // first volume draw, so the buffer still carries our depth when the stencil
+    // counting reads it.
     kh_volume_seam_pump(self);
 
     if (g_pip.on && !g_ro.dsv_main && !g_ro.in_injection) kh_pip_pre_draw(self);   // KH_PIP.
@@ -28172,12 +26641,12 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
     if (g_svs_vol_dsv_now && !g_ro.in_injection) {
         {
             const uint32_t khmr_f = static_cast<uint32_t>(g_svs_frame_seq);
-            // Frame-seq alone could not separate them - both sessions share the
+            // Frame-seq alone cannot separate them - both sessions share the
             // pre-resolve seq.
             const bool khmr_same = g_svs_vol_src && g_svs_vol_src == g_vmir_prepass_src;
-            // Order hardening: only the prepass session may claim the frame
-            // marker - a secondary-session-first frame must not burn the
-            // once-per-frame patch slot with a refused attempt.
+            // Only the prepass session may claim the frame marker - a
+            // secondary-session-first frame must not burn the once-per-frame
+            // patch slot with a refused attempt.
             if (khmr_same && g_vmir_mark2 != khmr_f) {
                 g_vmir_mark2 = khmr_f;
                 g_vmir_frame_ok = false;
@@ -28189,15 +26658,13 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
         }
     }
 
-    // One relaxed load on the active hot path; the whole per-draw suite falls
-    // to the entry compares when idle. The clear-hook boundary machinery is
-    // deliberately not gated (once per frame, and it keeps the render tid + PV
-    // latch warm so a re-spawn behaves exactly like today instead of re-opening
-    // a cold window).
+    // One relaxed load on the active hot path. The clear-hook boundary
+    // machinery is deliberately not gated (once per frame; keeps the render tid
+    // + PV latch warm so a re-spawn does not re-open a cold window).
     if (!g_kh_track_wanted.load(std::memory_order_relaxed)) return;
 
-    // KH_LIGHT_BASE: a main-scene draw issued while the current lighting
-    // block is live. Not g_ro.opaque_draws - that one stops at the injection.
+    // A main-scene draw issued while the current lighting block is live. Not
+    // g_ro.opaque_draws - that one stops at the injection.
     if (!g_ro.in_injection && g_ro.dsv_main && (!g_ro.blend_translucent || !g_ro.dss_nowrite)) ++g_blko_draws;
 
     if (!g_ro.in_injection) {
@@ -28207,19 +26674,15 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
         mask_cast_engine(self);
 
         if (g_ls.wanted.load(std::memory_order_relaxed)) {
-            // KH_DL_DENSE: every draw's cb11, not every 16th. Measured on one
-            // night run: pool-harvests carried on their TTL
-            // alone 33 pct -> 2.9 pct, the longest tail after a light's last
-            // sighting 1,183 -> 280 ms, the cadence mark at expiry 35 ms mean. The
-            // per-window dedupe and the arena cap bound the copies; the cost per
-            // draw is one PSGetConstantBuffers1 and a <= KH_DL_WIN_MAX compare.
+            // Every draw's cb11, not every 16th: the pool follows the engine at
+            // ~50 ms instead of riding its TTL. The per-window dedupe and the
+            // arena cap bound the copies.
             dynlights_sample_draw(self);
         }
     }
     // Hoisted above the guard: phase_on_atlas structurally excludes our own
-    // draws (the injection never runs inside the atlas phase) and the explicit
-    // in_injection term stays for safety; the every-16th sample plus the
-    // freshness idle keep healthy sessions at zero cost.
+    // draws (the injection never runs inside the atlas phase); the every-16th
+    // sample plus the freshness idle keep healthy sessions at zero cost.
     if (!g_ro.in_injection && g_ls.phase_on_atlas && ((++g_cascharv_ctr & 15) == 0)) {
         cascbind_step(self);
     }
@@ -28229,8 +26692,7 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
     if (!g_ro.blend_translucent || !g_ro.dss_nowrite) {
         if (g_ro.dsv_main) {
             // Retry until the first success, capped at the first 8 opaque draws
-            // - all latch consumers (publish rebuild, freeze re-anchor, seal
-            // references, injection) run after this point in the frame.
+            // - every latch consumer runs after this point in the frame.
             if (g_ro.cycle_pv_stale && g_ro.opaque_draws < 8) {
                 RVExtBridge::ProjectionViewTransform khl_pv = {};
 
@@ -28298,29 +26760,18 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
     kh_reorder_trigger(self);
 }
 
-// KH_DLS_WORLD - stage 4. The game environment receives our meshes' dynamic-light
-// shadows: one fullscreen multiply into the scene colour at the resolve, emitting
-// KhDlsWorldFactor - how much of each light's contribution our meshes blocked at
-// that pixel, divided by everything lighting it. The albedo cancels in that ratio,
-// which is what makes this reachable on a forward renderer with no G-buffer (see
-// the kernel's note in cb.hlsl). Here because depth and view are this frame's.
-// KH_DLSW_MASKREG: which matrix pair the mask was drawn with (1 = never sampled).
-// The format is the DXGI enum; RtIsScene is 1 when the bound RTV's resource is
-// the scene texture the resolve names.
+// KH_DLS_WORLD stage 4: the game environment receives our meshes' dynamic-light
+// shadows - one fullscreen multiply into the scene colour at the resolve,
+// emitting KhDlsWorldFactor (how much of each light's contribution our meshes
+// blocked at that pixel, divided by everything lighting it; the albedo cancels,
+// which is what makes this possible without a G-buffer - see the kernel's note
+// in cb.hlsl).
 static uint64_t g_dls_world_cycle = 0;        // once-per-cycle guard (state, not a lane).
-// The reconstruction inputs, published as written, so the fill is checkable
-// arithmetically: the fov used, the fov the engine's projection implies, and their
-// ratio (a ratio not 1 means the mask is scaled differently from the geometry it
-// covers). The viewport is whatever the engine left at the resolve - this pass
-// never sets one - and every screen-space index assumes i.pos.xy is in cast_dims
-// space.
 
-// Nothing here depends on another feature's depth convention: the caller resolves
-// the matrix once and hands in the engine's own view and projection for this
-// frame, so the mask clips exactly where the engine's draw of the same geometry
-// clipped. The value written is the clip w, not the clip z, so the z terms decide
-// only what is clipped, never what is stored. KH_DLSW_MASKREG: a full projection,
-// not a reconstructed fov pair.
+// The caller resolves the matrix once and hands in the engine's own view and
+// projection for this frame, so the mask clips exactly where the engine's draw
+// of the same geometry clipped. The value written is the clip w, not the clip
+// z, so the z terms decide only what is clipped, never what is stored.
 inline bool kh_dlsw_mask_render(ID3D11DeviceContext* khm_ctx,
                                 const float khm_view[16], const float khm_proj_in[16],
                                 UINT khm_w, UINT khm_h) {
@@ -28330,12 +26781,11 @@ inline bool kh_dlsw_mask_render(ID3D11DeviceContext* khm_ctx,
         !g_res.composite_cb || !g_res.composite_frame_cb) return false;
     if (g_dlsw_casters.empty()) return false;
     if (!khm_proj_in) return false;
-    // A degenerate projection scales the mesh to nothing or to infinity; either
-    // way the mask would be wrong rather than absent, and a wrong mask is the
-    // failure this whole path exists to remove.
+    // A degenerate projection scales the mesh to nothing or to infinity; a
+    // wrong mask is the failure this path exists to remove.
     if (!(fabsf(khm_proj_in[0]) > 1.0e-6f) || !(fabsf(khm_proj_in[5]) > 1.0e-6f)) return false;
-    // Refused instead; the caller counts it as a mask failure and the pass runs
-    // unmasked, which is the honest degradation.
+    // Refused; the caller counts it as a mask failure and the pass runs
+    // unmasked.
     if (!(khm_proj_in[11] > 0.0f)) return false;
 
     if (!g_res.dlsw_tex || g_res.dlsw_w != khm_w || g_res.dlsw_h != khm_h) {
@@ -28370,12 +26820,9 @@ inline bool kh_dlsw_mask_render(ID3D11DeviceContext* khm_ctx,
         g_res.dlsw_h = khm_h;
     }
 
-    // View * proj, row-vector. The projection is the caller'S now, and an
-    // invented projection is only equal to the engine's for a textbook
-    // perspective matrix. The z terms still decide only what gets clipped and
-    // never what gets stored (we store clip w), so taking the engine's own
-    // terms means the mask clips exactly where the engine's draw of the same
-    // mesh clipped.
+    // View * proj, row-vector, with the engine's own projection: the z terms
+    // decide only what is clipped (we store clip w), so the mask clips exactly
+    // where the engine's draw of the same mesh clipped.
     float khm_proj[4][4];
     memcpy(khm_proj, khm_proj_in, sizeof(khm_proj));
     float khm_v[4][4];
@@ -28386,16 +26833,15 @@ inline bool kh_dlsw_mask_render(ID3D11DeviceContext* khm_ctx,
     ConstantData khm_frm = {};
     memcpy(khm_frm.view_proj, khm_vp, sizeof(khm_frm.view_proj));
 
-    // KH_DLSW_MASKREBASE - the last of the registration residue. This
-    // is the whole reason centerRel exists (see its note at the CB), and the
-    // mask is the one consumer of that geometry that never adopted it.
+    // Rebase: the mask must adopt centerRel like every other consumer of that
+    // geometry.
     float khm_cam[3] = { 0.0f, 0.0f, 0.0f };
     extract_camera_pos(reinterpret_cast<const float(*)[4]>(khm_view), khm_cam);
     const bool khm_reb = kh_rebase_vp(khm_frm, khm_cam);
 
-    // StateBackup owes the restore: the pass changes pipeline state, and without it
-    // the world pass's own capture would record our shaders and min-blend as the
-    // engine's and hand them to every engine draw after the resolve.
+    // StateBackup owes the restore: without it the world pass's own capture
+    // would record our shaders and min-blend as the engine's and hand them to
+    // every engine draw after the resolve.
     StateBackup khm_bk;
     khm_bk.capture(khm_ctx);
     KhOmSave khm_om;
@@ -28404,11 +26850,11 @@ inline bool kh_dlsw_mask_render(ID3D11DeviceContext* khm_ctx,
     D3D11_VIEWPORT khm_ovp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
     khm_ctx->RSGetViewports(&khm_nvp, khm_ovp);
 
-    // The sentinel is the clear. Every pixel starts further away than anything
+    // The sentinel is the clear: every pixel starts further away than anything
     // can be, so min-blending a caster in always wins and an untouched pixel
-    // reads as "no mesh" without a second channel to say so. Uploaded inside
-    // the bracket: kh_upload_frame_cb discards and rewrites composite_frame_cb,
-    // and the bracket's restore puts the engine's binding back afterwards.
+    // reads as "no mesh". Uploaded inside the bracket: kh_upload_frame_cb
+    // rewrites composite_frame_cb, and the bracket's restore puts the engine's
+    // binding back.
     if (!kh_upload_frame_cb(khm_ctx, g_res.composite_frame_cb, khm_frm)) {
         khm_om.restore(khm_ctx);
         khm_om.release();
@@ -28444,53 +26890,47 @@ inline bool kh_dlsw_mask_render(ID3D11DeviceContext* khm_ctx,
     const UINT khm_stride = sizeof(MeshVertex), khm_off = 0;
     int khm_bound = -1;
     uint32_t khm_drawn = 0;
-    // KH_DLSW_MASK_ALPHA: the device for the material binds; the twin is
-    // optional (absent, an alpha caster masks whole, which is the old picture).
+    // The device for the material binds; the alpha twin is optional (absent, an
+    // alpha caster masks whole).
     ID3D11Device* khm_dev = nullptr;
     khm_ctx->GetDevice(&khm_dev);
     const bool khm_alpha_ok = khm_dev && g_res.ps_dls_mask_a && g_res.vs_tex && g_res.layout_tex;
     bool khm_alpha_bound = false;
     for (size_t khm_i = 0; khm_i < g_dlsw_casters.size(); ++khm_i) {
         const KhDlswCaster& khm_c = g_dlsw_casters[khm_i];
-        // KH_DLSW_MASK_ALPHA: only what owns pixels is masked. An invisible
-        // (casterOnly) object and a whole translucent one write no depth, so
-        // the surface at their pixels is the world behind them, which must
-        // receive the shadow they cast.
+        // Only what owns pixels is masked. An invisible (casterOnly) object and
+        // a whole translucent one write no depth, so the surface at their
+        // pixels is the world behind them, which must receive the shadow they
+        // cast.
         if (!khm_c.visible || khm_c.alpha < 0.999f) continue;
-        // The size test is not optional, and both sibling caster loops do it.
-        // khm_c.mesh comes from mesh_id_clamp, which bounds against the
-        // published registry (mesh_count) - not against mesh_vb. Those two are
-        // equal only while ensure_mesh_vbs keeps up, and it returns early on an
-        // empty mesh or a failed CreateBuffer, while flush_locked's publish
-        // block only reports that error and carries on - after kh_mesh_publish
-        // has already raised the published count.
+        // The size test is not optional: khm_c.mesh is bounded against the
+        // published registry (mesh_count), not against mesh_vb, and those two
+        // are equal only while ensure_mesh_vbs keeps up (it returns early on an
+        // empty mesh or a failed CreateBuffer after the published count was
+        // already raised).
         if (khm_c.mesh < 0 ||
             static_cast<size_t>(khm_c.mesh) >= g_res.mesh_vb.size() ||
             !g_res.mesh_vb[khm_c.mesh]) continue;
         ConstantData khm_obj = {};
-        // SQF [x, y, zASL] -> engine [x, zASL, y], the same swizzle every other
-        // consumer of a caster applies.
+        // SQF [x, y, zASL] -> engine [x, zASL, y].
         khm_obj.center_size[0] = khm_c.pos[0];
         khm_obj.center_size[1] = khm_c.pos[2];
         khm_obj.center_size[2] = khm_c.pos[1];
         khm_obj.size_axes[0] = khm_c.size[0];
         khm_obj.size_axes[1] = khm_c.size[2];
         khm_obj.size_axes[2] = khm_c.size[1];
-        // Always the rotation, never null. kh_fill_obj_rot dereferences its
-        // argument unconditionally, and an unrotated caster carries an identity
-        // in rot[] anyway - the vmir prepass passes c.rot flat for the same
-        // reason. s conditional would have dereferenced null the first time an
-        // unrotated mesh cast.
+        // Always the rotation, never null: kh_fill_obj_rot dereferences
+        // unconditionally, and an unrotated caster carries an identity in rot[]
+        // anyway.
         kh_fill_obj_rot(khm_obj, khm_c.rot);
         // Armed only when the matrix above actually rebased: the two must never
         // disagree, or the vertex would be camera-relative against an absolute
-        // matrix and the mask would land a whole camera vector away.
+        // matrix.
         if (khm_reb) kh_fill_center_rel(khm_obj, khm_cam);
         if (!kh_upload_obj_cb(khm_ctx, g_res.composite_cb, khm_obj)) break;
-        // KH_DLSW_MASK_ALPHA: an alpha caster with a material set masks through
-        // the textured VS and the clipping twin, its material bound per submesh
-        // (the seam footprint's discipline). Colour-alpha-only casters that
-        // reached here carry alpha >= 0.999, i.e. solid: the plain pair.
+        // An alpha caster with a material set masks through the textured VS and
+        // the clipping twin, its material bound per submesh. Colour-alpha-only
+        // casters that reached here carry alpha >= 0.999: the plain pair.
         const bool khm_want_alpha = khm_c.alpha_caster && khm_c.mats && khm_alpha_ok;
         if (khm_want_alpha != khm_alpha_bound) {
             khm_ctx->IASetInputLayout(khm_want_alpha ? g_res.layout_tex : g_res.input_layout);
@@ -28504,13 +26944,9 @@ inline bool kh_dlsw_mask_render(ID3D11DeviceContext* khm_ctx,
             khm_ctx->IASetIndexBuffer(g_res.mesh_ib[khm_c.mesh], DXGI_FORMAT_R32_UINT, 0);
             khm_bound = khm_c.mesh;
         }
-        // This drew "the full mesh, not the shadow LOD", on the ground that a
-        // decimated silhouette would leak the world's shading around the edges
-        // of the real one - and the real one is whatever the injection drew,
-        // which is the level kh_lod_pick chose, not level 0. Same pick, same
-        // inputs (the pass camera, the object's radius, its lock), and during a
-        // fade both levels are drawn as the injection draws them, so the mask
-        // covers their union. The shadow LOD is still not used here.
+        // The mask covers whatever the injection drew: the level kh_lod_pick
+        // chose (same pick, same inputs), and during a fade both levels, so the
+        // mask covers their union. Not the shadow LOD.
         {
             const MeshDef& khm_md = mesh_def(khm_c.mesh);
             int   khm_lvl = 0;
@@ -28556,8 +26992,8 @@ inline bool kh_dlsw_mask_render(ID3D11DeviceContext* khm_ctx,
 
 inline void kh_dls_world_pass_body(ID3D11DeviceContext* khw_ctx) {
 
-    // A light must actually hold a slot and have a map, or there is nothing to
-    // subtract and the pass is a fullscreen multiply by 1.
+    // A light must hold a slot and have a map, or the pass is a fullscreen
+    // multiply by 1.
     if (g_dls_n == 0 || g_dls_map_valid == 0ull) {  return; }
 
     if (!g_res.ps_dls_world || !g_res.vs_fullscreen || !g_res.rasterizer ||
@@ -28571,9 +27007,9 @@ inline void kh_dls_world_pass_body(ID3D11DeviceContext* khw_ctx) {
     if (!khw_rtv) {  return; }
     khw_rtv->Release();
 
-    // g_mask.cast_depth is the engine's own live resolved linear depth, adopted by
-    // identity at the resolve sweep and validated there as a screen-sized
-    // single-channel float. No snapshot, no resolve, no extra fullscreen pass.
+    // g_mask.cast_depth is the engine's own live resolved linear depth, adopted
+    // by identity at the resolve sweep and validated there as a screen-sized
+    // single-channel float.
     if (!g_mask.cast_depth || g_mask.cast_dims[0] < 2.0f || g_mask.cast_dims[1] < 2.0f) {
         return;
     }
@@ -28581,30 +27017,20 @@ inline void kh_dls_world_pass_body(ID3D11DeviceContext* khw_ctx) {
     ConstantData khw_obj = {};
     ConstantData khw_frm = {};
 
-    // The engine's dynamic-light pool, in the same lanes DynLights reads.
-    // fill_dynlights_cb is the mesh path's filler and needs a RenderObject; the
-    // pool merge it depends on is already published for this frame, so the
-    // lanes are copied from the last mesh fill's source rather than re-derived
-    // - one source, and the world cannot disagree with the meshes about which
-    // lights exist or which of them cast.
+    // The engine's dynamic-light pool, in the same lanes DynLights reads,
+    // copied from the last mesh fill's source rather than re-derived: one
+    // source, so the world cannot disagree with the meshes about which lights
+    // exist or cast.
     kh_dls_fill_dl_world(khw_obj);
     kh_dls_fill_cb(khw_frm);   // dls_meta / dls_ctl / dls_face_slice / dls_spot_vp.
 
-    // Engine sun + sky, for KhDlsWorldFactor's denominator only. These are
-    // FRAME-half lanes - lighting1 / lighting2 / lightAmb sit past view_proj
-    // in ConstantData - and the frame CB uploads from khw_frm, so writing
-    // them to khw_obj parked them in the never-uploaded frame tail of the
-    // object struct. The shader then summed Ltotal with a ZERO sun and sky,
-    // the factor collapsed to the dynamics-only ratio, and a shadow painted
-    // near-black regardless of how dim its light was or how bright the day
-    // (the ratio is brightness-invariant). Night - where the dynamic term IS
-    // the total - was the one regime that could not show it, and is where the
-    // feature was built and probed. lighting0[2]/[3] are OBJECT-half and stay
-    // on khw_obj.
-    // The else arm is fill_lighting_frame_cb's fallback, twinned (rule 1.5):
-    // an unharvested block reads white, which overstates Ltotal and fails
-    // toward under-darkening - the kernel's stated direction - never toward
-    // black.
+    // Engine sun + sky, for KhDlsWorldFactor's denominator. These are
+    // FRAME-half lanes (past view_proj) and the frame CB uploads from khw_frm,
+    // so they MUST be written to khw_frm - on khw_obj they land in the
+    // never-uploaded tail, Ltotal sums with zero sun and sky, and the shadow
+    // paints near-black in daylight. lighting0[2]/[3] are OBJECT-half and stay
+    // on khw_obj. The else arm twins fill_lighting_frame_cb's fallback (white,
+    // fails toward under-darkening).
     if (g_pub_block_valid) {
         khw_frm.lighting2[0] = g_pub_block_sun[0];
         khw_frm.lighting2[1] = g_pub_block_sun[1];
@@ -28628,11 +27054,9 @@ inline void kh_dls_world_pass_body(ID3D11DeviceContext* khw_ctx) {
     khw_frm.lighting1[1] = g_sun_dir_engine[1];
     khw_frm.lighting1[2] = g_sun_dir_engine[2];
 
-    // KH_DLS_WORLD_SELFMASK - do not paint on our own meshes. The mask projects world
-    // -> pixel and the reconstruction maps pixel -> world; being inverse directions
-    // of one map they share a view and an fov, with the reconstruction as the
-    // reference and the mask gated on khw_frozen so it is never drawn in a frame the
-    // reconstruction is not using.
+    // Do not paint on our own meshes. The mask projects world -> pixel and the
+    // reconstruction maps pixel -> world; the mask is gated on khw_frozen so it
+    // is never drawn in a frame the reconstruction is not using.
     RVExtBridge::ProjectionViewTransform khw_pv = {};
     bool khw_pv_ok = RVExtBridge::get_projection_view_transform(khw_pv);
     if (!khw_pv_ok && g_ro.cycle_pv_valid) { khw_pv = g_ro.cycle_pv; khw_pv_ok = true; }
@@ -28652,13 +27076,10 @@ inline void kh_dls_world_pass_body(ID3D11DeviceContext* khw_ctx) {
         khw_fov_ok = true;
     }
 
-    // KH_DLSW_MASKREG - the mask registers with the framebuffer, not with the
-    // Reconstruction. This is the white rim. The block above hoisted one view
-    // and one fov "for both consumers", on the stated ground that the mask and
-    // the reconstruction are inverse directions of the same map and so must
-    // share inputs. That is true of the map and false of the job, and the
-    // difference is the artifact: the reconstruction turns a depth texel into a
-    // world point.
+    // The mask registers with the framebuffer, not with the reconstruction: the
+    // reconstruction turns a depth texel into a world point, the mask
+    // rasterizes geometry - they share a view but not a job, and sharing one
+    // fov gave a white rim.
     khw_frm.mir_meta[0] = 0.0f;
     float khw_mv[16] = {};
     float khw_mp[16] = {};
@@ -28682,9 +27103,6 @@ inline void kh_dls_world_pass_body(ID3D11DeviceContext* khw_ctx) {
         float khw_cam[3] = { 0.0f, 0.0f, 0.0f };
         extract_camera_pos(khw_pv.view, khw_cam);
 
-        // The lag this inherits is real and is the sun cast's own: It is a
-        // frame behind under motion.
-
         for (int khw_r = 0; khw_r < 3; ++khw_r) {
             khw_frm.cast_view[0][khw_r] = khw_frozen ? g_fire_view2[12 + khw_r]
                                                      : khw_pv.view[3][khw_r];
@@ -28696,9 +27114,7 @@ inline void kh_dls_world_pass_body(ID3D11DeviceContext* khw_ctx) {
                 khw_frm.cast_mat[khw_r][2] = g_fire_cast_inv[khw_r * 3 + 2];
             } else {
                 // Inverse rotation of a row-vector orthonormal view is its
-                // transpose, which is what KhCastWorld's three dots expect -
-                // the same value the cofactor solve returns for an orthonormal
-                // r.
+                // transpose, which is what KhCastWorld's three dots expect.
                 khw_frm.cast_mat[khw_r][0] = khw_pv.view[khw_r][0];
                 khw_frm.cast_mat[khw_r][1] = khw_pv.view[khw_r][1];
                 khw_frm.cast_mat[khw_r][2] = khw_pv.view[khw_r][2];
@@ -28706,10 +27122,9 @@ inline void kh_dls_world_pass_body(ID3D11DeviceContext* khw_ctx) {
             khw_frm.cast_mat[khw_r][3] = 0.0f;   // KH_CAST_OCC lane hygiene.
         }
         khw_frm.cast_view[0][3] = 1.0f;
-        // The FOV scale comes from the engine when we have it. KhCastWorld
-        // multiplies NDC x by castView[1].x, so this lane is tan(fovX/2), and
-        // the shipping cast reads it from the engine's own constant block
-        // (g_mask.cast_fov, the floats at 176/177) rather than deriving it.
+        // KhCastWorld multiplies NDC x by castView[1].x, so this lane is
+        // tan(fovX/2), read from the engine's own constant block
+        // (g_mask.cast_fov) rather than derived.
         if (khw_fov_ok) {
             khw_frm.cast_view[1][0] = khw_fov[0];
             khw_frm.cast_view[1][1] = khw_fov[1];
@@ -28722,11 +27137,9 @@ inline void kh_dls_world_pass_body(ID3D11DeviceContext* khw_ctx) {
         khw_frm.cast_view[1][2] = g_mask.cast_dims[0];
         khw_frm.cast_view[1][3] = g_mask.cast_dims[1];
         // The camera the normal's facing test uses must come from the same view
-        // the reconstruction did, or the two disagree about which way is toward
-        // the eye. Derived by the reconstruction's own algebra rather than
-        // taken from elsewhere: with zl = 0, KhCastWorld reduces to
-        // (-translation) dotted through the inverse rotation, which is the
-        // camera in world space.
+        // the reconstruction did. Derived by the reconstruction's own algebra:
+        // with zl = 0, KhCastWorld reduces to (-translation) dotted through the
+        // inverse rotation.
         if (khw_frozen) {
             for (int khw_r = 0; khw_r < 3; ++khw_r) {
                 khw_cam[khw_r] = -(khw_frm.cast_view[0][0] * khw_frm.cast_mat[khw_r][0] +
@@ -28737,11 +27150,11 @@ inline void kh_dls_world_pass_body(ID3D11DeviceContext* khw_ctx) {
         khw_frm.cast_view[2][0] = khw_cam[0];
         khw_frm.cast_view[2][1] = khw_cam[1];
         khw_frm.cast_view[2][2] = khw_cam[2];
-        // KH_DLS_WORLD_INFRONT: the two projection terms that invert the mirror target's
-        // device depth back to a view distance (z = B / (device - A)), so the self-mask
-        // can ask whether our mesh is in front of the world surface. Taken from the live
-        // projection: the mirror prepass renders under the scene's own projection, and
-        // the frozen view differs from it in rotation and translation, not depth terms.
+        // The two projection terms that invert the mirror target's device depth
+        // back to a view distance (z = B / (device - A)), so the self-mask can
+        // ask whether our mesh is in front of the world surface. Taken from the
+        // live projection: the mirror prepass renders under the scene's own
+        // projection.
     }
 
     if (khw_frm.dls_range[3] > 0.0f) {
@@ -28755,10 +27168,9 @@ inline void kh_dls_world_pass_body(ID3D11DeviceContext* khw_ctx) {
     ID3D11ShaderResourceView* khw_old_t37 = nullptr;   // Past StateBackup's ps_srvs[37]; own save.
     khw_ctx->PSGetShaderResources(37, 1, &khw_old_t37);
 
-    // b0 and B1 bound as (0, 2), before the uploads - the order every other
-    // site uses. It does not, on a device without The 11.1 ring
-    // (g_cbr_supported false) it never binds. stateBackup saved both slots
-    // offset-aware and restores both.
+    // b0 and b1 bound as (0, 2), before the uploads; on a device without the
+    // 11.1 ring it never binds. StateBackup saved both slots offset-aware and
+    // restores both.
     ID3D11Buffer* khw_cbs[2] = { g_res.composite_cb, g_res.composite_frame_cb };
     khw_ctx->VSSetConstantBuffers(0, 2, khw_cbs);
     khw_ctx->PSSetConstantBuffers(0, 2, khw_cbs);
@@ -28782,17 +27194,15 @@ inline void kh_dls_world_pass_body(ID3D11DeviceContext* khw_ctx) {
     khw_ctx->HSSetShader(nullptr, nullptr, 0);
     khw_ctx->DSSetShader(nullptr, nullptr, 0);
     khw_ctx->OMSetDepthStencilState(g_res.dss_off, 0);
-    // Dest * src, with a unit blend factor, so SRC_COLOR is the multiplier and
-    // the blend factor must not participate.
+    // Dest * src with a unit blend factor, so SRC_COLOR is the multiplier.
     const FLOAT khw_bf[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
     khw_ctx->OMSetBlendState(g_res.dls_world_blend, khw_bf, 0xFFFFFFFF);
     khw_ctx->RSSetState(g_res.rasterizer);
     khw_ctx->Draw(3, 0);
 
-    // t0 held the depth SRV; the engine rebinds that resource as a DSV immediately
-    // after the resolve, and a lingering SRV over it would be force-nulled with a
-    // debug-layer warning storm. The full-table restore below covers it; the null is
-    // explicit for the same reason snapshot_composite_depth does it explicitly.
+    // t0 held the depth SRV; the engine rebinds that resource as a DSV
+    // immediately after the resolve, and a lingering SRV would be force-nulled
+    // with a debug-layer warning storm.
     ID3D11ShaderResourceView* khw_null = nullptr;
     khw_ctx->PSSetShaderResources(0, 1, &khw_null);
     khw_ctx->PSSetShaderResources(37, 1, &khw_old_t37);   // Outside StateBackup's t0.t36: put back
@@ -28801,10 +27211,9 @@ inline void kh_dls_world_pass_body(ID3D11DeviceContext* khw_ctx) {
     khw_bk.restore(khw_ctx);
 }
 
-// The resolve hook evaluates !g_ro.in_injection before it calls here, so the flag
-// is raised inside, not around the call. Without it the mask's OM/blend/depth
-// sets, its per-caster Draws and the fullscreen Draw(3) would flow through the
-// hooks as engine draws.
+// The resolve hook evaluates !g_ro.in_injection before calling here, so the
+// flag is raised inside. Without it the mask's state sets and draws would flow
+// through the hooks as engine draws.
 inline void kh_dls_world_pass(ID3D11DeviceContext* khw_ctx) {
     if (!khw_ctx) return;
     const bool khw_pinj = g_ro.in_injection;
@@ -28814,17 +27223,17 @@ inline void kh_dls_world_pass(ID3D11DeviceContext* khw_ctx) {
 }
 
 // This hook passes the resolve through - it never composites.
+// The format argument is never read: the pass keys on the source identity.
 static void STDMETHODCALLTYPE hooked_resolvesubresource(ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dst_sub, ID3D11Resource* src, UINT src_sub, DXGI_FORMAT fmt) {
     try {
     if (src && g_topo_scene_tex_id &&
         static_cast<void*>(src) == g_topo_scene_tex_id &&
         self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
         !g_ro.in_injection && reorder_on_render_thread()) {
-        // KH_DLSW_RTFMT: the resolve's own format argument is never read.
 
         if (g_dls_world_cycle != g_topo_cycles) {
-            // KH_DLS_WORLD - stage 4. Once per cycle: a second resolve would stack a second
-            // multiply and darken the frame quadratically.
+            // Once per cycle: a second resolve would stack a second multiply
+            // and darken the frame quadratically.
             g_dls_world_cycle = g_topo_cycles;
             kh_dls_world_pass(self);
         }
@@ -28891,9 +27300,8 @@ static void STDMETHODCALLTYPE hooked_draw_indexed(ID3D11DeviceContext* self, UIN
     try { reorder_pre_draw(self); } catch (...) { kh_hook_except(); }
     g_orig_draw_indexed(self, ic, sil, bvl);
     try {
-    if (g_vmir_pending &&   // KH_VOL_MIRROR re-issue (at KH_VMIR_NEAR); the flag is set for the
-        self == g_reorder_target_ctx.load(std::memory_order_relaxed)) {   // tracked context's own draw
-                                                                          // (kh_svs_bracket_post gate).
+    if (g_vmir_pending &&   // Mirror re-issue; the flag is set for the tracked context's own draw.
+        self == g_reorder_target_ctx.load(std::memory_order_relaxed)) {
         g_vmir_pending = false;
         if (kh_vmir_begin(self)) {
             g_orig_draw_indexed(self, ic, sil, bvl);
@@ -28908,9 +27316,8 @@ static void STDMETHODCALLTYPE hooked_draw(ID3D11DeviceContext* self, UINT vc, UI
     try { reorder_pre_draw(self); } catch (...) { kh_hook_except(); }
     g_orig_draw(self, vc, svl);
     try {
-    if (g_vmir_pending &&   // KH_VOL_MIRROR re-issue (at KH_VMIR_NEAR); the flag is set for the
-        self == g_reorder_target_ctx.load(std::memory_order_relaxed)) {   // tracked context's own draw
-                                                                          // (kh_svs_bracket_post gate).
+    if (g_vmir_pending &&   // Mirror re-issue; the flag is set for the tracked context's own draw.
+        self == g_reorder_target_ctx.load(std::memory_order_relaxed)) {
         g_vmir_pending = false;
         if (kh_vmir_begin(self)) {
             g_orig_draw(self, vc, svl);
@@ -28925,9 +27332,8 @@ static void STDMETHODCALLTYPE hooked_draw_indexed_instanced(ID3D11DeviceContext*
     try { reorder_pre_draw(self); } catch (...) { kh_hook_except(); }
     g_orig_draw_indexed_instanced(self, icpi, ic, sil, bvl, sil2);
     try {
-    if (g_vmir_pending &&   // KH_VOL_MIRROR re-issue (at KH_VMIR_NEAR); the flag is set for the
-        self == g_reorder_target_ctx.load(std::memory_order_relaxed)) {   // tracked context's own draw
-                                                                          // (kh_svs_bracket_post gate).
+    if (g_vmir_pending &&   // Mirror re-issue; the flag is set for the tracked context's own draw.
+        self == g_reorder_target_ctx.load(std::memory_order_relaxed)) {
         g_vmir_pending = false;
         if (kh_vmir_begin(self)) {
             g_orig_draw_indexed_instanced(self, icpi, ic, sil, bvl, sil2);
@@ -28942,9 +27348,8 @@ static void STDMETHODCALLTYPE hooked_draw_instanced(ID3D11DeviceContext* self, U
     try { reorder_pre_draw(self); } catch (...) { kh_hook_except(); }
     g_orig_draw_instanced(self, vcpi, ic, svl, sil);
     try {
-    if (g_vmir_pending &&   // KH_VOL_MIRROR re-issue (at KH_VMIR_NEAR); the flag is set for the
-        self == g_reorder_target_ctx.load(std::memory_order_relaxed)) {   // tracked context's own draw
-                                                                          // (kh_svs_bracket_post gate).
+    if (g_vmir_pending &&   // Mirror re-issue; the flag is set for the tracked context's own draw.
+        self == g_reorder_target_ctx.load(std::memory_order_relaxed)) {
         g_vmir_pending = false;
         if (kh_vmir_begin(self)) {
             g_orig_draw_instanced(self, vcpi, ic, svl, sil);
@@ -29007,9 +27412,9 @@ static void STDMETHODCALLTYPE hooked_omset_rendertargets(ID3D11DeviceContext* se
         shadow_track_targets(self, dsv, g_ro.dsv_main, n, rtvs);
 
         if (!was_on_atlas && g_ls.phase_on_atlas && g_ls.resolve_seen_since_cast) {
-            // Clearing it here is what keeps the atlas-exit-to-boundary window
-            // of the next cycle from re-firing the previous cycle's frozen
-            // inputs into the new cycle's mask.
+            // Clearing it here keeps the atlas-exit-to-boundary window of the
+            // next cycle from re-firing the previous cycle's frozen inputs into
+            // the new cycle's mask.
             g_ls.resolve_seen_since_cast = false;
         }
 
@@ -29031,8 +27436,8 @@ static void STDMETHODCALLTYPE hooked_omset_rts_and_uavs(ID3D11DeviceContext* sel
         !g_kh_flush_active && !g_ui_mask_injecting &&   // own-state exclusion by flags.
         reorder_on_render_thread() &&
         n != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL) {
-        // The DSV changes through this path too; leaving it untracked lets the
-        // flag go stale (n == keep leaves the current bindings alone).
+        // The DSV changes through this path too (n == keep leaves the current
+        // bindings alone).
         g_ro.dsv_main = dsv && g_main_depth_identity &&
                         reorder_dsv_identity(dsv) == g_main_depth_identity;
         kh_pip_track_targets(self, n, rtvs, dsv);   // KH_PIP (+ KH_PIP_FX at a leave).
@@ -29047,8 +27452,8 @@ static void STDMETHODCALLTYPE hooked_omset_rts_and_uavs(ID3D11DeviceContext* sel
 static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* self, ID3D11DepthStencilView* dsv, UINT flags, FLOAT depth, UINT8 stencil) {
     try {
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && !g_ro.in_injection &&
-        !g_kh_flush_active.load(std::memory_order_relaxed) &&   // Own-state exclusion: the flush's
-                                                                  // sun / DLS / owner clears are ours.
+        // Own-state exclusion: the flush's sun / DLS clears are ours.
+        !g_kh_flush_active.load(std::memory_order_relaxed) &&
         dsv && (flags & D3D11_CLEAR_DEPTH)) {
         g_depth_clear_serial++;   // KH_SVS_SKIP: any depth clear invalidates a cached seam inject.
         if (!(g_main_depth_identity && reorder_dsv_identity(dsv) == g_main_depth_identity)) kh_pip_on_clear();   // KH_PIP.
@@ -29061,17 +27466,15 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
             g_boundary_t = effect_time_seconds();
             kh_volume_seam_frame_reset();   // One injection per frame.
 
-            // post-flush redraw: a clear-less world redraw after the
+            // Post-flush redraw detector: a clear-less world redraw after the
             // flush shows up as opaques drawn past the flush's stamp (normal
-            // frames end at ~the stamp: translucents draw after the flush,
-            // opaques do not). Field-proven detector for the accepted repaint
-            // residual; the sentinel re-arms it per frame.
+            // frames end at ~the stamp). The sentinel re-arms it per frame.
             g_cc_flush_opaques.store(0xFFFFFFFFu, std::memory_order_relaxed);
 
             g_topo_cycles++;
 
             // A depth clear of the main scene buffer marks the new frame:
-            // Injection re-arms and the phase evidence resets.
+            // injection re-arms and the phase evidence resets.
             kh_blk_owner_frame();   // KH_LIGHT_BASE: the ended frame's base lighting publishes.
             kh_sun_raw_frame();   // KH_SUN_RAW: the ended frame's sun direction publishes.
             g_ro.injected = false;
@@ -29089,42 +27492,18 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
             g_ro.world_pair_valid = false;   // world-phase pair latch is per-cycle.
 
             if (g_sun_jump_pending) {
-                // A raw publish stepped past KH_SRAW_JUMP_DEG. The band seals are
-                // NOT wiped (the former wipe was measured as nothing but a few
-                // frames of absent bands: each seal re-pairs at its next capture,
-                // which is every capture since KH_RESEAL_FOLD); the union's map hash
-                // resets below.
+                // A raw publish stepped past KH_SRAW_JUMP_DEG. The band seals
+                // are NOT wiped (each re-pairs at its next capture anyway); the
+                // union's map hash resets below.
                 g_sun_jump_pending = false;
 
-                // KH_SUN_JUMP_KEEP: this used to zero sweep_settle and demand
-                // 10 sweeps back. maskArmZeroFrames 21 against sweepResetSun 21
-                // - identical, with fov 0 and gap 3 - so this reset, and only
-                // this reset, was costing a frame of world cast every time it
-                // fired. A frame with no world cast is a frame with no
-                // world-cast shadows, and that is the flicker.
-                //
-                // sweep_settle counts coherent sweeps of the ENGINE'S MASK
-                // STREAM, and a sun change does not make that stream
-                // incoherent. The two things that do - a > 0.25 s resolve gap
-                // and a > 10% fov move - are detected at their own site, every
-                // sweep, independently of this one. What a sun change
-                // invalidates is OUR sun maps - which the hash reset below
-                // re-fits WITHOUT clearing validity (see KH_SUN_JUMP_HOLD).
-                //
-                // The original comment recorded a real defect: a post-skip
-                // overcast firing into the transitional resolves. History
-                // only: this form has been built and tested across time
-                // skips with no overcast; the sweep_settle reset stays out.
-                // Settled.
-                // KH_SUN_JUMP_HOLD: the mask cast fires at draw 0, BEFORE
-                // render_sun_depth runs at the injection. Clearing validity
-                // here left that fire without a map for one frame, and it
-                // took the 64-caster analytic fallback instead - 1641 mapped
-                // shadows swapped for 64 hard boxes, once per jump
-                // (sweepResetSun 14/min in dump1). The union's hash already
-                // carries the sun, so the re-fit needs no invalidation; the
-                // hash reset below only makes it unconditional. Last frame's
-                // map, a degree or so stale, ships for exactly one fire.
+                // A sun jump must NOT reset sweep_settle (it counts coherent
+                // sweeps of the ENGINE'S mask stream, which a sun change does
+                // not break; the reset cost a frame of world cast - the
+                // flicker) and must NOT clear map validity (the mask cast fires
+                // at draw 0, before render_sun_depth, and would take the
+                // analytic fallback). The union's hash already carries the sun;
+                // the reset below only makes the re-fit unconditional.
                 g_sun_map_hash = 0;
             }
 
@@ -29138,7 +27517,6 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
                 g_ls.resolve_seen_since_cast = false;
             }
 
-            // The freeze, one layer upstream.
             {
                 const float khcp_t = static_cast<float>(effect_time_seconds());
                 if (g_ro.cycle_pv_valid) {
@@ -29161,11 +27539,11 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
             g_fire_clamp_painted = 0;
             g_fire_count_frame = 0;   // Fire census / tint parity rolls per cycle.
             g_mask_cast_fired = false;   // New frame: one analytic pass allowed.
-            g_mask_cast_arm = false;   // don't arm at the boundary: this frame's gated capture
-                                       // hasn't run yet, so the fire would use the previous frame's
-                                       // depth snapshot - on partitioned look-down frames near the
-                                       // mesh that stale close-range depth MIN-darkened the screen
-                                       // (the overcast).
+            // Do not arm at the boundary: this frame's gated capture has not
+            // run yet, so the fire would use the previous frame's depth
+            // snapshot - on partitioned look-down frames near the mesh that
+            // stale close-range depth MIN-darkened the screen.
+            g_mask_cast_arm = false;
             g_ls.view_published_this_frame = false;
 
             RVExtBridge::ProjectionViewTransform pv = {};
@@ -29173,7 +27551,7 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
             if (RVExtBridge::get_projection_view_transform(pv)) {
                 g_boundary_pv = pv;
                 g_boundary_pv_valid = true;
-                // KH_LATCH_FOLD: adopt (see the note at KH_LATCH_JUMP_M).
+                // Adopt the bridge PV at the clear (see KH_LATCH_JUMP_M).
                 float khc_cam[3];
                 extract_camera_pos(pv.view, khc_cam);
                 g_cam_step_m = g_latch_cam_valid
@@ -29303,19 +27681,16 @@ inline void ensure_reorder_hook() {
 }
 
 // Retained-mode flush: runs once per frame from the C++ Draw3D EH: geometry
-// then post-processing, with the scene captured at most once per frame, shared
-// by all scene-read objects. Fully dormant (immediate return) when there is
-// nothing to do.
+// then post-processing, with the scene captured at most once per frame. Fully
+// dormant when there is nothing to do.
 
-// Runs the actual per-frame work. The graphics lock is already held by the
-// caller (flush_frame). Returns after counting the skip reason if the bound
-// targets are not the main scene's.
+// The per-frame work. The graphics lock is already held by the caller
+// (flush_frame).
 inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
-    // KH_MESH_PUBLISH_DEFER: land a publish kh_fbx_register could not park for.
-    // This body holds the park end to end, so the publish and the VB top-up
-    // share one serialized window exactly as the register path's own park does.
-    // Ahead of every skip below on purpose: a frame the flush declines is still
-    // a parked frame, and the mesh must not wait for the gate to pass.
+    // Land a publish kh_fbx_register could not park for. This body holds the
+    // park end to end, so the publish and the VB top-up share one serialized
+    // window. Ahead of every skip below on purpose: a frame the flush declines
+    // is still a parked frame.
     if (g_mesh_publish_pending.exchange(false, std::memory_order_relaxed)) {
         kh_mesh_publish();
         const std::string khmp_err = ensure_mesh_vbs(dev);
@@ -29326,18 +27701,15 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     kh_material_gc();   // KH_MAT_POOL.
     kh_tex_cache_gc();   // KH_TEX_GC.
     // The graphics lock is held for all of flush_locked, which parks the render
-    // thread - the same invariant the injection relies on for lock-free context
-    // use - so these plain stores can never be observed mid-write. Publish this
-    // frame's staged world lighting for the render-thread consumers
-    // (composited-path shading).
+    // thread, so these plain stores can never be observed mid-write. Publish
+    // this frame's staged world lighting for the render-thread consumers.
     publish_world_lighting();
 
     // The lighting block AND the sun direction are published at the main depth
-    // clear (kh_blk_owner_frame, kh_sun_raw_frame), not here: nothing on the
-    // flush arbitrates either; the lit flag is g_sun_valid itself.
+    // clear, not here: nothing on the flush arbitrates either.
 
-    // Flush stamps: the serial keys the miss latch (once per flush); the opaque
-    // count feeds the post-flush redraw check at the next clear.
+    // Flush stamps: the serial keys the miss latch; the opaque count feeds the
+    // post-flush redraw check at the next clear.
     g_cc_flush_serial.fetch_add(1, std::memory_order_relaxed);
     g_cc_flush_opaques.store(g_ro.opaque_draws, std::memory_order_relaxed);
 
@@ -29346,10 +27718,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     kh_scene_sync();   // KH_SCENE.
     has_objects = g_scene.alive_n > 0;
 
-    // Require a DSV and require it to be the main scene's depth resource, not a
-    // PiP/mirror/UAV sub-pass. Drawing into a sub-pass both misses the visible
-    // frame (flicker) and churns the depth SRV cache against the wrong
-    // resource.
+    // Require a DSV and require it to be the main scene's depth, not a
+    // PiP/mirror/UAV sub-pass. Drawing into a sub-pass misses the visible frame
+    // and churns the depth SRV cache against the wrong resource.
 
     {
         ID3D11DepthStencilView* dsv = nullptr;
@@ -29397,10 +27768,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         } else {
             g_wrong_pass_streak = 0;
         }
-        // Which depended on the trigger firing - correctly never at 1x
-        // post-strip. td is the adopted-or-matched main scene depth the
-        // wrong-pass branch returned above, read here every flush with work at
-        // any FSAA state, zero added com calls.
+        // td is the adopted-or-matched main scene depth, read here every flush
+        // with work at any FSAA state.
         g_scene_depth_samples = td.SampleDesc.Count;
         // This site sees every transition at any FSAA, on the game thread under
         // the flush lock. The wipe compares against g_res.depth_sample_count;
@@ -29416,10 +27785,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         const bool khf_hold_now = khf_res_err == KH_SHADERS_COMPILING;
         if (khf_hold_now != g_acq_hold.load(std::memory_order_relaxed)) {
             g_acq_hold.store(khf_hold_now, std::memory_order_relaxed);
-            // Everything the chain accumulated while the flush was down belongs to an era
-            // with no reference behind it - wrong-era candidates whose best blocks the right
-            // one - so the release hands the first live frame a cold chain, not a poisoned
-            // one.
+            // Everything the chain accumulated while the flush was down belongs
+            // to an era with no reference behind it, so the release hands the
+            // first live frame a cold chain, not a poisoned one.
             if (!khf_hold_now) {
                 g_ls.view_src_valid = false;
                 g_ls.vc_n = 0;
@@ -29429,7 +27797,6 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 g_ls.alt_view_valid = false;
                 g_ring_best_valid = false;
                 g_view_relock_wide_cycle = 0;
-                // Warm sessions never take this door.
                                 g_ls.wipe_deferred = true;
 
                 for (int khf_b = 0; khf_b < 8; ++khf_b) {
@@ -29450,18 +27817,18 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     if (!has_objects) return;
 
-    // Snapshot the visible objects under the mutex, draw without holding it.
-    // Meshes and fullscreen passes are split; fullscreen passes run last, in
-    // handle (creation) order so chained effects compose deterministically.
+    // Snapshot the visible objects, draw without holding the mutex. Meshes and
+    // fullscreen passes are split; fullscreen passes run last, in creation
+    // order so chained effects compose deterministically.
     const float snapshot_now = effect_time_seconds();
     static uint64_t s_prev_inject_serial = 0;   // Flush runs on the game thread only.
     const uint64_t inject_serial = g_composite_inject_serial.load(std::memory_order_relaxed);
     const bool injected_since_last_flush = inject_serial != s_prev_inject_serial;
     s_prev_inject_serial = inject_serial;
     // A frame that saw an anomalous cycle, or whose world redrew after the
-    // injection (the repaint), or that never injected, gets its meshes drawn
-    // late here as well - identical overdraw where the injection survived,
-    // fill-in where a foreign pass erased it.
+    // injection, or that never injected, gets its meshes drawn late here as
+    // well - identical overdraw where the injection survived, fill-in where a
+    // foreign pass erased it.
     const bool repainted_since_inject = g_ro.opaques_since_inject >= 32;
     const bool anomaly_this_frame = g_ro.anomaly_seen;
     g_ro.anomaly_seen = false;
@@ -29486,7 +27853,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     {
         kh_scene_sync();   // KH_SCENE: live walk; the copies below are of visible objects only.
-        g_khf_veto_cands.clear();   // c8 veto scratch re-arms per flush.
+        g_khf_veto_cands.clear();
 
         for (uint32_t khsc_i = 0; khsc_i < g_scene.objs.size(); ++khsc_i) {
             if (!g_scene.alive[khsc_i]) continue;
@@ -29498,15 +27865,15 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 khf_expired.push_back(khsc_i);
                 continue;
             }
-            // Sun-map demand: a visible lit receiver (the old rule, kept whole)
-            // or any shadow-active object (KH_SHADOW_ACTIVE: casterOnly too).
+            // Sun-map demand: a visible lit receiver or any shadow-active
+            // object (casterOnly too).
             if ((khf_live.visible && khf_live.lit && !khf_live.fullscreen) || kh_shadow_active(khf_live)) khf_any_lit = true;
 
             if (khf_live.visible) {
                 RenderObject o = khf_live;
                 o.color[3] *= env;   // Envelope = universal intensity.
                 if (!o.fullscreen && kh_fsaa_world_standdown()) { continue; }
-                // Collected from the full list: composite- eligible solids are
+                // Collected from the full list: composite-eligible solids are
                 // absent from the flush's own mesh set on healthy frames and
                 // must still veto.
                 if (!o.fullscreen && o.effect == 0 && o.mode != DepthMode::Off &&
@@ -29517,15 +27884,14 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 if (!o.fullscreen) khf_any_mesh = true;
 
                 if (o.fullscreen) {
-                    // Both semantics: scene and both run here (the pre-tonemap
-                    // chain - the correct domain for the scene half); only
-                    // UI-mode passes are excluded.
+                    // Scene and both semantics run here (the pre-tonemap
+                    // chain); only UI-mode passes are excluded.
                     if (!o.ui_only) fullscreen.emplace_back(o.seq, o);
                 } else if (comp_healthy && is_composite_eligible(o)) {
-                    // Composited meshes are drawn pre-translucent by the reorder hook; the flush
-                    // stands down for them while injections are actually happening, blend submeshes
-                    // included (KH_BLEND_PART_INJ: the injection draws the translucent part in its
-                    // own tail with the solid draw's exact state).
+                    // Composited meshes are drawn pre-translucent by the
+                    // reorder hook; the flush stands down for them while
+                    // injections are happening, blend submeshes included (the
+                    // injection draws the translucent part in its own tail).
                 } else {
                     if (is_composite_eligible(o)) {
                         const uint64_t ms_fs = g_cc_flush_serial.load(std::memory_order_relaxed);
@@ -29535,11 +27901,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                             g_carry_pending_serial.store(ms_fs, std::memory_order_relaxed);
                         }
                     }
-                    // KH_MAT_BLEND: an object the flush owns this frame with a
-                    // blend material splits in two - its opaque part draws in
-                    // place, its translucent part joins the sorted tail. Effect
-                    // meshes and overlays keep their whole-object draw (their
-                    // PS never samples materials).
+                    // An object the flush owns this frame with a blend material
+                    // splits in two: its opaque part draws in place, its
+                    // translucent part joins the sorted tail. Effect meshes
+                    // keep their whole-object draw.
                     if (o.effect == 0 && o.mode != DepthMode::Off && kh_obj_has_blend(o)) {
                         meshes.push_back(o);
                         meshes.back().draw_part = 2;
@@ -29566,10 +27931,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     QueryPerformanceCounter(&khsn_t1);
 
-    // The render thread is parked (the same our-own-window invariant as every
-    // other draw here), the pass saves/restores its own RT + viewport state,
-    // and g_sun_map_rendered_frame makes this a no-op whenever the injection
-    // already ran this frame.
+    // The render thread is parked, the pass saves/restores its own RT +
+    // viewport state, and g_sun_map_rendered_frame makes this a no-op whenever
+    // the injection already ran this frame.
     kh_dls_select();   // KH_DL_SHADOW twin 2/2 (frame-guarded; free if twin 1 already ran).
     if (!injected_since_last_flush && khf_any_lit) {
         render_sun_depth(ctx);
@@ -29603,8 +27967,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     }
 
     // Registration repaint is meaningful only when an injected image exists
-    // this frame: require the landing itself; the window stays as the staleness
-    // bound on the landing's stamp.
+    // this frame; the window is the staleness bound on the landing's stamp.
     if (injected_since_last_flush &&
         g_inj_view_ms != 0 && steady_now_ms() - g_inj_view_ms < 100) {
         memcpy(&pv.view[0][0], g_inj_view, sizeof(g_inj_view));
@@ -29649,9 +28012,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         pv.projection[3][2] = g_inj_enc_m32;
     } else if (khf_latch_far) {
         // Far drifted under an agreeing near: the latch pair is the encode this
-        // flush (no override) - deliberately ahead of the slot rung, whose
-        // flush-time value is the partition-ambiguity the publish path exists
-        // to avoid (log_new8).
+        // flush - deliberately ahead of the slot rung, whose flush-time value
+        // is the partition ambiguity the publish path exists to avoid.
     } else if (khf_slot_band) {
         pv.projection[2][2] = g_ro.slot_m22;
         pv.projection[3][2] = g_ro.slot_m32;
@@ -29685,11 +28047,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                               g_far_keep_far > khf_acc_far * 1.05f;
     bool khf_farkeep_draw = false;   // per-mesh verdict (written by upload_cb).
 
-    // Snapshot demand: every consumer is mesh-side (the injection guard, the
+    // Occlusion snapshot. Every consumer is mesh-side (the injection guard, the
     // flush PSMain guard/arb, the t2 effect-mesh arbitration - all
     // freshness-gated and fail-safe to the stock path); the fullscreen chain
-    // Reads the live depth SRV, never this. Occlusion snapshot (the overhaul's
-    // producer).
+    // reads the live depth SRV, never this.
     if (khf_any_mesh) {
         std::string khs_err = snapshot_composite_depth(dev, ctx);
 
@@ -29706,10 +28067,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 g_snap_pair_src = 0;
             }
             if (!kh_view_camera_exact(pv.view, g_snap_cam)) extract_camera_pos(pv.view, g_snap_cam);
-            // Rows), so the shader multiplies a camera-relative offset - exact
-            // algebra whichever point c is; c near the true camera only keeps
-            // magnitudes small. KH_SNAP_REPROJECT: view*proj of this frame
-            // folded in double and rebased to g_snap_cam (row3 += cam.
+            // view*proj of this frame folded in double and rebased to
+            // g_snap_cam (row3 += cam . rows), so the shader multiplies a
+            // camera-relative offset - exact algebra whichever point c is; c
+            // near the true camera only keeps magnitudes small.
             {
                 double khsv_v[4][4];
                 for (int khsv_r = 0; khsv_r < 4; ++khsv_r)
@@ -29769,18 +28130,12 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     }
 
     float inv_view_proj[4][4] = {};
-    // KH_FX_DEPTH_VIEW: the inverse serves KhWorldPosFenced, which reads the
-    // depth buffer - so it inverts the view that RENDERED that depth: the
-    // cycle's boundary camera, harvested at its clear. The flush's own pv may
-    // be the injection's view (a frame's difference on the flushes that park
-    // the render thread past the next clear), which is right for the meshes
-    // it places and wrong for a reconstruction from the engine's depth: the
-    // soft edge of every localized mask shimmered under motion. Absolute, as
-    // view_proj is here (the rebase happens later).
-    // KH_FX_CAM_REL: the inverse is of the rotation-only view (camera at the
-    // origin) and the camera rides in fxCam for the shader to add back -
-    // KhgVpos's contract, the bucket path's khPass contract. An absolute
-    // inverse is kilometres in every entry cancelling per pixel in fp32.
+    // The inverse serves KhWorldPosFenced, which reads the engine depth, so it
+    // inverts the view that RENDERED that depth: the cycle's boundary camera -
+    // the flush's own pv may be the injection's view a frame apart, which
+    // shimmers every localized mask's edge. The inverse is of the rotation-only
+    // view; the camera rides in fxCam (an absolute inverse is kilometres
+    // cancelling per pixel in fp32).
     float khf_dvp[4][4];
     float khf_fx_cam[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
     if (g_ro.cycle_pv_valid && !g_ro.cycle_pv_stale && fabsf(g_ro.cycle_pv.projection[2][2]) > 1.0e-6f) {
@@ -29802,12 +28157,11 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     }
     const bool has_inverse = need_inverse && inverse_4x4(khf_dvp, inv_view_proj);
     // has_inverse is only consulted by objects that need it, so skipping the
-    // inverse when nothing does is behavior-identical.
+    // inverse when nothing does is behaviour-identical.
     float cam[3];
     extract_camera_pos(pv.view, cam);
     // Taken here, before the rain tracker and every other consumer, so the pass
-    // is internally coherent (a taken frame moves cam by 0-2 ulp, three orders
-    // below any gate downstream).
+    // is internally coherent.
     const bool khf_engcam = kh_engcam_consume(pv.view, cam);
 
     {
@@ -29863,11 +28217,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             vp_min_d = vp.MinDepth;
             vp_max_d = vp.MaxDepth;
 
-            // Only accept a range that spans the bulk of [0, 1] - the scene
-            // range does, sub-passes do not. The Draw3D park point can land
-            // inside a secondary render cycle whose viewport range is a narrow
-            // slice; recording that would poison the UI-phase depth
-            // linearization.
+            // Only accept a range that spans the bulk of [0, 1]: the Draw3D
+            // park point can land inside a secondary render cycle whose
+            // viewport range is a narrow slice, which would poison the UI-phase
+            // depth linearization.
             if (vp.MinDepth < 0.5f && vp.MaxDepth > 0.5f) {
                 g_scene_vp_min_d = vp.MinDepth;
                 g_scene_vp_max_d = vp.MaxDepth;
@@ -29875,17 +28228,16 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         }
     }
 
-    // Under the park, so the injection's read is the same lock-free staged read
-    // publish_world_lighting already relies on. KH_MESH_LOD: the pass's own
-    // pixels-per-tangent, published for both draw loops.
+    // The pass's own pixels-per-tangent, published under the park for both draw
+    // loops.
     g_lod_proj_px = (screen_h > 0.0f && pv.projection[1][1] > 0.0f)
                   ? pv.projection[1][1] * screen_h * 0.5f : 0.0f;
 
     const float now = effect_time_seconds();
 
     // Capability gating per frame: effects need the scene capture and the
-    // effect shader - Outline/Pulse additionally need the depth SRV in the PS,
-    // which requires the read-only DSV swap; without it they are skipped.
+    // effect shader; depth effects additionally need the depth SRV in the PS,
+    // which requires the read-only DSV swap.
     auto needs_depth = [](const RenderObject& o) {
         return o.localized || o.banded ||
                o.effect == static_cast<int>(EffectId::Outline) ||
@@ -29904,13 +28256,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     for (const auto& o : meshes) {
         if (o.effect > 0) any_effect = true;
-        // KH_MESH_FX_SPLIT: a mode-Off solid used to count here too. Its
-        // guard reads the proven snapshot at t0 (PSMain, armed by
-        // fxParams1.x < 1e8, which upload_cb disarms without a fresh
-        // snapshot) - never t1, never the effect unit, never the scene
-        // capture - so the term bought a mesh-only scene the effect shader
-        // and a scene resolve per flush that nothing read, and tied the
-        // mesh's frame to the effect path's setup succeeding.
+        // A mode-Off solid does not count here: its guard reads the snapshot at
+        // t0 (PSMain, armed by fxParams1.x < 1e8, which upload_cb disarms
+        // without a fresh snapshot) - never t1, never the effect unit, never
+        // the scene capture.
         if (needs_depth(o)) {
             any_effect = true;
             any_depth_fx = true;
@@ -29948,9 +28297,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
         // Without it, demote for the frame - a mesh becomes a solid, a
         // fullscreen pass is dropped by the chain's effect <= 0 skip - rather
-        // than gather through an unbound t1. Fail direction: one fx-less frame.
-        // (Fogscatter joined the stand-down - live depth is its distance
-        // authority; same demotion, same fail direction.).
+        // than gather through an unbound t1. Fogscatter joins the stand-down:
+        // live depth is its distance authority.
         if (!depth_fx_ready) {
             for (auto& o : meshes)
                 if (o.effect == static_cast<int>(EffectId::Ssgi) ||
@@ -29969,23 +28317,18 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         }
     }
 
-    // It carried a three-group order that the replacement did not: overlays
-    // last, then translucent and effect meshes, then opaques.
-
     StateBackup backup;
     backup.capture(ctx);
     kh_objbuf_sync(ctx);   // KH_OBJBUF: the flush's buckets index the records too.
     kh_objbuf_bind(ctx);
     kh_tex_async_pump(ctx, dev);   // KH_TEX_ASYNC: before any base is fixed or lane written.
 
-    // Depth-sampling effects: the read-only DSV is swapped in so the live
-    // depth SRV may legally sit at PS t1 while depth testing continues to
-    // work. The swap is per draw, not per phase: it lands when the scene/depth
-    // pair is bound (effect meshes, then the fullscreen chain) and the real
-    // DSV returns for any depth-writing solid that follows, so a TestWrite
-    // mesh keeps its depth write on frames that also carry a depth effect.
-    // The depth SRV is never bound while the writable DSV is (t1 = atlas on
-    // the solid category), so the runtime never sees the hazard pair.
+    // Depth-sampling effects: the read-only DSV is swapped in so the live depth
+    // SRV may sit at PS t1 while depth testing continues. Per draw, not per
+    // phase: it lands when the scene/depth pair is bound and the real DSV
+    // returns for any depth-writing solid, so a TestWrite mesh keeps its write
+    // on frames that also carry a depth effect. The depth SRV is never bound
+    // while the writable DSV is (t1 = atlas on the solid category).
     KhOmSave khf_om;
     bool khf_om_captured = false;
     bool khf_dsv_ro = false;
@@ -30020,19 +28363,18 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         depth_fx_ready ? g_res.depth_srv : nullptr
     };
     // t1 here (FSAA off: a single-channel R24/R32 SRV over the live depth) and
-    // the PIP depth copy in kh_pip_fx both land under the effect unit's
-    // MSAA_DEPTH 0 declaration Texture2D<float2> depthTex; the arb snapshot
-    // (R32G32) lands under Texture2D<float> khArbSnap. The shader reads .x
-    // only and the core runtime does not validate return-type width, so this
-    // is settled behaviour; only the debug layer would warn. Not a defect.
+    // the PIP depth copy both land under the effect unit's Texture2D<float2>
+    // depthTex; the arb snapshot (R32G32) under Texture2D<float> khArbSnap. The
+    // shader reads .x only and the runtime does not validate return-type width;
+    // only the debug layer would warn.
 
     // t1 stays empty until the first pair consumer swaps the DSV (see
     // khf_dsv_swap): the writable DSV is bound at this point.
     ID3D11ShaderResourceView* khf_srvs_init[2] = { ps_srvs[0], nullptr };
     ctx->PSSetShaderResources(0, 2, khf_srvs_init);
     // Flush-time proven depth snapshot for the effect-mesh arbitration (t2,
-    // inside the StateBackup saved range; harmless when nothing arms - PSEffect
-    // reads it only behind the local1.z gate).
+    // inside the StateBackup saved range; PSEffect reads it only behind the
+    // local1.z gate).
     if (g_res.comp_depth_srv && g_res.comp_depth_samples == 1) {
         ctx->PSSetShaderResources(2, 1, &g_res.comp_depth_srv);
     }
@@ -30051,8 +28393,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     if (g_res.samp_pf) ctx->PSSetSamplers(1, 1, &g_res.samp_pf);
     // Analytic terrain heightfield (t10, saved range) - the flush twin.
     if (g_thm_valid && g_res.thm_srv) ctx->PSSetShaderResources(10, 1, &g_res.thm_srv);
-    // KH_DL_SHADOW: the light depth array at t36, twin of the injection's bind
-    // and inside this pass's StateBackup range.
+    // The light depth array at t36, twin of the injection's bind and inside
+    // this pass's StateBackup range.
     if (g_res.dls_srv) {
         ctx->PSSetShaderResources(36, 1, &g_res.dls_srv);
     }
@@ -30064,16 +28406,15 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     }
     const FLOAT bf[4] = { 0, 0, 0, 0 };
     ctx->OMSetBlendState(g_res.blend_modes[0], bf, 0xFFFFFFFF);
-    ctx->RSSetState(kh_rs_pick(g_res.rasterizer));
+    ctx->RSSetState(g_res.rasterizer);
     ID3D11RasterizerState* khr_bound_rs = g_res.rasterizer;
     // Declared before the upload lambda so its [&] capture can see it; the
     // capture block just before the mesh pass sets the verdict.
     bool khf_perceptual = false;
 
     // Same floor/hold hysteresis on the flush's final encode near; requires the
-    // same-flush snapshot (fresh by construction on every healthy flush) and
-    // the live heightfield. Fail-safe direction: either down => stock path,
-    // today's behavior.
+    // same-flush snapshot and the live heightfield. Fail-safe: either down =>
+    // stock path.
     bool khf_fx_arb_this = false;
     static bool khf_fx_arb_prev = false;
     const float khf_arb_near = fabsf(pv.projection[2][2]) > 1e-9f
@@ -30082,14 +28423,14 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                                  g_res.comp_depth_time >= 0.0f &&
                                  now - g_res.comp_depth_time < 0.5f;
     // Floor restored here too - the twin must agree with the injection or the
-    // flush repaint re-takes the step. Mode 55 ungates both.
+    // flush repaint re-takes the step.
     const bool khf_arb_near_ok = khf_arb_near >= KH_FAR_ARB_NEAR_MIN || (khf_fx_arb_prev && khf_arb_near >= KH_FAR_ARB_NEAR_HOLD);
     const bool khf_fx_arb_frame = khf_arb_snap_ok && g_thm_valid && khf_arb_near_ok;
 
     khf_fx_arb_prev = khf_fx_arb_frame;
 
-    // Deliberate twin of the injection build (khr_cbf); see the note there. The
-    // per-object draw tails of the two mesh paths are twins by the same decision.
+    // Deliberate twin of the injection build (khr_cbf); the per-object draw
+    // tails of the two mesh paths are twins by the same decision.
     ConstantData khf_cbf = {};
     memcpy(khf_cbf.view_proj, view_proj, sizeof(khf_cbf.view_proj));
     memcpy(khf_cbf.inv_view_proj, inv_view_proj, sizeof(khf_cbf.inv_view_proj));
@@ -30100,10 +28441,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     fill_lighting_frame_cb(khf_cbf);
     {
         bool band_any = false;
-        // finest-first: order slots by near edge ascending, so the shader's
+        // Finest-first: order slots by near edge ascending, so the shader's
         // first containing band holds the finest content in the engine's
-        // overlap (crossfade) zones. bandBorder.w encodes valid + which
-        // physical texture slot to sample (1 + index).
+        // overlap zones. bandBorder.w encodes valid + which physical texture
+        // slot to sample (1 + index).
         int order[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
 
         for (int a = 0; a < 7; ++a) {
@@ -30138,22 +28479,20 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
             if (!kh_recv_health()) { continue; }
 
-            // Absent beats offset; the band re-enters the moment its seal
-            // completes. spawn-window guard: a pending band whose provisional
-            // view is the bridge fallback pairs cross-convention - the
-            // initial-shadow drift.
+            // Spawn-window guard: a pending band whose provisional view is the
+            // bridge fallback pairs cross-convention; the band re-enters the
+            // moment its seal completes.
             if (bs.pending_view && bs.vcol_bridge) {  continue; }
 
             // A pending band's vcol belongs to the epoch before the sm sitting
-            // next to it - the completion that pairs them has not run yet.
+            // next to it.
             if (bs.pending_view) {
                 continue;
             }
 
             // Twin dedupe: near inside the previous band's range and far not
-            // meaningfully beyond it = a partition duplicate of the same range;
-            // two twins alternate seal content and the shader's winner
-            // flip-flops (the range flicker).
+            // meaningfully beyond it = a partition duplicate; two twins
+            // alternate seal content and the shader's winner flip-flops.
             if (!(bs.border[1] > bs.border[0]) || bs.border[0] < 0.0f ||
                 bs.border[1] > 4000.0f) {
                 g_ls.band[order[b]].valid = false;   // The next resolve reseals sanely.
@@ -30185,27 +28524,24 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         kh_fill_sten_proj(khf_cbf, pv.projection);
         kh_fill_sten_reproj(khf_cbf);
 
-        // engine-mask depth-gated receive: registration-exact shadows (units,
-        // clouds, everything the engine resolves) on mesh surfaces within the
-        // depth margin of world geometry.
+        // Engine-mask depth-gated receive: registration-exact engine shadows on
+        // mesh surfaces within the depth margin of world geometry.
 
-        // Same reasoning as KhHazeT's: below the layer the engine switches to
-        // a branch outside our model, where the above-layer formula would pin
-        // the height term at full density and white the mesh out. Standing
-        // down there (fogBelow.y) is the intentional, tested answer. Closed.
+        // INTENTIONAL (same reasoning as KhHazeT): below the fog layer the
+        // engine switches to a branch outside our model, where the above-layer
+        // formula would pin the height term at full density and white the mesh
+        // out; the mesh stands down there (fogBelow.y).
         const float khf_cam_y =
             (g_ls.cam[0] * g_ls.cam[0] + g_ls.cam[1] * g_ls.cam[1] +
              g_ls.cam[2] * g_ls.cam[2] >= 1.0f) ? g_ls.cam[1]
           : (cam[0] * cam[0] + cam[1] * cam[1] + cam[2] * cam[2] >= 1.0f)
              ? cam[1] : 0.0f;
         // The altitude the fog block ships: clamped at the layer, never below
-        // it. The true camera altitude ships on the default path because the
-        // branch needs it to split the ray at the layer; clamping it would
-        // erase the very quantity the split consumes.
+        // it. The true camera altitude ships on the default path because that
+        // branch splits the ray at the layer.
         const float khf_fog_cam_y = khf_cam_y;
-        // fogBelow: x = the engine's below-layer extinction (block nb[51],
-        // cb5[12].w in the export - captured, read for the first time here), y
-        // = armed, z = the 324 clamp selector.
+        // fogBelow: x = the engine's below-layer extinction (block nb[51]), y =
+        // armed, z = the clamp selector.
         khf_cbf.fog_below[0] = (g_light_probe.hits > 0) ? g_light_probe.nb[51] : 0.0f;
         khf_cbf.fog_below[1] = 1.0f;
         khf_cbf.fog_below[2] = 0.0f;
@@ -30219,10 +28555,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             khf_cbf.fog_params[2] = g_fog[2];
             khf_cbf.fog_params[3] = khf_fog_on ? 1.0f : 0.0f;
 
-            // Fog decoupled from the block lock (settings- independence), so a
-            // degenerate staged decay (setFog with decay 0 can never anchor the
-            // probe) or the pre-lock cold window left the mesh unfogged in a
-            // fogged world - a mismatch, not a delay.
+            // Fog is decoupled from the block lock, so a degenerate staged
+            // decay or the pre-lock cold window does not leave the mesh
+            // unfogged in a fogged world.
             if (g_light_probe.hits > 0 && g_light_probe.meta == 40) {
                 const float* e = g_light_probe.nb + 36;
 
@@ -30263,10 +28598,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 khf_cbf.fog_sky_col[0] = g_sky_probe.nb[4];
                 khf_cbf.fog_sky_col[1] = g_sky_probe.nb[5];
                 khf_cbf.fog_sky_col[2] = g_sky_probe.nb[6];
-                // KH_FOG_UW_TARGET: the below-layer convergence colour.
-                // nb[28.30] = cb0[7] (the sky fog colour the export's r3
-                // builds), nb[68.70] = cb0[17] (its elevation gradient). Both
-                // are pure captures - no arithmetic, no choice - and they are
+                // The below-layer convergence colour: nb[28..30] = the sky fog
+                // colour, nb[68..70] = its elevation gradient. Pure captures,
                 // inert unless the shader is below the layer.
                 khf_cbf.fog_uw[0] = g_sky_probe.nb[28];
                 khf_cbf.fog_uw[1] = g_sky_probe.nb[29];
@@ -30281,16 +28614,14 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 g_fog_uw_col[2] = khf_cbf.fog_uw[2];
             }
 
-
             // Twin at the injection fill. Camera altitude (engine Y-up),
             // clamped at the fog layer.
             khf_cbf.fog_color[3] = khf_fog_cam_y;
         }
     }
-    // Heightfield lanes, both arms, solids always carried them; effect meshes
-    // read them only behind the local1.z arb arm (PSEffect's gate), so the
-    // always-live frame fill is pixel-inert for unarmed effects; chain passes
-    // never arm.
+    // Heightfield lanes, both arms: solids always carry them; effect meshes
+    // read them only behind the local1.z arb arm, so the always-live fill is
+    // inert for unarmed effects; chain passes never arm.
     kh_fill_occ(khf_cbf);
     uint64_t khf_fk_slot_seq[8] = {};
     if (khf_fk_fresh) {
@@ -30300,11 +28631,11 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     khf_cbf.kh_pass[0] = cam[0]; khf_cbf.kh_pass[1] = cam[1]; khf_cbf.kh_pass[2] = cam[2];
     khf_cbf.kh_pass[3] = khf_rebase_on ? 1.0f : 0.0f;
     khf_cbf.kh_pass_obj[0] = g_obj_vis.load(std::memory_order_relaxed);
-    // KH_PIP_TPL_FLUSH: the PIP paths (kh_pip_inject, kh_pip_fx) shade from a
-    // frame template the mesh injection publishes; a cycle with no injection
-    // (no meshes in the scene) left them with none. The flush's frame CB is
-    // the same template one publisher later, and the PIP disarms what differs.
-    // The injection's copy, when there is one this cycle, stands.
+    // The PIP paths (kh_pip_inject, kh_pip_fx) shade from a frame template the
+    // mesh injection publishes; a cycle with no injection (no meshes) would
+    // leave them none. The flush's frame CB is the same template one publisher
+    // later, and the PIP disarms what differs. The injection's copy, when there
+    // is one this cycle, stands.
     if (!g_pip.tpl_valid || g_pip.tpl_cycle != g_topo_cycles) {
         g_pip.tpl = khf_cbf;
         g_pip.tpl_valid = true;
@@ -30322,12 +28653,11 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         return khf_fk_fresh && (khfv_o.far_vis || khf_fk_inside) &&
                kh_mesh_dist_sq(khfv_o, cam) > khf_fk_edge * khf_fk_edge;
     };
-    // KH_FLUSH_NEARZ - the near-gap route, flush edition. The same gate, the
-    // same per-mesh verdict (inside near + 2 m, never far-keep), the same two
-    // lanes (fxMeta.x = +-near, fxMeta.y = the gap floor), the same viewport
-    // swap (MinDepth = floor for that draw) and the same pixel variant (the ARB
-    // twin, textured or not), whose SV_Depth ramp spreads the gap fragments
-    // from the floor up to the viewport min.
+    // The near-gap route, flush edition: the same gate, per-mesh verdict
+    // (inside near + 2 m, never far-keep), lanes (fxMeta.x = +-near, fxMeta.y =
+    // the gap floor), viewport swap (MinDepth = floor for that draw) and pixel
+    // variant (the ARB twin, whose SV_Depth ramp spreads the gap fragments from
+    // the floor up to the viewport min).
     const float khf_mesh_vp_lo = g_ro.trig_vp_valid ? g_ro.trig_vp_min : g_scene_vp_min_d;
     const float khf_mesh_vp_hi = g_ro.trig_vp_valid ? g_ro.trig_vp_max : g_scene_vp_max_d;
     const float khf_nz_A = pv.projection[2][2];
@@ -30341,20 +28671,19 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                kh_mesh_dist_sq(khnv_o, cam) < (khf_nz_near + 2.0f) * (khf_nz_near + 2.0f);
     };
     bool khf_nearz_draw = false;   // per-mesh verdict (written by upload_cb).
-    // KH_BUCKETS, flush edition. The plan is built and emitted after the draw
-    // order below; this is the pass verdict (twins + object buffer present)
-    // that every bucket decision on this pass reads, and the slot-1 bind
-    // latch. Twin at the injection.
+    // Buckets, flush edition: the pass verdict (twins + object buffer present)
+    // every bucket decision on this pass reads, and the slot-1 bind latch. Twin
+    // at the injection.
     const bool khf_inst_on = kh_inst_twins_on();
     static KhInstPlan khf_inst_plan;
     bool khf_inst_vb_bound = false;
-    // Hoisted per-object CB: the textured per-submesh path refills the
-    // matParams lanes and re-uploads after upload_cb returns, so the object
-    // slice must outlive the lambda.
+    // Hoisted per-object CB: the textured per-submesh path refills the mat
+    // lanes and re-uploads after upload_cb returns, so the object slice must
+    // outlive the lambda.
     ConstantData khf_obj_cbd = {};
     // khf_defer non-null = build only (deferred chain draw) - the caller
     // uploads the returned slice at flush time; the frame slice already went up
-    // at the pass build either way.
+    // at the pass build.
     auto upload_cb = [&](const RenderObject& o, bool chain_pass,
                          ConstantData* khf_defer = nullptr) -> bool {
         khf_farkeep_draw = false;   // per-call default; solid section may set it.
@@ -30365,28 +28694,22 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         cbd.center_size[1] = o.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y].
         cbd.center_size[2] = o.pos[1];
         cbd.center_size[3] = chain_pass ? 1.0f : 0.0f;
-        // FP32 jitter rebase: per-object arm mirrors the pass verdict (see
-        // kh_rebase_vp - one without the other is the wrong-space landmine).
-        // Chain passes carry it inertly (VSFullscreen).
+        // Per-object rebase arm mirrors the pass verdict (one without the other
+        // is the wrong-space landmine). Chain passes carry it inertly.
         if (khf_rebase_on) kh_fill_center_rel(cbd, cam);
         cbd.size_axes[0] = o.size[0];   // SQF [x,y,z] sizes -> engine [x,z,y].
         cbd.size_axes[1] = o.size[2];
         cbd.size_axes[2] = o.size[1];
         cbd.size_axes[3] = static_cast<float>(o.blend_mode);
         kh_fill_obj_rot(cbd, o.rot_m);
-        // KH_BUCKETS: a normal-blend translucent is never bucketed, so the
-        // perceptual arm is decided by the object alone.
+        // A normal-blend translucent is never bucketed, so the perceptual arm
+        // is decided by the object alone.
         cbd.blend_ctl[0] = (khf_perceptual && !o.fullscreen && o.draw_part != 1 &&
                             o.blend_mode == 0 && o.color[3] < 0.999f) ? 1.0f : 0.0f;   // KH_MAT_BLEND parts: never
                                                                                        // Perceptual.
         cbd.blend_ctl[1] = 150.0f;   // background-trust range (m); see the shader note.
-        // KH_FARVIS_NO_VDIST: blend_ctl[2] is the farVis flag the fog block reads as
-        // blendCtl.z (a lane no shader read before, so the CB layout is unchanged).
-        cbd.blend_ctl[2] = o.far_vis ? 1.0f : 0.0f;
-        // Written here so the lane is never inherited from the previous
-        // object's fade - the draw loop arms it per level and clears it again
-        // on the way out. KH_MESH_LOD: blend_ctl[3] is the crossfade dither and
-        // off is zero.
+        // blend_ctl[3] is the crossfade dither; written here so it is never
+        // inherited from the previous object's fade.
         cbd.blend_ctl[3] = 0.0f;
         kh_fill_fx_params_cb(cbd, o);
 
@@ -30395,8 +28718,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             memset(cbd.fx2, 0, sizeof(cbd.fx2));
         }
 
-        // Solid meshes repurpose fx0.xyz (unused effect params at effect 0) for
-        // the camera, which SolidMask's band term measures against.
+        // Solid meshes repurpose fx0.xyz (unused at effect 0) for the camera,
+        // which SolidMask's band term measures against.
         if (o.effect == 0) {
             cbd.fx0[0] = cam[0];
             cbd.fx0[1] = cam[1];
@@ -30413,7 +28736,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         cbd.depth_params[2] = vp_min_d;
         cbd.depth_params[3] = vp_max_d;
 
-        // depthParams above stays the live-depth pair for LinDepth/WorldPos;
+        // depthParams stays the live-depth pair for LinDepth/WorldPos;
         // local0/local1.zw carry the guard's channel once the masks have
         // written.
 
@@ -30525,12 +28848,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     KhCullSet khf_cull;
     kh_cull_build(view_proj, cam, khf_cull);
     khf_cull.back_on = true;   // KH_CULL_BACK: twin of the injection.
-    // The flush's one visibility truth (frustum only - occlusion culling is
-    // an injection concern: only there does the pass-wide depth-write
-    // contract make a cull provably output-identical). The material ensure,
-    // the plan's emit and the per-object loop all call this same lambda.
-    // KH_VIS_MEMO: the injection's twin. Cheaper here (frustum only - occlusion
-    // culling is an injection concern) but still asked three times per object.
+    // The flush's one visibility truth (frustum only - occlusion culling is an
+    // injection concern: only there does the pass-wide depth-write contract
+    // make a cull provably output-identical). The material ensure, the plan's
+    // emit and the per-object loop all call this lambda; memoised per object.
     g_vis_memo_flush.begin(meshes);
     auto khf_vis_calc = [&](const RenderObject& khfv_o) -> bool {
         float khfv_cc[3];
@@ -30543,29 +28864,26 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     uint32_t khf_perc_count = 0;
 
-    // KH_MAT_BLEND: a translucent draw is a whole translucent object on normal
-    // blend or an object's blend part (draw_part 1). One predicate for the
-    // sort; the capture demand below is the whole-object case only.
+    // A translucent draw is a whole translucent object on normal blend or an
+    // object's blend part (draw_part 1). One predicate for the sort; the
+    // capture demand below is the whole-object case only.
     auto khf_transl = [](const RenderObject& o) -> bool {
         return !o.fullscreen && (o.draw_part == 1 || (o.blend_mode == 0 && o.color[3] < 0.999f));
     };
-    // Blend parts are hardware-blended, never perceptual. The perceptual
-    // composite lerps against the capture and writes opaque, so two fragments
-    // of one draw that overlap - the near and far walls of a tube - do not
-    // accumulate: the later triangle replaces the earlier, and the pixel shows
-    // whichever layer rasterised last. A whole translucent object is one hull
-    // composited once and gets away with it; a material part is exactly the
-    // multi-layer case, and no sort or recapture can refresh a capture between
-    // fragments of the same draw.
+    // Blend parts are hardware-blended, never perceptual: the perceptual
+    // composite lerps against the capture and writes opaque, so overlapping
+    // fragments of one draw (the near and far walls of a tube) do not
+    // accumulate. A whole translucent object is one hull composited once; a
+    // material part is exactly the multi-layer case.
     for (const auto& o : meshes) {
         if (!o.fullscreen && o.draw_part != 1 && o.blend_mode == 0 && o.color[3] < 0.999f)
-            khf_perc_count++;   // KH_BUCKETS: a normal-blend translucent is never bucketed, so
-                                                                       // Demand the capture.
+            // A normal-blend translucent is never bucketed, so the perceptual
+            // demand counts objects directly.
+            khf_perc_count++;
     }
 
-    // Sorting is per draw (per object, or per object part), not per triangle: a
-    // self-overlapping translucent still relies on the ordered two-sided pass
-    // below.
+    // Sorting is per draw, not per triangle: a self-overlapping translucent
+    // still relies on the ordered two-sided pass below.
     static std::vector<uint32_t> khf_order;
     khf_order.clear();
     {
@@ -30600,7 +28918,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     khf_perceptual = khf_perc_count > 0;
     // Per-draw re-capture arms only with an overlap-capable set (2+); a lone
-    // translucent keeps the single pre-mesh capture (no cost).
+    // translucent keeps the single pre-mesh capture.
     const bool khf_perc_recapture = khf_perc_count >= 2;
 
     if (khf_perceptual) {
@@ -30638,38 +28956,38 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         khf_vp.MaxDepth = khf_mesh_vp_hi;
         ctx->RSSetViewports(1, &khf_vp);
     }
-    // KH_FLUSH_NEARZ: the gap viewport (MinDepth = the floor the routed draw's
-    // ramp starts from) and the per-draw swap tracker - the injection's
-    // khr_nz_vp / khr_gapvp_bound, flush edition.
+    // The gap viewport (MinDepth = the floor the routed draw's ramp starts
+    // from) and the per-draw swap tracker - the injection's khr_nz_vp /
+    // khr_gapvp_bound, flush edition.
     D3D11_VIEWPORT khf_nz_vp = khf_vp;
     if (khf_nz_on) khf_nz_vp.MinDepth = khf_nz_gap_lo;
     bool khf_gapvp_bound = false;
 
-    // game-thread ring - the park is held for all of flush_locked, so this ring
-    // and the injection's never touch. KH_MESH_TIMER, flush edition.
+    // Timer, flush edition: game-thread ring - the park is held for all of
+    // flush_locked, so this ring and the injection's never touch.
 
     for (const uint32_t khf_oi : khf_order) {
         const RenderObject& o = meshes[khf_oi];
-        // KH_BUCKETS: carried by its bucket's draw at the representative, or
-        // culled by the emission (never an overlay: mode Off is not eligible,
-        // so the ov census identity holds).
+        // Carried by its bucket's draw at the representative, or culled by the
+        // emission (never an overlay: mode Off is not eligible, so the ov
+        // census identity holds).
         if (khf_inst_on && khf_inst_plan.done[khf_oi]) continue;
-        // Fullscreen passes have no world extent and are never culled.
-        // KH_MESH_CULL, flush edition. Twin at the injection.
+        // Fullscreen passes have no world extent and are never culled. Twin at
+        // the injection.
         if (!o.fullscreen) {
             // A culled overlay counts as skipped, not as vanished: the UI-mask
             // census stands on ov_listed equalling ov_drawn plus ov_skipped,
-            // and a new early exit that does not pay into it would silently
-            // break that identity. khf_vis is the emit's twin, so an emitted
-            // bucket representative always draws here.
+            // and a new early exit that does not pay into it would break that
+            // identity. khf_vis is the emit's twin, so an emitted bucket
+            // representative always draws here.
             if (!khf_vis(o)) {
                 continue;
             }
         }
         // Before upload_cb (which may skip): a skipped mesh drew nothing, so no
         // refresh is owed.
-        const bool khf_o_perc = khf_transl(o) && o.draw_part != 1;   // Blend parts: hardware blend,
-                                                                       // No recapture.
+        // Blend parts: hardware blend, never perceptual.
+        const bool khf_o_perc = khf_transl(o) && o.draw_part != 1;
 
         if (khf_perc_recapture && khf_o_perc && khf_perc_seen) {
             if (kh_scene_capture_timed(dev, ctx).empty()) {
@@ -30677,10 +28995,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 khf_srv_cat = -1;   // t0/t1 pair may have been rebound; force re-swap below.
             }
         }
-        // Custom effect (user.hlsl): resolve the compiled PS first - a failed
-        // or missing compile skips the draw outright (reported once) rather
-        // than feeding the sentinel id into the builtin switch, which knows
-        // nothing of it.
+        // Custom effect (user .hlsl): resolve the compiled PS first - a failed
+        // or missing compile skips the draw (reported once) rather than feeding
+        // the sentinel id into the builtin switch.
         ID3D11PixelShader* khf_ufx = nullptr;
 
         if (o.effect == KH_EFFECT_CUSTOM) {
@@ -30696,22 +29013,19 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
         if (!upload_cb(o, false)) continue;
         if (khf_o_perc) khf_perc_seen = true;
-        // KH_TEXTURED routing (flush edition): textured solids take the
+        // Textured routing (flush edition): textured solids take the
         // PSMain/VSMain twins + the 4-element layout. Far-keep draws stay
         // untextured by design (the mesh sits at the accepted far plane - no
-        // texel resolves there; the arb twin remains an injection concern).
-        // Twins missing => untextured fallback.
+        // texel resolves there). Twins missing => untextured fallback.
         const KhMaterialSet* khf_txm = kh_obj_textured(o);
         const bool khf_tx_on = khf_txm != nullptr && !khf_farkeep_draw &&
             g_res.ps_tex && g_res.vs_tex && g_res.layout_tex && g_res.mat_sampler;
-        // KH_MAT_BLEND: a translucent part exists only through the textured
-        // twins - untextured, the mesh has no submesh table to split and no
-        // sampled alpha, so the part is skipped rather than drawn whole (the
-        // opaque part / injection already painted the mesh).
+        // A translucent part exists only through the textured twins -
+        // untextured, the mesh has no submesh table to split and no sampled
+        // alpha, so the part is skipped rather than drawn whole.
         if (o.draw_part == 1 && !khf_tx_on) {  continue; }
-        // KH_FLUSH_NEARZ: a near-gap draw takes the ARB twin - textured
-        // (ps_comp_arb_tex, compiled beside ps_comp_tex) or plain
-        // (ps_composite_arb, the far-keep draw's shader).
+        // A near-gap draw takes the ARB twin - textured (ps_comp_arb_tex) or
+        // plain (ps_composite_arb).
         const bool khf_nz_tex_ok = khf_tx_on && g_res.ps_comp_arb_tex != nullptr;
         const bool khf_nz_this = khf_nearz_draw && (khf_tx_on ? khf_nz_tex_ok : true);
         const int khf_ps_want = o.effect > 0 ? 1 : (khf_farkeep_draw ? 2 : (khf_nz_this ? (khf_tx_on ? 4 : 2) : (khf_tx_on ? 3 : 0)));
@@ -30743,17 +29057,17 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         }
 
         // PSComposite reads depth at t0; the flush's default pair puts scene
-        // color there (for effect shaders). Every solid mesh swaps the
-        // composite path's proven depth snapshot into t0 for its draw; the pair
-        // returns for effect meshes.
+        // colour there (for effect shaders). Every solid mesh swaps the proven
+        // depth snapshot into t0 for its draw; the pair returns for effect
+        // meshes.
         const int khf_srv_want = (o.effect == 0 && g_res.comp_depth_srv) ? 0 : 1;
 
         if (khf_srv_want != khf_srv_cat) {
             if (khf_srv_want == 0) {
                 ctx->PSSetShaderResources(0, 1, &g_res.comp_depth_srv);
 
-                // Mask at t20, pre-resolve snapshot at t21. Twin: the
-                // injection path carries the identical block.
+                // Mask at t21, pre-resolve snapshot at t22. Twin: the injection
+                // carries the identical block.
                 if (kh_svs_sten_on()) {
                     if (g_svs_pre_srv) {
                         ctx->PSSetShaderResources(21, 1, &g_svs_pre_srv);
@@ -30790,10 +29104,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             khf_bound_bm = o.blend_mode;
         }
 
-        // No depth-write change - effect meshes never wrote depth. The
-        // injection depth-writes every composite-eligible solid by contract;
-        // carried frames our meshes could occlude neither each other nor
-        // themselves.
+        // Effect meshes never write depth. The injection depth-writes every
+        // composite-eligible solid by contract.
         ID3D11DepthStencilState* dss =
             (khf_fx_arb_this)                ? g_res.dss_off :
             (o.mode == DepthMode::Off)       ? g_res.dss_off :
@@ -30804,9 +29116,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                                                g_res.dss_test;
 
         // Read-only DSV reconciliation: a pair consumer (depth at t1) cannot
-        // write the depth it reads, so its write arm is a plain test - the
-        // exact effect the read-only view already had on it; a solid that
-        // writes takes the real DSV back (t1 is the atlas there, no hazard).
+        // write the depth it reads, so its write arm is a plain test; a solid
+        // that writes takes the real DSV back (t1 is the atlas there, no
+        // hazard).
         if (khf_dsv_ro && dss == g_res.dss_test_write) {
             if (khf_srv_cat == 1) dss = g_res.dss_test;
             else                  khf_dsv_swap(false);
@@ -30817,10 +29129,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             khf_bound_dss = dss;
         }
         const bool khf_cam_outside = mesh_id_clamp(o.mesh) == 0 && ((kh_mesh_obb_dist_sq(o, cam) > 0.01f));
-        // KH_MAT_BLEND: a blend part on a two-sided object takes the ordered
-        // pass regardless of the object colour's alpha - interiors first,
-        // exteriors over them - the per-triangle sort a self-overlapping
-        // translucent submesh needs.
+        // A blend part on a two-sided object takes the ordered pass regardless
+        // of the object colour's alpha - interiors first, exteriors over them.
         const bool khf_ts_ordered = o.two_sided &&
                                     ((o.blend_mode == 0 && o.color[3] < 0.999f) || o.draw_part == 1) &&
                                     g_res.rasterizer_front != nullptr;
@@ -30829,7 +29139,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             (o.two_sided && !khf_cam_outside) ? g_res.rasterizer : g_res.rasterizer_cull;
 
         if (khr_want_rs != khr_bound_rs) {
-            ctx->RSSetState(kh_rs_pick(khr_want_rs));
+            ctx->RSSetState(khr_want_rs);
             khr_bound_rs = khr_want_rs;
         }
 
@@ -30849,20 +29159,18 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         const MeshDef& khf_md = mesh_def(mid);
         int khf_lod = 0;
         float khf_lodt = 0.0f;
-        // KH_LOD_LOCK: a locked instance never picks - level 0, no fade. Twin
-        // at the injection.
+        // A locked instance never picks - level 0, no fade. Twin at the
+        // injection.
         if (!o.lod_lock) kh_lod_pick(khf_md, kh_lod_radius(o), sqrtf(kh_mesh_dist_sq(o, cam)), khf_lod, khf_lodt);
         const bool khf_lodx = khf_lodt > 0.0f;
-        // The no-ladder baseline, once per object. Twin at the injection - see
-        // that block for the reasoning.
+        // The no-ladder baseline, once per object. Twin at the injection.
 
-        // KH_BUCKETS, flush edition: this object is its bucket's
-        // representative. Its CB is up, its PS/dss/blend are bound; swap in the
-        // instanced VS + layout, bind the lane ring once per pass, and draw the
-        // bucket's emitted ranges - every member that was visible at emission,
-        // sharing the route by key, at its own LOD level (crossfade included).
-        // A two-sided bucket draws CullNone (the camera-inside shortcut is per
-        // object). Twin at the injection.
+        // Buckets, flush edition: this object is its bucket's representative.
+        // Its CB is up and its PS/dss/blend bound; swap in the instanced VS +
+        // layout, bind the lane ring once per pass, draw the emitted ranges
+        // (every member visible at emission, sharing the route by key, at its
+        // own LOD level, crossfade included). A two-sided bucket draws
+        // CullNone. Twin at the injection.
         int khf_lod_iters = khf_lodx ? 2 : 1;
 
         if (khf_inst_on && khf_inst_plan.batch_of[khf_oi] >= 0) {
@@ -30880,7 +29188,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 }
 
                 if (o.two_sided && !khf_ts_ordered && khr_bound_rs != g_res.rasterizer) {
-                    ctx->RSSetState(kh_rs_pick(g_res.rasterizer));
+                    ctx->RSSetState(g_res.rasterizer);
                     khr_bound_rs = g_res.rasterizer;
                 }
 
@@ -30888,7 +29196,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 const uint32_t khf_id = kh_inst_draw(ctx, dev, khf_inst_plan, meshes, khf_oi,   // KH_BUCKETS.
                     khf_obj_cbd, g_res.constant_buffer, khf_tx_on ? khf_txm : nullptr, khf_ts_ordered, khr_bound_rs,
                     khf_nz_this ? 2 : 0, khf_nz_this ? g_res.ps_comp_arb_tex : g_res.ps_tex, o.draw_part == 1 ? 2 : 1,
-                    kh_inst_pre_none, khf_in);
+                    khf_in);
                 if (khf_tx_on) kh_stat_add(g_stats.textured_draws, khf_id);
                 khf_lod_iters = 0;   // The batch drew; no per-object level walk.
             }
@@ -30916,17 +29224,16 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
                 // The ordered contract restarts per level: iteration 1 left the
                 // cull rasterizer bound, and interiors must precede exteriors
-                // for this level too. kh_draw_textured already does the
-                // identical reset per submesh.
+                // for this level too.
                 if (khf_ts_ordered && khr_bound_rs != g_res.rasterizer_front) {
-                    ctx->RSSetState(kh_rs_pick(g_res.rasterizer_front));
+                    ctx->RSSetState(g_res.rasterizer_front);
                     khr_bound_rs = g_res.rasterizer_front;
                 }
 
                 ctx->DrawIndexed(khf_lc, khf_ls, 0);
 
                 if (khf_ts_ordered) {   // Pass 2: front faces over the interior.
-                    ctx->RSSetState(kh_rs_pick(g_res.rasterizer_cull));
+                    ctx->RSSetState(g_res.rasterizer_cull);
                     khr_bound_rs = g_res.rasterizer_cull;
                     ctx->DrawIndexed(khf_lc, khf_ls, 0);
                 }
@@ -30936,10 +29243,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         khf_obj_cbd.blend_ctl[3] = 0.0f;   // Never leaks into the next object.
     }
 
-
-    // Restore the parked pass's own viewport (the scene depth-range override
-    // above covered only the mesh draws; the chain and every later consumer see
-    // the original binding).
+    // Restore the parked pass's own viewport (the depth-range override covered
+    // only the mesh draws).
     if (khf_n_saved_vp > 0) ctx->RSSetViewports(khf_n_saved_vp, khf_saved_vp);
 
     // Chain passes below assume the ambient (CullNone) rasterizer.
@@ -30947,22 +29252,17 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     if (!fullscreen.empty() && effects_ready) {
         khf_dsv_swap(true);   // The chain samples live depth; its OM save must hold the read-only view.
-        // KH_FX_DEPTH_T1: and the depth it samples has to be AT t1. The mesh
-        // loop leaves t1 as the last mesh needed it - null, or the shadow atlas
-        // after a solid - and nothing below bound the depth SRV, so every
-        // localized / banded / depth-reading pass read 0 there: the near plane
-        // at every pixel, the camera position reconstructed everywhere, a
-        // world-space mask that tested the camera instead of the scene (whole
-        // screen inside the radius, nothing outside). The UI flush binds its
-        // pair; this is the scene flush's twin of that bind. Null when the
+        // The chain's depth must be AT t1: the mesh loop leaves t1 as the last
+        // mesh needed it, and a localized / banded / depth-reading pass reading
+        // 0 there reconstructs the camera position everywhere. Null when the
         // depth is not ready, as ps_srvs already says.
         ctx->PSSetShaderResources(1, 1, &ps_srvs[1]);
         std::string chain_err = meshes.empty() ? "" : kh_scene_capture_timed(dev, ctx);
         if (chain_err.empty()) chain_err = ensure_fx_chain(dev);
 
         if (!chain_err.empty()) {
-            // The mesh-side twin of this pair already reported ("KH effect
-            // setup"), the fullscreen chain never did.
+            // The mesh-side twin of this pair reports as "KH effect setup";
+            // this is the chain's own report.
             kh_ensure_ok("fullscreen chain", chain_err);
         } else {
             KhOmSave khfp_om;
@@ -30972,7 +29272,6 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             ctx->PSSetShader(g_res.ps_effect, nullptr, 0);
             ctx->OMSetDepthStencilState(g_res.dss_off, 0);
             ctx->OMSetBlendState(nullptr, bf, 0xFFFFFFFF);   // Opaque: compositing is in-shader.
-            // Timestamps: arm this flush's ring slot if free.
 
             ID3D11ShaderResourceView* src_srv = g_res.scene_srv;
             int write_idx = 0;
@@ -30990,7 +29289,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 // The resolve reads whichever half-res buffer holds the final
                 // smoothed field (two a-trous iterations ping-pong
                 // [2]->[3]->[2]; a failed iteration leaves the pointer at the
-                // last good stage - raw gather included).
+                // last good stage).
                 ID3D11ShaderResourceView* khsg_fin = nullptr;
                 ID3D11SamplerState* khsg_s2old = nullptr;   // KH_FX_SAMP_S2: the saved s2.
                 if (khfp_effect == static_cast<int>(EffectId::Ssgi) && !khfp_ps) {
@@ -31002,14 +29301,14 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                     const float khsg_l1sv = khfp_cbd.local0[1];
                     // [2]/[3] join the save - the pyramid level loop rides them
                     // (source dims for the downsample); a localized ssgi's mask
-                    // center z and shape live there and the resolve's tail
+                    // centre z and shape live there and the resolve's tail
                     // reads them.
                     const float khsg_l2sv = khfp_cbd.local0[2];
                     const float khsg_l3sv = khfp_cbd.local0[3];
                     khfp_cbd.local0[1] = (float)g_res.scene_w / (float)(g_khsg_w > 0 ? g_khsg_w : 1);
                     ctx->PSSetSamplers(2, 1, &g_res.khsg_sampler);
                     // Both exits release; s1 itself is untouched at either
-                    // point, so no restore is owed. Twin at the body upload.
+                    // point.
                     if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
                         ctx->PSSetSamplers(2, 1, &khsg_s2old);
                         if (khsg_s2old) khsg_s2old->Release();
@@ -31038,9 +29337,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                     ctx->OMSetRenderTargets(1, &g_res.chain_rtv[4], nullptr);
                     ctx->PSSetShaderResources(0, 1, &src_srv);
                     ctx->Draw(3, 0);
-                    // One aliased-pyramid frame class, never a lost pass. Each
-                    // level draws through the disjoint per-mip views with the
-                    // wide-tent kernel (effect 27); source dims ride local0.zw.
+                    // Each level draws through the disjoint per-mip views with
+                    // the wide-tent kernel (effect 27); source dims ride
+                    // local0.zw.
                     if (g_res.khsg_pyr_levels > 1) {
                         khfp_cbd.fx_meta[0] = 27.0f;
                         int khsg_lw = g_khsg_w > 0 ? g_khsg_w : 1;
@@ -31080,8 +29379,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                     ctx->Draw(3, 0);   // The gather (t0 = source for albedo, t3 = pyramid taps).
                     khsg_fin = g_res.chain_srv[2];   // Raw gather until smoothing lands.
                     // Missing buffer or a failed upload skips the draw whole -
-                    // the resolve reads the raw gather as before (one noisier
-                    // frame class, never a lost pass).
+                    // the resolve reads the raw gather instead (one noisier
+                    // frame, never a lost pass).
                     if (g_res.chain_rtv[3] && g_res.chain_srv[3]) {
                         khfp_cbd.fx_meta[0] = 25.0f;
                         khfp_cbd.local0[0] = 1.0f;
@@ -31126,11 +29425,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                         ctx->RSSetViewports(1, &khsg_vph);
                     }
                     // When the spread param is auto (< 0.5) the flush writes
-                    // the scale-matched value 1.5 x inv: identical 3.0 at the
-                    // 0.5 default, wider at coarser grids, tighter (sharper) at
-                    // full res. Explicit user values pass through untouched;
-                    // the shader's own auto stays as the belt. No restore owed:
-                    // khfp_cbd is per-pass.
+                    // the scale-matched value 1.5 x inv; explicit user values
+                    // pass through untouched. khfp_cbd is per-pass, so no
+                    // restore is owed.
                     if (khfp_cbd.fx2[3] < 0.5f)
                         khfp_cbd.fx2[3] = 1.5f * ((float)g_res.scene_w
                                         / (float)(g_khsg_w > 0 ? g_khsg_w : 1));
@@ -31155,8 +29452,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 // Gather at t3 for the resolve draw (bound after the OM above
                 // moved the RTV off buffer 2 - binding it earlier would be a
                 // read-write hazard the runtime resolves by silently nulling
-                // the SRV); unbound right after the draw so no other pass ever
-                // sees it.
+                // the SRV); unbound right after the draw.
                 if (khsg_pair) {
                     ctx->PSSetShaderResources(3, 1, &khsg_fin);
                 }
@@ -31177,11 +29473,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
             for (const auto& f : fullscreen) {
                 if (f.second.effect <= 0) continue;
-                // no-OP skip: color.a = 0 is an exact identity under the chain
-                // packing for every blend mode (comp folds to scene), so a
-                // zero-opacity pass costs nothing.
+                // No-op skip: color.a = 0 is an exact identity under the chain
+                // packing for every blend mode, so a zero-opacity pass costs
+                // nothing.
                 if (f.second.color[3] <= 0.001f) continue;
-                // quarter-res pyramid
 
                 // Custom effect: the pass draws with the user PS; absent or
                 // failed compiles skip the pass (reported once).
@@ -31207,18 +29502,12 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 if (f.second.effect == static_cast<int>(EffectId::Fogscatter))
                     kh_fogscatter_pack(khfp_cbd, fullscreen);
                 if (needs_depth(f.second)) {
-                    // KH_FX_ENGINE_PAIR: the pair the engine encoded this
-                    // cycle's depth with, read off its own upload, when it is
-                    // valid - the recipe every stable depth reader here uses
-                    // (kh_fill_sten_proj, the volume path, the effect-mesh
-                    // path). The flush-selected pair and the hold guard are
-                    // the fallback: between them the pair moved by a fraction
-                    // of a percent flush to flush (the mask's radius by
-                    // centimetres) and held against a zoom (the mask on and
-                    // off). Effect MESHES keep the flush-selected pair from
-                    // upload_cb by design (their arbitration reads it); the
-                    // two coincide whenever the engine pair is valid, and the
-                    // mesh path is tested steady on the flush pair. Closed.
+                    // The pair the engine encoded this cycle's depth with, read
+                    // off its own upload when valid - the recipe every stable
+                    // depth reader here uses; the flush-selected pair and hold
+                    // guard are the fallback. Effect MESHES keep the
+                    // flush-selected pair from upload_cb by design (their
+                    // arbitration reads it).
                     if (g_ro.engine_proj_valid) {
                         khfp_cbd.depth_params[0] = g_ro.engine_m22;
                         khfp_cbd.depth_params[1] = g_ro.engine_m32;
@@ -31234,9 +29523,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             }
 
             if (khfp_live) khfp_flush(true);
-            // Unconditional: a bail out of the final flush (SSGI resources
-            // missing, obj-CB Map failure) returns above the restore and would
-            // otherwise leave a chain RTV bound for the rest of the frame.
+            // Unconditional: a bail out of the final flush returns above the
+            // restore and would otherwise leave a chain RTV bound for the rest
+            // of the frame.
             khfp_om.restore(ctx);
             khfp_om.release();
         }
@@ -31251,7 +29540,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 // calls and must not extend the render-thread park. Publication to the
 // render-thread-visible globals happens inside flush_locked.
 
-// Same body, same three consumers: the shadowvis fallback (its gate kept), the
+// Same body, same three consumers: the shadowvis fallback, the
 // objectvis/objectdraw read, the key scan.
 inline void stage_video_options() {
     try {
@@ -31309,8 +29598,7 @@ inline void stage_world_lighting() {
 
 // Per-frame entry point from the Draw3D EH: checks for work, then acquires the
 // graphics lock with bounded retries - a transiently contended lock is a
-// dropped (effect-less, visibly flickering) frame, so one immediate retry is
-// cheap insurance.
+// dropped (visibly flickering) frame, so an immediate retry is cheap insurance.
 inline void kh_ui_driver_rehoist();   // Defined with the driver lifecycle below (the auto-hoist
                                       // Site).
 
@@ -31329,8 +29617,8 @@ inline void flush_frame() {
         for (const auto& khum_kv : g_draw_list) {
             if (!khum_kv.second.fullscreen) kh_mesh_note_ref(khum_kv.second.mesh);   // KH_MESH_FREE.
             kh_material_note_ref(khum_kv.second.materials);   // KH_MAT_POOL.
-            // Shadow-live demand: a visible lit object (the old rule, kept
-            // whole) or any shadow-active object (KH_SHADOW_ACTIVE: casterOnly too).
+            // Shadow-live demand: a visible lit object or any shadow-active
+            // object (casterOnly too).
             if ((khum_kv.second.visible && khum_kv.second.lit) || kh_shadow_active(khum_kv.second)) khum_lit = true;
             if (!khum_kv.second.visible) continue;
 
@@ -31346,10 +29634,8 @@ inline void flush_frame() {
 
         g_ui_mask_wanted.store(khum_wanted, std::memory_order_relaxed);
         g_svs_mesh_wanted.store(khum_mesh, std::memory_order_relaxed);
-        // FSAA requirement (290 disables): the lit demand stands the whole
-        // shadow-live ecosystem down at 1x through the existing master-demand
-        // gates - atlas tracking, upload scans, sweeps, band capture, cast, sun
-        // stream all idle, zero new paths.
+        // FSAA 1x: the lit demand stands the whole shadow-live ecosystem down
+        // through the existing master-demand gates.
         if (khum_lit && kh_fsaa_world_standdown()) khum_lit = false;
         g_ls.wanted.store(khum_lit, std::memory_order_relaxed);
     }
@@ -31368,8 +29654,8 @@ inline void flush_frame() {
         }
     }
     if (!RVExtBridge::is_initialized()) return;
-    // cold_t0: first flush whose draw list holds a shadow-capable mesh (any mesh,
-    // not only composite-eligible, so a translucent-first session opens the window).
+    // cold_t0: first flush whose draw list holds a shadow-capable mesh (any
+    // mesh, so a translucent-first session opens the window).
     if (g_mask.cold_t0 < 0.0) {
         std::lock_guard<std::mutex> g(g_draw_list_mutex);
 
@@ -31393,17 +29679,15 @@ inline void flush_frame() {
     ++g_flush_serial;   // KH_FLUSH_SERIAL: the graves' clock.
     kh_stat(g_stats.flushes);
 
-    // THREADING CONTRACT - DO NOT CHANGE. ScopedGraphicsLock is the engine's own
-    // RVExtensionGLock: while it is held the engine does not render, so the render
+    // THREADING CONTRACT - DO NOT CHANGE. ScopedGraphicsLock is the engine's
+    // RVExtensionGLock: while held the engine does not render, so the render
     // thread cannot be inside any hooked context method. That is what makes the
-    // flush's use of the immediate context, ensure_mesh_vbs's vector growth, the
-    // cb_ring cursors and g_res.release() at mission end safe against the
-    // render-thread injection. The injection runs inside the engine's draws and never
-    // takes this lock (taking it there would deadlock). get_projection_view_transform
-    // is read from the render thread without the lock by design: it is a read, and
-    // the one-frame offset on hard camera cuts is the expected staleness of an
-    // injected pass, not a torn read. Verified against the bridge source and BI's
-    // extension docs; leave it alone.
+    // flush's context use, ensure_mesh_vbs's vector growth, the cb_ring cursors
+    // and g_res.release() safe against the render-thread injection. The
+    // injection never takes this lock (deadlock). get_projection_view_transform
+    // is read from the render thread without the lock by design: a read, and
+    // the one-frame offset on hard cuts is the expected staleness of an
+    // injected pass.
     for (int attempt = 0; attempt < 3; ++attempt) {
         RVExtBridge::ScopedGraphicsLock lock;
 
@@ -31412,14 +29696,14 @@ inline void flush_frame() {
             continue;
         }
 
-        // Deferred mission destroy (armed only by a lock-exhausted mission end;
-        // never under 289): consumed here because this lock is the park
-        // invariant the teardown could not acquire.
+        // Deferred mission destroy (armed only by a lock-exhausted mission
+        // end): consumed here because this lock is the park invariant the
+        // teardown could not acquire.
         if (g_mission_destroy_pending.exchange(false, std::memory_order_relaxed)) {
-            // KH_DESTROY_TWIN: the same sequence rendering_integration_reset runs
-            // under its own park - the two joinable workers first, the shader
-            // pool after the caches - so a mission whose edge could not take
-            // the lock tears down no differently from one that could.
+            // The same sequence rendering_integration_reset runs under its own
+            // park - the two joinable workers first, the shader pool after the
+            // caches - so a mission whose edge could not take the lock tears
+            // down no differently.
             g_reorder_target_ctx.store(nullptr, std::memory_order_relaxed);
             kh_texldr_stop();
             kh_mesh_cache_writer_stop();
@@ -31432,19 +29716,17 @@ inline void flush_frame() {
             reset_session_state();
             return;
         }
-        g_kh_flush_active.store(true, std::memory_order_relaxed);   // Our draws traverse the T-path
-                                                                    // Otherwise.
+        // Our draws traverse the T-path otherwise.
+        g_kh_flush_active.store(true, std::memory_order_relaxed);
         g_flush_wrong_pass = false;
         flush_locked(dev, ctx);
         g_kh_flush_active.store(false, std::memory_order_relaxed);
         if (!g_flush_wrong_pass) return;
-        // KH_WRONG_PASS_REPARK: the park landed on a non-main depth (a PIP
-        // pass, an atlas cascade) and nothing was drawn. Release the lock (the
-        // scope ends), let the render thread move past it, park again - the
-        // remaining attempts of this loop. The frame is only lost when they
-        // all land wrong, and the readopt streak still covers a depth that
-        // has genuinely changed. Settled: three attempts with a yield have
-        // sufficed in every tested session; the re-park is not counted.
+        // The park landed on a non-main depth (a PIP pass, an atlas cascade)
+        // and nothing was drawn. Release the lock, let the render thread move
+        // past it, park again. The frame is only lost when every attempt lands
+        // wrong; the readopt streak still covers a depth that has genuinely
+        // changed.
         Sleep(0);
     }
 
@@ -31464,8 +29746,8 @@ inline std::string ensure_backbuffer_capture(ID3D11Device* dev, ID3D11DeviceCont
         bd.Format = td.Format;
         bd.SampleDesc.Count = 1;
         bd.Usage = D3D11_USAGE_DEFAULT;
-        // RENDER_TARGET joined SHADER_RESOURCE - the spill lane's
-        // premultiplying capture draws into this texture.
+        // RENDER_TARGET joins SHADER_RESOURCE: the spill lane's premultiplying
+        // capture draws into this texture.
         bd.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
         HRESULT hr = dev->CreateTexture2D(&bd, nullptr, &g_res.bb_tex);
         if (FAILED(hr)) return "Create bb tex " + hr_str(hr);
@@ -31514,9 +29796,9 @@ inline std::string kh_capture_bb_premult(ID3D11Device* dev, ID3D11DeviceContext*
     return "";
 }
 
-// Backbuffer format and dims. Group-scoped lifetime: ensure_backbuffer_capture
-// releases the whole capture group on any dims/format change before this runs,
-// so an existing texture matches bb_tex by construction.
+// Backbuffer format and dims. ensure_backbuffer_capture releases the whole
+// capture group on any dims/format change before this runs, so an existing
+// texture matches bb_tex by construction.
 inline std::string ensure_ui_chain(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& td) {
     if (g_res.ui_chain_tex) return "";
     D3D11_TEXTURE2D_DESC khuc_td = {};
@@ -31596,7 +29878,7 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     if (!res) {  return; }
     // The backbuffer identity the mask machinery learns is the GetResource
     // pointer - the same token the OMSet hook's classify resolves (weak
-    // identity, the codebase-wide convention).
+    // identity).
     void* khum_bb_id = static_cast<void*>(res);
     ID3D11Texture2D* bb = nullptr;
     HRESULT hr = res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&bb));
@@ -31647,9 +29929,9 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     const bool khum_mask_live = g_ui_mask.mask_valid &&
                                 g_ui_mask.phase_bb == khum_bb_id;
 
-    // A same- frame CPU verdict is therefore unobtainable here; the lagged
-    // verdict (event's first frame visible, everything after vetoed, sticky
-    // until provably sane) is the veto's floor.
+    // A same-frame CPU verdict is unobtainable here; the lagged verdict
+    // (event's first frame visible, everything after vetoed, sticky until
+    // provably sane) is the veto's floor.
     if (td.Width >= 512 && td.Height >= 512) {
         if (!g_res.ui_alpha_stage) {
             D3D11_TEXTURE2D_DESC khas_td = {};
@@ -31732,7 +30014,6 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     bool need_inverse = false;
 
     for (const auto& f : passes) {
-        // Ssgi left (view-space reconstruction).
         if (f.second.localized || f.second.effect == static_cast<int>(EffectId::Pulse) ||
             f.second.effect == KH_EFFECT_CUSTOM) { need_inverse = true; break; }
     }
@@ -31749,10 +30030,9 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     ctx->GSSetShader(nullptr, nullptr, 0);
     ctx->HSSetShader(nullptr, nullptr, 0);
     ctx->DSSetShader(nullptr, nullptr, 0);
-    // fail-dark (khf_frame_ok's exact pattern): a failed frame upload stands
-    // every draw down through the khuf_frame_ok latch - builtins at the pending
-    // flush, customs at their own upload - never a draw against a stale b1. CB
-    // split: b0 = per-object, b1 = per-frame.
+    // Fail-dark: a failed frame upload stands every draw down through the
+    // khuf_frame_ok latch - never a draw against a stale b1. b0 = per-object,
+    // b1 = per-frame.
     ID3D11Buffer* khui_cbs[2] = { g_res.constant_buffer, g_res.frame_cb };
     ctx->VSSetConstantBuffers(0, 2, khui_cbs);
     ctx->PSSetConstantBuffers(0, 2, khui_cbs);
@@ -31769,7 +30049,7 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     const FLOAT bf[4] = { 0, 0, 0, 0 };
 
     // The viewport at a control-Draw moment is the control's rectangle (our
-    // driver control is 1px) - a fullscreen triangle through it rasterizes to
+    // driver control is 1px), so a fullscreen triangle through it rasterizes to
     // nothing. Own the viewport explicitly: full target for our passes, engine
     // state restored after.
     UINT n_saved_vp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
@@ -31796,7 +30076,8 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     ID3D11DepthStencilView* khup_bb_dsv = nullptr;   // nullptr by the gate; carried for symmetry.
     ctx->OMGetRenderTargets(1, &khup_bb_rtv, &khup_bb_dsv);
     // The gate verified slot 0 and the DSV only; the single-slot rebinds below
-    // null slots 1-7, so the full set is captured here and restored at the tail.
+    // null slots 1-7, so the full set is captured here and restored at the
+    // tail.
     KhOmSave khup_om;
     khup_om.capture(ctx);
 
@@ -31807,8 +30088,7 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     auto khuf_flush = [&](bool khuf_final) {
         if (!khuf_live) return;
         khuf_live = false;
-        // Unbind the source slot before the destination's RTV turn (the scene
-        // chain's exact hazard pattern).
+        // Unbind the source slot before the destination's RTV turn.
         ID3D11ShaderResourceView* khuf_null = nullptr;
         ctx->PSSetShaderResources(0, 1, &khuf_null);
         if (khuf_final) ctx->OMSetRenderTargets(1, &khup_bb_rtv, khup_bb_dsv);
@@ -31829,10 +30109,7 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     };
 
-    // RGB-only replace blend so the mask channel itself survives the view. The
-    // shape during a flash names the culprit: uniform full-screen = an engine
-    // fullscreen pass or fade writing alpha after our clear; vignette-shaped =
-    // a damage/screen tint; rectangular = a specific element.
+    // RGB-only replace blend so the mask channel itself survives the view.
 
     if (khum_mask_live && g_res.ps_cov_fix && g_res.blend_alpha_zero) {
         // (1) capture the pre-correction surface (alpha = live dst.a).
@@ -31866,9 +30143,9 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 g_res.cov_hist_w = td.Width;
                 g_res.cov_hist_h = td.Height;
                 g_res.cov_hist_fmt = static_cast<uint32_t>(td.Format);
-                // Seed: a fresh history starts as this surface (sane or not, it
-                // self-heals at the first sane frame; seeding avoids an
-                // undefined-content read on the first poison).
+                // Seed: a fresh history starts as this surface (it self-heals
+                // at the first sane frame; seeding avoids an undefined-content
+                // read on the first poison).
                 ctx->CopyResource(g_res.cov_hist_tex, bb);
             }
         }
@@ -31890,10 +30167,8 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 // The debug view replaces the passes.
         const RenderObject& o = f.second;
         if (o.effect <= 0) continue;
-        // no-OP skip (write-window twin): color.a = 0 is an exact identity for
-        // the masked lane (chain packing folds to scene) and the spill lane
-        // (src collapses to the premultiplied frame, whose one/INV_DEST_ALPHA
-        // composite reconstructs the frame) - and skipping before the capture
+        // No-op skip (write-window twin): color.a = 0 is an exact identity for
+        // the masked lane and the spill lane - and skipping before the capture
         // saves the pass's copy too.
         if (o.color[3] <= 0.001f) continue;
 
@@ -31908,11 +30183,10 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             if (!khu_ufx) continue;
         }
 
-        // A LUT is not black-preserving (lifted blacks are the whole point of
-        // many grades), so it takes the masked builtin lane below - w = 2,
-        // in-shader coverage lerp - never spill. (resolved here, bound at the
-        // pending flush - a later pass in the deferral window must not steal
-        // t19 first.).
+        // A LUT is not black-preserving (lifted blacks are the point of many
+        // grades), so it takes the masked builtin lane (w = 2, in-shader
+        // coverage lerp) - never spill. Resolved here, bound at the pending
+        // flush: a later pass in the deferral window must not steal t19 first.
         ID3D11ShaderResourceView* khu_lut = nullptr;
 
         if (o.effect == KH_EFFECT_LUT) {
@@ -31928,7 +30202,7 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             o.effect == KH_EFFECT_CUSTOM;   // User shaders may sample depth.
 
         if (wants_depth && !depth_ok) continue;
-        if ((o.localized || o.effect == static_cast<int>(EffectId::Pulse)) && !has_inverse) continue;   // (Ssgi left - view space).
+        if ((o.localized || o.effect == static_cast<int>(EffectId::Pulse)) && !has_inverse) continue;
         if (o.effect == static_cast<int>(EffectId::Ssgi)) continue;
         if (o.effect == static_cast<int>(EffectId::Fogscatter)) continue;
 
@@ -31980,7 +30254,6 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         cbd.size_axes[3] = khu_spill ? 0.0f : static_cast<float>(o.blend_mode);
         kh_fill_fx_params_cb(cbd, o);
 
-
         cbd.fx_meta[0] = static_cast<float>(o.effect);
         cbd.fx_meta[1] = now;
         cbd.fx_meta[2] = static_cast<float>(td.Width);
@@ -31992,8 +30265,8 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
         kh_fill_local_band_cb(cbd, o);
         if (khu_ufx) {
-            // CB split: object slice per pass; the frame slice went up once at
-            // the flush head (hoist - the latch gates this draw too).
+            // Object slice per pass; the frame slice went up once at the flush
+            // head (the latch gates this draw too).
             if (!khuf_frame_ok ||
                 !kh_upload_obj_cb(ctx, g_res.constant_buffer, cbd)) continue;
             ctx->PSSetShader(khu_ufx, nullptr, 0);
@@ -32048,8 +30321,8 @@ inline bool flush_ui_frame() {
         }
 
         QueryPerformanceCounter(&khufc_t1);
-        g_kh_flush_active.store(true, std::memory_order_relaxed);   // Our draws traverse the T-path
-                                                                    // Otherwise.
+        // Our draws traverse the T-path otherwise.
+        g_kh_flush_active.store(true, std::memory_order_relaxed);
         flush_ui_locked(dev, ctx);
         g_kh_flush_active.store(false, std::memory_order_relaxed);
         QueryPerformanceCounter(&khufc_t2);
@@ -32064,7 +30337,7 @@ inline bool flush_ui_frame() {
 // Internal UI-flush driver: self-hosts the control "Draw" callsite. Display 46
 // does not exist at pre_init, so an EachFrame poller waits for it, creates an
 // invisible 1px map control once, attaches a compiled-SQF Draw handler invoking
-// the flushUIRender command, then idles (one flag check per frame).
+// flushUIRender, then idles.
 
 static intercept::client::EHIdentifierHandle g_ui_poll_eh;
 static bool g_ui_driver_registered = false;
@@ -32103,10 +30376,9 @@ inline void kh_ui_driver_rehoist() {
 }
 
 // C++ Draw3D event handler lifecycle. Mission EHs die with the mission: the
-// framework calls rendering_integration_reset at both mission edges
-// (confirmed against the framework file; no on_mission_start call remains).
+// framework calls rendering_integration_reset at both mission edges.
 // ensure_draw_eh also lazily self-registers as a fallback, so retained objects
-// added mid-mission always render even without the lifecycle calls.
+// added mid-mission always render.
 
 static intercept::client::EHIdentifierHandle g_draw3d_eh;
 static bool g_draw3d_eh_active = false;
@@ -32128,12 +30400,11 @@ inline void ensure_draw_eh() {
     g_draw3d_eh_active = true;
 }
 
-// KH_STATS_ARMED: the stats reset touches statistics only - the counters and
-// the shader-cache hit / miss pair - and disarms collection. It is called from
-// the game thread by resetRenderStats without the graphics lock, so nothing
-// the render thread depends on may be written here; the per-session live
-// state that used to sit in this function is kh_session_scratch_reset below,
-// which only the parked session reset reaches.
+// The stats reset touches statistics only - the counters and the shader-cache
+// hit / miss pair - and disarms collection. Called from the game thread by
+// resetRenderStats without the graphics lock, so nothing the render thread
+// depends on may be written here; per-session live state is
+// kh_session_scratch_reset below, which only the parked session reset reaches.
 inline void reset_stat_counters() {
     g_stats_armed.store(false, std::memory_order_relaxed);
     g_stats = RenderStats{};
@@ -32141,13 +30412,11 @@ inline void reset_stat_counters() {
     g_shader_cache_misses.store(0, std::memory_order_relaxed);
 }
 
-// Per-session scratch that is neither a device object nor a statistic. Must
-// run with the render thread parked (the session reset's contract).
+// Per-session scratch that is neither a device object nor a statistic. Must run
+// with the render thread parked.
 inline void kh_session_scratch_reset() {
     g_castocc_set.clear(); g_castocc_slack = 0.0f;
     g_castocc_pre.active = false; g_castocc_pre_noreach = false;   // KH_CASTOCC_PRE.
-                                    // Otherwise, which reads as a huge number
-                                    // Against a freshly reset frame count.
     g_sun_churn_prev_ms = 0;
     g_cam_step_m = -1.0f;
     g_fire_count_frame = 0;
@@ -32192,7 +30461,6 @@ inline void reset_session_state() {
         std::lock_guard<std::mutex> g(g_err_once_mutex);
         g_err_once.clear();
     }
-
 
     g_sun_union_rad_held = -1.0f;
     g_sun_union_lat_held = -1.0f;
@@ -32266,8 +30534,6 @@ inline void reset_session_state() {
     g_khlt_ref_ok = false;
     g_far_keep_m22 = 0.0f; g_far_keep_m32 = 0.0f; g_far_keep_far = -1.0f; g_far_keep_ms = 0;
 
-
-
     g_khfx_pair_near = -1.0f; g_khfx_cand_near = -1.0f; g_khfx_pair_ms = 0;
     g_khfx_verdict_serial = ~0ull; g_khfx_verdict_held = false;
     g_boundary_pv_valid = false;   // Session teardown: no stale cross-mission sample.
@@ -32328,17 +30594,12 @@ inline void kh_mission_handles_reset() {
     reset_retained_state();
 }
 
-// The whole-system reset, called by the framework at both mission edges.
-// Order inside the park: the two joinable workers stop first (the texture
-// loader and the .khmc writer - both interruptible between jobs, joined never
-// detached, queued work dropped) so no thread is alive while the caches they
-// feed are emptied; then every device object and learned identity; then the
-// caches (material textures, user .hlsl, user .cube: the next mission
-// re-resolves cold from disk, and the user-shader purge discards its pending
-// memo units before the pool goes); then the shader pool (bounded wait, then
-// detach - a job inside D3DCompile cannot be killed, and the prewarm refuses
-// while any detached worker is live); then the session state, which also
-// zeroes and disarms the stats.
+// The whole-system reset, both mission edges, under the park: the two joinable
+// workers first (texture loader, mesh cache writer), then every device object
+// and learned identity, then the caches (material textures, user .hlsl, user
+// .cube), then the shader pool (bounded wait, then detach - a job inside
+// D3DCompile cannot be killed, and the prewarm refuses while any detached
+// worker lives), then the session state (also zeroes and disarms the stats).
 inline void rendering_integration_reset() {
     bool khme_done = false;
     kh_mission_handles_reset();
@@ -32364,8 +30625,7 @@ inline void rendering_integration_reset() {
         break;
     }
 
-    // A mission that never uses the extension holds the state disarmed
-    // (bounded; strictly better than an armed inheritance).
+    // A mission that never uses the extension holds the state disarmed.
     if (!khme_done) {
         g_mission_destroy_pending.store(true, std::memory_order_relaxed);
     }
@@ -32388,9 +30648,9 @@ inline std::string add_render_object(const RenderObject& obj) {
     return handle;
 }
 
-// KH_SCENE: the script side's property update. The staged copy carries the
-// slot from the entry it was copied from; the entry may have been removed and
-// the slot reused meanwhile, so the slot is re-taken from the live entry.
+// The script side's property update. The staged copy carries the slot from the
+// entry it was copied from; the entry may have been removed and the slot reused
+// meanwhile, so the slot is re-taken from the live entry.
 inline bool update_render_object(const std::string& handle, RenderObject&& staged) {
     std::lock_guard<std::mutex> g(g_draw_list_mutex);
     auto it = g_draw_list.find(handle);

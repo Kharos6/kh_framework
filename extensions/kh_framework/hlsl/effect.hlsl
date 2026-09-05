@@ -1,23 +1,19 @@
-// Effect.hlsl - RCDATA resource in kh_shaders.rc, concatenated into its unit by C++ (no #include). Any edit changes the unit's shader cache key.
+// effect.hlsl - concatenated after cb.hlsl into the effect unit by C++ (no
+// #include). Any edit changes the unit's shader cache key.
 
 Texture2D<float4> sceneColor : register(t0);
 Texture2D<float4> khsgTex : register(t3);
-// KH_FX_SAMP_S2: s2, not s1. The shared prefix (g_cb_hlsl) declares khPfSamp at
-// s1 unconditionally, and the prefix is compiled into this unit too, so both
-// objects claimed s1 in one assembly. It built only because fxc drops an
-// unreferenced resource and PSEffect happens not to reach khPfSamp - effect
-// entry point calls a prefix helper that samples the moment pyramids, fxc fails
-// the whole unit with X4509 (overlapping register semantics) and every effect
-// goes dark at once, with the error surfacing only at the runtime ensure. C++
-// twin.
+// s2, not s1: the shared prefix declares khPfSamp at s1 and is compiled into
+// this unit too, so a second s1 fails the unit with X4509 the moment any effect
+// entry reaches a prefix helper that samples the pyramids. C++ twin
+// (KH_FX_SAMP_S2).
 SamplerState khsgSamp : register(s2);   // Linear clamp, bound only for the resolve draw.
 
 #if MSAA_DEPTH
 Texture2DMS<float> depthTex : register(t1);
 float LoadDepthPS(int2 px) { return depthTex.Load(px, 0); }
 #else
-// The snapshot is two-plane now, which is what it has always received.
-// Declaration only.
+// Two-plane snapshot; declaration only.
 Texture2D<float2> depthTex : register(t1);
 float LoadDepthPS(int2 px) { return depthTex.Load(int3(px, 0)).x; }
 #endif
@@ -25,10 +21,9 @@ float LoadDepthPS(int2 px) { return depthTex.Load(int3(px, 0)).x; }
 Texture2D<float> khArbSnap : register(t2);
 
 // Bound at t19 only for LUT passes - t19 is reserved for this unit
-// codebase-wide (it is inside StateBackup's widened save range, so the engine's
-// own bind is restored after every flush). Sampled with integer Loads only
-// (tetrahedral interpolation in the effect branch - no sampler, no half-texel
-// bias to manage).
+// codebase-wide (inside StateBackup's save range, so the engine's own bind is
+// restored after every flush). Sampled with integer Loads only (tetrahedral
+// interpolation; no sampler, no half-texel bias).
 Texture3D<float4> khLut : register(t19);
 float3 KhLutV(int3 p) { return khLut.Load(int4(p, 0)).rgb; }
 
@@ -36,7 +31,6 @@ float3 SampleScene(int2 px)
 {
     px = clamp(px, int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
     float4 khss = sceneColor.Load(int3(px, 0));
-    // Every other caller is byte-identical.
     if (centerSize.w > 2.5f) return khss.rgb * khss.a;
     return khss.rgb;
 }
@@ -54,10 +48,9 @@ float LinDepth(float raw)
 {
     float ndcZ = (raw - depthParams.z) / max(depthParams.w - depthParams.z, 1e-6f);
     float denom = ndcZ - depthParams.x;
-    // At/beyond the far plane the denominator crosses zero and flips sign. Sky
-    // pixels sit at the depth-clear value (1.0), which is beyond the viewport
-    // depth range entirely - treat everything past the far plane as "very far"
-    // instead of returning a negative distance.
+    // At/beyond the far plane the denominator crosses zero and flips sign; sky
+    // pixels sit at the depth-clear value (1.0), beyond the viewport range
+    // entirely - treat everything past the far plane as "very far".
     if (denom > -1e-7f) return 1e9f;
     float d = depthParams.y / denom;
     return d > 0.0f ? d : 1e9f;
@@ -65,7 +58,6 @@ float LinDepth(float raw)
 
 float Hash(float2 p) { return frac(sin(dot(p, float2(12.9898f, 78.233f))) * 43758.5453f); }
 
-// Quality-package helpers.
 float2 Hash2(float2 p)
 {
     return float2(Hash(p), Hash(p + float2(41.13f, 7.77f)));
@@ -123,12 +115,11 @@ float3 KhWorldPosFenced(int2 px, float2 uv, out float khwf_d)
     float4 khwf_nd = float4(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f,
                             depthParams.x + depthParams.y / max(khwf_d, 1.0f), 1.0f);
     float4 khwf_wp = mul(khwf_nd, invViewProj);
-    // KH_FX_CAM_REL: with fxCam armed the inverse is of a rotation-only view
-    // (camera at the origin) - small numbers, exact in fp32 - and the camera
-    // is added here, once, correctly rounded. An absolute inverse mixes the
-    // camera's kilometres into every entry and cancels them back out per
-    // pixel; that cancellation jittered the reconstruction by centimetres
-    // frame to frame, the soft edge of every localized mask with it.
+    // With fxCam armed the inverse is of a rotation-only view (camera at the
+    // origin) - small numbers, exact in fp32 - and the camera is added here,
+    // once. An absolute inverse mixes the camera's kilometres into every entry
+    // and cancels them per pixel, which jitters the reconstruction by
+    // centimetres frame to frame.
     return khwf_wp.xyz / khwf_wp.w + (fxCam.w > 0.5f ? fxCam.xyz : float3(0.0f, 0.0f, 0.0f));
 }
 
@@ -143,8 +134,7 @@ float3 KhgVpos(float2 vp_px, float vp_d, float2 vp_res, float vp_m00, float vp_m
 
 // fxParams1 / fxParams2 are system lanes for effect 23: the chain loop packs up
 // to two aggregated fog-pass records [startDist, endDist, skyAmount, opacity]
-// (kh_fogscatter_pack - the CPU mirror; zeroed lanes = no pass, and every other
-// fill site leaves them zeroed, so the loop is cold there).
+// (kh_fogscatter_pack); zeroed lanes = no pass.
 
 float KhFsFog(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float fs_m11)
 {
@@ -164,10 +154,9 @@ float KhFsFog(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float fs_m1
         float4 fs_nd = float4(fs_uv.x * 2.0f - 1.0f, 1.0f - fs_uv.y * 2.0f,
                               depthParams.x + depthParams.y / max(fs_de, 1.0f), 1.0f);
         float4 fs_wp = mul(fs_nd, invViewProj);
-        // KH_FX_CAM_REL: with fxCam armed the inverse is camera-relative
-        // (KhWorldPosFenced's rule) and the height comes back relative too;
-        // fogColor.w it is measured against is the camera's absolute altitude,
-        // so the camera's own is added here, once, exactly as the position is.
+        // With fxCam armed the inverse is camera-relative and the height comes
+        // back relative too; fogColor.w is the camera's absolute altitude, so
+        // the camera's own is added here, as the position is.
         float fs_hgt = fs_wp.y / fs_wp.w + (fxCam.w > 0.5f ? fxCam.y : 0.0f);
         float fs_camY = fogColor.w;
         float fs_tr;
@@ -192,8 +181,8 @@ float KhFsFog(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float fs_m1
         fs_s = 1.0f - saturate(fs_tr);
     }
 
-    // KH fog passes (effect-13 math twin - the same linear-depth ramp and the
-    // same skyAmount rule; edit both or neither), opacity- scaled, combined as
+    // KH fog passes (effect-13 math twin - the same linear-depth ramp and
+    // skyAmount rule; edit both or neither), opacity-scaled, combined as
     // independent media.
     float fs_fence = KhEncFence();
 
@@ -214,10 +203,10 @@ float KhFsFog(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float fs_m1
     return saturate(fs_s);
 }
 
-// CPU twin: the chain loops' pending append (kh_fuse_append; the fusible set {1
-// invert, 2 colorgrade, 3 vignette, 5 grain}, never localized / banded / spill
-// / LUT / custom, is enforced there, so this path carries no masks). Point-OP
-// pass fusion.
+// Point-op pass fusion. CPU twin: the chain loops' pending append
+// (kh_fuse_append) enforces the fusible set {1 invert, 2 colorgrade, 3
+// vignette, 5 grain}, never localized / banded / spill / LUT / custom, so this
+// path carries no masks.
 float3 KhFusePoint(int id, float3 c, float2 uv, float2 pos, float t,
                    float4 p0, float4 p1, float4 col)
 {
@@ -265,11 +254,9 @@ float3 KhFusePoint(int id, float3 c, float2 uv, float2 pos, float t,
     return c;
 }
 
-// Fused-stage composite: the packing tail's blend algebra verbatim over the
-// running value, plus - write-window lanes only - the coverage destination lerp
-// in its exact pre-composite position (the masked lane's order; spill stage-0
-// completes its own algebra before this runs, and appended stages are never
-// spill-classified).
+// Fused-stage composite: the packing tail's blend algebra over the running
+// value, plus - write-window lanes only - the coverage destination lerp in its
+// pre-composite position.
 float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float t)
 {
     int n = (int)fuseMeta.x;
@@ -323,10 +310,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         }
     }
 
-    // It never compiled: the effect shader builds lazily and no effect mesh had
-    // spawned since the arb round landed, so the X3004 surfaced only when the
-    // perceptual path first requested the chain. Far-frame analytic arbitration
-    // (flush/effect edition; the sec 2.4 mirror).
+    // Far-frame analytic arbitration (flush/effect edition).
     if (localParams1.z >= 0.5f) {
         int2 khaPx = clamp(int2(i.pos.xy), int2(0, 0),
                            int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
@@ -375,10 +359,10 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
     }
     else if (effect == 5)   // Film grain: [amount, fps, grainSizePx, lumaResponse, chroma].
     {
-        // Filmic grain: smooth value noise with spatial extent (not per-pixel
-        // salt), triangular amplitude distribution, response peaking in the
-        // mid-shadows and protecting highlights, optional chroma, and time
-        // quantized to a frame rate for the discrete film-frame feel.
+        // Filmic grain: smooth value noise with spatial extent, triangular
+        // amplitude distribution, response peaking in the mid-shadows and
+        // protecting highlights, optional chroma, time quantized to a frame
+        // rate.
         float fps = max(fxParams0.y, 1.0f);
         float seed = floor(t * fps) * 61.7f;
         float2 gp = i.pos.xy / max(fxParams0.z, 1.0f);
@@ -456,8 +440,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
                              // [bandWidth, intensity].
     {
         // Fenced reconstruction + the fence feather keep the ring continuous:
-        // Sky (clamped to the fence) lands at feather zero, and a ring band
-        // never reaches fence distances in normal use.
+        // sky (clamped to the fence) lands at feather zero.
         float khpl_d;
         float dist = distance(KhWorldPosFenced(px, uv, khpl_d), fxParams0.xyz);
         float band = max(fxParams1.x, 0.01f);
@@ -483,8 +466,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
     else if (effect == 13)   // Distance fog: [startDist m, endDist m, skyAmount 0.1], color = fog
                              // Color.
     {
-        // skyAmount = 1 with endDist inside the fence - every practical config
-        // - is output-identical. Twin edit at KhFsFog's fog-pass loop.
+        // Twin edit at KhFsFog's fog-pass loop.
         float d = LinDepth(LoadDepthPS(px));
         float f = saturate((d - fxParams0.x) / max(fxParams0.y - fxParams0.x, 1.0f));
         float khfg_f = KhEncFence();
@@ -497,10 +479,9 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
     else if (effect == 14)   // Lens flare, image-based: [threshold, intensity, ghostCount,
                              // ghostSpacing] + [haloRadius, haloIntensity.
     {
-        // Bright pixels anywhere in the capture spawn a "ghost" train mirrored
-        // through screen center, plus a halo ring - the sun, headlights and
-        // explosions all flare automatically. The HDR capture makes the
-        // threshold physically meaningful (sun >> white walls).
+        // Bright pixels anywhere in the capture spawn a ghost train mirrored
+        // through screen centre, plus a halo ring. The HDR capture makes the
+        // threshold physically meaningful.
         float2 cuv = float2(0.5f, 0.5f);
         float2 ghostVec = (cuv - uv) * fxParams0.w;
         int nGhosts = clamp((int)fxParams0.z, 1, 8);
@@ -548,9 +529,9 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
     else if (effect == 16)   // Sun flare, source-aware: p0.xyz = direction (engine space), p0.w =
                              // Size;
     {
-        // The direction projects as a point at infinity (w component 0); the
-        // flare fades via per-pixel depth occlusion at the source: sky =
-        // visible, geometry = blocked, partial coverage = smooth fade.
+        // The direction projects as a point at infinity (w = 0); the flare
+        // fades via per-pixel depth occlusion at the source: sky = visible,
+        // geometry = blocked.
         float4 clip = mul(float4(fxParams0.xyz, 0.0f), viewProj);
         if (clip.w > 0.01f)
         {
@@ -647,10 +628,9 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
     }
      else if (effect == 18)   // Clarity: [strength, radiusPx].
     {
-        // Wide-radius local contrast on luma only (chroma-preserving by
-        // construction: the scene is rescaled by L'/L, so saturation never
-        // moves). Two-ring 12-tap base estimate; the detail term is
-        // soft-limited so strong edges do not halo.
+        // Wide-radius local contrast on luma only (the scene is rescaled by
+        // L'/L, so saturation never moves). Two-ring 12-tap base estimate; the
+        // detail term is soft-limited so strong edges do not halo.
         float rad = max(fxParams0.y, 4.0f);
         float lC = Luma(scene);
         float lB = 0.0f;
@@ -674,11 +654,10 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
     }
     else if (effect == 19)   // Deband: [threshold(1/255), rangePx, grain(1/255)].
     {
-        // Gradient debanding (the mpv/flyguy family): average four taps on a
-        // hash-rotated cross within range; adopt the average only where it
-        // stays inside the threshold (real edges never do). Triangular-pdf
-        // grain breaks residual quantization. Static noise (temporally inert;
-        // no taa exists to launder animation).
+        // Gradient debanding: average four taps on a hash-rotated cross within
+        // range; adopt the average only where it stays inside the threshold
+        // (real edges never do). Triangular-pdf grain breaks residual
+        // quantization. Static noise (no TAA exists to launder animation).
         float2 h = Hash2(i.pos.xy);
         float ang = h.x * 6.2832f;
         float rad = (0.3f + 0.7f * h.y) * max(fxParams0.y, 2.0f);
@@ -705,9 +684,6 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         float tt = fxParams1.w * max(fxParams0.y, 0.0f);
         float windBase = clamp(-fxParams1.x * 0.055f, -0.5f, 0.5f);
         float wind = windBase + (q.x / aspect - 0.5f) * fwdK * 0.6f;
-        // Small-splatter retune: finer grids, smaller drops, slower cadence,
-        // gentler refraction (constants in KhRainLayer and below) - the
-        // requested "small splatters, slight motion".
         float4 L1 = KhRainLayer(q, tt,          float2(6.0f, 1.4f), 0.0f,
                                 0.45f + inten * 0.4f, wind, fwdK);
         float4 L2 = KhRainLayer(q, tt * 1.27f,  float2(10.0f, 2.4f), 3.7f,
@@ -766,11 +742,10 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         float khc_phase = khc_duv.y * khc_lines + t * fxParams2.x;
         float khc_line = floor(khc_phase);
 
-        // Tracking wobble (fxParams2.y, px): each scanline row shifts
-        // horizontally by a per-line random jitter requantized at 24 Hz (the
-        // loose-sync read) plus a slow per-line sway. Only the picture wobbles:
-        // The tube mask and the grille live on the glass and stay put by
-        // construction.
+        // Tracking wobble (fxParams2.y, px): each scanline row shifts by a
+        // per-line random jitter requantized at 24 Hz plus a slow per-line
+        // sway. Only the picture wobbles; the tube mask and the grille live on
+        // the glass.
         float khc_wob = ((Hash(float2(khc_line * 0.173f, floor(t * 24.0f) * 0.71f)) - 0.5f)
                        + 0.35f * sin(t * 2.3f + khc_line * 0.61f)) * fxParams2.y;
 
@@ -782,11 +757,9 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         khc_col.g = SampleScene(int2(khc_dpx)).g;
         khc_col.b = SampleScene(int2(khc_dpx - khc_fpx)).b;
 
-        // Beam scanlines over the distorted picture: the beam profile is a
-        // shaped sine whose exponent narrows in the shadows and widens toward
-        // the highlights (phosphor blooming), and the 1.32 gain recovers the
-        // average level the dark gaps remove. The profile rides the shared
-        // raster phase.
+        // Beam scanlines: a shaped sine whose exponent narrows in the shadows
+        // and widens toward the highlights (phosphor blooming); the 1.32 gain
+        // recovers the average level the dark gaps remove.
         float khc_lum = saturate(Luma(khc_col));
         float khc_beam = pow(abs(sin(khc_phase * 3.14159265f)),
                              lerp(2.2f, 0.65f, khc_lum));
@@ -808,18 +781,17 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         float khc_band = 1.0f - smoothstep(0.0f, 0.16f, khc_bd);
         khc_col *= 1.0f - khc_band * khc_band * 0.22f * saturate(fxParams1.z);
 
-        // Mains flicker: a fast beat (aliases against any real frame rate -
-        // authentically so) plus a per-refresh random sparkle quantized to 60
-        // Hz through the grain family's Hash.
+        // Mains flicker: a fast beat plus a per-refresh random sparkle
+        // quantized to 60 Hz.
         float khc_fl = saturate(fxParams1.y);
         float khc_hum = sin(t * 100.0f * 3.14159265f) * 0.5f + 0.5f;
         float khc_spark = Hash(float2(floor(t * 60.0f), 3.7f)) - 0.5f;
         khc_col *= 1.0f + khc_fl * (khc_hum * 0.04f + khc_spark * 0.05f);
 
         // Phosphor tint, then the tube face: rounded-rectangle mask in the
-        // distorted space (out-of-range refraction lands outside it by
-        // construction - the bezel is black), with a ~2 px feathered edge and a
-        // soft glass falloff into the corners.
+        // distorted space (out-of-range refraction lands outside it - the bezel
+        // is black), a ~2 px feathered edge and a soft glass falloff into the
+        // corners.
         khc_col *= color.rgb;
         float khc_cr = clamp(fxParams1.w, 0.003f, 0.5f);
         float2 khc_q = abs(khc_duv - 0.5f);

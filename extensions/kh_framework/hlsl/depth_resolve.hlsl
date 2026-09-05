@@ -1,4 +1,4 @@
-// depth_resolve.hlsl - RCDATA resource in kh_shaders.rc, concatenated into its unit by C++ (no #include). Any edit changes the unit's shader cache key.
+// depth_resolve.hlsl - a standalone unit (no #include). Any edit changes the unit's shader cache key.
 
 #if MSAA_DEPTH
 Texture2DMS<float> resolveSrc : register(t0);

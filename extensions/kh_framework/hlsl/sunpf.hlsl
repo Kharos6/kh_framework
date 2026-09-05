@@ -1,4 +1,4 @@
-// Sunpf.hlsl - RCDATA resource in kh_shaders.rc, concatenated into its unit by C++ (no #include). Any edit changes the unit's shader cache key.
+// sunpf.hlsl - a standalone unit (no #include). Any edit changes the unit's shader cache key.
 
 Texture2D<float> khpf_src : register(t0);
 struct VSOPf { float4 pos : SV_Position; };

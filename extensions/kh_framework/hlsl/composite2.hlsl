@@ -1,21 +1,20 @@
-// composite2.hlsl - RCDATA resource in kh_shaders.rc, concatenated into its unit by C++ (no #include). Any edit changes the unit's shader cache key.
+// composite2.hlsl - joined after composite.hlsl into the composite unit by C++
+// (no #include). Any edit changes the unit's shader cache key.
 
 struct VSOutC { float4 pos : SV_Position; float3 wpos : TEXCOORD0; float3 nrm : TEXCOORD1;
-    float3 wrel : TEXCOORD4;   // KH_SELF_REL_INTERP (at VSOut).
-    float4 icol : TEXCOORD5;   // KH_INSTANCING: the object colour interpolant (at VSOut).
-    nointerpolation float4 iobj0 : TEXCOORD7;   // KH_OBJBUF (at VSOut).
+    float3 wrel : TEXCOORD4;   // Anchor-relative position (at VSOut).
+    float4 icol : TEXCOORD5;   // The object colour interpolant (at VSOut).
+    nointerpolation float4 iobj0 : TEXCOORD7;   // Per-object lanes (at VSOut).
     nointerpolation float4 iobj1 : TEXCOORD8;
 #if KH_TEXTURED
     float2 uv : TEXCOORD2; float4 tanw : TEXCOORD3;   // World tangent + handedness.
-    nointerpolation uint matIx : TEXCOORD6;   // KH_MAT_TABLE (at VSOut).
+    nointerpolation uint matIx : TEXCOORD6;   // Material table entry (at VSOut).
 #endif
 };
 
-// KH_INSTANCING: wrappers over KhVsCore (the shared prefix), the per-object one
-// Over the CB lanes, the instanced one over the stream. The composite fills
-// never write stenVol2.z non-zero (the seam prepass does, for VSMirror); the
-// core carries the ladder verbatim. Twin:
-// VSMain / VSMainInst in the static unit.
+// Wrappers over KhVsCore, the per-object one over the CB lanes, the instanced
+// one over the stream. The composite fills never write stenVol2.z non-zero.
+// Twin: VSMain / VSMainInst in the static unit.
 VSOutC VSComposite(VSIn i)
 {
     VSOutC o;
@@ -36,7 +35,7 @@ VSOutC VSComposite(VSIn i)
     return o;
 }
 
-// KH_OBJBUF: twin of VSMainInst (static unit) - the record at the lane's slot.
+// Twin of VSMainInst (static unit) - the record at the lane's slot.
 VSOutC VSCompositeInst(VSIn i, VSInst n)
 {
     VSOutC o;
@@ -79,9 +78,9 @@ float4 PSComposite(VSOutC i) : SV_Target
     bool occ = fragZ > sceneZ * (1.0f + fxParams1.y) + fxParams1.x;
 
     // The fragment's own clearance (its height above the terrain at its own
-    // footprint) is therefore tested unconditionally - four loads, every
-    // distance, no gate - and the march handles the true behind-the-ridge cases
-    // beyond the min-distance gate.
+    // footprint) is tested unconditionally - four loads, every distance, no
+    // gate; the march handles the true behind-the-ridge cases beyond the
+    // min-distance gate.
     float khtClear = 2.0e9f;   // 2e9 = lane inactive (distinct from no-data 1e9).
 
     if (thmParams.w >= 0.5f) {
@@ -101,17 +100,14 @@ float4 PSComposite(VSOutC i) : SV_Target
 #if KH_ARB_DEPTH
     {
         float khaD = i.pos.w;
-        // It could never have shown a ramped write of ours sitting under a
-        // clamped engine write at the same pixel.
         float khaNzN = abs(fxMeta.x);
         float khaNzD = (fxMeta.x < 0.0f) ? (1.0f / max(i.pos.w, 1.0e-8f))
                                          : khaD;
         bool  khaNzArm = (khaNzN > 0.0f && khaNzD < khaNzN);
 
         if (thmParams.w >= 0.5f && khtClear < 1.0e8f) {
-            // Distance-proportional LOD margin (round 7): 0.06 is the
-            // far-arbiter relative offset; fxParams1.z remains the absolute
-            // cap.
+            // Distance-proportional LOD margin: 0.06 is the far-arbiter
+            // relative offset; fxParams1.z remains the absolute cap.
             float khaCh = abs(fxParams1.w);
             bool   khaSc   = sceneClear;
             float  khaSz   = sceneZ;
@@ -138,10 +134,9 @@ float4 PSComposite(VSOutC i) : SV_Target
                 }
             }
             const float khaTie = (snapCam.w >= 0.5f) ? (0.05f + 1.0e-4f * khaRefD) : 0.0f;
-            // The only self-consistent decision is one that does not depend on
-            // where our own last write landed: a competitor within the
-            // possibly-self band (gap <= 0.25 + tie) is judged at the fragment,
-            // and the pull is the 0.25 m margin itself.
+            // The decision must not depend on where our own last write landed:
+            // a competitor within the possibly-self band (gap <= 0.25 + tie) is
+            // judged at the fragment, and the pull is the 0.25 m margin itself.
             const bool khaFixed = (snapCam.w >= 0.5f);
             const float khaFixM = 0.10f;
             float khaOff = 0.0f;
@@ -180,9 +175,8 @@ float4 PSComposite(VSOutC i) : SV_Target
         }
 
         // i.pos.z is the rasterizer's own interpolated, viewport-mapped depth -
-        // byte-exact with what the hardware would have written for this
-        // fragment had we never declared SV_Depth. Exact pass-through - the
-        // depth banding.
+        // byte-exact with what the hardware would have written had we never
+        // declared SV_Depth. Exact pass-through.
         {
         const float khaNdcE = (i.pos.z - depthParams.z) /
                               max(depthParams.w - depthParams.z, 1.0e-6f);
@@ -205,8 +199,7 @@ float4 PSComposite(VSOutC i) : SV_Target
         if (khaNdc >= 1.0f) khaODepth = depthParams.w - 1.0e-4f;   // Sliver, saturated only.
         // fxMeta.x carries the near estimate (> 0 arms; every other solid-mesh
         // fill leaves it zero - effect meshes never compile this shader),
-        // fxMeta.y the widened floor the routed draw's viewport opened. The
-        // ramp has been inverted since and never fired where it was needed.
+        // fxMeta.y the widened floor the routed draw's viewport opened.
         if (khaNzArm) {
             khaODepth = fxMeta.y + (depthParams.z - fxMeta.y) *
                         saturate(khaNzD / khaNzN);
@@ -221,28 +214,23 @@ float4 PSComposite(VSOutC i) : SV_Target
     int bm = (int)sizeAxes.w;
 
 #if KH_TEXTURED
-    // KH_TEXTURED: sample below the far contract + guard blocks (the section-4
-    // checkpoint - the textured twin adds no return/discard above them),
-    // cutout-clip, then build the mapped shading normal. The geometric normal
-    // keeps owning the receive gating below - shadow behavior stays in parity
-    // with the untextured twin.
+    // Textured: sample below the far contract + guard blocks (the textured twin
+    // adds no return/discard above them), cutout-clip, then build the mapped
+    // shading normal. The geometric normal keeps owning the receive gating
+    // below.
     KhMatLoad(i.matIx);   // KH_MAT_TABLE: the lanes below read from the entry.
     KhMatSurf khtxS = KhSampleMat(i.uv);
 
-    // matParams0.y = alpha mode
     if (matParams0.y >= 0.5f && matParams0.y < 1.5f) clip(khtxS.alpha - matParams0.z);   // Cutout kill.
     // Opaque alpha contract: sampled alpha never reaches the blend on the
-    // opaque and cutout modes - survivors draw at alpha 1. KH_MAT_BLEND: a
-    // blend material is split at alpha 0.996 - texels at or above it are solid
-    // and draw in the opaque still occludes itself; texels below it draw in the
-    // translucent tail alpha kept and fed to the same 'a' line as the object
-    // colour's alpha below, hardware-blended without a depth write.
-    if (matParams0.y >= 1.5f) {   // KH_MAT_SPLIT_TEXEL: one verdict per texel, both parts. Twin
-                                  // Edit.
-        // KH_MAT_SPLIT_TOL: the verdict tolerates compression. BC3/BC7 alpha in
-        // a block that also holds transparent texels lands an opaque texel at
-        // ~0.93-0.98 - the rectangular bites, one block each. Solid is >= 0.9;
-        // a designed glass (0.3-0.6) still blends. Twin edit.
+    // opaque and cutout modes - survivors draw at alpha 1. A blend material is
+    // split at the texel: solid texels draw in the opaque part and still
+    // occlude; texels below it draw in the translucent tail, alpha kept and
+    // hardware-blended without a depth write.
+    if (matParams0.y >= 1.5f) {   // One verdict per texel, both parts. Twin edit.
+        // The verdict tolerates compression: BC3/BC7 alpha in a block that also
+        // holds transparent texels lands an opaque texel at ~0.93-0.98. Solid
+        // is >= 0.9; a designed glass (0.3-0.6) still blends. Twin edit.
         const float khtxCls = KhMatRouteTexel(matParams3.y, 1.0f, i.uv);
         if (matParams0.y >= 2.5f) {
             clip(khtxCls - 0.9f);
@@ -269,13 +257,9 @@ float4 PSComposite(VSOutC i) : SV_Target
 #endif
     float smf = 1.0f;
 
-    // An unguarded reference kills ps_composite and the box never draws;
-    // shipped exactly that, in the wrong chunk. Taken here, outside the
-    // divergent N.L branch, for the same quad-op legality as the pair above.
-    // PSComposite declares khStenP in both branches of that conditional; this
-    // block sat only in the #else, so the ARB variant never declared khBiasN
-    // while the call site below the #endif used it. The bias slope wants the
-    // facet, not the vertex normal.
+    // Taken outside the divergent N.L branch for quad-op legality, and declared
+    // in both branches of the KH_ARB_DEPTH conditional (the call site below the
+    // #endif reads it). The bias slope wants the facet, not the vertex normal.
     float3 khFacetN = cross(ddx(i.wpos), ddy(i.wpos));
     float khFacetL = length(khFacetN);
     float3 khBiasN = normalize(i.nrm);
@@ -293,34 +277,27 @@ float4 PSComposite(VSOutC i) : SV_Target
     if (lighting0.x >= 0.5f && dot(khShN, lighting1.xyz) > 0.01f) {
         {
             if (maskMeta.x >= 0.5f) smf = ShadowBandFactor(i.wrel + sunOrigin.xyz);
-            else                    smf = ShadowMapFactor(i.wpos);   // Yzw re-lettered (were zero).
+            else                    smf = ShadowMapFactor(i.wpos);
         }
 
-        // Placed at a statement boundary between two independent receive terms,
-        // so no expression is split. PSMain's twin segment is well under budget
-        // and is deliberately not split - the twins differ in whitespace only.
- 
-        // KH_SELF_SKIP_DARK: a pixel the received term already darkens to 0
-        // cannot get darker - min(0, x) = 0 - so the self ladder (the four
-        // tiers, their rings and pyramids: the costliest term in this shader)
-        // is not consulted for it. Exact: the only value it could contribute
-        // is discarded by the min. A plain if, as the N.L branch around it is,
-        // so the gradient hoisting fxc does for that branch applies here too.
+        // A pixel the received term already darkens to 0 cannot get darker -
+        // min(0, x) = 0 - so the self ladder (the costliest term in this
+        // shader) is not consulted for it. A plain if, so fxc's gradient
+        // hoisting applies.
         if (smf > 0.0f) smf = min(smf, SunShadowFactorSelf(i.wpos, i.wrel, khBiasN));
         if (maskMeta.w >= 0.5f) {
             float khStenU = KhStenUnit(i.pos.xy);
-            // On PSMain it is the effect ID, so the fade is not applied there
-            // and must not be 'restored' to match.
+            // On PSMain fxMeta.x is the effect id, so the fade is not applied
+            // there.
 #if KH_ARB_DEPTH
-            // The magnitude is the near either way and the body already reads
-            // abs.
+            // The magnitude is the near either way.
             if (abs(fxMeta.x) > 0.0f) {
                 float khStenF = saturate((i.pos.w / max(abs(fxMeta.x), 1.0e-4f) - 1.0f)
                                          / max(KH_STEN_FADE - 1.0f, 1.0e-4f));
 
-                // KH_VOL_MIRROR: inside the fade the stencil verdict now comes
-                // from the mirror counting pass instead of a flat 1.0 - shadow
-                // scales through the last metre instead of washing out.
+                // Inside the fade the stencil verdict comes from the mirror
+                // counting pass instead of a flat 1.0 - shadow scales through
+                // the last metre instead of washing out.
                 float khMirF = 1.0f;
                 if (mirMeta.x >= 0.5f) {
                     khMirF = KhMirUnit(i.pos.xy, mirMeta.y, mirMeta.z);
@@ -328,15 +305,12 @@ float4 PSComposite(VSOutC i) : SV_Target
                 khStenU = lerp(khMirF, khStenU, khStenF);
             }
 #endif
-            // The volume term above starts from a witness compare - the engine
-            // depth at this pixel must be this fragment's - and a translucent
-            // texel wrote no depth: the pixel holds whatever is behind the
-            // glass, the witness fails, the 7x7 search finds no matching plane
-            // and the fallback answers with the background's stencil, which
-            // changes with the camera. A translucent texel = the blend
-            // material's translucent part (matParams0.y 2) or a whole
-            // translucent object on normal blend (the interpolated colour alpha
-            // Below 0.999 at blend id 0). TWIN: PSMain and PSComposite.
+            // The volume term starts from a witness compare - the engine depth
+            // at this pixel must be this fragment's - and a translucent texel
+            // wrote no depth, so the witness fails and the fallback answers
+            // with the background's stencil. A translucent texel = the blend
+            // material's translucent part or a whole translucent object on
+            // normal blend. TWIN: PSMain and PSComposite.
             if (mirMeta.x >= 0.5f && mirMeta.x < 1.5f &&
                 ((matParams0.y >= 1.5f && matParams0.y < 2.5f) ||
                  (i.icol.a < 0.999f && bm == 0))) {
@@ -349,12 +323,11 @@ float4 PSComposite(VSOutC i) : SV_Target
         }
     }
 
-    // Slices surviving this are painted by the engine over our pixels, not by
-    // any term of ours. Twin edit: PSMain and PSComposite identical.
+    // Twin edit: PSMain and PSComposite identical from here to the shading
+    // call.
 
 #if KH_TEXTURED
-    khtxS.albedo *= i.icol.rgb;   // The object colour tints the albedo lane only (KH_INSTANCING:
-                                  // The interpolant).
+    khtxS.albedo *= i.icol.rgb;   // The object colour tints the albedo lane only.
 #if KH_USER_MAT
     float3 lc = KhUserShade(khtxS, i.wpos, khtxN, smf);
 #else
@@ -386,9 +359,9 @@ float4 PSComposite(VSOutC i) : SV_Target
 
         if (fogParams.w >= 0.5f) {
             if (fogEngine.w >= 0.5f) {
-                // Below it they carry the export's above-path and layer
-                // reference, and a ray wholly below the layer (khaFbA == 0)
-                // takes no height fog.
+                // Below the layer they carry the export's above-path and layer
+                // reference; a ray wholly below the layer (khaFbA == 0) takes
+                // no height fog.
                 float dh = abs(hgt - khaFbRef);
                 float k = fogParams.y * dh / max(khaFbA, 1.0e-4f);
                 float integ = k < 1.0e-6f ? khaFbA : (1.0f - exp(-khaFbA * k)) / k;
@@ -437,11 +410,10 @@ float4 PSComposite(VSOutC i) : SV_Target
                          max(khaWp + khaWs, 1.0e-5f);
         }
 
-        // At full optical depth our mesh paints exactly fog_target and nothing
-        // else, so a silhouette can only exist if fog_target differs from what
-        // the engine leaves on the pixels around it. Deliberately placed after
-        // the fogSky gradient resolves, so it paints the target actually handed
-        // to the lerp, not a stand-in.
+        // At full optical depth our mesh paints exactly fog_target, so a
+        // silhouette can only exist if fog_target differs from what the engine
+        // leaves around it. Placed after the fogSky gradient resolves, so it
+        // paints the target actually handed to the lerp.
 
         lc = lerp(fog_target, lc, trans);
     }
@@ -455,9 +427,9 @@ float4 PSComposite(VSOutC i) : SV_Target
     if (bm == 4) return float4(lc * a, 1.0f);
      if (bm == 5) return float4(lerp(float3(65504.0f, 65504.0f, 65504.0f), lc, a), 1.0f);
 
-    // Simple transparency per the spec is a display- space mix, so: sample the
+    // Simple transparency per the spec is a display-space mix: sample the
     // pre-mesh scene capture at this pixel, blend in Reinhard space, invert,
-    // write opaque - the destination can never dominate again.
+    // write opaque.
     if (blendCtl.x >= 0.5f) {
         float khb_a = (sceneZ > blendCtl.y) ? 1.0f : a;
         float3 scn = sceneColorTex.Load(int3(int2(i.pos.xy), 0)).rgb;

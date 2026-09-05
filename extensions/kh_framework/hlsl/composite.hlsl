@@ -1,4 +1,4 @@
-// Composite.hlsl - RCDATA resource in kh_shaders.rc, concatenated into its unit by C++ (no #include). Any edit changes the unit's shader cache key.
+// composite.hlsl - joined with composite2.hlsl after cb.hlsl into the composite unit (no #include). Any edit changes the unit's shader cache key.
 
 #if MSAA_DEPTH
 Texture2DMS<float> depthTex : register(t0);
@@ -14,10 +14,9 @@ float GuardSceneRaw(int2 px)
     return m > 0.0f ? m : 1.0f;   // All-clear pixel reads as the far clear.
 }
 #else
-// Two-plane snapshot -.x farthest (guard),.y nearest (witness).
+// Two-plane snapshot: .x farthest (guard), .y nearest (witness).
 Texture2D<float2> depthTex : register(t0);
-// Raw guard read: the snapshot value at the pixel. Unchanged -.x is the
-// farthest plane, exactly what this read has always returned.
+// Raw guard read: the snapshot's .x (farthest plane) at the pixel.
 float GuardSceneRaw(int2 px)
 {
     return depthTex.Load(int3(px, 0)).x;

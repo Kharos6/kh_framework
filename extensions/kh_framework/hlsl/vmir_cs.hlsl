@@ -1,4 +1,4 @@
-// vmir_cs.hlsl - RCDATA resource in kh_shaders.rc, concatenated into its unit by C++ (no #include). Any edit changes the unit's shader cache key.
+// vmir_cs.hlsl - a standalone unit (no #include). Any edit changes the unit's shader cache key.
 
 ByteAddressBuffer khmc_in : register(t0);
 RWByteAddressBuffer khmc_out : register(u0);

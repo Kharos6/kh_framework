@@ -6122,7 +6122,7 @@ static void update_unit_states() {
 
 // SQF entry points
 
-// KH_RENDER_ARGS (26759): the rendering commands' argument contract.
+// The rendering commands' argument contract.
 //
 // 1. Every in-array argument fault is REPORTED through report_error (the
 //    sqf_integration convention every other command family follows) and the
@@ -6271,7 +6271,7 @@ static bool kh_rv_effect(const game_value& v, RenderIntegration::RenderObject& o
     if (e < 0) { err = khfx_err.empty() ? std::string("unknown effect (a builtin effect name / id, a .hlsl path, or a .cube path)") : khfx_err; return false; }
     if (want_fullscreen && e == 0) { err = "a fullscreen pass needs an effect other than 'solid'"; return false; }
     obj.effect = e;
-    obj.fx_shader = RenderIntegration::kh_intern_str(khfx_path);   // KH_FX_INTERN.
+    obj.fx_shader = RenderIntegration::kh_intern_str(khfx_path);
     RenderIntegration::set_effect_params(obj, nullptr);   // New effect, its defaults.
     return true;
 }
@@ -6377,9 +6377,6 @@ static int kh_apply_shared_prop(RenderIntegration::RenderObject& obj,
                                 const std::string& prop, const game_value& val, std::string& err) {
     if (prop == "color")   return kh_rv_color(val, obj, err) ? 1 : 0;
     if (prop == "visible") { bool b = obj.visible; if (!kh_rv_bool(val, b, "visible", err)) return 0; obj.visible = b; return 1; }
-    // Compared against the mixed-case literal "casterOnly" while the callers
-    // lower-case the property first, so it never matched and every casterOnly
-    // update returned false.
     if (prop == "casteronly") { bool b = obj.caster_only; if (!kh_rv_bool(val, b, "casterOnly", err)) return 0; obj.caster_only = b; return 1; }
     if (prop == "params" || prop == "fxparams") return kh_rv_params(val, obj, err) ? 1 : 0;
     if (prop == "blend")   return kh_rv_blend(val, obj, err) ? 1 : 0;
@@ -6512,17 +6509,13 @@ static bool kh_update_one(const char* cmd, bool want_fullscreen,
     std::string prop = static_cast<std::string>(t[1]);
     std::transform(prop.begin(), prop.end(), prop.begin(), ::tolower);
 
-    // The value parsers may touch the disk: a first-seen .fbx runs the whole
-    // import (ufbx, the LOD ladder, tangents) and then parks the render thread
-    // to publish; .hlsl / .cube / material paths walk every mod's rendering
-    // folder on a cache miss. The render thread takes g_draw_list_mutex at five
-    // sites (the sun caster census, the mask cast, the seam inject, both
-    // injection staging loops), so parsing under it stalled the frame for the
-    // import's duration and - worse - inverted the park: the game thread waited
-    // for a render thread that was itself blocked on this mutex. Sound because
-    // every writer to a draw-list entry is the game thread (the SQF handlers
-    // and the flush's expiry erase - all on this thread, so nothing can
-    // interleave between the two locks); the render thread only reads.
+    // Parse OUTSIDE the draw-list lock: the value parsers may touch the disk
+    // (a first-seen .fbx runs the whole import and parks the render thread to
+    // publish; .hlsl / .cube / material paths walk the mod folders), and the
+    // render thread takes g_draw_list_mutex at several sites, so parsing under
+    // it stalls the frame and can invert the park (game thread waiting on a
+    // render thread blocked on this mutex). Sound because every writer to a
+    // draw-list entry is the game thread; the render thread only reads.
     RenderIntegration::RenderObject staged;
     {
         std::lock_guard<std::mutex> g(RenderIntegration::g_draw_list_mutex);
@@ -6712,17 +6705,13 @@ static game_value set_render_debug_sqf(game_value_parameter arg) {
     }
 }
 
-// Render statistics. KH_STATS_ARMED: collection is off until the first
-// getRenderStats call, which arms it and returns the merged record with the
-// counters at zero (statsArmed 0 = this call armed them); every later call
-// reports what accumulated since. resetRenderStats zeroes the counters and
-// disarms collection again. The record is the union of the former
-// getRenderStats / dumpRenderTrace / dumpDynamicLights outputs: the counters
-// and hook state, then the render-thread frame trace and the dynamic-light
-// state copied under one graphics-lock acquisition (the render thread parked)
-// and formatted after release. Trace keys keep their old names (camera = the
-// latched cycle camera); the dynamic-light keys carry a dl prefix; the two
-// former 'locked' rows are one 'traceLocked'.
+// Render statistics. Collection is off until the first getRenderStats call,
+// which arms it and returns the record with the counters at zero (statsArmed
+// 0 = this call armed them); every later call reports what accumulated since.
+// resetRenderStats zeroes the counters and disarms collection again. The
+// record is the counters and hook state, then the render-thread frame trace
+// and the dynamic-light state (dl prefix), copied under one graphics-lock
+// acquisition (the render thread parked) and formatted after release.
 static game_value reset_render_stats_sqf() {
     try {
         // Best effort park so the zeroing cannot tear against a render-thread
@@ -6851,7 +6840,7 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("hookActive", RenderIntegration::g_reorder_hook_active.load(std::memory_order_relaxed) ? 1.0f : 0.0f));
         out.push_back(kv("hookFailed", RenderIntegration::g_reorder_hook_failed ? 1.0f : 0.0f));
 
-        // The frame trace (formerly dumpRenderTrace).
+        // The frame trace.
         out.push_back(kv("traceLocked", khrt_got ? 1.0f : 0.0f));
         out.push_back(kv("frameCycles", static_cast<float>(khrt_cycles)));
         out.push_back(kv("depthClears", static_cast<float>(khrt_clears)));
@@ -6875,7 +6864,7 @@ static game_value get_render_stats_sqf() {
             out.push_back(kva("camera", std::move(cam)));
         }
 
-        // The dynamic-light state (formerly dumpDynamicLights).
+        // The dynamic-light state.
         out.push_back(kv("dlValid", khd_valid ? 1.0f : 0.0f));
         out.push_back(kv("dlPointN", static_cast<float>(khd_point_n)));
         out.push_back(kv("dlSpotN", static_cast<float>(khd_spot_n)));
@@ -6913,8 +6902,7 @@ static game_value get_render_stats_sqf() {
     }
 }
 
-// Localized passes always sample the depth buffer (read-only DSV phase rules
-// Apply). addLocalPostFX [[x,y,zASL], radius, falloff, effect, params?,
+// Localized passes always sample the depth buffer. addLocalPostFX [[x,y,zASL], radius, falloff, effect, params?,
 // [r,g,b,a]?, shape?, blend?, duration?, inverse?]. Optional slots skip on nil
 // ("" for blend).
 static game_value add_local_postfx_sqf(game_value_parameter args) {
@@ -6970,8 +6958,7 @@ static game_value add_local_postfx_sqf(game_value_parameter args) {
         if (arr.size() > 9 && !arr[9].is_nil()) {
             bool b = false;
             if (!kh_rv_bool(arr[9], b, "inverse", err)) { kh_rv_report("addLocalPostFX", err); return game_value(""); }
-            obj.local_inverse = b;   // KH_LOCAL_INVERSE: the effect reaches everything except the
-                                     // Volume.
+            obj.local_inverse = b;   // The effect reaches everything except the volume.
         }
 
         return game_value(RenderIntegration::add_render_object(obj));
@@ -6991,8 +6978,7 @@ static game_value add_local_postfx_sqf(game_value_parameter args) {
 static game_value flush_ui_render_sqf() {
 
     try {
-        RenderIntegration::ensure_ui_driver();   // Explicit UI-render demand is an enabling
-                                                 // Command.
+        RenderIntegration::ensure_ui_driver();   // Explicit UI-render demand enables the driver.
         return game_value(RenderIntegration::flush_ui_frame());
     } catch (const std::exception& e) {
         report_error(std::string("flushUIRender: ") + e.what());
@@ -8250,9 +8236,8 @@ static void initialize_sqf_integration() {
 
     _sqf_set_render_debug = intercept::client::host::register_sqf_command(
         "setRenderDebug",
-        // The SQF-visible description is deliberately narrow. Adding A mode
-        // still means two edits - that catalog comment and the whitelist above
-        // - and there is no compiler check that they agree.
+        // Adding a mode means two edits: this description and the whitelist in
+        // set_render_debug_sqf; nothing checks that they agree.
         "Sets the render debug mode",
         userFunctionWrapper<set_render_debug_sqf>,
         game_data_type::BOOL,

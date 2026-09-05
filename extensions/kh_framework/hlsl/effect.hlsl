@@ -123,7 +123,13 @@ float3 KhWorldPosFenced(int2 px, float2 uv, out float khwf_d)
     float4 khwf_nd = float4(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f,
                             depthParams.x + depthParams.y / max(khwf_d, 1.0f), 1.0f);
     float4 khwf_wp = mul(khwf_nd, invViewProj);
-    return khwf_wp.xyz / khwf_wp.w;
+    // KH_FX_CAM_REL: with fxCam armed the inverse is of a rotation-only view
+    // (camera at the origin) - small numbers, exact in fp32 - and the camera
+    // is added here, once, correctly rounded. An absolute inverse mixes the
+    // camera's kilometres into every entry and cancels them back out per
+    // pixel; that cancellation jittered the reconstruction by centimetres
+    // frame to frame, the soft edge of every localized mask with it.
+    return khwf_wp.xyz / khwf_wp.w + (fxCam.w > 0.5f ? fxCam.xyz : float3(0.0f, 0.0f, 0.0f));
 }
 
 // Pure function of its arguments; reads no CB.
@@ -158,7 +164,11 @@ float KhFsFog(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float fs_m1
         float4 fs_nd = float4(fs_uv.x * 2.0f - 1.0f, 1.0f - fs_uv.y * 2.0f,
                               depthParams.x + depthParams.y / max(fs_de, 1.0f), 1.0f);
         float4 fs_wp = mul(fs_nd, invViewProj);
-        float fs_hgt = fs_wp.y / fs_wp.w;
+        // KH_FX_CAM_REL: with fxCam armed the inverse is camera-relative
+        // (KhWorldPosFenced's rule) and the height comes back relative too;
+        // fogColor.w it is measured against is the camera's absolute altitude,
+        // so the camera's own is added here, once, exactly as the position is.
+        float fs_hgt = fs_wp.y / fs_wp.w + (fxCam.w > 0.5f ? fxCam.y : 0.0f);
         float fs_camY = fogColor.w;
         float fs_tr;
 

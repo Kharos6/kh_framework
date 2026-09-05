@@ -1075,6 +1075,19 @@ struct Resources {
     ID3D11VertexShader*       vs_dls_mask = nullptr;
     ID3D11PixelShader*        ps_dls_mask = nullptr;
     ID3D11PixelShader*        ps_dls_mask_a = nullptr;   // KH_DLSW_MASK_ALPHA: the alpha-clipping twin.
+    // KH_PIP_FX: the PIP pass's own scene capture (t0, copied per pass), its
+    // depth copied (t1; single-sample, so PSEffect's MSAA_DEPTH 0 build reads
+    // it), and that build. Sized to the PIP the last fire saw.
+    ID3D11PixelShader*        ps_effect_pip = nullptr;
+    bool                      ps_effect_pip_tried = false;   // One compile attempt per device.
+    ID3D11Texture2D*          pip_scene_tex = nullptr;
+    ID3D11ShaderResourceView* pip_scene_srv = nullptr;
+    UINT                      pip_scene_w = 0, pip_scene_h = 0;
+    DXGI_FORMAT               pip_scene_fmt = DXGI_FORMAT_UNKNOWN;
+    ID3D11Texture2D*          pip_depth_tex = nullptr;
+    ID3D11ShaderResourceView* pip_depth_srv = nullptr;
+    UINT                      pip_depth_w = 0, pip_depth_h = 0;
+    DXGI_FORMAT               pip_depth_fmt = DXGI_FORMAT_UNKNOWN;
     ID3D11BlendState*        blend_ui_replace = nullptr;   // Blend off, RGB-only write: builtin
                                                            // UI-phase.
     ID3D11BlendState*        blend_ui_masked = nullptr;   // Custom user FX only (their shaders
@@ -1203,8 +1216,8 @@ struct Resources {
     ID3D11SamplerState*       khsg_sampler = nullptr;
     // Read back donotflush 2+ frames later; a slot still in flight is skipped,
     // never reused hot.
-    // The geometry passes have never been measured. Two rings, not one, and the
-    // reason is threads.
+    // Two rings, not one, by design: one per thread (the threading contract at
+    // flush_frame). Settled; no measurement is owed.
     ID3D11Texture2D*          scene_tex = nullptr;
     ID3D11ShaderResourceView* scene_srv = nullptr;
     UINT                      scene_w = 0, scene_h = 0;
@@ -1396,6 +1409,16 @@ struct Resources {
         KH_SAFE_RELEASE(vs_dls_mask);
         KH_SAFE_RELEASE(ps_dls_mask);
         KH_SAFE_RELEASE(ps_dls_mask_a);
+        KH_SAFE_RELEASE(ps_effect_pip);   // KH_PIP_FX.
+        ps_effect_pip_tried = false;
+        KH_SAFE_RELEASE(pip_scene_srv);
+        KH_SAFE_RELEASE(pip_scene_tex);
+        pip_scene_w = pip_scene_h = 0;
+        pip_scene_fmt = DXGI_FORMAT_UNKNOWN;
+        KH_SAFE_RELEASE(pip_depth_srv);
+        KH_SAFE_RELEASE(pip_depth_tex);
+        pip_depth_w = pip_depth_h = 0;
+        pip_depth_fmt = DXGI_FORMAT_UNKNOWN;
         dlsw_w = dlsw_h = 0;
         KH_SAFE_RELEASE(blend_ui_replace);
         KH_SAFE_RELEASE(blend_ui_masked);
@@ -2096,6 +2119,7 @@ struct RenderStats {
     uint64_t composite_injections = 0;   // pre-translucent injection events (once per scene frame).
     uint64_t pip_injections = 0;   // KH_PIP: injections into PIP passes.
     uint64_t pip_meshes = 0;       // KH_PIP: draws they made.
+    uint64_t pip_fx = 0;           // KH_PIP_FX: localized fullscreen passes drawn into PIP passes.
     uint64_t composite_meshes = 0;   // Meshes drawn through the composited path.
     uint64_t textured_draws = 0;   // per-submesh textured draws issued (KH_TEXTURED).
     uint64_t meshes_released = 0;   // KH_MESH_FREE: registry meshes released by the idle GC.
@@ -2119,9 +2143,17 @@ inline void kh_stat_add(uint64_t& khst_c, uint64_t khst_n) { if (kh_stats_on()) 
 static uint64_t g_flush_serial = 0;
 
 
+// setRenderDebug: 0 is the only mode, by design. No readback or debug-view
+// modes are planned or pending; the stats surface (getRenderStats) is the
+// whole diagnostic contract. Closed.
 static std::atomic<int> g_dbg_mode{ 0 };
 
 static uint32_t g_scene_depth_samples = 0;   // sampleDesc.Count of the adopted main depth.
+// INTENTIONAL LIMITATION: at FSAA 1x (a single-sample main depth) every world
+// mesh stands down - the flush and the injection both - while fullscreen
+// passes keep running. The mesh integration is built and validated against
+// the engine's multisampled scene path only. This is the shipped behaviour,
+// not an open question; do not extend the mesh path to 1x without a campaign.
 inline bool kh_fsaa_world_standdown() {
     return g_scene_depth_samples == 1;
 }
@@ -2145,6 +2177,7 @@ static void* g_main_depth_identity = nullptr;
 static UINT g_main_depth_w = 0;
 static UINT g_main_depth_h = 0;
 static UINT  g_wrong_pass_streak = 0;
+static bool  g_flush_wrong_pass = false;   // KH_WRONG_PASS_REPARK: flush_locked parked on a non-main depth; re-park.
 static constexpr UINT KH_WRONG_PASS_READOPT = 120;
 
 // Depth values were written through the scene viewport depth range; UI-phase
@@ -2279,8 +2312,9 @@ struct alignas(16) ConstantData {
                                // block (b1).
     float view_proj[4][4];   // Rebased on the two mesh passes see center_rel; absolute at every
                              // Other site.
-    float inv_view_proj[4][4];   // Always the absolute inverse of the live encode (WorldPos depth
-                                 // Reconstruction).
+    float inv_view_proj[4][4];   // Inverse of the live encode for the depth reconstruction:
+                                 // of the rotation-only view when fx_cam.w = 1 (the shader adds
+                                 // fx_cam.xyz back), absolute when fx_cam.w = 0 (KH_FX_CAM_REL).
     float lighting1[4];   // Xyz = unit vector toward the light (engine axes), w = valid flag.
     float lighting2[4];   // Rgb = the engine's sun colour in HDR scene units, copied straight from the
                           // published lighting block (KH_LIGHT_BASE; (1,1,1) before the first publish),
@@ -2391,6 +2425,12 @@ struct alignas(16) ConstantData {
     // site that draws no bucket.
     float kh_pass[4];
     float kh_pass_obj[4];
+    // KH_FX_CAM_REL: xyz = the camera the effect unit's inverse view-projection
+    // is relative to (engine axes), w = 1 arms it - KhWorldPosFenced adds xyz
+    // back after the camera-relative reconstruction. w = 0 (the zeroed
+    // default): the inverse is absolute and nothing is added - the old
+    // contract, kept for fill sites that do not set the lane.
+    float fx_cam[4];
 };
 
 // CB-split slice geometry: the object block ends where view_proj (the first
@@ -3167,6 +3207,23 @@ inline void kh_shader_mt_worker() {
     }
 }
 
+// KH_PREWARM_ABANDON: a batch that was built but never got a worker is torn
+// down here - map entries this call inserted (and, as the refused-pool path
+// always did, any memo the map held), the owned sources, the queue. No worker
+// exists at either call site (g_khsm_thr is empty, g_khsm_live is 0 on
+// entry), so the map is touched without the lock exactly as the refused-pool
+// path does. The caller compiles inline, which is always correct.
+inline void kh_shader_mt_abandon() {
+    for (auto& khsm_kv : g_khsm_map) {
+        if (khsm_kv.second.blob) khsm_kv.second.blob->Release();
+    }
+    g_khsm_map.clear();
+    g_khsm_own.clear();
+    g_khsm_q.clear();
+    g_khsm_next.store(0, std::memory_order_relaxed);
+    g_khsm_active = false;
+}
+
 inline bool kh_shader_mt_prewarm(const KhShaderJob* khsm_jobs, size_t khsm_n,
                                  bool khsm_caller_works = true) {
     if (!khsm_jobs || khsm_n == 0) return false;
@@ -3259,21 +3316,26 @@ inline bool kh_shader_mt_prewarm(const KhShaderJob* khsm_jobs, size_t khsm_n,
         }
     }
     if (khsm_w > 0 && g_khsm_thr.empty()) {
-        for (auto& khsm_kv : g_khsm_map) {
-            if (khsm_kv.second.blob) khsm_kv.second.blob->Release();
-        }
-        g_khsm_map.clear();
-        g_khsm_own.clear();
-        g_khsm_q.clear();
-        g_khsm_next.store(0, std::memory_order_relaxed);
-        g_khsm_active = false;
+        kh_shader_mt_abandon();
         return false;
     }
     return true;
     } catch (...) {
-        // Partial state is possible - map entries, maybe spawned threads. Claim
-        // ownership so the caller's destructor tears it all down.
-        g_khsm_active = true;
+        // KH_PREWARM_ABANDON. Every throw site above precedes the spawn loop
+        // (the loop catches its own), so a throw here means map entries with
+        // no worker to finish them. Claiming ownership was right for the
+        // scoped caller (its destructor joins nothing and clears) and wrong
+        // for kh_shader_async_gate, which has no destructor: the hold would
+        // have scanned those never-done entries every flush, forever, with
+        // white placeholders for every mesh - the unbounded hold 1.316
+        // forbids. Tear it down and refuse; both callers then compile inline.
+        // The spawned-worker branch is unreachable today and kept only so a
+        // future throw after the spawn cannot orphan a live thread.
+        if (g_khsm_thr.empty()) {
+            kh_shader_mt_abandon();
+            return false;
+        }
+        g_khsm_active = true;   // Workers exist: the caller's teardown joins them.
         return true;
     }
 }
@@ -3364,7 +3426,11 @@ inline void kh_shader_mt_shutdown(bool khss_wait) {
     // The detach is documented safe on that path, so the reset paths do not
     // wait at all. It buys exactly one thing - the chance to join instead of
     // detach when a compile happens to be nearly done - and it pays for it by
-    // holding whatever lock the caller holds.
+    // holding whatever lock the caller holds. INTENTIONAL: both mission-end
+    // callers hold the graphics lock on the game thread, so a mission ended
+    // during a cold prewarm hitches for the tail of the slowest job (the
+    // effect unit runs to seconds), bounded here. A shorter bound trades
+    // that hitch for a detached worker on a cold cache; not worth it.
     const uint64_t khss_bound = khss_wait ? 5000u : 0u;
     while (khss_bound && g_khsm_live.load(std::memory_order_acquire) > 0 &&
            steady_now_ms() - khss_t0 < khss_bound) {
@@ -4548,6 +4614,19 @@ inline ID3D11ShaderResourceView* kh_user_lut_srv(ID3D11Device* dev, const std::s
 
     g_user_lut_cache.emplace(std::move(khlu_key), khlu_e);
     return khlu_e.srv;
+}
+
+// KH_PIP_FX: the cache alone, for the render thread - the flush loads a LUT
+// the first time its pass draws in the main view; a PIP fire before that
+// skips the pass rather than reading a file inside an engine hook. Twin of
+// the key built above.
+inline ID3D11ShaderResourceView* kh_user_lut_cached(const std::string& path) {
+    if (path.empty()) return nullptr;
+    std::string khlc_key("lut|");
+    khlc_key += path;
+    std::transform(khlc_key.begin(), khlc_key.end(), khlc_key.begin(), ::tolower);
+    auto khlc_it = g_user_lut_cache.find(khlc_key);
+    return khlc_it != g_user_lut_cache.end() ? khlc_it->second.srv : nullptr;
 }
 
 static std::unordered_map<std::string, int> g_fbx_cache;   // Lower(resolved path) -> mesh id.
@@ -8069,6 +8148,28 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         kh_hlsl_src(KH_HLSL_CB) + kh_hlsl_src(KH_HLSL_EFFECT).c_str() + kh_hlsl_src(KH_HLSL_EFFECT2).c_str() + kh_hlsl_src(KH_HLSL_EFFECT3).c_str();
     const D3D_SHADER_MACRO khfx_d0[] = {
         { "MSAA_DEPTH", "0" }, { nullptr, nullptr } };
+    // KH_PREWARM_ALL: the rest of the core set rides this one batch, so the
+    // first post FX, the first depth snapshot, the first sun prefilter and the
+    // first mirror prepass are memo hits whichever of meshes / post FX the
+    // scene holds first. Each table is its ensure's twin byte for byte:
+    // ensure_effect_shader (MSAA_DEPTH alone - both values, the main depth's
+    // build whichever its count and the PIP's), ensure_depth_resolve_shader
+    // (the adopted count, WIT_NEAREST 1 - source nulled while the count is
+    // unknown, a UI flush ahead of the scene flush, and the prewarm skips a
+    // null source; that one then compiles inline), ensure_sun_pf (an empty
+    // table) and kh_vmir_ensure_gpu (null) - the cache hash reads those two
+    // alike. The composite unit needs nothing more: its snapshot is always
+    // single-sample, so the khsp_d0* entries above are its whole key set.
+    const D3D_SHADER_MACRO khfx_d1[] = {
+        { "MSAA_DEPTH", "1" }, { nullptr, nullptr } };
+    const std::string khpw_sc = std::to_string(g_res.depth_sample_count > 0 ? g_res.depth_sample_count : 1);
+    const D3D_SHADER_MACRO khpw_dr[] = {
+        { "MSAA_DEPTH", g_res.depth_sample_count > 1 ? "1" : "0" },
+        { "SAMPLE_COUNT", khpw_sc.c_str() },
+        { "WIT_NEAREST", "1" },
+        { nullptr, nullptr } };
+    static const D3D_SHADER_MACRO khpw_none[] = { { nullptr, nullptr } };
+    const char* khpw_dr_src = g_res.depth_sample_count > 0 ? kh_hlsl_src(KH_HLSL_DEPTH_RESOLVE).c_str() : nullptr;
     // VSWhite/PSWhite are deliberately absent from this list and must stay
     // absent: kh_white_ensure compiles them on the render thread inside the
     // graphics lock, and compile_shader blocks on its condition variable for
@@ -8109,8 +8210,15 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         { khsp_comp_src.c_str(), "VSComposite", "vs_5_0", khsp_d0t, 0 },
         { khsp_comp_src.c_str(), "VSCompositeInst", "vs_5_0", khsp_d0,  0 },   // KH_INSTANCING twins.
         { khsp_comp_src.c_str(), "VSCompositeInst", "vs_5_0", khsp_d0t, 0 },
-        // Last: the lightest entry (PSEffect has no shadow chain).
+        // The lightest of the assembled units (PSEffect has no shadow chain).
         { khfx_src.c_str(), "PSEffect", "ps_5_0", khfx_d0, 0 },
+        // KH_PREWARM_ALL (tables above).
+        { khfx_src.c_str(), "PSEffect", "ps_5_0", khfx_d1, 0 },
+        { khpw_dr_src, "PSDepthResolve", "ps_5_0", khpw_dr, 0 },
+        { kh_hlsl_src(KH_HLSL_SUNPF).c_str(),   "VSPf",    "vs_5_0", khpw_none, 0 },
+        { kh_hlsl_src(KH_HLSL_SUNPF).c_str(),   "PSPf",    "ps_5_0", khpw_none, 0 },
+        { kh_hlsl_src(KH_HLSL_SUNPF).c_str(),   "PSPfMip", "ps_5_0", khpw_none, 0 },
+        { kh_hlsl_src(KH_HLSL_VMIR_CS).c_str(), "CSMirB2", "cs_5_0", nullptr,   0 },
     };
     const size_t khsp_n = _countof(khsp_jobs) -
         (0u);
@@ -10848,6 +10956,7 @@ static constexpr int KH_VT_OMSETBLENDSTATE       = 35;
 static constexpr int KH_VT_OMSETDEPTHSTENCIL     = 36;
 static constexpr int KH_VT_RESOLVESUBRESOURCE    = 57;
 static constexpr int KH_VT_UPDATESUBRESOURCE     = 48;
+static constexpr int KH_VT_COPYRESOURCE          = 47;   // KH_PIP_FX_COPY.
 static constexpr int KH_VT_CLEARDEPTHSTENCIL     = 53;
 
 typedef void (STDMETHODCALLTYPE* FnPSSetShaderResources)(ID3D11DeviceContext*, UINT, UINT, ID3D11ShaderResourceView* const*);
@@ -10863,6 +10972,7 @@ typedef void (STDMETHODCALLTYPE* FnClearDepthStencilView)(ID3D11DeviceContext*, 
 typedef HRESULT (STDMETHODCALLTYPE* FnMap)(ID3D11DeviceContext*, ID3D11Resource*, UINT, D3D11_MAP, UINT, D3D11_MAPPED_SUBRESOURCE*);
 typedef void (STDMETHODCALLTYPE* FnUnmap)(ID3D11DeviceContext*, ID3D11Resource*, UINT);
 typedef void (STDMETHODCALLTYPE* FnUpdateSubresource)(ID3D11DeviceContext*, ID3D11Resource*, UINT, const D3D11_BOX*, const void*, UINT, UINT);
+typedef void (STDMETHODCALLTYPE* FnCopyResource)(ID3D11DeviceContext*, ID3D11Resource*, ID3D11Resource*);   // KH_PIP_FX_COPY.
 
 static FnPSSetShaderResources    g_orig_pssetshaderresources = nullptr;
 static FnDrawIndexed             g_orig_draw_indexed = nullptr;
@@ -10877,6 +10987,7 @@ static FnClearDepthStencilView   g_orig_clear_depthstencil = nullptr;
 static FnMap                     g_orig_map = nullptr;
 static FnUnmap                   g_orig_unmap = nullptr;
 static FnUpdateSubresource       g_orig_updatesubresource = nullptr;
+static FnCopyResource            g_orig_copyresource = nullptr;   // KH_PIP_FX_COPY.
 typedef void (STDMETHODCALLTYPE* FnResolveSubresource)(ID3D11DeviceContext*, ID3D11Resource*, UINT, ID3D11Resource*, UINT, DXGI_FORMAT);
 static FnResolveSubresource      g_orig_resolvesubresource = nullptr;
 
@@ -13146,8 +13257,8 @@ static bool     g_fire_cast_inv_valid = false;   // Freeze produced a sane inver
 // A motion-churned derivation through a slow-rehashing map oscillates the
 // shadow position during motion and settles at rest (the duplicate's envelope);
 // cumulative rotation bias = the permanent offset; degenerate look-down cascade
-// geometry = the temporary pitch offset. One root, three symptoms, the one
-// subsystem never measured under motion.
+// geometry = the temporary pitch offset. One root, three symptoms; the churn
+// guard below is the settled answer, validated by eye under motion. Closed.
 static float    g_sun_churn_prev[3] = {};   // Published sun ~1 s ago.
 static uint64_t g_sun_churn_prev_ms = 0;
 
@@ -17857,8 +17968,8 @@ inline void release_shadow_device_state() {
     g_proj_locator = ProjLocator{};
     kh_engcam_device_reset();
     // KH_PIP_DEVRESET: the classification cache keys on depth identities and
-    // RTV pointers, cur_identity is one, and the template belongs to the old
-    // device's frame. A recycled address after a device reset would otherwise
+    // RTV pointers, and the template belongs to the old device's frame. A
+    // recycled address after a device reset would otherwise
     // fire the injection into a foreign RGBA16F pass, or hold PIP off until the
     // cache happened to evict. g_pip_seen re-arms at the next classified pass.
     kh_pip_reset();
@@ -20590,7 +20701,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
 // 3.4-4.5x on the rebuild - the half of the cost the step fix did not reach.
 // The trade is real and lands on the mask cast: a coarser reject test lets
 // more pixels through to the expensive path. That pass is 0.19 ms x 9 fires
-// against 4.2 ms of total GPU, so there is room, but watch it.
+// against 4.2 ms of total GPU: the headroom is measured and the trade stands.
+// Settled at 128.
 static constexpr int KH_OCC_N = 128;
 // KH_CASTOCC_DOMAIN. The grid covers the RECEIVER domain, not the caster set.
 //
@@ -22281,8 +22393,9 @@ static bool     g_svs_prev_had_rtv = false;
 static void*    g_svs_rtv_seen[8] = {};
 static uint32_t g_svs_rtv_seen_n = 0;
 // A rule cannot fire on a bind it never sees. This engine records on deferred
-// contexts; if the prepass binds land somewhere we do not watch, that buffer is
-// never marked and no rule can help. Pure read, no behaviour.
+// contexts; a prepass bind landing on one would go unmarked. Accepted
+// limitation by design (pure read, no behaviour); every tested session marks
+// its prepass through the immediate context. Closed.
 static void*    g_svs_cls_id[8] = {};
 static uint8_t  g_svs_cls_srv[8] = {};
 static uint32_t g_svs_cls_n = 0;
@@ -22358,8 +22471,8 @@ static std::vector<KhSvCaster> g_svs_caster_list;
 static std::vector<uint32_t>   g_svs_inst_ord;
 static float    g_svs_prime_vp[4][4] = {};
 
-// They do not have to be traded. The intra-frame gap has never been measured by
-// anything.
+// They do not have to be traded, by design: the seam view is per epoch and the
+// intra-frame gap is inside its tolerance in every tested session. Closed.
 
 static float    g_svs_seam_view[4][4] = {};
 static uint64_t g_svs_seam_view_seq = 0;
@@ -24876,15 +24989,45 @@ inline bool kh_upload_hook_wanted(ID3D11DeviceContext* self, ID3D11Resource* res
 // shared as they are. Draws are the static pair (VSMain / PSMain and the
 // textured twins), depth-tested and written into the PIP's own targets under
 // its own viewport; the injection's own exclusion flag covers them.
+//
+// KH_PIP_FX: the localized fullscreen passes (addLocalPostFX) are drawn into
+// the PIP too. The flush applies them to the main view over the finished
+// scene, masked by the world position it reconstructs from the main depth, so
+// a pass centred away from a mirror never reaches what the mirror shows. Here
+// they run when the ENGINE COPIES THE PIP COLOUR TARGET OUT
+// (KH_PIP_FX_COPY, hooked_copyresource): the capture showed the engine copy
+// it after its last draw and then overwrite it from that copy in its post
+// pass, so anything drawn at the OM leave was drawn into a target already
+// consumed; the first copy of a cycle is the engine's own opaque boundary.
+// The leave (kh_pip_track_targets) stays as the fallback for a PIP that is
+// never copied - kept by design for a PIP the engine does not copy; every
+// tested PIP is copied and takes the hook. The passes go through the same
+// PSEffect over a copy of the PIP's colour target (t0, re-copied per pass:
+// each pass reads the last) and
+// a copy of its depth (t1), with the PIP camera's rotation inverted and the
+// camera itself in fxCam (KH_FX_CAM_REL) so the mask lands on the world the
+// PIP sees, under the PIP's own viewport captured during the pass
+// (KH_PIP_FX_LEAVE_VP; at the leave the next pass's may already be bound),
+// RGB only (the PIP's alpha is the engine's). A draw-count trigger cannot
+// replace either: the PIP interleaves true translucents among its opaques in
+// distance order, so what had been drawn at "the first translucent" moved
+// with the camera.
+// Only what the flush's own
+// passes need without the main view: the SSGI chain (sized to the main
+// scene) and user shaders (compiled against the main depth's MSAA state) are
+// left to the main view; a LUT pass runs once the flush has loaded its file.
 // ============================================================================
 static constexpr uint32_t KH_PIP_MIN_OPAQUES = 32;     // Opaque draws on the PIP depth before a fire.
 static constexpr uint32_t KH_PIP_TPL_MAX_CYCLES = 2;   // A template older than this is stale.
 
 struct KhPipState {
     // The pass, from the OM hook.
-    void*    cur_identity = nullptr;   // Depth texture identity of the PIP pass currently bound (0 = none).
     bool     on = false;               // The bound targets are a PIP pass.
+    void*    cur_rtv = nullptr;        // KH_PIP_FX: RT0 of the PIP pass currently bound (weak; a change is a leave).
     uint32_t w = 0, h = 0;             // Its colour target size.
+    D3D11_VIEWPORT vp = {};            // KH_PIP_FX_LEAVE_VP: the pass's viewport, read at its MIN_OPAQUES-th opaque draw.
+    bool     vp_valid = false;
+    bool     fx_done = false;          // KH_PIP_FX: the passes were attempted this PIP cycle.
     // The cycle, from the clear hook and the draws.
     uint32_t opaques = 0;
     bool     injected = false;
@@ -24956,18 +25099,326 @@ inline void kh_pip_note_upload(ID3D11Resource* res, const void* data, uint32_t b
 }
 
 // At every OM set on the render thread, after g_ro.dsv_main is known.
-inline void kh_pip_track_targets(UINT n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv) {
+// KH_PIP_FX: PSEffect against a single-sample depth. The main build follows
+// the main depth's sample count (ensure_effect_shader); the PIP depth is
+// single-sample in every capture, and a multisampled one stands the pass down
+// below rather than reading it through the wrong declaration. The prewarm
+// table carries this exact define set, so the cache is warm.
+inline std::string kh_pip_fx_shader(ID3D11Device* dev) {
+    if (g_res.ps_effect_pip) return "";
+    if (g_res.ps_effect_pip_tried) return "PIP effect shader unavailable";
+    g_res.ps_effect_pip_tried = true;
+    const D3D_SHADER_MACRO khpx_def[] = { { "MSAA_DEPTH", "0" }, { nullptr, nullptr } };
+    const std::string khpx_src = kh_hlsl_src(KH_HLSL_CB) + kh_hlsl_src(KH_HLSL_EFFECT).c_str() + kh_hlsl_src(KH_HLSL_EFFECT2).c_str() + kh_hlsl_src(KH_HLSL_EFFECT3).c_str();
+    ID3DBlob* khpx_blob = nullptr;
+    std::string khpx_err = compile_shader(khpx_src.c_str(), "PSEffect", "ps_5_0", khpx_def, &khpx_blob);
+    if (!khpx_err.empty()) return khpx_err;
+    const HRESULT khpx_hr = dev->CreatePixelShader(khpx_blob->GetBufferPointer(), khpx_blob->GetBufferSize(), nullptr, &g_res.ps_effect_pip);
+    khpx_blob->Release();
+    if (FAILED(khpx_hr)) { g_res.ps_effect_pip = nullptr; return "CreatePixelShader(effect, PIP) " + hr_str(khpx_hr); }
+    return "";
+}
+
+// KH_PIP_FX: the PIP's depth, copied into a texture of ours the effect reads
+// at t1. A copy rather than an SRV on the engine's texture: the PIP depth
+// carries whatever bind flags the engine gave it, a copy needs none of them,
+// and the read-only-DSV swap the flush does for the main depth is not needed
+// when the source stays bound as it was. Same typeless format (CopyResource's
+// rule), the SRV typed as ensure_depth_srv types the main one.
+inline bool kh_pip_fx_depth(ID3D11Device* khpd_dev, ID3D11DeviceContext* khpd_ctx, ID3D11DepthStencilView* khpd_dsv) {
+    ID3D11Resource* khpd_res = nullptr;
+    khpd_dsv->GetResource(&khpd_res);
+    if (!khpd_res) return false;
+    ID3D11Texture2D* khpd_tex = nullptr;
+    if (FAILED(khpd_res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&khpd_tex))) || !khpd_tex) {
+        khpd_res->Release();
+        return false;
+    }
+    D3D11_TEXTURE2D_DESC khpd_td = {};
+    khpd_tex->GetDesc(&khpd_td);
+    bool khpd_ok = khpd_td.SampleDesc.Count == 1 && khpd_td.ArraySize == 1;
+    DXGI_FORMAT khpd_sf = DXGI_FORMAT_UNKNOWN;
+    switch (khpd_td.Format) {
+        case DXGI_FORMAT_R24G8_TYPELESS:    khpd_sf = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; break;
+        case DXGI_FORMAT_R32_TYPELESS:      khpd_sf = DXGI_FORMAT_R32_FLOAT; break;
+        case DXGI_FORMAT_R32G8X24_TYPELESS: khpd_sf = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS; break;
+        case DXGI_FORMAT_R16_TYPELESS:      khpd_sf = DXGI_FORMAT_R16_UNORM; break;
+        default: khpd_ok = false; break;
+    }
+    if (khpd_ok && (!g_res.pip_depth_tex || !g_res.pip_depth_srv ||
+                    g_res.pip_depth_w != khpd_td.Width || g_res.pip_depth_h != khpd_td.Height ||
+                    g_res.pip_depth_fmt != khpd_td.Format)) {
+        KH_SAFE_RELEASE(g_res.pip_depth_srv);
+        KH_SAFE_RELEASE(g_res.pip_depth_tex);
+        g_res.pip_depth_w = g_res.pip_depth_h = 0;
+        g_res.pip_depth_fmt = DXGI_FORMAT_UNKNOWN;
+        D3D11_TEXTURE2D_DESC khpd_cd = {};
+        khpd_cd.Width = khpd_td.Width;
+        khpd_cd.Height = khpd_td.Height;
+        khpd_cd.MipLevels = 1;
+        khpd_cd.ArraySize = 1;
+        khpd_cd.Format = khpd_td.Format;
+        khpd_cd.SampleDesc.Count = 1;
+        khpd_cd.Usage = D3D11_USAGE_DEFAULT;
+        khpd_cd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SHADER_RESOURCE_VIEW_DESC khpd_sd = {};
+        khpd_sd.Format = khpd_sf;
+        khpd_sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        khpd_sd.Texture2D.MipLevels = 1;
+        if (FAILED(khpd_dev->CreateTexture2D(&khpd_cd, nullptr, &g_res.pip_depth_tex)) || !g_res.pip_depth_tex ||
+            FAILED(khpd_dev->CreateShaderResourceView(g_res.pip_depth_tex, &khpd_sd, &g_res.pip_depth_srv)) || !g_res.pip_depth_srv) {
+            KH_SAFE_RELEASE(g_res.pip_depth_srv);
+            KH_SAFE_RELEASE(g_res.pip_depth_tex);
+            report_error_once_safe("KH pip fx: copy of the PIP depth could not be created (format " +
+                                   std::to_string(static_cast<int>(khpd_td.Format)) + "); no PIP post passes");
+            khpd_ok = false;
+        } else {
+            g_res.pip_depth_w = khpd_td.Width;
+            g_res.pip_depth_h = khpd_td.Height;
+            g_res.pip_depth_fmt = khpd_td.Format;
+        }
+    }
+    if (khpd_ok) khpd_ctx->CopyResource(g_res.pip_depth_tex, khpd_tex);
+    khpd_tex->Release();
+    khpd_res->Release();
+    return khpd_ok;
+}
+
+// KH_PIP_FX: the passes, into the PIP's colour target while it is bound. Called
+// from hooked_copyresource (KH_PIP_FX_COPY: the engine's own copy of the
+// target, before it) and, as the fallback for a PIP that is never copied, from
+// kh_pip_track_targets at the binding that leaves the pass. One attempt per
+// PIP cycle (fx_done, set first: our own copies below re-enter the copy hook
+// and must not fire). The gate is the pass itself - the opaque count the mesh
+// injection fires on - not the injection: a scene of fullscreen passes and no
+// meshes never injects, and its passes are exactly what the PIP is missing.
+inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
+    g_pip.fx_done = true;
+    if (g_pip.opaques < KH_PIP_MIN_OPAQUES || !g_pip.vp_valid) return;   // A real pass, its viewport known.
+    if (!g_pip.tpl_valid || !g_pip.view_valid || !g_pip.proj_valid) return;
+    if (g_topo_cycles < g_pip.tpl_cycle || g_topo_cycles - g_pip.tpl_cycle > KH_PIP_TPL_MAX_CYCLES) return;
+    if (!g_res.vs_fullscreen || !g_res.dss_off || !g_res.rasterizer ||
+        !g_res.composite_cb || !g_res.composite_frame_cb) return;
+
+    // The passes: the flush's fullscreen set narrowed to the localized ones
+    // (a global pass already reaches the mirror through the main view), in
+    // creation order, the envelope folded into the alpha as the flush does.
+    static std::vector<std::pair<uint64_t, RenderObject>> khpf_list;
+    khpf_list.clear();
+    const float khpf_now = effect_time_seconds();
+    kh_scene_sync();
+    for (uint32_t khpf_i = 0; khpf_i < g_scene.objs.size(); ++khpf_i) {
+        if (!g_scene.alive[khpf_i]) continue;
+        const RenderObject& o = g_scene.objs[khpf_i];
+        if (!o.visible || !o.fullscreen || !o.localized || o.ui_only || o.effect <= 0) continue;
+        if (o.effect == static_cast<int>(EffectId::Ssgi) || o.effect == KH_EFFECT_CUSTOM) continue;
+        bool khpf_exp = false;
+        const float khpf_env = lifetime_envelope(o, khpf_now, khpf_exp);
+        if (khpf_exp) continue;
+        RenderObject khpf_o = o;
+        khpf_o.color[3] *= khpf_env;
+        if (khpf_o.color[3] <= 0.001f) continue;
+        khpf_list.emplace_back(khpf_o.seq, khpf_o);
+    }
+    if (khpf_list.empty()) return;
+    std::sort(khpf_list.begin(), khpf_list.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    ID3D11Device* dev = RVExtBridge::get_d3d_device();
+    if (!dev) return;
+    if (!kh_ensure_ok("pip effect shader", kh_pip_fx_shader(dev))) return;
+
+    KhOmSave khpf_om;
+    khpf_om.capture(ctx);
+    ID3D11Resource* khpf_rt = nullptr;
+    if (khpf_om.rtv[0]) khpf_om.rtv[0]->GetResource(&khpf_rt);
+    bool khpf_ok = khpf_rt != nullptr && khpf_om.dsv != nullptr;
+    if (khpf_ok) {   // The PIP's colour target: our copy of it is what every pass reads.
+        ID3D11Texture2D* khpf_tex = nullptr;
+        if (FAILED(khpf_rt->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&khpf_tex))) || !khpf_tex) {
+            khpf_ok = false;
+        } else {
+            D3D11_TEXTURE2D_DESC khpf_td = {};
+            khpf_tex->GetDesc(&khpf_td);
+            D3D11_RENDER_TARGET_VIEW_DESC khpf_rd = {};
+            khpf_om.rtv[0]->GetDesc(&khpf_rd);
+            khpf_ok = khpf_td.SampleDesc.Count == 1 && khpf_td.ArraySize == 1;
+            if (khpf_ok && (!g_res.pip_scene_tex || !g_res.pip_scene_srv ||
+                            g_res.pip_scene_w != khpf_td.Width || g_res.pip_scene_h != khpf_td.Height ||
+                            g_res.pip_scene_fmt != khpf_rd.Format)) {
+                KH_SAFE_RELEASE(g_res.pip_scene_srv);
+                KH_SAFE_RELEASE(g_res.pip_scene_tex);
+                g_res.pip_scene_w = g_res.pip_scene_h = 0;
+                g_res.pip_scene_fmt = DXGI_FORMAT_UNKNOWN;
+                D3D11_TEXTURE2D_DESC khpf_cd = {};
+                khpf_cd.Width = khpf_td.Width;
+                khpf_cd.Height = khpf_td.Height;
+                khpf_cd.MipLevels = 1;
+                khpf_cd.ArraySize = 1;
+                khpf_cd.Format = khpf_rd.Format;   // The view's typed format (ensure_scene_capture_from's rule).
+                khpf_cd.SampleDesc.Count = 1;
+                khpf_cd.Usage = D3D11_USAGE_DEFAULT;
+                khpf_cd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                if (FAILED(dev->CreateTexture2D(&khpf_cd, nullptr, &g_res.pip_scene_tex)) || !g_res.pip_scene_tex ||
+                    FAILED(dev->CreateShaderResourceView(g_res.pip_scene_tex, nullptr, &g_res.pip_scene_srv)) || !g_res.pip_scene_srv) {
+                    KH_SAFE_RELEASE(g_res.pip_scene_srv);
+                    KH_SAFE_RELEASE(g_res.pip_scene_tex);
+                    report_error_once_safe("KH pip fx: copy of the PIP colour target could not be created; no PIP post passes");
+                    khpf_ok = false;
+                } else {
+                    g_res.pip_scene_w = khpf_td.Width;
+                    g_res.pip_scene_h = khpf_td.Height;
+                    g_res.pip_scene_fmt = khpf_rd.Format;
+                }
+            }
+            khpf_tex->Release();
+        }
+    }
+    if (khpf_ok) khpf_ok = kh_pip_fx_depth(dev, ctx, khpf_om.dsv);
+    if (!khpf_ok) {
+        if (khpf_rt) khpf_rt->Release();
+        khpf_om.release();
+        return;
+    }
+
+    // The PIP camera, as kh_pip_inject builds it: the rotation rows on
+    // camera-relative positions. KH_FX_CAM_REL: the inverse is of exactly that
+    // (rotation x projection - small numbers, exact in fp32) and fxCam carries
+    // the PIP camera the shader adds back.
+    float khpf_v[4][4] = {};
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            khpf_v[r][c] = g_pip.view_rows[c * 4 + r];
+    khpf_v[3][3] = 1.0f;
+    float khpf_p[4][4];
+    memcpy(khpf_p, g_pip.proj, sizeof(khpf_p));
+
+    ConstantData khpf_cbf = g_pip.tpl;
+    mul_4x4(khpf_v, khpf_p, khpf_cbf.view_proj);
+    if (!inverse_4x4(khpf_cbf.view_proj, khpf_cbf.inv_view_proj)) {
+        khpf_rt->Release();
+        khpf_om.release();
+        return;
+    }
+    khpf_cbf.fx_cam[0] = g_pip.cam[0];
+    khpf_cbf.fx_cam[1] = g_pip.cam[1];
+    khpf_cbf.fx_cam[2] = g_pip.cam[2];
+    khpf_cbf.fx_cam[3] = 1.0f;
+    khpf_cbf.fog_color[3] = g_pip.cam[1];                        // KhFsFog's camera altitude: the PIP's, not the
+                                                                 // template's main camera (the flush's khf_cam_y twin).
+    khpf_cbf.snap_cam[3] = 0.0f;                                 // The same disarms as the mesh injection.
+    memset(khpf_cbf.mask_meta, 0, sizeof(khpf_cbf.mask_meta));
+    khpf_cbf.lighting2[3] = 0.0f;
+    memset(khpf_cbf.sten_vol2, 0, sizeof(khpf_cbf.sten_vol2));
+    memset(khpf_cbf.mir_meta, 0, sizeof(khpf_cbf.mir_meta));
+
+    // The PIP's viewport: the screen size every pass's uv and pixel index
+    // assume, and the depth range its depth was encoded through.
+    // KH_PIP_FX_LEAVE_VP: the pass's own, captured during it; what is bound
+    // now may already be the next pass's. ASSUMPTION, held by every tested
+    // PIP: TopLeftX / TopLeftY are 0. PSEffect clamps int2(SV_Position.xy)
+    // to [0, fxMeta.zw), so an offset PIP viewport would fold its right and
+    // bottom edges; a new PIP kind that renders offset would need the origin
+    // carried in a lane and subtracted in the shader.
+    const D3D11_VIEWPORT khpf_vp = g_pip.vp;
+    if (khpf_vp.Width < 2.0f || khpf_vp.Height < 2.0f) {
+        khpf_rt->Release();
+        khpf_om.release();
+        return;
+    }
+    UINT khpf_nvp_cur = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    D3D11_VIEWPORT khpf_vp_cur[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    ctx->RSGetViewports(&khpf_nvp_cur, khpf_vp_cur);   // Restored after our draws (StateBackup holds no viewports).
+
+    const bool khpf_pinj = g_ro.in_injection;
+    g_ro.in_injection = true;   // Our own draws: the hooks stand aside.
+    StateBackup khpf_bk;
+    khpf_bk.capture(ctx);
+    uint32_t khpf_drawn = 0;
+    if (kh_upload_frame_cb(ctx, g_res.composite_frame_cb, khpf_cbf)) {
+        ctx->IASetInputLayout(nullptr);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
+        ctx->PSSetShader(g_res.ps_effect_pip, nullptr, 0);
+        ctx->GSSetShader(nullptr, nullptr, 0);
+        ctx->HSSetShader(nullptr, nullptr, 0);
+        ctx->DSSetShader(nullptr, nullptr, 0);
+        ID3D11Buffer* khpf_cbs[2] = { g_res.composite_cb, g_res.composite_frame_cb };
+        ctx->VSSetConstantBuffers(0, 2, khpf_cbs);
+        ctx->PSSetConstantBuffers(0, 2, khpf_cbs);
+        ctx->OMSetDepthStencilState(g_res.dss_off, 0);
+        const FLOAT khpf_bf[4] = { 0, 0, 0, 0 };
+        // Compositing is in-shader (the flush's rule); RGB only - the PIP's
+        // alpha (0.5 on its sky in the capture) is the engine's, read by its
+        // post pass, and the packing tail writes 1.
+        ctx->OMSetBlendState(g_res.blend_ui_replace ? g_res.blend_ui_replace : nullptr, khpf_bf, 0xFFFFFFFF);
+        ctx->RSSetState(g_res.rasterizer);
+        ctx->PSSetShaderResources(1, 1, &g_res.pip_depth_srv);
+        ctx->RSSetViewports(1, &khpf_vp);   // KH_PIP_FX_LEAVE_VP.
+        bool khpf_lut_bound = false;
+        for (const auto& khpf_f : khpf_list) {
+            const RenderObject& o = khpf_f.second;
+            ID3D11ShaderResourceView* khpf_lut = nullptr;
+            if (o.effect == KH_EFFECT_LUT) {
+                khpf_lut = kh_user_lut_cached(kh_fx_shader_of(o));
+                if (!khpf_lut) continue;   // Not loaded by the flush yet.
+            }
+            ConstantData cbd = khpf_cbf;
+            cbd.center_size[3] = 1.0f;   // A chain pass: the packing tail composites and writes opaque.
+            cbd.size_axes[3] = static_cast<float>(o.blend_mode);   // The tail's blend mode (upload_cb's twin);
+                                                                   // the template's zero read every pass as normal.
+            kh_fill_fx_params_cb(cbd, o);
+            if (o.effect == static_cast<int>(EffectId::Fogscatter)) kh_fogscatter_pack(cbd, khpf_list);
+            cbd.fx_meta[0] = static_cast<float>(o.effect);
+            cbd.fx_meta[1] = khpf_now;
+            cbd.fx_meta[2] = khpf_vp.Width;
+            cbd.fx_meta[3] = khpf_vp.Height;
+            cbd.depth_params[0] = khpf_p[2][2];   // The harvested projection: the pair the PIP depth was encoded with.
+            cbd.depth_params[1] = khpf_p[3][2];
+            cbd.depth_params[2] = khpf_vp.MinDepth;
+            cbd.depth_params[3] = khpf_vp.MaxDepth;
+            kh_fill_local_band_cb(cbd, o);
+            fill_lighting_obj_cb(cbd, o);
+            if (!kh_upload_obj_cb(ctx, g_res.composite_cb, cbd)) break;
+            if (khpf_lut) { ctx->PSSetShaderResources(19, 1, &khpf_lut); khpf_lut_bound = true; }
+            ID3D11ShaderResourceView* khpf_null = nullptr;
+            ctx->PSSetShaderResources(0, 1, &khpf_null);
+            ctx->CopyResource(g_res.pip_scene_tex, khpf_rt);   // Each pass reads the last.
+            ctx->PSSetShaderResources(0, 1, &g_res.pip_scene_srv);
+            ctx->Draw(3, 0);
+            ++khpf_drawn;
+        }
+        if (khpf_lut_bound) { ID3D11ShaderResourceView* khpf_n19 = nullptr; ctx->PSSetShaderResources(19, 1, &khpf_n19); }
+    }
+    khpf_bk.restore(ctx);   // The targets were never changed; the OM save needs no restore.
+    if (khpf_nvp_cur > 0) ctx->RSSetViewports(khpf_nvp_cur, khpf_vp_cur);   // KH_PIP_FX_LEAVE_VP.
+    g_ro.in_injection = khpf_pinj;
+    khpf_rt->Release();
+    khpf_om.release();
+    if (khpf_drawn) kh_stat_add(g_stats.pip_fx, khpf_drawn);
+}
+
+inline void kh_pip_track_targets(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv) {
+    // KH_PIP_FX: the binding that leaves a PIP pass (off, or another PIP's
+    // RT0) draws the passes into it first - the PIP's targets are still
+    // bound, this hook runs ahead of the engine's call.
+    const bool khpt_was = g_pip.on;
+    void* const khpt_was_rtv = g_pip.cur_rtv;
     if (!dsv || g_ro.dsv_main || !g_main_depth_identity || n < 1 || !rtvs || !rtvs[0]) {
+        if (khpt_was && !g_pip.fx_done) kh_pip_fx(ctx);
         g_pip.on = false;
+        g_pip.cur_rtv = nullptr;
         return;
     }
     void* khpt_id = reorder_dsv_identity(dsv);
     void* khpt_rtv = static_cast<void*>(rtvs[0]);
+    if (khpt_was && khpt_rtv != khpt_was_rtv && !g_pip.fx_done) kh_pip_fx(ctx);
     for (uint32_t i = 0; i < g_pip.cache_n; ++i) {
         const KhPipState::Key& k = g_pip.cache[i];
         if (k.dsv == khpt_id && k.rtv == khpt_rtv) {
             g_pip.on = k.pip;
-            if (k.pip) { g_pip.cur_identity = khpt_id; g_pip.w = k.w; g_pip.h = k.h; }
+            g_pip.cur_rtv = k.pip ? khpt_rtv : nullptr;
+            if (k.pip) { g_pip.w = k.w; g_pip.h = k.h; }
             return;
         }
     }
@@ -24993,7 +25444,8 @@ inline void kh_pip_track_targets(UINT n, ID3D11RenderTargetView* const* rtvs, ID
     if (g_pip.cache_n < 8) g_pip.cache[g_pip.cache_n++] = k;
     else g_pip.cache[g_topo_cycles & 7] = k;   // A cold slot; the cache is a hint.
     g_pip.on = khpt_pip;
-    if (khpt_pip) { g_pip.cur_identity = khpt_id; g_pip.w = khpt_w; g_pip.h = khpt_h; g_pip_seen = true; }
+    g_pip.cur_rtv = khpt_pip ? khpt_rtv : nullptr;
+    if (khpt_pip) { g_pip.w = khpt_w; g_pip.h = khpt_h; g_pip_seen = true; }
 }
 
 // A depth clear on a non-main target opens a PIP cycle (the PIP clears its
@@ -25002,6 +25454,8 @@ inline void kh_pip_track_targets(UINT n, ID3D11RenderTargetView* const* rtvs, ID
 inline void kh_pip_on_clear() {
     g_pip.opaques = 0;
     g_pip.injected = false;
+    g_pip.fx_done = false;   // KH_PIP_FX.
+    g_pip.vp_valid = false;  // KH_PIP_FX_LEAVE_VP.
 }
 
 inline void kh_pip_inject(ID3D11DeviceContext* ctx) {
@@ -25199,7 +25653,15 @@ inline void kh_pip_pre_draw(ID3D11DeviceContext* ctx) {
     if (g_ro.blend_translucent) {
         if (!g_pip.injected && g_pip.opaques >= KH_PIP_MIN_OPAQUES) kh_pip_inject(ctx);
     } else if (!g_ro.dss_nowrite) {
-        g_pip.opaques++;
+        // KH_PIP_FX_LEAVE_VP: the pass's viewport, read once at the draw that
+        // makes it a real pass; the leave (kh_pip_fx) draws under it.
+        if (++g_pip.opaques == KH_PIP_MIN_OPAQUES) {
+            UINT khpp_n = 1;
+            D3D11_VIEWPORT khpp_vp = {};
+            ctx->RSGetViewports(&khpp_n, &khpp_vp);
+            g_pip.vp_valid = khpp_n >= 1 && khpp_vp.Width >= 2.0f && khpp_vp.Height >= 2.0f;
+            if (g_pip.vp_valid) g_pip.vp = khpp_vp;
+        }
     }
 }
 // KH_PIP end.
@@ -25267,6 +25729,36 @@ static void STDMETHODCALLTYPE hooked_unmap(ID3D11DeviceContext* self, ID3D11Reso
 
     } catch (...) { kh_hook_except(); }
     g_orig_unmap(self, res, sub);
+}
+
+// KH_PIP_FX_COPY: the engine copies the PIP colour target out with
+// CopyResource - mid-pass for its translucents' capture and after the last
+// draw for its post pass, which then overwrites the target from that copy.
+// The passes run here, before the copy, so the copy carries them; the first
+// copy of a cycle is the engine's own opaque boundary (fx_done gates the
+// rest). The bound RT0 is compared by resource, not by view.
+static void STDMETHODCALLTYPE hooked_copyresource(ID3D11DeviceContext* self, ID3D11Resource* dst, ID3D11Resource* src) {
+    try {
+    if (src && g_pip.on && !g_pip.fx_done && g_pip.opaques >= KH_PIP_MIN_OPAQUES &&
+        self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
+        reorder_on_render_thread() && !g_ro.in_injection &&
+        !g_kh_flush_active.load(std::memory_order_relaxed) &&
+        g_kh_track_wanted.load(std::memory_order_relaxed)) {
+        ID3D11RenderTargetView* khcr_rtv = nullptr;
+        self->OMGetRenderTargets(1, &khcr_rtv, nullptr);
+        if (khcr_rtv) {
+            ID3D11Resource* khcr_res = nullptr;
+            khcr_rtv->GetResource(&khcr_res);
+            khcr_rtv->Release();
+            if (khcr_res) {
+                const bool khcr_pip = khcr_res == src;
+                khcr_res->Release();
+                if (khcr_pip) kh_pip_fx(self);
+            }
+        }
+    }
+    } catch (...) { kh_hook_except(); }
+    g_orig_copyresource(self, dst, src);
 }
 
 static void STDMETHODCALLTYPE hooked_updatesubresource(ID3D11DeviceContext* self, ID3D11Resource* res, UINT sub, const D3D11_BOX* dst_box, const void* data, UINT row_pitch, UINT depth_pitch) {
@@ -27557,7 +28049,7 @@ inline void kh_reorder_trigger(ID3D11DeviceContext* self) {
     // its depth clear and its translucent phase; late re-clears and
     // preview/overlay passes mostly do not - without this, such passes could
     // pull the injection into a completed frame and paint the meshes over
-    // everything.
+    // everything. The floors below are settled by test; nothing is pending.
     const bool khr_floor_keep = g_slot_keep_near > 0.0f && g_slot_keep_ms != 0 &&
                                 steady_now_ms() - g_slot_keep_ms < 250;
     // The floor is relative to what this map's accepted cycles show. A
@@ -28510,7 +29002,7 @@ static void STDMETHODCALLTYPE hooked_omset_rendertargets(ID3D11DeviceContext* se
         reorder_on_render_thread()) {
         g_ro.dsv_main = dsv && g_main_depth_identity &&
                         reorder_dsv_identity(dsv) == g_main_depth_identity;
-        kh_pip_track_targets(n, rtvs, dsv);   // KH_PIP.
+        kh_pip_track_targets(self, n, rtvs, dsv);   // KH_PIP (+ KH_PIP_FX at a leave).
         const bool was_on_atlas = g_ls.phase_on_atlas;
         shadow_track_targets(self, dsv, g_ro.dsv_main, n, rtvs);
 
@@ -28543,7 +29035,7 @@ static void STDMETHODCALLTYPE hooked_omset_rts_and_uavs(ID3D11DeviceContext* sel
         // flag go stale (n == keep leaves the current bindings alone).
         g_ro.dsv_main = dsv && g_main_depth_identity &&
                         reorder_dsv_identity(dsv) == g_main_depth_identity;
-        kh_pip_track_targets(n, rtvs, dsv);   // KH_PIP.
+        kh_pip_track_targets(self, n, rtvs, dsv);   // KH_PIP (+ KH_PIP_FX at a leave).
         shadow_track_targets(self, dsv, g_ro.dsv_main, n, rtvs);
 
     }
@@ -28620,10 +29112,10 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
                 // re-fits WITHOUT clearing validity (see KH_SUN_JUMP_HOLD).
                 //
                 // The original comment recorded a real defect: a post-skip
-                // overcast firing into the transitional resolves. If a
-                // whole-screen overcast reappears on a time skip, THIS is the
-                // change that did it - restore the sweep_settle reset and take
-                // the flicker back.
+                // overcast firing into the transitional resolves. History
+                // only: this form has been built and tested across time
+                // skips with no overcast; the sweep_settle reset stays out.
+                // Settled.
                 // KH_SUN_JUMP_HOLD: the mask cast fires at draw 0, BEFORE
                 // render_sun_depth runs at the injection. Clearing validity
                 // here left that fire without a map for one frame, and it
@@ -28767,6 +29259,7 @@ inline void ensure_reorder_hook() {
         { KH_VT_MAP,                  reinterpret_cast<void*>(&hooked_map),                     reinterpret_cast<void**>(&g_orig_map) },
         { KH_VT_UNMAP,                reinterpret_cast<void*>(&hooked_unmap),                   reinterpret_cast<void**>(&g_orig_unmap) },
         { KH_VT_UPDATESUBRESOURCE,    reinterpret_cast<void*>(&hooked_updatesubresource),      reinterpret_cast<void**>(&g_orig_updatesubresource) },
+        { KH_VT_COPYRESOURCE,         reinterpret_cast<void*>(&hooked_copyresource),           reinterpret_cast<void**>(&g_orig_copyresource) },   // KH_PIP_FX_COPY.
         { KH_VT_RESOLVESUBRESOURCE,   reinterpret_cast<void*>(&hooked_resolvesubresource),     reinterpret_cast<void**>(&g_orig_resolvesubresource) },
     };
 
@@ -28899,6 +29392,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             g_wrong_pass_streak = 0;
         } else if (identity != g_main_depth_identity) {
             g_wrong_pass_streak++;
+            g_flush_wrong_pass = true;     // KH_WRONG_PASS_REPARK: nothing of ours this park - the caller re-parks.
             return;
         } else {
             g_wrong_pass_streak = 0;
@@ -29275,7 +29769,38 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     }
 
     float inv_view_proj[4][4] = {};
-    const bool has_inverse = need_inverse && inverse_4x4(view_proj, inv_view_proj);
+    // KH_FX_DEPTH_VIEW: the inverse serves KhWorldPosFenced, which reads the
+    // depth buffer - so it inverts the view that RENDERED that depth: the
+    // cycle's boundary camera, harvested at its clear. The flush's own pv may
+    // be the injection's view (a frame's difference on the flushes that park
+    // the render thread past the next clear), which is right for the meshes
+    // it places and wrong for a reconstruction from the engine's depth: the
+    // soft edge of every localized mask shimmered under motion. Absolute, as
+    // view_proj is here (the rebase happens later).
+    // KH_FX_CAM_REL: the inverse is of the rotation-only view (camera at the
+    // origin) and the camera rides in fxCam for the shader to add back -
+    // KhgVpos's contract, the bucket path's khPass contract. An absolute
+    // inverse is kilometres in every entry cancelling per pixel in fp32.
+    float khf_dvp[4][4];
+    float khf_fx_cam[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    if (g_ro.cycle_pv_valid && !g_ro.cycle_pv_stale && fabsf(g_ro.cycle_pv.projection[2][2]) > 1.0e-6f) {
+        float khf_dproj[4][4];
+        memcpy(khf_dproj, g_ro.cycle_pv.projection, sizeof(khf_dproj));
+        if (g_ro.engine_proj_valid) {   // KH_FX_ENGINE_PAIR: the pair the passes linearise with.
+            khf_dproj[2][2] = g_ro.engine_m22;
+            khf_dproj[3][2] = g_ro.engine_m32;
+        }
+        float khf_dview[4][4];
+        memcpy(khf_dview, g_ro.cycle_pv.view, sizeof(khf_dview));
+        khf_dview[3][0] = khf_dview[3][1] = khf_dview[3][2] = 0.0f;
+        khf_dview[3][3] = 1.0f;
+        mul_4x4(khf_dview, khf_dproj, khf_dvp);
+        extract_camera_pos(g_ro.cycle_pv.view, khf_fx_cam);
+        khf_fx_cam[3] = 1.0f;
+    } else {
+        memcpy(khf_dvp, view_proj, sizeof(khf_dvp));   // Absolute; fxCam stays disarmed.
+    }
+    const bool has_inverse = need_inverse && inverse_4x4(khf_dvp, inv_view_proj);
     // has_inverse is only consulted by objects that need it, so skipping the
     // inverse when nothing does is behavior-identical.
     float cam[3];
@@ -29379,8 +29904,14 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     for (const auto& o : meshes) {
         if (o.effect > 0) any_effect = true;
-
-        if (needs_depth(o) || (o.effect == 0 && o.mode == DepthMode::Off)) {
+        // KH_MESH_FX_SPLIT: a mode-Off solid used to count here too. Its
+        // guard reads the proven snapshot at t0 (PSMain, armed by
+        // fxParams1.x < 1e8, which upload_cb disarms without a fresh
+        // snapshot) - never t1, never the effect unit, never the scene
+        // capture - so the term bought a mesh-only scene the effect shader
+        // and a scene resolve per flush that nothing read, and tied the
+        // mesh's frame to the effect path's setup succeeding.
+        if (needs_depth(o)) {
             any_effect = true;
             any_depth_fx = true;
         }
@@ -29488,6 +30019,12 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         effects_ready ? g_res.scene_srv : nullptr,
         depth_fx_ready ? g_res.depth_srv : nullptr
     };
+    // t1 here (FSAA off: a single-channel R24/R32 SRV over the live depth) and
+    // the PIP depth copy in kh_pip_fx both land under the effect unit's
+    // MSAA_DEPTH 0 declaration Texture2D<float2> depthTex; the arb snapshot
+    // (R32G32) lands under Texture2D<float> khArbSnap. The shader reads .x
+    // only and the core runtime does not validate return-type width, so this
+    // is settled behaviour; only the debug layer would warn. Not a defect.
 
     // t1 stays empty until the first pair consumer swaps the DSV (see
     // khf_dsv_swap): the writable DSV is bound at this point.
@@ -29556,6 +30093,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     ConstantData khf_cbf = {};
     memcpy(khf_cbf.view_proj, view_proj, sizeof(khf_cbf.view_proj));
     memcpy(khf_cbf.inv_view_proj, inv_view_proj, sizeof(khf_cbf.inv_view_proj));
+    memcpy(khf_cbf.fx_cam, khf_fx_cam, sizeof(khf_cbf.fx_cam));   // KH_FX_CAM_REL.
     const bool khf_rebase_on = khf_engcam
                              ? kh_rebase_vp_engcam(khf_cbf, pv.view, pv.projection)
                              : kh_rebase_vp_exact(khf_cbf, pv.view, pv.projection, cam);
@@ -29651,10 +30189,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         // clouds, everything the engine resolves) on mesh surfaces within the
         // depth margin of world geometry.
 
-        // Same reasoning as KhHazeT's: the engine switches to a branch we have
-        // never had a dump for, and our above-layer formula is then simply the
-        // wrong model - it also drives maxminY, 0 to 0, which pins the height
-        // Term at full density and whites the mesh out.
+        // Same reasoning as KhHazeT's: below the layer the engine switches to
+        // a branch outside our model, where the above-layer formula would pin
+        // the height term at full density and white the mesh out. Standing
+        // down there (fogBelow.y) is the intentional, tested answer. Closed.
         const float khf_cam_y =
             (g_ls.cam[0] * g_ls.cam[0] + g_ls.cam[1] * g_ls.cam[1] +
              g_ls.cam[2] * g_ls.cam[2] >= 1.0f) ? g_ls.cam[1]
@@ -29762,6 +30300,16 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     khf_cbf.kh_pass[0] = cam[0]; khf_cbf.kh_pass[1] = cam[1]; khf_cbf.kh_pass[2] = cam[2];
     khf_cbf.kh_pass[3] = khf_rebase_on ? 1.0f : 0.0f;
     khf_cbf.kh_pass_obj[0] = g_obj_vis.load(std::memory_order_relaxed);
+    // KH_PIP_TPL_FLUSH: the PIP paths (kh_pip_inject, kh_pip_fx) shade from a
+    // frame template the mesh injection publishes; a cycle with no injection
+    // (no meshes in the scene) left them with none. The flush's frame CB is
+    // the same template one publisher later, and the PIP disarms what differs.
+    // The injection's copy, when there is one this cycle, stands.
+    if (!g_pip.tpl_valid || g_pip.tpl_cycle != g_topo_cycles) {
+        g_pip.tpl = khf_cbf;
+        g_pip.tpl_valid = true;
+        g_pip.tpl_cycle = g_topo_cycles;
+    }
     const bool khf_frame_ok = kh_upload_frame_cb(ctx, g_res.frame_cb, khf_cbf);
 
     auto khf_fk_verdict = [&](const RenderObject& khfv_o) -> bool {
@@ -30399,6 +30947,16 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     if (!fullscreen.empty() && effects_ready) {
         khf_dsv_swap(true);   // The chain samples live depth; its OM save must hold the read-only view.
+        // KH_FX_DEPTH_T1: and the depth it samples has to be AT t1. The mesh
+        // loop leaves t1 as the last mesh needed it - null, or the shadow atlas
+        // after a solid - and nothing below bound the depth SRV, so every
+        // localized / banded / depth-reading pass read 0 there: the near plane
+        // at every pixel, the camera position reconstructed everywhere, a
+        // world-space mask that tested the camera instead of the scene (whole
+        // screen inside the radius, nothing outside). The UI flush binds its
+        // pair; this is the scene flush's twin of that bind. Null when the
+        // depth is not ready, as ps_srvs already says.
+        ctx->PSSetShaderResources(1, 1, &ps_srvs[1]);
         std::string chain_err = meshes.empty() ? "" : kh_scene_capture_timed(dev, ctx);
         if (chain_err.empty()) chain_err = ensure_fx_chain(dev);
 
@@ -30648,9 +31206,27 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 if (!upload_cb(f.second, true, &khfp_cbd)) continue;
                 if (f.second.effect == static_cast<int>(EffectId::Fogscatter))
                     kh_fogscatter_pack(khfp_cbd, fullscreen);
-                if (needs_depth(f.second))
-                    kh_fx_depth_pair_guard(khfp_cbd,
-                        g_cc_flush_serial.load(std::memory_order_relaxed));
+                if (needs_depth(f.second)) {
+                    // KH_FX_ENGINE_PAIR: the pair the engine encoded this
+                    // cycle's depth with, read off its own upload, when it is
+                    // valid - the recipe every stable depth reader here uses
+                    // (kh_fill_sten_proj, the volume path, the effect-mesh
+                    // path). The flush-selected pair and the hold guard are
+                    // the fallback: between them the pair moved by a fraction
+                    // of a percent flush to flush (the mask's radius by
+                    // centimetres) and held against a zoom (the mask on and
+                    // off). Effect MESHES keep the flush-selected pair from
+                    // upload_cb by design (their arbitration reads it); the
+                    // two coincide whenever the engine pair is valid, and the
+                    // mesh path is tested steady on the flush pair. Closed.
+                    if (g_ro.engine_proj_valid) {
+                        khfp_cbd.depth_params[0] = g_ro.engine_m22;
+                        khfp_cbd.depth_params[1] = g_ro.engine_m32;
+                    } else {
+                        kh_fx_depth_pair_guard(khfp_cbd,
+                            g_cc_flush_serial.load(std::memory_order_relaxed));
+                    }
+                }
                 khfp_effect = f.second.effect;
                 khfp_ps = khc_ufx;
                 khfp_lut = khc_lut;
@@ -30858,9 +31434,18 @@ inline void flush_frame() {
         }
         g_kh_flush_active.store(true, std::memory_order_relaxed);   // Our draws traverse the T-path
                                                                     // Otherwise.
+        g_flush_wrong_pass = false;
         flush_locked(dev, ctx);
         g_kh_flush_active.store(false, std::memory_order_relaxed);
-        return;
+        if (!g_flush_wrong_pass) return;
+        // KH_WRONG_PASS_REPARK: the park landed on a non-main depth (a PIP
+        // pass, an atlas cascade) and nothing was drawn. Release the lock (the
+        // scope ends), let the render thread move past it, park again - the
+        // remaining attempts of this loop. The frame is only lost when they
+        // all land wrong, and the readopt streak still covers a depth that
+        // has genuinely changed. Settled: three attempts with a yield have
+        // sufficed in every tested session; the re-park is not counted.
+        Sleep(0);
     }
 
     kh_stat(g_stats.lock_failed_frames);
@@ -31518,7 +32103,8 @@ inline void kh_ui_driver_rehoist() {
 }
 
 // C++ Draw3D event handler lifecycle. Mission EHs die with the mission: the
-// framework calls rendering_integration_reset at both mission edges.
+// framework calls rendering_integration_reset at both mission edges
+// (confirmed against the framework file; no on_mission_start call remains).
 // ensure_draw_eh also lazily self-registers as a fallback, so retained objects
 // added mid-mission always render even without the lifecycle calls.
 

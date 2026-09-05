@@ -603,8 +603,8 @@ float4 PSDlsWorld(VSOut i) : SV_Target
     // surface is the plane z = const in view space. So sample the plane over
     // KH_DLSW_NRM_R pixels instead of one and the signal-to-quantisation ratio
     // improves by that factor directly, with no assumption about the step's
-    // size - which matters, because we have never measured it and rule 1.84
-    // says not to stand a bar where a principle belongs. On a genuinely
+    // size - by design: no bar is stood where a principle belongs (rule
+    // 1.84), so the step needs no measuring. Settled. On a genuinely
     // resolved surface the two agree closely whatever the surface is doing; on
     // a staircase they do not, because each baseline lands on a different
     // tread.
@@ -879,7 +879,8 @@ float4 PSMain(VSOut i) : SV_Target
     // Twin: PSMain / PSComposite / PSEffect. The shared tail below is
     // kept as two copies on purpose: PSComposite interleaves KH_ARB_DEPTH blocks
     // and a khb_a lane through it, so a KhShadeTail() helper fails the site-text
-    // proof (rule 1.133). Decided 26892; revisit only with a shading change.
+    // proof (rule 1.133). Decided 26892; settled - a shading change is the
+    // only thing that reopens it.
     if (khObjFarVis < 0.5f && khObjCut > 0.0f && i.pos.w > khObjCut) discard;
     // Punch-through / overlay-occlusion guard, flush-path edition: the same
     // contract as PSComposite's. The CPU arms tight margins only for

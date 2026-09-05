@@ -62,8 +62,9 @@ cbuffer CBObj : register(b0)
 {
     row_major float4x4 viewProj;   // Rebased on the two mesh passes (see centerRel); absolute
                                    // Elsewhere.
-    row_major float4x4 invViewProj;   // Clip -> world (row-vector convention) always the absolute
-                                      // live-encode inverse.
+    row_major float4x4 invViewProj;   // Clip -> world (row-vector convention). Camera-relative
+                                      // when fxCam.w = 1 (every reader adds fxCam.xyz back:
+                                      // KhWorldPosFenced, KhFsFog); absolute when fxCam.w = 0.
     float4 lighting1;   // xyz = unit vector toward the sun/moon (engine axes), w = lighting valid
                         // Flag.
     float4 lighting2;   // rgb = the engine's sun colour in HDR scene units, straight from the published
@@ -177,6 +178,10 @@ cbuffer CBObj : register(b0)
     // shadowMeta2.y); yzw free. Zero wherever no bucket draws.
     float4 khPass;
     float4 khPassObj;
+    // KH_FX_CAM_REL: xyz = the camera invViewProj is relative to, w = 1 arms it
+    // (KhWorldPosFenced adds xyz after the reconstruction); w = 0 = invViewProj
+    // is absolute, nothing added.
+    float4 fxCam;
 };
  
 cbuffer CBEngView : register(b2)

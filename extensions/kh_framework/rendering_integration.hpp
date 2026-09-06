@@ -1907,6 +1907,7 @@ struct RenderObject {
     bool  visible = true;
     bool  timed = false;
     float birth_time = 0.0f;
+    double fx_t0 = 0.0;   // Creation stamp of the process clock in double (kh_fx_time's origin); never re-armed.
     float fade_in = 0.0f;
     float hold_dur = 0.0f;
     float fade_out = 0.0f;
@@ -2063,7 +2064,7 @@ static constexpr int KH_EFFECT_LUT = 101;
 static float    g_rain_vel[3] = {};
 // Integrated, never multiplied: accumulates dt * factor per flush and rides
 // fxParams1.w; the shader multiplies only by the user's speed param.
-static float    g_rain_phase = 0.0f;
+static double   g_rain_phase = 0.0;   // Integrated in double: a float accumulator loses its dt to rounding after hours.
 static float    g_rain_prev_cam[3] = {};
 static bool     g_rain_prev_valid = false;
 static uint64_t g_rain_prev_us = 0;
@@ -9558,7 +9559,13 @@ inline bool ensure_sun_depth4(ID3D11Device* dev) {
 // Pipeline state snapshot / restore (only what we touch). Constant buffers are
 // per-stage: b0/b1 of both VS and PS.
 
+// Restores itself if the pass that captured it unwinds before its explicit
+// restore (an exception inside a hook or the flush): the host's pipeline state
+// is never left as ours, and no captured reference leaks. The explicit
+// restore() stays the normal path; the destructor is the exception path only.
 struct StateBackup {
+    ID3D11DeviceContext*     ctx_saved = nullptr;   // The context of the capture (the destructor's).
+    bool                     armed = false;         // Captured and not yet restored.
     ID3D11InputLayout*       input_layout = nullptr;
     D3D11_PRIMITIVE_TOPOLOGY topology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
     // Two IA vertex slots: the instance stream binds slot 1. A slot we touch is
@@ -9602,7 +9609,13 @@ struct StateBackup {
     UINT                     scissor_n = 0;   // The engine's scissor rects, restored verbatim.
     D3D11_RECT               scissor[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
 
+    StateBackup() = default;
+    StateBackup(const StateBackup&) = delete;
+    StateBackup& operator=(const StateBackup&) = delete;
+    ~StateBackup() { if (armed && ctx_saved) restore(ctx_saved); }
     void capture(ID3D11DeviceContext* ctx) {
+        ctx_saved = ctx;
+        armed = true;
         ctx->IAGetInputLayout(&input_layout);
         ctx->IAGetPrimitiveTopology(&topology);
         ctx->IAGetVertexBuffers(0, 2, vb, vb_stride, vb_offset);
@@ -9676,6 +9689,7 @@ struct StateBackup {
         ctx->OMSetBlendState(blend, blend_factor, sample_mask);
         ctx->RSSetState(rasterizer);
         ctx->RSSetScissorRects(scissor_n, scissor_n ? scissor : nullptr);
+        armed = false;
         KH_SAFE_RELEASE(input_layout);
         KH_SAFE_RELEASE(vb[0]);
         KH_SAFE_RELEASE(vb[1]);
@@ -9705,24 +9719,60 @@ struct StateBackup {
 // flush-side target swap goes through this: full slot set in, full slot set
 // out.
 
+// The engine binds unordered-access views on the OM too
+// (OMSetRenderTargetsAndUnorderedAccessViews is hooked), and a plain
+// OMSetRenderTargets would drop them: the capture reads the UAVs behind the
+// bound RTVs and the restore carries them back (counters kept). With no UAV
+// bound, the set is the plain call it always was. Self-restoring on unwind
+// (see StateBackup); release() disarms.
 struct KhOmSave {
-    ID3D11RenderTargetView* rtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
-    ID3D11DepthStencilView* dsv = nullptr;
+    ID3D11RenderTargetView*    rtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+    ID3D11DepthStencilView*    dsv = nullptr;
+    ID3D11UnorderedAccessView* uav[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+    UINT                       uav_start = 0;   // = the bound RTV count; UAVs occupy the slots above it.
+    UINT                       uav_n = 0;       // UAVs found (0 = the plain set).
+    ID3D11DeviceContext*       ctx_saved = nullptr;
+    bool                       armed = false;
+    KhOmSave() = default;
+    KhOmSave(const KhOmSave&) = delete;
+    KhOmSave& operator=(const KhOmSave&) = delete;
+    ~KhOmSave() { if (armed && ctx_saved) restore(ctx_saved); release(); }
     void capture(ID3D11DeviceContext* ctx) {
+        ctx_saved = ctx;
+        armed = true;
         ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, &dsv);
+        uav_start = 0;
+        uav_n = 0;
+        for (UINT khom_i = 0; khom_i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++khom_i) if (rtv[khom_i]) uav_start = khom_i + 1;
+        if (uav_start < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT) {
+            // The Get writes from element 0 of the array it is handed, so the
+            // array is offset by the start slot to keep slot i at uav[i] (set
+            // reads it there).
+            ctx->OMGetRenderTargetsAndUnorderedAccessViews(0, nullptr, nullptr, uav_start,
+                                                           D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT - uav_start, uav + uav_start);
+            for (UINT khom_i = uav_start; khom_i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++khom_i) if (uav[khom_i]) uav_n = khom_i + 1 - uav_start;
+        }
+    }
+    void set(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* khom_dsv) {
+        if (uav_n == 0) {
+            ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, khom_dsv);
+            return;
+        }
+        static const UINT khom_keep[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = { ~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u };
+        ctx->OMSetRenderTargetsAndUnorderedAccessViews(uav_start, rtv, khom_dsv, uav_start, uav_n, uav + uav_start, khom_keep);
     }
     // Rebind the saved targets under a different depth view: only the DSV
     // moves.
-    void set_with_dsv(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* khom_dsv) {
-        ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, khom_dsv);
-    }
-    void restore(ID3D11DeviceContext* ctx) {
-        ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, dsv);
-    }
+    void set_with_dsv(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* khom_dsv) { set(ctx, khom_dsv); }
+    void restore(ID3D11DeviceContext* ctx) { set(ctx, dsv); }
     void release() {
-        for (UINT khom_i = 0; khom_i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++khom_i)
+        armed = false;
+        for (UINT khom_i = 0; khom_i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++khom_i) {
             KH_SAFE_RELEASE(rtv[khom_i]);
+            KH_SAFE_RELEASE(uav[khom_i]);
+        }
         KH_SAFE_RELEASE(dsv);
+        uav_n = 0;
     }
 };
 
@@ -9880,9 +9930,24 @@ inline bool inverse_4x4(const float m[4][4], float out[4][4]) {
 }
 
 // Monotonic seconds for effect animation (grain, distortion, pulse).
-inline float effect_time_seconds() {
+// The process clock in double: float seconds since the process start lose a
+// millisecond of resolution after a few hours, so the origin of anything a
+// shader animates on (fx_t0) and the differences taken against it are formed
+// here; the float form below serves the envelopes, whose granularity is
+// harmless at that scale.
+inline double effect_time_seconds_d() {
     static const std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
-    return std::chrono::duration<float>(std::chrono::steady_clock::now() - t0).count();
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
+inline float effect_time_seconds() {
+    return static_cast<float>(effect_time_seconds_d());
+}
+// The shader's time lane (fxMeta.y): seconds since the object was created,
+// formed in double and handed over as float, so an effect's animation keeps
+// its resolution however long the process has been up and never wraps.
+inline float kh_fx_time(const RenderObject& khft_o, double khft_now_d) {
+    const double khft_t = khft_now_d - khft_o.fx_t0;
+    return khft_t > 0.0 ? static_cast<float>(khft_t) : 0.0f;
 }
 
 inline void kh_sanitize_color(float c[4]) {
@@ -11027,6 +11092,25 @@ inline float latch_cam_dist_sq(const float a[3], const float b[3]) {
 // The last fog colour actually written into a CB (fill-site writes; stats
 // read). -1 = never filled.
 static float    g_fog_uw_col[3] = { -1.0f, -1.0f, -1.0f };
+
+// The adopted main depth's dimensions against a view's resource (the clear
+// hook's once-per-frame confirmation of the pointer identity). True when they
+// agree or the resource cannot be read (a read failure is not evidence).
+inline bool kh_main_depth_dims_match(ID3D11DepthStencilView* dsv) {
+    ID3D11Resource* khdm_res = nullptr;
+    dsv->GetResource(&khdm_res);
+    if (!khdm_res) return true;
+    ID3D11Texture2D* khdm_tex = nullptr;
+    bool khdm_ok = true;
+    if (SUCCEEDED(khdm_res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&khdm_tex))) && khdm_tex) {
+        D3D11_TEXTURE2D_DESC khdm_td = {};
+        khdm_tex->GetDesc(&khdm_td);
+        khdm_ok = khdm_td.Width == g_main_depth_w && khdm_td.Height == g_main_depth_h;
+        khdm_tex->Release();
+    }
+    khdm_res->Release();
+    return khdm_ok;
+}
 
 inline void* reorder_dsv_identity(ID3D11DepthStencilView* dsv) {
     void* id = nullptr;
@@ -16101,7 +16185,7 @@ inline void kh_fill_fx_params_cb(ConstantData& cbd, const RenderObject& o) {
         cbd.fx1[0] = g_rain_vel[0];
         cbd.fx1[1] = g_rain_vel[1];
         cbd.fx1[2] = g_rain_vel[2];
-        cbd.fx1[3] = g_rain_phase;   // The integrated rain clock.
+        cbd.fx1[3] = static_cast<float>(g_rain_phase);   // The integrated rain clock.
     }
 }
 
@@ -24696,6 +24780,7 @@ inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
     static std::vector<std::pair<uint64_t, RenderObject>> khpf_list;
     khpf_list.clear();
     const float khpf_now = effect_time_seconds();
+    const double khpf_now_d = effect_time_seconds_d();
     kh_scene_sync();
     for (uint32_t khpf_i = 0; khpf_i < g_scene.objs.size(); ++khpf_i) {
         if (!g_scene.alive[khpf_i]) continue;
@@ -24879,7 +24964,7 @@ inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
             kh_fill_fx_params_cb(cbd, o);
             if (o.effect == static_cast<int>(EffectId::Fogscatter)) kh_fogscatter_pack(cbd, khpf_list);
             cbd.fx_meta[0] = static_cast<float>(o.effect);
-            cbd.fx_meta[1] = khpf_now;
+            cbd.fx_meta[1] = kh_fx_time(o, khpf_now_d);
             cbd.fx_meta[2] = khpf_vp.Width;
             cbd.fx_meta[3] = khpf_vp.Height;
             cbd.depth_params[0] = khpf_p[2][2];   // The harvested projection: the pair the PIP depth was encoded with.
@@ -28598,8 +28683,18 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
         !g_kh_flush_active.load(std::memory_order_relaxed) &&
         dsv && (flags & D3D11_CLEAR_DEPTH)) {
         g_depth_clear_serial++;   // KH_SVS_SKIP: any depth clear invalidates a cached seam inject.
-        if (!(g_main_depth_identity && reorder_dsv_identity(dsv) == g_main_depth_identity)) kh_pip_on_clear();   // KH_PIP.
-        if (g_main_depth_identity && reorder_dsv_identity(dsv) == g_main_depth_identity) {
+        // The identity is a pointer the engine may recycle (a render-resolution
+        // change recreates the scene targets with no device reset): the match
+        // is confirmed against the adopted dimensions once per frame here, and
+        // a mismatch drops it so the next park re-adopts in either direction
+        // at once instead of after the wrong-pass streak.
+        bool khcd_main = g_main_depth_identity && reorder_dsv_identity(dsv) == g_main_depth_identity;
+        if (khcd_main && !kh_main_depth_dims_match(dsv)) {
+            g_main_depth_identity = nullptr;
+            khcd_main = false;
+        }
+        if (!khcd_main) kh_pip_on_clear();   // KH_PIP.
+        if (khcd_main) {
             // The engine clears the main scene depth on its render thread: this
             // is where that thread is identified for the tracking gate.
             g_reorder_render_tid.store(GetCurrentThreadId(), std::memory_order_relaxed);
@@ -29281,7 +29376,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
                 const float khrm_fk = fminf(fmaxf(g_rain_vel[2], 0.0f) / 20.0f, 1.0f);
                 const float khrm_ud = fminf(fmaxf(-g_rain_vel[1] * 0.06f, 0.0f), 1.0f);
-                g_rain_phase += khrm_dt * (1.0f + khrm_fk * 2.2f + khrm_ud);
+                g_rain_phase += static_cast<double>(khrm_dt) * (1.0 + static_cast<double>(khrm_fk) * 2.2 + static_cast<double>(khrm_ud));
             }
         }
 
@@ -29322,6 +29417,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                   ? pv.projection[1][1] * screen_h * 0.5f : 0.0f;
 
     const float now = effect_time_seconds();
+    const double now_d = effect_time_seconds_d();
 
     // Capability gating per frame: effects need the scene capture and the
     // effect shader; depth effects additionally need the depth SRV in the PS,
@@ -29811,7 +29907,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         }
 
         cbd.fx_meta[0] = static_cast<float>(o.effect);
-        cbd.fx_meta[1] = now;
+        cbd.fx_meta[1] = kh_fx_time(o, now_d);
         cbd.fx_meta[2] = screen_w;
         cbd.fx_meta[3] = screen_h;
         cbd.depth_params[0] = pv.projection[2][2];
@@ -31220,6 +31316,7 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     const bool has_inverse = need_inverse && inverse_4x4(view_proj, inv_view_proj);
     const float now = effect_time_seconds();
+    const double now_d = effect_time_seconds_d();
     const bool depth_ok = g_res.depth_srv != nullptr;
     StateBackup backup;
     backup.capture(ctx);
@@ -31455,7 +31552,7 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         kh_fill_fx_params_cb(cbd, o);
 
         cbd.fx_meta[0] = static_cast<float>(o.effect);
-        cbd.fx_meta[1] = now;
+        cbd.fx_meta[1] = kh_fx_time(o, now_d);
         cbd.fx_meta[2] = static_cast<float>(td.Width);
         cbd.fx_meta[3] = static_cast<float>(td.Height);
         cbd.depth_params[0] = pv.projection[2][2];
@@ -31924,6 +32021,7 @@ inline std::string add_render_object(const RenderObject& obj) {
     stored = obj;
     stored.seq = ++g_next_seq;   // Creation order (fullscreen pass chaining).
     stored.birth_time = effect_time_seconds();
+    stored.fx_t0 = effect_time_seconds_d();
     stored.slot = kh_scene_slot_alloc();   // KH_SCENE.
     g_scene_stage[stored.slot] = &stored;   // Node-stable in unordered_map.
     g_scene_handle[stored.slot] = handle;

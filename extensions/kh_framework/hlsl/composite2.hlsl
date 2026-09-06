@@ -44,7 +44,7 @@ VSOutC VSCompositeInst(VSIn i, VSInst n)
     KhVsCore(i.pos, i.nrm, r.pos.xyz, khvRel, khPass.w, r.size.xyz,
              r.rot0.xyz, r.rot1.xyz, r.rot2.xyz, o.pos, o.wpos, o.wrel, o.nrm);
     o.icol = float4(r.col.rgb, n.ilane.y);
-    KhObjLanesRec(r, n.ilane.x, o.iobj0, o.iobj1);
+    KhObjLanesRec(r, n.ilane.x, n.islot, o.iobj0, o.iobj1);
 #if KH_TEXTURED
     o.uv = i.uv;
     o.tanw = float4(normalize(KhRotateR(i.tan.xyz * r.size.xyz, r.rot0.xyz, r.rot1.xyz, r.rot2.xyz)), i.tan.w);
@@ -54,20 +54,20 @@ VSOutC VSCompositeInst(VSIn i, VSInst n)
 }
 
 #if KH_ARB_DEPTH
+// KH_FAR_VIS: the pass's min-distance mask (metres, 1e30 where no routed mesh
+// covers the pixel), the band draw's per-fragment order. Inside StateBackup's
+// saved range.
+Texture2D<float> khFvMask : register(t37);
 float4 PSComposite(VSOutC i, out float khaODepth : SV_Depth) : SV_Target
 #else
 float4 PSComposite(VSOutC i) : SV_Target
 #endif
 {
     KhObjLoad(i.iobj0, i.iobj1);   // KH_OBJBUF: the per-object lanes, per draw or per instance.
-    if (khObjDither != 0.0f) {
-        float khlD = frac(52.9829189f * frac(dot(i.pos.xy, float2(0.06711056f, 0.00583715f))));
-        if (khObjDither > 0.0f) { if (khlD >= khObjDither) discard; }
-        else if (khlD < -khObjDither) discard;
-    }
+    KhLodDitherCut(i.pos.xy, khObjDither);
     ClipEdgeSliver(i.wpos, i.nrm);   // Degenerate edge-on fragments (fireflies).
     ClipOwnNear(i.pos.w);   // Our own near plane. Twin call.
-    if (khObjFarVis < 0.5f && depthParams.y < -1.0e-3f &&
+    if (KhFarPlaneCut() && depthParams.y < -1.0e-3f &&
         depthParams.x + depthParams.y / max(i.pos.w, 1.0e-4f) > 1.0f) discard;
     if (khObjFarVis < 0.5f && khObjCut > 0.0f && i.pos.w > khObjCut) discard;
     int2 px = clamp(int2(i.pos.xy), int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
@@ -176,27 +176,52 @@ float4 PSComposite(VSOutC i) : SV_Target
 
         // i.pos.z is the rasterizer's own interpolated, viewport-mapped depth -
         // byte-exact with what the hardware would have written had we never
-        // declared SV_Depth. Exact pass-through.
+        // declared SV_Depth. Exact pass-through. The band draw (KH_FAR_VIS) is
+        // rasterised under a viewport whose MaxDepth is khFarVis.z, not
+        // depthParams.w, so its raster depth is unmapped through that range.
         {
+        const bool khaBand = khFarVis.w > 1.5f;
+        const float khaVpHi = khaBand ? khFarVis.z : depthParams.w;
         const float khaNdcE = (i.pos.z - depthParams.z) /
-                              max(depthParams.w - depthParams.z, 1.0e-6f);
+                              max(khaVpHi - depthParams.z, 1.0e-6f);
         float khaNdc = khaNdcE + (depthParams.y / max(khaD, 0.01f) -
                                   depthParams.y / max(i.pos.w, 0.01f));
-        if (khFarSplit.w > 0.5f) {
-            float khaF = khFarSplit.x + khFarSplit.y / max(khaD, 0.01f);
-            if (khaF <= 1.0f) {
-                khaNdc = khaF;
-            } else if (khFarSplit.w >= 1.5f) {
-                khaNdc = 1.0f;
-            } else if (fkVetoMeta.x > 0.5f &&
-                       KhFkVetoHit(fxParams0.xyz, i.wpos, khFarSplit.z)) {
-                clip(-1.0f);
-            }
+        // KH_FAR_VIS. The band draw owns the fragments beyond the encode far
+        // and nothing inside it (its in-far twin drew those with the
+        // hardware's depth); the in-far draw's own cut sits at the top of the
+        // shader (KhFarPlaneCut). The band draw's verdict is analytic - the
+        // raster form exists for hardware parity, which the band never needs.
+        if (khaBand) {
+            khaNdc = depthParams.x + depthParams.y / max(khaD, 0.01f);
+            if (khaNdc < 1.0f - 1.0e-6f) clip(-1.0f);
         }
         khaODepth = clamp(depthParams.z + (depthParams.w - depthParams.z) * khaNdc,
                           depthParams.z, depthParams.w);
- 
-        if (khaNdc >= 1.0f) khaODepth = depthParams.w - 1.0e-4f;   // Sliver, saturated only.
+
+        // Beyond the far plane. The world never reaches ndc 1 (its geometry
+        // ends at the plane), so the plane itself - depthParams.w - is behind
+        // every in-world fragment; an unrouted draw stops there. The band draw
+        // goes on, in two parts. Order among our own beyond-far fragments
+        // comes from the pass's min-distance mask (khFvMask, metres, fp32): a
+        // fragment behind the nearest routed surface at its pixel is cut. Then
+        // the depth: the world pair's own encode, continued past the plane
+        // into the opened viewport - exactly the value the hardware would have
+        // written under that viewport - so every engine consumer that reads
+        // the depth buffer through the world pair (clouds, fog, the engine's
+        // own soft compositing) linearises the fragment to its true distance
+        // for as long as the pair can express it (to ~1.4x the far plane at a
+        // 10 m near), and to the clear (sky) beyond that; the ordering against
+        // the far partition's content is the engine's own. The mask carries
+        // the order the band cannot.
+        if (khaNdc >= 1.0f) {
+            khaODepth = depthParams.w;
+            if (khaBand) {
+                const float khaM = khFvMask.Load(int3(int2(i.pos.xy), 0)).r;
+                if (i.pos.w > khaM * (1.0f + 1.0e-4f) + 0.01f) clip(-1.0f);
+                khaODepth = clamp(depthParams.z + (depthParams.w - depthParams.z) * khaNdc,
+                                  depthParams.w, khFarVis.z);
+            }
+        }
         // fxMeta.x carries the near estimate (> 0 arms; every other solid-mesh
         // fill leaves it zero - effect meshes never compile this shader),
         // fxMeta.y the widened floor the routed draw's viewport opened.
@@ -321,6 +346,13 @@ float4 PSComposite(VSOutC i) : SV_Target
             float khStRf = KhSunRangeFade(i.wpos);
             smf *= 1.0f - (1.0f - khStenU) * khStRf;
         }
+    } else if (lighting0.x >= 0.5f) {
+        // The gate's refusal is a verdict, not a skip: a lit pixel it leaves at
+        // smf = 1 keeps an unshadowed direct term, and at N.L in (0, 0.01] that
+        // is HDR sun x 0.01 - a lit line along every crease inside a shadow. An
+        // unlit object keeps 1 (a user material shader may read the lane). Twin:
+        // PSMain / PSComposite.
+        smf = 0.0f;
     }
 
     // Twin edit: PSMain and PSComposite identical from here to the shading

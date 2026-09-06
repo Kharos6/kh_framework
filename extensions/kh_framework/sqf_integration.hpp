@@ -157,6 +157,7 @@ static registered_sqf_function _sqf_get_render_stats;
 static registered_sqf_function _sqf_set_render_debug;
 static registered_sqf_function _sqf_reset_render_stats;
 static registered_sqf_function _sqf_set_ssgi_scale;
+static registered_sqf_function _sqf_set_render_ao;
 static registered_sqf_function _sqf_flush_ui_render;
 
 struct kh_command_variant {
@@ -6689,6 +6690,55 @@ static game_value set_ssgi_scale_sqf(game_value_parameter arg) {
     }
 }
 
+// KH_AO: [strength] or [strength, distance]. Strength is the term's exponent
+// (0 = off, 1 = as measured, above 1 deeper), clamped 0..4; the trace distance
+// in metres, clamped 0.05..10 (omitted = unchanged). Global; applies from the
+// next pass.
+static game_value set_render_ao_sqf(game_value_parameter arg) {
+    try {
+        float khao_s = 1.0f, khao_d = 1.0f;
+        bool khao_has_d = false;
+        if (arg.type_enum() != game_data_type::ARRAY) {
+            kh_rv_report("setRenderAmbientOcclusion", "expected [strength] or [strength, distance]");
+            return game_value(false);
+        }
+        const auto& khao_a = arg.to_array();
+        if (khao_a.size() < 1 || khao_a[0].type_enum() != game_data_type::SCALAR) {
+            kh_rv_report("setRenderAmbientOcclusion", "strength must be a number (0 = off, 1 = as measured, up to 4)");
+            return game_value(false);
+        }
+        khao_s = static_cast<float>(khao_a[0]);
+        if (khao_a.size() >= 2) {
+            if (khao_a[1].type_enum() != game_data_type::SCALAR) {
+                kh_rv_report("setRenderAmbientOcclusion", "distance must be a number (m)");
+                return game_value(false);
+            }
+            khao_d = static_cast<float>(khao_a[1]);
+            khao_has_d = true;
+        }
+        if (!(khao_s == khao_s) || (khao_has_d && !(khao_d == khao_d))) {
+            kh_rv_report("setRenderAmbientOcclusion", "NaN");
+            return game_value(false);
+        }
+        if (khao_s < 0.0f) khao_s = 0.0f;
+        if (khao_s > 4.0f) khao_s = 4.0f;
+        uint32_t khao_sb = 0;
+        memcpy(&khao_sb, &khao_s, sizeof(khao_sb));
+        RenderIntegration::g_ao_strength_bits.store(khao_sb, std::memory_order_relaxed);
+        if (khao_has_d) {
+            if (khao_d < 0.05f) khao_d = 0.05f;
+            if (khao_d > 10.0f) khao_d = 10.0f;
+            uint32_t khao_db = 0;
+            memcpy(&khao_db, &khao_d, sizeof(khao_db));
+            RenderIntegration::g_ao_dist_bits.store(khao_db, std::memory_order_relaxed);
+        }
+        return game_value(true);
+    } catch (...) {
+        report_error("setRenderAmbientOcclusion: unknown exception");
+        return game_value(false);
+    }
+}
+
 static game_value set_render_debug_sqf(game_value_parameter arg) {
     try {
         if (arg.type_enum() != game_data_type::SCALAR) { kh_rv_report("setRenderDebug", "mode must be a number"); return game_value(false); }
@@ -6766,6 +6816,8 @@ static game_value get_render_stats_sqf() {
         uint32_t khrt_opaques = 0, khrt_samples = 0, khrt_cw = 0, khrt_ch = 0, khrt_cs = 0;
         bool khrt_injected = false, khrt_pv = false, khrt_main = false, khrt_tid = false, khrt_got = false;
         float khrt_cam[3] = {};
+        // KH_FAR_VIS trace: the injection's encode pair (near / far, m), the
+        // depth range it wrote through, the mask's size.
         bool khd_valid = false, khd_view_valid = false;
         uint32_t khd_point_n = 0, khd_spot_n = 0, khd_pool_n = 0;
         float khd_cam[3] = {};
@@ -6790,7 +6842,6 @@ static game_value get_render_stats_sqf() {
             khrt_main = RenderIntegration::g_main_depth_identity != nullptr;
             khrt_tid = RenderIntegration::g_reorder_render_tid.load(std::memory_order_relaxed) != 0;
             for (int i = 0; i < 3; ++i) khrt_cam[i] = RenderIntegration::g_latch_cam[i];
-
             const RenderIntegration::DynLightsState& khd = RenderIntegration::g_dl;
             khd_valid = khd.valid;
             khd_view_valid = khd.view_valid;
@@ -6839,7 +6890,6 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("lockFailedFrames", static_cast<float>(s.lock_failed_frames)));
         out.push_back(kv("hookActive", RenderIntegration::g_reorder_hook_active.load(std::memory_order_relaxed) ? 1.0f : 0.0f));
         out.push_back(kv("hookFailed", RenderIntegration::g_reorder_hook_failed ? 1.0f : 0.0f));
-
         // The frame trace.
         out.push_back(kv("traceLocked", khrt_got ? 1.0f : 0.0f));
         out.push_back(kv("frameCycles", static_cast<float>(khrt_cycles)));
@@ -6863,7 +6913,6 @@ static game_value get_render_stats_sqf() {
             for (int i = 0; i < 3; ++i) cam.push_back(game_value(khrt_cam[i]));
             out.push_back(kva("camera", std::move(cam)));
         }
-
         // The dynamic-light state.
         out.push_back(kv("dlValid", khd_valid ? 1.0f : 0.0f));
         out.push_back(kv("dlPointN", static_cast<float>(khd_point_n)));
@@ -8242,6 +8291,14 @@ static void initialize_sqf_integration() {
         userFunctionWrapper<set_render_debug_sqf>,
         game_data_type::BOOL,
         game_data_type::SCALAR
+    );
+
+    _sqf_set_render_ao = intercept::client::host::register_sqf_command(
+        "setRenderAmbientOcclusion",
+        "[strength] or [strength, distance]. Ambient occlusion on our lit meshes (distance-field, on by default). Strength 0 turns it off, 1 is as measured, up to 4 deepens it; distance is the trace reach in metres (0.05-10, default 1; omitted = unchanged). Global; applies from the next pass. Returns true on accept",
+        userFunctionWrapper<set_render_ao_sqf>,
+        game_data_type::BOOL,
+        game_data_type::ARRAY
     );
 
     _sqf_set_ssgi_scale = intercept::client::host::register_sqf_command(

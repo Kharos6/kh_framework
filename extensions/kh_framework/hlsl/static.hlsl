@@ -35,7 +35,7 @@ VSOut VSMainInst(VSIn i, VSInst n)
     KhVsCore(i.pos, i.nrm, r.pos.xyz, khvRel, khPass.w, r.size.xyz,
              r.rot0.xyz, r.rot1.xyz, r.rot2.xyz, o.pos, o.wpos, o.wrel, o.nrm);
     o.icol = float4(r.col.rgb, n.ilane.y);
-    KhObjLanesRec(r, n.ilane.x, o.iobj0, o.iobj1);
+    KhObjLanesRec(r, n.ilane.x, n.islot, o.iobj0, o.iobj1);
 #if KH_TEXTURED
     o.uv = i.uv;
     o.tanw = float4(normalize(KhRotateR(i.tan.xyz * r.size.xyz, r.rot0.xyz, r.rot1.xyz, r.rot2.xyz)), i.tan.w);
@@ -132,45 +132,6 @@ float4 VSSunDepth(VSInSun i) : SV_Position
     return mul(float4(wp - sunOrigin.xyz, 1.0f), viewProj);
 }
 
-// KH_CAST_DISSOLVE - the engine's rule for far casters, in the map: each CASTER
-// FRAGMENT is dithered out by its own distance from the camera (sunOrigin) over
-// the same band as the range fade (KH_SUN_FADE_START .. 0.995 of mirMeta.w).
-// Per fragment, so the far corner of a mesh dissolves before its near one; a
-// nearer occluder still writes its depth, so unlike a depth-gap fade this
-// cannot lighten a doubly-shadowed spot. mirMeta.w = 0 (a caster-anchored map,
-// no camera) leaves every fragment.
-struct VSOutSunD { float4 pos : SV_Position; float3 wp : TEXCOORD0; };
-
-VSOutSunD VSSunDepthD(VSInSun i)
-{
-    VSOutSunD o;
-    KhObjRec r = khObjs[i.islot];
-    float3 lp = i.pos * r.size.xyz;
-    float3 wp = r.pos.xyz + lp.x * r.rot0.xyz + lp.y * r.rot1.xyz + lp.z * r.rot2.xyz;
-    o.pos = mul(float4(wp - sunOrigin.xyz, 1.0f), viewProj);
-    o.wp = wp;
-    return o;
-}
-
-// 4x4 Bayer, 16 levels - the SAME period as the alpha twin's: the receiver's
-// soft filter spans a ~4x4 texel footprint, so a period-4 pattern is averaged
-// whole and reads as uniform coverage (an 8x8 pattern speckles). The map
-// windows move in whole texels, so the pattern is fixed in the world.
-float KhSunDitherMap(float2 khdm_px)
-{
-    static const float khdm_b[16] = { 0.0f, 8.0f, 2.0f, 10.0f, 12.0f, 4.0f, 14.0f, 6.0f,
-                                      3.0f, 11.0f, 1.0f, 9.0f, 15.0f, 7.0f, 13.0f, 5.0f };
-    int2 khdm_p = int2(khdm_px) & 3;
-    return (khdm_b[khdm_p.y * 4 + khdm_p.x] + 0.5f) / 16.0f;
-}
-
-void PSSunDepthD(VSOutSunD i)
-{
-    if (mirMeta.w < 0.5f) return;
-    float khsd_f = KhSunRangeFadeAt(i.wp, sunOrigin.xyz);
-    clip(khsd_f - KhSunDitherMap(i.pos.xy));
-}
-
 #if KH_TEXTURED
 // KH_CAST_ALPHA - alpha-aware casting, in the map. Both consumers of the
 // private sun-depth maps (the self kernels and PSMaskCast's world cast) read
@@ -182,8 +143,7 @@ struct VSInSunA {
     uint   islot : TEXCOORD4;   // KH_OBJBUF (the plain twin's lane).
     float3 ilane : TEXCOORD5;   // y = the caster's colour alpha (envelope applied).
 };
-struct VSOutSunA { float4 pos : SV_Position; float2 uv : TEXCOORD0; float alpha : TEXCOORD1;
-                   float3 wp : TEXCOORD2; };   // wp: for the dissolve.
+struct VSOutSunA { float4 pos : SV_Position; float2 uv : TEXCOORD0; float alpha : TEXCOORD1; };
 
 VSOutSunA VSSunDepthA(VSInSunA i)
 {
@@ -194,7 +154,6 @@ VSOutSunA VSSunDepthA(VSInSunA i)
     o.pos = mul(float4(wp - sunOrigin.xyz, 1.0f), viewProj);
     o.uv = i.uv;
     o.alpha = i.ilane.y;
-    o.wp = wp;
     return o;
 }
 
@@ -219,17 +178,6 @@ void PSSunDepthA(VSOutSunA i)
     float khsa_t = KhMatRoute(matParams3.y, 1.0f, i.uv);
     if (khsa_mode == 1) clip(khsa_t - matParams0.z);   // Cutout: the cutoff kills, survivors cast full.
     else if (khsa_mode == 2 && KhMatRouteTexel(matParams3.y, 1.0f, i.uv) < 0.9f) khsa_a *= khsa_t;
-    // The distance band multiplies INTO the coverage and one dither decides, so
-    // a translucent caster dissolves with distance exactly as an opaque one
-    // does (two clips on the same pattern would compose as a min, not a
-    // product).
-    float khsa_f = (mirMeta.w >= 0.5f) ? KhSunRangeFadeAt(i.wp, sunOrigin.xyz) : 1.0f;
-    if (khsa_f < 0.9999f) {
-        float khsa_c = khsa_a * khsa_f;
-        clip(khsa_c - 0.004f);
-        clip(khsa_c - KhSunDitherMap(i.pos.xy));
-        return;
-    }
     if (khsa_a >= 0.996f) return;                       // Solid.
     clip(khsa_a - 0.004f);                              // Transparent: casts nothing.
     clip(khsa_a - KhSunDither(i.pos.xy));               // Partial: dithered coverage.
@@ -257,6 +205,12 @@ void PSInjDepthA(VSOut i)
 // quantity VSDlsMask stores).
 float4 PSDlsMaskA(VSOut i) : SV_Target
 {
+    // KH_FAR_VIS: the mask prepass draws a fading level with the colour
+    // draw's own dither, so the mask at a pixel is the level that pixel shows
+    // (a mask holding the union would cut the shown level behind the hidden
+    // one's nearer surface - speckle). The dlsw mask fills no dither.
+    KhObjLoad(i.iobj0, i.iobj1);
+    KhLodDitherCut(i.pos.xy, khObjDither);
     KhMatLoad(i.matIx);   // KH_MAT_TABLE.
     int khma_mode = (int)matParams0.y;
     float khma_t = KhMatRoute(matParams3.y, 1.0f, i.uv);
@@ -377,6 +331,7 @@ VSOutDM VSDlsMask(VSIn i)
 
 float4 PSDlsMask(VSOutDM i) : SV_Target
 {
+    KhLodDitherCut(i.pos.xy, blendCtl.w);   // KH_FAR_VIS (see PSDlsMaskA); the per-object lane.
     return float4(i.dist, 0.0f, 0.0f, 0.0f);
 }
 
@@ -748,14 +703,10 @@ VSOut VSFullscreen(uint vid : SV_VertexID)
 float4 PSMain(VSOut i) : SV_Target
 {
     KhObjLoad(i.iobj0, i.iobj1);   // KH_OBJBUF: the per-object lanes, per draw or per instance.
-    if (khObjDither != 0.0f) {
-        float khlD = frac(52.9829189f * frac(dot(i.pos.xy, float2(0.06711056f, 0.00583715f))));
-        if (khObjDither > 0.0f) { if (khlD >= khObjDither) discard; }
-        else if (khlD < -khObjDither) discard;
-    }
+    KhLodDitherCut(i.pos.xy, khObjDither);
     ClipEdgeSliver(i.wpos, i.nrm);   // Degenerate edge-on fragments (fireflies).
     ClipOwnNear(i.pos.w);   // Our own near plane. Twin call.
-    if (khObjFarVis < 0.5f && depthParams.y < -1.0e-3f &&
+    if (KhFarPlaneCut() && depthParams.y < -1.0e-3f &&
         depthParams.x + depthParams.y / max(i.pos.w, 1.0e-4f) > 1.0f) discard;
     // Twin: PSMain / PSComposite / PSEffect. The shared tail below is kept as
     // two copies on purpose: PSComposite interleaves KH_ARB_DEPTH blocks and a
@@ -870,6 +821,13 @@ float4 PSMain(VSOut i) : SV_Target
             float khStRf = KhSunRangeFade(i.wpos);
             smf *= 1.0f - (1.0f - khStenU) * khStRf;
         }
+    } else if (lighting0.x >= 0.5f) {
+        // The gate's refusal is a verdict, not a skip: a lit pixel it leaves at
+        // smf = 1 keeps an unshadowed direct term, and at N.L in (0, 0.01] that
+        // is HDR sun x 0.01 - a lit line along every crease inside a shadow. An
+        // unlit object keeps 1 (a user material shader may read the lane). Twin:
+        // PSMain / PSComposite.
+        smf = 0.0f;
     }
 
     // Twin edit: PSMain and PSComposite identical from here to the shading

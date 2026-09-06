@@ -748,6 +748,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
                         TeamspeakFramework::instance().cleanup();
                     }
                 } __except(EXCEPTION_EXECUTE_HANDLER) {}
+
+                __try {
+                    if (RenderIntegration::rendering_integration_is_initialized()) {
+                        RenderIntegration::rendering_integration_process_detach();
+                    }
+                } __except(EXCEPTION_EXECUTE_HANDLER) {}
                 
                 __try { 
                     MH_Uninitialize(); 

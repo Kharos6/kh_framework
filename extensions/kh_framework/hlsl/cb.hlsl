@@ -22,7 +22,7 @@ cbuffer CBObj : register(b0)
     // x = lit flag, z = ambient fraction, w = diffuse fraction (read through
     // KhObjLanesCb / KhObjLoad); y unread.
     float4 lighting0;
-    float4 shadowMeta2;   // x = far-visibility clamp flag, y = object view-distance cut; zw unread.
+    float4 shadowMeta2;   // x = far-visibility clamp flag, y = object view-distance cut, z = scene slot + 1 (KH_AO); w unread.
     // Engine-axes rotation rows (row-vector): world = center + local.x*R0 +
     // local.y*R1 + local.z*R2.
     float4 objRot0;
@@ -38,7 +38,15 @@ cbuffer CBObj : register(b0)
     // alpha-mode override (>= 0 replaces the table's mode; 3 = the opaque part
     // of a blend split). Zeroed and unread on every untextured fill.
     float4 matCtl;
-    float4 khFarSplit;   // Far-keep split: xy = the frame pair.
+    // KH_FAR_VIS (C++ twin kh_far_vis), per draw. A routed farVis object draws
+    // twice: w = 1 = the in-far draw (every fragment beyond the far plane is
+    // cut, as a farVis-off object's would be; depth is the hardware's,
+    // untouched); w = 2 = the band draw (ARB only: every fragment inside the
+    // far plane is cut, the rest ordered per fragment against the pass's
+    // min-distance mask at t37 and given the world pair's own depth continued
+    // past the plane, up to z = the MaxDepth of the viewport the band draw is
+    // rasterised under). xy free. Zero on every other draw.
+    float4 khFarVis;
     float4 fuseMeta;
     float4 fuseStage[12];
     float4 fxParams2;   // Effect parameters [8..11] (C++ twin fx2).
@@ -103,8 +111,6 @@ cbuffer CBObj : register(b0)
     // enabled and texture valid.
     float4 thmParams;
     float4 thmMeta;   // x = width (cells), y = height (cells).
-    float4 fkVetoMeta;   // x = OBB count (0 = veto dark).
-    float4 fkVeto[40];   // 8 OBBs x 5 float4: [center.xyz, 1+slot].
     float4 stenVol;   // xy = the injection's viewport depth range for this epoch; zw = the volume
                       // copy's own dims.
     float4 stenVol2;   // x = transport arm; z = KhVsCore vertex path selector (3 = the seam
@@ -165,6 +171,13 @@ cbuffer CBObj : register(b0)
     // xyz = the camera invViewProj is relative to, w = 1 arms it (every reader
     // adds xyz after the reconstruction); w = 0 = invViewProj is absolute.
     float4 fxCam;
+    // KH_AO (C++ twins kh_ao / kh_ao_atlas / kh_ao_occ): x = strength (0 =
+    // off), y = occluder count, z = trace distance (m), w = receiver range (m);
+    // the atlas's inverse width / depth (texels) and KH_SDF_N; the occluders'
+    // centres + bound radii.
+    float4 khAo;
+    float4 khAoAtlas;
+    float4 khAoOcc[192];
 };
  
 cbuffer CBEngView : register(b2)
@@ -193,13 +206,15 @@ StructuredBuffer<KhObjRec> khObjs : register(t39);
 // The per-object lanes a bucket varies per instance and the CB carries per
 // draw. Filled by the vertex shader into two flat interpolants (VSOut.iobj0/1)
 // and loaded by every mesh pixel shader at entry (KhObjLoad); the lighting /
-// far contract / dither reads use these, never lighting0.zw, shadowMeta2.xyz or
-// blendCtl.zw directly.
+// far contract / dither / self-occlusion reads use these, never lighting0.zw,
+// shadowMeta2.xyz or blendCtl.w directly (PSDlsMask, a per-object-only shader
+// with no VSOut, is the one reader of blendCtl.w itself).
 static float khObjAmb = 0.0f;      // lighting0.z twin: base-colour fraction kept in shadow.
 static float khObjDif = 0.0f;      // lighting0.w twin: n.L-scaled fraction.
-static float khObjFarVis = 0.0f;   // shadowMeta2.x / blendCtl.z twin: far-visibility clamp flag.
+static float khObjFarVis = 0.0f;   // shadowMeta2.x twin: far-visibility clamp flag.
 static float khObjCut = 0.0f;      // shadowMeta2.y twin: object view-distance cut (m, 0 = off).
 static float khObjDither = 0.0f;   // blendCtl.w twin: the LOD crossfade dither for this draw.
+static float khObjSlot = 0.0f;     // shadowMeta2.z twin: the scene slot + 1 (KH_AO's self test; 0 = none).
 void KhObjLoad(float4 khol_a, float4 khol_b)
 {
     khObjAmb = khol_a.x;
@@ -207,20 +222,39 @@ void KhObjLoad(float4 khol_a, float4 khol_b)
     khObjFarVis = khol_a.z;
     khObjCut = khol_a.w;
     khObjDither = khol_b.y;
+    khObjSlot = khol_b.z;
 }
 // The vertex side: the CB lanes (per-object draws)...
+// The LOD crossfade's per-pixel cut, one body for every pass that draws a
+// fading level (the two colour twins, the far-vis mask prepass): +v = the
+// finer level keeps the pixels below v, -v = the coarser keeps the rest.
+// Complementary at every pixel, whichever pass asks.
+void KhLodDitherCut(float2 khld_px, float khld_v)
+{
+    if (khld_v == 0.0f) return;
+    float khld_h = frac(52.9829189f * frac(dot(khld_px, float2(0.06711056f, 0.00583715f))));
+    if (khld_v > 0.0f) { if (khld_h >= khld_v) discard; }
+    else if (khld_h < -khld_v) discard;
+}
+// The far-plane cut: a farVis-off object always; a farVis object on its in-far
+// draw (KH_FAR_VIS, khFarVis.w = 1), whose beyond-far fragments belong to the
+// band draw. Read after KhObjLoad.
+bool KhFarPlaneCut()
+{
+    return khObjFarVis < 0.5f || (khFarVis.w > 0.5f && khFarVis.w < 1.5f);
+}
 void KhObjLanesCb(out float4 khoc_a, out float4 khoc_b)
 {
     khoc_a = float4(lighting0.z, lighting0.w, shadowMeta2.x, shadowMeta2.y);
-    khoc_b = float4(0.0f, blendCtl.w, 0.0f, 0.0f);
+    khoc_b = float4(0.0f, blendCtl.w, shadowMeta2.z, 0.0f);
 }
 // ...or the record + lane (bucket draws); the cut is the pass's object view
-// distance for a farVis-off instance.
-void KhObjLanesRec(KhObjRec khor_r, float khor_dither, out float4 khor_a, out float4 khor_b)
+// distance for a farVis-off instance; the slot is the instance's own.
+void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float4 khor_a, out float4 khor_b)
 {
     khor_a = float4(khor_r.rot1.w, khor_r.rot2.w, khor_r.size.w,
                     (khor_r.size.w > 0.5f) ? 0.0f : khPassObj.x);
-    khor_b = float4(0.0f, khor_dither, 0.0f, 0.0f);
+    khor_b = float4(0.0f, khor_dither, (float)khor_slot + 1.0f, 0.0f);
 }
 
 #define KH_RPDB_GC_M 0.008f
@@ -237,41 +271,6 @@ float KhSceneMeters(float raw)
     return d > 0.0f ? d : 1e9f;
 }
 
-// Slab test in each OBB's local frame (the rows transform world offsets to
-// local - the same row-vector convention as KhRotate).
-bool KhFkVetoHit(float3 cam, float3 wpos, float selfId)
-{
-    float3 kfvV = wpos - cam;
-    float kfvTf = length(kfvV);
-    if (kfvTf < 1.0f) return false;
-    float3 kfvRd = kfvV / kfvTf;
-    int kfvN = (int)(fkVetoMeta.x + 0.5f);
-    [loop] for (int kfvI = 0; kfvI < 8; ++kfvI) {
-        if (kfvI >= kfvN) break;
-        float4 kfvC = fkVeto[kfvI * 5 + 0];
-        if (abs(kfvC.w - selfId) < 0.5f) continue;
-        float3 kfvH = fkVeto[kfvI * 5 + 1].xyz;
-        float3 kfvA0 = fkVeto[kfvI * 5 + 2].xyz;
-        float3 kfvA1 = fkVeto[kfvI * 5 + 3].xyz;
-        float3 kfvA2 = fkVeto[kfvI * 5 + 4].xyz;
-        float3 kfvRo = cam - kfvC.xyz;
-        float3 kfvO = float3(dot(kfvRo, kfvA0), dot(kfvRo, kfvA1), dot(kfvRo, kfvA2));
-        float3 kfvD = float3(dot(kfvRd, kfvA0), dot(kfvRd, kfvA1), dot(kfvRd, kfvA2));
-        float3 kfvSd = float3(kfvD.x >= 0.0f ? 1.0f : -1.0f,
-                              kfvD.y >= 0.0f ? 1.0f : -1.0f,
-                              kfvD.z >= 0.0f ? 1.0f : -1.0f);
-        float3 kfvInv = kfvSd / max(abs(kfvD), 1.0e-6f);
-        float3 kfvT0 = (-kfvH - kfvO) * kfvInv;
-        float3 kfvT1 = ( kfvH - kfvO) * kfvInv;
-        float3 kfvMn = min(kfvT0, kfvT1);
-        float3 kfvMx = max(kfvT0, kfvT1);
-        float kfvIn  = max(max(kfvMn.x, kfvMn.y), kfvMn.z);
-        float kfvOut = min(min(kfvMx.x, kfvMx.y), kfvMx.z);
-        if (kfvIn <= kfvOut && kfvOut > 0.0f && kfvIn < kfvTf - 0.5f) return true;
-    }
-    return false;
-}
- 
 // Heightfield occlusion is marched camera->fragment: per-pixel, temporally
 // stable, altitude- and LOD-independent. Do not swap in a screen-space variant.
 Texture2D<float> terrainHeightTex : register(t10);
@@ -1267,6 +1266,127 @@ float3 DynLights(float3 wpos, float3 nrm)
 // Reinhard first, then the lift: x/(1+x) maps the whole HDR range into 0..1
 // without discarding anything above 1 (a saturate before the lift flattens
 // every flashlit surface to 1).
+// KH_AO - ambient occlusion from the meshes' signed distance fields (C++ twins
+// kh_sdf_bake / kh_sdf_atlas_sync / kh_ao_gather). Every mesh carries a
+// KH_SDF_N^3 field of its level-0 geometry - metric, signed for a closed mesh,
+// unsigned for an open one - resident in one Texture3D atlas (t41; blocks of
+// KH_SDF_N on a 16 x 16 grid per layer). The pass lists the occluders within
+// range of its camera - visible, opaque, depth-writing solids, the receiver's
+// own object among them - as spheres in khAoOcc and placement records at t40.
+// A lit fragment cone-traces the fields of the occluders its trace distance
+// can reach: six cones of equal solid angle over the hemisphere, six geometric
+// steps each, a cone's visibility the minimum over its steps of d / (t tan
+// half-angle), the term their cosine-weighted mean. The receiver's own field
+// is not consulted inside its cell size (the interpolated field is not
+// trustworthy there); another occluder's is, since a contact is exactly a
+// point near another surface. Only our meshes occlude, only our lit meshes
+// receive, and the term scales the ambient (sky) light alone.
+#define KH_SDF_N    32.0f
+#define KH_SDF_C    (0.5f * (KH_SDF_N - 1.0f) / (KH_SDF_N - 2.0f))   // The outermost cell centre, mesh units (one padding cell each side).
+#define KH_AO_MAX   192
+#define KH_AO_CAND  8
+#define KH_AO_CONES 6
+#define KH_AO_STEPS 6
+#define KH_AO_TAN   0.665f   // tan(33.6 deg): the half-angle of one sixth of the hemisphere.
+#define KH_AO_T0    0.02f    // First step (m).
+struct KhAoRec {
+    float4 pos;    // xyz = centre (engine axes), w = the scene slot + 1.
+    float4 size;   // xyz = edge lengths (engine axes), w = the atlas block index.
+    float4 rot0;   // xyz = rotation rows (world = pos + l.x rot0 + l.y rot1 + l.z rot2);
+    float4 rot1;   // rot0.w = metres per encoded unit, rot1.w = the bound radius (m),
+    float4 rot2;   // rot2.w = the field's cell size (m).
+};
+StructuredBuffer<KhAoRec> khAoRecs : register(t40);
+Texture3D<float> khSdfAtlas : register(t41);
+// Distance (m) from p to the record's surface; negative inside a closed mesh.
+// Beyond the field the boundary value plus the distance to the field's box.
+float KhAoDist(KhAoRec khad_r, float3 khad_p)
+{
+    const float3 khad_q = khad_p - khad_r.pos.xyz;
+    const float3 khad_l = float3(dot(khad_q, khad_r.rot0.xyz), dot(khad_q, khad_r.rot1.xyz), dot(khad_q, khad_r.rot2.xyz))
+                        / max(khad_r.size.xyz, float3(1.0e-4f, 1.0e-4f, 1.0e-4f));
+    const float3 khad_c = clamp(khad_l, -KH_SDF_C, KH_SDF_C);
+    const float khad_out = length((khad_l - khad_c) * khad_r.size.xyz);
+    const float khad_b = khad_r.size.w;
+    const float khad_bz = floor(khad_b / 256.0f);
+    const float khad_by = floor((khad_b - khad_bz * 256.0f) / 16.0f);
+    const float khad_bx = khad_b - khad_bz * 256.0f - khad_by * 16.0f;
+    // Cell centres sit at (i + 0.5) / N over [-E, E] with E = C + half a cell.
+    const float3 khad_t = float3(khad_bx, khad_by, khad_bz) * KH_SDF_N
+                        + (khad_c * (KH_SDF_N - 2.0f) + 0.5f * KH_SDF_N);
+    const float khad_v = khSdfAtlas.SampleLevel(khPfSamp, khad_t * float3(khAoAtlas.x, khAoAtlas.x, khAoAtlas.y), 0.0f);
+    return khad_v * khad_r.rot0.w + khad_out;
+}
+float KhAoTerm(float3 khao_p, float3 khao_n)
+{
+    if (khAo.x <= 0.0f || khAo.y < 0.5f) return 1.0f;
+    const float khao_fade = 1.0f - smoothstep(0.85f * khAo.w, khAo.w, length(khao_p - fxParams0.xyz));
+    if (khao_fade <= 0.0f) return 1.0f;
+    const float khao_D = max(khAo.z, 2.0f * KH_AO_T0);
+    // The occluders this fragment's trace can reach: the KH_AO_CAND nearest by
+    // margin to their bound sphere, not the first in the list's camera order -
+    // a dense cluster would otherwise hand a far fragment eight grazing spheres
+    // and drop its contact.
+    uint khao_cand[KH_AO_CAND];
+    float khao_cm[KH_AO_CAND];
+    uint khao_nc = 0;
+    const int khao_cnt = (int)khAo.y;
+    [loop] for (int khao_j = 0; khao_j < khao_cnt; ++khao_j) {
+        const float4 khao_s = khAoOcc[khao_j];
+        const float khao_mg = length(khao_p - khao_s.xyz) - khao_s.w;   // Margin to the sphere (m).
+        if (khao_mg >= khao_D) continue;
+        if (khao_nc < KH_AO_CAND) { khao_cand[khao_nc] = (uint)khao_j; khao_cm[khao_nc] = khao_mg; ++khao_nc; continue; }
+        uint khao_wi = 0;   // Full: the farthest held gives way to a nearer one.
+        [unroll] for (uint khao_qi = 1; khao_qi < KH_AO_CAND; ++khao_qi) { if (khao_cm[khao_qi] > khao_cm[khao_wi]) khao_wi = khao_qi; }
+        if (khao_mg < khao_cm[khao_wi]) { khao_cand[khao_wi] = (uint)khao_j; khao_cm[khao_wi] = khao_mg; }
+    }
+    if (khao_nc == 0) return 1.0f;
+    // The cone set in the fragment's frame: the normal, and five at 65 deg from
+    // it - the centres of six equal parts of the hemisphere.
+    const float3 khao_nn = normalize(khao_n);
+    const float3 khao_ax = abs(khao_nn.y) < 0.99f ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f);
+    const float3 khao_tg = normalize(cross(khao_ax, khao_nn));
+    const float3 khao_bt = cross(khao_nn, khao_tg);
+    float3 khao_dir[KH_AO_CONES];
+    khao_dir[0] = khao_nn;
+    [unroll] for (int khao_c = 1; khao_c < KH_AO_CONES; ++khao_c) {
+        const float khao_a = (float)(khao_c - 1) * 1.2566371f;   // 2 pi / 5.
+        khao_dir[khao_c] = khao_nn * 0.4226f + (khao_tg * cos(khao_a) + khao_bt * sin(khao_a)) * 0.9063f;
+    }
+    const float3 khao_o = khao_p + khao_nn * 0.01f;
+    const float khao_ls = log2(khao_D / KH_AO_T0) / (float)(KH_AO_STEPS - 1);
+    float khao_ts[KH_AO_STEPS];   // Geometric from KH_AO_T0 to the trace distance.
+    [unroll] for (int khao_i0 = 0; khao_i0 < KH_AO_STEPS; ++khao_i0) khao_ts[khao_i0] = KH_AO_T0 * exp2(khao_ls * (float)khao_i0);
+    float khao_d[KH_AO_CONES * KH_AO_STEPS];
+    [unroll] for (int khao_i = 0; khao_i < KH_AO_CONES * KH_AO_STEPS; ++khao_i) khao_d[khao_i] = 1.0e9f;
+    [loop] for (uint khao_k = 0; khao_k < khao_nc; ++khao_k) {
+        const KhAoRec khao_r = khAoRecs[khao_cand[khao_k]];
+        const bool khao_self = abs(khao_r.pos.w - khObjSlot) < 0.5f;
+        const float khao_tmin = khao_self ? khao_r.rot2.w : 0.0f;
+        [unroll] for (int khao_c2 = 0; khao_c2 < KH_AO_CONES; ++khao_c2) {
+            [unroll] for (int khao_s2 = 0; khao_s2 < KH_AO_STEPS; ++khao_s2) {
+                const float khao_t = khao_ts[khao_s2];
+                if (khao_t < khao_tmin) continue;
+                const float khao_dd = KhAoDist(khao_r, khao_o + khao_dir[khao_c2] * khao_t);
+                khao_d[khao_c2 * KH_AO_STEPS + khao_s2] = min(khao_d[khao_c2 * KH_AO_STEPS + khao_s2], khao_dd);
+            }
+        }
+    }
+    float khao_sum = 0.0f;
+    float khao_wsum = 0.0f;
+    [unroll] for (int khao_c3 = 0; khao_c3 < KH_AO_CONES; ++khao_c3) {
+        float khao_vis = 1.0f;
+        [unroll] for (int khao_s3 = 0; khao_s3 < KH_AO_STEPS; ++khao_s3) {
+            khao_vis = min(khao_vis, saturate(khao_d[khao_c3 * KH_AO_STEPS + khao_s3] / (khao_ts[khao_s3] * KH_AO_TAN)));
+        }
+        const float khao_w = khao_c3 == 0 ? 1.0f : 0.4226f;   // Cosine-weighted.
+        khao_sum += khao_vis * khao_w;
+        khao_wsum += khao_w;
+    }
+    // khAo.x is the strength as an exponent (1 = the measured term).
+    const float khao_ao = pow(max(khao_sum / khao_wsum, 1.0e-4f), khAo.x);
+    return 1.0f - (1.0f - khao_ao) * khao_fade;
+}
 float3 ApplyLighting(float3 base, float3 wpos, float3 nrm, float smf)
 {
     if (lighting0.x < 0.5f || lighting1.w < 0.5f) return base;
@@ -1274,7 +1394,8 @@ float3 ApplyLighting(float3 base, float3 wpos, float3 nrm, float smf)
     float ndl = saturate(dot(n, lighting1.xyz));
     float3 direct = lighting2.rgb * (ndl * khObjDif * smf);   // Per-pixel receive + self term
                                                               // (min-combined upstream).
-    return base * (lightAmb.rgb * khObjAmb + direct + DynLights(wpos, nrm));
+    // KH_AO scales the ambient alone: the sun has its shadows, the lights their maps.
+    return base * (lightAmb.rgb * (khObjAmb * KhAoTerm(wpos, n)) + direct + DynLights(wpos, nrm));
 }
 
 // The material lanes every reader names as matParams0..3. In the textured
@@ -1626,9 +1747,10 @@ float3 KhApplyPBR(KhMatSurf m, float3 wpos, float3 n, float smf)
              * (lightAmb.rgb * khObjAmb) * (khov_w * ndl * smf);
     }
     // The split-sum ambient replaces albedo * amb. smf is not passed - the sky
-    // is not shadowed by our casters.
+    // is not shadowed by our casters. KH_AO joins the material's own occlusion
+    // there (both scale the ambient alone).
     const float3 amb = KhPbrAmbient(n, v, khov_vOk, rough, F0, metal, m.albedo,
-                                    lightAmb.rgb * khObjAmb, m.occ);
+                                    lightAmb.rgb * khObjAmb, m.occ * KhAoTerm(wpos, n));
     return amb + KhDynLightsPBR(wpos, n, m.albedo, F0, rough, metal) + direct + khov + m.emissive;
 }
 #endif

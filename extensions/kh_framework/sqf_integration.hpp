@@ -6310,11 +6310,11 @@ static void kh_rv_report(const char* cmd, const std::string& msg) {
 }
 
 // addRender3D [[x,y,zASL], rotation, mesh]. Everything else - size, color,
-// mode, sceneRead, effect, params, band, blend, duration, lit, farVis,
-// twoSided, lodLock, casterOnly, visible, material - is an updateRender3D
+// mode, sceneRead, effect, params, band, blend, duration, lit, twoSided,
+// lodLock, casterOnly, visible, material - is an updateRender3D
 // property. A spawned mesh starts as: size 1 (the mesh's native dimensions),
 // color [1,1,1,1], mode 1 (depth test + write), no effect, no params, no band,
-// blend normal, permanent, lit, farVis false, twoSided false (back faces
+// blend normal, permanent, lit, twoSided false (back faces
 // culled), lodLock false. Aspect ratio is always preserved - there is no box
 // fit, so a model is never squashed to a cube.
 static game_value add_render3d_sqf(game_value_parameter args) {
@@ -6434,9 +6434,8 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj,
     if (prop == "effect")   return kh_rv_effect(val, obj, false, err);
     if (prop == "lit" || prop == "lighting") return kh_rv_lit(val, obj, err);
     if (prop == "twosided") { bool b = obj.two_sided; if (!kh_rv_bool(val, b, "twoSided", err)) return false; obj.two_sided = b; return true; }
-    if (prop == "farvis")   { bool b = obj.far_vis;   if (!kh_rv_bool(val, b, "farVis", err))   return false; obj.far_vis = b;   return true; }
     if (prop == "lodlock")  { bool b = obj.lod_lock;  if (!kh_rv_bool(val, b, "lodLock", err))  return false; obj.lod_lock = b;  return true; }
-    err = "unknown property (position | size | rotation | mesh | material | mode | sceneRead | effect | params | lit | twoSided | farVis | lodLock | casterOnly | color | visible | blend | band | duration)";
+    err = "unknown property (position | size | rotation | mesh | material | mode | sceneRead | effect | params | lit | twoSided | lodLock | casterOnly | color | visible | blend | band | duration)";
     return false;
 }
 
@@ -6816,8 +6815,6 @@ static game_value get_render_stats_sqf() {
         uint32_t khrt_opaques = 0, khrt_samples = 0, khrt_cw = 0, khrt_ch = 0, khrt_cs = 0;
         bool khrt_injected = false, khrt_pv = false, khrt_main = false, khrt_tid = false, khrt_got = false;
         float khrt_cam[3] = {};
-        // KH_FAR_VIS trace: the injection's encode pair (near / far, m), the
-        // depth range it wrote through, the mask's size.
         bool khd_valid = false, khd_view_valid = false;
         uint32_t khd_point_n = 0, khd_spot_n = 0, khd_pool_n = 0;
         float khd_cam[3] = {};
@@ -8239,7 +8236,7 @@ static void initialize_sqf_integration() {
 
     _sqf_update_render3d_array = intercept::client::host::register_sqf_command(
         "updateRender3D",
-        "[handle, property, value] or [[handle, property, value], ...]. Update a persistent 3D mesh object: position | size | rotation | mesh | material | mode | sceneRead | effect | params | lit | twoSided | farVis | lodLock | casterOnly | color | visible | blend | band | duration. material params: basecolor | roughness | metalness | emissiveintensity | normalstrength | cutoff | alphamode opaque|cutout|blend (blend: texels with alpha >= 0.996 draw solid with depth, the rest as a post-scene translucent part - hardware alpha, no depth write, back-to-front; casting is per object, never per material). Faults are reported; the batch form returns true only if every triple applied",
+        "[handle, property, value] or [[handle, property, value], ...]. Update a persistent 3D mesh object: position | size | rotation | mesh | material | mode | sceneRead | effect | params | lit | twoSided | lodLock | casterOnly | color | visible | blend | band | duration. material params: basecolor | roughness | metalness | emissiveintensity | normalstrength | cutoff | alphamode opaque|cutout|blend (blend: texels with alpha >= 0.996 draw solid with depth, the rest as a post-scene translucent part - hardware alpha, no depth write, back-to-front; casting is per object, never per material). Faults are reported; the batch form returns true only if every triple applied",
         userFunctionWrapper<update_render3d_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY

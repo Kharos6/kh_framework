@@ -1314,13 +1314,6 @@ struct Resources {
     ID3D11VertexShader*       vs_dls_mask = nullptr;
     ID3D11PixelShader*        ps_dls_mask = nullptr;
     ID3D11PixelShader*        ps_dls_mask_a = nullptr;   // KH_DLSW_MASK_ALPHA: the alpha-clipping twin.
-    // KH_FAR_VIS: the pass's min-distance mask of its routed farVis objects
-    // (R32 metres, min-blended through the dlsw mask shaders, no depth
-    // target), read at t37 by the band draw. Sized to the scene depth.
-    ID3D11Texture2D*          fv_tex = nullptr;
-    ID3D11RenderTargetView*   fv_rtv = nullptr;
-    ID3D11ShaderResourceView* fv_srv = nullptr;
-    UINT                      fv_w = 0, fv_h = 0;
     // KH_AO: the distance-field atlas (R16_SNORM Texture3D, KH_SDF_N blocks on
     // a KH_SDF_ROW grid per layer, t41), which blocks it holds since its last
     // (re)creation, and the per-thread occluder record buffers (t40; 0 = the
@@ -1654,10 +1647,6 @@ struct Resources {
         KH_SAFE_RELEASE(vs_dls_mask);
         KH_SAFE_RELEASE(ps_dls_mask);
         KH_SAFE_RELEASE(ps_dls_mask_a);
-        KH_SAFE_RELEASE(fv_srv);   // KH_FAR_VIS.
-        KH_SAFE_RELEASE(fv_rtv);
-        KH_SAFE_RELEASE(fv_tex);
-        fv_w = fv_h = 0;
         KH_SAFE_RELEASE(sdf_srv);   // KH_AO: every block re-uploads to the next atlas.
         KH_SAFE_RELEASE(sdf_tex);
         sdf_layers = 0;
@@ -1897,7 +1886,6 @@ struct RenderObject {
     bool  lit = false;
     float light_ambient = 0.40f;   // base-color fraction kept in full shadow.
     float light_diffuse = 0.60f;   // n.L-scaled fraction (ambient + diffuse ~ 1).
-    bool  far_vis = false;
     uint64_t seq = 0;   // Creation order (fullscreen pass chaining).
     // Transient, set only on the flush's staging copies, never stored. An
     // injected object's part is drawn by the injection; the flush stages a part
@@ -2176,11 +2164,11 @@ inline void kh_scene_grid_insert(uint32_t khgi_slot, const RenderObject& o) {
 
 // GPU object record, HLSL twin KhObjRec (t39). One per live-scene slot, engine
 // axes: what a bucket's instanced VS needs per object (centre, edge lengths,
-// rotation rows, colour without envelope, farVis, lit fractions). Rebuilt in
+// rotation rows, colour without envelope, lit fractions). Rebuilt in
 // kh_scene_sync per dirty slot, uploaded as ranges by kh_objbuf_sync.
 struct KhObjRec {
     float pos[4];    // xyz = centre (engine axes); w = 0.
-    float size[4];   // xyz = edge lengths (engine axes); w = farVis flag.
+    float size[4];   // xyz = edge lengths (engine axes); w unused (0).
     float rot0[4];   // Rotation rows (row-vector; identity when unrotated); rot0.w = 1
     float rot1[4];   // (filled), rot1.w = ambient fraction, rot2.w = diffuse fraction.
     float rot2[4];
@@ -2194,7 +2182,7 @@ static std::vector<uint8_t>  g_objbuf_dirty_mark;
 inline void kh_objrec_fill(KhObjRec& r, const RenderObject& o) {
     r.pos[0] = o.pos[0]; r.pos[1] = o.pos[2]; r.pos[2] = o.pos[1]; r.pos[3] = 0.0f;   // SQF [x,y,zASL] -> engine [x,zASL,y].
     r.size[0] = o.size[0]; r.size[1] = o.size[2]; r.size[2] = o.size[1];
-    r.size[3] = o.far_vis ? 1.0f : 0.0f;
+    r.size[3] = 0.0f;
     for (int rr = 0; rr < 3; ++rr) {
         float* khof_row = rr == 0 ? r.rot0 : rr == 1 ? r.rot1 : r.rot2;
         khof_row[0] = o.rot_m[rr * 3 + 0];
@@ -2416,6 +2404,28 @@ static constexpr uint64_t KH_FLUSH_STALE_PERIODS = 2;
 static constexpr uint64_t KH_FLUSH_STALE_SLACK_MS = 4;
 static constexpr uint64_t KH_FLUSH_PERIOD_MIN_MS = 4;
 static bool     g_flush_can_skip = false;   // Game thread: the last locked flush's verdict.
+// KH_FLUSH_MISS: the stale test above tolerates a landing up to two periods
+// old, so a SINGLE cycle in which the injection did not land (an anomalous
+// sky-heavy cycle, a far-phase re-arm, a cycle under the trigger floor) passed
+// the skip test and nobody drew the meshes that frame - the sky showed through
+// them for one frame. The landing serial is bumped only by a real landing, so
+// a flush_frame that sees no bump since its previous call parks and draws late.
+static uint64_t g_flush_miss_seen_serial = 0;   // Game thread only.
+// The per-frame verdict flush_locked reads (game thread): did the injection
+// land since the PREVIOUS flush_frame call - skipped parks included. It used
+// to compare against the serial seen at the previous PARK, so after a skip
+// streak the first parked flush read every landing of the streak as "injected
+// this frame", set comp_healthy, and stood down for the composite meshes on a
+// frame that had no landing: the sky showed through them for that frame
+// (every frame the terrain left the view).
+static bool     g_flush_landed_this_frame = false;
+// Raised on the render thread when a triggered injection bails without
+// landing (mid-frame, ahead of any grant); consumed by flush_frame's skip test.
+static std::atomic<bool> g_inj_bailed{false};
+// Raised on the render thread when 32 opaque draws follow a landing (the
+// parked flush's repainted_since_inject rule); the skip test cannot otherwise
+// see that the injected image was erased by a later partition.
+static std::atomic<bool> g_inj_repainted{false};
 static uint64_t g_flush_park_ms = 0;        // Game thread: steady stamp of the last park.
 static uint64_t g_flush_frame_ms = 0;       // Game thread: steady stamp of the last flush_frame with work.
 static std::atomic<bool> g_flush_skipped{ false };   // This frame's flush skipped its park (the injection snapshots).
@@ -2516,23 +2526,18 @@ struct alignas(16) ConstantData {
     float band0[4];   // x = band min (m), y = band max (m, <=0 unbounded), z = falloff (m), w =
                       // Banded flag.
     float lighting0[4];   // x = lit flag, z = ambient, w = diffuse.
-    // x = far-visibility clamp flag (per object), y = object view-distance cut
-    // (m, 0 = off), z = the scene slot + 1 (KH_AO's self test, 0 = none); w
-    // unread.
+    // x unread (zero; was the far-visibility flag), y = object view-distance
+    // cut (m, 0 = off), z = the scene slot + 1 (KH_AO's self test, 0 = none);
+    // w unread.
     float shadow_meta2[4];
     float obj_rot[3][4];   // [0][3] = 1 marks filled (the zeroed default reads as identity
                            // in-shader - auxiliary fills stay correct).
-    float blend_ctl[4];   // x = perceptual-composite enable (inject fill).
+    float blend_ctl[4];   // x = perceptual-composite enable (the flush's fill only; the injection
+                          // writes 0), y = PSComposite's background-trust range (m), read on no
+                          // live path (see the flush's fill), w = the LOD crossfade dither.
     float mat_ctl[4];   // KH_MAT_TABLE (HLSL twin matCtl): x = table index (base + slot) for the
                         // non-instanced VS, y = slot for the instanced VS, w = alpha-mode override
                         // (-1 none). The material lanes themselves live in the table (KhGpuMat).
-    // KH_FAR_VIS (HLSL twin khFarVis), per draw - the object block, since it is
-    // filled per object: z = the MaxDepth of the viewport the band draw is
-    // rasterised under (1), w = the arm: 1 = the in-far draw (beyond-far
-    // fragments cut), 2 = the band draw (ARB only: in-far fragments cut, the
-    // rest ordered against the pass's mask and given the world pair's depth
-    // continued past the plane); xy free. Zero on every other draw.
-    float kh_far_vis[4];
     float fuse_meta[4];
     float fuse_stage[12][4];
     // fx2 sits in the append region (append-only block discipline); HLSL twin
@@ -2647,7 +2652,7 @@ struct alignas(16) ConstantData {
     // Bucket pass lanes (HLSL twins khPass / khPassObj). khPass.xyz = the
     // pass's rebase camera (engine axes), w = 1 arms the instanced vertex
     // path's rebase (the instanced VS subtracts the camera itself). khPassObj.x
-    // = the engine object view distance (the farVis-off cut); yzw free. Zero on
+    // = the engine object view distance (the object view-distance cut); yzw free. Zero on
     // every fill site that draws no bucket.
     float kh_pass[4];
     float kh_pass_obj[4];
@@ -5658,7 +5663,7 @@ inline void kh_voc_face(KhVisOcc& khvf_o, const float khvf_p[4][2], float khvf_z
 
 // Occluder pick + rasterize. khvo_margin covers passes whose PS may write
 // nearer than their geometry (far-arb terrain clamp); khvo_far / khvo_cut bound
-// a farVis-off occluder to where its far contract cannot discard it. khvo_skip
+// an occluder to where its far contract cannot discard it. khvo_skip
 // = "may this object fail to depth-write a pixel the grid would count": the
 // SV_Depth routes and any box the below-terrain discard could eat fragments
 // from (kh_voc_buried).
@@ -5738,7 +5743,7 @@ inline void kh_vis_occ_build(KhVisOcc& khvo, const std::vector<RenderObject>& kh
             if (khvo_dc > khvo_dmx) khvo_dmx = khvo_dc;
         }
         if (!(khvo_dmn > KH_VOC_NEAR_M)) continue;
-        if (!o.far_vis) {   // Its own far contract may discard it: keep it well inside.
+        {   // Its own far contract may discard it: keep it well inside.
             float khvo_lim = khvo_far;
             if (khvo_cut > 0.0f && khvo_cut < khvo_lim) khvo_lim = khvo_cut;
             if (khvo_lim > 0.0f && !(khvo_dmx < 0.98f * khvo_lim)) continue;
@@ -7435,8 +7440,8 @@ struct KhInstKey {
     int      lit;
     int      two_sided;
     int      part;
-    uint32_t route;     // The pass's per-object route bits (2 near-gap, 4 far route) - CB
-                        // lanes, PS and viewport.
+    uint32_t route;     // The pass's per-object route bits (2 near-gap) - CB lanes, PS and
+                        // viewport.
     uint64_t aux;       // The object's dynamic-light selection identity (kh_dl_bucket_hash; 0 when
                         // the selection is not per object): fill_dynlights_cb culls the pool to the
                         // mesh's nearest set in mode 3, and the bucket uploads the representative's.
@@ -8724,7 +8729,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         rd.SlopeScaledDepthBias = 0.0f;
         rd.DepthBiasClamp = 0.0f;
         // The far plane's contract is a per-fragment PS test (the far contract
-        // block in PSMain/PSComposite/PSEffect), so farVis-off objects still
+        // block in PSMain/PSComposite/PSEffect), so objects still
         // pop at max view distance.
         rd.DepthClipEnable = FALSE;
         hr = dev->CreateRasterizerState(&rd, &g_res.rasterizer);
@@ -10365,16 +10370,6 @@ inline void kh_cam_of_site(const float khco_v[4][4], float khco_out[3],
     kh_cam_of(khco_v, khco_out);
 }
 
-inline bool kh_view_camera_exact_d(const float khcd_view[4][4], double khcd_out[3],
-                                   float* khcd_out_err = nullptr) {
-    float khcd_f[3];
-    if (!kh_view_camera_exact(khcd_view, khcd_f, khcd_out_err)) return false;
-    // kh_view_camera_exact already worked in double; only the store narrowed.
-    khcd_out[0] = khcd_f[0];
-    khcd_out[1] = khcd_f[1];
-    khcd_out[2] = khcd_f[2];
-    return true;
-}
 
 // State hooks (OMSetBlendState / OMSetDepthStencilState / OMSetRenderTargets)
 // maintain three booleans; state objects are classified live via GetDesc on
@@ -11089,8 +11084,7 @@ static constexpr float    KH_LATCH_JUMP_M   = 50.0f;
 static float    g_latch_cam[3] = {};   // Last boundary camera.
 static bool     g_latch_cam_valid = false;
 static float    g_cam_step_m = -1.0f;   // Boundary-camera step this frame (m).
-static RVExtBridge::ProjectionViewTransform g_boundary_pv = {};
-static bool     g_boundary_pv_valid = false;
+static bool     g_boundary_pv_valid = false;   // The clear-time bridge fetch succeeded this cycle (it IS g_ro.cycle_pv then).
 static float    g_boundary_t = -1.0f;
 inline float latch_cam_dist_sq(const float a[3], const float b[3]) {
     const float dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
@@ -11505,6 +11499,20 @@ inline bool kh_probe_lum_band(float a, float b);   // Defined with the locator (
 static constexpr int   KH_BLKO_MAX = 16;
 static constexpr float KH_BLKO_BASE_SHARE = 0.10f;   // Admission share of the frame's lit members (KH_BLKO_MEMBER).
 static constexpr float KH_BLKO_BASE_KEEP  = 0.05f;   // A standing base is kept down to this member share.
+// KH_LIT_EVIDENCE: a close with real evidence publishes at once, as before. A
+// SPARSE close - fewer than KH_LITE_CONF_DRAWS lit draws owned across its
+// clusters - may not overturn a standing publish with a value outside its
+// band unless that value repeats for KH_LITE_CONF_CLOSES consecutive
+// non-empty closes. Measured: the frame the terrain leaves the view owns two
+// or three lit draws, all the sky pass's; its block (sun 0, a faint blue
+// ambient - not all-zero, so admitted) won that vote and stood black through
+// every following sky-only close, which publish nothing. A genuinely dark
+// sparse scene still publishes, KH_LITE_CONF_CLOSES closes late.
+static constexpr uint32_t KH_LITE_CONF_DRAWS  = 16;
+static constexpr uint32_t KH_LITE_CONF_CLOSES = 8;
+static uint32_t g_lite_cand_n = 0;      // Consecutive sparse out-of-band closes agreeing with the candidate.
+static float    g_lite_cand_sl = 0.0f;  // The candidate's sun / ambient sums.
+static float    g_lite_cand_al = 0.0f;
 struct KhBlkOwn { float amb[3]; float sun[3]; uint32_t draws; uint32_t at; uint8_t flag;
                   uint32_t members; uint32_t rep_draws; float al; float sl; };
 static uint64_t g_blko_draws = 0;          // Main-scene draws, monotonic.
@@ -11618,10 +11626,31 @@ inline void kh_blk_owner_frame() {
         if (khof_pick < 0) khof_pick = khof_max;   // Nothing clears the member bar (many near-equal clusters): the largest owner.
     }
     memcpy(g_blko_last, g_blko_cur, sizeof(KhBlkOwn) * static_cast<size_t>(g_blko_n));
-    if (khof_pick >= 0 && kh_probe_world_cycle()) {
+    const bool khof_world = kh_probe_world_cycle();
+    if (khof_pick >= 0 && khof_world) {
         const KhBlkOwn& khof_w = g_blko_cur[khof_pick];
-        for (int khof_c = 0; khof_c < 3; ++khof_c) { g_pub_block_amb[khof_c] = khof_w.amb[khof_c]; g_pub_block_sun[khof_c] = khof_w.sun[khof_c]; }
-        g_pub_block_valid = true;
+        bool khof_admit = true;
+        if (g_pub_block_valid && khof_owned < KH_LITE_CONF_DRAWS) {   // KH_LIT_EVIDENCE.
+            const float khof_psl = g_pub_block_sun[0] + g_pub_block_sun[1] + g_pub_block_sun[2];
+            const float khof_pal = g_pub_block_amb[0] + g_pub_block_amb[1] + g_pub_block_amb[2];
+            if (!(kh_probe_lum_band(khof_psl, khof_w.sl) && kh_probe_lum_band(khof_pal, khof_w.al))) {
+                if (g_lite_cand_n > 0 && kh_probe_lum_band(g_lite_cand_sl, khof_w.sl) &&
+                    kh_probe_lum_band(g_lite_cand_al, khof_w.al)) {
+                    ++g_lite_cand_n;
+                } else {
+                    g_lite_cand_n = 1; g_lite_cand_sl = khof_w.sl; g_lite_cand_al = khof_w.al;
+                }
+                khof_admit = g_lite_cand_n >= KH_LITE_CONF_CLOSES;
+            } else {
+                g_lite_cand_n = 0;
+            }
+        } else {
+            g_lite_cand_n = 0;
+        }
+        if (khof_admit) {
+            for (int khof_c = 0; khof_c < 3; ++khof_c) { g_pub_block_amb[khof_c] = khof_w.amb[khof_c]; g_pub_block_sun[khof_c] = khof_w.sun[khof_c]; }
+            g_pub_block_valid = true;
+        }
     }
     g_blko_n = 0;
 }
@@ -13504,12 +13533,10 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
         float khp_best = -1.0f;   // Census: the best grid residual among y-compatible pool lights.
         int   khp_pick = -1;      // The claim: nearest candidate by position + every other lane.
         float khp_pick_cost = 0.0f;
-        bool  khp_pick_grid = false;
 
         for (uint32_t d = 0; d < g_dl.pool_n; ++d) {
             const DlPoolLight& khp_pl = g_dl.pool[d];
             bool  khp_same = false;
-            bool  khp_grid = false;
             float khp_dpos = 0.0f;
 
             if (khp_origin) {   // The harvest's transform, the re-sight's cube.
@@ -13532,7 +13559,6 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
 
                 if (khp_res <= KH_DL_ORIGIN_RES_MAX) {   // The fallback: no origin, or an origin gone stale on a flip.
                     khp_same = true;
-                    khp_grid = true;
                     khp_dpos = fabsf(khp_dx) + fabsf(khp_pl.rec[1] - khp_r[1]) + fabsf(khp_dz);
                 }
             }
@@ -13548,7 +13574,6 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
             if (khp_pick < 0 || khp_cost < khp_pick_cost) {
                 khp_pick = static_cast<int>(d);
                 khp_pick_cost = khp_cost;
-                khp_pick_grid = khp_grid;
             }
         }
 
@@ -14739,7 +14764,6 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
         }
 
         const float khd_lum = khd_ctl[12] + khd_ctl[13] + khd_ctl[14];
-        bool khd_ref_seen = false;   // Set once this window reaches candidacy.
 
         if (khd_total == 0) continue;
         const float* khd_l = reinterpret_cast<const float*>(khd_p + KH_DL_CTL_BYTES);
@@ -14804,8 +14828,6 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side) {
         // windows the harvest placed. A window whose camera could not be placed
         // is not the main pass.
         {
-            khd_ref_seen = true;
-
             if (dl_finite(khd_lum) && khd_lum > khd_best_lum) {
                 khd_best_lum = khd_lum;
                 khd_best_g[0] = khd_ctl[12];
@@ -16138,9 +16160,9 @@ inline void fill_lighting_frame_cb(ConstantData& cbd) {
     cbd.shadow_meta[1] = g_shadow_map_sign;
     cbd.shadow_meta[2] = g_shadow_map_bias;
     cbd.shadow_meta[3] = static_cast<float>(g_ls.atlas_size);
-    // shadowMeta2 is per-object (the far-vis flag) and fills in
-    // fill_lighting_obj_cb. Its yzw stays zero: each entry's camera origin is
-    // folded into its translation, so the shader consumes absolute world
+    // shadowMeta2 is per-object (the view-distance cut, the AO slot) and fills
+    // in fill_lighting_obj_cb; it stays zero here. Each entry's camera origin
+    // is folded into its translation, so the shader consumes absolute world
     // positions and per-entry staleness cannot misregister.
 
     for (uint32_t i = 0; i < n && out_i < KH_LIVE_MAX_CASCADES; ++i, ++out_i) {
@@ -16210,210 +16232,6 @@ inline void kh_fill_depth_range_cb(ConstantData& cbd) {
     }
 }
 
-// KH_FAR_VIS - the far route. A farVis object exists to draw beyond the far
-// plane, where the rasterizer (DepthClipEnable off) clamps every fragment to
-// the viewport's MaxDepth: one depth for the whole mesh, so a rear face drawn
-// after a front one wins the pixel. A routed object draws twice. The in-far
-// draw is the pass's ordinary draw with khFarVis.w = 1: the shader cuts its
-// fragments beyond the encode far and the hardware writes the depth, exactly
-// as for any mesh. The band draw takes the ARB pixel shader with w = 2 under
-// a viewport whose MaxDepth is opened to 1: it cuts the in-far fragments,
-// orders the rest per fragment against the pass's min-distance mask (the
-// prepass below: every routed object's distance, R32, min-blended - the
-// depth band above the world's viewport is ~0.001 deep and cannot carry a
-// strap against its own panel), and encodes them by distance into that band
-// and gives them the world pair's own depth continued past the plane (see
-// khFarVis in cb.hlsl): the value the hardware would write under that
-// viewport, so the engine's depth readers place them at their distance.
-// True when a farVis object can put a fragment beyond its encode far F: its
-// nearest bound plus its diameter reaches past F. Conservative toward routing;
-// a routed object that stays inside F encodes engine-exact anyway. A degenerate
-// far (1e9 from kh_enc_far) routes nothing.
-inline bool kh_far_vis_route(const RenderObject& o, float khfv_d2, float khfv_F) {
-    if (!o.far_vis || !(khfv_F > 0.0f) || khfv_F >= 1.0e8f) return false;
-    // A textured object's band draw must match its in-far draw's texturing:
-    // no textured ARB twin, no route (the object draws as it always did).
-    if (kh_obj_textured(o) && !g_res.ps_comp_arb_tex) return false;
-    const float khfv_r = 0.5f * sqrtf(o.size[0] * o.size[0] + o.size[1] * o.size[1] +
-                                      o.size[2] * o.size[2]);
-    return sqrtf(khfv_d2) + 2.0f * khfv_r > khfv_F;
-}
-// The lane. khfv_arm = 1 for the in-far draw, 2 for the band draw.
-inline void kh_fill_far_vis(ConstantData& cbd, float khfv_arm) {
-    cbd.kh_far_vis[0] = 0.0f;
-    cbd.kh_far_vis[1] = 0.0f;
-    cbd.kh_far_vis[2] = 1.0f;   // The far viewport's MaxDepth (kh_far_viewport).
-    cbd.kh_far_vis[3] = khfv_arm;
-}
-// The mask target, sized to the scene depth. False = no target (the route
-// stands down for the pass).
-inline bool kh_far_vis_mask_ensure(ID3D11Device* dev, UINT khfm_w, UINT khfm_h) {
-    if (!dev || khfm_w < 2 || khfm_h < 2) return false;
-    if (g_res.fv_tex && g_res.fv_w == khfm_w && g_res.fv_h == khfm_h) return g_res.fv_srv != nullptr;
-    KH_SAFE_RELEASE(g_res.fv_srv);
-    KH_SAFE_RELEASE(g_res.fv_rtv);
-    KH_SAFE_RELEASE(g_res.fv_tex);
-    g_res.fv_w = g_res.fv_h = 0;
-    D3D11_TEXTURE2D_DESC khfm_td = {};
-    khfm_td.Width = khfm_w;
-    khfm_td.Height = khfm_h;
-    khfm_td.MipLevels = 1;
-    khfm_td.ArraySize = 1;
-    khfm_td.Format = DXGI_FORMAT_R32_FLOAT;   // Metres.
-    khfm_td.SampleDesc.Count = 1;             // A per-pixel question; the band draw reads it per pixel.
-    khfm_td.Usage = D3D11_USAGE_DEFAULT;
-    khfm_td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    bool khfm_ok = SUCCEEDED(dev->CreateTexture2D(&khfm_td, nullptr, &g_res.fv_tex));
-    if (khfm_ok) khfm_ok = SUCCEEDED(dev->CreateRenderTargetView(g_res.fv_tex, nullptr, &g_res.fv_rtv));
-    if (khfm_ok) khfm_ok = SUCCEEDED(dev->CreateShaderResourceView(g_res.fv_tex, nullptr, &g_res.fv_srv));
-    if (!khfm_ok) {
-        KH_SAFE_RELEASE(g_res.fv_srv);
-        KH_SAFE_RELEASE(g_res.fv_rtv);
-        KH_SAFE_RELEASE(g_res.fv_tex);
-        return false;
-    }
-    g_res.fv_w = khfm_w;
-    g_res.fv_h = khfm_h;
-    return true;
-}
-// The prepass: every routed, visible object's distance into the mask, through
-// the dlsw mask pair (VSDlsMask / PSDlsMask, the alpha-clipping twin for a
-// material set), min-blended, no depth target, the pass's own frame CB
-// (viewProj and rebase already uploaded by the caller) and object ring. The
-// pass's viewport rectangle at [0, 1] depth, so a pixel here is the band
-// draw's pixel. Every fragment is written, in-far ones included: an in-far
-// fragment ahead of a beyond-far one cuts it exactly as the depth buffer
-// would. The mask holds only faces the colour draws rasterise: a twoSided
-// object under CullNone (its ordered pair draws both halves), any other under
-// the back-face cull the passes bind - a culled face nearer than a drawn one
-// would otherwise cut the drawn one behind it. State is captured and restored
-// whole; the caller binds fv_srv at t37 afterwards. Returns the object count
-// drawn (0 = nothing to read).
-template <class KhFvPred>
-inline uint32_t kh_far_vis_prepass(ID3D11DeviceContext* ctx, ID3D11Device* dev,
-                                   const std::vector<RenderObject>& meshes, const float cam[3],
-                                   bool khfp_rebase, ID3D11Buffer* obj_cb, const D3D11_VIEWPORT& khfp_vp,
-                                   KhDistMemo& khfp_dm, KhFvPred khfp_pred) {
-    if (!ctx || !dev || !g_res.vs_dls_mask || !g_res.ps_dls_mask || !g_res.dlsw_min_blend ||
-        !g_res.input_layout || !g_res.dss_off || !g_res.rasterizer || !obj_cb) return 0;
-    if (!kh_far_vis_mask_ensure(dev, g_main_depth_w, g_main_depth_h)) return 0;
-    StateBackup khfp_bk;
-    khfp_bk.capture(ctx);
-    KhOmSave khfp_om;
-    khfp_om.capture(ctx);
-    UINT khfp_nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
-    D3D11_VIEWPORT khfp_ovp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
-    ctx->RSGetViewports(&khfp_nvp, khfp_ovp);
-    // The mask must not be bound as an SRV while it is the target; a previous
-    // pass's bind is what StateBackup restores afterwards.
-    ID3D11ShaderResourceView* khfp_null = nullptr;
-    ctx->PSSetShaderResources(37, 1, &khfp_null);
-    const FLOAT khfp_far4[4] = { 1.0e30f, 1.0e30f, 1.0e30f, 1.0e30f };
-    ctx->OMSetRenderTargets(1, &g_res.fv_rtv, nullptr);
-    ctx->ClearRenderTargetView(g_res.fv_rtv, khfp_far4);
-    D3D11_VIEWPORT khfp_v = khfp_vp;
-    khfp_v.MinDepth = 0.0f;
-    khfp_v.MaxDepth = 1.0f;
-    ctx->RSSetViewports(1, &khfp_v);
-    ctx->IASetInputLayout(g_res.input_layout);
-    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ctx->VSSetShader(g_res.vs_dls_mask, nullptr, 0);
-    ctx->PSSetShader(g_res.ps_dls_mask, nullptr, 0);
-    ctx->GSSetShader(nullptr, nullptr, 0);
-    ctx->HSSetShader(nullptr, nullptr, 0);
-    ctx->DSSetShader(nullptr, nullptr, 0);
-    ctx->OMSetDepthStencilState(g_res.dss_off, 0);
-    const FLOAT khfp_bf[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
-    ctx->OMSetBlendState(g_res.dlsw_min_blend, khfp_bf, 0xFFFFFFFF);
-    ctx->RSSetState(g_res.rasterizer);
-    ID3D11RasterizerState* khfp_bound_rs = g_res.rasterizer;
-    const UINT khfp_stride = sizeof(MeshVertex), khfp_off = 0;
-    int khfp_bound = -1;
-    const bool khfp_alpha_ok = g_res.ps_dls_mask_a && g_res.vs_tex && g_res.layout_tex && g_res.mat_sampler;
-    bool khfp_alpha_bound = false;
-    uint32_t khfp_drawn = 0;
-    for (const RenderObject& o : meshes) {
-        if (!khfp_pred(o)) continue;
-        const int khfp_mid = mesh_id_clamp(o.mesh);
-        if (khfp_mid < 0 || static_cast<size_t>(khfp_mid) >= g_res.mesh_vb.size() || !g_res.mesh_vb[khfp_mid]) continue;
-        ConstantData khfp_obj = {};
-        khfp_obj.center_size[0] = o.pos[0];
-        khfp_obj.center_size[1] = o.pos[2];   // SQF [x, y, zASL] -> engine [x, zASL, y].
-        khfp_obj.center_size[2] = o.pos[1];
-        khfp_obj.size_axes[0] = o.size[0];
-        khfp_obj.size_axes[1] = o.size[2];
-        khfp_obj.size_axes[2] = o.size[1];
-        kh_fill_obj_rot(khfp_obj, o.rot_m);
-        if (khfp_rebase) kh_fill_center_rel(khfp_obj, cam);   // Armed exactly as the pass arms it.
-        const KhMaterialSet* khfp_ms = kh_obj_textured(o);
-        const bool khfp_alpha = khfp_ms != nullptr && khfp_alpha_ok;
-        if (khfp_alpha != khfp_alpha_bound) {
-            ctx->IASetInputLayout(khfp_alpha ? g_res.layout_tex : g_res.input_layout);
-            ctx->VSSetShader(khfp_alpha ? g_res.vs_tex : g_res.vs_dls_mask, nullptr, 0);
-            ctx->PSSetShader(khfp_alpha ? g_res.ps_dls_mask_a : g_res.ps_dls_mask, nullptr, 0);
-            if (khfp_alpha) ctx->PSSetSamplers(0, 1, &g_res.mat_sampler);
-            khfp_alpha_bound = khfp_alpha;
-        }
-        ID3D11RasterizerState* khfp_want_rs =
-            (o.two_sided || !g_res.rasterizer_cull) ? g_res.rasterizer : g_res.rasterizer_cull;
-        if (khfp_want_rs != khfp_bound_rs) {
-            ctx->RSSetState(khfp_want_rs);
-            khfp_bound_rs = khfp_want_rs;
-        }
-        if (khfp_mid != khfp_bound) {
-            ctx->IASetVertexBuffers(0, 1, &g_res.mesh_vb[khfp_mid], &khfp_stride, &khfp_off);
-            ctx->IASetIndexBuffer(g_res.mesh_ib[khfp_mid], DXGI_FORMAT_R32_UINT, 0);
-            khfp_bound = khfp_mid;
-        }
-        // The levels the colour draws pick (same function, same inputs), each
-        // under the colour draw's own dither half during a fade, so the mask
-        // at a pixel is the surface of the level that pixel shows - never the
-        // hidden level's nearer surface (which would cut the shown one).
-        const MeshDef& khfp_md = mesh_def(khfp_mid);
-        int khfp_lvl = 0;
-        float khfp_lt = 0.0f;
-        if (!o.lod_lock) kh_lod_pick(khfp_md, kh_lod_radius(o), sqrtf(khfp_dm.get(o, cam)), khfp_lvl, khfp_lt);
-        const int khfp_iters = khfp_lt > 0.0f ? 2 : 1;
-        bool khfp_ok = true;
-        for (int khfp_it = 0; khfp_it < khfp_iters && khfp_ok; ++khfp_it) {
-            const int khfp_lv = mesh_lod_clamp(khfp_md, khfp_lvl + khfp_it);
-            khfp_obj.blend_ctl[3] = khfp_lt > 0.0f ? kh_lod_dither(khfp_lt, khfp_it != 0) : 0.0f;
-            khfp_ok = kh_upload_obj_cb(ctx, obj_cb, khfp_obj);
-            if (!khfp_ok) break;
-            if (khfp_alpha) {   // Per submesh, the material's lanes and maps bound (the cutout / blend clip).
-                const std::vector<MeshSubmesh>& khfp_tab = mesh_lod_submeshes(khfp_md, khfp_lv);
-                for (size_t khfp_s = 0; khfp_s < khfp_tab.size() && khfp_ok; ++khfp_s) {
-                    const MeshSubmesh& khfp_sm = khfp_tab[khfp_s];
-                    if (khfp_sm.index_count == 0) continue;
-                    kh_bind_material(ctx, dev, khfp_obj, khfp_ms, khfp_s);
-                    khfp_ok = kh_upload_obj_cb(ctx, obj_cb, khfp_obj);
-                    if (!khfp_ok) break;
-                    ctx->DrawIndexed(khfp_sm.index_count, khfp_sm.index_start, 0);
-                }
-            } else {
-                UINT khfp_ls = 0, khfp_lc = 0;
-                mesh_lod_range(khfp_md, khfp_lv, khfp_ls, khfp_lc);
-                if (khfp_lc == 0) continue;
-                ctx->DrawIndexed(khfp_lc, khfp_ls, 0);
-            }
-        }
-        if (!khfp_ok) break;
-        ++khfp_drawn;
-    }
-    if (khfp_nvp > 0) ctx->RSSetViewports(khfp_nvp, khfp_ovp);
-    khfp_om.restore(ctx);
-    khfp_om.release();
-    khfp_bk.restore(ctx);
-    return khfp_drawn;
-}
-// The viewport a far-route draw rasterises under: the pass's, with the top
-// opened to 1 so the beyond band is writable (the PS clamps its SV_Depth to
-// the viewport range).
-inline D3D11_VIEWPORT kh_far_viewport(const D3D11_VIEWPORT& khfv_pass) {
-    D3D11_VIEWPORT khfv_v = khfv_pass;
-    khfv_v.MaxDepth = 1.0f;
-    return khfv_v;
-}
 // KH_AO - the runtime side of the distance-field ambient occlusion (the bake
 // and its atlas bookkeeping sit with the mesh store; the shader is KhAoTerm in
 // cb.hlsl). Per pass, kh_ao_gather lists the occluders - visible, opaque,
@@ -16656,10 +16474,10 @@ inline void fill_lighting_obj_cb(ConstantData& cbd, const RenderObject& o) {
     cbd.lighting0[0] = o.lit ? 1.0f : 0.0f;
     cbd.lighting0[2] = o.light_ambient;
     cbd.lighting0[3] = o.light_diffuse;
-    cbd.shadow_meta2[0] = o.far_vis ? 1.0f : 0.0f;
-    // 0 when never read - the shader treats 0 as no cut. A farVis-off object is
-    // sliced at the engine's object view distance.
-    cbd.shadow_meta2[1] = o.far_vis ? 0.0f : g_obj_vis.load(std::memory_order_relaxed);
+    cbd.shadow_meta2[0] = 0.0f;   // Unread (was the far-visibility flag).
+    // 0 when never read - the shader treats 0 as no cut. An object is sliced
+    // at the engine's object view distance.
+    cbd.shadow_meta2[1] = g_obj_vis.load(std::memory_order_relaxed);
     // KH_AO: the scene slot + 1 (0 = none), so the receiver knows its own record.
     cbd.shadow_meta2[2] = o.slot != 0xFFFFFFFFu ? static_cast<float>(o.slot + 1u) : 0.0f;
     if (o.lit) fill_dynlights_cb(cbd, o);
@@ -21287,58 +21105,8 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
                                 g_sun_map_time >= 0.0f &&
                                 effect_time_seconds() - g_sun_map_time < 0.25f;
 
-    if (!khcr_map_fresh) {
-        if (g_sun_map_no_local) {   return; }
-        return;
-    }
+    if (!khcr_map_fresh) return;
     if (!g_mask.engine_mask_rtv) {  return; }
-
-    if (g_fire_lock_valid && g_ls.frame_view_valid) {
-        float khep_a[3];
-        float khep_b[3];
-        extract_camera_pos(reinterpret_cast<const float(*)[4]>(g_ls.frame_view), khep_a);
-        extract_camera_pos(reinterpret_cast<const float(*)[4]>(g_fire_view2), khep_b);
-        const float khep_dx = khep_a[0] - khep_b[0];
-        const float khep_dy = khep_a[1] - khep_b[1];
-        const float khep_dz = khep_a[2] - khep_b[2];
-        float khep_d = sqrtf(khep_dx * khep_dx + khep_dy * khep_dy + khep_dz * khep_dz);
-        const float khep_ybar = 0.9999905f;
-        float khep_p9a = g_ls.frame_view[9];
-        float khep_p9b = g_fire_view2[9];
-        khep_p9a = khep_p9a > 1.0f ? 1.0f : (khep_p9a < -1.0f ? -1.0f : khep_p9a);
-        khep_p9b = khep_p9b > 1.0f ? 1.0f : (khep_p9b < -1.0f ? -1.0f : khep_p9b);
-        const float khep_pt = fabsf(asinf(khep_p9a) - asinf(khep_p9b));
-        float khep_yd = kh_epoch_yaw_dot(g_ls.frame_view, g_fire_view2);
-        bool khep_moved = (khep_yd < khep_ybar ||
-                           khep_pt > 0.004363f ||
-                           khep_d > 0.012f) &&
-                          khep_d < KH_LATCH_JUMP_M;
-
-        if (!khep_moved) {
-            RVExtBridge::ProjectionViewTransform khep_pv = {};
-
-            if (RVExtBridge::get_projection_view_transform(khep_pv)) {
-                float khep_c[3];
-                extract_camera_pos(khep_pv.view, khep_c);
-                const float khep_bx = khep_c[0] - khep_b[0];
-                const float khep_by = khep_c[1] - khep_b[1];
-                const float khep_bz = khep_c[2] - khep_b[2];
-                const float khep_bd = sqrtf(khep_bx * khep_bx + khep_by * khep_by + khep_bz * khep_bz);
-                const float khep_byd = kh_epoch_yaw_dot(&khep_pv.view[0][0], g_fire_view2);
-                float khep_q9 = khep_pv.view[2][1];
-                khep_q9 = khep_q9 > 1.0f ? 1.0f : (khep_q9 < -1.0f ? -1.0f : khep_q9);
-                const float khep_bpt = fabsf(asinf(khep_q9) - asinf(khep_p9b));
-
-                if ((khep_byd < khep_ybar ||
-                     khep_bpt > 0.004363f ||
-                     khep_bd > 0.012f) && khep_bd < KH_LATCH_JUMP_M) {
-                    khep_moved = true;
-                    khep_d = khep_bd;
-                    khep_yd = khep_byd;
-                }
-            }
-        }
-    }
 
     g_mask_cast_arm = false;
     g_mask_cast_fired = true;
@@ -21437,21 +21205,6 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         // Taken here, while g_fire_view2 still holds the engine's own render
         // view and before the bridge adoption replaces it: the only point where
         // both members of the pair exist at once.
-
-        if (g_ro.cycle_pv_valid) {
-            float khev_a[3];
-            float khev_b[3];
-            extract_camera_pos(reinterpret_cast<const float(*)[4]>(g_fire_view2), khev_a);
-            extract_camera_pos(g_ro.cycle_pv.view, khev_b);
-            float khev_q1 = g_fire_view2[9];
-            float khev_q2 = g_ro.cycle_pv.view[2][1];
-            khev_q1 = khev_q1 > 1.0f ? 1.0f : (khev_q1 < -1.0f ? -1.0f : khev_q1);
-            khev_q2 = khev_q2 > 1.0f ? 1.0f : (khev_q2 < -1.0f ? -1.0f : khev_q2);
-
-            float khev_yd = kh_epoch_yaw_dot(g_fire_view2, &g_ro.cycle_pv.view[0][0]);
-            khev_yd = khev_yd > 1.0f ? 1.0f : (khev_yd < -1.0f ? -1.0f : khev_yd);
-
-        }
 
         if (g_ro.cycle_pv_stale) {
             RVExtBridge::ProjectionViewTransform khfe_pv = {};
@@ -22094,10 +21847,6 @@ inline bool shadow_live_ensure_srv() {
     return true;
 }
 
-// OM-binding tracking for the recon: keeps phase_active / target_identity
-// current.
-static void*    g_svs_prev_dsv = nullptr;   // Identity of the previous OM depth bind.
-static bool     g_svs_prev_had_rtv = false;
 
 // Seam-target stability. The set is tiny, cleared at the frame boundary, and
 // holds identity tokens that are compared and never dereferenced.
@@ -22174,18 +21923,6 @@ static std::vector<KhSvCaster> g_svs_caster_list;
 static std::vector<uint32_t>   g_svs_inst_ord;
 static float    g_svs_prime_vp[4][4] = {};
 
-// The seam view is per epoch; the intra-frame gap is inside its tolerance by
-// design.
-
-static float    g_svs_seam_view[4][4] = {};
-static uint64_t g_svs_seam_view_seq = 0;
-static bool     g_svs_seam_view_valid = false;
-static bool     g_svs_seam_view_fresh = false;
-
-// The seam publishes under seq N and the colour pass reads g_svs_frame_seq ==
-// N+1, so an equality test can never pass.
-static constexpr uint64_t KH_SEAM_VIEW_MAX_AGE = 1;
-
 static float    g_khpe_p1 = -1.0f;   // Predictor base (spike-guarded committed near).
 static float    g_khpe_p2 = -1.0f;   // Its predecessor (-1 = slope unknown).
 static float    g_khpe_m22 = 0.0f;
@@ -22210,10 +21947,6 @@ static bool     g_khlt_lp_ok = false;
 
 static float    g_svs_prime_cam[3] = {};
 static bool     g_svs_prime_rebase = false;
-// Set at the take, cleared at the top of every injection - a stale carry would
-// be worse than the re-extraction it replaces.
-static float    g_comp_cam_take[3] = {};
-static bool     g_comp_cam_take_ok = false;
 static float    g_svs_prime_vp_lo = 0.0f;
 static float    g_svs_prime_vp_hi = 1.0f;
 static ID3D11Texture2D*          g_svs_vol_src = nullptr;
@@ -23321,7 +23054,7 @@ inline void kh_vmir_end(ID3D11DeviceContext* khvn_ctx) {
     KH_SAFE_RELEASE(g_vmir_sv_dsv);
     if (g_vmir_sv_nvp > 0) khvn_ctx->RSSetViewports(g_vmir_sv_nvp, g_vmir_sv_vps);
     ID3D11DeviceContext1* khvn_c1 = g_vmir_sv_b2_off_ok ? kh_ctx1(khvn_ctx) : nullptr;
-    if (g_vmir_sv_b2 && khvn_c1) {
+    if (g_vmir_sv_b2 && khvn_c1 && g_vmir_sv_b2_num > 0) {   // StateBackup's rule: the ranged set only with a range.
         khvn_c1->VSSetConstantBuffers1(2, 1, &g_vmir_sv_b2, &g_vmir_sv_b2_first, &g_vmir_sv_b2_num);
     } else {
         khvn_ctx->VSSetConstantBuffers(2, 1, &g_vmir_sv_b2);
@@ -23580,7 +23313,6 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
             }
 
             const float khlt_ud = khlt_take ? khlt_d : 0.0f;
-
             bool khlr_basis = false;
 
             bool khlr_sane = true;
@@ -23812,69 +23544,12 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
         }
     }
 
-    g_svs_seam_view_fresh = true;   // KH_LATCH_FOLD: the cycle PV is never a held camera now.
-    memcpy(g_svs_seam_view, &khv_pv.view[0][0], sizeof(g_svs_seam_view));
-    g_svs_seam_view_seq = g_svs_frame_seq;
-    // The cast seed may take this view only when it is the camera: swing <= 4
-    // px against the cycle. The footprint's own gate stays at 256; the seed's
-    // bar is the camera's.
-    g_svs_seam_view_valid = true;
-
     float khv_vp_m[4][4] = {};
     mul_4x4(khv_pv.view, khv_pv.projection, khv_vp_m);
     // The priming pass runs later in the frame and must rasterize with this
     // exact transform, or its depth test rejects our own footprint.
     memcpy(g_svs_prime_vp, khv_vp_m, sizeof(g_svs_prime_vp));
-    // The absolute copy survives the rebase below.
 
-    // Both matrices are absolute here (the rebase has not run yet), so a plain
-    // projection of one caster centre through each is the honest comparison.
-    float khv_swing_gate = -1.0f;
-    if (!khv_list.empty() && g_ro.cycle_pv_valid && g_main_depth_w && g_main_depth_h) {
-        float khv_cyc_m[4][4] = {};
-        mul_4x4(g_ro.cycle_pv.view, g_ro.cycle_pv.projection, khv_cyc_m);
-        const float khv_wc[3] = { khv_list[0].pos[0], khv_list[0].pos[2],
-                                  khv_list[0].pos[1] };   // SQF -> engine axes.
-        float khv_sx[2], khv_sy[2];
-        bool khv_ok = true;
-
-        for (int khv_k = 0; khv_k < 2; ++khv_k) {
-            const float (*khv_m)[4] = khv_k == 0 ? khv_vp_m : khv_cyc_m;
-            float khv_c[4];
-
-            for (int khv_j = 0; khv_j < 4; ++khv_j) {
-                khv_c[khv_j] = khv_m[3][khv_j]
-                             + khv_wc[0] * khv_m[0][khv_j]
-                             + khv_wc[1] * khv_m[1][khv_j]
-                             + khv_wc[2] * khv_m[2][khv_j];
-            }
-
-            if (!(khv_c[3] > 0.05f)) { khv_ok = false; break; }
-            khv_sx[khv_k] = (khv_c[0] / khv_c[3] * 0.5f + 0.5f) *
-                            static_cast<float>(g_main_depth_w);
-            khv_sy[khv_k] = (0.5f - khv_c[1] / khv_c[3] * 0.5f) *
-                            static_cast<float>(g_main_depth_h);
-        }
-
-        if (khv_ok) {
-            const float khv_ddx = khv_sx[0] - khv_sx[1];
-            const float khv_ddy = khv_sy[0] - khv_sy[1];
-            const float khv_sw = sqrtf(khv_ddx * khv_ddx + khv_ddy * khv_ddy);
-            const float khv_diag = sqrtf(
-                static_cast<float>(g_main_depth_w) * static_cast<float>(g_main_depth_w) +
-                static_cast<float>(g_main_depth_h) * static_cast<float>(g_main_depth_h));
-
-            if (khv_sw == khv_sw && khv_sw <= khv_diag) {
-                khv_swing_gate = khv_sw;
-            }
-        }
-    }
-
-    // The seam pass is identified by its transform: its b2 must agree with the
-    // cycle view. A candidate whose swing exceeds the threshold is refused
-    // before any state is touched, and the frame stays unmarked so later binds
-    // are tried. A genuine seam pass swings a few pixels. Off by default: no
-    // field benefit, and a genuine pass past 256 px would be refused.
     const bool khv_prev_inj = g_ro.in_injection;
     g_ro.in_injection = true;
 
@@ -24445,12 +24120,7 @@ inline void kh_volume_seam_track(ID3D11DeviceContext* ctx, ID3D11DepthStencilVie
         if (g_svs_rtv_seen[khv_i] == khv_id) { khv_seen_rtv = true; break; }
     }
 
-    const bool khv_adj = khv_id == g_svs_prev_dsv && g_svs_prev_had_rtv;
-    const bool khv_legacy = false;
-    const bool khv_seam = khv_depth_only && khv_id &&
-                          (khv_legacy ? khv_adj : khv_seen_rtv);
-    g_svs_prev_dsv = khv_id;
-    g_svs_prev_had_rtv = khv_has_rtv;
+    const bool khv_seam = khv_depth_only && khv_id && khv_seen_rtv;
 
     if (!khv_seam) return;
 
@@ -25176,9 +24846,8 @@ inline void kh_pip_inject(ID3D11DeviceContext* ctx) {
     // this pass's frustum (an invalid cull set returns every cell), the
     // eligible copies with the envelope folded, front to back, then buckets
     // through the static instanced twins (this pass draws the static pair:
-    // route 0 - no guard, arb, near-gap or far route; a farVis mesh
-    // beyond the PIP's far draws clamped at its MaxDepth, unordered, as every
-    // farVis mesh did before KH_FAR_VIS) and the per-object loop at each
+    // route 0 - no guard, arb or near-gap; a mesh beyond the PIP's far draws
+    // clamped at its MaxDepth, unordered) and the per-object loop at each
     // bucket's representative.
     static std::vector<RenderObject> khpi_meshes;
     static std::vector<uint32_t> khpi_cand;
@@ -25720,9 +25389,6 @@ inline void kh_snapshot_take(ID3D11Device* dev, ID3D11DeviceContext* ctx, const 
 // the terrain, both behind it, overlapping). If it shows, bound the clamp so
 // our meshes cannot reorder each other.
 inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
-    // The carried take camera is per pass.
-    g_comp_cam_take_ok = false;
-
     if (kh_fsaa_world_standdown()) {  return; }
 
     const float snapshot_now = effect_time_seconds();
@@ -25799,16 +25465,11 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             kh_cam_of(live.view, khlp_vc);
             const float khlp_d2 = latch_cam_dist_sq(khlp_lc, khlp_vc);
 
-            if (khlp_d2 > KH_LATCH_JUMP_M * KH_LATCH_JUMP_M) {
-                // Prefer the clear-time boundary sample
-                // (frame-setup-synchronous); the mid-frame live fetch (~one
-                // frame ahead) is only the fallback for a cycle whose boundary
-                // fetch failed.
-                if (g_boundary_pv_valid) {
-                    memcpy(&pv.view[0][0], &g_boundary_pv.view[0][0], sizeof(pv.view));
-                } else {
-                    memcpy(&pv.view[0][0], &live.view[0][0], sizeof(pv.view));
-                }
+            // A cycle whose clear-time fetch succeeded keeps its own sample
+            // (that sample is pv already); the mid-frame live fetch is only
+            // the fallback for a cycle whose boundary fetch failed.
+            if (khlp_d2 > KH_LATCH_JUMP_M * KH_LATCH_JUMP_M && !g_boundary_pv_valid) {
+                memcpy(&pv.view[0][0], &live.view[0][0], sizeof(pv.view));
             }
             const float m22_latch = pv.projection[2][2];
             const float m32_latch = pv.projection[3][2];
@@ -25865,85 +25526,12 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
 
     float khav_latch_view[16];
     memcpy(khav_latch_view, &pv.view[0][0], sizeof(khav_latch_view));
-    {
-        uint8_t khav_path = 0;
-        float khav_age_ms = -1.0f;
-            kh_adopt_frame_view(pv, &khav_path, &khav_age_ms);
-
-        const bool khsv_fresh_ok = g_svs_seam_view_fresh;
-        if (khsv_fresh_ok) {
-            if (!g_svs_seam_view_valid) {
-            } else if (g_svs_frame_seq < g_svs_seam_view_seq ||
-                       g_svs_frame_seq - g_svs_seam_view_seq > KH_SEAM_VIEW_MAX_AGE) {
-            } else {
-                const double khsr_c[3] = {
-                    -((double)pv.view[3][0] * pv.view[0][0] +
-                      (double)pv.view[3][1] * pv.view[0][1] +
-                      (double)pv.view[3][2] * pv.view[0][2]),
-                    -((double)pv.view[3][0] * pv.view[1][0] +
-                      (double)pv.view[3][1] * pv.view[1][1] +
-                      (double)pv.view[3][2] * pv.view[1][2]),
-                    -((double)pv.view[3][0] * pv.view[2][0] +
-                      (double)pv.view[3][1] * pv.view[2][1] +
-                      (double)pv.view[3][2] * pv.view[2][2]) };
-                // Adopt the seam basis, keep our camera; the rebuild below is
-                // shared. Two corrections, neither with a tolerance to tune:
-                // (a) the honest inverse,
-                float khsr_rt_err = -1.0f;
-                double khsr_cx[3] = { khsr_c[0], khsr_c[1], khsr_c[2] };
-                bool khsr_cx_ok = false;
-
-                khsr_cx_ok = kh_view_camera_exact_d(pv.view, khsr_cx,
-                                                    &khsr_rt_err);
-                if (!khsr_cx_ok) {
-                    khsr_cx[0] = khsr_c[0];
-                    khsr_cx[1] = khsr_c[1];
-                    khsr_cx[2] = khsr_c[2];
-                }
-
-                double khsr_useq[3] = {
-                    khsr_cx[0],
-                    khsr_cx[1],
-                    khsr_cx[2]};
-
-                bool khsr_snap = true;
-                for (int khsr_r = 0; khsr_r < 3 && khsr_snap; ++khsr_r) {
-                    for (int khsr_k = 0; khsr_k < 3; ++khsr_k) {
-                        if (pv.view[khsr_r][khsr_k] !=
-                            g_svs_seam_view[khsr_r][khsr_k]) {
-                            khsr_snap = false;
-                            break;
-                        }
-                    }
-                }
-
-                if (!khsr_snap) {
-                    for (int khsr_r = 0; khsr_r < 3; ++khsr_r) {
-                        for (int khsr_k = 0; khsr_k < 3; ++khsr_k) {
-                            pv.view[khsr_r][khsr_k] = g_svs_seam_view[khsr_r][khsr_k];
-                        }
-                        pv.view[khsr_r][3] = 0.0f;
-                    }
-                    // Translation rebuilt from our camera through the adopted
-                    // basis.
-                    for (int khsr_k = 0; khsr_k < 3; ++khsr_k) {
-                        pv.view[3][khsr_k] = static_cast<float>(
-                            -(khsr_useq[0] * pv.view[0][khsr_k] +
-                              khsr_useq[1] * pv.view[1][khsr_k] +
-                              khsr_useq[2] * pv.view[2][khsr_k]));
-                    }
-                    pv.view[3][3] = 1.0f;
-                }
-
-                g_comp_cam_take[0] = static_cast<float>(khsr_useq[0]);
-                g_comp_cam_take[1] = static_cast<float>(khsr_useq[1]);
-                g_comp_cam_take[2] = static_cast<float>(khsr_useq[2]);
-                g_comp_cam_take_ok = true;
-
-            }
-        }
-
-    }
+    // The seam's rotation rows are NOT adopted here: at altitude the seam
+    // pass runs before the cycle's clear and its view is the previous
+    // frame's, and adopting it handed every mesh a one-frame rotation error
+    // (measured 4.8 deg at mouse speed, distance-scaled). The pass draws with
+    // the cycle's own view; the seam's mask may trail a frame at its edge.
+    kh_adopt_frame_view(pv);
 
     // The meshes then rasterize with the true dynamic near plane of the frame
     // being rendered - the one scalar the bridge can never pin down - and the
@@ -26024,6 +25612,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             // so a genuine repaint later the same cycle still fires.
             g_ro.injected = false;   // Stay armed for the camera partition.
             g_ro.inject_attempts = 0;
+            g_inj_bailed.store(true, std::memory_order_relaxed);   // KH_FLUSH_MISS.
             return;
         }
 
@@ -26042,6 +25631,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         if (!kh_rescue_window_open()) {
             g_ro.injected = false;
             g_ro.inject_attempts = 0;
+            g_inj_bailed.store(true, std::memory_order_relaxed);   // KH_FLUSH_MISS.
             return;
         }
         // Rescue proceeds: khr_anomalous stays true, so the view-source
@@ -26244,13 +25834,9 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     }
     float cam[3];
 
-    if (g_comp_cam_take_ok) {
-        cam[0] = g_comp_cam_take[0];
-        cam[1] = g_comp_cam_take[1];
-        cam[2] = g_comp_cam_take[2];
-    } else if (kh_view_camera_exact(pv.view, cam)) {
-        // No take this frame: still take the camera honestly rather than
-        // through the transpose.
+    if (kh_view_camera_exact(pv.view, cam)) {
+        // The camera through the honest inverse of the view the pass draws
+        // with, never the transpose.
     } else {
         extract_camera_pos(pv.view, cam);
     }
@@ -26375,16 +25961,12 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     D3D11_VIEWPORT khr_nz_vp = khr_pass_vp;
     const float khr_nz_gap_lo = khr_pass_vp.MinDepth * KH_NEARZ_GAP_FRAC;
     if (khr_nz_on) khr_nz_vp.MinDepth = khr_nz_gap_lo;
-    // KH_FAR_VIS: the far route's viewport and the pass's arm (the ARB twin
-    // must exist: the route is its SV_Depth).
-    const D3D11_VIEWPORT khr_far_vp = kh_far_viewport(khr_pass_vp);
-    const bool khr_fv_on = g_res.ps_composite_arb != nullptr;
     // The per-draw viewport swap state (khr_bound_rs pattern): 0 = the pass's,
-    // 1 = the near-gap, 2 = the far.
+    // 1 = the near-gap.
     int khr_vp_bound = 0;
     auto khr_vp_select = [&](int khrv_want) {
         if (khrv_want == khr_vp_bound) return;
-        ctx->RSSetViewports(1, khrv_want == 2 ? &khr_far_vp : khrv_want == 1 ? &khr_nz_vp : &khr_pass_vp);
+        ctx->RSSetViewports(1, khrv_want == 1 ? &khr_nz_vp : &khr_pass_vp);
         khr_vp_bound = khrv_want;
     };
     ctx->GSSetShader(nullptr, nullptr, 0);
@@ -26690,7 +26272,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // depth lane's arming state.
     kh_fill_occ(khr_cbf);
     // Pass lanes: the rebase camera the bucket VS subtracts (armed exactly when
-    // the per-object path arms centerRel) and the farVis-off cut.
+    // the per-object path arms centerRel) and the object view-distance cut.
     khr_cbf.kh_pass[0] = cam[0]; khr_cbf.kh_pass[1] = cam[1]; khr_cbf.kh_pass[2] = cam[2];
     khr_cbf.kh_pass[3] = khr_rebase_on ? 1.0f : 0.0f;
     khr_cbf.kh_pass_obj[0] = g_obj_vis.load(std::memory_order_relaxed);
@@ -26720,16 +26302,13 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // Per-mesh route verdicts (near-z gap, far), factored out so the
     // bucket plan keys every member through the same code the representative is
     // judged by (route is part of the key).
-    struct KhInjRoute { bool nearz; bool farvis; };
+    struct KhInjRoute { bool nearz; };
     auto khr_route_of = [&](const RenderObject& khrv_o) -> KhInjRoute {
         KhInjRoute khrv_r;
         const float khr_d2 = g_dist_memo_inj.get(khrv_o, cam);
-        // KH_FAR_VIS: against the far this draw encodes with - the accepted
-        // pair's, the pair the world's opaques were drawn under.
-        khrv_r.farvis = khr_fv_on && kh_far_vis_route(khrv_o, khr_d2, khr_acc_far);
         // For z >= near the encode equals the world mapping, so routing on/off
-        // never pops. The far route excluded: disjoint by construction.
-        khrv_r.nearz = khr_nz_on && !khrv_r.farvis &&
+        // never pops.
+        khrv_r.nearz = khr_nz_on &&
             khr_d2 < (khr_nz_near + 2.0f) * (khr_nz_near + 2.0f);
         return khrv_r;
     };
@@ -26773,7 +26352,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                      khr_acc_far, g_obj_vis.load(std::memory_order_relaxed),
                      [&](const RenderObject& khvs_o) -> bool {
                          const KhInjRoute khvs_r = khr_route_of(khvs_o);
-                         return khvs_r.nearz || khvs_r.farvis || kh_voc_buried(khvs_o);
+                         return khvs_r.nearz || kh_voc_buried(khvs_o);
                      });
     // The pass's one visibility truth: the material ensure, the plan's emit and
     // the per-object loop all call this same lambda, so a bucket's
@@ -26786,7 +26365,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         if (!kh_mesh_visible(khr_cull, khrv_cc, kh_lod_radius(khrv_o))) return false;
         if (khr_occ.on) {
             const KhInjRoute khrv_r = khr_route_of(khrv_o);
-            if (!khrv_r.nearz && !khrv_r.farvis && kh_vis_occ_hidden(khr_occ, khrv_o)) return false;
+            if (!khrv_r.nearz && kh_vis_occ_hidden(khr_occ, khrv_o)) return false;
         }
         return true;
     };
@@ -26798,28 +26377,12 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         kh_inst_plan_build(khr_inst_plan, meshes, nullptr, meshes.size(),
                            [&](const RenderObject& khrp_o, KhInstKey& khrp_k) {
                                const KhInjRoute khrp_r = khr_route_of(khrp_o);
-                               khrp_k.route = (khrp_r.nearz ? 2u : 0u) | (khrp_r.farvis ? 4u : 0u);
+                               khrp_k.route = khrp_r.nearz ? 2u : 0u;
                                khrp_k.aux = kh_dl_bucket_hash(khrp_o);
                            });
         // The cull walk, once, against the pass's own frustum; the whole stream
         // lands in the ring here.
         kh_inst_plan_emit(ctx, dev, khr_inst_plan, meshes, cam, 1, khr_vis, g_dist_memo_inj);
-    }
-    // KH_FAR_VIS: the routed set's min-distance mask, then t37 for the band
-    // draws (StateBackup's range; restored with the pass). No mask, no band
-    // draws: the in-far draws still cut at the far plane, so the object ends
-    // there rather than draws unordered.
-    bool khr_fv_mask = false;
-    if (khr_fv_on) {
-        const uint32_t khr_fvn = kh_far_vis_prepass(ctx, dev, meshes, cam, khr_rebase_on, g_res.composite_cb,
-                                                    khr_pass_vp, g_dist_memo_inj,
-                                                    [&](const RenderObject& khfv_o) -> bool {
-                                                        return khr_route_of(khfv_o).farvis && khr_vis(khfv_o);
-                                                    });
-        if (khr_fvn > 0) {
-            ctx->PSSetShaderResources(37, 1, &g_res.fv_srv);
-            khr_fv_mask = true;
-        }
     }
     // KH_BLEND_PART_INJ - the translucent part draws where the solid draws.
     struct KhInjPart {
@@ -26864,7 +26427,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         kh_fill_obj_rot(cbd, o.rot_m);
         // blendCtl.x: never on this pass (see the pass head).
         cbd.blend_ctl[0] = 0.0f;
-        cbd.blend_ctl[1] = 150.0f;   // background-trust range (m); see the shader note.
+        cbd.blend_ctl[1] = 150.0f;   // PSComposite's background-trust range (m); unread with x = 0.
         // blend_ctl[3] is the crossfade dither; written here so it is never
         // inherited from the previous object's fade.
         cbd.blend_ctl[3] = 0.0f;
@@ -26877,14 +26440,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         // per-mesh route verdicts (khr_route_of, above the loop).
         const KhInjRoute khr_rt = khr_route_of(o);
         const bool khr_mesh_nearz = khr_rt.nearz;
-        const bool khr_mesh_farvis = khr_rt.farvis;   // KH_FAR_VIS.
         // Textured routing: a material-carrying solid takes the textured twin
         // of exactly the variant this draw would have used (plain / guard /
         // arb).
         const KhMaterialSet* khr_txm = kh_obj_textured(o);
-        // The far route does not pick the in-far draw's shaders (KH_FAR_VIS:
-        // that draw is the pass's ordinary one, hardware depth); the band draw
-        // below binds the ARB twin itself.
         const bool khr_tx_arb = khr_far_arb || khr_mesh_nearz;
         const bool khr_comp_vs = guard || khr_tx_arb;
         const bool khr_tx_on = khr_txm != nullptr &&
@@ -26922,7 +26481,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         // Band / local-volume mask inputs (same conversion as the flush).
         kh_fill_local_band_cb(cbd, o);
         fill_lighting_obj_cb(cbd, o);
-        if (guard || khr_tx_arb || khr_mesh_farvis) {   // KH_FAR_VIS: the pair and range, for the cut and the lane.
+        if (guard || khr_tx_arb) {   // The pair and range, for the cut and the lane.
             // Guard inputs: reconstruction coefficients + the encode range of
             // the copied depth, the copy's pixel dimensions, and the margins.
             cbd.depth_params[0] = pv.projection[2][2];
@@ -26963,11 +26522,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                     khr_nz_near;
                 cbd.fx_meta[1] = khr_nz_gap_lo;
             }
-            // KH_FAR_VIS, arm 1: the in-far draw (its beyond-far fragments cut)
-            // - only with a mask to hand the beyond part to; without one the
-            // draw stays as it always was (beyond-far fragments clamped at
-            // the far plane, unordered), never dark.
-            if (khr_mesh_farvis && khr_fv_mask) kh_fill_far_vis(cbd, 1.0f);
             g_inj_dp[0] = cbd.depth_params[0];
             g_inj_dp[1] = cbd.depth_params[1];
             g_inj_dp[2] = cbd.depth_params[2];
@@ -27006,7 +26560,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             khr_bound_rs = khr_want_rs;
         }
 
-        khr_vp_select(khr_mesh_nearz ? 1 : 0);   // The near-gap swap; the band draw below takes the far.
+        khr_vp_select(khr_mesh_nearz ? 1 : 0);   // The near-gap swap.
 
         const int mid = mesh_id_clamp(o.mesh);
 
@@ -27132,80 +26686,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 }
             }
         }
-        // The in-far draw's set, for the parts tail (the band draw rebinds).
+        // The solid draw's set, for the parts tail.
         ID3D11PixelShader*  khr_if_ps = khr_bound_ps;
         ID3D11VertexShader* khr_if_vs = khr_bound_vs;
         ID3D11InputLayout*  khr_if_il = khr_bound_il;
-        // KH_FAR_VIS: the band draw - the fragments beyond the encode far. The
-        // ARB twin matching the in-far draw's texturing, the far viewport, arm
-        // 2, the mask at t37; the bucket's ranges when this object represents
-        // one (the in-far draw's level walk ran zero iterations), else the same
-        // level walk. Part 1 only: a blend material's translucent part draws
-        // inside the far plane alone (the tail carries the in-far lane).
-        if (khr_mesh_farvis && khr_fv_mask) {
-            const bool khr_fv_bucket = khr_lod_iters == 0;
-            ID3D11PixelShader* khr_fv_ps = khr_tx_on ? g_res.ps_comp_arb_tex : g_res.ps_composite_arb;
-            ID3D11VertexShader* khr_fv_vs = khr_fv_bucket
-                ? (khr_tx_on ? g_res.vs_comp_inst_tex : g_res.vs_comp_inst)
-                : (khr_tx_on ? g_res.vs_comp_tex : g_res.vs_composite);
-            ID3D11InputLayout* khr_fv_il = khr_fv_bucket
-                ? (khr_tx_on ? g_res.layout_inst_tex : g_res.layout_inst)
-                : (khr_tx_on ? g_res.layout_tex : g_res.input_layout);
-            if (khr_fv_ps && khr_fv_vs && khr_fv_il) {
-                if (khr_fv_ps != khr_bound_ps) { ctx->PSSetShader(khr_fv_ps, nullptr, 0); khr_bound_ps = khr_fv_ps; }
-                if (khr_fv_vs != khr_bound_vs) { ctx->VSSetShader(khr_fv_vs, nullptr, 0); khr_bound_vs = khr_fv_vs; }
-                if (khr_fv_il != khr_bound_il) { ctx->IASetInputLayout(khr_fv_il); khr_bound_il = khr_fv_il; }
-                khr_vp_select(2);
-                cbd.kh_far_vis[3] = 2.0f;
-                // No guard and no terrain clamp on the band draw: beyond the far
-                // plane the snapshot holds no world depth - only our own previous
-                // band values, which linearise through the world pair into a
-                // few metres past the plane and would punch a fragment through
-                // its own last frame (a speckle in the first metres beyond, on
-                // the 24-bit steps); the clamp would pull it back inside.
-                float khr_fx1_keep[4];
-                memcpy(khr_fx1_keep, cbd.fx1, sizeof(khr_fx1_keep));
-                cbd.fx1[0] = 1e9f; cbd.fx1[1] = 0.0f; cbd.fx1[2] = 0.0f; cbd.fx1[3] = 0.0f;
-                uint32_t khr_fvd = 0;
-                if (khr_fv_bucket) {
-                    uint32_t khr_fvin = 0;
-                    if (kh_upload_obj_cb(ctx, g_res.composite_cb, cbd)) {
-                        khr_fvd = kh_inst_draw(ctx, dev, khr_inst_plan, meshes, static_cast<uint32_t>(khr_oi),
-                                               cbd, g_res.composite_cb, khr_tx_on ? khr_txm : nullptr, khr_ts_ordered,
-                                               khr_bound_rs, 2, khr_fv_ps, 1, khr_fvin);
-                    }
-                } else {
-                    for (int khr_fli = 0; khr_fli < (khr_lodx ? 2 : 1); ++khr_fli) {
-                        const int khr_flv = khr_lod + khr_fli;
-                        cbd.blend_ctl[3] = khr_lodx ? kh_lod_dither(khr_lodt, khr_fli != 0) : 0.0f;
-                        if (!kh_upload_obj_cb(ctx, g_res.composite_cb, cbd)) break;
-                        if (khr_tx_on) {
-                            khr_fvd += kh_draw_textured(ctx, dev, cbd, g_res.composite_cb, *khr_txm, mid, khr_ts_ordered,
-                                                        khr_bound_rs, 2, khr_fv_ps, khr_flv, 1);
-                        } else {
-                            UINT khr_fls = 0, khr_flc = 0;
-                            mesh_lod_range(khr_md, khr_flv, khr_fls, khr_flc);
-                            if (khr_ts_ordered && khr_bound_rs != g_res.rasterizer_front) {
-                                ctx->RSSetState(g_res.rasterizer_front);
-                                khr_bound_rs = g_res.rasterizer_front;
-                            }
-                            ctx->DrawIndexed(khr_flc, khr_fls, 0);
-                            ++khr_fvd;
-                            if (khr_ts_ordered) {
-                                ctx->RSSetState(g_res.rasterizer_cull);
-                                khr_bound_rs = g_res.rasterizer_cull;
-                                ctx->DrawIndexed(khr_flc, khr_fls, 0);
-                                ++khr_fvd;
-                            }
-                        }
-                    }
-                }
-                kh_stat_add(g_stats.composite_meshes, khr_fvd);
-                if (khr_tx_on) kh_stat_add(g_stats.textured_draws, khr_fvd);
-                memcpy(cbd.fx1, khr_fx1_keep, sizeof(khr_fx1_keep));   // The parts tail stages the
-                cbd.kh_far_vis[3] = 1.0f;                               // in-far lanes.
-            }
-        }
 
         cbd.blend_ctl[3] = 0.0f;   // Never leaks into the next object.
 
@@ -27907,7 +27391,7 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
             }
 
             ++g_ro.opaque_draws;
-            ++g_ro.opaques_since_inject;
+            if (++g_ro.opaques_since_inject == 32 && g_ro.injected) g_inj_repainted.store(true, std::memory_order_relaxed);   // KH_FLUSH_MISS.
 
             if (g_ro.slot_near_live > 0.0f &&
                 (!g_ro.world_pair_valid ||
@@ -28795,7 +28279,6 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
             RVExtBridge::ProjectionViewTransform pv = {};
 
             if (RVExtBridge::get_projection_view_transform(pv)) {
-                g_boundary_pv = pv;
                 g_boundary_pv_valid = true;
                 // Adopt the bridge PV at the clear (see KH_LATCH_JUMP_M).
                 float khc_cam[3];
@@ -29068,10 +28551,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // fullscreen passes are split; fullscreen passes run last, in creation
     // order so chained effects compose deterministically.
     const float snapshot_now = effect_time_seconds();
-    static uint64_t s_prev_inject_serial = 0;   // Flush runs on the game thread only.
-    const uint64_t inject_serial = g_composite_inject_serial.load(std::memory_order_relaxed);
-    const bool injected_since_last_flush = inject_serial != s_prev_inject_serial;
-    s_prev_inject_serial = inject_serial;
+    // Per flush_frame call, not per park (KH_FLUSH_MISS: see g_flush_landed_this_frame).
+    const bool injected_since_last_flush = g_flush_landed_this_frame;
     // A frame that saw an anomalous cycle, or whose world redrew after the
     // injection, or that never injected, gets its meshes drawn late here as
     // well - identical overdraw where the injection survived, fill-in where a
@@ -29283,7 +28764,6 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     // Verdict computed per mesh in upload_cb; PS pick at the loop's category
     // switch.
-    const float khf_acc_far = kh_enc_far(pv.projection[2][2], pv.projection[3][2]);
 
     // Occlusion snapshot. Every consumer is mesh-side (the injection guard, the
     // flush PSMain guard/arb, the t2 effect-mesh arbitration - all
@@ -29845,17 +29325,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     const float khf_nz_near = (khf_nz_A > 1.0e-6f) ? (-khf_nz_B / khf_nz_A) : 0.0f;
     const bool khf_nz_on = g_res.ps_composite_arb != nullptr && khf_nz_near > KH_CAM_NEAR_MIN && khf_nz_near < 50.0f && khf_mesh_vp_lo > 1.0e-5f && khf_mesh_vp_lo < khf_mesh_vp_hi && khf_mesh_vp_hi <= 1.0f;
     const float khf_nz_gap_lo = khf_mesh_vp_lo * KH_NEARZ_GAP_FRAC;
-    // KH_FAR_VIS, flush edition: the far route's arm and per-mesh verdict
-    // (against the far this draw encodes with), twin of the injection's.
-    const bool khf_fv_on = g_res.ps_composite_arb != nullptr;
-    auto khf_fv_verdict = [&](const RenderObject& khfv_o) -> bool {
-        return khf_fv_on && kh_far_vis_route(khfv_o, g_dist_memo_flush.get(khfv_o, cam), khf_acc_far);
-    };
-    bool khf_farvis_draw = false;   // per-mesh verdict (written by upload_cb).
-    bool khf_fv_mask = false;       // The pass's mask exists (set by the prepass below the frame build).
     // Asked by upload_cb for the object and by the batch draw for every member.
-    auto khf_nz_verdict = [&](const RenderObject& khnv_o, bool khnv_farvis) -> bool {
-        return khf_nz_on && !khnv_farvis &&
+    auto khf_nz_verdict = [&](const RenderObject& khnv_o) -> bool {
+        return khf_nz_on &&
                g_dist_memo_flush.get(khnv_o, cam) < (khf_nz_near + 2.0f) * (khf_nz_near + 2.0f);
     };
     bool khf_nearz_draw = false;   // per-mesh verdict (written by upload_cb).
@@ -29875,7 +29347,6 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     auto upload_cb = [&](const RenderObject& o, bool chain_pass,
                          ConstantData* khf_defer = nullptr) -> bool {
         khf_nearz_draw = false;   // KH_FLUSH_NEARZ: per-call default; solid section may set it.
-        khf_farvis_draw = false;   // KH_FAR_VIS: likewise.
         ConstantData& cbd = khf_defer ? *khf_defer : khf_obj_cbd;
         cbd = khf_cbf;   // CB split: frame template (matrices ride for the echoes).
         cbd.center_size[0] = o.pos[0];
@@ -29895,7 +29366,11 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         cbd.blend_ctl[0] = (khf_perceptual && !o.fullscreen && o.draw_part != 1 &&
                             o.blend_mode == 0 && o.color[3] < 0.999f) ? 1.0f : 0.0f;   // KH_MAT_BLEND parts: never
                                                                                        // Perceptual.
-        cbd.blend_ctl[1] = 150.0f;   // background-trust range (m); see the shader note.
+        // PSComposite's background-trust range (m). Read by no live draw: the
+        // plain route's PSMain has no such rule, and the one route that takes
+        // PSComposite here (near-gap) overrides it to 1e9 below. Kept as the
+        // shader declares it.
+        cbd.blend_ctl[1] = 150.0f;
         // blend_ctl[3] is the crossfade dither; written here so it is never
         // inherited from the previous object's fade.
         cbd.blend_ctl[3] = 0.0f;
@@ -29930,9 +29405,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
         // Without a fresh snapshot: guard stands down.
         if (o.effect == 0) {
-            khf_farvis_draw = !chain_pass && khf_fv_verdict(o);   // KH_FAR_VIS.
             // per-mesh near-gap verdict (khf_nz_verdict; KH_FLUSH_NEARZ).
-            khf_nearz_draw = !chain_pass && khf_nz_verdict(o, khf_farvis_draw);
+            khf_nearz_draw = !chain_pass && khf_nz_verdict(o);
             const bool snap_fresh = (o.mode == DepthMode::Off) &&
                                     g_res.comp_depth_srv &&
                                     g_res.comp_depth_samples == 1 &&
@@ -29976,17 +29450,6 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                     khf_nz_near;
                 cbd.fx_meta[1] = khf_nz_gap_lo;
                 cbd.blend_ctl[1] = 1.0e9f;
-            }
-            // KH_FAR_VIS: after the pair is final. The range is the mesh
-            // viewport's, which the far viewport opens. Armed only with a mask
-            // (the injection's rule): without one the draw stays as it was.
-            // The verdict was judged against pv's far; the snap_fresh branch
-            // above may have swapped the pair, but it needs a depth-Off object
-            // and a single-sample copy, and at 1x the mesh path stands down -
-            // so the pair the cut reads is the pair the route was judged on.
-            if (khf_farvis_draw && khf_fv_mask) {
-                kh_fill_depth_range_cb(cbd);
-                kh_fill_far_vis(cbd, 1.0f);   // Arm 1: the in-far draw.
             }
             // Armed once at the pass frame build (both arms; the terrain lane
             // never depends on the depth lane's arming state).
@@ -30083,8 +29546,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         kh_mat_ensure_all(ctx, dev, meshes, khf_vis);   // KH_MAT_TABLE: bases fixed before any lane is written.
         kh_inst_plan_build(khf_inst_plan, meshes, khf_order.data(), khf_order.size(),
                            [&](const RenderObject& khfp_o, KhInstKey& khfp_k) {
-                               const bool khfp_fv = khf_fv_verdict(khfp_o);
-                               khfp_k.route = (khf_nz_verdict(khfp_o, khfp_fv) ? 2u : 0u) | (khfp_fv ? 4u : 0u);
+                               khfp_k.route = khf_nz_verdict(khfp_o) ? 2u : 0u;
                                khfp_k.aux = kh_dl_bucket_hash(khfp_o);
                            });
         kh_inst_plan_emit(ctx, dev, khf_inst_plan, meshes, cam, 0, khf_vis, g_dist_memo_flush);   // KH_BUCKETS: the cull walk, once.
@@ -30131,44 +29593,17 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         ctx->RSSetViewports(1, &khf_vp);
     }
     // The gap viewport (MinDepth = the floor the routed draw's ramp starts
-    // from), the far viewport (KH_FAR_VIS) and the per-draw swap tracker - the
+    // from) and the per-draw swap tracker - the
     // injection's khr_vp_select, flush edition: 0 = the mesh viewport, 1 =
-    // the near-gap, 2 = the far.
+    // the near-gap.
     D3D11_VIEWPORT khf_nz_vp = khf_vp;
     if (khf_nz_on) khf_nz_vp.MinDepth = khf_nz_gap_lo;
-    const D3D11_VIEWPORT khf_far_vp = kh_far_viewport(khf_vp);
     int khf_vp_bound = 0;
     auto khf_vp_select = [&](int khfv_want) {
         if (khfv_want == khf_vp_bound) return;
-        ctx->RSSetViewports(1, khfv_want == 2 ? &khf_far_vp : khfv_want == 1 ? &khf_nz_vp : &khf_vp);
+        ctx->RSSetViewports(1, khfv_want == 1 ? &khf_nz_vp : &khf_vp);
         khf_vp_bound = khfv_want;
     };
-    // KH_FAR_VIS: the routed set's min-distance mask, then t37 for the band
-    // draws (the injection's twin). The frame CB above carries this pass's
-    // viewProj and rebase; the prepass restores every state it touches.
-    if (khf_fv_on) {
-        // A blend material's object is two entries here; the mask takes the
-        // solid one (its alpha twin clips the translucent texels itself).
-        // Depth-writing entries only (the dss rule below the loop): a
-        // translucent or depth-Off object writes no depth, so it must not cut
-        // what its band fragments would otherwise blend over. It still takes
-        // the route and is ordered against the writers.
-        const uint32_t khf_fvn = kh_far_vis_prepass(ctx, dev, meshes, cam, khf_rebase_on, g_res.constant_buffer,
-                                                    khf_vp, g_dist_memo_flush,
-                                                    [&](const RenderObject& khfv_o) -> bool {
-                                                        return !khfv_o.fullscreen && khfv_o.effect == 0 &&
-                                                               khfv_o.draw_part != 1 &&
-                                                               khfv_o.mode != DepthMode::Off &&
-                                                               (khfv_o.mode == DepthMode::TestWrite ||
-                                                                is_composite_eligible(khfv_o)) &&
-                                                               khf_fv_verdict(khfv_o) &&
-                                                               khf_vis(khfv_o);
-                                                    });
-        if (khf_fvn > 0) {
-            ctx->PSSetShaderResources(37, 1, &g_res.fv_srv);
-            khf_fv_mask = true;
-        }
-    }
 
     for (const uint32_t khf_oi : khf_order) {
         const RenderObject& o = meshes[khf_oi];
@@ -30219,9 +29654,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         if (khf_o_perc) khf_perc_seen = true;
         // Textured routing (flush edition): textured solids take the
         // PSMain/VSMain twins + the 4-element layout. Twins missing =>
-        // untextured fallback. The far route (KH_FAR_VIS) does not pick this
-        // draw's shaders: the in-far draw is the ordinary one; the band draw
-        // below binds the ARB twin.
+        // untextured fallback.
         const KhMaterialSet* khf_txm = kh_obj_textured(o);
         const bool khf_tx_on = khf_txm != nullptr &&
             g_res.ps_tex && g_res.vs_tex && g_res.layout_tex && g_res.mat_sampler;
@@ -30349,7 +29782,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             khr_bound_rs = khr_want_rs;
         }
 
-        khf_vp_select(khf_nz_this ? 1 : 0);   // KH_FLUSH_NEARZ; the band draw below takes the far.
+        khf_vp_select(khf_nz_this ? 1 : 0);   // KH_FLUSH_NEARZ.
 
         const int mid = mesh_id_clamp(o.mesh);
 
@@ -30439,63 +29872,6 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                     khr_bound_rs = g_res.rasterizer_cull;
                     ctx->DrawIndexed(khf_lc, khf_ls, 0);
                 }
-            }
-        }
-        // KH_FAR_VIS: the band draw (the injection's twin) - the ARB twin
-        // matching this draw's texturing over the VS already bound (the
-        // static pair and the composite pixel shader share their
-        // interpolants, as the near-gap route relies on), the far viewport,
-        // arm 2, the mask at t37; the bucket's ranges when this object
-        // represents one, else the same level walk. The category is poisoned
-        // so the next object rebinds its own.
-        if (khf_farvis_draw && khf_fv_mask) {
-            ID3D11PixelShader* khf_fv_ps = khf_tx_on ? g_res.ps_comp_arb_tex : g_res.ps_composite_arb;
-            if (khf_fv_ps) {
-                ctx->PSSetShader(khf_fv_ps, nullptr, 0);
-                khf_ps_cat = -1;
-                khf_vp_select(2);
-                khf_obj_cbd.kh_far_vis[3] = 2.0f;
-                // No guard and no terrain clamp on the band draw (the injection's
-                // twin; the reason is there). The next object refills the slice.
-                khf_obj_cbd.fx1[0] = 1e9f; khf_obj_cbd.fx1[1] = 0.0f;
-                khf_obj_cbd.fx1[2] = 0.0f; khf_obj_cbd.fx1[3] = 0.0f;
-                const int khf_fv_part = o.draw_part == 1 ? 2 : 1;
-                uint32_t khf_fvd = 0;
-                if (khf_lod_iters == 0) {
-                    uint32_t khf_fvin = 0;
-                    if (kh_upload_obj_cb(ctx, g_res.constant_buffer, khf_obj_cbd)) {
-                        khf_fvd = kh_inst_draw(ctx, dev, khf_inst_plan, meshes, khf_oi, khf_obj_cbd,
-                                               g_res.constant_buffer, khf_tx_on ? khf_txm : nullptr, khf_ts_ordered,
-                                               khr_bound_rs, 2, khf_fv_ps, khf_fv_part, khf_fvin);
-                    }
-                } else {
-                    for (int khf_fli = 0; khf_fli < (khf_lodx ? 2 : 1); ++khf_fli) {
-                        const int khf_flv = khf_lod + khf_fli;
-                        khf_obj_cbd.blend_ctl[3] = khf_lodx ? kh_lod_dither(khf_lodt, khf_fli != 0) : 0.0f;
-                        if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khf_obj_cbd)) break;
-                        if (khf_tx_on) {
-                            khf_fvd += kh_draw_textured(ctx, dev, khf_obj_cbd, g_res.constant_buffer, *khf_txm, mid,
-                                                        khf_ts_ordered, khr_bound_rs, 2, khf_fv_ps, khf_flv, khf_fv_part);
-                        } else {
-                            UINT khf_fls = 0, khf_flc = 0;
-                            mesh_lod_range(khf_md, khf_flv, khf_fls, khf_flc);
-                            if (khf_ts_ordered && khr_bound_rs != g_res.rasterizer_front) {
-                                ctx->RSSetState(g_res.rasterizer_front);
-                                khr_bound_rs = g_res.rasterizer_front;
-                            }
-                            ctx->DrawIndexed(khf_flc, khf_fls, 0);
-                            ++khf_fvd;
-                            if (khf_ts_ordered) {
-                                ctx->RSSetState(g_res.rasterizer_cull);
-                                khr_bound_rs = g_res.rasterizer_cull;
-                                ctx->DrawIndexed(khf_flc, khf_fls, 0);
-                                ++khf_fvd;
-                            }
-                        }
-                    }
-                }
-                if (khf_tx_on) kh_stat_add(g_stats.textured_draws, khf_fvd);
-                khf_obj_cbd.kh_far_vis[3] = 1.0f;
             }
         }
 
@@ -30956,6 +30332,17 @@ inline void flush_frame() {
                          // verdict it also left behind must not skip it.
                          g_mission_destroy_pending.load(std::memory_order_relaxed);
         if (!khff_lock && khff_stale) khff_lock = true;   // KH_FLUSH_STALE: the injection stopped landing.
+        {   // KH_FLUSH_MISS: no landing since the previous flush_frame - this frame is the late path's.
+            const uint64_t khff_serial = g_composite_inject_serial.load(std::memory_order_relaxed);
+            const bool khff_landed = khff_serial != g_flush_miss_seen_serial;
+            g_flush_miss_seen_serial = khff_serial;
+            g_flush_landed_this_frame = khff_landed;
+            const bool khff_bailed = g_inj_bailed.exchange(false, std::memory_order_relaxed);
+            const bool khff_repainted = g_inj_repainted.exchange(false, std::memory_order_relaxed);
+            if (!khff_lock && (!khff_landed || khff_bailed || khff_repainted)) {
+                khff_lock = true;
+            }
+        }
         if (!khff_lock) {
             // The shape the last park certified must still hold: no late object
             // (anything the injection does not own), no expiry (the flush owns
@@ -31723,8 +31110,6 @@ inline void kh_session_scratch_reset() {
     g_fire_count_frame = 0;
     g_fire_clamp_painted = 0;
     g_svs_post_made = 0;
-    g_comp_cam_take_ok = false;
-    g_svs_seam_view_valid = false; g_svs_seam_view_seq = 0;
     g_sun_band_reach[0] = g_sun_band_reach[1] = g_sun_band_reach[2] = -1.0f;
     g_sun_band_reach[3] = -1.0f;   // Far band.
     g_sun5_renders = 0; g_sun5_casters = 0;   // (validity clears at the pass gates).
@@ -31811,6 +31196,7 @@ inline void reset_session_state() {
     g_pub_block_valid = false;
     g_pub_block_amb[0] = g_pub_block_amb[1] = g_pub_block_amb[2] = 0.0f;
     g_pub_block_sun[0] = g_pub_block_sun[1] = g_pub_block_sun[2] = 0.0f;
+    g_lite_cand_n = 0; g_lite_cand_sl = 0.0f; g_lite_cand_al = 0.0f;   // KH_LIT_EVIDENCE.
     g_prewarm_cand_res = nullptr; g_prewarm_cand_off = 0;
     g_coldlock_cand_res = nullptr; g_coldlock_cand_off = 0;
     g_last_pv_ms = 0;
@@ -31849,6 +31235,9 @@ inline void reset_session_state() {
     g_comp_fail_streak = 0; g_comp_next_retry = 0.0f; g_comp_last_err.clear();
     g_snap_serial = 0; g_snap_ms = 0;
     g_flush_can_skip = false; g_flush_park_ms = 0; g_flush_frame_ms = 0;   // KH_FLUSH_CADENCE.
+    g_flush_miss_seen_serial = 0; g_flush_landed_this_frame = false;   // KH_FLUSH_MISS.
+    g_inj_bailed.store(false, std::memory_order_relaxed);
+    g_inj_repainted.store(false, std::memory_order_relaxed);
     g_flush_skipped.store(false, std::memory_order_relaxed);
     g_snap_pair_src = 0;
     g_snap_vp_valid = false;

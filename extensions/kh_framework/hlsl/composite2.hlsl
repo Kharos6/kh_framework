@@ -54,10 +54,6 @@ VSOutC VSCompositeInst(VSIn i, VSInst n)
 }
 
 #if KH_ARB_DEPTH
-// KH_FAR_VIS: the pass's min-distance mask (metres, 1e30 where no routed mesh
-// covers the pixel), the band draw's per-fragment order. Inside StateBackup's
-// saved range.
-Texture2D<float> khFvMask : register(t37);
 float4 PSComposite(VSOutC i, out float khaODepth : SV_Depth) : SV_Target
 #else
 float4 PSComposite(VSOutC i) : SV_Target
@@ -67,9 +63,9 @@ float4 PSComposite(VSOutC i) : SV_Target
     KhLodDitherCut(i.pos.xy, khObjDither);
     ClipEdgeSliver(i.wpos, i.nrm);   // Degenerate edge-on fragments (fireflies).
     ClipOwnNear(i.pos.w);   // Our own near plane. Twin call.
-    if (KhFarPlaneCut() && depthParams.y < -1.0e-3f &&
+    if (depthParams.y < -1.0e-3f &&
         depthParams.x + depthParams.y / max(i.pos.w, 1.0e-4f) > 1.0f) discard;
-    if (khObjFarVis < 0.5f && khObjCut > 0.0f && i.pos.w > khObjCut) discard;
+    if (khObjCut > 0.0f && i.pos.w > khObjCut) discard;
     int2 px = clamp(int2(i.pos.xy), int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
     float rawS = GuardSceneRaw(px);
     bool sceneClear = (rawS <= 0.000001f || rawS >= 0.999999f);
@@ -176,52 +172,19 @@ float4 PSComposite(VSOutC i) : SV_Target
 
         // i.pos.z is the rasterizer's own interpolated, viewport-mapped depth -
         // byte-exact with what the hardware would have written had we never
-        // declared SV_Depth. Exact pass-through. The band draw (KH_FAR_VIS) is
-        // rasterised under a viewport whose MaxDepth is khFarVis.z, not
-        // depthParams.w, so its raster depth is unmapped through that range.
+        // declared SV_Depth. Exact pass-through.
         {
-        const bool khaBand = khFarVis.w > 1.5f;
-        const float khaVpHi = khaBand ? khFarVis.z : depthParams.w;
         const float khaNdcE = (i.pos.z - depthParams.z) /
-                              max(khaVpHi - depthParams.z, 1.0e-6f);
+                              max(depthParams.w - depthParams.z, 1.0e-6f);
         float khaNdc = khaNdcE + (depthParams.y / max(khaD, 0.01f) -
                                   depthParams.y / max(i.pos.w, 0.01f));
-        // KH_FAR_VIS. The band draw owns the fragments beyond the encode far
-        // and nothing inside it (its in-far twin drew those with the
-        // hardware's depth); the in-far draw's own cut sits at the top of the
-        // shader (KhFarPlaneCut). The band draw's verdict is analytic - the
-        // raster form exists for hardware parity, which the band never needs.
-        if (khaBand) {
-            khaNdc = depthParams.x + depthParams.y / max(khaD, 0.01f);
-            if (khaNdc < 1.0f - 1.0e-6f) clip(-1.0f);
-        }
         khaODepth = clamp(depthParams.z + (depthParams.w - depthParams.z) * khaNdc,
                           depthParams.z, depthParams.w);
 
         // Beyond the far plane. The world never reaches ndc 1 (its geometry
         // ends at the plane), so the plane itself - depthParams.w - is behind
-        // every in-world fragment; an unrouted draw stops there. The band draw
-        // goes on, in two parts. Order among our own beyond-far fragments
-        // comes from the pass's min-distance mask (khFvMask, metres, fp32): a
-        // fragment behind the nearest routed surface at its pixel is cut. Then
-        // the depth: the world pair's own encode, continued past the plane
-        // into the opened viewport - exactly the value the hardware would have
-        // written under that viewport - so every engine consumer that reads
-        // the depth buffer through the world pair (clouds, fog, the engine's
-        // own soft compositing) linearises the fragment to its true distance
-        // for as long as the pair can express it (to ~1.4x the far plane at a
-        // 10 m near), and to the clear (sky) beyond that; the ordering against
-        // the far partition's content is the engine's own. The mask carries
-        // the order the band cannot.
-        if (khaNdc >= 1.0f) {
-            khaODepth = depthParams.w;
-            if (khaBand) {
-                const float khaM = khFvMask.Load(int3(int2(i.pos.xy), 0)).r;
-                if (i.pos.w > khaM * (1.0f + 1.0e-4f) + 0.01f) clip(-1.0f);
-                khaODepth = clamp(depthParams.z + (depthParams.w - depthParams.z) * khaNdc,
-                                  depthParams.w, khFarVis.z);
-            }
-        }
+        // every in-world fragment; the draw stops there.
+        if (khaNdc >= 1.0f) khaODepth = depthParams.w;
         // fxMeta.x carries the near estimate (> 0 arms; every other solid-mesh
         // fill leaves it zero - effect meshes never compile this shader),
         // fxMeta.y the widened floor the routed draw's viewport opened.
@@ -386,7 +349,7 @@ float4 PSComposite(VSOutC i) : SV_Target
             khaFbA   = distM - khaFbB;
             khaFbRef = khaFbLay;
         }
-        if (fogEngine.w >= 0.5f && fogEngine.w < 1.5f && khObjFarVis < 0.5f)
+        if (fogEngine.w >= 0.5f && fogEngine.w < 1.5f)
             trans = saturate((fogEngine.y - khaFbA) * fogEngine.z);
 
         if (fogParams.w >= 0.5f) {
@@ -463,6 +426,10 @@ float4 PSComposite(VSOutC i) : SV_Target
     // pre-mesh scene capture at this pixel, blend in Reinhard space, invert,
     // write opaque.
     if (blendCtl.x >= 0.5f) {
+        // Cold on every live fill: the injection writes blendCtl.x = 0, and
+        // the flush's one route into this shader (near-gap) sets blendCtl.y
+        // to 1e9, so khb_a == a there. PSMain, the live perceptual path, has
+        // no range rule.
         float khb_a = (sceneZ > blendCtl.y) ? 1.0f : a;
         float3 scn = sceneColorTex.Load(int3(int2(i.pos.xy), 0)).rgb;
         float3 ts = scn / (1.0f + scn);

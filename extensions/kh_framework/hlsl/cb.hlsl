@@ -22,15 +22,17 @@ cbuffer CBObj : register(b0)
     // x = lit flag, z = ambient fraction, w = diffuse fraction (read through
     // KhObjLanesCb / KhObjLoad); y unread.
     float4 lighting0;
-    float4 shadowMeta2;   // x = far-visibility clamp flag, y = object view-distance cut, z = scene slot + 1 (KH_AO); w unread.
+    float4 shadowMeta2;   // x unread (zero), y = object view-distance cut, z = scene slot + 1 (KH_AO); w unread.
     // Engine-axes rotation rows (row-vector): world = center + local.x*R0 +
     // local.y*R1 + local.z*R2.
     float4 objRot0;
     float4 objRot1;
     float4 objRot2;   // objRot0.w = 1 marks a filled matrix; 0 (the zeroed default) reads as identity.
-    // x = 1: normal-blend translucent mesh with the scene capture bound this
-    // inject - the packing composites in Reinhard space against t3 and writes
-    // opaque.
+    // x = 1: normal-blend translucent mesh with the scene capture bound (the
+    // flush's fill; the injection writes 0) - the packing composites in
+    // Reinhard space against t3 and writes opaque. y = PSComposite's
+    // background-trust range (m); no live fill reaches that read. w = the LOD
+    // crossfade dither.
     float4 blendCtl;
     // x = this draw's material table index (base + submesh slot; non-instanced
     // VS), y = the submesh slot (the instanced VS adds it to the instance's own
@@ -38,15 +40,6 @@ cbuffer CBObj : register(b0)
     // alpha-mode override (>= 0 replaces the table's mode; 3 = the opaque part
     // of a blend split). Zeroed and unread on every untextured fill.
     float4 matCtl;
-    // KH_FAR_VIS (C++ twin kh_far_vis), per draw. A routed farVis object draws
-    // twice: w = 1 = the in-far draw (every fragment beyond the far plane is
-    // cut, as a farVis-off object's would be; depth is the hardware's,
-    // untouched); w = 2 = the band draw (ARB only: every fragment inside the
-    // far plane is cut, the rest ordered per fragment against the pass's
-    // min-distance mask at t37 and given the world pair's own depth continued
-    // past the plane, up to z = the MaxDepth of the viewport the band draw is
-    // rasterised under). xy free. Zero on every other draw.
-    float4 khFarVis;
     float4 fuseMeta;
     float4 fuseStage[12];
     float4 fxParams2;   // Effect parameters [8..11] (C++ twin fx2).
@@ -164,7 +157,7 @@ cbuffer CBObj : register(b0)
     float4 dlsRange;
     // khPass.xyz = the pass's rebase camera (engine axes), w = 1 arms the
     // bucket vertex path's rebase (twin of centerRel.w). khPassObj.x = the
-    // engine object view distance (the farVis-off cut for bucket instances);
+    // engine object view distance (the cut for bucket instances);
     // yzw free. Zero wherever no bucket draws.
     float4 khPass;
     float4 khPassObj;
@@ -197,7 +190,7 @@ cbuffer CBEngView2 : register(b4)
 
 // The object record buffer (C++ twin KhObjRec, 6 float4), one per live-scene
 // slot, read by every bucket vertex shader through the lane's slot
-// (VSInst.islot). Engine axes. size.w = farVis flag, rot0.w = 1 (filled),
+// (VSInst.islot). Engine axes. size.w unused (0), rot0.w = 1 (filled),
 // rot1.w = lit ambient fraction, rot2.w = lit diffuse fraction; col carries no
 // lifetime envelope (the lane's alpha does).
 struct KhObjRec { float4 pos; float4 size; float4 rot0; float4 rot1; float4 rot2; float4 col; };
@@ -211,7 +204,6 @@ StructuredBuffer<KhObjRec> khObjs : register(t39);
 // with no VSOut, is the one reader of blendCtl.w itself).
 static float khObjAmb = 0.0f;      // lighting0.z twin: base-colour fraction kept in shadow.
 static float khObjDif = 0.0f;      // lighting0.w twin: n.L-scaled fraction.
-static float khObjFarVis = 0.0f;   // shadowMeta2.x twin: far-visibility clamp flag.
 static float khObjCut = 0.0f;      // shadowMeta2.y twin: object view-distance cut (m, 0 = off).
 static float khObjDither = 0.0f;   // blendCtl.w twin: the LOD crossfade dither for this draw.
 static float khObjSlot = 0.0f;     // shadowMeta2.z twin: the scene slot + 1 (KH_AO's self test; 0 = none).
@@ -219,14 +211,13 @@ void KhObjLoad(float4 khol_a, float4 khol_b)
 {
     khObjAmb = khol_a.x;
     khObjDif = khol_a.y;
-    khObjFarVis = khol_a.z;
     khObjCut = khol_a.w;
     khObjDither = khol_b.y;
     khObjSlot = khol_b.z;
 }
 // The vertex side: the CB lanes (per-object draws)...
 // The LOD crossfade's per-pixel cut, one body for every pass that draws a
-// fading level (the two colour twins, the far-vis mask prepass): +v = the
+// fading level (the two colour twins): +v = the
 // finer level keeps the pixels below v, -v = the coarser keeps the rest.
 // Complementary at every pixel, whichever pass asks.
 void KhLodDitherCut(float2 khld_px, float khld_v)
@@ -236,24 +227,16 @@ void KhLodDitherCut(float2 khld_px, float khld_v)
     if (khld_v > 0.0f) { if (khld_h >= khld_v) discard; }
     else if (khld_h < -khld_v) discard;
 }
-// The far-plane cut: a farVis-off object always; a farVis object on its in-far
-// draw (KH_FAR_VIS, khFarVis.w = 1), whose beyond-far fragments belong to the
-// band draw. Read after KhObjLoad.
-bool KhFarPlaneCut()
-{
-    return khObjFarVis < 0.5f || (khFarVis.w > 0.5f && khFarVis.w < 1.5f);
-}
 void KhObjLanesCb(out float4 khoc_a, out float4 khoc_b)
 {
-    khoc_a = float4(lighting0.z, lighting0.w, shadowMeta2.x, shadowMeta2.y);
+    khoc_a = float4(lighting0.z, lighting0.w, 0.0f, shadowMeta2.y);   // z unused.
     khoc_b = float4(0.0f, blendCtl.w, shadowMeta2.z, 0.0f);
 }
 // ...or the record + lane (bucket draws); the cut is the pass's object view
-// distance for a farVis-off instance; the slot is the instance's own.
+// distance; the slot is the instance's own.
 void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float4 khor_a, out float4 khor_b)
 {
-    khor_a = float4(khor_r.rot1.w, khor_r.rot2.w, khor_r.size.w,
-                    (khor_r.size.w > 0.5f) ? 0.0f : khPassObj.x);
+    khor_a = float4(khor_r.rot1.w, khor_r.rot2.w, 0.0f, khPassObj.x);
     khor_b = float4(0.0f, khor_dither, (float)khor_slot + 1.0f, 0.0f);
 }
 
@@ -1893,7 +1876,7 @@ struct VSOut { float4 pos : SV_Position; float3 wpos : TEXCOORD0; float3 nrm : T
     float4 icol : TEXCOORD5;
     // The per-object lanes (KhObjLoad at every mesh PS entry). Flat per draw or
     // per instance.
-    nointerpolation float4 iobj0 : TEXCOORD7;   // amb, dif, farVis, cut.
+    nointerpolation float4 iobj0 : TEXCOORD7;   // amb, dif, 0, cut.
     nointerpolation float4 iobj1 : TEXCOORD8;   // 0, dither, 0, 0.
 #if KH_TEXTURED
     float2 uv : TEXCOORD2; float4 tanw : TEXCOORD3;   // World tangent + handedness.
@@ -1966,7 +1949,7 @@ void KhVsCore(float3 khvc_lp, float3 khvc_ln, float3 khvc_ctr, float3 khvc_rel, 
         khvc_opos = (stenVol2.z >= 0.5f) ? mul(float4(khEngP, 1.0f), khEngVP)
                                          : khClip;
     }
-    // The farVis-off pop at max view distance is enforced per fragment in the
+    // The pop at max view distance is enforced per fragment in the
     // PS (far contract block) instead of here.
     khvc_owpos = wp;
     // KH_SELF_REL_INTERP: subtract the same fp32 anchor the sun matrices

@@ -205,7 +205,7 @@ void PSInjDepthA(VSOut i)
 // quantity VSDlsMask stores).
 float4 PSDlsMaskA(VSOut i) : SV_Target
 {
-    // KH_FAR_VIS: the mask prepass draws a fading level with the colour
+    // The mask prepass draws a fading level with the colour
     // draw's own dither, so the mask at a pixel is the level that pixel shows
     // (a mask holding the union would cut the shown level behind the hidden
     // one's nearer surface - speckle). The dlsw mask fills no dither.
@@ -331,7 +331,7 @@ VSOutDM VSDlsMask(VSIn i)
 
 float4 PSDlsMask(VSOutDM i) : SV_Target
 {
-    KhLodDitherCut(i.pos.xy, blendCtl.w);   // KH_FAR_VIS (see PSDlsMaskA); the per-object lane.
+    KhLodDitherCut(i.pos.xy, blendCtl.w);   // See PSDlsMaskA; the per-object lane.
     return float4(i.dist, 0.0f, 0.0f, 0.0f);
 }
 
@@ -706,12 +706,12 @@ float4 PSMain(VSOut i) : SV_Target
     KhLodDitherCut(i.pos.xy, khObjDither);
     ClipEdgeSliver(i.wpos, i.nrm);   // Degenerate edge-on fragments (fireflies).
     ClipOwnNear(i.pos.w);   // Our own near plane. Twin call.
-    if (KhFarPlaneCut() && depthParams.y < -1.0e-3f &&
+    if (depthParams.y < -1.0e-3f &&
         depthParams.x + depthParams.y / max(i.pos.w, 1.0e-4f) > 1.0f) discard;
     // Twin: PSMain / PSComposite / PSEffect. The shared tail below is kept as
     // two copies on purpose: PSComposite interleaves KH_ARB_DEPTH blocks and a
     // khb_a lane through it.
-    if (khObjFarVis < 0.5f && khObjCut > 0.0f && i.pos.w > khObjCut) discard;
+    if (khObjCut > 0.0f && i.pos.w > khObjCut) discard;
     // Punch-through / overlay-occlusion guard, flush-path edition: the same
     // contract as PSComposite's. The CPU arms tight margins only for
     // single-sample snapshots, so MSAA frames stand down by construction.
@@ -860,7 +860,7 @@ float4 PSMain(VSOut i) : SV_Target
             khaFbA   = distM - khaFbB;
             khaFbRef = khaFbLay;
         }
-        if (fogEngine.w >= 0.5f && fogEngine.w < 1.5f && khObjFarVis < 0.5f)
+        if (fogEngine.w >= 0.5f && fogEngine.w < 1.5f)
             trans = saturate((fogEngine.y - khaFbA) * fogEngine.z);
 
         if (fogParams.w >= 0.5f) {
@@ -927,7 +927,9 @@ float4 PSMain(VSOut i) : SV_Target
     if (bm == 5) return float4(lerp(float3(65504.0f, 65504.0f, 65504.0f), lc, a), 1.0f);
 
     if (blendCtl.x >= 0.5f) {
-        // Background trust: PSComposite's rule stands.
+        // No background-trust range here: this is the only live perceptual
+        // path (the injection never arms blendCtl.x), and it blends every
+        // pixel by a. PSComposite's blendCtl.y rule is reached by no fill.
         float3 scn = sceneColorTex.Load(int3(int2(i.pos.xy), 0)).rgb;
         float3 ts = scn / (1.0f + scn);
         float3 tl = lc / (1.0f + lc);

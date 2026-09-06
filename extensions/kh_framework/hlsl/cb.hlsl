@@ -291,6 +291,11 @@ float KhThmHeight(float2 xz)
     return lerp(lerp(h00, h10, f.x), lerp(h01, h11, f.x), f.y);
 }
 
+// Both callers read the result only through one test - clearance + 1.5 cells
+// below -thmMeta.z discards the fragment - and the running minimum can only
+// fall, so once that test holds the remaining steps cannot change the
+// outcome: the march stops there. The test is the callers' own expression,
+// evaluated on the running value, so the decision is identical.
 float KhThmClearance(float3 cam, float3 wp)
 {
     float mc = 1.0e9f;
@@ -306,6 +311,7 @@ float KhThmClearance(float3 cam, float3 wp)
         float3 p = lerp(cam, wp, t);
         float h = KhThmHeight(p.xz);
         if (h > -1.0e5f) mc = min(mc, p.y - h);
+        if (mc + 1.5f * thmParams.z < -thmMeta.z) break;   // Decided: the callers discard.
     }
 
     return mc;
@@ -1359,17 +1365,37 @@ float KhAoTerm(float3 khao_p, float3 khao_n)
     [unroll] for (int khao_i0 = 0; khao_i0 < KH_AO_STEPS; ++khao_i0) khao_ts[khao_i0] = KH_AO_T0 * exp2(khao_ls * (float)khao_i0);
     float khao_d[KH_AO_CONES * KH_AO_STEPS];
     [unroll] for (int khao_i = 0; khao_i < KH_AO_CONES * KH_AO_STEPS; ++khao_i) khao_d[khao_i] = 1.0e9f;
+    // Two exact skips. (1) A cone whose segment [o, o + D] stays farther than
+    // D * tan (+0.1%) from the field's PADDED box (half-diagonal * 2 KH_SDF_C,
+    // the clamp box KhAoDist measures from) cannot occlude: for every sample
+    // outside that box KhAoDist = a face-cell value (>= 0: the face cells lie
+    // outside the mesh's box) plus the exact distance to the clamped point,
+    // which is >= the distance to the padded sphere >= t * tan, so the step's
+    // term saturates to 1 - the same 1 it contributes now. (2) A cone with a
+    // step at or below zero has visibility 0 whatever its other steps read; no
+    // later candidate can change that, so the cone is dead for the rest.
+    bool khao_dead[KH_AO_CONES];
+    [unroll] for (int khao_i1 = 0; khao_i1 < KH_AO_CONES; ++khao_i1) khao_dead[khao_i1] = false;
     [loop] for (uint khao_k = 0; khao_k < khao_nc; ++khao_k) {
         const KhAoRec khao_r = khAoRecs[khao_cand[khao_k]];
         const bool khao_self = abs(khao_r.pos.w - khObjSlot) < 0.5f;
         const float khao_tmin = khao_self ? khao_r.rot2.w : 0.0f;
+        const float3 khao_cd = khao_r.pos.xyz - khao_o;
+        const float khao_rej = khao_r.rot1.w * (2.0f * KH_SDF_C) + khao_D * KH_AO_TAN * 1.001f;
         [unroll] for (int khao_c2 = 0; khao_c2 < KH_AO_CONES; ++khao_c2) {
+            if (khao_dead[khao_c2]) continue;
+            const float khao_tp = clamp(dot(khao_cd, khao_dir[khao_c2]), 0.0f, khao_D);
+            const float3 khao_cq = khao_cd - khao_dir[khao_c2] * khao_tp;   // Centre to its closest point on the segment.
+            if (dot(khao_cq, khao_cq) >= khao_rej * khao_rej) continue;
+            bool khao_hit = false;
             [unroll] for (int khao_s2 = 0; khao_s2 < KH_AO_STEPS; ++khao_s2) {
                 const float khao_t = khao_ts[khao_s2];
                 if (khao_t < khao_tmin) continue;
                 const float khao_dd = KhAoDist(khao_r, khao_o + khao_dir[khao_c2] * khao_t);
                 khao_d[khao_c2 * KH_AO_STEPS + khao_s2] = min(khao_d[khao_c2 * KH_AO_STEPS + khao_s2], khao_dd);
+                if (khao_d[khao_c2 * KH_AO_STEPS + khao_s2] <= 0.0f) khao_hit = true;
             }
+            if (khao_hit) khao_dead[khao_c2] = true;
         }
     }
     float khao_sum = 0.0f;

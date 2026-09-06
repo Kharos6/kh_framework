@@ -9608,6 +9608,10 @@ struct StateBackup {
     ID3D11RasterizerState*   rasterizer = nullptr;
     UINT                     scissor_n = 0;   // The engine's scissor rects, restored verbatim.
     D3D11_RECT               scissor[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    // A predicate set by the engine would predicate our draws too: cleared for
+    // the pass, handed back with its value.
+    ID3D11Predicate*         predicate = nullptr;
+    BOOL                     predicate_value = FALSE;
 
     StateBackup() = default;
     StateBackup(const StateBackup&) = delete;
@@ -9650,6 +9654,8 @@ struct StateBackup {
         ctx->RSGetScissorRects(&scissor_n, nullptr);
         if (scissor_n > _countof(scissor)) scissor_n = _countof(scissor);
         if (scissor_n) ctx->RSGetScissorRects(&scissor_n, scissor);
+        ctx->GetPredication(&predicate, &predicate_value);
+        if (predicate) ctx->SetPredication(nullptr, FALSE);
     }
 
     void restore(ID3D11DeviceContext* ctx) {
@@ -9689,6 +9695,7 @@ struct StateBackup {
         ctx->OMSetBlendState(blend, blend_factor, sample_mask);
         ctx->RSSetState(rasterizer);
         ctx->RSSetScissorRects(scissor_n, scissor_n ? scissor : nullptr);
+        if (predicate) ctx->SetPredication(predicate, predicate_value);
         armed = false;
         KH_SAFE_RELEASE(input_layout);
         KH_SAFE_RELEASE(vb[0]);
@@ -9711,6 +9718,7 @@ struct StateBackup {
         KH_SAFE_RELEASE(dss);
         KH_SAFE_RELEASE(blend);
         KH_SAFE_RELEASE(rasterizer);
+        KH_SAFE_RELEASE(predicate);
     }
 };
 
@@ -19055,11 +19063,10 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
     // correct. On a perspective map the same flag is destructive: geometry
     // nearer than the near plane clamps to depth 0 and occludes everything
     // behind it.
-    ID3D11RenderTargetView* khdr_prev_rtv[8] = {};
-    ID3D11DepthStencilView* khdr_prev_dsv = nullptr;
+    KhOmSave                khdr_om;   // Full OM set in, full OM set out (UAVs carried; self-restoring).
     D3D11_VIEWPORT          khdr_prev_vp[16] = {};
     UINT                    khdr_prev_nvp = 16;
-    khdr_ctx->OMGetRenderTargets(8, khdr_prev_rtv, &khdr_prev_dsv);
+    khdr_om.capture(khdr_ctx);
     khdr_ctx->RSGetViewports(&khdr_prev_nvp, khdr_prev_vp);
     ID3D11RasterizerState* khdr_prev_rs = nullptr;
     if (!g_res.dls_rast) {
@@ -19224,16 +19231,15 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
 
         khdr_slice += khdr_fn;
     }
-    // Hand the sun back exactly what it had. Every Get* above AddRef'd, so each
-    // saved pointer must be released whether or not it was used.
+    // Hand the sun back exactly what it had (the rasteriser's Get AddRef'd, so
+    // it is released whether or not it was used; the OM save releases itself).
     if (g_res.dls_rast) {
         khdr_ctx->RSSetState(khdr_prev_rs);
         KH_SAFE_RELEASE(khdr_prev_rs);
     }
-    khdr_ctx->OMSetRenderTargets(8, khdr_prev_rtv, khdr_prev_dsv);
+    khdr_om.restore(khdr_ctx);
+    khdr_om.release();
     if (khdr_prev_nvp > 0) khdr_ctx->RSSetViewports(khdr_prev_nvp, khdr_prev_vp);
-    for (int khdr_r = 0; khdr_r < 8; ++khdr_r) KH_SAFE_RELEASE(khdr_prev_rtv[khdr_r]);
-    KH_SAFE_RELEASE(khdr_prev_dsv);
 }
 
 // The light maps render on their own bracket, free of the sun pass's gates.
@@ -22007,7 +22013,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     ctx->OMSetBlendState(old_blend, old_bf, old_bmask);
     ctx->OMSetDepthStencilState(old_dss, old_sref);
     // Covers t0/t11 by construction.
-    ctx->PSSetShaderResources(0, _countof(old_ps_srvs), old_ps_srvs);   // Covers t25-t28; +t32; width.
+    ctx->PSSetShaderResources(0, _countof(old_ps_srvs), old_ps_srvs);   // t0..t32 (t35 below); width, not a literal.
     ctx->GSSetShader(old_gs, nullptr, 0);
     ctx->HSSetShader(old_hs, nullptr, 0);
     ctx->DSSetShader(old_ds2, nullptr, 0);
@@ -24804,6 +24810,10 @@ inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
     if (!dev) return;
     if (!kh_ensure_ok("pip effect shader", kh_pip_fx_shader(dev))) return;
 
+    // Declared before the OM save so the unwind restores the OM before the
+    // SRVs (1.388: destructors run in reverse declaration order); captured
+    // later, at the same site as before.
+    StateBackup khpf_bk;
     KhOmSave khpf_om;
     khpf_om.capture(ctx);
     ID3D11Resource* khpf_rt = nullptr;
@@ -24919,7 +24929,6 @@ inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
 
     const bool khpf_pinj = g_ro.in_injection;
     g_ro.in_injection = true;   // Our own draws: the hooks stand aside.
-    StateBackup khpf_bk;
     khpf_bk.capture(ctx);
     uint32_t khpf_drawn = 0;
     if (kh_upload_frame_cb(ctx, g_res.composite_frame_cb, khpf_cbf)) {
@@ -28351,7 +28360,7 @@ inline void kh_dls_world_pass_body(ID3D11DeviceContext* khw_ctx) {
 
     StateBackup khw_bk;
     khw_bk.capture(khw_ctx);
-    ID3D11ShaderResourceView* khw_old_t37 = nullptr;   // Past StateBackup's ps_srvs[37]; own save.
+    ID3D11ShaderResourceView* khw_old_t37 = nullptr;   // Inside StateBackup's t0..t41 too; the explicit put-back stays.
     khw_ctx->PSGetShaderResources(37, 1, &khw_old_t37);
 
     // b0 and b1 bound as (0, 2), before the uploads; on a device without the
@@ -28391,7 +28400,7 @@ inline void kh_dls_world_pass_body(ID3D11DeviceContext* khw_ctx) {
     // with a debug-layer warning storm.
     ID3D11ShaderResourceView* khw_null = nullptr;
     khw_ctx->PSSetShaderResources(0, 1, &khw_null);
-    khw_ctx->PSSetShaderResources(37, 1, &khw_old_t37);   // Outside StateBackup's t0.t36: put back
+    khw_ctx->PSSetShaderResources(37, 1, &khw_old_t37);   // Explicit put-back (StateBackup's restore covers it too)
     KH_SAFE_RELEASE(khw_old_t37);   // Exactly what was bound (t35 pattern).
     khw_ctx->PSSetShaderResources(36, 1, &khw_null);   // Inside it; explicit like t0 and t28.
     khw_bk.restore(khw_ctx);

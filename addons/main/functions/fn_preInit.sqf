@@ -1648,6 +1648,15 @@ if hasInterface then {
 	} forEach (("true" configClasses (configFile >> "CfgKhInitFunctions")) + ("true" configClasses (missionConfigFile >> "CfgKhInitFunctions")));
 
 	[
+		"MISSION",
+		"Ended",
+		[], 
+		{
+			(uiNamespace getVariable ["KH_var_display", displayNull]) closeDisplay 2;
+		}
+	] call KH_fnc_addEventHandler;
+
+	[
 		["USER_ACTION", "defaultAction"],
 		"Activate",
 		[],

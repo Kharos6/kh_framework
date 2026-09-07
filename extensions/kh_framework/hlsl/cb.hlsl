@@ -165,8 +165,8 @@ cbuffer CBObj : register(b0)
     float4 fxCam;
     // KH_AO (C++ twins kh_ao / kh_ao_atlas / kh_ao_occ): x = strength (0 =
     // off), y = occluder count, z = trace distance (m), w = receiver range (m);
-    // the atlas's inverse width / depth (texels) and KH_SDF_N; the occluders'
-    // centres + bound radii.
+    // the atlas's inverse width / depth (texels), KH_SDF_N, and the occluder
+    // grid's cell edge (m; KH_AO_GRID); the occluders' centres + bound radii.
     float4 khAo;
     float4 khAoAtlas;
     float4 khAoOcc[192];
@@ -1497,6 +1497,15 @@ struct KhAoRec {
 };
 StructuredBuffer<KhAoRec> khAoRecs : register(t40);
 Texture3D<float> khSdfAtlas : register(t41);
+// KH_AO_GRID (C++ twin g_ao_grid): KH_AO_GRID_N^3 cells over the cube of
+// khAo.w + khAo.z around the pass camera (fxParams0.xyz), KH_AO_GRID_STRIDE
+// uints each - a count, then record indices - every occluder whose bound
+// sphere grown by the trace touches the cell. A fragment's list is complete
+// for it by construction; the candidate pick below is unchanged.
+#define KH_AO_GRID_N      16
+#define KH_AO_GRID_CAP    15
+#define KH_AO_GRID_STRIDE 16
+StructuredBuffer<uint> khAoGrid : register(t34);
 // Distance (m) from p to the record's surface; negative inside a closed mesh.
 // Beyond the field the boundary value plus the distance to the field's box.
 float KhAoDist(KhAoRec khad_r, float3 khad_p)
@@ -1525,19 +1534,27 @@ float KhAoTerm(float3 khao_p, float3 khao_n)
     // The occluders this fragment's trace can reach: the KH_AO_CAND nearest by
     // margin to their bound sphere, not the first in the list's camera order -
     // a dense cluster would otherwise hand a far fragment eight grazing spheres
-    // and drop its contact.
+    // and drop its contact. KH_AO_GRID: the walk is over the fragment's cell
+    // list, not the whole reject list.
+    if (khAoAtlas.w <= 0.0f) return 1.0f;
+    const float khao_half = khAo.w + khAo.z;
+    const float3 khao_gp = (khao_p - fxParams0.xyz + khao_half) / khAoAtlas.w;
+    if (any(khao_gp < 0.0f) || any(khao_gp >= (float)KH_AO_GRID_N)) return 1.0f;   // Outside the domain (past the fade anyway).
+    const uint3 khao_gc = (uint3)khao_gp;
+    const uint khao_gi = (khao_gc.x + KH_AO_GRID_N * (khao_gc.y + KH_AO_GRID_N * khao_gc.z)) * KH_AO_GRID_STRIDE;
     uint khao_cand[KH_AO_CAND];
     float khao_cm[KH_AO_CAND];
     uint khao_nc = 0;
-    const int khao_cnt = (int)khAo.y;
+    const int khao_cnt = (int)min(khAoGrid[khao_gi], (uint)KH_AO_GRID_CAP);
     [loop] for (int khao_j = 0; khao_j < khao_cnt; ++khao_j) {
-        const float4 khao_s = khAoOcc[khao_j];
+        const uint khao_ri = khAoGrid[khao_gi + 1u + (uint)khao_j];
+        const float4 khao_s = khAoOcc[khao_ri];
         const float khao_mg = length(khao_p - khao_s.xyz) - khao_s.w;   // Margin to the sphere (m).
         if (khao_mg >= khao_D) continue;
-        if (khao_nc < KH_AO_CAND) { khao_cand[khao_nc] = (uint)khao_j; khao_cm[khao_nc] = khao_mg; ++khao_nc; continue; }
+        if (khao_nc < KH_AO_CAND) { khao_cand[khao_nc] = khao_ri; khao_cm[khao_nc] = khao_mg; ++khao_nc; continue; }
         uint khao_wi = 0;   // Full: the farthest held gives way to a nearer one.
         [unroll] for (uint khao_qi = 1; khao_qi < KH_AO_CAND; ++khao_qi) { if (khao_cm[khao_qi] > khao_cm[khao_wi]) khao_wi = khao_qi; }
-        if (khao_mg < khao_cm[khao_wi]) { khao_cand[khao_wi] = (uint)khao_j; khao_cm[khao_wi] = khao_mg; }
+        if (khao_mg < khao_cm[khao_wi]) { khao_cand[khao_wi] = khao_ri; khao_cm[khao_wi] = khao_mg; }
     }
     if (khao_nc == 0) return 1.0f;
     // The cone set in the fragment's frame: the normal, and five at 65 deg from

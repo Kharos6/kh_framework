@@ -1324,6 +1324,9 @@ struct Resources {
     std::vector<uint8_t>      sdf_resident;
     ID3D11Buffer*             ao_sb[2] = { nullptr, nullptr };
     ID3D11ShaderResourceView* ao_srv[2] = { nullptr, nullptr };
+    // KH_AO_GRID: the pass's occluder lists per cell (t34), same rings.
+    ID3D11Buffer*             ao_grid_sb[2] = { nullptr, nullptr };
+    ID3D11ShaderResourceView* ao_grid_srv[2] = { nullptr, nullptr };
     // KH_PIP_FX: the PIP pass's own scene capture (t0, copied per pass), its
     // depth copied (t1; single-sample, so PSEffect's MSAA_DEPTH 0 build reads
     // it), and that build. Sized to the PIP the last fire saw.
@@ -1654,6 +1657,8 @@ struct Resources {
         for (int khao_i = 0; khao_i < 2; ++khao_i) {
             KH_SAFE_RELEASE(ao_srv[khao_i]);
             KH_SAFE_RELEASE(ao_sb[khao_i]);
+            KH_SAFE_RELEASE(ao_grid_srv[khao_i]);   // KH_AO_GRID.
+            KH_SAFE_RELEASE(ao_grid_sb[khao_i]);
         }
         KH_SAFE_RELEASE(ps_effect_pip);   // KH_PIP_FX.
         ps_effect_pip_tried = false;
@@ -2690,8 +2695,10 @@ struct alignas(16) ConstantData {
     // kh_ao_gather. kh_ao: x = strength (0 = off; the shader's exponent), y =
     // occluder count, z = trace distance (m), w = receiver range (m).
     // kh_ao_atlas: x = 1 / atlas width, y = 1 / atlas depth (texels), z =
-    // KH_SDF_N. kh_ao_occ[i] = an occluder's centre (engine axes) and bound
-    // radius - the fragment's reject list; the records at t40 carry the rest.
+    // KH_SDF_N, w = the occluder grid's cell edge (m; KH_AO_GRID, 0 = no
+    // grid). kh_ao_occ[i] = an occluder's centre (engine axes) and bound
+    // radius - the fragment's reject list; the records at t40 carry the rest,
+    // the grid at t34 names which of them a fragment's cell can reach.
     float kh_ao[4];
     float kh_ao_atlas[4];
     float kh_ao_occ[192][4];
@@ -16453,6 +16460,22 @@ inline bool kh_sdf_atlas_sync(ID3D11DeviceContext* ctx, ID3D11Device* dev) {
 }
 static std::vector<std::pair<float, uint32_t>> g_ao_cand;   // Scratch: (distance^2, slot), pass-local.
 static std::vector<KhAoRec>                    g_ao_recs;   // Scratch: the records staged for upload.
+// KH_AO_GRID: a uniform grid over the AO domain (a cube of 2 x (range +
+// trace) around the pass camera), KH_AO_GRID_N cells an edge; each cell holds
+// a count and up to KH_AO_GRID_CAP record indices - every occluder whose
+// bound sphere, grown by the trace distance, touches the cell. A fragment
+// reads its cell's list instead of the whole reject list: the shader keeps
+// the same nearest-by-margin candidates it always did, from a list that is
+// complete for it by construction, so nothing changes unless a cell fills
+// past the cap (then the ones nearest the cell's centre stay). 3,000 casters
+// in a 300 m cube walked 192 entries per lit fragment before; a cell holds a
+// handful. Built on the CPU per pass in microseconds; 256 KB per upload.
+static constexpr uint32_t KH_AO_GRID_N   = 16u;
+static constexpr uint32_t KH_AO_GRID_CAP = 15u;                       // Indices per cell; slot 0 is the count.
+static constexpr uint32_t KH_AO_GRID_STRIDE = KH_AO_GRID_CAP + 1u;   // uints per cell.
+static constexpr uint32_t KH_AO_GRID_CELLS = KH_AO_GRID_N * KH_AO_GRID_N * KH_AO_GRID_N;
+static std::vector<uint32_t> g_ao_grid;   // Scratch: KH_AO_GRID_CELLS x KH_AO_GRID_STRIDE.
+static std::vector<float>    g_ao_grid_d2;   // Scratch: per kept entry, distance^2 to the cell centre (the cap's order).
 // The pass's occluder list into cbf and the ring's buffer, then t40 / t41
 // bound for the pass (both inside StateBackup's saved range). khag_ring: 0 =
 // the render thread (the injection, the PIP inject), 1 = the flush. Returns
@@ -16567,6 +16590,85 @@ inline uint32_t kh_ao_gather(ID3D11DeviceContext* ctx, ID3D11Device* dev, Consta
     khag_box.right = static_cast<UINT>(khag_n * sizeof(KhAoRec));
     khag_box.bottom = 1; khag_box.back = 1;
     ctx->UpdateSubresource(g_res.ao_sb[khag_ring], 0, &khag_box, g_ao_recs.data(), 0, 0);
+    // KH_AO_GRID: the cell lists. The domain is the cube the receiver range
+    // plus the trace can reach, centred on the pass camera (the shader
+    // centres it on fxParams0.xyz, which every AO fill site sets to this
+    // same camera); the cell edge goes up in kh_ao_atlas.w.
+    const float khag_half = khag_range + khag_dist;
+    const float khag_cell = fmaxf(2.0f * khag_half / static_cast<float>(KH_AO_GRID_N), 1.0e-3f);
+    const float khag_org[3] = { cam[0] - khag_half, cam[1] - khag_half, cam[2] - khag_half };
+    g_ao_grid.assign(KH_AO_GRID_CELLS * KH_AO_GRID_STRIDE, 0u);
+    g_ao_grid_d2.assign(KH_AO_GRID_CELLS * KH_AO_GRID_STRIDE, 0.0f);
+    for (uint32_t khag_i = 0; khag_i < khag_n; ++khag_i) {
+        const KhAoRec& r = g_ao_recs[khag_i];
+        const float khag_reach2 = r.rot1[3] + khag_dist;   // The sphere the fragments it can occlude lie in.
+        int khag_lo[3], khag_hi[3];
+        for (int k = 0; k < 3; ++k) {
+            khag_lo[k] = static_cast<int>(floorf((r.pos[k] - khag_reach2 - khag_org[k]) / khag_cell));
+            khag_hi[k] = static_cast<int>(floorf((r.pos[k] + khag_reach2 - khag_org[k]) / khag_cell));
+            if (khag_lo[k] < 0) khag_lo[k] = 0;
+            if (khag_hi[k] > static_cast<int>(KH_AO_GRID_N) - 1) khag_hi[k] = static_cast<int>(KH_AO_GRID_N) - 1;
+        }
+        for (int khag_z = khag_lo[2]; khag_z <= khag_hi[2]; ++khag_z)
+        for (int khag_y = khag_lo[1]; khag_y <= khag_hi[1]; ++khag_y)
+        for (int khag_x = khag_lo[0]; khag_x <= khag_hi[0]; ++khag_x) {
+            // The sphere against the cell's box (closest-point distance), so a
+            // corner cell the bounding box alone would take stays empty.
+            float khag_q2 = 0.0f;
+            const int khag_c3[3] = { khag_x, khag_y, khag_z };
+            for (int k = 0; k < 3; ++k) {
+                const float khag_c0 = khag_org[k] + static_cast<float>(khag_c3[k]) * khag_cell;
+                const float khag_c1 = khag_c0 + khag_cell;
+                const float khag_dd = r.pos[k] < khag_c0 ? khag_c0 - r.pos[k] : (r.pos[k] > khag_c1 ? r.pos[k] - khag_c1 : 0.0f);
+                khag_q2 += khag_dd * khag_dd;
+            }
+            if (khag_q2 > khag_reach2 * khag_reach2) continue;
+            const uint32_t khag_ci = (static_cast<uint32_t>(khag_x) +
+                                      KH_AO_GRID_N * (static_cast<uint32_t>(khag_y) + KH_AO_GRID_N * static_cast<uint32_t>(khag_z)))
+                                     * KH_AO_GRID_STRIDE;
+            uint32_t& khag_cnt = g_ao_grid[khag_ci];
+            // The cap's order: distance to the cell centre (the cell's
+            // fragments are within half a diagonal of it).
+            float khag_cd2 = 0.0f;
+            for (int k = 0; k < 3; ++k) {
+                const float khag_cc = khag_org[k] + (static_cast<float>(khag_c3[k]) + 0.5f) * khag_cell;
+                khag_cd2 += (r.pos[k] - khag_cc) * (r.pos[k] - khag_cc);
+            }
+            if (khag_cnt < KH_AO_GRID_CAP) {
+                g_ao_grid[khag_ci + 1u + khag_cnt] = khag_i;
+                g_ao_grid_d2[khag_ci + 1u + khag_cnt] = khag_cd2;
+                ++khag_cnt;
+            } else {
+                uint32_t khag_far = 1u;   // Full: the farthest held gives way to a nearer one.
+                for (uint32_t k = 2u; k <= KH_AO_GRID_CAP; ++k) if (g_ao_grid_d2[khag_ci + k] > g_ao_grid_d2[khag_ci + khag_far]) khag_far = k;
+                if (khag_cd2 < g_ao_grid_d2[khag_ci + khag_far]) {
+                    g_ao_grid[khag_ci + khag_far] = khag_i;
+                    g_ao_grid_d2[khag_ci + khag_far] = khag_cd2;
+                }
+            }
+        }
+    }
+    if (!g_res.ao_grid_sb[khag_ring]) {
+        D3D11_BUFFER_DESC khag_gd = {};
+        khag_gd.ByteWidth = static_cast<UINT>(KH_AO_GRID_CELLS * KH_AO_GRID_STRIDE * sizeof(uint32_t));
+        khag_gd.Usage = D3D11_USAGE_DEFAULT;
+        khag_gd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        khag_gd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+        khag_gd.StructureByteStride = sizeof(uint32_t);
+        if (FAILED(dev->CreateBuffer(&khag_gd, nullptr, &g_res.ao_grid_sb[khag_ring]))) { g_res.ao_grid_sb[khag_ring] = nullptr; return 0; }
+        D3D11_SHADER_RESOURCE_VIEW_DESC khag_gs = {};
+        khag_gs.Format = DXGI_FORMAT_UNKNOWN;
+        khag_gs.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+        khag_gs.Buffer.FirstElement = 0;
+        khag_gs.Buffer.NumElements = KH_AO_GRID_CELLS * KH_AO_GRID_STRIDE;
+        if (FAILED(dev->CreateShaderResourceView(g_res.ao_grid_sb[khag_ring], &khag_gs, &g_res.ao_grid_srv[khag_ring]))) {
+            KH_SAFE_RELEASE(g_res.ao_grid_sb[khag_ring]);
+            g_res.ao_grid_srv[khag_ring] = nullptr;
+            return 0;
+        }
+    }
+    ctx->UpdateSubresource(g_res.ao_grid_sb[khag_ring], 0, nullptr, g_ao_grid.data(), 0, 0);
+    ctx->PSSetShaderResources(34, 1, &g_res.ao_grid_srv[khag_ring]);
     cbf.kh_ao[0] = khag_str;
     cbf.kh_ao[1] = static_cast<float>(khag_n);
     cbf.kh_ao[2] = khag_dist;
@@ -16574,7 +16676,7 @@ inline uint32_t kh_ao_gather(ID3D11DeviceContext* ctx, ID3D11Device* dev, Consta
     cbf.kh_ao_atlas[0] = 1.0f / static_cast<float>(KH_SDF_ATLAS_WH);
     cbf.kh_ao_atlas[1] = 1.0f / static_cast<float>(KH_SDF_N * g_res.sdf_layers);
     cbf.kh_ao_atlas[2] = static_cast<float>(KH_SDF_N);
-    cbf.kh_ao_atlas[3] = 0.0f;
+    cbf.kh_ao_atlas[3] = khag_cell;   // KH_AO_GRID.
     ID3D11ShaderResourceView* khag_srvs[2] = { g_res.ao_srv[khag_ring], g_res.sdf_srv };
     ctx->PSSetShaderResources(40, 2, khag_srvs);
     if (g_res.samp_pf) ctx->PSSetSamplers(1, 1, &g_res.samp_pf);

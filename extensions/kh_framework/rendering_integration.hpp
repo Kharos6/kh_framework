@@ -3128,8 +3128,12 @@ inline void kh_mod_cache_append(std::vector<std::filesystem::path>& khma_out,
 // source+entry+target+defines, so without them a differently-flagged blob would
 // be served under the same key. Every hash here is CryptoGenerator's FNV-1a 64,
 // field-separated.
+// D3DCompile's default is optimization level 1; level 3 is the shipping
+// setting (scheduling, register allocation, dead code - never precision or
+// fast-math, which fxc keeps strict at every level). In the cache hash, so a
+// change here recompiles every unit once.
 inline uint32_t kh_shader_flags() {
-    return 0;
+    return D3DCOMPILE_OPTIMIZATION_LEVEL3;
 }
 
 inline uint64_t kh_shader_cache_hash(const char* src, const char* entry, const char* target,

@@ -565,8 +565,15 @@ float KhSunBlockerZ(Texture2D<float> khsb_m, float khsb_sz, float2 khsb_uv, floa
 // depth units per metre.
 float KhSunPcssWT(Texture2D<float> khpw_m, float khpw_sz, float2 khpw_uv, float khpw_z, float khpw_sp, float khpw_tw, float khpw_iD)
 {
+    // The widest penumbra this window allows at all: at or under the ring
+    // spread no blocker can take the kernel past the ring, so the ring answers
+    // and the search is skipped. (Where the search ran and found nothing it
+    // answered 'lit'; the ring's compares over the same texels are the
+    // contact verdict that stood before the search existed.)
+    float khpw_rw = KhPcssRadius(khpw_z, 0.0f, khpw_tw, khpw_iD);
+    if (khpw_rw <= khpw_sp) return KhSunSoftWT(khpw_m, khpw_sz, khpw_uv, khpw_z, khpw_sp);
     float2 khpw_rot = KhPcssRot(khpw_uv * khpw_sz);
-    float khpw_rs = clamp(KhPcssRadius(khpw_z, 0.0f, khpw_tw, khpw_iD), khpw_sp, KH_PCSS_RMAX);
+    float khpw_rs = min(khpw_rw, KH_PCSS_RMAX);
     float khpw_zb = KhSunBlockerZ(khpw_m, khpw_sz, khpw_uv, khpw_z, khpw_rs, khpw_rot);
     if (khpw_zb < 0.0f) return 0.0f;
     float khpw_r = KhPcssRadius(khpw_z, khpw_zb, khpw_tw, khpw_iD);
@@ -685,8 +692,9 @@ float SunShadowOcclusion(float3 wpos)
     {
         float2 khcu_rot = KhPcssRot(uv * sunMeta.y);
         float khcu_zr = c.z - khcu_b;
-        float khcu_rs = clamp(KhPcssRadius(khcu_zr, 0.0f, khcu_tw, khcu_iD), 1.0f, KH_PCSS_RMAX);
-        float khcu_zb = KhSunBlockerZ(khSunDepth, sunMeta.y, uv, khcu_zr, khcu_rs, khcu_rot);
+        float khcu_rw = KhPcssRadius(khcu_zr, 0.0f, khcu_tw, khcu_iD);   // KhSunPcssWT's skip: the ring spread is 1 here.
+        float khcu_rs = min(max(khcu_rw, 1.0f), KH_PCSS_RMAX);
+        float khcu_zb = khcu_rw <= 1.0f ? 0.0f : KhSunBlockerZ(khSunDepth, sunMeta.y, uv, khcu_zr, khcu_rs, khcu_rot);
         float khcu_r = khcu_zb < 0.0f ? 0.0f : KhPcssRadius(khcu_zr, khcu_zb, khcu_tw, khcu_iD);
         if (khcu_zb < 0.0f) {
             khtb_un = 0.0f;
@@ -817,8 +825,13 @@ float KhSelfTier(Texture2D<float> khT_map, Texture2D<float2> khT_pf, float4x4 kh
             // narrower than the receiver footprint, which is the minification
             // the prefilter blend served on the ring path).
             float2 khT_rot = KhPcssRot(khT_t);
-            float khT_rs = clamp(KhPcssRadius(khT_c.z, 0.0f, khT_tw, khT_iD), khT_sp, KH_PCSS_RMAX);
-            float khT_zb = KhSelfBlockerZ(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_rs, khT_rot);
+            // KhSunPcssWT's skip: a window whose widest penumbra fits the ring
+            // spread takes the ring without the search (khT_zb = 0 stands in for
+            // 'a blocker at no distance': khT_pr = 0, the ring path).
+            float khT_rw = KhPcssRadius(khT_c.z, 0.0f, khT_tw, khT_iD);
+            float khT_rs = min(max(khT_rw, khT_sp), KH_PCSS_RMAX);
+            float khT_zb = khT_rw <= khT_sp ? khT_c.z
+                         : KhSelfBlockerZ(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_rs, khT_rot);
             float khT_pr = khT_zb < 0.0f ? 0.0f : KhPcssRadius(khT_c.z, khT_zb, khT_tw, khT_iD);
             float khT_res;
             [branch] if (khT_zb < 0.0f) {
@@ -984,8 +997,10 @@ float SunShadowOcclusionSelf(float3 wrel, float3 nrm)
     }
     // KH_PCSS on the union, the same shape as the tiers.
     float2 khsr_rot = KhPcssRot(khsr_t);
-    float khsr_rs = clamp(KhPcssRadius(khsr_c.z, 0.0f, khsr_tw, khsr_iD), khsr_sp, KH_PCSS_RMAX);
-    float khsr_zb = KhSelfBlockerZ(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_rs, khsr_rot);
+    float khsr_rw = KhPcssRadius(khsr_c.z, 0.0f, khsr_tw, khsr_iD);   // KhSelfTier's skip.
+    float khsr_rs = min(max(khsr_rw, khsr_sp), KH_PCSS_RMAX);
+    float khsr_zb = khsr_rw <= khsr_sp ? khsr_c.z
+                  : KhSelfBlockerZ(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_rs, khsr_rot);
     float khsr_pr = khsr_zb < 0.0f ? 0.0f : KhPcssRadius(khsr_c.z, khsr_zb, khsr_tw, khsr_iD);
     float khsr_res;
     [branch] if (khsr_zb < 0.0f) {

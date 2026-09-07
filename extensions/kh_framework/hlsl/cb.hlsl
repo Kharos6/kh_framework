@@ -30,9 +30,8 @@ cbuffer CBObj : register(b0)
     float4 objRot2;   // objRot0.w = 1 marks a filled matrix; 0 (the zeroed default) reads as identity.
     // x = 1: normal-blend translucent mesh with the scene capture bound (the
     // flush's fill; the injection writes 0) - the packing composites in
-    // Reinhard space against t3 and writes opaque. y = PSComposite's
-    // background-trust range (m); no live fill reaches that read. w = the LOD
-    // crossfade dither.
+    // Reinhard space against t3 and writes opaque. w = the LOD crossfade
+    // dither. y / z unread.
     float4 blendCtl;
     // x = this draw's material table index (base + submesh slot; non-instanced
     // VS), y = the submesh slot (the instanced VS adds it to the instance's own
@@ -461,7 +460,8 @@ float KhSunSoftT(Texture2D<float> khcs_m, float khcs_sz, float2 uv, float z)
 
 float SunShadowCompareSoft(float2 uv, float z)  { return KhSunSoftT(khSunDepth, sunMeta.y, uv, z); }
 
-// The cast chain's compare: a 3 x 3 ring of bilinear compares at +-khcw_sp
+// The cast chain's contact ring (KhSunPcssWT answers with it where the
+// penumbra fits): a 3 x 3 ring of bilinear compares at +-khcw_sp
 // texels. The spread follows the receiver footprint (clamped 1..4), so the edge
 // is averaged over the texels it covers and a one-texel re-rasterization shift
 // under a moving sun is a fraction of the transition.
@@ -476,6 +476,107 @@ float KhSunSoftWT(Texture2D<float> khcw_m, float khcw_sz, float2 uv, float z, fl
         }
     }
     return khcw_a / 9.0f;
+}
+
+// KH_PCSS: percentage-closer soft shadows on every sun compare, both chains
+// and the union. The sun is a disc of KH_SUN_DIAM_TAN angular diameter, so a
+// caster's penumbra widens by that fraction of the occluder-to-receiver
+// distance along the light: a 0.5 m post at 100 m casts a ~0.9 m penumbra and
+// its shadow dissolves, a 30 m wall at 1 km keeps a solid core under a ~9 m
+// soft rim. That is what stops a grazing sun stretching small shadows to the
+// horizon - no distance cutoff, no shadow-range term. The blocker search
+// averages every occluder within the widest penumbra the tier's depth window
+// allows (the centre texel included, so a point under a caster is never
+// missed), which is what keeps overlapping casters on one continuous
+// estimate; a tap-count fade by caster distance cannot do that. Where the
+// penumbra fits the contact ring the ring answers unchanged, so contact
+// shadows are byte-identical to before.
+#define KH_SUN_DIAM_TAN 0.0093f   // tan(0.53 deg): the sun's (and the moon's) angular diameter.
+#define KH_PCSS_RMAX 128.0f       // Search and kernel radius cap, tier texels.
+static const float2 KH_PCSS_DISC[16] = {
+    float2(-0.94201624f, -0.39906216f), float2( 0.94558609f, -0.76890725f),
+    float2(-0.09418410f, -0.92938870f), float2( 0.34495938f,  0.29387760f),
+    float2(-0.91588581f,  0.45771432f), float2(-0.81544232f, -0.87912464f),
+    float2(-0.38277543f,  0.27676845f), float2( 0.97484398f,  0.75648379f),
+    float2( 0.44323325f, -0.97511554f), float2( 0.53742981f, -0.47373420f),
+    float2(-0.26496911f, -0.41893023f), float2( 0.79197514f,  0.19090188f),
+    float2(-0.24188840f,  0.99706507f), float2(-0.81409955f,  0.91437590f),
+    float2( 0.19984126f,  0.78641367f), float2( 0.14383161f, -0.14100790f)
+};
+// The disc is rotated per tier texel (interleaved gradient noise over the
+// texel index, so the pattern rides the texel-snapped window with the world,
+// never the screen).
+float2 KhPcssRot(float2 khpr_t)
+{
+    float khpr_a = 6.2831853f * frac(52.9829189f * frac(dot(floor(khpr_t), float2(0.06711056f, 0.00583715f))));
+    return float2(cos(khpr_a), sin(khpr_a));
+}
+float2 KhPcssTap(int khpt_i, float2 khpt_rot)
+{
+    float2 khpt_d = KH_PCSS_DISC[khpt_i];
+    return float2(khpt_d.x * khpt_rot.x - khpt_d.y * khpt_rot.y,
+                  khpt_d.x * khpt_rot.y + khpt_d.y * khpt_rot.x);
+}
+// Penumbra radius in tier texels: half the sun-disc spread over the
+// occluder-to-receiver distance (depth units / khpz_iD = metres; / khpz_tw =
+// texels). With khpz_zb = 0 it is the widest penumbra the window allows,
+// which is the blocker search radius.
+float KhPcssRadius(float khpz_z, float khpz_zb, float khpz_tw, float khpz_iD)
+{
+    return 0.5f * KH_SUN_DIAM_TAN * (khpz_z - khpz_zb) / max(khpz_iD, 1.0e-9f) / max(khpz_tw, 1.0e-9f);
+}
+// KhSunBilinT with the texel clamped to the map on both sides: a wide kernel
+// can leave the window, and an out-of-range Load answers 0 = the nearest depth
+// = occluded. The edge texel answers instead (KhSelfTapT's rule).
+float KhSunBilinTC(Texture2D<float> khcc_m, float khcc_sz, float2 uv, float z)
+{
+    float2 tx = uv * khcc_sz - 0.5f;
+    float2 f = frac(tx);
+    int2 p0 = int2(floor(tx));
+    int2 mx = int2((int)khcc_sz - 1, (int)khcc_sz - 1);
+    float o00 = (z > khcc_m.Load(int3(clamp(p0 + int2(0, 0), int2(0, 0), mx), 0))) ? 1.0f : 0.0f;
+    float o10 = (z > khcc_m.Load(int3(clamp(p0 + int2(1, 0), int2(0, 0), mx), 0))) ? 1.0f : 0.0f;
+    float o01 = (z > khcc_m.Load(int3(clamp(p0 + int2(0, 1), int2(0, 0), mx), 0))) ? 1.0f : 0.0f;
+    float o11 = (z > khcc_m.Load(int3(clamp(p0 + int2(1, 1), int2(0, 0), mx), 0))) ? 1.0f : 0.0f;
+    return lerp(lerp(o00, o10, f.x), lerp(o01, o11, f.x), f.y);
+}
+// The blocker search: the mean depth of the taps in front of the (biased)
+// receiver within khsb_r texels, centre included. -1 = nothing between the
+// light and the point.
+float KhSunBlockerZ(Texture2D<float> khsb_m, float khsb_sz, float2 khsb_uv, float khsb_z, float khsb_r, float2 khsb_rot)
+{
+    int2 khsb_mx = int2((int)khsb_sz - 1, (int)khsb_sz - 1);
+    float2 khsb_t = khsb_uv * khsb_sz;
+    float khsb_acc = 0.0f;
+    float khsb_n = 0.0f;
+    float khsb_c = khsb_m.Load(int3(clamp(int2(khsb_t), int2(0, 0), khsb_mx), 0));
+    if (khsb_c < khsb_z) { khsb_acc += khsb_c; khsb_n += 1.0f; }
+    [unroll] for (int khsb_i = 0; khsb_i < 16; ++khsb_i) {
+        int2 khsb_q = clamp(int2(khsb_t + KhPcssTap(khsb_i, khsb_rot) * khsb_r), int2(0, 0), khsb_mx);
+        float khsb_s = khsb_m.Load(int3(khsb_q, 0));
+        if (khsb_s < khsb_z) { khsb_acc += khsb_s; khsb_n += 1.0f; }
+    }
+    return khsb_n > 0.5f ? khsb_acc / khsb_n : -1.0f;
+}
+// The cast chain's compare: blocker search, then the contact ring unchanged
+// where the penumbra fits it, else the disc of bilinear compares at the
+// penumbra radius. khpw_z is the biased receiver depth; khpw_sp the ring
+// spread (the contact threshold); khpw_tw / khpw_iD the tier's texel (m) and
+// depth units per metre.
+float KhSunPcssWT(Texture2D<float> khpw_m, float khpw_sz, float2 khpw_uv, float khpw_z, float khpw_sp, float khpw_tw, float khpw_iD)
+{
+    float2 khpw_rot = KhPcssRot(khpw_uv * khpw_sz);
+    float khpw_rs = clamp(KhPcssRadius(khpw_z, 0.0f, khpw_tw, khpw_iD), khpw_sp, KH_PCSS_RMAX);
+    float khpw_zb = KhSunBlockerZ(khpw_m, khpw_sz, khpw_uv, khpw_z, khpw_rs, khpw_rot);
+    if (khpw_zb < 0.0f) return 0.0f;
+    float khpw_r = KhPcssRadius(khpw_z, khpw_zb, khpw_tw, khpw_iD);
+    if (khpw_r <= khpw_sp) return KhSunSoftWT(khpw_m, khpw_sz, khpw_uv, khpw_z, khpw_sp);   // Contact: as before.
+    khpw_r = min(khpw_r, KH_PCSS_RMAX) / khpw_sz;
+    float khpw_acc = 0.0f;
+    [unroll] for (int khpw_i = 0; khpw_i < 16; ++khpw_i) {
+        khpw_acc += KhSunBilinTC(khpw_m, khpw_sz, khpw_uv + KhPcssTap(khpw_i, khpw_rot) * khpw_r, khpw_z);
+    }
+    return khpw_acc * (1.0f / 16.0f);
 }
 
 // The tier-blend weight over the outer window edge. One curve for every blend
@@ -520,7 +621,12 @@ float KhCastTier(Texture2D<float> khC_map, float4x4 khC_vp, float4 khC_meta, flo
             // would push every world shadow bias / tan(elevation) sun-ward; the
             // capped khC_cb is what stops that.
             float khC_b = khC_cb > 0.0f ? khC_cb : khC_meta.z;
-            float khC_o = KhSunSoftWT(khC_map, khC_meta.y, khC_u, khC_c.z - khC_b, khC_sp);
+            // KH_PCSS: the tier's texel (m) and depth units per metre from
+            // the matrix, as KhSelfTier prices them.
+            float khC_iR = length(float3(khC_vp[0].x, khC_vp[1].x, khC_vp[2].x));
+            float khC_iD = length(float3(khC_vp[0].z, khC_vp[1].z, khC_vp[2].z));
+            float khC_tw = 2.0f / (max(khC_meta.y, 1.0f) * max(khC_iR, 1e-6f));
+            float khC_o = KhSunPcssWT(khC_map, khC_meta.y, khC_u, khC_c.z - khC_b, khC_sp, khC_tw, khC_iD);
             // Lit authoritative: the tier map is complete.
             if (khtb_occ >= 0.0f) { khC_done = true; return KhTbBlend(khC_o, khtb_occ, khtb_w); }
             if (khC_last) { khC_done = true; return khC_o; }   // The window holds the whole domain.
@@ -571,7 +677,30 @@ float SunShadowOcclusion(float3 wpos)
                           ? SunShadowCompareSoft(uv, 1.0f - khcu_b) : 0.0f;   // Filtered.
 
     // KH_TIER_BLEND: the union answer resolves any carried band edge.
-    float khtb_un = SunShadowCompareSoft(uv, c.z - khcu_b);
+    // KH_PCSS on the union too (the 0.75-texel diamond is its contact ring).
+    float khcu_iR = length(float3(sunVP[0].x, sunVP[1].x, sunVP[2].x));
+    float khcu_iD = length(float3(sunVP[0].z, sunVP[1].z, sunVP[2].z));
+    float khcu_tw = 2.0f / (max(sunMeta.y, 1.0f) * max(khcu_iR, 1e-6f));
+    float khtb_un;
+    {
+        float2 khcu_rot = KhPcssRot(uv * sunMeta.y);
+        float khcu_zr = c.z - khcu_b;
+        float khcu_rs = clamp(KhPcssRadius(khcu_zr, 0.0f, khcu_tw, khcu_iD), 1.0f, KH_PCSS_RMAX);
+        float khcu_zb = KhSunBlockerZ(khSunDepth, sunMeta.y, uv, khcu_zr, khcu_rs, khcu_rot);
+        float khcu_r = khcu_zb < 0.0f ? 0.0f : KhPcssRadius(khcu_zr, khcu_zb, khcu_tw, khcu_iD);
+        if (khcu_zb < 0.0f) {
+            khtb_un = 0.0f;
+        } else if (khcu_r <= 1.0f) {
+            khtb_un = SunShadowCompareSoft(uv, khcu_zr);   // Contact: as before.
+        } else {
+            khcu_r = min(khcu_r, KH_PCSS_RMAX) / sunMeta.y;
+            khtb_un = 0.0f;
+            [unroll] for (int khcu_i = 0; khcu_i < 16; ++khcu_i) {
+                khtb_un += KhSunBilinTC(khSunDepth, sunMeta.y, uv + KhPcssTap(khcu_i, khcu_rot) * khcu_r, khcu_zr);
+            }
+            khtb_un *= 1.0f / 16.0f;
+        }
+    }
     return (khtb_occ >= 0.0f) ? KhTbBlend(khtb_un, khtb_occ, khtb_w) : khtb_un;
 }
 
@@ -600,11 +729,46 @@ float KhSelfTapT(Texture2D<float> khst_m, float khst_sz, float2 khst_t, float2 k
                 lerp(khst_c.z, khst_c.w, khst_fr.x), khst_fr.y);
 }
 
+// KH_PCSS, the self chain's blocker search: point loads compared against the
+// receiver plane extrapolated to each tap (KhSelfTapT's own rule), centre
+// included. -1 = nothing between the light and the point. A receiver's own
+// curved surface reads as a blocker at a tiny distance, so a small penumbra
+// results and the contact ring answers - the wide kernel is reached only by
+// genuinely distant casters.
+float KhSelfBlockerZ(Texture2D<float> khbz_m, float khbz_sz, float2 khbz_t, float2 khbz_g, float khbz_z, float khbz_b, float khbz_r, float2 khbz_rot)
+{
+    int2 khbz_mx = int2((int)khbz_sz - 1, (int)khbz_sz - 1);
+    float khbz_acc = 0.0f;
+    float khbz_n = 0.0f;
+    [unroll] for (int khbz_i = 0; khbz_i < 17; ++khbz_i) {
+        float2 khbz_o = KhPcssTap(min(khbz_i, 15), khbz_rot) * khbz_r * (khbz_i < 16 ? 1.0f : 0.0f);   // Tap 16 = the centre.
+        int2 khbz_q = clamp(int2(khbz_t + khbz_o), int2(0, 0), khbz_mx);
+        float2 khbz_d = (float2(khbz_q) + 0.5f) - khbz_t;
+        float khbz_e = khbz_z + khbz_d.x * khbz_g.x + khbz_d.y * khbz_g.y - khbz_b;
+        float khbz_s = khbz_m.Load(int3(khbz_q, 0));
+        if (khbz_s < khbz_e) { khbz_acc += khbz_s; khbz_n += 1.0f; }
+    }
+    return khbz_n > 0.5f ? khbz_acc / khbz_n : -1.0f;
+}
+// The self chain's wide kernel: the disc of soft compares at khsp_r texels,
+// the slope bias grown by the radius (the textbook bias-with-filter-size, so a
+// receiver tilted to the light does not shadow itself across the disc).
+float KhSelfPcssT(Texture2D<float> khsp_m, float khsp_sz, float2 khsp_t, float2 khsp_g, float khsp_z, float khsp_b, float khsp_bsl, float khsp_w, float khsp_r, float2 khsp_rot)
+{
+    float khsp_bb = khsp_b + khsp_bsl * khsp_r;
+    float khsp_acc = 0.0f;
+    [unroll] for (int khsp_i = 0; khsp_i < 16; ++khsp_i) {
+        khsp_acc += KhSelfTapT(khsp_m, khsp_sz, khsp_t, khsp_g, khsp_z, khsp_bb, khsp_w, KhPcssTap(khsp_i, khsp_rot) * khsp_r);
+    }
+    return khsp_acc * (1.0f / 16.0f);
+}
+
 // One cascade of the self ladder: receiver-plane gradient (damped by
 // fwidth(n)), normal-offset sampling, a tier-proportional bias floor plus the
-// hero-priced slope term, a 3x3 footprint-spread pcf ring, the prefilter
-// (mean/variance) blend where the footprint exceeds a texel, and the tier-blend
-// carry at the window edge. The window test IS the selection: a point inside
+// hero-priced slope term, the KH_PCSS blocker search, then either the wide
+// penumbra disc or the contact path - a 3x3 footprint-spread pcf ring with the
+// prefilter (mean/variance) blend where the footprint exceeds a texel - and
+// the tier-blend carry at the window edge. The window test IS the selection: a point inside
 // this tier's window takes this tier's verdict, lit included - letting a lit
 // verdict fall through to a coarser tier paints the coarse tier's fatter shadow
 // rim outside the fine tier's correct one.
@@ -642,77 +806,94 @@ float KhSelfTier(Texture2D<float> khT_map, Texture2D<float2> khT_pf, float4x4 kh
                         + 0.35f * khT_tan * KH_SLOPE_TW(khT_tw) * khT_iD;
             float khT_gs = min(khgs, 4.0f * khT_tw);
             khT_b += khT_gs * khT_iD;
-            float2 khT_fw = fwidth(khT_t);
+            float2 khT_fw = fwidth(khT_t);   // Uniform control flow: taken here, read by both paths.
             float khT_sp = (khgs > 4.0f * khT_tw)
                          ? 1.0f
                          : clamp(0.5f * max(khT_fw.x, khT_fw.y), 1.0f, 8.0f);
             float khT_sw = max(2.0f * khT_gs, khT_tw) * khT_iD;   // Clamped slack.
-            // The centre and the four edge neighbours first; where those five
-            // agree the footprint is uniform and the diagonals cannot move the
-            // nine-tap mean, so they are skipped. That holds only while the
-            // taps overlap: the cross reaches sp texels out and the diagonals
-            // sp * sqrt(2), so past sp = 1 a diagonal edge can leave every
-            // cross tap lit while a corner is shadowed - hence the gate: the
-            // early-out only at sp = 1, all nine taps on grazing and distant
-            // footprints.
-            float khT_ctr = KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 0,  0));
-            float khT_cr4 = KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 0, -1) * khT_sp)
-                          + KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2(-1,  0) * khT_sp)
-                          + KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 1,  0) * khT_sp)
-                          + KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 0,  1) * khT_sp);
-            float khT_un = khT_ctr + khT_cr4;
+            // KH_PCSS: the blocker search over the widest penumbra this
+            // tier's window allows, then the contact ring unchanged where the
+            // penumbra fits it, else the disc at the penumbra radius (never
+            // narrower than the receiver footprint, which is the minification
+            // the prefilter blend served on the ring path).
+            float2 khT_rot = KhPcssRot(khT_t);
+            float khT_rs = clamp(KhPcssRadius(khT_c.z, 0.0f, khT_tw, khT_iD), khT_sp, KH_PCSS_RMAX);
+            float khT_zb = KhSelfBlockerZ(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_rs, khT_rot);
+            float khT_pr = khT_zb < 0.0f ? 0.0f : KhPcssRadius(khT_c.z, khT_zb, khT_tw, khT_iD);
             float khT_res;
-            [branch] if (khT_sp <= 1.5f &&
-                         (khT_un >= 4.9995f || khT_un <= 0.0005f)) {
-                khT_res = khT_ctr;   // Unanimous: the mean IS the centre.
+            [branch] if (khT_zb < 0.0f) {
+                khT_res = 0.0f;   // Nothing between the light and the point.
+            } else if (khT_pr > khT_sp) {
+                float khT_bsl = 0.35f * khT_tan * KH_SLOPE_TW(khT_tw) * khT_iD;
+                float khT_kr = min(max(khT_pr, 0.5f * max(khT_fw.x, khT_fw.y)), KH_PCSS_RMAX);
+                khT_res = KhSelfPcssT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_bsl, khT_sw, khT_kr, khT_rot);
             } else {
-                float khT_rng = khT_cr4
-                              + KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2(-1, -1) * khT_sp)
-                              + KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 1, -1) * khT_sp)
-                              + KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2(-1,  1) * khT_sp)
-                              + KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 1,  1) * khT_sp);
-                khT_res = (khT_ctr + khT_rng) / 9.0f;
-            }
-            if (khT_pfArm >= 0.5f) {
-                float khT_ft = max(khT_fw.x, khT_fw.y);
-                float khT_pw = (khgs > 4.0f * khT_tw)
-                             ? 0.0f : smoothstep(1.0f, 2.0f, khT_ft);
-                if (khT_pw > 0.001f) {
-                    float khT_lod = log2(max(khT_ft * 0.5f, 1.0f));
-                    float2 khT_mv = KhPfMu(khT_pf, khT_uv, khT_meta.y * 0.5f, khT_lod);
-                    float khT_vd = (khT_c.z - khT_b) - khT_mv.x;
-                    float khT_ww = max(khT_ft, 2.0f) * khT_tw * khT_iD;
-                    float khT_var = khT_mv.y - khT_mv.x * khT_mv.x;
-                    float khT_s2 = (khT_var >= 2.5e-7f ? max(khT_var, khT_ww * khT_ww)
-                                                       : khT_ww * khT_ww);   // Ramp.
-                    float khT_vv = khT_vd <= 0.0f ? 1.0f
-                                 : saturate(khT_s2 / (khT_s2 + khT_vd * khT_vd));
-                    float khT_pfo = 1.0f - saturate((khT_vv - 0.4f) / 0.6f);
-                    // khT_ga is the 'both read lit, do not invent shadow'
-                    // floor, as a weight (a hard test steps the blend across an
-                    // iso-contour - a halo tracking the penumbra).
-                    float khT_ga = max(smoothstep(0.0f, 0.002f, khT_res),
-                                       smoothstep(0.10f, 0.30f, khT_pfo));
-                    // The prefilter may not brighten the taps beyond the taps'
-                    // own uncertainty. Chebyshev's p_max is an UPPER bound on
-                    // the lit fraction: tight for a caster edge against open
-                    // sky, loose where two casters at different depths share
-                    // the footprint (their depth spread is variance with no lit
-                    // texel behind it - VSM light bleed, a bright line along
-                    // every shadow-meets-shadow boundary). Where the nine taps
-                    // are unanimous the prefilter has nothing brighter to add;
-                    // where they disagree it keeps its weight (4 r (1 - r),
-                    // continuous). Darkening is untouched (a thin caster the
-                    // taps straddle). Past the spread clamp the bound relaxes.
-                    float khT_wt = khT_pw * khT_ga;
-                    if (khT_pfo < khT_res) {
-                        float khT_unc = max(4.0f * khT_res * (1.0f - khT_res),
-                                            smoothstep(16.0f, 32.0f, khT_ft));
-                        khT_wt *= khT_unc;
-                    }
-                    khT_res = lerp(khT_res, khT_pfo, khT_wt);
+                // The centre and the four edge neighbours first; where those five
+                // agree the footprint is uniform and the diagonals cannot move the
+                // nine-tap mean, so they are skipped. That holds only while the
+                // taps overlap: the cross reaches sp texels out and the diagonals
+                // sp * sqrt(2), so past sp = 1 a diagonal edge can leave every
+                // cross tap lit while a corner is shadowed - hence the gate: the
+                // early-out only at sp = 1, all nine taps on grazing and distant
+                // footprints.
+                float khT_ctr = KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 0,  0));
+                float khT_cr4 = KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 0, -1) * khT_sp)
+                              + KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2(-1,  0) * khT_sp)
+                              + KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 1,  0) * khT_sp)
+                              + KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 0,  1) * khT_sp);
+                float khT_un = khT_ctr + khT_cr4;
+                [branch] if (khT_sp <= 1.5f &&
+                             (khT_un >= 4.9995f || khT_un <= 0.0005f)) {
+                    khT_res = khT_ctr;   // Unanimous: the mean IS the centre.
+                } else {
+                    float khT_rng = khT_cr4
+                                  + KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2(-1, -1) * khT_sp)
+                                  + KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 1, -1) * khT_sp)
+                                  + KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2(-1,  1) * khT_sp)
+                                  + KhSelfTapT(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_sw, float2( 1,  1) * khT_sp);
+                    khT_res = (khT_ctr + khT_rng) / 9.0f;
                 }
-            }
+                if (khT_pfArm >= 0.5f) {
+                    float khT_ft = max(khT_fw.x, khT_fw.y);
+                    float khT_pw = (khgs > 4.0f * khT_tw)
+                                 ? 0.0f : smoothstep(1.0f, 2.0f, khT_ft);
+                    if (khT_pw > 0.001f) {
+                        float khT_lod = log2(max(khT_ft * 0.5f, 1.0f));
+                        float2 khT_mv = KhPfMu(khT_pf, khT_uv, khT_meta.y * 0.5f, khT_lod);
+                        float khT_vd = (khT_c.z - khT_b) - khT_mv.x;
+                        float khT_ww = max(khT_ft, 2.0f) * khT_tw * khT_iD;
+                        float khT_var = khT_mv.y - khT_mv.x * khT_mv.x;
+                        float khT_s2 = (khT_var >= 2.5e-7f ? max(khT_var, khT_ww * khT_ww)
+                                                           : khT_ww * khT_ww);   // Ramp.
+                        float khT_vv = khT_vd <= 0.0f ? 1.0f
+                                     : saturate(khT_s2 / (khT_s2 + khT_vd * khT_vd));
+                        float khT_pfo = 1.0f - saturate((khT_vv - 0.4f) / 0.6f);
+                        // khT_ga is the 'both read lit, do not invent shadow'
+                        // floor, as a weight (a hard test steps the blend across an
+                        // iso-contour - a halo tracking the penumbra).
+                        float khT_ga = max(smoothstep(0.0f, 0.002f, khT_res),
+                                           smoothstep(0.10f, 0.30f, khT_pfo));
+                        // The prefilter may not brighten the taps beyond the taps'
+                        // own uncertainty. Chebyshev's p_max is an UPPER bound on
+                        // the lit fraction: tight for a caster edge against open
+                        // sky, loose where two casters at different depths share
+                        // the footprint (their depth spread is variance with no lit
+                        // texel behind it - VSM light bleed, a bright line along
+                        // every shadow-meets-shadow boundary). Where the nine taps
+                        // are unanimous the prefilter has nothing brighter to add;
+                        // where they disagree it keeps its weight (4 r (1 - r),
+                        // continuous). Darkening is untouched (a thin caster the
+                        // taps straddle). Past the spread clamp the bound relaxes.
+                        float khT_wt = khT_pw * khT_ga;
+                        if (khT_pfo < khT_res) {
+                            float khT_unc = max(4.0f * khT_res * (1.0f - khT_res),
+                                                smoothstep(16.0f, 32.0f, khT_ft));
+                            khT_wt *= khT_unc;
+                        }
+                        khT_res = lerp(khT_res, khT_pfo, khT_wt);
+                    }
+                }
+            }   // End of the contact-ring path.
             // Unconditional: the point is inside this tier's window, so this
             // tier's verdict stands whatever it is. Only the window EDGE
             // consults the next tier, through the same carry the cast chain
@@ -796,22 +977,36 @@ float SunShadowOcclusionSelf(float3 wrel, float3 nrm)
                 ? 1.0f
                 : clamp(0.5f * max(khsr_fw.x, khsr_fw.y), 1.0f, 8.0f);
     float khsr_sw = max(2.0f * khsr_gs, khsr_tw) * khsr_iD;   // Clamped slack.
-    float khsr_ctr = KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 0,  0));
-    float khsr_rng = KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2(-1, -1) * khsr_sp)
-                   + KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 0, -1) * khsr_sp)
-                   + KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 1, -1) * khsr_sp)
-                   + KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2(-1,  0) * khsr_sp)
-                   + KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 1,  0) * khsr_sp)
-                   + KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2(-1,  1) * khsr_sp)
-                   + KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 0,  1) * khsr_sp)
-                   + KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 1,  1) * khsr_sp);
     float khsr_fd = 1.0f;
     if (sunMeta.x >= 1.5f) {
         float khsr_e = max(abs(khsr_uv.x - 0.5f), abs(khsr_uv.y - 0.5f)) * 2.0f;
         khsr_fd = 1.0f - smoothstep(0.85f, 0.98f, khsr_e);
     }
-    float khsr_res = (khsr_ctr + khsr_w * khsr_rng)
-                   * (1.0f / (1.0f + 8.0f * khsr_w)) * khsr_fd;
+    // KH_PCSS on the union, the same shape as the tiers.
+    float2 khsr_rot = KhPcssRot(khsr_t);
+    float khsr_rs = clamp(KhPcssRadius(khsr_c.z, 0.0f, khsr_tw, khsr_iD), khsr_sp, KH_PCSS_RMAX);
+    float khsr_zb = KhSelfBlockerZ(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_rs, khsr_rot);
+    float khsr_pr = khsr_zb < 0.0f ? 0.0f : KhPcssRadius(khsr_c.z, khsr_zb, khsr_tw, khsr_iD);
+    float khsr_res;
+    [branch] if (khsr_zb < 0.0f) {
+        khsr_res = 0.0f;
+    } else if (khsr_pr > khsr_sp) {
+        float khsr_bsl = 0.35f * khsr_tan * KH_SLOPE_TW(khsr_tw) * khsr_iD;
+        float khsr_kr = min(max(khsr_pr, 0.5f * max(khsr_fw.x, khsr_fw.y)), KH_PCSS_RMAX);
+        khsr_res = KhSelfPcssT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_bsl, khsr_sw, khsr_kr, khsr_rot) * khsr_fd;
+    } else {
+        float khsr_ctr = KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 0,  0));
+        float khsr_rng = KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2(-1, -1) * khsr_sp)
+                       + KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 0, -1) * khsr_sp)
+                       + KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 1, -1) * khsr_sp)
+                       + KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2(-1,  0) * khsr_sp)
+                       + KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 1,  0) * khsr_sp)
+                       + KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2(-1,  1) * khsr_sp)
+                       + KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 0,  1) * khsr_sp)
+                       + KhSelfTapT(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_sw, float2( 1,  1) * khsr_sp);
+        khsr_res = (khsr_ctr + khsr_w * khsr_rng)
+                 * (1.0f / (1.0f + 8.0f * khsr_w)) * khsr_fd;
+    }   // End of the contact-ring path.
     // The union is reached only when no tier window held the point; its verdict
     // resolves any carried tier-edge blend and stands.
     return (khtb_occ >= 0.0f) ? KhTbBlend(khsr_res, khtb_occ, khtb_w) : khsr_res;
@@ -1388,6 +1583,16 @@ float KhAoTerm(float3 khao_p, float3 khao_n)
         [unroll] for (int khao_s3 = 0; khao_s3 < KH_AO_STEPS; ++khao_s3) {
             khao_vis = min(khao_vis, saturate(khao_d[khao_c3 * KH_AO_STEPS + khao_s3] / (khao_ts[khao_s3] * KH_AO_TAN)));
         }
+        // Horizon baseline. The five leaning cones (65 deg off the normal,
+        // 33.6 deg half-angle) dip below the receiver's tangent plane, so on a
+        // flat face the receiver's own field - or a coplanar neighbour's -
+        // sits t cos 65 / (t tan 33.6) = 0.635 of the cone width from every
+        // sample: every flat face read ~75% ambient, and brightened only where
+        // the face ended and the leaning cone saw nothing (a lit rim along
+        // every edge). A plane through the receiver occludes nothing of its
+        // hemisphere; the cone's visibility is measured against that baseline.
+        const float khao_base = khao_c3 == 0 ? 1.0f : (0.4226f / KH_AO_TAN);
+        khao_vis = saturate(khao_vis / khao_base);
         const float khao_w = khao_c3 == 0 ? 1.0f : 0.4226f;   // Cosine-weighted.
         khao_sum += khao_vis * khao_w;
         khao_wsum += khao_w;

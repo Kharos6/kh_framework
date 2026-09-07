@@ -426,15 +426,12 @@ float4 PSComposite(VSOutC i) : SV_Target
     // pre-mesh scene capture at this pixel, blend in Reinhard space, invert,
     // write opaque.
     if (blendCtl.x >= 0.5f) {
-        // Cold on every live fill: the injection writes blendCtl.x = 0, and
-        // the flush's one route into this shader (near-gap) sets blendCtl.y
-        // to 1e9, so khb_a == a there. PSMain, the live perceptual path, has
-        // no range rule.
-        float khb_a = (sceneZ > blendCtl.y) ? 1.0f : a;
+        // Twin: PSMain. Every pixel blends by a (the injection never arms
+        // blendCtl.x; the flush's near-gap route can).
         float3 scn = sceneColorTex.Load(int3(int2(i.pos.xy), 0)).rgb;
         float3 ts = scn / (1.0f + scn);
         float3 tl = lc / (1.0f + lc);
-        float3 tm = lerp(ts, tl, khb_a);
+        float3 tm = lerp(ts, tl, a);
         return float4(tm / max(1.0f - tm, 0.0039f), 1.0f);   // Cap ~HDR 255.
     }
 

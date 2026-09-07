@@ -2381,9 +2381,11 @@ static UINT g_main_depth_w = 0;
 static UINT g_main_depth_h = 0;
 static UINT  g_wrong_pass_streak = 0;
 static bool  g_flush_wrong_pass = false;   // KH_WRONG_PASS_REPARK: flush_locked parked on a non-main depth; re-park.
-// KH_FLUSH_CADENCE: the park costs the game thread the engine's grant wait every
-// frame (measured 5-7 ms), while a healthy injection owns every draw and the
-// park then only publishes, sweeps and snapshots. A locked flush certifies the
+// KH_FLUSH_CADENCE (OFF - see KH_FLUSH_CADENCE_ON below; what follows
+// describes the machinery as it stands behind the switch): the park costs the
+// game thread the engine's grant wait every frame (measured 5-7 ms), while a
+// healthy injection owns every draw and the park then only publishes, sweeps
+// and snapshots. A locked flush certifies the
 // frame shape (g_flush_can_skip: injection healthy, nothing late, nothing
 // expiring); while that holds and nothing is pending, flush_frame skips the
 // park until KH_FLUSH_LOCK_INTERVAL_MS have passed since the last one (the
@@ -2399,6 +2401,25 @@ static bool  g_flush_wrong_pass = false;   // KH_WRONG_PASS_REPARK: flush_locked
 // the interval. The period is the gap between consecutive flush_frame calls
 // with work, clamped; a false positive costs one park, a miss costs the
 // meshes.
+// KH_FLUSH_CADENCE_ON - MUST STAY false. DO NOT TURN THE SKIP ON FOR
+// PERFORMANCE. Every version through old4 parked every frame; the skip arrived
+// after it and has since needed KH_FLUSH_STALE, both halves of KH_FLUSH_MISS,
+// the repaint signal, the sparse-frame bail and the cycle witness - five
+// patches, each closing a one-frame hole the every-frame park never had (a
+// mesh vanishing for a frame, a mesh through the terrain for a frame, a black
+// lighting vote, wrong behaviour on the first frame with no game mesh in view)
+// - and the measured cadence barely skipped (1,325 parks to 1,193 landings in
+// the confirming dump). The stability audit against old2 / old3 / old4 found
+// the skip the one structural difference that touches those symptoms, so the
+// park is unconditional. The game thread can only cover the frame in flight
+// from inside the park: no pre-lock signal can name that frame, and every
+// skip is a frame the flush declines to look at. The machinery below stays
+// only so the history reads; with the switch off the skip test, its signals
+// (g_inj_bailed, g_inj_repainted, g_flush_landed_this_frame) and
+// g_flush_can_skip are inert. The cost of the park is 5-7 ms of game-thread
+// wait per frame, which every earlier version paid and which is the price of
+// a frame-exact flush.
+static constexpr bool     KH_FLUSH_CADENCE_ON = false;
 static constexpr uint64_t KH_FLUSH_LOCK_INTERVAL_MS = 100;
 static constexpr uint64_t KH_FLUSH_STALE_PERIODS = 2;
 static constexpr uint64_t KH_FLUSH_STALE_SLACK_MS = 4;
@@ -2410,6 +2431,9 @@ static bool     g_flush_can_skip = false;   // Game thread: the last locked flus
 // the skip test and nobody drew the meshes that frame - the sky showed through
 // them for one frame. The landing serial is bumped only by a real landing, so
 // a flush_frame that sees no bump since its previous call parks and draws late.
+// With KH_FLUSH_CADENCE_ON off every flush_frame call parks, so the per-call
+// verdict below equals the per-park one and the skip signals are inert; the
+// draw's own verdict is the cycle witness in flush_locked (KH_FLUSH_CYCLE_WITNESS).
 static uint64_t g_flush_miss_seen_serial = 0;   // Game thread only.
 // The per-frame verdict flush_locked reads (game thread): did the injection
 // land since the PREVIOUS flush_frame call - skipped parks included. It used
@@ -2420,7 +2444,10 @@ static uint64_t g_flush_miss_seen_serial = 0;   // Game thread only.
 // (every frame the terrain left the view).
 static bool     g_flush_landed_this_frame = false;
 // Raised on the render thread when a triggered injection bails without
-// landing (mid-frame, ahead of any grant); consumed by flush_frame's skip test.
+// landing, or when the world partition's translucent phase arrives under the
+// opaque floor (a sky-only frame that will never trigger) - mid-frame, ahead
+// of any grant; consumed by flush_frame's skip test only (inert with
+// KH_FLUSH_CADENCE_ON off).
 static std::atomic<bool> g_inj_bailed{false};
 // Raised on the render thread when 32 opaque draws follow a landing (the
 // parked flush's repainted_since_inject rule); the skip test cannot otherwise
@@ -2533,8 +2560,7 @@ struct alignas(16) ConstantData {
     float obj_rot[3][4];   // [0][3] = 1 marks filled (the zeroed default reads as identity
                            // in-shader - auxiliary fills stay correct).
     float blend_ctl[4];   // x = perceptual-composite enable (the flush's fill only; the injection
-                          // writes 0), y = PSComposite's background-trust range (m), read on no
-                          // live path (see the flush's fill), w = the LOD crossfade dither.
+                          // writes 0), w = the LOD crossfade dither; y / z unread.
     float mat_ctl[4];   // KH_MAT_TABLE (HLSL twin matCtl): x = table index (base + slot) for the
                         // non-instanced VS, y = slot for the instanced VS, w = alpha-mode override
                         // (-1 none). The material lanes themselves live in the table (KhGpuMat).
@@ -11667,7 +11693,11 @@ inline void kh_blk_owner_frame() {
 // switch the cascade axis leaves an unmoved lane by tens of degrees for 1-3
 // frames); the CASCADE CONSENSUS otherwise (night); the sky lane alone after
 // KH_SRAW_SKY_FALLBACK_MS with no cascade (shadows off). A step past
-// KH_SRAW_JUMP_DEG resets the union's map hash. Nothing here smooths.
+// KH_SRAW_JUMP_DEG resets the union's map hash. Nothing here blends: the
+// consensus published is its median over a ring of closes, and only while
+// that median is still or the lane witnesses the sun moving (KH_SRAW_SETTLE);
+// after a lane jump the lane stands until it settles. The engine's own
+// convergence, its rotation departures and its per-close spikes never publish.
 inline float kh_rc_median(float* khrm_v, int khrm_n) {   // Insertion sort: n <= KH_SRAW_CYC.
     for (int khrm_i = 1; khrm_i < khrm_n; ++khrm_i) {
         const float khrm_x = khrm_v[khrm_i];
@@ -11692,6 +11722,40 @@ static float    g_sraw_sky_step_deg = -1.0f;   // How far the lane moved since t
 static float    g_sraw_pub_gap_deg = -1.0f;   // Consensus vs the standing publish at the close (pre-publish).
 static float    g_sraw_sky_gap_deg = -1.0f;   // Consensus vs the sky lane (skyward), -1 = no fresh lane.
 static constexpr float KH_SRAW_LANE_STILL_DEG = 0.05f;   // KH_SRAW_LANE_HOLD: a lane step under this is 'did not move'.
+// KH_SRAW_SETTLE: the consensus is published only when it is STILL, and what
+// is published is its median over the last KH_SRAW_RING sampled world closes,
+// not the raw close. Two things move the raw consensus with no sun behind
+// them: its convergence after a jump (a second or more) and its departure
+// under camera rotation (the engine re-fits its cascades to the view; tens of
+// degrees for a few frames on a flick, a lean on a turn). A third moves it at
+// rest: single-close spikes up to ~1 deg (measured 0.001 deg mean / < 1 deg
+// max while the sky stood still), which a per-close step test can never call
+// settled - the first version of this did, and its cap then published a raw
+// spike. The median is still to ~0.001 deg at rest; its close-to-close step
+// against the elevation-scaled bar (0.02 rad x sin^2, floored at
+// KH_SRAW_SETTLE_MIN_DEG, capped at KH_SRAW_SETTLE_MAX_DEG) for
+// KH_SRAW_SETTLE_MS is 'settled'. A moving sun is witnessed by the lane
+// (KH_SRAW_LANE_STILL_DEG) and publishes at once. Unsettled and unwitnessed,
+// the standing publish holds: the lane after a jump (KH_SRAW_JUMP_HOLD), else
+// the last publish; KH_SRAW_HOLD_CAP_MS bounds every hold (night, or a sun
+// run so fast the lane test is not the witness). A shadow tip moves
+// 1 / sin^2(elevation) per radian of axis - 365x at 3 deg - which is why
+// none of this is visible at noon. Old-version lineage: KH_LIGHT_RECON's
+// median ring and kh_sun_settled's bar, retired when KH_SUN_RAW went raw.
+static constexpr int      KH_SRAW_RING          = 32;     // ~0.5 s of world closes.
+static constexpr uint64_t KH_SRAW_HOLD_CAP_MS   = 6000;
+static constexpr uint64_t KH_SRAW_SETTLE_MS     = 400;
+static constexpr float    KH_SRAW_SETTLE_MIN_DEG = 0.005f;
+static constexpr float    KH_SRAW_SETTLE_MAX_DEG = 0.15f;
+static float    g_sraw_ring[KH_SRAW_RING][3] = {};   // Raw consensus per sampled world close.
+static int      g_sraw_ring_n = 0;                   // Filled entries (<= KH_SRAW_RING).
+static int      g_sraw_ring_i = 0;                   // Next write slot.
+static float    g_sraw_med_prev[3] = {};             // The median at the previous close (the step's reference).
+static bool     g_sraw_med_prev_valid = false;
+static uint64_t g_sraw_hold_until_ms = 0;   // KH_SRAW_JUMP_HOLD: the lane stands until the median settles or this passes.
+static uint64_t g_sraw_cons_moved_ms = 0;   // Last close whose median stepped past the bar.
+static uint64_t g_sraw_unsettled_ms = 0;    // First unsettled close of the current run (0 = settled); the cap's clock.
+inline void kh_sraw_ring_reset() { g_sraw_ring_n = 0; g_sraw_ring_i = 0; g_sraw_med_prev_valid = false; }
 
 inline float kh_sraw_angle_deg(const float* khsa_a, const float* khsa_b) {
     float khsa_d = khsa_a[0] * khsa_b[0] + khsa_a[1] * khsa_b[1] + khsa_a[2] * khsa_b[2];
@@ -11743,6 +11807,44 @@ inline void kh_sun_raw_frame() {
     // (this frame's publish, below; a refused cycle leaves it open).
     if (khsf_src == 0) return;   // Nothing this cycle: the standing publish stays.
     if (khsf_src == 1) {
+        // KH_SRAW_SETTLE (see the statics). The ring takes world closes only;
+        // a refused close's sample is a foreign pass's axis.
+        bool khsf_settled = false;
+        if (khsf_world) {
+            g_sraw_ring[g_sraw_ring_i][0] = khsf_m[0]; g_sraw_ring[g_sraw_ring_i][1] = khsf_m[1]; g_sraw_ring[g_sraw_ring_i][2] = khsf_m[2];
+            g_sraw_ring_i = (g_sraw_ring_i + 1) % KH_SRAW_RING;
+            if (g_sraw_ring_n < KH_SRAW_RING) ++g_sraw_ring_n;
+        }
+        if (g_sraw_ring_n >= KH_SRAW_RING) {
+            float khsf_rx[KH_SRAW_RING], khsf_ry[KH_SRAW_RING], khsf_rz[KH_SRAW_RING];
+            for (int khsf_i = 0; khsf_i < KH_SRAW_RING; ++khsf_i) {
+                khsf_rx[khsf_i] = g_sraw_ring[khsf_i][0]; khsf_ry[khsf_i] = g_sraw_ring[khsf_i][1]; khsf_rz[khsf_i] = g_sraw_ring[khsf_i][2];
+            }
+            float khsf_md[3] = { kh_rc_median(khsf_rx, KH_SRAW_RING), kh_rc_median(khsf_ry, KH_SRAW_RING), kh_rc_median(khsf_rz, KH_SRAW_RING) };
+            const float khsf_ml = sqrtf(khsf_md[0] * khsf_md[0] + khsf_md[1] * khsf_md[1] + khsf_md[2] * khsf_md[2]);
+            if (khsf_ml > 1.0e-6f) {
+                khsf_md[0] /= khsf_ml; khsf_md[1] /= khsf_ml; khsf_md[2] /= khsf_ml;
+                if (khsf_md[1] < 0.0f) { khsf_md[0] = -khsf_md[0]; khsf_md[1] = -khsf_md[1]; khsf_md[2] = -khsf_md[2]; }
+                float khsf_step_deg = 0.0f;
+                if (g_sraw_med_prev_valid) khsf_step_deg = kh_sraw_angle_deg(khsf_md, g_sraw_med_prev);
+                g_sraw_med_prev[0] = khsf_md[0]; g_sraw_med_prev[1] = khsf_md[1]; g_sraw_med_prev[2] = khsf_md[2];
+                g_sraw_med_prev_valid = true;
+                const float khsf_sy = khsf_md[1];   // sin(elevation): skyward and unit.
+                float khsf_bar = 0.02f * khsf_sy * khsf_sy * 57.29578f;
+                if (khsf_bar < KH_SRAW_SETTLE_MIN_DEG) khsf_bar = KH_SRAW_SETTLE_MIN_DEG;
+                if (khsf_bar > KH_SRAW_SETTLE_MAX_DEG) khsf_bar = KH_SRAW_SETTLE_MAX_DEG;
+                if (khsf_step_deg > khsf_bar) g_sraw_cons_moved_ms = khsf_now;
+                khsf_settled = g_sraw_cons_moved_ms == 0 || khsf_now - g_sraw_cons_moved_ms >= KH_SRAW_SETTLE_MS;
+                khsf_m[0] = khsf_md[0]; khsf_m[1] = khsf_md[1]; khsf_m[2] = khsf_md[2];   // The median is the consensus from here.
+            }
+        }
+        if (khsf_settled) {
+            g_sraw_unsettled_ms = 0;
+        } else if (g_sraw_unsettled_ms == 0) {
+            g_sraw_unsettled_ms = khsf_now;   // The cap's clock: opened at the first unsettled close.
+        }
+        const bool khsf_capped = g_sraw_unsettled_ms != 0 && khsf_now - g_sraw_unsettled_ms >= KH_SRAW_HOLD_CAP_MS;
+        bool khsf_lane_moved = false;   // The sun moved (the lane stepped): the median publishes unheld.
         // Wobble: the consensus step from the previous sampled cycle while the sky lane held still.
         g_sraw_sky_gap_deg = -1.0f;
         if (kh_sun_axis_lane_fresh(khsf_now)) {
@@ -11752,23 +11854,51 @@ inline void kh_sun_raw_frame() {
             g_sraw_sky_step_deg = g_sraw_sky_prev_valid ? kh_sraw_angle_deg(khsf_s, g_sraw_sky_prev) : 0.0f;
             g_sraw_sky_prev[0] = khsf_s[0]; g_sraw_sky_prev[1] = khsf_s[1]; g_sraw_sky_prev[2] = khsf_s[2];
             g_sraw_sky_prev_valid = true;
+            khsf_lane_moved = khsf_s_ok && g_sraw_sky_step_deg > KH_SRAW_LANE_STILL_DEG;
+            // KH_SRAW_JUMP_HOLD: the lane jumped - the sun moved - the lane
+            // stands in for the consensus until the median settles on the new
+            // sun; the ring restarts so the old sun never blends into it.
+            if (khsf_s_ok && g_sraw_sky_step_deg > KH_SRAW_JUMP_DEG) {
+                g_sraw_hold_until_ms = khsf_now + KH_SRAW_HOLD_CAP_MS;
+                g_sraw_cons_moved_ms = khsf_now;
+                g_sraw_unsettled_ms = khsf_now;
+                khsf_settled = false;
+                khsf_lane_moved = false;
+                kh_sraw_ring_reset();
+            }
             // The witnessed lane is the axis, fold-free.
             if (g_sraw_sky_gap_deg <= KH_SRAW_LANE_WIT_DEG && khsf_s_ok) {
                 khsf_m[0] = khsf_s[0]; khsf_m[1] = khsf_s[1]; khsf_m[2] = khsf_s[2];
                 khsf_src = 3;
+                g_sraw_hold_until_ms = 0;   // The consensus reached the lane: nothing left to hold against.
+            } else if (khsf_s_ok && g_sraw_hold_until_ms != 0 && !khsf_settled && khsf_now < g_sraw_hold_until_ms) {
+                khsf_m[0] = khsf_s[0]; khsf_m[1] = khsf_s[1]; khsf_m[2] = khsf_s[2];
+                khsf_src = 4;   // The lane stands through the convergence.
             } else if (khsf_s_ok &&
                        (g_sraw_last_src == 3 || g_sraw_last_src == 4) &&
-                       g_sraw_sky_step_deg >= 0.0f && g_sraw_sky_step_deg <= KH_SRAW_LANE_STILL_DEG) {
+                       g_sraw_sky_step_deg >= 0.0f && g_sraw_sky_step_deg <= KH_SRAW_LANE_STILL_DEG &&
+                       !khsf_settled) {
                 // Standing-lane hold: the lane stood still since the previous
                 // close that named it (g_sraw_last_src is stored before the
                 // world test, so a refused close counts); the consensus left
-                // it, the sun did not (Src 4).
+                // it, the sun did not (Src 4). A settled median that left the
+                // lane is the engine's own axis and publishes.
                 khsf_m[0] = khsf_s[0]; khsf_m[1] = khsf_s[1]; khsf_m[2] = khsf_s[2];
                 khsf_src = 4;
+            } else {
+                g_sraw_hold_until_ms = 0;
             }
         } else {
             g_sraw_sky_step_deg = -1.0f;
             g_sraw_sky_prev_valid = false;
+            g_sraw_hold_until_ms = 0;   // No lane to stand in (night): the last publish holds instead.
+        }
+        // The consensus publishes settled, or witnessed moving, or capped, or
+        // when nothing stands yet; unsettled it holds the standing publish.
+        if (khsf_src == 1 && !khsf_settled && !khsf_lane_moved && !khsf_capped && g_pub_valid) {
+            g_sraw_last_src = khsf_src;
+            g_sraw_pub_gap_deg = kh_sraw_angle_deg(khsf_m, g_pub_dir);
+            return;   // Held: the standing publish stays.
         }
     }
     g_sraw_last_src = khsf_src;
@@ -11984,14 +12114,8 @@ static LiveShadowState g_ls;
 static float    g_inj_view[16] = {};
 static uint64_t g_inj_view_ms = 0;
 
-inline bool kh_adopt_frame_view(RVExtBridge::ProjectionViewTransform& pv,
-                                uint8_t* khav_out_path = nullptr,
-                                float* khav_out_age_ms = nullptr) {
-    if (khav_out_path) *khav_out_path = 0;
+inline bool kh_adopt_frame_view(RVExtBridge::ProjectionViewTransform& pv) {
     if (!g_ls.frame_view_valid || g_ls.frame_view_time < 0.0f) return false;
-    if (khav_out_age_ms) {
-        *khav_out_age_ms = (effect_time_seconds() - g_ls.frame_view_time) * 1000.0f;
-    }
 
     if (g_ls.pub_fresh_ms == 0 ||
         steady_now_ms() - g_ls.pub_fresh_ms > 1000) {
@@ -12021,7 +12145,6 @@ inline bool kh_adopt_frame_view(RVExtBridge::ProjectionViewTransform& pv,
     }
 
     if (khav_rot < 1.0e-5f) {
-        if (khav_out_path) *khav_out_path = 2;
         return true;
     }
 
@@ -12045,7 +12168,6 @@ inline bool kh_adopt_frame_view(RVExtBridge::ProjectionViewTransform& pv,
     }
 
     pv.view[3][3] = 1.0f;
-    if (khav_out_path) *khav_out_path = 1;
     return true;
 }
 
@@ -16253,7 +16375,7 @@ struct KhAoRec {   // HLSL twin KhAoRec (t40), 5 float4.
 static_assert(sizeof(KhAoRec) == 80, "KhAoRec is 5 float4 (HLSL twin)");
 static constexpr uint32_t KH_AO_MAX = 192u;   // HLSL twin KH_AO_MAX / khAoOcc's length.
 static_assert(sizeof(ConstantData::kh_ao_occ) == KH_AO_MAX * 16u, "kh_ao_occ holds KH_AO_MAX float4 (HLSL twin khAoOcc)");
-static constexpr float    KH_AO_RANGE_M = 150.0f;   // Receivers fade out over the last 15% of this.
+static constexpr float    KH_AO_RANGE_M = 150.0f;   // Receivers fade out over the last 15% of this (or of the cap-bound range).
 static std::atomic<uint32_t> g_ao_strength_bits{ 0x3F800000u };   // Float bits, default 1.0; 0 = off.
 static std::atomic<uint32_t> g_ao_dist_bits{ 0x3F800000u };       // Trace distance (m), default 1.0.
 inline float kh_ao_strength() {
@@ -16368,10 +16490,20 @@ inline uint32_t kh_ao_gather(ID3D11DeviceContext* ctx, ID3D11Device* dev, Consta
         g_ao_cand.emplace_back(khag_d2, khag_s);
     }
     if (g_ao_cand.empty()) return 0;
+    // The receiver fade must end where the occluder list does. Nearest-first
+    // to the cap, the list is complete only out to the last kept occluder's
+    // distance; a receiver can be occluded by anything within its trace
+    // distance, so it is complete for receivers up to that minus the trace.
+    // Publishing the nominal range while the cap bound left every receiver in
+    // a dense grid with a list that ended inside its fade, and each occluder
+    // entered the list as a step: the AO popped in instead of fading.
+    float khag_range = KH_AO_RANGE_M;
     if (g_ao_cand.size() > KH_AO_MAX) {
         std::partial_sort(g_ao_cand.begin(), g_ao_cand.begin() + KH_AO_MAX, g_ao_cand.end(),
                           [](const std::pair<float, uint32_t>& a, const std::pair<float, uint32_t>& b) { return a.first < b.first; });
         g_ao_cand.resize(KH_AO_MAX);
+        const float khag_last = sqrtf(g_ao_cand[KH_AO_MAX - 1u].first) - khag_dist;
+        if (khag_last < khag_range) khag_range = khag_last > 0.0f ? khag_last : 0.0f;
     }
     const uint32_t khag_n = static_cast<uint32_t>(g_ao_cand.size());
     g_ao_recs.resize(khag_n);
@@ -16434,7 +16566,7 @@ inline uint32_t kh_ao_gather(ID3D11DeviceContext* ctx, ID3D11Device* dev, Consta
     cbf.kh_ao[0] = khag_str;
     cbf.kh_ao[1] = static_cast<float>(khag_n);
     cbf.kh_ao[2] = khag_dist;
-    cbf.kh_ao[3] = KH_AO_RANGE_M;
+    cbf.kh_ao[3] = khag_range;   // The complete range (KH_AO_RANGE_M unless the cap bound).
     cbf.kh_ao_atlas[0] = 1.0f / static_cast<float>(KH_SDF_ATLAS_WH);
     cbf.kh_ao_atlas[1] = 1.0f / static_cast<float>(KH_SDF_N * g_res.sdf_layers);
     cbf.kh_ao_atlas[2] = static_cast<float>(KH_SDF_N);
@@ -19189,10 +19321,30 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     float cam_e[3] = { 0.0f, 0.0f, 0.0f };
     bool cam_valid = false;
 
+    // KH_SUN_CAM_LATCH: this camera is the anchor, the caster cylinder, the
+    // tier windows and the range fade's centre. It used to be the raw bridge
+    // sample, which is one step ahead of the frame at ground and foreign (up to
+    // 156 m, 1.410) at altitude, so the whole shadow domain sat that far off
+    // the camera the meshes draw from - invisible while shadows stayed under
+    // their casters, and a rim that led the camera once a low sun stretched
+    // them out to it. The injection's own take instead: the cycle latch, with
+    // the bridge admitted only when the clear-time fetch failed and the latch
+    // is more than KH_LATCH_JUMP_M behind it (inject_composited_meshes' rule).
     {
         RVExtBridge::ProjectionViewTransform cpv = {};
+        const bool khsc_live = RVExtBridge::get_projection_view_transform(cpv);
 
-        if (RVExtBridge::get_projection_view_transform(cpv)) {
+        if (g_ro.cycle_pv_valid) {
+            extract_camera_pos(g_ro.cycle_pv.view, cam_e);
+            cam_valid = true;
+            if (khsc_live && !g_boundary_pv_valid) {
+                float khsc_lc[3];
+                extract_camera_pos(cpv.view, khsc_lc);
+                if (latch_cam_dist_sq(cam_e, khsc_lc) > KH_LATCH_JUMP_M * KH_LATCH_JUMP_M) {
+                    cam_e[0] = khsc_lc[0]; cam_e[1] = khsc_lc[1]; cam_e[2] = khsc_lc[2];
+                }
+            }
+        } else if (khsc_live) {
             extract_camera_pos(cpv.view, cam_e);
             cam_valid = true;
         } else if (g_ls.cam[0] != 0.0f || g_ls.cam[1] != 0.0f || g_ls.cam[2] != 0.0f) {
@@ -24936,7 +25088,6 @@ inline void kh_pip_inject(ID3D11DeviceContext* ctx) {
         cbd.size_axes[3] = static_cast<float>(o.blend_mode);
         kh_fill_obj_rot(cbd, o.rot_m);
         cbd.blend_ctl[0] = 0.0f;
-        cbd.blend_ctl[1] = 150.0f;
         cbd.blend_ctl[3] = 0.0f;
         memcpy(cbd.color, o.color, sizeof(cbd.color));
         cbd.fx0[0] = cam[0]; cbd.fx0[1] = cam[1]; cbd.fx0[2] = cam[2];
@@ -26427,7 +26578,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         kh_fill_obj_rot(cbd, o.rot_m);
         // blendCtl.x: never on this pass (see the pass head).
         cbd.blend_ctl[0] = 0.0f;
-        cbd.blend_ctl[1] = 150.0f;   // PSComposite's background-trust range (m); unread with x = 0.
         // blend_ctl[3] is the crossfade dither; written here so it is never
         // inherited from the previous object's fade.
         cbd.blend_ctl[3] = 0.0f;
@@ -27211,22 +27361,39 @@ inline void kh_reorder_trigger(ID3D11DeviceContext* self) {
                                ? khr_floor_rel
                                : KH_REORDER_MIN_OPAQUE_DRAWS;
 
+    // Only a partition spanning the broad middle of [0, 1] is the world
+    // pass: a range starting deep is a far partition (distant terrain,
+    // clouds); one that never reaches the far side is the weapon/hands
+    // slice (rendered after the world - injecting there paints the mesh
+    // over the completed frame).
+    UINT n_vp = 1;
+    D3D11_VIEWPORT vp = {};
+    bool khr_world_vp = false;
+    auto khr_read_vp = [&]() -> bool {
+        self->RSGetViewports(&n_vp, &vp);
+        if (n_vp < 1) return false;
+        khr_world_vp = !(vp.MinDepth > 0.3f || vp.MaxDepth < 0.7f);
+        return true;
+    };
+
     if (g_ro.opaque_draws < min_opaques) {
+        // KH_FLUSH_MISS, the sparse frame (cadence only - inert with
+        // KH_FLUSH_CADENCE_ON off, and the viewport is not read here then):
+        // the world partition reached its translucent phase with too few
+        // opaques to be a scene (a sky-only view), so this cycle will not
+        // inject and the flush must draw it late. The two bail sites below
+        // sit past this floor and never see such a frame; raised here,
+        // mid-frame, it reaches the skip test as the other bails do.
+        if (KH_FLUSH_CADENCE_ON && khr_read_vp() && khr_world_vp && g_ro.dsv_main) {
+            g_inj_bailed.store(true, std::memory_order_relaxed);
+        }
         return;
     }
 
     {
-        // Only a partition spanning the broad middle of [0, 1] is the world
-        // pass: a range starting deep is a far partition (distant terrain,
-        // clouds); one that never reaches the far side is the weapon/hands
-        // slice (rendered after the world - injecting there paints the mesh
-        // over the completed frame).
-        UINT n_vp = 1;
-        D3D11_VIEWPORT vp = {};
-        self->RSGetViewports(&n_vp, &vp);
-        if (n_vp < 1) return;
+        if (!khr_read_vp()) return;
 
-        if (vp.MinDepth > 0.3f || vp.MaxDepth < 0.7f) {
+        if (!khr_world_vp) {
 
             if (!kh_rescue_window_open()) return;
         } else {
@@ -28552,7 +28719,23 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // order so chained effects compose deterministically.
     const float snapshot_now = effect_time_seconds();
     // Per flush_frame call, not per park (KH_FLUSH_MISS: see g_flush_landed_this_frame).
+    // The cadence's health verdict: a landing has happened lately.
     const bool injected_since_last_flush = g_flush_landed_this_frame;
+    // KH_FLUSH_CYCLE_WITNESS: the draw's verdict is a different question - has
+    // THE CYCLE IN FLIGHT landed, the one these late draws go into. The park
+    // holds the render thread stalled inside that cycle with its main depth
+    // bound (the wrong-pass re-park guarantees it), so the cycle's own flag,
+    // reset at its clear and set at its landing, is definite here. The serial
+    // delta is not: taken before the lock with the render thread mid-frame,
+    // "a landing since my last call" is usually the previous frame's, and on
+    // the first frame with no game mesh in view it stood the flush down for a
+    // cycle that would never inject - the meshes vanished for that frame. A
+    // park that lands ahead of a healthy cycle's landing draws late and the
+    // injection draws again: identical overdraw, the same as any never-injected
+    // frame here. Independent of KH_FLUSH_CADENCE_ON: with the park
+    // unconditional the serial delta is the previous park's landing and still
+    // cannot name the cycle in flight, so this witness stays.
+    const bool khf_cycle_landed = g_ro.injected;
     // A frame that saw an anomalous cycle, or whose world redrew after the
     // injection, or that never injected, gets its meshes drawn late here as
     // well - identical overdraw where the injection survived, fill-in where a
@@ -28560,8 +28743,13 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     const bool repainted_since_inject = g_ro.opaques_since_inject >= 32;
     const bool anomaly_this_frame = g_ro.anomaly_seen;
     g_ro.anomaly_seen = false;
-    const bool comp_healthy = composite_path_healthy() && injected_since_last_flush &&
-                              !repainted_since_inject && !anomaly_this_frame;
+    // khf_inj_healthy is the cadence's verdict (may the next frames skip the
+    // park); comp_healthy is the draw's (may this park stand down for the
+    // composite meshes). A park that lands ahead of its cycle's landing draws
+    // late without costing the cadence its skip.
+    const bool khf_inj_healthy = composite_path_healthy() && injected_since_last_flush &&
+                                 !repainted_since_inject && !anomaly_this_frame;
+    const bool comp_healthy = khf_inj_healthy && khf_cycle_landed;
 
     uint32_t khf_comp_eligible = 0;
     bool khf_any_lit = false;   // sun-map carry: a lit mesh exists this frame.
@@ -28572,9 +28760,6 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     static std::vector<std::pair<uint64_t, RenderObject>> fullscreen;   // Key = creation seq.
     meshes.clear();
     fullscreen.clear();
-
-    LARGE_INTEGER khsn_t0 = {}, khsn_t1 = {};
-    QueryPerformanceCounter(&khsn_t0);
 
     static std::vector<uint32_t> khf_expired;   // KH_SCENE: slots to erase after the walk.
     khf_expired.clear();
@@ -28649,8 +28834,6 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         }
     }
 
-    QueryPerformanceCounter(&khsn_t1);
-
     // The render thread is parked, the pass saves/restores its own RT +
     // viewport state, and g_sun_map_rendered_frame makes this a no-op whenever
     // the injection already ran this frame.
@@ -28664,7 +28847,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     if (khs_nothing_late && khf_comp_eligible == 0) {
         // KH_FLUSH_CADENCE: nothing to draw or snapshot for; the injection
         // (healthy, per comp_healthy) picks up whatever turns visible.
-        g_flush_can_skip = comp_healthy && khf_expired.empty();
+        g_flush_can_skip = khf_inj_healthy && khf_expired.empty();
         return;
     }
 
@@ -28673,7 +28856,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     RVExtBridge::ProjectionViewTransform pv = {};
 
-    const bool khf_sparse_live = !injected_since_last_flush &&
+    const bool khf_sparse_live = !khf_cycle_landed &&   // KH_FLUSH_CYCLE_WITNESS: the cycle in flight.
         g_ro.opaque_draws < KH_REORDER_MIN_OPAQUE_DRAWS / 8;
 
     if (khf_sparse_live && RVExtBridge::get_projection_view_transform(pv)) {
@@ -28772,7 +28955,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     if (khf_any_mesh) kh_snapshot_take(dev, ctx, pv);
     // KH_FLUSH_CADENCE: this park found the injection owning every draw with
     // nothing late and nothing expiring; the next frames may skip theirs.
-    g_flush_can_skip = comp_healthy && khs_nothing_late && khf_comp_eligible > 0 && khf_expired.empty();
+    g_flush_can_skip = khf_inj_healthy && khs_nothing_late && khf_comp_eligible > 0 && khf_expired.empty();
 
     // Heightfield GPU upload (the auto-builder completed a staging grid on the
     // game thread; the texture + live meta go live here, under the park).
@@ -29366,11 +29549,6 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         cbd.blend_ctl[0] = (khf_perceptual && !o.fullscreen && o.draw_part != 1 &&
                             o.blend_mode == 0 && o.color[3] < 0.999f) ? 1.0f : 0.0f;   // KH_MAT_BLEND parts: never
                                                                                        // Perceptual.
-        // PSComposite's background-trust range (m). Read by no live draw: the
-        // plain route's PSMain has no such rule, and the one route that takes
-        // PSComposite here (near-gap) overrides it to 1e9 below. Kept as the
-        // shader declares it.
-        cbd.blend_ctl[1] = 150.0f;
         // blend_ctl[3] is the crossfade dither; written here so it is never
         // inherited from the previous object's fade.
         cbd.blend_ctl[3] = 0.0f;
@@ -29449,7 +29627,6 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                 cbd.fx_meta[0] =
                     khf_nz_near;
                 cbd.fx_meta[1] = khf_nz_gap_lo;
-                cbd.blend_ctl[1] = 1.0e9f;
             }
             // Armed once at the pass frame build (both arms; the terrain lane
             // never depends on the depth lane's arming state).
@@ -30325,7 +30502,8 @@ inline void flush_frame() {
         const uint64_t khff_inj_age = khff_inj_ms <= khff_now_ms ? khff_now_ms - khff_inj_ms : 0;
         const bool khff_stale = khff_inj_ms == 0 ||
                                 khff_inj_age > KH_FLUSH_STALE_PERIODS * khff_period_ms + KH_FLUSH_STALE_SLACK_MS;
-        bool khff_lock = !g_flush_can_skip || khff_now_ms - g_flush_park_ms >= KH_FLUSH_LOCK_INTERVAL_MS ||
+        bool khff_lock = !KH_FLUSH_CADENCE_ON ||   // The park is unconditional (KH_FLUSH_CADENCE_ON).
+                         !g_flush_can_skip || khff_now_ms - g_flush_park_ms >= KH_FLUSH_LOCK_INTERVAL_MS ||
                          g_mesh_publish_pending.load(std::memory_order_relaxed) || g_thm_dirty ||
                          kh_user_shader_pending() || g_main_depth_identity == nullptr ||
                          // A lock-exhausted mission end left its teardown to this park; the
@@ -31181,6 +31359,7 @@ inline void reset_session_state() {
     g_sraw_last_src = 0; g_sraw_pub_gap_deg = -1.0f; g_sraw_sky_gap_deg = -1.0f;
     kh_pip_reset();   // KH_PIP.
     g_sraw_sky_prev_valid = false; g_sraw_sky_step_deg = -1.0f; g_sraw_sky_prev[0] = g_sraw_sky_prev[1] = g_sraw_sky_prev[2] = 0.0f;
+    g_sraw_hold_until_ms = 0; g_sraw_cons_moved_ms = 0; g_sraw_unsettled_ms = 0; kh_sraw_ring_reset();   // KH_SRAW_SETTLE.
     g_sun_jump_pending = false;
     g_skysun_ref_valid = false;
     g_skysun_ref[0] = g_skysun_ref[1] = g_skysun_ref[2] = 0.0f;

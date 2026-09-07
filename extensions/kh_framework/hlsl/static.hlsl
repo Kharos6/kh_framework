@@ -709,8 +709,8 @@ float4 PSMain(VSOut i) : SV_Target
     if (depthParams.y < -1.0e-3f &&
         depthParams.x + depthParams.y / max(i.pos.w, 1.0e-4f) > 1.0f) discard;
     // Twin: PSMain / PSComposite / PSEffect. The shared tail below is kept as
-    // two copies on purpose: PSComposite interleaves KH_ARB_DEPTH blocks and a
-    // khb_a lane through it.
+    // two copies on purpose: PSComposite interleaves KH_ARB_DEPTH blocks
+    // through it.
     if (khObjCut > 0.0f && i.pos.w > khObjCut) discard;
     // Punch-through / overlay-occlusion guard, flush-path edition: the same
     // contract as PSComposite's. The CPU arms tight margins only for
@@ -927,9 +927,7 @@ float4 PSMain(VSOut i) : SV_Target
     if (bm == 5) return float4(lerp(float3(65504.0f, 65504.0f, 65504.0f), lc, a), 1.0f);
 
     if (blendCtl.x >= 0.5f) {
-        // No background-trust range here: this is the only live perceptual
-        // path (the injection never arms blendCtl.x), and it blends every
-        // pixel by a. PSComposite's blendCtl.y rule is reached by no fill.
+        // Twin: PSComposite. Every pixel blends by a.
         float3 scn = sceneColorTex.Load(int3(int2(i.pos.xy), 0)).rgb;
         float3 ts = scn / (1.0f + scn);
         float3 tl = lc / (1.0f + lc);

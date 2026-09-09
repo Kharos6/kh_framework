@@ -6309,6 +6309,41 @@ static void kh_rv_report(const char* cmd, const std::string& msg) {
     report_error(std::string(cmd) + ": " + msg);
 }
 
+// KH_ATTACH_BONE - is this position slot the [object, "memoryPoint"] form?
+//
+// Unambiguous against every other thing a position slot accepts: a plain
+// position is three SCALARS, and an object to follow is an OBJECT rather than
+// an ARRAY. Only the shape [OBJECT, STRING] lands here, and a caller who wrote
+// that shape meant this and nothing else.
+//
+// Returns false WITHOUT touching err for anything that is simply not this form
+// - the caller falls through to its ordinary parse and reports its own fault.
+// A malformed near-miss (an object and a non-string, a two-element array whose
+// first slot is an object) is reported here instead, because falling through
+// would blame it for not being [x, y, zASL] when the script plainly attempted
+// a memory point.
+static bool kh_rv_bone_pair(const game_value& v, game_value& out_obj,
+                            std::string& out_mem, bool& out_bad, std::string& err) {
+    out_bad = false;
+    if (v.is_nil() || v.type_enum() != game_data_type::ARRAY) return false;
+    auto& bp = v.to_array();
+    if (bp.size() < 1 || bp[0].type_enum() != game_data_type::OBJECT) return false;
+    // First slot is an object: from here every exit is a reported fault.
+    if (bp.size() != 2) {
+        out_bad = true;
+        err = "position [object, memoryPoint] takes exactly two elements";
+        return false;
+    }
+    if (bp[1].type_enum() != game_data_type::STRING) {
+        out_bad = true;
+        err = "position [object, memoryPoint] needs the memory point name as a string";
+        return false;
+    }
+    out_obj = bp[0];
+    out_mem = static_cast<std::string>(bp[1]);
+    return true;
+}
+
 // KH_ATTACH: the position and the rotation slots of addRender3D, and the
 // "position" / "rotation" properties of updateRender3D, take a game OBJECT in
 // place of their value. The mesh then follows that object's transform every
@@ -6321,7 +6356,8 @@ static void kh_rv_report(const char* cmd, const std::string& msg) {
 //
 // addRender3D [[x,y,zASL], rotation, mesh]. Everything else - size, color,
 // mode, sceneRead, effect, params, band, blend, duration, lit, twoSided,
-// lodLock, casterOnly, visible, material - is an updateRender3D
+// lodLock, casterOnly, visible, material, attachPosition, attachRotation -
+// is an updateRender3D
 // property. A spawned mesh starts as: size 1 (the mesh's native dimensions),
 // color [1,1,1,1], mode 1 (depth test + write), no effect, no params, no band,
 // blend normal, permanent, lit, twoSided false (back faces
@@ -6340,7 +6376,44 @@ static game_value add_render3d_sqf(game_value_parameter args) {
         // KH_ATTACH: the objects to follow, registered once the handle exists.
         game_value khr_apos, khr_arot;
         float khr_ap[3], khr_ar[9];
-        if (RenderIntegration::kh_attach_is_obj(arr[0])) {
+        // KH_ATTACH_BONE: the proxy and its parent, likewise registered after
+        // the handle. khr_bone is what makes the rotation slot a boolean.
+        RenderIntegration::KhProxyOwn khr_bown;   // KH_ATTACH_BONE: owns the proxy until it is installed.
+        game_value khr_bparent;
+        std::string khr_bmem;
+        bool khr_bone = false, khr_brot = false, khr_bbad = false;
+        if (kh_rv_bone_pair(arr[0], khr_bparent, khr_bmem, khr_bbad, err)) {
+            khr_bone = true;
+            // The rotation slot is MANDATORY here and must be a boolean: with a
+            // memory point there is no sensible default, since following the
+            // bone's rotation and ignoring it are both ordinary things to want
+            // and picking one silently would be a guess the script cannot see.
+            if (arr[1].is_nil() || arr[1].type_enum() != game_data_type::BOOL) {
+                kh_rv_report("addRender3D", "rotation must be true or false when position is [object, memoryPoint] (true = follow the bone's rotation)");
+                return game_value("");
+            }
+            khr_brot = static_cast<bool>(arr[1]);
+            if (!RenderIntegration::kh_attach_bone_make(khr_bparent, khr_bmem, khr_bown.proxy, err)) {
+                kh_rv_report("addRender3D", err);
+                return game_value("");
+            }
+            // Frame one is seeded from the PARENT, not the proxy: attachTo has
+            // not been simulated yet, so the proxy is still sitting where
+            // createSimpleObject put it and reading it now would put the mesh at
+            // the map origin for one frame. The parent is the closest true
+            // answer available this instant; kh_attach_step moves the mesh onto
+            // the memory point on the next frame it runs.
+            if (RenderIntegration::kh_attach_read(khr_bparent, khr_ap, khr_ar)) {
+                obj.pos[0] = khr_ap[0]; obj.pos[1] = khr_ap[1]; obj.pos[2] = khr_ap[2];
+                if (khr_brot) {
+                    memcpy(obj.rot_m, khr_ar, sizeof(obj.rot_m));
+                    obj.rotated = RenderIntegration::kh_attach_rotated(khr_ar);
+                }
+            }
+        } else if (khr_bbad) {
+            kh_rv_report("addRender3D", err);
+            return game_value("");
+        } else if (RenderIntegration::kh_attach_is_obj(arr[0])) {
             if (!RenderIntegration::kh_attach_read(arr[0], khr_ap, khr_ar)) {
                 kh_rv_report("addRender3D", "position object is null - nothing to follow");
                 return game_value("");
@@ -6352,7 +6425,12 @@ static game_value add_render3d_sqf(game_value_parameter args) {
             return game_value("");
         }
 
-        if (RenderIntegration::kh_attach_is_obj(arr[1])) {
+        // KH_ATTACH_BONE consumed the rotation slot above (it is the
+        // follow-the-bone boolean), so the ordinary rotation parse is skipped
+        // entirely - a bare true/false is not a yaw and must not be read as one.
+        if (khr_bone) {
+            // Nothing to do: the boolean was applied when the proxy was built.
+        } else if (RenderIntegration::kh_attach_is_obj(arr[1])) {
             if (!RenderIntegration::kh_attach_read(arr[1], khr_ap, khr_ar)) {
                 kh_rv_report("addRender3D", "rotation object is null - nothing to follow");
                 return game_value("");
@@ -6389,8 +6467,14 @@ static game_value add_render3d_sqf(game_value_parameter args) {
         const std::string khr_h = RenderIntegration::add_render_object(obj);
         // KH_ATTACH: after the handle, so the table is keyed by the entry that
         // now exists; the transforms above are already in place for frame one.
-        if (!khr_apos.is_nil()) RenderIntegration::kh_attach_set(khr_h, khr_apos, false);
-        if (!khr_arot.is_nil()) RenderIntegration::kh_attach_set(khr_h, khr_arot, true);
+        // KH_ATTACH_BONE takes both lanes in one call (they name one proxy);
+        // the plain lanes are independent and take one each.
+        if (khr_bone) {
+            RenderIntegration::kh_attach_bone_set(khr_h, khr_bown.release(), khr_bparent, khr_brot);
+        } else {
+            if (!khr_apos.is_nil()) RenderIntegration::kh_attach_set(khr_h, khr_apos, false);
+            if (!khr_arot.is_nil()) RenderIntegration::kh_attach_set(khr_h, khr_arot, true);
+        }
         return game_value(khr_h);
     } catch (const std::exception& e) {
         report_error(std::string("addRender3D: ") + e.what());
@@ -6436,10 +6520,97 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
     if (shared >= 0) return shared == 1;
 
     if (prop == "position") {
+        // KH_ATTACH_BONE. The rotation-follow state is NOT set here: re-pointing
+        // an existing bone attachment at a new object or memory point keeps
+        // whatever the "rotation" property last said, and a fresh one starts not
+        // following (the script sets "rotation" to true if it wants that). This
+        // is what makes the two properties independent the way the plain lanes
+        // already are.
+        game_value khb_parent;
+        RenderIntegration::KhProxyOwn khb_own;   // KH_ATTACH_BONE: owns the proxy until it is installed.
+        std::string khb_mem;
+        bool khb_bad = false;
+        if (kh_rv_bone_pair(val, khb_parent, khb_mem, khb_bad, err)) {
+            if (!RenderIntegration::kh_attach_bone_make(khb_parent, khb_mem, khb_own.proxy, err)) return false;
+            const bool khb_rot = RenderIntegration::kh_attach_bone_rot_state(handle);
+            RenderIntegration::kh_attach_bone_set(handle, khb_own.release(), khb_parent, khb_rot);
+            // Seeded from the parent for the same reason addRender3D is: the
+            // attach has not been simulated yet.
+            float khb_p[3], khb_r[9];
+            if (RenderIntegration::kh_attach_read(khb_parent, khb_p, khb_r)) {
+                // KH_ATTACH_OFFSET rides the seed too, in the PARENT's frame
+                // for this one frame because the parent is what the seed reads
+                // (see the note above it). The position compose runs first:
+                // the rotation one overwrites khb_r.
+                RenderIntegration::kh_attach_offset_pos(obj, khb_r, khb_p);
+                obj.pos[0] = khb_p[0]; obj.pos[1] = khb_p[1]; obj.pos[2] = khb_p[2];
+                if (khb_rot) {
+                    RenderIntegration::kh_attach_offset_rot(obj, khb_r);
+                    memcpy(obj.rot_m, khb_r, sizeof(obj.rot_m));
+                    obj.rotated = RenderIntegration::kh_attach_rotated(khb_r);
+                }
+            }
+            return true;
+        }
+        if (khb_bad) return false;
         if (RenderIntegration::kh_attach_is_obj(val))
             return RenderIntegration::kh_attach_apply(handle, val, false, obj, err);
         RenderIntegration::kh_attach_set(handle, game_value(), false);   // Any other value detaches.
-        if (!kh_rv_pos(val, obj.pos, err)) { err = "position must be [x, y, zASL] or an object to follow"; return false; }
+        if (!kh_rv_pos(val, obj.pos, err)) { err = "position must be [x, y, zASL], [object, memoryPoint], or an object to follow"; return false; }
+        return true;
+    }
+    if (prop == "attachposition") {
+        // KH_ATTACH_OFFSET: where the mesh sits inside the frame it follows,
+        // in the FOLLOWED OBJECT's own axes ([x right, y forward, z up] at its
+        // identity) - not world axes, and not the mesh's own rotation. nil
+        // clears it.
+        //
+        // It is stored whether or not anything is attached, because it is a
+        // mesh property and not part of the attachment: a script may set it
+        // first and attach after, or detach and re-attach, and find it still
+        // there. With the POSITION lane unattached it simply has no effect,
+        // since a literal position has no frame to be relative to. It is not
+        // an error to set it early - refusing would make the property
+        // order-dependent and break the batch form for no gain.
+        if (val.is_nil()) {
+            obj.attach_pos[0] = 0.0f; obj.attach_pos[1] = 0.0f; obj.attach_pos[2] = 0.0f;
+            obj.attach_pos_on = false;
+        } else {
+            float khao_p[3];
+            if (!kh_rv_pos(val, khao_p, err)) {
+                err = "attachPosition must be [x, y, z] in the followed object's own axes (x right, y forward, z up), or nil to clear";
+                return false;
+            }
+            obj.attach_pos[0] = khao_p[0];
+            obj.attach_pos[1] = khao_p[1];
+            obj.attach_pos[2] = khao_p[2];
+            obj.attach_pos_on = khao_p[0] != 0.0f || khao_p[1] != 0.0f || khao_p[2] != 0.0f;
+        }
+        // Land it on THIS frame rather than the next step's, for the same
+        // reason kh_attach_apply reads at command time. A handle with nothing
+        // attached comes back from this untouched.
+        RenderIntegration::kh_attach_reseed(handle, obj);
+        return true;
+    }
+    if (prop == "attachrotation") {
+        // KH_ATTACH_OFFSET, the rotation twin: the SAME [pitch, yaw, roll]
+        // parser and the same matrix builder the "rotation" property uses,
+        // applied inside the followed object's frame instead of in world axes.
+        // nil - and equally an explicit all-zero triple - clears it.
+        //
+        // Inert until the ROTATION lane follows something, which is the
+        // narrower condition of the two: a mesh may well follow a bone's
+        // POSITION while holding a rotation the script typed, and turning that
+        // rotation relative to a frame the mesh is not using would be a guess.
+        // A script that wants that sets "rotation" instead.
+        float khao_pi = 0.0f, khao_ya = 0.0f, khao_ro = 0.0f;
+        if (!kh_rotation_from_gv(val, khao_pi, khao_ya, khao_ro)) {
+            err = "attachRotation must be nil, a number (yaw), or [pitch, yaw, roll] degrees, taken relative to the attach point";
+            return false;
+        }
+        RenderIntegration::kh_rotation_matrix(obj.attach_rot, khao_pi, khao_ya, khao_ro);
+        obj.attach_rot_on = khao_pi != 0.0f || khao_ya != 0.0f || khao_ro != 0.0f;
+        RenderIntegration::kh_attach_reseed(handle, obj);
         return true;
     }
     if (prop == "size" || prop == "scale") {
@@ -6448,11 +6619,28 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
         return true;
     }
     if (prop == "rotation") {
+        // KH_ATTACH_BONE: a BOOLEAN rotation is the follow-the-bone toggle and
+        // means nothing without a memory-point attachment to toggle, so it is
+        // refused rather than silently ignored when there is none. The toggle is
+        // a lane assignment only - the proxy stays attached follow-bone either
+        // way, which is why flipping it costs no engine call.
+        if (!val.is_nil() && val.type_enum() == game_data_type::BOOL) {
+            const bool khb_on = static_cast<bool>(val);
+            if (!RenderIntegration::kh_attach_bone_rot(handle, khb_on)) {
+                err = "rotation takes true or false only while position follows a [object, memoryPoint]";
+                return false;
+            }
+            // The lane moves this frame; the matrix follows on the next step.
+            // Turning it OFF leaves the mesh holding the bone's last rotation,
+            // which is the same thing detaching a rotation object has always
+            // done - the script sets an explicit rotation if it wants another.
+            return true;
+        }
         if (RenderIntegration::kh_attach_is_obj(val))
             return RenderIntegration::kh_attach_apply(handle, val, true, obj, err);
         RenderIntegration::kh_attach_set(handle, game_value(), true);   // Any other value detaches.
         float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f;
-        if (!kh_rotation_from_gv(val, khr_p, khr_y, khr_r)) { err = "rotation must be nil, a number (yaw), [pitch, yaw, roll] degrees, or an object to follow"; return false; }
+        if (!kh_rotation_from_gv(val, khr_p, khr_y, khr_r)) { err = "rotation must be nil, a number (yaw), [pitch, yaw, roll] degrees, an object to follow, or true/false while position follows a memory point"; return false; }
         RenderIntegration::kh_set_rotation(obj, khr_p, khr_y, khr_r);
         return true;
     }
@@ -6483,7 +6671,7 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
     if (prop == "lit" || prop == "lighting") return kh_rv_lit(val, obj, err);
     if (prop == "twosided") { bool b = obj.two_sided; if (!kh_rv_bool(val, b, "twoSided", err)) return false; obj.two_sided = b; return true; }
     if (prop == "lodlock")  { bool b = obj.lod_lock;  if (!kh_rv_bool(val, b, "lodLock", err))  return false; obj.lod_lock = b;  return true; }
-    err = "unknown property (position | size | rotation | mesh | material | mode | sceneRead | effect | params | lit | twoSided | lodLock | casterOnly | color | visible | blend | band | duration)";
+    err = "unknown property (position | attachPosition | size | rotation | attachRotation | mesh | material | mode | sceneRead | effect | params | lit | twoSided | lodLock | casterOnly | color | visible | blend | band | duration)";
     return false;
 }
 
@@ -8281,7 +8469,7 @@ static void initialize_sqf_integration() {
 
     _sqf_add_render3d_array = intercept::client::host::register_sqf_command(
         "addRender3D",
-        "[[x,y,zASL], rotation, mesh]. rotation = nil | yaw | [pitch, yaw, roll]; mesh = builtin name | registry index | .fbx path (nil = box). Either the position or the rotation slot may instead be a game OBJECT, and the mesh then follows that object's transform every frame (the two are independent and may name different objects). Spawns lit, mode 1, size 1, white, back-face culled; set everything else with updateRender3D. Returns the khr_ handle, or '' after reporting the fault",
+        "[[x,y,zASL], rotation, mesh]. rotation = nil | yaw | [pitch, yaw, roll]; mesh = builtin name | registry index | .fbx path (nil = box). Either the position or the rotation slot may instead be a game OBJECT, and the mesh then follows that object's transform every frame (the two are independent and may name different objects). Position may also be [object, memoryPoint] to follow a model memory point (bone); rotation is then REQUIRED and must be true (follow the bone's rotation) or false. The mesh is removed automatically if either the object or its memory-point proxy is deleted. Spawns lit, mode 1, size 1, white, back-face culled; set everything else with updateRender3D. Returns the khr_ handle, or '' after reporting the fault",
         userFunctionWrapper<add_render3d_sqf>,
         game_data_type::STRING,
         game_data_type::ARRAY
@@ -8289,7 +8477,7 @@ static void initialize_sqf_integration() {
 
     _sqf_update_render3d_array = intercept::client::host::register_sqf_command(
         "updateRender3D",
-        "[handle, property, value] or [[handle, property, value], ...]. Update a persistent 3D mesh object: position | size | rotation | mesh | material | mode | sceneRead | effect | params | lit | twoSided | lodLock | casterOnly | color | visible | blend | band | duration. position and rotation each take a game OBJECT to follow it every frame, or any ordinary value to detach and take that value. material params: basecolor | roughness | metalness | emissiveintensity | normalstrength | cutoff | alphamode opaque|cutout|blend (blend: texels with alpha >= 0.996 draw solid with depth, the rest as a post-scene translucent part - hardware alpha, no depth write, back-to-front; casting is per object, never per material). Faults are reported; the batch form returns true only if every triple applied",
+        "[handle, property, value] or [[handle, property, value], ...]. Update a persistent 3D mesh object: position | attachPosition | size | rotation | attachRotation | mesh | material | mode | sceneRead | effect | params | lit | twoSided | lodLock | casterOnly | color | visible | blend | band | duration. position and rotation each take a game OBJECT to follow it every frame, or any ordinary value to detach and take that value. position also takes [object, memoryPoint] to follow a model memory point (bone); rotation then takes true/false to start or stop following that bone's rotation, which costs no engine call and leaves the attachment alone. attachPosition [x, y, z] and attachRotation nil|yaw|[pitch, yaw, roll] offset the mesh WITHIN the frame it is attached to, in the followed object's own axes (x right, y forward, z up) rather than world axes - so a mesh can sit off the memory point or turned away from it. Each affects only its own lane and only while that lane follows an object; both are remembered across a detach, and nil clears. material params: basecolor | roughness | metalness | emissiveintensity | normalstrength | cutoff | alphamode opaque|cutout|blend (blend: texels with alpha >= 0.996 draw solid with depth, the rest as a post-scene translucent part - hardware alpha, no depth write, back-to-front; casting is per object, never per material). Faults are reported; the batch form returns true only if every triple applied",
         userFunctionWrapper<update_render3d_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY

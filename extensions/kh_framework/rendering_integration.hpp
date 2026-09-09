@@ -1223,7 +1223,6 @@ struct Resources {
     ID3D11RenderTargetView*   snap_rtv = nullptr;   // RTV over comp_depth_tex.
     ID3D11PixelShader*        ps_depth_resolve = nullptr;
     UINT                      ps_resolve_samples = 0;   // Source MSAA count compiled for.
-    int                       ps_resolve_wit = -1;   // WIT_NEAREST compiled for.
     // Analytic terrain heightfield (t10; see thmParams).
     ID3D11Texture2D*          thm_tex = nullptr;
     ID3D11ShaderResourceView* thm_srv = nullptr;
@@ -1528,7 +1527,6 @@ struct Resources {
         KH_SAFE_RELEASE(snap_rtv);
         KH_SAFE_RELEASE(ps_depth_resolve);
         ps_resolve_samples = 0;
-        ps_resolve_wit = -1;
         comp_depth_time = -1.0f;
         KH_SAFE_RELEASE(thm_tex);
         KH_SAFE_RELEASE(thm_srv);
@@ -1870,6 +1868,40 @@ struct RenderObject {
                        0.0f, 0.0f, 1.0f };
     bool  rotated = false;   // False = identity (skip the matrix math).
 
+    // KH_ATTACH_OFFSET - where the mesh sits INSIDE the frame it follows.
+    // Both are inert unless the MATCHING lane is attached: with no attachment
+    // there is no frame for an offset to be relative to, so the literal
+    // position or rotation the script set stands untouched. The two are
+    // independent of each other for the same reason the two lanes are.
+    //
+    // attach_pos is SQF order [x, y, z] like every other script-facing vector,
+    // and is read in the FOLLOWED OBJECT's own axes - x right, y forward, z up
+    // at that object's identity. Not world axes, and not the mesh's own
+    // rotated frame: an attach_rot never swings the attach_pos.
+    // attach_rot is a rotation matrix in ENGINE axes, the same form and the
+    // same builder as rot_m (kh_rotation_matrix), composed onto the followed
+    // object's basis as attach_rot * basis.
+    //
+    // They live here and not in KhAttach because they are mesh properties that
+    // OUTLIVE an attachment - a script may set one, detach, re-attach and
+    // expect it to still hold - and a KhAttach entry is erased the moment both
+    // its lanes clear. Being here also means they ride the ordinary staged
+    // update-and-commit like every other property instead of being written
+    // side-band under a different lock. The price is MEASURED, not estimated,
+    // and the measurement is +56 bytes on sizeof(RenderObject), paid on every
+    // staging copy the flush and the injection make, plus one bool
+    // test per lane per step for the meshes that set neither - which is all of
+    // them until a script asks. The DELTA is what was measured and is what the
+    // claim rests on; the absolute (296 -> 352 under the offline harness's
+    // g++ x86-64) is a different compiler's number and is not asserted for
+    // this build.
+    float attach_pos[3] = {};
+    float attach_rot[9] = { 1.0f, 0.0f, 0.0f,
+                            0.0f, 1.0f, 0.0f,
+                            0.0f, 0.0f, 1.0f };
+    bool  attach_pos_on = false;   // False = skip the compose entirely (the step's fast path).
+    bool  attach_rot_on = false;
+
     bool  caster_only = false;
     bool  two_sided = true;   // addRender3D spawns false (the script-side default).
     // This instance always draws level 0 - kh_lod_pick is skipped at both
@@ -1907,15 +1939,16 @@ struct RenderObject {
 
 };
 
-inline void kh_set_rotation(RenderObject& o, float pitch_deg, float yaw_deg, float roll_deg) {
-    o.rot[0] = pitch_deg;
-    o.rot[1] = yaw_deg;
-    o.rot[2] = roll_deg;
-    o.rotated = pitch_deg != 0.0f || yaw_deg != 0.0f || roll_deg != 0.0f;
-
-    if (!o.rotated) {
+// The matrix for a [pitch, yaw, roll] triple in ARMA degrees, in ENGINE axes.
+// Split out of kh_set_rotation so that KH_ATTACH_OFFSET's attach-space
+// rotation is built by exactly this code and the two cannot drift; the split
+// is the only change to what kh_set_rotation does. TWO call sites, counted:
+// kh_set_rotation below, and the attachRotation property in
+// sqf_integration.hpp.
+inline void kh_rotation_matrix(float khr_m[9], float pitch_deg, float yaw_deg, float roll_deg) {
+    if (pitch_deg == 0.0f && yaw_deg == 0.0f && roll_deg == 0.0f) {
         const float khr_id[9] = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f };
-        memcpy(o.rot_m, khr_id, sizeof(o.rot_m));
+        memcpy(khr_m, khr_id, sizeof(khr_id));
         return;
     }
 
@@ -1951,9 +1984,20 @@ inline void kh_set_rotation(RenderObject& o, float pitch_deg, float yaw_deg, flo
 
     for (int r = 0; r < 3; ++r) {
         for (int c = 0; c < 3; ++c) {
-            o.rot_m[r * 3 + c] = khr_ma[khr_p[r]][khr_p[c]];
+            khr_m[r * 3 + c] = khr_ma[khr_p[r]][khr_p[c]];
         }
     }
+}
+
+// rot / rotated are the euler the script typed; rot_m is the matrix. rotated
+// follows the EULER here (a typed zero is not rotated) - the attachment path
+// has its own test, kh_attach_rotated, because a raw basis has no euler.
+inline void kh_set_rotation(RenderObject& o, float pitch_deg, float yaw_deg, float roll_deg) {
+    o.rot[0] = pitch_deg;
+    o.rot[1] = yaw_deg;
+    o.rot[2] = roll_deg;
+    o.rotated = pitch_deg != 0.0f || yaw_deg != 0.0f || roll_deg != 0.0f;
+    kh_rotation_matrix(o.rot_m, pitch_deg, yaw_deg, roll_deg);
 }
 
 // Enclosing half extents (engine axes) of a rotated, per-axis-scaled mesh cube:
@@ -2325,7 +2369,7 @@ inline void kh_scene_stage_remove(const RenderObject& o) {
 // DO NOT DELETE THIS WITH THE DIAGNOSTICS. It was written for them, but it
 // is now load-bearing on the live path: kh_attach_vs_read gates BOTH of its
 // dereferences on it, every frame a mesh follows an object, and those are
-// raw reads at measured offsets into engine memory (1.434). The one-shot
+// raw reads at measured offsets into engine memory. The one-shot
 // probes that used to sweep behind it are gone; this is not one of them.
 //
 // It lives in this header rather than beside the SQF commands because this
@@ -2432,6 +2476,30 @@ struct KhAttach {
     // may be different objects and an object may have only the one copy.
     uint32_t off_pos = KH_ATTACH_OFF_NONE;
     uint32_t off_rot = KH_ATTACH_OFF_NONE;
+    // KH_ATTACH_BONE. proxy is a LOCAL simple object (KH_ATTACH_BONE_SHAPE)
+    // that the engine keeps attached to a memory point of bone_parent, so the
+    // two lanes above can read a bone's transform through the ordinary raw
+    // path with no new engine assumption: obj_pos (and obj_rot, when the
+    // script asked to follow the bone's rotation) hold THIS proxy, not the
+    // parent. Nil = no bone attachment and the lanes mean what they always
+    // did.
+    //
+    // bone_parent is held for ONE reason: the death test. attachTo does not
+    // destroy the proxy when its parent dies, so a mesh following a bone of a
+    // deleted vehicle would otherwise hang at the parent's last position
+    // forever - the proxy is still perfectly alive. Both are tested in
+    // kh_attach_step and either one being empty kills the mesh.
+    //
+    // The proxy is OURS: nothing else names it, so it must be deleted when the
+    // attachment ends or it is a leaked game object. Every site that ends an
+    // attachment is the GAME thread (kh_attach_drop's four call sites across
+    // three functions, and kh_attach_drop_all's two), but one of them -
+    // flush_locked's expiry sweep
+    // - runs inside the park, where an SQF call may not be made. That is the
+    // whole reason the deletion is queued rather than immediate; see
+    // g_attach_proxy_dead.
+    game_value proxy;
+    game_value bone_parent;
 };
 // Deliberately never destructed, the idiom the shader pool already uses: this
 // is the only static in the header that owns SQF references, and running a
@@ -2452,8 +2520,32 @@ static std::atomic<uint32_t> g_attach_n{ 0 };
 // only (kh_attach_reap).
 static std::vector<std::string> g_attach_dead;   // Under g_draw_list_mutex.
 // The reap's gate, the twin of g_attach_n: a session where nothing ever dies
-// pays one relaxed load per frame and takes no lock (1.421).
+// pays one relaxed load per frame and takes no lock.
 static std::atomic<uint32_t> g_attach_dead_n{ 0 };
+
+// KH_ATTACH_BONE - proxies whose attachment has ended, waiting for the game
+// thread to deleteVehicle them. game_value and not a handle, because the proxy
+// is not named by anything else: once the KhAttach entry goes, this vector is
+// the only thing that knows the object exists.
+//
+// The queue exists because RETIRING and DELETING a proxy have different
+// thread requirements. Retiring happens wherever an attachment ends, which
+// includes flush_locked's expiry sweep - the game thread, but INSIDE the park.
+// Deleting is sqf::delete_vehicle, an engine call that may not be made under
+// the graphics lock and may not be made under g_draw_list_mutex either (an SQF
+// command re-entering on this same thread would take that mutex again). So the
+// retire only ever moves a reference into this vector, and kh_attach_proxy_reap
+// drains it from flush_frame BEFORE the park, holding nothing.
+static std::vector<game_value> g_attach_proxy_dead;   // Under g_draw_list_mutex.
+// The drain's gate, the twin of g_attach_dead_n: a session that never attaches
+// to a bone pays one relaxed load per frame and takes no lock.
+static std::atomic<uint32_t> g_attach_proxy_dead_n{ 0 };
+
+// The shape spawned as the memory-point proxy. A simple object is the cheapest
+// thing the engine will attachTo a memory point and maintain a transform for;
+// it is created local (never networked) because it is a measuring stick, not
+// part of the mission.
+static const char* const KH_ATTACH_BONE_SHAPE = "KH_HelperSquare";
 
 // One test for "is this slot an object to follow", used by every site that
 // asks. is_nil FIRST: nil is a documented value in both slots (a nil rotation
@@ -2562,7 +2654,7 @@ inline bool kh_attach_obj_dead(const game_value& khod_gv) {
 // khvs_vb caches the last state pointer confirmed readable, khvs_bb the last
 // object base whose slot at khvs_off was.
 //
-// BOTH dereferences are page-gated (1.434). This is the one site in either
+// BOTH dereferences are page-gated. This is the one site in either
 // header that dereferences gd->object->object rather than using it as an
 // opaque identity key, and the offsets are measured, not declared: nothing
 // guarantees a given object extends to 0x1A0, and a house does not carry a
@@ -2663,6 +2755,85 @@ inline bool kh_attach_rotated(const float khat_m[9]) {
     return memcmp(khat_m, khat_id, sizeof(khat_id)) != 0;
 }
 
+// KH_ATTACH_OFFSET - the composition, and the ONLY place it happens, so the
+// axis convention and the multiplication order are each stated once.
+//
+// FOUR call sites each, counted, across four functions: kh_attach_apply and
+// kh_attach_step here, kh_attach_reseed below, and the bone seed inside
+// kh_apply_render3d_prop in sqf_integration.hpp. Every one of them is a site
+// that has just taken a raw transform and is about to write it into a mesh.
+//
+// khoq_basis is the FOLLOWED object's rotation rows exactly as
+// kh_attach_vs_read hands them back - aside / up / dir, engine axes - which is
+// the frame the offset is expressed in. khoq_pos is that object's position in
+// SQF order [x, y, zASL] and is advanced in place. Neither reads the mesh's
+// own rot_m: an offset is relative to the ATTACH POINT, not to whatever the
+// mesh is currently rotated to.
+inline void kh_attach_offset_pos(const RenderObject& khoq_o, const float khoq_basis[9],
+                                 float khoq_pos[3]) {
+    if (!khoq_o.attach_pos_on) return;
+    // SQF [x, y, z] -> the object's engine-ordered local axes [side, up,
+    // forward]: the p = (0, 2, 1) permutation kh_set_rotation and
+    // kh_objrec_fill already use, and which is its own inverse.
+    //
+    // UNVERIFIED, and it affects the SIGN OF X ALONE: row 0 is taken to be the
+    // object's RIGHT. The sweep that measured this layout checked rows 1 and 2
+    // against vectorUp and vectorDir and got 0.0000 on three objects (see
+    // kh_attach_raw's record above); it never checked row 0 against
+    // vectorSide, and the name this file records for that row - aside - does
+    // not say which way it points. If it turns out to be the LEFT, x is
+    // mirrored for an attached object and nothing else here changes: the basis
+    // is orthonormal either way, y and z are measured, and the fix is one
+    // negation at the line below.
+    const float khoq_l[3] = { khoq_o.attach_pos[0], khoq_o.attach_pos[2], khoq_o.attach_pos[1] };
+    float khoq_d[3] = { 0.0f, 0.0f, 0.0f };   // Engine axes (east, up, north).
+    for (int khoq_k = 0; khoq_k < 3; ++khoq_k) {
+        khoq_d[0] += khoq_l[khoq_k] * khoq_basis[khoq_k * 3 + 0];
+        khoq_d[1] += khoq_l[khoq_k] * khoq_basis[khoq_k * 3 + 1];
+        khoq_d[2] += khoq_l[khoq_k] * khoq_basis[khoq_k * 3 + 2];
+    }
+    khoq_pos[0] += khoq_d[0];   // east.
+    khoq_pos[1] += khoq_d[2];   // north = SQF y.
+    khoq_pos[2] += khoq_d[1];   // up = SQF zASL.
+}
+
+// KH_ATTACH_OFFSET - the rotation twin, in place on the rows just read.
+// Row-vector convention throughout (world = centre + local.x * R0 + local.y *
+// R1 + local.z * R2), so a mesh-local vector reaches world as
+// v * attach_rot * basis and the product is attach_rot * basis IN THAT ORDER.
+// The other order would turn the mesh about world axes instead of the attach
+// point's, which is the whole difference the property exists to express.
+inline void kh_attach_offset_rot(const RenderObject& khor_o, float khor_rot[9]) {
+    if (!khor_o.attach_rot_on) return;
+    float khor_m[9];
+    for (int khor_r = 0; khor_r < 3; ++khor_r) {
+        for (int khor_c = 0; khor_c < 3; ++khor_c) {
+            khor_m[khor_r * 3 + khor_c] =
+                khor_o.attach_rot[khor_r * 3 + 0] * khor_rot[0 * 3 + khor_c] +
+                khor_o.attach_rot[khor_r * 3 + 1] * khor_rot[1 * 3 + khor_c] +
+                khor_o.attach_rot[khor_r * 3 + 2] * khor_rot[2 * 3 + khor_c];
+        }
+    }
+    memcpy(khor_rot, khor_m, sizeof(khor_m));
+}
+
+// KH_ATTACH_BONE - hand this entry's proxy to the delete queue and clear both
+// bone lanes. Under g_draw_list_mutex. Takes a REFERENCE and moves out of it,
+// so calling it twice on the same entry is a no-op rather than a double
+// delete. Copies a game_value and makes no engine call, which is what lets it
+// run from the park; the call it cannot make is in kh_attach_proxy_reap.
+inline void kh_attach_proxy_retire(KhAttach& khpx_a) {
+    if (khpx_a.proxy.is_nil()) {
+        khpx_a.bone_parent = game_value();
+        return;
+    }
+    g_attach_proxy_dead.push_back(khpx_a.proxy);
+    g_attach_proxy_dead_n.store(static_cast<uint32_t>(g_attach_proxy_dead.size()),
+                                std::memory_order_relaxed);
+    khpx_a.proxy = game_value();
+    khpx_a.bone_parent = game_value();
+}
+
 // Set or clear one lane. A value that is not a live-typed OBJECT clears it;
 // an entry with both lanes clear is erased, so g_attach_n counts exactly the
 // meshes the step walks and the objects are released as soon as they stop
@@ -2674,6 +2845,18 @@ inline void kh_attach_set(const std::string& khas_h, const game_value& khas_gv, 
     if (khas_it == g_attach.end()) {
         if (!khas_on) return;
         khas_it = g_attach.emplace(khas_h, KhAttach()).first;
+    }
+    // KH_ATTACH_BONE: the proxy exists to BE the position lane's object, so
+    // pointing that lane anywhere else ends the bone attachment. Guarded on
+    // identity rather than on the flag, because kh_attach_bone_set installs
+    // the proxy through its own path and must not be undone here. The rotation
+    // lane is deliberately not covered: a script setting a plain rotation while
+    // the position still follows a bone keeps the attachment and just stops
+    // reading its rows.
+    if (!khas_rot && !khas_it->second.proxy.is_nil() &&
+        khas_gv.data.get() != khas_it->second.proxy.data.get()) {
+        kh_attach_proxy_retire(khas_it->second);
+        khas_it->second.obj_rot = game_value();   // It named the proxy too.
     }
     game_value& khas_lane = khas_rot ? khas_it->second.obj_rot : khas_it->second.obj_pos;
     khas_lane = khas_on ? khas_gv : game_value();
@@ -2688,7 +2871,17 @@ inline void kh_attach_set(const std::string& khas_h, const game_value& khas_gv, 
         khas_it->second.bb_pos = 0;
         khas_it->second.off_pos = KH_ATTACH_OFF_NONE;
     }
-    if (khas_it->second.obj_pos.is_nil() && khas_it->second.obj_rot.is_nil()) g_attach.erase(khas_it);
+    if (khas_it->second.obj_pos.is_nil() && khas_it->second.obj_rot.is_nil()) {
+        // KH_ATTACH_BONE: the entry is about to stop existing, and with it the
+        // only reference to its proxy - so retire before erasing or the object
+        // is leaked into the world with nothing left that knows its name. The
+        // guard above already retires on every path that can empty the position
+        // lane, so this is unreachable today; it is here because the erase is
+        // where a leak would be silent and permanent, and a later reader adding
+        // a rotation-side clear would not think to look at it.
+        kh_attach_proxy_retire(khas_it->second);
+        g_attach.erase(khas_it);
+    }
     g_attach_n.store(static_cast<uint32_t>(g_attach.size()), std::memory_order_relaxed);
 }
 
@@ -2698,11 +2891,27 @@ inline void kh_attach_set(const std::string& khas_h, const game_value& khas_gv, 
 // pass and the object would be held to process exit.
 inline void kh_attach_drop(const std::string& khad_h) {
     if (g_attach.empty()) return;
-    if (g_attach.erase(khad_h) == 0) return;
+    auto khad_it = g_attach.find(khad_h);
+    if (khad_it == g_attach.end()) return;
+    kh_attach_proxy_retire(khad_it->second);   // KH_ATTACH_BONE: ours to delete.
+    g_attach.erase(khad_it);
     g_attach_n.store(static_cast<uint32_t>(g_attach.size()), std::memory_order_relaxed);
 }
 
-inline void kh_attach_drop_all() {   // Under g_draw_list_mutex.
+// khad_retire distinguishes the two callers, and the distinction is real.
+// clear_render_objects is a SCRIPT clearing its meshes mid-mission: its
+// proxies are live game objects that nothing will ever delete but us, so they
+// must be queued. reset_retained_state is a MISSION EDGE: the engine is about
+// to destroy every object in the world, the drain will not run again, and
+// queueing there would hold SQF references to process exit - the exact thing
+// the note on g_attach warns about.
+inline void kh_attach_drop_all(bool khad_retire) {   // Under g_draw_list_mutex.
+    if (khad_retire) {
+        for (auto& khad_kv : g_attach) kh_attach_proxy_retire(khad_kv.second);
+    } else {
+        g_attach_proxy_dead.clear();
+        g_attach_proxy_dead_n.store(0, std::memory_order_relaxed);
+    }
     g_attach.clear();
     g_attach_n.store(0, std::memory_order_relaxed);
     // A mission edge takes the queue with the table: the handles it names
@@ -2748,6 +2957,206 @@ inline void kh_attach_reap() {
     g_attach_dead_n.store(0, std::memory_order_relaxed);
 }
 
+// KH_ATTACH_BONE, the delete side: GAME THREAD ONLY, once per flush_frame,
+// and the only place a proxy is destroyed. Its one call site is flush_frame,
+// which is the Draw3D handler and therefore the main game thread, and it sits
+// BEFORE the park because sqf::delete_vehicle is an engine call.
+//
+// The queue is swapped out under the mutex and drained outside it. That order
+// is not tidiness: deleteVehicle can re-enter our own SQF commands (an event
+// handler on the proxy's death calling removeRenderHandler), and those take
+// g_draw_list_mutex, which is not recursive.
+inline void kh_attach_proxy_reap() {
+    if (g_attach_proxy_dead_n.load(std::memory_order_relaxed) == 0) return;
+    std::vector<game_value> khpr_take;
+    {
+        std::lock_guard<std::mutex> khpr_g(g_draw_list_mutex);
+        khpr_take.swap(g_attach_proxy_dead);
+        g_attach_proxy_dead_n.store(0, std::memory_order_relaxed);
+    }
+    for (game_value& khpr_p : khpr_take) {
+        if (khpr_p.is_nil()) continue;
+        // A proxy whose parent was deleted may already be gone; deleting a null
+        // object is a no-op in SQF, and the try is the same belt this file puts
+        // on every other engine call made from a frame path.
+        try { sqf::delete_vehicle(static_cast<object>(khpr_p)); } catch (...) {}
+    }
+}
+
+// KH_ATTACH_BONE - queue a proxy that never reached a KhAttach entry.
+//
+// There is a window in every command that attaches to a memory point:
+// kh_attach_bone_make has created the object and attachTo has bound it to the
+// parent, but kh_attach_bone_set has not yet put it in a lane. In that window
+// NOTHING names it - not g_attach, not the draw list, not the dead queue - so
+// a command that returns there leaves a KH_ATTACH_BONE_SHAPE standing on the
+// parent's memory point for the rest of the mission, invisible to every
+// removal path (all five draw-list erase sites drop through kh_attach_drop,
+// and a proxy that was never in the table is reached by none of them).
+//
+// GAME THREAD, from a command entry point holding NO lock. It takes
+// g_draw_list_mutex only to append; the delete still happens in
+// kh_attach_proxy_reap, outside every lock, for the reasons in the note on
+// g_attach_proxy_dead. Deleting here instead would be safe at today's call
+// sites and would stop being safe the first time one of them moves.
+inline void kh_attach_proxy_orphan(game_value& khpo_p) {
+    if (khpo_p.is_nil()) return;
+    {
+        std::lock_guard<std::mutex> khpo_g(g_draw_list_mutex);
+        g_attach_proxy_dead.push_back(khpo_p);
+        g_attach_proxy_dead_n.store(static_cast<uint32_t>(g_attach_proxy_dead.size()),
+                                    std::memory_order_relaxed);
+    }
+    khpo_p = game_value();
+}
+
+// The owner of that window, so the audit is STRUCTURAL rather than one exit at
+// a time. addRender3D has seven returns between the make and the set plus two
+// catch blocks; six of the returns are unreachable with a live proxy only
+// because of the shape of an if/else chain, and that shape is exactly the kind
+// of thing a later edit changes without noticing. Every path out of the
+// command runs this destructor instead.
+//
+// Declare it only where g_draw_list_mutex is NOT held: the destructor takes
+// that mutex and it is not recursive. Both call sites are command entry
+// points, which is the one place the file guarantees that.
+struct KhProxyOwn {
+    game_value proxy;
+    KhProxyOwn() {}
+    KhProxyOwn(const KhProxyOwn&) = delete;
+    KhProxyOwn& operator=(const KhProxyOwn&) = delete;
+    ~KhProxyOwn() { kh_attach_proxy_orphan(proxy); }
+    // Hands ownership on. After this the guard holds nothing and its
+    // destructor is a no-op, so an installed proxy is never double-queued.
+    game_value release() {
+        game_value khpn_p = proxy;
+        proxy = game_value();
+        return khpn_p;
+    }
+};
+
+// KH_ATTACH_BONE - build the memory-point proxy. GAME THREAD ONLY: three SQF
+// calls, so every caller is a command entry point. False with a caller-facing
+// sentence in err.
+//
+// follow_bone is passed TRUE unconditionally and that is deliberate. The proxy
+// always tracks the bone's full transform; the script's rotation argument
+// decides only whether our ROTATION LANE reads the proxy, which is a lane
+// assignment and not an attach. So a script toggling rotation never re-runs
+// createSimpleObject or attachTo, and the position lane never flinches.
+inline bool kh_attach_bone_make(const game_value& khbm_parent, const std::string& khbm_mem,
+                                game_value& khbm_proxy, std::string& err) {
+    if (!kh_attach_is_obj(khbm_parent)) {
+        err = "position [object, memoryPoint] needs a game object in the first slot";
+        return false;
+    }
+    if (kh_attach_obj_dead(khbm_parent)) {
+        err = "position object is null - nothing to follow";
+        return false;
+    }
+    if (khbm_mem.empty()) {
+        err = "position [object, memoryPoint] needs a non-empty memory point name";
+        return false;
+    }
+    const object khbm_p = static_cast<object>(khbm_parent);
+    const object khbm_s = sqf::create_simple_object(KH_ATTACH_BONE_SHAPE,
+                                                    vector3(0.0f, 0.0f, 0.0f), true);
+    if (sqf::is_null(khbm_s)) {
+        err = std::string("could not create the memory-point proxy (") +
+              KH_ATTACH_BONE_SHAPE + " missing from the loaded mods?)";
+        return false;
+    }
+    // The spawn position is discarded by the attach on the next simulation
+    // step, which is why it is not asked for.
+    sqf::attach_to(khbm_s, khbm_p, vector3(0.0f, 0.0f, 0.0f), khbm_mem, true);
+    khbm_proxy = khbm_s;
+    return true;
+}
+
+// KH_ATTACH_BONE - install a finished proxy on a handle, both lanes at once.
+// Separate from kh_attach_set because the two lanes must move together here:
+// they name the same proxy, and setting them one at a time through the plain
+// path would retire the proxy between the two calls.
+inline void kh_attach_bone_set(const std::string& khbs_h, const game_value& khbs_proxy,
+                               const game_value& khbs_parent, bool khbs_rot) {
+    std::lock_guard<std::mutex> khbs_g(g_draw_list_mutex);
+    auto khbs_it = g_attach.find(khbs_h);
+    if (khbs_it == g_attach.end()) khbs_it = g_attach.emplace(khbs_h, KhAttach()).first;
+    // A rotation lane following something OTHER than the OLD proxy is the
+    // script's own, set through the ordinary "rotation" property, and the two
+    // lanes are independent by contract - so a position change must hand it
+    // back untouched rather than silently dropping it. Only a lane that was
+    // following the old proxy is the bone's to re-point.
+    const bool khbs_was_bone = !khbs_it->second.obj_rot.is_nil() &&
+                               !khbs_it->second.proxy.is_nil() &&
+                               khbs_it->second.obj_rot.data.get() ==
+                                   khbs_it->second.proxy.data.get();
+    const game_value khbs_keep = khbs_was_bone ? game_value() : khbs_it->second.obj_rot;
+    // Re-pointing an existing bone attachment at a new object or memory point:
+    // the old proxy stops being anything's lane here and is ours to delete.
+    kh_attach_proxy_retire(khbs_it->second);
+    khbs_it->second.proxy = khbs_proxy;
+    khbs_it->second.bone_parent = khbs_parent;
+    khbs_it->second.obj_pos = khbs_proxy;
+    khbs_it->second.vb_pos = 0;
+    khbs_it->second.bb_pos = 0;
+    khbs_it->second.off_pos = KH_ATTACH_OFF_NONE;
+    const game_value khbs_new_rot = khbs_rot ? khbs_proxy : khbs_keep;
+    // The caches belong to the object the lane names; a lane handed back
+    // unchanged keeps the offset it already measured.
+    if (khbs_new_rot.data.get() != khbs_it->second.obj_rot.data.get()) {
+        khbs_it->second.vb_rot = 0;
+        khbs_it->second.bb_rot = 0;
+        khbs_it->second.off_rot = KH_ATTACH_OFF_NONE;
+    }
+    khbs_it->second.obj_rot = khbs_new_rot;
+    g_attach_n.store(static_cast<uint32_t>(g_attach.size()), std::memory_order_relaxed);
+}
+
+// KH_ATTACH_BONE - the rotation toggle. Points the rotation lane at the proxy
+// the position lane already follows, or clears it, WITHOUT touching the
+// attachment: this is the whole reason the proxy is attached follow-bone once
+// and never again. False when the handle has no bone attachment, because a
+// boolean rotation means nothing without one.
+inline bool kh_attach_bone_rot(const std::string& khbr_h, bool khbr_on) {
+    std::lock_guard<std::mutex> khbr_g(g_draw_list_mutex);
+    auto khbr_it = g_attach.find(khbr_h);
+    if (khbr_it == g_attach.end() || khbr_it->second.proxy.is_nil()) return false;
+    if (!khbr_on) {
+        // FALSE means "stop following the bone", and nothing more. A rotation
+        // lane the script pointed at some other object is not the bone's and is
+        // not this command's to clear (the same independence bone_set honours).
+        if (khbr_it->second.obj_rot.is_nil() ||
+            khbr_it->second.obj_rot.data.get() != khbr_it->second.proxy.data.get()) return true;
+        khbr_it->second.obj_rot = game_value();
+    } else {
+        khbr_it->second.obj_rot = khbr_it->second.proxy;
+    }
+    khbr_it->second.vb_rot = 0;
+    khbr_it->second.bb_rot = 0;
+    khbr_it->second.off_rot = KH_ATTACH_OFF_NONE;
+    return true;
+}
+
+// KH_ATTACH_BONE - does this handle's rotation lane currently follow its bone?
+// Read by the "position" property so that re-pointing an existing bone
+// attachment at a new object or memory point PRESERVES the follow-rotation
+// state instead of silently resetting it. False for a handle with no bone
+// attachment, which is also the right answer for a fresh one.
+//
+// The test is IDENTITY against the proxy, not merely a non-nil lane: the two
+// lanes are independent by contract and a script may point the rotation lane
+// at some entirely different object while the position follows a bone. Such a
+// lane is not following the bone and answering true for it would let the
+// position property overwrite it.
+inline bool kh_attach_bone_rot_state(const std::string& khbq_h) {
+    std::lock_guard<std::mutex> khbq_g(g_draw_list_mutex);
+    auto khbq_it = g_attach.find(khbq_h);
+    if (khbq_it == g_attach.end() || khbq_it->second.proxy.is_nil()) return false;
+    if (khbq_it->second.obj_rot.is_nil()) return false;
+    return khbq_it->second.obj_rot.data.get() == khbq_it->second.proxy.data.get();
+}
+
 // Attach a lane AND take the transform now, so the mesh is in place on the
 // frame the command runs rather than one later. False with a caller-facing
 // sentence in err: a script gets the fault at the call site instead of a mesh
@@ -2761,15 +3170,59 @@ inline bool kh_attach_apply(const std::string& khaa_h, const game_value& khaa_gv
         return false;
     }
     if (khaa_rot) {
+        kh_attach_offset_rot(khaa_o, khaa_r);   // KH_ATTACH_OFFSET: inside the frame just read.
         memcpy(khaa_o.rot_m, khaa_r, sizeof(khaa_o.rot_m));
         khaa_o.rotated = kh_attach_rotated(khaa_r);
     } else {
+        kh_attach_offset_pos(khaa_o, khaa_r, khaa_p);   // KH_ATTACH_OFFSET.
         khaa_o.pos[0] = khaa_p[0];
         khaa_o.pos[1] = khaa_p[1];
         khaa_o.pos[2] = khaa_p[2];
     }
     kh_attach_set(khaa_h, khaa_gv, khaa_rot);
     return true;
+}
+
+// KH_ATTACH_OFFSET - this handle's two lane objects, copied out. GAME THREAD
+// ONLY: copying a game_value touches the SQF allocator, which is the same rule
+// that keeps kh_attach_step to strings. A handle with no attachment leaves
+// both out-params nil, which is what makes the re-seed below a no-op for it.
+//
+// The copy is taken under the mutex and USED outside it, so the raw reads and
+// their page walks never run with g_draw_list_mutex held from a command.
+inline void kh_attach_lanes(const std::string& khal_h, game_value& khal_pos, game_value& khal_rot) {
+    std::lock_guard<std::mutex> khal_g(g_draw_list_mutex);
+    auto khal_it = g_attach.find(khal_h);
+    if (khal_it == g_attach.end()) return;
+    khal_pos = khal_it->second.obj_pos;
+    khal_rot = khal_it->second.obj_rot;
+}
+
+// KH_ATTACH_OFFSET - re-take this mesh's transform from whatever it already
+// follows, so a changed offset lands on the frame the command runs instead of
+// waiting for the next step. GAME THREAD ONLY (kh_attach_lanes), takes no lock
+// itself past that copy, and makes NO SQF call - the reads are the same raw,
+// page-gated ones the step uses, with fresh caches because a command has no
+// lane to cache in.
+//
+// A lane that is not attached, or whose read fails this instant, is left
+// exactly as it is: the step corrects it on its next pass, and the mesh never
+// jumps somewhere neither value says.
+inline void kh_attach_reseed(const std::string& khrs_h, RenderObject& khrs_o) {
+    game_value khrs_lp, khrs_lr;
+    kh_attach_lanes(khrs_h, khrs_lp, khrs_lr);
+    float khrs_p[3], khrs_r[9];
+    if (!khrs_lp.is_nil() && kh_attach_read(khrs_lp, khrs_p, khrs_r)) {
+        kh_attach_offset_pos(khrs_o, khrs_r, khrs_p);
+        khrs_o.pos[0] = khrs_p[0];
+        khrs_o.pos[1] = khrs_p[1];
+        khrs_o.pos[2] = khrs_p[2];
+    }
+    if (!khrs_lr.is_nil() && kh_attach_read(khrs_lr, khrs_p, khrs_r)) {
+        kh_attach_offset_rot(khrs_o, khrs_r);
+        memcpy(khrs_o.rot_m, khrs_r, sizeof(khrs_o.rot_m));
+        khrs_o.rotated = kh_attach_rotated(khrs_r);   // The COMPOSED matrix, not the raw one.
+    }
 }
 
 // Runs from THREE sites, each immediately ahead of the scene read its draws
@@ -2799,7 +3252,15 @@ inline void kh_attach_step() {
         // releases the entry's game_values (the THREADS note on g_attach).
         // Either lane counts: a mesh following a turret that no longer
         // exists has nothing left to follow, whatever its other lane says.
-        if (kh_attach_obj_dead(khap_a.obj_pos) || kh_attach_obj_dead(khap_a.obj_rot)) {
+        //
+        // KH_ATTACH_BONE adds bone_parent, and it is not redundant with the
+        // two lanes. In bone mode the lanes hold the PROXY, and a proxy
+        // outlives its parent: attachTo leaves it standing at the parent's
+        // last position, perfectly readable, forever. Without this third test
+        // a mesh following a bone of a deleted vehicle would never die - the
+        // one case the whole feature has to get right.
+        if (kh_attach_obj_dead(khap_a.obj_pos) || kh_attach_obj_dead(khap_a.obj_rot) ||
+            kh_attach_obj_dead(khap_a.bone_parent)) {
             kh_attach_dead_queue(khap_it->first);
             continue;
         }
@@ -2812,6 +3273,14 @@ inline void kh_attach_step() {
         if (!khap_a.obj_pos.is_nil()) {
             khap_raw = kh_attach_raw(khap_a.obj_pos, khap_a.off_pos, khap_a.vb_pos, khap_a.bb_pos,
                                      khap_p, khap_r);
+            // KH_ATTACH_OFFSET, composed BEFORE the compare so both properties
+            // of that compare survive: a mesh with an offset still costs
+            // nothing on a frame its object did not move, and a CHANGED offset
+            // needs no special case at all - the composed value simply stops
+            // matching what the mesh carries. khap_r is the position object's
+            // own basis and is read here, before the rotation lane below can
+            // overwrite it.
+            if (khap_raw) kh_attach_offset_pos(khap_o, khap_r, khap_p);
             if (khap_raw && (khap_o.pos[0] != khap_p[0] || khap_o.pos[1] != khap_p[1] ||
                              khap_o.pos[2] != khap_p[2])) {
                 khap_o.pos[0] = khap_p[0];
@@ -2826,6 +3295,10 @@ inline void kh_attach_step() {
             if (!khap_rok)
                 khap_rok = kh_attach_raw(khap_a.obj_rot, khap_a.off_rot, khap_a.vb_rot, khap_a.bb_rot,
                                          khap_p, khap_r);
+            // KH_ATTACH_OFFSET. In place on khap_r, which the position block
+            // above has finished with either way - it used the basis, it did
+            // not change it, and on the shared-object path this IS that basis.
+            if (khap_rok) kh_attach_offset_rot(khap_o, khap_r);
             if (khap_rok && memcmp(khap_o.rot_m, khap_r, sizeof(khap_o.rot_m)) != 0) {
                 memcpy(khap_o.rot_m, khap_r, sizeof(khap_o.rot_m));
                 khap_o.rotated = kh_attach_rotated(khap_r);
@@ -3158,7 +3631,6 @@ struct alignas(16) ConstantData {
     // x = transport arm (1 = read the volume stencil); z = KhVsCore vertex path
     // selector (3 = the seam prepass).
     float sten_vol2[4];
-    float sten_proj[4][4];
     // Hero sun map - HLSL twins sunVP2 / sunMeta2 (mirror contract).
     float sun_vp2[4][4];   // World -> hero sun-depth clip (row-vector).
     float sun_meta2[4];   // x = valid, y = map size (px), z = compare bias, w = half-diag (m).
@@ -3643,7 +4115,9 @@ inline const std::vector<std::filesystem::path>& kh_mod_cache_dirs() {
     return khmd_dirs;
 }
 
-// "khs_<16 hex>.khsc" / "khm_<16 hex>.khmc" - one spelling, three callers.
+// "khs_<16 hex>.khsc" / "khm_<16 hex>.khmc" / "kht_<16 hex>.khtc" - one
+// spelling, FIVE callers: the shader cache probe, and the file / load pair
+// of each of the mesh and texture caches.
 inline std::string kh_cache_file_name(const char* khcf_pfx, uint64_t khcf_h,
                                       const char* khcf_ext) {
     std::ostringstream khcf_ss;
@@ -8710,7 +9184,6 @@ inline std::string ensure_resources(ID3D11Device* dev) {
     const D3D_SHADER_MACRO khpw_dr[] = {
         { "MSAA_DEPTH", g_res.depth_sample_count > 1 ? "1" : "0" },
         { "SAMPLE_COUNT", khpw_sc.c_str() },
-        { "WIT_NEAREST", "1" },
         { nullptr, nullptr } };
     static const D3D_SHADER_MACRO khpw_none[] = { { nullptr, nullptr } };
     const char* khpw_dr_src = g_res.depth_sample_count > 0 ? kh_hlsl_src(KH_HLSL_DEPTH_RESOLVE).c_str() : nullptr;
@@ -9844,9 +10317,7 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
 // Resolve PS, compiled per source MSAA count. Standalone source; the shared
 // vs_fullscreen's extra texcoord outputs a subset-reading PS legally ignores.
 inline std::string ensure_depth_resolve_shader(ID3D11Device* dev) {
-    const int khdr_wit = 1;
-    if (g_res.ps_depth_resolve && g_res.ps_resolve_samples == g_res.depth_sample_count
-        && g_res.ps_resolve_wit == khdr_wit) return "";
+    if (g_res.ps_depth_resolve && g_res.ps_resolve_samples == g_res.depth_sample_count) return "";
     if (g_res.ps_depth_resolve) { g_res.ps_depth_resolve->Release(); g_res.ps_depth_resolve = nullptr; }
 
     const std::string sc = std::to_string(g_res.depth_sample_count > 0 ? g_res.depth_sample_count : 1);
@@ -9854,7 +10325,6 @@ inline std::string ensure_depth_resolve_shader(ID3D11Device* dev) {
     const D3D_SHADER_MACRO defines[] = {
         { "MSAA_DEPTH", g_res.depth_sample_count > 1 ? "1" : "0" },
         { "SAMPLE_COUNT", sc.c_str() },
-        { "WIT_NEAREST", khdr_wit ? "1" : "0" },
         { nullptr, nullptr },
     };
 
@@ -9865,7 +10335,6 @@ inline std::string ensure_depth_resolve_shader(ID3D11Device* dev) {
     blob->Release();
     if (FAILED(hr)) return "Create depth resolve PS " + hr_str(hr);
     g_res.ps_resolve_samples = g_res.depth_sample_count;
-    g_res.ps_resolve_wit = khdr_wit;
     return "";
 }
 
@@ -16928,7 +17397,7 @@ struct KhAoRec {   // HLSL twin KhAoRec (t40), 5 float4.
     float rot2[4];   // the bound radius (m), rot2.w = the field's cell size (m).
 };
 static_assert(sizeof(KhAoRec) == 80, "KhAoRec is 5 float4 (HLSL twin)");
-static constexpr uint32_t KH_AO_MAX = 192u;   // HLSL twin KH_AO_MAX / khAoOcc's length.
+static constexpr uint32_t KH_AO_MAX = 192u;   // Twin of khAoOcc's declared length (192).
 static_assert(sizeof(ConstantData::kh_ao_occ) == KH_AO_MAX * 16u, "kh_ao_occ holds KH_AO_MAX float4 (HLSL twin khAoOcc)");
 static constexpr float    KH_AO_RANGE_M = 150.0f;   // Receivers fade out over the last 15% of this (or of the cap-bound range).
 static std::atomic<uint32_t> g_ao_strength_bits{ 0x3F800000u };   // Float bits, default 1.0; 0 = off.
@@ -19981,7 +20450,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     // KH_SUN_CAM_LATCH: this camera is the anchor, the caster cylinder, the
     // tier windows and the range fade's centre. It used to be the raw bridge
     // sample, which is one step ahead of the frame at ground and foreign (up to
-    // 156 m, 1.410) at altitude, so the whole shadow domain sat that far off
+    // 156 m) at altitude, so the whole shadow domain sat that far off
     // the camera the meshes draw from - invisible while shadows stayed under
     // their casters, and a rim that led the camera once a low sun stretched
     // them out to it. The injection's own take instead: the cycle latch, with
@@ -22723,24 +23192,12 @@ static float    g_svs_prime_vp_hi = 1.0f;
 static ID3D11Texture2D*          g_svs_vol_src = nullptr;
 static void*                     g_svs_vol_src_id = nullptr;
 static ID3D11Texture2D*          g_svs_vol_tex = nullptr;
-static ID3D11ShaderResourceView* g_svs_vol_depth_srv = nullptr;
 static ID3D11ShaderResourceView* g_svs_vol_sten_srv = nullptr;
 static uint32_t g_svs_vol_w = 0;
 static uint32_t g_svs_vol_h = 0;
 static bool     g_svs_vol_primed = false;
 // Live epoch latch.
 static uint64_t g_svs_vol_seq = 0;
-inline void kh_fill_sten_proj(ConstantData& khp_cbd, const float khp_proj[4][4]) {
-    memcpy(khp_cbd.sten_proj, khp_proj, sizeof(khp_cbd.sten_proj));
-
-    // Applied here too so the engine-view path pairs an engine rotation with
-    // engine depth coefficients rather than a mixture.
-    if (g_ro.engine_proj_valid) {
-        khp_cbd.sten_proj[2][2] = g_ro.engine_m22;
-        khp_cbd.sten_proj[3][2] = g_ro.engine_m32;
-    }
-}
-
 // Deliberate toggle: constant true, kept as a function so the volume transport
 // can be switched off in one place.
 inline bool kh_svs_vol_on() {
@@ -22748,7 +23205,6 @@ inline bool kh_svs_vol_on() {
 }
 
 inline void kh_svs_vol_release() {
-    if (g_svs_vol_depth_srv) { g_svs_vol_depth_srv->Release(); g_svs_vol_depth_srv = nullptr; }
     if (g_svs_vol_sten_srv) { g_svs_vol_sten_srv->Release(); g_svs_vol_sten_srv = nullptr; }
     if (g_svs_vol_tex) { g_svs_vol_tex->Release(); g_svs_vol_tex = nullptr; }
     g_svs_vol_w = 0; g_svs_vol_h = 0;
@@ -22787,7 +23243,7 @@ inline bool kh_svs_vol_ensure(ID3D11Device* khe_dev) {
     D3D11_TEXTURE2D_DESC khe_sd = {};
     g_svs_vol_src->GetDesc(&khe_sd);
 
-    if (g_svs_vol_tex && g_svs_vol_depth_srv && g_svs_vol_sten_srv &&
+    if (g_svs_vol_tex && g_svs_vol_sten_srv &&
         g_svs_vol_w == khe_sd.Width && g_svs_vol_h == khe_sd.Height) {
         return true;
     }
@@ -22821,15 +23277,6 @@ inline bool kh_svs_vol_ensure(ID3D11Device* khe_dev) {
     D3D11_SHADER_RESOURCE_VIEW_DESC khe_vd = {};
     khe_vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
     khe_vd.Texture2D.MipLevels = 1;
-    khe_vd.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;   // The depth plane.
-
-    if (FAILED(khe_dev->CreateShaderResourceView(g_svs_vol_tex, &khe_vd,
-                                                 &g_svs_vol_depth_srv))) {
-        g_svs_vol_depth_srv = nullptr;
-        kh_svs_vol_release();
-        return false;
-    }
-
     khe_vd.Format = DXGI_FORMAT_X24_TYPELESS_G8_UINT;   // The stencil plane (g).
 
     if (FAILED(khe_dev->CreateShaderResourceView(g_svs_vol_tex, &khe_vd,
@@ -22845,14 +23292,14 @@ inline bool kh_svs_vol_ensure(ID3D11Device* khe_dev) {
 }
 
 inline bool kh_svs_vol_ready() {
-    if (g_svs_vol_depth_srv == nullptr || g_svs_vol_sten_srv == nullptr) return false;
+    if (g_svs_vol_sten_srv == nullptr) return false;
     if (!g_svs_vol_primed) {  return false; }
     // No same-frame gate here, deliberately: the copy runs at the engine's
     // stencil-mask RTV bind and the reader is inject_composited_meshes off the
     // opaque trigger - opposite sides of the frame. Cross-frame consumption is
     // the transport's contract (g_svs_vol_primed is sticky; kh_svs_vol_copy's
     // no-mesh-wanted guard drops it). A same-frame gate silently dropped
-    // maskMeta.w, the stenVol2.x arm and the t23/t24 binds whenever the mask
+    // maskMeta.w, the stenVol2.x arm and the t24 bind whenever the mask
     // bind landed after the trigger. If staleness is ever observed, bound it
     // against a measured epoch lag, not equality.
 
@@ -24377,11 +24824,6 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
 
     ConstantData khv_cbf = {};
     memcpy(khv_cbf.view_proj, khv_vp_m, sizeof(khv_cbf.view_proj));
-    // Fills stenProj, which NO shader in any unit reads: the reprojected
-    // stencil read it served was replaced by the volume transport
-    // (stenVol2.x). Kept because a lane leaves the mirror on both sides or
-    // neither. The three fill sites stay in step for the same reason.
-    kh_fill_sten_proj(khv_cbf, khv_pv.projection);
     // The depth terms of the projection this prepass renders the mirror with.
     // The world pass inverts the mirror's depth through exactly these. VSMirror
     // overwrites z with its own conditional near plane, so the depth cannot be
@@ -25253,7 +25695,7 @@ inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
     if (!kh_ensure_ok("pip effect shader", kh_pip_fx_shader(dev))) return;
 
     // Declared before the OM save so the unwind restores the OM before the
-    // SRVs (1.388: destructors run in reverse declaration order); captured
+    // SRVs (destructors run in reverse declaration order); captured
     // later, at the same site as before.
     StateBackup khpf_bk;
     KhOmSave khpf_om;
@@ -26774,11 +27216,10 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             ctx->PSSetShaderResources(22, 1, &g_svs_post_srv);
         }
     }
-    // The volume copy's two planes (t23/t24), on their own arm; both inside
+    // The volume copy's stencil plane (t24), on its own arm; inside
     // StateBackup's saved range. Twin: the flush carries the identical block.
     if (kh_svs_vol_ready()) {
-        ID3D11ShaderResourceView* khr_vol[2] = { g_svs_vol_depth_srv, g_svs_vol_sten_srv };
-        ctx->PSSetShaderResources(23, 2, khr_vol);
+        ctx->PSSetShaderResources(24, 1, &g_svs_vol_sten_srv);
     }
     // The mirror stencil at t28 (inside StateBackup's saved range). mirMeta.x =
     // 0 short-circuits the shader, so an absent mask never reads a stale bind.
@@ -26955,8 +27396,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             khr_cbf.mask_meta[0] = 1.0f;   // Stream liveness: the receive.
         }
         khr_cbf.mask_meta[3] = kh_svs_unit_on() ? 1.0f : 0.0f;
-        // The engine-view arm for the visible mesh.
-        kh_fill_sten_proj(khr_cbf, pv.projection);
+        // The volume transport arm and the copy's dimensions, for the
+        // visible mesh.
         kh_fill_sten_reproj(khr_cbf);
 
         // Engine-mask depth-gated receive: registration-exact engine shadows on
@@ -30009,8 +30450,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             khf_cbf.mask_meta[0] = 1.0f;   // Stream liveness: the receive.
         }   // Stands down before the first publish or while the cascade stream is dead.
         khf_cbf.mask_meta[3] = kh_svs_unit_on() ? 1.0f : 0.0f;
-        // The engine-view arm, flush twin.
-        kh_fill_sten_proj(khf_cbf, pv.projection);
+        // The volume transport arm and the copy's dimensions, flush twin.
         kh_fill_sten_reproj(khf_cbf);
 
         // Engine-mask depth-gated receive: registration-exact engine shadows on
@@ -30528,11 +30968,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                         ctx->PSSetShaderResources(22, 1, &g_svs_post_srv);
                     }
                 }
-                // The volume copy's two planes (t23/t24), on their own arm.
+                // The volume copy's stencil plane (t24), on its own arm.
                 if (kh_svs_vol_ready()) {
-                    ID3D11ShaderResourceView* khf_vol[2] = { g_svs_vol_depth_srv,
-                                                             g_svs_vol_sten_srv };
-                    ctx->PSSetShaderResources(23, 2, khf_vol);
+                    ctx->PSSetShaderResources(24, 1, &g_svs_vol_sten_srv);
                 }
                 if (g_vmir_srv && g_vmir_mask_time >= 0.0f) {
                     ctx->PSSetShaderResources(28, 1, &g_vmir_srv);
@@ -31061,6 +31499,10 @@ inline void flush_frame() {
     // before the work test below, so a frame whose only remaining mesh was
     // following a deleted object correctly finds nothing left to draw.
     kh_attach_reap();
+    // KH_ATTACH_BONE: after the reap, because the reap is what retires the
+    // proxies of the meshes it just erased, and before the park, because this
+    // one makes SQF calls.
+    kh_attach_proxy_reap();
     bool has_work;
 
     {
@@ -32094,7 +32536,7 @@ inline void reset_retained_state() {
     {
         std::lock_guard<std::mutex> g(g_draw_list_mutex);
         for (auto& kv : g_draw_list) kh_scene_stage_remove(kv.second);   // KH_SCENE: deaths sync later.
-        kh_attach_drop_all();   // KH_ATTACH: a mission edge must not hold an object to process exit.
+        kh_attach_drop_all(false);   // KH_ATTACH: a mission edge must not hold an object to process exit.
         g_draw_list.clear();
         g_next_seq = 0;   // Creation order restarts with the list it orders.
     }
@@ -32279,7 +32721,7 @@ inline size_t clear_render_objects() {
     std::lock_guard<std::mutex> g(g_draw_list_mutex);
     const size_t n = g_draw_list.size();
     for (auto& kv : g_draw_list) kh_scene_stage_remove(kv.second);
-    kh_attach_drop_all();   // KH_ATTACH.
+    kh_attach_drop_all(true);   // KH_ATTACH: mid-mission, so the proxies are ours to delete.
     g_draw_list.clear();
     return n;
 }

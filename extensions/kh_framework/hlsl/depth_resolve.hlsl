@@ -20,11 +20,7 @@ float2 PSDepthResolve(float4 pos : SV_Position) : SV_Target
         if (r > 0.000001f && r < 0.999999f) n = min(n, r);
     }
     if (n > m) n = m;
-#if WIT_NEAREST
     return float2(m, n);
-#else
-    return float2(m, m);
-#endif
 #else
     float d = resolveSrc.Load(int3(p, 0));
     return float2(d, d);

@@ -112,12 +112,6 @@ cbuffer CBObj : register(b0)
     float4 stenVol;
     float4 stenVol2;   // x = transport arm; z = KhVsCore vertex path selector (3 = the seam
                        // prepass); y/w never written.
-    // The engine's projection (C++ twin sten_proj, filled by kh_fill_sten_proj
-    // at all three pass sites). Read by NO shader in any unit: the reprojected
-    // stencil read it went with was replaced by the volume transport
-    // (stenVol2.x). Kept because a lane leaves the mirror on both sides or
-    // neither, and nothing here has asked for a mirror move.
-    row_major float4x4 stenProj;
     row_major float4x4 sunVP2;   // World -> hero sun-depth clip.
     float4 sunMeta2;   // x = valid, y = size, z = bias, w = half-diag.
     row_major float4x4 sunVP3;   // World -> mid-band sun-depth clip (t26).
@@ -362,7 +356,6 @@ Texture2D<float4> khShadowPre : register(t21);
 Texture2D<float4> khShadowPost : register(t22);
 
 #define KH_PRIME_V   0.99607843f
-#define KH_PRIME_EPS 0.00196078f
 
 int2 KhMaskPx(float2 khsp_xy)
 {
@@ -385,7 +378,6 @@ float KhStenTerm(float2 khsp_xy)
     return KhStenRatio(khsp_post, khsp_pre);
 }
 
-Texture2D<float> khVolDepth : register(t23);
 Texture2D<uint2> khVolSten  : register(t24);
 // Same shadowed semantics as KhVolShadowed's default arm (count != 0).
 Texture2D<uint2> khMirSten  : register(t28);
@@ -601,7 +593,7 @@ float KhSunPcssWT(Texture2D<float> khpw_m, float khpw_sz, float2 khpw_uv, float 
 }
 
 // The tier-blend weight over the outer window edge. One curve for every blend
-// site (cast chain, self kernel, contact carries); KhJw shares it.
+// site (cast chain, self kernel, contact carries).
 float KhTbW(float khtw_e)
 {
     return 1.0f - smoothstep(0.75f, 0.98f, khtw_e);
@@ -611,11 +603,6 @@ float KhTbW(float khtw_e)
 float KhTbBlend(float khtd_c, float khtd_f, float khtd_w)
 {
     return lerp(khtd_c, khtd_f, khtd_w);
-}
-
-float KhJw(float khjw_e)
-{
-    return KhTbW(khjw_e);
 }
 
 // One cast tier for the four camera-anchored bands (hero/mid/outer/far). false
@@ -1497,7 +1484,6 @@ float3 DynLights(float3 wpos, float3 nrm)
 // receive, and the term scales the ambient (sky) light alone.
 #define KH_SDF_N    32.0f
 #define KH_SDF_C    (0.5f * (KH_SDF_N - 1.0f) / (KH_SDF_N - 2.0f))   // The outermost cell centre, mesh units (one padding cell each side).
-#define KH_AO_MAX   192
 #define KH_AO_CAND  8
 #define KH_AO_CONES 6
 #define KH_AO_STEPS 6

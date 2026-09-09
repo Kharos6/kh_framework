@@ -6309,6 +6309,16 @@ static void kh_rv_report(const char* cmd, const std::string& msg) {
     report_error(std::string(cmd) + ": " + msg);
 }
 
+// KH_ATTACH: the position and the rotation slots of addRender3D, and the
+// "position" / "rotation" properties of updateRender3D, take a game OBJECT in
+// place of their value. The mesh then follows that object's transform every
+// frame, read straight off the engine's own object record - no script call,
+// and no write at all on a frame where the object has not moved. The two
+// slots are independent: either, both, or neither, and they may name
+// different objects. Passing anything else back into a slot detaches it and
+// takes that value instead, so a script releases a mesh by setting a plain
+// position or rotation again.
+//
 // addRender3D [[x,y,zASL], rotation, mesh]. Everything else - size, color,
 // mode, sceneRead, effect, params, band, blend, duration, lit, twoSided,
 // lodLock, casterOnly, visible, material - is an updateRender3D
@@ -6327,12 +6337,33 @@ static game_value add_render3d_sqf(game_value_parameter args) {
             return game_value("");
         }
         RenderIntegration::RenderObject obj;
-        if (!kh_rv_pos(arr[0], obj.pos, err)) { kh_rv_report("addRender3D", err); return game_value(""); }
+        // KH_ATTACH: the objects to follow, registered once the handle exists.
+        game_value khr_apos, khr_arot;
+        float khr_ap[3], khr_ar[9];
+        if (RenderIntegration::kh_attach_is_obj(arr[0])) {
+            if (!RenderIntegration::kh_attach_read(arr[0], khr_ap, khr_ar)) {
+                kh_rv_report("addRender3D", "position object is null - nothing to follow");
+                return game_value("");
+            }
+            obj.pos[0] = khr_ap[0]; obj.pos[1] = khr_ap[1]; obj.pos[2] = khr_ap[2];
+            khr_apos = arr[0];
+        } else if (!kh_rv_pos(arr[0], obj.pos, err)) {
+            kh_rv_report("addRender3D", "position must be [x, y, zASL] or an object to follow");
+            return game_value("");
+        }
 
-        {
+        if (RenderIntegration::kh_attach_is_obj(arr[1])) {
+            if (!RenderIntegration::kh_attach_read(arr[1], khr_ap, khr_ar)) {
+                kh_rv_report("addRender3D", "rotation object is null - nothing to follow");
+                return game_value("");
+            }
+            memcpy(obj.rot_m, khr_ar, sizeof(obj.rot_m));
+            obj.rotated = RenderIntegration::kh_attach_rotated(khr_ar);
+            khr_arot = arr[1];
+        } else {
             float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f;
             if (!kh_rotation_from_gv(arr[1], khr_p, khr_y, khr_r)) {
-                kh_rv_report("addRender3D", "rotation must be nil, a number (yaw) or [pitch, yaw, roll] degrees");
+                kh_rv_report("addRender3D", "rotation must be nil, a number (yaw), [pitch, yaw, roll] degrees, or an object to follow");
                 return game_value("");
             }
             RenderIntegration::kh_set_rotation(obj, khr_p, khr_y, khr_r);
@@ -6355,7 +6386,12 @@ static game_value add_render3d_sqf(game_value_parameter args) {
         RenderIntegration::set_effect_params(obj, nullptr);
         RenderIntegration::kh_apply_native_size(obj);
 
-        return game_value(RenderIntegration::add_render_object(obj));
+        const std::string khr_h = RenderIntegration::add_render_object(obj);
+        // KH_ATTACH: after the handle, so the table is keyed by the entry that
+        // now exists; the transforms above are already in place for frame one.
+        if (!khr_apos.is_nil()) RenderIntegration::kh_attach_set(khr_h, khr_apos, false);
+        if (!khr_arot.is_nil()) RenderIntegration::kh_attach_set(khr_h, khr_arot, true);
+        return game_value(khr_h);
     } catch (const std::exception& e) {
         report_error(std::string("addRender3D: ") + e.what());
         return game_value("");
@@ -6391,20 +6427,32 @@ static int kh_apply_shared_prop(RenderIntegration::RenderObject& obj,
 }
 
 // UpdateRender3D's own set (the object is a mesh). Returns false with err.
-static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj,
+// Takes the handle because "position" and "rotation" may attach to a game
+// object (KH_ATTACH), and an attachment is keyed by handle, not by the staged
+// copy this writes into.
+static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const std::string& handle,
                                    const std::string& prop, const game_value& val, std::string& err) {
     const int shared = kh_apply_shared_prop(obj, prop, val, err);
     if (shared >= 0) return shared == 1;
 
-    if (prop == "position") return kh_rv_pos(val, obj.pos, err);
+    if (prop == "position") {
+        if (RenderIntegration::kh_attach_is_obj(val))
+            return RenderIntegration::kh_attach_apply(handle, val, false, obj, err);
+        RenderIntegration::kh_attach_set(handle, game_value(), false);   // Any other value detaches.
+        if (!kh_rv_pos(val, obj.pos, err)) { err = "position must be [x, y, zASL] or an object to follow"; return false; }
+        return true;
+    }
     if (prop == "size" || prop == "scale") {
         if (!RenderIntegration::read_vec3_or_uniform(val, obj.size_mul)) { err = "size must be a number or [x, y, z] multipliers of the mesh's own size"; return false; }
         RenderIntegration::kh_apply_native_size(obj);   // Multiplier -> metres.
         return true;
     }
     if (prop == "rotation") {
+        if (RenderIntegration::kh_attach_is_obj(val))
+            return RenderIntegration::kh_attach_apply(handle, val, true, obj, err);
+        RenderIntegration::kh_attach_set(handle, game_value(), true);   // Any other value detaches.
         float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f;
-        if (!kh_rotation_from_gv(val, khr_p, khr_y, khr_r)) { err = "rotation must be nil, a number (yaw) or [pitch, yaw, roll] degrees"; return false; }
+        if (!kh_rotation_from_gv(val, khr_p, khr_y, khr_r)) { err = "rotation must be nil, a number (yaw), [pitch, yaw, roll] degrees, or an object to follow"; return false; }
         RenderIntegration::kh_set_rotation(obj, khr_p, khr_y, khr_r);
         return true;
     }
@@ -6535,7 +6583,7 @@ static bool kh_update_one(const char* cmd, bool want_fullscreen,
 
     std::string err;
     const bool ok = want_fullscreen ? kh_apply_postfx_prop(staged, prop, t[2], err)
-                                    : kh_apply_render3d_prop(staged, prop, t[2], err);
+                                    : kh_apply_render3d_prop(staged, handle, prop, t[2], err);
     if (!ok) {
         kh_rv_report(cmd, "property '" + static_cast<std::string>(t[1]) + "'" + where + ": " + err);
         return false;
@@ -6725,6 +6773,11 @@ static game_value set_render_ao_sqf(game_value_parameter arg) {
         memcpy(&khao_sb, &khao_s, sizeof(khao_sb));
         RenderIntegration::g_ao_strength_bits.store(khao_sb, std::memory_order_relaxed);
         if (khao_has_d) {
+            // The 0.05 floor is load-bearing, not cosmetic: KhAoTerm traces
+            // max(distance, 2 * KH_AO_T0) = max(distance, 0.04) m, while
+            // kh_ao_gather builds the KH_AO_GRID cell lists out to the
+            // distance itself. Keeping the floor above 0.04 is what makes
+            // every cell's list complete for the trace that reads it.
             if (khao_d < 0.05f) khao_d = 0.05f;
             if (khao_d > 10.0f) khao_d = 10.0f;
             uint32_t khao_db = 0;
@@ -8228,7 +8281,7 @@ static void initialize_sqf_integration() {
 
     _sqf_add_render3d_array = intercept::client::host::register_sqf_command(
         "addRender3D",
-        "[[x,y,zASL], rotation, mesh]. rotation = nil | yaw | [pitch, yaw, roll]; mesh = builtin name | registry index | .fbx path (nil = box). Spawns lit, mode 1, size 1, white, back-face culled; set everything else with updateRender3D. Returns the khr_ handle, or '' after reporting the fault",
+        "[[x,y,zASL], rotation, mesh]. rotation = nil | yaw | [pitch, yaw, roll]; mesh = builtin name | registry index | .fbx path (nil = box). Either the position or the rotation slot may instead be a game OBJECT, and the mesh then follows that object's transform every frame (the two are independent and may name different objects). Spawns lit, mode 1, size 1, white, back-face culled; set everything else with updateRender3D. Returns the khr_ handle, or '' after reporting the fault",
         userFunctionWrapper<add_render3d_sqf>,
         game_data_type::STRING,
         game_data_type::ARRAY
@@ -8236,7 +8289,7 @@ static void initialize_sqf_integration() {
 
     _sqf_update_render3d_array = intercept::client::host::register_sqf_command(
         "updateRender3D",
-        "[handle, property, value] or [[handle, property, value], ...]. Update a persistent 3D mesh object: position | size | rotation | mesh | material | mode | sceneRead | effect | params | lit | twoSided | lodLock | casterOnly | color | visible | blend | band | duration. material params: basecolor | roughness | metalness | emissiveintensity | normalstrength | cutoff | alphamode opaque|cutout|blend (blend: texels with alpha >= 0.996 draw solid with depth, the rest as a post-scene translucent part - hardware alpha, no depth write, back-to-front; casting is per object, never per material). Faults are reported; the batch form returns true only if every triple applied",
+        "[handle, property, value] or [[handle, property, value], ...]. Update a persistent 3D mesh object: position | size | rotation | mesh | material | mode | sceneRead | effect | params | lit | twoSided | lodLock | casterOnly | color | visible | blend | band | duration. position and rotation each take a game OBJECT to follow it every frame, or any ordinary value to detach and take that value. material params: basecolor | roughness | metalness | emissiveintensity | normalstrength | cutoff | alphamode opaque|cutout|blend (blend: texels with alpha >= 0.996 draw solid with depth, the rest as a post-scene translucent part - hardware alpha, no depth write, back-to-front; casting is per object, never per material). Faults are reported; the batch form returns true only if every triple applied",
         userFunctionWrapper<update_render3d_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY

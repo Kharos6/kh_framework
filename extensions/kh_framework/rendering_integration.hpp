@@ -5904,7 +5904,13 @@ static constexpr float KH_LOD_REF_PX    = 320.0f;   // half-height px where leve
 static constexpr float KH_LOD_DIST_BIAS = 0.35f;   // Levels per log2 of the range term.
 static constexpr float KH_LOD_DIST_REF  = 100.0f;
 static constexpr float KH_LOD_FADE      = 0.30f;   // Fraction of a level spent crossfading.
-// Published once per flush under the park, read lock-free by the injection.
+// TWO writers, and the second is the reason this is not a park-only lane:
+// flush_locked publishes it under the park on the game thread, and
+// inject_composited_meshes publishes it again on the render thread with no
+// lock - on a frame the injection draws and the flush never reaches its own
+// publish, a park-only lane would stay 0 and every object would draw at level
+// 0. Both sites compute the same formula from their own pass's projection and
+// viewport height. Read lock-free by kh_lod_pick from every draw loop.
 static float g_lod_proj_px = 0.0f;
 
 inline void kh_lod_pick(const MeshDef& khl_d, float khl_radius, float khl_dist,
@@ -5943,8 +5949,12 @@ inline float kh_lod_dither(float khl_t, bool khl_second) {
     return khl_second ? -khl_v : khl_v;
 }
 
-// Frustum culling. Built once per flush under the park, read lock-free by the
-// injection.
+// Frustum culling. Nothing here is published or shared: every kh_cull_build
+// call fills a set the CALLER owns as a local, at five sites on both threads -
+// kh_volume_seam_inject, kh_pip_inject, inject_composited_meshes twice (the
+// grid pre-cull and the colour pass) and flush_locked. A set never outlives
+// the pass that built it, so it needs no lock and carries no cross-thread
+// contract.
 
 // The apex is recoverable from the planes (three intersect there); its offset
 // from the camera is the pass's rebase origin.
@@ -8503,9 +8513,11 @@ inline bool kh_apply_material_update(RenderObject& obj, const game_value& val, s
     return true;
 }
 
-// KH_WHITE_PREVIEW: the placeholder pair, built only from the deferral returns
-// in ensure_resources (a warm-cache session never creates it). Non-fatal: a
-// failure leaves it null.
+// KH_WHITE_PREVIEW: the placeholder pair. THREE call sites, all in
+// ensure_resources: the two deferral returns (the async hold and the prewarm
+// gate) and the success path, so a warm-cache session that defers nothing
+// still creates it - see the note at that third call. g_res.white_tried caps
+// it at one compile attempt per device. Non-fatal: a failure leaves it null.
 
 inline void kh_white_ensure(ID3D11Device* dev) {
     if (!dev || g_res.white_tried) return;
@@ -13797,7 +13809,6 @@ static constexpr uint32_t KH_DL_CTL_BYTES = 4 * 16;
 static constexpr uint32_t KH_DL_ARR_BYTES = KH_DL_MAX_LIGHTS * KH_DL_LIGHT_BYTES;
 static constexpr uint32_t KH_DL_STAGE_BYTES = KH_DL_CTL_BYTES + KH_DL_ARR_BYTES;
 static constexpr uint32_t KH_DL_RING = 16;
-static constexpr uint64_t KH_DL_STALE_MS = 500;   // Mirror expiry: fills stand down.
 static constexpr uint32_t KH_DL_WIN_MAX = 16;   // Distinct per-draw windows captured per frame
 static constexpr uint32_t KH_DL_VS_SLOTS = 13;   // VS cb slots captured (0.12).
 static constexpr uint32_t KH_DL_VS_CONSTS = 80;   // Constants per slot (view fits anywhere in 80).

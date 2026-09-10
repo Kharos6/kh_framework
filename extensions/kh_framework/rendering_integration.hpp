@@ -3225,9 +3225,9 @@ inline void kh_attach_reseed(const std::string& khrs_h, RenderObject& khrs_o) {
     }
 }
 
-// Runs from THREE sites, each immediately ahead of the scene read its draws
-// are built from: the injection and the cast fire on the render thread,
-// flush_frame on the game thread. See the THREADS note on g_attach - this is
+// Runs from FOUR sites, counted, each immediately ahead of the scene read its
+// draws are built from: the injection, the cast fire and the volume seam
+// inject on the render thread, flush_frame on the game thread. See the THREADS note on g_attach - this is
 // the half either thread may run, and the half that may never erase. A lane
 // is written only where the object's value actually differs from the one the
 // mesh already carries - the compare is exact, and a still object hands back
@@ -24291,6 +24291,14 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
     khv_list.clear();
 
     {
+        // The consume point for THIS pass, and the reason the footprint lands
+        // under the mesh instead of one frame behind it. The footprint is what
+        // the engine counts its stencil volumes against, so a footprint drawn
+        // at a stale transform hands our mesh a stencil computed for where it
+        // WAS - registered against the camera and against every engine caster,
+        // and wrong only about us. Same rule as the injection and the cast
+        // fire; this pass reads the scene to build draws exactly as they do.
+        kh_attach_step();
         kh_scene_sync();   // KH_SCENE: live walk by reference, no copy.
         for (uint32_t khsc_i = 0; khsc_i < g_scene.objs.size(); ++khsc_i) {
             if (!g_scene.alive[khsc_i]) continue;

@@ -4,4 +4,8 @@ class CfgEditorSubcategories
 	{
 		displayName = "Invisible";
 	};
+	class KH_Renderer
+	{
+		displayName = "Renderer";
+	};
 };

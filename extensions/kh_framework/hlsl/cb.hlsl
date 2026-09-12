@@ -1472,8 +1472,10 @@ float3 DynLights(float3 wpos, float3 nrm)
 // KH_SDF_N^3 field of its level-0 geometry - metric, signed for a closed mesh,
 // unsigned for an open one - resident in one Texture3D atlas (t41; blocks of
 // KH_SDF_N on a 16 x 16 grid per layer). The pass lists the occluders within
-// range of its camera - visible, opaque, depth-writing solids, the receiver's
-// own object among them - as spheres in khAoOcc and placement records at t40.
+// range of its camera - visible, opaque, depth-writing solids drawn in the
+// shape their field was baked from (no skinned pose, no simulating cloth), the
+// receiver's own object among them - as spheres in khAoOcc and placement
+// records at t40.
 // A lit fragment cone-traces the fields of the occluders its trace distance
 // can reach: six cones of equal solid angle over the hemisphere, six geometric
 // steps each, a cone's visibility the minimum over its steps of d / (t tan
@@ -1659,27 +1661,36 @@ static float4 matParams0 = 0.0f, matParams1 = 0.0f, matParams2 = 0.0f, matParams
 #if KH_TEXTURED
 // Every material map is a layer of a texture page (a Texture2DArray of textures
 // sharing width, height, format and mip count); the page is bound per draw at
-// t14-t18, the layer comes from the material table entry. Materials whose maps
-// live in the same pages batch across one instanced draw.
+// t14-t18 and t42, the layer comes from the material table entry. Materials
+// whose maps live in the same pages batch across one instanced draw. The arma
+// model keeps its AS map in the orm page and its SMDI map in the specular page
+// (both read linear there - kh_tex_slot_srgb), and SPECCOLOR alone takes the
+// sixth, at t42, past every other register (t23 and t33 are unassigned);
+// StateBackup saves t0-t42.
 Texture2DArray<float4> matDiffuse  : register(t14);
 Texture2DArray<float4> matNormal   : register(t15);
 Texture2DArray<float4> matOrm      : register(t16);
 Texture2DArray<float4> matEmissive : register(t17);
 Texture2DArray<float4> matSpecular : register(t18);
+Texture2DArray<float4> matSpecColor : register(t42);
 SamplerState matSamp : register(s0);
 
-// One entry per material-set slot, C++ twin KhGpuMat (6 float4). p0..p3 = the
+// One entry per material-set slot, C++ twin KhGpuMat (8 float4). p0..p3 = the
 // matParams0..3 lanes (map-bound flags, alpha mode, cutoff, normal strength /
 // base colour, roughness / metalness, emissive intensity, occ route, rough
 // route / metal route, alpha route, gloss route, spec workflow); lay0 =
-// diffuse/normal/orm/emissive layers, lay1.x = specular.
-struct KhGpuMat { float4 p0; float4 p1; float4 p2; float4 p3; float4 lay0; float4 lay1; };
+// diffuse/normal/orm/emissive layers, lay1.x = specular, lay1.y = speccolor;
+// p4 / p5 = matParams4 / 5, the arma model's lanes (specular colour,
+// glossiness fallback / fresnel N, K, specular route, model), zero for every
+// other material but the specular route (p5.z), which is -1 (unrouted).
+struct KhGpuMat { float4 p0; float4 p1; float4 p2; float4 p3; float4 lay0; float4 lay1; float4 p4; float4 p5; };
 StructuredBuffer<KhGpuMat> khMats : register(t38);
 
 // The per-pixel material lanes. KhMatLoad fills them from the table entry once
 // per pixel (the index rides the VS interpolant, flat per draw or per
 // instance).
 static float4 khMatLay0 = 0.0f, khMatLay1 = 0.0f;
+static float4 matParams4 = 0.0f, matParams5 = 0.0f;
 void KhMatLoad(uint khml_ix)
 {
     KhGpuMat khml_m = khMats[khml_ix];
@@ -1689,6 +1700,8 @@ void KhMatLoad(uint khml_ix)
     matParams3 = khml_m.p3;
     khMatLay0 = khml_m.lay0;
     khMatLay1 = khml_m.lay1;
+    matParams4 = khml_m.p4;
+    matParams5 = khml_m.p5;
     if (matCtl.w >= 0.0f) matParams0.y = matCtl.w;   // The draw's alpha-mode override.
 }
 float KhMatLayer(int slot)
@@ -1697,7 +1710,8 @@ float KhMatLayer(int slot)
     if (slot == 1) return khMatLay0.y;
     if (slot == 2) return khMatLay0.z;
     if (slot == 3) return khMatLay0.w;
-    return khMatLay1.x;
+    if (slot == 4) return khMatLay1.x;
+    return khMatLay1.y;
 }
 
 float4 KhMatFetch(int slot, float2 uv)
@@ -1707,7 +1721,8 @@ float4 KhMatFetch(int slot, float2 uv)
     if (slot == 1) return matNormal.Sample(matSamp, khmf_c);
     if (slot == 2) return matOrm.Sample(matSamp, khmf_c);
     if (slot == 3) return matEmissive.Sample(matSamp, khmf_c);
-    return matSpecular.Sample(matSamp, khmf_c);
+    if (slot == 4) return matSpecular.Sample(matSamp, khmf_c);
+    return matSpecColor.Sample(matSamp, khmf_c);
 }
 
 float KhMatRoute(float route, float fallback, float2 uv)
@@ -1734,8 +1749,9 @@ float4 KhMatFetchTexel(int slot, float2 uv)
     if (slot == 1) { matNormal.GetDimensions(kmt_w, kmt_h, kmt_n);   return matNormal.Load(int4(int2(kmt_t * float2(kmt_w, kmt_h)), kmt_l, 0)); }
     if (slot == 2) { matOrm.GetDimensions(kmt_w, kmt_h, kmt_n);      return matOrm.Load(int4(int2(kmt_t * float2(kmt_w, kmt_h)), kmt_l, 0)); }
     if (slot == 3) { matEmissive.GetDimensions(kmt_w, kmt_h, kmt_n); return matEmissive.Load(int4(int2(kmt_t * float2(kmt_w, kmt_h)), kmt_l, 0)); }
-    matSpecular.GetDimensions(kmt_w, kmt_h, kmt_n);
-    return matSpecular.Load(int4(int2(kmt_t * float2(kmt_w, kmt_h)), kmt_l, 0));
+    if (slot == 4) { matSpecular.GetDimensions(kmt_w, kmt_h, kmt_n); return matSpecular.Load(int4(int2(kmt_t * float2(kmt_w, kmt_h)), kmt_l, 0)); }
+    matSpecColor.GetDimensions(kmt_w, kmt_h, kmt_n);
+    return matSpecColor.Load(int4(int2(kmt_t * float2(kmt_w, kmt_h)), kmt_l, 0));
 }
 
 float KhMatRouteTexel(float route, float fallback, float2 uv)
@@ -1751,14 +1767,15 @@ float KhMatRouteTexel(float route, float fallback, float2 uv)
 // are per-pixel (KhMatLoad fills them from khMats[matIx], an interpolant the
 // compiler cannot prove uniform), so every branch on them is divergent flow. A
 // FILTERED sample needs implicit derivatives, which are unavailable in
-// divergent flow, so fxc hoists every arm of a slot chain at compile time: five
-// fetches per KhMatFetch call, ~29 per textured pixel. One tap set selected by
-// ALU is bounded at five fetches per pixel. Tapping a slot whose map is absent
+// divergent flow, so fxc hoists every arm of a slot chain at compile time: one
+// fetch per slot per KhMatFetch call, ~29 per textured pixel when it was
+// measured with five slots. One tap set selected by ALU is bounded at one fetch
+// per slot per pixel (six). Tapping a slot whose map is absent
 // costs nothing (a null SRV reads zero; the flag and route tests still decide
 // what the value means). This applies to the FILTERED path only:
 // KhMatFetchTexel's chain is Loads, which carry no derivative, so it is left as
 // is, as are KhMatFetch / KhMatRoute (their callers fetch once).
-struct KhMatTaps { float4 t0; float4 t1; float4 t2; float4 t3; float4 t4; };
+struct KhMatTaps { float4 t0; float4 t1; float4 t2; float4 t3; float4 t4; float4 t5; };
 
 KhMatTaps KhMatTapAll(float2 uv)
 {
@@ -1768,6 +1785,7 @@ KhMatTaps KhMatTapAll(float2 uv)
     khmt.t2 = matOrm.Sample(matSamp, float3(uv, khMatLay0.z));
     khmt.t3 = matEmissive.Sample(matSamp, float3(uv, khMatLay0.w));
     khmt.t4 = matSpecular.Sample(matSamp, float3(uv, khMatLay1.x));
+    khmt.t5 = matSpecColor.Sample(matSamp, float3(uv, khMatLay1.y));
     return khmt;
 }
 
@@ -1779,7 +1797,8 @@ float4 KhMatPick(KhMatTaps khmp, int slot)
          : slot == 1 ? khmp.t1
          : slot == 2 ? khmp.t2
          : slot == 3 ? khmp.t3
-                     : khmp.t4;
+         : slot == 4 ? khmp.t4
+                     : khmp.t5;
 }
 
 // KhMatRoute's decode over an already-taken tap set: same lane encoding (slot =
@@ -1796,9 +1815,12 @@ float KhMatRouteTap(KhMatTaps khmr, float route, float fallback)
 struct KhMatSurf {
     float3 albedo; float alpha; float3 nrmT; float occ; float rough;
     float metal; float3 emissive; float3 specF0; float gloss; float specOn;
+    // The arma model (model 1; 0 for pbr and user materials): the specular
+    // intensity x SPECCOLOR x specularColor, and the fresnel (N, K).
+    float model; float3 specTint; float2 fresnelNK;
 };
 
-// One tap set for the whole surface; the flag guards and the five routes are
+// One tap set for the whole surface; the flag guards and the six routes are
 // selects over it. The guards still decide what an absent map means (white
 // diffuse, flat normal, no emissive, no specular), not whether a fetch happens.
 KhMatSurf KhSampleMat(float2 uv)
@@ -1818,12 +1840,51 @@ KhMatSurf KhSampleMat(float2 uv)
     s.specOn = matParams3.w;
     float4 spc = (flags & 16) ? khsm_m.t4 : float4(0.0f, 0.0f, 0.0f, 0.0f);
     s.specF0 = spc.rgb;
-    s.gloss = KhMatRouteTap(khsm_m, matParams3.z, spc.a);
+    // The arma model's routes default, C++ side, to AS.g (occ above), SMDI.b
+    // (gloss) and SMDI.g (specular); unrouted, gloss falls back to the
+    // glossiness param and specular to 1. Its spec workflow lane, metalness
+    // and metal route are zero, so metal reads 0 above.
+    s.model = matParams5.w;
+    s.gloss = KhMatRouteTap(khsm_m, matParams3.z, s.model >= 0.5f ? matParams4.w : spc.a);
+    const float3 khsm_sc = (flags & 32) ? khsm_m.t5.rgb : float3(1.0f, 1.0f, 1.0f);
+    s.specTint = KhMatRouteTap(khsm_m, matParams5.z, 1.0f) * khsm_sc * matParams4.xyz;
+    s.fresnelNK = matParams5.xy;
     return s;
 }
 
-// Shared compact GGX core (Cook-Torrance D * G * f / (4 ndv ndl)) for the sun
-// term (KhApplyPBR) and the engine dynamic lights (KhDynLightsPBR).
+// The arma model's Fresnel: the reflectance of a conductor of complex index
+// N + iK at incidence cos = khfn_c, the mean of the s and p polarisations -
+// the function Arma's procedural "fresnel(N,K)" texture tabulates, term for
+// term (AA, BB, FS, FP with sin S tan S = sin^2 S / cos S). 1 at grazing for
+// every N, K; ((N-1)^2+K^2)/((N+1)^2+K^2) head-on. The cosine is floored so
+// tan S stays finite at grazing, and AA^2 + BB^2 so that N = K = 0 head-on
+// (0/0 in the original, a NaN in TexView) reads its limit, 1.
+float KhFresnelNK(float khfn_c, float khfn_n, float khfn_k)
+{
+    const float c = clamp(khfn_c, 1.0e-4f, 1.0f);
+    const float s2 = 1.0f - c * c;
+    const float n2 = khfn_n * khfn_n;
+    const float k2 = khfn_k * khfn_k;
+    const float t0 = n2 - k2 - s2;
+    const float ab2 = max(sqrt(t0 * t0 + 4.0f * n2 * k2), 1.0e-10f);   // AA^2 + BB^2.
+    const float a = sqrt(max(0.5f * (ab2 + t0), 0.0f));  // AA.
+    const float fs = (ab2 - 2.0f * a * c + c * c) / max(ab2 + 2.0f * a * c + c * c, 1.0e-12f);
+    const float st = s2 / c;   // sin S tan S.
+    const float fp = fs * (ab2 - 2.0f * a * st + st * st) / max(ab2 + 2.0f * a * st + st * st, 1.0e-12f);
+    return saturate(0.5f * (fs + fp));
+}
+
+// This pixel's Fresnel form: x = N, y = K, z >= 0.5 = the arma model's conductor
+// curve, which KhApplyPBR arms for its surface. Unarmed, every reader keeps
+// Schlick on F0.
+static float4 khFrNK = 0.0f;
+
+// Shared compact GGX core (Cook-Torrance D * G * F / (4 ndv ndl)) for the sun
+// term (KhApplyPBR) and the engine dynamic lights (KhDynLightsPBR). Armed
+// (khFrNK), F0 is the arma model's specular tint and F the tint times the
+// conductor curve at V.H. A branch, not a ternary: fxc evaluates both sides of
+// ?:, and this runs once per lobe per light, so the other kinds would pay for
+// the curve on every one. khFrNK is per material, so the branch is coherent.
 float3 KhGGXSpec(float3 n, float3 v, float3 l, float rough, float3 F0, out float3 outF)
 {
     float3 h = normalize(l + v);
@@ -1838,7 +1899,11 @@ float3 KhGGXSpec(float3 n, float3 v, float3 l, float rough, float3 F0, out float
     float kk = (rough + 1.0f) * (rough + 1.0f) * 0.125f;
     float gl = max(ndl, 1.0e-4f);
     float G = (ndv / (ndv * (1.0f - kk) + kk)) * (gl / (gl * (1.0f - kk) + kk));
-    outF = F0 + (1.0f - F0) * pow(1.0f - vdh, 5.0f);
+    [branch] if (khFrNK.z >= 0.5f) {
+        outF = F0 * KhFresnelNK(vdh, khFrNK.x, khFrNK.y);
+    } else {
+        outF = F0 + (1.0f - F0) * pow(1.0f - vdh, 5.0f);
+    }
     return D * G * outF / max(4.0f * ndv * gl, 1.0e-4f);
 }
 
@@ -1908,14 +1973,22 @@ float3 KhDynLightsPBR(float3 wpos, float3 nrm, float3 albedo, float3 F0, float r
         const float khs_amb = lerp(KH_DLS_AMB_KEEP, 1.0f, khs_sh);
         float ndl = max(dot(n, L), 0.0f);
         float3 diffI = dlGlobal.xyz * dlLights[b + 2].xyz * ndl * khs_sh;
-        float3 lit = albedo * (diffI * kdM + dlLights[b + 3].xyz * khs_amb);
+        // The diffuse keeps what the lobe does not reflect. Only the arma model
+        // takes 1 - F here, as KhApplyPBR's sun does: it has no metal lane, so
+        // F alone can take a conductor's diffuse (fresnel(1.3, 7) reflects ~90 %
+        // head-on). pbr keeps kdM alone - its metals are zeroed by it, and its
+        // dielectrics' ~4 % is the received look. Without a view (mode 3,
+        // zeroed camera) there is no lobe and no F, and the diffuse stays whole.
+        float3 khsKd = kdM;
+        float3 khsSpec = float3(0.0f, 0.0f, 0.0f);
 
         if (specOn >= 0.5f) {   // Uniform branch (mode verdict, not per-light).
             float3 khsF;
-            lit += KhGGXSpec(n, v, L, rough, F0, khsF) * diffI;
+            khsSpec = KhGGXSpec(n, v, L, rough, F0, khsF) * diffI;
+            if (khFrNK.z >= 0.5f) khsKd *= saturate(1.0f - khsF);   // The arma tint may exceed 1.
         }
 
-        acc += lit * att;
+        acc += (albedo * (diffI * khsKd + dlLights[b + 3].xyz * khs_amb) + khsSpec) * att;
     }
 
     return acc * dlGlobal.w;
@@ -1940,7 +2013,13 @@ float3 KhPbrAmbient(float3 khpa_n, float3 khpa_v, bool khpa_vOk, float khpa_roug
     const float4 khpa_r = khpa_rough * khpa_c0 + khpa_c1;
     const float  khpa_a004 = min(khpa_r.x * khpa_r.x, exp2(-9.28f * khpa_ndv)) * khpa_r.x + khpa_r.y;
     const float2 khpa_AB = float2(-1.04f, 1.04f) * khpa_a004 + khpa_r.zw;
-    const float3 khpa_envBRDF = khpa_F0 * khpa_AB.x + khpa_AB.y;
+    // Armed (khFrNK), F0 is the arma tint: the conductor curve's head-on value
+    // takes Schlick's F0 in the fit, and the tint scales the whole of it, the
+    // grazing part included - the tint x curve form of the direct term.
+    const bool   khpa_nk = khFrNK.z >= 0.5f;
+    const float  khpa_f0 = khpa_nk ? KhFresnelNK(1.0f, khFrNK.x, khFrNK.y) : 0.0f;
+    const float3 khpa_envBRDF = khpa_nk ? khpa_F0 * (khpa_f0 * khpa_AB.x + khpa_AB.y)
+                                        : khpa_F0 * khpa_AB.x + khpa_AB.y;
 
     // The dome along the reflection vector, blurred toward its mean.
     const float3 khpa_R = reflect(-khpa_v, khpa_n);
@@ -1952,9 +2031,19 @@ float3 KhPbrAmbient(float3 khpa_n, float3 khpa_v, bool khpa_vOk, float khpa_roug
     // Roughness-aware Schlick at N.V: what the surface reflects of the sky is
     // what the diffuse does not get.
     const float3 khpa_Fr = max(float3(1.0f - khpa_rough, 1.0f - khpa_rough, 1.0f - khpa_rough), khpa_F0);
-    const float3 khpa_Famb = khpa_F0 + (khpa_Fr - khpa_F0) * pow(1.0f - khpa_ndv, 5.0f);
+    float3 khpa_Famb = khpa_F0 + (khpa_Fr - khpa_F0) * pow(1.0f - khpa_ndv, 5.0f);
+    if (khpa_nk) {
+        // The same form on the conductor curve: its own rise from head-on
+        // toward grazing, normalised to 0..1, stands in for Schlick's
+        // (1 - ndv)^5, and roughness caps where it may reach exactly as
+        // max(1 - rough, F0) does above.
+        const float khpa_rise = saturate((KhFresnelNK(khpa_ndv, khFrNK.x, khFrNK.y) - khpa_f0) /
+                                         max(1.0f - khpa_f0, 1.0e-4f));
+        const float khpa_top = max(1.0f - khpa_rough, khpa_f0);
+        khpa_Famb = khpa_F0 * (khpa_f0 + (khpa_top - khpa_f0) * khpa_rise);
+    }
 
-    const float3 khpa_diff = khpa_albedo * khpa_ambo * (1.0f - khpa_metal) * (1.0f - khpa_Famb);
+    const float3 khpa_diff = khpa_albedo * khpa_ambo * (1.0f - khpa_metal) * saturate(1.0f - khpa_Famb);
     const float3 khpa_spec = khpa_env * khpa_envBRDF * khpa_occ;
     return khpa_diff + khpa_spec;
 }
@@ -1963,11 +2052,17 @@ float3 KhPbrAmbient(float3 khpa_n, float3 khpa_v, bool khpa_vOk, float khpa_roug
 float3 KhApplyPBR(KhMatSurf m, float3 wpos, float3 n, float smf)
 {
     if (lighting0.x < 0.5f || lighting1.w < 0.5f) return m.albedo * m.occ + m.emissive;
-    float rough = m.specOn >= 0.5f ? saturate(1.0f - m.gloss) : saturate(m.rough);
+    // The arma model: spec-gloss with its own tint and the conductor Fresnel,
+    // armed for every GGX lobe and the ambient below (khFrNK).
+    const bool khar_nk = m.model >= 0.5f;
+    khFrNK = khar_nk ? float4(max(m.fresnelNK, float2(0.0f, 0.0f)), 1.0f, 0.0f) : float4(0.0f, 0.0f, 0.0f, 0.0f);
+    const bool khar_sg = m.specOn >= 0.5f || khar_nk;   // Spec-gloss: rough from gloss, no metal.
+    float rough = khar_sg ? saturate(1.0f - m.gloss) : saturate(m.rough);
     rough = max(rough, 0.045f);
-    float3 F0 = m.specOn >= 0.5f ? m.specF0
+    float3 F0 = khar_nk ? max(m.specTint, float3(0.0f, 0.0f, 0.0f))
+              : m.specOn >= 0.5f ? m.specF0
               : lerp(float3(0.04f, 0.04f, 0.04f), m.albedo, saturate(m.metal));
-    float metal = m.specOn >= 0.5f ? 0.0f : saturate(m.metal);
+    float metal = khar_sg ? 0.0f : saturate(m.metal);
     float3 l = lighting1.xyz;
     float3 v = normalize(fxParams0.xyz - wpos);
     float ndl = saturate(dot(n, l));
@@ -1978,7 +2073,7 @@ float3 KhApplyPBR(KhMatSurf m, float3 wpos, float3 n, float smf)
     if (khsd_lit) {
         float3 F;
         float3 spec = KhGGXSpec(n, v, l, rough, F0, F);
-        float3 kd = (1.0f - F) * (1.0f - metal);
+        float3 kd = saturate(1.0f - F) * (1.0f - metal);   // The arma tint may exceed 1.
         direct = lighting2.rgb * (khObjDif * ndl * smf) * (kd * m.albedo + spec);
     }
     // The sun through cloud is a wide highlight: under overcast the sun colour
@@ -2120,7 +2215,7 @@ struct VSOut { float4 pos : SV_Position; float3 wpos : TEXCOORD0; float3 nrm : T
     // The per-object lanes (KhObjLoad at every mesh PS entry). Flat per draw or
     // per instance.
     nointerpolation float4 iobj0 : TEXCOORD7;   // amb, dif, 0, cut.
-    nointerpolation float4 iobj1 : TEXCOORD8;   // 0, dither, 0, 0.
+    nointerpolation float4 iobj1 : TEXCOORD8;   // 0, dither, scene slot + 1 (KH_AO; 0 = none), 0.
 #if KH_TEXTURED
     float2 uv : TEXCOORD2; float4 tanw : TEXCOORD3;   // World tangent + handedness.
     nointerpolation uint matIx : TEXCOORD6;   // KH_MAT_TABLE: this draw's / instance's entry.

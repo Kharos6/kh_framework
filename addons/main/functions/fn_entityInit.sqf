@@ -12,7 +12,34 @@ if _applyRetroactively then {
 
         _x setVariable [_blockerId, true];
         [_x, false, objNull] call _function;
-    } forEach (entities [_typeInclude, _typeExclude, true, false]);
+    } forEach ((allMissionObjects "") select {
+        private _entity = _x;
+        private _continue = true;
+
+        if (_typeExclude isNotEqualTo []) then {
+            {
+                if (_entity isKindOf _x) then {
+                    _continue = false;
+                    break;
+                };
+            } forEach _typeExclude;
+        };
+        
+        if _continue then {
+            if (_typeInclude isNotEqualTo []) then {
+                _continue = false;
+                
+                {
+                    if (_entity isKindOf _x) then {
+                        _continue = true;
+                        break;
+                    };
+                } forEach _typeInclude;
+            };
+        };
+
+        _continue;
+    });
 };
 
 [missionNamespace, _initId, clientOwner];

@@ -43,6 +43,7 @@ class CfgFunctions
 			class entityDeletedHandler {headerType = -1;};
 			class entityInit {headerType = -1;};
 			class entityInitHandler {headerType = -1;};
+			class entityRenderingSetup {headerType = -1;};
 			class entitySpawner {headerType = -1;};
 			class equipableObject {headerType = -1;};
 			class execute {headerType = -1;};
@@ -74,6 +75,7 @@ class CfgFunctions
 			class getUnitMoveType {headerType = -1;};
 			class getUnitStateAction {headerType = -1;};
 			class getUnitVehicleSlot {headerType = -1;};
+			class getUnitWeaponSlot {headerType = -1;};
 			class getVehicleLoadout {headerType = -1;};
 			class getViewTarget {headerType = -1;};
 			class getWeaponPosition {headerType = -1;};

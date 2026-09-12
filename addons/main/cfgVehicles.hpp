@@ -129,6 +129,52 @@ class CfgVehicles
     };
 	class Static;
 	class Land_InvisibleBarrier_F;
+	class KH_HelperRendererBox: Static
+	{
+		author = "Kharos";
+		displayName = "Helper Renderer Box";
+		editorCategory = "KH_Helpers";
+		editorSubcategory = "KH_Renderer";
+		vehicleClass = "KH_Helpers";
+		icon = "iconObject_1x1";
+		scope = 2;
+		class KH_Rendering3D
+		{
+			class Box
+			{
+				bindSkeleton = 0;
+				followRotation = 1;
+				model = "box";
+			};
+		};
+	};
+	class KH_HelperRendererSphere: Static
+	{
+		author = "Kharos";
+		displayName = "Helper Renderer Sphere";
+		editorCategory = "KH_Helpers";
+		editorSubcategory = "KH_Renderer";
+		vehicleClass = "KH_Helpers";
+		icon = "iconObject_1x1";
+		scope = 2;
+		class KH_Rendering3D
+		{
+			class Sphere
+			{
+				bindSkeleton = 0;
+				followRotation = 1;
+				model = "sphere";
+			};
+		};
+	};
+	class KH_HelperPhysics: Static
+	{
+		author = "Kharos";
+		displayName = "Helper Physics";
+		icon = "iconObject_1x1";
+		vehicleClass = "KH_Helpers";
+		scope = 1;
+	};
 	class KH_HelperArrow: Static
 	{
 		author = "Kharos";

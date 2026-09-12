@@ -700,8 +700,18 @@ VSOut VSFullscreen(uint vid : SV_VertexID)
     return o;
 }
 
-float4 PSMain(VSOut i) : SV_Target
+float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
 {
+    // TWO-SIDED: a back face is the other side of the same sheet, so it shades
+    // with the front's normal reversed. Every consumer below reads i.nrm (the
+    // N.L gate, the self-shadow bias, the lighting, KH_AO's cones, the dynamic
+    // lights), so reversing it here is the whole fix. Front is the authored
+    // side: meshgen::bake and the importer wind every triangle to its normal,
+    // no rasterizer sets FrontCounterClockwise, and size is never negative.
+    // Without this a single sheet's back took the front's sun and, at N.V
+    // clamped to 0, a grazing Fresnel over its whole area. Twin: PSComposite.
+    const float khFs = khFront ? 1.0f : -1.0f;
+    i.nrm *= khFs;
     KhObjLoad(i.iobj0, i.iobj1);   // KH_OBJBUF: the per-object lanes, per draw or per instance.
     KhLodDitherCut(i.pos.xy, khObjDither);
     ClipEdgeSliver(i.wpos, i.nrm);   // Degenerate edge-on fragments (fireflies).
@@ -774,21 +784,17 @@ float4 PSMain(VSOut i) : SV_Target
         if (khttl > 1.0e-5f) {
             khtt /= khttl;
             float3 khtb = cross(khtn, khtt) * i.tanw.w;
-            khtxN = normalize(khtt * khtxS.nrmT.x + khtb * khtxS.nrmT.y + khtn * khtxS.nrmT.z);
+            // On a back face khtn is already reversed and so is the bitangent
+            // it spawns; reversing the tangent term too makes the mapped normal
+            // exactly the front's reversed (one side's bump is the other's dent).
+            khtxN = normalize(khtt * (khFs * khtxS.nrmT.x) + khtb * khtxS.nrmT.y + khtn * khtxS.nrmT.z);
         } else khtxN = khtn;   // Degenerate tangent: geometric normal.
     }
 #endif
     float smf = 1.0f;
-    // Twin edit (PSComposite's ARB variant declares SV_Depth - the one place
-    // the twins differ). The 2 px deadband keeps the historic raster tap
-    // bit-exactly at steady motion.
-    float3 khFacetN = cross(ddx(i.wpos), ddy(i.wpos));
-    float khFacetL = length(khFacetN);
+    // The self-shadow bias takes the interpolated normal (reversed on a back
+    // face above). Twin: PSMain / PSComposite.
     float3 khBiasN = normalize(i.nrm);
-    if (khFacetL > 1.0e-12f) {
-        khFacetN /= khFacetL;
-        if (dot(khFacetN, khBiasN) < 0.0f) khFacetN = -khFacetN;
-    }
 
 #if KH_TEXTURED
     float3 khShN = khtxN;
@@ -843,6 +849,7 @@ float4 PSMain(VSOut i) : SV_Target
     float3 lc = ApplyLighting(i.icol.rgb, i.wpos, i.nrm, smf);
 #endif
 
+    float khFogKeep = 1.0f;   // The fog's share of a non-covering blend mode (below).
     if (fogParams.w >= 0.5f || hazePars.w >= 0.5f || fogEngine.w >= 0.5f) {
         float distM = i.pos.w;
         float hgt = i.wpos.y;
@@ -884,9 +891,19 @@ float4 PSMain(VSOut i) : SV_Target
         float khaBt = khaFbOn ? exp(-khaFbB * fogBelow.x) : 1.0f;
         trans *= khaBt;
         float3 fog_target = fogColor.rgb;
+        // The sky gradients take the view ray's elevation: its rise over its
+        // LENGTH, a property of the direction alone (-1 nadir, +1 zenith).
+        // distM is the depth along the view axis, shorter than the ray off
+        // axis, so dividing by it would carry the ratio past +-1 toward the
+        // screen edges - beyond the zenith end of the linear branch, and back
+        // up the nadir's quadratic. fxParams0.xyz is the pass camera on every
+        // fill site that binds this shader; the clamp absorbs fogColor.w
+        // differing from it. Twin: PSMain / PSComposite.
+        const float khFogEl = clamp((hgt - camY) / max(distance(i.wpos, fxParams0.xyz), 1.0e-4f),
+                                    -1.0f, 1.0f);
 
         if (fogSky.w >= 0.5f) {
-            float dirY = (hgt - camY) / max(distM, 1.0e-4f);
+            float dirY = khFogEl;
             float g;
 
             if (dirY < 0.0f) {
@@ -899,7 +916,7 @@ float4 PSMain(VSOut i) : SV_Target
             fog_target = fogSkyCol.rgb * g;
         }
         if (khaFbOn && fogUw.w >= 0.5f) {
-            float khaUwY = (hgt - camY) / max(distM, 1.0e-4f);
+            float khaUwY = khFogEl;
             float khaUwG;
             if (khaUwY < 0.0f) {
                 float khaUwU = khaUwY + 1.0f;
@@ -913,13 +930,22 @@ float4 PSMain(VSOut i) : SV_Target
                          max(khaWp + khaWs, 1.0e-5f);
         }
 
-        lc = lerp(fog_target, lc, trans);
+        // Only a surface that covers what is behind it shows the fog in front
+        // of it. Additive, multiply and screen do not cover: they add to or
+        // filter a background that already carries its own fog, so fog here
+        // weakens their contribution toward no change instead of painting
+        // fog_target into it (additive and screen added the fog colour; multiply
+        // tinted the background with it). Lighten and darken compare against the
+        // background, so they compare the surface as seen through the fog.
+        // Twin: PSMain / PSComposite.
+        if (bm == 1 || bm == 2 || bm == 3) khFogKeep = trans;
+        else lc = lerp(fog_target, lc, trans);
     }
 
 #if KH_TEXTURED
-    float a = i.icol.a * khtxS.alpha * SolidMask(i.wpos);
+    float a = i.icol.a * khtxS.alpha * SolidMask(i.wpos) * khFogKeep;
 #else
-    float a = i.icol.a * SolidMask(i.wpos);
+    float a = i.icol.a * SolidMask(i.wpos) * khFogKeep;
 #endif
     if (bm == 1 || bm == 3) return float4(lc * a, 1.0f);
     if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), lc, a), 1.0f);

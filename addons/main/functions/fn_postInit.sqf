@@ -1421,6 +1421,7 @@ isNil {
 			
 			if hasInterface then {
 				triggerCbaEvent ["KH_eve_playerMissionPreloaded", [clientOwner], "SERVER", false];
+				[[], [], [], KH_fnc_entityRenderingSetup, true] call KH_fnc_entityInit;
 				
 				execute [
 					[],

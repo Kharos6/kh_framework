@@ -1619,6 +1619,7 @@ if hasInterface then {
 	KH_var_playerKilledEventHandler = [];
 	KH_var_playerVoiceEffectHandler = [];
 	KH_var_postProcessingStack = [];
+	KH_var_physicsHandlers = [];
 
 	{
 		private _basePath = (getText (_x >> "path")) regexReplace ["(/)", "\\"];

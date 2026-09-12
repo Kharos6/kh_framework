@@ -1620,6 +1620,7 @@ if hasInterface then {
 	KH_var_playerVoiceEffectHandler = [];
 	KH_var_postProcessingStack = [];
 	KH_var_physicsHandlers = [];
+	KH_var_mainCameraFirstPerson = true;
 
 	{
 		private _basePath = (getText (_x >> "path")) regexReplace ["(/)", "\\"];
@@ -1891,7 +1892,20 @@ if hasInterface then {
 	execute [
 		[],
 		{
-			KH_var_mainCamera = ((allCameras select {_x select 2;}) param [0, []]) param [0, KH_var_playerUnit];
+			private _mainCamera = ((allCameras select {_x select 2;}) param [0, []]) param [0, KH_var_playerUnit];
+			private _cameraView = cameraView;
+			private _mainCameraFirstPerson = ((_cameraView isEqualTo "INTERNAL") || (_cameraView isEqualTo "GUNNER")) && ((KH_var_mainCamera isEqualTo KH_var_playerUnit) || (KH_var_mainCamera isEqualTo (objectParent KH_var_playerUnit)));
+
+			if (_mainCamera isNotEqualTo KH_var_mainCamera) then {
+				KH_var_mainCamera = _mainCamera;
+				triggerCbaEvent ["KH_eve_mainCameraChanged", [_mainCamera], true, false];
+			};
+
+			if (_mainCameraFirstPerson isNotEqualTo KH_var_mainCameraFirstPerson) then {
+				KH_var_mainCameraFirstPerson = _mainCameraFirstPerson;
+				triggerCbaEvent ["KH_eve_mainCameraViewTypeChanged", [_mainCameraFirstPerson], true, false];
+			};
+
 			private _unit = player;
 			private _filteredClassItems = getArray ((configOf _unit) >> "kh_equipmentFilter");
 			if ((KH_var_filterPlayerEquipmentList isEqualTo []) && (_filteredClassItems isEqualTo [])) exitWith {};

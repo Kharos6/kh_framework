@@ -118,7 +118,8 @@ cbuffer CBObj : register(b0)
     float4 sunMeta3;   // x = valid, y = size, z = bias, w = half-diag.
     row_major float4x4 sunVP4;   // World -> outer-band sun-depth clip (t27).
     float4 sunMeta4;   // x = valid, y = size, z = bias, w = half-diag.
-    // mirMeta: x = mirror mask valid, yz = mask dims, w = the sun shadow
+    // mirMeta: x = mirror mask valid (1; 2 = the mirror answers the whole
+    // surface, the view-model slice's fill), yz = mask dims, w = the sun shadow
     // range (m; C++ twin mir_meta[3], clamp(g_sun_range, 8, 1000)) that
     // KhSunRangeFade fades every sun shadow out over - 0 = no fade, not a
     // free lane. sunOrigin: the anchor
@@ -1041,9 +1042,16 @@ static const float KH_OWN_NEAR = 0.05f;
 
 static const float KH_STEN_FADE = 1.35f;
 
+// KH_INFRONT: the view-model slice's projection has a near of 0.01 (measured),
+// below our floor, so there the floor takes the engine's own near - the pass's
+// depthParams pair - and stays non-binding, as it is everywhere else. An
+// invalid pair (no perspective m32) keeps the floor alone.
 void ClipOwnNear(float khon_w)
 {
-    if (khon_w < KH_OWN_NEAR) discard;
+    float khon_n = KH_OWN_NEAR;
+    if (depthParams.y < -1.0e-3f && depthParams.x > 1.0e-6f)
+        khon_n = min(khon_n, -depthParams.y / depthParams.x);
+    if (khon_w < khon_n) discard;
 }
 
 void ClipEdgeSliver(float3 wpos, float3 nrm)

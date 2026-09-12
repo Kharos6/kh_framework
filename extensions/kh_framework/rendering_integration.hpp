@@ -6170,6 +6170,17 @@ struct RenderObject {
     float skel_ctr[3] = { 0.0f, 0.0f, 0.0f };
 
     bool  caster_only = false;
+    // KH_INFRONT: drawn in the engine's view-model depth slice - the range the
+    // first-person weapon and hands occupy, in front of the whole world and
+    // depth-sorted against them - by kh_infront_inject, never by the world
+    // colour passes. It casts shadows like any mesh while a slice is drawn
+    // (g_vm_slice_live; the sun / DLS maps and the mask cast are world-space
+    // passes, and only the seam footprint, a world-depth draw, leaves it
+    // out), is not an AO occluder, and draws level
+    // 0 only (the two slice draws must write identical depth). Effect meshes
+    // and fullscreen passes ignore it. With no view-model slice in the frame
+    // (third person) the mesh is not drawn, as the hands are not.
+    bool  in_front = false;
     bool  two_sided = true;   // addRender3D spawns false (the script-side default).
     // This instance always draws level 0 - kh_lod_pick is skipped at both
     // colour loops, so no crossfade.
@@ -20240,7 +20251,7 @@ inline void kh_white_draw(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     for (uint32_t khsc_i = 0; khsc_i < g_scene.objs.size(); ++khsc_i) {
         if (!g_scene.alive[khsc_i]) continue;
         const RenderObject& khw_o = g_scene.objs[khsc_i];
-        if (khw_o.fullscreen) continue;
+        if (khw_o.fullscreen || khw_o.in_front) continue;   // KH_INFRONT: never in the world depth.
         bool khw_expired = false;
         if (lifetime_envelope(khw_o, khw_now, khw_expired) <= 0.0f || khw_expired) continue;
         const int khw_mid = mesh_id_clamp(khw_o.mesh);
@@ -20486,7 +20497,7 @@ inline bool composite_path_healthy() {
 
 inline bool is_composite_eligible(const RenderObject& o) {
     return !o.fullscreen && o.effect == 0 && o.mode != DepthMode::Off &&
-           o.blend_mode == 0 && o.color[3] >= 0.999f;
+           o.blend_mode == 0 && o.color[3] >= 0.999f && !o.in_front;   // KH_INFRONT: its own slice.
 }
 
 // The one rule for whether an object takes part in shadowing (casting into the
@@ -20494,9 +20505,18 @@ inline bool is_composite_eligible(const RenderObject& o) {
 // receives nor casts (effect meshes are unlit by construction). casterOnly
 // admits an invisible object as a caster. Every caster gather and demand census
 // reads this, never the fields directly.
+// KH_INFRONT: whether the cycle that last ended drew the engine's view-model
+// slice (a hands prepass or colour pass was seen). Written by the render thread
+// at the main depth clear (kh_infront_frame_reset), read by every caster
+// gather and demand census on either thread; atomic because the flush's
+// pre-park census reads it outside the park. An inFront mesh casts only while
+// this holds - in third person there is no slice, so no shadow from a mesh that
+// is not drawn.
+static std::atomic<bool> g_vm_slice_live{false};
 inline bool kh_shadow_active(const RenderObject& o) {
     return !o.fullscreen && o.effect == 0 && o.lit && o.mode != DepthMode::Off &&
-           (o.visible || o.caster_only);
+           (o.visible || o.caster_only) &&
+           (!o.in_front || g_vm_slice_live.load(std::memory_order_relaxed));   // KH_INFRONT.
 }
 
 // A genuine scene issues many opaque draws between its depth clear and its
@@ -26450,6 +26470,7 @@ inline uint32_t kh_ao_gather(ID3D11DeviceContext* ctx, ID3D11Device* dev, Consta
         // Opaque, depth-writing, visible solids only: what the eye sees as a
         // surface is what occludes.
         if (!o.visible || o.fullscreen || o.effect != 0 || o.mode == DepthMode::Off || o.blend_mode != 0) continue;
+        if (o.in_front) continue;   // KH_INFRONT: occludes nothing of the world's.
         bool khag_exp = false;
         const float khag_env = lifetime_envelope(o, khag_now, khag_exp);
         if (khag_exp || o.color[3] * khag_env < 0.999f) continue;
@@ -28604,6 +28625,7 @@ struct SunCaster {
     bool lod_lock;   // KH_LOD_LOCK, carried so the dlsw mask can pick the drawn level.
     int  lod;        // KH_SHADOW_LOD_DRAWN: the level this pass draws (kh_drawn_lod at the list build).
     bool visible;    // KH_DLSW_MASK_ALPHA: a casterOnly invisible object casts but owns no pixel.
+    bool in_front;   // KH_INFRONT: drawn in the view-model slice (the dlsw mask draws it under the hands pair).
 };
 
 inline bool kh_mat_set_has_alpha(const KhMaterialSet* khma_s) {
@@ -28637,6 +28659,7 @@ inline SunCaster kh_sun_caster_of(const RenderObject& o, const float khsc_cam[3]
     c.slot = o.slot;
     c.lod_lock = o.lod_lock;
     c.visible = o.visible;   // KH_DLSW_MASK_ALPHA.
+    c.in_front = o.in_front;   // KH_INFRONT.
     c.lod = kh_drawn_lod(c.mesh, c.pos, c.size, c.rot, c.rotated, c.lod_lock, khsc_cam);   // KH_SHADOW_LOD_DRAWN.
     // The caster's alpha (colour alpha x lifetime envelope; an expired object
     // casts nothing) quantised to 1/64, its alpha-carrying material set, and
@@ -28956,6 +28979,7 @@ struct KhDlswCaster {
     float alpha;                  // < 0.999 = a whole translucent object: writes no depth, not drawn.
     const KhMaterialSet* mats;    // Alpha-carrying set, or nullptr.
     bool alpha_caster;            // The sun's verdict (kh_sun_caster_of).
+    bool in_front;                // KH_INFRONT: masked under the hands pair, after the world casters.
 };
 static std::vector<KhDlswCaster> g_dlsw_casters;
 
@@ -28998,6 +29022,7 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
             khsd.alpha = khsc.alpha;
             khsd.mats = khsc.mats;
             khsd.alpha_caster = khsc.alpha_caster;
+            khsd.in_front = khsc.in_front;   // KH_INFRONT.
         }
     }
     if (!khdr_ctx || g_dls_n == 0) {  return; }
@@ -32482,6 +32507,9 @@ inline void kh_svs_mask_snap(ID3D11DeviceContext* khv_ctx, bool khv_is_post) {
     }
 }
 static bool     g_svs_vol_dsv_now = false;
+// KH_INFRONT: the volume buffer is the bound DSV, a render target beside it or
+// not (the engine's hands prepass into it binds one). Set at every OM bind.
+static bool     g_svs_vol_dsv_bound = false;
 static bool     g_svs_injected_frame = false;
 
 inline void kh_volume_seam_frame_reset() {
@@ -33265,68 +33293,13 @@ inline void kh_vmir_end(ID3D11DeviceContext* khvn_ctx) {
     KH_SAFE_RELEASE(g_vmir_sv_b2);
 }
 
-inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint32_t khv_h) {
-    if (!ctx) return;
-
-    // Scan before stage, deliberately: the scan reads the previous frame's
-    // copy, so a full frame separates the GPU copy from the Map and DO_NOT_WAIT
-    // almost never blocks.
-
-    std::vector<KhSvCaster>& khv_list = g_svs_caster_list;
-    khv_list.clear();
-
-    {
-        // The consume point for THIS pass, and the reason the footprint lands
-        // under the mesh instead of one frame behind it. The footprint is what
-        // the engine counts its stencil volumes against, so a footprint drawn
-        // at a stale transform hands our mesh a stencil computed for where it
-        // WAS - registered against the camera and against every engine caster,
-        // and wrong only about us. Same rule as the injection and the cast
-        // fire; this pass reads the scene to build draws exactly as they do.
-        kh_attach_step();
-        kh_scene_sync();   // KH_SCENE: live walk by reference, no copy.
-        for (uint32_t khsc_i = 0; khsc_i < g_scene.objs.size(); ++khsc_i) {
-            if (!g_scene.alive[khsc_i]) continue;
-            const RenderObject& o = g_scene.objs[khsc_i];
-            // The footprint serves our receivers' stencil term: visible, lit,
-            // world-space, depth-participating geometry only.
-            if (!o.visible || !kh_shadow_active(o)) continue;
-            KhSvCaster c;
-            c.slot = khsc_i;   // KH_SEAM_INST: khObjs index for the instanced twins.
-            memcpy(c.pos, o.pos, sizeof(c.pos));
-            memcpy(c.size, o.size, sizeof(c.size));
-            memcpy(c.rot, o.rot_m, sizeof(c.rot));
-            c.rotated = o.rotated;
-            c.mesh = mesh_id_clamp(o.mesh);
-            c.lod = 0;   // KH_SHADOW_LOD_DRAWN: picked below, once khv_cam exists.
-            c.lod_lock = o.lod_lock;
-            c.a_vis = true;   // KH_SEAM_CULL: decided below, once the pass matrix is final.
-            {   // KH_FOOTPRINT_ALPHA (the sun census's recipe).
-                bool khsv_exp = false;
-                const float khsv_env = lifetime_envelope(o, effect_time_seconds(), khsv_exp);
-                float khsv_a = khsv_exp ? 0.0f : o.color[3] * khsv_env;
-                khsv_a = khsv_a < 0.0f ? 0.0f : (khsv_a > 1.0f ? 1.0f : khsv_a);
-                c.alpha = floorf(khsv_a * 64.0f + 0.5f) / 64.0f;
-                c.mats = kh_mat_set_has_alpha(kh_obj_textured(o)) ? o.materials : nullptr;
-                c.alpha_caster = kh_footprint_alpha_on() && (c.alpha < 0.999f || c.mats);
-            }
-            khv_list.push_back(c);
-        }
-    }
-
-    if (khv_list.empty()) {  return; }
-
-    ID3D11Device* dev = nullptr;
-    ctx->GetDevice(&dev);
-    const bool khv_res_ok = dev && kh_ensure_ok("seam resources", ensure_resources(dev));
-    if (dev) dev->Release();
-    if (!khv_res_ok || !g_res.input_layout || !g_res.vs ||
-        !g_res.composite_cb || !g_res.composite_frame_cb || !g_res.dss_test_write) {
-        return;
-    }
-
-    // The engine's camera projection for this frame.
-    RVExtBridge::ProjectionViewTransform khv_pv = {};
+// The seam's camera take: the engine's camera projection for this frame,
+// pre-clear, where no latch of this frame exists yet - the live bridge sample
+// reconciled against the latch and the encode-pair witnesses. Shared verbatim
+// with the view-model seam (kh_infront_seam_inject), which calls it only when
+// the world seam did not run this window: the step trackers it advances are
+// per window.
+inline bool kh_svs_take_pv(ID3D11DeviceContext* ctx, RVExtBridge::ProjectionViewTransform& khv_pv) {
     bool khv_have = false;
 
     if (g_ro.cycle_pv_valid) { khv_pv = g_ro.cycle_pv; khv_have = true; }
@@ -33341,7 +33314,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
     }
     else if (RVExtBridge::get_projection_view_transform(khv_pv)) { khv_have = true; }
 
-    if (!khv_have) {  return; }
+    if (!khv_have) {  return false; }
 
     // Record which source the injection is actually on, before adoption can
     // overwrite the rotation.
@@ -33754,6 +33727,80 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
             }
         }
     }
+    return true;
+}
+
+inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint32_t khv_h) {
+    if (!ctx) return;
+
+    // Scan before stage, deliberately: the scan reads the previous frame's
+    // copy, so a full frame separates the GPU copy from the Map and DO_NOT_WAIT
+    // almost never blocks.
+
+    std::vector<KhSvCaster>& khv_list = g_svs_caster_list;
+    khv_list.clear();
+    // KH_INFRONT: the view-model casters, drawn into the world count below
+    // (never into the mirror prepass or the instanced footprint).
+    static std::vector<KhSvCaster> khv_front;
+    khv_front.clear();
+
+    {
+        // The consume point for THIS pass, and the reason the footprint lands
+        // under the mesh instead of one frame behind it. The footprint is what
+        // the engine counts its stencil volumes against, so a footprint drawn
+        // at a stale transform hands our mesh a stencil computed for where it
+        // WAS - registered against the camera and against every engine caster,
+        // and wrong only about us. Same rule as the injection and the cast
+        // fire; this pass reads the scene to build draws exactly as they do.
+        kh_attach_step();
+        kh_scene_sync();   // KH_SCENE: live walk by reference, no copy.
+        for (uint32_t khsc_i = 0; khsc_i < g_scene.objs.size(); ++khsc_i) {
+            if (!g_scene.alive[khsc_i]) continue;
+            const RenderObject& o = g_scene.objs[khsc_i];
+            // The footprint serves our receivers' stencil term: visible, lit,
+            // world-space, depth-participating geometry only.
+            if (!o.visible || !kh_shadow_active(o)) continue;
+            KhSvCaster c;
+            c.slot = khsc_i;   // KH_SEAM_INST: khObjs index for the instanced twins.
+            memcpy(c.pos, o.pos, sizeof(c.pos));
+            memcpy(c.size, o.size, sizeof(c.size));
+            memcpy(c.rot, o.rot_m, sizeof(c.rot));
+            c.rotated = o.rotated;
+            c.mesh = mesh_id_clamp(o.mesh);
+            c.lod = 0;   // KH_SHADOW_LOD_DRAWN: picked below, once khv_cam exists.
+            c.lod_lock = o.lod_lock;
+            c.a_vis = true;   // KH_SEAM_CULL: decided below, once the pass matrix is final.
+            {   // KH_FOOTPRINT_ALPHA (the sun census's recipe).
+                bool khsv_exp = false;
+                const float khsv_env = lifetime_envelope(o, effect_time_seconds(), khsv_exp);
+                float khsv_a = khsv_exp ? 0.0f : o.color[3] * khsv_env;
+                khsv_a = khsv_a < 0.0f ? 0.0f : (khsv_a > 1.0f ? 1.0f : khsv_a);
+                c.alpha = floorf(khsv_a * 64.0f + 0.5f) / 64.0f;
+                c.mats = kh_mat_set_has_alpha(kh_obj_textured(o)) ? o.materials : nullptr;
+                c.alpha_caster = kh_footprint_alpha_on() && (c.alpha < 0.999f || c.mats);
+            }
+            if (o.in_front) {   // KH_INFRONT: its own list; whole-object translucents write no depth.
+                if (!(c.alpha_caster && c.alpha < 0.999f)) khv_front.push_back(c);
+                continue;
+            }
+            khv_list.push_back(c);
+        }
+    }
+
+    if (khv_list.empty() && khv_front.empty()) {  return; }
+
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    const bool khv_res_ok = dev && kh_ensure_ok("seam resources", ensure_resources(dev));
+    if (dev) dev->Release();
+    if (!khv_res_ok || !g_res.input_layout || !g_res.vs ||
+        !g_res.composite_cb || !g_res.composite_frame_cb || !g_res.dss_test_write) {
+        return;
+    }
+
+    // The engine's camera projection for this frame.
+    RVExtBridge::ProjectionViewTransform khv_pv = {};
+    if (!kh_svs_take_pv(ctx, khv_pv)) {  return; }
 
     float khv_vp_m[4][4] = {};
     mul_4x4(khv_pv.view, khv_pv.projection, khv_vp_m);
@@ -34128,6 +34175,73 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
             ctx->VSSetShader(g_res.vs, nullptr, 0);
             ctx->PSSetShader(nullptr, nullptr, 0);
         }
+        // KH_INFRONT: the view-model casters join the WORLD count. The
+        // engine's hands recount (kh_infront_seam_inject's window) redraws only
+        // the volumes that reach the camera, and the depth partition hides
+        // every world-range volume from a hands-range depth, so a shadow from
+        // a vehicle or a building reaches an inFront mesh only through this
+        // draw: the same footprint state, the world range, the seam's own
+        // transform, under the depth clamp (rast_inject) - a fragment nearer
+        // than the world near plane lands on it, which is the right count
+        // there since the engine clips its volumes' front faces short of it.
+        // The stencil is untouched, and the hands-seam draw keeps it, so this
+        // count survives to the resolve (the recount adds its near subset on
+        // top; a shadowed count stays nonzero and small).
+        for (const auto& c : khv_front) {
+            const bool khvf_want_alpha = c.alpha_caster && c.mats && khv_dev;
+            if (khvf_want_alpha != khv_alpha_bound) {
+                ctx->IASetInputLayout(khvf_want_alpha ? g_res.layout_tex : g_res.input_layout);
+                ctx->VSSetShader(khvf_want_alpha ? g_res.vs_tex : g_res.vs, nullptr, 0);
+                ctx->PSSetShader(khvf_want_alpha ? g_res.ps_inj_depth_a : nullptr, nullptr, 0);
+                if (khvf_want_alpha && g_res.mat_sampler) ctx->PSSetSamplers(0, 1, &g_res.mat_sampler);
+                khv_alpha_bound = khvf_want_alpha;
+            }
+            ID3D11Buffer* const khvf_vb = kh_mesh_vb_for(c.mesh, c.slot);   // KH_CLOTH.
+            if (khvf_vb != khv_bound_vb) {
+                ctx->IASetVertexBuffers(0, 1, &khvf_vb, &khv_stride, &khv_offset);
+                ctx->IASetIndexBuffer(g_res.mesh_ib[c.mesh], DXGI_FORMAT_R32_UINT, 0);
+                khv_bound_vb = khvf_vb;
+            }
+            khv_obj.depth_params[2] = khv_vp_lo;
+            khv_obj.depth_params[3] = khv_vp_hi;
+            khv_obj.fx_meta[0] = 0.0f;
+            khv_obj.fx_meta[1] = 0.0f;
+            khv_obj.center_size[0] = c.pos[0];
+            khv_obj.center_size[1] = c.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y].
+            khv_obj.center_size[2] = c.pos[1];
+            khv_obj.size_axes[0] = c.size[0];
+            khv_obj.size_axes[1] = c.size[2];
+            khv_obj.size_axes[2] = c.size[1];
+            kh_fill_obj_rot(khv_obj, c.rot);
+            if (khv_rebase_on) kh_fill_center_rel(khv_obj, khv_cam);
+            bool khvf_ok = true;
+            if (khvf_want_alpha) {
+                const MeshDef& khvf_md = mesh_def(c.mesh);
+                const std::vector<MeshSubmesh>& khvf_tab = mesh_lod_submeshes(khvf_md, 0);
+                for (size_t khvf_s = 0; khvf_s < khvf_tab.size() && khvf_ok; ++khvf_s) {
+                    const MeshSubmesh& khvf_sm = khvf_tab[khvf_s];
+                    if (khvf_sm.index_count == 0) continue;
+                    kh_bind_material(ctx, khv_dev, khv_obj, c.mats, khvf_s);
+                    khvf_ok = kh_upload_obj_cb(ctx, g_res.composite_cb, khv_obj);
+                    if (!khvf_ok) break;
+                    ctx->DrawIndexed(khvf_sm.index_count, khvf_sm.index_start, 0);
+                }
+                memset(khv_obj.mat_ctl, 0, sizeof(khv_obj.mat_ctl));
+            } else {
+                khvf_ok = kh_upload_obj_cb(ctx, g_res.composite_cb, khv_obj);
+                if (khvf_ok) {
+                    UINT khvf_is = 0, khvf_ic = 0;
+                    mesh_lod_range_of(c.mesh, 0, khvf_is, khvf_ic);
+                    ctx->DrawIndexed(khvf_ic, khvf_is, 0);
+                }
+            }
+            if (!khvf_ok) break;
+        }
+        if (khv_alpha_bound) {
+            ctx->IASetInputLayout(g_res.input_layout);
+            ctx->VSSetShader(g_res.vs, nullptr, 0);
+            ctx->PSSetShader(nullptr, nullptr, 0);
+        }
         if (khv_dev) khv_dev->Release();
 
         g_svs_injected_frame = true;
@@ -34140,7 +34254,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
     // Runs whether or not the footprint's frame CB landed: the mirror uploads
     // its own frame slice.
     {
-        bool khvm_go = !khv_list.empty();
+        bool khvm_go = !khv_list.empty() || !khv_front.empty();   // KH_INFRONT: the view-model casters join the mirror.
         if (khvm_go) {
             ID3D11Device* khvm_dev = nullptr;
             ctx->GetDevice(&khvm_dev);
@@ -34231,6 +34345,40 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
                             }
                         }
                     }   // KH_SEAM_INST: the per-caster path this replaced.
+                    // KH_INFRONT: the view-model casters into the mirror, per
+                    // caster, the world casters' own recipe (VSMirror: x / y / w
+                    // from the seam's matrix, z on the 0.05 near). The colour
+                    // pass reads the mirror over the whole mesh (mirMeta.x = 2),
+                    // so the near collapse the mirror exists for never reaches
+                    // it; the volume-buffer draws stay as the fallback where the
+                    // mirror is not built.
+                    if (!khv_front.empty()) {
+                        ctx->IASetInputLayout(g_res.input_layout);
+                        ctx->VSSetShader(g_vmir_vs, nullptr, 0);
+                        UINT khvf_stride = sizeof(MeshVertex), khvf_offset = 0;
+                        ID3D11Buffer* khvf_bound_vb = nullptr;   // KH_CLOTH.
+                        ConstantData khvf_obj = {};
+                        for (const auto& c : khv_front) {
+                            ID3D11Buffer* const khvf_want = kh_mesh_vb_for(c.mesh, c.slot);
+                            if (khvf_want != khvf_bound_vb) {
+                                ctx->IASetVertexBuffers(0, 1, &khvf_want, &khvf_stride, &khvf_offset);
+                                ctx->IASetIndexBuffer(g_res.mesh_ib[c.mesh], DXGI_FORMAT_R32_UINT, 0);
+                                khvf_bound_vb = khvf_want;
+                            }
+                            khvf_obj.center_size[0] = c.pos[0];
+                            khvf_obj.center_size[1] = c.pos[2];   // SQF -> engine axes.
+                            khvf_obj.center_size[2] = c.pos[1];
+                            khvf_obj.size_axes[0] = c.size[0];
+                            khvf_obj.size_axes[1] = c.size[2];
+                            khvf_obj.size_axes[2] = c.size[1];
+                            kh_fill_obj_rot(khvf_obj, c.rot);
+                            if (khv_rebase_on) kh_fill_center_rel(khvf_obj, khv_cam);
+                            if (!kh_upload_obj_cb(ctx, g_res.composite_cb, khvf_obj)) break;
+                            UINT khvf_is = 0, khvf_ic = 0;
+                            mesh_lod_range_of(c.mesh, 0, khvf_is, khvf_ic);
+                            ctx->DrawIndexed(khvf_ic, khvf_is, 0);
+                        }
+                    }
                     g_vmir_prepass_stamp = static_cast<uint32_t>(g_svs_frame_seq);
                     g_vmir_mask_time = effect_time_seconds();
                     g_vmir_prepass_src = g_svs_vol_src;
@@ -34253,6 +34401,7 @@ inline void kh_volume_seam_track(ID3D11DeviceContext* ctx, ID3D11DepthStencilVie
                                  bool dsv_is_main, UINT n, ID3D11RenderTargetView* const* rtvs) {
     g_svs_vol_dsv_now = false;
     void* khv_id = dsv ? reorder_dsv_identity(dsv) : nullptr;
+    g_svs_vol_dsv_bound = g_svs_vol_src && khv_id && khv_id == g_svs_vol_src_id;   // KH_INFRONT: any bind of it.
     const bool khv_depth_only = dsv && (n == 0 || !rtvs || !rtvs[0]);
     const bool khv_has_rtv = dsv && n > 0 && rtvs && rtvs[0];
 
@@ -35261,6 +35410,656 @@ inline void kh_pip_inject(ID3D11DeviceContext* ctx) {
 }
 
 // Every engine draw on a PIP pass (reorder_pre_draw, render thread).
+// KH_INFRONT - the engine's view-model slice. MEASURED (RenderDoc, 3840x2160,
+// one frame): after the main depth clear the engine draws the world's depth
+// prepass in the viewport range [0.011, 0.999], then the first-person weapon
+// and hands DEPTH PREPASS in [0.00301, 0.01] - 21 draws, no render target,
+// LESS_EQUAL + write, the projection slot rewritten with near 0.01 / far 500 at
+// the world's own sx / sy - then the world's colour passes in [0.011, 0.999],
+// then the hands COLOUR pass in [0.00301, 0.01] into the HDR scene target,
+// EQUAL + write against its own prepass, then post-processing. No depth clear
+// and no fullscreen draw into the scene target sit between the world and the
+// slice. Because the slice's range lies below the world's, the prepass culls
+// every world colour draw under the hands and the mid-frame depth readers see
+// them.
+//
+// An inFront mesh joins both slice draws: at the first draw of the depth
+// prepass it writes its depth (depth-only, LESS_EQUAL + write - its solid
+// texels only, PSInjDepthA's verdict), and at the first draw of the colour
+// pass it shades under the same viewport, the same view and the same hands
+// projection with LESS_EQUAL + write. Ordering against the engine's own hands
+// then falls out of the depth test: where ours is nearer it wins and their
+// EQUAL draw fails; where it is behind, its test fails against their prepass
+// depth. Both draws use ONE set of matrices and one mesh snapshot per cycle
+// (g_vm_*), so the colour draw meets its own prepass depth exactly, as the
+// engine's EQUAL draw meets its own.
+//
+// The hands pair (m22 / m32) is the engine's own: the projection slot the
+// locator watches receives the view-model upload before each slice
+// (proj_slot_probe admits it - same sx / sy, m22 within 2 % - and
+// g_ro.slot_near_live carries its near, below KH_CAM_NEAR_MIN, which is why
+// the world keep filters it). A slice whose upload the locator missed takes
+// the last confirmed pair (a fixed property of the engine; KH_VM_KEEP_MS).
+// The viewport is the engine's own, read at the trigger draw and left bound.
+// The view is the cycle latch under kh_adopt_frame_view, the recipe the world
+// injection uses; the frame lanes are the injection's uploaded template
+// (g_pip.tpl - the PIP's reuse), with the terrain lane and the snapshot stood
+// down and the sun / band / light / stencil terms kept; the stencil term
+// reads the mirror over the whole mesh (mirMeta.x = 2, the near-collapse fix),
+// the volume-buffer count where no mirror was built.
+//
+// A caster like any mesh while the engine draws a slice (kh_shadow_active,
+// g_vm_slice_live; the seam footprint alone excludes it), not an AO occluder,
+// never in the world colour passes (is_composite_eligible / the censuses).
+// Level 0 only.
+// Prepass and colour agree on every discard but ClipEdgeSliver (stands down
+// under 10 m, where a view-model mesh lives). A cloth / skin substitute
+// installed by a park landing between the two slice draws leaves that frame's
+// colour draw short of its prepass; the next frame repairs it.
+static std::atomic<bool> g_infront_wanted{false};   // flush_frame census: any visible inFront mesh.
+// Render-thread state (the hook's thread), reset at the main depth clear.
+static bool     g_vm_prev_near = false;   // The previous tracked draw sat in the slice's range.
+static bool     g_vm_pre_done = false;    // This cycle's prepass injection ran.
+static bool     g_vm_col_done = false;    // This cycle's colour injection ran.
+static bool     g_vm_seam_done = false;   // This window's view-model seam injection ran (the volume buffer).
+static bool     g_vm_frame_valid = false; // g_vm_view_proj / cam / pair / meshes are this cycle's.
+static uint64_t g_vm_frame_cycle = 0;
+static float    g_vm_view_proj[4][4] = {};   // The slice's rebased view-projection (kh_pass.w = g_vm_rebase).
+static float    g_vm_cam[3] = {};
+static float    g_vm_rebase = 0.0f;
+static float    g_vm_m22 = 0.0f, g_vm_m32 = 0.0f;   // The hands pair this cycle drew with.
+static float    g_vm_keep_m22 = 0.0f, g_vm_keep_m32 = 0.0f;   // The last confirmed pair.
+static uint64_t g_vm_keep_ms = 0;
+static constexpr uint64_t KH_VM_KEEP_MS = 2000;
+static std::vector<RenderObject> g_vm_meshes;   // The cycle's snapshot (both draws read it).
+
+inline void kh_infront_frame_reset() {
+    // The ended cycle's verdict, published before the flags clear (the session
+    // reset lands here too and publishes false).
+    g_vm_slice_live.store(g_vm_pre_done || g_vm_col_done, std::memory_order_relaxed);
+    g_vm_prev_near = false;
+    g_vm_pre_done = false;
+    g_vm_col_done = false;
+    g_vm_seam_done = false;
+    g_vm_frame_valid = false;
+}
+
+// The slice's range: a viewport that never reaches the far side (the trigger's
+// rule for the weapon / hands slice) and starts near.
+inline bool kh_infront_vp_is_slice(const D3D11_VIEWPORT& khvs_vp) {
+    return khvs_vp.MaxDepth < 0.7f && khvs_vp.MinDepth <= 0.3f &&
+           khvs_vp.MaxDepth > khvs_vp.MinDepth &&
+           khvs_vp.Width >= 2.0f && khvs_vp.Height >= 2.0f;
+}
+
+// The hands projection pair: the slot's live pair when it is not the world's
+// (its near below half the world's, or below KH_CAM_NEAR_MIN with no world
+// pair latched), else the keep.
+inline bool kh_infront_pair(float& khvp_m22, float& khvp_m32) {
+    const uint64_t khvp_now = steady_now_ms();
+    const float khvp_sn = g_ro.slot_near_live;
+    if (khvp_sn > 0.0f && fabsf(g_ro.slot_m22) > 1.0e-9f && g_ro.slot_m32 < 0.0f) {
+        bool khvp_hands;
+        if (g_ro.world_pair_valid && fabsf(g_ro.world_m22) > 1.0e-9f) {
+            const float khvp_wn = -g_ro.world_m32 / g_ro.world_m22;
+            khvp_hands = khvp_sn < 0.5f * khvp_wn;
+        } else {
+            khvp_hands = khvp_sn < KH_CAM_NEAR_MIN;
+        }
+        if (khvp_hands) {
+            khvp_m22 = g_ro.slot_m22;
+            khvp_m32 = g_ro.slot_m32;
+            g_vm_keep_m22 = khvp_m22;
+            g_vm_keep_m32 = khvp_m32;
+            g_vm_keep_ms = khvp_now;
+            return true;
+        }
+    }
+    if (g_vm_keep_ms != 0 && khvp_now - g_vm_keep_ms < KH_VM_KEEP_MS && fabsf(g_vm_keep_m22) > 1.0e-9f) {
+        khvp_m22 = g_vm_keep_m22;
+        khvp_m32 = g_vm_keep_m32;
+        return true;
+    }
+    return false;
+}
+
+// Once per cycle, at the first slice draw of either kind: the matrices and the
+// mesh snapshot both slice draws share.
+inline bool kh_infront_frame_prepare() {
+    if (g_vm_frame_valid && g_vm_frame_cycle == g_topo_cycles) return true;
+    g_vm_frame_valid = false;
+    float khvf_m22 = 0.0f, khvf_m32 = 0.0f;
+    if (!kh_infront_pair(khvf_m22, khvf_m32)) return false;
+    RVExtBridge::ProjectionViewTransform khvf_pv = {};
+    if (g_ro.cycle_pv_valid) {
+        khvf_pv = g_ro.cycle_pv;
+    } else if (!RVExtBridge::get_projection_view_transform(khvf_pv)) {
+        return false;
+    }
+    if (fabsf(khvf_pv.projection[2][2]) < 1.0e-6f || fabsf(khvf_pv.projection[0][0]) < 1.0e-6f) return false;
+    kh_adopt_frame_view(khvf_pv);
+    khvf_pv.projection[2][2] = khvf_m22;
+    khvf_pv.projection[3][2] = khvf_m32;
+    float khvf_cam[3];
+    if (!kh_view_camera_exact(khvf_pv.view, khvf_cam)) extract_camera_pos(khvf_pv.view, khvf_cam);
+    const bool khvf_engcam = kh_engcam_consume(khvf_pv.view, khvf_cam);
+    ConstantData khvf_tmp;
+    mul_4x4(khvf_pv.view, khvf_pv.projection, khvf_tmp.view_proj);
+    const bool khvf_rebase = khvf_engcam
+                           ? kh_rebase_vp_engcam(khvf_tmp, khvf_pv.view, khvf_pv.projection)
+                           : kh_rebase_vp_exact(khvf_tmp, khvf_pv.view, khvf_pv.projection, khvf_cam);
+    memcpy(g_vm_view_proj, khvf_tmp.view_proj, sizeof(g_vm_view_proj));
+    g_vm_cam[0] = khvf_cam[0]; g_vm_cam[1] = khvf_cam[1]; g_vm_cam[2] = khvf_cam[2];
+    g_vm_rebase = khvf_rebase ? 1.0f : 0.0f;
+    g_vm_m22 = khvf_m22;
+    g_vm_m32 = khvf_m32;
+
+    // The snapshot: the attach lanes sampled here, once, and the objects copied
+    // out so the second slice draw reads what the first drew.
+    kh_attach_step();
+    kh_scene_sync();
+    const float khvf_now = effect_time_seconds();
+    g_vm_meshes.clear();
+    for (uint32_t khvf_s = 0; khvf_s < g_scene.objs.size(); ++khvf_s) {
+        if (!g_scene.alive[khvf_s]) continue;
+        const RenderObject& o = g_scene.objs[khvf_s];
+        if (!o.in_front || !o.visible || o.fullscreen || o.effect != 0) continue;
+        bool khvf_exp = false;
+        const float khvf_env = lifetime_envelope(o, khvf_now, khvf_exp);
+        if (khvf_exp || khvf_env <= 0.0f) continue;
+        const int khvf_mid = mesh_id_clamp(o.mesh);
+        if (khvf_mid < 0 || static_cast<size_t>(khvf_mid) >= g_res.mesh_vb.size()) continue;
+        if (!kh_mesh_vb_for(khvf_mid, o.slot)) continue;   // KH_CLOTH: no buffer, nothing to draw.
+        g_vm_meshes.push_back(o);
+        g_vm_meshes.back().color[3] *= khvf_env;
+    }
+    g_vm_frame_cycle = g_topo_cycles;
+    g_vm_frame_valid = true;
+    return true;
+}
+
+// khvi_colour = false: the depth prepass (no render target bound). true: the
+// colour pass.
+inline void kh_infront_inject(ID3D11DeviceContext* ctx, const D3D11_VIEWPORT& khvi_vp, bool khvi_colour) {
+    if (!g_pip.tpl_valid) return;   // No frame lanes to shade under yet.
+    if (!g_res.vs || !g_res.ps || !g_res.composite_cb || !g_res.composite_frame_cb ||
+        !g_res.input_layout || !g_res.dss_test_write || !g_res.dss_test || !g_res.dss_off ||
+        !g_res.rasterizer || !g_res.rasterizer_cull || g_res.mesh_vb.empty()) return;
+    ID3D11Device* dev = RVExtBridge::get_d3d_device();
+    if (!dev) return;
+    const bool khvi_pinj = g_ro.in_injection;
+    g_ro.in_injection = true;   // Our own draws: the hooks stand aside.
+    if (!kh_infront_frame_prepare() || g_vm_meshes.empty()) {
+        g_ro.in_injection = khvi_pinj;
+        return;
+    }
+    const float* cam = g_vm_cam;
+    StateBackup khvi_bk;
+    khvi_bk.capture(ctx);
+
+    ConstantData khvi_cbf = g_pip.tpl;
+    memcpy(khvi_cbf.view_proj, g_vm_view_proj, sizeof(khvi_cbf.view_proj));
+    khvi_cbf.snap_cam[3] = 0.0f;                                   // No scene snapshot.
+    // The stencil unit (mask_meta.w, sten_vol, sten_vol2.x) stays: the engine
+    // counts its shadow volumes against the main depth after the hands
+    // prepass, so the count at a slice pixel is taken against OUR prepass
+    // depth - the same way its own hands receive them. Only the vertex-path
+    // selector (sten_vol2.z) is cleared: the plain path.
+    khvi_cbf.sten_vol2[2] = 0.0f;
+    // The mirror answers the whole mesh (mirMeta.x = 2) when this frame built
+    // it: the world seam drew the mesh into it, so its count is taken against
+    // the mesh with the volumes standing on a 0.05 near - the near-collapse fix
+    // the world receivers take at the near plane, here everywhere. Without a
+    // mirror the volume-buffer count (the world seam + the hands seam) answers.
+    khvi_cbf.mir_meta[0] = (khvi_colour && khvi_cbf.mir_meta[0] >= 0.5f && g_vmir_srv &&
+                            g_vmir_mask_time >= 0.0f) ? 2.0f : 0.0f;
+    khvi_cbf.thm_params[3] = 0.0f;                                 // The terrain never occludes the slice.
+    khvi_cbf.fx_meta[2] = khvi_vp.Width;
+    khvi_cbf.fx_meta[3] = khvi_vp.Height;
+    khvi_cbf.kh_pass[0] = cam[0]; khvi_cbf.kh_pass[1] = cam[1]; khvi_cbf.kh_pass[2] = cam[2];
+    khvi_cbf.kh_pass[3] = g_vm_rebase;
+    khvi_cbf.fog_color[3] = cam[1];
+    if (khvi_colour) kh_ao_gather(ctx, dev, khvi_cbf, cam, 0);   // Receives AO (t40 / t41 bound).
+    else memset(khvi_cbf.kh_ao, 0, sizeof(khvi_cbf.kh_ao));
+    if (!kh_upload_frame_cb(ctx, g_res.composite_frame_cb, khvi_cbf)) {
+        khvi_bk.restore(ctx);
+        g_ro.in_injection = khvi_pinj;
+        return;
+    }
+
+    const UINT stride = sizeof(MeshVertex), offset = 0;
+    ctx->IASetInputLayout(g_res.input_layout);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(g_res.vs, nullptr, 0);
+    ctx->PSSetShader(khvi_colour ? g_res.ps : nullptr, nullptr, 0);
+    ctx->GSSetShader(nullptr, nullptr, 0);
+    ctx->HSSetShader(nullptr, nullptr, 0);
+    ctx->DSSetShader(nullptr, nullptr, 0);
+    if (g_res.mat_sampler) ctx->PSSetSamplers(0, 1, &g_res.mat_sampler);
+    ID3D11Buffer* khvi_cbs[2] = { g_res.composite_cb, g_res.composite_frame_cb };
+    ctx->VSSetConstantBuffers(0, 2, khvi_cbs);
+    ctx->PSSetConstantBuffers(0, 2, khvi_cbs);
+    if (khvi_colour) {   // The flush's PSMain binds: the received atlas / bands, the sun ladder, the lights.
+        ID3D11ShaderResourceView* khvi_atlas = shadow_live_ensure_srv() ? g_ls.atlas_srv : nullptr;
+        ctx->PSSetShaderResources(1, 1, &khvi_atlas);
+        for (UINT khvi_b = 0; khvi_b < 8; ++khvi_b) {
+            if (g_ls.band[khvi_b].valid && g_ls.band[khvi_b].srv) {
+                const UINT khvi_t = khvi_b < 6 ? 4 + khvi_b : 12 + (khvi_b - 6);
+                ctx->PSSetShaderResources(khvi_t, 1, &g_ls.band[khvi_b].srv);
+            }
+        }
+        if (g_res.dls_srv) ctx->PSSetShaderResources(36, 1, &g_res.dls_srv);
+        if (g_sun_map_valid && g_res.sun_srv) ctx->PSSetShaderResources(11, 1, &g_res.sun_srv);
+        if (g_sun2_map_valid && g_res.sun2_srv) ctx->PSSetShaderResources(25, 1, &g_res.sun2_srv);
+        if (g_sun3_map_valid && g_res.sun3_srv) ctx->PSSetShaderResources(26, 1, &g_res.sun3_srv);
+        if (g_sun4_map_valid && g_res.sun4_srv) ctx->PSSetShaderResources(27, 1, &g_res.sun4_srv);
+        if (g_sun5_map_valid && g_res.sun5_srv) ctx->PSSetShaderResources(32, 1, &g_res.sun5_srv);
+        if (g_sun2_map_valid && g_sun_pf_valid[0] && g_res.sun_pf_srv[0]) ctx->PSSetShaderResources(29, 1, &g_res.sun_pf_srv[0]);
+        if (g_sun3_map_valid && g_sun_pf_valid[1] && g_res.sun_pf_srv[1]) ctx->PSSetShaderResources(30, 1, &g_res.sun_pf_srv[1]);
+        if (g_sun4_map_valid && g_sun_pf_valid[2] && g_res.sun_pf_srv[2]) ctx->PSSetShaderResources(31, 1, &g_res.sun_pf_srv[2]);
+        if (g_sun5_map_valid && g_sun_pf_valid[3] && g_res.sun_pf_srv[3]) ctx->PSSetShaderResources(20, 1, &g_res.sun_pf_srv[3]);
+        if (g_res.samp_pf) ctx->PSSetSamplers(1, 1, &g_res.samp_pf);
+        // The engine's stencil evidence, as the injection binds it: the pre /
+        // post pair (KhStenTerm) and the volume copy (KhVolTerm).
+        if (kh_svs_sten_on()) {
+            if (g_svs_pre_srv) ctx->PSSetShaderResources(21, 1, &g_svs_pre_srv);
+            if (g_svs_post_srv) ctx->PSSetShaderResources(22, 1, &g_svs_post_srv);
+        }
+        if (kh_svs_vol_ready()) ctx->PSSetShaderResources(24, 1, &g_svs_vol_sten_srv);
+        if (khvi_cbf.mir_meta[0] >= 1.5f) ctx->PSSetShaderResources(28, 1, &g_vmir_srv);   // The mirror.
+    }
+    ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);
+    ctx->RSSetState(g_res.rasterizer);
+    ID3D11RasterizerState* khvi_bound_rs = g_res.rasterizer;
+    const FLOAT khvi_bf[4] = { 0, 0, 0, 0 };
+    ctx->OMSetBlendState(g_res.blend_modes[0], khvi_bf, 0xFFFFFFFF);
+    int khvi_bound_bm = 0;
+    ID3D11Buffer* khvi_bound_vb = nullptr;   // KH_CLOTH.
+    ID3D11VertexShader* khvi_bound_vs = g_res.vs;
+    ID3D11InputLayout*  khvi_bound_il = g_res.input_layout;
+    ID3D11PixelShader*  khvi_bound_ps = khvi_colour ? g_res.ps : nullptr;
+    ID3D11DepthStencilState* khvi_bound_dss = g_res.dss_test_write;
+    const bool khvi_alpha_ok = kh_footprint_alpha_on();   // PSInjDepthA + the textured VS / layout.
+    const bool khvi_tex_ok = g_res.layout_tex && g_res.vs_tex && g_res.ps_tex && g_res.mat_sampler;
+
+    auto khvi_solid = [](const RenderObject& o) -> bool {
+        return o.mode != DepthMode::Off && o.blend_mode == 0 && o.color[3] >= 0.999f;
+    };
+    auto khvi_fill = [&](const RenderObject& o, ConstantData& cbd) {
+        cbd = khvi_cbf;
+        cbd.center_size[0] = o.pos[0];
+        cbd.center_size[1] = o.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y].
+        cbd.center_size[2] = o.pos[1];
+        if (g_vm_rebase > 0.5f) kh_fill_center_rel(cbd, cam);
+        cbd.size_axes[0] = o.size[0];
+        cbd.size_axes[1] = o.size[2];
+        cbd.size_axes[2] = o.size[1];
+        cbd.size_axes[3] = static_cast<float>(o.blend_mode);
+        kh_fill_obj_rot(cbd, o.rot_m);
+        cbd.blend_ctl[0] = 0.0f;
+        cbd.blend_ctl[3] = 0.0f;
+        memcpy(cbd.color, o.color, sizeof(cbd.color));
+        cbd.fx0[0] = cam[0]; cbd.fx0[1] = cam[1]; cbd.fx0[2] = cam[2];
+        cbd.fx1[0] = 1e9f;   // No punch-through guard: the slice has no scene snapshot.
+        cbd.fx1[1] = 0.0f;
+        cbd.fx_meta[0] = 0.0f;
+        cbd.fx_meta[1] = 0.0f;
+        cbd.depth_params[0] = g_vm_m22;   // The hands pair and the slice's own range.
+        cbd.depth_params[1] = g_vm_m32;
+        cbd.depth_params[2] = khvi_vp.MinDepth;
+        cbd.depth_params[3] = khvi_vp.MaxDepth;
+        kh_fill_local_band_cb(cbd, o);
+        fill_lighting_obj_cb(cbd, o);
+        cbd.shadow_meta2[1] = 0.0f;   // No object view-distance cut (the prepass has none either).
+    };
+    auto khvi_set_dss = [&](ID3D11DepthStencilState* khvd_s) {
+        if (khvd_s != khvi_bound_dss) { ctx->OMSetDepthStencilState(khvd_s, 0); khvi_bound_dss = khvd_s; }
+    };
+    auto khvi_bind_vb = [&](int khvb_mid, uint32_t khvb_slot) {
+        ID3D11Buffer* const khvb_vb = kh_mesh_vb_for(khvb_mid, khvb_slot);   // KH_CLOTH.
+        if (khvb_vb != khvi_bound_vb) {
+            ctx->IASetVertexBuffers(0, 1, &khvb_vb, &stride, &offset);
+            ctx->IASetIndexBuffer(g_res.mesh_ib[khvb_mid], DXGI_FORMAT_R32_UINT, 0);
+            khvi_bound_vb = khvb_vb;
+        }
+    };
+    auto khvi_bind_pipe = [&](bool khvp_tex, ID3D11PixelShader* khvp_ps) {
+        ID3D11VertexShader* khvp_vs = khvp_tex ? g_res.vs_tex : g_res.vs;
+        ID3D11InputLayout*  khvp_il = khvp_tex ? g_res.layout_tex : g_res.input_layout;
+        if (khvp_vs != khvi_bound_vs) { ctx->VSSetShader(khvp_vs, nullptr, 0); khvi_bound_vs = khvp_vs; }
+        if (khvp_il != khvi_bound_il) { ctx->IASetInputLayout(khvp_il); khvi_bound_il = khvp_il; }
+        if (khvp_ps != khvi_bound_ps) { ctx->PSSetShader(khvp_ps, nullptr, 0); khvi_bound_ps = khvp_ps; }
+    };
+    auto khvi_set_rs = [&](ID3D11RasterizerState* khvr_s) {
+        if (khvr_s != khvi_bound_rs) { ctx->RSSetState(khvr_s); khvi_bound_rs = khvr_s; }
+    };
+    auto khvi_set_bm = [&](int khvm_bm) {
+        if (khvm_bm != khvi_bound_bm) { ctx->OMSetBlendState(g_res.blend_modes[khvm_bm], khvi_bf, 0xFFFFFFFF); khvi_bound_bm = khvm_bm; }
+    };
+
+    ConstantData cbd;
+    uint32_t khvi_drawn = 0;
+
+    // Loop 1: the solids - the depth prepass draws these alone; the colour pass
+    // draws them first (LESS_EQUAL + write), a blend material's solid part
+    // included.
+    for (const RenderObject& o : g_vm_meshes) {
+        if (!khvi_solid(o)) continue;
+        const int mid = mesh_id_clamp(o.mesh);
+        const MeshDef& md = mesh_def(mid);
+        khvi_fill(o, cbd);
+        khvi_set_dss(g_res.dss_test_write);
+        khvi_set_rs(o.two_sided ? g_res.rasterizer : g_res.rasterizer_cull);
+        khvi_bind_vb(mid, o.slot);
+        const KhMaterialSet* khvi_txm = kh_obj_textured(o);
+        if (!khvi_colour) {
+            // Depth only. A material with cutout / blend texels takes the
+            // clip-only alpha footprint, per submesh with its maps bound - the
+            // colour pass's own texel verdict; everything else the bare VS.
+            const bool khvi_want_a = khvi_txm && khvi_alpha_ok && kh_mat_set_has_alpha(khvi_txm);
+            khvi_bind_pipe(khvi_want_a, khvi_want_a ? g_res.ps_inj_depth_a : nullptr);
+            if (khvi_want_a) {
+                const std::vector<MeshSubmesh>& khvi_tab = mesh_lod_submeshes(md, 0);
+                bool khvi_ok = true;
+                for (size_t khvi_si = 0; khvi_si < khvi_tab.size() && khvi_ok; ++khvi_si) {
+                    const MeshSubmesh& khvi_sm = khvi_tab[khvi_si];
+                    if (khvi_sm.index_count == 0) continue;
+                    kh_bind_material(ctx, dev, cbd, khvi_txm, khvi_si);
+                    khvi_ok = kh_upload_obj_cb(ctx, g_res.composite_cb, cbd);
+                    if (!khvi_ok) break;
+                    ctx->DrawIndexed(khvi_sm.index_count, khvi_sm.index_start, 0);
+                    ++khvi_drawn;
+                }
+                if (!khvi_ok) break;
+            } else {
+                if (!kh_upload_obj_cb(ctx, g_res.composite_cb, cbd)) break;
+                UINT khvi_ls = 0, khvi_lc = 0;
+                mesh_lod_range(md, 0, khvi_ls, khvi_lc);
+                if (khvi_lc == 0) continue;
+                ctx->DrawIndexed(khvi_lc, khvi_ls, 0);
+                ++khvi_drawn;
+            }
+            continue;
+        }
+        khvi_set_bm(0);
+        const bool khvi_tx = khvi_txm && khvi_tex_ok;
+        khvi_bind_pipe(khvi_tx, khvi_tx ? g_res.ps_tex : g_res.ps);
+        if (!kh_upload_obj_cb(ctx, g_res.composite_cb, cbd)) break;
+        if (khvi_tx) {
+            khvi_drawn += kh_draw_textured(ctx, dev, cbd, g_res.composite_cb, *khvi_txm, mid, false,
+                                           khvi_bound_rs, 0, g_res.ps_tex, 0, 1);
+        } else {
+            UINT khvi_ls = 0, khvi_lc = 0;
+            mesh_lod_range(md, 0, khvi_ls, khvi_lc);
+            if (khvi_lc == 0) continue;
+            ctx->DrawIndexed(khvi_lc, khvi_ls, 0);
+            ++khvi_drawn;
+        }
+    }
+
+    // Loop 2 (colour only): what writes no depth - a blend material's
+    // translucent part, a translucent or non-normal-blend object, a depth-Off
+    // overlay - far to near, tested against what loop 1 wrote.
+    if (khvi_colour) {
+        static std::vector<std::pair<float, uint32_t>> khvi_tail;
+        khvi_tail.clear();
+        for (uint32_t khvi_i = 0; khvi_i < static_cast<uint32_t>(g_vm_meshes.size()); ++khvi_i) {
+            const RenderObject& o = g_vm_meshes[khvi_i];
+            const bool khvi_part = khvi_solid(o) && kh_obj_has_blend(o) && kh_obj_textured(o) && khvi_tex_ok;
+            if (!khvi_solid(o) || khvi_part) khvi_tail.emplace_back(kh_mesh_dist_sq(o, cam), khvi_i);
+        }
+        std::stable_sort(khvi_tail.begin(), khvi_tail.end(),
+                         [](const std::pair<float, uint32_t>& a, const std::pair<float, uint32_t>& b) {
+                             return a.first > b.first;
+                         });
+        for (const auto& khvi_t : khvi_tail) {
+            const RenderObject& o = g_vm_meshes[khvi_t.second];
+            const int mid = mesh_id_clamp(o.mesh);
+            const MeshDef& md = mesh_def(mid);
+            const bool khvi_part = khvi_solid(o);   // The blend material's translucent tail.
+            khvi_fill(o, cbd);
+            khvi_set_dss(o.mode == DepthMode::Off ? g_res.dss_off : g_res.dss_test);
+            khvi_set_bm(o.blend_mode);
+            khvi_bind_vb(mid, o.slot);
+            const KhMaterialSet* khvi_txm = kh_obj_textured(o);
+            const bool khvi_tx = khvi_txm && khvi_tex_ok;
+            // A two-sided translucent draws its interior first, then its
+            // exterior over it (the ordered contract of both colour passes).
+            const bool khvi_ts = o.two_sided && !khvi_part && g_res.rasterizer_front != nullptr;
+            khvi_set_rs(khvi_ts ? g_res.rasterizer_front
+                        : (o.two_sided && !khvi_part) ? g_res.rasterizer : g_res.rasterizer_cull);
+            khvi_bind_pipe(khvi_tx, khvi_tx ? g_res.ps_tex : g_res.ps);
+            if (!kh_upload_obj_cb(ctx, g_res.composite_cb, cbd)) break;
+            if (khvi_tx) {
+                khvi_drawn += kh_draw_textured(ctx, dev, cbd, g_res.composite_cb, *khvi_txm, mid, khvi_ts,
+                                               khvi_bound_rs, 0, g_res.ps_tex, 0, khvi_part ? 2 : 1);
+            } else {
+                UINT khvi_ls = 0, khvi_lc = 0;
+                mesh_lod_range(md, 0, khvi_ls, khvi_lc);
+                if (khvi_lc == 0) continue;
+                ctx->DrawIndexed(khvi_lc, khvi_ls, 0);
+                ++khvi_drawn;
+                if (khvi_ts) {
+                    khvi_set_rs(g_res.rasterizer_cull);
+                    ctx->DrawIndexed(khvi_lc, khvi_ls, 0);
+                    ++khvi_drawn;
+                }
+            }
+        }
+    }
+    (void)khvi_drawn;
+    khvi_bk.restore(ctx);
+    g_ro.in_injection = khvi_pinj;
+}
+
+// KH_INFRONT - the view-model seam. MEASURED (the same capture): the engine's
+// stencil shadows are counted in a separate volume buffer BEFORE the main
+// depth clear - a world depth prepass, the world's volume counting (stencil
+// IncWrap / DecWrap under depth GreaterEqual, no write), then the HANDS
+// PREPASS into the same buffer in the hands range (depth LESS_EQUAL + write,
+// stencil AlwaysTrue / Replace 0: the count under the hands reset), then the
+// hands' own counting in the hands range (non-hands pixels fail the depth
+// test with zfail Keep and are untouched), then the resolve our copy is taken
+// at. The recount redraws only the volumes that reach the camera (MEASURED: 15
+// of the world count's 58 draws - the character's own and a few near ones),
+// and the depth partition hides every world-range volume from a hands-range
+// depth. So an inFront mesh takes part twice: at the world seam (inside
+// kh_volume_seam_inject, the world range under the depth clamp) for the world
+// count, and here, at the FIRST hands-range draw on the volume buffer - the
+// engine's own hands prepass, ahead of its first draw - with its hands-range
+// depth and the stencil untouched: the engine's Replace 0 then fires only
+// where its hands beat us, the world count survives under the mesh, and the
+// recount adds its near subset against our depth (a shadowed count stays
+// nonzero and small, the shader's test).
+//
+// The view is the world seam's own take (g_svs_prime_vp, this window) with
+// column 2 rebuilt from the hands pair - exact for a projection that differs
+// only in m22 / m32 - or, when the world seam did not run this window (no
+// world caster), the same take made here. Depth only, level 0, the solid
+// texels of an alpha material through PSInjDepthA (the slice prepass's
+// recipe).
+inline void kh_infront_seam_inject(ID3D11DeviceContext* ctx, const D3D11_VIEWPORT& khvs_vp) {
+    if (!g_res.vs || !g_res.composite_cb || !g_res.composite_frame_cb || !g_res.input_layout ||
+        !g_res.rasterizer || !g_res.rasterizer_cull || g_res.mesh_vb.empty()) return;
+    ID3D11Device* dev = RVExtBridge::get_d3d_device();
+    if (!dev) return;
+    float khvs_m22 = 0.0f, khvs_m32 = 0.0f;
+    if (!kh_infront_pair(khvs_m22, khvs_m32)) return;
+    const bool khvs_pinj = g_ro.in_injection;
+    g_ro.in_injection = true;
+
+    // The casters: live, at the consume point (the world seam's rule).
+    kh_attach_step();
+    kh_scene_sync();
+    static std::vector<RenderObject> khvs_list;
+    khvs_list.clear();
+    const float khvs_now = effect_time_seconds();
+    for (uint32_t khvs_s = 0; khvs_s < g_scene.objs.size(); ++khvs_s) {
+        if (!g_scene.alive[khvs_s]) continue;
+        const RenderObject& o = g_scene.objs[khvs_s];
+        if (!o.in_front || !o.visible || !kh_shadow_active(o)) continue;
+        if (o.blend_mode != 0 || o.color[3] < 0.999f) continue;   // Writes no depth in the colour pass: not drawn.
+        bool khvs_exp = false;
+        const float khvs_env = lifetime_envelope(o, khvs_now, khvs_exp);
+        if (khvs_exp || o.color[3] * khvs_env < 0.999f) continue;
+        const int khvs_mid = mesh_id_clamp(o.mesh);
+        if (khvs_mid < 0 || static_cast<size_t>(khvs_mid) >= g_res.mesh_vb.size()) continue;
+        if (!kh_mesh_vb_for(khvs_mid, o.slot)) continue;
+        khvs_list.push_back(o);
+    }
+    if (khvs_list.empty()) { g_ro.in_injection = khvs_pinj; return; }
+
+    // The pass transform: the world seam's this window, else the same take.
+    float khvs_vpm[4][4];
+    float khvs_cam[3];
+    bool  khvs_rebase;
+    if (g_svs_injected_frame) {
+        memcpy(khvs_vpm, g_svs_prime_vp, sizeof(khvs_vpm));
+        khvs_cam[0] = g_svs_prime_cam[0]; khvs_cam[1] = g_svs_prime_cam[1]; khvs_cam[2] = g_svs_prime_cam[2];
+        khvs_rebase = g_svs_prime_rebase;
+    } else {
+        RVExtBridge::ProjectionViewTransform khvs_pv = {};
+        if (!kh_svs_take_pv(ctx, khvs_pv)) { g_ro.in_injection = khvs_pinj; return; }
+        if (!kh_view_camera_exact(khvs_pv.view, khvs_cam)) extract_camera_pos(khvs_pv.view, khvs_cam);
+        const bool khvs_engcam = kh_engcam_consume(khvs_pv.view, khvs_cam);
+        ConstantData khvs_tmp = {};
+        mul_4x4(khvs_pv.view, khvs_pv.projection, khvs_tmp.view_proj);
+        khvs_rebase = khvs_engcam
+                    ? kh_rebase_vp_engcam(khvs_tmp, khvs_pv.view, khvs_pv.projection)
+                    : kh_rebase_vp_exact(khvs_tmp, khvs_pv.view, khvs_pv.projection, khvs_cam);
+        memcpy(khvs_vpm, khvs_tmp.view_proj, sizeof(khvs_vpm));
+    }
+    // Column 2 from the hands pair: VP[r][2] = m22 * V[r][2] = m22 * VP[r][3]
+    // (r < 3), VP[3][2] = m22 * VP[3][3] + m32 - the view's affine last column
+    // survives the rebase, which moves only its translation row.
+    for (int khvs_r = 0; khvs_r < 3; ++khvs_r) khvs_vpm[khvs_r][2] = khvs_m22 * khvs_vpm[khvs_r][3];
+    khvs_vpm[3][2] = khvs_m22 * khvs_vpm[3][3] + khvs_m32;
+
+    StateBackup khvs_bk;
+    khvs_bk.capture(ctx);
+    KhOmSave khvs_om;
+    khvs_om.capture(ctx);
+    ctx->OMSetRenderTargets(0, nullptr, khvs_om.dsv);
+    ConstantData khvs_cbf = {};
+    memcpy(khvs_cbf.view_proj, khvs_vpm, sizeof(khvs_cbf.view_proj));
+    khvs_cbf.kh_pass[0] = khvs_cam[0]; khvs_cbf.kh_pass[1] = khvs_cam[1]; khvs_cbf.kh_pass[2] = khvs_cam[2];
+    khvs_cbf.kh_pass[3] = khvs_rebase ? 1.0f : 0.0f;
+    if (!kh_upload_frame_cb(ctx, g_res.composite_frame_cb, khvs_cbf)) {
+        khvs_om.restore(ctx);
+        khvs_om.release();
+        khvs_bk.restore(ctx);
+        g_ro.in_injection = khvs_pinj;
+        return;
+    }
+    // The volume buffer, depth-only, under the engine's own hands-range
+    // viewport: the engine's hands prepass binds a render target beside it,
+    // which is not written here.
+    const UINT stride = sizeof(MeshVertex), offset = 0;
+    ctx->IASetInputLayout(g_res.input_layout);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(g_res.vs, nullptr, 0);
+    ctx->PSSetShader(nullptr, nullptr, 0);
+    ctx->GSSetShader(nullptr, nullptr, 0);
+    ctx->HSSetShader(nullptr, nullptr, 0);
+    ctx->DSSetShader(nullptr, nullptr, 0);
+    if (g_res.mat_sampler) ctx->PSSetSamplers(0, 1, &g_res.mat_sampler);
+    ID3D11Buffer* khvs_cbs[2] = { g_res.composite_cb, g_res.composite_frame_cb };
+    ctx->VSSetConstantBuffers(0, 2, khvs_cbs);
+    ctx->PSSetConstantBuffers(0, 2, khvs_cbs);
+    ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);   // Stencil untouched: the world count survives.
+    const FLOAT khvs_bf[4] = { 0, 0, 0, 0 };
+    ctx->OMSetBlendState(g_res.blend_modes[0], khvs_bf, 0xFFFFFFFF);
+    ctx->RSSetState(g_res.rasterizer);
+    ID3D11RasterizerState* khvs_bound_rs = g_res.rasterizer;
+    ID3D11Buffer* khvs_bound_vb = nullptr;
+    bool khvs_alpha_bound = false;
+    const bool khvs_alpha_ok = kh_footprint_alpha_on();
+    ConstantData cbd;
+    for (const RenderObject& o : khvs_list) {
+        const int mid = mesh_id_clamp(o.mesh);
+        const MeshDef& md = mesh_def(mid);
+        cbd = khvs_cbf;
+        cbd.center_size[0] = o.pos[0];
+        cbd.center_size[1] = o.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y].
+        cbd.center_size[2] = o.pos[1];
+        if (khvs_rebase) kh_fill_center_rel(cbd, khvs_cam);
+        cbd.size_axes[0] = o.size[0];
+        cbd.size_axes[1] = o.size[2];
+        cbd.size_axes[2] = o.size[1];
+        cbd.size_axes[3] = 0.0f;
+        kh_fill_obj_rot(cbd, o.rot_m);
+        cbd.depth_params[0] = khvs_m22;
+        cbd.depth_params[1] = khvs_m32;
+        cbd.depth_params[2] = khvs_vp.MinDepth;
+        cbd.depth_params[3] = khvs_vp.MaxDepth;
+        ID3D11RasterizerState* khvs_want_rs = o.two_sided ? g_res.rasterizer : g_res.rasterizer_cull;
+        if (khvs_want_rs != khvs_bound_rs) { ctx->RSSetState(khvs_want_rs); khvs_bound_rs = khvs_want_rs; }
+        ID3D11Buffer* const khvs_vb = kh_mesh_vb_for(mid, o.slot);   // KH_CLOTH.
+        if (khvs_vb != khvs_bound_vb) {
+            ctx->IASetVertexBuffers(0, 1, &khvs_vb, &stride, &offset);
+            ctx->IASetIndexBuffer(g_res.mesh_ib[mid], DXGI_FORMAT_R32_UINT, 0);
+            khvs_bound_vb = khvs_vb;
+        }
+        const KhMaterialSet* khvs_txm = kh_obj_textured(o);
+        const bool khvs_want_a = khvs_txm && khvs_alpha_ok && kh_mat_set_has_alpha(khvs_txm);
+        if (khvs_want_a != khvs_alpha_bound) {
+            ctx->IASetInputLayout(khvs_want_a ? g_res.layout_tex : g_res.input_layout);
+            ctx->VSSetShader(khvs_want_a ? g_res.vs_tex : g_res.vs, nullptr, 0);
+            ctx->PSSetShader(khvs_want_a ? g_res.ps_inj_depth_a : nullptr, nullptr, 0);
+            khvs_alpha_bound = khvs_want_a;
+        }
+        if (khvs_want_a) {
+            const std::vector<MeshSubmesh>& khvs_tab = mesh_lod_submeshes(md, 0);
+            bool khvs_ok = true;
+            for (size_t khvs_si = 0; khvs_si < khvs_tab.size() && khvs_ok; ++khvs_si) {
+                const MeshSubmesh& khvs_sm = khvs_tab[khvs_si];
+                if (khvs_sm.index_count == 0) continue;
+                kh_bind_material(ctx, dev, cbd, khvs_txm, khvs_si);
+                khvs_ok = kh_upload_obj_cb(ctx, g_res.composite_cb, cbd);
+                if (!khvs_ok) break;
+                ctx->DrawIndexed(khvs_sm.index_count, khvs_sm.index_start, 0);
+            }
+            if (!khvs_ok) break;
+        } else {
+            if (!kh_upload_obj_cb(ctx, g_res.composite_cb, cbd)) break;
+            UINT khvs_ls = 0, khvs_lc = 0;
+            mesh_lod_range(md, 0, khvs_ls, khvs_lc);
+            if (khvs_lc == 0) continue;
+            ctx->DrawIndexed(khvs_lc, khvs_ls, 0);
+        }
+    }
+    khvs_om.restore(ctx);
+    khvs_om.release();
+    khvs_bk.restore(ctx);
+    g_ro.in_injection = khvs_pinj;
+}
+
+// The hook's side: every tracked draw on the main depth while an inFront mesh
+// exists reads the viewport; the draw that first enters the slice's range
+// this cycle fires the prepass injection (no render target bound) or the
+// colour injection (the scene target bound), each once per cycle.
+inline void kh_infront_pre_draw(ID3D11DeviceContext* ctx) {
+    UINT khvd_n = 1;
+    D3D11_VIEWPORT khvd_vp = {};
+    ctx->RSGetViewports(&khvd_n, &khvd_vp);
+    const bool khvd_near = khvd_n >= 1 && kh_infront_vp_is_slice(khvd_vp);
+    const bool khvd_start = khvd_near && !g_vm_prev_near;
+    g_vm_prev_near = khvd_near;
+    if (!khvd_start) return;
+    ID3D11RenderTargetView* khvd_rtv = nullptr;
+    ctx->OMGetRenderTargets(1, &khvd_rtv, nullptr);
+    const bool khvd_colour = khvd_rtv != nullptr;
+    if (khvd_rtv) khvd_rtv->Release();
+    if (khvd_colour) {
+        if (g_vm_col_done) return;
+        g_vm_col_done = true;
+    } else {
+        if (g_vm_pre_done) return;
+        g_vm_pre_done = true;
+    }
+    kh_infront_inject(ctx, khvd_vp, khvd_colour);
+}
+
 inline void kh_pip_pre_draw(ID3D11DeviceContext* ctx) {
     if (g_ro.blend_translucent) {
         if (!g_pip.injected && g_pip.opaques >= KH_PIP_MIN_OPAQUES) kh_pip_inject(ctx);
@@ -35516,7 +36315,7 @@ inline bool kh_snapshot_rect(const RVExtBridge::ProjectionViewTransform& pv, UIN
     for (uint32_t khsr_i = 0; khsr_i < g_scene.objs.size(); ++khsr_i) {
         if (!g_scene.alive[khsr_i]) continue;
         const RenderObject& khsr_o = g_scene.objs[khsr_i];
-        if (!khsr_o.visible || khsr_o.fullscreen) continue;
+        if (!khsr_o.visible || khsr_o.fullscreen || khsr_o.in_front) continue;   // KH_INFRONT: no snapshot reader.
         float khsr_c[3];
         kh_obj_center_engine(khsr_o, khsr_c);
         const float khsr_hl[3] = { khsr_o.size[0] * 0.5f, khsr_o.size[2] * 0.5f, khsr_o.size[1] * 0.5f };
@@ -37595,6 +38394,19 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
             g_vmir_pending = g_vmir_frame_ok && khmr_same;
         }
     }
+    // KH_INFRONT: the view-model seam - the first hands-range draw on the
+    // volume buffer this window (the engine's hands prepass, render target
+    // bound), ahead of it.
+    if (g_svs_vol_dsv_bound && !g_ro.in_injection && !g_vm_seam_done &&
+        g_infront_wanted.load(std::memory_order_relaxed)) {
+        UINT khvq_n = 1;
+        D3D11_VIEWPORT khvq_vp = {};
+        self->RSGetViewports(&khvq_n, &khvq_vp);
+        if (khvq_n >= 1 && kh_infront_vp_is_slice(khvq_vp)) {
+            g_vm_seam_done = true;
+            kh_infront_seam_inject(self, khvq_vp);
+        }
+    }
 
     // One relaxed load on the active hot path. The clear-hook boundary
     // machinery is deliberately not gated (once per frame; keeps the render tid
@@ -37623,6 +38435,14 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
     // sample plus the freshness idle keep healthy sessions at zero cost.
     if (!g_ro.in_injection && g_ls.phase_on_atlas && ((++g_cascharv_ctr & 15) == 0)) {
         cascbind_step(self);
+    }
+
+    // KH_INFRONT: the view-model slice comes after the world's injection, so
+    // this sits ahead of the injected-cycle return.
+    if (!g_ro.in_injection && g_ro.dsv_main &&
+        g_infront_wanted.load(std::memory_order_relaxed) &&
+        !g_kh_flush_active.load(std::memory_order_relaxed)) {
+        kh_infront_pre_draw(self);
     }
 
     if (g_ro.in_injection || g_ro.injected) return;
@@ -37834,8 +38654,29 @@ inline bool kh_dlsw_mask_render(ID3D11DeviceContext* khm_ctx,
     khm_ctx->GetDevice(&khm_dev);
     const bool khm_alpha_ok = khm_dev && g_res.ps_dls_mask_a && g_res.vs_tex && g_res.layout_tex;
     bool khm_alpha_bound = false;
+    // KH_INFRONT: a view-model mesh sits in the slice's depth, and the world
+    // projection clips it short of the world near plane, so it would leave the
+    // mask and take the world-receive multiply on top of its own DLS term. It
+    // is masked in a second pass under the hands pair (column 2 of the same
+    // rebased matrix): x / y / w are the world's, z lands in [0, 1] from 0.01
+    // m, and the mask is metres (clip w) either way.
+    bool khm_front_any = false;
+    for (const KhDlswCaster& khm_c0 : g_dlsw_casters) {
+        if (khm_c0.in_front && khm_c0.visible && khm_c0.alpha >= 0.999f) khm_front_any = true;
+    }
+    for (int khm_pass = 0; khm_pass < 2; ++khm_pass) {
+    if (khm_pass == 1) {
+        if (!khm_front_any) break;
+        float khm_m22 = 0.0f, khm_m32 = 0.0f;
+        if (!kh_infront_pair(khm_m22, khm_m32)) break;
+        ConstantData khm_frm2 = khm_frm;
+        for (int khm_r = 0; khm_r < 3; ++khm_r) khm_frm2.view_proj[khm_r][2] = khm_m22 * khm_frm2.view_proj[khm_r][3];
+        khm_frm2.view_proj[3][2] = khm_m22 * khm_frm2.view_proj[3][3] + khm_m32;
+        if (!kh_upload_frame_cb(khm_ctx, g_res.composite_frame_cb, khm_frm2)) break;
+    }
     for (size_t khm_i = 0; khm_i < g_dlsw_casters.size(); ++khm_i) {
         const KhDlswCaster& khm_c = g_dlsw_casters[khm_i];
+        if (khm_c.in_front != (khm_pass == 1)) continue;   // KH_INFRONT: its own pass.
         // Only what owns pixels is masked. An invisible (casterOnly) object and
         // a whole translucent one write no depth, so the surface at their
         // pixels is the world behind them, which must receive the shadow they
@@ -37921,6 +38762,7 @@ inline bool kh_dlsw_mask_render(ID3D11DeviceContext* khm_ctx,
         }
         khm_drawn++;
     }
+    }   // KH_INFRONT: the two mask passes.
     if (khm_dev) khm_dev->Release();
 
     if (khm_nvp > 0) khm_ctx->RSSetViewports(khm_nvp, khm_ovp);
@@ -38456,6 +39298,7 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
 
             g_boundary_t = effect_time_seconds();
             kh_volume_seam_frame_reset();   // One injection per frame.
+            kh_infront_frame_reset();   // KH_INFRONT: the slice's two injections re-arm.
 
             // Post-flush redraw detector: a clear-less world redraw after the
             // flush shows up as opaques drawn past the flush's stamp (normal
@@ -38887,7 +39730,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             }
             // Sun-map demand: a visible lit receiver or any shadow-active
             // object (casterOnly too).
-            if ((khf_live.visible && khf_live.lit && !khf_live.fullscreen) || kh_shadow_active(khf_live)) khf_any_lit = true;
+            if ((khf_live.visible && khf_live.lit && !khf_live.fullscreen &&
+                 (!khf_live.in_front || g_vm_slice_live.load(std::memory_order_relaxed))) ||   // KH_INFRONT.
+                kh_shadow_active(khf_live)) khf_any_lit = true;
+            if (khf_live.in_front) continue;   // KH_INFRONT: the view-model slice draws it (kh_infront_inject); it casts above.
 
             if (khf_live.visible) {
                 RenderObject o = khf_live;
@@ -40738,6 +41584,7 @@ inline void flush_frame() {
         bool khum_wanted = false;
         bool khum_lit = false;   // Any shadow-active mesh (shadow-live demand; casterOnly counts).
         bool khum_mesh = false;   // Any visible mesh at all (volume-copy demand,).
+        bool khum_front = false;   // KH_INFRONT: any visible view-model mesh (the slice hook's demand).
         g_cloth_proxy_want.clear();   // KH_CLOTH_PROXY.
 
         for (const auto& khum_kv : g_draw_list) {
@@ -40745,7 +41592,9 @@ inline void flush_frame() {
             kh_material_note_ref(khum_kv.second.materials);   // KH_MAT_POOL.
             // Shadow-live demand: a visible lit object or any shadow-active
             // object (casterOnly too).
-            if ((khum_kv.second.visible && khum_kv.second.lit) || kh_shadow_active(khum_kv.second)) khum_lit = true;
+            if ((khum_kv.second.visible && khum_kv.second.lit &&
+                 (!khum_kv.second.in_front || g_vm_slice_live.load(std::memory_order_relaxed))) ||   // KH_INFRONT.
+                kh_shadow_active(khum_kv.second)) khum_lit = true;
             if (kh_cloth_obj_sim(khum_kv.second) || kh_chain_obj_sim(khum_kv.second)) {   // KH_CHAIN too.
                 khff_cloth = true;   // Visible or not, as the sync counts it.
                 // KH_CLOTH_PROXY: what the proxy step needs, taken under this lock.
@@ -40757,7 +41606,8 @@ inline void flush_frame() {
             if (khum_kv.second.fullscreen) {
                 if (khum_kv.second.affect_ui) khum_wanted = true;
             } else {
-                khum_mesh = true;
+                khum_mesh = true;   // Every visible mesh reads the volume copy and the snapshots.
+                if (khum_kv.second.in_front) khum_front = true;   // KH_INFRONT: the slice hook's demand too.
             }
             // No early-out: the two reference notes above must reach every
             // object (an unnoted mesh or material set is released by the GCs
@@ -40766,6 +41616,7 @@ inline void flush_frame() {
 
         g_ui_mask_wanted.store(khum_wanted, std::memory_order_relaxed);
         g_svs_mesh_wanted.store(khum_mesh, std::memory_order_relaxed);
+        g_infront_wanted.store(khum_front, std::memory_order_relaxed);   // KH_INFRONT.
         // FSAA 1x: the lit demand stands the whole shadow-live ecosystem down
         // through the existing master-demand gates.
         if (khum_lit && kh_fsaa_world_standdown()) khum_lit = false;
@@ -41664,6 +42515,10 @@ inline void reset_session_state() {
     kh_session_scratch_reset();
     kh_ui_mask_reset();   // Learned backbuffers, phase machine, demand flag.
     g_kh_track_wanted.store(false, std::memory_order_relaxed);   // Recomputes at the next flush.
+    g_infront_wanted.store(false, std::memory_order_relaxed);   // KH_INFRONT: likewise.
+    kh_infront_frame_reset();
+    g_vm_keep_ms = 0;
+    g_vm_meshes.clear();
     g_dbg_mode.store(0, std::memory_order_relaxed);
     g_ao_strength_bits.store(0x3F800000u, std::memory_order_relaxed);   // KH_AO: on, 1.0.
     g_ao_dist_bits.store(0x3F800000u, std::memory_order_relaxed);       // 1 m.

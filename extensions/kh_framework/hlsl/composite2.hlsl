@@ -309,6 +309,11 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
                  (i.icol.a < 0.999f && bm == 0))) {
                 khStenU = KhMirUnit(i.pos.xy, mirMeta.y, mirMeta.z);
             }
+            // KH_INFRONT (mirMeta.x = 2): a view-model mesh reads the mirror
+            // over its whole surface - its count taken against itself with the
+            // volumes standing on the mirror's 0.05 near, so the world near
+            // plane's collapse never reaches it. TWIN: PSMain and PSComposite.
+            if (mirMeta.x >= 1.5f) khStenU = KhMirUnit(i.pos.xy, mirMeta.y, mirMeta.z);
             // After the near-collapse mirror lerp: the fade thins the final
             // verdict.
             float khStRf = KhSunRangeFade(i.wpos);

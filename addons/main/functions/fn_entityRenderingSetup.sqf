@@ -9,7 +9,7 @@ if (_entity isKindOf "Man") then {
         "SlotItemChanged",
         [],
         {
-            params ["_entity", "_name", "_slot", "_assigned", "_weapon"];
+            params ["_entity", "_name", "_slot", "_assigned"];
             private _renderHandlers = _entity getVariable ["KH_var_renderHandlers", createHashMap];
             private _key = str _slot;
 
@@ -60,6 +60,48 @@ if (_entity isKindOf "Man") then {
 
                 _renderHandlers set [_key, _currentHandlers];
             };                    
+        }
+    ] call KH_fnc_addEventHandler;
+
+    [
+        "CBA",
+        "KH_eve_weaponSlotChanged",
+        [_entity],
+        {
+            params ["_entity", "_slot", "_newWeapon"];
+            _args params ["_thisEntity"];
+            if (_entity isNotEqualTo _thisEntity) exitWith {};
+            private _renderHandlers = _entity getVariable ["KH_var_renderHandlers", createHashMap];
+
+            if !(_renderHandlers isNil _slot) then {
+                {
+                    removeRenderHandler _x;
+                } forEach (_renderHandlers get _slot);
+
+                _renderHandlers set [_slot, []];
+            };
+
+            private _currentHandlers = [];
+
+            {
+                private _renderHandler = addRender3D [[_entity, (getNumber (_x >> "bindSkeleton")) isEqualTo 1], (getNumber (_x >> "followRotation")) isEqualTo 1, getText (_x >> "model")];
+
+                private _properties = ((configProperties [
+                    _x, 
+                    "!((toLowerANSI (configName _x)) in ['model', 'bindskeleton', 'followrotation']);",
+                    true
+                ]) apply {
+                    [_renderHandler, configName _x, ["", _x, nil] call KH_fnc_getConfigValue];
+                });
+
+                if (_properties isNotEqualTo []) then {
+                    updateRender3D _properties;
+                };
+
+                _currentHandlers pushBack _renderHandler;
+            } forEach ("true" configClasses (configFile >> "CfgWeapons" >> _newWeapon >> "KH_Rendering3D"););
+
+            _renderHandlers set [_slot, _currentHandlers];                 
         }
     ] call KH_fnc_addEventHandler;
 };

@@ -46,9 +46,13 @@
 // plane jumped at every edge and each facet took its own tone; a smooth
 // normal makes the term continuous across them.
 //
-// Every pass draws over the meshes' rectangle padded by the blurs' reach
-// (KH_SSAO_RECT_PAD), and no pass reads a term or half-grid depth texel
-// outside it: nothing wrote there this frame.
+// Every pass draws over the meshes' rectangle padded by the passes' reach
+// (KH_SSAO_RECT_PAD). The gather and blur taps read no term or half-grid
+// depth texel outside it: nothing wrote there this frame. The wide normal's
+// four depth taps (KhSaNormal at a stride of up to 24 half pixels) take no
+// such test; they stay inside because a marked pixel lies inside the
+// UNPADDED rectangle and the pad exceeds that stride - the C++ side's
+// contract at KH_SSAO_RECT_PAD.
 //
 // The gather is the SSGI branch's discipline (effect2.hlsl, effect 22), which
 // is where every flicker of this kind was already paid for: taps on a

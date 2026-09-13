@@ -1040,12 +1040,46 @@ inline bool kh_physics_bvh_refit(KhPhysicsBvh& khrf_o, const KhPhysicsBvhTopo& k
 // reason as the build.
 // KH_SKEL: khcq_vd / khcq_s, when given, place each triangle's corners at
 // vp + s * vd (a deforming collider part-way through its frame).
+// KH_CLOTH_WARM: khcq_warm, when given, is the triangle this query hit last
+// time (KH_CLOTH_WARM_NONE = none). It is tested FIRST and its distance seeds
+// the bound, so the walk below skips every node further than it - cloth
+// resting on a body hits the same triangles for hundreds of substeps, and the
+// walk then visits almost nothing. The answer is the same nearest point: a
+// seed is only a candidate, and anything strictly nearer still replaces it.
+// (Two triangles at exactly the same distance: the seed wins where the walk's
+// order used to decide - the one place the two can differ.) On a hit the
+// slot takes the triangle found; on a miss it keeps what it held.
+static constexpr uint32_t KH_CLOTH_WARM_NONE = 0xFFFFFFFFu;
 inline bool kh_physics_bvh_nearest(const KhPhysicsBvh& khcq_b, const float* khcq_p, float khcq_r,
                                  float* khcq_out, float& khcq_d, uint32_t& khcq_tri, int& khcq_reg,
-                                 const float* khcq_vd = nullptr, float khcq_s = 0.0f) {
+                                 const float* khcq_vd = nullptr, float khcq_s = 0.0f, uint32_t* khcq_warm = nullptr) {
     if (khcq_b.empty()) return false;
     float khcq_best2 = khcq_r * khcq_r;
     bool  khcq_hit = false;
+    if (khcq_warm && *khcq_warm != KH_CLOTH_WARM_NONE &&
+        (static_cast<size_t>(*khcq_warm) + 1u) * 9u <= khcq_b.vp.size()) {
+        const uint32_t khcq_wt = *khcq_warm;
+        const float* v = &khcq_b.vp[static_cast<size_t>(khcq_wt) * 9u];
+        float khcq_vv[9];
+        if (khcq_vd) {
+            const float* khcq_dv = khcq_vd + static_cast<size_t>(khcq_wt) * 9u;
+            for (int j = 0; j < 9; ++j) khcq_vv[j] = v[j] + khcq_s * khcq_dv[j];
+            v = khcq_vv;
+        }
+        float khcq_c[3];
+        int khcq_r0 = 0;
+        kh_cloth_closest_tri(khcq_p, v, v + 3, v + 6, khcq_c, khcq_r0);
+        float khcq_dv[3];
+        kh_cloth_v3_sub(khcq_c, khcq_p, khcq_dv);
+        const float khcq_d2 = kh_cloth_v3_dot(khcq_dv, khcq_dv);
+        if (khcq_d2 < khcq_best2) {
+            khcq_best2 = khcq_d2;
+            khcq_out[0] = khcq_c[0]; khcq_out[1] = khcq_c[1]; khcq_out[2] = khcq_c[2];
+            khcq_tri = khcq_wt;
+            khcq_reg = khcq_r0;
+            khcq_hit = true;
+        }
+    }
     uint32_t khcq_st[64];
     int khcq_sp = 0;
     khcq_st[khcq_sp++] = 0u;
@@ -1092,6 +1126,7 @@ inline bool kh_physics_bvh_nearest(const KhPhysicsBvh& khcq_b, const float* khcq
         }
     }
     if (khcq_hit) khcq_d = sqrtf(khcq_best2);
+    if (khcq_hit && khcq_warm) *khcq_warm = khcq_tri;
     return khcq_hit;
 }
 
@@ -1485,7 +1520,8 @@ inline void kh_cloth_w2l(const float* khcw_world, const float* khcw_centre, cons
 // radius covers the distance travelled as well as the thickness, or a
 // particle moving faster than its thickness per substep tunnels through.
 inline bool kh_physics_collide_one(const KhPhysicsColliderView& khco_c, float khco_thick,
-                                 const float* khco_prev, float* khco_p, float* khco_n_out, float* khco_sv_out) {
+                                 const float* khco_prev, float* khco_p, float* khco_n_out, float* khco_sv_out,
+                                 uint32_t* khco_warm = nullptr) {   // KH_CLOTH_WARM: the particle's last-hit slot for this collider.
     if (!khco_c.bvh || khco_c.bvh->empty()) return false;
     float khco_mv[3];
     kh_cloth_v3_sub(khco_p, khco_prev, khco_mv);
@@ -1524,7 +1560,7 @@ inline bool kh_physics_collide_one(const KhPhysicsColliderView& khco_c, float kh
     const float* khco_vd = khco_def ? khco_c.bvh->vd.data() : nullptr;
     const float khco_s1 = khco_def ? khco_c.def1 : 0.0f;
     float khco_cl[3]; float khco_d = 0.0f; uint32_t khco_t = 0u; int khco_reg = 0;
-    if (!kh_physics_bvh_nearest(*khco_c.bvh, khco_l, khco_r, khco_cl, khco_d, khco_t, khco_reg, khco_vd, khco_s1)) {
+    if (!kh_physics_bvh_nearest(*khco_c.bvh, khco_l, khco_r, khco_cl, khco_d, khco_t, khco_reg, khco_vd, khco_s1, khco_warm)) {
         // Nothing within reach of the surface. That is usually 'far outside',
         // but it is also what a DEEPLY EMBEDDED particle looks like - one
         // spawned inside, or carried in by a teleport - and leaving that one
@@ -1546,7 +1582,7 @@ inline bool kh_physics_collide_one(const KhPhysicsColliderView& khco_c, float kh
             khco_diag += e * e;
         }
         khco_diag = sqrtf(khco_diag) + sqrtf(khco_out2);
-        if (!kh_physics_bvh_nearest(*khco_c.bvh, khco_l, khco_diag, khco_cl, khco_d, khco_t, khco_reg, khco_vd, khco_s1)) return false;
+        if (!kh_physics_bvh_nearest(*khco_c.bvh, khco_l, khco_diag, khco_cl, khco_d, khco_t, khco_reg, khco_vd, khco_s1, khco_warm)) return false;
     }
 
     // Back to world, and do the whole decision there: a BVH-space distance is
@@ -1818,8 +1854,18 @@ struct KhClothState {
     std::vector<float>    self_box;     // Per face, then per edge: its box over the substep (6 floats).
     std::vector<uint32_t> self_head;    // Hash bucket starts, one past the table.
     std::vector<uint32_t> self_ent;     // Face indices, bucket by bucket.
-    std::vector<uint32_t> self_seen;    // Per element, the query that last met it, plus one.
     std::vector<uint8_t>  self_tang;    // Per particle: 1 = at an edge-through-face intersection at the substep's start.
+    // KH_CLOTH_FORK: the gather's queries run in chunks, across the pool when
+    // the cloth is large (kh_cloth_fork_run). Per participant (the job's own
+    // worker and each helper): its own 'seen' stamps (per element, the query
+    // that last met it, plus one) and tangle marks; per chunk: the pairs it
+    // listed, concatenated in chunk order afterwards.
+    // Worker-private scratch like the rest; a helper touches only its own
+    // participant's and its chunk's entries.
+    std::vector<std::vector<uint32_t>>     self_seen_par;
+    std::vector<std::vector<uint8_t>>      self_tang_par;
+    std::vector<std::vector<KhClothSelfC>> self_c_par;
+    std::vector<std::vector<KhClothSelfE>> self_e_par;
     // The jolt stand-down (kh_cloth_step): seconds left with self-collision
     // off, and the velocity of each corner of the carrier's box last frame.
     float                 self_hold;
@@ -1838,6 +1884,12 @@ struct KhClothState {
     float                 reach;
     // Worker-private: the per-substep collider views (kh_cloth_step).
     std::vector<KhPhysicsColliderView> col_sub;
+    // KH_CLOTH_WARM: per collider (in col_sub's order) per particle, the
+    // triangle its last query hit (KH_CLOTH_WARM_NONE = none), and per
+    // collider the slot / mesh the column was filled for - a column whose
+    // collider changed identity starts over. Worker-private.
+    std::vector<uint32_t> col_warm;
+    std::vector<uint32_t> col_warm_key;
     // KH_SKEL: a skeletal binding's guide for the rigid-follow targets
     // (kh_cloth_target), 3 floats per particle, mesh-local like 'rest': where
     // the skeleton puts each particle at the start of the frame (a) and at its
@@ -1987,6 +2039,133 @@ inline bool kh_cloth_seg_tri(const float* p, const float* q, const float* a, con
 // nearest edge or corner, which needs no side. An edge pair keeps the
 // direction between its nearest points at the start in the same role.
 //
+// KH_CLOTH_FORK - a fork-join inside one job, on the cloth pool's own
+// workers. A job that has a loop of independent chunks posts it here; every
+// pool worker that is idle (waiting on g_cloth_cv with no job to take) helps
+// by taking chunks until none is left, and the job's own worker takes chunks
+// too, then waits for the last helper's to finish. A worker with a job of its
+// own never helps (cloth jobs come first in kh_cloth_worker), so a heavy
+// cloth borrows only the threads that would otherwise sleep, and a machine
+// running one big cloth uses the whole pool on it.
+//
+// What a chunk may touch is the initiator's instance, read-only, plus scratch
+// indexed by the CHUNK (its own output) or by the PARTICIPANT id it was handed
+// (its own stamps) - never anything another chunk writes. The fork state is
+// one global record, and every handout is one atomic word carrying the
+// generation, the chunk count AND the chunk (gen << 40 | n << 20 | chunk),
+// so what a helper compares its chunk against came from the same word: a
+// helper that wakes late and takes a word from a fork already finished sees
+// a foreign generation (or the zero the fork's end leaves) and takes
+// nothing, and a valid handout of generation g proves fork g still in
+// flight - its count cannot be complete without this chunk - so the fn,
+// ctx and cap it then reads are g's (the next post needs g's join first).
+// No chunk runs twice, and nothing of a finished fork is read after its
+// initiator returned. Participant ids past the scratch capacity take no
+// chunk (the initiator runs what is left); the initiator is always
+// participant 0.
+// Chunks never block, take a lock or wait on anything, which is what keeps
+// helping deadlock-free. The wake and the pool size are the runtime's
+// (kh_cloth_fork_wake, kh_cloth_fork_workers); the core only posts.
+//
+// ONE FORK AT A TIME. The record is one, so two jobs posting at once would
+// write each other's count and counter, and one of them would wait for a
+// total that was reset under it - for ever, with its instance's busy flag
+// never cleared. A job takes g_cloth_fork_mu for the whole of its fork
+// (kh_cloth_fork_run), and a job that finds it taken runs its chunks
+// serially on its own thread instead of waiting: no worker idles on
+// another's fork, and the result is the same either way (a chunk's output
+// does not depend on who ran it). Helpers never take the mutex. The only
+// lock taken inside it is g_cloth_mu, by the wake, momentarily; nothing
+// takes g_cloth_fork_mu while holding any lock.
+struct KhClothFork {
+    std::atomic<uint64_t> next{ 0 };        // gen << 40 | n << 20 | the next chunk to hand out; 0 between forks.
+    std::atomic<uint32_t> gen_posted{ 0 };  // The generation posted; 0 = none.
+    std::atomic<uint32_t> done{ 0 };        // Chunks finished (a chunk that threw counts: it is over).
+    std::atomic<uint32_t> failed{ 0 };      // Chunks that threw; the initiator rethrows for them after the join.
+    std::atomic<uint32_t> pids{ 1 };        // The next participant id (0 is the initiator's).
+    uint32_t n = 0;                         // Chunks (also in every handout word).
+    uint32_t cap = 0;                       // Participant ids with scratch (the pool's size: the same for every fork).
+    uint32_t gen = 0;
+    void (*fn)(void*, uint32_t, uint32_t) = nullptr;   // (ctx, chunk, participant).
+    void* ctx = nullptr;
+};
+static KhClothFork g_cloth_fork;
+static std::mutex g_cloth_fork_mu;   // Held by the one job whose fork is posted.
+static constexpr uint32_t KH_CLOTH_FORK_MAXN = (1u << 20) - 1u;   // Chunks a handout word can name.
+inline uint32_t kh_cloth_fork_gen_of(uint64_t khfg_v) { return static_cast<uint32_t>(khfg_v >> 40); }
+inline uint32_t kh_cloth_fork_n_of(uint64_t khfg_v)   { return static_cast<uint32_t>(khfg_v >> 20) & KH_CLOTH_FORK_MAXN; }
+inline uint32_t kh_cloth_fork_i_of(uint64_t khfg_v)   { return static_cast<uint32_t>(khfg_v) & KH_CLOTH_FORK_MAXN; }
+inline uint32_t kh_cloth_fork_workers();   // The pool's thread count (defined with the pool).
+inline void kh_cloth_fork_wake();          // Wakes the idle workers (defined with the pool).
+// An idle worker's helping: chunks until none is left. Returns the
+// generation it served (0 = none was posted): a worker serves a generation
+// ONCE and then waits for the next one, never re-enters a fork it has left
+// (a re-entry would take a fresh participant id for no chunk, and a worker
+// looping on a still-posted fork would spin for the fork's whole length).
+inline uint32_t kh_cloth_fork_help(uint32_t khfh_served) {
+    const uint32_t khfh_g = g_cloth_fork.gen_posted.load(std::memory_order_acquire);
+    if (khfh_g == 0u || khfh_g == khfh_served) return khfh_served;
+    const uint32_t khfh_pid = g_cloth_fork.pids.fetch_add(1u, std::memory_order_acq_rel);
+    if (khfh_pid >= g_cloth_fork.cap) return khfh_g;   // No scratch for one more: the initiator finishes.
+    for (;;) {
+        const uint64_t khfh_v = g_cloth_fork.next.fetch_add(1u, std::memory_order_acq_rel);
+        if (kh_cloth_fork_gen_of(khfh_v) != khfh_g) break;   // Another fork's word, or none: nothing of this one is left.
+        const uint32_t khfh_i = kh_cloth_fork_i_of(khfh_v);
+        if (khfh_i >= kh_cloth_fork_n_of(khfh_v)) break;   // The count of THIS word, never the record's.
+        // A chunk that throws (an allocation) must still count as finished, or
+        // the initiator waits for ever; it rethrows on the job's own thread,
+        // where kh_cloth_worker's catch clears the instance's busy flag.
+        try { g_cloth_fork.fn(g_cloth_fork.ctx, khfh_i, khfh_pid); }
+        catch (...) { g_cloth_fork.failed.fetch_add(1u, std::memory_order_acq_rel); }
+        g_cloth_fork.done.fetch_add(1u, std::memory_order_acq_rel);
+    }
+    return khfh_g;
+}
+// The initiator's side: chunks 0..n-1 of fn, in parallel when the pool can
+// help, serially (in order, as participant 0) when it cannot. Returns once
+// every chunk has finished.
+inline void kh_cloth_fork_run(uint32_t khfr_n, uint32_t khfr_cap, void (*khfr_fn)(void*, uint32_t, uint32_t), void* khfr_ctx) {
+    if (khfr_n <= 1u || khfr_n > KH_CLOTH_FORK_MAXN || khfr_cap < 2u || !g_cloth_fork_mu.try_lock()) {   // Small, alone, or another job's fork is up: serial.
+        for (uint32_t khfr_i = 0; khfr_i < khfr_n; ++khfr_i) khfr_fn(khfr_ctx, khfr_i, 0u);
+        return;
+    }
+    std::lock_guard<std::mutex> khfr_hold(g_cloth_fork_mu, std::adopt_lock);   // Released when the fork is done.
+    KhClothFork& khfr_f = g_cloth_fork;
+    khfr_f.fn = khfr_fn;
+    khfr_f.ctx = khfr_ctx;
+    khfr_f.n = khfr_n;
+    khfr_f.cap = khfr_cap;
+    khfr_f.done.store(0u, std::memory_order_relaxed);
+    khfr_f.failed.store(0u, std::memory_order_relaxed);
+    khfr_f.pids.store(1u, std::memory_order_relaxed);
+    khfr_f.gen = (khfr_f.gen + 1u) & 0xFFFFFFu;   // 24 bits, never 0 (0 is 'no fork').
+    if (khfr_f.gen == 0u) khfr_f.gen = 1u;
+    const uint32_t khfr_g = khfr_f.gen;
+    khfr_f.next.store((static_cast<uint64_t>(khfr_g) << 40) | (static_cast<uint64_t>(khfr_n) << 20), std::memory_order_release);
+    khfr_f.gen_posted.store(khfr_g, std::memory_order_release);
+    kh_cloth_fork_wake();
+    for (;;) {
+        const uint64_t khfr_v = khfr_f.next.fetch_add(1u, std::memory_order_acq_rel);
+        const uint32_t khfr_i = kh_cloth_fork_i_of(khfr_v);
+        if (kh_cloth_fork_gen_of(khfr_v) != khfr_g || khfr_i >= khfr_n) break;
+        try { khfr_fn(khfr_ctx, khfr_i, 0u); }
+        catch (...) { khfr_f.failed.fetch_add(1u, std::memory_order_acq_rel); }
+        khfr_f.done.fetch_add(1u, std::memory_order_acq_rel);
+    }
+    while (khfr_f.done.load(std::memory_order_acquire) < khfr_n) std::this_thread::yield();
+    khfr_f.next.store(0u, std::memory_order_release);   // Every later handout reads 'no fork'.
+    khfr_f.gen_posted.store(0u, std::memory_order_release);
+    if (khfr_f.failed.load(std::memory_order_acquire) != 0u) throw std::bad_alloc();   // The one thing a chunk can throw (a list growing); <new> is in every unit.
+}
+// A chunk lambda through the fork's plain function pointer.
+template <class KhFcF> inline void kh_cloth_fork_call(void* khfc_c, uint32_t khfc_i, uint32_t khfc_p) {
+    (*static_cast<KhFcF*>(khfc_c))(khfc_i, khfc_p);
+}
+// Elements (faces + edges) from which the gather forks; below it the chunking
+// costs more than it saves. Queries per chunk.
+static constexpr size_t   KH_CLOTH_FORK_MIN   = 4096u;
+static constexpr uint32_t KH_CLOTH_FORK_CHUNK = 256u;
+
 // A pair is taken if its two ends started within KH_CLOTH_SELF_REACH times
 // the separation plus their predicted relative motion. The reach exceeds one
 // separation because the constraint solve carries particles further than the
@@ -2190,7 +2369,32 @@ inline void kh_cloth_self_gather(KhClothState& khsg_s, float khsg_thick) {
     // An element in several cells, or two cells on one bucket, is met more
     // than once by a query; the stamp (the querying particle, n + the querying
     // edge, or n + edges + the tangle test's edge, plus one) takes it once.
-    khsg_s.self_seen.assign(khsg_nel, 0u);
+    // KH_CLOTH_FORK: the three query loops below run in chunks of
+    // KH_CLOTH_FORK_CHUNK queries, across the pool when the element count
+    // earns it, and each participant stamps its own copy of the table (the
+    // stamps are unique per query, so the copies never disagree). A chunk's
+    // pairs go to its own list and the lists are joined in chunk order, so
+    // the pair lists - and the sweep order the solve takes them in - are
+    // exactly the serial loop's. self_tang is the participants' marks joined.
+    const uint32_t khsg_cap0 = kh_cloth_fork_workers();
+    const bool     khsg_par = khsg_cap0 >= 2u && khsg_nel >= KH_CLOTH_FORK_MIN;
+    const uint32_t khsg_cap = khsg_par ? khsg_cap0 : 1u;
+    if (khsg_s.self_seen_par.size() < khsg_cap) khsg_s.self_seen_par.resize(khsg_cap);
+    if (khsg_s.self_tang_par.size() < khsg_cap) khsg_s.self_tang_par.resize(khsg_cap);
+    for (uint32_t khsg_pi = 0; khsg_pi < khsg_cap; ++khsg_pi) {
+        khsg_s.self_seen_par[khsg_pi].assign(khsg_nel, 0u);
+        khsg_s.self_tang_par[khsg_pi].assign(khsg_n, 0u);
+    }
+    auto khsg_chunks = [khsg_par](size_t khsg_nq) -> uint32_t {
+        if (!khsg_par || khsg_nq == 0u) return 1u;
+        return static_cast<uint32_t>((khsg_nq + KH_CLOTH_FORK_CHUNK - 1u) / KH_CLOTH_FORK_CHUNK);
+    };
+    auto khsg_range = [khsg_par](size_t khsg_nq, uint32_t khsg_c, uint32_t& khsg_lo, uint32_t& khsg_hi) {
+        if (!khsg_par) { khsg_lo = 0u; khsg_hi = static_cast<uint32_t>(khsg_nq); return; }
+        khsg_lo = khsg_c * KH_CLOTH_FORK_CHUNK;
+        const size_t khsg_e = static_cast<size_t>(khsg_lo) + KH_CLOTH_FORK_CHUNK;
+        khsg_hi = static_cast<uint32_t>(khsg_e < khsg_nq ? khsg_e : khsg_nq);
+    };
     auto khsg_overlap = [](const float* x, const float* y) {
         return !(x[0] > y[3] || x[3] < y[0] || x[1] > y[4] || x[4] < y[1] || x[2] > y[5] || x[5] < y[2]);
     };
@@ -2198,7 +2402,7 @@ inline void kh_cloth_self_gather(KhClothState& khsg_s, float khsg_thick) {
     // khsg_qb, once, handed to khsg_fn. The range is tested first: a query
     // for faces walks past the edges in its cells, and an edge past the
     // edges it has already been paired with, for one integer compare each.
-    auto khsg_query = [&](const float* khsg_qb, uint32_t khsg_stamp, uint32_t khsg_el0, uint32_t khsg_el1, auto&& khsg_fn) {
+    auto khsg_query = [&](uint32_t* khsg_seen, const float* khsg_qb, uint32_t khsg_stamp, uint32_t khsg_el0, uint32_t khsg_el1, auto&& khsg_fn) {
         int lo[3], hi[3];
         khsg_cells(khsg_qb, lo, hi);
         for (int x = lo[0]; x <= hi[0]; ++x) for (int y = lo[1]; y <= hi[1]; ++y) for (int z = lo[2]; z <= hi[2]; ++z) {
@@ -2206,38 +2410,61 @@ inline void kh_cloth_self_gather(KhClothState& khsg_s, float khsg_thick) {
             for (uint32_t e = khsg_s.self_head[khsg_bk]; e < khsg_s.self_head[khsg_bk + 1u]; ++e) {
                 const uint32_t el = khsg_s.self_ent[e];
                 if (el < khsg_el0 || el >= khsg_el1) continue;
-                if (khsg_s.self_seen[el] == khsg_stamp) continue;
-                khsg_s.self_seen[el] = khsg_stamp;
+                if (khsg_seen[el] == khsg_stamp) continue;
+                khsg_seen[el] = khsg_stamp;
                 if (khsg_overlap(khsg_qb, &khsg_s.self_box[el * 6u])) khsg_fn(el);
             }
         }
     };
 
     // Tangles (above): the particles of every edge through a face at the start.
-    khsg_s.self_tang.assign(khsg_n, 0u);
-    for (uint32_t e = 0; e < khsg_ne; ++e) {
-        const float* const khsg_eb = &khsg_s.self_box[(khsg_nt + e) * 6u];
-        if (khsg_eb[0] > khsg_eb[3]) continue;
-        const KhClothSelfEdge& E = khsg_s.self_edges[e];
-        khsg_query(khsg_eb, static_cast<uint32_t>(khsg_n + khsg_ne) + e + 1u, 0u, static_cast<uint32_t>(khsg_nt), [&](uint32_t t) {
-            const KhClothTri& T = khsg_s.tri[t];
-            if (E.a == T.a || E.a == T.b || E.a == T.c || E.b == T.a || E.b == T.b || E.b == T.c) return;
-            if (!kh_cloth_seg_tri(khsg_s.part[E.a].pp, khsg_s.part[E.b].pp,
-                                  khsg_s.part[T.a].pp, khsg_s.part[T.b].pp, khsg_s.part[T.c].pp)) return;
-            khsg_s.self_tang[E.a] = khsg_s.self_tang[E.b] = 1u;
-            khsg_s.self_tang[T.a] = khsg_s.self_tang[T.b] = khsg_s.self_tang[T.c] = 1u;
-        });
+    {
+        auto khsg_tangle = [&](uint32_t khsg_c, uint32_t khsg_pid) {
+            uint32_t* const khsg_seen = khsg_s.self_seen_par[khsg_pid].data();
+            uint8_t* const khsg_tang = khsg_s.self_tang_par[khsg_pid].data();
+            uint32_t khsg_lo, khsg_hi;
+            khsg_range(khsg_ne, khsg_c, khsg_lo, khsg_hi);
+            for (uint32_t e = khsg_lo; e < khsg_hi; ++e) {
+                const float* const khsg_eb = &khsg_s.self_box[(khsg_nt + e) * 6u];
+                if (khsg_eb[0] > khsg_eb[3]) continue;
+                const KhClothSelfEdge& E = khsg_s.self_edges[e];
+                khsg_query(khsg_seen, khsg_eb, static_cast<uint32_t>(khsg_n + khsg_ne) + e + 1u, 0u, static_cast<uint32_t>(khsg_nt), [&](uint32_t t) {
+                    const KhClothTri& T = khsg_s.tri[t];
+                    if (E.a == T.a || E.a == T.b || E.a == T.c || E.b == T.a || E.b == T.b || E.b == T.c) return;
+                    if (!kh_cloth_seg_tri(khsg_s.part[E.a].pp, khsg_s.part[E.b].pp,
+                                          khsg_s.part[T.a].pp, khsg_s.part[T.b].pp, khsg_s.part[T.c].pp)) return;
+                    khsg_tang[E.a] = khsg_tang[E.b] = 1u;
+                    khsg_tang[T.a] = khsg_tang[T.b] = khsg_tang[T.c] = 1u;
+                });
+            }
+        };
+        kh_cloth_fork_run(khsg_chunks(khsg_ne), khsg_cap, &kh_cloth_fork_call<decltype(khsg_tangle)>, &khsg_tangle);
+        // The marks, joined: participant 0's array is the one every test reads.
+        khsg_s.self_tang.swap(khsg_s.self_tang_par[0]);
+        for (uint32_t khsg_pi = 1; khsg_pi < khsg_cap; ++khsg_pi) {
+            const std::vector<uint8_t>& khsg_t = khsg_s.self_tang_par[khsg_pi];
+            for (size_t i = 0; i < khsg_n; ++i) khsg_s.self_tang[i] |= khsg_t[i];
+        }
     }
     auto khsg_tg = [&khsg_s](uint32_t x) { return khsg_s.self_tang[x] != 0u; };
 
     // Particle against face.
-    for (uint32_t q = 0; q < khsg_n; ++q) {
+    {
+    const uint32_t khsg_nc = khsg_chunks(khsg_n);
+    if (khsg_s.self_c_par.size() < khsg_nc) khsg_s.self_c_par.resize(khsg_nc);
+    auto khsg_pf = [&](uint32_t khsg_c, uint32_t khsg_pid) {
+    uint32_t* const khsg_seen = khsg_s.self_seen_par[khsg_pid].data();
+    std::vector<KhClothSelfC>& khsg_out = khsg_s.self_c_par[khsg_c];
+    khsg_out.clear();
+    uint32_t khsg_lo, khsg_hi;
+    khsg_range(khsg_n, khsg_c, khsg_lo, khsg_hi);
+    for (uint32_t q = khsg_lo; q < khsg_hi; ++q) {
         const KhClothPart& Q = khsg_s.part[q];
         float khsg_qb[6];
         khsg_boxof(&q, 1, 0.0f, khsg_qb);
         if (khsg_toofast(khsg_qb)) continue;
         for (int k = 0; k < 3; ++k) { khsg_qb[k] -= KH_CLOTH_SELF_REACH * khsg_thick; khsg_qb[3 + k] += KH_CLOTH_SELF_REACH * khsg_thick; }
-        khsg_query(khsg_qb, q + 1u, 0u, static_cast<uint32_t>(khsg_nt), [&](uint32_t t) {
+        khsg_query(khsg_seen, khsg_qb, q + 1u, 0u, static_cast<uint32_t>(khsg_nt), [&](uint32_t t) {
             const KhClothTri& khsg_t = khsg_s.tri[t];
             if (q == khsg_t.a || q == khsg_t.b || q == khsg_t.c) return;
             const KhClothPart& A = khsg_s.part[khsg_t.a];
@@ -2280,18 +2507,34 @@ inline void kh_cloth_self_gather(KhClothState& khsg_s, float khsg_thick) {
             khsg_pc.sep = khsg_sp;
             khsg_pc.dep = 0.0f;
             khsg_pc.s0 = fabsf(khsg_s0);
-            khsg_s.self_c.push_back(khsg_pc);
+            khsg_out.push_back(khsg_pc);
         });
+    }
+    };
+    kh_cloth_fork_run(khsg_nc, khsg_cap, &kh_cloth_fork_call<decltype(khsg_pf)>, &khsg_pf);
+    if (khsg_nc == 1u) khsg_s.self_c.swap(khsg_s.self_c_par[0]);
+    else for (uint32_t khsg_c = 0; khsg_c < khsg_nc; ++khsg_c) {
+        khsg_s.self_c.insert(khsg_s.self_c.end(), khsg_s.self_c_par[khsg_c].begin(), khsg_s.self_c_par[khsg_c].end());
+    }
     }
 
     // Edge against edge, each pair once (the second index the larger).
-    for (uint32_t e0 = 0; e0 < khsg_ne; ++e0) {
+    {
+    const uint32_t khsg_nc = khsg_chunks(khsg_ne);
+    if (khsg_s.self_e_par.size() < khsg_nc) khsg_s.self_e_par.resize(khsg_nc);
+    auto khsg_ee = [&](uint32_t khsg_c, uint32_t khsg_pid) {
+    uint32_t* const khsg_seen = khsg_s.self_seen_par[khsg_pid].data();
+    std::vector<KhClothSelfE>& khsg_out = khsg_s.self_e_par[khsg_c];
+    khsg_out.clear();
+    uint32_t khsg_lo, khsg_hi;
+    khsg_range(khsg_ne, khsg_c, khsg_lo, khsg_hi);
+    for (uint32_t e0 = khsg_lo; e0 < khsg_hi; ++e0) {
         const KhClothSelfEdge& E0 = khsg_s.self_edges[e0];
         float* const khsg_qb = &khsg_s.self_box[(khsg_nt + e0) * 6u];   // Its own box; empty when too fast.
         if (khsg_qb[0] > khsg_qb[3]) continue;
         float khsg_qg[6];
         for (int k = 0; k < 3; ++k) { khsg_qg[k] = khsg_qb[k] - KH_CLOTH_SELF_REACH * khsg_thick; khsg_qg[3 + k] = khsg_qb[3 + k] + KH_CLOTH_SELF_REACH * khsg_thick; }
-        khsg_query(khsg_qg, static_cast<uint32_t>(khsg_n) + e0 + 1u, static_cast<uint32_t>(khsg_nt) + e0 + 1u,
+        khsg_query(khsg_seen, khsg_qg, static_cast<uint32_t>(khsg_n) + e0 + 1u, static_cast<uint32_t>(khsg_nt) + e0 + 1u,
                    static_cast<uint32_t>(khsg_nel), [&](uint32_t el) {
             const uint32_t e1 = el - static_cast<uint32_t>(khsg_nt);
             const KhClothSelfEdge& E1 = khsg_s.self_edges[e1];
@@ -2329,8 +2572,15 @@ inline void kh_cloth_self_gather(KhClothState& khsg_s, float khsg_thick) {
             khsg_pe.sep = khsg_sp;
             khsg_pe.dep = 0.0f;
             khsg_pe.d0 = khsg_nl;
-            khsg_s.self_e.push_back(khsg_pe);
+            khsg_out.push_back(khsg_pe);
         });
+    }
+    };
+    kh_cloth_fork_run(khsg_nc, khsg_cap, &kh_cloth_fork_call<decltype(khsg_ee)>, &khsg_ee);
+    if (khsg_nc == 1u) khsg_s.self_e.swap(khsg_s.self_e_par[0]);
+    else for (uint32_t khsg_c = 0; khsg_c < khsg_nc; ++khsg_c) {
+        khsg_s.self_e.insert(khsg_s.self_e.end(), khsg_s.self_e_par[khsg_c].begin(), khsg_s.self_e_par[khsg_c].end());
+    }
     }
 }
 
@@ -3021,13 +3271,34 @@ inline void kh_cloth_substep(KhClothState& khcs_s, const KhClothParams& khcs_pr,
     // (kinetic). A fixed fraction of the tangential velocity would have no
     // static regime and creep down every slope.
     const float khcs_fr = khcs_pr.friction < 0.0f ? 0.0f : (khcs_pr.friction > 1.0f ? 1.0f : khcs_pr.friction);
+    // KH_CLOTH_WARM: the per-collider columns of last-hit triangles, kept
+    // across substeps and frames while the collider at that index is the same
+    // object (slot and mesh); a column for a collider that changed starts
+    // over, and a new column count re-lays them all out.
+    if (khcs_ncol != 0u) {
+        const size_t khcs_wn = khcs_n * khcs_ncol;
+        if (khcs_s.col_warm.size() != khcs_wn || khcs_s.col_warm_key.size() != khcs_ncol * 2u) {
+            khcs_s.col_warm.assign(khcs_wn, KH_CLOTH_WARM_NONE);
+            khcs_s.col_warm_key.assign(khcs_ncol * 2u, KH_CLOTH_WARM_NONE);
+        }
+        for (size_t c = 0; c < khcs_ncol; ++c) {
+            const uint32_t khcs_km = static_cast<uint32_t>(khcs_col[c].mesh);
+            if (khcs_s.col_warm_key[c * 2u] != khcs_col[c].slot || khcs_s.col_warm_key[c * 2u + 1u] != khcs_km) {
+                khcs_s.col_warm_key[c * 2u] = khcs_col[c].slot;
+                khcs_s.col_warm_key[c * 2u + 1u] = khcs_km;
+                std::fill(khcs_s.col_warm.begin() + static_cast<ptrdiff_t>(c * khcs_n),
+                          khcs_s.col_warm.begin() + static_cast<ptrdiff_t>((c + 1u) * khcs_n), KH_CLOTH_WARM_NONE);
+            }
+        }
+    }
     for (size_t i = 0; i < khcs_n; ++i) {
         KhClothPart& khcs_p = khcs_s.part[i];
         if (khcs_p.w <= 0.0f) continue;
         for (size_t c = 0; c < khcs_ncol; ++c) {
             float khcs_n_hit[3], khcs_sv[3];
             const float khcs_p0[3] = { khcs_p.p[0], khcs_p.p[1], khcs_p.p[2] };
-            if (!kh_physics_collide_one(khcs_col[c], khcs_pr.thickness, khcs_p.pp, khcs_p.p, khcs_n_hit, khcs_sv)) continue;
+            if (!kh_physics_collide_one(khcs_col[c], khcs_pr.thickness, khcs_p.pp, khcs_p.p, khcs_n_hit, khcs_sv,
+                                        &khcs_s.col_warm[c * khcs_n + i])) continue;
             float khcs_f = khcs_fr * khcs_col[c].friction;
             if (khcs_f <= 0.0f) continue;
             if (khcs_f > 1.0f) khcs_f = 1.0f;
@@ -5708,6 +5979,14 @@ static std::atomic<bool> g_svs_mesh_wanted{false};
 // Set/cleared only inside the graphics-lock scope (every other submission
 // thread parked). Atomic so a hook body cannot cache it.
 static std::atomic<bool> g_kh_flush_active{false};
+// The flag's scope for the two parks: set on entry, cleared on every exit,
+// exception included.
+struct KhFlushActiveScope {
+    KhFlushActiveScope() { g_kh_flush_active.store(true, std::memory_order_relaxed); }
+    ~KhFlushActiveScope() { g_kh_flush_active.store(false, std::memory_order_relaxed); }
+    KhFlushActiveScope(const KhFlushActiveScope&) = delete;
+    KhFlushActiveScope& operator=(const KhFlushActiveScope&) = delete;
+};
 // Recursion guard for the UI-phase-thread injection (the clear's own Draw
 // re-enters the hooks on that thread). Deliberately separate from
 // g_ro.in_injection, which belongs to the render thread.
@@ -9524,6 +9803,10 @@ static std::atomic<bool> g_cloth_stop{ false };
 // std::thread's static destructor is std::terminate under the loader lock -
 // the same reason g_khmw_thr and g_khtl_thr are declared this way.
 static std::vector<std::thread>& g_cloth_thr = *(new std::vector<std::thread>());
+// KH_CLOTH_FORK: the pool's thread count as a plain atomic, written once by
+// kh_cloth_workers_start after its threads exist and read by the gather on
+// any worker (the vector itself is never read off the game thread).
+static std::atomic<uint32_t> g_cloth_thr_n{ 0 };
 // Buffers whose instance is gone. COM release belongs to the game thread under
 // the park, never to a worker, so removal parks the pointer here.
 static std::vector<ID3D11Buffer*> g_cloth_grave;
@@ -10714,20 +10997,39 @@ struct KhSkinCol {
 };
 static std::unordered_map<uint64_t, KhSkinCol> g_skin_col;
 
+// KH_CLOTH_FORK: the pool's size, for the gather's participant scratch, and
+// the wake a posted fork sends the idle workers. The wake takes and drops
+// g_cloth_mu before notifying so a worker between its predicate and its wait
+// cannot miss it; nothing is held while it is taken (a job's own worker
+// posts, holding no lock).
+inline uint32_t kh_cloth_fork_workers() {
+    const uint32_t khfw_n = g_cloth_thr_n.load(std::memory_order_relaxed);
+    return khfw_n > 0u ? khfw_n : 1u;
+}
+inline void kh_cloth_fork_wake() {
+    { std::lock_guard<std::mutex> khfw_g(g_cloth_mu); }
+    g_cloth_cv.notify_all();
+}
+
 inline void kh_cloth_worker() {
+    uint32_t khcw_served = 0;   // KH_CLOTH_FORK: the fork generation this worker last helped.
     for (;;) {
         std::shared_ptr<KhClothInst> khcw_job;
         std::shared_ptr<KhSkinInst> khcw_skin;
         {
             std::unique_lock<std::mutex> khcw_l(g_cloth_mu);
-            g_cloth_cv.wait(khcw_l, [] {
-                return g_cloth_stop.load(std::memory_order_relaxed) || !g_cloth_q.empty() || !g_skin_q.empty();
+            g_cloth_cv.wait(khcw_l, [khcw_served] {
+                const uint32_t khcw_g = g_cloth_fork.gen_posted.load(std::memory_order_acquire);
+                return g_cloth_stop.load(std::memory_order_relaxed) || !g_cloth_q.empty() || !g_skin_q.empty() ||
+                       (khcw_g != 0u && khcw_g != khcw_served);
             });
             if (g_cloth_stop.load(std::memory_order_relaxed) && g_cloth_q.empty() && g_skin_q.empty()) return;
             // Cloth first, so adding skin jobs to the pool never delays a cloth
             // step behind them: a cloth waits at most for one short skin job a
             // worker had already taken. A skin job that misses its park is
-            // drawn a frame later, which only its bones' pose feels.
+            // drawn a frame later, which only its bones' pose feels. A posted
+            // fork comes after both: an idle worker helps a running job, a
+            // worker with a job of its own runs that.
             if (!g_cloth_q.empty()) {
                 khcw_job = g_cloth_q.back();
                 g_cloth_q.pop_back();
@@ -10735,6 +11037,8 @@ inline void kh_cloth_worker() {
                 khcw_skin = g_skin_q.back();
                 g_skin_q.pop_back();
             } else {
+                khcw_l.unlock();
+                khcw_served = kh_cloth_fork_help(khcw_served);   // KH_CLOTH_FORK: holding nothing.
                 continue;
             }
         }
@@ -10763,6 +11067,7 @@ inline void kh_cloth_workers_start() {
     for (unsigned khcs_i = 0; khcs_i < khcs_n; ++khcs_i) {
         try { g_cloth_thr.emplace_back(kh_cloth_worker); } catch (...) { break; }
     }
+    g_cloth_thr_n.store(static_cast<uint32_t>(g_cloth_thr.size()), std::memory_order_relaxed);   // KH_CLOTH_FORK.
 }
 
 // Slot -> substitute vertex buffer, the one thing every draw pass consults.
@@ -26620,7 +26925,7 @@ inline void kh_fill_depth_range_cb(ConstantData& cbd) {
 // occluder records and a cell grid at t34 / t40 / t41, and a six-cone
 // trace per lit fragment): three lanes of CBFrame, the cache chunk and the
 // mesh-cache version went with it (KH_MESH_CACHE_VERSION 10).
-struct KhSsaoCb {   // HLSL twin CBSsao (ssao.hlsl, b0), 3 float4.
+struct KhSsaoCb {   // HLSL twin CBSsao (ssao.hlsl, b0), 5 float4.
     float proj[4];   // x = m00, y = m11, z = m22, w = m32 (the injection's projection).
     float vp[4];     // x = viewport MinDepth, y = MaxDepth, z = target width, w = target height.
     float ctl[4];    // x = radius (m), y = strength (the exponent), z = the draw's blur stride
@@ -26630,10 +26935,16 @@ struct KhSsaoCb {   // HLSL twin CBSsao (ssao.hlsl, b0), 3 float4.
     float half[4];   // x, y = the half-resolution grid's width and height; z / w unused (0).
 };
 static_assert(sizeof(KhSsaoCb) == 80, "KhSsaoCb is 5 float4 (HLSL twin CBSsao)");
-// The pass rectangle is the meshes' (kh_snapshot_rect) padded by the blurs'
-// reach: 5 x 5 passes on the half grid two taps deep at strides of at most
-// 3, 6 and 4 half pixels (the a-trous pair and the apply) - 12 + 24 + 16 =
-// 52 full pixels in all, inside this pad; the rectangle bounds every read.
+// The pass rectangle is the meshes' (kh_snapshot_rect) padded by the passes'
+// reach beyond a marked pixel. Two reaches must fit inside the pad: the
+// blurs' - 5 x 5 passes on the half grid two taps deep at strides of at most
+// 3, 6 and 4 half pixels (the a-trous pair and the apply), 12 + 24 + 16 = 52
+// full pixels - and PSSsaoMain's wide normal, four half-grid depth taps at a
+// stride of at most 24 half pixels = 48 full, which take no rectangle test
+// (the gather and blur taps do). A marked pixel lies inside the unpadded
+// rectangle (the mark is a depth write of a mesh whose box the rectangle
+// bounds), so both reaches stay on half-grid texels PSSsaoDepth wrote this
+// frame; the whole-target fallback writes every texel.
 static constexpr LONG KH_SSAO_RECT_PAD = 72;
 static std::atomic<uint32_t> g_ao_strength_bits{ 0x3F800000u };   // Float bits, default 1.0; 0 = off.
 static std::atomic<uint32_t> g_ao_dist_bits{ 0x3F000000u };       // The sample radius (m), default 0.5.
@@ -38073,7 +38384,9 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // The tail: every staged part, far to near, under the exact state its solid
     // drew with, dss_test, the object's blend state, interiors-then-exteriors
     // when twoSided, else back-face culled. The LOD crossfade is honoured. dss
-    // goes back to the pass default afterwards.
+    // goes back to the plain write state afterwards - never the marking one:
+    // the eraser has run (KH_SSAO_MARK), so a mark left past it would reach
+    // the next drawer's apply.
     if (!khr_parts.empty()) {
         khr_parts_order.resize(khr_parts.size());
         for (uint32_t khp_i = 0; khp_i < static_cast<uint32_t>(khr_parts.size()); ++khp_i) khr_parts_order[khp_i] = khp_i;
@@ -38135,7 +38448,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             }
         }
 
-        ctx->OMSetDepthStencilState(khr_dss_w, khr_ssao.on ? 1u : 0u);   // The pass default back (see the bind above).
+        ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);   // Plain write: the eraser is behind us.
     }
 
     if (n_saved_vp > 0) ctx->RSSetViewports(n_saved_vp, saved_vp);
@@ -42172,11 +42485,16 @@ inline void flush_frame() {
             reset_session_state();
             return;
         }
-        // Our draws traverse the T-path otherwise.
-        g_kh_flush_active.store(true, std::memory_order_relaxed);
-        g_flush_wrong_pass = false;
-        flush_locked(dev, ctx);
-        g_kh_flush_active.store(false, std::memory_order_relaxed);
+        // Our draws traverse the T-path otherwise. Released on unwind too: a
+        // throw out of flush_locked reaches the Draw3D handler's catch, and a
+        // flag left true would have every hook treat the engine's draws as
+        // ours for the rest of the session (the render-thread twin,
+        // g_ro.in_injection, is cleared by kh_hook_except).
+        {
+            KhFlushActiveScope khff_active;
+            g_flush_wrong_pass = false;
+            flush_locked(dev, ctx);
+        }
         if (!g_flush_wrong_pass) return;
         // The park landed on a non-main depth (a PIP pass, an atlas cascade)
         // and nothing was drawn. Release the lock, let the render thread move
@@ -42778,10 +43096,12 @@ inline bool flush_ui_frame() {
             continue;
         }
 
-        // Our draws traverse the T-path otherwise.
-        g_kh_flush_active.store(true, std::memory_order_relaxed);
-        flush_ui_locked(dev, ctx);
-        g_kh_flush_active.store(false, std::memory_order_relaxed);
+        // Our draws traverse the T-path otherwise (released on unwind, as in
+        // flush_frame).
+        {
+            KhFlushActiveScope khfu_active;
+            flush_ui_locked(dev, ctx);
+        }
         return true;
     }
 
@@ -43212,6 +43532,7 @@ inline void rendering_integration_process_detach() {
         kh_thread_stop_bounded(khpd_t, khpd_el < 200u ? static_cast<DWORD>(200u - khpd_el) : 0u);
     }
     g_cloth_thr.clear();
+    g_cloth_thr_n.store(0u, std::memory_order_relaxed);   // KH_CLOTH_FORK.
 }
 
 inline std::string add_render_object(const RenderObject& obj) {

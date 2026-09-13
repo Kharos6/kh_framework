@@ -1618,6 +1618,7 @@ if hasInterface then {
 	KH_var_playerRespawnedEventHandler = [];
 	KH_var_playerKilledEventHandler = [];
 	KH_var_playerVoiceEffectHandler = [];
+	KH_var_postProcessingHandler = [];
 	KH_var_postProcessingStack = [];
 	KH_var_physicsHandlers = [];
 	KH_var_mainCameraFirstPerson = true;
@@ -1693,6 +1694,107 @@ if hasInterface then {
 					} forEach KH_var_playerControlledUnitChangeStack;
 
 					[_previousUnit, _unit] call KH_fnc_playerControlledUnitChangeInit;
+
+					if (KH_var_postProcessingHandler isNotEqualTo []) then {
+						[KH_var_postProcessingHandler] call KH_fnc_removeHandler;
+					};
+
+					execute [
+						[],
+						{
+							private _applied = false;
+							private _weaponsConfigParent = configFile >> "CfgWeapons";
+
+							{
+								private _effects = getArray (_x >> "kh_postProcessing");
+
+								if (_effects isNotEqualTo []) then {
+									{
+										removeRenderHandler _x;
+									} forEach KH_var_postProcessingStack;
+
+									KH_var_postProcessingStack resize 0;
+
+									{
+										KH_var_postProcessingStack pushBack (addPostFX _x);
+									} forEach _effects;
+
+									_applied = true;
+									break;
+								};
+							} forEach [
+								configFile >> "CfgGlasses" >> (goggles KH_var_playerUnit),
+								_weaponsConfigParent >> (hmd KH_var_playerUnit),
+								_weaponsConfigParent >> (headgear KH_var_playerUnit),
+								configFile >> "CfgVehicles" >> (backpack KH_var_playerUnit), 
+								_weaponsConfigParent >> (vest KH_var_playerUnit),
+								_weaponsConfigParent >> (uniform KH_var_playerUnit)
+							];
+
+							if !_applied then {
+								{
+									removeRenderHandler _x;
+								} forEach KH_var_postProcessingStack;
+
+								KH_var_postProcessingStack resize 0;
+							};
+						},
+						true,
+						"1",
+						false
+					];
+
+					KH_var_postProcessingHandler = [
+						["ENTITY", KH_var_playerUnit, "LOCAL"],
+						"SlotItemChanged",
+						[],
+						{
+							execute [
+								[],
+								{
+									private _applied = false;
+									private _weaponsConfigParent = configFile >> "CfgWeapons";
+
+									{
+										private _effects = getArray (_x >> "kh_postProcessing");
+
+										if (_effects isNotEqualTo []) then {
+											{
+												removeRenderHandler _x;
+											} forEach KH_var_postProcessingStack;
+
+											KH_var_postProcessingStack resize 0;
+
+											{
+												KH_var_postProcessingStack pushBack (addPostFX _x);
+											} forEach _effects;
+
+											_applied = true;
+											break;
+										};
+									} forEach [
+										configFile >> "CfgGlasses" >> (goggles KH_var_playerUnit),
+										_weaponsConfigParent >> (hmd KH_var_playerUnit),
+										_weaponsConfigParent >> (headgear KH_var_playerUnit),
+										configFile >> "CfgVehicles" >> (backpack KH_var_playerUnit), 
+										_weaponsConfigParent >> (vest KH_var_playerUnit),
+										_weaponsConfigParent >> (uniform KH_var_playerUnit)
+									];
+
+									if !_applied then {
+										{
+											removeRenderHandler _x;
+										} forEach KH_var_postProcessingStack;
+
+										KH_var_postProcessingStack resize 0;
+									};
+								},
+								true,
+								"-1",
+								false
+							];
+						}
+					] call KH_fnc_addEventHandler;
 
 					if isMultiplayer then {
 						execute [
@@ -1790,103 +1892,6 @@ if hasInterface then {
 				{KH_var_clientRegistered && KH_var_missionInitialized && !(isNull player) && (alive player);},
 				false
 			];
-
-			execute [
-				[],
-				{
-					private _applied = false;
-					private _weaponsConfigParent = configFile >> "CfgWeapons";
-
-					{
-						private _effects = getArray (_x >> "kh_postProcessing");
-
-						if (_effects isNotEqualTo []) then {
-							{
-								removeRenderHandler _x;
-							} forEach KH_var_postProcessingStack;
-
-							KH_var_postProcessingStack resize 0;
-
-							{
-								KH_var_postProcessingStack pushBack (addPostFX _x);
-							} forEach _effects;
-
-							_applied = true;
-							break;
-						};
-					} forEach [
-						configFile >> "CfgGlasses" >> (goggles KH_var_playerUnit),
-						_weaponsConfigParent >> (hmd KH_var_playerUnit),
-						_weaponsConfigParent >> (headgear KH_var_playerUnit),
-						configFile >> "CfgVehicles" >> (backpack KH_var_playerUnit), 
-						_weaponsConfigParent >> (vest KH_var_playerUnit),
-						_weaponsConfigParent >> (uniform KH_var_playerUnit)
-					];
-
-					if !_applied then {
-						{
-							removeRenderHandler _x;
-						} forEach KH_var_postProcessingStack;
-
-						KH_var_postProcessingStack resize 0;
-					};
-				},
-				true,
-				"1",
-				false
-			];
-
-			[
-				["ENTITY", KH_var_playerUnit, "LOCAL"],
-				"SlotItemChanged",
-				[],
-				{
-					execute [
-						[],
-						{
-							private _applied = false;
-							private _weaponsConfigParent = configFile >> "CfgWeapons";
-
-							{
-								private _effects = getArray (_x >> "kh_postProcessing");
-
-								if (_effects isNotEqualTo []) then {
-									{
-										removeRenderHandler _x;
-									} forEach KH_var_postProcessingStack;
-
-									KH_var_postProcessingStack resize 0;
-
-									{
-										KH_var_postProcessingStack pushBack (addPostFX _x);
-									} forEach _effects;
-
-									_applied = true;
-									break;
-								};
-							} forEach [
-								configFile >> "CfgGlasses" >> (goggles KH_var_playerUnit),
-								_weaponsConfigParent >> (hmd KH_var_playerUnit),
-								_weaponsConfigParent >> (headgear KH_var_playerUnit),
-								configFile >> "CfgVehicles" >> (backpack KH_var_playerUnit), 
-								_weaponsConfigParent >> (vest KH_var_playerUnit),
-								_weaponsConfigParent >> (uniform KH_var_playerUnit)
-							];
-
-							if !_applied then {
-								{
-									removeRenderHandler _x;
-								} forEach KH_var_postProcessingStack;
-
-								KH_var_postProcessingStack resize 0;
-							};
-						},
-						true,
-						"-1",
-						false
-					];
-				}
-			] call KH_fnc_addEventHandler;
 		}
 	] call KH_fnc_addEventHandler;
 

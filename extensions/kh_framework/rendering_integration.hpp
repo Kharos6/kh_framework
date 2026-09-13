@@ -348,7 +348,18 @@ inline void pyramid(std::vector<MeshVertex>& v) {
 // up) -> engine [x, z, y] (the same swap every SQF position/size fill
 // performs), then reorder each triangle so cross(b-a, c-a) points along its
 // stored normal (the swap flips handedness).
-inline void bake(std::vector<MeshVertex>& v) {
+//
+// khb_ext: the per-axis extents the positions were squashed by, in the
+// ENGINE frame (the import's d.native_ext), or null for a mesh authored in
+// the unit box (the builtins). The winding test must be taken in the
+// authored frame: squashing by S = diag(1 / ext) turns the geometric cross
+// into diag(ext) . n_geom and KH_IMPORT_NRM stores diag(ext) . n, so their
+// plain dot is n_geom . diag(ext^2) . n - a dot weighted by the squared
+// extents, whose sign a thin mesh's smoothed normals decide by their tiny
+// in-plane parts. Weighting by 1 / ext^2 recovers sign(n_geom . n): the
+// authored winding, never a back-facing hole. Null weights are exactly 1.0,
+// so the builtins' test is the plain dot it was.
+inline void bake(std::vector<MeshVertex>& v, const float* khb_ext = nullptr) {
     for (auto& mv : v) {
         const float py = mv.pos[1]; mv.pos[1] = mv.pos[2]; mv.pos[2] = py;
         const float ny = mv.nrm[1]; mv.nrm[1] = mv.nrm[2]; mv.nrm[2] = ny;
@@ -371,8 +382,15 @@ inline void bake(std::vector<MeshVertex>& v) {
             e1[0] * e2[1] - e1[1] * e2[0],
         };
         const float* n = v[i].nrm;
+        float khb_w[3] = { 1.0f, 1.0f, 1.0f };
+        if (khb_ext) {
+            for (int k = 0; k < 3; ++k) {
+                const float khb_e = fabsf(khb_ext[k]) > 1.0e-6f ? khb_ext[k] : 1.0f;
+                khb_w[k] = 1.0f / (khb_e * khb_e);
+            }
+        }
 
-        if (g[0] * n[0] + g[1] * n[1] + g[2] * n[2] < 0.0f) {
+        if (g[0] * n[0] * khb_w[0] + g[1] * n[1] * khb_w[1] + g[2] * n[2] * khb_w[2] < 0.0f) {
             const MeshVertex tmp = v[i + 1];
             v[i + 1] = v[i + 2];
             v[i + 2] = tmp;
@@ -15846,7 +15864,11 @@ static constexpr uint32_t KH_MESH_CACHE_MAGIC = 0x434D484Bu;   // "khmc" little-
 // the LOD tables and the weight chunk) is gone with the field it carried; the
 // loader no longer probes for it, so a file that still has one must not be
 // read past its LOD tables.
-static constexpr uint32_t KH_MESH_CACHE_VERSION = 10;
+// 11: meshgen::bake's winding test and the tangent generation taken in the
+// authored frame (the squashed frame flipped 68 of a 1 x 0.23 x 1.5 m cape's
+// 2,716 triangles and sheared its tangents); a cached mesh would keep its
+// back-facing holes.
+static constexpr uint32_t KH_MESH_CACHE_VERSION = 11;
 
 // Documents unavailable or creation failed: the cache silently disables and
 // every load is a plain import.
@@ -17352,27 +17374,19 @@ inline bool kh_fbx_import(const std::string& path, int& out_id, std::string& err
 
         for (size_t khfc_i = 0; khfc_i < buckets[bi].size(); ++khfc_i) {
             MeshVertex& mv = buckets[bi][khfc_i];
-            for (int k = 0; k < 3; ++k) mv.pos[k] = (mv.pos[k] - ctr[k]) / ext[k];
-            // KH_IMPORT_NRM: the stored normal is the NORMALIZED-SPACE normal,
-            // as the builtins' are. KhVsCore draws normalize(n / size) - the
-            // inverse transpose of the per-axis scale above - and that is right
-            // only for the squashed geometry's normal, which is the authored
-            // one scaled BY the extents (normals scale inversely to positions).
-            // The authored unit normal stored as it came leaned every draw of
-            // a non-cubic import toward its thin axes: a normal at 45 deg
-            // between a long and a short axis of ratio r drew at atan(r). Same
-            // frame as pos here (the y / z swap is bake's, and moves both).
-            {
-                float khin_n[3];
-                for (int k = 0; k < 3; ++k) khin_n[k] = mv.nrm[k] * ext[k];
-                const float khin_l = kh_cloth_v3_len(khin_n);
-                if (khin_l > 1.0e-12f) for (int k = 0; k < 3; ++k) mv.nrm[k] = khin_n[k] / khin_l;
-            }
+            // The vertex stays in the AUTHORED frame (metres, unit normals)
+            // through the tangent generation below; the squash into the unit
+            // box is one pass after it (KH_IMPORT_SQUASH). The keys the cloth
+            // weights and skin influences are resolved by are the squashed
+            // position, computed here by the expression that pass uses, so
+            // the resolve's un-bake lands on the same floats.
+            float khin_sq[3];
+            for (int k = 0; k < 3; ++k) khin_sq[k] = (mv.pos[k] - ctr[k]) / ext[k];
             // KH_CLOTH: keyed on the normalized PRE-BAKE position, which is
             // what the resolve below un-bakes back to.
             if (khfc_any && khfc_i < bucket_w[bi].size()) {
                 KhClothPosKey khfc_k;
-                memcpy(khfc_k.p, mv.pos, sizeof(khfc_k.p));
+                memcpy(khfc_k.p, khin_sq, sizeof(khfc_k.p));
                 const uint8_t khfc_w = bucket_w[bi][khfc_i];
                 auto khfc_it = khfc_map.find(khfc_k);
                 // A welded position that two corners disagree about takes the
@@ -17388,7 +17402,7 @@ inline bool kh_fbx_import(const std::string& path, int& out_id, std::string& err
             // weighted ones the first stands, as good as the other.
             if (khsk_any && khfc_i < bucket_s[bi].size()) {
                 KhClothPosKey khsk_k;
-                memcpy(khsk_k.p, mv.pos, sizeof(khsk_k.p));
+                memcpy(khsk_k.p, khin_sq, sizeof(khsk_k.p));
                 const KhSkinInf& khsk_f = bucket_s[bi][khfc_i];
                 const auto khsk_it = khsk_map.find(khsk_k);
                 if (khsk_it == khsk_map.end()) khsk_map.emplace(khsk_k, khsk_f);
@@ -17406,8 +17420,34 @@ inline bool kh_fbx_import(const std::string& path, int& out_id, std::string& err
         bucket_s[bi].shrink_to_fit();
     }
 
+    // Tangents in the AUTHORED frame (metres, unit normals): mikktspace's
+    // projection of the uv tangent onto the plane perpendicular to the normal
+    // is a Euclidean step, and taken after the per-axis squash it sheared the
+    // frame - on a 1 x 0.23 x 1.5 m cape a sixth of the corners' tangents
+    // turned more than 30 degrees in the tangent plane, some reversed.
+    // Handedness is the uv orientation and survives any frame; bake negates it
+    // for the y / z swap.
     if (has_uv) kh_gen_tangents(d.verts);   // Arma space; bake flips handedness.
-    meshgen::bake(d.verts);
+    // KH_IMPORT_SQUASH: into the unit box, every attribute by its own rule.
+    // Positions by 1 / ext. KH_IMPORT_NRM: the stored normal is the
+    // NORMALIZED-SPACE normal, as the builtins' are - KhVsCore draws
+    // normalize(n / size), the inverse transpose of this scale, which is right
+    // only for the squashed geometry's normal, the authored one scaled BY the
+    // extents (normals scale inversely to positions); the authored unit normal
+    // stored as it came leaned every draw of a non-cubic import toward its thin
+    // axes. Tangents are covariant with positions (KhVsCore multiplies by
+    // size): by 1 / ext, w untouched. The same frame for all three; the y / z
+    // swap is bake's, and moves them together.
+    for (MeshVertex& mv : d.verts) {
+        for (int k = 0; k < 3; ++k) mv.pos[k] = (mv.pos[k] - ctr[k]) / ext[k];
+        float khin_n[3], khin_t[3];
+        for (int k = 0; k < 3; ++k) { khin_n[k] = mv.nrm[k] * ext[k]; khin_t[k] = mv.tan[k] / ext[k]; }
+        const float khin_l = kh_cloth_v3_len(khin_n);
+        if (khin_l > 1.0e-12f) for (int k = 0; k < 3; ++k) mv.nrm[k] = khin_n[k] / khin_l;
+        const float khin_tl = kh_cloth_v3_len(khin_t);
+        if (khin_tl > 1.0e-12f) for (int k = 0; k < 3; ++k) mv.tan[k] = khin_t[k] / khin_tl;
+    }
+    meshgen::bake(d.verts, d.native_ext);   // The winding test in the authored frame (see bake).
     {
         kh_lod_build(d);
     }

@@ -69,6 +69,99 @@
 ] call CBA_fnc_addSetting;
 
 [
+	"KH_var_renderingAmbientOcclusionStrength",
+	"SLIDER",   
+	[
+		"Ambient Occlusion Strength", 
+		"Strength of the ambient occlusion affecting KH Rendered meshes and their surroundings."
+	], 
+	[
+		"KH Rendering",
+		"Post Processing"
+	],
+	[0.000, 4.000, 1.000, 3],
+	0,
+	{
+		if !hasInterface exitWith {};
+		
+		execute [
+			[],
+			{
+				setRenderAmbientOcclusion [KH_var_renderingAmbientOcclusionStrength, KH_var_renderingAmbientOcclusionRadius];
+			},
+			true,
+			"-1",
+			false
+		];
+	},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_renderingAmbientOcclusionRadius",
+	"SLIDER",   
+	[
+		"Ambient Occlusion Radius", 
+		"Radius of the ambient occlusion affecting KH Rendered meshes and their surroundings."
+	], 
+	[
+		"KH Rendering",
+		"Post Processing"
+	],
+	[0.050, 5.000, 0.500, 3],
+	0,
+	{
+		if !hasInterface exitWith {};
+		
+		execute [
+			[],
+			{
+				setRenderAmbientOcclusion [KH_var_renderingAmbientOcclusionStrength, KH_var_renderingAmbientOcclusionRadius];
+			},
+			true,
+			"-1",
+			false
+		];
+	},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_renderingFogScattering",
+	"CHECKBOX",   
+	[
+		"Fog Scattering", 
+		"Simulates light scattering within fog."
+	], 
+	[
+		"KH Rendering",
+		"Post Processing"
+	],
+	false,
+	0,
+	{
+		if !hasInterface exitWith {};
+
+		execute [
+			[],
+			{
+				removeRenderHandler KH_var_fogScatteringHandler;
+
+				if KH_var_renderingFogScattering then {
+					KH_var_fogScatteringHandler = addPostFX ["fogScatter", [1, 0, 12]];
+				};
+
+				nil;
+			},
+			true,
+			"-1",
+			false
+		];
+	},
+	false
+] call CBA_fnc_addSetting;
+
+[
 	"KH_var_allowTeamspeakVoiceEffectPresets",
 	"CHECKBOX",   
 	[

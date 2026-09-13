@@ -6999,6 +6999,9 @@ static bool kh_rv_chain_sim(const game_value& val, RenderIntegration::RenderObje
     if (!khch_old_proxy.is_nil() && khch_old_proxy.data.get() != khch_c.proxy.data.get()) khch_drop = khch_old_proxy;
     R::g_chain_cfg[handle] = khch_c;
     R::kh_attach_proxy_orphan(khch_drop);
+    // KH_SKEL_PROXY_CULL: a bound skeleton's proxies follow the chain's start
+    // and end bones; re-made only when the kept set changed.
+    if (!R::kh_skel_chain_rebind(handle, obj, err)) return false;
     const bool khch_was = obj.chain_sim;
     obj.chain_sim = khch_on;
     // LOD-locked for the cloth's reason: the decimated levels' vertices are
@@ -7055,7 +7058,7 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
                 // replaces a binding keeps that binding's rotation state, as
                 // re-pointing a bone does.
                 std::vector<std::string> khs_mem;
-                if (!RenderIntegration::kh_skel_make(khb_parent, RenderIntegration::kh_skel_bone_names(obj.mesh),
+                if (!RenderIntegration::kh_skel_make(khb_parent, RenderIntegration::kh_skel_bone_names(obj.mesh, handle, obj.seq),
                                                      khs_own.proxies, khs_mem, err)) return false;
                 const bool khs_rot = RenderIntegration::kh_attach_has_binding(handle)
                                    ? RenderIntegration::kh_attach_bone_rot_state(handle) : true;
@@ -7210,7 +7213,7 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
             if (RenderIntegration::kh_attach_is_obj(khm_parent)) {
                 RenderIntegration::KhSkelOwn khm_own;
                 std::vector<std::string> khm_mem;
-                if (!RenderIntegration::kh_skel_make(khm_parent, RenderIntegration::kh_skel_bone_names(mid),
+                if (!RenderIntegration::kh_skel_make(khm_parent, RenderIntegration::kh_skel_bone_names(mid, handle, obj.seq),
                                                      khm_own.proxies, khm_mem, err)) return false;
                 const bool khm_rotf = RenderIntegration::kh_attach_bone_rot_state(handle);
                 RenderIntegration::kh_attach_skel_set(handle, khm_own.release(), khm_mem, khm_parent, khm_rotf);
@@ -7873,16 +7876,16 @@ static game_value set_ssgi_scale_sqf(game_value_parameter arg) {
     }
 }
 
-// KH_AO: [strength] or [strength, distance]. Strength is the term's exponent
-// (0 = off, 1 = as measured, above 1 deeper), clamped 0..4; the trace distance
-// in metres, clamped 0.05..10 (omitted = unchanged). Global; applies from the
-// next pass.
+// KH_SSAO: [strength] or [strength, radius]. Strength is the term's exponent
+// (0 = off, 1 = as measured, above 1 deeper), clamped 0..4; the sample radius
+// in metres, clamped 0.05..5 (omitted = unchanged; default 0.5). Global;
+// applies from the next injected frame.
 static game_value set_render_ao_sqf(game_value_parameter arg) {
     try {
-        float khao_s = 1.0f, khao_d = 1.0f;
+        float khao_s = 1.0f, khao_d = 0.5f;
         bool khao_has_d = false;
         if (arg.type_enum() != game_data_type::ARRAY) {
-            kh_rv_report("setRenderAmbientOcclusion", "expected [strength] or [strength, distance]");
+            kh_rv_report("setRenderAmbientOcclusion", "expected [strength] or [strength, radius]");
             return game_value(false);
         }
         const auto& khao_a = arg.to_array();
@@ -7893,7 +7896,7 @@ static game_value set_render_ao_sqf(game_value_parameter arg) {
         khao_s = static_cast<float>(khao_a[0]);
         if (khao_a.size() >= 2) {
             if (khao_a[1].type_enum() != game_data_type::SCALAR) {
-                kh_rv_report("setRenderAmbientOcclusion", "distance must be a number (m)");
+                kh_rv_report("setRenderAmbientOcclusion", "radius must be a number (m)");
                 return game_value(false);
             }
             khao_d = static_cast<float>(khao_a[1]);
@@ -7909,13 +7912,11 @@ static game_value set_render_ao_sqf(game_value_parameter arg) {
         memcpy(&khao_sb, &khao_s, sizeof(khao_sb));
         RenderIntegration::g_ao_strength_bits.store(khao_sb, std::memory_order_relaxed);
         if (khao_has_d) {
-            // The 0.05 floor is load-bearing, not cosmetic: KhAoTerm traces
-            // max(distance, 2 * KH_AO_T0) = max(distance, 0.04) m, while
-            // kh_ao_gather builds the KH_AO_GRID cell lists out to the
-            // distance itself. Keeping the floor above 0.04 is what makes
-            // every cell's list complete for the trace that reads it.
+            // The radius is the hemisphere the kernel samples in metres; the
+            // floor keeps it above the depth's own bias, the cap keeps the
+            // screen-space reach sane close to the camera.
             if (khao_d < 0.05f) khao_d = 0.05f;
-            if (khao_d > 10.0f) khao_d = 10.0f;
+            if (khao_d > 5.0f) khao_d = 5.0f;
             uint32_t khao_db = 0;
             memcpy(&khao_db, &khao_d, sizeof(khao_db));
             RenderIntegration::g_ao_dist_bits.store(khao_db, std::memory_order_relaxed);
@@ -9548,7 +9549,7 @@ static void initialize_sqf_integration() {
 
     _sqf_set_render_ao = intercept::client::host::register_sqf_command(
         "setRenderAmbientOcclusion",
-        "[strength] or [strength, distance]. Ambient occlusion on our lit meshes (distance-field, on by default). Strength 0 turns it off, 1 is as measured, up to 4 deepens it; distance is the trace reach in metres (0.05-10, default 1; omitted = unchanged). Global; applies from the next pass. Returns true on accept",
+        "[strength] or [strength, radius]. Screen-space ambient occlusion on our meshes only (on by default; skinned, cloth and chain meshes included; the game world occludes them, they never darken it). Strength 0 turns it off, 1 is as measured, up to 4 deepens it; radius is the sample reach in metres (0.05-5, default 0.5; omitted = unchanged). Global; applies from the next frame. Returns true on accept",
         userFunctionWrapper<set_render_ao_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY

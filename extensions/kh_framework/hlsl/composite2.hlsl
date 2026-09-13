@@ -61,8 +61,8 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
 {
     // TWO-SIDED: a back face is the other side of the same sheet, so it shades
     // with the front's normal reversed. Every consumer below reads i.nrm (the
-    // N.L gate, the self-shadow bias, the lighting, KH_AO's cones, the dynamic
-    // lights), so reversing it here is the whole fix. Front is the authored
+    // N.L gate, the self-shadow bias, the lighting, the dynamic lights), so
+    // reversing it here is the whole fix. Front is the authored
     // side: meshgen::bake and the importer wind every triangle to its normal,
     // no rasterizer sets FrontCounterClockwise, and size is never negative.
     // Without this a single sheet's back took the front's sun and, at N.V

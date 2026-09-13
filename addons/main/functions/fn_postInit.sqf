@@ -1959,6 +1959,12 @@ isNil {
 							0,
 							false
 						];
+
+						if KH_var_renderingFogScattering then {
+							KH_var_fogScatteringHandler = addPostFX ["fogScatter", [1, 0, 12]];
+						};
+
+						setRenderAmbientOcclusion [KH_var_renderingAmbientOcclusionStrength, KH_var_renderingAmbientOcclusionRadius];
 					},
 					true,
 					{KH_var_clientRegistered && KH_var_missionInitialized;},

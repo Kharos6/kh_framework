@@ -99,7 +99,7 @@ if (_entity isKindOf "Man") then {
                 };
 
                 _currentHandlers pushBack _renderHandler;
-            } forEach ("true" configClasses (configFile >> "CfgWeapons" >> _newWeapon >> "KH_Rendering3D"););
+            } forEach ("true" configClasses (configFile >> "CfgWeapons" >> _newWeapon >> "KH_Rendering3D"));
 
             _renderHandlers set [_slot, _currentHandlers];                 
         }

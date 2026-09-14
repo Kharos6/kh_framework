@@ -20370,7 +20370,6 @@ inline ID3D11RasterizerState* kh_sun_rs_pick(bool khrs_clamp) {
 }
 static std::atomic<float> g_sun_range{200.0f};
 static std::atomic<float> g_obj_vis{0.0f};
-static bool        g_video_opt_keys_done = false;
 static std::atomic<int> g_sun_range_src{0};
 
 inline bool kh_sun_map_ensure(ID3D11Device* dev, UINT khsm_size,
@@ -42875,13 +42874,15 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
 
 // Same body, same three consumers: the shadowvis fallback, the
 // objectvis/objectdraw read, the key scan.
-// KH_VIDEO_OPT_CADENCE: getVideoOptions builds a map of every video setting
-// on the engine side - measured at ~1.2 ms per call, the whole of
-// flushPrepUs on every frame of every session - to read two values that
-// change when the user edits a setting. Sampled at KH_VIDEO_OPT_INTERVAL_MS;
-// the first call is immediate. Envelope: a changed shadow visibility or
-// object view distance reaches g_sun_range / g_obj_vis up to that interval
-// late.
+// KH_VIDEO_OPT_CADENCE: this used to call getVideoOptions, which builds a map
+// of every video setting and marshals it across the boundary, to read two
+// scalars - ~1.2 ms a call, the whole of flushPrepUs. It now asks the engine
+// for the two values directly. The cadence is KEPT as insurance rather than
+// need: these are two engine calls per sample and their cost is unmeasured
+// here, so the interval caps them at four a second. If a profile shows them
+// trivial, this whole gate can go and the values can be read every frame.
+// Envelope: a changed shadow visibility or object view distance reaches
+// g_sun_range / g_obj_vis up to KH_VIDEO_OPT_INTERVAL_MS late.
 static constexpr uint64_t KH_VIDEO_OPT_INTERVAL_MS = 250;
 static uint64_t g_video_opt_ms = 0;   // Game thread: the last sample.
 inline void stage_video_options() {
@@ -42889,38 +42890,26 @@ inline void stage_video_options() {
         const uint64_t khsr_now_ms = steady_now_ms();
         if (g_video_opt_ms != 0 && khsr_now_ms - g_video_opt_ms < KH_VIDEO_OPT_INTERVAL_MS) return;
         g_video_opt_ms = khsr_now_ms;
-        const bool khsr_want_shadow = g_sun_range_src.load(std::memory_order_relaxed) != 2;
-        rv_hashmap khsr_map = sqf::get_video_options();
-        bool khsr_shadow_done = !khsr_want_shadow;
-        bool khsr_obj_done = false;
-        const bool khsr_census = !g_video_opt_keys_done;
-        for (auto& khsr_e : khsr_map) {
-            if (!khsr_census && khsr_shadow_done && khsr_obj_done) break;
-            if (khsr_e.key.type_enum() != game_data_type::STRING) continue;
-            std::string khsr_k = static_cast<std::string>(khsr_e.key);
-            for (auto& khsr_c : khsr_k) {
-                if (khsr_c >= 'A' && khsr_c <= 'Z') khsr_c = static_cast<char>(khsr_c + 32);
+        // The shadow range is not read while a script owns it (src == 2): the
+        // engine value would overwrite the script's on the next sample.
+        if (g_sun_range_src.load(std::memory_order_relaxed) != 2) {
+            const float khsr_sh = sqf::get_shadow_distance();
+            // The same admission the map path used: a NaN or a non-positive
+            // reading leaves the previous value standing.
+            if (khsr_sh == khsr_sh && khsr_sh > 0.0f) {
+                g_sun_range.store(khsr_sh, std::memory_order_relaxed);
+                g_sun_range_src.store(1, std::memory_order_relaxed);
             }
-            const bool khsr_is_shadow = !khsr_shadow_done && khsr_k.find("shadowvis") != std::string::npos;
-            const bool khsr_is_obj = !khsr_obj_done &&
-                (khsr_k.find("objectvis") != std::string::npos ||
-                 khsr_k.find("objectdraw") != std::string::npos);
-            if (!khsr_is_shadow && !khsr_is_obj) continue;
-            if (khsr_e.value.type_enum() == game_data_type::SCALAR) {
-                const float khsr_f = static_cast<float>(khsr_e.value);
-                if (khsr_f == khsr_f && khsr_f > 0.0f) {
-                    if (khsr_is_shadow) {
-                        g_sun_range.store(khsr_f, std::memory_order_relaxed);
-                        g_sun_range_src.store(1, std::memory_order_relaxed);
-                    } else {
-                        g_obj_vis.store(khsr_f, std::memory_order_relaxed);
-                    }
-                }
-            }
-            if (khsr_is_shadow) khsr_shadow_done = true;
-            else                khsr_obj_done = true;
         }
-        if (khsr_census) g_video_opt_keys_done = true;
+        // rv_rendering_distances carries a shadow_distance too. It is NOT read
+        // here: whether it is the same quantity as get_shadow_distance() is
+        // unproved, and substituting one for the other unproved is how a term
+        // silently changes meaning. If they are measured equal, this becomes
+        // one call instead of two.
+        const float khsr_obj = sqf::get_object_view_distance().object_distance;
+        if (khsr_obj == khsr_obj && khsr_obj > 0.0f) {
+            g_obj_vis.store(khsr_obj, std::memory_order_relaxed);
+        }
     } catch (...) {}
 }
 inline void stage_world_lighting() {
@@ -44418,7 +44407,7 @@ inline void reset_session_state() {
       g_ls.wipe_deferred = false;
     // Cleared here, re-armed by the first stage_video_options.
     g_obj_vis.store(0.0f, std::memory_order_relaxed);
-     g_video_opt_keys_done = false;
+    g_video_opt_ms = 0;   // KH_VIDEO_OPT_CADENCE: the next poll is immediate.
      g_cascbind_feed_t = -1.0f;
 
     // The lifetime pairing trio is session-scoped under full destroy.

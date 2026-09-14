@@ -8061,14 +8061,6 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("shadowActiveObjects", static_cast<float>(khrs_casters)));
         out.push_back(kv("meshDefs", static_cast<float>(RenderIntegration::mesh_count())));
         out.push_back(kv("flushes", static_cast<float>(s.flushes)));
-        // KH_RENDER_FLUSH: frames the game thread did not park because the
-        // render thread flushed them (fullscreen-only frames), and whether
-        // that path stood down for the session (1 = every frame parks again).
-        out.push_back(kv("rtFlushFrames", static_cast<float>(s.rt_flush_frames)));
-        // KH_RENDER_FLUSH: the render-thread flush stood the path down for
-        // this session (a depth view it needs was missing at the hook); every
-        // frame parks again, which reads as the pre-campaign frame rate.
-        out.push_back(kv("rtFlushFallback", RenderIntegration::g_fx_rt_fallback.load(std::memory_order_relaxed) ? 1.0f : 0.0f));
         // KH_PRESENT_UI: 1 = the Present hook is installed and the UI chain is
         // drawn from it, 0 = not attempted yet, -1 = the install failed and the
         // UI passes are back on the graphics lock.

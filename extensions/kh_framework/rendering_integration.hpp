@@ -6306,7 +6306,10 @@ static std::atomic<uint64_t>  g_present_ui_ms{ 0 };   // Steady ms of the last P
 // first backbuffer draw, the scene quad - and clears once.
 static std::atomic<uint64_t>  g_present_seq{ 0 };
 inline uint64_t kh_ui_frame_ordinal();   // Defined after g_flush_frame_pub, which it reads on the lock path.
-static ID3D11RenderTargetView* g_present_rtv[4] = {};   // RTVs on the swapchain's buffers, by weak identity (device state).
+// RTVs on the swapchain's buffers, by weak identity (device state). Each
+// holds a reference on the buffer it views, so the ring is released ahead of
+// any resize as well as at the device reset (KH_PRESENT_RESIZE).
+static ID3D11RenderTargetView* g_present_rtv[4] = {};
 static void*                   g_present_rtv_id[4] = {};
 static uint32_t                g_present_rtv_next = 0;
 inline uint64_t steady_now_ms();   // Defined with the clocks below; the liveness test needs it here.
@@ -6354,7 +6357,11 @@ static std::atomic<bool> g_kh_track_wanted{false};
 // safe across that pair because the engine drives the immediate context from
 // one thread at a time, but Present is a swapchain call and takes no part in
 // that exclusion, so the reader holds its own reference (see hooked_present).
-// Released with the mask.
+// Released with the mask - at the device reset, and ahead of a buffer resize
+// (KH_PRESENT_RESIZE), because this reference is one of the two that would
+// otherwise fail the engine's ResizeBuffers. It is taken at the arm whether
+// or not the Present hook is serving, so that release cannot be conditional
+// on the Present path being installed.
 static ID3D11RenderTargetView* g_ui_frame_rtv = nullptr;
 static uint64_t                g_ui_frame_rtv_seq = 0;   // The present sequence it was taken in.
 // KH_UI_PS_LEARN's store (the rule sits with the machine, kh_ui_draw_is_ui_ps).
@@ -6364,7 +6371,9 @@ inline void kh_ui_ps_learn_release() {
     for (uint32_t khpl_i = 0; khpl_i < 8; ++khpl_i) KH_SAFE_RELEASE(g_ui_ps_learn[khpl_i]);
     g_ui_ps_learn_n = 0;
 }
-inline void kh_ui_mask_reset() {   // Device reset / session destroy: forget everything.
+// Device reset, session destroy, or a buffer resize about to invalidate every
+// learned identity (KH_PRESENT_RESIZE): forget everything.
+inline void kh_ui_mask_reset() {
     g_ui_mask = KhUiMask{};
     KH_SAFE_RELEASE(g_ui_frame_rtv);   // KH_PRESENT_RTV.
     g_ui_frame_rtv_seq = 0;
@@ -8514,7 +8523,6 @@ inline uint64_t kh_ui_frame_ordinal() {
 
 struct RenderStats {
     uint64_t flushes = 0;   // Flush attempts with work queued.
-    uint64_t rt_flush_frames = 0;   // KH_RENDER_FLUSH: frames the game thread left to the render thread (no park).
     uint64_t lock_retries = 0;   // Individual failed lock acquisitions.
     uint64_t lock_failed_frames = 0;   // Frames dropped after all retries failed.
     uint64_t ui_flushes = 0;   // UI-phase flush attempts with work queued.
@@ -8645,8 +8653,11 @@ static bool     g_flush_can_skip = false;
 // flushed by the RENDER THREAD, from the scene-resolve hook (the same
 // pre-resolve moment the grant point lands at: the MSAA scene target still
 // bound, the main depth still bound), and the game thread does not park. This
-// is not the cadence skip above: nothing is left undrawn on a skipped park,
-// because the thread that owns the frame draws the chain itself, every cycle.
+// is not the cadence skip above: on a skipped park the thread that owns the
+// frame draws the chain itself, every cycle - but it draws it AT THE SCENE
+// RESOLVE, which is earlier in the frame than the park lands, and that
+// difference is not cosmetic: see KH_RT_FLUSH_ON below, which is why this
+// whole scheme is currently stood down.
 // Anything the render thread may not do unparked - a mesh publish, a cloth or
 // skin upload, an expiry erase, the terrain upload, the GCs, the shader pump -
 // forces the park exactly as before, and a periodic park carries the
@@ -8667,8 +8678,50 @@ static bool     g_flush_can_skip = false;
 //   g_fx_rt_fallback sticky for the session: the render thread found the state
 //                    it needs missing at the hook; every frame parks again
 //                    (today's behaviour - a fallback, never a flicker).
-//                    Published as rtFlushFallback.
 //   g_fx_rt_park_ms  game thread: the last park under this scheme.
+// KH_RT_FLUSH_ON - MUST STAY false until the question below is answered.
+//
+// The scheme above is correct about WHAT it draws and wrong about WHERE.
+// The fullscreen post-FX chain has exactly one drawer (kh_fx_chain_run, one
+// call site in flush_locked). Before this scheme that site ran only from the
+// park, unconditionally, at one point in the frame. The render-thread flush
+// runs it from hooked_resolvesubresource instead, ahead of the engine's
+// resolve of the scene texture - and the engine composites the view model
+// (the first-person hands and weapon, their own depth partition) AFTER that
+// resolve. The chain therefore drew before the view model existed and could
+// not affect it: in a fullscreen-only session a SCENE or BOTH effect covered
+// the world and left the view model untouched.
+//
+// Reported and reproduced in game, and the natural experiment is what pins
+// it: spawning any non-fullscreen mesh makes khff_mesh_obj true, which makes
+// khfr_skip false, which parks every frame - and the symptom disappears
+// exactly then. The first frames of a session are correct for the same
+// reason (g_fx_rt_park_ms starts at 0, so the first frame cannot skip), which
+// is why the effect "worked for a moment" before stopping. The rare
+// single-frame recoveries are the parks that happened to land after the main
+// depth clear, where khfl_chain_owed reads true.
+//
+// Standing the scheme down here rather than removing it: this one term is
+// the ONLY place g_fx_rt_wanted is ever set, so with it false the resolve
+// hook never flushes, flush_locked is only ever called with khfl_rt false,
+// g_fx_rt_cycle stays ~0ull, and khfl_chain_owed is therefore permanently
+// true - the park draws the chain every frame, which is precisely the
+// pre-scheme behaviour. Nothing else reads these lanes for anything but
+// this path. KH_PRESENT_UI is untouched and keeps serving the UI chain.
+//
+// What turning it back on requires (do not flip this switch without it):
+// a capture that says where the engine draws the view model relative to the
+// scene resolve, and a trigger for the render-thread flush that sits after
+// it - and the two lanes that watched this path back, which were retired
+// with it because both became constants: rtFlushFrames (the count of
+// frames left to the render thread, now always 0) and rtFlushFallback
+// (the session stand-down, now always 0, since the three sites that set
+// g_fx_rt_fallback are all behind khfl_rt). g_fx_rt_fallback itself stays:
+// it is machinery, not a lane, and khfr_skip still reads it.
+// it. The cost of leaving it off is the post-FX frame rate on sessions with
+// NO mesh - a mesh session parked every frame under this scheme too, so it
+// loses nothing.
+static constexpr bool         KH_RT_FLUSH_ON = false;
 static constexpr uint64_t     KH_RT_PARK_INTERVAL_MS = 250;
 static std::atomic<bool>      g_fx_rt_wanted{ false };
 static std::atomic<bool>      g_fx_park_req{ false };
@@ -40352,7 +40405,9 @@ static void STDMETHODCALLTYPE hooked_resolvesubresource(ID3D11DeviceContext* sel
             g_dls_world_cycle = g_topo_cycles;
             kh_dls_world_pass(self);
         }
-        // KH_RENDER_FLUSH round B: the fullscreen-only frame's flush, on this
+        // KH_RENDER_FLUSH round B: armed only by flush_frame, and only under
+        // KH_RT_FLUSH_ON - which is false, so this branch does not run today.
+        // The fullscreen-only frame's flush, on this
         // thread, once per cycle, after the world pass and ahead of the
         // engine's resolve. in_injection is raised as the world pass raises
         // it, so the flush's own draws are not tracked as the engine's.
@@ -43284,6 +43339,7 @@ inline void flush_frame() {
         // park this frame takes, whichever term called for it.
         const bool khfr_park_req = g_fx_park_req.exchange(false, std::memory_order_relaxed);
         const bool khfr_skip =
+            KH_RT_FLUSH_ON &&   // Stood down: the chain must be the park's (see the constant).
             !khff_mesh_obj && !khff_cloth && !khff_expiring && !khfr_ui_fx &&
             !g_fx_rt_fallback.load(std::memory_order_relaxed) &&
             !khfr_park_req &&
@@ -43294,7 +43350,6 @@ inline void flush_frame() {
             g_fx_rt_park_ms != 0 && khfr_now_ms - g_fx_rt_park_ms < KH_RT_PARK_INTERVAL_MS;
         if (khfr_skip) {
             g_fx_rt_wanted.store(true, std::memory_order_relaxed);
-            kh_stat(g_stats.rt_flush_frames);
             // The scene-flush ordinal (see flush_locked): once per frame, on
             // this thread, ahead of the UI pass, exactly as the park's.
             g_flush_frame++;
@@ -44058,6 +44113,45 @@ static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* self, UINT khp_s
     }
     return g_orig_present ? g_orig_present(self, khp_sync, khp_flags) : E_FAIL;
 }
+// KH_PRESENT_RESIZE: the seventeenth hook. ResizeBuffers fails with
+// DXGI_ERROR_INVALID_CALL while ANY reference on a swapchain buffer is
+// outstanding, and two caches of ours hold one: the Present RTV ring
+// (g_present_rtv, views we create on GetBuffer(0)) and the mask machine's
+// captured frame view (g_ui_frame_rtv, the engine's own UI render target,
+// taken at the arm). The engine's reset hook releases both, but nothing
+// orders that hook AHEAD of this call - measured in game: a 4K -> 1080p
+// change left the swapchain at its old size with the scene in the top-left
+// quarter and the rest black, the effect returning seconds later when the
+// reset finally ran. Releasing here is ahead of the resize by construction,
+// which is the only thing that closes it. A fullscreen toggle is covered by
+// the same hook: whatever path changes the buffer size comes through
+// ResizeBuffers. Nothing is re-created here - the ring refills on the next
+// Present (its key is the buffer pointer, and the new buffers are new
+// objects) and the mask re-arms on the next UI pass.
+typedef HRESULT (STDMETHODCALLTYPE* KhResizeBuffersFn)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
+static KhResizeBuffersFn g_orig_resize_buffers = nullptr;
+static HRESULT STDMETHODCALLTYPE hooked_resizebuffers(IDXGISwapChain* self, UINT khrb_count, UINT khrb_w,
+                                                      UINT khrb_h, DXGI_FORMAT khrb_fmt, UINT khrb_flags) {
+    try {
+        // Both caches belong to the presenting thread, and this is a
+        // swapchain call on that thread exactly as Present is; like Present,
+        // it takes no part in the immediate context's one-thread-at-a-time
+        // exclusion, which is why the mask machine's own reset is the right
+        // release rather than the view alone: every backbuffer identity,
+        // width and height it has learned is about to name a buffer that no
+        // longer exists, and this is the release the reset hook already
+        // performs for that same reason.
+        kh_present_rtv_release();
+        kh_ui_mask_reset();
+    } catch (...) {
+        // Neither release can throw; the guard is here so that nothing of
+        // ours can turn a resize into a failed one. kh_hook_except is
+        // deliberately NOT called - it clears g_ro.in_injection, which
+        // belongs to the render thread and is not this thread's to touch.
+    }
+    return g_orig_resize_buffers ? g_orig_resize_buffers(self, khrb_count, khrb_w, khrb_h, khrb_fmt, khrb_flags)
+                                 : DXGI_ERROR_INVALID_CALL;
+}
 // The install: a swapchain on a hidden window, on the game's device, for its
 // vtable; the window and the swapchain are gone before the hook is enabled.
 // One attempt per session; a failure leaves the lock path in place.
@@ -44073,6 +44167,7 @@ inline void ensure_present_hook() {
     IDXGISwapChain* khph_sc = nullptr;
     HWND khph_hw = nullptr;
     void* khph_slot = nullptr;
+    void* khph_slot_rb = nullptr;   // KH_PRESENT_RESIZE.
     do {
         if (FAILED(khph_dev->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&khph_dxgi))) || !khph_dxgi) break;
         if (FAILED(khph_dxgi->GetAdapter(&khph_ad)) || !khph_ad) break;
@@ -44091,6 +44186,7 @@ inline void ensure_present_hook() {
         khph_sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
         if (FAILED(khph_fac->CreateSwapChain(khph_dev, &khph_sd, &khph_sc)) || !khph_sc) break;
         khph_slot = (*reinterpret_cast<void***>(khph_sc))[8];   // IDXGISwapChain::Present.
+        khph_slot_rb = (*reinterpret_cast<void***>(khph_sc))[13];   // IDXGISwapChain::ResizeBuffers.
     } while (false);
     KH_SAFE_RELEASE(khph_sc);
     if (khph_hw) DestroyWindow(khph_hw);
@@ -44098,6 +44194,24 @@ inline void ensure_present_hook() {
     KH_SAFE_RELEASE(khph_ad);
     KH_SAFE_RELEASE(khph_dxgi);
     if (!khph_slot) { report_error_once_safe("KH RenderIntegration: Present hook: no swapchain vtable (UI passes keep the lock path)"); return; }
+    // KH_PRESENT_RESIZE: installed BEFORE the Present hook and independently of
+    // it. g_ui_frame_rtv is taken by the mask machine's arm whether or not the
+    // Present path is serving, so a session whose Present hook fails to install
+    // still holds a backbuffer reference across a resize; gating this on the
+    // Present hook's success would leave exactly that session broken. A failure
+    // here is reported and stands nothing down: the session then resizes as it
+    // did before this hook existed.
+    if (khph_slot_rb && !g_orig_resize_buffers &&
+        (MH_CreateHook(khph_slot_rb, reinterpret_cast<void*>(&hooked_resizebuffers), reinterpret_cast<void**>(&g_orig_resize_buffers)) != MH_OK ||
+         MH_EnableHook(khph_slot_rb) != MH_OK)) {
+        // MinHook writes the trampoline only on a successful create, so a
+        // failed create leaves g_orig_resize_buffers null and the hook
+        // uninstalled - our function is never entered. It is NOT nulled here:
+        // if the create succeeded and only the enable failed, the trampoline is
+        // valid and must stay, or an enable that partly took would forward
+        // through a null pointer and fail every resize outright.
+        report_error_once_safe("KH RenderIntegration: ResizeBuffers hook: MinHook failed (a resolution change with a UI effect active may fail to resize)");
+    }
     if (MH_CreateHook(khph_slot, reinterpret_cast<void*>(&hooked_present), reinterpret_cast<void**>(&g_orig_present)) != MH_OK ||
         MH_EnableHook(khph_slot) != MH_OK) {
         report_error_once_safe("KH RenderIntegration: Present hook: MinHook failed (UI passes keep the lock path)");

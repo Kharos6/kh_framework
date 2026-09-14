@@ -54,6 +54,8 @@
 #include <ksmedia.h>
 #include <d3dcompiler.h>
 #include <d3d11_1.h>
+#include <intrin.h>
+#include <smmintrin.h>
 
 #include "intercept/include/intercept.hpp"
 #include "intercept/include/client/sqf/sqf.hpp"
@@ -231,7 +233,7 @@ static void report_error(const std::string& error_message) {
 
 static game_value raw_call_sqf_native(const code& code_obj) noexcept {
     g_return_value = game_value();
-    intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, code_obj);
+    intercept::client::host::functions.invoke_raw_unary_nolock(intercept::client::__sqf::unary__isnil__code_string__ret__bool, code_obj);
     game_value result = g_return_value;
     g_return_value = game_value();
     return result;
@@ -240,14 +242,14 @@ static game_value raw_call_sqf_native(const code& code_obj) noexcept {
 static game_value raw_call_sqf_args_native(const code& code_obj, const game_value& args) noexcept {
     g_return_value = game_value();
     g_call_arguments = args;
-    intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, code_obj);
+    intercept::client::host::functions.invoke_raw_unary_nolock(intercept::client::__sqf::unary__isnil__code_string__ret__bool, code_obj);
     game_value result = g_return_value;
     g_return_value = game_value();
     return result;
 }
 
 static game_value raw_call_sqf_native_no_return(const code& code_obj) noexcept {
-    intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, code_obj);
+    intercept::client::host::functions.invoke_raw_unary_nolock(intercept::client::__sqf::unary__isnil__code_string__ret__bool, code_obj);
     return game_value();
 }
 
@@ -255,7 +257,7 @@ static game_value raw_call_sqf_args_native_no_return(const code& code_obj, const
     auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
     static r_string args_name = "_khargs"sv;
     game_state->set_local_variable(args_name, args);
-    intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, code_obj);
+    intercept::client::host::functions.invoke_raw_unary_nolock(intercept::client::__sqf::unary__isnil__code_string__ret__bool, code_obj);
     return game_value();
 }
 

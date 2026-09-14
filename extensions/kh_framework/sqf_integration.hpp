@@ -8061,6 +8061,22 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("shadowActiveObjects", static_cast<float>(khrs_casters)));
         out.push_back(kv("meshDefs", static_cast<float>(RenderIntegration::mesh_count())));
         out.push_back(kv("flushes", static_cast<float>(s.flushes)));
+        // KH_RENDER_FLUSH: frames the game thread did not park because the
+        // render thread flushed them (fullscreen-only frames), and whether
+        // that path stood down for the session (1 = every frame parks again).
+        out.push_back(kv("rtFlushFrames", static_cast<float>(s.rt_flush_frames)));
+        // KH_RENDER_FLUSH: the render-thread flush stood the path down for
+        // this session (a depth view it needs was missing at the hook); every
+        // frame parks again, which reads as the pre-campaign frame rate.
+        out.push_back(kv("rtFlushFallback", RenderIntegration::g_fx_rt_fallback.load(std::memory_order_relaxed) ? 1.0f : 0.0f));
+        // KH_PRESENT_UI: 1 = the Present hook is installed and the UI chain is
+        // drawn from it, 0 = not attempted yet, -1 = the install failed and the
+        // UI passes are back on the graphics lock.
+        out.push_back(kv("presentHookActive", RenderIntegration::g_present_hook_active.load(std::memory_order_relaxed) ? 1.0f : (RenderIntegration::g_present_hook_failed ? -1.0f : 0.0f)));
+        // KH_UI_POISON_RUN: consecutive UI flushes whose eight coverage probes
+        // all read 255. At KH_UI_POISON_DEAD the mask is dead for that display
+        // and no UI pass draws - which is the map screen, by decision.
+        out.push_back(kv("uiPoisonRun", static_cast<float>(RenderIntegration::g_ui_poison_run)));   // A plain int, read torn-free on x64.
         out.push_back(kv("uiFlushes", static_cast<float>(s.ui_flushes)));
         out.push_back(kv("injections", static_cast<float>(s.composite_injections)));
         out.push_back(kv("pipInjections", static_cast<float>(s.pip_injections)));   // KH_PIP.
@@ -8110,6 +8126,20 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("texturesReleased", static_cast<float>(s.textures_released)));
         out.push_back(kv("shaderCacheHits", static_cast<float>(RenderIntegration::g_shader_cache_hits.load(std::memory_order_relaxed))));
         out.push_back(kv("shaderCacheMisses", static_cast<float>(RenderIntegration::g_shader_cache_misses.load(std::memory_order_relaxed))));
+        // KH_PROF: the ended cycle's frame-time breakdown. For every CPU zone,
+        // "<zone>Us" is the microseconds spent in it during the cycle and
+        // "<zone>N" its entry count (hookMap counts maps and unmaps; the w*
+        // zones are worker-microseconds summed across the pool). For every GPU
+        // zone, "<zone>Us" is the GPU interval of its last run in the cycle
+        // two clears back (timestamp queries read without a stall).
+        for (uint32_t khps_z = 0; khps_z < RenderIntegration::KHP_ZONE_N; ++khps_z) {
+            const std::string khps_n = RenderIntegration::g_prof_zone_name[khps_z];
+            out.push_back(kv((khps_n + "Us").c_str(), static_cast<float>(RenderIntegration::g_prof_us_pub[khps_z].load(std::memory_order_relaxed))));
+            out.push_back(kv((khps_n + "N").c_str(), static_cast<float>(RenderIntegration::g_prof_n_pub[khps_z].load(std::memory_order_relaxed))));
+        }
+        for (uint32_t khgs_z = 0; khgs_z < RenderIntegration::KHG_ZONE_N; ++khgs_z) {
+            out.push_back(kv((std::string(RenderIntegration::g_gpu_zone_name[khgs_z]) + "Us").c_str(), static_cast<float>(RenderIntegration::g_gpu_us_pub[khgs_z].load(std::memory_order_relaxed))));
+        }
         out.push_back(kv("lockRetries", static_cast<float>(s.lock_retries)));
         out.push_back(kv("lockFailedFrames", static_cast<float>(s.lock_failed_frames)));
         out.push_back(kv("hookActive", RenderIntegration::g_reorder_hook_active.load(std::memory_order_relaxed) ? 1.0f : 0.0f));
@@ -9775,39 +9805,22 @@ static void initialize_sqf_integration() {
     )");
 
     g_compiled_kh_ui_render_init = sqf::compile(R"(
-        private _display = findDisplay 46;
-
-        if (isNull _display) exitWith { 
+        if (isNull (findDisplay 46)) exitWith { 
             setReturnValue false;
         };
 
-        private _old = uiNamespace getVariable ["kh_var_uiDriverControl", controlNull];
-
-        if !(isNull _old) then { 
-            ctrlDelete _old;
+        if (missionNamespace isNil "KH_var_uiDriver") then {
+            missionNamespace setVariable [
+                "KH_var_uiDriver",
+                addMissionEventHandler [
+                    "Draw2D", 
+                    {
+                        flushUIRender;
+                    }
+                ]
+            ];
         };
 
-        private _control = _display ctrlCreate ["RscMapControlEmpty", -1];
-
-        if (isNull _control) then { 
-            _control = _display ctrlCreate ["RscMapControlEmpty", -1] 
-        };
-
-        if (isNull _control) exitWith { 
-            setReturnValue false;
-        };
-
-        _control ctrlSetPosition [0, 0, 0.000001, 0.000001];
-        _control ctrlCommit 0;
-
-        _control ctrlAddEventHandler [
-            "Draw", 
-            { 
-                flushUIRender;
-            }
-        ];
-
-        uiNamespace setVariable ["kh_var_uiDriverControl", _control];
         setReturnValue true;
     )");
 }

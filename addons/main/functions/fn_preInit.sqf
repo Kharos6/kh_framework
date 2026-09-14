@@ -1889,7 +1889,7 @@ if hasInterface then {
 					};
 				},
 				true,
-				{KH_var_clientRegistered && KH_var_missionInitialized && !(isNull player) && (alive player);},
+				{KH_var_clientRegistered && KH_var_missionInitialized && KH_var_missionLoaded && !(isNull player) && (alive player);},
 				false
 			];
 		}

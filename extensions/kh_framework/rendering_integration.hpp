@@ -4,10 +4,250 @@
 
 // FBX/texture third-party units (ufbx, mikktspace, stb_image) + <fstream>/
 // <memory>: included by the framework header ahead of this file.
+// KH_WC_COPY (kh_wc_copy) uses __cpuid, _mm_mfence and _mm_stream_load_si128:
+// <intrin.h> and <smmintrin.h> come from the framework header ahead of this file.
 
 // Both integration headers are CRLF-only, tab-free ASCII. Shaders are plain
 // .hlsl RCDATA resources (kh_shaders.rc).
 namespace RenderIntegration {
+
+// KH_STATS_ARMED (hoisted here for KH_PROF, whose scopes precede the stats
+// block): collection is off until the first getRenderStats.
+static std::atomic<bool> g_stats_armed{ false };
+inline bool kh_stats_on() { return g_stats_armed.load(std::memory_order_relaxed); }
+// KH_PROF: opt-in frame-time instrumentation, CPU and GPU, per main-depth
+// cycle. Nothing here runs unless the stats are armed (a getRenderStats):
+// a disarmed session pays one relaxed load per scope, no QPC, no query.
+//
+// CPU zones: KhProfScope takes two QueryPerformanceCounter reads around a
+// region and adds the ticks and one entry to the zone's accumulators -
+// relaxed atomics, because zones run on the render thread, the game thread
+// under the park, the UI-phase thread and the worker pool. The fold at the
+// main depth clear (kh_prof_fold) converts the accumulators to microseconds
+// and publishes them with the entry counts as "the ended cycle's" values.
+// Worker-pool zones (cloth, chain, skin, BVH) sum across workers, so they
+// are worker-microseconds and can exceed the frame; divide by the count.
+//
+// GPU zones: one TIMESTAMP_DISJOINT query brackets each cycle (begun and
+// ended at the main depth clear, on the render thread), and each zone owns
+// a begin/end TIMESTAMP pair per ring slot. KhGpuScope issues End(begin)
+// and End(end) on the context it is given - the immediate context, whether
+// the render thread or the parked game thread holds it. The fold reads the
+// slot two cycles back with DONOTFLUSH and keeps the last value when a
+// result is not ready, so no readback ever stalls the pipeline. Queries are
+// created lazily on the first armed use and released with the resources.
+// A zone that ran more than once in a cycle reports its last run (a pair
+// holds one interval); the CPU count tells how many runs there were.
+enum KhProfZone : uint32_t {
+    // Render-thread hooks.
+    KHP_HOOK_CLEAR, KHP_HOOK_DRAW, KHP_HOOK_MAP, KHP_UPLOAD_SCAN,
+    // Injection and its systems.
+    KHP_INJECT, KHP_ATTACH_STEP, KHP_SCENE_SYNC, KHP_OBJBUF_SYNC, KHP_SUN_LADDER,
+    KHP_DLS_FRAME, KHP_DLS_WORLD, KHP_MASK_CAST, KHP_SVS_PRIME, KHP_SVS_VOL_COPY,
+    KHP_VMIR, KHP_SSAO, KHP_CULL_BUILD, KHP_VIS_OCC, KHP_INST_PLAN, KHP_SNAPSHOT,
+    KHP_PIP, KHP_BAND_COMMIT, KHP_THM_AUTOBUILD, KHP_DL_ACQUIRE,
+    // Game-thread flush and its systems.
+    KHP_FLUSH, KHP_FLUSH_FRAME, KHP_FLUSH_UI, KHP_CLOTH_UPLOAD, KHP_SKIN_UPLOAD, KHP_SKIN_SYNC,
+    // KH_PARK_WAIT: the graphics-lock acquire alone, per park (the game thread
+    // stalled until the render thread reaches the engine's grant point), for
+    // the Draw3D park and the UI driver's park; flushUiFrame is the UI park whole.
+    KHP_FLUSH_LOCK_WAIT, KHP_FLUSH_UI_LOCK_WAIT, KHP_FLUSH_UI_FRAME,
+    // flush_frame's pre-lock work, in three pieces: the attachment step and
+    // reaps; the demand census under g_draw_list_mutex; the rest up to the
+    // park decision (proxy step, chain prepare, the driver re-hoist, the hook
+    // ensure).
+    KHP_FLUSH_PRE, KHP_FLUSH_CENSUS, KHP_FLUSH_PREP,
+    KHP_CHAIN_PREPARE, KHP_CLOTH_PROXY, KHP_PHYSICS_GATHER, KHP_MESH_GC, KHP_SCENE_CAPTURE,
+    KHP_UI_MASK_DRAW,
+    // Worker pool (worker-microseconds).
+    KHP_W_CLOTH_SIM, KHP_W_CHAIN_SIM, KHP_W_SKIN_JOB, KHP_W_BVH_BUILD, KHP_W_BVH_REFIT,
+    // One-shot builders (import time).
+    KHP_LOD_BUILD, KHP_ENSURE_RES,
+    KHP_ZONE_N
+};
+static const char* const g_prof_zone_name[KHP_ZONE_N] = {
+    "hookClear", "hookDraw", "hookMap", "uploadScan",
+    "inject", "attachStep", "sceneSync", "objbufSync", "sunLadder",
+    "dlsFrame", "dlsWorld", "maskCast", "svsPrime", "svsVolCopy",
+    "vmir", "ssao", "cullBuild", "visOcc", "instPlan", "snapshot",
+    "pip", "bandCommit", "thmAutobuild", "dlAcquire",
+    "flush", "flushFrame", "flushUi", "clothUpload", "skinUpload", "skinSync",
+    "flushLockWait", "flushUiLockWait", "flushUiFrame",
+    "flushPre", "flushCensus", "flushPrep",
+    "chainPrepare", "clothProxy", "physicsGather", "meshGc", "sceneCapture",
+    "uiMaskDraw",
+    "wClothSim", "wChainSim", "wSkinJob", "wBvhBuild", "wBvhRefit",
+    "lodBuild", "ensureRes",
+};
+static std::atomic<uint64_t> g_prof_ticks[KHP_ZONE_N];
+static std::atomic<uint64_t> g_prof_count[KHP_ZONE_N];
+static std::atomic<uint64_t> g_prof_us_pub[KHP_ZONE_N];
+static std::atomic<uint64_t> g_prof_n_pub[KHP_ZONE_N];
+inline uint64_t kh_prof_freq() {
+    static const uint64_t khpf = [] { LARGE_INTEGER khpf_f = {}; QueryPerformanceFrequency(&khpf_f); return khpf_f.QuadPart > 0 ? static_cast<uint64_t>(khpf_f.QuadPart) : 1ull; }();
+    return khpf;
+}
+struct KhProfScope {
+    KhProfZone khps_z;
+    int64_t    khps_t0;
+    bool       khps_on;
+    explicit KhProfScope(KhProfZone khps_zone) : khps_z(khps_zone), khps_t0(0), khps_on(kh_stats_on()) {
+        if (khps_on) { LARGE_INTEGER khps_q = {}; QueryPerformanceCounter(&khps_q); khps_t0 = khps_q.QuadPart; }
+    }
+    ~KhProfScope() {
+        if (!khps_on) return;
+        LARGE_INTEGER khps_q = {}; QueryPerformanceCounter(&khps_q);
+        g_prof_ticks[khps_z].fetch_add(static_cast<uint64_t>(khps_q.QuadPart - khps_t0), std::memory_order_relaxed);
+        g_prof_count[khps_z].fetch_add(1, std::memory_order_relaxed);
+    }
+    KhProfScope(const KhProfScope&) = delete;
+    KhProfScope& operator=(const KhProfScope&) = delete;
+};
+#define KH_PROF_SCOPE(z) KhProfScope khps_scope_##z(z)
+// An explicit interval for a region a scope cannot bracket (a constructor's
+// own body: the graphics lock's acquire). Same accounting, armed only.
+inline int64_t kh_prof_now() { if (!kh_stats_on()) return 0; LARGE_INTEGER khpn_q = {}; QueryPerformanceCounter(&khpn_q); return khpn_q.QuadPart; }
+inline void kh_prof_add(KhProfZone khpa_z, int64_t khpa_t0) {
+    if (!kh_stats_on() || khpa_t0 == 0) return;
+    LARGE_INTEGER khpa_q = {}; QueryPerformanceCounter(&khpa_q);
+    g_prof_ticks[khpa_z].fetch_add(static_cast<uint64_t>(khpa_q.QuadPart - khpa_t0), std::memory_order_relaxed);
+    g_prof_count[khpa_z].fetch_add(1, std::memory_order_relaxed);
+}
+
+enum KhGpuZone : uint32_t {
+    KHG_INJECT, KHG_SUN_LADDER, KHG_DLS_FRAME, KHG_DLS_WORLD, KHG_MASK_CAST, KHG_SVS_PRIME,
+    KHG_SVS_VOL_COPY, KHG_VMIR, KHG_SSAO_POST, KHG_SNAPSHOT, KHG_PIP,
+    KHG_FLUSH, KHG_FLUSH_UI, KHG_SCENE_CAPTURE,
+    KHG_ZONE_N
+};
+static const char* const g_gpu_zone_name[KHG_ZONE_N] = {
+    "gInject", "gSunLadder", "gDlsFrame", "gDlsWorld", "gMaskCast", "gSvsPrime",
+    "gSvsVolCopy", "gVmir", "gSsaoPost", "gSnapshot", "gPip",
+    "gFlush", "gFlushUi", "gSceneCapture",
+};
+static constexpr uint32_t KH_GPU_RING = 4u;
+struct KhGpuProf {
+    ID3D11Query* disjoint[KH_GPU_RING] = {};
+    ID3D11Query* ts[KHG_ZONE_N][KH_GPU_RING][2] = {};
+    bool         used[KHG_ZONE_N][KH_GPU_RING] = {};
+    bool         ready = false;    // Queries exist.
+    bool         failed = false;   // A create failed: the GPU side stands down for the session.
+    int          open_slot = -1;   // Slot whose disjoint is begun, -1 = none.
+    uint64_t     cycle = 0;        // Cycles folded (ring index source).
+};
+static KhGpuProf g_gpu_prof;
+static std::atomic<uint64_t> g_gpu_us_pub[KHG_ZONE_N];
+inline uint32_t kh_gpu_slot() { return static_cast<uint32_t>(g_gpu_prof.cycle % KH_GPU_RING); }
+inline bool kh_gpu_prof_ensure(ID3D11DeviceContext* khgp_ctx) {
+    if (g_gpu_prof.ready) return true;
+    if (g_gpu_prof.failed || !khgp_ctx) return false;
+    ID3D11Device* khgp_dev = nullptr;
+    khgp_ctx->GetDevice(&khgp_dev);
+    if (!khgp_dev) { g_gpu_prof.failed = true; return false; }
+    bool khgp_ok = true;
+    for (uint32_t khgp_r = 0; khgp_r < KH_GPU_RING && khgp_ok; ++khgp_r) {
+        D3D11_QUERY_DESC khgp_dd = {}; khgp_dd.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+        if (FAILED(khgp_dev->CreateQuery(&khgp_dd, &g_gpu_prof.disjoint[khgp_r]))) khgp_ok = false;
+        for (uint32_t khgp_z = 0; khgp_z < KHG_ZONE_N && khgp_ok; ++khgp_z) {
+            D3D11_QUERY_DESC khgp_td = {}; khgp_td.Query = D3D11_QUERY_TIMESTAMP;
+            if (FAILED(khgp_dev->CreateQuery(&khgp_td, &g_gpu_prof.ts[khgp_z][khgp_r][0])) ||
+                FAILED(khgp_dev->CreateQuery(&khgp_td, &g_gpu_prof.ts[khgp_z][khgp_r][1]))) khgp_ok = false;
+        }
+    }
+    khgp_dev->Release();
+    if (!khgp_ok) {
+        for (uint32_t khgp_r = 0; khgp_r < KH_GPU_RING; ++khgp_r) {
+            KH_SAFE_RELEASE(g_gpu_prof.disjoint[khgp_r]);
+            for (uint32_t khgp_z = 0; khgp_z < KHG_ZONE_N; ++khgp_z) { KH_SAFE_RELEASE(g_gpu_prof.ts[khgp_z][khgp_r][0]); KH_SAFE_RELEASE(g_gpu_prof.ts[khgp_z][khgp_r][1]); }
+        }
+        g_gpu_prof.failed = true;
+        return false;
+    }
+    g_gpu_prof.ready = true;
+    return true;
+}
+inline void kh_gpu_prof_release() {
+    for (uint32_t khgr_r = 0; khgr_r < KH_GPU_RING; ++khgr_r) {
+        KH_SAFE_RELEASE(g_gpu_prof.disjoint[khgr_r]);
+        for (uint32_t khgr_z = 0; khgr_z < KHG_ZONE_N; ++khgr_z) {
+            KH_SAFE_RELEASE(g_gpu_prof.ts[khgr_z][khgr_r][0]);
+            KH_SAFE_RELEASE(g_gpu_prof.ts[khgr_z][khgr_r][1]);
+            g_gpu_prof.used[khgr_z][khgr_r] = false;
+        }
+    }
+    g_gpu_prof.ready = false;
+    g_gpu_prof.failed = false;
+    g_gpu_prof.open_slot = -1;
+}
+struct KhGpuScope {
+    ID3D11DeviceContext* khgs_ctx;
+    KhGpuZone            khgs_z;
+    int                  khgs_slot;   // The bracket the begin stamp went to; -1 = none.
+    KhGpuScope(ID3D11DeviceContext* khgs_c, KhGpuZone khgs_zone) : khgs_ctx(khgs_c), khgs_z(khgs_zone), khgs_slot(-1) {
+        // Only inside an open cycle bracket, on a ready query set.
+        if (!kh_stats_on() || !khgs_ctx || g_gpu_prof.open_slot < 0 || !g_gpu_prof.ready) return;
+        khgs_slot = g_gpu_prof.open_slot;
+        khgs_ctx->End(g_gpu_prof.ts[khgs_z][static_cast<uint32_t>(khgs_slot)][0]);
+        g_gpu_prof.used[khgs_z][static_cast<uint32_t>(khgs_slot)] = true;
+    }
+    ~KhGpuScope() {
+        // The end stamp goes to the begin's bracket; if that bracket closed
+        // meanwhile the pair is dropped rather than straddling two.
+        if (khgs_slot < 0) return;
+        if (g_gpu_prof.open_slot != khgs_slot) { g_gpu_prof.used[khgs_z][static_cast<uint32_t>(khgs_slot)] = false; return; }
+        khgs_ctx->End(g_gpu_prof.ts[khgs_z][static_cast<uint32_t>(khgs_slot)][1]);
+    }
+    KhGpuScope(const KhGpuScope&) = delete;
+    KhGpuScope& operator=(const KhGpuScope&) = delete;
+};
+#define KH_GPU_SCOPE(ctx, z) KhGpuScope khgs_scope_##z((ctx), z)
+
+// The cycle fold, at the main depth clear on the render thread: publish the
+// CPU accumulators, close this cycle's GPU bracket, harvest the slot two
+// cycles back, and open the next bracket while the stats stay armed.
+inline void kh_prof_fold(ID3D11DeviceContext* khpf_ctx) {
+    const uint64_t khpf_f = kh_prof_freq();
+    for (uint32_t khpf_z = 0; khpf_z < KHP_ZONE_N; ++khpf_z) {
+        const uint64_t khpf_t = g_prof_ticks[khpf_z].exchange(0, std::memory_order_relaxed);
+        const uint64_t khpf_n = g_prof_count[khpf_z].exchange(0, std::memory_order_relaxed);
+        g_prof_us_pub[khpf_z].store(khpf_t * 1000000ull / khpf_f, std::memory_order_relaxed);
+        g_prof_n_pub[khpf_z].store(khpf_n, std::memory_order_relaxed);
+    }
+    const bool khpf_on = kh_stats_on();
+    if (g_gpu_prof.open_slot >= 0 && g_gpu_prof.ready && khpf_ctx) {
+        khpf_ctx->End(g_gpu_prof.disjoint[static_cast<uint32_t>(g_gpu_prof.open_slot)]);
+        g_gpu_prof.open_slot = -1;
+        g_gpu_prof.cycle++;
+        // Harvest: the slot two cycles back, never waiting.
+        if (g_gpu_prof.cycle >= 2) {
+            const uint32_t khpf_s = static_cast<uint32_t>((g_gpu_prof.cycle - 2) % KH_GPU_RING);
+            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT khpf_dj = {};
+            if (khpf_ctx->GetData(g_gpu_prof.disjoint[khpf_s], &khpf_dj, sizeof(khpf_dj), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
+                !khpf_dj.Disjoint && khpf_dj.Frequency > 0) {
+                for (uint32_t khpf_z = 0; khpf_z < KHG_ZONE_N; ++khpf_z) {
+                    if (!g_gpu_prof.used[khpf_z][khpf_s]) { g_gpu_us_pub[khpf_z].store(0, std::memory_order_relaxed); continue; }
+                    UINT64 khpf_a = 0, khpf_b = 0;
+                    if (khpf_ctx->GetData(g_gpu_prof.ts[khpf_z][khpf_s][0], &khpf_a, sizeof(khpf_a), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
+                        khpf_ctx->GetData(g_gpu_prof.ts[khpf_z][khpf_s][1], &khpf_b, sizeof(khpf_b), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
+                        khpf_b >= khpf_a) {
+                        g_gpu_us_pub[khpf_z].store((khpf_b - khpf_a) * 1000000ull / khpf_dj.Frequency, std::memory_order_relaxed);
+                    }
+                    g_gpu_prof.used[khpf_z][khpf_s] = false;
+                }
+            }
+        }
+    }
+    if (khpf_on && khpf_ctx && kh_gpu_prof_ensure(khpf_ctx)) {
+        const uint32_t khpf_s = kh_gpu_slot();
+        for (uint32_t khpf_z = 0; khpf_z < KHG_ZONE_N; ++khpf_z) g_gpu_prof.used[khpf_z][khpf_s] = false;
+        khpf_ctx->Begin(g_gpu_prof.disjoint[khpf_s]);
+        g_gpu_prof.open_slot = static_cast<int>(khpf_s);
+    }
+}
+inline void kh_prof_reset_pub() {
+    for (uint32_t khpr_z = 0; khpr_z < KHP_ZONE_N; ++khpr_z) { g_prof_us_pub[khpr_z].store(0, std::memory_order_relaxed); g_prof_n_pub[khpr_z].store(0, std::memory_order_relaxed); }
+    for (uint32_t khpr_z = 0; khpr_z < KHG_ZONE_N; ++khpr_z) g_gpu_us_pub[khpr_z].store(0, std::memory_order_relaxed);
+}
 
 enum class DepthMode : int {
     TestOnly = 0,   // Default: occluded by scene, depth buffer untouched.
@@ -769,6 +1009,7 @@ struct KhPhysicsBvhTopo {
 
 inline void kh_physics_bvh_build(KhPhysicsBvh& khcb_o, const float* khcb_pos, uint32_t khcb_nv,
                                const uint32_t* khcb_ix, uint32_t khcb_ni, KhPhysicsBvhTopo* khcb_topo = nullptr) {
+    KH_PROF_SCOPE(KHP_W_BVH_BUILD);   // KH_PROF.
     khcb_o.nodes.clear(); khcb_o.tri.clear(); khcb_o.vp.clear(); khcb_o.vd.clear();
     if (khcb_topo) { khcb_topo->src.clear(); khcb_topo->cid.clear(); khcb_topo->eid.clear(); khcb_topo->ncid = khcb_topo->neid = 0u; }
     if (!khcb_pos || !khcb_ix || khcb_ni < 3u) return;
@@ -960,6 +1201,7 @@ inline void kh_physics_bvh_build(KhPhysicsBvh& khcb_o, const float* khcb_pos, ui
 // holds both poses, so a query at any fraction between them prunes correctly.
 inline bool kh_physics_bvh_refit(KhPhysicsBvh& khrf_o, const KhPhysicsBvhTopo& khrf_tp, const float* khrf_pos,
                                uint32_t khrf_nv, std::vector<float>& khrf_scr, const float* khrf_prev = nullptr) {
+    KH_PROF_SCOPE(KHP_W_BVH_REFIT);   // KH_PROF.
     const size_t khrf_nt = khrf_o.tri.size();
     if (khrf_nt == 0u || khrf_tp.src.size() != khrf_nt * 3u || khrf_tp.cid.size() != khrf_nt * 3u ||
         khrf_tp.eid.size() != khrf_nt * 3u || khrf_o.vp.size() != khrf_nt * 9u || khrf_o.pn.size() != khrf_nt * 18u) return false;
@@ -4787,6 +5029,7 @@ inline void kh_chain_step(KhClothState& s, KhChainState& c, const KhChainParams&
                           size_t ncol, const float* centre, const float* rot, bool rotated, const float* size,
                           float dt, const float* wind, const float* g, size_t nbone, const KhChainTarget& tg,
                           const KhClothAffView* aff, size_t naff, const KhClothGround* ground) {
+    KH_PROF_SCOPE(KHP_W_CHAIN_SIM);   // KH_PROF.
     if (c.body.empty()) return;
     if (!(dt > 0.0f)) dt = 0.0f;
     if (dt > KH_CLOTH_DT_MAX) dt = KH_CLOTH_DT_MAX;
@@ -5969,7 +6212,9 @@ struct KhUiMask {
     void*    bb_id[4] = {};
     UINT     bb_w[4] = {}, bb_h[4] = {};
     uint32_t bb_n = 0;
-    // Phase machine (render thread only).
+    // Phase machine: fed by the backbuffer draws of BOTH context threads (the
+    // engine draws its UI from either; KH_UI_MASK_RT), which the engine
+    // serialises on the immediate context; clocked by the Present sequence.
     int      phase = 0;   // 0 idle, 1 armed, 2 compose ran, 3 cleared.
     void*    phase_bb = nullptr;   // The learned entry the current phase locked.
     UINT     phase_w = 0, phase_h = 0;
@@ -5989,7 +6234,92 @@ struct KhUiMask {
     bool        alpha_copy_pending = false;
 };
 static KhUiMask g_ui_mask;
+// KH_UI_POISON_RUN: consecutive UI flushes whose coverage probes all read 255
+// (no widget alpha survived to the flush). One such frame is a transient the
+// history mask covers; KH_UI_POISON_DEAD of them in a row is a display where
+// the machine's clear placement does not hold (the map: the engine enters
+// the Present function body ~30 times in one presented frame there, one call
+// site, plain flags - measured by capture - and every entry re-arms the
+// machine and wipes the alpha; the real Present is the last). On such a
+// display the mask is declared dead: no passes, no correction, the history
+// frozen at its last sane state, so the effect stops instead of painting the
+// previous display's coverage (the ghost) and resumes when the probes read
+// coverage again. uiPoisonRun publishes the run.
+static constexpr int32_t     KH_UI_POISON_DEAD = 3;
+static int32_t               g_ui_poison_run = 0;   // UI-flush thread only.
+// KH_UI_DIAG, verdicts of the round-C investigation, recorded here because
+// their lanes are gone: the UI driver's Draw EH fires OUTSIDE the engine's
+// UI pass (the bound target there was never a learned backbuffer); the
+// graphics lock, once the Draw3D park was gone, was granted where the
+// backbuffer IS bound but ahead of the engine's own UI composition, which
+// then painted over the effect; the runtime's multithread protection is OFF
+// on this engine (the two context threads never overlap; the engine hands
+// the context over), so drawing from the EH without a lock collided with the
+// render thread - the one crash of the campaign. Present is the point after
+// the widgets, and it needs no lock.
+// KH_UI_THREADS (measured; the lanes are retired, the fact is not): the
+// engine draws MOST of its UI pass on the RENDER thread and a few widgets
+// plus Present on the game thread, which is why the machine is fed from both
+// context threads (reorder_pre_draw's two call sites). A build on which that
+// stops holding feeds the machine from one thread and places the alpha clear
+// against the other's draws; the symptom is 'some elements, flashing'.
+// KH_PRESENT (measured; the lanes are retired, the facts are not): one
+// swapchain, one calling site, flags 0, sync 0, and no DXGI_PRESENT_TEST call
+// on this build - but the body IS entered about twice per presented HUD frame
+// and about thirty times per map frame. hooked_present is written for all of
+// that and counts none of it, so a build that presents differently costs
+// correctness rather than a lane; the TEST passthrough stays for the same
+// reason.
 static std::atomic<bool> g_ui_mask_wanted{false};   // Any visible UI-mode pass exists.
+// KH_PRESENT_UI (round C): the UI chain is drawn from a hooked
+// IDXGISwapChain::Present - after the engine's widgets and before the flip,
+// on the thread that presents, which owns the immediate context exclusively
+// at that call (the runtime forbids concurrent use; the engine's own Present
+// would otherwise be UB). The UI driver's Draw EH fires OUTSIDE the UI pass
+// (measured: the target there was never a learned backbuffer) and its
+// graphics lock lands where the engine then paints its scene quad over the
+// effect (the target changed across the wait; uiCovMax 255): Present is
+// the one point after the widgets this engine exposes, and it needs no lock.
+// The hook is found through a throwaway swapchain on a hidden window (a
+// vtable is per class, so its Present slot is the game's), installed with
+// MinHook beside the fifteen context slots, and like them never uninstalled:
+// it passes through whenever the demand is off. flush_ui_locked runs
+// unchanged inside it, with an RTV on the swapchain's backbuffer bound under
+// a KhOmSave (it draws into whatever RT0 is bound). While this path is live
+// (a Present within KH_PRESENT_UI_STALE_MS drew the chain) the driver's EH
+// takes no lock and the Draw3D park is not forced by UI effects; otherwise
+// both fall back to what they were.
+static constexpr uint64_t     KH_PRESENT_UI_STALE_MS = 250;
+static std::atomic<bool>      g_present_hook_active{ false };
+static bool                   g_present_hook_failed = false;   // Game thread: one attempt per PROCESS - no reset clears this, and the
+                                                               // two ways it fails (no swapchain vtable, MinHook refusing the slot)
+                                                               // are structural, so a later mission would fail the same way.
+static std::atomic<uint64_t>  g_present_ui_ms{ 0 };   // Steady ms of the last Present that drew the UI chain.
+// KH_PRESENT_SEQ: presented frames, counted at every real (non-TEST) Present
+// of the game's swapchain. While the Present path is live this is the UI
+// mask machine's frame clock in place of the game thread's flush ordinal:
+// measured, that ordinal ticks about twice per presented frame once the
+// Draw3D park no longer holds the two in step, so the arm gate opened twice a
+// frame, the alpha-zero clear ran twice, and the coverage at Present held only
+// the widgets drawn after the second clear (the flicker; the effect on one
+// element). A clock that ticks once per Present arms once - at the frame's
+// first backbuffer draw, the scene quad - and clears once.
+static std::atomic<uint64_t>  g_present_seq{ 0 };
+inline uint64_t kh_ui_frame_ordinal();   // Defined after g_flush_frame_pub, which it reads on the lock path.
+static ID3D11RenderTargetView* g_present_rtv[4] = {};   // RTVs on the swapchain's buffers, by weak identity (device state).
+static void*                   g_present_rtv_id[4] = {};
+static uint32_t                g_present_rtv_next = 0;
+inline uint64_t steady_now_ms();   // Defined with the clocks below; the liveness test needs it here.
+inline bool kh_present_ui_live() {
+    if (!g_present_hook_active.load(std::memory_order_relaxed)) return false;
+    const uint64_t khpl_ms = g_present_ui_ms.load(std::memory_order_relaxed);
+    return khpl_ms != 0 && steady_now_ms() - khpl_ms < KH_PRESENT_UI_STALE_MS;
+}
+inline void kh_present_rtv_release() {
+    for (int khpr_i = 0; khpr_i < 4; ++khpr_i) { KH_SAFE_RELEASE(g_present_rtv[khpr_i]); g_present_rtv_id[khpr_i] = nullptr; }
+    g_present_rtv_next = 0;
+}
+inline void ensure_present_hook();   // Defined with the hook, after flush_ui_locked.
 // KH_SVS_VOL_DEMAND: any visible non-fullscreen mesh exists. Recomputed in
 // flush_frame's demand loop beside the UI and lit flags.
 static std::atomic<bool> g_svs_mesh_wanted{false};
@@ -6012,8 +6342,33 @@ static std::atomic<bool> g_ui_mask_injecting{false};
 static std::atomic<bool> g_kh_track_wanted{false};
 // Sticky until a sane reading (min < 32).
 
+// KH_PRESENT_RTV: the engine's own render-target view for the frame's UI
+// pass, taken (AddRef'd) at the mask machine's arm - the object the widgets
+// draw into - and bound at Present for the UI flush. GetBuffer(0) is NOT that
+// object on a flip-model swapchain (the buffers rotate; measured: the hook
+// saw ~4 of ~50 widget draws per frame as 'known', the rest landed on a
+// buffer the machine had never learned, and which widgets took the effect
+// changed with the frame and the open display). Written at the arm, which
+// since KH_UI_MASK_RT runs on EITHER context thread, and read at Present on
+// the presenting thread (presentOnUiThread): the machine's other state is
+// safe across that pair because the engine drives the immediate context from
+// one thread at a time, but Present is a swapchain call and takes no part in
+// that exclusion, so the reader holds its own reference (see hooked_present).
+// Released with the mask.
+static ID3D11RenderTargetView* g_ui_frame_rtv = nullptr;
+static uint64_t                g_ui_frame_rtv_seq = 0;   // The present sequence it was taken in.
+// KH_UI_PS_LEARN's store (the rule sits with the machine, kh_ui_draw_is_ui_ps).
+static ID3D11PixelShader* g_ui_ps_learn[8] = {};
+static uint32_t           g_ui_ps_learn_n = 0;
+inline void kh_ui_ps_learn_release() {
+    for (uint32_t khpl_i = 0; khpl_i < 8; ++khpl_i) KH_SAFE_RELEASE(g_ui_ps_learn[khpl_i]);
+    g_ui_ps_learn_n = 0;
+}
 inline void kh_ui_mask_reset() {   // Device reset / session destroy: forget everything.
     g_ui_mask = KhUiMask{};
+    KH_SAFE_RELEASE(g_ui_frame_rtv);   // KH_PRESENT_RTV.
+    g_ui_frame_rtv_seq = 0;
+    kh_ui_ps_learn_release();   // KH_UI_PS_LEARN.
     g_ui_mask_wanted.store(false, std::memory_order_relaxed);
     g_ui_mask_injecting.store(false, std::memory_order_relaxed);
 }
@@ -6572,6 +6927,7 @@ inline void kh_objbuf_mark(uint32_t khom_slot) {   // Under the park (kh_scene_s
 // The dirty-only sync. Under the park invariant on whichever thread walks
 // next; takes g_draw_list_mutex for the copy only. O(dirty), O(1) when idle.
 inline void kh_scene_sync() {
+    KH_PROF_SCOPE(KHP_SCENE_SYNC);   // KH_PROF.
     std::lock_guard<std::mutex> khss_l(g_draw_list_mutex);
     if (g_scene_dirty.empty()) return;
     const size_t khss_n = g_scene_stage.size();
@@ -6609,6 +6965,7 @@ inline void kh_scene_sync() {
 // per dirty run (whole upload past half). Every write carries a box. False = no
 // buffer.
 inline bool kh_objbuf_sync(ID3D11DeviceContext* ctx) {
+    KH_PROF_SCOPE(KHP_OBJBUF_SYNC);   // KH_PROF.
     const uint32_t khob_n = static_cast<uint32_t>(g_objbuf_cpu.size());
     if (khob_n == 0 || !ctx) return false;
     bool khob_whole = false;
@@ -6973,7 +7330,7 @@ struct KhAttachDiag {
 static std::atomic<uint64_t> g_attach_repaired{ 0 };   // Reads taken only because the basis was repaired.
 static std::atomic<uint64_t> g_attach_refused{ 0 };    // Reads refused (the lane held its transform).
 static std::atomic<uint32_t> g_attach_skew_bits{ 0 };  // Float bits: the largest skew seen.
-inline bool kh_stats_on();   // Defined with the stats below.
+inline bool kh_stats_on();   // Defined with KH_PROF at the top of the namespace.
 
 // One test for "is this slot an object to follow", used by every site that
 // asks. is_nil FIRST: nil is a documented value in both slots (a nil rotation
@@ -7996,6 +8353,7 @@ inline void kh_attach_diag_note(bool khdn_ok, const KhAttachDiag& khdn_d) {
 // skinned here from the stash, once per cycle (KH_SKEL_DRAW); the game
 // thread's and the seams' steps pass none and read what the cycle skinned.
 inline void kh_attach_step(ID3D11DeviceContext* khap_ctx = nullptr) {
+    KH_PROF_SCOPE(KHP_ATTACH_STEP);   // KH_PROF.
     if (g_attach_n.load(std::memory_order_relaxed) == 0) return;
     std::lock_guard<std::mutex> khap_g(g_draw_list_mutex);
     for (auto khap_it = g_attach.begin(); khap_it != g_attach.end(); ++khap_it) {
@@ -8148,9 +8506,15 @@ inline std::string make_render_uid() {
 
 static uint64_t g_flush_frame = 0;
 static std::atomic<uint64_t> g_flush_frame_pub{0};
+// KH_PRESENT_SEQ: the UI mask machine's frame clock (see g_present_seq).
+inline uint64_t kh_ui_frame_ordinal() {
+    return kh_present_ui_live() ? g_present_seq.load(std::memory_order_relaxed)
+                                : g_flush_frame_pub.load(std::memory_order_relaxed);
+}
 
 struct RenderStats {
     uint64_t flushes = 0;   // Flush attempts with work queued.
+    uint64_t rt_flush_frames = 0;   // KH_RENDER_FLUSH: frames the game thread left to the render thread (no park).
     uint64_t lock_retries = 0;   // Individual failed lock acquisitions.
     uint64_t lock_failed_frames = 0;   // Frames dropped after all retries failed.
     uint64_t ui_flushes = 0;   // UI-phase flush attempts with work queued.
@@ -8195,8 +8559,7 @@ static RenderStats g_stats;
 // resetRenderStats zeroes the counters and disarms it again. Every counter
 // write goes through kh_stat / kh_stat_add so a disarmed session pays one
 // relaxed load per site and accumulates nothing.
-static std::atomic<bool> g_stats_armed{ false };
-inline bool kh_stats_on() { return g_stats_armed.load(std::memory_order_relaxed); }
+// g_stats_armed / kh_stats_on: defined with KH_PROF at the top of the file.
 inline void kh_stat(uint64_t& khst_c) { if (kh_stats_on()) ++khst_c; }
 inline void kh_stat_add(uint64_t& khst_c, uint64_t khst_n) { if (kh_stats_on()) khst_c += khst_n; }
 // The live flush count the graves and the band dedupe key on. Never reset - a
@@ -8271,7 +8634,49 @@ static constexpr uint64_t KH_FLUSH_LOCK_INTERVAL_MS = 100;
 static constexpr uint64_t KH_FLUSH_STALE_PERIODS = 2;
 static constexpr uint64_t KH_FLUSH_STALE_SLACK_MS = 4;
 static constexpr uint64_t KH_FLUSH_PERIOD_MIN_MS = 4;
-static bool     g_flush_can_skip = false;   // Game thread: the last locked flush's verdict.
+// The last flush's verdict, read by flush_frame on the game thread. Written by
+// flush_locked on WHICHEVER thread ran it, the render-thread flush included -
+// which is a plain cross-thread store, and harmless only because the switch
+// above is off and no reader consults it (the skip test short-circuits on
+// !KH_FLUSH_CADENCE_ON). Turning the switch on means giving this an owner.
+static bool     g_flush_can_skip = false;
+// KH_RENDER_FLUSH round B: a frame whose draw list holds ONLY fullscreen
+// effects (no mesh object at all, nothing simulating, nothing pending) is
+// flushed by the RENDER THREAD, from the scene-resolve hook (the same
+// pre-resolve moment the grant point lands at: the MSAA scene target still
+// bound, the main depth still bound), and the game thread does not park. This
+// is not the cadence skip above: nothing is left undrawn on a skipped park,
+// because the thread that owns the frame draws the chain itself, every cycle.
+// Anything the render thread may not do unparked - a mesh publish, a cloth or
+// skin upload, an expiry erase, the terrain upload, the GCs, the shader pump -
+// forces the park exactly as before, and a periodic park carries the
+// housekeeping (KH_RT_PARK_INTERVAL_MS). Mesh sessions are unchanged: any
+// non-fullscreen object parks every frame.
+//   g_fx_rt_wanted   game thread -> render thread: this frame's flush is yours
+//                    (set on a skipped frame; cleared by the parked flush at
+//                    its head, with the render thread stalled).
+//   g_fx_rt_cycle    render thread: the cycle its flush ran in; a park that
+//                    lands in the same cycle draws no chain.
+//   g_fx_park_cycle  the cycle the last park landed in; a resolve later in
+//                    that same cycle (the game thread may already have set
+//                    'wanted' for its next frame) draws no chain. Together:
+//                    one chain per cycle, whichever thread - proved over every
+//                    interleaving of decide / grant / resolve by model.
+//   g_fx_park_req    render thread -> game thread: something needed the park
+//                    (an expiry, a mesh that appeared); the next frame parks.
+//   g_fx_rt_fallback sticky for the session: the render thread found the state
+//                    it needs missing at the hook; every frame parks again
+//                    (today's behaviour - a fallback, never a flicker).
+//                    Published as rtFlushFallback.
+//   g_fx_rt_park_ms  game thread: the last park under this scheme.
+static constexpr uint64_t     KH_RT_PARK_INTERVAL_MS = 250;
+static std::atomic<bool>      g_fx_rt_wanted{ false };
+static std::atomic<bool>      g_fx_park_req{ false };
+static std::atomic<bool>      g_fx_rt_fallback{ false };
+static uint64_t               g_fx_rt_cycle = ~0ull;
+static uint64_t               g_fx_park_cycle = ~0ull;   // The cycle the last park landed in (written under the park, read at the hook).
+static uint64_t               g_fx_rt_park_ms = 0;
+static std::mutex             g_fog_stage_mu;   // The staged fog: written unparked on the game thread, read by either thread's publish.
 // KH_FLUSH_MISS: the stale test above tolerates a landing up to two periods
 // old, so a SINGLE cycle in which the injection did not land (an anomalous
 // sky-heavy cycle, a far-phase re-arm, a cycle under the trigger floor) passed
@@ -10942,6 +11347,7 @@ inline void kh_chain_writeback(KhClothInst& khcw_in, uint32_t khcw_back) {
 // One job. Runs on a cloth worker and touches nothing the game thread may be
 // writing: 'busy' was set before this instance was queued and is cleared last.
 inline void kh_cloth_run(const std::shared_ptr<KhClothInst>& khcj_in) {
+    KH_PROF_SCOPE(KHP_W_CLOTH_SIM);   // KH_PROF.
     KhClothInst& khcj = *khcj_in;
     const uint32_t khcj_back = 1u - khcj.front.load(std::memory_order_relaxed);
     if (khcj.chain) {
@@ -11428,6 +11834,7 @@ struct KhPhysicsColSrc {
 
 inline void kh_physics_gather_colliders(const std::vector<RenderObject>& khcg_objs,
                                       std::vector<KhPhysicsColSrc>& khcg_out) {
+    KH_PROF_SCOPE(KHP_PHYSICS_GATHER);   // KH_PROF.
     khcg_out.clear();
     ++g_physics_bvh_frame;
     for (size_t khcg_i = 0; khcg_i < khcg_objs.size(); ++khcg_i) {
@@ -12462,6 +12869,7 @@ inline bool kh_cloth_pin_fresh(KhClothInst& khpf_in, uint32_t khpf_f) {
     return khpf_any;
 }
 inline void kh_cloth_upload(ID3D11DeviceContext* khcu_ctx, ID3D11Device* khcu_dev) {
+    KH_PROF_SCOPE(KHP_CLOTH_UPLOAD);   // KH_PROF.
     if (!khcu_ctx || !khcu_dev) return;
     std::vector<std::shared_ptr<KhClothInst>> khcu_live;
     uint32_t khcu_max_slot = 0;
@@ -12966,6 +13374,7 @@ inline void kh_skin_verts(const KhSkinRest& khsr_d, const float* khsr_a, size_t 
 // the shape that took the current one by more than KH_CLOTH_SHAPE_M, the
 // cloth's bound for the cloth's reason - then publishes.
 inline void kh_skin_run(KhSkinInst& khsr_in) {
+    KH_PROF_SCOPE(KHP_W_SKIN_JOB);   // KH_PROF.
     const KhSkinRest& khsr_d = *khsr_in.in_rest;
     const uint32_t khsr_back = 1u - (khsr_in.front.load(std::memory_order_relaxed) & 1u);
     std::vector<MeshVertex>& khsr_out = khsr_in.out[khsr_back];
@@ -13149,6 +13558,7 @@ inline void kh_skin_draw_step(const std::string& khsd_h, KhAttach& khsd_a, Rende
 }
 
 inline void kh_skin_sync() {
+    KH_PROF_SCOPE(KHP_SKIN_SYNC);   // KH_PROF.
     if (g_attach_n.load(std::memory_order_relaxed) == 0 && g_skin.empty()) return;
     for (auto& khss_kv : g_skin) khss_kv.second->seen = false;
     std::vector<std::shared_ptr<KhSkinInst>> khss_jobs;
@@ -13349,6 +13759,7 @@ inline bool kh_skin_guide_of(uint64_t khgo_seq, int khgo_mesh, std::vector<float
 // published result (recorded in KhSkinGpu), never from an instance a worker
 // may be writing.
 inline void kh_skin_upload(ID3D11DeviceContext* khsu_ctx, ID3D11Device* khsu_dev) {
+    KH_PROF_SCOPE(KHP_SKIN_UPLOAD);   // KH_PROF.
     if (!khsu_ctx || !khsu_dev) return;
     uint64_t khsu_meshes = 0, khsu_bones = 0, khsu_driven = 0, khsu_proxies = 0;
     // put = false: the render thread skinned this binding's buffer this cycle
@@ -13554,6 +13965,7 @@ inline void kh_skin_drop_all() {
 // spawn point fails the parent-reach test, as a skeletal binding's does, and
 // the lane stays free that frame.
 inline void kh_chain_prepare() {
+    KH_PROF_SCOPE(KHP_CHAIN_PREPARE);   // KH_PROF.
     if (g_chain_cfg.empty()) return;
     std::vector<std::string> khcp_dead, khcp_read;
     {
@@ -15194,6 +15606,7 @@ inline std::vector<MeshVertex> kh_lod_decimate(const std::vector<MeshVertex>& kh
 // Build levels 1..KH_LOD_MAX onto a baked MeshDef. Idempotent; any level that
 // refuses to shrink ends the ladder and lod_n names what exists.
 inline void kh_lod_build(MeshDef& khlb_d) {
+    KH_PROF_SCOPE(KHP_LOD_BUILD);   // KH_PROF.
     if (khlb_d.lod_n) return;
     if (khlb_d.submeshes.empty() || khlb_d.verts.empty()) return;
     if (!khlb_d.indices.empty()) return;   // Expanded form only (kh_mesh_weld runs after).
@@ -15390,6 +15803,7 @@ inline bool kh_cull_apex(const KhCullSet& khc_s, float khc_a[3]) {
 }
 
 inline void kh_cull_build(const float khc_vp[4][4], const float khc_cam[3], KhCullSet& khc_o) {
+    KH_PROF_SCOPE(KHP_CULL_BUILD);   // KH_PROF.
     khc_o.valid = false;
 
     for (int khc_i = 0; khc_i < 4; ++khc_i) {
@@ -15638,6 +16052,7 @@ inline void kh_vis_occ_build(KhVisOcc& khvo, const std::vector<RenderObject>& kh
                              const float khvo_vp[4][4], const KhCullSet& khvo_cull,
                              const float khvo_cam[3], float khvo_margin,
                              float khvo_far, float khvo_cut, KhVocSkip khvo_skip) {
+    KH_PROF_SCOPE(KHP_VIS_OCC);   // KH_PROF.
     khvo.on = false;
     if (!khvo_cull.valid) return;
     memcpy(khvo.vp, khvo_vp, sizeof(khvo.vp));
@@ -16403,6 +16818,7 @@ inline void kh_mesh_grave_sweep() {
 // flush_frame before this runs, so "idle" means no object carried the id for
 // the whole window.
 inline void kh_mesh_gc() {
+    KH_PROF_SCOPE(KHP_MESH_GC);   // KH_PROF.
     const uint64_t khgc_now = GetTickCount64();
     const uint32_t khgc_n = mesh_count();
     const uint32_t khgc_b = mesh_store().builtin_n;
@@ -17998,6 +18414,7 @@ struct KhInstPlan {
 template <class KhInstRoute>
 inline void kh_inst_plan_build(KhInstPlan& p, const std::vector<RenderObject>& meshes,
                                const uint32_t* khip_order, size_t khip_n, KhInstRoute khip_route) {
+    KH_PROF_SCOPE(KHP_INST_PLAN);   // KH_PROF.
     p.batch_of.assign(meshes.size(), -1);
     p.done.assign(meshes.size(), 0);
     p.batch_begin.clear();
@@ -18588,6 +19005,7 @@ inline void kh_vs_optional(ID3D11Device* dev, const std::string& src, const char
 }
 
 inline std::string ensure_resources(ID3D11Device* dev) {
+    KH_PROF_SCOPE(KHP_ENSURE_RES);   // KH_PROF.
     // The mod cache scan is a magic static that walks mod folders on disk; it
     // must not first run on a shader worker (ModFolderSearcher reentrancy).
     // This site runs on the game or render thread before any pool arms.
@@ -19509,6 +19927,8 @@ inline std::string ensure_scene_capture(ID3D11Device* dev, ID3D11DeviceContext* 
 
 // Game-thread flush_locked call sites only.
 inline std::string kh_scene_capture_timed(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    KH_PROF_SCOPE(KHP_SCENE_CAPTURE);
+    KH_GPU_SCOPE(ctx, KHG_SCENE_CAPTURE);   // KH_PROF.
     return ensure_scene_capture(dev, ctx);
 }
 
@@ -20155,7 +20575,13 @@ struct StateBackup {
     // Our passes bind b0 and b1. The capture is offset-aware through context1:
     // the engine binds its b0 pool as windows, and a plain restore would hand
     // each window back at offset zero. Widen these arrays and the offset pairs
-    // in the same edit that re-arms a bind.
+    // in the same edit that re-arms a bind. b2-b4 are declared by every unit
+    // (CBEngView*) and read as the engine left them: no pass under a
+    // StateBackup ever Sets them - the one b2 writer, kh_vmir_begin, runs in
+    // the draw hook outside any backup and carries its own save / restore
+    // pair (g_vmir_sv_b2), as kh_vmir_patch_b2 does for the CS stage, which
+    // this backup does not cover either. A pass that Sets b2-b4 or CS state
+    // under a backup widens this capture in the same edit.
     ID3D11Buffer*            vs_cbs[2] = { nullptr, nullptr };
     ID3D11Buffer*            ps_cbs[2] = { nullptr, nullptr };
     UINT                     vs_cb_first[2] = { 0, 0 }, vs_cb_num[2] = { 0, 0 };
@@ -21360,6 +21786,7 @@ inline std::string kh_thm_upload(ID3D11Device* dev) {
 // Game thread, flush prelude, pre-lock. The coarse seed is synchronous and
 // one-time; refinement is budgeted at 4096 samples per call.
 inline void kh_thm_autobuild_step() {
+    KH_PROF_SCOPE(KHP_THM_AUTOBUILD);   // KH_PROF.
     if (g_thm_dirty) return;
     if (g_thm_auto_state == 2) return;
 
@@ -21953,14 +22380,74 @@ inline void proj_scan_upload(ID3D11Resource* res, const void* data, uint32_t byt
     }
 }
 
-// One plain copy into a cached scratch; every scanner reads the copy. No
-// streaming loads: movntdqa from WC memory may return stale bytes. Render
-// thread only; 64 KiB is the D3D11 constant-buffer cap.
+// KH_WC_COPY - the one copy out of a mapped dynamic buffer, into a cached
+// scratch every scanner then walks. The mapped memory is what the driver
+// hands the engine for a WRITE_DISCARD / NO_OVERWRITE map: on NVIDIA that is
+// cacheable system memory and a plain memcpy runs at memory speed; on AMD it
+// is write-combined system memory or host-visible VRAM behind the PCIe BAR,
+// where an ordinary load is one uncached bus transaction per 16 bytes and a
+// memcpy of the engine's ~12k maps a frame costs tens of milliseconds - the
+// AMD-only frame-rate collapse when the meshes light up (kh_upload_hook_wanted
+// captures every constant buffer the engine maps while a lit mesh exists).
+// MOVNTDQA (SSE4.1) is the documented way to read such memory: on a WC region
+// it fetches whole 64-byte lines into the core's streaming buffers, one bus
+// transaction per line and several in flight; on a cacheable region it is an
+// ordinary load. Staleness, the reason an earlier campaign declined it: the
+// streaming buffers are not coherent, so a line still held from an earlier
+// capture could be returned. MFENCE before the loads is the SDM / APM
+// discipline for exactly that - it retires the engine's own WC stores (made
+// on this thread, before its Unmap) and drains every streaming buffer, so
+// each load below reads memory as it stands at the fence. A CPU without
+// SSE4.1 takes the memcpy it always took. Render thread only; 64 KiB is the
+// D3D11 constant-buffer cap. Accounting (bytes, copies, time) is kept by
+// kh_upload_capture, the one caller path, only while the stats are armed.
+inline bool kh_wc_stream_ok() {
+    static const bool khwc_ok = [] {
+        int khwc_r[4] = { 0, 0, 0, 0 };
+        __cpuid(khwc_r, 1);
+        return (khwc_r[2] & (1 << 19)) != 0;   // ECX bit 19: SSE4.1 (MOVNTDQA).
+    }();
+    return khwc_ok;
+}
+inline void kh_wc_copy(void* khwc_dst, const void* khwc_src, uint32_t khwc_n) {
+    uint8_t* khwc_d = static_cast<uint8_t*>(khwc_dst);
+    const uint8_t* khwc_s = static_cast<const uint8_t*>(khwc_src);
+    if (khwc_n < 128u || !kh_wc_stream_ok()) { memcpy(khwc_d, khwc_s, khwc_n); return; }
+    _mm_mfence();
+    const uint32_t khwc_head = static_cast<uint32_t>((16u - (reinterpret_cast<uintptr_t>(khwc_s) & 15u)) & 15u);
+    if (khwc_head) { memcpy(khwc_d, khwc_s, khwc_head); khwc_d += khwc_head; khwc_s += khwc_head; khwc_n -= khwc_head; }
+    uint32_t khwc_i = 0;
+    const uint32_t khwc_n64 = khwc_n & ~63u;
+    for (; khwc_i < khwc_n64; khwc_i += 64u) {
+        __m128i* khwc_p = reinterpret_cast<__m128i*>(const_cast<uint8_t*>(khwc_s + khwc_i));
+        const __m128i khwc_a = _mm_stream_load_si128(khwc_p);
+        const __m128i khwc_b = _mm_stream_load_si128(khwc_p + 1);
+        const __m128i khwc_c = _mm_stream_load_si128(khwc_p + 2);
+        const __m128i khwc_e = _mm_stream_load_si128(khwc_p + 3);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(khwc_d + khwc_i), khwc_a);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(khwc_d + khwc_i + 16), khwc_b);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(khwc_d + khwc_i + 32), khwc_c);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(khwc_d + khwc_i + 48), khwc_e);
+    }
+    const uint32_t khwc_n16 = khwc_n & ~15u;
+    for (; khwc_i < khwc_n16; khwc_i += 16u) {
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(khwc_d + khwc_i),
+                         _mm_stream_load_si128(reinterpret_cast<__m128i*>(const_cast<uint8_t*>(khwc_s + khwc_i))));
+    }
+    if (khwc_i < khwc_n) memcpy(khwc_d + khwc_i, khwc_s + khwc_i, khwc_n - khwc_i);
+}
+// KH_AMD_PROBE / KH_WC_COPY (measured, the lanes retired): the funnel's cost
+// is its capture count times the bytes each capture copies, and the count is
+// the engine's draw count (12-13k a cycle here, ~1.3 ms with the scan) - it
+// is at its per-capture floor, so kh_wc_copy's streaming read is the lever,
+// not the count. The staging polls that answer WAS_STILL_DRAWING and the
+// read-only DSV swap were the two other vendor-sensitive shapes examined and
+// neither was the AMD collapse.
 static constexpr uint32_t KH_UPLOAD_SCRATCH_BYTES = 65536u;
 static alignas(64) uint8_t g_upload_scratch[KH_UPLOAD_SCRATCH_BYTES];
 inline const void* kh_upload_scratch(const void* khus_src, uint32_t& khus_bytes) {
     if (khus_bytes > KH_UPLOAD_SCRATCH_BYTES) khus_bytes = KH_UPLOAD_SCRATCH_BYTES;
-    memcpy(g_upload_scratch, khus_src, khus_bytes);
+    kh_wc_copy(g_upload_scratch, khus_src, khus_bytes);
     return g_upload_scratch;
 }
 
@@ -22545,6 +23032,9 @@ inline bool kh_sun_axis_foreign(float khsx_x, float khsx_y, float khsx_z, float*
 // pure shadow lag.
 inline void publish_world_lighting() {
     g_sun_valid = g_pub_valid;
+    // KH_RENDER_FLUSH: the render-thread flush publishes too, unparked, so the
+    // staged copy is read under the mutex stage_world_lighting writes it under.
+    std::lock_guard<std::mutex> khpw_l(g_fog_stage_mu);
     g_fog_valid = g_fog_staged_valid;
     g_fog[0] = g_fog_staged[0];
     g_fog[1] = g_fog_staged[1];
@@ -23600,6 +24090,7 @@ inline bool kh_band_pair_coherent(const float* khpc_vc, const float* khpc_fv) {
 }
 // Gated on a plain bool, so the steady-state cost is one load.
 inline void kh_band_stage_commit(ID3D11DeviceContext* ctx) {
+    KH_PROF_SCOPE(KHP_BAND_COMMIT);   // KH_PROF.
     if (!g_ls.stage_any) return;
     if (!ctx || !g_ls.atlas_tex) return;
     if (!g_ls.frame_view_valid || g_ls.frame_view_time < 0.0f) return;
@@ -23994,7 +24485,7 @@ inline const void* kh_cbs_write(void* khcw_id, const void* khcw_src, uint32_t& k
         khcw_slot = khcw_lru;   // The run is full: the least recently written identity is recycled.
     }
     if (khcw_slot->data.size() < khcw_bytes) khcw_slot->data.resize(khcw_bytes);
-    memcpy(khcw_slot->data.data(), khcw_src, khcw_bytes);
+    kh_wc_copy(khcw_slot->data.data(), khcw_src, khcw_bytes);   // KH_WC_COPY: the mapped source.
     if (khcw_slot->id != khcw_id) khcw_slot->pres_gen = 0;   // A recycled entry forgets its key.
     khcw_slot->id = khcw_id;
     khcw_slot->bytes = khcw_bytes;
@@ -25844,6 +26335,7 @@ inline void dynlights_publish(const uint8_t* khd_p, int khd_s) {
 // this frame's cbd fills read the mirror; then issue this frame's copy into a
 // free staging slot.
 inline void dynlights_acquire(ID3D11DeviceContext* ctx, const float view[4][4]) {
+    KH_PROF_SCOPE(KHP_DL_ACQUIRE);   // KH_PROF.
     if (!g_ls.wanted.load(std::memory_order_relaxed)) return;
 
     // (0) harvest the previous frame's per-draw window captures, then flip.
@@ -27175,6 +27667,7 @@ inline void kh_ssao_bind_fs(ID3D11DeviceContext* ctx, ID3D11PixelShader* khsb_ps
 // padded; whole when that fails) and bounds the post passes.
 inline void kh_ssao_pre(ID3D11Device* dev, ID3D11DeviceContext* ctx, KhSsaoPass& khsp,
                         const float khsp_proj[4][4], float khsp_vp_lo, float khsp_vp_hi) {
+    KH_PROF_SCOPE(KHP_SSAO);   // KH_PROF.
     khsp.on = false;
     if (!(kh_ao_strength() > 0.0f) || !dev || !ctx) return;
     UINT khsp_dw = 0, khsp_dh = 0;
@@ -27212,18 +27705,35 @@ inline void kh_ssao_rect(const RVExtBridge::ProjectionViewTransform& khsr_pv, D3
     }
 }
 // After a drawer's last draw, the scene target still bound as RT0: the term
-// over khsp.rect, then the multiply into the scene at our pixels.
+// over khsp.rect, then the multiply into the scene at our pixels, then the
+// eraser. The drawer's marks are already on the stencil when this is
+// entered (khsp.on armed the marking state at its draws), and the eraser is
+// the only thing that clears them: it runs on EVERY path out of here once
+// khsp.on holds and the drawer's DSV is known - a term pass that stands down
+// (a failed constant-buffer Map, an empty half grid) still erases, or the
+// mark would stand for the next drawer's apply at pixels it never painted
+// (the KH_SSAO_MARK rule). Its own needs (kh_ssao_pre checked them:
+// vs_fullscreen, rasterizer, dss_mark_clear, a non-empty rectangle) are the
+// only early returns; the term's resources gate the term alone.
 inline void kh_ssao_post(ID3D11DeviceContext* ctx, const KhSsaoPass& khsp) {
+    KH_PROF_SCOPE(KHP_SSAO);
+    KH_GPU_SCOPE(ctx, KHG_SSAO_POST);   // KH_PROF.
     if (!khsp.on || !ctx) return;
     D3D11_VIEWPORT khsp_vp = {};
     if (!kh_ssao_viewport(khsp, khsp_vp)) return;
-    if (!g_res.ssao_cb || !g_res.ssao_ao_rtv || !g_res.ssao_ao_srv || !g_res.ssao_ao2_rtv ||
-        !g_res.ssao_ao2_srv || !g_res.ssao_dh_rtv || !g_res.ssao_dh_srv || !g_res.depth_srv ||
-        !g_res.depth_sten_srv || !g_res.dss_mark_clear ||
-        !g_res.ps_ssao_depth || !g_res.ps_ssao_main || !g_res.ps_ssao_blur || !g_res.ps_ssao_apply) return;
+    if (!g_res.vs_fullscreen || !g_res.rasterizer || !g_res.dss_mark_clear) return;
+    StateBackup khsp_bk;
+    khsp_bk.capture(ctx);
+    KhOmSave khsp_om;
+    khsp_om.capture(ctx);
+    ID3D11RenderTargetView* khsp_scene = khsp_om.rtv[0];
     D3D11_VIEWPORT khsp_hvp = {};
     kh_ssao_viewport_half(khsp_vp, khsp_hvp);
-    if (!(khsp_hvp.Width >= 1.0f && khsp_hvp.Height >= 1.0f)) return;
+    const bool khsp_term = g_res.ssao_cb && g_res.ssao_ao_rtv && g_res.ssao_ao_srv && g_res.ssao_ao2_rtv &&
+                           g_res.ssao_ao2_srv && g_res.ssao_dh_rtv && g_res.ssao_dh_srv && g_res.depth_srv &&
+                           g_res.depth_sten_srv &&
+                           g_res.ps_ssao_depth && g_res.ps_ssao_main && g_res.ps_ssao_blur && g_res.ps_ssao_apply &&
+                           khsp_hvp.Width >= 1.0f && khsp_hvp.Height >= 1.0f;
     // The lanes, re-uploaded per draw with that draw's stride multiplier.
     KhSsaoCb khsp_cb = {};
     khsp_cb.proj[0] = khsp.proj[0]; khsp_cb.proj[1] = khsp.proj[1];
@@ -27248,12 +27758,8 @@ inline void kh_ssao_post(ID3D11DeviceContext* ctx, const KhSsaoPass& khsp) {
         ctx->Unmap(g_res.ssao_cb, 0);
         return true;
     };
-    if (!khsp_upload(1.0f)) return;
-    StateBackup khsp_bk;
-    khsp_bk.capture(ctx);
-    KhOmSave khsp_om;
-    khsp_om.capture(ctx);
-    ID3D11RenderTargetView* khsp_scene = khsp_om.rtv[0];
+    bool khsp_ok = khsp_term && khsp_upload(1.0f);
+    if (khsp_ok) {
     // The half grid's depth (unbinds the DSV; the live depth reads at t0, its
     // stencil - the mark - at t1), then the term on it, from t3.
     ctx->OMSetRenderTargets(1, &g_res.ssao_dh_rtv, nullptr);
@@ -27271,7 +27777,6 @@ inline void kh_ssao_post(ID3D11DeviceContext* ctx, const KhSsaoPass& khsp) {
     ctx->Draw(3, 0);
     // The a-trous pair (the SSGI chain's), ping-pong ao -> ao2 -> ao at
     // strides 1 and 2; a target is never read and written by one draw.
-    bool khsp_ok = true;
     ctx->PSSetShader(g_res.ps_ssao_blur, nullptr, 0);
     ctx->OMSetRenderTargets(1, &g_res.ssao_ao2_rtv, nullptr);
     ctx->RSSetViewports(1, &khsp_hvp);
@@ -27305,15 +27810,16 @@ inline void kh_ssao_post(ID3D11DeviceContext* ctx, const KhSsaoPass& khsp) {
     }
     ID3D11ShaderResourceView* khsp_null[4] = { nullptr, nullptr, nullptr, nullptr };
     ctx->PSSetShaderResources(0, 4, khsp_null);   // Before the DSV comes back.
+    }   // End of the term pass; the eraser below does not depend on it.
     // The eraser: the mark to 0 over the rectangle, so the next drawer's pass
     // sees only what it painted. No target, the drawer's own DSV (writable),
-    // no pixel shader - the stencil op alone.
-    if (khsp_ok && khsp_om.dsv) {
+    // no pixel shader - the stencil op alone. Unconditional on the term's
+    // outcome (see the header): it binds its whole state itself, since the
+    // term pass may not have run.
+    if (khsp_om.dsv) {
         ctx->OMSetRenderTargets(0, nullptr, khsp_om.dsv);
         ctx->RSSetViewports(1, &khsp_vp);
-        ctx->PSSetShader(nullptr, nullptr, 0);
-        const FLOAT khsp_bf0[4] = { 0, 0, 0, 0 };
-        ctx->OMSetBlendState(nullptr, khsp_bf0, 0xFFFFFFFF);
+        kh_ssao_bind_fs(ctx, nullptr, nullptr);
         ctx->OMSetDepthStencilState(g_res.dss_mark_clear, 1);
         ctx->Draw(3, 0);
     }
@@ -28546,6 +29052,7 @@ inline void release_shadow_device_state() {
     // deliberately does none of this.
     kh_svs_mask_release();
     kh_ctx1_release();   // Cached context1 interface the device.
+    kh_present_rtv_release();   // KH_PRESENT_UI: RTVs on the old swapchain's buffers.
     g_rt0_desc_n = 0;   // RT0 desc cache = weak identities; wholesale evict.
     g_rt0_desc_next = 0;
     memset(g_rt0_desc, 0, sizeof(g_rt0_desc));
@@ -28675,6 +29182,7 @@ inline void release_shadow_device_state() {
     g_sky_probe = CbColorProbe{};
     skybind_release();
     cascbind_release();
+    kh_gpu_prof_release();   // KH_PROF: the timestamp queries go with the session.
 }
 
 // KH_BAND_RECV_SKIP: a band seal is read by ShadowBandFactor only for mesh
@@ -29969,6 +30477,8 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
 // flush fallback) - the kh_dls_select rule.
 static uint64_t g_dls_frame_cycle = ~0ull;      // once-per-cycle guard (state, not a lane).
 inline void kh_dls_frame(ID3D11DeviceContext* khdf_ctx) {
+    KH_PROF_SCOPE(KHP_DLS_FRAME);
+    KH_GPU_SCOPE(khdf_ctx, KHG_DLS_FRAME);   // KH_PROF.
     if (!khdf_ctx) return;
     if (g_dls_frame_cycle == g_topo_cycles) return;
     g_dls_frame_cycle = g_topo_cycles;
@@ -30065,6 +30575,8 @@ inline void kh_dls_frame(ID3D11DeviceContext* khdf_ctx) {
 }
 
 inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
+    KH_PROF_SCOPE(KHP_SUN_LADDER);
+    KH_GPU_SCOPE(ctx, KHG_SUN_LADDER);   // KH_PROF.
     if (g_sun_map_rendered_frame) return g_sun_map_valid;
     g_sun_map_rendered_frame = true;
 
@@ -31929,6 +32441,14 @@ inline bool kh_fire_mask_srv_bound(ID3D11DeviceContext* khfb_ctx) {
 }
 
 inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
+    KH_PROF_SCOPE(KHP_MASK_CAST);
+    // The GPU stamp (KHG_MASK_CAST) is NOT taken here: this runs on every
+    // tracked engine draw and nearly always returns at one of the gates
+    // below, and a stamp pair at the head cost two context End() calls per
+    // draw while armed (~3k a frame, most of maskCastUs) and reported the
+    // last run - an early return - so gMaskCastUs never measured the fire.
+    // It is taken at the fire's own start below (g_mask_cast_fired = true),
+    // after the once-per-frame ladder build, which has its own zone.
 
     // Resolve-keyed re-fires stay ungated: gating this cadence starved the fire
     // on look-down frames.
@@ -32055,6 +32575,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
 
     g_mask_cast_arm = false;
     g_mask_cast_fired = true;
+    KH_GPU_SCOPE(ctx, KHG_MASK_CAST);   // KH_PROF: the fire proper (see the head).
 
     if (g_mask.cold_t0 >= 0.0 && g_mask.cold_first_cast < 0.0f) {
         g_mask.cold_first_cast = static_cast<float>(effect_time_seconds() - g_mask.cold_t0);
@@ -33307,10 +33828,37 @@ static float    g_engcam_ref[3] = {};   // Last recovered camera (coarse).
 static bool     g_engcam_ref_ok = false;   // Scan gate only - never decides.
 
 inline bool kh_engcam_on() {
-    // The locator is default demand: g_kh_track_wanted gates the whole funnel
-    // upstream, and the locked path is an identity compare plus one 16-byte
-    // read. Deliberate toggle.
+    // The feature toggle: the scan and the consume run whenever the funnel
+    // does (g_kh_track_wanted gates it upstream). What the locator asks the
+    // funnel to CAPTURE is kh_engcam_wanted below, not this.
     return true;
+}
+
+// KH_ENGCAM_GATE: the locator's demand on the upload funnel, per buffer.
+// Unlocked, it hunts - every constant-buffer map is a candidate row scan and
+// the funnel must carry them all. Locked, kh_engcam_scan reads one 16-byte
+// row of one buffer (the fast path above the row scan) and answers every
+// other buffer with an early return; admitting those maps bought a fenced
+// copy, two QPC reads and eight scanners for a compare that fails. So the
+// demand follows the lock: a map of the locked buffer, or any map while
+// there is no lock (the consume drops the lock on disagreement and the
+// device reset clears it - both reopen the hunt by this same test, the
+// next frame's scan rebuilds the candidate table as before, and the lock
+// lands on the sights rule it always did). The other funnel consumers keep
+// their own terms; kh_cbc_on (any visible mesh) and kh_dl_cpu_wanted (a
+// lit mesh) still ask for every map, by design. MEASURED (KH_ENGCAM_DIAG,
+// a post-FX-only session, locked throughout): the count did not move -
+// uploadCaptures stayed at every constant-buffer map of the cycle, because
+// the buffer the lock lands on is the engine's per-draw constant buffer,
+// one small buffer re-mapped for nearly every draw with the camera row in
+// every upload (engcamHuntSights ~1,450 sightings of one value in one
+// frame). Identity cannot narrow a funnel the engine multiplexes through
+// one buffer; the gate is kept as correct and equivalent, not as a saving.
+// Render thread (the hook's own gate precedes this term); g_engcam_res is
+// the same render-thread / park-ordered state kh_engcam_scan reads.
+inline bool kh_engcam_wanted(ID3D11Resource* khew_res) {
+    if (!kh_engcam_on()) return false;
+    return !g_engcam_res || static_cast<void*>(khew_res) == g_engcam_res;
 }
 
 inline bool kh_engcam_agree4(const float* khg_a, const float* khg_b) {
@@ -33518,6 +34066,8 @@ inline bool kh_engcam_consume(const float khec_view[4][4], float khec_cam[3]) {
                 khec_best = &g_engcam_cand[khec_k];
             }
         }
+
+        // KH_ENGCAM_DIAG: what this hunt saw, before its verdict.
 
         if (!khec_best) return false;
 
@@ -33854,6 +34404,8 @@ static UINT g_vmir_sv_b2_num = 0;
 static bool g_vmir_sv_b2_off_ok = false;
 
 inline bool kh_vmir_begin(ID3D11DeviceContext* khvb_ctx) {
+    KH_PROF_SCOPE(KHP_VMIR);
+    KH_GPU_SCOPE(khvb_ctx, KHG_VMIR);   // KH_PROF.
     ID3D11UnorderedAccessView* khvb_uavs[8] = {};
     khvb_ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, g_vmir_sv_rtvs, &g_vmir_sv_dsv);
     khvb_ctx->OMGetRenderTargetsAndUnorderedAccessViews(0, nullptr, nullptr, 0, 8, khvb_uavs);   // UAV probe only.
@@ -33931,6 +34483,7 @@ inline bool kh_vmir_begin(ID3D11DeviceContext* khvb_ctx) {
 }
 
 inline void kh_vmir_end(ID3D11DeviceContext* khvn_ctx) {
+    KH_PROF_SCOPE(KHP_VMIR);   // KH_PROF.
     khvn_ctx->RSSetState(g_vmir_sv_rs);   // Engine clip state back first.
     KH_SAFE_RELEASE(g_vmir_sv_rs);
     khvn_ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, g_vmir_sv_rtvs, g_vmir_sv_dsv);
@@ -35265,7 +35818,7 @@ inline bool kh_upload_hook_wanted(ID3D11DeviceContext* self, ID3D11Resource* res
            g_kh_track_wanted.load(std::memory_order_relaxed) &&
            (kh_cbc_on() || g_pip_seen ||
             kh_dl_cpu_wanted() ||   // KH_DL_CPU: every constant buffer the engine maps.
-            kh_engcam_on() ||
+            kh_engcam_wanted(res) ||   // KH_ENGCAM_GATE: every map until locked, then its buffer.
             (!g_ro.engine_proj_valid && g_ro.cycle_pv_valid) || shadow_live_wanted() ||
             (g_proj_locator.valid && res == g_proj_locator.buf) ||
             // The b2 the mirror patch reads. One extra buffer, uploaded a
@@ -35769,6 +36322,8 @@ inline void kh_pip_on_clear() {
 }
 
 inline void kh_pip_inject(ID3D11DeviceContext* ctx) {
+    KH_PROF_SCOPE(KHP_PIP);
+    KH_GPU_SCOPE(ctx, KHG_PIP);   // KH_PROF.
     g_pip.injected = true;   // One attempt per cycle, whatever the gates say.
     if (!g_pip.tpl_valid || !g_pip.view_valid || !g_pip.proj_valid) return;
     if (g_topo_cycles < g_pip.tpl_cycle || g_topo_cycles - g_pip.tpl_cycle > KH_PIP_TPL_MAX_CYCLES) return;
@@ -36726,6 +37281,7 @@ inline void kh_pip_pre_draw(ID3D11DeviceContext* ctx) {
 }
 
 inline void kh_upload_scan(ID3D11Resource* res, const void* khus_d, uint32_t khus_n) {
+    KH_PROF_SCOPE(KHP_UPLOAD_SCAN);   // KH_PROF.
     kh_b2_snap_note(res, khus_d, khus_n);   // KH_MIR_CPU (no-op until b2 is learned).
     proj_scan_upload(res, khus_d, khus_n);
     shadow_live_upload(khus_d, khus_n);
@@ -36739,6 +37295,7 @@ inline void kh_upload_scan(ID3D11Resource* res, const void* khus_d, uint32_t khu
 }
 
 static HRESULT STDMETHODCALLTYPE hooked_map(ID3D11DeviceContext* self, ID3D11Resource* res, UINT sub, D3D11_MAP type, UINT flags, D3D11_MAPPED_SUBRESOURCE* mapped) {
+    KH_PROF_SCOPE(KHP_HOOK_MAP);   // KH_PROF.
     const HRESULT hr = g_orig_map(self, res, sub, type, flags, mapped);
 
     try {
@@ -36768,6 +37325,7 @@ static HRESULT STDMETHODCALLTYPE hooked_map(ID3D11DeviceContext* self, ID3D11Res
 }
 
 static void STDMETHODCALLTYPE hooked_unmap(ID3D11DeviceContext* self, ID3D11Resource* res, UINT sub) {
+    KH_PROF_SCOPE(KHP_HOOK_MAP);   // KH_PROF.
     try {
     if (sub == 0 && self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
         reorder_on_render_thread() &&   // render-thread-only again (pairs with the map gate above).
@@ -37003,6 +37561,8 @@ inline bool kh_snapshot_rect(const RVExtBridge::ProjectionViewTransform& pv, UIN
 }
 
 inline void kh_snapshot_take(ID3D11Device* dev, ID3D11DeviceContext* ctx, const RVExtBridge::ProjectionViewTransform& pv, const D3D11_RECT* khs_rect = nullptr) {
+    KH_PROF_SCOPE(KHP_SNAPSHOT);
+    KH_GPU_SCOPE(ctx, KHG_SNAPSHOT);   // KH_PROF.
     std::string khs_err = snapshot_composite_depth(dev, ctx, khs_rect);
 
     if (!khs_err.empty()) {
@@ -37065,6 +37625,8 @@ inline void kh_snapshot_take(ID3D11Device* dev, ID3D11DeviceContext* ctx, const 
 // the terrain, both behind it, overlapping). If it shows, bound the clamp so
 // our meshes cannot reorder each other.
 inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
+    KH_PROF_SCOPE(KHP_INJECT);
+    KH_GPU_SCOPE(ctx, KHG_INJECT);   // KH_PROF.
     if (kh_fsaa_world_standdown()) {  return; }
 
     const float snapshot_now = effect_time_seconds();
@@ -38588,7 +39150,52 @@ inline void kh_ui_mask_clear_alpha(ID3D11DeviceContext* ctx) {
     g_ui_mask.mask_valid = true;
 }
 
+// KH_UI_CLEAR_AT_BLEND: does this draw blend against its target? The
+// stand-in clear rule until a UI shader has been learned (KH_UI_PS_LEARN):
+// on the HUD the scene quad is opaque and the first widget blends, so the
+// clear lands between them. It is not a content / UI boundary in general
+// (the map's tiles blend); the shader rule replaces it once learned. The OM
+// hook's verdict (g_ro.blend_translucent) is render-thread state and the
+// machine is fed from both threads, so the state is read here (one GetDesc
+// on an immutable object per backbuffer draw).
+inline bool kh_ui_draw_blends(ID3D11DeviceContext* khub_ctx) {
+    ID3D11BlendState* khub_bs = nullptr;
+    FLOAT khub_bf[4] = {};
+    UINT khub_mask = 0;
+    khub_ctx->OMGetBlendState(&khub_bs, khub_bf, &khub_mask);
+    if (!khub_bs) return false;   // The default state: opaque.
+    D3D11_BLEND_DESC khub_d = {};
+    khub_bs->GetDesc(&khub_d);
+    khub_bs->Release();
+    return khub_d.RenderTarget[0].BlendEnable && khub_d.RenderTarget[0].DestBlend != D3D11_BLEND_ZERO;
+}
+// KH_UI_PS_LEARN: the engine's UI pixel shaders, learned from the GAME
+// thread's backbuffer draws (UI by construction - the driver control is one
+// of them) and used to place the clear: the clear lands right before the
+// first draw with a learned shader after the arm (measured on the HUD: one
+// PS for every widget of a frame, another for the scene quad). Until one is
+// learned the blend rule stands in. The map is the known exception: its
+// tiles draw with the UI shader too, so no draw-state rule finds the
+// tiles / borders boundary there (the engine's grant point did), and the
+// map takes no effect (KH_UI_POISON_RUN). Objects are AddRef'd while held
+// (the hook-desc-cache rule); released with the mask.
+// Is the bound PS a learned UI shader (learning it first when this is a
+// game-thread draw)? One PSGetShader per backbuffer draw.
+inline bool kh_ui_draw_is_ui_ps(ID3D11DeviceContext* khup_ctx, bool khup_learn) {
+    ID3D11PixelShader* khup_ps = nullptr;
+    khup_ctx->PSGetShader(&khup_ps, nullptr, nullptr);
+    if (!khup_ps) return false;
+    bool khup_hit = false;
+    for (uint32_t khup_i = 0; khup_i < g_ui_ps_learn_n; ++khup_i) if (g_ui_ps_learn[khup_i] == khup_ps) { khup_hit = true; break; }
+    if (!khup_hit && khup_learn && g_ui_ps_learn_n < 8u) {
+        g_ui_ps_learn[g_ui_ps_learn_n++] = khup_ps;   // Keeps the Get's reference.
+        return true;
+    }
+    khup_ps->Release();
+    return khup_hit;
+}
 inline void kh_ui_mask_thread_draw(ID3D11DeviceContext* ctx) {
+    KH_PROF_SCOPE(KHP_UI_MASK_DRAW);   // KH_PROF.
     ID3D11RenderTargetView* kht_rtv = nullptr;
     ID3D11DepthStencilView* kht_dsv = nullptr;
     ctx->OMGetRenderTargets(1, &kht_rtv, &kht_dsv);
@@ -38596,7 +39203,7 @@ inline void kh_ui_mask_thread_draw(ID3D11DeviceContext* ctx) {
     if (kht_dsv) {
         kht_dsv->Release();
         if (kht_rtv) kht_rtv->Release();
-        if (g_ui_mask.phase == 2) { g_ui_mask.phase = 0;  }
+        if (g_ui_mask.phase == 2) g_ui_mask.phase = 0;
         return;
     }
 
@@ -38648,7 +39255,7 @@ inline void kh_ui_mask_thread_draw(ID3D11DeviceContext* ctx) {
         (kht_now.QuadPart - g_ui_mask.phase_arm_tick) > (kht_qpf * 50) / 1000;
     // The 50 ms failsafe overrides exactly as for the consumption gate (menus
     // where Draw3D stalls: degraded 20 Hz arming, never a deadlock).
-    const uint64_t kht_ord = g_flush_frame_pub.load(std::memory_order_relaxed);
+    const uint64_t kht_ord = kh_ui_frame_ordinal();   // KH_PRESENT_SEQ: the Present clock while that path is live.
     const bool kht_ord_advanced = kht_ord != g_ui_mask.phase_arm_ordinal;
     if (g_ui_mask.ord_tick == 0 || kht_ord != g_ui_mask.ord_seen) {
         g_ui_mask.ord_seen = kht_ord;
@@ -38676,7 +39283,12 @@ inline void kh_ui_mask_thread_draw(ID3D11DeviceContext* ctx) {
         g_ui_mask.bnd_tick = kht_now.QuadPart;
     }
 
-    if (g_ui_mask.phase == 2 && !kht_arm_ok) {
+    // KH_UI_CLEAR_AT_BLEND: armed, and this is the first blending draw since
+    // - the content is behind us, the widgets begin here. An opaque draw
+    // while armed is content and leaves the arm standing.
+    const bool kht_ui_draw = kh_ui_draw_is_ui_ps(ctx, !reorder_on_render_thread());   // KH_UI_PS_LEARN.
+    if (g_ui_mask.phase == 2 && !kht_arm_ok &&
+        (g_ui_ps_learn_n > 0 ? kht_ui_draw : kh_ui_draw_blends(ctx))) {
         kh_ui_mask_clear_alpha(ctx);
         g_ui_mask.phase_tick = kht_now.QuadPart;
         return;
@@ -38686,6 +39298,13 @@ inline void kh_ui_mask_thread_draw(ID3D11DeviceContext* ctx) {
         // The compose serial feeds the flush's apply-once gate; the clear is
         // always scheduled - every write-window pass is coverage-masked.
         g_ui_mask.phase_bb = kht_id;
+        {   // KH_PRESENT_RTV: hold the engine's view of this buffer for the Present flush.
+            ID3D11RenderTargetView* khfr_rtv = nullptr;
+            ctx->OMGetRenderTargets(1, &khfr_rtv, nullptr);
+            KH_SAFE_RELEASE(g_ui_frame_rtv);
+            g_ui_frame_rtv = khfr_rtv;   // Owned (the Get AddRef'd it).
+            g_ui_frame_rtv_seq = g_present_seq.load(std::memory_order_relaxed);
+        }
         g_ui_mask.phase_w = kht_w;
         g_ui_mask.phase_h = kht_h;
         g_ui_mask.phase_tick = kht_now.QuadPart;
@@ -38709,6 +39328,8 @@ inline void kh_svs_bracket_post(ID3D11DeviceContext* self) {
 }
 
 inline void kh_svs_prime_mask(ID3D11DeviceContext* ctx) {
+    KH_PROF_SCOPE(KHP_SVS_PRIME);
+    KH_GPU_SCOPE(ctx, KHG_SVS_PRIME);   // KH_PROF.
     if (!ctx || g_ro.in_injection) return;
 
     // No mode test here.
@@ -38846,6 +39467,8 @@ inline void kh_svs_prime_mask(ID3D11DeviceContext* ctx) {
 }
 
 inline void kh_svs_vol_copy(ID3D11DeviceContext* khc_ctx) {
+    KH_PROF_SCOPE(KHP_SVS_VOL_COPY);
+    KH_GPU_SCOPE(khc_ctx, KHG_SVS_VOL_COPY);   // KH_PROF.
     if (g_svs_vol_seq == g_svs_frame_seq) {
         return;
     }
@@ -39033,6 +39656,7 @@ inline void kh_reorder_trigger(ID3D11DeviceContext* self) {
 }
 
 inline void reorder_pre_draw(ID3D11DeviceContext* self) {
+    KH_PROF_SCOPE(KHP_HOOK_DRAW);   // KH_PROF.
     if (self != g_reorder_target_ctx.load(std::memory_order_relaxed)) {
         return;
     }
@@ -39049,6 +39673,27 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
         }
 
         return;
+    }
+
+    // KH_UI_MASK_RT: the coverage mask machine sees THIS thread's draws too.
+    // Measured (KH_UI_DIAG): the engine issues most of its UI-pass draws on
+    // the render thread and only a few, plus Present, on the game thread; a
+    // machine fed from the game thread alone saw ~6 of ~50 widget draws a
+    // frame, cleared the alpha at an arbitrary point against the render
+    // thread's own UI draws, and the coverage at Present was whatever fell
+    // after it (poisoned to 255 whenever the render thread's scene quad came
+    // later). Under the Draw3D park the game thread's draws always trailed
+    // the render thread's - an ordering the park supplied, never a contract.
+    // The machine's state is plain and safe here for the reason the whole
+    // hook family is: the engine never uses the immediate context from two
+    // threads at once (measured: the runtime's multithread protection is off -
+    // see the KH_UI_DIAG verdicts). Gated past the 3D pass
+    // (no main depth bound) so the target query is paid on UI draws alone;
+    // our own draws are excluded by in_injection / the injecting flag.
+    if (g_ui_mask_wanted.load(std::memory_order_relaxed) && !g_ro.dsv_main &&
+        !g_ro.in_injection && !g_ui_mask_injecting.load(std::memory_order_relaxed) &&
+        !g_kh_flush_active.load(std::memory_order_relaxed)) {
+        kh_ui_mask_thread_draw(self);
     }
 
     // Deferred seam injection, render thread only and before this draw - the
@@ -39681,6 +40326,8 @@ inline void kh_dls_world_pass_body(ID3D11DeviceContext* khw_ctx) {
 // flag is raised inside. Without it the mask's state sets and draws would flow
 // through the hooks as engine draws.
 inline void kh_dls_world_pass(ID3D11DeviceContext* khw_ctx) {
+    KH_PROF_SCOPE(KHP_DLS_WORLD);
+    KH_GPU_SCOPE(khw_ctx, KHG_DLS_WORLD);   // KH_PROF.
     if (!khw_ctx) return;
     const bool khw_pinj = g_ro.in_injection;
     g_ro.in_injection = true;
@@ -39688,6 +40335,8 @@ inline void kh_dls_world_pass(ID3D11DeviceContext* khw_ctx) {
     g_ro.in_injection = khw_pinj;
 }
 
+// KH_RENDER_FLUSH: the flush body, defined with the flush below.
+inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_rt);
 // This hook passes the resolve through - it never composites.
 // The format argument is never read: the pass keys on the source identity.
 static void STDMETHODCALLTYPE hooked_resolvesubresource(ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dst_sub, ID3D11Resource* src, UINT src_sub, DXGI_FORMAT fmt) {
@@ -39702,6 +40351,21 @@ static void STDMETHODCALLTYPE hooked_resolvesubresource(ID3D11DeviceContext* sel
             // and darken the frame quadratically.
             g_dls_world_cycle = g_topo_cycles;
             kh_dls_world_pass(self);
+        }
+        // KH_RENDER_FLUSH round B: the fullscreen-only frame's flush, on this
+        // thread, once per cycle, after the world pass and ahead of the
+        // engine's resolve. in_injection is raised as the world pass raises
+        // it, so the flush's own draws are not tracked as the engine's.
+        if (g_fx_rt_wanted.load(std::memory_order_relaxed) && g_fx_rt_cycle != g_topo_cycles &&
+            g_fx_park_cycle != g_topo_cycles) {   // A park already flushed this cycle (it landed ahead of this resolve).
+            g_fx_rt_cycle = g_topo_cycles;
+            ID3D11Device* khfr_dev = RVExtBridge::get_d3d_device();
+            if (khfr_dev) {
+                const bool khfr_pinj = g_ro.in_injection;
+                g_ro.in_injection = true;
+                flush_locked(khfr_dev, self, true);
+                g_ro.in_injection = khfr_pinj;
+            }
         }
     }
 
@@ -39766,8 +40430,11 @@ static void STDMETHODCALLTYPE hooked_draw_indexed(ID3D11DeviceContext* self, UIN
     try { reorder_pre_draw(self); } catch (...) { kh_hook_except(); }
     g_orig_draw_indexed(self, ic, sil, bvl);
     try {
-    if (g_vmir_pending &&   // Mirror re-issue; the flag is set for the tracked context's own draw.
-        self == g_reorder_target_ctx.load(std::memory_order_relaxed)) {
+    // Mirror re-issue; the flag is set for the tracked context's own draw. The
+    // context test first: g_vmir_pending is a plain render-thread bool, and
+    // this hook runs on every thread that draws through a shared vtable.
+    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
+        g_vmir_pending) {
         g_vmir_pending = false;
         if (kh_vmir_begin(self)) {
             g_orig_draw_indexed(self, ic, sil, bvl);
@@ -39782,8 +40449,11 @@ static void STDMETHODCALLTYPE hooked_draw(ID3D11DeviceContext* self, UINT vc, UI
     try { reorder_pre_draw(self); } catch (...) { kh_hook_except(); }
     g_orig_draw(self, vc, svl);
     try {
-    if (g_vmir_pending &&   // Mirror re-issue; the flag is set for the tracked context's own draw.
-        self == g_reorder_target_ctx.load(std::memory_order_relaxed)) {
+    // Mirror re-issue; the flag is set for the tracked context's own draw. The
+    // context test first: g_vmir_pending is a plain render-thread bool, and
+    // this hook runs on every thread that draws through a shared vtable.
+    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
+        g_vmir_pending) {
         g_vmir_pending = false;
         if (kh_vmir_begin(self)) {
             g_orig_draw(self, vc, svl);
@@ -39798,8 +40468,11 @@ static void STDMETHODCALLTYPE hooked_draw_indexed_instanced(ID3D11DeviceContext*
     try { reorder_pre_draw(self); } catch (...) { kh_hook_except(); }
     g_orig_draw_indexed_instanced(self, icpi, ic, sil, bvl, sil2);
     try {
-    if (g_vmir_pending &&   // Mirror re-issue; the flag is set for the tracked context's own draw.
-        self == g_reorder_target_ctx.load(std::memory_order_relaxed)) {
+    // Mirror re-issue; the flag is set for the tracked context's own draw. The
+    // context test first: g_vmir_pending is a plain render-thread bool, and
+    // this hook runs on every thread that draws through a shared vtable.
+    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
+        g_vmir_pending) {
         g_vmir_pending = false;
         if (kh_vmir_begin(self)) {
             g_orig_draw_indexed_instanced(self, icpi, ic, sil, bvl, sil2);
@@ -39814,8 +40487,11 @@ static void STDMETHODCALLTYPE hooked_draw_instanced(ID3D11DeviceContext* self, U
     try { reorder_pre_draw(self); } catch (...) { kh_hook_except(); }
     g_orig_draw_instanced(self, vcpi, ic, svl, sil);
     try {
-    if (g_vmir_pending &&   // Mirror re-issue; the flag is set for the tracked context's own draw.
-        self == g_reorder_target_ctx.load(std::memory_order_relaxed)) {
+    // Mirror re-issue; the flag is set for the tracked context's own draw. The
+    // context test first: g_vmir_pending is a plain render-thread bool, and
+    // this hook runs on every thread that draws through a shared vtable.
+    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
+        g_vmir_pending) {
         g_vmir_pending = false;
         if (kh_vmir_begin(self)) {
             g_orig_draw_instanced(self, vcpi, ic, svl, sil);
@@ -39957,6 +40633,7 @@ static void STDMETHODCALLTYPE hooked_omset_rts_and_uavs(ID3D11DeviceContext* sel
 }
 
 static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* self, ID3D11DepthStencilView* dsv, UINT flags, FLOAT depth, UINT8 stencil) {
+    KH_PROF_SCOPE(KHP_HOOK_CLEAR);   // KH_PROF.
     try {
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && !g_ro.in_injection &&
         // Own-state exclusion: the flush's sun / DLS clears are ours.
@@ -39991,6 +40668,7 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
 
             g_topo_cycles++;
             g_topo_cycles_pub.store(g_topo_cycles, std::memory_order_relaxed);   // KH_ATTACH_CYCLE: the pre-park step's read.
+            kh_prof_fold(self);   // KH_PROF: the ended cycle publishes; the next GPU bracket opens.
 
             // A depth clear of the main scene buffer marks the new frame:
             // injection re-arms and the phase evidence resets.
@@ -40204,8 +40882,531 @@ inline void ensure_reorder_hook() {
 
 // The per-frame work. The graphics lock is already held by the caller
 // (flush_frame).
-inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+// KH_RENDER_FLUSH round A: the fullscreen chain, lifted out of flush_locked
+// verbatim (the moved block: the ping-pong through chain_tex, the SSGI
+// gather / pyramid / resolve, the LUT and user-shader passes, the fusion, the
+// final write-back into the saved OM). What the flush supplied from its
+// locals arrives as parameters: the depth SRV it had at t1 (null when the
+// depth is not ready), whether a scene capture is still owed (the flush's
+// mesh loop takes one when meshes drew), and its two lambdas - the per-pass
+// constant-buffer fill (upload_cb, chain_pass = true, deferred) and the
+// depth-demand predicate - as template parameters, so the call sites inside
+// are the flush's own text. The caller performs the read-only DSV swap before
+// calling and keeps its OM save; this function's own KhOmSave is what the
+// final pass restores into. Round B calls this from the render thread with
+// its own fill; until then the flush is the one caller.
+template <class KhFxUploadCb, class KhFxNeedsDepth>
+inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
+                            std::vector<std::pair<uint64_t, RenderObject>>& fullscreen,
+                            const FLOAT bf[4], ID3D11ShaderResourceView* khfc_depth_srv,
+                            bool khfc_capture, KhFxUploadCb&& upload_cb, KhFxNeedsDepth&& needs_depth) {
+    // The chain's depth must be AT t1: the mesh loop leaves t1 as the last
+    // mesh needed it, and a localized / banded / depth-reading pass reading
+    // 0 there reconstructs the camera position everywhere. Null when the
+    // depth is not ready, as ps_srvs already says.
+    ctx->PSSetShaderResources(1, 1, &khfc_depth_srv);
+    std::string chain_err = khfc_capture ? kh_scene_capture_timed(dev, ctx) : "";
+    if (chain_err.empty()) chain_err = ensure_fx_chain(dev);
+
+    if (!chain_err.empty()) {
+        // The mesh-side twin of this pair reports as "KH effect setup";
+        // this is the chain's own report.
+        kh_ensure_ok("fullscreen chain", chain_err);
+    } else {
+        KhOmSave khfp_om;
+        khfp_om.capture(ctx);
+        ctx->IASetInputLayout(nullptr);
+        ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
+        ctx->PSSetShader(g_res.ps_effect, nullptr, 0);
+        ctx->OMSetDepthStencilState(g_res.dss_off, 0);
+        ctx->OMSetBlendState(nullptr, bf, 0xFFFFFFFF);   // Opaque: compositing is in-shader.
+
+        ID3D11ShaderResourceView* src_srv = g_res.scene_srv;
+        int write_idx = 0;
+
+        bool                      khfp_live = false;
+        ConstantData              khfp_cbd;
+        int                       khfp_effect = 0;
+        ID3D11PixelShader*        khfp_ps = nullptr;
+        ID3D11ShaderResourceView* khfp_lut = nullptr;
+
+        auto khfp_flush = [&](bool khfp_final) {
+            if (!khfp_live) return;
+            khfp_live = false;
+            bool khsg_pair = false;
+            // The resolve reads whichever half-res buffer holds the final
+            // smoothed field (two a-trous iterations ping-pong
+            // [2]->[3]->[2]; a failed iteration leaves the pointer at the
+            // last good stage).
+            ID3D11ShaderResourceView* khsg_fin = nullptr;
+            ID3D11SamplerState* khsg_s2old = nullptr;   // KH_FX_SAMP_S2: the saved s2.
+            if (khfp_effect == static_cast<int>(EffectId::Ssgi) && !khfp_ps) {
+                if (!g_res.chain_srv[2] || !g_res.chain_srv[4] ||
+                    !g_res.chain_rtv[4] || !g_res.khsg_sampler) return;   // Pyramid joins the drop-whole
+                                                                          // Gate.
+                ctx->PSGetSamplers(2, 1, &khsg_s2old);   // KH_FX_SAMP_S2: slot 2.
+                const float khsg_l0sv = khfp_cbd.local0[0];
+                const float khsg_l1sv = khfp_cbd.local0[1];
+                // [2]/[3] join the save - the pyramid level loop rides them
+                // (source dims for the downsample); a localized ssgi's mask
+                // centre z and shape live there and the resolve's tail
+                // reads them.
+                const float khsg_l2sv = khfp_cbd.local0[2];
+                const float khsg_l3sv = khfp_cbd.local0[3];
+                khfp_cbd.local0[1] = (float)g_res.scene_w / (float)(g_khsg_w > 0 ? g_khsg_w : 1);
+                ctx->PSSetSamplers(2, 1, &g_res.khsg_sampler);
+                // Both exits release; s1 itself is untouched at either
+                // point.
+                if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
+                    ctx->PSSetSamplers(2, 1, &khsg_s2old);
+                    if (khsg_s2old) khsg_s2old->Release();
+                    return;
+                }
+                ctx->PSSetShader(g_res.ps_effect, nullptr, 0);
+                ID3D11ShaderResourceView* khsg_null = nullptr;
+                ctx->PSSetShaderResources(0, 1, &khsg_null);
+                ctx->OMSetRenderTargets(1, &g_res.chain_rtv[2], nullptr);
+                // The gather draws on the half viewport; the saved one is
+                // restored before the resolve body.
+                D3D11_VIEWPORT khsg_vps; UINT khsg_vpn = 1;
+                ctx->RSGetViewports(&khsg_vpn, &khsg_vps);
+                D3D11_VIEWPORT khsg_vph = {};
+                khsg_vph.Width    = (float)(g_khsg_w > 0 ? g_khsg_w : 1);
+                khsg_vph.Height   = (float)(g_khsg_h > 0 ? g_khsg_h : 1);
+                khsg_vph.MaxDepth = 1.0f;
+                ctx->RSSetViewports(1, &khsg_vph);
+                khfp_cbd.fx_meta[0] = 26.0f;
+                if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
+                    if (khsg_vpn) ctx->RSSetViewports(1, &khsg_vps);
+                    ctx->PSSetSamplers(2, 1, &khsg_s2old);
+                    if (khsg_s2old) khsg_s2old->Release();
+                    return;
+                }
+                ctx->OMSetRenderTargets(1, &g_res.chain_rtv[4], nullptr);
+                ctx->PSSetShaderResources(0, 1, &src_srv);
+                ctx->Draw(3, 0);
+                // Each level draws through the disjoint per-mip views with
+                // the wide-tent kernel (effect 27); source dims ride
+                // local0.zw.
+                if (g_res.khsg_pyr_levels > 1) {
+                    khfp_cbd.fx_meta[0] = 27.0f;
+                    int khsg_lw = g_khsg_w > 0 ? g_khsg_w : 1;
+                    int khsg_lh = g_khsg_h > 0 ? g_khsg_h : 1;
+
+                    for (int khsg_m = 1; khsg_m < g_res.khsg_pyr_levels; ++khsg_m) {
+                        khfp_cbd.local0[2] = (float)khsg_lw;   // Source level dims.
+                        khfp_cbd.local0[3] = (float)khsg_lh;
+                        if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) break;
+                        khsg_lw = khsg_lw > 1 ? khsg_lw / 2 : 1;
+                        khsg_lh = khsg_lh > 1 ? khsg_lh / 2 : 1;
+                        D3D11_VIEWPORT khsg_vpm = {};
+                        khsg_vpm.Width    = (float)khsg_lw;
+                        khsg_vpm.Height   = (float)khsg_lh;
+                        khsg_vpm.MaxDepth = 1.0f;
+                        ctx->OMSetRenderTargets(1, &g_res.khsg_mip_rtv[khsg_m], nullptr);
+                        ctx->RSSetViewports(1, &khsg_vpm);
+                        ctx->PSSetShaderResources(3, 1, &g_res.khsg_mip_srv[khsg_m - 1]);
+                        ctx->Draw(3, 0);
+                    }
+
+                    ID3D11ShaderResourceView* khsg_pn = nullptr;
+                    ctx->PSSetShaderResources(3, 1, &khsg_pn);
+                    ctx->RSSetViewports(1, &khsg_vph);   // Back to the gather grid.
+                } else {
+                    ctx->GenerateMips(g_res.chain_srv[4]);
+                }
+                ctx->OMSetRenderTargets(1, &g_res.chain_rtv[2], nullptr);
+                khfp_cbd.fx_meta[0] = 22.0f;
+                if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
+                    if (khsg_vpn) ctx->RSSetViewports(1, &khsg_vps);
+                    ctx->PSSetSamplers(2, 1, &khsg_s2old);
+                    if (khsg_s2old) khsg_s2old->Release();
+                    return;
+                }
+                ctx->PSSetShaderResources(3, 1, &g_res.chain_srv[4]);
+                ctx->Draw(3, 0);   // The gather (t0 = source for albedo, t3 = pyramid taps).
+                khsg_fin = g_res.chain_srv[2];   // Raw gather until smoothing lands.
+                // Missing buffer or a failed upload skips the draw whole -
+                // the resolve reads the raw gather instead (one noisier
+                // frame, never a lost pass).
+                if (g_res.chain_rtv[3] && g_res.chain_srv[3]) {
+                    khfp_cbd.fx_meta[0] = 25.0f;
+                    khfp_cbd.local0[0] = 1.0f;
+
+                    if (kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
+                        ctx->OMSetRenderTargets(1, &g_res.chain_rtv[3], nullptr);
+                        ctx->PSSetShaderResources(3, 1, &g_res.chain_srv[2]);
+                        ctx->Draw(3, 0);
+                        ID3D11ShaderResourceView* khsg_n3 = nullptr;
+                        ctx->PSSetShaderResources(3, 1, &khsg_n3);
+                        khsg_fin = g_res.chain_srv[3];
+
+                        khfp_cbd.local0[0] = 2.0f;   // Iteration B: sp, back into [2].
+                        if (kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
+                            ctx->OMSetRenderTargets(1, &g_res.chain_rtv[2], nullptr);
+                            ctx->PSSetShaderResources(3, 1, &g_res.chain_srv[3]);
+                            ctx->Draw(3, 0);
+                            ctx->PSSetShaderResources(3, 1, &khsg_n3);
+                            khsg_fin = g_res.chain_srv[2];
+
+                            khfp_cbd.local0[0] = 4.0f;
+                            if (kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
+                                ctx->OMSetRenderTargets(1, &g_res.chain_rtv[3], nullptr);
+                                ctx->PSSetShaderResources(3, 1, &g_res.chain_srv[2]);
+                                ctx->Draw(3, 0);
+                                ctx->PSSetShaderResources(3, 1, &khsg_n3);
+                                khsg_fin = g_res.chain_srv[3];
+                            }
+                        }
+                    }
+
+                }
+                khfp_cbd.local0[0] = khsg_l0sv;
+                khfp_cbd.local0[1] = khsg_l1sv;
+                khfp_cbd.local0[2] = khsg_l2sv;
+                khfp_cbd.local0[3] = khsg_l3sv;
+                if (khsg_vpn) {
+                    ctx->RSSetViewports(1, &khsg_vps);
+                } else {
+                    khsg_vph.Width  = (float)g_res.scene_w;
+                    khsg_vph.Height = (float)g_res.scene_h;
+                    ctx->RSSetViewports(1, &khsg_vph);
+                }
+                // When the spread param is auto (< 0.5) the flush writes
+                // the scale-matched value 1.5 x inv; explicit user values
+                // pass through untouched. khfp_cbd is per-pass, so no
+                // restore is owed.
+                if (khfp_cbd.fx2[3] < 0.5f)
+                    khfp_cbd.fx2[3] = 1.5f * ((float)g_res.scene_w
+                                    / (float)(g_khsg_w > 0 ? g_khsg_w : 1));
+                khfp_cbd.fx_meta[0] = 24.0f;
+                khsg_pair = true;
+            }
+            if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
+                if (khsg_pair) ctx->PSSetSamplers(2, 1, &khsg_s2old);   // KH_FX_SSGI_BAIL: s2 back on
+                                                                        // The pair path.
+                if (khsg_s2old) khsg_s2old->Release();   // pair-path ref (leak-fix twin above;
+                                                         // Null on every non-pair path).
+                return;
+            }
+            if (khfp_lut) ctx->PSSetShaderResources(19, 1, &khfp_lut);
+            ctx->PSSetShader(khfp_ps ? khfp_ps : g_res.ps_effect, nullptr, 0);
+            // Unbind the source slot before binding it as RTV next round.
+            ID3D11ShaderResourceView* khfp_null = nullptr;
+            ctx->PSSetShaderResources(0, 1, &khfp_null);
+            if (khfp_final) khfp_om.restore(ctx);
+            else            ctx->OMSetRenderTargets(1, &g_res.chain_rtv[write_idx], nullptr);
+            ctx->PSSetShaderResources(0, 1, &src_srv);
+            // Gather at t3 for the resolve draw (bound after the OM above
+            // moved the RTV off buffer 2 - binding it earlier would be a
+            // read-write hazard the runtime resolves by silently nulling
+            // the SRV); unbound right after the draw.
+            if (khsg_pair) {
+                ctx->PSSetShaderResources(3, 1, &khsg_fin);
+            }
+            ctx->Draw(3, 0);
+            if (khsg_pair) {
+                ID3D11ShaderResourceView* khsg_n2 = nullptr;
+                ctx->PSSetShaderResources(3, 1, &khsg_n2);
+                ctx->PSSetSamplers(2, 1, &khsg_s2old);   // KH_FX_SAMP_S2: exact prior binding
+                                                         // Back.
+                if (khsg_s2old) { khsg_s2old->Release(); khsg_s2old = nullptr; }
+            }
+
+            if (!khfp_final) {
+                src_srv = g_res.chain_srv[write_idx];
+                write_idx ^= 1;
+            }
+        };
+
+        for (const auto& f : fullscreen) {
+            if (f.second.effect <= 0) continue;
+            // No-op skip: color.a = 0 is an exact identity under the chain
+            // packing for every blend mode, so a zero-opacity pass costs
+            // nothing.
+            if (f.second.color[3] <= 0.001f) continue;
+
+            // Custom effect: the pass draws with the user PS; absent or
+            // failed compiles skip the pass (reported once).
+            ID3D11PixelShader* khc_ufx = nullptr;
+
+            if (f.second.effect == KH_EFFECT_CUSTOM) {
+                khc_ufx = kh_user_fx_ps(dev, kh_fx_shader_of(f.second));
+                if (!khc_ufx) continue;
+            }
+
+            ID3D11ShaderResourceView* khc_lut = nullptr;
+
+            if (f.second.effect == KH_EFFECT_LUT) {
+                khc_lut = kh_user_lut_srv(dev, kh_fx_shader_of(f.second));
+                if (!khc_lut) continue;
+            }
+
+            if (khfp_live && !khfp_ps && kh_fuse_appendable(f.second) &&
+                kh_fuse_append(khfp_cbd, f.second)) continue;
+
+            khfp_flush(false);
+            if (!upload_cb(f.second, true, &khfp_cbd)) continue;
+            if (f.second.effect == static_cast<int>(EffectId::Fogscatter))
+                kh_fogscatter_pack(khfp_cbd, fullscreen);
+            if (needs_depth(f.second)) {
+                // The pair the engine encoded this cycle's depth with, read
+                // off its own upload when valid - the recipe every stable
+                // depth reader here uses; the flush-selected pair and hold
+                // guard are the fallback. Effect MESHES keep the
+                // flush-selected pair from upload_cb by design (their
+                // arbitration reads it).
+                if (g_ro.engine_proj_valid) {
+                    khfp_cbd.depth_params[0] = g_ro.engine_m22;
+                    khfp_cbd.depth_params[1] = g_ro.engine_m32;
+                } else {
+                    kh_fx_depth_pair_guard(khfp_cbd,
+                        g_cc_flush_serial.load(std::memory_order_relaxed));
+                }
+            }
+            khfp_effect = f.second.effect;
+            khfp_ps = khc_ufx;
+            khfp_lut = khc_lut;
+            khfp_live = true;
+        }
+
+        if (khfp_live) khfp_flush(true);
+        // Unconditional: a bail out of the final flush returns above the
+        // restore and would otherwise leave a chain RTV bound for the rest
+        // of the frame.
+        khfp_om.restore(ctx);
+        khfp_om.release();
+    }
+}
+
+// KH_RENDER_FLUSH round A: the flush's per-pass frame template, lifted out of
+// flush_locked verbatim: view / inverse / fxCam, the rebase verdict, the
+// lighting frame lanes, the band table, the sun and fog lanes, the heightfield
+// lanes and the bucket pass lanes. The parameters carry the flush's own names
+// so the moved lines read as they did; returns the rebase verdict
+// (khf_rebase_on). The PIP template publish and the upload stay at the call
+// site. The injection builds its twin (khr_cbf) inline; round B compares the
+// two and the render thread's chain takes this one.
+inline bool kh_fx_frame_template(ConstantData& khf_cbf, const RVExtBridge::ProjectionViewTransform& pv,
+                                 const float view_proj[4][4], const float inv_view_proj[4][4],
+                                 const float khf_fx_cam[4], bool khf_engcam, const float cam[3]) {
+    memcpy(khf_cbf.view_proj, view_proj, sizeof(khf_cbf.view_proj));
+    memcpy(khf_cbf.inv_view_proj, inv_view_proj, sizeof(khf_cbf.inv_view_proj));
+    memcpy(khf_cbf.fx_cam, khf_fx_cam, sizeof(khf_cbf.fx_cam));   // KH_FX_CAM_REL.
+    const bool khf_rebase_on = khf_engcam
+                             ? kh_rebase_vp_engcam(khf_cbf, pv.view, pv.projection)
+                             : kh_rebase_vp_exact(khf_cbf, pv.view, pv.projection, cam);
+    fill_lighting_frame_cb(khf_cbf);
+    {
+        bool band_any = false;
+        // Finest-first: order slots by near edge ascending, so the shader's
+        // first containing band holds the finest content in the engine's
+        // overlap zones. bandBorder.w encodes valid + which physical texture
+        // slot to sample (1 + index).
+        int order[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+
+        for (int a = 0; a < 7; ++a) {
+            for (int b2 = a + 1; b2 < 8; ++b2) {
+                const float na = g_ls.band[order[a]].valid ? g_ls.band[order[a]].border[0] : 1e9f;
+                const float nb = g_ls.band[order[b2]].valid ? g_ls.band[order[b2]].border[0] : 1e9f;
+
+                if (nb < na) {
+                    const int t = order[a];
+                    order[a] = order[b2];
+                    order[b2] = t;
+                }
+            }
+        }
+
+        float prev_far = -1e9f;
+
+        for (int b = 0; b < 8; ++b) {
+            const auto& bs = g_ls.band[order[b]];
+            khf_cbf.band_border[b][3] = 0.0f;
+            if (!bs.valid || !bs.srv) { continue; }
+
+            // Absent beats offset: the receive term stands down for
+            // KH_RECEIVE_WARMUP_S after the first capture.
+            if (!g_ls.receive_warmed) {
+                if (g_ls.first_capture_time < 0.0f ||
+                    effect_time_seconds() - g_ls.first_capture_time < KH_RECEIVE_WARMUP_S) {
+                    continue;
+                }
+                g_ls.receive_warmed = true;
+            }
+
+            if (!kh_recv_health()) { continue; }
+
+            // Spawn-window guard: a pending band whose provisional view is the
+            // bridge fallback pairs cross-convention; the band re-enters the
+            // moment its seal completes.
+            if (bs.pending_view && bs.vcol_bridge) {  continue; }
+
+            // A pending band's vcol belongs to the epoch before the sm sitting
+            // next to it.
+            if (bs.pending_view) {
+                continue;
+            }
+
+            // Twin dedupe: near inside the previous band's range and far not
+            // meaningfully beyond it = a partition duplicate; two twins
+            // alternate seal content and the shader's winner flip-flops.
+            if (!(bs.border[1] > bs.border[0]) || bs.border[0] < 0.0f ||
+                bs.border[1] > 4000.0f) {
+                g_ls.band[order[b]].valid = false;   // The next resolve reseals sanely.
+                continue;
+            }
+
+            if (bs.border[0] < prev_far - 0.5f && bs.border[1] < prev_far * 1.25f + 1.0f) { continue; }
+            prev_far = bs.border[1];
+
+            memcpy(khf_cbf.band_mat[b * 3 + 0], bs.sm + 0, 16);
+            memcpy(khf_cbf.band_mat[b * 3 + 1], bs.sm + 4, 16);
+            memcpy(khf_cbf.band_mat[b * 3 + 2], bs.sm + 8, 16);
+            memcpy(khf_cbf.band_view[b * 3 + 0], bs.vcol + 0, 16);
+            memcpy(khf_cbf.band_view[b * 3 + 1], bs.vcol + 4, 16);
+            memcpy(khf_cbf.band_view[b * 3 + 2], bs.vcol + 8, 16);
+            khf_cbf.band_border[b][0] = bs.border[0];
+            khf_cbf.band_border[b][1] = bs.border[1];
+            khf_cbf.band_border[b][2] = bs.border[2];
+            khf_cbf.band_border[b][3] = 1.0f + static_cast<float>(order[b]);
+            band_any = true;
+        }
+
+        if (band_any && g_sun_valid &&
+            (g_atlas_frame_cur || g_atlas_frame_prev)) {   // Published sun + live atlas.
+            khf_cbf.mask_meta[0] = 1.0f;   // Stream liveness: the receive.
+        }   // Stands down before the first publish or while the cascade stream is dead.
+        khf_cbf.mask_meta[3] = kh_svs_unit_on() ? 1.0f : 0.0f;
+        // The volume transport arm and the copy's dimensions, flush twin.
+        kh_fill_sten_reproj(khf_cbf);
+
+        // Engine-mask depth-gated receive: registration-exact engine shadows on
+        // mesh surfaces within the depth margin of world geometry.
+
+        // INTENTIONAL (same reasoning as KhHazeT): below the fog layer the
+        // engine switches to a branch outside our model, where the above-layer
+        // formula would pin the height term at full density and white the mesh
+        // out; the mesh stands down there (fogBelow.y).
+        const float khf_cam_y =
+            (g_ls.cam[0] * g_ls.cam[0] + g_ls.cam[1] * g_ls.cam[1] +
+             g_ls.cam[2] * g_ls.cam[2] >= 1.0f) ? g_ls.cam[1]
+          : (cam[0] * cam[0] + cam[1] * cam[1] + cam[2] * cam[2] >= 1.0f)
+             ? cam[1] : 0.0f;
+        // The TRUE camera altitude, unclamped. The shaders arm their
+        // below-layer branch on camY < fogSkyCol.w (static.hlsl,
+        // composite2.hlsl), so a lane clamped at the layer would arm that
+        // branch nowhere: the ray is split shader-side, not here.
+        const float khf_fog_cam_y = khf_cam_y;
+        // fogBelow: x = the engine's below-layer extinction (block nb[51]),
+        // y = armed. z is written 0 here and read by no shader (it carried a
+        // clamp selector for a form none kept); w is never written.
+        khf_cbf.fog_below[0] = (g_light_probe.hits > 0) ? g_light_probe.nb[51] : 0.0f;
+        khf_cbf.fog_below[1] = 1.0f;
+        khf_cbf.fog_below[2] = 0.0f;
+        const bool khf_fog_on = g_fog_valid && g_fog[0] > 1e-4f;
+        const bool khf_eng_ok = g_light_probe.hits > 0 && g_light_probe.meta == 40;
+        kh_fill_haze(khf_cbf);
+
+        if (khf_fog_on || khf_cbf.haze_pars[3] >= 0.5f || khf_eng_ok) {
+            khf_cbf.fog_params[0] = khf_fog_on ? g_fog[0] : 0.0f;
+            khf_cbf.fog_params[1] = g_fog[1];
+            khf_cbf.fog_params[2] = g_fog[2];
+            khf_cbf.fog_params[3] = khf_fog_on ? 1.0f : 0.0f;
+
+            // Fog is decoupled from the block lock, so a degenerate staged
+            // decay or the pre-lock cold window does not leave the mesh
+            // unfogged in a fogged world.
+            if (g_light_probe.hits > 0 && g_light_probe.meta == 40) {
+                const float* e = g_light_probe.nb + 36;
+
+                for (int c = 0; c < 3; ++c) khf_cbf.fog_color[c] = e[c];
+
+                // Engine transmittance terms from the block mirror: the density
+                // scale, the linear ramp's end + inverse range.
+                khf_cbf.fog_engine[0] = g_light_probe.nb[41];
+                khf_cbf.fog_engine[1] = g_light_probe.nb[48];
+                khf_cbf.fog_engine[2] = g_light_probe.nb[49];
+                const bool khf_dec_fresh =
+                    g_light_probe.hits > 0 &&
+                    (effect_time_seconds() - g_light_probe.last_confirm) < 0.5f;
+                const bool khf_dec_eng = khf_dec_fresh && g_light_probe.nb[40] >= 0.0f && g_light_probe.nb[40] < 1.0f;
+                if (khf_dec_eng) {
+                    khf_cbf.fog_params[1] = g_light_probe.nb[40];
+                }
+                const bool khf_terms = g_light_probe.nb[48] > 1.0f &&
+                                       g_light_probe.nb[49] > 0.0f &&
+                                       g_light_probe.nb[41] >= 0.0f;
+                const float khf_rp_end = g_light_probe.nb[48];
+                const float khf_rp_inv = g_light_probe.nb[49];
+                const float khf_rp_prod = khf_rp_end * khf_rp_inv;
+                const bool khf_rp_incoh = khf_terms && khf_rp_prod < 1.0f;
+                const bool khf_ramp_off = khf_rp_incoh;
+                khf_cbf.fog_engine[3] = !khf_terms ? 0.0f : (khf_ramp_off ? 2.0f : 1.0f);
+            } else {
+                khf_cbf.fog_color[0] = 1.0f;
+                khf_cbf.fog_color[1] = 1.0f;
+                khf_cbf.fog_color[2] = 1.0f;
+            }
+
+            if (g_sky_probe.hits > 0) {
+                khf_cbf.fog_sky[0] = 1.0f;
+                khf_cbf.fog_sky[1] = 1.0f;
+                khf_cbf.fog_sky[2] = 1.0f;
+                khf_cbf.fog_sky[3] = 1.0f;
+                khf_cbf.fog_sky_col[0] = g_sky_probe.nb[4];
+                khf_cbf.fog_sky_col[1] = g_sky_probe.nb[5];
+                khf_cbf.fog_sky_col[2] = g_sky_probe.nb[6];
+                // The below-layer convergence colour: nb[28..30] = the sky fog
+                // colour, nb[68..70] = its elevation gradient. Pure captures,
+                // inert unless the shader is below the layer.
+                khf_cbf.fog_uw[0] = g_sky_probe.nb[28];
+                khf_cbf.fog_uw[1] = g_sky_probe.nb[29];
+                khf_cbf.fog_uw[2] = g_sky_probe.nb[30];
+                khf_cbf.fog_uw[3] =
+                    1.0f;
+                khf_cbf.fog_uw_grad[0] = g_sky_probe.nb[68];
+                khf_cbf.fog_uw_grad[1] = g_sky_probe.nb[69];
+                khf_cbf.fog_uw_grad[2] = g_sky_probe.nb[70];
+                g_fog_uw_col[0] = khf_cbf.fog_uw[0];
+                g_fog_uw_col[1] = khf_cbf.fog_uw[1];
+                g_fog_uw_col[2] = khf_cbf.fog_uw[2];
+            }
+
+            // Twin at the injection fill. Camera altitude (engine Y-up),
+            // unclamped - see khf_fog_cam_y.
+            khf_cbf.fog_color[3] = khf_fog_cam_y;
+        }
+    }
+    // Heightfield lanes, both arms: solids always carry them; effect meshes
+    // read them only behind the local1.z arb arm, so the always-live fill is
+    // inert for unarmed effects; chain passes never arm.
+    kh_fill_occ(khf_cbf);
+    // KH_OBJBUF pass lanes (twin of the injection's).
+    khf_cbf.kh_pass[0] = cam[0]; khf_cbf.kh_pass[1] = cam[1]; khf_cbf.kh_pass[2] = cam[2];
+    khf_cbf.kh_pass[3] = khf_rebase_on ? 1.0f : 0.0f;
+    khf_cbf.kh_pass_obj[0] = g_obj_vis.load(std::memory_order_relaxed);
+    return khf_rebase_on;
+}
+
+
+// khfl_rt (KH_RENDER_FLUSH round B): true when the RENDER THREAD runs this
+// body unparked, from the scene-resolve hook, for a frame the game thread
+// certified as fullscreen-only. On that path the housekeeping that needs the
+// park (publish, GCs, cloth / skin uploads, the terrain upload, the shader
+// pump, the expiry erase) is left to the next park, a mesh that turned up
+// since the census is skipped and the park requested, and a missing depth
+// view stands the path down for the session (g_fx_rt_fallback).
+inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_rt) {
+    KH_PROF_SCOPE(KHP_FLUSH);
+    KH_GPU_SCOPE(ctx, KHG_FLUSH);   // KH_PROF.
     g_flush_can_skip = false;   // KH_FLUSH_CADENCE: every early return below leaves the next frames parked.
+    // KH_RENDER_FLUSH: the park takes the frame back HERE, with the render
+    // thread stalled - every cycle up to this one had its render-thread flush
+    // or has this park (khfl_chain_owed below), and none after it a stale
+    // 'wanted' until the game thread skips again.
+    if (!khfl_rt) { g_fx_rt_wanted.store(false, std::memory_order_relaxed); g_fx_park_cycle = g_topo_cycles; }
+    if (!khfl_rt) {   // KH_RENDER_FLUSH: park-only housekeeping.
     // Land a publish kh_fbx_register could not park for. This body holds the
     // park end to end, so the publish and the VB top-up share one serialized
     // window. Ahead of every skip below on purpose: a frame the flush declines
@@ -40224,6 +41425,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // observe - a resized slot table, a released buffer, a half-written Map.
     kh_cloth_upload(ctx, dev);
     kh_skin_upload(ctx, dev);   // KH_SKEL: after the cloth, which empties the slot tables first.
+    }   // End of the park-only housekeeping (KH_RENDER_FLUSH).
     // The graphics lock is held for all of flush_locked, which parks the render
     // thread, so these plain stores can never be observed mid-write. Publish
     // this frame's staged world lighting for the render-thread consumers.
@@ -40251,6 +41453,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         ctx->OMGetRenderTargets(0, nullptr, &dsv);
 
         if (!dsv) {
+            // KH_RENDER_FLUSH: the hook found no depth view - the assumption
+            // this path rests on does not hold on this engine build. Stand
+            // down for the session; every frame parks again.
+            if (khfl_rt) g_fx_rt_fallback.store(true, std::memory_order_relaxed);
             return;
         }
 
@@ -40259,6 +41465,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         dsv->Release();
 
         if (!res) {
+            if (khfl_rt) g_fx_rt_fallback.store(true, std::memory_order_relaxed);
             return;
         }
 
@@ -40267,6 +41474,11 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         res->Release();
 
         if (FAILED(hr) || !tex) {
+            // The same class as the two failures above - the depth view this
+            // path assumes is not the shape it assumes - so the same verdict:
+            // a retry every cycle would re-pay the query for a state no frame
+            // can change.
+            if (khfl_rt) g_fx_rt_fallback.store(true, std::memory_order_relaxed);
             return;
         }
 
@@ -40287,7 +41499,12 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             g_wrong_pass_streak = 0;
         } else if (identity != g_main_depth_identity) {
             g_wrong_pass_streak++;
-            g_flush_wrong_pass = true;     // KH_WRONG_PASS_REPARK: nothing of ours this park - the caller re-parks.
+            // KH_WRONG_PASS_REPARK: nothing of ours this park - the caller
+            // re-parks. The park is the only caller with a re-park loop, so
+            // the render-thread path leaves the flag alone rather than store
+            // across threads for a reader it does not have; its own retry is
+            // the next cycle's resolve.
+            if (!khfl_rt) g_flush_wrong_pass = true;
             return;
         } else {
             g_wrong_pass_streak = 0;
@@ -40335,9 +41552,16 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         }
     }
     kh_user_shader_reap();
-    kh_user_shader_pump(dev);
-    g_flush_frame++;
-    g_flush_frame_pub.store(g_flush_frame, std::memory_order_relaxed);
+    if (!khfl_rt) kh_user_shader_pump(dev);   // KH_RENDER_FLUSH: the re-arm is park-only; the take is either thread's.
+    // KH_RENDER_FLUSH: the scene-flush ordinal is the GAME THREAD's clock -
+    // the UI phase machine arms on it advancing once per frame ahead of the
+    // UI pass, and flush_ui_locked reads a jump of two as a dark driver and
+    // skips every pass. Bumped here on the park, and by flush_frame on a
+    // skipped frame, never on the render thread's cycle clock.
+    if (!khfl_rt) {
+        g_flush_frame++;
+        g_flush_frame_pub.store(g_flush_frame, std::memory_order_relaxed);
+    }
 
     if (!has_objects) return;
 
@@ -40409,6 +41633,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             const float env = lifetime_envelope(khf_live, snapshot_now, expired);
 
             if (expired) {
+                // KH_RENDER_FLUSH: the erase is the park's (kh_attach_drop is
+                // game-thread work); the next frame parks and erases.
+                if (khfl_rt) { g_fx_park_req.store(true, std::memory_order_relaxed); continue; }
                 khf_expired.push_back(khsc_i);
                 continue;
             }
@@ -40422,6 +41649,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             if (khf_live.visible) {
                 RenderObject o = khf_live;
                 o.color[3] *= env;   // Envelope = universal intensity.
+                // KH_RENDER_FLUSH: a mesh that appeared since the game thread's
+                // census belongs to the park (and to the injection, which will
+                // draw it next cycle); the next frame parks.
+                if (khfl_rt && !o.fullscreen) { g_fx_park_req.store(true, std::memory_order_relaxed); continue; }
                 if (!o.fullscreen && kh_fsaa_world_standdown()) { continue; }
                 if (is_composite_eligible(o)) ++khf_comp_eligible;
                 if (!o.fullscreen) khf_any_mesh = true;
@@ -40472,7 +41703,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             }
         }
 
-        if (!khf_expired.empty()) {   // The flush owns the erasure (the others skip expired).
+        if (!khfl_rt && !khf_expired.empty()) {   // The flush owns the erasure (the others skip expired). Park only (KH_RENDER_FLUSH).
             std::lock_guard<std::mutex> g(g_draw_list_mutex);
             for (uint32_t khfe_s : khf_expired) {
                 if (khfe_s >= g_scene_stage.size() || !g_scene_stage[khfe_s]) continue;
@@ -40610,7 +41841,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
     // Heightfield GPU upload (the auto-builder completed a staging grid on the
     // game thread; the texture + live meta go live here, under the park).
-    if (g_thm_dirty) {
+    if (!khfl_rt && g_thm_dirty) {   // KH_RENDER_FLUSH: park only (the flag is the game thread's).
         std::string kht_err = kh_thm_upload(dev);
         if (!kht_err.empty()) report_error_once_safe("KH terrain heightmap: " + kht_err);
     }
@@ -40939,202 +42170,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // Deliberate twin of the injection build (khr_cbf); the per-object draw
     // tails of the two mesh paths are twins by the same decision.
     ConstantData khf_cbf = {};
-    memcpy(khf_cbf.view_proj, view_proj, sizeof(khf_cbf.view_proj));
-    memcpy(khf_cbf.inv_view_proj, inv_view_proj, sizeof(khf_cbf.inv_view_proj));
-    memcpy(khf_cbf.fx_cam, khf_fx_cam, sizeof(khf_cbf.fx_cam));   // KH_FX_CAM_REL.
-    const bool khf_rebase_on = khf_engcam
-                             ? kh_rebase_vp_engcam(khf_cbf, pv.view, pv.projection)
-                             : kh_rebase_vp_exact(khf_cbf, pv.view, pv.projection, cam);
-    fill_lighting_frame_cb(khf_cbf);
-    {
-        bool band_any = false;
-        // Finest-first: order slots by near edge ascending, so the shader's
-        // first containing band holds the finest content in the engine's
-        // overlap zones. bandBorder.w encodes valid + which physical texture
-        // slot to sample (1 + index).
-        int order[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
-
-        for (int a = 0; a < 7; ++a) {
-            for (int b2 = a + 1; b2 < 8; ++b2) {
-                const float na = g_ls.band[order[a]].valid ? g_ls.band[order[a]].border[0] : 1e9f;
-                const float nb = g_ls.band[order[b2]].valid ? g_ls.band[order[b2]].border[0] : 1e9f;
-
-                if (nb < na) {
-                    const int t = order[a];
-                    order[a] = order[b2];
-                    order[b2] = t;
-                }
-            }
-        }
-
-        float prev_far = -1e9f;
-
-        for (int b = 0; b < 8; ++b) {
-            const auto& bs = g_ls.band[order[b]];
-            khf_cbf.band_border[b][3] = 0.0f;
-            if (!bs.valid || !bs.srv) { continue; }
-
-            // Absent beats offset: the receive term stands down for
-            // KH_RECEIVE_WARMUP_S after the first capture.
-            if (!g_ls.receive_warmed) {
-                if (g_ls.first_capture_time < 0.0f ||
-                    effect_time_seconds() - g_ls.first_capture_time < KH_RECEIVE_WARMUP_S) {
-                    continue;
-                }
-                g_ls.receive_warmed = true;
-            }
-
-            if (!kh_recv_health()) { continue; }
-
-            // Spawn-window guard: a pending band whose provisional view is the
-            // bridge fallback pairs cross-convention; the band re-enters the
-            // moment its seal completes.
-            if (bs.pending_view && bs.vcol_bridge) {  continue; }
-
-            // A pending band's vcol belongs to the epoch before the sm sitting
-            // next to it.
-            if (bs.pending_view) {
-                continue;
-            }
-
-            // Twin dedupe: near inside the previous band's range and far not
-            // meaningfully beyond it = a partition duplicate; two twins
-            // alternate seal content and the shader's winner flip-flops.
-            if (!(bs.border[1] > bs.border[0]) || bs.border[0] < 0.0f ||
-                bs.border[1] > 4000.0f) {
-                g_ls.band[order[b]].valid = false;   // The next resolve reseals sanely.
-                continue;
-            }
-
-            if (bs.border[0] < prev_far - 0.5f && bs.border[1] < prev_far * 1.25f + 1.0f) { continue; }
-            prev_far = bs.border[1];
-
-            memcpy(khf_cbf.band_mat[b * 3 + 0], bs.sm + 0, 16);
-            memcpy(khf_cbf.band_mat[b * 3 + 1], bs.sm + 4, 16);
-            memcpy(khf_cbf.band_mat[b * 3 + 2], bs.sm + 8, 16);
-            memcpy(khf_cbf.band_view[b * 3 + 0], bs.vcol + 0, 16);
-            memcpy(khf_cbf.band_view[b * 3 + 1], bs.vcol + 4, 16);
-            memcpy(khf_cbf.band_view[b * 3 + 2], bs.vcol + 8, 16);
-            khf_cbf.band_border[b][0] = bs.border[0];
-            khf_cbf.band_border[b][1] = bs.border[1];
-            khf_cbf.band_border[b][2] = bs.border[2];
-            khf_cbf.band_border[b][3] = 1.0f + static_cast<float>(order[b]);
-            band_any = true;
-        }
-
-        if (band_any && g_sun_valid &&
-            (g_atlas_frame_cur || g_atlas_frame_prev)) {   // Published sun + live atlas.
-            khf_cbf.mask_meta[0] = 1.0f;   // Stream liveness: the receive.
-        }   // Stands down before the first publish or while the cascade stream is dead.
-        khf_cbf.mask_meta[3] = kh_svs_unit_on() ? 1.0f : 0.0f;
-        // The volume transport arm and the copy's dimensions, flush twin.
-        kh_fill_sten_reproj(khf_cbf);
-
-        // Engine-mask depth-gated receive: registration-exact engine shadows on
-        // mesh surfaces within the depth margin of world geometry.
-
-        // INTENTIONAL (same reasoning as KhHazeT): below the fog layer the
-        // engine switches to a branch outside our model, where the above-layer
-        // formula would pin the height term at full density and white the mesh
-        // out; the mesh stands down there (fogBelow.y).
-        const float khf_cam_y =
-            (g_ls.cam[0] * g_ls.cam[0] + g_ls.cam[1] * g_ls.cam[1] +
-             g_ls.cam[2] * g_ls.cam[2] >= 1.0f) ? g_ls.cam[1]
-          : (cam[0] * cam[0] + cam[1] * cam[1] + cam[2] * cam[2] >= 1.0f)
-             ? cam[1] : 0.0f;
-        // The TRUE camera altitude, unclamped. The shaders arm their
-        // below-layer branch on camY < fogSkyCol.w (static.hlsl,
-        // composite2.hlsl), so a lane clamped at the layer would arm that
-        // branch nowhere: the ray is split shader-side, not here.
-        const float khf_fog_cam_y = khf_cam_y;
-        // fogBelow: x = the engine's below-layer extinction (block nb[51]),
-        // y = armed. z is written 0 here and read by no shader (it carried a
-        // clamp selector for a form none kept); w is never written.
-        khf_cbf.fog_below[0] = (g_light_probe.hits > 0) ? g_light_probe.nb[51] : 0.0f;
-        khf_cbf.fog_below[1] = 1.0f;
-        khf_cbf.fog_below[2] = 0.0f;
-        const bool khf_fog_on = g_fog_valid && g_fog[0] > 1e-4f;
-        const bool khf_eng_ok = g_light_probe.hits > 0 && g_light_probe.meta == 40;
-        kh_fill_haze(khf_cbf);
-
-        if (khf_fog_on || khf_cbf.haze_pars[3] >= 0.5f || khf_eng_ok) {
-            khf_cbf.fog_params[0] = khf_fog_on ? g_fog[0] : 0.0f;
-            khf_cbf.fog_params[1] = g_fog[1];
-            khf_cbf.fog_params[2] = g_fog[2];
-            khf_cbf.fog_params[3] = khf_fog_on ? 1.0f : 0.0f;
-
-            // Fog is decoupled from the block lock, so a degenerate staged
-            // decay or the pre-lock cold window does not leave the mesh
-            // unfogged in a fogged world.
-            if (g_light_probe.hits > 0 && g_light_probe.meta == 40) {
-                const float* e = g_light_probe.nb + 36;
-
-                for (int c = 0; c < 3; ++c) khf_cbf.fog_color[c] = e[c];
-
-                // Engine transmittance terms from the block mirror: the density
-                // scale, the linear ramp's end + inverse range.
-                khf_cbf.fog_engine[0] = g_light_probe.nb[41];
-                khf_cbf.fog_engine[1] = g_light_probe.nb[48];
-                khf_cbf.fog_engine[2] = g_light_probe.nb[49];
-                const bool khf_dec_fresh =
-                    g_light_probe.hits > 0 &&
-                    (effect_time_seconds() - g_light_probe.last_confirm) < 0.5f;
-                const bool khf_dec_eng = khf_dec_fresh && g_light_probe.nb[40] >= 0.0f && g_light_probe.nb[40] < 1.0f;
-                if (khf_dec_eng) {
-                    khf_cbf.fog_params[1] = g_light_probe.nb[40];
-                }
-                const bool khf_terms = g_light_probe.nb[48] > 1.0f &&
-                                       g_light_probe.nb[49] > 0.0f &&
-                                       g_light_probe.nb[41] >= 0.0f;
-                const float khf_rp_end = g_light_probe.nb[48];
-                const float khf_rp_inv = g_light_probe.nb[49];
-                const float khf_rp_prod = khf_rp_end * khf_rp_inv;
-                const bool khf_rp_incoh = khf_terms && khf_rp_prod < 1.0f;
-                const bool khf_ramp_off = khf_rp_incoh;
-                khf_cbf.fog_engine[3] = !khf_terms ? 0.0f : (khf_ramp_off ? 2.0f : 1.0f);
-            } else {
-                khf_cbf.fog_color[0] = 1.0f;
-                khf_cbf.fog_color[1] = 1.0f;
-                khf_cbf.fog_color[2] = 1.0f;
-            }
-
-            if (g_sky_probe.hits > 0) {
-                khf_cbf.fog_sky[0] = 1.0f;
-                khf_cbf.fog_sky[1] = 1.0f;
-                khf_cbf.fog_sky[2] = 1.0f;
-                khf_cbf.fog_sky[3] = 1.0f;
-                khf_cbf.fog_sky_col[0] = g_sky_probe.nb[4];
-                khf_cbf.fog_sky_col[1] = g_sky_probe.nb[5];
-                khf_cbf.fog_sky_col[2] = g_sky_probe.nb[6];
-                // The below-layer convergence colour: nb[28..30] = the sky fog
-                // colour, nb[68..70] = its elevation gradient. Pure captures,
-                // inert unless the shader is below the layer.
-                khf_cbf.fog_uw[0] = g_sky_probe.nb[28];
-                khf_cbf.fog_uw[1] = g_sky_probe.nb[29];
-                khf_cbf.fog_uw[2] = g_sky_probe.nb[30];
-                khf_cbf.fog_uw[3] =
-                    1.0f;
-                khf_cbf.fog_uw_grad[0] = g_sky_probe.nb[68];
-                khf_cbf.fog_uw_grad[1] = g_sky_probe.nb[69];
-                khf_cbf.fog_uw_grad[2] = g_sky_probe.nb[70];
-                g_fog_uw_col[0] = khf_cbf.fog_uw[0];
-                g_fog_uw_col[1] = khf_cbf.fog_uw[1];
-                g_fog_uw_col[2] = khf_cbf.fog_uw[2];
-            }
-
-            // Twin at the injection fill. Camera altitude (engine Y-up),
-            // unclamped - see khf_fog_cam_y.
-            khf_cbf.fog_color[3] = khf_fog_cam_y;
-        }
-    }
-    // Heightfield lanes, both arms: solids always carry them; effect meshes
-    // read them only behind the local1.z arb arm, so the always-live fill is
-    // inert for unarmed effects; chain passes never arm.
-    kh_fill_occ(khf_cbf);
-    // KH_OBJBUF pass lanes (twin of the injection's).
-    khf_cbf.kh_pass[0] = cam[0]; khf_cbf.kh_pass[1] = cam[1]; khf_cbf.kh_pass[2] = cam[2];
-    khf_cbf.kh_pass[3] = khf_rebase_on ? 1.0f : 0.0f;
-    khf_cbf.kh_pass_obj[0] = g_obj_vis.load(std::memory_order_relaxed);
+    const bool khf_rebase_on = kh_fx_frame_template(khf_cbf, pv, view_proj, inv_view_proj, khf_fx_cam, khf_engcam, cam);
     // The PIP paths (kh_pip_inject, kh_pip_fx) shade from a frame template the
     // mesh injection publishes; a cycle with no injection (no meshes) would
     // leave them none. The flush's frame CB is the same template one publisher
@@ -41764,285 +42800,13 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     // Chain passes below assume the ambient (CullNone) rasterizer.
     if (khr_bound_rs != g_res.rasterizer) ctx->RSSetState(g_res.rasterizer);
 
-    if (!fullscreen.empty() && effects_ready) {
+    // KH_RENDER_FLUSH: one chain per cycle, whichever thread. A park that lands
+    // in a cycle the render thread already flushed draws no chain (the render
+    // thread is stalled here, so g_fx_rt_cycle is this park's to read).
+    const bool khfl_chain_owed = khfl_rt || g_fx_rt_cycle != g_topo_cycles;
+    if (!fullscreen.empty() && effects_ready && khfl_chain_owed) {
         khf_dsv_swap(true);   // The chain samples live depth; its OM save must hold the read-only view.
-        // The chain's depth must be AT t1: the mesh loop leaves t1 as the last
-        // mesh needed it, and a localized / banded / depth-reading pass reading
-        // 0 there reconstructs the camera position everywhere. Null when the
-        // depth is not ready, as ps_srvs already says.
-        ctx->PSSetShaderResources(1, 1, &ps_srvs[1]);
-        std::string chain_err = meshes.empty() ? "" : kh_scene_capture_timed(dev, ctx);
-        if (chain_err.empty()) chain_err = ensure_fx_chain(dev);
-
-        if (!chain_err.empty()) {
-            // The mesh-side twin of this pair reports as "KH effect setup";
-            // this is the chain's own report.
-            kh_ensure_ok("fullscreen chain", chain_err);
-        } else {
-            KhOmSave khfp_om;
-            khfp_om.capture(ctx);
-            ctx->IASetInputLayout(nullptr);
-            ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
-            ctx->PSSetShader(g_res.ps_effect, nullptr, 0);
-            ctx->OMSetDepthStencilState(g_res.dss_off, 0);
-            ctx->OMSetBlendState(nullptr, bf, 0xFFFFFFFF);   // Opaque: compositing is in-shader.
-
-            ID3D11ShaderResourceView* src_srv = g_res.scene_srv;
-            int write_idx = 0;
-
-            bool                      khfp_live = false;
-            ConstantData              khfp_cbd;
-            int                       khfp_effect = 0;
-            ID3D11PixelShader*        khfp_ps = nullptr;
-            ID3D11ShaderResourceView* khfp_lut = nullptr;
-
-            auto khfp_flush = [&](bool khfp_final) {
-                if (!khfp_live) return;
-                khfp_live = false;
-                bool khsg_pair = false;
-                // The resolve reads whichever half-res buffer holds the final
-                // smoothed field (two a-trous iterations ping-pong
-                // [2]->[3]->[2]; a failed iteration leaves the pointer at the
-                // last good stage).
-                ID3D11ShaderResourceView* khsg_fin = nullptr;
-                ID3D11SamplerState* khsg_s2old = nullptr;   // KH_FX_SAMP_S2: the saved s2.
-                if (khfp_effect == static_cast<int>(EffectId::Ssgi) && !khfp_ps) {
-                    if (!g_res.chain_srv[2] || !g_res.chain_srv[4] ||
-                        !g_res.chain_rtv[4] || !g_res.khsg_sampler) return;   // Pyramid joins the drop-whole
-                                                                              // Gate.
-                    ctx->PSGetSamplers(2, 1, &khsg_s2old);   // KH_FX_SAMP_S2: slot 2.
-                    const float khsg_l0sv = khfp_cbd.local0[0];
-                    const float khsg_l1sv = khfp_cbd.local0[1];
-                    // [2]/[3] join the save - the pyramid level loop rides them
-                    // (source dims for the downsample); a localized ssgi's mask
-                    // centre z and shape live there and the resolve's tail
-                    // reads them.
-                    const float khsg_l2sv = khfp_cbd.local0[2];
-                    const float khsg_l3sv = khfp_cbd.local0[3];
-                    khfp_cbd.local0[1] = (float)g_res.scene_w / (float)(g_khsg_w > 0 ? g_khsg_w : 1);
-                    ctx->PSSetSamplers(2, 1, &g_res.khsg_sampler);
-                    // Both exits release; s1 itself is untouched at either
-                    // point.
-                    if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
-                        ctx->PSSetSamplers(2, 1, &khsg_s2old);
-                        if (khsg_s2old) khsg_s2old->Release();
-                        return;
-                    }
-                    ctx->PSSetShader(g_res.ps_effect, nullptr, 0);
-                    ID3D11ShaderResourceView* khsg_null = nullptr;
-                    ctx->PSSetShaderResources(0, 1, &khsg_null);
-                    ctx->OMSetRenderTargets(1, &g_res.chain_rtv[2], nullptr);
-                    // The gather draws on the half viewport; the saved one is
-                    // restored before the resolve body.
-                    D3D11_VIEWPORT khsg_vps; UINT khsg_vpn = 1;
-                    ctx->RSGetViewports(&khsg_vpn, &khsg_vps);
-                    D3D11_VIEWPORT khsg_vph = {};
-                    khsg_vph.Width    = (float)(g_khsg_w > 0 ? g_khsg_w : 1);
-                    khsg_vph.Height   = (float)(g_khsg_h > 0 ? g_khsg_h : 1);
-                    khsg_vph.MaxDepth = 1.0f;
-                    ctx->RSSetViewports(1, &khsg_vph);
-                    khfp_cbd.fx_meta[0] = 26.0f;
-                    if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
-                        if (khsg_vpn) ctx->RSSetViewports(1, &khsg_vps);
-                        ctx->PSSetSamplers(2, 1, &khsg_s2old);
-                        if (khsg_s2old) khsg_s2old->Release();
-                        return;
-                    }
-                    ctx->OMSetRenderTargets(1, &g_res.chain_rtv[4], nullptr);
-                    ctx->PSSetShaderResources(0, 1, &src_srv);
-                    ctx->Draw(3, 0);
-                    // Each level draws through the disjoint per-mip views with
-                    // the wide-tent kernel (effect 27); source dims ride
-                    // local0.zw.
-                    if (g_res.khsg_pyr_levels > 1) {
-                        khfp_cbd.fx_meta[0] = 27.0f;
-                        int khsg_lw = g_khsg_w > 0 ? g_khsg_w : 1;
-                        int khsg_lh = g_khsg_h > 0 ? g_khsg_h : 1;
-
-                        for (int khsg_m = 1; khsg_m < g_res.khsg_pyr_levels; ++khsg_m) {
-                            khfp_cbd.local0[2] = (float)khsg_lw;   // Source level dims.
-                            khfp_cbd.local0[3] = (float)khsg_lh;
-                            if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) break;
-                            khsg_lw = khsg_lw > 1 ? khsg_lw / 2 : 1;
-                            khsg_lh = khsg_lh > 1 ? khsg_lh / 2 : 1;
-                            D3D11_VIEWPORT khsg_vpm = {};
-                            khsg_vpm.Width    = (float)khsg_lw;
-                            khsg_vpm.Height   = (float)khsg_lh;
-                            khsg_vpm.MaxDepth = 1.0f;
-                            ctx->OMSetRenderTargets(1, &g_res.khsg_mip_rtv[khsg_m], nullptr);
-                            ctx->RSSetViewports(1, &khsg_vpm);
-                            ctx->PSSetShaderResources(3, 1, &g_res.khsg_mip_srv[khsg_m - 1]);
-                            ctx->Draw(3, 0);
-                        }
-
-                        ID3D11ShaderResourceView* khsg_pn = nullptr;
-                        ctx->PSSetShaderResources(3, 1, &khsg_pn);
-                        ctx->RSSetViewports(1, &khsg_vph);   // Back to the gather grid.
-                    } else {
-                        ctx->GenerateMips(g_res.chain_srv[4]);
-                    }
-                    ctx->OMSetRenderTargets(1, &g_res.chain_rtv[2], nullptr);
-                    khfp_cbd.fx_meta[0] = 22.0f;
-                    if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
-                        if (khsg_vpn) ctx->RSSetViewports(1, &khsg_vps);
-                        ctx->PSSetSamplers(2, 1, &khsg_s2old);
-                        if (khsg_s2old) khsg_s2old->Release();
-                        return;
-                    }
-                    ctx->PSSetShaderResources(3, 1, &g_res.chain_srv[4]);
-                    ctx->Draw(3, 0);   // The gather (t0 = source for albedo, t3 = pyramid taps).
-                    khsg_fin = g_res.chain_srv[2];   // Raw gather until smoothing lands.
-                    // Missing buffer or a failed upload skips the draw whole -
-                    // the resolve reads the raw gather instead (one noisier
-                    // frame, never a lost pass).
-                    if (g_res.chain_rtv[3] && g_res.chain_srv[3]) {
-                        khfp_cbd.fx_meta[0] = 25.0f;
-                        khfp_cbd.local0[0] = 1.0f;
-
-                        if (kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
-                            ctx->OMSetRenderTargets(1, &g_res.chain_rtv[3], nullptr);
-                            ctx->PSSetShaderResources(3, 1, &g_res.chain_srv[2]);
-                            ctx->Draw(3, 0);
-                            ID3D11ShaderResourceView* khsg_n3 = nullptr;
-                            ctx->PSSetShaderResources(3, 1, &khsg_n3);
-                            khsg_fin = g_res.chain_srv[3];
-
-                            khfp_cbd.local0[0] = 2.0f;   // Iteration B: sp, back into [2].
-                            if (kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
-                                ctx->OMSetRenderTargets(1, &g_res.chain_rtv[2], nullptr);
-                                ctx->PSSetShaderResources(3, 1, &g_res.chain_srv[3]);
-                                ctx->Draw(3, 0);
-                                ctx->PSSetShaderResources(3, 1, &khsg_n3);
-                                khsg_fin = g_res.chain_srv[2];
-
-                                khfp_cbd.local0[0] = 4.0f;
-                                if (kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
-                                    ctx->OMSetRenderTargets(1, &g_res.chain_rtv[3], nullptr);
-                                    ctx->PSSetShaderResources(3, 1, &g_res.chain_srv[2]);
-                                    ctx->Draw(3, 0);
-                                    ctx->PSSetShaderResources(3, 1, &khsg_n3);
-                                    khsg_fin = g_res.chain_srv[3];
-                                }
-                            }
-                        }
-
-                    }
-                    khfp_cbd.local0[0] = khsg_l0sv;
-                    khfp_cbd.local0[1] = khsg_l1sv;
-                    khfp_cbd.local0[2] = khsg_l2sv;
-                    khfp_cbd.local0[3] = khsg_l3sv;
-                    if (khsg_vpn) {
-                        ctx->RSSetViewports(1, &khsg_vps);
-                    } else {
-                        khsg_vph.Width  = (float)g_res.scene_w;
-                        khsg_vph.Height = (float)g_res.scene_h;
-                        ctx->RSSetViewports(1, &khsg_vph);
-                    }
-                    // When the spread param is auto (< 0.5) the flush writes
-                    // the scale-matched value 1.5 x inv; explicit user values
-                    // pass through untouched. khfp_cbd is per-pass, so no
-                    // restore is owed.
-                    if (khfp_cbd.fx2[3] < 0.5f)
-                        khfp_cbd.fx2[3] = 1.5f * ((float)g_res.scene_w
-                                        / (float)(g_khsg_w > 0 ? g_khsg_w : 1));
-                    khfp_cbd.fx_meta[0] = 24.0f;
-                    khsg_pair = true;
-                }
-                if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
-                    if (khsg_pair) ctx->PSSetSamplers(2, 1, &khsg_s2old);   // KH_FX_SSGI_BAIL: s2 back on
-                                                                            // The pair path.
-                    if (khsg_s2old) khsg_s2old->Release();   // pair-path ref (leak-fix twin above;
-                                                             // Null on every non-pair path).
-                    return;
-                }
-                if (khfp_lut) ctx->PSSetShaderResources(19, 1, &khfp_lut);
-                ctx->PSSetShader(khfp_ps ? khfp_ps : g_res.ps_effect, nullptr, 0);
-                // Unbind the source slot before binding it as RTV next round.
-                ID3D11ShaderResourceView* khfp_null = nullptr;
-                ctx->PSSetShaderResources(0, 1, &khfp_null);
-                if (khfp_final) khfp_om.restore(ctx);
-                else            ctx->OMSetRenderTargets(1, &g_res.chain_rtv[write_idx], nullptr);
-                ctx->PSSetShaderResources(0, 1, &src_srv);
-                // Gather at t3 for the resolve draw (bound after the OM above
-                // moved the RTV off buffer 2 - binding it earlier would be a
-                // read-write hazard the runtime resolves by silently nulling
-                // the SRV); unbound right after the draw.
-                if (khsg_pair) {
-                    ctx->PSSetShaderResources(3, 1, &khsg_fin);
-                }
-                ctx->Draw(3, 0);
-                if (khsg_pair) {
-                    ID3D11ShaderResourceView* khsg_n2 = nullptr;
-                    ctx->PSSetShaderResources(3, 1, &khsg_n2);
-                    ctx->PSSetSamplers(2, 1, &khsg_s2old);   // KH_FX_SAMP_S2: exact prior binding
-                                                             // Back.
-                    if (khsg_s2old) { khsg_s2old->Release(); khsg_s2old = nullptr; }
-                }
-
-                if (!khfp_final) {
-                    src_srv = g_res.chain_srv[write_idx];
-                    write_idx ^= 1;
-                }
-            };
-
-            for (const auto& f : fullscreen) {
-                if (f.second.effect <= 0) continue;
-                // No-op skip: color.a = 0 is an exact identity under the chain
-                // packing for every blend mode, so a zero-opacity pass costs
-                // nothing.
-                if (f.second.color[3] <= 0.001f) continue;
-
-                // Custom effect: the pass draws with the user PS; absent or
-                // failed compiles skip the pass (reported once).
-                ID3D11PixelShader* khc_ufx = nullptr;
-
-                if (f.second.effect == KH_EFFECT_CUSTOM) {
-                    khc_ufx = kh_user_fx_ps(dev, kh_fx_shader_of(f.second));
-                    if (!khc_ufx) continue;
-                }
-
-                ID3D11ShaderResourceView* khc_lut = nullptr;
-
-                if (f.second.effect == KH_EFFECT_LUT) {
-                    khc_lut = kh_user_lut_srv(dev, kh_fx_shader_of(f.second));
-                    if (!khc_lut) continue;
-                }
-
-                if (khfp_live && !khfp_ps && kh_fuse_appendable(f.second) &&
-                    kh_fuse_append(khfp_cbd, f.second)) continue;
-
-                khfp_flush(false);
-                if (!upload_cb(f.second, true, &khfp_cbd)) continue;
-                if (f.second.effect == static_cast<int>(EffectId::Fogscatter))
-                    kh_fogscatter_pack(khfp_cbd, fullscreen);
-                if (needs_depth(f.second)) {
-                    // The pair the engine encoded this cycle's depth with, read
-                    // off its own upload when valid - the recipe every stable
-                    // depth reader here uses; the flush-selected pair and hold
-                    // guard are the fallback. Effect MESHES keep the
-                    // flush-selected pair from upload_cb by design (their
-                    // arbitration reads it).
-                    if (g_ro.engine_proj_valid) {
-                        khfp_cbd.depth_params[0] = g_ro.engine_m22;
-                        khfp_cbd.depth_params[1] = g_ro.engine_m32;
-                    } else {
-                        kh_fx_depth_pair_guard(khfp_cbd,
-                            g_cc_flush_serial.load(std::memory_order_relaxed));
-                    }
-                }
-                khfp_effect = f.second.effect;
-                khfp_ps = khc_ufx;
-                khfp_lut = khc_lut;
-                khfp_live = true;
-            }
-
-            if (khfp_live) khfp_flush(true);
-            // Unconditional: a bail out of the final flush returns above the
-            // restore and would otherwise leave a chain RTV bound for the rest
-            // of the frame.
-            khfp_om.restore(ctx);
-            khfp_om.release();
-        }
+        kh_fx_chain_run(dev, ctx, fullscreen, bf, ps_srvs[1], !meshes.empty(), upload_cb, needs_depth);
     }
 
     if (khf_om_captured) khf_om.restore(ctx);
@@ -42056,8 +42820,20 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
 // Same body, same three consumers: the shadowvis fallback, the
 // objectvis/objectdraw read, the key scan.
+// KH_VIDEO_OPT_CADENCE: getVideoOptions builds a map of every video setting
+// on the engine side - measured at ~1.2 ms per call, the whole of
+// flushPrepUs on every frame of every session - to read two values that
+// change when the user edits a setting. Sampled at KH_VIDEO_OPT_INTERVAL_MS;
+// the first call is immediate. Envelope: a changed shadow visibility or
+// object view distance reaches g_sun_range / g_obj_vis up to that interval
+// late.
+static constexpr uint64_t KH_VIDEO_OPT_INTERVAL_MS = 250;
+static uint64_t g_video_opt_ms = 0;   // Game thread: the last sample.
 inline void stage_video_options() {
     try {
+        const uint64_t khsr_now_ms = steady_now_ms();
+        if (g_video_opt_ms != 0 && khsr_now_ms - g_video_opt_ms < KH_VIDEO_OPT_INTERVAL_MS) return;
+        g_video_opt_ms = khsr_now_ms;
         const bool khsr_want_shadow = g_sun_range_src.load(std::memory_order_relaxed) != 2;
         rv_hashmap khsr_map = sqf::get_video_options();
         bool khsr_shadow_done = !khsr_want_shadow;
@@ -42099,13 +42875,14 @@ inline void stage_world_lighting() {
     // whenever the flush runs.
 
     try {
-        g_fog_staged_valid = false;
-        const auto fp = sqf::fog_params();
+        const auto fp = sqf::fog_params();   // The engine call outside the mutex (1.607).
+        std::lock_guard<std::mutex> khsw_l(g_fog_stage_mu);   // KH_RENDER_FLUSH.
         g_fog_staged[0] = fp.value;
         g_fog_staged[1] = fp.decay;
         g_fog_staged[2] = fp.base;
         g_fog_staged_valid = true;
     } catch (...) {
+        { std::lock_guard<std::mutex> khsw_l(g_fog_stage_mu); g_fog_staged_valid = false; }
         // Fog unavailable this frame: the fog term stands down.
     }
 }
@@ -42238,6 +43015,7 @@ inline bool kh_cloth_proxy_eh_ready() {
 
 // flush_frame, after its census and before the park.
 inline void kh_cloth_proxy_step() {
+    KH_PROF_SCOPE(KHP_CLOTH_PROXY);   // KH_PROF.
     const uint64_t khpx_f = ++g_cloth_proxy_frame;
     std::vector<game_value> khpx_dead;
     // Reconcile the table with the census. No engine call in this part.
@@ -42305,6 +43083,8 @@ inline void kh_cloth_proxy_step() {
 }
 
 inline void flush_frame() {
+    KH_PROF_SCOPE(KHP_FLUSH_FRAME);   // KH_PROF.
+    const int64_t khff_pre_t0 = kh_prof_now();   // KH_PROF: flushPre.
     // KH_ATTACH: this call serves the LATE-DRAW path only - a cycle the
     // injection did not take, where the flush owns the draw and the render
     // thread is parked, so game-thread sampling is the frame's own sampling.
@@ -42320,8 +43100,12 @@ inline void flush_frame() {
     // proxies of the meshes it just erased, and before the park, because this
     // one makes SQF calls.
     kh_attach_proxy_reap();
+    kh_prof_add(KHP_FLUSH_PRE, khff_pre_t0);
+    const int64_t khff_cen_t0 = kh_prof_now();   // KH_PROF: flushCensus.
     bool has_work;
     bool khff_cloth = false;   // KH_CLOTH: some object asks to simulate (kh_cloth_sync's inert gate).
+    bool khff_mesh_obj = false;   // KH_RENDER_FLUSH: a non-fullscreen object exists (the park's frame).
+    bool khff_expiring = false;   // KH_RENDER_FLUSH: a fullscreen object expires now (the park erases).
 
     {
         std::lock_guard<std::mutex> g(g_draw_list_mutex);
@@ -42333,8 +43117,13 @@ inline void flush_frame() {
         bool khum_mesh = false;   // Any visible mesh at all (volume-copy demand,).
         bool khum_front = false;   // KH_INFRONT: any visible view-model mesh (the slice hook's demand).
         g_cloth_proxy_want.clear();   // KH_CLOTH_PROXY.
+        const float khum_now_s = effect_time_seconds();   // KH_RENDER_FLUSH: the expiry test's clock.
 
         for (const auto& khum_kv : g_draw_list) {
+            // KH_RENDER_FLUSH: any non-fullscreen object, visible or not, is the
+            // park's frame; a fullscreen object expiring now is the park's erase.
+            if (!khum_kv.second.fullscreen) khff_mesh_obj = true;
+            else { bool khum_exp = false; lifetime_envelope(khum_kv.second, khum_now_s, khum_exp); if (khum_exp) khff_expiring = true; }
             if (!khum_kv.second.fullscreen) kh_mesh_note_ref(khum_kv.second.mesh);   // KH_MESH_FREE.
             kh_material_note_ref(khum_kv.second.materials);   // KH_MAT_POOL.
             // Shadow-live demand: a visible lit object or any shadow-active
@@ -42370,6 +43159,8 @@ inline void flush_frame() {
         g_ls.wanted.store(khum_lit, std::memory_order_relaxed);
     }
 
+    kh_prof_add(KHP_FLUSH_CENSUS, khff_cen_t0);
+    const int64_t khff_prep_t0 = kh_prof_now();   // KH_PROF: flushPrep (closed at the park decision).
     // KH_CLOTH_PROXY: holding nothing, and ahead of the empty-list return
     // below, so the last cloth mesh's removal still deletes its proxy.
     if (!g_cloth_proxy_want.empty() || !g_cloth_proxy.empty()) kh_cloth_proxy_step();
@@ -42408,6 +43199,7 @@ inline void flush_frame() {
     stage_world_lighting();   // Game thread: getLighting -> staged sun state (pre-lock).
     kh_thm_autobuild_step();   // Game thread: zero-setup terrain acquisition (pre-lock).
     ensure_reorder_hook();   // Cheap early-out once installed; refreshes the tracked context.
+    if (g_ui_mask_wanted.load(std::memory_order_relaxed)) ensure_present_hook();   // KH_PRESENT_UI: once, when a UI pass first exists.
     ID3D11Device* dev = RVExtBridge::get_d3d_device();
     ID3D11DeviceContext* ctx = RVExtBridge::get_d3d_device_context();
     if (!dev || !ctx) return;
@@ -42466,6 +43258,54 @@ inline void flush_frame() {
         g_flush_skipped.store(false, std::memory_order_relaxed);
         g_flush_park_ms = khff_now_ms;
     }
+    // KH_RENDER_FLUSH round B: the fullscreen-only frame is the render
+    // thread's (see the globals). Every term names something only the park may
+    // do, or a state the render thread reported it could not do without; the
+    // periodic park carries the housekeeping. The render thread is told before
+    // any park (false) and on every skipped frame (true), so a cycle is
+    // flushed by exactly one thread (flush_locked's khfl_chain_owed closes the
+    // park-after-render-flush race inside one cycle).
+    kh_prof_add(KHP_FLUSH_PREP, khff_prep_t0);
+    {
+        const uint64_t khfr_now_ms = steady_now_ms();
+        // KH_UI_ORDER: a frame with a visible UI-affecting effect parks
+        // UNLESS the Present hook is drawing the UI chain (KH_PRESENT_UI, the
+        // normal state). On the lock path the UI driver's EH is granted
+        // ahead of the engine's UI composition without the Draw3D park in
+        // front of it (KH_UI_DIAG), so that path needs the park to order the
+        // flush after the composition.
+        const bool khfr_ui_fx = g_ui_mask_wanted.load(std::memory_order_relaxed) && !kh_present_ui_live();   // KH_PRESENT_UI serves the UI chain otherwise.
+        // Consumed HERE, not inside the chain below: && short-circuits, and the
+        // terms ahead of it are the very states the render thread raises it for
+        // (a mesh that appeared, an expiry). Left in the chain the exchange was
+        // skipped on exactly those frames, the request survived the park it
+        // asked for, and it spent itself later on an unrelated fullscreen-only
+        // frame - one park that nothing needed. A request is answered by the
+        // park this frame takes, whichever term called for it.
+        const bool khfr_park_req = g_fx_park_req.exchange(false, std::memory_order_relaxed);
+        const bool khfr_skip =
+            !khff_mesh_obj && !khff_cloth && !khff_expiring && !khfr_ui_fx &&
+            !g_fx_rt_fallback.load(std::memory_order_relaxed) &&
+            !khfr_park_req &&
+            !g_mesh_publish_pending.load(std::memory_order_relaxed) && !g_thm_dirty &&
+            !g_mission_destroy_pending.load(std::memory_order_relaxed) &&
+            g_reorder_render_tid.load(std::memory_order_relaxed) != 0 &&
+            g_reorder_target_ctx.load(std::memory_order_relaxed) != nullptr &&
+            g_fx_rt_park_ms != 0 && khfr_now_ms - g_fx_rt_park_ms < KH_RT_PARK_INTERVAL_MS;
+        if (khfr_skip) {
+            g_fx_rt_wanted.store(true, std::memory_order_relaxed);
+            kh_stat(g_stats.rt_flush_frames);
+            // The scene-flush ordinal (see flush_locked): once per frame, on
+            // this thread, ahead of the UI pass, exactly as the park's.
+            g_flush_frame++;
+            g_flush_frame_pub.store(g_flush_frame, std::memory_order_relaxed);
+            return;
+        }
+        // Not cleared here: a resolve between this store and the park's landing
+        // would draw no chain for a cycle no park reaches. The parked flush
+        // clears it at its head, with the render thread stalled.
+        g_fx_rt_park_ms = khfr_now_ms;
+    }
     ++g_flush_serial;   // KH_FLUSH_SERIAL: the graves' clock.
     kh_stat(g_stats.flushes);
 
@@ -42496,7 +43336,9 @@ inline void flush_frame() {
     // the one-frame offset on hard cuts is the expected staleness of an
     // injected pass.
     for (int attempt = 0; attempt < 3; ++attempt) {
+        const int64_t khff_wait_t0 = kh_prof_now();   // KH_PARK_WAIT.
         RVExtBridge::ScopedGraphicsLock lock;
+        kh_prof_add(KHP_FLUSH_LOCK_WAIT, khff_wait_t0);
 
         if (!lock.acquired()) {
             kh_stat(g_stats.lock_retries);
@@ -42533,7 +43375,7 @@ inline void flush_frame() {
         {
             KhFlushActiveScope khff_active;
             g_flush_wrong_pass = false;
-            flush_locked(dev, ctx);
+            flush_locked(dev, ctx, false);
         }
         if (!g_flush_wrong_pass) return;
         // The park landed on a non-main depth (a PIP pass, an atlas cascade)
@@ -42648,6 +43490,8 @@ inline std::string ensure_ui_chain(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC
 }
 
 inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    KH_PROF_SCOPE(KHP_FLUSH_UI);
+    KH_GPU_SCOPE(ctx, KHG_FLUSH_UI);   // KH_PROF.
     const float snapshot_now = effect_time_seconds();
     static std::vector<std::pair<uint64_t, RenderObject>> passes;   // Key = creation seq.
     passes.clear();
@@ -42731,7 +43575,7 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     kh_ui_mask_learn(khum_bb_id, td.Width, td.Height);
     {
         static uint64_t khum_prev_scene_frame = 0;
-        const uint64_t khum_scene_frame = g_flush_frame;
+        const uint64_t khum_scene_frame = kh_ui_frame_ordinal();   // KH_PRESENT_SEQ (twin of the arm's clock).
         const bool khum_driver_dark =
             khum_prev_scene_frame != 0 &&
             khum_scene_frame > khum_prev_scene_frame + 1;
@@ -42744,7 +43588,8 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     }
 
     const bool khum_mask_live = g_ui_mask.mask_valid &&
-                                g_ui_mask.phase_bb == khum_bb_id;
+                                g_ui_mask.phase_bb == khum_bb_id &&
+                                g_ui_poison_run < KH_UI_POISON_DEAD;   // KH_UI_POISON_RUN: a dead mask draws nothing.
 
     // A same-frame CPU verdict is unobtainable here; the lagged verdict
     // (event's first frame visible, everything after vetoed, sticky until
@@ -42771,7 +43616,7 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                                                  D3D11_MAP_FLAG_DO_NOT_WAIT, &khas_map);
 
                 if (SUCCEEDED(khas_hr)) {
-                    int khas_min = 255, khas_max = 0;
+                    int khas_min = 255;   // The poison rule reads the minimum alone.
 
                     for (UINT khas_y = 0; khas_y < 64; ++khas_y) {
                         const uint8_t* khas_row =
@@ -42781,11 +43626,11 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                             const int khas_a = khas_row[khas_x * 4 + 3];   // A is byte 3 in RGBA8 and
                                                                            // BGRA8.
                             if (khas_a < khas_min) khas_min = khas_a;
-                            if (khas_a > khas_max) khas_max = khas_a;
                         }
                     }
 
                     ctx->Unmap(g_res.ui_alpha_stage, 0);
+                    g_ui_poison_run = (khas_min == 255) ? g_ui_poison_run + 1 : 0;   // KH_UI_POISON_RUN.
                     g_ui_mask.alpha_copy_pending = false;
                 } else if (khas_hr != DXGI_ERROR_WAS_STILL_DRAWING) {
                     g_ui_mask.alpha_copy_pending = false;
@@ -43111,6 +43956,156 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     bb->Release();
 }
 
+// KH_PRESENT_UI: the sixteenth hook (see the globals). Runs the UI flush
+// into the swapchain's backbuffer on the presenting thread, then forwards.
+typedef HRESULT (STDMETHODCALLTYPE* KhPresentFn)(IDXGISwapChain*, UINT, UINT);
+static KhPresentFn g_orig_present = nullptr;
+inline ID3D11RenderTargetView* kh_present_rtv(ID3D11Device* khpv_dev, ID3D11Texture2D* khpv_bb) {
+    void* khpv_id = static_cast<void*>(khpv_bb);
+    for (int khpv_i = 0; khpv_i < 4; ++khpv_i) if (g_present_rtv[khpv_i] && g_present_rtv_id[khpv_i] == khpv_id) return g_present_rtv[khpv_i];
+    D3D11_TEXTURE2D_DESC khpv_td = {};
+    khpv_bb->GetDesc(&khpv_td);
+    D3D11_RENDER_TARGET_VIEW_DESC khpv_rd = {};
+    const D3D11_RENDER_TARGET_VIEW_DESC* khpv_rdp = nullptr;
+    if (khpv_td.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS || khpv_td.Format == DXGI_FORMAT_B8G8R8A8_TYPELESS) {
+        khpv_rd.Format = khpv_td.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS ? DXGI_FORMAT_R8G8B8A8_UNORM : DXGI_FORMAT_B8G8R8A8_UNORM;
+        khpv_rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+        khpv_rdp = &khpv_rd;
+    }
+    ID3D11RenderTargetView* khpv_rtv = nullptr;
+    if (FAILED(khpv_dev->CreateRenderTargetView(khpv_bb, khpv_rdp, &khpv_rtv)) || !khpv_rtv) return nullptr;
+    const uint32_t khpv_s = g_present_rtv_next++ & 3u;
+    KH_SAFE_RELEASE(g_present_rtv[khpv_s]);
+    g_present_rtv[khpv_s] = khpv_rtv;
+    g_present_rtv_id[khpv_s] = khpv_id;
+    return khpv_rtv;
+}
+static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* self, UINT khp_sync, UINT khp_flags) {
+    try {
+        // KH_PRESENT_TEST: the engine calls Present with DXGI_PRESENT_TEST in
+        // the MIDDLE of its UI pass (an occlusion probe; nothing is presented
+        // and RenderDoc does not end the frame there - measured: our flush
+        // landed between two widget groups, 24 draws before the real Present).
+        // Only a presenting call ends the frame.
+        if (khp_flags & DXGI_PRESENT_TEST) {
+            return g_orig_present ? g_orig_present(self, khp_sync, khp_flags) : E_FAIL;
+        }
+        ID3D11DeviceContext* khp_ctx = static_cast<ID3D11DeviceContext*>(g_reorder_target_ctx.load(std::memory_order_relaxed));
+        if (self && khp_ctx && g_ui_mask_wanted.load(std::memory_order_relaxed) &&
+            !g_kh_flush_active.load(std::memory_order_relaxed)) {
+            // The device is a term, not a fallback: flush_ui_locked dereferences
+            // it (ensure_resources, the alpha-stage create), and the lock path
+            // guards it the same way at flush_ui_frame's head. Without the term
+            // a null device still reached the flush whenever the held-RTV
+            // branch below supplied the view, which needs no device of its own.
+            // Read here, behind the cheap flags, as every other call site reads
+            // it - a Present with no UI pass pays nothing.
+            ID3D11Device* khp_dev = RVExtBridge::get_d3d_device();
+            ID3D11Texture2D* khp_bb = nullptr;
+            if (khp_dev && FAILED(self->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&khp_bb)))) khp_bb = nullptr;
+            if (khp_bb) {
+                // KH_PRESENT_RTV: the engine's own view when the machine armed
+                // this frame (same thread); GetBuffer(0)'s otherwise.
+                ID3D11RenderTargetView* khp_rtv =
+                    (g_ui_frame_rtv && g_ui_frame_rtv_seq == g_present_seq.load(std::memory_order_relaxed))
+                        ? g_ui_frame_rtv
+                        : kh_present_rtv(khp_dev, khp_bb);
+                // Neither source hands out a reference: g_ui_frame_rtv is the
+                // mask machine's, released and replaced at the next arm on
+                // EITHER context thread (KH_UI_MASK_RT), and this is a
+                // swapchain call, which the machine's one-thread-at-a-time
+                // context invariant does not cover. Hold one until the bind
+                // below, which takes the runtime's own.
+                if (khp_rtv) khp_rtv->AddRef();
+                // The view holds the buffer from here, and nothing below reads
+                // khp_bb - so it goes back now rather than after the flush. A
+                // throw out of flush_ui_locked reaches this function's catch,
+                // which cannot see this scope, and a stranded reference on
+                // backbuffer 0 is not an ordinary leak: it fails the engine's
+                // next ResizeBuffers.
+                khp_bb->Release();
+                khp_bb = nullptr;
+                if (khp_rtv) {
+                    // Our draws are ours to the hooks on either thread: the
+                    // render-thread hooks stand aside on in_injection, the
+                    // UI-thread branch and the OM hooks on g_ui_mask_injecting.
+                    const bool khp_rt = reorder_on_render_thread();
+                    const bool khp_pinj = g_ro.in_injection;
+                    if (khp_rt) g_ro.in_injection = true;
+                    g_ui_mask_injecting.store(true, std::memory_order_relaxed);
+                    {
+                        KhOmSave khp_om;
+                        khp_om.capture(khp_ctx);
+                        khp_ctx->OMSetRenderTargets(1, &khp_rtv, nullptr);
+                        khp_rtv->Release();   // The bind holds it now; nothing below reads the pointer.
+                        flush_ui_locked(khp_dev, khp_ctx);
+                        khp_om.restore(khp_ctx);
+                        khp_om.release();
+                    }
+                    g_ui_mask_injecting.store(false, std::memory_order_relaxed);
+                    if (khp_rt) g_ro.in_injection = khp_pinj;
+                    g_present_ui_ms.store(steady_now_ms(), std::memory_order_relaxed);
+                }
+            }
+        }
+        // KH_PRESENT_SEQ: the presented-frame clock, bumped after the flush so
+        // the next frame's flush sees +1 (a Present with nothing to draw for
+        // us still ends a frame).
+        g_present_seq.fetch_add(1, std::memory_order_relaxed);
+    } catch (...) {
+        g_ui_mask_injecting.store(false, std::memory_order_relaxed);
+        kh_hook_except();
+    }
+    return g_orig_present ? g_orig_present(self, khp_sync, khp_flags) : E_FAIL;
+}
+// The install: a swapchain on a hidden window, on the game's device, for its
+// vtable; the window and the swapchain are gone before the hook is enabled.
+// One attempt per session; a failure leaves the lock path in place.
+inline void ensure_present_hook() {
+    if (g_present_hook_active.load(std::memory_order_relaxed) || g_present_hook_failed) return;
+    if (!g_reorder_hook_active.load(std::memory_order_acquire)) return;   // MinHook is up once the context hooks are.
+    ID3D11Device* khph_dev = RVExtBridge::get_d3d_device();
+    if (!khph_dev) return;
+    g_present_hook_failed = true;   // Cleared on success below.
+    IDXGIDevice* khph_dxgi = nullptr;
+    IDXGIAdapter* khph_ad = nullptr;
+    IDXGIFactory* khph_fac = nullptr;
+    IDXGISwapChain* khph_sc = nullptr;
+    HWND khph_hw = nullptr;
+    void* khph_slot = nullptr;
+    do {
+        if (FAILED(khph_dev->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&khph_dxgi))) || !khph_dxgi) break;
+        if (FAILED(khph_dxgi->GetAdapter(&khph_ad)) || !khph_ad) break;
+        if (FAILED(khph_ad->GetParent(__uuidof(IDXGIFactory), reinterpret_cast<void**>(&khph_fac))) || !khph_fac) break;
+        khph_hw = CreateWindowExA(0, "STATIC", "kh_present_probe", WS_POPUP, 0, 0, 2, 2, nullptr, nullptr, GetModuleHandleA(nullptr), nullptr);
+        if (!khph_hw) break;
+        DXGI_SWAP_CHAIN_DESC khph_sd = {};
+        khph_sd.BufferCount = 1;
+        khph_sd.BufferDesc.Width = 2;
+        khph_sd.BufferDesc.Height = 2;
+        khph_sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        khph_sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        khph_sd.OutputWindow = khph_hw;
+        khph_sd.SampleDesc.Count = 1;
+        khph_sd.Windowed = TRUE;
+        khph_sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+        if (FAILED(khph_fac->CreateSwapChain(khph_dev, &khph_sd, &khph_sc)) || !khph_sc) break;
+        khph_slot = (*reinterpret_cast<void***>(khph_sc))[8];   // IDXGISwapChain::Present.
+    } while (false);
+    KH_SAFE_RELEASE(khph_sc);
+    if (khph_hw) DestroyWindow(khph_hw);
+    KH_SAFE_RELEASE(khph_fac);
+    KH_SAFE_RELEASE(khph_ad);
+    KH_SAFE_RELEASE(khph_dxgi);
+    if (!khph_slot) { report_error_once_safe("KH RenderIntegration: Present hook: no swapchain vtable (UI passes keep the lock path)"); return; }
+    if (MH_CreateHook(khph_slot, reinterpret_cast<void*>(&hooked_present), reinterpret_cast<void**>(&g_orig_present)) != MH_OK ||
+        MH_EnableHook(khph_slot) != MH_OK) {
+        report_error_once_safe("KH RenderIntegration: Present hook: MinHook failed (UI passes keep the lock path)");
+        return;
+    }
+    g_present_hook_failed = false;
+    g_present_hook_active.store(true, std::memory_order_release);
+}
 inline bool flush_ui_frame() {
     bool has_work = false;
 
@@ -43127,15 +44122,28 @@ inline bool flush_ui_frame() {
     ID3D11DeviceContext* ctx = RVExtBridge::get_d3d_device_context();
     if (!dev || !ctx) return false;
     kh_stat(g_stats.ui_flushes);
+    KH_PROF_SCOPE(KHP_FLUSH_UI_FRAME);   // KH_PARK_WAIT: the UI park whole (its wait + flush_ui_locked).
 
+    // KH_PRESENT_UI: the Present hook draws the UI chain this frame; the EH
+    // only keeps the driver alive. Off that path (no hook, or Present has not
+    // drawn within the stale window) the lock path below stands.
+    if (kh_present_ui_live()) return true;
+
+    // The lock path: the fallback while the Present hook is not serving (not
+    // installed, or no Present drew the chain within the stale window). Its
+    // grant lands ahead of the engine's UI composition without the Draw3D
+    // park in front of it (KH_UI_DIAG above), so under the render-thread
+    // flush it is also what the KH_UI_ORDER park term exists for. Never
+    // without the lock: see KH_UI_DIAG.
     for (int attempt = 0; attempt < 3; ++attempt) {
+        const int64_t khfu_wait_t0 = kh_prof_now();   // KH_PARK_WAIT.
         RVExtBridge::ScopedGraphicsLock lock;
+        kh_prof_add(KHP_FLUSH_UI_LOCK_WAIT, khfu_wait_t0);
 
         if (!lock.acquired()) {
             kh_stat(g_stats.lock_retries);
             continue;
         }
-
         // Our draws traverse the T-path otherwise (released on unwind, as in
         // flush_frame).
         {
@@ -43149,10 +44157,16 @@ inline bool flush_ui_frame() {
     return false;
 }
 
-// Internal UI-flush driver: self-hosts the control "Draw" callsite. Display 46
-// does not exist at pre_init, so an EachFrame poller waits for it, creates an
-// invisible 1px map control once, attaches a compiled-SQF Draw handler invoking
-// flushUIRender, then idles.
+// Internal UI-flush driver: a mission "Draw2D" event handler calling
+// flushUIRender. Display 46 does not exist at pre_init, so an EachFrame poller
+// waits for it, runs the compiled init once (which adds the handler if
+// missionNamespace does not already hold its id), then idles. The init is
+// idempotent, so the re-hoist below costs a namespace test.
+// Previously this hosted its own invisible RscMapControlEmpty on display 46 and
+// hung a "Draw" handler on it, deleting and recreating the control at every
+// re-hoist (twice a second). Under KH_PRESENT_UI the driver no longer draws -
+// the Present hook does (flush_ui_frame returns at kh_present_ui_live) - so the
+// callsite only has to exist and be cheap; the control is gone.
 
 static intercept::client::EHIdentifierHandle g_ui_poll_eh;
 static bool g_ui_driver_registered = false;
@@ -43187,7 +44201,7 @@ inline void kh_ui_driver_rehoist() {
     const float khrh_now = effect_time_seconds();
     if (khrh_now - g_ui_rehoist_last_s < 0.5f) return;
     g_ui_rehoist_last_s = khrh_now;
-    g_ui_ctrl_created = false;   // The EachFrame poll re-runs the init next frame.
+    g_ui_ctrl_created = false;   // The EachFrame poll re-runs the (idempotent) init next frame.
 }
 
 // C++ Draw3D event handler lifecycle. Mission EHs die with the mission: the
@@ -43228,6 +44242,7 @@ inline void reset_stat_counters() {
     g_attach_skew_bits.store(0, std::memory_order_relaxed);
     g_shader_cache_hits.store(0, std::memory_order_relaxed);
     g_shader_cache_misses.store(0, std::memory_order_relaxed);
+    kh_prof_reset_pub();   // KH_PROF.
 }
 
 // Per-session scratch that is neither a device object nor a statistic. Must run
@@ -43370,6 +44385,14 @@ inline void reset_session_state() {
     g_comp_fail_streak = 0; g_comp_next_retry = 0.0f; g_comp_last_err.clear();
     g_snap_serial = 0; g_snap_ms = 0;
     g_flush_can_skip = false; g_flush_park_ms = 0; g_flush_frame_ms = 0;   // KH_FLUSH_CADENCE.
+    // KH_RENDER_FLUSH: the scheme restarts with the session (under the park,
+    // so the render thread is not between the test and the store).
+    g_fx_rt_wanted.store(false, std::memory_order_relaxed);
+    g_fx_park_req.store(false, std::memory_order_relaxed);
+    g_fx_rt_fallback.store(false, std::memory_order_relaxed);
+    g_fx_rt_cycle = ~0ull;
+    g_fx_park_cycle = ~0ull;
+    g_fx_rt_park_ms = 0;
     g_flush_miss_seen_serial = 0; g_flush_landed_this_frame = false;   // KH_FLUSH_MISS.
     g_inj_bailed.store(false, std::memory_order_relaxed);
     g_inj_repainted.store(false, std::memory_order_relaxed);

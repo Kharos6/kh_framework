@@ -4978,7 +4978,7 @@ public:
                                                 game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
                                                 game_state->set_local_variable(args_name, handler.handler_arguments);
                                                 game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
-                                                intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
+                                                intercept::client::host::functions.invoke_raw_unary_nolock(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
                                             } catch (const std::exception& e) {
                                                 report_error("KH Network: Handler error for '" + msg.event_name + "' - " + std::string(e.what()));
                                             }
@@ -5008,7 +5008,7 @@ public:
                             game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
                             game_state->set_local_variable(args_name, handler.handler_arguments);
                             game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
-                            intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
+                            intercept::client::host::functions.invoke_raw_unary_nolock(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
                         } catch (const std::exception& e) {
                             report_error("KH Network: Handler error for '" + msg.event_name + "' - " + std::string(e.what()));
                         }
@@ -5157,7 +5157,7 @@ public:
                                                     game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
                                                     game_state->set_local_variable(args_name, handler.handler_arguments);
                                                     game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
-                                                    intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
+                                                    intercept::client::host::functions.invoke_raw_unary_nolock(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
                                                 } catch (const std::exception& e) {
                                                     report_error("KH Network: Handler error for '" + msg.event_name + "' - " + std::string(e.what()));
                                                 }
@@ -5201,7 +5201,7 @@ public:
                             game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
                             game_state->set_local_variable(args_name, handler.handler_arguments);
                             game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
-                            intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
+                            intercept::client::host::functions.invoke_raw_unary_nolock(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
                         } catch (const std::exception& e) {
                             report_error("KH Network: Handler error for '" + msg.event_name + "' - " + std::string(e.what()));
                         }

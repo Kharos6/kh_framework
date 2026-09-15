@@ -22099,6 +22099,44 @@ static KhCbCensusEntry g_cbc[KH_CBC_N];
 
 inline bool shadow_live_wanted();   // Defined with the live-shadow state.
 
+// DO NOT TRY TO NARROW THIS. It was measured, in full, and it cannot be.
+//
+// kh_cbc_on() is term 1 of kh_upload_hook_wanted's consumer list, and it is a
+// blanket: with a lit mesh in the scene it admits EVERY engine constant-buffer
+// map - ~8,800 a cycle, ~3 ms of render-thread time. That looks like an
+// obvious win, and the shape of the code encourages the idea: the census it
+// feeds (g_cbc) holds 16 slots and the other locators all narrow to one buffer
+// once they lock. It was instrumented per term, per consumer, and per map.
+// The numbers, two passes 2,891 cycles apart on a lit-mesh scene:
+//
+//   the census IS stable      0 new slots in 5,579,840 notes; 2 slots live;
+//                             ~849 of the ~8,800 admissions a cycle reach it.
+//   shadow_register_upload    16 / 16 slots FULL, taking 22.1 NEW slots a
+//   is NOT                    cycle - it recycles its whole table ~1.4x every
+//                             frame. It has no working set; the stream is its
+//                             working set, which is what its own 'no size cap:
+//                             big CBs hold the maps' is telling you.
+//
+// The candidate tried was the union of what term 1's consumers actually hold -
+// census + cb_reg + view_src + the two colour probes - with discovery left
+// open while any table is unpopulated. Run as a shadow predicate against live
+// traffic (admission unchanged, so nothing could break while measuring) it
+// refused 21 % of admissions and would have COST 16.2 cb_reg slots a cycle,
+// 74 % of every new one. The prize was ~0.6 ms; the price was three quarters
+// of the shadow register's intake.
+//
+// The failure mode is why this warning is here rather than a smaller comment:
+// a starved consumer here does not fall back and does not flicker. It holds
+// its last value. Shadow view recovery would degrade silently and surface
+// weeks later as 'shadows sometimes look wrong', with nothing pointing back
+// here. The same shape already bit the two colour probes in locator_note_upload
+// when a different blanket term was closed: they had no term of their own and
+// were riding that one.
+//
+// If you still want to try: the only consumer that can be locked is the census,
+// and it is 10 % of the traffic. Anything else needs shadow_register_upload to
+// stop being a rolling recorder, which is a change to what it is FOR, not a
+// change to this gate.
 inline bool kh_cbc_on() {
     return shadow_live_wanted() || g_svs_mesh_wanted.load(std::memory_order_relaxed);
 }

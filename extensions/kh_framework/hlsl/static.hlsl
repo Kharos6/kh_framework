@@ -175,7 +175,18 @@ void PSSunDepthA(VSOutSunA i)
     int khsa_mode = (int)matParams0.y;   // 0 opaque, 1 cutout, 2 blend (kh_bind_material).
     // The material's alpha by its own route (diffuse.a by default; 1 when no
     // map is bound), exactly the colour pass's sampling.
-    float khsa_t = KhMatRoute(matParams3.y, 1.0f, i.uv);
+    // KH_CAST_ALPHA_SKIP: KhMatRoute resolves through KhMatFetch, whose
+    // six-arm slot chain fxc hoists WHOLE (the slot is a StructuredBuffer lane,
+    // so it cannot prove it uniform and a filtered sample has no derivative in
+    // divergent flow) - one call is SIX filtered samples, as the note at
+    // KhMatTapAll measured. An opaque material never reads the result, and a
+    // cast shader runs per casting fragment per TIER: up to five sun tiers and
+    // up to 48 dynamic-light face slices. Asking for it only where it is read
+    // is the same value on every path (1.758: a dead accumulation is still
+    // paid); the worst fxc can do with the guard is hoist the chain back to
+    // where it already is.
+    float khsa_t = 1.0f;
+    if (khsa_mode == 1 || khsa_mode == 2) khsa_t = KhMatRoute(matParams3.y, 1.0f, i.uv);
     if (khsa_mode == 1) clip(khsa_t - matParams0.z);   // Cutout: the cutoff kills, survivors cast full.
     else if (khsa_mode == 2 && KhMatRouteTexel(matParams3.y, 1.0f, i.uv) < 0.9f) khsa_a *= khsa_t;
     if (khsa_a >= 0.996f) return;                       // Solid.
@@ -191,8 +202,10 @@ void PSInjDepthA(VSOut i)
 {
     KhMatLoad(i.matIx);   // KH_MAT_TABLE.
     int khfa_mode = (int)matParams0.y;
-    float khfa_t = KhMatRoute(matParams3.y, 1.0f, i.uv);
-    if (khfa_mode == 1) clip(khfa_t - matParams0.z);
+    // KH_CAST_ALPHA_SKIP (see PSSunDepthA): the filtered alpha is read by the
+    // cutout arm alone, so opaque and blend materials asked for six samples and
+    // threw the answer away.
+    if (khfa_mode == 1) clip(KhMatRoute(matParams3.y, 1.0f, i.uv) - matParams0.z);
     // The colour pass's own verdict.
     else if (khfa_mode == 2) clip(KhMatRouteTexel(matParams3.y, 1.0f, i.uv) - 0.9f);
 }
@@ -213,8 +226,8 @@ float4 PSDlsMaskA(VSOut i) : SV_Target
     KhLodDitherCut(i.pos.xy, khObjDither);
     KhMatLoad(i.matIx);   // KH_MAT_TABLE.
     int khma_mode = (int)matParams0.y;
-    float khma_t = KhMatRoute(matParams3.y, 1.0f, i.uv);
-    if (khma_mode == 1) clip(khma_t - matParams0.z);
+    // KH_CAST_ALPHA_SKIP (see PSSunDepthA).
+    if (khma_mode == 1) clip(KhMatRoute(matParams3.y, 1.0f, i.uv) - matParams0.z);
     // The colour pass's own verdict.
     else if (khma_mode == 2) clip(KhMatRouteTexel(matParams3.y, 1.0f, i.uv) - 0.9f);
     return float4(i.pos.w, 0.0f, 0.0f, 0.0f);

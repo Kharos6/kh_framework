@@ -1025,6 +1025,14 @@ float SunShadowOcclusionSelf(float3 wrel, float3 nrm)
 
 float SunShadowFactorSelf(float3 wpos, float3 wrel, float3 nrm)
 {
+    // KH_SHADOW_STRENGTH_SKIP: sunMeta.w is g_shadow_map_strength, a CB scalar,
+    // so this branch is UNIFORM - one scalar test, no divergence, and no
+    // gradient of the ladder below is taken in split flow. At strength 0 the
+    // product is an exact 1 - 0 whatever the ladder answers, and the ladder is
+    // the costliest term in the mesh shaders (the four tiers plus the union
+    // map, each a KH_PCSS blocker search and up to 16 taps). An HLSL multiply
+    // evaluates both sides (1.573); this is the gate that makes the zero free.
+    if (saturate(sunMeta.w) <= 0.0f) return 1.0f;
     return 1.0f - SunShadowOcclusionSelf(wrel, nrm) * saturate(sunMeta.w)
                 * KhSunRangeFade(wpos);
 }
@@ -1443,6 +1451,15 @@ float3 DynLights(float3 wpos, float3 nrm)
             float c = saturate((dot(-dlLights[b + 1].xyz, L) - dlLights[b + 1].w) * dlLights[b + 2].w);
             att *= (c > 0.0f) ? pow(c, dlLights[b + 3].w) : 0.0f;
         }
+        // KH_DL_ATT_SKIP: both cut-offs above are HARD zeros - the range fade is
+        // 1 - saturate(...) past its width, and the cone is the (c > 0) select -
+        // so everything below is multiplied by an exact 0 and the light cannot
+        // reach this pixel. Skipping it skips KhDlsShadow, which is 36 Loads
+        // (KhDlsSoft's 9 x KhDlsBilin's 4). Twin: KhDlsWorldFactor, which has
+        // carried this same guard since it was written; the two mesh loops did
+        // not. No gradient is skipped with it: khs_fwp is priced before the
+        // loop and KhDlsSoft Loads only.
+        if (att <= 0.0f) continue;
 
         // The shadow scales the directional term only. dlLights[b + 3] is the
         // per-light ambient - the away-facing glow that makes A3 lights read on
@@ -1791,6 +1808,8 @@ float3 KhDynLightsPBR(float3 wpos, float3 nrm, float3 albedo, float3 F0, float r
             float c = saturate((dot(-dlLights[b + 1].xyz, L) - dlLights[b + 1].w) * dlLights[b + 2].w);
             att *= (c > 0.0f) ? pow(c, dlLights[b + 3].w) : 0.0f;
         }
+        // KH_DL_ATT_SKIP: twin of the DynLights and KhDlsWorldFactor guard.
+        if (att <= 0.0f) continue;
 
         // Twin of the DynLights site. Folding the term into diffI shadows the
         // specular lobe with it (KhGGXSpec is scaled by diffI): a highlight
@@ -1810,7 +1829,15 @@ float3 KhDynLightsPBR(float3 wpos, float3 nrm, float3 albedo, float3 F0, float r
         float3 khsKd = kdM;
         float3 khsSpec = float3(0.0f, 0.0f, 0.0f);
 
-        if (specOn >= 0.5f) {   // Uniform branch (mode verdict, not per-light).
+        // specOn is the mode verdict (uniform); ndl is per pixel and per light.
+        // KH_DL_NDL_SKIP: ndl is max(dot, 0), a HARD zero on a face turned away
+        // from this light, so diffI is an exact zero too and BOTH terms the lobe
+        // feeds vanish whatever F comes back - khsSpec is GGX * diffI, and the
+        // diffuse is diffI * khsKd. This is KhApplyPBR's khsd_lit rule
+        // (KH_SUN_SKIP_DARK) on the per-light side, and it carries the conductor
+        // Fresnel's three square roots and the D/G/divide with it. The per-light
+        // ambient below does NOT take the gate: it is not scaled by ndl.
+        if (specOn >= 0.5f && ndl > 0.0f) {
             float3 khsF;
             khsSpec = KhGGXSpec(n, v, L, rough, F0, khsF) * diffI;
             if (khFrNK.z >= 0.5f) khsKd *= saturate(1.0f - khsF);   // The arma tint may exceed 1.
@@ -2129,8 +2156,15 @@ void KhVsCore(float3 khvc_lp, float3 khvc_ln, float3 khvc_ctr, float3 khvc_rel, 
     khvc_onrm = normalize(KhRotateR(khvc_ln / max(khvc_size, float3(1e-4f, 1e-4f, 1e-4f)), khvc_r0, khvc_r1, khvc_r2));
 }
 
-// The effect unit's depthTex owns t1: only the static and composite compiles
-// pass KH_RECEIVE_TEX.
+// The effect unit's depthTex owns t1. KH_RECEIVE_TEX is passed by the white,
+// static and composite compiles - kh_white_ensure, ensure_resources'
+// static and composite tables, ensure_composite_shader, and kh_user_mat_ps's
+// three material twins - and by nothing else. EVERY compile of the effect
+// unit (ensure_resources' prewarm pair, ensure_effect_shader,
+// kh_pip_fx_shader) and kh_user_fx_ps's cb + user post-FX pass MSAA_DEPTH
+// alone; that is what keeps shadowAtlas off depthTex at t1. white.hlsl
+// declares no register of its own, so the white unit takes the block below
+// without colliding with anything.
 #ifdef KH_RECEIVE_TEX
 // The engine's shadow atlas (the depth its cascade passes render into), sampled
 // with the engine's own per-cascade world->atlasUV+depth transforms harvested
@@ -2192,6 +2226,15 @@ void ShadowMapSample(float3 rel, out int cascade, out float occluded)
 
 float ShadowMapFactor(float3 rel)
 {
+    // KH_SHADOW_STRENGTH_SKIP: lighting2.w is g_shadow_map_strength, a CB
+    // scalar, so this is a UNIFORM branch. It is not a rare case: BOTH PIP
+    // fills (kh_pip_fx's and the PIP mesh injection's) zero lighting2[3] on
+    // purpose, because shadowAtlas is the MAIN view's and is not bound in a PIP
+    // pass - so without this gate every PIP mesh pixel walked the cascade table
+    // and took four Loads from an UNBOUND t1 (which reads fully occluded) only
+    // to multiply the answer by zero. Returning here skips the walk and the
+    // unbound read alike; the result is bit-identical either way.
+    if (saturate(lighting2.w) <= 0.0f) return 1.0f;
     int cascade;
     float occluded;
     ShadowMapSample(rel, cascade, occluded);
@@ -2231,6 +2274,11 @@ float BandCmpBilin(int t, float2 pos, float z)
 
 float ShadowBandFactor(float3 wpos)
 {
+    // KH_SHADOW_STRENGTH_SKIP: the ShadowMapFactor gate, on the band path. The
+    // tail multiplies by the same saturate(lighting2.w), so at strength 0 this
+    // returns an exact 1 after 16 to 64 Loads through the eight-arm band
+    // select. UNIFORM, so the loops below keep whole-warp flow.
+    if (saturate(lighting2.w) <= 0.0f) return 1.0f;
     // No [unroll] on these loops (X4575 in this unit); the 'done' flag plus a
     // plain break is the accepted early-out shape - no continue. Slots arrive
     // finest-first; the first containing band wins; bandBorder.w-1 names the

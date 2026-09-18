@@ -17,6 +17,8 @@ class CfgPatches
 			"KH_HelperArrow",
 			"KH_HelperSquare",
 			"KH_HelperRectangle_1x1x2",
+			"KH_HelperRendererBox",
+			"KH_HelperRendererSphere",
 			"KH_InvisibleWall_1x1x1",
 			"KH_InvisibleWall_2x1x1",
 			"KH_InvisibleWall_2x1x2",

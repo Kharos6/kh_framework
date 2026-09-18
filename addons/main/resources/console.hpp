@@ -116,7 +116,7 @@ class KH_Console
             w = QUOTE(RSC_POS_W(25));
             h = QUOTE(RSC_POS_H(2));
             wholeHeight = 0.45;
-            class ComboScrollBar: Scrollbar
+            class ComboScrollBar: ScrollBar
             {
                 color[] = {1, 1, 1, 1};
             };

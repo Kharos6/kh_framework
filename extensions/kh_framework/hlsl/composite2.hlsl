@@ -245,9 +245,17 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
         float3 khtn = normalize(i.nrm);
         float3 khtt = i.tanw.xyz - khtn * dot(khtn, i.tanw.xyz);
         float khttl = length(khtt);
+#if KH_USER_MAT
+        khUserNPs = khtn;   // KH_USER_FRAME. TWIN: PSMain / PSComposite.
+        khUserFacePs = khFs;
+#endif
         if (khttl > 1.0e-5f) {
             khtt /= khttl;
             float3 khtb = cross(khtn, khtt) * i.tanw.w;
+#if KH_USER_MAT
+            khUserTPs = khtt * khFs;   // The builtin's own tangent term (below).
+            khUserBPs = khtb;
+#endif
             // On a back face khtn is already reversed and so is the bitangent
             // it spawns; reversing the tangent term too makes the mapped normal
             // exactly the front's reversed (one side's bump is the other's dent).
@@ -279,7 +287,19 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
         // hoisting applies.
         if (smf > 0.0f) smf = min(smf, SunShadowFactorSelf(i.wpos, i.wrel, khBiasN));
         if (maskMeta.w >= 0.5f) {
-            float khStenU = KhStenUnit(i.pos.xy);
+            // A translucent texel = the blend material's translucent part or a
+            // whole translucent object on normal blend (the mirror below
+            // replaces its count where armed). KH_VOL_WITNESS: the witness
+            // needs this fragment in the footprint the copy was counted
+            // against, which holds only depth-participating opaque casters -
+            // so a translucent texel, a whole object below full alpha on any
+            // blend mode (the seam skips those) and a depth-Off overlay
+            // (shadowMeta2.z) have none and take the count as it stands. TWIN:
+            // PSMain and PSComposite.
+            const bool khStenTl = (matParams0.y >= 1.5f && matParams0.y < 2.5f) ||
+                                  (i.icol.a < 0.999f && bm == 0);
+            const bool khStenNoWit = khStenTl || i.icol.a < 0.999f || shadowMeta2.z >= 0.5f;
+            float khStenU = KhStenUnit(i.pos.xy, khStenNoWit ? -1.0f : i.pos.w);
             // On PSMain fxMeta.x is the effect id, so the fade is not applied
             // there.
 #if KH_ARB_DEPTH
@@ -299,14 +319,11 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
             }
 #endif
             // The volume term starts from a witness compare - the engine depth
-            // at this pixel must be this fragment's - and a translucent texel
-            // wrote no depth, so the witness fails and the fallback answers
-            // with the background's stencil. A translucent texel = the blend
-            // material's translucent part or a whole translucent object on
-            // normal blend. TWIN: PSMain and PSComposite.
-            if (mirMeta.x >= 0.5f && mirMeta.x < 1.5f &&
-                ((matParams0.y >= 1.5f && matParams0.y < 2.5f) ||
-                 (i.icol.a < 0.999f && bm == 0))) {
+            // at this pixel must be this fragment's (KH_VOL_WITNESS) - and a
+            // translucent texel wrote no depth, so it has none and answers with
+            // the background's stencil; where the mirror is armed it reads the
+            // mirror instead. TWIN: PSMain and PSComposite.
+            if (mirMeta.x >= 0.5f && mirMeta.x < 1.5f && khStenTl) {
                 khStenU = KhMirUnit(i.pos.xy, mirMeta.y, mirMeta.z);
             }
             // KH_INFRONT (mirMeta.x = 2): a view-model mesh reads the mirror
@@ -344,6 +361,8 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
     float3 lc = ApplyLighting(i.icol.rgb, i.wpos, i.nrm, smf);
 #endif
 
+    // KhDlswFog (static.hlsl) is this block's transmittance and colour for the
+    // world pass (KH_DLSW_FOG): an edit here is an edit there. TWIN.
     float khFogKeep = 1.0f;   // The fog's share of a non-covering blend mode (below).
     if (fogParams.w >= 0.5f || hazePars.w >= 0.5f || fogEngine.w >= 0.5f) {
         float distM = i.pos.w;

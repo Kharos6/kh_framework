@@ -1,7 +1,7 @@
 class RscButton;
 class RscButtonMenuCancel;
 class RscButtonMenuOK;
-class RscCheckbox;
+class RscCheckBox;
 class RscCombo;
 class RscEdit;
 class RscEditMulti;

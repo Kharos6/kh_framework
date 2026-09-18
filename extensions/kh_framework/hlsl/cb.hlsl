@@ -22,7 +22,8 @@ cbuffer CBObj : register(b0)
     // x = lit flag, z = ambient fraction, w = diffuse fraction (read through
     // KhObjLanesCb / KhObjLoad); y unread.
     float4 lighting0;
-    float4 shadowMeta2;   // x unread (zero), y = object view-distance cut; z / w unread (zero).
+    float4 shadowMeta2;   // x unread (zero), y = object view-distance cut; z = 1 for a
+                          // depth-Off overlay (KH_VOL_WITNESS), else 0; w unread (zero).
     // Engine-axes rotation rows (row-vector): world = center + local.x*R0 +
     // local.y*R1 + local.z*R2.
     float4 objRot0;
@@ -109,14 +110,18 @@ cbuffer CBObj : register(b0)
     // x = origin world X, y = origin world Z (SQF y), z = cell size (m), w =
     // enabled and texture valid.
     float4 thmParams;
-    float4 thmMeta;   // x = width (cells), y = height (cells).
-    // zw = the volume copy's own dims (not fxMeta.zw), the only lanes read
-    // here. xy carried the injection's viewport depth range for the epoch the
-    // old reprojected read came from; kh_fill_sten_reproj writes 0 to both and
-    // no shader reads them.
+    // x = width (cells), y = height (cells), z = the terrain band (m,
+    // KH_THM_BIAS_M: the discard's clearance and PSMaskCast's snap), w = the
+    // view distance (m, KH_THM_MIN_DIST_M) from which the clearance march runs.
+    // Written with thmParams by kh_fill_occ; both stay zero with no heightfield.
+    float4 thmMeta;
+    // zw = the volume copy's own dims (not fxMeta.zw). xy = the copy's depth
+    // encode pair (m22, m32), KH_VOL_WITNESS (zero = no witness).
     float4 stenVol;
-    float4 stenVol2;   // x = transport arm; z = KhVsCore vertex path selector (3 = the seam
-                       // prepass); y/w never written.
+    // x = transport arm; z = KhVsCore vertex path selector (3 = the seam
+    // prepass); y/w = the copy's viewport depth range (min, max), KH_VOL_WITNESS
+    // (armed while w > y).
+    float4 stenVol2;
     row_major float4x4 sunVP2;   // World -> hero sun-depth clip.
     float4 sunMeta2;   // x = valid, y = size, z = bias, w = half-diag.
     row_major float4x4 sunVP3;   // World -> mid-band sun-depth clip (t26).
@@ -132,6 +137,8 @@ cbuffer CBObj : register(b0)
     // = world-absolute); w = the far tier's prefilter arm.
     float4 mirMeta;
     float4 sunOrigin;
+    // x = engine below-layer extinction, y = armed; z = the cast fire's
+    // frozen-depth ulp, relative (KH_CAST_SNAP_FACING, PSMaskCast only).
     float4 fogBelow;
     // Below the fog layer the engine converges on a different colour: fogUw.rgb
     // = cb0[7], the sky fog colour, shaped by the cb0[17] elevation gradient in
@@ -181,6 +188,14 @@ cbuffer CBObj : register(b0)
     // through the KhUser* accessors below. C++ twins user_cam / user_cam_rot.
     float4 khUserCam;
     float4 khUserCamRot[3];
+    // KH_VOL_ZOOM (C++ twin sten_vol3): this pass's raster -> the volume
+    // copy's, per axis copy = raster * xy + zw (the copy's seam frame drew under
+    // its own projection - a zoom between the two frames moves every surface
+    // on screen). x = 0 = identity.
+    float4 stenVol3;
+    // KH_VOL_FOOT (C++ twin sten_vol4): x = 1 when khVolFoot (t33) holds the
+    // footprint mask of the copy's seam frame; yzw unused.
+    float4 stenVol4;
 };
  
 cbuffer CBEngView : register(b2)
@@ -313,8 +328,34 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 // Re-sampling the material (animation): KhUserUv() is the pixel's UV, so
 // KhSampleMat(KhUserUv() + offset) re-samples the whole surface and
 // KhMatFetch(slot, uv) one map (slots 0 diffuse, 1 normal, 2 orm, 3 emissive,
-// 4 specular, 5 speccolor); drive the offset from KhUserTime(). A user shader
-// cannot bring textures of its own: nothing binds a register it declares.
+// 4 specular, 5 speccolor); drive the offset from KhUserTime().
+// Textures of its own (KH_USER_TEX): the material's texture slots user0 ..
+// user5 (script: [path, "user0", "srgb" | "linear"], linear by default) are
+// this shader's alone - no builtin input reads them. Read them with
+//     KhUserTex(i, uv)             filtered (matSamp, the material sampler)
+//     KhUserTexLod(i, uv, lod)     at a mip level (loops, parallax steps)
+//     KhUserTexGrad(i, uv, dx, dy) with explicit derivatives
+//     KhUserTexValid(i)            the map resolved and is loaded
+//     KhUserTexSize(i)             its size in texels (0 when absent)
+// with i a literal 0 - 5 (a non-literal i samples all six and selects). An
+// absent or still-loading map reads zero. Declare no texture or sampler of
+// your own: nothing binds a register a user shader declares, and a taken
+// register fails the compile.
+// The surface frame (KH_USER_FRAME), the builtin's own:
+//     KhUserGeomNormal()  the interpolated vertex normal, unit, reversed on the
+//                         back face of a two-sided mesh (n is it with the
+//                         normal map applied)
+//     KhUserTangent() / KhUserBitangent()  the orthonormal tangent and
+//                         bitangent (zero where the mesh has no usable tangent)
+//     KhUserPerturb(t)    normalize(T * t.x + B * t.y + N * t.z) for a
+//                         tangent-space normal t - with the material's own
+//                         normal map (s.nrmT) it reproduces n exactly; N alone
+//                         where there is no tangent
+//     KhUserFrontFace()   false on the back face of a two-sided mesh.
+// View direction in tangent space (parallax): with v = KhUserViewDir(wpos),
+// float3(dot(v, T), dot(v, B), dot(v, N)).
+// The pixel stage only: there is no user vertex stage (the geometry, and every
+// shadow and depth pass drawn from it, is the builtin's).
 //
 // ---- EFFECT shaders (a fullscreen pass or effect mesh given a .hlsl path) --
 // Main view only (a PIP pass skips it). Compiled as this file plus the user
@@ -388,6 +429,8 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //   KhUserUv()            MATERIAL only: the pixel's texture UV.
 //   KhUserPixel()         MATERIAL only: the pixel's position in the target, px
 //                         (an effect has i.pos.xy).
+//   KhUserTex* / KhUserGeomNormal / KhUserTangent / KhUserBitangent /
+//   KhUserPerturb / KhUserFrontFace   MATERIAL only: see the MATERIAL section.
 // Object lanes (per-object draws: the drawn object; on a bucket draw these
 // are the first instance's - use the accessors): centerSize.xyz its centre
 // (engine axes), sizeAxes.xyz its edge lengths (engine axes), objRot0..2.xyz
@@ -413,6 +456,23 @@ static float2 khUserUvPs = float2(0.0f, 0.0f);
 static float2 khUserPxPs = float2(0.0f, 0.0f);
 float2 KhUserUv()    { return khUserUvPs; }
 float2 KhUserPixel() { return khUserPxPs; }
+#if KH_USER_MAT
+// KH_USER_FRAME: set by PSMain / PSComposite where they build the mapped
+// normal, before KhUserShade (TWIN).
+static float3 khUserNPs = float3(0.0f, 0.0f, 1.0f);
+static float3 khUserTPs = float3(0.0f, 0.0f, 0.0f);
+static float3 khUserBPs = float3(0.0f, 0.0f, 0.0f);
+static float  khUserFacePs = 1.0f;
+float3 KhUserGeomNormal() { return khUserNPs; }
+float3 KhUserTangent()    { return khUserTPs; }
+float3 KhUserBitangent()  { return khUserBPs; }
+bool   KhUserFrontFace()  { return khUserFacePs > 0.0f; }
+float3 KhUserPerturb(float3 khup_t)
+{
+    if (dot(khUserTPs, khUserTPs) <= 0.0f) return khUserNPs;
+    return normalize(khUserTPs * khup_t.x + khUserBPs * khup_t.y + khUserNPs * khup_t.z);
+}
+#endif
 
 #define KH_RPDB_GC_M 0.008f
 #define KH_HERO_TEXEL_M 0.001f
@@ -547,6 +607,11 @@ float KhStenTerm(float2 khsp_xy)
 }
 
 Texture2D<uint2> khVolSten  : register(t24);
+// KH_VOL_WITNESS: the same copy's depth plane (R24_UNORM_X8).
+Texture2D<float> khVolDepth : register(t23);
+// KH_VOL_FOOT: our footprint's view distance (m) at the copy's seam frame, drawn
+// by the seam with no depth test; 1e30 = none of our surfaces there.
+Texture2D<float> khVolFoot : register(t33);
 // Same shadowed semantics as KhVolShadowed's default arm (count != 0).
 Texture2D<uint2> khMirSten  : register(t28);
 float KhMirUnit(float2 khmu_px, float khmu_w, float khmu_h)
@@ -598,14 +663,88 @@ bool KhVolShadowed(uint khvd_c)
     return khvd_c != 0u && khvd_c < 128u;
 }
 
-float KhVolTerm(float2 khvt_raster)
+// KH_VOL_WITNESS. The copy is read a frame late (the injection precedes the
+// engine's counting draws), so at a pixel this surface did not cover then, the
+// count is another surface's - the body behind a swinging cape, in its own
+// shadow, shows through the cape's moving edge. The witness: the distance our
+// surface stood at at the pixel in the copy's frame (KhVolWitnessDist - the
+// KH_VOL_FOOT mask, else the copy's depth decoded) must be this fragment's view
+// distance within KH_VOL_WITNESS_M or KH_VOL_WITNESS_REL of it (the measured
+// guard's relative margin). A failed witness takes the mean of the ring of neighbours
+// KH_VOL_WITNESS_R pixels out that pass it (the surface's own counts beside
+// the uncovered edge), then of the ring twice as far (an edge that moved
+// further in the frame), else lit: a count that belongs to no part of this
+// surface is never used.
+static const float KH_VOL_WITNESS_M = 0.05f;
+static const float KH_VOL_WITNESS_REL = 0.02f;
+static const int   KH_VOL_WITNESS_R = 2;
+// The distance the witness compares against at a copy pixel (m), <= 0 = no
+// surface. KH_VOL_FOOT: our own footprint mask when the copy has one - no
+// encode to decode, so a moving near plane cannot shift it; otherwise the
+// copy's depth plane decoded through the seam's encode (stenVol.xy,
+// stenVol2.yw). No finite distance (at or past infinity) = no surface; the
+// projection's far is finite (m22 > 1), so a cleared depth texel (1.0) decodes
+// to the far plane's distance, which a fragment short of it never matches.
+float KhVolWitnessDist(int2 khvw_p)
 {
-    return KhVolShadowed(KhVolCount(KhVolPx(khvt_raster))) ? 0.0f : 1.0f;
+    if (stenVol4.x >= 0.5f) {
+        const float khvw_f = khVolFoot.Load(int3(khvw_p, 0));
+        return (khvw_f > 0.0f && khvw_f < 1.0e29f) ? khvw_f : -1.0f;
+    }
+    const float khvw_ndc = (khVolDepth.Load(int3(khvw_p, 0)) - stenVol2.y) / (stenVol2.w - stenVol2.y);
+    const float khvw_den = khvw_ndc - stenVol.x;
+    if (khvw_den > -1.0e-7f) return -1.0f;
+    return stenVol.y / khvw_den;
+}
+bool KhVolWitness(int2 khvw_p, float khvw_z)
+{
+    const float khvw_d = KhVolWitnessDist(khvw_p);
+    return khvw_d > 0.0f &&
+           abs(khvw_d - khvw_z) <= max(KH_VOL_WITNESS_M, KH_VOL_WITNESS_REL * khvw_z);
 }
 
-float KhStenUnit(float2 khsu_raster)
+// The eight neighbours khvr_r pixels out: the lit sum and count of those that
+// pass the witness.
+void KhVolRing(int2 khvr_p, float khvr_z, int khvr_r, inout float khvr_acc, inout float khvr_n)
 {
-    if (stenVol2.x >= 0.5f) return KhVolTerm(khsu_raster);
+    const int2 khvr_mx = int2((int)stenVol.z - 1, (int)stenVol.w - 1);
+    [unroll] for (int khvr_k = 0; khvr_k < 8; ++khvr_k) {
+        const int2 khvr_d = (khvr_k == 0) ? int2( 1,  0) : (khvr_k == 1) ? int2(-1,  0)
+                          : (khvr_k == 2) ? int2( 0,  1) : (khvr_k == 3) ? int2( 0, -1)
+                          : (khvr_k == 4) ? int2( 1,  1) : (khvr_k == 5) ? int2(-1,  1)
+                          : (khvr_k == 6) ? int2( 1, -1) :                 int2(-1, -1);
+        const int2 khvr_q = clamp(khvr_p + khvr_d * khvr_r, int2(0, 0), khvr_mx);
+        if (KhVolWitness(khvr_q, khvr_z)) {
+            khvr_acc += KhVolShadowed(KhVolCount(khvr_q)) ? 0.0f : 1.0f;
+            khvr_n += 1.0f;
+        }
+    }
+}
+
+// khvt_z = the fragment's view distance (SV_Position.w); <= 0 = no witness (a
+// texel that wrote no depth).
+float KhVolTerm(float2 khvt_raster, float khvt_z)
+{
+    // KH_VOL_ZOOM: this pixel's view ray in the copy's pixel grid. View depth
+    // does not change with the projection, so khvt_z stands as it is.
+    const float2 khvt_c = (stenVol3.x > 0.0f) ? khvt_raster * stenVol3.xy + stenVol3.zw : khvt_raster;
+    const int2 khvt_p = KhVolPx(khvt_c);
+    // Armed with a witness source: the footprint mask (KH_VOL_FOOT) or the
+    // depth plane's encode.
+    if (!(khvt_z > 0.0f) || !(stenVol4.x >= 0.5f || stenVol2.w > stenVol2.y) ||
+        KhVolWitness(khvt_p, khvt_z)) {
+        return KhVolShadowed(KhVolCount(khvt_p)) ? 0.0f : 1.0f;
+    }
+    float khvt_acc = 0.0f;
+    float khvt_n = 0.0f;
+    KhVolRing(khvt_p, khvt_z, KH_VOL_WITNESS_R, khvt_acc, khvt_n);
+    if (khvt_n <= 0.0f) KhVolRing(khvt_p, khvt_z, 2 * KH_VOL_WITNESS_R, khvt_acc, khvt_n);
+    return khvt_n > 0.0f ? khvt_acc / khvt_n : 1.0f;
+}
+
+float KhStenUnit(float2 khsu_raster, float khsu_z)
+{
+    if (stenVol2.x >= 0.5f) return KhVolTerm(khsu_raster, khsu_z);
     return KhStenTerm(khsu_raster);
 }
 
@@ -1513,9 +1652,10 @@ float2 KhDlsGrad(float3 khg_p, float3 khg_n, float3 khg_r, float3 khg_u,
     return clamp(khg_g, -khg_c, khg_c);
 }
  
-// khd_zunc is the receiver's own depth uncertainty in metres, supplied by the
-// caller: a mesh passes 0 (interpolated geometry is exact); the world pass
-// passes its quantised-depth plateau step, which exceeds the constant bias.
+// khd_zunc is the receiver's own depth uncertainty in metres, added to the
+// bias, supplied by the caller. Every caller passes 0: a mesh because
+// interpolated geometry is exact, and the world pass (KhDlsWorldFactor from
+// PSDlsWorld) as well.
 // khd_fwp: the receiver's world footprint per screen pixel,
 // length(fwidth(wpos)), priced by the caller BEFORE its light loop (a gradient
 // inside a loop with a break does not compile).
@@ -1575,8 +1715,13 @@ float KhDlsShadow(int khd_slot, float3 khd_wpos, float3 khd_nrm, float khd_zunc,
     return saturate(1.0f - khd_occ * khd_rf);   // Thinned by the range fade, not cut.
 }
  
-// The strongest dynamic-light occlusion any casting light claims at this point
-// (1 lit, 0 fully blocked), for ApplyLighting and KhApplyPBR.
+// Every dynamic light that reaches this point, summed (KH_DL_RING: no count
+// cap): each light's diffuse N.L term, scaled by its own shadow from our
+// meshes' maps (KhDlsShadow), plus its per-light ambient (KH_DLS_AMB_KEEP of
+// which stays in full shadow), attenuated, the sum scaled by dlGlobal.w. HDR
+// light in the engine's scene units, added to the ambient and sun by
+// ApplyLighting (the untextured combine); the textured path's twin is
+// KhDynLightsPBR.
 float3 DynLights(float3 wpos, float3 nrm)
 {
     if (dlCtl.x < 0.5f) return float3(0.0f, 0.0f, 0.0f);
@@ -1682,8 +1827,10 @@ static float4 matParams0 = 0.0f, matParams1 = 0.0f, matParams2 = 0.0f, matParams
 // whose maps live in the same pages batch across one instanced draw. The arma
 // model keeps its AS map in the orm page and its SMDI map in the specular page
 // (both read linear there - kh_tex_slot_srgb), and SPECCOLOR alone takes the
-// sixth, at t42, past every other register (t23 and t33 are unassigned);
-// StateBackup saves t0-t42.
+// sixth, at t42, past every other register (t33 is KH_VOL_FOOT's mask, t34
+// unassigned); a
+// user material's own maps (KH_USER_TEX) follow at t43-t48. StateBackup saves
+// t0-t48.
 Texture2DArray<float4> matDiffuse  : register(t14);
 Texture2DArray<float4> matNormal   : register(t15);
 Texture2DArray<float4> matOrm      : register(t16);
@@ -1692,21 +1839,23 @@ Texture2DArray<float4> matSpecular : register(t18);
 Texture2DArray<float4> matSpecColor : register(t42);
 SamplerState matSamp : register(s0);
 
-// One entry per material-set slot, C++ twin KhGpuMat (8 float4). p0..p3 = the
+// One entry per material-set slot, C++ twin KhGpuMat (9 float4). p0..p3 = the
 // matParams0..3 lanes (map-bound flags, alpha mode, cutoff, normal strength /
 // base colour, roughness / metalness, emissive intensity, occ route, rough
 // route / metal route, alpha route, gloss route, spec workflow); lay0 =
 // diffuse/normal/orm/emissive layers, lay1.x = specular, lay1.y = speccolor;
 // p4 / p5 = matParams4 / 5, the arma model's lanes (specular colour,
 // glossiness fallback / fresnel N, K, specular route, model), zero for every
-// other material but the specular route (p5.z), which is -1 (unrouted).
-struct KhGpuMat { float4 p0; float4 p1; float4 p2; float4 p3; float4 lay0; float4 lay1; float4 p4; float4 p5; };
+// other material but the specular route (p5.z), which is -1 (unrouted); lay1.zw
+// and lay2 = KH_USER_TEX's user0..user5 layers. p0.x's bits 6-11 are those
+// maps' bound flags.
+struct KhGpuMat { float4 p0; float4 p1; float4 p2; float4 p3; float4 lay0; float4 lay1; float4 p4; float4 p5; float4 lay2; };
 StructuredBuffer<KhGpuMat> khMats : register(t38);
 
 // The per-pixel material lanes. KhMatLoad fills them from the table entry once
 // per pixel (the index rides the VS interpolant, flat per draw or per
 // instance).
-static float4 khMatLay0 = 0.0f, khMatLay1 = 0.0f;
+static float4 khMatLay0 = 0.0f, khMatLay1 = 0.0f, khMatLay2 = 0.0f;
 static float4 matParams4 = 0.0f, matParams5 = 0.0f;
 void KhMatLoad(uint khml_ix)
 {
@@ -1717,6 +1866,7 @@ void KhMatLoad(uint khml_ix)
     matParams3 = khml_m.p3;
     khMatLay0 = khml_m.lay0;
     khMatLay1 = khml_m.lay1;
+    khMatLay2 = khml_m.lay2;   // KH_USER_TEX.
     matParams4 = khml_m.p4;
     matParams5 = khml_m.p5;
     if (matCtl.w >= 0.0f) matParams0.y = matCtl.w;   // The draw's alpha-mode override.
@@ -1741,6 +1891,72 @@ float4 KhMatFetch(int slot, float2 uv)
     if (slot == 4) return matSpecular.Sample(matSamp, khmf_c);
     return matSpecColor.Sample(matSamp, khmf_c);
 }
+
+#if KH_USER_MAT
+// KH_USER_TEX: a user material's own maps (the texture slots user0..user5),
+// pages bound per draw at t43-t48 by kh_bind_material (null for every other
+// material). See the USER SHADER CONTRACT. The selects are ?: chains, not
+// flow, so a filtered sample never sits in divergent control flow; with a
+// literal index fxc drops the other five.
+Texture2DArray<float4> khUserMap0 : register(t43);
+Texture2DArray<float4> khUserMap1 : register(t44);
+Texture2DArray<float4> khUserMap2 : register(t45);
+Texture2DArray<float4> khUserMap3 : register(t46);
+Texture2DArray<float4> khUserMap4 : register(t47);
+Texture2DArray<float4> khUserMap5 : register(t48);
+float KhUserTexLayer(int khut_i)
+{
+    return khut_i == 0 ? khMatLay1.z : khut_i == 1 ? khMatLay1.w
+         : khut_i == 2 ? khMatLay2.x : khut_i == 3 ? khMatLay2.y
+         : khut_i == 4 ? khMatLay2.z : khMatLay2.w;
+}
+bool KhUserTexValid(int khut_i)
+{
+    return khut_i >= 0 && khut_i < 6 && ((((int)matParams0.x) >> (6 + khut_i)) & 1) != 0;
+}
+float4 KhUserTex(int khut_i, float2 khut_uv)
+{
+    const float3 khut_c = float3(khut_uv, KhUserTexLayer(khut_i));
+    return khut_i == 0 ? khUserMap0.Sample(matSamp, khut_c)
+         : khut_i == 1 ? khUserMap1.Sample(matSamp, khut_c)
+         : khut_i == 2 ? khUserMap2.Sample(matSamp, khut_c)
+         : khut_i == 3 ? khUserMap3.Sample(matSamp, khut_c)
+         : khut_i == 4 ? khUserMap4.Sample(matSamp, khut_c)
+                       : khUserMap5.Sample(matSamp, khut_c);
+}
+float4 KhUserTexLod(int khut_i, float2 khut_uv, float khut_lod)
+{
+    const float3 khut_c = float3(khut_uv, KhUserTexLayer(khut_i));
+    return khut_i == 0 ? khUserMap0.SampleLevel(matSamp, khut_c, khut_lod)
+         : khut_i == 1 ? khUserMap1.SampleLevel(matSamp, khut_c, khut_lod)
+         : khut_i == 2 ? khUserMap2.SampleLevel(matSamp, khut_c, khut_lod)
+         : khut_i == 3 ? khUserMap3.SampleLevel(matSamp, khut_c, khut_lod)
+         : khut_i == 4 ? khUserMap4.SampleLevel(matSamp, khut_c, khut_lod)
+                       : khUserMap5.SampleLevel(matSamp, khut_c, khut_lod);
+}
+float4 KhUserTexGrad(int khut_i, float2 khut_uv, float2 khut_dx, float2 khut_dy)
+{
+    const float3 khut_c = float3(khut_uv, KhUserTexLayer(khut_i));
+    return khut_i == 0 ? khUserMap0.SampleGrad(matSamp, khut_c, khut_dx, khut_dy)
+         : khut_i == 1 ? khUserMap1.SampleGrad(matSamp, khut_c, khut_dx, khut_dy)
+         : khut_i == 2 ? khUserMap2.SampleGrad(matSamp, khut_c, khut_dx, khut_dy)
+         : khut_i == 3 ? khUserMap3.SampleGrad(matSamp, khut_c, khut_dx, khut_dy)
+         : khut_i == 4 ? khUserMap4.SampleGrad(matSamp, khut_c, khut_dx, khut_dy)
+                       : khUserMap5.SampleGrad(matSamp, khut_c, khut_dx, khut_dy);
+}
+float2 KhUserTexSize(int khut_i)
+{
+    if (!KhUserTexValid(khut_i)) return float2(0.0f, 0.0f);
+    uint khut_w = 0, khut_h = 0, khut_n = 0;
+    if (khut_i == 0)      khUserMap0.GetDimensions(khut_w, khut_h, khut_n);
+    else if (khut_i == 1) khUserMap1.GetDimensions(khut_w, khut_h, khut_n);
+    else if (khut_i == 2) khUserMap2.GetDimensions(khut_w, khut_h, khut_n);
+    else if (khut_i == 3) khUserMap3.GetDimensions(khut_w, khut_h, khut_n);
+    else if (khut_i == 4) khUserMap4.GetDimensions(khut_w, khut_h, khut_n);
+    else                  khUserMap5.GetDimensions(khut_w, khut_h, khut_n);
+    return float2((float)khut_w, (float)khut_h);   // A page holds maps of one size.
+}
+#endif
 
 float KhMatRoute(float route, float fallback, float2 uv)
 {

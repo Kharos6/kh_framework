@@ -162,6 +162,35 @@
 ] call CBA_fnc_addSetting;
 
 [
+	"KH_var_renderingDynamicShadows",
+	"CHECKBOX",   
+	[
+		"Dynamic Shadows", 
+		"Allows dynamic lights to cast shadows from KH Rendered meshes."
+	], 
+	[
+		"KH Rendering",
+		"Lighting"
+	],
+	false,
+	0,
+	{
+		if !hasInterface exitWith {};
+
+		execute [
+			[],
+			{
+				allowDynamicShadows KH_var_renderingDynamicShadows;
+			},
+			true,
+			"-1",
+			false
+		];
+	},
+	false
+] call CBA_fnc_addSetting;
+
+[
 	"KH_var_allowTeamspeakVoiceEffectPresets",
 	"CHECKBOX",   
 	[

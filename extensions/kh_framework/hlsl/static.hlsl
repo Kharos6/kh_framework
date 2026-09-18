@@ -71,6 +71,15 @@ float4 VSSeamInst(VSInSeam i) : SV_Position
     return khsi_pos;
 }
 
+// KH_VOL_FOOT: the seam's footprint view distance (m) into its R32F mask, under
+// a MIN blend - the witness's record of where our surface stood when the
+// engine counted. SV_Position.w is the view distance the colour passes' own
+// SV_Position.w carries, so the witness compares metres against metres.
+float4 PSSeamFoot(float4 khsf_pos : SV_Position) : SV_Target
+{
+    return float4(khsf_pos.w, 0.0f, 0.0f, 0.0f);
+}
+
 // The sun-depth stream is the same lane the colour buckets use; the record
 // supplies centre, size and rotation.
 struct VSInSun {
@@ -383,9 +392,13 @@ float KhDlsMaskCov(float2 khmc_px, float khmc_w, float khmc_h, float khmc_zl)
 // one, told through khw_nrel).
 static const float KH_DLSW_NRM_R = 3.0f;        // Base baseline, pixels.
 // The second-difference bound that decides whether the stencil is looking at
-// one surface: for any plane zl(+r) + zl(-r) - 2*zl is exactly zero whatever
-// its slope, so this is blind to orientation and sensitive only to the
-// neighbourhood breaking.
+// one surface. zl(+r) + zl(-r) - 2*zl is zero for a plane only where its depth
+// is linear across the stencil (along a direction of constant depth, or head
+// on); in general 1/zl, not zl, is affine in screen space, so the term also
+// grows with perspective curvature - distant grazing ground exceeds the bound
+// at the wide radius first. Such a fit is refused like a broken one, and the
+// caller falls back as it does for one (PSDlsWorld to its narrower fit,
+// PSMaskCast's snap to the full band).
 static const float KH_DLSW_NRM_FLAT = 0.02f;
 // The agreement floor for the two baselines: cos(8 deg) between two unit
 // normals; dimensionless, no knowledge of the quantisation step.
@@ -467,13 +480,21 @@ bool KhDlswPlane(float2 khp_px, float2 khp_dims, float khp_r, float khp_zc,
 // offset, which degrade to a slightly wrong shade, not a wrong verdict, and the
 // factor is clamped to [0,1]. Every early exit returns 1.0, invisible under the
 // multiply.
-float4 PSDlsWorld(VSOut i) : SV_Target
+// The pass body, shared by PSDlsWorld (the multiply) and PSDlsWorldFog (its
+// dual-source form): returns the factor exactly as PSDlsWorld always has, and
+// the reconstructed world point and its view depth (khw_zo < 0 where the pixel
+// has none).
+float4 KhDlsWorldMain(VSOut i, out float3 khw_wo, out float khw_zo)
 {
+    khw_wo = float3(0.0f, 0.0f, 0.0f);
+    khw_zo = -1.0f;
     const float2 khw_dims = float2(castView[1].z, castView[1].w);
     if (khw_dims.x < 2.0f || khw_dims.y < 2.0f) return float4(1.0f, 1.0f, 1.0f, 1.0f);
     const float khw_zl = KhCastZl(i.pos.xy, khw_dims);
     if (!(khw_zl > 0.05f) || khw_zl > 8000.0f) return float4(1.0f, 1.0f, 1.0f, 1.0f);
     const float3 khw_w = KhCastWorld(i.pos.xy, khw_dims, khw_zl);
+    khw_wo = khw_w;
+    khw_zo = khw_zl;
 
     // KhCastWorld builds v = (ndc.x*fovx, ndc.y*fovy, 1) * zl, so inside a
     // quantisation plateau zl is constant across the quad and the reconstructed
@@ -574,6 +595,123 @@ float4 PSDlsWorld(VSOut i) : SV_Target
     khw_f = lerp(khw_f, float3(1.0f, 1.0f, 1.0f), khw_cov);
     return float4(khw_f, 1.0f);
 }
+
+float4 PSDlsWorld(VSOut i) : SV_Target
+{
+    float3 khw_w;
+    float  khw_z;
+    return KhDlsWorldMain(i, khw_w, khw_z);
+}
+
+// KH_DLSW_FOG. The engine's forward shaders fog every pixel before this pass
+// sees it: dest = T * L + (1 - T) * C (L the lit surface, T the transmittance,
+// C the fog colour). A plain multiply by the factor F darkens the fog along
+// with the light our meshes block; the correct result is T * L * F + (1 - T)
+// * C = dest * F + (1 - T) * C * (1 - F). Written as a dual-source blend: the
+// first target is the added term, the second the multiplier. T and C are the
+// mesh twins' own (PSMain / PSComposite's fog block, here as KhDlswFog) on
+// this cycle's fog lanes - the C++ copies them from this cycle's mesh frame
+// template or, on a cycle with none yet, fills them as the flush does
+// (KH_DLSW_FOG_FILL) - at the world point and view depth the pass
+// reconstructed; the camera is the reconstruction's (castView[2]).
+float3 KhDlswFog(float distM, float3 khdf_wpos, float3 khdf_cam, out float trans)
+{
+    float hgt = khdf_wpos.y;
+    float camY = fogColor.w;
+    trans = 1.0f;
+    float khaFbLay = fogSkyCol.w;
+    bool  khaFbOn  = fogBelow.y >= 0.5f && camY < khaFbLay;
+    float khaFbA   = distM;   // Path above the layer.
+    float khaFbB   = 0.0f;   // Path below it.
+    float khaFbRef = camY;   // The height reference.
+    if (khaFbOn) {
+        float khaFbF = saturate((khaFbLay - camY) /
+                                (max(hgt - camY, 0.0f) + 1.0e-5f));
+        khaFbB   = distM * khaFbF;
+        khaFbA   = distM - khaFbB;
+        khaFbRef = khaFbLay;
+    }
+    if (fogEngine.w >= 0.5f && fogEngine.w < 1.5f)
+        trans = saturate((fogEngine.y - khaFbA) * fogEngine.z);
+
+    if (fogParams.w >= 0.5f) {
+        if (fogEngine.w >= 0.5f) {
+            float dh = abs(hgt - khaFbRef);
+            float k = fogParams.y * dh / max(khaFbA, 1.0e-4f);
+            float integ = k < 1.0e-6f ? khaFbA : (1.0f - exp(-khaFbA * k)) / k;
+            float minY = khaFbOn ? min(khaFbLay, hgt) : min(hgt, camY);
+            trans *= exp(-integ * fogEngine.x * exp(-fogParams.y * max(minY, 0.0f)));
+        } else {
+            float dens = fogParams.x * exp(-fogParams.y * max(hgt - fogParams.z, 0.0f));
+            trans = exp(-distM * dens * 0.0153f);
+        }
+    }
+
+    trans *= KhHazeT(distM, hgt, camY, fogSkyCol.w);
+    float khaAR = trans;
+    float khaBt = khaFbOn ? exp(-khaFbB * fogBelow.x) : 1.0f;
+    trans *= khaBt;
+    float3 fog_target = fogColor.rgb;
+    const float khFogEl = clamp((hgt - camY) / max(distance(khdf_wpos, khdf_cam), 1.0e-4f),
+                                -1.0f, 1.0f);
+
+    if (fogSky.w >= 0.5f) {
+        float dirY = khFogEl;
+        float g;
+
+        if (dirY < 0.0f) {
+            float u = dirY + 1.0f;
+            g = u * u * (fogSky.y - fogSky.x) + fogSky.x;
+        } else {
+            g = dirY * (fogSky.z - fogSky.y) + fogSky.y;
+        }
+
+        fog_target = fogSkyCol.rgb * g;
+    }
+    if (khaFbOn && fogUw.w >= 0.5f) {
+        float khaUwY = khFogEl;
+        float khaUwG;
+        if (khaUwY < 0.0f) {
+            float khaUwU = khaUwY + 1.0f;
+            khaUwG = khaUwU * khaUwU * (fogUwGrad.y - fogUwGrad.x) + fogUwGrad.x;
+        } else {
+            khaUwG = khaUwY * (fogUwGrad.z - fogUwGrad.y) + fogUwGrad.y;
+        }
+        float khaWp = khaBt * (1.0f - khaAR);   // The PSC_FogColor weight.
+        float khaWs = 1.0f - khaBt;   // The sky-colour weight.
+        fog_target = (fog_target * khaWp + fogUw.rgb * khaUwG * khaWs) /
+                     max(khaWp + khaWs, 1.0e-5f);
+    }
+    return fog_target;
+}
+
+struct KhDlswFogOut {
+    float4 add : SV_Target0;   // Source 0: the fog share the multiply takes back.
+    float4 mul : SV_Target1;   // Source 1: the factor (dest * src1).
+};
+KhDlswFogOut PSDlsWorldFog(VSOut i)
+{
+    float3 khwf_w;
+    float  khwf_z;
+    KhDlswFogOut khwf_o;
+    khwf_o.mul = KhDlsWorldMain(i, khwf_w, khwf_z);
+    khwf_o.add = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    if (khwf_z > 0.0f && any(khwf_o.mul.rgb < 1.0f) &&
+        (fogParams.w >= 0.5f || hazePars.w >= 0.5f || fogEngine.w >= 0.5f)) {
+        float khwf_t;
+        const float3 khwf_c = KhDlswFog(khwf_z, khwf_w, castView[2].xyz, khwf_t);
+        khwf_o.add = float4(khwf_c * ((1.0f - khwf_t) * (1.0f - khwf_o.mul.rgb)), 0.0f);
+    }
+    return khwf_o;
+}
+// KH_CAST_SNAP_FACING (PSMaskCast): R16_FLOAT's relative ulp (2^-10), the
+// fallback when the fire's lane is unset; the plane fit's radius
+// (px); the resolution bar in ulps along the ray; the up-facing bar (|n.y|:
+// slopes up to 60 degrees are ground).
+static const float KH_CAST_SNAP_ULP16 = 0.0009765625f;
+static const float KH_CAST_SNAP_R = 4.0f;
+static const float KH_CAST_SNAP_RES = 4.0f;
+static const float KH_CAST_SNAP_UP = 0.5f;
  float4 PSMaskCast(VSOut i) : SV_Target
 {
     float2 dimsM = float2(castView[1].z, castView[1].w);
@@ -601,9 +739,42 @@ float4 PSDlsWorld(VSOut i) : SV_Target
     float2 khrp_s = i.pos.xy;
     float3 pw = KhCastWorld(khrp_s, dimsM, zl);
 
+    // The terrain snap puts a receiver within thmMeta.z (KH_THM_BIAS_M, 0.35 m)
+    // of the heightfield onto it: the depth's quantisation moves a
+    // reconstructed ground point along the view ray, and our sun map has no
+    // terrain in it to absorb that, so an unsnapped ground shadow would crawl.
+    // KH_CAST_SNAP_FACING: only the ground may be snapped. A wall, a plinth, a
+    // rock face or a vehicle side within that band is not the heightfield -
+    // flattened onto it, it received the shadow the ground at its foot
+    // receives, extruded straight up its face (the band of wrong shadow along
+    // every vertical surface near the ground). The surface is measured by the
+    // world pass's plane fit (KhDlswPlane) at KH_CAST_SNAP_R pixels: a 1-pixel
+    // step can sit below one quantum of a 16-bit depth, this baseline cannot,
+    // and the fit refuses a stencil that straddles an edge. A fitted plane whose
+    // two spans each exceed KH_CAST_SNAP_RES depth ulps carried along the ray
+    // and that faces sideways keeps its own height, snapped only within one
+    // such ulp (noise it could be); an up-facing plane, or none fitted, keeps
+    // the full band exactly as before. fogBelow.z = the ulp, relative (the
+    // fire's fill; 0 reads as R16_FLOAT's).
     if (thmParams.w >= 0.5f) {
         float khtsH = KhThmHeight(pw.xz);
-        if (khtsH > -1.0e5f && abs(pw.y - khtsH) < 0.35f) pw.y = khtsH;
+        if (khtsH > -1.0e5f && abs(pw.y - khtsH) < thmMeta.z) {
+            float khtsTol = thmMeta.z;
+            float3 khtsDx, khtsDy;
+            if (KhDlswPlane(khrp_s, dimsM, KH_CAST_SNAP_R, zl, khtsDx, khtsDy)) {
+                const float  khtsUlp = fogBelow.z > 0.0f ? fogBelow.z : KH_CAST_SNAP_ULP16;
+                const float3 khtsCam = float3(dot(-castView[0].xyz, castMat[0].xyz),
+                                              dot(-castView[0].xyz, castMat[1].xyz),
+                                              dot(-castView[0].xyz, castMat[2].xyz));
+                const float  khtsQ = khtsUlp * distance(pw, khtsCam);   // One ulp along the ray.
+                const float3 khtsN = cross(khtsDx, khtsDy);
+                const float  khtsNl = length(khtsN);
+                const bool   khtsResolved = min(length(khtsDx), length(khtsDy)) > KH_CAST_SNAP_RES * khtsQ &&
+                                            khtsNl > 1.0e-12f;
+                if (khtsResolved && abs(khtsN.y) < KH_CAST_SNAP_UP * khtsNl) khtsTol = min(thmMeta.z, khtsQ);
+            }
+            if (abs(pw.y - khtsH) < khtsTol) pw.y = khtsH;
+        }
     }
 
     float hit = 0.0f;
@@ -798,9 +969,17 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
         float3 khtn = normalize(i.nrm);
         float3 khtt = i.tanw.xyz - khtn * dot(khtn, i.tanw.xyz);
         float khttl = length(khtt);
+#if KH_USER_MAT
+        khUserNPs = khtn;   // KH_USER_FRAME. TWIN: PSMain / PSComposite.
+        khUserFacePs = khFs;
+#endif
         if (khttl > 1.0e-5f) {
             khtt /= khttl;
             float3 khtb = cross(khtn, khtt) * i.tanw.w;
+#if KH_USER_MAT
+            khUserTPs = khtt * khFs;   // The builtin's own tangent term (below).
+            khUserBPs = khtb;
+#endif
             // On a back face khtn is already reversed and so is the bitangent
             // it spawns; reversing the tangent term too makes the mapped normal
             // exactly the front's reversed (one side's bump is the other's dent).
@@ -829,16 +1008,25 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
         // hoisting applies as it does for the N.L branch.
         if (smf > 0.0f) smf = min(smf, SunShadowFactorSelf(i.wpos, i.wrel, khBiasN));
         if (maskMeta.w >= 0.5f) {
-            float khStenU = KhStenUnit(i.pos.xy);
+            // A translucent texel = the blend material's translucent part or a
+            // whole translucent object on normal blend (the mirror below
+            // replaces its count where armed). KH_VOL_WITNESS: the witness
+            // needs this fragment in the footprint the copy was counted
+            // against, which holds only depth-participating opaque casters -
+            // so a translucent texel, a whole object below full alpha on any
+            // blend mode (the seam skips those) and a depth-Off overlay
+            // (shadowMeta2.z) have none and take the count as it stands. TWIN:
+            // PSMain and PSComposite.
+            const bool khStenTl = (matParams0.y >= 1.5f && matParams0.y < 2.5f) ||
+                                  (i.icol.a < 0.999f && bm == 0);
+            const bool khStenNoWit = khStenTl || i.icol.a < 0.999f || shadowMeta2.z >= 0.5f;
+            float khStenU = KhStenUnit(i.pos.xy, khStenNoWit ? -1.0f : i.pos.w);
             // The volume term starts from a witness compare - the engine depth
-            // at this pixel must be this fragment's - and a translucent texel
-            // wrote no depth, so the witness fails and the fallback answers
-            // with the background's stencil. A translucent texel = the blend
-            // material's translucent part or a whole translucent object on
-            // normal blend. TWIN: PSMain and PSComposite.
-            if (mirMeta.x >= 0.5f && mirMeta.x < 1.5f &&
-                ((matParams0.y >= 1.5f && matParams0.y < 2.5f) ||
-                 (i.icol.a < 0.999f && bm == 0))) {
+            // at this pixel must be this fragment's (KH_VOL_WITNESS) - and a
+            // translucent texel wrote no depth, so it has none and answers with
+            // the background's stencil; where the mirror is armed it reads the
+            // mirror instead. TWIN: PSMain and PSComposite.
+            if (mirMeta.x >= 0.5f && mirMeta.x < 1.5f && khStenTl) {
                 khStenU = KhMirUnit(i.pos.xy, mirMeta.y, mirMeta.z);
             }
             // KH_INFRONT (mirMeta.x = 2): a view-model mesh reads the mirror
@@ -873,6 +1061,8 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
     float3 lc = ApplyLighting(i.icol.rgb, i.wpos, i.nrm, smf);
 #endif
 
+    // KhDlswFog (static.hlsl) is this block's transmittance and colour for the
+    // world pass (KH_DLSW_FOG): an edit here is an edit there. TWIN.
     float khFogKeep = 1.0f;   // The fog's share of a non-covering blend mode (below).
     if (fogParams.w >= 0.5f || hazePars.w >= 0.5f || fogEngine.w >= 0.5f) {
         float distM = i.pos.w;

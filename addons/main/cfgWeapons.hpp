@@ -34,7 +34,7 @@ class CfgWeapons
         modes[] = {"DefaultMode"};
         kh_meleeWeapon = 1;
         kh_meleeController = 1;
-        class Eventhandlers {};
+        class EventHandlers {};
         class Library
         {
             libTextDesc = "A melee weapon.";

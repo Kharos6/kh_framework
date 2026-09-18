@@ -62,9 +62,7 @@ private _resetInitLuaExecutions = uiNamespace getVariable "KH_var_resetInitLuaEx
 
 		if (isNumber (_x >> "resetInit")) then {
 			if ((getNumber (_x >> "resetInit")) isEqualTo 1) then {
-                if !(_name in _resetInitLuaExecutions) then {
-        		    _resetInitLuaExecutions pushBack _name;
-                };
+        		_resetInitLuaExecutions pushBackUnique _name;
 			};
         };
     } forEach ("true" configClasses _x);

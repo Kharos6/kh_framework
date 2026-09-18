@@ -1,9 +1,17 @@
 // vmir_cs.hlsl - a standalone unit (no #include). Any edit changes the unit's shader cache key.
 
+// KH_MIR_DRAW: the b2 patch as a draw - one texel per row of the patched
+// matrix, into a four-element R32G32B32A32_FLOAT buffer target - instead of
+// a compute dispatch (no graphics -> compute transition mid-frame). The
+// arithmetic is the former CSMirB2's, line for line; C++ twin
+// kh_mir_patch_cpu. The file keeps its name (its resource entry).
 ByteAddressBuffer khmc_in : register(t0);
-RWByteAddressBuffer khmc_out : register(u0);
-[numthreads(1, 1, 1)]
-void CSMirB2(uint3 khmc_id : SV_DispatchThreadID)
+float4 VSMirB2(uint khmv_id : SV_VertexID) : SV_Position
+{
+    const float2 khmv_uv = float2((khmv_id << 1) & 2, khmv_id & 2);
+    return float4(khmv_uv * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
+}
+float4 PSMirB2(float4 khmp_pos : SV_Position) : SV_Target
 {
     float khmc_m[16];
     [unroll] for (uint khmc_i = 0; khmc_i < 16; ++khmc_i) {
@@ -28,13 +36,9 @@ void CSMirB2(uint3 khmc_id : SV_DispatchThreadID)
     float khmc_l32 = -0.05f * khmc_l22;
     float khmc_a = khmc_ok ? (khmc_l32 / khmc_m32) : 1.0f;
     float khmc_b = khmc_ok ? (khmc_l22 - khmc_m22 * khmc_a) : 0.0f;
-    [unroll] for (uint khmc_r2 = 0; khmc_r2 < 4; ++khmc_r2) {
-        float khmc_z = khmc_m[khmc_r2 * 4 + 2];
-        float khmc_ww = khmc_m[khmc_r2 * 4 + 3];
-        float khmc_zo = khmc_ok ? (khmc_a * khmc_z + khmc_b * khmc_ww) : khmc_z;
-        khmc_out.Store(khmc_r2 * 16 + 0, asuint(khmc_m[khmc_r2 * 4 + 0]));
-        khmc_out.Store(khmc_r2 * 16 + 4, asuint(khmc_m[khmc_r2 * 4 + 1]));
-        khmc_out.Store(khmc_r2 * 16 + 8, asuint(khmc_zo));
-        khmc_out.Store(khmc_r2 * 16 + 12, asuint(khmc_ww));
-    }
+    const uint  khmc_r2 = min((uint)khmp_pos.x, 3u);   // The texel is the row.
+    const float khmc_z = khmc_m[khmc_r2 * 4 + 2];
+    const float khmc_ww = khmc_m[khmc_r2 * 4 + 3];
+    const float khmc_zo = khmc_ok ? (khmc_a * khmc_z + khmc_b * khmc_ww) : khmc_z;
+    return float4(khmc_m[khmc_r2 * 4 + 0], khmc_m[khmc_r2 * 4 + 1], khmc_zo, khmc_ww);
 }

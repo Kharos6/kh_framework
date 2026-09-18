@@ -1964,6 +1964,7 @@ isNil {
 							KH_var_fogScatteringHandler = addPostFX ["fogScatter", [1, 0, 12]];
 						};
 
+						allowDynamicShadows KH_var_renderingDynamicShadows;
 						setRenderAmbientOcclusion [KH_var_renderingAmbientOcclusionStrength, KH_var_renderingAmbientOcclusionRadius];
 					},
 					true,

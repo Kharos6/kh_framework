@@ -125,17 +125,13 @@ KH_var_executedStacks = [];
 
 		if (isNumber (_x >> "preInit")) then {
 			if ((getNumber (_x >> "preInit")) isEqualTo 1) then {
-				if !(_name in KH_var_preInitLuaExecutions) then {
-        			KH_var_preInitLuaExecutions pushBack _name;
-                };
+        		KH_var_preInitLuaExecutions pushBack _name;
 			};
         };
 
 		if (isNumber (_x >> "postInit")) then {
 			if ((getNumber (_x >> "postInit")) isEqualTo 1) then {
-				if !(_name in KH_var_postInitLuaExecutions) then {
-        			KH_var_postInitLuaExecutions pushBack _name;
-                };
+        		KH_var_postInitLuaExecutions pushBack _name;
 			};
         };
     } forEach ("true" configClasses _x);

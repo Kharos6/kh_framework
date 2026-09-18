@@ -224,7 +224,9 @@ void PSInjDepthA(VSOut i)
 // writes no depth, so the surface at its pixel is whatever is behind it and
 // must receive the dynamic-light shadow like the ground beside it. Survivors
 // write the view distance PSDlsMask writes (SV_Position.w is the clip w, the
-// quantity VSDlsMask stores).
+// quantity VSDlsMask stores). Second user: the seam's KH_VOL_FOOT mask draws
+// its alpha casters with it (a zero dither lane there), so it must keep
+// PSInjDepthA's clip - an edit here is an edit to that mask.
 float4 PSDlsMaskA(VSOut i) : SV_Target
 {
     // The mask prepass draws a fading level with the colour

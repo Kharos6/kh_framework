@@ -195,6 +195,18 @@ class CfgVehicles
 		vehicleClass = "KH_Helpers";
 		scope = 2;
 	};
+	class KH_HelperRender: Static
+	{
+		author = "Kharos";
+		displayName = "Helper Render";
+		icon = "iconObject_1x1";
+		model = "\x\kh\addons\main\models\SM_HelperRender.p3d";
+		vehicleClass = "KH_Helpers";
+		hiddenSelections[] = {
+			"mat_invisible"
+		};
+		scope = 1;
+	};
 	class KH_HelperRectangle_1x1x2: Static
 	{
 		author = "Kharos";

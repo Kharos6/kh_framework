@@ -1,5 +1,6 @@
 private _entity = param [0];
 if !(_entity isEqualType objNull) exitWith {};
+if !(_entity isNil "KH_var_renderHandlers") exitWith {};
 private _renderHandlers = createHashMap;
 _entity setVariable ["KH_var_renderHandlers", _renderHandlers];
 
@@ -39,7 +40,11 @@ if (_entity isKindOf "Man") then {
                         updateRender3D _properties;
                     };
 
-                    _currentHandlers pushBack _renderHandler;
+                    if (((getNumber (_x >> "showInVehicle")) isEqualTo 0) && !(isNull (objectParent _entity))) then {
+                        updateRender3D [_renderHandler, "visible", false];
+                    };
+
+                    _currentHandlers pushBack [_renderHandler, _x];
                 } forEach (
                     "true" configClasses (
                         switch _slot do {
@@ -60,6 +65,40 @@ if (_entity isKindOf "Man") then {
 
                 _renderHandlers set [_key, _currentHandlers];
             };                    
+        }
+    ] call KH_fnc_addEventHandler;
+
+    [
+        ["ENTITY", _entity, "LOCAL"],
+        "GetInMan",
+        [],
+        {
+            params ["_entity"];
+
+            {
+                _x params ["_renderHandler", "_class"];
+
+                if ((getNumber (_class >> "showInVehicle")) isEqualTo 0) then {
+                    updateRender3D [_renderHandler, "visible", false];
+                };
+            } forEach (values (_entity getVariable ["KH_var_renderHandlers", createHashMap]));    
+        }
+    ] call KH_fnc_addEventHandler;
+
+    [
+        ["ENTITY", _entity, "LOCAL"],
+        "GetOutMan",
+        [],
+        {
+            params ["_entity"];
+
+            {
+                _x params ["_renderHandler", "_class"];
+
+                if ((getNumber (_class >> "showInVehicle")) isEqualTo 0) then {
+                    updateRender3D [_renderHandler, "visible", true];
+                };
+            } forEach (values (_entity getVariable ["KH_var_renderHandlers", createHashMap]));        
         }
     ] call KH_fnc_addEventHandler;
 
@@ -98,7 +137,7 @@ if (_entity isKindOf "Man") then {
                     updateRender3D _properties;
                 };
 
-                _currentHandlers pushBack _renderHandler;
+                _currentHandlers pushBack [_renderHandler, _x];
             } forEach ("true" configClasses (configFile >> "CfgWeapons" >> _newWeapon >> "KH_Rendering3D"));
 
             _renderHandlers set [_slot, _currentHandlers];                 
@@ -123,7 +162,11 @@ private _currentHandlers = [];
         updateRender3D _properties;
     };
 
-    _currentHandlers pushBack _renderHandler;
+    if (((getNumber (_x >> "showInVehicle")) isEqualTo 0) && !(isNull (objectParent _entity))) then {
+        updateRender3D [_renderHandler, "visible", false];
+    };
+
+    _currentHandlers pushBack [_renderHandler, _x];
 } forEach ("true" configClasses ((configOf _entity) >> "KH_Rendering3D"));
 
 if (_currentHandlers isNotEqualTo []) then {

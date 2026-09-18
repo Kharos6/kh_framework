@@ -8,9 +8,10 @@
 // as the SSGI's gather is: the cost is the meshes' screen coverage, and
 // the term is a smooth field the full-resolution apply upsamples
 // depth-guided (effect 24's recipe).
-//   PSSsaoDepth - sample 0 of the live main depth at every other pixel, into
-//                 an R32 half-res texture every later tap reads (one
-//                 multisampled load per half pixel instead of a hundred).
+//   PSSsaoDepth - sample 0 of the live main depth at every other pixel,
+//                 converted to metres (KhSaMeters), into an R32 half-res
+//                 texture every later tap reads (one multisampled load and
+//                 one conversion per half pixel instead of one per tap).
 //   PSSsaoMain  - half res: the occlusion term into an R8 target, 1 wherever
 //                 the pixel is not ours.
 //   PSSsaoBlur  - twice, half res, ping-ponging two R8 targets: the SSGI
@@ -18,7 +19,9 @@
 //                 doubling), at our pixels alone (the rest pass through).
 //   PSSsaoApply - full res: the term through the SSGI resolve's joint-bilateral
 //                 5 x 5 over the half grid, MULTIPLIED into the scene colour
-//                 (dest.rgb *= src.rgb) at our pixels alone.
+//                 (dest.rgb *= src.rgb) at our samples alone: the C++ side
+//                 binds the read-only depth view with a stencil test on the
+//                 mark, so unmarked pixels never run it.
 //   (eraser)    - no shader: a stencil-only draw sets the mark back to 0.
 //
 // "Ours" is the one test every pass takes, and it is the STENCIL's answer
@@ -88,9 +91,11 @@
 // What this does not do, by design: a translucent or depth-Off draw of ours
 // writes no depth and so is never "ours" here (no term on it, as before), and
 // the term lands before either drawer's translucent tail blends over it; the
-// PIP passes and the view-model slice draw no term; on
-// an MSAA scene the test is sample 0's, so a silhouette pixel whose sample 0
-// is ours takes the multiply on every sample (a sub-pixel dark rim at most).
+// PIP passes and the view-model slice draw no term; on an MSAA scene the
+// shaders' test is sample 0's: a pixel whose sample 0 is not ours takes no
+// term on any sample, and one whose sample 0 is ours takes it on its marked
+// samples (the apply's stencil test) - on every sample where the read-only
+// depth view or the test state is missing (a sub-pixel dark rim at most).
 
 cbuffer CBSsao : register(b0)
 {
@@ -117,7 +122,7 @@ float KhSaLive(int2 khsl_p) { return khsaLive.Load(int3(khsl_p, 0)); }
 uint  KhSaMark(int2 khsm_p) { return khsaMark.Load(int3(khsm_p, 0)).g; }
 #endif
 Texture2D<float> khsaAo    : register(t2);   // The term on the half grid (the blurs and the apply read it).
-Texture2D<float> khsaDepth : register(t3);   // PSSsaoDepth's half-res sample-0 depth (raw).
+Texture2D<float> khsaDepth : register(t3);   // PSSsaoDepth's half-res sample-0 depth (metres).
 
 #define KH_SA_N 16   // Taps per pixel: 8 annuli, two azimuths each.
 #define KH_SA_RANGE_FRAC 0.05f   // The radius is at least this share of the distance.
@@ -143,6 +148,8 @@ int2 KhSaClampHalf(int2 khsc_p)
     return clamp(khsc_p, int2(0, 0), int2((int)khsaHalf.x - 1, (int)khsaHalf.y - 1));
 }
 // Is a half-grid pixel inside the rectangle (whose full-res edges round outward)?
+// The rectangle lies inside the target (kh_ssao_viewport clamps it), so this is
+// also every pass's test that a half-grid tap is on the grid.
 bool KhSaInRectHalf(int2 khsr_p)
 {
     return khsr_p.x >= (int)(khsaRect.x * 0.5f) && khsr_p.y >= (int)(khsaRect.y * 0.5f) &&
@@ -158,10 +165,11 @@ float KhSaMeters(float khsm_raw)
     float khsm_d = khsaProj.w / khsm_den;
     return khsm_d > 0.0f ? khsm_d : 1.0e9f;
 }
-// The half-grid depth, metres (the sample at full pixel 2p).
+// The half-grid depth, metres (the sample at full pixel 2p; PSSsaoDepth stored
+// it converted).
 float KhSaDepthH(int2 khsd_hp)
 {
-    return KhSaMeters(khsaDepth.Load(int3(KhSaClampHalf(khsd_hp), 0)));
+    return khsaDepth.Load(int3(KhSaClampHalf(khsd_hp), 0));
 }
 
 // The view-space position of FULL pixel p (integer coordinates; the centre is
@@ -220,10 +228,11 @@ bool KhSaOurs(int2 khso_p)
     return KhSaMark(khso_p) == 1u;
 }
 
-// Half res: sample 0 of the live depth at full pixel 2p.
+// Half res: sample 0 of the live depth at full pixel 2p, in metres - the
+// conversion every half-grid read took, taken once (R32_FLOAT keeps it exact).
 float PSSsaoDepth(float4 pos : SV_Position) : SV_Target
 {
-    return KhSaLive(KhSaClampFull(int2(pos.xy) * 2));
+    return KhSaMeters(KhSaLive(KhSaClampFull(int2(pos.xy) * 2)));
 }
 
 // Half res: the term at half pixel hp (full pixel 2hp).
@@ -274,32 +283,36 @@ float PSSsaoMain(float4 pos : SV_Position) : SV_Target
     const float khsp_hn = (float)(KH_SA_N >> 1);
 
     float khsp_sum = 0.0f;
-    [loop] for (int khsp_k = 0; khsp_k < KH_SA_N; ++khsp_k) {
-        const int khsp_kp = khsp_k >> 1;
-        const float khsp_an = (float)khsp_kp * 2.3999632f + khsp_rot + (float)(khsp_k & 1) * 3.14159265f;
+    // Annulus by annulus, its two azimuths inside: the angle base, the jitter
+    // and the radius belong to the pair and are evaluated once (the taps and
+    // their order are the per-tap loop's).
+    [loop] for (int khsp_kp = 0; khsp_kp < (KH_SA_N >> 1); ++khsp_kp) {
+        const float khsp_ab = (float)khsp_kp * 2.3999632f + khsp_rot;
         const float khsp_jk = frac(khsp_ig2 + (float)khsp_kp * 0.61803399f);
+        // At least 1.05 half px: the self-sample floor (a half pixel = two full).
         const float khsp_sr = max(sqrt(((float)khsp_kp + khsp_jk) / khsp_hn) * khsp_spx, 1.05f);
-        const float2 khsp_off = float2(cos(khsp_an), sin(khsp_an)) * khsp_sr;
-        if (dot(khsp_off, khsp_off) < 1.0f) continue;   // The self-sample floor (a half pixel = two full).
-        const int2 khsp_sp = int2((float2)khsp_hp + 0.5f + khsp_off);
-        // Off-screen taps reject rather than clamp (a clamp would read the
-        // border pixel's surface as a neighbour); so do taps outside the
-        // rectangle, whose half-grid depth PSSsaoDepth did not write this
-        // frame (the blurs take the same rule).
-        if (khsp_sp.x < 0 || khsp_sp.y < 0 || khsp_sp.x >= (int)khsaHalf.x || khsp_sp.y >= (int)khsaHalf.y) continue;
-        if (!KhSaInRectHalf(khsp_sp)) continue;
-        const float khsp_sd = KhSaDepthH(khsp_sp);
-        if (khsp_sd > 1.0e8f) continue;   // Sky: nothing there to occlude.
-        const float3 khsp_v = KhSaView(khsp_sp * 2, khsp_sd) - khsp_P;
-        const float khsp_d = length(khsp_v);
-        if (khsp_d < 1.0e-4f) continue;
-        const float khsp_ph = dot(khsp_N, khsp_v);   // Height above the tangent plane.
-        const float khsp_pw = smoothstep(khsp_pfl, khsp_pfl * 2.0f, khsp_ph);
-        if (khsp_pw <= 0.0f) continue;
-        // Cosine-ish weight (the sine of the elevation) under a smooth range
-        // falloff: a far foreground edge must not darken what is behind it.
-        const float khsp_fall = saturate(1.0f - (khsp_d * khsp_d) / (khsp_rad * khsp_rad));
-        khsp_sum += khsp_pw * (khsp_ph / khsp_d) * khsp_fall * khsp_fall;
+        [loop] for (int khsp_par = 0; khsp_par < 2; ++khsp_par) {
+            const float khsp_an = khsp_ab + (float)khsp_par * 3.14159265f;
+            const float2 khsp_off = float2(cos(khsp_an), sin(khsp_an)) * khsp_sr;
+            const int2 khsp_sp = int2((float2)khsp_hp + 0.5f + khsp_off);
+            // Taps outside the rectangle reject rather than clamp (a clamp
+            // would read the border pixel's surface as a neighbour): their
+            // half-grid depth was not written this frame, and the rectangle
+            // test is the on-grid test too (the blurs take the same rule).
+            if (!KhSaInRectHalf(khsp_sp)) continue;
+            const float khsp_sd = KhSaDepthH(khsp_sp);
+            if (khsp_sd > 1.0e8f) continue;   // Sky: nothing there to occlude.
+            const float3 khsp_v = KhSaView(khsp_sp * 2, khsp_sd) - khsp_P;
+            const float khsp_d = length(khsp_v);
+            if (khsp_d < 1.0e-4f) continue;
+            const float khsp_ph = dot(khsp_N, khsp_v);   // Height above the tangent plane.
+            const float khsp_pw = smoothstep(khsp_pfl, khsp_pfl * 2.0f, khsp_ph);
+            if (khsp_pw <= 0.0f) continue;
+            // Cosine-ish weight (the sine of the elevation) under a smooth range
+            // falloff: a far foreground edge must not darken what is behind it.
+            const float khsp_fall = saturate(1.0f - (khsp_d * khsp_d) / (khsp_rad * khsp_rad));
+            khsp_sum += khsp_pw * (khsp_ph / khsp_d) * khsp_fall * khsp_fall;
+        }
     }
     // Normalised by the tap count, scaled so a right-angled crease reads ~0.3.
     const float khsp_occ = saturate(khsp_sum * (2.0f / (float)KH_SA_N)) * khsp_conf;
@@ -322,8 +335,7 @@ float KhSaBlur(int2 khsb_hp, float khsb_z)
     [unroll] for (int khsb_j = -2; khsb_j <= 2; ++khsb_j) {
         [unroll] for (int khsb_i = -2; khsb_i <= 2; ++khsb_i) {
             const int2 khsb_q = khsb_hp + int2(khsb_i, khsb_j) * khsb_st;
-            if (!KhSaInRectHalf(khsb_q)) continue;   // Not written this frame.
-            if (khsb_q.x < 0 || khsb_q.y < 0 || khsb_q.x >= (int)khsaHalf.x || khsb_q.y >= (int)khsaHalf.y) continue;
+            if (!KhSaInRectHalf(khsb_q)) continue;   // Not written this frame (or off the grid).
             const float khsb_qz = KhSaDepthH(khsb_q);
             if (khsb_qz > 1.0e8f) continue;
             const float khsb_dz = abs(khsb_qz - khsb_z) / (khsb_z * 0.06f + 0.05f);
@@ -348,7 +360,12 @@ float PSSsaoBlur(float4 pos : SV_Position) : SV_Target
 
 // Full res: the term at this pixel from the half grid, depth-guided (the
 // SSGI resolve's upsample: the full-res depth guides the half-res field),
-// dithered, multiplied into the scene at our pixels.
+// dithered, multiplied into the scene at our pixels. The stencil test runs
+// ahead of the shader (the state writes nothing, so the discard below cannot
+// need a late test): a pixel with no marked sample is never shaded, and the
+// output reaches only the samples that pass. The sample-0 test stays - it is
+// what makes the guiding depth below ours.
+[earlydepthstencil]
 float4 PSSsaoApply(float4 pos : SV_Position) : SV_Target
 {
     const int2 khsq_p = int2(pos.xy);
@@ -364,7 +381,6 @@ float4 PSSsaoApply(float4 pos : SV_Position) : SV_Target
         [unroll] for (int khsq_i = -2; khsq_i <= 2; ++khsq_i) {
             const int2 khsq_q = khsq_hp + int2(khsq_i, khsq_j) * khsq_st;
             if (!KhSaInRectHalf(khsq_q)) continue;
-            if (khsq_q.x < 0 || khsq_q.y < 0 || khsq_q.x >= (int)khsaHalf.x || khsq_q.y >= (int)khsaHalf.y) continue;
             const float khsq_qz = KhSaDepthH(khsq_q);
             if (khsq_qz > 1.0e8f) continue;
             const float khsq_dz = abs(khsq_qz - khsq_z) / (khsq_z * 0.06f + 0.05f);

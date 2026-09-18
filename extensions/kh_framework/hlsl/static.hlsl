@@ -736,8 +736,12 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
     // through it.
     if (khObjCut > 0.0f && i.pos.w > khObjCut) discard;
     // Punch-through / overlay-occlusion guard, flush-path edition: the same
-    // contract as PSComposite's. The CPU arms tight margins only for
-    // single-sample snapshots, so MSAA frames stand down by construction.
+    // contract as PSComposite's. When armed, t0 holds the single-sample depth
+    // snapshot, whose .x is the farthest sample (PSDepthResolve). World
+    // meshes draw only on a multisampled main depth (kh_fsaa_world_standdown),
+    // so this runs on MSAA frames: a pixel any sample leaves uncovered reads as
+    // the far clear and keeps the fragment, and the hardware depth test makes
+    // the per-sample cut (see snapshot_composite_depth).
     if (fxParams1.x < 1e8f) {
         int2 gpx = clamp(int2(i.pos.xy), int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
         float sceneZ = KhSceneMeters(KhSceneLoad(gpx));

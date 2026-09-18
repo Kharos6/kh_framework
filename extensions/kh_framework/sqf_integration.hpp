@@ -6996,7 +6996,11 @@ static bool kh_rv_chain_sim(const game_value& val, RenderIntegration::RenderObje
     if (khch_pos_set) khch_c.proxy = khch_c.pos == R::KH_CHE_MEM ? khch_own.release() : game_value();
     R::kh_chain_cfg_resolve(khch_c);
     game_value khch_drop;
-    if (!khch_old_proxy.is_nil() && khch_old_proxy.data.get() != khch_c.proxy.data.get()) khch_drop = khch_old_proxy;
+    // KH_CBL_PXY_POOL: a position set this call holds its own reference (a
+    // pooled make can return the same proxy), so the old reference goes
+    // whenever the position was set; otherwise only when the config no longer
+    // names it.
+    if (!khch_old_proxy.is_nil() && (khch_pos_set || khch_old_proxy.data.get() != khch_c.proxy.data.get())) khch_drop = khch_old_proxy;
     R::g_chain_cfg[handle] = khch_c;
     R::kh_attach_proxy_orphan(khch_drop);
     // KH_SKEL_PROXY_CULL: a bound skeleton's proxies follow the chain's start
@@ -8005,6 +8009,7 @@ static game_value get_render_stats_sqf() {
         uint32_t khrt_opaques = 0, khrt_samples = 0, khrt_cw = 0, khrt_ch = 0, khrt_cs = 0;
         bool khrt_injected = false, khrt_pv = false, khrt_main = false, khrt_tid = false, khrt_got = false;
         float khrt_cam[3] = {};
+        uint32_t khrt_pxy_live = 0;   // Render thread's plain count, read under the park.
         bool khd_valid = false, khd_view_valid = false;
         uint32_t khd_point_n = 0, khd_spot_n = 0, khd_pool_n = 0;
         float khd_cam[3] = {};
@@ -8029,6 +8034,7 @@ static game_value get_render_stats_sqf() {
             khrt_main = RenderIntegration::g_main_depth_identity != nullptr;
             khrt_tid = RenderIntegration::g_reorder_render_tid.load(std::memory_order_relaxed) != 0;
             for (int i = 0; i < 3; ++i) khrt_cam[i] = RenderIntegration::g_latch_cam[i];
+            khrt_pxy_live = RenderIntegration::g_pxy_live_n;
             const RenderIntegration::DynLightsState& khd = RenderIntegration::g_dl;
             khd_valid = khd.valid;
             khd_view_valid = khd.view_valid;
@@ -8159,6 +8165,16 @@ static game_value get_render_stats_sqf() {
             for (int i = 0; i < 3; ++i) cam.push_back(game_value(khrt_cam[i]));
             out.push_back(kva("camera", std::move(cam)));
         }
+        // Attachment proxies and the locator: pxyLive and pxyPool are current;
+        // the rest count while collection is armed.
+        out.push_back(kv("pxyLive", static_cast<float>(khrt_pxy_live)));
+        out.push_back(kv("pxyPool", static_cast<float>(RenderIntegration::g_pxy_pool_n.load(std::memory_order_relaxed))));
+        out.push_back(kv("pxyScaleFailed", static_cast<float>(RenderIntegration::g_pxy_scale_failed.load(std::memory_order_relaxed))));
+        out.push_back(kv("pxyDecided", static_cast<float>(RenderIntegration::g_pxy_decided.load(std::memory_order_relaxed))));
+        out.push_back(kv("pxyUndecided", static_cast<float>(RenderIntegration::g_pxy_undecided.load(std::memory_order_relaxed))));
+        out.push_back(kv("pxyCorrected", static_cast<float>(RenderIntegration::g_pxy_pre_ne.load(std::memory_order_relaxed))));
+        out.push_back(kv("cblDecisions", static_cast<float>(RenderIntegration::g_cbl_dec_cb.load(std::memory_order_relaxed))));
+        out.push_back(kv("cblFallbacks", static_cast<float>(RenderIntegration::g_cbl_dec_fb.load(std::memory_order_relaxed))));
         // The dynamic-light state.
         out.push_back(kv("dlValid", khd_valid ? 1.0f : 0.0f));
         out.push_back(kv("dlPointN", static_cast<float>(khd_point_n)));

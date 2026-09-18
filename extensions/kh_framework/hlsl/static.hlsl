@@ -496,7 +496,7 @@ float4 PSDlsWorld(VSOut i) : SV_Target
         const int khw_rn = (int)dlCtl.y + (int)dlCtl.z;
         bool khw_reach = false;
         [loop] for (int khw_ri = 0; khw_ri < khw_rn && !khw_reach; ++khw_ri) {
-            const int khw_rs = (int)dlLights[khw_ri * 6 + 5].z - 1;
+            const int khw_rs = (int)KhDlRec(khw_ri * 6 + 5).z - 1;
             if (khw_rs < 0) continue;
             const float khw_rf = dlsMeta[khw_rs].w * 1.05f;
             if (khw_rf <= 0.0f) continue;
@@ -863,6 +863,8 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
 #if KH_TEXTURED
     khtxS.albedo *= i.icol.rgb;   // The object colour tints the albedo lane only.
 #if KH_USER_MAT
+    khUserUvPs = i.uv;   // KH_USER_LANES: KhUserUv / KhUserPixel. TWIN: PSMain / PSComposite.
+    khUserPxPs = i.pos.xy;
     float3 lc = KhUserShade(khtxS, i.wpos, khtxN, smf);
 #else
     float3 lc = KhApplyPBR(khtxS, i.wpos, khtxN, smf);

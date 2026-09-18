@@ -51,7 +51,12 @@ cbuffer CBObj : register(b0)
     // View matrix columns (world->view rotation) for mode 2, captured with the
     // light list.
     float4 dlView[3];
-    float4 dlLights[192];
+    // KH_DL_RING: x = where this draw's light records start in khDlRecs (t40),
+    // as uint bits - read it through KhDlRec, never directly. C++ twin dl_first.
+    float4 dlFirst;
+    // KH_USER_LANES: x = the session clock (s), y = this object's creation on
+    // it (s). Read through the KhUser* accessors below. C++ twin user_obj.
+    float4 khUserObj;
 };
 
  cbuffer CBFrame : register(b1)
@@ -171,6 +176,11 @@ cbuffer CBObj : register(b0)
     // xyz = the camera invViewProj is relative to, w = 1 arms it (every reader
     // adds xyz after the reconstruction); w = 0 = invViewProj is absolute.
     float4 fxCam;
+    // KH_USER_LANES: the pass camera - xyz position (engine axes, absolute),
+    // w = 1 when filled; the rows are its right, up and forward axes. Read
+    // through the KhUser* accessors below. C++ twins user_cam / user_cam_rot.
+    float4 khUserCam;
+    float4 khUserCamRot[3];
 };
  
 cbuffer CBEngView : register(b2)
@@ -190,11 +200,26 @@ cbuffer CBEngView2 : register(b4)
 
 // The object record buffer (C++ twin KhObjRec, 6 float4), one per live-scene
 // slot, read by every bucket vertex shader through the lane's slot
-// (VSInst.islot). Engine axes. size.w unused (0), rot0.w = 1 (filled),
+// (VSInst.islot). Engine axes. size.w = the object's creation on the session
+// clock (KH_USER_LANES), rot0.w = 1 (filled),
 // rot1.w = lit ambient fraction, rot2.w = lit diffuse fraction; col carries no
 // lifetime envelope (the lane's alpha does).
 struct KhObjRec { float4 pos; float4 size; float4 rot0; float4 rot1; float4 rot2; float4 col; };
 StructuredBuffer<KhObjRec> khObjs : register(t39);
+
+// KH_DL_RING: the draw's dynamic-light records, 6 float4 per light (the
+// engine's cb11 record: [0] position, [1] spot axis + cone threshold, [2]
+// diffuse + cone scale, [3] ambient + cone exponent, [4] offset + (a0,a1,a2),
+// [5] fade start + inverse width + OUR shadow slot + 1), points first then
+// spots, dlCtl.y + dlCtl.z of them - no count cap. Every read is gated on
+// those counts (dlCtl.x >= 0.5 and the index below them): past them the ring
+// holds another draw's records. Bound at PS t40 by the C++ append
+// (kh_dlr_append), inside StateBackup's saved range.
+StructuredBuffer<float4> khDlRecs : register(t40);
+float4 KhDlRec(int khdr_i)
+{
+    return khDlRecs[asuint(dlFirst.x) + (uint)khdr_i];
+}
 
 // The per-object lanes a bucket varies per instance and the CB carries per
 // draw. Filled by the vertex shader into two flat interpolants (VSOut.iobj0/1)
@@ -206,10 +231,15 @@ static float khObjAmb = 0.0f;      // lighting0.z twin: base-colour fraction kep
 static float khObjDif = 0.0f;      // lighting0.w twin: n.L-scaled fraction.
 static float khObjCut = 0.0f;      // shadowMeta2.y twin: object view-distance cut (m, 0 = off).
 static float khObjDither = 0.0f;   // blendCtl.w twin: the LOD crossfade dither for this draw.
+// KH_USER_LANES: khUserObj.y twin - this object's (or bucket instance's)
+// creation on the session clock. The sentinel means 'not loaded': KhUserTime
+// then reads the CB, which is this object's on every per-object draw.
+static float khObjBirth = -1.0e30f;
 void KhObjLoad(float4 khol_a, float4 khol_b)
 {
     khObjAmb = khol_a.x;
     khObjDif = khol_a.y;
+    khObjBirth = khol_a.z;
     khObjCut = khol_a.w;
     khObjDither = khol_b.y;
 }
@@ -227,7 +257,7 @@ void KhLodDitherCut(float2 khld_px, float khld_v)
 }
 void KhObjLanesCb(out float4 khoc_a, out float4 khoc_b)
 {
-    khoc_a = float4(lighting0.z, lighting0.w, 0.0f, shadowMeta2.y);   // z unused.
+    khoc_a = float4(lighting0.z, lighting0.w, khUserObj.y, shadowMeta2.y);   // z = creation (KH_USER_LANES).
     khoc_b = float4(0.0f, blendCtl.w, 0.0f, 0.0f);   // z / w unused.
 }
 // ...or the record + lane (bucket draws); the cut is the pass's object view
@@ -236,9 +266,153 @@ void KhObjLanesCb(out float4 khoc_a, out float4 khoc_b)
 // stays so the two bucket vertex shaders keep one call shape.
 void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float4 khor_a, out float4 khor_b)
 {
-    khor_a = float4(khor_r.rot1.w, khor_r.rot2.w, 0.0f, khPassObj.x);
+    khor_a = float4(khor_r.rot1.w, khor_r.rot2.w, khor_r.size.w, khPassObj.x);   // z = creation (KH_USER_LANES).
     khor_b = float4(0.0f, khor_dither, 0.0f, 0.0f);   // z / w unused.
 }
+
+// ===========================================================================
+// USER SHADER CONTRACT (KH_USER_LANES). What a user .hlsl may rely on.
+//
+// ---- MATERIAL shaders (a material whose shader is a .hlsl path) ----------
+// Placed after this file and BEFORE the builtin pixel shaders, and compiled
+// three times - the flush's twin (static.hlsl) and the injection's guard and
+// arbitration twins (composite) - with KH_TEXTURED = KH_USER_MAT =
+// KH_RECEIVE_TEX = 1. It may call anything in this file; it cannot call into
+// static.hlsl / composite2.hlsl (they come after it). It defines
+//     float3 KhUserShade(KhMatSurf s, float3 wpos, float3 n, float smf)
+// While the compile is pending, or if it fails (reported once), the submesh
+// draws flat unlit white instead (the white placeholder, with the default
+// material); the builtin PBR shades it only if the placeholder itself was not
+// built.
+//   s     the material sampled at the pixel's UV (KhSampleMat); the object
+//         colour already tints s.albedo. s.alpha is informational: coverage is
+//         decided around the call (below).
+//   wpos  the world position (engine axes: x east, y up, z north; absolute m).
+//   n     the shading normal the builtin uses: unit, normal map applied, and
+//         reversed on the back face of a two-sided mesh.
+//   smf   the sun shadow factor, 0 dark - 1 lit: the received world shadows
+//         and the private self-shadow, already min-combined - multiply the sun
+//         term by it once and do not stack another sun shadow on it.
+//   RETURN the lit colour in the engine's linear HDR scene units (the units of
+//         lighting2 and lightAmb), before fog. Around the call the builtin
+//         applies fog, the coverage (the material's cutout / blend alpha times
+//         the object colour's alpha) and the object's blend mode - a user
+//         shader cannot change coverage.
+// The builtin's own recipe is the reference to copy or wrap: KhApplyPBR(s,
+// wpos, n, smf) is what KhUserShade replaces, and ApplyLighting (untextured)
+// documents the combine. Rules its pieces follow:
+//   - khObjAmb / khObjDif are this object's ambient and sun-diffuse fractions
+//     (loaded at the PS entry, per instance on a bucket draw). Scale the
+//     ambient and the direct sun by them; never read lighting0.zw directly.
+//   - DynLights(wpos, n) / KhDynLightsPBR(...) carry every dynamic light that
+//     reaches the mesh, with their own shadows; add them as they are.
+//   - Ambient occlusion is NOT a shader term: KH_SSAO multiplies the result at
+//     the pixel after the draw. s.occ is the material's occlusion map, for the
+//     ambient only (as KhPbrAmbient applies it).
+//   - Emissive is not added for you: KhApplyPBR adds s.emissive last.
+// Re-sampling the material (animation): KhUserUv() is the pixel's UV, so
+// KhSampleMat(KhUserUv() + offset) re-samples the whole surface and
+// KhMatFetch(slot, uv) one map (slots 0 diffuse, 1 normal, 2 orm, 3 emissive,
+// 4 specular, 5 speccolor); drive the offset from KhUserTime(). A user shader
+// cannot bring textures of its own: nothing binds a register it declares.
+//
+// ---- EFFECT shaders (a fullscreen pass or effect mesh given a .hlsl path) --
+// Main view only (a PIP pass skips it). Compiled as this file plus the user
+// file alone, with MSAA_DEPTH set to the scene's - none of the effect unit's helpers (SampleScene, LinDepth,
+// KhWorldPosFenced) are in it; copy what is needed from effect.hlsl. It
+// defines
+//     float4 PSEffect(VSOut i) : SV_Target
+// and should begin with KhObjLoad(i.iobj0, i.iobj1), as the builtin does.
+// Bound for it: the scene colour at t0 (declare Texture2D<float4> sceneColor :
+// register(t0)) and the depth at t1 (declare it as effect.hlsl does: under
+// MSAA_DEPTH a Texture2DMS<float> - read sample 0 - else the two-plane
+// Texture2D<float2> snapshot - read .x, the farthest plane). Nothing else is
+// promised: read textures with integer Loads (every builtin effect does);
+// no sampler is guaranteed bound, s0 / s1 are this file's registers and s2
+// is the SSGI resolve's (a second declaration at a taken register fails the
+// compile with X4509).
+//   fxMeta     x = effect id, y = the object's age in seconds (formed in
+//              double: the most precise clock), zw = the target size in px.
+//              uv = i.pos.xy / fxMeta.zw.
+//   fxParams0..2  the script's twelve effect parameters, in order.
+//   color      the object colour; color.a is the script's opacity (a
+//              fullscreen pass whose color.a <= 0.001 is skipped undrawn).
+//   sizeAxes.w the blend mode (0 normal, 1 additive, 2 multiply, 3 screen,
+//              4 lighten, 5 darken).
+//   centerSize.w  which composite the pass is in:
+//     > 0.5 A FULLSCREEN pass. The output REPLACES the pixel (opaque write):
+//           opacity, blend mode, the localization mask (localParams0/1,
+//           localRadii) and the band mask (bandParams) are NOT applied for a
+//           user shader - the builtin applies them inside its own PSEffect
+//           (the tail of effect3.hlsl is the recipe). 1.0 = the scene chain:
+//           t0 is the engine's HDR scene colour at its scene resolve, before
+//           the engine's own post-processing and tonemap, and the output goes
+//           back in the same linear HDR units. 1.25 = the UI phase (a pass the
+//           script set to affect the UI): t0 is the finished display frame,
+//           post-tonemap, UI included (0 - 1), its alpha the UI coverage, and
+//           the hardware then lerps the output by that coverage (or, with the
+//           script's UI spill, adds it over the UI).
+//     < 0.5 An EFFECT MESH. The output is hardware-blended by the blend mode;
+//           return it packed as the builtin's final lines do (normal: rgb,
+//           alpha = opacity; additive / screen: rgb * opacity, 1; multiply:
+//           lerp(1, rgb, opacity), 1; lighten / darken: lerp(scene, rgb,
+//           opacity), 1). The builtin's first lines are not applied for you
+//           either: its depth gate against depthParams and the object's
+//           view-distance cut (discard past khObjCut, set by KhObjLoad) -
+//           without them an effect mesh draws past the engine's object view
+//           distance.
+//   World position from depth (KhWorldPosFenced's recipe): the view distance
+//   d = LinDepth(raw) (depthParams: x = m22, y = m32, zw = the viewport depth
+//   range); clip = (uv.x * 2 - 1, 1 - uv.y * 2, depthParams.x +
+//   depthParams.y / d, 1); w = mul(clip, invViewProj); world = w.xyz / w.w,
+//   plus fxCam.xyz when fxCam.w >= 0.5 (the inverse is then camera-relative).
+//
+// ---- Both kinds: the accessors below. -------------------------------------
+// They read lanes every pass that can run a user shader fills (the mesh flush
+// and injection, the PIP and view-model passes, the scene and UI effect
+// chains).
+//   KhUserTime()          the object's age: seconds since it was created - the
+//                         animation clock. Per object, bucket instances
+//                         included. Formed in float on a clock that restarts
+//                         with each mission, so it resolves ~0.5 ms after an
+//                         hour of mission (an effect's fxMeta.y is exact).
+//   KhUserSessionTime()   seconds since the mission's render clock started; one
+//                         value for every object - a shared clock.
+//   KhUserCameraValid()   true when the camera lanes below are filled.
+//   KhUserCameraPos()     the pass camera's position (engine axes, absolute).
+//                         For a PIP pass it is the PIP camera.
+//   KhUserCameraRight() / KhUserCameraUp() / KhUserCameraForward()
+//                         the pass camera's axes (engine axes, unit length);
+//                         Forward is the direction it looks.
+//   KhUserViewDir(wpos)   unit vector from wpos toward the camera.
+//   KhUserUv()            MATERIAL only: the pixel's texture UV.
+//   KhUserPixel()         MATERIAL only: the pixel's position in the target, px
+//                         (an effect has i.pos.xy).
+// Object lanes (per-object draws: the drawn object; on a bucket draw these
+// are the first instance's - use the accessors): centerSize.xyz its centre
+// (engine axes), sizeAxes.xyz its edge lengths (engine axes), objRot0..2.xyz
+// its rotation rows (objRot0.w = 1 when set, identity otherwise).
+// Scene lanes: lighting1.xyz the unit vector toward the sun or moon (w = 1
+// valid), lighting2.rgb its colour and lightAmb.rgb the ambient (HDR scene
+// units).
+// ===========================================================================
+float  KhUserSessionTime()   { return khUserObj.x; }
+float  KhUserTime()          { return max(khUserObj.x - (khObjBirth > -1.0e29f ? khObjBirth : khUserObj.y), 0.0f); }
+bool   KhUserCameraValid()   { return khUserCam.w >= 0.5f; }
+float3 KhUserCameraPos()     { return khUserCam.xyz; }
+float3 KhUserCameraRight()   { return khUserCamRot[0].xyz; }
+float3 KhUserCameraUp()      { return khUserCamRot[1].xyz; }
+float3 KhUserCameraForward() { return khUserCamRot[2].xyz; }
+float3 KhUserViewDir(float3 khuv_wpos)
+{
+    const float3 khuv_d = khUserCam.xyz - khuv_wpos;
+    return khuv_d * rsqrt(max(dot(khuv_d, khuv_d), 1.0e-12f));
+}
+// Set by PSMain / PSComposite immediately before KhUserShade (TWIN).
+static float2 khUserUvPs = float2(0.0f, 0.0f);
+static float2 khUserPxPs = float2(0.0f, 0.0f);
+float2 KhUserUv()    { return khUserUvPs; }
+float2 KhUserPixel() { return khUserPxPs; }
 
 #define KH_RPDB_GC_M 0.008f
 #define KH_HERO_TEXEL_M 0.001f
@@ -1407,10 +1581,8 @@ float3 DynLights(float3 wpos, float3 nrm)
 {
     if (dlCtl.x < 0.5f) return float3(0.0f, 0.0f, 0.0f);
     int pointN = (int)dlCtl.y;
-    // Bounded to the declared array (192 / 6): the C++ fill sites cap at
-    // KH_DL_MAX_LIGHTS = 32 already, so this is a hard floor under them, not a
-    // second truth.
-    int totalN = min(pointN + (int)dlCtl.z, 32);
+    // Every light that reaches this mesh (KH_DL_RING: no count cap).
+    int totalN = pointN + (int)dlCtl.z;
     float3 n = normalize(nrm);
     float3 p;
 
@@ -1437,19 +1609,19 @@ float3 DynLights(float3 wpos, float3 nrm)
 
     [loop] for (int i = 0; i < totalN; ++i) {
         int b = i * 6;
-        float3 L = dlLights[b + 0].xyz - p;
+        float3 L = KhDlRec(b + 0).xyz - p;
         float dist = length(L);
         L /= dist + 1e-4f;
-        float d = max(dist * dlCtl.w - dlLights[b + 4].x, 0.0f);
-        float att = saturate(1.0f / (dot(dlLights[b + 4].yzw, float3(1.0f, d, d * d)) + 1e-4f));
-        att *= 1.0f - saturate((dist * dlCtl.w - dlLights[b + 5].x) * dlLights[b + 5].y);
+        float d = max(dist * dlCtl.w - KhDlRec(b + 4).x, 0.0f);
+        float att = saturate(1.0f / (dot(KhDlRec(b + 4).yzw, float3(1.0f, d, d * d)) + 1e-4f));
+        att *= 1.0f - saturate((dist * dlCtl.w - KhDlRec(b + 5).x) * KhDlRec(b + 5).y);
 
         if (i >= pointN) {
             // Spot cone: the engine's log/mul/exp pow; the (c > 0) guard stands
             // in for log(0) = -inf -> exp -> 0, and dodges the pow(0, 0) NaN a
             // degenerate exponent would mint.
-            float c = saturate((dot(-dlLights[b + 1].xyz, L) - dlLights[b + 1].w) * dlLights[b + 2].w);
-            att *= (c > 0.0f) ? pow(c, dlLights[b + 3].w) : 0.0f;
+            float c = saturate((dot(-KhDlRec(b + 1).xyz, L) - KhDlRec(b + 1).w) * KhDlRec(b + 2).w);
+            att *= (c > 0.0f) ? pow(c, KhDlRec(b + 3).w) : 0.0f;
         }
         // KH_DL_ATT_SKIP: both cut-offs above are HARD zeros - the range fade is
         // 1 - saturate(...) past its width, and the cone is the (c > 0) select -
@@ -1461,18 +1633,18 @@ float3 DynLights(float3 wpos, float3 nrm)
         // loop and KhDlsSoft Loads only.
         if (att <= 0.0f) continue;
 
-        // The shadow scales the directional term only. dlLights[b + 3] is the
+        // The shadow scales the directional term only. KhDlRec(b + 3) is the
         // per-light ambient - the away-facing glow that makes A3 lights read on
         // surfaces facing away - and a surface in shadow is still inside that
         // glow. A dim light casts a faint shadow and a bright one a hard shadow
         // for free.
-        const float khs_sh = KhDlsShadow((int)dlLights[b + 5].z - 1, wpos, nrm, 0.0f, khs_fwp);
+        const float khs_sh = KhDlsShadow((int)KhDlRec(b + 5).z - 1, wpos, nrm, 0.0f, khs_fwp);
         // A pure-ambient light must still cast: a fraction of the per-light
         // ambient follows the shadow (KH_DLS_AMB_KEEP kept).
         const float khs_amb = lerp(KH_DLS_AMB_KEEP, 1.0f, khs_sh);
         float ndl = max(dot(n, L), 0.0f);
-        acc += (dlGlobal.xyz * dlLights[b + 2].xyz * ndl * khs_sh
-              + dlLights[b + 3].xyz * khs_amb) * att;
+        acc += (dlGlobal.xyz * KhDlRec(b + 2).xyz * ndl * khs_sh
+              + KhDlRec(b + 3).xyz * khs_amb) * att;
     }
 
     return acc * dlGlobal.w;
@@ -1760,10 +1932,8 @@ float3 KhDynLightsPBR(float3 wpos, float3 nrm, float3 albedo, float3 F0, float r
 {
     if (dlCtl.x < 0.5f) return float3(0.0f, 0.0f, 0.0f);
     int pointN = (int)dlCtl.y;
-    // Bounded to the declared array (192 / 6): the C++ fill sites cap at
-    // KH_DL_MAX_LIGHTS = 32 already, so this is a hard floor under them, not a
-    // second truth.
-    int totalN = min(pointN + (int)dlCtl.z, 32);
+    // Every light that reaches this mesh (KH_DL_RING: no count cap).
+    int totalN = pointN + (int)dlCtl.z;
     float3 n = normalize(nrm);
     float3 p;
     float specOn = 1.0f;
@@ -1794,19 +1964,19 @@ float3 KhDynLightsPBR(float3 wpos, float3 nrm, float3 albedo, float3 F0, float r
 
     [loop] for (int i = 0; i < totalN; ++i) {
         int b = i * 6;
-        float3 L = dlLights[b + 0].xyz - p;
+        float3 L = KhDlRec(b + 0).xyz - p;
         float dist = length(L);
         L /= dist + 1e-4f;
-        float d = max(dist * dlCtl.w - dlLights[b + 4].x, 0.0f);
-        float att = saturate(1.0f / (dot(dlLights[b + 4].yzw, float3(1.0f, d, d * d)) + 1e-4f));
-        att *= 1.0f - saturate((dist * dlCtl.w - dlLights[b + 5].x) * dlLights[b + 5].y);
+        float d = max(dist * dlCtl.w - KhDlRec(b + 4).x, 0.0f);
+        float att = saturate(1.0f / (dot(KhDlRec(b + 4).yzw, float3(1.0f, d, d * d)) + 1e-4f));
+        att *= 1.0f - saturate((dist * dlCtl.w - KhDlRec(b + 5).x) * KhDlRec(b + 5).y);
 
         if (i >= pointN) {
             // Spot cone: the engine's log/mul/exp pow; the (c > 0) guard stands
             // in for log(0) = -inf -> exp -> 0, and dodges the pow(0, 0) NaN a
             // degenerate exponent would mint.
-            float c = saturate((dot(-dlLights[b + 1].xyz, L) - dlLights[b + 1].w) * dlLights[b + 2].w);
-            att *= (c > 0.0f) ? pow(c, dlLights[b + 3].w) : 0.0f;
+            float c = saturate((dot(-KhDlRec(b + 1).xyz, L) - KhDlRec(b + 1).w) * KhDlRec(b + 2).w);
+            att *= (c > 0.0f) ? pow(c, KhDlRec(b + 3).w) : 0.0f;
         }
         // KH_DL_ATT_SKIP: twin of the DynLights and KhDlsWorldFactor guard.
         if (att <= 0.0f) continue;
@@ -1815,11 +1985,11 @@ float3 KhDynLightsPBR(float3 wpos, float3 nrm, float3 albedo, float3 F0, float r
         // specular lobe with it (KhGGXSpec is scaled by diffI): a highlight
         // from a blocked light goes with the light. The per-light ambient stays
         // outside.
-        const float khs_sh = KhDlsShadow((int)dlLights[b + 5].z - 1, wpos, nrm, 0.0f, khs_fwp);
+        const float khs_sh = KhDlsShadow((int)KhDlRec(b + 5).z - 1, wpos, nrm, 0.0f, khs_fwp);
         // Twin of the DynLights site.
         const float khs_amb = lerp(KH_DLS_AMB_KEEP, 1.0f, khs_sh);
         float ndl = max(dot(n, L), 0.0f);
-        float3 diffI = dlGlobal.xyz * dlLights[b + 2].xyz * ndl * khs_sh;
+        float3 diffI = dlGlobal.xyz * KhDlRec(b + 2).xyz * ndl * khs_sh;
         // The diffuse keeps what the lobe does not reflect. Only the arma model
         // takes 1 - F here, as KhApplyPBR's sun does: it has no metal lane, so
         // F alone can take a conductor's diffuse (fresnel(1.3, 7) reflects ~90 %
@@ -1843,7 +2013,7 @@ float3 KhDynLightsPBR(float3 wpos, float3 nrm, float3 albedo, float3 F0, float r
             if (khFrNK.z >= 0.5f) khsKd *= saturate(1.0f - khsF);   // The arma tint may exceed 1.
         }
 
-        acc += (albedo * (diffI * khsKd + dlLights[b + 3].xyz * khs_amb) + khsSpec) * att;
+        acc += (albedo * (diffI * khsKd + KhDlRec(b + 3).xyz * khs_amb) + khsSpec) * att;
     }
 
     return acc * dlGlobal.w;
@@ -1992,7 +2162,7 @@ float3 KhDlsWorldFactor(float3 khw_wpos, float3 khw_nrm, float khw_zunc,
     if (dlCtl.x < 2.5f) return float3(1.0f, 1.0f, 1.0f);
 
     const int khw_pointN = (int)dlCtl.y;
-    const int khw_totalN = min(khw_pointN + (int)dlCtl.z, 32);   // Same floor as DynLights.
+    const int khw_totalN = khw_pointN + (int)dlCtl.z;   // Every light the fill packed (KH_DL_RING).
     const float3 khw_n = normalize(khw_nrm);
 
     float3 khw_dyn = float3(0.0f, 0.0f, 0.0f);       // What the lights add here.
@@ -2001,29 +2171,29 @@ float3 KhDlsWorldFactor(float3 khw_wpos, float3 khw_nrm, float khw_zunc,
 
     [loop] for (int khw_i = 0; khw_i < khw_totalN; ++khw_i) {
         const int khw_b = khw_i * 6;
-        float3 khw_L = dlLights[khw_b + 0].xyz - khw_wpos;
+        float3 khw_L = KhDlRec(khw_b + 0).xyz - khw_wpos;
         const float khw_dist = length(khw_L);
         khw_L /= khw_dist + 1e-4f;
-        const float khw_d = max(khw_dist * dlCtl.w - dlLights[khw_b + 4].x, 0.0f);
-        float khw_att = saturate(1.0f / (dot(dlLights[khw_b + 4].yzw,
+        const float khw_d = max(khw_dist * dlCtl.w - KhDlRec(khw_b + 4).x, 0.0f);
+        float khw_att = saturate(1.0f / (dot(KhDlRec(khw_b + 4).yzw,
                                              float3(1.0f, khw_d, khw_d * khw_d)) + 1e-4f));
-        khw_att *= 1.0f - saturate((khw_dist * dlCtl.w - dlLights[khw_b + 5].x)
-                                   * dlLights[khw_b + 5].y);
+        khw_att *= 1.0f - saturate((khw_dist * dlCtl.w - KhDlRec(khw_b + 5).x)
+                                   * KhDlRec(khw_b + 5).y);
         if (khw_i >= khw_pointN) {
-            const float khw_c = saturate((dot(-dlLights[khw_b + 1].xyz, khw_L)
-                                          - dlLights[khw_b + 1].w) * dlLights[khw_b + 2].w);
-            khw_att *= (khw_c > 0.0f) ? pow(khw_c, dlLights[khw_b + 3].w) : 0.0f;
+            const float khw_c = saturate((dot(-KhDlRec(khw_b + 1).xyz, khw_L)
+                                          - KhDlRec(khw_b + 1).w) * KhDlRec(khw_b + 2).w);
+            khw_att *= (khw_c > 0.0f) ? pow(khw_c, KhDlRec(khw_b + 3).w) : 0.0f;
         }
         if (khw_att <= 0.0f) continue;
 
         const float  khw_ndl = lerp(1.0f, max(dot(khw_n, khw_L), 0.0f), khw_nrel);
-        const float3 khw_diff = dlGlobal.xyz * dlLights[khw_b + 2].xyz * khw_ndl;
-        const float3 khw_amb = dlLights[khw_b + 3].xyz;
+        const float3 khw_diff = dlGlobal.xyz * KhDlRec(khw_b + 2).xyz * khw_ndl;
+        const float3 khw_amb = KhDlRec(khw_b + 3).xyz;
         khw_dyn += (khw_diff + khw_amb) * khw_att;
 
         // The slot lane, written by kh_dls_fill_cb's twin in the C++. 0 = this
         // light casts no shadow (the zeroed default).
-        const int khw_slot = (int)dlLights[khw_b + 5].z - 1;
+        const int khw_slot = (int)KhDlRec(khw_b + 5).z - 1;
         if (khw_slot < 0) continue;
         const float khw_sh = KhDlsShadow(khw_slot, khw_wpos, khw_n, khw_zunc, khw_fwp);
 
@@ -2070,7 +2240,7 @@ struct VSOut { float4 pos : SV_Position; float3 wpos : TEXCOORD0; float3 nrm : T
     float4 icol : TEXCOORD5;
     // The per-object lanes (KhObjLoad at every mesh PS entry). Flat per draw or
     // per instance.
-    nointerpolation float4 iobj0 : TEXCOORD7;   // amb, dif, 0, cut.
+    nointerpolation float4 iobj0 : TEXCOORD7;   // amb, dif, creation (KH_USER_LANES), cut.
     nointerpolation float4 iobj1 : TEXCOORD8;   // 0, dither, 0, 0.
 #if KH_TEXTURED
     float2 uv : TEXCOORD2; float4 tanw : TEXCOORD3;   // World tangent + handedness.

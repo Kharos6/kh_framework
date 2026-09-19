@@ -291,14 +291,15 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
             // whole translucent object on normal blend (the mirror below
             // replaces its count where armed). KH_VOL_WITNESS: the witness
             // needs this fragment in the footprint the copy was counted
-            // against, which holds only depth-participating opaque casters -
-            // so a translucent texel, a whole object below full alpha on any
-            // blend mode (the seam skips those) and a depth-Off overlay
-            // (shadowMeta2.z) have none and take the count as it stands. TWIN:
-            // PSMain and PSComposite.
+            // against, which holds only depth-participating opaque casters on
+            // normal blend - so a translucent texel, a whole object below full
+            // alpha on any blend mode, an object on a see-through blend mode
+            // at any alpha (KH_FOOT_BLEND: the seam skips all of those) and a
+            // depth-Off overlay (shadowMeta2.z) have none and take the count
+            // as it stands. TWIN: PSMain and PSComposite.
             const bool khStenTl = (matParams0.y >= 1.5f && matParams0.y < 2.5f) ||
                                   (i.icol.a < 0.999f && bm == 0);
-            const bool khStenNoWit = khStenTl || i.icol.a < 0.999f || shadowMeta2.z >= 0.5f;
+            const bool khStenNoWit = khStenTl || i.icol.a < 0.999f || bm != 0 || shadowMeta2.z >= 0.5f;
             float khStenU = KhStenUnit(i.pos.xy, khStenNoWit ? -1.0f : i.pos.w);
             // On PSMain fxMeta.x is the effect id, so the fade is not applied
             // there.
@@ -318,11 +319,12 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
                 khStenU = lerp(khMirF, khStenU, khStenF);
             }
 #endif
-            // The volume term starts from a witness compare - the engine depth
-            // at this pixel must be this fragment's (KH_VOL_WITNESS) - and a
-            // translucent texel wrote no depth, so it has none and answers with
-            // the background's stencil; where the mirror is armed it reads the
-            // mirror instead. TWIN: PSMain and PSComposite.
+            // The volume term starts from a witness compare - the distance our
+            // surface stood at in the copy's frame (the KH_VOL_FOOT mask, else
+            // the copy's depth decoded) must be this fragment's (KH_VOL_WITNESS)
+            // - and a translucent texel is not in the footprint, so it has none
+            // and answers with the background's stencil; where the mirror is
+            // armed it reads the mirror instead. TWIN: PSMain and PSComposite.
             if (mirMeta.x >= 0.5f && mirMeta.x < 1.5f && khStenTl) {
                 khStenU = KhMirUnit(i.pos.xy, mirMeta.y, mirMeta.z);
             }

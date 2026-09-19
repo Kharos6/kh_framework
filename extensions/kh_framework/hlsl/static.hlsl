@@ -706,6 +706,58 @@ KhDlswFogOut PSDlsWorldFog(VSOut i)
     }
     return khwf_o;
 }
+// PSMaskCast's near_ok: is the point within some caster's shadow reach (the
+// occupancy grid's cell, else KhCastReach over the CB or t2 list, else the
+// combined bounds)? khno_ty widens every caster's y extent (and the grid's
+// y span) - 0 is the exact test; KH_CAST_PRE passes the snap band so the
+// answer holds for every point within it above or below khno_p. lr is
+// taken from the unwidened extents, as before.
+bool KhCastNearOk(float3 khno_p, float khno_ty)
+{
+    bool near_ok = false;
+    float stretch = 2.0f + 3.0f / max(abs(castView[2].y), 0.15f);
+
+    if (localityMeta.y >= 0.5f) {
+        int lc = (int)localityMeta.x;
+
+        if (castMat[0].w > 0.0f) {
+            // Constant time in the caster count. The bound comes from the
+            // CB, not a literal, so it cannot drift from the C++ that sizes
+            // the texture; zero (an unwritten lane) reads as 256.
+            int khoN = (int)localityMeta.w;
+            if (khoN <= 0) khoN = 256;
+            int2 khoC = (int2)floor((khno_p.xz - float2(castMat[1].w, castMat[2].w)) * castMat[0].w);
+            if (khoC.x >= 0 && khoC.y >= 0 && khoC.x < khoN && khoC.y < khoN) {
+                float2 khoY = khrCastOcc.Load(int3(khoC, 0));
+                if (khno_p.y >= khoY.x - khno_ty && khno_p.y <= khoY.y + khno_ty) near_ok = true;
+            }
+        } else {
+            [loop] for (int li = 0; li < lc && !near_ok; ++li) {
+                float3 lce = khrLocalityExt[li * 2].xyz;
+                float3 lhe = khrLocalityExt[li * 2 + 1].xyz;
+                float lr = min(length(lhe) * stretch, max(600.0f, length(lhe) * 24.0f));
+                if (KhCastReach(khno_p, lce, float3(lhe.x, lhe.y + khno_ty, lhe.z), lr)) near_ok = true;
+            }
+        }
+    } else if (localityMeta.x >= 0.5f && localityMeta.x <= 16.5f) {
+        int lc = (int)localityMeta.x;
+
+        [loop] for (int li = 0; li < lc && !near_ok; ++li) {
+            float3 lce = locality[li * 2].xyz;
+            float3 lhe = locality[li * 2 + 1].xyz;
+            float lr = min(length(lhe) * stretch, max(600.0f, length(lhe) * 24.0f));
+            if (KhCastReach(khno_p, lce, float3(lhe.x, lhe.y + khno_ty, lhe.z), lr)) near_ok = true;   // Twin of the reach drop.
+        }
+    } else {
+        float castR = length(sizeAxes.xyz) * 0.5f;
+        float reach = min(castR * stretch, max(600.0f, castR * 24.0f));
+        float3 khno_h = sizeAxes.xyz * 0.5f;
+        // The combined-bounds fallback sweeps too.
+        near_ok = KhCastReach(khno_p, centerSize.xyz, float3(khno_h.x, khno_h.y + khno_ty, khno_h.z), reach);
+    }
+    return near_ok;
+}
+
 // KH_CAST_SNAP_FACING (PSMaskCast): R16_FLOAT's relative ulp (2^-10), the
 // fallback when the fire's lane is unset; the plane fit's radius
 // (px); the resolution bar in ulps along the ray; the up-facing bar (|n.y|:
@@ -758,7 +810,18 @@ static const float KH_CAST_SNAP_UP = 0.5f;
     // such ulp (noise it could be); an up-facing plane, or none fitted, keeps
     // the full band exactly as before. fogBelow.z = the ulp, relative (the
     // fire's fill; 0 reads as R16_FLOAT's).
-    if (thmParams.w >= 0.5f) {
+    // KH_CAST_PRE: on the sun-map path the reach test runs first, here, at
+    // the unsnapped point with every y extent widened by the band the snap
+    // can move it (thmMeta.z, the snap's own guard). A refused pixel can
+    // reach no hit whatever the snap does - the exact test below is a
+    // subset of this one for every point within the band, and every later
+    // term only lowers hit - so the snap and the exact test run for the
+    // survivors alone; the verdict is the same at every pixel. The slab path
+    // keeps its snap (it reads pw whole).
+    const bool khcOnMap = sunMeta.x >= 0.5f;
+    const float khcPreTol = (thmParams.w >= 0.5f) ? thmMeta.z : 0.0f;
+    const bool khcPre = !khcOnMap || (khcNearOk && KhCastNearOk(pw, khcPreTol));
+    if (thmParams.w >= 0.5f && khcPre) {
         float khtsH = KhThmHeight(pw.xz);
         if (khtsH > -1.0e5f && abs(pw.y - khtsH) < thmMeta.z) {
             float khtsTol = thmMeta.z;
@@ -780,47 +843,10 @@ static const float KH_CAST_SNAP_UP = 0.5f;
     }
 
     float hit = 0.0f;
-    if (sunMeta.x >= 0.5f) {
-        bool near_ok = false;
-        float stretch = 2.0f + 3.0f / max(abs(castView[2].y), 0.15f);
-
-        if (localityMeta.y >= 0.5f) {
-            int lc = (int)localityMeta.x;
-
-            if (castMat[0].w > 0.0f) {
-                // Constant time in the caster count. The bound comes from the
-                // CB, not a literal, so it cannot drift from the C++ that sizes
-                // the texture; zero (an unwritten lane) reads as 256.
-                int khoN = (int)localityMeta.w;
-                if (khoN <= 0) khoN = 256;
-                int2 khoC = (int2)floor((pw.xz - float2(castMat[1].w, castMat[2].w)) * castMat[0].w);
-                if (khoC.x >= 0 && khoC.y >= 0 && khoC.x < khoN && khoC.y < khoN) {
-                    float2 khoY = khrCastOcc.Load(int3(khoC, 0));
-                    if (pw.y >= khoY.x && pw.y <= khoY.y) near_ok = true;
-                }
-            } else {
-                [loop] for (int li = 0; li < lc && !near_ok; ++li) {
-                    float3 lce = khrLocalityExt[li * 2].xyz;
-                    float3 lhe = khrLocalityExt[li * 2 + 1].xyz;
-                    float lr = min(length(lhe) * stretch, max(600.0f, length(lhe) * 24.0f));
-                    if (KhCastReach(pw, lce, lhe, lr)) near_ok = true;
-                }
-            }
-        } else if (localityMeta.x >= 0.5f && localityMeta.x <= 16.5f) {
-            int lc = (int)localityMeta.x;
-
-            [loop] for (int li = 0; li < lc && !near_ok; ++li) {
-                float3 lce = locality[li * 2].xyz;
-                float3 lhe = locality[li * 2 + 1].xyz;
-                float lr = min(length(lhe) * stretch, max(600.0f, length(lhe) * 24.0f));
-                if (KhCastReach(pw, lce, lhe, lr)) near_ok = true;   // Twin of the reach drop.
-            }
-        } else {
-            float castR = length(sizeAxes.xyz) * 0.5f;
-            float reach = min(castR * stretch, max(600.0f, castR * 24.0f));
-            // The combined-bounds fallback sweeps too.
-            near_ok = KhCastReach(pw, centerSize.xyz, sizeAxes.xyz * 0.5f, reach);
-        }
+    if (khcOnMap) {
+        // KH_CAST_PRE: the exact test, survivors only (near_ok is false
+        // wherever the pre-test refused - see the snap).
+        bool near_ok = khcPre ? KhCastNearOk(pw, 0.0f) : false;
 
         // zl floor 1.2 m: if the captured depth texture transiently holds
         // aliased non-depth content (normalized values <= 1), every pixel
@@ -1014,20 +1040,22 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
             // whole translucent object on normal blend (the mirror below
             // replaces its count where armed). KH_VOL_WITNESS: the witness
             // needs this fragment in the footprint the copy was counted
-            // against, which holds only depth-participating opaque casters -
-            // so a translucent texel, a whole object below full alpha on any
-            // blend mode (the seam skips those) and a depth-Off overlay
-            // (shadowMeta2.z) have none and take the count as it stands. TWIN:
-            // PSMain and PSComposite.
+            // against, which holds only depth-participating opaque casters on
+            // normal blend - so a translucent texel, a whole object below full
+            // alpha on any blend mode, an object on a see-through blend mode
+            // at any alpha (KH_FOOT_BLEND: the seam skips all of those) and a
+            // depth-Off overlay (shadowMeta2.z) have none and take the count
+            // as it stands. TWIN: PSMain and PSComposite.
             const bool khStenTl = (matParams0.y >= 1.5f && matParams0.y < 2.5f) ||
                                   (i.icol.a < 0.999f && bm == 0);
-            const bool khStenNoWit = khStenTl || i.icol.a < 0.999f || shadowMeta2.z >= 0.5f;
+            const bool khStenNoWit = khStenTl || i.icol.a < 0.999f || bm != 0 || shadowMeta2.z >= 0.5f;
             float khStenU = KhStenUnit(i.pos.xy, khStenNoWit ? -1.0f : i.pos.w);
-            // The volume term starts from a witness compare - the engine depth
-            // at this pixel must be this fragment's (KH_VOL_WITNESS) - and a
-            // translucent texel wrote no depth, so it has none and answers with
-            // the background's stencil; where the mirror is armed it reads the
-            // mirror instead. TWIN: PSMain and PSComposite.
+            // The volume term starts from a witness compare - the distance our
+            // surface stood at in the copy's frame (the KH_VOL_FOOT mask, else
+            // the copy's depth decoded) must be this fragment's (KH_VOL_WITNESS)
+            // - and a translucent texel is not in the footprint, so it has none
+            // and answers with the background's stencil; where the mirror is
+            // armed it reads the mirror instead. TWIN: PSMain and PSComposite.
             if (mirMeta.x >= 0.5f && mirMeta.x < 1.5f && khStenTl) {
                 khStenU = KhMirUnit(i.pos.xy, mirMeta.y, mirMeta.z);
             }

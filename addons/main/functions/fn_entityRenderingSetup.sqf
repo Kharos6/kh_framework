@@ -30,7 +30,7 @@ if (_entity isKindOf "Man") then {
 
                     private _properties = ((configProperties [
                         _x, 
-                        "!((toLowerANSI (configName _x)) in ['model', 'bindskeleton', 'followrotation']);",
+                        "!((toLowerANSI (configName _x)) in ['model', 'bindskeleton', 'followrotation', 'mesh']);",
                         true
                     ]) apply {
                         [_renderHandler, configName _x, ["", _x, nil] call KH_fnc_getConfigValue];
@@ -127,7 +127,7 @@ if (_entity isKindOf "Man") then {
 
                 private _properties = ((configProperties [
                     _x, 
-                    "!((toLowerANSI (configName _x)) in ['model', 'bindskeleton', 'followrotation']);",
+                    "!((toLowerANSI (configName _x)) in ['model', 'bindskeleton', 'followrotation', 'mesh']);",
                     true
                 ]) apply {
                     [_renderHandler, configName _x, ["", _x, nil] call KH_fnc_getConfigValue];
@@ -148,11 +148,16 @@ if (_entity isKindOf "Man") then {
 private _currentHandlers = [];
 
 {
-    private _renderHandler = addRender3D [[_entity, (getNumber (_x >> "bindSkeleton")) isEqualTo 1], (getNumber (_x >> "followRotation")) isEqualTo 1, getText (_x >> "model")];
+    private _renderHandler = if (!is3DEN && ((getNumber (_x >> "static")) isEqualTo 1)) then {
+        addRender3D [getPosWorldVisual _entity, (getNumber (_x >> "followRotation")) isEqualTo 1, getText (_x >> "model")];
+    }
+    else {
+        addRender3D [[_entity, (getNumber (_x >> "bindSkeleton")) isEqualTo 1], (getNumber (_x >> "followRotation")) isEqualTo 1, getText (_x >> "model")];
+    };
     
     private _properties = ((configProperties [
         _x, 
-        "!((toLowerANSI (configName _x)) in ['model', 'bindskeleton', 'followrotation']);",
+        "!((toLowerANSI (configName _x)) in ['model', 'bindskeleton', 'followrotation', 'mesh']);",
         true
     ]) apply {
         [_renderHandler, configName _x, ["", _x, nil] call KH_fnc_getConfigValue];

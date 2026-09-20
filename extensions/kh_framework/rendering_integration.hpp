@@ -11,6 +11,410 @@
 // .hlsl RCDATA resources (kh_shaders.rc).
 namespace RenderIntegration {
 
+// ===========================================================================
+// SQF COMMAND REFERENCE - the script surface of this header, in full. The
+// description strings registered in sqf_integration.hpp are one or two
+// sentences each; everything a command accepts is written HERE, and an edit
+// to a command's parser (sqf_integration.hpp: add_render3d_sqf,
+// kh_apply_render3d_prop, update_post_fx_sqf, add_physics_affector_sqf, ...)
+// or to a property's meaning is an edit to its entry below. User .hlsl files
+// have their own reference: the USER SHADER CONTRACT in cb.hlsl.
+// ===========================================================================
+//
+// ---- STRING = addRender3D ARRAY --------------------------------------------
+// [[x,y,zASL], rotation, mesh]. rotation = nil | yaw | [pitch, yaw, roll];
+// mesh = builtin name | registry index | .fbx path (nil = box).
+//
+// Either the position or the rotation slot may instead be a game OBJECT, and
+// the mesh then follows that object's transform every frame (the two are
+// independent and may name different objects).
+//
+// Position may also be [object, memoryPoint] to follow a model memory point
+// (bone); rotation is then REQUIRED and must be true (follow the bone's
+// rotation) or false.
+//
+// Position [object, true] binds the mesh's skeleton to the object: the
+// model's origin sits on the object's, every bone whose name matches one of
+// the object's memory points (case-insensitive) follows that point, a bone
+// with no match follows its parent bone, and a bone with neither stays with
+// the object; the rest pose must put the bones on the memory points.
+// Rotation is then true (the default: the model turns with the object) or
+// false (it keeps its rotation while the bones keep their positions relative
+// to the object). The mesh is drawn at its authored scale, its bounds follow
+// the pose, and lodLock is forced. With clothSimulation on it is the cloth's
+// to draw: the bones carry what kh_cloth_pin holds (a partly pinned vertex
+// is pulled toward where its bones put it) and leave what kh_cloth_sim frees
+// to the simulation.
+//
+// [object, false] attaches to the object as a plain OBJECT does.
+//
+// The mesh is removed automatically if either the object or its memory-point
+// proxy is deleted.
+//
+// Spawns lit, mode 1, size 1, white, back-face culled; set everything else
+// with updateRender3D.
+//
+// Every true/false here also takes 1/0, except the rotation slot beside a
+// plain object, where a bare number is a yaw.
+//
+// Returns the khr_ handle, or '' after reporting the fault
+//
+// ---- BOOL = updateRender3D ARRAY -------------------------------------------
+// [handle, property, value] or [[handle, property, value], ...]. Update a
+// persistent 3D mesh object: position | attachPosition | size | rotation |
+// attachRotation | mesh | material | mode | sceneRead | effect | params |
+// lit | twoSided | lodLock | inFront | casterOnly | clothSimulation |
+// physicsCollider | chainSimulation | simulationLod | color | visible |
+// blend | band | duration.
+//
+// inFront true draws the mesh in the game's first-person view-model layer -
+// the depth slice the weapon and hands occupy - so it stands in front of the
+// whole world and still sorts correctly against the weapon and hands
+// themselves; it casts and receives shadows as any mesh does, always draws
+// its full-detail level, and is not drawn in a view with no view model
+// (third person). Effect meshes ignore it.
+//
+// clothSimulation and physicsCollider each take true, false, [] or an array
+// of [key, value] pairs. clothSimulation simulates the mesh: its geometry
+// must be painted with the vertex groups or colour sets kh_cloth_sim (where
+// it moves) and kh_cloth_pin (where it does not) - a gradient between them
+// blends smoothly from rigid to free and is centred, so painting a vertex
+// halfway lets it hang about halfway - and an unpainted mesh simply does not
+// simulate. Keys: stiffness | bend | damping | drag | mass | gravity |
+// maxStretch | thickness | friction | maxSpeed | teleport | range | sleep |
+// shell | wind | buoyancy | waterDrag | selfCollision | selfThickness |
+// selfFriction | iterations | substeps.
+//
+// Cloth reacts to the world wind automatically: wind scales it per object (0
+// ignores wind) and it acts through each face's own facing, so cloth edge-on
+// to the wind is barely pushed. It also reacts to water - sea level is 0 ASL
+// and anything below it is submerged - where buoyancy sets the upward
+// acceleration as a multiple of gravity (0 sinks as if in air, 1 is neutral,
+// above 1 rises), waterDrag replaces drag while under, and wind stops
+// acting.
+//
+// shell is for THICK cloth: a solidified mesh is two separate surfaces that
+// share no geometry except the rim, so without it the front and back drift
+// apart and can turn inside out. Set shell to a little more than the mesh's
+// own thickness in metres to bind opposing surfaces together; leave it 0 for
+// single-sided cloth.
+//
+// selfCollision (default false) stops the cloth passing through itself: with
+// it true, no part of the cloth comes nearer to another part of the same
+// cloth than selfThickness metres (default 0.01), from the side it came
+// from, and the layers grip each other with selfFriction (0-1, default 0.3;
+// the plain friction key is only for colliders). Layers the mesh was
+// modelled closer than selfThickness keep their modelled gap, so a folded or
+// thick mesh is not blown apart. It prevents crossings; it does not pull a
+// tangle out, but it does not hold one either: where the cloth already
+// passes through itself it is left free to come apart. Thin, fast or
+// coarsely tessellated cloth can still slip through in places - raise
+// selfThickness - and a collider always wins over the cloth's own layers.
+// When the object snaps rather than moves (a jump or turn under the teleport
+// distance that no cloth could follow), self-collision stands down for one
+// second so the cloth can fall open, then resumes. Enabling it forces
+// lodLock, because the decimated levels have their own vertices and cannot
+// be simulated.
+//
+// physicsCollider makes the mesh push cloth around, using its real
+// triangles: keys margin | friction | inside (inside contains cloth instead
+// of excluding it) | convex. A collider must be a closed, outward-facing
+// mesh - inside and outside are decided from its winding.
+//
+// convex (default false) is the cheap path for a collider built from CONVEX
+// pieces - a body made of a capsule per bone, say, all in one mesh, each
+// piece its own closed shell that shares no vertex with another: cloth then
+// takes each piece's distance as the largest of its faces' plane distances -
+// exact on its faces, and at its edges and corners the standoff keeps the
+// piece's sharp shape rather than rounding it - which costs about one plane
+// test per particle instead of a search of the triangles, so many such
+// colliders near many cloths stay cheap. A piece that is not convex is not
+// detected and collides as those planes say (cloth pushed to the piece's
+// hull). Margin, friction, inside and the skeletal binding all work as
+// before; a skinned convex collider refits only its planes per pose. Chains
+// take it too.
+//
+// A skeletal binding (position [object, true]) collides as its skinned pose,
+// rebuilt whenever the pose changes, so a closed low-poly body mesh bound to
+// a character lets cloth collide with the character as it moves; its
+// triangles are refitted into the collider on every pose change, so keep it
+// coarse. Its limbs sweep across each frame in the cloth's substeps and
+// carry cloth by friction as they swing, though a limb moving more than half
+// its thickness in one substep can still pass through. A hidden collider
+// (visible false) is not drawn and still collides, which is how an invisible
+// collision body is made.
+//
+// Gravity, the air (still, or moving with the world wind), water and physics
+// affectors (addPhysicsAffector) are the external forces. Cloth lands on the
+// terrain, with its friction key: the ground itself, not what stands on it -
+// buildings, floors, bridges and rocks need colliders, and cloth on an upper
+// floor falls through it to the ground below.
+//
+// chainSimulation simulates the mesh's own skeleton as a chain of rigid
+// bodies - a rope, a chain, an ammo belt: every bone from the start bone
+// down swings, joined to its parent at its head, the bones drive the mesh,
+// and what collides is the mesh's geometry, against the terrain and every
+// physicsCollider. It takes true, false, [] or [key, value] pairs, and needs
+// a model imported with a skeleton whose bones skin its vertices.
+//
+// Keys: start (a bone name; nil = the skeleton's root), which stays pinned
+// where the object puts it, or under a skeletal binding (position [object,
+// true]) where its memory point does | end (a bone name; nil = the chain's
+// tip when it does not branch) | startPoint and endPoint ("head" or "tail",
+// nil = the default), which point of each of those two bones the chain uses.
+// A bone's head is its own origin and its tail is its far end - the next
+// bone's head, or on a tip bone the reach of its own geometry. startPoint is
+// where the chain hangs off the start bone (default "tail"; "head" hangs it
+// one bone higher, so the mesh below is that much shorter), and endPoint is
+// the point endPosition places and endRotation turns (default "head"; "tail"
+// holds the very end of the last bone, which is what a rope's tip usually
+// wants) | endPosition and endRotation, the end bone's hold, set up like the
+// mesh's own position and rotation: nil leaves it free, true follows the end
+// bone's memory point on a bound skeleton (else its place in the mesh),
+// false holds it where it stood when the chain started, [x, y, zASL] or yaw
+// / [pitch, yaw, roll] hold it there in the world, an object follows that
+// object, and endPosition [object, memoryPoint] follows a memory point -
+// which links two objects with one chain; endRotation true then follows that
+// memory point's (or that object's) rotation. endPosition places the end
+// bone's point - its head unless endPoint says "tail" - and an end held away
+// from where it stands is brought there at 2 m/s rather than snapped |
+// stiffness (0-1, 1 = the joints hold exactly) | bend and twist (0-1: 0
+// limp, 1 rigid) | swingLimit and twistLimit (degrees, 180 = none - a chain
+// does not collide with itself, and limits are what keep its links from
+// folding through each other) | damping | drag (against the air, which moves
+// with the world wind times wind) | mass (kg, the whole chain) | gravity |
+// thickness | friction | maxSpeed | teleport | range | sleep | wind |
+// buoyancy | waterDrag | iterations | substeps. A simulating chain is drawn
+// at its authored size (size is kept for when it stops), forces lodLock,
+// cannot also be clothSimulation, and does not itself push cloth. A chain
+// that cannot simulate (no skeleton, or a named bone missing) is named once
+// in the RPT.
+//
+// simulationLod is the level of detail of the cloth and chain solvers, ON BY
+// DEFAULT: an object that is both far from the camera AND small on screen
+// runs a share of its own iterations and substeps (a small cloth close by,
+// or a large one seen from afar, runs them whole; nothing is ever frozen or
+// skipped, and self-collision, colliders and the sleep rule are untouched).
+// It takes true (on, keeping its dials), false or [] (off - the object's
+// dials run whole wherever it is), or [key, value] pairs (on, setting those
+// keys): floor (0.05-1, default 0.25) is the least share it runs at, so the
+// default is a quarter of the iterations and half of the substeps at the far
+// end (each never under 1; 1 = off); fullDistance (m, default 25) - nearer
+// than this the solver runs whole; minDistance (m, default 100) - beyond
+// this, and below minScreenShare, it runs at the floor; fullScreenShare
+// (default 0.06) - an object whose bounding sphere spans more of the screen
+// height than this runs whole, however far; minScreenShare (default 0.015) -
+// below this, and beyond minDistance, it runs at the floor. The defaults are
+// fitted to a 1 x 2 m cape at the default field of view: whole out to 25 m,
+// at the floor from 100 m, and the two shares are what such a cape spans at
+// those distances, so a smaller cloth is reduced sooner and a larger one
+// later. Between the two distances and the two shares it ramps smoothly,
+// taking the better of the distance and the screen verdicts; iterations give
+// first, substeps only below half share. fullDistance must be under
+// minDistance and minScreenShare under fullScreenShare. getRenderStats
+// reports simLodShare, the share of the solver work run last frame.
+//
+// position and rotation each take a game OBJECT to follow it every frame, or
+// any ordinary value to detach and take that value. position also takes
+// [object, memoryPoint] to follow a model memory point (bone); rotation then
+// takes true/false to start or stop following that bone's rotation, which
+// costs no engine call and leaves the attachment alone. position [object,
+// true] is the skeletal binding (see addRender3D) - rotation's true/false
+// then says whether the model turns with the object, and size is ignored
+// until the binding ends; [object, false] is a plain attach to the object.
+//
+// attachPosition [x, y, z] and attachRotation nil|yaw|[pitch, yaw, roll]
+// offset the mesh WITHIN the frame it is attached to, in the followed
+// object's own axes (x right, y forward, z up) rather than world axes - so a
+// mesh can sit off the memory point or turned away from it. Each affects
+// only its own lane and only while that lane follows an object; both are
+// remembered across a detach, and nil clears.
+//
+// material params: basecolor | roughness | metalness | emissiveintensity |
+// normalstrength | cutoff | alphamode opaque|cutout|blend (blend: texels
+// with alpha >= 0.9 draw solid with depth, the rest as a post-scene
+// translucent part - hardware alpha, no depth write, back-to-front; casting
+// is per object, never per material).
+//
+// A .hlsl material (the shader given as a .hlsl path; the USER SHADER
+// CONTRACT in cb.hlsl is its full reference) takes every map, routing input
+// and param of both builtin shaders: maps diffuse | normal | orm or as |
+// emissive | specular or smdi | speccolor - orm and as are ONE slot, as are
+// specular and smdi, so give one name of each pair, and the name says what
+// the map holds (as and smdi as described for "arma" below, smdi read as
+// data rather than colour) - routing inputs occlusion | roughness | metallic
+// | alpha | gloss | specular, and the params above plus glossiness |
+// specularcolor | fresnel. It also takes the texture slots user0 .. user5,
+// which only its own code reads (KhUserTex): their third element is "srgb"
+// for colour data or "linear" (the default) instead of a routing array. When
+// the .hlsl defines a vertex stage (KhUserVertex, which deforms the mesh on
+// the GPU) it takes two more params: vertexBound (metres, default 0) is the
+// farthest the stage moves any vertex - culling, the level of detail and the
+// shadow fits pad the object by it, so a value too small lets the mesh
+// vanish or its shadow clip at the screen edge, and one too large costs only
+// a looser fit - and vertexStatic (0 or 1, default 0) says the result
+// depends on no clock and no camera, so it is worked out again only when the
+// object moves, turns, resizes or changes colour or material; an object with
+// a vertex stage is drawn on its own, outside the instanced batches.
+//
+// The shader "arma" is Arma's specular-gloss workflow on the same lighting:
+// maps diffuse | normal | as (ambient occlusion in green) | smdi (green =
+// specular, blue = gloss, black matte to white shiny) | speccolor (tints the
+// specular) | emissive, routing inputs occlusion | gloss | specular | alpha,
+// and params basecolor | glossiness (without an smdi map, default 0.2) |
+// specularcolor [r, g, b] | fresnel [N, K] or an rvmat string with
+// fresnel(N,K) in it (refractive index and absorption, default 1.5, 0) |
+// emissiveintensity | normalstrength | cutoff | alphamode.
+//
+// Every true/false value also takes 1/0, except rotation and chain
+// endRotation, where a bare number is a yaw.
+//
+// Faults are reported; the batch form returns true only if every triple
+// applied
+//
+// ---- STRING = addPostFX ARRAY ----------------------------------------------
+// [effect, params?, [r,g,b,a]?, band?, blend?, affectUI?, duration?]. Create
+// a persistent fullscreen post-processing pass. affectUI takes 'scene' |
+// 'UI' | 'both' | true/false | 1/0.
+//
+// Returns the khr_ handle, or '' after reporting the fault
+//
+// ---- STRING = addLocalPostFX ARRAY -----------------------------------------
+// [[x,y,zASL], radius, falloff, effect, params?, [r,g,b,a]?, shape?, blend?,
+// duration?, inverse?]. Create a persistent post-processing effect confined
+// to a world-space volume (inverse = true or 1: everywhere except it).
+//
+// Returns the khr_ handle, or '' after reporting the fault
+//
+// ---- BOOL = updatePostFX ARRAY ---------------------------------------------
+// [handle, property, value] or [[handle, property, value], ...]. Update a
+// fullscreen / local post-processing pass: position | effect | params | ui |
+// uiSpill | radius | falloff | localSphere | shape | inverse | color |
+// visible | blend | band | duration.
+//
+// Every true/false value also takes 1/0.
+//
+// Faults are reported; the batch form returns true only if every triple
+// applied
+//
+// ---- STRING = addPhysicsAffector ARRAY -------------------------------------
+// [type, [lifetime, position, vectorDir, scale, ...]]. Create a physics
+// affector that pushes simulated cloth (clothSimulation). type = wind |
+// turbulence | vortex | force | radial | drag. The second array is lifetime,
+// position, then vectorDir ONLY for the types that have a direction (wind,
+// vortex, force), then scale, then the type's own values with falloff last;
+// any slot but position may be nil for its default, and trailing slots may
+// be left off.
+//
+// lifetime = seconds or [fadeIn, hold, fadeOut] (nil, [] or 0 = permanent);
+// an affector deletes itself when its lifetime ends.
+//
+// position = [x, y, zASL].
+//
+// vectorDir = [x, y, z] in world axes (default north; vortex default up).
+//
+// scale = a radius in metres or [x, y, z] half-extents along the affector's
+// right, forward (vectorDir) and up - world east, north and up for a type
+// with no direction - and nil or 0 acts everywhere.
+//
+// falloff = the outer fraction (0-1) of that region over which the effect
+// fades to nothing.
+//
+// wind [lifetime, position, vectorDir, scale, speed 10, falloff 0.25]: air
+// blowing along vectorDir at speed m/s.
+//
+// turbulence [lifetime, position, scale, strength 5, eddySize 2, rate 0.5,
+// falloff 0.25]: swirling gusts - strength is the typical (RMS) air speed
+// (m/s), eddySize the size of a swirl (m), rate how fast they change (per
+// second).
+//
+// vortex [lifetime, position, vectorDir, scale, swirl 10, inflow 0, updraft
+// 0, core 0, falloff 0.25]: air turning about the axis vectorDir,
+// counter-clockwise seen from its tip for a positive swirl, which is the
+// speed (m/s) at the core radius - still on the axis, falling away beyond
+// the core; inflow draws toward the axis and updraft lifts along it (m/s,
+// negative reverses); core = the core radius in metres (0 = a quarter of the
+// scale across the axis, or 1 m when unbounded).
+//
+// force [lifetime, position, vectorDir, scale, strength 9.80665, falloff
+// 0.25]: acceleration along vectorDir (m/s^2; 9.80665 is one g).
+//
+// radial [lifetime, position, scale, strength 20, falloff 1]: acceleration
+// away from position (m/s^2; negative pulls toward it), fading to nothing
+// within 0.1 m of it.
+//
+// drag [lifetime, position, scale, strength 0.5, falloff 0.25]: thicker air
+// - the fraction of the cloth's velocity removed per 1/120 s (0-1), on top
+// of the cloth's own drag.
+//
+// wind, turbulence and vortex move the AIR: they add to the world wind and
+// push cloth exactly as it does - through each face's own facing, so cloth
+// edge-on to them is barely pushed, less for heavier cloth, not under water,
+// and the cloth's wind key does not scale them. force and radial push every
+// simulated point alike, like gravity. A cloth takes every affector in
+// reach. physicsAffectors in getRenderStats counts the live ones.
+//
+// Update with updatePhysicsAffector; delete with removeRenderHandler.
+//
+// Returns the khpa_ handle, or '' after reporting the fault
+//
+// ---- BOOL = updatePhysicsAffector ARRAY ------------------------------------
+// [handle, property, value] or [[handle, property, value], ...]. Update a
+// physics affector (addPhysicsAffector): lifetime (counts from now) |
+// position | rotation (vectorDir; wind, vortex and force only) | scale |
+// params (the whole parameter array as addPhysicsAffector takes it; the
+// lifetime counts from now) | any of the type's own values by name - wind:
+// speed | falloff; turbulence: strength | eddySize | rate | falloff; vortex:
+// swirl | inflow | updraft | core | falloff; force, radial and drag:
+// strength | falloff. nil sets a value back to its default. The type cannot
+// change - remove the affector and add another.
+//
+// Faults are reported; the batch form returns true only if every triple
+// applied
+//
+// ---- BOOL = removeRenderHandler STRING -------------------------------------
+// Remove a retained render object (mesh or post-processing pass) by its khr_
+// handle, or a physics affector by its khpa_ handle. Returns true when
+// something was removed; '' and a handle nothing owns do nothing and return
+// false without a report (removeAllRenderHandlers clears everything)
+//
+// ---- BOOL = removeAllRenderHandlers ----------------------------------------
+// Remove every retained render object (mesh and post-processing pass) and
+// every physics affector. Returns true
+//
+// ---- ARRAY = allRenderHandlers ---------------------------------------------
+// Every handle removeRenderHandler accepts right now: the khr_ handles
+// (meshes and passes) in creation order, then the khpa_ handles (live
+// physics affectors) in creation order
+//
+// ---- ARRAY = getRenderStats ------------------------------------------------
+// Render statistics: counters and hook state, the render-thread frame trace
+// and the dynamic-light state. The first call arms collection (statsArmed 0)
+// and reports zero counters; later calls report what accumulated since
+//
+// ---- BOOL = resetRenderStats -----------------------------------------------
+// Zero the render counters and disarm collection until the next
+// getRenderStats. Returns true
+//
+// ---- BOOL = setRenderDebug SCALAR ------------------------------------------
+// Sets the render debug mode. 0 is the only catalogued mode
+// (set_render_debug_sqf refuses any other)
+//
+// ---- BOOL = setRenderAmbientOcclusion ARRAY --------------------------------
+// [strength] or [strength, radius]. Screen-space ambient occlusion on our
+// meshes only
+//
+// ---- BOOL = setSsgiScale SCALAR --------------------------------------------
+// SSGI gather resolution multiplier: 1 full res, 0.5 half (default), 2
+// supersampled
+//
+// ---- BOOL = allowDynamicShadows BOOL ---------------------------------------
+// Whether dynamic lights cast shadows from our meshes
+//
+// ---- BOOL = flushUIRender --------------------------------------------------
+// Renders all UI-affecting passes
+// ===========================================================================
+
 // KH_SESSION_RESET - an object back to what a fresh process holds: destroyed
 // and value-initialised in place (zero, then its members' own initialisers),
 // which is how its static storage began; arrays element by element. Only on an
@@ -973,10 +1377,26 @@ struct KhPhysicsBvh {
     // template's. kh_physics_collide_one takes the convex path on such a pose
     // whatever the view asks.
     bool cvx_only = false;
+    // KH_COL_CLEAR: this pose's identity (unique in the process, never 0 once
+    // built or refitted), the identity of the pose vd sweeps FROM (0 = none:
+    // no vd, or a chain that was cut), and the largest corner sweep |vd| of
+    // the pose, in vp's units - what bounds how far any point of the surface
+    // moves between two sweep fractions, or from the previous pose to this.
+    uint32_t pose_seq = 0u;
+    uint32_t prev_seq = 0u;
+    float    vd_max = 0.0f;
     bool empty() const { return nodes.empty() || tri.empty(); }
     bool cvx_valid() const { return cvx_pstart.size() >= 2u && cvx_pl.size() == cvx_tri.size() * 4u && !cvx_tri.empty(); }
 };
 
+// KH_COL_CLEAR: a pose identity. Any thread (a worker builds and refits); an
+// identity, so never reset (kh_session_globals_reset's keep list).
+static std::atomic<uint32_t> g_physics_pose_serial{ 0 };
+inline uint32_t kh_physics_pose_seq_next() {
+    uint32_t khps_s = g_physics_pose_serial.fetch_add(1u, std::memory_order_relaxed) + 1u;
+    if (khps_s == 0u) khps_s = g_physics_pose_serial.fetch_add(1u, std::memory_order_relaxed) + 1u;
+    return khps_s;
+}
 inline void kh_cloth_v3_sub(const float* a, const float* b, float* o) {
     o[0] = a[0] - b[0]; o[1] = a[1] - b[1]; o[2] = a[2] - b[2];
 }
@@ -1196,6 +1616,7 @@ inline void kh_physics_bvh_build(KhPhysicsBvh& khcb_o, const float* khcb_pos, ui
                                const uint32_t* khcb_ix, uint32_t khcb_ni, KhPhysicsBvhTopo* khcb_topo = nullptr) {
     KH_PROF_SCOPE(KHP_W_BVH_BUILD);   // KH_PROF.
     khcb_o.nodes.clear(); khcb_o.tri.clear(); khcb_o.vp.clear(); khcb_o.vd.clear();
+    khcb_o.pose_seq = kh_physics_pose_seq_next(); khcb_o.prev_seq = 0u; khcb_o.vd_max = 0.0f;   // KH_COL_CLEAR: a new pose, sweeping from none.
     if (khcb_topo) { khcb_topo->src.clear(); khcb_topo->cid.clear(); khcb_topo->eid.clear(); khcb_topo->ncid = khcb_topo->neid = 0u; }
     if (!khcb_pos || !khcb_ix || khcb_ni < 3u) return;
     const uint32_t khcb_nt = khcb_ni / 3u;
@@ -1424,6 +1845,17 @@ inline bool kh_physics_bvh_refit(KhPhysicsBvh& khrf_o, const KhPhysicsBvhTopo& k
         }
     } else {
         khrf_o.vd.clear();
+    }
+    {   // KH_COL_CLEAR: a refitted copy is a new pose; its largest corner sweep. The caller names the pose it sweeps from.
+        khrf_o.pose_seq = kh_physics_pose_seq_next();
+        khrf_o.prev_seq = 0u;
+        float khrf_m2 = 0.0f;
+        for (size_t khrf_q = 0; khrf_q + 3u <= khrf_o.vd.size(); khrf_q += 3u) {
+            const float* d = &khrf_o.vd[khrf_q];
+            const float khrf_d2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+            if (khrf_d2 > khrf_m2) khrf_m2 = khrf_d2;
+        }
+        khrf_o.vd_max = sqrtf(khrf_m2);
     }
     const bool khrf_sw = !khrf_o.vd.empty();
     if (khrf_planes && !khrf_o.nodes.empty()) {   // KH_COL_CONVEX: the root box over both poses, then the planes.
@@ -2140,6 +2572,54 @@ inline bool kh_physics_convex_one(const KhPhysicsColliderView& khcx_c, float khc
     return khcx_hit;
 }
 
+// KH_COL_CLEAR - the collision pass's clearance cache. A cloth hanging from a
+// body sits INSIDE the body's root box and BEYOND reach of its surface, so
+// nearly every free particle, every substep, fell through the reach-limited
+// query to the embedded-particle rescue's - a nearest search over the whole
+// body - to learn that it is outside and nothing is to be done (measured: 61 -
+// 77 % of the near queries went wide, one call in 70 - 150 ended in a
+// contact). A particle found OUTSIDE at distance d of the surface cannot touch
+// or enter the collider until it and the surface have together closed d less
+// the standoff, so the pair remembers d and where the particle stood, and the
+// pass answers 'no contact' without a query while what is left of d clears
+// the standoff:
+//   - the particle's travel is measured in the COLLIDER'S MODEL FRAME (the
+//     BVH's space plus the pose's own box centre), where the collider's rigid
+//     motion - its root's, however fast - is no motion at all, and a rigid
+//     collider's surface stands still exactly;
+//   - a deforming (skinned) collider's surface moves by at most the pose's
+//     largest corner sweep times the sweep fraction covered
+//     (KhPhysicsBvh::vd_max), summed per collider column as its poses chain
+//     (kh_col_clear_advance): within a pose by the fraction, from a pose to
+//     the one that sweeps from it (prev_seq) by what was left of the old and
+//     what is covered of the new. A pose that does not chain from the last
+//     one used - a cut, a rebuilt BVH, a skipped pose - empties the column;
+//   - everything is a lower bound in the BVH's units, carried to metres by the
+//     smallest residual scale as the query's own reach is, with
+//     KH_COL_CLEAR_PAD_M and KH_COL_CLEAR_SLACK over the standoff for the
+//     residual scale's anisotropy and float rounding.
+// A skipped call is one the queries would have answered 'false' with the
+// particle untouched: the pass's result is the same, only the particle's warm
+// slot is not refreshed (a seed, not an answer). A rebase, an origin shift, a
+// teleport or the non-finite rescue move the particle far in the model frame
+// and simply spend the record. Not for a containing ('inside') collider nor
+// the convex path. KH_COL_CLEAR_ON false = every call queries, as before.
+static constexpr bool  KH_COL_CLEAR_ON = true;
+static constexpr float KH_COL_CLEAR_PAD_M = 0.005f;
+static constexpr float KH_COL_CLEAR_SLACK = 0.98f;
+static constexpr float KH_COL_CLEAR_ACC_MAX = 1000.0f;   // The column's sum restarts here: a float's differences stay exact to 0.1 mm.
+struct KhColClear {        // One particle against one collider column. d <= 0 = nothing known.
+    float l[3];            // Where the particle stood, the collider's model frame.
+    float d;               // Its distance from the surface then (the BVH's units), found outside.
+    float acc;             // The column's surface-motion sum then.
+};
+struct KhColClearCol {     // One collider column's pose chain.
+    uint32_t seq = 0u;     // The pose last used...
+    float    s = 0.0f;     // ...at this sweep fraction (def1; 0 = the pose itself)...
+    float    vd_max = 0.0f;   // ...and its largest corner sweep.
+    float    acc = 0.0f;   // Surface motion summed over the chain (the BVH's units).
+    bool     on = false;   // The column's records may be read and written.
+};
 // One collider pass over one particle. Returns true when the particle was
 // moved, so the caller can apply friction against the same contact:
 // khco_n_out is the push direction and khco_sv_out how far the surface under
@@ -2149,7 +2629,8 @@ inline bool kh_physics_convex_one(const KhPhysicsColliderView& khcx_c, float khc
 // particle moving faster than its thickness per substep tunnels through.
 inline bool kh_physics_collide_one(const KhPhysicsColliderView& khco_c, float khco_thick,
                                  const float* khco_prev, float* khco_p, float* khco_n_out, float* khco_sv_out,
-                                 uint32_t* khco_warm = nullptr) {   // KH_CLOTH_WARM: the particle's last-hit slot for this collider.
+                                 uint32_t* khco_warm = nullptr,   // KH_CLOTH_WARM: the particle's last-hit slot for this collider.
+                                 KhColClear* khco_cc = nullptr, float khco_acc = 0.0f) {   // KH_COL_CLEAR: the pair's record and the column's sum.
     if (!khco_c.bvh || khco_c.bvh->empty()) return false;
     // KH_COL_CONVEX: a collider marked convex, or a pose refitted for the
     // planes alone (whose nodes below the root are stale), takes the planes.
@@ -2188,6 +2669,17 @@ inline bool kh_physics_collide_one(const KhPhysicsColliderView& khco_c, float kh
     if (khco_es[2] < khco_smin) khco_smin = khco_es[2];
     if (khco_smin < 1.0e-6f) khco_smin = 1.0e-6f;
     const float khco_r = khco_reach / khco_smin;
+    // KH_COL_CLEAR: the particle in the collider's model frame; a record that
+    // still clears the standoff answers the call.
+    const float khco_lm[3] = { khco_l[0] + khco_c.skin_ctr[0], khco_l[1] + khco_c.skin_ctr[1], khco_l[2] + khco_c.skin_ctr[2] };
+    if (khco_c.inside) khco_cc = nullptr;
+    if (khco_cc && khco_cc->d > 0.0f) {
+        const float khco_m[3] = { khco_lm[0] - khco_cc->l[0], khco_lm[1] - khco_cc->l[1], khco_lm[2] - khco_cc->l[2] };
+        const float khco_left = (khco_cc->d - sqrtf(khco_m[0] * khco_m[0] + khco_m[1] * khco_m[1] + khco_m[2] * khco_m[2]) -
+                                 (khco_acc - khco_cc->acc)) * khco_smin;
+        if (khco_left * KH_COL_CLEAR_SLACK > khco_thick + khco_c.margin + KH_COL_CLEAR_PAD_M) return false;
+        khco_cc->d = 0.0f;   // Spent (a NaN lands here too): query.
+    }
     // KH_SKEL: a deforming collider is queried at the substep's end pose.
     const bool khco_def = khco_c.deform && !khco_c.bvh->vd.empty() && khco_c.bvh->vd.size() == khco_c.bvh->vp.size();
     const float* khco_vd = khco_def ? khco_c.bvh->vd.data() : nullptr;
@@ -2261,7 +2753,10 @@ inline bool kh_physics_collide_one(const KhPhysicsColliderView& khco_c, float kh
         // In a face's interior the face normal IS the gradient of the
         // distance, so the contact is the plane: signed depth along it.
         const float khco_sd = kh_cloth_v3_dot(khco_dv, nw);
-        if (khco_sd >= khco_want) return false;           // Already clear on the outside.
+        if (khco_sd >= khco_want) {                       // Already clear on the outside.
+            if (khco_cc) { memcpy(khco_cc->l, khco_lm, sizeof(khco_cc->l)); khco_cc->d = khco_d; khco_cc->acc = khco_acc; }   // KH_COL_CLEAR.
+            return false;
+        }
         const float khco_push = khco_want - khco_sd;
         for (int k = 0; k < 3; ++k) khco_p[k] += nw[k] * khco_push;
         khco_n_out[0] = nw[0]; khco_n_out[1] = nw[1]; khco_n_out[2] = nw[2];
@@ -2306,7 +2801,10 @@ inline bool kh_physics_collide_one(const KhPhysicsColliderView& khco_c, float kh
             }
             khco_sd = 0.0f;
         }
-        if (khco_sd >= khco_want) return false;
+        if (khco_sd >= khco_want) {   // Outside (khco_sd is positive on the cloth's side alone).
+            if (khco_cc) { memcpy(khco_cc->l, khco_lm, sizeof(khco_cc->l)); khco_cc->d = khco_d; khco_cc->acc = khco_acc; }   // KH_COL_CLEAR.
+            return false;
+        }
         for (int k = 0; k < 3; ++k) khco_p[k] = khco_cw[k] + khco_u[k] * khco_want;
         khco_n_out[0] = khco_u[0]; khco_n_out[1] = khco_u[1]; khco_n_out[2] = khco_u[2];
     }
@@ -2355,6 +2853,31 @@ inline bool kh_physics_collide_one(const KhPhysicsColliderView& khco_c, float kh
     return true;
 }
 
+// KH_COL_CLEAR: one collider column at one substep - its surface-motion sum
+// advanced along the pose chain. False = the column's records are void (the
+// caller empties them): not a cacheable collider, a pose that does not chain
+// from the last one used, or the sum at its restart.
+inline bool kh_col_clear_advance(KhColClearCol& khca_c, const KhPhysicsColliderView& khca_v) {
+    const KhPhysicsBvh* const b = khca_v.bvh;
+    const bool khca_ok = KH_COL_CLEAR_ON && b && !b->empty() && b->pose_seq != 0u && !khca_v.inside &&
+                         !((khca_v.convex || b->cvx_only) && b->cvx_valid());
+    // The sweep fraction the query reads the surface at (kh_physics_collide_one's khco_def).
+    const bool khca_def = khca_ok && khca_v.deform && !b->vd.empty() && b->vd.size() == b->vp.size();
+    const float khca_s = khca_def ? khca_v.def1 : 0.0f;
+    bool khca_chain = khca_ok && khca_c.on;
+    if (khca_chain) {
+        if (khca_c.seq == b->pose_seq) khca_c.acc += fabsf(khca_s - khca_c.s) * b->vd_max;
+        else if (b->prev_seq != 0u && b->prev_seq == khca_c.seq) khca_c.acc += fabsf(khca_c.s) * khca_c.vd_max + (1.0f + khca_s) * b->vd_max;
+        else khca_chain = false;
+        if (khca_chain && !(khca_c.acc < KH_COL_CLEAR_ACC_MAX)) khca_chain = false;
+    }
+    if (!khca_chain) khca_c.acc = 0.0f;
+    khca_c.on = khca_ok;
+    khca_c.seq = khca_ok ? b->pose_seq : 0u;
+    khca_c.s = khca_s;
+    khca_c.vd_max = khca_ok ? b->vd_max : 0.0f;
+    return khca_chain;
+}
 // Nearest pinned particle along the mesh, for every particle, plus that path's
 // rest length. A multi-source Dijkstra over the stretch edges - not a BFS,
 // because edge rest lengths differ and a hop count is not a distance.
@@ -2528,6 +3051,8 @@ struct KhClothState {
     // collider changed identity starts over. Worker-private.
     std::vector<uint32_t> col_warm;
     std::vector<uint32_t> col_warm_key;
+    std::vector<KhColClear>    col_clear;       // KH_COL_CLEAR: col_warm's layout, a record per particle per column.
+    std::vector<KhColClearCol> col_clear_col;   // ...and each column's pose chain.
     // KH_SKEL: a skeletal binding's guide for the rigid-follow targets
     // (kh_cloth_target), 3 floats per particle, mesh-local like 'rest': where
     // the skeleton puts each particle at the start of the frame (a) and at its
@@ -3991,6 +4516,10 @@ inline void kh_cloth_substep(KhClothState& khcs_s, const KhClothParams& khcs_pr,
             khcs_s.col_warm.assign(khcs_wn, KH_CLOTH_WARM_NONE);
             khcs_s.col_warm_key.assign(khcs_ncol * 2u, KH_CLOTH_WARM_NONE);
         }
+        if (khcs_s.col_clear.size() != khcs_wn || khcs_s.col_clear_col.size() != khcs_ncol) {   // KH_COL_CLEAR: laid out with the warm columns.
+            khcs_s.col_clear.assign(khcs_wn, KhColClear{});
+            khcs_s.col_clear_col.assign(khcs_ncol, KhColClearCol{});
+        }
         for (size_t c = 0; c < khcs_ncol; ++c) {
             const uint32_t khcs_km = static_cast<uint32_t>(khcs_col[c].mesh);
             if (khcs_s.col_warm_key[c * 2u] != khcs_col[c].slot || khcs_s.col_warm_key[c * 2u + 1u] != khcs_km) {
@@ -3998,6 +4527,13 @@ inline void kh_cloth_substep(KhClothState& khcs_s, const KhClothParams& khcs_pr,
                 khcs_s.col_warm_key[c * 2u + 1u] = khcs_km;
                 std::fill(khcs_s.col_warm.begin() + static_cast<ptrdiff_t>(c * khcs_n),
                           khcs_s.col_warm.begin() + static_cast<ptrdiff_t>((c + 1u) * khcs_n), KH_CLOTH_WARM_NONE);
+                khcs_s.col_clear_col[c] = KhColClearCol{};   // KH_COL_CLEAR: another collider's column; emptied just below.
+            }
+            // KH_COL_CLEAR: the column's chain to this substep's pose; records of a broken chain are void.
+            const bool khcs_was = khcs_s.col_clear_col[c].on;
+            if (!kh_col_clear_advance(khcs_s.col_clear_col[c], khcs_col[c]) && (khcs_was || khcs_s.col_clear_col[c].on)) {
+                std::fill(khcs_s.col_clear.begin() + static_cast<ptrdiff_t>(c * khcs_n),
+                          khcs_s.col_clear.begin() + static_cast<ptrdiff_t>((c + 1u) * khcs_n), KhColClear{});
             }
         }
     }
@@ -4008,7 +4544,9 @@ inline void kh_cloth_substep(KhClothState& khcs_s, const KhClothParams& khcs_pr,
             float khcs_n_hit[3], khcs_sv[3];
             const float khcs_p0[3] = { khcs_p.p[0], khcs_p.p[1], khcs_p.p[2] };
             if (!kh_physics_collide_one(khcs_col[c], khcs_pr.thickness, khcs_p.pp, khcs_p.p, khcs_n_hit, khcs_sv,
-                                        &khcs_s.col_warm[c * khcs_n + i])) continue;
+                                        &khcs_s.col_warm[c * khcs_n + i],
+                                        khcs_s.col_clear_col[c].on ? &khcs_s.col_clear[c * khcs_n + i] : nullptr,   // KH_COL_CLEAR.
+                                        khcs_s.col_clear_col[c].acc)) continue;
             float khcs_f = khcs_fr * khcs_col[c].friction;
             if (khcs_f <= 0.0f) continue;
             if (khcs_f > 1.0f) khcs_f = 1.0f;
@@ -5945,8 +6483,9 @@ struct KhMaterial {
     int shader = 0;   // 0 = "pbr"; 1 = custom user.hlsl (user_shader); 2 = "arma" (builtin).
     std::string user_shader;   // Resolved.hlsl path when shader == 1 ("" otherwise).
     // Diffuse, normal, orm, emissive, specular, speccolor. The arma model keeps
-    // its AS map in the orm slot and its SMDI map in the specular slot, and is
-    // the only one that takes speccolor.
+    // its AS map in the orm slot and its SMDI map in the specular slot, and
+    // takes speccolor; a .hlsl material takes all six under either naming
+    // (KH_USER_SLOTS, map_as / map_smdi below).
     KhMaterialMap maps[KH_MAT_MAPS];
     float base_color[3] = { 1.0f, 1.0f, 1.0f };
     float roughness = 0.8f;
@@ -5966,11 +6505,34 @@ struct KhMaterial {
     float glossiness = 0.2f;                          // Gloss with no SMDI map (0 matte - 1 mirror).
     float fresnel_n = 1.5f;                           // Refractive index N.
     float fresnel_k = 0.0f;                           // Absorption coefficient K.
+    // KH_USER_SLOTS - a .hlsl material may give its orm slot as "as" and its
+    // specular slot as "smdi" (the arma model's maps: the same two slots). The
+    // name says what the slot holds: SMDI's channels are data, so the specular
+    // slot is then read linear (kh_tex_map_srgb), and the default routes are
+    // the named map's own (kh_mat_gpu_fill). False for "pbr"; unread for
+    // "arma", whose two slots hold AS and SMDI by definition.
+    bool map_as = false;
+    bool map_smdi = false;
+    // KH_USER_VS - the .hlsl defines KhUserVertex (kh_user_vertex_scan, at the
+    // parse): its vertices are deformed by it, once a cycle (kh_uvs_step).
+    // vertex_bound is the script's promise of how far it moves any vertex (m,
+    // "vertexBound"): the CPU cannot see the deformation, so every bounds
+    // test pads by it (kh_bounds_size_of). vertex_static ("vertexStatic") says
+    // its result depends on nothing that changes by itself - no clock, no
+    // camera - so it is evaluated again only when its inputs move.
+    bool  user_vertex = false;
+    float vertex_bound = 0.0f;
+    bool  vertex_static = false;
 };
 
 struct KhMaterialSet {
     std::vector<KhMaterial> slots;
     bool any = false;   // At least one used slot.
+    // KH_USER_VS: some slot has a vertex stage; the largest vertex_bound among
+    // them; every one of them is vertex_static. Derived at the parse.
+    bool  vertex_any = false;
+    float vertex_bound = 0.0f;
+    bool  vertex_static = false;
     // Content hash (kh_material_set_hash): the KH_MAT_POOL intern key and the
     // instancing batch key. Covers every field kh_bind_material and
     // kh_draw_textured read.
@@ -6030,6 +6592,12 @@ inline uint64_t kh_material_set_hash(const KhMaterialSet& khmh_s) {
         mix(&m.glossiness, sizeof(m.glossiness));
         mix(&m.fresnel_n, sizeof(m.fresnel_n));
         mix(&m.fresnel_k, sizeof(m.fresnel_k));
+        if (m.shader == 1) {   // KH_USER_SLOTS: what a .hlsl material's orm / specular slots hold. The other kinds mix nothing more.
+            const uint8_t khmh_nm = static_cast<uint8_t>((m.map_as ? 1 : 0) | (m.map_smdi ? 2 : 0) |
+                                                         (m.user_vertex ? 4 : 0) | (m.vertex_static ? 8 : 0));   // KH_USER_VS.
+            mix(&khmh_nm, 1);
+            mix(&m.vertex_bound, sizeof(m.vertex_bound));
+        }
     }
 
     return h;
@@ -6048,6 +6616,9 @@ static constexpr uint64_t KH_MAT_GC_IDLE_MS = 120000;
 struct KhMatPoolEntry { std::unique_ptr<KhMaterialSet> set; uint64_t last_ref_ms; };
 struct KhMatGrave { std::unique_ptr<KhMaterialSet> set; uint64_t flush_at; };
 static std::unordered_map<uint64_t, KhMatPoolEntry> g_mat_pool;
+// KH_USER_VS: a material set with a vertex stage has been made (the parse
+// raises it). Zero = kh_uvs_upload has nothing to look for and walks nothing.
+static std::atomic<uint32_t> g_uvs_sets{ 0 };
 static std::vector<KhMatGrave> g_mat_grave;
 static std::mutex g_mat_pool_mu;
 
@@ -6360,6 +6931,8 @@ struct Resources {
     ID3D11GeometryShader*     skin_so_gs = nullptr;
     ID3D11InputLayout*        skin_so_layout = nullptr;
     ID3D11Buffer*             skin_so_cb = nullptr;
+    ID3D11Buffer*             uvs_obj_cb = nullptr;     // KH_USER_VS: the deform pass's own b0 / b1 (the white
+    ID3D11Buffer*             uvs_frame_cb = nullptr;   // placeholder's no-borrowing contract).
     ID3D11RasterizerState*    rast_sun = nullptr;   // cullNone, no scene depth bias.
     // The back-face twin of rast_sun (CullFront).
     ID3D11RasterizerState*    rast_sun_lo = nullptr;   // low-bias default (8 / 1.0).
@@ -6571,6 +7144,8 @@ struct Resources {
         KH_SAFE_RELEASE(ps_sunpfm);
         KH_SAFE_RELEASE(ps_sunpf);
         KH_SAFE_RELEASE(vs_sunpf);
+        KH_SAFE_RELEASE(uvs_frame_cb);   // KH_USER_VS.
+        KH_SAFE_RELEASE(uvs_obj_cb);
         KH_SAFE_RELEASE(skin_so_cb);   // KH_SKIN_GPU.
         KH_SAFE_RELEASE(skin_so_layout);
         KH_SAFE_RELEASE(skin_so_gs);
@@ -6944,6 +7519,9 @@ inline void kh_user_lut_cache_release();   // User.cube LUT cache (defined with 
 inline void kh_cloth_release_all();   // KH_CLOTH: the per-instance vertex buffers (defined with the runtime).
 inline void kh_cloth_slot_forget(uint32_t khsf_slot);   // KH_CLOTH: a dead slot's substitute (defined with the runtime).
 inline void kh_skin_release_all();   // KH_SKEL: the skinned vertex buffers (defined after the cloth runtime).
+inline void kh_uvs_release_all();    // KH_USER_VS: the deformed vertex buffers (defined with the user lanes' fill).
+inline bool kh_uvs_draws_from(uint32_t khud_slot, const ID3D11Buffer* khud_src);   // KH_USER_VS: the slot draws a vertex stage's buffer deformed from this one.
+inline void kh_uvs_src_wrote(uint32_t khsw_slot);   // KH_USER_VS: a slot's own per-instance vertex buffer was just written (every writer of one calls it).
 inline void kh_skin_drop_all();
 
 // The device-death ladder shared by both reset branches: no shader worker may
@@ -6962,6 +7540,7 @@ inline void kh_engine_reset_release() {
     // drape. The workers keep running - they hold no device object.
     kh_cloth_release_all();
     kh_skin_release_all();   // KH_SKEL: likewise; the next park re-uploads the pose.
+    kh_uvs_release_all();    // KH_USER_VS: likewise; the next flush makes them again.
 }
 
 static void __stdcall on_engine_reset() {
@@ -7224,8 +7803,14 @@ inline void kh_rot_half_extents(const float hl[3], const float* rot_m, bool rota
 
 // KH_CAST_REFIT: the size every BOUNDS test takes - the script's, grown per
 // axis to what a plain cloth's simulation reached (RenderObject::cast_size).
+// KH_USER_VS: plus the vertex stage's declared reach on both sides of every
+// axis (KhMaterialSet::vertex_bound) - the deformation happens on the GPU, so
+// the script's promise is all a bounds test has. Untouched without one.
 inline void kh_bounds_size_of(const RenderObject& o, float khbs_sz[3]) {
     for (int k = 0; k < 3; ++k) khbs_sz[k] = o.cast_size[k] > o.size[k] ? o.cast_size[k] : o.size[k];
+    if (o.materials && o.materials->vertex_any && o.materials->vertex_bound > 0.0f) {
+        for (int k = 0; k < 3; ++k) khbs_sz[k] += 2.0f * o.materials->vertex_bound;
+    }
 }
 inline void kh_world_half_extents(const RenderObject& o, float he[3]) {
     float khwh_sz[3];
@@ -7679,6 +8264,35 @@ inline bool kh_probe_readable(const void* khpr_p, size_t khpr_n) {
 #define KH_ATTACH_VS_SIM    0u
 #endif
 #define KH_ATTACH_OFF_NONE  0xFFFFFFFFu
+// KH_ATTACH_VIS_RETRY - a choice that fell to the simulation copy is
+// PROVISIONAL for a while: the stored value is KH_ATTACH_OFF_TRY | (retries
+// left << 8) | the cadence window of its last trial (retries 1..
+// KH_ATTACH_OFF_TRIES = 254, so it is never KH_ATTACH_OFF_NONE), the pose is
+// read from the simulation copy exactly as a final choice of it reads, and the
+// twin test runs again ONCE per cadence window (eight cycles; at the first
+// read that falls in it) until it
+// passes (the visual copy, for good) or the retries run out (the simulation
+// copy, for good). Once per WINDOW, not per read, so the span - ~2,000 cycles -
+// is the same for every choice however often it is read: a locator track is
+// read by the draw sweep dozens of times a cycle and a lane a few, and the two
+// must not come to settle on different copies of one helper
+// (KH_ATTACH_TRACK_OFF). Why: a helper
+// is created at the origin and attached on the next simulation step, so a
+// first read inside that window finds its visual copy absent or kilometres
+// from its simulation copy, and a once-only choice then kept a helper that
+// HAS a visual copy on the other one for the binding's life - which of its
+// lanes did was a race at the bind. Bounded, so an object with the one copy
+// (a house) pays a failed page-gated trial KH_ATTACH_OFF_TRIES times in its
+// life, one a window, and nothing after. Who reads a stored choice: the two
+// choosers, which read through kh_attach_off_read; kh_attach_lf_applies; and
+// kh_skin_sync's game-thread fallback, which asks whether its lane's choice IS
+// the visual copy to pick the parent's copy to pair it with. The last two test
+// for equality with KH_ATTACH_VS_RENDER, so a provisional value counts as the
+// simulation copy - the copy it is being read from. A new reader does the same.
+#define KH_ATTACH_OFF_TRY   0xFFFF0000u
+#define KH_ATTACH_OFF_TRIES 254u
+inline bool kh_attach_off_trying(uint32_t khot_o) { return khot_o != KH_ATTACH_OFF_NONE && (khot_o & 0xFFFF0000u) == KH_ATTACH_OFF_TRY; }
+inline uint32_t kh_attach_off_read(uint32_t khot_o) { return kh_attach_off_trying(khot_o) ? KH_ATTACH_VS_SIM : khot_o; }   // The copy a stored choice reads.
 // How far two copies of the SAME object's state may sit apart and still be
 // believed to be that: a frame of travel at any speed the engine simulates,
 // and a basis nowhere near a different object's. Generous on purpose - this
@@ -7689,8 +8303,10 @@ inline bool kh_probe_readable(const void* khpr_p, size_t khpr_n) {
 // takes. The attachment lanes choose per lane (kh_attach_raw), and this must
 // agree with them: a proxy pose composed from one copy against a parent read
 // from the other carries the offset between the two, which is a frame of the
-// parent's travel. Every pose is on this copy; only kh_pxy_sim_note's row
-// lengths are not - they are the proxy's scale class.
+// parent's travel. Every pose is on this copy where the object carries it
+// (kh_attach_track_read: the simulation copy otherwise, and while the choice
+// is provisional - KH_ATTACH_VIS_RETRY); kh_pxy_sim_note's row lengths are
+// always the simulation copy's - they are the proxy's scale class.
 // Constant by construction: a site's page-gate caches are valid for one
 // offset only.
 #define KH_ATTACH_TRACK_OFF KH_ATTACH_VS_RENDER
@@ -7730,8 +8346,10 @@ struct KhAttach {
     uintptr_t bb_pos = 0;
     uintptr_t bb_rot = 0;
     // Which of the two visual states this lane's object turned out to carry
-    // (KH_ATTACH_OFF_NONE = not chosen yet). Per lane, because the two lanes
-    // may be different objects and an object may have only the one copy.
+    // (KH_ATTACH_OFF_NONE = not chosen yet; KH_ATTACH_OFF_TRY | ... = the
+    // simulation copy, provisionally - KH_ATTACH_VIS_RETRY). Per lane, because
+    // the two lanes may be different objects and an object may have only the
+    // one copy.
     uint32_t off_pos = KH_ATTACH_OFF_NONE;
     uint32_t off_rot = KH_ATTACH_OFF_NONE;
     // KH_ATTACH_ANCHOR - the cycle's pose, read once at the engine's first
@@ -8464,8 +9082,57 @@ inline bool kh_attach_vs_read(uintptr_t khvs_base, uint32_t khvs_off, uintptr_t&
     return true;
 }
 
+// KH_ATTACH_VIS_RETRY - the choice of copy, for both choosers below (one body,
+// so a lane and a track of the same object cannot come to choose differently
+// by rule). First (KH_ATTACH_OFF_NONE): khoc_want when it reads AND agrees with
+// the simulation copy within the twin bounds, else the simulation copy,
+// provisionally. Provisional: the same test again, once per cadence window
+// (the window of the last trial rides in the stored value, so the reads that
+// follow it in the same window do nothing); a pass takes khoc_want, a fail
+// spends a retry, the last one settles on the simulation copy. Own page caches per trial, so neither seeds the caller's;
+// the caller's are cleared when the choice MOVES (they belong to one offset).
+// False only for a first choice with no readable simulation copy - not the
+// layout that was measured - which leaves the choice unmade, as ever.
+inline bool kh_attach_off_choose(uintptr_t khoc_base, uint32_t khoc_want, uint32_t& khoc_off,
+                                 uintptr_t& khoc_vb, uintptr_t& khoc_bb) {
+    const bool khoc_first = khoc_off == KH_ATTACH_OFF_NONE;
+    const uint64_t khoc_c = g_topo_cycles_pub.load(std::memory_order_relaxed);
+    const uint32_t khoc_win = static_cast<uint32_t>(khoc_c >> 3) & 0xFFu;   // The cadence window (eight cycles), as the stored value carries it.
+    if (!khoc_first && (khoc_off & 0xFFu) == khoc_win) return true;   // This window's trial is done.
+    uintptr_t khoc_vw = 0, khoc_bw = 0, khoc_vs = 0, khoc_bs = 0;
+    float khoc_pw[3], khoc_rw[9], khoc_ps[3], khoc_rs[9];
+    if (!kh_attach_vs_read(khoc_base, KH_ATTACH_VS_SIM, khoc_vs, khoc_bs, khoc_ps, khoc_rs)) {
+        if (khoc_first) return false;
+        khoc_off = (khoc_off & ~0xFFu) | khoc_win;   // A trial that cannot read is not spent; the window still is.
+        return true;
+    }
+    bool khoc_twin = khoc_want != KH_ATTACH_VS_SIM &&
+                     kh_attach_vs_read(khoc_base, khoc_want, khoc_vw, khoc_bw, khoc_pw, khoc_rw);
+    if (khoc_twin) {
+        for (int khoc_i = 0; khoc_i < 3; ++khoc_i)
+            if (fabsf(khoc_pw[khoc_i] - khoc_ps[khoc_i]) > KH_ATTACH_TWIN_M) khoc_twin = false;
+        for (int khoc_i = 0; khoc_i < 9; ++khoc_i)
+            if (fabsf(khoc_rw[khoc_i] - khoc_rs[khoc_i]) > KH_ATTACH_TWIN_DOT) khoc_twin = false;
+    }
+    if (khoc_twin) {
+        khoc_off = khoc_want;
+        khoc_vb = 0;   // Both caches belong to the offset that was just chosen.
+        khoc_bb = 0;
+    } else if (khoc_first) {
+        khoc_off = KH_ATTACH_OFF_TRY | (KH_ATTACH_OFF_TRIES << 8) | khoc_win;
+        khoc_vb = 0;
+        khoc_bb = 0;
+    } else {
+        const uint32_t khoc_left = ((khoc_off >> 8) & 0xFFu) - 1u;   // The caches are the simulation copy's already.
+        khoc_off = khoc_left != 0u ? (KH_ATTACH_OFF_TRY | (khoc_left << 8) | khoc_win) : KH_ATTACH_VS_SIM;
+    }
+    return true;
+}
+
 // The lane's transform, from the render copy where the object has one. The
-// choice is made once and needs no reference and no SQF call: the render copy
+// choice needs no reference and no SQF call (kh_attach_off_choose: made at the
+// first read, and re-made for a while if it fell to the simulation copy -
+// KH_ATTACH_VIS_RETRY): the render copy
 // is taken only when the simulation copy agrees with it to within a frame of
 // travel, which is what tells us the two are the same object's state and not
 // an unrelated structure that happens to hold a plausible basis. False means
@@ -8482,32 +9149,16 @@ inline bool kh_attach_raw(const game_value& khrw_gv, uint32_t& khrw_off, uintptr
     // below it.
     if (!khrw_gd || !khrw_gd->object || !khrw_gd->object->object) return false;
     const uintptr_t khrw_base = reinterpret_cast<uintptr_t>(khrw_gd->object->object);
-    if (khrw_off == KH_ATTACH_OFF_NONE) {
-        uintptr_t khrw_vr = 0, khrw_vs = 0;
-        // Own caches: the selection reads both offsets off the same base, so
-        // each trial gates its own slot, and neither seeds the lane's.
-        uintptr_t khrw_br = 0, khrw_bs = 0;
-        float khrw_pr[3], khrw_rr[9], khrw_ps[3], khrw_rs[9];
-        const bool khrw_okr = kh_attach_vs_read(khrw_base, KH_ATTACH_VS_RENDER, khrw_vr, khrw_br, khrw_pr, khrw_rr);
-        const bool khrw_oks = kh_attach_vs_read(khrw_base, KH_ATTACH_VS_SIM, khrw_vs, khrw_bs, khrw_ps, khrw_rs);
-        if (!khrw_oks) return false;   // No simulation copy: this is not the layout we measured.
-        bool khrw_twin = khrw_okr;
-        if (khrw_twin) {
-            for (int khrw_i = 0; khrw_i < 3; ++khrw_i)
-                if (fabsf(khrw_pr[khrw_i] - khrw_ps[khrw_i]) > KH_ATTACH_TWIN_M) khrw_twin = false;
-            for (int khrw_i = 0; khrw_i < 9; ++khrw_i)
-                if (fabsf(khrw_rr[khrw_i] - khrw_rs[khrw_i]) > KH_ATTACH_TWIN_DOT) khrw_twin = false;
-        }
-        khrw_off = khrw_twin ? KH_ATTACH_VS_RENDER : KH_ATTACH_VS_SIM;
-        khrw_vb = 0;   // Both caches belong to the offset that was just chosen.
-        khrw_bb = 0;
+    if (khrw_off == KH_ATTACH_OFF_NONE || kh_attach_off_trying(khrw_off)) {
+        if (!kh_attach_off_choose(khrw_base, KH_ATTACH_VS_RENDER, khrw_off, khrw_vb, khrw_bb)) return false;   // No simulation copy: this is not the layout we measured.
     }
-    return kh_attach_vs_read(khrw_base, khrw_off, khrw_vb, khrw_bb, khrw_pos, khrw_rot, khrw_diag);
+    return kh_attach_vs_read(khrw_base, kh_attach_off_read(khrw_off), khrw_vb, khrw_bb, khrw_pos, khrw_rot, khrw_diag);
 }
 
 // KH_ATTACH_TRACK - the copy a locator target's own sample takes. The choice
-// is made once per
-// object and cached as a lane's is: KH_ATTACH_TRACK_OFF where the object
+// is made per
+// object and cached as a lane's is (kh_attach_off_choose, KH_ATTACH_VIS_RETRY
+// included): KH_ATTACH_TRACK_OFF where the object
 // carries it AND it agrees with the simulation copy within a frame of travel
 // (the same twin test), the simulation copy otherwise - an object with only
 // the one copy reads exactly as it did. The page caches are cleared with the
@@ -8516,24 +9167,10 @@ inline bool kh_attach_track_read(uintptr_t khtr_base, uint32_t& khtr_off, uintpt
                                  uintptr_t& khtr_bb, float khtr_pos[3], float khtr_rot[9],
                                  float* khtr_len_out = nullptr) {
     if (KH_ATTACH_VS_SIM == 0u || khtr_base == 0) return false;
-    if (khtr_off == KH_ATTACH_OFF_NONE) {
-        // Own caches per trial, so neither seeds the object's.
-        uintptr_t khtr_vp = 0, khtr_bp = 0, khtr_vs = 0, khtr_bs = 0;
-        float khtr_pp[3], khtr_pr[9], khtr_sp[3], khtr_sr[9];
-        if (!kh_attach_vs_read(khtr_base, KH_ATTACH_VS_SIM, khtr_vs, khtr_bs, khtr_sp, khtr_sr)) return false;
-        bool khtr_use = KH_ATTACH_TRACK_OFF != KH_ATTACH_VS_SIM &&
-                        kh_attach_vs_read(khtr_base, KH_ATTACH_TRACK_OFF, khtr_vp, khtr_bp, khtr_pp, khtr_pr);
-        if (khtr_use) {
-            for (int khtr_i = 0; khtr_i < 3; ++khtr_i)
-                if (fabsf(khtr_pp[khtr_i] - khtr_sp[khtr_i]) > KH_ATTACH_TWIN_M) khtr_use = false;
-            for (int khtr_i = 0; khtr_i < 9; ++khtr_i)
-                if (fabsf(khtr_pr[khtr_i] - khtr_sr[khtr_i]) > KH_ATTACH_TWIN_DOT) khtr_use = false;
-        }
-        khtr_off = khtr_use ? KH_ATTACH_TRACK_OFF : KH_ATTACH_VS_SIM;
-        khtr_vb = 0;
-        khtr_bb = 0;
+    if (khtr_off == KH_ATTACH_OFF_NONE || kh_attach_off_trying(khtr_off)) {
+        if (!kh_attach_off_choose(khtr_base, KH_ATTACH_TRACK_OFF, khtr_off, khtr_vb, khtr_bb)) return false;
     }
-    return kh_attach_vs_read(khtr_base, khtr_off, khtr_vb, khtr_bb, khtr_pos, khtr_rot, nullptr, khtr_len_out);
+    return kh_attach_vs_read(khtr_base, kh_attach_off_read(khtr_off), khtr_vb, khtr_bb, khtr_pos, khtr_rot, nullptr, khtr_len_out);
 }
 
 // The one-shot form, for the command sites that have no lane to cache in: the
@@ -8941,7 +9578,9 @@ inline bool kh_pxy_pool_get(const game_value& khpg_parent, const std::string& kh
         }
         g_pxy_pool_key.erase(khpg_kit);   // Not shareable; its entry drains through the reap.
     }
-    const object khpg_s = sqf::create_simple_object(KH_ATTACH_BONE_SHAPE, vector3(0.0f, 0.0f, 0.0f), true);
+    const object khpg_s = sqf::create_vehicle_local(KH_ATTACH_BONE_SHAPE, vector3(0.0f, 0.0f, 0.0f));
+    sqf::enable_simulation(khpg_s, false);
+    sqf::set_physics_collision_flag(khpg_s, false);
     if (sqf::is_null(khpg_s)) {
         err = std::string("could not create ") + khpg_article + " memory-point proxy (" +
               KH_ATTACH_BONE_SHAPE + " missing from the loaded mods?)";
@@ -9591,6 +10230,7 @@ struct KhCblTarget {
     // sweep.
     uintptr_t xbase = 0, xvb = 0, xbb = 0;
     uint32_t  x_track_off = KH_ATTACH_OFF_NONE;   // KH_ATTACH_TRACK, the traced proxy's copy.
+    uint64_t  x_cycle = ~0ull;         // KH_CBL_XTRACE_LIVE: the cycle an anchored lane last named xbase.
     bool      sw_ok = false;
     float     sw_pp[3] = {}, sw_xp[3] = {};
     // KH_CBL_PAIR: the parent current when the traced proxy last changed,
@@ -9602,6 +10242,19 @@ struct KhCblTarget {
     uint64_t  a_pair_cycle = ~0ull;
     float     a_pair_p[3] = {}, a_pair_r[9] = {};
 };
+// KH_CBL_XTRACE_LIVE - xbase is a WEAK identity of a helper that is OURS to
+// delete: the binding that named it may end (removeRenderHandler, a position
+// that re-points it, its mesh's lifetime) while other bindings keep the parent's
+// target alive, and the helper is then deleted under a trace nothing renews. A
+// read of it is believed only while an anchored lane named it within
+// KH_CBL_TOUCH_KEEP cycles - the window a target's own base is trusted for (the
+// anchor's try_lock may miss a cycle). Past it the sweep stops reading the
+// address and kh_cbl_pair_now hands out the parent as it stands - what a parent
+// with no traced proxy always got - instead of a pair latched to a helper that
+// no longer moves. Render thread.
+inline bool kh_cbl_x_live(const KhCblTarget& khxl_t) {
+    return khxl_t.xbase != 0 && khxl_t.x_cycle <= g_topo_cycles && g_topo_cycles - khxl_t.x_cycle <= KH_CBL_TOUCH_KEEP;
+}
 // One target per followed parent, grown on demand (a target unnamed for
 // KH_CBL_GAP_DROP cycles is reused first). Render thread only. Targets are
 // named by index (KhCblAct::ti), never by a kept pointer.
@@ -10521,7 +11174,7 @@ inline void kh_cbl_note_draw() {
         float khnd_p[3], khnd_r[9];
         if (!kh_cbl_read_sim(khnd_t, khnd_p, khnd_r)) continue;
         float khnd_xq[3], khnd_xp[3] = { 0.0f, 0.0f, 0.0f }, khnd_xr[9];
-        const bool khnd_xok = khnd_t.xbase != 0 &&
+        const bool khnd_xok = kh_cbl_x_live(khnd_t) &&   // KH_CBL_XTRACE_LIVE.
             kh_attach_track_read(khnd_t.xbase, khnd_t.x_track_off, khnd_t.xvb, khnd_t.xbb, khnd_xq, khnd_xr);
         if (khnd_xok) kh_cbl_swap_yz(khnd_xq, khnd_xp);
         uint32_t khnd_bits = 0u;
@@ -10566,7 +11219,7 @@ inline bool kh_cbl_pair_now(KhCblTarget& khpw_t, float khpw_p[3], float khpw_r[9
     float khpw_pn[3], khpw_rn[9];
     if (!kh_cbl_read_sim(khpw_t, khpw_pn, khpw_rn)) return false;
     float khpw_xq[3], khpw_xr[9];
-    if (khpw_t.xbase != 0 && khpw_t.sw_ok &&
+    if (kh_cbl_x_live(khpw_t) && khpw_t.sw_ok &&   // KH_CBL_XTRACE_LIVE.
         kh_attach_track_read(khpw_t.xbase, khpw_t.x_track_off, khpw_t.xvb, khpw_t.xbb, khpw_xq, khpw_xr)) {
         float khpw_xe[3];
         kh_cbl_swap_yz(khpw_xq, khpw_xe);
@@ -10599,8 +11252,15 @@ inline void kh_cbl_anchor_lane(const KhAttach& khal_a) {
         kh_cbl_swap_yz(khal_a.anc_p, khal_t->al_p);
         memcpy(khal_t->al_r, khal_a.anc_r, sizeof(khal_t->al_r));
     }
-    if (khal_t->a_cycle == khal_c) return;   // Another lane on this parent took it.
-    {   // The cycle's first lane with a proxy names the traced proxy.
+    // The cycle's first lane on this parent that HAS a proxy names the traced
+    // proxy - ahead of the once-per-cycle return below, which used to leave the
+    // naming to the cycle's first lane of ANY kind: beside a plain attach to the
+    // same object that g_attach happened to walk first, a memory-point or
+    // skeletal binding never got a trace (no pair, no KH_CBL_SNAP snapshot), and
+    // one whose namer was removed kept the removed binding's helper
+    // (KH_CBL_XTRACE_LIVE). A trace not renewed within the keep window starts
+    // over even at the same address: the helper there may be another one.
+    if (khal_t->x_cycle != khal_c) {
         const game_value* khal_x = nullptr;
         if (khal_a.skel) {
             if (!khal_a.skel_proxy.empty()) khal_x = &khal_a.skel_proxy[0];
@@ -10608,14 +11268,18 @@ inline void kh_cbl_anchor_lane(const KhAttach& khal_a) {
             khal_x = &khal_a.obj_pos;
         }
         const uintptr_t khal_xb = khal_x ? kh_cbl_base_of(*khal_x) : 0;
-        if (khal_xb != 0 && khal_xb != khal_t->xbase) {
-            khal_t->xbase = khal_xb;
-            khal_t->xvb = 0;
-            khal_t->xbb = 0;
-            khal_t->x_track_off = KH_ATTACH_OFF_NONE;
-            khal_t->sw_ok = false;
+        if (khal_xb != 0) {
+            if (khal_xb != khal_t->xbase || !kh_cbl_x_live(*khal_t)) {
+                khal_t->xbase = khal_xb;
+                khal_t->xvb = 0;
+                khal_t->xbb = 0;
+                khal_t->x_track_off = KH_ATTACH_OFF_NONE;
+                khal_t->sw_ok = false;
+            }
+            khal_t->x_cycle = khal_c;
         }
     }
+    if (khal_t->a_cycle == khal_c) return;   // Another lane on this parent took it.
     const bool khal_consec = khal_t->a_ok && khal_t->a_cycle + 1u == khal_c;
     khal_t->pa_ok = khal_t->a_ok;
     memcpy(khal_t->pa_p, khal_t->a_p, sizeof(khal_t->pa_p));
@@ -10988,12 +11652,48 @@ inline bool kh_pxy_ortho(float khpo_r[9]) {
     memcpy(khpo_r, khpo_o, sizeof(khpo_o));
     return true;
 }
+// KH_CBL_NOT_HELPER - a window whose three rows all have a live helper's own
+// length is that helper's matrix (or a sibling's of its class): a helper's
+// scale is its identity (1.0775 x 1.05^k, never 1), and a unit-scale parent -
+// every character and vehicle - is never drawn at it. (The one window this can
+// turn away wrongly is a followed object the script SCALED to within
+// KH_PXY_LEN_TOL of a live helper's class, standing in that helper's cell with
+// its axes on the helper's: it then decides from its anchor, which for the
+// static props that are scaled is its pose exactly.)
+// kh_cbl_window keeps such a window from the PARENT path, which tests a
+// window's basis and translation and never its row lengths: a helper rides a
+// bone of its own parent, its basis within KH_CBL_AXIS_COS of the parent's
+// whenever the bone stands near its rest orientation (a pelvis, a spine, a
+// head), 0.9-1.6 m above the parent's origin - outside the parent's radius at
+// rest (KH_CBL_RAD_MIN) and inside it once the unit moves (the radius's motion
+// term). Its hits then earned a key on the parent, and on a cycle whose only
+// admitted depth-pass hit was the helper's the parent was DECIDED at the
+// helper's matrix for that cycle. Every bone-driven vertex is drawn at its
+// proxy's absolute pose whatever the parent's (kh_skin_step_maps: the parent
+// cancels), so the body and a cloth's bound part did not show it; a cloth's
+// SIMULATED part, which is stored relative to the carrier and drawn at the
+// decided parent, jumped by the whole error for that frame (the user: a cape
+// above its wearer's head for a frame or two, moving units only, with or
+// without a weapon). Lengths: the drawn rows of a helper measure its scale
+// (the bone's matrix is rigid), whichever of kh_pxy_try's two hypotheses its
+// visual state's own rows answer to.
+inline bool kh_pxy_len_is_helper(const float khlh_len[3], float khlh_scale) {
+    if (!(khlh_scale > 1.0f + 2.0f * KH_PXY_LEN_TOL)) return false;   // A unit-length window is not told from a parent's by its lengths.
+    for (int j = 0; j < 3; ++j) {
+        if (!(fabsf(khlh_len[j] - khlh_scale) <= KH_PXY_LEN_TOL * khlh_scale)) return false;
+    }
+    return true;
+}
 // One window against one slot.
+// KH_CBL_NOT_HELPER: khpw_mine (optional) is raised when the window passed this
+// slot's basis and length tests at the slot's own scale - ahead of the gate,
+// the key and the admission, none of which bear on whose matrix it is.
 // KH_CBL_CAMX: khpw_camx = khpw_t is already the absolute translation (the
 // window's plus the origin its upload carried); the hypothesis is CAMX and the
 // grid rebase does not apply.
 inline void kh_pxy_try(const float khpw_vn[3][3], const float khpw_len[3], const float khpw_t[3], uint32_t khpw_kind,
-                       uint32_t khpw_pass, uint32_t khpw_off, uint32_t khpw_width, uint32_t khpw_i, bool khpw_camx = false) {
+                       uint32_t khpw_pass, uint32_t khpw_off, uint32_t khpw_width, uint32_t khpw_i, bool khpw_camx = false,
+                       bool* khpw_mine = nullptr) {
     const uint64_t khpw_c = g_topo_cycles;
     KhPxySlot& khpw_s = g_pxy[khpw_i];
     if (khpw_s.base == 0 || khpw_s.hn == 0u || khpw_s.touch_cycle > khpw_c ||
@@ -11048,6 +11748,7 @@ inline void kh_pxy_try(const float khpw_vn[3][3], const float khpw_len[3], const
     if (!khpw_ok) return;
     const float khpw_lr = khpw_e1 < khpw_e2 ? khpw_e1 : khpw_e2;
     if (!(khpw_lr <= KH_PXY_LEN_TOL)) return;
+    if (khpw_mine && kh_pxy_len_is_helper(khpw_len, khpw_s.scale)) *khpw_mine = true;   // KH_CBL_NOT_HELPER.
     float khpw_dd = kh_pxy_track_dist(khpw_s, khpw_p);
     // Read live when the upload is not on the track, not only when it fails the
     // gate: the tick may have landed after the anchor, and the nearest-to-track
@@ -11137,7 +11838,7 @@ inline bool kh_pxy_cell_any(const float khpa_t[3], const float* khpa_orig = null
 // One window at one translation: as uploaded (khpw_camx false: the absolute
 // and grid hypotheses) or with its upload's origin added (true: KH_CBL_CAMX).
 inline void kh_pxy_window_at(const float khpw_vn[3][3], const float khpw_len[3], const float khpw_t[3], uint32_t khpw_kind,
-                             uint32_t khpw_pass, uint32_t khpw_off, uint32_t khpw_width, bool khpw_camx) {
+                             uint32_t khpw_pass, uint32_t khpw_off, uint32_t khpw_width, bool khpw_camx, bool* khpw_mine = nullptr) {
     uint32_t khpw_cell;
     if (!kh_pxy_cell_of(khpw_t, khpw_cell)) return;
     const uint32_t khpw_e0 = g_pxy_cell_start[khpw_cell], khpw_e1 = g_pxy_cell_start[khpw_cell + 1u];
@@ -11162,21 +11863,22 @@ inline void kh_pxy_window_at(const float khpw_vn[3][3], const float khpw_len[3],
                 if (g_pxy_try_mark[khpw_i] == khpw_ser) continue;
                 g_pxy_try_mark[khpw_i] = khpw_ser;
             }
-            kh_pxy_try(khpw_vn, khpw_len, khpw_t, khpw_kind, khpw_pass, khpw_off, khpw_width, khpw_i, khpw_camx);
+            kh_pxy_try(khpw_vn, khpw_len, khpw_t, khpw_kind, khpw_pass, khpw_off, khpw_width, khpw_i, khpw_camx, khpw_mine);
         }
     }
     for (uint32_t khpw_w = 0; khpw_w < g_pxy_wide_n; ++khpw_w) {
-        kh_pxy_try(khpw_vn, khpw_len, khpw_t, khpw_kind, khpw_pass, khpw_off, khpw_width, g_pxy_wide[khpw_w], khpw_camx);
+        kh_pxy_try(khpw_vn, khpw_len, khpw_t, khpw_kind, khpw_pass, khpw_off, khpw_width, g_pxy_wide[khpw_w], khpw_camx, khpw_mine);
     }
 }
 // Render thread, kh_cbl_window: the window as uploaded, and, when its upload
 // carried an origin (KH_CBL_CAMX), at translation + origin as well.
 inline void kh_pxy_window(const float khpw_vn[3][3], const float khpw_len[3], const float khpw_t[3], uint32_t khpw_kind,
-                          uint32_t khpw_pass, uint32_t khpw_off, uint32_t khpw_width, const float* khpw_orig = nullptr) {
-    kh_pxy_window_at(khpw_vn, khpw_len, khpw_t, khpw_kind, khpw_pass, khpw_off, khpw_width, false);
+                          uint32_t khpw_pass, uint32_t khpw_off, uint32_t khpw_width, const float* khpw_orig = nullptr,
+                          bool* khpw_mine = nullptr) {
+    kh_pxy_window_at(khpw_vn, khpw_len, khpw_t, khpw_kind, khpw_pass, khpw_off, khpw_width, false, khpw_mine);
     if (khpw_orig) {
         const float khpw_w[3] = { khpw_t[0] + khpw_orig[0], khpw_t[1] + khpw_orig[1], khpw_t[2] + khpw_orig[2] };
-        kh_pxy_window_at(khpw_vn, khpw_len, khpw_w, khpw_kind, khpw_pass, khpw_off, khpw_width, true);
+        kh_pxy_window_at(khpw_vn, khpw_len, khpw_w, khpw_kind, khpw_pass, khpw_off, khpw_width, true, khpw_mine);
     }
 }
 // Render thread, a step under g_draw_list_mutex: the slot's pose for this cycle.
@@ -11318,6 +12020,25 @@ inline uint32_t kh_pxy_skel(KhAttach& khsk_a, const float khsk_root_p[3], const 
 // proxy route, which decides first and is kept deciding by
 // KH_PXY_UNIQUE_TEX. The reads below stand only when this one does not exist
 // (the first cycle of a binding, a skipped cycle).
+// KH_ATTACH_LF_SIM_ONLY - all of that was measured on a helper that carries
+// the SIMULATION copy alone, whose state the game thread writes a frame ahead
+// of the draw - which is the whole reason a read a cycle old is the drawn one.
+// (Nothing in getRenderStats tells the two kinds apart: attachSkew reads the
+// class scale on either copy.) A helper that
+// carries the VISUAL copy is read as its parent is,
+// and a parent's own read was the drawn one in both captures: last cycle's
+// read then put the mesh a frame BEHIND on every cycle the race fell that way
+// (seen: a lag at any speed, a teleport every other frame, with the proxy
+// route undecided). So this read stands in only for a lane (or a skeletal
+// proxy) whose chosen copy is not the visual one; a visual-copy helper takes
+// the live read beside its pair, the same-copy design KH_CBL_PXY_SKEL and
+// kh_cbl_snap_pick_skel were written for. Decided per lane and per proxy, so
+// helpers of both kinds may be mixed. A lane that has not chosen yet
+// (KH_ATTACH_OFF_NONE: never read), or whose choice is provisional
+// (KH_ATTACH_VIS_RETRY: it IS reading the simulation copy), counts as before.
+inline bool kh_attach_lf_applies(uint32_t khla_off) {
+    return !(KH_ATTACH_VS_RENDER != 0u && khla_off == KH_ATTACH_VS_RENDER);
+}
 // Render thread, a final step, under g_draw_list_mutex: this cycle's reads.
 inline void kh_attach_lf_take(KhAttach& khlf_a) {
     const uint64_t khlf_c = g_topo_cycles;
@@ -11357,18 +12078,23 @@ inline bool kh_attach_lf_prev(const KhAttach& khlp_a, uint32_t& khlp_s) {
 // written into the stash in the stash parent's frame, as kh_pxy_skel writes a
 // decided upload (rel = par^-1 * X' = root^-1 * X_drawn). root_p SQF order,
 // root_r engine rows, before the offsets. False (the stash untouched) unless
-// every proxy has one.
+// every proxy has one. KH_ATTACH_LF_SIM_ONLY: a proxy read from the visual
+// copy keeps the stash's fresh sample, and the answer is then false - the
+// caller's "nothing left to wait for" holds only when every proxy was served.
 inline bool kh_attach_lf_skel(KhAttach& khls_a, const float khls_root_p[3], const float khls_root_r[9]) {
     uint32_t khls_s = 0u;
     if (!khls_a.skel || !kh_attach_lf_prev(khls_a, khls_s) || khls_a.skel_lf_gen[khls_s] != khls_a.skel_gen) return false;
     const size_t khls_np = khls_a.skel_proxy.size();
     const std::vector<float>& khls_v = khls_a.skel_lf[khls_s];
     if (khls_np == 0u || khls_v.size() != khls_np * 12u || khls_a.skel_smp.size() != khls_np * 12u) return false;
+    if (khls_a.skel_smp_off.size() != khls_np) return false;   // The stash's own copy choices (the sample block sizes them first).
+    bool khls_all = true;
     float khls_ps[3], khls_pc[3], khls_pcr[9];
     kh_cbl_swap_yz(khls_root_p, khls_ps);
     kh_cbl_swap_yz(khls_a.skel_smp_par, khls_pc);
     memcpy(khls_pcr, khls_a.skel_smp_par + 3, sizeof(khls_pcr));
     for (size_t khls_j = 0; khls_j < khls_np; ++khls_j) {
+        if (!kh_attach_lf_applies(khls_a.skel_smp_off[khls_j])) { khls_all = false; continue; }   // KH_ATTACH_LF_SIM_ONLY.
         float khls_x[3], khls_xr[9], khls_xs[3];
         kh_cbl_swap_yz(&khls_v[khls_j * 12u], khls_x);
         memcpy(khls_xr, &khls_v[khls_j * 12u + 3u], sizeof(khls_xr));
@@ -11377,7 +12103,7 @@ inline bool kh_attach_lf_skel(KhAttach& khls_a, const float khls_root_p[3], cons
         memcpy(&khls_a.skel_smp[khls_j * 12u], khls_xs, sizeof(khls_xs));
         memcpy(&khls_a.skel_smp[khls_j * 12u + 3u], khls_xr, sizeof(khls_xr));
     }
-    return true;
+    return khls_all;
 }
 // KH_CBL_PXY_SKEL - a memory-point lane (the proxy route undecided) placed
 // exactly as a skeletal binding places its proxies (kh_attach_step's
@@ -11394,7 +12120,8 @@ inline bool kh_attach_lf_skel(KhAttach& khls_a, const float khls_root_p[3], cons
 // but undecided, draws the carried pose and leaves the final step to settle it.
 // A failed live read keeps the lane's own sample. SQF-order position, engine
 // rows, before the offsets. Render thread, under g_draw_list_mutex.
-// KH_ATTACH_LAST_FRAME's read, when it exists, is taken before any of this.
+// KH_ATTACH_LAST_FRAME's read, when it exists AND the helper is read from the
+// simulation copy (KH_ATTACH_LF_SIM_ONLY), is taken before any of this.
 inline void kh_cbl_proxy_lane(KhAttach& khpl_a, KhCblTarget* khpl_t, bool khpl_anchored, bool khpl_ctx,
                               float khpl_p[3], float khpl_r[9]) {
     const uint64_t khpl_c = g_topo_cycles;
@@ -11404,7 +12131,8 @@ inline void kh_cbl_proxy_lane(KhAttach& khpl_a, KhCblTarget* khpl_t, bool khpl_a
         return;
     }
     uint32_t khpl_ls = 0u;   // KH_ATTACH_LAST_FRAME.
-    const bool khpl_lf = kh_attach_lf_prev(khpl_a, khpl_ls) && khpl_a.lf_xb[khpl_ls] == kh_cbl_base_of(khpl_a.proxy);
+    const bool khpl_lf = kh_attach_lf_applies(khpl_a.off_pos) &&   // KH_ATTACH_LF_SIM_ONLY: a visual-copy helper reads live.
+                         kh_attach_lf_prev(khpl_a, khpl_ls) && khpl_a.lf_xb[khpl_ls] == kh_cbl_base_of(khpl_a.proxy);
     if (khpl_lf) {
         memcpy(khpl_p, khpl_a.lf_p[khpl_ls], sizeof(khpl_a.lf_p[0]));
         memcpy(khpl_r, khpl_a.lf_r[khpl_ls], sizeof(khpl_a.lf_r[0]));
@@ -13029,6 +13757,32 @@ inline bool kh_shader_mt_prewarm(const KhShaderJob* khsm_jobs, size_t khsm_n,
     // A detached worker from a previous session may still be reading the queue
     // and the owned-job storage; refusing here is what makes that detach safe.
     if (g_khsm_live.load(std::memory_order_acquire) > 0) return false;
+    // KH_SHADER_ORPHANS - a shutdown that could not wait (the device reset's
+    // never does; a mission end's gives up after its bound) detaches its
+    // workers and LEAVES the memo for them: they finish the unit they hold and
+    // exit on the abort flag, and every unit none of them had claimed stays in
+    // the map undone, for good - no worker will take it (the queue below skips
+    // a hash the map already holds) and nothing erases it. Such an entry then
+    //   - kept the main ensure's deferral up for the rest of the session
+    //     whenever this batch queued anything new (kh_shader_async_hold waits
+    //     for EVERY entry of the map; a reset changes the sample-count defines,
+    //     so new units are the usual case): white placeholders, no mesh;
+    //   - with nothing new to queue, sent every orphaned unit to an inline
+    //     compile inside the ensure - the seconds-long stall the pool exists to
+    //     avoid;
+    //   - kept a user-shader batch from ever being reaped (kh_user_shader_reap
+    //     waits the same way), so g_khsm_active stood and every later prewarm,
+    //     the main one included, was refused.
+    // Here no batch is live and no worker exists, so an undone entry is an
+    // orphan by construction: dropped (it holds no blob), and queued again
+    // below like any other unit. Done entries stay - their blobs are good.
+    {
+        std::lock_guard<std::mutex> khsm_l(g_khsm_mu);
+        for (auto khsm_it = g_khsm_map.begin(); khsm_it != g_khsm_map.end();) {
+            if (!khsm_it->second.done) khsm_it = g_khsm_map.erase(khsm_it);
+            else ++khsm_it;
+        }
+    }
     g_khsa_abort.store(false, std::memory_order_relaxed);
     unsigned khsm_hw = std::thread::hardware_concurrency();
     if (khsm_hw == 0) khsm_hw = 1;
@@ -13582,6 +14336,17 @@ struct KhClothInst {
     // re-placed the bound part and wrote vb; the upload leaves that cycle's
     // bytes, key and box standing.
     uint64_t pin_step_cycle = ~0ull;
+    // KH_CLOTH_PIN_GRADE - out_guide[b]: the guide the job solved out[b]
+    // against (its in_guide, copied with out[b]). The re-placement above was
+    // binary - a hard pin took this frame's bones, a particle painted 2 % sim
+    // kept the pose an older guide gave it - while the solver's gradient is
+    // continuous, so the cloth tore along the pin boundary by however far the
+    // bones had moved since the job's guide (a frame or more: the job is
+    // asynchronous, and KH_SIM_LOD spaces its steps). With it kh_cloth_pin_place
+    // carries a gradient particle along by (1 - its paint weight) of what its
+    // OWN target moved since - 1 at the pinned end, 0 at the simulated end, so
+    // it meets both neighbours. Empty or of another bone count = no grading.
+    std::vector<float> out_guide[2];
     std::vector<float> ch_mat[2];
     std::vector<MeshVertex> pin_out;
     std::vector<float> pin_guide;
@@ -13918,6 +14683,8 @@ inline bool kh_cloth_build(KhClothInst& khcb_in, const MeshDef& khcb_d, uint32_t
     khcb_in.rest = khcb_d.verts;
     khcb_in.out[0] = khcb_d.verts;
     khcb_in.out[1] = khcb_d.verts;
+    khcb_in.out_guide[0].clear();   // KH_CLOTH_PIN_GRADE: the rest pose was solved against no guide.
+    khcb_in.out_guide[1].clear();
     khcb_in.box_on[0] = khcb_in.box_on[1] = false;   // KH_SKEL: both start in the rest box.
     khcb_in.uploaded_box_on = false;
     khcb_in.sim_out.clear();
@@ -14892,6 +15659,7 @@ inline void kh_cloth_run(const std::shared_ptr<KhClothInst>& khcj_in) {
             }
         }
     }
+    khcj.out_guide[khcj_back] = khcj.in_guide;   // KH_CLOTH_PIN_GRADE: what this front's targets were (inputs stand while busy).
     }
     khcj.front.store(khcj_back, std::memory_order_release);
     khcj.gen.fetch_add(1u, std::memory_order_release);
@@ -16447,11 +17215,13 @@ inline void kh_cloth_stats_publish(uint64_t khsp_inst, uint64_t khsp_ch_inst, ui
 // uploads newly published frames, resizes the slot table and empties the grave.
 // KH_CLOTH_PIN_FRESH: the front buffer with the guide-bound part re-placed from
 // this frame's guide into pin_out, in the front's frame - the cloth's hard pins
-// (w == 0), or a chain mesh re-skinned with fresh kinematic and guide-mapped
-// bone maps and the job's dynamic ones. False when there is nothing to re-place
-// (the front uploads as is). Under g_cloth_mu, from kh_cloth_upload and
-// kh_cloth_pin_draw_step; reads only what the job does not write past the
-// build, plus out / box_* / ch_mat at front. kh_cloth_pin_place re-places from
+// (w == 0) exactly, its pin/sim gradient in proportion (KH_CLOTH_PIN_GRADE,
+// KhClothInst::out_guide), or a chain mesh re-skinned with fresh kinematic and
+// guide-mapped bone maps and the job's dynamic ones. False when there is
+// nothing to re-place (the front uploads as is). Under g_cloth_mu, from
+// kh_cloth_upload and kh_cloth_pin_draw_step; reads only what the job does not
+// write past the build (a particle's w and att among it), plus out / box_* /
+// ch_mat / out_guide at front. kh_cloth_pin_place re-places from
 // any guide (khpf_g, khpf_nb maps in kh_skin_affine_of's layout);
 // kh_cloth_pin_fresh feeds it the Draw3D guide.
 inline bool kh_cloth_pin_place(KhClothInst& khpf_in, uint32_t khpf_f, const float* khpf_g, size_t khpf_nb) {
@@ -16499,10 +17269,33 @@ inline bool kh_cloth_pin_place(KhClothInst& khpf_in, uint32_t khpf_f, const floa
         khpf_is[k] = 1.0f / khpf_s[k];
     }
     const bool khpf_boxed = khpf_in.box_on[khpf_f];
+    // KH_CLOTH_PIN_GRADE: the front's own guide, when it has one of this bone
+    // count and the bones have moved since (standing still grades nothing).
+    const std::vector<float>& khpf_og = khpf_in.out_guide[khpf_f];
+    const bool khpf_grade = khpf_og.size() == khpf_nb * 12u &&
+                            memcmp(khpf_og.data(), khpf_g, khpf_nb * 12u * sizeof(float)) != 0;
     bool khpf_any = false;
     for (size_t i = 0; i < khpf_nv; ++i) {
         const uint32_t p = khpf_in.vmap[i];
-        if (p >= khpf_np || khpf_in.st.part[p].w > 0.0f) continue;
+        if (p >= khpf_np) continue;
+        if (khpf_in.st.part[p].w > 0.0f) {
+            // A gradient particle (att > 0; att and w are the build's, never
+            // the job's): the solver's own position, carried along by (1 - w)
+            // of its target's move. att = S w / (1 - w), so 1 - w = S / (S + att).
+            const float khpf_att = khpf_in.st.part[p].att;
+            if (!khpf_grade || !(khpf_att > 0.0f)) continue;   // Fully simulated: the job's, as it is.
+            float g1[3], g0[3];
+            kh_cloth_guide_at(khpf_in, khpf_g, khpf_nb, khpf_is, p, g1);
+            kh_cloth_guide_at(khpf_in, khpf_og.data(), khpf_nb, khpf_is, p, g0);
+            const float khpf_k = KH_CLOTH_ATT_SOFT / (KH_CLOTH_ATT_SOFT + khpf_att);
+            float d[3];
+            for (int k = 0; k < 3; ++k) d[k] = (g1[k] - g0[k]) * khpf_k;
+            if (!(d[0] == d[0] && d[1] == d[1] && d[2] == d[2]) || (d[0] == 0.0f && d[1] == 0.0f && d[2] == 0.0f)) continue;
+            if (!khpf_any) { khpf_in.pin_out = khpf_src; khpf_any = true; }
+            // A difference of two guided positions: the box's centre cancels.
+            for (int k = 0; k < 3; ++k) khpf_in.pin_out[i].pos[k] += khpf_boxed ? d[k] * khpf_s[k] / khpf_be[k] : d[k];
+            continue;
+        }
         if (!khpf_any) { khpf_in.pin_out = khpf_src; khpf_any = true; }
         float g[3];
         kh_cloth_guide_at(khpf_in, khpf_g, khpf_nb, khpf_is, p, g);
@@ -16587,6 +17380,7 @@ inline void kh_cloth_upload(ID3D11DeviceContext* khcu_ctx, ID3D11Device* khcu_de
                 // stray level-1 draw would render it.
                 memcpy(khcu_m.pData, khcu_src.data(), khcu_src.size() * sizeof(MeshVertex));
                 khcu_ctx->Unmap(khcu_in.vb, 0);
+                kh_uvs_src_wrote(khcu_in.slot);   // KH_USER_VS: a vertex stage over this buffer evaluates again.
                 khcu_in.uploaded_gen = khcu_gen;
                 khcu_in.uploaded_shape = khcu_in.shape_of[khcu_f & 1u];   // KH_CLOTH_SHAPE: out[f]'s.
                 // KH_SKEL: and its box, which kh_skin_upload hands the object.
@@ -17007,6 +17801,7 @@ struct KhSkinInst {
     KhPhysicsBvhTopo col_topo;
     std::vector<float> col_scr;
     std::vector<float> col_prev;       // The last collider job's positions (met), the next one's motion base.
+    uint32_t col_pose_seq = 0u;        // KH_COL_CLEAR: the last collider pose's identity (KhPhysicsBvh::pose_seq), the next one's prev_seq.
     // PUBLISHED: buffer b, its box and its key are written by the worker before
     // front's release store, and read by the upload after its acquire load.
     std::vector<MeshVertex> out[2];
@@ -17025,6 +17820,20 @@ struct KhSkinInst {
     // the front result had none.
     std::atomic<uint64_t> step_cycle_pub{ ~0ull };
     std::atomic<bool> need_full{ false };
+    // KH_SKIN_HIDDEN_COL - the object is hidden (kh_skin_sync writes, the upload
+    // reads). A hidden mesh that is no collider asks for no pose at all; a
+    // hidden COLLIDER (an invisible collision body - the usual way to give a
+    // cloth a body) still needs its positions and BVH every frame, and since
+    // no step skins a mesh that is not drawn it was never 'owned': its worker
+    // skinned the full vertices and the flush uploaded the whole array, every
+    // frame, for bytes nothing draws (measured: five bodies, skinUploadUs 13 ->
+    // 127). Hidden, its job is positions-only once its buffer holds a pose, and
+    // the upload takes the result's record (gen, key, box, BVH) and leaves the
+    // bytes. Shown again, the first visible step skins the buffer before the
+    // cycle's draw and the next job is a full one; a park's late draw in that
+    // one frame (the only drawer no ctx step precedes) shows the pose the
+    // buffer last held.
+    std::atomic<bool> hidden{ false };
 };
 // KH_SKIN_MAP - written by the game thread (kh_skin_sync, kh_skin_drop_all) and
 // read on the render thread by kh_skin_upload, so the map's structure and the
@@ -17489,6 +18298,13 @@ inline void kh_skin_run(KhSkinInst& khsr_in) {
             }
         }
         khsr_in.col_prev = khsr_in.met;
+        // KH_COL_CLEAR: col_prev names THIS pose from here on, so the identity
+        // of the pose vd swept from is taken now and col_pose_seq stands at
+        // none until this pose's BVH exists: a job that throws below (an
+        // allocation) leaves the next pose a cut chain, never a link to a pose
+        // its vd was not measured from.
+        const uint32_t khsr_from = khsr_in.col_pose_seq;
+        khsr_in.col_pose_seq = 0u;
         std::shared_ptr<KhPhysicsBvh> khsr_bv = std::make_shared<KhPhysicsBvh>(*khsr_in.col_tpl);
         // KH_COL_CONVEX: a convex collider's pose is its planes: the refit
         // leaves the nodes below the root and the pseudonormals alone.
@@ -17496,10 +18312,15 @@ inline void kh_skin_run(KhSkinInst& khsr_in) {
                                 khsr_pp.empty() ? nullptr : khsr_pp.data(), khsr_in.in_convex)) {
             kh_physics_bvh_build(*khsr_bv, khsr_cp.data(), static_cast<uint32_t>(khsr_nv), khsr_d.idx0.data(), khsr_ni);
         }
+        // KH_COL_CLEAR: vd is this pose less the LAST collider job's (col_prev),
+        // so that job's pose is the one this sweeps from; none without vd.
+        khsr_bv->prev_seq = khsr_bv->vd.empty() ? 0u : khsr_from;
+        khsr_in.col_pose_seq = khsr_bv->pose_seq;
         khsr_in.bvh_of[khsr_back] = khsr_bv;
     } else {
         khsr_in.bvh_of[khsr_back].reset();
         khsr_in.col_prev.clear();   // Switched off: the next collider pose starts still.
+        khsr_in.col_pose_seq = 0u;   // KH_COL_CLEAR.
     }
     bool khsr_moved = khsr_pos && (khsr_in.shape_key == 0u || khsr_in.shape_ref.size() != khsr_in.met.size());   // KH_SKIN_GPU: no positions, no test - the key stands.
     for (size_t khsr_i = 0; khsr_pos && khsr_i < khsr_in.met.size() && !khsr_moved; ++khsr_i) {
@@ -17704,6 +18525,7 @@ inline void kh_skin_draw_finish(const std::string& khsd_h, KhAttach& khsd_a, Ren
             khsd_ctx->Unmap(khsd_vb, 0);
         }
     }
+    kh_uvs_src_wrote(khsd_o.slot);   // KH_USER_VS: a vertex stage over this buffer evaluates again (kh_uvs_step follows this step).
     // The key of the bytes just written: the palette's for a GPU pose (its
     // snapshot stood under the batch's checks, in this same step).
     const uint32_t khsd_key = (khsd_so_vb && khsd_a.skin && khsd_a.skin->rest_draw)
@@ -17762,8 +18584,12 @@ inline void kh_cloth_pin_draw_step(KhAttach& khcp_a, RenderObject& khcp_o, ID3D1
         if (khcp_cl.retired || !khcp_cl.built || khcp_cl.rest.empty() || !khcp_cl.vb ||
             khcp_cl.seq != khcp_o.seq || khcp_cl.mesh != khcp_in->mesh) return;
         // Installed by an upload already; until then a new instance draws the
-        // mesh's own vertices.
-        if (khcp_o.slot >= g_cloth_vb_slot.size() || g_cloth_vb_slot[khcp_o.slot] != khcp_cl.vb) return;
+        // mesh's own vertices. KH_USER_VS: installed too when the slot draws a
+        // vertex stage's buffer deformed from this one (kh_uvs_draws_from) -
+        // the table then names the stage's buffer, and this step used to stand
+        // down for good, leaving the bound part a frame behind its bones.
+        const bool khcp_direct = khcp_o.slot < g_cloth_vb_slot.size() && g_cloth_vb_slot[khcp_o.slot] == khcp_cl.vb;
+        if (!khcp_direct && !kh_uvs_draws_from(khcp_o.slot, khcp_cl.vb)) return;
         const uint32_t khcp_gen = khcp_cl.gen.load(std::memory_order_acquire);
         const uint32_t khcp_f = khcp_cl.front.load(std::memory_order_acquire) & 1u;
         if (!kh_cloth_pin_place(khcp_cl, khcp_f, khcp_a.draw_a.data(), khcp_a.draw_a.size() / 12u)) return;   // Nothing bound: the upload's front stands.
@@ -17772,6 +18598,7 @@ inline void kh_cloth_pin_draw_step(KhAttach& khcp_a, RenderObject& khcp_o, ID3D1
         if (FAILED(khcp_ctx->Map(khcp_cl.vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &khcp_m)) || !khcp_m.pData) return;
         memcpy(khcp_m.pData, khcp_cl.pin_out.data(), khcp_cl.pin_out.size() * sizeof(MeshVertex));   // The whole array, as the upload.
         khcp_ctx->Unmap(khcp_cl.vb, 0);
+        kh_uvs_src_wrote(khcp_o.slot);   // KH_USER_VS: a vertex stage over this buffer evaluates again (kh_uvs_step follows this step).
         // What the upload records with a write: the generation, the key, the box.
         khcp_cl.uploaded_gen = khcp_gen;
         khcp_cl.uploaded_shape = khcp_cl.shape_of[khcp_f];
@@ -17779,7 +18606,10 @@ inline void kh_cloth_pin_draw_step(KhAttach& khcp_a, RenderObject& khcp_o, ID3D1
         memcpy(khcp_cl.uploaded_box_ctr, khcp_cl.box_ctr[khcp_f], sizeof(khcp_cl.uploaded_box_ctr));
         memcpy(khcp_cl.uploaded_box_size, khcp_cl.box_size[khcp_f], sizeof(khcp_cl.uploaded_box_size));
         khcp_cl.pin_step_cycle = g_topo_cycles;
-        g_cloth_gen_slot[khcp_o.slot] = khcp_cl.uploaded_shape;   // Sized with g_cloth_vb_slot by the upload.
+        // Sized with g_cloth_vb_slot by the upload. Under a vertex stage the
+        // slot's key is the stage's (kh_uvs_step moves it with this copy), as
+        // kh_skin_draw_finish leaves it.
+        if (khcp_direct) g_cloth_gen_slot[khcp_o.slot] = khcp_cl.uploaded_shape;
         khcp_box = khcp_cl.uploaded_box_on;
         memcpy(khcp_bc, khcp_cl.uploaded_box_ctr, sizeof(khcp_bc));
         memcpy(khcp_bs, khcp_cl.uploaded_box_size, sizeof(khcp_bs));
@@ -17846,6 +18676,7 @@ inline void kh_skin_sync() {
             khss_in.cloth = khss_cloth;
             khss_in.want_collide = kh_physics_obj_collider(khss_o);
             khss_in.want_convex = khss_o.physics_col_convex;   // KH_COL_CONVEX.
+            khss_in.hidden.store(!khss_o.visible, std::memory_order_relaxed);   // KH_SKIN_HIDDEN_COL.
             // A hidden mesh keeps its instance and its last result, so the
             // buffer the upload installs and the box the object carries stay
             // one pair while it is hidden and when it is shown again; it only
@@ -17996,7 +18827,11 @@ inline void kh_skin_sync() {
         khss_in.done_collide = khss_in.want_collide;
         khss_in.in_convex = khss_in.want_convex;   // KH_COL_CONVEX.
         khss_in.done_convex = khss_in.want_convex;
-        khss_in.in_verts = !khss_owned;   // KH_SKIN_GPU.
+        // KH_SKIN_GPU: no vertices while the step owns the buffer. KH_SKIN_HIDDEN_COL: nor while the object is
+        // hidden - unless the upload asked (need_full: a buffer that holds no pose yet) or this is the first result.
+        khss_in.in_verts = !khss_owned && (!khss_in.hidden.load(std::memory_order_relaxed) ||
+                                           khss_in.need_full.load(std::memory_order_relaxed) ||
+                                           khss_in.gen.load(std::memory_order_relaxed) == 0u);
         if (khss_in.in_verts) khss_in.need_full.store(false, std::memory_order_relaxed);   // This job answers it.
         khss_in.in_cut = khss_in.cut;
         khss_in.cut = false;
@@ -18182,7 +19017,11 @@ inline void kh_skin_upload(ID3D11DeviceContext* khsu_ctx, ID3D11Device* khsu_dev
                         // and takes nothing this time: the record waits with the
                         // bytes, as it does for a Map that fails.
                         bool khsu_wrote = false;
-                        if (khsu_gp.vb && !khsu_stepped) {
+                        // KH_SKIN_HIDDEN_COL: a hidden object's result without vertices, for a buffer that already
+                        // holds a pose - the record is taken, the bytes stand, nothing is asked for.
+                        const bool khsu_hid = khsu_gp.vb && khsu_gp.valid && !khsu_stepped && !khsu_in.out_ok[khsu_f] &&
+                                              khsu_in.hidden.load(std::memory_order_relaxed);
+                        if (khsu_gp.vb && !khsu_stepped && !khsu_hid) {
                             if (!khsu_in.out_ok[khsu_f]) {
                                 khsu_in.need_full.store(true, std::memory_order_relaxed);
                             } else if (khsu_gp.so) {
@@ -18196,9 +19035,12 @@ inline void kh_skin_upload(ID3D11DeviceContext* khsu_ctx, ID3D11Device* khsu_dev
                                     khsu_wrote = true;
                                 }
                             }
-                            if (khsu_wrote) khsu_gp.by_step = false;   // The worker's bytes again: the put may follow.
+                            if (khsu_wrote) {
+                                khsu_gp.by_step = false;   // The worker's bytes again: the put may follow.
+                                kh_uvs_src_wrote(khsu_in.slot);   // KH_USER_VS: a vertex stage over this buffer evaluates again.
+                            }
                         }
-                        if (khsu_gp.vb && (khsu_stepped || khsu_wrote)) {
+                        if (khsu_gp.vb && (khsu_stepped || khsu_wrote || khsu_hid)) {
                             // COLLIDER: a pose this record has not held before
                             // takes this frame's stamp; the same pose uploaded
                             // again after a device reset keeps its own.
@@ -18782,7 +19624,8 @@ inline KhTexRef kh_tex_ref_of(const KhTexEntry& khtr_e) {
 // Cache key: lower-cased path + colour space (a map may be bound in both).
 // kh_tex_slot_srgb is the per-slot rule: diffuse / emissive / specular /
 // speccolor are colour data, normal / orm linear - except that the arma model's
-// specular slot holds SMDI, whose channels are data, so it is linear there.
+// specular slot holds SMDI, whose channels are data, so it is linear there (as
+// is a .hlsl material's when the script named it "smdi": kh_tex_map_srgb).
 inline std::string kh_tex_cache_key(const std::string& khtk_path, bool khtk_srgb) {
     std::string khtk_key = khtk_path;
     std::transform(khtk_key.begin(), khtk_key.end(), khtk_key.begin(), ::tolower);
@@ -18797,6 +19640,7 @@ inline bool kh_tex_slot_srgb(int khts_shader, int khts_slot) {
 // slots, the script's own choice for KH_USER_TEX's user slots.
 inline bool kh_tex_map_srgb(const KhMaterial& khtm_m, int khtm_slot) {
     if (khtm_slot >= KH_MAT_MAPS_BUILTIN) return khtm_m.maps[khtm_slot].srgb;
+    if (khtm_slot == 4 && khtm_m.shader == 1 && khtm_m.map_smdi) return false;   // KH_USER_SLOTS: SMDI is data.
     return kh_tex_slot_srgb(khtm_m.shader, khtm_slot);
 }
 
@@ -18868,6 +19712,12 @@ inline KhTexRef kh_tex_resolve(ID3D11Device* dev, ID3D11DeviceContext* ctx,
 
 struct KhUserShaderEntry {
     ID3D11PixelShader* ps = nullptr;
+    // KH_USER_VS: a vertex-stage entry ("v|path") holds these three instead -
+    // the VS, the stream-output object made from its bytecode, and the input
+    // layout made against it (kh_user_mat_vs).
+    ID3D11VertexShader*   vs = nullptr;
+    ID3D11GeometryShader* gs = nullptr;
+    ID3D11InputLayout*    il = nullptr;
     bool failed = false;
     bool pending = false;   // A compile is queued or in flight.
     uint64_t hash = 0;
@@ -18880,7 +19730,8 @@ static std::unordered_map<std::string, KhUserShaderEntry> g_user_ps_cache;
 struct KhUserReq {
     std::string key;   // The g_user_ps_cache key this serves.
     std::string src;   // Full concatenated source, owned.
-    std::string entry;   // PSMain / PSComposite / PSEffect.
+    std::string entry;   // PSMain / PSComposite / PSEffect / VSUserSo.
+    std::string target = "ps_5_0";   // KH_USER_VS: "vs_5_0" for VSUserSo.
     std::vector<std::string> dn;
     std::vector<std::string> dv;
     uint64_t hash = 0;
@@ -18927,7 +19778,12 @@ inline void kh_user_shader_purge_pending() {
 
 inline void kh_user_shader_cache_release() {
     kh_user_shader_purge_pending();   // Before the map, never after.
-    for (auto& khus_kv : g_user_ps_cache) KH_SAFE_RELEASE(khus_kv.second.ps);
+    for (auto& khus_kv : g_user_ps_cache) {
+        KH_SAFE_RELEASE(khus_kv.second.ps);
+        KH_SAFE_RELEASE(khus_kv.second.il);   // KH_USER_VS.
+        KH_SAFE_RELEASE(khus_kv.second.gs);
+        KH_SAFE_RELEASE(khus_kv.second.vs);
+    }
     g_user_ps_cache.clear();
 }
 
@@ -18994,7 +19850,7 @@ inline void kh_user_shader_pump(ID3D11Device* dev) {
     for (const KhUserReq& khur : g_user_req) {
         if (khur.armed) continue;
         khup_tabs.push_back(kh_user_req_macros(khur));
-        KhShaderJob khup_j = { khur.src.c_str(), khur.entry.c_str(), "ps_5_0",
+        KhShaderJob khup_j = { khur.src.c_str(), khur.entry.c_str(), khur.target.c_str(),
                                khup_tabs.back().data(), khur.hash };
         khup_jobs.push_back(khup_j);
     }
@@ -19067,7 +19923,8 @@ inline ID3D11PixelShader* kh_user_async_take(ID3D11Device* dev, const std::strin
 inline bool kh_user_async_queue(std::string khuq_key, std::string khuq_full,
                                 const char* khuq_entry,
                                 const std::vector<std::string>& khuq_dn,
-                                const std::vector<std::string>& khuq_dv) {
+                                const std::vector<std::string>& khuq_dv,
+                                const char* khuq_target = "ps_5_0") {   // KH_USER_VS: "vs_5_0".
     if (g_user_req.size() >= KH_USER_REQ_MAX) return false;
     KhUserReq khuq_r;
     khuq_r.key = khuq_key;
@@ -19075,9 +19932,10 @@ inline bool kh_user_async_queue(std::string khuq_key, std::string khuq_full,
     khuq_r.entry = khuq_entry;
     khuq_r.dn = khuq_dn;
     khuq_r.dv = khuq_dv;
+    khuq_r.target = khuq_target;
     const std::vector<D3D_SHADER_MACRO> khuq_m = kh_user_req_macros(khuq_r);
     khuq_r.hash = kh_shader_cache_hash(khuq_r.src.c_str(), khuq_r.entry.c_str(),
-                                       "ps_5_0", khuq_m.data());
+                                       khuq_r.target.c_str(), khuq_m.data());
     KhUserShaderEntry khuq_e;
     khuq_e.pending = true;
     khuq_e.hash = khuq_r.hash;
@@ -19096,6 +19954,53 @@ inline bool kh_user_shader_source(const std::string& path, std::string& out, std
     if (out.size() >= 3 && out[0] == '\xEF' && out[1] == '\xBB' && out[2] == '\xBF') out.erase(0, 3);
     if (out.empty()) { err = "'" + path + "' is empty"; return false; }
     return true;
+}
+
+// KH_USER_VS - does this source define a vertex stage: the identifier
+// KhUserVertex, whole, followed by '(' , outside every comment. (A mention in a
+// comment is not a definition; a false yes would only cost a compile that
+// fails, reported once.)
+inline bool kh_user_src_has_vertex(const std::string& khsv_s) {
+    static const char khsv_id[] = "KhUserVertex";
+    const size_t khsv_n = khsv_s.size(), khsv_m = sizeof(khsv_id) - 1u;
+    auto khsv_word = [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; };
+    for (size_t i = 0; i < khsv_n;) {
+        if (khsv_s[i] == '/' && i + 1u < khsv_n && khsv_s[i + 1u] == '/') {
+            while (i < khsv_n && khsv_s[i] != '\n') ++i;
+            continue;
+        }
+        if (khsv_s[i] == '/' && i + 1u < khsv_n && khsv_s[i + 1u] == '*') {
+            i += 2u;
+            while (i + 1u < khsv_n && !(khsv_s[i] == '*' && khsv_s[i + 1u] == '/')) ++i;
+            i = i + 1u < khsv_n ? i + 2u : khsv_n;
+            continue;
+        }
+        if (khsv_s.compare(i, khsv_m, khsv_id) == 0) {
+            const bool khsv_head = i == 0u || !khsv_word(khsv_s[i - 1u]);
+            size_t j = i + khsv_m;
+            const bool khsv_more = j < khsv_n && khsv_word(khsv_s[j]);
+            while (j < khsv_n && (khsv_s[j] == ' ' || khsv_s[j] == '\t' || khsv_s[j] == '\r' || khsv_s[j] == '\n')) ++j;
+            if (khsv_head && !khsv_more && j < khsv_n && khsv_s[j] == '(') return true;
+            i += khsv_m;
+            continue;
+        }
+        ++i;
+    }
+    return false;
+}
+// The parse's answer, per resolved path and session (a script that re-sends a
+// material every frame must not re-read the file every frame). Game thread
+// only; emptied by kh_session_globals_reset, so an edited file is read again
+// by the next mission. An unreadable file says no here and reports through
+// the pixel stage's own read.
+static std::unordered_map<std::string, bool> g_user_vtx_scan;
+inline bool kh_user_vertex_scan(const std::string& khvs_path) {
+    const auto khvs_it = g_user_vtx_scan.find(khvs_path);
+    if (khvs_it != g_user_vtx_scan.end()) return khvs_it->second;
+    std::string khvs_src, khvs_err;
+    const bool khvs_has = kh_user_shader_source(khvs_path, khvs_src, khvs_err) && kh_user_src_has_vertex(khvs_src);
+    g_user_vtx_scan.emplace(khvs_path, khvs_has);
+    return khvs_has;
 }
 
 // Custom post-processing PS for a resolved user path (nullptr = absent or
@@ -19209,6 +20114,94 @@ inline ID3D11PixelShader* kh_user_mat_ps(ID3D11Device* dev, const std::string& p
     report_error_once_safe("KH user material shader '" + path + "': " + khum_err);
     g_user_ps_cache.emplace(std::move(khum_key), khum_e);
     return nullptr;
+}
+
+// KH_USER_VS - the vertex stage of a resolved user path: VSUserSo (static.hlsl)
+// over cb.hlsl + the user file + static.hlsl, the material twins' defines plus
+// KH_USER_VS, compiled on the pool like every user unit. Returns 0 = pending
+// (or the queue was full: asked again), 1 = ready (the three objects handed
+// out), 2 = failed (latched, reported once). The stream-output object is made
+// from the VS bytecode - MeshVertex's four lanes, 48 bytes, nothing rasterised
+// - exactly as kh_skin_so_ensure makes GPU skinning's. Flush side or the
+// render thread's step: the cache's one-thread-at-a-time contract.
+inline int kh_user_mat_vs(ID3D11Device* dev, const std::string& path, ID3D11VertexShader*& khuv_vs,
+                          ID3D11GeometryShader*& khuv_gs, ID3D11InputLayout*& khuv_il) {
+    khuv_vs = nullptr; khuv_gs = nullptr; khuv_il = nullptr;
+    if (!dev || path.empty()) return 2;
+    static std::string khuv_key;
+    khuv_key.assign("v|");
+    khuv_key += path;
+    std::transform(khuv_key.begin(), khuv_key.end(), khuv_key.begin(), ::tolower);
+    auto khuv_it = g_user_ps_cache.find(khuv_key);
+    if (khuv_it == g_user_ps_cache.end()) {
+        std::string khuv_src, khuv_err;
+        if (!kh_user_shader_source(path, khuv_src, khuv_err)) {
+            KhUserShaderEntry khuv_f;
+            khuv_f.failed = true;
+            report_error_once_safe("KH user vertex stage '" + path + "': " + khuv_err);
+            g_user_ps_cache.emplace(khuv_key, khuv_f);
+            return 2;
+        }
+        std::vector<std::string> khuv_dn, khuv_dv;
+        khuv_dn.push_back("KH_RECEIVE_TEX"); khuv_dv.push_back("1");
+        khuv_dn.push_back("KH_TEXTURED");    khuv_dv.push_back("1");
+        khuv_dn.push_back("KH_USER_MAT");    khuv_dv.push_back("1");
+        khuv_dn.push_back("KH_USER_VS");     khuv_dv.push_back("1");
+        kh_user_async_queue(khuv_key, kh_hlsl_src(KH_HLSL_CB) + khuv_src + kh_hlsl_src(KH_HLSL_STATIC).c_str(),
+                            "VSUserSo", khuv_dn, khuv_dv, "vs_5_0");
+        return 0;
+    }
+    KhUserShaderEntry& khuv_e = khuv_it->second;
+    if (khuv_e.pending) {
+        ID3DBlob* khuv_blob = nullptr;
+        std::string khuv_err;
+        bool khuv_gone = false;
+        if (!kh_shader_memo_try_take(khuv_e.hash, &khuv_blob, khuv_err, khuv_gone)) return 0;   // Not ready; the pump re-arms a lost one.
+        khuv_e.pending = false;
+        if (khuv_err.empty() && khuv_blob) {
+            static const D3D11_SO_DECLARATION_ENTRY khuv_so[] = {
+                { 0, "POSITION", 0, 0, 3, 0 },
+                { 0, "NORMAL",   0, 0, 3, 0 },
+                { 0, "TEXCOORD", 0, 0, 2, 0 },
+                { 0, "TANGENT",  0, 0, 4, 0 },
+            };
+            static const D3D11_INPUT_ELEMENT_DESC khuv_ild[] = {
+                { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT,    0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+                { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+                { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,       0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+                { "TANGENT",  0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            };
+            const UINT khuv_stride = static_cast<UINT>(sizeof(MeshVertex));
+            HRESULT khuv_hr = dev->CreateVertexShader(khuv_blob->GetBufferPointer(), khuv_blob->GetBufferSize(), nullptr, &khuv_e.vs);
+            if (SUCCEEDED(khuv_hr)) {
+                khuv_hr = dev->CreateGeometryShaderWithStreamOutput(khuv_blob->GetBufferPointer(), khuv_blob->GetBufferSize(),
+                                                                    khuv_so, 4u, &khuv_stride, 1u, D3D11_SO_NO_RASTERIZED_STREAM,
+                                                                    nullptr, &khuv_e.gs);
+            }
+            if (SUCCEEDED(khuv_hr)) {
+                khuv_hr = dev->CreateInputLayout(khuv_ild, 4u, khuv_blob->GetBufferPointer(), khuv_blob->GetBufferSize(), &khuv_e.il);
+            }
+            if (FAILED(khuv_hr)) khuv_err = "stream-output objects: " + hr_str(khuv_hr);
+        }
+        if (khuv_blob) khuv_blob->Release();
+        for (size_t khuv_i = 0; khuv_i < g_user_req.size(); ++khuv_i) {
+            if (g_user_req[khuv_i].key == khuv_key) {
+                g_user_req.erase(g_user_req.begin() + static_cast<ptrdiff_t>(khuv_i));
+                break;
+            }
+        }
+        if (!khuv_e.vs || !khuv_e.gs || !khuv_e.il) {
+            KH_SAFE_RELEASE(khuv_e.il);
+            KH_SAFE_RELEASE(khuv_e.gs);
+            KH_SAFE_RELEASE(khuv_e.vs);
+            khuv_e.failed = true;
+            report_error_once_safe("KH user vertex stage '" + path + "': " +
+                                   (khuv_err.empty() ? std::string("no blob") : khuv_err));
+        }
+    }
+    if (khuv_e.failed || !khuv_e.vs || !khuv_e.gs || !khuv_e.il) return 2;
+    khuv_vs = khuv_e.vs; khuv_gs = khuv_e.gs; khuv_il = khuv_e.il;
+    return 1;
 }
 
 struct KhUserLutEntry {
@@ -20948,6 +21941,23 @@ inline void kh_mesh_cache_trim() {
 
         for (const auto& khmc_e : std::filesystem::directory_iterator(khmc_dir)) {
             if (!khmc_e.is_regular_file()) continue;
+            // KH_CACHE_TMP_SWEEP - a shader blob is written to '<name>.khsc.tmp<pid>'
+            // and renamed into place (kh_shader_compile_raw); a process that
+            // died, or was closed, between the two left the temp file for
+            // good: its extension is none this trim counts, so it was never
+            // budgeted and never removed. One older than an hour is no live
+            // writer's (a write takes milliseconds) and goes; a younger one
+            // may be another process's in flight and is left.
+            // (Matched on the native string: path::string() throws on a name
+            // the code page cannot hold, and a throw here ends the whole trim.)
+            if (khmc_e.path().filename().native().find(std::filesystem::path(".khsc.tmp").native()) != std::filesystem::path::string_type::npos) {
+                std::error_code khmc_tec;
+                const auto khmc_tt = std::filesystem::last_write_time(khmc_e.path(), khmc_tec);
+                if (!khmc_tec && std::filesystem::file_time_type::clock::now() - khmc_tt > std::chrono::hours(1)) {
+                    std::filesystem::remove(khmc_e.path(), khmc_tec);
+                }
+                continue;
+            }
             if (khmc_e.path().extension() != ".khmc" &&
                 khmc_e.path().extension() != ".khsc" &&
                 khmc_e.path().extension() != ".khtc") continue;   // Textures share the 1 GiB.
@@ -22451,8 +23461,9 @@ inline const KhMaterialSet* kh_obj_textured(const RenderObject& o) {
 }
 
 // C++ twin of KhGpuMat (cb.hlsl): the material lanes, the page layers of the
-// six maps, and the arma model's lanes (p4 / p5, zero for every other model
-// but the specular route, which is -1).
+// six maps, and the arma model's lanes (p4 / p5: filled for the arma model
+// and, KH_USER_SLOTS, for a .hlsl material - whose model lane p5[3] stays 0;
+// zero for pbr but the specular route, which is -1).
 // lay1.zw and lay2 are KH_USER_TEX's user0..user5 layers (zero for every
 // material without them).
 struct KhGpuMat {
@@ -22489,6 +23500,17 @@ inline void kh_mat_gpu_fill(ID3D11DeviceContext* ctx, ID3D11Device* dev, const K
     // the occlusion, SMDI.b the gloss and SMDI.g the specular intensity; it
     // has no roughness or metal and does not take the pbr spec workflow.
     const bool khmf_arma = m.used && m.shader == 2;
+    // KH_USER_SLOTS - a .hlsl material's orm / specular slot follows the map
+    // the script named: "as" defaults the occlusion to .g and leaves roughness
+    // and metal unrouted (AS carries neither; an explicit route still stands);
+    // "smdi" defaults the gloss to .b and the specular intensity to .g and
+    // leaves the pbr spec workflow off (SMDI's rgb is not an F0). Its arma
+    // lanes are filled whichever it named; its model lane stays 0 - the
+    // shader's own choice (KhMatSurf::model).
+    const bool khmf_user = m.used && m.shader == 1;
+    const bool khmf_as = khmf_arma || (khmf_user && m.map_as);
+    const bool khmf_smdi = khmf_arma || (khmf_user && m.map_smdi);
+    const bool khmf_lanes = khmf_arma || khmf_user;
     khmf_g.p0[0] = static_cast<float>(flags);
     khmf_g.p0[1] = static_cast<float>(m.alpha_mode);   // 0 opaque, 1 cutout, 2 blend (the draw may
                                                        // override to 3 through matCtl.w).
@@ -22500,22 +23522,22 @@ inline void kh_mat_gpu_fill(ID3D11DeviceContext* ctx, ID3D11Device* dev, const K
     khmf_g.p1[3] = m.roughness;
     khmf_g.p2[0] = khmf_arma ? 0.0f : m.metalness;
     khmf_g.p2[1] = m.emissive_intensity;
-    khmf_g.p2[2] = route_eff(m.route_occ,   2, khmf_arma ? 1 : 0);
-    khmf_g.p2[3] = khmf_arma ? -1.0f : route_eff(m.route_rough, 2, 1);
-    khmf_g.p3[0] = khmf_arma ? -1.0f : route_eff(m.route_metal, 2, 2);
+    khmf_g.p2[2] = route_eff(m.route_occ,   2, khmf_as ? 1 : 0);
+    khmf_g.p2[3] = khmf_arma ? -1.0f : route_eff(m.route_rough, khmf_as ? -1 : 2, 1);
+    khmf_g.p3[0] = khmf_arma ? -1.0f : route_eff(m.route_metal, khmf_as ? -1 : 2, 2);
     khmf_g.p3[1] = route_eff(m.route_alpha, 0, 3);
-    khmf_g.p3[2] = route_eff(m.route_gloss, 4, khmf_arma ? 2 : 3);
-    khmf_g.p3[3] = (!khmf_arma && (flags & 16)) ? 1.0f : 0.0f;
+    khmf_g.p3[2] = route_eff(m.route_gloss, 4, khmf_smdi ? 2 : 3);
+    khmf_g.p3[3] = (!khmf_smdi && (flags & 16)) ? 1.0f : 0.0f;
     khmf_g.lay0[0] = khmf_lay[0]; khmf_g.lay0[1] = khmf_lay[1]; khmf_g.lay0[2] = khmf_lay[2]; khmf_g.lay0[3] = khmf_lay[3];
     khmf_g.lay1[0] = khmf_lay[4]; khmf_g.lay1[1] = khmf_lay[5];
     khmf_g.lay1[2] = khmf_lay[6]; khmf_g.lay1[3] = khmf_lay[7];   // KH_USER_TEX: user0, user1.
     khmf_g.lay2[0] = khmf_lay[8]; khmf_g.lay2[1] = khmf_lay[9];   // user2..user5.
     khmf_g.lay2[2] = khmf_lay[10]; khmf_g.lay2[3] = khmf_lay[11];
-    for (int k = 0; k < 3; ++k) khmf_g.p4[k] = khmf_arma ? m.spec_color[k] : 0.0f;
-    khmf_g.p4[3] = khmf_arma ? m.glossiness : 0.0f;
-    khmf_g.p5[0] = khmf_arma ? m.fresnel_n : 0.0f;
-    khmf_g.p5[1] = khmf_arma ? m.fresnel_k : 0.0f;
-    khmf_g.p5[2] = khmf_arma ? route_eff(m.route_spec, 4, 1) : -1.0f;
+    for (int k = 0; k < 3; ++k) khmf_g.p4[k] = khmf_lanes ? m.spec_color[k] : 0.0f;
+    khmf_g.p4[3] = khmf_lanes ? m.glossiness : 0.0f;
+    khmf_g.p5[0] = khmf_lanes ? m.fresnel_n : 0.0f;
+    khmf_g.p5[1] = khmf_lanes ? m.fresnel_k : 0.0f;
+    khmf_g.p5[2] = khmf_lanes ? route_eff(m.route_spec, khmf_smdi ? 4 : -1, 1) : -1.0f;
     khmf_g.p5[3] = khmf_arma ? 1.0f : 0.0f;
 }
 
@@ -22758,6 +23780,7 @@ inline bool kh_inst_eligible(const RenderObject& o) {
     if (o.cloth_sim) return false;
     if (o.chain_sim) return false;   // KH_CHAIN: the same reason.
     if (o.skel) return false;   // KH_SKEL: the same reason - its skinned buffer is its own.
+    if (o.materials && o.materials->vertex_any) return false;   // KH_USER_VS: the same reason - its deformed buffer is its own.
     return !o.fullscreen && o.effect == 0 && o.mode != DepthMode::Off &&
            !(o.blend_mode == 0 && o.color[3] < 0.999f) && !o.localized && !o.banded;
 }
@@ -23133,19 +24156,21 @@ inline bool kh_apply_material_update(RenderObject& obj, const game_value& val, s
     auto lower = [](std::string s) { std::transform(s.begin(), s.end(), s.begin(), ::tolower); return s; };
     // The map slot a texture name takes, by shader kind: the arma model names
     // its maps as Arma does and keeps AS / SMDI in the orm / specular slots
-    // (KhMaterial::maps).
-    auto slot_id = [&](const std::string& s, bool khum_arma) -> int {
+    // (KhMaterial::maps). KH_USER_SLOTS: a .hlsl material takes both namings -
+    // every slot there is (the name then says what slots 2 and 4 hold).
+    auto slot_id = [&](const std::string& s, bool khum_arma, bool khum_user) -> int {
         if (s == "diffuse" || s == "albedo") return 0;
         if (s == "normal") return 1;
         if (s == "emissive") return 3;
-        if (khum_arma) {
+        if (khum_arma || khum_user) {
             if (s == "as") return 2;
             if (s == "smdi") return 4;
             if (s == "speccolor") return 5;
-            return -1;
         }
-        if (s == "orm") return 2;
-        if (s == "specular") return 4;
+        if (!khum_arma) {
+            if (s == "orm") return 2;
+            if (s == "specular") return 4;
+        }
         return -1;
     };
     auto chan_id = [](const std::string& s) -> int {
@@ -23206,7 +24231,9 @@ inline bool kh_apply_material_update(RenderObject& obj, const game_value& val, s
             err = "unknown shader '" + khum_sh_raw + "' (\"pbr\", \"arma\" or a \".hlsl\" path)";
             return false;
         }
+        const bool khum_user = !khum_sh_path.empty();   // KH_USER_SLOTS: every slot, route and param.
         const char* const khum_slots = khum_arma ? "diffuse|normal|as|smdi|speccolor|emissive"
+                                     : khum_user ? "diffuse|normal|orm|as|emissive|specular|smdi|speccolor"
                                                  : "diffuse|normal|orm|emissive|specular";
 
         // Build the material once, assign to every target.
@@ -23214,6 +24241,7 @@ inline bool kh_apply_material_update(RenderObject& obj, const game_value& val, s
         mat.used = true;
         mat.shader = !khum_sh_path.empty() ? 1 : (khum_arma ? 2 : 0);
         mat.user_shader = khum_sh_path;
+        mat.user_vertex = khum_user && kh_user_vertex_scan(khum_sh_path);   // KH_USER_VS: the file defines KhUserVertex.
 
         if (ent.size() > 2 && !ent[2].is_nil()) {
             if (ent[2].type_enum() != game_data_type::ARRAY) { err = "textures must be an array of [path, slot, routing?] entries"; return false; }
@@ -23229,7 +24257,7 @@ inline bool kh_apply_material_update(RenderObject& obj, const game_value& val, s
                 }
                 const std::string tpath = static_cast<std::string>(te[0]);
                 const std::string khut_name = lower(static_cast<std::string>(te[1]));
-                int slot = slot_id(khut_name, khum_arma);
+                int slot = slot_id(khut_name, khum_arma, khum_user);
                 // KH_USER_TEX: user0..user5, read only by a .hlsl material's
                 // own code (KhUserTex); no builtin input can be routed to one.
                 const bool khut_user = khut_name.size() == 5 && khut_name.compare(0, 4, "user") == 0 &&
@@ -23257,6 +24285,16 @@ inline bool kh_apply_material_update(RenderObject& obj, const game_value& val, s
                 if (resolved.empty()) {
                     err = "texture '" + tpath + "' not found (searched Documents\\Arma 3\\kh_framework\\rendering, then every mod's 'rendering' folder)";
                     return false;
+                }
+                if (khum_user && (slot == 2 || slot == 4)) {   // KH_USER_SLOTS: one slot, two namings - the name says what it holds.
+                    const bool khut_an = khut_name == "as" || khut_name == "smdi";
+                    bool& khut_held = slot == 2 ? mat.map_as : mat.map_smdi;
+                    if (!mat.maps[slot].path.empty() && khut_held != khut_an) {
+                        err = slot == 2 ? "texture slots 'orm' and 'as' are one slot: give one of them"
+                                        : "texture slots 'specular' and 'smdi' are one slot: give one of them";
+                        return false;
+                    }
+                    khut_held = khut_an;
                 }
                 mat.maps[slot].path = resolved;
                 mat.maps[slot].srgb = false;
@@ -23293,12 +24331,14 @@ inline bool kh_apply_material_update(RenderObject& obj, const game_value& val, s
                         if      (input == "occlusion")  mat.route_occ = route;
                         else if (input == "alpha")      mat.route_alpha = route;
                         else if (input == "gloss")      mat.route_gloss = route;
-                        else if (khum_arma && input == "specular") mat.route_spec = route;
+                        else if ((khum_arma || khum_user) && input == "specular") mat.route_spec = route;
                         else if (!khum_arma && input == "roughness") mat.route_rough = route;
                         else if (!khum_arma && (input == "metallic" || input == "metalness")) mat.route_metal = route;
                         else {
                             err = "unknown routing input '" + input + "' (" +
-                                  (khum_arma ? "occlusion|gloss|specular|alpha" : "occlusion|roughness|metallic|alpha|gloss") + ")";
+                                  (khum_arma ? "occlusion|gloss|specular|alpha"
+                                   : khum_user ? "occlusion|roughness|metallic|alpha|gloss|specular"
+                                               : "occlusion|roughness|metallic|alpha|gloss") + ")";
                             return false;
                         }
                     }
@@ -23329,17 +24369,17 @@ inline bool kh_apply_material_update(RenderObject& obj, const game_value& val, s
                 } else if (!khum_arma && (key == "metalness" || key == "metallic")) {
                     if (pe[1].type_enum() != game_data_type::SCALAR) { err = "metalness must be a number"; return false; }
                     mat.metalness = static_cast<float>(pe[1]);
-                } else if (khum_arma && (key == "glossiness" || key == "gloss")) {
+                } else if ((khum_arma || khum_user) && (key == "glossiness" || key == "gloss")) {
                     if (pe[1].type_enum() != game_data_type::SCALAR) { err = "glossiness must be a number"; return false; }
                     mat.glossiness = static_cast<float>(pe[1]);
-                } else if (khum_arma && (key == "specularcolor" || key == "speccolor")) {
+                } else if ((khum_arma || khum_user) && (key == "specularcolor" || key == "speccolor")) {
                     if (pe[1].type_enum() != game_data_type::ARRAY) { err = "specularColor must be [r, g, b] numbers"; return false; }
                     auto& c = pe[1].to_array();
                     if ((c.size() > 0 && c[0].type_enum() != game_data_type::SCALAR) ||
                         (c.size() > 1 && c[1].type_enum() != game_data_type::SCALAR) ||
                         (c.size() > 2 && c[2].type_enum() != game_data_type::SCALAR)) { err = "specularColor must be [r, g, b] numbers"; return false; }
                     for (size_t k = 0; k < 3 && k < c.size(); ++k) mat.spec_color[k] = static_cast<float>(c[k]);
-                } else if (khum_arma && key == "fresnel") {
+                } else if ((khum_arma || khum_user) && key == "fresnel") {
                     // [N, K], or Arma's own procedural texture string with a
                     // fresnel(N,K) in it, pasted from an rvmat.
                     float khum_nk[2] = { 0.0f, 0.0f };
@@ -23374,6 +24414,14 @@ inline bool kh_apply_material_update(RenderObject& obj, const game_value& val, s
                     }
                     mat.fresnel_n = khum_nk[0];
                     mat.fresnel_k = khum_nk[1];
+                } else if (khum_user && key == "vertexbound") {   // KH_USER_VS: how far KhUserVertex moves any vertex (m).
+                    if (pe[1].type_enum() != game_data_type::SCALAR) { err = "vertexBound must be a number (metres)"; return false; }
+                    const float khum_vb = static_cast<float>(pe[1]);
+                    if (!(khum_vb >= 0.0f && khum_vb < 1.0e6f)) { err = "vertexBound must be a finite number >= 0 (metres)"; return false; }
+                    mat.vertex_bound = khum_vb;
+                } else if (khum_user && key == "vertexstatic") {   // KH_USER_VS: the result moves only when its inputs do.
+                    if (pe[1].type_enum() != game_data_type::SCALAR) { err = "vertexStatic must be a number (0 or 1)"; return false; }
+                    mat.vertex_static = static_cast<float>(pe[1]) != 0.0f;
                 } else if (key == "emissiveintensity" || key == "emissive") {
                     if (pe[1].type_enum() != game_data_type::SCALAR) { err = "emissiveIntensity must be a number"; return false; }
                     mat.emissive_intensity = static_cast<float>(pe[1]);
@@ -23393,7 +24441,8 @@ inline bool kh_apply_material_update(RenderObject& obj, const game_value& val, s
                 } else {
                     err = "unknown material param '" + key + "' (" +
                           (khum_arma ? "basecolor|glossiness|specularcolor|fresnel|emissiveintensity|normalstrength|cutoff|alphamode"
-                                     : "basecolor|roughness|metalness|emissiveintensity|normalstrength|cutoff|alphamode") + ")";
+                           : khum_user ? "basecolor|roughness|metalness|glossiness|specularcolor|fresnel|emissiveintensity|normalstrength|cutoff|alphamode|vertexbound|vertexstatic"
+                                       : "basecolor|roughness|metalness|emissiveintensity|normalstrength|cutoff|alphamode") + ")";
                     return false;
                 }
             }
@@ -23404,6 +24453,19 @@ inline bool kh_apply_material_update(RenderObject& obj, const game_value& val, s
 
     next.any = false;
     for (const auto& s : next.slots) if (s.used) { next.any = true; break; }
+    // KH_USER_VS: the set's vertex-stage summary (what the bounds, the bucket
+    // test and kh_uvs_upload read without walking the slots).
+    next.vertex_any = false;
+    next.vertex_bound = 0.0f;
+    next.vertex_static = true;
+    for (const auto& s : next.slots) {
+        if (!s.used || s.shader != 1 || !s.user_vertex) continue;
+        next.vertex_any = true;
+        if (s.vertex_bound > next.vertex_bound) next.vertex_bound = s.vertex_bound;
+        if (!s.vertex_static) next.vertex_static = false;
+    }
+    if (!next.vertex_any) next.vertex_static = false;
+    else g_uvs_sets.store(1u, std::memory_order_relaxed);   // A flag, not a count: a script may re-send a material every frame.
     next.hash = kh_material_set_hash(next);   // KH_INSTANCING: the batch key's material identity.
     obj.materials = kh_material_intern(std::move(next));   // KH_MAT_POOL.
     return true;
@@ -26598,9 +27660,12 @@ static inline void kh_hook_except() {
         try { report_error_once_safe("KH RenderIntegration: exception inside a context hook (frame skipped)"); } catch (...) {}
     }
 }
-// Restores g_ro.in_injection on every exit, exception included, for the parked
-// flush (its save/restore pairs are skipped by a throw). Game thread, inside
-// the park's lock scope.
+// Restores g_ro.in_injection on every exit, exception included. Three users:
+// the parked flush (kh_park_run - its save/restore pairs are skipped by a
+// throw; game thread, inside the park's lock scope), and kh_skin_so_batch and
+// kh_uvs_step (the render thread's steps - and, for kh_uvs_step, the flush's
+// thread at kh_uvs_upload's end - which declare it ahead of their StateBackup
+// so that it unwinds after the restore).
 struct KhInjectionFlagScope {
     bool khif_prev;
     KhInjectionFlagScope() : khif_prev(g_ro.in_injection) {}
@@ -26618,7 +27683,7 @@ struct KhInjectionFlagScope {
 // A binding it cannot take (no stream-output buffer, no rest stream, a palette
 // that does not fit, a Map that fails) is left for the pool, untouched.
 // THE BRACKET (1.957): StateBackup holds everything the pass sets that it
-// captures (layout, topology, IA slot 0, VS / GS / PS, VS b0); the
+// captures (layout, topology, IA slot 0, VS / GS / PS / HS / DS, VS b0); the
 // stream-output target it does not capture is saved and handed back here
 // (offset -1: an engine target, were there ever one, keeps appending).
 // g_ro.in_injection is raised for the pass - the cast fire's step runs before
@@ -26668,6 +27733,12 @@ inline void kh_skin_so_batch(ID3D11DeviceContext* khsb_ctx, std::vector<KhSkinDr
         khsb_ctx->VSSetShader(g_res.skin_so_vs, nullptr, 0);
         khsb_ctx->GSSetShader(g_res.skin_so_gs, nullptr, 0);
         khsb_ctx->PSSetShader(nullptr, nullptr, 0);
+        // A point list is not a valid input to a hull shader: were the engine
+        // ever to leave tessellation stages bound at a step site, the draws
+        // below would be dropped and the pose never written. Cleared for the
+        // pass, as kh_uvs_step clears them; the restore hands them back.
+        khsb_ctx->HSSetShader(nullptr, nullptr, 0);
+        khsb_ctx->DSSetShader(nullptr, nullptr, 0);
         khsb_ctx->VSSetConstantBuffers(0, 1, &g_res.skin_so_cb);
         for (size_t i = 0; i < khsb_jobs.size(); ++i) {
             const KhSbTarget& tg = khsb_tg[i];
@@ -32448,6 +33519,382 @@ inline void kh_fill_user_cam_cb(ConstantData& cbd, const float* khuc_cam, const 
     }
 }
 
+// KH_USER_VS - the user vertex stage. A .hlsl material that defines
+//     void KhUserVertex(inout KhUserVtx v)
+// (the contract is in cb.hlsl) deforms its submesh's vertices. The deformation
+// must be the SAME in every pass that draws the mesh - the colour twins, the
+// five sun tiers, the light maps, the seam, the mirror, the mask cast, PIP,
+// inFront - or the shadows and the depth part from it, so it is not a hook in
+// a dozen vertex shaders: it runs ONCE a cycle as a stream-output pass (GPU
+// skinning's architecture, kh_skin_so_batch) into a vertex buffer of the
+// object's own, installed in the slot table every pass resolves its vertex
+// buffer through (kh_mesh_vb_for). No pass, layout or shader but VSUserSo
+// knows it exists.
+//   kh_uvs_upload  (the flush, after the cloth's and the skin's uploads, which
+//     empty and refill the slot tables): finds the live objects whose set has
+//     a vertex stage, makes each one's DEFAULT + STREAM_OUTPUT buffer, primes
+//     it with a copy of its SOURCE - the buffer the slot held (a cloth's, a
+//     skinned pose's) or the mesh's own - and installs it over that, once
+//     every vertex stage of the set has landed (pending: the source draws,
+//     undeformed; failed: reported once, that submesh stays undeformed).
+//   kh_uvs_step  (the render thread's context steps - the cast fire's, the
+//     injection's, the flush's - right after kh_attach_step, so a skinned
+//     source holds this cycle's pose; and the end of kh_uvs_upload, so a new
+//     buffer is deformed before its first draw): per object once a cycle (and
+//     again within it, over a source of the object's own, when what it reads
+//     has moved since - see the gate), the
+//     object's lanes into the pass's own b0 / b1, then per vertex RUN of a
+//     submesh with a vertex stage one point-list draw of the source through
+//     that stage into the buffer at the run's byte offset. A run is a maximal
+//     stretch of vertices one submesh owns (kh_uvs_runs_build: the first
+//     submesh, over every LOD level's index block, to reference a vertex) -
+//     stream output writes in order, so only a contiguous stretch lands on
+//     its own vertices. Runs of submeshes without a stage keep the primed
+//     copy; a source that changes under us is copied whole first.
+// The shape key (g_cloth_gen_slot) moves with every evaluation, so the sun
+// ladder, the mask, the occluders and the seam see an animated caster;
+// vertexStatic (KhMaterialSet::vertex_static) evaluates again only when the
+// object's lanes, its set or its source's key moved, and never applies to a
+// source of the object's own (a pose moves under its key's threshold).
+// Objects with a stage leave the buckets (kh_inst_eligible); their bounds pad
+// by vertexBound (kh_bounds_size_of). Everything here runs on the flush's
+// thread or the render thread's step - the slot tables' own contract - and
+// holds no lock.
+struct KhUvsRun { UINT first; UINT count; uint32_t sub; };
+struct KhUvsGpu {
+    ID3D11Buffer* vb = nullptr;
+    UINT          bytes = 0;
+    uint64_t      seq = 0;            // The object (RenderObject::seq) and mesh the buffer was made for.
+    int           mesh = -1;
+    ID3D11Buffer* src = nullptr;      // Weak: the source the buffer was primed from (this flush's).
+    bool          src_own = false;    // The source is the object's own buffer (cloth, skinned): its bytes move.
+    bool          src_dirty = true;   // src_own: the source was written, or primed from, since the last evaluation (kh_uvs_src_wrote).
+    uint32_t      src_key = 0u;       // The source's shape key at the install.
+    std::vector<KhUvsRun> runs;
+    bool          failed = false;     // The buffer's create failed: not retried for this object and mesh.
+    bool          seen = false;       // This flush's sweep mark.
+    bool          installed = false;  // This flush installed it.
+    uint64_t      step_cycle = ~0ull; // The cycle (g_topo_cycles) last evaluated.
+    uint32_t      key = 0u;           // The shape key of the bytes the buffer holds.
+    bool          done = false;       // vertexStatic: evaluated for done_* below.
+    uint32_t      done_src_key = 0u;
+    const KhMaterialSet* done_set = nullptr;
+    float         done_lanes[19] = {};   // pos, size, rot_m, color - everything of the object a stage can read.
+    bool          done_view_ok = false;  // The pass camera the last evaluation filled (g_ro.cycle_pv; a stale cycle adopts one late).
+    float         done_view[4][4] = {};
+};
+static std::unordered_map<uint32_t, KhUvsGpu> g_uvs;   // By scene slot.
+static uint32_t g_uvs_key_serial = 0u;
+inline uint32_t kh_uvs_key_next() {
+    if (++g_uvs_key_serial == 0u) g_uvs_key_serial = 1u;   // Never 0: the slot table's 'no key'.
+    return g_uvs_key_serial;
+}
+inline void kh_uvs_release_all() {
+    for (auto& khur_kv : g_uvs) {
+        // The slot table never names a released buffer.
+        if (khur_kv.second.vb && khur_kv.first < g_cloth_vb_slot.size() && g_cloth_vb_slot[khur_kv.first] == khur_kv.second.vb) {
+            kh_cloth_slot_forget(khur_kv.first);
+        }
+        KH_SAFE_RELEASE(khur_kv.second.vb);
+    }
+    g_uvs.clear();
+}
+// The slot table names this slot's vertex-stage buffer, installed this flush,
+// and that buffer is deformed from khud_src: what the slot draws is khud_src
+// through the stage. For a step that writes a per-instance buffer only once an
+// upload has installed it (kh_cloth_pin_draw_step): with a stage over it the
+// table names OUR buffer, and the bytes it writes still reach the draw - the
+// record is src_own, so kh_uvs_step, which follows kh_attach_step at every
+// site, copies the source whole before it deforms. The tables' thread.
+inline bool kh_uvs_draws_from(uint32_t khud_slot, const ID3D11Buffer* khud_src) {
+    if (!khud_src || khud_slot >= g_cloth_vb_slot.size()) return false;
+    const auto khud_it = g_uvs.find(khud_slot);
+    if (khud_it == g_uvs.end()) return false;
+    const KhUvsGpu& khud_r = khud_it->second;
+    return khud_r.installed && khud_r.vb && khud_r.src == khud_src && g_cloth_vb_slot[khud_slot] == khud_r.vb;
+}
+// KH_USER_VS_SRC_DIRTY - a slot's own per-instance vertex buffer was just
+// written: kh_cloth_upload, kh_skin_upload (the flush), kh_skin_draw_finish
+// (for the batch's stream-output pose too) and kh_cloth_pin_draw_step (the
+// step) - EVERY writer of one; a new writer calls this or a stage over its
+// buffer draws the bytes before its write. One empty() test when no object has
+// a vertex stage. The tables' thread, as every caller is.
+inline void kh_uvs_src_wrote(uint32_t khsw_slot) {
+    if (g_uvs.empty()) return;
+    const auto khsw_it = g_uvs.find(khsw_slot);
+    if (khsw_it != g_uvs.end()) khsw_it->second.src_dirty = true;
+}
+inline void kh_uvs_runs_build(const MeshDef& khrb_d, std::vector<KhUvsRun>& khrb_out) {
+    khrb_out.clear();
+    const size_t khrb_nv = khrb_d.verts.size();
+    std::vector<uint32_t> khrb_own(khrb_nv, 0xFFFFFFFFu);
+    for (int khrb_l = 0; khrb_l <= static_cast<int>(khrb_d.lod_n); ++khrb_l) {
+        const std::vector<MeshSubmesh>& khrb_tab = mesh_lod_submeshes(khrb_d, khrb_l);
+        for (size_t si = 0; si < khrb_tab.size(); ++si) {
+            const size_t khrb_b = khrb_tab[si].index_start;
+            const size_t khrb_e = khrb_b + khrb_tab[si].index_count;
+            if (khrb_e > khrb_d.indices.size()) continue;
+            for (size_t k = khrb_b; k < khrb_e; ++k) {
+                const uint32_t v = khrb_d.indices[k];
+                if (v < khrb_nv && khrb_own[v] == 0xFFFFFFFFu) khrb_own[v] = static_cast<uint32_t>(si);
+            }
+        }
+    }
+    for (size_t v = 0; v < khrb_nv;) {
+        size_t e = v + 1u;
+        while (e < khrb_nv && khrb_own[e] == khrb_own[v]) ++e;
+        if (khrb_own[v] != 0xFFFFFFFFu) khrb_out.push_back(KhUvsRun{ static_cast<UINT>(v), static_cast<UINT>(e - v), khrb_own[v] });
+        v = e;
+    }
+}
+inline bool kh_uvs_cbs_ensure(ID3D11Device* khce_dev) {
+    if (g_res.uvs_obj_cb && g_res.uvs_frame_cb) return true;
+    if (!khce_dev) return false;
+    KH_SAFE_RELEASE(g_res.uvs_obj_cb);
+    KH_SAFE_RELEASE(g_res.uvs_frame_cb);
+    D3D11_BUFFER_DESC khce_bd = {};
+    khce_bd.ByteWidth = static_cast<UINT>(KH_CBOBJ_BYTES);
+    khce_bd.Usage = D3D11_USAGE_DYNAMIC;
+    khce_bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    khce_bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    if (FAILED(khce_dev->CreateBuffer(&khce_bd, nullptr, &g_res.uvs_obj_cb))) { g_res.uvs_obj_cb = nullptr; return false; }
+    khce_bd.ByteWidth = static_cast<UINT>(KH_CBFRAME_BYTES);
+    if (FAILED(khce_dev->CreateBuffer(&khce_bd, nullptr, &g_res.uvs_frame_cb))) {
+        g_res.uvs_frame_cb = nullptr;
+        KH_SAFE_RELEASE(g_res.uvs_obj_cb);
+        return false;
+    }
+    return true;
+}
+// The lanes a vertexStatic evaluation stands for.
+inline void kh_uvs_lanes_of(const RenderObject& o, float khul_out[19]) {
+    memcpy(khul_out, o.pos, sizeof(float) * 3u);
+    memcpy(khul_out + 3, o.size, sizeof(float) * 3u);
+    memcpy(khul_out + 6, o.rot_m, sizeof(float) * 9u);
+    memcpy(khul_out + 15, o.color, sizeof(float) * 4u);
+}
+inline void kh_uvs_step(ID3D11DeviceContext* khus_ctx) {
+    if (!khus_ctx || g_uvs.empty()) return;
+    ID3D11Device* khus_dev = RVExtBridge::get_d3d_device();
+    if (!khus_dev) return;
+    kh_scene_sync();   // The lanes every pass of this cycle will draw with (the step before us may have moved them).
+    static std::vector<uint32_t> khus_work;   // Scratch (one thread at a time, as the tables).
+    khus_work.clear();
+    for (auto& khus_kv : g_uvs) {
+        const uint32_t s = khus_kv.first;
+        KhUvsGpu& r = khus_kv.second;
+        if (!r.vb || !r.src || !r.installed) continue;
+        // Once a cycle - except over a source of the object's own: kh_attach_step
+        // skins a binding that waited for the injection at ITS step, after the
+        // cast fire's evaluation of this cycle, and the colour passes would then
+        // draw the stage over the previous pose. Such a record goes on to the
+        // KH_USER_VS_SRC_DIRTY test below at every step (the sun map is rebuilt
+        // by KH_SUN_RESTEP on the same edge).
+        if (r.step_cycle == g_topo_cycles && !r.src_own) continue;
+        if (s >= g_scene.objs.size() || !g_scene.alive[s] || s >= g_cloth_vb_slot.size() || g_cloth_vb_slot[s] != r.vb) continue;
+        const RenderObject& o = g_scene.objs[s];
+        if (o.seq != r.seq || !o.materials || !o.materials->vertex_any || mesh_id_clamp(o.mesh) != r.mesh) continue;
+        if (!o.visible && !o.caster_only) continue;   // Nothing draws it. (An invisible casterOnly object still casts: the maps draw this buffer.)
+        // KH_USER_VS_SRC_DIRTY: evaluated this cycle already (so: over a source
+        // of the object's own) - again only if something the stage reads has
+        // moved since: the source's bytes (kh_uvs_src_wrote - the step before
+        // us re-posed it), the object's lanes or set (that step moved it), the
+        // pass camera (a stale cycle adopts its view late). The clock alone
+        // does not ask: within a cycle the evaluation stands, as it always has
+        // over a mesh's own buffer.
+        if (r.step_cycle == g_topo_cycles && !r.src_dirty && r.done && r.done_set == o.materials &&
+            r.done_view_ok == g_ro.cycle_pv_valid &&
+            (!r.done_view_ok || memcmp(r.done_view, g_ro.cycle_pv.view, sizeof(r.done_view)) == 0)) {
+            float khus_l[19];
+            kh_uvs_lanes_of(o, khus_l);
+            if (memcmp(khus_l, r.done_lanes, sizeof(khus_l)) == 0) continue;
+        }
+        if (o.materials->vertex_static && !r.src_own && r.done && r.done_set == o.materials && r.done_src_key == r.src_key) {
+            float khus_l[19];
+            kh_uvs_lanes_of(o, khus_l);
+            if (memcmp(khus_l, r.done_lanes, sizeof(khus_l)) == 0) { r.step_cycle = g_topo_cycles; continue; }
+        }
+        khus_work.push_back(s);
+    }
+    if (khus_work.empty() || !kh_uvs_cbs_ensure(khus_dev)) return;
+    {
+        // The bracket, as kh_skin_so_batch's (1.957 / 1.1022): the flag first
+        // and last, the stream-output target StateBackup does not hold saved by
+        // hand. The pass sets the layout, the topology, IA slot 0, VS / GS / PS
+        // / HS / DS and VS b0 / b1 - all in the capture.
+        KhInjectionFlagScope khus_flag;
+        g_ro.in_injection = true;
+        StateBackup khus_sb;
+        khus_sb.capture(khus_ctx);
+        ID3D11Buffer* khus_so_old = nullptr;
+        khus_ctx->SOGetTargets(1, &khus_so_old);
+        const UINT khus_zero = 0u, khus_stride = static_cast<UINT>(sizeof(MeshVertex));
+        khus_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
+        khus_ctx->PSSetShader(nullptr, nullptr, 0);
+        khus_ctx->HSSetShader(nullptr, nullptr, 0);
+        khus_ctx->DSSetShader(nullptr, nullptr, 0);
+        bool khus_ok = true;
+        {   // b1: the camera lanes; everything else zero (lighting1.w = 0 says so to a reader).
+            ConstantData khus_cbf = {};
+            if (g_ro.cycle_pv_valid) {
+                float khus_cam[3];
+                extract_camera_pos(g_ro.cycle_pv.view, khus_cam);
+                kh_fill_user_cam_cb(khus_cbf, khus_cam, g_ro.cycle_pv.view);
+            }
+            khus_ok = kh_upload_frame_cb(khus_ctx, g_res.uvs_frame_cb, khus_cbf);
+        }
+        ID3D11Buffer* khus_cbs[2] = { g_res.uvs_obj_cb, g_res.uvs_frame_cb };
+        khus_ctx->VSSetConstantBuffers(0, 2, khus_cbs);
+        ID3D11VertexShader* khus_bound_vs = nullptr;
+        for (size_t w = 0; khus_ok && w < khus_work.size(); ++w) {
+            const uint32_t s = khus_work[w];
+            KhUvsGpu& r = g_uvs[s];
+            const RenderObject& o = g_scene.objs[s];
+            const KhMaterialSet& khus_ms = *o.materials;
+            // The source moved under the primed copy: the whole of it again, the
+            // stages over it. (The target bound here, if any, is the previous
+            // object's buffer - never this one.)
+            if (r.src_own) { khus_ctx->CopyResource(r.vb, r.src); r.src_dirty = false; }
+            ConstantData khus_cbd = {};
+            khus_cbd.center_size[0] = o.pos[0];
+            khus_cbd.center_size[1] = o.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y].
+            khus_cbd.center_size[2] = o.pos[1];
+            khus_cbd.size_axes[0] = o.size[0];    // SQF [x,y,z] sizes -> engine [x,z,y].
+            khus_cbd.size_axes[1] = o.size[2];
+            khus_cbd.size_axes[2] = o.size[1];
+            kh_fill_obj_rot(khus_cbd, o.rot_m);
+            memcpy(khus_cbd.color, o.color, sizeof(khus_cbd.color));
+            kh_fill_user_obj_cb(khus_cbd, o);
+            bool khus_drew = false;
+            for (const KhUvsRun& khus_run : r.runs) {
+                if (khus_run.sub >= khus_ms.slots.size()) continue;
+                const KhMaterial& m = khus_ms.slots[khus_run.sub];
+                if (!m.used || m.shader != 1 || !m.user_vertex || m.user_shader.empty()) continue;
+                ID3D11VertexShader* khus_vs = nullptr;
+                ID3D11GeometryShader* khus_gs = nullptr;
+                ID3D11InputLayout* khus_il = nullptr;
+                if (kh_user_mat_vs(khus_dev, m.user_shader, khus_vs, khus_gs, khus_il) != 1) continue;
+                khus_cbd.shadow_meta2[3] = static_cast<float>(khus_run.first);   // SV_VertexID restarts at 0 with every draw: the run's first vertex.
+                if (!kh_upload_obj_cb(khus_ctx, g_res.uvs_obj_cb, khus_cbd)) { khus_ok = false; break; }
+                if (khus_vs != khus_bound_vs) {
+                    khus_ctx->IASetInputLayout(khus_il);
+                    khus_ctx->VSSetShader(khus_vs, nullptr, 0);
+                    khus_ctx->GSSetShader(khus_gs, nullptr, 0);
+                    khus_bound_vs = khus_vs;
+                }
+                const UINT khus_off = khus_run.first * khus_stride;
+                khus_ctx->IASetVertexBuffers(0, 1, &r.src, &khus_stride, &khus_zero);
+                khus_ctx->SOSetTargets(1, &r.vb, &khus_off);
+                if (g_orig_draw) g_orig_draw(khus_ctx, khus_run.count, khus_run.first); else khus_ctx->Draw(khus_run.count, khus_run.first);
+                khus_drew = true;
+            }
+            r.step_cycle = g_topo_cycles;
+            if (khus_drew || r.src_own) {
+                r.key = kh_uvs_key_next();
+                if (s < g_cloth_gen_slot.size()) g_cloth_gen_slot[s] = r.key;   // The key follows the bytes.
+            }
+            r.done = khus_ok;
+            r.done_set = o.materials;
+            r.done_src_key = r.src_key;
+            kh_uvs_lanes_of(o, r.done_lanes);
+            r.done_view_ok = g_ro.cycle_pv_valid;
+            if (r.done_view_ok) memcpy(r.done_view, g_ro.cycle_pv.view, sizeof(r.done_view));
+        }
+        // The target off before anything binds a buffer as vertices; the engine's handed back (offset -1: it keeps appending).
+        const UINT khus_append = static_cast<UINT>(-1);
+        khus_ctx->SOSetTargets(1, &khus_so_old, &khus_append);
+        if (khus_so_old) khus_so_old->Release();
+        khus_sb.restore(khus_ctx);   // Under the flag.
+    }   // The flag handed back last.
+}
+inline void kh_uvs_upload(ID3D11DeviceContext* khuu_ctx, ID3D11Device* khuu_dev) {
+    if (!khuu_ctx || !khuu_dev) return;
+    if (g_uvs.empty() && g_uvs_sets.load(std::memory_order_relaxed) == 0u) return;   // The session has made no vertex stage.
+    kh_scene_sync();
+    for (auto& khuu_kv : g_uvs) { khuu_kv.second.seen = false; khuu_kv.second.installed = false; }
+    const uint32_t khuu_n = static_cast<uint32_t>(g_scene.objs.size());
+    for (uint32_t s = 0; s < khuu_n; ++s) {
+        if (!g_scene.alive[s]) continue;
+        const RenderObject& o = g_scene.objs[s];
+        if (!o.materials || !o.materials->vertex_any || o.fullscreen || o.effect != 0) continue;
+        const int khuu_mid = mesh_id_clamp(o.mesh);
+        if (khuu_mid < 0 || static_cast<size_t>(khuu_mid) >= g_res.mesh_vb.size() || !kh_mesh_alive(khuu_mid)) continue;
+        const MeshDef& khuu_md = mesh_def(khuu_mid);
+        const size_t khuu_nv = khuu_md.verts.size();
+        if (khuu_nv == 0u || khuu_nv > 0xFFFFFFFFull / sizeof(MeshVertex)) continue;
+        const UINT khuu_bytes = static_cast<UINT>(khuu_nv * sizeof(MeshVertex));
+        KhUvsGpu& r = g_uvs[s];
+        if (r.seq != o.seq || r.mesh != khuu_mid || r.bytes != khuu_bytes) {   // Another object in the slot, or another mesh: start over.
+            KH_SAFE_RELEASE(r.vb);
+            r = KhUvsGpu();
+            r.seq = o.seq; r.mesh = khuu_mid; r.bytes = khuu_bytes;
+        }
+        r.seen = true;
+        if (r.failed) continue;
+        // Every vertex stage of the set has landed, and one at least is ready.
+        bool khuu_pend = false, khuu_any = false;
+        for (const KhMaterial& m : o.materials->slots) {
+            if (!m.used || m.shader != 1 || !m.user_vertex || m.user_shader.empty()) continue;
+            ID3D11VertexShader* khuu_vs = nullptr;
+            ID3D11GeometryShader* khuu_gs = nullptr;
+            ID3D11InputLayout* khuu_il = nullptr;
+            const int khuu_st = kh_user_mat_vs(khuu_dev, m.user_shader, khuu_vs, khuu_gs, khuu_il);
+            if (khuu_st == 0) khuu_pend = true;
+            else if (khuu_st == 1) khuu_any = true;
+        }
+        if (khuu_pend || !khuu_any) {
+            // Not installed this flush, so nothing evaluates it: what the last
+            // evaluation stood for is forgotten. done_set is a WEAK pointer, and
+            // this is the one window in which the set it names can be released
+            // while the record lives on (the object holds ANOTHER set, whose
+            // stage is pending or failed) - a later set allocated at that address
+            // would otherwise pass both gates of kh_uvs_step for the old one.
+            r.done = false;
+            continue;
+        }
+        ID3D11Buffer* const khuu_src = kh_mesh_vb_for(khuu_mid, s);   // What the cloth's and the skin's uploads left in the slot, else the mesh's own.
+        if (!khuu_src) continue;
+        if (!r.vb) {
+            D3D11_BUFFER_DESC khuu_bd = {};
+            khuu_bd.ByteWidth = khuu_bytes;
+            khuu_bd.Usage = D3D11_USAGE_DEFAULT;
+            khuu_bd.BindFlags = D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_STREAM_OUTPUT;
+            if (FAILED(khuu_dev->CreateBuffer(&khuu_bd, nullptr, &r.vb))) {
+                r.vb = nullptr;
+                r.failed = true;
+                report_error_once_safe("KH user vertex stage: a deformed vertex buffer could not be made (the mesh draws undeformed)");
+                continue;
+            }
+            r.src = nullptr;
+        }
+        if (r.src != khuu_src) {   // Prime: the runs no stage owns draw from this copy.
+            D3D11_BUFFER_DESC khuu_sd = {};
+            khuu_src->GetDesc(&khuu_sd);
+            if (khuu_sd.ByteWidth != khuu_bytes) continue;   // Not this mesh's vertex array: the source draws.
+            khuu_ctx->CopyResource(r.vb, khuu_src);
+            r.src = khuu_src;
+            r.src_dirty = true;   // Another source: whatever was evaluated this cycle was evaluated over the old one.
+            r.done = false;
+        }
+        r.src_own = khuu_src != g_res.mesh_vb[khuu_mid];
+        r.src_key = kh_cloth_gen_of(s);
+        if (r.runs.empty()) kh_uvs_runs_build(khuu_md, r.runs);
+        if (r.key == 0u) r.key = kh_uvs_key_next();
+        if (g_cloth_vb_slot.size() <= s) g_cloth_vb_slot.resize(s + 1u, nullptr);
+        if (g_cloth_gen_slot.size() <= s) g_cloth_gen_slot.resize(s + 1u, 0u);
+        if (g_cloth_mesh_slot.size() <= s) g_cloth_mesh_slot.resize(s + 1u, -1);
+        g_cloth_vb_slot[s] = r.vb;
+        g_cloth_gen_slot[s] = r.key;
+        g_cloth_mesh_slot[s] = khuu_mid;
+        r.installed = true;
+    }
+    for (auto khuu_it = g_uvs.begin(); khuu_it != g_uvs.end();) {   // An object that left, or lost its stage.
+        if (!khuu_it->second.seen) { KH_SAFE_RELEASE(khuu_it->second.vb); khuu_it = g_uvs.erase(khuu_it); }
+        else ++khuu_it;
+    }
+    kh_uvs_step(khuu_ctx);   // A buffer installed just now is deformed before its first draw.
+}
+
 inline void kh_fill_fx_params_cb(ConstantData& cbd, const RenderObject& o) {
     kh_fill_user_obj_cb(cbd, o);   // KH_USER_LANES.
     memcpy(cbd.color, o.color, sizeof(cbd.color));
@@ -38058,6 +39505,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     if (g_cast_map_frame != g_ro.frame_cycles) {
         g_cast_map_frame = g_ro.frame_cycles;
         kh_attach_step(ctx);   // The followed transforms first: the map is built from them (KH_SKEL_DRAW: the skinned pose too).
+        kh_uvs_step(ctx);      // KH_USER_VS: and the deformed meshes - the map casts what the colour passes will draw.
         render_sun_depth(ctx);
     }
 
@@ -43552,7 +45000,9 @@ inline void kh_cbl_window(const uint8_t* khcw_w, uint32_t khcw_kind,
     // shear, so kh_attach_vs_read's band applies, not the rigid test below. Our
     // own flush's uploads are not the engine's.
     if (khcw_pxy_any) {   // The loose squareness held above.
-        kh_pxy_window(vn, khcw_len, t, khcw_kind, khcw_pass, khcw_off, khcw_width, khcw_orig);
+        bool khcw_mine = false;
+        kh_pxy_window(vn, khcw_len, t, khcw_kind, khcw_pass, khcw_off, khcw_width, khcw_orig, &khcw_mine);
+        if (khcw_mine) return;   // KH_CBL_NOT_HELPER: a helper's own matrix positions no parent.
     }
     if (khcw_c01 > KH_CBL_SQUARE || khcw_c02 > KH_CBL_SQUARE || khcw_c12 > KH_CBL_SQUARE) return;
     if (!khcw_act_any) return;   // KH_CBL_WIN_POS: no parent to test.
@@ -44178,6 +45628,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
             KhFinalStepScope khfs_final;   // KH_CBL_LATE: the last step that can still change this cycle's draw.
             kh_attach_step(ctx);   // KH_SKEL_DRAW: this step skins the skeletal bindings too.
         }
+        kh_uvs_step(ctx);   // KH_USER_VS: a no-op for what the cast fire's step evaluated, but for a source this step just re-posed.
         if (g_sun_restep_cycle == g_topo_cycles) g_sun_map_rendered_frame = false;   // KH_SUN_RESTEP: rebuild from this step's poses.
         kh_scene_sync();
         kh_objbuf_sync(ctx);   // KH_OBJBUF: the records this pass's buckets index.
@@ -48374,6 +49825,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
     // observe - a resized slot table, a released buffer, a half-written Map.
     kh_cloth_upload(ctx, dev);
     kh_skin_upload(ctx, dev);   // KH_SKEL: after the cloth, which empties the slot tables first.
+    kh_uvs_upload(ctx, dev);    // KH_USER_VS: last - its source is whatever those two left in the slot.
     }   // End of the scene flush's housekeeping.
     // KH_DL_FALLBACK_HARVEST: a cycle no accepted injection harvested (a rescue
     // or anomalous cycle, a far-phase refusal, a scene with no opaque mesh to
@@ -48417,6 +49869,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
             KhFinalStepScope khfl_final;
             kh_attach_step(ctx);
         }
+        kh_uvs_step(ctx);   // KH_USER_VS: this cycle's late draws, when no injection stepped it.
         // KH_SUN_RESTEP, the injection's twin: this flush's late meshes
         // self-shadow from the map the cast fire built before this step moved them.
         if (g_sun_restep_cycle == g_topo_cycles) g_sun_map_rendered_frame = false;
@@ -51319,7 +52772,12 @@ inline void kh_session_scratch_reset() {
 // mission edges by kh_attach_drop_all);
 // g_mesh_publish_pending (kh_mesh_release_session); the material pool
 // (kh_material_pool_reset keeps the pinned default); the cloth pool's records
-// (kh_cloth_workers_stop); the read-memo epoch (bumped, never reset); the
+// (kh_cloth_workers_stop); the read-memo epoch (bumped, never reset); the collider
+// pose serial (g_physics_pose_serial: an identity, never reused); the
+// vertex-stage hint (g_uvs_sets, KH_USER_VS: the deferred teardown runs under
+// the NEXT mission's objects, whose sets the parse has already counted - zeroed
+// here it would switch their vertex stages off; left standing it costs a
+// later mission without one a walk of the live scene a flush); the
 // interned path strings (a name -> pointer table nothing resolves through);
 // the compiled proxy handlers; the per-thread draw handshakes (set and
 // consumed inside one draw); the upload scratch (written before every read);
@@ -51485,6 +52943,9 @@ inline void kh_session_globals_reset() {
     kh_reinit(g_tex_cache);
     kh_reinit(g_user_ps_cache);
     kh_reinit(g_user_req);
+    kh_reinit(g_user_vtx_scan);   // KH_USER_VS.
+    kh_reinit(g_uvs);             // Its buffers went with kh_uvs_release_all.
+    g_uvs_key_serial = 0u;
     g_user_req_seen = 0;
     g_user_req_settle = 0;
     g_user_req_waits = 0;
@@ -52264,6 +53725,7 @@ inline void kh_session_teardown(bool khst_clean) {
     g_res.release();
     kh_cloth_drop_all();   // KH_CLOTH: the instances and their buffers.
     kh_skin_drop_all();    // KH_SKEL: likewise.
+    kh_uvs_release_all();  // KH_USER_VS: likewise (the records hold nothing a mission outlives).
     kh_tex_cache_release();
     kh_user_shader_cache_release();
     kh_user_lut_cache_release();

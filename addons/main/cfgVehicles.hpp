@@ -6,6 +6,7 @@ class CfgVehicles
 		kh_meleeSurfaceBlockPower = 999999;
 	};
 	class Land;
+	class ThingX;
 	class Man: Land
 	{
 		kh_unitHeight = 1.85;
@@ -195,7 +196,7 @@ class CfgVehicles
 		vehicleClass = "KH_Helpers";
 		scope = 2;
 	};
-	class KH_HelperRender: Static
+	class KH_HelperRender: ThingX
 	{
 		author = "Kharos";
 		displayName = "Helper Render";

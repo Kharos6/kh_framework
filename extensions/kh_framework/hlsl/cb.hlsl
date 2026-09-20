@@ -23,7 +23,9 @@ cbuffer CBObj : register(b0)
     // KhObjLanesCb / KhObjLoad); y unread.
     float4 lighting0;
     float4 shadowMeta2;   // x unread (zero), y = object view-distance cut; z = 1 for a
-                          // depth-Off overlay (KH_VOL_WITNESS), else 0; w unread (zero).
+                          // depth-Off overlay (KH_VOL_WITNESS), else 0; w = the first
+                          // vertex of the run VSUserSo is drawing (KH_USER_VS's pass
+                          // alone; zero, and unread, everywhere else).
     // Engine-axes rotation rows (row-vector): world = center + local.x*R0 +
     // local.y*R1 + local.z*R2.
     float4 objRot0;
@@ -286,7 +288,16 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 }
 
 // ===========================================================================
-// USER SHADER CONTRACT (KH_USER_LANES). What a user .hlsl may rely on.
+// USER SHADER CONTRACT (KH_USER_LANES). What a user .hlsl may rely on -
+// everything a custom shader can plug into is in THIS file, as a declaration
+// or in the text below; nothing of the contract lives anywhere else.
+// Where the file goes: Documents\Arma 3\kh_framework\rendering, else any
+// loaded mod's 'rendering' folder (searched in that order; the script names
+// the file relative to it). The first use compiles it in the background - a
+// material draws flat white and an effect pass is skipped until it lands - and
+// the result is cached on disk; a compile error is reported once, with fxc's
+// own message. A file is read once per mission: restart the mission to pick up
+// an edit.
 //
 // ---- MATERIAL shaders (a material whose shader is a .hlsl path) ----------
 // Placed after this file and BEFORE the builtin pixel shaders, and compiled
@@ -325,10 +336,66 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //     the pixel after the draw. s.occ is the material's occlusion map, for the
 //     ambient only (as KhPbrAmbient applies it).
 //   - Emissive is not added for you: KhApplyPBR adds s.emissive last.
+// The material's inputs (KH_USER_SLOTS) - EVERY map slot, routing input and
+// param there is belongs to a .hlsl material. The script side (updateRender3D
+// "material"), one entry per submesh selector:
+//     [selector, "my.hlsl", [[path, slot, routing?], ...], [[key, value], ...]]
+//   selector  a submesh name, its index, or -1 / "*" for every submesh.
+//   slot      where the map goes - KhMatFetch's slot number, its colour space:
+//     "diffuse" | "albedo"   0  sRGB
+//     "normal"               1  linear
+//     "orm"  or  "as"        2  linear   ONE slot under two names: give one.
+//     "emissive"             3  sRGB
+//     "specular" or "smdi"   4  sRGB as "specular", linear as "smdi" (its
+//                               channels are data). ONE slot: give one.
+//     "speccolor"            5  sRGB
+//     "user0" .. "user5"        yours alone (KH_USER_TEX below); their third
+//                               element is "srgb" | "linear", not a routing.
+//   routing   [[input, channel], ...] - which channel ("r" "g" "b" "a") of THIS
+//             map feeds a surface input: "occlusion", "roughness", "metallic"
+//             (or "metalness"), "alpha", "gloss", "specular". Unrouted, an
+//             input takes its map's own convention:
+//               occlusion  orm.r - as.g when the slot was named "as"
+//               roughness  orm.g - none under "as" (the roughness param)
+//               metallic   orm.b - none under "as" (the metalness param)
+//               alpha      diffuse.a
+//               gloss      specular.a - smdi.b when named "smdi"
+//               specular   none (1) - smdi.g when named "smdi"
+//   params    "basecolor" [r,g,b], "roughness", "metalness" (or "metallic"),
+//             "glossiness", "specularColor" [r,g,b], "fresnel" [N,K] (or an
+//             rvmat's "fresnel(N,K)" string), "emissiveIntensity",
+//             "normalStrength", "cutoff", "alphaMode" "opaque" | "cutout" |
+//             "blend"; and the VERTEX stage's "vertexBound", "vertexStatic"
+//             (below). Defaults: basecolor 1,1,1; roughness 0.8; metalness 0;
+//             glossiness 0.2; specularColor 1,1,1; fresnel 1.5,0; the two
+//             strengths 1; cutoff 0.5; opaque.
+// What they arrive as - the fields of s (KhMatSurf, from KhSampleMat):
+//   albedo    diffuse.rgb (1 with no map) x basecolor x the object colour.
+//   alpha     the routed "alpha" (1 unrouted).
+//   nrmT      the tangent-space normal, xy x normalStrength (0,0,1, no map).
+//   occ, rough, metal   the routed inputs; with no map behind a route, 1, the
+//             roughness param and the metalness param.
+//   emissive  emissive.rgb x emissiveIntensity (0 with no map).
+//   specF0    slot 4's rgb as sampled (0 with no map); specOn = 1 when that
+//             slot holds a "specular" map - the builtin then shades spec-gloss
+//             from specF0 and gloss. 0 under "smdi" (its rgb is no F0).
+//   gloss     the routed "gloss"; 0 with no map behind it - take
+//             KhUserMatGlossiness() then (the builtin arma model does).
+//   specTint  the routed "specular" (1 unrouted) x speccolor.rgb (1 with no
+//             map) x the specularColor param.
+//   fresnelNK the fresnel param.
+//   model     0. Set it to 1 before KhApplyPBR(s, ...) to shade with the arma
+//             model - spec-gloss from gloss, specTint as F0, the conductor
+//             Fresnel of fresnelNK - instead of metal-rough.
+// The raw values behind them: KhUserMatHas(slot) - the map resolved and is
+// loaded - and KhUserMatBaseColor / Roughness / Metalness /
+// EmissiveIntensity / NormalStrength / Cutoff / AlphaMode / SpecularColor /
+// Glossiness / Fresnel(), each the script's param (or its default).
 // Re-sampling the material (animation): KhUserUv() is the pixel's UV, so
 // KhSampleMat(KhUserUv() + offset) re-samples the whole surface and
-// KhMatFetch(slot, uv) one map (slots 0 diffuse, 1 normal, 2 orm, 3 emissive,
-// 4 specular, 5 speccolor); drive the offset from KhUserTime().
+// KhMatFetch(slot, uv) one map, filtered (the slot numbers above;
+// KhMatFetchTexel(slot, uv) is the unfiltered texel at mip 0); drive the
+// offset from KhUserTime().
 // Textures of its own (KH_USER_TEX): the material's texture slots user0 ..
 // user5 (script: [path, "user0", "srgb" | "linear"], linear by default) are
 // this shader's alone - no builtin input reads them. Read them with
@@ -354,14 +421,79 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //     KhUserFrontFace()   false on the back face of a two-sided mesh.
 // View direction in tangent space (parallax): with v = KhUserViewDir(wpos),
 // float3(dot(v, T), dot(v, B), dot(v, N)).
-// The pixel stage only: there is no user vertex stage (the geometry, and every
-// shadow and depth pass drawn from it, is the builtin's).
+//
+// ---- The VERTEX stage of a material shader (KH_USER_VS) -------------------
+// Optional. A material .hlsl that also defines
+//     void KhUserVertex(inout KhUserVtx v)
+// deforms the vertices of the submeshes it is assigned to (it still defines
+// KhUserShade; "return KhApplyPBR(s, wpos, n, smf);" keeps the builtin look).
+// It is a DEFORM function, not a free vertex shader: it moves the mesh's own
+// vertices, in the object's space, and everything downstream - the builtin
+// vertex transform, every colour pass, every shadow and depth pass - then
+// draws the deformed mesh as if it had been authored so. (A cloth collider
+// does not see it: physics stays on the CPU.) It is evaluated ONCE per frame
+// for all of them (C++
+// kh_uvs_step: a stream-output pass through VSUserSo, static.hlsl), which is
+// what keeps a shadow attached to what casts it.
+//   v.pos      the vertex, object space, METRES: x right, y up, z forward, the
+//              object's centre at 0 - before the object's rotation and
+//              position (world = KhUserVtxWorld(v.pos)). Write it. (It is
+//              stored in the object's box, so an axis the script set the
+//              object's size to ZERO on cannot be displaced along; an imported
+//              flat mesh has 0.1 mm there, which is enough.)
+//   v.nrm      the unit normal, object space. Write it if the deformation
+//              turns the surface (it need not stay unit length).
+//   v.tan      the unit tangent, object space (zero where the mesh has none),
+//              and v.tanSign its handedness. Write v.tan with v.nrm.
+//   v.uv       the texture coordinate. Writable: it is what the pixel stage
+//              receives (KhUserUv), the one channel from this stage to that.
+//   v.rest     READ: v.pos as authored (or as skinned / simulated this frame -
+//              the stage runs after both), whatever you have written to v.pos.
+//   v.id       READ: the vertex's index in the mesh's vertex array - stable
+//              across frames and LOD levels; hash it for per-vertex variation.
+// What it may read: KhUserTime() (the object's age - the animation clock),
+// KhUserSessionTime(), the object lanes (centerSize.xyz the centre, sizeAxes.xyz
+// the edge lengths, objRot0..2 / KhObjRows the rotation rows, color), the
+// KhUserVtx* helpers below, and the MAIN view's camera (KhUserCamera*,
+// KhUserViewDir) - the one camera there is at that point: a PIP view and every
+// shadow map draw the same deformed mesh, so a vertex turned toward the camera
+// faces the main view in all of them. NOT there: the material table and every
+// texture - no map is bound to the vertex stage and the table is not loaded,
+// so KhUserMat* read zero, and KhUserTex / KhSampleMat / KhMatFetch must not
+// be called from it at all (a filtered Sample does not compile in a vertex
+// shader); the lighting and fog lanes (zero; lighting1.w = 0 says so);
+// khObjAmb / khObjDif.
+// The script's two params, with the material's others:
+//   "vertexBound"   metres: the farthest KhUserVertex moves any vertex from
+//              v.rest. The deformation happens on the GPU, so this promise is
+//              all the culling, the LOD radius, the sun-map fit and the cast
+//              have: every bounds test pads the object by it. Too small and
+//              the mesh is culled at the screen edge while still in view, or
+//              its shadow is clipped; too large costs only a looser fit.
+//              Default 0 - right only for a stage that stays inside the box.
+//   "vertexStatic"  1: the result depends on nothing that changes by itself
+//              (no clock, no camera) - it is then evaluated again only when
+//              the object moves, turns, resizes, changes colour or material,
+//              and its shadow maps are not redrawn every frame. Default 0.
+//              (Unread over a skinned or simulated mesh, which moves.)
+// Its envelope: an object with a vertex stage is drawn per object (it leaves
+// the instanced buckets, as a cloth does) and owns one vertex buffer of the
+// mesh's size; a vertex shared by two submeshes belongs to the first of them;
+// there are no interpolants of your own from this stage to KhUserShade (v.uv
+// is the channel). While the stage compiles the mesh draws undeformed; if it
+// fails (reported once) it stays so.
 //
 // ---- EFFECT shaders (a fullscreen pass or effect mesh given a .hlsl path) --
+// The script side: the object's "effect" property is the .hlsl path (where a
+// builtin effect's name or id would go) and its "params" property the twelve
+// numbers that arrive as fxParams0..2.
 // Main view only (a PIP pass skips it). Compiled as this file plus the user
-// file alone, with MSAA_DEPTH set to the scene's - none of the effect unit's helpers (SampleScene, LinDepth,
-// KhWorldPosFenced) are in it; copy what is needed from effect.hlsl. It
-// defines
+// file alone, with MSAA_DEPTH set to the scene's - the effect unit's own
+// helpers (SampleScene, LinDepth, KhWorldPosFenced in effect.hlsl) are NOT in
+// it; the two recipes a depth-aware effect needs are written out below, and
+// reading the scene is one clamped Load:
+//     sceneColor.Load(int3(clamp(px, int2(0, 0), int2(fxMeta.zw) - 1), 0))
+// It defines
 //     float4 PSEffect(VSOut i) : SV_Target
 // and should begin with KhObjLoad(i.iobj0, i.iobj1), as the builtin does.
 // Bound for it: the scene colour at t0 (declare Texture2D<float4> sceneColor :
@@ -402,6 +534,11 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //           view-distance cut (discard past khObjCut, set by KhObjLoad) -
 //           without them an effect mesh draws past the engine's object view
 //           distance.
+//   View distance from a raw depth (LinDepth's recipe; raw = the t1 read):
+//     z = (raw - depthParams.z) / max(depthParams.w - depthParams.z, 1e-6)
+//     q = z - depthParams.x          the far plane and the sky (raw at the
+//     d = (q > -1e-7) ? 1e9          clear value) have q >= 0: 'very far'
+//                     : depthParams.y / q,  and 1e9 again if that is <= 0.
 //   World position from depth (KhWorldPosFenced's recipe): the view distance
 //   d = LinDepth(raw) (depthParams: x = m22, y = m32, zw = the viewport depth
 //   range); clip = (uv.x * 2 - 1, 1 - uv.y * 2, depthParams.x +
@@ -429,8 +566,11 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //   KhUserUv()            MATERIAL only: the pixel's texture UV.
 //   KhUserPixel()         MATERIAL only: the pixel's position in the target, px
 //                         (an effect has i.pos.xy).
-//   KhUserTex* / KhUserGeomNormal / KhUserTangent / KhUserBitangent /
-//   KhUserPerturb / KhUserFrontFace   MATERIAL only: see the MATERIAL section.
+//   KhUserTex* / KhUserMat* / KhUserGeomNormal / KhUserTangent /
+//   KhUserBitangent / KhUserPerturb / KhUserFrontFace   MATERIAL only: see the
+//                         MATERIAL section.
+//   KhUserVtxWorld(p) / KhUserVtxWorldDir(d) / KhUserVtxObjectDir(d)
+//                         object space <-> world, for the VERTEX stage.
 // Object lanes (per-object draws: the drawn object; on a bucket draw these
 // are the first instance's - use the accessors): centerSize.xyz its centre
 // (engine axes), sizeAxes.xyz its edge lengths (engine axes), objRot0..2.xyz
@@ -456,6 +596,27 @@ static float2 khUserUvPs = float2(0.0f, 0.0f);
 static float2 khUserPxPs = float2(0.0f, 0.0f);
 float2 KhUserUv()    { return khUserUvPs; }
 float2 KhUserPixel() { return khUserPxPs; }
+// KH_USER_VS: object space (metres, the object's centre at 0) to world and a
+// direction likewise - the builtin transform's own arithmetic (KhVsCore), for
+// a vertex stage that needs to know where it is (wind, a world-space wave).
+// The object lanes are the drawn object's on every per-object draw, which the
+// vertex stage's pass is.
+float3 KhUserVtxWorld(float3 khvw_p)
+{
+    if (objRot0.w < 0.5f) return centerSize.xyz + khvw_p;
+    return centerSize.xyz + khvw_p.x * objRot0.xyz + khvw_p.y * objRot1.xyz + khvw_p.z * objRot2.xyz;
+}
+float3 KhUserVtxWorldDir(float3 khvw_d)
+{
+    if (objRot0.w < 0.5f) return khvw_d;
+    return khvw_d.x * objRot0.xyz + khvw_d.y * objRot1.xyz + khvw_d.z * objRot2.xyz;
+}
+// World direction back to object space (the rows are orthonormal).
+float3 KhUserVtxObjectDir(float3 khvw_d)
+{
+    if (objRot0.w < 0.5f) return khvw_d;
+    return float3(dot(khvw_d, objRot0.xyz), dot(khvw_d, objRot1.xyz), dot(khvw_d, objRot2.xyz));
+}
 #if KH_USER_MAT
 // KH_USER_FRAME: set by PSMain / PSComposite where they build the mapped
 // normal, before KhUserShade (TWIN).
@@ -472,6 +633,18 @@ float3 KhUserPerturb(float3 khup_t)
     if (dot(khUserTPs, khUserTPs) <= 0.0f) return khUserNPs;
     return normalize(khUserTPs * khup_t.x + khUserBPs * khup_t.y + khUserNPs * khup_t.z);
 }
+// KH_USER_VS: what KhUserVertex receives and hands back (the VERTEX stage
+// section of the USER SHADER CONTRACT). Declared for every material compile,
+// so the pixel twins parse a file that defines the stage.
+struct KhUserVtx {
+    float3 pos;       // Object space, metres. WRITE.
+    float3 nrm;       // Object space, unit on entry. WRITE.
+    float3 tan;       // Object space, unit on entry (zero = none). WRITE.
+    float  tanSign;   // The tangent's handedness.
+    float2 uv;        // WRITE: the pixel stage's UV.
+    float3 rest;      // READ: pos on entry.
+    uint   id;        // READ: the vertex's index in the mesh's vertex array.
+};
 #endif
 
 #define KH_RPDB_GC_M 0.008f
@@ -1828,8 +2001,9 @@ static float4 matParams0 = 0.0f, matParams1 = 0.0f, matParams2 = 0.0f, matParams
 // model keeps its AS map in the orm page and its SMDI map in the specular page
 // (both read linear there - kh_tex_slot_srgb), and SPECCOLOR alone takes the
 // sixth, at t42, past every other register (t33 is KH_VOL_FOOT's mask, t34
-// unassigned); a
-// user material's own maps (KH_USER_TEX) follow at t43-t48. StateBackup saves
+// unassigned). A user (.hlsl) material takes all six under either naming
+// (KH_USER_SLOTS: its specular page is read linear when the script named it
+// "smdi"); its own maps (KH_USER_TEX) follow at t43-t48. StateBackup saves
 // t0-t48.
 Texture2DArray<float4> matDiffuse  : register(t14);
 Texture2DArray<float4> matNormal   : register(t15);
@@ -1845,10 +2019,11 @@ SamplerState matSamp : register(s0);
 // route / metal route, alpha route, gloss route, spec workflow); lay0 =
 // diffuse/normal/orm/emissive layers, lay1.x = specular, lay1.y = speccolor;
 // p4 / p5 = matParams4 / 5, the arma model's lanes (specular colour,
-// glossiness fallback / fresnel N, K, specular route, model), zero for every
-// other material but the specular route (p5.z), which is -1 (unrouted); lay1.zw
-// and lay2 = KH_USER_TEX's user0..user5 layers. p0.x's bits 6-11 are those
-// maps' bound flags.
+// glossiness fallback / fresnel N, K, specular route, model): filled for the
+// arma model and, KH_USER_SLOTS, for a user material (whose model lane stays
+// 0); zero for pbr but the specular route (p5.z), which is -1 (unrouted);
+// lay1.zw and lay2 = KH_USER_TEX's user0..user5 layers. p0.x's bits 0-5 are
+// the six maps' bound flags, bits 6-11 the user maps'.
 struct KhGpuMat { float4 p0; float4 p1; float4 p2; float4 p3; float4 lay0; float4 lay1; float4 p4; float4 p5; float4 lay2; };
 StructuredBuffer<KhGpuMat> khMats : register(t38);
 
@@ -1956,6 +2131,21 @@ float2 KhUserTexSize(int khut_i)
     else                  khUserMap5.GetDimensions(khut_w, khut_h, khut_n);
     return float2((float)khut_w, (float)khut_h);   // A page holds maps of one size.
 }
+// KH_USER_SLOTS: the material's six maps and the script's params, as the table
+// holds them for this pixel (KhMatLoad runs before KhUserShade). See the USER
+// SHADER CONTRACT. KhUserMatHas: i = KhMatFetch's slot (0 diffuse, 1 normal,
+// 2 orm / as, 3 emissive, 4 specular / smdi, 5 speccolor).
+bool   KhUserMatHas(int khum_i)     { return khum_i >= 0 && khum_i < 6 && ((((int)matParams0.x) >> khum_i) & 1) != 0; }
+float3 KhUserMatBaseColor()         { return matParams1.xyz; }
+float  KhUserMatRoughness()         { return matParams1.w; }
+float  KhUserMatMetalness()         { return matParams2.x; }
+float  KhUserMatEmissiveIntensity() { return matParams2.y; }
+float  KhUserMatNormalStrength()    { return matParams0.w; }
+float  KhUserMatCutoff()            { return matParams0.z; }
+int    KhUserMatAlphaMode()         { return (int)matParams0.y; }   // 0 opaque, 1 cutout, 2 blend, 3 = a blend material's opaque part.
+float3 KhUserMatSpecularColor()     { return matParams4.xyz; }
+float  KhUserMatGlossiness()        { return matParams4.w; }
+float2 KhUserMatFresnel()           { return matParams5.xy; }       // (N, K).
 #endif
 
 float KhMatRoute(float route, float fallback, float2 uv)
@@ -2049,7 +2239,8 @@ struct KhMatSurf {
     float3 albedo; float alpha; float3 nrmT; float occ; float rough;
     float metal; float3 emissive; float3 specF0; float gloss; float specOn;
     // The arma model (model 1; 0 for pbr and user materials): the specular
-    // intensity x SPECCOLOR x specularColor, and the fresnel (N, K).
+    // intensity x SPECCOLOR x specularColor, and the fresnel (N, K). Filled for
+    // a user material too (KH_USER_SLOTS), which may set model itself.
     float model; float3 specTint; float2 fresnelNK;
 };
 

@@ -44,6 +44,58 @@ VSOut VSMainInst(VSIn i, VSInst n)
     return o;
 }
 
+#if KH_USER_VS
+// KH_USER_VS - the user vertex stage's one entry point: a material .hlsl's
+// KhUserVertex (it sits between cb.hlsl and this file) over every vertex of a
+// submesh, streamed out as the MeshVertex it came in as. C++ (kh_uvs_step)
+// draws the source buffer as a point list through this with stream output
+// bound and rasterisation off - kh_user_mat_vs names these four semantics in
+// this order, MeshVertex's lanes at offsets 0 / 12 / 24 / 32 - so every pass
+// then draws the deformed buffer with the vertex shader it always had.
+// The stored lanes are KhVsCore's, and this is its exact inverse: a position
+// in the object's box (KhVsCore multiplies it by the edge lengths, as they
+// are), a normal it divides by them (floored at 1e-4, its own floor), a
+// tangent the wrappers multiply by them. KhUserVertex sees the metric ones
+// and they are stored back the same way. A lane it did not change is handed
+// on bit for bit, so a vertex it leaves where it was matches its undeformed
+// neighbours exactly; an axis with no extent cannot be displaced along and
+// keeps the stored position. SV_VertexID restarts at 0 with every draw;
+// shadowMeta2.w is the run's first vertex.
+struct VSOutUserSo {
+    float3 pos : POSITION;
+    float3 nrm : NORMAL;
+    float2 uv  : TEXCOORD0;
+    float4 tan : TANGENT;
+};
+VSOutUserSo VSUserSo(VSIn i, uint khuv_vid : SV_VertexID)
+{
+    const float3 khuv_s = sizeAxes.xyz;
+    const float3 khuv_sn = max(khuv_s, float3(1.0e-4f, 1.0e-4f, 1.0e-4f));   // KhVsCore's normal floor.
+    const float3 khuv_ok = step(float3(1.0e-30f, 1.0e-30f, 1.0e-30f), abs(khuv_s));   // 1 = the axis has extent.
+    const float3 khuv_inv = khuv_ok / lerp(float3(1.0f, 1.0f, 1.0f), khuv_s, khuv_ok);
+    const float3 khuv_n = i.nrm / khuv_sn;
+    const float3 khuv_t = i.tan.xyz * khuv_s;
+    const float  khuv_tl = dot(khuv_t, khuv_t);
+    KhUserVtx v;
+    v.pos = i.pos * khuv_s;
+    v.nrm = khuv_n * rsqrt(max(dot(khuv_n, khuv_n), 1.0e-20f));
+    v.tan = (khuv_tl > 1.0e-20f) ? khuv_t * rsqrt(khuv_tl) : float3(0.0f, 0.0f, 0.0f);
+    v.tanSign = i.tan.w;
+    v.uv = i.uv;
+    v.rest = v.pos;
+    v.id = khuv_vid + (uint)shadowMeta2.w;
+    const float3 khuv_n0 = v.nrm;
+    const float3 khuv_t0 = v.tan;
+    KhUserVertex(v);
+    VSOutUserSo o;
+    o.pos = all(v.pos == v.rest) ? i.pos : lerp(i.pos, v.pos * khuv_inv, khuv_ok);
+    o.nrm = all(v.nrm == khuv_n0) ? i.nrm : v.nrm * khuv_sn;
+    o.uv = v.uv;
+    o.tan = float4(all(v.tan == khuv_t0) ? i.tan.xyz : v.tan * khuv_inv, v.tanSign);
+    return o;
+}
+#endif
+
 // The stencil-volume seam transport's instance stream: the sun ladder's own
 // lane (KhInstLane / VSInSun), so layout_sundepth binds both entry points
 // below. NORMAL is declared to keep that layout's slot-0 shape and is unread by

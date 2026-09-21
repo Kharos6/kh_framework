@@ -8071,7 +8071,6 @@ static game_value get_render_stats_sqf() {
         uint32_t khrt_opaques = 0, khrt_samples = 0, khrt_cw = 0, khrt_ch = 0, khrt_cs = 0;
         bool khrt_injected = false, khrt_pv = false, khrt_main = false, khrt_tid = false, khrt_got = false;
         float khrt_cam[3] = {};
-        uint32_t khrt_pxy_live = 0;   // Render thread's plain count, read under the park.
         bool khd_valid = false, khd_view_valid = false;
         uint32_t khd_point_n = 0, khd_spot_n = 0, khd_pool_n = 0;
         float khd_cam[3] = {};
@@ -8104,7 +8103,6 @@ static game_value get_render_stats_sqf() {
             khrt_main = RenderIntegration::g_main_depth_identity != nullptr;
             khrt_tid = RenderIntegration::g_reorder_render_tid.load(std::memory_order_relaxed) != 0;
             for (int i = 0; i < 3; ++i) khrt_cam[i] = RenderIntegration::g_latch_cam[i];
-            khrt_pxy_live = RenderIntegration::g_pxy_live_n;
             const RenderIntegration::DynLightsState& khd = RenderIntegration::g_dl;
             khd_valid = khd.valid;
             khd_view_valid = khd.view_valid;
@@ -8273,21 +8271,11 @@ static game_value get_render_stats_sqf() {
             for (int i = 0; i < 3; ++i) cam.push_back(game_value(khrt_cam[i]));
             out.push_back(kva("camera", std::move(cam)));
         }
-        // Attachment proxies and the locator: pxyLive and pxyPool are current;
-        // the rest count while collection is armed.
-        out.push_back(kv("pxyLive", static_cast<float>(khrt_pxy_live)));
+        // The helper pool, current.
         out.push_back(kv("pxyPool", static_cast<float>(RenderIntegration::g_pxy_pool_n.load(std::memory_order_relaxed))));
-        out.push_back(kv("pxyScaleFailed", static_cast<float>(RenderIntegration::g_pxy_scale_failed.load(std::memory_order_relaxed))));
-        out.push_back(kv("pxyClassTop", static_cast<float>(RenderIntegration::g_pxy_class_top.load(std::memory_order_relaxed))));   // KH_PXY_CLASS_OPEN: the highest scale class handed out this session (0 = the first).
-        out.push_back(kv("pxyDecided", static_cast<float>(RenderIntegration::g_pxy_decided.load(std::memory_order_relaxed))));
-        out.push_back(kv("pxyUndecided", static_cast<float>(RenderIntegration::g_pxy_undecided.load(std::memory_order_relaxed))));
-        out.push_back(kv("pxyCorrected", static_cast<float>(RenderIntegration::g_pxy_pre_ne.load(std::memory_order_relaxed))));
-        // The locator's health since arming (divide by frameCycles): cycles scanned in full; proxies lacking an admitted fixed
-        // main-pass / shadow key (per proxy per cycle - 0 when healthy); parent keys revoked by a contradicting main-pass upload;
-        // parent hits at the exact camera-relative hypothesis (KH_CBL_CAMX).
+        // The locator's health since arming (divide by frameCycles): cycles scanned in full; parent keys revoked by a
+        // contradicting main-pass upload; parent hits taken at the exact camera-relative hypothesis (KH_CBL_CAMX).
         out.push_back(kv("scanFullCycles", static_cast<float>(RenderIntegration::g_scan_full_cycles.load(std::memory_order_relaxed))));
-        out.push_back(kv("fastPxyNoMain", static_cast<float>(RenderIntegration::g_fast_pxy_no_main.load(std::memory_order_relaxed))));
-        out.push_back(kv("fastPxyNoShadow", static_cast<float>(RenderIntegration::g_fast_pxy_no_shadow.load(std::memory_order_relaxed))));
         out.push_back(kv("cblRevoked", static_cast<float>(RenderIntegration::g_cbl_revoked.load(std::memory_order_relaxed))));
         out.push_back(kv("cblCamxHits", static_cast<float>(RenderIntegration::g_cbl_camx_hits.load(std::memory_order_relaxed))));
         out.push_back(kv("dlIdle", static_cast<float>(RenderIntegration::g_dl_idle.load(std::memory_order_relaxed))));   // KH_DL_IDLE: harvests in a row with an empty pool (must read 0 with lights present).

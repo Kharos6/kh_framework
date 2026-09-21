@@ -336,24 +336,23 @@ if (
                     private _switchSecondary = (inputAction "SwitchHandgun") isNotEqualTo 0;
                     private _switchTertiary = (inputAction "SwitchSecondary") isNotEqualTo 0;
                     private _switchBinocular = (inputAction "binocular") isNotEqualTo 0;
-                    private _raiseWeapon = (inputAction "toggleRaiseWeapon") isNotEqualTo 0;
                     private _throw = (inputAction "throw") isNotEqualTo 0;
                     private _reload = (inputAction "reloadMagazine") isNotEqualTo 0;
                     private _prone = (inputAction "MoveDown") isNotEqualTo 0;
                     private _crouch = (inputAction "MoveUp") isNotEqualTo 0;
                     private _fire = ((inputAction "defaultAction") isNotEqualTo 0) && !(_unit getVariable ["KH_var_inMeleeState", false]) && ((_unit getVariable ["KH_var_meleeMode", ""]) isEqualTo "");
 
-                    if ((_currentInterruptableAnimation isNotEqualTo "") && (_switchPrimary || _switchSecondary || _switchTertiary || _switchBinocular || _raiseWeapon || _throw || _reload || _prone || _crouch || _fire)) exitWith {
+                    if ((_currentInterruptableAnimation isNotEqualTo "") && (_switchPrimary || _switchSecondary || _switchTertiary || _switchBinocular || _throw || _reload || _prone || _crouch || _fire)) exitWith {
                         _unit playActionNow "Stop";
                         _unit setVariable ["KH_var_lockedAnimation", true];
                         private _moves = getText ((configOf _unit) >> "moves");
 
-                        if (_raiseWeapon || _prone || _crouch) then {
+                        if (_prone || _crouch) then {
                             execute [
                                 [
                                     _unit, 
                                     toLowerANSI (getText (configFile >> _moves >> "Actions" >> (getText (configFile >> _moves >> "states" >> _animationState >> "actions")) >> "stop")),
-                                    [["down", "up"] select _crouch, "Stand"] select _raiseWeapon
+                                    ["down", "up"] select _crouch
                                 ],
                                 {
                                     params ["_unit", "_state", "_newState"];

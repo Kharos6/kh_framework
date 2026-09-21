@@ -152,7 +152,7 @@ private _currentHandlers = [];
         addRender3D [getPosWorldVisual _entity, (getNumber (_x >> "followRotation")) isEqualTo 1, getText (_x >> "model")];
     }
     else {
-        addRender3D [[_entity, (getNumber (_x >> "bindSkeleton")) isEqualTo 1], (getNumber (_x >> "followRotation")) isEqualTo 1, getText (_x >> "model")];
+        addRender3D [[_entity, ["", "bindSkeleton", nil] call KH_fnc_getConfigValue], (getNumber (_x >> "followRotation")) isEqualTo 1, getText (_x >> "model")];
     };
     
     private _properties = ((configProperties [

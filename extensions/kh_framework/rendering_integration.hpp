@@ -9789,6 +9789,20 @@ struct KhFinalStepScope {
     KhFinalStepScope(const KhFinalStepScope&) = delete;
     KhFinalStepScope& operator=(const KhFinalStepScope&) = delete;
 };
+// KH_CAST_REPICK: raised around the step the cast fire runs just before it paints our shadow into the engine's mask
+// (mask_cast_engine). That step picks again, as the final step does, but never waits; g_attach_repick_moved notes that
+// it moved something, so the fire rebuilds the sun map from the new poses before painting. g_gts_first_done is the
+// newest published sample when the cycle's first render-thread step ran (g_gts_first_cyc): a paint with nothing newer
+// has nothing to pick again. Render thread only; the flag is raised only through KhRepickStepScope.
+static bool g_attach_repick_step = false;
+static bool g_attach_repick_moved = false;
+static uint64_t g_gts_first_cyc = ~0ull, g_gts_first_done = 0;
+struct KhRepickStepScope {
+    KhRepickStepScope() { g_attach_repick_step = true; }
+    ~KhRepickStepScope() { g_attach_repick_step = false; }
+    KhRepickStepScope(const KhRepickStepScope&) = delete;
+    KhRepickStepScope& operator=(const KhRepickStepScope&) = delete;
+};
 // KH_SUN_RESTEP - the cycle in which the injection's final step moved or
 // re-skinned a followed object after the cast fire's step had built the sun
 // map, which our meshes' self-shadow also samples. inject_composited_meshes
@@ -9797,7 +9811,9 @@ struct KhFinalStepScope {
 // the cycle's sample again (kh_gts_for_cycle), so it moves a binding wherever
 // the frame's own sample landed after the fire's step - most cycles of a light
 // scene - as well as where a mesh was shown or edited between the two. The
-// world cast is not repainted.
+// world cast is painted once a frame, into the engine's own mask, and cannot be
+// repainted: the fire picks again just before that paint instead
+// (KH_CAST_REPICK).
 static uint64_t g_sun_restep_cycle = ~0ull;
 
 // KH_ATTACH_GT_SNAP - which sample a cycle draws (KH_GTS_NEAREST). The Draw3D sampler (kh_attach_gt_snap) samples every
@@ -9812,10 +9828,17 @@ static uint64_t g_sun_restep_cycle = ~0ull;
 //          outside g_draw_list_mutex, which the sampler needs) until half a period after the clear, past which it is
 //          not this frame's. Not arrived: the newest sample before the clear (B) - a frame later than that draws one
 //          behind, that frame alone, and a render cycle with no frame of its own redraws the last one.
-//   Final = the earlier steps (the cast fire's, 0.03 ms after the clear) take what has landed and never wait: in a
-//          light scene the frame's Draw3D lands after them (measured: 0.3-1.0 ms after the clear), and holding the
-//          render thread there held the game thread back from its Draw3D until the wait gave up. The final step picks
+//   Final = the cast fire's first step (0.03 ms after the clear) takes what has landed and never waits: in a light
+//          scene the frame's Draw3D lands after it (measured: 0.3-1.7 ms after the clear). The final step picks
 //          again; a pose that changes there re-skins its skeletal mesh and reopens the sun map (KH_SUN_RESTEP).
+//   Paint = the engine reads its shadow mask right after the fire paints our shadow into it (0.08-0.47 ms after the
+//          clear), so the fire waits for the frame's own sample just before that paint and picks again (KH_CAST_WAIT,
+//          KH_CAST_REPICK) - but at most KH_CAST_WAIT_US after the clear, not half a period. Waiting this early can
+//          hold the game thread back from its Draw3D until the wait gives up (after some vehicle exits: the sample
+//          landed 0.35-0.45 ms after every give-up, whatever the limit); a half-period wait there then pushed the
+//          final step past its own deadline and drew mesh and shadow a frame behind. Unblocked, the sample landed
+//          0.1-1.7 ms after the clear in every run. Past the cap the shadow carries the previous frame's pose for that
+//          frame, and the final step still waits (to half a period) for the mesh.
 // Measured (a test probe, withdrawn; the engine's diag_frameNo against the render cycle): three runs - a heavy scene
 // (21.7 ms frames), a light one after a vehicle exit (10.4 ms) and one flipping between 20 ms and 10 ms frames across
 // an exit - 756 cycles, each frame's own Draw3D within 3.1 ms before or 2.6 ms after its clear (at most 26 % of a
@@ -9829,6 +9852,9 @@ static constexpr uint32_t KH_GTS_STAMPS = 8u;
 static std::atomic<int64_t> g_gts_stamp_pub[KH_GTS_STAMPS];   // Game thread: seq's stamp at [seq % KH_GTS_STAMPS], stored
                                                               // before g_gts_done_pub names it.
 static uint64_t g_gts_wait_cyc = ~0ull;              // The cycle whose final step has run its wait (kh_gts_wait).
+static uint64_t g_gts_paint_wait_cyc = ~0ull;        // The cycle whose cast-fire paint has run its wait (KH_CAST_WAIT).
+static constexpr int64_t KH_CAST_WAIT_US = 2000;     // KH_CAST_WAIT: the paint's wait ends this long after the clear
+                                                     // at the latest (above the 1.7 ms slowest unblocked arrival seen).
 inline int64_t kh_gts_qpc() { LARGE_INTEGER khgq_q; QueryPerformanceCounter(&khgq_q); return khgq_q.QuadPart; }
 // The main depth clear (render thread): this cycle's boundary, and half the frame period - the shorter of the last two
 // frames, so one long frame (a hitch, a pause) does not widen the window.
@@ -9909,15 +9935,15 @@ inline void kh_gts_carry(const float khgy_pp[12], const float khgy_pn[12], const
         }
     }
 }
-// The cycle's final render-thread step, before kh_attach_step takes g_draw_list_mutex: when no sample stamped from
-// half a period before the clear has been published, wait for this frame's own until half a period after it.
-inline void kh_gts_wait() {
-    if (g_gts_wait_cyc == g_topo_cycles) return;
-    g_gts_wait_cyc = g_topo_cycles;
+// When no sample stamped from half a period before the clear has been published, wait for this frame's own until half
+// a period after the clear, past which it is not this frame's - or until khgw_cap ticks after the clear, if sooner.
+// Render thread, outside g_draw_list_mutex (the sampler needs it). Its callers gate it once per cycle each: the final
+// step (kh_gts_wait, no cap) and the cast fire's paint (KH_CAST_WAIT, KH_CAST_WAIT_US).
+inline void kh_gts_wait_own(int64_t khgw_cap) {
     const int64_t khgw_half = g_gts_half;
     if (khgw_half <= 0) return;   // The period is not known yet: the pick takes B.
     const int64_t khgw_from = g_gts_clear_qpc - khgw_half;
-    const int64_t khgw_until = g_gts_clear_qpc + khgw_half;
+    const int64_t khgw_until = g_gts_clear_qpc + (khgw_cap < khgw_half ? khgw_cap : khgw_half);
     for (;;) {
         const uint64_t khgw_s = g_gts_done_pub.load(std::memory_order_acquire);
         if (khgw_s != 0u && g_gts_stamp_pub[khgw_s % KH_GTS_STAMPS].load(std::memory_order_relaxed) >= khgw_from) return;
@@ -9925,12 +9951,19 @@ inline void kh_gts_wait() {
         std::this_thread::yield();
     }
 }
+// The cycle's final render-thread step, before kh_attach_step takes g_draw_list_mutex.
+inline void kh_gts_wait() {
+    if (g_gts_wait_cyc == g_topo_cycles) return;
+    g_gts_wait_cyc = g_topo_cycles;
+    kh_gts_wait_own(g_gts_half);
+}
 // The sample cycle khgc_cyc draws (KH_ATTACH_GT_SNAP, above), or null (the ring holds none for this binding): the one
 // stamped nearest the cycle's clear within half a period, else the newest before the clear, else the oldest held.
 // Memoized per binding and cycle by the render thread (khgc_store), so the steps of a cycle draw one sample even when
-// the next Draw3D lands between them - except that the final step (g_attach_final_step) picks again and stores its
-// pick for the steps after it. A game-thread step (the park's, with the render thread held still) reads the memo, or
-// computes the same pick unstored. Under g_draw_list_mutex.
+// the next Draw3D lands between them - except that the final step (g_attach_final_step) and the cast fire's step
+// before its paint (g_attach_repick_step, KH_CAST_REPICK) pick again and store their pick for the steps after them.
+// A game-thread step (the park's, with the render thread held still) reads the memo, or computes the same pick
+// unstored. Under g_draw_list_mutex.
 inline const KhGtSnap* kh_gts_for_cycle(KhAttach& khgc_a, uint64_t khgc_cyc, bool khgc_store) {
     const size_t khgc_np = khgc_a.skel ? khgc_a.skel_proxy.size() : (khgc_a.proxy.is_nil() ? 0u : 1u);
     const uint32_t khgc_gen = khgc_a.skel ? khgc_a.skel_gen : 0u;
@@ -9943,7 +9976,7 @@ inline const KhGtSnap* kh_gts_for_cycle(KhAttach& khgc_a, uint64_t khgc_cyc, boo
             khgc_c[khgc_nc++] = &khgc_s;
         }
     }
-    const bool khgc_new = khgc_a.gts_cyc != khgc_cyc || (khgc_store && g_attach_final_step);
+    const bool khgc_new = khgc_a.gts_cyc != khgc_cyc || (khgc_store && (g_attach_final_step || g_attach_repick_step));
     if (!khgc_new) {   // This cycle's pick stands.
         for (uint32_t khgc_i = 0; khgc_i < khgc_nc; ++khgc_i) {
             if (khgc_c[khgc_i]->seq == khgc_a.gts_pick_seq) return khgc_c[khgc_i];
@@ -9996,6 +10029,7 @@ inline void kh_attach_moved_note(const RenderObject& khmn_o, bool khmn_moved, bo
     if (!khmn_moved) return;
     kh_scene_mark(khmn_o.slot);
     if (g_attach_final_step && khmn_rt) g_sun_restep_cycle = g_topo_cycles;
+    if (g_attach_repick_step && khmn_rt) g_attach_repick_moved = true;   // KH_CAST_REPICK.
 }
 // KH_SKIN_FORK - one binding whose vertices this step skins across the pool:
 // its loop tail (the upload, the box, the draw centre, the scene mark) waits
@@ -10148,6 +10182,10 @@ inline void kh_attach_gt_snap() {
 inline void kh_attach_step(ID3D11DeviceContext* khap_ctx = nullptr) {
     KH_PROF_SCOPE(KHP_ATTACH_STEP);   // KH_PROF.
     if (g_attach_n.load(std::memory_order_relaxed) == 0) return;
+    if (reorder_on_render_thread() && g_gts_first_cyc != g_topo_cycles) {   // KH_CAST_REPICK: the cycle's first step.
+        g_gts_first_cyc = g_topo_cycles;
+        g_gts_first_done = g_gts_done_pub.load(std::memory_order_acquire);
+    }
     if (reorder_on_render_thread() && g_attach_final_step) kh_gts_wait();   // Before the mutex the sampler needs.
     std::lock_guard<std::mutex> khap_g(g_draw_list_mutex);
     static std::vector<KhSkinDrawJob> khap_jobs;   // Under g_draw_list_mutex (steps never overlap).
@@ -37462,6 +37500,31 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
             return;
         }
     }
+    // KH_CAST_WAIT: the engine reads its mask right after this paint, before a light frame's own Draw3D has landed,
+    // so wait for it here, once per cycle - at most KH_CAST_WAIT_US after the clear (see the Paint note at
+    // KH_ATTACH_GT_SNAP: past it the wait may be what holds the Draw3D back).
+    if (reorder_on_render_thread() && g_attach_n.load(std::memory_order_relaxed) != 0u &&
+        g_gts_paint_wait_cyc != g_topo_cycles) {
+        g_gts_paint_wait_cyc = g_topo_cycles;
+        kh_gts_wait_own(static_cast<int64_t>(kh_prof_freq()) * KH_CAST_WAIT_US / 1000000);
+    }
+    // KH_CAST_REPICK: this paint is the frame's one; it reads the sun map built at the frame's first step, from the
+    // samples landed by then. When a newer sample has been published since (the one just waited for, as a rule), a
+    // step that picks again - without waiting - moves what it changes, and the map is rebuilt from it before the
+    // paint. A wait that reached its cap leaves the previous frame's pose in the shadow.
+    if (g_gts_first_cyc == g_topo_cycles && g_gts_done_pub.load(std::memory_order_acquire) > g_gts_first_done) {
+        g_attach_repick_moved = false;
+        {
+            KhRepickStepScope khrp_scope;
+            kh_attach_step(ctx);
+        }
+        if (g_attach_repick_moved) {
+            kh_uvs_step(ctx);
+            g_sun_map_rendered_frame = false;
+            render_sun_depth(ctx);
+        }
+        g_gts_first_done = g_gts_done_pub.load(std::memory_order_acquire);   // Picked against these.
+    }
     g_ro.in_injection = true;
     ID3D11RenderTargetView* old_rtvs[8] = {};
     ID3D11DepthStencilView* old_dsv = nullptr;
@@ -49778,6 +49841,11 @@ inline void kh_session_scratch_reset() {
     g_gts_clear_prev = 0;
     g_gts_half = 0;
     g_gts_wait_cyc = ~0ull;
+    g_gts_first_cyc = ~0ull;      // KH_CAST_REPICK.
+    g_gts_first_done = 0;
+    g_gts_paint_wait_cyc = ~0ull;   // KH_CAST_WAIT.
+    g_attach_repick_step = false;
+    g_attach_repick_moved = false;
     g_sun_restep_cycle = ~0ull;
     g_rtshadow_cycle.store(~0ull, std::memory_order_relaxed);
     g_dls_frame_cycle = ~0ull;

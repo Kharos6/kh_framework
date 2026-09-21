@@ -7036,7 +7036,7 @@ static bool kh_rv_chain_sim(const game_value& val, RenderIntegration::RenderObje
     if (khch_pos_set) khch_c.proxy = khch_c.pos == R::KH_CHE_MEM ? khch_own.release() : game_value();
     R::kh_chain_cfg_resolve(khch_c);
     game_value khch_drop;
-    // KH_CBL_PXY_POOL: a position set this call holds its own reference (a
+    // KH_PXY_POOL: a position set this call holds its own reference (a
     // pooled make can return the same proxy), so the old reference goes
     // whenever the position was set; otherwise only when the config no longer
     // names it.
@@ -8273,14 +8273,7 @@ static game_value get_render_stats_sqf() {
         }
         // The helper pool, current.
         out.push_back(kv("pxyPool", static_cast<float>(RenderIntegration::g_pxy_pool_n.load(std::memory_order_relaxed))));
-        // The locator's health since arming (divide by frameCycles): cycles scanned in full; parent keys revoked by a
-        // contradicting main-pass upload; parent hits taken at the exact camera-relative hypothesis (KH_CBL_CAMX).
-        out.push_back(kv("scanFullCycles", static_cast<float>(RenderIntegration::g_scan_full_cycles.load(std::memory_order_relaxed))));
-        out.push_back(kv("cblRevoked", static_cast<float>(RenderIntegration::g_cbl_revoked.load(std::memory_order_relaxed))));
-        out.push_back(kv("cblCamxHits", static_cast<float>(RenderIntegration::g_cbl_camx_hits.load(std::memory_order_relaxed))));
         out.push_back(kv("dlIdle", static_cast<float>(RenderIntegration::g_dl_idle.load(std::memory_order_relaxed))));   // KH_DL_IDLE: harvests in a row with an empty pool (must read 0 with lights present).
-        out.push_back(kv("cblDecisions", static_cast<float>(RenderIntegration::g_cbl_dec_cb.load(std::memory_order_relaxed))));
-        out.push_back(kv("cblFallbacks", static_cast<float>(RenderIntegration::g_cbl_dec_fb.load(std::memory_order_relaxed))));
         // The dynamic-light state.
         out.push_back(kv("dlValid", khd_valid ? 1.0f : 0.0f));
         out.push_back(kv("dlPointN", static_cast<float>(khd_point_n)));

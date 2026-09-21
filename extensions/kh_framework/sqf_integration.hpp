@@ -8184,11 +8184,13 @@ static game_value get_render_stats_sqf() {
         // iterations) the cloth and chain steps ran at last frame; 1 = every
         // instance at its dials (or none stepped).
         out.push_back(kv("simLodShare", s.simlod_full > 0 ? static_cast<float>(static_cast<double>(s.simlod_work) / static_cast<double>(s.simlod_full)) : 1.0f));
-        // KH_ATTACH_DIAG: the attachment step's per-frame lane reads.
-        // attachRefused rising means a followed mesh is holding its last
-        // transform because its read failed the checks; attachRepaired counts
-        // reads taken only because a bone-driven basis was re-orthonormalised;
-        // attachSkew is the largest row-length deviation from 1 any read had.
+        // KH_ATTACH_DIAG: the Draw3D sampler's object reads. attachRefused
+        // counts reads that failed the checks - a parent's leaves its mesh
+        // holding for that frame, a helper's is carried from the previous
+        // frame (KH_GTS_HOLD), a rotation object's leaves the rotation
+        // holding; attachRepaired counts reads taken only because a
+        // bone-driven basis was re-orthonormalised; attachSkew is the largest
+        // row-length deviation from 1 any read had.
         out.push_back(kv("attachRepaired", static_cast<float>(RenderIntegration::g_attach_repaired.load(std::memory_order_relaxed))));
         out.push_back(kv("attachRefused", static_cast<float>(RenderIntegration::g_attach_refused.load(std::memory_order_relaxed))));
         {

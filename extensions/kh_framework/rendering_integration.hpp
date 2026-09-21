@@ -27,7 +27,11 @@ namespace RenderIntegration {
 //
 // Either the position or the rotation slot may instead be a game OBJECT, and
 // the mesh then follows that object's transform every frame (the two are
-// independent and may name different objects).
+// independent and may name different objects). A character (kind of Man) is
+// followed through a hidden helper attached to it - as the object of a plain
+// binding, a rotation object, or the parent of a skeletal binding - so the
+// mesh stays with it in vehicles; the helper is shared by every binding on
+// that character and deleted with the last one.
 //
 // Position may also be [object, memoryPoint] to follow a model memory point
 // (bone); rotation is then REQUIRED and must be true (follow the bone's
@@ -8296,7 +8300,8 @@ inline bool kh_skin_pose_read(const KhSkinInst& khpr_in);
 //          followed object itself for a plain one (and for a binding that follows a rotation alone, that object -
 //          kh_attach_parent_gv). 12 floats: position (SQF order), then the basis rows.
 //   px   = the helpers, the same 12 floats each: a skeletal binding's proxies in order, or a memory-point
-//          binding's one proxy. Empty for a plain binding.
+//          binding's one proxy (a refused one carried from the previous sample - KH_GTS_HOLD). Empty for a plain
+//          binding.
 //   rot  = the ROTATION lane's own object, when it is neither par nor the one helper (a script's own object).
 // gen / xb name the binding the sample was taken for (a skeletal binding's skel_gen; the position lane's object, or
 // the rotation lane's where there is no position lane - kh_attach_key_gv),
@@ -8304,6 +8309,11 @@ inline bool kh_skin_pose_read(const KhSkinInst& khpr_in);
 // the cycle's depth clear. Written by the game thread and read by the render thread's step, both under
 // g_draw_list_mutex.
 static constexpr uint32_t KH_GTS_N = 4u;   // Samples kept: the drawn frame is at most one or two behind the newest.
+// The Draw3D sampler's serial (kh_attach_gt_snap): each sample's KhGtSnap::seq. Game thread only. Reset with the
+// objects (kh_session_objects_reset), not the session: the bindings hold its values (their rings and picks, the
+// helper stamps KhAttach::org_*_seq and KhPxyPoolEnt::made_seq), and the deferred teardown leaves the next mission's
+// bindings standing.
+static uint64_t g_gts_seq = 0;
 struct KhGtSnap {
     bool      ok = false;
     bool      rot_ok = false;
@@ -8327,6 +8337,23 @@ struct KhAttach {
     uintptr_t gts_par_vb = 0, gts_par_bb = 0, gts_rot_vb = 0, gts_rot_bb = 0;
     std::vector<uint32_t>  gts_off;
     std::vector<uintptr_t> gts_vb, gts_bb;
+    // KH_ATTACH_MAN_HELPER: a character's own visual state is not written while it rides in a vehicle (the engine
+    // draws the crew from the vehicle, and the state keeps the pose it had when the character got in), but a helper
+    // attached to it is: attachTo places it from the character's drawn transform. A lane naming a Man therefore gets
+    // a pooled helper attached at the character's origin (kh_pxy_pool_get, memory point ""), and the Draw3D sampler
+    // reads the helper wherever it would have read the character (kh_attach_org_read) - a skeletal binding's parent
+    // included, whose frozen state the bones were made relative to (cancelled until a bone lay more than
+    // KH_SKEL_REACH_M from it, and never under rotation false). One helper per character, shared through the pool by
+    // every lane and binding on it and deleted with the last (kh_attach_proxy_reap). org_*_for is the object the
+    // helper stands in for (kh_attach_org_sync retires one that no longer does); org_*_seq is the sample that first
+    // saw the helper after it was made (the pool's made_seq + 1; 0: not known, the first sample of the lane), which
+    // the sampler skips, because attachTo places a new helper at the next simulation step - one made frames ago is
+    // read from the lane's first sample.
+    // Game thread, under g_draw_list_mutex; the render thread never reads them.
+    game_value  org_pos, org_rot;
+    const void* org_pos_for = nullptr;
+    const void* org_rot_for = nullptr;
+    uint64_t    org_pos_seq = 0, org_rot_seq = 0;
     game_value obj_pos;   // Nil = position not attached.
     game_value obj_rot;   // Nil = rotation not attached.
     // KH_ATTACH_BONE. proxy is a LOCAL simple object (KH_ATTACH_BONE_SHAPE)
@@ -8381,10 +8408,13 @@ struct KhAttach {
     uint32_t               skel_smp_gen = 0;    // The skel_gen the stash was taken for.
     uint64_t               skel_smp_ms = 0;     // Its steady stamp (KH_SKEL_SAMPLE_KEEP_MS).
     // KH_SKEL_DRAW: the cycle (g_topo_cycles) whose render-thread step took
-    // this stash and skinned it - usually the cast fire's, else the injection's
-    // when the skin waited for it. Later steps of that cycle keep both, so the
-    // sun ladder, the DLS maps, the seam and the injection draw one pose.
+    // this stash and skinned it - usually the cast fire's. Later steps of that
+    // cycle keep both unless the final step picks another sample (skel_smp_seq,
+    // the sample stashed; skel_draw_seq, the sample skinned), when it stashes
+    // and skins again, so the injection and everything after it draw one pose.
     uint64_t               skel_smp_cycle = ~0ull;
+    uint64_t               skel_smp_seq = 0;
+    uint64_t               skel_draw_seq = 0;
     // KH_ATTACH_CYCLE: the cycle (g_topo_cycles) in which the render thread's
     // step last wrote this entry's lanes into the mesh - the consume point's
     // sample, the one that draws. A park's step (kh_park_run) leaves an entry
@@ -8471,17 +8501,18 @@ static std::atomic<uint32_t> g_attach_proxy_dead_n{ 0 };
 // class the engine will create locally and attach will do.
 static const char* const KH_ATTACH_BONE_SHAPE = "KH_HelperRender";
 
-// KH_ATTACH_DIAG - what kh_attach_step's per-frame lane reads came back as,
-// for getRenderStats (attachRepaired / attachRefused / attachSkew). Written
-// only by the step, which holds g_draw_list_mutex on either thread; atomics
-// because getRenderStats and resetRenderStats read and zero them without it.
+// KH_ATTACH_DIAG - what the Draw3D sampler's object reads (kh_gts_read) came
+// back as, for getRenderStats (attachRepaired / attachRefused / attachSkew).
+// Written only by the sampler, on the game thread under g_draw_list_mutex;
+// atomics because getRenderStats and resetRenderStats read and zero them
+// without it.
 // Collected only while stats are armed, like every g_stats counter.
 struct KhAttachDiag {
     float skew = 0.0f;       // Largest |row length - 1| of the basis read.
     bool  repaired = false;  // A row outside 1 % of unit length: re-orthonormalised.
 };
 static std::atomic<uint64_t> g_attach_repaired{ 0 };   // Reads taken only because the basis was repaired.
-static std::atomic<uint64_t> g_attach_refused{ 0 };    // Reads refused (the lane held its transform).
+static std::atomic<uint64_t> g_attach_refused{ 0 };    // Reads refused (what follows: kh_attach_gt_snap).
 static std::atomic<uint32_t> g_attach_skew_bits{ 0 };  // Float bits: the largest skew seen.
 inline bool kh_stats_on();   // Defined with KH_PROF at the top of the namespace.
 
@@ -8494,7 +8525,8 @@ inline bool kh_attach_is_obj(const game_value& khao_gv) {
 }
 
 // KH_PXY_POOL - one proxy per (parent, memory point), shared by every
-// binding on that point, attached follow-bone with zero offset. g_pxy_pool (by
+// binding on that point, attached with zero offset - following the bone for a memory point, at the origin for
+// none (KH_ATTACH_MAN_HELPER). g_pxy_pool (by
 // proxy) counts the holders; kh_attach_proxy_reap releases one per ended proxy
 // and deletes at the last. g_pxy_pool_key (parent | lower-case memory point)
 // finds a live proxy to share; an entry with a dead parent or proxy is not
@@ -8509,6 +8541,7 @@ struct KhPxyPoolEnt {
     game_value  parent;
     uint32_t    refs = 0;
     std::string key;
+    uint64_t    made_seq = 0;   // g_gts_seq when it was made and attached (KH_ATTACH_MAN_HELPER's stamp).
 };
 static std::unordered_map<uintptr_t, KhPxyPoolEnt>& g_pxy_pool =
     *(new std::unordered_map<uintptr_t, KhPxyPoolEnt>());
@@ -9043,16 +9076,70 @@ inline bool kh_attach_rot_is_binding(const KhAttach& khrb_a) {
            khrb_a.obj_rot.data.get() == khrb_a.bone_parent.data.get();
 }
 
+// KH_ATTACH_MAN_HELPER - a character's origin helper, for a lane about to name khom_gv: the pool's (shared by every
+// lane on that character), or none for anything that is not a Man, or when the helper cannot be made (the lane then
+// reads the character itself, as before). GAME THREAD, holding no lock (SQF calls); defined after kh_pxy_pool_get.
+// The caller owns the reference and files it: into a lane (kh_attach_org_put) or the delete queue. khom_from: the
+// first sample that saw the helper (its pool entry's made_seq + 1), 0 when not known.
+inline void kh_attach_org_make(const game_value& khom_gv, game_value& khom_out, uint64_t& khom_from);
+// Queue one helper reference for kh_attach_proxy_reap (release, delete at the last). Under g_draw_list_mutex.
+inline void kh_attach_org_drop(game_value& khod_h) {
+    if (khod_h.is_nil()) return;
+    g_attach_proxy_dead.push_back(khod_h);
+    g_attach_proxy_dead_n.store(static_cast<uint32_t>(g_attach_proxy_dead.size()), std::memory_order_relaxed);
+    khod_h = game_value();
+}
+// A lane's new helper (nil: none), replacing the one it had, stamped with khop_from (kh_attach_org_make). The same
+// helper again (the pool's, for the same character) keeps its stamp. Under g_draw_list_mutex.
+inline void kh_attach_org_put(KhAttach& khop_a, bool khop_rot, game_value& khop_h, const game_value& khop_for,
+                              uint64_t khop_from) {
+    game_value& khop_slot = khop_rot ? khop_a.org_rot : khop_a.org_pos;
+    const bool khop_same = !khop_slot.is_nil() && !khop_h.is_nil() && khop_slot.data.get() == khop_h.data.get();
+    kh_attach_org_drop(khop_slot);
+    khop_slot = khop_h;
+    khop_h = game_value();
+    (khop_rot ? khop_a.org_rot_for : khop_a.org_pos_for) = khop_slot.is_nil() ? nullptr : khop_for.data.get();
+    if (!khop_same) (khop_rot ? khop_a.org_rot_seq : khop_a.org_pos_seq) = khop_from;
+}
+// Retire every helper that no longer stands in for its lane: the position helper serves a plain binding's position
+// object or a skeletal binding's parent (both the position lane's object; a memory-point binding places from its
+// own helper and reads its parent only as a check); the rotation helper serves the rotation lane's object when that
+// is not the position lane's (whose read already has it). Under g_draw_list_mutex; after every lane change.
+inline void kh_attach_org_sync(KhAttach& khos_a) {
+    const bool khos_pos_ok = khos_a.skel || khos_a.bone_parent.is_nil();
+    if (!khos_a.org_pos.is_nil() &&
+        (!khos_pos_ok || khos_a.obj_pos.is_nil() || khos_a.obj_pos.data.get() != khos_a.org_pos_for)) {
+        kh_attach_org_drop(khos_a.org_pos);
+        khos_a.org_pos_for = nullptr;
+    }
+    if (!khos_a.org_rot.is_nil() &&
+        (khos_a.obj_rot.is_nil() || khos_a.obj_rot.data.get() != khos_a.org_rot_for ||
+         khos_a.obj_rot.data.get() == khos_a.obj_pos.data.get())) {
+        kh_attach_org_drop(khos_a.org_rot);
+        khos_a.org_rot_for = nullptr;
+    }
+}
+// Both helpers, when the entry ends. Under g_draw_list_mutex.
+inline void kh_attach_org_retire(KhAttach& khor_a) {
+    kh_attach_org_drop(khor_a.org_pos);
+    kh_attach_org_drop(khor_a.org_rot);
+    khor_a.org_pos_for = nullptr;
+    khor_a.org_rot_for = nullptr;
+}
+
 // Set or clear one lane. A value that is not a live-typed OBJECT clears it;
 // an entry with both lanes clear is erased, so g_attach_n counts exactly the
 // meshes the step walks and the objects are released as soon as they stop
 // being followed.
 inline void kh_attach_set(const std::string& khas_h, const game_value& khas_gv, bool khas_rot) {
+    game_value khas_org;   // KH_ATTACH_MAN_HELPER: made before the mutex (SQF calls); every path below files it.
+    uint64_t   khas_from = 0u;
+    if (kh_attach_is_obj(khas_gv) && !kh_attach_obj_dead(khas_gv)) kh_attach_org_make(khas_gv, khas_org, khas_from);
     std::lock_guard<std::mutex> khas_g(g_draw_list_mutex);
     const bool khas_on = kh_attach_is_obj(khas_gv);
     auto khas_it = g_attach.find(khas_h);
     if (khas_it == g_attach.end()) {
-        if (!khas_on) return;
+        if (!khas_on) { kh_attach_org_drop(khas_org); return; }
         khas_it = g_attach.emplace(khas_h, KhAttach()).first;
     }
     // KH_ATTACH_BONE: the proxy exists to BE the position lane's object, so
@@ -9079,6 +9166,8 @@ inline void kh_attach_set(const std::string& khas_h, const game_value& khas_gv, 
     }
     game_value& khas_lane = khas_rot ? khas_it->second.obj_rot : khas_it->second.obj_pos;
     khas_lane = khas_on ? khas_gv : game_value();
+    kh_attach_org_put(khas_it->second, khas_rot, khas_org, khas_gv, khas_from);   // KH_ATTACH_MAN_HELPER (nil: none).
+    kh_attach_org_sync(khas_it->second);
     if (khas_it->second.obj_pos.is_nil() && khas_it->second.obj_rot.is_nil()) {
         // KH_ATTACH_BONE: the entry is about to stop existing, and with it the
         // only reference to its proxy - so retire before erasing or the object
@@ -9088,6 +9177,7 @@ inline void kh_attach_set(const std::string& khas_h, const game_value& khas_gv, 
         // where a leak would be silent and permanent, and a later reader adding
         // a rotation-side clear would not think to look at it.
         kh_attach_proxy_retire(khas_it->second);
+        kh_attach_org_retire(khas_it->second);   // KH_ATTACH_MAN_HELPER.
         g_attach.erase(khas_it);
     }
     g_attach_n.store(static_cast<uint32_t>(g_attach.size()), std::memory_order_relaxed);
@@ -9102,6 +9192,7 @@ inline void kh_attach_drop(const std::string& khad_h) {
     auto khad_it = g_attach.find(khad_h);
     if (khad_it == g_attach.end()) return;
     kh_attach_proxy_retire(khad_it->second);   // KH_ATTACH_BONE: ours to delete.
+    kh_attach_org_retire(khad_it->second);     // KH_ATTACH_MAN_HELPER: likewise.
     g_attach.erase(khad_it);
     g_attach_n.store(static_cast<uint32_t>(g_attach.size()), std::memory_order_relaxed);
 }
@@ -9115,7 +9206,10 @@ inline void kh_attach_drop(const std::string& khad_h) {
 // the note on g_attach warns about.
 inline void kh_attach_drop_all(bool khad_retire) {   // Under g_draw_list_mutex.
     if (khad_retire) {
-        for (auto& khad_kv : g_attach) kh_attach_proxy_retire(khad_kv.second);
+        for (auto& khad_kv : g_attach) {
+            kh_attach_proxy_retire(khad_kv.second);
+            kh_attach_org_retire(khad_kv.second);   // KH_ATTACH_MAN_HELPER.
+        }
     } else {
         g_attach_proxy_dead.clear();
         g_attach_proxy_dead_n.store(0, std::memory_order_relaxed);
@@ -9286,11 +9380,12 @@ inline bool kh_pxy_pool_get(const game_value& khpg_parent, const std::string& kh
     }
     // The spawn position is discarded by the attach on the next simulation
     // step, which is why it is not asked for.
-    sqf::attach_to(khpg_s, static_cast<object>(khpg_parent), vector3(0.0f, 0.0f, 0.0f), khpg_mem, true);
+    sqf::attach_to(khpg_s, static_cast<object>(khpg_parent), vector3(0.0f, 0.0f, 0.0f), khpg_mem, !khpg_mem.empty());
     KhPxyPoolEnt khpg_e;
     khpg_e.proxy = khpg_s;
     khpg_e.parent = khpg_parent;
     khpg_e.refs = 1u;
+    khpg_e.made_seq = g_gts_seq;
     khpg_e.key = khpg_key;
     khpg_out = khpg_e.proxy;
     const uintptr_t khpg_xb = kh_attach_base_of(khpg_e.proxy);
@@ -9305,6 +9400,23 @@ inline bool kh_pxy_pool_get(const game_value& khpg_parent, const std::string& kh
         g_pxy_pool_n.store(static_cast<uint32_t>(g_pxy_pool.size()), std::memory_order_relaxed);
     }
     return true;
+}
+
+// KH_ATTACH_MAN_HELPER (declared above kh_attach_set). The helper is attached at the character's origin with no
+// memory point - where its visual state is placed, and what a plain lane reads - and pooled under that empty point.
+inline void kh_attach_org_make(const game_value& khom_gv, game_value& khom_out, uint64_t& khom_from) {
+    khom_out = game_value();
+    khom_from = 0u;
+    try {
+        if (!sqf::is_kind_of(static_cast<object>(khom_gv), "Man")) return;
+        std::string khom_err;
+        if (!kh_pxy_pool_get(khom_gv, std::string(), khom_out, "a character's", khom_err)) khom_out = game_value();
+    } catch (...) {
+        khom_out = game_value();
+    }
+    if (khom_out.is_nil()) return;
+    const auto khom_it = g_pxy_pool.find(kh_attach_base_of(khom_out));
+    if (khom_it != g_pxy_pool.end()) khom_from = khom_it->second.made_seq + 1u;
 }
 
 // KH_ATTACH_BONE - the memory-point proxy. GAME THREAD ONLY (SQF calls). False
@@ -9465,6 +9577,7 @@ inline void kh_attach_bone_set(const std::string& khbs_h, const game_value& khbs
     khbs_it->second.obj_pos = khbs_proxy;
     const game_value khbs_new_rot = khbs_rot ? khbs_proxy : khbs_keep;
     khbs_it->second.obj_rot = khbs_new_rot;
+    kh_attach_org_sync(khbs_it->second);   // KH_ATTACH_MAN_HELPER.
     g_attach_n.store(static_cast<uint32_t>(g_attach.size()), std::memory_order_relaxed);
 }
 
@@ -9477,6 +9590,9 @@ inline void kh_attach_bone_set(const std::string& khbs_h, const game_value& khbs
 inline void kh_attach_skel_set(const std::string& khss_h, std::vector<game_value>&& khss_proxies,
                                const std::vector<std::string>& khss_mems,
                                const game_value& khss_parent, bool khss_rot) {
+    game_value khss_org;   // KH_ATTACH_MAN_HELPER: the parent's, made before the mutex (SQF calls); filed below.
+    uint64_t   khss_from = 0u;
+    if (kh_attach_is_obj(khss_parent) && !kh_attach_obj_dead(khss_parent)) kh_attach_org_make(khss_parent, khss_org, khss_from);
     std::lock_guard<std::mutex> khss_g(g_draw_list_mutex);
     auto khss_it = g_attach.find(khss_h);
     if (khss_it == g_attach.end()) khss_it = g_attach.emplace(khss_h, KhAttach()).first;
@@ -9490,6 +9606,8 @@ inline void kh_attach_skel_set(const std::string& khss_h, std::vector<game_value
     khss_a.bone_parent = khss_parent;
     khss_a.obj_pos = khss_parent;
     khss_a.obj_rot = khss_rot ? khss_parent : khss_keep;
+    kh_attach_org_put(khss_a, false, khss_org, khss_parent, khss_from);   // KH_ATTACH_MAN_HELPER (nil: none).
+    kh_attach_org_sync(khss_a);
     // A stash taken this cycle was the old binding's: the next render-thread
     // step re-samples and re-skins.
     khss_a.skel_smp_cycle = ~0ull;
@@ -9532,6 +9650,7 @@ inline bool kh_attach_bone_rot(const std::string& khbr_h, bool khbr_on) {
     } else {
         khbr_it->second.obj_rot = khbr_it->second.obj_pos;   // KH_ATTACH_PLAIN_ROT.
     }
+    kh_attach_org_sync(khbr_it->second);   // KH_ATTACH_MAN_HELPER.
     return true;
 }
 
@@ -9674,40 +9793,58 @@ struct KhFinalStepScope {
 // re-skinned a followed object after the cast fire's step had built the sun
 // map, which our meshes' self-shadow also samples. inject_composited_meshes
 // reopens the map for that cycle (it re-renders only if its input hash
-// changed). Cost: a second ladder render on such cycles. Every step of a cycle
-// draws the cycle's one sample (kh_gts_for_cycle), so the final step moves a
-// binding only where the fire's step did not place it already (no sample yet
-// at the fire's step, a mesh shown or edited between the two). The world cast
-// is not repainted.
+// changed). Cost: a second ladder render on such cycles. The final step picks
+// the cycle's sample again (kh_gts_for_cycle), so it moves a binding wherever
+// the frame's own sample landed after the fire's step - most cycles of a light
+// scene - as well as where a mesh was shown or edited between the two. The
+// world cast is not repainted.
 static uint64_t g_sun_restep_cycle = ~0ull;
 
-// KH_ATTACH_GT_SNAP - which sample a cycle draws. The Draw3D sampler (kh_attach_gt_snap) samples every binding's
-// objects once a frame; the step draws one of those samples and never reads an object itself.
-//   B    = the newest sample taken before this cycle's main depth clear (g_gts_clear_qpc, stamped by the clear hook):
-//          the frame the engine draws whenever the game thread reached that frame's Draw3D before the clear.
-//   Late = the render thread can reach a frame's draws before the game thread reaches that frame's Draw3D - the
-//          engine's own Draw3D icons cannot be early (they draw at the end of the frame, after Draw3D queued them),
-//          but our draw is mid-scene. Then B is the sample the previous cycle aimed at and this frame's own is the
-//          next: the cycle's first render-thread step waits for it (kh_gts_wait: outside g_draw_list_mutex, which
-//          the sampler needs, at most KH_GTS_WAIT_US) and the pick draws it.
-//   Aim  = every cycle records the sample it aimed at (g_gts_last_seq), and the next cycle's base is that. A target
-//          that never arrived within the wait is burned - its frame has gone by - so the next cycle aims past it
-//          rather than drawing it a frame late; a second timeout in a row means the aim is ahead of the frames (a
-//          render cycle with no frame of its own) and it falls back to B.
-// Measured: which side of the clear a frame's Draw3D lands on flips with the load - a light scene put the render
-// thread ahead on 637 of 646 frames, an ordinary one on none. A time rule (B alone) drew N+1, N+1 at each flip, an
-// order rule (last + 1) sat a frame behind for whole stretches; this rule drew every frame of both, and its wait
-// cost 0.38 ms a frame where it ran (at most 0.76 ms), nothing where it did not.
+// KH_ATTACH_GT_SNAP - which sample a cycle draws (KH_GTS_NEAREST). The Draw3D sampler (kh_attach_gt_snap) samples every
+// binding's objects once a frame; the step draws one of those samples and never reads an object itself.
+//   Own  = a frame's Draw3D lands within a few milliseconds of that frame's main depth clear - before it or after it,
+//          and which side flips with the load - while every other frame's lands most of a frame away. So a cycle's
+//          own sample is the one stamped nearest its clear, within half a frame period either side (g_gts_half: half
+//          the shorter of the last two frames, so a hitch or a pause does not stretch it). Nothing is carried from
+//          cycle to cycle: a frame judged wrong cannot put the next one wrong.
+//   Wait = when no sample stamped from half a period before the clear has been published, this frame's own is still
+//          to come: the cycle's FINAL step (the injection's, or the render-thread flush's) waits for it (kh_gts_wait:
+//          outside g_draw_list_mutex, which the sampler needs) until half a period after the clear, past which it is
+//          not this frame's. Not arrived: the newest sample before the clear (B) - a frame later than that draws one
+//          behind, that frame alone, and a render cycle with no frame of its own redraws the last one.
+//   Final = the earlier steps (the cast fire's, 0.03 ms after the clear) take what has landed and never wait: in a
+//          light scene the frame's Draw3D lands after them (measured: 0.3-1.0 ms after the clear), and holding the
+//          render thread there held the game thread back from its Draw3D until the wait gave up. The final step picks
+//          again; a pose that changes there re-skins its skeletal mesh and reopens the sun map (KH_SUN_RESTEP).
+// Measured (a test probe, withdrawn; the engine's diag_frameNo against the render cycle): three runs - a heavy scene
+// (21.7 ms frames), a light one after a vehicle exit (10.4 ms) and one flipping between 20 ms and 10 ms frames across
+// an exit - 756 cycles, each frame's own Draw3D within 3.1 ms before or 2.6 ms after its clear (at most 26 % of a
+// frame), the nearest sample the frame's own on every one. The rules this replaced (the newest before the clear, with
+// an aim carried from cycle to cycle, write-offs and fallbacks) drew 321 of them a frame behind after vehicle exits.
 static int64_t  g_gts_clear_qpc = 0;                 // Render thread: this cycle's main depth clear (kh_gts_qpc).
-static constexpr int64_t KH_GTS_WAIT_US = 2000;
+static int64_t  g_gts_clear_prev = 0;                // The clear before it.
+static int64_t  g_gts_half = 0;                      // Half the frame period at this clear (0: not known yet).
 static std::atomic<uint64_t> g_gts_done_pub{ 0 };   // Game thread: the seq whose sampler has written every binding.
-static uint64_t g_gts_last_seq = 0;                  // Render thread: the sample the latest cycle aimed at.
-static uint64_t g_gts_last_cyc = ~0ull;              // The cycle g_gts_last_seq is for.
-static uint64_t g_gts_base_seq = 0, g_gts_base_cyc = ~0ull;   // The cycle's base (kh_gts_wait), and its cycle.
-static uint64_t g_gts_wait_cyc = ~0ull;              // The cycle whose first render-thread step has run.
-static uint64_t g_gts_absent_last = ~0ull, g_gts_absent_dec_cyc = ~0ull;   // The last cycle with a burn decision.
-static bool     g_gts_absent_burn = false;           // That cycle's decision: burn (true) or fall back to B.
+static constexpr uint32_t KH_GTS_STAMPS = 8u;
+static std::atomic<int64_t> g_gts_stamp_pub[KH_GTS_STAMPS];   // Game thread: seq's stamp at [seq % KH_GTS_STAMPS], stored
+                                                              // before g_gts_done_pub names it.
+static uint64_t g_gts_wait_cyc = ~0ull;              // The cycle whose final step has run its wait (kh_gts_wait).
 inline int64_t kh_gts_qpc() { LARGE_INTEGER khgq_q; QueryPerformanceCounter(&khgq_q); return khgq_q.QuadPart; }
+// The main depth clear (render thread): this cycle's boundary, and half the frame period - the shorter of the last two
+// frames, so one long frame (a hitch, a pause) does not widen the window.
+inline void kh_gts_clear_note(int64_t khcn_now) {
+    const int64_t khcn_a = g_gts_clear_qpc;
+    const int64_t khcn_b = g_gts_clear_prev;
+    g_gts_clear_prev = khcn_a;
+    g_gts_clear_qpc = khcn_now;
+    if (khcn_b > 0 && khcn_a > khcn_b && khcn_now > khcn_a) {
+        const int64_t khcn_d1 = khcn_now - khcn_a;
+        const int64_t khcn_d2 = khcn_a - khcn_b;
+        g_gts_half = (khcn_d1 < khcn_d2 ? khcn_d1 : khcn_d2) / 2;
+    } else {
+        g_gts_half = 0;
+    }
+}
 // The object a binding is placed relative to: a memory-point binding's parent, else its position lane's object, else
 // (a binding that follows a rotation alone - KH_ATTACH_ROT_ONLY) its rotation lane's object.
 inline const game_value& kh_attach_parent_gv(const KhAttach& khpg_a) {
@@ -9718,6 +9855,25 @@ inline const game_value& kh_attach_parent_gv(const KhAttach& khpg_a) {
 inline const game_value& kh_attach_key_gv(const KhAttach& khkg_a) {
     return khkg_a.obj_pos.is_nil() ? khkg_a.obj_rot : khkg_a.obj_pos;
 }
+// KH_ATTACH_MAN_HELPER: the object the Draw3D sampler reads for khor_obj - the lane's helper where one stands in for
+// it and has been attached (read after its stamp, the first sample that saw it: that sample reads the character,
+// because attachTo places a new helper at the next simulation step; a lane with no stamp stamps its own first
+// sample), else the object itself - which is also what a helper something
+// else deleted falls back to (the character's own state: right outside a vehicle, as before the helpers). Game
+// thread, under g_draw_list_mutex.
+inline const game_value& kh_attach_org_read(KhAttach& khor_a, const game_value& khor_obj, uint64_t khor_seq) {
+    const void* const khor_p = khor_obj.data.get();
+    if (!khor_p) return khor_obj;
+    if (!khor_a.org_pos.is_nil() && khor_a.org_pos_for == khor_p) {
+        if (khor_a.org_pos_seq == 0u) khor_a.org_pos_seq = khor_seq;
+        return khor_seq > khor_a.org_pos_seq && !kh_attach_obj_dead(khor_a.org_pos) ? khor_a.org_pos : khor_obj;
+    }
+    if (!khor_a.org_rot.is_nil() && khor_a.org_rot_for == khor_p) {
+        if (khor_a.org_rot_seq == 0u) khor_a.org_rot_seq = khor_seq;
+        return khor_seq > khor_a.org_rot_seq && !kh_attach_obj_dead(khor_a.org_rot) ? khor_a.org_rot : khor_obj;
+    }
+    return khor_obj;
+}
 // The sampler's read of one object, its validation noted for getRenderStats (KH_ATTACH_DIAG).
 inline bool kh_gts_read(const game_value& khgr_gv, uint32_t& khgr_off, uintptr_t& khgr_vb, uintptr_t& khgr_bb,
                         float khgr_pos[3], float khgr_rot[9]) {
@@ -9726,30 +9882,55 @@ inline bool kh_gts_read(const game_value& khgr_gv, uint32_t& khgr_off, uintptr_t
     kh_attach_diag_note(khgr_ok, khgr_dg);
     return khgr_ok;
 }
-// The cycle's first render-thread step, before kh_attach_step takes g_draw_list_mutex: the cycle's base, and the
-// wait for a late frame's sample. A timeout returns; the pick then burns the target.
+// KH_GTS_HOLD - a helper whose read was refused this frame (attachRefused) keeps the pose it had RELATIVE TO ITS PARENT
+// in the binding's previous sample, carried onto this frame's parent: the rest of the binding stays current and that
+// one helper holds its local pose for the frame, instead of the whole binding going without a sample - which the pick
+// then draws as a held frame, a visible jump. Poses are 12 floats: position (SQF order), then the basis rows (engine
+// axes, orthonormal as kh_attach_vs_eval hands them back). khgy_out must not alias an input.
+inline void kh_gts_carry(const float khgy_pp[12], const float khgy_pn[12], const float khgy_x[12], float khgy_out[12]) {
+    const float khgy_d[3] = { khgy_x[0] - khgy_pp[0], khgy_x[2] - khgy_pp[2], khgy_x[1] - khgy_pp[1] };   // Engine axes.
+    const float* const khgy_rp = khgy_pp + 3;
+    const float* const khgy_rn = khgy_pn + 3;
+    float khgy_w[3] = { 0.0f, 0.0f, 0.0f };   // The offset, taken into the new parent's frame.
+    for (int k = 0; k < 3; ++k) {
+        const float khgy_l = khgy_d[0] * khgy_rp[k * 3] + khgy_d[1] * khgy_rp[k * 3 + 1] + khgy_d[2] * khgy_rp[k * 3 + 2];
+        for (int c = 0; c < 3; ++c) khgy_w[c] += khgy_l * khgy_rn[k * 3 + c];
+    }
+    khgy_out[0] = khgy_pn[0] + khgy_w[0];
+    khgy_out[1] = khgy_pn[1] + khgy_w[2];   // SQF north = engine z.
+    khgy_out[2] = khgy_pn[2] + khgy_w[1];   // SQF up = engine y.
+    for (int i = 0; i < 3; ++i) {   // Each basis row, re-expressed from the old parent's frame in the new one's.
+        const float* const khgy_r = khgy_x + 3 + i * 3;
+        float* const khgy_o = khgy_out + 3 + i * 3;
+        khgy_o[0] = khgy_o[1] = khgy_o[2] = 0.0f;
+        for (int k = 0; k < 3; ++k) {
+            const float khgy_l = khgy_r[0] * khgy_rp[k * 3] + khgy_r[1] * khgy_rp[k * 3 + 1] + khgy_r[2] * khgy_rp[k * 3 + 2];
+            for (int c = 0; c < 3; ++c) khgy_o[c] += khgy_l * khgy_rn[k * 3 + c];
+        }
+    }
+}
+// The cycle's final render-thread step, before kh_attach_step takes g_draw_list_mutex: when no sample stamped from
+// half a period before the clear has been published, wait for this frame's own until half a period after it.
 inline void kh_gts_wait() {
     if (g_gts_wait_cyc == g_topo_cycles) return;
     g_gts_wait_cyc = g_topo_cycles;
-    g_gts_base_seq = g_gts_last_seq;   // Before any of the cycle's picks move it.
-    g_gts_base_cyc = g_topo_cycles;
-    const uint64_t khgw_want = g_gts_base_seq;   // Landed past it: this frame's own sample.
-    if (khgw_want == 0u || g_gts_done_pub.load(std::memory_order_acquire) > khgw_want) return;
-    static const int64_t khgw_f = [] { LARGE_INTEGER khgw_q = {}; QueryPerformanceFrequency(&khgw_q);
-                                       return khgw_q.QuadPart > 0 ? static_cast<int64_t>(khgw_q.QuadPart) : 1ll; }();
-    const int64_t khgw_cap = khgw_f * KH_GTS_WAIT_US / 1000000ll;
-    LARGE_INTEGER khgw_t0 = {}, khgw_t = {};
-    QueryPerformanceCounter(&khgw_t0);
-    while (g_gts_done_pub.load(std::memory_order_acquire) <= khgw_want) {
-        QueryPerformanceCounter(&khgw_t);
-        if (khgw_t.QuadPart - khgw_t0.QuadPart >= khgw_cap) return;
+    const int64_t khgw_half = g_gts_half;
+    if (khgw_half <= 0) return;   // The period is not known yet: the pick takes B.
+    const int64_t khgw_from = g_gts_clear_qpc - khgw_half;
+    const int64_t khgw_until = g_gts_clear_qpc + khgw_half;
+    for (;;) {
+        const uint64_t khgw_s = g_gts_done_pub.load(std::memory_order_acquire);
+        if (khgw_s != 0u && g_gts_stamp_pub[khgw_s % KH_GTS_STAMPS].load(std::memory_order_relaxed) >= khgw_from) return;
+        if (kh_gts_qpc() >= khgw_until) return;
         std::this_thread::yield();
     }
 }
-// The sample cycle khgc_cyc draws (KH_ATTACH_GT_SNAP, above), or null (the ring holds none for this binding). One pick
-// per binding per cycle, memoized by the render thread (khgc_store), so every step of a cycle draws one sample even
-// when the next Draw3D lands between them; a game-thread step (the park's) reads the memo, or computes the same pick
-// unstored. Under g_draw_list_mutex.
+// The sample cycle khgc_cyc draws (KH_ATTACH_GT_SNAP, above), or null (the ring holds none for this binding): the one
+// stamped nearest the cycle's clear within half a period, else the newest before the clear, else the oldest held.
+// Memoized per binding and cycle by the render thread (khgc_store), so the steps of a cycle draw one sample even when
+// the next Draw3D lands between them - except that the final step (g_attach_final_step) picks again and stores its
+// pick for the steps after it. A game-thread step (the park's, with the render thread held still) reads the memo, or
+// computes the same pick unstored. Under g_draw_list_mutex.
 inline const KhGtSnap* kh_gts_for_cycle(KhAttach& khgc_a, uint64_t khgc_cyc, bool khgc_store) {
     const size_t khgc_np = khgc_a.skel ? khgc_a.skel_proxy.size() : (khgc_a.proxy.is_nil() ? 0u : 1u);
     const uint32_t khgc_gen = khgc_a.skel ? khgc_a.skel_gen : 0u;
@@ -9762,55 +9943,37 @@ inline const KhGtSnap* kh_gts_for_cycle(KhAttach& khgc_a, uint64_t khgc_cyc, boo
             khgc_c[khgc_nc++] = &khgc_s;
         }
     }
-    const bool khgc_new = khgc_a.gts_cyc != khgc_cyc;
+    const bool khgc_new = khgc_a.gts_cyc != khgc_cyc || (khgc_store && g_attach_final_step);
     if (!khgc_new) {   // This cycle's pick stands.
         for (uint32_t khgc_i = 0; khgc_i < khgc_nc; ++khgc_i) {
             if (khgc_c[khgc_i]->seq == khgc_a.gts_pick_seq) return khgc_c[khgc_i];
         }
     }
     if (khgc_nc == 0u) return nullptr;
-    const KhGtSnap* khgc_b = nullptr;   // B: the newest taken before this cycle's clear, else the oldest held.
-    for (uint32_t khgc_i = 0; khgc_i < khgc_nc; ++khgc_i) {
-        if (khgc_c[khgc_i]->qpc <= g_gts_clear_qpc && (!khgc_b || khgc_c[khgc_i]->seq > khgc_b->seq)) khgc_b = khgc_c[khgc_i];
-    }
-    if (!khgc_b) {
-        for (uint32_t khgc_i = 0; khgc_i < khgc_nc; ++khgc_i) if (!khgc_b || khgc_c[khgc_i]->seq < khgc_b->seq) khgc_b = khgc_c[khgc_i];
-    }
-    const bool khgc_last = khgc_a.gts_cyc != ~0ull && khgc_a.gts_cyc + 1u == khgc_cyc;
-    const KhGtSnap* khgc_p = khgc_b;
-    // The base: what the previous cycle aimed at (the render thread's cycle, taken by kh_gts_wait), else this
-    // binding's own last pick. B at or before it: this frame's own sample came after the clear - the next one.
-    const bool khgc_based = g_gts_base_cyc == khgc_cyc && g_gts_base_seq != 0u;
-    const uint64_t khgc_base = khgc_based ? g_gts_base_seq : khgc_a.gts_pick_seq;
-    bool khgc_absent = false;
-    uint64_t khgc_target = 0u;
-    if (khgc_new && (khgc_based || khgc_last) && khgc_b->seq <= khgc_base) {
-        khgc_target = khgc_base + 1u;
-        const KhGtSnap* khgc_l = nullptr;
+    const int64_t khgc_cl = g_gts_clear_qpc;
+    const int64_t khgc_half = g_gts_half;
+    const KhGtSnap* khgc_p = nullptr;   // The frame's own: nearest the clear, within half a period.
+    int64_t khgc_best = 0;
+    if (khgc_half > 0) {
         for (uint32_t khgc_i = 0; khgc_i < khgc_nc; ++khgc_i) {
-            if (khgc_c[khgc_i]->seq == khgc_target) khgc_l = khgc_c[khgc_i];
+            const int64_t khgc_d = khgc_c[khgc_i]->qpc >= khgc_cl ? khgc_c[khgc_i]->qpc - khgc_cl : khgc_cl - khgc_c[khgc_i]->qpc;
+            if (khgc_d <= khgc_half && (!khgc_p || khgc_d < khgc_best)) {
+                khgc_p = khgc_c[khgc_i];
+                khgc_best = khgc_d;
+            }
         }
-        if (khgc_l) khgc_p = khgc_l;
-        else khgc_absent = true;   // Not arrived within the wait: B, one lag frame.
+    }
+    if (!khgc_p) {   // Not arrived (or the period not known yet): B, the newest before the clear, else the oldest held.
+        for (uint32_t khgc_i = 0; khgc_i < khgc_nc; ++khgc_i) {
+            if (khgc_c[khgc_i]->qpc <= khgc_cl && (!khgc_p || khgc_c[khgc_i]->seq > khgc_p->seq)) khgc_p = khgc_c[khgc_i];
+        }
+    }
+    if (!khgc_p) {
+        for (uint32_t khgc_i = 0; khgc_i < khgc_nc; ++khgc_i) if (!khgc_p || khgc_c[khgc_i]->seq < khgc_p->seq) khgc_p = khgc_c[khgc_i];
     }
     if (khgc_store && khgc_new) {
         khgc_a.gts_cyc = khgc_cyc;
         khgc_a.gts_pick_seq = khgc_p->seq;
-        uint64_t khgc_aim = khgc_p->seq;   // What this cycle aimed at: the target, burned, when it never arrived.
-        if (khgc_absent) {
-            if (g_gts_absent_dec_cyc != khgc_cyc) {   // One decision per cycle, for every binding.
-                g_gts_absent_dec_cyc = khgc_cyc;
-                g_gts_absent_burn = g_gts_absent_last + 1u != khgc_cyc;
-                g_gts_absent_last = khgc_cyc;
-            }
-            if (g_gts_absent_burn) khgc_aim = khgc_target;
-        }
-        if (g_gts_last_cyc != khgc_cyc) {   // The cycle's first pick sets it; the rest only raise it.
-            g_gts_last_cyc = khgc_cyc;
-            g_gts_last_seq = khgc_aim;
-        } else if (khgc_aim > g_gts_last_seq) {
-            g_gts_last_seq = khgc_aim;
-        }
     }
     return khgc_p;
 }
@@ -9880,9 +10043,9 @@ inline void kh_skin_stat_note(uint32_t khsn_gpu, uint32_t khsn_cpu) {
 // every binding's objects read TOGETHER - the parent (or a plain binding's object, or the object a rotation alone
 // follows), the proxies, the rotation lane's own object - through kh_attach_raw's copy rule, with page caches of this
 // function's own. Draw3D is the instant the engine's own drawn state is coherent (a Draw3D icon at an object's visual
-// position never falters). A failed read leaves the binding without a sample this frame; the step draws the ring's, or
-// holds. g_gts_done_pub is published once every binding is written.
-static uint64_t g_gts_seq = 0;   // Game thread only.
+// position never falters). A failed PARENT read leaves the binding without a sample this frame (the step draws the
+// ring's, or holds); a failed helper read is carried from the previous sample (KH_GTS_HOLD); a failed read of the
+// rotation lane's own object leaves the rotation holding. g_gts_done_pub is published once every binding is written.
 inline void kh_attach_gt_snap() {
     if (g_attach_n.load(std::memory_order_relaxed) == 0) return;
     std::lock_guard<std::mutex> khgt_g(g_draw_list_mutex);
@@ -9892,9 +10055,11 @@ inline void kh_attach_gt_snap() {
         KhAttach& khgt_a = khgt_kv.second;
         // The object the binding is placed relative to, and the helpers it follows. KH_ATTACH_ROT_ONLY: a binding with
         // no position lane is sampled on its rotation object, which the step then takes as the parent's.
-        const game_value& khgt_par = kh_attach_parent_gv(khgt_a);
+        // KH_ATTACH_MAN_HELPER: khgt_lpar is that object, khgt_par what is read for it.
+        const game_value& khgt_lpar = kh_attach_parent_gv(khgt_a);
         const size_t khgt_np = khgt_a.skel ? khgt_a.skel_proxy.size() : (khgt_a.proxy.is_nil() ? 0u : 1u);
-        if (khgt_par.is_nil() || (khgt_a.skel && khgt_np == 0u)) continue;
+        if (khgt_lpar.is_nil() || (khgt_a.skel && khgt_np == 0u)) continue;
+        const game_value& khgt_par = kh_attach_org_read(khgt_a, khgt_lpar, khgt_seq);
         const uint32_t khgt_gen = khgt_a.skel ? khgt_a.skel_gen : 0u;
         const uintptr_t khgt_xb = kh_attach_base_of(kh_attach_key_gv(khgt_a));
         const uintptr_t khgt_pb = kh_attach_base_of(khgt_par);
@@ -9920,25 +10085,35 @@ inline void kh_attach_gt_snap() {
         memcpy(khgt_s.par, khgt_p, sizeof(khgt_p));
         memcpy(khgt_s.par + 3, khgt_r, sizeof(khgt_r));
         khgt_s.px.resize(khgt_np * 12u);
+        // KH_GTS_HOLD: the binding's previous sample, written before this one (another ring slot), when it is this
+        // binding's - a refused helper read is carried from it; with none (the first sample after a bind), as before.
+        const KhGtSnap& khgt_prev = khgt_a.gts[(khgt_a.gts_w + KH_GTS_N - 1u) % KH_GTS_N];
+        const bool khgt_prev_ok = khgt_a.gts_w != 0u && khgt_prev.ok && khgt_prev.gen == khgt_gen &&
+                                  khgt_prev.xb == khgt_xb && khgt_prev.px.size() == khgt_np * 12u;
         bool khgt_ok = true;
         for (size_t khgt_j = 0; khgt_j < khgt_np; ++khgt_j) {
             const game_value& khgt_x = khgt_a.skel ? khgt_a.skel_proxy[khgt_j] : khgt_a.proxy;
-            if (!kh_gts_read(khgt_x, khgt_a.gts_off[khgt_j], khgt_a.gts_vb[khgt_j], khgt_a.gts_bb[khgt_j], khgt_p, khgt_r)) { khgt_ok = false; break; }
+            if (!kh_gts_read(khgt_x, khgt_a.gts_off[khgt_j], khgt_a.gts_vb[khgt_j], khgt_a.gts_bb[khgt_j], khgt_p, khgt_r)) {
+                if (!khgt_prev_ok) { khgt_ok = false; break; }
+                kh_gts_carry(khgt_prev.par, khgt_s.par, &khgt_prev.px[khgt_j * 12u], &khgt_s.px[khgt_j * 12u]);
+                continue;
+            }
             memcpy(&khgt_s.px[khgt_j * 12u], khgt_p, sizeof(khgt_p));
             memcpy(&khgt_s.px[khgt_j * 12u + 3u], khgt_r, sizeof(khgt_r));
         }
         if (!khgt_ok) continue;
         // The rotation lane, when it follows an object of its own (neither the parent nor the one helper).
         const void* const khgt_rd = khgt_a.obj_rot.is_nil() ? nullptr : khgt_a.obj_rot.data.get();
-        if (khgt_rd && khgt_rd != khgt_par.data.get() && !(khgt_np == 1u && !khgt_a.skel && khgt_rd == khgt_a.proxy.data.get())) {
-            const uintptr_t khgt_rb = kh_attach_base_of(khgt_a.obj_rot);
+        if (khgt_rd && khgt_rd != khgt_lpar.data.get() && !(khgt_np == 1u && !khgt_a.skel && khgt_rd == khgt_a.proxy.data.get())) {
+            const game_value& khgt_ro = kh_attach_org_read(khgt_a, khgt_a.obj_rot, khgt_seq);   // KH_ATTACH_MAN_HELPER.
+            const uintptr_t khgt_rb = kh_attach_base_of(khgt_ro);
             if (khgt_a.gts_rb != khgt_rb) {
                 khgt_a.gts_rb = khgt_rb;
                 khgt_a.gts_rot_off = KH_ATTACH_OFF_NONE;
                 khgt_a.gts_rot_vb = 0;
                 khgt_a.gts_rot_bb = 0;
             }
-            if (kh_gts_read(khgt_a.obj_rot, khgt_a.gts_rot_off, khgt_a.gts_rot_vb, khgt_a.gts_rot_bb, khgt_p, khgt_r)) {
+            if (kh_gts_read(khgt_ro, khgt_a.gts_rot_off, khgt_a.gts_rot_vb, khgt_a.gts_rot_bb, khgt_p, khgt_r)) {
                 memcpy(khgt_s.rot, khgt_p, sizeof(khgt_p));
                 memcpy(khgt_s.rot + 3, khgt_r, sizeof(khgt_r));
                 khgt_s.rot_ok = true;
@@ -9951,6 +10126,7 @@ inline void kh_attach_gt_snap() {
         khgt_s.ok = true;
         ++khgt_a.gts_w;
     }
+    g_gts_stamp_pub[khgt_seq % KH_GTS_STAMPS].store(khgt_q, std::memory_order_relaxed);   // Before the seq names it.
     g_gts_done_pub.store(khgt_seq, std::memory_order_release);   // Every binding written: kh_gts_wait.
 }
 
@@ -9972,7 +10148,7 @@ inline void kh_attach_gt_snap() {
 inline void kh_attach_step(ID3D11DeviceContext* khap_ctx = nullptr) {
     KH_PROF_SCOPE(KHP_ATTACH_STEP);   // KH_PROF.
     if (g_attach_n.load(std::memory_order_relaxed) == 0) return;
-    if (reorder_on_render_thread()) kh_gts_wait();   // Before the mutex the sampler needs.
+    if (reorder_on_render_thread() && g_attach_final_step) kh_gts_wait();   // Before the mutex the sampler needs.
     std::lock_guard<std::mutex> khap_g(g_draw_list_mutex);
     static std::vector<KhSkinDrawJob> khap_jobs;   // Under g_draw_list_mutex (steps never overlap).
     khap_jobs.clear();
@@ -10034,7 +10210,9 @@ inline void kh_attach_step(ID3D11DeviceContext* khap_ctx = nullptr) {
             // the cycle stashes and skins it before any draw.
             const bool khap_pose = khap_o.visible || (khap_a.skin && kh_skin_pose_read(*khap_a.skin));
             if (khap_a.skel && khap_rt && khap_pose &&
-                !(khap_ctx && khap_a.skel_smp_ok && khap_a.skel_smp_cycle == g_topo_cycles)) {   // KH_SKEL_DRAW: this cycle's pose stands.
+                !(khap_ctx && khap_a.skel_smp_ok && khap_a.skel_smp_cycle == g_topo_cycles &&
+                  khap_a.skel_smp_seq == khap_gs->seq)) {   // KH_SKEL_DRAW: this cycle's pose stands.
+                khap_a.skel_smp_seq = khap_gs->seq;
                 const size_t khap_np = khap_a.skel_proxy.size();
                 khap_a.skel_smp_gen = khap_a.skel_gen;
                 khap_a.skel_smp.resize(khap_np * 12u);
@@ -10091,8 +10269,10 @@ inline void kh_attach_step(ID3D11DeviceContext* khap_ctx = nullptr) {
         }
         bool khap_defer = false;   // KH_SKIN_FORK: this binding's tail waits for its vertices.
         if (khap_raw && khap_a.skel) {   // KH_SKEL: the deferred position, now the rotation is final.
-            if (khap_ctx && khap_o.visible && khap_a.skel_smp_ok && khap_a.skel_smp_cycle != g_topo_cycles) {
-                // KH_SKEL_DRAW: once per cycle, drawn meshes only.
+            if (khap_ctx && khap_o.visible && khap_a.skel_smp_ok &&
+                (khap_a.skel_smp_cycle != g_topo_cycles || khap_a.skel_draw_seq != khap_a.skel_smp_seq)) {
+                // KH_SKEL_DRAW: once per cycle and sample, drawn meshes only.
+                khap_a.skel_draw_seq = khap_a.skel_smp_seq;
                 if (kh_skin_draw_prep(khap_a, khap_o, khap_ctx)) {
                     khap_jobs.push_back(KhSkinDrawJob{ &khap_it->first, &khap_a, &khap_o,
                                                        { khap_root[0], khap_root[1], khap_root[2] },
@@ -10198,8 +10378,8 @@ struct RenderStats {
     // by looking at the screen: whether the sim ran at all, whether it is
     // keeping up, and whether it is rescuing itself behind your back.
     // KH_CLOTH / KH_CHAIN, published by kh_cloth_upload: instances simulating
-    // right now, the frames one was still busy from the previous one (session
-    // total - a steady rise means the workers cannot keep up), the collider
+    // right now, the frames one was still busy from the previous one (since the
+    // stats were armed - a steady rise means the workers cannot keep up), the collider
     // meshes gathered last frame and the live physics affectors.
     uint64_t cloth_instances = 0;
     uint64_t cloth_skipped = 0;
@@ -10214,7 +10394,7 @@ struct RenderStats {
     uint64_t skin_bones_driven = 0;
     uint64_t skin_proxies = 0;
     // Changed poses that waited a frame because that mesh's last job was still
-    // running on the pool - the skin's clothSkipped. Session total.
+    // running on the pool - the skin's clothSkipped. Since the stats were armed.
     uint64_t skin_skipped = 0;
     uint64_t chain_instances = 0;
     uint64_t chain_skipped = 0;
@@ -14454,7 +14634,7 @@ inline void kh_cloth_sync(float khcs_dt, bool khcs_wanted) {
         // carrier and colliders moved across. Dropped, the cloth fell behind
         // real time and read two frames' travel as one frame's velocity.
         if (khcs_in->busy.load(std::memory_order_acquire)) {
-            (khcs_ch ? g_chain_skipped : g_cloth_skipped).fetch_add(1u, std::memory_order_relaxed);
+            if (kh_stats_on()) (khcs_ch ? g_chain_skipped : g_cloth_skipped).fetch_add(1u, std::memory_order_relaxed);
             khcs_in->dt_owed += khcs_dt;
             if (khcs_in->dt_owed > KH_CLOTH_DT_MAX) khcs_in->dt_owed = KH_CLOTH_DT_MAX;
             continue;
@@ -16299,7 +16479,7 @@ inline void kh_skin_sync() {
         if (khss_in.busy.load(std::memory_order_acquire)) {
             // Still skinning the last pose. This one waits a frame (done is
             // left alone, so the next sync sees it again) and is counted.
-            g_skin_skipped.fetch_add(1u, std::memory_order_relaxed);
+            if (kh_stats_on()) g_skin_skipped.fetch_add(1u, std::memory_order_relaxed);
             continue;
         }
         const MeshDef& khss_d = mesh_def(khss_in.mesh);
@@ -45926,7 +46106,7 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
 
             g_topo_cycles++;
             g_topo_cycles_pub.store(g_topo_cycles, std::memory_order_relaxed);   // KH_ATTACH_CYCLE: the park's step reads it.
-            g_gts_clear_qpc = kh_gts_qpc();   // KH_ATTACH_GT_SNAP: this cycle's boundary, against the samples' stamps.
+            kh_gts_clear_note(kh_gts_qpc());   // KH_ATTACH_GT_SNAP: this cycle's boundary and half the frame period.
             kh_prof_fold(self);   // KH_PROF: the ended cycle publishes; the next GPU bracket opens.
 
             // A depth clear of the main scene buffer marks the new frame:
@@ -49571,6 +49751,9 @@ inline void reset_stat_counters() {
     g_skin_bound_worst_bits.store(0, std::memory_order_relaxed);   // KH_SKIN_GPU: skinBoundWorst.
     g_skin_so_n.store(0, std::memory_order_relaxed);   // skinGpu / skinCpu: republished by the next cycle's skinning.
     g_skin_cpu_n.store(0, std::memory_order_relaxed);
+    g_cloth_skipped.store(0, std::memory_order_relaxed);   // clothSkipped / chainSkipped / skinSkipped.
+    g_chain_skipped.store(0, std::memory_order_relaxed);
+    g_skin_skipped.store(0, std::memory_order_relaxed);
 }
 
 // Per-session scratch that is neither a device object nor a statistic. Must run
@@ -49590,17 +49773,11 @@ inline void kh_session_scratch_reset() {
     // A cycle-stamped latch restarts with the counter above: a stamp left by
     // the previous session matches once, when the new session's counter reaches
     // it, and that cycle's once-per-cycle work is skipped.
-    g_gts_seq = 0;   // KH_ATTACH_GT_SNAP (the ring itself rides in g_attach, which the objects reset empties).
-    g_gts_done_pub.store(0, std::memory_order_relaxed);   // Restarts with g_gts_seq, or no wait would ever run.
+    // KH_ATTACH_GT_SNAP: g_gts_seq and its publication are reset with the objects (kh_session_objects_reset).
     g_gts_clear_qpc = 0;
-    g_gts_last_seq = 0;
-    g_gts_last_cyc = ~0ull;
-    g_gts_base_seq = 0;
-    g_gts_base_cyc = ~0ull;
+    g_gts_clear_prev = 0;
+    g_gts_half = 0;
     g_gts_wait_cyc = ~0ull;
-    g_gts_absent_last = ~0ull;
-    g_gts_absent_dec_cyc = ~0ull;
-    g_gts_absent_burn = false;
     g_sun_restep_cycle = ~0ull;
     g_rtshadow_cycle.store(~0ull, std::memory_order_relaxed);
     g_dls_frame_cycle = ~0ull;
@@ -50301,6 +50478,7 @@ inline void kh_session_objects_reset() {
     kh_reinit(g_objbuf_cpu);
     kh_reinit(g_objbuf_dirty);
     kh_reinit(g_objbuf_dirty_mark);
+    g_gts_seq = 0;   // KH_ATTACH_GT_SNAP: the bindings' sample numbers (their rings, picks and helper stamps).
     g_skel_gen_serial = 0;
     g_attach_n.store(0, std::memory_order_relaxed);
     kh_reinit(g_attach_dead);
@@ -50308,6 +50486,8 @@ inline void kh_session_objects_reset() {
     kh_reinit(g_attach_proxy_dead);
     g_attach_proxy_dead_n.store(0, std::memory_order_relaxed);
     g_pxy_pool_n.store(0, std::memory_order_relaxed);
+    g_gts_done_pub.store(0, std::memory_order_relaxed);   // Names a g_gts_seq value: restarts with it.
+    for (auto& khsg_st : g_gts_stamp_pub) khsg_st.store(0, std::memory_order_relaxed);
     g_next_seq = 0;
     kh_reinit(g_chain_cfg);
     kh_reinit(g_chain_warned);

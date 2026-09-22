@@ -1259,3 +1259,32 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
 
     return float4(lc, a);
 }
+// KH_VOL_REPLAY: the merge - replay B's count (t49) and footprint distance (t50) where replay A (t34) equals the
+// engine's count (t41), and everywhere when the seam withheld our footprint (colour.y: that copy counted against
+// whatever is behind our meshes); else the copy's count and its own footprint mask (t51). Two targets: the count in
+// .g of an R8G8_UINT (as the copy's X24_G8 view reads) and the distance in an R32_FLOAT. t42..t48 are cb.hlsl's.
+// t34, t41 and t49 have a second consumer: PSReplayMergeMir (KH_MIR_REPLAY), below.
+Texture2D<uint2> khRpA     : register(t34);
+Texture2D<uint2> khRpEng   : register(t41);
+Texture2D<uint2> khRpB     : register(t49);
+Texture2D<float> khRpFootB : register(t50);
+Texture2D<float> khRpFootC : register(t51);
+struct KhRpMergeOut { uint2 sten : SV_Target0; float foot : SV_Target1; };
+KhRpMergeOut PSReplayMerge(VSOut i)
+{
+    const int3 khrm_p = int3(int2(i.pos.xy), 0);
+    const uint khrm_e = khRpEng.Load(khrm_p).g;
+    const bool khrm_t = color.y > 0.5f || khRpA.Load(khrm_p).g == khrm_e;
+    KhRpMergeOut khrm_o;
+    khrm_o.sten = uint2(0u, khrm_t ? khRpB.Load(khrm_p).g : khrm_e);
+    khrm_o.foot = khrm_t ? khRpFootB.Load(khrm_p) : khRpFootC.Load(khrm_p);
+    return khrm_o;
+}
+// KH_MIR_REPLAY: the mirror's merge (one target) - mirror B's count (t49) where mirror A (t34) equals the real
+// mirror's (t41), else the real mirror's; in .g of an R8G8_UINT, as the mirror's X24_G8 view reads (KhMirUnit).
+uint2 PSReplayMergeMir(VSOut i) : SV_Target0
+{
+    const int3 khrn_p = int3(int2(i.pos.xy), 0);
+    const uint khrn_e = khRpEng.Load(khrn_p).g;
+    return uint2(0u, khRpA.Load(khrn_p).g == khrn_e ? khRpB.Load(khrn_p).g : khrn_e);
+}

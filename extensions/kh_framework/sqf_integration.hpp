@@ -158,7 +158,6 @@ static registered_sqf_function _sqf_update_post_fx_array;
 static registered_sqf_function _sqf_add_postfx_array;
 static registered_sqf_function _sqf_add_local_postfx_array;
 static registered_sqf_function _sqf_get_render_stats;
-static registered_sqf_function _sqf_set_render_debug;
 static registered_sqf_function _sqf_reset_render_stats;
 static registered_sqf_function _sqf_set_ssgi_scale;
 static registered_sqf_function _sqf_allow_dynamic_shadows;
@@ -7994,22 +7993,6 @@ static game_value set_render_ao_sqf(game_value_parameter arg) {
     }
 }
 
-static game_value set_render_debug_sqf(game_value_parameter arg) {
-    try {
-        if (arg.type_enum() != game_data_type::SCALAR) { kh_rv_report("setRenderDebug", "mode must be a number"); return game_value(false); }
-        const int khd_m = static_cast<int>(static_cast<float>(arg));
-        if (khd_m != 0) {
-            kh_rv_report("setRenderDebug", "mode " + std::to_string(khd_m) + " is not a catalogued mode (0 is the only mode)");
-            return game_value(false);
-        }
-        RenderIntegration::g_dbg_mode.store(khd_m, std::memory_order_relaxed);
-        return game_value(true);
-    } catch (...) {
-        report_error("setRenderDebug: unknown exception");
-        return game_value(false);
-    }
-}
-
 // Render statistics. Collection is off until the first getRenderStats call,
 // which arms it and returns the record with the counters at zero (statsArmed
 // 0 = this call armed them); every later call reports what accumulated since.
@@ -8334,6 +8317,30 @@ static game_value get_render_stats_sqf() {
             out.push_back(kva("lightBlock", std::move(blk)));
             out.push_back(kva("dlRef", std::move(ref)));
             out.push_back(kva("dlsSlots", std::move(slots)));
+        }
+        {   // KH_VOL_REPLAY: [merged frames, fallback frames, refused passes, ring wraps captured, scissored frames,
+            // full-screen frames, mirror merged, mirror fallback (KH_MIR_REPLAY)].
+            const auto& c = RenderIntegration::g_rp_c;
+            auto_array<game_value> a;
+            for (uint64_t v : { c.merged, c.fallback, c.refused, c.splits, c.scissored, c.fullscreen, c.mir_merged,
+                                c.mir_fallback })
+                a.push_back(game_value(static_cast<float>(v)));
+            out.push_back(kva("stencilReplay", std::move(a)));
+        }
+        {   // KH_GTS_IDENTITY: [identity waits, of them later than half a period (the time rule would have missed),
+            // timeouts (identity off until relearned), offset breaks (relearned)].
+            auto_array<game_value> a;
+            for (uint64_t v : { RenderIntegration::g_gid_waits, RenderIntegration::g_gid_late, RenderIntegration::g_gid_timeouts,
+                                RenderIntegration::g_gid_breaks })
+                a.push_back(game_value(static_cast<float>(v)));
+            out.push_back(kva("identityWait", std::move(a)));
+        }
+        {   // KH_RT_PAINT_READ: [paints that tried a read, bindings read, torn, refused, matched, stale, other].
+            const auto& c = RenderIntegration::g_rtp_c;
+            auto_array<game_value> a;
+            for (uint64_t v : { c.paints, c.bindings, c.torn, c.refused, c.matched, c.stale, c.other })
+                a.push_back(game_value(static_cast<float>(v)));
+            out.push_back(kva("paintRead", std::move(a)));
         }
         return game_value(std::move(out));
     } catch (...) {
@@ -9702,17 +9709,6 @@ static void initialize_sqf_integration() {
         "Zero the render counters and disarm collection until the next getRenderStats. Returns true",
         userFunctionWrapper<reset_render_stats_sqf>,
         game_data_type::BOOL
-    );
-
-    _sqf_set_render_debug = intercept::client::host::register_sqf_command(
-        "setRenderDebug",
-        // Adding a mode means two edits: the whitelist in set_render_debug_sqf and
-        // this command's entry in the SQF COMMAND REFERENCE (rendering_integration.hpp);
-        // nothing checks that they agree.
-        "Sets the render debug mode",
-        userFunctionWrapper<set_render_debug_sqf>,
-        game_data_type::BOOL,
-        game_data_type::SCALAR
     );
 
     _sqf_set_render_ao = intercept::client::host::register_sqf_command(

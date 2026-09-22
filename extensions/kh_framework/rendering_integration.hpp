@@ -400,10 +400,6 @@ namespace RenderIntegration {
 // Zero the render counters and disarm collection until the next
 // getRenderStats. Returns true
 //
-// ---- BOOL = setRenderDebug SCALAR ------------------------------------------
-// Sets the render debug mode. 0 is the only catalogued mode
-// (set_render_debug_sqf refuses any other)
-//
 // ---- BOOL = setRenderAmbientOcclusion ARRAY --------------------------------
 // [strength] or [strength, radius]. Screen-space ambient occlusion on our
 // meshes only
@@ -6722,6 +6718,8 @@ struct Resources {
     UINT                     ps_effect_samples = 0;   // Depth MSAA count it was compiled for.
     ID3D11VertexShader*      vs_composite = nullptr;   // injected-path VS (adds world position).
     ID3D11PixelShader*       ps_maskcast = nullptr;   // Analytic mask cast (single-sample t0).
+    ID3D11PixelShader*       ps_rpmerge = nullptr;    // KH_VOL_REPLAY: the replayed count and footprint, merged.
+    ID3D11PixelShader*       ps_rpmergemir = nullptr;   // KH_MIR_REPLAY: the replayed mirror count, merged.
     ID3D11PixelShader*       ps_dls_world = nullptr;   // KH_DLS_WORLD: dynamic-light world receive
                                                        // (single-sample t0).
     ID3D11PixelShader*       ps_dls_world_fog = nullptr;   // KH_DLSW_FOG: its dual-source twin.
@@ -6898,7 +6896,6 @@ struct Resources {
     UINT                      cov_hist_h = 0;
     uint32_t                  cov_hist_fmt = 0;
     ID3D11PixelShader*       ps_cov_fix = nullptr;
-    ID3D11PixelShader*       ps_dbg_cov = nullptr;   // Coverage debug view.
     ID3D11PixelShader*       ps_premult_copy = nullptr;
     ID3D11RasterizerState*   rasterizer = nullptr;   // cullNone, MSAA, depth bias.
     ID3D11Texture2D*          sun_tex = nullptr;
@@ -7246,11 +7243,12 @@ struct Resources {
         KH_SAFE_RELEASE(blend_alpha_zero);
         KH_SAFE_RELEASE(ps_alpha_zero);
         KH_SAFE_RELEASE(ps_premult_copy);
-        KH_SAFE_RELEASE(ps_dbg_cov);
         KH_SAFE_RELEASE(ps_cov_fix);
         KH_SAFE_RELEASE(ps_inj_depth_a);
         KH_SAFE_RELEASE(ps_maskprime);
         KH_SAFE_RELEASE(ps_maskcast);
+        KH_SAFE_RELEASE(ps_rpmerge);   // KH_VOL_REPLAY.
+        KH_SAFE_RELEASE(ps_rpmergemir);   // KH_MIR_REPLAY.
         KH_SAFE_RELEASE(ps_dls_world);
         KH_SAFE_RELEASE(ps_dls_world_fog);
         KH_SAFE_RELEASE(ps_seam_foot);
@@ -8337,6 +8335,17 @@ struct KhAttach {
     uintptr_t gts_par_vb = 0, gts_par_bb = 0, gts_rot_vb = 0, gts_rot_bb = 0;
     std::vector<uint32_t>  gts_off;
     std::vector<uintptr_t> gts_vb, gts_bb;
+    // KH_RT_PAINT_READ: the render thread's own read of what the sampler last read (rt_par: the parent or its helper;
+    // rt_rot: the rotation object, nil when the lane has none of its own), with its own page caches, for the cast
+    // fire's paint when this frame's own sample has not landed. rt_snap is that read, rt_cyc the cycle it is for.
+    game_value rt_par, rt_rot;
+    uint32_t  rt_par_off = KH_ATTACH_OFF_NONE, rt_rot_off = KH_ATTACH_OFF_NONE;
+    uintptr_t rt_par_vb = 0, rt_par_bb = 0, rt_rot_vb = 0, rt_rot_bb = 0, rt_pb = 0, rt_rb = 0, rt_xb = 0;
+    uint32_t  rt_gen = 0;
+    std::vector<uint32_t>  rt_off;
+    std::vector<uintptr_t> rt_vb, rt_bb;
+    KhGtSnap  rt_snap;
+    uint64_t  rt_cyc = ~0ull;
     // KH_ATTACH_MAN_HELPER: a character's own visual state is not written while it rides in a vehicle (the engine
     // draws the crew from the vehicle, and the state keeps the pose it had when the character got in), but a helper
     // attached to it is: attachTo places it from the character's drawn transform. A lane naming a Man therefore gets
@@ -9826,8 +9835,10 @@ static uint64_t g_sun_restep_cycle = ~0ull;
 //   Wait = when no sample stamped from half a period before the clear has been published, this frame's own is still
 //          to come: the cycle's FINAL step (the injection's, or the render-thread flush's) waits for it (kh_gts_wait:
 //          outside g_draw_list_mutex, which the sampler needs) until half a period after the clear, past which it is
-//          not this frame's. Not arrived: the newest sample before the clear (B) - a frame later than that draws one
-//          behind, that frame alone, and a render cycle with no frame of its own redraws the last one.
+//          not this frame's. With the sample-to-cycle offset known (KH_GTS_IDENTITY, below) it waits instead for the
+//          frame's own sample by number, to KH_GTS_ID_CAP_MS after the clear, and the pick takes it by number. Not
+//          arrived: the newest sample before the clear (B) - a frame later than that draws one behind, that frame
+//          alone, and a render cycle with no frame of its own redraws the last one.
 //   Final = the cast fire's first step (0.03 ms after the clear) takes what has landed and never waits: in a light
 //          scene the frame's Draw3D lands after it (measured: 0.3-1.7 ms after the clear). The final step picks
 //          again; a pose that changes there re-skins its skeletal mesh and reopens the sun map (KH_SUN_RESTEP).
@@ -9837,8 +9848,9 @@ static uint64_t g_sun_restep_cycle = ~0ull;
 //          hold the game thread back from its Draw3D until the wait gives up (after some vehicle exits: the sample
 //          landed 0.35-0.45 ms after every give-up, whatever the limit); a half-period wait there then pushed the
 //          final step past its own deadline and drew mesh and shadow a frame behind. Unblocked, the sample landed
-//          0.1-1.7 ms after the clear in every run. Past the cap the shadow carries the previous frame's pose for that
-//          frame, and the final step still waits (to half a period) for the mesh.
+//          0.1-1.7 ms after the clear in every run. Past the cap, with the frame's own sample still absent, the render
+//          thread reads the objects itself for the paint (KH_RT_PAINT_READ, below); where that read is not taken the
+//          shadow carries the previous frame's pose for that frame. The final step still waits for the mesh (Wait).
 // Measured (a test probe, withdrawn; the engine's diag_frameNo against the render cycle): three runs - a heavy scene
 // (21.7 ms frames), a light one after a vehicle exit (10.4 ms) and one flipping between 20 ms and 10 ms frames across
 // an exit - 756 cycles, each frame's own Draw3D within 3.1 ms before or 2.6 ms after its clear (at most 26 % of a
@@ -9935,10 +9947,32 @@ inline void kh_gts_carry(const float khgy_pp[12], const float khgy_pn[12], const
         }
     }
 }
+// KH_GTS_IDENTITY - render cycles and Draw3D samples run one for one, so the frame's own sample is sample number
+// cycle + g_gid_k. The offset is learned on every cycle whose own sample is unambiguous by time (stamped within half a
+// period of the clear, the pick's own rule) and relearned when that disagrees. The final step then waits for that
+// sample by number, however late it lands (a hitch, a high-framerate frame whose Draw3D follows the clear): the
+// engine's render thread waits for the frame's Draw3D before its icons anyway, so the frame could not finish sooner.
+// Two things bound it all the same: a frame with no Draw3D (the map, loading) and an offset gone stale after a real
+// stall - KH_GTS_ID_CAP_MS after the clear it stops, and identity stays off until a cycle relearns it (one capped wait
+// per such stretch, not one per frame). Only the final step waits by identity; the cast fire's paint stays capped by
+// time (rule 1.1095: an early wait can hold Draw3D back).
+static constexpr int64_t KH_GTS_ID_CAP_MS = 100;
+static int64_t  g_gid_k = 0;                 // Render thread: sample number - cycle.
+static bool     g_gid_ok = false;            // The offset is known (learned since the last timeout / session start).
+static uint64_t g_gid_waits = 0, g_gid_late = 0, g_gid_timeouts = 0, g_gid_breaks = 0;   // getRenderStats "identityWait".
+// KH_RT_PAINT_READ: getRenderStats "paintRead" - [paints that tried a read, bindings read, torn (the two reads disagreed),
+// refused (a read failed validation), then at the final step against the frame's own sample: matched, stale (equal
+// to the previous frame's sample), other].
+struct KhRtpCounters { uint64_t paints = 0, bindings = 0, torn = 0, refused = 0, matched = 0, stale = 0, other = 0; };
+static KhRtpCounters g_rtp_c;
+static uint64_t g_rtp_cyc = ~0ull;                          // The cycle whose paint has run its read.
+static constexpr uint64_t KH_RT_SEQ_BIT = 1ull << 62;       // A render-thread read's number: never a sample's, so the
+                                                            // final step re-stashes a skeletal pose from the real one.
 // When no sample stamped from half a period before the clear has been published, wait for this frame's own until half
 // a period after the clear, past which it is not this frame's - or until khgw_cap ticks after the clear, if sooner.
 // Render thread, outside g_draw_list_mutex (the sampler needs it). Its callers gate it once per cycle each: the final
-// step (kh_gts_wait, no cap) and the cast fire's paint (KH_CAST_WAIT, KH_CAST_WAIT_US).
+// step while the identity offset is unknown (kh_gts_wait, no cap) and the cast fire's paint (KH_CAST_WAIT,
+// KH_CAST_WAIT_US).
 inline void kh_gts_wait_own(int64_t khgw_cap) {
     const int64_t khgw_half = g_gts_half;
     if (khgw_half <= 0) return;   // The period is not known yet: the pick takes B.
@@ -9952,13 +9986,53 @@ inline void kh_gts_wait_own(int64_t khgw_cap) {
     }
 }
 // The cycle's final render-thread step, before kh_attach_step takes g_draw_list_mutex.
+// KH_GTS_IDENTITY: the offset from the newest sample published, when it is stamped within half a period of this
+// cycle's clear (after the wait, the frame's own); otherwise (a hitch: the own sample later than half a period, or not
+// yet here) the offset stands. The newest only: after a hitch the previous frame's late sample can stamp near the new
+// clear, and a scan for the nearest would take it for this frame's.
+inline void kh_gts_id_learn() {
+    const int64_t khil_half = g_gts_half;
+    if (khil_half <= 0) return;
+    const uint64_t khil_own = g_gts_done_pub.load(std::memory_order_acquire);
+    if (khil_own == 0) return;
+    const int64_t khil_q = g_gts_stamp_pub[khil_own % KH_GTS_STAMPS].load(std::memory_order_relaxed);
+    const int64_t khil_d = khil_q >= g_gts_clear_qpc ? khil_q - g_gts_clear_qpc : g_gts_clear_qpc - khil_q;
+    if (khil_d > khil_half) return;
+    const int64_t khil_k = static_cast<int64_t>(khil_own) - static_cast<int64_t>(g_topo_cycles);
+    if (g_gid_ok && khil_k != g_gid_k && kh_stats_on()) ++g_gid_breaks;
+    g_gid_k = khil_k;
+    g_gid_ok = true;
+}
+// The cycle's final render-thread step, before kh_attach_step takes g_draw_list_mutex.
 inline void kh_gts_wait() {
     if (g_gts_wait_cyc == g_topo_cycles) return;
     g_gts_wait_cyc = g_topo_cycles;
-    kh_gts_wait_own(g_gts_half);
+    if (g_gid_ok && g_gts_clear_qpc != 0) {   // KH_GTS_IDENTITY: the frame's own sample, by number.
+        const uint64_t khgw_want = static_cast<uint64_t>(static_cast<int64_t>(g_topo_cycles) + g_gid_k);
+        const int64_t khgw_until = g_gts_clear_qpc + static_cast<int64_t>(kh_prof_freq()) * KH_GTS_ID_CAP_MS / 1000;
+        if (kh_stats_on()) ++g_gid_waits;
+        for (;;) {
+            if (g_gts_done_pub.load(std::memory_order_acquire) >= khgw_want) break;
+            if (kh_gts_qpc() >= khgw_until) {   // No sample: identity off; this cycle's newest is not its own, so no relearning.
+                g_gid_ok = false;
+                if (kh_stats_on()) ++g_gid_timeouts;
+                return;
+            }
+            std::this_thread::yield();
+        }
+        if (g_gid_ok && g_gts_half > 0) {   // Later than half a period after the clear: the time rule would have missed it.
+            const int64_t khgw_q = g_gts_stamp_pub[khgw_want % KH_GTS_STAMPS].load(std::memory_order_relaxed);
+            if (khgw_q > g_gts_clear_qpc + g_gts_half && kh_stats_on()) ++g_gid_late;
+        }
+    } else {
+        kh_gts_wait_own(g_gts_half);
+    }
+    kh_gts_id_learn();
 }
-// The sample cycle khgc_cyc draws (KH_ATTACH_GT_SNAP, above), or null (the ring holds none for this binding): the one
-// stamped nearest the cycle's clear within half a period, else the newest before the clear, else the oldest held.
+// The sample cycle khgc_cyc draws (KH_ATTACH_GT_SNAP, above), or null (the ring holds none for this binding): the
+// frame's own by number when the identity offset is known and the ring holds it (KH_GTS_IDENTITY), else the one
+// stamped nearest the cycle's clear within half a period, else - at the cast fire's repick only - the render thread's
+// read for this cycle (KH_RT_PAINT_READ), else the newest before the clear, else the oldest held.
 // Memoized per binding and cycle by the render thread (khgc_store), so the steps of a cycle draw one sample even when
 // the next Draw3D lands between them - except that the final step (g_attach_final_step) and the cast fire's step
 // before its paint (g_attach_repick_step, KH_CAST_REPICK) pick again and store their pick for the steps after them.
@@ -9977,6 +10051,9 @@ inline const KhGtSnap* kh_gts_for_cycle(KhAttach& khgc_a, uint64_t khgc_cyc, boo
         }
     }
     const bool khgc_new = khgc_a.gts_cyc != khgc_cyc || (khgc_store && (g_attach_final_step || g_attach_repick_step));
+    if (!khgc_new && khgc_a.rt_cyc == khgc_cyc && khgc_a.gts_pick_seq == khgc_a.rt_snap.seq) {   // KH_RT_PAINT_READ.
+        return &khgc_a.rt_snap;
+    }
     if (!khgc_new) {   // This cycle's pick stands.
         for (uint32_t khgc_i = 0; khgc_i < khgc_nc; ++khgc_i) {
             if (khgc_c[khgc_i]->seq == khgc_a.gts_pick_seq) return khgc_c[khgc_i];
@@ -9986,8 +10063,12 @@ inline const KhGtSnap* kh_gts_for_cycle(KhAttach& khgc_a, uint64_t khgc_cyc, boo
     const int64_t khgc_cl = g_gts_clear_qpc;
     const int64_t khgc_half = g_gts_half;
     const KhGtSnap* khgc_p = nullptr;   // The frame's own: nearest the clear, within half a period.
+    if (g_gid_ok) {   // KH_GTS_IDENTITY: by number, when it is in the ring (a late one the time rule would pass over).
+        const uint64_t khgc_want = static_cast<uint64_t>(static_cast<int64_t>(khgc_cyc) + g_gid_k);
+        for (uint32_t khgc_i = 0; khgc_i < khgc_nc; ++khgc_i) if (khgc_c[khgc_i]->seq == khgc_want) khgc_p = khgc_c[khgc_i];
+    }
     int64_t khgc_best = 0;
-    if (khgc_half > 0) {
+    if (!khgc_p && khgc_half > 0) {   // KH_GTS_IDENTITY: the time rule when identity has not picked.
         for (uint32_t khgc_i = 0; khgc_i < khgc_nc; ++khgc_i) {
             const int64_t khgc_d = khgc_c[khgc_i]->qpc >= khgc_cl ? khgc_c[khgc_i]->qpc - khgc_cl : khgc_cl - khgc_c[khgc_i]->qpc;
             if (khgc_d <= khgc_half && (!khgc_p || khgc_d < khgc_best)) {
@@ -9995,6 +10076,12 @@ inline const KhGtSnap* kh_gts_for_cycle(KhAttach& khgc_a, uint64_t khgc_cyc, boo
                 khgc_best = khgc_d;
             }
         }
+    }
+    if (!khgc_p && g_attach_repick_step && khgc_store && khgc_a.rt_cyc == khgc_cyc && khgc_a.rt_snap.ok &&
+        khgc_a.rt_snap.gen == khgc_gen && khgc_a.rt_snap.xb == khgc_xb && khgc_a.rt_snap.px.size() == khgc_np * 12u) {
+        khgc_a.gts_cyc = khgc_cyc;   // KH_RT_PAINT_READ: the paint's pose, the own sample not here - the later steps keep it.
+        khgc_a.gts_pick_seq = khgc_a.rt_snap.seq;
+        return &khgc_a.rt_snap;
     }
     if (!khgc_p) {   // Not arrived (or the period not known yet): B, the newest before the clear, else the oldest held.
         for (uint32_t khgc_i = 0; khgc_i < khgc_nc; ++khgc_i) {
@@ -10004,6 +10091,21 @@ inline const KhGtSnap* kh_gts_for_cycle(KhAttach& khgc_a, uint64_t khgc_cyc, boo
     if (!khgc_p) {
         for (uint32_t khgc_i = 0; khgc_i < khgc_nc; ++khgc_i) if (!khgc_p || khgc_c[khgc_i]->seq < khgc_p->seq) khgc_p = khgc_c[khgc_i];
     }
+    if (khgc_store && g_attach_final_step && khgc_a.rt_cyc == khgc_cyc && g_gid_ok && khgc_p &&   // KH_RT_PAINT_READ:
+        khgc_p->seq == static_cast<uint64_t>(static_cast<int64_t>(khgc_cyc) + g_gid_k)) {        // the check.
+        const KhGtSnap& khgc_r = khgc_a.rt_snap;
+        auto khgc_same = [&](const KhGtSnap& x, const KhGtSnap& y) {
+            return memcmp(x.par, y.par, sizeof(x.par)) == 0 && x.px.size() == y.px.size() &&
+                   (x.px.empty() || memcmp(x.px.data(), y.px.data(), x.px.size() * sizeof(float)) == 0) &&
+                   x.rot_ok == y.rot_ok && (!x.rot_ok || memcmp(x.rot, y.rot, sizeof(x.rot)) == 0);
+        };
+        const KhGtSnap* khgc_prev = nullptr;
+        for (uint32_t khgc_i = 0; khgc_i < khgc_nc; ++khgc_i) if (khgc_c[khgc_i]->seq + 1u == khgc_p->seq) khgc_prev = khgc_c[khgc_i];
+        if (khgc_same(khgc_r, *khgc_p)) { if (kh_stats_on()) ++g_rtp_c.matched; }
+        else if (khgc_prev && khgc_same(khgc_r, *khgc_prev)) { if (kh_stats_on()) ++g_rtp_c.stale; }
+        else { if (kh_stats_on()) ++g_rtp_c.other; }
+        khgc_a.rt_cyc = ~0ull;   // Counted once.
+    }
     if (khgc_store && khgc_new) {
         khgc_a.gts_cyc = khgc_cyc;
         khgc_a.gts_pick_seq = khgc_p->seq;
@@ -10011,6 +10113,90 @@ inline const KhGtSnap* kh_gts_for_cycle(KhAttach& khgc_a, uint64_t khgc_cyc, boo
     return khgc_p;
 }
 
+// KH_RT_PAINT_READ - the cast fire paints our shadow into the engine's mask once a frame and cannot wait past
+// KH_CAST_WAIT_US for the frame's own sample (rule 1.1095); past that it painted the previous frame's pose. When the
+// own sample is still absent there (identity known, sample cycle + g_gid_k not published), the render thread reads
+// the same objects the sampler reads - twice - and a binding takes the read only if every read validated and both
+// passes agree bit for bit (the game thread may be writing the object meanwhile). The paint's repick step draws it;
+// the injection still waits for and draws the frame's own sample (the mesh stays exact), and its final step counts
+// the read against that sample (matched / stale / other). Only when the own sample is absent, only at the paint.
+inline bool kh_rt_own_absent() {
+    if (!g_gid_ok) return false;   // The frame's own number unknown: no read (today's pick).
+    const uint64_t khra_want = static_cast<uint64_t>(static_cast<int64_t>(g_topo_cycles) + g_gid_k);
+    return g_gts_done_pub.load(std::memory_order_acquire) < khra_want;
+}
+// Render thread, outside g_draw_list_mutex (taken here). The bindings read; 0 = none; KH_RT_OWN_ARRIVED = the own
+// sample was published before the mutex was ours (read nothing - the paint's repick takes the sample itself). Under
+// the mutex the answer is exact: the sampler cannot publish, and the game thread moves objects on to the next frame
+// only after its Draw3D handler, whose sampler needs this mutex - so a read made while the sample is absent cannot
+// see the next frame's pose.
+static constexpr uint32_t KH_RT_OWN_ARRIVED = ~0u;
+inline uint32_t kh_rt_paint_read() {
+    std::lock_guard<std::mutex> khrp_g(g_draw_list_mutex);
+    if (!kh_rt_own_absent()) return KH_RT_OWN_ARRIVED;
+    const uint64_t khrp_cyc = g_topo_cycles;
+    const uint64_t khrp_seq = static_cast<uint64_t>(static_cast<int64_t>(khrp_cyc) + g_gid_k) | KH_RT_SEQ_BIT;
+    const int64_t khrp_q = kh_gts_qpc();
+    uint32_t khrp_n = 0;
+    std::vector<float> khrp_a, khrp_b;
+    for (auto& khrp_kv : g_attach) {
+        KhAttach& a = khrp_kv.second;
+        if (a.rt_par.is_nil()) continue;
+        // A helper the game thread deleted since the sampler read it (the sampler's own rule, kh_attach_org_read): its
+        // state no longer moves - this binding keeps today's pick for the frame.
+        if (kh_attach_obj_dead(a.rt_par) || kh_attach_obj_dead(a.rt_rot)) continue;
+        const size_t np = a.skel ? a.skel_proxy.size() : (a.proxy.is_nil() ? 0u : 1u);
+        if (a.skel && np == 0u) continue;
+        const uint32_t gen = a.skel ? a.skel_gen : 0u;
+        const uintptr_t xb = kh_attach_base_of(kh_attach_key_gv(a));
+        const uintptr_t pb = kh_attach_base_of(a.rt_par);
+        if (xb == 0 || pb == 0) continue;
+        if (a.rt_gen != gen || a.rt_xb != xb || a.rt_off.size() != np) {   // The render thread's own page caches.
+            a.rt_off.assign(np, KH_ATTACH_OFF_NONE);
+            a.rt_vb.assign(np, 0u);
+            a.rt_bb.assign(np, 0u);
+            a.rt_gen = gen;
+            a.rt_xb = xb;
+        }
+        if (a.rt_pb != pb) { a.rt_pb = pb; a.rt_par_off = KH_ATTACH_OFF_NONE; a.rt_par_vb = 0; a.rt_par_bb = 0; }
+        const uintptr_t rb = a.rt_rot.is_nil() ? 0u : kh_attach_base_of(a.rt_rot);
+        if (a.rt_rb != rb) { a.rt_rb = rb; a.rt_rot_off = KH_ATTACH_OFF_NONE; a.rt_rot_vb = 0; a.rt_rot_bb = 0; }
+        const size_t n = (np + 2u) * 12u;   // Parent, helpers, rotation object.
+        khrp_a.assign(n, 0.0f);
+        khrp_b.assign(n, 0.0f);
+        auto read_all = [&](float* out, bool& rot_ok) -> bool {
+            if (!kh_attach_raw(a.rt_par, a.rt_par_off, a.rt_par_vb, a.rt_par_bb, out, out + 3, nullptr)) return false;
+            for (size_t j = 0; j < np; ++j) {
+                const game_value& x = a.skel ? a.skel_proxy[j] : a.proxy;
+                float* const o = out + (j + 1u) * 12u;
+                if (!kh_attach_raw(x, a.rt_off[j], a.rt_vb[j], a.rt_bb[j], o, o + 3, nullptr)) return false;
+            }
+            rot_ok = false;
+            if (rb != 0u) {
+                float* const o = out + (np + 1u) * 12u;
+                rot_ok = kh_attach_raw(a.rt_rot, a.rt_rot_off, a.rt_rot_vb, a.rt_rot_bb, o, o + 3, nullptr);
+            }
+            return true;
+        };
+        bool rot_a = false, rot_b = false;
+        if (!read_all(khrp_a.data(), rot_a) || !read_all(khrp_b.data(), rot_b)) { { if (kh_stats_on()) ++g_rtp_c.refused; } continue; }
+        if (rot_a != rot_b || memcmp(khrp_a.data(), khrp_b.data(), n * sizeof(float)) != 0) { { if (kh_stats_on()) ++g_rtp_c.torn; } continue; }
+        KhGtSnap& sn = a.rt_snap;
+        sn.ok = true;
+        sn.rot_ok = rot_a;
+        sn.seq = khrp_seq;
+        sn.qpc = khrp_q;
+        sn.gen = gen;
+        sn.xb = xb;
+        memcpy(sn.par, khrp_a.data(), sizeof(sn.par));
+        sn.px.assign(khrp_a.begin() + 12, khrp_a.begin() + 12 + static_cast<ptrdiff_t>(np * 12u));
+        if (rot_a) memcpy(sn.rot, khrp_a.data() + (np + 1u) * 12u, sizeof(sn.rot));
+        a.rt_cyc = khrp_cyc;
+        ++khrp_n;
+    }
+    if (kh_stats_on()) g_rtp_c.bindings += khrp_n;
+    return khrp_n;
+}
 // kh_attach_step's tail for a skeletal binding: the draw centre from its root,
 // now the rotation (and the skin's box) is final.
 inline void kh_attach_skel_place(RenderObject& khsp_o, float khsp_root[3], bool& khsp_moved) {
@@ -10094,6 +10280,8 @@ inline void kh_attach_gt_snap() {
         const size_t khgt_np = khgt_a.skel ? khgt_a.skel_proxy.size() : (khgt_a.proxy.is_nil() ? 0u : 1u);
         if (khgt_lpar.is_nil() || (khgt_a.skel && khgt_np == 0u)) continue;
         const game_value& khgt_par = kh_attach_org_read(khgt_a, khgt_lpar, khgt_seq);
+        khgt_a.rt_par = khgt_par;        // KH_RT_PAINT_READ: what the render thread reads for the parent.
+        khgt_a.rt_rot = game_value();    // Set below when the rotation lane follows an object of its own.
         const uint32_t khgt_gen = khgt_a.skel ? khgt_a.skel_gen : 0u;
         const uintptr_t khgt_xb = kh_attach_base_of(kh_attach_key_gv(khgt_a));
         const uintptr_t khgt_pb = kh_attach_base_of(khgt_par);
@@ -10140,6 +10328,7 @@ inline void kh_attach_gt_snap() {
         const void* const khgt_rd = khgt_a.obj_rot.is_nil() ? nullptr : khgt_a.obj_rot.data.get();
         if (khgt_rd && khgt_rd != khgt_lpar.data.get() && !(khgt_np == 1u && !khgt_a.skel && khgt_rd == khgt_a.proxy.data.get())) {
             const game_value& khgt_ro = kh_attach_org_read(khgt_a, khgt_a.obj_rot, khgt_seq);   // KH_ATTACH_MAN_HELPER.
+            khgt_a.rt_rot = khgt_ro;     // KH_RT_PAINT_READ.
             const uintptr_t khgt_rb = kh_attach_base_of(khgt_ro);
             if (khgt_a.gts_rb != khgt_rb) {
                 khgt_a.gts_rb = khgt_rb;
@@ -10177,8 +10366,9 @@ inline void kh_attach_gt_snap() {
 // khap_ctx: a render-thread drawer's context (the cast fire's step, the
 // injection's, the render-thread flush's), with which a skeletal binding is
 // skinned from the stash once per cycle; every other step passes none.
-// Every pose comes from the cycle's Draw3D sample (kh_gts_for_cycle): the step reads no object itself, and a binding
-// with no sample this cycle holds the pose it has.
+// Every pose comes from the cycle's pick (kh_gts_for_cycle): a Draw3D sample, or - from the cast fire's paint until
+// the final step picks again - the render thread's read standing in for an absent one (KH_RT_PAINT_READ). The step
+// reads no object itself, and a binding with no sample this cycle holds the pose it has.
 inline void kh_attach_step(ID3D11DeviceContext* khap_ctx = nullptr) {
     KH_PROF_SCOPE(KHP_ATTACH_STEP);   // KH_PROF.
     if (g_attach_n.load(std::memory_order_relaxed) == 0) return;
@@ -10477,9 +10667,6 @@ inline void kh_stat_add(uint64_t& khst_c, uint64_t khst_n) { if (kh_stats_on()) 
 // render thread's flush, so atomic; a reader one step behind holds a grave one
 // flush longer.
 static std::atomic<uint64_t> g_flush_serial{ 0 };
-
-// setRenderDebug: 0 is the only mode; reserved for future debug views.
-static std::atomic<int> g_dbg_mode{ 0 };
 
 static uint32_t g_scene_depth_samples = 0;   // sampleDesc.Count of the adopted main depth.
 // INTENTIONAL: at FSAA 1x (single-sample main depth) every world mesh stands
@@ -22402,6 +22589,8 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         { static_src.c_str(), "VSMirror",    "vs_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "VSSeamInst",   "vs_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "PSSeamFoot",   "ps_5_0", khcb_rx_defines, 0 },   // KH_VOL_FOOT.
+        { static_src.c_str(), "PSReplayMerge", "ps_5_0", khcb_rx_defines, 0 },   // KH_VOL_REPLAY (kh_ps_optional's twin).
+        { static_src.c_str(), "PSReplayMergeMir", "ps_5_0", khcb_rx_defines, 0 },   // KH_MIR_REPLAY (likewise).
         { static_src.c_str(), "VSMirrorInst", "vs_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "VSFullscreen","vs_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "VSSunDepth",  "vs_5_0", khcb_rx_defines, 0 },
@@ -22480,6 +22669,8 @@ inline std::string ensure_resources(ID3D11Device* dev) {
     // Non-fatal entry points: each consumer gates on its pointer.
     kh_ps_optional(dev, static_src, "PSInjDepthA", khtx_defines, &g_res.ps_inj_depth_a, "KH inject-depth alpha shader: ");   // KH_FOOTPRINT_ALPHA (KH_TEXTURED for KhMatRoute).
     kh_ps_optional(dev, static_src, "PSMaskCast", khcb_rx_defines, &g_res.ps_maskcast, "KH maskcast shader: ");   // Analytic mask cast.
+    kh_ps_optional(dev, static_src, "PSReplayMerge", khcb_rx_defines, &g_res.ps_rpmerge, "KH replay merge shader: ");   // KH_VOL_REPLAY.
+    kh_ps_optional(dev, static_src, "PSReplayMergeMir", khcb_rx_defines, &g_res.ps_rpmergemir, "KH mirror merge shader: ");   // KH_MIR_REPLAY.
     kh_ps_optional(dev, static_src, "PSDlsWorld", khcb_rx_defines, &g_res.ps_dls_world, "KH dlsworld shader: ");   // KH_DLS_WORLD receive.
     kh_ps_optional(dev, static_src, "PSSeamFoot", khcb_rx_defines, &g_res.ps_seam_foot, "KH seam footprint shader: ");   // KH_VOL_FOOT; absent = the depth-plane witness.
     kh_ps_optional(dev, static_src, "PSDlsWorldFog", khcb_rx_defines, &g_res.ps_dls_world_fog, "KH dlsworld fog shader: ");   // KH_DLSW_FOG; absent = the plain multiply.
@@ -22959,19 +23150,6 @@ inline std::string ensure_resources(ID3D11Device* dev) {
                                         nullptr, &g_res.ps_premult_copy);
             khpm_blob->Release();
             if (FAILED(hr)) { g_res.release(); return "Create PS(premult) " + hr_str(hr); }
-
-            ID3DBlob* khdc_blob = nullptr;
-            const std::string khdc_err = compile_shader(
-                "Texture2D khSrc : register(t0);"
-                "float4 main(float4 pos : SV_Position) : SV_Target"
-                "{ float a = khSrc.Load(int3(int2(pos.xy), 0)).a;"
-                "  return float4(a, a, a, 1.0f); }",
-                "main", "ps_5_0", nullptr, &khdc_blob);
-            if (!khdc_err.empty()) { g_res.release(); return "Compile PS(dbgCov): " + khdc_err; }
-            hr = dev->CreatePixelShader(khdc_blob->GetBufferPointer(), khdc_blob->GetBufferSize(),
-                                        nullptr, &g_res.ps_dbg_cov);
-            khdc_blob->Release();
-            if (FAILED(hr)) { g_res.release(); return "Create PS(dbgCov) " + hr_str(hr); }
 
             // getDimensions makes it CB-free (it runs before the flush binds
             // the common constant buffers).
@@ -25263,6 +25441,22 @@ static constexpr int KH_VT_RESOLVESUBRESOURCE    = 57;
 static constexpr int KH_VT_UPDATESUBRESOURCE     = 48;
 static constexpr int KH_VT_COPYRESOURCE          = 47;   // KH_PIP_FX_COPY.
 static constexpr int KH_VT_CLEARDEPTHSTENCIL     = 53;
+// KH_VOL_REPLAY: the paths into the volume buffer the recorder does not see (d3d11.h order, as the slots above).
+static constexpr int KH_VT_DRAWAUTO              = 38;
+static constexpr int KH_VT_DRAWINDEXEDINSTIND    = 39;
+static constexpr int KH_VT_DRAWINSTIND           = 40;
+static constexpr int KH_VT_COPYSUBRESOURCEREGION = 46;
+static constexpr int KH_VT_EXECUTECOMMANDLIST    = 58;
+typedef void (STDMETHODCALLTYPE* FnDrawAuto)(ID3D11DeviceContext*);
+typedef void (STDMETHODCALLTYPE* FnDrawIndirect)(ID3D11DeviceContext*, ID3D11Buffer*, UINT);
+typedef void (STDMETHODCALLTYPE* FnCopySubresourceRegion)(ID3D11DeviceContext*, ID3D11Resource*, UINT, UINT, UINT, UINT,
+                                                          ID3D11Resource*, UINT, const D3D11_BOX*);
+typedef void (STDMETHODCALLTYPE* FnExecuteCommandList)(ID3D11DeviceContext*, ID3D11CommandList*, BOOL);
+static FnDrawAuto              g_orig_draw_auto = nullptr;
+static FnDrawIndirect          g_orig_draw_indexed_inst_indirect = nullptr;
+static FnDrawIndirect          g_orig_draw_inst_indirect = nullptr;
+static FnCopySubresourceRegion g_orig_copy_region = nullptr;
+static FnExecuteCommandList    g_orig_execute_command_list = nullptr;
 
 typedef void (STDMETHODCALLTYPE* FnPSSetShaderResources)(ID3D11DeviceContext*, UINT, UINT, ID3D11ShaderResourceView* const*);
 typedef void (STDMETHODCALLTYPE* FnDrawIndexed)(ID3D11DeviceContext*, UINT, UINT, INT);
@@ -33271,7 +33465,9 @@ inline void kh_sun_ladder_forget() {
     g_sun_map_hash = 0;
 }
 
+inline void kh_rp_release_all();   // KH_VOL_REPLAY (defined with the replay).
 inline void release_shadow_device_state() {
+    kh_rp_release_all();   // KH_VOL_REPLAY: every engine object the records hold, our targets and copies.
     // Mask SRV, the latched mask candidate, the pre-resolve snapshot + SRV, the
     // pending-copy arm and every weak seam identity die with the device.
     // kh_svs_mask_release's swap half is what mask adoption calls, and it
@@ -37525,6 +37721,24 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         }
         g_gts_first_done = g_gts_done_pub.load(std::memory_order_acquire);   // Picked against these.
     }
+    // KH_RT_PAINT_READ: the own sample still absent after the wait - the render thread's read, if both passes agree.
+    if (reorder_on_render_thread() && g_attach_n.load(std::memory_order_relaxed) != 0u && g_rtp_cyc != g_topo_cycles &&
+        g_gts_first_cyc == g_topo_cycles && kh_rt_own_absent()) {
+        g_rtp_cyc = g_topo_cycles;
+        { if (kh_stats_on()) ++g_rtp_c.paints; }
+        if (kh_rt_paint_read() > 0u) {   // Reads taken, or the own sample arrived meanwhile: the paint's repick either way.
+            g_attach_repick_moved = false;
+            {
+                KhRepickStepScope khrt_scope;
+                kh_attach_step(ctx);
+            }
+            if (g_attach_repick_moved) {
+                kh_uvs_step(ctx);
+                g_sun_map_rendered_frame = false;
+                render_sun_depth(ctx);
+            }
+        }
+    }
     g_ro.in_injection = true;
     ID3D11RenderTargetView* old_rtvs[8] = {};
     ID3D11DepthStencilView* old_dsv = nullptr;
@@ -38626,6 +38840,27 @@ inline bool kh_sten_proj_terms(const float khpt_p[4][4], float khpt_out[4]) {
     return fabsf(khpt_out[0]) > 1.0e-6f && fabsf(khpt_out[1]) > 1.0e-6f;
 }
 
+// KH_VOL_REPLAY - the stencil our meshes read. The engine counts its stencil volumes for a frame at the end of the
+// cycle before (the volume pass), against a footprint of our meshes the seam draws into its buffer - at the pose it
+// has there, a frame old. The pass is recorded (every draw on the volume buffer, its whole state, every buffer the
+// engine can still rewrite copied as the draw used it) and replayed at the injection against the engine's own depth
+// plus our footprint at this cycle's pose (replay B). Our meshes read that count (t24) and its footprint distance
+// (t33, the witness) instead of the copy. KH_SEAM_WITHHOLD: while they do, the seams write no footprint into the
+// engine's buffer - the engine resolves its own world and hands shadow from that count, and a footprint a frame old
+// shades the pixels our meshes have just left (the trailing ghost). A cycle the replay cannot serve reads the copy,
+// and the seams that follow write the footprint, as before the replay.
+static bool     g_rp_merge_ok = false;
+static uint64_t g_rp_merge_cyc = ~0ull;                       // The cycle the merged textures are for.
+static ID3D11ShaderResourceView* g_rp_msten_srv = nullptr;   // Merged count (R8G8_UINT, .g - as the copy's view reads).
+static ID3D11ShaderResourceView* g_rp_mfoot_srv = nullptr;   // Merged footprint distance (R32_FLOAT, m).
+static bool     g_rp_seam_b = false;                          // A seam is drawing replay B's footprint.
+static uint64_t g_rp_withheld_seq = ~0ull;                    // The frame whose world seam withheld our footprint.
+inline bool kh_rp_merged_now() {
+    return g_rp_merge_ok && g_rp_merge_cyc == g_topo_cycles && g_rp_msten_srv && g_rp_mfoot_srv;
+}
+// KH_SEAM_WITHHOLD: this cycle's injection merged, so the seams that follow (for the next frame's count) write no
+// footprint; a cycle that did not merge writes it as before, so its fallback copy is the copy it always was.
+inline bool kh_rp_seam_withhold() { return !g_rp_seam_b && kh_rp_merged_now(); }
 // KH_VOL_FOOT: the copy's footprint mask, or nullptr - the one test the fill's
 // arm and both binds (the injection, the flush) share.
 inline ID3D11ShaderResourceView* kh_svs_foot_bound() {
@@ -38647,7 +38882,7 @@ inline void kh_fill_sten_reproj(ConstantData& khs_cbd, const float (*khs_proj)[4
     khs_cbd.sten_vol2[3] = khs_wit ? g_svs_vol_enc[3] : 0.0f;
     // KH_VOL_FOOT: armed exactly when the pass binds the copy's mask at t33
     // (kh_svs_foot_bound).
-    khs_cbd.sten_vol4[0] = (khs_vol && kh_svs_foot_bound()) ? 1.0f : 0.0f;
+    khs_cbd.sten_vol4[0] = (khs_vol && (kh_rp_merged_now() || kh_svs_foot_bound())) ? 1.0f : 0.0f;   // KH_VOL_REPLAY.
     khs_cbd.sten_vol4[1] = khs_cbd.sten_vol4[2] = khs_cbd.sten_vol4[3] = 0.0f;
     // KH_VOL_ZOOM: ndc_copy = ndc_pass * s + o per axis (s = the copy's scale
     // over the pass's, o = the offsets' difference), carried to pixels: the
@@ -38656,6 +38891,10 @@ inline void kh_fill_sten_reproj(ConstantData& khs_cbd, const float (*khs_proj)[4
     // relative to the camera is read exactly as before, only through the
     // copy's own zoom.
     khs_cbd.sten_vol3[0] = khs_cbd.sten_vol3[1] = khs_cbd.sten_vol3[2] = khs_cbd.sten_vol3[3] = 0.0f;
+    // KH_VOL_REPLAY: a merged frame maps the same way. Replay B redraws the copy's pass in the copy's raster (its
+    // footprint under the cycle latch, which kh_rp_b_eligible holds to the copy's projection), while this pass draws
+    // under khs_proj, whose scale the injection takes from the live fetch - the two differ while the view zooms.
+    // Equal projections give s = 1 and o = 0 exactly: the lookup is the raster itself.
     float khs_now[4];
     if (khs_vol && g_svs_vol_proj_ok && khs_proj && g_svs_vol_w > 0 && g_svs_vol_h > 0 &&
         kh_sten_proj_terms(khs_proj, khs_now)) {
@@ -39002,6 +39241,42 @@ static ID3D11RasterizerState* g_vmir_sv_rs = nullptr;
 // The secondary session then counts for the engine exactly as before and never
 // touches the mirror.
 static ID3D11Texture2D* g_vmir_prepass_src = nullptr;   // Weak identity, compare only.
+
+// KH_MIR_REPLAY - the mirror stencil (t28), replayed as the volume count is (KH_VOL_REPLAY). The mirror is a count
+// taken against our own surfaces alone: the world seam's prepass draws every caster into it (world and inFront,
+// translucent ones included) and the engine's counting draws are re-issued there with the near-patched view block.
+// It answers the stencil for translucent texels (mirMeta.x = 1), for the whole of an inFront mesh (mirMeta.x = 2)
+// and for PSComposite's near-plane fade - at the seam's pose, a frame old, as the volume copy did before the replay.
+// On a cycle whose volume count merges, replay B's world seam draws the prepass again at this cycle's pose into
+// mirror B, the pass's re-issued draws are replayed into it and into the real mirror's depth with its count cleared
+// (mirror A, the trust), and the merge takes B where A equals the real mirror, else the real mirror. Every t28 bind
+// takes kh_rp_mir_srv().
+static bool     g_rp_mir_ok = false;                          // The merged mirror is g_rp_mir_cyc's.
+static uint64_t g_rp_mir_cyc = ~0ull;
+static bool     g_rp_mir_want = false;                        // Replay B's world seam draws mirror B's prepass...
+static bool     g_rp_mirb_drawn = false;                      // ...and it did.
+static uint32_t g_rp_mir_w = 0, g_rp_mir_h = 0;
+static ID3D11Texture2D*          g_rp_mira_tex = nullptr;     // Mirror A.
+static ID3D11DepthStencilView*   g_rp_mira_dsv = nullptr;
+static ID3D11ShaderResourceView* g_rp_mira_srv = nullptr;
+static ID3D11Texture2D*          g_rp_mirb_tex = nullptr;     // Mirror B.
+static ID3D11DepthStencilView*   g_rp_mirb_dsv = nullptr;
+static ID3D11ShaderResourceView* g_rp_mirb_srv = nullptr;
+static ID3D11Texture2D*          g_rp_mirm_tex = nullptr;     // The merged mirror (R8G8_UINT, the count in .g).
+static ID3D11RenderTargetView*   g_rp_mirm_rtv = nullptr;
+static ID3D11ShaderResourceView* g_rp_mirm_srv = nullptr;
+inline void kh_rp_mir_release() {
+    KH_SAFE_RELEASE(g_rp_mira_srv); KH_SAFE_RELEASE(g_rp_mira_dsv); KH_SAFE_RELEASE(g_rp_mira_tex);
+    KH_SAFE_RELEASE(g_rp_mirb_srv); KH_SAFE_RELEASE(g_rp_mirb_dsv); KH_SAFE_RELEASE(g_rp_mirb_tex);
+    KH_SAFE_RELEASE(g_rp_mirm_srv); KH_SAFE_RELEASE(g_rp_mirm_rtv); KH_SAFE_RELEASE(g_rp_mirm_tex);
+    g_rp_mir_w = g_rp_mir_h = 0;
+    g_rp_mir_ok = false;
+}
+inline bool kh_rp_mir_merged_now() {
+    return g_rp_mir_ok && g_rp_mir_cyc == g_topo_cycles && g_rp_mirm_srv && kh_rp_merged_now();
+}
+// The mirror every t28 bind takes: this cycle's merge, else the real mirror.
+inline ID3D11ShaderResourceView* kh_rp_mir_srv() { return kh_rp_mir_merged_now() ? g_rp_mirm_srv : g_vmir_srv; }
 
 inline void kh_vmir_release() {
     for (int khvr_k = 0; khvr_k < 2; ++khvr_k) {
@@ -39844,8 +40119,11 @@ inline bool kh_svs_take_pv(ID3D11DeviceContext* ctx, RVExtBridge::ProjectionView
     return true;
 }
 
+inline void kh_rp_foreign(int khrf_kind);                    // KH_VOL_REPLAY (defined with the replay).
+inline void kh_rp_snap_engine(ID3D11DeviceContext* ctx);     // KH_VOL_REPLAY (defined with the replay).
 inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint32_t khv_h) {
     if (!ctx) return;
+    kh_rp_foreign(2);   // KH_VOL_REPLAY: our footprint written into a pass already being recorded.
 
     // Scan before stage, deliberately: the scan reads the previous frame's
     // copy, so a full frame separates the GPU copy from the Map and DO_NOT_WAIT
@@ -39904,6 +40182,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
     }
 
     if (khv_list.empty() && khv_front.empty()) {  return; }
+    if (!g_rp_seam_b) kh_rp_snap_engine(ctx);   // KH_VOL_REPLAY: the engine's own depth, before any footprint of ours.
 
     ID3D11Device* dev = nullptr;
     ctx->GetDevice(&dev);
@@ -39916,7 +40195,14 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
 
     // The engine's camera projection for this frame.
     RVExtBridge::ProjectionViewTransform khv_pv = {};
-    if (!kh_svs_take_pv(ctx, khv_pv)) {  return; }
+    if (g_rp_seam_b) {   // KH_VOL_REPLAY: at the injection this frame's latch is the pass's camera; no tracker advances.
+        if (!g_ro.cycle_pv_valid) {  return; }
+        khv_pv = g_ro.cycle_pv;
+        if (g_ro.engine_proj_valid) {
+            khv_pv.projection[2][2] = g_ro.engine_m22;
+            khv_pv.projection[3][2] = g_ro.engine_m32;
+        }
+    } else if (!kh_svs_take_pv(ctx, khv_pv)) {  return; }
 
     float khv_vp_m[4][4] = {};
     mul_4x4(khv_pv.view, khv_pv.projection, khv_vp_m);
@@ -39939,7 +40225,9 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
     // Depth target only - the engine's own, exactly as it bound it. Dropping
     // the render target keeps the paired linear-depth colour buffer (which the
     // cascade resolves read) out of this entirely.
-    ctx->OMSetRenderTargets(0, nullptr, khv_old_dsv);
+    const bool khv_withhold = kh_rp_seam_withhold();   // KH_SEAM_WITHHOLD: no depth target - the footprint draws go nowhere.
+    if (khv_withhold) g_rp_withheld_seq = g_svs_frame_seq;
+    ctx->OMSetRenderTargets(0, nullptr, khv_withhold ? nullptr : khv_old_dsv);
 
     float khv_vp_lo = g_ro.trig_vp_valid ? g_ro.trig_vp_min : g_scene_vp_min_d;
     float khv_vp_hi = g_ro.trig_vp_valid ? g_ro.trig_vp_max : g_scene_vp_max_d;
@@ -40064,7 +40352,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
             const uint32_t khsk_cg = kh_cloth_gen_of(khsk_c.slot);
             khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, &khsk_cg, sizeof(khsk_cg));
         }
-        if (g_svs_skip_valid && g_svs_skip_sig == khsk_h) {
+        if (!g_rp_seam_b && g_svs_skip_valid && g_svs_skip_sig == khsk_h) {   // KH_VOL_REPLAY: replay B always draws.
             khv_om.restore(ctx);
             if (khv_old_nvp > 0) ctx->RSSetViewports(khv_old_nvp, khv_old_vps);
             backup.restore(ctx);
@@ -40376,7 +40664,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
         }
         if (khv_dev) khv_dev->Release();
 
-        g_svs_injected_frame = true;
+        if (!g_rp_seam_b) g_svs_injected_frame = true;   // KH_VOL_REPLAY: replay B is not this frame's seam.
 
         g_svs_prime_ready = true;   // Transform + list valid.
     }
@@ -40386,7 +40674,8 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
     // Runs whether or not the footprint's frame CB landed: the mirror uploads
     // its own frame slice.
     {
-        bool khvm_go = !khv_list.empty() || !khv_front.empty();   // KH_INFRONT: the view-model casters join the mirror.
+        // KH_INFRONT; KH_MIR_REPLAY: for B only when kh_rp_replay armed mirror B.
+        bool khvm_go = (!khv_list.empty() || !khv_front.empty()) && (!g_rp_seam_b || g_rp_mir_want);
         if (khvm_go) {
             ID3D11Device* khvm_dev = nullptr;
             ctx->GetDevice(&khvm_dev);
@@ -40397,13 +40686,16 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
                 }
                 khvm_dev->Release();
             }
-            if (khvm_ok && g_vmir_vs) {
+            // KH_MIR_REPLAY: in B mode the prepass is mirror B's, at this cycle's pose (b2 is the pass's first draw's,
+            // bound by kh_rp_replay_b, as the real prepass read it); the real mirror stays as the pass counted it.
+            ID3D11DepthStencilView* const khvm_dsv = g_rp_seam_b ? g_rp_mirb_dsv : g_vmir_dsv;
+            if (khvm_ok && g_vmir_vs && khvm_dsv) {
                 // The frame CB uploads verbatim - VSMirror takes x/y/w from
                 // this matrix and remaps z through the live-b2 low pair itself.
                 if (kh_upload_frame_cb(ctx, g_res.composite_frame_cb, khv_cbf)) {
-                    ctx->ClearDepthStencilView(g_vmir_dsv,
+                    ctx->ClearDepthStencilView(khvm_dsv,
                         D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
-                    ctx->OMSetRenderTargets(0, nullptr, g_vmir_dsv);
+                    ctx->OMSetRenderTargets(0, nullptr, khvm_dsv);
                     D3D11_VIEWPORT khvm_vp = {};
                     khvm_vp.Width = static_cast<float>(g_vmir_w);
                     khvm_vp.Height = static_cast<float>(g_vmir_h);
@@ -40511,9 +40803,13 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
                             ctx->DrawIndexed(khvf_ic, khvf_is, 0);
                         }
                     }
-                    g_vmir_prepass_stamp = static_cast<uint32_t>(g_svs_frame_seq);
-                    g_vmir_mask_time = effect_time_seconds();
-                    g_vmir_prepass_src = g_svs_vol_src;
+                    if (g_rp_seam_b) {
+                        g_rp_mirb_drawn = true;   // KH_MIR_REPLAY: mirror B; the real mirror's stamps stand.
+                    } else {
+                        g_vmir_prepass_stamp = static_cast<uint32_t>(g_svs_frame_seq);
+                        g_vmir_mask_time = effect_time_seconds();
+                        g_vmir_prepass_src = g_svs_vol_src;
+                    }
                 }
             }
         }
@@ -40655,7 +40951,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
         }
     }
 
-    g_svs_skip_valid = true;   // KH_SVS_SKIP: this signature's pass completed.
+    g_svs_skip_valid = !khv_withhold;   // KH_SVS_SKIP: this signature's pass completed (KH_SEAM_WITHHOLD: a withheld one drew nothing).
     khv_om.restore(ctx);
     if (khv_old_nvp > 0) ctx->RSSetViewports(khv_old_nvp, khv_old_vps);
     backup.restore(ctx);
@@ -41959,8 +42255,14 @@ inline void kh_infront_inject(ID3D11DeviceContext* ctx, const D3D11_VIEWPORT& kh
             if (g_svs_pre_srv) ctx->PSSetShaderResources(21, 1, &g_svs_pre_srv);
             if (g_svs_post_srv) ctx->PSSetShaderResources(22, 1, &g_svs_post_srv);
         }
-        if (kh_svs_vol_ready()) ctx->PSSetShaderResources(24, 1, &g_svs_vol_sten_srv);
-        if (khvi_cbf.mir_meta[0] >= 1.5f) ctx->PSSetShaderResources(28, 1, &g_vmir_srv);   // The mirror.
+        if (kh_svs_vol_ready()) {   // KH_VOL_REPLAY: the replayed count when this cycle has one.
+            ID3D11ShaderResourceView* const khvi_sten = kh_rp_merged_now() ? g_rp_msten_srv : g_svs_vol_sten_srv;
+            ctx->PSSetShaderResources(24, 1, &khvi_sten);
+        }
+        if (khvi_cbf.mir_meta[0] >= 1.5f) {   // The mirror (KH_MIR_REPLAY: this cycle's merge when it has one).
+            ID3D11ShaderResourceView* const khvi_mir = kh_rp_mir_srv();
+            ctx->PSSetShaderResources(28, 1, &khvi_mir);
+        }
     }
     ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);
     ctx->RSSetState(g_res.rasterizer);
@@ -42172,6 +42474,988 @@ inline void kh_infront_inject(ID3D11DeviceContext* ctx, const D3D11_VIEWPORT& kh
 // world caster), the same take made here. Depth only, level 0, the solid
 // texels of an alpha material through PSInjDepthA (the slice prepass's
 // recipe).
+// KH_VOL_REPLAY - the recorder and the replay (the design note is with the stage state, above the lane fill).
+// Render thread. A pass is every draw with the volume buffer bound from its first counting draw to the stencil
+// resolve (the bracket): the counting draws and the uncounted ones beside a target (the engine's hands prepass among
+// them), in order. What a draw reads that the engine can still rewrite is copied as the draw used it: constant buffers
+// per draw (whole, once per buffer per draw), vertex / index buffers at the pass's end, and a ring buffer the engine
+// wraps inside the pass (maps with DISCARD) at the wrap, for the draws before it (KH_REPLAY_SPLIT). A pass something
+// else writes into (a clear, our world seam, a command list, an indirect draw, a copy into the buffer) is refused and
+// the frame keeps the copy; our in-front footprint is left to the merge's per-pixel trust (kh_rp_foreign).
+inline void kh_infront_seam_inject(ID3D11DeviceContext* ctx, const D3D11_VIEWPORT& khvs_vp);   // Defined below.
+static constexpr uint32_t KH_RP_MAXDRAWS = 128u, KH_RP_CB = 14u, KH_RP_SRV = 16u, KH_RP_VB = 4u;
+static constexpr uint32_t KH_RP_VPS = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+struct KhRpDraw {
+    uint8_t kind = 0;
+    bool mir = false;   // KH_MIR_REPLAY: the real mirror re-issued this draw (g_vmir_pending, set just before it).
+    UINT a = 0, b = 0, c = 0, e = 0;
+    INT d = 0;
+    ID3D11InputLayout* il = nullptr;
+    D3D11_PRIMITIVE_TOPOLOGY topo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    ID3D11Buffer* vb[KH_RP_VB] = {};
+    UINT vbs[KH_RP_VB] = {}, vbo[KH_RP_VB] = {};
+    bool vb_dyn[KH_RP_VB] = {};   // Still the engine's rewritable buffer: copied at the pass's end.
+    ID3D11Buffer* ib = nullptr;
+    DXGI_FORMAT ifmt = DXGI_FORMAT_UNKNOWN;
+    UINT ioff = 0;
+    bool ib_dyn = false;
+    ID3D11VertexShader* vs = nullptr;
+    ID3D11PixelShader* ps = nullptr;
+    bool cb1 = false;   // The windows below are real (captured through context 1).
+    ID3D11Buffer* vcb[KH_RP_CB] = {};
+    UINT vcf[KH_RP_CB] = {}, vcn[KH_RP_CB] = {};
+    ID3D11Buffer* pcb[KH_RP_CB] = {};
+    UINT pcf[KH_RP_CB] = {}, pcn[KH_RP_CB] = {};
+    ID3D11ShaderResourceView* psrv[KH_RP_SRV] = {};
+    ID3D11SamplerState* psmp[KH_RP_SRV] = {};
+    ID3D11DepthStencilState* dss = nullptr;
+    UINT sref = 0;
+    ID3D11RasterizerState* rs = nullptr;
+    ID3D11BlendState* bs = nullptr;
+    FLOAT bf[4] = {};
+    UINT bmask = 0xFFFFFFFFu;
+    UINT nvp = 0, nsc = 0;
+    D3D11_VIEWPORT vp[KH_RP_VPS] = {};
+    D3D11_RECT sc[KH_RP_VPS] = {};
+    void release() {
+        KH_SAFE_RELEASE(il); KH_SAFE_RELEASE(ib); KH_SAFE_RELEASE(vs); KH_SAFE_RELEASE(ps);
+        for (auto& x : vb) KH_SAFE_RELEASE(x);
+        for (auto& x : vcb) KH_SAFE_RELEASE(x);
+        for (auto& x : pcb) KH_SAFE_RELEASE(x);
+        for (auto& x : psrv) KH_SAFE_RELEASE(x);
+        for (auto& x : psmp) KH_SAFE_RELEASE(x);
+        KH_SAFE_RELEASE(dss); KH_SAFE_RELEASE(rs); KH_SAFE_RELEASE(bs);
+        *this = KhRpDraw();
+    }
+};
+// getRenderStats "stencilReplay": [merged frames, fallback frames, refused passes, ring wraps captured, scissored
+// frames, full-screen frames, mirror merged, mirror fallback (KH_MIR_REPLAY: merged frames whose pass drew the mirror,
+// by whether the mirror merged too)].
+struct KhRpCounters {
+    uint64_t merged = 0, fallback = 0, refused = 0, splits = 0, scissored = 0, fullscreen = 0;
+    uint64_t mir_merged = 0, mir_fallback = 0;
+};
+static KhRpCounters g_rp_c;
+static KhRpDraw g_rp_draws[KH_RP_MAXDRAWS];
+static uint32_t g_rp_n = 0;
+static uint64_t g_rp_pass = ~0ull;      // The g_svs_frame_seq of the pass being / last recorded.
+static bool     g_rp_ok = false, g_rp_ended = false, g_rp_replayed = false;
+static ID3D11Texture2D*          g_rp_pre = nullptr;    // The buffer at the pass's first draw (replay A's start).
+static ID3D11Texture2D*          g_rp_tgt = nullptr;    // Replay A.
+static ID3D11DepthStencilView*   g_rp_dsv = nullptr;
+static ID3D11ShaderResourceView* g_rp_sten = nullptr;
+static ID3D11Texture2D*          g_rp_eng = nullptr;    // The buffer at the world seam's start: the engine's depth only.
+static uint64_t g_rp_eng_seq = ~0ull;
+static uint64_t g_rp_vol_clear_seq = ~0ull;             // The frame the engine last cleared the buffer in.
+static ID3D11Texture2D*          g_rp_tgtb = nullptr;   // Replay B.
+static ID3D11DepthStencilView*   g_rp_dsvb = nullptr;
+static ID3D11ShaderResourceView* g_rp_stenb = nullptr;
+static ID3D11Texture2D*          g_rp_mst_tex = nullptr;   // The merged pair.
+static ID3D11RenderTargetView*   g_rp_mst_rtv = nullptr;
+static ID3D11Texture2D*          g_rp_mft_tex = nullptr;
+static ID3D11RenderTargetView*   g_rp_mft_rtv = nullptr;
+static uint32_t g_rp_w = 0, g_rp_h = 0;
+static constexpr uint32_t KH_RP_CBCLS = 15u;             // Constant snapshots: power-of-two capacities, 256 B .. 4 MB.
+static std::vector<ID3D11Buffer*> g_rp_cbpool[KH_RP_CBCLS];
+static uint32_t g_rp_cbpool_used[KH_RP_CBCLS] = {};
+struct KhRpDyn { ID3D11Buffer* ours = nullptr; UINT bytes = 0, bind = 0; uintptr_t eng = 0; uint64_t pass = ~0ull; };
+static std::vector<KhRpDyn> g_rp_dyn;                    // Pass-end copies of the rewritable vertex / index buffers.
+struct KhRpSplit { ID3D11Buffer* b = nullptr; UINT bytes = 0, bind = 0; };
+static std::vector<KhRpSplit> g_rp_split_pool;          // KH_REPLAY_SPLIT copies, pooled per pass.
+static uint32_t g_rp_split_used = 0;
+// The in-front footprint: where in the pass the hands seam came (the draw it preceded) and its slice viewport.
+static uint64_t       g_rp_front_seq = ~0ull;
+static uint32_t       g_rp_front_idx = 0;
+static D3D11_VIEWPORT g_rp_front_vp = {};
+// KH_REPLAY_SCISSOR: scissor-enabled twins of the rasterizer states the replay binds.
+struct KhRpRs { ID3D11RasterizerState* eng = nullptr; ID3D11RasterizerState* ours = nullptr; };
+static std::vector<KhRpRs> g_rp_rs;
+// KH_MIR_REPLAY: depth-clamp twins of the rasterizer states the mirror replay binds ([0] as the engine's, [1] with
+// the scissor on).
+struct KhRpRsMir { ID3D11RasterizerState* eng = nullptr; ID3D11RasterizerState* ours[2] = {}; };
+static std::vector<KhRpRsMir> g_rp_rs_mir;
+inline void kh_rp_release_records() {
+    for (uint32_t i = 0; i < g_rp_n && i < KH_RP_MAXDRAWS; ++i) g_rp_draws[i].release();
+    g_rp_n = 0;
+    for (auto& u : g_rp_cbpool_used) u = 0;
+    g_rp_split_used = 0;
+}
+inline void kh_rp_release_all() {   // Device loss and session teardown.
+    kh_rp_release_records();
+    KH_SAFE_RELEASE(g_rp_sten); KH_SAFE_RELEASE(g_rp_dsv); KH_SAFE_RELEASE(g_rp_tgt); KH_SAFE_RELEASE(g_rp_pre);
+    KH_SAFE_RELEASE(g_rp_stenb); KH_SAFE_RELEASE(g_rp_dsvb); KH_SAFE_RELEASE(g_rp_tgtb); KH_SAFE_RELEASE(g_rp_eng);
+    KH_SAFE_RELEASE(g_rp_msten_srv); KH_SAFE_RELEASE(g_rp_mst_rtv); KH_SAFE_RELEASE(g_rp_mst_tex);
+    KH_SAFE_RELEASE(g_rp_mfoot_srv); KH_SAFE_RELEASE(g_rp_mft_rtv); KH_SAFE_RELEASE(g_rp_mft_tex);
+    g_rp_w = g_rp_h = 0;
+    for (auto& cls : g_rp_cbpool) { for (auto& b : cls) KH_SAFE_RELEASE(b); cls.clear(); }
+    for (auto& d : g_rp_dyn) KH_SAFE_RELEASE(d.ours);
+    g_rp_dyn.clear();
+    for (auto& x : g_rp_split_pool) KH_SAFE_RELEASE(x.b);
+    g_rp_split_pool.clear();
+    for (auto& x : g_rp_rs) { KH_SAFE_RELEASE(x.eng); KH_SAFE_RELEASE(x.ours); }
+    g_rp_rs.clear();
+    kh_rp_mir_release();   // KH_MIR_REPLAY.
+    for (auto& x : g_rp_rs_mir) { KH_SAFE_RELEASE(x.eng); KH_SAFE_RELEASE(x.ours[0]); KH_SAFE_RELEASE(x.ours[1]); }
+    g_rp_rs_mir.clear();
+    g_rp_pass = ~0ull;
+    g_rp_ok = g_rp_ended = g_rp_replayed = false;
+    g_rp_merge_ok = false;
+    g_rp_eng_seq = ~0ull;
+    g_rp_vol_clear_seq = ~0ull;
+    g_rp_front_seq = ~0ull;
+}
+inline bool kh_rp_ensure_tex(ID3D11Device* dev) {
+    if (!dev || !g_svs_vol_src) return false;
+    D3D11_TEXTURE2D_DESC sd = {};
+    g_svs_vol_src->GetDesc(&sd);
+    if (g_rp_pre && g_rp_tgt && g_rp_dsv && g_rp_sten && g_rp_eng && g_rp_tgtb && g_rp_dsvb && g_rp_stenb && g_rp_mst_rtv &&
+        g_rp_msten_srv && g_rp_mft_rtv && g_rp_mfoot_srv && g_rp_w == sd.Width && g_rp_h == sd.Height) return true;
+    KH_SAFE_RELEASE(g_rp_sten); KH_SAFE_RELEASE(g_rp_dsv); KH_SAFE_RELEASE(g_rp_tgt); KH_SAFE_RELEASE(g_rp_pre);
+    KH_SAFE_RELEASE(g_rp_stenb); KH_SAFE_RELEASE(g_rp_dsvb); KH_SAFE_RELEASE(g_rp_tgtb); KH_SAFE_RELEASE(g_rp_eng);
+    KH_SAFE_RELEASE(g_rp_msten_srv); KH_SAFE_RELEASE(g_rp_mst_rtv); KH_SAFE_RELEASE(g_rp_mst_tex);
+    KH_SAFE_RELEASE(g_rp_mfoot_srv); KH_SAFE_RELEASE(g_rp_mft_rtv); KH_SAFE_RELEASE(g_rp_mft_tex);
+    g_rp_merge_ok = false;
+    if (sd.SampleDesc.Count != 1 || sd.ArraySize != 1 || sd.MipLevels != 1) return false;
+    if (sd.Format != DXGI_FORMAT_D24_UNORM_S8_UINT && sd.Format != DXGI_FORMAT_R24G8_TYPELESS) return false;
+    D3D11_TEXTURE2D_DESC td = sd;
+    td.Format = DXGI_FORMAT_R24G8_TYPELESS;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+    td.CPUAccessFlags = 0;
+    td.MiscFlags = 0;
+    D3D11_DEPTH_STENCIL_VIEW_DESC dd = {};
+    dd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+    D3D11_SHADER_RESOURCE_VIEW_DESC vd = {};
+    vd.Format = DXGI_FORMAT_X24_TYPELESS_G8_UINT;
+    vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    vd.Texture2D.MipLevels = 1;
+    if (FAILED(dev->CreateTexture2D(&td, nullptr, &g_rp_pre))) { g_rp_pre = nullptr; return false; }
+    if (FAILED(dev->CreateTexture2D(&td, nullptr, &g_rp_tgt))) { g_rp_tgt = nullptr; return false; }
+    if (FAILED(dev->CreateDepthStencilView(g_rp_tgt, &dd, &g_rp_dsv))) { g_rp_dsv = nullptr; return false; }
+    if (FAILED(dev->CreateShaderResourceView(g_rp_tgt, &vd, &g_rp_sten))) { g_rp_sten = nullptr; return false; }
+    if (FAILED(dev->CreateTexture2D(&td, nullptr, &g_rp_eng))) { g_rp_eng = nullptr; return false; }
+    if (FAILED(dev->CreateTexture2D(&td, nullptr, &g_rp_tgtb))) { g_rp_tgtb = nullptr; return false; }
+    if (FAILED(dev->CreateDepthStencilView(g_rp_tgtb, &dd, &g_rp_dsvb))) { g_rp_dsvb = nullptr; return false; }
+    if (FAILED(dev->CreateShaderResourceView(g_rp_tgtb, &vd, &g_rp_stenb))) { g_rp_stenb = nullptr; return false; }
+    D3D11_TEXTURE2D_DESC md = {};
+    md.Width = sd.Width; md.Height = sd.Height; md.MipLevels = 1; md.ArraySize = 1; md.SampleDesc.Count = 1;
+    md.Usage = D3D11_USAGE_DEFAULT;
+    md.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    md.Format = DXGI_FORMAT_R8G8_UINT;
+    if (FAILED(dev->CreateTexture2D(&md, nullptr, &g_rp_mst_tex))) { g_rp_mst_tex = nullptr; return false; }
+    if (FAILED(dev->CreateRenderTargetView(g_rp_mst_tex, nullptr, &g_rp_mst_rtv))) { g_rp_mst_rtv = nullptr; return false; }
+    if (FAILED(dev->CreateShaderResourceView(g_rp_mst_tex, nullptr, &g_rp_msten_srv))) { g_rp_msten_srv = nullptr; return false; }
+    md.Format = DXGI_FORMAT_R32_FLOAT;
+    if (FAILED(dev->CreateTexture2D(&md, nullptr, &g_rp_mft_tex))) { g_rp_mft_tex = nullptr; return false; }
+    if (FAILED(dev->CreateRenderTargetView(g_rp_mft_tex, nullptr, &g_rp_mft_rtv))) { g_rp_mft_rtv = nullptr; return false; }
+    if (FAILED(dev->CreateShaderResourceView(g_rp_mft_tex, nullptr, &g_rp_mfoot_srv))) { g_rp_mfoot_srv = nullptr; return false; }
+    g_rp_w = sd.Width;
+    g_rp_h = sd.Height;
+    return true;
+}
+// Any buffer the engine can still write (DYNAMIC or DEFAULT): the replay copies it rather than referencing it.
+inline bool kh_rp_is_mutable(ID3D11Buffer* b, UINT* bytes = nullptr, UINT* bind = nullptr) {
+    if (!b) return false;
+    D3D11_BUFFER_DESC d = {};
+    b->GetDesc(&d);
+    if (bytes) *bytes = d.ByteWidth;
+    if (bind) *bind = d.BindFlags;
+    return d.Usage != D3D11_USAGE_IMMUTABLE;
+}
+// A copy of a constant buffer as it stands now, at offset 0 of a pooled buffer of its power-of-two capacity.
+inline ID3D11Buffer* kh_rp_cb_snapshot(ID3D11DeviceContext* ctx, ID3D11Buffer* eng, UINT bytes) {
+    uint32_t cls = 0;
+    UINT cap = 256u;
+    while (cap < bytes && cls + 1u < KH_RP_CBCLS) { cap <<= 1; ++cls; }
+    if (cap < bytes) return nullptr;
+    std::vector<ID3D11Buffer*>& pool = g_rp_cbpool[cls];
+    uint32_t& used = g_rp_cbpool_used[cls];
+    ID3D11Buffer* ours = used < pool.size() ? pool[used] : nullptr;
+    if (!ours) {
+        ID3D11Device* dev = nullptr;
+        ctx->GetDevice(&dev);
+        if (!dev) return nullptr;
+        D3D11_BUFFER_DESC d = {};
+        d.ByteWidth = cap;
+        d.Usage = D3D11_USAGE_DEFAULT;
+        d.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        const HRESULT hr = dev->CreateBuffer(&d, nullptr, &ours);
+        dev->Release();
+        if (FAILED(hr)) return nullptr;
+        pool.push_back(ours);
+    }
+    ++used;
+    if (cap == bytes) {
+        ctx->CopyResource(ours, eng);
+    } else {
+        D3D11_BOX box = {};
+        box.left = 0; box.right = bytes; box.top = 0; box.bottom = 1; box.front = 0; box.back = 1;
+        ctx->CopySubresourceRegion(ours, 0, 0, 0, 0, eng, 0, &box);
+    }
+    ours->AddRef();   // The record's own reference; the pool keeps its.
+    return ours;
+}
+// The first counting draw of a pass. The bound DSV must be the volume buffer. Replay A's start is snapshotted only on a
+// pass the world seam did not withhold (a withheld pass is replayed as B alone).
+inline void kh_rp_pass_begin(ID3D11DeviceContext* ctx) {
+    kh_rp_release_records();
+    g_rp_pass = g_svs_frame_seq;
+    g_rp_ok = true;
+    g_rp_ended = false;
+    g_rp_replayed = false;
+    ID3D11DepthStencilView* dsv = nullptr;
+    ctx->OMGetRenderTargets(0, nullptr, &dsv);
+    void* const id = dsv ? reorder_dsv_identity(dsv) : nullptr;
+    KH_SAFE_RELEASE(dsv);
+    if (!g_svs_vol_src || !id || id != g_svs_vol_src_id) { g_rp_ok = false; kh_stat(g_rp_c.refused); return; }
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    const bool ok = kh_rp_ensure_tex(dev);
+    if (dev) dev->Release();
+    if (!ok) { g_rp_ok = false; kh_stat(g_rp_c.refused); return; }
+    if (g_rp_withheld_seq == g_rp_pass) return;
+    const bool prev = g_ro.in_injection;
+    g_ro.in_injection = true;
+    KhOmSave om;
+    om.capture(ctx);
+    ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    ctx->CopyResource(g_rp_pre, g_svs_vol_src);
+    om.restore(ctx);
+    om.release();
+    g_ro.in_injection = prev;
+}
+// The volume buffer as the engine left it for this frame's count, before our world seam's footprint.
+inline void kh_rp_snap_engine(ID3D11DeviceContext* ctx) {
+    try {
+        if (!ctx || !g_svs_vol_src) return;
+        ID3D11Device* dev = nullptr;
+        ctx->GetDevice(&dev);
+        const bool ok = kh_rp_ensure_tex(dev);
+        if (dev) dev->Release();
+        if (!ok) return;
+        const bool prev = g_ro.in_injection;
+        g_ro.in_injection = true;
+        KhOmSave om;
+        om.capture(ctx);
+        ctx->OMSetRenderTargets(0, nullptr, nullptr);
+        ctx->CopyResource(g_rp_eng, g_svs_vol_src);
+        om.restore(ctx);
+        om.release();
+        g_ro.in_injection = prev;
+        g_rp_eng_seq = g_svs_frame_seq;
+    } catch (...) {}
+}
+// One engine draw with the volume buffer bound, after our own pre-draw work (the seams have run).
+inline void kh_rp_record(ID3D11DeviceContext* ctx, uint8_t kind, UINT a, UINT b, UINT c, INT d, UINT e) {
+    try {
+        if (ctx != g_reorder_target_ctx.load(std::memory_order_relaxed) || !reorder_on_render_thread()) return;
+        if (g_ro.in_injection) return;
+        const bool open = g_rp_pass == g_svs_frame_seq && !g_rp_ended;
+        if (!g_svs_vol_dsv_now) {   // Bound beside a target: recorded inside a pass (depth and stencil on replay).
+            if (!g_svs_vol_dsv_bound || !open) return;   // Never starts a pass.
+        } else if (g_rp_pass != g_svs_frame_seq) {   // The frame's first counting draw (one pass a frame).
+            kh_rp_pass_begin(ctx);
+        }
+        if (!g_rp_ok || g_rp_ended) return;
+        if (g_rp_n >= KH_RP_MAXDRAWS) { g_rp_ok = false; kh_stat(g_rp_c.refused); return; }
+        ID3D11GeometryShader* gs = nullptr; ctx->GSGetShader(&gs, nullptr, nullptr);
+        ID3D11HullShader* hs = nullptr; ctx->HSGetShader(&hs, nullptr, nullptr);
+        ID3D11DomainShader* ds = nullptr; ctx->DSGetShader(&ds, nullptr, nullptr);
+        const bool stages = gs || hs || ds;
+        KH_SAFE_RELEASE(gs); KH_SAFE_RELEASE(hs); KH_SAFE_RELEASE(ds);
+        if (stages) { g_rp_ok = false; kh_stat(g_rp_c.refused); return; }
+        KhRpDraw& r = g_rp_draws[g_rp_n++];
+        r.kind = kind; r.a = a; r.b = b; r.c = c; r.d = d; r.e = e;
+        r.mir = g_vmir_pending;   // KH_MIR_REPLAY.
+        ctx->IAGetInputLayout(&r.il);
+        ctx->IAGetPrimitiveTopology(&r.topo);
+        ctx->IAGetVertexBuffers(0, KH_RP_VB, r.vb, r.vbs, r.vbo);
+        for (uint32_t k = 0; k < KH_RP_VB; ++k) r.vb_dyn[k] = kh_rp_is_mutable(r.vb[k]);
+        ctx->IAGetIndexBuffer(&r.ib, &r.ifmt, &r.ioff);
+        r.ib_dyn = kh_rp_is_mutable(r.ib);
+        ctx->VSGetShader(&r.vs, nullptr, nullptr);
+        ctx->PSGetShader(&r.ps, nullptr, nullptr);
+        ID3D11DeviceContext1* const c1 = g_cb_offsetting ? kh_ctx1(ctx) : nullptr;
+        r.cb1 = c1 != nullptr;
+        if (c1) {
+            c1->VSGetConstantBuffers1(0, KH_RP_CB, r.vcb, r.vcf, r.vcn);
+            c1->PSGetConstantBuffers1(0, KH_RP_CB, r.pcb, r.pcf, r.pcn);
+        } else {
+            ctx->VSGetConstantBuffers(0, KH_RP_CB, r.vcb);
+            ctx->PSGetConstantBuffers(0, KH_RP_CB, r.pcb);
+        }
+        {   // Rewritable constants: each buffer copied whole, once per draw; every slot bound to it keeps its window.
+            ID3D11Buffer* seen_eng[2u * KH_RP_CB];
+            ID3D11Buffer* seen_snap[2u * KH_RP_CB];
+            uint32_t nseen = 0;
+            for (uint32_t st = 0; st < 2u; ++st) {
+                ID3D11Buffer** set = st ? r.pcb : r.vcb;
+                for (uint32_t k = 0; k < KH_RP_CB; ++k) {
+                    UINT bytes = 0;
+                    if (!kh_rp_is_mutable(set[k], &bytes)) continue;
+                    ID3D11Buffer* snap = nullptr;
+                    for (uint32_t q = 0; q < nseen; ++q) if (seen_eng[q] == set[k]) { snap = seen_snap[q]; break; }
+                    if (snap) {
+                        snap->AddRef();
+                    } else {
+                        snap = kh_rp_cb_snapshot(ctx, set[k], bytes);
+                        if (!snap) { g_rp_ok = false; kh_stat(g_rp_c.refused); }
+                        else { seen_eng[nseen] = set[k]; seen_snap[nseen] = snap; ++nseen; }
+                    }
+                    set[k]->Release();
+                    set[k] = snap;
+                }
+            }
+        }
+        ctx->PSGetShaderResources(0, KH_RP_SRV, r.psrv);
+        ctx->PSGetSamplers(0, KH_RP_SRV, r.psmp);
+        ctx->OMGetDepthStencilState(&r.dss, &r.sref);
+        ctx->RSGetState(&r.rs);
+        ctx->OMGetBlendState(&r.bs, r.bf, &r.bmask);
+        r.nvp = KH_RP_VPS; ctx->RSGetViewports(&r.nvp, r.vp);
+        r.nsc = KH_RP_VPS; ctx->RSGetScissorRects(&r.nsc, r.sc);
+    } catch (...) { g_rp_ok = false; }
+}
+// Anything else writing the volume buffer inside a pass: the replay could not reproduce it. (0 a clear, 2 our world
+// footprint, 4 a command list, 5 an indirect draw, 6 a copy into the buffer. Our in-front footprint is not one: replay
+// A lacks it, so the merge keeps the copy only where it changed the count - the in-front call site, reorder_pre_draw.)
+inline void kh_rp_foreign(int khrf_kind) {
+    (void)khrf_kind;
+    if (g_rp_pass != g_svs_frame_seq || !g_rp_ok || g_rp_ended || g_rp_n == 0) return;
+    g_rp_ok = false;
+    kh_stat(g_rp_c.refused);
+}
+// The hands seam's place in the pass (the in-front call site, before the draw it precedes is recorded).
+inline void kh_rp_front_note(const D3D11_VIEWPORT& khfn_vp) {
+    g_rp_front_seq = g_svs_frame_seq;
+    g_rp_front_idx = (g_rp_pass == g_svs_frame_seq && !g_rp_ended) ? g_rp_n : 0u;
+    g_rp_front_vp = khfn_vp;
+}
+// KH_REPLAY_SPLIT: from the Map hook, before the engine's map reaches the runtime, so the copy queued here reads the
+// contents the draws recorded so far used.
+inline void kh_rp_on_map(ID3D11DeviceContext* self, ID3D11Resource* res, D3D11_MAP type) {
+    if (type != D3D11_MAP_WRITE_DISCARD || !res) return;
+    if (self != g_reorder_target_ctx.load(std::memory_order_relaxed) || !reorder_on_render_thread() || g_ro.in_injection) return;
+    if (g_rp_pass != g_svs_frame_seq || g_rp_ended || !g_rp_ok || g_rp_n == 0) return;
+    ID3D11Buffer* eng = nullptr;
+    for (uint32_t i = 0; i < g_rp_n && !eng; ++i) {
+        const KhRpDraw& r = g_rp_draws[i];
+        for (uint32_t k = 0; k < KH_RP_VB; ++k) if (r.vb_dyn[k] && r.vb[k] && static_cast<void*>(r.vb[k]) == static_cast<void*>(res)) eng = r.vb[k];
+        if (!eng && r.ib_dyn && r.ib && static_cast<void*>(r.ib) == static_cast<void*>(res)) eng = r.ib;
+    }
+    if (!eng) return;
+    UINT bytes = 0, bind = 0;
+    kh_rp_is_mutable(eng, &bytes, &bind);
+    if (g_rp_split_used >= g_rp_split_pool.size()) g_rp_split_pool.push_back(KhRpSplit());
+    KhRpSplit& sp = g_rp_split_pool[g_rp_split_used];
+    if (!sp.b || sp.bytes != bytes || sp.bind != bind) {
+        KH_SAFE_RELEASE(sp.b);
+        ID3D11Device* dev = nullptr;
+        self->GetDevice(&dev);
+        D3D11_BUFFER_DESC d = {};
+        d.ByteWidth = bytes;
+        d.Usage = D3D11_USAGE_DEFAULT;
+        d.BindFlags = bind & (D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_INDEX_BUFFER);
+        if (!dev || FAILED(dev->CreateBuffer(&d, nullptr, &sp.b))) sp.b = nullptr;
+        if (dev) dev->Release();
+        sp.bytes = bytes;
+        sp.bind = bind;
+    }
+    if (!sp.b) { g_rp_ok = false; kh_stat(g_rp_c.refused); return; }
+    ++g_rp_split_used;
+    const bool prev = g_ro.in_injection;
+    g_ro.in_injection = true;
+    self->CopyResource(sp.b, eng);
+    g_ro.in_injection = prev;
+    for (uint32_t i = 0; i < g_rp_n; ++i) {   // Every draw so far that used it reads the copy (no pass-end copy for them).
+        KhRpDraw& r = g_rp_draws[i];
+        for (uint32_t k = 0; k < KH_RP_VB; ++k) {
+            if (r.vb_dyn[k] && r.vb[k] == eng) { r.vb[k]->Release(); sp.b->AddRef(); r.vb[k] = sp.b; r.vb_dyn[k] = false; }
+        }
+        if (r.ib_dyn && r.ib == eng) { r.ib->Release(); sp.b->AddRef(); r.ib = sp.b; r.ib_dyn = false; }
+    }
+    kh_stat(g_rp_c.splits);
+}
+// The stencil resolve (the bracket): the rewritable vertex / index buffers the pass still references, copied once.
+inline void kh_rp_pass_end(ID3D11DeviceContext* ctx) {
+    if (g_rp_pass != g_svs_frame_seq || g_rp_ended) return;
+    g_rp_ended = true;
+    if (!g_rp_ok || g_rp_n == 0) return;
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) { g_rp_ok = false; return; }
+    auto ours_for = [&](ID3D11Buffer* eng) -> ID3D11Buffer* {
+        UINT bytes = 0, bind = 0;
+        kh_rp_is_mutable(eng, &bytes, &bind);
+        const uintptr_t id = reinterpret_cast<uintptr_t>(eng);
+        KhRpDyn* slot = nullptr;
+        for (auto& x : g_rp_dyn) if (x.eng == id) { slot = &x; break; }
+        if (!slot) { g_rp_dyn.push_back(KhRpDyn()); slot = &g_rp_dyn.back(); slot->eng = id; }
+        if (!slot->ours || slot->bytes != bytes || slot->bind != bind) {
+            KH_SAFE_RELEASE(slot->ours);
+            D3D11_BUFFER_DESC d = {};
+            d.ByteWidth = bytes;
+            d.Usage = D3D11_USAGE_DEFAULT;
+            d.BindFlags = bind & (D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_INDEX_BUFFER);
+            if (FAILED(dev->CreateBuffer(&d, nullptr, &slot->ours))) { slot->ours = nullptr; return nullptr; }
+            slot->bytes = bytes;
+            slot->bind = bind;
+        }
+        if (slot->pass != g_rp_pass) {
+            ctx->CopyResource(slot->ours, eng);
+            slot->pass = g_rp_pass;
+        }
+        return slot->ours;
+    };
+    for (uint32_t i = 0; i < g_rp_n && g_rp_ok; ++i) {
+        KhRpDraw& r = g_rp_draws[i];
+        for (uint32_t k = 0; k < KH_RP_VB; ++k) {
+            if (!r.vb_dyn[k] || !r.vb[k]) continue;
+            ID3D11Buffer* o = ours_for(r.vb[k]);
+            if (!o) { g_rp_ok = false; kh_stat(g_rp_c.refused); break; }
+            r.vb[k]->Release(); o->AddRef(); r.vb[k] = o;
+        }
+        if (r.ib_dyn && r.ib && g_rp_ok) {
+            ID3D11Buffer* o = ours_for(r.ib);
+            if (!o) { g_rp_ok = false; kh_stat(g_rp_c.refused); }
+            else { r.ib->Release(); o->AddRef(); r.ib = o; }
+        }
+    }
+    dev->Release();
+}
+// Everything the replay touches, saved and restored whole (StateBackup covers only our own passes' slots).
+struct KhRpSave {
+    ID3D11InputLayout* il = nullptr; D3D11_PRIMITIVE_TOPOLOGY topo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    ID3D11Buffer* vb[KH_RP_VB] = {}; UINT vbs[KH_RP_VB] = {}, vbo[KH_RP_VB] = {};
+    ID3D11Buffer* ib = nullptr; DXGI_FORMAT ifmt = DXGI_FORMAT_UNKNOWN; UINT ioff = 0;
+    ID3D11VertexShader* vs = nullptr; ID3D11PixelShader* ps = nullptr;
+    ID3D11GeometryShader* gs = nullptr; ID3D11HullShader* hs = nullptr; ID3D11DomainShader* ds = nullptr;
+    bool cb1 = false;
+    ID3D11Buffer* vcb[KH_RP_CB] = {}; UINT vcf[KH_RP_CB] = {}, vcn[KH_RP_CB] = {};
+    ID3D11Buffer* pcb[KH_RP_CB] = {}; UINT pcf[KH_RP_CB] = {}, pcn[KH_RP_CB] = {};
+    ID3D11ShaderResourceView* psrv[64] = {}; ID3D11SamplerState* psmp[KH_RP_SRV] = {};   // 64: t49..t51 are ours.
+    ID3D11DepthStencilState* dss = nullptr; UINT sref = 0; ID3D11RasterizerState* rs = nullptr;
+    ID3D11BlendState* bs = nullptr; FLOAT bf[4] = {}; UINT bmask = 0xFFFFFFFFu;
+    UINT nvp = 0, nsc = 0; D3D11_VIEWPORT vp[KH_RP_VPS] = {}; D3D11_RECT sc[KH_RP_VPS] = {};
+    KhOmSave om;
+    void capture(ID3D11DeviceContext* ctx) {
+        ctx->IAGetInputLayout(&il); ctx->IAGetPrimitiveTopology(&topo);
+        ctx->IAGetVertexBuffers(0, KH_RP_VB, vb, vbs, vbo); ctx->IAGetIndexBuffer(&ib, &ifmt, &ioff);
+        ctx->VSGetShader(&vs, nullptr, nullptr); ctx->PSGetShader(&ps, nullptr, nullptr);
+        ctx->GSGetShader(&gs, nullptr, nullptr); ctx->HSGetShader(&hs, nullptr, nullptr); ctx->DSGetShader(&ds, nullptr, nullptr);
+        ID3D11DeviceContext1* const c1 = g_cb_offsetting ? kh_ctx1(ctx) : nullptr;
+        cb1 = c1 != nullptr;
+        if (c1) { c1->VSGetConstantBuffers1(0, KH_RP_CB, vcb, vcf, vcn); c1->PSGetConstantBuffers1(0, KH_RP_CB, pcb, pcf, pcn); }
+        else { ctx->VSGetConstantBuffers(0, KH_RP_CB, vcb); ctx->PSGetConstantBuffers(0, KH_RP_CB, pcb); }
+        ctx->PSGetShaderResources(0, 64, psrv); ctx->PSGetSamplers(0, KH_RP_SRV, psmp);
+        ctx->OMGetDepthStencilState(&dss, &sref); ctx->RSGetState(&rs); ctx->OMGetBlendState(&bs, bf, &bmask);
+        nvp = KH_RP_VPS; ctx->RSGetViewports(&nvp, vp); nsc = KH_RP_VPS; ctx->RSGetScissorRects(&nsc, sc);
+        om.capture(ctx);
+    }
+    void restore(ID3D11DeviceContext* ctx) {
+        ctx->IASetInputLayout(il); ctx->IASetPrimitiveTopology(topo);
+        ctx->IASetVertexBuffers(0, KH_RP_VB, vb, vbs, vbo); ctx->IASetIndexBuffer(ib, ifmt, ioff);
+        ctx->VSSetShader(vs, nullptr, 0); ctx->PSSetShader(ps, nullptr, 0);
+        ctx->GSSetShader(gs, nullptr, 0); ctx->HSSetShader(hs, nullptr, 0); ctx->DSSetShader(ds, nullptr, 0);
+        ID3D11DeviceContext1* const c1 = cb1 ? kh_ctx1(ctx) : nullptr;
+        if (c1) { c1->VSSetConstantBuffers1(0, KH_RP_CB, vcb, vcf, vcn); c1->PSSetConstantBuffers1(0, KH_RP_CB, pcb, pcf, pcn); }
+        else { ctx->VSSetConstantBuffers(0, KH_RP_CB, vcb); ctx->PSSetConstantBuffers(0, KH_RP_CB, pcb); }
+        ctx->PSSetShaderResources(0, 64, psrv); ctx->PSSetSamplers(0, KH_RP_SRV, psmp);
+        ctx->OMSetDepthStencilState(dss, sref); ctx->RSSetState(rs); ctx->OMSetBlendState(bs, bf, bmask);
+        if (nvp) ctx->RSSetViewports(nvp, vp);
+        if (nsc) ctx->RSSetScissorRects(nsc, sc);
+        om.restore(ctx);
+    }
+    void release() {
+        KH_SAFE_RELEASE(il); KH_SAFE_RELEASE(ib); KH_SAFE_RELEASE(vs); KH_SAFE_RELEASE(ps);
+        KH_SAFE_RELEASE(gs); KH_SAFE_RELEASE(hs); KH_SAFE_RELEASE(ds);
+        for (auto& x : vb) KH_SAFE_RELEASE(x);
+        for (auto& x : vcb) KH_SAFE_RELEASE(x);
+        for (auto& x : pcb) KH_SAFE_RELEASE(x);
+        for (auto& x : psrv) KH_SAFE_RELEASE(x);
+        for (auto& x : psmp) KH_SAFE_RELEASE(x);
+        KH_SAFE_RELEASE(dss); KH_SAFE_RELEASE(rs); KH_SAFE_RELEASE(bs);
+        om.release();
+    }
+};
+// KH_REPLAY_SCISSOR: the scissor-enabled twin of a rasterizer state (null = the default state), cached per state.
+inline ID3D11RasterizerState* kh_rp_rs_scissor(ID3D11DeviceContext* ctx, ID3D11RasterizerState* eng) {
+    for (const auto& x : g_rp_rs) if (x.eng == eng) return x.ours;
+    D3D11_RASTERIZER_DESC d = {};
+    if (eng) {
+        eng->GetDesc(&d);
+    } else {
+        d.FillMode = D3D11_FILL_SOLID;
+        d.CullMode = D3D11_CULL_BACK;
+        d.DepthClipEnable = TRUE;
+    }
+    d.ScissorEnable = TRUE;
+    ID3D11RasterizerState* ours = nullptr;
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (dev) { if (FAILED(dev->CreateRasterizerState(&d, &ours))) ours = nullptr; dev->Release(); }
+    if (!ours) return nullptr;
+    if (eng) eng->AddRef();
+    g_rp_rs.push_back(KhRpRs{ eng, ours });
+    return ours;
+}
+// KH_MIR_REPLAY: the depth-clamp twin (kh_vmir_begin's clone: DepthClipEnable off) of a rasterizer state, with the
+// scissor forced on for khrm_sc, cached per state.
+inline ID3D11RasterizerState* kh_rp_rs_mir(ID3D11DeviceContext* ctx, ID3D11RasterizerState* eng, bool khrm_sc) {
+    const int k = khrm_sc ? 1 : 0;
+    for (const auto& x : g_rp_rs_mir) if (x.eng == eng && x.ours[k]) return x.ours[k];
+    D3D11_RASTERIZER_DESC d = {};
+    if (eng) {
+        eng->GetDesc(&d);
+    } else {
+        d.FillMode = D3D11_FILL_SOLID;
+        d.CullMode = D3D11_CULL_BACK;
+        d.DepthClipEnable = TRUE;
+    }
+    d.DepthClipEnable = FALSE;
+    if (khrm_sc) d.ScissorEnable = TRUE;
+    ID3D11RasterizerState* ours = nullptr;
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (dev) { if (FAILED(dev->CreateRasterizerState(&d, &ours))) ours = nullptr; dev->Release(); }
+    if (!ours) return nullptr;
+    for (auto& x : g_rp_rs_mir) if (x.eng == eng) { x.ours[k] = ours; return ours; }
+    KhRpRsMir e;
+    e.eng = eng;
+    if (eng) eng->AddRef();
+    e.ours[k] = ours;
+    g_rp_rs_mir.push_back(e);
+    return ours;
+}
+// KH_REPLAY_SCISSOR: the screen rectangle our visible meshes can cover - each bounding sphere through this frame's
+// camera, conservatively, plus a margin for the witness ring and skinned motion. False = the whole target (an in-front
+// mesh - drawn under its own projection - or a sphere reaching the near plane). An empty rectangle = nothing to read.
+inline bool kh_rp_scissor_rect(D3D11_RECT& khsr_r) {
+    if (!g_ro.cycle_pv_valid || g_rp_w == 0 || g_rp_h == 0) return false;
+    const float (*V)[4] = g_ro.cycle_pv.view;
+    const float (*Pm)[4] = g_ro.cycle_pv.projection;
+    if (!(fabsf(Pm[2][3]) > 1.0e-6f)) return false;
+    const float sx = Pm[0][0] / Pm[2][3], sy = Pm[1][1] / Pm[2][3], ox = Pm[2][0] / Pm[2][3], oy = Pm[2][1] / Pm[2][3];
+    float x0 = 1.0e9f, y0 = 1.0e9f, x1 = -1.0e9f, y1 = -1.0e9f;
+    bool any = false;
+    for (uint32_t i = 0; i < g_scene.objs.size(); ++i) {
+        if (!g_scene.alive[i]) continue;
+        const RenderObject& o = g_scene.objs[i];
+        if (!o.visible) continue;
+        if (o.in_front) return false;
+        float bs[3];
+        kh_bounds_size_of(o, bs);
+        const float rad = 1.25f * kh_lod_radius_of(bs, o.rot_m, o.rotated) + 0.05f;
+        const float c[3] = { o.pos[0], o.pos[2], o.pos[1] };   // Engine axes.
+        const float vx = c[0] * V[0][0] + c[1] * V[1][0] + c[2] * V[2][0] + V[3][0];
+        const float vy = c[0] * V[0][1] + c[1] * V[1][1] + c[2] * V[2][1] + V[3][1];
+        const float vz = c[0] * V[0][2] + c[1] * V[1][2] + c[2] * V[2][2] + V[3][2];
+        if (vz + rad <= 0.0f) continue;               // Wholly behind the camera.
+        if (vz - rad <= 0.05f) return false;          // Reaches the near plane: no finite bound.
+        const float zn = vz - rad, zf = vz + rad;
+        const float tx0 = fminf((vx - rad) / zn, (vx - rad) / zf), tx1 = fmaxf((vx + rad) / zn, (vx + rad) / zf);
+        const float ty0 = fminf((vy - rad) / zn, (vy - rad) / zf), ty1 = fmaxf((vy + rad) / zn, (vy + rad) / zf);
+        const float nx0 = fminf(sx * tx0, sx * tx1) + ox, nx1 = fmaxf(sx * tx0, sx * tx1) + ox;
+        const float ny0 = fminf(sy * ty0, sy * ty1) + oy, ny1 = fmaxf(sy * ty0, sy * ty1) + oy;
+        x0 = fminf(x0, nx0); x1 = fmaxf(x1, nx1);
+        y0 = fminf(y0, ny0); y1 = fmaxf(y1, ny1);
+        any = true;
+    }
+    const float W = static_cast<float>(g_rp_w), H = static_cast<float>(g_rp_h), M = 16.0f;
+    if (!any) { khsr_r = D3D11_RECT{ 0, 0, 0, 0 }; return true; }
+    const float px0 = (x0 * 0.5f + 0.5f) * W - M, px1 = (x1 * 0.5f + 0.5f) * W + M;
+    const float py0 = (0.5f - y1 * 0.5f) * H - M, py1 = (0.5f - y0 * 0.5f) * H + M;
+    khsr_r.left = static_cast<LONG>(fmaxf(0.0f, fminf(W, floorf(px0))));
+    khsr_r.right = static_cast<LONG>(fmaxf(0.0f, fminf(W, ceilf(px1))));
+    khsr_r.top = static_cast<LONG>(fmaxf(0.0f, fminf(H, floorf(py0))));
+    khsr_r.bottom = static_cast<LONG>(fmaxf(0.0f, fminf(H, ceilf(py1))));
+    if (khsr_r.right <= khsr_r.left || khsr_r.bottom <= khsr_r.top) khsr_r = D3D11_RECT{ 0, 0, 0, 0 };
+    return true;
+}
+// The recorded draws [khri_from, khri_to), re-issued into whatever depth target is bound; with khri_sc, each through
+// its rasterizer's scissor twin, clipped to khri_rect (intersected with the draw's own scissor when it had one).
+inline void kh_rp_issue(ID3D11DeviceContext* ctx, uint32_t khri_from, uint32_t khri_to, const D3D11_RECT* khri_sc) {
+    ctx->GSSetShader(nullptr, nullptr, 0); ctx->HSSetShader(nullptr, nullptr, 0); ctx->DSSetShader(nullptr, nullptr, 0);
+    for (uint32_t i = khri_from; i < khri_to && i < g_rp_n; ++i) {
+        const KhRpDraw& r = g_rp_draws[i];
+        ctx->IASetInputLayout(r.il);
+        ctx->IASetPrimitiveTopology(r.topo);
+        ctx->IASetVertexBuffers(0, KH_RP_VB, r.vb, r.vbs, r.vbo);
+        ctx->IASetIndexBuffer(r.ib, r.ifmt, r.ioff);
+        ctx->VSSetShader(r.vs, nullptr, 0);
+        ctx->PSSetShader(r.ps, nullptr, 0);
+        ID3D11DeviceContext1* const c1 = r.cb1 ? kh_ctx1(ctx) : nullptr;
+        if (c1) {
+            c1->VSSetConstantBuffers1(0, KH_RP_CB, r.vcb, r.vcf, r.vcn);
+            c1->PSSetConstantBuffers1(0, KH_RP_CB, r.pcb, r.pcf, r.pcn);
+        } else {
+            ctx->VSSetConstantBuffers(0, KH_RP_CB, r.vcb);
+            ctx->PSSetConstantBuffers(0, KH_RP_CB, r.pcb);
+        }
+        ctx->PSSetShaderResources(0, KH_RP_SRV, r.psrv);
+        ctx->PSSetSamplers(0, KH_RP_SRV, r.psmp);
+        ctx->OMSetDepthStencilState(r.dss, r.sref);
+        ctx->OMSetBlendState(r.bs, r.bf, r.bmask);
+        if (r.nvp) ctx->RSSetViewports(r.nvp, r.vp);
+        ID3D11RasterizerState* const sc_rs = khri_sc ? kh_rp_rs_scissor(ctx, r.rs) : nullptr;
+        if (sc_rs) {
+            D3D11_RECT rc = *khri_sc;
+            D3D11_RASTERIZER_DESC rd = {};
+            if (r.rs) r.rs->GetDesc(&rd);
+            if (r.rs && rd.ScissorEnable && r.nsc) {   // The draw clipped itself too: both.
+                rc.left = rc.left > r.sc[0].left ? rc.left : r.sc[0].left;
+                rc.top = rc.top > r.sc[0].top ? rc.top : r.sc[0].top;
+                rc.right = rc.right < r.sc[0].right ? rc.right : r.sc[0].right;
+                rc.bottom = rc.bottom < r.sc[0].bottom ? rc.bottom : r.sc[0].bottom;
+                if (rc.right <= rc.left || rc.bottom <= rc.top) continue;   // Nothing of it inside.
+            }
+            ctx->RSSetState(sc_rs);
+            ctx->RSSetScissorRects(1, &rc);
+        } else {
+            ctx->RSSetState(r.rs);
+            if (r.nsc) ctx->RSSetScissorRects(r.nsc, r.sc);
+        }
+        switch (r.kind) {
+            case 1: ctx->DrawIndexed(r.a, r.b, r.d); break;
+            case 2: ctx->Draw(r.a, r.b); break;
+            case 3: ctx->DrawIndexedInstanced(r.a, r.b, r.c, r.d, r.e); break;
+            case 4: ctx->DrawInstanced(r.a, r.b, r.c, r.e); break;
+            default: break;
+        }
+    }
+}
+// KH_MIR_REPLAY: the recorded draws the real mirror re-issued, into khrm_dsv the way kh_vmir_begin re-issues them - no
+// render target, the whole mirror's viewport, the near-patched view block at b2 (g_vmir_b2_patch, still this pass's:
+// it is patched once a pass, at its first counting draw), the depth-clamp twin of the draw's rasterizer state - and
+// everything else as recorded. With khrm_sc each is clipped to it (and to its own scissor when it had one), as
+// kh_rp_issue clips. False = a twin could not be made.
+inline bool kh_rp_issue_mir(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* khrm_dsv, const D3D11_RECT* khrm_sc) {
+    ctx->GSSetShader(nullptr, nullptr, 0); ctx->HSSetShader(nullptr, nullptr, 0); ctx->DSSetShader(nullptr, nullptr, 0);
+    ctx->OMSetRenderTargets(0, nullptr, khrm_dsv);
+    D3D11_VIEWPORT vp = {};
+    vp.Width = static_cast<float>(g_vmir_w);
+    vp.Height = static_cast<float>(g_vmir_h);
+    vp.MaxDepth = 1.0f;
+    for (uint32_t i = 0; i < g_rp_n && i < KH_RP_MAXDRAWS; ++i) {
+        const KhRpDraw& r = g_rp_draws[i];
+        if (!r.mir) continue;
+        ID3D11RasterizerState* const rs = kh_rp_rs_mir(ctx, r.rs, khrm_sc != nullptr);
+        if (!rs) return false;
+        D3D11_RECT rc = {};
+        if (khrm_sc) {
+            rc = *khrm_sc;
+            D3D11_RASTERIZER_DESC rd = {};
+            if (r.rs) r.rs->GetDesc(&rd);
+            if (r.rs && rd.ScissorEnable && r.nsc) {   // The draw clipped itself too: both.
+                rc.left = rc.left > r.sc[0].left ? rc.left : r.sc[0].left;
+                rc.top = rc.top > r.sc[0].top ? rc.top : r.sc[0].top;
+                rc.right = rc.right < r.sc[0].right ? rc.right : r.sc[0].right;
+                rc.bottom = rc.bottom < r.sc[0].bottom ? rc.bottom : r.sc[0].bottom;
+                if (rc.right <= rc.left || rc.bottom <= rc.top) continue;   // Nothing of it inside.
+            }
+        }
+        ctx->IASetInputLayout(r.il);
+        ctx->IASetPrimitiveTopology(r.topo);
+        ctx->IASetVertexBuffers(0, KH_RP_VB, r.vb, r.vbs, r.vbo);
+        ctx->IASetIndexBuffer(r.ib, r.ifmt, r.ioff);
+        ctx->VSSetShader(r.vs, nullptr, 0);
+        ctx->PSSetShader(r.ps, nullptr, 0);
+        ID3D11DeviceContext1* const c1 = r.cb1 ? kh_ctx1(ctx) : nullptr;
+        if (c1) {
+            c1->VSSetConstantBuffers1(0, KH_RP_CB, r.vcb, r.vcf, r.vcn);
+            c1->PSSetConstantBuffers1(0, KH_RP_CB, r.pcb, r.pcf, r.pcn);
+        } else {
+            ctx->VSSetConstantBuffers(0, KH_RP_CB, r.vcb);
+            ctx->PSSetConstantBuffers(0, KH_RP_CB, r.pcb);
+        }
+        ctx->VSSetConstantBuffers(2, 1, &g_vmir_b2_patch);   // Whole, as kh_vmir_begin binds it.
+        ctx->PSSetShaderResources(0, KH_RP_SRV, r.psrv);
+        ctx->PSSetSamplers(0, KH_RP_SRV, r.psmp);
+        ctx->OMSetDepthStencilState(r.dss, r.sref);
+        ctx->OMSetBlendState(r.bs, r.bf, r.bmask);
+        ctx->RSSetViewports(1, &vp);
+        ctx->RSSetState(rs);
+        if (khrm_sc) ctx->RSSetScissorRects(1, &rc);
+        else if (r.nsc) ctx->RSSetScissorRects(r.nsc, r.sc);
+        switch (r.kind) {
+            case 1: ctx->DrawIndexed(r.a, r.b, r.d); break;
+            case 2: ctx->Draw(r.a, r.b); break;
+            case 3: ctx->DrawIndexedInstanced(r.a, r.b, r.c, r.d, r.e); break;
+            case 4: ctx->DrawInstanced(r.a, r.b, r.c, r.e); break;
+            default: break;
+        }
+    }
+    return true;
+}
+// KH_MIR_REPLAY: mirror A, B and the merged mirror, at the volume buffer's size (the mirror's own, kh_vmir_ensure_targets).
+inline bool kh_rp_ensure_mir(ID3D11Device* dev) {
+    if (!dev || g_rp_w == 0 || g_rp_h == 0) return false;
+    if (g_rp_mira_tex && g_rp_mira_dsv && g_rp_mira_srv && g_rp_mirb_tex && g_rp_mirb_dsv && g_rp_mirb_srv &&
+        g_rp_mirm_tex && g_rp_mirm_rtv && g_rp_mirm_srv && g_rp_mir_w == g_rp_w && g_rp_mir_h == g_rp_h) return true;
+    kh_rp_mir_release();
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = g_rp_w; td.Height = g_rp_h; td.MipLevels = 1; td.ArraySize = 1; td.SampleDesc.Count = 1;
+    td.Format = DXGI_FORMAT_R24G8_TYPELESS;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+    D3D11_DEPTH_STENCIL_VIEW_DESC dd = {};
+    dd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+    D3D11_SHADER_RESOURCE_VIEW_DESC vd = {};
+    vd.Format = DXGI_FORMAT_X24_TYPELESS_G8_UINT;
+    vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    vd.Texture2D.MipLevels = 1;
+    bool ok = SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &g_rp_mira_tex)) && g_rp_mira_tex &&
+              SUCCEEDED(dev->CreateDepthStencilView(g_rp_mira_tex, &dd, &g_rp_mira_dsv)) && g_rp_mira_dsv &&
+              SUCCEEDED(dev->CreateShaderResourceView(g_rp_mira_tex, &vd, &g_rp_mira_srv)) && g_rp_mira_srv &&
+              SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &g_rp_mirb_tex)) && g_rp_mirb_tex &&
+              SUCCEEDED(dev->CreateDepthStencilView(g_rp_mirb_tex, &dd, &g_rp_mirb_dsv)) && g_rp_mirb_dsv &&
+              SUCCEEDED(dev->CreateShaderResourceView(g_rp_mirb_tex, &vd, &g_rp_mirb_srv)) && g_rp_mirb_srv;
+    if (ok) {
+        D3D11_TEXTURE2D_DESC md = td;
+        md.Format = DXGI_FORMAT_R8G8_UINT;
+        md.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        ok = SUCCEEDED(dev->CreateTexture2D(&md, nullptr, &g_rp_mirm_tex)) && g_rp_mirm_tex &&
+             SUCCEEDED(dev->CreateRenderTargetView(g_rp_mirm_tex, nullptr, &g_rp_mirm_rtv)) && g_rp_mirm_rtv &&
+             SUCCEEDED(dev->CreateShaderResourceView(g_rp_mirm_tex, nullptr, &g_rp_mirm_srv)) && g_rp_mirm_srv;
+    }
+    if (!ok) { kh_rp_mir_release(); return false; }
+    g_rp_mir_w = g_rp_w;
+    g_rp_mir_h = g_rp_h;
+    return true;
+}
+// KH_MIR_REPLAY: the recorded pass drew the real mirror - its prepass ran in this pass's frame on this buffer, and at
+// least one of its draws was re-issued there.
+inline bool kh_rp_mir_used() {
+    if (g_vmir_prepass_stamp != static_cast<uint32_t>(g_rp_pass) || !g_vmir_prepass_src ||
+        g_vmir_prepass_src != g_svs_vol_src) return false;
+    for (uint32_t i = 0; i < g_rp_n && i < KH_RP_MAXDRAWS; ++i) if (g_rp_draws[i].mir) return true;
+    return false;
+}
+// KH_MIR_REPLAY: the mirror can be replayed this cycle - it was drawn, what its re-issue bound still stands, and the
+// targets exist at its size.
+inline bool kh_rp_mir_eligible(ID3D11DeviceContext* ctx) {
+    if (!kh_rp_mir_used() || !g_res.ps_rpmergemir || !g_vmir_tex || !g_vmir_srv || !g_vmir_b2_patch) return false;
+    if (g_vmir_w != g_rp_w || g_vmir_h != g_rp_h) return false;
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    const bool ok = kh_rp_ensure_mir(dev);
+    if (dev) dev->Release();
+    return ok;
+}
+// KH_MIR_REPLAY: inside kh_rp_replay's state bracket, after the volume merge. Mirror A: the real mirror's depth (the
+// pass's prepass) with its count cleared; mirror B: this cycle's prepass (replay B's world seam drew it); the same
+// re-issued draws into both; then the merge - B where A equals the real mirror, else the real mirror. False = the
+// real mirror stands.
+inline bool kh_rp_mir_replay(ID3D11DeviceContext* ctx, const D3D11_RECT* khmr_sc) {
+    if (!g_rp_mirb_drawn || !g_rp_mira_tex || !g_rp_mira_dsv || !g_rp_mirb_dsv || !g_rp_mirm_rtv ||
+        !g_res.ps_rpmergemir || !g_vmir_tex) return false;
+    ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    ctx->CopyResource(g_rp_mira_tex, g_vmir_tex);
+    ctx->ClearDepthStencilView(g_rp_mira_dsv, D3D11_CLEAR_STENCIL, 1.0f, 0);   // The count only: the depth stands.
+    if (!kh_rp_issue_mir(ctx, g_rp_mira_dsv, khmr_sc)) return false;
+    if (!kh_rp_issue_mir(ctx, g_rp_mirb_dsv, khmr_sc)) return false;
+    ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    ID3D11ShaderResourceView* nul[1] = { nullptr };
+    ctx->PSSetShaderResources(28, 1, nul);   // The merged mirror may still be bound for reading from the last cycle.
+    ctx->OMSetRenderTargets(1, &g_rp_mirm_rtv, nullptr);
+    D3D11_VIEWPORT vpc = {};
+    vpc.Width = static_cast<float>(g_rp_w);
+    vpc.Height = static_cast<float>(g_rp_h);
+    vpc.MaxDepth = 1.0f;
+    ctx->RSSetViewports(1, &vpc);
+    ID3D11RasterizerState* const mrs = khmr_sc ? kh_rp_rs_scissor(ctx, nullptr) : nullptr;
+    ctx->RSSetState(mrs);
+    if (mrs) ctx->RSSetScissorRects(1, khmr_sc);
+    ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
+    ctx->OMSetDepthStencilState(g_res.dss_off, 0);
+    ctx->IASetInputLayout(nullptr);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
+    ctx->PSSetShader(g_res.ps_rpmergemir, nullptr, 0);
+    ID3D11ShaderResourceView* const in_a = g_rp_mira_srv;
+    ID3D11ShaderResourceView* const in_e = g_vmir_srv;
+    ID3D11ShaderResourceView* const in_b = g_rp_mirb_srv;
+    ctx->PSSetShaderResources(34, 1, &in_a);
+    ctx->PSSetShaderResources(41, 1, &in_e);
+    ctx->PSSetShaderResources(49, 1, &in_b);
+    ID3D11Buffer* cbs[2] = { g_res.composite_cb, g_res.composite_frame_cb };   // VSFullscreen's lanes (the volume merge's).
+    ctx->VSSetConstantBuffers(0, 2, cbs);
+    ctx->PSSetConstantBuffers(0, 2, cbs);
+    ctx->Draw(3, 0);
+    ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    ctx->PSSetShaderResources(34, 1, nul);
+    ctx->PSSetShaderResources(41, 1, nul);
+    ctx->PSSetShaderResources(49, 1, nul);
+    return true;
+}
+// Replay B can run this frame (the reason it cannot is its fallback).
+inline bool kh_rp_b_eligible() {
+    if (g_rp_eng_seq != g_rp_pass) return false;          // No engine snapshot of this pass.
+    if (g_rp_vol_clear_seq != g_rp_pass) return false;    // Not cleared this frame: a footprint could survive in it.
+    if (!g_svs_vol_foot_ok || !kh_svs_foot_bound()) return false;   // The fallback pixels' witness.
+    if (!g_res.ps_rpmerge || !g_rp_dsvb || !g_rp_stenb || !g_rp_mst_rtv || !g_rp_mft_rtv) return false;
+    if (g_svs_vol_proj_ok) {   // B's footprint (the cycle latch) in the copy's raster; a pass under another zoom maps.
+        float now[4];
+        if (!g_ro.cycle_pv_valid || !kh_sten_proj_terms(g_ro.cycle_pv.projection, now)) return false;
+        for (int k = 0; k < 4; ++k) {
+            const float tol = 1.0e-4f * (fabsf(now[k]) > 1.0f ? fabsf(now[k]) : 1.0f);
+            if (fabsf(g_svs_vol_proj[k] - now[k]) > tol) return false;
+        }
+    }
+    return true;
+}
+// Replay B: the engine's depth, our world footprint at this cycle's pose (the world seam's own pass in B mode, with
+// the volume pass's b2..b4 bound - its depth goes through the engine's view block), then the recorded draws with our
+// in-front footprint (the hands seam in B mode, its slice viewport) at the place the hands seam came in the pass. The
+// seams' globals are their own frame's again afterwards. False when the world footprint did not draw.
+inline bool kh_rp_replay_b(ID3D11DeviceContext* ctx, const D3D11_RECT* khrb_sc) {
+    ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    ctx->CopyResource(g_rp_tgtb, g_rp_eng);
+    ctx->OMSetRenderTargets(0, nullptr, g_rp_dsvb);
+    {
+        const KhRpDraw& r0 = g_rp_draws[0];
+        ID3D11DeviceContext1* const c1 = r0.cb1 ? kh_ctx1(ctx) : nullptr;
+        if (c1) c1->VSSetConstantBuffers1(2, 3, &r0.vcb[2], &r0.vcf[2], &r0.vcn[2]);
+        else ctx->VSSetConstantBuffers(2, 3, &r0.vcb[2]);
+    }
+    const uint64_t sv_sig = g_svs_skip_sig;
+    const bool sv_valid = g_svs_skip_valid, sv_inj = g_svs_injected_frame, sv_prime = g_svs_prime_ready;
+    float sv_vp[4][4]; memcpy(sv_vp, g_svs_prime_vp, sizeof(sv_vp));
+    float sv_cam[3]; memcpy(sv_cam, g_svs_prime_cam, sizeof(sv_cam));
+    const bool sv_rebase = g_svs_prime_rebase;
+    const float sv_lo = g_svs_prime_vp_lo, sv_hi = g_svs_prime_vp_hi;
+    float sv_enc[4]; memcpy(sv_enc, g_svs_seam_enc, sizeof(sv_enc));
+    const uint64_t sv_enc_seq = g_svs_seam_enc_seq;
+    float sv_proj[4]; memcpy(sv_proj, g_svs_seam_proj, sizeof(sv_proj));
+    const bool sv_proj_ok = g_svs_seam_proj_ok;
+    const int sv_fix = g_svs_foot_seam_ix;
+    const uint64_t sv_fseq = g_svs_foot_seam_seq;
+    g_svs_foot_seam_seq = ~0ull;
+    g_rp_seam_b = true;
+    kh_volume_seam_inject(ctx, g_rp_w, g_rp_h);
+    const int b_foot = g_svs_foot_pub == 0 ? 1 : 0;
+    const bool drew = g_svs_foot_seam_seq == g_svs_frame_seq && g_svs_foot_seam_ix == b_foot;
+    if (drew) {
+        const bool front = g_rp_front_seq == g_rp_pass;
+        const uint32_t at = front ? (g_rp_front_idx < g_rp_n ? g_rp_front_idx : g_rp_n) : g_rp_n;
+        ctx->OMSetRenderTargets(0, nullptr, g_rp_dsvb);
+        kh_rp_issue(ctx, 0, at, khrb_sc);
+        if (front) {   // The in-front footprint where the hands seam came: its slice, into B, at this cycle's pose.
+            ctx->OMSetRenderTargets(0, nullptr, g_rp_dsvb);
+            ctx->RSSetViewports(1, &g_rp_front_vp);
+            kh_infront_seam_inject(ctx, g_rp_front_vp);
+        }
+        ctx->OMSetRenderTargets(0, nullptr, g_rp_dsvb);
+        kh_rp_issue(ctx, at, g_rp_n, khrb_sc);
+        ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    }
+    g_rp_seam_b = false;
+    g_svs_skip_sig = sv_sig; g_svs_skip_valid = sv_valid; g_svs_injected_frame = sv_inj; g_svs_prime_ready = sv_prime;
+    memcpy(g_svs_prime_vp, sv_vp, sizeof(sv_vp)); memcpy(g_svs_prime_cam, sv_cam, sizeof(sv_cam));
+    g_svs_prime_rebase = sv_rebase; g_svs_prime_vp_lo = sv_lo; g_svs_prime_vp_hi = sv_hi;
+    memcpy(g_svs_seam_enc, sv_enc, sizeof(sv_enc)); g_svs_seam_enc_seq = sv_enc_seq;
+    memcpy(g_svs_seam_proj, sv_proj, sizeof(sv_proj)); g_svs_seam_proj_ok = sv_proj_ok;
+    g_svs_foot_seam_ix = sv_fix; g_svs_foot_seam_seq = sv_fseq;
+    return drew;
+}
+// At the injection: replay the last recorded pass and merge. A withheld pass is B everywhere (its copy counted against
+// whatever is behind our meshes); one that was not keeps B only where replay A equals the engine's count.
+inline void kh_rp_replay(ID3D11DeviceContext* ctx) {
+    g_rp_merge_ok = false;   // This cycle is merged only if the replay below completes.
+    g_rp_mir_ok = false;     // KH_MIR_REPLAY: likewise the mirror.
+    if (g_rp_pass == ~0ull || g_rp_replayed || !g_rp_ended) return;
+    g_rp_replayed = true;
+    if (!g_rp_ok || g_rp_n == 0 || g_svs_vol_seq != g_rp_pass || !g_svs_vol_sten_srv || !g_svs_vol_primed ||
+        !g_res.vs_fullscreen || !g_res.dss_off || !g_res.composite_cb || !kh_rp_b_eligible()) {
+        kh_stat(g_rp_c.fallback);
+        return;
+    }
+    const bool withheld = g_rp_withheld_seq == g_rp_pass;
+    D3D11_RECT rect = {};
+    const bool sc = kh_rp_scissor_rect(rect);
+    if (sc && (rect.right <= rect.left || rect.bottom <= rect.top)) return;   // No mesh of ours on screen.
+    kh_stat(sc ? g_rp_c.scissored : g_rp_c.fullscreen);
+    const D3D11_RECT* const scp = sc ? &rect : nullptr;
+    const bool prev = g_ro.in_injection;
+    g_ro.in_injection = true;
+    KhRpSave sv;
+    sv.capture(ctx);
+    bool ok = true;
+    if (!withheld) {   // Replay A (the trust): the pass as the engine drew it, from its first draw.
+        ctx->OMSetRenderTargets(0, nullptr, nullptr);
+        ctx->CopyResource(g_rp_tgt, g_rp_pre);
+        ctx->OMSetRenderTargets(0, nullptr, g_rp_dsv);
+        kh_rp_issue(ctx, 0, g_rp_n, scp);
+        ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    }
+    const bool mir_used = kh_rp_mir_used();   // KH_MIR_REPLAY: replay B's world seam draws mirror B's prepass too.
+    const bool mir = mir_used && kh_rp_mir_eligible(ctx);
+    g_rp_mir_want = mir;
+    g_rp_mirb_drawn = false;
+    ok = kh_rp_replay_b(ctx, scp);
+    g_rp_mir_want = false;
+    if (ok) {   // The merge: the count and its footprint distance, B where trusted (everywhere when withheld).
+        ID3D11ShaderResourceView* nul[1] = { nullptr };
+        ctx->PSSetShaderResources(24, 1, nul);   // Neither merged texture may be bound for reading while written.
+        ctx->PSSetShaderResources(33, 1, nul);
+        ID3D11RenderTargetView* mrt[2] = { g_rp_mst_rtv, g_rp_mft_rtv };
+        ctx->OMSetRenderTargets(2, mrt, nullptr);
+        D3D11_VIEWPORT vpc = {};
+        vpc.Width = static_cast<float>(g_rp_w);
+        vpc.Height = static_cast<float>(g_rp_h);
+        vpc.MaxDepth = 1.0f;
+        ctx->RSSetViewports(1, &vpc);
+        ID3D11RasterizerState* const mrs = scp ? kh_rp_rs_scissor(ctx, nullptr) : nullptr;
+        ctx->RSSetState(mrs);
+        if (mrs) ctx->RSSetScissorRects(1, scp);
+        ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
+        ctx->OMSetDepthStencilState(g_res.dss_off, 0);
+        ctx->IASetInputLayout(nullptr);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
+        ctx->PSSetShader(g_res.ps_rpmerge, nullptr, 0);
+        ID3D11ShaderResourceView* in2[2] = { withheld ? nullptr : g_rp_sten, g_svs_vol_sten_srv };
+        ctx->PSSetShaderResources(34, 1, &in2[0]);
+        ctx->PSSetShaderResources(41, 1, &in2[1]);
+        ID3D11ShaderResourceView* in3[3] = { g_rp_stenb, g_svs_foot_srv[g_svs_foot_pub == 0 ? 1 : 0], kh_svs_foot_bound() };
+        ctx->PSSetShaderResources(49, 3, in3);
+        ID3D11Buffer* cbs[2] = { g_res.composite_cb, g_res.composite_frame_cb };   // Bound before the upload (ring).
+        ctx->VSSetConstantBuffers(0, 2, cbs);
+        ctx->PSSetConstantBuffers(0, 2, cbs);
+        ConstantData cbd = {};
+        cbd.color[1] = withheld ? 1.0f : 0.0f;
+        ok = kh_upload_obj_cb(ctx, g_res.composite_cb, cbd);
+        if (ok) ctx->Draw(3, 0);
+        ctx->OMSetRenderTargets(0, nullptr, nullptr);
+        ID3D11ShaderResourceView* nul5[5] = {};
+        ctx->PSSetShaderResources(49, 3, nul5);
+        ctx->PSSetShaderResources(34, 1, nul5);
+        ctx->PSSetShaderResources(41, 1, nul5);
+    }
+    const bool mir_done = ok && mir && kh_rp_mir_replay(ctx, scp);   // KH_MIR_REPLAY.
+    sv.restore(ctx);
+    sv.release();
+    g_ro.in_injection = prev;
+    if (ok) {
+        g_rp_merge_ok = true;
+        g_rp_merge_cyc = g_topo_cycles;
+        kh_stat(g_rp_c.merged);
+        if (mir_used) {   // KH_MIR_REPLAY.
+            g_rp_mir_ok = mir_done;
+            g_rp_mir_cyc = g_topo_cycles;
+            kh_stat(mir_done ? g_rp_c.mir_merged : g_rp_c.mir_fallback);
+        }
+    } else {
+        kh_stat(g_rp_c.fallback);
+    }
+}
+// Command lists, indirect / auto draws and copies into the volume buffer: none of them reaches the recorder, so a pass
+// they happen inside is refused. Installed one by one after the core hooks (a failure leaves that one off).
+inline bool kh_rp_engine_call(ID3D11DeviceContext* self) {
+    return self == g_reorder_target_ctx.load(std::memory_order_relaxed) && reorder_on_render_thread() && !g_ro.in_injection;
+}
 inline void kh_infront_seam_inject(ID3D11DeviceContext* ctx, const D3D11_VIEWPORT& khvs_vp) {
     if (!g_res.vs || !g_res.composite_cb || !g_res.composite_frame_cb || !g_res.input_layout ||
         !g_res.rasterizer || !g_res.rasterizer_cull || g_res.mesh_vb.empty()) return;
@@ -42207,7 +43491,7 @@ inline void kh_infront_seam_inject(ID3D11DeviceContext* ctx, const D3D11_VIEWPOR
     float khvs_vpm[4][4];
     float khvs_cam[3];
     bool  khvs_rebase;
-    if (g_svs_injected_frame) {
+    if (g_svs_injected_frame || g_rp_seam_b) {   // KH_VOL_REPLAY: in B mode, the transform the B world seam just took.
         memcpy(khvs_vpm, g_svs_prime_vp, sizeof(khvs_vpm));
         khvs_cam[0] = g_svs_prime_cam[0]; khvs_cam[1] = g_svs_prime_cam[1]; khvs_cam[2] = g_svs_prime_cam[2];
         khvs_rebase = g_svs_prime_rebase;
@@ -42387,6 +43671,7 @@ inline void kh_upload_scan(ID3D11Resource* res, const void* khus_d, uint32_t khu
 }
 
 static HRESULT STDMETHODCALLTYPE hooked_map(ID3D11DeviceContext* self, ID3D11Resource* res, UINT sub, D3D11_MAP type, UINT flags, D3D11_MAPPED_SUBRESOURCE* mapped) {
+    try { kh_rp_on_map(self, res, type); } catch (...) {}   // KH_REPLAY_SPLIT: before the discard reaches the runtime.
     KH_PROF_SCOPE(KHP_HOOK_MAP);   // KH_PROF.
     const HRESULT hr = g_orig_map(self, res, sub, type, flags, mapped);
 
@@ -42443,12 +43728,56 @@ static void STDMETHODCALLTYPE hooked_unmap(ID3D11DeviceContext* self, ID3D11Reso
     g_orig_unmap(self, res, sub);
 }
 
+static void STDMETHODCALLTYPE hooked_draw_auto(ID3D11DeviceContext* self) {   // KH_VOL_REPLAY.
+    try { if (kh_rp_engine_call(self) && g_svs_vol_dsv_bound) kh_rp_foreign(5); } catch (...) { kh_hook_except(); }
+    g_orig_draw_auto(self);
+}
+static void STDMETHODCALLTYPE hooked_draw_indexed_inst_indirect(ID3D11DeviceContext* self, ID3D11Buffer* args, UINT off) {
+    try { if (kh_rp_engine_call(self) && g_svs_vol_dsv_bound) kh_rp_foreign(5); } catch (...) { kh_hook_except(); }
+    g_orig_draw_indexed_inst_indirect(self, args, off);
+}
+static void STDMETHODCALLTYPE hooked_draw_inst_indirect(ID3D11DeviceContext* self, ID3D11Buffer* args, UINT off) {
+    try { if (kh_rp_engine_call(self) && g_svs_vol_dsv_bound) kh_rp_foreign(5); } catch (...) { kh_hook_except(); }
+    g_orig_draw_inst_indirect(self, args, off);
+}
+static void STDMETHODCALLTYPE hooked_copy_region(ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dsub, UINT x, UINT y,
+                                                 UINT z, ID3D11Resource* src, UINT ssub, const D3D11_BOX* box) {
+    try {
+        if (kh_rp_engine_call(self) && dst && g_svs_vol_src && static_cast<void*>(dst) == static_cast<void*>(g_svs_vol_src))
+            kh_rp_foreign(6);
+    } catch (...) { kh_hook_except(); }
+    g_orig_copy_region(self, dst, dsub, x, y, z, src, ssub, box);
+}
+static void STDMETHODCALLTYPE hooked_execute_command_list(ID3D11DeviceContext* self, ID3D11CommandList* cl, BOOL restore) {
+    try { if (kh_rp_engine_call(self)) kh_rp_foreign(4); } catch (...) { kh_hook_except(); }
+    g_orig_execute_command_list(self, cl, restore);
+}
+// Installed one by one after the core table succeeded: a failure leaves that one off and never touches the core hooks.
+inline void kh_rp_extra_hooks(void** vt) {
+    struct Sp { int slot; void* det; void** orig; };
+    const Sp sp[] = {
+        { KH_VT_DRAWAUTO,             reinterpret_cast<void*>(&hooked_draw_auto),                  reinterpret_cast<void**>(&g_orig_draw_auto) },
+        { KH_VT_DRAWINDEXEDINSTIND,   reinterpret_cast<void*>(&hooked_draw_indexed_inst_indirect), reinterpret_cast<void**>(&g_orig_draw_indexed_inst_indirect) },
+        { KH_VT_DRAWINSTIND,          reinterpret_cast<void*>(&hooked_draw_inst_indirect),         reinterpret_cast<void**>(&g_orig_draw_inst_indirect) },
+        { KH_VT_COPYSUBRESOURCEREGION, reinterpret_cast<void*>(&hooked_copy_region),               reinterpret_cast<void**>(&g_orig_copy_region) },
+        { KH_VT_EXECUTECOMMANDLIST,   reinterpret_cast<void*>(&hooked_execute_command_list),       reinterpret_cast<void**>(&g_orig_execute_command_list) },
+    };
+    for (const auto& x : sp) {
+        if (*x.orig) continue;   // Already in place (a later install round).
+        if (MH_CreateHook(vt[x.slot], x.det, x.orig) != MH_OK) { *x.orig = nullptr; continue; }
+        if (MH_EnableHook(vt[x.slot]) != MH_OK) { MH_RemoveHook(vt[x.slot]); *x.orig = nullptr; continue; }
+    }
+}
 // KH_PIP_FX_COPY: the engine copies the PIP colour target out with CopyResource
 // (mid-pass for its translucents, and after the last draw for its post pass,
 // which overwrites the target from that copy). The passes run here, before the
 // copy, so the copy carries them; the first copy of a cycle is the engine's
 // opaque boundary. RT0 is compared by resource, not by view.
 static void STDMETHODCALLTYPE hooked_copyresource(ID3D11DeviceContext* self, ID3D11Resource* dst, ID3D11Resource* src) {
+    try {   // KH_VOL_REPLAY: a copy into the volume buffer inside a pass.
+        if (kh_rp_engine_call(self) && dst && g_svs_vol_src && static_cast<void*>(dst) == static_cast<void*>(g_svs_vol_src))
+            kh_rp_foreign(6);
+    } catch (...) {}
     try {
     if (src && g_pip.on && !g_pip.fx_done && g_pip.opaques >= KH_PIP_MIN_OPAQUES &&
         self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
@@ -42793,6 +44122,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     kh_dls_select();   // KH_DL_SHADOW twin 1/2 - ahead of the sun, never inside it.
     render_sun_depth(ctx);
     kh_dls_frame(ctx);   // KH_DLS_FRAME twin 1/2 - after the sun, never inside it.
+    kh_rp_replay(ctx);   // KH_VOL_REPLAY: before the meshes bind t24 / t33.
 
     RVExtBridge::ProjectionViewTransform pv = {};
 
@@ -43337,18 +44667,20 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // The volume copy's stencil plane (t24), on its own arm; inside
     // StateBackup's saved range. Twin: the flush carries the identical block.
     if (kh_svs_vol_ready()) {
-        ctx->PSSetShaderResources(24, 1, &g_svs_vol_sten_srv);
+        ID3D11ShaderResourceView* const khr_sten = kh_rp_merged_now() ? g_rp_msten_srv : g_svs_vol_sten_srv;   // KH_VOL_REPLAY.
+        ctx->PSSetShaderResources(24, 1, &khr_sten);
         // KH_VOL_WITNESS: its depth plane (t23; inside StateBackup's range).
         if (g_svs_vol_depth_srv) ctx->PSSetShaderResources(23, 1, &g_svs_vol_depth_srv);
         // KH_VOL_FOOT: its footprint mask (t33; inside StateBackup's range).
-        ID3D11ShaderResourceView* const khr_foot = kh_svs_foot_bound();
+        ID3D11ShaderResourceView* const khr_foot = kh_rp_merged_now() ? g_rp_mfoot_srv : kh_svs_foot_bound();
         if (khr_foot) ctx->PSSetShaderResources(33, 1, &khr_foot);
     }
     // The mirror stencil at t28 (inside StateBackup's saved range). mirMeta.x =
     // 0 short-circuits the shader, so an absent mask never reads a stale bind.
     // Twin: the flush carries the identical block.
     if (g_vmir_srv && g_vmir_mask_time >= 0.0f) {
-        ctx->PSSetShaderResources(28, 1, &g_vmir_srv);
+        ID3D11ShaderResourceView* const khr_mir = kh_rp_mir_srv();   // KH_MIR_REPLAY.
+        ctx->PSSetShaderResources(28, 1, &khr_mir);
     }
     // Shadow atlas for the per-pixel map compare (shadowMeta.x = 0
     // short-circuits the shader when the table is empty). t1 is inside
@@ -44714,6 +46046,7 @@ inline void kh_volume_seam_pump(ID3D11DeviceContext* ctx) {
         // The volume copy first and on its own arm: same position requirement
         // as pre (after the counting draws, before the resolve), separate
         // demand gate, separate lanes.
+        kh_rp_pass_end(ctx);   // KH_VOL_REPLAY: the rewritable buffers, before anything rewrites them.
         kh_svs_vol_copy(ctx);
         // The bracket is the stencil resolve, a 4-vertex fullscreen quad with
         // no view matrix to read.
@@ -44911,7 +46244,14 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
         self->RSGetViewports(&khvq_n, &khvq_vp);
         if (khvq_n >= 1 && kh_infront_vp_is_slice(khvq_vp)) {
             g_vm_seam_done = true;
-            kh_infront_seam_inject(self, khvq_vp);
+            kh_rp_front_note(khvq_vp);   // KH_VOL_REPLAY: where in the pass replay B draws the in-front footprint.
+            if (!kh_rp_seam_withhold()) {   // KH_SEAM_WITHHOLD: the hands count, as the world's.
+                // KH_VOL_REPLAY: the pass stays replayable. Replay A lacks this footprint, so it differs from the copy
+                // only where the footprint changed the count, and the merge keeps the copy there (per-pixel trust).
+                // Refusing the pass instead left the next cycle unmerged, so its hands seam wrote and refused again:
+                // with an in-front mesh, first person never got back to a merged cycle.
+                kh_infront_seam_inject(self, khvq_vp);
+            }
         }
     }
 
@@ -45924,6 +47264,7 @@ static void STDMETHODCALLTYPE hooked_pssetshaderresources(ID3D11DeviceContext* s
 
 static void STDMETHODCALLTYPE hooked_draw_indexed(ID3D11DeviceContext* self, UINT ic, UINT sil, INT bvl) {
     try { reorder_pre_draw(self); } catch (...) { kh_hook_except(); }
+    kh_rp_record(self, 1, ic, sil, 0, bvl, 0);   // KH_VOL_REPLAY: the engine's state, after our pre-draw work.
     g_orig_draw_indexed(self, ic, sil, bvl);
     try {
     // Mirror re-issue; the flag is set for the tracked context's own draw. The
@@ -45944,6 +47285,7 @@ static void STDMETHODCALLTYPE hooked_draw_indexed(ID3D11DeviceContext* self, UIN
 
 static void STDMETHODCALLTYPE hooked_draw(ID3D11DeviceContext* self, UINT vc, UINT svl) {
     try { reorder_pre_draw(self); } catch (...) { kh_hook_except(); }
+    kh_rp_record(self, 2, vc, svl, 0, 0, 0);   // KH_VOL_REPLAY: the engine's state, after our pre-draw work.
     g_orig_draw(self, vc, svl);
     try {
     // Mirror re-issue; the flag is set for the tracked context's own draw. The
@@ -45964,6 +47306,7 @@ static void STDMETHODCALLTYPE hooked_draw(ID3D11DeviceContext* self, UINT vc, UI
 
 static void STDMETHODCALLTYPE hooked_draw_indexed_instanced(ID3D11DeviceContext* self, UINT icpi, UINT ic, UINT sil, INT bvl, UINT sil2) {
     try { reorder_pre_draw(self); } catch (...) { kh_hook_except(); }
+    kh_rp_record(self, 3, icpi, ic, sil, bvl, sil2);   // KH_VOL_REPLAY: the engine's state, after our pre-draw work.
     g_orig_draw_indexed_instanced(self, icpi, ic, sil, bvl, sil2);
     try {
     // Mirror re-issue; the flag is set for the tracked context's own draw. The
@@ -45984,6 +47327,7 @@ static void STDMETHODCALLTYPE hooked_draw_indexed_instanced(ID3D11DeviceContext*
 
 static void STDMETHODCALLTYPE hooked_draw_instanced(ID3D11DeviceContext* self, UINT vcpi, UINT ic, UINT svl, UINT sil) {
     try { reorder_pre_draw(self); } catch (...) { kh_hook_except(); }
+    kh_rp_record(self, 4, vcpi, ic, svl, 0, sil);   // KH_VOL_REPLAY: the engine's state, after our pre-draw work.
     g_orig_draw_instanced(self, vcpi, ic, svl, sil);
     try {
     // Mirror re-issue; the flag is set for the tracked context's own draw. The
@@ -46134,6 +47478,11 @@ static void STDMETHODCALLTYPE hooked_omset_rts_and_uavs(ID3D11DeviceContext* sel
 }
 
 static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* self, ID3D11DepthStencilView* dsv, UINT flags, FLOAT depth, UINT8 stencil) {
+    if (dsv && g_svs_vol_src_id && self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&   // KH_VOL_REPLAY.
+        reorder_dsv_identity(dsv) == g_svs_vol_src_id) {
+        kh_rp_foreign(0);   // Inside a pass: refused. Before one: this frame's buffer starts clean.
+        g_rp_vol_clear_seq = g_svs_frame_seq;
+    }
     KH_PROF_SCOPE(KHP_HOOK_CLEAR);   // KH_PROF.
     try {
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && !g_ro.in_injection &&
@@ -46363,6 +47712,7 @@ inline void ensure_reorder_hook() {
             g_reorder_hook_fail_count = 0;   // A success clears the ladder.
             g_reorder_hook_retry_ms = 0;
             g_reorder_hook_active.store(true, std::memory_order_release);
+            kh_rp_extra_hooks(vt);   // KH_VOL_REPLAY: optional, after the core hooks.
             return;
         }
 
@@ -48148,15 +49498,17 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
                 }
                 // The volume copy's stencil plane (t24), on its own arm.
                 if (kh_svs_vol_ready()) {
-                    ctx->PSSetShaderResources(24, 1, &g_svs_vol_sten_srv);
+                    ID3D11ShaderResourceView* const khf_sten = kh_rp_merged_now() ? g_rp_msten_srv : g_svs_vol_sten_srv;   // KH_VOL_REPLAY.
+                    ctx->PSSetShaderResources(24, 1, &khf_sten);
                     // KH_VOL_WITNESS: its depth plane (t23). Twin: the injection.
                     if (g_svs_vol_depth_srv) ctx->PSSetShaderResources(23, 1, &g_svs_vol_depth_srv);
                     // KH_VOL_FOOT: its footprint mask (t33). Twin: the injection.
-                    ID3D11ShaderResourceView* const khf_foot = kh_svs_foot_bound();
+                    ID3D11ShaderResourceView* const khf_foot = kh_rp_merged_now() ? g_rp_mfoot_srv : kh_svs_foot_bound();
                     if (khf_foot) ctx->PSSetShaderResources(33, 1, &khf_foot);
                 }
                 if (g_vmir_srv && g_vmir_mask_time >= 0.0f) {
-                    ctx->PSSetShaderResources(28, 1, &g_vmir_srv);
+                    ID3D11ShaderResourceView* const khf_mir = kh_rp_mir_srv();   // KH_MIR_REPLAY.
+                    ctx->PSSetShaderResources(28, 1, &khf_mir);
                 }
                 // Null when no atlas exists - the shader's shadowMeta.x = 0
                 // short-circuit protects, and a stale depth SRV must never
@@ -49338,7 +50690,6 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     }
 
     for (const auto& f : passes) {
-// The debug view replaces the passes.
         const RenderObject& o = f.second;
         if (o.effect <= 0) continue;
         // No-op skip (write-window twin): color.a = 0 is an exact identity for
@@ -49806,6 +51157,9 @@ inline void reset_stat_counters() {
     g_stats_armed.store(false, std::memory_order_relaxed);
     g_stats = RenderStats{};
     g_attach_repaired.store(0, std::memory_order_relaxed);   // KH_ATTACH_DIAG.
+    g_rp_c = KhRpCounters();   // KH_VOL_REPLAY.
+    g_gid_waits = g_gid_late = g_gid_timeouts = g_gid_breaks = 0;   // KH_GTS_IDENTITY.
+    g_rtp_c = KhRtpCounters();   // KH_RT_PAINT_READ.
     g_attach_refused.store(0, std::memory_order_relaxed);
     g_attach_skew_bits.store(0, std::memory_order_relaxed);
     g_shader_cache_hits.store(0, std::memory_order_relaxed);
@@ -49837,6 +51191,24 @@ inline void kh_session_scratch_reset() {
     // the previous session matches once, when the new session's counter reaches
     // it, and that cycle's once-per-cycle work is skipped.
     // KH_ATTACH_GT_SNAP: g_gts_seq and its publication are reset with the objects (kh_session_objects_reset).
+    kh_rp_release_records();   // KH_VOL_REPLAY (the targets and copies go with the device).
+    g_rp_pass = ~0ull;
+    g_rp_ok = g_rp_ended = g_rp_replayed = false;
+    g_rp_merge_ok = false;
+    g_rp_mir_ok = false;   // KH_MIR_REPLAY.
+    g_rp_mir_want = false;
+    g_rp_mirb_drawn = false;
+    g_rp_withheld_seq = ~0ull;
+    g_rp_front_seq = ~0ull;
+    g_rp_eng_seq = ~0ull;
+    g_rp_vol_clear_seq = ~0ull;
+    g_rp_seam_b = false;
+    g_rp_c = KhRpCounters();
+    g_gid_ok = false;   // KH_GTS_IDENTITY: relearned in the new session.
+    g_gid_k = 0;
+    g_gid_waits = g_gid_late = g_gid_timeouts = g_gid_breaks = 0;
+    g_rtp_cyc = ~0ull;   // KH_RT_PAINT_READ.
+    g_rtp_c = KhRtpCounters();
     g_gts_clear_qpc = 0;
     g_gts_clear_prev = 0;
     g_gts_half = 0;
@@ -49901,7 +51273,29 @@ inline void kh_session_scratch_reset() {
 // them). Runs first in reset_session_state, after every device object is
 // released, so no COM pointer is dropped unreleased; the hand-written resets
 // below it still decide the values they set.
+// KH_VOL_REPLAY, KH_MIR_REPLAY, KH_SEAM_WITHHOLD, KH_GTS_IDENTITY, KH_RT_PAINT_READ: every namespace-scope global of
+// these features
+// back to a fresh process's value (SESSION CLEAN SLATE). Idempotent: the GPU objects are released first (normally
+// already done by release_shadow_device_state), so it is right in either teardown order.
+inline void kh_rp_globals_reset() {
+    kh_rp_release_all();
+    g_rp_merge_cyc = ~0ull;
+    g_rp_mir_cyc = ~0ull;   // KH_MIR_REPLAY (its targets and g_rp_mir_ok go with kh_rp_release_all).
+    g_rp_mir_want = false;
+    g_rp_mirb_drawn = false;
+    g_rp_seam_b = false;
+    g_rp_withheld_seq = ~0ull;
+    g_rp_front_idx = 0;
+    g_rp_front_vp = D3D11_VIEWPORT{};
+    g_rp_c = KhRpCounters();
+    g_gid_k = 0;
+    g_gid_ok = false;
+    g_gid_waits = g_gid_late = g_gid_timeouts = g_gid_breaks = 0;
+    g_rtp_c = KhRtpCounters();
+    g_rtp_cyc = ~0ull;
+}
 inline void kh_session_globals_reset() {
+    kh_rp_globals_reset();   // KH_VOL_REPLAY and its companions.
     g_stats_armed.store(false, std::memory_order_relaxed);
     for (auto& khsg_a : g_prof_ticks) khsg_a.store(0, std::memory_order_relaxed);
     for (auto& khsg_a : g_prof_count) khsg_a.store(0, std::memory_order_relaxed);
@@ -49947,7 +51341,6 @@ inline void kh_session_globals_reset() {
     g_flush_frame_pub.store(0, std::memory_order_relaxed);
     kh_reinit(g_stats);
     g_flush_serial.store(0, std::memory_order_relaxed);
-    g_dbg_mode.store(0, std::memory_order_relaxed);
     g_scene_depth_samples = 0;
     g_main_depth_identity.store(nullptr, std::memory_order_relaxed);
     g_main_depth_w = 0;
@@ -50600,7 +51993,6 @@ inline void reset_session_state() {
     kh_infront_frame_reset();
     g_vm_keep_ms = 0;
     g_vm_meshes.clear();
-    g_dbg_mode.store(0, std::memory_order_relaxed);
     g_ao_strength_bits.store(0x3F800000u, std::memory_order_relaxed);   // KH_SSAO: on, 1.0.
     g_ao_dist_bits.store(0x3F000000u, std::memory_order_relaxed);       // Radius 0.5 m.
 

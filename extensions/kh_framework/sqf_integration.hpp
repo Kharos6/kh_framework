@@ -2819,7 +2819,15 @@ static game_value stt_stop_capture_sqf() {
     }
 }
 
+// KH_PLAYER_ONLY: the HTML UI (html*) and the renderer (the SQF COMMAND REFERENCE in
+// rendering_integration.hpp) exist only where there is an interface - framework.hpp's g_is_player
+// (hasInterface). On a dedicated server or a headless client each of their commands returns its empty
+// value at once - no parse, no report, nothing started: '' for a STRING, false for a BOOL, [] for an
+// ARRAY, nil for htmlGetJsVariable.
+static bool kh_gfx_off() { return !g_is_player; }
+
 static game_value ui_create_html_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    if (kh_gfx_off()) return game_value("");   // KH_PLAYER_ONLY.
     try {
         std::string html_content = left_arg;
 
@@ -2843,6 +2851,7 @@ static game_value ui_create_html_sqf(game_value_parameter left_arg, game_value_p
 }
 
 static game_value ui_open_html_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    if (kh_gfx_off()) return game_value("");   // KH_PLAYER_ONLY.
     try {
         std::string filename = left_arg;
 
@@ -2870,6 +2879,7 @@ static game_value ui_open_html_sqf(game_value_parameter left_arg, game_value_par
 }
 
 static game_value ui_close_html_sqf(game_value_parameter args) {
+    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
     try {
         std::string doc_id = args;
 
@@ -2885,6 +2895,7 @@ static game_value ui_close_html_sqf(game_value_parameter args) {
 }
 
 static game_value ui_set_html_visible_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
     try {
         std::string doc_id = left_arg;
 
@@ -2901,6 +2912,7 @@ static game_value ui_set_html_visible_sqf(game_value_parameter left_arg, game_va
 }
 
 static game_value ui_get_open_documents_sqf() {
+    if (kh_gfx_off()) return game_value(auto_array<game_value>());   // KH_PLAYER_ONLY.
     try {
         auto docs = UIFramework::instance().get_open_documents();
         auto_array<game_value> result;
@@ -2918,6 +2930,7 @@ static game_value ui_get_open_documents_sqf() {
 }
 
 static game_value ui_is_initialized_sqf() {
+    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
     try {
         return game_value(UIFramework::instance().is_initialized());
     } catch (const std::exception& e) {
@@ -2927,6 +2940,7 @@ static game_value ui_is_initialized_sqf() {
 }
 
 static game_value ui_execute_js_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
     try {
         std::string doc_id = left_arg;
 
@@ -2948,6 +2962,7 @@ static game_value ui_execute_js_sqf(game_value_parameter left_arg, game_value_pa
 }
 
 static game_value ui_set_js_variable_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
     try {
         std::string doc_id = left_arg;
 
@@ -2980,6 +2995,7 @@ static game_value ui_set_js_variable_sqf(game_value_parameter left_arg, game_val
 }
 
 static game_value ui_get_js_variable_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    if (kh_gfx_off()) return game_value();   // KH_PLAYER_ONLY.
     try {
         std::string doc_id = left_arg;
 
@@ -3002,6 +3018,7 @@ static game_value ui_get_js_variable_sqf(game_value_parameter left_arg, game_val
 }
 
 static game_value ui_set_position_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
     try {
         std::string doc_id = left_arg;
 
@@ -3029,6 +3046,7 @@ static game_value ui_set_position_sqf(game_value_parameter left_arg, game_value_
 }
 
 static game_value ui_set_opacity_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
     try {
         std::string doc_id = left_arg;
 
@@ -3045,6 +3063,7 @@ static game_value ui_set_opacity_sqf(game_value_parameter left_arg, game_value_p
 }
 
 static game_value ui_set_size_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
     try {
         std::string doc_id = left_arg;
 
@@ -3077,6 +3096,7 @@ static game_value ui_set_size_sqf(game_value_parameter left_arg, game_value_para
 }
 
 static game_value ui_set_z_order_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
+    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
     try {
         std::string doc_id = left_arg;
 
@@ -3093,6 +3113,7 @@ static game_value ui_set_z_order_sqf(game_value_parameter left_arg, game_value_p
 }
 
 static game_value ui_bring_to_front_sqf(game_value_parameter args) {
+    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
     try {
         std::string doc_id = args;
 
@@ -3108,6 +3129,7 @@ static game_value ui_bring_to_front_sqf(game_value_parameter args) {
 }
 
 static game_value ui_send_to_back_sqf(game_value_parameter args) {
+    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
     try {
         std::string doc_id = args;
 
@@ -3123,6 +3145,7 @@ static game_value ui_send_to_back_sqf(game_value_parameter args) {
 }
 
 static game_value ui_reload_html_sqf(game_value_parameter args) {
+    if (kh_gfx_off()) return game_value("");   // KH_PLAYER_ONLY.
     try {
         std::string doc_id = args;
 
@@ -6450,7 +6473,9 @@ static bool kh_rv_bone_pair(const game_value& v, game_value& out_obj,
 //
 // addRender3D [[x,y,zASL], rotation, mesh]. Everything else - size, color,
 // mode, sceneRead, effect, params, band, blend, duration, lit, twoSided,
-// lodLock, inFront, casterOnly, clothSimulation, physicsCollider, visible, material,
+// lodLock, inFront, casterOnly, castShadow, receiveShadow, occluder, clothSimulation,
+// physicsCollider, visible,
+// material,
 // attachPosition, attachRotation -
 // is an updateRender3D
 // property. A spawned mesh starts as: size 1 (the mesh's native dimensions),
@@ -6459,6 +6484,7 @@ static bool kh_rv_bone_pair(const game_value& v, game_value& out_obj,
 // culled), lodLock false. Aspect ratio is always preserved - there is no box
 // fit, so a model is never squashed to a cube.
 static game_value add_render3d_sqf(game_value_parameter args) {
+    if (kh_gfx_off()) return game_value("");   // KH_PLAYER_ONLY.
     try {
         auto& arr = args.to_array();
         std::string err;
@@ -6802,10 +6828,11 @@ static bool kh_rv_cloth_sim(const game_value& val, RenderIntegration::RenderObje
     }
     obj.cloth = khcs_c;
     obj.cloth_sim = khcs_on;
-    // A simulated mesh is LOD-LOCKED, and this is not a preference. The
-    // decimated levels are separate vertices at quadric-optimal positions with
-    // no counterpart in level 0, so the simulation cannot move them - a cloth
-    // that dropped a level would snap back to its rest pose mid-swing.
+    // A simulated mesh is LOD-LOCKED, and this is not a preference. A
+    // decimated level shares most of its vertices with level 0 but has its
+    // own (quadric-placed, or carrying other attributes), which the simulation
+    // does not move - a cloth that dropped a level would tear mid-swing, its
+    // own vertices at rest. The lodLock setter refuses to clear it.
     if (khcs_on) obj.lod_lock = true;
     // KH_SKEL: a skeletal mesh that simulates is drawn by the cloth, its bones
     // guiding what kh_cloth_pin holds (kh_cloth_guide_prep), until cloth is
@@ -7047,7 +7074,7 @@ static bool kh_rv_chain_sim(const game_value& val, RenderIntegration::RenderObje
     if (!R::kh_skel_chain_rebind(handle, obj, err)) return false;
     const bool khch_was = obj.chain_sim;
     obj.chain_sim = khch_on;
-    // LOD-locked for the cloth's reason: the decimated levels' vertices are
+    // LOD-locked for the cloth's reason: a decimated level's own vertices are
     // not the skeleton's to move.
     if (khch_on) obj.lod_lock = true;
     // A plain object is drawn at its authored size while it simulates (the
@@ -7290,13 +7317,42 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
     if (prop == "effect")   return kh_rv_effect(val, obj, false, err);
     if (prop == "lit" || prop == "lighting") return kh_rv_lit(val, obj, err);
     if (prop == "twosided") { bool b = obj.two_sided; if (!kh_rv_bool(val, b, "twoSided", err)) return false; obj.two_sided = b; return true; }
-    if (prop == "lodlock")  { bool b = obj.lod_lock;  if (!kh_rv_bool(val, b, "lodLock", err))  return false; obj.lod_lock = b;  return true; }
+    if (prop == "lodlock") {
+        bool b = obj.lod_lock;
+        if (!kh_rv_bool(val, b, "lodLock", err)) return false;
+        // KH_LOD_FORCED: a skeletal binding, a cloth and a chain draw level 0 alone - a decimated level's own
+        // vertices are not the skin's or the solver's to move - so the lock they set is not the script's to clear.
+        if (!b && (obj.skel || obj.cloth_sim || obj.chain_sim)) {
+            err = "lodLock stays on while a skeletal binding, clothSimulation or chainSimulation is on";
+            return false;
+        }
+        obj.lod_lock = b;
+        return true;
+    }
     if (prop == "infront")  { bool b = obj.in_front;  if (!kh_rv_bool(val, b, "inFront", err))  return false; obj.in_front = b;  return true; }   // KH_INFRONT.
+    if (prop == "castshadow") {   // KH_SHADOW_SWITCH.
+        bool b = obj.cast_shadow;
+        if (!kh_rv_bool(val, b, "castShadow", err)) return false;
+        obj.cast_shadow = b;
+        return true;
+    }
+    if (prop == "receiveshadow") {   // KH_SHADOW_SWITCH.
+        bool b = obj.receive_shadow;
+        if (!kh_rv_bool(val, b, "receiveShadow", err)) return false;
+        obj.receive_shadow = b;
+        return true;
+    }
+    if (prop == "occluder") {   // KH_OCC_FORCE.
+        bool b = obj.occluder;
+        if (!kh_rv_bool(val, b, "occluder", err)) return false;
+        obj.occluder = b;
+        return true;
+    }
     if (prop == "clothsimulation") return kh_rv_cloth_sim(val, obj, err);
     if (prop == "physicscollider")   return kh_rv_physics_collider(val, obj, err);
     if (prop == "chainsimulation") return kh_rv_chain_sim(val, obj, handle, err);
     if (prop == "simulationlod") return kh_rv_sim_lod(val, obj, err);   // KH_SIM_LOD.
-    err = "unknown property (position | attachPosition | size | rotation | attachRotation | mesh | material | mode | sceneRead | effect | params | lit | twoSided | lodLock | inFront | casterOnly | clothSimulation | physicsCollider | chainSimulation | simulationLod | color | visible | blend | band | duration)";
+    err = "unknown property (position | attachPosition | size | rotation | attachRotation | mesh | material | mode | sceneRead | effect | params | lit | twoSided | lodLock | inFront | casterOnly | castShadow | receiveShadow | occluder | clothSimulation | physicsCollider | chainSimulation | simulationLod | color | visible | blend | band | duration)";
     return false;
 }
 
@@ -7433,6 +7489,7 @@ static game_value kh_update_many(const char* cmd, bool want_fullscreen, const ga
 }
 
 static game_value update_render3d_sqf(game_value_parameter args) {
+    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
     try {
         return kh_update_many("updateRender3D", false, args);
     } catch (const std::exception& e) {
@@ -7445,6 +7502,7 @@ static game_value update_render3d_sqf(game_value_parameter args) {
 }
 
 static game_value update_post_fx_sqf(game_value_parameter args) {
+    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
     try {
         return kh_update_many("updatePostFX", true, args);
     } catch (const std::exception& e) {
@@ -7464,6 +7522,7 @@ static game_value update_post_fx_sqf(game_value_parameter args) {
 // The type check stays reported: a non-string is a wrong call, not a missing
 // handle.
 static game_value remove_render_handler_sqf(game_value_parameter arg) {
+    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
     try {
         if (arg.type_enum() != game_data_type::STRING) {
             kh_rv_report("removeRenderHandler", "handle must be a string (removeAllRenderHandlers clears every object)");
@@ -7490,6 +7549,7 @@ static game_value remove_render_handler_sqf(game_value_parameter arg) {
 // object (mesh and post-processing pass) and every physics affector. Nullary,
 // so it cannot be reached by an unset variable. Returns true.
 static game_value remove_all_render_handlers_sqf() {
+    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
     try {
         RenderIntegration::clear_render_objects();
         RenderIntegration::kh_aff_clear();   // KH_AFFECTOR: every handle removeRenderHandler takes.
@@ -7507,6 +7567,7 @@ static game_value remove_all_render_handlers_sqf() {
 // the khr_ handles (meshes and passes) in creation order, then the khpa_
 // handles (physics affectors, expired ones reaped first) in creation order.
 static game_value all_render_handlers_sqf() {
+    if (kh_gfx_off()) return game_value(auto_array<game_value>());   // KH_PLAYER_ONLY.
     try {
         std::vector<std::string> khah_h;
         RenderIntegration::render_object_handles(khah_h);
@@ -7726,6 +7787,7 @@ static bool kh_aff_parse(const KhAffSchema& khap_s, const game_value& khap_v,
 }
 
 static game_value add_physics_affector_sqf(game_value_parameter args) {
+    if (kh_gfx_off()) return game_value("");   // KH_PLAYER_ONLY.
     try {
         auto& arr = args.to_array();
         if (arr.size() != 2 || arr[0].type_enum() != game_data_type::STRING) {
@@ -7832,6 +7894,7 @@ static bool kh_aff_update_one(const game_value& triple, int index) {
 }
 
 static game_value update_physics_affector_sqf(game_value_parameter args) {
+    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
     try {
         auto& arr = args.to_array();
         if (arr.size() == 0) {
@@ -7856,6 +7919,7 @@ static game_value update_physics_affector_sqf(game_value_parameter args) {
 // addPostFX [effect, params?, [r,g,b,a]?, band?, blend?, affectUI?, duration?]
 // Optional slots skip on nil ("" for blend / affectUI).
 static game_value add_postfx_sqf(game_value_parameter args) {
+    if (kh_gfx_off()) return game_value("");   // KH_PLAYER_ONLY.
     try {
         auto& arr = args.to_array();
         std::string err;
@@ -7907,6 +7971,7 @@ static game_value add_postfx_sqf(game_value_parameter args) {
 // at every mission start. The dynamic lights still light the meshes either
 // way; only the shadows they cast (onto our meshes and onto the world) follow.
 static game_value allow_dynamic_shadows_sqf(game_value_parameter arg) {
+    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
     try {
         if (arg.type_enum() != game_data_type::BOOL) {
             kh_rv_report("allowDynamicShadows", "expected true or false");
@@ -7921,6 +7986,7 @@ static game_value allow_dynamic_shadows_sqf(game_value_parameter arg) {
 }
 
 static game_value set_ssgi_scale_sqf(game_value_parameter arg) {
+    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
     try {
         if (arg.type_enum() != game_data_type::SCALAR) {
             kh_rv_report("setSsgiScale", "scale must be a number (0.25 .. 2)");
@@ -7946,6 +8012,7 @@ static game_value set_ssgi_scale_sqf(game_value_parameter arg) {
 // in metres, clamped 0.05..5 (omitted = unchanged; default 0.5). Global;
 // applies from the next injected frame.
 static game_value set_render_ao_sqf(game_value_parameter arg) {
+    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
     try {
         float khao_s = 1.0f, khao_d = 0.5f;
         bool khao_has_d = false;
@@ -8001,6 +8068,7 @@ static game_value set_render_ao_sqf(game_value_parameter arg) {
 // and the dynamic-light state (dl prefix), copied under one graphics-lock
 // acquisition (the render thread parked) and formatted after release.
 static game_value reset_render_stats_sqf() {
+    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
     try {
         // Best effort park so the zeroing cannot tear against a render-thread
         // increment; a lock that never comes still resets (the counters are
@@ -8019,6 +8087,7 @@ static game_value reset_render_stats_sqf() {
 }
 
 static game_value get_render_stats_sqf() {
+    if (kh_gfx_off()) return game_value(auto_array<game_value>());   // KH_PLAYER_ONLY.
     try {
         auto kv = [](const char* k, float v) {
             auto_array<game_value> pair;
@@ -8209,6 +8278,8 @@ static game_value get_render_stats_sqf() {
             out.push_back(kv("skinBoundWorst", khsg_r));
         }
         out.push_back(kv("injectedMeshes", static_cast<float>(s.composite_meshes)));
+        out.push_back(kv("occluders", static_cast<float>(s.vis_occluders)));        // KH_OCC_STATS.
+        out.push_back(kv("occludedMeshes", static_cast<float>(s.vis_occluded)));
         out.push_back(kv("texturedDraws", static_cast<float>(s.textured_draws)));
         out.push_back(kv("fbxImports", static_cast<float>(s.fbx_imports)));
         out.push_back(kv("meshesReleased", static_cast<float>(s.meshes_released)));
@@ -8220,7 +8291,7 @@ static game_value get_render_stats_sqf() {
         // "<zone>N" its entry count (hookMap counts maps and unmaps; the w*
         // zones are worker-microseconds summed across the pool). For every GPU
         // zone, "<zone>Us" is the GPU interval of its last run in the cycle
-        // two clears back (timestamp queries read without a stall).
+        // six clears back (timestamp queries read without a stall).
         for (uint32_t khps_z = 0; khps_z < RenderIntegration::KHP_ZONE_N; ++khps_z) {
             const std::string khps_n = RenderIntegration::g_prof_zone_name[khps_z];
             out.push_back(kv((khps_n + "Us").c_str(), static_cast<float>(RenderIntegration::g_prof_us_pub[khps_z].load(std::memory_order_relaxed))));
@@ -8319,11 +8390,12 @@ static game_value get_render_stats_sqf() {
             out.push_back(kva("dlsSlots", std::move(slots)));
         }
         {   // KH_VOL_REPLAY: [merged frames, fallback frames, refused passes, ring wraps captured, scissored frames,
-            // full-screen frames, mirror merged, mirror fallback (KH_MIR_REPLAY)].
+            // full-screen frames, mirror merged, mirror fallback, mirror idle (KH_MIR_REPLAY), uncovered passes
+            // (KH_REPLAY_SCISSOR), constant snapshots copied on the GPU, from the CPU (KH_REPLAY_CPUCB)].
             const auto& c = RenderIntegration::g_rp_c;
             auto_array<game_value> a;
             for (uint64_t v : { c.merged, c.fallback, c.refused, c.splits, c.scissored, c.fullscreen, c.mir_merged,
-                                c.mir_fallback })
+                                c.mir_fallback, c.mir_idle, c.uncovered, c.cb_gpu, c.cb_cpu })
                 a.push_back(game_value(static_cast<float>(v)));
             out.push_back(kva("stencilReplay", std::move(a)));
         }
@@ -8353,6 +8425,7 @@ static game_value get_render_stats_sqf() {
 // [r,g,b,a]?, shape?, blend?, duration?, inverse?]. Optional slots skip on nil
 // ("" for blend).
 static game_value add_local_postfx_sqf(game_value_parameter args) {
+    if (kh_gfx_off()) return game_value("");   // KH_PLAYER_ONLY.
     try {
         auto& arr = args.to_array();
         std::string err;
@@ -8423,6 +8496,7 @@ static game_value add_local_postfx_sqf(game_value_parameter args) {
 // no-op when no UI-affecting passes exist. Returns bool: true if passes were
 // queued this call.
 static game_value flush_ui_render_sqf() {
+    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
 
     try {
         RenderIntegration::ensure_ui_driver();   // Explicit UI-render demand enables the driver.

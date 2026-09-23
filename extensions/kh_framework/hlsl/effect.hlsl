@@ -11,12 +11,31 @@ SamplerState khsgSamp : register(s2);   // Linear clamp, bound only for the reso
 
 #if MSAA_DEPTH
 Texture2DMS<float> depthTex : register(t1);
-float LoadDepthPS(int2 px) { return depthTex.Load(px, 0); }
+float LoadDepthRaw(int2 px) { return depthTex.Load(px, 0); }
 #else
 // Two-plane snapshot; declaration only.
 Texture2D<float2> depthTex : register(t1);
-float LoadDepthPS(int2 px) { return depthTex.Load(int3(px, 0)).x; }
+float LoadDepthRaw(int2 px) { return depthTex.Load(int3(px, 0)).x; }
 #endif
+// KH_NEARZ_MARK: our near-z fragments nearer than the near plane are written
+// into a gap below the viewport's MinDepth that this pair reads as a flat wall
+// at the near distance. The marker (t37, armed by shadowMeta2.x) holds (raw,
+// true distance) where a drawer of ours wrote one this cycle; where its raw is
+// still the live raw, that distance comes back re-encoded through this pass's
+// own pair, so LinDepth (and every reader of this load) gets the true one. Any
+// other pixel - the hands drawn over since, the world - loads as it is.
+Texture2D<float2> khNzMark : register(t37);
+float LoadDepthPS(int2 px)
+{
+    const float khnz_r = LoadDepthRaw(px);
+    if (shadowMeta2.x > 0.5f) {
+        const float2 khnz_m = khNzMark.Load(int3(px, 0));
+        if (khnz_m.x > 0.0f && khnz_m.x == khnz_r && khnz_m.y > 0.0f) {
+            return depthParams.z + (depthParams.w - depthParams.z) * (depthParams.x + depthParams.y / khnz_m.y);
+        }
+    }
+    return khnz_r;
+}
 
 Texture2D<float> khArbSnap : register(t2);
 

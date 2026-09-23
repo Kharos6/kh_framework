@@ -191,6 +191,98 @@ static bool ensure_minhook() {
     return true;
 }
 
+// KH_SHARED_PRESENT: IDXGISwapChain::Present is one function per DXGI
+// implementation and MinHook takes one hook per target, so a second module's
+// MH_CreateHook on it fails (MH_ERROR_ALREADY_CREATED) and one module's
+// MH_RemoveHook would take the other's hook with it. Every module subscribes
+// here instead. kh_present_hook detours each distinct target a module resolved
+// (at most KH_PRESENT_TARGETS; repeat calls are no-ops) and never removes it
+// before MH_Uninitialize; the detour calls the subscribers in slot order (none
+// on a DXGI_PRESENT_TEST call), then the original once. Slots: the renderer
+// first (its UI passes composite onto the engine's frame), then the HTML
+// overlay (UIFramework, drawn on top). A
+// subscriber must not throw. Clearing a slot stops later calls; one already
+// made may still be running, so each module keeps its own in-flight guard.
+// The original runs under UIFramework's long-standing rule: a structured
+// exception inside it (D3D teardown) reads as S_OK.
+// KH_OVERLAY_BRACKET: the renderer hooks the game's immediate context, and
+// another module's present-time draws on it are not the engine's: the
+// dispatcher calls the begin / end pair the renderer registered around every
+// subscriber but the renderer's own, and the renderer excludes those draws as
+// it excludes its own present-time draws.
+enum KhPresentSlot : int { KH_PRESENT_SLOT_RENDER = 0, KH_PRESENT_SLOT_UI = 1, KH_PRESENT_SLOTS = 2 };
+typedef void (*KhSharedPresentCb)(IDXGISwapChain*, UINT, UINT);
+typedef HRESULT (STDMETHODCALLTYPE* KhSharedPresentFn)(IDXGISwapChain*, UINT, UINT);
+static std::atomic<KhSharedPresentCb> g_kh_present_cb[KH_PRESENT_SLOTS] = {};
+static std::atomic<int (*)()> g_kh_overlay_begin{nullptr};
+static std::atomic<void (*)(int)> g_kh_overlay_end{nullptr};
+static constexpr int KH_PRESENT_TARGETS = 2;
+static void* g_kh_present_target[KH_PRESENT_TARGETS] = {};   // Under g_kh_present_mu.
+static KhSharedPresentFn g_kh_present_orig[KH_PRESENT_TARGETS] = {};   // Set before the target is enabled.
+static std::mutex g_kh_present_mu;
+
+static void kh_present_dispatch(IDXGISwapChain* khpd_sc, UINT khpd_sync, UINT khpd_flags) {
+    for (int khpd_i = 0; khpd_i < KH_PRESENT_SLOTS; ++khpd_i) {
+        const KhSharedPresentCb khpd_cb = g_kh_present_cb[khpd_i].load(std::memory_order_acquire);
+        if (!khpd_cb) continue;
+        int (*const khpd_b)() = khpd_i != KH_PRESENT_SLOT_RENDER
+                                ? g_kh_overlay_begin.load(std::memory_order_acquire) : nullptr;
+        void (*const khpd_e)(int) = khpd_b ? g_kh_overlay_end.load(std::memory_order_acquire) : nullptr;
+        const bool khpd_br = khpd_b && khpd_e;
+        const int khpd_tok = khpd_br ? khpd_b() : 0;
+        khpd_cb(khpd_sc, khpd_sync, khpd_flags);
+        if (khpd_br) khpd_e(khpd_tok);
+    }
+}
+template <int KhK>
+static HRESULT STDMETHODCALLTYPE kh_present_detour(IDXGISwapChain* khpt_sc, UINT khpt_sync, UINT khpt_flags) {
+    // DXGI_PRESENT_TEST presents nothing (the engine issues one mid-UI-pass,
+    // KH_PRESENT_TEST); every subscriber draws, so none runs on a test.
+    if (!(khpt_flags & DXGI_PRESENT_TEST)) kh_present_dispatch(khpt_sc, khpt_sync, khpt_flags);
+    const KhSharedPresentFn khpt_orig = g_kh_present_orig[KhK];
+    if (!khpt_orig) return E_FAIL;
+    __try {
+        return khpt_orig(khpt_sc, khpt_sync, khpt_flags);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return S_OK;
+    }
+}
+// MH_OK when khph_addr is detoured (now or before); -1 when MinHook is
+// unavailable, -2 when every target slot is taken, else the failing MH_STATUS
+// (a created hook that would not enable is removed again).
+static int kh_present_hook(void* khph_addr) {
+    if (!khph_addr) return -2;
+    if (!ensure_minhook()) return -1;
+    std::lock_guard<std::mutex> khph_l(g_kh_present_mu);
+    for (int khph_k = 0; khph_k < KH_PRESENT_TARGETS; ++khph_k) {
+        if (g_kh_present_target[khph_k] == khph_addr) return MH_OK;
+    }
+    for (int khph_k = 0; khph_k < KH_PRESENT_TARGETS; ++khph_k) {
+        if (g_kh_present_target[khph_k]) continue;
+        void* const khph_det = khph_k == 0 ? reinterpret_cast<void*>(&kh_present_detour<0>)
+                                           : reinterpret_cast<void*>(&kh_present_detour<1>);
+        MH_STATUS khph_st = MH_CreateHook(khph_addr, khph_det, reinterpret_cast<void**>(&g_kh_present_orig[khph_k]));
+        if (khph_st != MH_OK) return static_cast<int>(khph_st);
+        khph_st = MH_EnableHook(khph_addr);
+        if (khph_st != MH_OK) {
+            MH_RemoveHook(khph_addr);
+            g_kh_present_orig[khph_k] = nullptr;
+            return static_cast<int>(khph_st);
+        }
+        g_kh_present_target[khph_k] = khph_addr;
+        return MH_OK;
+    }
+    return -2;
+}
+static void kh_present_subscribe(KhPresentSlot khps_slot, KhSharedPresentCb khps_cb) {
+    g_kh_present_cb[khps_slot].store(khps_cb, std::memory_order_release);
+}
+static void kh_present_overlay_register(int (*khpo_begin)(), void (*khpo_end)(int)) {
+    g_kh_overlay_end.store(khpo_end, std::memory_order_release);
+    g_kh_overlay_begin.store(khpo_begin, std::memory_order_release);
+}
+
 // Detect explicitly dedicated server
 static bool get_machine_is_server() {
     static bool initialized = false;

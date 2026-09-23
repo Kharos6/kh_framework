@@ -3,8 +3,9 @@
 // unit's shader cache key. C++ twins: KhSsaoCb, kh_ssao_pre, kh_ssao_post, KH_SSAO_MARK.
 //
 // Five draws after a drawer's depth-writing draws (the world injection's on
-// the render thread, or the flush's late ones under the park), plus the
-// C++ side's eraser draw. The term is computed on a HALF-RESOLUTION grid,
+// the render thread, or the flush's late ones under the park), plus - whether
+// or not the term runs - the near-plane marker's draw and the C++ side's
+// eraser draw. The term is computed on a HALF-RESOLUTION grid,
 // as the SSGI's gather is: the cost is the meshes' screen coverage, and
 // the term is a smooth field the full-resolution apply upsamples
 // depth-guided (effect 24's recipe).
@@ -22,6 +23,10 @@
 //                 (dest.rgb *= src.rgb) at our samples alone: the C++ side
 //                 binds the read-only depth view with a stencil test on the
 //                 mark, so unmarked pixels never run it.
+//   PSSsaoNearMark - full res, while the mark stands, for a pass that routes
+//                 near-z alone: (raw, true distance) at this drawer's gap
+//                 pixels into the near-plane marker the late effect chain
+//                 reads (KH_NEARZ_MARK; see the entry point).
 //   (eraser)    - no shader: a stencil-only draw sets the mark back to 0.
 //
 // "Ours" is the one test every pass takes, and it is the STENCIL's answer
@@ -37,7 +42,9 @@
 // darkens the mesh leaning on it. The engine's own AO stays the engine's.
 //
 // Depth is metres along the view axis from the injection's own pair
-// (KhSceneMeters's recipe) and the viewport range the pass drew in; the view
+// (KhSceneMeters's recipe) and the viewport range the pass drew in - or, for
+// a near-z routed fragment of ours nearer than the pass's near plane, from
+// the route's own depth ramp (KH_SSAO_NEARZ, KhSaMetersAt); the view
 // position is rebuilt from the pixel and that depth (KhgVpos's recipe). The
 // normal is taken twice: over a 1 px baseline from the nearer neighbour on
 // each screen axis (silhouette-safe: the cliff's slope is never the pixel's),
@@ -107,7 +114,8 @@ cbuffer CBSsao : register(b0)
     // y = top, z = right, w = bottom, exclusive): a term texel outside it was
     // not written this frame and must not be read.
     float4 khsaRect;
-    float4 khsaHalf;   // x, y = the half-resolution grid's width and height (px); z / w unused.
+    float4 khsaHalf;   // x, y = the half-resolution grid's width and height (px); z = the near-z route's near
+                       // (0 = no route this pass), w = its gap floor (KH_SSAO_NEARZ).
 };
 
 #if MSAA_DEPTH
@@ -228,11 +236,42 @@ bool KhSaOurs(int2 khso_p)
     return KhSaMark(khso_p) == 1u;
 }
 
+// KH_SSAO_NEARZ: the depth of full pixel p in metres. A near-z routed draw of
+// ours writes each fragment nearer than the pass's near plane on a straight
+// line into the gap below the viewport's MinDepth (PSComposite's KH_ARB_DEPTH
+// ramp: raw = gap + (MinDepth - gap) * z / near), which the projection reads
+// as about the near distance for every one of them - a flat wall, occluding
+// nothing. A raw in that gap on a pixel of ours decodes through the ramp
+// instead; every other raw, and every raw of a pixel that is not ours (the
+// engine's hands can lie in the gap when the flush draws late), decodes as
+// before. khsaHalf.z = the route's near (0 = none), khsaHalf.w = the gap's
+// floor; the gap's top is khsaVp.x.
+float KhSaMetersAt(int2 khsz_p, float khsz_raw)
+{
+    if (khsaHalf.z > 0.0f && khsz_raw < khsaVp.x && khsz_raw >= khsaHalf.w && KhSaOurs(khsz_p)) {
+        return max(khsaHalf.z * (khsz_raw - khsaHalf.w) / max(khsaVp.x - khsaHalf.w, 1.0e-9f), 1.0e-4f);
+    }
+    return KhSaMeters(khsz_raw);
+}
+
+// KH_NEARZ_MARK: (raw depth, true distance) at a full pixel of ours in the
+// near-z gap - KhSaMetersAt's own test and decode - into the near-plane
+// marker the late effect chain reads (effect.hlsl, LoadDepthPS); every other
+// pixel is discarded and keeps what the marker held.
+float2 PSSsaoNearMark(float4 pos : SV_Position) : SV_Target
+{
+    const int2 khnm_p = int2(pos.xy);
+    const float khnm_raw = KhSaLive(khnm_p);
+    if (!(khsaHalf.z > 0.0f && khnm_raw < khsaVp.x && khnm_raw >= khsaHalf.w && KhSaOurs(khnm_p))) discard;
+    return float2(khnm_raw, KhSaMetersAt(khnm_p, khnm_raw));
+}
+
 // Half res: sample 0 of the live depth at full pixel 2p, in metres - the
 // conversion every half-grid read took, taken once (R32_FLOAT keeps it exact).
 float PSSsaoDepth(float4 pos : SV_Position) : SV_Target
 {
-    return KhSaMeters(KhSaLive(KhSaClampFull(int2(pos.xy) * 2)));
+    const int2 khsd_p = KhSaClampFull(int2(pos.xy) * 2);
+    return KhSaMetersAt(khsd_p, KhSaLive(khsd_p));   // KH_SSAO_NEARZ.
 }
 
 // Half res: the term at half pixel hp (full pixel 2hp).
@@ -370,7 +409,7 @@ float4 PSSsaoApply(float4 pos : SV_Position) : SV_Target
 {
     const int2 khsq_p = int2(pos.xy);
     if (!KhSaOurs(khsq_p)) discard;   // The multiply blend leaves the pixel.
-    const float khsq_z = KhSaMeters(KhSaLive(khsq_p));
+    const float khsq_z = KhSaMetersAt(khsq_p, KhSaLive(khsq_p));   // KH_SSAO_NEARZ.
     const int2 khsq_hp = khsq_p >> 1;
     const float khsq_rad = max(khsaCtl.x, khsq_z * KH_SA_RANGE_FRAC);
     const float khsq_spx = khsq_rad * khsaProj.y * 0.5f * khsaHalf.y / max(khsq_z, 1.0e-3f);

@@ -545,8 +545,16 @@ float4 KhDlsWorldMain(VSOut i, out float3 khw_wo, out float khw_zo)
     const float2 khw_dims = float2(castView[1].z, castView[1].w);
     if (khw_dims.x < 2.0f || khw_dims.y < 2.0f) return float4(1.0f, 1.0f, 1.0f, 1.0f);
     const float khw_zl = KhCastZl(i.pos.xy, khw_dims);
-    if (!(khw_zl > 0.05f) || khw_zl > 8000.0f) return float4(1.0f, 1.0f, 1.0f, 1.0f);
     const float3 khw_w = KhCastWorld(i.pos.xy, khw_dims, khw_zl);
+    // KH_DLSW_GRAD: the reconstructed point's screen gradients, taken here -
+    // before every per-pixel exit (the depth check, the range fade, the reach
+    // test, the normal's refusal, the mask's coverage), so no lane of the quad
+    // has left: the normal's fallback and the light loop's footprint
+    // (KhDlsWorldFactor's khw_fwp) read them. A pixel the depth check turns away
+    // still lends its point to its neighbours' gradients, as a helper lane would.
+    const float3 khw_gx = ddx(khw_w);
+    const float3 khw_gy = ddy(khw_w);
+    if (!(khw_zl > 0.05f) || khw_zl > 8000.0f) return float4(1.0f, 1.0f, 1.0f, 1.0f);
     khw_wo = khw_w;
     khw_zo = khw_zl;
 
@@ -581,8 +589,8 @@ float4 KhDlsWorldMain(VSOut i, out float3 khw_wo, out float khw_zo)
         if (!khw_reach) return float4(1.0f, 1.0f, 1.0f, 1.0f);
     }
 
-    float3 khw_dx = ddx(khw_w);
-    float3 khw_dy = ddy(khw_w);
+    float3 khw_dx = khw_gx;   // KH_DLSW_GRAD: taken above.
+    float3 khw_dy = khw_gy;
     float khw_nrel = 1.0f;
 
     {
@@ -645,7 +653,8 @@ float4 KhDlsWorldMain(VSOut i, out float3 khw_wo, out float khw_zo)
         khw_cov = KhDlsMaskCov(i.pos.xy, mirMeta.y, mirMeta.z, khw_zl);
         if (khw_cov >= 0.999f) return float4(1.0f, 1.0f, 1.0f, 1.0f);
     }
-    float3 khw_f = KhDlsWorldFactor(khw_w, khw_n, 0.0f, khw_nrel);
+    float3 khw_f = KhDlsWorldFactor(khw_w, khw_n, 0.0f, khw_nrel,
+                                    length(abs(khw_gx) + abs(khw_gy)));   // KH_DLSW_GRAD: fwidth(khw_w).
     khw_f = lerp(khw_f, float3(1.0f, 1.0f, 1.0f), khw_cov);
     return float4(khw_f, 1.0f);
 }
@@ -896,6 +905,9 @@ static const float KH_CAST_SNAP_UP = 0.5f;
 
     float hit = 0.0f;
     if (khcOnMap) {
+        // KH_SUN_GRAD: the cast chain's gradients, here - past the snap, before
+        // the per-pixel tests below (khcOnMap is a CB lane: uniform).
+        const KhSunCastGrad khcG = KhSunCastGradAt(pw);
         // KH_CAST_PRE: the exact test, survivors only (near_ok is false
         // wherever the pre-test refused - see the snap).
         bool near_ok = khcPre ? KhCastNearOk(pw, 0.0f) : false;
@@ -905,7 +917,7 @@ static const float KH_CAST_SNAP_UP = 0.5f;
         // reconstructs to ~the camera position and MIN-darkens the whole screen
         // whenever the player stands near a caster.
         if (near_ok && khcNearOk) {
-            hit = SunShadowOcclusion(pw);   // Near floor: whole-texture verdict above.
+            hit = SunShadowOcclusion(pw, khcG);   // Near floor: whole-texture verdict above.
             // The fade is measured from the FROZEN fire camera (castMat *
             // -castView[0]), the same view pw came from, not sunOrigin (this
             // frame's camera): a frame of motion apart, the band moves under
@@ -978,7 +990,7 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
     i.nrm *= khFs;
     KhObjLoad(i.iobj0, i.iobj1);   // KH_OBJBUF: the per-object lanes, per draw or per instance.
     KhLodDitherCut(i.pos.xy, khObjDither);
-    ClipEdgeSliver(i.wpos, i.nrm);   // Degenerate edge-on fragments (fireflies).
+    ClipEdgeSliver(i.wpos);   // Degenerate edge-on fragments (fireflies).
     ClipOwnNear(i.pos.w);   // Our own near plane. Twin call.
     if (depthParams.y < -1.0e-3f &&
         depthParams.x + depthParams.y / max(i.pos.w, 1.0e-4f) > 1.0f) discard;
@@ -1077,16 +1089,25 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
 #else
     float3 khShN = normalize(i.nrm);
 #endif
-    if (lighting0.x >= 0.5f && dot(khShN, lighting1.xyz) > 0.01f) {
+    // KH_SUN_GRAD: the self ladder's gradients, taken here - before the N.L gate
+    // below and the ladder's own per-pixel branches - under a condition uniform
+    // in a quad (a CB lane and a per-primitive flat lane). Twin: PSMain /
+    // PSComposite.
+    KhSunSelfGrad khSG = (KhSunSelfGrad)0;
+    if (lighting0.x >= 0.5f && khObjNoRecv < 0.5f) khSG = KhSunSelfGradAt(i.wrel, khBiasN);
+    // KH_SHADOW_SWITCH: with receiveShadow off (khObjNoRecv) no received term
+    // is taken - smf stays 1 where the face turns to the sun and the gate's 0
+    // below still holds where it does not. Twin: PSMain / PSComposite.
+    if (lighting0.x >= 0.5f && dot(khShN, lighting1.xyz) > 0.01f && khObjNoRecv < 0.5f) {
         {
             if (maskMeta.x >= 0.5f) smf = ShadowBandFactor(i.wrel + sunOrigin.xyz);
             else                    smf = ShadowMapFactor(i.wpos);
         }
         // A pixel the received term already darkens to 0 cannot get darker -
         // min(0, x) = 0 - so the self ladder (the costliest term in this
-        // shader) is not consulted for it. A plain if, so fxc's gradient
-        // hoisting applies as it does for the N.L branch.
-        if (smf > 0.0f) smf = min(smf, SunShadowFactorSelf(i.wpos, i.wrel, khBiasN));
+        // shader) is not consulted for it. A plain if: the ladder takes no
+        // gradient of its own (KH_SUN_GRAD - khSG, priced above).
+        if (smf > 0.0f) smf = min(smf, SunShadowFactorSelf(i.wpos, i.wrel, khBiasN, khSG));
         if (maskMeta.w >= 0.5f) {
             // A translucent texel = the blend material's translucent part or a
             // whole translucent object on normal blend (the mirror below
@@ -1119,7 +1140,7 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
             float khStRf = KhSunRangeFade(i.wpos);
             smf *= 1.0f - (1.0f - khStenU) * khStRf;
         }
-    } else if (lighting0.x >= 0.5f) {
+    } else if (lighting0.x >= 0.5f && !(dot(khShN, lighting1.xyz) > 0.01f)) {
         // The gate's refusal is a verdict, not a skip: a lit pixel it leaves at
         // smf = 1 keeps an unshadowed direct term, and at N.L in (0, 0.01] that
         // is HDR sun x 0.01 - a lit line along every crease inside a shadow. An

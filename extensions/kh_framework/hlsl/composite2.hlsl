@@ -71,7 +71,7 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
     i.nrm *= khFs;
     KhObjLoad(i.iobj0, i.iobj1);   // KH_OBJBUF: the per-object lanes, per draw or per instance.
     KhLodDitherCut(i.pos.xy, khObjDither);
-    ClipEdgeSliver(i.wpos, i.nrm);   // Degenerate edge-on fragments (fireflies).
+    ClipEdgeSliver(i.wpos);   // Degenerate edge-on fragments (fireflies).
     ClipOwnNear(i.pos.w);   // Our own near plane. Twin call.
     if (depthParams.y < -1.0e-3f &&
         depthParams.x + depthParams.y / max(i.pos.w, 1.0e-4f) > 1.0f) discard;
@@ -111,7 +111,10 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
                                          : khaD;
         bool  khaNzArm = (khaNzN > 0.0f && khaNzD < khaNzN);
 
-        if (thmParams.w >= 0.5f && khtClear < 1.0e8f) {
+        // KH_ARB_GRAD: the gate is the terrain lane alone (a CB lane: uniform);
+        // the fragment's own terrain data (khtClear) is tested below, past the
+        // probe's gradient.
+        if (thmParams.w >= 0.5f) {
             // Distance-proportional LOD margin: 0.06 is the far-arbiter
             // relative offset; fxParams1.z remains the absolute cap.
             float khaCh = abs(fxParams1.w);
@@ -145,24 +148,34 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
             // judged at the fragment, and the pull is the 0.25 m margin itself.
             const bool khaFixed = (snapCam.w >= 0.5f);
             const float khaFixM = 0.10f;
+            // KH_ARB_GRAD: the terrain probe at the snapshot ray's point - its
+            // height over the heightfield (khaTd) and that height's screen
+            // gradient (the ramp's width) - for every pixel of the quad, in
+            // uniform control flow (fxParams1.w is a CB lane): the ramp reads its
+            // neighbours' heights, and a gradient taken past the per-pixel tests
+            // below reads lanes that left them. The tests read it as they read it
+            // in place.
+            const float khaTol = max(0.15f, thmParams.z * 0.02f);
+            float khaSh = -1.0e6f, khaTd = 0.0f, khaTrw = khaTol;
+            if (fxParams1.w > 0.0f) {
+                float3 khaDir = (i.wpos - khaRayO) / max(khaRayW, 1.0e-4f);   // The snapshot's ray.
+                float khaIdZ = (khaFixed && (khaRefD - khaSz) <= 0.25f + khaTie) ? khaRefD : khaSz;
+                float3 khaSp = khaRayO + khaDir * khaIdZ;
+                khaSh = KhThmHeight(khaSp.xz);
+                khaTd = khaSp.y - khaSh;
+                khaTrw = max(fwidth(khaTd), khaTol);
+            }
             float khaOff = 0.0f;
 
-            if (!khaSc && khaSz < khaRefD + khaTie) {
+            if (khtClear < 1.0e8f && !khaSc && khaSz < khaRefD + khaTie) {
 
                 float khaCap = min(fxParams1.z, i.pos.w * 0.06f) *
                     saturate((khaCh - khtClear) / max(0.3f * khaCh, 1.0f));
                 bool khaTerr = true;
                 float khaTerrW = 1.0f;   // The ramped form of khaTerr.
 
-                if (fxParams1.w > 0.0f) {
-                    float3 khaDir = (i.wpos - khaRayO) / max(khaRayW, 1.0e-4f);   // The snapshot's ray.
-                    float khaIdZ = (khaFixed && (khaRefD - khaSz) <= 0.25f + khaTie) ? khaRefD : khaSz;
-                    float3 khaSp = khaRayO + khaDir * khaIdZ;
-                    float khaSh = KhThmHeight(khaSp.xz);
-                    float khaTol = max(0.15f, thmParams.z * 0.02f);
-                    khaTerr = (khaSh > -1.0e5f) && ((khaSp.y - khaSh) <= khaTol);
-                    float khaTd = khaSp.y - khaSh;
-                    float khaTrw = max(fwidth(khaTd), khaTol);
+                if (fxParams1.w > 0.0f) {   // KH_ARB_GRAD: the probe above.
+                    khaTerr = (khaSh > -1.0e5f) && (khaTd <= khaTol);
                     float khaTe = khaTol + khaTrw;   // The ramp reaches up past the tolerance.
                     khaTerrW = (khaSh > -1.0e5f)
                              ? saturate((khaTe - khaTd) / max(khaTrw, 1.0e-4f))
@@ -275,7 +288,16 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
 #else
     float3 khShN = normalize(i.nrm);
 #endif
-    if (lighting0.x >= 0.5f && dot(khShN, lighting1.xyz) > 0.01f) {
+    // KH_SUN_GRAD: the self ladder's gradients, taken here - before the N.L gate
+    // below and the ladder's own per-pixel branches - under a condition uniform
+    // in a quad (a CB lane and a per-primitive flat lane). Twin: PSMain /
+    // PSComposite.
+    KhSunSelfGrad khSG = (KhSunSelfGrad)0;
+    if (lighting0.x >= 0.5f && khObjNoRecv < 0.5f) khSG = KhSunSelfGradAt(i.wrel, khBiasN);
+    // KH_SHADOW_SWITCH: with receiveShadow off (khObjNoRecv) no received term
+    // is taken - smf stays 1 where the face turns to the sun and the gate's 0
+    // below still holds where it does not. Twin: PSMain / PSComposite.
+    if (lighting0.x >= 0.5f && dot(khShN, lighting1.xyz) > 0.01f && khObjNoRecv < 0.5f) {
         {
             if (maskMeta.x >= 0.5f) smf = ShadowBandFactor(i.wrel + sunOrigin.xyz);
             else                    smf = ShadowMapFactor(i.wpos);
@@ -283,9 +305,9 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
 
         // A pixel the received term already darkens to 0 cannot get darker -
         // min(0, x) = 0 - so the self ladder (the costliest term in this
-        // shader) is not consulted for it. A plain if, so fxc's gradient
-        // hoisting applies.
-        if (smf > 0.0f) smf = min(smf, SunShadowFactorSelf(i.wpos, i.wrel, khBiasN));
+        // shader) is not consulted for it. A plain if: the ladder takes no
+        // gradient of its own (KH_SUN_GRAD - khSG, priced above).
+        if (smf > 0.0f) smf = min(smf, SunShadowFactorSelf(i.wpos, i.wrel, khBiasN, khSG));
         if (maskMeta.w >= 0.5f) {
             // A translucent texel = the blend material's translucent part or a
             // whole translucent object on normal blend (the mirror below
@@ -338,7 +360,7 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
             float khStRf = KhSunRangeFade(i.wpos);
             smf *= 1.0f - (1.0f - khStenU) * khStRf;
         }
-    } else if (lighting0.x >= 0.5f) {
+    } else if (lighting0.x >= 0.5f && !(dot(khShN, lighting1.xyz) > 0.01f)) {
         // The gate's refusal is a verdict, not a skip: a lit pixel it leaves at
         // smf = 1 keeps an unshadowed direct term, and at N.L in (0, 0.01] that
         // is HDR sun x 0.01 - a lit line along every crease inside a shadow. An

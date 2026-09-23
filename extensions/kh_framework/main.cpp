@@ -24,6 +24,9 @@ int intercept::api_version() {
 }
 
 void intercept::pre_start() {
+    g_is_server = sqf::is_server();
+    g_is_headless = (!(sqf::is_server()) && !(sqf::has_interface()));
+    g_is_player = sqf::has_interface();
     g_kh_cached_temporal_stack = game_value(auto_array<game_value>());
     g_kh_cached_temporal_additions = game_value(auto_array<game_value>());
     g_kh_cached_temporal_deletions = game_value(auto_array<game_value>());
@@ -91,9 +94,6 @@ void intercept::pre_init() {
 
     if (!g_is_menu || g_is_dedicated_server) {
         g_last_ts_connect_attempt = -1.0f;
-        g_is_server = sqf::is_server();
-        g_is_headless = (!(sqf::is_server()) && !(sqf::has_interface()));
-        g_is_player = sqf::has_interface();
         g_mission_time = 0.0f;
         g_mission_frame = 0;
 

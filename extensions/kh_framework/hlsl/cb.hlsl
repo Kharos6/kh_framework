@@ -19,10 +19,13 @@ cbuffer CBObj : register(b0)
     float4 localRadii;   // xyz = mask radii (engine axes).
     float4 bandParams;   // x = band min (m), y = band max (m, <=0 unbounded), z = falloff (m), w =
                          // Banded flag.
-    // x = lit flag, z = ambient fraction, w = diffuse fraction (read through
-    // KhObjLanesCb / KhObjLoad); y unread.
+    // x = lit flag, y = 1 when receiveShadow is off (KH_SHADOW_SWITCH), z =
+    // ambient fraction, w = diffuse fraction (y / z / w read through
+    // KhObjLanesCb / KhObjLoad).
     float4 lighting0;
-    float4 shadowMeta2;   // x unread (zero), y = object view-distance cut; z = 1 for a
+    // x = 1 on an effect-chain pass whose near-plane marker (t37, effect.hlsl)
+    // is this cycle's (KH_NEARZ_MARK), else 0.
+    float4 shadowMeta2;   // y = object view-distance cut; z = 1 for a
                           // depth-Off overlay (KH_VOL_WITNESS), else 0; w = the first
                           // vertex of the run VSUserSo is drawing (KH_USER_VS's pass
                           // alone; zero, and unread, everywhere else).
@@ -198,6 +201,11 @@ cbuffer CBObj : register(b0)
     // KH_VOL_FOOT (C++ twin sten_vol4): x = 1 when khVolFoot (t33) holds the
     // footprint mask of the copy's seam frame; yzw unused.
     float4 stenVol4;
+    // KH_PCSS_CELL (C++ twin sun_lat): each camera tier's texel lattice offset
+    // as uint bits (asuint) - hero xy, mid zw; outer xy, far zw. A texel index
+    // of that tier plus it is the world-fixed lattice KhPcssRot hashes.
+    float4 sunLat0;
+    float4 sunLat1;
 };
  
 cbuffer CBEngView : register(b2)
@@ -218,7 +226,8 @@ cbuffer CBEngView2 : register(b4)
 // The object record buffer (C++ twin KhObjRec, 6 float4), one per live-scene
 // slot, read by every bucket vertex shader through the lane's slot
 // (VSInst.islot). Engine axes. size.w = the object's creation on the session
-// clock (KH_USER_LANES), rot0.w = 1 (filled),
+// clock (KH_USER_LANES), pos.w = 1 when receiveShadow is off (KH_SHADOW_SWITCH),
+// rot0.w = 1 (filled),
 // rot1.w = lit ambient fraction, rot2.w = lit diffuse fraction; col carries no
 // lifetime envelope (the lane's alpha does).
 struct KhObjRec { float4 pos; float4 size; float4 rot0; float4 rot1; float4 rot2; float4 col; };
@@ -248,6 +257,10 @@ static float khObjAmb = 0.0f;      // lighting0.z twin: base-colour fraction kep
 static float khObjDif = 0.0f;      // lighting0.w twin: n.L-scaled fraction.
 static float khObjCut = 0.0f;      // shadowMeta2.y twin: object view-distance cut (m, 0 = off).
 static float khObjDither = 0.0f;   // blendCtl.w twin: the LOD crossfade dither for this draw.
+// KH_SHADOW_SWITCH: lighting0.y / KhObjRec pos.w twin - 1 = receiveShadow off:
+// every received shadow term reads 1 (the mesh shaders' sun block, DynLights,
+// KhDynLightsPBR). 0 where nothing loaded it.
+static float khObjNoRecv = 0.0f;
 // KH_USER_LANES: khUserObj.y twin - this object's (or bucket instance's)
 // creation on the session clock. The sentinel means 'not loaded': KhUserTime
 // then reads the CB, which is this object's on every per-object draw.
@@ -259,6 +272,7 @@ void KhObjLoad(float4 khol_a, float4 khol_b)
     khObjBirth = khol_a.z;
     khObjCut = khol_a.w;
     khObjDither = khol_b.y;
+    khObjNoRecv = khol_b.x;   // KH_SHADOW_SWITCH.
 }
 // The vertex side: the CB lanes (per-object draws)...
 // The LOD crossfade's per-pixel cut, one body for every pass that draws a
@@ -275,7 +289,7 @@ void KhLodDitherCut(float2 khld_px, float khld_v)
 void KhObjLanesCb(out float4 khoc_a, out float4 khoc_b)
 {
     khoc_a = float4(lighting0.z, lighting0.w, khUserObj.y, shadowMeta2.y);   // z = creation (KH_USER_LANES).
-    khoc_b = float4(0.0f, blendCtl.w, 0.0f, 0.0f);   // z / w unused.
+    khoc_b = float4(lighting0.y, blendCtl.w, 0.0f, 0.0f);   // x = KH_SHADOW_SWITCH; z / w unused.
 }
 // ...or the record + lane (bucket draws); the cut is the pass's object view
 // distance. khor_slot is the instance's scene slot, unread since the
@@ -284,7 +298,7 @@ void KhObjLanesCb(out float4 khoc_a, out float4 khoc_b)
 void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float4 khor_a, out float4 khor_b)
 {
     khor_a = float4(khor_r.rot1.w, khor_r.rot2.w, khor_r.size.w, khPassObj.x);   // z = creation (KH_USER_LANES).
-    khor_b = float4(0.0f, khor_dither, 0.0f, 0.0f);   // z / w unused.
+    khor_b = float4(khor_r.pos.w, khor_dither, 0.0f, 0.0f);   // x = KH_SHADOW_SWITCH; z / w unused.
 }
 
 // ===========================================================================
@@ -318,7 +332,8 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //         reversed on the back face of a two-sided mesh.
 //   smf   the sun shadow factor, 0 dark - 1 lit: the received world shadows
 //         and the private self-shadow, already min-combined - multiply the sun
-//         term by it once and do not stack another sun shadow on it.
+//         term by it once and do not stack another sun shadow on it. With
+//         receiveShadow off it is 1 wherever the face turns to the sun.
 //   RETURN the lit colour in the engine's linear HDR scene units (the units of
 //         lighting2 and lightAmb), before fog. Around the call the builtin
 //         applies fog, the coverage (the material's cutout / blend alpha times
@@ -331,7 +346,8 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //     (loaded at the PS entry, per instance on a bucket draw). Scale the
 //     ambient and the direct sun by them; never read lighting0.zw directly.
 //   - DynLights(wpos, n) / KhDynLightsPBR(...) carry every dynamic light that
-//     reaches the mesh, with their own shadows; add them as they are.
+//     reaches the mesh, with their own shadows (none with receiveShadow off);
+//     add them as they are.
 //   - Ambient occlusion is NOT a shader term: KH_SSAO multiplies the result at
 //     the pixel after the draw. s.occ is the material's occlusion map, for the
 //     ambient only (as KhPbrAmbient applies it).
@@ -789,6 +805,10 @@ Texture2D<float> khVolFoot : register(t33);
 Texture2D<uint2> khMirSten  : register(t28);
 float KhMirUnit(float2 khmu_px, float khmu_w, float khmu_h)
 {
+    // KH_MIR_ZOOM: the mirror is drawn in the volume copy's raster (the seam's
+    // projection), so this pixel is looked up through the same map as the count
+    // (stenVol3, KhVolTerm): identity when the projections agree.
+    if (stenVol3.x > 0.0f) khmu_px = khmu_px * stenVol3.xy + stenVol3.zw;
     int2 khmu_p = int2(clamp(khmu_px.x, 0.0f, khmu_w - 1.0f),
                        clamp(khmu_px.y, 0.0f, khmu_h - 1.0f));
     return (khMirSten.Load(int3(khmu_p, 0)).g != 0u) ? 0.0f : 1.0f;
@@ -1004,12 +1024,28 @@ static const float2 KH_PCSS_DISC[16] = {
     float2(-0.24188840f,  0.99706507f), float2(-0.81409955f,  0.91437590f),
     float2( 0.19984126f,  0.78641367f), float2( 0.14383161f, -0.14100790f)
 };
-// The disc is rotated per tier texel (interleaved gradient noise over the
-// texel index, so the pattern rides the texel-snapped window with the world,
-// never the screen).
-float2 KhPcssRot(float2 khpr_t)
+// KH_PCSS_CELL: the disc is rotated per cell (interleaved gradient noise over
+// the cell index). A cell is the map's texel split 2^k ways per axis, k the
+// least that keeps a cell within the receiver's pixel footprint (khpr_fw =
+// fwidth of the texel coordinate, its smaller axis; texels no larger than a
+// pixel keep k = 0), so the rotation changes from pixel to pixel however far
+// the map's texels are magnified - one rotation across a whole magnified
+// texel drew its disc noise as blocks of that texel's size. The index is the
+// world-fixed lattice (the texel index + khpr_lat, sunLat* for a camera tier,
+// 0 for the union, whose window moves only at a re-fit), so the pattern stays
+// with the world when the tier's window re-snaps; it changes where k does (a
+// footprint crossing a power of two). The 4096-cell period keeps the noise's
+// float arithmetic exact.
+#define KH_PCSS_CELL_KMAX 8.0f
+float2 KhPcssRot(float2 khpr_t, float2 khpr_fw, float2 khpr_lat)
 {
-    float khpr_a = 6.2831853f * frac(52.9829189f * frac(dot(floor(khpr_t), float2(0.06711056f, 0.00583715f))));
+    const float khpr_f = max(min(khpr_fw.x, khpr_fw.y), 1.0e-6f);   // NaN / 0 take the finest cell.
+    const float khpr_k = clamp(ceil(-log2(khpr_f)), 0.0f, KH_PCSS_CELL_KMAX);
+    const float2 khpr_i = floor(khpr_t);
+    const uint2 khpr_c = ((uint2(int2(khpr_i)) + asuint(khpr_lat)) << (uint)khpr_k)
+                       + uint2(floor((khpr_t - khpr_i) * exp2(khpr_k)));
+    const float2 khpr_g = float2(khpr_c & 4095u);
+    float khpr_a = 6.2831853f * frac(52.9829189f * frac(dot(khpr_g, float2(0.06711056f, 0.00583715f))));
     return float2(cos(khpr_a), sin(khpr_a));
 }
 float2 KhPcssTap(int khpt_i, float2 khpt_rot)
@@ -1048,8 +1084,10 @@ float KhSunBlockerZ(Texture2D<float> khsb_m, float khsb_sz, float2 khsb_uv, floa
 // where the penumbra fits it, else the disc of bilinear compares at the
 // penumbra radius. khpw_z is the biased receiver depth; khpw_sp the ring
 // spread (the contact threshold); khpw_tw / khpw_iD the tier's texel (m) and
-// depth units per metre.
-float KhSunPcssWT(Texture2D<float> khpw_m, float khpw_sz, float2 khpw_uv, float khpw_z, float khpw_sp, float khpw_tw, float khpw_iD)
+// depth units per metre; khpw_fw / khpw_lat the receiver's texel footprint and
+// the map's lattice offset (KhPcssRot).
+float KhSunPcssWT(Texture2D<float> khpw_m, float khpw_sz, float2 khpw_uv, float khpw_z, float khpw_sp,
+                  float khpw_tw, float khpw_iD, float2 khpw_fw, float2 khpw_lat)
 {
     // The widest penumbra this window allows at all: at or under the ring
     // spread no blocker can take the kernel past the ring, so the ring answers
@@ -1058,7 +1096,7 @@ float KhSunPcssWT(Texture2D<float> khpw_m, float khpw_sz, float2 khpw_uv, float 
     // contact verdict that stood before the search existed.)
     float khpw_rw = KhPcssRadius(khpw_z, 0.0f, khpw_tw, khpw_iD);
     if (khpw_rw <= khpw_sp) return KhSunSoftWT(khpw_m, khpw_sz, khpw_uv, khpw_z, khpw_sp);
-    float2 khpw_rot = KhPcssRot(khpw_uv * khpw_sz);
+    float2 khpw_rot = KhPcssRot(khpw_uv * khpw_sz, khpw_fw, khpw_lat);
     float khpw_rs = min(khpw_rw, KH_PCSS_RMAX);
     float khpw_zb = KhSunBlockerZ(khpw_m, khpw_sz, khpw_uv, khpw_z, khpw_rs, khpw_rot);
     if (khpw_zb < 0.0f) return 0.0f;
@@ -1085,11 +1123,90 @@ float KhTbBlend(float khtd_c, float khtd_f, float khtd_w)
     return lerp(khtd_c, khtd_f, khtd_w);
 }
 
+// KH_SUN_GRAD: every gradient the two sun chains read, taken by the pixel shader
+// in uniform control flow and handed down. The chains branch per pixel - a
+// tier's window test, the carry's early returns, the mesh shaders' N.L gate -
+// and a gradient taken past such a branch reads lanes of its quad that left it
+// (undefined in D3D11). Each value is the expression the chain took in place,
+// evaluated before any such branch, so a pixel whose quad stayed together reads
+// what it always read. A lane whose map is off (a CB flag: uniform) is 0.
+// The cast chain's (SunShadowOcclusion): the footprint of each camera tier's
+// texel coordinate, then the union's (KhCastTier's khC_fw, the union's rotation).
+struct KhSunCastGrad {
+    float2 fw2;   // Hero.
+    float2 fw3;   // Mid.
+    float2 fw4;   // Outer.
+    float2 fw5;   // Far.
+    float2 fwu;   // The union.
+};
+float2 KhSunCastFw(float3 khsf_r, float4x4 khsf_vp, float4 khsf_meta)
+{
+    if (khsf_meta.x < 0.5f) return float2(0.0f, 0.0f);
+    float4 khsf_c = mul(float4(khsf_r, 1.0f), khsf_vp);
+    float2 khsf_u = float2(0.5f + 0.5f * khsf_c.x, 0.5f - 0.5f * khsf_c.y);
+    return fwidth(khsf_u * khsf_meta.y);
+}
+KhSunCastGrad KhSunCastGradAt(float3 wpos)
+{
+    KhSunCastGrad khsc_g;
+    const float3 khsc_r = wpos - sunOrigin.xyz;
+    khsc_g.fw2 = KhSunCastFw(khsc_r, sunVP2, sunMeta2);
+    khsc_g.fw3 = KhSunCastFw(khsc_r, sunVP3, sunMeta3);
+    khsc_g.fw4 = KhSunCastFw(khsc_r, sunVP4, sunMeta4);
+    khsc_g.fw5 = KhSunCastFw(khsc_r, sunVP5, sunMeta5);
+    khsc_g.fwu = KhSunCastFw(khsc_r, sunVP, sunMeta);
+    return khsc_g;
+}
+// The self chain's (SunShadowOcclusionSelf): length(fwidth(n)) and the
+// receiver's half footprint (khgs), then each tier's and the union's texel
+// footprint at the normal-offset point the chain samples (KhSelfTier's khT_fw,
+// the union's khsr_fw). Zero where the ladder is never consulted.
+struct KhSunSelfGrad {
+    float  fwn;   // length(fwidth(n)).
+    float  gs;    // 0.5 * length(fwidth(wrel)): the chain's khgs.
+    float2 fw2;   // Hero.
+    float2 fw3;   // Mid.
+    float2 fw4;   // Outer.
+    float2 fw5;   // Far.
+    float2 fwu;   // The union.
+};
+float2 KhSunSelfFw(float3 khsg_wr, float3 khsg_n, float khsg_k, float4x4 khsg_vp, float4 khsg_meta)
+{
+    if (khsg_meta.x < 0.5f) return float2(0.0f, 0.0f);
+    float khsg_iR0 = length(float3(khsg_vp[0].x, khsg_vp[1].x, khsg_vp[2].x));
+    float khsg_no = khsg_k * 2.0f / (max(khsg_meta.y, 1.0f) * max(khsg_iR0, 1e-6f));
+    float4 khsg_c = mul(float4(khsg_wr + khsg_n * khsg_no, 1.0f), khsg_vp);
+    float2 khsg_uv = float2(0.5f + 0.5f * khsg_c.x, 0.5f - 0.5f * khsg_c.y);
+    return fwidth(khsg_uv * khsg_meta.y);
+}
+KhSunSelfGrad KhSunSelfGradAt(float3 wrel, float3 nrm)
+{
+    KhSunSelfGrad khss_g = (KhSunSelfGrad)0;
+    // The ladder's uniform exits - no map (SunShadowOcclusionSelf) and zero
+    // strength (SunShadowFactorSelf, KH_SHADOW_STRENGTH_SKIP) - so both stay free.
+    if (sunMeta.x < 0.5f || saturate(sunMeta.w) <= 0.0f) return khss_g;
+    float3 n = normalize(nrm);
+    float ndl = saturate(dot(n, lighting1.xyz));
+    khss_g.fwn = length(fwidth(n));
+    khss_g.gs = 0.5f * length(fwidth(wrel));
+    float khno_k = min(1.0f + 2.0f * sqrt(saturate(1.0f - ndl * ndl))
+                              / max(ndl, 0.15f), 2.0f)
+                 * saturate(1.0f - 5.0f * khss_g.fwn);   // SunShadowOcclusionSelf's.
+    khss_g.fw2 = KhSunSelfFw(wrel, n, khno_k, sunVP2, sunMeta2);
+    khss_g.fw3 = KhSunSelfFw(wrel, n, khno_k, sunVP3, sunMeta3);
+    khss_g.fw4 = KhSunSelfFw(wrel, n, khno_k, sunVP4, sunMeta4);
+    khss_g.fw5 = KhSunSelfFw(wrel, n, khno_k, sunVP5, sunMeta5);
+    khss_g.fwu = KhSunSelfFw(wrel, n, khno_k, sunVP, sunMeta);
+    return khss_g;
+}
+
 // One cast tier for the four camera-anchored bands (hero/mid/outer/far). false
 // = fall through with the carry state updated in place. Twin contract with
 // KhSelfTier's ladder.
 float KhCastTier(Texture2D<float> khC_map, float4x4 khC_vp, float4 khC_meta, float3 khC_r,
                  float khC_cb,   // This tier's cast bias; 0 = meta.z.
+                 float2 khC_lat,   // KH_PCSS_CELL: this tier's lattice offset (sunLat*).
+                 float2 khC_fw,    // KH_SUN_GRAD: fwidth of this tier's texel coordinate.
                  bool khC_last,   // Last camera tier - no edge carry.
                  inout float khtb_occ, inout float khtb_w, out bool khC_done)
 {
@@ -1097,9 +1214,8 @@ float KhCastTier(Texture2D<float> khC_map, float4x4 khC_vp, float4 khC_meta, flo
     if (khC_meta.x >= 0.5f) {
         float4 khC_c = mul(float4(khC_r, 1.0f), khC_vp);
         float2 khC_u = float2(0.5f + 0.5f * khC_c.x, 0.5f - 0.5f * khC_c.y);
-        // The receiver footprint in this tier's texels, taken here where
-        // control flow is still uniform.
-        float2 khC_fw = fwidth(khC_u * khC_meta.y);
+        // The receiver footprint in this tier's texels (khC_fw), taken by the
+        // pixel shader in uniform control flow (KH_SUN_GRAD).
         float  khC_sp = clamp(0.5f * max(khC_fw.x, khC_fw.y), 1.0f, 4.0f);
         if (khC_u.x > 0.002f && khC_u.x < 0.998f &&
             khC_u.y > 0.002f && khC_u.y < 0.998f &&
@@ -1114,7 +1230,8 @@ float KhCastTier(Texture2D<float> khC_map, float4x4 khC_vp, float4 khC_meta, flo
             float khC_iR = length(float3(khC_vp[0].x, khC_vp[1].x, khC_vp[2].x));
             float khC_iD = length(float3(khC_vp[0].z, khC_vp[1].z, khC_vp[2].z));
             float khC_tw = 2.0f / (max(khC_meta.y, 1.0f) * max(khC_iR, 1e-6f));
-            float khC_o = KhSunPcssWT(khC_map, khC_meta.y, khC_u, khC_c.z - khC_b, khC_sp, khC_tw, khC_iD);
+            float khC_o = KhSunPcssWT(khC_map, khC_meta.y, khC_u, khC_c.z - khC_b, khC_sp, khC_tw, khC_iD,
+                                      khC_fw, khC_lat);
             // Lit authoritative: the tier map is complete.
             if (khtb_occ >= 0.0f) { khC_done = true; return KhTbBlend(khC_o, khtb_occ, khtb_w); }
             if (khC_last) { khC_done = true; return khC_o; }   // The window holds the whole domain.
@@ -1127,7 +1244,7 @@ float KhCastTier(Texture2D<float> khC_map, float4x4 khC_vp, float4 khC_meta, flo
     return 0.0f;
 }
 
-float SunShadowOcclusion(float3 wpos)
+float SunShadowOcclusion(float3 wpos, KhSunCastGrad khsc_g)   // KH_SUN_GRAD: KhSunCastGradAt(wpos).
 {
     if (sunMeta.x < 0.5f) return 0.0f;
     // Twin contract: the cast chain here and the self chain carry the identical
@@ -1141,13 +1258,17 @@ float SunShadowOcclusion(float3 wpos)
         const float3 khc_r = wpos - sunOrigin.xyz;
         bool khc_done;
         float khc_v;
-        khc_v = KhCastTier(khSunDepth2, sunVP2, sunMeta2, khc_r, sunCastBias.x, false, khtb_occ, khtb_w, khc_done);
+        khc_v = KhCastTier(khSunDepth2, sunVP2, sunMeta2, khc_r, sunCastBias.x, sunLat0.xy, khsc_g.fw2, false,
+                           khtb_occ, khtb_w, khc_done);
         if (khc_done) return khc_v;
-        khc_v = KhCastTier(khSunDepth3, sunVP3, sunMeta3, khc_r, sunCastBias.y, false, khtb_occ, khtb_w, khc_done);
+        khc_v = KhCastTier(khSunDepth3, sunVP3, sunMeta3, khc_r, sunCastBias.y, sunLat0.zw, khsc_g.fw3, false,
+                           khtb_occ, khtb_w, khc_done);
         if (khc_done) return khc_v;
-        khc_v = KhCastTier(khSunDepth4, sunVP4, sunMeta4, khc_r, sunCastBias.z, false, khtb_occ, khtb_w, khc_done);
+        khc_v = KhCastTier(khSunDepth4, sunVP4, sunMeta4, khc_r, sunCastBias.z, sunLat1.xy, khsc_g.fw4, false,
+                           khtb_occ, khtb_w, khc_done);
         if (khc_done) return khc_v;
-        khc_v = KhCastTier(khSunDepth5, sunVP5, sunMeta5, khc_r, sunCastBias.w, true, khtb_occ, khtb_w, khc_done);
+        khc_v = KhCastTier(khSunDepth5, sunVP5, sunMeta5, khc_r, sunCastBias.w, sunLat1.zw, khsc_g.fw5, true,
+                           khtb_occ, khtb_w, khc_done);
         if (khc_done) return khc_v;
     }
     float4 c = mul(float4(wpos - sunOrigin.xyz, 1.0f), sunVP);   // Ortho: w = 1 (KH_SUN_ANCHOR).
@@ -1171,7 +1292,7 @@ float SunShadowOcclusion(float3 wpos)
     float khcu_tw = 2.0f / (max(sunMeta.y, 1.0f) * max(khcu_iR, 1e-6f));
     float khtb_un;
     {
-        float2 khcu_rot = KhPcssRot(uv * sunMeta.y);
+        float2 khcu_rot = KhPcssRot(uv * sunMeta.y, khsc_g.fwu, float2(0.0f, 0.0f));   // KH_PCSS_CELL, KH_SUN_GRAD.
         float khcu_zr = c.z - khcu_b;
         float khcu_rw = KhPcssRadius(khcu_zr, 0.0f, khcu_tw, khcu_iD);   // KhSunPcssWT's skip: the ring spread is 1 here.
         float khcu_rs = min(max(khcu_rw, 1.0f), KH_PCSS_RMAX);
@@ -1263,6 +1384,9 @@ float KhSelfPcssT(Texture2D<float> khsp_m, float khsp_sz, float2 khsp_t, float2 
 // rim outside the fine tier's correct one.
 float KhSelfTier(Texture2D<float> khT_map, Texture2D<float2> khT_pf, float4x4 khT_vp, float4 khT_meta,
                  float khT_pfArm,
+                 float2 khT_lat,   // KH_PCSS_CELL: this tier's lattice offset (sunLat*).
+                 float2 khT_fw,    // KH_SUN_GRAD: fwidth of this tier's texel coordinate.
+                 float khT_fwn,    // KH_SUN_GRAD: length(fwidth(n)).
                  bool khT_last,   // Last camera tier - no edge carry.
                  float3 khwr, float3 n, float ndl, float khno_k, float khgs,
                  inout float khtb_occ, inout float khtb_w, out bool khT_done)
@@ -1283,7 +1407,7 @@ float KhSelfTier(Texture2D<float> khT_map, Texture2D<float2> khT_pf, float4x4 kh
             float khT_iD = length(float3(khT_vp[0].z, khT_vp[1].z, khT_vp[2].z));
             float khT_tw = 2.0f / (max(khT_meta.y, 1.0f) * max(khT_iR, 1e-6f));
             float khT_k = khT_tw * khT_iD / max(ndl, 0.02f)
-                        * saturate(1.0f - 3.0f * length(fwidth(n)));   // Damped gradient.
+                        * saturate(1.0f - 3.0f * khT_fwn);   // Damped gradient (KH_SUN_GRAD).
             float khT_gc = KH_RPDB_GC(khT_tw) * khT_iD;
             float2 khT_g = clamp(
                 float2( dot(n, khT_cr / max(khT_iR, 1e-9f)) * khT_k,
@@ -1295,7 +1419,7 @@ float KhSelfTier(Texture2D<float> khT_map, Texture2D<float2> khT_pf, float4x4 kh
                         + 0.35f * khT_tan * KH_SLOPE_TW(khT_tw) * khT_iD;
             float khT_gs = min(khgs, 4.0f * khT_tw);
             khT_b += khT_gs * khT_iD;
-            float2 khT_fw = fwidth(khT_t);   // Uniform control flow: taken here, read by both paths.
+            // khT_fw: fwidth(khT_t), taken in uniform control flow (KH_SUN_GRAD), read by both paths.
             float khT_sp = (khgs > 4.0f * khT_tw)
                          ? 1.0f
                          : clamp(0.5f * max(khT_fw.x, khT_fw.y), 1.0f, 8.0f);
@@ -1305,7 +1429,7 @@ float KhSelfTier(Texture2D<float> khT_map, Texture2D<float2> khT_pf, float4x4 kh
             // penumbra fits it, else the disc at the penumbra radius (never
             // narrower than the receiver footprint, which is the minification
             // the prefilter blend served on the ring path).
-            float2 khT_rot = KhPcssRot(khT_t);
+            float2 khT_rot = KhPcssRot(khT_t, khT_fw, khT_lat);
             // KhSunPcssWT's skip: a window whose widest penumbra fits the ring
             // spread takes the ring without the search (khT_zb = the receiver's
             // own depth stands in for 'a blocker at no distance': khT_pr = 0,
@@ -1406,34 +1530,35 @@ float KhSelfTier(Texture2D<float> khT_map, Texture2D<float2> khT_pf, float4x4 kh
 
 // The self term: hero, mid, outer, far tiers, then the union map. Twin contract
 // with SunShadowOcclusion (the cast chain): identical carry shape.
-float SunShadowOcclusionSelf(float3 wrel, float3 nrm)
+float SunShadowOcclusionSelf(float3 wrel, float3 nrm, KhSunSelfGrad khsg)   // KH_SUN_GRAD: KhSunSelfGradAt.
 {
     if (sunMeta.x < 0.5f) return 0.0f;
     float3 khwr = wrel;
-    float khgs = 0.5f * length(fwidth(khwr));
+    float khgs = khsg.gs;
     float3 n = normalize(nrm);
     float ndl = saturate(dot(n, lighting1.xyz));
     float khno_k = min(1.0f + 2.0f * sqrt(saturate(1.0f - ndl * ndl))
                               / max(ndl, 0.15f), 2.0f)
-                 * saturate(1.0f - 5.0f * length(fwidth(n)));
+                 * saturate(1.0f - 5.0f * khsg.fwn);
     float khtb_occ = -1.0f;
     float khtb_w = 0.0f;
     bool  khT_done = false;
     float khT_v;
-    khT_v = KhSelfTier(khSunDepth2, khSunPf2, sunVP2, sunMeta2, sunPf.x, false,
+    khT_v = KhSelfTier(khSunDepth2, khSunPf2, sunVP2, sunMeta2, sunPf.x, sunLat0.xy, khsg.fw2, khsg.fwn, false,
                        khwr, n, ndl, khno_k, khgs,
                        khtb_occ, khtb_w, khT_done);
     if (khT_done) return khT_v;
-    khT_v = KhSelfTier(khSunDepth3, khSunPf3, sunVP3, sunMeta3, sunPf.y, false,
+    khT_v = KhSelfTier(khSunDepth3, khSunPf3, sunVP3, sunMeta3, sunPf.y, sunLat0.zw, khsg.fw3, khsg.fwn, false,
                        khwr, n, ndl, khno_k, khgs,
                        khtb_occ, khtb_w, khT_done);
     if (khT_done) return khT_v;
-    khT_v = KhSelfTier(khSunDepth4, khSunPf4, sunVP4, sunMeta4, sunPf.z, false,
+    khT_v = KhSelfTier(khSunDepth4, khSunPf4, sunVP4, sunMeta4, sunPf.z, sunLat1.xy, khsg.fw4, khsg.fwn, false,
                        khwr, n, ndl, khno_k, khgs,
                        khtb_occ, khtb_w, khT_done);
     if (khT_done) return khT_v;
     if (sunMeta5.x >= 0.5f) {
-        khT_v = KhSelfTier(khSunDepth5, khSunPf5, sunVP5, sunMeta5, sunOrigin.w, true,   // KH_FAR_PF.
+        khT_v = KhSelfTier(khSunDepth5, khSunPf5, sunVP5, sunMeta5, sunOrigin.w, sunLat1.zw, khsg.fw5, khsg.fwn,
+                           true,   // KH_FAR_PF.
                            khwr, n, ndl, khno_k, khgs,
                            khtb_occ, khtb_w, khT_done);
         if (khT_done) return khT_v;
@@ -1453,7 +1578,7 @@ float SunShadowOcclusionSelf(float3 wrel, float3 nrm)
     float khsr_iD = length(float3(sunVP[0].z, sunVP[1].z, sunVP[2].z));
     float khsr_tw = 2.0f / (max(sunMeta.y, 1.0f) * max(khsr_iR, 1e-6f));
     float khsr_k = khsr_tw * khsr_iD / max(ndl, 0.02f)
-                 * saturate(1.0f - 3.0f * length(fwidth(n)));
+                 * saturate(1.0f - 3.0f * khsg.fwn);
     float khsr_gc = KH_RPDB_GC(khsr_tw) * khsr_iD;   // KH_RPDB_WORLD_CLAMP twin.
     float2 khsr_g = clamp(
         float2( dot(n, khsr_cr / max(khsr_iR, 1e-9f)) * khsr_k,
@@ -1467,7 +1592,7 @@ float SunShadowOcclusionSelf(float3 wrel, float3 nrm)
     float khsr_gs = min(khgs, 4.0f * khsr_tw);
     khsr_b += khsr_gs * khsr_iD;
     float khsr_w = saturate(0.001f / max(khsr_tw, 1e-6f));
-    float2 khsr_fw = fwidth(khsr_t);
+    float2 khsr_fw = khsg.fwu;   // KH_SUN_GRAD: fwidth(khsr_t), taken in uniform control flow.
     float khsr_sp = (khgs > 4.0f * khsr_tw)
                 ? 1.0f
                 : clamp(0.5f * max(khsr_fw.x, khsr_fw.y), 1.0f, 8.0f);
@@ -1478,7 +1603,7 @@ float SunShadowOcclusionSelf(float3 wrel, float3 nrm)
         khsr_fd = 1.0f - smoothstep(0.85f, 0.98f, khsr_e);
     }
     // KH_PCSS on the union, the same shape as the tiers.
-    float2 khsr_rot = KhPcssRot(khsr_t);
+    float2 khsr_rot = KhPcssRot(khsr_t, khsr_fw, float2(0.0f, 0.0f));   // KH_PCSS_CELL.
     float khsr_rw = KhPcssRadius(khsr_c.z, 0.0f, khsr_tw, khsr_iD);   // KhSelfTier's skip.
     float khsr_rs = min(max(khsr_rw, khsr_sp), KH_PCSS_RMAX);
     float khsr_zb = khsr_rw <= khsr_sp ? khsr_c.z
@@ -1509,17 +1634,17 @@ float SunShadowOcclusionSelf(float3 wrel, float3 nrm)
     return (khtb_occ >= 0.0f) ? KhTbBlend(khsr_res, khtb_occ, khtb_w) : khsr_res;
 }
 
-float SunShadowFactorSelf(float3 wpos, float3 wrel, float3 nrm)
+float SunShadowFactorSelf(float3 wpos, float3 wrel, float3 nrm, KhSunSelfGrad khsg)
 {
     // KH_SHADOW_STRENGTH_SKIP: sunMeta.w is g_shadow_map_strength, a CB scalar,
-    // so this branch is UNIFORM - one scalar test, no divergence, and no
-    // gradient of the ladder below is taken in split flow. At strength 0 the
+    // so this branch is UNIFORM - one scalar test, no divergence (the ladder
+    // takes no gradient of its own: KH_SUN_GRAD, khsg). At strength 0 the
     // product is an exact 1 - 0 whatever the ladder answers, and the ladder is
     // the costliest term in the mesh shaders (the four tiers plus the union
     // map, each a KH_PCSS blocker search and up to 16 taps). An HLSL multiply
     // evaluates both sides (1.573); this is the gate that makes the zero free.
     if (saturate(sunMeta.w) <= 0.0f) return 1.0f;
-    return 1.0f - SunShadowOcclusionSelf(wrel, nrm) * saturate(sunMeta.w)
+    return 1.0f - SunShadowOcclusionSelf(wrel, nrm, khsg) * saturate(sunMeta.w)
                 * KhSunRangeFade(wpos);
 }
 
@@ -1527,6 +1652,8 @@ float SunShadowFactorSelf(float3 wpos, float3 wrel, float3 nrm)
 // of 0.07, so it can never be the binding constraint.
 static const float KH_OWN_NEAR = 0.05f;
 
+// C++ twin KH_RP_STEN_FADE: the mirror replay runs only for a mesh that can
+// reach this band (KH_MIR_BAND) - change both together.
 static const float KH_STEN_FADE = 1.35f;
 
 // KH_INFRONT: the view-model slice's projection has a near of 0.01 (measured),
@@ -1541,7 +1668,7 @@ void ClipOwnNear(float khon_w)
     if (khon_w < khon_n) discard;
 }
 
-void ClipEdgeSliver(float3 wpos, float3 nrm)
+void ClipEdgeSliver(float3 wpos)
 {
     // Fail-safe: this clip trusts fxParams0.xyz as the camera. The failure
     // direction is 'fireflies possible', never 'geometry lost'.
@@ -1956,7 +2083,9 @@ float3 DynLights(float3 wpos, float3 nrm)
         // surfaces facing away - and a surface in shadow is still inside that
         // glow. A dim light casts a faint shadow and a bright one a hard shadow
         // for free.
-        const float khs_sh = KhDlsShadow((int)KhDlRec(b + 5).z - 1, wpos, nrm, 0.0f, khs_fwp);
+        // KH_SHADOW_SWITCH: a mesh with receiveShadow off takes no light's shadow.
+        const float khs_sh = khObjNoRecv >= 0.5f ? 1.0f
+                           : KhDlsShadow((int)KhDlRec(b + 5).z - 1, wpos, nrm, 0.0f, khs_fwp);
         // A pure-ambient light must still cast: a fraction of the per-light
         // ambient follows the shadow (KH_DLS_AMB_KEEP kept).
         const float khs_amb = lerp(KH_DLS_AMB_KEEP, 1.0f, khs_sh);
@@ -2392,7 +2521,8 @@ float3 KhDynLightsPBR(float3 wpos, float3 nrm, float3 albedo, float3 F0, float r
         // specular lobe with it (KhGGXSpec is scaled by diffI): a highlight
         // from a blocked light goes with the light. The per-light ambient stays
         // outside.
-        const float khs_sh = KhDlsShadow((int)KhDlRec(b + 5).z - 1, wpos, nrm, 0.0f, khs_fwp);
+        const float khs_sh = khObjNoRecv >= 0.5f ? 1.0f   // KH_SHADOW_SWITCH, as DynLights.
+                           : KhDlsShadow((int)KhDlRec(b + 5).z - 1, wpos, nrm, 0.0f, khs_fwp);
         // Twin of the DynLights site.
         const float khs_amb = lerp(KH_DLS_AMB_KEEP, 1.0f, khs_sh);
         float ndl = max(dot(n, L), 0.0f);
@@ -2559,9 +2689,11 @@ float3 KhApplyPBR(KhMatSurf m, float3 wpos, float3 n, float smf)
 // agreement between two baselines of its depth-derived plane, which collapses
 // to the view axis inside quantisation plateaus). Where the normal is not
 // resolved N.L falls back to 1 - the facing prior - on BOTH the numerator's
-// diffuse and the denominator's sun.
+// diffuse and the denominator's sun. khw_fwp: length(fwidth(khw_wpos)),
+// priced by the caller before any per-pixel exit (KH_DLSW_GRAD) - it reaches
+// here past several.
 float3 KhDlsWorldFactor(float3 khw_wpos, float3 khw_nrm, float khw_zunc,
-                        float khw_nrel)
+                        float khw_nrel, float khw_fwp)
 {
     if (dlCtl.x < 0.5f) return float3(1.0f, 1.0f, 1.0f);
     // Mode 3 only: modes 1/2 decode light positions relative to the camera
@@ -2574,7 +2706,6 @@ float3 KhDlsWorldFactor(float3 khw_wpos, float3 khw_nrm, float khw_zunc,
 
     float3 khw_dyn = float3(0.0f, 0.0f, 0.0f);       // What the lights add here.
     float3 khw_blocked = float3(0.0f, 0.0f, 0.0f);   // And how much we take back.
-    const float khw_fwp = length(fwidth(khw_wpos));   // Footprint priced outside the loop.
 
     [loop] for (int khw_i = 0; khw_i < khw_totalN; ++khw_i) {
         const int khw_b = khw_i * 6;
@@ -2648,7 +2779,7 @@ struct VSOut { float4 pos : SV_Position; float3 wpos : TEXCOORD0; float3 nrm : T
     // The per-object lanes (KhObjLoad at every mesh PS entry). Flat per draw or
     // per instance.
     nointerpolation float4 iobj0 : TEXCOORD7;   // amb, dif, creation (KH_USER_LANES), cut.
-    nointerpolation float4 iobj1 : TEXCOORD8;   // 0, dither, 0, 0.
+    nointerpolation float4 iobj1 : TEXCOORD8;   // no-receive (KH_SHADOW_SWITCH), dither, 0, 0.
 #if KH_TEXTURED
     float2 uv : TEXCOORD2; float4 tanw : TEXCOORD3;   // World tangent + handedness.
     nointerpolation uint matIx : TEXCOORD6;   // KH_MAT_TABLE: this draw's / instance's entry.

@@ -26,7 +26,7 @@ if (_entity isKindOf "Man") then {
                 private _currentHandlers = [];
 
                 {
-                    private _renderHandler = addRender3D [[_entity, (getNumber (_x >> "bindSkeleton")) isEqualTo 1], (getNumber (_x >> "followRotation")) isEqualTo 1, getText (_x >> "model")];
+                    private _renderHandler = addRender3D [[_entity, ["", _x >> "bindSkeleton", nil] call KH_fnc_getConfigValue], getNumber (_x >> "followRotation"), getText (_x >> "model")];
 
                     private _properties = ((configProperties [
                         _x, 
@@ -123,7 +123,7 @@ if (_entity isKindOf "Man") then {
             private _currentHandlers = [];
 
             {
-                private _renderHandler = addRender3D [[_entity, (getNumber (_x >> "bindSkeleton")) isEqualTo 1], (getNumber (_x >> "followRotation")) isEqualTo 1, getText (_x >> "model")];
+                private _renderHandler = addRender3D [[_entity, ["", _x >> "bindSkeleton", nil] call KH_fnc_getConfigValue], getNumber (_x >> "followRotation"), getText (_x >> "model")];
 
                 private _properties = ((configProperties [
                     _x, 
@@ -149,10 +149,10 @@ private _currentHandlers = [];
 
 {
     private _renderHandler = if (!is3DEN && ((getNumber (_x >> "static")) isEqualTo 1)) then {
-        addRender3D [getPosWorldVisual _entity, (getNumber (_x >> "followRotation")) isEqualTo 1, getText (_x >> "model")];
+        addRender3D [getPosWorldVisual _entity, getNumber (_x >> "followRotation"), getText (_x >> "model")];
     }
     else {
-        addRender3D [[_entity, ["", "bindSkeleton", nil] call KH_fnc_getConfigValue], (getNumber (_x >> "followRotation")) isEqualTo 1, getText (_x >> "model")];
+        addRender3D [[_entity, ["", _x >> "bindSkeleton", nil] call KH_fnc_getConfigValue], getNumber (_x >> "followRotation"), getText (_x >> "model")];
     };
     
     private _properties = ((configProperties [

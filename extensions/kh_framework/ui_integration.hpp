@@ -811,6 +811,12 @@ public:
 
     // Initialize the UI framework and start the worker thread
     bool initialize() {
+        // KH_PLAYER_ONLY: only a machine with an interface shows HTML (hasInterface,
+        // framework.hpp's g_is_player). On a dedicated server or a headless client
+        // nothing starts - no worker, no hook - and create / open return ''. The
+        // html* commands stand down before reaching here (sqf_integration.hpp,
+        // kh_gfx_off); this is the gate for any other caller.
+        if (!g_is_player) return false;
         if (shutting_down_.load(std::memory_order_acquire)) return false;
         if (initialized_.load(std::memory_order_acquire)) return true;
         std::lock_guard<std::mutex> lock(init_mutex_);
@@ -869,7 +875,7 @@ public:
 
         __try {
             if (hook_installed_.load(std::memory_order_acquire) && hooked_present_addr_) {
-                MH_DisableHook(hooked_present_addr_);
+                kh_present_subscribe(KH_PRESENT_SLOT_UI, nullptr);   // KH_SHARED_PRESENT: never the hook itself.
             }
         }
         __except(EXCEPTION_EXECUTE_HANDLER) {
@@ -899,7 +905,7 @@ public:
             std::lock_guard<std::mutex> lock(hook_mutex_);
             
             if (hook_installed_.load(std::memory_order_acquire) && hooked_present_addr_) {
-                MH_DisableHook(hooked_present_addr_);
+                kh_present_subscribe(KH_PRESENT_SLOT_UI, nullptr);   // KH_SHARED_PRESENT: never the hook itself.
             }
         }
 
@@ -1878,9 +1884,7 @@ private:
 
     // MinHook members
     static std::atomic<UIFramework*> instance_ptr_;
-    typedef HRESULT(STDMETHODCALLTYPE* PresentFn)(IDXGISwapChain*, UINT, UINT);
-    static PresentFn original_present_;
-    static void* hooked_present_addr_;
+    static void* hooked_present_addr_;   // KH_SHARED_PRESENT: the target this module subscribed through.
     static std::atomic<bool> hook_installed_;
     static std::mutex hook_mutex_;
 
@@ -1898,7 +1902,7 @@ private:
     // ladder_reset, called from the init path only).
     struct HookLadder {
         std::atomic<int32_t>  fail_count{0};   // failed rounds this ladder (0..3)
-        std::atomic<int32_t>  fail_phase{0};   // Present: 1 temp swap chain, 2 MinHook init, 3 CreateHook, 4 EnableHook
+        std::atomic<int32_t>  fail_phase{0};   // Present: 1 temp swap chain, 2 MinHook init, 3 shared hook
                                                 // WndProc: 1 no game window, 2 SetWindowLongPtr
         std::atomic<int32_t>  status{0};   // MH_STATUS (Present) or GetLastError (WndProc) of the failing call
         std::atomic<bool>     failed{false};   // third strike: permanent for the session
@@ -2017,9 +2021,11 @@ private:
         return {};
     }
 
-    static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* sc, UINT si, UINT f) {
-        PresentFn orig = original_present_;
-        
+    // KH_SHARED_PRESENT: a subscriber of framework.hpp's one Present detour
+    // (slot KH_PRESENT_SLOT_UI, after the renderer's); the detour forwards to
+    // the original under this module's old rule (an exception there reads as
+    // S_OK).
+    static void present_cb(IDXGISwapChain* sc, UINT, UINT) {
         __try {
             UIFramework* ptr = instance_ptr_.load(std::memory_order_acquire);
             if (ptr && !ptr->shutting_down_.load(std::memory_order_acquire)) {
@@ -2029,17 +2035,6 @@ private:
         __except(EXCEPTION_EXECUTE_HANDLER) {
             // Crash during rendering - likely D3D teardown, ignore
         }
-
-        if (orig) {
-            __try {
-                return orig(sc, si, f);
-            }
-            __except(EXCEPTION_EXECUTE_HANDLER) {
-                return S_OK;
-            }
-        }
-        
-        return S_OK;
     }
 
     static HWND find_game_window() {
@@ -2108,33 +2103,19 @@ private:
         void** vtable = *(void***)temp_swap_chain.Get();
         void* present_addr = vtable[8];
 
-        // Only initialize MinHook once (framework ensure_minhook is bool-only:
-        // status -1 = unavailable, as the render side records it)
-        if (!ensure_minhook()) {
-            present_ladder_.fail_phase.store(2, std::memory_order_release);
-            present_ladder_.status.store(-1, std::memory_order_release);
-            instance_ptr_.store(nullptr, std::memory_order_release);
-            return false;
-        }
-
-        MH_STATUS khmh_st = MH_CreateHook(present_addr, &hooked_present, (void**)&original_present_);
-        
+        // KH_SHARED_PRESENT: the renderer detours the same Present, and MinHook
+        // takes one hook per target - the one detour is framework.hpp's, shared.
+        // Status -1 = MinHook unavailable (phase 2, as the render side records
+        // it); any other failure is phase 3 with its MH_STATUS (-2 = no target
+        // slot). A hook that would not enable was removed by kh_present_hook.
+        const int khmh_st = kh_present_hook(present_addr);
         if (khmh_st != MH_OK) {
-            present_ladder_.fail_phase.store(3, std::memory_order_release);
+            present_ladder_.fail_phase.store(khmh_st == -1 ? 2 : 3, std::memory_order_release);
             present_ladder_.status.store(static_cast<int32_t>(khmh_st), std::memory_order_release);
             instance_ptr_.store(nullptr, std::memory_order_release);
             return false;
         }
-
-        khmh_st = MH_EnableHook(present_addr);
-
-        if (khmh_st != MH_OK) {
-            present_ladder_.fail_phase.store(4, std::memory_order_release);
-            present_ladder_.status.store(static_cast<int32_t>(khmh_st), std::memory_order_release);
-            MH_RemoveHook(present_addr);   // nothing partial survives the round
-            instance_ptr_.store(nullptr, std::memory_order_release);
-            return false;
-        }
+        kh_present_subscribe(KH_PRESENT_SLOT_UI, &present_cb);
 
         hooked_present_addr_ = present_addr;
         hook_installed_.store(true, std::memory_order_release);
@@ -2146,8 +2127,10 @@ private:
         if (!hook_installed_.load(std::memory_order_acquire)) return;
 
         if (hooked_present_addr_) {
+            // KH_SHARED_PRESENT: unsubscribe only - the detour is shared with the
+            // renderer and stays until MH_Uninitialize.
+            kh_present_subscribe(KH_PRESENT_SLOT_UI, nullptr);
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            MH_RemoveHook(hooked_present_addr_);
             hooked_present_addr_ = nullptr;
         }
         
@@ -2777,7 +2760,6 @@ private:
 };
 
 std::atomic<UIFramework*> UIFramework::instance_ptr_{nullptr};
-UIFramework::PresentFn UIFramework::original_present_ = nullptr;
 void* UIFramework::hooked_present_addr_ = nullptr;
 std::atomic<bool> UIFramework::hook_installed_{false};
 std::mutex UIFramework::hook_mutex_;

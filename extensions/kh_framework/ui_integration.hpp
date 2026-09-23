@@ -1888,7 +1888,7 @@ private:
     static std::atomic<bool> hook_installed_;
     static std::mutex hook_mutex_;
 
-    // KH_UI_HOOK_LADDER (26721): the three-strike install ladder, one per
+    // KH_UI_HOOK_LADDER: the three-strike install ladder, one per
     // hook. TWIN of RenderIntegration's g_reorder_hook_* lanes and
     // kh_reorder_hook_fail_round: a failed install is retried after 1 s,
     // then after 10 s, then declared dead for the session with ONE

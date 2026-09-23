@@ -24,8 +24,6 @@ int intercept::api_version() {
 }
 
 void intercept::pre_start() {
-    g_is_server = sqf::is_server();
-    g_is_headless = (!(sqf::is_server()) && !(sqf::has_interface()));
     g_is_player = sqf::has_interface();
     g_kh_cached_temporal_stack = game_value(auto_array<game_value>());
     g_kh_cached_temporal_additions = game_value(auto_array<game_value>());
@@ -87,6 +85,8 @@ void intercept::pre_start() {
 }
 
 void intercept::pre_init() {
+    g_is_server = sqf::is_server();
+    g_is_headless = (!(sqf::is_server()) && !(sqf::has_interface()));
     populate_sqf_command_map();
     auto displays = sqf::all_displays();
     g_is_menu = (displays.size() == 1 && displays[0] == sqf::find_display(0));
@@ -250,6 +250,8 @@ void intercept::on_frame() {
 }
 
 void intercept::mission_ended() {
+    g_is_server = false;
+    g_is_headless = false;
     g_kh_cached_temporal_stack = game_value(auto_array<game_value>());
     g_kh_cached_temporal_additions = game_value(auto_array<game_value>());
     g_kh_cached_temporal_deletions = game_value(auto_array<game_value>());

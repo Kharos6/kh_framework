@@ -236,8 +236,8 @@ static void kh_present_dispatch(IDXGISwapChain* khpd_sc, UINT khpd_sync, UINT kh
 }
 template <int KhK>
 static HRESULT STDMETHODCALLTYPE kh_present_detour(IDXGISwapChain* khpt_sc, UINT khpt_sync, UINT khpt_flags) {
-    // DXGI_PRESENT_TEST presents nothing (the engine issues one mid-UI-pass,
-    // KH_PRESENT_TEST); every subscriber draws, so none runs on a test.
+    // DXGI_PRESENT_TEST presents nothing and every subscriber draws, so none
+    // runs on a test (KH_PRESENT_TEST).
     if (!(khpt_flags & DXGI_PRESENT_TEST)) kh_present_dispatch(khpt_sc, khpt_sync, khpt_flags);
     const KhSharedPresentFn khpt_orig = g_kh_present_orig[KhK];
     if (!khpt_orig) return E_FAIL;

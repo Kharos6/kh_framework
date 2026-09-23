@@ -473,8 +473,8 @@ namespace RenderIntegration {
 // KH_PLAYER_ONLY (the reference above): false = this machine has no graphics
 // and nothing of this header may start. Tested where anything starts - the
 // Draw3D and UI drivers, a new object or affector - and at the mission reset.
-// framework.hpp's g_is_player: hasInterface, written on the game thread in
-// pre_start (and again in pre_init); every caller is on the game thread.
+// framework.hpp's g_is_player: hasInterface, written once, on the game thread,
+// in pre_start (main.cpp); every caller is on the game thread.
 inline bool kh_render_on() { return ::g_is_player; }
 
 // KH_SESSION_RESET - an object back to what a fresh process holds: destroyed
@@ -7461,7 +7461,7 @@ struct Resources {
     ID3D11ShaderResourceView* sun_pf_scr_srvm[12] = {};
     ID3D11PixelShader*        ps_sunpfm = nullptr;
     ID3D11BlendState*         blend_pf = nullptr;
-    ID3D11SamplerState*       samp_pf = nullptr;   // linear-clamp; s1 on both mesh paths.
+    ID3D11SamplerState*       samp_pf = nullptr;   // linear-clamp; s1 (KH_SHADOW_GATHER).
     ID3D11VertexShader*       vs_sunpf = nullptr;
     ID3D11PixelShader*        ps_sunpf = nullptr;
     // KH_SKIN_GPU (kh_skin_so_ensure): VSSkinSo, the geometry-stage object that
@@ -7889,12 +7889,11 @@ static int32_t               g_ui_poison_run = 0;   // UI-flush thread only.
 // stops holding feeds the machine from one thread and places the alpha clear
 // against the other's draws; the symptom is 'some elements, flashing'.
 // KH_PRESENT (measured; the lanes are retired, the facts are not): one
-// swapchain, one calling site, flags 0, sync 0, and no DXGI_PRESENT_TEST call
-// on this build - but the body IS entered about twice per presented HUD frame
-// and about thirty times per map frame. kh_present_cb is written for all of
-// that and counts none of it, so a build that presents differently costs
-// correctness rather than a lane; the TEST passthrough stays for the same
-// reason.
+// swapchain, one calling site, sync 0, and the body IS entered about twice per
+// presented HUD frame and about thirty times per map frame. kh_present_cb is
+// written for all of that and counts none of it, so a build that presents
+// differently costs correctness rather than a lane. A DXGI_PRESENT_TEST call
+// presents nothing and passes straight through (KH_PRESENT_TEST).
 static std::atomic<bool> g_ui_mask_wanted{false};   // Any visible UI-mode pass exists.
 // KH_PRESENT_UI (round C): the UI chain is drawn from a hooked
 // IDXGISwapChain::Present - after the engine's widgets and before the flip,
@@ -25616,7 +25615,7 @@ struct StateBackup {
     // own StateBackup).
     ID3D11ShaderResourceView* ps_srvs[49] = {};   // t0..t48.
     ID3D11ShaderResourceView* vs_srv39 = nullptr;   // KH_OBJBUF: the object record buffer's VS slot.
-    ID3D11SamplerState*      ps_samps[2] = {};   // s0 material, s1 pyramid sampler.
+    ID3D11SamplerState*      ps_samps[2] = {};   // s0 material, s1 the shadow Gather (KH_SHADOW_GATHER).
     ID3D11DepthStencilState* dss = nullptr;
     UINT                     stencil_ref = 0;
     ID3D11BlendState*        blend = nullptr;
@@ -29139,18 +29138,136 @@ static bool     g_sun_pf_fresh[4] = { false, false, false, false };   // Rendere
 static uint64_t g_sun_tier_key[4] = { 0, 0, 0, 0 };
 static bool     g_sun_tier_key_ok[4] = { false, false, false, false };
 
+// KH_PF_NEED - which tiers' moment pyramids a receiver of ours can read (bit k: tier k = hero, mid, outer, far).
+// KhSelfTier reads tier k's pyramid only for a sample point that reached tier k - no finer tier answered it - and
+// lies inside tier k's window. A finer tier j answers every point inside its window whose edge weight KhTbW is
+// 1 (e = max |clip.xy| at or under 0.7513, 0 < clip.z < 1): with a carry it blends and ends, without one it ends.
+// The sample point is the receiver plus the normal offset, at most 2 of tier j's texels (khno_k <= 2 times the
+// texel). So an object whose drawn box (kh_world_half_extents: everything it may draw), grown by that offset,
+// projects inside |x|, |y| <= KH_PF_NEED_E and KH_PF_NEED_Z .. 1 - KH_PF_NEED_Z of tier j never reaches a tier
+// past j. A tier up to j is needed only where the box's image meets its window: an image wholly outside it (past
+// |x| or |y| = 1 or z outside 0 .. 1, by KH_PF_NEED_Z) holds no point its window test admits. The clip is affine
+// (the sun projections are ortho), so a box's image is its centre's plus the sums of the rows' absolute values.
+// A pass that shades under a copied frame template (the
+// PIP, the view-model slice) passes it: the tiers and matrices its shader will read, and its own objects when they
+// are a snapshot (the slice's). Otherwise the tiers are the maps as they stand - the fill after the convert
+// writes those same lanes - and the objects are the scene: every colour-drawing object in it, a superset of what
+// any pass draws from it. Render thread, or the game thread under the park.
+static constexpr double KH_PF_NEED_E = 0.74;    // Under the 0.7513 KhTbW needs, by a margin for float.
+static constexpr double KH_PF_NEED_Z = 1.0e-3;
+inline uint32_t kh_sun_pf_need(const ConstantData* khpn_tpl, const std::vector<RenderObject>* khpn_objs) {
+    struct KhPfTier { bool on; double vp[4][4]; double a[3]; double pad; };
+    KhPfTier khpn_t[4];
+    const bool khpn_gv[4] = { g_sun2_map_valid, g_sun3_map_valid, g_sun4_map_valid, g_sun5_map_valid };
+    const float (*const khpn_gm[4])[4] = { g_sun2_map_vp, g_sun3_map_vp, g_sun4_map_vp, g_sun5_map_vp };
+    const UINT khpn_gs[4] = { g_sun2_map_size, g_sun3_map_size, g_sun4_map_size, g_sun5_map_size };
+    uint32_t khpn_all = 0;
+    for (int k = 0; k < 4; ++k) {
+        KhPfTier& t = khpn_t[k];
+        const float (*m)[4] = khpn_gm[k];
+        float khpn_sz = static_cast<float>(khpn_gs[k]);
+        if (khpn_tpl) {   // The template's lanes: what that pass's shader reads.
+            const float (*const khpn_tm[4])[4] = { khpn_tpl->sun_vp2, khpn_tpl->sun_vp3, khpn_tpl->sun_vp4,
+                                                    khpn_tpl->sun_vp5 };
+            const float* const khpn_tt[4] = { khpn_tpl->sun_meta2, khpn_tpl->sun_meta3, khpn_tpl->sun_meta4,
+                                               khpn_tpl->sun_meta5 };
+            t.on = khpn_tpl->sun_meta[0] >= 0.5f && khpn_tt[k][0] >= 0.5f;
+            m = khpn_tm[k];
+            khpn_sz = khpn_tt[k][1];
+            for (int i = 0; i < 3; ++i) t.a[i] = static_cast<double>(khpn_tpl->sun_origin[i]);
+        } else {
+            t.on = khpn_gv[k];
+            for (int i = 0; i < 3; ++i) t.a[i] = static_cast<double>(g_sun_tier_anchor[k][i]);
+        }
+        for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c) t.vp[r][c] = static_cast<double>(m[r][c]);
+        const double khpn_ir = sqrt(t.vp[0][0] * t.vp[0][0] + t.vp[1][0] * t.vp[1][0] + t.vp[2][0] * t.vp[2][0]);
+        const double khpn_tw = 2.0 / (fmax(static_cast<double>(khpn_sz), 1.0) * fmax(khpn_ir, 1.0e-6));
+        t.pad = 2.0 * khpn_tw * 1.01 + 1.0e-4;   // The normal offset's reach (KhSelfTier's khT_no).
+        if (t.on) khpn_all |= 1u << k;
+    }
+    if (khpn_all == 0u) return 0u;
+    uint32_t khpn_need = 0u;
+    auto khpn_one = [&](const RenderObject& o) {
+        if (!o.visible || o.fullscreen) return;
+        const double khpn_c[3] = { o.pos[0], o.pos[2], o.pos[1] };   // Engine axes.
+        float khpn_hf[3];
+        kh_world_half_extents(o, khpn_hf);
+        uint32_t khpn_reach = 0u;
+        for (int j = 0; j < 4; ++j) {   // Finest first; the far tier is the last (nothing lies past it).
+            const KhPfTier& t = khpn_t[j];
+            if (!t.on) continue;
+            double khpn_cl[3], khpn_ex[3];
+            for (int i = 0; i < 3; ++i) {
+                khpn_cl[i] = t.vp[3][i];
+                khpn_ex[i] = 0.0;
+                for (int r = 0; r < 3; ++r) {
+                    khpn_cl[i] += (khpn_c[r] - t.a[r]) * t.vp[r][i];
+                    khpn_ex[i] += fabs(t.vp[r][i]) * (static_cast<double>(khpn_hf[r]) + t.pad);
+                }
+            }
+            const bool khpn_out = fabs(khpn_cl[0]) - khpn_ex[0] >= 1.0 + KH_PF_NEED_Z ||
+                                  fabs(khpn_cl[1]) - khpn_ex[1] >= 1.0 + KH_PF_NEED_Z ||
+                                  khpn_cl[2] + khpn_ex[2] <= -KH_PF_NEED_Z ||
+                                  khpn_cl[2] - khpn_ex[2] >= 1.0 + KH_PF_NEED_Z;   // NaN: not outside.
+            if (khpn_out) continue;   // No point of it passes this window: past it, as if the tier were off.
+            khpn_reach |= 1u << j;
+            const bool khpn_in = fabs(khpn_cl[0]) + khpn_ex[0] <= KH_PF_NEED_E &&
+                                 fabs(khpn_cl[1]) + khpn_ex[1] <= KH_PF_NEED_E &&
+                                 khpn_cl[2] - khpn_ex[2] >= KH_PF_NEED_Z &&
+                                 khpn_cl[2] + khpn_ex[2] <= 1.0 - KH_PF_NEED_Z;   // NaN: not held.
+            if (khpn_in) break;   // Every point ends here: no tier past it is read.
+        }
+        khpn_need |= khpn_reach;
+    };
+    if (khpn_objs) {
+        for (const RenderObject& o : *khpn_objs) { khpn_one(o); if (khpn_need == khpn_all) break; }
+    } else {
+        for (uint32_t s = 0; s < g_scene.objs.size() && khpn_need != khpn_all; ++s) {
+            if (g_scene.alive[s]) khpn_one(g_scene.objs[s]);
+        }
+    }
+    return khpn_need;
+}
+// KH_PF_NEED: a fresh map whose pyramid no receiver can read waits here, its pf_valid down (its lanes and its bind
+// off) until a convert finds a reader; a render meanwhile re-arms pf_valid and the wait puts it down again.
+static bool g_sun_pf_held[4] = { false, false, false, false };
+
 // A failed step clears the band flag; the kernel stays classic there.
 // KH_SESSION_RESET: hoisted out of the function below so the session reset reaches it.
 static uint64_t g_sun_pf_done = ~0ull;
-inline void kh_sun_pf_convert(ID3D11DeviceContext* ctx) {
+// khpc_tpl / khpc_objs: a template pass's lanes and snapshot (KH_PF_NEED); the injection and the flush pass neither.
+inline void kh_sun_pf_convert(ID3D11DeviceContext* ctx, const ConstantData* khpc_tpl = nullptr,
+                              const std::vector<RenderObject>* khpc_objs = nullptr) {
     const uint64_t khpc_mark = g_sun2_renders + g_sun3_renders + g_sun4_renders + g_sun5_renders;   // KH_FAR_PF.
-    if (g_sun_pf_done == khpc_mark) return;   // Once per fresh map set (twin call sites).
+    const bool khpc_held = g_sun_pf_held[0] || g_sun_pf_held[1] || g_sun_pf_held[2] || g_sun_pf_held[3];
+    if (g_sun_pf_done == khpc_mark && !khpc_held) return;   // Once per fresh map set (twin call sites).
     g_sun_pf_done = khpc_mark;
     if (!g_res.vs_sunpf || !g_res.ps_sunpf || !g_res.ps_sunpfm ||
         !g_res.sun_pf_scr) {
         g_sun_pf_valid[0] = false; g_sun_pf_valid[1] = false; g_sun_pf_valid[2] = false; g_sun_pf_valid[3] = false;
+        for (int khpc_k = 0; khpc_k < 4; ++khpc_k) g_sun_pf_held[khpc_k] = false;   // KH_PF_NEED.
         return;
     }
+    // KH_PF_NEED: decided before any state is touched - a held tier a receiver now reads is due again; a fresh one
+    // none reads waits. Nothing due: no state capture, no draw.
+    const uint32_t khpc_need = kh_sun_pf_need(khpc_tpl, khpc_objs);
+    bool khpc_due = false;
+    for (int khpc_k = 0; khpc_k < 4; ++khpc_k) {
+        const bool khpc_read = (khpc_need & (1u << khpc_k)) != 0u;
+        if (g_sun_pf_held[khpc_k]) {
+            if (!khpc_read) { g_sun_pf_valid[khpc_k] = false; continue; }
+            g_sun_pf_held[khpc_k] = false;   // A held tier stays fresh (only a convert clears fresh):
+            g_sun_pf_valid[khpc_k] = true;    // re-armed, it converts below.
+        }
+        if (!g_sun_pf_valid[khpc_k] || !g_sun_pf_fresh[khpc_k]) continue;
+        if (!khpc_read) {
+            g_sun_pf_held[khpc_k] = true;
+            g_sun_pf_valid[khpc_k] = false;
+            continue;
+        }
+        khpc_due = true;
+    }
+    if (!khpc_due) return;
     KhOmSave khpc_om;   // Full OM set in, full OM set out (rule: never a slot-0/4 save).
     khpc_om.capture(ctx);
     UINT khpc_nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
@@ -32860,6 +32977,15 @@ inline void kh_fill_sun_tiers_cb(ConstantData& cbd) {
     kh_dls_fill_cb(cbd);   // KH_DL_SHADOW: beside the sun tiers, same frame CB.
 }
 
+// The prefilter arms, as the passes bind the pyramids (a map and its converted pyramid). The frame fill writes
+// them; a pass shading under a copied template (the PIP, the view-model slice) writes them again after its own
+// convert (KH_PF_NEED), so they say what its binds bind.
+inline void kh_fill_sun_pf_lanes(ConstantData& cbd) {
+    cbd.sun_pf[0] = g_sun2_map_valid && g_sun_pf_valid[0] ? 1.0f : 0.0f;
+    cbd.sun_pf[1] = g_sun3_map_valid && g_sun_pf_valid[1] ? 1.0f : 0.0f;
+    cbd.sun_pf[2] = g_sun4_map_valid && g_sun_pf_valid[2] ? 1.0f : 0.0f;
+    cbd.sun_origin[3] = g_sun5_map_valid && g_sun_pf_valid[3] ? 1.0f : 0.0f;   // KH_FAR_PF: the far arm.
+}
 inline void fill_lighting_frame_cb(ConstantData& cbd) {
     cbd.lighting1[0] = g_sun_dir_engine[0];
     cbd.lighting1[1] = g_sun_dir_engine[1];
@@ -32914,12 +33040,7 @@ inline void fill_lighting_frame_cb(ConstantData& cbd) {
         // frames): rebase it algebraically so every matrix in this block shares
         // cbd.sun_origin.
         kh_fill_sun_tiers_cb(cbd);
-        {
-            cbd.sun_pf[0] = g_sun2_map_valid && g_sun_pf_valid[0] ? 1.0f : 0.0f;
-            cbd.sun_pf[1] = g_sun3_map_valid && g_sun_pf_valid[1] ? 1.0f : 0.0f;
-            cbd.sun_pf[2] = g_sun4_map_valid && g_sun_pf_valid[2] ? 1.0f : 0.0f;
-            cbd.sun_origin[3] = g_sun5_map_valid && g_sun_pf_valid[3] ? 1.0f : 0.0f;   // KH_FAR_PF: the far arm.
-        }
+        kh_fill_sun_pf_lanes(cbd);
     }
 
     if (!g_atlas_frame_cur && !g_atlas_frame_prev) {
@@ -35175,6 +35296,7 @@ inline void kh_sun_ladder_forget() {
     g_sun_pf_valid[3] = false;   // KH_FAR_PF.
     for (int khtk_i = 0; khtk_i < 4; ++khtk_i) {   // KH_SUN_TIER_KEY.
         g_sun_pf_fresh[khtk_i] = false;
+        g_sun_pf_held[khtk_i] = false;   // KH_PF_NEED.
         g_sun_tier_key_ok[khtk_i] = false;
     }
     g_sun_map_hash = 0;
@@ -39568,6 +39690,8 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     ID3D11ShaderResourceView* khco_old_t35 = nullptr;   // KH_CAST_OCC: t35 sits past
                                                         // old_ps_srvs[33].
     ctx->PSGetShaderResources(35, 1, &khco_old_t35);
+    ID3D11SamplerState* khgm_old_s1 = nullptr;   // KH_SHADOW_GATHER: s1, put back with t35.
+    ctx->PSGetSamplers(1, 1, &khgm_old_s1);
     ctx->GSGetShader(&old_gs, nullptr, nullptr);
     ctx->HSGetShader(&old_hs, nullptr, nullptr);
     ctx->DSGetShader(&old_ds2, nullptr, nullptr);
@@ -39633,6 +39757,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     if (sun_map && g_sun3_map_valid && g_res.sun3_srv) ctx->PSSetShaderResources(26, 1, &g_res.sun3_srv);
     if (sun_map && g_sun4_map_valid && g_res.sun4_srv) ctx->PSSetShaderResources(27, 1, &g_res.sun4_srv);
     if (sun_map && g_sun5_map_valid && g_res.sun5_srv) ctx->PSSetShaderResources(32, 1, &g_res.sun5_srv);
+    ctx->PSSetSamplers(1, 1, &g_res.samp_pf);   // KH_SHADOW_GATHER: the cast chain's (null = the default, clamp).
     // t36 is not bound here: PSMaskCast never reads it. This fire binds only
     // what it reads.
     if (g_res.thm_srv) ctx->PSSetShaderResources(10, 1, &g_res.thm_srv);   // Terrain snap (full-table
@@ -39867,6 +39992,8 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     if (khsr_set) ctx->RSSetScissorRects(khsr_old_n, khsr_old_n ? khsr_old : nullptr);   // KH_CAST_SCISSOR.
     ctx->PSSetShaderResources(35, 1, &khco_old_t35);
     KH_SAFE_RELEASE(khco_old_t35);
+    ctx->PSSetSamplers(1, 1, &khgm_old_s1);   // KH_SHADOW_GATHER.
+    KH_SAFE_RELEASE(khgm_old_s1);
     g_ro.in_injection = false;
     KH_SAFE_RELEASE(old_vs_cb);
     KH_SAFE_RELEASE(old_vs_cb1);
@@ -43575,6 +43702,9 @@ inline void kh_pip_inject(ID3D11DeviceContext* ctx) {
     // split and its elevation from it, and fxParams0 below is the PIP camera.
     khpi_cbf.fog_color[3] = cam[1];
     khpi_cbf.kh_pass[3] = 1.0f;
+    kh_scene_sync();   // KH_PF_NEED: the scene this pass draws, synced ahead of its convert and binds.
+    kh_sun_pf_convert(ctx, &khpi_cbf);   // KH_PF_NEED: a pyramid this pass's receivers read converts here.
+    kh_fill_sun_pf_lanes(khpi_cbf);   // KH_PF_NEED: the arms say what the binds below bind.
     if (!kh_upload_frame_cb(ctx, g_res.composite_frame_cb, khpi_cbf)) {
         khpi_bk.restore(ctx);
         g_ro.in_injection = khpi_pinj;
@@ -43605,7 +43735,7 @@ inline void kh_pip_inject(ID3D11DeviceContext* ctx) {
     if (g_sun3_map_valid && g_sun_pf_valid[1] && g_res.sun_pf_srv[1]) ctx->PSSetShaderResources(30, 1, &g_res.sun_pf_srv[1]);
     if (g_sun4_map_valid && g_sun_pf_valid[2] && g_res.sun_pf_srv[2]) ctx->PSSetShaderResources(31, 1, &g_res.sun_pf_srv[2]);
     if (g_sun5_map_valid && g_sun_pf_valid[3] && g_res.sun_pf_srv[3]) ctx->PSSetShaderResources(20, 1, &g_res.sun_pf_srv[3]);
-    if (g_res.samp_pf) ctx->PSSetSamplers(1, 1, &g_res.samp_pf);
+    ctx->PSSetSamplers(1, 1, &g_res.samp_pf);   // KH_SHADOW_GATHER: null = the default state, also clamp.
     if (g_thm_valid && g_res.thm_srv) ctx->PSSetShaderResources(10, 1, &g_res.thm_srv);
     ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);
     ctx->RSSetState(g_res.rasterizer);
@@ -43619,8 +43749,7 @@ inline void kh_pip_inject(ID3D11DeviceContext* ctx) {
     const float khpi_now = effect_time_seconds();
     uint32_t khpi_drawn = 0;
 
-    kh_scene_sync();
-    kh_objbuf_sync(ctx);   // KH_OBJBUF: the records this pass's buckets index.
+    kh_objbuf_sync(ctx);   // KH_OBJBUF: the records this pass's buckets index (scene synced above).
     kh_objbuf_bind(ctx);   // VS t39 (StateBackup restores it).
 
     // The injection's structure on the PIP camera: the grid pre-cull against
@@ -44046,6 +44175,8 @@ inline void kh_infront_inject(ID3D11DeviceContext* ctx, const D3D11_VIEWPORT& kh
     khvi_cbf.kh_pass[0] = cam[0]; khvi_cbf.kh_pass[1] = cam[1]; khvi_cbf.kh_pass[2] = cam[2];
     khvi_cbf.kh_pass[3] = g_vm_rebase;
     khvi_cbf.fog_color[3] = cam[1];
+    kh_sun_pf_convert(ctx, &khvi_cbf, &g_vm_meshes);   // KH_PF_NEED: the slice's snapshot is what it draws.
+    kh_fill_sun_pf_lanes(khvi_cbf);   // KH_PF_NEED: the arms say what the binds below bind.
     if (!kh_upload_frame_cb(ctx, g_res.composite_frame_cb, khvi_cbf)) {
         khvi_bk.restore(ctx);
         g_ro.in_injection = khvi_pinj;
@@ -44083,7 +44214,7 @@ inline void kh_infront_inject(ID3D11DeviceContext* ctx, const D3D11_VIEWPORT& kh
         if (g_sun3_map_valid && g_sun_pf_valid[1] && g_res.sun_pf_srv[1]) ctx->PSSetShaderResources(30, 1, &g_res.sun_pf_srv[1]);
         if (g_sun4_map_valid && g_sun_pf_valid[2] && g_res.sun_pf_srv[2]) ctx->PSSetShaderResources(31, 1, &g_res.sun_pf_srv[2]);
         if (g_sun5_map_valid && g_sun_pf_valid[3] && g_res.sun_pf_srv[3]) ctx->PSSetShaderResources(20, 1, &g_res.sun_pf_srv[3]);
-        if (g_res.samp_pf) ctx->PSSetSamplers(1, 1, &g_res.samp_pf);
+        ctx->PSSetSamplers(1, 1, &g_res.samp_pf);   // KH_SHADOW_GATHER: null = the default state, also clamp.
         // The engine's stencil evidence, as the injection binds it: the pre /
         // post pair (KhStenTerm) and the volume copy (KhVolTerm).
         if (kh_svs_sten_on()) {
@@ -47257,7 +47388,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     if (g_sun3_map_valid && g_sun_pf_valid[1] && g_res.sun_pf_srv[1]) ctx->PSSetShaderResources(30, 1, &g_res.sun_pf_srv[1]);
     if (g_sun4_map_valid && g_sun_pf_valid[2] && g_res.sun_pf_srv[2]) ctx->PSSetShaderResources(31, 1, &g_res.sun_pf_srv[2]);
     if (g_sun5_map_valid && g_sun_pf_valid[3] && g_res.sun_pf_srv[3]) ctx->PSSetShaderResources(20, 1, &g_res.sun_pf_srv[3]);   // KH_FAR_PF.
-    if (g_res.samp_pf) ctx->PSSetSamplers(1, 1, &g_res.samp_pf);
+    ctx->PSSetSamplers(1, 1, &g_res.samp_pf);   // KH_SHADOW_GATHER: null = the default state, also clamp.
     // Analytic terrain heightfield (t10, saved range; see thmParams).
     if (g_thm_valid && g_res.thm_srv) ctx->PSSetShaderResources(10, 1, &g_res.thm_srv);
     // The light depth array at t36, bound by the pass that reads it (twin: the
@@ -49526,6 +49657,7 @@ inline void kh_dls_world_pass_body(ID3D11DeviceContext* khw_ctx) {
 
     khw_ctx->PSSetShaderResources(0, 1, &g_mask.cast_depth);
     if (g_res.dls_srv) khw_ctx->PSSetShaderResources(36, 1, &g_res.dls_srv);
+    khw_ctx->PSSetSamplers(1, 1, &g_res.samp_pf);   // KH_SHADOW_GATHER (khw_bk restores s1).
     if (khw_frm.mir_meta[0] >= 0.5f && g_res.dlsw_srv) {
         khw_ctx->PSSetShaderResources(37, 1, &g_res.dlsw_srv);   // KH_DLSW_MASK, metres.
     }
@@ -51603,7 +51735,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
     if (g_sun3_map_valid && g_sun_pf_valid[1] && g_res.sun_pf_srv[1]) ctx->PSSetShaderResources(30, 1, &g_res.sun_pf_srv[1]);
     if (g_sun4_map_valid && g_sun_pf_valid[2] && g_res.sun_pf_srv[2]) ctx->PSSetShaderResources(31, 1, &g_res.sun_pf_srv[2]);
     if (g_sun5_map_valid && g_sun_pf_valid[3] && g_res.sun_pf_srv[3]) ctx->PSSetShaderResources(20, 1, &g_res.sun_pf_srv[3]);   // KH_FAR_PF.
-    if (g_res.samp_pf) ctx->PSSetSamplers(1, 1, &g_res.samp_pf);
+    ctx->PSSetSamplers(1, 1, &g_res.samp_pf);   // KH_SHADOW_GATHER: null = the default state, also clamp.
     // Analytic terrain heightfield (t10, saved range) - the flush twin.
     if (g_thm_valid && g_res.thm_srv) ctx->PSSetShaderResources(10, 1, &g_res.thm_srv);
     // The light depth array at t36, twin of the injection's bind and inside
@@ -53471,11 +53603,10 @@ inline void kh_overlay_end(int khoe_tok) {
 static void kh_present_cb(IDXGISwapChain* self, UINT khp_sync, UINT khp_flags) {
     (void)khp_sync;
     try {
-        // KH_PRESENT_TEST: the engine calls Present with DXGI_PRESENT_TEST in
-        // the MIDDLE of its UI pass (an occlusion probe; nothing is presented
-        // and RenderDoc does not end the frame there - measured: our flush
-        // landed between two widget groups, 24 draws before the real Present).
-        // Only a presenting call ends the frame.
+        // KH_PRESENT_TEST: a DXGI_PRESENT_TEST call presents nothing (an
+        // occlusion probe) and ends no frame; only a presenting call does. The
+        // shared detour runs no subscriber on one (framework.hpp); this return
+        // holds the same rule here.
         if (khp_flags & DXGI_PRESENT_TEST) return;   // Shows nothing: the detour forwards it.
         ID3D11DeviceContext* khp_ctx = static_cast<ID3D11DeviceContext*>(g_reorder_target_ctx.load(std::memory_order_relaxed));
         if (self && khp_ctx && g_ui_mask_wanted.load(std::memory_order_relaxed) &&
@@ -54305,6 +54436,7 @@ inline void kh_session_globals_reset() {
     g_sun5_casters = 0;
     { const bool khsg_v[4] = { false, false, false, false }; memcpy(g_sun_pf_valid, khsg_v, sizeof(g_sun_pf_valid)); }
     { const bool khsg_v[4] = { false, false, false, false }; memcpy(g_sun_pf_fresh, khsg_v, sizeof(g_sun_pf_fresh)); }
+    { const bool khsg_v[4] = { false, false, false, false }; memcpy(g_sun_pf_held, khsg_v, sizeof(g_sun_pf_held)); }
     { const uint64_t khsg_v[4] = { 0, 0, 0, 0 }; memcpy(g_sun_tier_key, khsg_v, sizeof(g_sun_tier_key)); }
     { const bool khsg_v[4] = { false, false, false, false }; memcpy(g_sun_tier_key_ok, khsg_v, sizeof(g_sun_tier_key_ok)); }
     g_sun_pf_done = ~0ull;

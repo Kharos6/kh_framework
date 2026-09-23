@@ -5,8 +5,8 @@ Texture2D<float4> sceneColor : register(t0);
 Texture2D<float4> khsgTex : register(t3);
 // s2, not s1: the shared prefix declares khPfSamp at s1 and is compiled into
 // this unit too, so a second s1 fails the unit with X4509 the moment any effect
-// entry reaches a prefix helper that samples the pyramids. C++ twin
-// (KH_FX_SAMP_S2).
+// entry reaches a prefix helper that uses it (the shadow compares' Gather,
+// KH_SHADOW_GATHER). C++ twin (KH_FX_SAMP_S2).
 SamplerState khsgSamp : register(s2);   // Linear clamp, bound only for the resolve draw.
 
 #if MSAA_DEPTH

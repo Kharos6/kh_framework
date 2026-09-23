@@ -742,6 +742,14 @@ Texture2D<float2> khSunPf2 : register(t29);   // Hero.
 Texture2D<float2> khSunPf3 : register(t30);
 Texture2D<float2> khSunPf4 : register(t31);   // Outer.
 Texture2D<float2> khSunPf5 : register(t20);   // Far (KH_FAR_PF; t20 was free in every unit).
+// KH_SHADOW_GATHER: s1 is also the shadow compares' Gather sampler (KhSunBilinT,
+// KhSelfTapT, KhDlsBilin). Gather returns the 2 x 2 texels a bilinear sample
+// would read, in one fetch, whatever the filter; only the address mode
+// matters, and it is CLAMP - samp_pf's, or the default state a null binding
+// invokes. Every pass that runs those kernels binds it: the mesh passes
+// (injection, flush, PIP, inFront), the mask cast and the DLS world pass.
+// Every map they read is a single-mip view, so the level is mip 0 on every
+// path. (KhPfMu reads its pyramids by Load and takes no sampler.)
 SamplerState khPfSamp : register(s1);   // Linear-clamp.
 float2 KhPfMu(Texture2D<float2> khpb_t, float2 khpb_uv, float khpb_base, float khpb_lod)
 {
@@ -942,30 +950,36 @@ float KhStenUnit(float2 khsu_raster, float khsu_z)
 }
 
 // Every sun bilinear compare, ring and kernel. Floor, not truncate, and the
-// texel clamped to the map on both sides (KhSelfTapT's and KhDlsBilin's rule):
-// int2() rounds toward zero while frac is x - floor(x), so they disagree
-// wherever tx < 0, and an out-of-range Load answers 0 = the nearest depth =
-// occluded. The wide kernel needs both - it samples up to KH_PCSS_RMAX texels
-// from a uv inside the window. The ring needs them only at the rim, and only
-// below the sizes shipped: its widest reach is khcw_sp (<= 4) texels past a uv
-// guarded to 0.002 / 0.998, which lands 3.7 texels inside a 4096 map and 0.4
-// OUTSIDE a 2048 one. Nothing differs at 4096; this is what keeps a lower
-// KH_SUN_*_BASE from drawing an occluded rim along every tier window edge.
-// Two clamps, not four: clamp is per component, so clamping the corner pair
-// and mixing their components gives every tap the value a per-tap clamp would
-// (this is the hot path - the contact ring runs nine of these per receiver).
+// map's edge texel answering for every texel past it, on both sides
+// (KhSelfTapT's and KhDlsBilin's rule): int2() rounds toward zero while frac
+// is x - floor(x), so they disagree wherever tx < 0, and a texel past the map
+// read as 0 is the nearest depth = occluded. The wide kernel needs both - it
+// samples up to KH_PCSS_RMAX texels from a uv inside the window. The ring
+// needs them only at the rim, and only below the sizes shipped: its widest
+// reach is khcw_sp (<= 4) texels past a uv guarded to 0.002 / 0.998, which
+// lands 3.7 texels inside a 4096 map and 0.4 OUTSIDE a 2048 one. Nothing
+// differs at 4096; this is what keeps a lower KH_SUN_*_BASE from drawing an
+// occluded rim along every tier window edge. In the bilinear compare below
+// the edge rule is the Gather sampler's CLAMP addressing; it clamps no index.
+// KH_SHADOW_GATHER: the 2 x 2 block (lo, lo + 1 on each axis) in one Gather,
+// sampled at the corner its four texels share, (lo + 1) / size: half a texel
+// from every texel boundary, so the hardware selects exactly lo and lo + 1
+// on each axis. CLAMP repeats the edge texel as the per-index clamp to
+// [0, size - 1] did, and the texels come back unfiltered, so every compare
+// and weight is the four-Load form's, bit for bit. Components: w = (lo.x,
+// lo.y), z = (lo.x + 1, lo.y), x = (lo.x, lo.y + 1), y = (lo.x + 1, lo.y + 1).
+// size must be the texture's own width: every sun map is created at its size
+// lane (kh_sun_map_ensure), and the DLS kernel takes GetDimensions'.
 float KhSunBilinT(Texture2D<float> khcb_m, float khcb_sz, float2 uv, float z)
 {
     float2 tx = uv * khcb_sz - 0.5f;
     float2 f = frac(tx);
-    int2 khcb_lo = int2(floor(tx));
-    int2 khcb_mx = int2((int)khcb_sz - 1, (int)khcb_sz - 1);
-    int2 p0 = clamp(khcb_lo,               int2(0, 0), khcb_mx);
-    int2 p1 = clamp(khcb_lo + int2(1, 1),  int2(0, 0), khcb_mx);
-    float o00 = (z > khcb_m.Load(int3(p0.x, p0.y, 0))) ? 1.0f : 0.0f;
-    float o10 = (z > khcb_m.Load(int3(p1.x, p0.y, 0))) ? 1.0f : 0.0f;
-    float o01 = (z > khcb_m.Load(int3(p0.x, p1.y, 0))) ? 1.0f : 0.0f;
-    float o11 = (z > khcb_m.Load(int3(p1.x, p1.y, 0))) ? 1.0f : 0.0f;
+    const float2 khcb_lo = floor(tx);
+    const float4 khcb_g = khcb_m.Gather(khPfSamp, (khcb_lo + 1.0f) / khcb_sz);   // KH_SHADOW_GATHER.
+    float o00 = (z > khcb_g.w) ? 1.0f : 0.0f;
+    float o10 = (z > khcb_g.z) ? 1.0f : 0.0f;
+    float o01 = (z > khcb_g.x) ? 1.0f : 0.0f;
+    float o11 = (z > khcb_g.y) ? 1.0f : 0.0f;
     return lerp(lerp(o00, o10, f.x), lerp(o01, o11, f.x), f.y);
 }
 
@@ -1316,10 +1330,12 @@ float SunShadowOcclusion(float3 wpos, KhSunCastGrad khsc_g)   // KH_SUN_GRAD: Kh
 
 // Soft compare for the self term: five bilinear taps in a +/-0.75-texel diamond
 // (~2.5-texel penumtra). One tap body for all five maps (fxc resolves a
-// resource parameter at inlining). The texel is clamped on BOTH sides to the
-// map (khst_sz = the map edge in texels): a footprint ring past the far edge
-// would feed Load an out-of-range texel, which returns 0 = the nearest depth =
-// occluded; the edge texel answers instead, the same rule KhDlsBilin applies.
+// resource parameter at inlining). The texel is kept to the map on BOTH sides
+// (khst_sz = the map edge in texels): a footprint ring past an edge reads the
+// edge texel, never an out-of-range 0 (= the nearest depth = occluded) - the
+// same rule KhDlsBilin applies. The fetch has it from the Gather sampler's
+// CLAMP addressing; the index clamp below puts each tap's depth gradient
+// (khst_d) at the texel the fetch returned.
 float KhSelfTapT(Texture2D<float> khst_m, float khst_sz, float2 khst_t, float2 khst_g, float khst_z, float khst_b, float khst_w, float2 khst_o)
 {
     float2 khst_tc = khst_t + khst_o - 0.5f;   // Fractional offsets land on the corners.
@@ -1327,12 +1343,16 @@ float KhSelfTapT(Texture2D<float> khst_m, float khst_sz, float2 khst_t, float2 k
     float2 khst_fr = khst_tc - khst_f0;
     int2   khst_p0 = int2(khst_f0);
     int2   khst_mx = int2((int)khst_sz - 1, (int)khst_sz - 1);
+    // KH_SHADOW_GATHER (KhSunBilinT's note): the block's four texels in one
+    // fetch, reordered to this loop's tap order (0, 0) (1, 0) (0, 1) (1, 1).
+    const float4 khst_gv = khst_m.Gather(khPfSamp, (khst_f0 + 1.0f) / khst_sz);
+    const float4 khst_gt = float4(khst_gv.w, khst_gv.z, khst_gv.x, khst_gv.y);
     float4 khst_c;
     [unroll] for (int khst_k = 0; khst_k < 4; ++khst_k) {
         int2 khst_q = clamp(khst_p0 + int2(khst_k & 1, khst_k >> 1), int2(0, 0), khst_mx);
         float2 khst_d = (float2(khst_q) + 0.5f) - khst_t;
         float khst_e = khst_z + khst_d.x * khst_g.x + khst_d.y * khst_g.y - khst_b;
-        float khst_s = khst_m.Load(int3(khst_q, 0));
+        float khst_s = khst_gt[khst_k];
         khst_c[khst_k] = saturate((khst_e - khst_s) / max(khst_w, 1.0e-9f) + 0.5f);
     }
     return lerp(lerp(khst_c.x, khst_c.y, khst_fr.x),
@@ -1779,13 +1799,19 @@ float KhDlsBilin(float khb_sz, float2 uv, float khb_slice,
     float2 tx = uv * khb_sz - 0.5f;
     float2 f = frac(tx);
     // Floor, not truncate: int2 rounds toward zero while frac is x - floor(x),
-    // so they disagree wherever tx < 0, and the outermost texel of every cube
-    // face would sample its neighbour instead of itself.
+    // so they disagree wherever tx < 0, and at the outermost texel of every
+    // cube face a tap's khb_d below would be taken at the neighbouring texel,
+    // not the one the Gather (which floors tx itself) returned.
     int2 p0 = int2(floor(tx));
-    int khb_s = (int)khb_slice;
     int khb_mx = (int)khb_sz - 1;
-    // Tap order 0..3 = (0,0) (1,0) (0,1) (1,1), the o00/o10/o01/o11 the lerp
-    // pair below consumes.
+    // KH_SHADOW_GATHER (KhSunBilinT's note): the block's four texels in one
+    // fetch. khb_slice is a whole slice below the array's size (KhDlsFaceUV
+    // refuses a negative one; kh_dls_render assigns slices only below
+    // dls_slices), where Gather's rounded index and the Load's truncated one
+    // are the same slice. Tap order 0..3 = (0,0) (1,0) (0,1) (1,1), the
+    // o00/o10/o01/o11 the lerp pair below consumes.
+    const float4 khb_gv = khDlsMaps.Gather(khPfSamp, float3((floor(tx) + 1.0f) / khb_sz, khb_slice));
+    const float4 khb_gt = float4(khb_gv.w, khb_gv.z, khb_gv.x, khb_gv.y);
     float4 khb_o;
     [unroll] for (int khb_k = 0; khb_k < 4; ++khb_k) {
         int2 khb_q = clamp(p0 + int2(khb_k & 1, khb_k >> 1),
@@ -1795,7 +1821,7 @@ float KhDlsBilin(float khb_sz, float2 uv, float khb_slice,
         float2 khb_d = (float2(khb_q) + 0.5f) - khb_tc;
         float khb_zq = khb_zb + khb_d.x * khb_g.x + khb_d.y * khb_g.y;
         float khb_ref = khb_a + khb_c / max(khb_zq, khb_near);
-        khb_o[khb_k] = (khb_ref > khDlsMaps.Load(int4(khb_q, khb_s, 0))) ? 1.0f : 0.0f;
+        khb_o[khb_k] = (khb_ref > khb_gt[khb_k]) ? 1.0f : 0.0f;
     }
     return lerp(lerp(khb_o.x, khb_o.y, f.x), lerp(khb_o.z, khb_o.w, f.x), f.y);
 }

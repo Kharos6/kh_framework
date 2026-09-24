@@ -214,14 +214,20 @@ KH_var_executedStacks = [];
 			};
 
 			missionNamespace setVariable [_handlerTickCounter, nil];
-			KH_var_temporalExecutionStackMonitor deleteAt _handlerId;
+
+			if (((KH_var_temporalExecutionStackMonitor getOrDefault [_handlerId, []]) param [2, ""]) isEqualTo _handlerTickCounter) then {
+				KH_var_temporalExecutionStackMonitor deleteAt _handlerId;
+			};
 		};
 
 		if ((missionNamespace getVariable [_handlerTickCounter, 1]) >= _timeout) then {
 			"DELETIONS" manageExecutionStack [true, _handlerId];
 			_timeoutArguments call _timeoutFunction;
 			missionNamespace setVariable [_handlerTickCounter, nil];
-			KH_var_temporalExecutionStackMonitor deleteAt _handlerId;
+
+			if (((KH_var_temporalExecutionStackMonitor getOrDefault [_handlerId, []]) param [2, ""]) isEqualTo _handlerTickCounter) then {
+				KH_var_temporalExecutionStackMonitor deleteAt _handlerId;
+			};
 		}
 		else {
 			missionNamespace setVariable [_handlerTickCounter, (missionNamespace getVariable [_handlerTickCounter, 1]) + 1];

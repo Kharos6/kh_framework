@@ -144,6 +144,7 @@ static registered_sqf_function _sqf_vector_curve_slope;
 static registered_sqf_function _sqf_get_unit_yaw_speed;
 static registered_sqf_function _sqf_process_execution;
 static registered_sqf_function _sqf_manage_execution_stack_string_array;
+static registered_sqf_function _sqf_execution_replaced;
 static registered_sqf_function _sqf_trigger_cba_event_array;
 static registered_sqf_function _sqf_process_cba_group_event;
 static registered_sqf_function _sqf_process_cba_array_event;
@@ -4966,7 +4967,8 @@ static void kh_trigger_stack_handler(const std::string& environment_id, bool del
 // additions (kh_push_temporal_addition), the compiled handlers queue deletions and scripts edit all three
 // (manageExecutionStack), process_temporal_execution_stack (on_frame) takes the queues and runs the stack, and
 // main.cpp empties them at both mission edges (kh_temporal_clear). Never destructed: they hold game values, which
-// the mission edges release; process exit must not.
+// the mission edges release; process exit must not. An execute whose environment names an id replaces whatever
+// executor held it (kh_temporal_replace).
 //
 // An entry is the ten-element array execute builds, which manageExecutionStack takes too:
 // [arguments, function (CODE), interval (SCALAR: > 0 seconds between runs, 0 every frame, -n every n frames),
@@ -4988,6 +4990,8 @@ struct KhTemporalEntry {
     game_value  execution_time;
     float       execution_count = 0.0f;
     bool        removed = false;         // Removed from the stack while it ran: runs no more, leaves after the run.
+    bool        replaced = false;        // Replaced while the stack ran (kh_temporal_replace); removed too.
+    std::string owner;                   // An execute timeout entry: the environment id it belongs to.
 };
 
 static std::vector<KhTemporalEntry>& g_kh_temporal_stack = *(new std::vector<KhTemporalEntry>());
@@ -5001,6 +5005,11 @@ static bool g_kh_temporal_running = false;
 // An entry was marked removed during the current run (kh_temporal_stack_remove, the one writer of the mark). Only
 // a run marks entries and its end erases them, so with this false nothing is marked and the end skips the erase.
 static bool g_kh_temporal_removed_any = false;
+// Every replacement of an id steps its generation (kh_temporal_replace), so execute can tell that its own executor
+// was replaced during one of its immediate calls. Emptied with the tables.
+static std::unordered_map<std::string, uint64_t> g_kh_temporal_gen;
+// The entry the run is calling, for the length of the call (executionReplaced); null otherwise.
+static KhTemporalEntry* g_kh_temporal_current = nullptr;
 
 // One entry from its array. False with the reason in khte_err.
 static bool kh_temporal_entry_of(const game_value& khte_v, KhTemporalEntry& khte_e, std::string& khte_err) {
@@ -5036,11 +5045,14 @@ static bool kh_temporal_entry_of(const game_value& khte_v, KhTemporalEntry& khte
     khte_e.execution_time = khte_a[8];
     khte_e.execution_count = static_cast<float>(khte_a[9]);
     khte_e.removed = false;
+    khte_e.replaced = false;
+    khte_e.owner.clear();
     return true;
 }
 
-// Queues an addition: at the back, or at the front (a timeout with priority).
-static void kh_push_temporal_addition(const game_value& entry, bool prepend) {
+// Queues an addition: at the back, or at the front (a timeout with priority). owner: the environment id a timeout
+// entry belongs to, so a replacement of that environment takes it too.
+static void kh_push_temporal_addition(const game_value& entry, bool prepend, const std::string& owner = std::string()) {
     KhTemporalEntry khpa_e;
     std::string khpa_err;
 
@@ -5048,6 +5060,8 @@ static void kh_push_temporal_addition(const game_value& entry, bool prepend) {
         report_error("Temporal execution: " + khpa_err);
         return;
     }
+
+    khpa_e.owner = owner;
 
     if (prepend) {
         g_kh_temporal_additions.insert(g_kh_temporal_additions.begin(), std::move(khpa_e));
@@ -5076,6 +5090,42 @@ static void kh_temporal_stack_remove(const std::string& khsr_id) {
     }
 }
 
+// A new executor takes the id (execute's environment id) and whatever held it goes, as a deletion would take it but
+// silently (no timeout function runs, as a JIP id override overwrites): every entry with the id or owned by it (its
+// timeout) leaves the stack - now, or while the stack runs it runs no more and leaves when the run ends, and inside
+// its own call executionReplaced answers true - and leaves the late entries and the queued additions; the id's
+// queued deletion is dropped (it would take the new executor); the monitor entry and its tick counter go.
+static void kh_temporal_replace(const std::string& khrp_id) {
+    ++g_kh_temporal_gen[khrp_id];
+    auto khrp_is = [&khrp_id](const KhTemporalEntry& khrp_e) { return khrp_e.id == khrp_id || khrp_e.owner == khrp_id; };
+    std::vector<KhTemporalEntry>& khrp_a = g_kh_temporal_additions;
+    khrp_a.erase(std::remove_if(khrp_a.begin(), khrp_a.end(), khrp_is), khrp_a.end());
+    std::vector<KhTemporalEntry>& khrp_late = g_kh_temporal_stack_late;
+    khrp_late.erase(std::remove_if(khrp_late.begin(), khrp_late.end(), khrp_is), khrp_late.end());
+
+    if (g_kh_temporal_running) {
+        for (KhTemporalEntry& khrp_e : g_kh_temporal_stack) {
+            if (khrp_is(khrp_e)) {
+                khrp_e.removed = true;
+                khrp_e.replaced = true;
+                g_kh_temporal_removed_any = true;
+            }
+        }
+    } else {
+        std::vector<KhTemporalEntry>& khrp_s = g_kh_temporal_stack;
+        khrp_s.erase(std::remove_if(khrp_s.begin(), khrp_s.end(), khrp_is), khrp_s.end());
+    }
+
+    g_kh_temporal_deletions.erase(khrp_id);
+    raw_call_sqf_args_native(g_compiled_kh_monitor_delete, game_value(khrp_id));
+}
+
+// The replacement generation of an id (0: never replaced).
+static uint64_t kh_temporal_gen_of(const std::string& khgo_id) {
+    const auto khgo_it = g_kh_temporal_gen.find(khgo_id);
+    return khgo_it == g_kh_temporal_gen.end() ? 0 : khgo_it->second;
+}
+
 // Both mission edges (main.cpp: pre_init, mission_ended), never inside a run.
 static void kh_temporal_clear() {
     g_kh_temporal_stack.clear();
@@ -5084,6 +5134,8 @@ static void kh_temporal_clear() {
     g_kh_temporal_stack_late.clear();
     g_kh_temporal_running = false;
     g_kh_temporal_removed_any = false;
+    g_kh_temporal_gen.clear();
+    g_kh_temporal_current = nullptr;
 }
 
 static void kh_monitor_set(const std::string& environment_id, game_value entry) {
@@ -5374,7 +5426,23 @@ static game_value kh_execute_impl(game_value_parameter execute_params) {
 
         auto& env = environment.to_array();
         game_value environment_type = kh_param(env, 0, game_value(std::string("0")), {game_data_type::SCALAR, game_data_type::STRING, game_data_type::CODE});
-        std::string environment_id = UIDGenerator::generate();
+        // The environment id: the environment's last element (SCALAR 6, CODE 7, STRING 2), read as the special
+        // executions' id overrides - a non-empty STRING replaces the executor that holds it (kh_temporal_replace);
+        // anything else is a fresh uid.
+        const size_t environment_id_index = (environment_type.type_enum() == game_data_type::SCALAR) ? 6
+                                          : (environment_type.type_enum() == game_data_type::CODE) ? 7 : 2;
+        std::string environment_id = static_cast<std::string>(kh_param(env, environment_id_index, game_value(std::string()), {game_data_type::STRING}));
+
+        if (environment_id.empty()) {
+            environment_id = UIDGenerator::generate();
+        } else {
+            kh_temporal_replace(environment_id);
+        }
+
+        // Replaced again during one of this call's own immediate calls (its function, its condition, or a timeout
+        // function one of them sets off): the later executor holds the id and this call stops there.
+        const uint64_t environment_gen = kh_temporal_gen_of(environment_id);
+        const auto environment_replaced = [&]() { return kh_temporal_gen_of(environment_id) != environment_gen; };
         const float cba_time = sqf::get_variable(sqf::mission_namespace(), "cba_missiontime");
 
         // ============================== SCALAR
@@ -5461,6 +5529,7 @@ static game_value kh_execute_impl(game_value_parameter execute_params) {
 
             if (immediate) {
                 previous_return = kh_immediate_call(fed, subfunction_code, handler_id, cba_time);
+                if (environment_replaced()) return handler_id;
 
                 if (iteration_count) {
                     kh_trigger_stack_handler(environment_id, false, false, false);
@@ -5471,7 +5540,7 @@ static game_value kh_execute_impl(game_value_parameter execute_params) {
                 }
             }
 
-            if (!continue_execution) {
+            if (!continue_execution || environment_replaced()) {
                 return handler_id;
             }
 
@@ -5502,7 +5571,7 @@ static game_value kh_execute_impl(game_value_parameter execute_params) {
                     game_value(),
                     game_value(cba_time),
                     game_value(0.0f)
-                }), timeout_priority);
+                }), timeout_priority, environment_id);
             }
 
             return handler_id;
@@ -5599,12 +5668,14 @@ static game_value kh_execute_impl(game_value_parameter execute_params) {
 
             if (immediate) {
                 game_value condition_value = kh_immediate_call(arguments, condition, handler_id, cba_time);
+                if (environment_replaced()) return handler_id;
                 const bool condition_result = condition_value.type_enum() == game_data_type::BOOL && static_cast<bool>(condition_value);
 
                 if (iteration_count) {
                     if (count_condition_failure) {
                         if (condition_result) {
                             previous_return = kh_immediate_call(fed, subfunction_code, handler_id, cba_time);
+                            if (environment_replaced()) return handler_id;
                             kh_trigger_stack_handler(environment_id, false, false, false);
                         } else {
                             if (timeout_on_condition_failure) {
@@ -5620,6 +5691,7 @@ static game_value kh_execute_impl(game_value_parameter execute_params) {
                     } else {
                         if (condition_result) {
                             previous_return = kh_immediate_call(fed, subfunction_code, handler_id, cba_time);
+                            if (environment_replaced()) return handler_id;
                             kh_trigger_stack_handler(environment_id, false, false, false);
 
                             if (timeout_number == 1.0f) {
@@ -5632,13 +5704,14 @@ static game_value kh_execute_impl(game_value_parameter execute_params) {
                 } else {
                     if (condition_result) {
                         previous_return = kh_immediate_call(fed, subfunction_code, handler_id, cba_time);
+                        if (environment_replaced()) return handler_id;
                     } else if (timeout_on_condition_failure) {
                         kh_trigger_stack_handler(environment_id, true, true, true);
                     }
                 }
             }
 
-            if (!continue_execution) {
+            if (!continue_execution || environment_replaced()) {
                 return handler_id;
             }
 
@@ -5682,7 +5755,7 @@ static game_value kh_execute_impl(game_value_parameter execute_params) {
                     game_value(),
                     game_value(cba_time),
                     game_value(0.0f)
-                }), timeout_priority);
+                }), timeout_priority, environment_id);
             }
 
             return handler_id;
@@ -5712,7 +5785,7 @@ static game_value kh_execute_impl(game_value_parameter execute_params) {
             kh_monitor_set(environment_id, kh_make_array({
                 kh_make_array({game_value(auto_array<game_value>()), game_value(g_compiled_kh_empty_code), game_value(environment_type_number), game_value(environment_id), parsed_special.return_value}),
                 game_value(g_compiled_kh_empty_code),
-                game_value(environment_id),
+                game_value(UIDGenerator::generate()),   // Its tick counter: never counted (no timeout), nil-ed on deletion.
                 game_value(0.0f),
                 game_value(false)
             }));
@@ -6181,7 +6254,9 @@ static void process_temporal_execution_stack() {
             game_state->set_local_variable(n_previous_return, e.previous_return);
             game_state->set_local_variable(n_execution_time, e.execution_time);
             game_state->set_local_variable(n_execution_count, game_value(execution_count));
+            g_kh_temporal_current = &e;
             e.previous_return = raw_call_sqf_native(g_compiled_sqf_generic_call_args);
+            g_kh_temporal_current = nullptr;
             const float step = tick_based ? delay : (delay < 0.0f ? -delay : delay);
             e.due = delta + step;
             e.execution_count = execution_count + 1.0f;
@@ -6289,6 +6364,13 @@ static game_value manage_execution_stack_sqf(game_value_parameter khme_which, ga
         report_error("An unknown error occurred in manageExecutionStack");
         return game_value(false);
     }
+}
+
+// executionReplaced (internal): true inside the call of a stack entry that a replacement took during that call
+// (kh_temporal_replace), false everywhere else. The compiled handlers ask it after user code and before what
+// they do to the environment id, which by then belongs to the new executor.
+static game_value execution_replaced_sqf() {
+    return game_value(g_kh_temporal_current != nullptr && g_kh_temporal_current->replaced);
 }
 
 // The weapon each unit of kh_var_allmen holds per slot,
@@ -9839,6 +9921,13 @@ static void initialize_sqf_integration() {
         game_data_type::ARRAY
     );
 
+    _sqf_execution_replaced = intercept::client::host::register_sqf_command(
+        "executionReplaced",
+        "Internal KH temporal stack guard - whether the stack entry being run was replaced during its call",
+        userFunctionWrapper<execution_replaced_sqf>,
+        game_data_type::BOOL
+    );
+
     _sqf_trigger_cba_event_array = intercept::client::host::register_sqf_command(
         "triggerCbaEvent",
         "Triggers a CBA event through the KH target resolution model. Format [event, arguments, target, jip], where event is either a string or [eventName, entity] for entity events. Returns the JIP handler id array when jip is requested",
@@ -10074,6 +10163,16 @@ static void initialize_sqf_integration() {
     g_compiled_kh_subfunction_process = sqf::compile(R"(processExecution _this;)");
     g_compiled_kh_monitor_set = sqf::compile(R"(KH_var_temporalExecutionStackMonitor set getCallArguments;)");
 
+    g_compiled_kh_monitor_delete = sqf::compile(R"(
+        private _currentId = getCallArguments;
+        private _currentMonitor = KH_var_temporalExecutionStackMonitor get _currentId;
+
+        if !(isNil "_currentMonitor") then {
+            missionNamespace setVariable [_currentMonitor select 2, nil];
+            KH_var_temporalExecutionStackMonitor deleteAt _currentId;
+        };
+    )");
+
     g_compiled_kh_monitor_wrapper_scalar = sqf::compile(R"(
         params ["_arguments", "_timeoutFunction", "_environmentType", "_environmentId", "_return"];
         private _handlerId = [[["TEMPORAL"], _environmentType, _environmentId, clientOwner], _return];
@@ -10089,7 +10188,10 @@ static void initialize_sqf_integration() {
     g_compiled_kh_handler_scalar_iteration = sqf::compile(R"(
         params ["_fedArguments", "_subfunction", "_environmentId"];
         _fedArguments call _subfunction;
-        triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false];
+
+        if !(executionReplaced) then {
+            triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false];
+        };
     )");
 
     g_compiled_kh_handler_scalar = sqf::compile(R"(
@@ -10107,11 +10209,15 @@ static void initialize_sqf_integration() {
         params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType"];
 
         if (_arguments call _environmentType) then {
-            _fedArguments call _subfunction;
-            triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false];
+            if !(executionReplaced) then {
+                _fedArguments call _subfunction;
+                triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false];
+            };
         }
         else {
-            triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true], true, false];
+            if !(executionReplaced) then {
+                triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true], true, false];
+            };
         };
     )");
 
@@ -10119,11 +10225,15 @@ static void initialize_sqf_integration() {
         params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType"];
 
         if (_arguments call _environmentType) then {
-            _fedArguments call _subfunction;
-            triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false];
+            if !(executionReplaced) then {
+                _fedArguments call _subfunction;
+                triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false];
+            };
         }
         else {
-            triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, true], true, false];
+            if !(executionReplaced) then {
+                triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, true], true, false];
+            };
         };
     )");
 
@@ -10131,8 +10241,10 @@ static void initialize_sqf_integration() {
         params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType"];
 
         if (_arguments call _environmentType) then {
-            _fedArguments call _subfunction;
-            triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false];
+            if !(executionReplaced) then {
+                _fedArguments call _subfunction;
+                triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false];
+            };
         };
     )");
 
@@ -10140,10 +10252,14 @@ static void initialize_sqf_integration() {
         params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType"];
 
         if (_arguments call _environmentType) then {
-            _fedArguments call _subfunction;
+            if !(executionReplaced) then {
+                _fedArguments call _subfunction;
+            };
         }
         else {
-            triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true], true, false];
+            if !(executionReplaced) then {
+                triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, true], true, false];
+            };
         };
     )");
 
@@ -10151,15 +10267,20 @@ static void initialize_sqf_integration() {
         params ["_arguments", "_fedArguments", "_subfunction", "_environmentId", "_environmentType"];
 
         if (_arguments call _environmentType) then {
-            _fedArguments call _subfunction;
+            if !(executionReplaced) then {
+                _fedArguments call _subfunction;
+            };
         };
     )");
 
     g_compiled_kh_handler_string = sqf::compile(R"(
         params ["_fedArguments", "_subfunction", "_environmentId"];
         _fedArguments call _subfunction;
-        "DELETIONS" manageExecutionStack [true, _environmentId];
-        KH_var_temporalExecutionStackMonitor deleteAt _environmentId;
+
+        if !(executionReplaced) then {
+            "DELETIONS" manageExecutionStack [true, _environmentId];
+            KH_var_temporalExecutionStackMonitor deleteAt _environmentId;
+        };
     )");
 
     g_compiled_kh_callback_handler = sqf::compile(R"(

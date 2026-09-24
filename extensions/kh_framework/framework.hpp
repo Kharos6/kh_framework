@@ -112,6 +112,7 @@ static code g_compiled_kh_empty_code;
 static code g_compiled_kh_subfunction_basic;
 static code g_compiled_kh_subfunction_process;
 static code g_compiled_kh_monitor_set;
+static code g_compiled_kh_monitor_delete;
 static code g_compiled_kh_monitor_wrapper_scalar;
 static code g_compiled_kh_monitor_wrapper_code;
 static code g_compiled_kh_handler_scalar_iteration;

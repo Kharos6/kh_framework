@@ -808,12 +808,12 @@ bool KhCastNearOk(float3 khno_p, float khno_ty)
     if (localityMeta.y >= 0.5f) {
         int lc = (int)localityMeta.x;
 
-        if (castMat[0].w > 0.0f) {
+        if (castMat[0].w > 0.0f && localityMeta.w >= 1.0f) {
             // Constant time in the caster count. The bound comes from the
             // CB, not a literal, so it cannot drift from the C++ that sizes
-            // the texture; zero (an unwritten lane) reads as 256.
+            // the texture; an unwritten lane (zero) leaves the grid unarmed
+            // and the t2 list below answers (kh_cast_scissor's twin gate).
             int khoN = (int)localityMeta.w;
-            if (khoN <= 0) khoN = 256;
             int2 khoC = (int2)floor((khno_p.xz - float2(castMat[1].w, castMat[2].w)) * castMat[0].w);
             if (khoC.x >= 0 && khoC.y >= 0 && khoC.x < khoN && khoC.y < khoN) {
                 float2 khoY = khrCastOcc.Load(int3(khoC, 0));

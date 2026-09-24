@@ -12154,8 +12154,8 @@ struct alignas(16) ConstantData {
     // x = per-caster locality pair count; y = 1 -> the uncapped t2 list carries
     // them; z = sun map older than 0.5 s (the filtered-compare gate); w =
     // KH_OCC_N, the cast-occupancy grid's edge in texels, so PSMaskCast
-    // bounds its Load against the CB rather than a literal (the shader reads
-    // an unwritten 0 as 256 - see the HLSL twin localityMeta).
+    // bounds its Load against the CB rather than a literal; an unwritten 0
+    // leaves the grid unarmed (PSMaskCast and kh_cast_scissor alike).
     float locality_meta[4];
     float locality[32][4];   // [2i] = center.xyz, [2i+1] = half extents.xyz.
     float light_amb[4];   // Rgb = engine ambient (HDR) or (1,1,1) cold; w = engine mode.
@@ -39514,7 +39514,7 @@ inline bool kh_cast_occ_build(ID3D11DeviceContext* khco_ctx, ConstantData& khco_
 
     if (khcw_env && khco_k == g_castocc_key) {
         kh_castocc_pre_step(khco_ctx, khco_n, khco_k, khco_dom, khco_sun, khco_rng);   // KH_CASTOCC_PRE: the next grid, a slice at a time; may commit.
-        khco_cb.cast_mat[0][3] = g_castocc_inv;   // Armed (> 0) - lane note at the build tail.
+        khco_cb.cast_mat[0][3] = g_castocc_inv;   // The arm (> 0), with the fill's localityMeta.w.
         khco_cb.cast_mat[1][3] = g_castocc_lo[0];
         khco_cb.cast_mat[2][3] = g_castocc_lo[1];
         return true;
@@ -39980,9 +39980,10 @@ inline int kh_cast_scissor(const ConstantData& khcs_cb, bool khcs_unorm, D3D11_R
     };
     const int khcs_lc = static_cast<int>(khcs_cb.locality_meta[0]);
     if (khcs_cb.locality_meta[1] >= 0.5f) {
-        if (khcs_cb.cast_mat[0][3] > 0.0f) {   // The occupancy grid: xz inside its N cells, the whole band.
+        // The occupancy grid, armed as PSMaskCast arms it (an unwritten edge lane: the t2 list below): xz
+        // inside its N cells, the whole band.
+        if (khcs_cb.cast_mat[0][3] > 0.0f && khcs_cb.locality_meta[3] >= 1.0f) {
             int khcs_n = static_cast<int>(khcs_cb.locality_meta[3]);
-            if (khcs_n <= 0) khcs_n = 256;
             const double khcs_ext = static_cast<double>(khcs_n) / khcs_cb.cast_mat[0][3];
             const double khcs_lx = khcs_cb.cast_mat[1][3], khcs_lz = khcs_cb.cast_mat[2][3];
             double x0 = fmax(khcs_lx, khcs_fc[0] - khcs_rr), x1 = fmin(khcs_lx + khcs_ext, khcs_fc[0] + khcs_rr);   // The fade's square.
@@ -40719,7 +40720,8 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         // Lane hygiene: the memcpy above writes four floats per row, so
         // cast_mat[r][3] lands the view matrix's fourth column - the occupancy
         // grid's arm and origin lanes (castMat[0].w > 0 arms the shader's O(1)
-        // path; [1].w / [2].w are the grid origin XZ). Both are enforced here.
+        // path, with localityMeta.w; [1].w / [2].w are the grid origin XZ). Both
+        // are enforced here.
         cbd.cast_mat[0][3] = 0.0f;
         cbd.cast_mat[1][3] = 0.0f;
         cbd.cast_mat[2][3] = 0.0f;
@@ -49734,8 +49736,9 @@ inline void kh_reorder_trigger(ID3D11DeviceContext* self) {
     // injection into a completed frame and paint the meshes over everything.
     const bool khr_floor_keep = g_slot_keep_near > 0.0f && g_slot_keep_ms != 0 &&
                                 steady_now_ms() - g_slot_keep_ms < 250;
-    // The floor is relative to what this map's accepted cycles show. A
-    // populated map never leaves 16.
+    // With camera evidence - a projection found in this cycle's uploads, or a
+    // plausible one kept from an upload within the last 250 ms - the floor is
+    // an eighth of the full count; without it, the full count.
     uint32_t khr_floor_rel = KH_REORDER_MIN_OPAQUE_DRAWS / 8;
     const uint32_t min_opaques = (g_ro.engine_proj_valid || khr_floor_keep)
                                ? khr_floor_rel
@@ -51408,8 +51411,8 @@ inline void ensure_reorder_hook() {
 // depth-demand predicate - as template parameters, so the call sites inside
 // are the flush's own text. The caller performs the read-only DSV swap before
 // calling and keeps its OM save; this function's own KhOmSave is what the
-// final pass restores into. Round B calls this from the render thread with
-// its own fill; until then the flush is the one caller.
+// final pass restores into. flush_locked is the one caller: its scene flush
+// and its chain-only run (KH_FX_LATE) alike.
 template <class KhFxUploadCb, class KhFxNeedsDepth>
 inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                             std::vector<std::pair<uint64_t, RenderObject>>& fullscreen,

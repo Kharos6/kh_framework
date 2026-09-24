@@ -4998,6 +4998,9 @@ static std::unordered_set<std::string>& g_kh_temporal_deletions = *(new std::uno
 // entry added to it meanwhile waits here and joins it, in order, when the run ends.
 static std::vector<KhTemporalEntry>& g_kh_temporal_stack_late = *(new std::vector<KhTemporalEntry>());
 static bool g_kh_temporal_running = false;
+// An entry was marked removed during the current run (kh_temporal_stack_remove, the one writer of the mark). Only
+// a run marks entries and its end erases them, so with this false nothing is marked and the end skips the erase.
+static bool g_kh_temporal_removed_any = false;
 
 // One entry from its array. False with the reason in khte_err.
 static bool kh_temporal_entry_of(const game_value& khte_v, KhTemporalEntry& khte_e, std::string& khte_err) {
@@ -5062,7 +5065,10 @@ static void kh_temporal_stack_remove(const std::string& khsr_id) {
 
     if (g_kh_temporal_running) {
         for (KhTemporalEntry& khsr_e : g_kh_temporal_stack) {
-            if (khsr_e.id == khsr_id) khsr_e.removed = true;
+            if (khsr_e.id == khsr_id) {
+                khsr_e.removed = true;
+                g_kh_temporal_removed_any = true;
+            }
         }
     } else {
         std::vector<KhTemporalEntry>& khsr_s = g_kh_temporal_stack;
@@ -5077,6 +5083,7 @@ static void kh_temporal_clear() {
     g_kh_temporal_deletions.clear();
     g_kh_temporal_stack_late.clear();
     g_kh_temporal_running = false;
+    g_kh_temporal_removed_any = false;
 }
 
 static void kh_monitor_set(const std::string& environment_id, game_value entry) {
@@ -6075,8 +6082,6 @@ static bool kh_set_contains(const std::unordered_set<std::string>& set, const ga
 }
 
 static void process_temporal_execution_stack() {
-    rv_namespace ns = sqf::mission_namespace();
-
     if (!g_kh_cached_entity_initializations_deletions.is_nil() && g_kh_cached_entity_initializations_deletions.type_enum() == game_data_type::ARRAY) {
         auto& entity_deletions = g_kh_cached_entity_initializations_deletions.to_array();
 
@@ -6185,9 +6190,13 @@ static void process_temporal_execution_stack() {
 
     // The run's edits settle: the entries removed from the stack leave it, those added to it join it in order.
     g_kh_temporal_running = false;
-    stack.erase(std::remove_if(stack.begin(), stack.end(), [](const KhTemporalEntry& khtr_e) {
-        return khtr_e.removed;
-    }), stack.end());
+
+    if (g_kh_temporal_removed_any) {
+        stack.erase(std::remove_if(stack.begin(), stack.end(), [](const KhTemporalEntry& khtr_e) {
+            return khtr_e.removed;
+        }), stack.end());
+        g_kh_temporal_removed_any = false;
+    }
 
     if (!g_kh_temporal_stack_late.empty()) {
         stack.insert(stack.end(), std::make_move_iterator(g_kh_temporal_stack_late.begin()),
@@ -6330,7 +6339,6 @@ static void update_unit_states() {
         st.time[st.head] = now;
         if (st.count < YAW_MAXSAMPLES) st.count++;
 
-        // KH_WEAPON_SLOTS.
         auto khws_it = g_unit_weapons.find(key);
         const bool khws_first = khws_it == g_unit_weapons.end();
         if (khws_first) khws_it = g_unit_weapons.emplace(key, KhUnitWeapons()).first;
@@ -6357,7 +6365,7 @@ static void update_unit_states() {
         else ++it;
     }
 
-    // KH_WEAPON_SLOTS: the events, after the walk and the prune.
+    // The weapon-slot events, after the walk and the prune.
     static const game_value khws_event_name("KH_eve_weaponSlotChanged");
     for (const KhWeaponEvent& khws_e : khws_events) {
         kh_cba_local_event(khws_event_name, kh_make_array({

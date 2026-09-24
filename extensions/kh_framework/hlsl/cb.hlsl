@@ -94,9 +94,10 @@ cbuffer CBObj : register(b0)
     // view's own rows 0..2 when none was (the same for an orthonormal view);
     // castView[1] = (fov.x, fov.y, maskW, maskH); castView[2] = the frozen sun
     // (xyz) and strength (w). castMat[0..2].w = KH_CAST_OCC's occupancy grid:
-    // cells per metre (> 0 arms it) and the grid's low x and z corner. The DLS
-    // world pass (PSDlsWorld) reads castMat.xyz and castView[0..1] the same way,
-    // and castView[2].xyz as the camera its reconstruction came from.
+    // cells per metre (> 0 arms it, with localityMeta.w) and the grid's low x
+    // and z corner. The DLS world pass (PSDlsWorld) reads castMat.xyz and
+    // castView[0..1] the same way, and castView[2].xyz as the camera its
+    // reconstruction came from.
     float4 castMat[3];
     float4 castView[3];
     // x = view-paired band table valid; w = the unit-stencil arm (C++ twin
@@ -108,7 +109,7 @@ cbuffer CBObj : register(b0)
     float4 sunMeta;   // x = valid, y = map size (px), z = compare bias, w = strength.
     // x = pair count, y = t2 list armed, z = sun map older than 0.5 s (the
     // filtered-compare gate), w = KH_OCC_N, the cast-occupancy grid's edge in
-    // texels (0 reads as 256).
+    // texels (0, unwritten, leaves the grid unarmed).
     float4 localityMeta;
     float4 locality[32];   // [2i] = center.xyz (engine), [2i+1] = half extents.xyz.
     // rgb = engine ambient colour (HDR scene units) from the located lighting

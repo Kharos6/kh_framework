@@ -175,11 +175,9 @@ void intercept::pre_init() {
         }
 
         kh_temporal_clear();
-        sqf::set_variable(sqf::mission_namespace(), "kh_var_entityinitializations", game_value(auto_array<game_value>()));
-        sqf::set_variable(sqf::mission_namespace(), "kh_var_entityinitializationsdeletions", game_value(auto_array<game_value>()));
+        raw_call_sqf_native_no_return(sqf::get_variable(sqf::mission_namespace(), "kh_fnc_preinit"));
         g_kh_cached_entity_initializations = sqf::get_variable(sqf::mission_namespace(), "kh_var_entityinitializations");
         g_kh_cached_entity_initializations_deletions = sqf::get_variable(sqf::mission_namespace(), "kh_var_entityinitializationsdeletions");
-        raw_call_sqf_native_no_return(sqf::get_variable(sqf::mission_namespace(), "kh_fnc_preinit"));
         sqf::diag_log("KH Framework Extension - Pre-init");
     }
 }

@@ -2167,8 +2167,8 @@ static float4 matParams0 = 0.0f, matParams1 = 0.0f, matParams2 = 0.0f, matParams
 // whose maps live in the same pages batch across one instanced draw. The arma
 // model keeps its AS map in the orm page and its SMDI map in the specular page
 // (both read linear there - kh_tex_slot_srgb), and SPECCOLOR alone takes the
-// sixth, at t42, past every other register (t33 is KH_VOL_FOOT's mask, t34
-// unassigned). A user (.hlsl) material takes all six under either naming
+// sixth, at t42 (t33 is KH_VOL_FOOT's mask, t34 is read by the replay merges
+// in static.hlsl). A user (.hlsl) material takes all six under either naming
 // (KH_USER_SLOTS: its specular page is read linear when the script named it
 // "smdi"); its own maps (KH_USER_TEX) follow at t43-t48. StateBackup saves
 // t0-t48.

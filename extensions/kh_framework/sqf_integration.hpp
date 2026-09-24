@@ -10211,7 +10211,10 @@ static void initialize_sqf_integration() {
         if (_arguments call _environmentType) then {
             if !(executionReplaced) then {
                 _fedArguments call _subfunction;
-                triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false];
+
+                if !(executionReplaced) then {
+                    triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false];
+                };
             };
         }
         else {
@@ -10227,7 +10230,10 @@ static void initialize_sqf_integration() {
         if (_arguments call _environmentType) then {
             if !(executionReplaced) then {
                 _fedArguments call _subfunction;
-                triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false];
+
+                if !(executionReplaced) then {
+                    triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false];
+                };
             };
         }
         else {
@@ -10243,7 +10249,10 @@ static void initialize_sqf_integration() {
         if (_arguments call _environmentType) then {
             if !(executionReplaced) then {
                 _fedArguments call _subfunction;
-                triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false];
+
+                if !(executionReplaced) then {
+                    triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, false, false, false], true, false];
+                };
             };
         };
     )");

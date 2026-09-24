@@ -26458,10 +26458,11 @@ struct StateBackup {
     // occupancy, t36 DLS array, t37 dlsw mask (the DLS world pass) or the
     // near-plane marker (the effect chain, KH_NEARZ_MARK), t38 material table, t23 the
     // volume copy's depth, t40 the light ring, t42 SPECCOLOR, t43-t48 the
-    // KH_USER_TEX pages, t33 the KH_VOL_FOOT mask (t34, t39, t41 free at the
-    // pixel stage - t39 is
-    // the object records' VS slot, vs_srv39 below; SSAO binds t0-t3 under its
-    // own StateBackup).
+    // KH_USER_TEX pages, t33 the KH_VOL_FOOT mask (t39 free at the pixel
+    // stage - it is the object records' VS slot, vs_srv39 below; t34 and t41,
+    // with t49-t51 past this range, are read only by the replay merges -
+    // PSReplayMerge / PSReplayMergeMir - which bind and null them under their
+    // own KhRpSave (t0-t63); SSAO binds t0-t3 under its own StateBackup).
     ID3D11ShaderResourceView* ps_srvs[49] = {};   // t0..t48.
     ID3D11ShaderResourceView* vs_srv39 = nullptr;   // KH_OBJBUF: the object record buffer's VS slot.
     ID3D11SamplerState*      ps_samps[2] = {};   // s0 material, s1 the shadow Gather (KH_SHADOW_GATHER).

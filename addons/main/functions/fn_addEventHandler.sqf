@@ -1,10 +1,18 @@
-params [["_type", "", ["", []]], ["_event", "", [true, 0, ""]], "_arguments", ["_function", {}, ["", {}]]];
+params [["_type", "", ["", []]], ["_event", "", [true, 0, ""]], "_arguments", ["_function", {}, ["", {}]], ["_handlerIdOverride", "", [""]]];
 private _argumentsId = generateUid;
 missionNamespace setVariable [_argumentsId, _arguments];
 private _eventNameId = generateUid;
 missionNamespace setVariable [_eventNameId, _event];
 private _handlerId = generateUid;
 private _previousReturnId = generateUid;
+
+if (_handlerIdOverride isEqualTo "") then {
+	_handlerIdOverride = generateUid;
+}
+else {
+	[missionNamespace getVariable [_handlerIdOverride, []]] call KH_fnc_removeHandler;
+};
+
 private ["_persistentEventId", "_persistentExecutionId", "_handler", "_remoteHandler", "_eventType", "_expression"];
 
 if (_type isEqualType []) then {
@@ -489,7 +497,9 @@ if !(_type isEqualType []) then {
 if (isNil "_persistentEventId") then {
 	missionNamespace setVariable [_handlerId, [_type, _event, _handler, clientOwner]];
 	triggerCbaEvent ["KH_eve_eventHandlerAdded", [[_type, _event, _handler, clientOwner]], true, false];
-	[_type, _event, _handler, clientOwner];
+	private _finalId = [_type, _event, _handler, clientOwner];
+	missionNamespace setVariable [_handlerIdOverride, _finalId];
+	_finalId;
 }
 else {
 	private "_eventOwner";
@@ -500,5 +510,7 @@ else {
 
 	missionNamespace setVariable [_handlerId, [_type, _handler, _persistentExecutionId, _eventOwner], true];
 	triggerCbaEvent ["KH_eve_eventHandlerAdded", [[_type, _handler, _persistentExecutionId, _eventOwner]], "GLOBAL", false];
-	[_type, _handler, _persistentExecutionId, _eventOwner];
+	private _finalId = [_type, _handler, _persistentExecutionId, _eventOwner];
+	missionNamespace setVariable [_handlerIdOverride, _finalId];
+	_finalId;
 };

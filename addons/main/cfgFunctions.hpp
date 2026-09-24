@@ -46,7 +46,6 @@ class CfgFunctions
 			class entityRenderingSetup {headerType = -1;};
 			class entitySpawner {headerType = -1;};
 			class equipableObject {headerType = -1;};
-			class execute {headerType = -1;};
 			class filterPlayerEquipment {headerType = -1;};
 			class fultonExtract {headerType = -1;};
 			class getCloudletParameters {headerType = -1;};

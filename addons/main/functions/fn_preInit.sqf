@@ -207,12 +207,10 @@ KH_var_executedStacks = [];
 		_currentHandler params ["_timeoutArguments", "_timeoutFunction", "_handlerTickCounter", "_timeout", "_timeoutOnDeletion"];
 
 		if _deleteHandler exitWith {
-			if !(_handlerId in KH_var_temporalExecutionStackDeletions) then {
-				KH_var_temporalExecutionStackDeletions pushBackUnique _handlerId;
+			"DELETIONS" manageExecutionStack [true, _handlerId];
 
-				if (_timeoutOnDeletion || _overrideTimeoutOnDeletion) then {
-					_timeoutArguments call _timeoutFunction;
-				};
+			if (_timeoutOnDeletion || _overrideTimeoutOnDeletion) then {
+				_timeoutArguments call _timeoutFunction;
 			};
 
 			missionNamespace setVariable [_handlerTickCounter, nil];
@@ -220,11 +218,8 @@ KH_var_executedStacks = [];
 		};
 
 		if ((missionNamespace getVariable [_handlerTickCounter, 1]) >= _timeout) then {
-			if !(_handlerId in KH_var_temporalExecutionStackDeletions) then {
-				KH_var_temporalExecutionStackDeletions pushBackUnique _handlerId;
-				_timeoutArguments call _timeoutFunction;
-			};
-
+			"DELETIONS" manageExecutionStack [true, _handlerId];
+			_timeoutArguments call _timeoutFunction;
 			missionNamespace setVariable [_handlerTickCounter, nil];
 			KH_var_temporalExecutionStackMonitor deleteAt _handlerId;
 		}

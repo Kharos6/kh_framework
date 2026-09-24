@@ -37,7 +37,11 @@ namespace RenderIntegration {
 // followed through a hidden helper attached to it - as the object of a plain
 // binding, a rotation object, or the parent of a skeletal binding - so the
 // mesh stays with it in vehicles; the helper is shared by every binding on
-// that character and deleted with the last one.
+// that character and deleted with the last one. While the character rides
+// in a vehicle, whatever is followed on it - the helper, a memory point, a
+// skeletal binding's bones, a chain's end - is placed and turned as the
+// character is drawn, every frame (the game trails a crew member's
+// attached objects behind it).
 //
 // Position may also be [object, memoryPoint] to follow a model memory point
 // (bone); rotation is then REQUIRED and must be true (follow the bone's
@@ -10821,6 +10825,369 @@ inline const KhGtSnap* kh_gts_for_cycle(KhAttach& khgc_a, uint64_t khgc_cyc, boo
     return khgc_p;
 }
 
+// KH_CREW_LAG - the engine places a crew member's attachTo children (its origin helper, every memory-point proxy on
+// it) behind where it draws the character (seen on player-controlled crew; the direction does not trail), while the
+// character's own rendered position is right: getPosWorldVisual, the model centre - the point the origin helper
+// stands for (getPosASLVisual is the land contact, a constant apart) - and so is its rendered orientation
+// (vectorDirVisual / vectorUpVisual). So while a character rides in a vehicle the Draw3D sampler moves every helper
+// it reads for that character as ONE rigid body, from where the origin helper is to where the character is drawn:
+// a pose p, r read on it becomes t + (p - h) * D and r * D - h the origin helper's read, t the rendered position,
+// D = (the helper's rows)^-1 * (the rendered rows), all taken in the same Draw3D. Every pose relative to the
+// character stays as the engine has it (a skeletal binding's bones against their parent, a memory point against
+// the origin) and the whole set lands where, and turns as, the character is drawn; with no trail in the direction
+// (the case seen) D is the identity to float precision and this is the translation t - h. A chain's end
+// (kh_chain_prepare) takes the same: a memory point moved so and its reach tested against the rendered position;
+// an end following the character itself placed at that position and turned to that orientation - the character's
+// own state is not written while it is crew (KH_ATTACH_MAN_HELPER), so a raw read of it would hold the get-in pose.
+// Crew or not: the character's GetInMan / GetOutMan events and a check when its entry is made, each asking
+// `vehicle` - the handlers take Intercept's argument lists as it declares them and read none of the arguments.
+// While crew, the pose is read every Draw3D (getPosWorldVisual, vectorDirVisual, vectorUpVisual per character), so
+// a seat switch (which stays in the vehicle), a turret's traverse or a turn-out needs no event of its own.
+// KH_RT_PAINT_READ carries it too: the render thread makes no engine call, so it places the character from the
+// vehicle (read raw, with the paint read's other reads) and the character's pose in that vehicle's frame as the
+// last Draw3D measured it - a prediction over the one frame whose sample has not landed (the pose held for it).
+// One entry per character a binding places from (kh_attach_parent_gv) through a helper - an origin helper standing in
+// for it, or helpers on it (a memory-point or skeletal binding) when it is a Man - or a simulating chain's end
+// follows when it is a Man (kh_crew_chain_cand: its object, its memory point's owner, its rotation object), keyed
+// by its base (two holders may have different game values of one object; an entry whose character was deleted
+// drains at the next sync). The entry holds a pool reference of its own on the character's origin helper, which a
+// memory-point binding or a chain's end alone has none of. A rotation lane that follows a character of its own (not
+// the object its binding is placed from) through that character's helper brings it in too: the lane is turned as
+// that character is drawn (its rows, from the same rigid move).
+// GAME THREAD maintains it (kh_crew_sync, from flush_frame; the events): inserted, erased and every field the render
+// thread reads (in, helper, veh, l_ok, l, lq, r_*) written under g_draw_list_mutex; t / tr / seen are the game
+// thread's alone. Never destructed (game values); the mission edge empties it (kh_crew_clear_all, outside the mutex:
+// dropping an entry removes its event handlers, an SQF call).
+struct KhCrewEnt {
+    game_value man;
+    game_value helper;           // The character's origin helper (this entry's pool reference).
+    game_value veh;              // The vehicle it rides in; nil on foot.
+    uint64_t   serial = 0;       // The events' key (g_crew_serial).
+    bool       in = false;
+    bool       seen = false;     // kh_crew_sync's census mark.
+    bool       t_ok = false;
+    double     t[3] = {};        // getPosWorldVisual this Draw3D, SQF order.
+    bool       tr_ok = false;
+    float      tr[9] = {};       // vectorDirVisual / vectorUpVisual this Draw3D, as rows (kh_crew_rows).
+    bool       d_ok = false;     // This Draw3D's correction (kh_crew_measure): h, D, cr.
+    double     h[3] = {};        // The origin helper's read, SQF order.
+    float      dm[9] = {};       // D = (the helper's rows)^-1 * cr.
+    float      cr[9] = {};       // The character's rows as drawn: tr, or the helper's where tr failed its checks.
+    bool       l_ok = false;
+    float      l[3] = {};        // The character in the vehicle's frame (its rows, engine axes),
+    float      lq[9] = {};       // and its rows in it (cr * the vehicle's rows^-1).
+    uint64_t   born = 0;         // g_crew_frame when the entry (and its helper reference) was made.
+    uintptr_t  g_hb = 0, g_hvb = 0, g_hbb = 0, g_vb = 0, g_vvb = 0, g_vbb = 0;   // The sampler's page caches.
+    uint32_t   g_hoff = KH_ATTACH_OFF_NONE, g_voff = KH_ATTACH_OFF_NONE;
+    uintptr_t  r_hb = 0, r_hvb = 0, r_hbb = 0, r_vb = 0, r_vvb = 0, r_vbb = 0;   // The paint read's (render thread).
+    uint32_t   r_hoff = KH_ATTACH_OFF_NONE, r_voff = KH_ATTACH_OFF_NONE;
+    intercept::client::EHIdentifierHandle eh_in, eh_out;
+};
+static std::unordered_map<uintptr_t, KhCrewEnt>& g_crew = *(new std::unordered_map<uintptr_t, KhCrewEnt>());
+// Game thread: characters found not to be a Man (base -> the object's identity), rebuilt by every sync from the
+// candidates it saw - an address the engine reuses for another object is asked again.
+static std::unordered_map<uintptr_t, const void*>& g_crew_notman = *(new std::unordered_map<uintptr_t, const void*>());
+static uint64_t g_crew_serial = 0;   // Game thread; restarted with the table (kh_crew_clear_all).
+static uint64_t g_crew_frame = 0;    // Game thread: kh_crew_sync's count; restarted with the table.
+// One raw read with a page cache of the entry's own, restarted when the object behind it changes.
+inline bool kh_crew_read(const game_value& khcr_gv, uintptr_t& khcr_b, uint32_t& khcr_off, uintptr_t& khcr_vb,
+                         uintptr_t& khcr_bb, float khcr_p[3], float khcr_r[9]) {
+    if (khcr_gv.is_nil() || kh_attach_obj_dead(khcr_gv)) return false;
+    const uintptr_t khcr_nb = kh_attach_base_of(khcr_gv);
+    if (khcr_nb == 0) return false;
+    if (khcr_b != khcr_nb) { khcr_b = khcr_nb; khcr_off = KH_ATTACH_OFF_NONE; khcr_vb = 0; khcr_bb = 0; }
+    return kh_attach_raw(khcr_gv, khcr_off, khcr_vb, khcr_bb, khcr_p, khcr_r, nullptr);
+}
+// A point in a pose's frame and back: positions SQF order, the pose's rows engine axes (row-vector convention, as
+// kh_attach_raw hands them back; each row divided by its own length squared, so a scaled pose round-trips too).
+inline void kh_crew_local(const float khcl_vp[3], const float khcl_vr[9], const double khcl_t[3], float khcl_l[3]) {
+    const double khcl_w[3] = { khcl_t[0] - khcl_vp[0], khcl_t[2] - khcl_vp[2],   // Engine axes.
+                               khcl_t[1] - khcl_vp[1] };
+    for (int khcl_k = 0; khcl_k < 3; ++khcl_k) {
+        const double khcl_x = khcl_vr[khcl_k * 3 + 0], khcl_y = khcl_vr[khcl_k * 3 + 1];
+        const double khcl_z = khcl_vr[khcl_k * 3 + 2];
+        const double khcl_n = khcl_x * khcl_x + khcl_y * khcl_y + khcl_z * khcl_z;
+        khcl_l[khcl_k] = khcl_n > 0.0
+            ? static_cast<float>((khcl_x * khcl_w[0] + khcl_y * khcl_w[1] + khcl_z * khcl_w[2]) / khcl_n) : 0.0f;
+    }
+}
+inline void kh_crew_place(const float khcp_vp[3], const float khcp_vr[9], const float khcp_l[3], double khcp_t[3]) {
+    double khcp_w[3] = { 0.0, 0.0, 0.0 };   // Engine axes.
+    for (int khcp_k = 0; khcp_k < 3; ++khcp_k) {
+        for (int khcp_j = 0; khcp_j < 3; ++khcp_j) {
+            khcp_w[khcp_j] += static_cast<double>(khcp_l[khcp_k]) * static_cast<double>(khcp_vr[khcp_k * 3 + khcp_j]);
+        }
+    }
+    khcp_t[0] = khcp_vp[0] + khcp_w[0];
+    khcp_t[1] = khcp_vp[1] + khcp_w[2];
+    khcp_t[2] = khcp_vp[2] + khcp_w[1];
+}
+// 3x3 rows (row k = axis k, engine axes; a pose's rows multiply on the right): a product, an inverse (false when
+// singular), D = a^-1 * b (the identity when a is singular).
+inline void kh_crew_mul3(const float khcu_a[9], const float khcu_b[9], float khcu_o[9]) {
+    float khcu_t[9];
+    for (int khcu_i = 0; khcu_i < 3; ++khcu_i) {
+        for (int khcu_j = 0; khcu_j < 3; ++khcu_j) {
+            double khcu_s = 0.0;
+            for (int khcu_k = 0; khcu_k < 3; ++khcu_k) {
+                khcu_s += static_cast<double>(khcu_a[khcu_i * 3 + khcu_k]) *
+                          static_cast<double>(khcu_b[khcu_k * 3 + khcu_j]);
+            }
+            khcu_t[khcu_i * 3 + khcu_j] = static_cast<float>(khcu_s);
+        }
+    }
+    memcpy(khcu_o, khcu_t, sizeof(khcu_t));
+}
+inline bool kh_crew_inv3(const float khci_m[9], float khci_o[9]) {
+    const double a = khci_m[0], b = khci_m[1], c = khci_m[2], d = khci_m[3], e = khci_m[4], f = khci_m[5];
+    const double g = khci_m[6], h = khci_m[7], i = khci_m[8];
+    const double khci_det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    if (!(std::fabs(khci_det) > 1e-9)) return false;
+    const double r = 1.0 / khci_det;
+    const double khci_v[9] = { (e * i - f * h) * r, (c * h - b * i) * r, (b * f - c * e) * r,
+                               (f * g - d * i) * r, (a * i - c * g) * r, (c * d - a * f) * r,
+                               (d * h - e * g) * r, (b * g - a * h) * r, (a * e - b * d) * r };
+    for (int k = 0; k < 9; ++k) khci_o[k] = static_cast<float>(khci_v[k]);
+    return true;
+}
+inline void kh_crew_delta(const float khcd_a[9], const float khcd_b[9], float khcd_o[9]) {
+    float khcd_i[9];
+    if (!kh_crew_inv3(khcd_a, khcd_i)) {
+        const float khcd_one[9] = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f };
+        memcpy(khcd_o, khcd_one, sizeof(khcd_one));
+        return;
+    }
+    kh_crew_mul3(khcd_i, khcd_b, khcd_o);
+}
+// A pose read on the character, moved with it: p (SQF order) to t + (p - h) * D, its rows r (null: none) to r * D.
+inline void kh_crew_apply(const double khca_t[3], const double khca_h[3], const float khca_d[9], float khca_p[3],
+                          float* khca_r) {
+    const double khca_v[3] = { khca_p[0] - khca_h[0], khca_p[2] - khca_h[2], khca_p[1] - khca_h[1] };   // Engine.
+    double khca_w[3];
+    for (int j = 0; j < 3; ++j) {
+        khca_w[j] = khca_v[0] * khca_d[j] + khca_v[1] * khca_d[3 + j] + khca_v[2] * khca_d[6 + j];
+    }
+    khca_p[0] = static_cast<float>(khca_t[0] + khca_w[0]);
+    khca_p[1] = static_cast<float>(khca_t[1] + khca_w[2]);
+    khca_p[2] = static_cast<float>(khca_t[2] + khca_w[1]);
+    if (khca_r) kh_crew_mul3(khca_r, khca_d, khca_r);
+}
+// vectorDirVisual / vectorUpVisual (SQF order) as rows - aside (up x dir), up, dir in engine axes, the order the
+// visual state keeps them in (KH_ATTACH_RAW). False when the pair is not a unit, orthogonal pair.
+inline bool kh_crew_rows(const float khrw_dir[3], const float khrw_up[3], float khrw_o[9]) {
+    const double d[3] = { khrw_dir[0], khrw_dir[2], khrw_dir[1] };
+    const double u[3] = { khrw_up[0], khrw_up[2], khrw_up[1] };
+    const double dd = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+    const double uu = u[0] * u[0] + u[1] * u[1] + u[2] * u[2];
+    const double du = d[0] * u[0] + d[1] * u[1] + d[2] * u[2];
+    if (!(std::fabs(dd - 1.0) < 1e-3 && std::fabs(uu - 1.0) < 1e-3 && std::fabs(du) < 1e-3)) return false;
+    const double s[3] = { u[1] * d[2] - u[2] * d[1], u[2] * d[0] - u[0] * d[2], u[0] * d[1] - u[1] * d[0] };
+    for (int k = 0; k < 3; ++k) {
+        khrw_o[k] = static_cast<float>(s[k]);
+        khrw_o[3 + k] = static_cast<float>(u[k]);
+        khrw_o[6 + k] = static_cast<float>(d[k]);
+    }
+    return true;
+}
+// The entry's helper is placed: a Draw3D after the entry was made (attachTo places a new helper at the next
+// simulation step - KH_ATTACH_MAN_HELPER's stamp, counted in syncs, which run whether or not any binding samples).
+inline bool kh_crew_placed(const KhCrewEnt& khpl_e) {
+    return g_crew_frame > khpl_e.born;
+}
+// This Draw3D's corrections: kh_crew_sync, under g_draw_list_mutex, after its pose reads - the same instant
+// as the sampler's reads and the chain end's (all in this Draw3D, with no engine step between).
+inline void kh_crew_measure() {
+    for (auto& khcm_kv : g_crew) {
+        KhCrewEnt& khcm_e = khcm_kv.second;
+        khcm_e.d_ok = false;
+        if (!khcm_e.in || !khcm_e.t_ok || !kh_crew_placed(khcm_e)) { khcm_e.l_ok = false; continue; }
+        float khcm_p[3], khcm_r[9];
+        if (!kh_crew_read(khcm_e.helper, khcm_e.g_hb, khcm_e.g_hoff, khcm_e.g_hvb, khcm_e.g_hbb, khcm_p, khcm_r)) {
+            khcm_e.l_ok = false;
+            continue;
+        }
+        for (int khcm_k = 0; khcm_k < 3; ++khcm_k) khcm_e.h[khcm_k] = khcm_p[khcm_k];
+        memcpy(khcm_e.cr, khcm_e.tr_ok ? khcm_e.tr : khcm_r, sizeof(khcm_e.cr));
+        kh_crew_delta(khcm_r, khcm_e.cr, khcm_e.dm);
+        khcm_e.d_ok = true;
+        khcm_e.l_ok = kh_crew_read(khcm_e.veh, khcm_e.g_vb, khcm_e.g_voff, khcm_e.g_vvb, khcm_e.g_vbb, khcm_p, khcm_r);
+        float khcm_vi[9];
+        if (khcm_e.l_ok) khcm_e.l_ok = kh_crew_inv3(khcm_r, khcm_vi);
+        if (khcm_e.l_ok) {
+            kh_crew_local(khcm_p, khcm_r, khcm_e.t, khcm_e.l);
+            kh_crew_mul3(khcm_e.cr, khcm_vi, khcm_e.lq);
+        }
+    }
+}
+// The entry correcting what a binding places from (khco_par, kh_attach_parent_gv) this sample; null: none. By base:
+// the sync ahead of this sample dropped every entry whose character was deleted, so a live entry's base is its own.
+inline KhCrewEnt* kh_crew_of(const game_value& khco_par) {
+    if (g_crew.empty() || khco_par.is_nil()) return nullptr;
+    const auto khco_it = g_crew.find(kh_attach_base_of(khco_par));
+    return khco_it == g_crew.end() || !khco_it->second.d_ok ? nullptr : &khco_it->second;
+}
+// The character's vehicle now (nil: on foot). GAME THREAD, holding no lock (an SQF call).
+inline game_value kh_crew_vehicle(const game_value& khcv_man, uintptr_t khcv_b) {
+    try {
+        const object khcv_o = sqf::vehicle(static_cast<object>(khcv_man));
+        if (!sqf::is_null(khcv_o) && kh_attach_base_of(khcv_o) != khcv_b) return khcv_o;
+    } catch (...) {}
+    return game_value();
+}
+// An event of the character's: crew or not, asked again. GAME THREAD (the engine's event dispatch), holding no lock.
+inline void kh_crew_event(uintptr_t khce_b, uint64_t khce_s) {
+    const auto khce_it = g_crew.find(khce_b);
+    if (khce_it == g_crew.end() || khce_it->second.serial != khce_s) return;
+    KhCrewEnt& khce_e = khce_it->second;
+    game_value khce_v = kh_crew_vehicle(khce_e.man, khce_b);
+    std::lock_guard<std::mutex> khce_g(g_draw_list_mutex);
+    khce_e.veh = khce_v;
+    khce_e.in = !khce_v.is_nil();
+    khce_e.d_ok = false;
+    khce_e.l_ok = false;
+}
+// The entry's two event handlers (GetInMan, GetOutMan). False when one could not be added: the
+// caller drops the entry (its handles remove what was added).
+inline bool kh_crew_listen(KhCrewEnt& khcl_e, uintptr_t khcl_b) {
+    const uint64_t khcl_s = khcl_e.serial;
+    auto khcl_f = [khcl_b, khcl_s](const auto&...) { kh_crew_event(khcl_b, khcl_s); };
+    namespace khcl_ic = intercept::client;
+    try {
+        const object khcl_o = static_cast<object>(khcl_e.man);
+        khcl_e.eh_in = khcl_ic::addEventHandler<khcl_ic::eventhandlers_object::GetInMan>(khcl_o, khcl_f);
+        khcl_e.eh_out = khcl_ic::addEventHandler<khcl_ic::eventhandlers_object::GetOutMan>(khcl_o, khcl_f);
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+// KH_CHAIN's side of the census (defined with kh_chain_prepare, after g_chain_cfg): whether any chain is set up, and
+// the characters a simulating chain's end follows. Game thread; the second under g_draw_list_mutex.
+inline bool kh_crew_chain_any();
+inline void kh_crew_chain_cand(std::vector<std::pair<game_value, bool>>& khcc_out);
+// The table against this frame's bindings, and this Draw3D's positions. GAME THREAD, from flush_frame after the
+// reaps and before the sampler, holding no lock across an SQF call. An entry whose character no binding places from
+// any more (or that was deleted) drops: its helper reference to the reap, its event handlers here.
+inline void kh_crew_sync() {
+    if (g_attach_n.load(std::memory_order_relaxed) == 0 && g_crew.empty() && !kh_crew_chain_any()) return;
+    ++g_crew_frame;
+    static std::vector<std::pair<game_value, bool>> khcs_cand;   // (character, has an origin helper: a Man).
+    khcs_cand.clear();
+    {
+        std::lock_guard<std::mutex> khcs_g(g_draw_list_mutex);
+        for (const auto& khcs_kv : g_attach) {
+            const KhAttach& khcs_a = khcs_kv.second;
+            const game_value& khcs_p = kh_attach_parent_gv(khcs_a);
+            // A rotation lane's own character (its helper stands in for an object that is not the parent).
+            const game_value& khcs_r = khcs_a.obj_rot;
+            if (kh_attach_is_obj(khcs_r) && khcs_r.data.get() != khcs_p.data.get() && !khcs_a.org_rot.is_nil() &&
+                khcs_a.org_rot_for == khcs_r.data.get()) khcs_cand.emplace_back(khcs_r, true);
+            if (!kh_attach_is_obj(khcs_p)) continue;
+            const void* const khcs_pd = khcs_p.data.get();
+            const bool khcs_org = (!khcs_a.org_pos.is_nil() && khcs_a.org_pos_for == khcs_pd) ||
+                                  (!khcs_a.org_rot.is_nil() && khcs_a.org_rot_for == khcs_pd);
+            const bool khcs_pxy = khcs_a.skel ? !khcs_a.skel_proxy.empty() : !khcs_a.proxy.is_nil();
+            if (khcs_org || khcs_pxy) khcs_cand.emplace_back(khcs_p, khcs_org);
+        }
+        kh_crew_chain_cand(khcs_cand);
+    }
+    for (auto& khcs_kv : g_crew) khcs_kv.second.seen = false;
+    std::unordered_map<uintptr_t, const void*> khcs_nm;
+    for (const auto& khcs_c : khcs_cand) {
+        const game_value& khcs_m = khcs_c.first;
+        const uintptr_t khcs_b = kh_attach_base_of(khcs_m);
+        if (khcs_b == 0 || kh_attach_obj_dead(khcs_m)) continue;
+        const auto khcs_it = g_crew.find(khcs_b);
+        if (khcs_it != g_crew.end()) {   // By base: two bindings may hold two game values of one object.
+            if (!kh_attach_obj_dead(khcs_it->second.man)) khcs_it->second.seen = true;   // Else it drains below.
+            continue;
+        }
+        if (!khcs_c.second) {   // Helpers only (a memory point, a skeleton): a Man?
+            const auto khcs_n = g_crew_notman.find(khcs_b);
+            bool khcs_man = false;
+            if (khcs_n == g_crew_notman.end() || khcs_n->second != khcs_m.data.get()) {
+                try { khcs_man = sqf::is_kind_of(static_cast<object>(khcs_m), "Man"); }
+                catch (...) { khcs_man = false; }
+            }
+            if (!khcs_man) { khcs_nm[khcs_b] = khcs_m.data.get(); continue; }
+        }
+        KhCrewEnt khcs_e;
+        khcs_e.man = khcs_m;
+        khcs_e.serial = ++g_crew_serial;
+        khcs_e.born = g_crew_frame;
+        std::string khcs_err;
+        try {
+            if (!kh_pxy_pool_get(khcs_m, std::string(), khcs_e.helper, "a character's", khcs_err)) {
+                khcs_e.helper = game_value();
+            }
+        } catch (...) {
+            khcs_e.helper = game_value();
+        }
+        if (khcs_e.helper.is_nil()) continue;   // No helper to correct against: its bindings read as before.
+        khcs_e.veh = kh_crew_vehicle(khcs_m, khcs_b);
+        khcs_e.in = !khcs_e.veh.is_nil();
+        if (!kh_crew_listen(khcs_e, khcs_b)) { kh_attach_proxy_orphan(khcs_e.helper); continue; }
+        khcs_e.seen = true;
+        std::lock_guard<std::mutex> khcs_g(g_draw_list_mutex);
+        g_crew.emplace(khcs_b, std::move(khcs_e));
+    }
+    g_crew_notman.swap(khcs_nm);
+    std::vector<KhCrewEnt> khcs_gone;
+    {
+        std::lock_guard<std::mutex> khcs_g(g_draw_list_mutex);
+        for (auto khcs_it = g_crew.begin(); khcs_it != g_crew.end();) {
+            if (khcs_it->second.seen && !kh_attach_obj_dead(khcs_it->second.man)) { ++khcs_it; continue; }
+            khcs_gone.push_back(std::move(khcs_it->second));
+            khcs_it = g_crew.erase(khcs_it);
+        }
+    }
+    for (KhCrewEnt& khcs_e : khcs_gone) kh_attach_proxy_orphan(khcs_e.helper);   // Takes the mutex itself.
+    khcs_gone.clear();   // Their event handlers go here, holding nothing.
+    for (auto& khcs_kv : g_crew) {
+        KhCrewEnt& khcs_e = khcs_kv.second;
+        khcs_e.t_ok = false;
+        khcs_e.tr_ok = false;
+        if (!khcs_e.in) continue;
+        try {
+            const object khcs_o = static_cast<object>(khcs_e.man);
+            const vector3 khcs_dv = sqf::vector_dir_visual(khcs_o);
+            const vector3 khcs_uv = sqf::vector_up_visual(khcs_o);
+            const float khcs_df[3] = { khcs_dv.x, khcs_dv.y, khcs_dv.z };
+            const float khcs_uf[3] = { khcs_uv.x, khcs_uv.y, khcs_uv.z };
+            khcs_e.tr_ok = kh_crew_rows(khcs_df, khcs_uf, khcs_e.tr);   // Else the helper's rows (kh_crew_measure).
+        } catch (...) {
+            khcs_e.tr_ok = false;
+        }
+        try {
+            const vector3 khcs_v = sqf::get_pos_world_visual(static_cast<object>(khcs_e.man));
+            khcs_e.t[0] = khcs_v.x;
+            khcs_e.t[1] = khcs_v.y;
+            khcs_e.t[2] = khcs_v.z;
+            khcs_e.t_ok = std::isfinite(khcs_e.t[0]) && std::isfinite(khcs_e.t[1]) && std::isfinite(khcs_e.t[2]);
+        } catch (...) {
+            khcs_e.t_ok = false;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> khcs_g(g_draw_list_mutex);
+        kh_crew_measure();
+    }
+    khcs_cand.clear();
+}
+// The mission edge: the table emptied, its event handlers removed outside the mutex; the helper references are
+// released, not queued (the pool is emptied with the bindings - kh_attach_drop_all).
+inline void kh_crew_clear_all() {
+    std::unordered_map<uintptr_t, KhCrewEnt> khca_old;
+    {
+        std::lock_guard<std::mutex> khca_g(g_draw_list_mutex);
+        khca_old.swap(g_crew);
+    }
+    khca_old.clear();
+    g_crew_notman.clear();
+    g_crew_serial = 0;
+    g_crew_frame = 0;
+}
+
 // KH_RT_PAINT_READ - the cast fire paints our shadow into the engine's mask once a frame and cannot wait past
 // KH_CAST_WAIT_US for the frame's own sample (rule 1.1095); past that it painted the previous frame's pose. When the
 // own sample is still absent there (identity known, sample cycle + g_gid_k not published), the render thread reads
@@ -10830,6 +11197,9 @@ inline const KhGtSnap* kh_gts_for_cycle(KhAttach& khgc_a, uint64_t khgc_cyc, boo
 // the read against that sample (matched / stale / other). Only when the own sample is absent, only at the paint.
 // KH_PXY_SMOOTH: its helper positions are the raw reads (the estimator runs in the sampler alone), so a paint drawn
 // from it may sit up to one float step from the frame's smoothed pose; the check compares raw reads with raw reads.
+// KH_CREW_LAG: a binding placed from a crew member also reads the character's origin helper and vehicle (both
+// passes) and moves its helpers by the prediction; its check then counts 'other' wherever the prediction and the
+// frame's own measurement differ in a bit.
 inline bool kh_rt_own_absent() {
     if (!g_gid_ok) return false;   // The frame's own number unknown: no read (today's pick).
     const uint64_t khra_want = static_cast<uint64_t>(static_cast<int64_t>(g_topo_cycles) + g_gid_k);
@@ -10871,7 +11241,22 @@ inline uint32_t kh_rt_paint_read() {
         if (a.rt_pb != pb) { a.rt_pb = pb; a.rt_par_off = KH_ATTACH_OFF_NONE; a.rt_par_vb = 0; a.rt_par_bb = 0; }
         const uintptr_t rb = a.rt_rot.is_nil() ? 0u : kh_attach_base_of(a.rt_rot);
         if (a.rt_rb != rb) { a.rt_rb = rb; a.rt_rot_off = KH_ATTACH_OFF_NONE; a.rt_rot_vb = 0; a.rt_rot_bb = 0; }
-        const size_t n = (np + 2u) * 12u;   // Parent, helpers, rotation object.
+        // KH_CREW_LAG: a crew member's origin helper and vehicle too, once a sample has placed it in that vehicle.
+        KhCrewEnt* cw = nullptr;
+        if (!g_crew.empty()) {
+            const game_value& pg = kh_attach_parent_gv(a);
+            const auto cit = g_crew.find(kh_attach_base_of(pg));
+            if (cit != g_crew.end() && cit->second.in && cit->second.l_ok) cw = &cit->second;
+        }
+        // KH_CREW_LAG: the rotation lane's own character, where its helper is what the lane reads: its vehicle too.
+        KhCrewEnt* cwr = nullptr;
+        if (rb != 0u && !g_crew.empty()) {
+            const auto cit = g_crew.find(kh_attach_base_of(a.obj_rot));
+            if (cit != g_crew.end() && cit->second.in && cit->second.l_ok &&
+                a.rt_rot.data.get() == cit->second.helper.data.get()) cwr = &cit->second;
+        }
+        const size_t nc = np + 2u + (cw ? 2u : 0u);   // Parent, helpers, rotation object (, helper, vehicle).
+        const size_t n = (nc + (cwr ? 1u : 0u)) * 12u;   // (, the rotation lane's character's vehicle)
         khrp_a.assign(n, 0.0f);
         khrp_b.assign(n, 0.0f);
         auto read_all = [&](float* out, bool& rot_ok) -> bool {
@@ -10885,6 +11270,15 @@ inline uint32_t kh_rt_paint_read() {
             if (rb != 0u) {
                 float* const o = out + (np + 1u) * 12u;
                 rot_ok = kh_attach_raw(a.rt_rot, a.rt_rot_off, a.rt_rot_vb, a.rt_rot_bb, o, o + 3, nullptr);
+            }
+            if (cw) {   // KH_CREW_LAG.
+                float* const o = out + (np + 2u) * 12u;
+                if (!kh_crew_read(cw->helper, cw->r_hb, cw->r_hoff, cw->r_hvb, cw->r_hbb, o, o + 3) ||
+                    !kh_crew_read(cw->veh, cw->r_vb, cw->r_voff, cw->r_vvb, cw->r_vbb, o + 12, o + 15)) return false;
+            }
+            if (cwr) {   // KH_CREW_LAG.
+                float* const o = out + nc * 12u;
+                if (!kh_crew_read(cwr->veh, cwr->r_vb, cwr->r_voff, cwr->r_vvb, cwr->r_vbb, o, o + 3)) return false;
             }
             return true;
         };
@@ -10901,6 +11295,27 @@ inline uint32_t kh_rt_paint_read() {
         memcpy(sn.par, khrp_a.data(), sizeof(sn.par));
         sn.px.assign(khrp_a.begin() + 12, khrp_a.begin() + 12 + static_cast<ptrdiff_t>(np * 12u));
         if (rot_a) memcpy(sn.rot, khrp_a.data() + (np + 1u) * 12u, sizeof(sn.rot));
+        if (cw) {   // KH_CREW_LAG: the prediction - the character where its last offset in the vehicle puts it now.
+            const float* const hc = khrp_a.data() + (np + 2u) * 12u;   // The helper's pose, then the vehicle's.
+            double tp[3];
+            kh_crew_place(hc + 12, hc + 15, cw->l, tp);
+            float cr[9], dm[9];
+            kh_crew_mul3(cw->lq, hc + 15, cr);   // Its rows in the vehicle, on the vehicle as it is now.
+            kh_crew_delta(hc + 3, cr, dm);
+            const double hd[3] = { hc[0], hc[1], hc[2] };
+            const bool ph = a.rt_par.data.get() == cw->helper.data.get();
+            if (ph) kh_crew_apply(tp, hd, dm, sn.par, sn.par + 3);
+            if (ph || !a.skel) {
+                for (size_t j = 0; j < np; ++j) kh_crew_apply(tp, hd, dm, &sn.px[j * 12u], &sn.px[j * 12u + 3u]);
+            }
+        }
+        if (cwr && rot_a) {   // KH_CREW_LAG: the rotation lane's character, likewise predicted.
+            const float* const vc = khrp_a.data() + nc * 12u;
+            double tp[3];
+            kh_crew_place(vc, vc + 3, cwr->l, tp);
+            for (int k = 0; k < 3; ++k) sn.rot[k] = static_cast<float>(tp[k]);
+            kh_crew_mul3(cwr->lq, vc + 3, sn.rot + 3);
+        }
         a.rt_cyc = khrp_cyc;
         ++khrp_n;
     }
@@ -11144,6 +11559,13 @@ inline bool kh_attach_gt_snap() {
         if (!kh_gts_read(khgt_par, khgt_a.gts_par_off, khgt_a.gts_par_vb, khgt_a.gts_par_bb, khgt_p, khgt_r)) continue;
         memcpy(khgt_s.par, khgt_p, sizeof(khgt_p));
         memcpy(khgt_s.par + 3, khgt_r, sizeof(khgt_r));
+        // KH_CREW_LAG: a crew member's helpers moved by its correction - the parent where its origin helper is read.
+        KhCrewEnt* const khgt_cw = kh_crew_of(khgt_lpar);
+        if (khgt_cw && khgt_par.data.get() == khgt_cw->helper.data.get()) {
+            kh_crew_apply(khgt_cw->t, khgt_cw->h, khgt_cw->dm, khgt_s.par, khgt_s.par + 3);
+        }
+        // The helpers on it: a memory point always (its parent read is a check), a skeleton's bones with the parent.
+        const bool khgt_cwx = khgt_cw && (!khgt_a.skel || khgt_par.data.get() == khgt_cw->helper.data.get());
         khgt_s.px.resize(khgt_np * 12u);
         khgt_s.pxd.assign(khgt_np * 3u, 0.0f);   // KH_PXY_SMOOTH: zero = the reading as it stands.
         // KH_GTS_HOLD: the binding's previous sample, written before this one (another ring slot), when it is this
@@ -11161,6 +11583,9 @@ inline bool kh_attach_gt_snap() {
                     memcpy(&khgt_s.pxd[khgt_j * 3u], &khgt_prev.pxd[khgt_j * 3u], 3u * sizeof(float));
                 }
                 continue;
+            }
+            if (khgt_cwx) {   // KH_CREW_LAG: every helper of the character, ahead of the estimator.
+                kh_crew_apply(khgt_cw->t, khgt_cw->h, khgt_cw->dm, khgt_p, khgt_r);
             }
             memcpy(&khgt_s.px[khgt_j * 12u], khgt_p, sizeof(khgt_p));
             memcpy(&khgt_s.px[khgt_j * 12u + 3u], khgt_r, sizeof(khgt_r));
@@ -11183,6 +11608,11 @@ inline bool kh_attach_gt_snap() {
                 memcpy(khgt_s.rot, khgt_p, sizeof(khgt_p));
                 memcpy(khgt_s.rot + 3, khgt_r, sizeof(khgt_r));
                 khgt_s.rot_ok = true;
+                // KH_CREW_LAG: a crew member of its own, moved (so turned) as that character is drawn.
+                const KhCrewEnt* const khgt_cr = kh_crew_of(khgt_a.obj_rot);
+                if (khgt_cr && khgt_ro.data.get() == khgt_cr->helper.data.get()) {
+                    kh_crew_apply(khgt_cr->t, khgt_cr->h, khgt_cr->dm, khgt_s.rot, khgt_s.rot + 3);
+                }
             }
         }
         khgt_s.gen = khgt_gen;
@@ -17972,6 +18402,23 @@ inline void kh_skin_drop_all() {
 // spawn point fails the parent-reach test, as a skeletal binding's does, and
 // the lane stays free that frame. khcp_gts: this flush_frame's sampler took a
 // sample (kh_attach_gt_snap's answer) - its number and stamp are this pass's.
+// KH_CREW_LAG (declared with the crew table): any chain set up; the characters a simulating chain's end follows -
+// its object, its memory point's owner, its rotation object - for the census (a Man among them joins the table).
+// Game thread, under g_draw_list_mutex (the draw list is read).
+inline bool kh_crew_chain_any() { return !g_chain_cfg.empty(); }
+inline void kh_crew_chain_cand(std::vector<std::pair<game_value, bool>>& khcc_out) {
+    for (const auto& khcc_kv : g_chain_cfg) {
+        const KhChainCfg& khcc_c = khcc_kv.second;
+        const auto khcc_d = g_draw_list.find(khcc_kv.first);
+        if (khcc_d == g_draw_list.end() || khcc_d->second.seq != khcc_c.seq || !kh_chain_obj_sim(khcc_d->second)) {
+            continue;
+        }
+        if ((khcc_c.pos == KH_CHE_OBJ || khcc_c.pos == KH_CHE_MEM) && kh_attach_is_obj(khcc_c.pos_obj)) {
+            khcc_out.emplace_back(khcc_c.pos_obj, false);
+        }
+        if (khcc_c.rot == KH_CHE_OBJ && kh_attach_is_obj(khcc_c.rot_obj)) khcc_out.emplace_back(khcc_c.rot_obj, false);
+    }
+}
 inline void kh_chain_prepare(bool khcp_gts) {
     KH_PROF_SCOPE(KHP_CHAIN_PREPARE);   // KH_PROF.
     if (g_chain_cfg.empty()) return;
@@ -18019,6 +18466,13 @@ inline void kh_chain_prepare(bool khcp_gts) {
             if (!kh_attach_obj_dead(khcp_c.pos_obj) && !kh_attach_obj_dead(khcp_c.proxy) &&
                 kh_attach_raw(khcp_c.proxy, khcp_c.rd_pos.off, khcp_c.rd_pos.vb, khcp_c.rd_pos.bb, khcp_p, khcp_mr) &&
                 kh_attach_raw(khcp_c.pos_obj, khcp_c.rd_par.off, khcp_c.rd_par.vb, khcp_c.rd_par.bb, khcp_pp, khcp_pr)) {
+                // KH_CREW_LAG: the memory point moved by its character's correction, its reach tested against where
+                // the character is drawn (its own state holds the get-in pose while it is crew).
+                const KhCrewEnt* const khcp_cw = kh_crew_of(khcp_c.pos_obj);
+                if (khcp_cw) {
+                    kh_crew_apply(khcp_cw->t, khcp_cw->h, khcp_cw->dm, khcp_p, khcp_mr);
+                    for (int k = 0; k < 3; ++k) khcp_pp[k] = static_cast<float>(khcp_cw->t[k]);
+                }
                 float khcp_d[3];
                 for (int k = 0; k < 3; ++k) khcp_d[k] = khcp_p[k] - khcp_pp[k];
                 khcp_mem_ok = khcp_d[0] * khcp_d[0] + khcp_d[1] * khcp_d[1] + khcp_d[2] * khcp_d[2] <=
@@ -18041,11 +18495,19 @@ inline void kh_chain_prepare(bool khcp_gts) {
         if (khcp_c.pos == KH_CHE_OBJ && !kh_attach_obj_dead(khcp_c.pos_obj) &&
             kh_attach_raw(khcp_c.pos_obj, khcp_c.rd_pos.off, khcp_c.rd_pos.vb, khcp_c.rd_pos.bb, khcp_p, khcp_r)) {
             khcp_c.live_pos[0] = khcp_p[0]; khcp_c.live_pos[1] = khcp_p[2]; khcp_c.live_pos[2] = khcp_p[1];
+            const KhCrewEnt* const khcp_cw = kh_crew_of(khcp_c.pos_obj);   // KH_CREW_LAG: where it is drawn.
+            if (khcp_cw) {
+                khcp_c.live_pos[0] = khcp_cw->t[0];
+                khcp_c.live_pos[1] = khcp_cw->t[2];
+                khcp_c.live_pos[2] = khcp_cw->t[1];
+            }
             khcp_c.live_p = true;
         }
         if (khcp_c.rot == KH_CHE_OBJ && !kh_attach_obj_dead(khcp_c.rot_obj) &&
             kh_attach_raw(khcp_c.rot_obj, khcp_c.rd_rot.off, khcp_c.rd_rot.vb, khcp_c.rd_rot.bb, khcp_p, khcp_r)) {
             memcpy(khcp_c.live_rot, khcp_r, sizeof(khcp_c.live_rot));
+            const KhCrewEnt* const khcp_cw = kh_crew_of(khcp_c.rot_obj);   // KH_CREW_LAG: turned as drawn.
+            if (khcp_cw) memcpy(khcp_c.live_rot, khcp_cw->cr, sizeof(khcp_c.live_rot));
             khcp_c.live_r = true;
         }
         // A refused read holds the lane's last transform (KhChainCfg::read_p);
@@ -53282,6 +53744,9 @@ inline void flush_frame() {
     // proxies of the meshes it just erased, and before the park, because this
     // one makes SQF calls.
     kh_attach_proxy_reap();
+    // KH_CREW_LAG: the crew table and this Draw3D's corrections - holding nothing (SQF calls), after the reaps
+    // and before the sampler and the chain's end (kh_chain_prepare), which apply them.
+    kh_crew_sync();
     // KH_ATTACH_GT_SNAP: this frame's objects, as the engine will draw them. After the reaps (a reaped binding
     // takes no sample) and before the park, on the thread the SQF commands write the table from.
     const bool khff_gts = kh_attach_gt_snap();
@@ -55425,6 +55890,7 @@ inline void reset_retained_state() {
         g_draw_list.clear();
         g_next_seq = 0;   // Creation order restarts with the list it orders.
     }
+    kh_crew_clear_all();   // KH_CREW_LAG: outside the mutex (its entries' event handlers go).
     kh_aff_clear();   // KH_AFFECTOR: game thread, like the table itself.
     // KH_CLOTH_PROXY: released, not deleted - the mission's end takes its own
     // objects, and a mission edge must not hold one (kh_attach_drop_all).

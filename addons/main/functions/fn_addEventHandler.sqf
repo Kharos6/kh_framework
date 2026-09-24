@@ -397,32 +397,35 @@ switch _eventType do {
 		if (_timeout isNotEqualTo 0) then {
 			private _timeoutId = generateUid;
 
-			KH_var_temporalExecutionStackAdditions pushBack [
-				[_handler],
-				{
-					params ["_handler"];
-					triggerCbaEvent ["KH_eve_drawUiExecutionStackHandler", [_handler, true, false], true, false];
-					KH_var_temporalExecutionStackDeletions pushBackUnique _handlerId;
-				},
-				_timeout,
-				if (_timeout isEqualTo 0) then {
-					diag_frameNo + 1;
-				}
-				else {
-					if (_timeout > 0) then {
-						diag_tickTime + _timeout;
+			"ADDITIONS" manageExecutionStack [
+				true,
+				[
+					[_handler],
+					{
+						params ["_handler"];
+						triggerCbaEvent ["KH_eve_drawUiExecutionStackHandler", [_handler, true, false], true, false];
+						"DELETIONS" manageExecutionStack [true, _handlerId];
+					},
+					_timeout,
+					if (_timeout isEqualTo 0) then {
+						diag_frameNo + 1;
 					}
 					else {
-						diag_frameNo + (abs _timeout);
-					};
-				},
-				-1,
-				_timeoutId,
-				_timeoutId,
-				nil,
-				CBA_missionTime,
-				0
-			]
+						if (_timeout > 0) then {
+							diag_tickTime + _timeout;
+						}
+						else {
+							diag_frameNo + (abs _timeout);
+						};
+					},
+					-1,
+					_timeoutId,
+					_timeoutId,
+					nil,
+					CBA_missionTime,
+					0
+				]
+			];
 		};
 	};
 

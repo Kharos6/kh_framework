@@ -232,7 +232,7 @@ cbuffer CBEngView2 : register(b4)
     float4 engBlk2[15];
 };
 
-// The object record buffer (C++ twin KhObjRec, 6 float4), one per live-scene
+// The object record buffer (C++ twin KhObjRec, 7 float4), one per live-scene
 // slot, read by every bucket vertex shader through the lane's slot
 // (VSInst.islot). Engine axes. size.w = the object's creation on the session
 // clock (KH_USER_LANES), pos.w = 1 when receiveShadow is off (KH_SHADOW_SWITCH),

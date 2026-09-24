@@ -143,6 +143,7 @@ static registered_sqf_function _sqf_curve_slope;
 static registered_sqf_function _sqf_vector_curve_slope;
 static registered_sqf_function _sqf_get_unit_yaw_speed;
 static registered_sqf_function _sqf_process_execution;
+static registered_sqf_function _sqf_manage_execution_stack_string_array;
 static registered_sqf_function _sqf_trigger_cba_event_array;
 static registered_sqf_function _sqf_process_cba_group_event;
 static registered_sqf_function _sqf_process_cba_array_event;
@@ -4175,7 +4176,6 @@ static void kh_flatten_into(const game_value& value, auto_array<game_value>& out
     }
 }
 
-// Dispatches a compiled dispatcher shim through the native KH_fnc_execute
 // equivalent: execute [_arguments, _function, _target, true, false]
 static game_value kh_cba_execute_remote(const game_value& execute_arguments, const code& function, const char* execute_target) {
     auto_array<game_value> exec_args;
@@ -4961,16 +4961,122 @@ static void kh_trigger_stack_handler(const std::string& environment_id, bool del
     );
 }
 
+// The temporal execution stack and its two queues, the pending additions and the pending
+// deletions: internal tables (no mission namespace variable). GAME THREAD ONLY: execute / processExecution queue
+// additions (kh_push_temporal_addition), the compiled handlers queue deletions and scripts edit all three
+// (manageExecutionStack), process_temporal_execution_stack (on_frame) takes the queues and runs the stack, and
+// main.cpp empties them at both mission edges (kh_temporal_clear). Never destructed: they hold game values, which
+// the mission edges release; process exit must not.
+//
+// An entry is the ten-element array execute builds, which manageExecutionStack takes too:
+// [arguments, function (CODE), interval (SCALAR: > 0 seconds between runs, 0 every frame, -n every n frames),
+//  due (SCALAR: the diag_tickTime or diag_frameNo it next runs at), epoch (-1: _totalDelta is the frame's delta;
+//  else the getEpoch of its last run), handlerId, id (STRING: what a deletion or a removal matches),
+//  previousReturn, executionTime, executionCount (SCALAR)]. The run hands them to the function as _thisArguments,
+// _thisFunction, _totalDelta, _handlerId, _eventName (the id), _previousReturn, _executionTime and
+// _executionCount.
+struct KhTemporalEntry {
+    game_value  arguments;
+    game_value  function;
+    float       interval = 0.0f;
+    float       due = 0.0f;
+    game_value  epoch;
+    game_value  handler_id;
+    game_value  event_name;              // The id as given (_eventName).
+    std::string id;                      // The same id, matched by deletions and removals.
+    game_value  previous_return;
+    game_value  execution_time;
+    float       execution_count = 0.0f;
+    bool        removed = false;         // Removed from the stack while it ran: runs no more, leaves after the run.
+};
+
+static std::vector<KhTemporalEntry>& g_kh_temporal_stack = *(new std::vector<KhTemporalEntry>());
+static std::vector<KhTemporalEntry>& g_kh_temporal_additions = *(new std::vector<KhTemporalEntry>());
+static std::unordered_set<std::string>& g_kh_temporal_deletions = *(new std::unordered_set<std::string>());
+
+// While the stack runs it keeps its size (the run walks it by index and holds each entry across its call): an
+// entry added to it meanwhile waits here and joins it, in order, when the run ends.
+static std::vector<KhTemporalEntry>& g_kh_temporal_stack_late = *(new std::vector<KhTemporalEntry>());
+static bool g_kh_temporal_running = false;
+
+// One entry from its array. False with the reason in khte_err.
+static bool kh_temporal_entry_of(const game_value& khte_v, KhTemporalEntry& khte_e, std::string& khte_err) {
+    if (khte_v.type_enum() != game_data_type::ARRAY) {
+        khte_err = "an execution must be an ARRAY";
+        return false;
+    }
+
+    auto& khte_a = khte_v.to_array();
+
+    if (khte_a.size() != 10) {
+        khte_err = "an execution has 10 elements, not " + std::to_string(khte_a.size());
+        return false;
+    }
+
+    if (khte_a[1].type_enum() != game_data_type::CODE || khte_a[2].type_enum() != game_data_type::SCALAR ||
+        khte_a[3].type_enum() != game_data_type::SCALAR || khte_a[6].type_enum() != game_data_type::STRING ||
+        khte_a[9].type_enum() != game_data_type::SCALAR) {
+        khte_err = "an execution is [arguments, function (CODE), interval (SCALAR), due (SCALAR), epoch, handlerId, "
+                   "id (STRING), previousReturn, executionTime, executionCount (SCALAR)]";
+        return false;
+    }
+
+    khte_e.arguments = khte_a[0];
+    khte_e.function = khte_a[1];
+    khte_e.interval = static_cast<float>(khte_a[2]);
+    khte_e.due = static_cast<float>(khte_a[3]);
+    khte_e.epoch = khte_a[4];
+    khte_e.handler_id = khte_a[5];
+    khte_e.event_name = khte_a[6];
+    khte_e.id = static_cast<std::string>(khte_a[6]);
+    khte_e.previous_return = khte_a[7];
+    khte_e.execution_time = khte_a[8];
+    khte_e.execution_count = static_cast<float>(khte_a[9]);
+    khte_e.removed = false;
+    return true;
+}
+
+// Queues an addition: at the back, or at the front (a timeout with priority).
 static void kh_push_temporal_addition(const game_value& entry, bool prepend) {
-    auto& additions = g_kh_cached_temporal_additions.to_array();
+    KhTemporalEntry khpa_e;
+    std::string khpa_err;
+
+    if (!kh_temporal_entry_of(entry, khpa_e, khpa_err)) {
+        report_error("Temporal execution: " + khpa_err);
+        return;
+    }
 
     if (prepend) {
-        auto_array<game_value> single;
-        single.push_back(entry);
-        additions.insert(additions.begin(), single.begin(), single.end());
+        g_kh_temporal_additions.insert(g_kh_temporal_additions.begin(), std::move(khpa_e));
     } else {
-        additions.push_back(entry);
+        g_kh_temporal_additions.push_back(std::move(khpa_e));
     }
+}
+
+// Every stack entry with the id leaves the stack: now, or - while the stack runs - it runs no more and leaves when
+// the run ends. An entry added during the run and not yet joined leaves at once.
+static void kh_temporal_stack_remove(const std::string& khsr_id) {
+    auto khsr_is = [&khsr_id](const KhTemporalEntry& khsr_e) { return khsr_e.id == khsr_id; };
+    std::vector<KhTemporalEntry>& khsr_late = g_kh_temporal_stack_late;
+    khsr_late.erase(std::remove_if(khsr_late.begin(), khsr_late.end(), khsr_is), khsr_late.end());
+
+    if (g_kh_temporal_running) {
+        for (KhTemporalEntry& khsr_e : g_kh_temporal_stack) {
+            if (khsr_e.id == khsr_id) khsr_e.removed = true;
+        }
+    } else {
+        std::vector<KhTemporalEntry>& khsr_s = g_kh_temporal_stack;
+        khsr_s.erase(std::remove_if(khsr_s.begin(), khsr_s.end(), khsr_is), khsr_s.end());
+    }
+}
+
+// Both mission edges (main.cpp: pre_init, mission_ended), never inside a run.
+static void kh_temporal_clear() {
+    g_kh_temporal_stack.clear();
+    g_kh_temporal_additions.clear();
+    g_kh_temporal_deletions.clear();
+    g_kh_temporal_stack_late.clear();
+    g_kh_temporal_running = false;
 }
 
 static void kh_monitor_set(const std::string& environment_id, game_value entry) {
@@ -5222,7 +5328,6 @@ static game_value kh_call_subfunction(const game_value& fed_arguments, bool basi
     return call_serialized_function_sqf(arguments, game_value(std::move(call_params)));
 }
 
-// Native KH_fnc_execute
 static game_value kh_execute_impl(game_value_parameter execute_params) {
     try {
         if (execute_params.type_enum() != game_data_type::ARRAY) return game_value();
@@ -5952,26 +6057,6 @@ static game_value kh_set_variable_display(game_value_parameter left_arg, game_va
     return kh_set_variable_impl(left_arg, right_arg);
 }
 
-static bool kh_gv_equals(const game_value& a, const game_value& b) {
-    auto ta = a.type_enum();
-    if (ta != b.type_enum()) return false;
-
-    switch (ta) {
-        case game_data_type::STRING: return static_cast<std::string>(a) == static_cast<std::string>(b);
-        case game_data_type::SCALAR: return static_cast<float>(a) == static_cast<float>(b);
-        case game_data_type::BOOL:   return static_cast<bool>(a) == static_cast<bool>(b);
-        default: return false;
-    }
-}
-
-static bool kh_gv_in_array(const game_value& needle, const auto_array<game_value>& haystack) {
-    for (size_t i = 0; i < haystack.size(); ++i) {
-        if (kh_gv_equals(needle, haystack[i])) return true;
-    }
-
-    return false;
-}
-
 static std::unordered_set<std::string> kh_build_string_set(const auto_array<game_value>& arr) {
     std::unordered_set<std::string> set;
     set.reserve(arr.size());
@@ -6018,50 +6103,22 @@ static void process_temporal_execution_stack() {
         }
     }
 
-    if (g_kh_cached_temporal_stack.is_nil() || g_kh_cached_temporal_stack.type_enum() != game_data_type::ARRAY) {
-        return;
+    // The queued additions join the stack, then the queued deletions leave it (queued additions
+    // included).
+    std::vector<KhTemporalEntry>& stack = g_kh_temporal_stack;
+
+    if (!g_kh_temporal_additions.empty()) {
+        stack.insert(stack.end(), std::make_move_iterator(g_kh_temporal_additions.begin()),
+                     std::make_move_iterator(g_kh_temporal_additions.end()));
+        g_kh_temporal_additions.clear();
     }
 
-    auto& stack = g_kh_cached_temporal_stack.to_array();
+    if (!g_kh_temporal_deletions.empty()) {
+        stack.erase(std::remove_if(stack.begin(), stack.end(), [](const KhTemporalEntry& khtd_e) {
+            return g_kh_temporal_deletions.count(khtd_e.id) != 0;
+        }), stack.end());
 
-    // Temporal execution stack additions
-    if (!g_kh_cached_temporal_additions.is_nil() && g_kh_cached_temporal_additions.type_enum() == game_data_type::ARRAY) {
-        auto& additions = g_kh_cached_temporal_additions.to_array();
-
-        if (additions.size() > 0) {
-            for (size_t i = 0; i < additions.size(); ++i) {
-                stack.push_back(additions[i]);
-            }
-
-            additions.resize(0);
-        }
-    }
-
-    // Temporal execution stack deletions
-    auto_array<game_value>* deletions = nullptr;
-
-    if (!g_kh_cached_temporal_deletions.is_nil() && g_kh_cached_temporal_deletions.type_enum() == game_data_type::ARRAY) {
-        deletions = &g_kh_cached_temporal_deletions.to_array();
-    }
-
-    std::unordered_set<std::string> deletion_set;
-
-    if (deletions != nullptr && deletions->size() > 0) {
-        deletion_set = kh_build_string_set(*deletions);
-        size_t w = 0;
-
-        for (size_t r = 0; r < stack.size(); ++r) {
-            auto& e = stack[r].to_array();
-            bool del = (e.size() > 6 && kh_set_contains(deletion_set, e[6]));
-
-            if (!del) {
-                if (w != r) stack[w] = stack[r];
-                ++w;
-            }
-        }
-
-        stack.resize(w);
-        deletions->resize(0);
+        g_kh_temporal_deletions.clear();
     }
 
     // Execute due entries
@@ -6079,50 +6136,153 @@ static void process_temporal_execution_stack() {
     game_value frame_delta = game_value(sqf::diag_delta_time());
     auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
 
-    for (size_t i = 0; i < n; ++i) {
-        auto& e = stack[i].to_array();
+    // The stack keeps its size while it runs (g_kh_temporal_stack_late, kh_temporal_stack_remove), so each entry
+    // is held across its own call.
+    g_kh_temporal_running = true;
 
-        if (deletions != nullptr && !deletions->empty() && kh_gv_in_array(e[6], *deletions)) {
+    for (size_t i = 0; i < n; ++i) {
+        KhTemporalEntry& e = stack[i];
+
+        // Removed, or queued for deletion, earlier in this run: it runs no more.
+        if (e.removed || (!g_kh_temporal_deletions.empty() && g_kh_temporal_deletions.count(e.id) != 0)) {
             continue;
         }
 
-        const float delay = static_cast<float>(e[2]);
-        const float delta = static_cast<float>(e[3]);
+        const float delay = e.interval;
+        const float delta = e.due;
         const bool tick_based = delay > 0.0f;
         const float clock = tick_based ? tick : frame;
 
         if (clock >= delta) {
-            const game_value old_total_delta = e[4];
-            const float execution_count = static_cast<float>(e[9]);
+            const game_value old_total_delta = e.epoch;
+            const float execution_count = e.execution_count;
             game_value total_delta;
             const bool is_minus_one = (old_total_delta.type_enum() == game_data_type::SCALAR && static_cast<float>(old_total_delta) == -1.0f);
 
             if (is_minus_one) {
                 total_delta = frame_delta;
             } else {
-                e[4] = get_epoch_sqf();
+                e.epoch = get_epoch_sqf();
                 total_delta = get_epoch_delta_sqf(old_total_delta);
             }
 
             // Inject the loop locals so the executed function inherits them
             // (call shares scope)
-            game_state->set_local_variable(n_arguments, e[0]);
-            game_state->set_local_variable(n_function, static_cast<code>(e[1]));
+            game_state->set_local_variable(n_arguments, e.arguments);
+            game_state->set_local_variable(n_function, static_cast<code>(e.function));
             game_state->set_local_variable(n_total_delta, total_delta);
-            game_state->set_local_variable(n_handler_id, e[5]);
-            game_state->set_local_variable(n_event_name, e[6]);
-            game_state->set_local_variable(n_previous_return, e[7]);
-            game_state->set_local_variable(n_execution_time, e[8]);
-            game_state->set_local_variable(n_execution_count, e[9]);
-            e[7] = raw_call_sqf_native(g_compiled_sqf_generic_call_args);
+            game_state->set_local_variable(n_handler_id, e.handler_id);
+            game_state->set_local_variable(n_event_name, e.event_name);
+            game_state->set_local_variable(n_previous_return, e.previous_return);
+            game_state->set_local_variable(n_execution_time, e.execution_time);
+            game_state->set_local_variable(n_execution_count, game_value(execution_count));
+            e.previous_return = raw_call_sqf_native(g_compiled_sqf_generic_call_args);
             const float step = tick_based ? delay : (delay < 0.0f ? -delay : delay);
-            e[3] = game_value(delta + step);
-            e[9] = game_value(execution_count + 1.0f);
+            e.due = delta + step;
+            e.execution_count = execution_count + 1.0f;
         }
+    }
+
+    // The run's edits settle: the entries removed from the stack leave it, those added to it join it in order.
+    g_kh_temporal_running = false;
+    stack.erase(std::remove_if(stack.begin(), stack.end(), [](const KhTemporalEntry& khtr_e) {
+        return khtr_e.removed;
+    }), stack.end());
+
+    if (!g_kh_temporal_stack_late.empty()) {
+        stack.insert(stack.end(), std::make_move_iterator(g_kh_temporal_stack_late.begin()),
+                     std::make_move_iterator(g_kh_temporal_stack_late.end()));
+        g_kh_temporal_stack_late.clear();
     }
 }
 
-// KH_WEAPON_SLOTS - the weapon each unit of kh_var_allmen holds per slot,
+// STRING manageExecutionStack ARRAY, the script's edit of the three tables. Left: which one,
+// "STACK", "ADDITIONS" or "DELETIONS" (any case). Right: [add (BOOL), element] - true adds, false removes.
+//   "STACK" [true, execution]: joins the stack now; while the stack runs, when that run ends (not in it).
+//   "STACK" [false, id]: every entry with the id leaves the stack now; while the stack runs, it runs no more and
+//     leaves when that run ends.
+//   "ADDITIONS" [true, execution]: queued at the back; the stack's next run appends the queue before it applies
+//     the deletion queue.
+//   "ADDITIONS" [false, id]: every queued execution with the id leaves the queue.
+//   "DELETIONS" [true, id]: queued, once (adding a queued id changes nothing). The stack's next run drops every
+//     entry with the id, queued additions included; a run in progress skips them from then on.
+//   "DELETIONS" [false, id]: taken off the queue.
+// An execution is the ten-element entry, an id a STRING. Returns true when the edit was
+// applied - a removal that matched nothing included; a malformed request is reported and returns false.
+static game_value manage_execution_stack_sqf(game_value_parameter khme_which, game_value_parameter khme_args) {
+    try {
+        const std::string khme_w = kh_lower_copy(static_cast<std::string>(khme_which));
+        const int khme_k = khme_w == "stack" ? 0 : khme_w == "additions" ? 1 : khme_w == "deletions" ? 2 : -1;
+
+        if (khme_k < 0) {
+            report_error("manageExecutionStack: the stack is \"STACK\", \"ADDITIONS\" or \"DELETIONS\", not \"" +
+                         static_cast<std::string>(khme_which) + "\"");
+            return game_value(false);
+        }
+
+        auto& khme_a = khme_args.to_array();
+
+        if (khme_a.size() != 2 || khme_a[0].type_enum() != game_data_type::BOOL) {
+            report_error("manageExecutionStack: the right argument is [add (BOOL), element]");
+            return game_value(false);
+        }
+
+        const bool khme_add = static_cast<bool>(khme_a[0]);
+        const game_value& khme_el = khme_a[1];
+
+        if (khme_add && khme_k != 2) {
+            KhTemporalEntry khme_e;
+            std::string khme_err;
+
+            if (!kh_temporal_entry_of(khme_el, khme_e, khme_err)) {
+                report_error("manageExecutionStack: " + khme_err);
+                return game_value(false);
+            }
+
+            if (khme_k == 1) {
+                g_kh_temporal_additions.push_back(std::move(khme_e));
+            } else if (g_kh_temporal_running) {
+                g_kh_temporal_stack_late.push_back(std::move(khme_e));
+            } else {
+                g_kh_temporal_stack.push_back(std::move(khme_e));
+            }
+
+            return game_value(true);
+        }
+
+        if (khme_el.type_enum() != game_data_type::STRING) {
+            report_error("manageExecutionStack: an id must be a STRING");
+            return game_value(false);
+        }
+
+        const std::string khme_id = static_cast<std::string>(khme_el);
+
+        if (khme_k == 2) {
+            if (khme_add) {
+                g_kh_temporal_deletions.insert(khme_id);
+            } else {
+                g_kh_temporal_deletions.erase(khme_id);
+            }
+        } else if (khme_k == 1) {
+            std::vector<KhTemporalEntry>& khme_q = g_kh_temporal_additions;
+            khme_q.erase(std::remove_if(khme_q.begin(), khme_q.end(), [&khme_id](const KhTemporalEntry& khme_x) {
+                return khme_x.id == khme_id;
+            }), khme_q.end());
+        } else {
+            kh_temporal_stack_remove(khme_id);
+        }
+
+        return game_value(true);
+    } catch (const std::exception& e) {
+        report_error("manageExecutionStack: " + std::string(e.what()));
+        return game_value(false);
+    } catch (...) {
+        report_error("An unknown error occurred in manageExecutionStack");
+        return game_value(false);
+    }
+}
+
+// The weapon each unit of kh_var_allmen holds per slot,
 // sampled every frame beside the yaw ring, keyed like g_unit_states. A slot
 // whose weapon stops matching its stored value fires KH_eve_weaponSlotChanged
 // with [unit, slot, newWeapon]; a unit seen for the first time fires all three
@@ -9661,6 +9821,16 @@ static void initialize_sqf_integration() {
         game_data_type::ARRAY
     );
 
+    _sqf_manage_execution_stack_string_array = intercept::client::host::register_sqf_command(
+        "manageExecutionStack",
+        "\"STACK\" / \"ADDITIONS\" / \"DELETIONS\" manageExecutionStack [add, element]: adds an execution array "
+        "(an id for DELETIONS) or removes by id. Returns true when applied",
+        userFunctionWrapper<manage_execution_stack_sqf>,
+        game_data_type::BOOL,
+        game_data_type::STRING,
+        game_data_type::ARRAY
+    );
+
     _sqf_trigger_cba_event_array = intercept::client::host::register_sqf_command(
         "triggerCbaEvent",
         "Triggers a CBA event through the KH target resolution model. Format [event, arguments, target, jip], where event is either a string or [eventName, entity] for entity events. Returns the JIP handler id array when jip is requested",
@@ -9922,7 +10092,7 @@ static void initialize_sqf_integration() {
     g_compiled_kh_handler_timeout = sqf::compile(R"(
         params ["_environmentId", "_timeoutId"];
         triggerCbaEvent ["KH_eve_temporalExecutionStackHandler", [_environmentId, true, true, false], true, false];
-        KH_var_temporalExecutionStackDeletions pushBackUnique _timeoutId;
+        "DELETIONS" manageExecutionStack [true, _timeoutId];
     )");
 
     g_compiled_kh_handler_code_iteration_hard_fail = sqf::compile(R"(
@@ -9980,7 +10150,7 @@ static void initialize_sqf_integration() {
     g_compiled_kh_handler_string = sqf::compile(R"(
         params ["_fedArguments", "_subfunction", "_environmentId"];
         _fedArguments call _subfunction;
-        KH_var_temporalExecutionStackDeletions pushBackUnique _environmentId;
+        "DELETIONS" manageExecutionStack [true, _environmentId];
         KH_var_temporalExecutionStackMonitor deleteAt _environmentId;
     )");
 

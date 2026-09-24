@@ -25,9 +25,6 @@ int intercept::api_version() {
 
 void intercept::pre_start() {
     g_is_player = sqf::has_interface();
-    g_kh_cached_temporal_stack = game_value(auto_array<game_value>());
-    g_kh_cached_temporal_additions = game_value(auto_array<game_value>());
-    g_kh_cached_temporal_deletions = game_value(auto_array<game_value>());
     g_kh_cached_entity_initializations = game_value(auto_array<game_value>());
     g_kh_cached_entity_initializations_deletions = game_value(auto_array<game_value>());
     (void)AIFramework::instance();
@@ -177,14 +174,9 @@ void intercept::pre_init() {
             }
         }
 
-        sqf::set_variable(sqf::mission_namespace(), "kh_var_temporalexecutionstack", game_value(auto_array<game_value>()));
-        sqf::set_variable(sqf::mission_namespace(), "kh_var_temporalexecutionstackadditions", game_value(auto_array<game_value>()));
-        sqf::set_variable(sqf::mission_namespace(), "kh_var_temporalexecutionstackdeletions", game_value(auto_array<game_value>()));
+        kh_temporal_clear();
         sqf::set_variable(sqf::mission_namespace(), "kh_var_entityinitializations", game_value(auto_array<game_value>()));
         sqf::set_variable(sqf::mission_namespace(), "kh_var_entityinitializationsdeletions", game_value(auto_array<game_value>()));
-        g_kh_cached_temporal_stack = sqf::get_variable(sqf::mission_namespace(), "kh_var_temporalexecutionstack");
-        g_kh_cached_temporal_additions = sqf::get_variable(sqf::mission_namespace(), "kh_var_temporalexecutionstackadditions");
-        g_kh_cached_temporal_deletions = sqf::get_variable(sqf::mission_namespace(), "kh_var_temporalexecutionstackdeletions");
         g_kh_cached_entity_initializations = sqf::get_variable(sqf::mission_namespace(), "kh_var_entityinitializations");
         g_kh_cached_entity_initializations_deletions = sqf::get_variable(sqf::mission_namespace(), "kh_var_entityinitializationsdeletions");
         raw_call_sqf_native_no_return(sqf::get_variable(sqf::mission_namespace(), "kh_fnc_preinit"));
@@ -252,9 +244,7 @@ void intercept::on_frame() {
 void intercept::mission_ended() {
     g_is_server = false;
     g_is_headless = false;
-    g_kh_cached_temporal_stack = game_value(auto_array<game_value>());
-    g_kh_cached_temporal_additions = game_value(auto_array<game_value>());
-    g_kh_cached_temporal_deletions = game_value(auto_array<game_value>());
+    kh_temporal_clear();
     g_kh_cached_entity_initializations = game_value(auto_array<game_value>());
     g_kh_cached_entity_initializations_deletions = game_value(auto_array<game_value>());
     g_mission_time = 0.0f;

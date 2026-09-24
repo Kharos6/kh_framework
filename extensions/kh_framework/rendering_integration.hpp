@@ -61,6 +61,17 @@ namespace RenderIntegration {
 // The mesh is removed automatically if either the object or its memory-point
 // proxy is deleted.
 //
+// Far from the map origin the game keeps a memory point's world position to
+// float precision - steps of about 0.5 mm at 4-8 km, 1 mm at 8-16 km and
+// 2 mm past 16 km, horizontally - so a point that barely moves jitters by
+// that step (the game's own attached objects do the same). A memory-point
+// binding, the bones of a skeletal binding and a chain's end on a memory
+// point follow a smoothed track of the point instead, always within one such
+// step of where the game reports it; a jump of more than 64 steps in one
+// frame (a teleport) is taken exactly. An attached mesh is also placed finer
+// than a world float, so its own offset (attachPosition, a skeletal mesh's
+// centre) adds no step.
+//
 // Spawns lit, mode 1, size 1, white, back-face culled; set everything else
 // with updateRender3D.
 //
@@ -2686,6 +2697,7 @@ struct KhPhysicsColliderView {
     float bake[3];
     float rot[9];        // The collider object's rot_m, engine axes, rows as basis vectors.
     float centre[3];     // Centre: world in the gather's views, the cloth's own frame in its copies (kh_cloth_sync).
+    float res[3] = {};   // KH_POS_RES: a world view's centre residual (engine axes); zero in the frame copies.
     float size[3];       // Engine-axes edge lengths; the normalized mesh spans [-0.5, 0.5].
     float inv_size[3];
     float bs_c[3];       // Bounding sphere, the broadphase - in the same frame as centre.
@@ -7487,6 +7499,8 @@ struct Resources {
     ID3D11VertexShader*       vs_sundepth_a = nullptr;
     ID3D11PixelShader*        ps_sundepth_a = nullptr;
     ID3D11InputLayout*        layout_sundepth_a = nullptr;   // TEXCOORD0 (uv) on slot 0.
+    ID3D11VertexShader*       vs_sundepth_ao = nullptr;      // KH_CAST_ALPHA: VSSunDepthAObj (KH_SUN_OBJ).
+    ID3D11InputLayout*        layout_sundepth_ao = nullptr;  // Its layout: the mesh's own four lanes, slot 0 only.
     // One depth array for every casting light: a spot spends 1 slice, a point
     // spends 6 (a cube unrolled).
     ID3D11RasterizerState*    dls_rast = nullptr;
@@ -7702,6 +7716,8 @@ struct Resources {
         KH_SAFE_RELEASE(vs_sundepth_a);
         KH_SAFE_RELEASE(ps_sundepth_a);
         KH_SAFE_RELEASE(layout_sundepth_a);
+        KH_SAFE_RELEASE(vs_sundepth_ao);
+        KH_SAFE_RELEASE(layout_sundepth_ao);
         KH_SAFE_RELEASE(sun_instance_vb);
         sun_instance_cap = 0;
         KH_SAFE_RELEASE(vs_seam_inst);   // KH_SEAM_INST.
@@ -8125,6 +8141,9 @@ struct RenderObject {
     float band_max = 0.0f;   // Band end (m); <= 0 = unbounded (includes sky).
     float band_falloff = 10.0f;   // Fade width at both band edges (m).
     float pos[3] = {};   // SQF coords [x, y, zASL]; converted at draw.
+    // KH_POS_RES (kh_pos_res): engine axes, the exact centre minus pos, valid while pos is pos_res_at.
+    float pos_res[3] = {};
+    float pos_res_at[3] = {};
     float size[3] = { 1.0f, 1.0f, 1.0f };   // Resolved mesh edge lengths per SQF.
     float size_mul[3] = { 1.0f, 1.0f, 1.0f };
     float rot[3] = {};   // [pitch, yaw, roll] degrees, arma sense (yaw) clockwise from north about
@@ -8282,6 +8301,48 @@ struct RenderObject {
     float sim_lod[5] = { 0.25f, 25.0f, 100.0f, 0.06f, 0.015f };
 };
 
+// KH_POS_RES - an attached mesh's centre finer than a world float holds. The step composes it in double (the
+// helper, the KH_PXY_SMOOTH delta, attachPosition, a skeletal mesh's centre) and stores the nearest floats in pos
+// and the rest in pos_res (engine axes, at most half a float step); every draw that places the mesh adds pos_res
+// where it forms a camera- or anchor-relative centre (kh_fill_center_rel, the object record's res lane), so the
+// drawn position carries no world-scale rounding of ours. The residual belongs to the pos it was taken for
+// (pos_res_at): any other writer that changes pos retires it without knowing it exists (one that stores the very
+// floats it was taken for leaves it live - at most half a float step from what that writer meant). The draw's
+// world-absolute lanes (centerSize, the record's pos) keep pos alone; the bounds cover the residual
+// (kh_bounds_size_of grows by it) and an occluder's box is pulled in by it (kh_vis_occ_build), so no test is off by
+// it; every cache keyed on a caster's position keys on its residual too, and a simulation's frame and a collider
+// enter exact (kh_cloth_sync).
+inline void kh_pos_res(const RenderObject& khpr_o, float khpr_e[3]) {   // Engine axes; zero when retired.
+    if (memcmp(khpr_o.pos, khpr_o.pos_res_at, sizeof(khpr_o.pos)) == 0) {
+        memcpy(khpr_e, khpr_o.pos_res, sizeof(khpr_o.pos_res));
+    } else {
+        khpr_e[0] = khpr_e[1] = khpr_e[2] = 0.0f;
+    }
+}
+// The exact centre (SQF order) into pos and its residual: true when either changed (the step's moved test).
+inline bool kh_pos_set_exact(RenderObject& khpx_o, const double khpx_p[3]) {
+    const float khpx_f[3] = { static_cast<float>(khpx_p[0]), static_cast<float>(khpx_p[1]),
+                              static_cast<float>(khpx_p[2]) };
+    const float khpx_r[3] = { static_cast<float>(khpx_p[0] - static_cast<double>(khpx_f[0])),   // Engine axes.
+                              static_cast<float>(khpx_p[2] - static_cast<double>(khpx_f[2])),
+                              static_cast<float>(khpx_p[1] - static_cast<double>(khpx_f[1])) };
+    const bool khpx_ch = memcmp(khpx_o.pos, khpx_f, sizeof(khpx_f)) != 0 ||
+                         memcmp(khpx_o.pos_res_at, khpx_f, sizeof(khpx_f)) != 0 ||
+                         memcmp(khpx_o.pos_res, khpx_r, sizeof(khpx_r)) != 0;
+    memcpy(khpx_o.pos, khpx_f, sizeof(khpx_f));
+    memcpy(khpx_o.pos_res_at, khpx_f, sizeof(khpx_f));
+    memcpy(khpx_o.pos_res, khpx_r, sizeof(khpx_r));
+    return khpx_ch;
+}
+// The centre as the draws place it (pos plus a live residual), SQF order.
+inline void kh_pos_exact(const RenderObject& khpe_o, double khpe_p[3]) {
+    float khpe_e[3];
+    kh_pos_res(khpe_o, khpe_e);
+    khpe_p[0] = static_cast<double>(khpe_o.pos[0]) + static_cast<double>(khpe_e[0]);
+    khpe_p[1] = static_cast<double>(khpe_o.pos[1]) + static_cast<double>(khpe_e[2]);
+    khpe_p[2] = static_cast<double>(khpe_o.pos[2]) + static_cast<double>(khpe_e[1]);
+}
+
 // The matrix for a [pitch, yaw, roll] triple in ARMA degrees, in ENGINE axes.
 // Split out of kh_set_rotation so that KH_ATTACH_OFFSET's attach-space
 // rotation is built by exactly this code and the two cannot drift; the split
@@ -8371,6 +8432,10 @@ inline void kh_rot_half_extents(const float hl[3], const float* rot_m, bool rota
 // KH_USER_VS: plus the vertex stage's declared reach on both sides of every
 // axis (KhMaterialSet::vertex_bound) - the deformation happens on the GPU, so
 // the script's promise is all a bounds test has. Untouched without one.
+// KH_POS_RES: plus twice the residual's length on every axis, divided by the
+// smallest row scale of a scaled rotation: the mesh is drawn at pos plus its
+// residual, which may point anywhere, and the box about pos then holds all of
+// it after any rotation. Untouched with no live residual.
 inline void kh_bounds_size_of(const RenderObject& o, float khbs_sz[3]) {
     for (int k = 0; k < 3; ++k) khbs_sz[k] = o.cast_size[k] > o.size[k] ? o.cast_size[k] : o.size[k];
     {
@@ -8383,6 +8448,22 @@ inline void kh_bounds_size_of(const RenderObject& o, float khbs_sz[3]) {
     }
     if (o.materials && o.materials->vertex_any && o.materials->vertex_bound > 0.0f) {
         for (int k = 0; k < 3; ++k) khbs_sz[k] += 2.0f * o.materials->vertex_bound;
+    }
+    {   // KH_POS_RES.
+        float khbs_r[3];
+        kh_pos_res(o, khbs_r);
+        const float khbs_rl = sqrtf(khbs_r[0] * khbs_r[0] + khbs_r[1] * khbs_r[1] + khbs_r[2] * khbs_r[2]);
+        if (khbs_rl > 0.0f) {
+            float khbs_g = 2.0f * khbs_rl;
+            if (o.rotated) {
+                for (int khbs_rr = 0; khbs_rr < 3; ++khbs_rr) {
+                    const float* khbs_w = &o.rot_m[khbs_rr * 3];
+                    const float khbs_n = sqrtf(khbs_w[0] * khbs_w[0] + khbs_w[1] * khbs_w[1] + khbs_w[2] * khbs_w[2]);
+                    if (khbs_n > 1.0e-6f && khbs_n < 1.0f) khbs_g = fmaxf(khbs_g, 2.0f * khbs_rl / khbs_n);
+                }
+            }
+            for (int k = 0; k < 3; ++k) khbs_sz[k] += khbs_g;
+        }
     }
 }
 inline void kh_world_half_extents(const RenderObject& o, float he[3]) {
@@ -8600,8 +8681,9 @@ struct KhObjRec {
     float rot1[4];   // (filled), rot1.w = ambient fraction, rot2.w = diffuse fraction.
     float rot2[4];
     float col[4];    // Object colour, envelope not applied.
+    float res[4];    // xyz = KH_POS_RES (engine axes; added to every relative centre the record forms); w unread.
 };
-static_assert(sizeof(KhObjRec) == 96, "KhObjRec is 6 float4 (HLSL twin)");
+static_assert(sizeof(KhObjRec) == 112, "KhObjRec is 7 float4 (HLSL twin)");
 static std::vector<KhObjRec> g_objbuf_cpu;          // By slot; the buffer's mirror.
 static std::vector<uint32_t> g_objbuf_dirty;        // Slots the GPU copy is behind on.
 static std::vector<uint8_t>  g_objbuf_dirty_mark;
@@ -8621,6 +8703,8 @@ inline void kh_objrec_fill(KhObjRec& r, const RenderObject& o) {
     r.rot1[3] = o.light_ambient;
     r.rot2[3] = o.light_diffuse;
     memcpy(r.col, o.color, sizeof(r.col));
+    kh_pos_res(o, r.res);   // KH_POS_RES.
+    r.res[3] = 0.0f;
 }
 
 inline void kh_objbuf_mark(uint32_t khom_slot) {   // Under the park (kh_scene_sync).
@@ -8896,6 +8980,7 @@ struct KhGtSnap {
     float     par[12] = {};
     float     rot[12] = {};
     std::vector<float> px;
+    std::vector<float> pxd;   // KH_PXY_SMOOTH: per helper 3 floats (SQF order), estimator output minus px's reading.
 };
 struct KhAttach {
     // KH_ATTACH_GT_SNAP: the ring, and the page caches and copy choices of the reads that fill it (the Draw3D
@@ -8987,6 +9072,7 @@ struct KhAttach {
     // g_draw_list_mutex by the step, read under it by the sync.
     std::vector<float>     skel_smp;
     float                  skel_smp_par[12] = {};
+    std::vector<float>     skel_smp_d;   // KH_PXY_SMOOTH: per proxy 3 floats, the sample's pxd (zero: none).
     bool                   skel_smp_ok = false;
     uint32_t               skel_smp_gen = 0;    // The skel_gen the stash was taken for.
     uint64_t               skel_smp_ms = 0;     // Its steady stamp (KH_SKEL_SAMPLE_KEEP_MS).
@@ -9125,6 +9211,20 @@ struct KhPxyPoolEnt {
     uint32_t    refs = 0;
     std::string key;
     uint64_t    made_seq = 0;   // g_gts_seq when it was made and attached (KH_ATTACH_MAN_HELPER's stamp).
+    // KH_PXY_SMOOTH: a memory-point proxy (bone) and its estimator, per SQF axis - the last reading, the target and
+    // which way it last moved, the tracker's output and velocity (m/s); the sample it last ran for, that sample's
+    // stamp and delta (output minus reading). Game thread only: the sampler (under g_draw_list_mutex) and a chain's
+    // end read (kh_chain_prepare); ends with the entry.
+    bool        bone = false;
+    bool        sm_ok = false;
+    uint64_t    sm_seq = 0;
+    int64_t     sm_q = 0;
+    int8_t      sm_dir[3] = {};   // The way each axis's target last moved: +1, -1, 0 = not since a restart.
+    float       sm_r[3] = {};
+    double      sm_t[3] = {};
+    double      sm_x[3] = {};
+    double      sm_v[3] = {};
+    float       sm_d[3] = {};
 };
 static std::unordered_map<uintptr_t, KhPxyPoolEnt>& g_pxy_pool =
     *(new std::unordered_map<uintptr_t, KhPxyPoolEnt>());
@@ -9518,14 +9618,16 @@ inline bool kh_attach_rotated(const float khat_m[9]) {
     return memcmp(khat_m, khat_id, sizeof(khat_id)) != 0;
 }
 
-// KH_ATTACH_OFFSET - the composition, and the ONLY place it happens, so the
+// KH_ATTACH_OFFSET - the composition, and the ONLY place it happens (with the
+// position's double twin below, kh_attach_offset_pos_d - KH_POS_RES), so the
 // axis convention and the multiplication order are each stated once.
 //
 // FIVE call sites each, counted, across four functions: kh_attach_apply and
 // kh_attach_step here, kh_attach_reseed below, and the bone seed and the
-// skeletal seed inside kh_apply_render3d_prop in sqf_integration.hpp. Every one
-// of them is a site that has just taken a raw transform and is about to write
-// it into a mesh.
+// skeletal seed inside kh_apply_render3d_prop in sqf_integration.hpp -
+// kh_attach_step's position through the double twin. Every one of them is a
+// site that has just taken a raw transform and is about to write it into a
+// mesh.
 //
 // khoq_basis is the FOLLOWED object's rotation rows exactly as
 // kh_attach_vs_read hands them back - aside / up / dir, engine axes - which is
@@ -9550,6 +9652,21 @@ inline void kh_attach_offset_pos(const RenderObject& khoq_o, const float khoq_ba
     khoq_pos[0] += khoq_d[0];   // east.
     khoq_pos[1] += khoq_d[2];   // north = SQF y.
     khoq_pos[2] += khoq_d[1];   // up = SQF zASL.
+}
+
+// KH_POS_RES: the same offset onto a double position (the step's), so it adds no world-scale rounding.
+inline void kh_attach_offset_pos_d(const RenderObject& khod_o, const float khod_basis[9], double khod_pos[3]) {
+    if (!khod_o.attach_pos_on) return;
+    const double khod_l[3] = { khod_o.attach_pos[0], khod_o.attach_pos[2], khod_o.attach_pos[1] };
+    double khod_d[3] = { 0.0, 0.0, 0.0 };   // Engine axes (east, up, north).
+    for (int khod_k = 0; khod_k < 3; ++khod_k) {
+        khod_d[0] += khod_l[khod_k] * static_cast<double>(khod_basis[khod_k * 3 + 0]);
+        khod_d[1] += khod_l[khod_k] * static_cast<double>(khod_basis[khod_k * 3 + 1]);
+        khod_d[2] += khod_l[khod_k] * static_cast<double>(khod_basis[khod_k * 3 + 2]);
+    }
+    khod_pos[0] += khod_d[0];   // east.
+    khod_pos[1] += khod_d[2];   // north = SQF y.
+    khod_pos[2] += khod_d[1];   // up = SQF zASL.
 }
 
 // KH_ATTACH_OFFSET - the rotation twin, in place on the rows just read.
@@ -9580,8 +9697,9 @@ inline void kh_attach_offset_rot(const RenderObject& khor_o, float khor_rot[9]) 
 // every cull and caster bound reads) is the box of the pose being drawn, and a
 // mesh drawing its rest buffer (no skin, or before its first upload; skel_ctr
 // is then the import's own box centre) sits at its authored place on the
-// parent. Runs after the rotation is final: the centre turns with it. Either
-// thread (kh_attach_step runs on both).
+// parent. Runs after the rotation is final: the centre turns with it. Game
+// thread (kh_attach_reseed, addRender3D and the skeletal seed); the step's
+// twin, kh_skel_centre_d, runs on either thread (kh_attach_step runs on both).
 inline void kh_skel_centre(const RenderObject& khsc_o, float khsc_pos[3]) {
     const float* khsc_c = khsc_o.skel_ctr;   // Engine axes.
     float khsc_d[3] = { khsc_c[0], khsc_c[1], khsc_c[2] };
@@ -9594,6 +9712,21 @@ inline void kh_skel_centre(const RenderObject& khsc_o, float khsc_pos[3]) {
     khsc_pos[0] += khsc_d[0];   // east.
     khsc_pos[1] += khsc_d[2];   // north = SQF y.
     khsc_pos[2] += khsc_d[1];   // up = SQF zASL.
+}
+// KH_POS_RES: the same centre onto a double root (the step's).
+inline void kh_skel_centre_d(const RenderObject& khsd_o, double khsd_pos[3]) {
+    const float* khsd_c = khsd_o.skel_ctr;   // Engine axes.
+    double khsd_d[3] = { khsd_c[0], khsd_c[1], khsd_c[2] };
+    if (khsd_o.rotated) {
+        for (int k = 0; k < 3; ++k) {
+            khsd_d[k] = static_cast<double>(khsd_c[0]) * khsd_o.rot_m[0 * 3 + k] +
+                        static_cast<double>(khsd_c[1]) * khsd_o.rot_m[1 * 3 + k] +
+                        static_cast<double>(khsd_c[2]) * khsd_o.rot_m[2 * 3 + k];
+        }
+    }
+    khsd_pos[0] += khsd_d[0];
+    khsd_pos[1] += khsd_d[2];
+    khsd_pos[2] += khsd_d[1];
 }
 
 // KH_SKEL - the box of the REST buffer: the import's own size and centre. For
@@ -9969,6 +10102,7 @@ inline bool kh_pxy_pool_get(const game_value& khpg_parent, const std::string& kh
     khpg_e.parent = khpg_parent;
     khpg_e.refs = 1u;
     khpg_e.made_seq = g_gts_seq;
+    khpg_e.bone = !khpg_mem.empty();   // KH_PXY_SMOOTH: an origin helper is not estimated.
     khpg_e.key = khpg_key;
     khpg_out = khpg_e.proxy;
     const uintptr_t khpg_xb = kh_attach_base_of(khpg_e.proxy);
@@ -10694,6 +10828,8 @@ inline const KhGtSnap* kh_gts_for_cycle(KhAttach& khgc_a, uint64_t khgc_cyc, boo
 // passes agree bit for bit (the game thread may be writing the object meanwhile). The paint's repick step draws it;
 // the injection still waits for and draws the frame's own sample (the mesh stays exact), and its final step counts
 // the read against that sample (matched / stale / other). Only when the own sample is absent, only at the paint.
+// KH_PXY_SMOOTH: its helper positions are the raw reads (the estimator runs in the sampler alone), so a paint drawn
+// from it may sit up to one float step from the frame's smoothed pose; the check compares raw reads with raw reads.
 inline bool kh_rt_own_absent() {
     if (!g_gid_ok) return false;   // The frame's own number unknown: no read (today's pick).
     const uint64_t khra_want = static_cast<uint64_t>(static_cast<int64_t>(g_topo_cycles) + g_gid_k);
@@ -10773,15 +10909,10 @@ inline uint32_t kh_rt_paint_read() {
 }
 // kh_attach_step's tail for a skeletal binding: the draw centre from its root,
 // now the rotation (and the skin's box) is final.
-inline void kh_attach_skel_place(RenderObject& khsp_o, float khsp_root[3], bool& khsp_moved) {
-    kh_skel_centre(khsp_o, khsp_root);
-    if (khsp_o.pos[0] != khsp_root[0] || khsp_o.pos[1] != khsp_root[1] ||
-        khsp_o.pos[2] != khsp_root[2]) {
-        khsp_o.pos[0] = khsp_root[0];
-        khsp_o.pos[1] = khsp_root[1];
-        khsp_o.pos[2] = khsp_root[2];
-        khsp_moved = true;
-    }
+inline void kh_attach_skel_place(RenderObject& khsp_o, const double khsp_root[3], bool& khsp_moved) {
+    double khsp_c[3] = { khsp_root[0], khsp_root[1], khsp_root[2] };   // KH_POS_RES: exact to the draw.
+    kh_skel_centre_d(khsp_o, khsp_c);
+    if (kh_pos_set_exact(khsp_o, khsp_c)) khsp_moved = true;
 }
 // kh_attach_step's tail for every binding: a moved mesh re-files its scene
 // slot, and a final step that moved it reopens the sun map (KH_SUN_RESTEP).
@@ -10799,7 +10930,7 @@ struct KhSkinDrawJob {
     const std::string* h;
     KhAttach*          a;
     RenderObject*      o;
-    float              root[3];
+    double             root[3];   // KH_POS_RES: the skeletal root, exact.
     float              bc[3], bs[3];
     bool               moved;
     bool               ok;
@@ -10833,6 +10964,138 @@ inline void kh_skin_stat_note(uint32_t khsn_gpu, uint32_t khsn_cpu) {
     g_skin_stat_gpu += khsn_gpu;
     g_skin_stat_cpu += khsn_cpu;
 }
+// KH_PXY_SMOOTH - a memory-point helper's position through a bounded estimator. The engine places an attached object
+// by a world position it stores as float, so a helper on a memory point carries that position's rounding: steps of
+// the float spacing there (0.49 mm at 4-8 km from the map origin, 0.98 mm at 8-16 km, 1.95 mm at 16-32 km; height
+// stays small), which an idle bone crosses back and forth - the dance the engine's own attached objects show too.
+// The rounding is bounded - the true point lies within half a spacing of the reading on each axis - and the output
+// never leaves one spacing of the reading. Per SQF axis, per helper, once per Draw3D sample, on the reading as the
+// sampler took it:
+//   target  - it stays where it is while it lies within half a spacing of the reading, else it moves: to the reading
+//             itself when it moves the way it last moved (a drift - the boundary it just crossed is behind it),
+//             otherwise to the nearest point within half a spacing (a reversal, which is where dither lives): a
+//             reading dithering across a boundary leaves it still;
+//   tracker - an alpha-beta tracker follows the target: position and velocity, critically damped at a time
+//             constant that eases from KH_PXY_SMOOTH_TAU_SLOW at or under KH_PXY_SMOOTH_SPD_SLOW spacings a second
+//             to KH_PXY_SMOOTH_TAU_FAST at or over KH_PXY_SMOOTH_SPD_FAST (its own speed), gains from the sample's
+//             real interval: it turns the target's steps into motion at the pace the steps set. It may never
+//             step against the way the target last moved (a type-2 tracker overshoots every step it is given, and
+//             the swing back was a new dance on slow breathing), and a velocity against that way is dropped;
+//   clamp   - the output is kept within one spacing of the reading, and a clamp takes the velocity with it;
+//   reset   - a reading more than KH_PXY_SMOOTH_RESET spacings from the last one (a teleport) is the output, and
+//             everything starts again from it.
+// The velocity is the output's own recent motion, used only to carry the output between readings: nothing is shown
+// that the current reading rules out (the clamp), and nothing is extrapolated past a reading (the user accepted the
+// model). Measured offline over dither, idle breathing (clean and noisy), drift, sway of 20 to 200 spacings, a walk
+// and a run, at 30 / 60 / 144 fps with 20 % frame jitter, 5 to 25 km (per-frame jerk against the truth, spacings,
+// rms / max, 60 fps; raw -> this): dither 0.71 / 1.00 -> 0.01 / 0.02; breathing 0.20 / 0.98 -> 0.08 / 0.39 with
+// the true count of reversals; sway 0.39 / 0.99 -> 0.16 / 0.46; drift 0.40 / 0.82 -> 0.10 / 0.21; a walk
+// 0.40 / 0.98 -> 0.18 / 0.50. Only an instant step from rest to a run jerks once past raw (1.5 spacings).
+// Accepted envelope (the user): within one spacing of the engine's reading at any speed, a teleport exact. The
+// output travels as a delta from the reading (KhGtSnap::pxd - at most a spacing, which a float holds finely) to the
+// step, which places the mesh with it in double (KH_POS_RES) and a skeletal binding's bones with it (kh_skin_rel).
+// The estimator runs on the GAME THREAD only - in the sampler (under g_draw_list_mutex) and for a chain's end on a
+// memory point (kh_chain_prepare, on the sampler's sample, or one of its own) - on the pool entry, so every binding and
+// chain end on one memory point moves alike, and it makes no engine call; the render thread's paint read
+// (KH_RT_PAINT_READ) stays raw. An origin helper (no memory point) and a followed object are not estimated: each is
+// the point the engine draws its object from, not a rounded offset from it.
+static constexpr double KH_PXY_SMOOTH_RESET = 64.0;     // Spacings one sample may step before the state restarts.
+static constexpr double KH_PXY_SMOOTH_TAU_SLOW = 0.10;  // The tracker's time constant (s), at rest ...
+static constexpr double KH_PXY_SMOOTH_TAU_FAST = 0.05;  // ... and moving;
+static constexpr double KH_PXY_SMOOTH_SPD_SLOW = 5.0;   // at or under this speed (spacings a second) the first,
+static constexpr double KH_PXY_SMOOTH_SPD_FAST = 30.0;  // at or over this the second, linear between.
+// A chain end's own sample number, taken when this flush_frame's sampler took no sample (kh_chain_prepare): this
+// bit and the pass's stamp - never a sampler's (small counts) nor a render thread read's (KH_RT_SEQ_BIT, bit 62),
+// new every pass.
+static constexpr uint64_t KH_PXY_SEQ_CHAIN = 1ull << 61;
+// The float spacing at khps_r (one unit in the last place of its binade): half of it bounds the rounding of any value
+// that rounds to khps_r - at a power of two the spacing below is the smaller one.
+inline double kh_pxy_spacing(float khps_r) {
+    uint32_t khps_b = 0;
+    memcpy(&khps_b, &khps_r, sizeof(khps_b));
+    const int khps_e = static_cast<int>((khps_b >> 23) & 0xFFu);
+    return std::ldexp(1.0, (khps_e == 0 ? 1 : khps_e) - 150);
+}
+// One helper's reading (khsm_r, SQF order) in the Draw3D sample khsm_seq, stamped khsm_q (kh_gts_qpc): khsm_d = the
+// output minus the reading. A second call for the same sample (another binding on the same memory point) hands back
+// the first's.
+inline void kh_pxy_smooth(KhPxyPoolEnt& khsm_e, uint64_t khsm_seq, int64_t khsm_q, const float khsm_r[3],
+                          float khsm_d[3]) {
+    if (khsm_e.sm_ok && khsm_e.sm_seq == khsm_seq) { memcpy(khsm_d, khsm_e.sm_d, sizeof(khsm_e.sm_d)); return; }
+    if (!kh_cloth_finite3(khsm_r)) {
+        khsm_d[0] = khsm_d[1] = khsm_d[2] = 0.0f;
+        khsm_e.sm_ok = false;   // Nothing to hold to: the next reading starts it again.
+        return;
+    }
+    const double khsm_dt = khsm_e.sm_ok && khsm_q > khsm_e.sm_q
+                         ? static_cast<double>(khsm_q - khsm_e.sm_q) / static_cast<double>(kh_prof_freq()) : 0.0;
+    for (int k = 0; k < 3; ++k) {
+        const double khsm_x = static_cast<double>(khsm_r[k]);
+        const double khsm_s = kh_pxy_spacing(khsm_r[k]);
+        const double khsm_h = 0.5 * khsm_s;
+        double& khsm_t = khsm_e.sm_t[k];
+        double& khsm_o = khsm_e.sm_x[k];
+        double& khsm_v = khsm_e.sm_v[k];
+        if (!khsm_e.sm_ok || !(fabs(khsm_x - static_cast<double>(khsm_e.sm_r[k])) <= KH_PXY_SMOOTH_RESET * khsm_s)) {
+            khsm_t = khsm_x;   // reset: a teleport, or the first reading.
+            khsm_o = khsm_x;
+            khsm_v = 0.0;
+            khsm_e.sm_dir[k] = 0;
+        } else {
+            const double khsm_lo = khsm_x - khsm_h;
+            const double khsm_hi = khsm_x + khsm_h;
+            const int8_t khsm_mv = khsm_t < khsm_lo ? 1 : (khsm_t > khsm_hi ? -1 : 0);   // target.
+            if (khsm_mv != 0) {
+                khsm_t = khsm_mv == khsm_e.sm_dir[k] ? khsm_x : (khsm_mv > 0 ? khsm_lo : khsm_hi);
+                khsm_e.sm_dir[k] = khsm_mv;
+            }
+            if (khsm_dt > 0.0) {   // tracker.
+                const double khsm_sp = fabs(khsm_v) / khsm_s;
+                double khsm_u = (khsm_sp - KH_PXY_SMOOTH_SPD_SLOW) / (KH_PXY_SMOOTH_SPD_FAST - KH_PXY_SMOOTH_SPD_SLOW);
+                khsm_u = khsm_u < 0.0 ? 0.0 : (khsm_u > 1.0 ? 1.0 : khsm_u);
+                const double khsm_w =
+                    1.0 / (KH_PXY_SMOOTH_TAU_SLOW + (KH_PXY_SMOOTH_TAU_FAST - KH_PXY_SMOOTH_TAU_SLOW) * khsm_u);
+                const double khsm_a = 1.0 - exp(-2.0 * khsm_w * khsm_dt);
+                const double khsm_bc = khsm_a * khsm_a / (2.0 - khsm_a);   // Critical damping.
+                const double khsm_b = (khsm_w * khsm_dt) * (khsm_w * khsm_dt) < khsm_bc
+                                    ? (khsm_w * khsm_dt) * (khsm_w * khsm_dt) : khsm_bc;
+                const double khsm_o0 = khsm_o;
+                const double khsm_p = khsm_o + khsm_v * khsm_dt;
+                const double khsm_err = khsm_t - khsm_p;
+                khsm_o = khsm_p + khsm_a * khsm_err;
+                khsm_v += (khsm_b / khsm_dt) * khsm_err;
+                const double khsm_g = static_cast<double>(khsm_e.sm_dir[k]);   // Never against the target's way.
+                if (khsm_g != 0.0 && (khsm_o - khsm_o0) * khsm_g < 0.0) {
+                    khsm_o = khsm_o0;
+                    if (khsm_v * khsm_g < 0.0) khsm_v = 0.0;
+                }
+            }
+            const double khsm_c = khsm_o < khsm_x - khsm_s ? khsm_x - khsm_s
+                                : (khsm_o > khsm_x + khsm_s ? khsm_x + khsm_s : khsm_o);   // clamp.
+            if (khsm_c != khsm_o) {
+                if (khsm_dt > 0.0) khsm_v += (khsm_c - khsm_o) / khsm_dt;
+                khsm_o = khsm_c;
+            }
+        }
+        khsm_e.sm_r[k] = khsm_r[k];
+        khsm_d[k] = static_cast<float>(khsm_o - khsm_x);
+    }
+    khsm_e.sm_ok = true;
+    khsm_e.sm_seq = khsm_seq;
+    khsm_e.sm_q = khsm_q;
+    memcpy(khsm_e.sm_d, khsm_d, sizeof(khsm_e.sm_d));
+}
+// The sampler's call for one helper it read: the estimator's delta for a memory-point helper the pool holds, zero for
+// anything else (an origin helper, a proxy the pool never filed).
+inline void kh_pxy_smooth_note(const game_value& khpn_x, uint64_t khpn_seq, int64_t khpn_q, const float khpn_r[3],
+                               float khpn_d[3]) {
+    khpn_d[0] = khpn_d[1] = khpn_d[2] = 0.0f;
+    const uintptr_t khpn_b = kh_attach_base_of(khpn_x);
+    if (khpn_b == 0) return;
+    const auto khpn_it = g_pxy_pool.find(khpn_b);
+    if (khpn_it == g_pxy_pool.end() || !khpn_it->second.bone) return;
+    kh_pxy_smooth(khpn_it->second, khpn_seq, khpn_q, khpn_r, khpn_d);
+}
 // KH_ATTACH_GT_SNAP - GAME THREAD, flush_frame (the Draw3D handler), once a frame and under g_draw_list_mutex:
 // every binding's objects read TOGETHER - the parent (or a plain binding's object, or the object a rotation alone
 // follows), the proxies, the rotation lane's own object - through kh_attach_raw's copy rule, with page caches of this
@@ -10840,8 +11103,9 @@ inline void kh_skin_stat_note(uint32_t khsn_gpu, uint32_t khsn_cpu) {
 // position never falters). A failed PARENT read leaves the binding without a sample this frame (the step draws the
 // ring's, or holds); a failed helper read is carried from the previous sample (KH_GTS_HOLD); a failed read of the
 // rotation lane's own object leaves the rotation holding. g_gts_done_pub is published once every binding is written.
-inline void kh_attach_gt_snap() {
-    if (g_attach_n.load(std::memory_order_relaxed) == 0) return;
+// True when this call took a sample (g_gts_seq names it): kh_chain_prepare's choice (KH_PXY_SMOOTH).
+inline bool kh_attach_gt_snap() {
+    if (g_attach_n.load(std::memory_order_relaxed) == 0) return false;
     std::lock_guard<std::mutex> khgt_g(g_draw_list_mutex);
     const uint64_t khgt_seq = ++g_gts_seq;
     const int64_t khgt_q = kh_gts_qpc();
@@ -10881,6 +11145,7 @@ inline void kh_attach_gt_snap() {
         memcpy(khgt_s.par, khgt_p, sizeof(khgt_p));
         memcpy(khgt_s.par + 3, khgt_r, sizeof(khgt_r));
         khgt_s.px.resize(khgt_np * 12u);
+        khgt_s.pxd.assign(khgt_np * 3u, 0.0f);   // KH_PXY_SMOOTH: zero = the reading as it stands.
         // KH_GTS_HOLD: the binding's previous sample, written before this one (another ring slot), when it is this
         // binding's - a refused helper read is carried from it; with none (the first sample after a bind), as before.
         const KhGtSnap& khgt_prev = khgt_a.gts[(khgt_a.gts_w + KH_GTS_N - 1u) % KH_GTS_N];
@@ -10892,10 +11157,14 @@ inline void kh_attach_gt_snap() {
             if (!kh_gts_read(khgt_x, khgt_a.gts_off[khgt_j], khgt_a.gts_vb[khgt_j], khgt_a.gts_bb[khgt_j], khgt_p, khgt_r)) {
                 if (!khgt_prev_ok) { khgt_ok = false; break; }
                 kh_gts_carry(khgt_prev.par, khgt_s.par, &khgt_prev.px[khgt_j * 12u], &khgt_s.px[khgt_j * 12u]);
+                if (khgt_prev.pxd.size() == khgt_np * 3u) {   // KH_PXY_SMOOTH: the carried pose keeps its delta.
+                    memcpy(&khgt_s.pxd[khgt_j * 3u], &khgt_prev.pxd[khgt_j * 3u], 3u * sizeof(float));
+                }
                 continue;
             }
             memcpy(&khgt_s.px[khgt_j * 12u], khgt_p, sizeof(khgt_p));
             memcpy(&khgt_s.px[khgt_j * 12u + 3u], khgt_r, sizeof(khgt_r));
+            kh_pxy_smooth_note(khgt_x, khgt_seq, khgt_q, khgt_p, &khgt_s.pxd[khgt_j * 3u]);   // KH_PXY_SMOOTH.
         }
         if (!khgt_ok) continue;
         // The rotation lane, when it follows an object of its own (neither the parent nor the one helper).
@@ -10925,6 +11194,7 @@ inline void kh_attach_gt_snap() {
     }
     g_gts_stamp_pub[khgt_seq % KH_GTS_STAMPS].store(khgt_q, std::memory_order_relaxed);   // Before the seq names it.
     g_gts_done_pub.store(khgt_seq, std::memory_order_release);   // Every binding written: kh_gts_wait.
+    return true;
 }
 
 // Runs from SEVEN sites, counted, each immediately ahead of the scene read its
@@ -10991,7 +11261,7 @@ inline void kh_attach_step(ID3D11DeviceContext* khap_ctx = nullptr) {
         const bool khap_same = !khap_a.obj_pos.is_nil() && !khap_a.obj_rot.is_nil() &&
                                khap_a.obj_pos.data.get() == khap_a.obj_rot.data.get();
         float khap_p[3], khap_r[9];
-        float khap_root[3] = { 0.0f, 0.0f, 0.0f };   // KH_SKEL: the root, kept past the rotation read.
+        double khap_root[3] = { 0.0, 0.0, 0.0 };   // KH_SKEL: the root (KH_POS_RES: exact), past the rotation read.
         // KH_ATTACH_GT_SNAP: this cycle's sample of everything this binding follows, taken once for both lanes, on
         // either thread (a game-thread step reads the render thread's cycle, which the park holds still).
         const KhGtSnap* const khap_gs =
@@ -11005,6 +11275,13 @@ inline void kh_attach_step(ID3D11DeviceContext* khap_ctx = nullptr) {
             const float* const khap_src = khap_a.skel || khap_a.bone_parent.is_nil() ? khap_gs->par : khap_gs->px.data();
             memcpy(khap_p, khap_src, sizeof(khap_p));
             memcpy(khap_r, khap_src + 3, sizeof(khap_r));
+            // KH_POS_RES: the position exact, in double - a memory-point binding's helper where the estimator puts
+            // it (KH_PXY_SMOOTH; the paint read's sample has no deltas), the offset below composed onto it - and
+            // stored as a world float plus its residual (kh_pos_set_exact).
+            double khap_pd[3] = { khap_p[0], khap_p[1], khap_p[2] };
+            if (khap_src != khap_gs->par && khap_gs->pxd.size() >= 3u) {
+                for (int khap_k = 0; khap_k < 3; ++khap_k) khap_pd[khap_k] += static_cast<double>(khap_gs->pxd[khap_k]);
+            }
             // KH_SKEL_SAMPLE: a skeletal binding's bones, stashed with the parent read beside them - one pair, the
             // one the skinning makes the bones relative to. A hidden mesh is neither stashed nor skinned unless
             // something other than the draw reads its pose - its cloth's guide or its collider (the sync's own rule;
@@ -11020,6 +11297,10 @@ inline void kh_attach_step(ID3D11DeviceContext* khap_ctx = nullptr) {
                 khap_a.skel_smp.resize(khap_np * 12u);
                 memcpy(khap_a.skel_smp.data(), khap_gs->px.data(), khap_np * 12u * sizeof(float));
                 memcpy(khap_a.skel_smp_par, khap_gs->par, sizeof(float) * 12u);
+                khap_a.skel_smp_d.assign(khap_np * 3u, 0.0f);   // KH_PXY_SMOOTH: the bones' deltas (none: zero).
+                if (khap_gs->pxd.size() == khap_np * 3u) {
+                    memcpy(khap_a.skel_smp_d.data(), khap_gs->pxd.data(), khap_np * 3u * sizeof(float));
+                }
                 khap_a.skel_smp_ok = true;
                 khap_a.skel_smp_ms = steady_now_ms();
             }
@@ -11030,16 +11311,13 @@ inline void kh_attach_step(ID3D11DeviceContext* khap_ctx = nullptr) {
             // matching what the mesh carries. khap_r is the position object's
             // own basis and is read here, before the rotation lane below can
             // overwrite it.
-            kh_attach_offset_pos(khap_o, khap_r, khap_p);
+            kh_attach_offset_pos_d(khap_o, khap_r, khap_pd);   // KH_POS_RES.
             // KH_SKEL: a skeletal mesh is drawn from its root plus a centre
             // that turns with the rotation the block below may still change,
-            // so its write waits for that block (kh_skel_centre).
+            // so its write waits for that block (kh_skel_centre_d).
             if (khap_a.skel) {
-                memcpy(khap_root, khap_p, sizeof(khap_root));
-            } else if (khap_o.pos[0] != khap_p[0] || khap_o.pos[1] != khap_p[1] || khap_o.pos[2] != khap_p[2]) {
-                khap_o.pos[0] = khap_p[0];
-                khap_o.pos[1] = khap_p[1];
-                khap_o.pos[2] = khap_p[2];
+                memcpy(khap_root, khap_pd, sizeof(khap_root));
+            } else if (kh_pos_set_exact(khap_o, khap_pd)) {
                 khap_moved = true;
             }
         }
@@ -11914,11 +12192,15 @@ inline bool kh_rebase_vp_exact(ConstantData& khx_cbd, const float khx_view[4][4]
 }
 
 // Per-object rebase twin: center minus the pass camera, subtracted in double.
-// Requires center_size already filled with the engine-axes center.
-inline void kh_fill_center_rel(ConstantData& cbd, const float* cam3) {
-    cbd.center_rel[0] = static_cast<float>(static_cast<double>(cbd.center_size[0]) - static_cast<double>(cam3[0]));
-    cbd.center_rel[1] = static_cast<float>(static_cast<double>(cbd.center_size[1]) - static_cast<double>(cam3[1]));
-    cbd.center_rel[2] = static_cast<float>(static_cast<double>(cbd.center_size[2]) - static_cast<double>(cam3[2]));
+// Requires center_size already filled with the engine-axes center. khfr_res:
+// the object's KH_POS_RES residual (engine axes), or null - added in double,
+// so the relative centre is the exact one.
+inline void kh_fill_center_rel(ConstantData& cbd, const float* cam3, const float* khfr_res) {
+    for (int khfr_k = 0; khfr_k < 3; ++khfr_k) {
+        cbd.center_rel[khfr_k] = static_cast<float>(static_cast<double>(cbd.center_size[khfr_k]) -
+                                                    static_cast<double>(cam3[khfr_k]) +
+                                                    (khfr_res ? static_cast<double>(khfr_res[khfr_k]) : 0.0));
+    }
     cbd.center_rel[3] = 1.0f;   // Armed (matches the pass's rebased viewProj).
 }
 
@@ -14804,6 +15086,7 @@ inline void kh_physics_gather_colliders(const std::vector<RenderObject>& khcg_ob
         // (kh_skel_centre), so the BVH's is that plus (ctr - skel_ctr) * R -
         // and its edge lengths that box's (khcg_sz).
         kh_cloth_engine_pos(khcg_o, khcg_v.centre);
+        kh_pos_res(khcg_o, khcg_v.res);   // KH_POS_RES: added where the view enters an instance's frame.
         if (khcg_skin) {
             float khcg_d[3];
             for (int k = 0; k < 3; ++k) khcg_d[k] = khcg_sctr[k] - khcg_o.skel_ctr[k];
@@ -15531,6 +15814,15 @@ inline void kh_cloth_sync(float khcs_dt, bool khcs_wanted) {
         // from rest whatever the origin was.
         float khcs_wc[3];
         kh_cloth_engine_pos(khcs_o, khcs_wc);
+        // KH_POS_RES: the same centre exact - the object's residual and the offset below in double - for the frame
+        // the write-back makes the vertices relative to (the draw adds the residual back; khcs_wc, a world float,
+        // serves the broadphase, the ground patch and the simulation level).
+        double khcs_wd[3];
+        {
+            float khcs_wr[3];
+            kh_pos_res(khcs_o, khcs_wr);
+            for (int k = 0; k < 3; ++k) khcs_wd[k] = static_cast<double>(khcs_wc[k]) + static_cast<double>(khcs_wr[k]);
+        }
         if (khcs_o.skel) {
             // KH_SKEL: the object stands at root + skel_ctr * rot
             // (kh_skel_centre); the rest box's centre is the authored
@@ -15539,18 +15831,23 @@ inline void kh_cloth_sync(float khcs_dt, bool khcs_wanted) {
             for (int k = 0; k < 3; ++k) khcs_d[k] = khcs_md.native_ctr[k] - khcs_o.skel_ctr[k];
             if (khcs_o.rotated) {
                 for (int k = 0; k < 3; ++k) {
-                    khcs_wc[k] += khcs_d[0] * khcs_o.rot_m[k] + khcs_d[1] * khcs_o.rot_m[3 + k] +
-                                  khcs_d[2] * khcs_o.rot_m[6 + k];
+                    const float khcs_a = khcs_d[0] * khcs_o.rot_m[k] + khcs_d[1] * khcs_o.rot_m[3 + k] +
+                                         khcs_d[2] * khcs_o.rot_m[6 + k];
+                    khcs_wc[k] += khcs_a;
+                    khcs_wd[k] += static_cast<double>(khcs_a);
                 }
             } else {
-                for (int k = 0; k < 3; ++k) khcs_wc[k] += khcs_d[k];
+                for (int k = 0; k < 3; ++k) {
+                    khcs_wc[k] += khcs_d[k];
+                    khcs_wd[k] += static_cast<double>(khcs_d[k]);
+                }
             }
         }
         {
             double khcs_od[3];
-            for (int k = 0; k < 3; ++k) khcs_od[k] = static_cast<double>(khcs_wc[k]) - khcs_in->org[k];
+            for (int k = 0; k < 3; ++k) khcs_od[k] = khcs_wd[k] - khcs_in->org[k];
             if (!khcs_in->org_on) {
-                for (int k = 0; k < 3; ++k) khcs_in->org[k] = static_cast<double>(khcs_wc[k]);
+                for (int k = 0; k < 3; ++k) khcs_in->org[k] = khcs_wd[k];
                 khcs_in->org_on = true;
             } else if (khcs_od[0] * khcs_od[0] + khcs_od[1] * khcs_od[1] + khcs_od[2] * khcs_od[2] >
                        KH_CLOTH_ORIGIN_M * KH_CLOTH_ORIGIN_M) {
@@ -15558,7 +15855,7 @@ inline void kh_cloth_sync(float khcs_dt, bool khcs_wanted) {
             }
         }
         for (int k = 0; k < 3; ++k) {
-            khcs_in->in_centre[k] = static_cast<float>(static_cast<double>(khcs_wc[k]) - khcs_in->org[k]);
+            khcs_in->in_centre[k] = static_cast<float>(khcs_wd[k] - khcs_in->org[k]);
         }
         khcs_in->st.sea = static_cast<float>(-khcs_in->org[KH_CLOTH_UP]);
         memcpy(khcs_in->in_rot, khcs_o.rot_m, sizeof(khcs_in->in_rot));
@@ -15628,11 +15925,16 @@ inline void kh_cloth_sync(float khcs_dt, bool khcs_wanted) {
             }
             khcs_in->in_col.push_back(khcs_v);
             KhPhysicsColliderView& khcs_nv = khcs_in->in_col.back();
-            // Into this instance's frame, in double: the gather's views are world.
+            // Into this instance's frame, in double: the gather's views are world (KH_POS_RES: plus the residual,
+            // so the collider stands where it is drawn).
             for (int k = 0; k < 3; ++k) {
-                khcs_nv.centre[k] = static_cast<float>(static_cast<double>(khcs_v.centre[k]) - khcs_in->org[k]);
-                khcs_nv.bs_c[k] = static_cast<float>(static_cast<double>(khcs_v.bs_c[k]) - khcs_in->org[k]);
-                khcs_nv.prev.centre[k] = static_cast<float>(static_cast<double>(khcs_v.prev.centre[k]) - khcs_in->org[k]);
+                const double khcs_r = static_cast<double>(khcs_v.res[k]);
+                khcs_nv.centre[k] =
+                    static_cast<float>(static_cast<double>(khcs_v.centre[k]) - khcs_in->org[k] + khcs_r);
+                khcs_nv.bs_c[k] = static_cast<float>(static_cast<double>(khcs_v.bs_c[k]) - khcs_in->org[k] + khcs_r);
+                khcs_nv.prev.centre[k] =
+                    static_cast<float>(static_cast<double>(khcs_v.prev.centre[k]) - khcs_in->org[k] + khcs_r);
+                khcs_nv.res[k] = 0.0f;
             }
             for (size_t khcs_s = 0; khcs_s < khcs_seen.size(); ++khcs_s) {
                 const KhPhysicsColliderView& khcs_sv = khcs_seen[khcs_s];
@@ -16607,15 +16909,26 @@ inline void kh_skin_drive(KhSkinInst& khsd_in, const MeshDef& khsd_d, const std:
     }
 }
 
-// One affine map per bone from the current pose - the job's input, a few
-// floats per bone. Game thread, on an instance that is not busy.
 // A proxy's transform against a parent's: the relative pose, false when the
 // proxy is out of reach of it. Positions SQF order, bases rows aside / up /
-// dir in engine axes, as the raw read hands them.
+// dir in engine axes, as the raw read hands them. khsx_xd: the proxy's
+// KH_PXY_SMOOTH delta (SQF order), or null. The offset is taken in double
+// and rounded once: with no delta that is the float difference exactly (IEEE
+// subtraction is correctly rounded), and a delta finer than the world
+// position's float step survives into the small offset.
 inline bool kh_skin_rel(const float khsx_xp[3], const float khsx_xr[9], const float khsx_pp[3], const float khsx_rp[9],
-                        KhSkinXf& khsx_x) {
+                        KhSkinXf& khsx_x, const float* khsx_xd) {
     // Engine axes: SQF [x, y, zASL] -> [x, zASL, y].
-    const float khsx_d[3] = { khsx_xp[0] - khsx_pp[0], khsx_xp[2] - khsx_pp[2], khsx_xp[1] - khsx_pp[1] };
+    double khsx_w[3] = { static_cast<double>(khsx_xp[0]) - static_cast<double>(khsx_pp[0]),
+                         static_cast<double>(khsx_xp[2]) - static_cast<double>(khsx_pp[2]),
+                         static_cast<double>(khsx_xp[1]) - static_cast<double>(khsx_pp[1]) };
+    if (khsx_xd) {
+        khsx_w[0] += static_cast<double>(khsx_xd[0]);
+        khsx_w[1] += static_cast<double>(khsx_xd[2]);
+        khsx_w[2] += static_cast<double>(khsx_xd[1]);
+    }
+    const float khsx_d[3] = { static_cast<float>(khsx_w[0]), static_cast<float>(khsx_w[1]),
+                              static_cast<float>(khsx_w[2]) };
     if (khsx_d[0] * khsx_d[0] + khsx_d[1] * khsx_d[1] + khsx_d[2] * khsx_d[2] > KH_SKEL_REACH_M * KH_SKEL_REACH_M) return false;
     for (int r = 0; r < 3; ++r) {
         // Row vectors: local = world * R^T, so each lane is a dot with one of
@@ -16649,6 +16962,8 @@ inline void kh_skin_affine_of(const KhSkinInst& khsa_in, const MeshDef& khsa_d, 
         }
     }
 }
+// One affine map per bone from the current pose - the job's input, a few
+// floats per bone. Game thread, on an instance that is not busy.
 inline void kh_skin_affine(const KhSkinInst& khsa_in, const MeshDef& khsa_d, std::vector<float>& khsa_a) {
     kh_skin_affine_of(khsa_in, khsa_d, khsa_in.pose, khsa_in.pose_ok, khsa_a);
 }
@@ -16935,7 +17250,10 @@ inline bool kh_skin_step_maps(KhAttach& khsd_a, const KhSkinInst* khsd_in, const
     khsd_a.draw_ok.assign(khsd_np, 0u);
     for (size_t khsd_j = 0; khsd_j < khsd_np; ++khsd_j) {
         const float* khsd_s = &khsd_a.skel_smp[khsd_j * 12u];
-        if (kh_skin_rel(khsd_s, khsd_s + 3, khsd_a.skel_smp_par, khsd_a.skel_smp_par + 3, khsd_a.draw_pose[khsd_j])) {
+        const float* const khsd_xd = khsd_a.skel_smp_d.size() == khsd_np * 3u ? &khsd_a.skel_smp_d[khsd_j * 3u]
+                                                                                : nullptr;   // KH_PXY_SMOOTH.
+        if (kh_skin_rel(khsd_s, khsd_s + 3, khsd_a.skel_smp_par, khsd_a.skel_smp_par + 3, khsd_a.draw_pose[khsd_j],
+                        khsd_xd)) {
             khsd_a.draw_ok[khsd_j] = 1u;
         }
     }
@@ -17217,8 +17535,10 @@ inline void kh_skin_sync() {
                                   steady_now_ms() - khss_a.skel_smp_ms < KH_SKEL_SAMPLE_KEEP_MS;
             for (size_t khss_j = 0; khss_smp && khss_j < khss_a.skel_proxy.size(); ++khss_j) {
                 KhSkinXf khss_x;
+                const float* const khss_xd = khss_a.skel_smp_d.size() == khss_a.skel_proxy.size() * 3u
+                                           ? &khss_a.skel_smp_d[khss_j * 3u] : nullptr;   // KH_PXY_SMOOTH.
                 if (!kh_skin_rel(&khss_a.skel_smp[khss_j * 12u], &khss_a.skel_smp[khss_j * 12u + 3u],
-                                 khss_a.skel_smp_par, khss_a.skel_smp_par + 3, khss_x)) continue;
+                                 khss_a.skel_smp_par, khss_a.skel_smp_par + 3, khss_x, khss_xd)) continue;
                 khss_in.pose[khss_j] = khss_x;
                 if (!khss_in.pose_ok[khss_j]) khss_in.cut = true;   // Rest to live: not a motion.
                 khss_in.pose_ok[khss_j] = 1u;
@@ -17585,9 +17905,12 @@ inline void kh_skin_upload(ID3D11DeviceContext* khsu_ctx, ID3D11Device* khsu_dev
                     khsu_w[k] = khsu_d[0] * khsu_o.rot_m[k] + khsu_d[1] * khsu_o.rot_m[3 + k] + khsu_d[2] * khsu_o.rot_m[6 + k];
                 }
             }
-            khsu_o.pos[0] += khsu_w[0];
-            khsu_o.pos[1] += khsu_w[2];
-            khsu_o.pos[2] += khsu_w[1];
+            double khsu_x[3];   // KH_POS_RES: the move applied to the exact centre.
+            kh_pos_exact(khsu_o, khsu_x);
+            khsu_x[0] += static_cast<double>(khsu_w[0]);
+            khsu_x[1] += static_cast<double>(khsu_w[2]);
+            khsu_x[2] += static_cast<double>(khsu_w[1]);
+            kh_pos_set_exact(khsu_o, khsu_x);
             memcpy(khsu_o.skel_ctr, khsu_p.ctr, sizeof(khsu_o.skel_ctr));
             memcpy(khsu_o.size, khsu_p.size, sizeof(khsu_p.size));
             kh_scene_mark(khsu_o.slot);
@@ -17647,8 +17970,9 @@ inline void kh_skin_drop_all() {
 // point's through its proxy, by the raw page-gated reads kh_attach_step uses -
 // no script call. A memory-point proxy the attach has not yet moved off its
 // spawn point fails the parent-reach test, as a skeletal binding's does, and
-// the lane stays free that frame.
-inline void kh_chain_prepare() {
+// the lane stays free that frame. khcp_gts: this flush_frame's sampler took a
+// sample (kh_attach_gt_snap's answer) - its number and stamp are this pass's.
+inline void kh_chain_prepare(bool khcp_gts) {
     KH_PROF_SCOPE(KHP_CHAIN_PREPARE);   // KH_PROF.
     if (g_chain_cfg.empty()) return;
     std::vector<std::string> khcp_dead, khcp_read;
@@ -17674,6 +17998,15 @@ inline void kh_chain_prepare() {
         kh_attach_proxy_orphan(khcp_it->second.proxy);   // Takes g_draw_list_mutex itself.
         g_chain_cfg.erase(khcp_it);
     }
+    // KH_PXY_SMOOTH: this pass's sample. When the Draw3D sampler took one in this flush_frame (it runs first): its
+    // number and stamp, so a proxy a binding shares steps once (the entry hands the sampler's result back) and one
+    // it does not takes one step at the frame's stamp. When it took none, a sample of the chain's own
+    // (KH_PXY_SEQ_CHAIN). Keyed on the sampler's run, not on the binding count: a binding the census expires after
+    // the sampler stepped a shared proxy leaves the count at zero, and a sample of the chain's own then stepped the
+    // entry twice in one pass (1.1201).
+    const int64_t khcp_q = khcp_gts ? g_gts_stamp_pub[g_gts_seq % KH_GTS_STAMPS].load(std::memory_order_relaxed)
+                                    : kh_gts_qpc();
+    const uint64_t khcp_seq = khcp_gts ? g_gts_seq : (KH_PXY_SEQ_CHAIN | static_cast<uint64_t>(khcp_q));
     for (const std::string& khcp_h : khcp_read) {
         const auto khcp_it = g_chain_cfg.find(khcp_h);
         if (khcp_it == g_chain_cfg.end()) continue;
@@ -17692,7 +18025,12 @@ inline void kh_chain_prepare() {
                               KH_SKEL_REACH_M * KH_SKEL_REACH_M;
             }
             if (khcp_mem_ok && khcp_c.pos == KH_CHE_MEM) {
-                khcp_c.live_pos[0] = khcp_p[0]; khcp_c.live_pos[1] = khcp_p[2]; khcp_c.live_pos[2] = khcp_p[1];
+                // KH_PXY_SMOOTH: the memory point where the estimator has it (the proxy is the pool's), in double.
+                float khcp_sd[3];
+                kh_pxy_smooth_note(khcp_c.proxy, khcp_seq, khcp_q, khcp_p, khcp_sd);
+                khcp_c.live_pos[0] = static_cast<double>(khcp_p[0]) + static_cast<double>(khcp_sd[0]);
+                khcp_c.live_pos[1] = static_cast<double>(khcp_p[2]) + static_cast<double>(khcp_sd[2]);
+                khcp_c.live_pos[2] = static_cast<double>(khcp_p[1]) + static_cast<double>(khcp_sd[1]);
                 khcp_c.live_p = true;
             }
             if (khcp_mem_ok && khcp_c.rot == KH_CHE_MEM) {
@@ -20838,6 +21176,24 @@ inline void kh_vis_occ_build(KhVisOcc& khvo, const std::vector<RenderObject>& kh
                 khvo_hv[khvo_rr][khvo_c] = khvo_inset * khvo_bh[khvo_rr] * khvo_ax;
                 khvo_ctr[khvo_c] += khvo_bc[khvo_rr] * khvo_ax;
             }
+        }
+        {   // KH_POS_RES: drawn at pos plus its residual - every half-vector pulled in by the residual's length
+            // (the rows are orthogonal), so the box lies inside the drawn one wherever the residual points; an
+            // axis that would vanish takes the occluder out.
+            float khvo_rs[3];
+            kh_pos_res(o, khvo_rs);
+            const float khvo_rl = sqrtf(khvo_rs[0] * khvo_rs[0] + khvo_rs[1] * khvo_rs[1] + khvo_rs[2] * khvo_rs[2]);
+            bool khvo_gone = false;
+            if (khvo_rl > 0.0f) {
+                for (int khvo_rr = 0; khvo_rr < 3; ++khvo_rr) {
+                    float* const khvo_h = khvo_hv[khvo_rr];
+                    const float khvo_len = sqrtf(khvo_h[0] * khvo_h[0] + khvo_h[1] * khvo_h[1] + khvo_h[2] * khvo_h[2]);
+                    if (!(khvo_len > khvo_rl)) { khvo_gone = true; break; }
+                    const float khvo_f = 1.0f - khvo_rl / khvo_len;
+                    khvo_h[0] *= khvo_f; khvo_h[1] *= khvo_f; khvo_h[2] *= khvo_f;
+                }
+            }
+            if (khvo_gone) continue;
         }
         float khvo_dmn = 1.0e18f, khvo_dmx = 0.0f;
         for (int khvo_s8 = 0; khvo_s8 < 8; ++khvo_s8) {
@@ -24099,6 +24455,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         { static_src.c_str(), "VSFullscreen","vs_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "VSSunDepth",  "vs_5_0", khcb_rx_defines, 0 },
         { static_src.c_str(), "VSSunDepthA", "vs_5_0", khtx_defines,    0 },   // KH_CAST_ALPHA twins.
+        { static_src.c_str(), "VSSunDepthAObj", "vs_5_0", khtx_defines, 0 },   // KH_CAST_ALPHA: the fallback's.
         { static_src.c_str(), "PSSunDepthA", "ps_5_0", khtx_defines,    0 },
         { khsp_comp_src.c_str(), "VSComposite", "vs_5_0", khsp_d0,  0 },
         { khsp_comp_src.c_str(), "VSComposite", "vs_5_0", khsp_d0t, 0 },
@@ -24302,6 +24659,36 @@ inline std::string ensure_resources(ID3D11Device* dev) {
 
         if (khsa_vb) khsa_vb->Release();
         if (khsa_pb) khsa_pb->Release();
+    }
+    // KH_CAST_ALPHA: VSSunDepthA's per-object twin and its layout (the mesh's own four lanes, validated against
+    // its blob) - the depth maps' per-object route (KH_SUN_OBJ) draws its alpha casters with it and PSSunDepthA.
+    // Non-fatal: absent, that route draws them whole.
+    {
+        ID3DBlob* khso_vb = nullptr;
+        const std::string khso_err = compile_shader(static_src.c_str(), "VSSunDepthAObj", "vs_5_0", khtx_defines,
+                                                    &khso_vb);
+        if (khso_err.empty() && khso_vb) {
+            HRESULT khso_hr = dev->CreateVertexShader(khso_vb->GetBufferPointer(), khso_vb->GetBufferSize(), nullptr,
+                                                      &g_res.vs_sundepth_ao);
+            if (SUCCEEDED(khso_hr)) {
+                const D3D11_INPUT_ELEMENT_DESC khso_el[] = {   // layout_tex's lanes.
+                    { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT,    0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+                    { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+                    { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,       0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+                    { "TANGENT",  0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+                };
+                khso_hr = dev->CreateInputLayout(khso_el, 4, khso_vb->GetBufferPointer(), khso_vb->GetBufferSize(),
+                                                 &g_res.layout_sundepth_ao);
+            }
+            if (FAILED(khso_hr)) {
+                KH_SAFE_RELEASE(g_res.vs_sundepth_ao);
+                KH_SAFE_RELEASE(g_res.layout_sundepth_ao);
+                report_error_once_safe("KH sun-depth alpha fallback shader: create " + hr_str(khso_hr));
+            }
+        } else if (!khso_err.empty()) {
+            report_error_once_safe("KH sun-depth alpha fallback shader: " + khso_err);
+        }
+        if (khso_vb) khso_vb->Release();
     }
 
     hr = dev->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &g_res.vs);
@@ -29045,6 +29432,11 @@ static float g_sun_map_time = -1.0f;
 static bool  g_sun_map_no_local = false;   // Casters exist, none within the fit.
 static float g_sun_map_vp[16] = {};   // row-vector world -> sun clip.
 static float g_sun_anchor_now[3] = {};
+// KH_DLS_LOD_CAM - the camera the light maps pick their casters' levels at (kh_dls_frame, KH_SHADOW_LOD_DRAWN):
+// the sun ladder's camera this cycle (engine axes; zero when camera-less), written by render_sun_depth ahead of
+// its no-sun returns. g_sun_anchor_now is the same camera once a sun is published; before a session's first
+// publish it stays at the origin while the light maps still render (they need no sun).
+static float g_sun_cam_now[3] = {};
 static float g_sun_map_anchor[3] = {};
 static float g_sun_cam_anchor[3] = {};
 static float g_sun_tier_anchor[4][3] = {};   // Tiers 2.5, stamped only when that tier rendered.
@@ -33643,14 +34035,16 @@ inline float kh_ao_dist() {
 // drawn over since (the hands) keeps its own. Valid for the cycle that wrote it (g_nzm_cycle).
 static uint64_t g_nzm_cycle = ~0ull;   // The cycle the marker was cleared and written in (~0 = none).
 inline bool kh_nzm_valid() { return g_nzm_cycle == g_topo_cycles && g_res.nzm_srv != nullptr; }
-// The marker may have a reader this cycle: a visible effect object - a fullscreen or local pass, which the chain
-// arms, or an effect mesh, counted too although no effect mesh is armed (KH_NEARZ_MARK's limit). With SSAO off, the
-// drawers still mark their depth writes for it (kh_ssao_pre).
+// The marker may have a reader this cycle: a visible fullscreen or local pass the scene chain runs, which arms it
+// (the flush's rule: every fullscreen pass but a UI-mode one - ui_only - which the UI chain runs with no marker
+// armed). An effect mesh is not one either - no effect mesh is armed (KH_NEARZ_MARK's limit), so it neither
+// reads the marker nor asks for it. Without a reader the marker is not written, and with SSAO off the drawers do
+// not mark for it (kh_ssao_pre).
 inline bool kh_nzm_wanted() {
     for (uint32_t i = 0; i < g_scene.objs.size(); ++i) {
         if (!g_scene.alive[i]) continue;
         const RenderObject& o = g_scene.objs[i];
-        if (o.visible && (o.fullscreen || o.localized || o.effect != 0)) return true;
+        if (o.visible && (o.fullscreen || o.localized) && !o.ui_only) return true;
     }
     return false;
 }
@@ -33666,6 +34060,7 @@ struct KhSsaoPass {
     // draws ramp the fragments nearer than that near from, up to vp_lo. Set by the drawer before kh_ssao_post.
     float       nz_near = 0.0f, nz_gap = 0.0f;
     bool        term = false;    // KH_NEARZ_MARK: the SSAO term runs (off: the mark serves the marker alone).
+    bool        nzm = false;     // KH_NEARZ_MARK: the marker has a reader this cycle (kh_nzm_wanted).
 };
 // The five pixel shaders, compiled at the live depth's sample count (the
 // depth-resolve recipe). Byte for byte the speculation batch's define table.
@@ -33847,7 +34242,8 @@ inline void kh_ssao_pre(ID3D11Device* dev, ID3D11DeviceContext* ctx, KhSsaoPass&
     KH_PROF_SCOPE(KHP_SSAO);   // KH_PROF.
     khsp.on = false;
     khsp.term = kh_ao_strength() > 0.0f;   // KH_NEARZ_MARK: or the marker alone.
-    if ((!khsp.term && !kh_nzm_wanted()) || !dev || !ctx) return;
+    khsp.nzm = kh_nzm_wanted();
+    if ((!khsp.term && !khsp.nzm) || !dev || !ctx) return;
     UINT khsp_dw = 0, khsp_dh = 0;
     if (!kh_ensure_ok("ssao depth", ensure_depth_srv(dev, ctx, &khsp_dw, &khsp_dh))) return;
     if (!g_res.depth_srv || !g_res.depth_sten_srv || khsp_dw < 2 || khsp_dh < 2) return;   // No stencil plane: no mark, no term.
@@ -33991,8 +34387,10 @@ inline void kh_ssao_post(ID3D11DeviceContext* ctx, const KhSsaoPass& khsp) {
     ctx->PSSetShaderResources(0, 4, khsp_null);   // Before the DSV comes back.
     }   // End of the term pass; the eraser below does not depend on it.
     // KH_NEARZ_MARK: this drawer's near-z gap pixels into the marker while the mark stands. A cycle's first write
-    // clears it; a later drawer adds its own pixels (the pass discards every other).
-    if (khsp.nz_near > 0.0f && g_res.ps_ssao_nzmark && g_res.depth_srv && g_res.depth_sten_srv && g_res.ssao_cb) {
+    // clears it; a later drawer adds its own pixels (the pass discards every other). Only for a reader (khsp.nzm):
+    // with no fullscreen pass the target is never made and the pass never draws.
+    if (khsp.nzm && khsp.nz_near > 0.0f && g_res.ps_ssao_nzmark && g_res.depth_srv && g_res.depth_sten_srv &&
+        g_res.ssao_cb) {
         ID3D11Device* khnm_dev = nullptr;
         ctx->GetDevice(&khnm_dev);
         bool khnm_ok = khnm_dev != nullptr;
@@ -36042,6 +36440,7 @@ inline void mask_classify_rt(UINT n, ID3D11RenderTargetView* const* rtvs) {
 // alpha_caster = alpha below 1 or mats present, and the alpha twins exist.
 struct SunCaster {
     float pos[3]; float size[3]; float rot[9]; bool rotated; int mesh;
+    float res[3];   // KH_POS_RES (kh_pos_res at the build).
     float bsize[3];   // KH_CAST_REFIT: kh_bounds_size_of - every bounds test below; size draws and picks the LOD.
     uint32_t slot;   // KH_OBJBUF: the live-scene slot (the lane's index into the record buffer).
     float alpha;
@@ -36066,6 +36465,10 @@ inline bool kh_mat_set_has_alpha(const KhMaterialSet* khma_s) {
 inline bool kh_cast_alpha_on() {
     return g_res.vs_sundepth_a && g_res.ps_sundepth_a && g_res.layout_sundepth_a;
 }
+// KH_CAST_ALPHA: the per-object depth route's alpha pair (VSSunDepthAObj + PSSunDepthA; KH_SUN_OBJ).
+inline bool kh_cast_alpha_obj_on() {
+    return g_res.vs_sundepth_ao && g_res.ps_sundepth_a && g_res.layout_sundepth_ao;
+}
 
 // The opaque sun-depth state: the depth-only pair (no pixel shader). Every
 // caster in a map draws whole; the receiver's own range fade (KhSunRangeFade,
@@ -36081,6 +36484,7 @@ inline void kh_sun_bind_opaque(ID3D11DeviceContext* khbo_ctx) {
 inline SunCaster kh_sun_caster_of(const RenderObject& o, const float khsc_cam[3]) {
     SunCaster c;
     memcpy(c.pos, o.pos, sizeof(c.pos));
+    kh_pos_res(o, c.res);   // KH_POS_RES.
     memcpy(c.size, o.size, sizeof(c.size));
     kh_bounds_size_of(o, c.bsize);   // KH_CAST_REFIT.
     memcpy(c.rot, o.rot_m, sizeof(c.rot));
@@ -36183,6 +36587,109 @@ inline uint64_t kh_sun_draw_alpha_t(ID3D11DeviceContext* ctx, const KhSaSet& khs
 inline uint64_t kh_sun_draw_alpha(ID3D11DeviceContext* ctx, const std::vector<SunCaster>& khsa_set,
                                   const ConstantData& khsa_tpl, ID3D11Buffer* khsa_inst_vb) {
     return kh_sun_draw_alpha_t(ctx, khsa_set, khsa_tpl, khsa_inst_vb);
+}
+// KH_SUN_OBJ - the instanced depth route's availability: the sun-depth pair, the record buffer and the shared
+// stream. A pass without it (or whose set the stream cannot hold, or whose map failed) draws per object.
+inline bool kh_sun_inst_on() {
+    return g_res.vs_sundepth && g_res.layout_sundepth && g_res.sun_instance_vb && g_res.obj_srv;   // KH_OBJBUF.
+}
+// KH_SUN_INST_CAP - the depth maps' shared instance stream (sun_instance_vb, one KhInstLane per caster), grown and
+// never shrunk to hold khsi_need lanes: by the union for its casters and by the light maps for theirs, so a scene
+// with no sun map (no published sun: the union returns before it grows) still instances its light faces. False
+// when the stream is absent (a failed create): the caller draws per object (kh_sun_draw_obj_t).
+inline bool kh_sun_inst_ensure(ID3D11Device* khsi_dev, size_t khsi_need) {
+    if (khsi_dev && khsi_need > static_cast<size_t>(g_res.sun_instance_cap)) {
+        KH_SAFE_RELEASE(g_res.sun_instance_vb);
+        UINT khsi_cap = g_res.sun_instance_cap > 64 ? g_res.sun_instance_cap : 64;
+        while (static_cast<size_t>(khsi_cap) < khsi_need) khsi_cap *= 2;
+        D3D11_BUFFER_DESC khsi_bd = {};
+        khsi_bd.ByteWidth = khsi_cap * KH_INST_STRIDE;
+        khsi_bd.Usage = D3D11_USAGE_DYNAMIC;
+        khsi_bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        khsi_bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (SUCCEEDED(khsi_dev->CreateBuffer(&khsi_bd, nullptr, &g_res.sun_instance_vb))) {
+            g_res.sun_instance_cap = khsi_cap;
+        } else {
+            g_res.sun_instance_vb = nullptr;
+            g_res.sun_instance_cap = 0;
+        }
+    }
+    return g_res.sun_instance_vb != nullptr;
+}
+// KH_SUN_OBJ - the per-object depth route, for the union, the four tiers and the light faces alike: every caster
+// through VSMain's armed branch against the map's origin (khso_org, engine axes: the anchor for the sun maps, the
+// light for a face - the frame CB's sunOrigin, which the matrix measures from; KH_POS_RES residual included), at
+// its drawn level (KH_SHADOW_LOD_DRAWN, as the instanced runs - or the two disagree on silhouette), one constant
+// upload + draw each; a caster whose alpha is under 1 or whose material set carries alpha through VSSunDepthAObj +
+// PSSunDepthA by kh_sun_draw_alpha's rules (a cutout clips at its cutoff, a fade and a blend material's translucent
+// texels dither their coverage), its alpha (colour x envelope, 1/64 steps) in color.a, per submesh of the drawn
+// level with its material bound; without that pair the caster draws whole. The caller binds the target, viewport,
+// depth and rasterizer states and uploads the frame CB; this binds its own IA / VS / PS state and leaves the
+// per-object opaque pair (input_layout, VSMain, no PS). False when an upload failed: the map is incomplete.
+template <class KhSaSet>
+inline bool kh_sun_draw_obj_t(ID3D11DeviceContext* ctx, const KhSaSet& khso_set, const float khso_org[3]) {
+    ID3D11Device* khso_dev = nullptr;   // kh_bind_material's.
+    ctx->GetDevice(&khso_dev);
+    ctx->IASetInputLayout(g_res.input_layout);
+    ctx->VSSetShader(g_res.vs, nullptr, 0);
+    ctx->PSSetShader(nullptr, nullptr, 0);
+    const UINT khso_stride = sizeof(MeshVertex), khso_offset = 0;
+    ID3D11Buffer* khso_bound_vb = nullptr;   // KH_CLOTH: the buffer identifies the draw, not the mesh id.
+    bool khso_ok = true;
+    for (size_t khso_i = 0; khso_i < khso_set.size() && khso_ok; ++khso_i) {
+        const SunCaster& c = kh_sa_at(khso_set[khso_i]);
+        ID3D11Buffer* const khso_vb = kh_mesh_vb_for(c.mesh, c.slot);   // KH_CLOTH.
+        if (khso_vb != khso_bound_vb) {
+            ctx->IASetVertexBuffers(0, 1, &khso_vb, &khso_stride, &khso_offset);
+            ctx->IASetIndexBuffer(g_res.mesh_ib[c.mesh], DXGI_FORMAT_R32_UINT, 0);
+            khso_bound_vb = khso_vb;
+        }
+        ConstantData khso_cbd = {};
+        khso_cbd.center_size[0] = c.pos[0];
+        khso_cbd.center_size[1] = c.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y].
+        khso_cbd.center_size[2] = c.pos[1];
+        khso_cbd.size_axes[0] = c.size[0];   // SQF [x,y,z] sizes -> engine [x,z,y].
+        khso_cbd.size_axes[1] = c.size[2];
+        khso_cbd.size_axes[2] = c.size[1];
+        kh_fill_center_rel(khso_cbd, khso_org, c.res);
+        kh_fill_obj_rot(khso_cbd, c.rot);   // Object rotation (VSMain path).
+        if ((c.alpha < 0.999f || c.mats) && khso_dev && kh_cast_alpha_obj_on()) {
+            ctx->IASetInputLayout(g_res.layout_sundepth_ao);
+            ctx->VSSetShader(g_res.vs_sundepth_ao, nullptr, 0);
+            ctx->PSSetShader(g_res.ps_sundepth_a, nullptr, 0);
+            if (g_res.mat_sampler) ctx->PSSetSamplers(0, 1, &g_res.mat_sampler);
+            khso_cbd.color[3] = c.alpha;
+            if (!c.mats) {   // Colour alpha only: one draw, the whole level, mode 0, no maps.
+                kh_bind_material(ctx, khso_dev, khso_cbd, nullptr, 0);
+                khso_ok = kh_upload_obj_cb(ctx, g_res.composite_cb, khso_cbd);
+                if (khso_ok) {
+                    UINT khso_als = 0, khso_alc = 0;
+                    mesh_lod_range_of(c.mesh, c.lod, khso_als, khso_alc);
+                    ctx->DrawIndexed(khso_alc, khso_als, 0);
+                }
+            } else {   // Per submesh of the level, its material bound.
+                const std::vector<MeshSubmesh>& khso_tab = mesh_lod_submeshes(mesh_def(c.mesh), c.lod);
+                for (size_t khso_s = 0; khso_s < khso_tab.size() && khso_ok; ++khso_s) {
+                    const MeshSubmesh& khso_sm = khso_tab[khso_s];
+                    if (khso_sm.index_count == 0) continue;
+                    kh_bind_material(ctx, khso_dev, khso_cbd, c.mats, khso_s);
+                    khso_ok = kh_upload_obj_cb(ctx, g_res.composite_cb, khso_cbd);
+                    if (khso_ok) ctx->DrawIndexed(khso_sm.index_count, khso_sm.index_start, 0);
+                }
+            }
+            ctx->IASetInputLayout(g_res.input_layout);   // The opaque pair again.
+            ctx->VSSetShader(g_res.vs, nullptr, 0);
+            ctx->PSSetShader(nullptr, nullptr, 0);
+            continue;
+        }
+        khso_ok = kh_upload_obj_cb(ctx, g_res.composite_cb, khso_cbd);
+        if (!khso_ok) break;
+        UINT khso_ls = 0, khso_lc = 0;
+        mesh_lod_range_of(c.mesh, c.lod, khso_ls, khso_lc);
+        ctx->DrawIndexed(khso_lc, khso_ls, 0);
+    }
+    if (khso_dev) khso_dev->Release();
+    return khso_ok;
 }
 
 // Stage 2b - the maps. Every property the sun's depth pass has (the shadow LOD,
@@ -36466,6 +36973,7 @@ inline void kh_dls_fill_cb(ConstantData& khf_cb) {
 // Uncapped; cleared, never freed.
 struct KhDlswCaster {
     float pos[3]; float size[3]; float rot[9]; bool rotated; int mesh; bool lod_lock;
+    float res[3];   // KH_POS_RES, from the SunCaster.
     uint32_t slot = 0xFFFFFFFFu;   // KH_CLOTH: which substitute vertex buffer this caster draws from.
     // KH_DLSW_MASK_ALPHA: the mask's own lanes, copied from the SunCaster.
     bool visible;                 // false = casterOnly invisible: no pixel is ours, not drawn.
@@ -36487,6 +36995,7 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
     uint64_t khdr_chash = CryptoGenerator::FNV1A64_OFFSET;
     for (const SunCaster& khdl_c : khdr_casters) {
         khdr_chash = CryptoGenerator::fnv1a64_update(khdr_chash, khdl_c.pos, sizeof(khdl_c.pos));
+        khdr_chash = CryptoGenerator::fnv1a64_update(khdr_chash, khdl_c.res, sizeof(khdl_c.res));   // KH_POS_RES.
         khdr_chash = CryptoGenerator::fnv1a64_update(khdr_chash, khdl_c.size, sizeof(khdl_c.size));
         khdr_chash = CryptoGenerator::fnv1a64_update(khdr_chash, khdl_c.rot, sizeof(khdl_c.rot));
         khdr_chash = CryptoGenerator::fnv1a64_update(khdr_chash, &khdl_c.mesh, sizeof(khdl_c.mesh));
@@ -36510,6 +37019,7 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
             g_dlsw_casters.emplace_back();
             KhDlswCaster& khsd = g_dlsw_casters.back();
             memcpy(khsd.pos, khsc.pos, sizeof(khsd.pos));
+            memcpy(khsd.res, khsc.res, sizeof(khsd.res));   // KH_POS_RES.
             memcpy(khsd.size, khsc.size, sizeof(khsd.size));
             memcpy(khsd.rot, khsc.rot, sizeof(khsd.rot));
             khsd.rotated = khsc.rotated;
@@ -36693,6 +37203,7 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
         g_dls_keys[khdr_s] = khdr_key;
 
         UINT khdr_next = khdr_slice;
+        bool khdr_fail = false;   // KH_SUN_OBJ: a face left incomplete - the key is not committed.
         for (uint32_t khdr_f = 0; khdr_f < KH_DLS_FACES; ++khdr_f) {
             if (!(g_dls_facemask[khdr_s] & (1u << khdr_f))) continue;
             const UINT khdr_sl = khdr_next++;
@@ -36727,9 +37238,9 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
 
             khdr_ctx->ClearDepthStencilView(khdr_dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
             if (khdr_keep.empty()) {  continue; }
-            if (khdr_keep.size() > static_cast<size_t>(g_res.sun_instance_cap)) {
-                continue;
-            }
+            // KH_SUN_OBJ: instanced while the stream holds the face's casters; per object otherwise (no instancing
+            // resources, more casters than the stream holds, a failed map) - never an empty face.
+            const bool khdr_inst = kh_sun_inst_on() && khdr_keep.size() <= static_cast<size_t>(g_res.sun_instance_cap);
 
             ConstantData khdr_obj = {};
             ConstantData khdr_cbf = {};
@@ -36739,6 +37250,7 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
             khdr_cbf.sun_origin[2] = khdr_l.pos[2];
             if (!kh_upload_frame_cb(khdr_ctx, g_res.composite_frame_cb, khdr_cbf) ||
                 !kh_upload_obj_cb(khdr_ctx, g_res.composite_cb, khdr_obj)) {
+                khdr_fail = true;
                 continue;
             }
 
@@ -36752,9 +37264,12 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
             }
 
             D3D11_MAPPED_SUBRESOURCE khdr_im = {};
-            if (FAILED(khdr_ctx->Map(g_res.sun_instance_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &khdr_im))) {
+            if (!khdr_inst || FAILED(khdr_ctx->Map(g_res.sun_instance_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &khdr_im))) {
+                if (!kh_sun_draw_obj_t(khdr_ctx, khdr_keep, khdr_l.pos)) khdr_fail = true;   // KH_SUN_OBJ.
                 continue;
             }
+            khdr_ctx->IASetInputLayout(g_res.layout_sundepth);   // KH_SUN_OBJ: a face before may have drawn per object.
+            khdr_ctx->VSSetShader(g_res.vs_sundepth, nullptr, 0);
             KhInstLane* khdr_out = static_cast<KhInstLane*>(khdr_im.pData);   // KH_OBJBUF: slot + alpha.
             for (const SunCaster* khdr_c : khdr_keep) {
                 khdr_out->slot = khdr_c->slot;
@@ -36796,6 +37311,7 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
             }
 
         }
+        if (khdr_fail) g_dls_keys[khdr_s] = 0;   // KH_SUN_OBJ: rebuilt next frame, as the union commits on success.
 
         khdr_slice += khdr_fn;
     }
@@ -36821,7 +37337,7 @@ inline void kh_dls_frame(ID3D11DeviceContext* khdf_ctx) {
     if (g_dls_frame_cycle == g_topo_cycles) return;
     g_dls_frame_cycle = g_topo_cycles;
 
-    static std::vector<SunCaster> khdf_casters;   // Scratch; both callers hold the graphics lock.
+    static std::vector<SunCaster> khdf_casters;   // Scratch: both callers run on the render thread or in a park.
     khdf_casters.clear();
     static std::vector<SunCaster> khdf_owners;   // KH_SHADOW_SWITCH: visible non-casters (the mask only).
     khdf_owners.clear();
@@ -36869,16 +37385,17 @@ inline void kh_dls_frame(ID3D11DeviceContext* khdf_ctx) {
                 khdf_near = khdf_dx * khdf_dx + khdf_dy * khdf_dy + khdf_dz * khdf_dz <= khdf_lim * khdf_lim;
             }
             if (!khdf_near) {  continue; }
-            // KH_SHADOW_LOD_DRAWN: this frame's camera. KH_SHADOW_SWITCH: a mesh
-            // with castShadow off draws into no map, but a visible one still owns
-            // its pixels, which the world pass must not paint (the mask).
-            if (o.cast_shadow) khdf_casters.push_back(kh_sun_caster_of(o, g_sun_anchor_now));
-            else if (o.visible) khdf_owners.push_back(kh_sun_caster_of(o, g_sun_anchor_now));
+            // KH_SHADOW_LOD_DRAWN: this frame's camera (KH_DLS_LOD_CAM - with or
+            // without a published sun). KH_SHADOW_SWITCH: a mesh with castShadow
+            // off draws into no map, but a visible one still owns its pixels,
+            // which the world pass must not paint (the mask).
+            if (o.cast_shadow) khdf_casters.push_back(kh_sun_caster_of(o, g_sun_cam_now));
+            else if (o.visible) khdf_owners.push_back(kh_sun_caster_of(o, g_sun_cam_now));
         }
     }
 
-    const bool khdf_state = g_res.vs_sundepth && g_res.layout_sundepth && g_res.sun_instance_vb &&
-                            g_res.dss_test_write && g_res.rast_sun && g_res.obj_srv &&   // KH_OBJBUF.
+    // KH_SUN_OBJ: the instancing resources are not required - a face draws per object without them.
+    const bool khdf_state = g_res.vs && g_res.input_layout && g_res.dss_test_write && g_res.rast_sun &&
                             g_res.composite_cb && g_res.composite_frame_cb;
     if (!khdf_state || khdf_casters.empty()) {
         // Nothing to render into, or nothing that could cast. The per-light
@@ -36894,6 +37411,14 @@ inline void kh_dls_frame(ID3D11DeviceContext* khdf_ctx) {
     // state save, the depth-only instanced pipeline. kh_dls_render saves and
     // restores its own targets, viewport and rasteriser; StateBackup restores
     // both vertex-buffer slots and t36.
+    if (g_res.vs_sundepth && g_res.layout_sundepth && g_res.obj_srv) {   // KH_SUN_INST_CAP: the faces' stream.
+        ID3D11Device* khdf_dev = nullptr;
+        khdf_ctx->GetDevice(&khdf_dev);
+        if (khdf_dev) {
+            kh_sun_inst_ensure(khdf_dev, khdf_casters.size());
+            khdf_dev->Release();
+        }
+    }
     const bool khdf_pinj = g_ro.in_injection;
     g_ro.in_injection = true;
     StateBackup khdf_bk;
@@ -36925,30 +37450,6 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     // KH_PROF: the GPU stamp past the once-per-frame return. A zone reports its last run, and a frame calls this
     // twice (the cast fire, then the injection): stamped at the head, gSunLadder was the second call's return.
     KH_GPU_SCOPE(ctx, KHG_SUN_LADDER);
-
-    // No published sun: no self / cast map. Without a sky witness validity drops
-    // here so frozen consumers stand down too; with one the call returns at the
-    // `!sun` test below instead (the witness carries no map - kh_sun_axis_witnessed),
-    // where the flags are already down: g_sun_valid clears only at the session
-    // resets, which drop them as well.
-    if (!g_sun_valid && !kh_sun_axis_witnessed()) {
-        g_sun_map_valid = false;
-        g_sun2_map_valid = false;
-        g_sun3_map_valid = false;
-        g_sun4_map_valid = false;
-        g_sun5_map_valid = false;
-        return false;
-    }
-    g_sun_map_no_local = false;
-    if (!ctx) return false;
-
-    // The maps render from the live derivation - the axis the engine's own
-    // cascades are built from, the reference the eye compares our shadow
-    // against.
-    const float* sun = kh_shadow_sun();
-
-    // KH_SUN_AXIS_FOLD: the maps render from the publish itself.
-    if (!sun) return false;
 
     float cam_e[3] = { 0.0f, 0.0f, 0.0f };
     bool cam_valid = false;
@@ -36986,6 +37487,34 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             cam_valid = true;
         }
     }
+
+    // KH_DLS_LOD_CAM: the light maps' level camera, here - ahead of the no-sun returns below, as the light
+    // maps need no sun - and zero when camera-less, as the anchor below takes it.
+    memcpy(g_sun_cam_now, cam_e, sizeof(g_sun_cam_now));
+
+    // No published sun: no self / cast map. Without a sky witness validity drops
+    // here so frozen consumers stand down too; with one the call returns at the
+    // `!sun` test below instead (the witness carries no map - kh_sun_axis_witnessed),
+    // where the flags are already down: g_sun_valid clears only at the session
+    // resets, which drop them as well.
+    if (!g_sun_valid && !kh_sun_axis_witnessed()) {
+        g_sun_map_valid = false;
+        g_sun2_map_valid = false;
+        g_sun3_map_valid = false;
+        g_sun4_map_valid = false;
+        g_sun5_map_valid = false;
+        return false;
+    }
+    g_sun_map_no_local = false;
+    if (!ctx) return false;
+
+    // The maps render from the live derivation - the axis the engine's own
+    // cascades are built from, the reference the eye compares our shadow
+    // against.
+    const float* sun = kh_shadow_sun();
+
+    // KH_SUN_AXIS_FOLD: the maps render from the publish itself.
+    if (!sun) return false;
 
     // Camera-less flushes anchor at the origin (world-absolute), correct by
     // construction.
@@ -37126,8 +37655,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         }
         // Per-band ensure: a band whose resources fail is stood down alone
         // (meta zeroed, both consumers fall through to the next tier).
-        const bool khsh_core = g_res.vs_sundepth && g_res.layout_sundepth &&
-                               g_res.sun_instance_vb && g_res.obj_srv;   // KH_OBJBUF.
+        // KH_SUN_OBJ: no instancing requirement - a band draws per object without it (kh_sun_draw_obj_t).
+        const bool khsh_core = g_res.vs && g_res.input_layout;
         const bool khsh_ok0 = khsh_core && ensure_sun_depth2(khsh_dev);
         const bool khsh_ok1 = khsh_core && ensure_sun_depth3(khsh_dev);
         const bool khsh_ok2 = khsh_core && ensure_sun_depth4(khsh_dev);
@@ -37183,10 +37712,9 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         if (khsh_standalone) {
             g_ro.in_injection = true;
             khsh_bk.capture(ctx);
-            // VB slot 1 is outside StateBackup's coverage; the union pass saves
-            // it explicitly and the standalone pass must too, or our mesh +
-            // instance buffers leak into the engine's next draws on every skip
-            // frame.
+            // VB slot 1 is saved explicitly, as the union pass saves it (StateBackup
+            // covers slots 0 and 1 as well), so our mesh + instance buffers never
+            // leak into the engine's next draws on a skip frame.
             ctx->IAGetVertexBuffers(1, 1, &khsh_ovb1, &khsh_ovb1_stride, &khsh_ovb1_offset);
             khsh_om.capture(ctx);   // Full OM set (8 RTVs + DSV).
             ctx->RSGetViewports(&khsh_nvp, khsh_ovp);
@@ -37411,10 +37939,10 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
 
             // Membership is the ortho's own lateral clip, never a positional
             // subset of it.
-            if (khsh_set.empty() ||
-                khsh_set.size() > static_cast<size_t>(g_res.sun_instance_cap)) {
-                return;   // Capacity grows on union render frames; valid stays false.
-            }
+            if (khsh_set.empty()) return;   // Valid stays false.
+            // KH_SUN_OBJ: instanced while the union's stream holds the band's casters; per object otherwise (no
+            // instancing resources, a set past the stream, a failed map).
+            const bool khsh_inst = kh_sun_inst_on() && khsh_set.size() <= static_cast<size_t>(g_res.sun_instance_cap);
 
             ConstantData khsh_obj = {};
             ConstantData khsh_cbf = {};
@@ -37442,8 +37970,11 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                               return a.mesh != b.mesh ? a.mesh < b.mesh : a.lod < b.lod;   // KH_SHADOW_LOD_DRAWN.
                           });
                 D3D11_MAPPED_SUBRESOURCE khsh_im = {};
+                bool khsh_drawn = false;
 
-                if (SUCCEEDED(ctx->Map(g_res.sun_instance_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &khsh_im))) {
+                if (khsh_inst && SUCCEEDED(ctx->Map(g_res.sun_instance_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &khsh_im))) {
+                    ctx->IASetInputLayout(g_res.layout_sundepth);   // KH_SUN_OBJ: a band before may have drawn per
+                    kh_sun_bind_opaque(ctx);                         // object.
                     KhInstLane* khsh_outp = static_cast<KhInstLane*>(khsh_im.pData);   // KH_OBJBUF: slot + alpha.
 
                     for (const auto& c : khsh_set) {
@@ -37485,7 +38016,11 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
 
                     kh_sun_draw_alpha(ctx, khsh_set, khsh_obj, g_res.sun_instance_vb);   // KH_CAST_ALPHA: the alpha
                                                                                          // Casters, this tier.
-
+                    khsh_drawn = true;
+                } else {
+                    khsh_drawn = kh_sun_draw_obj_t(ctx, khsh_set, g_sun_anchor_now);   // KH_SUN_OBJ.
+                }
+                if (khsh_drawn) {
                     memcpy(khsh_out_vp, khsh_lvp, sizeof(khsh_out_vp));
                     khsh_out_bias = khsh_bbw / khsh_d2v;
                     khsh_out_cbias = khsh_cbw / khsh_d2v;
@@ -37591,9 +38126,6 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         if (khsh_ok3 && khsh_did[3]) memcpy(g_sun_tier_anchor[3], g_sun_anchor_now, sizeof(g_sun_anchor_now));
         memcpy(g_sun_cam_anchor, g_sun_anchor_now, sizeof(g_sun_cam_anchor));
 
-        // The light maps rendered here, inside this lambda, behind every gate
-        // in front of it.
-
         if (khsh_standalone) {
             khsh_om.restore(ctx);
             if (khsh_nvp > 0) ctx->RSSetViewports(khsh_nvp, khsh_ovp);
@@ -37614,6 +38146,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
 
         for (const auto& c : casters) {
             fnv(c.pos, sizeof(c.pos));
+            fnv(c.res, sizeof(c.res));   // KH_POS_RES: a centre that moved finer than pos re-renders too.
             fnv(c.size, sizeof(c.size));
             fnv(c.rot, sizeof(c.rot));   // Rotating a caster re-renders.
             fnv(&c.mesh, sizeof(c.mesh));
@@ -37666,30 +38199,9 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     const bool res_ok = kh_ensure_ok("sun-depth resources", ensure_resources(dev)) && ensure_sun_depth(dev);
     bool instanced = res_ok && g_res.vs_sundepth && g_res.layout_sundepth && g_res.obj_srv;   // KH_OBJBUF.
 
-    if (instanced) {
-        // Grow-only dynamic instance buffer: one 16-byte KhInstLane per caster
-        // (centre, extents and rotation live in the record buffer the lane's
-        // slot indexes).
-        const UINT need = static_cast<UINT>(casters.size());
-
-        if (need > g_res.sun_instance_cap) {
-            KH_SAFE_RELEASE(g_res.sun_instance_vb);
-            UINT cap = g_res.sun_instance_cap > 64 ? g_res.sun_instance_cap : 64;
-            while (cap < need) cap *= 2;
-            D3D11_BUFFER_DESC bd = {};
-            bd.ByteWidth = cap * KH_INST_STRIDE;
-            bd.Usage = D3D11_USAGE_DYNAMIC;
-            bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-            bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-
-            if (SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &g_res.sun_instance_vb))) {
-                g_res.sun_instance_cap = cap;
-            } else {
-                g_res.sun_instance_cap = 0;
-                instanced = false;
-            }
-        }
-    }
+    // KH_SUN_INST_CAP: one 16-byte KhInstLane per caster (centre, extents and rotation live in the record buffer the
+    // lane's slot indexes); no stream, the per-object route (KH_SUN_OBJ).
+    if (instanced && !kh_sun_inst_ensure(dev, casters.size())) instanced = false;
 
     dev->Release();
     if (!res_ok) return false;
@@ -37960,6 +38472,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         // caster set, so the fitting argument holds here only.
         ctx->RSSetState(kh_sun_rs_pick(false));
     }
+    bool khsd_inst_drawn = false;   // KH_SUN_OBJ: the stream took the casters.
     if (instanced) {
         std::sort(casters.begin(), casters.end(),
                   [](const SunCaster& a, const SunCaster& b) {
@@ -38019,38 +38532,11 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
 
             kh_sun_draw_alpha(ctx, casters, khsd_obj, g_res.sun_instance_vb);
         }
-    } else {
-        // Per-caster fallback (instancing unavailable): one constant upload +
-        // draw each.
-        UINT stride = sizeof(MeshVertex), offset = 0;
-        ID3D11Buffer* bound_vb = nullptr;   // KH_CLOTH: the buffer identifies the draw, not the mesh id.
-
-        for (const auto& c : casters) {
-            ID3D11Buffer* const khca_vb = kh_mesh_vb_for(c.mesh, c.slot);   // KH_CLOTH.
-            if (khca_vb != bound_vb) {
-                ctx->IASetVertexBuffers(0, 1, &khca_vb, &stride, &offset);
-                ctx->IASetIndexBuffer(g_res.mesh_ib[c.mesh], DXGI_FORMAT_R32_UINT, 0);
-                bound_vb = khca_vb;
-            }
-
-            if (!khsd_frame_ok) break;
-            ConstantData cbd = {};
-            cbd.center_size[0] = c.pos[0];
-            cbd.center_size[1] = c.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y].
-            cbd.center_size[2] = c.pos[1];
-            cbd.size_axes[0] = c.size[0];   // SQF [x,y,z] sizes -> engine [x,z,y].
-            cbd.size_axes[1] = c.size[2];
-            cbd.size_axes[2] = c.size[1];
-
-            kh_fill_obj_rot(cbd, c.rot);   // Object rotation (VSMain path).
-            if (!kh_upload_obj_cb(ctx, g_res.composite_cb, cbd)) break;   // CB split: object slice.
-            // The per-caster fallback takes the same level as the instanced
-            // path, or the two disagree on silhouette.
-            UINT khsf_ls = 0, khsf_lc = 0;
-            mesh_lod_range_of(c.mesh, c.lod, khsf_ls, khsf_lc);   // KH_SHADOW_LOD_DRAWN.
-            ctx->DrawIndexed(khsf_lc, khsf_ls, 0);
-        }
+        khsd_inst_drawn = filled;
     }
+    // KH_SUN_OBJ: the per-object route when the stream could not take the casters (no instancing resources, a
+    // failed map) - the same map, never an empty one committed as valid.
+    if (!khsd_inst_drawn && khsd_frame_ok) kh_sun_draw_obj_t(ctx, casters, g_sun_anchor_now);
 
     khsh_render_cams(true);
 
@@ -40115,6 +40601,7 @@ static uint8_t  g_svs_bracket = 0;
 // the list whole.
 struct KhSvCaster {
     float pos[3]; float size[3]; float rot[9]; bool rotated; int mesh;
+    float res[3];   // KH_POS_RES (kh_pos_res at the build).
     float bsize[3];   // KH_CAST_REFIT: the cull's size (kh_bounds_size_of); size draws.
     int  lod;        // KH_SHADOW_LOD_DRAWN: the level the footprint draws (the injection's own pick,
                      // taken once the pass camera is known, below the list build).
@@ -42101,6 +42588,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
             KhSvCaster c;
             c.slot = khsc_i;   // KH_SEAM_INST: khObjs index for the instanced twins.
             memcpy(c.pos, o.pos, sizeof(c.pos));
+            kh_pos_res(o, c.res);   // KH_POS_RES.
             memcpy(c.size, o.size, sizeof(c.size));
             kh_bounds_size_of(o, c.bsize);   // KH_CAST_REFIT.
             memcpy(c.rot, o.rot_m, sizeof(c.rot));
@@ -42286,6 +42774,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
         khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, &khv_vp_hi, sizeof(khv_vp_hi));
         for (const KhSvCaster& khsk_c : khv_list) {
             khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, khsk_c.pos, sizeof(khsk_c.pos));
+            khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, khsk_c.res, sizeof(khsk_c.res));   // KH_POS_RES.
             khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, khsk_c.size, sizeof(khsk_c.size));
             khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, khsk_c.rot, sizeof(khsk_c.rot));
             khsk_h = CryptoGenerator::fnv1a64_update(khsk_h, &khsk_c.mesh, sizeof(khsk_c.mesh));
@@ -42501,12 +42990,12 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
             khv_obj.size_axes[1] = c.size[2] * khv_grow;
             khv_obj.size_axes[2] = c.size[1] * khv_grow;
             kh_fill_obj_rot(khv_obj, c.rot);
-            if (khv_rebase_on) kh_fill_center_rel(khv_obj, khv_cam);
+            if (khv_rebase_on) kh_fill_center_rel(khv_obj, khv_cam, c.res);   // KH_POS_RES.
 
             if (khv_want_alpha) {   // KH_FOOTPRINT_ALPHA: per submesh, the material's alpha lanes +
                                     // Maps bound.
                 const MeshDef& khv_md = mesh_def(c.mesh);
-                const std::vector<MeshSubmesh>& khv_tab = mesh_lod_submeshes(khv_md, 0);
+                const std::vector<MeshSubmesh>& khv_tab = mesh_lod_submeshes(khv_md, c.lod);   // KH_SHADOW_LOD_DRAWN.
                 bool khv_ok = true;
 
                 for (size_t khv_s = 0; khv_s < khv_tab.size() && khv_ok; ++khv_s) {
@@ -42580,7 +43069,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
             khv_obj.size_axes[1] = c.size[2];
             khv_obj.size_axes[2] = c.size[1];
             kh_fill_obj_rot(khv_obj, c.rot);
-            if (khv_rebase_on) kh_fill_center_rel(khv_obj, khv_cam);
+            if (khv_rebase_on) kh_fill_center_rel(khv_obj, khv_cam, c.res);   // KH_POS_RES.
             bool khvf_ok = true;
             if (khvf_want_alpha) {
                 const MeshDef& khvf_md = mesh_def(c.mesh);
@@ -42713,7 +43202,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
                             khvm_obj.size_axes[1] = c.size[2];
                             khvm_obj.size_axes[2] = c.size[1];
                             kh_fill_obj_rot(khvm_obj, c.rot);
-                            if (khv_rebase_on) kh_fill_center_rel(khvm_obj, khv_cam);
+                            if (khv_rebase_on) kh_fill_center_rel(khvm_obj, khv_cam, c.res);   // KH_POS_RES.
                             if (!kh_upload_obj_cb(ctx, g_res.composite_cb, khvm_obj)) break;
                             {   // KH_SHADOW_LOD_DRAWN.
                                 UINT khsl_is = 0, khsl_ic = 0;
@@ -42749,7 +43238,7 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
                             khvf_obj.size_axes[1] = c.size[2];
                             khvf_obj.size_axes[2] = c.size[1];
                             kh_fill_obj_rot(khvf_obj, c.rot);
-                            if (khv_rebase_on) kh_fill_center_rel(khvf_obj, khv_cam);
+                            if (khv_rebase_on) kh_fill_center_rel(khvf_obj, khv_cam, c.res);   // KH_POS_RES.
                             if (!kh_upload_obj_cb(ctx, g_res.composite_cb, khvf_obj)) break;
                             UINT khvf_is = 0, khvf_ic = 0;
                             mesh_lod_range_of(c.mesh, 0, khvf_is, khvf_ic);
@@ -42847,8 +43336,8 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
                 if (c.no_foot) continue;                             // KH_FOOT_BLEND: as the footprint.
                 if (khv_inst_ok && !c.alpha_caster) continue;        // Drawn instanced above.
                 if (c.alpha_caster && c.alpha < 0.999f) continue;    // Writes no depth: no footprint.
-                // The footprint's own test (khv_want_alpha): per submesh of level
-                // 0, else the injection's level.
+                // The footprint's own test (khv_want_alpha): per submesh of the drawn
+                // level (c.lod, the injection's), else that level whole.
                 const bool khvp_fp_alpha = c.alpha_caster && c.mats && khvp_dev;
                 const bool khvp_want_alpha = khvp_fp_alpha && khvp_alpha_ok;
                 if (khvp_want_alpha != khvp_alpha_bound) {
@@ -42873,10 +43362,10 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
                 khvp_obj.size_axes[1] = c.size[2];
                 khvp_obj.size_axes[2] = c.size[1];
                 kh_fill_obj_rot(khvp_obj, c.rot);
-                if (khv_rebase_on) kh_fill_center_rel(khvp_obj, khv_cam);
+                if (khv_rebase_on) kh_fill_center_rel(khvp_obj, khv_cam, c.res);   // KH_POS_RES.
                 if (khvp_want_alpha) {   // The footprint's submeshes, each with its material.
                     const MeshDef& khvp_md = mesh_def(c.mesh);
-                    const std::vector<MeshSubmesh>& khvp_tab = mesh_lod_submeshes(khvp_md, 0);
+                    const std::vector<MeshSubmesh>& khvp_tab = mesh_lod_submeshes(khvp_md, c.lod);
                     for (size_t khvp_s = 0; khvp_s < khvp_tab.size() && khvp_ok; ++khvp_s) {
                         const MeshSubmesh& khvp_sm = khvp_tab[khvp_s];
                         if (khvp_sm.index_count == 0) continue;
@@ -42890,10 +43379,10 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
                     continue;
                 }
                 if (!kh_upload_obj_cb(ctx, g_res.composite_cb, khvp_obj)) { khvp_ok = false; break; }
-                // The level the footprint drew: an alpha caster's submeshes span
-                // level 0; the rest, the injection's level.
+                // The level the footprint drew: the injection's (KH_SHADOW_LOD_DRAWN),
+                // whole or per submesh alike.
                 UINT khvp_is = 0, khvp_ic = 0;
-                mesh_lod_range_of(c.mesh, khvp_fp_alpha ? 0 : c.lod, khvp_is, khvp_ic);
+                mesh_lod_range_of(c.mesh, c.lod, khvp_is, khvp_ic);
                 ctx->DrawIndexed(khvp_ic, khvp_is, 0);
             }
             if (khvp_dev) khvp_dev->Release();
@@ -43842,7 +44331,9 @@ inline void kh_pip_inject(ID3D11DeviceContext* ctx) {
         cbd.center_size[0] = o.pos[0];
         cbd.center_size[1] = o.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y].
         cbd.center_size[2] = o.pos[1];
-        kh_fill_center_rel(cbd, cam);    // Arms center_rel.w: the rebased contract.
+        float khpi_res[3];   // KH_POS_RES: the object's live residual.
+        kh_pos_res(o, khpi_res);
+        kh_fill_center_rel(cbd, cam, khpi_res);    // Arms center_rel.w: the rebased contract.
         cbd.size_axes[0] = o.size[0];
         cbd.size_axes[1] = o.size[2];
         cbd.size_axes[2] = o.size[1];
@@ -44252,7 +44743,9 @@ inline void kh_infront_inject(ID3D11DeviceContext* ctx, const D3D11_VIEWPORT& kh
         cbd.center_size[0] = o.pos[0];
         cbd.center_size[1] = o.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y].
         cbd.center_size[2] = o.pos[1];
-        if (g_vm_rebase > 0.5f) kh_fill_center_rel(cbd, cam);
+        float khvi_res[3];   // KH_POS_RES: the object's live residual.
+        kh_pos_res(o, khvi_res);
+        if (g_vm_rebase > 0.5f) kh_fill_center_rel(cbd, cam, khvi_res);
         cbd.size_axes[0] = o.size[0];
         cbd.size_axes[1] = o.size[2];
         cbd.size_axes[2] = o.size[1];
@@ -46169,7 +46662,9 @@ inline void kh_infront_seam_inject(ID3D11DeviceContext* ctx, const D3D11_VIEWPOR
         cbd.center_size[0] = o.pos[0];
         cbd.center_size[1] = o.pos[2];   // SQF [x,y,zASL] -> engine [x,zASL,y].
         cbd.center_size[2] = o.pos[1];
-        if (khvs_rebase) kh_fill_center_rel(cbd, khvs_cam);
+        float khvs_res[3];   // KH_POS_RES: the object's live residual.
+        kh_pos_res(o, khvs_res);
+        if (khvs_rebase) kh_fill_center_rel(cbd, khvs_cam, khvs_res);
         cbd.size_axes[0] = o.size[0];
         cbd.size_axes[1] = o.size[2];
         cbd.size_axes[2] = o.size[1];
@@ -47816,7 +48311,9 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         cbd.center_size[2] = o.pos[1];
         // Per-object rebase arm mirrors the pass verdict (one without the other
         // is the wrong-space landmine).
-        if (khr_rebase_on) kh_fill_center_rel(cbd, cam);
+        float khr_res[3];   // KH_POS_RES: the object's live residual.
+        kh_pos_res(o, khr_res);
+        if (khr_rebase_on) kh_fill_center_rel(cbd, cam, khr_res);
         cbd.size_axes[0] = o.size[0];   // SQF [x,y,z] sizes -> engine [x,z,y].
         cbd.size_axes[1] = o.size[2];
         cbd.size_axes[2] = o.size[1];
@@ -48644,7 +49141,7 @@ inline void kh_svs_prime_mask(ID3D11DeviceContext* ctx) {
             khp_obj.size_axes[1] = c.size[2];
             khp_obj.size_axes[2] = c.size[1];
             kh_fill_obj_rot(khp_obj, c.rot);
-            if (g_svs_prime_rebase) kh_fill_center_rel(khp_obj, g_svs_prime_cam);
+            if (g_svs_prime_rebase) kh_fill_center_rel(khp_obj, g_svs_prime_cam, c.res);   // KH_POS_RES.
 
             if (!kh_upload_obj_cb(ctx, g_res.composite_cb, khp_obj)) {
                 break;
@@ -49257,7 +49754,7 @@ inline bool kh_dlsw_mask_render(ID3D11DeviceContext* khm_ctx,
         // Armed only when the matrix above actually rebased: the two must never
         // disagree, or the vertex would be camera-relative against an absolute
         // matrix.
-        if (khm_reb) kh_fill_center_rel(khm_obj, khm_cam);
+        if (khm_reb) kh_fill_center_rel(khm_obj, khm_cam, khm_c.res);   // KH_POS_RES.
         if (!kh_upload_obj_cb(khm_ctx, g_res.composite_cb, khm_obj)) break;
         // An alpha caster with a material set masks through the textured VS and
         // the clipping twin, its material bound per submesh. Colour-alpha-only
@@ -51843,7 +52340,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
         cbd.center_size[3] = chain_pass ? 1.0f : 0.0f;
         // Per-object rebase arm mirrors the pass verdict (one without the other
         // is the wrong-space landmine). Chain passes carry it inertly.
-        if (khf_rebase_on) kh_fill_center_rel(cbd, cam);
+        float khf_res[3];   // KH_POS_RES: the object's live residual.
+        kh_pos_res(o, khf_res);
+        if (khf_rebase_on) kh_fill_center_rel(cbd, cam, khf_res);
         cbd.size_axes[0] = o.size[0];   // SQF [x,y,z] sizes -> engine [x,z,y].
         cbd.size_axes[1] = o.size[2];
         cbd.size_axes[2] = o.size[1];
@@ -52785,7 +53284,7 @@ inline void flush_frame() {
     kh_attach_proxy_reap();
     // KH_ATTACH_GT_SNAP: this frame's objects, as the engine will draw them. After the reaps (a reaped binding
     // takes no sample) and before the park, on the thread the SQF commands write the table from.
-    kh_attach_gt_snap();
+    const bool khff_gts = kh_attach_gt_snap();
     kh_prof_add(KHP_FLUSH_PRE, khff_pre_t0);
     const int64_t khff_cen_t0 = kh_prof_now();   // KH_PROF: flushCensus.
     bool has_work;
@@ -52869,7 +53368,7 @@ inline void flush_frame() {
     // KH_CLOTH_PROXY: holding nothing, and ahead of the empty-list return
     // below, so the last cloth mesh's removal still deletes its proxy.
     if (!g_cloth_proxy_want.empty() || !g_cloth_proxy.empty()) kh_cloth_proxy_step();
-    kh_chain_prepare();   // KH_CHAIN: likewise holding nothing and ahead of it.
+    kh_chain_prepare(khff_gts);   // KH_CHAIN: likewise holding nothing and ahead of it.
 
     g_kh_track_wanted.store(has_work, std::memory_order_relaxed);
 
@@ -54397,6 +54896,7 @@ inline void kh_session_globals_reset() {
     g_sun_map_no_local = false;
     kh_reinit(g_sun_map_vp);
     kh_reinit(g_sun_anchor_now);
+    kh_reinit(g_sun_cam_now);   // KH_DLS_LOD_CAM.
     kh_reinit(g_sun_map_anchor);
     kh_reinit(g_sun_cam_anchor);
     kh_reinit(g_sun_tier_anchor);
@@ -55159,6 +55659,8 @@ inline bool update_render_object(const std::string& handle, RenderObject&& stage
     staged.slot = khuo_live.slot;
     if (memcmp(staged.pos, base.pos, sizeof(staged.pos)) == 0) {
         memcpy(staged.pos, khuo_live.pos, sizeof(staged.pos));
+        memcpy(staged.pos_res, khuo_live.pos_res, sizeof(staged.pos_res));   // KH_POS_RES.
+        memcpy(staged.pos_res_at, khuo_live.pos_res_at, sizeof(staged.pos_res_at));
     }
     if (memcmp(staged.rot_m, base.rot_m, sizeof(staged.rot_m)) == 0 && staged.rotated == base.rotated) {
         memcpy(staged.rot_m, khuo_live.rot_m, sizeof(staged.rot_m));

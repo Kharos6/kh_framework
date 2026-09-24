@@ -31,7 +31,7 @@ VSOut VSMainInst(VSIn i, VSInst n)
 {
     VSOut o;
     KhObjRec r = khObjs[n.islot];
-    precise float3 khvRel = r.pos.xyz - khPass.xyz;
+    precise float3 khvRel = (r.pos.xyz - khPass.xyz) + r.res.xyz;   // KH_POS_RES.
     KhVsCore(i.pos, i.nrm, r.pos.xyz, khvRel, khPass.w, r.size.xyz,
              r.rot0.xyz, r.rot1.xyz, r.rot2.xyz, o.pos, o.wpos, o.wrel, o.nrm);
     o.icol = float4(r.col.rgb, n.ilane.y);
@@ -115,7 +115,7 @@ struct VSInSeam {
 float4 VSSeamInst(VSInSeam i) : SV_Position
 {
     KhObjRec r = khObjs[i.islot];
-    precise float3 khsi_rel = r.pos.xyz - khPass.xyz;
+    precise float3 khsi_rel = (r.pos.xyz - khPass.xyz) + r.res.xyz;   // KH_POS_RES.
     float4 khsi_pos;
     float3 khsi_wpos, khsi_wrel, khsi_nrm;
     KhVsCore(i.pos, i.nrm, r.pos.xyz, khsi_rel, khPass.w, r.size.xyz,
@@ -182,15 +182,20 @@ float4 VSMirrorInst(VSInSeam i) : SV_Position
     KhObjRec r = khObjs[i.islot];
     float3 khmi_l = KhRotateR(i.pos * r.size.xyz, r.rot0.xyz, r.rot1.xyz, r.rot2.xyz);
     float3 khmi_wp = r.pos.xyz + khmi_l;
-    precise float3 khmi_rel = r.pos.xyz - khPass.xyz;
+    precise float3 khmi_rel = (r.pos.xyz - khPass.xyz) + r.res.xyz;   // KH_POS_RES.
     return KhMirClip((khPass.w > 0.5f) ? (khmi_rel + khmi_l) : khmi_wp);
 }
 float4 VSSunDepth(VSInSun i) : SV_Position
 {
     KhObjRec r = khObjs[i.islot];
     float3 lp = i.pos * r.size.xyz;
-    float3 wp = r.pos.xyz + lp.x * r.rot0.xyz + lp.y * r.rot1.xyz + lp.z * r.rot2.xyz;
-    return mul(float4(wp - sunOrigin.xyz, 1.0f), viewProj);
+    // KH_POS_RES: the centre against the anchor first (two world-scale values
+    // close together: a small, exact difference), then its residual and the
+    // turned vertex - no world-scale rounding reaches the map. The receivers'
+    // wrel (KhVsCore) is formed from small terms the same way.
+    precise float3 khsu_c = (r.pos.xyz - sunOrigin.xyz) + r.res.xyz;
+    float3 wr = khsu_c + (lp.x * r.rot0.xyz + lp.y * r.rot1.xyz + lp.z * r.rot2.xyz);
+    return mul(float4(wr, 1.0f), viewProj);
 }
 
 #if KH_TEXTURED
@@ -211,10 +216,31 @@ VSOutSunA VSSunDepthA(VSInSunA i)
     VSOutSunA o;
     KhObjRec r = khObjs[i.islot];
     float3 lp = i.pos * r.size.xyz;
-    float3 wp = r.pos.xyz + lp.x * r.rot0.xyz + lp.y * r.rot1.xyz + lp.z * r.rot2.xyz;
-    o.pos = mul(float4(wp - sunOrigin.xyz, 1.0f), viewProj);
+    precise float3 khsa_c = (r.pos.xyz - sunOrigin.xyz) + r.res.xyz;   // KH_POS_RES: VSSunDepth's order.
+    float3 wr = khsa_c + (lp.x * r.rot0.xyz + lp.y * r.rot1.xyz + lp.z * r.rot2.xyz);
+    o.pos = mul(float4(wr, 1.0f), viewProj);
     o.uv = i.uv;
     o.alpha = i.ilane.y;
+    return o;
+}
+
+// KH_CAST_ALPHA: VSSunDepthA's per-object twin, for the depth maps' per-object
+// route (KH_SUN_OBJ, kh_sun_draw_obj_t: the union, the tiers and the light
+// faces without the instance stream or the record buffer): the object CB's
+// lanes, the position through the branch that route arms against the map's
+// origin (centerRel = centre - origin + KH_POS_RES, kh_fill_center_rel; the sun
+// anchor, or the light for a face) - KhVsCore's armed expression, so an alpha
+// caster lands on the texels VSMain puts an opaque one on - and the caster's
+// alpha in color.a. Feeds PSSunDepthA.
+VSOutSunA VSSunDepthAObj(VSIn i)
+{
+    VSOutSunA o;
+    float3 khso_r0, khso_r1, khso_r2;
+    KhObjRows(khso_r0, khso_r1, khso_r2);
+    const float3 khso_tp = centerRel.xyz + KhRotateR(i.pos * sizeAxes.xyz, khso_r0, khso_r1, khso_r2);
+    o.pos = mul(float4(khso_tp, 1.0f), viewProj);
+    o.uv = i.uv;
+    o.alpha = color.a;
     return o;
 }
 
@@ -298,10 +324,11 @@ float4 PSDlsMaskA(VSOut i) : SV_Target
 #endif
 
 // Analytic mask cast: per-pixel ray-vs-AABB toward the sun, drawn into the
-// engine's screen-space shadow mask with multiply blending. castMat[0..2] =
-// view rows 0..2; castView[0] = view row 3 (translation); castView[1] = (fov.x,
-// fov.y, maskW, maskH); castView[2] = sunDir.xyz + strength in w. Scene linear
-// depth at t0.
+// engine's screen-space shadow mask with multiply blending. castMat[0..2].xyz
+// = the view's inverse rotation for KhCastWorld's row dots (cb.hlsl's lane
+// note); castView[0] = view row 3 (translation); castView[1] = (fov.x, fov.y,
+// maskW, maskH); castView[2] = sunDir.xyz + strength in w. Scene linear depth
+// at t0.
 Texture2D<float4> sceneDepthTex : register(t0);
 float KhSceneLoad(int2 p) { return sceneDepthTex.Load(int3(p, 0)).x; }
 
@@ -827,6 +854,9 @@ static const float KH_CAST_SNAP_ULP16 = 0.0009765625f;
 static const float KH_CAST_SNAP_R = 4.0f;
 static const float KH_CAST_SNAP_RES = 4.0f;
 static const float KH_CAST_SNAP_UP = 0.5f;
+// KH_CAST_SNAP_ABOVE: the depth ulps along the ray a receiver ABOVE the heightfield may sit and still be snapped
+// down onto it - the quantisation the snap exists for, not the whole band.
+static const float KH_CAST_SNAP_ABOVE = 4.0f;
  float4 PSMaskCast(VSOut i) : SV_Target
 {
     float2 dimsM = float2(castView[1].z, castView[1].w);
@@ -858,6 +888,16 @@ static const float KH_CAST_SNAP_UP = 0.5f;
     // of the heightfield onto it: the depth's quantisation moves a
     // reconstructed ground point along the view ray, and our sun map has no
     // terrain in it to absorb that, so an unsnapped ground shadow would crawl.
+    // KH_CAST_SNAP_ABOVE: a receiver ABOVE the heightfield is snapped only
+    // within KH_CAST_SNAP_ABOVE depth ulps carried along the ray, whatever it
+    // faces. Height alone cannot tell the ground from an engine surface lying
+    // on it (a prone body, a helmet, a low prop - the heightfield is point-
+    // sampled, its cells up to tens of metres), and snapped down such a surface
+    // went below every caster of ours lower than itself and took their shadow
+    // (a mesh under or inside it darkened it). Beyond the quantisation it keeps
+    // its own height, the ground above the heightfield included - noise at most
+    // one such ulp. Near the camera that is millimetres; far away the ulp grows
+    // and the whole band comes back. Below the heightfield the whole band holds.
     // KH_CAST_SNAP_FACING: only the ground may be snapped. A wall, a plinth, a
     // rock face or a vehicle side within that band is not the heightfield -
     // flattened onto it, it received the shadow the ground at its foot
@@ -869,8 +909,9 @@ static const float KH_CAST_SNAP_UP = 0.5f;
     // two spans each exceed KH_CAST_SNAP_RES depth ulps carried along the ray
     // and that faces sideways keeps its own height, snapped only within one
     // such ulp (noise it could be); an up-facing plane, or none fitted, keeps
-    // the full band exactly as before. fogBelow.z = the ulp, relative (the
-    // fire's fill; 0 reads as R16_FLOAT's).
+    // the full band below the heightfield and KH_CAST_SNAP_ABOVE's tolerance
+    // above it. fogBelow.z = the ulp, relative (the fire's fill; 0 reads as
+    // R16_FLOAT's).
     // KH_CAST_PRE: on the sun-map path the reach test runs first, here, at
     // the unsnapped point with every y extent widened by the band the snap
     // can move it (thmMeta.z, the snap's own guard). A refused pixel can
@@ -885,19 +926,20 @@ static const float KH_CAST_SNAP_UP = 0.5f;
     if (thmParams.w >= 0.5f && khcPre) {
         float khtsH = KhThmHeight(pw.xz);
         if (khtsH > -1.0e5f && abs(pw.y - khtsH) < thmMeta.z) {
-            float khtsTol = thmMeta.z;
+            const float  khtsUlp = fogBelow.z > 0.0f ? fogBelow.z : KH_CAST_SNAP_ULP16;
+            const float3 khtsCam = float3(dot(-castView[0].xyz, castMat[0].xyz),
+                                          dot(-castView[0].xyz, castMat[1].xyz),
+                                          dot(-castView[0].xyz, castMat[2].xyz));
+            const float  khtsQ = khtsUlp * distance(pw, khtsCam);   // One ulp along the ray.
+            // KH_CAST_SNAP_ABOVE: above the heightfield, the quantisation alone.
+            float khtsTol = pw.y > khtsH ? min(thmMeta.z, KH_CAST_SNAP_ABOVE * khtsQ) : thmMeta.z;
             float3 khtsDx, khtsDy;
             if (KhDlswPlane(khrp_s, dimsM, KH_CAST_SNAP_R, zl, khtsDx, khtsDy)) {
-                const float  khtsUlp = fogBelow.z > 0.0f ? fogBelow.z : KH_CAST_SNAP_ULP16;
-                const float3 khtsCam = float3(dot(-castView[0].xyz, castMat[0].xyz),
-                                              dot(-castView[0].xyz, castMat[1].xyz),
-                                              dot(-castView[0].xyz, castMat[2].xyz));
-                const float  khtsQ = khtsUlp * distance(pw, khtsCam);   // One ulp along the ray.
                 const float3 khtsN = cross(khtsDx, khtsDy);
                 const float  khtsNl = length(khtsN);
                 const bool   khtsResolved = min(length(khtsDx), length(khtsDy)) > KH_CAST_SNAP_RES * khtsQ &&
                                             khtsNl > 1.0e-12f;
-                if (khtsResolved && abs(khtsN.y) < KH_CAST_SNAP_UP * khtsNl) khtsTol = min(thmMeta.z, khtsQ);
+                if (khtsResolved && abs(khtsN.y) < KH_CAST_SNAP_UP * khtsNl) khtsTol = min(khtsTol, khtsQ);
             }
             if (abs(pw.y - khtsH) < khtsTol) pw.y = khtsH;
         }

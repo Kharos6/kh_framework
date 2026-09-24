@@ -40,7 +40,7 @@ VSOutC VSCompositeInst(VSIn i, VSInst n)
 {
     VSOutC o;
     KhObjRec r = khObjs[n.islot];
-    precise float3 khvRel = r.pos.xyz - khPass.xyz;
+    precise float3 khvRel = (r.pos.xyz - khPass.xyz) + r.res.xyz;   // KH_POS_RES.
     KhVsCore(i.pos, i.nrm, r.pos.xyz, khvRel, khPass.w, r.size.xyz,
              r.rot0.xyz, r.rot1.xyz, r.rot2.xyz, o.pos, o.wpos, o.wrel, o.nrm);
     o.icol = float4(r.col.rgb, n.ilane.y);

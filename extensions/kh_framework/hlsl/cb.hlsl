@@ -86,10 +86,19 @@ cbuffer CBObj : register(b0)
     float4 bandMat[24];
     float4 bandView[24];
     float4 bandBorder[8];   // x = near, y = far, z = fade, w = 0 invalid / 1+texIndex.
-    // Cast pass: the meshes are drawn depth-only into the engine's shadow atlas
-    // at each cascade pass end, so the world receives their shadows.
-    float4 castMat[3];   // This cascade's sampling matrix rows.
-    float4 castView[3];   // Matching view columns.
+    // The mask cast's lanes (PSMaskCast, static.hlsl): our shadow painted into
+    // the engine's screen-space shadow mask from the engine view the fire
+    // reconstructs the scene through. castView[0].xyz = that view's row 3
+    // (translation) and castMat[0..2].xyz its inverse rotation laid out for
+    // KhCastWorld's row dots - the cofactor inverse frozen with the view, or the
+    // view's own rows 0..2 when none was (the same for an orthonormal view);
+    // castView[1] = (fov.x, fov.y, maskW, maskH); castView[2] = the frozen sun
+    // (xyz) and strength (w). castMat[0..2].w = KH_CAST_OCC's occupancy grid:
+    // cells per metre (> 0 arms it) and the grid's low x and z corner. The DLS
+    // world pass (PSDlsWorld) reads castMat.xyz and castView[0..1] the same way,
+    // and castView[2].xyz as the camera its reconstruction came from.
+    float4 castMat[3];
+    float4 castView[3];
     // x = view-paired band table valid; w = the unit-stencil arm (C++ twin
     // mask_meta[3], kh_svs_unit_on). y/z unwritten.
     float4 maskMeta;
@@ -229,8 +238,10 @@ cbuffer CBEngView2 : register(b4)
 // clock (KH_USER_LANES), pos.w = 1 when receiveShadow is off (KH_SHADOW_SWITCH),
 // rot0.w = 1 (filled),
 // rot1.w = lit ambient fraction, rot2.w = lit diffuse fraction; col carries no
-// lifetime envelope (the lane's alpha does).
-struct KhObjRec { float4 pos; float4 size; float4 rot0; float4 rot1; float4 rot2; float4 col; };
+// lifetime envelope (the lane's alpha does). res.xyz = KH_POS_RES, the centre's
+// part finer than pos's float: every relative centre a record forms (against
+// khPass, against sunOrigin) adds it; res.w unread.
+struct KhObjRec { float4 pos; float4 size; float4 rot0; float4 rot1; float4 rot2; float4 col; float4 res; };
 StructuredBuffer<KhObjRec> khObjs : register(t39);
 
 // KH_DL_RING: the draw's dynamic-light records, 6 float4 per light (the
@@ -2880,10 +2891,15 @@ void KhVsCore(float3 khvc_lp, float3 khvc_ln, float3 khvc_ctr, float3 khvc_rel, 
     // The pop at max view distance is enforced per fragment in the
     // PS (far contract block) instead of here.
     khvc_owpos = wp;
-    // KH_SELF_REL_INTERP: subtract the same fp32 anchor the sun matrices
-    // subtract - the quantised anchor cancels exactly, and the interpolant
-    // leaves at metres scale.
-    khvc_owrel = wp - sunOrigin.xyz;
+    // KH_SELF_REL_INTERP: the position against the sun anchor, which the sun
+    // matrices subtract. KH_POS_RES: armed, it is built from the camera-
+    // relative position (the residual already in it) and the pass camera's
+    // offset from the anchor - both small, so wp's world-scale rounding never
+    // reaches the self-shadow lookup (VSSunDepth builds its casters the same
+    // way). Every armed pass that reads it - the colour passes: injection,
+    // flush, PIP, view-model slice - fills khPass with the camera it rebases
+    // on; the volume and prime passes arm without reading it.
+    khvc_owrel = (khvc_relArm > 0.5f) ? (khvTp + (khPass.xyz - sunOrigin.xyz)) : (wp - sunOrigin.xyz);
     // Per-axis scale is non-uniform: normals take the inverse scale, then the
     // object rotation (the inverse-transpose of scale-then-rotate for
     // orthonormal R - see kh_set_rotation).

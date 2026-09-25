@@ -1,45 +1,7 @@
 // effect.hlsl - concatenated after cb.hlsl into the effect unit by C++ (no
 // #include). Any edit changes the unit's shader cache key.
-
-Texture2D<float4> sceneColor : register(t0);
-Texture2D<float4> khsgTex : register(t3);
-// s2, not s1: the shared prefix declares khPfSamp at s1 and is compiled into
-// this unit too, so a second s1 fails the unit with X4509 the moment any effect
-// entry reaches a prefix helper that uses it (the shadow compares' Gather,
-// KH_SHADOW_GATHER). C++ twin (KH_FX_SAMP_S2).
-// Bound only for the draws that read it, the prior binding put back: the SSGI resolve's linear clamp, or a glow
-// pass's anisotropic clamp (KH_GLOW_PYR, C++ KhGlowBind).
-SamplerState khsgSamp : register(s2);
-
-#if MSAA_DEPTH
-Texture2DMS<float> depthTex : register(t1);
-float LoadDepthRaw(int2 px) { return depthTex.Load(px, 0); }
-#else
-// Two-plane snapshot; declaration only.
-Texture2D<float2> depthTex : register(t1);
-float LoadDepthRaw(int2 px) { return depthTex.Load(int3(px, 0)).x; }
-#endif
-// KH_NEARZ_MARK: our near-z fragments nearer than the near plane are written
-// into a gap below the viewport's MinDepth that this pair reads as a flat wall
-// at the near distance. The marker (t37, armed by shadowMeta2.x) holds (raw,
-// true distance) where a drawer of ours wrote one this cycle; where its raw is
-// still the live raw, that distance comes back re-encoded through this pass's
-// own pair, so LinDepth (and every reader of this load) gets the true one. Any
-// other pixel - the hands drawn over since, the world - loads as it is.
-Texture2D<float2> khNzMark : register(t37);
-float LoadDepthPS(int2 px)
-{
-    const float khnz_r = LoadDepthRaw(px);
-    if (shadowMeta2.x > 0.5f) {
-        const float2 khnz_m = khNzMark.Load(int3(px, 0));
-        if (khnz_m.x > 0.0f && khnz_m.x == khnz_r && khnz_m.y > 0.0f) {
-            return depthParams.z + (depthParams.w - depthParams.z) * (depthParams.x + depthParams.y / khnz_m.y);
-        }
-    }
-    return khnz_r;
-}
-
-Texture2D<float> khArbSnap : register(t2);
+// Its shared declarations and helpers are cb.hlsl's KH_FX_UNIT section (a user
+// effect compiles against the same text); what is here is the builtins' own.
 
 // KH_FX_SIDE - a value that is the same for a whole pass, or that every pixel would otherwise recompute for its
 // neighbours, drawn once before the pass by this same shader into a small target of ours (the side ids 28 - 30
@@ -57,33 +19,6 @@ Texture2D<float> khUiProbe : register(t5);   // matCtl.z: the UI lane's coverage
 Texture3D<float4> khLut : register(t19);
 float3 KhLutV(int3 p) { return khLut.Load(int4(p, 0)).rgb; }
 
-float3 SampleScene(int2 px)
-{
-    px = clamp(px, int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
-    float4 khss = sceneColor.Load(int3(px, 0));
-    if (centerSize.w > 2.5f) return khss.rgb * khss.a;
-    return khss.rgb;
-}
-
-// Meaningless in the scene phase - callers gate on the flag.
-float KhUiCov(int2 px)
-{
-    px = clamp(px, int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
-    return sceneColor.Load(int3(px, 0)).a;
-}
-
-float Luma(float3 c) { return dot(c, float3(0.2126f, 0.7152f, 0.0722f)); }   // BT.709.
-
-// KH_FX_PX_REF: every size a builtin effect gives in pixels - its "...Px" parameters and the fixed pixel
-// spans inside the effects below - is in pixels of a 1080-row frame; this is the factor to the pass's own
-// frame (fxMeta.w, the height of the picture it draws), so a look holds at any resolution. Exactly 1 at 1080
-// rows, and every use multiplies it onto the finished pixel quantity, so at 1080 rows each quantity is the
-// unscaled one (up to fxc reordering a product - it is not IEEE-strict - a rounding step on an offset at
-// most). What stays in real pixels: sharpen's 1-px neighbourhood (sharpening is of the display's pixels), anti-aliasing
-// widths (the CRT tube's feather), per-pixel dither and sampling noise (deband's grain, the interleaved
-// rotations), and the SSGI chain (its radius is in metres; its resolve works on the gather's own grid).
-float KhFxPx() { return max(fxMeta.w, 1.0f) / 1080.0f; }
-
 // KH_CRT_MASK: the length of [0, u] that stripe k (0 R, 1 G, 2 B) of a triad p pixels wide covers - the
 // running integral of the stripe's indicator, continuous across period edges, so a pixel's coverage of the
 // stripe is the difference at its two edges (an exact box filter).
@@ -93,41 +28,6 @@ float KhCrtStripe(float u, float p, float k)
     const float n = floor(u / p);
     return n * w + clamp(u - n * p - k * w, 0.0f, w);
 }
-
-// KH_GLOW_PYR - the glows' and blurs' pre-filtered picture. C++ kh_glow_build makes one per pass, of that pass's own
-// source: level 0 is half the frame (PSGlowSeed), each further level half the one above (PSGlowDown), each texel a
-// 4 x 4 tent (1 3 3 1) over what it covers - padded past the frame (edge-clamped) so every level halves exactly and
-// one uv addresses them all. The bright-pass effects (bloom 8, halation 12, lens flare 14) take it through their
-// threshold, subtracted before the average as their direct taps subtract it; the UI spill lane's premultiply rides
-// SampleScene. The pass reads it at t3 (khsgTex) through khsgSamp (s2: anisotropic, clamp).
-// fuseMeta.y > 0.5 arms it; fuseMeta.zw is the full-resolution extent level 0 covers (twice its size, not less than
-// the frame). A tap reads the level whose texel matches its footprint - the spacing to the next tap - so a sparse
-// tap pattern samples a picture already averaged over the gaps between its taps: no copies of the scene at the
-// tap spacing, no grain from a jittered pattern. Disarmed (no pyramid for the pass) every effect takes its direct
-// taps, exactly as before. (Anamorphic reads a pyramid of its own, halved along its streak alone: KH_ANA_PYR.)
-bool KhGlowOn() { return fuseMeta.y > 0.5f; }
-
-// Each footprint is taken a quarter past the tap spacing: bilinear reads of a level are not shift-invariant, so at
-// the bare spacing a lone bright pixel under the 5 x 5 bloom still ripples by up to ~18% of its peak; at 1.25 by
-// about a tenth, the glow's spread then ~15% past the direct taps' (~10% at the bare spacing). H38 models it.
-static const float KH_GLOW_FP = 1.25f;
-
-// pc: a full-resolution position (pixel centres at +0.5). The footprint is fa pixels along the unit axis ax and fp
-// across it; hardware anisotropic filtering takes the long side (up to 16:1, then a coarser level).
-float3 KhGlowTapA(float2 pc, float2 ax, float fa, float fp)
-{
-    const float2 khga_e = max(fuseMeta.zw, float2(1.0f, 1.0f));
-    const float2 khga_g = KH_GLOW_FP / khga_e;
-    return khsgTex.SampleGrad(khsgSamp, pc / khga_e, ax * (fa * khga_g), float2(-ax.y, ax.x) * (fp * khga_g)).rgb;
-}
-float3 KhGlowTap(float2 pc, float f) { return KhGlowTapA(pc, float2(1.0f, 0.0f), f, f); }
-
-// The pyramid's share of taps sp pixels apart: none at a pixel or less (adjacent pixels leave no gap - the direct
-// taps, exactly as before), all from two, linear between. KhGlowSel takes the direct result d unless the share
-// is positive.
-float KhGlowMix(float sp) { return KhGlowOn() ? saturate(sp - 1.0f) : 0.0f; }
-float3 KhGlowSel(float3 d, float3 p, float m) { return m <= 0.0f ? d : (m >= 1.0f ? p : lerp(d, p, m)); }
-float KhGlowSel(float d, float p, float m) { return m <= 0.0f ? d : (m >= 1.0f ? p : lerp(d, p, m)); }
 
 // KH_GLOW_PYR's builders, drawn by kh_glow_build with VSFullscreen over each level's viewport. The seed (level 0):
 // each texel the tent over the frame's pixels 2p - 1 .. 2p + 2 (SampleScene clamps to the frame), each through the
@@ -260,44 +160,6 @@ float3 KhAnaStreak(Texture2D<float4> khas_tx, int khas_k, int khas_len, float kh
     return khas_a;
 }
 
-float LinDepth(float raw)
-{
-    float ndcZ = (raw - depthParams.z) / max(depthParams.w - depthParams.z, 1e-6f);
-    float denom = ndcZ - depthParams.x;
-    // At/beyond the far plane the denominator crosses zero and flips sign; sky
-    // pixels sit at the depth-clear value (1.0), beyond the viewport range
-    // entirely - treat everything past the far plane as "very far".
-    if (denom > -1e-7f) return 1e9f;
-    float d = depthParams.y / denom;
-    return d > 0.0f ? d : 1e9f;
-}
-
-// KH_HASH - integer hashing (pcg3d, Jarzynski & Olano, "Hash Functions for GPU Rendering", JCGT 2020) in place of
-// frac(sin(dot(p, k)) * 43758.5453). D3D11 specifies sin only on [-100 pi, 100 pi]; the sine hash fed it ~1e5 from
-// a pixel position and, through the time-seeded callers (fxMeta.y is seconds since the object's creation and never
-// wraps), without bound - vendor-defined noise, and after hours of grain adjacent cells collided outright. The
-// input's bits are hashed exactly, so equal inputs give equal values (every caller's structure holds) and distinct
-// ones stay distinct at any magnitude; a time seed rides as its own integer lane (KhHashF). Output in [0, 1).
-uint3 KhPcg3(uint3 v)
-{
-    v = v * 1664525u + 1013904223u;
-    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
-    v ^= v >> 16u;
-    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
-    return v;
-}
-float KhHashF(float2 p, uint s) { return (float)(KhPcg3(uint3(asuint(p), s)).x >> 8) * (1.0f / 16777216.0f); }
-float Hash(float2 p) { return KhHashF(p, 0u); }
-// KH_HASH's range rule for the periodic terms: sin / cos of an argument that grows with time, reduced to one
-// period first (the same value, inside the specified range).
-float KhSin(float x) { return sin(6.2831853f * frac(x * 0.15915494f)); }
-float KhCos(float x) { return cos(6.2831853f * frac(x * 0.15915494f)); }
-
-float2 Hash2(float2 p)
-{
-    return float2(Hash(p), Hash(p + float2(41.13f, 7.77f)));
-}
-
 float4 KhRainLayer(float2 q, float tt, float2 grid, float seedOfs,
                    float amount, float wind, float stretch)
 {
@@ -335,86 +197,13 @@ float4 KhRainLayer(float2 q, float tt, float2 grid, float seedOfs,
     return float4(nrm, saturate(drop + beads * 0.6f), saturate(trail + beads));
 }
 
-// Per-pixel world position from the depth buffer + inverse view-projection.
-float KhEncFence()
-{
-    float khef_den = 1.0f - depthParams.x;
-    float khef_far = khef_den < -1.0e-7f ? depthParams.y / khef_den : 20000.0f;
-    return clamp(khef_far, 500.0f, 100000.0f);
-}
-
-float3 KhWorldPosFenced(int2 px, float2 uv, out float khwf_d)
-{
-    float khwf_raw = LinDepth(LoadDepthPS(px));
-    khwf_d = min(khwf_raw, KhEncFence() * 0.999f);
-    float4 khwf_nd = float4(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f,
-                            depthParams.x + depthParams.y / max(khwf_d, 1.0f), 1.0f);
-    float4 khwf_wp = mul(khwf_nd, invViewProj);
-    // With fxCam armed the inverse is of a rotation-only view (camera at the
-    // origin) - small numbers, exact in fp32 - and the camera is added here,
-    // once. An absolute inverse mixes the camera's kilometres into every entry
-    // and cancels them per pixel, which jitters the reconstruction by
-    // centimetres frame to frame.
-    return khwf_wp.xyz / khwf_wp.w + (fxCam.w > 0.5f ? fxCam.xyz : float3(0.0f, 0.0f, 0.0f));
-}
-
-// Pure function of its arguments; reads no CB.
-float3 KhgVpos(float2 vp_px, float vp_d, float2 vp_res, float vp_m00, float vp_m11)
-{
-    float2 vp_uv = (vp_px + 0.5f) / vp_res;
-    return float3((vp_uv.x * 2.0f - 1.0f) * vp_d / vp_m00,
-                  (1.0f - vp_uv.y * 2.0f) * vp_d / vp_m11,
-                  vp_d);
-}
-
 // fxParams1 / fxParams2 are system lanes for effect 23: the chain loop packs up
 // to two aggregated fog-pass records [startDist, endDist, skyAmount, opacity]
 // (kh_fogscatter_pack); zeroed lanes = no pass.
 
 float KhFsFog(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float fs_m11)
 {
-    float fs_s = 0.0f;
-
-    if (fogParams.w >= 0.5f && depthParams.y < -1.0e-3f)
-    {
-        // The encode pair's far fence (m32 gate above guarantees the standard-z
-        // shape: 1 - m22 < 0, m32 < 0 -> positive fence).
-        float fs_fden = 1.0f - depthParams.x;
-        float fs_far = fs_fden < -1.0e-7f ? depthParams.y / fs_fden : 20000.0f;
-        float fs_de = min(fs_d, clamp(fs_far, 500.0f, 100000.0f) * 0.999f);
-        float fs_distM = length(KhgVpos(fs_px, fs_de, fs_res, fs_m00, fs_m11));
-        // Height at the clamped distance: the analytic ndcZ of fs_de, immune to
-        // the beyond-far mirror and to raw-depth teeter by construction.
-        float2 fs_uv = (fs_px + 0.5f) / fs_res;
-        float4 fs_nd = float4(fs_uv.x * 2.0f - 1.0f, 1.0f - fs_uv.y * 2.0f,
-                              depthParams.x + depthParams.y / max(fs_de, 1.0f), 1.0f);
-        float4 fs_wp = mul(fs_nd, invViewProj);
-        // With fxCam armed the inverse is camera-relative and the height comes
-        // back relative too; fogColor.w is the camera's absolute altitude, so
-        // the camera's own is added here, as the position is.
-        float fs_hgt = fs_wp.y / fs_wp.w + (fxCam.w > 0.5f ? fxCam.y : 0.0f);
-        float fs_camY = fogColor.w;
-        float fs_tr;
-
-        if (fogEngine.w >= 0.5f)
-        {
-            float fs_ramp = fogEngine.w >= 1.5f
-                          ? 1.0f
-                          : saturate((fogEngine.y - fs_distM) * fogEngine.z);
-            float fs_dh = abs(fs_hgt - fs_camY);
-            float fs_k = fogParams.y * fs_dh / max(fs_distM, 1.0e-4f);
-            float fs_integ = fs_k < 1.0e-6f ? fs_distM : (1.0f - exp(-fs_distM * fs_k)) / fs_k;
-            float fs_minY = min(fs_hgt, fs_camY);
-            fs_tr = fs_ramp * exp(-fs_integ * fogEngine.x * exp(-fogParams.y * max(fs_minY, 0.0f)));
-        }
-        else
-        {
-            float fs_dens = fogParams.x * exp(-fogParams.y * max(fs_hgt - fogParams.z, 0.0f));
-            fs_tr = exp(-fs_distM * fs_dens * 0.0153f);
-        }
-
-        fs_s = 1.0f - saturate(fs_tr);
-    }
+    float fs_s = KhFxFogEngine(fs_px, fs_d, fs_res, fs_m00, fs_m11);   // KH_FX_USER: the engine term, one body.
 
     // KH fog passes (effect-13 math twin - the same linear-depth ramp and
     // skyAmount rule; edit both or neither), opacity-scaled, combined as
@@ -438,92 +227,6 @@ float KhFsFog(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float fs_m1
     return saturate(fs_s);
 }
 
-// Point-op pass fusion. CPU twin: the chain loops' pending append
-// (kh_fuse_append) enforces the fusible set {1 invert, 2 colorgrade, 3
-// vignette, 5 grain}, never localized / banded / spill / LUT / custom, so this
-// path carries no masks.
-// Film grain's noise (effect 5 and KhFusePoint's id 5 - one body): smooth value noise over grainSizePx cells,
-// triangular-ish and signed, optional chroma. p0 = [amount, fps, grainSizePx, lumaResponse], chroma = the chroma
-// lane. KH_HASH: the frame (time quantized to fps) is the hash's integer lane, the cells' own coordinates the
-// other two, so no frame count or position reaches a float sum.
-float3 KhGrainGc(float2 pos, float t, float4 p0, float chroma)
-{
-    const float fps = max(p0.y, 1.0f);
-    const uint f = (uint)floor(t * fps);
-    const float2 gp = pos / (max(p0.z, 1.0f) * KhFxPx());   // KH_FX_PX_REF.
-    const float2 ip = floor(gp);
-    float2 fp = frac(gp);
-    fp = fp * fp * (3.0f - 2.0f * fp);
-    const float n00 = KhHashF(ip, f);
-    const float n10 = KhHashF(ip + float2(1, 0), f);
-    const float n01 = KhHashF(ip + float2(0, 1), f);
-    const float n11 = KhHashF(ip + float2(1, 1), f);
-    const float nv = lerp(lerp(n00, n10, fp.x), lerp(n01, n11, fp.x), fp.y);
-    const float nf = KhHashF(gp * 2.13f + 17.0f, f);
-    const float g = (nv + nf) * 0.5f - 0.5f;   // Triangular-ish, signed.
-    float3 gc = g.xxx;
-    if (chroma > 0.001f)
-    {
-        const float gr = (lerp(KhHashF(ip + 31.0f, f), KhHashF(ip + float2(1, 1) + 31.0f, f), fp.x) + KhHashF(gp * 1.71f + 47.0f, f)) * 0.5f - 0.5f;
-        const float gb = (lerp(KhHashF(ip + 73.0f, f), KhHashF(ip + float2(1, 1) + 73.0f, f), fp.x) + KhHashF(gp * 2.71f + 89.0f, f)) * 0.5f - 0.5f;
-        gc = lerp(gc, float3(gr, g, gb), chroma);
-    }
-    return gc;
-}
-
-float3 KhFusePoint(int id, float3 c, float2 uv, float2 pos, float t,
-                   float4 p0, float4 p1, float4 col)
-{
-    if (id == 1) return (1.0f - saturate(c)) * col.rgb;
-    if (id == 2)
-    {
-        float3 g = c * col.rgb * p0.z;
-        float l = Luma(g);
-        g = lerp(l.xxx, g, p0.x);
-        g = (g - 0.5f) * p0.y + 0.5f;
-        return pow(max(g, 0.0f), max(p0.w, 1.0e-4f));   // Effect 2's twin: see its gamma floor.
-    }
-    if (id == 3)
-    {
-        float d = distance(uv, float2(0.5f, 0.5f)) * 1.4142f;
-        float v = smoothstep(p0.x, p0.x + max(p0.y, 1e-3f), d);
-        return lerp(c, col.rgb, v);
-    }
-    if (id == 5)
-    {
-        const float3 gc = KhGrainGc(pos, t, p0, p1.x);   // Effect 5's twin: one body.
-        float luma = saturate(Luma(c));
-        float resp = lerp(1.0f, 4.0f * luma * (1.0f - luma) * 0.9f + 0.1f, p0.w);
-        return c + gc * p0.x * resp;
-    }
-    return c;
-}
-
-// Fused-stage composite: the packing tail's blend algebra over the running
-// value, plus - write-window lanes only - the coverage destination lerp in its
-// pre-composite position.
-float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float t)
-{
-    int n = (int)fuseMeta.x;
-    [loop] for (int s = 0; s < n; ++s)
-    {
-        float4 fm = fuseStage[s * 4];
-        float4 fcol = fuseStage[s * 4 + 3];
-        float3 c = KhFusePoint((int)fm.x, v, uv, pos, t,
-                               fuseStage[s * 4 + 1], fuseStage[s * 4 + 2], fcol);
-        if (uiLane) c = lerp(v, c, cov);
-        float a = fcol.w;
-        int bm = (int)fm.y;
-        float3 mixed = lerp(v, c, a);
-        if (bm == 1)      v = v + c * a;
-        else if (bm == 2) v = v * lerp(float3(1.0f, 1.0f, 1.0f), c, a);
-        else if (bm == 3) v = v + c * a - v * c * a;
-        else if (bm == 4) v = max(v, mixed);
-        else if (bm == 5) v = min(v, mixed);
-        else              v = mixed;
-    }
-    return v;
-}
 // Sun flare's source (effect 16, side id 29): the direction projects as a point at infinity (w = 0). False = the
 // source is behind the camera or well off screen; spos its uv, sp its pixel.
 bool KhSunFlareSpot(out float2 spos, out int2 sp)
@@ -556,12 +259,7 @@ float KhSunFlareVis(int2 sp)
 
 float4 PSEffect(VSOut i) : SV_Target
 {
-    KhObjLoad(i.iobj0, i.iobj1);   // KH_OBJBUF: effect meshes draw per object (the CB lanes).
-    // Fullscreen passes are inert by construction (w = 1 -> ndc far below 1),
-    // and zeroed/degenerate depthParams stand the test down via the m32 gate.
-    if (depthParams.y < -1.0e-3f &&
-        depthParams.x + depthParams.y / max(i.pos.w, 1.0e-4f) > 1.0f) discard;
-    if (khObjCut > 0.0f && i.pos.w > khObjCut) discard;
+    KhFxBegin(i);   // KH_FX_USER: the lanes, the depth gate, the view-distance cut and the arbitration (cb.hlsl).
     int2  px = int2(i.pos.xy);
     float2 uv = i.pos.xy / float2(fxMeta.z, fxMeta.w);
     int   effect = (int)fxMeta.x;
@@ -589,26 +287,6 @@ float4 PSEffect(VSOut i) : SV_Target
         if (khpMin >= 0.75f) {
             float4 khpRaw = sceneColor.Load(int3(px, 0));
             return float4(khpRaw.rgb, khpRaw.a);
-        }
-    }
-
-    // Far-frame analytic arbitration (flush/effect edition).
-    if (localParams1.z >= 0.5f) {
-        int2 khaPx = clamp(int2(i.pos.xy), int2(0, 0),
-                           int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
-        float khaRaw = khArbSnap.Load(int3(khaPx, 0));
-
-        if (khaRaw > 0.000001f && khaRaw < 0.999999f) {
-            float khaNdc = (khaRaw - localParams0.z) / max(localParams0.w - localParams0.z, 1e-6f);
-            float khaDen = khaNdc - localParams0.x;
-            float khaScene = (khaDen > -1e-7f) ? 1.0e9f : localParams0.y / khaDen;
-            if (khaScene <= 0.0f) khaScene = 1.0e9f;
-            if (i.pos.w > khaScene * (1.0f + localParams1.w) + localParams1.z) discard;
-        }
-
-        if (thmParams.w >= 0.5f) {
-            float khaHe = KhThmHeight(i.wpos.xz);
-            if (khaHe > -1.0e5f && (i.wpos.y - khaHe) < -thmMeta.z) discard;
         }
     }
 

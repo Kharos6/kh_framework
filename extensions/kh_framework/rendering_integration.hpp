@@ -104,8 +104,8 @@ namespace RenderIntegration {
 // attachRotation | mesh | material | mode | sceneRead | effect | params |
 // lit | twoSided | lodLock | inFront | casterOnly | castShadow |
 // receiveShadow | occluder | clothSimulation | physicsCollider |
-// chainSimulation | simulationLod | color | visible | blend | band |
-// duration.
+// chainSimulation | simulationLod | textures | color | visible | blend |
+// band | duration.
 //
 // castShadow and receiveShadow (both true by default) switch the mesh's
 // shadows. castShadow false casts none - onto the world, under dynamic
@@ -117,11 +117,9 @@ namespace RenderIntegration {
 // false) neither casts nor receives whatever these say. A shadow view
 // distance of 5 m or less in the video options turns every mesh's shadows
 // off, as if both were false on all of them, and idles the machinery only
-// shadows use; raising it turns them back on. The setting is read when a
-// mission first has a mesh or post-processing pass, about four times a
-// second while the video options are open, once more as they close, and
-// once again after any stretch of more than half a second in which no mesh
-// or pass existed or no 3D frame was drawn.
+// shadows use; raising it turns them back on. The setting is read about
+// four times a second while any mesh or post-processing pass exists and 3D
+// frames are drawn, so a change takes effect within about a quarter second.
 //
 // inFront true draws the mesh in the game's first-person view-model layer -
 // the depth slice the weapon and hands occupy - so it stands in front of the
@@ -419,8 +417,17 @@ namespace RenderIntegration {
 // ---- BOOL = updatePostFX ARRAY ---------------------------------------------
 // [handle, property, value] or [[handle, property, value], ...]. Update a
 // fullscreen / local post-processing pass: position | effect | params | ui |
-// uiSpill | radius | falloff | localSphere | shape | inverse | color |
-// visible | blend | band | duration.
+// uiSpill | radius | falloff | localSphere | shape | inverse | textures |
+// color | visible | blend | band | duration.
+//
+// textures (here and in updateRender3D, for an effect mesh) gives a .hlsl
+// effect textures of its own: [[path, slot, colour?], ...] with slot
+// "user0" .. "user5" and colour "srgb" or "linear" (the default) - png,
+// jpg, jpeg, tga, bmp or dds, found as the .hlsl is (Documents\Arma
+// 3\kh_framework\rendering, then every mod's 'rendering' folder). The array
+// is the whole set: a slot it does not name is cleared, and [] clears them
+// all. Only the effect's own code reads them (KhUserTex, cb.hlsl's USER
+// SHADER CONTRACT); a builtin effect ignores them.
 //
 // Every true/false value also takes 1/0.
 //
@@ -7280,6 +7287,26 @@ inline const std::string* kh_intern_str(const std::string& khis_s) {
     return khis_p;
 }
 
+// KH_FX_TEX: a user effect's own textures (the script's "textures", user0 .. user5) as one immutable, interned
+// set - its paths (interned, nullptr = none) and bit i = user<i> is colour (sRGB) - so an object carries one
+// pointer (RenderObject::fx_tex, nullptr = no textures) rather than the set. Interned for the process as the
+// paths are (one per distinct set; never released), on the game thread (the SQF parser); readers dereference
+// an immutable record.
+struct KhFxTexSet {
+    const std::string* path[6] = {};
+    uint8_t srgb = 0;
+};
+static std::unordered_map<std::string, std::unique_ptr<KhFxTexSet>> g_fx_texset_pool;   // Key: the set's bytes.
+static std::mutex g_fx_texset_mu;
+inline const KhFxTexSet* kh_fx_tex_intern(const KhFxTexSet& khti_s) {
+    std::string khti_k(reinterpret_cast<const char*>(khti_s.path), sizeof(khti_s.path));
+    khti_k.push_back(static_cast<char>(khti_s.srgb));
+    std::lock_guard<std::mutex> khti_l(g_fx_texset_mu);
+    auto& khti_e = g_fx_texset_pool[khti_k];
+    if (!khti_e) khti_e.reset(new KhFxTexSet(khti_s));
+    return khti_e.get();
+}
+
 inline bool kh_ends_with_ci(const std::string& s, const char* suffix) {
     const size_t sl = strlen(suffix);
     if (s.size() < sl) return false;
@@ -7314,7 +7341,7 @@ static constexpr UINT KH_DLS_MAP_PX = 1024;
 // only other caller.
 inline void kh_sun_ladder_forget();
 
-// KH_GLOW_PYR - one glow pass's pyramid (effect.hlsl: KhGlowTap reads it, PSGlowSeed / PSGlowDown make it;
+// KH_GLOW_PYR - one glow pass's pyramid (cb.hlsl's KhGlowTap reads it, effect.hlsl's PSGlowSeed / PSGlowDown make it;
 // kh_glow_build). Level 0 is half the frame, padded up to a multiple of 2^(KH_GLOW_LEVELS - 1) so every level halves
 // exactly and one uv addresses them all; R16G16B16A16_FLOAT, for the scene's HDR bright passes. Resources holds one
 // per route that draws glows (glow_pyr): [0] the scene flush - its effect meshes and then its chain, one after the
@@ -7547,9 +7574,11 @@ struct Resources {
     ID3D11BlendState*        blend_ui_replace = nullptr;   // Blend off, RGB-only write: builtin
                                                            // UI-phase.
     // Custom user FX only: hardware-lerps the chain-composited output by
-    // coverage (their shaders cannot be assumed coverage-aware); no glow spill
-    // for custom.
+    // coverage (their shaders cannot be assumed coverage-aware).
     ID3D11BlendState*        blend_ui_masked = nullptr;
+    // Custom user FX only, a pass with uiSpill (the builtin spill lane
+    // composites in-shader): the output plus the frame's uncovered share,
+    // src + dst x (1 - dst.a).
     ID3D11BlendState*        blend_ui_spill = nullptr;
     ID3D11BlendState*        blend_alpha_zero = nullptr;   // Blend off, alpha-only write mask.
     ID3D11PixelShader*       ps_alpha_zero = nullptr;
@@ -8273,6 +8302,9 @@ struct RenderObject {
                                               // builtin; consumed only when effect == KH_EFFECT_CUSTOM)
                                               // - or the resolved .cube path when effect ==
                                               // KH_EFFECT_LUT (same slot, same rule). kh_fx_shader_of.
+    // KH_FX_TEX: a user effect's own textures, the script's "textures" - an interned set (kh_fx_tex_intern),
+    // nullptr = none. Read only when effect == KH_EFFECT_CUSTOM.
+    const KhFxTexSet* fx_tex = nullptr;
     bool  fullscreen = false;   // True = fullscreen triangle (post-processing pass), size unused.
     // Fullscreen passes: true = render post-tonemap over the composited frame
     // (UI included).
@@ -8854,8 +8886,9 @@ inline void kh_scene_grid_insert(uint32_t khgi_slot, const RenderObject& o) {
     khgi_it->second.slots.push_back(khgi_slot);
 }
 
-// KH_SHADOW_OFF - a shadow view distance of KH_SHADOW_OFF_M or less (the video options' shadowVisibility, read
-// by stage_video_options on the game thread whoever owns g_sun_range) turns every shadow of ours off: every mesh
+// KH_SHADOW_OFF - a shadow view distance of KH_SHADOW_OFF_M or less (the video options' shadow view distance,
+// getObjectViewDistance's second element, read by stage_video_options on the game thread whoever owns
+// g_sun_range) turns every shadow of ours off: every mesh
 // casts and receives as if castShadow and receiveShadow were both false (KH_SHADOW_SWITCH) - no caster in any
 // gather or census (kh_cast_on, kh_shadow_active: no sun, far or DLS map, no world cast, no DLS world pass) and
 // no received term (the khObjNoRecv lanes: the sun's bands / atlas, the stencil and mirror, the self ladder, the
@@ -12406,9 +12439,13 @@ struct alignas(16) ConstantData {
     // fx_t0) - x - y is the object's own age, the effects' fxMeta.y; zw unused
     // (zero). Filled by kh_fill_user_obj_cb from fill_lighting_obj_cb and
     // kh_fill_fx_params_cb (every object fill of a pass that can run a user
-    // shader); zero elsewhere. Last per-object field: the per-frame block (b1)
-    // starts at view_proj.
+    // shader); zero elsewhere.
     float user_obj[4];
+    // KH_FX_TEX (HLSL twin khFxTexLay): a user effect's textures, 1 + each one's layer in its page ([0].xyzw =
+    // user0 .. user3, [1].xy = user4 / user5; 0 = absent or still loading; [1].zw unused). Written by kh_fx_tex_fill
+    // on a user effect's draw alone; zero elsewhere. Last per-object field: the per-frame block (b1) starts at
+    // view_proj.
+    float fx_tex[2][4];
     float view_proj[4][4];   // Rebased on the two mesh passes (see center_rel); absolute at every other site.
     float inv_view_proj[4][4];   // Inverse of the live encode for the depth reconstruction:
                                  // of the rotation-only view when fx_cam.w = 1 (the shader adds
@@ -19319,6 +19356,7 @@ struct KhUserShaderEntry {
     ID3D11InputLayout*    il = nullptr;
     bool failed = false;
     bool pending = false;   // A compile is queued or in flight.
+    bool pyr = false;       // KH_FX_USER: an effect whose file reads the pre-filtered pyramid (kh_user_fx_ps).
     uint64_t hash = 0;
 };
 
@@ -19555,13 +19593,10 @@ inline bool kh_user_shader_source(const std::string& path, std::string& out, std
     return true;
 }
 
-// KH_USER_VS - does this source define a vertex stage: the identifier
-// KhUserVertex, whole, followed by '(' , outside every comment. (A mention in a
-// comment is not a definition; a false yes would only cost a compile that
-// fails, reported once.)
-inline bool kh_user_src_has_vertex(const std::string& khsv_s) {
-    static const char khsv_id[] = "KhUserVertex";
-    const size_t khsv_n = khsv_s.size(), khsv_m = sizeof(khsv_id) - 1u;
+// Does this source name khsv_id as a call or a definition: the identifier, whole, followed by '(' , outside every
+// comment (a mention in a comment is neither).
+inline bool kh_user_src_calls(const std::string& khsv_s, const char* khsv_id) {
+    const size_t khsv_n = khsv_s.size(), khsv_m = strlen(khsv_id);
     auto khsv_word = [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; };
     for (size_t i = 0; i < khsv_n;) {
         if (khsv_s[i] == '/' && i + 1u < khsv_n && khsv_s[i + 1u] == '/') {
@@ -19587,6 +19622,9 @@ inline bool kh_user_src_has_vertex(const std::string& khsv_s) {
     }
     return false;
 }
+// KH_USER_VS - does this source define a vertex stage: KhUserVertex followed by '('. (A false yes would only cost a
+// compile that fails, reported once.)
+inline bool kh_user_src_has_vertex(const std::string& khsv_s) { return kh_user_src_calls(khsv_s, "KhUserVertex"); }
 // The parse's answer, per resolved path and session (a script that re-sends a
 // material every frame must not re-read the file every frame). Game thread
 // only; emptied by kh_session_globals_reset, so an edited file is read again
@@ -19602,22 +19640,37 @@ inline bool kh_user_vertex_scan(const std::string& khvs_path) {
     return khvs_has;
 }
 
-// Custom post-processing PS for a resolved user path (nullptr = absent or
-// latched failure; the caller skips the pass). Keyed per live depth MSAA count,
-// like the builtin effect shader.
-inline ID3D11PixelShader* kh_user_fx_ps(ID3D11Device* dev, const std::string& path) {
+// Custom post-processing PS for a resolved user path (nullptr = pending, absent or
+// latched failure; the caller skips the pass). Keyed per depth MSAA count, like
+// the builtin effect shader: khuf_samples is the count of the depth the pass
+// reads - 0 the live scene's, 1 a single-sample copy (the PIP's).
+// KH_FX_USER: compiled as cb.hlsl + the file with MSAA_DEPTH and KH_FX_UNIT = 1
+// (cb.hlsl's KH_FX_UNIT section: the builtin effects' own declarations and
+// helpers). khuf_pyr (optional): the pass reads the pre-filtered pyramid - its
+// file calls KhGlowTap or KhGlowTapA - so the route builds one for it (false
+// while nothing is ready).
+inline ID3D11PixelShader* kh_user_fx_ps(ID3D11Device* dev, const std::string& path, bool* khuf_pyr = nullptr,
+                                        UINT khuf_samples = 0u) {
+    if (khuf_pyr) *khuf_pyr = false;
     if (!dev || path.empty()) return nullptr;
+    const UINT khuf_n = khuf_samples ? khuf_samples : g_res.depth_sample_count;
     // The cold miss path std:moves the buffer into the map; the next call's
     // assign re-grows once.
     static std::string khus_key;
     khus_key.assign("fx|");
-    khus_key += std::to_string(g_res.depth_sample_count);
+    khus_key += std::to_string(khuf_n);
     khus_key += '|';
     khus_key += path;
     std::transform(khus_key.begin(), khus_key.end(), khus_key.begin(), ::tolower);
     auto khus_it = g_user_ps_cache.find(khus_key);
-    if (khus_it != g_user_ps_cache.end())
-        return kh_user_async_take(dev, khus_key, path, "effect");
+    if (khus_it != g_user_ps_cache.end()) {
+        ID3D11PixelShader* khuf_ps = kh_user_async_take(dev, khus_key, path, "effect");
+        if (khuf_pyr && khuf_ps) {
+            const auto khuf_it = g_user_ps_cache.find(khus_key);
+            *khuf_pyr = khuf_it != g_user_ps_cache.end() && khuf_it->second.pyr;
+        }
+        return khuf_ps;
+    }
     // The compile is queued and this returns nullptr; the caller skips the pass
     // this frame and picks the shader up when it lands.
     std::string khua_src, khua_err;
@@ -19628,13 +19681,50 @@ inline ID3D11PixelShader* kh_user_fx_ps(ID3D11Device* dev, const std::string& pa
         g_user_ps_cache.emplace(std::move(khus_key), khua_e);
         return nullptr;
     }
+    const bool khuf_wants = kh_user_src_calls(khua_src, "KhGlowTap") ||   // KH_FX_USER.
+                            kh_user_src_calls(khua_src, "KhGlowTapA");
     std::vector<std::string> khua_dn, khua_dv;
     khua_dn.push_back("MSAA_DEPTH");
-    khua_dv.push_back(g_res.depth_sample_count > 1 ? "1" : "0");
-    kh_user_async_queue(khus_key, kh_hlsl_src(KH_HLSL_CB) + khua_src,
-                        "PSEffect", khua_dn, khua_dv);
+    khua_dv.push_back(khuf_n > 1 ? "1" : "0");
+    khua_dn.push_back("KH_FX_UNIT");
+    khua_dv.push_back("1");
+    if (kh_user_async_queue(khus_key, kh_hlsl_src(KH_HLSL_CB) + khua_src,
+                            "PSEffect", khua_dn, khua_dv)) {
+        const auto khuf_it = g_user_ps_cache.find(khus_key);
+        if (khuf_it != g_user_ps_cache.end()) khuf_it->second.pyr = khuf_wants;
+    }
     return nullptr;
 
+}
+
+// KH_FX_TEX - a user effect's own textures: each resolved through the texture cache as a material's maps are
+// (kh_tex_resolve - the loader worker, the pages, the idle GC, which this per-draw resolve keeps from ageing it
+// while it is drawn), its layer into the draw's lanes (fx_tex: 1 + layer, 0 = absent or still loading) and its
+// page into khft_srv[i] for t43 + i (cb.hlsl's khUserMap0..5 in the KH_FX_UNIT section). Before the upload.
+inline void kh_fx_tex_fill(ID3D11Device* dev, ID3D11DeviceContext* ctx, ConstantData& cbd, const RenderObject& o,
+                           ID3D11ShaderResourceView* khft_srv[KH_MAT_USER_MAPS]) {
+    memset(cbd.fx_tex, 0, sizeof(cbd.fx_tex));
+    for (int khft_i = 0; khft_i < KH_MAT_USER_MAPS; ++khft_i) {
+        khft_srv[khft_i] = nullptr;
+        if (!o.fx_tex || !o.fx_tex->path[khft_i]) continue;
+        const KhTexRef khft_r = kh_tex_resolve(dev, ctx, *o.fx_tex->path[khft_i],
+                                               ((o.fx_tex->srgb >> khft_i) & 1u) != 0u);
+        if (!khft_r.srv || khft_r.layer < 0) continue;
+        khft_srv[khft_i] = khft_r.srv;
+        cbd.fx_tex[khft_i >> 2][khft_i & 3] = 1.0f + static_cast<float>(khft_r.layer);
+    }
+}
+// Bound around the draw: the pages at t43 - t48 and the material sampler at s0 (anisotropic, wrap; null = the
+// default state until the core set made it), both inside StateBackup's saved range. The pages come off after the
+// draw (kh_fx_tex_unbind) - on the effect-mesh route at the next builtin object's shader switch, or at the flush's
+// state restore when none follows.
+inline void kh_fx_tex_bind(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* const khft_srv[KH_MAT_USER_MAPS]) {
+    ctx->PSSetShaderResources(43, KH_MAT_USER_MAPS, khft_srv);
+    ctx->PSSetSamplers(0, 1, &g_res.mat_sampler);
+}
+inline void kh_fx_tex_unbind(ID3D11DeviceContext* ctx) {
+    ID3D11ShaderResourceView* const khft_null[KH_MAT_USER_MAPS] = {};
+    ctx->PSSetShaderResources(43, KH_MAT_USER_MAPS, khft_null);
 }
 
 // Custom material PS for a resolved user path and pipeline variant (khum_ctx: 0
@@ -23176,8 +23266,10 @@ inline ID3D11ShaderResourceView* kh_tex_load_cached(ID3D11Device* dev, const std
 
 // KH_TEX_ASYNC: the texture loader worker is disk + CPU only (never touches the
 // device), so it is engine-reset-safe without a stop. The device half - create
-// and page placement - runs in kh_tex_async_pump at the pass heads under the
-// park. Lazy start, joined at mission end.
+// and page placement - runs in kh_tex_async_pump at the pass heads (the
+// injection, the scene flush, the UI flush), each inside the engine's own
+// one-thread-at-a-time use of the immediate context or under a park. Lazy
+// start, joined at mission end.
 struct KhTexLoadJob { std::string key; std::string path; bool srgb; bool force; };
 struct KhTexLoadDone {
     std::string key;
@@ -23294,8 +23386,8 @@ inline bool kh_texldr_queue(const std::string& khtl_key, const std::string& khtl
 
 // The device half: create + page-place up to four finished loads at the pass
 // heads, before kh_mat_ensure_all (a placement bumps the page generation, so
-// every base is re-fixed before any lane is written). Under the park. A key the
-// cache no longer holds drops its result.
+// every base is re-fixed before any lane is written) - serialized as
+// KH_TEX_ASYNC says. A key the cache no longer holds drops its result.
 static constexpr size_t KH_TEXLDR_PUMP_MAX = 4;
 inline void kh_tex_async_pump(ID3D11DeviceContext* ctx, ID3D11Device* dev) {
     if (!ctx || !dev) return;
@@ -25187,12 +25279,13 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         { "MSAA_DEPTH", "0" }, { "SAMPLE_COUNT", khsp_sc1.c_str() },
         { "KH_ARB_DEPTH", "1" }, { "KH_RECEIVE_TEX", "1" },
         { "KH_TEXTURED", "1" }, { nullptr, nullptr } };
-    // Must match ensure_effect_shader byte for byte: MSAA_DEPTH alone (no
-    // SAMPLE_COUNT, no KH_RECEIVE_TEX - the effect unit never receives).
+    // Must match ensure_effect_shader byte for byte: MSAA_DEPTH, then KH_FX_UNIT
+    // (cb.hlsl's effect section; no SAMPLE_COUNT, no KH_RECEIVE_TEX - the effect
+    // unit never receives).
     const std::string khfx_src =
         kh_hlsl_src(KH_HLSL_CB) + kh_hlsl_src(KH_HLSL_EFFECT).c_str() + kh_hlsl_src(KH_HLSL_EFFECT2).c_str() + kh_hlsl_src(KH_HLSL_EFFECT3).c_str();
     const D3D_SHADER_MACRO khfx_d0[] = {
-        { "MSAA_DEPTH", "0" }, { nullptr, nullptr } };
+        { "MSAA_DEPTH", "0" }, { "KH_FX_UNIT", "1" }, { nullptr, nullptr } };
     // The rest of the core set rides this batch so the first post FX, depth
     // snapshot, sun prefilter and mirror prepass are memo hits. Twins:
     // ensure_effect_shader (both MSAA_DEPTH values: the main depth's and the
@@ -25200,7 +25293,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
     // KH_PREWARM_ALL below), ensure_sun_pf (empty table), kh_vmir_ensure_gpu
     // (null) - the hash reads those two alike.
     const D3D_SHADER_MACRO khfx_d1[] = {
-        { "MSAA_DEPTH", "1" }, { nullptr, nullptr } };
+        { "MSAA_DEPTH", "1" }, { "KH_FX_UNIT", "1" }, { nullptr, nullptr } };
     static const D3D_SHADER_MACRO khpw_none[] = { { nullptr, nullptr } };
     // VSWhite/PSWhite stay out of this list: they are the placeholder drawn
     // WHILE it compiles, so kh_white_ensure builds them at the arming, on the
@@ -26252,6 +26345,7 @@ inline std::string ensure_effect_shader(ID3D11Device* dev) {
 
     const D3D_SHADER_MACRO defines[] = {
         { "MSAA_DEPTH", g_res.depth_sample_count > 1 ? "1" : "0" },
+        { "KH_FX_UNIT", "1" },   // cb.hlsl's effect section (the prewarm tables' twin).
         { nullptr, nullptr }
     };
 
@@ -26785,7 +26879,8 @@ struct StateBackup {
     // occupancy, t36 DLS array, t37 dlsw mask (the DLS world pass) or the
     // near-plane marker (the effect chain, KH_NEARZ_MARK), t38 material table, t23 the
     // volume copy's depth, t40 the light ring, t42 SPECCOLOR, t43-t48 the
-    // KH_USER_TEX pages, t33 the KH_VOL_FOOT mask (t39 free at the pixel
+    // KH_USER_TEX pages (a user effect's too: KH_FX_TEX), t33 the KH_VOL_FOOT
+    // mask (t39 free at the pixel
     // stage - it is the object records' VS slot, vs_srv39 below; t34 and t41,
     // with t49-t51 past this range, are read only by the replay merges -
     // PSReplayMerge / PSReplayMergeMir - which bind and null them under their
@@ -26990,7 +27085,7 @@ struct KhOmSave {
     }
 };
 
-// KH_GLOW_PYR - the glows and blurs read a pre-filtered picture (effect.hlsl's KH_GLOW_PYR note): the effects whose
+// KH_GLOW_PYR - the glows and blurs read a pre-filtered picture (cb.hlsl's KH_GLOW_PYR note): the effects whose
 // taps read it, and those among them that take it through their threshold (fxParams0.x, the bright pass).
 // Anamorphic is not among them: its streak is a pixel thin, which an isotropic level cannot give without
 // thickening it; it reads a pyramid of its own, halved along the streak alone (KH_ANA_PYR, kh_ana_build).
@@ -27764,7 +27859,7 @@ inline int kh_effect_from_gv(const game_value& gv, std::string& out_hlsl, std::s
 // space here. False if a provided entry is a non-number (nil keeps the
 // default).
 inline bool set_effect_params(RenderObject& obj, const auto_array<game_value>* params) {
-    // Every ...Px lane below is in pixels of a 1080-row picture (KH_FX_PX_REF, effect.hlsl's KhFxPx).
+    // Every ...Px lane below is in pixels of a 1080-row picture (KH_FX_PX_REF, cb.hlsl's KhFxPx).
     static const float defaults[KH_MAX_EFFECT + 1][12] = {
         {},
         {},
@@ -35268,7 +35363,7 @@ inline float kh_ao_dist() {
 // engine's hands can hold the same depths as our near-z gap, so the depth alone cannot say a gap pixel is ours. Each
 // drawer's kh_ssao_post, while its mark still stands, writes (raw, true distance) at its near-z gap pixels into
 // this marker (PSSsaoNearMark, KhSaMetersAt's test and decode); the chain arms it (shadowMeta2.x, t37) and
-// effect.hlsl's LoadDepthPS takes the true distance wherever the marker's raw is still the live raw - a pixel
+// cb.hlsl's LoadDepthPS takes the true distance wherever the marker's raw is still the live raw - a pixel
 // drawn over since (the hands) keeps its own. Valid for the cycle that wrote it (g_nzm_cycle).
 static uint64_t g_nzm_cycle = ~0ull;   // The cycle the marker was cleared and written in (~0 = none).
 inline bool kh_nzm_valid() { return g_nzm_cycle == g_topo_cycles && g_res.nzm_srv != nullptr; }
@@ -45007,7 +45102,7 @@ inline std::string kh_pip_fx_shader(ID3D11Device* dev) {
     if (g_res.ps_effect_pip) return "";
     if (g_res.ps_effect_pip_tried) return "PIP effect shader unavailable";
     g_res.ps_effect_pip_tried = true;
-    const D3D_SHADER_MACRO khpx_def[] = { { "MSAA_DEPTH", "0" }, { nullptr, nullptr } };
+    const D3D_SHADER_MACRO khpx_def[] = { { "MSAA_DEPTH", "0" }, { "KH_FX_UNIT", "1" }, { nullptr, nullptr } };
     const std::string khpx_src = kh_hlsl_src(KH_HLSL_CB) + kh_hlsl_src(KH_HLSL_EFFECT).c_str() + kh_hlsl_src(KH_HLSL_EFFECT2).c_str() + kh_hlsl_src(KH_HLSL_EFFECT3).c_str();
     ID3DBlob* khpx_blob = nullptr;
     std::string khpx_err = compile_shader(khpx_src.c_str(), "PSEffect", "ps_5_0", khpx_def, &khpx_blob);
@@ -45103,12 +45198,16 @@ inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
     khpf_list.clear();
     const float khpf_now = effect_time_seconds();
     const double khpf_now_d = effect_time_seconds_d();
+    ID3D11Device* khpf_dev = RVExtBridge::get_d3d_device();   // KH_FX_USER: a user pass's PIP build, asked here.
     kh_scene_sync();
     for (uint32_t khpf_i = 0; khpf_i < g_scene.objs.size(); ++khpf_i) {
         if (!g_scene.alive[khpf_i]) continue;
         const RenderObject& o = g_scene.objs[khpf_i];
         if (!o.visible || !o.fullscreen || !o.localized || o.ui_only || o.effect <= 0) continue;
-        if (o.effect == static_cast<int>(EffectId::Ssgi) || o.effect == KH_EFFECT_CUSTOM) continue;
+        if (o.effect == static_cast<int>(EffectId::Ssgi)) continue;
+        // KH_FX_USER: a user pass joins once its single-sample build is ready (asking queues it).
+        if (o.effect == KH_EFFECT_CUSTOM &&
+            (!khpf_dev || !kh_user_fx_ps(khpf_dev, kh_fx_shader_of(o), nullptr, 1u))) continue;
         bool khpf_exp = false;
         const float khpf_env = lifetime_envelope(o, khpf_now, khpf_exp);
         if (khpf_exp) continue;
@@ -45283,6 +45382,13 @@ inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
                 khpf_lut = kh_user_lut_cached(kh_fx_shader_of(o));
                 if (!khpf_lut) break;   // Resolved at the gather; a release since ends the chain.
             }
+            // KH_FX_USER: a user pass's single-sample build (the PIP depth is a copy), ready at the gather.
+            ID3D11PixelShader* khpf_ufx = nullptr;
+            bool khpf_upyr = false;
+            if (o.effect == KH_EFFECT_CUSTOM) {
+                khpf_ufx = kh_user_fx_ps(dev, kh_fx_shader_of(o), &khpf_upyr, 1u);
+                if (!khpf_ufx) break;   // As a LUT released since.
+            }
             ConstantData cbd = khpf_cbf;
             cbd.center_size[3] = 1.0f;   // A chain pass: the packing tail composites and writes opaque.
             cbd.size_axes[3] = static_cast<float>(o.blend_mode);   // The tail's blend mode (upload_cb's twin);
@@ -45301,7 +45407,7 @@ inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
             fill_lighting_obj_cb(ctx, cbd, o);
             // KH_GLOW_PYR: the scene chain's rule, on this pass's own source.
             bool khpf_gl = false;
-            if (kh_glow_effect(o.effect)) {
+            if (kh_glow_effect(o.effect) || khpf_upyr) {   // KH_FX_USER: or a user pass's.
                 khpf_gl = kh_glow_build(dev, ctx, g_res.glow_pyr[2], khpf_src, cbd.fx_meta[2], cbd.fx_meta[3],
                                         cbd.center_size[3], o.effect, cbd.fx0[0], g_res.composite_cb);
                 kh_glow_lanes(cbd, khpf_gl ? &g_res.glow_pyr[2] : nullptr);
@@ -45315,6 +45421,8 @@ inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
                     khpf_an = &g_res.ana_pyr[2][khpf_ax];
                 kh_ana_lanes(cbd, khpf_an);
             }
+            ID3D11ShaderResourceView* khpf_tex[KH_MAT_USER_MAPS] = {};   // KH_FX_TEX.
+            if (khpf_ufx) kh_fx_tex_fill(dev, ctx, cbd, o, khpf_tex);
             if (!kh_upload_obj_cb(ctx, g_res.composite_cb, cbd)) break;
             if (khpf_lut) { ctx->PSSetShaderResources(19, 1, &khpf_lut); khpf_lut_bound = true; }
             // Unbind the source before its sibling becomes the target (the
@@ -45329,7 +45437,11 @@ inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
             if (khpf_gl) khpf_gb.bind(ctx, g_res.glow_pyr[2]);
             KhAnaBind khpf_ab;   // KH_ANA_PYR.
             if (khpf_an) khpf_ab.bind(ctx, *khpf_an);
+            ctx->PSSetShader(khpf_ufx ? khpf_ufx : g_res.ps_effect_pip, nullptr, 0);   // KH_FX_USER: per pass.
+            if (khpf_ufx) ctx->PSSetSamplers(1, 1, &g_res.samp_pf);   // KH_FX_USER: s1 for every user effect draw.
+            if (khpf_ufx) kh_fx_tex_bind(ctx, khpf_tex);   // KH_FX_TEX.
             ctx->Draw(3, 0);
+            if (khpf_ufx) kh_fx_tex_unbind(ctx);
             khpf_ab.unbind();
             khpf_gb.unbind();
             ++khpf_drawn;
@@ -52264,6 +52376,8 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
         ConstantData              khfp_cbd;
         int                       khfp_effect = 0;
         ID3D11PixelShader*        khfp_ps = nullptr;
+        bool                      khfp_upyr = false;   // KH_FX_USER: the user pass reads the pyramid.
+        const RenderObject*       khfp_obj = nullptr;   // KH_FX_TEX: the pass's object (its textures).
         ID3D11ShaderResourceView* khfp_lut = nullptr;
 
         auto khfp_flush = [&](bool khfp_final) {
@@ -52271,9 +52385,9 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
             khfp_live = false;
             bool khsg_pair = false;
             // The resolve reads whichever half-res buffer holds the final
-            // smoothed field (two a-trous iterations ping-pong
-            // [2]->[3]->[2]; a failed iteration leaves the pointer at the
-            // last good stage).
+            // smoothed field (three a-trous iterations, steps 1 / 2 / 4,
+            // ping-pong [2]->[3]->[2]->[3]; a failed iteration leaves the
+            // pointer at the last good stage).
             ID3D11ShaderResourceView* khsg_fin = nullptr;
             ID3D11SamplerState* khsg_s2old = nullptr;   // KH_FX_SAMP_S2: the saved s2.
             if (khfp_effect == static_cast<int>(EffectId::Ssgi) && !khfp_ps) {
@@ -52434,7 +52548,7 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
             }
             // KH_GLOW_PYR: a glow pass's pyramid, of this pass's own source, built before its constants go up.
             bool khgl_on = false;
-            if (!khfp_ps && kh_glow_effect(khfp_effect)) {
+            if ((!khfp_ps && kh_glow_effect(khfp_effect)) || (khfp_ps && khfp_upyr)) {   // KH_FX_USER: or a user's.
                 khgl_on = kh_glow_build(dev, ctx, g_res.glow_pyr[0], src_srv, khfp_cbd.fx_meta[2], khfp_cbd.fx_meta[3],
                                         khfp_cbd.center_size[3], khfp_effect, khfp_cbd.fx0[0], g_res.constant_buffer);
                 kh_glow_lanes(khfp_cbd, khgl_on ? &g_res.glow_pyr[0] : nullptr);
@@ -52448,6 +52562,8 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                     khan_pyr = &g_res.ana_pyr[0][khan_ax];
                 kh_ana_lanes(khfp_cbd, khan_pyr);
             }
+            ID3D11ShaderResourceView* khfp_tex[KH_MAT_USER_MAPS] = {};   // KH_FX_TEX.
+            if (khfp_ps && khfp_obj) kh_fx_tex_fill(dev, ctx, khfp_cbd, *khfp_obj, khfp_tex);
             if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
                 if (khsg_pair) ctx->PSSetSamplers(2, 1, &khsg_s2old);   // KH_FX_SSGI_BAIL: s2 back on
                                                                         // The pair path.
@@ -52457,6 +52573,7 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
             }
             if (khfp_lut) ctx->PSSetShaderResources(19, 1, &khfp_lut);
             ctx->PSSetShader(khfp_ps ? khfp_ps : g_res.ps_effect, nullptr, 0);
+            if (khfp_ps) ctx->PSSetSamplers(1, 1, &g_res.samp_pf);   // KH_FX_USER: s1 for every user effect draw.
             // Unbind the source slot before binding it as RTV next round.
             ID3D11ShaderResourceView* khfp_null = nullptr;
             ctx->PSSetShaderResources(0, 1, &khfp_null);
@@ -52475,7 +52592,9 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
             KhAnaBind khan_b;   // KH_ANA_PYR: its atlases at t3 / t6, for this draw.
             if (khan_pyr) khan_b.bind(ctx, *khan_pyr);
             if (khfx_side >= 0) ctx->PSSetShaderResources(4, 1, &g_res.fxs_srv[khfx_side]);   // KH_FX_SIDE.
+            if (khfp_ps) kh_fx_tex_bind(ctx, khfp_tex);   // KH_FX_TEX.
             ctx->Draw(3, 0);
+            if (khfp_ps) kh_fx_tex_unbind(ctx);
             khan_b.unbind();
             khgl_b.unbind();
             if (khfx_side >= 0) {   // Unbound at once: the next side draw renders into it.
@@ -52506,9 +52625,10 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
             // Custom effect: the pass draws with the user PS; absent or
             // failed compiles skip the pass (reported once).
             ID3D11PixelShader* khc_ufx = nullptr;
+            bool khc_upyr = false;   // KH_FX_USER.
 
             if (f.second.effect == KH_EFFECT_CUSTOM) {
-                khc_ufx = kh_user_fx_ps(dev, kh_fx_shader_of(f.second));
+                khc_ufx = kh_user_fx_ps(dev, kh_fx_shader_of(f.second), &khc_upyr);
                 if (!khc_ufx) continue;
             }
 
@@ -52544,6 +52664,8 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
             khfp_cbd.shadow_meta2[0] = kh_nzm_valid() ? 1.0f : 0.0f;   // KH_NEARZ_MARK: LoadDepthPS reads t37.
             khfp_effect = f.second.effect;
             khfp_ps = khc_ufx;
+            khfp_upyr = khc_upyr;
+            khfp_obj = &f.second;
             khfp_lut = khc_lut;
             khfp_live = true;
         }
@@ -53661,6 +53783,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
     bool khf_ana_ok[2] = { false, false };
     float khf_ana_t[2] = { 0.0f, 0.0f };
     const KhAnaPyr* khf_ana_draw = nullptr;
+    ID3D11ShaderResourceView* khf_utex[KH_MAT_USER_MAPS] = {};   // KH_FX_TEX: a user mesh's pages (upload_cb).
     // khf_defer non-null = build only (deferred chain draw) - the caller
     // uploads the returned slice at flush time; the frame slice already went up
     // at the pass build.
@@ -53792,6 +53915,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
             khf_fx_arb_this = true;
         }
         fill_lighting_obj_cb(ctx, cbd, o);
+        if (!chain_pass && o.effect == KH_EFFECT_CUSTOM) kh_fx_tex_fill(dev, ctx, cbd, o, khf_utex);   // KH_FX_TEX.
         // A failed frame upload stands every draw down: fail dark, never
         // stale-frame draws.
         if (khf_defer) return khf_frame_ok;
@@ -53997,9 +54121,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
         // or missing compile skips the draw (reported once) rather than feeding
         // the sentinel id into the builtin switch.
         ID3D11PixelShader* khf_ufx = nullptr;
+        bool khf_upyr = false;   // KH_FX_USER.
 
         if (o.effect == KH_EFFECT_CUSTOM) {
-            khf_ufx = kh_user_fx_ps(dev, kh_fx_shader_of(o));
+            khf_ufx = kh_user_fx_ps(dev, kh_fx_shader_of(o), &khf_upyr);
             if (!khf_ufx) continue;
         }
 
@@ -54011,7 +54136,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
 
         // KH_GLOW_PYR: before upload_cb, whose slice the build's own upload would replace.
         khf_glow_draw = nullptr;
-        if (!khf_ufx && kh_glow_effect(o.effect)) {
+        if ((!khf_ufx && kh_glow_effect(o.effect)) || (khf_ufx && khf_upyr)) {   // KH_FX_USER: or a user mesh's.
             const bool khfg_b = kh_glow_bright(o.effect);
             const float khfg_t = khfg_b ? o.fx[0] : 0.0f;
             if (khf_glow_gen != khf_cap_gen || khf_glow_b != khfg_b || khf_glow_t != khfg_t) {
@@ -54062,8 +54187,11 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
             // Custom PS per object: bind unconditionally and poison the
             // category so the next builtin object rebinds its own.
             ctx->PSSetShader(khf_ufx, nullptr, 0);
+            ctx->PSSetSamplers(1, 1, &g_res.samp_pf);   // KH_FX_USER: s1 for every user effect draw.
+            kh_fx_tex_bind(ctx, khf_utex);   // KH_FX_TEX: this object's (upload_cb filled them); off at the next one.
             khf_ps_cat = -1;
         } else if (khf_ps_want != khf_ps_cat) {
+            if (khf_ps_cat == -1) kh_fx_tex_unbind(ctx);   // KH_FX_TEX: a user mesh's pages off before a builtin draw.
             ctx->PSSetShader(khf_ps_want == 1 ? g_res.ps_effect
                            : khf_ps_want == 2 ? g_res.ps_composite_arb
                            : khf_ps_want == 3 ? g_res.ps_tex
@@ -54323,88 +54451,41 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
 // g_sun_range, g_shadows_off); the fog stage_world_lighting stages beside it
 // is published inside flush_locked (publish_world_lighting).
 
-// KH_VIDEO_OPT_CADENCE: this used to call getVideoOptions, which builds a map
-// of every video setting and marshals it across the boundary, to read two
-// scalars - ~1.2 ms a call, the whole of flushPrepUs. The object view distance
-// is asked of the engine directly (getObjectViewDistance), every sample, and
-// the interval caps that call at four a second.
-// KH_SHADOW_VIS: the shadow view distance is getVideoOptions' "shadowVisibility"
-// again - getShadowDistance does not follow a change made in the video options
-// at runtime (measured in game). Its cost is paid only where the setting can
-// change: once per session (the first sample, which takes the setting the
-// mission starts with), then while the video options display (5) is open and
-// on the one sample after it closes (a change applied as it closes, or inside
-// the last interval, is not missed); between reads the last reading stands.
-// KH_VIDEO_OPT_GAP: a sample is taken only when a Draw3D's flush_frame reaches
-// the staging (some mesh or pass exists, the bridge is up), so the display can
-// open and close with no sample at all - an empty draw list, or no Draw3D. The
-// first sample after more than KH_VIDEO_OPT_GAP_MS without one reads as well,
-// so a change made in such a pause is not missed. Envelope: a pause of
-// KH_VIDEO_OPT_GAP_MS or less is taken to be too short to open the options,
-// change the setting and close them; one ~1.2 ms read per longer pause, and
-// at under two frames a second every sample reads.
-// Envelope: a changed shadow visibility or object view distance reaches
-// g_sun_range / g_obj_vis up to KH_VIDEO_OPT_INTERVAL_MS late.
+// KH_VIDEO_OPT_CADENCE: both settings come from one engine call every sample -
+// getObjectViewDistance, the video options' [object view distance, shadow view
+// distance] - and the interval caps it at four a second. (getVideoOptions,
+// which builds a map of every video setting - ~1.2 ms a call - is not read;
+// getShadowDistance does not follow a change made in the video options at
+// runtime, measured in game.)
+// KH_SHADOW_VIS: the shadow view distance, read on every sample like the object
+// view distance - no display gate, no pause rule: a sample is taken only when a
+// Draw3D's flush_frame reaches the staging (some mesh or pass exists, the bridge
+// is up), and each one reads the current setting.
+// Envelope: a changed shadow or object view distance reaches g_shadows_off /
+// g_sun_range / g_obj_vis up to KH_VIDEO_OPT_INTERVAL_MS after the first sample
+// that follows the change.
 static constexpr uint64_t KH_VIDEO_OPT_INTERVAL_MS = 250;
-static constexpr uint64_t KH_VIDEO_OPT_GAP_MS = 2 * KH_VIDEO_OPT_INTERVAL_MS;   // KH_VIDEO_OPT_GAP.
 static uint64_t g_video_opt_ms = 0;   // Game thread: the last sample.
-static bool     g_shadow_vis_read = false;   // Game thread: KH_SHADOW_VIS's session read was attempted.
-static bool     g_shadow_vis_menu = false;   // Game thread: display 5 was open at the last sample.
 inline void stage_video_options() {
     try {
         const uint64_t khsr_now_ms = steady_now_ms();
         if (g_video_opt_ms != 0 && khsr_now_ms - g_video_opt_ms < KH_VIDEO_OPT_INTERVAL_MS) return;
-        // KH_VIDEO_OPT_GAP: this sample follows a pause in the sampling (taken before the stamp moves).
-        // The stamp is 0 only at a session's start, where the session read is due anyway.
-        const bool khsr_gap = khsr_now_ms - g_video_opt_ms > KH_VIDEO_OPT_GAP_MS;
         g_video_opt_ms = khsr_now_ms;
-        // KH_SHADOW_VIS: the video options' shadow view distance - once per session, then while their display is
-        // open, on the sample after it closes and on the first after a pause (KH_VIDEO_OPT_GAP) - its own try: a
-        // failure leaves the reads below. khsr_ok = a reading this sample.
-        float khsr_sh = 0.0f;
-        bool khsr_ok = false;
-        try {
-            const bool khsr_menu = !sqf::is_null(sqf::find_display(5.0f));
-            const bool khsr_closed = g_shadow_vis_menu && !khsr_menu;   // It closed since the last sample.
-            g_shadow_vis_menu = khsr_menu;
-            if (!g_shadow_vis_read || khsr_menu || khsr_closed || khsr_gap) {
-                g_shadow_vis_read = true;   // Attempted: from here on only the display, its close and a pause read.
-                // The map exactly as sqf::get_video_options returns it (an rv_hashmap), held by auto and read
-                // in place. Never convert it to a game_value: that builds a game_data_hashmap on our side, and
-                // doing so crashed the game at the first read. The pairs are walked as kh_hashmap_get walks one
-                // (sqf_integration).
-                const auto khsr_vo = sqf::get_video_options();
-                for (const auto& khsr_kv : khsr_vo) {
-                    if (khsr_kv.key.type_enum() == game_data_type::STRING &&
-                        static_cast<std::string>(khsr_kv.key) == "shadowVisibility") {
-                        if (khsr_kv.value.type_enum() == game_data_type::SCALAR) {
-                            khsr_sh = static_cast<float>(khsr_kv.value);
-                            khsr_ok = true;
-                        }
-                        break;
-                    }
-                }
-            }
-        } catch (...) {}
-        // KH_SHADOW_OFF: whoever owns the range below; a NaN leaves the switch as it stands.
-        if (khsr_ok && khsr_sh == khsr_sh) g_shadows_off.store(khsr_sh <= KH_SHADOW_OFF_M, std::memory_order_relaxed);
+        // KH_SHADOW_VIS: both view distances, one call.
+        const auto khsr_rd = sqf::get_object_view_distance();
+        const float khsr_sh = khsr_rd.shadow_distance;
+        // KH_SHADOW_OFF: whoever owns the range below; 0 or below reads as off, a NaN leaves the switch as it
+        // stands.
+        if (khsr_sh == khsr_sh) g_shadows_off.store(khsr_sh <= KH_SHADOW_OFF_M, std::memory_order_relaxed);
         // The shadow range is not written while the engine's band table owns it
         // (src == 2: the far border of the engine's cascades, published by the
-        // render thread): the two would overwrite each other.
-        if (khsr_ok && g_sun_range_src.load(std::memory_order_relaxed) != 2) {
-            // The same admission the map path used: a NaN or a non-positive
-            // reading leaves the previous value standing.
-            if (khsr_sh == khsr_sh && khsr_sh > 0.0f) {
-                g_sun_range.store(khsr_sh, std::memory_order_relaxed);
-                g_sun_range_src.store(1, std::memory_order_relaxed);
-            }
+        // render thread): the two would overwrite each other. A NaN or a
+        // non-positive reading leaves the previous value standing.
+        if (g_sun_range_src.load(std::memory_order_relaxed) != 2 && khsr_sh == khsr_sh && khsr_sh > 0.0f) {
+            g_sun_range.store(khsr_sh, std::memory_order_relaxed);
+            g_sun_range_src.store(1, std::memory_order_relaxed);
         }
-        // rv_rendering_distances carries a shadow_distance too. It is NOT read
-        // here: whether it is the same quantity as "shadowVisibility" is
-        // unproved, and substituting one for the other unproved is how a term
-        // silently changes meaning. If they are measured equal, it replaces
-        // the getVideoOptions read (no display gate, no map).
-        const float khsr_obj = sqf::get_object_view_distance().object_distance;
+        const float khsr_obj = khsr_rd.object_distance;
         if (khsr_obj == khsr_obj && khsr_obj > 0.0f) {
             g_obj_vis.store(khsr_obj, std::memory_order_relaxed);
         }
@@ -55206,6 +55287,10 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     const bool depth_ok = g_res.depth_srv != nullptr;
     StateBackup backup;
     backup.capture(ctx);
+    // KH_FX_TEX: finished background loads land here too - a scene of UI-lane passes alone never reaches the scene
+    // flush's pump (its list keeps UI-only passes out), and a user pass's textures would stay pending. A placement
+    // bumps the page generation; every material draw re-fixes its base against it (kh_mat_gpu_ensure).
+    kh_tex_async_pump(ctx, dev);
     ctx->IASetInputLayout(nullptr);
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
@@ -55402,9 +55487,10 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         if (!khum_mask_live) {  continue; }
 
         ID3D11PixelShader* khu_ufx = nullptr;
+        bool khu_upyr = false;   // KH_FX_USER.
 
         if (o.effect == KH_EFFECT_CUSTOM) {
-            khu_ufx = kh_user_fx_ps(dev, kh_fx_shader_of(o));
+            khu_ufx = kh_user_fx_ps(dev, kh_fx_shader_of(o), &khu_upyr);
             if (!khu_ufx) continue;
         }
 
@@ -55490,15 +55576,31 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
         kh_fill_local_band_cb(cbd, o);
         if (khu_ufx) {
+            // KH_FX_USER: the pyramid of the pass's own source (t0, the capture) when its file reads it - the UI
+            // route's, glow_pyr[1] - built before the pass's constants go up (kh_glow_build uploads its own).
+            bool khu_gl = false;
+            if (khu_upyr && khuf_frame_ok) {
+                khu_gl = kh_glow_build(dev, ctx, g_res.glow_pyr[1], g_res.bb_srv, cbd.fx_meta[2], cbd.fx_meta[3],
+                                       cbd.center_size[3], o.effect, 0.0f, g_res.constant_buffer);
+                kh_glow_lanes(cbd, khu_gl ? &g_res.glow_pyr[1] : nullptr);
+            }
+            ID3D11ShaderResourceView* khu_tex[KH_MAT_USER_MAPS] = {};   // KH_FX_TEX.
+            kh_fx_tex_fill(dev, ctx, cbd, o, khu_tex);
             // Object slice per pass; the frame slice went up once at the flush
             // head (the latch gates this draw too).
             if (!khuf_frame_ok ||
                 !kh_upload_obj_cb(ctx, g_res.constant_buffer, cbd)) continue;
             ctx->PSSetShader(khu_ufx, nullptr, 0);
+            ctx->PSSetSamplers(1, 1, &g_res.samp_pf);   // KH_FX_USER: s1 for every user effect draw.
             ctx->OMSetBlendState(khu_spill ? g_res.blend_ui_spill
                                            : g_res.blend_ui_masked,
                                  bf, 0xFFFFFFFF);
+            KhGlowBind khu_gb;   // KH_FX_USER: t3 / s2 for this draw.
+            if (khu_gl) khu_gb.bind(ctx, g_res.glow_pyr[1]);
+            kh_fx_tex_bind(ctx, khu_tex);   // KH_FX_TEX.
             ctx->Draw(3, 0);
+            kh_fx_tex_unbind(ctx);
+            khu_gb.unbind();
 
         } else {
             khuf_cbd = cbd;
@@ -55999,7 +56101,9 @@ inline void kh_session_scratch_reset() {
 // the NEXT mission's objects, whose sets the parse has already counted - zeroed
 // here it would switch their vertex stages off; left standing it costs a
 // later mission without one a walk of the live scene a flush); the
-// interned path strings (a name -> pointer table nothing resolves through);
+// interned path strings (a name -> pointer table nothing resolves through) and
+// effect texture sets (g_fx_texset_pool, KH_FX_TEX: immutable records objects
+// point at);
 // the compiled proxy handlers; the per-thread draw handshakes (set and
 // consumed inside one draw); the upload scratch (written before every read);
 // g_ui_frame_rtv / g_ui_ps_learn (kh_ui_mask_reset, below, releases and clears
@@ -56663,8 +56767,6 @@ inline void kh_session_globals_reset() {
     kh_reinit(g_hdc_dss);
     g_flush_fx_arb_prev = false;
     g_video_opt_ms = 0;
-    g_shadow_vis_read = false;   // KH_SHADOW_VIS: the next session reads its starting setting.
-    g_shadow_vis_menu = false;
     g_ui_rehoist_auto_s = -1.0e9f;
     g_ui_prev_scene_frame = 0;
     g_ui_rehoist_last_s = -1.0e9f;
@@ -56759,8 +56861,6 @@ inline void reset_session_state() {
     // Cleared here, re-armed by the first stage_video_options.
     g_obj_vis.store(0.0f, std::memory_order_relaxed);
     g_video_opt_ms = 0;   // KH_VIDEO_OPT_CADENCE: the next poll is immediate.
-    g_shadow_vis_read = false;   // KH_SHADOW_VIS: and it reads the starting setting.
-    g_shadow_vis_menu = false;
      g_cascbind_feed_t = -1.0f;
 
     // The lifetime pairing trio is session-scoped under full destroy.

@@ -6966,6 +6966,61 @@ static game_value add_render3d_sqf(game_value_parameter args) {
 // Property set both kinds own. Returns 1 = applied, 0 = recognized but the
 // value was invalid (err set), -1 = not a shared property (fall through to the
 // caller's kind-specific set).
+// KH_FX_TEX: a .hlsl effect's own textures - [[path, "user0" .. "user5", "srgb" | "linear"?], ...], the whole set
+// (a slot the array does not name is cleared; [] clears them all). Checked in full before anything is set.
+static bool kh_rv_fx_textures(const game_value& v, RenderIntegration::RenderObject& obj, std::string& err) {
+    static const char* const khft_form = "textures must be an array of [path, \"user0\" .. \"user5\", "
+                                         "\"srgb\" | \"linear\"?] entries ([] = none)";
+    if (v.type_enum() != game_data_type::ARRAY) { err = khft_form; return false; }
+    auto& khft_a = v.to_array();
+    RenderIntegration::KhFxTexSet khft_set;
+    bool khft_any = false;
+    for (size_t khft_i = 0; khft_i < khft_a.size(); ++khft_i) {
+        if (khft_a[khft_i].type_enum() != game_data_type::ARRAY) { err = khft_form; return false; }
+        auto& khft_e = khft_a[khft_i].to_array();
+        if (khft_e.size() < 2 || khft_e.size() > 3 || khft_e[0].type_enum() != game_data_type::STRING ||
+            khft_e[1].type_enum() != game_data_type::STRING) { err = khft_form; return false; }
+        std::string khft_n = static_cast<std::string>(khft_e[1]);
+        std::transform(khft_n.begin(), khft_n.end(), khft_n.begin(), ::tolower);
+        if (!(khft_n.size() == 5 && khft_n.compare(0, 4, "user") == 0 && khft_n[4] >= '0' &&
+              khft_n[4] < '0' + RenderIntegration::KH_MAT_USER_MAPS)) {
+            err = "texture slot '" + static_cast<std::string>(khft_e[1]) + "' must be user0 .. user5";
+            return false;
+        }
+        const int khft_k = khft_n[4] - '0';
+        if (khft_set.path[khft_k]) { err = "texture slot '" + khft_n + "' is given twice"; return false; }
+        const std::string khft_path = static_cast<std::string>(khft_e[0]);
+        auto khft_ext = [&](const char* khft_x) { return RenderIntegration::kh_ends_with_ci(khft_path, khft_x); };
+        if (!(khft_ext(".png") || khft_ext(".jpg") || khft_ext(".jpeg") || khft_ext(".tga") ||
+              khft_ext(".bmp") || khft_ext(".dds"))) {
+            err = "texture '" + khft_path + "': unsupported extension (png|jpg|jpeg|tga|bmp|dds)";
+            return false;
+        }
+        bool khft_srgb = false;
+        if (khft_e.size() > 2 && !khft_e[2].is_nil()) {
+            std::string khft_cs = khft_e[2].type_enum() == game_data_type::STRING ? static_cast<std::string>(khft_e[2])
+                                                                                   : std::string();
+            std::transform(khft_cs.begin(), khft_cs.end(), khft_cs.begin(), ::tolower);
+            if (khft_cs != "srgb" && khft_cs != "linear") {
+                err = "a texture's third element is \"srgb\" or \"linear\" (the default)";
+                return false;
+            }
+            khft_srgb = khft_cs == "srgb";
+        }
+        const std::string khft_res = RenderIntegration::RenderAssetDiscovery::find_asset_file(khft_path);
+        if (khft_res.empty()) {
+            err = "texture '" + khft_path + "' not found (searched Documents\\Arma 3\\kh_framework\\rendering, "
+                  "then every mod's 'rendering' folder)";
+            return false;
+        }
+        khft_set.path[khft_k] = RenderIntegration::kh_intern_str(khft_res);
+        if (khft_srgb) khft_set.srgb = static_cast<uint8_t>(khft_set.srgb | (1u << khft_k));
+        khft_any = true;
+    }
+    obj.fx_tex = khft_any ? RenderIntegration::kh_fx_tex_intern(khft_set) : nullptr;
+    return true;
+}
+
 static int kh_apply_shared_prop(RenderIntegration::RenderObject& obj,
                                 const std::string& prop, const game_value& val, std::string& err) {
     if (prop == "color")   return kh_rv_color(val, obj, err) ? 1 : 0;
@@ -6974,6 +7029,7 @@ static int kh_apply_shared_prop(RenderIntegration::RenderObject& obj,
     if (prop == "params" || prop == "fxparams") return kh_rv_params(val, obj, err) ? 1 : 0;
     if (prop == "blend")   return kh_rv_blend(val, obj, err) ? 1 : 0;
     if (prop == "band")    return kh_rv_band(val, obj, err) ? 1 : 0;
+    if (prop == "textures") return kh_rv_fx_textures(val, obj, err) ? 1 : 0;   // KH_FX_TEX.
     if (prop == "duration") {
         if (!kh_rv_duration(val, obj, err)) return 0;
         obj.birth_time = RenderIntegration::effect_time_seconds();   // Re-arm from now.
@@ -7646,7 +7702,7 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
     if (prop == "physicscollider")   return kh_rv_physics_collider(val, obj, err);
     if (prop == "chainsimulation") return kh_rv_chain_sim(val, obj, handle, err);
     if (prop == "simulationlod") return kh_rv_sim_lod(val, obj, err);   // KH_SIM_LOD.
-    err = "unknown property (position | attachPosition | size | rotation | attachRotation | mesh | material | mode | sceneRead | effect | params | lit | twoSided | lodLock | inFront | casterOnly | castShadow | receiveShadow | occluder | clothSimulation | physicsCollider | chainSimulation | simulationLod | color | visible | blend | band | duration)";
+    err = "unknown property (position | attachPosition | size | rotation | attachRotation | mesh | material | mode | sceneRead | effect | params | lit | twoSided | lodLock | inFront | casterOnly | castShadow | receiveShadow | occluder | clothSimulation | physicsCollider | chainSimulation | simulationLod | textures | color | visible | blend | band | duration)";
     return false;
 }
 
@@ -7697,7 +7753,7 @@ static bool kh_apply_postfx_prop(RenderIntegration::RenderObject& obj,
     }
     if (prop == "inverse") { bool b = obj.local_inverse; if (!kh_rv_bool(val, b, "inverse", err)) return false; obj.local_inverse = b; return true; }
 
-    err = "unknown property (position | effect | params | ui | uiSpill | radius | falloff | localSphere | shape | inverse | color | visible | blend | band | duration)";
+    err = "unknown property (position | effect | params | ui | uiSpill | radius | falloff | localSphere | shape | inverse | textures | color | visible | blend | band | duration)";
     return false;
 }
 

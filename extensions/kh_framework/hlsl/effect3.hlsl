@@ -131,71 +131,8 @@
         }
     }
 
-    if (localParams1.y > 0.5f)
-    {
-        float khlm_d;
-        float3 nd3 = abs(KhWorldPosFenced(px, uv, khlm_d) - localParams0.xyz) / max(localRadii.xyz, 0.01f);
-        // Normalized distance: 1.0 = the mask surface (ellipsoid or mesh).
-        float nd = (localParams0.w > 0.5f)
-                 ? max(nd3.x, max(nd3.y, nd3.z))   // Cube (Chebyshev).
-                 : length(nd3);   // Sphere/ellipsoid.
-        float mask = 1.0f - smoothstep(1.0f, 1.0f + max(localParams1.x, 0.001f), nd);
-        // localRadii.w >= 0.5 complements the mask - the effect reaches
-        // everything except the volume, falloff band and sky included. C++ twin
-        // local_radii[3] (addLocalPostFX 'inverse').
-        if (localRadii.w >= 0.5f) mask = 1.0f - mask;
-        outc = lerp(scene, outc, mask);
-    }
-
-    // Camera-distance band mask: full strength within [min, max], fading over
-    // 'falloff' metres at both edges; max <= 0 = unbounded far (sky included).
-    // Multiplies with the localization mask.
-    if (bandParams.w > 0.5f)
-    {
-        float d = LinDepth(LoadDepthPS(px));
-        float fall = max(bandParams.z, 0.01f);
-        float mask = smoothstep(bandParams.x - fall, bandParams.x, d);
-        if (bandParams.y > 0.0f)
-            mask *= 1.0f - smoothstep(bandParams.y, bandParams.y + fall, d);
-        outc = lerp(scene, outc, mask);
-    }
-
-    // UI-coverage destination mask (write-window masked lane, centerSize.w =
-    // 2): the effect vanishes smoothly off the UI.
-    if (centerSize.w > 1.5f && centerSize.w < 2.5f)
-        outc = lerp(scene, outc, KhUiCov(px));   // Spill = w 3, excluded.
-
-    int bm = (int)sizeAxes.w;
-    if (centerSize.w > 0.5f)
-    {
-        float a = color.a;
-        float3 mixed = lerp(scene, outc, a);
-        float3 comp;
-        if (bm == 1)      comp = scene + outc * a;   // Additive.
-        else if (bm == 2) comp = scene * lerp(float3(1.0f, 1.0f, 1.0f), outc, a);   // Multiply.
-        else if (bm == 3) comp = scene + outc * a - scene * outc * a;   // Screen.
-        else if (bm == 4) comp = max(scene, mixed);   // Lighten.
-        else if (bm == 5) comp = min(scene, mixed);   // Darken.
-         else              comp = mixed;   // Normal.
-
-        if (centerSize.w > 1.5f) {
-            float4 khuRaw = sceneColor.Load(int3(clamp(px, int2(0, 0),
-                int2((int)fxMeta.z - 1, (int)fxMeta.w - 1)), 0));
-            if (centerSize.w > 2.5f)
-                comp += khuRaw.rgb * (1.0f - khuRaw.a);
-            comp = KhFuseTail(comp, khuRaw.a, true, uv, i.pos.xy, t);
-            return float4(comp, khuRaw.a);   // Coverage passthrough.
-        }
-
-        comp = KhFuseTail(comp, 1.0f, false, uv, i.pos.xy, t);   // (scene chain lane).
-        return float4(comp, 1.0f);
-    }
-
-    // Blend-mode output packing (meshes: hardware blend against the live
-    // framebuffer; intensity pre-applied where blend factors cannot express
-    // it).
-    if (bm == 1 || bm == 3) return float4(outc * color.a, 1.0f);   // Additive, screen.
-    if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), outc, color.a), 1.0f);   // Multiply.
-    if (bm == 4 || bm == 5) return float4(lerp(scene, outc, color.a), 1.0f);   // Lighten, darken (MAX/MIN op).
-    return float4(outc, color.a);   // Normal (alpha lerp).
+    // KH_FX_USER: the finish - the localization and band masks, the UI lane's
+    // coverage, opacity and blend mode, the fused stages and the packing - is
+    // KhFxFinish (cb.hlsl's KH_FX_UNIT section), one body with the user effects'.
+    return KhFxFinish(scene, outc, i.pos.xy);
 }

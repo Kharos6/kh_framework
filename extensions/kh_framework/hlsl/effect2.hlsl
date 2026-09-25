@@ -276,9 +276,10 @@
     }
     else if (effect == 26)
     {
-        // Radiance pyramid seed (internal id: setPostFX validates <=
-        // KH_MAX_EFFECT, so 24/25/26 stay unreachable from SQF; the flush
-        // synthesizes this ahead of the gather). i.pos spans the scaled grid,
+        // Radiance pyramid seed (internal id: a script's effect id is
+        // validated <= KH_MAX_EFFECT (effect_id_from_gv), so 24 - 30 stay
+        // unreachable from SQF; the flush synthesizes this ahead of the
+        // gather). i.pos spans the scaled grid,
         // so the full-frame uv rebuilds through the local0.y factor.
         float khrs_inv = localParams0.y >= 0.25f ? localParams0.y : 2.0f;
         float2 khrs_uv = i.pos.xy * khrs_inv / float2(fxMeta.z, fxMeta.w);

@@ -23,7 +23,7 @@ cbuffer CBObj : register(b0)
     // shadow is (KH_SHADOW_OFF), z = ambient fraction, w = diffuse fraction
     // (y / z / w read through KhObjLanesCb / KhObjLoad).
     float4 lighting0;
-    // x = 1 on an effect-chain pass whose near-plane marker (t37, effect.hlsl)
+    // x = 1 on an effect-chain pass whose near-plane marker (t37, the KH_FX_UNIT section)
     // is this cycle's (KH_NEARZ_MARK), else 0.
     float4 shadowMeta2;   // y = object view-distance cut; z = 1 for a
                           // depth-Off overlay (KH_VOL_WITNESS), else 0; w = the first
@@ -66,6 +66,11 @@ cbuffer CBObj : register(b0)
     // KH_USER_LANES: x = the session clock (s), y = this object's creation on
     // it (s). Read through the KhUser* accessors below. C++ twin user_obj.
     float4 khUserObj;
+    // KH_FX_TEX: a user effect's own textures - 1 + each one's layer in its page
+    // ([0].xyzw = user0 .. user3, [1].xy = user4 / user5; 0 = absent or still
+    // loading; [1].zw unused). Zero on every draw but a user effect's. Read
+    // through KhUserTex* (the KH_FX_UNIT section). C++ twin fx_tex.
+    float4 khFxTexLay[2];
 };
 
  cbuffer CBFrame : register(b1)
@@ -529,24 +534,68 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 // ---- EFFECT shaders (a fullscreen pass or effect mesh given a .hlsl path) --
 // The script side: the object's "effect" property is the .hlsl path (where a
 // builtin effect's name or id would go) and its "params" property the twelve
-// numbers that arrive as fxParams0..2.
-// Main view only (a PIP pass skips it). Compiled as this file plus the user
-// file alone, with MSAA_DEPTH set to the scene's - the effect unit's own
-// helpers (SampleScene, LinDepth, KhWorldPosFenced in effect.hlsl) are NOT in
-// it; the two recipes a depth-aware effect needs are written out below, and
-// reading the scene is one clamped Load:
-//     sceneColor.Load(int3(clamp(px, int2(0, 0), int2(fxMeta.zw) - 1), 0))
-// It defines
+// numbers that arrive as fxParams0..2. It defines
 //     float4 PSEffect(VSOut i) : SV_Target
-// and should begin with KhObjLoad(i.iobj0, i.iobj1), as the builtin does.
-// Bound for it: the scene colour at t0 (declare Texture2D<float4> sceneColor :
-// register(t0)) and the depth at t1 (declare it as effect.hlsl does: under
-// MSAA_DEPTH a Texture2DMS<float> - read sample 0 - else the two-plane
-// Texture2D<float2> snapshot - read .x, the farthest plane). Nothing else is
-// promised: read textures with integer Loads (every builtin effect does);
-// no sampler is guaranteed bound, s0 / s1 are this file's registers and s2
-// is the SSGI resolve's (a second declaration at a taken register fails the
-// compile with X4509).
+// Compiled as this file plus the user file, with MSAA_DEPTH set to the depth
+// it reads (the scene's; 0 in a picture-in-picture, whose depth is a
+// single-sample copy) and KH_FX_UNIT = 1: the KH_FX_UNIT section at the end of
+// this file - the builtin effects' own declarations and helpers, the text
+// their shader is built on - is in it. Do not declare what it declares, and
+// declare no texture or sampler of your own: nothing binds a register a user
+// shader declares, and a taken register fails the compile.
+// Where it runs: the scene chain, the UI lane, effect meshes and - a localized
+// pass, as the builtins' - a picture-in-picture.
+// Bound for it, as for the builtin effects (the section declares each):
+//   sceneColor (t0)  the pass's source. SampleScene(px) reads it clamped to the
+//                    frame (and premultiplied in the UI spill lane).
+//   depthTex (t1)    the depth the pass sees. LoadDepthPS(px) is the builtins'
+//                    read: the raw depth (LoadDepthRaw), with our near-plane
+//                    marker applied where one of our meshes drew nearer than
+//                    the near plane. LinDepth(raw) = metres along the view
+//                    axis (1e9 for the far plane and the sky);
+//                    KhWorldPosFenced(px, uv, d) = the world position (engine
+//                    axes, absolute) and d its distance, fenced short of the
+//                    far plane; KhgVpos = the view-space position.
+//   khNzMark (t37)   that marker (armed by shadowMeta2.x; LoadDepthPS reads it).
+//   khArbSnap (t2)   an effect mesh's arbitration snapshot (KhFxBegin reads it).
+//   khsgTex (t3) / khsgSamp (s2)  the pass's source pre-filtered: the pyramid
+//                    the builtin glows read, built for a pass whose file calls
+//                    KhGlowTap or KhGlowTapA (not thresholded). KhGlowTap(pc, f)
+//                    reads it over a footprint of f px at the full-res
+//                    position pc (centres at + 0.5), KhGlowTapA along an axis;
+//                    KhGlowOn() is false while none is armed, and
+//                    KhGlowSel(direct, pyramid, KhGlowMix(spacing)) blends as
+//                    the builtins do (direct taps a pixel apart or less, the
+//                    pyramid from two).
+//   khPfSamp (s1)    linear, clamp, every mip - bound for every user effect draw.
+//   khUserMap0..5 (t43 - t48) / khFxUserSamp (s0)  the effect's own textures:
+//                    the script's "textures" (updatePostFX, or updateRender3D
+//                    for an effect mesh), user0 .. user5, "srgb" for colour
+//                    data or "linear" (the default). Read them as a material
+//                    shader reads its own: KhUserTex(i, uv) filtered
+//                    (anisotropic, wrap), KhUserTexLod(i, uv, lod),
+//                    KhUserTexGrad(i, uv, dx, dy), KhUserTexValid(i) (resolved
+//                    and loaded), KhUserTexSize(i) (texels; 0 when absent),
+//                    with i a literal 0 - 5 (a non-literal i samples all six
+//                    and selects). An absent or still-loading texture reads
+//                    zero.
+// Helpers there, besides those: KhUiCov(px) (the UI coverage, in the UI lane),
+// Luma (BT.709), KhFxPx() (the factor from a 1080-row frame to this one - the
+// builtins' pixel sizes are 1080-row pixels), KhEncFence(), KhFxFogEngine
+// (the engine's fog at a pixel), KhHashF / Hash / Hash2 (integer hashes of
+// a float2 - exact at any magnitude; a time seed goes in KhHashF's integer
+// lane), KhSin / KhCos (sin / cos reduced to one period - for a growing
+// argument), KhGrainGc (the builtin grain's noise).
+// The builtin's first and last lines, opt-in (one body with its own shader):
+//     KhFxBegin(i);                               call it first
+//     return KhFxFinish(SampleScene(px), outc, i.pos.xy);
+// KhFxBegin loads the object lanes (KhObjLoad) and, for an effect mesh, takes
+// the depth gate, the view-distance cut and the far-frame arbitration.
+// KhFxFinish applies what the builtin applies to its result: the localization
+// mask and its inverse, the band mask, opacity (color.a) and the blend mode,
+// and packs the output for the composite the pass is in. Without them the
+// output is written as returned - the rest of this section - and the shader
+// should still begin with KhObjLoad(i.iobj0, i.iobj1).
 //   fxMeta     x = effect id, y = the object's age in seconds (formed in
 //              double: the most precise clock), zw = the target size in px.
 //              uv = i.pos.xy / fxMeta.zw.
@@ -556,42 +605,38 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //   sizeAxes.w the blend mode (0 normal, 1 additive, 2 multiply, 3 screen,
 //              4 lighten, 5 darken).
 //   centerSize.w  which composite the pass is in:
-//     > 0.5 A FULLSCREEN pass. The output REPLACES the pixel (opaque write):
-//           opacity, blend mode, the localization mask (localParams0/1,
-//           localRadii) and the band mask (bandParams) are NOT applied for a
-//           user shader - the builtin applies them inside its own PSEffect
-//           (the tail of effect3.hlsl is the recipe). 1.0 = the scene chain:
+//     > 0.5 A FULLSCREEN pass. Opacity, blend mode, the localization mask
+//           (localParams0/1, localRadii) and the band mask (bandParams) are
+//           NOT applied for a user shader - KhFxFinish applies them as the
+//           builtin does.
+//           1.0 = the scene chain (and a picture-in-picture's localized pass):
 //           t0 is the engine's HDR scene colour at its scene resolve, before
-//           the engine's own post-processing and tonemap, and the output goes
-//           back in the same linear HDR units. 1.25 = the UI phase (a pass the
-//           script set to affect the UI): t0 is the finished display frame,
-//           post-tonemap, UI included (0 - 1), its alpha the UI coverage, and
-//           the hardware then lerps the output by that coverage (or, with the
-//           script's UI spill, adds it over the UI).
+//           the engine's own post-processing and tonemap, and the output
+//           REPLACES the pixel's colour (no hardware blend), in the same
+//           linear HDR units.
+//           1.25 = the UI phase (a pass the script set to affect the UI): t0
+//           is the finished display frame, post-tonemap, UI included (0 - 1),
+//           its alpha the UI coverage, and the hardware lerps the frame toward
+//           the output by that coverage (rgb only). With the script's UI
+//           spill, t0's rgb is premultiplied by that coverage, sizeAxes.w
+//           reads 0 (normal) and the hardware ADDS the output to the frame's
+//           uncovered share - output + frame * (1 - coverage) - so it replaces
+//           the UI where the UI is opaque and spills past it.
 //     < 0.5 An EFFECT MESH. The output is hardware-blended by the blend mode;
 //           return it packed as the builtin's final lines do (normal: rgb,
 //           alpha = opacity; additive / screen: rgb * opacity, 1; multiply:
 //           lerp(1, rgb, opacity), 1; lighten / darken: lerp(scene, rgb,
-//           opacity), 1). The builtin's first lines are not applied for you
-//           either: its depth gate against depthParams and the object's
-//           view-distance cut (discard past khObjCut, set by KhObjLoad) -
-//           without them an effect mesh draws past the engine's object view
-//           distance.
-//   View distance from a raw depth (LinDepth's recipe; raw = the t1 read):
-//     z = (raw - depthParams.z) / max(depthParams.w - depthParams.z, 1e-6)
-//     q = z - depthParams.x          the far plane and the sky (raw at the
-//     d = (q > -1e-7) ? 1e9          clear value) have q >= 0: 'very far'
-//                     : depthParams.y / q,  and 1e9 again if that is <= 0.
-//   World position from depth (KhWorldPosFenced's recipe): the view distance
-//   d = LinDepth(raw) (depthParams: x = m22, y = m32, zw = the viewport depth
-//   range); clip = (uv.x * 2 - 1, 1 - uv.y * 2, depthParams.x +
-//   depthParams.y / d, 1); w = mul(clip, invViewProj); world = w.xyz / w.w,
-//   plus fxCam.xyz when fxCam.w >= 0.5 (the inverse is then camera-relative).
+//           opacity), 1) - or return KhFxFinish, which does. The builtin's
+//           first lines are not applied for you either (KhFxBegin applies
+//           them): its depth gate against depthParams, the object's
+//           view-distance cut (discard past khObjCut, set by KhObjLoad) and
+//           the far-frame arbitration - without them an effect mesh draws
+//           past the engine's object view distance.
 //
 // ---- Both kinds: the accessors below. -------------------------------------
 // They read lanes every pass that can run a user shader fills (the mesh flush
 // and injection, the PIP and view-model passes, the scene and UI effect
-// chains).
+// chains, the PIP's effect passes).
 //   KhUserTime()          the object's age: seconds since it was created - the
 //                         animation clock. Per object, bucket instances
 //                         included. Formed in float on a clock that restarts
@@ -609,9 +654,10 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //   KhUserUv()            MATERIAL only: the pixel's texture UV.
 //   KhUserPixel()         MATERIAL only: the pixel's position in the target, px
 //                         (an effect has i.pos.xy).
-//   KhUserTex* / KhUserMat* / KhUserGeomNormal / KhUserTangent /
-//   KhUserBitangent / KhUserPerturb / KhUserFrontFace   MATERIAL only: see the
-//                         MATERIAL section.
+//   KhUserTex*            both: a material's user0 .. user5 (the MATERIAL
+//                         section), an effect's "textures" (the EFFECT section).
+//   KhUserMat* / KhUserGeomNormal / KhUserTangent / KhUserBitangent /
+//   KhUserPerturb / KhUserFrontFace   MATERIAL only: see the MATERIAL section.
 //   KhUserVtxWorld(p) / KhUserVtxWorldDir(d) / KhUserVtxObjectDir(d)
 //                         object space <-> world, for the VERTEX stage.
 // Object lanes (per-object draws: the drawn object; on a bucket draw these
@@ -2955,11 +3001,12 @@ void KhVsCore(float3 khvc_lp, float3 khvc_ln, float3 khvc_ctr, float3 khvc_rel, 
 
 // The effect unit's depthTex owns t1. KH_RECEIVE_TEX is passed by the white,
 // static and composite compiles - kh_white_ensure, ensure_resources'
-// static and composite tables, ensure_composite_shader, and kh_user_mat_ps's
-// three material twins - and by nothing else. EVERY compile of the effect
-// unit (ensure_resources' prewarm pair, ensure_effect_shader,
-// kh_pip_fx_shader) and kh_user_fx_ps's cb + user post-FX pass MSAA_DEPTH
-// alone; that is what keeps shadowAtlas off depthTex at t1. white.hlsl
+// static and composite tables, ensure_composite_shader, kh_user_mat_ps's
+// three material twins and kh_user_mat_vs's vertex stage - and by nothing
+// else. EVERY compile of the effect unit (ensure_resources' prewarm pair,
+// ensure_effect_shader, kh_pip_fx_shader) and kh_user_fx_ps's cb + user
+// post-FX pass MSAA_DEPTH and KH_FX_UNIT, never KH_RECEIVE_TEX; that is what
+// keeps shadowAtlas off depthTex at t1. white.hlsl
 // declares no register of its own, so the white unit takes the block below
 // without colliding with anything.
 #ifdef KH_RECEIVE_TEX
@@ -3220,3 +3267,513 @@ float KhHazeT(float khaz_d, float khaz_wposY, float khaz_camY, float khaz_layerY
 
     return min(exp(-khaz_I * khaz_b), 1.0f);
 }
+// ===========================================================================
+// KH_FX_UNIT - the effect unit's own declarations and helpers. Compiled into
+// the builtin effect shader (effect.hlsl, effect2.hlsl and effect3.hlsl follow
+// this file) and into every user effect shader (the USER SHADER CONTRACT's
+// EFFECT section) - one text for both, so a
+// user effect reads the scene, the depth, the pyramid and the fog as the
+// builtins do, and can begin and finish its pixel with the builtin's own lines
+// (KhFxBegin / KhFxFinish, below). Fenced: the mesh units declare other
+// resources at t0 - t3 (static.hlsl, composite.hlsl).
+// ===========================================================================
+#if KH_FX_UNIT
+Texture2D<float4> sceneColor : register(t0);
+Texture2D<float4> khsgTex : register(t3);
+// s2, not s1: khPfSamp holds s1 (declared earlier in this file), so a second s1
+// fails the compile with X4509 the moment any entry reaches a helper that uses it
+// (the shadow compares' Gather, KH_SHADOW_GATHER). C++ twin (KH_FX_SAMP_S2).
+// Bound for a user effect only when its pyramid is (KhGlowBind).
+// Bound only for the draws that read it, the prior binding put back: the SSGI resolve's linear clamp, or a glow
+// pass's anisotropic clamp (KH_GLOW_PYR, C++ KhGlowBind).
+SamplerState khsgSamp : register(s2);
+
+#if MSAA_DEPTH
+Texture2DMS<float> depthTex : register(t1);
+float LoadDepthRaw(int2 px) { return depthTex.Load(px, 0); }
+#else
+// Two-plane snapshot; declaration only.
+Texture2D<float2> depthTex : register(t1);
+float LoadDepthRaw(int2 px) { return depthTex.Load(int3(px, 0)).x; }
+#endif
+// KH_NEARZ_MARK: our near-z fragments nearer than the near plane are written
+// into a gap below the viewport's MinDepth that this pair reads as a flat wall
+// at the near distance. The marker (t37, armed by shadowMeta2.x) holds (raw,
+// true distance) where a drawer of ours wrote one this cycle; where its raw is
+// still the live raw, that distance comes back re-encoded through this pass's
+// own pair, so LinDepth (and every reader of this load) gets the true one. Any
+// other pixel - the hands drawn over since, the world - loads as it is.
+Texture2D<float2> khNzMark : register(t37);
+float LoadDepthPS(int2 px)
+{
+    const float khnz_r = LoadDepthRaw(px);
+    if (shadowMeta2.x > 0.5f) {
+        const float2 khnz_m = khNzMark.Load(int3(px, 0));
+        if (khnz_m.x > 0.0f && khnz_m.x == khnz_r && khnz_m.y > 0.0f) {
+            return depthParams.z + (depthParams.w - depthParams.z) * (depthParams.x + depthParams.y / khnz_m.y);
+        }
+    }
+    return khnz_r;
+}
+
+Texture2D<float> khArbSnap : register(t2);
+
+float3 SampleScene(int2 px)
+{
+    px = clamp(px, int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
+    float4 khss = sceneColor.Load(int3(px, 0));
+    if (centerSize.w > 2.5f) return khss.rgb * khss.a;
+    return khss.rgb;
+}
+
+// Meaningless in the scene phase - callers gate on the flag.
+float KhUiCov(int2 px)
+{
+    px = clamp(px, int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
+    return sceneColor.Load(int3(px, 0)).a;
+}
+
+float Luma(float3 c) { return dot(c, float3(0.2126f, 0.7152f, 0.0722f)); }   // BT.709.
+
+// KH_FX_PX_REF: every size a builtin effect gives in pixels - its "...Px" parameters and the fixed pixel
+// spans inside the effects below - is in pixels of a 1080-row frame; this is the factor to the pass's own
+// frame (fxMeta.w, the height of the picture it draws), so a look holds at any resolution. Exactly 1 at 1080
+// rows, and every use multiplies it onto the finished pixel quantity, so at 1080 rows each quantity is the
+// unscaled one (up to fxc reordering a product - it is not IEEE-strict - a rounding step on an offset at
+// most). What stays in real pixels: sharpen's 1-px neighbourhood (sharpening is of the display's pixels), anti-aliasing
+// widths (the CRT tube's feather), per-pixel dither and sampling noise (deband's grain, the interleaved
+// rotations), and the SSGI chain (its radius is in metres; its resolve works on the gather's own grid).
+float KhFxPx() { return max(fxMeta.w, 1.0f) / 1080.0f; }
+
+// KH_GLOW_PYR - the glows' and blurs' pre-filtered picture. C++ kh_glow_build makes one per pass, of that pass's own
+// source: level 0 is half the frame (PSGlowSeed), each further level half the one above (PSGlowDown), each texel a
+// 4 x 4 tent (1 3 3 1) over what it covers - padded past the frame (edge-clamped) so every level halves exactly and
+// one uv addresses them all. The bright-pass effects (bloom 8, halation 12, lens flare 14) take it through their
+// threshold, subtracted before the average as their direct taps subtract it; the UI spill lane's premultiply rides
+// SampleScene. The pass reads it at t3 (khsgTex) through khsgSamp (s2: anisotropic, clamp).
+// fuseMeta.y > 0.5 arms it; fuseMeta.zw is the full-resolution extent level 0 covers (twice its size, not less than
+// the frame). A tap reads the level whose texel matches its footprint - the spacing to the next tap - so a sparse
+// tap pattern samples a picture already averaged over the gaps between its taps: no copies of the scene at the
+// tap spacing, no grain from a jittered pattern. Disarmed (no pyramid for the pass) every effect takes its direct
+// taps, exactly as before. (Anamorphic reads a pyramid of its own, halved along its streak alone: KH_ANA_PYR.)
+bool KhGlowOn() { return fuseMeta.y > 0.5f; }
+
+// Each footprint is taken a quarter past the tap spacing: bilinear reads of a level are not shift-invariant, so at
+// the bare spacing a lone bright pixel under the 5 x 5 bloom still ripples by up to ~18% of its peak; at 1.25 by
+// about a tenth, the glow's spread then ~15% past the direct taps' (~10% at the bare spacing). H38 models it.
+static const float KH_GLOW_FP = 1.25f;
+
+// pc: a full-resolution position (pixel centres at +0.5). The footprint is fa pixels along the unit axis ax and fp
+// across it; hardware anisotropic filtering takes the long side (up to 16:1, then a coarser level).
+float3 KhGlowTapA(float2 pc, float2 ax, float fa, float fp)
+{
+    const float2 khga_e = max(fuseMeta.zw, float2(1.0f, 1.0f));
+    const float2 khga_g = KH_GLOW_FP / khga_e;
+    return khsgTex.SampleGrad(khsgSamp, pc / khga_e, ax * (fa * khga_g), float2(-ax.y, ax.x) * (fp * khga_g)).rgb;
+}
+float3 KhGlowTap(float2 pc, float f) { return KhGlowTapA(pc, float2(1.0f, 0.0f), f, f); }
+
+// The pyramid's share of taps sp pixels apart: none at a pixel or less (adjacent pixels leave no gap - the direct
+// taps, exactly as before), all from two, linear between. KhGlowSel takes the direct result d unless the share
+// is positive.
+float KhGlowMix(float sp) { return KhGlowOn() ? saturate(sp - 1.0f) : 0.0f; }
+float3 KhGlowSel(float3 d, float3 p, float m) { return m <= 0.0f ? d : (m >= 1.0f ? p : lerp(d, p, m)); }
+float KhGlowSel(float d, float p, float m) { return m <= 0.0f ? d : (m >= 1.0f ? p : lerp(d, p, m)); }
+
+float LinDepth(float raw)
+{
+    float ndcZ = (raw - depthParams.z) / max(depthParams.w - depthParams.z, 1e-6f);
+    float denom = ndcZ - depthParams.x;
+    // At/beyond the far plane the denominator crosses zero and flips sign; sky
+    // pixels sit at the depth-clear value (1.0), beyond the viewport range
+    // entirely - treat everything past the far plane as "very far".
+    if (denom > -1e-7f) return 1e9f;
+    float d = depthParams.y / denom;
+    return d > 0.0f ? d : 1e9f;
+}
+
+// KH_HASH - integer hashing (pcg3d, Jarzynski & Olano, "Hash Functions for GPU Rendering", JCGT 2020) in place of
+// frac(sin(dot(p, k)) * 43758.5453). D3D11 specifies sin only on [-100 pi, 100 pi]; the sine hash fed it ~1e5 from
+// a pixel position and, through the time-seeded callers (fxMeta.y is seconds since the object's creation and never
+// wraps), without bound - vendor-defined noise, and after hours of grain adjacent cells collided outright. The
+// input's bits are hashed exactly, so equal inputs give equal values (every caller's structure holds) and distinct
+// ones stay distinct at any magnitude; a time seed rides as its own integer lane (KhHashF). Output in [0, 1).
+uint3 KhPcg3(uint3 v)
+{
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    return v;
+}
+float KhHashF(float2 p, uint s) { return (float)(KhPcg3(uint3(asuint(p), s)).x >> 8) * (1.0f / 16777216.0f); }
+float Hash(float2 p) { return KhHashF(p, 0u); }
+// KH_HASH's range rule for the periodic terms: sin / cos of an argument that grows with time, reduced to one
+// period first (the same value, inside the specified range).
+float KhSin(float x) { return sin(6.2831853f * frac(x * 0.15915494f)); }
+float KhCos(float x) { return cos(6.2831853f * frac(x * 0.15915494f)); }
+
+float2 Hash2(float2 p)
+{
+    return float2(Hash(p), Hash(p + float2(41.13f, 7.77f)));
+}
+
+// Per-pixel world position from the depth buffer + inverse view-projection.
+float KhEncFence()
+{
+    float khef_den = 1.0f - depthParams.x;
+    float khef_far = khef_den < -1.0e-7f ? depthParams.y / khef_den : 20000.0f;
+    return clamp(khef_far, 500.0f, 100000.0f);
+}
+
+float3 KhWorldPosFenced(int2 px, float2 uv, out float khwf_d)
+{
+    float khwf_raw = LinDepth(LoadDepthPS(px));
+    khwf_d = min(khwf_raw, KhEncFence() * 0.999f);
+    float4 khwf_nd = float4(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f,
+                            depthParams.x + depthParams.y / max(khwf_d, 1.0f), 1.0f);
+    float4 khwf_wp = mul(khwf_nd, invViewProj);
+    // With fxCam armed the inverse is of a rotation-only view (camera at the
+    // origin) - small numbers, exact in fp32 - and the camera is added here,
+    // once. An absolute inverse mixes the camera's kilometres into every entry
+    // and cancels them per pixel, which jitters the reconstruction by
+    // centimetres frame to frame.
+    return khwf_wp.xyz / khwf_wp.w + (fxCam.w > 0.5f ? fxCam.xyz : float3(0.0f, 0.0f, 0.0f));
+}
+
+// Pure function of its arguments; reads no CB.
+float3 KhgVpos(float2 vp_px, float vp_d, float2 vp_res, float vp_m00, float vp_m11)
+{
+    float2 vp_uv = (vp_px + 0.5f) / vp_res;
+    return float3((vp_uv.x * 2.0f - 1.0f) * vp_d / vp_m00,
+                  (1.0f - vp_uv.y * 2.0f) * vp_d / vp_m11,
+                  vp_d);
+}
+
+// KH_FX_USER: the engine's own fog at a pixel - the share of its light the
+// engine's fog replaces (0 none - 1 all), from the view distance fs_d (LinDepth),
+// the frame fs_res (fxMeta.zw) and the projection's two scales fs_m00 / fs_m11
+// (the lengths of viewProj's first and second columns over its xyz rows, as
+// fog scatter forms them). Fog scatter's engine term (KhFsFog adds the KH fog
+// passes to it) - one body.
+float KhFxFogEngine(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float fs_m11)
+{
+    float fs_s = 0.0f;
+
+    if (fogParams.w >= 0.5f && depthParams.y < -1.0e-3f)
+    {
+        // The encode pair's far fence (m32 gate above guarantees the standard-z
+        // shape: 1 - m22 < 0, m32 < 0 -> positive fence).
+        float fs_fden = 1.0f - depthParams.x;
+        float fs_far = fs_fden < -1.0e-7f ? depthParams.y / fs_fden : 20000.0f;
+        float fs_de = min(fs_d, clamp(fs_far, 500.0f, 100000.0f) * 0.999f);
+        float fs_distM = length(KhgVpos(fs_px, fs_de, fs_res, fs_m00, fs_m11));
+        // Height at the clamped distance: the analytic ndcZ of fs_de, immune to
+        // the beyond-far mirror and to raw-depth teeter by construction.
+        float2 fs_uv = (fs_px + 0.5f) / fs_res;
+        float4 fs_nd = float4(fs_uv.x * 2.0f - 1.0f, 1.0f - fs_uv.y * 2.0f,
+                              depthParams.x + depthParams.y / max(fs_de, 1.0f), 1.0f);
+        float4 fs_wp = mul(fs_nd, invViewProj);
+        // With fxCam armed the inverse is camera-relative and the height comes
+        // back relative too; fogColor.w is the camera's absolute altitude, so
+        // the camera's own is added here, as the position is.
+        float fs_hgt = fs_wp.y / fs_wp.w + (fxCam.w > 0.5f ? fxCam.y : 0.0f);
+        float fs_camY = fogColor.w;
+        float fs_tr;
+
+        if (fogEngine.w >= 0.5f)
+        {
+            float fs_ramp = fogEngine.w >= 1.5f
+                          ? 1.0f
+                          : saturate((fogEngine.y - fs_distM) * fogEngine.z);
+            float fs_dh = abs(fs_hgt - fs_camY);
+            float fs_k = fogParams.y * fs_dh / max(fs_distM, 1.0e-4f);
+            float fs_integ = fs_k < 1.0e-6f ? fs_distM : (1.0f - exp(-fs_distM * fs_k)) / fs_k;
+            float fs_minY = min(fs_hgt, fs_camY);
+            fs_tr = fs_ramp * exp(-fs_integ * fogEngine.x * exp(-fogParams.y * max(fs_minY, 0.0f)));
+        }
+        else
+        {
+            float fs_dens = fogParams.x * exp(-fogParams.y * max(fs_hgt - fogParams.z, 0.0f));
+            fs_tr = exp(-fs_distM * fs_dens * 0.0153f);
+        }
+
+        fs_s = 1.0f - saturate(fs_tr);
+    }
+    return fs_s;
+}
+
+// Point-op pass fusion. CPU twin: the chain loops' pending append
+// (kh_fuse_append) enforces the fusible set {1 invert, 2 colorgrade, 3
+// vignette, 5 grain}, never localized / banded / spill / LUT / custom, so this
+// path carries no masks.
+// Film grain's noise (effect 5 and KhFusePoint's id 5 - one body): smooth value noise over grainSizePx cells,
+// triangular-ish and signed, optional chroma. p0 = [amount, fps, grainSizePx, lumaResponse], chroma = the chroma
+// lane. KH_HASH: the frame (time quantized to fps) is the hash's integer lane, the cells' own coordinates the
+// other two, so no frame count or position reaches a float sum.
+float3 KhGrainGc(float2 pos, float t, float4 p0, float chroma)
+{
+    const float fps = max(p0.y, 1.0f);
+    const uint f = (uint)floor(t * fps);
+    const float2 gp = pos / (max(p0.z, 1.0f) * KhFxPx());   // KH_FX_PX_REF.
+    const float2 ip = floor(gp);
+    float2 fp = frac(gp);
+    fp = fp * fp * (3.0f - 2.0f * fp);
+    const float n00 = KhHashF(ip, f);
+    const float n10 = KhHashF(ip + float2(1, 0), f);
+    const float n01 = KhHashF(ip + float2(0, 1), f);
+    const float n11 = KhHashF(ip + float2(1, 1), f);
+    const float nv = lerp(lerp(n00, n10, fp.x), lerp(n01, n11, fp.x), fp.y);
+    const float nf = KhHashF(gp * 2.13f + 17.0f, f);
+    const float g = (nv + nf) * 0.5f - 0.5f;   // Triangular-ish, signed.
+    float3 gc = g.xxx;
+    if (chroma > 0.001f)
+    {
+        const float gr = (lerp(KhHashF(ip + 31.0f, f), KhHashF(ip + float2(1, 1) + 31.0f, f), fp.x) + KhHashF(gp * 1.71f + 47.0f, f)) * 0.5f - 0.5f;
+        const float gb = (lerp(KhHashF(ip + 73.0f, f), KhHashF(ip + float2(1, 1) + 73.0f, f), fp.x) + KhHashF(gp * 2.71f + 89.0f, f)) * 0.5f - 0.5f;
+        gc = lerp(gc, float3(gr, g, gb), chroma);
+    }
+    return gc;
+}
+
+float3 KhFusePoint(int id, float3 c, float2 uv, float2 pos, float t,
+                   float4 p0, float4 p1, float4 col)
+{
+    if (id == 1) return (1.0f - saturate(c)) * col.rgb;
+    if (id == 2)
+    {
+        float3 g = c * col.rgb * p0.z;
+        float l = Luma(g);
+        g = lerp(l.xxx, g, p0.x);
+        g = (g - 0.5f) * p0.y + 0.5f;
+        return pow(max(g, 0.0f), max(p0.w, 1.0e-4f));   // Effect 2's twin: see its gamma floor.
+    }
+    if (id == 3)
+    {
+        float d = distance(uv, float2(0.5f, 0.5f)) * 1.4142f;
+        float v = smoothstep(p0.x, p0.x + max(p0.y, 1e-3f), d);
+        return lerp(c, col.rgb, v);
+    }
+    if (id == 5)
+    {
+        const float3 gc = KhGrainGc(pos, t, p0, p1.x);   // Effect 5's twin: one body.
+        float luma = saturate(Luma(c));
+        float resp = lerp(1.0f, 4.0f * luma * (1.0f - luma) * 0.9f + 0.1f, p0.w);
+        return c + gc * p0.x * resp;
+    }
+    return c;
+}
+
+// Fused-stage composite: the packing tail's blend algebra over the running
+// value, plus - write-window lanes only - the coverage destination lerp in its
+// pre-composite position.
+float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float t)
+{
+    int n = (int)fuseMeta.x;
+    [loop] for (int s = 0; s < n; ++s)
+    {
+        float4 fm = fuseStage[s * 4];
+        float4 fcol = fuseStage[s * 4 + 3];
+        float3 c = KhFusePoint((int)fm.x, v, uv, pos, t,
+                               fuseStage[s * 4 + 1], fuseStage[s * 4 + 2], fcol);
+        if (uiLane) c = lerp(v, c, cov);
+        float a = fcol.w;
+        int bm = (int)fm.y;
+        float3 mixed = lerp(v, c, a);
+        if (bm == 1)      v = v + c * a;
+        else if (bm == 2) v = v * lerp(float3(1.0f, 1.0f, 1.0f), c, a);
+        else if (bm == 3) v = v + c * a - v * c * a;
+        else if (bm == 4) v = max(v, mixed);
+        else if (bm == 5) v = min(v, mixed);
+        else              v = mixed;
+    }
+    return v;
+}
+
+// KH_FX_TEX - a user effect's own textures (the script's "textures", user0 ..
+// user5; C++ kh_fx_tex_fill): each a layer of a texture page bound per draw at
+// t43 + i (null when absent), its layer in khFxTexLay (1 + layer; 0 = absent
+// or still loading), read through s0 (anisotropic, wrap - the material
+// sampler). The material shaders' KH_USER_TEX functions, by the same names and
+// rules: the selects are ?: chains, not flow, so a filtered sample never sits
+// in divergent control flow; with a literal index fxc drops the other five.
+// The builtin effects bind none of these and read none.
+Texture2DArray<float4> khUserMap0 : register(t43);
+Texture2DArray<float4> khUserMap1 : register(t44);
+Texture2DArray<float4> khUserMap2 : register(t45);
+Texture2DArray<float4> khUserMap3 : register(t46);
+Texture2DArray<float4> khUserMap4 : register(t47);
+Texture2DArray<float4> khUserMap5 : register(t48);
+SamplerState khFxUserSamp : register(s0);
+float KhFxTexLane(int khut_i)
+{
+    return khut_i == 0 ? khFxTexLay[0].x : khut_i == 1 ? khFxTexLay[0].y
+         : khut_i == 2 ? khFxTexLay[0].z : khut_i == 3 ? khFxTexLay[0].w
+         : khut_i == 4 ? khFxTexLay[1].x : khFxTexLay[1].y;
+}
+float KhUserTexLayer(int khut_i) { return max(KhFxTexLane(khut_i) - 1.0f, 0.0f); }
+bool KhUserTexValid(int khut_i)
+{
+    return khut_i >= 0 && khut_i < 6 && KhFxTexLane(khut_i) > 0.5f;
+}
+float4 KhUserTex(int khut_i, float2 khut_uv)
+{
+    const float3 khut_c = float3(khut_uv, KhUserTexLayer(khut_i));
+    return khut_i == 0 ? khUserMap0.Sample(khFxUserSamp, khut_c)
+         : khut_i == 1 ? khUserMap1.Sample(khFxUserSamp, khut_c)
+         : khut_i == 2 ? khUserMap2.Sample(khFxUserSamp, khut_c)
+         : khut_i == 3 ? khUserMap3.Sample(khFxUserSamp, khut_c)
+         : khut_i == 4 ? khUserMap4.Sample(khFxUserSamp, khut_c)
+                       : khUserMap5.Sample(khFxUserSamp, khut_c);
+}
+float4 KhUserTexLod(int khut_i, float2 khut_uv, float khut_lod)
+{
+    const float3 khut_c = float3(khut_uv, KhUserTexLayer(khut_i));
+    return khut_i == 0 ? khUserMap0.SampleLevel(khFxUserSamp, khut_c, khut_lod)
+         : khut_i == 1 ? khUserMap1.SampleLevel(khFxUserSamp, khut_c, khut_lod)
+         : khut_i == 2 ? khUserMap2.SampleLevel(khFxUserSamp, khut_c, khut_lod)
+         : khut_i == 3 ? khUserMap3.SampleLevel(khFxUserSamp, khut_c, khut_lod)
+         : khut_i == 4 ? khUserMap4.SampleLevel(khFxUserSamp, khut_c, khut_lod)
+                       : khUserMap5.SampleLevel(khFxUserSamp, khut_c, khut_lod);
+}
+float4 KhUserTexGrad(int khut_i, float2 khut_uv, float2 khut_dx, float2 khut_dy)
+{
+    const float3 khut_c = float3(khut_uv, KhUserTexLayer(khut_i));
+    return khut_i == 0 ? khUserMap0.SampleGrad(khFxUserSamp, khut_c, khut_dx, khut_dy)
+         : khut_i == 1 ? khUserMap1.SampleGrad(khFxUserSamp, khut_c, khut_dx, khut_dy)
+         : khut_i == 2 ? khUserMap2.SampleGrad(khFxUserSamp, khut_c, khut_dx, khut_dy)
+         : khut_i == 3 ? khUserMap3.SampleGrad(khFxUserSamp, khut_c, khut_dx, khut_dy)
+         : khut_i == 4 ? khUserMap4.SampleGrad(khFxUserSamp, khut_c, khut_dx, khut_dy)
+                       : khUserMap5.SampleGrad(khFxUserSamp, khut_c, khut_dx, khut_dy);
+}
+float2 KhUserTexSize(int khut_i)
+{
+    if (!KhUserTexValid(khut_i)) return float2(0.0f, 0.0f);
+    uint khut_w = 0, khut_h = 0, khut_n = 0;
+    if (khut_i == 0)      khUserMap0.GetDimensions(khut_w, khut_h, khut_n);
+    else if (khut_i == 1) khUserMap1.GetDimensions(khut_w, khut_h, khut_n);
+    else if (khut_i == 2) khUserMap2.GetDimensions(khut_w, khut_h, khut_n);
+    else if (khut_i == 3) khUserMap3.GetDimensions(khut_w, khut_h, khut_n);
+    else if (khut_i == 4) khUserMap4.GetDimensions(khut_w, khut_h, khut_n);
+    else                  khUserMap5.GetDimensions(khut_w, khut_h, khut_n);
+    return float2((float)khut_w, (float)khut_h);   // A page holds maps of one size.
+}
+
+// KH_FX_USER - the builtin effect's first and last lines, one body with its
+// PSEffect (which calls both) and a user effect's opt-in.
+// KhFxBegin: the object's lanes (KhObjLoad), the depth gate an effect mesh
+// takes against the scene pair (a fullscreen pass passes it by construction),
+// the object's view-distance cut (khObjCut) and an effect mesh's far-frame
+// arbitration (localParams1.z arms it: the snapshot at t2, and the terrain).
+// Call it first.
+void KhFxBegin(VSOut i)
+{
+    KhObjLoad(i.iobj0, i.iobj1);   // KH_OBJBUF: effect meshes draw per object (the CB lanes).
+    // Fullscreen passes are inert by construction (w = 1 -> ndc far below 1),
+    // and zeroed/degenerate depthParams stand the test down via the m32 gate.
+    if (depthParams.y < -1.0e-3f &&
+        depthParams.x + depthParams.y / max(i.pos.w, 1.0e-4f) > 1.0f) discard;
+    if (khObjCut > 0.0f && i.pos.w > khObjCut) discard;
+
+    // Far-frame analytic arbitration (flush/effect edition).
+    if (localParams1.z >= 0.5f) {
+        int2 khaPx = clamp(int2(i.pos.xy), int2(0, 0),
+                           int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
+        float khaRaw = khArbSnap.Load(int3(khaPx, 0));
+
+        if (khaRaw > 0.000001f && khaRaw < 0.999999f) {
+            float khaNdc = (khaRaw - localParams0.z) / max(localParams0.w - localParams0.z, 1e-6f);
+            float khaDen = khaNdc - localParams0.x;
+            float khaScene = (khaDen > -1e-7f) ? 1.0e9f : localParams0.y / khaDen;
+            if (khaScene <= 0.0f) khaScene = 1.0e9f;
+            if (i.pos.w > khaScene * (1.0f + localParams1.w) + localParams1.z) discard;
+        }
+
+        if (thmParams.w >= 0.5f) {
+            float khaHe = KhThmHeight(i.wpos.xz);
+            if (khaHe > -1.0e5f && (i.wpos.y - khaHe) < -thmMeta.z) discard;
+        }
+    }
+}
+
+// KhFxFinish: the pixel finished as the builtin finishes its own - the
+// localization mask (and its inverse), the band mask, the UI lane's coverage,
+// opacity (color.a) and the blend mode, the fused stages, then the packing
+// its composite wants (a fullscreen pass writes the composite; an effect mesh
+// returns what the hardware blend expects). scene = the pass's source at the
+// pixel (SampleScene), outc = the effect's result, pos = i.pos.xy. Return it.
+float4 KhFxFinish(float3 scene, float3 outc, float2 pos)
+{
+    const int2 px = int2(pos);
+    const float2 uv = pos / float2(fxMeta.z, fxMeta.w);
+    const float t = fxMeta.y;
+
+    if (localParams1.y > 0.5f)
+    {
+        float khlm_d;
+        float3 nd3 = abs(KhWorldPosFenced(px, uv, khlm_d) - localParams0.xyz) / max(localRadii.xyz, 0.01f);
+        // Normalized distance: 1.0 = the mask surface (ellipsoid or mesh).
+        float nd = (localParams0.w > 0.5f)
+                 ? max(nd3.x, max(nd3.y, nd3.z))   // Cube (Chebyshev).
+                 : length(nd3);   // Sphere/ellipsoid.
+        float mask = 1.0f - smoothstep(1.0f, 1.0f + max(localParams1.x, 0.001f), nd);
+        // localRadii.w >= 0.5 complements the mask - the effect reaches
+        // everything except the volume, falloff band and sky included. C++ twin
+        // local_radii[3] (addLocalPostFX 'inverse').
+        if (localRadii.w >= 0.5f) mask = 1.0f - mask;
+        outc = lerp(scene, outc, mask);
+    }
+
+    // Camera-distance band mask: full strength within [min, max], fading over
+    // 'falloff' metres at both edges; max <= 0 = unbounded far (sky included).
+    // Multiplies with the localization mask.
+    if (bandParams.w > 0.5f)
+    {
+        float d = LinDepth(LoadDepthPS(px));
+        float fall = max(bandParams.z, 0.01f);
+        float mask = smoothstep(bandParams.x - fall, bandParams.x, d);
+        if (bandParams.y > 0.0f)
+            mask *= 1.0f - smoothstep(bandParams.y, bandParams.y + fall, d);
+        outc = lerp(scene, outc, mask);
+    }
+
+    // UI-coverage destination mask (write-window masked lane, centerSize.w =
+    // 2): the effect vanishes smoothly off the UI.
+    if (centerSize.w > 1.5f && centerSize.w < 2.5f)
+        outc = lerp(scene, outc, KhUiCov(px));   // Spill = w 3, excluded.
+
+    int bm = (int)sizeAxes.w;
+    if (centerSize.w > 0.5f)
+    {
+        float a = color.a;
+        float3 mixed = lerp(scene, outc, a);
+        float3 comp;
+        if (bm == 1)      comp = scene + outc * a;   // Additive.
+        else if (bm == 2) comp = scene * lerp(float3(1.0f, 1.0f, 1.0f), outc, a);   // Multiply.
+        else if (bm == 3) comp = scene + outc * a - scene * outc * a;   // Screen.
+        else if (bm == 4) comp = max(scene, mixed);   // Lighten.
+        else if (bm == 5) comp = min(scene, mixed);   // Darken.
+         else              comp = mixed;   // Normal.
+
+        if (centerSize.w > 1.5f) {
+            float4 khuRaw = sceneColor.Load(int3(clamp(px, int2(0, 0),
+                int2((int)fxMeta.z - 1, (int)fxMeta.w - 1)), 0));
+            if (centerSize.w > 2.5f)
+                comp += khuRaw.rgb * (1.0f - khuRaw.a);
+            comp = KhFuseTail(comp, khuRaw.a, true, uv, pos, t);
+            return float4(comp, khuRaw.a);   // Coverage passthrough.
+        }
+
+        comp = KhFuseTail(comp, 1.0f, false, uv, pos, t);   // (scene chain lane).
+        return float4(comp, 1.0f);
+    }
+
+    // Blend-mode output packing (meshes: hardware blend against the live
+    // framebuffer; intensity pre-applied where blend factors cannot express
+    // it).
+    if (bm == 1 || bm == 3) return float4(outc * color.a, 1.0f);   // Additive, screen.
+    if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), outc, color.a), 1.0f);   // Multiply.
+    if (bm == 4 || bm == 5) return float4(lerp(scene, outc, color.a), 1.0f);   // Lighten, darken (MAX/MIN op).
+    return float4(outc, color.a);   // Normal (alpha lerp).
+}
+#endif

@@ -262,7 +262,7 @@ float KhSaMetersAt(int2 khsz_p, float khsz_raw)
 
 // KH_NEARZ_MARK: (raw depth, true distance) at a full pixel of ours in the
 // near-z gap - KhSaMetersAt's own test and decode - into the near-plane
-// marker the late effect chain reads (effect.hlsl, LoadDepthPS); every other
+// marker the late effect chain reads (LoadDepthPS, cb.hlsl); every other
 // pixel is discarded and keeps what the marker held.
 float2 PSSsaoNearMark(float4 pos : SV_Position) : SV_Target
 {

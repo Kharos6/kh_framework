@@ -63,6 +63,26 @@ float KhUiCov(int2 px)
 
 float Luma(float3 c) { return dot(c, float3(0.299f, 0.587f, 0.114f)); }
 
+// KH_FX_PX_REF: every size a builtin effect gives in pixels - its "...Px" parameters and the fixed pixel
+// spans inside the effects below - is in pixels of a 1080-row frame; this is the factor to the pass's own
+// frame (fxMeta.w, the height of the picture it draws), so a look holds at any resolution. Exactly 1 at 1080
+// rows, and every use multiplies it onto the finished pixel quantity, so at 1080 rows each quantity is the
+// unscaled one (up to fxc reordering a product - it is not IEEE-strict - a rounding step on an offset at
+// most). What stays in real pixels: sharpen's 1-px neighbourhood (sharpening is of the display's pixels), anti-aliasing
+// widths (the CRT tube's feather), per-pixel dither and sampling noise (deband's grain, the interleaved
+// rotations), and the SSGI chain (its radius is in metres; its resolve works on the gather's own grid).
+float KhFxPx() { return max(fxMeta.w, 1.0f) / 1080.0f; }
+
+// KH_CRT_MASK: the length of [0, u] that stripe k (0 R, 1 G, 2 B) of a triad p pixels wide covers - the
+// running integral of the stripe's indicator, continuous across period edges, so a pixel's coverage of the
+// stripe is the difference at its two edges (an exact box filter).
+float KhCrtStripe(float u, float p, float k)
+{
+    const float w = p / 3.0f;
+    const float n = floor(u / p);
+    return n * w + clamp(u - n * p - k * w, 0.0f, w);
+}
+
 float LinDepth(float raw)
 {
     float ndcZ = (raw - depthParams.z) / max(depthParams.w - depthParams.z, 1e-6f);
@@ -248,7 +268,7 @@ float3 KhFusePoint(int id, float3 c, float2 uv, float2 pos, float t,
     {
         float fps = max(p0.y, 1.0f);
         float seed = floor(t * fps) * 61.7f;
-        float2 gp = pos / max(p0.z, 1.0f);
+        float2 gp = pos / (max(p0.z, 1.0f) * KhFxPx());   // KH_FX_PX_REF (effect 5's twin).
         float2 ip = floor(gp);
         float2 fp = frac(gp);
         fp = fp * fp * (3.0f - 2.0f * fp);
@@ -371,7 +391,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
     }
     else if (effect == 4)   // Chromatic aberration: [strengthPx], radial.
     {
-        float2 off = (uv - 0.5f) * fxParams0.x;
+        float2 off = (uv - 0.5f) * fxParams0.x * KhFxPx();   // KH_FX_PX_REF.
         float r = SampleScene(int2(i.pos.xy + off)).r;
         float b = SampleScene(int2(i.pos.xy - off)).b;
         outc = float3(r, scene.g, b);
@@ -384,7 +404,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         // rate.
         float fps = max(fxParams0.y, 1.0f);
         float seed = floor(t * fps) * 61.7f;
-        float2 gp = i.pos.xy / max(fxParams0.z, 1.0f);
+        float2 gp = i.pos.xy / (max(fxParams0.z, 1.0f) * KhFxPx());   // KH_FX_PX_REF (KhFusePoint's twin).
         float2 ip = floor(gp);
         float2 fp = frac(gp);
         fp = fp * fp * (3.0f - 2.0f * fp);
@@ -418,7 +438,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
     }
     else if (effect == 7)   // Gaussian-ish blur: [radiusPx].
     {
-        int r = max((int)fxParams0.x, 1);
+        int r = max((int)(fxParams0.x * KhFxPx()), 1);   // KH_FX_PX_REF.
         float3 acc = scene * 0.25f;
         acc += (SampleScene(px + int2(r, 0)) + SampleScene(px - int2(r, 0))
               + SampleScene(px + int2(0, r)) + SampleScene(px - int2(0, r))) * 0.125f;
@@ -428,7 +448,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
     }
     else if (effect == 8)   // Bloom: [threshold, intensity, radiusPx].
     {
-        int r = max((int)fxParams0.z, 1);
+        int r = max((int)(fxParams0.z * KhFxPx()), 1);   // KH_FX_PX_REF.
         float3 acc = 0.0f;
         [unroll] for (int oy = -2; oy <= 2; ++oy)
         [unroll] for (int ox = -2; ox <= 2; ++ox)
@@ -438,20 +458,23 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
     else if (effect == 9)   // Distortion: [amplitudePx, frequency, speed].
     {
         float2 off = float2(sin(uv.y * fxParams0.y * 6.2832f + t * fxParams0.z),
-                            cos(uv.x * fxParams0.y * 6.2832f + t * fxParams0.z)) * fxParams0.x;
+                            cos(uv.x * fxParams0.y * 6.2832f + t * fxParams0.z)) * fxParams0.x * KhFxPx();   // KH_FX_PX_REF.
         outc = SampleScene(int2(i.pos.xy + off));
     }
 
         else if (effect == 10)   // Outline: [depthEdgeScale, lumEdgeScale, sceneDarken, glowBoost],
                                  // Color = edge.
     {
+        // KH_FX_PX_REF: the step is the drawn line's width - one reference pixel - and a step spanning the same
+        // part of the picture measures the same depth and luma differences, so the thresholds hold at any size.
+        const int khol_d = max((int)KhFxPx(), 1);
         float dC = LinDepth(LoadDepthPS(px));
-        float dX = LinDepth(LoadDepthPS(px + int2(1, 0))) - dC;
-        float dY = LinDepth(LoadDepthPS(px + int2(0, 1))) - dC;
+        float dX = LinDepth(LoadDepthPS(px + int2(khol_d, 0))) - dC;
+        float dY = LinDepth(LoadDepthPS(px + int2(0, khol_d))) - dC;
         float depthEdge = saturate((abs(dX) + abs(dY)) / max(dC, 1.0f) * fxParams0.x);
         float lC = Luma(scene);
-        float lumEdge = saturate((abs(Luma(SampleScene(px + int2(1, 0))) - lC)
-                                + abs(Luma(SampleScene(px + int2(0, 1))) - lC)) * fxParams0.y);
+        float lumEdge = saturate((abs(Luma(SampleScene(px + int2(khol_d, 0))) - lC)
+                                + abs(Luma(SampleScene(px + int2(0, khol_d))) - lC)) * fxParams0.y);
         float edge = saturate(depthEdge + lumEdge);
         outc = scene * fxParams0.z + color.rgb * edge * fxParams0.w;
     }
@@ -472,7 +495,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
     else if (effect == 12)   // Halation: [threshold, intensity, radiusPx], color = glow tint
                              // (warm).
     {
-        int r = max((int)fxParams0.z, 1);
+        int r = max((int)(fxParams0.z * KhFxPx()), 1);   // KH_FX_PX_REF.
         const int2 dirs[8] = { int2(1,0), int2(-1,0), int2(0,1), int2(0,-1),
                                int2(1,1), int2(-1,1), int2(1,-1), int2(-1,-1) };
         float3 acc = 0.0f;
@@ -511,7 +534,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
             float w = 1.0f - saturate(length(suv - cuv) * 1.6f);
             w = w * w;
             float2 spf = saturate(suv) * float2(fxMeta.z, fxMeta.w);
-            float2 cdir = normalize(ghostVec + 1e-5f) * fxParams1.z;
+            float2 cdir = normalize(ghostVec + 1e-5f) * fxParams1.z * KhFxPx();   // KH_FX_PX_REF.
             float3 s;
             s.r = max(SampleScene(int2(spf + cdir)).r - fxParams0.x, 0.0f);
             s.g = max(SampleScene(int2(spf)).g        - fxParams0.x, 0.0f);
@@ -535,7 +558,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         {
             float t = (float)k / 16.0f;
             float w = pow(1.0f - t, max(fxParams0.w, 0.1f));
-            int off = (int)(t * fxParams0.z);
+            int off = (int)(t * fxParams0.z * KhFxPx());   // KH_FX_PX_REF.
             int2 d = (fxParams1.x > 0.5f) ? int2(0, off) : int2(off, 0);
             acc += (max(SampleScene(px + d) - fxParams0.x, 0.0f)
                   + max(SampleScene(px - d) - fxParams0.x, 0.0f)) * w;
@@ -564,7 +587,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
                 [unroll] for (int oy = -2; oy <= 2; ++oy)
                 [unroll] for (int ox = -2; ox <= 2; ++ox)
                 {
-                    float khsf_d = LinDepth(LoadDepthPS(sp + int2(ox, oy) * 3));
+                    float khsf_d = LinDepth(LoadDepthPS(sp + int2(ox, oy) * max((int)(3.0f * KhFxPx()), 1)));   // KH_FX_PX_REF.
                     vis += saturate((min(khsf_d, khsf_f) - khsf_f * 0.98f)
                                     / max(khsf_f * 0.019f, 1.0f));
                 }
@@ -612,7 +635,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         float band = floor(uv.y * bands);
         float bh = (Hash(float2(band, tf)) - 0.5f) * 2.0f;
         bh = sign(bh) * pow(abs(bh), 3.0f);
-        suv.x += bh * fxParams0.z * drive;
+        suv.x += bh * fxParams0.z * drive * KhFxPx();   // KH_FX_PX_REF.
 
         // Block corruption: coarse grid cells randomly displaced.
         if (fxParams1.y > 0.001f)
@@ -621,13 +644,13 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
             float ch = Hash(cell + tf * 1.7f);
             if (ch > 1.0f - 0.15f * saturate(fxParams1.y) * saturate(drive))
             {
-                float2 off = (float2(Hash(cell + 3.1f + tf), Hash(cell + 5.7f + tf)) - 0.5f) * 80.0f * drive;
+                float2 off = (float2(Hash(cell + 3.1f + tf), Hash(cell + 5.7f + tf)) - 0.5f) * 80.0f * drive * KhFxPx();   // KH_FX_PX_REF.
                 suv += off;
             }
         }
 
         // RGB channel split along the tear axis.
-        float split = fxParams1.x * drive;
+        float split = fxParams1.x * drive * KhFxPx();   // KH_FX_PX_REF.
         float3 col;
         col.r = SampleScene(int2(suv + float2(split, 0.0f))).r;
         col.g = SampleScene(int2(suv)).g;
@@ -636,9 +659,10 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         // Interference lines + static.
         if (fxParams1.z > 0.001f)
         {
-            float ln = Hash(float2(floor(i.pos.y * 0.5f), tf * 2.3f));
+            float ln = Hash(float2(floor(i.pos.y * 0.5f / KhFxPx()), tf * 2.3f));   // KH_FX_PX_REF: 2-px rows.
             float lineHit = step(1.0f - 0.2f * saturate(fxParams1.z) * saturate(drive), ln);
-            float n = Hash(i.pos.xy * 0.37f + tf * 13.7f);
+            // KH_FX_PX_REF: one static cell per reference pixel (the cell centre is the pixel centre at 1080).
+            float n = Hash((floor(i.pos.xy / KhFxPx()) + 0.5f) * 0.37f + tf * 13.7f);
             col = lerp(col, color.rgb * n, lineHit * 0.85f);
             col += (n - 0.5f) * fxParams1.z * drive * 0.35f;
         }
@@ -650,7 +674,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         // Wide-radius local contrast on luma only (the scene is rescaled by
         // L'/L, so saturation never moves). Two-ring 12-tap base estimate; the
         // detail term is soft-limited so strong edges do not halo.
-        float rad = max(fxParams0.y, 4.0f);
+        float rad = max(fxParams0.y, 4.0f) * KhFxPx();   // KH_FX_PX_REF.
         float lC = Luma(scene);
         float lB = 0.0f;
 
@@ -679,7 +703,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         // quantization. Static noise (no TAA exists to launder animation).
         float2 h = Hash2(i.pos.xy);
         float ang = h.x * 6.2832f;
-        float rad = (0.3f + 0.7f * h.y) * max(fxParams0.y, 2.0f);
+        float rad = (0.3f + 0.7f * h.y) * max(fxParams0.y, 2.0f) * KhFxPx();   // KH_FX_PX_REF (the dither stays per pixel).
         float2 dir = float2(cos(ang), sin(ang)) * rad;
         float3 avg = (SampleScene(px + int2(dir))
                     + SampleScene(px - int2(dir))
@@ -718,7 +742,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         [loop] for (int k = 0; k < 8; ++k)
         {
             float ang = float(k) * 0.7854f;
-            fogC += SampleScene(px + int2(cos(ang) * 7.0f, sin(ang) * 7.0f)) * 0.125f;
+            fogC += SampleScene(px + int2(cos(ang) * 7.0f * KhFxPx(), sin(ang) * 7.0f * KhFxPx())) * 0.125f;   // KH_FX_PX_REF.
         }
 
         fogC = lerp(fogC, Luma(fogC).xxx, 0.12f) * 1.02f;
@@ -736,7 +760,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         float3 base = lerp(scene, fogC, fogAmt * (1.0f - wiped) * 0.85f);
         // Refraction through the drops: inverted-wide sample + chroma split.
         float refr = max(fxParams0.w, 0.0f);
-        float2 offPx = -nrm * refr * (20.0f + fwdK * 8.0f);
+        float2 offPx = -nrm * refr * (20.0f + fwdK * 8.0f) * KhFxPx();   // KH_FX_PX_REF.
         int2 rp = px + int2(offPx);
         float3 through;
         through.g = SampleScene(rp).g;
@@ -750,7 +774,8 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         outc = col;
     }
     else if (effect == 21)   // Crt: [curvature, scanlines, lineCount, maskStrength] +
-                             // [aberrationPx, flicker, rollingBand, cornerRadius] +.
+                             // [aberrationPx, flicker, rollingBand, cornerRadius] +
+                             // [lineScroll (lines/s), wobblePx, maskSizePx].
     {
         float khc_curv = max(fxParams0.x, 0.0f);
         float2 khc_cc = uv - 0.5f;
@@ -766,11 +791,11 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         // sway. Only the picture wobbles; the tube mask and the grille live on
         // the glass.
         float khc_wob = ((Hash(float2(khc_line * 0.173f, floor(t * 24.0f) * 0.71f)) - 0.5f)
-                       + 0.35f * sin(t * 2.3f + khc_line * 0.61f)) * fxParams2.y;
+                       + 0.35f * sin(t * 2.3f + khc_line * 0.61f)) * fxParams2.y * KhFxPx();   // KH_FX_PX_REF.
 
         float2 khc_dpx = khc_duv * float2(fxMeta.z, fxMeta.w);
         khc_dpx.x += khc_wob;
-        float2 khc_fpx = khc_cc * khc_r2 * 4.0f * fxParams1.x;
+        float2 khc_fpx = khc_cc * khc_r2 * 4.0f * fxParams1.x * KhFxPx();   // KH_FX_PX_REF.
         float3 khc_col;
         khc_col.r = SampleScene(int2(khc_dpx + khc_fpx)).r;
         khc_col.g = SampleScene(int2(khc_dpx)).g;
@@ -784,12 +809,18 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
                              lerp(2.2f, 0.65f, khc_lum));
         khc_col *= lerp(1.0f, khc_beam * 1.32f, saturate(fxParams0.y));
 
-        // Aperture grille
+        // Aperture grille (KH_CRT_MASK): R, G and B stripes, one triad maskSizePx wide (fxParams2.z, pixels of a
+        // 1080-row picture - KH_FX_PX_REF - at least 1, default 3), each stripe's share of this pixel
+        // box-filtered, so any size draws at any resolution without moire; a triad only a few pixels wide
+        // averages toward grey, as a real one seen from afar does. On the glass: screen space, not curved.
+        // At the default size on 1080 rows each pixel is one whole stripe - the unfiltered triad exactly.
         float khc_mk = saturate(fxParams0.w);
-        int khc_m = (int)fmod(i.pos.x, 3.0f);
-        float3 khc_tri = khc_m == 0 ? float3(1.0f, 0.45f, 0.45f)
-                       : khc_m == 1 ? float3(0.45f, 1.0f, 0.45f)
-                                    : float3(0.45f, 0.45f, 1.0f);
+        const float khc_tp = max(fxParams2.z, 1.0f) * KhFxPx();
+        const float khc_xl = i.pos.x - 0.5f;
+        const float khc_xr = i.pos.x + 0.5f;
+        float3 khc_tri = 0.45f + 0.55f * float3(KhCrtStripe(khc_xr, khc_tp, 0.0f) - KhCrtStripe(khc_xl, khc_tp, 0.0f),
+                                                KhCrtStripe(khc_xr, khc_tp, 1.0f) - KhCrtStripe(khc_xl, khc_tp, 1.0f),
+                                                KhCrtStripe(khc_xr, khc_tp, 2.0f) - KhCrtStripe(khc_xl, khc_tp, 2.0f));
         khc_col *= lerp(float3(1.0f, 1.0f, 1.0f), khc_tri * 1.35f, khc_mk);
 
         // Rolling sync band: a soft dark bar drifting down the frame and

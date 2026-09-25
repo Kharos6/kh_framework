@@ -6,7 +6,7 @@
         float khfs_m00 = max(length(float3(viewProj[0].x, viewProj[1].x, viewProj[2].x)), 1e-6f);
         float khfs_m11 = max(length(float3(viewProj[0].y, viewProj[1].y, viewProj[2].y)), 1e-6f);
         float khfs_in = max(fxParams0.x, 0.0f);
-        float khfs_rm = fxParams0.y > 0.5f ? clamp(fxParams0.y, 2.0f, 96.0f)
+        float khfs_rm = fxParams0.y > 0.5f ? clamp(fxParams0.y, 2.0f, 96.0f) * KhFxPx()   // KH_FX_PX_REF.
                                            : clamp(fxMeta.w / 90.0f, 4.0f, 64.0f);
         int khfs_n = clamp((int)fxParams0.z, 4, 24);
         float khfs_cd = LinDepth(LoadDepthPS(px));

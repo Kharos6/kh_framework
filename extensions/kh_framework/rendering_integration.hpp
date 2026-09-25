@@ -373,6 +373,18 @@ namespace RenderIntegration {
 // a persistent fullscreen post-processing pass. affectUI takes 'scene' |
 // 'UI' | 'both' | true/false | 1/0.
 //
+// A size an effect's params give in pixels (blur, bloom and halation
+// radius, grain size, aberration, distortion, lens-flare chroma,
+// anamorphic length, glitch slice and split, clarity radius, deband range,
+// the CRT's aberration, wobble and mask size, fog scatter's radius) is in pixels of a
+// 1080-row picture and scales with the picture's height, so a look holds
+// at any resolution - here, in addLocalPostFX and on effect meshes alike.
+// The effects' own built-in pixel spans scale the same way (the outline's
+// width, glitch rows, blocks and static, the rain lens's film blur and
+// refraction, the sun flare's occlusion test). What stays per pixel:
+// sharpen's 1-px neighbourhood, anti-aliasing, per-pixel dither and
+// sampling noise, and SSGI's sample-grid widths (its radius is in metres).
+//
 // Returns the khr_ handle, or '' after reporting the fault
 //
 // ---- STRING = addLocalPostFX ARRAY -----------------------------------------
@@ -27118,6 +27130,7 @@ inline int kh_effect_from_gv(const game_value& gv, std::string& out_hlsl, std::s
 // space here. False if a provided entry is a non-number (nil keeps the
 // default).
 inline bool set_effect_params(RenderObject& obj, const auto_array<game_value>* params) {
+    // Every ...Px lane below is in pixels of a 1080-row picture (KH_FX_PX_REF, effect.hlsl's KhFxPx).
     static const float defaults[KH_MAX_EFFECT + 1][12] = {
         {},
         {},
@@ -27148,7 +27161,7 @@ inline bool set_effect_params(RenderObject& obj, const auto_array<game_value>* p
         { 1.6f, 16.0f, 0.6f },   // 19 deband: threshold(1/255), rangePx, grain(1/255).
         { 0.6f, 1.0f, 0.35f, 1.0f },   // 20 rainlens: intensity, speed, condensation, refract
                                        // (fx[4.7] system: camera velocity).
-        { 0.12f, 0.45f, 540.0f, 0.35f, 1.5f, 0.25f, 0.3f, 0.06f, 4.0f, 1.5f },
+        { 0.12f, 0.45f, 540.0f, 0.35f, 1.5f, 0.25f, 0.3f, 0.06f, 4.0f, 1.5f, 3.0f },   // 21 crt: lane 10 = maskSizePx.
         { 0.7f, 4.0f, 12.0f, 0.15f, 2.0f, 1.0f, 300.0f, 3.0f, 0.65f },
         { 1.0f, 0.0f, 12.0f },
     };

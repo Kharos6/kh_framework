@@ -28,8 +28,13 @@ namespace RenderIntegration {
 // ===========================================================================
 //
 // ---- STRING = addRender3D ARRAY --------------------------------------------
-// [[x,y,zASL], rotation, mesh]. rotation = nil | yaw | [pitch, yaw, roll];
-// mesh = builtin name | registry index | .fbx path (nil = box).
+// [[x,y,zASL], rotation, mesh]. rotation = nil | yaw | [pitch, yaw, roll] |
+// [vectorDir, vectorUp]; mesh = builtin name | registry index | .fbx path
+// (nil = box). [vectorDir, vectorUp] is the pair setVectorDirAndUp takes, in
+// world axes: the direction is kept and the up made square to it (a zero or
+// parallel pair is refused). The mesh rotations below - updateRender3D's
+// rotation and attachRotation, a chain's endRotation - take the same four
+// forms.
 //
 // Either the position or the rotation slot may instead be a game OBJECT, and
 // the mesh then follows that object's transform every frame (the two are
@@ -51,7 +56,9 @@ namespace RenderIntegration {
 // model's origin sits on the object's, every bone whose name matches one of
 // the object's memory points (case-insensitive) follows that point, a bone
 // with no match follows its parent bone, and a bone with neither stays with
-// the object; the rest pose must put the bones on the memory points.
+// the object; the rest pose must put the bones on the memory points. What no
+// bone moves - a vertex with no weight, or all of a mesh with no skeleton or
+// none of whose bones match (a builtin, say) - stays with the object too.
 // Rotation is then true (the default: the model turns with the object) or
 // false (it keeps its rotation while the bones keep their positions relative
 // to the object). The mesh is drawn at its authored scale, its bounds follow
@@ -82,7 +89,14 @@ namespace RenderIntegration {
 // Every true/false here also takes 1/0, except the rotation slot beside a
 // plain object, where a bare number is a yaw.
 //
-// Returns the khr_ handle, or '' after reporting the fault
+// An object to follow that is null fails the command without a report - in
+// the position slot, [object, memoryPoint], [object, true] or [object,
+// false], or the rotation slot - and so does a live one whose transform
+// cannot be read at the call, except under [object, memoryPoint], where
+// the mesh is made and follows the point once it can be read.
+//
+// Returns the khr_ handle, or '' after reporting the fault (or without a
+// report, as above)
 //
 // ---- BOOL = updateRender3D ARRAY -------------------------------------------
 // [handle, property, value] or [[handle, property, value], ...]. Update a
@@ -246,8 +260,9 @@ namespace RenderIntegration {
 // mesh's own position and rotation: nil leaves it free, true follows the end
 // bone's memory point on a bound skeleton (else its place in the mesh),
 // false holds it where it stood when the chain started, [x, y, zASL] or yaw
-// / [pitch, yaw, roll] hold it there in the world, an object follows that
-// object, and endPosition [object, memoryPoint] follows a memory point -
+// / [pitch, yaw, roll] / [vectorDir, vectorUp] hold it there in the world,
+// an object follows that object, and endPosition [object, memoryPoint]
+// follows a memory point -
 // which links two objects with one chain; endRotation true then follows that
 // memory point's (or that object's) rotation. endPosition places the end
 // bone's point - its head unless endPoint says "tail" - and an end held away
@@ -297,9 +312,10 @@ namespace RenderIntegration {
 // then says whether the model turns with the object, and size is ignored
 // until the binding ends; [object, false] is a plain attach to the object.
 //
-// attachPosition [x, y, z] and attachRotation nil|yaw|[pitch, yaw, roll]
-// offset the mesh WITHIN the frame it is attached to, in the followed
-// object's own axes (x right, y forward, z up) rather than world axes - so a
+// attachPosition [x, y, z] and attachRotation nil|yaw|[pitch, yaw, roll]|
+// [vectorDir, vectorUp] offset the mesh WITHIN the frame it is attached to,
+// in the followed object's own axes (x right, y forward, z up; the vectors
+// too) rather than world axes - so a
 // mesh can sit off the memory point or turned away from it. Each affects
 // only its own lane and only while that lane follows an object; both are
 // remembered across a detach, and nil clears.
@@ -343,8 +359,14 @@ namespace RenderIntegration {
 // Every true/false value also takes 1/0, except rotation and chain
 // endRotation, where a bare number is a yaw.
 //
-// Faults are reported; the batch form returns true only if every triple
-// applied
+// Faults are reported, except an object to follow that is null - in
+// position or rotation (every form above that names one), a skeletal
+// binding's parent when its mesh changes, or a chain's endPosition /
+// endRotation (endPosition's [object, memoryPoint] too) - and a live one
+// whose transform cannot be read at the call, for position (an object,
+// [object, true] or [object, false]) and rotation (an object): that triple
+// fails without a report. The batch form returns true only if every
+// triple applied
 //
 // ---- STRING = addPostFX ARRAY ----------------------------------------------
 // [effect, params?, [r,g,b,a]?, band?, blend?, affectUI?, duration?]. Create
@@ -8152,7 +8174,8 @@ struct RenderObject {
     float size_mul[3] = { 1.0f, 1.0f, 1.0f };
     float rot[3] = {};   // [pitch, yaw, roll] degrees, arma sense (yaw) clockwise from north about
                          // z-up, pitch nose-up about x-east, roll clockwise about y-north; heading
-                         // applied outermost).
+                         // applied outermost). Zero when rot_m came from [vectorDir, vectorUp]
+                         // (kh_set_rotation_rows): the script typed axes, not angles.
     float rot_m[9] = { 1.0f, 0.0f, 0.0f,
                        0.0f, 1.0f, 0.0f,
                        0.0f, 0.0f, 1.0f };
@@ -8351,8 +8374,9 @@ inline void kh_pos_exact(const RenderObject& khpe_o, double khpe_p[3]) {
 // Split out of kh_set_rotation so that KH_ATTACH_OFFSET's attach-space
 // rotation is built by exactly this code and the two cannot drift; the split
 // is the only change to what kh_set_rotation does. TWO call sites, counted:
-// kh_set_rotation below, and the attachRotation property in
-// sqf_integration.hpp.
+// kh_set_rotation below, and kh_rotation_m_from_gv in sqf_integration.hpp,
+// the parser every other typed rotation (attachRotation, a chain's
+// endRotation) takes its matrix from.
 inline void kh_rotation_matrix(float khr_m[9], float pitch_deg, float yaw_deg, float roll_deg) {
     if (pitch_deg == 0.0f && yaw_deg == 0.0f && roll_deg == 0.0f) {
         const float khr_id[9] = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f };
@@ -8406,6 +8430,39 @@ inline void kh_set_rotation(RenderObject& o, float pitch_deg, float yaw_deg, flo
     o.rot[2] = roll_deg;
     o.rotated = pitch_deg != 0.0f || yaw_deg != 0.0f || roll_deg != 0.0f;
     kh_rotation_matrix(o.rot_m, pitch_deg, yaw_deg, roll_deg);
+}
+
+// KH_ROT_VECTORS - the matrix for a [vectorDir, vectorUp] pair in SQF's axes (x east / right, y north / forward, z
+// up), as setVectorDirAndUp takes it: the direction kept, the up made square to it, aside = up x dir. The rows are
+// the ones kh_rotation_matrix and a raw read hand back (aside / up / dir, engine axes: x east, y up, z north). False
+// for a zero, non-finite or (to within 0.06 degrees) parallel pair.
+inline bool kh_rotation_from_vectors(float khrv_m[9], const float khrv_dir[3], const float khrv_up[3]) {
+    float khrv_d[3] = { khrv_dir[0], khrv_dir[2], khrv_dir[1] };   // SQF -> engine axes.
+    float khrv_u[3] = { khrv_up[0], khrv_up[2], khrv_up[1] };
+    const float khrv_dl = kh_cloth_v3_len(khrv_d);
+    const float khrv_ul = kh_cloth_v3_len(khrv_u);
+    if (!(khrv_dl > 1.0e-6f && khrv_dl < 1.0e30f) || !(khrv_ul > 1.0e-6f && khrv_ul < 1.0e30f)) return false;
+    for (int k = 0; k < 3; ++k) { khrv_d[k] /= khrv_dl; khrv_u[k] /= khrv_ul; }
+    const float khrv_k = kh_cloth_v3_dot(khrv_u, khrv_d);
+    for (int k = 0; k < 3; ++k) khrv_u[k] -= khrv_k * khrv_d[k];
+    const float khrv_sl = kh_cloth_v3_len(khrv_u);
+    if (!(khrv_sl >= 1.0e-3f)) return false;
+    for (int k = 0; k < 3; ++k) khrv_u[k] /= khrv_sl;
+    khrv_m[0] = khrv_u[1] * khrv_d[2] - khrv_u[2] * khrv_d[1];
+    khrv_m[1] = khrv_u[2] * khrv_d[0] - khrv_u[0] * khrv_d[2];
+    khrv_m[2] = khrv_u[0] * khrv_d[1] - khrv_u[1] * khrv_d[0];
+    for (int k = 0; k < 3; ++k) { khrv_m[3 + k] = khrv_u[k]; khrv_m[6 + k] = khrv_d[k]; }
+    return true;
+}
+// KH_ROT_VECTORS - kh_set_rotation's twin for the vector form: no euler (zero), the matrix as given, rotated unless
+// it is exactly the identity (kh_attach_rotated's test).
+inline void kh_set_rotation_rows(RenderObject& o, const float khsr_m[9]) {
+    static const float khsr_id[9] = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f };
+    o.rot[0] = 0.0f;
+    o.rot[1] = 0.0f;
+    o.rot[2] = 0.0f;
+    memcpy(o.rot_m, khsr_m, sizeof(o.rot_m));
+    o.rotated = memcmp(khsr_m, khsr_id, sizeof(khsr_id)) != 0;
 }
 
 // Enclosing half extents (engine axes) of a rotated, per-axis-scaled mesh cube:
@@ -8996,17 +9053,19 @@ struct KhAttach {
     uintptr_t gts_xb = 0, gts_pb = 0, gts_rb = 0;
     uint32_t  gts_par_off = KH_ATTACH_OFF_NONE, gts_rot_off = KH_ATTACH_OFF_NONE;
     uintptr_t gts_par_vb = 0, gts_par_bb = 0, gts_rot_vb = 0, gts_rot_bb = 0;
+    uintptr_t gts_par_avb = 0, gts_par_abb = 0, gts_rot_avb = 0, gts_rot_abb = 0;   // KH_ATTACH_VS_CACHE.
     std::vector<uint32_t>  gts_off;
-    std::vector<uintptr_t> gts_vb, gts_bb;
+    std::vector<uintptr_t> gts_vb, gts_bb, gts_avb, gts_abb;
     // KH_RT_PAINT_READ: the render thread's own read of what the sampler last read (rt_par: the parent or its helper;
     // rt_rot: the rotation object, nil when the lane has none of its own), with its own page caches, for the cast
     // fire's paint when this frame's own sample has not landed. rt_snap is that read, rt_cyc the cycle it is for.
     game_value rt_par, rt_rot;
     uint32_t  rt_par_off = KH_ATTACH_OFF_NONE, rt_rot_off = KH_ATTACH_OFF_NONE;
     uintptr_t rt_par_vb = 0, rt_par_bb = 0, rt_rot_vb = 0, rt_rot_bb = 0, rt_pb = 0, rt_rb = 0, rt_xb = 0;
+    uintptr_t rt_par_avb = 0, rt_par_abb = 0, rt_rot_avb = 0, rt_rot_abb = 0;   // KH_ATTACH_VS_CACHE.
     uint32_t  rt_gen = 0;
     std::vector<uint32_t>  rt_off;
-    std::vector<uintptr_t> rt_vb, rt_bb;
+    std::vector<uintptr_t> rt_vb, rt_bb, rt_avb, rt_abb;
     KhGtSnap  rt_snap;
     uint64_t  rt_cyc = ~0ull;
     // KH_ATTACH_MAN_HELPER: a character's own visual state is not written while it rides in a vehicle (the engine
@@ -9339,7 +9398,8 @@ inline bool kh_attach_obj_dead(const game_value& khod_gv) {
 // all, against four per mesh per frame for the command path below.
 //
 // EVERY NUMBER HERE WAS MEASURED - by a one-shot memory-sweep probe, since
-// retired, on a player, a vehicle and a house. The visual-state pointer is at object + 0xD0 on a 64-bit build
+// retired, on a player, a vehicle and a house. The simulation copy's state pointer is at object + 0xD0 on a 64-bit
+// build (the visual copy's, 0x1A0, is recorded below)
 // (0xA0 holds two packed 32-bit values - 0x0000000c000000d9 on the player -
 // which is what game_data_object::get_position_matrix dereferences with no
 // build branch, and why it crashed). visState1 starts one pointer past it and
@@ -9491,8 +9551,12 @@ inline bool kh_attach_vs_eval(const float* khvs_f, float khvs_pos[3], float khvs
 // One visual state, structure only - no reference, nothing assumed but the
 // measured layout recorded above. khvs_pos comes back in RenderObject::pos's
 // [x, y, zASL] and IS the anchor - nothing is applied to it afterwards.
-// khvs_vb caches the last state pointer confirmed readable, khvs_bb the last
-// object base whose slot at khvs_off was.
+// khvs_vb caches the last state pointer confirmed readable - and it stays
+// confirmed only while reads through it validate: a pointer whose bytes do
+// not read as a state (0x1A0 on an object class nobody measured) is probed
+// again on its next read, as it was before any lane cached a visual attempt
+// (KH_ATTACH_VS_CACHE) - khvs_bb the last object base whose slot at
+// khvs_off was.
 //
 // BOTH dereferences are page-gated. This is the one site in either
 // header that dereferences gd->object->object rather than using it as an
@@ -9530,7 +9594,7 @@ inline bool kh_attach_vs_read(uintptr_t khvs_base, uint32_t khvs_off, uintptr_t&
             if (khvs_c.v == khvs_v && memcmp(khvs_c.f, khvs_f, sizeof(khvs_f)) == 0) {
                 khvs_m->old[khvs_s] = static_cast<uint8_t>(khvs_w ^ 1u);   // The other way ages.
                 if (khvs_c.reached && khvs_diag) *khvs_diag = khvs_c.diag;
-                if (!khvs_c.ok) return false;
+                if (!khvs_c.ok) { khvs_vb = 0; return false; }   // Not a state: confirmed no longer.
                 memcpy(khvs_rot, khvs_c.rot, sizeof(khvs_c.rot));
                 memcpy(khvs_pos, khvs_c.pos, sizeof(khvs_c.pos));
                 if (khvs_len_out) memcpy(khvs_len_out, khvs_c.len, sizeof(khvs_c.len));
@@ -9559,7 +9623,7 @@ inline bool kh_attach_vs_read(uintptr_t khvs_base, uint32_t khvs_off, uintptr_t&
         memcpy(khvs_e->len, khvs_el, sizeof(khvs_el));
     }
     if (khvs_diag) *khvs_diag = khvs_dg;
-    if (!khvs_ok) return false;
+    if (!khvs_ok) { khvs_vb = 0; return false; }   // Not a state: confirmed no longer.
     memcpy(khvs_rot, khvs_er, sizeof(khvs_er));
     memcpy(khvs_pos, khvs_ep, sizeof(khvs_ep));
     if (khvs_len_out) memcpy(khvs_len_out, khvs_el, sizeof(khvs_el));
@@ -9571,12 +9635,21 @@ inline bool kh_attach_vs_read(uintptr_t khvs_base, uint32_t khvs_off, uintptr_t&
 // carries one; the simulation copy only for an object that carries none (a house), which is the scripter's choice of
 // object. The first visual read that lands locks the copy for good; until one does, each read tries it and takes the
 // simulation copy for that read, so a slot not yet readable at the bind cannot demote an object that has one. No
-// comparison between the copies, no step back for the simulation one. khrw_off is the caller's record of the choice
-// (KH_ATTACH_OFF_NONE: none yet), khrw_vb / khrw_bb the page caches of that offset. False: not readable this time.
+// comparison between the copies, no step back for the simulation one - with one exception, KH_ATTACH_VS_STALE: a
+// visual copy the engine never writes (an object with no model to draw) keeps its default state, exactly the world
+// origin, and such a read neither locks nor stands while the simulation copy puts the object anywhere else; that
+// read is taken instead, and the next read asks the visual copy again. It locks only when the simulation copy reads
+// the origin too; while that copy cannot be read, the read is not readable (false), nothing locks, and the next
+// read asks both again. khrw_off is the caller's record of the choice
+// (KH_ATTACH_OFF_NONE: none yet), khrw_vb / khrw_bb the page caches of that offset. KH_ATTACH_VS_CACHE: khrw_avb /
+// khrw_abb are the visual attempt's own page caches while no visual read has locked (they become khrw_vb / khrw_bb
+// when one does), so an object whose visual copy is absent or never written pays no page probe per read once its
+// pages are confirmed - the same keyed rule as every lane cache: probed again when the object or the state
+// pointer changes. False: not readable this time.
 // Every read of a followed object comes here: the Draw3D sampler (proxies, parents, a rotation lane's own object),
 // the one-shot reads at the commands, the chains.
 inline bool kh_attach_raw(const game_value& khrw_gv, uint32_t& khrw_off, uintptr_t& khrw_vb,
-                          uintptr_t& khrw_bb, float khrw_pos[3], float khrw_rot[9],
+                          uintptr_t& khrw_bb, uintptr_t& khrw_avb, uintptr_t& khrw_abb, float khrw_pos[3], float khrw_rot[9],
                           KhAttachDiag* khrw_diag = nullptr) {
     if (KH_ATTACH_VS_RENDER == 0u || KH_ATTACH_VS_SIM == 0u) return false;
     if (!kh_attach_is_obj(khrw_gv)) return false;
@@ -9589,11 +9662,29 @@ inline bool kh_attach_raw(const game_value& khrw_gv, uint32_t& khrw_off, uintptr
     if (khrw_off == KH_ATTACH_VS_RENDER) {   // Locked: the visual copy, and nothing else, for good.
         return kh_attach_vs_read(khrw_base, KH_ATTACH_VS_RENDER, khrw_vb, khrw_bb, khrw_pos, khrw_rot, khrw_diag);
     }
-    uintptr_t khrw_vw = 0, khrw_bw = 0;
-    if (kh_attach_vs_read(khrw_base, KH_ATTACH_VS_RENDER, khrw_vw, khrw_bw, khrw_pos, khrw_rot, khrw_diag)) {   // It has one.
+    if (kh_attach_vs_read(khrw_base, KH_ATTACH_VS_RENDER, khrw_avb, khrw_abb, khrw_pos, khrw_rot, khrw_diag)) {   // It has one.
+        if (khrw_pos[0] == 0.0f && khrw_pos[1] == 0.0f && khrw_pos[2] == 0.0f) {   // KH_ATTACH_VS_STALE.
+            float khrw_sp[3], khrw_sr[9];
+            KhAttachDiag khrw_sd;
+            if (khrw_off != KH_ATTACH_VS_SIM) {   // The caches held another offset's pages.
+                khrw_off = KH_ATTACH_VS_SIM;
+                khrw_vb = 0;
+                khrw_bb = 0;
+            }
+            // Nothing to compare with: where the object is stays unknown, so this read is not readable (the
+            // lanes hold their last pose) and nothing locks - an origin the simulation copy has not confirmed is
+            // no proof the visual copy is real, and a lock is for good.
+            if (!kh_attach_vs_read(khrw_base, KH_ATTACH_VS_SIM, khrw_vb, khrw_bb, khrw_sp, khrw_sr, &khrw_sd)) return false;
+            if (!(khrw_sp[0] == 0.0f && khrw_sp[1] == 0.0f && khrw_sp[2] == 0.0f)) {
+                memcpy(khrw_pos, khrw_sp, sizeof(khrw_sp));
+                memcpy(khrw_rot, khrw_sr, sizeof(khrw_sr));
+                if (khrw_diag) *khrw_diag = khrw_sd;
+                return true;
+            }
+        }
         khrw_off = KH_ATTACH_VS_RENDER;
-        khrw_vb = khrw_vw;   // The page caches become the visual copy's.
-        khrw_bb = khrw_bw;
+        khrw_vb = khrw_avb;   // The page caches become the visual copy's.
+        khrw_bb = khrw_abb;
         return true;
     }
     if (khrw_off != KH_ATTACH_VS_SIM) {   // The caches held another offset's pages.
@@ -9611,7 +9702,8 @@ inline bool kh_attach_read(const game_value& khar_gv, float khar_pos[3], float k
     uint32_t  khar_off = KH_ATTACH_OFF_NONE;
     uintptr_t khar_vb = 0;
     uintptr_t khar_bb = 0;
-    return kh_attach_raw(khar_gv, khar_off, khar_vb, khar_bb, khar_pos, khar_rot);
+    uintptr_t khar_avb = 0, khar_abb = 0;
+    return kh_attach_raw(khar_gv, khar_off, khar_vb, khar_bb, khar_avb, khar_abb, khar_pos, khar_rot);
 }
 
 // rotated is the skip flag the bounds and the vertex path read, so it has to
@@ -10140,8 +10232,16 @@ inline void kh_attach_org_make(const game_value& khom_gv, game_value& khom_out, 
     if (khom_it != g_pxy_pool.end()) khom_from = khom_it->second.made_seq + 1u;
 }
 
+// KH_NULL_SILENT - an attach target that is null (or whose transform cannot be read) is no fault the script hears
+// of: the command still fails - nothing created, the property not applied - and reports nothing. A function below
+// that finds one puts this marker in err instead of a sentence (kh_attach_bone_make, kh_skel_make,
+// kh_attach_apply); sqf_integration.hpp sets it at its own such sites, and every report site there says nothing
+// for it (kh_err_silent).
+static constexpr const char* KH_ERR_SILENT = "KH_ERR_SILENT";
+inline bool kh_err_silent(const std::string& khes_e) { return khes_e == KH_ERR_SILENT; }
+
 // KH_ATTACH_BONE - the memory-point proxy. GAME THREAD ONLY (SQF calls). False
-// with a caller-facing sentence in err. follow_bone is always true: the proxy
+// with a caller-facing sentence in err (KH_ERR_SILENT for a null parent). follow_bone is always true: the proxy
 // tracks the full transform, and the script's rotation flag only selects
 // whether the rotation lane reads it, so toggling rotation never re-attaches.
 inline bool kh_attach_bone_make(const game_value& khbm_parent, const std::string& khbm_mem,
@@ -10151,7 +10251,7 @@ inline bool kh_attach_bone_make(const game_value& khbm_parent, const std::string
         return false;
     }
     if (kh_attach_obj_dead(khbm_parent)) {
-        err = "position object is null - nothing to follow";
+        err = KH_ERR_SILENT;   // KH_NULL_SILENT.
         return false;
     }
     if (khbm_mem.empty()) {
@@ -10249,7 +10349,7 @@ inline bool kh_skel_plan(const object& khsp_p, const KhSkelBones& khsp_b,
 // (follow-bone, so the proxy carries the bone's animated rotation). GAME
 // THREAD ONLY: one SQF call for the list and two per kept memory point, so
 // every caller is a command entry point holding no lock. False with a
-// caller-facing sentence in err; every proxy made before a failure is already
+// caller-facing sentence in err (KH_ERR_SILENT for a null parent); every proxy made before a failure is already
 // in khsm_proxies, where the caller's KhSkelOwn queues it for deletion.
 inline bool kh_skel_make(const game_value& khsm_parent, const KhSkelBones& khsm_bones,
                          std::vector<game_value>& khsm_proxies, std::vector<std::string>& khsm_mems,
@@ -10259,7 +10359,7 @@ inline bool kh_skel_make(const game_value& khsm_parent, const KhSkelBones& khsm_
         return false;
     }
     if (kh_attach_obj_dead(khsm_parent)) {
-        err = "position object is null - nothing to follow";
+        err = KH_ERR_SILENT;   // KH_NULL_SILENT.
         return false;
     }
     const object khsm_p = static_cast<object>(khsm_parent);
@@ -10404,15 +10504,14 @@ inline bool kh_attach_has_binding(const std::string& khhb_h) {
 }
 
 // Attach a lane AND take the transform now, so the mesh is in place on the
-// frame the command runs rather than one later. False with a caller-facing
-// sentence in err: a script gets the fault at the call site instead of a mesh
-// that silently never moves.
+// frame the command runs rather than one later. False when the object cannot
+// be read (null, or not readable now), with KH_ERR_SILENT in err: the
+// property fails without a report (KH_NULL_SILENT), and nothing is attached.
 inline bool kh_attach_apply(const std::string& khaa_h, const game_value& khaa_gv,
                             bool khaa_rot, RenderObject& khaa_o, std::string& err) {
     float khaa_p[3], khaa_r[9];
     if (!kh_attach_read(khaa_gv, khaa_p, khaa_r)) {
-        err = khaa_rot ? "rotation object is null - nothing to follow"
-                       : "position object is null - nothing to follow";
+        err = KH_ERR_SILENT;   // KH_NULL_SILENT.
         return false;
     }
     if (khaa_rot) {
@@ -10626,9 +10725,9 @@ inline const game_value& kh_attach_org_read(KhAttach& khor_a, const game_value& 
 }
 // The sampler's read of one object, its validation noted for getRenderStats (KH_ATTACH_DIAG).
 inline bool kh_gts_read(const game_value& khgr_gv, uint32_t& khgr_off, uintptr_t& khgr_vb, uintptr_t& khgr_bb,
-                        float khgr_pos[3], float khgr_rot[9]) {
+                        uintptr_t& khgr_avb, uintptr_t& khgr_abb, float khgr_pos[3], float khgr_rot[9]) {
     KhAttachDiag khgr_dg;
-    const bool khgr_ok = kh_attach_raw(khgr_gv, khgr_off, khgr_vb, khgr_bb, khgr_pos, khgr_rot, &khgr_dg);
+    const bool khgr_ok = kh_attach_raw(khgr_gv, khgr_off, khgr_vb, khgr_bb, khgr_avb, khgr_abb, khgr_pos, khgr_rot, &khgr_dg);
     kh_attach_diag_note(khgr_ok, khgr_dg);
     return khgr_ok;
 }
@@ -10878,8 +10977,10 @@ struct KhCrewEnt {
     float      lq[9] = {};       // and its rows in it (cr * the vehicle's rows^-1).
     uint64_t   born = 0;         // g_crew_frame when the entry (and its helper reference) was made.
     uintptr_t  g_hb = 0, g_hvb = 0, g_hbb = 0, g_vb = 0, g_vvb = 0, g_vbb = 0;   // The sampler's page caches.
+    uintptr_t  g_havb = 0, g_habb = 0, g_vavb = 0, g_vabb = 0;   // KH_ATTACH_VS_CACHE: their visual attempts'.
     uint32_t   g_hoff = KH_ATTACH_OFF_NONE, g_voff = KH_ATTACH_OFF_NONE;
     uintptr_t  r_hb = 0, r_hvb = 0, r_hbb = 0, r_vb = 0, r_vvb = 0, r_vbb = 0;   // The paint read's (render thread).
+    uintptr_t  r_havb = 0, r_habb = 0, r_vavb = 0, r_vabb = 0;   // KH_ATTACH_VS_CACHE: their visual attempts'.
     uint32_t   r_hoff = KH_ATTACH_OFF_NONE, r_voff = KH_ATTACH_OFF_NONE;
     intercept::client::EHIdentifierHandle eh_in, eh_out;
 };
@@ -10891,12 +10992,12 @@ static uint64_t g_crew_serial = 0;   // Game thread; restarted with the table (k
 static uint64_t g_crew_frame = 0;    // Game thread: kh_crew_sync's count; restarted with the table.
 // One raw read with a page cache of the entry's own, restarted when the object behind it changes.
 inline bool kh_crew_read(const game_value& khcr_gv, uintptr_t& khcr_b, uint32_t& khcr_off, uintptr_t& khcr_vb,
-                         uintptr_t& khcr_bb, float khcr_p[3], float khcr_r[9]) {
+                         uintptr_t& khcr_bb, uintptr_t& khcr_avb, uintptr_t& khcr_abb, float khcr_p[3], float khcr_r[9]) {
     if (khcr_gv.is_nil() || kh_attach_obj_dead(khcr_gv)) return false;
     const uintptr_t khcr_nb = kh_attach_base_of(khcr_gv);
     if (khcr_nb == 0) return false;
-    if (khcr_b != khcr_nb) { khcr_b = khcr_nb; khcr_off = KH_ATTACH_OFF_NONE; khcr_vb = 0; khcr_bb = 0; }
-    return kh_attach_raw(khcr_gv, khcr_off, khcr_vb, khcr_bb, khcr_p, khcr_r, nullptr);
+    if (khcr_b != khcr_nb) { khcr_b = khcr_nb; khcr_off = KH_ATTACH_OFF_NONE; khcr_vb = 0; khcr_bb = 0; khcr_avb = 0; khcr_abb = 0; }
+    return kh_attach_raw(khcr_gv, khcr_off, khcr_vb, khcr_bb, khcr_avb, khcr_abb, khcr_p, khcr_r, nullptr);
 }
 // A point in a pose's frame and back: positions SQF order, the pose's rows engine axes (row-vector convention, as
 // kh_attach_raw hands them back; each row divided by its own length squared, so a scaled pose round-trips too).
@@ -11002,7 +11103,7 @@ inline void kh_crew_measure() {
         khcm_e.d_ok = false;
         if (!khcm_e.in || !khcm_e.t_ok || !kh_crew_placed(khcm_e)) { khcm_e.l_ok = false; continue; }
         float khcm_p[3], khcm_r[9];
-        if (!kh_crew_read(khcm_e.helper, khcm_e.g_hb, khcm_e.g_hoff, khcm_e.g_hvb, khcm_e.g_hbb, khcm_p, khcm_r)) {
+        if (!kh_crew_read(khcm_e.helper, khcm_e.g_hb, khcm_e.g_hoff, khcm_e.g_hvb, khcm_e.g_hbb, khcm_e.g_havb, khcm_e.g_habb, khcm_p, khcm_r)) {
             khcm_e.l_ok = false;
             continue;
         }
@@ -11010,7 +11111,7 @@ inline void kh_crew_measure() {
         memcpy(khcm_e.cr, khcm_e.tr_ok ? khcm_e.tr : khcm_r, sizeof(khcm_e.cr));
         kh_crew_delta(khcm_r, khcm_e.cr, khcm_e.dm);
         khcm_e.d_ok = true;
-        khcm_e.l_ok = kh_crew_read(khcm_e.veh, khcm_e.g_vb, khcm_e.g_voff, khcm_e.g_vvb, khcm_e.g_vbb, khcm_p, khcm_r);
+        khcm_e.l_ok = kh_crew_read(khcm_e.veh, khcm_e.g_vb, khcm_e.g_voff, khcm_e.g_vvb, khcm_e.g_vbb, khcm_e.g_vavb, khcm_e.g_vabb, khcm_p, khcm_r);
         float khcm_vi[9];
         if (khcm_e.l_ok) khcm_e.l_ok = kh_crew_inv3(khcm_r, khcm_vi);
         if (khcm_e.l_ok) {
@@ -11225,8 +11326,7 @@ inline uint32_t kh_rt_paint_read() {
         // A helper the game thread deleted since the sampler read it (the sampler's own rule, kh_attach_org_read): its
         // state no longer moves - this binding keeps today's pick for the frame.
         if (kh_attach_obj_dead(a.rt_par) || kh_attach_obj_dead(a.rt_rot)) continue;
-        const size_t np = a.skel ? a.skel_proxy.size() : (a.proxy.is_nil() ? 0u : 1u);
-        if (a.skel && np == 0u) continue;
+        const size_t np = a.skel ? a.skel_proxy.size() : (a.proxy.is_nil() ? 0u : 1u);   // 0: the parent alone (the sampler's rule).
         const uint32_t gen = a.skel ? a.skel_gen : 0u;
         const uintptr_t xb = kh_attach_base_of(kh_attach_key_gv(a));
         const uintptr_t pb = kh_attach_base_of(a.rt_par);
@@ -11235,12 +11335,18 @@ inline uint32_t kh_rt_paint_read() {
             a.rt_off.assign(np, KH_ATTACH_OFF_NONE);
             a.rt_vb.assign(np, 0u);
             a.rt_bb.assign(np, 0u);
+            a.rt_avb.assign(np, 0u);
+            a.rt_abb.assign(np, 0u);
             a.rt_gen = gen;
             a.rt_xb = xb;
         }
-        if (a.rt_pb != pb) { a.rt_pb = pb; a.rt_par_off = KH_ATTACH_OFF_NONE; a.rt_par_vb = 0; a.rt_par_bb = 0; }
+        if (a.rt_pb != pb) {
+            a.rt_pb = pb; a.rt_par_off = KH_ATTACH_OFF_NONE; a.rt_par_vb = 0; a.rt_par_bb = 0; a.rt_par_avb = 0; a.rt_par_abb = 0;
+        }
         const uintptr_t rb = a.rt_rot.is_nil() ? 0u : kh_attach_base_of(a.rt_rot);
-        if (a.rt_rb != rb) { a.rt_rb = rb; a.rt_rot_off = KH_ATTACH_OFF_NONE; a.rt_rot_vb = 0; a.rt_rot_bb = 0; }
+        if (a.rt_rb != rb) {
+            a.rt_rb = rb; a.rt_rot_off = KH_ATTACH_OFF_NONE; a.rt_rot_vb = 0; a.rt_rot_bb = 0; a.rt_rot_avb = 0; a.rt_rot_abb = 0;
+        }
         // KH_CREW_LAG: a crew member's origin helper and vehicle too, once a sample has placed it in that vehicle.
         KhCrewEnt* cw = nullptr;
         if (!g_crew.empty()) {
@@ -11260,25 +11366,27 @@ inline uint32_t kh_rt_paint_read() {
         khrp_a.assign(n, 0.0f);
         khrp_b.assign(n, 0.0f);
         auto read_all = [&](float* out, bool& rot_ok) -> bool {
-            if (!kh_attach_raw(a.rt_par, a.rt_par_off, a.rt_par_vb, a.rt_par_bb, out, out + 3, nullptr)) return false;
+            if (!kh_attach_raw(a.rt_par, a.rt_par_off, a.rt_par_vb, a.rt_par_bb, a.rt_par_avb, a.rt_par_abb, out, out + 3,
+                               nullptr)) return false;
             for (size_t j = 0; j < np; ++j) {
                 const game_value& x = a.skel ? a.skel_proxy[j] : a.proxy;
                 float* const o = out + (j + 1u) * 12u;
-                if (!kh_attach_raw(x, a.rt_off[j], a.rt_vb[j], a.rt_bb[j], o, o + 3, nullptr)) return false;
+                if (!kh_attach_raw(x, a.rt_off[j], a.rt_vb[j], a.rt_bb[j], a.rt_avb[j], a.rt_abb[j], o, o + 3, nullptr)) return false;
             }
             rot_ok = false;
             if (rb != 0u) {
                 float* const o = out + (np + 1u) * 12u;
-                rot_ok = kh_attach_raw(a.rt_rot, a.rt_rot_off, a.rt_rot_vb, a.rt_rot_bb, o, o + 3, nullptr);
+                rot_ok = kh_attach_raw(a.rt_rot, a.rt_rot_off, a.rt_rot_vb, a.rt_rot_bb, a.rt_rot_avb, a.rt_rot_abb, o, o + 3,
+                                       nullptr);
             }
             if (cw) {   // KH_CREW_LAG.
                 float* const o = out + (np + 2u) * 12u;
-                if (!kh_crew_read(cw->helper, cw->r_hb, cw->r_hoff, cw->r_hvb, cw->r_hbb, o, o + 3) ||
-                    !kh_crew_read(cw->veh, cw->r_vb, cw->r_voff, cw->r_vvb, cw->r_vbb, o + 12, o + 15)) return false;
+                if (!kh_crew_read(cw->helper, cw->r_hb, cw->r_hoff, cw->r_hvb, cw->r_hbb, cw->r_havb, cw->r_habb, o, o + 3) ||
+                    !kh_crew_read(cw->veh, cw->r_vb, cw->r_voff, cw->r_vvb, cw->r_vbb, cw->r_vavb, cw->r_vabb, o + 12, o + 15)) return false;
             }
             if (cwr) {   // KH_CREW_LAG.
                 float* const o = out + nc * 12u;
-                if (!kh_crew_read(cwr->veh, cwr->r_vb, cwr->r_voff, cwr->r_vvb, cwr->r_vbb, o, o + 3)) return false;
+                if (!kh_crew_read(cwr->veh, cwr->r_vb, cwr->r_voff, cwr->r_vvb, cwr->r_vbb, cwr->r_vavb, cwr->r_vabb, o, o + 3)) return false;
             }
             return true;
         };
@@ -11531,7 +11639,9 @@ inline bool kh_attach_gt_snap() {
         // KH_ATTACH_MAN_HELPER: khgt_lpar is that object, khgt_par what is read for it.
         const game_value& khgt_lpar = kh_attach_parent_gv(khgt_a);
         const size_t khgt_np = khgt_a.skel ? khgt_a.skel_proxy.size() : (khgt_a.proxy.is_nil() ? 0u : 1u);
-        if (khgt_lpar.is_nil() || (khgt_a.skel && khgt_np == 0u)) continue;
+        // A skeletal binding with no proxies (a mesh with no skeleton, or none of whose bones matched a memory point)
+        // is sampled for its parent alone: its root, and so all of its geometry, follows the object.
+        if (khgt_lpar.is_nil()) continue;
         const game_value& khgt_par = kh_attach_org_read(khgt_a, khgt_lpar, khgt_seq);
         khgt_a.rt_par = khgt_par;        // KH_RT_PAINT_READ: what the render thread reads for the parent.
         khgt_a.rt_rot = game_value();    // Set below when the rotation lane follows an object of its own.
@@ -11543,6 +11653,8 @@ inline bool kh_attach_gt_snap() {
             khgt_a.gts_off.assign(khgt_np, KH_ATTACH_OFF_NONE);   // Another binding on this handle: its caches are not ours.
             khgt_a.gts_vb.assign(khgt_np, 0u);
             khgt_a.gts_bb.assign(khgt_np, 0u);
+            khgt_a.gts_avb.assign(khgt_np, 0u);
+            khgt_a.gts_abb.assign(khgt_np, 0u);
             khgt_a.gts_gen = khgt_gen;
             khgt_a.gts_xb = khgt_xb;
         }
@@ -11551,12 +11663,15 @@ inline bool kh_attach_gt_snap() {
             khgt_a.gts_par_off = KH_ATTACH_OFF_NONE;
             khgt_a.gts_par_vb = 0;
             khgt_a.gts_par_bb = 0;
+            khgt_a.gts_par_avb = 0;
+            khgt_a.gts_par_abb = 0;
         }
         KhGtSnap& khgt_s = khgt_a.gts[khgt_a.gts_w % KH_GTS_N];
         khgt_s.ok = false;   // Not a sample until every read of it lands.
         khgt_s.rot_ok = false;
         float khgt_p[3], khgt_r[9];
-        if (!kh_gts_read(khgt_par, khgt_a.gts_par_off, khgt_a.gts_par_vb, khgt_a.gts_par_bb, khgt_p, khgt_r)) continue;
+        if (!kh_gts_read(khgt_par, khgt_a.gts_par_off, khgt_a.gts_par_vb, khgt_a.gts_par_bb, khgt_a.gts_par_avb,
+                         khgt_a.gts_par_abb, khgt_p, khgt_r)) continue;
         memcpy(khgt_s.par, khgt_p, sizeof(khgt_p));
         memcpy(khgt_s.par + 3, khgt_r, sizeof(khgt_r));
         // KH_CREW_LAG: a crew member's helpers moved by its correction - the parent where its origin helper is read.
@@ -11576,7 +11691,8 @@ inline bool kh_attach_gt_snap() {
         bool khgt_ok = true;
         for (size_t khgt_j = 0; khgt_j < khgt_np; ++khgt_j) {
             const game_value& khgt_x = khgt_a.skel ? khgt_a.skel_proxy[khgt_j] : khgt_a.proxy;
-            if (!kh_gts_read(khgt_x, khgt_a.gts_off[khgt_j], khgt_a.gts_vb[khgt_j], khgt_a.gts_bb[khgt_j], khgt_p, khgt_r)) {
+            if (!kh_gts_read(khgt_x, khgt_a.gts_off[khgt_j], khgt_a.gts_vb[khgt_j], khgt_a.gts_bb[khgt_j],
+                             khgt_a.gts_avb[khgt_j], khgt_a.gts_abb[khgt_j], khgt_p, khgt_r)) {
                 if (!khgt_prev_ok) { khgt_ok = false; break; }
                 kh_gts_carry(khgt_prev.par, khgt_s.par, &khgt_prev.px[khgt_j * 12u], &khgt_s.px[khgt_j * 12u]);
                 if (khgt_prev.pxd.size() == khgt_np * 3u) {   // KH_PXY_SMOOTH: the carried pose keeps its delta.
@@ -11603,8 +11719,11 @@ inline bool kh_attach_gt_snap() {
                 khgt_a.gts_rot_off = KH_ATTACH_OFF_NONE;
                 khgt_a.gts_rot_vb = 0;
                 khgt_a.gts_rot_bb = 0;
+                khgt_a.gts_rot_avb = 0;
+                khgt_a.gts_rot_abb = 0;
             }
-            if (kh_gts_read(khgt_ro, khgt_a.gts_rot_off, khgt_a.gts_rot_vb, khgt_a.gts_rot_bb, khgt_p, khgt_r)) {
+            if (kh_gts_read(khgt_ro, khgt_a.gts_rot_off, khgt_a.gts_rot_vb, khgt_a.gts_rot_bb, khgt_a.gts_rot_avb,
+                            khgt_a.gts_rot_abb, khgt_p, khgt_r)) {
                 memcpy(khgt_s.rot, khgt_p, sizeof(khgt_p));
                 memcpy(khgt_s.rot + 3, khgt_r, sizeof(khgt_r));
                 khgt_s.rot_ok = true;
@@ -11725,10 +11844,10 @@ inline void kh_attach_step(ID3D11DeviceContext* khap_ctx = nullptr) {
                 const size_t khap_np = khap_a.skel_proxy.size();
                 khap_a.skel_smp_gen = khap_a.skel_gen;
                 khap_a.skel_smp.resize(khap_np * 12u);
-                memcpy(khap_a.skel_smp.data(), khap_gs->px.data(), khap_np * 12u * sizeof(float));
+                if (khap_np != 0u) memcpy(khap_a.skel_smp.data(), khap_gs->px.data(), khap_np * 12u * sizeof(float));
                 memcpy(khap_a.skel_smp_par, khap_gs->par, sizeof(float) * 12u);
                 khap_a.skel_smp_d.assign(khap_np * 3u, 0.0f);   // KH_PXY_SMOOTH: the bones' deltas (none: zero).
-                if (khap_gs->pxd.size() == khap_np * 3u) {
+                if (khap_np != 0u && khap_gs->pxd.size() == khap_np * 3u) {
                     memcpy(khap_a.skel_smp_d.data(), khap_gs->pxd.data(), khap_np * 3u * sizeof(float));
                 }
                 khap_a.skel_smp_ok = true;
@@ -15220,7 +15339,7 @@ inline bool kh_chain_mesh_ok(int khcm_mesh) {
 // kinds; true resolves at the command to the rotation of whatever the
 // position follows (MEM, OBJ) or BONE.
 enum KhChainEndKind : uint8_t { KH_CHE_FREE = 0, KH_CHE_BONE, KH_CHE_HOLD, KH_CHE_WORLD, KH_CHE_OBJ, KH_CHE_MEM };
-struct KhChainRead { uint32_t off = KH_ATTACH_OFF_NONE; uintptr_t vb = 0; uintptr_t bb = 0; };
+struct KhChainRead { uint32_t off = KH_ATTACH_OFF_NONE; uintptr_t vb = 0; uintptr_t bb = 0; uintptr_t avb = 0; uintptr_t abb = 0; };
 struct KhChainCfg {
     uint64_t seq = 0;                   // The object this entry belongs to (RenderObject::seq).
     KhChainParams par = kh_chain_defaults();
@@ -18464,8 +18583,8 @@ inline void kh_chain_prepare(bool khcp_gts) {
         if (khcp_c.pos == KH_CHE_MEM || khcp_c.rot == KH_CHE_MEM) {
             float khcp_pp[3], khcp_pr[9];
             if (!kh_attach_obj_dead(khcp_c.pos_obj) && !kh_attach_obj_dead(khcp_c.proxy) &&
-                kh_attach_raw(khcp_c.proxy, khcp_c.rd_pos.off, khcp_c.rd_pos.vb, khcp_c.rd_pos.bb, khcp_p, khcp_mr) &&
-                kh_attach_raw(khcp_c.pos_obj, khcp_c.rd_par.off, khcp_c.rd_par.vb, khcp_c.rd_par.bb, khcp_pp, khcp_pr)) {
+                kh_attach_raw(khcp_c.proxy, khcp_c.rd_pos.off, khcp_c.rd_pos.vb, khcp_c.rd_pos.bb, khcp_c.rd_pos.avb, khcp_c.rd_pos.abb, khcp_p, khcp_mr) &&
+                kh_attach_raw(khcp_c.pos_obj, khcp_c.rd_par.off, khcp_c.rd_par.vb, khcp_c.rd_par.bb, khcp_c.rd_par.avb, khcp_c.rd_par.abb, khcp_pp, khcp_pr)) {
                 // KH_CREW_LAG: the memory point moved by its character's correction, its reach tested against where
                 // the character is drawn (its own state holds the get-in pose while it is crew).
                 const KhCrewEnt* const khcp_cw = kh_crew_of(khcp_c.pos_obj);
@@ -18493,7 +18612,7 @@ inline void kh_chain_prepare(bool khcp_gts) {
             }
         }
         if (khcp_c.pos == KH_CHE_OBJ && !kh_attach_obj_dead(khcp_c.pos_obj) &&
-            kh_attach_raw(khcp_c.pos_obj, khcp_c.rd_pos.off, khcp_c.rd_pos.vb, khcp_c.rd_pos.bb, khcp_p, khcp_r)) {
+            kh_attach_raw(khcp_c.pos_obj, khcp_c.rd_pos.off, khcp_c.rd_pos.vb, khcp_c.rd_pos.bb, khcp_c.rd_pos.avb, khcp_c.rd_pos.abb, khcp_p, khcp_r)) {
             khcp_c.live_pos[0] = khcp_p[0]; khcp_c.live_pos[1] = khcp_p[2]; khcp_c.live_pos[2] = khcp_p[1];
             const KhCrewEnt* const khcp_cw = kh_crew_of(khcp_c.pos_obj);   // KH_CREW_LAG: where it is drawn.
             if (khcp_cw) {
@@ -18504,7 +18623,7 @@ inline void kh_chain_prepare(bool khcp_gts) {
             khcp_c.live_p = true;
         }
         if (khcp_c.rot == KH_CHE_OBJ && !kh_attach_obj_dead(khcp_c.rot_obj) &&
-            kh_attach_raw(khcp_c.rot_obj, khcp_c.rd_rot.off, khcp_c.rd_rot.vb, khcp_c.rd_rot.bb, khcp_p, khcp_r)) {
+            kh_attach_raw(khcp_c.rot_obj, khcp_c.rd_rot.off, khcp_c.rd_rot.vb, khcp_c.rd_rot.bb, khcp_c.rd_rot.avb, khcp_c.rd_rot.abb, khcp_p, khcp_r)) {
             memcpy(khcp_c.live_rot, khcp_r, sizeof(khcp_c.live_rot));
             const KhCrewEnt* const khcp_cw = kh_crew_of(khcp_c.rot_obj);   // KH_CREW_LAG: turned as drawn.
             if (khcp_cw) memcpy(khcp_c.live_rot, khcp_cw->cr, sizeof(khcp_c.live_rot));

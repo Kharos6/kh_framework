@@ -215,6 +215,7 @@ class CfgVehicles
 		editorCategory = "KH_Helpers";
 		editorSubcategory = "KH_Invisible";
 		model = "\x\kh\addons\main\models\SM_HelperRectangle_1x1x2.p3d";
+		icon = "iconObject_1x1";
 		vehicleClass = "KH_Helpers";
 		scope = 2;
 	};

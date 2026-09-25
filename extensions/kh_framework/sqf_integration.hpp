@@ -6475,9 +6475,9 @@ static void update_unit_states() {
 //    its own with its index.
 //
 // Rotation argument: nil = identity, a bare number = heading (yaw), or
-// [pitch, yaw, roll] degrees (ARMA sense - see kh_set_rotation). ONE parser
-// for addRender3D (slot 1, right after position) and updateRender3D
-// "rotation", so the two cannot drift. Returns false on a malformed value.
+// [pitch, yaw, roll] degrees (ARMA sense - see kh_set_rotation). The euler
+// reader under kh_rotation_m_from_gv (below), which every typed rotation
+// goes through. Returns false on a malformed value.
 static bool kh_rotation_from_gv(const game_value& khrg_v, float& khrg_p, float& khrg_y, float& khrg_r) {
     khrg_p = 0.0f; khrg_y = 0.0f; khrg_r = 0.0f;
     if (khrg_v.is_nil()) return true;
@@ -6493,6 +6493,42 @@ static bool kh_rotation_from_gv(const game_value& khrg_v, float& khrg_p, float& 
     if (ra.size() >= 1) khrg_p = static_cast<float>(ra[0]);
     if (ra.size() >= 2) khrg_y = static_cast<float>(ra[1]);
     if (ra.size() >= 3) khrg_r = static_cast<float>(ra[2]);
+    return true;
+}
+
+// Every typed rotation - addRender3D's slot, updateRender3D "rotation" and
+// "attachRotation", a chain's "endRotation" - as its matrix (engine axes,
+// rows aside / up / dir): the euler forms above through kh_rotation_matrix,
+// or [vectorDir, vectorUp] (setVectorDirAndUp's pair, two arrays of three
+// numbers) through kh_rotation_from_vectors. vec: the vector form was given
+// (p / y / r come back zero); id: no rotation (an all-zero euler or nil, or a
+// pair that is exactly the identity). False on a malformed value.
+static bool kh_rotation_m_from_gv(const game_value& v, float m[9], float& p, float& y, float& r, bool& vec, bool& id) {
+    p = 0.0f; y = 0.0f; r = 0.0f;
+    vec = false;
+    id = true;
+    if (!v.is_nil() && v.type_enum() == game_data_type::ARRAY) {
+        auto& khrm_a = v.to_array();
+        if (khrm_a.size() == 2 && khrm_a[0].type_enum() == game_data_type::ARRAY && khrm_a[1].type_enum() == game_data_type::ARRAY) {
+            float khrm_dir[3], khrm_up[3];
+            for (int khrm_i = 0; khrm_i < 2; ++khrm_i) {
+                auto& khrm_v = khrm_a[khrm_i].to_array();
+                if (khrm_v.size() != 3) return false;
+                for (int k = 0; k < 3; ++k) {
+                    if (khrm_v[k].type_enum() != game_data_type::SCALAR) return false;
+                    (khrm_i == 0 ? khrm_dir : khrm_up)[k] = static_cast<float>(khrm_v[k]);
+                }
+            }
+            if (!RenderIntegration::kh_rotation_from_vectors(m, khrm_dir, khrm_up)) return false;
+            static const float khrm_id[9] = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f };
+            vec = true;
+            id = memcmp(m, khrm_id, sizeof(khrm_id)) == 0;
+            return true;
+        }
+    }
+    if (!kh_rotation_from_gv(v, p, y, r)) return false;
+    RenderIntegration::kh_rotation_matrix(m, p, y, r);
+    id = p == 0.0f && y == 0.0f && r == 0.0f;
     return true;
 }
 
@@ -6769,8 +6805,7 @@ static game_value add_render3d_sqf(game_value_parameter args) {
         } else if (khr_pair && khr_splain) {
             // KH_SKEL: [object, false] is the plain attach an OBJECT asks for.
             if (!RenderIntegration::kh_attach_read(khr_bparent, khr_ap, khr_ar)) {
-                kh_rv_report("addRender3D", "position object is null - nothing to follow");
-                return game_value("");
+                return game_value("");   // KH_NULL_SILENT.
             }
             obj.pos[0] = khr_ap[0]; obj.pos[1] = khr_ap[1]; obj.pos[2] = khr_ap[2];
             khr_apos = khr_bparent;
@@ -6785,7 +6820,7 @@ static game_value add_render3d_sqf(game_value_parameter args) {
                 return game_value("");
             }
             if (!RenderIntegration::kh_attach_bone_make(khr_bparent, khr_bmem, khr_bown.proxy, err)) {
-                kh_rv_report("addRender3D", err);
+                if (!RenderIntegration::kh_err_silent(err)) kh_rv_report("addRender3D", err);   // KH_NULL_SILENT.
                 return game_value("");
             }
             // Frame one is seeded from the PARENT, not the proxy: attachTo has
@@ -6806,8 +6841,7 @@ static game_value add_render3d_sqf(game_value_parameter args) {
             return game_value("");
         } else if (RenderIntegration::kh_attach_is_obj(arr[0])) {
             if (!RenderIntegration::kh_attach_read(arr[0], khr_ap, khr_ar)) {
-                kh_rv_report("addRender3D", "position object is null - nothing to follow");
-                return game_value("");
+                return game_value("");   // KH_NULL_SILENT.
             }
             obj.pos[0] = khr_ap[0]; obj.pos[1] = khr_ap[1]; obj.pos[2] = khr_ap[2];
             khr_apos = arr[0];
@@ -6841,19 +6875,20 @@ static game_value add_render3d_sqf(game_value_parameter args) {
             }
         } else if (RenderIntegration::kh_attach_is_obj(arr[1])) {
             if (!RenderIntegration::kh_attach_read(arr[1], khr_ap, khr_ar)) {
-                kh_rv_report("addRender3D", "rotation object is null - nothing to follow");
-                return game_value("");
+                return game_value("");   // KH_NULL_SILENT.
             }
             memcpy(obj.rot_m, khr_ar, sizeof(obj.rot_m));
             obj.rotated = RenderIntegration::kh_attach_rotated(khr_ar);
             khr_arot = arr[1];
         } else {
-            float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f;
-            if (!kh_rotation_from_gv(arr[1], khr_p, khr_y, khr_r)) {
-                kh_rv_report("addRender3D", "rotation must be nil, a number (yaw), [pitch, yaw, roll] degrees, an object to follow, or true/false when the position follows an object (true = turn with it)");
+            float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f, khr_m[9];
+            bool khr_vec = false, khr_id = true;
+            if (!kh_rotation_m_from_gv(arr[1], khr_m, khr_p, khr_y, khr_r, khr_vec, khr_id)) {
+                kh_rv_report("addRender3D", "rotation must be nil, a number (yaw), [pitch, yaw, roll] degrees, [vectorDir, vectorUp] (non-zero, not parallel), an object to follow, or true/false when the position follows an object (true = turn with it)");
                 return game_value("");
             }
-            RenderIntegration::kh_set_rotation(obj, khr_p, khr_y, khr_r);
+            if (khr_vec) RenderIntegration::kh_set_rotation_rows(obj, khr_m);
+            else RenderIntegration::kh_set_rotation(obj, khr_p, khr_y, khr_r);
         }
 
         if (!arr[2].is_nil()) {   // Nil = mesh 0 (box).
@@ -6877,23 +6912,26 @@ static game_value add_render3d_sqf(game_value_parameter args) {
             // one seeded from the parent (the proxies have not been simulated
             // yet; the skin holds the rest pose until they have). The mesh
             // starts in its rest box, lod_locked like a cloth - a decimated
-            // level has vertices no bone weights.
+            // level has vertices no bone weights. A parent that cannot be read
+            // is refused (without a report, KH_NULL_SILENT), as [object, false]
+            // refuses it, rather than leaving the mesh at the map origin.
+            if (!RenderIntegration::kh_attach_read(khr_bparent, khr_ap, khr_ar)) {
+                return game_value("");   // KH_NULL_SILENT.
+            }
             if (!RenderIntegration::kh_skel_make(khr_bparent, RenderIntegration::kh_skel_bone_names(obj.mesh),
                                                  khr_sown.proxies, khr_smem, err)) {
-                kh_rv_report("addRender3D", err);
+                if (!RenderIntegration::kh_err_silent(err)) kh_rv_report("addRender3D", err);   // KH_NULL_SILENT.
                 return game_value("");
             }
             obj.skel = true;
             obj.lod_lock = true;
             RenderIntegration::kh_skel_rest_box(obj);
-            if (RenderIntegration::kh_attach_read(khr_bparent, khr_ap, khr_ar)) {
-                if (khr_brot) {
-                    memcpy(obj.rot_m, khr_ar, sizeof(obj.rot_m));
-                    obj.rotated = RenderIntegration::kh_attach_rotated(khr_ar);
-                }
-                RenderIntegration::kh_skel_centre(obj, khr_ap);
-                obj.pos[0] = khr_ap[0]; obj.pos[1] = khr_ap[1]; obj.pos[2] = khr_ap[2];
+            if (khr_brot) {
+                memcpy(obj.rot_m, khr_ar, sizeof(obj.rot_m));
+                obj.rotated = RenderIntegration::kh_attach_rotated(khr_ar);
             }
+            RenderIntegration::kh_skel_centre(obj, khr_ap);
+            obj.pos[0] = khr_ap[0]; obj.pos[1] = khr_ap[1]; obj.pos[2] = khr_ap[2];
         }
 
         const std::string khr_h = RenderIntegration::add_render_object(obj);
@@ -7222,7 +7260,7 @@ static bool kh_rv_chain_sim(const game_value& val, RenderIntegration::RenderObje
             } else if (kh_gv_bool(v, khch_b)) {   // KH_BOOL_SCALAR.
                 khch_c.pos = khch_b ? R::KH_CHE_BONE : R::KH_CHE_HOLD;
             } else if (R::kh_attach_is_obj(v)) {
-                if (R::kh_attach_obj_dead(v)) { err = "chain parameter 'endPosition' object is null - nothing to follow"; return false; }
+                if (R::kh_attach_obj_dead(v)) { err = R::KH_ERR_SILENT; return false; }   // KH_NULL_SILENT.
                 khch_c.pos = R::KH_CHE_OBJ;
                 khch_c.pos_obj = v;
             } else if (kh_rv_bone_pair(v, khch_par, khch_mem, khch_bad, khch_skel, khch_plain, err)) {
@@ -7231,7 +7269,7 @@ static bool kh_rv_chain_sim(const game_value& val, RenderIntegration::RenderObje
                     return false;
                 }
                 if (!R::kh_attach_bone_make(khch_par, khch_mem, khch_own.proxy, err)) {
-                    err = "chain parameter 'endPosition': " + err;
+                    if (!R::kh_err_silent(err)) err = "chain parameter 'endPosition': " + err;   // KH_NULL_SILENT: kept whole.
                     return false;
                 }
                 khch_c.pos = R::KH_CHE_MEM;
@@ -7260,16 +7298,16 @@ static bool kh_rv_chain_sim(const game_value& val, RenderIntegration::RenderObje
                 if (static_cast<bool>(v)) khch_c.rot_true = true;   // Resolved against the position below.
                 else khch_c.rot = R::KH_CHE_HOLD;
             } else if (R::kh_attach_is_obj(v)) {
-                if (R::kh_attach_obj_dead(v)) { err = "chain parameter 'endRotation' object is null - nothing to follow"; return false; }
+                if (R::kh_attach_obj_dead(v)) { err = R::KH_ERR_SILENT; return false; }   // KH_NULL_SILENT.
                 khch_c.rot = R::KH_CHE_OBJ;
                 khch_c.rot_obj = v;
             } else {
                 float khch_pi = 0.0f, khch_ya = 0.0f, khch_ro = 0.0f;
-                if (!kh_rotation_from_gv(v, khch_pi, khch_ya, khch_ro)) {
-                    err = "chain parameter 'endRotation' must be nil, true, false, a number (yaw), [pitch, yaw, roll] degrees, or an object";
+                bool khch_vec = false, khch_id = true;
+                if (!kh_rotation_m_from_gv(v, khch_c.rot_w, khch_pi, khch_ya, khch_ro, khch_vec, khch_id)) {
+                    err = "chain parameter 'endRotation' must be nil, true, false, a number (yaw), [pitch, yaw, roll] degrees, [vectorDir, vectorUp] (non-zero, not parallel), or an object";
                     return false;
                 }
-                R::kh_rotation_matrix(khch_c.rot_w, khch_pi, khch_ya, khch_ro);
                 khch_c.rot = R::KH_CHE_WORLD;
             }
         }
@@ -7377,6 +7415,13 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
                 // A new binding's root follows the parent's rotation; one that
                 // replaces a binding keeps that binding's rotation state, as
                 // re-pointing a bone does.
+                // A parent that cannot be read is refused without a report, as
+                // [object, false] (kh_attach_apply) refuses it (KH_NULL_SILENT).
+                float khs_p[3], khs_r[9];
+                if (!RenderIntegration::kh_attach_read(khb_parent, khs_p, khs_r)) {
+                    err = RenderIntegration::KH_ERR_SILENT;
+                    return false;
+                }
                 std::vector<std::string> khs_mem;
                 if (!RenderIntegration::kh_skel_make(khb_parent, RenderIntegration::kh_skel_bone_names(obj.mesh, handle, obj.seq),
                                                      khs_own.proxies, khs_mem, err)) return false;
@@ -7386,17 +7431,14 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
                 obj.skel = true;
                 obj.lod_lock = true;
                 RenderIntegration::kh_skel_rest_box(obj);
-                float khs_p[3], khs_r[9];
-                if (RenderIntegration::kh_attach_read(khb_parent, khs_p, khs_r)) {
-                    RenderIntegration::kh_attach_offset_pos(obj, khs_r, khs_p);   // The root, then its centre.
-                    if (khs_rot) {
-                        RenderIntegration::kh_attach_offset_rot(obj, khs_r);
-                        memcpy(obj.rot_m, khs_r, sizeof(obj.rot_m));
-                        obj.rotated = RenderIntegration::kh_attach_rotated(khs_r);
-                    }
-                    RenderIntegration::kh_skel_centre(obj, khs_p);
-                    obj.pos[0] = khs_p[0]; obj.pos[1] = khs_p[1]; obj.pos[2] = khs_p[2];
+                RenderIntegration::kh_attach_offset_pos(obj, khs_r, khs_p);   // The root, then its centre.
+                if (khs_rot) {
+                    RenderIntegration::kh_attach_offset_rot(obj, khs_r);
+                    memcpy(obj.rot_m, khs_r, sizeof(obj.rot_m));
+                    obj.rotated = RenderIntegration::kh_attach_rotated(khs_r);
                 }
+                RenderIntegration::kh_skel_centre(obj, khs_p);
+                obj.pos[0] = khs_p[0]; obj.pos[1] = khs_p[1]; obj.pos[2] = khs_p[2];
                 return true;
             }
             khs_leave();
@@ -7463,8 +7505,8 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
         return true;
     }
     if (prop == "attachrotation") {
-        // KH_ATTACH_OFFSET, the rotation twin: the SAME [pitch, yaw, roll]
-        // parser and the same matrix builder the "rotation" property uses,
+        // KH_ATTACH_OFFSET, the rotation twin: the SAME parser
+        // (kh_rotation_m_from_gv) and matrix builders the "rotation" property uses,
         // applied inside the followed object's frame instead of in world axes.
         // nil - and equally an explicit all-zero triple - clears it.
         //
@@ -7474,12 +7516,12 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
         // rotation relative to a frame the mesh is not using would be a guess.
         // A script that wants that sets "rotation" instead.
         float khao_pi = 0.0f, khao_ya = 0.0f, khao_ro = 0.0f;
-        if (!kh_rotation_from_gv(val, khao_pi, khao_ya, khao_ro)) {
-            err = "attachRotation must be nil, a number (yaw), or [pitch, yaw, roll] degrees, taken relative to the attach point";
+        bool khao_vec = false, khao_id = true;
+        if (!kh_rotation_m_from_gv(val, obj.attach_rot, khao_pi, khao_ya, khao_ro, khao_vec, khao_id)) {
+            err = "attachRotation must be nil, a number (yaw), [pitch, yaw, roll] degrees, or [vectorDir, vectorUp] (non-zero, not parallel), taken relative to the attach point";
             return false;
         }
-        RenderIntegration::kh_rotation_matrix(obj.attach_rot, khao_pi, khao_ya, khao_ro);
-        obj.attach_rot_on = khao_pi != 0.0f || khao_ya != 0.0f || khao_ro != 0.0f;
+        obj.attach_rot_on = !khao_id;
         RenderIntegration::kh_attach_reseed(handle, obj);
         return true;
     }
@@ -7515,9 +7557,11 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
         if (RenderIntegration::kh_attach_is_obj(val))
             return RenderIntegration::kh_attach_apply(handle, val, true, obj, err);
         RenderIntegration::kh_attach_set(handle, game_value(), true);   // Any other value detaches.
-        float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f;
-        if (!kh_rotation_from_gv(val, khr_p, khr_y, khr_r)) { err = "rotation must be nil, a number (yaw), [pitch, yaw, roll] degrees, an object to follow, or true/false while the position follows an object, a memory point or a skeletal binding"; return false; }
-        RenderIntegration::kh_set_rotation(obj, khr_p, khr_y, khr_r);
+        float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f, khr_m[9];
+        bool khr_vec = false, khr_id = true;
+        if (!kh_rotation_m_from_gv(val, khr_m, khr_p, khr_y, khr_r, khr_vec, khr_id)) { err = "rotation must be nil, a number (yaw), [pitch, yaw, roll] degrees, [vectorDir, vectorUp] (non-zero, not parallel), an object to follow, or true/false while the position follows an object, a memory point or a skeletal binding"; return false; }
+        if (khr_vec) RenderIntegration::kh_set_rotation_rows(obj, khr_m);
+        else RenderIntegration::kh_set_rotation(obj, khr_p, khr_y, khr_r);
         return true;
     }
     if (prop == "mesh") {
@@ -7708,6 +7752,7 @@ static bool kh_update_one(const char* cmd, bool want_fullscreen,
     const bool ok = want_fullscreen ? kh_apply_postfx_prop(staged, prop, t[2], err)
                                     : kh_apply_render3d_prop(staged, handle, prop, t[2], err);
     if (!ok) {
+        if (RenderIntegration::kh_err_silent(err)) return false;   // KH_NULL_SILENT: the triple fails unreported.
         kh_rv_report(cmd, "property '" + static_cast<std::string>(t[1]) + "'" + where + ": " + err);
         return false;
     }

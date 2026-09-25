@@ -16,7 +16,7 @@ if (_entity isKindOf "Man") then {
 
             if !(_renderHandlers isNil _key) then {
                 {
-                    removeRenderHandler _x;
+                    removeRenderHandler (_x select 0);
                 } forEach (_renderHandlers get _key);
 
                 _renderHandlers set [_key, []];
@@ -26,11 +26,11 @@ if (_entity isKindOf "Man") then {
                 private _currentHandlers = [];
 
                 {
-                    private _renderHandler = addRender3D [[_entity, ["", _x >> "bindSkeleton", nil] call KH_fnc_getConfigValue], getNumber (_x >> "followRotation"), getText (_x >> "model")];
+                    private _renderHandler = addRender3D [[_entity, ["", _x >> "bindSkeleton", true] call KH_fnc_getConfigValue], (getNumber (_x >> "followRotation")) isEqualTo 1, getText (_x >> "model")];
 
                     private _properties = ((configProperties [
                         _x, 
-                        "!((toLowerANSI (configName _x)) in ['model', 'bindskeleton', 'followrotation', 'mesh']);",
+                        "!((toLowerANSI (configName _x)) in ['model', 'mesh', 'bindskeleton', 'followrotation']);",
                         true
                     ]) apply {
                         [_renderHandler, configName _x, ["", _x, nil] call KH_fnc_getConfigValue];
@@ -114,7 +114,7 @@ if (_entity isKindOf "Man") then {
 
             if !(_renderHandlers isNil _slot) then {
                 {
-                    removeRenderHandler _x;
+                    removeRenderHandler (_x select 0);
                 } forEach (_renderHandlers get _slot);
 
                 _renderHandlers set [_slot, []];
@@ -123,11 +123,11 @@ if (_entity isKindOf "Man") then {
             private _currentHandlers = [];
 
             {
-                private _renderHandler = addRender3D [[_entity, ["", _x >> "bindSkeleton", nil] call KH_fnc_getConfigValue], getNumber (_x >> "followRotation"), getText (_x >> "model")];
+                private _renderHandler = addRender3D [[_entity, ["", _x >> "bindSkeleton", true] call KH_fnc_getConfigValue], (getNumber (_x >> "followRotation")) isEqualTo 1, getText (_x >> "model")];
 
                 private _properties = ((configProperties [
                     _x, 
-                    "!((toLowerANSI (configName _x)) in ['model', 'bindskeleton', 'followrotation', 'mesh']);",
+                    "!((toLowerANSI (configName _x)) in ['model', 'mesh', 'bindskeleton', 'followrotation']);",
                     true
                 ]) apply {
                     [_renderHandler, configName _x, ["", _x, nil] call KH_fnc_getConfigValue];
@@ -149,15 +149,15 @@ private _currentHandlers = [];
 
 {
     private _renderHandler = if (!is3DEN && ((getNumber (_x >> "static")) isEqualTo 1)) then {
-        addRender3D [getPosWorldVisual _entity, getNumber (_x >> "followRotation"), getText (_x >> "model")];
+        addRender3D [getPosWorldVisual _entity, [vectorDirVisual _entity, vectorUpVisual _entity], getText (_x >> "model")];
     }
     else {
-        addRender3D [[_entity, ["", _x >> "bindSkeleton", nil] call KH_fnc_getConfigValue], getNumber (_x >> "followRotation"), getText (_x >> "model")];
+        addRender3D [[_entity, ["", _x >> "bindSkeleton", true] call KH_fnc_getConfigValue], (getNumber (_x >> "followRotation")) isEqualTo 1, getText (_x >> "model")];
     };
     
     private _properties = ((configProperties [
         _x, 
-        "!((toLowerANSI (configName _x)) in ['model', 'bindskeleton', 'followrotation', 'mesh']);",
+        "!((toLowerANSI (configName _x)) in ['model', 'mesh', 'bindskeleton', 'followrotation']);",
         true
     ]) apply {
         [_renderHandler, configName _x, ["", _x, nil] call KH_fnc_getConfigValue];

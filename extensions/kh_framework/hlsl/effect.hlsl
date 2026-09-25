@@ -7,7 +7,9 @@ Texture2D<float4> khsgTex : register(t3);
 // this unit too, so a second s1 fails the unit with X4509 the moment any effect
 // entry reaches a prefix helper that uses it (the shadow compares' Gather,
 // KH_SHADOW_GATHER). C++ twin (KH_FX_SAMP_S2).
-SamplerState khsgSamp : register(s2);   // Linear clamp, bound only for the resolve draw.
+// Bound only for the draws that read it, the prior binding put back: the SSGI resolve's linear clamp, or a glow
+// pass's anisotropic clamp (KH_GLOW_PYR, C++ KhGlowBind).
+SamplerState khsgSamp : register(s2);
 
 #if MSAA_DEPTH
 Texture2DMS<float> depthTex : register(t1);
@@ -81,6 +83,77 @@ float KhCrtStripe(float u, float p, float k)
     const float w = p / 3.0f;
     const float n = floor(u / p);
     return n * w + clamp(u - n * p - k * w, 0.0f, w);
+}
+
+// KH_GLOW_PYR - the glows' and blurs' pre-filtered picture. C++ kh_glow_build makes one per pass, of that pass's own
+// source: level 0 is half the frame (PSGlowSeed), each further level half the one above (PSGlowDown), each texel a
+// 4 x 4 tent (1 3 3 1) over what it covers - padded past the frame (edge-clamped) so every level halves exactly and
+// one uv addresses them all. The bright-pass effects (bloom 8, halation 12, lens flare 14) take it through their
+// threshold, subtracted before the average as their direct taps subtract it; the UI spill lane's premultiply rides
+// SampleScene. The pass reads it at t3 (khsgTex) through khsgSamp (s2: anisotropic, clamp).
+// fuseMeta.y > 0.5 arms it; fuseMeta.zw is the full-resolution extent level 0 covers (twice its size, not less than
+// the frame). A tap reads the level whose texel matches its footprint - the spacing to the next tap - so a sparse
+// tap pattern samples a picture already averaged over the gaps between its taps: no copies of the scene at the
+// tap spacing, no grain from a jittered pattern. Disarmed (no pyramid for the pass) every effect takes its direct
+// taps, exactly as before. (Anamorphic keeps its direct taps: a one-pixel-thin streak needs a one-axis pyramid.)
+bool KhGlowOn() { return fuseMeta.y > 0.5f; }
+
+// Each footprint is taken a quarter past the tap spacing: bilinear reads of a level are not shift-invariant, so at
+// the bare spacing a lone bright pixel under the 5 x 5 bloom still ripples by up to ~18% of its peak; at 1.25 by
+// about a tenth, the glow's spread then ~15% past the direct taps' (~10% at the bare spacing). H38 models it.
+static const float KH_GLOW_FP = 1.25f;
+
+// pc: a full-resolution position (pixel centres at +0.5). The footprint is fa pixels along the unit axis ax and fp
+// across it; hardware anisotropic filtering takes the long side (up to 16:1, then a coarser level).
+float3 KhGlowTapA(float2 pc, float2 ax, float fa, float fp)
+{
+    const float2 khga_e = max(fuseMeta.zw, float2(1.0f, 1.0f));
+    const float2 khga_g = KH_GLOW_FP / khga_e;
+    return khsgTex.SampleGrad(khsgSamp, pc / khga_e, ax * (fa * khga_g), float2(-ax.y, ax.x) * (fp * khga_g)).rgb;
+}
+float3 KhGlowTap(float2 pc, float f) { return KhGlowTapA(pc, float2(1.0f, 0.0f), f, f); }
+
+// The pyramid's share of taps sp pixels apart: none at a pixel or less (adjacent pixels leave no gap - the direct
+// taps, exactly as before), all from two, linear between. KhGlowSel takes the direct result d unless the share
+// is positive.
+float KhGlowMix(float sp) { return KhGlowOn() ? saturate(sp - 1.0f) : 0.0f; }
+float3 KhGlowSel(float3 d, float3 p, float m) { return m <= 0.0f ? d : (m >= 1.0f ? p : lerp(d, p, m)); }
+float KhGlowSel(float d, float p, float m) { return m <= 0.0f ? d : (m >= 1.0f ? p : lerp(d, p, m)); }
+
+// KH_GLOW_PYR's builders, drawn by kh_glow_build with VSFullscreen over each level's viewport. The seed (level 0):
+// each texel the tent over the frame's pixels 2p - 1 .. 2p + 2 (SampleScene clamps to the frame), each through the
+// pass's threshold when localParams0.y arms it (localParams0.x). Negative and NaN values read as 0, and the sum
+// stays inside half precision.
+float4 PSGlowSeed(float4 pos : SV_Position) : SV_Target
+{
+    const int2 khgs_b = int2(pos.xy) * 2 - 1;
+    const float khgs_k[4] = { 0.125f, 0.375f, 0.375f, 0.125f };
+    float3 khgs_a = 0.0f;
+    [unroll] for (int khgs_y = 0; khgs_y < 4; ++khgs_y)
+    [unroll] for (int khgs_x = 0; khgs_x < 4; ++khgs_x)
+    {
+        float3 khgs_c = SampleScene(khgs_b + int2(khgs_x, khgs_y));
+        if (localParams0.y > 0.5f) khgs_c -= localParams0.x;
+        khgs_a += min(max(khgs_c, 0.0f), 65504.0f) * (khgs_k[khgs_x] * khgs_k[khgs_y]);
+    }
+    return float4(khgs_a, 1.0f);
+}
+// Each further level: the same tent over the level above (t3, that level's own view), clamped to its edge.
+float4 PSGlowDown(float4 pos : SV_Position) : SV_Target
+{
+    uint khgd_w, khgd_h;
+    khsgTex.GetDimensions(khgd_w, khgd_h);
+    const int2 khgd_hi = int2((int)khgd_w, (int)khgd_h) - 1;
+    const int2 khgd_b = int2(pos.xy) * 2 - 1;
+    const float khgd_k[4] = { 0.125f, 0.375f, 0.375f, 0.125f };
+    float3 khgd_a = 0.0f;
+    [unroll] for (int khgd_y = 0; khgd_y < 4; ++khgd_y)
+    [unroll] for (int khgd_x = 0; khgd_x < 4; ++khgd_x)
+    {
+        const int2 khgd_p = clamp(khgd_b + int2(khgd_x, khgd_y), int2(0, 0), khgd_hi);
+        khgd_a += khsgTex.Load(int3(khgd_p, 0)).rgb * (khgd_k[khgd_x] * khgd_k[khgd_y]);
+    }
+    return float4(khgd_a, 1.0f);
 }
 
 float LinDepth(float raw)
@@ -438,22 +511,54 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
     }
     else if (effect == 7)   // Gaussian-ish blur: [radiusPx].
     {
-        int r = max((int)(fxParams0.x * KhFxPx()), 1);   // KH_FX_PX_REF.
-        float3 acc = scene * 0.25f;
-        acc += (SampleScene(px + int2(r, 0)) + SampleScene(px - int2(r, 0))
-              + SampleScene(px + int2(0, r)) + SampleScene(px - int2(0, r))) * 0.125f;
-        acc += (SampleScene(px + int2(r, r)) + SampleScene(px - int2(r, r))
-              + SampleScene(px + int2(r, -r)) + SampleScene(px + int2(-r, r))) * 0.0625f;
-        outc = acc;
+        // KH_GLOW_PYR: the same 3 x 3 kernel, each tap over the radius (the tap spacing).
+        const float khbl_s = max(fxParams0.x * KhFxPx(), 1.0f);
+        const float khbl_m = KhGlowMix(khbl_s);
+        float3 acc = 0.0f;
+        if (khbl_m < 1.0f)
+        {
+            int r = max((int)(fxParams0.x * KhFxPx()), 1);   // KH_FX_PX_REF.
+            acc = scene * 0.25f;
+            acc += (SampleScene(px + int2(r, 0)) + SampleScene(px - int2(r, 0))
+                  + SampleScene(px + int2(0, r)) + SampleScene(px - int2(0, r))) * 0.125f;
+            acc += (SampleScene(px + int2(r, r)) + SampleScene(px - int2(r, r))
+                  + SampleScene(px + int2(r, -r)) + SampleScene(px + int2(-r, r))) * 0.0625f;
+        }
+        float3 khbl_p = 0.0f;
+        if (khbl_m > 0.0f)
+        {
+            const float2 khbl_c = i.pos.xy;
+            const float2 khbl_x = float2(khbl_s, 0.0f);
+            const float2 khbl_y = float2(0.0f, khbl_s);
+            khbl_p = KhGlowTap(khbl_c, khbl_s) * 0.25f
+                   + (KhGlowTap(khbl_c + khbl_x, khbl_s) + KhGlowTap(khbl_c - khbl_x, khbl_s)
+                    + KhGlowTap(khbl_c + khbl_y, khbl_s) + KhGlowTap(khbl_c - khbl_y, khbl_s)) * 0.125f
+                   + (KhGlowTap(khbl_c + khbl_x + khbl_y, khbl_s) + KhGlowTap(khbl_c - khbl_x - khbl_y, khbl_s)
+                    + KhGlowTap(khbl_c + khbl_x - khbl_y, khbl_s) + KhGlowTap(khbl_c - khbl_x + khbl_y, khbl_s)) * 0.0625f;
+        }
+        outc = KhGlowSel(acc, khbl_p, khbl_m);
     }
     else if (effect == 8)   // Bloom: [threshold, intensity, radiusPx].
     {
-        int r = max((int)(fxParams0.z * KhFxPx()), 1);   // KH_FX_PX_REF.
+        // KH_GLOW_PYR: the same 5 x 5 grid, each tap over the radius (the tap spacing); the pyramid is thresholded.
+        const float khbm_s = max(fxParams0.z * KhFxPx(), 1.0f);
+        const float khbm_m = KhGlowMix(khbm_s);
         float3 acc = 0.0f;
-        [unroll] for (int oy = -2; oy <= 2; ++oy)
-        [unroll] for (int ox = -2; ox <= 2; ++ox)
-            acc += max(SampleScene(px + int2(ox, oy) * r) - fxParams0.x, 0.0f);
-        outc = scene + acc / 25.0f * fxParams0.y;
+        if (khbm_m < 1.0f)
+        {
+            int r = max((int)(fxParams0.z * KhFxPx()), 1);   // KH_FX_PX_REF.
+            [unroll] for (int oy = -2; oy <= 2; ++oy)
+            [unroll] for (int ox = -2; ox <= 2; ++ox)
+                acc += max(SampleScene(px + int2(ox, oy) * r) - fxParams0.x, 0.0f);
+        }
+        float3 khbm_p = 0.0f;
+        if (khbm_m > 0.0f)
+        {
+            [unroll] for (int khbm_y = -2; khbm_y <= 2; ++khbm_y)
+            [unroll] for (int khbm_x = -2; khbm_x <= 2; ++khbm_x)
+                khbm_p += KhGlowTap(i.pos.xy + float2((float)khbm_x, (float)khbm_y) * khbm_s, khbm_s);
+        }
+        outc = scene + KhGlowSel(acc, khbm_p, khbm_m) / 25.0f * fxParams0.y;
     }
     else if (effect == 9)   // Distortion: [amplitudePx, frequency, speed].
     {
@@ -465,9 +570,10 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         else if (effect == 10)   // Outline: [depthEdgeScale, lumEdgeScale, sceneDarken, glowBoost],
                                  // Color = edge.
     {
-        // KH_FX_PX_REF: the step is the drawn line's width - one reference pixel - and a step spanning the same
-        // part of the picture measures the same depth and luma differences, so the thresholds hold at any size.
-        const int khol_d = max((int)KhFxPx(), 1);
+        // KH_FX_PX_REF: the step is the drawn line's width - one reference pixel, to the nearest whole pixel - and a
+        // step spanning the same part of the picture measures the same depth and luma differences, so the thresholds
+        // hold at any size.
+        const int khol_d = max((int)floor(KhFxPx() + 0.5f), 1);
         float dC = LinDepth(LoadDepthPS(px));
         float dX = LinDepth(LoadDepthPS(px + int2(khol_d, 0))) - dC;
         float dY = LinDepth(LoadDepthPS(px + int2(0, khol_d))) - dC;
@@ -495,15 +601,29 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
     else if (effect == 12)   // Halation: [threshold, intensity, radiusPx], color = glow tint
                              // (warm).
     {
-        int r = max((int)(fxParams0.z * KhFxPx()), 1);   // KH_FX_PX_REF.
         const int2 dirs[8] = { int2(1,0), int2(-1,0), int2(0,1), int2(0,-1),
                                int2(1,1), int2(-1,1), int2(1,-1), int2(-1,-1) };
+        // KH_GLOW_PYR: the same two rings, each tap over its ring's spacing (the radius, twice it); thresholded.
+        const float khha_s = max(fxParams0.z * KhFxPx(), 1.0f);
+        const float khha_m = KhGlowMix(khha_s);
         float3 acc = 0.0f;
-        [unroll] for (int k = 0; k < 8; ++k)
-            acc += max(SampleScene(px + dirs[k] * r) - fxParams0.x, 0.0f) * 0.09f;
-        [unroll] for (int k2 = 0; k2 < 8; ++k2)
-            acc += max(SampleScene(px + dirs[k2] * r * 2) - fxParams0.x, 0.0f) * 0.035f;
-        outc = scene + acc * color.rgb * fxParams0.y;
+        if (khha_m < 1.0f)
+        {
+            int r = max((int)(fxParams0.z * KhFxPx()), 1);   // KH_FX_PX_REF.
+            [unroll] for (int k = 0; k < 8; ++k)
+                acc += max(SampleScene(px + dirs[k] * r) - fxParams0.x, 0.0f) * 0.09f;
+            [unroll] for (int k2 = 0; k2 < 8; ++k2)
+                acc += max(SampleScene(px + dirs[k2] * r * 2) - fxParams0.x, 0.0f) * 0.035f;
+        }
+        float3 khha_p = 0.0f;
+        if (khha_m > 0.0f)
+        {
+            [unroll] for (int khha_k = 0; khha_k < 8; ++khha_k)
+                khha_p += KhGlowTap(i.pos.xy + float2(dirs[khha_k]) * khha_s, khha_s) * 0.09f;
+            [unroll] for (int khha_j = 0; khha_j < 8; ++khha_j)
+                khha_p += KhGlowTap(i.pos.xy + float2(dirs[khha_j]) * (khha_s * 2.0f), khha_s * 2.0f) * 0.035f;
+        }
+        outc = scene + KhGlowSel(acc, khha_p, khha_m) * color.rgb * fxParams0.y;
     }
     else if (effect == 13)   // Distance fog: [startDist m, endDist m, skyAmount 0.1], color = fog
                              // Color.
@@ -528,6 +648,10 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         float2 ghostVec = (cuv - uv) * fxParams0.w;
         int nGhosts = clamp((int)fxParams0.z, 1, 8);
         float3 acc = 0.0f;
+        // KH_GLOW_PYR: a ghost is the picture scaled by 1 - ghostSpacing * g about the centre, so a point read
+        // either magnifies pixels into blocks or skips them; from the (thresholded) pyramid each ghost reads over
+        // that scale (two pixels at least), and so does the halo.
+        const bool khlf_g = KhGlowOn();
         for (int g = 1; g <= nGhosts; ++g)
         {
             float2 suv = uv + ghostVec * (float)g;
@@ -536,15 +660,28 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
             float2 spf = saturate(suv) * float2(fxMeta.z, fxMeta.w);
             float2 cdir = normalize(ghostVec + 1e-5f) * fxParams1.z * KhFxPx();   // KH_FX_PX_REF.
             float3 s;
-            s.r = max(SampleScene(int2(spf + cdir)).r - fxParams0.x, 0.0f);
-            s.g = max(SampleScene(int2(spf)).g        - fxParams0.x, 0.0f);
-            s.b = max(SampleScene(int2(spf - cdir)).b - fxParams0.x, 0.0f);
+            if (khlf_g)
+            {
+                const float khlf_f = max(abs(1.0f - fxParams0.w * (float)g), 2.0f);
+                s.r = KhGlowTap(spf + cdir, khlf_f).r;
+                s.g = KhGlowTap(spf, khlf_f).g;
+                s.b = KhGlowTap(spf - cdir, khlf_f).b;
+            }
+            else
+            {
+                s.r = max(SampleScene(int2(spf + cdir)).r - fxParams0.x, 0.0f);
+                s.g = max(SampleScene(int2(spf)).g        - fxParams0.x, 0.0f);
+                s.b = max(SampleScene(int2(spf - cdir)).b - fxParams0.x, 0.0f);
+            }
             acc += s * w;
         }
         float rC = length(uv - cuv);
         float hw = 1.0f - saturate(abs(rC - fxParams1.x) * 8.0f);
         float2 huv = uv + normalize(cuv - uv + 1e-5f) * fxParams1.x;
-        acc += max(SampleScene(int2(saturate(huv) * float2(fxMeta.z, fxMeta.w))) - fxParams0.x, 0.0f) * hw * fxParams1.y;
+        if (khlf_g)
+            acc += KhGlowTap(saturate(huv) * float2(fxMeta.z, fxMeta.w), 2.0f) * hw * fxParams1.y;
+        else
+            acc += max(SampleScene(int2(saturate(huv) * float2(fxMeta.z, fxMeta.w))) - fxParams0.x, 0.0f) * hw * fxParams1.y;
         outc = scene + acc * color.rgb * fxParams0.y;
     }
 
@@ -587,7 +724,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
                 [unroll] for (int oy = -2; oy <= 2; ++oy)
                 [unroll] for (int ox = -2; ox <= 2; ++ox)
                 {
-                    float khsf_d = LinDepth(LoadDepthPS(sp + int2(ox, oy) * max((int)(3.0f * KhFxPx()), 1)));   // KH_FX_PX_REF.
+                    float khsf_d = LinDepth(LoadDepthPS(sp + int2(ox, oy) * max((int)floor(3.0f * KhFxPx() + 0.5f), 1)));   // KH_FX_PX_REF: nearest whole px.
                     vis += saturate((min(khsf_d, khsf_f) - khsf_f * 0.98f)
                                     / max(khsf_f * 0.019f, 1.0f));
                 }
@@ -677,18 +814,40 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         float rad = max(fxParams0.y, 4.0f) * KhFxPx();   // KH_FX_PX_REF.
         float lC = Luma(scene);
         float lB = 0.0f;
+        // KH_GLOW_PYR: the twelve taps sit 0.785 rad apart along their rings (2 pi rad / 8, 2 pi (rad / 2) / 4);
+        // each over that spacing, the base estimate is the smooth local average it stands for.
+        const float khcl_s = 0.7854f * rad;
+        const float khcl_m = KhGlowMix(khcl_s);
 
-        [loop] for (int k = 0; k < 8; ++k)
+        if (khcl_m < 1.0f)
         {
-            float ang = float(k) * 0.7854f + 0.3927f;
-            lB += Luma(SampleScene(px + int2(cos(ang) * rad, sin(ang) * rad))) * 0.0833f;
-        }
+            [loop] for (int k = 0; k < 8; ++k)
+            {
+                float ang = float(k) * 0.7854f + 0.3927f;
+                lB += Luma(SampleScene(px + int2(cos(ang) * rad, sin(ang) * rad))) * 0.0833f;
+            }
 
-        [loop] for (int k2 = 0; k2 < 4; ++k2)
-        {
-            float ang2 = float(k2) * 1.5708f;
-            lB += Luma(SampleScene(px + int2(cos(ang2) * rad * 0.5f, sin(ang2) * rad * 0.5f))) * 0.0833f;
+            [loop] for (int k2 = 0; k2 < 4; ++k2)
+            {
+                float ang2 = float(k2) * 1.5708f;
+                lB += Luma(SampleScene(px + int2(cos(ang2) * rad * 0.5f, sin(ang2) * rad * 0.5f))) * 0.0833f;
+            }
         }
+        float khcl_p = 0.0f;
+        if (khcl_m > 0.0f)
+        {
+            [loop] for (int khcl_k = 0; khcl_k < 8; ++khcl_k)
+            {
+                const float khcl_a = float(khcl_k) * 0.7854f + 0.3927f;
+                khcl_p += Luma(KhGlowTap(i.pos.xy + float2(cos(khcl_a), sin(khcl_a)) * rad, khcl_s)) * 0.0833f;
+            }
+            [loop] for (int khcl_j = 0; khcl_j < 4; ++khcl_j)
+            {
+                const float khcl_b = float(khcl_j) * 1.5708f;
+                khcl_p += Luma(KhGlowTap(i.pos.xy + float2(cos(khcl_b), sin(khcl_b)) * (rad * 0.5f), khcl_s)) * 0.0833f;
+            }
+        }
+        lB = KhGlowSel(lB, khcl_p, khcl_m);
 
         float detail = lC - lB;
         detail = detail / (1.0f + 2.5f * abs(detail));   // Soft limiter (anti-halo).
@@ -738,12 +897,28 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         // punched through by the drops themselves.
         float fogAmt = saturate(fxParams0.z) * saturate(0.25f + inten);
         float3 fogC = 0.0f;
+        // KH_GLOW_PYR: the film's eight taps sit 2 pi 7 / 8 = 5.5 reference pixels apart; each over that spacing.
+        const float khrl_s = 5.4978f * KhFxPx();
+        const float khrl_m = KhGlowMix(khrl_s);
 
-        [loop] for (int k = 0; k < 8; ++k)
+        if (khrl_m < 1.0f)
         {
-            float ang = float(k) * 0.7854f;
-            fogC += SampleScene(px + int2(cos(ang) * 7.0f * KhFxPx(), sin(ang) * 7.0f * KhFxPx())) * 0.125f;   // KH_FX_PX_REF.
+            [loop] for (int k = 0; k < 8; ++k)
+            {
+                float ang = float(k) * 0.7854f;
+                fogC += SampleScene(px + int2(cos(ang) * 7.0f * KhFxPx(), sin(ang) * 7.0f * KhFxPx())) * 0.125f;   // KH_FX_PX_REF.
+            }
         }
+        float3 khrl_p = 0.0f;
+        if (khrl_m > 0.0f)
+        {
+            [loop] for (int khrl_k = 0; khrl_k < 8; ++khrl_k)
+            {
+                const float khrl_a = float(khrl_k) * 0.7854f;
+                khrl_p += KhGlowTap(i.pos.xy + float2(cos(khrl_a), sin(khrl_a)) * (7.0f * KhFxPx()), khrl_s) * 0.125f;
+            }
+        }
+        fogC = KhGlowSel(fogC, khrl_p, khrl_m);
 
         fogC = lerp(fogC, Luma(fogC).xxx, 0.12f) * 1.02f;
         // Fine static condensation droplets (twinkle in with the film, cleared

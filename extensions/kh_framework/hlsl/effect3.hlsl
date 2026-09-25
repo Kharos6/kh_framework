@@ -21,13 +21,18 @@
                                                + 0.00583715f * (i.pos.y + 5.588238f)));
         float khfs_rot = khfs_ig * 6.2831853f;
         float khfs_hn = (float)((khfs_n + 1) >> 1);
+        // KH_GLOW_PYR: each tap's share of the disc (pi rm^2 / n) is a square rm sqrt(pi / n) on a side; a tap's
+        // colour is the picture averaged over it, so the per-pixel rotation no longer shows as grain.
+        const float khfs_gs = khfs_rm * sqrt(3.14159265f / (float)khfs_n);
+        const float khfs_gm = KhGlowMix(khfs_gs);
 
         [loop] for (int khfs_k = 0; khfs_k < khfs_n; ++khfs_k)
         {
             int khfs_kp = khfs_k >> 1;
             float khfs_an = khfs_kp * 2.3999632f + khfs_rot + (khfs_k & 1) * 3.14159265f;
             float khfs_sr = max(sqrt((khfs_kp + khfs_ig2) / khfs_hn) * khfs_rm, 1.0f);
-            int2 khfs_sp = int2(float2(px) + 0.5f + float2(cos(khfs_an), sin(khfs_an)) * khfs_sr);
+            const float2 khfs_pc = float2(px) + 0.5f + float2(cos(khfs_an), sin(khfs_an)) * khfs_sr;
+            int2 khfs_sp = int2(khfs_pc);
             // Off-screen taps are absent information: skipping them leaves the
             // closing sum-normalization to renormalize, so edge receivers lean
             // on their surviving weights instead of dimming.
@@ -39,7 +44,11 @@
             float khfs_rk = khfs_rm * khfs_ss;
             if (khfs_sr >= khfs_rk) continue;   // This source's disc does not reach.
             float khfs_w = khfs_ss * khfs_c1 * (1.0f - khfs_sr / khfs_rk) / max(khfs_rk * khfs_rk, 1.0f);
-            khfs_acc += SampleScene(khfs_sp) * khfs_w;
+            float3 khfs_c;
+            if (khfs_gm >= 1.0f)      khfs_c = KhGlowTap(khfs_pc, khfs_gs);
+            else if (khfs_gm <= 0.0f) khfs_c = SampleScene(khfs_sp);
+            else                      khfs_c = lerp(SampleScene(khfs_sp), KhGlowTap(khfs_pc, khfs_gs), khfs_gm);
+            khfs_acc += khfs_c * khfs_w;
             khfs_ws += khfs_w;
         }
 

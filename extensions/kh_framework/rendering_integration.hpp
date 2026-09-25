@@ -385,6 +385,18 @@ namespace RenderIntegration {
 // sharpen's 1-px neighbourhood, anti-aliasing, per-pixel dither and
 // sampling noise, and SSGI's sample-grid widths (its radius is in metres).
 //
+// The glows and blurs - blur, bloom, halation, lens flare, clarity, the
+// rain lens's condensation film and fog scatter - read a pre-filtered copy
+// of the picture (a pyramid of halved levels made for each pass from its
+// own source, thresholded first for bloom, halation and lens flare), each
+// tap averaged over (a little past) the gap to its
+// neighbours, so a large radius spreads smoothly instead of showing copies
+// of the scene at its tap spacing, a lens-flare ghost is soft instead of
+// blocky, and fog scatter carries no grain. Taps a pixel apart or less read
+// the picture itself, as before - except lens flare's: its ghosts and halo
+// always read the copy, over two pixels at least. The same holds in
+// addLocalPostFX, on effect meshes, over the UI and in a picture-in-picture.
+//
 // Returns the khr_ handle, or '' after reporting the fault
 //
 // ---- STRING = addLocalPostFX ARRAY -----------------------------------------
@@ -568,7 +580,7 @@ enum KhProfZone : uint32_t {
     KHP_DLS_FRAME, KHP_DLS_WORLD, KHP_MASK_CAST, KHP_SVS_PRIME, KHP_SVS_VOL_COPY,
     KHP_VMIR, KHP_SSAO, KHP_CULL_BUILD, KHP_VIS_OCC, KHP_INST_PLAN, KHP_SNAPSHOT,
     KHP_PIP, KHP_BAND_COMMIT, KHP_THM_AUTOBUILD, KHP_DL_ACQUIRE,
-    // Game-thread flush and its systems.
+    // The flushes and their systems.
     KHP_FLUSH, KHP_FLUSH_FRAME, KHP_FLUSH_UI, KHP_CLOTH_UPLOAD, KHP_SKIN_UPLOAD, KHP_SKIN_SYNC,
     // KH_PARK_WAIT: the graphics-lock acquire alone, per park (the game thread
     // stalled until the render thread reaches the engine's grant point), for
@@ -7292,6 +7304,30 @@ static constexpr UINT KH_DLS_MAP_PX = 1024;
 // only other caller.
 inline void kh_sun_ladder_forget();
 
+// KH_GLOW_PYR - one glow pass's pyramid (effect.hlsl: KhGlowTap reads it, PSGlowSeed / PSGlowDown make it;
+// kh_glow_build). Level 0 is half the frame, padded up to a multiple of 2^(KH_GLOW_LEVELS - 1) so every level halves
+// exactly and one uv addresses them all; R16G16B16A16_FLOAT, for the scene's HDR bright passes. Resources holds one
+// per route that draws glows (glow_pyr): [0] the scene flush - its effect meshes and then its chain, one after the
+// other - [1] the UI pass, [2] the PIP. Each is made at its first use, remade when its frame changes size, and
+// released with the device (Resources::release).
+static constexpr int KH_GLOW_LEVELS = 8;   // Texels of 2 .. 256 frame pixels.
+struct KhGlowPyr {
+    ID3D11Texture2D*          tex = nullptr;
+    ID3D11ShaderResourceView* srv = nullptr;   // Every level: the pass's taps (t3).
+    ID3D11RenderTargetView*   rtv[KH_GLOW_LEVELS] = {};
+    ID3D11ShaderResourceView* lvl_srv[KH_GLOW_LEVELS] = {};   // One level each: the next level's source.
+    UINT                      w = 0, h = 0;   // Level 0.
+    void release() {
+        for (int khgp_i = 0; khgp_i < KH_GLOW_LEVELS; ++khgp_i) {
+            KH_SAFE_RELEASE(rtv[khgp_i]);
+            KH_SAFE_RELEASE(lvl_srv[khgp_i]);
+        }
+        KH_SAFE_RELEASE(srv);
+        KH_SAFE_RELEASE(tex);
+        w = h = 0;
+    }
+};
+
 struct Resources {
     ID3D11VertexShader*      vs = nullptr;
     ID3D11PixelShader*       ps = nullptr;
@@ -7384,7 +7420,7 @@ struct Resources {
     std::vector<ID3D11Buffer*> mesh_vb;   // One VB per published registry mesh (48-byte textured
                                           // Vertex format; grows in step via ensure_mesh_vbs - see
                                           // the dynamic-registration contract).
-    ID3D11Buffer*            constant_buffer = nullptr;   // Dynamic, per draw (game-thread flush):
+    ID3D11Buffer*            constant_buffer = nullptr;   // Dynamic, per draw (the scene and UI flushes):
                                                           // CBObj b0.
     ID3D11Buffer*            composite_cb = nullptr;   // Dynamic, per draw (render-thread
                                                        // Injection): CBObj b0.
@@ -7395,8 +7431,8 @@ struct Resources {
                                                 // composite_cb's.
     uint32_t                 cb_ring_cursor[2] = {};
     bool                     cb_ring_fresh[2] = { true, true };   // Next map must discard.
-    // CB-split frame twins (b1): one per thread, same separation logic.
-    ID3D11Buffer*            frame_cb = nullptr;   // Game thread (flush + Udriver).
+    // CB-split frame twins (b1): the flushes' and the injection's, the same split as the pair above.
+    ID3D11Buffer*            frame_cb = nullptr;   // The scene flush + the UI flush.
     ID3D11Buffer*            composite_frame_cb = nullptr;   // Render thread (injection, sun depth,
                                                              // Mask cast).
     ID3D11DepthStencilState* dss_test = nullptr;   // LESS_EQUAL, no write.
@@ -7594,6 +7630,13 @@ struct Resources {
     // prefix owns s1); bound only for that draw with the prior binding
     // saved/restored (StateBackup covers s0-s1 only).
     ID3D11SamplerState*       khsg_sampler = nullptr;
+    // KH_GLOW_PYR: the glow passes' pyramids (KhGlowPyr, per route), their builders (effect.hlsl PSGlowSeed /
+    // PSGlowDown, made once with the core set - absent, every glow takes its direct taps) and the anisotropic clamp
+    // sampler the taps read through at s2 (bound only for a glow draw, the prior binding put back: KhGlowBind).
+    KhGlowPyr                 glow_pyr[3];
+    ID3D11PixelShader*        ps_glow_seed = nullptr;
+    ID3D11PixelShader*        ps_glow_down = nullptr;
+    ID3D11SamplerState*       glow_sampler = nullptr;
     ID3D11Texture2D*          scene_tex = nullptr;
     ID3D11ShaderResourceView* scene_srv = nullptr;
     UINT                      scene_w = 0, scene_h = 0;
@@ -7870,6 +7913,10 @@ struct Resources {
         release_fx_chain();
         release_scene_capture();
         release_depth_srv();
+        for (KhGlowPyr& khgp_p : glow_pyr) khgp_p.release();   // KH_GLOW_PYR.
+        KH_SAFE_RELEASE(ps_glow_seed);
+        KH_SAFE_RELEASE(ps_glow_down);
+        KH_SAFE_RELEASE(glow_sampler);
         // The sun maps, their pyramids and the tier keys' subjects all died
         // above; the flags and the input hash that claim them live outside
         // Resources. render_sun_depth's hash early return is reached from
@@ -9453,7 +9500,8 @@ inline bool kh_attach_obj_dead(const game_value& khod_gv) {
 // when both the pointer and every byte of the floats match, so a hit is the
 // evaluation's own result. A miss replaces the set's older entry. 8,192
 // entries (~1.1 MB) per thread that reads (the game thread: the Draw3D
-// sampler, the commands, the chains) keep a scene of a few
+// sampler, the commands, the chains, the crew table; the render thread: the
+// paint read, KH_RT_PAINT_READ) keep a scene of a few
 // thousand followed objects and helpers resident; heap-allocated on the
 // thread's first read and kept for the process, zeroed (v = 0 never matches
 // a state), and emptied again at the thread's first read after a session
@@ -9659,7 +9707,8 @@ inline bool kh_attach_vs_read(uintptr_t khvs_base, uint32_t khvs_off, uintptr_t&
 // pages are confirmed - the same keyed rule as every lane cache: probed again when the object or the state
 // pointer changes. False: not readable this time.
 // Every read of a followed object comes here: the Draw3D sampler (proxies, parents, a rotation lane's own object),
-// the one-shot reads at the commands, the chains.
+// the one-shot reads at the commands, the chains, the crew table (KH_CREW_LAG) and the render thread's paint read
+// (KH_RT_PAINT_READ).
 inline bool kh_attach_raw(const game_value& khrw_gv, uint32_t& khrw_off, uintptr_t& khrw_vb,
                           uintptr_t& khrw_bb, uintptr_t& khrw_avb, uintptr_t& khrw_abb, float khrw_pos[3], float khrw_rot[9],
                           KhAttachDiag* khrw_diag = nullptr) {
@@ -9707,9 +9756,13 @@ inline bool kh_attach_raw(const game_value& khrw_gv, uint32_t& khrw_off, uintptr
     return kh_attach_vs_read(khrw_base, KH_ATTACH_VS_SIM, khrw_vb, khrw_bb, khrw_pos, khrw_rot, khrw_diag);
 }
 
-// The one-shot form, for the command sites that have no lane to cache in: the
-// attach itself and addRender3D's two slots, each of which reads once. The
-// Draw3D sampler uses kh_attach_raw directly with its own caches.
+// The one-shot form, for the command sites that have no lane to cache in, each
+// of which reads once: addRender3D's position and rotation slots (the object
+// named, or the parent a pair form binds to), and updateRender3D's properties
+// - the attach itself (kh_attach_apply), the parent of a new memory-point or
+// skeletal binding (sqf_integration.hpp) and the re-seed of a mesh already
+// attached (kh_attach_reseed). The Draw3D sampler uses kh_attach_raw directly
+// with its own caches.
 inline bool kh_attach_read(const game_value& khar_gv, float khar_pos[3], float khar_rot[9]) {
     uint32_t  khar_off = KH_ATTACH_OFF_NONE;
     uintptr_t khar_vb = 0;
@@ -12227,7 +12280,7 @@ struct alignas(16) ConstantData {
     float mat_ctl[4];   // KH_MAT_TABLE (HLSL twin matCtl): x = table index (base + slot) for the
                         // non-instanced VS, y = slot for the instanced VS, w = alpha-mode override
                         // (-1 none). The material lanes themselves live in the table (KhGpuMat).
-    float fuse_meta[4];
+    float fuse_meta[4];   // x = the fused stages (kh_fuse_append); y, zw = KH_GLOW_PYR's arm and extent (kh_glow_lanes).
     float fuse_stage[12][4];
     // fx2 sits in the append region (append-only block discipline); HLSL twin
     // fxParams2. Zeroed on every fill site except the chain-pass fills.
@@ -12553,7 +12606,7 @@ struct KhVisMemo {
     }
 };
 static KhVisMemo g_vis_memo_inj;    // Render thread (the injection).
-static KhVisMemo g_vis_memo_flush;  // Game thread under the graphics lock.
+static KhVisMemo g_vis_memo_flush;  // The flush (the render thread's scene flush, or the game thread under a park).
 
 // The distance twin: kh_mesh_dist_sq (to the world-axis box enclosing the
 // object's rotated size box - not an OBB distance) is asked per object by the
@@ -12591,7 +12644,7 @@ struct KhDistMemo {
     }
 };
 static KhDistMemo g_dist_memo_inj;    // Render thread (the injection, the PIP inject).
-static KhDistMemo g_dist_memo_flush;  // Game thread under the graphics lock.
+static KhDistMemo g_dist_memo_flush;  // The flush (the render thread's scene flush, or the game thread under a park).
 
 // The order both colour passes draw in: by group (opaque solids, then
 // translucent and effect meshes, then depth-Off overlays), the opaque solids
@@ -25056,6 +25109,8 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         { khsp_comp_src.c_str(), "VSCompositeInst", "vs_5_0", khsp_d0t, 0 },
         { khfx_src.c_str(), "PSEffect", "ps_5_0", khfx_d0, 0 },
         { khfx_src.c_str(), "PSEffect", "ps_5_0", khfx_d1, 0 },
+        { khfx_src.c_str(), "PSGlowSeed", "ps_5_0", khfx_d0, 0 },   // KH_GLOW_PYR (the creation below).
+        { khfx_src.c_str(), "PSGlowDown", "ps_5_0", khfx_d0, 0 },
         { kh_hlsl_src(KH_HLSL_SUNPF).c_str(),   "VSPf",    "vs_5_0", khpw_none, 0 },
         { kh_hlsl_src(KH_HLSL_SUNPF).c_str(),   "PSPf",    "ps_5_0", khpw_none, 0 },
         { kh_hlsl_src(KH_HLSL_SUNPF).c_str(),   "PSPfMip", "ps_5_0", khpw_none, 0 },
@@ -25164,6 +25219,9 @@ inline std::string ensure_resources(ID3D11Device* dev) {
     kh_ps_optional(dev, static_src, "PSDlsMask", khcb_rx_defines, &g_res.ps_dls_mask, "KH dlsmask PS: ");   // compile leaves the mask off.
     kh_ps_optional(dev, static_src, "PSDlsMaskA", khtx_defines, &g_res.ps_dls_mask_a, "KH dlsmask alpha PS: ");   // KH_DLSW_MASK_ALPHA (KH_TEXTURED for KhMatRoute); absent = alpha casters mask opaque.
     kh_ps_optional(dev, static_src, "PSMaskPrime", khcb_rx_defines, &g_res.ps_maskprime, "KH maskprime shader: ");   // Priming pass, same contract.
+    // KH_GLOW_PYR: the effect unit's two pyramid builders (MSAA_DEPTH 0 - neither reads depth); absent = direct taps.
+    kh_ps_optional(dev, khfx_src, "PSGlowSeed", khfx_d0, &g_res.ps_glow_seed, "KH glow seed shader: ");
+    kh_ps_optional(dev, khfx_src, "PSGlowDown", khfx_d0, &g_res.ps_glow_down, "KH glow down shader: ");
 
     {   // Instanced sun-depth VS + layout: non-fatal (per-caster loop covers).
         ID3DBlob* sd_blob = nullptr;
@@ -25919,7 +25977,7 @@ inline std::string ensure_scene_capture(ID3D11Device* dev, ID3D11DeviceContext* 
     return err;
 }
 
-// Game-thread flush_locked call sites only.
+// flush_locked's call sites only.
 inline std::string kh_scene_capture_timed(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     KH_PROF_SCOPE(KHP_SCENE_CAPTURE);
     KH_GPU_SCOPE(ctx, KHG_SCENE_CAPTURE);   // KH_PROF.
@@ -26791,6 +26849,236 @@ struct KhOmSave {
         }
         KH_SAFE_RELEASE(dsv);
         uav_n = 0;
+    }
+};
+
+// KH_GLOW_PYR - the glows and blurs read a pre-filtered picture (effect.hlsl's KH_GLOW_PYR note): the effects whose
+// taps read it, and those among them that take it through their threshold (fxParams0.x, the bright pass).
+// Anamorphic is not among them: its streak is a pixel thin, which an isotropic level cannot give without
+// thickening it, and the anisotropic read that could costs about ten times its taps (it wants a one-axis pyramid).
+inline bool kh_glow_effect(int khge_e) {
+    return khge_e == static_cast<int>(EffectId::Blur) || khge_e == static_cast<int>(EffectId::Bloom) ||
+           khge_e == static_cast<int>(EffectId::Halation) || khge_e == static_cast<int>(EffectId::LensFlare) ||
+           khge_e == static_cast<int>(EffectId::Clarity) ||
+           khge_e == static_cast<int>(EffectId::RainLens) || khge_e == static_cast<int>(EffectId::Fogscatter);
+}
+inline bool kh_glow_bright(int khgb_e) {
+    return khgb_e == static_cast<int>(EffectId::Bloom) || khgb_e == static_cast<int>(EffectId::Halation) ||
+           khgb_e == static_cast<int>(EffectId::LensFlare);
+}
+
+// KH_GLOW_PYR - the pyramid for a frame of khpe_fw x khpe_fh (and the shared sampler), made or remade as needed.
+// False (reported once) when anything cannot be made; the pass then takes its direct taps.
+inline bool kh_glow_pyr_ensure(ID3D11Device* dev, KhGlowPyr& khpe_p, UINT khpe_fw, UINT khpe_fh) {
+    if (khpe_fw == 0u || khpe_fh == 0u) return false;
+    if (!g_res.glow_sampler) {
+        D3D11_SAMPLER_DESC khpe_sd = {};
+        khpe_sd.Filter = D3D11_FILTER_ANISOTROPIC;
+        khpe_sd.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+        khpe_sd.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+        khpe_sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        khpe_sd.MaxAnisotropy = 16;
+        khpe_sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
+        khpe_sd.MinLOD = 0.0f;
+        khpe_sd.MaxLOD = D3D11_FLOAT32_MAX;
+        const HRESULT khpe_shr = dev->CreateSamplerState(&khpe_sd, &g_res.glow_sampler);
+        if (FAILED(khpe_shr)) {
+            g_res.glow_sampler = nullptr;
+            report_error_once_safe("KH glow pyramid: CreateSamplerState " + hr_str(khpe_shr));
+            return false;
+        }
+    }
+    const UINT khpe_q = 1u << (KH_GLOW_LEVELS - 1);
+    const UINT khpe_w = ((khpe_fw + 1u) / 2u + khpe_q - 1u) / khpe_q * khpe_q;
+    const UINT khpe_h = ((khpe_fh + 1u) / 2u + khpe_q - 1u) / khpe_q * khpe_q;
+    if (khpe_p.tex && khpe_p.w == khpe_w && khpe_p.h == khpe_h) return true;
+    khpe_p.release();
+    D3D11_TEXTURE2D_DESC khpe_td = {};
+    khpe_td.Width = khpe_w;
+    khpe_td.Height = khpe_h;
+    khpe_td.MipLevels = KH_GLOW_LEVELS;
+    khpe_td.ArraySize = 1;
+    khpe_td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    khpe_td.SampleDesc.Count = 1;
+    khpe_td.Usage = D3D11_USAGE_DEFAULT;
+    khpe_td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    HRESULT khpe_hr = dev->CreateTexture2D(&khpe_td, nullptr, &khpe_p.tex);
+    if (SUCCEEDED(khpe_hr)) khpe_hr = dev->CreateShaderResourceView(khpe_p.tex, nullptr, &khpe_p.srv);
+    for (int khpe_m = 0; SUCCEEDED(khpe_hr) && khpe_m < KH_GLOW_LEVELS; ++khpe_m) {
+        D3D11_RENDER_TARGET_VIEW_DESC khpe_rd = {};
+        khpe_rd.Format = khpe_td.Format;
+        khpe_rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+        khpe_rd.Texture2D.MipSlice = static_cast<UINT>(khpe_m);
+        khpe_hr = dev->CreateRenderTargetView(khpe_p.tex, &khpe_rd, &khpe_p.rtv[khpe_m]);
+        if (FAILED(khpe_hr)) break;
+        D3D11_SHADER_RESOURCE_VIEW_DESC khpe_vd = {};
+        khpe_vd.Format = khpe_td.Format;
+        khpe_vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        khpe_vd.Texture2D.MostDetailedMip = static_cast<UINT>(khpe_m);
+        khpe_vd.Texture2D.MipLevels = 1;
+        khpe_hr = dev->CreateShaderResourceView(khpe_p.tex, &khpe_vd, &khpe_p.lvl_srv[khpe_m]);
+    }
+    if (FAILED(khpe_hr)) {
+        khpe_p.release();
+        report_error_once_safe("KH glow pyramid: " + hr_str(khpe_hr) + " (glows take their direct taps)");
+        return false;
+    }
+    khpe_p.w = khpe_w;
+    khpe_p.h = khpe_h;
+    return true;
+}
+
+// KH_GLOW_PYR - the pass's lanes: armed with the pyramid's full-resolution extent, or disarmed (null).
+inline void kh_glow_lanes(ConstantData& khgl_cbd, const KhGlowPyr* khgl_p) {
+    khgl_cbd.fuse_meta[1] = khgl_p ? 1.0f : 0.0f;
+    khgl_cbd.fuse_meta[2] = khgl_p ? 2.0f * static_cast<float>(khgl_p->w) : 0.0f;
+    khgl_cbd.fuse_meta[3] = khgl_p ? 2.0f * static_cast<float>(khgl_p->h) : 0.0f;
+}
+
+// KH_GLOW_PYR - kh_glow_build's save of everything it binds, put back exactly as it was (the kh_sun_pf_convert
+// pattern): targets and viewports, the input assembler's layout and topology, both shaders, the rasterizer,
+// depth-stencil and blend states, and PS t0 / t3. b0 is NOT kept: the build uploads its own slice, so a caller
+// uploads its pass's constants after it.
+struct KhGlowSave {
+    KhOmSave                  om;
+    D3D11_VIEWPORT            vp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    UINT                      vp_n = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    ID3D11InputLayout*        il = nullptr;
+    D3D11_PRIMITIVE_TOPOLOGY  topo = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    ID3D11VertexShader*       vs = nullptr;
+    ID3D11PixelShader*        ps = nullptr;
+    ID3D11RasterizerState*    rs = nullptr;
+    ID3D11DepthStencilState*  dss = nullptr;
+    UINT                      dss_ref = 0;
+    ID3D11BlendState*         bs = nullptr;
+    FLOAT                     bf[4] = {};
+    UINT                      bmask = 0xFFFFFFFFu;
+    ID3D11ShaderResourceView* t0 = nullptr;
+    ID3D11ShaderResourceView* t3 = nullptr;
+    void capture(ID3D11DeviceContext* ctx) {
+        om.capture(ctx);
+        ctx->RSGetViewports(&vp_n, vp);
+        ctx->IAGetInputLayout(&il);
+        ctx->IAGetPrimitiveTopology(&topo);
+        ctx->VSGetShader(&vs, nullptr, nullptr);
+        ctx->PSGetShader(&ps, nullptr, nullptr);
+        ctx->RSGetState(&rs);
+        ctx->OMGetDepthStencilState(&dss, &dss_ref);
+        ctx->OMGetBlendState(&bs, bf, &bmask);
+        ctx->PSGetShaderResources(0, 1, &t0);
+        ctx->PSGetShaderResources(3, 1, &t3);
+    }
+    void restore(ID3D11DeviceContext* ctx) {
+        // The pyramid's views off every slot first, so no target coming back meets one of ours bound.
+        ID3D11ShaderResourceView* khgv_null = nullptr;
+        ctx->PSSetShaderResources(0, 1, &khgv_null);
+        ctx->PSSetShaderResources(3, 1, &khgv_null);
+        om.restore(ctx);
+        om.release();
+        if (vp_n > 0) ctx->RSSetViewports(vp_n, vp);
+        ctx->IASetInputLayout(il);
+        ctx->IASetPrimitiveTopology(topo);
+        ctx->VSSetShader(vs, nullptr, 0);
+        ctx->PSSetShader(ps, nullptr, 0);
+        ctx->RSSetState(rs);
+        ctx->OMSetDepthStencilState(dss, dss_ref);
+        ctx->OMSetBlendState(bs, bf, bmask);
+        ctx->PSSetShaderResources(0, 1, &t0);
+        ctx->PSSetShaderResources(3, 1, &t3);
+        KH_SAFE_RELEASE(il);
+        KH_SAFE_RELEASE(vs);
+        KH_SAFE_RELEASE(ps);
+        KH_SAFE_RELEASE(rs);
+        KH_SAFE_RELEASE(dss);
+        KH_SAFE_RELEASE(bs);
+        KH_SAFE_RELEASE(t0);
+        KH_SAFE_RELEASE(t3);
+    }
+};
+
+// KH_GLOW_PYR - build khgb_p from khgb_src, the pass's own source (its t0), for a pass of effect khgb_e over a frame
+// of khgb_fw x khgb_fh (its fxMeta.zw): the seed through the pass's threshold (khgb_thr, fxParams0.x) when the
+// effect is a bright pass and through SampleScene's premultiply when khgb_csw (its centerSize.w) is the UI spill
+// lane's, then every level from the one above. Every binding it makes is put back (KhGlowSave) except b0, which
+// carries its own slice (khgb_cb, the route's object buffer): call it BEFORE the pass's own upload. False = no
+// pyramid (resources or shaders missing): the pass is left disarmed and takes its direct taps. Our draws, inside a
+// pass that already stands the hooks aside.
+inline bool kh_glow_build(ID3D11Device* dev, ID3D11DeviceContext* ctx, KhGlowPyr& khgb_p,
+                          ID3D11ShaderResourceView* khgb_src, float khgb_fw, float khgb_fh, float khgb_csw,
+                          int khgb_e, float khgb_thr, ID3D11Buffer* khgb_cb) {
+    if (!dev || !ctx || !khgb_src || !khgb_cb || !g_res.ps_glow_seed || !g_res.ps_glow_down ||
+        !g_res.vs_fullscreen || !g_res.rasterizer || !g_res.dss_off) return false;
+    if (!(khgb_fw >= 1.0f && khgb_fh >= 1.0f && khgb_fw < 65536.0f && khgb_fh < 65536.0f)) return false;
+    if (!kh_glow_pyr_ensure(dev, khgb_p, static_cast<UINT>(khgb_fw + 0.5f), static_cast<UINT>(khgb_fh + 0.5f))) return false;
+    ConstantData khgb_cbd = {};
+    khgb_cbd.fx_meta[2] = khgb_fw;   // SampleScene's clamp: the pass's frame.
+    khgb_cbd.fx_meta[3] = khgb_fh;
+    khgb_cbd.center_size[3] = khgb_csw;   // SampleScene's premultiply (w > 2.5, the UI spill lane).
+    const bool khgb_bright = kh_glow_bright(khgb_e);
+    khgb_cbd.local0[0] = khgb_bright ? khgb_thr : 0.0f;
+    khgb_cbd.local0[1] = khgb_bright ? 1.0f : 0.0f;
+    KhGlowSave khgb_sv;
+    khgb_sv.capture(ctx);
+    const bool khgb_ok = kh_upload_obj_cb(ctx, khgb_cb, khgb_cbd);
+    if (khgb_ok) {
+        ID3D11ShaderResourceView* khgb_null = nullptr;
+        ctx->PSSetShaderResources(3, 1, &khgb_null);   // No view of the pyramid bound while its levels are targets.
+        ctx->IASetInputLayout(nullptr);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
+        ctx->RSSetState(g_res.rasterizer);
+        ctx->OMSetDepthStencilState(g_res.dss_off, 0);
+        const FLOAT khgb_bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        ctx->OMSetBlendState(nullptr, khgb_bf, 0xFFFFFFFF);
+        D3D11_VIEWPORT khgb_vp = {};
+        khgb_vp.MaxDepth = 1.0f;
+        ctx->OMSetRenderTargets(1, &khgb_p.rtv[0], nullptr);
+        ctx->PSSetShaderResources(0, 1, &khgb_src);
+        ctx->PSSetShader(g_res.ps_glow_seed, nullptr, 0);
+        khgb_vp.Width = static_cast<FLOAT>(khgb_p.w);
+        khgb_vp.Height = static_cast<FLOAT>(khgb_p.h);
+        ctx->RSSetViewports(1, &khgb_vp);
+        ctx->Draw(3, 0);
+        ctx->PSSetShaderResources(0, 1, &khgb_null);
+        ctx->PSSetShader(g_res.ps_glow_down, nullptr, 0);
+        for (int khgb_m = 1; khgb_m < KH_GLOW_LEVELS; ++khgb_m) {
+            ctx->OMSetRenderTargets(1, &khgb_p.rtv[khgb_m], nullptr);   // Level m - 1's view stays off it.
+            ctx->PSSetShaderResources(3, 1, &khgb_p.lvl_srv[khgb_m - 1]);
+            khgb_vp.Width = static_cast<FLOAT>(khgb_p.w >> khgb_m);
+            khgb_vp.Height = static_cast<FLOAT>(khgb_p.h >> khgb_m);
+            ctx->RSSetViewports(1, &khgb_vp);
+            ctx->Draw(3, 0);
+        }
+    }
+    khgb_sv.restore(ctx);
+    return khgb_ok;
+}
+
+// KH_GLOW_PYR - one glow draw's t3 (the pyramid) and s2 (the anisotropic sampler), each put back as it was by
+// unbind() or the scope's end (the SSGI resolve's KH_FX_SAMP_S2 rule; StateBackup keeps s0 - s1 only).
+struct KhGlowBind {
+    ID3D11DeviceContext*      ctx = nullptr;
+    ID3D11SamplerState*       s2 = nullptr;
+    ID3D11ShaderResourceView* t3 = nullptr;
+    KhGlowBind() = default;
+    KhGlowBind(const KhGlowBind&) = delete;
+    KhGlowBind& operator=(const KhGlowBind&) = delete;
+    ~KhGlowBind() { unbind(); }
+    void bind(ID3D11DeviceContext* khgn_ctx, const KhGlowPyr& khgn_p) {
+        if (ctx || !khgn_ctx || !khgn_p.srv || !g_res.glow_sampler) return;
+        ctx = khgn_ctx;
+        ctx->PSGetSamplers(2, 1, &s2);
+        ctx->PSGetShaderResources(3, 1, &t3);
+        ctx->PSSetSamplers(2, 1, &g_res.glow_sampler);
+        ctx->PSSetShaderResources(3, 1, &khgn_p.srv);
+    }
+    void unbind() {
+        if (!ctx) return;
+        ctx->PSSetShaderResources(3, 1, &t3);
+        ctx->PSSetSamplers(2, 1, &s2);
+        KH_SAFE_RELEASE(t3);
+        KH_SAFE_RELEASE(s2);
+        ctx = nullptr;
     }
 };
 
@@ -29685,9 +29973,9 @@ static ID3D11Resource* g_coldlock_cand_res = nullptr;   // Injection cold-adopti
                                                         // double-confirmation memory.
 static uint32_t g_coldlock_cand_off = 0;
 
-// Flush serial (game thread, under the graphics lock): once-per-flush key for
-// the miss latch.
-static std::atomic<uint64_t> g_cc_flush_serial{0};   // Ticks once per flush_locked.
+// Flush serial (the scene flush: the render thread's, or the game thread's
+// under a park): once-per-flush key for the miss latch.
+static std::atomic<uint64_t> g_cc_flush_serial{0};   // Ticks once per scene flush (a chain-only run does not).
 
 static std::atomic<uint32_t> g_cc_flush_opaques{0xFFFFFFFFu};   // Sentinel = no flush yet.
 
@@ -44642,6 +44930,13 @@ inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
             cbd.depth_params[3] = khpf_vp.MaxDepth;
             kh_fill_local_band_cb(cbd, o);
             fill_lighting_obj_cb(ctx, cbd, o);
+            // KH_GLOW_PYR: the scene chain's rule, on this pass's own source.
+            bool khpf_gl = false;
+            if (kh_glow_effect(o.effect)) {
+                khpf_gl = kh_glow_build(dev, ctx, g_res.glow_pyr[2], khpf_src, cbd.fx_meta[2], cbd.fx_meta[3],
+                                        cbd.center_size[3], o.effect, cbd.fx0[0], g_res.composite_cb);
+                kh_glow_lanes(cbd, khpf_gl ? &g_res.glow_pyr[2] : nullptr);
+            }
             if (!kh_upload_obj_cb(ctx, g_res.composite_cb, cbd)) break;
             if (khpf_lut) { ctx->PSSetShaderResources(19, 1, &khpf_lut); khpf_lut_bound = true; }
             // Unbind the source before its sibling becomes the target (the
@@ -44652,7 +44947,10 @@ inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
             if (khpf_last) khpf_om.restore(ctx);
             else           ctx->OMSetRenderTargets(1, &g_res.pip_scene_rtv[khpf_wr], nullptr);
             ctx->PSSetShaderResources(0, 1, &khpf_src);
+            KhGlowBind khpf_gb;   // KH_GLOW_PYR.
+            if (khpf_gl) khpf_gb.bind(ctx, g_res.glow_pyr[2]);
             ctx->Draw(3, 0);
+            khpf_gb.unbind();
             ++khpf_drawn;
             if (!khpf_last) {
                 khpf_src = khpf_wr == 1 ? g_res.pip_scene_srv2 : g_res.pip_scene_srv;
@@ -51737,6 +52035,13 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                 khfp_cbd.fx_meta[0] = 24.0f;
                 khsg_pair = true;
             }
+            // KH_GLOW_PYR: a glow pass's pyramid, of this pass's own source, built before its constants go up.
+            bool khgl_on = false;
+            if (!khfp_ps && kh_glow_effect(khfp_effect)) {
+                khgl_on = kh_glow_build(dev, ctx, g_res.glow_pyr[0], src_srv, khfp_cbd.fx_meta[2], khfp_cbd.fx_meta[3],
+                                        khfp_cbd.center_size[3], khfp_effect, khfp_cbd.fx0[0], g_res.constant_buffer);
+                kh_glow_lanes(khfp_cbd, khgl_on ? &g_res.glow_pyr[0] : nullptr);
+            }
             if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
                 if (khsg_pair) ctx->PSSetSamplers(2, 1, &khsg_s2old);   // KH_FX_SSGI_BAIL: s2 back on
                                                                         // The pair path.
@@ -51759,7 +52064,10 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
             if (khsg_pair) {
                 ctx->PSSetShaderResources(3, 1, &khsg_fin);
             }
+            KhGlowBind khgl_b;   // KH_GLOW_PYR: the pyramid at t3 and its sampler at s2, for this draw.
+            if (khgl_on) khgl_b.bind(ctx, g_res.glow_pyr[0]);
             ctx->Draw(3, 0);
+            khgl_b.unbind();
             if (khsg_pair) {
                 ID3D11ShaderResourceView* khsg_n2 = nullptr;
                 ctx->PSSetShaderResources(3, 1, &khsg_n2);
@@ -52216,8 +52524,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
         // td is the adopted-or-matched main scene depth, read here every flush
         // with work at any FSAA state.
         g_scene_depth_samples = td.SampleDesc.Count;
-        // This site sees every transition at any FSAA, on the game thread under
-        // the flush lock. The wipe compares against g_res.depth_sample_count;
+        // This site sees every transition at any FSAA, in every flush (either
+        // thread's, chain-only runs too). The wipe compares against g_res.depth_sample_count;
         // the store after it keeps both trigger sites deduped.
         kh_msaa_toggle_wipe(td.SampleDesc.Count);
         g_res.depth_sample_count = td.SampleDesc.Count;
@@ -52924,6 +53232,15 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
     // lanes and re-uploads after upload_cb returns, so the object slice must
     // outlive the lambda.
     ConstantData khf_obj_cbd = {};
+    // KH_GLOW_PYR, effect meshes: their source is the scene capture at t0, which a perceptual translucent's
+    // re-capture rewrites (khf_cap_gen counts the captures this flush takes after the effects' own). A glow mesh
+    // builds glow_pyr[0] once per capture and threshold (the key below) and upload_cb arms its lanes
+    // (khf_glow_draw); the chain after the meshes builds its own.
+    uint64_t khf_cap_gen = 0;
+    uint64_t khf_glow_gen = ~0ull;
+    bool khf_glow_b = false, khf_glow_ok = false;
+    float khf_glow_t = 0.0f;
+    const KhGlowPyr* khf_glow_draw = nullptr;
     // khf_defer non-null = build only (deferred chain draw) - the caller
     // uploads the returned slice at flush time; the frame slice already went up
     // at the pass build.
@@ -52955,6 +53272,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
         // inherited from the previous object's fade.
         cbd.blend_ctl[3] = 0.0f;
         kh_fill_fx_params_cb(cbd, o);
+        if (!chain_pass && khf_glow_draw) kh_glow_lanes(cbd, khf_glow_draw);   // KH_GLOW_PYR.
 
         if (o.effect == static_cast<int>(EffectId::Fogscatter)) {
             memset(cbd.fx1, 0, sizeof(cbd.fx1));
@@ -53149,6 +53467,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
     const bool khf_perc_recapture = khf_perc_count >= 2;
 
     if (khf_perceptual) {
+        ++khf_cap_gen;   // KH_GLOW_PYR.
         if (kh_scene_capture_timed(dev, ctx).empty()) {
             ctx->PSSetShaderResources(3, 1, &g_res.scene_srv);
         } else {
@@ -53247,6 +53566,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
         const bool khf_o_perc = khf_transl(o) && o.draw_part != 1;
 
         if (khf_perc_recapture && khf_o_perc && khf_perc_seen) {
+            ++khf_cap_gen;   // KH_GLOW_PYR.
             if (kh_scene_capture_timed(dev, ctx).empty()) {
                 ctx->PSSetShaderResources(3, 1, &g_res.scene_srv);
                 khf_srv_cat = -1;   // t0/t1 pair may have been rebound; force re-swap below.
@@ -53268,8 +53588,24 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
             ctx->PSSetShaderResources(19, 1, &khf_lut);
         }
 
+        // KH_GLOW_PYR: before upload_cb, whose slice the build's own upload would replace.
+        khf_glow_draw = nullptr;
+        if (!khf_ufx && kh_glow_effect(o.effect)) {
+            const bool khfg_b = kh_glow_bright(o.effect);
+            const float khfg_t = khfg_b ? o.fx[0] : 0.0f;
+            if (khf_glow_gen != khf_cap_gen || khf_glow_b != khfg_b || khf_glow_t != khfg_t) {
+                khf_glow_ok = kh_glow_build(dev, ctx, g_res.glow_pyr[0], ps_srvs[0], screen_w, screen_h, 0.0f,
+                                            o.effect, o.fx[0], g_res.constant_buffer);
+                khf_glow_gen = khf_cap_gen;
+                khf_glow_b = khfg_b;
+                khf_glow_t = khfg_t;
+            }
+            if (khf_glow_ok) khf_glow_draw = &g_res.glow_pyr[0];
+        }
         if (!upload_cb(o, false)) continue;
         if (khf_o_perc) khf_perc_seen = true;
+        KhGlowBind khf_gb;   // KH_GLOW_PYR: t3 / s2 for this object's draws, put back at the iteration's end.
+        if (khf_glow_draw) khf_gb.bind(ctx, *khf_glow_draw);
         // Textured routing (flush edition): textured solids take the
         // PSMain/VSMain twins + the 4-element layout. Twins missing =>
         // untextured fallback.
@@ -54454,6 +54790,15 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     auto khuf_flush = [&](bool khuf_final) {
         if (!khuf_live) return;
         khuf_live = false;
+        // KH_GLOW_PYR: the scene chain's rule, on this pass's own source (the spill lane's premultiply rides its w).
+        bool khug_on = false;
+        const int khug_e = static_cast<int>(khuf_cbd.fx_meta[0] + 0.5f);
+        if (khuf_frame_ok && kh_glow_effect(khug_e)) {
+            khug_on = kh_glow_build(dev, ctx, g_res.glow_pyr[1], khup_srvs[khup_src], khuf_cbd.fx_meta[2],
+                                    khuf_cbd.fx_meta[3], khuf_cbd.center_size[3], khug_e, khuf_cbd.fx0[0],
+                                    g_res.constant_buffer);
+            kh_glow_lanes(khuf_cbd, khug_on ? &g_res.glow_pyr[1] : nullptr);
+        }
         // Unbind the source slot before the destination's RTV turn.
         ID3D11ShaderResourceView* khuf_null = nullptr;
         ctx->PSSetShaderResources(0, 1, &khuf_null);
@@ -54470,7 +54815,10 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         ctx->PSSetShader(g_res.ps_effect, nullptr, 0);
         ctx->OMSetBlendState(khuf_final ? g_res.blend_ui_replace : nullptr,
                              bf, 0xFFFFFFFF);
+        KhGlowBind khug_b;   // KH_GLOW_PYR.
+        if (khug_on) khug_b.bind(ctx, g_res.glow_pyr[1]);
         ctx->Draw(3, 0);
+        khug_b.unbind();
         if (!khuf_final) khup_src ^= 1;
 
     };

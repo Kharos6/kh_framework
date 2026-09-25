@@ -10,7 +10,15 @@
                                            : clamp(fxMeta.w / 90.0f, 4.0f, 64.0f);
         int khfs_n = clamp((int)fxParams0.z, 4, 24);
         float khfs_cd = LinDepth(LoadDepthPS(px));
-        float khfs_sc = saturate(KhFsFog(float2(px), khfs_cd, khfs_res, khfs_m00, khfs_m11) * khfs_in);
+        // KH_FX_SIDE: every tap needs its source pixel's fog (KhFsFog: a matrix transform and two or three
+        // exponentials), which each receiver the source reaches used to recompute. The scene chain draws every
+        // pixel's once before the pass (side id 28, the same call on the same depth) and arms matCtl.y; the pass
+        // reads it. Unarmed (effect meshes, the PIP) each tap computes it, as before.
+        const bool khfs_side = matCtl.y > 0.5f;
+        float khfs_f0;
+        [branch] if (khfs_side) khfs_f0 = khFxSide.Load(int3(px, 0));
+        else                    khfs_f0 = KhFsFog(float2(px), khfs_cd, khfs_res, khfs_m00, khfs_m11);
+        float khfs_sc = saturate(khfs_f0 * khfs_in);
         float khfs_c1 = 3.0f * khfs_rm * khfs_rm / (float)khfs_n;
         float khfs_rc = max(khfs_rm * khfs_sc, 1.0f);
         float khfs_ws = (1.0f - khfs_sc) + khfs_sc * khfs_c1 / (khfs_rc * khfs_rc);
@@ -39,7 +47,10 @@
             if (khfs_sp.x < 0 || khfs_sp.y < 0 ||
                 khfs_sp.x >= (int)fxMeta.z || khfs_sp.y >= (int)fxMeta.w) continue;
             float khfs_sd = LinDepth(LoadDepthPS(khfs_sp));
-            float khfs_ss = saturate(KhFsFog(float2(khfs_sp), khfs_sd, khfs_res, khfs_m00, khfs_m11) * khfs_in);
+            float khfs_fs;
+            [branch] if (khfs_side) khfs_fs = khFxSide.Load(int3(khfs_sp, 0));   // KH_FX_SIDE.
+            else                    khfs_fs = KhFsFog(float2(khfs_sp), khfs_sd, khfs_res, khfs_m00, khfs_m11);
+            float khfs_ss = saturate(khfs_fs * khfs_in);
             if (khfs_sd > khfs_cd) khfs_ss = min(khfs_ss, khfs_sc);   // Deflection gate.
             float khfs_rk = khfs_rm * khfs_ss;
             if (khfs_sr >= khfs_rk) continue;   // This source's disc does not reach.
@@ -53,6 +64,14 @@
         }
 
         outc = khfs_acc / max(khfs_ws, 1e-4f);
+    }
+    else if (effect == 28)   // KH_FX_SIDE: fog scatter's per-pixel fog (KhFsFog), drawn before the pass.
+    {
+        // Fog scatter's own inputs, the same expressions (its lanes are this pass's).
+        const float2 khfa_res = float2(fxMeta.z, fxMeta.w);
+        const float khfa_m00 = max(length(float3(viewProj[0].x, viewProj[1].x, viewProj[2].x)), 1e-6f);
+        const float khfa_m11 = max(length(float3(viewProj[0].y, viewProj[1].y, viewProj[2].y)), 1e-6f);
+        return float4(KhFsFog(float2(px), LinDepth(LoadDepthPS(px)), khfa_res, khfa_m00, khfa_m11), 0.0f, 0.0f, 1.0f);
     }
      else if (effect == 101)   // 3D LUT grade (.cube, effect KH_EFFECT_LUT): [strength].
     {

@@ -114,7 +114,14 @@ namespace RenderIntegration {
 // takes none - not the world's, not our meshes' (its own included), not those
 // our meshes cast under dynamic lights; the sun and every dynamic light still
 // light it, and a face turned from the sun stays unlit. An unlit mesh (lit
-// false) neither casts nor receives whatever these say.
+// false) neither casts nor receives whatever these say. A shadow view
+// distance of 5 m or less in the video options turns every mesh's shadows
+// off, as if both were false on all of them, and idles the machinery only
+// shadows use; raising it turns them back on. The setting is read when a
+// mission first has a mesh or post-processing pass, about four times a
+// second while the video options are open, once more as they close, and
+// once again after any stretch of more than half a second in which no mesh
+// or pass existed or no 3D frame was drawn.
 //
 // inFront true draws the mesh in the game's first-person view-model layer -
 // the depth slice the weapon and hands occupy - so it stands in front of the
@@ -392,10 +399,13 @@ namespace RenderIntegration {
 // tap averaged over (a little past) the gap to its
 // neighbours, so a large radius spreads smoothly instead of showing copies
 // of the scene at its tap spacing, a lens-flare ghost is soft instead of
-// blocky, and fog scatter carries no grain. Taps a pixel apart or less read
-// the picture itself, as before - except lens flare's: its ghosts and halo
-// always read the copy, over two pixels at least. The same holds in
-// addLocalPostFX, on effect meshes, over the UI and in a picture-in-picture.
+// blocky, and fog scatter carries no grain. The anamorphic streak reads a
+// copy halved along its own axis only (thresholded too), so it runs as one
+// continuous line instead of a row of dots and stays one pixel thin. Taps a
+// pixel apart or less read the picture itself, as before - except lens
+// flare's: its ghosts and halo always read the copy, over two pixels at
+// least. The same holds in addLocalPostFX, on effect meshes, over the UI and
+// in a picture-in-picture.
 //
 // Returns the khr_ handle, or '' after reporting the fault
 //
@@ -7328,6 +7338,36 @@ struct KhGlowPyr {
     }
 };
 
+// KH_ANA_PYR - anamorphic's one-axis pyramid (effect.hlsl's KH_ANA_PYR note: PSAnaSeed / PSAnaDown make it, effect 15
+// reads it; kh_ana_build). Level k keeps the frame's full size across the streak's axis and has kh_ana_n texels along
+// it (one per 2^(k+1) frame pixels); the levels are strips of two atlases - [0] the even ones, [1] the odd, each at
+// kh_ana_off along the axis - so a level is always built from the other atlas. R16G16B16A16_FLOAT, as the glow
+// pyramid. Resources holds one per glow_pyr route and axis (ana_pyr[route][axis]), each made at its first use,
+// remade when its frame changes size, and released with the device (Resources::release).
+static constexpr int KH_ANA_LEVELS = 8;   // HLSL twin: texels of 2 .. 256 frame pixels along the axis.
+static_assert(KH_ANA_LEVELS >= 2 && KH_ANA_LEVELS % 2 == 0, "KH_ANA_LEVELS: the top two levels end the two atlases");
+// HLSL twin KhAnaLevel (n, o): level k's texels along a frame khan_len pixels long, and its offset in its atlas.
+inline UINT kh_ana_n(UINT khan_len, int khan_k) { return (khan_len + (2u << khan_k) - 1u) >> (khan_k + 1); }
+inline UINT kh_ana_off(UINT khao_len, int khao_k) {
+    UINT khao_o = 0u;
+    for (int khao_j = khao_k & 1; khao_j < khao_k; khao_j += 2) khao_o += kh_ana_n(khao_len, khao_j);
+    return khao_o;
+}
+struct KhAnaPyr {
+    ID3D11Texture2D*          tex[2] = {};
+    ID3D11ShaderResourceView* srv[2] = {};   // The pass's taps (t3 / t6); the other level's source while building.
+    ID3D11RenderTargetView*   rtv[2] = {};
+    UINT                      fw = 0, fh = 0;   // The frame it is made for.
+    void release() {
+        for (int khap_i = 0; khap_i < 2; ++khap_i) {
+            KH_SAFE_RELEASE(rtv[khap_i]);
+            KH_SAFE_RELEASE(srv[khap_i]);
+            KH_SAFE_RELEASE(tex[khap_i]);
+        }
+        fw = fh = 0;
+    }
+};
+
 struct Resources {
     ID3D11VertexShader*      vs = nullptr;
     ID3D11PixelShader*       ps = nullptr;
@@ -7637,6 +7677,21 @@ struct Resources {
     ID3D11PixelShader*        ps_glow_seed = nullptr;
     ID3D11PixelShader*        ps_glow_down = nullptr;
     ID3D11SamplerState*       glow_sampler = nullptr;
+    // KH_ANA_PYR: anamorphic's one-axis pyramids (KhAnaPyr, per glow_pyr route and per axis: [route][0] along x,
+    // [route][1] along y) and their builders (effect.hlsl PSAnaSeed / PSAnaDown, made with the glow builders -
+    // absent, anamorphic takes its direct taps). No sampler: its taps are Loads.
+    KhAnaPyr                  ana_pyr[3][2];
+    ID3D11PixelShader*        ps_ana_seed = nullptr;
+    ID3D11PixelShader*        ps_ana_down = nullptr;
+    // KH_FX_SIDE (effect.hlsl's note): a pass's side value, drawn by PSEffect itself before the pass
+    // (kh_fx_side_draw) - [0] fog scatter's per-pixel fog (R16_FLOAT, the frame's size), [1] the sun flare's
+    // visibility and [2] the UI lane's coverage probe (R32_FLOAT, 1 x 1). Made at first use, remade on a size
+    // change, released with the device.
+    ID3D11Texture2D*          fxs_tex[3] = {};
+    ID3D11RenderTargetView*   fxs_rtv[3] = {};
+    ID3D11ShaderResourceView* fxs_srv[3] = {};
+    UINT                      fxs_w[3] = {};
+    UINT                      fxs_h[3] = {};
     ID3D11Texture2D*          scene_tex = nullptr;
     ID3D11ShaderResourceView* scene_srv = nullptr;
     UINT                      scene_w = 0, scene_h = 0;
@@ -7917,6 +7972,15 @@ struct Resources {
         KH_SAFE_RELEASE(ps_glow_seed);
         KH_SAFE_RELEASE(ps_glow_down);
         KH_SAFE_RELEASE(glow_sampler);
+        for (KhAnaPyr (&khap_r)[2] : ana_pyr) for (KhAnaPyr& khap_p : khap_r) khap_p.release();   // KH_ANA_PYR.
+        KH_SAFE_RELEASE(ps_ana_seed);
+        KH_SAFE_RELEASE(ps_ana_down);
+        for (int khfs_i = 0; khfs_i < 3; ++khfs_i) {   // KH_FX_SIDE.
+            KH_SAFE_RELEASE(fxs_srv[khfs_i]);
+            KH_SAFE_RELEASE(fxs_rtv[khfs_i]);
+            KH_SAFE_RELEASE(fxs_tex[khfs_i]);
+            fxs_w[khfs_i] = fxs_h[khfs_i] = 0;
+        }
         // The sun maps, their pyramids and the tier keys' subjects all died
         // above; the flags and the input hash that claim them live outside
         // Resources. render_sun_depth's hash early return is reached from
@@ -8790,12 +8854,35 @@ inline void kh_scene_grid_insert(uint32_t khgi_slot, const RenderObject& o) {
     khgi_it->second.slots.push_back(khgi_slot);
 }
 
+// KH_SHADOW_OFF - a shadow view distance of KH_SHADOW_OFF_M or less (the video options' shadowVisibility, read
+// by stage_video_options on the game thread whoever owns g_sun_range) turns every shadow of ours off: every mesh
+// casts and receives as if castShadow and receiveShadow were both false (KH_SHADOW_SWITCH) - no caster in any
+// gather or census (kh_cast_on, kh_shadow_active: no sun, far or DLS map, no world cast, no DLS world pass) and
+// no received term (the khObjNoRecv lanes: the sun's bands / atlas, the stencil and mirror, the self ladder, the
+// DLS shadows). The receive lanes take it through g_objbuf_shoff, the object records' own copy (kh_objbuf_sync).
+// The machinery that serves nothing but those terms stands down with it, each through a stand-down path it already
+// has: the DLS light choice (kh_dls_select's allowDynamicShadows-off branch: no slot, so no map and no world
+// pass); the volume copy (kh_svs_vol_copy's no-reader branch, which drops the primed flag); the mask snapshots
+// and the prime (kh_svs_snap_wanted false); and the volume seam's arm (kh_svs_inject_armed false: no world
+// footprint in the engine's volume pass, so no recording, no replay, no mirror prepass, patch or mirror replay,
+// no census take) with the in-front seam beside it and the replay's constant-buffer images (kh_rp_img_note).
+// Every frame while off, kh_volume_seam_frame_reset leaves nothing of that path ready for shadows' return (copy,
+// snapshots, mirror) and releases the last recorded pass. What stays is what non-shadow work reads: the
+// engine-side capture (its cascade axes are the sun direction that lights every mesh - kh_sun_raw_note), the
+// constant-buffer census (a blanket term of the upload funnel the lighting probes ride - kh_cbc_on's note), the
+// dynamic lights' harvest (g_ls.wanted: a lit mesh, not a shadow) and the engine-mask tracking the capture
+// shares.
+static constexpr float KH_SHADOW_OFF_M = 5.0f;
+static std::atomic<bool> g_shadows_off{ false };   // Game thread writes; every thread reads.
+inline bool kh_shadows_off() { return g_shadows_off.load(std::memory_order_relaxed); }
+
 // GPU object record, HLSL twin KhObjRec (t39). One per live-scene slot, engine
 // axes: what a bucket's instanced VS needs per object (centre, edge lengths,
 // rotation rows, colour without envelope, lit fractions). Rebuilt in
 // kh_scene_sync per dirty slot, uploaded as ranges by kh_objbuf_sync.
 struct KhObjRec {
-    float pos[4];    // xyz = centre (engine axes); w = 1 with receiveShadow off (KH_SHADOW_SWITCH), else 0.
+    float pos[4];    // xyz = centre (engine axes); w = 1 with receiveShadow off (KH_SHADOW_SWITCH) or every
+                     // shadow off (KH_SHADOW_OFF, g_objbuf_shoff), else 0.
     float size[4];   // xyz = edge lengths (engine axes); w = creation (s, the session clock; KH_USER_LANES).
     float rot0[4];   // Rotation rows (row-vector; identity when unrotated); rot0.w = 1
     float rot1[4];   // (filled), rot1.w = ambient fraction, rot2.w = diffuse fraction.
@@ -8807,10 +8894,14 @@ static_assert(sizeof(KhObjRec) == 112, "KhObjRec is 7 float4 (HLSL twin)");
 static std::vector<KhObjRec> g_objbuf_cpu;          // By slot; the buffer's mirror.
 static std::vector<uint32_t> g_objbuf_dirty;        // Slots the GPU copy is behind on.
 static std::vector<uint8_t>  g_objbuf_dirty_mark;
+// KH_SHADOW_OFF as the records hold it (under the park, as the mirror): kh_objbuf_sync takes the switch and
+// re-derives every record's pos.w when it moves, so the records agree with one another; the per-draw receive
+// lane (fill_lighting_obj_cb) reads this copy too.
+static bool g_objbuf_shoff = false;
 
 inline void kh_objrec_fill(KhObjRec& r, const RenderObject& o) {
     r.pos[0] = o.pos[0]; r.pos[1] = o.pos[2]; r.pos[2] = o.pos[1];   // SQF [x,y,zASL] -> engine [x,zASL,y].
-    r.pos[3] = o.receive_shadow ? 0.0f : 1.0f;   // KH_SHADOW_SWITCH (khObjNoRecv).
+    r.pos[3] = (o.receive_shadow && !g_objbuf_shoff) ? 0.0f : 1.0f;   // KH_SHADOW_SWITCH / KH_SHADOW_OFF (khObjNoRecv).
     r.size[0] = o.size[0]; r.size[1] = o.size[2]; r.size[2] = o.size[1];
     r.size[3] = static_cast<float>(o.fx_t0);   // KH_USER_LANES: creation on the session clock (khUserObj.y's twin).
     for (int rr = 0; rr < 3; ++rr) {
@@ -8881,6 +8972,14 @@ inline bool kh_objbuf_sync(ID3D11DeviceContext* ctx) {
     const uint32_t khob_n = static_cast<uint32_t>(g_objbuf_cpu.size());
     if (khob_n == 0 || !ctx) return false;
     bool khob_whole = false;
+    // KH_SHADOW_OFF: the switch moved - every record's receive lane again, and the buffer goes up whole.
+    if (kh_shadows_off() != g_objbuf_shoff) {
+        g_objbuf_shoff = !g_objbuf_shoff;
+        const uint32_t khob_m = khob_n < g_scene.objs.size() ? khob_n : static_cast<uint32_t>(g_scene.objs.size());
+        for (uint32_t khob_s = 0; khob_s < khob_m; ++khob_s)
+            g_objbuf_cpu[khob_s].pos[3] = (g_scene.objs[khob_s].receive_shadow && !g_objbuf_shoff) ? 0.0f : 1.0f;
+        khob_whole = true;
+    }
     if (!g_res.obj_sb || g_res.obj_cap < khob_n) {
         ID3D11Device* khob_dev = nullptr;
         ctx->GetDevice(&khob_dev);
@@ -12278,9 +12377,13 @@ struct alignas(16) ConstantData {
     float blend_ctl[4];   // x = perceptual-composite enable (the flush's fill only; the injection
                           // writes 0), w = the LOD crossfade dither; y / z unread.
     float mat_ctl[4];   // KH_MAT_TABLE (HLSL twin matCtl): x = table index (base + slot) for the
-                        // non-instanced VS, y = slot for the instanced VS, w = alpha-mode override
-                        // (-1 none). The material lanes themselves live in the table (KhGpuMat).
-    float fuse_meta[4];   // x = the fused stages (kh_fuse_append); y, zw = KH_GLOW_PYR's arm and extent (kh_glow_lanes).
+                        // non-instanced VS, y = slot for the instanced VS, z = 1 when x holds for
+                        // every instance, w = alpha-mode override (-1 none). The material lanes
+                        // themselves live in the table (KhGpuMat). On an effect pass y / z are
+                        // KH_FX_SIDE's arms instead (the scene chain's fog scatter / sun flare,
+                        // the UI lane's probe), zero unless the pass drew its side value first.
+    float fuse_meta[4];   // x = the fused stages (kh_fuse_append); y, zw = KH_GLOW_PYR's arm and extent
+                          // (kh_glow_lanes), or on an anamorphic pass KH_ANA_PYR's arm and frame (kh_ana_lanes).
     float fuse_stage[12][4];
     // fx2 sits in the append region (append-only block discipline); HLSL twin
     // fxParams2. Zeroed on every fill site except the chain-pass fills.
@@ -12459,6 +12562,13 @@ struct alignas(16) ConstantData {
     // kh_fill_sun_tiers_cb from the render that made each map; a stood-down
     // tier's pair is unread (its meta is zero).
     float sun_lat[2][4];
+    // KH_CB_DERIVED (HLSL twins sunCol / castCam, cb.hlsl's note): never filled by hand - kh_upload_frame_cb forms
+    // them from this struct's own matrices at every frame upload (kh_cb_derived), so they cannot drift from what
+    // the upload carries. sun_col: each sun map's texel and depth scales, the lengths of its matrix's columns 0 and
+    // 2 over rows 0 - 2 - [0] = union xy / hero zw, [1] = mid xy / outer zw, [2] = far xy (zw zero). cast_cam: the
+    // frozen mask-cast camera, cast_mat's rows dotted with -cast_view[0].
+    float sun_col[3][4];
+    float cast_cam[4];
 };
 
 // CB-split slice geometry: the object block ends where view_proj (the first
@@ -12563,10 +12673,33 @@ inline bool kh_upload_obj_cb(ID3D11DeviceContext* ctx, ID3D11Buffer* buf, const 
     return true;
 }
 
+// KH_CB_DERIVED: the frame lanes formed from the frame's own matrices, written straight into the mapped upload at
+// their offsets past the object block (every frame upload comes through kh_upload_frame_cb, which takes the struct
+// const). ConstantData's note has the layout.
+inline void kh_cb_derived(uint8_t* khcd_dst, const ConstantData& khcd_c) {
+    float khcd_col[3][4] = {};
+    const float (*const khcd_m[5])[4] = { khcd_c.sun_vp, khcd_c.sun_vp2, khcd_c.sun_vp3, khcd_c.sun_vp4, khcd_c.sun_vp5 };
+    for (int khcd_i = 0; khcd_i < 5; ++khcd_i) {
+        const float (*const khcd_v)[4] = khcd_m[khcd_i];
+        float* const khcd_o = &khcd_col[khcd_i >> 1][(khcd_i & 1) * 2];
+        khcd_o[0] = sqrtf(khcd_v[0][0] * khcd_v[0][0] + khcd_v[1][0] * khcd_v[1][0] + khcd_v[2][0] * khcd_v[2][0]);
+        khcd_o[1] = sqrtf(khcd_v[0][2] * khcd_v[0][2] + khcd_v[1][2] * khcd_v[1][2] + khcd_v[2][2] * khcd_v[2][2]);
+    }
+    float khcd_cam[4] = {};
+    for (int khcd_r = 0; khcd_r < 3; ++khcd_r) {
+        khcd_cam[khcd_r] = -(khcd_c.cast_view[0][0] * khcd_c.cast_mat[khcd_r][0] +
+                             khcd_c.cast_view[0][1] * khcd_c.cast_mat[khcd_r][1] +
+                             khcd_c.cast_view[0][2] * khcd_c.cast_mat[khcd_r][2]);
+    }
+    memcpy(khcd_dst + (offsetof(ConstantData, sun_col) - KH_CBOBJ_BYTES), khcd_col, sizeof(khcd_col));
+    memcpy(khcd_dst + (offsetof(ConstantData, cast_cam) - KH_CBOBJ_BYTES), khcd_cam, sizeof(khcd_cam));
+}
+
 inline bool kh_upload_frame_cb(ID3D11DeviceContext* ctx, ID3D11Buffer* buf, const ConstantData& cbd) {
     D3D11_MAPPED_SUBRESOURCE mapped = {};
     if (FAILED(ctx->Map(buf, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
     memcpy(mapped.pData, reinterpret_cast<const uint8_t*>(&cbd) + KH_CBOBJ_BYTES, KH_CBFRAME_BYTES);
+    kh_cb_derived(static_cast<uint8_t*>(mapped.pData), cbd);   // KH_CB_DERIVED.
     ctx->Unmap(buf, 0);
     return true;
 }
@@ -25111,6 +25244,8 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         { khfx_src.c_str(), "PSEffect", "ps_5_0", khfx_d1, 0 },
         { khfx_src.c_str(), "PSGlowSeed", "ps_5_0", khfx_d0, 0 },   // KH_GLOW_PYR (the creation below).
         { khfx_src.c_str(), "PSGlowDown", "ps_5_0", khfx_d0, 0 },
+        { khfx_src.c_str(), "PSAnaSeed", "ps_5_0", khfx_d0, 0 },   // KH_ANA_PYR (the creation below).
+        { khfx_src.c_str(), "PSAnaDown", "ps_5_0", khfx_d0, 0 },
         { kh_hlsl_src(KH_HLSL_SUNPF).c_str(),   "VSPf",    "vs_5_0", khpw_none, 0 },
         { kh_hlsl_src(KH_HLSL_SUNPF).c_str(),   "PSPf",    "ps_5_0", khpw_none, 0 },
         { kh_hlsl_src(KH_HLSL_SUNPF).c_str(),   "PSPfMip", "ps_5_0", khpw_none, 0 },
@@ -25208,7 +25343,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
     }
 
     // Non-fatal entry points: each consumer gates on its pointer.
-    kh_ps_optional(dev, static_src, "PSInjDepthA", khtx_defines, &g_res.ps_inj_depth_a, "KH inject-depth alpha shader: ");   // KH_FOOTPRINT_ALPHA (KH_TEXTURED for KhMatRoute).
+    kh_ps_optional(dev, static_src, "PSInjDepthA", khtx_defines, &g_res.ps_inj_depth_a, "KH inject-depth alpha shader: ");   // KH_FOOTPRINT_ALPHA (KH_TEXTURED for KhMatRouteG).
     kh_ps_optional(dev, static_src, "PSMaskCast", khcb_rx_defines, &g_res.ps_maskcast, "KH maskcast shader: ");   // Analytic mask cast.
     kh_ps_optional(dev, static_src, "PSReplayMerge", khcb_rx_defines, &g_res.ps_rpmerge, "KH replay merge shader: ");   // KH_VOL_REPLAY.
     kh_ps_optional(dev, static_src, "PSReplayMergeMir", khcb_rx_defines, &g_res.ps_rpmergemir, "KH mirror merge shader: ");   // KH_MIR_REPLAY.
@@ -25217,11 +25352,14 @@ inline std::string ensure_resources(ID3D11Device* dev) {
     kh_ps_optional(dev, static_src, "PSDlsWorldFog", khcb_rx_defines, &g_res.ps_dls_world_fog, "KH dlsworld fog shader: ");   // KH_DLSW_FOG; absent = the plain multiply.
     kh_vs_optional(dev, static_src, "VSDlsMask", khcb_rx_defines, &g_res.vs_dls_mask, "KH dlsmask VS: ");   // KH_DLSW_MASK pair: a failed
     kh_ps_optional(dev, static_src, "PSDlsMask", khcb_rx_defines, &g_res.ps_dls_mask, "KH dlsmask PS: ");   // compile leaves the mask off.
-    kh_ps_optional(dev, static_src, "PSDlsMaskA", khtx_defines, &g_res.ps_dls_mask_a, "KH dlsmask alpha PS: ");   // KH_DLSW_MASK_ALPHA (KH_TEXTURED for KhMatRoute); absent = alpha casters mask opaque.
+    kh_ps_optional(dev, static_src, "PSDlsMaskA", khtx_defines, &g_res.ps_dls_mask_a, "KH dlsmask alpha PS: ");   // KH_DLSW_MASK_ALPHA (KH_TEXTURED for KhMatRouteG); absent = alpha casters mask opaque.
     kh_ps_optional(dev, static_src, "PSMaskPrime", khcb_rx_defines, &g_res.ps_maskprime, "KH maskprime shader: ");   // Priming pass, same contract.
     // KH_GLOW_PYR: the effect unit's two pyramid builders (MSAA_DEPTH 0 - neither reads depth); absent = direct taps.
     kh_ps_optional(dev, khfx_src, "PSGlowSeed", khfx_d0, &g_res.ps_glow_seed, "KH glow seed shader: ");
     kh_ps_optional(dev, khfx_src, "PSGlowDown", khfx_d0, &g_res.ps_glow_down, "KH glow down shader: ");
+    // KH_ANA_PYR: anamorphic's two, likewise (MSAA_DEPTH 0); absent = its direct taps.
+    kh_ps_optional(dev, khfx_src, "PSAnaSeed", khfx_d0, &g_res.ps_ana_seed, "KH anamorphic seed shader: ");
+    kh_ps_optional(dev, khfx_src, "PSAnaDown", khfx_d0, &g_res.ps_ana_down, "KH anamorphic down shader: ");
 
     {   // Instanced sun-depth VS + layout: non-fatal (per-caster loop covers).
         ID3DBlob* sd_blob = nullptr;
@@ -25276,7 +25414,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
 
     // The alpha-aware sun-depth VS/PS + their layout (mesh slot 0 with the uv,
     // the same per-instance slot 1). Non-fatal: absent, every caster draws
-    // whole. Compiled KH_TEXTURED for KhMatRoute.
+    // whole. Compiled KH_TEXTURED for KhMatRouteG.
     {
         ID3DBlob* khsa_vb = nullptr;
         ID3DBlob* khsa_pb = nullptr;
@@ -26855,7 +26993,7 @@ struct KhOmSave {
 // KH_GLOW_PYR - the glows and blurs read a pre-filtered picture (effect.hlsl's KH_GLOW_PYR note): the effects whose
 // taps read it, and those among them that take it through their threshold (fxParams0.x, the bright pass).
 // Anamorphic is not among them: its streak is a pixel thin, which an isotropic level cannot give without
-// thickening it, and the anisotropic read that could costs about ten times its taps (it wants a one-axis pyramid).
+// thickening it; it reads a pyramid of its own, halved along the streak alone (KH_ANA_PYR, kh_ana_build).
 inline bool kh_glow_effect(int khge_e) {
     return khge_e == static_cast<int>(EffectId::Blur) || khge_e == static_cast<int>(EffectId::Bloom) ||
            khge_e == static_cast<int>(EffectId::Halation) || khge_e == static_cast<int>(EffectId::LensFlare) ||
@@ -27081,6 +27219,214 @@ struct KhGlowBind {
         ctx = nullptr;
     }
 };
+
+// KH_ANA_PYR - the pyramid for a frame of khpe_fw x khpe_fh along axis khpe_ax (0 x, 1 y), made or remade as needed.
+// Each atlas is the frame's size across the axis and, along it, as long as its last level's strip ends. False
+// (reported once) when anything cannot be made; the pass then takes its direct taps.
+inline bool kh_ana_pyr_ensure(ID3D11Device* dev, KhAnaPyr& khpe_p, UINT khpe_fw, UINT khpe_fh, int khpe_ax) {
+    if (khpe_fw == 0u || khpe_fh == 0u) return false;
+    if (khpe_p.tex[0] && khpe_p.tex[1] && khpe_p.fw == khpe_fw && khpe_p.fh == khpe_fh) return true;
+    khpe_p.release();
+    const UINT khpe_len = khpe_ax ? khpe_fh : khpe_fw;
+    HRESULT khpe_hr = S_OK;
+    for (int khpe_a = 0; SUCCEEDED(khpe_hr) && khpe_a < 2; ++khpe_a) {
+        const int khpe_k = KH_ANA_LEVELS - 2 + khpe_a;   // This atlas's top level (KH_ANA_LEVELS is even).
+        const UINT khpe_ext = kh_ana_off(khpe_len, khpe_k) + kh_ana_n(khpe_len, khpe_k);
+        D3D11_TEXTURE2D_DESC khpe_td = {};
+        khpe_td.Width = khpe_ax ? khpe_fw : khpe_ext;
+        khpe_td.Height = khpe_ax ? khpe_ext : khpe_fh;
+        khpe_td.MipLevels = 1;
+        khpe_td.ArraySize = 1;
+        khpe_td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        khpe_td.SampleDesc.Count = 1;
+        khpe_td.Usage = D3D11_USAGE_DEFAULT;
+        khpe_td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        khpe_hr = dev->CreateTexture2D(&khpe_td, nullptr, &khpe_p.tex[khpe_a]);
+        if (SUCCEEDED(khpe_hr))
+            khpe_hr = dev->CreateShaderResourceView(khpe_p.tex[khpe_a], nullptr, &khpe_p.srv[khpe_a]);
+        if (SUCCEEDED(khpe_hr))
+            khpe_hr = dev->CreateRenderTargetView(khpe_p.tex[khpe_a], nullptr, &khpe_p.rtv[khpe_a]);
+    }
+    if (FAILED(khpe_hr)) {
+        khpe_p.release();
+        report_error_once_safe("KH anamorphic pyramid: " + hr_str(khpe_hr) + " (anamorphic takes its direct taps)");
+        return false;
+    }
+    khpe_p.fw = khpe_fw;
+    khpe_p.fh = khpe_fh;
+    return true;
+}
+
+// KH_ANA_PYR - an anamorphic pass's lanes: armed with the frame its pyramid was made for, or disarmed (null). The
+// glows' lanes (kh_glow_lanes), which an anamorphic pass never takes.
+inline void kh_ana_lanes(ConstantData& khal_cbd, const KhAnaPyr* khal_p) {
+    khal_cbd.fuse_meta[1] = khal_p ? 1.0f : 0.0f;
+    khal_cbd.fuse_meta[2] = khal_p ? static_cast<float>(khal_p->fw) : 0.0f;
+    khal_cbd.fuse_meta[3] = khal_p ? static_cast<float>(khal_p->fh) : 0.0f;
+}
+
+// KH_ANA_PYR - build khab_p from khab_src, the pass's own source (its t0), for an anamorphic pass over a frame of
+// khab_fw x khab_fh (its fxMeta.zw) along axis khab_ax (its fxParams1.x > 0.5): level 0 through the pass's threshold
+// (khab_thr, fxParams0.x) and SampleScene's premultiply when khab_csw (its centerSize.w) is the UI spill lane's,
+// then every level from the one below, each into its strip. kh_glow_build's contract: every binding it makes is put
+// back (KhGlowSave) except b0, which carries its own slices (khab_cb, the route's object buffer), so call it BEFORE
+// the pass's own upload; false = no pyramid (resources or shaders missing): the pass is left disarmed and takes
+// its direct taps. Our draws, inside a pass that already stands the hooks aside.
+inline bool kh_ana_build(ID3D11Device* dev, ID3D11DeviceContext* ctx, KhAnaPyr& khab_p,
+                         ID3D11ShaderResourceView* khab_src, float khab_fw, float khab_fh, float khab_csw,
+                         int khab_ax, float khab_thr, ID3D11Buffer* khab_cb) {
+    if (!dev || !ctx || !khab_src || !khab_cb || !g_res.ps_ana_seed || !g_res.ps_ana_down ||
+        !g_res.vs_fullscreen || !g_res.rasterizer || !g_res.dss_off) return false;
+    if (!(khab_fw >= 1.0f && khab_fh >= 1.0f && khab_fw <= 16384.0f && khab_fh <= 16384.0f)) return false;
+    const UINT khab_w = static_cast<UINT>(khab_fw + 0.5f);
+    const UINT khab_h = static_cast<UINT>(khab_fh + 0.5f);
+    if (!kh_ana_pyr_ensure(dev, khab_p, khab_w, khab_h, khab_ax)) return false;
+    const UINT khab_len = khab_ax ? khab_h : khab_w;
+    ConstantData khab_cbd = {};
+    khab_cbd.fx_meta[2] = khab_fw;   // SampleScene's clamp: the pass's frame (and the levels' length along).
+    khab_cbd.fx_meta[3] = khab_fh;
+    khab_cbd.center_size[3] = khab_csw;   // SampleScene's premultiply (w > 2.5, the UI spill lane).
+    khab_cbd.local0[0] = khab_thr;
+    khab_cbd.local0[2] = khab_ax ? 1.0f : 0.0f;
+    KhGlowSave khab_sv;
+    khab_sv.capture(ctx);
+    ID3D11ShaderResourceView* khab_null = nullptr;
+    ctx->IASetInputLayout(nullptr);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
+    ctx->RSSetState(g_res.rasterizer);
+    ctx->OMSetDepthStencilState(g_res.dss_off, 0);
+    const FLOAT khab_bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    ctx->OMSetBlendState(nullptr, khab_bf, 0xFFFFFFFF);
+    bool khab_ok = true;
+    for (int khab_k = 0; khab_ok && khab_k < KH_ANA_LEVELS; ++khab_k) {
+        khab_cbd.local0[3] = static_cast<float>(khab_k);   // The level (PSAnaDown).
+        khab_ok = kh_upload_obj_cb(ctx, khab_cb, khab_cbd);
+        if (!khab_ok) break;
+        ctx->PSSetShaderResources(3, 1, &khab_null);   // The atlas about to be a target is off every slot first.
+        ctx->OMSetRenderTargets(1, &khab_p.rtv[khab_k & 1], nullptr);
+        D3D11_VIEWPORT khab_vp = {};   // The level's strip.
+        const FLOAT khab_o = static_cast<FLOAT>(kh_ana_off(khab_len, khab_k));
+        const FLOAT khab_n = static_cast<FLOAT>(kh_ana_n(khab_len, khab_k));
+        khab_vp.TopLeftX = khab_ax ? 0.0f : khab_o;
+        khab_vp.TopLeftY = khab_ax ? khab_o : 0.0f;
+        khab_vp.Width = khab_ax ? static_cast<FLOAT>(khab_w) : khab_n;
+        khab_vp.Height = khab_ax ? khab_n : static_cast<FLOAT>(khab_h);
+        khab_vp.MaxDepth = 1.0f;
+        ctx->RSSetViewports(1, &khab_vp);
+        if (khab_k == 0) {
+            ctx->PSSetShader(g_res.ps_ana_seed, nullptr, 0);
+            ctx->PSSetShaderResources(0, 1, &khab_src);
+        } else {
+            if (khab_k == 1) {
+                ctx->PSSetShaderResources(0, 1, &khab_null);
+                ctx->PSSetShader(g_res.ps_ana_down, nullptr, 0);
+            }
+            ctx->PSSetShaderResources(3, 1, &khab_p.srv[(khab_k - 1) & 1]);   // The level below, the other atlas.
+        }
+        ctx->Draw(3, 0);
+    }
+    khab_sv.restore(ctx);
+    return khab_ok;
+}
+
+// KH_ANA_PYR - one anamorphic draw's t3 / t6 (the even / odd atlases), each put back as it was by unbind() or the
+// scope's end (KhGlowBind's rule). No sampler: the taps are Loads.
+struct KhAnaBind {
+    ID3D11DeviceContext*      ctx = nullptr;
+    ID3D11ShaderResourceView* t3 = nullptr;
+    ID3D11ShaderResourceView* t6 = nullptr;
+    KhAnaBind() = default;
+    KhAnaBind(const KhAnaBind&) = delete;
+    KhAnaBind& operator=(const KhAnaBind&) = delete;
+    ~KhAnaBind() { unbind(); }
+    void bind(ID3D11DeviceContext* khan_ctx, const KhAnaPyr& khan_p) {
+        if (ctx || !khan_ctx || !khan_p.srv[0] || !khan_p.srv[1]) return;
+        ctx = khan_ctx;
+        ctx->PSGetShaderResources(3, 1, &t3);
+        ctx->PSGetShaderResources(6, 1, &t6);
+        ctx->PSSetShaderResources(3, 1, &khan_p.srv[0]);
+        ctx->PSSetShaderResources(6, 1, &khan_p.srv[1]);
+    }
+    void unbind() {
+        if (!ctx) return;
+        ctx->PSSetShaderResources(6, 1, &t6);
+        ctx->PSSetShaderResources(3, 1, &t3);
+        KH_SAFE_RELEASE(t6);
+        KH_SAFE_RELEASE(t3);
+        ctx = nullptr;
+    }
+};
+
+// KH_FX_SIDE - draw side value k (side id khsd_id: 28 fog scatter's per-pixel fog, 29 the sun flare's visibility,
+// 30 the UI lane's coverage probe) with PSEffect into its own target, from the pass's own constants, before the
+// pass: the glow build's contract - it uploads its own slice to khsd_cb (the route's object buffer, bound at b0),
+// so the pass uploads its constants after it, and every other binding it makes is put back (KhGlowSave). The fog
+// target is the frame's size and is drawn through the viewport the pass draws through; the two 1 x 1 targets
+// through a 1 x 1 one. khsd_t0: the source bound at t0 for the draw (null keeps t0 as it is). False = no side
+// value: the pass stays unarmed and computes the value in place.
+inline bool kh_fx_side_draw(ID3D11Device* dev, ID3D11DeviceContext* ctx, int khsd_k, ConstantData& khsd_cbd,
+                            float khsd_id, UINT khsd_w, UINT khsd_h, ID3D11ShaderResourceView* khsd_t0,
+                            ID3D11Buffer* khsd_cb) {
+    if (!dev || !ctx || !khsd_cb || khsd_k < 0 || khsd_k > 2) return false;
+    if (khsd_w == 0 || khsd_h == 0 || khsd_w > 16384 || khsd_h > 16384) return false;
+    if (!g_res.ps_effect || !g_res.vs_fullscreen || !g_res.rasterizer || !g_res.dss_off) return false;
+    if (!g_res.fxs_tex[khsd_k] || !g_res.fxs_rtv[khsd_k] || !g_res.fxs_srv[khsd_k] ||
+        g_res.fxs_w[khsd_k] != khsd_w || g_res.fxs_h[khsd_k] != khsd_h) {
+        KH_SAFE_RELEASE(g_res.fxs_srv[khsd_k]);
+        KH_SAFE_RELEASE(g_res.fxs_rtv[khsd_k]);
+        KH_SAFE_RELEASE(g_res.fxs_tex[khsd_k]);
+        g_res.fxs_w[khsd_k] = g_res.fxs_h[khsd_k] = 0;
+        D3D11_TEXTURE2D_DESC khsd_td = {};
+        khsd_td.Width = khsd_w;
+        khsd_td.Height = khsd_h;
+        khsd_td.MipLevels = 1;
+        khsd_td.ArraySize = 1;
+        khsd_td.Format = khsd_k == 0 ? DXGI_FORMAT_R16_FLOAT : DXGI_FORMAT_R32_FLOAT;
+        khsd_td.SampleDesc.Count = 1;
+        khsd_td.Usage = D3D11_USAGE_DEFAULT;
+        khsd_td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(dev->CreateTexture2D(&khsd_td, nullptr, &g_res.fxs_tex[khsd_k])) ||
+            FAILED(dev->CreateRenderTargetView(g_res.fxs_tex[khsd_k], nullptr, &g_res.fxs_rtv[khsd_k])) ||
+            FAILED(dev->CreateShaderResourceView(g_res.fxs_tex[khsd_k], nullptr, &g_res.fxs_srv[khsd_k]))) {
+            KH_SAFE_RELEASE(g_res.fxs_srv[khsd_k]);
+            KH_SAFE_RELEASE(g_res.fxs_rtv[khsd_k]);
+            KH_SAFE_RELEASE(g_res.fxs_tex[khsd_k]);
+            report_error_once_safe("KH fx side target could not be made (the pass computes it in place)");
+            return false;
+        }
+        g_res.fxs_w[khsd_k] = khsd_w;
+        g_res.fxs_h[khsd_k] = khsd_h;
+    }
+    KhGlowSave khsd_sv;
+    khsd_sv.capture(ctx);
+    const float khsd_id0 = khsd_cbd.fx_meta[0];
+    khsd_cbd.fx_meta[0] = khsd_id;
+    const bool khsd_ok = kh_upload_obj_cb(ctx, khsd_cb, khsd_cbd);
+    khsd_cbd.fx_meta[0] = khsd_id0;
+    if (khsd_ok) {
+        ctx->OMSetRenderTargets(1, &g_res.fxs_rtv[khsd_k], nullptr);
+        if (khsd_k != 0) {
+            D3D11_VIEWPORT khsd_vp = {};
+            khsd_vp.Width = 1.0f;
+            khsd_vp.Height = 1.0f;
+            khsd_vp.MaxDepth = 1.0f;
+            ctx->RSSetViewports(1, &khsd_vp);
+        }
+        const FLOAT khsd_bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        ctx->IASetInputLayout(nullptr);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
+        ctx->PSSetShader(g_res.ps_effect, nullptr, 0);
+        ctx->RSSetState(g_res.rasterizer);
+        ctx->OMSetDepthStencilState(g_res.dss_off, 0);
+        ctx->OMSetBlendState(nullptr, khsd_bf, 0xFFFFFFFF);
+        if (khsd_t0) ctx->PSSetShaderResources(0, 1, &khsd_t0);
+        ctx->Draw(3, 0);
+    }
+    khsd_sv.restore(ctx);
+    return khsd_ok;
+}
 
 inline float effect_time_seconds();   // Defined below; the snapshot timestamp needs it.
 
@@ -27822,8 +28168,9 @@ inline bool is_composite_eligible(const RenderObject& o) {
 // An unlit mesh neither receives nor casts (effect meshes are unlit by
 // construction). casterOnly admits an invisible object as a caster;
 // KH_SHADOW_SWITCH: castShadow false makes it no caster at all, casterOnly or
-// not. Every caster gather and demand census reads these, never the fields
-// directly.
+// not, and so does every shadow off (KH_SHADOW_OFF): kh_cast_on. Every caster
+// gather and demand census reads these - kh_cast_on where it has taken the
+// part test already - never the fields directly.
 // KH_INFRONT: whether the cycle that last ended drew the engine's view-model
 // slice (a hands prepass or colour pass was seen). Written by the render thread
 // at the main depth clear (kh_infront_frame_reset), read by every caster
@@ -27837,8 +28184,11 @@ inline bool kh_shadow_part(const RenderObject& o) {
            (o.visible || o.caster_only) &&
            (!o.in_front || g_vm_slice_live.load(std::memory_order_relaxed));   // KH_INFRONT.
 }
+inline bool kh_cast_on(const RenderObject& o) {
+    return o.cast_shadow && !kh_shadows_off();   // KH_SHADOW_SWITCH, KH_SHADOW_OFF.
+}
 inline bool kh_shadow_active(const RenderObject& o) {
-    return o.cast_shadow && kh_shadow_part(o);   // KH_SHADOW_SWITCH.
+    return kh_cast_on(o) && kh_shadow_part(o);
 }
 
 // A genuine scene issues many opaque draws between its depth clear and its
@@ -29117,9 +29467,9 @@ static float g_sun_dir_engine[3] = { 0.0f, 1.0f, 0.0f };   // Unit vector toward
 // lit = ambient + sun, shadowed = ambient, so the per-channel factor is
 // amb/(amb+sun).
 
-// Game-thread staging. Fog is fetched alongside getLighting (the extension
-// self-fetches fogParams). RV's fog density decays exponentially with height
-// above fogBase.
+// Game-thread staging. The fog is fetched by stage_world_lighting (the
+// extension self-fetches fogParams). RV's fog density decays exponentially
+// with height above fogBase.
 static bool  g_fog_staged_valid = false;
 static float g_fog_staged[3] = { 0.0f, 0.0f, 0.0f };
 static bool  g_fog_valid = false;
@@ -33556,7 +33906,7 @@ inline void kh_dls_select() {
     // stand-down branch (no map, no caster list) and the world pass returns at
     // its first test. The per-light skip keys stay: nothing renders into the
     // slices while off, so a key that matches on return names a valid slice.
-    if (!g_dls_allowed.load(std::memory_order_relaxed)) {
+    if (!g_dls_allowed.load(std::memory_order_relaxed) || kh_shadows_off()) {   // KH_SHADOW_OFF too.
         for (uint32_t khs_s = 0; khs_s < KH_DLS_MAX; ++khs_s) g_dls[khs_s].live = 0;
         g_dls_n = 0;
         return;
@@ -34612,8 +34962,8 @@ inline void kh_uvs_step(ID3D11DeviceContext* khus_ctx) {
         const RenderObject& o = g_scene.objs[s];
         if (o.seq != r.seq || !o.materials || !o.materials->vertex_any || mesh_id_clamp(o.mesh) != r.mesh) continue;
         // Nothing draws it. (An invisible casterOnly object still casts while
-        // castShadow is on - KH_SHADOW_SWITCH: the maps draw this buffer.)
-        if (!o.visible && !(o.caster_only && o.cast_shadow)) continue;
+        // castShadow is on - KH_SHADOW_SWITCH, KH_SHADOW_OFF: the maps draw this buffer.)
+        if (!o.visible && !(o.caster_only && kh_cast_on(o))) continue;
         // KH_USER_VS_SRC_DIRTY: evaluated this cycle already (so: over a source
         // of the object's own) - again only if something the stage reads has
         // moved since: the source's bytes (kh_uvs_src_wrote - the step before
@@ -34845,7 +35195,7 @@ inline void kh_fill_depth_range_cb(ConstantData& cbd) {
 // ssao.hlsl; the settings are setRenderAmbientOcclusion's). After a drawer's
 // depth-writing draws - the injection's, or the flush's late ones - the term
 // is computed from the live main depth, which then holds the world's opaques
-// and ours, smoothed by the SSGI chain's two a-trous iterations, and
+// and ours, smoothed by three separable blur levels (KH_SSAO_SEP), and
 // multiplied into the scene colour at OUR pixels (kh_ssao_post), over the
 // meshes' pixel rectangle (kh_snapshot_rect, padded).
 //
@@ -34878,7 +35228,9 @@ struct KhSsaoCb {   // HLSL twin CBSsao (ssao.hlsl, b0), 5 float4.
     float proj[4];   // x = m00, y = m11, z = m22, w = m32 (the injection's projection).
     float vp[4];     // x = viewport MinDepth, y = MaxDepth, z = target width, w = target height.
     float ctl[4];    // x = radius (m), y = strength (the exponent), z = the draw's blur stride
-                     // multiplier (1, 2, 3); w unused (0).
+                     // multiplier (1, 2, 3 by level); w = the blur's axis and rule (KH_SSAO_SEP: 0 / 1 = x / y,
+                     // + 2 = the third level's stride rule). Only the blurs read z / w: the gather's and the
+                     // near marker's uploads carry z = 1, w = 0; the apply draws under the last blur's.
     float rect[4];   // The pass rectangle, left / top / right / bottom (px, exclusive): the
                      // blurs read no term texel outside it (nothing wrote there this frame).
     float half[4];   // x, y = the half-resolution grid's width and height; z = the near-z route's near (0 = no route
@@ -34887,14 +35239,16 @@ struct KhSsaoCb {   // HLSL twin CBSsao (ssao.hlsl, b0), 5 float4.
 static_assert(sizeof(KhSsaoCb) == 80, "KhSsaoCb is 5 float4 (HLSL twin CBSsao)");
 // The pass rectangle is the meshes' (kh_snapshot_rect) padded by the passes'
 // reach beyond a marked pixel. Two reaches must fit inside the pad: the
-// blurs' - 5 x 5 passes on the half grid two taps deep at strides of at most
-// 3, 6 and 4 half pixels (the a-trous pair and the apply), 12 + 24 + 16 = 52
-// full pixels - and PSSsaoMain's wide normal, four half-grid depth taps at a
-// stride of at most 24 half pixels = 48 full, which take no rectangle test
-// (the gather and blur taps do). A marked pixel lies inside the unpadded
-// rectangle (the mark is a depth write of a mesh whose box the rectangle
-// bounds), so both reaches stay on half-grid texels PSSsaoDepth wrote this
-// frame; the whole-target fallback writes every texel.
+// blurs' and the apply's - three separable levels on the half grid, each
+// two taps deep per axis at strides of at most 3, 6 and 4 half pixels
+// (KH_SSAO_SEP), 12 + 24 + 16 = 52 full pixels, and the apply's upsample
+// one half texel (2 full) past them, 54 - and PSSsaoMain's wide normal, four
+// half-grid depth taps at a stride of at most 24 half pixels = 48 full,
+// which take no rectangle test (the gather, blur and apply taps do). A
+// marked pixel lies inside the unpadded rectangle (the mark is a depth write
+// of a mesh whose box the rectangle bounds), so both reaches stay on
+// half-grid texels PSSsaoDepth wrote this frame; the whole-target fallback
+// writes every texel.
 static constexpr LONG KH_SSAO_RECT_PAD = 72;
 static std::atomic<uint32_t> g_ao_strength_bits{ 0x3F800000u };   // Float bits, default 1.0; 0 = off.
 static std::atomic<uint32_t> g_ao_dist_bits{ 0x3F000000u };       // The sample radius (m), default 0.5.
@@ -35016,7 +35370,7 @@ inline void kh_ssao_targets_release() {
     g_res.ssao_hh = 0;
 }
 // The half grid (the main depth's size rounded up to even, halved): its
-// sample-0 depth in metres (R32_FLOAT), the term and its a-trous twin
+// sample-0 depth in metres (R32_FLOAT), the term and its ping-pong twin
 // (R8_UNORM); and the 80-byte b0.
 inline bool ensure_ssao_targets(ID3D11Device* dev, UINT khst_w, UINT khst_h) {
     if (!g_res.ssao_cb) {
@@ -35228,27 +35582,28 @@ inline void kh_ssao_post(ID3D11DeviceContext* ctx, const KhSsaoPass& khsp) {
     khsp_srvs[3] = g_res.ssao_dh_srv;
     ctx->PSSetShaderResources(3, 1, &khsp_srvs[3]);
     ctx->Draw(3, 0);
-    // The a-trous pair (the SSGI chain's), ping-pong ao -> ao2 -> ao at
-    // strides 1 and 2; a target is never read and written by one draw.
+    // The blur levels below ping-pong ao -> ao2 -> ao; a target is never read
+    // and written by one draw.
     ctx->PSSetShader(g_res.ps_ssao_blur, nullptr, 0);
-    ctx->OMSetRenderTargets(1, &g_res.ssao_ao2_rtv, nullptr);
-    ctx->RSSetViewports(1, &khsp_hvp);
-    khsp_srvs[2] = g_res.ssao_ao_srv;
-    ctx->PSSetShaderResources(2, 1, &khsp_srvs[2]);
-    ctx->Draw(3, 0);
     ID3D11ShaderResourceView* khsp_none = nullptr;
-    ctx->PSSetShaderResources(2, 1, &khsp_none);   // ao2 becomes the target below.
-    if (khsp_upload(2.0f)) {
-        ctx->OMSetRenderTargets(1, &g_res.ssao_ao_rtv, nullptr);
-        ctx->RSSetViewports(1, &khsp_hvp);
-        khsp_srvs[2] = g_res.ssao_ao2_srv;
-        ctx->PSSetShaderResources(2, 1, &khsp_srvs[2]);
-        ctx->Draw(3, 0);
-        ctx->PSSetShaderResources(2, 1, &khsp_none);
-        khsp_ok = khsp_upload(3.0f);
-    } else {
-        khsp_ok = false;
+    // KH_SSAO_SEP: three levels of the separable blur, each an x pass (ao -> ao2) then a y pass (ao2 -> ao), so
+    // the term is back in ao for the apply. ctl.z = the level's stride multiplier; ctl.w = the axis, + 2 at the
+    // third level (its stride rule is the one the apply blurred at before it became a pure upsample).
+    static const float khsp_lv[3][2] = { { 1.0f, 0.0f }, { 2.0f, 0.0f }, { 3.0f, 2.0f } };
+    for (int khsp_l = 0; khsp_l < 3 && khsp_ok; ++khsp_l) {
+        for (int khsp_a = 0; khsp_a < 2 && khsp_ok; ++khsp_a) {
+            khsp_cb.ctl[3] = khsp_lv[khsp_l][1] + static_cast<float>(khsp_a);
+            if (!khsp_upload(khsp_lv[khsp_l][0])) { khsp_ok = false; break; }
+            ctx->PSSetShaderResources(2, 1, &khsp_none);   // This pass's target may be the last one's source.
+            ctx->OMSetRenderTargets(1, khsp_a == 0 ? &g_res.ssao_ao2_rtv : &g_res.ssao_ao_rtv, nullptr);
+            ctx->RSSetViewports(1, &khsp_hvp);
+            khsp_srvs[2] = khsp_a == 0 ? g_res.ssao_ao_srv : g_res.ssao_ao2_srv;
+            ctx->PSSetShaderResources(2, 1, &khsp_srvs[2]);
+            ctx->Draw(3, 0);
+        }
     }
+    ctx->PSSetShaderResources(2, 1, &khsp_none);   // ao becomes the apply's source below.
+    khsp_cb.ctl[3] = 0.0f;
     // The multiply over the read-only view of the drawer's depth (both planes
     // read-only, so t0 / t1 stay bound) with the mark test (stencil EQUAL 1, no
     // writes): unmarked pixels skip the shader and only marked samples are
@@ -35362,7 +35717,7 @@ inline uint64_t kh_dl_bucket_hash(const RenderObject& o) {
 inline void kh_fill_user_obj_cb(ConstantData& cbd, const RenderObject& o);   // KH_USER_LANES, with the fx fill.
 inline void fill_lighting_obj_cb(ID3D11DeviceContext* ctx, ConstantData& cbd, const RenderObject& o) {
     cbd.lighting0[0] = o.lit ? 1.0f : 0.0f;
-    cbd.lighting0[1] = o.receive_shadow ? 0.0f : 1.0f;   // KH_SHADOW_SWITCH (khObjNoRecv).
+    cbd.lighting0[1] = (o.receive_shadow && !g_objbuf_shoff) ? 0.0f : 1.0f;   // KH_SHADOW_SWITCH / KH_SHADOW_OFF.
     cbd.lighting0[2] = o.light_ambient;
     cbd.lighting0[3] = o.light_diffuse;
     cbd.shadow_meta2[0] = 0.0f;   // KH_NEARZ_MARK: the effect chain arms its own passes; 0 everywhere else.
@@ -38272,7 +38627,7 @@ inline void kh_dls_frame(ID3D11DeviceContext* khdf_ctx) {
             // without a published sun). KH_SHADOW_SWITCH: a mesh with castShadow
             // off draws into no map, but a visible one still owns its pixels,
             // which the world pass must not paint (the mask).
-            if (o.cast_shadow) khdf_casters.push_back(kh_sun_caster_of(o, g_sun_cam_now));
+            if (kh_cast_on(o)) khdf_casters.push_back(kh_sun_caster_of(o, g_sun_cam_now));   // KH_SHADOW_OFF too.
             else if (o.visible) khdf_owners.push_back(kh_sun_caster_of(o, g_sun_cam_now));
         }
     }
@@ -41827,6 +42182,7 @@ inline bool kh_svs_feature_on() {
 // The two artifacts get separate arms: the multiply reads a mask our depth
 // never touched, so injection, snapshots and multiply arm independently.
 inline bool kh_svs_inject_armed() {
+    if (kh_shadows_off()) return false;   // KH_SHADOW_OFF: nothing reads what the seam and the pass it arms serve.
     if (kh_svs_feature_on()) return true;
     return   // A mode must be wired into every site it needs.
            false;
@@ -41835,6 +42191,7 @@ inline bool kh_svs_inject_armed() {
 inline bool kh_svs_snap_wanted() {
     // Only our mesh draws read the snapshots (t22), so a frame with no visible
     // mesh copies nothing (the volume copy is gated the same way).
+    if (kh_shadows_off()) return false;   // KH_SHADOW_OFF: no reader.
     if (kh_svs_feature_on()) return g_svs_mesh_wanted.load(std::memory_order_relaxed);
     return false;
 }
@@ -41960,6 +42317,7 @@ static bool     g_svs_vol_dsv_now = false;
 static bool     g_svs_vol_dsv_bound = false;
 static bool     g_svs_injected_frame = false;
 
+inline void kh_rp_release_if_held();   // KH_SHADOW_OFF: defined with the replay's records.
 inline void kh_volume_seam_frame_reset() {
     g_svs_injected_frame = false;
     if (g_svs_pending) { g_svs_pending = false;  }
@@ -41968,6 +42326,17 @@ inline void kh_volume_seam_frame_reset() {
     g_svs_vol_dsv_now = false;
     g_svs_prime_ready = false;
     g_svs_frame_seq++;   // Epoch clock for the snapshot age.
+    // KH_SHADOW_OFF: every frame shadows are off, nothing of the stencil path stays ready for their return - the
+    // volume copy unprimed, the snapshots unmade, the mirror absent (KH_MIR_GATE's rule for a skipped mirror: every
+    // reader then takes none rather than an older one) - and the last recorded pass lets its engine buffers go
+    // (the epoch above has moved, so no pass is open). Here and not at the engine's mask bracket, which a frame
+    // without the engine's shadow passes never reaches.
+    if (kh_shadows_off()) {
+        g_svs_vol_primed = false;
+        g_svs_post_made = 0;
+        g_vmir_mask_time = -1.0f;
+        kh_rp_release_if_held();
+    }
     if (g_svs_mask_cand) {
         void* khv_cid = static_cast<void*>(g_svs_mask_cand);
 
@@ -44937,6 +45306,15 @@ inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
                                         cbd.center_size[3], o.effect, cbd.fx0[0], g_res.composite_cb);
                 kh_glow_lanes(cbd, khpf_gl ? &g_res.glow_pyr[2] : nullptr);
             }
+            // KH_ANA_PYR: anamorphic's one-axis pyramid, the same rule.
+            const KhAnaPyr* khpf_an = nullptr;
+            if (o.effect == static_cast<int>(EffectId::Anamorphic)) {
+                const int khpf_ax = cbd.fx1[0] > 0.5f ? 1 : 0;
+                if (kh_ana_build(dev, ctx, g_res.ana_pyr[2][khpf_ax], khpf_src, cbd.fx_meta[2], cbd.fx_meta[3],
+                                 cbd.center_size[3], khpf_ax, cbd.fx0[0], g_res.composite_cb))
+                    khpf_an = &g_res.ana_pyr[2][khpf_ax];
+                kh_ana_lanes(cbd, khpf_an);
+            }
             if (!kh_upload_obj_cb(ctx, g_res.composite_cb, cbd)) break;
             if (khpf_lut) { ctx->PSSetShaderResources(19, 1, &khpf_lut); khpf_lut_bound = true; }
             // Unbind the source before its sibling becomes the target (the
@@ -44949,7 +45327,10 @@ inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
             ctx->PSSetShaderResources(0, 1, &khpf_src);
             KhGlowBind khpf_gb;   // KH_GLOW_PYR.
             if (khpf_gl) khpf_gb.bind(ctx, g_res.glow_pyr[2]);
+            KhAnaBind khpf_ab;   // KH_ANA_PYR.
+            if (khpf_an) khpf_ab.bind(ctx, *khpf_an);
             ctx->Draw(3, 0);
+            khpf_ab.unbind();
             khpf_gb.unbind();
             ++khpf_drawn;
             if (!khpf_last) {
@@ -46081,6 +46462,7 @@ inline void kh_rp_img_clear() { kh_rp_keep_release(g_rp_img, [] { g_rp_img_arena
 // scratch), while the volume buffer is bound - the whole buffer as the GPU will read it. Render thread.
 inline void kh_rp_img_note(ID3D11Resource* khin_r, const void* khin_d, uint32_t khin_n) {
     if (!g_svs_vol_dsv_bound || !g_rp_cbreuse_on || !g_cb_offsetting || !khin_r || !khin_d || khin_n == 0) return;
+    if (kh_shadows_off()) return;   // KH_SHADOW_OFF: nothing replays them.
     if (proj_upload_byte_width(khin_r) != khin_n) return;   // Whole buffers only.
     kh_upload_need(khin_d, khin_n);   // KH_UPLOAD_LAZY: all of it.
     std::lock_guard<std::mutex> khin_l(g_rp_cbkeep_mx);
@@ -46188,6 +46570,7 @@ inline void kh_rp_release_records() {
     g_rp_stage_used = 0;   // KH_REPLAY_CPUCB: the pages are this pass's again (the images are not the records').
     kh_rp_desc_clear();   // KH_RP_DESC_CACHE.
 }
+inline void kh_rp_release_if_held() { if (g_rp_n != 0) kh_rp_release_records(); }   // KH_SHADOW_OFF.
 inline void kh_rp_release_all() {   // Device loss and session teardown.
     kh_rp_release_records();
     std::vector<KhRpDraw>().swap(g_rp_draws);   // KH_RP_UNCAPPED: the storage too (every record released above).
@@ -50077,7 +50460,7 @@ inline void kh_svs_vol_copy(ID3D11DeviceContext* khc_ctx) {
     // No visible mesh, no reader: the copy is refused and the primed flag
     // dropped, so kh_svs_vol_ready cannot hand a mesh that appears next frame a
     // copy from before it existed.
-    if (!g_svs_mesh_wanted.load(std::memory_order_relaxed)) {
+    if (!g_svs_mesh_wanted.load(std::memory_order_relaxed) || kh_shadows_off()) {   // KH_SHADOW_OFF: no reader.
         g_svs_vol_primed = false;
         return;
     }
@@ -50331,7 +50714,7 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
     // volume buffer this window (the engine's hands prepass, render target
     // bound), ahead of it.
     if (g_svs_vol_dsv_bound && !g_ro.in_injection && !g_vm_seam_done &&
-        g_infront_wanted.load(std::memory_order_relaxed)) {
+        g_infront_wanted.load(std::memory_order_relaxed) && !kh_shadows_off()) {   // KH_SHADOW_OFF: the world's rule.
         UINT khvq_n = 1;
         D3D11_VIEWPORT khvq_vp = {};
         self->RSGetViewports(&khvq_n, &khvq_vp);
@@ -52035,12 +52418,35 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                 khfp_cbd.fx_meta[0] = 24.0f;
                 khsg_pair = true;
             }
+            // KH_FX_SIDE: fog scatter's per-pixel fog (side id 28, the frame's size) or the sun flare's visibility
+            // (29, 1 x 1), drawn before the pass's constants go up; they then arm matCtl.y, and t4 carries it.
+            int khfx_side = -1;
+            if (!khfp_ps && (khfp_effect == static_cast<int>(EffectId::Fogscatter) ||
+                             khfp_effect == static_cast<int>(EffectId::SunFlare))) {
+                const bool khfx_fog = khfp_effect == static_cast<int>(EffectId::Fogscatter);
+                const UINT khfx_w = khfx_fog ? static_cast<UINT>((khfp_cbd.fx_meta[2] > 0.0f ? khfp_cbd.fx_meta[2] : 0.0f) + 0.5f) : 1u;
+                const UINT khfx_h = khfx_fog ? static_cast<UINT>((khfp_cbd.fx_meta[3] > 0.0f ? khfp_cbd.fx_meta[3] : 0.0f) + 0.5f) : 1u;
+                if (kh_fx_side_draw(dev, ctx, khfx_fog ? 0 : 1, khfp_cbd, khfx_fog ? 28.0f : 29.0f, khfx_w, khfx_h,
+                                    nullptr, g_res.constant_buffer)) {
+                    khfx_side = khfx_fog ? 0 : 1;
+                    khfp_cbd.mat_ctl[1] = 1.0f;
+                }
+            }
             // KH_GLOW_PYR: a glow pass's pyramid, of this pass's own source, built before its constants go up.
             bool khgl_on = false;
             if (!khfp_ps && kh_glow_effect(khfp_effect)) {
                 khgl_on = kh_glow_build(dev, ctx, g_res.glow_pyr[0], src_srv, khfp_cbd.fx_meta[2], khfp_cbd.fx_meta[3],
                                         khfp_cbd.center_size[3], khfp_effect, khfp_cbd.fx0[0], g_res.constant_buffer);
                 kh_glow_lanes(khfp_cbd, khgl_on ? &g_res.glow_pyr[0] : nullptr);
+            }
+            // KH_ANA_PYR: anamorphic's one-axis pyramid (per axis), likewise before its constants go up.
+            const KhAnaPyr* khan_pyr = nullptr;
+            if (!khfp_ps && khfp_effect == static_cast<int>(EffectId::Anamorphic)) {
+                const int khan_ax = khfp_cbd.fx1[0] > 0.5f ? 1 : 0;
+                if (kh_ana_build(dev, ctx, g_res.ana_pyr[0][khan_ax], src_srv, khfp_cbd.fx_meta[2], khfp_cbd.fx_meta[3],
+                                 khfp_cbd.center_size[3], khan_ax, khfp_cbd.fx0[0], g_res.constant_buffer))
+                    khan_pyr = &g_res.ana_pyr[0][khan_ax];
+                kh_ana_lanes(khfp_cbd, khan_pyr);
             }
             if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
                 if (khsg_pair) ctx->PSSetSamplers(2, 1, &khsg_s2old);   // KH_FX_SSGI_BAIL: s2 back on
@@ -52066,8 +52472,16 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
             }
             KhGlowBind khgl_b;   // KH_GLOW_PYR: the pyramid at t3 and its sampler at s2, for this draw.
             if (khgl_on) khgl_b.bind(ctx, g_res.glow_pyr[0]);
+            KhAnaBind khan_b;   // KH_ANA_PYR: its atlases at t3 / t6, for this draw.
+            if (khan_pyr) khan_b.bind(ctx, *khan_pyr);
+            if (khfx_side >= 0) ctx->PSSetShaderResources(4, 1, &g_res.fxs_srv[khfx_side]);   // KH_FX_SIDE.
             ctx->Draw(3, 0);
+            khan_b.unbind();
             khgl_b.unbind();
+            if (khfx_side >= 0) {   // Unbound at once: the next side draw renders into it.
+                ID3D11ShaderResourceView* khfx_n = nullptr;
+                ctx->PSSetShaderResources(4, 1, &khfx_n);
+            }
             if (khsg_pair) {
                 ID3D11ShaderResourceView* khsg_n2 = nullptr;
                 ctx->PSSetShaderResources(3, 1, &khsg_n2);
@@ -53241,6 +53655,12 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
     bool khf_glow_b = false, khf_glow_ok = false;
     float khf_glow_t = 0.0f;
     const KhGlowPyr* khf_glow_draw = nullptr;
+    // KH_ANA_PYR, effect meshes: glow_pyr[0]'s rule for anamorphic's one-axis pyramid, per axis - built once per
+    // capture and threshold, its lanes armed by upload_cb (khf_ana_draw).
+    uint64_t khf_ana_gen[2] = { ~0ull, ~0ull };
+    bool khf_ana_ok[2] = { false, false };
+    float khf_ana_t[2] = { 0.0f, 0.0f };
+    const KhAnaPyr* khf_ana_draw = nullptr;
     // khf_defer non-null = build only (deferred chain draw) - the caller
     // uploads the returned slice at flush time; the frame slice already went up
     // at the pass build.
@@ -53273,6 +53693,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
         cbd.blend_ctl[3] = 0.0f;
         kh_fill_fx_params_cb(cbd, o);
         if (!chain_pass && khf_glow_draw) kh_glow_lanes(cbd, khf_glow_draw);   // KH_GLOW_PYR.
+        if (!chain_pass && khf_ana_draw) kh_ana_lanes(cbd, khf_ana_draw);   // KH_ANA_PYR.
 
         if (o.effect == static_cast<int>(EffectId::Fogscatter)) {
             memset(cbd.fx1, 0, sizeof(cbd.fx1));
@@ -53602,10 +54023,24 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
             }
             if (khf_glow_ok) khf_glow_draw = &g_res.glow_pyr[0];
         }
+        khf_ana_draw = nullptr;   // KH_ANA_PYR: the same rule, per axis.
+        if (!khf_ufx && o.effect == static_cast<int>(EffectId::Anamorphic)) {
+            const int khfa_ax = o.fx[4] > 0.5f ? 1 : 0;   // fxParams1.x (kh_fill_fx_params_cb).
+            const float khfa_t = o.fx[0];
+            if (khf_ana_gen[khfa_ax] != khf_cap_gen || khf_ana_t[khfa_ax] != khfa_t) {
+                khf_ana_ok[khfa_ax] = kh_ana_build(dev, ctx, g_res.ana_pyr[0][khfa_ax], ps_srvs[0], screen_w, screen_h,
+                                                   0.0f, khfa_ax, khfa_t, g_res.constant_buffer);
+                khf_ana_gen[khfa_ax] = khf_cap_gen;
+                khf_ana_t[khfa_ax] = khfa_t;
+            }
+            if (khf_ana_ok[khfa_ax]) khf_ana_draw = &g_res.ana_pyr[0][khfa_ax];
+        }
         if (!upload_cb(o, false)) continue;
         if (khf_o_perc) khf_perc_seen = true;
         KhGlowBind khf_gb;   // KH_GLOW_PYR: t3 / s2 for this object's draws, put back at the iteration's end.
         if (khf_glow_draw) khf_gb.bind(ctx, *khf_glow_draw);
+        KhAnaBind khf_ab;   // KH_ANA_PYR: t3 / t6, likewise.
+        if (khf_ana_draw) khf_ab.bind(ctx, *khf_ana_draw);
         // Textured routing (flush edition): textured solids take the
         // PSMain/VSMain twins + the 4-element layout. Twins missing =>
         // untextured fallback.
@@ -53882,30 +54317,81 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
     backup.restore(ctx);
 }
 
-// Runs from flush_frame before the graphics lock is taken: it makes SQF/engine
-// calls and must not extend the render-thread park. Publication to the
-// render-thread-visible globals happens inside flush_locked.
+// Runs from flush_frame (stage_world_lighting) before the graphics lock is
+// taken: it makes SQF/engine calls and must not extend the render-thread park.
+// Its readings go straight to atomics either thread reads (g_obj_vis,
+// g_sun_range, g_shadows_off); the fog stage_world_lighting stages beside it
+// is published inside flush_locked (publish_world_lighting).
 
-// Same body, same three consumers: the shadowvis fallback, the
-// objectvis/objectdraw read, the key scan.
 // KH_VIDEO_OPT_CADENCE: this used to call getVideoOptions, which builds a map
 // of every video setting and marshals it across the boundary, to read two
-// scalars - ~1.2 ms a call, the whole of flushPrepUs. It now asks the engine
-// for the two values directly, and the interval caps those two engine calls at
-// four a second.
+// scalars - ~1.2 ms a call, the whole of flushPrepUs. The object view distance
+// is asked of the engine directly (getObjectViewDistance), every sample, and
+// the interval caps that call at four a second.
+// KH_SHADOW_VIS: the shadow view distance is getVideoOptions' "shadowVisibility"
+// again - getShadowDistance does not follow a change made in the video options
+// at runtime (measured in game). Its cost is paid only where the setting can
+// change: once per session (the first sample, which takes the setting the
+// mission starts with), then while the video options display (5) is open and
+// on the one sample after it closes (a change applied as it closes, or inside
+// the last interval, is not missed); between reads the last reading stands.
+// KH_VIDEO_OPT_GAP: a sample is taken only when a Draw3D's flush_frame reaches
+// the staging (some mesh or pass exists, the bridge is up), so the display can
+// open and close with no sample at all - an empty draw list, or no Draw3D. The
+// first sample after more than KH_VIDEO_OPT_GAP_MS without one reads as well,
+// so a change made in such a pause is not missed. Envelope: a pause of
+// KH_VIDEO_OPT_GAP_MS or less is taken to be too short to open the options,
+// change the setting and close them; one ~1.2 ms read per longer pause, and
+// at under two frames a second every sample reads.
 // Envelope: a changed shadow visibility or object view distance reaches
 // g_sun_range / g_obj_vis up to KH_VIDEO_OPT_INTERVAL_MS late.
 static constexpr uint64_t KH_VIDEO_OPT_INTERVAL_MS = 250;
+static constexpr uint64_t KH_VIDEO_OPT_GAP_MS = 2 * KH_VIDEO_OPT_INTERVAL_MS;   // KH_VIDEO_OPT_GAP.
 static uint64_t g_video_opt_ms = 0;   // Game thread: the last sample.
+static bool     g_shadow_vis_read = false;   // Game thread: KH_SHADOW_VIS's session read was attempted.
+static bool     g_shadow_vis_menu = false;   // Game thread: display 5 was open at the last sample.
 inline void stage_video_options() {
     try {
         const uint64_t khsr_now_ms = steady_now_ms();
         if (g_video_opt_ms != 0 && khsr_now_ms - g_video_opt_ms < KH_VIDEO_OPT_INTERVAL_MS) return;
+        // KH_VIDEO_OPT_GAP: this sample follows a pause in the sampling (taken before the stamp moves).
+        // The stamp is 0 only at a session's start, where the session read is due anyway.
+        const bool khsr_gap = khsr_now_ms - g_video_opt_ms > KH_VIDEO_OPT_GAP_MS;
         g_video_opt_ms = khsr_now_ms;
-        // The shadow range is not read while a script owns it (src == 2): the
-        // engine value would overwrite the script's on the next sample.
-        if (g_sun_range_src.load(std::memory_order_relaxed) != 2) {
-            const float khsr_sh = sqf::get_shadow_distance();
+        // KH_SHADOW_VIS: the video options' shadow view distance - once per session, then while their display is
+        // open, on the sample after it closes and on the first after a pause (KH_VIDEO_OPT_GAP) - its own try: a
+        // failure leaves the reads below. khsr_ok = a reading this sample.
+        float khsr_sh = 0.0f;
+        bool khsr_ok = false;
+        try {
+            const bool khsr_menu = !sqf::is_null(sqf::find_display(5.0f));
+            const bool khsr_closed = g_shadow_vis_menu && !khsr_menu;   // It closed since the last sample.
+            g_shadow_vis_menu = khsr_menu;
+            if (!g_shadow_vis_read || khsr_menu || khsr_closed || khsr_gap) {
+                g_shadow_vis_read = true;   // Attempted: from here on only the display, its close and a pause read.
+                // The map exactly as sqf::get_video_options returns it (an rv_hashmap), held by auto and read
+                // in place. Never convert it to a game_value: that builds a game_data_hashmap on our side, and
+                // doing so crashed the game at the first read. The pairs are walked as kh_hashmap_get walks one
+                // (sqf_integration).
+                const auto khsr_vo = sqf::get_video_options();
+                for (const auto& khsr_kv : khsr_vo) {
+                    if (khsr_kv.key.type_enum() == game_data_type::STRING &&
+                        static_cast<std::string>(khsr_kv.key) == "shadowVisibility") {
+                        if (khsr_kv.value.type_enum() == game_data_type::SCALAR) {
+                            khsr_sh = static_cast<float>(khsr_kv.value);
+                            khsr_ok = true;
+                        }
+                        break;
+                    }
+                }
+            }
+        } catch (...) {}
+        // KH_SHADOW_OFF: whoever owns the range below; a NaN leaves the switch as it stands.
+        if (khsr_ok && khsr_sh == khsr_sh) g_shadows_off.store(khsr_sh <= KH_SHADOW_OFF_M, std::memory_order_relaxed);
+        // The shadow range is not written while the engine's band table owns it
+        // (src == 2: the far border of the engine's cascades, published by the
+        // render thread): the two would overwrite each other.
+        if (khsr_ok && g_sun_range_src.load(std::memory_order_relaxed) != 2) {
             // The same admission the map path used: a NaN or a non-positive
             // reading leaves the previous value standing.
             if (khsr_sh == khsr_sh && khsr_sh > 0.0f) {
@@ -53914,10 +54400,10 @@ inline void stage_video_options() {
             }
         }
         // rv_rendering_distances carries a shadow_distance too. It is NOT read
-        // here: whether it is the same quantity as get_shadow_distance() is
+        // here: whether it is the same quantity as "shadowVisibility" is
         // unproved, and substituting one for the other unproved is how a term
-        // silently changes meaning. If they are measured equal, this becomes
-        // one call instead of two.
+        // silently changes meaning. If they are measured equal, it replaces
+        // the getVideoOptions read (no display gate, no map).
         const float khsr_obj = sqf::get_object_view_distance().object_distance;
         if (khsr_obj == khsr_obj && khsr_obj > 0.0f) {
             g_obj_vis.store(khsr_obj, std::memory_order_relaxed);
@@ -54337,7 +54823,7 @@ inline void flush_frame() {
         }
     }
     kh_sun_size_latch();   // KH_SUN_LADDER: the hook-less path latches here.
-    stage_world_lighting();   // Game thread: getLighting -> staged sun state (pre-lock).
+    stage_world_lighting();   // Game thread: the video options and the fog (pre-lock).
     kh_thm_autobuild_step();   // Game thread: zero-setup terrain acquisition (pre-lock).
     ensure_reorder_hook();   // Cheap early-out once installed; refreshes the tracked context.
     if (g_ui_mask_wanted.load(std::memory_order_relaxed)) ensure_present_hook();   // KH_PRESENT_UI: once, when a UI pass first exists.
@@ -54790,6 +55276,14 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     auto khuf_flush = [&](bool khuf_final) {
         if (!khuf_live) return;
         khuf_live = false;
+        // KH_FX_SIDE: the lane's coverage probe (side id 30, 1 x 1) of this pass's own source, drawn before the
+        // pass's constants go up; they then arm matCtl.z, and t5 carries it.
+        bool khuf_probe = false;
+        if (khuf_frame_ok && khuf_cbd.center_size[3] > 1.5f &&
+            kh_fx_side_draw(dev, ctx, 2, khuf_cbd, 30.0f, 1u, 1u, khup_srvs[khup_src], g_res.constant_buffer)) {
+            khuf_probe = true;
+            khuf_cbd.mat_ctl[2] = 1.0f;
+        }
         // KH_GLOW_PYR: the scene chain's rule, on this pass's own source (the spill lane's premultiply rides its w).
         bool khug_on = false;
         const int khug_e = static_cast<int>(khuf_cbd.fx_meta[0] + 0.5f);
@@ -54798,6 +55292,16 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                                     khuf_cbd.fx_meta[3], khuf_cbd.center_size[3], khug_e, khuf_cbd.fx0[0],
                                     g_res.constant_buffer);
             kh_glow_lanes(khuf_cbd, khug_on ? &g_res.glow_pyr[1] : nullptr);
+        }
+        // KH_ANA_PYR: anamorphic's one-axis pyramid, the same rule (the spill lane's premultiply rides its w too).
+        const KhAnaPyr* khua_pyr = nullptr;
+        if (khuf_frame_ok && khug_e == static_cast<int>(EffectId::Anamorphic)) {
+            const int khua_ax = khuf_cbd.fx1[0] > 0.5f ? 1 : 0;
+            if (kh_ana_build(dev, ctx, g_res.ana_pyr[1][khua_ax], khup_srvs[khup_src], khuf_cbd.fx_meta[2],
+                             khuf_cbd.fx_meta[3], khuf_cbd.center_size[3], khua_ax, khuf_cbd.fx0[0],
+                             g_res.constant_buffer))
+                khua_pyr = &g_res.ana_pyr[1][khua_ax];
+            kh_ana_lanes(khuf_cbd, khua_pyr);
         }
         // Unbind the source slot before the destination's RTV turn.
         ID3D11ShaderResourceView* khuf_null = nullptr;
@@ -54817,8 +55321,16 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
                              bf, 0xFFFFFFFF);
         KhGlowBind khug_b;   // KH_GLOW_PYR.
         if (khug_on) khug_b.bind(ctx, g_res.glow_pyr[1]);
+        KhAnaBind khua_b;   // KH_ANA_PYR.
+        if (khua_pyr) khua_b.bind(ctx, *khua_pyr);
+        if (khuf_probe) ctx->PSSetShaderResources(5, 1, &g_res.fxs_srv[2]);   // KH_FX_SIDE.
         ctx->Draw(3, 0);
+        khua_b.unbind();
         khug_b.unbind();
+        if (khuf_probe) {   // Unbound at once: the next pass's probe renders into it.
+            ID3D11ShaderResourceView* khuf_pn = nullptr;
+            ctx->PSSetShaderResources(5, 1, &khuf_pn);
+        }
         if (!khuf_final) khup_src ^= 1;
 
     };
@@ -55676,6 +56188,7 @@ inline void kh_session_globals_reset() {
     g_sun_range.store(200.0f, std::memory_order_relaxed);
     g_obj_vis.store(0.0f, std::memory_order_relaxed);
     g_sun_range_src.store(0, std::memory_order_relaxed);
+    g_shadows_off.store(false, std::memory_order_relaxed);   // KH_SHADOW_OFF.
     g_sun_pf_autogen = false;
     g_reorder_target_ctx.store(nullptr, std::memory_order_relaxed);
     g_composite_last_inject_ms.store(0, std::memory_order_relaxed);
@@ -56150,6 +56663,8 @@ inline void kh_session_globals_reset() {
     kh_reinit(g_hdc_dss);
     g_flush_fx_arb_prev = false;
     g_video_opt_ms = 0;
+    g_shadow_vis_read = false;   // KH_SHADOW_VIS: the next session reads its starting setting.
+    g_shadow_vis_menu = false;
     g_ui_rehoist_auto_s = -1.0e9f;
     g_ui_prev_scene_frame = 0;
     g_ui_rehoist_last_s = -1.0e9f;
@@ -56174,6 +56689,7 @@ inline void kh_session_objects_reset() {
     kh_reinit(g_objbuf_cpu);
     kh_reinit(g_objbuf_dirty);
     kh_reinit(g_objbuf_dirty_mark);
+    g_objbuf_shoff = false;   // KH_SHADOW_OFF.
     g_gts_seq = 0;   // KH_ATTACH_GT_SNAP: the bindings' sample numbers (their rings, picks and helper stamps).
     g_skel_gen_serial = 0;
     g_attach_n.store(0, std::memory_order_relaxed);
@@ -56243,6 +56759,8 @@ inline void reset_session_state() {
     // Cleared here, re-armed by the first stage_video_options.
     g_obj_vis.store(0.0f, std::memory_order_relaxed);
     g_video_opt_ms = 0;   // KH_VIDEO_OPT_CADENCE: the next poll is immediate.
+    g_shadow_vis_read = false;   // KH_SHADOW_VIS: and it reads the starting setting.
+    g_shadow_vis_menu = false;
      g_cascbind_feed_t = -1.0f;
 
     // The lifetime pairing trio is session-scoped under full destroy.

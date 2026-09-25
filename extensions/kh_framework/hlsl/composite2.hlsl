@@ -84,7 +84,7 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
     bool occ = fragZ > sceneZ * (1.0f + fxParams1.y) + fxParams1.x;
 
     // The fragment's own clearance (its height above the terrain at its own
-    // footprint) is tested unconditionally - four loads, every distance, no
+    // footprint) is tested unconditionally - one Gather, every distance, no
     // gate; the march handles the true behind-the-ridge cases beyond the
     // min-distance gate.
     float khtClear = 2.0e9f;   // 2e9 = lane inactive (distinct from no-data 1e9).

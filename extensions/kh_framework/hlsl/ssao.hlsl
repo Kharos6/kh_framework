@@ -2,7 +2,7 @@
 // standalone unit (no cb.hlsl prefix; its own b0). Any edit changes the
 // unit's shader cache key. C++ twins: KhSsaoCb, kh_ssao_pre, kh_ssao_post, KH_SSAO_MARK.
 //
-// Five draws after a drawer's depth-writing draws (the world injection's on
+// Nine draws after a drawer's depth-writing draws (the world injection's on
 // the render thread, or the flush's late ones under the park), plus - whether
 // or not the term runs - the near-plane marker's draw and the C++ side's
 // eraser draw. The term is computed on a HALF-RESOLUTION grid,
@@ -15,11 +15,15 @@
 //                 one conversion per half pixel instead of one per tap).
 //   PSSsaoMain  - half res: the occlusion term into an R8 target, 1 wherever
 //                 the pixel is not ours.
-//   PSSsaoBlur  - twice, half res, ping-ponging two R8 targets: the SSGI
-//                 chain's a-trous iterations (5 x 5, depth-weighted, stride
-//                 doubling), at our pixels alone (the rest pass through).
-//   PSSsaoApply - full res: the term through the SSGI resolve's joint-bilateral
-//                 5 x 5 over the half grid, MULTIPLIED into the scene colour
+//   PSSsaoBlur  - six times, half res, ping-ponging two R8 targets: three
+//                 levels of the depth-weighted 5-tap blur, each an x pass then
+//                 a y pass (KH_SSAO_SEP: separable - the 5 x 5 kernel's
+//                 Gaussian is a product, its depth weight taken per axis), at
+//                 strides growing level to level, at our pixels alone (the rest
+//                 pass through).
+//   PSSsaoApply - full res: the term through a joint-bilateral upsample of the
+//                 half grid (the four texels around the pixel, depth-weighted),
+//                 MULTIPLIED into the scene colour
 //                 (dest.rgb *= src.rgb) at our samples alone: the C++ side
 //                 binds the read-only depth view with a stencil test on the
 //                 mark, so unmarked pixels never run it.
@@ -69,8 +73,8 @@
 // screen-space disk of stratified annuli at golden-angle azimuths, rotated per
 // pixel from the POSITION ALONE (no frame term: a static frame is
 // bit-identical, every shimmer is real motion) - but by a 4 x 4 ORDERED tile
-// of sixteen rotations, not the SSGI's gradient noise: the first a-trous
-// iteration's 5 x 5 covers a whole tile, so after it every pixel holds the
+// of sixteen rotations, not the SSGI's gradient noise: the first blur level's
+// 5 x 5 support (its x pass then its y pass) covers a whole tile, so after it every pixel holds the
 // average over all sixteen rotations and the field no longer depends on
 // where the tile lands on the surface. A skinned mesh is never still, and
 // under a screen-anchored random pattern every frame re-rolled its taps; a 2 px
@@ -85,9 +89,9 @@
 // here). The sum is normalised by tap count (a
 // surviving-weight division turns one tap into a sparkle) and faded where the
 // reconstruction cannot be trusted: at grazing incidence and where the radius
-// spans only a few pixels. What one 5 x 5 could not hide - the tap pattern is
-// anchored to the screen, so a moving mesh slides under it - the chain's
-// three smoothing passes average out, as they do for the SSGI.
+// spans only a few pixels. What one blur level could not hide - the tap pattern is
+// anchored to the screen, so a moving mesh slides under it - the three blur
+// levels average out, as the SSGI's smoothing passes do for it.
 //
 // The radius is world-space, so far away it is a few pixels and the term
 // with it. As the distance grows the radius is floored at KH_SA_RANGE_FRAC of
@@ -109,7 +113,9 @@ cbuffer CBSsao : register(b0)
     float4 khsaProj;   // x = m00, y = m11, z = m22, w = m32 (the drawer's projection, row-vector).
     float4 khsaVp;     // x = viewport MinDepth, y = MaxDepth, z = target width, w = target height (px, full res).
     float4 khsaCtl;    // x = radius (m), y = strength (the term's exponent), z = the blur stride
-                       // multiplier of this draw (1, 2 for the a-trous pair, 3 for the apply); w unused.
+                       // multiplier of this draw (1, 2, 3 by level); w = the blur's axis and rule
+                       // (KH_SSAO_SEP: 0 / 1 = x / y at the first two levels' stride, 2 / 3 = x / y at
+                       // the third level's - the stride the full-res apply used to blur at).
     // The FULL-resolution pixel rectangle every pass draws over (x = left,
     // y = top, z = right, w = bottom, exclusive): a term texel outside it was
     // not written this frame and must not be read.
@@ -360,34 +366,47 @@ float PSSsaoMain(float4 pos : SV_Position) : SV_Target
     return pow(max(khsp_ao, 1.0e-4f), khsaCtl.y);
 }
 
-// The 5 x 5 blur of the term at half pixel hp, weighted by distance and by
-// relative depth agreement (the SSGI resolve's weights), at a stride (half
-// px) that grows with the radius on screen times this draw's multiplier
-// (khsaCtl.z). Taps outside the rectangle and sky taps are dropped.
+// KH_SSAO_SEP: the depth-weighted blur of the term at half pixel hp along ONE axis - five taps weighted by
+// distance (exp(-i^2 / 8), the old 5 x 5's Gaussian, which is a product of two of these) and by relative depth
+// agreement (the SSGI resolve's weights) - at a stride (half px) that grows with the radius on screen. An x pass
+// then a y pass is the separable form of the former 5 x 5 (ten taps for twenty-five; the depth weight is taken per
+// axis, the textbook approximation). khsaCtl.w: bit 0 = the axis (0 x, 1 y); >= 2 = the third level's stride rule
+// (the one the full-res apply blurred at before it became a pure upsample). Taps outside the rectangle and sky
+// taps are dropped, and so are taps that are not ours (KH_SSAO_OURS, below).
+//
+// KH_SSAO_OURS: the term exists only at our pixels - PSSsaoMain writes 1 (no occlusion) everywhere else - so a
+// tap on a pixel that is not ours carries no measurement, only that placeholder. Where one of our meshes touches
+// or pierces an engine surface the two share a depth, the depth weight admits the engine's pixels at full weight,
+// and their 1s washed out the contact's occlusion exactly where it is strongest: a bright halo along every
+// contact with engine geometry (never between two of our meshes, whose pixels all carry real terms). A masked
+// filter reads its mask: the blurs and the apply's upsample take our taps alone.
 float KhSaBlur(int2 khsb_hp, float khsb_z)
 {
     const float khsb_rad = max(khsaCtl.x, khsb_z * KH_SA_RANGE_FRAC);
     const float khsb_spx = khsb_rad * khsaProj.y * 0.5f * khsaHalf.y / khsb_z;
-    const int khsb_st = (int)(clamp(khsb_spx * 0.08f, 1.0f, 3.0f) * max(khsaCtl.z, 1.0f));
+    const int khsb_m = (int)(khsaCtl.w + 0.5f);
+    const int2 khsb_ax = (khsb_m & 1) ? int2(0, 1) : int2(1, 0);
+    const int khsb_st = (khsb_m >= 2)
+                      ? (int)clamp(khsb_spx * 0.08f * max(khsaCtl.z, 1.0f), 1.0f, 4.0f)
+                      : (int)(clamp(khsb_spx * 0.08f, 1.0f, 3.0f) * max(khsaCtl.z, 1.0f));
     float khsb_sum = 0.0f;
     float khsb_wsum = 0.0f;
-    [unroll] for (int khsb_j = -2; khsb_j <= 2; ++khsb_j) {
-        [unroll] for (int khsb_i = -2; khsb_i <= 2; ++khsb_i) {
-            const int2 khsb_q = khsb_hp + int2(khsb_i, khsb_j) * khsb_st;
-            if (!KhSaInRectHalf(khsb_q)) continue;   // Not written this frame (or off the grid).
-            const float khsb_qz = KhSaDepthH(khsb_q);
-            if (khsb_qz > 1.0e8f) continue;
-            const float khsb_dz = abs(khsb_qz - khsb_z) / (khsb_z * 0.06f + 0.05f);
-            const float khsb_w = exp(-0.125f * (float)(khsb_i * khsb_i + khsb_j * khsb_j)) * exp(-khsb_dz * khsb_dz);
-            khsb_sum += khsaAo.Load(int3(khsb_q, 0)) * khsb_w;
-            khsb_wsum += khsb_w;
-        }
+    [unroll] for (int khsb_i = -2; khsb_i <= 2; ++khsb_i) {
+        const int2 khsb_q = khsb_hp + khsb_ax * (khsb_i * khsb_st);
+        if (!KhSaInRectHalf(khsb_q)) continue;   // Not written this frame (or off the grid).
+        if (!KhSaOurs(khsb_q * 2)) continue;     // KH_SSAO_OURS: the placeholder, not a term.
+        const float khsb_qz = KhSaDepthH(khsb_q);
+        if (khsb_qz > 1.0e8f) continue;
+        const float khsb_dz = abs(khsb_qz - khsb_z) / (khsb_z * 0.06f + 0.05f);
+        const float khsb_w = exp(-0.125f * (float)(khsb_i * khsb_i)) * exp(-khsb_dz * khsb_dz);
+        khsb_sum += khsaAo.Load(int3(khsb_q, 0)) * khsb_w;
+        khsb_wsum += khsb_w;
     }
     return khsb_wsum > 1.0e-4f ? khsb_sum / khsb_wsum : khsaAo.Load(int3(khsb_hp, 0));
 }
 
-// Half res, one a-trous iteration (effect 25's twin) at our pixels; a pixel
-// that is not ours passes its value through (the next stride reads it).
+// Half res, one axis of one blur level (KH_SSAO_SEP) at our pixels; a pixel
+// that is not ours passes its value through (the next pass reads it).
 float PSSsaoBlur(float4 pos : SV_Position) : SV_Target
 {
     const int2 khsr_hp = int2(pos.xy);
@@ -397,8 +416,9 @@ float PSSsaoBlur(float4 pos : SV_Position) : SV_Target
     return KhSaBlur(khsr_hp, khsr_z);
 }
 
-// Full res: the term at this pixel from the half grid, depth-guided (the
-// SSGI resolve's upsample: the full-res depth guides the half-res field),
+// Full res: the term at this pixel from the half grid, depth-guided - a joint
+// bilateral upsample (KH_SSAO_SEP; the blurring is all done on the half grid)
+// over our texels alone (KH_SSAO_OURS) -
 // dithered, multiplied into the scene at our pixels. The stencil test runs
 // ahead of the shader (the state writes nothing, so the discard below cannot
 // need a late test): a pixel with no marked sample is never shaded, and the
@@ -411,21 +431,43 @@ float4 PSSsaoApply(float4 pos : SV_Position) : SV_Target
     if (!KhSaOurs(khsq_p)) discard;   // The multiply blend leaves the pixel.
     const float khsq_z = KhSaMetersAt(khsq_p, KhSaLive(khsq_p));   // KH_SSAO_NEARZ.
     const int2 khsq_hp = khsq_p >> 1;
-    const float khsq_rad = max(khsaCtl.x, khsq_z * KH_SA_RANGE_FRAC);
-    const float khsq_spx = khsq_rad * khsaProj.y * 0.5f * khsaHalf.y / max(khsq_z, 1.0e-3f);
-    const int khsq_st = (int)clamp(khsq_spx * 0.08f * max(khsaCtl.z, 1.0f), 1.0f, 4.0f);
+    // KH_SSAO_SEP: the joint bilateral upsample (Kopf et al. 2007). Half texel hp stands at full pixel 2 hp
+    // (PSSsaoDepth and the gather read there), so this pixel lies at hp + (p & 1) / 2 on the half grid: the four
+    // texels around it take their bilinear weights (an even pixel is its own texel's alone) times the blurs'
+    // depth weight against this pixel's full-resolution depth. Taps off the rectangle and sky taps drop; none
+    // left falls back to the texel.
+    const float2 khsq_f = float2(khsq_p & 1) * 0.5f;
     float khsq_sum = 0.0f;
     float khsq_wsum = 0.0f;
-    [unroll] for (int khsq_j = -2; khsq_j <= 2; ++khsq_j) {
-        [unroll] for (int khsq_i = -2; khsq_i <= 2; ++khsq_i) {
-            const int2 khsq_q = khsq_hp + int2(khsq_i, khsq_j) * khsq_st;
+    [unroll] for (int khsq_j = 0; khsq_j <= 1; ++khsq_j) {
+        [unroll] for (int khsq_i = 0; khsq_i <= 1; ++khsq_i) {
+            const float khsq_bw = (khsq_i ? khsq_f.x : 1.0f - khsq_f.x) * (khsq_j ? khsq_f.y : 1.0f - khsq_f.y);
+            if (khsq_bw <= 0.0f) continue;
+            const int2 khsq_q = khsq_hp + int2(khsq_i, khsq_j);
             if (!KhSaInRectHalf(khsq_q)) continue;
+            if (!KhSaOurs(khsq_q * 2)) continue;   // KH_SSAO_OURS.
             const float khsq_qz = KhSaDepthH(khsq_q);
             if (khsq_qz > 1.0e8f) continue;
             const float khsq_dz = abs(khsq_qz - khsq_z) / (khsq_z * 0.06f + 0.05f);
-            const float khsq_w = exp(-0.125f * (float)(khsq_i * khsq_i + khsq_j * khsq_j)) * exp(-khsq_dz * khsq_dz);
+            const float khsq_w = khsq_bw * exp(-khsq_dz * khsq_dz);
             khsq_sum += khsaAo.Load(int3(khsq_q, 0)) * khsq_w;
             khsq_wsum += khsq_w;
+        }
+    }
+    // KH_SSAO_OURS: an odd pixel of ours whose two texels are not (a sliver of our mesh one pixel wide between
+    // engine pixels) has no term among its four; it takes the nearest of ours in the 3 x 3 around, depth-weighted.
+    if (!(khsq_wsum > 1.0e-4f)) {
+        [unroll] for (int khsq_n = -1; khsq_n <= 1; ++khsq_n) {
+            [unroll] for (int khsq_m = -1; khsq_m <= 1; ++khsq_m) {
+                const int2 khsq_q = khsq_hp + int2(khsq_m, khsq_n);
+                if (!KhSaInRectHalf(khsq_q) || !KhSaOurs(khsq_q * 2)) continue;
+                const float khsq_qz = KhSaDepthH(khsq_q);
+                if (khsq_qz > 1.0e8f) continue;
+                const float khsq_dz = abs(khsq_qz - khsq_z) / (khsq_z * 0.06f + 0.05f);
+                const float khsq_w = exp(-khsq_dz * khsq_dz);
+                khsq_sum += khsaAo.Load(int3(khsq_q, 0)) * khsq_w;
+                khsq_wsum += khsq_w;
+            }
         }
     }
     float khsq_ao = khsq_wsum > 1.0e-4f ? khsq_sum / khsq_wsum : khsaAo.Load(int3(KhSaClampHalf(khsq_hp), 0));

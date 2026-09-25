@@ -41,6 +41,15 @@ float LoadDepthPS(int2 px)
 
 Texture2D<float> khArbSnap : register(t2);
 
+// KH_FX_SIDE - a value that is the same for a whole pass, or that every pixel would otherwise recompute for its
+// neighbours, drawn once before the pass by this same shader into a small target of ours (the side ids 28 - 30
+// return it) and read here. Each is armed by its own lane of matCtl, which no effect pass otherwise fills
+// (kh_bind_material writes it for textured meshes only, and every effect pass's constants start from a zeroed
+// template); unarmed - effect meshes, the PIP, and any route that did not draw it - the pass computes the value in
+// place, as it always has. t4 / t5 are free in this unit (cb.hlsl's receive textures there are fenced out of it).
+Texture2D<float> khFxSide  : register(t4);   // matCtl.y: fog scatter's per-pixel fog (28, full size) / the sun flare's visibility (29, 1 x 1).
+Texture2D<float> khUiProbe : register(t5);   // matCtl.z: the UI lane's coverage probe (30, 1 x 1).
+
 // Bound at t19 only for LUT passes - t19 is reserved for this unit
 // codebase-wide (inside StateBackup's save range, so the engine's own bind is
 // restored after every flush). Sampled with integer Loads only (tetrahedral
@@ -63,7 +72,7 @@ float KhUiCov(int2 px)
     return sceneColor.Load(int3(px, 0)).a;
 }
 
-float Luma(float3 c) { return dot(c, float3(0.299f, 0.587f, 0.114f)); }
+float Luma(float3 c) { return dot(c, float3(0.2126f, 0.7152f, 0.0722f)); }   // BT.709.
 
 // KH_FX_PX_REF: every size a builtin effect gives in pixels - its "...Px" parameters and the fixed pixel
 // spans inside the effects below - is in pixels of a 1080-row frame; this is the factor to the pass's own
@@ -95,7 +104,7 @@ float KhCrtStripe(float u, float p, float k)
 // the frame). A tap reads the level whose texel matches its footprint - the spacing to the next tap - so a sparse
 // tap pattern samples a picture already averaged over the gaps between its taps: no copies of the scene at the
 // tap spacing, no grain from a jittered pattern. Disarmed (no pyramid for the pass) every effect takes its direct
-// taps, exactly as before. (Anamorphic keeps its direct taps: a one-pixel-thin streak needs a one-axis pyramid.)
+// taps, exactly as before. (Anamorphic reads a pyramid of its own, halved along its streak alone: KH_ANA_PYR.)
 bool KhGlowOn() { return fuseMeta.y > 0.5f; }
 
 // Each footprint is taken a quarter past the tap spacing: bilinear reads of a level are not shift-invariant, so at
@@ -156,6 +165,101 @@ float4 PSGlowDown(float4 pos : SV_Position) : SV_Target
     return float4(khgd_a, 1.0f);
 }
 
+// KH_ANA_PYR - anamorphic's pre-filtered picture: a pyramid halved ALONG THE STREAK'S AXIS ONLY, so every level keeps
+// the frame's full resolution across it and the streak stays one pixel thin (an isotropic level thickens it; the
+// anisotropic read of one costs about ten times its taps). C++ kh_ana_build makes it per pass, of that pass's own
+// source, through its threshold: level k (0 .. KH_ANA_LEVELS - 1) has one texel per 2^(k+1) frame pixels along the
+// axis and one per pixel across it - level 0 the frame through the glows' tent (1 3 3 1) along the axis
+// (PSAnaSeed), each further level the same tent over the level below (PSAnaDown), clamped to that level's edge.
+// The levels are strips of two atlases, the even ones at t3 (khsgTex) and the odd ones at t6 (khAnaB), so a level
+// is always built from the other atlas and never read while it is a target; KhAnaLevel places them (C++ twins
+// kh_ana_n / kh_ana_off). Armed as the glows are (KhGlowOn, fuseMeta.y); on an anamorphic pass fuseMeta.zw is the
+// frame the pyramid was made for (C++ kh_ana_lanes), not the glows' padded extent. t6 is free in this unit, as
+// t4 / t5 are (cb.hlsl's receive textures there are fenced out of it).
+#define KH_ANA_LEVELS 8   // C++ twin KH_ANA_LEVELS: texels of 2 .. 256 frame pixels along the axis.
+Texture2D<float4> khAnaB : register(t6);   // KH_ANA_PYR's odd levels (t3 holds the even ones).
+// Level k of a frame khal_len pixels long along the axis: khal_n texels (the frame's pixels 2^(k+1) at a time, the
+// last one partly past the edge), at along-offset khal_o in its atlas - after the levels of its own parity below it.
+void KhAnaLevel(int khal_k, int khal_len, out int khal_n, out int khal_o)
+{
+    khal_n = (khal_len + (2 << khal_k) - 1) >> (khal_k + 1);
+    khal_o = 0;
+    [loop] for (int khal_j = khal_k & 1; khal_j < khal_k; khal_j += 2)
+        khal_o += (khal_len + (2 << khal_j) - 1) >> (khal_j + 1);
+}
+// The builders, drawn by kh_ana_build with VSFullscreen over each level's strip (its viewport). localParams0: x = the
+// threshold, z = the axis (1 = along y), w = the level. Level 0 (at offset 0 of the even atlas): each texel the tent
+// over the frame's pixels 2i - 1 .. 2i + 2 along the axis, of its own row across (SampleScene clamps to the frame),
+// each through the threshold - anamorphic is a bright pass. Negative and NaN values read as 0, and the sum stays
+// inside half precision (PSGlowSeed's rule).
+float4 PSAnaSeed(float4 pos : SV_Position) : SV_Target
+{
+    const bool khas_v = localParams0.z > 0.5f;
+    const int2 khas_p = int2(pos.xy);
+    const int khas_b = (khas_v ? khas_p.y : khas_p.x) * 2 - 1;
+    const int khas_c = khas_v ? khas_p.x : khas_p.y;
+    const float khas_k[4] = { 0.125f, 0.375f, 0.375f, 0.125f };
+    float3 khas_a = 0.0f;
+    [unroll] for (int khas_i = 0; khas_i < 4; ++khas_i)
+    {
+        const int khas_q = khas_b + khas_i;
+        const float3 khas_s = SampleScene(khas_v ? int2(khas_c, khas_q) : int2(khas_q, khas_c)) - localParams0.x;
+        khas_a += min(max(khas_s, 0.0f), 65504.0f) * khas_k[khas_i];
+    }
+    return float4(khas_a, 1.0f);
+}
+// Each further level: the same tent over the level below (t3, the other atlas), clamped to that level's own edge.
+float4 PSAnaDown(float4 pos : SV_Position) : SV_Target
+{
+    const bool khad_v = localParams0.z > 0.5f;
+    const int khad_k = (int)(localParams0.w + 0.5f);
+    const int khad_len = (int)((khad_v ? fxMeta.w : fxMeta.z) + 0.5f);
+    int khad_n, khad_o, khad_sn, khad_so;
+    KhAnaLevel(khad_k, khad_len, khad_n, khad_o);
+    KhAnaLevel(khad_k - 1, khad_len, khad_sn, khad_so);
+    const int2 khad_p = int2(pos.xy);
+    const int khad_b = ((khad_v ? khad_p.y : khad_p.x) - khad_o) * 2 - 1;
+    const int khad_c = khad_v ? khad_p.x : khad_p.y;
+    const float khad_w[4] = { 0.125f, 0.375f, 0.375f, 0.125f };
+    float3 khad_a = 0.0f;
+    [unroll] for (int khad_i = 0; khad_i < 4; ++khad_i)
+    {
+        const int khad_q = khad_so + clamp(khad_b + khad_i, 0, khad_sn - 1);
+        khad_a += khsgTex.Load(int3(khad_v ? int2(khad_c, khad_q) : int2(khad_q, khad_c), 0)).rgb * khad_w[khad_i];
+    }
+    return float4(khad_a, 1.0f);
+}
+// The read: level k at a position khat_p along the axis (full-resolution pixels, centres at + 0.5) on row khat_c
+// across, linear between the two texels around it (texel i's centre is at (i + 0.5) 2^(k+1)), clamped to the level's
+// edge. Loads: across the axis the row is exactly the pixel's own, whatever a sampler would round.
+float3 KhAnaTap(Texture2D<float4> khat_t, float khat_p, int khat_k, int khat_n, int khat_o, int khat_c, bool khat_v)
+{
+    const float khat_u = khat_p / (float)(2 << khat_k) - 0.5f;
+    const float khat_f = floor(khat_u);
+    const int khat_i0 = khat_o + clamp((int)khat_f, 0, khat_n - 1);
+    const int khat_i1 = khat_o + clamp((int)khat_f + 1, 0, khat_n - 1);
+    const float3 khat_a = khat_t.Load(int3(khat_v ? int2(khat_c, khat_i0) : int2(khat_i0, khat_c), 0)).rgb;
+    const float3 khat_b = khat_t.Load(int3(khat_v ? int2(khat_c, khat_i1) : int2(khat_i1, khat_c), 0)).rgb;
+    return lerp(khat_a, khat_b, khat_u - khat_f);
+}
+// Effect 15's 16 taps each side of khas_pc, khas_l / 16 apart, from level khas_k alone, weighted as its direct taps.
+float3 KhAnaStreak(Texture2D<float4> khas_tx, int khas_k, int khas_len, float khas_pc, int khas_c, bool khas_v,
+                   float khas_l)
+{
+    int khas_n, khas_o;
+    KhAnaLevel(khas_k, khas_len, khas_n, khas_o);
+    float3 khas_a = 0.0f;
+    [unroll] for (int khas_j = 1; khas_j <= 16; ++khas_j)
+    {
+        const float khas_t = (float)khas_j / 16.0f;
+        const float khas_w = pow(1.0f - khas_t, max(fxParams0.w, 0.1f));
+        const float khas_d = khas_t * khas_l;
+        khas_a += (KhAnaTap(khas_tx, khas_pc + khas_d, khas_k, khas_n, khas_o, khas_c, khas_v)
+                 + KhAnaTap(khas_tx, khas_pc - khas_d, khas_k, khas_n, khas_o, khas_c, khas_v)) * khas_w;
+    }
+    return khas_a;
+}
+
 float LinDepth(float raw)
 {
     float ndcZ = (raw - depthParams.z) / max(depthParams.w - depthParams.z, 1e-6f);
@@ -168,7 +272,26 @@ float LinDepth(float raw)
     return d > 0.0f ? d : 1e9f;
 }
 
-float Hash(float2 p) { return frac(sin(dot(p, float2(12.9898f, 78.233f))) * 43758.5453f); }
+// KH_HASH - integer hashing (pcg3d, Jarzynski & Olano, "Hash Functions for GPU Rendering", JCGT 2020) in place of
+// frac(sin(dot(p, k)) * 43758.5453). D3D11 specifies sin only on [-100 pi, 100 pi]; the sine hash fed it ~1e5 from
+// a pixel position and, through the time-seeded callers (fxMeta.y is seconds since the object's creation and never
+// wraps), without bound - vendor-defined noise, and after hours of grain adjacent cells collided outright. The
+// input's bits are hashed exactly, so equal inputs give equal values (every caller's structure holds) and distinct
+// ones stay distinct at any magnitude; a time seed rides as its own integer lane (KhHashF). Output in [0, 1).
+uint3 KhPcg3(uint3 v)
+{
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    return v;
+}
+float KhHashF(float2 p, uint s) { return (float)(KhPcg3(uint3(asuint(p), s)).x >> 8) * (1.0f / 16777216.0f); }
+float Hash(float2 p) { return KhHashF(p, 0u); }
+// KH_HASH's range rule for the periodic terms: sin / cos of an argument that grows with time, reduced to one
+// period first (the same value, inside the specified range).
+float KhSin(float x) { return sin(6.2831853f * frac(x * 0.15915494f)); }
+float KhCos(float x) { return cos(6.2831853f * frac(x * 0.15915494f)); }
 
 float2 Hash2(float2 p)
 {
@@ -185,7 +308,7 @@ float4 KhRainLayer(float2 q, float tt, float2 grid, float seedOfs,
     if (n.x > amount) return float4(0, 0, 0, 0);
     float2 f = frac(cellUv);
     float x = (n.y - 0.5f) * 0.55f;
-    x += (0.42f - abs(x)) * sin(tt * 0.7f + n.z * 6.2832f)
+    x += (0.42f - abs(x)) * KhSin(tt * 0.7f + n.z * 6.2832f)   // KH_HASH: tt grows with time.
          * 0.4f * (1.0f - saturate(stretch * 1.4f));
     // Drop y: a descending cycle with a linger-then-fall ease (drops hold, then
     // slip - the real-glass cadence).
@@ -319,6 +442,35 @@ float KhFsFog(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float fs_m1
 // (kh_fuse_append) enforces the fusible set {1 invert, 2 colorgrade, 3
 // vignette, 5 grain}, never localized / banded / spill / LUT / custom, so this
 // path carries no masks.
+// Film grain's noise (effect 5 and KhFusePoint's id 5 - one body): smooth value noise over grainSizePx cells,
+// triangular-ish and signed, optional chroma. p0 = [amount, fps, grainSizePx, lumaResponse], chroma = the chroma
+// lane. KH_HASH: the frame (time quantized to fps) is the hash's integer lane, the cells' own coordinates the
+// other two, so no frame count or position reaches a float sum.
+float3 KhGrainGc(float2 pos, float t, float4 p0, float chroma)
+{
+    const float fps = max(p0.y, 1.0f);
+    const uint f = (uint)floor(t * fps);
+    const float2 gp = pos / (max(p0.z, 1.0f) * KhFxPx());   // KH_FX_PX_REF.
+    const float2 ip = floor(gp);
+    float2 fp = frac(gp);
+    fp = fp * fp * (3.0f - 2.0f * fp);
+    const float n00 = KhHashF(ip, f);
+    const float n10 = KhHashF(ip + float2(1, 0), f);
+    const float n01 = KhHashF(ip + float2(0, 1), f);
+    const float n11 = KhHashF(ip + float2(1, 1), f);
+    const float nv = lerp(lerp(n00, n10, fp.x), lerp(n01, n11, fp.x), fp.y);
+    const float nf = KhHashF(gp * 2.13f + 17.0f, f);
+    const float g = (nv + nf) * 0.5f - 0.5f;   // Triangular-ish, signed.
+    float3 gc = g.xxx;
+    if (chroma > 0.001f)
+    {
+        const float gr = (lerp(KhHashF(ip + 31.0f, f), KhHashF(ip + float2(1, 1) + 31.0f, f), fp.x) + KhHashF(gp * 1.71f + 47.0f, f)) * 0.5f - 0.5f;
+        const float gb = (lerp(KhHashF(ip + 73.0f, f), KhHashF(ip + float2(1, 1) + 73.0f, f), fp.x) + KhHashF(gp * 2.71f + 89.0f, f)) * 0.5f - 0.5f;
+        gc = lerp(gc, float3(gr, g, gb), chroma);
+    }
+    return gc;
+}
+
 float3 KhFusePoint(int id, float3 c, float2 uv, float2 pos, float t,
                    float4 p0, float4 p1, float4 col)
 {
@@ -329,7 +481,7 @@ float3 KhFusePoint(int id, float3 c, float2 uv, float2 pos, float t,
         float l = Luma(g);
         g = lerp(l.xxx, g, p0.x);
         g = (g - 0.5f) * p0.y + 0.5f;
-        return pow(max(g, 0.0f), p0.w);
+        return pow(max(g, 0.0f), max(p0.w, 1.0e-4f));   // Effect 2's twin: see its gamma floor.
     }
     if (id == 3)
     {
@@ -339,26 +491,7 @@ float3 KhFusePoint(int id, float3 c, float2 uv, float2 pos, float t,
     }
     if (id == 5)
     {
-        float fps = max(p0.y, 1.0f);
-        float seed = floor(t * fps) * 61.7f;
-        float2 gp = pos / (max(p0.z, 1.0f) * KhFxPx());   // KH_FX_PX_REF (effect 5's twin).
-        float2 ip = floor(gp);
-        float2 fp = frac(gp);
-        fp = fp * fp * (3.0f - 2.0f * fp);
-        float n00 = Hash(ip + seed);
-        float n10 = Hash(ip + float2(1, 0) + seed);
-        float n01 = Hash(ip + float2(0, 1) + seed);
-        float n11 = Hash(ip + float2(1, 1) + seed);
-        float nv = lerp(lerp(n00, n10, fp.x), lerp(n01, n11, fp.x), fp.y);
-        float nf = Hash(gp * 2.13f + seed + 17.0f);
-        float g = (nv + nf) * 0.5f - 0.5f;
-        float3 gc = g.xxx;
-        if (p1.x > 0.001f)
-        {
-            float gr = (lerp(Hash(ip + seed + 31.0f), Hash(ip + float2(1, 1) + seed + 31.0f), fp.x) + Hash(gp * 1.71f + seed + 47.0f)) * 0.5f - 0.5f;
-            float gb = (lerp(Hash(ip + seed + 73.0f), Hash(ip + float2(1, 1) + seed + 73.0f), fp.x) + Hash(gp * 2.71f + seed + 89.0f)) * 0.5f - 0.5f;
-            gc = lerp(gc, float3(gr, g, gb), p1.x);
-        }
+        const float3 gc = KhGrainGc(pos, t, p0, p1.x);   // Effect 5's twin: one body.
         float luma = saturate(Luma(c));
         float resp = lerp(1.0f, 4.0f * luma * (1.0f - luma) * 0.9f + 0.1f, p0.w);
         return c + gc * p0.x * resp;
@@ -391,7 +524,37 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
     }
     return v;
 }
- float4 PSEffect(VSOut i) : SV_Target
+// Sun flare's source (effect 16, side id 29): the direction projects as a point at infinity (w = 0). False = the
+// source is behind the camera or well off screen; spos its uv, sp its pixel.
+bool KhSunFlareSpot(out float2 spos, out int2 sp)
+{
+    spos = float2(0.0f, 0.0f);
+    sp = int2(0, 0);
+    const float4 clip = mul(float4(fxParams0.xyz, 0.0f), viewProj);
+    if (!(clip.w > 0.01f)) return false;
+    const float2 sndc = clip.xy / clip.w;
+    if (!all(abs(sndc) < 1.3f)) return false;
+    spos = float2(sndc.x * 0.5f + 0.5f, 0.5f - sndc.y * 0.5f);
+    sp = int2(saturate(spos) * float2(fxMeta.z, fxMeta.w));
+    return true;
+}
+// Its visibility: the flare fades via depth occlusion at the source - sky = visible, geometry = blocked - over 25
+// taps around it. The same for every pixel of the pass (KH_FX_SIDE draws it once where it can).
+float KhSunFlareVis(int2 sp)
+{
+    float vis = 0.0f;
+    const float khsf_f = KhEncFence();
+    [unroll] for (int oy = -2; oy <= 2; ++oy)
+    [unroll] for (int ox = -2; ox <= 2; ++ox)
+    {
+        float khsf_d = LinDepth(LoadDepthPS(sp + int2(ox, oy) * max((int)floor(3.0f * KhFxPx() + 0.5f), 1)));   // KH_FX_PX_REF: nearest whole px.
+        vis += saturate((min(khsf_d, khsf_f) - khsf_f * 0.98f)
+                        / max(khsf_f * 0.019f, 1.0f));
+    }
+    return vis / 25.0f;
+}
+
+float4 PSEffect(VSOut i) : SV_Target
 {
     KhObjLoad(i.iobj0, i.iobj1);   // KH_OBJBUF: effect meshes draw per object (the CB lanes).
     // Fullscreen passes are inert by construction (w = 1 -> ndc far below 1),
@@ -407,15 +570,22 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
     float3 outc = scene;
 
     if (centerSize.w > 1.5f) {
+        // KH_FX_SIDE: eight fixed pixels, so one verdict for the whole pass - the UI flush draws it once, 1 x 1,
+        // before the pass (side id 30) and arms matCtl.z; unarmed, each pixel probes.
         float khpMin = 1.0f;
-        khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.18f, fxMeta.w * 0.21f)));
-        khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.47f, fxMeta.w * 0.16f)));
-        khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.79f, fxMeta.w * 0.24f)));
-        khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.23f, fxMeta.w * 0.52f)));
-        khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.68f, fxMeta.w * 0.47f)));
-        khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.31f, fxMeta.w * 0.77f)));
-        khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.58f, fxMeta.w * 0.84f)));
-        khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.86f, fxMeta.w * 0.69f)));
+        [branch] if (matCtl.z > 0.5f) {
+            khpMin = khUiProbe.Load(int3(0, 0, 0));
+        } else {
+            khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.18f, fxMeta.w * 0.21f)));
+            khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.47f, fxMeta.w * 0.16f)));
+            khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.79f, fxMeta.w * 0.24f)));
+            khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.23f, fxMeta.w * 0.52f)));
+            khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.68f, fxMeta.w * 0.47f)));
+            khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.31f, fxMeta.w * 0.77f)));
+            khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.58f, fxMeta.w * 0.84f)));
+            khpMin = min(khpMin, KhUiCov(int2(fxMeta.z * 0.86f, fxMeta.w * 0.69f)));
+        }
+        if (effect == 30) return float4(khpMin, 0.0f, 0.0f, 1.0f);   // KH_FX_SIDE: the probe itself.
         if (khpMin >= 0.75f) {
             float4 khpRaw = sceneColor.Load(int3(px, 0));
             return float4(khpRaw.rgb, khpRaw.a);
@@ -453,7 +623,9 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         float l = Luma(c);
         c = lerp(l.xxx, c, fxParams0.x);
         c = (c - 0.5f) * fxParams0.y + 0.5f;
-        c = pow(max(c, 0.0f), fxParams0.w);
+        // The exponent floored at 1e-4: gamma 0 (or below) was pow(0, 0) = NaN on every black pixel (and inf below
+        // zero); at the floor black stays black and the rest goes to ~1 - the limit gamma -> 0 gives.
+        c = pow(max(c, 0.0f), max(fxParams0.w, 1.0e-4f));
         outc = c;
     }
     else if (effect == 3)   // Vignette: [startRadius, softness], color = edge color.
@@ -475,28 +647,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         // amplitude distribution, response peaking in the mid-shadows and
         // protecting highlights, optional chroma, time quantized to a frame
         // rate.
-        float fps = max(fxParams0.y, 1.0f);
-        float seed = floor(t * fps) * 61.7f;
-        float2 gp = i.pos.xy / (max(fxParams0.z, 1.0f) * KhFxPx());   // KH_FX_PX_REF (KhFusePoint's twin).
-        float2 ip = floor(gp);
-        float2 fp = frac(gp);
-        fp = fp * fp * (3.0f - 2.0f * fp);
-
-        float n00 = Hash(ip + seed);
-        float n10 = Hash(ip + float2(1, 0) + seed);
-        float n01 = Hash(ip + float2(0, 1) + seed);
-        float n11 = Hash(ip + float2(1, 1) + seed);
-        float nv = lerp(lerp(n00, n10, fp.x), lerp(n01, n11, fp.x), fp.y);
-        float nf = Hash(gp * 2.13f + seed + 17.0f);
-        float g = (nv + nf) * 0.5f - 0.5f;   // Triangular-ish, signed.
-
-        float3 gc = g.xxx;
-        if (fxParams1.x > 0.001f)
-        {
-            float gr = (lerp(Hash(ip + seed + 31.0f), Hash(ip + float2(1, 1) + seed + 31.0f), fp.x) + Hash(gp * 1.71f + seed + 47.0f)) * 0.5f - 0.5f;
-            float gb = (lerp(Hash(ip + seed + 73.0f), Hash(ip + float2(1, 1) + seed + 73.0f), fp.x) + Hash(gp * 2.71f + seed + 89.0f)) * 0.5f - 0.5f;
-            gc = lerp(gc, float3(gr, g, gb), fxParams1.x);
-        }
+        const float3 gc = KhGrainGc(i.pos.xy, t, fxParams0, fxParams1.x);   // KhFusePoint's twin: one body.
 
         float luma = saturate(Luma(scene));
         float resp = lerp(1.0f, 4.0f * luma * (1.0f - luma) * 0.9f + 0.1f, fxParams0.w);
@@ -562,8 +713,8 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
     }
     else if (effect == 9)   // Distortion: [amplitudePx, frequency, speed].
     {
-        float2 off = float2(sin(uv.y * fxParams0.y * 6.2832f + t * fxParams0.z),
-                            cos(uv.x * fxParams0.y * 6.2832f + t * fxParams0.z)) * fxParams0.x * KhFxPx();   // KH_FX_PX_REF.
+        float2 off = float2(KhSin(uv.y * fxParams0.y * 6.2832f + t * fxParams0.z),   // KH_HASH: t grows.
+                            KhCos(uv.x * fxParams0.y * 6.2832f + t * fxParams0.z)) * fxParams0.x * KhFxPx();   // KH_FX_PX_REF.
         outc = SampleScene(int2(i.pos.xy + off));
     }
 
@@ -690,17 +841,49 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
     {
         float3 acc = 0.0f;
         float total = 0.0f;
+        // KH_ANA_PYR: the taps are lengthPx / 16 apart; from two pixels up each reads the one-axis pyramid over that
+        // spacing (x KH_GLOW_FP, the glows' margin), so the streak is one continuous line instead of 16 copies of
+        // each highlight a side. Taps a pixel apart or less read the picture itself, as before (KhGlowMix).
+        const float khan_l = fxParams0.z * KhFxPx();   // KH_FX_PX_REF.
+        const float khan_m = KhGlowMix(khan_l / 16.0f);
 
         [unroll] for (int k = 1; k <= 16; ++k)
         {
             float t = (float)k / 16.0f;
             float w = pow(1.0f - t, max(fxParams0.w, 0.1f));
-            int off = (int)(t * fxParams0.z * KhFxPx());   // KH_FX_PX_REF.
-            int2 d = (fxParams1.x > 0.5f) ? int2(0, off) : int2(off, 0);
-            acc += (max(SampleScene(px + d) - fxParams0.x, 0.0f)
-                  + max(SampleScene(px - d) - fxParams0.x, 0.0f)) * w;
+            if (khan_m < 1.0f)
+            {
+                int off = (int)(t * fxParams0.z * KhFxPx());   // KH_FX_PX_REF.
+                int2 d = (fxParams1.x > 0.5f) ? int2(0, off) : int2(off, 0);
+                acc += (max(SampleScene(px + d) - fxParams0.x, 0.0f)
+                      + max(SampleScene(px - d) - fxParams0.x, 0.0f)) * w;
+            }
             total += 2.0f * w;
         }
+        float3 khan_p = 0.0f;
+        if (khan_m > 0.0f)
+        {
+            // The level whose texel (2^(k+1) px) is the spacing x KH_GLOW_FP, as the two around it linear in log2
+            // (trilinear by hand); a spacing past the top level's reads the top level. The pair is one even and one
+            // odd level, one from each atlas; the weights are the pass's, so each branch is uniform.
+            const bool khan_v = fxParams1.x > 0.5f;
+            const int khan_len = (int)((khan_v ? fuseMeta.w : fuseMeta.z) + 0.5f);
+            const int khan_cw = (int)((khan_v ? fuseMeta.z : fuseMeta.w) + 0.5f);
+            const int khan_c = clamp((int)(khan_v ? i.pos.x : i.pos.y), 0, max(khan_cw - 1, 0));
+            const float khan_pc = khan_v ? i.pos.y : i.pos.x;
+            const float khan_lv = clamp(log2(KH_GLOW_FP * khan_l / 16.0f) - 1.0f, 0.0f, (float)(KH_ANA_LEVELS - 1));
+            const int khan_k0 = min((int)khan_lv, KH_ANA_LEVELS - 2);
+            const float khan_f = khan_lv - (float)khan_k0;
+            const bool khan_odd = (khan_k0 & 1) != 0;
+            const float khan_we = khan_odd ? khan_f : 1.0f - khan_f;   // The even level's share.
+            [branch] if (khan_we > 0.0f)
+                khan_p += khan_we * KhAnaStreak(khsgTex, khan_odd ? khan_k0 + 1 : khan_k0, khan_len, khan_pc,
+                                                khan_c, khan_v, khan_l);
+            [branch] if (khan_we < 1.0f)
+                khan_p += (1.0f - khan_we) * KhAnaStreak(khAnaB, khan_odd ? khan_k0 : khan_k0 + 1, khan_len, khan_pc,
+                                                         khan_c, khan_v, khan_l);
+        }
+        acc = KhGlowSel(acc, khan_p, khan_m);
 
         acc /= max(total, 1.0f);
         outc = scene + acc * color.rgb * fxParams0.y;
@@ -708,27 +891,16 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
     else if (effect == 16)   // Sun flare, source-aware: p0.xyz = direction (engine space), p0.w =
                              // Size;
     {
-        // The direction projects as a point at infinity (w = 0); the flare
-        // fades via per-pixel depth occlusion at the source: sky = visible,
-        // geometry = blocked.
-        float4 clip = mul(float4(fxParams0.xyz, 0.0f), viewProj);
-        if (clip.w > 0.01f)
+        // KhSunFlareSpot / KhSunFlareVis above. KH_FX_SIDE: the scene chain draws the visibility once, 1 x 1,
+        // before the pass (side id 29) and arms matCtl.y; unarmed, each pixel measures it.
+        float2 spos;
+        int2 sp;
+        if (KhSunFlareSpot(spos, sp))
         {
-            float2 sndc = clip.xy / clip.w;
-            if (all(abs(sndc) < 1.3f))
             {
-                float2 spos = float2(sndc.x * 0.5f + 0.5f, 0.5f - sndc.y * 0.5f);
-                int2 sp = int2(saturate(spos) * float2(fxMeta.z, fxMeta.w));
-                float vis = 0.0f;
-                float khsf_f = KhEncFence();
-                [unroll] for (int oy = -2; oy <= 2; ++oy)
-                [unroll] for (int ox = -2; ox <= 2; ++ox)
-                {
-                    float khsf_d = LinDepth(LoadDepthPS(sp + int2(ox, oy) * max((int)floor(3.0f * KhFxPx() + 0.5f), 1)));   // KH_FX_PX_REF: nearest whole px.
-                    vis += saturate((min(khsf_d, khsf_f) - khsf_f * 0.98f)
-                                    / max(khsf_f * 0.019f, 1.0f));
-                }
-                vis /= 25.0f;
+                float vis;   // A branch, not ?: (which evaluates both arms).
+                [branch] if (matCtl.y > 0.5f) vis = khFxSide.Load(int3(0, 0, 0));
+                else                          vis = KhSunFlareVis(sp);
                 if (vis > 0.001f)
                 {
                     float aspect = fxMeta.z / fxMeta.w;
@@ -753,6 +925,12 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
                 }
             }
         }
+    }
+    else if (effect == 29)   // KH_FX_SIDE: the sun flare's source visibility (1 x 1, drawn before the pass).
+    {
+        float2 spos;
+        int2 sp;
+        return float4(KhSunFlareSpot(spos, sp) ? KhSunFlareVis(sp) : 0.0f, 0.0f, 0.0f, 1.0f);
     }
 
         else if (effect == 17)   // Glitch: [intensity, speed, sliceAmountPx, sliceBands] +
@@ -926,7 +1104,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         float2 sid = floor(q * 34.0f);
         float sn = Hash(sid);
         float2 sf = frac(q * 34.0f) - 0.5f;
-        float slife = saturate(sin(t * 0.35f + sn * 6.2832f) * 0.5f + 0.5f);
+        float slife = saturate(KhSin(t * 0.35f + sn * 6.2832f) * 0.5f + 0.5f);   // KH_HASH.
         float sdrop = smoothstep(0.12f + sn * 0.1f, 0.05f, length(sf))
                     * step(sn, fogAmt * 0.8f) * slife * (1.0f - saturate(trail * 1.6f));
         nrm += (sf / 0.2f) * sdrop * 0.18f;
@@ -966,7 +1144,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         // sway. Only the picture wobbles; the tube mask and the grille live on
         // the glass.
         float khc_wob = ((Hash(float2(khc_line * 0.173f, floor(t * 24.0f) * 0.71f)) - 0.5f)
-                       + 0.35f * sin(t * 2.3f + khc_line * 0.61f)) * fxParams2.y * KhFxPx();   // KH_FX_PX_REF.
+                       + 0.35f * KhSin(t * 2.3f + khc_line * 0.61f)) * fxParams2.y * KhFxPx();   // KH_FX_PX_REF, KH_HASH.
 
         float2 khc_dpx = khc_duv * float2(fxMeta.z, fxMeta.w);
         khc_dpx.x += khc_wob;
@@ -980,7 +1158,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         // and widens toward the highlights (phosphor blooming); the 1.32 gain
         // recovers the average level the dark gaps remove.
         float khc_lum = saturate(Luma(khc_col));
-        float khc_beam = pow(abs(sin(khc_phase * 3.14159265f)),
+        float khc_beam = pow(abs(KhSin(khc_phase * 3.14159265f)),   // KH_HASH: the phase scrolls with t.
                              lerp(2.2f, 0.65f, khc_lum));
         khc_col *= lerp(1.0f, khc_beam * 1.32f, saturate(fxParams0.y));
 
@@ -1009,7 +1187,7 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         // Mains flicker: a fast beat plus a per-refresh random sparkle
         // quantized to 60 Hz.
         float khc_fl = saturate(fxParams1.y);
-        float khc_hum = sin(t * 100.0f * 3.14159265f) * 0.5f + 0.5f;
+        float khc_hum = KhSin(t * 100.0f * 3.14159265f) * 0.5f + 0.5f;   // KH_HASH.
         float khc_spark = Hash(float2(floor(t * 60.0f), 3.7f)) - 0.5f;
         khc_col *= 1.0f + khc_fl * (khc_hum * 0.04f + khc_spark * 0.05f);
 

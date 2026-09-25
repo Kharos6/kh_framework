@@ -257,6 +257,8 @@ float KhSunDither(float2 khsd_px)
 
 void PSSunDepthA(VSOutSunA i)
 {
+    const float2 khsa_dx = ddx(i.uv);   // KH_MAT_GRAD: the gradients at entry, in uniform flow.
+    const float2 khsa_dy = ddy(i.uv);
     KhMatLoad((uint)matCtl.x);   // KH_MAT_TABLE: per-submesh draw, the CB lane.
     float khsa_a = i.alpha;
     int khsa_mode = (int)matParams0.y;   // 0 opaque, 1 cutout, 2 blend (kh_bind_material).
@@ -265,15 +267,16 @@ void PSSunDepthA(VSOutSunA i)
     // KH_CAST_ALPHA_SKIP: KhMatRoute resolves through KhMatFetch, whose
     // six-arm slot chain fxc hoists WHOLE (the slot is a StructuredBuffer lane,
     // so it cannot prove it uniform and a filtered sample has no derivative in
-    // divergent flow) - one call is SIX filtered samples, as the note at
-    // KhMatTapAll measured. An opaque material never reads the result, and a
+    // divergent flow) - one call is SIX filtered samples, as cb.hlsl's
+    // KH_MAT_GRAD note measured; KhMatRouteG (explicit gradients, a real
+    // branch) is one. An opaque material never reads the result, and a
     // cast shader runs per casting fragment per TIER: up to five sun tiers and
     // up to 48 dynamic-light face slices. Asking for it only where it is read
     // is the same value on every path (1.758: a dead accumulation is still
     // paid); the worst fxc can do with the guard is hoist the chain back to
     // where it already is.
     float khsa_t = 1.0f;
-    if (khsa_mode == 1 || khsa_mode == 2) khsa_t = KhMatRoute(matParams3.y, 1.0f, i.uv);
+    if (khsa_mode == 1 || khsa_mode == 2) khsa_t = KhMatRouteG(matParams3.y, 1.0f, i.uv, khsa_dx, khsa_dy);
     if (khsa_mode == 1) clip(khsa_t - matParams0.z);   // Cutout: the cutoff kills, survivors cast full.
     else if (khsa_mode == 2 && KhMatRouteTexel(matParams3.y, 1.0f, i.uv) < 0.9f) khsa_a *= khsa_t;
     if (khsa_a >= 0.996f) return;                       // Solid.
@@ -287,12 +290,14 @@ void PSSunDepthA(VSOutSunA i)
 // inherits the glass's shadow. Whole translucent objects never reach it.
 void PSInjDepthA(VSOut i)
 {
+    const float2 khfa_dx = ddx(i.uv);   // KH_MAT_GRAD: the gradients at entry, in uniform flow.
+    const float2 khfa_dy = ddy(i.uv);
     KhMatLoad(i.matIx);   // KH_MAT_TABLE.
     int khfa_mode = (int)matParams0.y;
     // KH_CAST_ALPHA_SKIP (see PSSunDepthA): the filtered alpha is read by the
     // cutout arm alone, so opaque and blend materials asked for six samples and
     // threw the answer away.
-    if (khfa_mode == 1) clip(KhMatRoute(matParams3.y, 1.0f, i.uv) - matParams0.z);
+    if (khfa_mode == 1) clip(KhMatRouteG(matParams3.y, 1.0f, i.uv, khfa_dx, khfa_dy) - matParams0.z);
     // The colour pass's own verdict.
     else if (khfa_mode == 2) clip(KhMatRouteTexel(matParams3.y, 1.0f, i.uv) - 0.9f);
 }
@@ -311,12 +316,14 @@ float4 PSDlsMaskA(VSOut i) : SV_Target
     // draw's own dither, so the mask at a pixel is the level that pixel shows
     // (a mask holding the union would cut the shown level behind the hidden
     // one's nearer surface - speckle). The dlsw mask fills no dither.
+    const float2 khma_dx = ddx(i.uv);   // KH_MAT_GRAD: the gradients at entry, ahead of the cut, in uniform flow.
+    const float2 khma_dy = ddy(i.uv);
     KhObjLoad(i.iobj0, i.iobj1);
     KhLodDitherCut(i.pos.xy, khObjDither);
     KhMatLoad(i.matIx);   // KH_MAT_TABLE.
     int khma_mode = (int)matParams0.y;
     // KH_CAST_ALPHA_SKIP (see PSSunDepthA).
-    if (khma_mode == 1) clip(KhMatRoute(matParams3.y, 1.0f, i.uv) - matParams0.z);
+    if (khma_mode == 1) clip(KhMatRouteG(matParams3.y, 1.0f, i.uv, khma_dx, khma_dy) - matParams0.z);
     // The colour pass's own verdict.
     else if (khma_mode == 2) clip(KhMatRouteTexel(matParams3.y, 1.0f, i.uv) - 0.9f);
     return float4(i.pos.w, 0.0f, 0.0f, 0.0f);
@@ -927,9 +934,7 @@ static const float KH_CAST_SNAP_ABOVE = 4.0f;
         float khtsH = KhThmHeight(pw.xz);
         if (khtsH > -1.0e5f && abs(pw.y - khtsH) < thmMeta.z) {
             const float  khtsUlp = fogBelow.z > 0.0f ? fogBelow.z : KH_CAST_SNAP_ULP16;
-            const float3 khtsCam = float3(dot(-castView[0].xyz, castMat[0].xyz),
-                                          dot(-castView[0].xyz, castMat[1].xyz),
-                                          dot(-castView[0].xyz, castMat[2].xyz));
+            const float3 khtsCam = castCam.xyz;   // KH_CB_DERIVED: castMat . -castView[0].
             const float  khtsQ = khtsUlp * distance(pw, khtsCam);   // One ulp along the ray.
             // KH_CAST_SNAP_ABOVE: above the heightfield, the quantisation alone.
             float khtsTol = pw.y > khtsH ? min(thmMeta.z, KH_CAST_SNAP_ABOVE * khtsQ) : thmMeta.z;
@@ -964,9 +969,7 @@ static const float KH_CAST_SNAP_ABOVE = 4.0f;
             // -castView[0]), the same view pw came from, not sunOrigin (this
             // frame's camera): a frame of motion apart, the band moves under
             // the shadows every frame.
-            float3 khfc = float3(dot(-castView[0].xyz, castMat[0].xyz),
-                                 dot(-castView[0].xyz, castMat[1].xyz),
-                                 dot(-castView[0].xyz, castMat[2].xyz));
+            float3 khfc = castCam.xyz;   // KH_CB_DERIVED.
             hit *= KhSunRangeFadeAt(pw, khfc);   // Range fade (at the helper).
         }
 

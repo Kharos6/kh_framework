@@ -8750,18 +8750,14 @@ static game_value get_render_stats_sqf() {
                 a.push_back(game_value(static_cast<float>(v)));
             out.push_back(kva("stencilReplay", std::move(a)));
         }
-        {   // KH_GTS_IDENTITY: [identity waits, of them later than half a period (the time rule would have missed),
-            // timeouts (identity off until relearned), offset breaks (relearned)].
-            auto_array<game_value> a;
-            for (uint64_t v : { RenderIntegration::g_gid_waits, RenderIntegration::g_gid_late, RenderIntegration::g_gid_timeouts,
-                                RenderIntegration::g_gid_breaks })
-                a.push_back(game_value(static_cast<float>(v)));
-            out.push_back(kva("identityWait", std::move(a)));
+        {   // KH_GTS_IDENTITY: relearnings of the sample-to-cycle offset that changed it.
+            out.push_back(kv("identityBreaks", static_cast<float>(RenderIntegration::g_gid_breaks)));
         }
-        {   // KH_RT_PAINT_READ: [paints that tried a read, bindings read, torn, refused, matched, stale, other].
+        {   // KH_RT_PAINT_READ: [paints that tried a read, bindings read, torn, refused, matched, stale, other,
+            // final steps that read for the mesh].
             const auto& c = RenderIntegration::g_rtp_c;
             auto_array<game_value> a;
-            for (uint64_t v : { c.paints, c.bindings, c.torn, c.refused, c.matched, c.stale, c.other })
+            for (uint64_t v : { c.paints, c.bindings, c.torn, c.refused, c.matched, c.stale, c.other, c.finals })
                 a.push_back(game_value(static_cast<float>(v)));
             out.push_back(kva("paintRead", std::move(a)));
         }

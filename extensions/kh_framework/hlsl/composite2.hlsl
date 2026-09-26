@@ -94,9 +94,9 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
         if (khtHe > -1.0e5f) khtClear = i.wpos.y - khtHe;
 
         if (fragZ >= thmMeta.w) {
-            // True ridges carry far more relief than 1.5 cells; only sub-cell
+            // True ridges carry far more relief than 1.5 tolerance cells (KhThmTolCell); only sub-cell
             // bumps lose their (false) vote.
-            float khtMc = KhThmClearance(fxParams0.xyz, i.wpos) + 1.5f * thmParams.z;
+            float khtMc = KhThmClearance(fxParams0.xyz, i.wpos) + 1.5f * KhThmTolCell();
             if (khtMc < khtClear) khtClear = khtMc;
         }
 
@@ -155,7 +155,7 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
             // neighbours' heights, and a gradient taken past the per-pixel tests
             // below reads lanes that left them. The tests read it as they read it
             // in place.
-            const float khaTol = max(0.15f, thmParams.z * 0.02f);
+            const float khaTol = max(0.15f, KhThmTolCell() * 0.02f);
             float khaSh = -1.0e6f, khaTd = 0.0f, khaTrw = khaTol;
             if (fxParams1.w > 0.0f) {
                 float3 khaDir = (i.wpos - khaRayO) / max(khaRayW, 1.0e-4f);   // The snapshot's ray.

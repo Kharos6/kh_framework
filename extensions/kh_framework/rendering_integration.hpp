@@ -9249,7 +9249,8 @@ struct KhAttach {
     std::vector<uintptr_t> gts_vb, gts_bb, gts_avb, gts_abb;
     // KH_RT_PAINT_READ: the render thread's own read of what the sampler last read (rt_par: the parent or its helper;
     // rt_rot: the rotation object, nil when the lane has none of its own), with its own page caches, for the cast
-    // fire's paint when this frame's own sample has not landed. rt_snap is that read, rt_cyc the cycle it is for.
+    // fire's paint and the final step's mesh when this frame's own sample has not landed. rt_snap is that read,
+    // rt_cyc the cycle it is for.
     game_value rt_par, rt_rot;
     uint32_t  rt_par_off = KH_ATTACH_OFF_NONE, rt_rot_off = KH_ATTACH_OFF_NONE;
     uintptr_t rt_par_vb = 0, rt_par_bb = 0, rt_rot_vb = 0, rt_rot_bb = 0, rt_pb = 0, rt_rb = 0, rt_xb = 0;
@@ -9259,6 +9260,11 @@ struct KhAttach {
     std::vector<uintptr_t> rt_vb, rt_bb, rt_avb, rt_abb;
     KhGtSnap  rt_snap;
     uint64_t  rt_cyc = ~0ull;
+    // KH_RT_PAINT_READ: the read the final step drew for the mesh (the frame's own sample not landed), kept for its
+    // check against that sample at the next cycle's final step (kh_gts_for_cycle).
+    KhGtSnap  rt_chk;
+    uint64_t  rt_chk_cyc = ~0ull;
+    bool      rt_crew = false;   // rt_snap placed by the crew prediction (KH_CREW_LAG): the repick's alone.
     // KH_ATTACH_MAN_HELPER: a character's own visual state is not written while it rides in a vehicle (the engine
     // draws the crew from the vehicle, and the state keeps the pose it had when the character got in), but a helper
     // attached to it is: attachTo places it from the character's drawn transform. A lane naming a Man therefore gets
@@ -9485,6 +9491,10 @@ static std::unordered_map<uintptr_t, KhPxyPoolEnt>& g_pxy_pool =
 static std::unordered_map<std::string, uintptr_t>& g_pxy_pool_key =
     *(new std::unordered_map<std::string, uintptr_t>());
 static std::atomic<uint32_t> g_pxy_pool_n{ 0 };
+// KH_PXY_SMOOTH: the estimator is stepped from the game thread (the sampler, a chain's end) and the render thread
+// (its reads, KH_RT_PAINT_READ): every step, and every insert into or erase from g_pxy_pool (game thread), holds
+// this. Held for map operations and the step alone - no engine call, no other lock taken inside it.
+static std::mutex g_pxy_pool_mu;
 // KH_ATTACH_ROW_MAX - the longest basis row a visual-state read admits
 // (kh_attach_vs_eval). A followed object the script scaled
 // carries its scale in these rows, so the band is generous: a little over 2x
@@ -9507,7 +9517,10 @@ inline void kh_pxy_pool_erase(std::unordered_map<uintptr_t, KhPxyPoolEnt>::itera
     KhPxyPoolEnt& khpr_e = khpr_it->second;
     const auto khpr_kit = g_pxy_pool_key.find(khpr_e.key);
     if (khpr_kit != g_pxy_pool_key.end() && khpr_kit->second == khpr_it->first) g_pxy_pool_key.erase(khpr_kit);
-    g_pxy_pool.erase(khpr_it);
+    {
+        std::lock_guard<std::mutex> khpr_l(g_pxy_pool_mu);   // KH_PXY_SMOOTH: the render thread steps entries.
+        g_pxy_pool.erase(khpr_it);
+    }
     g_pxy_pool_n.store(static_cast<uint32_t>(g_pxy_pool.size()), std::memory_order_relaxed);
 }
 // The reap's release: true = no holder left (or never pooled), the caller
@@ -10222,7 +10235,10 @@ inline void kh_attach_drop_all(bool khad_retire) {   // Under g_draw_list_mutex.
     } else {
         g_attach_proxy_dead.clear();
         g_attach_proxy_dead_n.store(0, std::memory_order_relaxed);
-        g_pxy_pool.clear();   // The mission edge (game thread).
+        {
+            std::lock_guard<std::mutex> khpc_l(g_pxy_pool_mu);   // KH_PXY_SMOOTH.
+            g_pxy_pool.clear();   // The mission edge (game thread).
+        }
         g_pxy_pool_key.clear();
         g_pxy_pool_n.store(0, std::memory_order_relaxed);
     }
@@ -10405,7 +10421,10 @@ inline bool kh_pxy_pool_get(const game_value& khpg_parent, const std::string& kh
         // memory point.
         const auto khpg_old = g_pxy_pool.find(khpg_xb);
         if (khpg_old != g_pxy_pool.end()) kh_pxy_pool_erase(khpg_old);
-        g_pxy_pool[khpg_xb] = khpg_e;
+        {
+            std::lock_guard<std::mutex> khpg_l(g_pxy_pool_mu);   // KH_PXY_SMOOTH.
+            g_pxy_pool[khpg_xb] = khpg_e;
+        }
         g_pxy_pool_key[khpg_key] = khpg_xb;
         g_pxy_pool_n.store(static_cast<uint32_t>(g_pxy_pool.size()), std::memory_order_relaxed);
     }
@@ -10836,34 +10855,43 @@ static uint64_t g_sun_restep_cycle = ~0ull;
 // KH_ATTACH_GT_SNAP - which sample a cycle draws (KH_GTS_NEAREST). The Draw3D sampler (kh_attach_gt_snap) samples every
 // binding's objects once a frame; the step draws one of those samples and never reads an object itself.
 //   Own  = a frame's Draw3D lands within a few milliseconds of that frame's main depth clear - before it or after it,
-//          and which side flips with the load - while every other frame's lands most of a frame away. So a cycle's
-//          own sample is the one stamped nearest its clear, within half a frame period either side (g_gts_half: half
-//          the shorter of the last two frames, so a hitch or a pause does not stretch it). Nothing is carried from
-//          cycle to cycle: a frame judged wrong cannot put the next one wrong.
-//   Wait = when no sample stamped from half a period before the clear has been published, this frame's own is still
-//          to come: the cycle's FINAL step (the injection's, or the render-thread flush's) waits for it (kh_gts_wait:
-//          outside g_draw_list_mutex, which the sampler needs) until half a period after the clear, past which it is
-//          not this frame's. With the sample-to-cycle offset known (KH_GTS_IDENTITY, below) it waits instead for the
-//          frame's own sample by number, to KH_GTS_ID_CAP_MS after the clear, and the pick takes it by number. Not
-//          arrived: the newest sample before the clear (B) - a frame later than that draws one behind, that frame
-//          alone, and a render cycle with no frame of its own redraws the last one.
-//   Final = the cast fire's first step (0.03 ms after the clear) takes what has landed and never waits: in a light
-//          scene the frame's Draw3D lands after it (measured: 0.3-1.7 ms after the clear). The final step picks
-//          again; a pose that changes there re-skins its skeletal mesh and reopens the sun map (KH_SUN_RESTEP).
+//          and which side flips with the load - while every other frame's lands most of a frame away. That is how
+//          the frame's own sample is recognised: the offset between sample numbers and cycles is learned from it
+//          (KH_GTS_IDENTITY, below) and carried from cycle to cycle, relearned every cycle, and a cycle's own sample
+//          is sample number cycle + that offset. Before the offset is known, the sample stamped nearest the clear
+//          within half a frame period either side stands in (g_gts_half: half the shorter of the last two frames, so
+//          a hitch or a pause does not stretch it).
+//   Wait = none, but for a binding or a followed chain end on a crew member: the render thread does not wait for a
+//          Draw3D. On some terrains
+//          a frame's own Draw3D runs only after that frame's injection (cytech_underground_terrain, measured below), so
+//          a wait for it there ended only at its cap, and a wait at all can hold the game thread back from its Draw3D.
+//          A crew member's exact pose is the Draw3D's own measurement (KH_CREW_LAG: getPosWorldVisual), so while one
+//          is bound, or a chain's end follows one (kh_chain_end_crew_n), the final step waits for that frame's sample
+//          as it did for every binding before the reads, up to
+//          KH_GTS_CREW_CAP_MS after the clear (kh_gts_step_prep).
+//   Own or read = every render-thread step draws the frame's own sample by number when it has landed
+//          (KH_GTS_IDENTITY, below); when it has not, the render thread reads the objects itself - at the cycle's
+//          first step and again at its final step (kh_gts_step_prep) - and the step draws that read, so the mesh
+//          and everything drawn from it in the cycle (the sun and dynamic-light maps, the footprint and stencil
+//          seams, the view-model slice, the world cast's paint) take the frame's pose (KH_RT_PAINT_READ, below).
+//          Before the offset is known (a session's first cycles) a step draws the sample stamped nearest the clear
+//          within half a period, else the newest before the clear (B).
+//   Final = the cast fire's first step (0.03 ms after the clear) takes the frame's own sample if it has landed, else
+//          the render thread's read ("Own or read"): in a light scene the frame's Draw3D lands after it (measured:
+//          0.3-1.7 ms after the clear). The final step picks again; a pose that changes there re-skins its skeletal
+//          mesh and reopens the sun map (KH_SUN_RESTEP).
 //   Paint = the engine reads its shadow mask right after the fire paints our shadow into it (0.08-0.47 ms after the
-//          clear), so the fire waits for the frame's own sample just before that paint and picks again (KH_CAST_WAIT,
-//          KH_CAST_REPICK) - but at most KH_CAST_WAIT_US after the clear, not half a period. Waiting this early can
-//          hold the game thread back from its Draw3D until the wait gives up (after some vehicle exits: the sample
-//          landed 0.35-0.45 ms after every give-up, whatever the limit); a half-period wait there then pushed the
-//          final step past its own deadline and drew mesh and shadow a frame behind. Unblocked, the sample landed
-//          0.1-1.7 ms after the clear in every run. Past the cap, with the frame's own sample still absent, the render
-//          thread reads the objects itself for the paint (KH_RT_PAINT_READ, below); where that read is not taken the
-//          shadow carries the previous frame's pose for that frame. The final step still waits for the mesh (Wait).
+//          clear). The fire picks again just before that paint when a sample has landed since the cycle's first step
+//          (KH_CAST_REPICK) and, with the frame's own still absent, reads the objects itself (KH_RT_PAINT_READ).
 // Measured (a test probe, withdrawn; the engine's diag_frameNo against the render cycle): three runs - a heavy scene
 // (21.7 ms frames), a light one after a vehicle exit (10.4 ms) and one flipping between 20 ms and 10 ms frames across
 // an exit - 756 cycles, each frame's own Draw3D within 3.1 ms before or 2.6 ms after its clear (at most 26 % of a
 // frame), the nearest sample the frame's own on every one. The rules this replaced (the newest before the clear, with
 // an aim carried from cycle to cycle, write-offs and fallbacks) drew 321 of them a frame behind after vehicle exits.
+// Measured on cytech_underground_terrain (a test probe, withdrawn): the own Draw3D landed 1-3 ms after the clear,
+// after the final step (about 0.6 ms); the waits this replaced (by number, capped at 100 ms) ended at the cap 13
+// times in about 7 s, the sample landing just after each, and after them a half period swollen past 14 ms let the
+// previous frame's sample be learned as the frame's own, so every cycle drew one frame behind (1,230 in one run).
 static int64_t  g_gts_clear_qpc = 0;                 // Render thread: this cycle's main depth clear (kh_gts_qpc).
 static int64_t  g_gts_clear_prev = 0;                // The clear before it.
 static int64_t  g_gts_half = 0;                      // Half the frame period at this clear (0: not known yet).
@@ -10871,10 +10899,7 @@ static std::atomic<uint64_t> g_gts_done_pub{ 0 };   // Game thread: the seq whos
 static constexpr uint32_t KH_GTS_STAMPS = 8u;
 static std::atomic<int64_t> g_gts_stamp_pub[KH_GTS_STAMPS];   // Game thread: seq's stamp at [seq % KH_GTS_STAMPS], stored
                                                               // before g_gts_done_pub names it.
-static uint64_t g_gts_wait_cyc = ~0ull;              // The cycle whose final step has run its wait (kh_gts_wait).
-static uint64_t g_gts_paint_wait_cyc = ~0ull;        // The cycle whose cast-fire paint has run its wait (KH_CAST_WAIT).
-static constexpr int64_t KH_CAST_WAIT_US = 2000;     // KH_CAST_WAIT: the paint's wait ends this long after the clear
-                                                     // at the latest (above the 1.7 ms slowest unblocked arrival seen).
+static uint64_t g_gts_final_cyc = ~0ull;             // The cycle whose final step has run kh_gts_step_prep.
 inline int64_t kh_gts_qpc() { LARGE_INTEGER khgq_q; QueryPerformanceCounter(&khgq_q); return khgq_q.QuadPart; }
 // The main depth clear (render thread): this cycle's boundary, and half the frame period - the shorter of the last two
 // frames, so one long frame (a hitch, a pause) does not widen the window.
@@ -10956,91 +10981,91 @@ inline void kh_gts_carry(const float khgy_pp[12], const float khgy_pn[12], const
     }
 }
 // KH_GTS_IDENTITY - render cycles and Draw3D samples run one for one, so the frame's own sample is sample number
-// cycle + g_gid_k. The offset is learned on every cycle whose own sample is unambiguous by time (stamped within half a
-// period of the clear, the pick's own rule) and relearned when that disagrees. The final step then waits for that
-// sample by number, however late it lands (a hitch, a high-framerate frame whose Draw3D follows the clear): the
-// engine's render thread waits for the frame's Draw3D before its icons anyway, so the frame could not finish sooner.
-// Two things bound it all the same: a frame with no Draw3D (the map, loading) and an offset gone stale after a real
-// stall - KH_GTS_ID_CAP_MS after the clear it stops, and identity stays off until a cycle relearns it (one capped wait
-// per such stretch, not one per frame). Only the final step waits by identity; the cast fire's paint stays capped by
-// time (rule 1.1095: an early wait can hold Draw3D back).
-static constexpr int64_t KH_GTS_ID_CAP_MS = 100;
+// cycle + g_gid_k. The offset is learned once a cycle, at its first render-thread step, from the PREVIOUS cycle,
+// whose own Draw3D has landed by then (kh_gts_id_learn): the one sample stamped within KH_GTS_OWN_US and within
+// half a period of that cycle's clear, when there is exactly one. The window is fixed: after a stall the half
+// period swelled past 14 ms and let the previous frame's sample, stamped 12.65 ms before the clear, pass for the
+// frame's own - after which every cycle drew one frame behind. Own samples landed between 3.1 ms before and 3.2 ms
+// after their clear in every measured run. A learning that changes the offset is a break (getRenderStats
+// "identityBreaks").
+static constexpr int64_t KH_GTS_OWN_US = 4000;
 static int64_t  g_gid_k = 0;                 // Render thread: sample number - cycle.
-static bool     g_gid_ok = false;            // The offset is known (learned since the last timeout / session start).
-static uint64_t g_gid_waits = 0, g_gid_late = 0, g_gid_timeouts = 0, g_gid_breaks = 0;   // getRenderStats "identityWait".
+static bool     g_gid_ok = false;            // The offset is known (learned since the session start).
+static uint64_t g_gid_breaks = 0;            // getRenderStats "identityBreaks".
+static uint64_t g_gts_learn_cyc = ~0ull;     // Render thread: the cycle whose offset has been learned.
+static uint64_t g_gts_first_rd_cyc = ~0ull;  // Render thread: the cycle whose first step has run its read.
+// KH_CREW_LAG: bindings the last Draw3D sample placed on a crew member, and followed chain ends on one (the sampler;
+// the render thread reads it),
+// and how long after the clear the final step waits for the frame's own sample while there is one - the cap the
+// waits for every binding had.
+static std::atomic<uint32_t> g_gts_crew_n{ 0 };
+static constexpr int64_t KH_GTS_CREW_CAP_MS = 100;
+// KH_CHAIN_END_DRAW: chains whose end follows an object or a memory point, is fixed in the world or is held on a
+// skeletal object's bone (g_chain_end, game thread under g_draw_list_mutex; kh_chain_end_filed). With one, the
+// Draw3D sampler and the steps run even with no binding: the frame's identity and the render thread's read serve a
+// followed end as they serve a binding.
+static std::atomic<uint32_t> g_chain_end_n{ 0 };
+// With a chain end followed, the sampler's number is published with that Draw3D's chain targets (at the end of
+// kh_chain_prepare, kh_chain_end_publish, still inside the Draw3D handler and under g_draw_list_mutex): a step that
+// saw the sample landed but not its chain targets would draw the chain's end a frame old. Game thread.
+static uint64_t g_gts_done_defer = 0;
+inline bool kh_attach_live() {
+    return g_attach_n.load(std::memory_order_relaxed) != 0u || g_chain_end_n.load(std::memory_order_relaxed) != 0u;
+}
+inline void kh_chain_end_rt_read(uint64_t khcr_cyc, uint64_t khcr_own, int64_t khcr_q);   // Defined with the chain.
+inline void kh_chain_end_draw(ID3D11DeviceContext* khed_ctx);                            // Likewise.
+inline uint32_t kh_chain_end_crew_n();                                                   // Likewise (KH_CREW_LAG).
 // KH_RT_PAINT_READ: getRenderStats "paintRead" - [paints that tried a read, bindings read, torn (the two reads disagreed),
-// refused (a read failed validation), then at the final step against the frame's own sample: matched, stale (equal
-// to the previous frame's sample), other].
-struct KhRtpCounters { uint64_t paints = 0, bindings = 0, torn = 0, refused = 0, matched = 0, stale = 0, other = 0; };
+// refused (a read failed validation), then each read against the frame's own sample once it has landed: matched,
+// stale (equal to the previous frame's sample), other; and final steps that read for the mesh].
+struct KhRtpCounters {
+    uint64_t paints = 0, bindings = 0, torn = 0, refused = 0, matched = 0, stale = 0, other = 0, finals = 0;
+};
 static KhRtpCounters g_rtp_c;
 static uint64_t g_rtp_cyc = ~0ull;                          // The cycle whose paint has run its read.
 static constexpr uint64_t KH_RT_SEQ_BIT = 1ull << 62;       // A render-thread read's number: never a sample's, so the
                                                             // final step re-stashes a skeletal pose from the real one.
-// When no sample stamped from half a period before the clear has been published, wait for this frame's own until half
-// a period after the clear, past which it is not this frame's - or until khgw_cap ticks after the clear, if sooner.
-// Render thread, outside g_draw_list_mutex (the sampler needs it). Its callers gate it once per cycle each: the final
-// step while the identity offset is unknown (kh_gts_wait, no cap) and the cast fire's paint (KH_CAST_WAIT,
-// KH_CAST_WAIT_US).
-inline void kh_gts_wait_own(int64_t khgw_cap) {
-    const int64_t khgw_half = g_gts_half;
-    if (khgw_half <= 0) return;   // The period is not known yet: the pick takes B.
-    const int64_t khgw_from = g_gts_clear_qpc - khgw_half;
-    const int64_t khgw_until = g_gts_clear_qpc + (khgw_cap < khgw_half ? khgw_cap : khgw_half);
-    for (;;) {
-        const uint64_t khgw_s = g_gts_done_pub.load(std::memory_order_acquire);
-        if (khgw_s != 0u && g_gts_stamp_pub[khgw_s % KH_GTS_STAMPS].load(std::memory_order_relaxed) >= khgw_from) return;
-        if (kh_gts_qpc() >= khgw_until) return;
-        std::this_thread::yield();
-    }
-}
-// The cycle's final render-thread step, before kh_attach_step takes g_draw_list_mutex.
-// KH_GTS_IDENTITY: the offset from the newest sample published, when it is stamped within half a period of this
-// cycle's clear (after the wait, the frame's own); otherwise (a hitch: the own sample later than half a period, or not
-// yet here) the offset stands. The newest only: after a hitch the previous frame's late sample can stamp near the new
-// clear, and a scan for the nearest would take it for this frame's.
+// KH_GTS_IDENTITY: the offset from the previous cycle - the newest published samples' stamps against that cycle's
+// clear (g_gts_clear_prev): learned only when exactly one lies within the window (after a hitch a frame's late
+// sample can land near the next clear, beside that frame's own; two there is no answer, and the offset stands).
+// Seven, not eight: the sampler writes the stamp of the next sample into the eighth slot before it publishes.
+// Render thread, once a cycle (kh_gts_step_prep).
 inline void kh_gts_id_learn() {
-    const int64_t khil_half = g_gts_half;
-    if (khil_half <= 0) return;
-    const uint64_t khil_own = g_gts_done_pub.load(std::memory_order_acquire);
-    if (khil_own == 0) return;
-    const int64_t khil_q = g_gts_stamp_pub[khil_own % KH_GTS_STAMPS].load(std::memory_order_relaxed);
-    const int64_t khil_d = khil_q >= g_gts_clear_qpc ? khil_q - g_gts_clear_qpc : g_gts_clear_qpc - khil_q;
-    if (khil_d > khil_half) return;
-    const int64_t khil_k = static_cast<int64_t>(khil_own) - static_cast<int64_t>(g_topo_cycles);
+    const int64_t khil_cp = g_gts_clear_prev;
+    if (khil_cp <= 0 || g_topo_cycles == 0u) return;
+    int64_t khil_w = static_cast<int64_t>(kh_prof_freq()) * KH_GTS_OWN_US / 1000000;
+    if (g_gts_half > 0 && g_gts_half < khil_w) khil_w = g_gts_half;
+    const uint64_t khil_done = g_gts_done_pub.load(std::memory_order_acquire);
+    uint64_t khil_best = 0;
+    uint32_t khil_n = 0;
+    for (uint64_t khil_i = 0; khil_i + 1u < KH_GTS_STAMPS && khil_i < khil_done; ++khil_i) {
+        const uint64_t khil_s = khil_done - khil_i;
+        const int64_t khil_q = g_gts_stamp_pub[khil_s % KH_GTS_STAMPS].load(std::memory_order_relaxed);
+        const int64_t khil_d = khil_q >= khil_cp ? khil_q - khil_cp : khil_cp - khil_q;
+        if (khil_d <= khil_w) {
+            khil_best = khil_s;
+            ++khil_n;
+        }
+    }
+    if (khil_n != 1u) return;
+    const int64_t khil_k = static_cast<int64_t>(khil_best) - static_cast<int64_t>(g_topo_cycles - 1u);
     if (g_gid_ok && khil_k != g_gid_k && kh_stats_on()) ++g_gid_breaks;
     g_gid_k = khil_k;
     g_gid_ok = true;
 }
-// The cycle's final render-thread step, before kh_attach_step takes g_draw_list_mutex.
-inline void kh_gts_wait() {
-    if (g_gts_wait_cyc == g_topo_cycles) return;
-    g_gts_wait_cyc = g_topo_cycles;
-    if (g_gid_ok && g_gts_clear_qpc != 0) {   // KH_GTS_IDENTITY: the frame's own sample, by number.
-        const uint64_t khgw_want = static_cast<uint64_t>(static_cast<int64_t>(g_topo_cycles) + g_gid_k);
-        const int64_t khgw_until = g_gts_clear_qpc + static_cast<int64_t>(kh_prof_freq()) * KH_GTS_ID_CAP_MS / 1000;
-        if (kh_stats_on()) ++g_gid_waits;
-        for (;;) {
-            if (g_gts_done_pub.load(std::memory_order_acquire) >= khgw_want) break;
-            if (kh_gts_qpc() >= khgw_until) {   // No sample: identity off; this cycle's newest is not its own, so no relearning.
-                g_gid_ok = false;
-                if (kh_stats_on()) ++g_gid_timeouts;
-                return;
-            }
-            std::this_thread::yield();
-        }
-        if (g_gid_ok && g_gts_half > 0) {   // Later than half a period after the clear: the time rule would have missed it.
-            const int64_t khgw_q = g_gts_stamp_pub[khgw_want % KH_GTS_STAMPS].load(std::memory_order_relaxed);
-            if (khgw_q > g_gts_clear_qpc + g_gts_half && kh_stats_on()) ++g_gid_late;
-        }
-    } else {
-        kh_gts_wait_own(g_gts_half);
-    }
-    kh_gts_id_learn();
+// KH_RT_PAINT_READ: two poses equal bit for bit (the check of a read against the frame's own sample).
+inline bool kh_gts_same(const KhGtSnap& khgs_x, const KhGtSnap& khgs_y) {
+    return memcmp(khgs_x.par, khgs_y.par, sizeof(khgs_x.par)) == 0 && khgs_x.px.size() == khgs_y.px.size() &&
+           (khgs_x.px.empty() || memcmp(khgs_x.px.data(), khgs_y.px.data(), khgs_x.px.size() * sizeof(float)) == 0) &&
+           khgs_x.rot_ok == khgs_y.rot_ok &&
+           (!khgs_x.rot_ok || memcmp(khgs_x.rot, khgs_y.rot, sizeof(khgs_x.rot)) == 0);
 }
 // The sample cycle khgc_cyc draws (KH_ATTACH_GT_SNAP, above), or null (the ring holds none for this binding): the
-// frame's own by number when the identity offset is known and the ring holds it (KH_GTS_IDENTITY), else the one
-// stamped nearest the cycle's clear within half a period, else - at the cast fire's repick only - the render thread's
-// read for this cycle (KH_RT_PAINT_READ), else the newest before the clear, else the oldest held.
+// frame's own by number when the identity offset is known and the ring holds it (KH_GTS_IDENTITY); else, at a
+// render-thread pick, the render thread's read for this cycle (KH_RT_PAINT_READ: the frame's own has not landed);
+// else the one stamped nearest the cycle's clear within half a period; else the newest before the clear, else the
+// oldest held. The final step also checks the read it drew the cycle before against that frame's own sample,
+// landed since (matched / stale / other).
 // Memoized per binding and cycle by the render thread (khgc_store), so the steps of a cycle draw one sample even when
 // the next Draw3D lands between them - except that the final step (g_attach_final_step) and the cast fire's step
 // before its paint (g_attach_repick_step, KH_CAST_REPICK) pick again and store their pick for the steps after them.
@@ -11067,6 +11092,23 @@ inline const KhGtSnap* kh_gts_for_cycle(KhAttach& khgc_a, uint64_t khgc_cyc, boo
             if (khgc_c[khgc_i]->seq == khgc_a.gts_pick_seq) return khgc_c[khgc_i];
         }
     }
+    // KH_RT_PAINT_READ: the read the previous cycle's final step drew, against that frame's own sample, once.
+    if (khgc_store && g_attach_final_step && g_gid_ok && khgc_a.rt_chk_cyc != ~0ull &&
+        khgc_a.rt_chk_cyc + 1u == khgc_cyc) {
+        const uint64_t khgc_ow = static_cast<uint64_t>(static_cast<int64_t>(khgc_a.rt_chk_cyc) + g_gid_k);
+        const KhGtSnap* khgc_o = nullptr;
+        const KhGtSnap* khgc_ob = nullptr;
+        for (uint32_t khgc_i = 0; khgc_i < khgc_nc; ++khgc_i) {
+            if (khgc_c[khgc_i]->seq == khgc_ow) khgc_o = khgc_c[khgc_i];
+            if (khgc_c[khgc_i]->seq + 1u == khgc_ow) khgc_ob = khgc_c[khgc_i];
+        }
+        if (khgc_o) {
+            khgc_a.rt_chk_cyc = ~0ull;
+            if (kh_gts_same(khgc_a.rt_chk, *khgc_o)) { if (kh_stats_on()) ++g_rtp_c.matched; }
+            else if (khgc_ob && kh_gts_same(khgc_a.rt_chk, *khgc_ob)) { if (kh_stats_on()) ++g_rtp_c.stale; }
+            else { if (kh_stats_on()) ++g_rtp_c.other; }
+        }
+    }
     if (khgc_nc == 0u) return nullptr;
     const int64_t khgc_cl = g_gts_clear_qpc;
     const int64_t khgc_half = g_gts_half;
@@ -11074,6 +11116,21 @@ inline const KhGtSnap* kh_gts_for_cycle(KhAttach& khgc_a, uint64_t khgc_cyc, boo
     if (g_gid_ok) {   // KH_GTS_IDENTITY: by number, when it is in the ring (a late one the time rule would pass over).
         const uint64_t khgc_want = static_cast<uint64_t>(static_cast<int64_t>(khgc_cyc) + g_gid_k);
         for (uint32_t khgc_i = 0; khgc_i < khgc_nc; ++khgc_i) if (khgc_c[khgc_i]->seq == khgc_want) khgc_p = khgc_c[khgc_i];
+    }
+    // KH_RT_PAINT_READ: a render-thread pick with the frame's own not landed - the render thread's read of it for this
+    // cycle (kh_gts_step_prep), which the steps after it keep (the memo). A crew member's read is its prediction
+    // (KH_CREW_LAG), which only the paint's repick takes: the mesh keeps the Draw3D's measurement for it. The final
+    // step keeps its read for the check against the frame's own sample at the next final step.
+    if (!khgc_p && g_gid_ok && khgc_store && khgc_new && (!khgc_a.rt_crew || g_attach_repick_step) &&
+        khgc_a.rt_cyc == khgc_cyc && khgc_a.rt_snap.ok && khgc_a.rt_snap.gen == khgc_gen &&
+        khgc_a.rt_snap.xb == khgc_xb && khgc_a.rt_snap.px.size() == khgc_np * 12u) {
+        khgc_a.gts_cyc = khgc_cyc;
+        khgc_a.gts_pick_seq = khgc_a.rt_snap.seq;
+        if (g_attach_final_step) {
+            khgc_a.rt_chk = khgc_a.rt_snap;
+            khgc_a.rt_chk_cyc = khgc_cyc;
+        }
+        return &khgc_a.rt_snap;
     }
     int64_t khgc_best = 0;
     if (!khgc_p && khgc_half > 0) {   // KH_GTS_IDENTITY: the time rule when identity has not picked.
@@ -11084,12 +11141,6 @@ inline const KhGtSnap* kh_gts_for_cycle(KhAttach& khgc_a, uint64_t khgc_cyc, boo
                 khgc_best = khgc_d;
             }
         }
-    }
-    if (!khgc_p && g_attach_repick_step && khgc_store && khgc_a.rt_cyc == khgc_cyc && khgc_a.rt_snap.ok &&
-        khgc_a.rt_snap.gen == khgc_gen && khgc_a.rt_snap.xb == khgc_xb && khgc_a.rt_snap.px.size() == khgc_np * 12u) {
-        khgc_a.gts_cyc = khgc_cyc;   // KH_RT_PAINT_READ: the paint's pose, the own sample not here - the later steps keep it.
-        khgc_a.gts_pick_seq = khgc_a.rt_snap.seq;
-        return &khgc_a.rt_snap;
     }
     if (!khgc_p) {   // Not arrived (or the period not known yet): B, the newest before the clear, else the oldest held.
         for (uint32_t khgc_i = 0; khgc_i < khgc_nc; ++khgc_i) {
@@ -11102,15 +11153,10 @@ inline const KhGtSnap* kh_gts_for_cycle(KhAttach& khgc_a, uint64_t khgc_cyc, boo
     if (khgc_store && g_attach_final_step && khgc_a.rt_cyc == khgc_cyc && g_gid_ok && khgc_p &&   // KH_RT_PAINT_READ:
         khgc_p->seq == static_cast<uint64_t>(static_cast<int64_t>(khgc_cyc) + g_gid_k)) {        // the check.
         const KhGtSnap& khgc_r = khgc_a.rt_snap;
-        auto khgc_same = [&](const KhGtSnap& x, const KhGtSnap& y) {
-            return memcmp(x.par, y.par, sizeof(x.par)) == 0 && x.px.size() == y.px.size() &&
-                   (x.px.empty() || memcmp(x.px.data(), y.px.data(), x.px.size() * sizeof(float)) == 0) &&
-                   x.rot_ok == y.rot_ok && (!x.rot_ok || memcmp(x.rot, y.rot, sizeof(x.rot)) == 0);
-        };
         const KhGtSnap* khgc_prev = nullptr;
         for (uint32_t khgc_i = 0; khgc_i < khgc_nc; ++khgc_i) if (khgc_c[khgc_i]->seq + 1u == khgc_p->seq) khgc_prev = khgc_c[khgc_i];
-        if (khgc_same(khgc_r, *khgc_p)) { if (kh_stats_on()) ++g_rtp_c.matched; }
-        else if (khgc_prev && khgc_same(khgc_r, *khgc_prev)) { if (kh_stats_on()) ++g_rtp_c.stale; }
+        if (kh_gts_same(khgc_r, *khgc_p)) { if (kh_stats_on()) ++g_rtp_c.matched; }
+        else if (khgc_prev && kh_gts_same(khgc_r, *khgc_prev)) { if (kh_stats_on()) ++g_rtp_c.stale; }
         else { if (kh_stats_on()) ++g_rtp_c.other; }
         khgc_a.rt_cyc = ~0ull;   // Counted once.
     }
@@ -11486,18 +11532,20 @@ inline void kh_crew_clear_all() {
     g_crew_frame = 0;
 }
 
-// KH_RT_PAINT_READ - the cast fire paints our shadow into the engine's mask once a frame and cannot wait past
-// KH_CAST_WAIT_US for the frame's own sample (rule 1.1095); past that it painted the previous frame's pose. When the
-// own sample is still absent there (identity known, sample cycle + g_gid_k not published), the render thread reads
-// the same objects the sampler reads - twice - and a binding takes the read only if every read validated and both
-// passes agree bit for bit (the game thread may be writing the object meanwhile). The paint's repick step draws it;
-// the injection still waits for and draws the frame's own sample (the mesh stays exact), and its final step counts
-// the read against that sample (matched / stale / other). Only when the own sample is absent, only at the paint.
-// KH_PXY_SMOOTH: its helper positions are the raw reads (the estimator runs in the sampler alone), so a paint drawn
-// from it may sit up to one float step from the frame's smoothed pose; the check compares raw reads with raw reads.
+// KH_RT_PAINT_READ - nothing on the render thread waits for a Draw3D but the final step while a binding or a
+// followed chain end is on a crew member (see
+// "Wait"). When the frame's own sample is absent (identity known, sample cycle + g_gid_k not published) at the cast
+// fire's paint or at the cycle's steps (kh_gts_step_prep), the render thread reads the same objects the sampler reads -
+// twice - and a binding takes the read only if every read validated and both passes agree bit for bit (the game thread
+// may be writing the object meanwhile). Every render-thread step of the cycle draws it (a crew member's prediction, the
+// paint's repick alone); a read the final step drew is counted against the frame's own sample once that lands
+// (matched / stale / other).
+// KH_PXY_SMOOTH: its memory-point helpers are smoothed as the sampler smooths them (the estimator stepped with the
+// frame's own sample number); the check compares the raw reads.
 // KH_CREW_LAG: a binding placed from a crew member also reads the character's origin helper and vehicle (both
-// passes) and moves its helpers by the prediction; its check then counts 'other' wherever the prediction and the
-// frame's own measurement differ in a bit.
+// passes) and moves its helpers by the prediction, which only the paint's repick draws (the mesh keeps the frame's
+// own sample: the final step waits for it); the final step's check of the paint's read counts 'other' wherever the
+// prediction and the frame's own measurement differ in a bit.
 inline bool kh_rt_own_absent() {
     if (!g_gid_ok) return false;   // The frame's own number unknown: no read (today's pick).
     const uint64_t khra_want = static_cast<uint64_t>(static_cast<int64_t>(g_topo_cycles) + g_gid_k);
@@ -11505,15 +11553,19 @@ inline bool kh_rt_own_absent() {
 }
 // Render thread, outside g_draw_list_mutex (taken here). The bindings read; 0 = none; KH_RT_OWN_ARRIVED = the own
 // sample was published before the mutex was ours (read nothing - the paint's repick takes the sample itself). Under
-// the mutex the answer is exact: the sampler cannot publish, and the game thread moves objects on to the next frame
-// only after its Draw3D handler, whose sampler needs this mutex - so a read made while the sample is absent cannot
-// see the next frame's pose.
+// the mutex the answer is exact: the sample is published under it (by the sampler, or - with a chain end followed -
+// with the chain's targets later in the same Draw3D handler, g_gts_done_defer), and the game thread moves objects
+// on to the next frame only after that handler - so a read made while the sample is absent cannot see the next
+// frame's pose.
 static constexpr uint32_t KH_RT_OWN_ARRIVED = ~0u;
+inline void kh_pxy_smooth_note(const game_value& khpn_x, uint64_t khpn_seq, int64_t khpn_q, const float khpn_r[3],
+                               float khpn_d[3]);   // KH_PXY_SMOOTH, defined with the estimator below.
 inline uint32_t kh_rt_paint_read() {
     std::lock_guard<std::mutex> khrp_g(g_draw_list_mutex);
     if (!kh_rt_own_absent()) return KH_RT_OWN_ARRIVED;
     const uint64_t khrp_cyc = g_topo_cycles;
     const uint64_t khrp_seq = static_cast<uint64_t>(static_cast<int64_t>(khrp_cyc) + g_gid_k) | KH_RT_SEQ_BIT;
+    const uint64_t khrp_own = khrp_seq & ~KH_RT_SEQ_BIT;   // KH_PXY_SMOOTH: the frame's own sample number.
     const int64_t khrp_q = kh_gts_qpc();
     uint32_t khrp_n = 0;
     std::vector<float> khrp_a, khrp_b;
@@ -11621,11 +11673,50 @@ inline uint32_t kh_rt_paint_read() {
             for (int k = 0; k < 3; ++k) sn.rot[k] = static_cast<float>(tp[k]);
             kh_crew_mul3(cwr->lq, vc + 3, sn.rot + 3);
         }
+        // KH_PXY_SMOOTH: the memory-point helpers through the estimator, stepped with the frame's own sample number -
+        // once for the frame: the Draw3D sampler, reading the same pose later, is handed this result back. A crew
+        // member's predicted helpers stay raw (the repick's alone).
+        sn.pxd.assign(np * 3u, 0.0f);
+        if (!cw) {
+            for (size_t j = 0; j < np; ++j) {
+                const game_value& x = a.skel ? a.skel_proxy[j] : a.proxy;
+                kh_pxy_smooth_note(x, khrp_own, khrp_q, &sn.px[j * 12u], &sn.pxd[j * 3u]);
+            }
+        }
+        a.rt_crew = cw != nullptr || cwr != nullptr;
         a.rt_cyc = khrp_cyc;
         ++khrp_n;
     }
     if (kh_stats_on()) g_rtp_c.bindings += khrp_n;
+    kh_chain_end_rt_read(khrp_cyc, khrp_own, khrp_q);   // KH_CHAIN_END_DRAW: the followed ends, likewise.
     return khrp_n;
+}
+// Every render-thread step, before kh_attach_step takes g_draw_list_mutex (KH_ATTACH_GT_SNAP: "Own or read" and
+// "Wait"). Once a cycle, the identity offset relearned from the previous cycle. Then, with the frame's own sample not
+// landed, the render thread's read of every binding - at the cycle's first step, and again at its final step
+// (kh_rt_paint_read takes the mutex itself; a sample that lands first makes it read nothing, and the pick takes the
+// sample). At the final step, while a binding or a followed chain end is on a crew member (g_gts_crew_n), the
+// frame's own sample is waited for first.
+inline void kh_gts_step_prep() {
+    const bool khsp_final = g_attach_final_step;
+    if (g_gts_learn_cyc != g_topo_cycles) {
+        g_gts_learn_cyc = g_topo_cycles;
+        kh_gts_id_learn();
+    }
+    uint64_t& khsp_done = khsp_final ? g_gts_final_cyc : g_gts_first_rd_cyc;
+    if (khsp_done == g_topo_cycles) return;
+    khsp_done = g_topo_cycles;
+    if (!kh_rt_own_absent()) return;
+    if (khsp_final && g_gts_crew_n.load(std::memory_order_relaxed) != 0u) {   // KH_CREW_LAG: as before the reads.
+        const uint64_t khsp_want = static_cast<uint64_t>(static_cast<int64_t>(g_topo_cycles) + g_gid_k);
+        const int64_t khsp_until = g_gts_clear_qpc + static_cast<int64_t>(kh_prof_freq()) * KH_GTS_CREW_CAP_MS / 1000;
+        while (g_gts_done_pub.load(std::memory_order_acquire) < khsp_want && kh_gts_qpc() < khsp_until) {
+            std::this_thread::yield();
+        }
+        if (!kh_rt_own_absent()) return;
+    }
+    if (khsp_final && kh_stats_on()) ++g_rtp_c.finals;
+    (void)kh_rt_paint_read();
 }
 // kh_attach_step's tail for a skeletal binding: the draw centre from its root,
 // now the rotation (and the skin's box) is final.
@@ -11714,10 +11805,11 @@ inline void kh_skin_stat_note(uint32_t khsn_gpu, uint32_t khsn_cpu) {
 // Accepted envelope (the user): within one spacing of the engine's reading at any speed, a teleport exact. The
 // output travels as a delta from the reading (KhGtSnap::pxd - at most a spacing, which a float holds finely) to the
 // step, which places the mesh with it in double (KH_POS_RES) and a skeletal binding's bones with it (kh_skin_rel).
-// The estimator runs on the GAME THREAD only - in the sampler (under g_draw_list_mutex) and for a chain's end on a
-// memory point (kh_chain_prepare, on the sampler's sample, or one of its own) - on the pool entry, so every binding and
-// chain end on one memory point moves alike, and it makes no engine call; the render thread's paint read
-// (KH_RT_PAINT_READ) stays raw. An origin helper (no memory point) and a followed object are not estimated: each is
+// The estimator runs in the sampler, for a chain's end on a memory point (kh_chain_prepare, on the sampler's sample,
+// or one of its own) and in the render thread's read (KH_RT_PAINT_READ, with the frame's own sample number, whose
+// result the sampler is handed back) - on the pool entry, so every binding and chain end on one memory point moves
+// alike - always under g_pxy_pool_mu, and it makes no engine call.
+// An origin helper (no memory point) and a followed object are not estimated: each is
 // the point the engine draws its object from, not a rounded offset from it.
 static constexpr double KH_PXY_SMOOTH_RESET = 64.0;     // Spacings one sample may step before the state restarts.
 static constexpr double KH_PXY_SMOOTH_TAU_SLOW = 0.10;  // The tracker's time constant (s), at rest ...
@@ -11812,6 +11904,7 @@ inline void kh_pxy_smooth_note(const game_value& khpn_x, uint64_t khpn_seq, int6
     khpn_d[0] = khpn_d[1] = khpn_d[2] = 0.0f;
     const uintptr_t khpn_b = kh_attach_base_of(khpn_x);
     if (khpn_b == 0) return;
+    std::lock_guard<std::mutex> khpn_l(g_pxy_pool_mu);   // Both threads step (KH_RT_PAINT_READ).
     const auto khpn_it = g_pxy_pool.find(khpn_b);
     if (khpn_it == g_pxy_pool.end() || !khpn_it->second.bone) return;
     kh_pxy_smooth(khpn_it->second, khpn_seq, khpn_q, khpn_r, khpn_d);
@@ -11822,13 +11915,19 @@ inline void kh_pxy_smooth_note(const game_value& khpn_x, uint64_t khpn_seq, int6
 // function's own. Draw3D is the instant the engine's own drawn state is coherent (a Draw3D icon at an object's visual
 // position never falters). A failed PARENT read leaves the binding without a sample this frame (the step draws the
 // ring's, or holds); a failed helper read is carried from the previous sample (KH_GTS_HOLD); a failed read of the
-// rotation lane's own object leaves the rotation holding. g_gts_done_pub is published once every binding is written.
+// rotation lane's own object leaves the rotation holding. g_gts_done_pub is published once every binding is written
+// (with a chain end followed, once that Draw3D's chain targets are filed too: g_gts_done_defer).
 // True when this call took a sample (g_gts_seq names it): kh_chain_prepare's choice (KH_PXY_SMOOTH).
 inline bool kh_attach_gt_snap() {
-    if (g_attach_n.load(std::memory_order_relaxed) == 0) return false;
+    if (!kh_attach_live()) return false;   // KH_CHAIN_END_DRAW: a followed chain end is sampled by number too.
     std::lock_guard<std::mutex> khgt_g(g_draw_list_mutex);
+    if (g_gts_done_defer != 0u) {   // KH_CHAIN_END_DRAW: a deferral a thrown pass never published, first.
+        g_gts_done_pub.store(g_gts_done_defer, std::memory_order_release);
+        g_gts_done_defer = 0u;
+    }
     const uint64_t khgt_seq = ++g_gts_seq;
     const int64_t khgt_q = kh_gts_qpc();
+    uint32_t khgt_crew_n = 0;   // KH_CREW_LAG: bindings placed on a crew member, then chain ends (g_gts_crew_n).
     for (auto& khgt_kv : g_attach) {
         KhAttach& khgt_a = khgt_kv.second;
         // The object the binding is placed relative to, and the helpers it follows. KH_ATTACH_ROT_ONLY: a binding with
@@ -11873,6 +11972,7 @@ inline bool kh_attach_gt_snap() {
         memcpy(khgt_s.par + 3, khgt_r, sizeof(khgt_r));
         // KH_CREW_LAG: a crew member's helpers moved by its correction - the parent where its origin helper is read.
         KhCrewEnt* const khgt_cw = kh_crew_of(khgt_lpar);
+        if (khgt_cw && khgt_cw->in) ++khgt_crew_n;
         if (khgt_cw && khgt_par.data.get() == khgt_cw->helper.data.get()) {
             kh_crew_apply(khgt_cw->t, khgt_cw->h, khgt_cw->dm, khgt_s.par, khgt_s.par + 3);
         }
@@ -11926,6 +12026,7 @@ inline bool kh_attach_gt_snap() {
                 khgt_s.rot_ok = true;
                 // KH_CREW_LAG: a crew member of its own, moved (so turned) as that character is drawn.
                 const KhCrewEnt* const khgt_cr = kh_crew_of(khgt_a.obj_rot);
+                if (khgt_cr && khgt_cr->in && !(khgt_cw && khgt_cw->in)) ++khgt_crew_n;
                 if (khgt_cr && khgt_ro.data.get() == khgt_cr->helper.data.get()) {
                     kh_crew_apply(khgt_cr->t, khgt_cr->h, khgt_cr->dm, khgt_s.rot, khgt_s.rot + 3);
                 }
@@ -11938,8 +12039,14 @@ inline bool kh_attach_gt_snap() {
         khgt_s.ok = true;
         ++khgt_a.gts_w;
     }
+    khgt_crew_n += kh_chain_end_crew_n();   // KH_CREW_LAG: a followed chain end on a crew member waits too.
+    g_gts_crew_n.store(khgt_crew_n, std::memory_order_relaxed);   // KH_CREW_LAG.
     g_gts_stamp_pub[khgt_seq % KH_GTS_STAMPS].store(khgt_q, std::memory_order_relaxed);   // Before the seq names it.
-    g_gts_done_pub.store(khgt_seq, std::memory_order_release);   // Every binding written: kh_gts_wait.
+    if (g_chain_end_n.load(std::memory_order_relaxed) != 0u) {
+        g_gts_done_defer = khgt_seq;   // KH_CHAIN_END_DRAW: published with the chain ends' targets.
+    } else {
+        g_gts_done_pub.store(khgt_seq, std::memory_order_release);   // Every binding written: kh_rt_own_absent.
+    }
     return true;
 }
 
@@ -11954,19 +12061,21 @@ inline bool kh_attach_gt_snap() {
 // the same floats every frame - so a parked vehicle costs the compare and
 // nothing else: no scene mark, no grid move, no record upload.
 // khap_ctx: a render-thread drawer's context (the cast fire's step, the
-// injection's, the render-thread flush's), with which a skeletal binding is
-// skinned from the stash once per cycle; every other step passes none.
-// Every pose comes from the cycle's pick (kh_gts_for_cycle): a Draw3D sample, or - from the cast fire's paint until
-// the final step picks again - the render thread's read standing in for an absent one (KH_RT_PAINT_READ). The step
-// reads no object itself, and a binding with no sample this cycle holds the pose it has.
+// injection's, the render-thread flush's, the footprint seam's and the
+// view-model passes' - KH_SEAM_SKIN), with which a skeletal binding is
+// skinned from the stash once per cycle and sample, a cloth's pinned part
+// re-placed and a chain's end corrected; the park's step passes none.
+// Every pose comes from the cycle's pick (kh_gts_for_cycle): a Draw3D sample, or the render thread's read standing
+// in for an absent one (KH_RT_PAINT_READ: read at the cycle's first step, the cast fire's paint and the final step).
+// The step reads no object itself, and a binding with no sample this cycle holds the pose it has.
 inline void kh_attach_step(ID3D11DeviceContext* khap_ctx = nullptr) {
     KH_PROF_SCOPE(KHP_ATTACH_STEP);   // KH_PROF.
-    if (g_attach_n.load(std::memory_order_relaxed) == 0) return;
+    if (!kh_attach_live()) return;   // KH_CHAIN_END_DRAW: a followed chain end steps with no binding.
     if (reorder_on_render_thread() && g_gts_first_cyc != g_topo_cycles) {   // KH_CAST_REPICK: the cycle's first step.
         g_gts_first_cyc = g_topo_cycles;
         g_gts_first_done = g_gts_done_pub.load(std::memory_order_acquire);
     }
-    if (reorder_on_render_thread() && g_attach_final_step) kh_gts_wait();   // Before the mutex the sampler needs.
+    if (reorder_on_render_thread()) kh_gts_step_prep();   // Before the mutex (the read takes it).
     std::lock_guard<std::mutex> khap_g(g_draw_list_mutex);
     static std::vector<KhSkinDrawJob> khap_jobs;   // Under g_draw_list_mutex (steps never overlap).
     khap_jobs.clear();
@@ -12114,7 +12223,10 @@ inline void kh_attach_step(ID3D11DeviceContext* khap_ctx = nullptr) {
         if (!khap_defer) kh_attach_moved_note(khap_o, khap_moved, khap_rt);
         if (khap_rt) khap_a.smp_cycle = g_topo_cycles;   // KH_ATTACH_CYCLE.
     }
-    if (khap_jobs.empty()) return;
+    if (khap_jobs.empty()) {
+        kh_chain_end_draw(khap_ctx);   // KH_CHAIN_END_DRAW: after every binding is placed.
+        return;
+    }
     // KH_SKIN_GPU: the bindings the GPU can skin are skinned there (so_vb set,
     // their bound in bc / bs); the pool takes what is left - none, once the
     // stream-output objects and the bindings' buffers exist.
@@ -12150,6 +12262,7 @@ inline void kh_attach_step(ID3D11DeviceContext* khap_ctx = nullptr) {
         kh_attach_moved_note(*khap_j.o, khap_j.moved, khap_j.rt);
     }
     khap_jobs.clear();
+    kh_chain_end_draw(khap_ctx);   // KH_CHAIN_END_DRAW: after every binding is placed and skinned.
 }
 
 // Handles are opaque strings from the framework's UID generator, prefixed "khr_";
@@ -13931,6 +14044,44 @@ struct KhClothInst {
     // re-placed the bound part and wrote vb; the upload leaves that cycle's
     // bytes, key and box standing.
     uint64_t pin_step_cycle = ~0ull;
+    uint32_t pin_front = 0;   // KH_CHAIN_END_DRAW: the out[] buffer that step placed (its pin_mat's).
+    // KH_CHAIN_END_DRAW - per out[] buffer, written by the writeback before front's release like box_*: the end's
+    // position and rotation targets the job held, carrier-local (false: that lane had none). end_mat / end_out /
+    // end_met: kh_chain_end_draw's scratch; end_shape_ref / end_shape_key: the shape that took the key of the bytes
+    // it writes (KH_CLOTH_SHAPE's rule, kh_cloth_step_shape). Render thread, under g_cloth_mu.
+    bool  end_job_p[2] = { false, false };
+    bool  end_job_r[2] = { false, false };
+    float end_job_x[2][3] = {};
+    float end_job_q[2][4] = {};
+    std::vector<float>      end_mat;
+    std::vector<MeshVertex> end_out;
+    std::vector<float>      end_met;
+    std::vector<float>      end_shape_ref;
+    uint32_t                end_shape_key = 0u;
+    // The same targets in the world (engine axes; a rotation as its quaternion), for an end fixed there: its frame
+    // target is where the job held it (KH_CHE_WORLD, KH_CHE_HOLD). end_anc: kh_chain_end_fix's scratch.
+    double end_job_w[2][3] = {};
+    float  end_job_wq[2][4] = {};
+    std::vector<int32_t>    end_anc;
+    // KH_CHAIN_END_DRAW (C3) - vb_wr counts every write of vb (kh_cloth_upload, kh_cloth_pin_draw_step,
+    // kh_chain_end_draw); the draw's last write: vb_wr then (end_wr), the buffer, front and generation, the bone
+    // maps it skinned and the front's box - equal again, with no write between, the bytes would be the same, and
+    // the draw keeps them (end_be: the box they were stored in). Render thread, under g_cloth_mu.
+    uint32_t                vb_wr = 0u;
+    uint32_t                end_wr = 0u;
+    bool                    end_wr_ok = false;
+    ID3D11Buffer*           end_vb = nullptr;
+    uint32_t                end_f = 0u, end_gen = 0u;
+    std::vector<float>      end_mat_last;
+    float                   end_box[6] = {};
+    float                   end_be[3] = {};
+    // KH_CLOTH_STEP_SHAPE - pin_g: the guide kh_cloth_pin_place last re-placed a chain from (kh_chain_end_draw reads
+    // the pin step's: an end held on a bone). pin_met: kh_cloth_pin_seal's scratch; pin_shape_ref / pin_shape_key: the
+    // shape that took the key of the re-placement's bytes. Under g_cloth_mu (render thread, or a park).
+    std::vector<float>      pin_g;
+    std::vector<float>      pin_met;
+    std::vector<float>      pin_shape_ref;
+    uint32_t                pin_shape_key = 0u;
     // KH_CLOTH_PIN_GRADE - out_guide[b]: the guide the job solved out[b]
     // against (its in_guide, copied with out[b]). The re-placement above was
     // binary - a hard pin took this frame's bones, a particle painted 2 % sim
@@ -15124,6 +15275,30 @@ inline void kh_chain_writeback(KhClothInst& khcw_in, uint32_t khcw_back) {
         memcpy(&mat[bi * 12u + 9u], t, sizeof(t));
     }
     khcw_in.ch_mat[khcw_back] = mat;   // KH_CLOTH_PIN_FRESH: the park re-skins the guide's bones from these.
+    // KH_CHAIN_END_DRAW: the end's targets this step held, carrier-local as the bones, and in the world - a held end
+    // (KH_CHE_HOLD) as kh_chain_step holds it: where it first stood, once that was captured.
+    const bool khcw_hp = khcw_in.in_tg.pos_hold && c.hold_on;
+    const bool khcw_hr = khcw_in.in_tg.rot_hold && c.hold_on;
+    khcw_in.end_job_p[khcw_back] = khcw_in.in_tg.pos == 2u || khcw_hp;
+    if (khcw_in.end_job_p[khcw_back]) {
+        const float* const khcw_tp = khcw_hp ? c.hold_p : khcw_in.in_tg.p;
+        float d[3];
+        kh_cloth_v3_sub(khcw_tp, s.centre, d);
+        kh_q_rot(qfc, d, khcw_in.end_job_x[khcw_back]);
+        for (int k = 0; k < 3; ++k) {
+            khcw_in.end_job_w[khcw_back][k] = khcw_in.org[k] + static_cast<double>(khcw_tp[k]);
+        }
+    }
+    khcw_in.end_job_r[khcw_back] = khcw_in.in_tg.rot == 2u || khcw_hr;
+    if (khcw_in.end_job_r[khcw_back]) {
+        float qt[4];
+        if (khcw_hr) memcpy(qt, c.hold_q, sizeof(qt));
+        else kh_q_from_axes(khcw_in.in_tg.r, qt);
+        kh_q_norm(qt);
+        memcpy(khcw_in.end_job_wq[khcw_back], qt, sizeof(qt));
+        kh_q_mul(qfc, qt, khcw_in.end_job_q[khcw_back]);
+        kh_q_norm(khcw_in.end_job_q[khcw_back]);
+    }
     const std::vector<MeshVertex>& rest = khcw_in.rest;
     const size_t nv = rest.size();
     std::vector<MeshVertex>& out = khcw_in.out[khcw_back];
@@ -15525,6 +15700,35 @@ inline void kh_cloth_engine_size(const RenderObject& khce_o, float* khce_out) {
     khce_out[0] = khce_o.size[0]; khce_out[1] = khce_o.size[2]; khce_out[2] = khce_o.size[1];
 }
 
+// The carrier's centre in the world (engine axes): khca_wc the world float, khca_wd exact (KH_POS_RES) - the frame
+// the write-back makes a chain's or cloth's vertices relative to. A skeletal object stands at root + skel_ctr * rot
+// (kh_skel_centre); the rest box's centre is the authored native_ctr, at root + native_ctr * rot. kh_cloth_sync
+// builds its instance's frame from it, and kh_chain_end_draw the frame a chain is drawn in (KH_CHAIN_END_DRAW).
+inline void kh_cloth_carrier_at(const RenderObject& khca_o, const float khca_nc[3], float khca_wc[3],
+                                double khca_wd[3]) {
+    kh_cloth_engine_pos(khca_o, khca_wc);
+    {
+        float khca_wr[3];
+        kh_pos_res(khca_o, khca_wr);
+        for (int k = 0; k < 3; ++k) khca_wd[k] = static_cast<double>(khca_wc[k]) + static_cast<double>(khca_wr[k]);
+    }
+    if (!khca_o.skel) return;
+    float khca_d[3];
+    for (int k = 0; k < 3; ++k) khca_d[k] = khca_nc[k] - khca_o.skel_ctr[k];
+    if (khca_o.rotated) {
+        for (int k = 0; k < 3; ++k) {
+            const float khca_a = khca_d[0] * khca_o.rot_m[k] + khca_d[1] * khca_o.rot_m[3 + k] +
+                                 khca_d[2] * khca_o.rot_m[6 + k];
+            khca_wc[k] += khca_a;
+            khca_wd[k] += static_cast<double>(khca_a);
+        }
+    } else {
+        for (int k = 0; k < 3; ++k) {
+            khca_wc[k] += khca_d[k];
+            khca_wd[k] += static_cast<double>(khca_d[k]);
+        }
+    }
+}
 inline bool kh_cloth_obj_sim(const RenderObject& khco_o) {
     return khco_o.cloth_sim && !khco_o.fullscreen && khco_o.mesh >= 0;
 }
@@ -15613,6 +15817,159 @@ struct KhChainCfg {
     float  live_rot[9] = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f };
 };
 static std::unordered_map<std::string, KhChainCfg> g_chain_cfg;
+// KH_CHAIN_END_DRAW - a chain's end that follows an object or a memory point is a physics target: the job holds
+// the end where the Draw3D it was fed from put it, and on a terrain whose Draw3D lands after the frame's injection
+// that is one frame older than the pose the frame draws. So each render-thread step with a device context re-places
+// the end where THIS frame puts it (kh_chain_end_draw): the frame's own Draw3D targets by sample number (the ring,
+// published by kh_chain_prepare), else the render thread's read of them (kh_chain_end_rt_read, KH_RT_PAINT_READ).
+// An end fixed in the world (a world endPosition / endRotation, or one held where it first stood) is the same
+// target every frame, but the job placed it in the frame the carrier had then, and the chain draws in the frame
+// the carrier has now: the draw re-places it where the job held it, in the world. An end held on the bound
+// skeleton's bone (true, on a skeletal binding) moves with the skeleton: the draw re-places it where the pin step's
+// guide puts that bone, against where the job's guide did (kh_chain_end_bone). On any other object the bone's
+// place is fixed on the carrier, and nothing is corrected.
+// The end body and everything hanging past it take the whole correction (turned about the held point), the links
+// between the start and the end a share growing along the chain - the target's motion since the Draw3D the job was
+// fed from: a frame's when a job lands every frame, more while the job is still busy with an earlier one. Both
+// targets are taken as the solver holds them, within the chain's reach of its start (kh_chain_end_taut). What is
+// written is stored in the front's box grown to hold it (the object's bounds) and keyed by its own shape
+// (kh_chain_end_store, kh_cloth_step_shape): the front's key would tell the caching passes nothing changed.
+// A crew member's end keeps the Draw3D's measurement alone (KH_CREW_LAG): the render thread does not read it, and
+// the final step waits for the frame's own sample (kh_chain_end_on_crew), as for a crew binding.
+struct KhChainEndSmp {
+    uint64_t seq = 0;                  // The Draw3D sample number (a chain's own number never matches a cycle).
+    bool     p_ok = false, r_ok = false;
+    double   p[3] = {};                // World, engine axes (KhChainCfg::live_pos).
+    float    r[9] = {};                // Engine axes (KhChainCfg::live_rot).
+};
+struct KhChainEnd {
+    uint64_t   seq = 0;                // The object (RenderObject::seq).
+    uint8_t    pos_k = KH_CHE_FREE, rot_k = KH_CHE_FREE;
+    game_value pos_obj, proxy, rot_obj;   // Game thread's (KhChainCfg's), read by the render thread under the mutex.
+    KhChainEndSmp smp[KH_GTS_N];
+    uint32_t   smp_w = 0;
+    // Render thread: its own page caches and its read for cycle rt_cyc.
+    KhChainRead rt_rd_p, rt_rd_r;
+    uint64_t   rt_cyc = ~0ull;
+    KhChainEndSmp rt;
+};
+static std::unordered_map<std::string, KhChainEnd>& g_chain_end = *(new std::unordered_map<std::string, KhChainEnd>());
+inline bool kh_chain_end_followed(uint8_t khef_k) { return khef_k == KH_CHE_OBJ || khef_k == KH_CHE_MEM; }
+inline bool kh_chain_end_fixed(uint8_t khef_k) { return khef_k == KH_CHE_WORLD || khef_k == KH_CHE_HOLD; }
+inline bool kh_chain_end_drawn(uint8_t khef_k) { return kh_chain_end_followed(khef_k) || kh_chain_end_fixed(khef_k); }
+// Does a chain file in the table: a lane followed or fixed in the world, or held on the bone of a skeletal object's
+// skeleton. Under g_draw_list_mutex (the object's kind is the draw list's).
+inline bool kh_chain_end_filed(const KhChainCfg& khef_c, const std::string& khef_h) {
+    if (kh_chain_end_drawn(khef_c.pos) || kh_chain_end_drawn(khef_c.rot)) return true;
+    if (khef_c.pos != KH_CHE_BONE && khef_c.rot != KH_CHE_BONE) return false;
+    const auto khef_d = g_draw_list.find(khef_h);
+    return khef_d != g_draw_list.end() && khef_d->second.seq == khef_c.seq && khef_d->second.skel;
+}
+// Game thread, at the end of kh_chain_prepare (khep_seq: that pass's sample number): every chain with a followed
+// lane files this Draw3D's targets (a lane fixed in the world or held on a bone files nothing: the job and the pin
+// step record those); a chain with none of them leaves the table.
+inline void kh_chain_end_publish(uint64_t khep_seq) {
+    std::lock_guard<std::mutex> khep_g(g_draw_list_mutex);
+    for (auto khep_it = g_chain_end.begin(); khep_it != g_chain_end.end();) {
+        const auto khep_c = g_chain_cfg.find(khep_it->first);
+        if (khep_c == g_chain_cfg.end() || khep_c->second.seq != khep_it->second.seq ||
+            !(kh_chain_end_filed(khep_c->second, khep_it->first))) {
+            khep_it = g_chain_end.erase(khep_it);
+        } else {
+            ++khep_it;
+        }
+    }
+    for (auto& khep_kv : g_chain_cfg) {
+        const KhChainCfg& c = khep_kv.second;
+        if (!kh_chain_end_filed(c, khep_kv.first)) continue;
+        KhChainEnd& e = g_chain_end[khep_kv.first];
+        if (e.seq != c.seq || e.pos_k != c.pos || e.rot_k != c.rot || e.pos_obj.data.get() != c.pos_obj.data.get() ||
+            e.proxy.data.get() != c.proxy.data.get() || e.rot_obj.data.get() != c.rot_obj.data.get()) {
+            e = KhChainEnd();   // A new object or new lanes: nothing earlier describes them.
+            e.seq = c.seq;
+            e.pos_k = c.pos;
+            e.rot_k = c.rot;
+            e.pos_obj = c.pos_obj;
+            e.proxy = c.proxy;
+            e.rot_obj = c.rot_obj;
+        }
+        KhChainEndSmp& s = e.smp[e.smp_w++ % KH_GTS_N];
+        s.seq = khep_seq;
+        s.p_ok = kh_chain_end_followed(c.pos) && c.live_p;
+        s.r_ok = kh_chain_end_followed(c.rot) && c.live_r;
+        memcpy(s.p, c.live_pos, sizeof(s.p));
+        memcpy(s.r, c.live_rot, sizeof(s.r));
+    }
+    g_chain_end_n.store(static_cast<uint32_t>(g_chain_end.size()), std::memory_order_relaxed);
+    if (g_gts_done_defer != 0u) {   // The sample and its chain targets together (g_gts_done_defer).
+        g_gts_done_pub.store(g_gts_done_defer, std::memory_order_release);
+        g_gts_done_defer = 0u;
+    }
+}
+// KH_CREW_LAG - a chain end on a crew member: its position lane's object (or memory point's owner) or its own
+// rotation object riding in a vehicle. The render thread does not read it (its drawn pose is the Draw3D's
+// measurement, not a read of its state); kh_chain_end_crew_n counts it for g_gts_crew_n, so the final step waits
+// for the frame's own sample as it does for a crew binding. Under g_draw_list_mutex (either thread).
+inline bool kh_chain_end_on_crew(const KhChainEnd& khecr_e) {
+    const KhCrewEnt* const khecr_c1 = kh_crew_of(khecr_e.pos_obj);
+    const KhCrewEnt* const khecr_c2 = khecr_e.rot_k == KH_CHE_OBJ ? kh_crew_of(khecr_e.rot_obj) : nullptr;
+    return (khecr_c1 && khecr_c1->in) || (khecr_c2 && khecr_c2->in);
+}
+// KH_CREW_LAG - the chain ends with a followed lane kh_chain_end_on_crew holds on a crew member (the Draw3D sampler,
+// game thread, under g_draw_list_mutex; the table as the last kh_chain_end_publish left it).
+inline uint32_t kh_chain_end_crew_n() {
+    uint32_t khecn_n = 0;
+    for (const auto& khecn_kv : g_chain_end) {
+        const KhChainEnd& khecn_e = khecn_kv.second;
+        if ((kh_chain_end_followed(khecn_e.pos_k) || kh_chain_end_followed(khecn_e.rot_k)) &&
+            kh_chain_end_on_crew(khecn_e)) ++khecn_n;
+    }
+    return khecn_n;
+}
+// Render thread, from kh_rt_paint_read (under g_draw_list_mutex, the frame's own sample absent): each followed end
+// read as kh_chain_prepare reads it - twice, taken only if both passes agree bit for bit - a memory point through
+// the estimator with the frame's own number. A lane the newest Draw3D could not place and a dead object are not
+// read (the draw then keeps what the job held); nor is a crew member's end (kh_chain_end_on_crew: the final step
+// waits for its own sample instead).
+inline void kh_chain_end_rt_read(uint64_t khcr_cyc, uint64_t khcr_own, int64_t khcr_q) {
+    for (auto& khcr_kv : g_chain_end) {
+        KhChainEnd& e = khcr_kv.second;
+        const KhChainEndSmp* khcr_n = nullptr;
+        for (const KhChainEndSmp& khcr_s : e.smp) {
+            if (khcr_s.seq != 0u && (!khcr_n || khcr_s.seq > khcr_n->seq)) khcr_n = &khcr_s;
+        }
+        if (!khcr_n) continue;
+        const bool khcr_wp = kh_chain_end_followed(e.pos_k) && khcr_n->p_ok;
+        const bool khcr_wr = kh_chain_end_followed(e.rot_k) && khcr_n->r_ok;
+        if (!khcr_wp && !khcr_wr) continue;
+        const game_value& khcr_px = e.pos_k == KH_CHE_MEM ? e.proxy : e.pos_obj;
+        const game_value& khcr_rx = e.rot_k == KH_CHE_MEM ? e.proxy : e.rot_obj;
+        if (kh_chain_end_on_crew(e)) continue;   // KH_CREW_LAG: the final step waits for its own sample.
+        if ((khcr_wp && kh_attach_obj_dead(khcr_px)) || (khcr_wr && kh_attach_obj_dead(khcr_rx))) continue;
+        float khcr_a[24] = {}, khcr_b[24] = {};   // Position lane: p, r; rotation lane: p, r.
+        auto khcr_read = [&](float* o) -> bool {
+            if (khcr_wp && !kh_attach_raw(khcr_px, e.rt_rd_p.off, e.rt_rd_p.vb, e.rt_rd_p.bb, e.rt_rd_p.avb,
+                                          e.rt_rd_p.abb, o, o + 3)) return false;
+            if (khcr_wr && !kh_attach_raw(khcr_rx, e.rt_rd_r.off, e.rt_rd_r.vb, e.rt_rd_r.bb, e.rt_rd_r.avb,
+                                          e.rt_rd_r.abb, o + 12, o + 15)) return false;
+            return true;
+        };
+        if (!khcr_read(khcr_a) || !khcr_read(khcr_b) || memcmp(khcr_a, khcr_b, sizeof(khcr_a)) != 0) continue;
+        KhChainEndSmp& r = e.rt;
+        r.seq = khcr_own;
+        r.p_ok = khcr_wp;
+        r.r_ok = khcr_wr;
+        if (khcr_wp) {
+            float khcr_sd[3] = { 0.0f, 0.0f, 0.0f };
+            if (e.pos_k == KH_CHE_MEM) kh_pxy_smooth_note(e.proxy, khcr_own, khcr_q, khcr_a, khcr_sd);
+            r.p[0] = static_cast<double>(khcr_a[0]) + static_cast<double>(khcr_sd[0]);   // SQF order -> engine axes.
+            r.p[1] = static_cast<double>(khcr_a[2]) + static_cast<double>(khcr_sd[2]);
+            r.p[2] = static_cast<double>(khcr_a[1]) + static_cast<double>(khcr_sd[1]);
+        }
+        if (khcr_wr) memcpy(r.r, khcr_a + 15, sizeof(r.r));
+        e.rt_cyc = khcr_cyc;
+    }
+}
 // The parallel of g_cloth_objs: each copied object's handle, for the chain's
 // settings (kh_cloth_sync).
 static std::vector<std::string> g_cloth_objs_h;
@@ -16007,7 +16364,9 @@ inline void kh_cloth_wind_sample() {
 // cell are measured apart, so a checkerboard or row-alternating split is
 // found as well as a uniform one. A class that answers neither way falls back
 // to a smooth (bilinear) fit and says so once. Game thread only; the workers
-// see only each cloth's own copy of the nodes under it.
+// see only each cloth's own copy of the nodes under it. The heightfield our
+// meshes are clipped against takes the same split (KH_THM_EXACT:
+// kh_thm_autobuild_step measures it here too, with or without a cloth).
 static bool     g_ground_ready = false;              // A matrix and its split are known.
 static bool     g_ground_tried = false;              // Measured for the matrix below, successfully or not.
 static float    g_ground_cell = 0.0f;                // The matrix measured: its spacing...
@@ -16092,8 +16451,8 @@ inline void kh_cloth_ground_prepare() {
     }
     if (khgp_smooth) {
         report_error_once_safe("KH cloth ground: the terrain's triangle split was not recognised (grid " +
-                               std::to_string(khgp_c) + " m) - cloth lands on a smooth fit of the terrain, "
-                               "within a few centimetres of it");
+                               std::to_string(khgp_c) + " m) - cloth lands, and meshes are clipped, on a smooth "
+                               "fit of the terrain, which departs from it on uneven ground");
     }
     g_ground_ready = true;
 }
@@ -16596,37 +16955,12 @@ inline void kh_cloth_sync(float khcs_dt, bool khcs_wanted) {
         // The carrier in the world, then in the instance's own frame. A fresh
         // instance takes its origin where it stands; the first step places it
         // from rest whatever the origin was.
+        // KH_POS_RES: the same centre exact - the object's residual and the offset in double - for the frame the
+        // write-back makes the vertices relative to (the draw adds the residual back; khcs_wc, a world float, serves
+        // the broadphase, the ground patch and the simulation level).
         float khcs_wc[3];
-        kh_cloth_engine_pos(khcs_o, khcs_wc);
-        // KH_POS_RES: the same centre exact - the object's residual and the offset below in double - for the frame
-        // the write-back makes the vertices relative to (the draw adds the residual back; khcs_wc, a world float,
-        // serves the broadphase, the ground patch and the simulation level).
         double khcs_wd[3];
-        {
-            float khcs_wr[3];
-            kh_pos_res(khcs_o, khcs_wr);
-            for (int k = 0; k < 3; ++k) khcs_wd[k] = static_cast<double>(khcs_wc[k]) + static_cast<double>(khcs_wr[k]);
-        }
-        if (khcs_o.skel) {
-            // KH_SKEL: the object stands at root + skel_ctr * rot
-            // (kh_skel_centre); the rest box's centre is the authored
-            // native_ctr, at root + native_ctr * rot.
-            float khcs_d[3];
-            for (int k = 0; k < 3; ++k) khcs_d[k] = khcs_md.native_ctr[k] - khcs_o.skel_ctr[k];
-            if (khcs_o.rotated) {
-                for (int k = 0; k < 3; ++k) {
-                    const float khcs_a = khcs_d[0] * khcs_o.rot_m[k] + khcs_d[1] * khcs_o.rot_m[3 + k] +
-                                         khcs_d[2] * khcs_o.rot_m[6 + k];
-                    khcs_wc[k] += khcs_a;
-                    khcs_wd[k] += static_cast<double>(khcs_a);
-                }
-            } else {
-                for (int k = 0; k < 3; ++k) {
-                    khcs_wc[k] += khcs_d[k];
-                    khcs_wd[k] += static_cast<double>(khcs_d[k]);
-                }
-            }
-        }
+        kh_cloth_carrier_at(khcs_o, khcs_md.native_ctr, khcs_wc, khcs_wd);
         {
             double khcs_od[3];
             for (int k = 0; k < 3; ++k) khcs_od[k] = khcs_wd[k] - khcs_in->org[k];
@@ -16832,8 +17166,9 @@ inline void kh_cloth_stats_publish(uint64_t khsp_inst, uint64_t khsp_ch_inst, ui
 // KH_CLOTH_PIN_FRESH: the front buffer with the guide-bound part re-placed from
 // this frame's guide into pin_out, in the front's frame - the cloth's hard pins
 // (w == 0) exactly, its pin/sim gradient in proportion (KH_CLOTH_PIN_GRADE,
-// KhClothInst::out_guide), or a chain mesh re-skinned with fresh kinematic and
-// guide-mapped bone maps and the job's dynamic ones. False when there is
+// KhClothInst::out_guide), or a chain mesh re-skinned (positions, normals and
+// tangents) with fresh kinematic and guide-mapped bone maps and the job's
+// dynamic ones. False when there is
 // nothing to re-place (the front uploads as is). Under g_cloth_mu, from
 // kh_cloth_upload and kh_cloth_pin_draw_step; reads only what the job does not
 // write past the build (a particle's w and att among it), plus out / box_* /
@@ -16852,6 +17187,7 @@ inline bool kh_cloth_pin_place(KhClothInst& khpf_in, uint32_t khpf_f, const floa
         const std::vector<float>& khpf_jm = khpf_in.ch_mat[khpf_f];
         if (khpf_nbone == 0u || khpf_nb != khpf_nbone || khpf_jm.size() != khpf_nbone * 12u || !khpf_in.box_on[khpf_f]) return false;
         khpf_in.pin_mat = khpf_jm;
+        khpf_in.pin_g.assign(khpf_g, khpf_g + khpf_nb * 12u);   // KH_CHAIN_END_DRAW: an end held on a bone.
         bool khpf_any = false;
         for (size_t bi = 0; bi < khpf_nbone; ++bi) {
             const int32_t bd = c.body_of[bi];
@@ -16873,7 +17209,20 @@ inline bool kh_cloth_pin_place(KhClothInst& khpf_in, uint32_t khpf_f, const floa
         for (size_t i = 0; i < khpf_nv; ++i) {
             float pp[3], nn[3], tt[3];
             kh_chain_skin_vert(khpf_in.rest[i], c.ext, inf ? &c.inf[i] : nullptr, khpf_in.pin_mat.data(), khpf_nbone, pp, nn, tt);
-            for (int k = 0; k < 3; ++k) khpf_in.pin_out[i].pos[k] = (pp[k] - (khpf_bc[k] - c.auth_ctr[k])) / khpf_be[k];
+            // Position, normal and tangent from the same maps, stored as the writeback stores them (a re-placed
+            // bone's surface turns with it).
+            MeshVertex& o = khpf_in.pin_out[i];
+            float n[3], tn[3];
+            for (int k = 0; k < 3; ++k) {
+                o.pos[k] = (pp[k] - (khpf_bc[k] - c.auth_ctr[k])) / khpf_be[k];
+                n[k] = nn[k] * khpf_be[k];
+                tn[k] = tt[k] / khpf_be[k];
+            }
+            const float nl = kh_cloth_v3_len(n), tl = kh_cloth_v3_len(tn);
+            for (int k = 0; k < 3; ++k) {
+                o.nrm[k] = nl > 1.0e-30f ? n[k] / nl : khpf_in.rest[i].nrm[k];
+                o.tan[k] = tl > 1.0e-30f ? tn[k] / tl : khpf_in.rest[i].tan[k];
+            }
         }
         return true;
     }
@@ -16921,6 +17270,79 @@ inline bool kh_cloth_pin_place(KhClothInst& khpf_in, uint32_t khpf_f, const floa
         memcpy(khpf_in.pin_out[i].pos, g, sizeof(g));
     }
     return khpf_any;
+}
+// KH_CLOTH_STEP_SHAPE - the key of bytes a consume-point writer made from a front rather than the front itself
+// (kh_cloth_pin_seal: the pin re-placement; kh_chain_end_draw: the chain end's correction), by KH_CLOTH_SHAPE's rule
+// on metric positions, as kh_chain_writeback keys a front: a new key from the process-wide serial when some vertex
+// has left the shape that took khck_key by more than KH_CLOTH_SHAPE_M on any axis, else khck_key again. Under the
+// front's key the caching passes (the footprint seam, the sun ladder, the point-light maps) would keep what the
+// writer moved where the job left it while the job's front stands.
+inline uint32_t kh_cloth_step_shape(std::vector<float>& khck_ref, uint32_t& khck_key,
+                                    const std::vector<float>& khck_met) {
+    bool khck_moved = khck_key == 0u || khck_ref.size() != khck_met.size();
+    for (size_t i = 0; i < khck_met.size() && !khck_moved; ++i) {
+        if (!(fabsf(khck_met[i] - khck_ref[i]) <= KH_CLOTH_SHAPE_M)) khck_moved = true;
+    }
+    if (khck_moved) {
+        khck_ref = khck_met;
+        uint32_t k = g_cloth_shape_serial.fetch_add(1u, std::memory_order_relaxed) + 1u;
+        if (k == 0u) k = g_cloth_shape_serial.fetch_add(1u, std::memory_order_relaxed) + 1u;
+        khck_key = k;
+    }
+    return khck_key;
+}
+// KH_CLOTH_STEP_SHAPE - pin_out (kh_cloth_pin_place's re-placement of front khps_f) sealed as the bytes it is: in
+// the smallest box centred on the front's that holds its level-0 vertices and is never smaller than the front's
+// (the re-placed part can leave the front's box, and the object's bounds are the box of its bytes) - positions,
+// normals and tangents re-expressed in it when it grew, under KhVsCore's convention - and under its own key
+// (kh_cloth_step_shape). Level 0 is the front's own box rule: a chain's lvl0, a cloth's particles. A front with no
+// box keeps the front's box and key. Hands back the key; khps_be: the box the bytes are in. Under g_cloth_mu.
+inline uint32_t kh_cloth_pin_seal(KhClothInst& khps_in, uint32_t khps_f, float khps_be[3]) {
+    const float* const khps_bf = khps_in.box_size[khps_f];
+    memcpy(khps_be, khps_bf, sizeof(float) * 3u);
+    if (!khps_in.box_on[khps_f]) return khps_in.shape_of[khps_f];
+    std::vector<MeshVertex>& khps_v = khps_in.pin_out;
+    const size_t khps_nv = khps_v.size();
+    float khps_bc[3];   // The box's centre, carrier-local (the writeback's metric frame).
+    for (int k = 0; k < 3; ++k) khps_bc[k] = khps_in.box_ctr[khps_f][k] - khps_in.auth_ctr[k];
+    const std::vector<uint8_t>& khps_lv = khps_in.ch.lvl0;
+    const size_t khps_np = khps_in.st.part.size();
+    float khps_r[3] = { 0.0f, 0.0f, 0.0f };   // The farthest level-0 vertex from the centre, per axis.
+    for (size_t i = 0; i < khps_nv; ++i) {
+        const bool khps_l0 = khps_in.chain ? (khps_lv.size() != khps_nv || khps_lv[i] != 0u)
+                                           : (i < khps_in.vmap.size() && khps_in.vmap[i] < khps_np);
+        if (!khps_l0) continue;
+        for (int k = 0; k < 3; ++k) {
+            const float d = fabsf(khps_v[i].pos[k]) * khps_bf[k];
+            if (d > khps_r[k]) khps_r[k] = d;
+        }
+    }
+    bool khps_grew = false;
+    for (int k = 0; k < 3; ++k) {
+        if (2.0f * khps_r[k] > khps_bf[k]) { khps_be[k] = 2.0f * khps_r[k]; khps_grew = true; }
+    }
+    if (khps_grew) {
+        for (size_t i = 0; i < khps_nv; ++i) {
+            MeshVertex& o = khps_v[i];
+            float n[3], tn[3];
+            for (int k = 0; k < 3; ++k) {
+                o.pos[k] = o.pos[k] * khps_bf[k] / khps_be[k];
+                n[k] = o.nrm[k] * (khps_be[k] / khps_bf[k]);
+                tn[k] = o.tan[k] * (khps_bf[k] / khps_be[k]);
+            }
+            const float nl = kh_cloth_v3_len(n), tl = kh_cloth_v3_len(tn);
+            for (int k = 0; k < 3; ++k) {
+                if (nl > 1.0e-30f) o.nrm[k] = n[k] / nl;
+                if (tl > 1.0e-30f) o.tan[k] = tn[k] / tl;
+            }
+        }
+    }
+    std::vector<float>& khps_met = khps_in.pin_met;
+    khps_met.resize(khps_nv * 3u);
+    for (size_t i = 0; i < khps_nv; ++i) {
+        for (int k = 0; k < 3; ++k) khps_met[i * 3u + k] = khps_v[i].pos[k] * khps_be[k] + khps_bc[k];
+    }
+    return kh_cloth_step_shape(khps_in.pin_shape_ref, khps_in.pin_shape_key, khps_met);
 }
 inline bool kh_cloth_pin_fresh(KhClothInst& khpf_in, uint32_t khpf_f) {
     if (!kh_skin_guide_of(khpf_in.seq, khpf_in.mesh, khpf_in.pin_guide)) return false;
@@ -16988,6 +17410,11 @@ inline void kh_cloth_upload(ID3D11DeviceContext* khcu_ctx, ID3D11Device* khcu_de
         const bool khcu_stepped = khcu_in.pin_step_cycle == g_topo_cycles;
         const bool khcu_fresh = !khcu_stepped && kh_cloth_pin_fresh(khcu_in, khcu_f & 1u);
         if (!khcu_stepped && (khcu_gen != khcu_in.uploaded_gen || khcu_fresh)) {
+            // KH_CLOTH_STEP_SHAPE: a re-placement goes out in its own box, under its own key; the front, the front's.
+            float khcu_be[3];
+            memcpy(khcu_be, khcu_in.box_size[khcu_f & 1u], sizeof(khcu_be));
+            const uint32_t khcu_key = khcu_fresh ? kh_cloth_pin_seal(khcu_in, khcu_f & 1u, khcu_be)
+                                                 : khcu_in.shape_of[khcu_f & 1u];
             const std::vector<MeshVertex>& khcu_src = khcu_fresh ? khcu_in.pin_out : khcu_in.out[khcu_f & 1u];
             D3D11_MAPPED_SUBRESOURCE khcu_m = {};
             if (SUCCEEDED(khcu_ctx->Map(khcu_in.vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &khcu_m)) && khcu_m.pData) {
@@ -16997,12 +17424,13 @@ inline void kh_cloth_upload(ID3D11DeviceContext* khcu_ctx, ID3D11Device* khcu_de
                 memcpy(khcu_m.pData, khcu_src.data(), khcu_src.size() * sizeof(MeshVertex));
                 khcu_ctx->Unmap(khcu_in.vb, 0);
                 kh_uvs_src_wrote(khcu_in.slot);   // KH_USER_VS: a vertex stage over this buffer evaluates again.
+                ++khcu_in.vb_wr;   // KH_CHAIN_END_DRAW (C3).
                 khcu_in.uploaded_gen = khcu_gen;
-                khcu_in.uploaded_shape = khcu_in.shape_of[khcu_f & 1u];   // KH_CLOTH_SHAPE: out[f]'s.
+                khcu_in.uploaded_shape = khcu_key;   // KH_CLOTH_SHAPE: the bytes' (out[f]'s, or the re-placement's).
                 // KH_SKEL: and its box, which kh_skin_upload hands the object.
                 khcu_in.uploaded_box_on = khcu_in.box_on[khcu_f & 1u];
                 memcpy(khcu_in.uploaded_box_ctr, khcu_in.box_ctr[khcu_f & 1u], sizeof(khcu_in.uploaded_box_ctr));
-                memcpy(khcu_in.uploaded_box_size, khcu_in.box_size[khcu_f & 1u], sizeof(khcu_in.uploaded_box_size));
+                memcpy(khcu_in.uploaded_box_size, khcu_be, sizeof(khcu_in.uploaded_box_size));
                 memcpy(khcu_in.uploaded_cast_size, khcu_in.cast_size[khcu_f & 1u], sizeof(khcu_in.uploaded_cast_size));   // KH_CAST_REFIT.
             }
         }
@@ -18190,7 +18618,8 @@ inline void kh_skin_draw_finish(const std::string& khsd_h, KhAttach& khsd_a, Ren
 // point. kh_cloth_upload's re-place runs at the scene resolve, after the
 // injection, so on its own the mesh drew one frame behind its bones. This step
 // re-places the same part from the maps of the stash just taken
-// (kh_skin_step_maps), at the upload's front with that front's box, writes the
+// (kh_skin_step_maps), at the upload's front in that front's box (grown to hold
+// it, under its own key: kh_cloth_pin_seal), writes the
 // installed buffer and stamps the cycle (KhClothInst::pin_step_cycle) so the
 // upload leaves it. The simulated part is the job's front either way. From
 // kh_attach_step under g_draw_list_mutex; takes g_cloth_mu inside (list ->
@@ -18219,18 +18648,22 @@ inline void kh_cloth_pin_draw_step(KhAttach& khcp_a, RenderObject& khcp_o, ID3D1
         const uint32_t khcp_f = khcp_cl.front.load(std::memory_order_acquire) & 1u;
         if (!kh_cloth_pin_place(khcp_cl, khcp_f, khcp_a.draw_a.data(), khcp_a.draw_a.size() / 12u)) return;   // Nothing bound: the upload's front stands.
         if (khcp_cl.pin_out.size() != khcp_cl.rest.size()) return;
+        float khcp_be[3];   // KH_CLOTH_STEP_SHAPE: the bytes' box and key.
+        const uint32_t khcp_key = kh_cloth_pin_seal(khcp_cl, khcp_f, khcp_be);
         D3D11_MAPPED_SUBRESOURCE khcp_m = {};
         if (FAILED(khcp_ctx->Map(khcp_cl.vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &khcp_m)) || !khcp_m.pData) return;
         memcpy(khcp_m.pData, khcp_cl.pin_out.data(), khcp_cl.pin_out.size() * sizeof(MeshVertex));   // The whole array, as the upload.
         khcp_ctx->Unmap(khcp_cl.vb, 0);
         kh_uvs_src_wrote(khcp_o.slot);   // KH_USER_VS: a vertex stage over this buffer evaluates again (kh_uvs_step follows this step).
-        // What the upload records with a write: the generation, the key, the box.
+        ++khcp_cl.vb_wr;   // KH_CHAIN_END_DRAW (C3).
+        // What the upload records with a write: the generation, the key, the box - these bytes'.
         khcp_cl.uploaded_gen = khcp_gen;
-        khcp_cl.uploaded_shape = khcp_cl.shape_of[khcp_f];
+        khcp_cl.uploaded_shape = khcp_key;
         khcp_cl.uploaded_box_on = khcp_cl.box_on[khcp_f];
         memcpy(khcp_cl.uploaded_box_ctr, khcp_cl.box_ctr[khcp_f], sizeof(khcp_cl.uploaded_box_ctr));
-        memcpy(khcp_cl.uploaded_box_size, khcp_cl.box_size[khcp_f], sizeof(khcp_cl.uploaded_box_size));
+        memcpy(khcp_cl.uploaded_box_size, khcp_be, sizeof(khcp_cl.uploaded_box_size));
         khcp_cl.pin_step_cycle = g_topo_cycles;
+        khcp_cl.pin_front = khcp_f;   // KH_CHAIN_END_DRAW.
         // Sized with g_cloth_vb_slot by the upload. Under a vertex stage the
         // slot's key is the stage's (kh_uvs_step moves it with this copy), as
         // kh_skin_draw_finish leaves it.
@@ -18250,6 +18683,342 @@ inline void kh_cloth_pin_draw_step(KhAttach& khcp_a, RenderObject& khcp_o, ID3D1
     }
 }
 
+// KH_CHAIN_END_DRAW - the correction on one chain's bone maps (carrier-local: 3x3 images of the axes, then the
+// translation): khcf_dp the end's move, khcf_dq its turn, about the point the end is held by. Along the chain's
+// path from its start to the end body: the end body and everything below it take both; a link between the path's
+// last kinematic body and the end a share of the move growing with its place on the path, and whatever branches
+// off such a link the link's share (it stays on it); the rest - the kinematic start, what branches off before it,
+// carrier / skeleton bones - nothing. Bodies are numbered parents before children (kh_chain_build), so on an
+// unbranched chain the path is the numbering. khcf_anc: scratch.
+inline void kh_chain_end_fix(const KhChainState& c, std::vector<float>& khcf_m, const float khcf_dp[3],
+                             const float khcf_dq[4], std::vector<int32_t>& khcf_anc) {
+    const int32_t khcf_eb = c.end_body;
+    const size_t khcf_nb = c.body_of.size();
+    const size_t khcf_nd = c.body.size();
+    if (khcf_eb < 0 || static_cast<size_t>(khcf_eb) >= khcf_nd || khcf_m.size() != khcf_nb * 12u) return;
+    const KhChainBody& e = c.body[static_cast<size_t>(khcf_eb)];
+    // khcf_anc[0, nd): a body's place on the path (0 the start), or -1; [nd, 2 nd): the path body it hangs from.
+    khcf_anc.assign(khcf_nd * 2u, -1);
+    int32_t khcf_ep = 0;   // The end's place: its depth.
+    for (int32_t p = c.body[static_cast<size_t>(khcf_eb)].parent, n = 0; p >= 0 && n < static_cast<int32_t>(khcf_nd);
+         p = c.body[static_cast<size_t>(p)].parent, ++n) {
+        if (static_cast<size_t>(p) >= khcf_nd) return;
+        ++khcf_ep;
+    }
+    for (int32_t p = khcf_eb, d = khcf_ep; p >= 0 && d >= 0; p = c.body[static_cast<size_t>(p)].parent, --d) {
+        khcf_anc[static_cast<size_t>(p)] = d;
+    }
+    int32_t khcf_s0 = -1;   // The place of the path's last kinematic body before the end.
+    for (size_t b = 0; b < khcf_nd; ++b) {
+        const int32_t d = khcf_anc[b];
+        if (d >= 0 && d < khcf_ep && !(c.body[b].inv_m > 0.0f) && d > khcf_s0) khcf_s0 = d;
+    }
+    for (size_t b = 0; b < khcf_nd; ++b) {   // Parents before children: a parent's answer is in.
+        const int32_t p = c.body[b].parent;
+        if (khcf_anc[b] >= 0) khcf_anc[khcf_nd + b] = static_cast<int32_t>(b);
+        else if (p >= 0 && static_cast<size_t>(p) < b) {
+            khcf_anc[khcf_nd + b] = khcf_anc[khcf_nd + static_cast<size_t>(p)];
+        }
+    }
+    const float* khcf_me = nullptr;
+    for (size_t bi = 0; bi < khcf_nb; ++bi) if (c.body_of[bi] == khcf_eb) { khcf_me = &khcf_m[bi * 12u]; break; }
+    if (!khcf_me) return;
+    float khcf_lp[3], khcf_pv[3];   // The held point: the end body's centre plus end_pt, where the bone puts it.
+    for (int k = 0; k < 3; ++k) khcf_lp[k] = e.x0[k] + (e.parent >= 0 ? c.end_pt[k] : 0.0f);
+    for (int k = 0; k < 3; ++k) {
+        khcf_pv[k] = khcf_lp[0] * khcf_me[k] + khcf_lp[1] * khcf_me[3 + k] + khcf_lp[2] * khcf_me[6 + k] +
+                     khcf_me[9 + k];
+    }
+    for (size_t bi = 0; bi < khcf_nb; ++bi) {
+        const int32_t bb = c.body_of[bi];
+        if (bb < 0 || static_cast<size_t>(bb) >= khcf_nd) continue;
+        const int32_t ba = khcf_anc[khcf_nd + static_cast<size_t>(bb)];   // The path body it moves with.
+        if (ba < 0) continue;
+        const int32_t bd = khcf_anc[static_cast<size_t>(ba)];   // That body's place.
+        if (bd <= khcf_s0) continue;
+        float* mm = &khcf_m[bi * 12u];
+        if (bd >= khcf_ep) {
+            for (int a = 0; a < 3; ++a) {
+                const float v[3] = { mm[a * 3], mm[a * 3 + 1], mm[a * 3 + 2] };
+                kh_q_rot(khcf_dq, v, &mm[a * 3]);
+            }
+            const float d[3] = { mm[9] - khcf_pv[0], mm[10] - khcf_pv[1], mm[11] - khcf_pv[2] };
+            float r[3];
+            kh_q_rot(khcf_dq, d, r);
+            for (int k = 0; k < 3; ++k) mm[9 + k] = khcf_pv[k] + khcf_dp[k] + r[k];
+        } else {
+            const float w = static_cast<float>(bd - khcf_s0) / static_cast<float>(khcf_ep - khcf_s0);
+            for (int k = 0; k < 3; ++k) mm[9 + k] += w * khcf_dp[k];
+        }
+    }
+}
+// KH_CHAIN_END_DRAW - the corrected shape stored as kh_chain_writeback stores a shape: every vertex skinned through
+// khcs_mat (khcs_nb bones) into khcs_met (carrier-local metres, 3 a vertex) and khcs_out, in the smallest box
+// centred on the front's (khcs_bc: its centre, carrier-local) that holds the level-0 vertices and is never
+// smaller than the front's (khcs_bf) - handed back in khcs_be. The corrected end can leave the front's box, and the
+// object's bounds are the box of its bytes. Nothing moved out, the box and the bytes are the front's formula's.
+inline void kh_chain_end_store(const MeshVertex* khcs_rest, size_t khcs_nv, const float khcs_ext[3],
+                               const KhSkinInf* khcs_inf, const uint8_t* khcs_lvl0, const float* khcs_mat,
+                               size_t khcs_nb, const float khcs_bc[3], const float khcs_bf[3],
+                               std::vector<float>& khcs_met, MeshVertex* khcs_out, float khcs_be[3]) {
+    khcs_met.resize(khcs_nv * 3u);
+    float khcs_r[3] = { 0.0f, 0.0f, 0.0f };   // The farthest level-0 vertex from the centre, per axis.
+    for (size_t i = 0; i < khcs_nv; ++i) {
+        const MeshVertex& r = khcs_rest[i];
+        MeshVertex& o = khcs_out[i];
+        float pp[3], nn[3], tt[3];
+        kh_chain_skin_vert(r, khcs_ext, khcs_inf ? &khcs_inf[i] : nullptr, khcs_mat, khcs_nb, pp, nn, tt);
+        if (!khcs_lvl0 || khcs_lvl0[i] != 0u) {   // The writeback's box rule: level 0.
+            for (int k = 0; k < 3; ++k) {
+                const float d = fabsf(pp[k] - khcs_bc[k]);
+                if (d > khcs_r[k]) khcs_r[k] = d;
+            }
+        }
+        memcpy(&khcs_met[i * 3u], pp, sizeof(pp));
+        memcpy(o.nrm, nn, sizeof(nn));
+        memcpy(o.tan, tt, sizeof(tt));
+        o.tan[3] = r.tan[3];
+        o.uv[0] = r.uv[0];
+        o.uv[1] = r.uv[1];
+    }
+    for (int k = 0; k < 3; ++k) khcs_be[k] = 2.0f * khcs_r[k] > khcs_bf[k] ? 2.0f * khcs_r[k] : khcs_bf[k];
+    for (size_t i = 0; i < khcs_nv; ++i) {
+        MeshVertex& o = khcs_out[i];
+        const float* p = &khcs_met[i * 3u];
+        float n[3], tn[3];
+        for (int k = 0; k < 3; ++k) {
+            o.pos[k] = (p[k] - khcs_bc[k]) / khcs_be[k];
+            n[k] = o.nrm[k] * khcs_be[k];
+            tn[k] = o.tan[k] / khcs_be[k];
+        }
+        const float nl = kh_cloth_v3_len(n), tl = kh_cloth_v3_len(tn);
+        for (int k = 0; k < 3; ++k) {
+            o.nrm[k] = nl > 1.0e-30f ? n[k] / nl : khcs_rest[i].nrm[k];
+            o.tan[k] = tl > 1.0e-30f ? tn[k] / tl : khcs_rest[i].tan[k];
+        }
+    }
+}
+// KH_CHAIN_END_DRAW - a position target khct_p (carrier-local, in place) as kh_chain_step holds it: a target
+// further from the pin than the chain can reach (KhChainState::end_reach) is pulled in to that reach along the same
+// line - the pin is body 0's point where the end's path hangs off it (joint end_root - 1's ra), placed by the bone
+// maps khct_m (the solver's step: body 0's pose at the step's end, which its map is). The job held its end at its
+// own target so taken; the correction takes this frame's the same way, so a taut chain stays taut, not stretched.
+inline void kh_chain_end_taut(const KhChainState& c, const std::vector<float>& khct_m, float khct_p[3]) {
+    if (!(c.end_reach > 0.0f) || c.end_root <= 0 || c.body.empty() ||
+        static_cast<size_t>(c.end_root) > c.joint.size()) return;
+    const int32_t khct_b = c.body[0].bone;
+    if (khct_b < 0 || (static_cast<size_t>(khct_b) + 1u) * 12u > khct_m.size()) return;
+    const float* const m = &khct_m[static_cast<size_t>(khct_b) * 12u];
+    const float* const ra = c.joint[static_cast<size_t>(c.end_root) - 1u].ra;
+    float l[3], pin[3], d[3];
+    for (int k = 0; k < 3; ++k) l[k] = c.body[0].x0[k] + ra[k];
+    for (int k = 0; k < 3; ++k) pin[k] = l[0] * m[k] + l[1] * m[3 + k] + l[2] * m[6 + k] + m[9 + k];
+    kh_cloth_v3_sub(khct_p, pin, d);
+    const float len = kh_cloth_v3_len(d);
+    if (len > c.end_reach && len > 1.0e-9f) {
+        const float sc = c.end_reach / len;
+        for (int k = 0; k < 3; ++k) khct_p[k] = pin[k] + d[k] * sc;
+    }
+}
+// KH_CHAIN_END_DRAW - an end held on the bound skeleton's bone (kind 1: endPosition / endRotation true), where the
+// skeleton pose khcb_g (khcb_nb maps in kh_skin_affine's layout, or null: the rest) puts it, carrier-local - what
+// kh_chain_end_pos / kh_chain_end_rot hold at a step's end (kh_chain_kin at fraction 1: the bone map, the body
+// placed by kh_chain_place with its start offset, then the endPoint), less the carrier frame. khcb_q: the body's
+// orientation; khcb_p: the held point.
+inline void kh_chain_end_bone(const KhChainState& c, const float* khcb_g, size_t khcb_nb, float khcb_q[4],
+                              float khcb_p[3]) {
+    const size_t khcb_e = static_cast<size_t>(c.end_body);
+    const KhChainBody& E = c.body[khcb_e];
+    float t[3], l[3];
+    kh_chain_bone_map(c, khcb_g, khcb_g, khcb_nb, E.bone, 1.0f, khcb_q, t);
+    kh_q_rot(khcb_q, E.x0, l);
+    const float* const off = kh_chain_start_off(c, khcb_e);
+    for (int k = 0; k < 3; ++k) l[k] += t[k] + (off ? off[k] : 0.0f);
+    if (E.parent < 0) { memcpy(khcb_p, l, sizeof(l)); return; }
+    float d[3];
+    kh_q_rot(khcb_q, c.end_pt, d);   // KH_CHAIN_POINT.
+    for (int k = 0; k < 3; ++k) khcb_p[k] = l[k] + d[k];
+}
+// KH_CHAIN_END_DRAW - from kh_attach_step's end (render thread, g_draw_list_mutex held, every binding placed and
+// skinned), at each step with a device context: every chain in g_chain_end whose frame targets are known - a
+// followed lane's own Draw3D's by number, else the render thread's read for this cycle; a lane fixed in the world,
+// the job's world target; a lane on a skeletal object's bone, the pin step's guide - each taken within the chain's
+// reach (kh_chain_end_taut), is re-skinned from its front's bone maps (a
+// skeletal one's: this cycle's pin re-placement, KH_CLOTH_PIN_STEP, which must have run) with the end corrected, in
+// the frame the object draws at now (kh_cloth_carrier_at), and written as the pin step writes, in the front's box
+// grown to hold it and under its own key (kh_chain_end_store / kh_cloth_step_shape); the object takes that box, as
+// the upload's put would. Bytes it wrote whose inputs have not changed since, with no other write between, are kept
+// (C3, KhClothInst::vb_wr). Takes g_cloth_mu (list -> cloth).
+inline void kh_chain_end_draw(ID3D11DeviceContext* khed_ctx) {
+    if (!khed_ctx || !reorder_on_render_thread() || g_chain_end.empty()) return;
+    const uint64_t khed_cyc = g_topo_cycles;
+    const uint64_t khed_want = static_cast<uint64_t>(static_cast<int64_t>(khed_cyc) + g_gid_k);
+    for (auto& khed_kv : g_chain_end) {
+        KhChainEnd& e = khed_kv.second;
+        // A followed lane: this frame's target, when known (identity learned); a fixed one: the job's own.
+        const KhChainEndSmp* khed_s = nullptr;
+        if (g_gid_ok) {
+            for (const KhChainEndSmp& khed_k : e.smp) if (khed_k.seq == khed_want && khed_k.seq != 0u) khed_s = &khed_k;
+            if (!khed_s && e.rt_cyc == khed_cyc) khed_s = &e.rt;
+        }
+        const bool khed_wp = kh_chain_end_fixed(e.pos_k);   // Fixed in the world (not khed_fr: the carrier frame).
+        const bool khed_wr = kh_chain_end_fixed(e.rot_k);
+        const bool khed_bp = e.pos_k == KH_CHE_BONE;   // Held on the skeleton's bone (a skeletal object's alone).
+        const bool khed_br = e.rot_k == KH_CHE_BONE;
+        bool khed_tp = khed_wp || khed_bp || (khed_s && khed_s->p_ok && kh_chain_end_followed(e.pos_k));
+        bool khed_tr = khed_wr || khed_br || (khed_s && khed_s->r_ok && kh_chain_end_followed(e.rot_k));
+        if (!khed_tp && !khed_tr) continue;   // Nothing known for this frame: the job's end stands.
+        const auto khed_it = g_draw_list.find(khed_kv.first);
+        if (khed_it == g_draw_list.end() || khed_it->second.seq != e.seq || khed_it->second.slot == 0xFFFFFFFFu) {
+            continue;
+        }
+        RenderObject& khed_o = khed_it->second;
+        bool khed_wrote = false;
+        float khed_size[3] = {};
+        {
+            std::lock_guard<std::mutex> khed_g(g_cloth_mu);
+            const auto khed_ci = g_cloth.find(khed_o.slot);
+            if (khed_ci == g_cloth.end()) continue;
+            KhClothInst& in = *khed_ci->second;
+            if (!in.chain || in.retired || !in.built || in.rest.empty() || !in.vb || in.seq != khed_o.seq) continue;
+            const bool khed_direct = khed_o.slot < g_cloth_vb_slot.size() && g_cloth_vb_slot[khed_o.slot] == in.vb;
+            if (!khed_direct && !kh_uvs_draws_from(khed_o.slot, in.vb)) continue;   // Not installed yet.
+            // A skeletal chain's kinematic bones are this cycle's pin re-placement (KH_CLOTH_PIN_STEP, which must
+            // have run), in the front it placed and whose box it handed the object; a plain chain's the front now.
+            const bool khed_skel = khed_o.skel;
+            if (khed_skel && in.pin_step_cycle != khed_cyc) continue;
+            const uint32_t khed_gen = in.gen.load(std::memory_order_acquire);
+            const uint32_t f = khed_skel ? (in.pin_front & 1u) : (in.front.load(std::memory_order_acquire) & 1u);
+            const KhChainState& c = in.ch;
+            const size_t nb = c.body_of.size();
+            const size_t nv = in.rest.size();
+            if (c.end_body < 0 || nb == 0u || in.ch_mat[f].size() != nb * 12u || in.out[f].size() != nv ||
+                !in.box_on[f]) continue;
+            // A bone lane: the pin step's guide (this cycle's, above) against the job's; a skeletal object's alone.
+            const bool khed_bg = khed_skel && in.pin_g.size() == nb * 12u;
+            khed_tp = khed_tp && (khed_bp ? khed_bg : in.end_job_p[f]);
+            khed_tr = khed_tr && (khed_br ? khed_bg : in.end_job_r[f]);
+            if (!khed_tp && !khed_tr) continue;
+            if (khed_skel && in.pin_mat.size() != nb * 12u) continue;
+            float khed_bnq[4] = { 0.0f, 0.0f, 0.0f, 1.0f }, khed_bjq[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+            float khed_bnp[3] = {}, khed_bjp[3] = {};
+            if ((khed_tp && khed_bp) || (khed_tr && khed_br)) {
+                const std::vector<float>& khed_jg = in.out_guide[f];   // The job's (its in_guide), or none: the rest.
+                kh_chain_end_bone(c, khed_jg.size() == nb * 12u ? khed_jg.data() : nullptr, nb, khed_bjq, khed_bjp);
+                kh_chain_end_bone(c, in.pin_g.data(), nb, khed_bnq, khed_bnp);
+            }
+            // The frame the object draws at now, as kh_cloth_sync builds the job's.
+            float khed_wc[3];
+            double khed_wd[3];
+            kh_cloth_carrier_at(khed_o, c.auth_ctr, khed_wc, khed_wd);
+            KhClothFrame khed_fr;
+            memcpy(khed_fr.rot, khed_o.rot_m, sizeof(khed_fr.rot));
+            khed_fr.rotated = khed_o.rotated;
+            float qf[4];
+            kh_chain_frame_q(khed_fr, qf);
+            const float qfc[4] = { -qf[0], -qf[1], -qf[2], qf[3] };
+            float dp[3] = { 0.0f, 0.0f, 0.0f };
+            float dq[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+            if (khed_tp) {
+                float khed_tn[3], khed_tj[3];   // This frame's position target and the job's, carrier-local.
+                if (khed_bp) {
+                    memcpy(khed_tn, khed_bnp, sizeof(khed_tn));
+                    memcpy(khed_tj, khed_bjp, sizeof(khed_tj));
+                } else {
+                    const double* const khed_tw =   // The target, in the world.
+                        khed_wp ? static_cast<const double*>(in.end_job_w[f]) : static_cast<const double*>(khed_s->p);
+                    const float d[3] = { static_cast<float>(khed_tw[0] - khed_wd[0]),
+                                         static_cast<float>(khed_tw[1] - khed_wd[1]),
+                                         static_cast<float>(khed_tw[2] - khed_wd[2]) };
+                    kh_q_rot(qfc, d, khed_tn);
+                    memcpy(khed_tj, in.end_job_x[f], sizeof(khed_tj));
+                }
+                // As the solver holds them: within the chain's reach of its pin - the job's where the job's maps put
+                // the start, this frame's where this frame's do (the maps the correction is applied to, below).
+                kh_chain_end_taut(c, in.ch_mat[f], khed_tj);
+                kh_chain_end_taut(c, khed_skel ? in.pin_mat : in.ch_mat[f], khed_tn);
+                for (int k = 0; k < 3; ++k) dp[k] = khed_tn[k] - khed_tj[k];
+            }
+            if (khed_tr && khed_br) {
+                const float jc[4] = { -khed_bjq[0], -khed_bjq[1], -khed_bjq[2], khed_bjq[3] };
+                kh_q_mul(khed_bnq, jc, dq);
+                kh_q_norm(dq);
+            } else if (khed_tr) {
+                float qt[4], ql[4];
+                if (khed_wr) memcpy(qt, in.end_job_wq[f], sizeof(qt));
+                else kh_q_from_axes(khed_s->r, qt);
+                kh_q_mul(qfc, qt, ql);
+                kh_q_norm(ql);
+                const float* jq = in.end_job_q[f];
+                const float jc[4] = { -jq[0], -jq[1], -jq[2], jq[3] };
+                kh_q_mul(ql, jc, dq);
+                kh_q_norm(dq);
+            }
+            if (!(dp[0] == dp[0] && dp[1] == dp[1] && dp[2] == dp[2] && dq[0] == dq[0] && dq[1] == dq[1] &&
+                  dq[2] == dq[2] && dq[3] == dq[3])) continue;
+            in.end_mat = khed_skel ? in.pin_mat : in.ch_mat[f];
+            kh_chain_end_fix(c, in.end_mat, dp, dq, in.end_anc);
+            // C3: the bytes this draw last wrote, unless another write came since or an input differs (the maps
+            // bit for bit, the front, its box) - kept, not skinned and written again.
+            float khed_box[6];
+            memcpy(khed_box, in.box_ctr[f], sizeof(float) * 3u);
+            memcpy(khed_box + 3, in.box_size[f], sizeof(float) * 3u);
+            const bool khed_keep = in.end_wr_ok && in.end_wr == in.vb_wr && in.end_vb == in.vb && in.end_f == f &&
+                                   in.end_gen == khed_gen && in.end_mat_last.size() == in.end_mat.size() &&
+                                   memcmp(in.end_mat_last.data(), in.end_mat.data(),
+                                          in.end_mat.size() * sizeof(float)) == 0 &&
+                                   memcmp(in.end_box, khed_box, sizeof(khed_box)) == 0;
+            float be[3];
+            if (khed_keep) {
+                memcpy(be, in.end_be, sizeof(be));
+            } else {
+                // Skinned and stored as the writeback stores a shape: in the front's box, grown about its centre
+                // where the corrected end leaves it (kh_chain_end_store).
+                float bc[3];
+                for (int k = 0; k < 3; ++k) bc[k] = in.box_ctr[f][k] - c.auth_ctr[k];
+                in.end_out.resize(nv);
+                kh_chain_end_store(in.rest.data(), nv, c.ext, c.inf.size() == nv ? c.inf.data() : nullptr,
+                                   c.lvl0.size() == nv ? c.lvl0.data() : nullptr, in.end_mat.data(), nb, bc,
+                                   in.box_size[f], in.end_met, in.end_out.data(), be);
+                D3D11_MAPPED_SUBRESOURCE khed_m = {};
+                if (FAILED(khed_ctx->Map(in.vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &khed_m)) || !khed_m.pData) continue;
+                memcpy(khed_m.pData, in.end_out.data(), nv * sizeof(MeshVertex));   // The whole array, as the upload.
+                khed_ctx->Unmap(in.vb, 0);
+                kh_uvs_src_wrote(khed_o.slot);   // KH_USER_VS.
+                in.uploaded_shape = kh_cloth_step_shape(in.end_shape_ref, in.end_shape_key, in.end_met);
+                in.end_wr = ++in.vb_wr;
+                in.end_wr_ok = true;
+                in.end_vb = in.vb;
+                in.end_f = f;
+                in.end_gen = khed_gen;
+                in.end_mat_last = in.end_mat;
+                memcpy(in.end_box, khed_box, sizeof(khed_box));
+                memcpy(in.end_be, be, sizeof(be));
+            }
+            // What the upload records with a write, for these bytes: their key (kh_cloth_step_shape: the key follows
+            // the bytes) and their box (the front's centre, the grown size) - which the upload's chain put and
+            // kh_skin_upload hand the object. A plain chain the rest too (KH_CLOTH_PIN_STEP's rule), so the upload
+            // leaves this buffer this cycle; a skeletal one's the pin step recorded, for this same front.
+            memcpy(in.uploaded_box_size, be, sizeof(in.uploaded_box_size));
+            if (!khed_skel) {
+                in.uploaded_gen = khed_gen;
+                in.uploaded_box_on = in.box_on[f];
+                memcpy(in.uploaded_box_ctr, in.box_ctr[f], sizeof(in.uploaded_box_ctr));
+                in.pin_step_cycle = khed_cyc;
+            }
+            if (khed_direct) g_cloth_gen_slot[khed_o.slot] = in.uploaded_shape;
+            khed_size[0] = be[0];   // SQF order, as the upload's put.
+            khed_size[1] = be[2];
+            khed_size[2] = be[1];
+            khed_wrote = true;
+        }
+        if (!khed_wrote) continue;
+        if (memcmp(khed_o.size, khed_size, sizeof(khed_size)) != 0) {   // Either kind: the box of its bytes.
+            memcpy(khed_o.size, khed_size, sizeof(khed_size));
+        }
+        kh_attach_moved_note(khed_o, true, true);   // Re-filed; a final step's reopens the sun map (KH_SUN_RESTEP).
+    }
+}
 inline void kh_skin_sync() {
     KH_PROF_SCOPE(KHP_SKIN_SYNC);   // KH_PROF.
     if (g_attach_n.load(std::memory_order_relaxed) == 0 && g_skin.empty()) return;
@@ -18775,7 +19544,10 @@ inline void kh_crew_chain_cand(std::vector<std::pair<game_value, bool>>& khcc_ou
 }
 inline void kh_chain_prepare(bool khcp_gts) {
     KH_PROF_SCOPE(KHP_CHAIN_PREPARE);   // KH_PROF.
-    if (g_chain_cfg.empty()) return;
+    if (g_chain_cfg.empty()) {
+        if (g_chain_end_n.load(std::memory_order_relaxed) != 0u) kh_chain_end_publish(0u);   // Empties the table.
+        return;
+    }
     std::vector<std::string> khcp_dead, khcp_read;
     {
         std::lock_guard<std::mutex> khcp_g(g_draw_list_mutex);
@@ -18895,6 +19667,7 @@ inline void kh_chain_prepare(bool khcp_gts) {
             }
         }
     }
+    kh_chain_end_publish(khcp_seq);   // KH_CHAIN_END_DRAW: this Draw3D's targets, by its sample number.
 }
 
 class RenderAssetDiscovery {
@@ -28336,6 +29109,15 @@ static UINT g_thm_w = 0;
 static UINT g_thm_h = 0;
 static float                 g_thm_origin[2] = {};
 static float                 g_thm_cell = 0.0f;
+// KH_THM_EXACT - the engine's triangle split for the staging grid, as KhThmHeight reads it (thmParams.w - 1): class
+// k's split (kh_cloth_ground_prepare's g_ground_split: 0, 1, or 2 = bilinear) in base-3 digit k. A grid not at the
+// matrix's native spacing, or a split not measured, is bilinear throughout (KH_THM_SPLIT_SMOOTH). The autobuild writes
+// it with the grid; the upload publishes it (g_thml_split) with the grid's other live meta.
+static constexpr int         KH_THM_SPLIT_SMOOTH = 2 + 2 * 3 + 2 * 9 + 2 * 27;
+static int                   g_thm_split = KH_THM_SPLIT_SMOOTH;
+// KH_THM_EXACT - the widest grid a side the heightfield texture takes (D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION): the
+// matrix is taken whole up to it, point-sampled past it (maps finer than 16384 nodes a side).
+static constexpr size_t      KH_THM_MAX_SIDE = 16384;
 // KH_NO_PARK_THM: handoff between the autobuild (game thread writes the staging
 // grid, then sets it) and kh_thm_upload (the flush reads the grid, then clears
 // it). The builder waits while it is set, so the grid is frozen until the
@@ -28344,6 +29126,7 @@ static std::atomic<bool>     g_thm_dirty{ false };
 static std::atomic<bool>     g_thm_valid{ false };   // Live texture usable. Written by the render thread, read by the game thread.
 static float                 g_thml_origin[2] = {};   // Live meta (published by the flush).
 static float                 g_thml_cell = 0.0f;
+static int                   g_thml_split = KH_THM_SPLIT_SMOOTH;   // KH_THM_EXACT: g_thm_split, live.
 static UINT g_thml_w = 0;
 static UINT g_thml_h = 0;
 // Zero-setup terrain acquisition: at the flush prelude (game thread, pre-lock)
@@ -28363,7 +29146,9 @@ static float                 g_thmf_cell = 0.0f;
 // snapshots of exactly the uploaded grid
 // (g_voc_thm_*, published under the park - never the autobuild's staging): its
 // nodes, and their max per KH_VOC_THM_DS-node cell. It takes the max over every
-// node the footprint's bilinear support touches - node by node while that is
+// node the footprint's support touches (a sample's cell corners: its height is
+// a convex mix of them, whichever triangle or the bilinear fit KhThmHeight
+// takes - KH_THM_EXACT) - node by node while that is
 // at most KH_VOC_THM_FINE_CAP nodes, else by the coarse cells - and answers the
 // line (engine y) above which the endpoint test cannot discard a fragment of
 // the occluder: its floor (kh_voc_floor). The cull keeps only the part of the
@@ -28410,8 +29195,8 @@ inline float kh_voc_floor(const RenderObject& khvb_o) {
         khvb_gz0 > static_cast<float>(g_voc_thm_fh)) {
         return KH_VOC_FLOOR_NONE;
     }
-    // Fine-node range under the footprint plus one node each way (the bilinear
-    // support of a sample at g touches floor(g) and floor(g) + 1), clamped in
+    // Fine-node range under the footprint plus one node each way (the support
+    // of a sample at g - its cell's corners - touches floor(g) and floor(g) + 1), clamped in
     // float so the casts stay in range.
     const float khvb_fx = static_cast<float>(g_voc_thm_fw - 1);
     const float khvb_fz = static_cast<float>(g_voc_thm_fh - 1);
@@ -28457,7 +29242,7 @@ inline void kh_fill_occ(ConstantData& cbd) {
     cbd.thm_params[0] = g_thml_origin[0];
     cbd.thm_params[1] = g_thml_origin[1];
     cbd.thm_params[2] = g_thml_cell;
-    cbd.thm_params[3] = 1.0f;
+    cbd.thm_params[3] = 1.0f + static_cast<float>(g_thml_split);   // KH_THM_EXACT: enabled, and the split.
     cbd.thm_meta[0] = static_cast<float>(g_thml_w);
     cbd.thm_meta[1] = static_cast<float>(g_thml_h);
     cbd.thm_meta[2] = KH_THM_BIAS_M;
@@ -28506,6 +29291,7 @@ inline std::string kh_thm_upload_body(ID3D11Device* dev) {
     g_thml_origin[0] = g_thm_origin[0];
     g_thml_origin[1] = g_thm_origin[1];
     g_thml_cell = g_thm_cell;
+    g_thml_split = g_thm_split;   // KH_THM_EXACT.
     g_thml_w = g_thm_w;
     g_thml_h = g_thm_h;
     // The nodes and their coarse max, of exactly the grid just uploaded (render
@@ -28571,11 +29357,15 @@ inline void kh_thm_autobuild_step() {
             // missions by the framework; the first build is synchronous, one
             // engine height query per terrain-grid node, on this thread.
             ::initialize_terrain_matrix();
-            // Path A: the framework's native-resolution terrain matrix,
-            // point-sampled to <= 1025 per side; nothing to refine.
+            // Path A: the framework's native-resolution terrain matrix, whole (KH_THM_EXACT: point-sampled only past
+            // KH_THM_MAX_SIDE nodes a side), with the engine's triangle split; nothing to refine.
             if (!g_terrain_matrix.empty() && g_terrain_grid_width > 0.0f) {
+                // KH_THM_EXACT: the split, measured on this matrix (engine calls: this thread, holding no lock, as
+                // the matrix's own build; once per matrix and mission, shared with the cloth ground).
+                kh_cloth_ground_prepare();
                 const size_t khb_src = g_terrain_matrix.size();
-                const size_t khb_stride = (khb_src + 1024) / 1025 > 0 ? (khb_src + 1024) / 1025 : 1;
+                const size_t khb_stride = (khb_src + KH_THM_MAX_SIDE - 1) / KH_THM_MAX_SIDE > 0
+                                        ? (khb_src + KH_THM_MAX_SIDE - 1) / KH_THM_MAX_SIDE : 1;
                 const size_t khb_ow = (khb_src + khb_stride - 1) / khb_stride;
                 g_thm_origin[0] = 0.0f;
                 g_thm_origin[1] = 0.0f;
@@ -28595,6 +29385,13 @@ inline void kh_thm_autobuild_step() {
                     }
                 }
 
+                // KH_THM_EXACT: the split applies to the matrix's own cells alone - taken whole, and measured on it.
+                g_thm_split = KH_THM_SPLIT_SMOOTH;
+                if (khb_stride == 1 && g_ground_ready && g_ground_n == khb_src &&
+                    g_ground_cell == g_terrain_grid_width) {
+                    g_thm_split = g_ground_split[0] + 3 * g_ground_split[1] + 9 * g_ground_split[2] +
+                                  27 * g_ground_split[3];
+                }
                 g_thm_dirty = true;
                 g_thm_auto_state = 2;
                 return;
@@ -28611,6 +29408,7 @@ inline void kh_thm_autobuild_step() {
 
             const UINT khb_cd = 65;
             const float khb_cc = khb_ws / 64.0f;
+            g_thm_split = KH_THM_SPLIT_SMOOTH;   // KH_THM_EXACT: sampled, not the engine's nodes - a bilinear fit.
             g_thm_origin[0] = 0.0f;
             g_thm_origin[1] = 0.0f;
             g_thm_cell = khb_cc;
@@ -31557,7 +32355,7 @@ static constexpr uint32_t KH_DL_VS_SLOTS = 13;   // VS cb slots captured (0.12).
 static constexpr uint32_t KH_DL_VS_CONSTS = 80;   // Constants per slot (view fits anywhere in 80).
 static constexpr uint32_t KH_DL_VS_BYTES = KH_DL_VS_CONSTS * 16;
 static constexpr float    KH_DL_DERIVE_Y_TOL = 1.5f;   // Heights are absolute in the list frame.
-static constexpr float    KH_DL_DERIVE_GRID_TOL = 1.0f;   // Origin must sit on the 100 m grid.
+static constexpr float    KH_DL_DERIVE_GRID_TOL = 1.0f;   // Strong routes: within this of a whole land-grid cell.
 static constexpr float    KH_DL_DERIVE_ROT_TOL = 0.03f;   // Candidate rotation vs the frame view.
 // Windows with only loose candidates go unresolved (dark-safe), never flapping.
 static constexpr float    KH_DL_ORIGIN_RES_MAX = 0.03f;
@@ -31570,7 +32368,42 @@ static constexpr float    KH_DL_ANCHOR_RES = 0.005f;
 static constexpr uint32_t KH_DL_WIN_VS_BYTES = KH_DL_VS_SLOTS * KH_DL_VS_BYTES;
 static constexpr uint32_t KH_DL_WIN_BYTES = KH_DL_STAGE_BYTES + KH_DL_WIN_VS_BYTES;
 static constexpr uint32_t KH_DL_ARENA_BYTES = KH_DL_WIN_MAX * KH_DL_WIN_BYTES;
-static constexpr float    KH_DL_ORIGIN_Q = 100.0f;   // Origin grid (3500/4500/3300 all fit).
+// KH_DL_ORIGIN_GRID - the engine's light-list origins sit on whole cells of the terrain's land grid (getTerrainInfo's
+// land_grid_width) at a multiple of it that the map decides: 4 x 25 m = 100 m on Malden, 4 x 32 m = 128 m on
+// cytech_underground_terrain (measured, a test probe). Nothing is assumed per map: g_dl_cell is the terrain's land
+// grid width, staged on the game thread once per session (stage_world_lighting; 0 until read), and the strong routes
+// - the camera matrix (route 0), matrix x world pairs (route 1) and route 1's memoised hint - accept an origin on
+// it. Every origin they commit teaches the multiple (g_dl_q_cells: the greatest common divisor of the committed
+// origins' cell counts), and the weaker tests - bare triples (routes 2 / 3 and their hints), the anchor vote, the
+// re-sight fallback and the anchor ghost test - use that learned grid and stand down until one is learned.
+static std::atomic<float> g_dl_cell{ 0.0f };   // Game thread writes, once per session; the render thread reads.
+static uint32_t g_dl_q_cells = 0;              // Render thread (or a park): the learned multiple, 0 = none yet.
+inline float kh_dl_grid_base() { return g_dl_cell.load(std::memory_order_relaxed); }
+inline float kh_dl_grid() {
+    const float khdg_c = kh_dl_grid_base();
+    return (khdg_c > 0.0f && g_dl_q_cells > 0u) ? khdg_c * static_cast<float>(g_dl_q_cells) : 0.0f;
+}
+inline uint32_t kh_dl_gcd(uint32_t khgc_a, uint32_t khgc_b) {
+    while (khgc_b != 0u) {
+        const uint32_t khgc_t = khgc_a % khgc_b;
+        khgc_a = khgc_b;
+        khgc_b = khgc_t;
+    }
+    return khgc_a;
+}
+// A strong route's committed origin: its cell counts folded into the learned multiple (gcd(0, n) = n, so the first
+// origin seeds it and every later one can only refine it).
+inline void kh_dl_grid_learn(float khgl_ox, float khgl_oz) {
+    const float khgl_c = kh_dl_grid_base();
+    if (!(khgl_c > 0.0f)) return;
+    const float khgl_fx = fabsf(khgl_ox) / khgl_c;
+    const float khgl_fz = fabsf(khgl_oz) / khgl_c;
+    if (!(khgl_fx < 1.0e6f && khgl_fz < 1.0e6f)) return;   // NaN fails too.
+    uint32_t khgl_g = g_dl_q_cells;
+    khgl_g = kh_dl_gcd(khgl_g, static_cast<uint32_t>(floorf(khgl_fx + 0.5f)));
+    khgl_g = kh_dl_gcd(khgl_g, static_cast<uint32_t>(floorf(khgl_fz + 0.5f)));
+    if (khgl_g > 0u) g_dl_q_cells = khgl_g;
+}
 static constexpr uint64_t KH_DL_POOL_STALE_MS = 500;
 // A harvest gap past this is a stall (alt-tab, load, time skip), not a frame.
 // KH_DL_WIN_SLOTS: wider than KH_DL_WIN_MAX because this table remembers
@@ -32033,11 +32866,13 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
                 }
             }
 
-            if (!khp_same && fabsf(khp_pl.rec[1] - khp_r[1]) <= 0.25f) {   // Grid test / census.
+            // Grid test / census, on the learned grid (KH_DL_ORIGIN_GRID; none learned: no grid match).
+            const float khp_q = kh_dl_grid();
+            if (!khp_same && khp_q > 0.0f && fabsf(khp_pl.rec[1] - khp_r[1]) <= 0.25f) {
                 float khp_dx = khp_pl.rec[0] - khp_r[0];
-                khp_dx -= KH_DL_ORIGIN_Q * floorf(khp_dx / KH_DL_ORIGIN_Q + 0.5f);
+                khp_dx -= khp_q * floorf(khp_dx / khp_q + 0.5f);
                 float khp_dz = khp_pl.rec[2] - khp_r[2];
-                khp_dz -= KH_DL_ORIGIN_Q * floorf(khp_dz / KH_DL_ORIGIN_Q + 0.5f);
+                khp_dz -= khp_q * floorf(khp_dz / khp_q + 0.5f);
                 const float khp_res = fabsf(khp_dx) > fabsf(khp_dz) ? fabsf(khp_dx) : fabsf(khp_dz);
                 if (khp_best < 0.0f || khp_res < khp_best) khp_best = khp_res;
 
@@ -32519,14 +33354,15 @@ inline bool dl_rot_identity(const float (&khd_v)[4][4]) {
 // The frame-structure proof shared by every route: bare triples must be
 // near-exact - a random constant must not fake a camera.
 inline bool dl_origin_validate(float khd_ex, float khd_ey, float khd_ez, bool khd_pair,
-                               float khd_ytol, float khd_gtol,
+                               float khd_ytol, float khd_gtol, float khd_q,
                                float& khd_ox, float& khd_oz, float& khd_res) {
+    if (!(khd_q > 0.0f)) return false;   // KH_DL_ORIGIN_GRID: no grid known yet.
     if (fabsf(khd_ey) > khd_ytol) {
         return false;
     }
 
-    const float khd_sx = floorf(khd_ex / KH_DL_ORIGIN_Q + 0.5f) * KH_DL_ORIGIN_Q;
-    const float khd_sz = floorf(khd_ez / KH_DL_ORIGIN_Q + 0.5f) * KH_DL_ORIGIN_Q;
+    const float khd_sx = floorf(khd_ex / khd_q + 0.5f) * khd_q;
+    const float khd_sz = floorf(khd_ez / khd_q + 0.5f) * khd_q;
     const float khd_rx = fabsf(khd_ex - khd_sx);
     const float khd_rz = fabsf(khd_ez - khd_sz);
 
@@ -32793,7 +33629,7 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
                 const float* khd_t = khd_block(khd_h_slot) + khd_h_off;
 
                 if (dl_finite(khd_t[0]) && dl_finite(khd_t[1]) && dl_finite(khd_t[2]) && dl_origin_validate(khd_bcam[0] - khd_t[0], khd_bcam[1] - khd_t[1],
-                                       khd_bcam[2] - khd_t[2], true, 0.5f, 0.25f,
+                                       khd_bcam[2] - khd_t[2], true, 0.5f, 0.25f, kh_dl_grid(),
                                        khd_tox, khd_toz, khd_tres) && khd_tres <= KH_DL_ORIGIN_RES_MAX && khd_range_ok(khd_tox, khd_toz) && !(khd_tox == 0.0f && khd_toz == 0.0f)) {
                     khd_hit = true;
                 }
@@ -32809,7 +33645,7 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
 
                 if (dl_finite(khd_t[0]) && dl_finite(khd_t[1]) && dl_finite(khd_t[2]) && dl_cand_structure(khd_block(khd_h_wslot) + khd_h_woff,
                                       khd_h_wform, khd_vw) && dl_rot_identity(khd_vw) && dl_origin_validate(khd_vw[3][0] - khd_t[0], khd_vw[3][1] - khd_t[1],
-                                       khd_vw[3][2] - khd_t[2], true, 0.5f, 0.25f,
+                                       khd_vw[3][2] - khd_t[2], true, 0.5f, 0.25f, kh_dl_grid(),
                                        khd_tox, khd_toz, khd_tres) && khd_tres <= KH_DL_ORIGIN_RES_MAX && khd_range_ok(khd_tox, khd_toz) && !(khd_tox == 0.0f && khd_toz == 0.0f)) {
                     khd_hit = true;
                 }
@@ -32834,7 +33670,7 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
                     if (dl_finite(khd_cam[0]) && dl_finite(khd_cam[1]) && dl_finite(khd_cam[2]) && dl_origin_validate(khd_bcam[0] - khd_cam[0] - khd_vw[3][0],
                                            khd_bcam[1] - khd_cam[1] - khd_vw[3][1],
                                            khd_bcam[2] - khd_cam[2] - khd_vw[3][2],
-                                           true, KH_DL_DERIVE_Y_TOL, KH_DL_DERIVE_GRID_TOL,
+                                           true, KH_DL_DERIVE_Y_TOL, KH_DL_DERIVE_GRID_TOL, kh_dl_grid_base(),
                                            khd_tox, khd_toz, khd_tres) && khd_tres <= KH_DL_ORIGIN_RES_MAX && khd_range_ok(khd_tox, khd_toz) && !(khd_tox == 0.0f && khd_toz == 0.0f)) {
                         khd_hit = true;
                     }
@@ -32855,6 +33691,7 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
         }
 
         if (khd_hit) {
+            if (khd_h_kind == 1) kh_dl_grid_learn(khd_tox, khd_toz);   // KH_DL_ORIGIN_GRID: a strong route's.
             khd_ox = khd_tox;
             khd_oz = khd_toz;
             khd_res = khd_tres;
@@ -32892,7 +33729,7 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
 
                     if (dl_origin_validate(khd_bcam[0] - khd_cam[0], khd_bcam[1] - khd_cam[1],
                                            khd_bcam[2] - khd_cam[2], false,
-                                           KH_DL_DERIVE_Y_TOL, KH_DL_DERIVE_GRID_TOL,
+                                           KH_DL_DERIVE_Y_TOL, KH_DL_DERIVE_GRID_TOL, kh_dl_grid_base(),
                                            khd_tox, khd_toz, khd_tres)) {
                         khd_offer(khd_tox, khd_toz, khd_tres, static_cast<uint8_t>(0),
                                   static_cast<int32_t>(khd_s), khd_off, khd_form, -1, 0, 0);
@@ -32932,7 +33769,7 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
             if (dl_origin_validate(khd_bcam[0] - khd_mv[a].cam[0] - khd_wm[b].t[0],
                                    khd_bcam[1] - khd_mv[a].cam[1] - khd_wm[b].t[1],
                                    khd_bcam[2] - khd_mv[a].cam[2] - khd_wm[b].t[2],
-                                   true, KH_DL_DERIVE_Y_TOL, KH_DL_DERIVE_GRID_TOL,
+                                   true, KH_DL_DERIVE_Y_TOL, KH_DL_DERIVE_GRID_TOL, kh_dl_grid_base(),
                                    khd_tox, khd_toz, khd_tres)) {
                 khd_offer(khd_tox, khd_toz, khd_tres, 1,
                           khd_mv[a].slot, khd_mv[a].off, khd_mv[a].form,
@@ -32956,7 +33793,7 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
 
             // t = camera in the light frame.
             if (dl_origin_validate(khd_bcam[0] - khd_t[0], khd_bcam[1] - khd_t[1],
-                                   khd_bcam[2] - khd_t[2], true, 0.5f, 0.25f,
+                                   khd_bcam[2] - khd_t[2], true, 0.5f, 0.25f, kh_dl_grid(),
                                    khd_tox, khd_toz, khd_tres)) {
                 khd_offer(khd_tox, khd_toz, khd_tres, 2,
                           static_cast<int32_t>(khd_s), khd_off, 0, -1, 0, 0);
@@ -32966,7 +33803,7 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
             // translation.
             for (uint32_t b = 0; b < khd_wm_n; ++b) {
                 if (dl_origin_validate(khd_wm[b].t[0] - khd_t[0], khd_wm[b].t[1] - khd_t[1],
-                                       khd_wm[b].t[2] - khd_t[2], true, 0.5f, 0.25f,
+                                       khd_wm[b].t[2] - khd_t[2], true, 0.5f, 0.25f, kh_dl_grid(),
                                        khd_tox, khd_toz, khd_tres)) {
                     khd_offer(khd_tox, khd_toz, khd_tres, 3,
                               static_cast<int32_t>(khd_s), khd_off, 0,
@@ -32994,6 +33831,7 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
         khd_wslot_out = khd_b_wslot;
         // Record what is being committed and what came immediately before it.
 
+        if (khd_b_kind <= 1) kh_dl_grid_learn(khd_b_ox, khd_b_oz);   // KH_DL_ORIGIN_GRID: routes 0 / 1 only.
         g_dl.win_hint_set[khd_ws] = 1;
         g_dl.win_hint_kind[khd_ws] = khd_b_kind;
         g_dl.win_hint_slot[khd_ws] = khd_b_slot;
@@ -33058,6 +33896,8 @@ inline void dynlights_anchor_upsert(float khd_x, float khd_y, float khd_z, uint6
 // never revisited. Drop the anchor, never the pool.
 
 inline bool dynlights_anchor_ghost(const float* khg_a) {
+    const float khg_q = kh_dl_grid();   // KH_DL_ORIGIN_GRID: no grid learned, no conviction.
+    if (!(khg_q > 0.0f)) return false;
     for (uint32_t khg_p = 0; khg_p < g_dl.pool_n; ++khg_p) {
         const DlPoolLight& khg_e = g_dl.pool[khg_p];
         // Only a corroborated light may convict an anchor: otherwise a bad
@@ -33069,8 +33909,8 @@ inline bool dynlights_anchor_ghost(const float* khg_a) {
                                                                     // Light.
         const float khg_dx = khg_r[0] - khg_a[0];
         const float khg_dz = khg_r[2] - khg_a[2];
-        const float khg_sx = floorf(khg_dx / KH_DL_ORIGIN_Q + 0.5f) * KH_DL_ORIGIN_Q;
-        const float khg_sz = floorf(khg_dz / KH_DL_ORIGIN_Q + 0.5f) * KH_DL_ORIGIN_Q;
+        const float khg_sx = floorf(khg_dx / khg_q + 0.5f) * khg_q;
+        const float khg_sz = floorf(khg_dz / khg_q + 0.5f) * khg_q;
         if (khg_sx == 0.0f && khg_sz == 0.0f) continue;   // Same place: this is the light.
         if (fabsf(khg_dx - khg_sx) > KH_DL_MATCH_M) continue;
         if (fabsf(khg_dz - khg_sz) > KH_DL_MATCH_M) continue;
@@ -33085,6 +33925,8 @@ inline bool dynlights_anchor_ghost(const float* khg_a) {
 inline bool dynlights_pool_vote(const float* khd_l, uint32_t khd_total,
                                 float& khd_ox, float& khd_oz) {
     if (g_dl.anchor_n == 0 || khd_total == 0) return false;
+    const float khd_q = kh_dl_grid();   // KH_DL_ORIGIN_GRID: no grid learned, no vote.
+    if (!(khd_q > 0.0f)) return false;
     float khd_cox[8], khd_coz[8], khd_cres[8];
     uint32_t khd_cv[8], khd_cn = 0;
 
@@ -33098,8 +33940,8 @@ inline bool dynlights_pool_vote(const float* khd_l, uint32_t khd_total,
             if (fabsf(g_dl.anchor_pos[d][1] - khd_r[1]) > 0.25f) continue;   // Same light: identical Y.
             const float khd_ex = g_dl.anchor_pos[d][0] - khd_r[0];
             const float khd_ez = g_dl.anchor_pos[d][2] - khd_r[2];
-            const float khd_sx = floorf(khd_ex / KH_DL_ORIGIN_Q + 0.5f) * KH_DL_ORIGIN_Q;
-            const float khd_sz = floorf(khd_ez / KH_DL_ORIGIN_Q + 0.5f) * KH_DL_ORIGIN_Q;
+            const float khd_sx = floorf(khd_ex / khd_q + 0.5f) * khd_q;
+            const float khd_sz = floorf(khd_ez / khd_q + 0.5f) * khd_q;
             const float khd_rx = fabsf(khd_ex - khd_sx);
             const float khd_rz = fabsf(khd_ez - khd_sz);
             if (khd_rx > KH_DL_ORIGIN_RES_MAX || khd_rz > KH_DL_ORIGIN_RES_MAX) continue;
@@ -34514,11 +35356,24 @@ inline float kh_dl_select(const RenderObject& o, std::vector<uint32_t>& khds_sel
     if (g_dl.pool_n == 0) return khds_scale;
     if (steady_now_ms() - g_dl.pool_stamp > KH_DL_POOL_STALE_MS) return khds_scale;
     // Mesh center + half diagonal, engine axes (SQF [x,y,zASL] -> engine
-    // [x, zASL, y]).
+    // [x, zASL, y]). KH_NEARZ_BOUNDS: the diagonal of the box around everything the mesh may draw
+    // (kh_bounds_size_of: a cloth's reach, a decimated level, a vertex stage's reach, the residual), each axis
+    // grown by its rotation row's scale past 1 - a light reaching only a part past the script's size lights it too.
+    // A builtin with none of those and unit rows keeps the script's size: the old sphere.
     const float khds_c[3] = { o.pos[0], o.pos[2], o.pos[1] };
-    const float khds_half = 0.5f * sqrtf(o.size[0] * o.size[0] +
-                                         o.size[1] * o.size[1] +
-                                         o.size[2] * o.size[2]);
+    float khds_sz[3];
+    kh_bounds_size_of(o, khds_sz);
+    if (o.rotated) {
+        static const int khds_ax[3] = { 0, 2, 1 };   // Row j (engine-local axis j) -> its SQF size axis.
+        for (int khds_j = 0; khds_j < 3; ++khds_j) {
+            const float* const khds_w = &o.rot_m[khds_j * 3];
+            const float khds_n = sqrtf(khds_w[0] * khds_w[0] + khds_w[1] * khds_w[1] + khds_w[2] * khds_w[2]);
+            if (khds_n > 1.0f) khds_sz[khds_ax[khds_j]] *= khds_n;
+        }
+    }
+    const float khds_half = 0.5f * sqrtf(khds_sz[0] * khds_sz[0] +
+                                         khds_sz[1] * khds_sz[1] +
+                                         khds_sz[2] * khds_sz[2]);
     static thread_local std::vector<std::pair<float, uint32_t>> khds_d;   // Scratch.
     khds_d.clear();
     for (uint32_t i = 0; i < g_dl.pool_n; ++i) {
@@ -41390,18 +42245,9 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
             return;
         }
     }
-    // KH_CAST_WAIT: the engine reads its mask right after this paint, before a light frame's own Draw3D has landed,
-    // so wait for it here, once per cycle - at most KH_CAST_WAIT_US after the clear (see the Paint note at
-    // KH_ATTACH_GT_SNAP: past it the wait may be what holds the Draw3D back).
-    if (reorder_on_render_thread() && g_attach_n.load(std::memory_order_relaxed) != 0u &&
-        g_gts_paint_wait_cyc != g_topo_cycles) {
-        g_gts_paint_wait_cyc = g_topo_cycles;
-        kh_gts_wait_own(static_cast<int64_t>(kh_prof_freq()) * KH_CAST_WAIT_US / 1000000);
-    }
     // KH_CAST_REPICK: this paint is the frame's one; it reads the sun map built at the frame's first step, from the
-    // samples landed by then. When a newer sample has been published since (the one just waited for, as a rule), a
-    // step that picks again - without waiting - moves what it changes, and the map is rebuilt from it before the
-    // paint. A wait that reached its cap leaves the previous frame's pose in the shadow.
+    // samples landed by then. When a newer sample has been published since, a step that picks again moves what it
+    // changes, and the map is rebuilt from it before the paint. Nothing waits here (KH_ATTACH_GT_SNAP: "Wait").
     if (g_gts_first_cyc == g_topo_cycles && g_gts_done_pub.load(std::memory_order_acquire) > g_gts_first_done) {
         g_attach_repick_moved = false;
         {
@@ -41415,7 +42261,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         }
         g_gts_first_done = g_gts_done_pub.load(std::memory_order_acquire);   // Picked against these.
     }
-    // KH_RT_PAINT_READ: the own sample still absent after the wait - the render thread's read, if both passes agree.
+    // KH_RT_PAINT_READ: the own sample still absent - the render thread's read, if both passes agree.
     if (reorder_on_render_thread() && g_attach_n.load(std::memory_order_relaxed) != 0u && g_rtp_cyc != g_topo_cycles &&
         g_gts_first_cyc == g_topo_cycles && kh_rt_own_absent()) {
         g_rtp_cyc = g_topo_cycles;
@@ -43923,7 +44769,16 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
         // WAS - registered against the camera and against every engine caster,
         // and wrong only about us. Same rule as the injection and the cast
         // fire; this pass reads the scene to build draws exactly as they do.
-        kh_attach_step();
+        {
+            // KH_SEAM_SKIN: with the pass's context, so the footprint is this frame's SHAPE as well as its place -
+            // the skeletal skin, a cloth's pinned part and a chain's end (KH_CHAIN_END_DRAW) are written only by a
+            // step with a context - and the vertex stages over them, as the cast fire and the injection pair them.
+            // Our own buffer writes, under the flag: the hooks stand aside.
+            KhInjectionFlagScope khv_flag;
+            g_ro.in_injection = true;
+            kh_attach_step(ctx);
+            kh_uvs_step(ctx);
+        }
         kh_scene_sync();   // KH_SCENE: live walk by reference, no copy.
         for (uint32_t khsc_i = 0; khsc_i < g_scene.objs.size(); ++khsc_i) {
             if (!g_scene.alive[khsc_i]) continue;
@@ -45942,7 +46797,7 @@ inline bool kh_infront_pair(float& khvp_m22, float& khvp_m32) {
 
 // Once per cycle, at the first slice draw of either kind: the matrices and the
 // mesh snapshot both slice draws share.
-inline bool kh_infront_frame_prepare() {
+inline bool kh_infront_frame_prepare(ID3D11DeviceContext* khvf_ctx) {
     if (g_vm_frame_valid && g_vm_frame_cycle == g_topo_cycles) return true;
     g_vm_frame_valid = false;
     float khvf_m22 = 0.0f, khvf_m32 = 0.0f;
@@ -45973,8 +46828,11 @@ inline bool kh_infront_frame_prepare() {
     g_vm_m32 = khvf_m32;
 
     // The snapshot: the attach lanes sampled here, once, and the objects copied
-    // out so the second slice draw reads what the first drew.
-    kh_attach_step();
+    // out so the second slice draw reads what the first drew. KH_SEAM_SKIN: with
+    // the pass's context (its caller raised the flag), so the shapes are this
+    // frame's too, and the vertex stages over them.
+    kh_attach_step(khvf_ctx);
+    kh_uvs_step(khvf_ctx);
     kh_scene_sync();
     const float khvf_now = effect_time_seconds();
     g_vm_meshes.clear();
@@ -46007,7 +46865,7 @@ inline void kh_infront_inject(ID3D11DeviceContext* ctx, const D3D11_VIEWPORT& kh
     if (!dev) return;
     const bool khvi_pinj = g_ro.in_injection;
     g_ro.in_injection = true;   // Our own draws: the hooks stand aside.
-    if (!kh_infront_frame_prepare() || g_vm_meshes.empty()) {
+    if (!kh_infront_frame_prepare(ctx) || g_vm_meshes.empty()) {
         g_ro.in_injection = khvi_pinj;
         return;
     }
@@ -47958,8 +48816,10 @@ inline void kh_infront_seam_inject(ID3D11DeviceContext* ctx, const D3D11_VIEWPOR
     const bool khvs_pinj = g_ro.in_injection;
     g_ro.in_injection = true;
 
-    // The casters: live, at the consume point (the world seam's rule).
-    kh_attach_step();
+    // The casters: live, at the consume point (the world seam's rule), their shapes
+    // too (KH_SEAM_SKIN: the pass's context; the flag is raised above).
+    kh_attach_step(ctx);
+    kh_uvs_step(ctx);
     kh_scene_sync();
     static std::vector<RenderObject> khvs_list;
     khvs_list.clear();
@@ -48769,13 +49629,15 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     const float snap_world_m22 = g_ro.world_m22;
     const float snap_world_m32 = g_ro.world_m32;
 
+    // KH_PART_NEAR: the camera's own near - the cycle's camera (the clear's latch, its pair checked against the
+    // live one above), before any pair below replaces it: the partition our meshes belong in.
+    const float khr_cam_near = fabsf(pv.projection[2][2]) > 1e-9f
+                             ? (-pv.projection[3][2] / pv.projection[2][2]) : -1.0f;
+
     if (measured) {
         pv.projection[2][2] = g_ro.engine_m22;
         pv.projection[3][2] = g_ro.engine_m32;
     }
-
-    const float khr_bridge_near = fabsf(pv.projection[2][2]) > 1e-9f
-                                ? (-pv.projection[3][2] / pv.projection[2][2]) : -1.0f;
 
     const bool khr_keep_fresh = g_slot_keep_near > 0.0f && g_slot_keep_ms != 0 &&
                                 steady_now_ms() - g_slot_keep_ms < 250;
@@ -48807,28 +49669,31 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
 
     // A following camera partition still gets its own injection via the
     // partition-change re-arm.
-    if (snap_slot_near > 0.0f && khr_bridge_near > 1e-4f &&
-        khr_slot_sane_far &&   // celestial-class slots never arm the far phase.
-        snap_slot_near > 1.5f * khr_bridge_near) {
+    // KH_PART_NEAR: judged on the near this injection would draw with - the pair just taken - against the
+    // camera's. The world-phase latch keeps the last opaque draw's pair, which can be a far partition's (a view
+    // with no object near the camera: 10 m, measured) while the slot has already moved on to the camera's; judged
+    // on the slot, the rule passed and the injection drew with the far near, a near mesh wholly in the near-gap in
+    // front of everything. Where the slot and the latch agree (every far partition before this) it is the rule as
+    // it was.
+    const float khr_eff_near = fabsf(pv.projection[2][2]) > 1e-9f
+                             ? (-pv.projection[3][2] / pv.projection[2][2]) : -1.0f;
+    if (snap_slot_near > 0.0f && khr_cam_near > 1e-4f &&
+        kh_enc_far(pv.projection[2][2], pv.projection[3][2]) <= KH_ENC_FAR_MAX &&   // Celestial-class: never.
+        khr_eff_near > 1.5f * khr_cam_near) {
         float khr_cam[3];
         extract_camera_pos(pv.view, khr_cam);
         float khr_min_clear = 1e9f;
 
         for (uint32_t khr_slot : khr_elig) {   // KH_SCENE: every eligible mesh, pre-cull independent.
-            const RenderObject& m = g_scene.objs[khr_slot];
-            const float me[3] = { m.pos[0], m.pos[2], m.pos[1] };   // SQF -> engine axes.
-            const float dx = me[0] - khr_cam[0];
-            const float dy = me[1] - khr_cam[1];
-            const float dz = me[2] - khr_cam[2];
-            const float r = 0.5f * sqrtf(m.size[0] * m.size[0] +
-                                         m.size[1] * m.size[1] +
-                                         m.size[2] * m.size[2]);
-            const float d = sqrtf(dx * dx + dy * dy + dz * dz) - r;
+            // KH_NEARZ_BOUNDS: the nearest the box around everything the mesh may draw comes to the camera
+            // (kh_bounds_size_of: a cloth's reach, a decimated level, a vertex stage's reach, the residual; a
+            // scaled rotation) - the script's size alone passed such a mesh as clear, drawn in the near-gap.
+            const float d = sqrtf(kh_bounds_dist_sq(g_scene.objs[khr_slot], khr_cam));
 
             if (d < khr_min_clear) khr_min_clear = d;
         }
 
-        if (khr_min_clear < 1.5f * snap_slot_near) {
+        if (khr_min_clear < 1.5f * khr_eff_near) {
             // A repaint-invoked call landing here gets its one-shot refunded,
             // so a genuine repaint later the same cycle still fires.
             g_ro.injected = false;   // Stay armed for the camera partition.
@@ -54493,6 +55358,16 @@ inline void stage_video_options() {
 }
 inline void stage_world_lighting() {
     stage_video_options();
+    // KH_DL_ORIGIN_GRID: the terrain's land-grid cell, once per session (an engine call, like the reads above).
+    if (!(g_dl_cell.load(std::memory_order_relaxed) > 0.0f)) {
+        try {
+            const auto khdc_t = sqf::get_terrain_info();
+            const float khdc_w = khdc_t.land_grid_width;
+            if (khdc_w == khdc_w && khdc_w > 0.0f && khdc_w < 1.0e5f) {
+                g_dl_cell.store(khdc_w, std::memory_order_relaxed);
+            }
+        } catch (...) {}
+    }
 
     // Atmospheric occlusion applies to every world-space mesh; stage it
     // whenever the flush runs.
@@ -55983,7 +56858,7 @@ inline void reset_stat_counters() {
     g_stats = RenderStats{};
     g_attach_repaired.store(0, std::memory_order_relaxed);   // KH_ATTACH_DIAG.
     g_rp_c = KhRpCounters();   // KH_VOL_REPLAY.
-    g_gid_waits = g_gid_late = g_gid_timeouts = g_gid_breaks = 0;   // KH_GTS_IDENTITY.
+    g_gid_breaks = 0;   // KH_GTS_IDENTITY.
     g_rtp_c = KhRtpCounters();   // KH_RT_PAINT_READ.
     g_attach_refused.store(0, std::memory_order_relaxed);
     g_attach_skew_bits.store(0, std::memory_order_relaxed);
@@ -56041,16 +56916,18 @@ inline void kh_session_scratch_reset() {
     g_rp_c = KhRpCounters();
     g_gid_ok = false;   // KH_GTS_IDENTITY: relearned in the new session.
     g_gid_k = 0;
-    g_gid_waits = g_gid_late = g_gid_timeouts = g_gid_breaks = 0;
+    g_gid_breaks = 0;
     g_rtp_cyc = ~0ull;   // KH_RT_PAINT_READ.
     g_rtp_c = KhRtpCounters();
     g_gts_clear_qpc = 0;
     g_gts_clear_prev = 0;
     g_gts_half = 0;
-    g_gts_wait_cyc = ~0ull;
+    g_gts_final_cyc = ~0ull;
+    g_gts_learn_cyc = ~0ull;
+    g_gts_first_rd_cyc = ~0ull;
+    g_gts_crew_n.store(0, std::memory_order_relaxed);   // KH_CREW_LAG.
     g_gts_first_cyc = ~0ull;      // KH_CAST_REPICK.
     g_gts_first_done = 0;
-    g_gts_paint_wait_cyc = ~0ull;   // KH_CAST_WAIT.
     g_attach_repick_step = false;
     g_attach_repick_moved = false;
     g_sun_restep_cycle = ~0ull;
@@ -56135,7 +57012,7 @@ inline void kh_rp_globals_reset() {
     g_rp_c = KhRpCounters();
     g_gid_k = 0;
     g_gid_ok = false;
-    g_gid_waits = g_gid_late = g_gid_timeouts = g_gid_breaks = 0;
+    g_gid_breaks = 0;
     g_rtp_c = KhRtpCounters();
     g_rtp_cyc = ~0ull;
 }
@@ -56324,10 +57201,12 @@ inline void kh_session_globals_reset() {
     g_thm_h = 0;
     kh_reinit(g_thm_origin);
     g_thm_cell = 0.0f;
+    g_thm_split = KH_THM_SPLIT_SMOOTH;   // KH_THM_EXACT.
     g_thm_dirty.store(false, std::memory_order_relaxed);
     g_thm_valid.store(false, std::memory_order_relaxed);
     kh_reinit(g_thml_origin);
     g_thml_cell = 0.0f;
+    g_thml_split = KH_THM_SPLIT_SMOOTH;   // KH_THM_EXACT.
     g_thml_w = 0;
     g_thml_h = 0;
     g_thm_auto_state = 0;
@@ -56767,6 +57646,8 @@ inline void kh_session_globals_reset() {
     kh_reinit(g_hdc_dss);
     g_flush_fx_arb_prev = false;
     g_video_opt_ms = 0;
+    g_dl_cell.store(0.0f, std::memory_order_relaxed);   // KH_DL_ORIGIN_GRID: the next session reads its terrain.
+    g_dl_q_cells = 0;
     g_ui_rehoist_auto_s = -1.0e9f;
     g_ui_prev_scene_frame = 0;
     g_ui_rehoist_last_s = -1.0e9f;
@@ -56801,9 +57682,12 @@ inline void kh_session_objects_reset() {
     g_attach_proxy_dead_n.store(0, std::memory_order_relaxed);
     g_pxy_pool_n.store(0, std::memory_order_relaxed);
     g_gts_done_pub.store(0, std::memory_order_relaxed);   // Names a g_gts_seq value: restarts with it.
+    g_gts_done_defer = 0;   // KH_CHAIN_END_DRAW.
     for (auto& khsg_st : g_gts_stamp_pub) khsg_st.store(0, std::memory_order_relaxed);
     g_next_seq = 0;
     kh_reinit(g_chain_cfg);
+    kh_reinit(g_chain_end);   // KH_CHAIN_END_DRAW (reset_retained_state has emptied it).
+    g_chain_end_n.store(0, std::memory_order_relaxed);
     kh_reinit(g_chain_warned);
     kh_reinit(g_chain_nobuild);
     g_ground_ready = false;
@@ -56861,6 +57745,8 @@ inline void reset_session_state() {
     // Cleared here, re-armed by the first stage_video_options.
     g_obj_vis.store(0.0f, std::memory_order_relaxed);
     g_video_opt_ms = 0;   // KH_VIDEO_OPT_CADENCE: the next poll is immediate.
+    g_dl_cell.store(0.0f, std::memory_order_relaxed);   // KH_DL_ORIGIN_GRID.
+    g_dl_q_cells = 0;
      g_cascbind_feed_t = -1.0f;
 
     // The lifetime pairing trio is session-scoped under full destroy.
@@ -56962,6 +57848,7 @@ inline void reset_session_state() {
     g_thm_w = g_thm_h = 0;
     g_thm_origin[0] = g_thm_origin[1] = 0.0f;
     g_thm_cell = 0.0f;
+    g_thm_split = KH_THM_SPLIT_SMOOTH;   // KH_THM_EXACT.
     g_thm_dirty = false;
     g_thm_valid = false;
     g_voc_thm_max.clear();
@@ -56975,6 +57862,7 @@ inline void reset_session_state() {
     g_voc_thm_valid = false;
     g_thml_origin[0] = g_thml_origin[1] = 0.0f;
     g_thml_cell = 0.0f;
+    g_thml_split = KH_THM_SPLIT_SMOOTH;   // KH_THM_EXACT.
     g_thml_w = g_thml_h = 0;
     g_thm_auto_state = 0;
     g_thm_auto_cursor = 0;
@@ -56999,6 +57887,11 @@ inline void reset_retained_state() {
     g_cloth_proxy.clear();
     g_cloth_proxy_want.clear();
     g_chain_cfg.clear();   // KH_CHAIN: its proxies too are the mission's, released the same way.
+    {   // KH_CHAIN_END_DRAW: the render thread reads the table under the mutex.
+        std::lock_guard<std::mutex> khce_g(g_draw_list_mutex);
+        g_chain_end.clear();
+        g_chain_end_n.store(0, std::memory_order_relaxed);
+    }
     g_chain_warned.clear();
     g_chain_nobuild.clear();
     g_aff_frame.clear();

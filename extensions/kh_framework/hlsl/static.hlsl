@@ -1064,8 +1064,8 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
         if (khtHe > -1.0e5f) khtC = i.wpos.y - khtHe;
 
         if (i.pos.w >= thmMeta.w) {
-            // 1.5-cell aliasing slack (twin).
-            float khtMc = KhThmClearance(fxParams0.xyz, i.wpos) + 1.5f * thmParams.z;
+            // 1.5 tolerance cells of slack (KhThmTolCell; twin).
+            float khtMc = KhThmClearance(fxParams0.xyz, i.wpos) + 1.5f * KhThmTolCell();
             if (khtMc < khtC) khtC = khtMc;
         }
 

@@ -130,10 +130,11 @@ cbuffer CBObj : register(b0)
     float4 fogSky;   // The sky CB's view-elevation gradient control.
     float4 fogSkyCol;   // The sky CB's fog base colour (row 7).
     float4 hazePars;   // Engine distance haze, the sky CB's row 14.
-    // x = origin world X, y = origin world Z (SQF y), z = cell size (m), w =
-    // enabled and texture valid.
+    // x = origin world X, y = origin world Z (SQF y), z = node spacing (m: the terrain grid's own where the
+    // framework's terrain matrix is the source), w = enabled and texture valid (0 off) as 1 + the split code:
+    // the engine's triangle split of each cell class, one base-3 digit per class (KhThmHeight, KH_THM_EXACT).
     float4 thmParams;
-    // x = width (cells), y = height (cells), z = the terrain band (m,
+    // x = width, y = height (nodes: the texture's texels), z = the terrain band (m,
     // KH_THM_BIAS_M: the discard's clearance and PSMaskCast's snap), w = the
     // view distance (m, KH_THM_MIN_DIST_M) from which the clearance march runs.
     // Written with thmParams by kh_fill_occ; both stay zero with no heightfield.
@@ -756,8 +757,12 @@ Texture2D<float> terrainHeightTex : register(t10);
 // KH_SHADOW_GATHER's sampler (its note is at KhPfMu below), declared here because KhThmHeight reads through it.
 SamplerState khPfSamp : register(s1);   // Linear-clamp.
 
-// Bilinear terrain height (ASL meters) at engine-space (x, z). Returns -1e6
-// outside the heightfield (= no occlusion evidence).
+// KH_THM_EXACT - the terrain height (ASL metres) at engine-space (x, z), as the engine's own ground has it: between
+// the nodes, two flat triangles per cell, split along the diagonal kh_cloth_ground_prepare measured for the cell's
+// class ((i & 1) | (j & 1) << 1 of its first node's indices; 0 = the diagonal from (i, j) to (i + 1, j + 1), 1 = the
+// one from (i + 1, j) to (i, j + 1), 2 = a bilinear fit where the split is not known - a grid not at the matrix's
+// native spacing, or a split not recognised), carried as base-3 digit k of thmParams.w - 1. C++ twin:
+// kh_cloth_ground_plane. Returns -1e6 outside the heightfield (= no occlusion evidence).
 float KhThmHeight(float2 xz)
 {
     float2 g = (xz - thmParams.xy) / max(thmParams.z, 1e-3f);
@@ -770,10 +775,35 @@ float KhThmHeight(float2 xz)
     // test above keeps c0 + 1 inside it, so the addressing mode never engages: the texels, and the lerp, are the
     // four Loads' bit for bit. Components: w = c0, z = c0 + (1, 0), x = c0 + (0, 1), y = c0 + (1, 1).
     const float4 khth_g = terrainHeightTex.Gather(khPfSamp, (float2(c0) + 1.0f) / thmMeta.xy);
+    const float khth_h00 = khth_g.w, khth_h10 = khth_g.z, khth_h01 = khth_g.x, khth_h11 = khth_g.y;
+    const uint2 khth_p = uint2(c0) & 1u;
+    const uint khth_cls = khth_p.x | (khth_p.y << 1);
+    const float khth_d = khth_cls == 0u ? 1.0f : (khth_cls == 1u ? 3.0f : (khth_cls == 2u ? 9.0f : 27.0f));
+    const float khth_q = floor(max(thmParams.w - 1.0f, 0.0f) / khth_d);   // Small integers: exact.
+    const float khth_sp = khth_q - 3.0f * floor(khth_q / 3.0f);
+    if (khth_sp < 0.5f) {   // The diagonal from (i, j) to (i + 1, j + 1).
+        return f.x >= f.y ? khth_h00 + (khth_h10 - khth_h00) * f.x + (khth_h11 - khth_h10) * f.y
+                          : khth_h00 + (khth_h11 - khth_h01) * f.x + (khth_h01 - khth_h00) * f.y;
+    }
+    if (khth_sp < 1.5f) {   // The diagonal from (i + 1, j) to (i, j + 1).
+        return f.x + f.y <= 1.0f
+             ? khth_h00 + (khth_h10 - khth_h00) * f.x + (khth_h01 - khth_h00) * f.y
+             : khth_h11 + (khth_h11 - khth_h01) * (f.x - 1.0f) + (khth_h11 - khth_h10) * (f.y - 1.0f);
+    }
     return lerp(lerp(khth_g.w, khth_g.z, f.x), lerp(khth_g.x, khth_g.y, f.x), f.y);
 }
 
-// Both callers read the result only through one test - clearance + 1.5 cells
+// KH_THM_EXACT - the scale the heightfield's tolerances were tuned at: the cell of the grid the heightfield was
+// decimated to before it took the matrix whole (at most 1025 nodes a side, kh_thm_autobuild_step's old stride
+// (n + 1024) / 1025 over the n nodes a side). They absorb what the engine's own drawn terrain departs from its
+// exact ground (its distant LOD), which a finer heightfield does not shrink: the march's end skip and its sub-cell
+// slack, the arbitration's terrain tolerance.
+float KhThmTolCell()
+{
+    return thmParams.z * floor((thmMeta.x + 1024.0f) / 1025.0f);
+}
+
+// Both callers read the result only through one test - clearance + 1.5 tolerance cells (KhThmTolCell)
 // below -thmMeta.z discards the fragment - and the running minimum can only
 // fall, so once that test holds the remaining steps cannot change the
 // outcome: the march stops there. The test is the callers' own expression,
@@ -783,7 +813,7 @@ float KhThmClearance(float3 cam, float3 wp)
     float mc = 1.0e9f;
     float len = distance(cam, wp);
     if (len < 1.0f) return mc;
-    float skip = max(2.0f * thmParams.z, 25.0f);
+    float skip = max(2.0f * KhThmTolCell(), 25.0f);
     float t0 = saturate(skip / len);
     float t1 = 1.0f - saturate(skip / len);
     if (t1 <= t0) return mc;
@@ -793,7 +823,7 @@ float KhThmClearance(float3 cam, float3 wp)
         float3 p = lerp(cam, wp, t);
         float h = KhThmHeight(p.xz);
         if (h > -1.0e5f) mc = min(mc, p.y - h);
-        if (mc + 1.5f * thmParams.z < -thmMeta.z) break;   // Decided: the callers discard.
+        if (mc + 1.5f * KhThmTolCell() < -thmMeta.z) break;   // Decided: the callers discard.
     }
 
     return mc;

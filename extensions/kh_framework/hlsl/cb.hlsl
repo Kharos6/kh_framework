@@ -131,8 +131,9 @@ cbuffer CBObj : register(b0)
     float4 fogSkyCol;   // The sky CB's fog base colour (row 7).
     float4 hazePars;   // Engine distance haze, the sky CB's row 14.
     // x = origin world X, y = origin world Z (SQF y), z = node spacing (m: the terrain grid's own where the
-    // framework's terrain matrix is the source), w = enabled and texture valid (0 off) as 1 + the split code:
-    // the engine's triangle split of each cell class, one base-3 digit per class (KhThmHeight, KH_THM_EXACT).
+    // framework's terrain matrix is the source, a whole multiple of it past KH_THM_MAX_SIDE nodes a side), w =
+    // enabled and texture valid (0 off) as 1 + the split code: the engine's triangle split of each cell class,
+    // one base-3 digit per class (KhThmHeight, KH_THM_EXACT).
     float4 thmParams;
     // x = width, y = height (nodes: the texture's texels), z = the terrain band (m,
     // KH_THM_BIAS_M: the discard's clearance and PSMaskCast's snap), w = the
@@ -779,8 +780,11 @@ float KhThmHeight(float2 xz)
     const uint2 khth_p = uint2(c0) & 1u;
     const uint khth_cls = khth_p.x | (khth_p.y << 1);
     const float khth_d = khth_cls == 0u ? 1.0f : (khth_cls == 1u ? 3.0f : (khth_cls == 2u ? 9.0f : 27.0f));
-    const float khth_q = floor(max(thmParams.w - 1.0f, 0.0f) / khth_d);   // Small integers: exact.
-    const float khth_sp = khth_q - 3.0f * floor(khth_q / 3.0f);
+    // Each floor takes an integer plus a half over its divisor, a quotient at least 0.5 / 27 from any integer:
+    // D3D11 divides to 2.5 ulp (x * rcp(d) on most parts), and an exact integer quotient (12 / 3, 9 / 9 - the
+    // code of every alternating split) could land just under it and drop a digit.
+    const float khth_q = floor((max(thmParams.w - 1.0f, 0.0f) + 0.5f) / khth_d);
+    const float khth_sp = khth_q - 3.0f * floor((khth_q + 0.5f) / 3.0f);
     if (khth_sp < 0.5f) {   // The diagonal from (i, j) to (i + 1, j + 1).
         return f.x >= f.y ? khth_h00 + (khth_h10 - khth_h00) * f.x + (khth_h11 - khth_h10) * f.y
                           : khth_h00 + (khth_h11 - khth_h01) * f.x + (khth_h01 - khth_h00) * f.y;

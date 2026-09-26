@@ -898,8 +898,8 @@ static const float KH_CAST_SNAP_ABOVE = 4.0f;
     // KH_CAST_SNAP_ABOVE: a receiver ABOVE the heightfield is snapped only
     // within KH_CAST_SNAP_ABOVE depth ulps carried along the ray, whatever it
     // faces. Height alone cannot tell the ground from an engine surface lying
-    // on it (a prone body, a helmet, a low prop - the heightfield is point-
-    // sampled, its cells up to tens of metres), and snapped down such a surface
+    // on it (a prone body, a helmet, a low prop - within the band of the
+    // ground, which the heightfield follows), and snapped down such a surface
     // went below every caster of ours lower than itself and took their shadow
     // (a mesh under or inside it darkened it). Beyond the quantisation it keeps
     // its own height, the ground above the heightfield included - noise at most

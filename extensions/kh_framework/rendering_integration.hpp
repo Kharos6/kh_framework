@@ -11197,9 +11197,9 @@ inline const KhGtSnap* kh_gts_for_cycle(KhAttach& khgc_a, uint64_t khgc_cyc, boo
 // the object its binding is placed from) through that character's helper brings it in too: the lane is turned as
 // that character is drawn (its rows, from the same rigid move).
 // GAME THREAD maintains it (kh_crew_sync, from flush_frame; the events): inserted, erased and every field the render
-// thread reads (in, helper, veh, l_ok, l, lq, r_*) written under g_draw_list_mutex; t / tr / seen are the game
-// thread's alone. Never destructed (game values); the mission edge empties it (kh_crew_clear_all, outside the mutex:
-// dropping an entry removes its event handlers, an SQF call).
+// thread reads (in, d_ok, helper, veh, l_ok, l, lq, r_*) written under g_draw_list_mutex; t / tr / seen are the
+// game thread's alone. Never destructed (game values); the mission edge empties it (kh_crew_clear_all, outside
+// the mutex: dropping an entry removes its event handlers, an SQF call).
 struct KhCrewEnt {
     game_value man;
     game_value helper;           // The character's origin helper (this entry's pool reference).
@@ -45844,15 +45844,15 @@ inline bool kh_upload_hook_wanted(ID3D11DeviceContext* self, ID3D11Resource* res
 }
 
 // KH_PIP - our meshes in the engine's PIP cameras. A PIP is a full scene pass
-// on its own depth (D24S8) and HDR colour (RGBA16F) targets, both
+// on its own depth (D24S8) and HDR colour targets (the main scene's kind: RGBA16F at HDR quality Standard), both
 // single-sample, rendered BEFORE the main pass. Engine per-view block (VS b2):
 // floats 0..15 rebase origin (1,0,0,X / 0,1,0,0 / 0,0,1,Z / 0,0,0,0), 16..27
 // the 3x4 view [R | -R.cam] on rebased positions, 28..31 rebased camera (w =
 // 1), 56..59 absolute camera (w = 1). Projection: b0 floats 0..15, row-vector
 // (m00 0 0 0 / 0 m11 0 0 / 0 0 m22 1 / 0 0 m32 0). Both are re-uploaded per
 // view ahead of its draws, so the last such uploads before a PIP draw are the
-// PIP camera's. The pass is recognised at the OM hook (non-main depth + RGBA16F
-// single-sample colour that is not the scene texture); its depth clear opens a
+// PIP camera's. The pass is recognised at the OM hook (non-main depth + RGBA16F or the main scene's own format,
+// KH_PIP_FMT - single-sample colour that is not the scene texture); its depth clear opens a
 // cycle, opaques are counted, and the first blended draw after
 // KH_PIP_MIN_OPAQUES fires one injection: the previous main pass's frame
 // template with the view lanes replaced and every screen-space lane disarmed
@@ -45891,8 +45891,11 @@ struct KhPipState {
     ConstantData tpl = {};
     bool     tpl_valid = false;
     uint64_t tpl_cycle = 0;
-    // Classification cache: (dsv identity, rtv0) -> verdict.
-    struct Key { void* dsv; void* rtv; bool pip; uint32_t w, h; };
+    // KH_PIP_FMT: the main scene colour target's format (a DXGI_FORMAT; 0 = not seen yet), kh_pip_scene_fmt_note.
+    uint32_t scene_fmt = 0;
+    // Classification cache: (dsv identity, rtv0) -> verdict, with the scene_fmt it was made under (fmt): a
+    // verdict made before the format was learned, or under another, is not reused.
+    struct Key { void* dsv; void* rtv; bool pip; uint32_t w, h; uint32_t fmt; };
     Key      cache[8] = {};
     uint32_t cache_n = 0;
 };
@@ -45901,6 +45904,20 @@ static KhPipState g_pip;
 inline void kh_pip_reset() {
     g_pip = KhPipState();
     g_pip_seen = false;
+}
+// KH_PIP_FMT - the main scene colour target's format, read where the injection draws into it (its RT0 at the
+// landing, the resource the census latches). A PIP pass renders the scene into a target of the same kind, and
+// that kind follows the video options' HDR quality: RGBA16F at Standard, another format at Low, where the fixed
+// RGBA16F test recognised no PIP and none of our meshes appeared in one. Render thread (the census's); the
+// reference is the caller's, live for the call.
+inline void kh_pip_scene_fmt_note(ID3D11Resource* khpsf_res) {
+    ID3D11Texture2D* khpsf_tex = nullptr;
+    if (FAILED(khpsf_res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&khpsf_tex))) ||
+        !khpsf_tex) return;
+    D3D11_TEXTURE2D_DESC khpsf_td = {};
+    khpsf_tex->GetDesc(&khpsf_td);
+    khpsf_tex->Release();
+    g_pip.scene_fmt = static_cast<uint32_t>(khpsf_td.Format);
 }
 
 // The two engine blocks by signature (see the KH_PIP note). A handful of exact
@@ -46337,7 +46354,7 @@ inline void kh_pip_track_targets(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderT
     if (khpt_was && khpt_rtv != khpt_was_rtv && !g_pip.fx_done) kh_pip_fx(ctx);
     for (uint32_t i = 0; i < g_pip.cache_n; ++i) {
         const KhPipState::Key& k = g_pip.cache[i];
-        if (k.dsv == khpt_id && k.rtv == khpt_rtv) {
+        if (k.dsv == khpt_id && k.rtv == khpt_rtv && k.fmt == g_pip.scene_fmt) {   // KH_PIP_FMT.
             g_pip.on = k.pip;
             g_pip.cur_rtv = k.pip ? khpt_rtv : nullptr;
             if (k.pip) { g_pip.w = k.w; g_pip.h = k.h; }
@@ -46354,15 +46371,17 @@ inline void kh_pip_track_targets(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderT
             if (SUCCEEDED(khpt_res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&khpt_tex))) && khpt_tex) {
                 D3D11_TEXTURE2D_DESC td = {};
                 khpt_tex->GetDesc(&td);
-                khpt_pip = td.Format == DXGI_FORMAT_R16G16B16A16_FLOAT && td.SampleDesc.Count == 1 &&
-                           td.Width >= 64 && td.Height >= 64;
+                // KH_PIP_FMT: the HDR target kind - RGBA16F, as before, or the main scene's own format.
+                const bool khpt_hdr = td.Format == DXGI_FORMAT_R16G16B16A16_FLOAT ||
+                                      (g_pip.scene_fmt != 0u && static_cast<uint32_t>(td.Format) == g_pip.scene_fmt);
+                khpt_pip = khpt_hdr && td.SampleDesc.Count == 1 && td.Width >= 64 && td.Height >= 64;
                 khpt_w = td.Width; khpt_h = td.Height;
                 khpt_tex->Release();
             }
         }
         khpt_res->Release();
     }
-    KhPipState::Key k = { khpt_id, khpt_rtv, khpt_pip, khpt_w, khpt_h };
+    KhPipState::Key k = { khpt_id, khpt_rtv, khpt_pip, khpt_w, khpt_h, g_pip.scene_fmt };
     if (g_pip.cache_n < 8) g_pip.cache[g_pip.cache_n++] = k;
     else g_pip.cache[g_topo_cycles & 7] = k;   // A cold slot; the cache is a hint.
     g_pip.on = khpt_pip;
@@ -51595,7 +51614,8 @@ inline void kh_reorder_trigger(ID3D11DeviceContext* self) {
 
     // Frame-topology census: stamp the accept and latch the scene colour RT0
     // identity (the injection draws into it - the one moment it is known to be
-    // bound). Identity only, never dereferenced.
+    // bound). The latched identity is never dereferenced; KH_PIP_FMT reads the
+    // format through the reference held here.
 
     {
         ID3D11RenderTargetView* kht_rtv = nullptr;
@@ -51607,6 +51627,7 @@ inline void kh_reorder_trigger(ID3D11DeviceContext* self) {
 
             if (kht_res) {
                 g_topo_scene_tex_id = static_cast<void*>(kht_res);
+                kh_pip_scene_fmt_note(kht_res);   // KH_PIP_FMT.
                 kht_res->Release();
             }
 
@@ -54210,7 +54231,31 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
         }
     }
 
-    if (khf_inj_pair) {
+    // KH_LATE_WORLD_PAIR - a render-thread flush drawing a cycle the injection did not land in, on a frame drawn under
+    // one pair, takes that pair: the world phase's latch (this cycle's g_ro.world_m22 / m32 - the pair the engine's
+    // last opaque world draw rendered under, which wrote the depth these draws test against), the injection's own
+    // first choice. Measured (a test probe, withdrawn): in sparse views the injection never ran (6 to 65 engine
+    // opaques a frame), and the publication rung took a pair published a frame to 52 s before whose near was within
+    // its 25 % of the camera's (6.51 m against 6.29, 3.65 against 4.52). The engine's near plane moves with the view,
+    // so the mesh was encoded nearer or farther than the terrain about it - a slice through it that moved with the
+    // camera, in front of the terrain or behind it. So the latch replaces exactly that: an earlier landing's
+    // publication (khf_inj_pair or khf_latch_far, chosen against it) in a cycle that has not landed. Everything else
+    // stands as it was - a landed cycle, a session no injection has published in (post effects alone), a park's
+    // flush, a cycle with no latch, and a partitioned frame: the latch's near past 1.5 x the
+    // camera's (KH_PART_NEAR), whose depth holds more than one encode, so that no one pair is right for a late draw.
+    bool khf_world_pair = false;
+    if (khfl_rt && !injected_since_last_flush && khf_pub_valid && (khf_inj_pair || khf_latch_far) &&
+        g_ro.world_pair_valid) {
+        const float khf_wp_near = fabsf(g_ro.world_m22) > 1e-9f ? (-g_ro.world_m32 / g_ro.world_m22) : -1.0f;
+        const float khf_wp_cam = fabsf(pv.projection[2][2]) > 1e-9f
+                               ? (-pv.projection[3][2] / pv.projection[2][2]) : -1.0f;
+        khf_world_pair = khf_wp_near > 0.0f && khf_wp_cam > 1e-4f && khf_wp_near <= 1.5f * khf_wp_cam;
+    }
+
+    if (khf_world_pair) {
+        pv.projection[2][2] = g_ro.world_m22;
+        pv.projection[3][2] = g_ro.world_m32;
+    } else if (khf_inj_pair) {
         pv.projection[2][2] = g_inj_enc_m22;
         pv.projection[3][2] = g_inj_enc_m32;
     } else if (khf_latch_far) {

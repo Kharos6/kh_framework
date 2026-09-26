@@ -1,6 +1,12 @@
 private _entity = param [0];
 if !(_entity isEqualType objNull) exitWith {};
-if !(_entity isNil "KH_var_renderHandlers") exitWith {};
+
+{
+    {
+        removeRenderHandler (_x select 0);
+    } forEach _y;
+} forEach (_entity getVariable ["KH_var_renderHandlers", createHashMap]);
+
 private _renderHandlers = createHashMap;
 _entity setVariable ["KH_var_renderHandlers", _renderHandlers];
 
@@ -65,7 +71,8 @@ if (_entity isKindOf "Man") then {
 
                 _renderHandlers set [_key, _currentHandlers];
             };                    
-        }
+        },
+        ["KH_var_renderingSlotItemHandler", hashValue _entity] joinString "_"
     ] call KH_fnc_addEventHandler;
 
     [
@@ -82,7 +89,8 @@ if (_entity isKindOf "Man") then {
                     updateRender3D [_renderHandler, "visible", false];
                 };
             } forEach (values (_entity getVariable ["KH_var_renderHandlers", createHashMap]));    
-        }
+        },
+        ["KH_var_renderingGetInHandler", hashValue _entity] joinString "_"
     ] call KH_fnc_addEventHandler;
 
     [
@@ -99,7 +107,8 @@ if (_entity isKindOf "Man") then {
                     updateRender3D [_renderHandler, "visible", true];
                 };
             } forEach (values (_entity getVariable ["KH_var_renderHandlers", createHashMap]));        
-        }
+        },
+        ["KH_var_renderingGetOutHandler", hashValue _entity] joinString "_"
     ] call KH_fnc_addEventHandler;
 
     [
@@ -141,7 +150,8 @@ if (_entity isKindOf "Man") then {
             } forEach ("true" configClasses (configFile >> "CfgWeapons" >> _newWeapon >> "KH_Rendering3D"));
 
             _renderHandlers set [_slot, _currentHandlers];                 
-        }
+        },
+        ["KH_var_renderingWeaponSlotHandler", hashValue _entity] joinString "_"
     ] call KH_fnc_addEventHandler;
 };
 

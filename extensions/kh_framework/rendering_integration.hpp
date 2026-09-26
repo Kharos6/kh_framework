@@ -12366,7 +12366,15 @@ static std::atomic<uint64_t> g_flush_serial{ 0 };
 static uint32_t g_scene_depth_samples = 0;   // sampleDesc.Count of the adopted main depth.
 // INTENTIONAL: at FSAA 1x (single-sample main depth) every world mesh stands
 // down - flush and injection - while fullscreen passes keep running. The mesh
-// path is validated against the multisampled scene only.
+// path is validated against the multisampled scene only. At 1x the game thread
+// clears the main depth, so the clear hook names it the render thread, and the
+// engine's render thread - which draws the 1x scene - is outside every hook's
+// render-thread gate: the injection, PIP, in-front and seam routes, keyed on its
+// scene passes, never run (measured, probe FS: no injection or PIP injection
+// at 1x). It never flushes either, so the watchdog parks every 1x frame, and
+// that flush draws no world mesh into the frame (the white placeholder
+// included; its sun and dynamic-light maps can still render, unread). A runtime
+// FSAA change returns to the bootstrap (KH_WATCH_STALL, KH_FSAA_SWITCH).
 inline bool kh_fsaa_world_standdown() {
     return g_scene_depth_samples == 1;
 }
@@ -12380,9 +12388,26 @@ inline bool kh_ensure_ok(const char* khe_what, const std::string& khe_err) {
     return false;
 }
 
-// Atomic: written by the render thread (clear-hook drop, resolve re-adoption)
-// and the flush, read by the game thread's watchdog and late chain test.
+// Atomic: written by the clear hook's drops (either thread: at FSAA 1x the
+// game thread clears the main depth), the render thread's resolve re-adoption,
+// the flush and the game thread's watchdog (KH_WATCH_STALL); read by each of
+// those, by the named render thread's hooks (the OM, PIP and injection identity
+// tests) and by the late chain test (either thread).
 static std::atomic<void*> g_main_depth_identity{ nullptr };
+// KH_WATCH_STALL - the watchdog's lag test (flush_frame) compares two counters that stop together when the main
+// depth is not recognised - a same-size stale identity after FSAA changes to 1x at runtime, where no scene resolve
+// re-adopts it (KH_DEPTH_READOPT) - so it read ready while nothing of ours ran (measured, probe FS: one 68 s cycle
+// over ~5,500 Draw3D samples and ~44,000 engine depth clears, no park; the real 1x scene then passed for a PIP and
+// the PIP injection drew the meshes into it). A watchdog sample at which the engine cleared depth since the last
+// one while the published cycle did not move counts; KH_WATCH_STALL_FRAMES of them in a row drop the identity and
+// the render thread, the bootstrap state, and the park re-adopts at once (the 1x mission start's path). A screen
+// that draws no 3D scene clears no depth and runs no Draw3D (measured: no sample in 26-36 s menu stretches), so
+// the rule stays idle there.
+static constexpr uint32_t KH_WATCH_STALL_FRAMES = 8u;
+static std::atomic<uint64_t> g_watch_clears{ 0 };   // Engine depth clears on the tracked context (the clear hook).
+static uint64_t g_watch_cyc_seen = ~0ull;   // Game thread: the published cycle at the watchdog's last sample.
+static uint64_t g_watch_clears_seen = 0;    // Game thread: g_watch_clears at that sample.
+static uint32_t g_watch_still = 0;          // Game thread: samples in a row with depth cleared and the cycle still.
 static UINT g_main_depth_w = 0;
 static UINT g_main_depth_h = 0;
 static UINT  g_wrong_pass_streak = 0;
@@ -28738,11 +28763,9 @@ inline float lifetime_envelope(const RenderObject& o, float now, bool& expired) 
     return 0.0f;
 }
 
-// Camera position in engine space from the view matrix (row-vector convention:
-// eye_i = -sum_j T_j * R[i][j]).
-
 inline void kh_white_draw(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     if (!dev || !ctx || !g_res.white_ready) return;
+    if (kh_fsaa_world_standdown()) return;   // FSAA 1x: the placeholder is a world mesh too.
     // Runs inside the flush's serialized window; a failure costs the objects
     // whose buffers are missing, not the pass.
     ensure_mesh_vbs(dev);
@@ -28812,6 +28835,8 @@ inline void kh_white_draw(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     khw_backup.restore(ctx);
 }
 
+// Camera position in engine space from the view matrix (row-vector convention:
+// eye_i = -sum_j T_j * R[i][j]).
 inline void extract_camera_pos(const float view[4][4], float out[3]) {
     for (int i = 0; i < 3; ++i) {
         out[i] = -(view[3][0] * view[i][0] +
@@ -29893,6 +29918,23 @@ inline bool kh_main_depth_dims_match(ID3D11DepthStencilView* dsv) {
     }
     khdm_res->Release();
     return khdm_ok;
+}
+// KH_FSAA_SWITCH - a depth view over a multisampled texture of the adopted main depth's size.
+inline bool kh_depth_msaa_scene(ID3D11DepthStencilView* kh1m_dsv) {
+    ID3D11Resource* kh1m_res = nullptr;
+    kh1m_dsv->GetResource(&kh1m_res);
+    if (!kh1m_res) return false;
+    ID3D11Texture2D* kh1m_tex = nullptr;
+    bool kh1m_ms = false;
+    const HRESULT kh1m_hr = kh1m_res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&kh1m_tex));
+    if (SUCCEEDED(kh1m_hr) && kh1m_tex) {
+        D3D11_TEXTURE2D_DESC kh1m_td = {};
+        kh1m_tex->GetDesc(&kh1m_td);
+        kh1m_ms = kh1m_td.SampleDesc.Count > 1 && kh1m_td.Width == g_main_depth_w && kh1m_td.Height == g_main_depth_h;
+        kh1m_tex->Release();
+    }
+    kh1m_res->Release();
+    return kh1m_ms;
 }
 
 inline void* reorder_dsv_identity(ID3D11DepthStencilView* dsv) {
@@ -52586,7 +52628,7 @@ inline void kh_fx_late_gt(ID3D11DeviceContext* khfg_ctx, bool khfg_rt = false) {
 // names the scene texture there. It replaces an identity only after
 // KH_DEPTH_READOPT_RUN consecutive disagreeing resolves (at once when none
 // exists). FSAA 1x has no scene resolve; the watchdog park remains the path
-// there.
+// there (a same-size stale identity: KH_WATCH_STALL).
 static constexpr uint32_t KH_DEPTH_READOPT_RUN = 8u;
 static uint32_t g_depth_readopt_run = 0;   // Render thread only.
 inline void kh_main_depth_readopt(ID3D11DeviceContext* khdr_ctx, ID3D11Resource* khdr_src) {
@@ -52965,6 +53007,7 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
         !g_kh_flush_active.load(std::memory_order_relaxed) &&
         dsv && (flags & D3D11_CLEAR_DEPTH)) {
         g_depth_clear_serial++;   // KH_SVS_SKIP: any depth clear invalidates a cached seam inject.
+        g_watch_clears.fetch_add(1u, std::memory_order_relaxed);   // KH_WATCH_STALL.
         // The identity is a pointer the engine may recycle (a render-resolution
         // change recreates the scene targets with no device reset): the match
         // is confirmed against the adopted dimensions once per frame here, and
@@ -52975,10 +53018,25 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
             g_main_depth_identity = nullptr;
             khcd_main = false;
         }
+        // KH_FSAA_SWITCH: a single-sample identity (FSAA 1x) while a multisampled
+        // depth of its size is cleared - FSAA was turned on at runtime. The
+        // identity may still match the game thread's own clear, which keeps
+        // naming the game thread (it never resolves: no KH_DEPTH_READOPT), and
+        // only the park's wrong-pass streak would re-adopt (KH_WRONG_PASS_READOPT
+        // parks): back to the bootstrap instead, and the next park adopts at
+        // once (the MSAA mission start's path). Inert while a multisampled
+        // depth is adopted (kh_fsaa_world_standdown is false then).
+        if (!khcd_main && g_main_depth_identity && kh_fsaa_world_standdown() && kh_depth_msaa_scene(dsv)) {
+            g_main_depth_identity = nullptr;
+            g_reorder_render_tid.store(0, std::memory_order_relaxed);
+        }
         if (!khcd_main) kh_pip_on_clear();   // KH_PIP.
         if (khcd_main) {
-            // The engine clears the main scene depth on its render thread: this
-            // is where that thread is identified for the tracking gate.
+            // The thread that clears the main scene depth is named the render
+            // thread for the tracking gate: at MSAA the engine's render thread;
+            // at FSAA 1x the game thread (measured, probe FS), so the gate keeps
+            // the real render thread's mesh routes off there (the INTENTIONAL
+            // note at kh_fsaa_world_standdown).
             g_reorder_render_tid.store(GetCurrentThreadId(), std::memory_order_relaxed);
             kh_sun_size_latch();
 
@@ -55886,11 +55944,27 @@ inline void flush_frame() {
     // KH_NO_PARK BOOTSTRAP: g_main_depth_identity is adopted only by
     // flush_locked, and the render-thread flush needs g_reorder_render_tid,
     // which is set only once that identity is known. So park until both are
-    // known, then stop; the clear hook drops a stale identity, and this parks
-    // again until it is re-adopted.
+    // known, then stop; the clear hook drops a stale identity (another size, or
+    // single-sample once FSAA is on: KH_FSAA_SWITCH), KH_WATCH_STALL below a
+    // same-size one, and this parks again until it is re-adopted.
     // WATCHDOG: also park when the render thread has not flushed for a couple
     // of cycles (no scene resolve, an unrecognised pass shape, a stood-down
     // hook).
+    // KH_WATCH_STALL: this sample against the last - the engine cleared depth, and the published cycle did not move.
+    // Samples without a depth clear neither count nor reset (a screen with no 3D scene between two stalled ones).
+    {
+        const uint64_t khnp_pub = g_topo_cycles_pub.load(std::memory_order_relaxed);
+        const uint64_t khnp_clr = g_watch_clears.load(std::memory_order_relaxed);
+        if (khnp_pub != g_watch_cyc_seen) {
+            g_watch_still = 0;
+        } else if (khnp_clr != g_watch_clears_seen && ++g_watch_still >= KH_WATCH_STALL_FRAMES) {
+            g_watch_still = 0;
+            g_main_depth_identity.store(nullptr, std::memory_order_relaxed);   // Back to the bootstrap: the park below.
+            g_reorder_render_tid.store(0, std::memory_order_relaxed);
+        }
+        g_watch_cyc_seen = khnp_pub;
+        g_watch_clears_seen = khnp_clr;
+    }
     const uint64_t khnp_last = g_rtshadow_cycle.load(std::memory_order_relaxed);
     const bool khnp_ready = g_main_depth_identity != nullptr &&
                             g_reorder_render_tid.load(std::memory_order_relaxed) != 0 &&
@@ -57268,6 +57342,10 @@ inline void kh_session_globals_reset() {
     g_voc_thm_cell = 0.0f;
     g_voc_thm_valid = false;
     g_reorder_render_tid.store(0, std::memory_order_relaxed);
+    g_watch_clears.store(0, std::memory_order_relaxed);   // KH_WATCH_STALL (and the three below).
+    g_watch_cyc_seen = ~0ull;
+    g_watch_clears_seen = 0;
+    g_watch_still = 0;
     kh_reinit(g_ro);
     g_hook_exceptions.store(0, std::memory_order_relaxed);
     g_slot_keep_m22 = 0.0f;
@@ -57868,6 +57946,10 @@ inline void reset_session_state() {
     g_carry_pending_serial.store(0, std::memory_order_relaxed);
     g_sr = ShadowReconState{};
     g_reorder_render_tid.store(0, std::memory_order_relaxed);
+    g_watch_clears.store(0, std::memory_order_relaxed);   // KH_WATCH_STALL (and the three below).
+    g_watch_cyc_seen = ~0ull;
+    g_watch_clears_seen = 0;
+    g_watch_still = 0;
     g_main_depth_w = 0; g_main_depth_h = 0; g_wrong_pass_streak = 0;
     g_proj_last_m32 = 0.0f;
     g_mask = ShadowMaskState{};   // Device pointers already nulled by the release.

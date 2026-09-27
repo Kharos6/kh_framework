@@ -4,6 +4,7 @@ class Cfg3DEN
 	{
 		class KH_Framework
 		{
+			onTerrainNew = "removeAllRenderHandlers;";
 			onEditableEntityAdded = "call KH_fnc_entityRenderingSetup;";
 			onEditableEntityRemoved = "if ((param [0]) isEqualType objNull) then {{{removeRenderHandler (_x select 0);} forEach _y;} forEach ((param [0]) getVariable ['KH_var_renderHandlers', createHashMap]);};";
 			onMissionPreviewEnd = "[] spawn {sleep 1; isNil {{[_x] call KH_fnc_entityRenderingSetup} forEach (allMissionObjects '');};};";

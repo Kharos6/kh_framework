@@ -133,6 +133,7 @@ static game_value g_call_arguments;
 static game_value g_kh_cached_entity_initializations;
 static game_value g_kh_cached_entity_initializations_deletions;
 static bool g_is_menu = true;
+static bool g_is_eden = false;
 static bool g_is_server = false;
 static bool g_is_dedicated_server = false;
 static bool g_is_headless = false;

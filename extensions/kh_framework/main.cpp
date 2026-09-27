@@ -87,6 +87,7 @@ void intercept::pre_init() {
     populate_sqf_command_map();
     auto displays = sqf::all_displays();
     g_is_menu = (displays.size() == 1 && displays[0] == sqf::find_display(0));
+    g_is_eden = sqf::is_eden();
     g_is_dedicated_server = sqf::is_dedicated();
 
     if (!g_is_menu || g_is_dedicated_server) {
@@ -196,9 +197,11 @@ void intercept::post_init() {
 }
 
 void intercept::on_frame() {
-    if ((!(sqf::is_eden()) && !g_is_menu) || g_is_dedicated_server) {
+    g_is_eden = sqf::is_eden();
+
+    if ((!g_is_eden && !g_is_menu) || g_is_dedicated_server) {
         if (!g_is_dedicated_server) {
-            if (!sqf::is_eden() && sqf::is_multiplayer()) {
+            if (!g_is_eden && sqf::is_multiplayer()) {
                 if (g_last_ts_connect_attempt < 0.0f || g_game_time - g_last_ts_connect_attempt >= 1.0f) {
                     g_last_ts_connect_attempt = g_game_time;
                     

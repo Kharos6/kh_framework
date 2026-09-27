@@ -282,7 +282,7 @@ float4 KhDlRec(int khdr_i)
 // draw. Filled by the vertex shader into two flat interpolants (VSOut.iobj0/1)
 // and loaded by every mesh pixel shader at entry (KhObjLoad); the lighting /
 // far contract / dither reads use these, never lighting0.zw,
-// shadowMeta2.xy or blendCtl.w directly (PSDlsMask, a per-object-only shader
+// shadowMeta2.y or blendCtl.w directly (PSDlsMask, a per-object-only shader
 // with no VSOut, is the one reader of blendCtl.w itself).
 static float khObjAmb = 0.0f;      // lighting0.z twin: base-colour fraction kept in shadow.
 static float khObjDif = 0.0f;      // lighting0.w twin: n.L-scaled fraction.
@@ -1390,8 +1390,12 @@ float SunShadowOcclusion(float3 wpos, KhSunCastGrad khsc_g)   // KH_SUN_GRAD: Kh
 
     const float khcu_b = sunCastBias2.x > 0.0f ? sunCastBias2.x : sunMeta.z;
 
-    if (c.z >= 1.0f) return localityMeta.z >= 0.5f
-                          ? SunShadowCompareSoft(uv, 1.0f - khcu_b) : 0.0f;   // Filtered.
+    // Past the map's far plane: the far compare (filtered), which a carried band
+    // verdict resolves too - as the two exits above, and the self twin's, do.
+    if (c.z >= 1.0f) {
+        const float khcu_far = localityMeta.z >= 0.5f ? SunShadowCompareSoft(uv, 1.0f - khcu_b) : 0.0f;
+        return (khtb_occ >= 0.0f) ? KhTbBlend(khcu_far, khtb_occ, khtb_w) : khcu_far;
+    }
 
     // KH_TIER_BLEND: the union answer resolves any carried band edge.
     // KH_PCSS on the union too (the 0.75-texel diamond is its contact ring).
@@ -1422,8 +1426,10 @@ float SunShadowOcclusion(float3 wpos, KhSunCastGrad khsc_g)   // KH_SUN_GRAD: Kh
     return (khtb_occ >= 0.0f) ? KhTbBlend(khtb_un, khtb_occ, khtb_w) : khtb_un;
 }
 
-// Soft compare for the self term: five bilinear taps in a +/-0.75-texel diamond
-// (~2.5-texel penumtra). One tap body for all five maps (fxc resolves a
+// One soft-compare tap for the self term: the 2 x 2 block's compares, each
+// against the receiver plane extrapolated to its texel, bilinearly weighted
+// (KhSelfTier's 3 x 3 ring and KhSelfPcssT's disc are built from it). One tap
+// body for all five maps (fxc resolves a
 // resource parameter at inlining). The texel is kept to the map on BOTH sides
 // (khst_sz = the map edge in texels): a footprint ring past an edge reads the
 // edge texel, never an out-of-range 0 (= the nearest depth = occluded) - the
@@ -1763,8 +1769,8 @@ float SunShadowFactorSelf(float3 wpos, float3 wrel, float3 nrm, KhSunSelfGrad kh
                 * KhSunRangeFade(wpos);
 }
 
-// Our own near clip: 0.05 m sits an order of magnitude below the engine's floor
-// of 0.07, so it can never be the binding constraint.
+// Our own near clip: 0.05 m sits below the engine's floor of 0.07, so it can
+// never be the binding constraint.
 static const float KH_OWN_NEAR = 0.05f;
 
 // C++ twin KH_RP_STEN_FADE: the mirror replay runs only for a mesh that can
@@ -1860,9 +1866,10 @@ float KhDlsNear(float khn_far)
 {
     return min(max(khn_far / KH_DLS_NEAR_RATIO, KH_DLS_NEAR_M), KH_DLS_NEAR_CAP_M);
 }
-// Receiver-distance fade at the shadow view distance, the sun's own rule
-// (KhSunRangeFade) on the light maps; without it a lamp's shadow on the ground
-// draws at any range while the sun's stops at shadowVisibility.
+// Receiver-distance fade at the shadow view distance, the light maps' twin of
+// KhSunRangeFade; without it a lamp's shadow on the ground draws at any range
+// while the sun's stops at shadowVisibility. A sphere about dlsRange.xyz fading
+// over 0.94 - 0.995 R (the sun's is a cylinder, from KH_SUN_FADE_START).
 float KhDlsRangeFade(float3 khrf_p)
 {
     if (dlsRange.w <= 0.0f) return 1.0f;
@@ -1875,9 +1882,9 @@ float KhDlsRangeFade(float3 khrf_p)
 
 Texture2DArray<float> khDlsMaps : register(t36);
 
-// Parity with the sun filter: KhSunBilinT / KhSunSoftT with the texture swapped
-// for an array slice - same bilinear weights, same 0.75-texel cross offset,
-// same 5-tap average, same rule that a depth map is compared BEFORE it is
+// Parity with the sun filter: KhSunBilinT / KhSunSoftWT with the texture
+// swapped for an array slice - same bilinear weights, same 3 x 3 footprint
+// ring, same 9-tap average, same rule that a depth map is compared BEFORE it is
 // filtered. The compare is built PER TAP: a single projected reference z is
 // only correct for a receiver parallel to the map plane; on a tilted one the
 // receiver's true depth differs at every texel of the footprint, so (as
@@ -2125,7 +2132,8 @@ float KhDlsShadow(int khd_slot, float3 khd_wpos, float3 khd_nrm, float khd_zunc,
     const float2 khd_g = KhDlsGrad(khd_p, khd_n, khd_fr, khd_fu, khd_z,
                                    (float)khd_mw, khd_fsx, khd_texel);
 
-    // The sun's own 5-tap soft compare on an array slice. Returns occlusion in
+    // The sun cast's 3 x 3 footprint ring (KhSunSoftWT's shape) on an array
+    // slice (KhDlsSoft). Returns occlusion in
     // the sun's convention (1 = blocked); this kernel's contract is lit, so it
     // is inverted once here. Footprint in map texels at this receiver: a face
     // texel at distance z spans 2z / size, scaled by the projection's lateral.
@@ -2192,11 +2200,12 @@ float3 DynLights(float3 wpos, float3 nrm)
         // KH_DL_ATT_SKIP: both cut-offs above are HARD zeros - the range fade is
         // 1 - saturate(...) past its width, and the cone is the (c > 0) select -
         // so everything below is multiplied by an exact 0 and the light cannot
-        // reach this pixel. Skipping it skips KhDlsShadow, which is 36 Loads
-        // (KhDlsSoft's 9 x KhDlsBilin's 4). Twin: KhDlsWorldFactor, which has
+        // reach this pixel. Skipping it skips KhDlsShadow, which is 9 Gathers
+        // (KhDlsSoft's 9 KhDlsBilin, one each). Twin: KhDlsWorldFactor, which has
         // carried this same guard since it was written; the two mesh loops did
         // not. No gradient is skipped with it: khs_fwp is priced before the
-        // loop and KhDlsSoft Loads only.
+        // loop, and KhDlsSoft's Gathers read a single-mip array (mip 0 whatever
+        // their implicit derivatives say - KH_SHADOW_GATHER).
         if (att <= 0.0f) continue;
 
         // The shadow scales the directional term only. KhDlRec(b + 3) is the
@@ -2222,9 +2231,8 @@ float3 DynLights(float3 wpos, float3 nrm)
 // private sun-depth self term, min-combined - they answer the same question at
 // different granularities and must not stack).
  
-// Reinhard first, then the lift: x/(1+x) maps the whole HDR range into 0..1
-// without discarding anything above 1 (a saturate before the lift flattens
-// every flashlit surface to 1).
+// Returns HDR: the result is neither clamped nor tone-mapped here (the one
+// Reinhard mix is PSMain / PSComposite's blendCtl.x composite).
 float3 ApplyLighting(float3 base, float3 wpos, float3 nrm, float smf)
 {
     if (lighting0.x < 0.5f || lighting1.w < 0.5f) return base;

@@ -39,6 +39,21 @@ namespace RenderIntegration {
 // file-name fallback, case and / against \ alike. Two leading slashes are a
 // network path, as before.
 //
+// A texture - a material's map, an effect's user0 .. user5 - is a png, jpg,
+// jpeg, tga, bmp or dds file, or the game's own .paa (or .pac, the same file),
+// so a texture in the game's or a mod's PBOs can be named by its engine path
+// (\a3\...\x_co.paa). A .paa keeps its own mip levels and, for DXT1 / DXT3 /
+// DXT5, its compression - except where the texture converter swizzled its
+// channels (every _nohq / _nofhq / _nshq / _novhq / _nopx normal map, _sky,
+// _adshq, _dt, _detail): the swizzle is undone, so the texture reads as the
+// picture it was made from (a _nohq's X comes back out of alpha), and such a
+// texture is held uncompressed - 4x a DXT5's memory, 8x a DXT1's (_dt,
+// _detail). So is a DXT file whose full-size level is not a multiple of 4
+// pixels on a side (a 2 x 2, a 256 x 1 strip): a block format needs that. A
+// channel the converter dropped does not come back: an alpha reads opaque, a
+// colour channel what the file stores in its place.
+// Operation Flashpoint's palette-indexed files are not read.
+//
 // ---- STRING = addRender3D ARRAY --------------------------------------------
 // [[x,y,zASL], rotation, mesh]. rotation = nil | yaw | [pitch, yaw, roll] |
 // [vectorDir, vectorUp]; mesh = builtin name | registry index | .fbx path
@@ -470,7 +485,7 @@ namespace RenderIntegration {
 // textures (here and in updateRender3D, for an effect mesh) gives a .hlsl
 // effect textures of its own: [[path, slot, colour?], ...] with slot
 // "user0" .. "user5" and colour "srgb" or "linear" (the default) - png,
-// jpg, jpeg, tga, bmp or dds, found as the .hlsl is (Documents\Arma
+// jpg, jpeg, tga, bmp, dds, paa or pac, found as the .hlsl is (Documents\Arma
 // 3\kh_framework\rendering, then every mod's 'rendering' folder). The array
 // is the whole set: a slot it does not name is cleared, and [] clears them
 // all. Only the effect's own code reads them (KhUserTex, cb.hlsl's USER
@@ -11627,7 +11642,8 @@ inline const KhGtSnap* kh_gts_for_cycle(KhAttach& khgc_a, uint64_t khgc_cyc, boo
 // an end following the character itself placed at that position and turned to that orientation - the character's
 // own state is not written while it is crew (KH_ATTACH_MAN_HELPER), so a raw read of it would hold the get-in pose.
 // Crew or not: the character's GetInMan / GetOutMan events and a check when its entry is made, each asking
-// `vehicle` - the handlers take Intercept's argument lists as it declares them and read none of the arguments.
+// `objectParent` (kh_crew_vehicle) - the handlers take Intercept's argument lists as it declares them and read none
+// of the arguments.
 // While crew, the pose is read every Draw3D (getPosWorldVisual, vectorDirVisual, vectorUpVisual per character), so
 // a seat switch (which stays in the vehicle), a turret's traverse or a turn-out needs no event of its own. In the
 // Eden editor the three are the simulation's - getPosWorld, vectorDir, vectorUp (KH_ATTACH_EDEN).
@@ -11816,11 +11832,13 @@ inline KhCrewEnt* kh_crew_of(const game_value& khco_par) {
     const auto khco_it = g_crew.find(kh_attach_base_of(khco_par));
     return khco_it == g_crew.end() || !khco_it->second.d_ok ? nullptr : &khco_it->second;
 }
-// The character's vehicle now (nil: on foot). GAME THREAD, holding no lock (an SQF call).
-inline game_value kh_crew_vehicle(const game_value& khcv_man, uintptr_t khcv_b) {
+// The character's vehicle now (nil: on foot). GAME THREAD, holding no lock (an SQF call). KH_CREW_PARENT:
+// objectParent - the vehicle a unit rides in, null on foot (an attachTo parent is not one). vehicle answered the unit
+// itself on foot, which a test against the character's own base had to tell apart.
+inline game_value kh_crew_vehicle(const game_value& khcv_man) {
     try {
-        const object khcv_o = sqf::vehicle(static_cast<object>(khcv_man));
-        if (!sqf::is_null(khcv_o) && kh_attach_base_of(khcv_o) != khcv_b) return khcv_o;
+        const object khcv_o = sqf::object_parent(static_cast<object>(khcv_man));
+        if (!sqf::is_null(khcv_o)) return khcv_o;
     } catch (...) {}
     return game_value();
 }
@@ -11829,7 +11847,7 @@ inline void kh_crew_event(uintptr_t khce_b, uint64_t khce_s) {
     const auto khce_it = g_crew.find(khce_b);
     if (khce_it == g_crew.end() || khce_it->second.serial != khce_s) return;
     KhCrewEnt& khce_e = khce_it->second;
-    game_value khce_v = kh_crew_vehicle(khce_e.man, khce_b);
+    game_value khce_v = kh_crew_vehicle(khce_e.man);
     std::lock_guard<std::mutex> khce_g(g_draw_list_mutex);
     khce_e.veh = khce_v;
     khce_e.in = !khce_v.is_nil();
@@ -11914,7 +11932,7 @@ inline void kh_crew_sync() {
             khcs_e.helper = game_value();
         }
         if (khcs_e.helper.is_nil()) continue;   // No helper to correct against: its bindings read as before.
-        khcs_e.veh = kh_crew_vehicle(khcs_m, khcs_b);
+        khcs_e.veh = kh_crew_vehicle(khcs_m);
         khcs_e.in = !khcs_e.veh.is_nil();
         if (!kh_crew_listen(khcs_e, khcs_b)) { kh_attach_proxy_orphan(khcs_e.helper); continue; }
         khcs_e.seen = true;
@@ -20536,10 +20554,10 @@ private:
 
 // PBO_PATH: a resolved asset's bytes - find_asset_file's PBO form (one leading backslash) from the loaded PBOs
 // (ModFolderSearcher::read_pbo_file_shared, whose cache keeps it), anything else from the disk. Every read of a
-// resolved asset goes through here: the .fbx import, the texture loads (sync, the loader worker, the .dds route)
-// and kh_user_shader_source (.hlsl and .cube). False when it cannot be read, is empty, or holds khar_max bytes or
-// more; khar_err says which ("cannot open file", "empty file", "file too large", "read failed", or the PBO
-// reader's reason).
+// resolved asset goes through here: the .fbx import, the texture loads (sync, the loader worker, the .dds and
+// .paa routes) and kh_user_shader_source (.hlsl and .cube). False when it cannot be read, is empty, or holds khar_max
+// bytes or more; khar_err says which ("cannot open file", "empty file", "file too large", "read failed", or the
+// PBO reader's reason).
 inline bool kh_asset_read(const std::string& khar_path, std::vector<uint8_t>& khar_out, uint64_t khar_max,
                           std::string* khar_err = nullptr) {
     khar_out.clear();
@@ -20717,8 +20735,9 @@ inline bool kh_tex_page_place(ID3D11Device* dev, ID3D11DeviceContext* ctx,
     return true;
 }
 
-// Pre-compressed + pre-mipped is the performance path for real assets;
-// everything else goes through stb.
+// Pre-compressed + pre-mipped is the performance path for real assets (a .paa
+// comes here too, made into these bytes: KH_PAA); everything else goes through
+// stb.
 inline ID3D11ShaderResourceView* kh_load_dds(ID3D11Device* dev, const std::vector<uint8_t>& f,
                                              bool srgb, std::string& err) {
     auto rd32 = [&](size_t off) { uint32_t v; memcpy(&v, f.data() + off, 4); return v; };
@@ -20802,6 +20821,482 @@ inline ID3D11ShaderResourceView* kh_load_dds(ID3D11Device* dev, const std::vecto
     tex->Release();
     if (FAILED(hr)) { err = "CreateSRV " + hr_str(hr); return nullptr; }
     return srv;
+}
+
+// KH_PAA - Bohemia's own texture file, .paa (and .pac, the same file): the Bohemia wiki's "PAA File Format",
+// checked against three open readers (BIS.PAA, HEMTT, woozymasta/paa) and against files BI's own ImageToPAA /
+// TexView wrote from known pictures. Layout: a 2-byte type; tags ("GGAT", a reversed 4-character name, a 4-byte
+// length, the data) of which only the channel swizzle (SWIZ) is used; a palette count (0 for these types); then the
+// levels, each { u16 width (bit 15: LZO-packed, DXT types only), u16 height, u24 stored size, data }, to a 0 x 0
+// level. A DXT level is its blocks, as stored or LZO-packed (Arma 2 on); every other type is BI's LZSS, always.
+//
+// The file becomes the .dds route's bytes (kh_paa_to_dds -> kh_load_dds, on the loader worker or the synchronous
+// fallback), so creation, page placement, the colour space and the failure reports are the .dds route's. DXT1 / DXT3 /
+// DXT5 keep their blocks (BC1 / BC2 / BC3) and the file's own mip chain. Everything else becomes 8-bit BGRA, every
+// level: the 16-bit ARGB4444 / ARGB1555 types and the 8:8 grey + alpha one (in Direct3D's own bit order - what BI's
+// tools write, measured on their files; the open readers above swap red and blue in ARGB4444, and BIS.PAA in ARGB1555
+// too), ARGB8888 (BGRA bytes, as the open readers have it; no BI-written file to measure), the premultiplied DXT2 /
+// DXT4 (their colour divided back by alpha), a DXT level 0 whose size is not a multiple of 4 (a block format needs
+// that), and any file whose SWIZ tag moved or inverted a channel - every _nohq / _nofhq / _novhq / _nshq / _nopx normal
+// map, _sky, _adshq, _dt and _detail: 4x a DXT5's memory, 8x a DXT1's (_dt, _detail). The swizzle is undone (BIS.PAA's
+// inverse): each channel the converter kept comes back where the picture had it - a _nohq normal map's X out of alpha.
+// One it dropped cannot come back: an alpha reads opaque, a colour channel what the file stores in its place. A swizzle
+// that only fills colour channels with a constant, or alpha with 1 (_smdi, _as, _ads, ...), undoes to itself and keeps
+// the blocks. MAXC (always white from BI's tools) and the other tags are not applied. Operation Flashpoint's
+// palette-indexed files are refused. Every length and offset in the file is checked before use, and a level's size
+// against what its stored bytes can hold before anything is allocated; a level that does not decode, is not the next of
+// level 0's chain (to 1 x 1), or could not come from its bytes ends the chain there (level 0: the file fails). The size
+// cap is the stb route's: 16384 on a side.
+inline bool kh_paa_ext(const std::string& khpe_path) {
+    return kh_ends_with_ci(khpe_path, ".paa") || kh_ends_with_ci(khpe_path, ".pac");
+}
+// BI's LZSS as a .paa packs a non-DXT level - pbo_unlzss's scheme (a 4 KB window of spaces, flag bits low first,
+// 1 = a literal byte, 0 = a 12-bit distance back and a 4-bit length - 3), but only the output's length is known:
+// khpz_on bytes from at most khpz_n input bytes, then a 4-byte sum of the output. A .paa's sum is signed (each byte
+// as -128 .. 127; measured on BI's files), a PBO's unsigned; either is taken. A back-reference running past the
+// output's end stops there (the wiki's reference decoder). False on a short input or a sum that matches neither.
+inline bool kh_paa_unlzss(const uint8_t* khpz_in, size_t khpz_n, uint8_t* khpz_out, size_t khpz_on) {
+    uint8_t khpz_ring[4096];
+    memset(khpz_ring, ' ', sizeof(khpz_ring));
+    size_t khpz_r = 0, khpz_ip = 0, khpz_op = 0;
+    uint32_t khpz_su = 0, khpz_ss = 0;
+    auto khpz_put = [&](uint8_t khpz_c) {
+        khpz_out[khpz_op++] = khpz_c;
+        khpz_su += khpz_c;
+        khpz_ss += static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(khpz_c)));
+        khpz_ring[khpz_r] = khpz_c;
+        khpz_r = (khpz_r + 1u) & 4095u;
+    };
+    while (khpz_op < khpz_on) {
+        if (khpz_ip >= khpz_n) return false;
+        const uint32_t khpz_f = khpz_in[khpz_ip++];
+        for (int khpz_bit = 0; khpz_bit < 8 && khpz_op < khpz_on; ++khpz_bit) {
+            if (khpz_f & (1u << khpz_bit)) {
+                if (khpz_ip >= khpz_n) return false;
+                khpz_put(khpz_in[khpz_ip++]);
+            } else {
+                if (khpz_n - khpz_ip < 2) return false;
+                const size_t khpz_d = khpz_in[khpz_ip] | (static_cast<size_t>(khpz_in[khpz_ip + 1] & 0xF0u) << 4);
+                size_t khpz_len = static_cast<size_t>(khpz_in[khpz_ip + 1] & 0x0Fu) + 3u;
+                khpz_ip += 2;
+                if (khpz_len > khpz_on - khpz_op) khpz_len = khpz_on - khpz_op;
+                size_t khpz_s = (khpz_r - khpz_d) & 4095u;
+                for (size_t khpz_k = 0; khpz_k < khpz_len; ++khpz_k) {
+                    const uint8_t khpz_c = khpz_ring[khpz_s];
+                    khpz_s = (khpz_s + 1u) & 4095u;
+                    khpz_put(khpz_c);
+                }
+            }
+        }
+    }
+    if (khpz_n - khpz_ip < 4) return false;
+    const uint32_t khpz_st = static_cast<uint32_t>(khpz_in[khpz_ip]) |
+                             (static_cast<uint32_t>(khpz_in[khpz_ip + 1]) << 8) |
+                             (static_cast<uint32_t>(khpz_in[khpz_ip + 2]) << 16) |
+                             (static_cast<uint32_t>(khpz_in[khpz_ip + 3]) << 24);
+    return khpz_st == khpz_ss || khpz_st == khpz_su;
+}
+// LZO1X, as Arma 2 and later pack a large DXT level: minilzo's lzo1x_decompress_safe, instruction for instruction,
+// with every read and write bounds-checked. True only when the stream reaches its end marker having written exactly
+// khpo_on bytes (input past the marker is not read).
+inline bool kh_paa_unlzo(const uint8_t* khpo_in, size_t khpo_n, uint8_t* khpo_out, size_t khpo_on) {
+    size_t khpo_ip = 0, khpo_op = 0, khpo_t = 0;
+    auto khpo_lit = [&](size_t khpo_k) {
+        if (khpo_k > khpo_n - khpo_ip || khpo_k > khpo_on - khpo_op) return false;
+        memcpy(khpo_out + khpo_op, khpo_in + khpo_ip, khpo_k);
+        khpo_ip += khpo_k;
+        khpo_op += khpo_k;
+        return true;
+    };
+    auto khpo_copy = [&](size_t khpo_dist, size_t khpo_k) {   // Byte by byte: a match may overlap its own output.
+        if (khpo_dist == 0 || khpo_dist > khpo_op || khpo_k > khpo_on - khpo_op) return false;
+        for (size_t khpo_i = 0; khpo_i < khpo_k; ++khpo_i, ++khpo_op) {
+            khpo_out[khpo_op] = khpo_out[khpo_op - khpo_dist];
+        }
+        return true;
+    };
+    // A length's run of zero bytes, each worth 255, then the byte that ends it plus khpo_base.
+    auto khpo_run = [&](size_t khpo_base) {
+        size_t khpo_z = 0;
+        while (khpo_ip < khpo_n && khpo_in[khpo_ip] == 0) {
+            ++khpo_ip;
+            khpo_z += 255u;
+            if (khpo_z > khpo_on) return false;   // Longer than the output can hold.
+        }
+        if (khpo_ip >= khpo_n) return false;
+        khpo_t = khpo_z + khpo_base + khpo_in[khpo_ip++];
+        return true;
+    };
+    enum { KHPO_LOOP, KHPO_FIRST, KHPO_MATCH, KHPO_DONE } khpo_st = KHPO_LOOP;
+    if (khpo_n == 0) return false;
+    if (khpo_in[0] > 17) {
+        khpo_t = khpo_in[0] - 17u;
+        khpo_ip = 1;
+        if (!khpo_lit(khpo_t)) return false;
+        if (khpo_t < 4) {   // match_next: the literals, then a match.
+            if (khpo_ip >= khpo_n) return false;
+            khpo_t = khpo_in[khpo_ip++];
+            khpo_st = KHPO_MATCH;
+        } else {
+            khpo_st = KHPO_FIRST;
+        }
+    }
+    for (;;) {
+        if (khpo_st == KHPO_LOOP) {
+            if (khpo_ip >= khpo_n) return false;
+            khpo_t = khpo_in[khpo_ip++];
+            if (khpo_t >= 16) { khpo_st = KHPO_MATCH; continue; }
+            if (khpo_t == 0 && !khpo_run(15)) return false;
+            if (!khpo_lit(khpo_t + 3u)) return false;
+            khpo_st = KHPO_FIRST;
+        } else if (khpo_st == KHPO_FIRST) {   // first_literal_run.
+            if (khpo_ip >= khpo_n) return false;
+            khpo_t = khpo_in[khpo_ip++];
+            if (khpo_t >= 16) { khpo_st = KHPO_MATCH; continue; }
+            if (khpo_ip >= khpo_n) return false;
+            const size_t khpo_d = 1u + 0x0800u + (khpo_t >> 2) + (static_cast<size_t>(khpo_in[khpo_ip++]) << 2);
+            if (!khpo_copy(khpo_d, 3)) return false;
+            khpo_st = KHPO_DONE;
+        } else if (khpo_st == KHPO_MATCH) {
+            size_t khpo_d = 0, khpo_len = 0;
+            if (khpo_t >= 64) {   // M2.
+                if (khpo_ip >= khpo_n) return false;
+                khpo_d = 1u + ((khpo_t >> 2) & 7u) + (static_cast<size_t>(khpo_in[khpo_ip++]) << 3);
+                khpo_len = (khpo_t >> 5) + 1u;
+            } else if (khpo_t >= 32) {   // M3.
+                khpo_t &= 31u;
+                if (khpo_t == 0 && !khpo_run(31)) return false;
+                if (khpo_n - khpo_ip < 2) return false;
+                khpo_d = 1u + (khpo_in[khpo_ip] >> 2) + (static_cast<size_t>(khpo_in[khpo_ip + 1]) << 6);
+                khpo_ip += 2;
+                khpo_len = khpo_t + 2u;
+            } else if (khpo_t >= 16) {   // M4, or the end marker.
+                const size_t khpo_hi = (khpo_t & 8u) << 11;
+                khpo_t &= 7u;
+                if (khpo_t == 0 && !khpo_run(7)) return false;
+                if (khpo_n - khpo_ip < 2) return false;
+                const size_t khpo_lo = (khpo_in[khpo_ip] >> 2) + (static_cast<size_t>(khpo_in[khpo_ip + 1]) << 6);
+                khpo_ip += 2;
+                if (khpo_hi + khpo_lo == 0) return khpo_op == khpo_on;   // eof_found.
+                khpo_d = khpo_hi + khpo_lo + 0x4000u;
+                khpo_len = khpo_t + 2u;
+            } else {   // M1, after a match's literals.
+                if (khpo_ip >= khpo_n) return false;
+                khpo_d = 1u + (khpo_t >> 2) + (static_cast<size_t>(khpo_in[khpo_ip++]) << 2);
+                khpo_len = 2;
+            }
+            if (!khpo_copy(khpo_d, khpo_len)) return false;
+            khpo_st = KHPO_DONE;
+        } else {   // match_done: the low two bits of the match's second-last byte are trailing literals.
+            khpo_t = khpo_in[khpo_ip - 2] & 3u;
+            if (khpo_t == 0) { khpo_st = KHPO_LOOP; continue; }
+            if (!khpo_lit(khpo_t)) return false;   // match_next.
+            if (khpo_ip >= khpo_n) return false;
+            khpo_t = khpo_in[khpo_ip++];
+            khpo_st = KHPO_MATCH;
+        }
+    }
+}
+// One DXT block's 16 texels as BGRA (row by row), Direct3D's decode: 5:6:5 end points widened by bit replication;
+// DXT1 in its 3-colour mode (c0 <= c1) gives transparent black for index 3; DXT2 / DXT3 carry 4-bit alpha, DXT4 /
+// DXT5 interpolated alpha, and their colour block is always 4-colour.
+inline void kh_paa_bc_block(int khpb_dxt, const uint8_t* khpb_b, uint8_t khpb_px[16][4]) {
+    const uint8_t* const khpb_cb = khpb_dxt == 1 ? khpb_b : khpb_b + 8;
+    const uint32_t khpb_c0 = khpb_cb[0] | (static_cast<uint32_t>(khpb_cb[1]) << 8);
+    const uint32_t khpb_c1 = khpb_cb[2] | (static_cast<uint32_t>(khpb_cb[3]) << 8);
+    uint32_t khpb_c[4][4];   // B, G, R, A.
+    const uint32_t khpb_e[2] = { khpb_c0, khpb_c1 };
+    for (int khpb_k = 0; khpb_k < 2; ++khpb_k) {
+        const uint32_t khpb_v = khpb_e[khpb_k];
+        const uint32_t khpb_r5 = (khpb_v >> 11) & 31u, khpb_g6 = (khpb_v >> 5) & 63u, khpb_b5 = khpb_v & 31u;
+        khpb_c[khpb_k][0] = (khpb_b5 << 3) | (khpb_b5 >> 2);
+        khpb_c[khpb_k][1] = (khpb_g6 << 2) | (khpb_g6 >> 4);
+        khpb_c[khpb_k][2] = (khpb_r5 << 3) | (khpb_r5 >> 2);
+        khpb_c[khpb_k][3] = 255u;
+    }
+    const bool khpb_four = khpb_dxt != 1 || khpb_c0 > khpb_c1;
+    for (int khpb_ch = 0; khpb_ch < 3; ++khpb_ch) {
+        const uint32_t khpb_a = khpb_c[0][khpb_ch], khpb_z = khpb_c[1][khpb_ch];
+        if (khpb_four) {
+            khpb_c[2][khpb_ch] = (2u * khpb_a + khpb_z + 1u) / 3u;
+            khpb_c[3][khpb_ch] = (khpb_a + 2u * khpb_z + 1u) / 3u;
+        } else {
+            khpb_c[2][khpb_ch] = (khpb_a + khpb_z + 1u) / 2u;
+            khpb_c[3][khpb_ch] = 0u;
+        }
+    }
+    khpb_c[2][3] = 255u;
+    khpb_c[3][3] = khpb_four ? 255u : 0u;
+    const uint32_t khpb_ix = khpb_cb[4] | (static_cast<uint32_t>(khpb_cb[5]) << 8) |
+                             (static_cast<uint32_t>(khpb_cb[6]) << 16) | (static_cast<uint32_t>(khpb_cb[7]) << 24);
+    uint32_t khpb_al[8] = {};
+    uint64_t khpb_ab = 0;   // DXT2 / 3: sixteen 4-bit alphas; DXT4 / 5: sixteen 3-bit indices.
+    if (khpb_dxt == 2 || khpb_dxt == 3) {
+        for (int khpb_i = 0; khpb_i < 8; ++khpb_i) khpb_ab |= static_cast<uint64_t>(khpb_b[khpb_i]) << (8 * khpb_i);
+    } else if (khpb_dxt == 4 || khpb_dxt == 5) {
+        const uint32_t khpb_a0 = khpb_b[0], khpb_a1 = khpb_b[1];
+        khpb_al[0] = khpb_a0;
+        khpb_al[1] = khpb_a1;
+        if (khpb_a0 > khpb_a1) {
+            for (uint32_t khpb_i = 2; khpb_i < 8; ++khpb_i)
+                khpb_al[khpb_i] = ((8u - khpb_i) * khpb_a0 + (khpb_i - 1u) * khpb_a1 + 3u) / 7u;
+        } else {
+            for (uint32_t khpb_i = 2; khpb_i < 6; ++khpb_i)
+                khpb_al[khpb_i] = ((6u - khpb_i) * khpb_a0 + (khpb_i - 1u) * khpb_a1 + 2u) / 5u;
+            khpb_al[6] = 0u;
+            khpb_al[7] = 255u;
+        }
+        for (int khpb_i = 0; khpb_i < 6; ++khpb_i) {
+            khpb_ab |= static_cast<uint64_t>(khpb_b[2 + khpb_i]) << (8 * khpb_i);
+        }
+    }
+    for (int khpb_i = 0; khpb_i < 16; ++khpb_i) {
+        const uint32_t* const khpb_s = khpb_c[(khpb_ix >> (2 * khpb_i)) & 3u];
+        khpb_px[khpb_i][0] = static_cast<uint8_t>(khpb_s[0]);
+        khpb_px[khpb_i][1] = static_cast<uint8_t>(khpb_s[1]);
+        khpb_px[khpb_i][2] = static_cast<uint8_t>(khpb_s[2]);
+        uint32_t khpb_av = khpb_s[3];
+        if (khpb_dxt == 2 || khpb_dxt == 3) khpb_av = static_cast<uint32_t>((khpb_ab >> (4 * khpb_i)) & 15u) * 17u;
+        else if (khpb_dxt == 4 || khpb_dxt == 5) khpb_av = khpb_al[(khpb_ab >> (3 * khpb_i)) & 7u];
+        khpb_px[khpb_i][3] = static_cast<uint8_t>(khpb_av);
+    }
+}
+// The file as .dds bytes (a 128-byte header, then every level) for kh_load_dds: FourCC DXT1 / DXT3 / DXT5 blocks, or
+// 32-bit BGRA (KH_PAA above). khpa_err says why on false. Never throws: a failed allocation is a failed file.
+inline bool kh_paa_to_dds(const std::vector<uint8_t>& khpa_f, std::vector<uint8_t>& khpa_dds, std::string& khpa_err) {
+    khpa_dds.clear();
+    try {
+        const uint8_t* const khpa_b = khpa_f.data();
+        const size_t khpa_n = khpa_f.size();
+        auto khpa_u16 = [&](size_t khpa_o) {
+            return static_cast<uint32_t>(khpa_b[khpa_o]) | (static_cast<uint32_t>(khpa_b[khpa_o + 1]) << 8);
+        };
+        if (khpa_n < 2) { khpa_err = "not a PAA file"; return false; }
+        const uint32_t khpa_type = khpa_u16(0);
+        int khpa_dxt = 0;          // 1 .. 5: DXTn.
+        uint32_t khpa_bpp = 0;     // The other types' bytes per texel.
+        switch (khpa_type) {
+            case 0xFF01u: case 0xFF02u: case 0xFF03u: case 0xFF04u: case 0xFF05u:
+                khpa_dxt = static_cast<int>(khpa_type & 0xFFu); break;
+            case 0x4444u: case 0x1555u: case 0x8080u: khpa_bpp = 2; break;
+            case 0x8888u: khpa_bpp = 4; break;
+            default: {
+                if (khpa_type == 0x4747u) {   // "GG": an untyped file's first tag - OFP's palette index.
+                    khpa_err = "palette-indexed PAA (Operation Flashpoint) is not supported";
+                } else {
+                    static const char khpa_hx[] = "0123456789ABCDEF";
+                    khpa_err = "unknown PAA type 0x";
+                    for (int khpa_s = 12; khpa_s >= 0; khpa_s -= 4) khpa_err += khpa_hx[(khpa_type >> khpa_s) & 15u];
+                }
+                return false;
+            }
+        }
+        size_t khpa_p = 2;
+        uint8_t khpa_swz[4] = { 0, 1, 2, 3 };   // SWIZ as stored: the sources of A, R, G, B.
+        while (khpa_n - khpa_p >= 4 && memcmp(khpa_b + khpa_p, "GGAT", 4) == 0) {
+            if (khpa_n - khpa_p < 12) { khpa_err = "truncated PAA tag"; return false; }
+            const uint32_t khpa_tl = khpa_u16(khpa_p + 8) | (khpa_u16(khpa_p + 10) << 16);
+            if (khpa_tl > khpa_n - khpa_p - 12) { khpa_err = "truncated PAA tag"; return false; }
+            if (khpa_tl == 4 && memcmp(khpa_b + khpa_p + 4, "ZIWS", 4) == 0) memcpy(khpa_swz, khpa_b + khpa_p + 12, 4);
+            khpa_p += 12u + khpa_tl;
+        }
+        if (khpa_n - khpa_p < 2) { khpa_err = "truncated PAA header"; return false; }
+        const size_t khpa_pal = static_cast<size_t>(khpa_u16(khpa_p)) * 3u;   // 0 for these types; skipped.
+        khpa_p += 2;
+        if (khpa_pal > khpa_n - khpa_p) { khpa_err = "truncated PAA palette"; return false; }
+        khpa_p += khpa_pal;
+        // The swizzle's inverse, per channel of the picture (A, R, G, B): the stored channel it came from, and
+        // whether it was inverted (BIS.PAA's inverse). A colour channel no stored one came from keeps the stored one
+        // in its place; an alpha none came from is opaque (khpa_a_one) - unless the stored alpha is the converter's
+        // own constant 1 (SWIZ 8), which already is.
+        int khpa_src[4] = { 0, 1, 2, 3 };
+        bool khpa_neg[4] = { false, false, false, false };
+        bool khpa_hit_a = false;
+        for (int khpa_ch = 0; khpa_ch < 4; ++khpa_ch) {
+            const uint32_t khpa_v = khpa_swz[khpa_ch];
+            if (khpa_v >= 4u && khpa_v <= 7u) { khpa_src[khpa_v - 4u] = khpa_ch; khpa_neg[khpa_v - 4u] = true; }
+            else if (khpa_v <= 3u) { khpa_src[khpa_v] = khpa_ch; khpa_neg[khpa_v] = false; }
+            khpa_hit_a = khpa_hit_a || (khpa_v <= 7u && (khpa_v & 3u) == 0u);
+        }
+        const bool khpa_a_one = !khpa_hit_a && khpa_swz[0] != 8u;
+        bool khpa_swz_id = !khpa_a_one;
+        for (int khpa_ch = 0; khpa_ch < 4; ++khpa_ch) {
+            khpa_swz_id = khpa_swz_id && khpa_src[khpa_ch] == khpa_ch && !khpa_neg[khpa_ch];
+        }
+        struct KhPaaLevel { uint32_t w, h; bool lzo; size_t off, size; };
+        KhPaaLevel khpa_lv[16];
+        int khpa_nl = 0;
+        while (khpa_nl < 16 && khpa_n - khpa_p >= 4) {
+            uint32_t khpa_w = khpa_u16(khpa_p);
+            const uint32_t khpa_h = khpa_u16(khpa_p + 2);
+            if (khpa_w == 0 && khpa_h == 0) break;   // The end.
+            const bool khpa_lzo = khpa_dxt != 0 && (khpa_w & 0x8000u) != 0;
+            if (khpa_lzo) khpa_w &= 0x7FFFu;
+            if (khpa_n - khpa_p < 7) break;
+            const size_t khpa_sz = khpa_b[khpa_p + 4] | (static_cast<size_t>(khpa_b[khpa_p + 5]) << 8) |
+                                   (static_cast<size_t>(khpa_b[khpa_p + 6]) << 16);
+            if (khpa_sz > khpa_n - khpa_p - 7) break;   // Truncated: the levels before it stand.
+            khpa_lv[khpa_nl++] = { khpa_w, khpa_h, khpa_lzo, khpa_p + 7, khpa_sz };
+            khpa_p += 7u + khpa_sz;
+        }
+        if (khpa_nl == 0) { khpa_err = "PAA holds no mip level"; return false; }
+        const uint32_t khpa_w0 = khpa_lv[0].w, khpa_h0 = khpa_lv[0].h;
+        if (khpa_w0 == 0 || khpa_h0 == 0 || khpa_w0 > 16384 || khpa_h0 > 16384) {
+            khpa_err = "bad PAA dimensions";
+            return false;
+        }
+        // Blocks as stored only for the three plain DXT types, a level 0 a block format can take, and no swizzle to
+        // undo; everything else is BGRA.
+        const bool khpa_keep = (khpa_dxt == 1 || khpa_dxt == 3 || khpa_dxt == 5) && khpa_swz_id &&
+                               (khpa_w0 & 3u) == 0 && (khpa_h0 & 3u) == 0;
+        const uint32_t khpa_blk = khpa_dxt == 1 ? 8u : 16u;
+        // The chain, before anything is allocated: each level must be the next of level 0's full chain (which ends
+        // at 1 x 1), and its stored bytes must be able to hold its texels - as stored, or packed no tighter than the
+        // format can (LZSS: 18 bytes from 2, 144 from 17 with the flag byte; LZO1X: under 256 from each input byte,
+        // a run's zero bytes being 255 each). A 50-byte file claiming 16384 x 16384 fails here, not after a 1 GB
+        // allocation. The levels that pass are what the body reserves, once level 0 has decoded.
+        uint32_t khpa_full = 1;
+        for (uint32_t khpa_m = khpa_w0 > khpa_h0 ? khpa_w0 : khpa_h0; khpa_m > 1u; khpa_m >>= 1) ++khpa_full;
+        size_t khpa_rn[16] = {};
+        size_t khpa_total = 128;   // The DDS header goes in front of the body: no copy at the end.
+        int khpa_cl = 0;           // Levels in the chain.
+        for (; khpa_cl < khpa_nl && static_cast<uint32_t>(khpa_cl) < khpa_full; ++khpa_cl) {
+            const KhPaaLevel& khpa_v = khpa_lv[khpa_cl];
+            const uint32_t khpa_ew = khpa_w0 >> khpa_cl ? khpa_w0 >> khpa_cl : 1u;
+            const uint32_t khpa_eh = khpa_h0 >> khpa_cl ? khpa_h0 >> khpa_cl : 1u;
+            if (khpa_v.w != khpa_ew || khpa_v.h != khpa_eh) break;   // Not the next level of the chain.
+            const size_t khpa_n4 = ((khpa_ew + 3u) / 4u) * static_cast<size_t>((khpa_eh + 3u) / 4u);
+            const size_t khpa_r = khpa_dxt ? khpa_n4 * khpa_blk : static_cast<size_t>(khpa_ew) * khpa_eh * khpa_bpp;
+            const bool khpa_fits = khpa_dxt == 0 ? khpa_r / 9u <= khpa_v.size
+                                 : khpa_v.lzo    ? khpa_r / 256u <= khpa_v.size
+                                                 : khpa_r <= khpa_v.size;
+            if (!khpa_fits) break;
+            khpa_rn[khpa_cl] = khpa_r;
+            khpa_total += khpa_keep ? khpa_r : static_cast<size_t>(khpa_ew) * khpa_eh * 4u;
+        }
+        if (khpa_cl == 0) { khpa_err = "corrupt PAA level 0 data"; return false; }
+        std::vector<uint8_t> khpa_raw;   // One level's texel data as stored, unpacked.
+        std::vector<uint8_t> khpa_body(128);
+        uint32_t khpa_mips = 0;
+        for (int khpa_l = 0; khpa_l < khpa_cl; ++khpa_l) {
+            const KhPaaLevel& khpa_v = khpa_lv[khpa_l];
+            const uint32_t khpa_ew = khpa_w0 >> khpa_l ? khpa_w0 >> khpa_l : 1u;
+            const uint32_t khpa_eh = khpa_h0 >> khpa_l ? khpa_h0 >> khpa_l : 1u;
+            const size_t khpa_bw = (khpa_ew + 3u) / 4u, khpa_bh = (khpa_eh + 3u) / 4u;
+            const size_t khpa_rl = khpa_rn[khpa_l];
+            const uint8_t* const khpa_src_b = khpa_b + khpa_v.off;
+            khpa_raw.resize(khpa_rl);
+            bool khpa_ok;
+            if (khpa_dxt == 0) khpa_ok = kh_paa_unlzss(khpa_src_b, khpa_v.size, khpa_raw.data(), khpa_rl);
+            else if (khpa_v.lzo) khpa_ok = kh_paa_unlzo(khpa_src_b, khpa_v.size, khpa_raw.data(), khpa_rl);
+            else { khpa_ok = true; memcpy(khpa_raw.data(), khpa_src_b, khpa_rl); }   // Size checked above.
+            if (!khpa_ok) {
+                if (khpa_l == 0) { khpa_err = "corrupt PAA level 0 data"; return false; }
+                break;
+            }
+            if (khpa_l == 0) khpa_body.reserve(khpa_total);   // Keeps the header's 128 bytes; no reallocation after.
+            if (khpa_keep) {
+                khpa_body.insert(khpa_body.end(), khpa_raw.begin(), khpa_raw.end());
+            } else {
+                const size_t khpa_o0 = khpa_body.size();
+                khpa_body.resize(khpa_o0 + static_cast<size_t>(khpa_ew) * khpa_eh * 4u);
+                uint8_t* const khpa_d = khpa_body.data() + khpa_o0;   // BGRA, row by row.
+                const uint8_t* const khpa_r = khpa_raw.data();
+                if (khpa_dxt) {
+                    uint8_t khpa_px[16][4];
+                    for (size_t khpa_by = 0; khpa_by < khpa_bh; ++khpa_by) {
+                        for (size_t khpa_bx = 0; khpa_bx < khpa_bw; ++khpa_bx) {
+                            kh_paa_bc_block(khpa_dxt, khpa_r + (khpa_by * khpa_bw + khpa_bx) * khpa_blk, khpa_px);
+                            for (size_t khpa_i = 0; khpa_i < 16; ++khpa_i) {
+                                const size_t khpa_x = khpa_bx * 4u + (khpa_i & 3u);
+                                const size_t khpa_y = khpa_by * 4u + (khpa_i >> 2);
+                                if (khpa_x >= khpa_ew || khpa_y >= khpa_eh) continue;
+                                memcpy(khpa_d + (khpa_y * khpa_ew + khpa_x) * 4u, khpa_px[khpa_i], 4);
+                            }
+                        }
+                    }
+                } else {
+                    const size_t khpa_np = static_cast<size_t>(khpa_ew) * khpa_eh;
+                    for (size_t khpa_i = 0; khpa_i < khpa_np; ++khpa_i) {
+                        uint8_t* const khpa_o = khpa_d + khpa_i * 4u;
+                        if (khpa_type == 0x8888u) { memcpy(khpa_o, khpa_r + khpa_i * 4u, 4); continue; }
+                        const uint32_t khpa_q = khpa_r[khpa_i * 2u] |
+                                                (static_cast<uint32_t>(khpa_r[khpa_i * 2u + 1u]) << 8);
+                        if (khpa_type == 0x4444u) {   // A4R4G4B4.
+                            for (int khpa_k = 0; khpa_k < 4; ++khpa_k) {
+                                khpa_o[khpa_k] = static_cast<uint8_t>(((khpa_q >> (4 * khpa_k)) & 15u) * 17u);
+                            }
+                        } else if (khpa_type == 0x1555u) {   // A1R5G5B5.
+                            for (int khpa_k = 0; khpa_k < 3; ++khpa_k) {
+                                const uint32_t khpa_c5 = (khpa_q >> (5 * khpa_k)) & 31u;
+                                khpa_o[khpa_k] = static_cast<uint8_t>((khpa_c5 << 3) | (khpa_c5 >> 2));
+                            }
+                            khpa_o[3] = (khpa_q & 0x8000u) ? 255u : 0u;
+                        } else {   // 8:8 grey, then alpha.
+                            khpa_o[0] = khpa_o[1] = khpa_o[2] = static_cast<uint8_t>(khpa_q & 0xFFu);
+                            khpa_o[3] = static_cast<uint8_t>(khpa_q >> 8);
+                        }
+                    }
+                }
+                const size_t khpa_np = static_cast<size_t>(khpa_ew) * khpa_eh;
+                if (khpa_dxt == 2 || khpa_dxt == 4) {   // Premultiplied: the colour back over its alpha.
+                    for (size_t khpa_i = 0; khpa_i < khpa_np; ++khpa_i) {
+                        uint8_t* const khpa_o = khpa_d + khpa_i * 4u;
+                        const uint32_t khpa_a = khpa_o[3];
+                        if (khpa_a == 0 || khpa_a == 255) continue;
+                        for (int khpa_k = 0; khpa_k < 3; ++khpa_k) {
+                            const uint32_t khpa_u = (khpa_o[khpa_k] * 255u + khpa_a / 2u) / khpa_a;
+                            khpa_o[khpa_k] = static_cast<uint8_t>(khpa_u > 255u ? 255u : khpa_u);
+                        }
+                    }
+                }
+                if (!khpa_swz_id) {   // BGRA bytes: A is byte 3, R 2, G 1, B 0.
+                    for (size_t khpa_i = 0; khpa_i < khpa_np; ++khpa_i) {
+                        uint8_t* const khpa_o = khpa_d + khpa_i * 4u;
+                        const uint8_t khpa_s[4] = { khpa_o[0], khpa_o[1], khpa_o[2], khpa_o[3] };
+                        for (int khpa_ch = 0; khpa_ch < 4; ++khpa_ch) {
+                            const uint8_t khpa_sv = khpa_s[khpa_src[khpa_ch] == 0 ? 3 : 3 - khpa_src[khpa_ch]];
+                            khpa_o[khpa_ch == 0 ? 3 : 3 - khpa_ch] = khpa_neg[khpa_ch]
+                                                                    ? static_cast<uint8_t>(255u - khpa_sv) : khpa_sv;
+                        }
+                        if (khpa_a_one) khpa_o[3] = 255u;
+                    }
+                }
+            }
+            ++khpa_mips;
+        }
+        uint8_t* const khpa_hd = khpa_body.data();   // The 128 bytes reserved in front, zeroed.
+        auto khpa_put32 = [&](size_t khpa_o, uint32_t khpa_x) {
+            for (int khpa_k = 0; khpa_k < 4; ++khpa_k) {
+                khpa_hd[khpa_o + khpa_k] = static_cast<uint8_t>(khpa_x >> (8 * khpa_k));
+            }
+        };
+        khpa_put32(0, 0x20534444u);   // "DDS ".
+        khpa_put32(4, 124u);
+        khpa_put32(8, 0x1u | 0x2u | 0x4u | 0x1000u | 0x20000u);   // Caps, height, width, pixel format, mip count.
+        khpa_put32(12, khpa_h0);
+        khpa_put32(16, khpa_w0);
+        khpa_put32(28, khpa_mips);
+        khpa_put32(76, 32u);
+        if (khpa_keep) {
+            khpa_put32(80, 0x4u);   // FourCC.
+            khpa_put32(84, khpa_dxt == 1 ? 0x31545844u : khpa_dxt == 3 ? 0x33545844u : 0x35545844u);
+        } else {
+            khpa_put32(80, 0x40u | 0x1u);   // RGB + alpha: B8G8R8A8.
+            khpa_put32(88, 32u);
+            khpa_put32(92, 0x00FF0000u);
+            khpa_put32(96, 0x0000FF00u);
+            khpa_put32(100, 0x000000FFu);
+            khpa_put32(104, 0xFF000000u);
+        }
+        khpa_put32(108, 0x1000u | 0x400000u | 0x8u);   // Texture, mipmap, complex.
+        khpa_dds.swap(khpa_body);
+        return true;
+    } catch (const std::exception&) {
+        khpa_dds.clear();
+        khpa_err = "out of memory";
+        return false;
+    }
 }
 
 struct KhTexBlob;
@@ -20931,6 +21426,10 @@ inline KhTexRef kh_tex_resolve(ID3D11Device* dev, ID3D11DeviceContext* ctx,
         std::vector<uint8_t> bytes;
         if (!kh_asset_read(path, bytes, 256ull * 1024u * 1024u)) err = "read failed";   // PBO_PATH.
         else khtr_single = kh_load_dds(dev, bytes, srgb, err);
+    } else if (kh_paa_ext(path)) {   // KH_PAA: made into .dds bytes, then the .dds route.
+        std::vector<uint8_t> khtr_paa, khtr_dds;
+        if (!kh_asset_read(path, khtr_paa, 256ull * 1024u * 1024u)) err = "read failed";   // PBO_PATH.
+        else if (kh_paa_to_dds(khtr_paa, khtr_dds, err)) khtr_single = kh_load_dds(dev, khtr_dds, srgb, err);
     } else {
         khtr_single = kh_load_stb(dev, ctx, path, srgb, err);
     }
@@ -25008,7 +25507,7 @@ struct KhTexLoadDone {
     bool srgb = false;
     bool from_cache = false;
     std::shared_ptr<KhTexBlob> blob;   // Non-.dds results.
-    std::vector<uint8_t> dds;          // .dds raw file bytes (parsed at the pump).
+    std::vector<uint8_t> dds;          // .dds raw file bytes, or a .paa's made from it (parsed at the pump).
     std::string err;
 };
 static std::mutex g_khtl_mu;
@@ -25041,6 +25540,10 @@ inline void kh_texldr_worker() {
             if (kh_ends_with_ci(khtl_d.path, ".dds")) {   // Same read + guard as the sync path.
                 // PBO_PATH: kh_asset_read.
                 if (!kh_asset_read(khtl_d.path, khtl_d.dds, 256ull * 1024u * 1024u)) khtl_d.err = "read failed";
+            } else if (kh_paa_ext(khtl_d.path)) {   // KH_PAA: the sync path's twin - .dds bytes for the pump.
+                std::vector<uint8_t> khtl_paa;
+                if (!kh_asset_read(khtl_d.path, khtl_paa, 256ull * 1024u * 1024u)) khtl_d.err = "read failed";
+                else if (!kh_paa_to_dds(khtl_paa, khtl_d.dds, khtl_d.err)) std::vector<uint8_t>().swap(khtl_d.dds);
             } else {
                 if (!kh_tex_blob_load(khtl_d.path, khtl_d.srgb, khtl_d.blob, khtl_d.from_cache, khtl_d.err,
                                       khtl_j.force)) {
@@ -26682,8 +27185,9 @@ inline bool kh_apply_material_update(RenderObject& obj, const game_value& val, s
                 }
                 if (!(kh_ends_with_ci(tpath, ".png") || kh_ends_with_ci(tpath, ".jpg") ||
                       kh_ends_with_ci(tpath, ".jpeg") || kh_ends_with_ci(tpath, ".tga") ||
-                      kh_ends_with_ci(tpath, ".bmp") || kh_ends_with_ci(tpath, ".dds"))) {
-                    err = "texture '" + tpath + "': unsupported extension (png|jpg|jpeg|tga|bmp|dds)";
+                      kh_ends_with_ci(tpath, ".bmp") || kh_ends_with_ci(tpath, ".dds") ||
+                      kh_paa_ext(tpath))) {   // KH_PAA.
+                    err = "texture '" + tpath + "': unsupported extension (png|jpg|jpeg|tga|bmp|dds|paa|pac)";
                     return false;
                 }
                 const std::string resolved = RenderAssetDiscovery::find_asset_file(tpath);
@@ -31592,7 +32096,7 @@ static float g_band_tab_far[8]   = { -1,-1,-1,-1,-1,-1,-1,-1 };
 static float g_pub_block_amb[3] = {};
 static float g_pub_block_sun[3] = {};
 // Luminance-band agreement with an absolute epsilon so night-small values
-// cannot ratio-flap: |a - b| <= max(half the larger, 0.02).
+// cannot ratio-flap: |a - b| <= max(15% of the larger, 0.02).
 
 inline bool kh_probe_lum_band(float a, float b);   // Defined with the locator (the 15% band).
 
@@ -33096,7 +33600,7 @@ inline void kh_sun_pf_convert(ID3D11DeviceContext* ctx, const ConstantData* khpc
     KH_SAFE_RELEASE(khpc_sr[0]);
     KH_SAFE_RELEASE(khpc_sr[1]);
 }
-// 1 = the band never fitted.
+// -1 = the band never fitted.
 static float    g_sun_band_reach[4] = { -1.0f, -1.0f, -1.0f, -1.0f };   // [3] = far.
 // khsh_out_reach / khsh_out_casters are written only inside the
 // completed-render block, so with valid false they are stale from the last
@@ -33112,7 +33616,7 @@ static constexpr float KH_BAND_FWD_SLACK = 1.25f;
 static constexpr float KH_BAND_FWD_DROP  = 1.60f;   // re-latch tighter past this.
 static float    g_sun_fwd_held[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
 static float    g_sun_union_rad_held = -1.0f;
-// 1 = the latch has never taken.
+// -1 = the latch has never taken.
 static float    g_sun_union_lat_held = -1.0f;
 static uint64_t g_sun_map_hash = 0;
 static float g_sun_map_bounds[6] = {};   // Combined caster AABB: center xyz, half extents xyz
@@ -39299,14 +39803,15 @@ struct ShadowMaskState {
 };
 
 static ShadowMaskState g_mask;
-// The DXGI format of the depth adopted into g_mask.cast_depth. The receiver
-// depth arrives quantised: on a grazing surface near the camera many pixels
-// share one plateau, so a normal from the 2x2 quad inside a plateau is the view
-// axis, not the surface. The world pass measures the plane over KH_DLSW_NRM_R
-// pixels at two baselines and carries their agreement into KhDlsWorldFactor
-// (khw_nrel); where they disagree the normal may not drive N.L. KH_DLS_BIAS_M
-// must exceed the receiver uncertainty or plateaus flip the compare. Texel:
-// 2*z0/KH_DLS_MAP_PX at 90 degrees, divided by sin(incidence).
+// g_mask.cast_depth is also the DLS world pass's receiver depth (its t0 in
+// kh_dls_world_pass_body), and it arrives quantised: on a grazing surface near
+// the camera many pixels share one plateau, so a normal from the 2x2 quad
+// inside a plateau is the view axis, not the surface. The world pass measures
+// the plane over KH_DLSW_NRM_R pixels at two baselines and carries their
+// agreement into KhDlsWorldFactor (khw_nrel); where they disagree the normal
+// may not drive N.L. KH_DLS_BIAS_M must exceed the receiver uncertainty or
+// plateaus flip the compare. Texel: 2*z0/KH_DLS_MAP_PX at 90 degrees, divided
+// by sin(incidence).
 
 inline void kh_svs_mask_release(bool khm_scrub_vmir);   // Default on the earlier declaration.
 inline void kh_vmir_release();   // KH_VOL_MIRROR (defined with its statics).
@@ -41054,10 +41559,13 @@ inline bool kh_dlsw_view_covers(const float khdo_c[3], const float khdo_m[3], fl
 static uint64_t g_dls_frame_cycle = ~0ull;      // once-per-cycle guard (state, not a lane).
 inline void kh_dls_frame(ID3D11DeviceContext* khdf_ctx) {
     KH_PROF_SCOPE(KHP_DLS_FRAME);
-    KH_GPU_SCOPE(khdf_ctx, KHG_DLS_FRAME);   // KH_PROF.
     if (!khdf_ctx) return;
     if (g_dls_frame_cycle == g_topo_cycles) return;
     g_dls_frame_cycle = g_topo_cycles;
+    // KH_PROF_ONCE: the GPU stamp past the once-per-cycle return, as render_sun_depth's. A zone reports its last run,
+    // and a cycle can call this twice (an injection re-armed for the camera partition or by the rescue, a park flush
+    // ahead of the injection): stamped at the head, gDlsFrame was the second call's empty return.
+    KH_GPU_SCOPE(khdf_ctx, KHG_DLS_FRAME);
 
     static std::vector<SunCaster> khdf_casters;   // Scratch: both callers run on the render thread or in a park.
     khdf_casters.clear();
@@ -47637,7 +48145,6 @@ inline void kh_pip_note_upload(ID3D11Resource* res, const void* data, uint32_t b
     }
 }
 
-// At every OM set on the render thread, after g_ro.dsv_main is known.
 // KH_PIP_FX: PSEffect against a single-sample depth; a multisampled PIP depth
 // stands the pass down rather than reading it through the wrong declaration.
 // The prewarm table carries this exact define set.
@@ -48024,6 +48531,7 @@ inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
     if (khpf_drawn) kh_stat_add(g_stats.pip_fx, khpf_drawn);
 }
 
+// At every OM set on the render thread, after g_ro.dsv_main is known.
 inline void kh_pip_track_targets(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv) {
     // The binding that leaves a PIP pass (off, or another PIP's RT0) draws the
     // passes into it first - the PIP's targets are still bound, this hook runs
@@ -48914,8 +49422,10 @@ inline void kh_infront_inject(ID3D11DeviceContext* ctx, const D3D11_VIEWPORT& kh
 // else writes into (a clear, our world seam, a command list, an indirect draw, a copy into the buffer) is refused and
 // the frame keeps the copy; our in-front footprint is left to the merge's per-pixel trust (kh_rp_foreign).
 inline void kh_infront_seam_inject(ID3D11DeviceContext* ctx, const D3D11_VIEWPORT& khvs_vp);   // Defined below.
-// KH_RP_UNCAPPED: a pass has no draw limit - the records grow on demand (g_rp_draws), and nothing run per map or
-// per constant capture walks them or the reuse list (KhRpPtrMap), so a pass costs in proportion to its draws.
+// KH_RP_UNCAPPED: a pass has no draw limit - the records grow on demand (g_rp_draws). A map or a constant capture
+// is a lookup (KhRpPtrMap), not a walk of the records or the reuse list; only a split (KH_REPLAY_SPLIT: a DISCARD
+// map of a buffer a record still flags, once per ring wrap) walks the records drawn so far. A pass costs its draws
+// plus one such walk per split.
 static constexpr uint32_t KH_RP_CB = 14u, KH_RP_SRV = 16u, KH_RP_VB = 4u;
 static constexpr uint32_t KH_RP_VPS = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
 struct KhRpDraw {
@@ -49714,7 +50224,8 @@ inline void kh_rp_pass_end(ID3D11DeviceContext* ctx) {
         }
     }
     // KH_RP_DYN_PRUNE: a copy no pass has named for more than KH_RP_DYN_KEEP frames goes (g_rp_pass is the frame
-    // sequence, g_svs_frame_seq, bumped at every main-depth clear), at the end of a pass not refused at its start.
+    // sequence, g_svs_frame_seq, bumped at every main-depth clear), at the end of a pass that reaches the copies
+    // above; a pass refused before its end, or with no draw, returns ahead of them and adds no slot either.
     // The slots are keyed by an engine
     // buffer's address, which the engine frees and reuses, so without this every buffer a volume pass ever drew with
     // kept a copy of its size for the session. A record still holding one keeps it alive (its own reference).
@@ -53221,10 +53732,12 @@ inline void kh_svs_prime_mask(ID3D11DeviceContext* ctx) {
 
 inline void kh_svs_vol_copy(ID3D11DeviceContext* khc_ctx) {
     KH_PROF_SCOPE(KHP_SVS_VOL_COPY);
-    KH_GPU_SCOPE(khc_ctx, KHG_SVS_VOL_COPY);   // KH_PROF.
     if (g_svs_vol_seq == g_svs_frame_seq) {
         return;
     }
+    // KH_PROF_ONCE: past the return above (this seam frame's copy is taken; the seam frame is the GPU zone's cycle -
+    // both turn at the main-depth clear), as kh_dls_frame's: a later call's empty return no longer replaces it.
+    KH_GPU_SCOPE(khc_ctx, KHG_SVS_VOL_COPY);
 
     if (!khc_ctx || g_ro.in_injection) {  return; }
     if (!kh_svs_vol_on()) {  return; }
@@ -53309,7 +53822,6 @@ inline void kh_volume_seam_pump(ID3D11DeviceContext* ctx) {
     kh_volume_seam_inject(ctx, g_svs_pend_w, g_svs_pend_h);
 }
 
-// No twin, one authority.
 // KH_SCENE_NAME - the scene texture is named where it is known to be the scene's: at the injection's accept (the
 // target it draws into) and at the scene resolve kh_main_depth_readopt recognises. Everything at the scene resolve
 // keys on it - the render-thread flush (whose absence parks every Draw3D: flush_frame's khnp_ready), the late chain
@@ -53323,6 +53835,7 @@ inline void kh_scene_tex_name(ID3D11Resource* khsn_res) {
     g_topo_scene_seen_cycle = g_topo_cycles;
 }
 
+// No twin, one authority.
 inline void kh_reorder_trigger(ID3D11DeviceContext* self) {
     if (!g_ro.dsv_main) return;
 

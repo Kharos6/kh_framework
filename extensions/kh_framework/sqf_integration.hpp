@@ -7225,8 +7225,8 @@ static bool kh_rv_fx_textures(const game_value& v, RenderIntegration::RenderObje
         const std::string khft_path = static_cast<std::string>(khft_e[0]);
         auto khft_ext = [&](const char* khft_x) { return RenderIntegration::kh_ends_with_ci(khft_path, khft_x); };
         if (!(khft_ext(".png") || khft_ext(".jpg") || khft_ext(".jpeg") || khft_ext(".tga") ||
-              khft_ext(".bmp") || khft_ext(".dds"))) {
-            err = "texture '" + khft_path + "': unsupported extension (png|jpg|jpeg|tga|bmp|dds)";
+              khft_ext(".bmp") || khft_ext(".dds") || RenderIntegration::kh_paa_ext(khft_path))) {   // KH_PAA.
+            err = "texture '" + khft_path + "': unsupported extension (png|jpg|jpeg|tga|bmp|dds|paa|pac)";
             return false;
         }
         bool khft_srgb = false;
@@ -10106,6 +10106,7 @@ static void initialize_sqf_integration() {
         game_data_type::SCALAR
     );
 
+    // KH_NET_REMOVE_ARRAY: the [handlerId, owner] pair khNetworkMessageReceive returns.
     _sqf_kh_network_remove_handler_array = intercept::client::host::register_sqf_command(
         "khNetworkRemoveHandler",
         "Remove a network message handler by [handlerId, owner]",

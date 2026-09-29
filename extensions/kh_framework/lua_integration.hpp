@@ -1102,7 +1102,12 @@ namespace LuaFunctions {
                     if (lua_pcall(L, args.size(), 1, 0) == 0) {
                         last_result = sol::stack::pop<sol::object>(L);
                     } else {
-                        std::string err = lua_tostring(L, -1);
+                        // KH_LUA_ERR_NULL: lua_tostring is NULL for a non-string, non-number error object
+                        // (assert(false, t) with t a table or nil raises t itself) - sqf's trigger has the twin.
+                        const char* khle_msg = lua_tostring(L, -1);
+                        std::string err = khle_msg
+                            ? std::string(khle_msg)
+                            : "error object of type " + std::string(lua_typename(L, lua_type(L, -1)));
                         report_error("Event handler error: " + err);
                         lua_pop(L, 1);
                     }
@@ -2012,7 +2017,14 @@ static void initialize_lua_state() {
                     } else if (obj.is<const char*>()) {
                         ss << obj.as<const char*>();
                     } else {
-                        ss << lua_tostring(obj.lua_state(), -1);
+                        // KH_LUA_ERR_NULL: this argument itself (the stack top is the LAST argument), as its text
+                        // when Lua has one (a number), else its type name - lua_tostring is NULL for a nil, a table,
+                        // a function or a userdata, and a NULL char* written to a stream is undefined.
+                        lua_State* khle_l = va.lua_state();
+                        obj.push(khle_l);
+                        const char* khle_s = lua_tostring(khle_l, -1);
+                        ss << (khle_s ? khle_s : lua_typename(khle_l, lua_type(khle_l, -1)));
+                        lua_pop(khle_l, 1);
                     }
 
                     ss << " ";

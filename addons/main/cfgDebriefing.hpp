@@ -1,4 +1,4 @@
-class cfgDebriefing
+class CfgDebriefing
 {
 	class KH_MissionConcluded
 	{

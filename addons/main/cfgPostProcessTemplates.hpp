@@ -1,4 +1,4 @@
-class CfgPostprocessTemplates
+class CfgPostProcessTemplates
 {
 	class KH_BlueHour
 	{

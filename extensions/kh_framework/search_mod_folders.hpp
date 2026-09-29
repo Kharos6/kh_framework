@@ -98,6 +98,26 @@ typedef struct _OBJECT_TYPE_INFORMATION {
 // pairs up to an empty key ("prefix" among them); an entry with an empty name ends the table; the files' data
 // follows back to back in table order. Method 'Cprs' with the two sizes different = LZSS-packed (below); 'Encr' =
 // encrypted (not readable).
+// PBO_PATH: every integration that looks a file up in a folder of its own (rendering, html_ui, ai_models,
+// tts_models, stt_models) takes a path with ONE leading separator - "\x\kh\addons\main\ui\kh_logo_512.paa" or
+// "/x/kh/..." - as such an engine path instead (is_pbo_path): no Documents folder, no mod folder. Two leading
+// separators are a network path ("\\server\share"), as before; so is anything else a path already was.
+// PBO_LIST (list_pbo_directory): the files under an engine folder, at any depth, whichever PBOs hold them - one
+// whose prefix is the folder or lies inside it, or one whose prefix holds the folder - each path answered by the PBO
+// read_pbo_file would take it from.
+// PBO_EXTRACT (extract_pbo_file / extract_pbo_directory): a copy on disk for a consumer that can only open a real
+// file (llama.cpp, sherpa-onnx), under Documents\Arma 3\kh_framework\cache\pbo\files, the engine path below it
+// (lower case), with a stamp per file under ...\pbo\stamps naming its source - the PBO's path, size and write time,
+// the entry's offset, sizes and method. A copy whose stamp matches is used as it stands; any other is written again
+// (a .part file, renamed over it; the stamp after). Entries stream through a 1 MB buffer (a packed one - LZSS, small
+// files - unpacks in memory). A folder's copy holds exactly the folder's files: one an earlier copy left that the
+// PBOs no longer hold is deleted with its stamp. A path segment that is not a plain file name ("", ".", "..", a
+// character Windows forbids, a trailing dot or space, a device name such as CON - also with spaces before the
+// extension, "nul .txt", and COM / LPT with a superscript 1-3) is refused, so nothing is written outside the
+// root. One extraction at a time (pbo_extract_mutex, taken before pbo_mutex, never inside it) - and one
+// across the user's game processes (PBO_EXTRACT_XPROC: the cache is the user's Documents folder, which a client and
+// a local dedicated server share; a named mutex in the session's namespace, taken inside pbo_extract_mutex, so two
+// processes never write one .part, prune each other's, or stamp each other's copy).
 // ===========================================================================
 class ModFolderSearcher {
 private:
@@ -212,6 +232,13 @@ private:
         PboFile& operator=(const PboFile&) = delete;
         bool ok() const { return handle_ != INVALID_HANDLE_VALUE; }
         uint64_t size() const { return size_; }
+
+        // PBO_EXTRACT: the file's last write time (FILETIME ticks; 0 when unknown).
+        uint64_t write_time() const {
+            FILETIME ft = {};
+            if (handle_ == INVALID_HANDLE_VALUE || !GetFileTime(handle_, nullptr, nullptr, &ft)) return 0;
+            return (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+        }
 
         bool read_at(uint64_t offset, void* dst, size_t count) const {
             if (offset > size_ || size_ - offset < count) return false;
@@ -407,6 +434,21 @@ private:
         pbo_index_built = true;
     }
 
+    // An archive's file table, read the first time it is needed (pbo_mutex held by the caller). Committed once read
+    // whole (a header that fails keeps an empty table); false = the PBO did not open this time - not cached, a later
+    // lookup tries again. pbo_find and list_pbo_directory both load through it.
+    static bool pbo_table_ensure(PboArchive& a) {
+        if (a.entries_loaded) return true;
+        PboFile file(a.path);
+        if (!file.ok()) return false;
+        std::unordered_map<std::string, PboEntry> table;
+        std::string prefix;
+        if (!pbo_read_header(file, a.path, prefix, &table)) table.clear();
+        a.entries = std::move(table);
+        a.entries_loaded = true;
+        return true;
+    }
+
     // The PBO and entry holding a normalised engine path (pbo_mutex held by the caller). Longest prefix first.
     static bool pbo_find(const std::string& vpath, std::filesystem::path& pbo, PboEntry& entry) {
         for (size_t cut = vpath.rfind('\\'); cut != std::string::npos && cut > 0; cut = vpath.rfind('\\', cut - 1)) {
@@ -416,17 +458,7 @@ private:
 
             for (size_t idx : it->second) {
                 PboArchive& a = pbo_archives[idx];
-
-                if (!a.entries_loaded) {   // Committed once read whole (a header that fails keeps an empty table).
-                    PboFile file(a.path);
-                    if (!file.ok()) continue;   // Not opened this time: not cached, a later lookup tries again.
-                    std::unordered_map<std::string, PboEntry> table;
-                    std::string prefix;
-                    if (!pbo_read_header(file, a.path, prefix, &table)) table.clear();
-                    a.entries = std::move(table);
-                    a.entries_loaded = true;
-                }
-
+                if (!pbo_table_ensure(a)) continue;
                 const auto e = a.entries.find(inner);
 
                 if (e != a.entries.end()) {
@@ -466,6 +498,10 @@ private:
         const bool packed = entry.method == PBO_METHOD_PACKED && entry.original_size != 0 &&
                             entry.original_size != entry.data_size;
 
+        // KH_PBO_LZSS_BOUND: this LZSS gives at most 9 bytes per input byte (a 2-byte reference at most 18, a
+        // literal 1, flag bytes none), so a larger unpacked size is corrupt - refused before it is allocated.
+        if (packed && entry.original_size / 9 > entry.data_size) return fail("corrupt packed data in " + pbo_utf8(pbo));
+
         PboFile file(pbo);
         if (!file.ok()) return fail("cannot open " + pbo_utf8(pbo));
 
@@ -488,6 +524,209 @@ private:
         } catch (const std::bad_alloc&) {
             return fail("out of memory");
         }
+    }
+
+    // PBO_EXTRACT (the note above the class).
+    static std::mutex pbo_extract_mutex;
+
+    // PBO_EXTRACT_XPROC (the note above the class): held for one extraction, inside pbo_extract_mutex. The handle
+    // is made once and kept for the process; a mutex that cannot be made leaves the process-local lock alone, as
+    // before. An abandoned one (its holder exited mid-copy) is taken as held: the stamps decide what stands.
+    class PboExtractXLock {
+    public:
+        PboExtractXLock() {
+            static const HANDLE khxl_h = CreateMutexW(nullptr, FALSE, L"Local\\kh_framework_pbo_extract");
+            h_ = khxl_h;
+            if (h_) {
+                const DWORD khxl_r = WaitForSingleObject(h_, INFINITE);
+                owned_ = khxl_r == WAIT_OBJECT_0 || khxl_r == WAIT_ABANDONED;
+            }
+        }
+        ~PboExtractXLock() { if (owned_) ReleaseMutex(h_); }
+        PboExtractXLock(const PboExtractXLock&) = delete;
+        PboExtractXLock& operator=(const PboExtractXLock&) = delete;
+    private:
+        HANDLE h_ = nullptr;
+        bool owned_ = false;
+    };
+
+    // UTF-8 -> a wide path piece (std::filesystem::u8path is deprecated in C++20).
+    static std::wstring pbo_wide(const std::string& s) {
+        if (s.empty()) return std::wstring();
+        const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+        if (n <= 0) return std::wstring();
+        std::wstring w(static_cast<size_t>(n), L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), &w[0], n);
+        return w;
+    }
+
+    // A normalised engine path as a relative filesystem path; false when a segment is not a plain file name.
+    static bool pbo_safe_rel(const std::string& key, std::filesystem::path& rel) {
+        rel.clear();
+        size_t a = 0;
+
+        while (a <= key.size()) {
+            size_t b = key.find('\\', a);
+            if (b == std::string::npos) b = key.size();
+            const std::string seg = key.substr(a, b - a);
+            if (seg.empty() || seg == "." || seg == "..") return false;
+
+            for (char c : seg) {
+                if (static_cast<unsigned char>(c) < 32 || c == ':' || c == '<' || c == '>' || c == '"' || c == '|' ||
+                    c == '?' || c == '*' || c == '/') return false;
+            }
+
+            if (seg.back() == '.' || seg.back() == ' ') return false;   // Windows drops them: two names, one file.
+            std::string stem = seg.substr(0, seg.find('.'));   // Lower case already (pbo_normalise).
+            // KH_PBO_DEVNAME: Windows drops the spaces before the extension too ("nul .txt" is NUL), and takes COM /
+            // LPT with a superscript 1-3 (UTF-8 C2 B9 / C2 B2 / C2 B3) as a port as well.
+            while (!stem.empty() && stem.back() == ' ') stem.pop_back();
+            const bool khpd_port = stem.compare(0, 3, "com") == 0 || stem.compare(0, 3, "lpt") == 0;
+
+            const bool khpd_digit = (stem.size() == 4 && stem[3] >= '0' && stem[3] <= '9') ||
+                                    (stem.size() == 5 && stem[3] == '\xC2' &&
+                                     (stem[4] == '\xB9' || stem[4] == '\xB2' || stem[4] == '\xB3'));
+
+            if (stem == "con" || stem == "prn" || stem == "aux" || stem == "nul" || (khpd_port && khpd_digit)) {
+                return false;
+            }
+
+            const std::wstring w = pbo_wide(seg);
+            if (w.empty()) return false;
+            rel /= w;
+            a = b + 1;
+        }
+
+        return !rel.empty();
+    }
+
+    // Documents\Arma 3\kh_framework\cache\pbo (empty when Documents is unknown).
+    static std::filesystem::path pbo_extract_root() {
+        char docs[MAX_PATH];
+        if (SHGetFolderPathA(NULL, CSIDL_MYDOCUMENTS, NULL, SHGFP_TYPE_CURRENT, docs) != S_OK) return {};
+        return std::filesystem::path(docs) / "Arma 3" / "kh_framework" / "cache" / "pbo";
+    }
+
+    // One file's copy (pbo_extract_mutex held): out = its path under root\files. key is normalised.
+    static bool pbo_extract_one(const std::string& key, const std::filesystem::path& root, std::filesystem::path& out,
+                                std::string* err) {
+        auto fail = [&](const std::string& why) {
+            if (err) *err = why + ": " + key;
+            return false;
+        };
+
+        std::filesystem::path rel;
+        if (!pbo_safe_rel(key, rel)) return fail("not a plain file path");
+        std::filesystem::path pbo;
+        PboEntry entry;
+
+        {
+            std::lock_guard<std::mutex> lock(pbo_mutex);
+            pbo_index_ensure();
+            if (!pbo_find(key, pbo, entry)) return fail("no loaded PBO holds the file");
+        }
+
+        if (entry.method == PBO_METHOD_ENCRYPTED) return fail("the file is encrypted");
+        if (entry.method != 0 && entry.method != PBO_METHOD_PACKED) return fail("unknown packing method");
+
+        const bool packed = entry.method == PBO_METHOD_PACKED && entry.original_size != 0 &&
+                            entry.original_size != entry.data_size;
+
+        // KH_PBO_LZSS_BOUND (pbo_read_uncached): an unpacked size LZSS cannot reach is refused before any allocation.
+        if (packed && entry.original_size / 9 > entry.data_size) return fail("corrupt packed data in " + pbo_utf8(pbo));
+        const uint64_t want = packed ? entry.original_size : entry.data_size;
+        PboFile file(pbo);
+        if (!file.ok()) return fail("cannot open " + pbo_utf8(pbo));
+
+        const std::string stamp = pbo_utf8(pbo) + "|" + std::to_string(file.size()) + "|" +
+                                  std::to_string(file.write_time()) + "|" + std::to_string(entry.offset) + "|" +
+                                  std::to_string(entry.data_size) + "|" + std::to_string(entry.original_size) + "|" +
+                                  std::to_string(entry.method);
+
+        const std::filesystem::path dest = root / L"files" / rel;
+        std::filesystem::path stamp_path = root / L"stamps" / rel;
+        stamp_path += L".khpbo";
+        std::error_code ec;
+
+        {   // The copy stands when its stamp and its size say it is this entry's.
+            std::ifstream sf(stamp_path, std::ios::binary);
+            std::string have;
+            if (sf) have.assign((std::istreambuf_iterator<char>(sf)), std::istreambuf_iterator<char>());
+
+            if (have == stamp && std::filesystem::is_regular_file(dest, ec) &&
+                std::filesystem::file_size(dest, ec) == want && !ec) {
+                out = dest;
+                return true;
+            }
+        }
+
+        std::filesystem::remove(stamp_path, ec);   // No stamp may vouch for a copy being rewritten.
+        std::filesystem::create_directories(dest.parent_path(), ec);
+        std::filesystem::create_directories(stamp_path.parent_path(), ec);
+        std::filesystem::path part = dest;
+        part += L".part";
+
+        try {
+            {
+                std::ofstream of(part, std::ios::binary | std::ios::trunc);
+                if (!of) return fail("cannot write " + pbo_utf8(part));
+
+                if (!packed) {
+                    std::vector<uint8_t> buf(size_t(1) << 20);
+                    uint64_t done = 0;
+
+                    while (done < want) {
+                        const size_t n = static_cast<size_t>(std::min<uint64_t>(buf.size(), want - done));
+
+                        if (!file.read_at(entry.offset + done, buf.data(), n)) {
+                            of.close();
+                            std::filesystem::remove(part, ec);
+                            return fail("cannot read " + pbo_utf8(pbo));
+                        }
+
+                        of.write(reinterpret_cast<const char*>(buf.data()), static_cast<std::streamsize>(n));
+                        done += n;
+                    }
+                } else {
+                    std::vector<uint8_t> stored(entry.data_size);
+                    std::vector<uint8_t> plain(entry.original_size);
+
+                    if (!file.read_at(entry.offset, stored.data(), stored.size()) ||
+                        !pbo_unlzss(stored.data(), stored.size(), plain.data(), plain.size())) {
+                        of.close();
+                        std::filesystem::remove(part, ec);
+                        return fail("cannot unpack " + pbo_utf8(pbo));
+                    }
+
+                    of.write(reinterpret_cast<const char*>(plain.data()), static_cast<std::streamsize>(plain.size()));
+                }
+
+                of.flush();
+
+                if (!of) {
+                    of.close();
+                    std::filesystem::remove(part, ec);
+                    return fail("cannot write " + pbo_utf8(part));
+                }
+            }
+
+            std::filesystem::rename(part, dest, ec);   // Replaces an older copy.
+
+            if (ec) {
+                std::filesystem::remove(part, ec);
+                return fail("cannot place " + pbo_utf8(dest));
+            }
+
+            std::ofstream sf(stamp_path, std::ios::binary | std::ios::trunc);
+            sf.write(stamp.data(), static_cast<std::streamsize>(stamp.size()));
+            // A stamp that did not land costs only a rewrite next time: the copy itself is whole.
+        } catch (const std::exception&) {
+            std::filesystem::remove(part, ec);
+            return fail("out of memory");
+        }
+
+        out = dest;
+        return true;
     }
 
     // Discover active mod folders by inspecting PBO file handles
@@ -556,6 +795,12 @@ private:
                 continue;
             }
 
+            // Skip handles with problematic access rights. KH_ACCESS_FIRST: before any call on the handle - a
+            // synchronous pipe's queries (GetFileType's among them) can wait while a read on it is pending.
+            if (handle.GrantedAccess == 0x0012019f) {
+                continue;
+            }
+
             HANDLE dupHandle = nullptr;
 
             if (!NT_SUCCESS(NtDuplicateObject(
@@ -586,11 +831,6 @@ private:
                 continue;
             }
 
-            // Skip handles with problematic access rights
-            if (handle.GrantedAccess == 0x0012019f) {
-                continue;
-            }
-
             ULONG returnLength = 0;   // A failed query need not write it (read on the retry below).
             std::unique_ptr<void, FreeDeleter> objectNameInfo(malloc(0x1000));
             
@@ -613,11 +853,19 @@ private:
             UNICODE_STRING objectName = *static_cast<PUNICODE_STRING>(objectNameInfo.get());
 
             // Check if this is a PBO file
-            if (objectName.Length) {
-                std::wstring_view tmp_type(objectTypeInfo->Name.Buffer);
-                std::wstring_view tmp_name(objectName.Buffer);
+            if (objectName.Length && objectName.Buffer && objectTypeInfo->Name.Buffer) {
+                // KH_NT_NAME_LEN: a UNICODE_STRING need not end in a NUL - its Length (bytes) bounds it.
+                std::wstring_view tmp_type(objectTypeInfo->Name.Buffer, objectTypeInfo->Name.Length / sizeof(wchar_t));
+                std::wstring_view tmp_name(objectName.Buffer, objectName.Length / sizeof(wchar_t));
+                // KH_PBO_CASE: ".pbo" in any case, as the extension test below takes it (c | 0x20 folds ASCII only).
+                bool khpc_pbo = false;
 
-                if (tmp_type == L"File"sv && tmp_name.find(L".pbo"sv) != std::wstring::npos) {
+                for (size_t k = 0; !khpc_pbo && k + 4 <= tmp_name.size(); ++k) {
+                    khpc_pbo = tmp_name[k] == L'.' && (tmp_name[k + 1] | 0x20) == L'p' &&
+                               (tmp_name[k + 2] | 0x20) == L'b' && (tmp_name[k + 3] | 0x20) == L'o';
+                }
+
+                if (tmp_type == L"File"sv && khpc_pbo) {
                     // A path that does not fit returns the size it needs (terminator included) and writes nothing.
                     std::vector<wchar_t> buffer(MAX_PATH);
 
@@ -705,8 +953,9 @@ public:
         const std::vector<std::filesystem::path>& directories,
         const std::string& extension) {
         std::vector<std::filesystem::path> found_files;
-        std::string lowercase_ext = extension;
-        std::transform(lowercase_ext.begin(), lowercase_ext.end(), lowercase_ext.begin(), ::tolower);
+        // KH_EXT_WIDE: the extension as UTF-8 (the engine's strings), compared wide in ASCII lower case.
+        std::wstring lowercase_ext = pbo_wide(extension);
+        for (auto& c : lowercase_ext) if (c >= L'A' && c <= L'Z') c = static_cast<wchar_t>(c + 32);
         
         for (const auto& dir : directories) {
             try {
@@ -716,9 +965,11 @@ public:
                 
                 for (const auto& entry : std::filesystem::directory_iterator(dir)) {
                     if (entry.is_regular_file()) {
-                        std::string file_ext = entry.path().extension().string();
-                        std::transform(file_ext.begin(), file_ext.end(), file_ext.begin(), ::tolower);
-                        
+                        // KH_EXT_WIDE: wide - path::string() throws on a character the ANSI code page lacks,
+                        // and the catch outside the loop then ended the whole directory's scan.
+                        std::wstring file_ext = entry.path().extension().wstring();
+                        for (auto& c : file_ext) if (c >= L'A' && c <= L'Z') c = static_cast<wchar_t>(c + 32);
+
                         if (file_ext == lowercase_ext) {
                             found_files.push_back(entry.path());
                         }
@@ -736,8 +987,9 @@ public:
         const std::vector<std::filesystem::path>& directories,
         const std::string& extension) {
         
-        std::string lowercase_ext = extension;
-        std::transform(lowercase_ext.begin(), lowercase_ext.end(), lowercase_ext.begin(), ::tolower);
+        // KH_EXT_WIDE: the extension as UTF-8 (the engine's strings), compared wide in ASCII lower case.
+        std::wstring lowercase_ext = pbo_wide(extension);
+        for (auto& c : lowercase_ext) if (c >= L'A' && c <= L'Z') c = static_cast<wchar_t>(c + 32);
         
         for (const auto& dir : directories) {
             try {
@@ -747,9 +999,11 @@ public:
                 
                 for (const auto& entry : std::filesystem::directory_iterator(dir)) {
                     if (entry.is_regular_file()) {
-                        std::string file_ext = entry.path().extension().string();
-                        std::transform(file_ext.begin(), file_ext.end(), file_ext.begin(), ::tolower);
-                        
+                        // KH_EXT_WIDE: wide - path::string() throws on a character the ANSI code page lacks,
+                        // and the catch outside the loop then ended the whole directory's scan.
+                        std::wstring file_ext = entry.path().extension().wstring();
+                        for (auto& c : file_ext) if (c >= L'A' && c <= L'Z') c = static_cast<wchar_t>(c + 32);
+
                         if (file_ext == lowercase_ext) {
                             return entry.path();
                         }
@@ -896,6 +1150,144 @@ public:
         return true;
     }
 
+    // PBO_PATH: one leading separator, not two (the note above the class).
+    static bool is_pbo_path(const std::string& path) {
+        return path.size() > 1 && (path[0] == '\\' || path[0] == '/') && path[1] != '\\' && path[1] != '/';
+    }
+
+    // PBO_PATH: an engine path as every lookup here keys it (lower-case ASCII, '\\' separators, no leading or
+    // trailing separator).
+    static std::string normalise_pbo_path(const std::string& path) {
+        try {
+            return pbo_normalise(path);
+        } catch (const std::exception&) {   // Out of memory.
+            return std::string();
+        }
+    }
+
+    // PBO_LIST (the note above the class): the files under the engine folder virtual_dir, relative to it, sorted.
+    static std::vector<std::string> list_pbo_directory(const std::string& virtual_dir) {
+        std::vector<std::string> out;
+
+        try {
+            const std::string d = pbo_normalise(virtual_dir);
+            if (d.empty()) return out;
+            std::lock_guard<std::mutex> lock(pbo_mutex);
+            pbo_index_ensure();
+            // Longest prefix first, as pbo_find: a nested PBO's copy of a path is the one read.
+            std::vector<const std::pair<const std::string, std::vector<size_t>>*> pres;
+            for (const auto& kv : pbo_by_prefix) pres.push_back(&kv);
+
+            std::sort(pres.begin(), pres.end(), [](const auto* x, const auto* y) {
+                return x->first.size() != y->first.size() ? x->first.size() > y->first.size() : x->first < y->first;
+            });
+
+            std::unordered_set<std::string> seen;
+
+            for (const auto* kv : pres) {
+                const std::string& p = kv->first;
+                std::string lead;   // What an inner path must start with (a prefix above the folder).
+                std::string head;   // What goes in front of an inner path (a prefix inside the folder).
+
+                if (p == d) {
+                } else if (p.size() > d.size() && p.compare(0, d.size(), d) == 0 && p[d.size()] == '\\') {
+                    head = p.substr(d.size() + 1) + "\\";
+                } else if (d.size() > p.size() && d.compare(0, p.size(), p) == 0 && d[p.size()] == '\\') {
+                    lead = d.substr(p.size() + 1) + "\\";
+                } else {
+                    continue;
+                }
+
+                for (size_t idx : kv->second) {   // Path order within a prefix, as pbo_find.
+                    PboArchive& a = pbo_archives[idx];
+                    if (!pbo_table_ensure(a)) continue;
+
+                    for (const auto& e : a.entries) {
+                        if (e.first.size() <= lead.size() || e.first.compare(0, lead.size(), lead) != 0) continue;
+                        std::string rel = head + e.first.substr(lead.size());
+                        if (seen.insert(rel).second) out.push_back(std::move(rel));
+                    }
+                }
+            }
+
+            std::sort(out.begin(), out.end());
+        } catch (const std::exception&) {   // Out of memory.
+            out.clear();
+        }
+
+        return out;
+    }
+
+    // PBO_EXTRACT (the note above the class): out = the copy of the file at this engine path. False when no loaded
+    // PBO holds it or it cannot be copied (err, when given, says which).
+    static bool extract_pbo_file(const std::string& virtual_path, std::filesystem::path& out,
+                                 std::string* err = nullptr) {
+        out.clear();
+
+        try {
+            const std::string key = pbo_normalise(virtual_path);
+            const std::filesystem::path root = pbo_extract_root();
+            if (root.empty()) { if (err) *err = "the Documents folder is unknown: " + virtual_path; return false; }
+            std::lock_guard<std::mutex> lock(pbo_extract_mutex);
+            PboExtractXLock xlock;   // PBO_EXTRACT_XPROC.
+            return pbo_extract_one(key, root, out, err);
+        } catch (const std::exception&) {   // Out of memory, or a filesystem error.
+            if (err) *err = "cannot extract: " + virtual_path;
+            return false;
+        }
+    }
+
+    // PBO_EXTRACT: out = the copy of the engine folder virtual_dir - every file list_pbo_directory finds under it,
+    // and nothing else. False when the PBOs hold nothing there or a file of it cannot be copied (the folder is then
+    // left as far as it got; the next call finishes it).
+    static bool extract_pbo_directory(const std::string& virtual_dir, std::filesystem::path& out,
+                                      std::string* err = nullptr) {
+        out.clear();
+
+        try {
+            const std::string d = pbo_normalise(virtual_dir);
+            std::filesystem::path rel;
+            if (!pbo_safe_rel(d, rel)) { if (err) *err = "not a plain folder path: " + virtual_dir; return false; }
+            const std::filesystem::path root = pbo_extract_root();
+            if (root.empty()) { if (err) *err = "the Documents folder is unknown: " + virtual_dir; return false; }
+            std::lock_guard<std::mutex> lock(pbo_extract_mutex);
+            PboExtractXLock xlock;   // PBO_EXTRACT_XPROC.
+            const std::vector<std::string> files = list_pbo_directory(d);
+            if (files.empty()) { if (err) *err = "no loaded PBO holds anything under: " + virtual_dir; return false; }
+            std::unordered_set<std::wstring> keep;   // Lower-case ASCII, as the copies are named.
+
+            for (const std::string& f : files) {
+                std::filesystem::path one;
+                if (!pbo_extract_one(d + "\\" + f, root, one, err)) return false;
+                keep.insert(one.lexically_normal().wstring());
+            }
+
+            const std::filesystem::path dir = root / L"files" / rel;
+            std::error_code ec;
+            std::vector<std::filesystem::path> gone;
+
+            for (auto it = std::filesystem::recursive_directory_iterator(dir, ec);
+                 !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+                if (it->is_regular_file(ec) && keep.count(it->path().lexically_normal().wstring()) == 0) {
+                    gone.push_back(it->path());
+                }
+            }
+
+            for (const auto& g : gone) {   // A file the PBOs no longer hold under the folder (or a .part left over).
+                std::filesystem::remove(g, ec);
+                std::filesystem::path st = root / L"stamps" / g.lexically_relative(root / L"files");
+                st += L".khpbo";
+                std::filesystem::remove(st, ec);
+            }
+
+            out = dir;
+            return true;
+        } catch (const std::exception&) {   // Out of memory, or a filesystem error.
+            if (err) *err = "cannot extract: " + virtual_dir;
+            return false;
+        }
+    }
+
     // the byte budget of the cached files (0 = keep none); a smaller one evicts at once.
     static void set_pbo_cache_budget(size_t bytes) {
         std::lock_guard<std::mutex> lock(pbo_cache_mutex);
@@ -942,3 +1334,4 @@ std::unordered_map<std::string, std::list<ModFolderSearcher::PboCached>::iterato
 size_t ModFolderSearcher::pbo_cache_bytes = 0;
 size_t ModFolderSearcher::pbo_cache_budget = ModFolderSearcher::PBO_CACHE_BUDGET;
 std::mutex ModFolderSearcher::pbo_cache_mutex;
+std::mutex ModFolderSearcher::pbo_extract_mutex;

@@ -215,6 +215,17 @@ public:
     }
 
     static std::filesystem::path find_model(const std::string& model_name) {
+        // PBO_PATH (search_mod_folders.hpp's note): one leading slash names the model FOLDER inside the loaded PBOs
+        // by its engine path, no stt_models folder. sherpa-onnx opens files on disk, so the model is the folder's
+        // extracted copy (PBO_EXTRACT: every file under it, written once, reused while its PBO is unchanged).
+        if (ModFolderSearcher::is_pbo_path(model_name)) {
+            std::filesystem::path out;
+            std::string err;
+            if (ModFolderSearcher::extract_pbo_directory(model_name, out, &err)) return out;
+            MainThreadScheduler::instance().schedule([err]() { sqf::diag_log("KH - STT Framework: " + err); });
+            return std::filesystem::path();
+        }
+
         auto search_paths = find_all_stt_model_directories();
         
         for (const auto& base_path : search_paths) {

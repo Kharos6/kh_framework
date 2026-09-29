@@ -60,9 +60,13 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
 #endif
 {
     // TWO-SIDED: a back face is the other side of the same sheet, so it shades
-    // with the front's normal reversed. Every consumer below reads i.nrm (the
-    // N.L gate, the self-shadow bias, the lighting, the dynamic lights), so
-    // reversing it here is the whole fix. Front is the authored
+    // with the front's normal reversed. Every consumer below reads i.nrm or
+    // the mapped normal built from it (the N.L gate, the self-shadow bias, the
+    // lighting, the dynamic lights - on the textured route the gate, the
+    // lighting and the dynamic lights' N.L take the mapped one, their shadow
+    // lookup the geometric one, KH_DLS_GEOM_N), so reversing it here, with the
+    // tangent term the textured block reverses, is the whole
+    // fix. Front is the authored
     // side: meshgen::bake and the importer wind every triangle to its normal,
     // no rasterizer sets FrontCounterClockwise, and size is never negative.
     // Without this a single sheet's back took the front's sun and, at N.V
@@ -195,10 +199,17 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
 
         // i.pos.z is the rasterizer's own interpolated, viewport-mapped depth -
         // byte-exact with what the hardware would have written had we never
-        // declared SV_Depth. Exact pass-through.
+        // declared SV_Depth. KH_ARB_VP_FLOOR: a near-gap routed draw (fxMeta.x
+        // armed) rasterises in the gap viewport, whose MinDepth is the floor
+        // fxMeta.y, not depthParams.z - its ndc is taken from that range, so
+        // a fragment at or beyond the near plane writes the world mapping
+        // exactly and routing a mesh on or off moves none of its depth (read
+        // over the world range it sat up to ~0.1 % of its distance nearer).
+        // Every other draw's viewport is depthParams.zw: pass-through as before.
         {
-        const float khaNdcE = (i.pos.z - depthParams.z) /
-                              max(depthParams.w - depthParams.z, 1.0e-6f);
+        const float khaVpLo = (abs(fxMeta.x) > 0.0f) ? fxMeta.y : depthParams.z;
+        const float khaNdcE = (i.pos.z - khaVpLo) /
+                              max(depthParams.w - khaVpLo, 1.0e-6f);
         float khaNdc = khaNdcE + (depthParams.y / max(khaD, 0.01f) -
                                   depthParams.y / max(i.pos.w, 0.01f));
         khaODepth = clamp(depthParams.z + (depthParams.w - depthParams.z) * khaNdc,
@@ -208,9 +219,10 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
         // ends at the plane), so the plane itself - depthParams.w - is behind
         // every in-world fragment; the draw stops there.
         if (khaNdc >= 1.0f) khaODepth = depthParams.w;
-        // fxMeta.x carries the near estimate (> 0 arms; every other solid-mesh
-        // fill leaves it zero - effect meshes never compile this shader),
-        // fxMeta.y the widened floor the routed draw's viewport opened.
+        // fxMeta.x carries the near estimate (non-zero arms, its magnitude the
+        // near; the negative 1 / w form above has no C++ writer; every other
+        // solid-mesh fill leaves it zero - effect meshes never compile this
+        // shader), fxMeta.y the widened floor the routed draw's viewport opened.
         if (khaNzArm) {
             khaODepth = fxMeta.y + (depthParams.z - fxMeta.y) *
                         saturate(khaNzD / khaNzN);
@@ -227,8 +239,8 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
 #if KH_TEXTURED
     // Textured: sample below the far contract + guard blocks (the textured twin
     // adds no return/discard above them), cutout-clip, then build the mapped
-    // shading normal. The geometric normal keeps owning the receive gating
-    // below.
+    // shading normal. The mapped normal drives the sun N.L gate below
+    // (khShN); the self-shadow bias keeps the geometric one (khBiasN).
     KhMatLoad(i.matIx);   // KH_MAT_TABLE: the lanes below read from the entry.
     KhMatSurf khtxS = KhSampleMat(i.uv);
 
@@ -285,6 +297,10 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
 
 #if KH_TEXTURED
     float3 khShN = khtxN;
+    // KH_DLS_GEOM_N: the dynamic lights' shadow lookup keeps the geometric
+    // normal, as the self-shadow bias does; their N.L takes khtxN. TWIN:
+    // PSMain / PSComposite.
+    khDlsGeomN = khBiasN;
 #else
     float3 khShN = normalize(i.nrm);
 #endif
@@ -323,8 +339,9 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
                                   (i.icol.a < 0.999f && bm == 0);
             const bool khStenNoWit = khStenTl || i.icol.a < 0.999f || bm != 0 || shadowMeta2.z >= 0.5f;
             float khStenU = KhStenUnit(i.pos.xy, khStenNoWit ? -1.0f : i.pos.w);
-            // On PSMain fxMeta.x is the effect id, so the fade is not applied
-            // there.
+            // PSMain has no KH_ARB_DEPTH block, so the fade is not applied there
+            // (it never reads fxMeta.x, which the flush fills with the near for
+            // its near-gap draws, a textured fallback to PSMain included).
 #if KH_ARB_DEPTH
             // The magnitude is the near either way.
             if (abs(fxMeta.x) > 0.0f) {

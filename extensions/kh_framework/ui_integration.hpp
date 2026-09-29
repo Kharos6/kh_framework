@@ -225,6 +225,15 @@ public:
             path_str = path_str.substr(8);
         }
         
+        std::string pbo_key;
+
+        if (pbo_key_of(path_str, pbo_key)) {   // PBO_PATH: from the PBOs, never the disk.
+            const std::shared_ptr<const std::vector<uint8_t>> pbo_data =
+                ModFolderSearcher::read_pbo_file_shared(pbo_key);
+            if (!pbo_data || pbo_data->empty()) return nullptr;
+            return ultralight::Buffer::CreateFromCopy(pbo_data->data(), pbo_data->size());
+        }
+
         std::filesystem::path file_path = ResolvePath(path_str);
         
         if (file_path.empty()) {
@@ -283,12 +292,55 @@ public:
         exists_cache_.clear();
     }
 
+    // PBO_PATH (search_mod_folders.hpp's note): an HTML file named with one leading slash is inside the loaded PBOs.
+    // Its page is loaded from a file:/// URL under this root, which no file on disk is ever read from: every path
+    // Ultralight asks this file system for below it - the page itself, and the css / js / images / fonts its
+    // relative links reach, in its own PBO or another's - is the engine path after the root, answered from the PBOs
+    // (ModFolderSearcher) in memory. A plain drive path, so Ultralight resolves relative links against it as it
+    // does for a page on disk.
+    static const std::filesystem::path& pbo_root() {
+        static const std::filesystem::path root("C:\\kh_framework_pbo");
+        return root;
+    }
+
+    // The engine path of a path under pbo_root() ('/' and '\\' alike, ASCII case-insensitive, a separator before
+    // the drive tolerated), else false.
+    static bool pbo_key_of(const std::string& path_str, std::string& key) {
+        auto norm = [](const std::string& s) {
+            std::string o;
+            o.reserve(s.size());
+
+            for (char ch : s) {
+                if (ch == '/') ch = '\\';
+                if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch + 32);
+                o.push_back(ch);
+            }
+            
+            return o;
+        };
+
+        static const std::string root = norm(pbo_root().string());
+        std::string p = norm(path_str);
+        size_t a = 0;
+        while (a < p.size() && p[a] == '\\') ++a;
+
+        if (p.size() <= a + root.size() + 1 || p.compare(a, root.size(), root) != 0 || p[a + root.size()] != '\\') {
+            return false;
+        }
+
+        key = p.substr(a + root.size() + 1);
+        return !key.empty();
+    }
+
 private:
     std::vector<std::filesystem::path> search_paths_;
     std::filesystem::path resources_path_;
     mutable LRUCache<std::string, bool> exists_cache_;
 
     bool CheckExistsInternal(const std::string& path_str) const {
+        std::string pbo_key;
+        if (pbo_key_of(path_str, pbo_key)) return ModFolderSearcher::pbo_file_exists(pbo_key);   // PBO_PATH.
+
         try {
             // Check resources path first
             if (!resources_path_.empty()) {
@@ -343,17 +395,46 @@ private:
     }
 };
 
-static game_value js_value_to_game_value(JSContextRef ctx, JSValueRef value) {
+// KH_JS_BOUND: a page's value is page data, and one call converts at most KH_JS_ELEMS_MAX array elements in all,
+// nested at most KH_JS_DEPTH_MAX deep. Unbounded, an array holding itself (a = []; a.push(a)) recursed until the
+// worker's stack overflowed and the process died; one holding itself twice doubled the work at every level; and a
+// length set far past the elements (a.length = 4e9) reserved it all. An array past the depth converts as nil, one
+// whose elements would take the call past the budget as empty; each element is counted once, when its array
+// reserves it.
+// KH_JS_GAME_THREAD: JavaScriptCore calls the bridge on the Ultralight worker (renderer_->Update, the page commands),
+// and a game_value may not be made or freed there - it allocates from the engine's SQF pools, which are the game
+// thread's alone (the renderer's own rule, rendering_integration.hpp KH_ATTACH_OFFSET). The page's values are copied
+// into this plain tree on the worker instead and made game_values in the scheduled call, on the game thread: the same
+// nil / bool / number / string / array shapes, the same values, the same bounds as before.
+struct KhJsVal {
+    enum Kind : uint8_t { KH_JSV_NIL, KH_JSV_BOOL, KH_JSV_NUM, KH_JSV_STR, KH_JSV_ARR };
+    Kind kind = KH_JSV_NIL;
+    bool b = false;
+    float n = 0.0f;
+    std::string s;
+    std::vector<KhJsVal> a;
+};
+static constexpr int KH_JS_DEPTH_MAX = 64;
+static constexpr size_t KH_JS_ELEMS_MAX = 1000000;
+static KhJsVal js_value_to_kh_js(JSContextRef ctx, JSValueRef value, int depth, size_t& budget) {
+    KhJsVal out;   // KH_JS_GAME_THREAD: nil.
+
     if (JSValueIsNull(ctx, value) || JSValueIsUndefined(ctx, value)) {
-        return game_value();
+        return out;
     }
+
+    if (depth > KH_JS_DEPTH_MAX) return out;   // KH_JS_BOUND.
     
     if (JSValueIsBoolean(ctx, value)) {
-        return game_value(JSValueToBoolean(ctx, value));
+        out.kind = KhJsVal::KH_JSV_BOOL;
+        out.b = JSValueToBoolean(ctx, value);
+        return out;
     }
     
     if (JSValueIsNumber(ctx, value)) {
-        return game_value(static_cast<float>(JSValueToNumber(ctx, value, nullptr)));
+        out.kind = KhJsVal::KH_JSV_NUM;
+        out.n = static_cast<float>(JSValueToNumber(ctx, value, nullptr));
+        return out;
     }
     
     if (JSValueIsString(ctx, value)) {
@@ -362,7 +443,9 @@ static game_value js_value_to_game_value(JSContextRef ctx, JSValueRef value) {
         std::vector<char> buffer(max_size);
         JSStringGetUTF8CString(js_str, buffer.data(), max_size);
         JSStringRelease(js_str);
-        return game_value(std::string(buffer.data()));
+        out.kind = KhJsVal::KH_JSV_STR;
+        out.s = std::string(buffer.data());
+        return out;
     }
     
     if (JSValueIsArray(ctx, value)) {
@@ -370,16 +453,24 @@ static game_value js_value_to_game_value(JSContextRef ctx, JSValueRef value) {
         JSStringRef length_str = JSStringCreateWithUTF8CString("length");
         JSValueRef length_val = JSObjectGetProperty(ctx, arr_obj, length_str, nullptr);
         JSStringRelease(length_str);
-        size_t length = static_cast<size_t>(JSValueToNumber(ctx, length_val, nullptr));
-        auto_array<game_value> result;
-        result.reserve(length);
+        const double js_len = JSValueToNumber(ctx, length_val, nullptr);
+        // KH_JS_BOUND: a count within what the call has left, or empty.
+        size_t length = 0;
+
+        if (js_len >= 0.0 && js_len <= static_cast<double>(budget)) {
+            length = static_cast<size_t>(js_len);
+            budget -= length;
+        }
+
+        out.kind = KhJsVal::KH_JSV_ARR;
+        out.a.reserve(length);
         
         for (size_t i = 0; i < length; i++) {
             JSValueRef element = JSObjectGetPropertyAtIndex(ctx, arr_obj, static_cast<unsigned>(i), nullptr);
-            result.push_back(js_value_to_game_value(ctx, element));
+            out.a.push_back(js_value_to_kh_js(ctx, element, depth + 1, budget));
         }
         
-        return game_value(std::move(result));
+        return out;
     }
     
     if (JSValueIsObject(ctx, value)) {
@@ -391,11 +482,30 @@ static game_value js_value_to_game_value(JSContextRef ctx, JSValueRef value) {
             std::vector<char> buffer(max_size);
             JSStringGetUTF8CString(json_str, buffer.data(), max_size);
             JSStringRelease(json_str);
-            return game_value(std::string(buffer.data()));
+            out.kind = KhJsVal::KH_JSV_STR;
+            out.s = std::string(buffer.data());
+            return out;
         }
     }
     
-    return game_value();
+    return out;
+}
+
+// KH_JS_GAME_THREAD: a converted value as its game_value. GAME THREAD ONLY (the scheduled call). The tree is at most
+// KH_JS_DEPTH_MAX + 1 deep and KH_JS_ELEMS_MAX elements in all (js_value_to_kh_js).
+static game_value kh_js_to_game_value(const KhJsVal& v) {
+    switch (v.kind) {
+    case KhJsVal::KH_JSV_BOOL: return game_value(v.b);
+    case KhJsVal::KH_JSV_NUM:  return game_value(v.n);
+    case KhJsVal::KH_JSV_STR:  return game_value(std::string(v.s));
+    case KhJsVal::KH_JSV_ARR: {
+        auto_array<game_value> result;
+        result.reserve(v.a.size());
+        for (const KhJsVal& e : v.a) result.push_back(kh_js_to_game_value(e));
+        return game_value(std::move(result));
+    }
+    default: return game_value();
+    }
 }
 
 class UIJavaScriptBridge {
@@ -419,28 +529,40 @@ private:
             return JSValueMakeUndefined(ctx);
         }
         
-        // Convert all arguments to a game_value array
-        auto_array<game_value> args_array;
-        args_array.reserve(argumentCount);
-        
-        for (size_t i = 0; i < argumentCount; i++) {
-            args_array.push_back(js_value_to_game_value(ctx, arguments[i]));
-        }
-        
-        // Create the final game_value (single arg or array)
-        game_value args_to_send;
+        // KH_JS_BOUND: an exception (an allocation) must not unwind through JavaScriptCore's own frames - the
+        // event is dropped instead. The arguments share one element budget.
+        try {
+            // KH_JS_GAME_THREAD: the arguments as plain values here (this is the Ultralight worker); the game_value
+            // - the single argument, or the array of them - is made in the scheduled call, on the game thread.
+            size_t budget = KH_JS_ELEMS_MAX;
+            std::vector<KhJsVal> args_list;
+            args_list.reserve(argumentCount);
 
-        if (argumentCount == 1) {
-            args_to_send = std::move(args_array[0]);
-        } else {
-            args_to_send = game_value(std::move(args_array));
-        }
-        
-        // Schedule execution on main thread
-        MainThreadScheduler::instance().schedule([args = std::move(args_to_send)]() mutable {
-            raw_call_sqf_args_native_no_return(g_compiled_html_js_event, std::move(args));
-        });
-        
+            for (size_t i = 0; i < argumentCount; i++) {
+                args_list.push_back(js_value_to_kh_js(ctx, arguments[i], 0, budget));
+            }
+
+            MainThreadScheduler::instance().schedule([args = std::move(args_list)]() mutable {
+                game_value args_to_send;
+
+                try {
+                    if (args.size() == 1) {
+                        args_to_send = kh_js_to_game_value(args[0]);
+                    } else {
+                        auto_array<game_value> args_array;
+                        args_array.reserve(args.size());
+                        for (const KhJsVal& khjs_a : args) args_array.push_back(kh_js_to_game_value(khjs_a));
+                        args_to_send = game_value(std::move(args_array));
+                    }
+                } catch (...) {
+                    return;   // An allocation failed: the event is dropped, as on the worker before.
+                }
+
+                std::vector<KhJsVal>().swap(args);   // The plain copy is done with: not held across the call.
+                raw_call_sqf_args_native_no_return(g_compiled_html_js_event, std::move(args_to_send));
+            });
+        } catch (...) {}
+
         return JSValueMakeUndefined(ctx);
     }
 };
@@ -950,7 +1072,6 @@ public:
         should_stop_.store(false, std::memory_order_release);
         has_pending_commands_.store(false, std::memory_order_release);
         shutting_down_.store(false, std::memory_order_release);
-        last_swap_chain_ = nullptr;
     }
 
     std::string create_html(const std::string& html_content, int x, int y, int width, int height, float opacity = 1.0f) {
@@ -1230,19 +1351,6 @@ public:
 
         if (shutting_down_.load(std::memory_order_seq_cst)) return;
 
-        if (swap_chain != last_swap_chain_) {
-            ComPtr<ID3D11Texture2D> back_buffer;
-
-            if (SUCCEEDED(swap_chain->GetBuffer(0, IID_PPV_ARGS(&back_buffer)))) {
-                D3D11_TEXTURE2D_DESC desc;
-                back_buffer->GetDesc(&desc);
-                screen_width_.store(desc.Width, std::memory_order_relaxed);
-                screen_height_.store(desc.Height, std::memory_order_relaxed);
-            }
-
-            last_swap_chain_ = swap_chain;
-        }
-
         // Initialize D3D renderer if needed
         if (!d3d_initialized_.load(std::memory_order_acquire)) {
             auto ri = RVExtBridge::get_render_info();
@@ -1255,8 +1363,6 @@ public:
         }
         
         if (!d3d_initialized_.load(std::memory_order_acquire)) return;
-        int sw = screen_width_.load(std::memory_order_relaxed);
-        int sh = screen_height_.load(std::memory_order_relaxed);
 
         struct RenderItem {
             std::shared_ptr<UIDocument> doc;
@@ -1288,6 +1394,23 @@ public:
         }
 
         if (render_list.empty()) return;
+
+        // KH_UI_RESIZE: the back buffer's size, read every Present that draws (nothing before this reads it). A
+        // resolution change goes through ResizeBuffers on the same swapchain (RenderIntegration's
+        // KH_PRESENT_RESIZE), so a read keyed on the swapchain pointer kept the old size - the viewport, the pixel
+        // mapping and the off-screen test with it, and a document past the old edge was clipped or never drawn.
+        // GetDesc takes no buffer reference.
+        {
+            DXGI_SWAP_CHAIN_DESC resize_desc = {};
+
+            if (SUCCEEDED(swap_chain->GetDesc(&resize_desc)) &&
+                resize_desc.BufferDesc.Width > 0 && resize_desc.BufferDesc.Height > 0) {
+                screen_width_.store(static_cast<int>(resize_desc.BufferDesc.Width), std::memory_order_relaxed);
+                screen_height_.store(static_cast<int>(resize_desc.BufferDesc.Height), std::memory_order_relaxed);
+            }
+        }
+        int sw = screen_width_.load(std::memory_order_relaxed);
+        int sh = screen_height_.load(std::memory_order_relaxed);
 
         // Sort by z_order
         std::sort(render_list.begin(), render_list.end(),
@@ -1378,15 +1501,39 @@ private:
             // install retries at +1 s and +10 s before it is declared
             // dead - the same shape as RenderIntegration's
             // ensure_reorder_hook. Cheap early-out once installed.
-            ensure_present_hook();
-            ensure_wndproc_hook();
-
             // Main processing loop
+            // KH_UI_WORKER_KEEP: an exception out of an iteration (an allocation in the pixel cache, the hook
+            // ladder's scheduling) ended the worker with initialized_ still set - and create_html, open_html and
+            // the JS getter wait on the worker with no timeout, so the next such call froze the game thread for
+            // good. The step is dropped instead (reported once) and the loop goes on - the hook ensures and the
+            // work each under their own guard, so a hook step that keeps failing never stops the commands being
+            // served. The ladder's first calls are the loop's own (a pair ahead of it, outside the guard, went).
+            bool worker_iter_reported = false;
+            auto worker_iter_failed = [&worker_iter_reported]() {
+                if (worker_iter_reported) return;
+                worker_iter_reported = true;
+
+                try {
+                    MainThreadScheduler::instance().schedule([]() {
+                        report_error("KH - UI Framework: a worker update failed; the worker carries on");
+                    });
+                } catch (...) {}
+            };
+
             while (!should_stop_.load(std::memory_order_acquire)) {
-                ensure_present_hook();
-                ensure_wndproc_hook();
-                process_commands();
-                update_ultralight();
+                try {
+                    ensure_present_hook();
+                    ensure_wndproc_hook();
+                } catch (...) {
+                    worker_iter_failed();
+                }
+
+                try {
+                    process_commands();
+                    update_ultralight();
+                } catch (...) {
+                    worker_iter_failed();
+                }
 
                 {
                     std::unique_lock<std::mutex> lock(worker_mutex_);
@@ -1566,8 +1713,20 @@ private:
                 } else {
                     int dirty_top = std::max(0, dirty.top);
                     int dirty_bottom = std::min(h, dirty.bottom);
-                    doc->dirty_top = dirty_top;
-                    doc->dirty_bottom = dirty_bottom;
+
+                    // KH_UI_DIRTY_UNION: the range a Present has not uploaded yet (texture_needs_update still set;
+                    // on_present clears it under this lock once it has) is still owed - the new rows join it.
+                    // Replacing it lost those rows whenever two passes landed between Presents (a frame under
+                    // 60 fps, a mouse move waking the worker, a document skipped off screen), and the texture kept
+                    // them stale: a hover highlight left lit, text half redrawn.
+                    if (doc->texture_needs_update.load(std::memory_order_acquire) &&
+                        doc->dirty_top < doc->dirty_bottom) {
+                        doc->dirty_top = std::min(doc->dirty_top, dirty_top);
+                        doc->dirty_bottom = std::max(doc->dirty_bottom, dirty_bottom);
+                    } else {
+                        doc->dirty_top = dirty_top;
+                        doc->dirty_bottom = dirty_bottom;
+                    }
 
                     if (dirty_top < dirty_bottom) {
                         size_t offset = static_cast<size_t>(dirty_top) * stride;
@@ -1728,14 +1887,18 @@ private:
             documents_.erase(it);
         }
 
-        d3d_renderer_.remove_doc_texture(doc_id);
-        
+        // KH_UI_CLOSE_ORDER: the pixels first, then the texture. A Present holding this document from its snapshot
+        // uploads under pixel_mutex through update_texture, which makes the texture entry when it is missing; with
+        // the texture removed first, an upload in between made it again, and nothing removed it before shutdown.
+        // Cleared first, that upload finds no pixels; one already under the lock finishes before the removal.
         if (doc_to_close) {
             doc_to_close->view = nullptr;
             std::lock_guard<std::mutex> pixel_lock(doc_to_close->pixel_mutex);
             doc_to_close->cached_pixels.clear();
             doc_to_close->pixels_ready.store(false, std::memory_order_release);
         }
+
+        d3d_renderer_.remove_doc_texture(doc_id);
     }
 
     void set_html_size_internal(const std::string& doc_id, int width, int height) {
@@ -1856,7 +2019,6 @@ private:
     std::atomic<int> screen_height_{1080};
     std::atomic<bool> shutting_down_{false};
     std::atomic<bool> hook_executing_{false};
-    IDXGISwapChain* last_swap_chain_ = nullptr;
     static std::atomic<WNDPROC> original_wndproc_;
     static std::atomic<HWND> game_hwnd_;
     std::atomic<int> last_mouse_x_{0};
@@ -1983,15 +2145,22 @@ private:
         if (!ladder_due(wndproc_ladder_)) return;
         wndproc_ladder_.pending.store(true, std::memory_order_release);
 
-        MainThreadScheduler::instance().schedule([this]() {
-            if (!shutting_down_.load(std::memory_order_acquire) &&
-                !should_stop_.load(std::memory_order_acquire)) {
-                if (install_wndproc_hook()) ladder_success(wndproc_ladder_);
-                else ladder_fail_round(wndproc_ladder_, "WndProc (mouse/keyboard) hook install failed", "HTML input disabled");
-            }
+        // KH_UI_WORKER_KEEP: a schedule that throws must not leave 'pending' set - every later call returned at it
+        // and the install never came. Not rethrown: the next iteration asks again.
+        try {
+            MainThreadScheduler::instance().schedule([this]() {
+                if (!shutting_down_.load(std::memory_order_acquire) &&
+                    !should_stop_.load(std::memory_order_acquire)) {
+                    if (install_wndproc_hook()) ladder_success(wndproc_ladder_);
+                    else ladder_fail_round(wndproc_ladder_, "WndProc (mouse/keyboard) hook install failed",
+                                           "HTML input disabled");
+                }
 
+                wndproc_ladder_.pending.store(false, std::memory_order_release);
+            });
+        } catch (...) {
             wndproc_ladder_.pending.store(false, std::memory_order_release);
-        });
+        }
     }
 
 
@@ -2013,6 +2182,14 @@ private:
     }
 
     std::filesystem::path find_html_file(const std::string& filename) {
+        // PBO_PATH: one leading slash - the file inside the loaded PBOs at that engine path, no html_ui folder; the
+        // page loads from under UIFileSystem::pbo_root, which answers it and its relative links from the PBOs.
+        if (ModFolderSearcher::is_pbo_path(filename)) {
+            const std::string key = ModFolderSearcher::normalise_pbo_path(filename);
+            if (key.empty() || !ModFolderSearcher::pbo_file_exists(key)) return {};
+            return UIFileSystem::pbo_root() / key;
+        }
+
         for (const auto& base : html_dirs_) {
             auto p = base / filename;
             if (std::filesystem::exists(p)) return p;

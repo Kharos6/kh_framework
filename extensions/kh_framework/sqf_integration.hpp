@@ -113,6 +113,7 @@ static registered_sqf_function _sqf_kh_network_remove_jip;
 static registered_sqf_function _sqf_kh_network_message_receive_string_array;
 static registered_sqf_function _sqf_kh_network_message_receive_string_code;
 static registered_sqf_function _sqf_kh_network_remove_handler;
+static registered_sqf_function _sqf_kh_network_remove_handler_array;
 static registered_sqf_function _sqf_kh_network_is_initialized;
 static registered_sqf_function _sqf_kh_network_initialize;
 static registered_sqf_function _sqf_kh_network_shutdown;
@@ -396,6 +397,53 @@ static std::string kh_command_arity_description(const kh_command_entry& entry) {
     return out.empty() ? std::string("none") : out;
 }
 
+// KH_SQF_INT - a script number a handler needs as an int: a SCALAR, finite and
+// above INT_MIN and below 2^31 (RenderIntegration::kh_gv_int; fractions truncate). A
+// float -> int conversion of NaN / inf / an out-of-range value is UB, so every
+// such argument goes through here, and the handler reports and fails when it
+// returns false (out is then left as it was).
+static bool kh_sqf_int(const game_value& khsi_v, int& khsi_out) {
+    if (khsi_v.type_enum() != game_data_type::SCALAR) return false;
+    return RenderIntegration::kh_gv_int(khsi_v, khsi_out);
+}
+
+// KH_SQF_INT for the client ids inside an ARRAY target (khNetworkMessageSend, khSetVariable): false when a
+// number element is not an int (each one reaches the network layer's conversion as a lone number target does),
+// at any depth - a nested array is resolved as a target in its own right. Any other target is not this check's.
+static bool kh_sqf_target_ids_ok(const game_value& khst_t) {
+    if (khst_t.type_enum() != game_data_type::ARRAY) return true;
+    int khst_i = 0;
+
+    for (const game_value& khst_e : khst_t.to_array()) {
+        if (khst_e.type_enum() == game_data_type::SCALAR && !kh_sqf_int(khst_e, khst_i)) return false;
+        if (khst_e.type_enum() == game_data_type::ARRAY && !kh_sqf_target_ids_ok(khst_e)) return false;
+    }
+
+    return true;
+}
+
+// KH_LUA_STACK - room for khlr_n more slots on the Lua stack, asked before they are pushed (sol::as_args and
+// the raw pushes take one per value; Lua guarantees only LUA_MINSTACK free slots). lua_checkstack grows the
+// stack (protected, whatever the frames below hold) or refuses. LuaJIT's refuses once this frame would pass
+// LUAI_MAXCSTACK (8000 slots), while its pushes grow the stack themselves up to its 65500-slot ceiling -
+// calls of 8000 values and more ran there - so under LuaJIT, past lua_checkstack's reach, that ceiling is
+// tested instead. It counts this frame's slots only: a call made while Lua frames below hold much of the
+// stack (a script's Lua -> SQF -> Lua) can still overflow there, as any such call could before this guard
+// (a push past the ceiling raises a stack-overflow error, outside any protected call of ours).
+// The 1e6 bound is past any Lua's limit and keeps the int conversion exact.
+static bool kh_lua_room(lua_State* khlr_l, size_t khlr_n) {
+    if (khlr_n > 1000000u) return false;
+#if defined(LUAJIT_VERSION)
+    const size_t khlr_top = static_cast<size_t>(lua_gettop(khlr_l)) + khlr_n + LUA_MINSTACK;
+    if (khlr_top <= static_cast<size_t>(LUAI_MAXCSTACK)) {
+        return lua_checkstack(khlr_l, static_cast<int>(khlr_n) + LUA_MINSTACK) != 0;
+    }
+    return khlr_top < 65500u;
+#else
+    return lua_checkstack(khlr_l, static_cast<int>(khlr_n) + LUA_MINSTACK) != 0;
+#endif
+}
+
 static game_value execute_lua_sqf(game_value_parameter args, game_value_parameter code_or_function) {    
     try {
         LuaStackGuard guard(*g_lua_state);
@@ -510,6 +558,13 @@ static game_value execute_lua_sqf(game_value_parameter args, game_value_paramete
             if (arr.empty()) {
                 result = func();
             } else {
+                // KH_LUA_STACK: sol::as_args pushes one slot per element - room for them first, or the
+                // call is refused (kh_lua_room).
+                if (!kh_lua_room(g_lua_state->lua_state(), arr.size())) {
+                    report_error("Too many arguments for the Lua stack (" + std::to_string(arr.size()) + ")");
+                    return game_value();
+                }
+
                 std::vector<sol::object> arg_vec;
                 arg_vec.reserve(arr.size());
 
@@ -575,6 +630,9 @@ static game_value compile_lua_sqf(game_value_parameter name, game_value_paramete
             if (!lua_name.empty() && result.function.valid()) {
                 // Update call cache
                 g_call_cache[lua_name] = {lua_name, result.function, true};
+                // KH_LUA_RECOMPILE: execute_lua_sqf looks in g_local_exec_cache first (keyed by the
+                // call site's value), so a call site that ran the old function would keep running it.
+                g_local_exec_cache.clear();
             }
 
             return game_value();
@@ -640,7 +698,12 @@ static game_value crypto_hash_sqf(game_value_parameter type, game_value_paramete
 
 static game_value generate_random_string_sqf(game_value_parameter options, game_value_parameter length) {
     try {
-        int len = static_cast<int>(static_cast<float>(length));
+        int len = 0;
+
+        if (!kh_sqf_int(length, len)) {   // KH_SQF_INT.
+            report_error("Length must be a number within int range");
+            return game_value();
+        }
 
         if (len <= 0) {
             report_error("Length must be greater than 0");
@@ -691,7 +754,8 @@ static game_value generate_uid_sqf() {
 
 static game_value get_epoch_sqf() noexcept {
     try {
-        auto now = std::chrono::high_resolution_clock::now();
+        // KH_EPOCH_SYSTEM: the Unix epoch (system_clock); high_resolution_clock is steady_clock on MSVC (uptime).
+        auto now = std::chrono::system_clock::now();
         auto duration = now.time_since_epoch();
         auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
         double seconds = microseconds / 1000000.0;
@@ -707,7 +771,7 @@ static game_value get_epoch_delta_sqf(game_value_parameter past_epoch_str) noexc
     try {
         std::string past_str = static_cast<std::string>(past_epoch_str);
         double past_epoch = std::stod(past_str);
-        auto now = std::chrono::high_resolution_clock::now();
+        auto now = std::chrono::system_clock::now();   // KH_EPOCH_SYSTEM: getEpoch's clock.
         auto duration = now.time_since_epoch();
         auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
         double current_epoch = microseconds / 1000000.0;
@@ -962,6 +1026,15 @@ static game_value trigger_lua_event_sqf(game_value_parameter left_arg, game_valu
             sol::state& lua = *g_lua_state;
             lua_State* L = lua.lua_state();
 
+            // KH_LUA_STACK: four fixed slots (event.trigger, name, target, jip) and one per
+            // argument - room for them first, or the call is refused (kh_lua_room).
+            const size_t khte_n = event_args.type_enum() == game_data_type::ARRAY ? event_args.to_array().size() : 1;
+
+            if (!kh_lua_room(L, khte_n + 4u)) {
+                report_error("Failed to trigger event: too many arguments (" + std::to_string(khte_n) + ")");
+                return game_value();
+            }
+
             // Push function
             lua_getglobal(L, "event");
             lua_getfield(L, -1, "trigger");
@@ -991,7 +1064,10 @@ static game_value trigger_lua_event_sqf(game_value_parameter left_arg, game_valu
 
             // Call the function
             if (lua_pcall(L, arg_count, 1, 0) != 0) {
-                std::string err = lua_tostring(L, -1);
+                // KH_LUA_ERR_NULL: lua_tostring is NULL for a non-string, non-number error object.
+                const char* khte_msg = lua_tostring(L, -1);
+                std::string err = khte_msg ? std::string(khte_msg)
+                                           : "error object of type " + std::string(lua_typename(L, lua_type(L, -1)));
                 lua_pop(L, 1);
                 report_error("Failed to trigger event: " + err);
                 return game_value();
@@ -1637,7 +1713,9 @@ static game_value quaternion_to_euler_sqf(game_value_parameter quat) {
             // Gimbal lock roll is 90
             aroundX = 0.0f;
             aroundY = (sinRoll < 0.0f) ? 90.0f : 270.0f;
-            float coupled = std::atan2(2.0f * (x * y + w * z), 1.0f - 2.0f * (y * y + z * z));
+            // KH_QUAT_GIMBAL: the right column's X / Y are cos(roll) * ... = 0 here, so the yaw
+            // comes from the dir column (-dirX, dirY), as in vectorToEuler / getRotationEuler.
+            float coupled = std::atan2(-2.0f * (x * y - w * z), 1.0f - 2.0f * (x * x + z * z));
             aroundZ = std::fmod(-coupled * RAD_TO_DEG + 360.0f, 360.0f);
         } else {
             // Normal case negate extracted angles to undo the convention
@@ -2427,29 +2505,53 @@ static game_value set_ai_parameters_sqf(game_value_parameter left_arg, game_valu
             return game_value(false);
         }
 
-        int n_ctx = static_cast<int>((float)params[0]);
-        int max_new_tokens = static_cast<int>((float)params[1]);
+        // KH_SQF_INT: every integer parameter is checked before it is converted; the first bad
+        // index is reported below and nothing is applied. A nil one reads 0, as the float and bool
+        // slots read it (and as every slot always has).
+        int khap_bad = -1;
+        auto khap_int = [&](size_t khap_i) {
+            int khap_v = 0;
+            if (params[khap_i].is_nil()) return khap_v;
+            if (!kh_sqf_int(params[khap_i], khap_v) && khap_bad < 0) khap_bad = static_cast<int>(khap_i);
+            return khap_v;
+        };
+        int n_ctx = khap_int(0);
+        int max_new_tokens = khap_int(1);
         float temperature = static_cast<float>(params[2]);
-        int top_k = static_cast<int>((float)params[3]);
+        int top_k = khap_int(3);
         float top_p = static_cast<float>(params[4]);
         float min_p = static_cast<float>(params[5]);
         float typical_p = static_cast<float>(params[6]);
         float repeat_penalty = static_cast<float>(params[7]);
-        int repeat_last_n = static_cast<int>(params[8]);
+        int repeat_last_n = khap_int(8);
         float presence_penalty = static_cast<float>(params[9]);
         float frequency_penalty = static_cast<float>(params[10]);
-        int mirostat = static_cast<int>(params[11]);
+        int mirostat = khap_int(11);
         float mirostat_tau = static_cast<float>(params[12]);
         float mirostat_eta = static_cast<float>(params[13]);
-        int seed = static_cast<uint32_t>(static_cast<int>(params[14]));
-        int n_batch = static_cast<int>((float)params[15]);
-        int n_ubatch = static_cast<int>((float)params[16]);
-        int cpu_threads = static_cast<int>((float)params[17]);
-        int cpu_threads_batch = static_cast<int>((float)params[18]);
-        int gpu_layers = static_cast<int>((float)params[19]);
+        // KH_AI_SEED: the seed is llama.cpp's uint32 (0xFFFFFFFF = random), carried in an int as the baseline's
+        // round trip did. SQF numbers are floats, so 4294967295 arrives as 2^32 and is taken as 0xFFFFFFFF.
+        int seed = 0;
+        {
+            float khas_f = -1.0e30f;   // A non-number fails the range below; nil reads 0, as above.
+            if (params[14].is_nil()) khas_f = 0.0f;
+            else if (params[14].type_enum() == game_data_type::SCALAR) khas_f = static_cast<float>(params[14]);
+            if (khas_f >= -2147483648.0f && khas_f <= 4294967296.0f) {   // NaN fails both.
+                const uint32_t khas_u = khas_f >= 4294967296.0f ? 0xFFFFFFFFu
+                                      : static_cast<uint32_t>(static_cast<int64_t>(khas_f));
+                seed = static_cast<int>(khas_u);
+            } else if (khap_bad < 0) {
+                khap_bad = 14;
+            }
+        }
+        int n_batch = khap_int(15);
+        int n_ubatch = khap_int(16);
+        int cpu_threads = khap_int(17);
+        int cpu_threads_batch = khap_int(18);
+        int gpu_layers = khap_int(19);
         bool flash_attention = static_cast<bool>(params[20]);
         bool offload_kv_cache = static_cast<bool>(params[21]);
-        int main_gpu = static_cast<int>(params[22]);
+        int main_gpu = khap_int(22);
 
         if (params[23].type_enum() == game_data_type::ARRAY) {
             auto& split_params = params[23].to_array();
@@ -2461,9 +2563,17 @@ static game_value set_ai_parameters_sqf(game_value_parameter left_arg, game_valu
             }
         } else {
             report_error("KH - AI Framework: setAiParameters error: Tensor Split must be an array");
+            return game_value(false);   // KH_AI_SPLIT_FAIL: like every other check here.
         }
 
-        int split_mode = static_cast<int>(params[24]);
+        int split_mode = khap_int(24);
+
+        if (khap_bad >= 0) {
+            report_error("KH - AI Framework: setAiParameters error: parameter " + std::to_string(khap_bad) +
+                         (khap_bad == 14 ? " (seed) must be a number from -2147483648 to 4294967295"
+                                         : " must be a number within int range"));
+            return game_value(false);
+        }
 
         bool result = AIFramework::instance().set_ai_parameters(
             ai_name, n_ctx, max_new_tokens, temperature, top_k, top_p,
@@ -2609,8 +2719,10 @@ static game_value tts_load_model_with_config_sqf(game_value_parameter left_arg, 
             try {
                 auto config = right_arg.to_array();
 
-                if (config.size() > 0 && !config[0].is_nil()) {
-                    num_threads = static_cast<int>(static_cast<float>(config[0]));
+                if (config.size() > 0 && !config[0].is_nil() && !kh_sqf_int(config[0], num_threads)) {
+                    // KH_SQF_INT.
+                    report_error("KH - TTS Framework: ttsLoadModel - thread count must be a number within int range");
+                    return game_value(false);
                 }
 
                 if (config.size() > 1 && !config[1].is_nil()) {
@@ -2660,7 +2772,13 @@ static game_value tts_speak_sqf(game_value_parameter params) {
         float z = arr.size() > 4 ? static_cast<float>(arr[4]) : 0.0f;
         float volume = arr.size() > 5 ? static_cast<float>(arr[5]) : 1.0f;
         float speed = arr.size() > 6 ? static_cast<float>(arr[6]) : 1.0f;
-        int sid = arr.size() > 7 ? static_cast<int>(static_cast<float>(arr[7])) : 0;
+        int sid = 0;
+
+        if (arr.size() > 7 && !arr[7].is_nil() && !kh_sqf_int(arr[7], sid)) {   // KH_SQF_INT; nil keeps 0.
+            report_error("KH - TTS Framework: ttsSpeak - speaker sid must be a number within int range");
+            return game_value(false);
+        }
+
         auto effects = TTSFramework::parse_effects_from_args(arr, 8);
 
         if (speaker_id.empty()) {
@@ -2777,7 +2895,14 @@ static game_value stt_load_model_with_config_sqf(game_value_parameter model_name
     try {
         std::string model = model_name;
         auto& config_arr = config.to_array();
-        int threads = config_arr.size() > 0 ? static_cast<int>(static_cast<float>(config_arr[0])) : 4;
+        int threads = 4;
+
+        if (config_arr.size() > 0 && !config_arr[0].is_nil() &&
+            !kh_sqf_int(config_arr[0], threads)) {   // KH_SQF_INT; nil keeps 4.
+            report_error("KH - STT Framework: sttLoadModel - thread count must be a number within int range");
+            return game_value(false);
+        }
+
         return game_value(STTFramework::instance().load_model_public(model, threads));
     } catch (const std::exception& e) {
         report_error("KH - STT Framework: sttLoadModel failed: " + std::string(e.what()));
@@ -2840,10 +2965,15 @@ static game_value ui_create_html_sqf(game_value_parameter left_arg, game_value_p
         int x = 0, y = 0, width = 0, height = 0;
         float opacity = 1.0f;
         auto& arr = right_arg.to_array();
-        x = arr.size() > 0 ? static_cast<int>(static_cast<float>(arr[0])) : 0;
-        y = arr.size() > 1 ? static_cast<int>(static_cast<float>(arr[1])) : 0;
-        width = arr.size() > 2 ? static_cast<int>(static_cast<float>(arr[2])) : 0;
-        height = arr.size() > 3 ? static_cast<int>(static_cast<float>(arr[3])) : 0;
+        int* const khhc_dst[4] = { &x, &y, &width, &height };
+
+        for (size_t khhc_i = 0; khhc_i < 4 && khhc_i < arr.size(); ++khhc_i) {   // KH_SQF_INT; nil keeps 0.
+            if (!arr[khhc_i].is_nil() && !kh_sqf_int(arr[khhc_i], *khhc_dst[khhc_i])) {
+                report_error("KH - UI Framework: htmlCreate - x, y, width, height must be numbers within int range");
+                return game_value("");
+            }
+        }
+
         opacity = arr.size() > 4 ? static_cast<float>(arr[4]) : 1.0f;
         return game_value(UIFramework::instance().create_html(html_content, x, y, width, height, opacity));
     } catch (const std::exception& e) {
@@ -2866,10 +2996,15 @@ static game_value ui_open_html_sqf(game_value_parameter left_arg, game_value_par
 
         if (right_arg.type_enum() == game_data_type::ARRAY) {
             auto& arr = right_arg.to_array();
-            x = arr.size() > 0 ? static_cast<int>(static_cast<float>(arr[0])) : 0;
-            y = arr.size() > 1 ? static_cast<int>(static_cast<float>(arr[1])) : 0;
-            width = arr.size() > 2 ? static_cast<int>(static_cast<float>(arr[2])) : 0;
-            height = arr.size() > 3 ? static_cast<int>(static_cast<float>(arr[3])) : 0;
+            int* const khho_dst[4] = { &x, &y, &width, &height };
+
+            for (size_t khho_i = 0; khho_i < 4 && khho_i < arr.size(); ++khho_i) {   // KH_SQF_INT; nil keeps 0.
+                if (!arr[khho_i].is_nil() && !kh_sqf_int(arr[khho_i], *khho_dst[khho_i])) {
+                    report_error("KH - UI Framework: htmlOpen - x, y, width, height must be numbers within int range");
+                    return game_value("");
+                }
+            }
+
             opacity = arr.size() > 4 ? static_cast<float>(arr[4]) : 1.0f;
         }
 
@@ -3038,8 +3173,13 @@ static game_value ui_set_position_sqf(game_value_parameter left_arg, game_value_
             return game_value(false);
         }
 
-        int x = static_cast<int>(static_cast<float>(arr[0]));
-        int y = static_cast<int>(static_cast<float>(arr[1]));
+        int x = 0, y = 0;
+
+        if (!kh_sqf_int(arr[0], x) || !kh_sqf_int(arr[1], y)) {   // KH_SQF_INT.
+            report_error("KH - UI Framework: htmlSetPosition - x and y must be numbers within int range");
+            return game_value(false);
+        }
+
         return game_value(UIFramework::instance().set_html_position(doc_id, x, y));
     } catch (const std::exception& e) {
         report_error("KH - UI Framework: Error in htmlSetPosition - " + std::string(e.what()));
@@ -3083,8 +3223,12 @@ static game_value ui_set_size_sqf(game_value_parameter left_arg, game_value_para
             return game_value(false);
         }
 
-        int width = static_cast<int>(static_cast<float>(arr[0]));
-        int height = static_cast<int>(static_cast<float>(arr[1]));
+        int width = 0, height = 0;
+
+        if (!kh_sqf_int(arr[0], width) || !kh_sqf_int(arr[1], height)) {   // KH_SQF_INT.
+            report_error("KH - UI Framework: htmlSetSize - width and height must be numbers within int range");
+            return game_value(false);
+        }
 
         if (width <= 0 || height <= 0) {
             return game_value(false);
@@ -3106,7 +3250,13 @@ static game_value ui_set_z_order_sqf(game_value_parameter left_arg, game_value_p
             return game_value(false);
         }
 
-        int z_order = static_cast<int>(static_cast<float>(right_arg));
+        int z_order = 0;
+
+        if (!kh_sqf_int(right_arg, z_order)) {   // KH_SQF_INT.
+            report_error("KH - UI Framework: htmlSetZOrder - z-order must be a number within int range");
+            return game_value(false);
+        }
+
         return game_value(UIFramework::instance().set_html_z_order(doc_id, z_order));
     } catch (const std::exception& e) {
         report_error("KH - UI Framework: Error in htmlSetZOrder - " + std::string(e.what()));
@@ -3233,12 +3383,25 @@ static game_value network_message_send_sqf(game_value_parameter left_arg, game_v
             return game_value(false);
         }
 
+        // KH_SQF_INT: a number target is a client id, checked before anything (the JIP store) acts.
+        int khns_client = 0;
+
+        if (!target.is_nil() && target.type_enum() == game_data_type::SCALAR && !kh_sqf_int(target, khns_client)) {
+            report_error("KH Network: A client id target must be a number within int range");
+            return game_value(false);
+        }
+
+        if (!kh_sqf_target_ids_ok(target)) {
+            report_error("KH Network: A client id in an array target must be a number within int range");
+            return game_value(false);
+        }
+
         NetworkTargetType target_type;
         game_value target_data;
         bool target_is_code = (!target.is_nil() && target.type_enum() == game_data_type::CODE);
 
-        // Below stores the conditional wrapper instead (no
-        // plain-then-replace).
+        // A CODE target: its case below stores the conditional wrapper
+        // instead (KH_JIP_CODE; no plain-then-replace).
         if (!jip_key.empty() && !target_is_code) {
             NetworkFramework::instance().store_jip_message(jip_key, event_name, message, static_cast<int>(sqf::client_owner()), dependency_net_id, dependency_is_group, unit_required);
         }
@@ -3251,7 +3414,7 @@ static game_value network_message_send_sqf(game_value_parameter left_arg, game_v
 
         switch (type) {
             case game_data_type::SCALAR: {
-                int client_id = static_cast<int>(static_cast<float>(target));
+                int client_id = khns_client;   // KH_SQF_INT: checked above.
 
                 if (client_id < 0) {
                     target_type = NetworkTargetType::CLIENT_ID_EXCLUDE;
@@ -3334,6 +3497,15 @@ static game_value network_message_send_sqf(game_value_parameter left_arg, game_v
                 cond_data.push_back(game_value(event_name));
                 cond_data.push_back(message);
                 game_value cond_payload(std::move(cond_data));
+
+                // KH_JIP_CODE: the key stores the conditional event itself (the name and payload sent below), so a
+                // client that joins later gets the same condition-gated event under it. The joiner evaluates the
+                // condition when the message arrives: one that reads its player unit needs unitRequired.
+                if (!jip_key.empty()) {
+                    NetworkFramework::instance().store_jip_message(
+                        jip_key, NET_INTERNAL_CONDITIONAL_EVENT, cond_payload, static_cast<int>(sqf::client_owner()),
+                        dependency_net_id, dependency_is_group, unit_required);
+                }
 
                 bool success = NetworkFramework::instance().send_message_to_target(
                     NetworkTargetType::CODE_CONDITION,
@@ -3501,12 +3673,18 @@ static game_value network_remove_handler_sqf(game_value_parameter handler_value)
                 return game_value(false);
             }
 
-            handler_id = static_cast<int>(static_cast<float>(a[0]));
-            owner_id = static_cast<int>(static_cast<float>(a[1]));
+            if (!kh_sqf_int(a[0], handler_id) || !kh_sqf_int(a[1], owner_id)) {   // KH_SQF_INT.
+                report_error("KH Network: networkRemoveHandler [handlerId, owner] must be numbers within int range");
+                return game_value(false);
+            }
         } else {
             // Back-compat: a bare handler id targets a handler owned by this
             // machine.
-            handler_id = static_cast<int>(static_cast<float>(handler_value));
+            if (!kh_sqf_int(handler_value, handler_id)) {   // KH_SQF_INT.
+                report_error("KH Network: Handler ID must be a number within int range");
+                return game_value(false);
+            }
+
             owner_id = static_cast<int>(sqf::client_owner());
         }
 
@@ -3575,6 +3753,19 @@ static game_value kh_set_variable_impl(game_value_parameter left_arg, game_value
             return game_value(false);
         }
 
+        // KH_SQF_INT: a number target is a client id, checked before anything (the JIP store) acts.
+        int khsv_client = 0;
+
+        if (!target.is_nil() && target.type_enum() == game_data_type::SCALAR && !kh_sqf_int(target, khsv_client)) {
+            report_error("KH SetVariable: A client id target must be a number within int range");
+            return game_value(false);
+        }
+
+        if (!kh_sqf_target_ids_ok(target)) {
+            report_error("KH SetVariable: A client id in an array target must be a number within int range");
+            return game_value(false);
+        }
+
         std::string jip_key = "";
         std::string dependency_net_id = "";
         bool dependency_is_group = false;
@@ -3632,8 +3823,8 @@ static game_value kh_set_variable_impl(game_value_parameter left_arg, game_value
         game_value message(std::move(message_data));
         bool target_is_code = (!target.is_nil() && target.type_enum() == game_data_type::CODE);
 
-        // Store the JIP message now, unless the target is CODE
-        // branch below stores the conditional wrapper instead (no
+        // Store the JIP message now, unless the target is CODE: its case
+        // below stores the conditional wrapper instead (KH_JIP_CODE; no
         // plain-then-replace).
         if (!jip_key.empty() && !target_is_code) {
             NetworkFramework::instance().store_jip_message(
@@ -3658,7 +3849,7 @@ static game_value kh_set_variable_impl(game_value_parameter left_arg, game_value
 
         switch (type) {
             case game_data_type::SCALAR: {
-                int client_id = static_cast<int>(static_cast<float>(target));
+                int client_id = khsv_client;   // KH_SQF_INT: checked above.
 
                 if (client_id < 0) {
                     target_type = NetworkTargetType::CLIENT_ID_EXCLUDE;
@@ -3711,6 +3902,18 @@ static game_value kh_set_variable_impl(game_value_parameter left_arg, game_value
                 break;
             }
 
+            case game_data_type::TEAM_MEMBER: {   // KH_SETVAR_TEAM: as networkMessageSend's case.
+                game_value agent_obj = sqf::agent(target);
+
+                if (agent_obj.is_nil() || sqf::is_null(static_cast<object>(agent_obj))) {
+                    return (!jip_key.empty()) ? game_value(jip_key) : game_value(true);
+                }
+
+                target_type = NetworkTargetType::TEAM_MEMBER_OWNER;
+                target_data = target;
+                break;
+            }
+
             case game_data_type::SIDE:
                 target_type = NetworkTargetType::SIDE_MEMBERS;
                 target_data = target;
@@ -3734,6 +3937,14 @@ static game_value kh_set_variable_impl(game_value_parameter left_arg, game_value
                 cond_data.push_back(game_value(std::string(NET_INTERNAL_SET_VARIABLE_EVENT)));
                 cond_data.push_back(message);
                 game_value cond_payload(std::move(cond_data));
+
+                // KH_JIP_CODE: as networkMessageSend - the key stores the conditional event sent below; a later
+                // plain JIP set of the variable supersedes it (store_jip_message erases it).
+                if (!jip_key.empty()) {
+                    NetworkFramework::instance().store_jip_message(
+                        jip_key, NET_INTERNAL_CONDITIONAL_EVENT, cond_payload, static_cast<int>(sqf::client_owner()),
+                        dependency_net_id, dependency_is_group, unit_required);
+                }
 
                 bool success = NetworkFramework::instance().send_message_to_target(
                     NetworkTargetType::CODE_CONDITION,
@@ -6410,6 +6621,7 @@ static void update_unit_states() {
 
     for (size_t i = 0; i < units.size(); ++i) {
         const auto& unit = units[i];
+        if (unit.type_enum() != game_data_type::OBJECT) continue;   // KH_ALLMEN_TYPE: data is read as an object.
         game_data_object* gd = (game_data_object*)unit.data.get();
         if (gd == nullptr || gd->object == nullptr || gd->object->object == nullptr) continue;
         void* key = (void*)gd->object->object;
@@ -6483,17 +6695,18 @@ static bool kh_rotation_from_gv(const game_value& khrg_v, float& khrg_p, float& 
     if (khrg_v.is_nil()) return true;
     if (khrg_v.type_enum() == game_data_type::SCALAR) {
         khrg_y = static_cast<float>(khrg_v);   // Bare number = heading (yaw).
-        return true;
+        return std::isfinite(khrg_y);   // KH_RV_FINITE, as the vector form refuses.
     }
     if (khrg_v.type_enum() != game_data_type::ARRAY) return false;
     auto& ra = khrg_v.to_array();
+    if (ra.size() > 3) return false;   // KH_RV_EXACT: an extra element is an error (contract 2).
     if ((ra.size() > 0 && ra[0].type_enum() != game_data_type::SCALAR) ||
         (ra.size() > 1 && ra[1].type_enum() != game_data_type::SCALAR) ||
         (ra.size() > 2 && ra[2].type_enum() != game_data_type::SCALAR)) return false;
     if (ra.size() >= 1) khrg_p = static_cast<float>(ra[0]);
     if (ra.size() >= 2) khrg_y = static_cast<float>(ra[1]);
     if (ra.size() >= 3) khrg_r = static_cast<float>(ra[2]);
-    return true;
+    return std::isfinite(khrg_p) && std::isfinite(khrg_y) && std::isfinite(khrg_r);   // KH_RV_FINITE.
 }
 
 // Every typed rotation - addRender3D's slot, updateRender3D "rotation" and
@@ -6540,8 +6753,8 @@ static bool kh_rotation_m_from_gv(const game_value& v, float m[9], float& p, flo
 // number cannot mean both: addRender3D's rotation slot while position follows
 // a plain object (KH_ATTACH_PLAIN_ROT), updateRender3D "rotation", and
 // chainSimulation "endRotation". Those three take true / false only, and the
-// comment at each says so; every other boolean on the surface goes through
-// this.
+// comment at each says so. Two more do not come here: allowDynamicShadows
+// takes a real BOOL only, and the material key vertexStatic a number only.
 static bool kh_gv_bool(const game_value& v, bool& out) {
     if (v.is_nil()) return false;
     if (v.type_enum() == game_data_type::BOOL) { out = static_cast<bool>(v); return true; }
@@ -6580,16 +6793,27 @@ static bool kh_ui_phase_from_gv(const game_value& gv, bool& affect_ui, bool& ui_
 // err; the caller prefixes the command (and property / element index) and
 // reports it. One parser per value shape so the creators and the updaters
 // cannot disagree about what a colour or a band looks like.
+// KH_RV_FINITE: all three finite (script numbers are checked before they are
+// stored).
+static bool kh_rv_finite3(const float v[3]) {
+    return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
+}
+
 static bool kh_rv_pos(const game_value& v, float out[3], std::string& err) {
     if (v.type_enum() != game_data_type::ARRAY) { err = "position must be [x, y, zASL]"; return false; }
     auto& pos = v.to_array();
-    if (pos.size() < 3 ||
+    if (pos.size() != 3 ||   // KH_RV_EXACT: an extra element is an error (contract 2).
         pos[0].type_enum() != game_data_type::SCALAR ||
         pos[1].type_enum() != game_data_type::SCALAR ||
         pos[2].type_enum() != game_data_type::SCALAR) { err = "position must be [x, y, zASL]"; return false; }
-    out[0] = static_cast<float>(pos[0]);
-    out[1] = static_cast<float>(pos[1]);
-    out[2] = static_cast<float>(pos[2]);
+    const float khrp_v[3] = { static_cast<float>(pos[0]), static_cast<float>(pos[1]), static_cast<float>(pos[2]) };
+    if (!kh_rv_finite3(khrp_v)) {   // KH_RV_FINITE.
+        err = "position must be [x, y, zASL] finite numbers";
+        return false;
+    }
+    out[0] = khrp_v[0];
+    out[1] = khrp_v[1];
+    out[2] = khrp_v[2];
     return true;
 }
 
@@ -6612,6 +6836,9 @@ static bool kh_rv_band(const game_value& v, RenderIntegration::RenderObject& obj
     if (band.size() > 3) { err = "band must be [minDist, maxDist, falloff?] numbers ([] clears)"; return false; }
     for (size_t i = 0; i < band.size(); ++i) {
         if (band[i].type_enum() != game_data_type::SCALAR) { err = "band must be [minDist, maxDist, falloff?] numbers ([] clears)"; return false; }
+    }
+    for (size_t i = 0; i < band.size(); ++i) {   // KH_RV_FINITE.
+        if (!std::isfinite(static_cast<float>(band[i]))) { err = "band entries must be finite numbers"; return false; }
     }
     if (band.size() < 2) {
         obj.banded = false;
@@ -6639,7 +6866,10 @@ static bool kh_rv_duration(const game_value& v, RenderIntegration::RenderObject&
 static bool kh_rv_params(const game_value& v, RenderIntegration::RenderObject& obj, std::string& err) {
     if (v.is_nil()) return RenderIntegration::set_effect_params(obj, nullptr);
     if (v.type_enum() != game_data_type::ARRAY) { err = "params must be an array of numbers (nil entries keep the default)"; return false; }
-    if (!RenderIntegration::set_effect_params(obj, &v.to_array())) { err = "params entries must be numbers (or nil to keep the default)"; return false; }
+    if (!RenderIntegration::set_effect_params(obj, &v.to_array())) {
+        err = "params must be at most 12 finite numbers (or nil to keep the default)";   // KH_FX_FINITE.
+        return false;
+    }
     return true;
 }
 
@@ -6683,6 +6913,9 @@ static bool kh_rv_lit(const game_value& v, RenderIntegration::RenderObject& obj,
     if (la.size() > 2) { err = "lit must be a boolean or [ambient, diffuse] numbers ([] = off)"; return false; }
     for (size_t i = 0; i < la.size(); ++i) {
         if (la[i].type_enum() != game_data_type::SCALAR) { err = "lit must be a boolean or [ambient, diffuse] numbers ([] = off)"; return false; }
+    }
+    for (size_t i = 0; i < la.size(); ++i) {   // KH_RV_FINITE.
+        if (!std::isfinite(static_cast<float>(la[i]))) { err = "lit [ambient, diffuse] must be finite"; return false; }
     }
     if (la.size() < 1) {
         obj.lit = false;
@@ -7009,8 +7242,8 @@ static bool kh_rv_fx_textures(const game_value& v, RenderIntegration::RenderObje
         }
         const std::string khft_res = RenderIntegration::RenderAssetDiscovery::find_asset_file(khft_path);
         if (khft_res.empty()) {
-            err = "texture '" + khft_path + "' not found (searched Documents\\Arma 3\\kh_framework\\rendering, "
-                  "then every mod's 'rendering' folder)";
+            err = "texture '" + khft_path + "' not found " +
+                  RenderIntegration::RenderAssetDiscovery::searched(khft_path);
             return false;
         }
         khft_set.path[khft_k] = RenderIntegration::kh_intern_str(khft_res);
@@ -7025,7 +7258,6 @@ static int kh_apply_shared_prop(RenderIntegration::RenderObject& obj,
                                 const std::string& prop, const game_value& val, std::string& err) {
     if (prop == "color")   return kh_rv_color(val, obj, err) ? 1 : 0;
     if (prop == "visible") { bool b = obj.visible; if (!kh_rv_bool(val, b, "visible", err)) return 0; obj.visible = b; return 1; }
-    if (prop == "casteronly") { bool b = obj.caster_only; if (!kh_rv_bool(val, b, "casterOnly", err)) return 0; obj.caster_only = b; return 1; }
     if (prop == "params" || prop == "fxparams") return kh_rv_params(val, obj, err) ? 1 : 0;
     if (prop == "blend")   return kh_rv_blend(val, obj, err) ? 1 : 0;
     if (prop == "band")    return kh_rv_band(val, obj, err) ? 1 : 0;
@@ -7038,12 +7270,34 @@ static int kh_apply_shared_prop(RenderIntegration::RenderObject& obj,
     return -1;
 }
 
+// KH_PLAIN_ROT_CARRY - updateRender3D "position" to a plain object (an object, or [object, false]). A plain
+// "rotation true" lane follows the position's object (KH_ATTACH_PLAIN_ROT), so it moves to the new one - as a new
+// memory-point or skeletal binding takes it over (KH_SKEL_ROT_OWN) - where it stayed on the old object, which
+// "rotation false" could then no longer clear. Carried as "rotation <object>" sets it (this frame's rotation
+// too); a read that fails at that point leaves the lane to the next step. A rotation that follows an object of
+// the script's own, or a binding's, is not the plain lane (the latter ends with the binding, kh_attach_set). A
+// detach ends the plain lane (the "position" handler's triple, kh_attach_set's khas_end_plain).
+static bool kh_rv_attach_plain(const std::string& khrp_h, const game_value& khrp_gv,
+                               RenderIntegration::RenderObject& obj, std::string& err) {
+    const bool khrp_carry = RenderIntegration::kh_attach_rot_plain(khrp_h);   // Before the position moves.
+    if (!RenderIntegration::kh_attach_apply(khrp_h, khrp_gv, false, obj, err)) return false;
+    if (khrp_carry) {
+        std::string khrp_err;
+        if (!RenderIntegration::kh_attach_apply(khrp_h, khrp_gv, true, obj, khrp_err)) {
+            RenderIntegration::kh_attach_bone_rot(khrp_h, true);
+        }
+    }
+    return true;
+}
+
 // UpdateRender3D's own set (the object is a mesh). Returns false with err.
-// KH_CLOTH. Both properties take the same shape: false or [] turns the role
-// off, true turns it on with defaults, and an array of [key, value] pairs
-// turns it on and sets those keys. Named rather than positional because there
-// are fifteen of them and a positional array at that width is unreadable and
-// unextendable - a new parameter would have to go on the end forever.
+// KH_CLOTH. The four properties that read it (clothSimulation, chainSimulation,
+// physicsCollider, simulationLod) take one shape: false or [] turns the role
+// off, true turns it on with the object's current settings (the defaults until
+// a key was set), and an array of [key, value] pairs turns it on and sets
+// those keys. Named rather than positional because cloth has twenty-two of
+// them and a positional array at that width is unreadable and unextendable -
+// a new parameter would have to go on the end forever.
 static bool kh_rv_cloth_pairs(const game_value& val, const char* khcp_what,
                               std::vector<std::pair<std::string, game_value>>& khcp_out,
                               bool& khcp_on, std::string& err) {
@@ -7411,11 +7665,23 @@ static bool kh_rv_chain_sim(const game_value& val, RenderIntegration::RenderObje
     // whenever the position was set; otherwise only when the config no longer
     // names it.
     if (!khch_old_proxy.is_nil() && (khch_pos_set || khch_old_proxy.data.get() != khch_c.proxy.data.get())) khch_drop = khch_old_proxy;
+    // KH_CHAIN_COMMIT_LAST: the rebind below reads the new settings (the start and end bones name the kept proxies),
+    // so they go in first - and come back out if it fails (a proxy it could not make): the previous settings stand,
+    // this call's own proxy reference goes and the old proxy is kept, as the note above promises for any fault.
+    const auto khch_prev_it = R::g_chain_cfg.find(handle);
+    const bool khch_had = khch_prev_it != R::g_chain_cfg.end();
+    R::KhChainCfg khch_prev;
+    if (khch_had) khch_prev = khch_prev_it->second;
     R::g_chain_cfg[handle] = khch_c;
-    R::kh_attach_proxy_orphan(khch_drop);
     // KH_SKEL_PROXY_CULL: a bound skeleton's proxies follow the chain's start
     // and end bones; re-made only when the kept set changed.
-    if (!R::kh_skel_chain_rebind(handle, obj, err)) return false;
+    if (!R::kh_skel_chain_rebind(handle, obj, err)) {
+        if (khch_had) R::g_chain_cfg[handle] = khch_prev;
+        else R::g_chain_cfg.erase(handle);
+        if (khch_pos_set) R::kh_attach_proxy_orphan(khch_c.proxy);
+        return false;
+    }
+    R::kh_attach_proxy_orphan(khch_drop);
     const bool khch_was = obj.chain_sim;
     obj.chain_sim = khch_on;
     // LOD-locked for the cloth's reason: a decimated level's own vertices are
@@ -7444,9 +7710,13 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
         // KH_ATTACH_BONE. The rotation-follow state is NOT set here: re-pointing
         // an existing bone attachment at a new object or memory point keeps
         // whatever the "rotation" property last said, and a fresh one starts not
-        // following (the script sets "rotation" to true if it wants that). This
-        // is what makes the two properties independent the way the plain lanes
-        // already are.
+        // following (the script sets "rotation" to true if it wants that) -
+        // unless the rotation followed the position's own object (rotation true on
+        // a plain attach), which any new position that follows an object takes
+        // over (KH_SKEL_ROT_OWN, KH_PLAIN_ROT_CARRY; a skeletal binding's root
+        // follows its parent by default, below). A rotation that follows an
+        // object of the script's own is never changed here; a detach (below) ends
+        // the plain one.
         game_value khb_parent;
         RenderIntegration::KhProxyOwn khb_own;   // KH_ATTACH_BONE: owns the proxy until it is installed.
         RenderIntegration::KhSkelOwn khs_own;    // KH_SKEL: owns the proxies until they are installed.
@@ -7465,12 +7735,14 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
         if (kh_rv_bone_pair(val, khb_parent, khb_mem, khb_bad, khb_skel, khb_plain, err)) {
             if (khb_plain) {   // [object, false]: the plain attach.
                 khs_leave();
-                return RenderIntegration::kh_attach_apply(handle, khb_parent, false, obj, err);
+                return kh_rv_attach_plain(handle, khb_parent, obj, err);   // KH_PLAIN_ROT_CARRY.
             }
             if (khb_skel) {
                 // A new binding's root follows the parent's rotation; one that
                 // replaces a binding keeps that binding's rotation state, as
-                // re-pointing a bone does.
+                // re-pointing a bone does. KH_SKEL_ROT_OWN: a rotation that
+                // follows an object of the script's own is kept (the lanes are
+                // independent): the root does not take the parent's then.
                 // A parent that cannot be read is refused without a report, as
                 // [object, false] (kh_attach_apply) refuses it (KH_NULL_SILENT).
                 float khs_p[3], khs_r[9];
@@ -7482,7 +7754,8 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
                 if (!RenderIntegration::kh_skel_make(khb_parent, RenderIntegration::kh_skel_bone_names(obj.mesh, handle, obj.seq),
                                                      khs_own.proxies, khs_mem, err)) return false;
                 const bool khs_rot = RenderIntegration::kh_attach_has_binding(handle)
-                                   ? RenderIntegration::kh_attach_bone_rot_state(handle) : true;
+                                   ? RenderIntegration::kh_attach_bone_rot_state(handle)
+                                   : !RenderIntegration::kh_attach_rot_own(handle);   // KH_SKEL_ROT_OWN.
                 RenderIntegration::kh_attach_skel_set(handle, khs_own.release(), khs_mem, khb_parent, khs_rot);
                 obj.skel = true;
                 obj.lod_lock = true;
@@ -7499,7 +7772,10 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
             }
             khs_leave();
             if (!RenderIntegration::kh_attach_bone_make(khb_parent, khb_mem, khb_own.proxy, err)) return false;
-            const bool khb_rot = RenderIntegration::kh_attach_bone_rot_state(handle);
+            // KH_SKEL_ROT_OWN: a plain "rotation true" lane (it follows the position's object) carries over as
+            // following the new proxy, as on the skeletal route; an object of the script's own is kept.
+            const bool khb_rot = RenderIntegration::kh_attach_bone_rot_state(handle) ||
+                                 RenderIntegration::kh_attach_rot_plain(handle);
             RenderIntegration::kh_attach_bone_set(handle, khb_own.release(), khb_parent, khb_rot);
             // Seeded from the parent for the same reason addRender3D is: the
             // attach has not been simulated yet.
@@ -7520,11 +7796,20 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
             return true;
         }
         if (khb_bad) return false;
+        if (RenderIntegration::kh_attach_is_obj(val)) {
+            khs_leave();
+            return kh_rv_attach_plain(handle, val, obj, err);   // KH_PLAIN_ROT_CARRY.
+        }
+        // Any other value detaches - once it has parsed. The detach writes the live attachment table at once, which
+        // no discarded staged copy undoes, so a triple that fails must change nothing before it fails.
+        float khp_pos[3];
+        if (!kh_rv_pos(val, khp_pos, err)) { err = "position must be [x, y, zASL], [object, memoryPoint], [object, true/false], or an object to follow"; return false; }
+        // KH_PLAIN_ROT_CARRY: a plain "rotation true" lane follows the position's object, so the detach ends it
+        // too (as a binding's lane ends, kh_attach_set) and the mesh keeps the rotation it holds - left on the old
+        // object, "rotation false" was refused (no position to name) and only an explicit rotation cleared it.
         khs_leave();
-        if (RenderIntegration::kh_attach_is_obj(val))
-            return RenderIntegration::kh_attach_apply(handle, val, false, obj, err);
-        RenderIntegration::kh_attach_set(handle, game_value(), false);   // Any other value detaches.
-        if (!kh_rv_pos(val, obj.pos, err)) { err = "position must be [x, y, zASL], [object, memoryPoint], [object, true/false], or an object to follow"; return false; }
+        RenderIntegration::kh_attach_set(handle, game_value(), false, true);   // khs_leave changes no lane.
+        memcpy(obj.pos, khp_pos, sizeof(khp_pos));
         return true;
     }
     if (prop == "attachposition") {
@@ -7582,7 +7867,18 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
         return true;
     }
     if (prop == "size" || prop == "scale") {
-        if (!RenderIntegration::read_vec3_or_uniform(val, obj.size_mul)) { err = "size must be a number or [x, y, z] multipliers of the mesh's own size"; return false; }
+        float khsz_m[3];
+        if (!RenderIntegration::read_vec3_or_uniform(val, khsz_m)) {
+            err = "size must be a number or [x, y, z] multipliers of the mesh's own size";
+            return false;
+        }
+        // KH_SIZE_FINITE: an infinite size reached every reach test (a cloth copied the whole terrain grid each
+        // frame); a NaN one was taken as 1. Both are refused, and the object keeps its size.
+        if (!std::isfinite(khsz_m[0]) || !std::isfinite(khsz_m[1]) || !std::isfinite(khsz_m[2])) {
+            err = "size must be finite";
+            return false;
+        }
+        memcpy(obj.size_mul, khsz_m, sizeof(khsz_m));
         // KH_SKEL: a skeletal mesh is drawn at its authored scale and its box
         // belongs to the skin (RenderObject::skel); the multiplier is kept and
         // applies when the binding ends.
@@ -7612,10 +7908,11 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
         }
         if (RenderIntegration::kh_attach_is_obj(val))
             return RenderIntegration::kh_attach_apply(handle, val, true, obj, err);
-        RenderIntegration::kh_attach_set(handle, game_value(), true);   // Any other value detaches.
         float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f, khr_m[9];
         bool khr_vec = false, khr_id = true;
+        // Any other value detaches (below) - once it has parsed, as position's.
         if (!kh_rotation_m_from_gv(val, khr_m, khr_p, khr_y, khr_r, khr_vec, khr_id)) { err = "rotation must be nil, a number (yaw), [pitch, yaw, roll] degrees, [vectorDir, vectorUp] (non-zero, not parallel), an object to follow, or true/false while the position follows an object, a memory point or a skeletal binding"; return false; }
+        RenderIntegration::kh_attach_set(handle, game_value(), true);
         if (khr_vec) RenderIntegration::kh_set_rotation_rows(obj, khr_m);
         else RenderIntegration::kh_set_rotation(obj, khr_p, khr_y, khr_r);
         return true;
@@ -7651,7 +7948,8 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
     if (prop == "material") return RenderIntegration::kh_apply_material_update(obj, val, err);
     if (prop == "mode") {
         if (val.type_enum() != game_data_type::SCALAR) { err = "mode must be 0 (depth test), 1 (test + write) or 2 (overlay)"; return false; }
-        const int m = static_cast<int>(static_cast<float>(val));
+        int m = -1;
+        if (!RenderIntegration::kh_gv_int(val, m)) m = -1;   // Not finite / past int: refused; fractions truncate.
         if (m < 0 || m > 2) { err = "mode must be 0 (depth test), 1 (test + write) or 2 (overlay)"; return false; }
         obj.mode = static_cast<RenderIntegration::DepthMode>(m);
         return true;
@@ -7680,6 +7978,13 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
         return true;
     }
     if (prop == "infront")  { bool b = obj.in_front;  if (!kh_rv_bool(val, b, "inFront", err))  return false; obj.in_front = b;  return true; }   // KH_INFRONT.
+    // A mesh's alone: updatePostFX refuses it (a pass casts nothing; every caster test excludes passes).
+    if (prop == "casteronly") {
+        bool b = obj.caster_only;
+        if (!kh_rv_bool(val, b, "casterOnly", err)) return false;
+        obj.caster_only = b;
+        return true;
+    }
     if (prop == "castshadow") {   // KH_SHADOW_SWITCH.
         bool b = obj.cast_shadow;
         if (!kh_rv_bool(val, b, "castShadow", err)) return false;
@@ -7715,17 +8020,29 @@ static bool kh_apply_postfx_prop(RenderIntegration::RenderObject& obj,
     if (prop == "position") return kh_rv_pos(val, obj.pos, err);
     if (prop == "effect")   return kh_rv_effect(val, obj, true, err);
     if (prop == "ui") {
-        if (!kh_ui_phase_from_gv(val, obj.affect_ui, obj.ui_only)) { err = "ui must be \"SCENE\", \"UI\", \"BOTH\", or a boolean"; return false; }
-        if (obj.affect_ui) RenderIntegration::kh_ui_driver_rehoist();   // UI phase demanded.
-        return true;
+        // KH_UI_EMPTY: "" is addPostFX's positional skip (kh_ui_phase_from_gv), not a value an update can set.
+        const bool khpp_empty = val.type_enum() == game_data_type::STRING && static_cast<std::string>(val).empty();
+        if (khpp_empty || !kh_ui_phase_from_gv(val, obj.affect_ui, obj.ui_only)) {
+            err = "ui must be \"SCENE\", \"UI\", \"BOTH\", or a boolean";
+            return false;
+        }
+        return true;   // KH_UI_REHOIST_LAST: kh_update_one hoists the UI driver once the write-back succeeded.
     }
     if (prop == "uispill") { bool b = obj.ui_spill; if (!kh_rv_bool(val, b, "uiSpill", err)) return false; obj.ui_spill = b; return true; }
     if (prop == "radius") {
         if (!RenderIntegration::read_vec3_or_uniform(val, obj.local_radius)) { err = "radius must be a number or [x, y, z] metres"; return false; }
+        if (!kh_rv_finite3(obj.local_radius)) {   // KH_RV_FINITE.
+            err = "radius must be finite (metres)";
+            return false;
+        }
         return true;
     }
     if (prop == "falloff") {
         if (val.type_enum() != game_data_type::SCALAR) { err = "falloff must be a number (metres)"; return false; }
+        if (!std::isfinite(static_cast<float>(val))) {   // KH_RV_FINITE.
+            err = "falloff must be a finite number (metres)";
+            return false;
+        }
         obj.local_falloff = static_cast<float>(val);
         return true;
     }
@@ -7740,6 +8057,11 @@ static bool kh_apply_postfx_prop(RenderIntegration::RenderObject& obj,
         float khls_r[3];
         if (!RenderIntegration::read_vec3_or_uniform(sp[0], khls_r)) { err = "localSphere radius must be a number or [x, y, z] metres"; return false; }
         if (sp.size() >= 2 && sp[1].type_enum() != game_data_type::SCALAR) { err = "localSphere falloff must be a number (metres)"; return false; }
+        // KH_RV_FINITE.
+        if (!kh_rv_finite3(khls_r) || (sp.size() >= 2 && !std::isfinite(static_cast<float>(sp[1])))) {
+            err = "localSphere radius and falloff must be finite (metres)";
+            return false;
+        }
         obj.localized = true;
         obj.local_radius[0] = khls_r[0]; obj.local_radius[1] = khls_r[1]; obj.local_radius[2] = khls_r[2];
         if (sp.size() >= 2) obj.local_falloff = static_cast<float>(sp[1]);
@@ -7757,7 +8079,7 @@ static bool kh_apply_postfx_prop(RenderIntegration::RenderObject& obj,
     return false;
 }
 
-// One [handle, property, value] applied under the draw-list lock.
+// One [handle, property, value]: copied under the draw-list lock, parsed outside it, written back under it.
 static bool kh_update_one(const char* cmd, bool want_fullscreen,
                           const game_value& triple, int index) {
     const std::string where = index < 0 ? std::string() : (" [" + std::to_string(index) + "]");
@@ -7787,20 +8109,23 @@ static bool kh_update_one(const char* cmd, bool want_fullscreen,
     // chain box) are taken from the live entry unless this property changed
     // them (update_render_object, KH_UPDATE_MERGE).
     RenderIntegration::RenderObject staged;
+    std::string khuo_miss;   // KH_REPORT_UNLOCKED: report_error is an SQF call, made after the lock is released.
     {
         std::lock_guard<std::mutex> g(RenderIntegration::g_draw_list_mutex);
         auto it = RenderIntegration::g_draw_list.find(handle);
         if (it == RenderIntegration::g_draw_list.end()) {
-            kh_rv_report(cmd, "no render object with handle '" + handle + "'" + where);
-            return false;
+            khuo_miss = "no render object with handle '" + handle + "'" + where;
+        } else if (it->second.fullscreen != want_fullscreen) {
+            khuo_miss = "handle '" + handle + "'" + where + (want_fullscreen
+                        ? " is a mesh object - use updateRender3D"
+                        : " is a post-processing pass - use updatePostFX");
+        } else {
+            staged = it->second;
         }
-        if (it->second.fullscreen != want_fullscreen) {
-            kh_rv_report(cmd, "handle '" + handle + "'" + where + (want_fullscreen
-                         ? " is a mesh object - use updateRender3D"
-                         : " is a post-processing pass - use updatePostFX"));
-            return false;
-        }
-        staged = it->second;
+    }
+    if (!khuo_miss.empty()) {
+        kh_rv_report(cmd, khuo_miss);
+        return false;
     }
     const RenderIntegration::RenderObject base = staged;   // KH_UPDATE_MERGE: what the property starts from.
 
@@ -7813,11 +8138,15 @@ static bool kh_update_one(const char* cmd, bool want_fullscreen,
         return false;
     }
 
+    // KH_UI_REHOIST_LAST: updatePostFX "ui" demanding the UI phase hoists the driver only once applied.
+    const bool khuo_rehoist = want_fullscreen && prop == "ui" && staged.affect_ui;
+
     // KH_SCENE: the write-back marks the slot dirty for the live scene.
     if (!RenderIntegration::update_render_object(handle, std::move(staged), base)) {
         kh_rv_report(cmd, "render object '" + handle + "'" + where + " was removed while the update was being applied");
         return false;
     }
+    if (khuo_rehoist) RenderIntegration::kh_ui_driver_rehoist();
     return true;
 }
 
@@ -8303,10 +8632,11 @@ static game_value add_postfx_sqf(game_value_parameter args) {
             return game_value("");
         }
 
-        if (obj.affect_ui) RenderIntegration::kh_ui_driver_rehoist();
-
         if (arr.size() > 6 && !arr[6].is_nil() &&
             !kh_rv_duration(arr[6], obj, err)) { kh_rv_report("addPostFX", err); return game_value(""); }
+
+        // KH_UI_REHOIST_LAST: after the last validation, so a refused call starts nothing.
+        if (obj.affect_ui) RenderIntegration::kh_ui_driver_rehoist();
 
         return game_value(RenderIntegration::add_render_object(obj));
     } catch (const std::exception& e) {
@@ -8350,7 +8680,7 @@ static game_value set_ssgi_scale_sqf(game_value_parameter arg) {
         }
         if (khss < 0.25f) khss = 0.25f;
         if (khss > 2.0f)  khss = 2.0f;
-        RenderIntegration::g_khsg_scale = khss;
+        RenderIntegration::g_khsg_scale.store(khss, std::memory_order_relaxed);   // KH_XTHREAD_ATOMIC.
         return game_value(true);
     } catch (...) {
         report_error("setSsgiScale: unknown exception");
@@ -8372,6 +8702,11 @@ static game_value set_render_ao_sqf(game_value_parameter arg) {
             return game_value(false);
         }
         const auto& khao_a = arg.to_array();
+        if (khao_a.size() > 2) {   // KH_RV_EXACT: an extra element is an error (contract 2).
+            kh_rv_report("setRenderAmbientOcclusion", "expected [strength] or [strength, radius] (" +
+                         std::to_string(khao_a.size()) + " elements given)");
+            return game_value(false);
+        }
         if (khao_a.size() < 1 || khao_a[0].type_enum() != game_data_type::SCALAR) {
             kh_rv_report("setRenderAmbientOcclusion", "strength must be a number (0 = off, 1 = as measured, up to 4)");
             return game_value(false);
@@ -8416,14 +8751,17 @@ static game_value set_render_ao_sqf(game_value_parameter arg) {
 // 0 = this call armed them); every later call reports what accumulated since.
 // resetRenderStats zeroes the counters and disarms collection again. The
 // record is the counters and hook state, then the render-thread frame trace
-// and the dynamic-light state (dl prefix), copied under one graphics-lock
-// acquisition (the render thread parked) and formatted after release.
+// and the dynamic-light state (dl prefix). Only the trace and the light state
+// are copied under the graphics lock (the render thread parked); the counters
+// are read live after release (plain words - a count may be a few increments
+// behind).
 static game_value reset_render_stats_sqf() {
     if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
     try {
-        // Best effort park so the zeroing cannot tear against a render-thread
+        // Best effort park so the zeroing cannot race a render-thread
         // increment; a lock that never comes still resets (the counters are
-        // relaxed 64-bit words, a torn count is the worst case).
+        // plain uint64_t or relaxed atomics: an increment racing the zeroing
+        // can be lost or survive it - a miscount is the worst case).
         for (int attempt = 0; attempt < 4; ++attempt) {
             RVExtBridge::ScopedGraphicsLock lock;
             if (!lock.acquired()) continue;
@@ -8498,7 +8836,7 @@ static game_value get_render_stats_sqf() {
             khrt_flush_frame = RenderIntegration::g_flush_frame;
             khrt_opaques = RenderIntegration::g_ro.opaque_draws;
             khrt_injected = RenderIntegration::g_ro.injected;
-            khrt_samples = RenderIntegration::g_scene_depth_samples;
+            khrt_samples = RenderIntegration::g_scene_depth_samples.load(std::memory_order_relaxed);
             khrt_cw = RenderIntegration::g_res.comp_depth_w;
             khrt_ch = RenderIntegration::g_res.comp_depth_h;
             khrt_cs = RenderIntegration::g_res.comp_depth_samples;
@@ -8791,9 +9129,13 @@ static game_value add_local_postfx_sqf(game_value_parameter args) {
             kh_rv_report("addLocalPostFX", "radius must be a number or [x, y, z] metres");
             return game_value("");
         }
+        if (!kh_rv_finite3(obj.local_radius)) {   // KH_RV_FINITE.
+            kh_rv_report("addLocalPostFX", "radius must be finite (metres)");
+            return game_value("");
+        }
 
-        if (arr[2].type_enum() != game_data_type::SCALAR) {
-            kh_rv_report("addLocalPostFX", "falloff must be a number (metres)");
+        if (arr[2].type_enum() != game_data_type::SCALAR || !std::isfinite(static_cast<float>(arr[2]))) {
+            kh_rv_report("addLocalPostFX", "falloff must be a finite number (metres)");   // KH_RV_FINITE.
             return game_value("");
         }
         obj.local_falloff = static_cast<float>(arr[2]);
@@ -9762,6 +10104,14 @@ static void initialize_sqf_integration() {
         userFunctionWrapper<network_remove_handler_sqf>,
         game_data_type::BOOL,
         game_data_type::SCALAR
+    );
+
+    _sqf_kh_network_remove_handler_array = intercept::client::host::register_sqf_command(
+        "khNetworkRemoveHandler",
+        "Remove a network message handler by [handlerId, owner]",
+        userFunctionWrapper<network_remove_handler_sqf>,
+        game_data_type::BOOL,
+        game_data_type::ARRAY
     );
 
     _sqf_kh_network_is_initialized = intercept::client::host::register_sqf_command(

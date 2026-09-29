@@ -40,6 +40,17 @@ public:
 
     // Search for a specific .gguf file across all locations (Documents + Mods)
     static std::string find_model_file(const std::string& filename) {
+        // PBO_PATH (search_mod_folders.hpp's note): one leading slash names the file inside the loaded PBOs by its
+        // engine path, no ai_models folder. llama.cpp opens a file on disk, so the path is its extracted copy
+        // (PBO_EXTRACT: written once, reused while its PBO is unchanged). A PBO holds files under 4 GB.
+        if (ModFolderSearcher::is_pbo_path(filename)) {
+            std::filesystem::path out;
+            std::string err;
+            if (ModFolderSearcher::extract_pbo_file(filename, out, &err)) return out.string();
+            MainThreadScheduler::instance().schedule([err]() { sqf::diag_log("KH - AI Framework: " + err); });
+            return "";
+        }
+
         std::vector<std::filesystem::path> search_paths;
         
         // Priority 1: Documents folder

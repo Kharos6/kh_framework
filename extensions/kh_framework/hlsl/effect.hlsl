@@ -242,19 +242,35 @@ bool KhSunFlareSpot(out float2 spos, out int2 sp)
     return true;
 }
 // Its visibility: the flare fades via depth occlusion at the source - sky = visible, geometry = blocked - over 25
-// taps around it. The same for every pixel of the pass (KH_FX_SIDE draws it once where it can).
+// taps around it. The same for every pixel of the pass (KH_FX_SIDE draws it once where it can). A tap off the frame
+// is absent information and is left out of the average (fog scatter's rule): a Load there reads 0, the near plane,
+// which counted as blocked and dimmed a sun standing near an edge. KhSunFlareSpot clamps the source to the frame
+// edge (one past it), so some taps always land inside; with none (a frame a few pixels wide) it reads 0.
 float KhSunFlareVis(int2 sp)
 {
     float vis = 0.0f;
+    float khsf_n = 0.0f;
     const float khsf_f = KhEncFence();
     [unroll] for (int oy = -2; oy <= 2; ++oy)
     [unroll] for (int ox = -2; ox <= 2; ++ox)
     {
-        float khsf_d = LinDepth(LoadDepthPS(sp + int2(ox, oy) * max((int)floor(3.0f * KhFxPx() + 0.5f), 1)));   // KH_FX_PX_REF: nearest whole px.
+        // KH_FX_PX_REF: nearest whole px.
+        const int2 khsf_p = sp + int2(ox, oy) * max((int)floor(3.0f * KhFxPx() + 0.5f), 1);
+        if (khsf_p.x < 0 || khsf_p.y < 0 || khsf_p.x >= (int)fxMeta.z || khsf_p.y >= (int)fxMeta.w) continue;
+        float khsf_d = LinDepth(LoadDepthPS(khsf_p));
         vis += saturate((min(khsf_d, khsf_f) - khsf_f * 0.98f)
                         / max(khsf_f * 0.019f, 1.0f));
+        khsf_n += 1.0f;
     }
-    return vis / 25.0f;
+    return khsf_n > 0.0f ? vis / khsf_n : 0.0f;
+}
+// KH_FLARE_EDGE: the source's fade as it leaves the frame - 1 on screen, falling linearly with the farther axis to 0
+// where KhSunFlareSpot gives up (1.3 NDC). Past the edge the source is clamped to it and its visibility is the
+// border's, so without the fade the flare held that level out to 1.3 and then vanished in one frame.
+float KhSunFlareEdge(float2 spos)
+{
+    const float2 khse_n = abs(spos * 2.0f - 1.0f);
+    return saturate((1.3f - max(khse_n.x, khse_n.y)) / 0.3f);
 }
 
 float4 PSEffect(VSOut i) : SV_Target
@@ -403,9 +419,12 @@ float4 PSEffect(VSOut i) : SV_Target
         // step spanning the same part of the picture measures the same depth and luma differences, so the thresholds
         // hold at any size.
         const int khol_d = max((int)floor(KhFxPx() + 0.5f), 1);
+        // The depth taps clamp to the frame as SampleScene clamps the luma taps: LoadDepthPS does not, and a Load
+        // past the right or bottom edge reads 0 - the near plane - which drew an edge line along both borders.
+        const int2 khol_hi = int2((int)fxMeta.z - 1, (int)fxMeta.w - 1);
         float dC = LinDepth(LoadDepthPS(px));
-        float dX = LinDepth(LoadDepthPS(px + int2(khol_d, 0))) - dC;
-        float dY = LinDepth(LoadDepthPS(px + int2(0, khol_d))) - dC;
+        float dX = LinDepth(LoadDepthPS(min(px + int2(khol_d, 0), khol_hi))) - dC;
+        float dY = LinDepth(LoadDepthPS(min(px + int2(0, khol_d), khol_hi))) - dC;
         float depthEdge = saturate((abs(dX) + abs(dY)) / max(dC, 1.0f) * fxParams0.x);
         float lC = Luma(scene);
         float lumEdge = saturate((abs(Luma(SampleScene(px + int2(khol_d, 0))) - lC)
@@ -569,8 +588,9 @@ float4 PSEffect(VSOut i) : SV_Target
     else if (effect == 16)   // Sun flare, source-aware: p0.xyz = direction (engine space), p0.w =
                              // Size;
     {
-        // KhSunFlareSpot / KhSunFlareVis above. KH_FX_SIDE: the scene chain draws the visibility once, 1 x 1,
-        // before the pass (side id 29) and arms matCtl.y; unarmed, each pixel measures it.
+        // KhSunFlareSpot / KhSunFlareVis / KhSunFlareEdge above. KH_FX_SIDE: the scene chain draws the visibility
+        // (edge fade included) once, 1 x 1, before the pass (side id 29) and arms matCtl.y; unarmed, each pixel
+        // measures it.
         float2 spos;
         int2 sp;
         if (KhSunFlareSpot(spos, sp))
@@ -578,7 +598,7 @@ float4 PSEffect(VSOut i) : SV_Target
             {
                 float vis;   // A branch, not ?: (which evaluates both arms).
                 [branch] if (matCtl.y > 0.5f) vis = khFxSide.Load(int3(0, 0, 0));
-                else                          vis = KhSunFlareVis(sp);
+                else                          vis = KhSunFlareVis(sp) * KhSunFlareEdge(spos);   // KH_FLARE_EDGE.
                 if (vis > 0.001f)
                 {
                     float aspect = fxMeta.z / fxMeta.w;
@@ -608,7 +628,9 @@ float4 PSEffect(VSOut i) : SV_Target
     {
         float2 spos;
         int2 sp;
-        return float4(KhSunFlareSpot(spos, sp) ? KhSunFlareVis(sp) : 0.0f, 0.0f, 0.0f, 1.0f);
+        float khsv_v = 0.0f;   // A branch, not ?: (which evaluates both arms).
+        [branch] if (KhSunFlareSpot(spos, sp)) khsv_v = KhSunFlareVis(sp) * KhSunFlareEdge(spos);   // KH_FLARE_EDGE.
+        return float4(khsv_v, 0.0f, 0.0f, 1.0f);
     }
 
         else if (effect == 17)   // Glitch: [intensity, speed, sliceAmountPx, sliceBands] +

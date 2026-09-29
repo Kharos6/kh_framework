@@ -282,8 +282,10 @@ float4 KhDlRec(int khdr_i)
 // draw. Filled by the vertex shader into two flat interpolants (VSOut.iobj0/1)
 // and loaded by every mesh pixel shader at entry (KhObjLoad); the lighting /
 // far contract / dither reads use these, never lighting0.zw,
-// shadowMeta2.y or blendCtl.w directly (PSDlsMask, a per-object-only shader
-// with no VSOut, is the one reader of blendCtl.w itself).
+// shadowMeta2.y or blendCtl.w directly. The passes with no VSOut read the CB
+// itself: PSDlsMask, the one reader of blendCtl.w, and the DLS world pass,
+// whose KhDlsWorldFactor reads lighting0.z / .w (kh_dls_world_pass fills both
+// with 1).
 static float khObjAmb = 0.0f;      // lighting0.z twin: base-colour fraction kept in shadow.
 static float khObjDif = 0.0f;      // lighting0.w twin: n.L-scaled fraction.
 static float khObjCut = 0.0f;      // shadowMeta2.y twin: object view-distance cut (m, 0 = off).
@@ -349,8 +351,9 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 // Placed after this file and BEFORE the builtin pixel shaders, and compiled
 // three times - the flush's twin (static.hlsl) and the injection's guard and
 // arbitration twins (composite) - with KH_TEXTURED = KH_USER_MAT =
-// KH_RECEIVE_TEX = 1. It may call anything in this file; it cannot call into
-// static.hlsl / composite2.hlsl (they come after it). It defines
+// KH_RECEIVE_TEX = 1. It may call anything in this file outside the KH_FX_UNIT
+// section (an effect's: a material compile does not define it); it cannot call
+// into static.hlsl / composite2.hlsl (they come after it). It defines
 //     float3 KhUserShade(KhMatSurf s, float3 wpos, float3 n, float smf)
 // While the compile is pending, or if it fails (reported once), the submesh
 // draws flat unlit white instead (the white placeholder, with the default
@@ -381,7 +384,8 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //     ambient and the direct sun by them; never read lighting0.zw directly.
 //   - DynLights(wpos, n) / KhDynLightsPBR(...) carry every dynamic light that
 //     reaches the mesh, with their own shadows (none with receiveShadow off or
-//     every mesh's shadows off); add them as they are.
+//     every mesh's shadows off); add them as they are. The n passed drives
+//     their N.L; their shadow lookup takes the geometric normal (KH_DLS_GEOM_N).
 //   - Ambient occlusion is NOT a shader term: KH_SSAO multiplies the result at
 //     the pixel after the draw. s.occ is the material's occlusion map, for the
 //     ambient only (as KhPbrAmbient applies it).
@@ -902,7 +906,8 @@ Texture2D<float> khVolDepth : register(t23);
 // KH_VOL_FOOT: our footprint's view distance (m) at the copy's seam frame, drawn
 // by the seam with no depth test; 1e30 = none of our surfaces there.
 Texture2D<float> khVolFoot : register(t33);
-// Same shadowed semantics as KhVolShadowed's default arm (count != 0).
+// Any non-zero count reads as shadowed here. KhVolShadowed (below) also refuses
+// a count of 128 or more (a wrapped count), so the two differ there.
 Texture2D<uint2> khMirSten  : register(t28);
 float KhMirUnit(float2 khmu_px, float khmu_w, float khmu_h)
 {
@@ -1025,8 +1030,14 @@ float KhVolTerm(float2 khvt_raster, float khvt_z)
     const int2 khvt_p = KhVolPx(khvt_c);
     // Armed with a witness source: the footprint mask (KH_VOL_FOOT) or the
     // depth plane's encode.
-    if (!(khvt_z > 0.0f) || !(stenVol4.x >= 0.5f || stenVol2.w > stenVol2.y) ||
-        KhVolWitness(khvt_p, khvt_z)) {
+    // KH_VOL_WITNESS_BRANCH: a branch, not || - fxc evaluates every operand, so the
+    // witness's Load ran on every pixel, unarmed and depth-less ones too. Same verdict
+    // (a NaN z or encode fails its compare here as it did under the !); the witness
+    // takes no gradient.
+    bool khvt_own = true;
+    [branch] if (khvt_z > 0.0f && (stenVol4.x >= 0.5f || stenVol2.w > stenVol2.y))
+        khvt_own = KhVolWitness(khvt_p, khvt_z);
+    if (khvt_own) {
         return KhVolShadowed(KhVolCount(khvt_p)) ? 0.0f : 1.0f;
     }
     float khvt_acc = 0.0f;
@@ -1393,7 +1404,8 @@ float SunShadowOcclusion(float3 wpos, KhSunCastGrad khsc_g)   // KH_SUN_GRAD: Kh
     // Past the map's far plane: the far compare (filtered), which a carried band
     // verdict resolves too - as the two exits above, and the self twin's, do.
     if (c.z >= 1.0f) {
-        const float khcu_far = localityMeta.z >= 0.5f ? SunShadowCompareSoft(uv, 1.0f - khcu_b) : 0.0f;
+        float khcu_far = 0.0f;   // KH_PCSS_SKIP_BRANCH's rule: a branch, not ?: (fxc runs both arms).
+        [branch] if (localityMeta.z >= 0.5f) khcu_far = SunShadowCompareSoft(uv, 1.0f - khcu_b);
         return (khtb_occ >= 0.0f) ? KhTbBlend(khcu_far, khtb_occ, khtb_w) : khcu_far;
     }
 
@@ -1408,7 +1420,11 @@ float SunShadowOcclusion(float3 wpos, KhSunCastGrad khsc_g)   // KH_SUN_GRAD: Kh
         float khcu_zr = c.z - khcu_b;
         float khcu_rw = KhPcssRadius(khcu_zr, 0.0f, khcu_tw, khcu_iD);   // KhSunPcssWT's skip: the ring spread is 1 here.
         float khcu_rs = min(max(khcu_rw, 1.0f), KH_PCSS_RMAX);
-        float khcu_zb = khcu_rw <= 1.0f ? 0.0f : KhSunBlockerZ(khSunDepth, sunMeta.y, uv, khcu_zr, khcu_rs, khcu_rot);
+        // KH_PCSS_SKIP_BRANCH: a branch, not ?: - fxc evaluates both arms of a ternary, so the skip ran the
+        // search (17 Loads) on every pixel. Load-only, so no gradient is taken inside; the value is the ternary's.
+        float khcu_zb = 0.0f;
+        [branch] if (!(khcu_rw <= 1.0f))
+            khcu_zb = KhSunBlockerZ(khSunDepth, sunMeta.y, uv, khcu_zr, khcu_rs, khcu_rot);
         float khcu_r = khcu_zb < 0.0f ? 0.0f : KhPcssRadius(khcu_zr, khcu_zb, khcu_tw, khcu_iD);
         if (khcu_zb < 0.0f) {
             khtb_un = 0.0f;
@@ -1557,8 +1573,9 @@ float KhSelfTier(Texture2D<float> khT_map, Texture2D<float2> khT_pf, float4x4 kh
             // the ring path).
             float khT_rw = KhPcssRadius(khT_c.z, 0.0f, khT_tw, khT_iD);
             float khT_rs = min(max(khT_rw, khT_sp), KH_PCSS_RMAX);
-            float khT_zb = khT_rw <= khT_sp ? khT_c.z
-                         : KhSelfBlockerZ(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_rs, khT_rot);
+            float khT_zb = khT_c.z;   // KH_PCSS_SKIP_BRANCH (the cast chain's note).
+            [branch] if (!(khT_rw <= khT_sp))
+                khT_zb = KhSelfBlockerZ(khT_map, khT_meta.y, khT_t, khT_g, khT_c.z, khT_b, khT_rs, khT_rot);
             float khT_pr = khT_zb < 0.0f ? 0.0f : KhPcssRadius(khT_c.z, khT_zb, khT_tw, khT_iD);
             float khT_res;
             [branch] if (khT_zb < 0.0f) {
@@ -1727,8 +1744,9 @@ float SunShadowOcclusionSelf(float3 wrel, float3 nrm, KhSunSelfGrad khsg)   // K
     float2 khsr_rot = KhPcssRot(khsr_t, khsr_fw, float2(0.0f, 0.0f));   // KH_PCSS_CELL.
     float khsr_rw = KhPcssRadius(khsr_c.z, 0.0f, khsr_tw, khsr_iD);   // KhSelfTier's skip.
     float khsr_rs = min(max(khsr_rw, khsr_sp), KH_PCSS_RMAX);
-    float khsr_zb = khsr_rw <= khsr_sp ? khsr_c.z
-                  : KhSelfBlockerZ(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_rs, khsr_rot);
+    float khsr_zb = khsr_c.z;   // KH_PCSS_SKIP_BRANCH (the cast chain's note).
+    [branch] if (!(khsr_rw <= khsr_sp))
+        khsr_zb = KhSelfBlockerZ(khSunDepth, sunMeta.y, khsr_t, khsr_g, khsr_c.z, khsr_b, khsr_rs, khsr_rot);
     float khsr_pr = khsr_zb < 0.0f ? 0.0f : KhPcssRadius(khsr_c.z, khsr_zb, khsr_tw, khsr_iD);
     float khsr_res;
     [branch] if (khsr_zb < 0.0f) {
@@ -1951,7 +1969,9 @@ float KhDlsSoft(float khs_sz, float2 uv, float khs_slice,
     return khs_acc / 9.0f;
 }
 
-// khd_nrm is the receiver's world normal. A mesh shadowing itself is the common
+// khd_nrm is the receiver's world normal - the geometric one where the caller
+// has it (KH_DLS_GEOM_N), since the offset and the plane gradient model the
+// true surface. A mesh shadowing itself is the common
 // case for a lamp beside a prop, and a self-compare with only a constant bias
 // acnes wherever the surface slants away; this kernel takes the sun kernel's
 // three defences (receiver-normal offset, texel-priced slope term,
@@ -2096,7 +2116,7 @@ float KhDlsShadow(int khd_slot, float3 khd_wpos, float3 khd_nrm, float khd_zunc,
     if (khd_rf <= 0.0f) return 1.0f;
 
     // Face-axis distance before the offset, to price the texel: one texel of a
-    // 90 degree face at distance z is 2z / size.
+    // 90 degree face at distance z is 2z / size (a spot's: KH_DLS_SPOT_TEXEL).
     const float3 khd_p0 = khd_wpos - khd_meta.xyz;
     const float  khd_z0 = max(max(abs(khd_p0.x), abs(khd_p0.y)), abs(khd_p0.z));
     uint khd_mw, khd_mh, khd_me;
@@ -2105,7 +2125,22 @@ float KhDlsShadow(int khd_slot, float3 khd_wpos, float3 khd_nrm, float khd_zunc,
     // divide by max(0, 1) and displace the receiver twice its own distance from
     // the light. Answer lit.
     if (khd_mw < 2u) return 1.0f;
-    const float  khd_texel = 2.0f * khd_z0 / max((float)khd_mw, 1.0f);
+    // KH_DLS_SPOT_TEXEL: a spot's map is one frustum of lateral scale sx =
+    // 1/tan(fov/2), so its texel at depth z along the axis is 2z / (size * sx)
+    // (KhDlsFaceUV's rule). Priced as a cube face, the offset, the texel bias
+    // and KhDlsGrad's cap were sized from the wrong texel (sx is 0.18 - 16.7).
+    // z is the spot's clip.w (0 behind it: no offset, and KhDlsFaceUV answers
+    // lit) and sx the length of column x, off the matrix the lookup projects
+    // with. A cube keeps z0 and sx = 1: the same division, bit for bit.
+    float khd_tz = khd_z0;
+    float khd_tsx = 1.0f;
+    [branch] if (dlsCtl[khd_slot].x >= 0.5f) {
+        khd_tz = max(dot(float4(khd_p0, 1.0f), float4(dlsSpotVP[khd_slot][0].w, dlsSpotVP[khd_slot][1].w,
+                                                     dlsSpotVP[khd_slot][2].w, dlsSpotVP[khd_slot][3].w)), 0.0f);
+        khd_tsx = max(length(float3(dlsSpotVP[khd_slot][0].x, dlsSpotVP[khd_slot][1].x,
+                                    dlsSpotVP[khd_slot][2].x)), 1.0e-3f);
+    }
+    const float  khd_texel = 2.0f * khd_tz / (max((float)khd_mw, 1.0f) * khd_tsx);   // One map texel (m).
     const int    khd_fbase = khd_slot * 6;
     const bool   khd_off_on = dlsFaceSlice[khd_fbase].y >= 0.5f;
     const float3 khd_n = normalize(khd_nrm);
@@ -2135,15 +2170,24 @@ float KhDlsShadow(int khd_slot, float3 khd_wpos, float3 khd_nrm, float khd_zunc,
     // The sun cast's 3 x 3 footprint ring (KhSunSoftWT's shape) on an array
     // slice (KhDlsSoft). Returns occlusion in
     // the sun's convention (1 = blocked); this kernel's contract is lit, so it
-    // is inverted once here. Footprint in map texels at this receiver: a face
-    // texel at distance z spans 2z / size, scaled by the projection's lateral.
-    const float khd_sp = clamp(0.5f * khd_fwp / max(khd_texel / max(khd_fsx, 1.0e-3f), 1.0e-6f), 1.0f, 4.0f);
+    // is inverted once here. Footprint in map texels at this receiver: khd_texel
+    // is already one map texel, the lateral scale included (KH_DLS_SPOT_TEXEL).
+    const float khd_sp = clamp(0.5f * khd_fwp / max(khd_texel, 1.0e-6f), 1.0f, 4.0f);
     const float khd_occ = KhDlsSoft((float)khd_mw, khd_uv, khd_slice,
                                     khd_z - khd_b, khd_g,
                                     khd_a, khd_c, khd_near, khd_sp);
     return saturate(1.0f - khd_occ * khd_rf);   // Thinned by the range fade, not cut.
 }
  
+// KH_DLS_GEOM_N: the receiver normal the two mesh light loops hand KhDlsShadow -
+// the GEOMETRIC (interpolated, face-reversed) normal, as the sun self term's
+// khBiasN. A normal map's tilt is not the surface the map sees: fed to the
+// offset and KhDlsGrad it moved every tap's reference depth and mottled the
+// shadow after the map. Set by PSMain / PSComposite on the textured route
+// before the shading call (TWIN); zero = unset, the loop's own nrm is used
+// (the untextured route, whose nrm is already the geometric one).
+static float3 khDlsGeomN = float3(0.0f, 0.0f, 0.0f);
+
 // Every dynamic light that reaches this point, summed (KH_DL_RING: no count
 // cap): each light's diffuse N.L term, scaled by its own shadow from our
 // meshes' maps (KhDlsShadow), plus its per-light ambient (KH_DLS_AMB_KEEP of
@@ -2180,6 +2224,8 @@ float3 DynLights(float3 wpos, float3 nrm)
 
     float3 acc = float3(0.0f, 0.0f, 0.0f);
     const float khs_fwp = length(fwidth(wpos));   // Footprint priced outside the loop.
+    // KH_DLS_GEOM_N: the shadow lookup's normal; n (shading) keeps the N.L term.
+    const float3 khs_rn = (dot(khDlsGeomN, khDlsGeomN) > 0.25f) ? khDlsGeomN : nrm;
 
     [loop] for (int i = 0; i < totalN; ++i) {
         int b = i * 6;
@@ -2214,8 +2260,14 @@ float3 DynLights(float3 wpos, float3 nrm)
         // glow. A dim light casts a faint shadow and a bright one a hard shadow
         // for free.
         // KH_SHADOW_SWITCH: a mesh with receiveShadow off takes no light's shadow.
-        const float khs_sh = khObjNoRecv >= 0.5f ? 1.0f
-                           : KhDlsShadow((int)KhDlRec(b + 5).z - 1, wpos, nrm, 0.0f, khs_fwp);
+        // KH_NORECV_BRANCH: a branch, not ?: - fxc evaluates both arms of a
+        // ternary, so the lookup (KH_DL_ATT_SKIP's 9 Gathers) ran for such a mesh
+        // too and was thrown away. Same value, NaN included; nothing under it
+        // takes a gradient (the note above).
+        float khs_sh = 1.0f;
+        [branch] if (!(khObjNoRecv >= 0.5f)) {
+            khs_sh = KhDlsShadow((int)KhDlRec(b + 5).z - 1, wpos, khs_rn, 0.0f, khs_fwp);
+        }
         // A pure-ambient light must still cast: a fraction of the per-light
         // ambient follows the shadow (KH_DLS_AMB_KEEP kept).
         const float khs_amb = lerp(KH_DLS_AMB_KEEP, 1.0f, khs_sh);
@@ -2421,18 +2473,24 @@ float KhMatRoute(float route, float fallback, float2 uv)
 // touches the window (the rim at distance, a uv seam where the hardware picks
 // the coarsest mip), so such texels would leave the opaque pass and the part
 // pass could not cover them - bites through a solid hull.
+// The texel under t = frac(uv) of a w x h level. frac of a uv a hair below zero rounds to exactly 1.0 in fp32, one past
+// the last texel, where a Load returns zero (alpha 0: a solid texel read as clear); the index stops at the last one.
+int2 KhMatTexelIx(float2 t, uint w, uint h)
+{
+    return min(int2(t * float2(w, h)), int2((int)w - 1, (int)h - 1));
+}
 float4 KhMatFetchTexel(int slot, float2 uv)
 {
     uint kmt_w, kmt_h, kmt_n;
     float2 kmt_t = frac(uv);   // The sampler wraps; so does this.
     int kmt_l = (int)KhMatLayer(slot);
-    if (slot == 0) { matDiffuse.GetDimensions(kmt_w, kmt_h, kmt_n);  return matDiffuse.Load(int4(int2(kmt_t * float2(kmt_w, kmt_h)), kmt_l, 0)); }
-    if (slot == 1) { matNormal.GetDimensions(kmt_w, kmt_h, kmt_n);   return matNormal.Load(int4(int2(kmt_t * float2(kmt_w, kmt_h)), kmt_l, 0)); }
-    if (slot == 2) { matOrm.GetDimensions(kmt_w, kmt_h, kmt_n);      return matOrm.Load(int4(int2(kmt_t * float2(kmt_w, kmt_h)), kmt_l, 0)); }
-    if (slot == 3) { matEmissive.GetDimensions(kmt_w, kmt_h, kmt_n); return matEmissive.Load(int4(int2(kmt_t * float2(kmt_w, kmt_h)), kmt_l, 0)); }
-    if (slot == 4) { matSpecular.GetDimensions(kmt_w, kmt_h, kmt_n); return matSpecular.Load(int4(int2(kmt_t * float2(kmt_w, kmt_h)), kmt_l, 0)); }
+    if (slot == 0) { matDiffuse.GetDimensions(kmt_w, kmt_h, kmt_n);  return matDiffuse.Load(int4(KhMatTexelIx(kmt_t, kmt_w, kmt_h), kmt_l, 0)); }
+    if (slot == 1) { matNormal.GetDimensions(kmt_w, kmt_h, kmt_n);   return matNormal.Load(int4(KhMatTexelIx(kmt_t, kmt_w, kmt_h), kmt_l, 0)); }
+    if (slot == 2) { matOrm.GetDimensions(kmt_w, kmt_h, kmt_n);      return matOrm.Load(int4(KhMatTexelIx(kmt_t, kmt_w, kmt_h), kmt_l, 0)); }
+    if (slot == 3) { matEmissive.GetDimensions(kmt_w, kmt_h, kmt_n); return matEmissive.Load(int4(KhMatTexelIx(kmt_t, kmt_w, kmt_h), kmt_l, 0)); }
+    if (slot == 4) { matSpecular.GetDimensions(kmt_w, kmt_h, kmt_n); return matSpecular.Load(int4(KhMatTexelIx(kmt_t, kmt_w, kmt_h), kmt_l, 0)); }
     matSpecColor.GetDimensions(kmt_w, kmt_h, kmt_n);
-    return matSpecColor.Load(int4(int2(kmt_t * float2(kmt_w, kmt_h)), kmt_l, 0));
+    return matSpecColor.Load(int4(KhMatTexelIx(kmt_t, kmt_w, kmt_h), kmt_l, 0));
 }
 
 // KH_MAT_GRAD: KhMatFetch / KhMatRoute with the uv gradients handed in - SampleGrad, the one filtered read
@@ -2669,6 +2727,8 @@ float3 KhDynLightsPBR(float3 wpos, float3 nrm, float3 albedo, float3 F0, float r
     float kdM = 1.0f - saturate(metal);
     float3 acc = float3(0.0f, 0.0f, 0.0f);
     const float khs_fwp = length(fwidth(wpos));   // Footprint priced outside the loop.
+    // KH_DLS_GEOM_N: the shadow lookup's normal; n (shading) keeps the N.L term.
+    const float3 khs_rn = (dot(khDlsGeomN, khDlsGeomN) > 0.25f) ? khDlsGeomN : nrm;
 
     [loop] for (int i = 0; i < totalN; ++i) {
         int b = i * 6;
@@ -2693,8 +2753,10 @@ float3 KhDynLightsPBR(float3 wpos, float3 nrm, float3 albedo, float3 F0, float r
         // specular lobe with it (KhGGXSpec is scaled by diffI * pi, KH_PBR_PI): a highlight
         // from a blocked light goes with the light. The per-light ambient stays
         // outside.
-        const float khs_sh = khObjNoRecv >= 0.5f ? 1.0f   // KH_SHADOW_SWITCH, as DynLights.
-                           : KhDlsShadow((int)KhDlRec(b + 5).z - 1, wpos, nrm, 0.0f, khs_fwp);
+        float khs_sh = 1.0f;   // KH_SHADOW_SWITCH, as DynLights (KH_NORECV_BRANCH).
+        [branch] if (!(khObjNoRecv >= 0.5f)) {
+            khs_sh = KhDlsShadow((int)KhDlRec(b + 5).z - 1, wpos, khs_rn, 0.0f, khs_fwp);
+        }
         // Twin of the DynLights site.
         const float khs_amb = lerp(KH_DLS_AMB_KEEP, 1.0f, khs_sh);
         float ndl = max(dot(n, L), 0.0f);

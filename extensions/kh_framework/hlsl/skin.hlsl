@@ -2,9 +2,11 @@
 // STANDALONE unit (cb.hlsl is not prefixed): one vertex shader and no pixel
 // stage. C++ (kh_skin_so_batch) draws a mesh's REST STREAM as a point list
 // through VSSkinSo with stream output bound and rasterisation off, so every
-// vertex lands in the binding's own vertex buffer as one MeshVertex - the
-// same 48 bytes (position, normal, uv, tangent) kh_skin_verts writes on the
-// CPU. Every pass that draws the mesh binds that buffer as it always has:
+// streamed vertex lands in the binding's own vertex buffer as one MeshVertex -
+// the same 48 bytes (position, normal, uv, tangent) kh_skin_verts writes on the
+// CPU. A lod_locked binding streams level 0's prefix alone (KH_SKIN_LVL0): the
+// decimated levels' tail keeps older bytes and is never drawn. Every pass that
+// draws the mesh binds that buffer as it always has:
 // no other shader knows skinning exists.
 //
 // TWIN of kh_skin_verts (rendering_integration.hpp) - the same sums in the

@@ -198,6 +198,8 @@ void intercept::post_init() {
 
 void intercept::on_frame() {
     g_is_eden = sqf::is_eden();
+    process_temporal_execution_stack();        
+    MainThreadScheduler::instance().process_frame();
 
     if ((!g_is_eden && !g_is_menu) || g_is_dedicated_server) {
         if (!g_is_dedicated_server) {
@@ -219,8 +221,6 @@ void intercept::on_frame() {
         }
 
         update_unit_states();
-        process_temporal_execution_stack();        
-        MainThreadScheduler::instance().process_frame();
         float current_delta = sqf::diag_delta_time();
         g_game_time += current_delta;
         g_game_frame++;

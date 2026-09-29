@@ -180,6 +180,9 @@ struct JipMessage {
     bool dependency_is_group;
     bool unit_required = false;
     uint64_t seq = 0;   // replay-order sequence
+    // KH_JIP_CODE: for a condition-gated setVariable (NET_INTERNAL_CONDITIONAL_EVENT wrapping
+    // NET_INTERNAL_SET_VARIABLE_EVENT), the variable's own key ("_SETVAR_..."); empty for every other entry.
+    std::string setvar_key;
 };
 
 struct OutgoingMessage {
@@ -4590,9 +4593,28 @@ public:
         
         std::string actual_key = jip_key;
         
+        // KH_JIP_CODE: the variable's key ("_SETVAR_<ns>_<id>_<var>") of a plain set - which is stored under it, one
+        // entry per variable - or of a condition-gated set [condition, NET_INTERNAL_SET_VARIABLE_EVENT, message],
+        // which keeps its own key (each condition is its own entry) and records the variable's in setvar_key.
+        std::string var_key;
+        const game_value* setvar_msg = nullptr;
+        bool setvar_cond = false;
+
         if (event_name == NET_INTERNAL_SET_VARIABLE_EVENT) {
+            setvar_msg = &message;
+        } else if (event_name == NET_INTERNAL_CONDITIONAL_EVENT && message.type_enum() == game_data_type::ARRAY) {
+            auto& cond_arr = message.to_array();
+
+            if (cond_arr.size() >= 3 && cond_arr[1].type_enum() == game_data_type::STRING &&
+                static_cast<std::string>(cond_arr[1]) == NET_INTERNAL_SET_VARIABLE_EVENT) {
+                setvar_msg = &cond_arr[2];
+                setvar_cond = true;
+            }
+        }
+
+        if (setvar_msg) {
             try {
-                auto& arr = message.to_array();
+                auto& arr = setvar_msg->to_array();
                 
                 if (arr.size() >= 2) {
                     game_value ns_data = arr[0];
@@ -4611,13 +4633,16 @@ public:
                             }
                         }
                         
-                        actual_key = "_SETVAR_" + std::to_string(ns_type) + "_" + ns_id + "_" + var_name;
+                        var_key = "_SETVAR_" + std::to_string(ns_type) + "_" + ns_id + "_" + var_name;
                     }
                 }
             } catch (...) {
                 // Fall back to provided key if parsing fails
+                var_key.clear();
             }
         }
+
+        if (!setvar_cond && !var_key.empty()) actual_key = var_key;
         
         try {
             auto& tls_buffer = get_tls_serialize_buffer();
@@ -4625,9 +4650,21 @@ public:
             serialize_game_value(tls_buffer, message);
             std::vector<uint8_t> payload(tls_buffer.begin(), tls_buffer.end());
             std::lock_guard<std::mutex> lock(jip_mutex_);
+
+            // KH_JIP_CODE: a plain JIP set of the variable supersedes its condition-gated sets stored before it - a
+            // joiner replays the plain value alone. (The replay ignores targets, for every entry: a plain set sent
+            // to some clients only is replayed to every joiner, and supersedes the conditional sets all the same.)
+            if (!setvar_cond && !var_key.empty()) {
+                for (auto it = jip_messages_.begin(); it != jip_messages_.end();) {
+                    if (it->second.setvar_key == var_key) it = jip_messages_.erase(it);
+                    else ++it;
+                }
+            }
+
             auto existing = jip_messages_.find(actual_key);
             uint64_t seq = (existing != jip_messages_.end()) ? existing->second.seq : jip_seq_counter_++;
-            jip_messages_[actual_key] = {event_name, std::move(payload), sender, dependency_net_id, dependency_is_group, unit_required, seq};
+            jip_messages_[actual_key] = {event_name, std::move(payload), sender, dependency_net_id, dependency_is_group,
+                                         unit_required, seq, setvar_cond ? var_key : std::string()};
         } catch (const std::exception& e) {
             report_error("KH Network: Failed to store JIP message '" + actual_key + "' - " + std::string(e.what()));
         } catch (...) {
@@ -4674,7 +4711,7 @@ public:
     }
 
     void send_jip_messages_to_client(int client_id) {
-        std::vector<std::tuple<std::string, std::shared_ptr<std::vector<uint8_t>>, int>> messages_to_send;
+        std::vector<std::tuple<std::string, std::shared_ptr<std::vector<uint8_t>>, int, uint64_t>> messages_to_send;
         
         {
             std::lock_guard<std::mutex> lock(jip_mutex_);
@@ -4703,16 +4740,24 @@ public:
                     pooled_payload->clear();
                     write_string(*pooled_payload, msg.event_name);
                     pooled_payload->insert(pooled_payload->end(), msg.payload.begin(), msg.payload.end());
-                    messages_to_send.emplace_back(std::string(NET_INTERNAL_UNIT_GATE_EVENT), std::move(pooled_payload), msg.original_sender);
+                    messages_to_send.emplace_back(std::string(NET_INTERNAL_UNIT_GATE_EVENT), std::move(pooled_payload),
+                                                  msg.original_sender, msg.seq);
                 } else {
                     *pooled_payload = msg.payload;
-                    messages_to_send.emplace_back(msg.event_name, std::move(pooled_payload), msg.original_sender);
+                    messages_to_send.emplace_back(msg.event_name, std::move(pooled_payload), msg.original_sender,
+                                                  msg.seq);
                 }
             }
         }
         
+        // KH_JIP_ORDER: the replay goes out in registration order (JipMessage::seq; a key stored again keeps its
+        // first seq) instead of the map's arbitrary one, where a message could reach the joiner ahead of an earlier
+        // one it builds on. The joiner still runs unit-gated entries once its unit exists, after the others.
+        std::sort(messages_to_send.begin(), messages_to_send.end(),
+                  [](const auto& a, const auto& b) { return std::get<3>(a) < std::get<3>(b); });
+
         if (!messages_to_send.empty()) {
-            for (auto& [event_name, payload, sender] : messages_to_send) {
+            for (auto& [event_name, payload, sender, seq] : messages_to_send) {
                 outgoing_queue_lockfree_.push(
                     OutgoingMessage(client_id, sender, std::string(event_name), std::move(payload))
                 );

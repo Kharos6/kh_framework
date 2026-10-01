@@ -121,13 +121,11 @@ class CfgFunctions
 			class openVehicleSpawner {headerType = -1;};
 			class parseBoolean {headerType = -1;};
 			class parseNormalizedScreenTransforms {headerType = -1;};
-			class parseSpecialExecution {headerType = -1;};
 			class persistentExecutionSetup {headerType = -1;};
 			class playRecordedMission {headerType = -1;};
 			class postInit {headerType = -1;};
 			class preInit {headerType = -1;};
 			class preStart {preStart = 1;};
-			class processExecution {headerType = -1;};
 			class processRemoteSerializedFunction {headerType = -1;};
 			class raycast {headerType = -1;};
 			class raycast2d {headerType = -1;};

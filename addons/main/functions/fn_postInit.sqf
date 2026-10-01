@@ -1960,12 +1960,20 @@ isNil {
 							false
 						];
 
+						if KH_var_renderingVolumetricDynamicLights then {
+							KH_var_volumetricDynamicLightsHandler = addPostFX ["dynamicLightFog", [1, 1, 0, 0.6, 16, 250, 2, 24]];
+						};
+
 						if KH_var_renderingFogScattering then {
 							KH_var_fogScatteringHandler = addPostFX ["fogScatter", [1, 0, 12]];
 						};
 
+						if KH_var_renderingGlobalIllumination then {
+							KH_var_globalIlluminationHandler = addPostFX ["ssgi", [1, 6, 12, 0.05, 1, 1, 100, 3, 0.5]];
+						};
+
 						allowDynamicShadows KH_var_renderingDynamicShadows;
-						setRenderAmbientOcclusion [KH_var_renderingAmbientOcclusionStrength, KH_var_renderingAmbientOcclusionRadius];
+						setRenderAmbientOcclusion [[0, 1] select KH_var_renderingAmbientOcclusion, 0.5];
 					},
 					true,
 					{KH_var_clientRegistered && KH_var_missionInitialized;},

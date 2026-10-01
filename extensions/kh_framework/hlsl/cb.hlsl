@@ -3559,7 +3559,12 @@ float3 KhgVpos(float2 vp_px, float vp_d, float2 vp_res, float vp_m00, float vp_m
 // the frame fs_res (fxMeta.zw) and the projection's two scales fs_m00 / fs_m11
 // (the lengths of viewProj's first and second columns over its xyz rows, as
 // fog scatter forms them). Fog scatter's engine term (KhFsFog adds the KH fog
-// passes to it) - one body.
+// passes to it) - one body. KH_FOG_SKY: the sky (a depth past the far fence) and,
+// with the engine's fog-end ramp, whatever lies past the fog end - where the game
+// shows no geometry, only sky and clouds - take the height fog integrated along
+// the view ray to infinity instead of the ramp's full fog: looking up from above
+// the fog shows a clear sky, from inside it a fogged one, and toward the horizon
+// the path grows without bound (fully fogged).
 float KhFxFogEngine(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float fs_m11)
 {
     float fs_s = 0.0f;
@@ -3570,7 +3575,8 @@ float KhFxFogEngine(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float
         // shape: 1 - m22 < 0, m32 < 0 -> positive fence).
         float fs_fden = 1.0f - depthParams.x;
         float fs_far = fs_fden < -1.0e-7f ? depthParams.y / fs_fden : 20000.0f;
-        float fs_de = min(fs_d, clamp(fs_far, 500.0f, 100000.0f) * 0.999f);
+        float fs_fence = clamp(fs_far, 500.0f, 100000.0f) * 0.999f;
+        float fs_de = min(fs_d, fs_fence);
         float fs_distM = length(KhgVpos(fs_px, fs_de, fs_res, fs_m00, fs_m11));
         // Height at the clamped distance: the analytic ndcZ of fs_de, immune to
         // the beyond-far mirror and to raw-depth teeter by construction.
@@ -3584,8 +3590,28 @@ float KhFxFogEngine(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float
         float fs_hgt = fs_wp.y / fs_wp.w + (fxCam.w > 0.5f ? fxCam.y : 0.0f);
         float fs_camY = fogColor.w;
         float fs_tr;
+        // KH_FOG_SKY: the density model is the branch's own - the engine terms' (fogEngine.x at sea level, falling
+        // off with fogParams.y above it, flat below) or the fallback's (fogParams.x * 0.0153 up to fogParams.z,
+        // falling off above) - integrated from the camera along the ray's rise fs_sin per metre: the flat part up to
+        // the base over fs_sin, the falloff's exp(-f h0) / (f fs_sin). A level or falling ray, or no falloff: no end.
+        const bool fs_sky = fs_d >= fs_fence ||
+                            (fogEngine.w >= 0.5f && fogEngine.w < 1.5f && fs_distM >= fogEngine.y);
 
-        if (fogEngine.w >= 0.5f)
+        if (fs_sky)
+        {
+            float fs_sin = (fs_hgt - fs_camY) / max(fs_distM, 1.0e-4f);
+            float fs_f = fogParams.y;
+            float fs_base = fogEngine.w >= 0.5f ? 0.0f : fogParams.z;
+            float fs_sig = fogEngine.w >= 0.5f ? fogEngine.x : fogParams.x * 0.0153f;
+            if (fs_sig <= 0.0f)
+                fs_tr = 1.0f;
+            else if (fs_sin <= 1.0e-4f || fs_f <= 1.0e-6f)
+                fs_tr = 0.0f;
+            else
+                fs_tr = exp(-fs_sig * (max(fs_base - fs_camY, 0.0f)
+                                       + exp(-fs_f * max(fs_camY - fs_base, 0.0f)) / fs_f) / fs_sin);
+        }
+        else if (fogEngine.w >= 0.5f)
         {
             float fs_ramp = fogEngine.w >= 1.5f
                           ? 1.0f

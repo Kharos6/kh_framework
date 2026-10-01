@@ -69,17 +69,17 @@
 ] call CBA_fnc_addSetting;
 
 [
-	"KH_var_renderingAmbientOcclusionStrength",
-	"SLIDER",   
+	"KH_var_renderingAmbientOcclusion",
+	"CHECKBOX",   
 	[
-		"Ambient Occlusion Strength", 
-		"Strength of the ambient occlusion affecting KH Rendered meshes and their surroundings."
+		"Ambient Occlusion", 
+		"Simulates ambient occlusion affecting KH Rendered meshes and their surroundings."
 	], 
 	[
 		"KH Rendering",
 		"Post Processing"
 	],
-	[0.000, 4.000, 1.000, 3],
+	false,
 	0,
 	{
 		if !hasInterface exitWith {};
@@ -87,7 +87,7 @@
 		execute [
 			[],
 			{
-				setRenderAmbientOcclusion [KH_var_renderingAmbientOcclusionStrength, KH_var_renderingAmbientOcclusionRadius];
+				setRenderAmbientOcclusion [[0, 1] select KH_var_renderingAmbientOcclusion, 0.5];
 			},
 			true,
 			"-1",
@@ -98,17 +98,17 @@
 ] call CBA_fnc_addSetting;
 
 [
-	"KH_var_renderingAmbientOcclusionRadius",
-	"SLIDER",   
+	"KH_var_renderingGlobalIllumination",
+	"CHECKBOX",   
 	[
-		"Ambient Occlusion Radius", 
-		"Radius of the ambient occlusion affecting KH Rendered meshes and their surroundings."
+		"Global Illumination", 
+		"Simulates global illumination."
 	], 
 	[
 		"KH Rendering",
 		"Post Processing"
 	],
-	[0.050, 5.000, 0.500, 3],
+	false,
 	0,
 	{
 		if !hasInterface exitWith {};
@@ -116,7 +116,48 @@
 		execute [
 			[],
 			{
-				setRenderAmbientOcclusion [KH_var_renderingAmbientOcclusionStrength, KH_var_renderingAmbientOcclusionRadius];
+				removeRenderHandler KH_var_globalIlluminationHandler;
+
+				if KH_var_renderingGlobalIllumination then {
+					KH_var_globalIlluminationHandler = addPostFX ["ssgi", [1, 6, 12, 0.05, 1, 1, 100, 3, 0.5]];
+				};
+
+				nil;
+			},
+			true,
+			"-1",
+			false
+		];
+	},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_renderingVolumetricDynamicLights",
+	"CHECKBOX",   
+	[
+		"Volumetric Dynamic Lights", 
+		"Simulates dynamic light fog contribution."
+	], 
+	[
+		"KH Rendering",
+		"Post Processing"
+	],
+	false,
+	0,
+	{
+		if !hasInterface exitWith {};
+
+		execute [
+			[],
+			{
+				removeRenderHandler KH_var_volumetricDynamicLightsHandler;
+
+				if KH_var_renderingVolumetricDynamicLights then {
+					KH_var_volumetricDynamicLightsHandler = addPostFX ["dynamicLightFog", [1, 1, 0, 0.6, 16, 250, 2, 24]];
+				};
+
+				nil;
 			},
 			true,
 			"-1",

@@ -467,6 +467,51 @@ namespace RenderIntegration {
 // least. The same holds in addLocalPostFX, on effect meshes, over the UI and
 // in a picture-in-picture.
 //
+// dynamicLightFog (KH_DLF) lights the game's fog with its dynamic lights -
+// street lamps, flashlights, fires, vehicle lights: each glows through the
+// fog around it in its own colour and brightness, a spot lighting its cone
+// alone into a beam, as bright as the light and as thick as the fog there.
+// The density is the game's own fog as it stands, thinning with height as
+// the game's does, so with the game's fog at 0 the pass adds nothing unless
+// baseDensity is set. The fog in front of it dims the glow as the game's fog
+// dims anything (past the game's fog end, nothing shows), and the glow stops
+// at the first surface - against the sky it reaches maxDistance. Params
+// [intensity 1, fogScale 1, baseDensity 0, anisotropy 0.6, steps 16,
+// maxDistance 250, shadows 2, maxLights 24]: intensity scales the light the
+// fog scatters; fogScale multiplies the game's fog density and baseDensity
+// (per metre) adds an even haze of its own; anisotropy (-0.9 .. 0.9) is how
+// strongly the fog scatters forward - toward 0.9 the glow gathers where you
+// look into the light, 0 spreads it evenly; steps (4 - 64) are the samples
+// taken through each light's reach, gathered toward its bright core, fewer
+// being cheaper and grainier; maxDistance (10 - 5000 m) is how far from the
+// camera the fog is marched and lights are taken; shadows 0 casts none, 1
+// lets our own meshes cut the light into shafts (with allowDynamicShadows
+// true, which draws the light maps they cast from), 2 adds the game's own
+// geometry as the camera sees it - a wall, a fence, a building corner
+// between a light and the fog; maxLights (1 - 64) keeps the lights whose
+// reach comes nearest the camera. The colour tints the fog's light; its
+// alpha is the pass's opacity. The fog is worked out on the grid
+// setSsgiScale sets (half size by default) and filtered up to the picture,
+// so geometry thinner than a grid texel - a wire, a thin post - can show
+// the glow of what lies behind it (setSsgiScale 1 works it out per pixel);
+// getRenderStats reports the grid work's GPU time as gDlFogUs (the pass's
+// last step, the upsample onto the picture, counts in gFlush). The game's
+// geometry casts only what the camera sees of it: a wall off screen or
+// behind the camera casts no shaft, a thin post or branch seen side-on
+// casts a faint one, something standing within about a metre of the
+// surface behind it (more, farther off) is taken as part of that surface
+// (a lamp between the two is shadowed by it), and a surface within a metre
+// of a light - its housing, the hand or vehicle holding it - casts none, as
+// the game's lights shine through their own. The lights are the ones the
+// game uploads for the frame, as our meshes' dynamic lighting has them, and
+// a visible pass keeps that capture running as a lit mesh does; with FSAA
+// at 1x none are read and the pass adds nothing. addLocalPostFX confines
+// it as it confines any pass, by the surface each pixel shows: where that
+// surface lies outside the volume - the sky included - the glow is cut,
+// though the fog it crosses may lie inside (with inverse, the reverse). On
+// a mesh (updateRender3D's effect), in a picture-in-picture and on the UI
+// it draws nothing.
+//
 // Returns the khr_ handle, or '' after reporting the fault
 //
 // ---- STRING = addLocalPostFX ARRAY -----------------------------------------
@@ -755,13 +800,13 @@ inline void kh_prof_add(KhProfZone khpa_z, int64_t khpa_t0) {
 enum KhGpuZone : uint32_t {
     KHG_INJECT, KHG_SUN_LADDER, KHG_DLS_FRAME, KHG_DLS_WORLD, KHG_MASK_CAST, KHG_SVS_PRIME,
     KHG_SVS_VOL_COPY, KHG_VMIR, KHG_SSAO_POST, KHG_SNAPSHOT, KHG_PIP,
-    KHG_FLUSH, KHG_FLUSH_UI, KHG_SCENE_CAPTURE,
+    KHG_FLUSH, KHG_FLUSH_UI, KHG_SCENE_CAPTURE, KHG_DLF,
     KHG_ZONE_N
 };
 static const char* const g_gpu_zone_name[KHG_ZONE_N] = {
     "gInject", "gSunLadder", "gDlsFrame", "gDlsWorld", "gMaskCast", "gSvsPrime",
     "gSvsVolCopy", "gVmir", "gSsaoPost", "gSnapshot", "gPip",
-    "gFlush", "gFlushUi", "gSceneCapture",
+    "gFlush", "gFlushUi", "gSceneCapture", "gDlFog",
 };
 static constexpr uint32_t KH_GPU_RING = 8u;
 // The cycles back a slot is read, never waiting (< KH_GPU_RING): the GPU was measured running 5 cycles behind the CPU
@@ -7949,16 +7994,14 @@ struct Resources {
     // Fullscreen-chain ping-pong targets (single-sample, scene format): one
     // scene Resolve per frame regardless of pass count.
     ID3D11Texture2D*          chain_tex[5] = {};   // [3] = a-trous sibling of [2]; [4] = fp16
-                                                   // Radiance pyramid.
+                                                   // radiance seed (KH_SSGI_SEED).
     ID3D11RenderTargetView*   chain_rtv[5] = {};
     ID3D11ShaderResourceView* chain_srv[5] = {};
-    // 13 covers 4K and beyond.
-    ID3D11RenderTargetView*   khsg_mip_rtv[13] = {};
-    ID3D11ShaderResourceView* khsg_mip_srv[13] = {};
-    int                       khsg_pyr_levels = 0;
-    // Linear-clamp sampler for the ssgi resolve upsample at s2 (the shared
-    // prefix owns s1); bound only for that draw with the prior binding
-    // saved/restored (StateBackup covers s0-s1 only).
+    // Linear-clamp sampler at s2 for the ssgi side chain (the shared prefix
+    // owns s1): the radiance seed (26), the gather's radiance taps (22) and
+    // the resolve's upsample (24) sample through it. Bound from the seed to
+    // the resolve, the prior binding saved/restored (StateBackup covers s0-s1
+    // only).
     ID3D11SamplerState*       khsg_sampler = nullptr;
     // KH_GLOW_PYR: the glow passes' pyramids (KhGlowPyr, per route), their builders (effect.hlsl PSGlowSeed /
     // PSGlowDown, made once with the core set - absent, every glow takes its direct taps) and the anisotropic clamp
@@ -8010,16 +8053,11 @@ struct Resources {
     }
 
     void release_fx_chain() {
-        for (int i = 0; i < 5; ++i) {   // Gather; + pre-smooth; + radiance pyramid.
+        for (int i = 0; i < 5; ++i) {   // Gather; + pre-smooth; + radiance seed.
             KH_SAFE_RELEASE(chain_tex[i]);
             KH_SAFE_RELEASE(chain_rtv[i]);
             KH_SAFE_RELEASE(chain_srv[i]);
         }
-        for (int i = 0; i < 13; ++i) {
-            KH_SAFE_RELEASE(khsg_mip_rtv[i]);
-            KH_SAFE_RELEASE(khsg_mip_srv[i]);
-        }
-        khsg_pyr_levels = 0;
         KH_SAFE_RELEASE(khsg_sampler);
     }
 
@@ -8422,6 +8460,11 @@ static std::atomic<bool> g_svs_mesh_wanted{false};
 // effects alone needs this term to feed the probes. Written by flush_frame's
 // census (game thread), read by the upload hooks (render thread).
 static std::atomic<bool> g_fogsc_wanted{false};
+// KH_DLF_DEMAND: a visible scene-chain dynamicLightFog pass - the dynamic lights' capture (kh_dl_cpu_wanted) without
+// the lit meshes' engine shadow capture (g_ls.wanted, shadow_live_wanted), which the pass never reads. Written by
+// flush_frame's census (game thread; FSAA 1x stands it down as it does g_ls.wanted), read by the capture's hooks and
+// the flush's fallback harvest (render thread).
+static std::atomic<bool> g_dlf_wanted{false};
 
 // Set/cleared only inside the graphics-lock scope (every other submission
 // thread parked). Atomic so a hook body cannot cache it.
@@ -9027,9 +9070,15 @@ enum class EffectId : int {
     Crt = 21,
     Ssgi = 22,
     Fogscatter = 23,
+    // 24 - 30 are the chain's internal side ids (SSGI's 24 - 26, with 27 - its pyramid's level draw - retired by
+    // KH_SSGI_SEED; KH_FX_SIDE's 28 - 30), refused to a script (effect_id_from_gv).
+    DynLightFog = 31,   // KH_DLF.
 };
 
-static constexpr int KH_MAX_EFFECT = 23;
+static constexpr int KH_MAX_EFFECT = 31;
+// KH_DLF: dynamicLightFog's own passes, drawn by the chain alone (above KH_MAX_EFFECT: no script reaches them).
+static constexpr int KH_DLF_GATHER = 32;
+static constexpr int KH_DLF_FILTER = 33;
 // User effect sentinel: RenderObject.effect for a custom ".hlsl" pass
 // (fx_shader carries the resolved path).
 static constexpr int KH_EFFECT_CUSTOM = 100;
@@ -9191,8 +9240,8 @@ inline void kh_scene_grid_insert(uint32_t khgi_slot, const RenderObject& o) {
 // snapshots, mirror) and releases the last recorded pass. What stays is what non-shadow work reads: the
 // engine-side capture (its cascade axes are the sun direction that lights every mesh - kh_sun_raw_note), the
 // constant-buffer census (a blanket term of the upload funnel the lighting probes ride - kh_cbc_on's note), the
-// dynamic lights' harvest (g_ls.wanted: a lit mesh, not a shadow) and the engine-mask tracking the capture
-// shares.
+// dynamic lights' harvest (kh_dl_cpu_wanted: a lit mesh, not a shadow, or a dynamicLightFog pass) and the
+// engine-mask tracking the capture shares.
 static constexpr float KH_SHADOW_OFF_M = 5.0f;
 static std::atomic<bool> g_shadows_off{ false };   // Game thread writes; every thread reads.
 inline bool kh_shadows_off() { return g_shadows_off.load(std::memory_order_relaxed); }
@@ -12879,6 +12928,23 @@ struct RenderStats {
     uint64_t dl_stale_fills = 0;
     uint64_t dl_ring_fails = 0;
     uint64_t dl_mesh_lights_max = 0;
+    // KH_DL_DIAG (CN-4) - what can change the dynamic lights for one frame. Pool lights a complete harvest's presence
+    // sweep dropped with no sighting after the harvest that created them (a light drawn in one span only, a copy placed
+    // at a wrong origin, the placements of a light moving past the match cube that no later upload re-sighted).
+    // Harvests whose brightest candidate - the main-pass reference's evidence (ref_hist, KH_DL_REF_MEDIAN: a placed
+    // window or an upload re-sighted through its buffer's origin) - was brighter / dimmer than the last such
+    // harvest's (kh_dl_ref_brighter), and whose previous such was a move this one took back (a one-harvest excursion
+    // - the median keeps it from the reference). New pool entries
+    // repeating an older entry's record a nonzero whole number of land-grid cells away at its height (kh_dl_copy_of:
+    // another origin's placement of that light, or a lamp of the same model grid-aligned with it). And
+    // dynamicLightFog lights, per pass and frame, whose light-map slot is not published (unshadowed there).
+    uint64_t dl_blinks = 0;
+    uint64_t dl_ref_up = 0;
+    uint64_t dl_ref_down = 0;
+    uint64_t dl_ref_spike_up = 0;
+    uint64_t dl_ref_spike_down = 0;
+    uint64_t dl_copies = 0;
+    uint64_t dlf_unshadowed = 0;
 };
 static RenderStats g_stats;
 // KH_STATS_ARMED: collection is off until the first getRenderStats; a
@@ -28411,7 +28477,7 @@ static int   g_khsg_h = 0;
 
 // Creates (or recreates on a size, format or scale change) the five
 // single-sample chain targets (the SSGI group among them at its own scale, the
-// radiance pyramid with its mip views). Called after ensure_scene_capture,
+// radiance seed). Called after ensure_scene_capture,
 // which establishes dimensions.
 inline std::string ensure_fx_chain(ID3D11Device* dev) {
     if (!g_res.scene_tex) return "no scene capture";
@@ -28443,21 +28509,18 @@ inline std::string ensure_fx_chain(ID3D11Device* dev) {
         g_res.release_fx_chain();
     }
 
-    for (int i = 0; i < 5; ++i) {   // Gather; + pre-smooth; + radiance pyramid.
+    for (int i = 0; i < 5; ++i) {   // Gather; + pre-smooth; + radiance seed.
         D3D11_TEXTURE2D_DESC td = sd;
         td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
         td.SampleDesc.Count = 1;
         td.SampleDesc.Quality = 0;
-        // [3] is [2]'s a-trous sibling: same half grid, same fp16.
+        // [3] is [2]'s a-trous sibling: same half grid, same fp16. [4], the
+        // radiance seed the gather's taps read, is one level (KH_SSGI_SEED: the
+        // gather reads the base alone - KH_SSGI_VB - so no pyramid is built).
         if (i >= 2) {
             td.Width  = khsg_sw;
             td.Height = khsg_sh;
             td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        }
-        // The gather's taps read only this pyramid.
-        if (i == 4) {
-            td.MipLevels = 0;
-            td.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
         }
         HRESULT hr = dev->CreateTexture2D(&td, nullptr, &g_res.chain_tex[i]);
         if (FAILED(hr)) { g_res.release_fx_chain(); return "Create chain tex " + hr_str(hr); }
@@ -28467,35 +28530,10 @@ inline std::string ensure_fx_chain(ID3D11Device* dev) {
         if (FAILED(hr)) { g_res.release_fx_chain(); return "Create chain SRV " + hr_str(hr); }
     }
 
-    if (g_res.chain_tex[4]) {
-        D3D11_TEXTURE2D_DESC khpd = {};
-        g_res.chain_tex[4]->GetDesc(&khpd);
-        int khpl = (int)khpd.MipLevels;
-        if (khpl > 13) khpl = 13;
-
-        for (int m = 0; m < khpl; ++m) {
-            D3D11_RENDER_TARGET_VIEW_DESC khrd = {};
-            khrd.Format = khpd.Format;
-            khrd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-            khrd.Texture2D.MipSlice = (UINT)m;
-            HRESULT khhr = dev->CreateRenderTargetView(g_res.chain_tex[4], &khrd, &g_res.khsg_mip_rtv[m]);
-            if (FAILED(khhr)) { g_res.release_fx_chain(); return "Create pyramid RTV " + hr_str(khhr); }
-            D3D11_SHADER_RESOURCE_VIEW_DESC khsd = {};
-            khsd.Format = khpd.Format;
-            khsd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-            khsd.Texture2D.MostDetailedMip = (UINT)m;
-            khsd.Texture2D.MipLevels = 1;
-            khhr = dev->CreateShaderResourceView(g_res.chain_tex[4], &khsd, &g_res.khsg_mip_srv[m]);
-            if (FAILED(khhr)) { g_res.release_fx_chain(); return "Create pyramid SRV " + hr_str(khhr); }
-        }
-
-        g_res.khsg_pyr_levels = khpl;
-    }
-
     g_khsg_w = (int)khsg_sw;
     g_khsg_h = (int)khsg_sh;
 
-    if (!g_res.khsg_sampler) {   // The resolve's bilinear sampler.
+    if (!g_res.khsg_sampler) {   // The ssgi chain's bilinear sampler (seed, gather taps, resolve).
         D3D11_SAMPLER_DESC khsm = {};
         khsm.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
         khsm.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -30179,8 +30217,8 @@ inline int effect_id_from_gv(const game_value& gv) {
         int id = -1;
         if (!kh_gv_int(gv, id)) return -1;
         // 18..20 = clarity/deband/rainlens; 21 = crt; 22 = ssgi; 23 =
-        // fogscatter.
-        return (id >= 0 && id <= KH_MAX_EFFECT) ? id : -1;
+        // fogscatter; 31 = dynamiclightfog. 24 - 30 are internal side ids (KH_DLF).
+        return (id >= 0 && id <= KH_MAX_EFFECT && !(id >= 24 && id <= 30)) ? id : -1;
     }
 
     if (gv.type_enum() != game_data_type::STRING) return -1;
@@ -30210,6 +30248,7 @@ inline int effect_id_from_gv(const game_value& gv) {
     if (s == "crt")        return 21;
     if (s == "ssgi")       return 22;
     if (s == "fogscatter") return 23;
+    if (s == "dynamiclightfog") return 31;   // KH_DLF.
     return -1;
 }
 
@@ -30277,6 +30316,10 @@ inline bool set_effect_params(RenderObject& obj, const auto_array<game_value>* p
         { 0.12f, 0.45f, 540.0f, 0.35f, 1.5f, 0.25f, 0.3f, 0.06f, 4.0f, 1.5f, 3.0f },   // 21 crt: lane 10 = maskSizePx.
         { 0.7f, 4.0f, 12.0f, 0.15f, 2.0f, 1.0f, 300.0f, 3.0f, 0.65f },
         { 1.0f, 0.0f, 12.0f },
+        {}, {}, {}, {}, {}, {}, {},   // 24 - 30: internal side ids (no script's effect).
+        { 1.0f, 1.0f, 0.0f, 0.6f, 16.0f, 250.0f, 2.0f, 24.0f },   // 31 dynamicLightFog (KH_DLF): intensity,
+                                                                  // fogScale, baseDensity, anisotropy, steps,
+                                                                  // maxDistance, shadows, maxLights.
     };
 
     // LUT default row: strength = 1 (a zero default would be a silent no-op;
@@ -30508,6 +30551,34 @@ inline void kh_cam_of(const float khco_v[4][4], float khco_out[3]) {
 inline void kh_cam_of_site(const float khco_v[4][4], float khco_out[3],
                            int khco_site) {
     kh_cam_of(khco_v, khco_out);
+}
+
+// KH_CAM_HONEST: a view's inverse rotation laid out for KhCastWorld's row dots - castMat[j][c] = cofactor[j][c] / det,
+// the freeze's own layout (g_fire_cast_inv) - in double. False (the caller keeps the transpose) for a rotation whose
+// determinant is 0.1 or more off 1, the freeze's own refusal.
+inline bool kh_view_inv_rows(const float khvi_v[4][4], float khvi_out[3][3]) {
+    const double khvi_r[3][3] = {
+        { khvi_v[0][0], khvi_v[0][1], khvi_v[0][2] },
+        { khvi_v[1][0], khvi_v[1][1], khvi_v[1][2] },
+        { khvi_v[2][0], khvi_v[2][1], khvi_v[2][2] } };
+    const double khvi_c[3][3] = {
+        { khvi_r[1][1] * khvi_r[2][2] - khvi_r[1][2] * khvi_r[2][1],
+          khvi_r[1][2] * khvi_r[2][0] - khvi_r[1][0] * khvi_r[2][2],
+          khvi_r[1][0] * khvi_r[2][1] - khvi_r[1][1] * khvi_r[2][0] },
+        { khvi_r[0][2] * khvi_r[2][1] - khvi_r[0][1] * khvi_r[2][2],
+          khvi_r[0][0] * khvi_r[2][2] - khvi_r[0][2] * khvi_r[2][0],
+          khvi_r[0][1] * khvi_r[2][0] - khvi_r[0][0] * khvi_r[2][1] },
+        { khvi_r[0][1] * khvi_r[1][2] - khvi_r[0][2] * khvi_r[1][1],
+          khvi_r[0][2] * khvi_r[1][0] - khvi_r[0][0] * khvi_r[1][2],
+          khvi_r[0][0] * khvi_r[1][1] - khvi_r[0][1] * khvi_r[1][0] } };
+    const double khvi_det = khvi_r[0][0] * khvi_c[0][0] + khvi_r[0][1] * khvi_c[0][1] + khvi_r[0][2] * khvi_c[0][2];
+    if (!(fabs(khvi_det - 1.0) < 0.1)) return false;
+    for (int khvi_j = 0; khvi_j < 3; ++khvi_j) {
+        for (int khvi_k = 0; khvi_k < 3; ++khvi_k) {
+            khvi_out[khvi_j][khvi_k] = static_cast<float>(khvi_c[khvi_j][khvi_k] / khvi_det);
+        }
+    }
+    return true;
 }
 
 
@@ -32632,7 +32703,7 @@ static constexpr uint32_t KH_REG_READ_MIN = 200u;
 static constexpr uint32_t KH_REG_SLICE_LO = 176u;
 static constexpr uint32_t KH_REG_SLICE_N = 24u;
 struct LiveShadowState {
-    std::atomic<bool> wanted{ false };   // Game thread: any lit object exists.
+    std::atomic<bool> wanted{ false };   // Game thread: a visible lit mesh or a shadow-active one (the census).
     // Atlas tracking (render thread).
     void*    atlas_identity = nullptr;
     ID3D11Texture2D*          atlas_tex = nullptr;
@@ -33790,17 +33861,18 @@ inline bool kh_band_view_native(const float* khfv_v, bool khfv_count) {
 // source within the 25 ms window is centimetres, cross-source is metres.
 // Gap-returning form (-1 = unjudgeable/admit).
 inline float kh_band_source_gap(const float* khss_vc, const float* khss_fv) {
-    float khss_a[3] = { 0.0f, 0.0f, 0.0f };
+    float khss_m[4][4] = {};   // KH_CAM_HONEST: the row layout, for the honest inverse.
     for (int khss_j = 0; khss_j < 3; ++khss_j) {
         const float* khss_v = &khss_vc[khss_j * 4];
         const float khss_n = sqrtf(khss_v[0] * khss_v[0] +
                                    khss_v[1] * khss_v[1] +
                                    khss_v[2] * khss_v[2]);
         if (!(khss_n > 0.9f && khss_n < 1.1f)) return -1.0f;
-        khss_a[0] -= khss_v[3] * khss_v[0];
-        khss_a[1] -= khss_v[3] * khss_v[1];
-        khss_a[2] -= khss_v[3] * khss_v[2];
+        for (int khss_i = 0; khss_i < 4; ++khss_i) khss_m[khss_i][khss_j] = khss_v[khss_i];
     }
+    khss_m[3][3] = 1.0f;
+    float khss_a[3];
+    kh_cam_of(khss_m, khss_a);
     float khss_b[3];
     if (!kh_view_camera_exact(reinterpret_cast<const float(*)[4]>(khss_fv), khss_b)) return -1.0f;
     const float khss_dx = khss_a[0] - khss_b[0];
@@ -33814,17 +33886,18 @@ inline float kh_band_source_gap(const float* khss_vc, const float* khss_fv) {
 static uint64_t g_band_fall_flush = ~0ull;   // Flush of the last allowed fall-through.
 // The verdict form: true = within 50 m or unjudgeable (admit), false = refuse.
 inline bool kh_band_pair_coherent(const float* khpc_vc, const float* khpc_fv) {
-    float khpc_a[3] = { 0.0f, 0.0f, 0.0f };
+    float khpc_m[4][4] = {};   // KH_CAM_HONEST: the row layout, for the honest inverse.
     for (int khpc_j = 0; khpc_j < 3; ++khpc_j) {   // Decode the capture camera.
         const float* khpc_v = &khpc_vc[khpc_j * 4];
         const float khpc_n = sqrtf(khpc_v[0] * khpc_v[0] +
                                    khpc_v[1] * khpc_v[1] +
                                    khpc_v[2] * khpc_v[2]);
         if (!(khpc_n > 0.9f && khpc_n < 1.1f)) return true;
-        khpc_a[0] -= khpc_v[3] * khpc_v[0];
-        khpc_a[1] -= khpc_v[3] * khpc_v[1];
-        khpc_a[2] -= khpc_v[3] * khpc_v[2];
+        for (int khpc_i = 0; khpc_i < 4; ++khpc_i) khpc_m[khpc_i][khpc_j] = khpc_v[khpc_i];
     }
+    khpc_m[3][3] = 1.0f;
+    float khpc_a[3];
+    kh_cam_of(khpc_m, khpc_a);
     float khpc_b[3];
     if (!kh_view_camera_exact(reinterpret_cast<const float(*)[4]>(khpc_fv), khpc_b)) return true;
     const float khpc_dx = khpc_a[0] - khpc_b[0];
@@ -34134,6 +34207,9 @@ static constexpr uint64_t KH_DL_POOL_STALE_MS = 500;
 // KH_DL_WIN_SLOTS: wider than KH_DL_WIN_MAX because this table remembers
 // windows across harvests as the engine cycles buffer addresses.
 static constexpr uint32_t KH_DL_WIN_SLOTS = KH_DL_WIN_MAX * 4u;
+// KH_DL_PRES_CUR: the distinct origins one harvest's placed windows with a live capture camera remember (more are not
+// kept).
+static constexpr uint32_t KH_DL_CUR_N = 4;
 static constexpr uint64_t KH_DL_TTL_CAP_MS = 1500;   // Proven ceiling (sparse worst case).
 static constexpr uint64_t KH_DL_TTL_FLOOR_MS = 250;   // Safety floor (unproven cadence).
 // The tail a light with proven cadence gets after the engine stops emitting it
@@ -34223,6 +34299,9 @@ struct KhCbShadow {
     void*    id = nullptr;   // Weak identity (the resource pointer), compare only.
     uint32_t bytes = 0;      // Bytes held: the buffer's width, capped at the scratch size.
     uint32_t gen = 0;        // Write generation: the global counter at the last capture (never 0 once written).
+    // KH_DL_REC_ORDER: the capture's place in capture order (g_cbs_wseq at the write; 0 = never written). gen wraps at
+    // 32 bits and is the LRU clock; this orders two captured contents of any identities.
+    uint64_t wseq = 0;
     // The (generation, first constant, span) the sampler last processed this
     // buffer at - the O(1) 'same upload again' test.
     uint32_t pres_gen = 0;
@@ -34232,9 +34311,10 @@ struct KhCbShadow {
 };
 static KhCbShadow g_cbs[KH_CBS_N];
 static uint32_t   g_cbs_gen = 0;    // The global write counter (LRU clock and generation).
+static uint64_t   g_cbs_wseq = 0;   // KH_DL_REC_ORDER: the capture clock (one tick per kh_cbs_write; never wraps).
 
-inline bool kh_dl_cpu_wanted() {
-    return g_ls.wanted.load(std::memory_order_relaxed);
+inline bool kh_dl_cpu_wanted() {   // A lit mesh or a caster (g_ls.wanted), or a dynamicLightFog pass (KH_DLF_DEMAND).
+    return g_ls.wanted.load(std::memory_order_relaxed) || g_dlf_wanted.load(std::memory_order_relaxed);
 }
 // KH_DL_IDLE - the harvester's whole-buffer capture (kh_cbs_write: every
 // constant buffer the engine maps, copied whole out of write-combined memory,
@@ -34350,6 +34430,7 @@ inline const void* kh_cbs_write(void* khcw_id, const void* khcw_src, uint32_t& k
     khcw_slot->bytes = khcw_bytes;
     if (++g_cbs_gen == 0) ++g_cbs_gen;
     khcw_slot->gen = g_cbs_gen;
+    khcw_slot->wseq = ++g_cbs_wseq;   // KH_DL_REC_ORDER.
     return khcw_slot->data.data();
 }
 // KH_DL_WANT_STALE: the identity's shadow emptied in place - every reader's size test then misses, and the
@@ -34366,6 +34447,7 @@ inline void kh_cbs_clear() {
         g_cbs[khcc_i].id = nullptr;
         g_cbs[khcc_i].bytes = 0;
         g_cbs[khcc_i].gen = 0;
+        g_cbs[khcc_i].wseq = 0;   // KH_DL_REC_ORDER.
         g_cbs[khcc_i].pres_gen = 0;
         g_cbs[khcc_i].pres_first = 0;
         g_cbs[khcc_i].pres_seq = 0;
@@ -34398,6 +34480,7 @@ struct DlWindowMeta {
     uint32_t gen = 0;
     uint64_t chash = 0;
     uint64_t seq = 0;
+    uint64_t wseq = 0;   // KH_DL_REC_ORDER: the cb11 content's capture order (its shadow's wseq; 0 = GPU arena).
     // KH_DL_WIN_VIEW: the frame view (3 float4 columns) and true-world camera this
     // window was drawn under (kh_dl_meta_view). A trigger-to-trigger span holds the
     // previous frame's post-trigger draws and this frame's, which need not share a
@@ -34405,6 +34488,7 @@ struct DlWindowMeta {
     float    view[12] = {};
     float    cam[3] = {};
     uint8_t  view_ok = 0;
+    uint8_t  view_live = 0;   // KH_DL_PRES_CUR: the view is the clear's own fetch (kh_dl_view_live).
 };
 
 struct DlPoolLight {
@@ -34422,6 +34506,10 @@ struct DlPoolLight {
     // is seq == N. The depth-clear cycle is not usable as the key: the engine
     // clears the main depth many times a frame at night.
     uint64_t seq = 0;
+    uint64_t first_seq = 0;   // KH_DL_DIAG (CN-4): the harvest (g_dl.harvest_seq) whose merge created it.
+    // KH_DL_REC_ORDER: the capture order (KhCbShadow::wseq) of the content rec holds; 0 = unordered (a GPU-arena
+    // window's). A write never replaces a newer content with an older one.
+    uint64_t rec_wseq = 0;
 };
 
 struct DlRingEntry {
@@ -34476,11 +34564,28 @@ struct DynLightsState {
     float    main_gdiff[3] = { 1.0f, 1.0f, 1.0f };
     float    main_scale = 1.0f;
     uint8_t  main_ref_valid = 0;
+    // KH_DL_REF_MEDIAN: the brightest candidate's (main_gdiff rgb, main_scale) of the last three harvests that had
+    // one (a placed window, or KH_DL_REF_SEEN an upload re-sighted through its buffer's origin), oldest first, and
+    // how many are held (0 - 3; the session reset empties it).
+    float    ref_hist[3][4] = {};
+    uint32_t ref_hist_n = 0;
     // Per-window resolved origin.
     float    win_ox[KH_DL_WIN_SLOTS] = {};
     float    win_oz[KH_DL_WIN_SLOTS] = {};
     uint8_t  win_oset[KH_DL_WIN_SLOTS] = {};
     uint64_t win_oseq[KH_DL_WIN_SLOTS] = {};   // KH_DL_PRES_FRESH: the harvest that set it (0 = none).
+    // KH_DL_PRES_CUR: the origins (x, z) harvest cur_oseq placed windows with a live capture camera (view_live) at
+    // (0 = none yet), cur_n of them, each with the capture camera (x, z) of the last such window placed there; and
+    // whether it also placed one without a live camera, or at a (KH_DL_CUR_N + 1)th origin (cur_amb).
+    float    cur_o[KH_DL_CUR_N][4] = {};
+    uint32_t cur_n = 0;
+    uint64_t cur_oseq = 0;
+    uint8_t  cur_amb = 0;   // Harvest cur_oseq placed a window that could contradict unseen: it vouches for none.
+    // KH_DL_REF_SEEN: span ref_seen_seq's brightest ctl (gdiff rgb, scale) among the uploads presence re-sighted a
+    // record of through their buffer's origin, and its brightness (the sum of the three; -1 = none).
+    float    ref_seen[4] = {};
+    float    ref_seen_lum = -1.0f;
+    uint64_t ref_seen_seq = 0;
     // The pool vote runs as a confirmation, not only a fallback: the engine
     // culls its light list to the camera, so a correct origin places at least
     // one of a window's lights near the camera and a wrong one displaces them
@@ -34503,7 +34608,8 @@ struct DynLightsState {
 };
 static DynLightsState g_dl;
 // KH_DL_FALLBACK_HARVEST: the cycle (g_topo_cycles) whose span the pool last
-// merged. The injection harvests an accepted cycle; the render-thread flush
+// merged. The injection harvests an accepted cycle (KH_DL_TRIGGER_HARVEST: its
+// trigger, when it has nothing to draw); the render-thread flush
 // harvests any cycle the injection did not, so the pool never goes stale while
 // meshes still draw (fill_dynlights_cb drops every light of a pool older than
 // KH_DL_POOL_STALE_MS). Render thread.
@@ -34528,6 +34634,12 @@ inline bool dl_finite(float v) { return v == v && v < 1.0e30f && v > -1.0e30f; }
 // pass reads the origin the last harvest resolved for a buffer.
 inline bool kh_dl_win_origin_of(const void* khp_buf, float& khp_ox, float& khp_oz);
 inline uint64_t kh_dl_win_origin_seq(const void* khp_buf);   // KH_DL_PRES_FRESH.
+inline bool kh_dl_pres_fresh(const void* khc_buf, float khc_ox, float khc_oz, uint64_t khc_seq);   // KH_DL_PRES_CUR.
+// KH_DL_PRES_CUR: is the cycle's view the clear's own bridge fetch - not held (cycle_pv_stale) and not a retry's
+// mid-frame sample, which runs a step ahead of the frame (KH_SUN_CAM_LATCH)?
+inline bool kh_dl_view_live() {
+    return g_ro.cycle_pv_valid && !g_ro.cycle_pv_stale && g_boundary_pv_valid;
+}
 
 // The unplaceable-record table, keyed on the raw list-frame position at metre
 // resolution (the same light lands on the same key while the origin stands; a
@@ -34607,12 +34719,15 @@ inline bool kh_dl_ctl_main(const float* khm_c) {
 // position plus every non-position lane, never a light an earlier record of
 // this list claimed. Returns the count of finite records that matched nothing
 // and are not recently-unplaceable - the lights to author. KH_DL_PRES_REC: a
-// main-pass upload's cube re-sight also rewrites the record, as the merge does.
+// main-pass upload's cube re-sight also rewrites the record, as the merge does
+// - KH_DL_REC_ORDER: unless the record holds a newer capture's content (khp_wseq
+// is this upload's capture order, the shadow's wseq).
 inline uint32_t dynlights_presence_upload(const void* khp_buf,
                                           const uint8_t* khp_ctl, const uint8_t* khp_l,
                                           uint32_t khp_bytes11, uint64_t khp_seq,
                                           uint64_t khp_now,
-                                          uint32_t& khp_unpl, uint32_t& khp_hit_n) {   // KH_DL_UNPL: recently unplaceable / matched.
+                                          uint32_t& khp_unpl, uint32_t& khp_hit_n,   // KH_DL_UNPL: unplaced / matched.
+                                          uint64_t khp_wseq) {   // KH_DL_REC_ORDER.
     int32_t khp_pc_i = 0, khp_sc_i = 0;
     memcpy(&khp_pc_i, khp_ctl + 0, 4);
     memcpy(&khp_sc_i, khp_ctl + 16, 4);
@@ -34630,13 +34745,17 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
     uint32_t khp_claim_n = 0;
     // KH_DL_PRES_REC: may this upload rewrite what it re-sights? Only with the
     // buffer's origin (the record's world position) and a main-pass ctl.
-    // KH_DL_PRES_FRESH: and only when the last harvest itself set that origin.
+    // KH_DL_PRES_FRESH: and only when the last harvest itself set that origin
+    // - or KH_DL_PRES_CUR placed another window at it, the camera on the
+    // same cells since (kh_dl_pres_fresh, and its premise).
     // A stale origin can cube-match a DIFFERENT light a grid step away (a row
     // of lamps) and overwrite its record; an older origin may be stale by any
-    // rebase since, so such an upload only keeps what it sights alive, as
-    // before. The last harvest's narrows that and does not close it: a rebase
-    // after its windows were drawn (the camera crossing a cell) leaves this
-    // span's later uploads a grid step off.
+    // rebase since, so such an upload (neither test met) only keeps what it
+    // sights alive, as before. The last harvest's narrows that and does not
+    // close it: a rebase after its windows were drawn (the camera crossing a
+    // cell) leaves this span's later uploads a grid step off - for its own
+    // windows' buffers, and through KH_DL_PRES_CUR for every buffer at that
+    // origin where its camera test is blind (kh_dl_pres_fresh).
     // KH_DL_PRES_STALE: such an upload mostly shows it. A record whose light
     // is in the pool finds that light a whole number of land-grid cells from
     // where the buffer's origin puts it (the engine's origins sit on whole
@@ -34656,8 +34775,9 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
     // number of cells away (within 3 cm): that list is stamp-only, as before.
     float khp_c[16];
     memcpy(khp_c, khp_ctl, sizeof(khp_c));
-    const bool khp_rw = khp_origin && kh_dl_win_origin_seq(khp_buf) + 1 == khp_seq &&
+    const bool khp_rw = khp_origin && kh_dl_pres_fresh(khp_buf, khp_ox, khp_oz, khp_seq) &&
                         kh_dl_ctl_main(khp_c);
+    bool khp_any_org = false;   // KH_DL_REF_SEEN: a record of this list re-sighted through the buffer's origin.
     bool     khp_stale = false;              // KH_DL_PRES_STALE: a record showed another origin.
     int      khp_rw_pick[KH_DL_MAX_LIGHTS];   // KH_DL_PRES_STALE: the rewrites owed - pool light, record.
     uint32_t khp_rw_rec[KH_DL_MAX_LIGHTS];
@@ -34752,6 +34872,7 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
         if (khp_pick >= 0) {
             DlPoolLight& khp_pl = g_dl.pool[khp_pick];
             if (khp_claim_n < KH_DL_MAX_LIGHTS) khp_claim[khp_claim_n++] = khp_pick;
+            if (khp_pick_org) khp_any_org = true;   // KH_DL_REF_SEEN.
             // A sighting, priced as the aux re-sight prices one.
             if (khp_pl.stamp != 0) {
                 const uint64_t khp_gap = khp_now >= khp_pl.stamp ? khp_now - khp_pl.stamp : 0;
@@ -34780,11 +34901,35 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
     // merge writes it - unless a record showed the origin stale (KH_DL_PRES_STALE): then stamped only.
     for (uint32_t k = 0; k < khp_rw_n && !khp_stale; ++k) {
         DlPoolLight& khp_pl = g_dl.pool[khp_rw_pick[k]];
+        // KH_DL_REC_ORDER: a buffer sampled again at a later draw without a new upload holds an older content than
+        // what a newer upload has written since: the light stays stamped, its record stands.
+        if (khp_pl.rec_wseq > khp_wseq) continue;
         const float* khp_r = reinterpret_cast<const float*>(khp_l + khp_rw_rec[k] * KH_DL_LIGHT_BYTES);
         memcpy(khp_pl.rec, khp_r, sizeof(khp_pl.rec));
         khp_pl.rec[0] = khp_ox + khp_r[0];   // +0 rewritten to absolute world.
         khp_pl.rec[2] = khp_oz + khp_r[2];
         khp_pl.spot = khp_rw_rec[k] >= static_cast<uint32_t>(khp_pc_i) ? 1 : 0;
+        khp_pl.rec_wseq = khp_wseq;   // KH_DL_REC_ORDER.
+    }
+
+    // KH_DL_REF_SEEN: a list that re-sighted a record through its buffer's origin (of any age, whatever its rewrite
+    // took) offers its ctl to the reference beside the placed windows (dynlights_merge_windows): those are what the
+    // routine quota and the unknown lights happened to author, and a variant whose lists carried no new light went
+    // unseen. The ctl is the pass's, not the origin's: a cube hit only says the list carries lights.
+    if (khp_any_org && dl_finite(khp_c[12]) && dl_finite(khp_c[13]) && dl_finite(khp_c[14]) &&
+        dl_finite(khp_c[8]) && khp_c[8] > 1.0e-6f && khp_c[8] < 1.0e6f) {
+        if (g_dl.ref_seen_seq != khp_seq) {   // The span's first.
+            g_dl.ref_seen_seq = khp_seq;
+            g_dl.ref_seen_lum = -1.0f;
+        }
+        const float khp_lum = khp_c[12] + khp_c[13] + khp_c[14];
+        if (dl_finite(khp_lum) && khp_lum > g_dl.ref_seen_lum) {
+            g_dl.ref_seen_lum = khp_lum;
+            g_dl.ref_seen[0] = khp_c[12];
+            g_dl.ref_seen[1] = khp_c[13];
+            g_dl.ref_seen[2] = khp_c[14];
+            g_dl.ref_seen[3] = khp_c[8];
+        }
     }
 
     khp_hit_n = khp_hits;
@@ -34792,10 +34937,12 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
     return khp_unknown;
 }
 
-// KH_DL_WIN_VIEW: stamp a window with the view it is drawn under - this cycle's
-// bridge view (g_ro.cycle_pv) at the capture. No view: the derivation and the
-// range backstop stand down for this window.
+// KH_DL_WIN_VIEW: stamp a window with the view it is drawn under - the cycle's
+// view (g_ro.cycle_pv: the clear's bridge fetch, a later retry's, or a held
+// one) at the capture. No view: the derivation and the range backstop stand
+// down for this window. KH_DL_PRES_CUR: view_live when it is the clear's own.
 inline void kh_dl_meta_view(DlWindowMeta& khd_m) {
+    khd_m.view_live = kh_dl_view_live() ? 1 : 0;   // KH_DL_PRES_CUR.
     if (!g_ro.cycle_pv_valid) {
         khd_m.view_ok = 0;
         return;
@@ -34806,7 +34953,7 @@ inline void kh_dl_meta_view(DlWindowMeta& khd_m) {
         khd_m.view[khd_k * 4 + 2] = g_ro.cycle_pv.view[2][khd_k];
         khd_m.view[khd_k * 4 + 3] = 0.0f;
     }
-    extract_camera_pos(g_ro.cycle_pv.view, khd_m.cam);
+    kh_cam_of(g_ro.cycle_pv.view, khd_m.cam);
     khd_m.view_ok = 1;
 }
 
@@ -34896,6 +35043,11 @@ inline void dynlights_sample_draw_cpu(ID3D11DeviceContext1* khd_c1, ID3D11Buffer
 
     for (uint32_t i = 0; i < g_dl.win_count[khd_w]; ++i) {   // Identical content: its twin did the work.
         if (g_dl.win_meta[khd_w][i].seq == khd_seq && g_dl.win_meta[khd_w][i].chash == khd_h) {
+            // KH_DL_REC_ORDER: the same content captured again later - its twin's content is as new as this capture
+            // (presence does not run for it; the window, at the harvest, writes it as this capture's).
+            if (g_dl.win_meta[khd_w][i].wseq != 0 && g_dl.win_meta[khd_w][i].wseq < khd_s11->wseq) {
+                g_dl.win_meta[khd_w][i].wseq = khd_s11->wseq;
+            }
             return;
         }
     }
@@ -34905,7 +35057,8 @@ inline void dynlights_sample_draw_cpu(ID3D11DeviceContext1* khd_c1, ID3D11Buffer
     uint32_t khd_unknown = dynlights_presence_upload(static_cast<const void*>(khd_b11),
                                                      khd_p10, khd_p11, khd_want11,
                                                      khd_seq,
-                                                     steady_now_ms(), khd_unpl, khd_hit_n);
+                                                     steady_now_ms(), khd_unpl, khd_hit_n,
+                                                     khd_s11->wseq);   // KH_DL_REC_ORDER.
     // A note may not starve a light of the window that could place it: an
     // upload carrying two known lights clears the vote's bar, so its noted
     // records author as unknown ones do.
@@ -34942,6 +35095,7 @@ inline void dynlights_sample_draw_cpu(ID3D11DeviceContext1* khd_c1, ID3D11Buffer
     khd_meta.first = khd_f11;
     khd_meta.bytes11 = khd_want11;
     khd_meta.gen = khd_s11->gen;
+    khd_meta.wseq = khd_s11->wseq;   // KH_DL_REC_ORDER.
     khd_meta.chash = khd_h;
     khd_meta.seq = khd_seq;
     kh_dl_meta_view(khd_meta);   // KH_DL_WIN_VIEW.
@@ -35320,6 +35474,56 @@ inline uint64_t kh_dl_win_origin_seq(const void* khp_buf) {
     return 0;
 }
 
+// KH_DL_PRES_CUR: have two cameras (x, z) crossed no line of the land grid's cells, nor a half-cell line, between
+// them? The engine's origins sit on whole cells (KH_DL_ORIGIN_GRID); KH_DL_PRES_CUR's premise is that they move only as
+// the render camera crosses one of those lines - the cell's edge or its middle, of the engine's step or a multiple of
+// it - so that a camera that crossed none kept its origin. Not measured in the field (CO's withdrawn probe sampled it
+// with its curStep / curBreak columns; no dump was taken). No cell read yet: no.
+inline bool kh_dl_same_cells(float khs_ax, float khs_az, float khs_bx, float khs_bz) {
+    const float khs_c = kh_dl_grid_base();
+    if (!(khs_c > 0.0f)) return false;
+    auto khs_one = [khs_c](float khs_a, float khs_b) {
+        return floorf(khs_a / khs_c) == floorf(khs_b / khs_c) &&
+               floorf(khs_a / khs_c + 0.5f) == floorf(khs_b / khs_c + 0.5f);
+    };
+    return khs_one(khs_ax, khs_bx) && khs_one(khs_az, khs_bz);
+}
+
+// KH_DL_PRES_CUR: may an upload of span khc_seq rewrite through the origin (khc_ox, khc_oz) its buffer resolved? When
+// the last harvest set that origin (KH_DL_PRES_FRESH), or placed another window at the same origin (within the vote's
+// residual) and the camera now is on the same cells as that window's capture camera (kh_dl_same_cells): the frame's
+// lists sit at one origin, which moves only as the camera crosses cells, so a buffer that got no window is placed by
+// its neighbours'. A window is authored only on the routine quota (the span's first uploads), an unknown light or a
+// buffer with no origin, and a harvest places few of those - so a moving light whose lists came later in the frame was
+// never rewritten: it froze until it left the 1 m match cube and was sighted as new. The camera test is what keeps a
+// harvest that placed windows on both sides of a crossing (a span holds two frames) from vouching for the old cell,
+// and it vouches only for the one origin whose camera is on the camera's cells now: two such (a window placed at a
+// wrong origin after the crossing) vouch for neither, nor does a harvest that placed a window it could not weigh (no
+// live camera, or past KH_DL_CUR_N origins: cur_amb). Only the clear's own view is a camera (kh_dl_view_live). What it
+// misses, for every buffer at the origin and one span: a rebase its premise does not see (kh_dl_same_cells - a rule
+// with hysteresis or a radius, an origin keyed on something other than the render camera, a view out of step with
+// the lists) and a window placed wrong at an origin no window of the harvest contradicts - KH_DL_PRES_FRESH's own
+// residual, which reached only that harvest's windows' buffers; KH_DL_PRES_STALE stands behind both.
+inline bool kh_dl_pres_fresh(const void* khc_buf, float khc_ox, float khc_oz, uint64_t khc_seq) {
+    if (kh_dl_win_origin_seq(khc_buf) + 1 == khc_seq) return true;
+    if (g_dl.cur_oseq == 0 || g_dl.cur_oseq + 1 != khc_seq || g_dl.cur_amb || !kh_dl_view_live()) return false;
+    int khc_hit = -1;
+    for (uint32_t khc_i = 0; khc_i < g_dl.cur_n && khc_hit < 0; ++khc_i) {
+        if (fabsf(g_dl.cur_o[khc_i][0] - khc_ox) <= KH_DL_ORIGIN_RES_MAX &&
+            fabsf(g_dl.cur_o[khc_i][1] - khc_oz) <= KH_DL_ORIGIN_RES_MAX) {
+            khc_hit = static_cast<int>(khc_i);
+        }
+    }
+    if (khc_hit < 0) return false;
+    float khc_cam[3];
+    kh_cam_of(g_ro.cycle_pv.view, khc_cam);
+    for (uint32_t khc_i = 0; khc_i < g_dl.cur_n; ++khc_i) {   // The hit's camera here, and no other origin's.
+        const bool khc_here = kh_dl_same_cells(khc_cam[0], khc_cam[2], g_dl.cur_o[khc_i][2], g_dl.cur_o[khc_i][3]);
+        if (khc_here != (static_cast<int>(khc_i) == khc_hit)) return false;
+    }
+    return true;
+}
+
 inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& khd_m,
                                     const float* khd_recs, uint32_t khd_rec_n,
                                     float& khd_ox, float& khd_oz, float& khd_res,
@@ -35551,7 +35755,7 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
                                       khd_h_wform, khd_vw) &&
                     dl_rot_identity(khd_vw)) {
                     float khd_cam[3];
-                    extract_camera_pos(khd_vm, khd_cam);
+                    kh_cam_of(khd_vm, khd_cam);
 
                     if (dl_finite(khd_cam[0]) && dl_finite(khd_cam[1]) && dl_finite(khd_cam[2]) && dl_origin_validate(khd_bcam[0] - khd_cam[0] - khd_vw[3][0],
                                            khd_bcam[1] - khd_cam[1] - khd_vw[3][1],
@@ -35607,7 +35811,7 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
 
                 if (dl_rot_matches(khd_v, khd_bcols)) {
                     float khd_cam[3];
-                    extract_camera_pos(khd_v, khd_cam);
+                    kh_cam_of(khd_v, khd_cam);
 
                     if (!dl_finite(khd_cam[0]) || !dl_finite(khd_cam[1]) || !dl_finite(khd_cam[2])) {
                         continue;
@@ -35917,6 +36121,94 @@ inline void dynlights_pool_sweep_ttl(uint64_t khd_now) {
     g_dl.pool_n = khd_keep;
 }
 
+// KH_DL_DIAG (CN-4): whether reference b (main_gdiff rgb, main_scale) lights a light brighter than a by more than
+// 10 %: a diffuse channel up by more than a tenth of a's (of 0.02 at least - the merge's own floor), or the distance
+// scale down by more than a tenth of b's (attenuation reads distance x scale). Dimmer is brighter(b, a).
+inline bool kh_dl_ref_brighter(const float* khrb_a, const float* khrb_b) {
+    for (int khrb_c = 0; khrb_c < 3; ++khrb_c) {
+        if (khrb_b[khrb_c] - khrb_a[khrb_c] > 0.1f * fmaxf(fabsf(khrb_a[khrb_c]), 0.02f)) return true;
+    }
+    return khrb_a[3] - khrb_b[3] > 0.1f * fabsf(khrb_b[3]);
+}
+// KH_DL_REF_MEDIAN: a harvest's brightest candidate (khrp_r: gdiff rgb, scale) into the history, KH_DL_DIAG's
+// moves counted against the pushes before it, and the reference published: each component's median of the three
+// held, or the newest while fewer are (the session's first harvests). No age limit: after a pause in the harvests the
+// first one back publishes the reference held before it once, then the new one - the lag of any lasting change; a
+// reset there would pass the next excursion unfiltered, on the harvest where lights come back into view.
+inline void kh_dl_ref_push(const float* khrp_r) {
+    if (g_dl.ref_hist_n == 3) {
+        memmove(g_dl.ref_hist[0], g_dl.ref_hist[1], sizeof(g_dl.ref_hist[0]) * 2u);
+        g_dl.ref_hist_n = 2;
+    }
+    memcpy(g_dl.ref_hist[g_dl.ref_hist_n], khrp_r, sizeof(g_dl.ref_hist[0]));
+    ++g_dl.ref_hist_n;
+    const uint32_t khrp_n = g_dl.ref_hist_n;
+    if (khrp_n >= 2) {
+        const float* const khrp_p = g_dl.ref_hist[khrp_n - 2];
+        if (kh_dl_ref_brighter(khrp_p, khrp_r)) kh_stat(g_stats.dl_ref_up);
+        if (kh_dl_ref_brighter(khrp_r, khrp_p)) kh_stat(g_stats.dl_ref_down);
+    }
+    float khrp_m[4];
+    memcpy(khrp_m, khrp_r, sizeof(khrp_m));
+    if (khrp_n == 3) {
+        const float* const khrp_o = g_dl.ref_hist[0];
+        const float* const khrp_c = g_dl.ref_hist[1];
+        // The middle one an excursion this one took back.
+        const bool khrp_back = !kh_dl_ref_brighter(khrp_o, khrp_r) && !kh_dl_ref_brighter(khrp_r, khrp_o);
+        if (khrp_back && kh_dl_ref_brighter(khrp_o, khrp_c)) kh_stat(g_stats.dl_ref_spike_up);
+        if (khrp_back && kh_dl_ref_brighter(khrp_c, khrp_o)) kh_stat(g_stats.dl_ref_spike_down);
+        for (int khrp_k = 0; khrp_k < 4; ++khrp_k) {
+            const float khrp_a = khrp_o[khrp_k], khrp_b = khrp_c[khrp_k];
+            khrp_m[khrp_k] = fmaxf(fminf(khrp_a, khrp_b), fminf(fmaxf(khrp_a, khrp_b), khrp_r[khrp_k]));
+        }
+    }
+    g_dl.main_gdiff[0] = khrp_m[0];
+    g_dl.main_gdiff[1] = khrp_m[1];
+    g_dl.main_gdiff[2] = khrp_m[2];
+    g_dl.main_scale = khrp_m[3];
+    g_dl.main_ref_valid = 1;
+}
+// KH_DL_DIAG (CN-4): whether pool entry khc_e repeats an older entry's light a nonzero whole number of land-grid
+// cells away. Every origin sits on whole cells (KH_DL_ORIGIN_GRID), so a window whose origin comes out wrong places
+// its lights exactly that far off, as new entries; a lamp of the same model grid-aligned with another looks the same.
+// The test: an entry the merge created earlier, at the same height and a whole number of cells off in x and z (both
+// within 1 cm; TWIN of presence's khp_elsewhere, KH_DL_PRES_STALE, tighter), with the same record in every lane but
+// the position - the attenuation, fade and cone shape exactly (their own relative 1e-4), the cone axis within 0.05 and
+// its cut within 1e-3, the colour within half (a fire flickers from one upload to the next). No land grid read: no.
+inline bool kh_dl_copy_of(uint32_t khc_e) {
+    const float khc_cell = kh_dl_grid_base();
+    if (!(khc_cell > 0.0f)) return false;
+    const DlPoolLight& khc_a = g_dl.pool[khc_e];
+    auto khc_near = [](float khc_x, float khc_y, float khc_tol) { return fabsf(khc_x - khc_y) <= khc_tol; };
+    for (uint32_t khc_j = 0; khc_j < g_dl.pool_n; ++khc_j) {
+        const DlPoolLight& khc_b = g_dl.pool[khc_j];
+        if (khc_j == khc_e || khc_b.first_seq >= khc_a.first_seq || khc_b.spot != khc_a.spot) continue;
+        if (!khc_near(khc_a.rec[1], khc_b.rec[1], 0.01f)) continue;
+        const float khc_dx = khc_a.rec[0] - khc_b.rec[0];
+        const float khc_dz = khc_a.rec[2] - khc_b.rec[2];
+        if (!khc_near(khc_dx, khc_cell * floorf(khc_dx / khc_cell + 0.5f), 0.01f) ||
+            !khc_near(khc_dz, khc_cell * floorf(khc_dz / khc_cell + 0.5f), 0.01f)) continue;
+        if (!(fabsf(khc_dx) > 0.5f * khc_cell || fabsf(khc_dz) > 0.5f * khc_cell)) continue;   // The same place.
+        bool khc_same = true;
+        static const int khc_exact[] = { 11, 15, 16, 17, 18, 19, 20, 21 };
+        for (int khc_k : khc_exact) {
+            const float khc_m = fmaxf(1.0f, fmaxf(fabsf(khc_a.rec[khc_k]), fabsf(khc_b.rec[khc_k])));
+            khc_same = khc_same && khc_near(khc_a.rec[khc_k], khc_b.rec[khc_k], 1.0e-4f * khc_m);
+        }
+        for (int khc_k = 4; khc_k < 7; ++khc_k) {
+            khc_same = khc_same && khc_near(khc_a.rec[khc_k], khc_b.rec[khc_k], 0.05f);
+        }
+        khc_same = khc_same && khc_near(khc_a.rec[7], khc_b.rec[7], 1.0e-3f);
+        static const int khc_col[] = { 8, 9, 10, 12, 13, 14 };
+        for (int khc_k : khc_col) {
+            const float khc_m = fmaxf(fabsf(khc_a.rec[khc_k]), fabsf(khc_b.rec[khc_k]));
+            khc_same = khc_same && khc_near(khc_a.rec[khc_k], khc_b.rec[khc_k], 0.5f * khc_m + 1.0e-3f);
+        }
+        if (khc_same) return true;
+    }
+    return false;
+}
+
 // Origin recovery + persistent union merge for one harvested arena side.
 inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side, bool khd_bridge) {
     const uint64_t khd_now = steady_now_ms();
@@ -36049,8 +36341,9 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side, bool 
         }
 
         // Main-pass reference candidates: brightest ctl this harvest, among the
-        // windows the harvest placed. A window whose camera could not be placed
-        // is not the main pass.
+        // windows the harvest placed (KH_DL_REF_SEEN adds the span's uploads
+        // re-sighted through their buffer's origin, after the loop). A window
+        // whose camera could not be placed is not the main pass.
         {
             if (dl_finite(khd_lum) && khd_lum > khd_best_lum) {
                 khd_best_lum = khd_lum;
@@ -36071,17 +36364,43 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side, bool 
             g_dl.win_oz[khd_ws] = khd_o_z;
             g_dl.win_oset[khd_ws] = 1;
             g_dl.win_oseq[khd_ws] = g_dl.harvest_seq;   // KH_DL_PRES_FRESH.
+            if (g_dl.cur_oseq != g_dl.harvest_seq) {   // KH_DL_PRES_CUR: this harvest's first placement.
+                g_dl.cur_oseq = g_dl.harvest_seq;
+                g_dl.cur_n = 0;
+                g_dl.cur_amb = 0;
+            }
+            if (!khd_m.view_live) g_dl.cur_amb = 1;   // A window no camera weighs: the harvest vouches for none.
+            if (khd_m.view_live) {   // Its capture camera vouches for the origin.
+                uint32_t khd_c = 0;
+                while (khd_c < g_dl.cur_n && !(fabsf(g_dl.cur_o[khd_c][0] - khd_o_x) <= KH_DL_ORIGIN_RES_MAX &&
+                                               fabsf(g_dl.cur_o[khd_c][1] - khd_o_z) <= KH_DL_ORIGIN_RES_MAX)) {
+                    ++khd_c;
+                }
+                if (khd_c == g_dl.cur_n && g_dl.cur_n < KH_DL_CUR_N) {
+                    ++g_dl.cur_n;
+                } else if (khd_c == g_dl.cur_n) {
+                    g_dl.cur_amb = 1;   // An origin past the cap: unweighed.
+                }
+                if (khd_c < g_dl.cur_n) {   // New, or the same origin's later capture (window order).
+                    g_dl.cur_o[khd_c][0] = khd_o_x;
+                    g_dl.cur_o[khd_c][1] = khd_o_z;
+                    g_dl.cur_o[khd_c][2] = khd_m.cam[0];
+                    g_dl.cur_o[khd_c][3] = khd_m.cam[2];
+                }
+            }
         }
 
         // The trigger-window mirror is main-pass by construction (the injection
         // triggers inside the main pass); a window whose globals diverge from
-        // that reference is aux: it keeps a pool light it sights alive (stamp,
-        // sightings) without rewriting it - a light it sights first is still
-        // written, verbatim, as any first sight is. TWIN: kh_dl_ctl_main (the
-        // presence pass's rewrite test, KH_DL_PRES_REC).
+        // the main-pass reference (KH_DL_REF_MEDIAN: the median of the harvests'
+        // brightest candidates, not that mirror) is aux: it keeps a pool
+        // light it sights alive (stamp, sightings) without rewriting it - a
+        // light it sights first is still written, verbatim, as any first sight
+        // is. TWIN: kh_dl_ctl_main (the presence pass's rewrite test,
+        // KH_DL_PRES_REC).
         bool khd_main = true;
 
-        if (g_dl.main_ref_valid) {   // vs the max-luminance reference one harvest of lag;
+        if (g_dl.main_ref_valid) {   // vs the reference the last harvest left (KH_DL_REF_MEDIAN);
                                      // Brightness moves slowly.
             for (int khd_k = 0; khd_k < 3 && khd_main; ++khd_k) {
                 const float khd_mref = g_dl.main_gdiff[khd_k];
@@ -36139,6 +36458,7 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side, bool 
                 g_dl.pool[khd_hit] = DlPoolLight{};   // The slot may hold a compacted-out ghost's
                                                       // Stamps.
                 g_dl.pool[khd_hit].id = g_dl_pool_next_id++;
+                g_dl.pool[khd_hit].first_seq = g_dl.harvest_seq;   // KH_DL_DIAG (CN-4).
                 if (g_dl_pool_next_id == 0) g_dl_pool_next_id = 1;
             }
             if (khd_claim_n < KH_DL_MAX_LIGHTS) khd_claim[khd_claim_n++] = khd_hit;
@@ -36160,6 +36480,10 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side, bool 
             // records makes the pass alternation flap per light).
             DlPoolLight& khd_pl = g_dl.pool[khd_hit];
             const uint8_t khd_spot_new = i >= khd_pc ? 1 : 0;
+            // KH_DL_REC_ORDER: a window older than the content the record holds (one of the span's first uploads - the
+            // previous frame's lists, or a buffer sampled again unrewritten - under a record presence or a later
+            // window wrote) re-sights as any main window does - cadence, anchor, stamp - and leaves the newer record.
+            const bool khd_older = !khd_new && khd_m.wseq != 0 && khd_pl.rec_wseq > khd_m.wseq;
 
             if (khd_pl.stamp != 0) {
                 const uint64_t khd_gap = khd_now - khd_pl.stamp;
@@ -36169,11 +36493,14 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side, bool 
                 khd_pl.gap_max_ms = 0;
                 khd_pl.sightings = 1;
             }
-            memcpy(khd_pl.rec, khd_r, sizeof(khd_pl.rec));
-            khd_pl.rec[0] = khd_wx;   // +0 rewritten to absolute world.
-            khd_pl.rec[1] = khd_wy;
-            khd_pl.rec[2] = khd_wz;
-            khd_pl.spot = khd_spot_new;
+            if (!khd_older) {   // KH_DL_REC_ORDER.
+                memcpy(khd_pl.rec, khd_r, sizeof(khd_pl.rec));
+                khd_pl.rec[0] = khd_wx;   // +0 rewritten to absolute world.
+                khd_pl.rec[1] = khd_wy;
+                khd_pl.rec[2] = khd_wz;
+                khd_pl.spot = khd_spot_new;
+                khd_pl.rec_wseq = khd_m.wseq;
+            }
             if (khd_derived_ok) {
 
                 if (khd_dres >= 0.0f && khd_dres <= KH_DL_ANCHOR_RES) {
@@ -36186,13 +36513,25 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side, bool 
         }
     }
 
-    if (khd_best_lum > 0.0f) {   // Empty harvests keep the last reference.
-        // The brightest ctl of the harvest IS the main-pass reference.
-        g_dl.main_gdiff[0] = khd_best_g[0];
-        g_dl.main_gdiff[1] = khd_best_g[1];
-        g_dl.main_gdiff[2] = khd_best_g[2];
-        g_dl.main_scale = khd_best_s;
-        g_dl.main_ref_valid = 1;
+    // KH_DL_REF_MEDIAN - the main-pass reference: the diffuse multiplier and distance scale every dynamic light, the
+    // fog's and our meshes', is weighted and attenuated with (kh_dl_fill_ctl), what a main-pass list is told from an
+    // aux one by (khd_main above, kh_dl_ctl_main) and what the light maps' reach and score read. Its evidence is the
+    // brightest ctl among the windows a harvest places and (KH_DL_REF_SEEN) among the span's uploads re-sighted
+    // through their buffer's origin - the windows alone follow what the routine quota and the new lights authored: a
+    // variant whose lists carried no new light went unseen, and came back on the harvests where one did (gunfire),
+    // the reference flipping with it. Each component is the median of the last three harvests' (kh_dl_ref_push):
+    // once three are held, an excursion of one harvest never reaches it and a lasting change does a harvest later. A
+    // harvest with no lit candidate keeps the last reference.
+    if (g_dl.ref_seen_seq == g_dl.harvest_seq && g_dl.ref_seen_lum > khd_best_lum) {   // KH_DL_REF_SEEN.
+        khd_best_lum = g_dl.ref_seen_lum;
+        khd_best_g[0] = g_dl.ref_seen[0];
+        khd_best_g[1] = g_dl.ref_seen[1];
+        khd_best_g[2] = g_dl.ref_seen[2];
+        khd_best_s = g_dl.ref_seen[3];
+    }
+    if (khd_best_lum > 0.0f) {
+        const float khd_best_r[4] = { khd_best_g[0], khd_best_g[1], khd_best_g[2], khd_best_s };
+        kh_dl_ref_push(khd_best_r);
     }
 
     if (khd_pres) {
@@ -36219,6 +36558,7 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side, bool 
                 const DlPoolLight& khd_e = g_dl.pool[i];
 
                 if (khd_e.seq != khd_c && !(khd_bridge && khd_e.seq + 1u == khd_c)) {
+                    if (khd_e.seq == khd_e.first_seq) kh_stat(g_stats.dl_blinks);   // KH_DL_DIAG (CN-4).
                     continue;
                 }
 
@@ -36229,6 +36569,11 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side, bool 
             g_dl.pool_n = khd_keep;
         }
     }
+    if (kh_stats_on()) {   // KH_DL_DIAG (CN-4): this harvest's new entries that repeat an older one elsewhere.
+        for (uint32_t khd_i = 0; khd_i < g_dl.pool_n; ++khd_i) {
+            if (g_dl.pool[khd_i].first_seq == g_dl.harvest_seq && kh_dl_copy_of(khd_i)) kh_stat(g_stats.dl_copies);
+        }
+    }
     {   // KH_DL_IDLE: harvests in a row with nothing in the pool.
         const uint32_t khd_idle = g_dl_idle.load(std::memory_order_relaxed);
         g_dl_idle.store(g_dl.pool_n == 0 ? (khd_idle < 0xFFFFFFFFu ? khd_idle + 1u : khd_idle) : 0u, std::memory_order_relaxed);
@@ -36237,7 +36582,8 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side, bool 
     g_dl.pool_stamp = khd_now;
 }
 
-// Arena lifecycle at the injection: harvest the previous frame's captures
+// Arena lifecycle at the injection (or its trigger, KH_DL_TRIGGER_HARVEST; the
+// flush's fallback otherwise): harvest the previous frame's captures
 // (DO_NOT_WAIT; a stall retries next injection without flipping), then flip
 // sides.
 inline void dynlights_harvest_arena(ID3D11DeviceContext* ctx, bool khd_bridge) {
@@ -36375,12 +36721,13 @@ inline void dynlights_publish(const uint8_t* khd_p, int khd_s) {
 }
 
 // Runs inside an accepted injection on the render thread (never on
-// anomalous/rescue cycles). Harvest first, so a completed copy publishes before
+// anomalous/rescue cycles) - or at its trigger when it has nothing to draw
+// (KH_DL_TRIGGER_HARVEST). Harvest first, so a completed copy publishes before
 // this frame's cbd fills read the mirror; then issue this frame's copy into a
 // free staging slot.
 inline void dynlights_acquire(ID3D11DeviceContext* ctx, const float view[4][4]) {
     KH_PROF_SCOPE(KHP_DL_ACQUIRE);   // KH_PROF.
-    if (!g_ls.wanted.load(std::memory_order_relaxed)) return;
+    if (!kh_dl_cpu_wanted()) return;   // KH_DLF_DEMAND: a lit mesh or a caster, or a dynamicLightFog pass.
 
     // (0) harvest the previous frame's per-draw window captures, then flip.
     dynlights_harvest_arena(ctx, g_dl_harvest_flush_last);   // KH_DL_SPAN_BRIDGE.
@@ -36446,7 +36793,7 @@ inline void dynlights_acquire(ID3D11DeviceContext* ctx, const float view[4][4]) 
                 g_dl.pending_view[0][khd_k * 4 + 2] = view[2][khd_k];
                 g_dl.pending_view[0][khd_k * 4 + 3] = 0.0f;
             }
-            extract_camera_pos(view, g_dl.pending_cam[0]);
+            kh_cam_of(view, g_dl.pending_cam[0]);
             g_dl.pending_view_ok[0] = 1;
         } else {
             g_dl.pending_view_ok[0] = 0;
@@ -36528,7 +36875,7 @@ inline void dynlights_acquire(ID3D11DeviceContext* ctx, const float view[4][4]) 
             g_dl.pending_view[khd_w][khd_k * 4 + 3] = 0.0f;
         }
 
-        extract_camera_pos(view, g_dl.pending_cam[khd_w]);
+        kh_cam_of(view, g_dl.pending_cam[khd_w]);
         g_dl.pending_view_ok[khd_w] = 1;
     } else {
         g_dl.pending_view_ok[khd_w] = 0;
@@ -36612,7 +36959,7 @@ inline float kh_dls_score(const DlPoolLight& khs_l, float khs_dist, float khs_sc
 // camera at the origin would rank confidently wrong).
 inline bool kh_dls_camera(float khc_out[3]) {
     if (!g_ro.cycle_pv_valid) return false;
-    extract_camera_pos(g_ro.cycle_pv.view, khc_out);
+    kh_cam_of(g_ro.cycle_pv.view, khc_out);
     return khc_out[0] == khc_out[0] && khc_out[1] == khc_out[1] && khc_out[2] == khc_out[2];
 }
 
@@ -37165,7 +37512,9 @@ static uint64_t g_dls_keys[KH_DLS_MAX] = {};   // per-slot skip key (state, not 
 // ever refused. A draw reads its records at dl_first.x; the region stays valid
 // until the next append that DISCARDs, and every fill site draws its object
 // before it fills the next one - the invariant that makes a DISCARD safe.
-// Render thread, or the game thread under a park (the fill sites' rule).
+// Render thread, or the game thread under a park (the fill sites' rule) - or inside KH_FX_LATE's chain-only flush,
+// which reaches it through the dynamicLightFog block on the game thread under kh_dlf_select's premise (the engine
+// never drives its context from both threads at once).
 // Device objects: released by release_shadow_device_state (kh_dlr_release).
 static ID3D11Buffer*             g_dlr_buf = nullptr;
 static ID3D11ShaderResourceView* g_dlr_srv = nullptr;
@@ -37430,6 +37779,8 @@ inline void dynlights_reset_session() {
     g_dl.main_gdiff[0] = g_dl.main_gdiff[1] = g_dl.main_gdiff[2] = 1.0f;
     g_dl.main_scale = 1.0f;
     g_dl.main_ref_valid = 0;
+    memset(g_dl.ref_hist, 0, sizeof(g_dl.ref_hist));   // KH_DL_REF_MEDIAN.
+    g_dl.ref_hist_n = 0;
 
     memset(g_dl.anchor_pos, 0, sizeof(g_dl.anchor_pos));
     memset(g_dl.anchor_stamp, 0, sizeof(g_dl.anchor_stamp));
@@ -37439,6 +37790,11 @@ inline void dynlights_reset_session() {
     memset(g_dl.win_oz, 0, sizeof(g_dl.win_oz));
     memset(g_dl.win_oset, 0, sizeof(g_dl.win_oset));
     memset(g_dl.win_oseq, 0, sizeof(g_dl.win_oseq));   // KH_DL_PRES_FRESH.
+    g_dl.cur_n = 0;   // KH_DL_PRES_CUR.
+    g_dl.cur_oseq = 0;
+    g_dl.cur_amb = 0;
+    g_dl.ref_seen_lum = -1.0f;   // KH_DL_REF_SEEN.
+    g_dl.ref_seen_seq = 0;
 
     memset(g_dl.win_fail_lo, 0, sizeof(g_dl.win_fail_lo));
     memset(g_dl.win_fail_run, 0, sizeof(g_dl.win_fail_run));
@@ -37737,7 +38093,9 @@ struct KhUvsGpu {
     uint32_t      done_src_key = 0u;
     const KhMaterialSet* done_set = nullptr;
     float         done_lanes[19] = {};   // pos, size, rot_m, color - everything of the object a stage can read.
-    bool          done_view_ok = false;  // The pass camera the last evaluation filled (g_ro.cycle_pv; a stale cycle adopts one late).
+    // The cycle latch (g_ro.cycle_pv) the last evaluation ran under - the once-a-cycle gate's key; its camera lanes
+    // took an adopted copy of it (KH_FX_FRAME_ADOPT). A stale cycle adopts one late.
+    bool          done_view_ok = false;
     float         done_view[4][4] = {};
 };
 static std::unordered_map<uint32_t, KhUvsGpu> g_uvs;   // By scene slot.
@@ -37897,9 +38255,16 @@ inline void kh_uvs_step(ID3D11DeviceContext* khus_ctx) {
         {   // b1: the camera lanes; everything else zero (lighting1.w = 0 says so to a reader).
             ConstantData khus_cbf = {};
             if (g_ro.cycle_pv_valid) {
+                // KH_FX_FRAME_ADOPT: the colour passes fill these lanes from their adopted view (the injection, the
+                // flush, the UI lane), so the stage takes the same rotation. The once-a-cycle gate keeps the latch's
+                // own rows as its key (done_view), so no step runs it again for adoption alone: when the cycle's
+                // first step comes before this frame's view is published, adoption declines and the stage keeps the
+                // latch's rotation for the cycle, as every step did before.
+                RVExtBridge::ProjectionViewTransform khus_pv = g_ro.cycle_pv;
+                kh_adopt_frame_view(khus_pv);
                 float khus_cam[3];
-                extract_camera_pos(g_ro.cycle_pv.view, khus_cam);
-                kh_fill_user_cam_cb(khus_cbf, khus_cam, g_ro.cycle_pv.view);
+                kh_cam_of(khus_pv.view, khus_cam);
+                kh_fill_user_cam_cb(khus_cbf, khus_cam, khus_pv.view);
             }
             khus_ok = kh_upload_frame_cb(khus_ctx, g_res.uvs_frame_cb, khus_cbf);
         }
@@ -38912,13 +39277,9 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
                     fv[13] = bv[13];
                     fv[14] = bv[14];
                 } else {
-                    double cam[3];
-
-                    for (int j = 0; j < 3; ++j) {
-                        cam[j] = -(static_cast<double>(bv[12]) * bv[j * 4 + 0] +
-                                   static_cast<double>(bv[13]) * bv[j * 4 + 1] +
-                                   static_cast<double>(bv[14]) * bv[j * 4 + 2]);
-                    }
+                    float khpv_hc[3];
+                    kh_cam_of(g_ro.cycle_pv.view, khpv_hc);   // KH_CAM_HONEST: bv's camera, not its transpose.
+                    const double cam[3] = { khpv_hc[0], khpv_hc[1], khpv_hc[2] };
 
                     for (int c = 0; c < 3; ++c) {
                         fv[12 + c] = static_cast<float>(
@@ -41077,6 +41438,119 @@ inline bool kh_dls_fill_dl_world(ID3D11DeviceContext* khd_ctx, ConstantData& khd
     }
     return true;
 }
+// KH_DLF - dynamicLightFog's lights (effect.hlsl's KH_DLF note). A fresh pool (kh_dl_select's staleness rule)
+// is the chain loop's skip test: without one the pass would add nothing.
+inline bool kh_dlf_pool_live() {
+    return g_dl.pool_n != 0 && steady_now_ms() - g_dl.pool_stamp <= KH_DL_POOL_STALE_MS;
+}
+// Every pool light whose reach comes within the pass's maxDistance of the camera, nearest reach first, at most
+// maxLights, packed points first then spots as the shader's pointN split reads them. Each is the engine's cb11
+// record as kh_dl_pack copies it, with [0..2] made relative to the pass's camera (fxCam: the frame the shader
+// reconstructs in; the subtraction in double), [5].z = our light map's slot + 1 when the pass takes our meshes'
+// shadows (shadows >= 1) and the map is published this frame (kh_dls_published), else 0, and [5].w = the reach in
+// metres: the nearest of the hard fade (the shader's fade term is zero past it), the distance where the light's
+// brightness under its attenuation - and the pass's intensity and tint, which scale what it adds - falls to
+// KH_DLF_EPS, and the camera's distance plus maxDistance (the gather marches no farther from the camera). A record
+// with a lane that is not finite is left out (one would blank every light's fog where its reach spans). Returns the
+// count; khdl_pn = the points among them, khdl_scale = the distance scale their attenuation takes (kh_dl_select's).
+// Render thread or a park (g_dl's fill-site rule); KH_FX_LATE's chain-only flush may also run it on the game thread,
+// inside a resolve the engine issues there - under that route's premise that the engine never drives its context
+// from both threads at once, which holds g_dl's writers (the harvests, inside the render thread's context calls and
+// flush) off it. Empty: no fresh pool, an unarmed camera (fxCam.w), or no light bright and near enough.
+static constexpr float KH_DLF_EPS = 2.0e-3f;   // Scene units: a light dimmer than this adds nothing visible.
+inline uint32_t kh_dlf_select(const ConstantData& khdl_cb, std::vector<float>& khdl_out, uint32_t& khdl_pn,
+                              float& khdl_scale) {
+    khdl_out.clear();
+    khdl_pn = 0;
+    khdl_scale = (g_dl.main_ref_valid && g_dl.main_scale > 1.0e-6f) ? g_dl.main_scale : 1.0f;
+    if (!kh_dlf_pool_live() || !(khdl_cb.fx_cam[3] >= 0.5f)) return 0;
+    // The pass's params, stored finite (set_effect_params); their ranges are the COMMAND REFERENCE's.
+    const float khdl_maxd = fminf(fmaxf(khdl_cb.fx1[1], 10.0f), 5000.0f);
+    const uint32_t khdl_max = static_cast<uint32_t>(fminf(fmaxf(khdl_cb.fx1[3], 1.0f), 64.0f));
+    const bool khdl_shadow = khdl_cb.fx1[2] >= 0.5f;
+    // The brightness the shader gives a light (kh_dl_fill_ctl's global tint and intensity).
+    float khdl_gd[3] = { 1.0f, 1.0f, 1.0f };
+    if (g_dl.main_ref_valid &&
+        (g_dl.main_gdiff[0] > 0.0f || g_dl.main_gdiff[1] > 0.0f || g_dl.main_gdiff[2] > 0.0f)) {
+        for (int khdl_c = 0; khdl_c < 3; ++khdl_c) khdl_gd[khdl_c] = g_dl.main_gdiff[khdl_c];
+    }
+    // The pass's own gain on a light: intensity (fx0.x) times the tint's strongest channel.
+    const float khdl_gi = kh_dl_intensity() * fmaxf(khdl_cb.fx0[0], 0.0f) *
+                          fmaxf(fmaxf(khdl_cb.color[0], khdl_cb.color[1]), fmaxf(khdl_cb.color[2], 0.0f));
+    struct KhDlfCand { float key; float reach; float rel[3]; uint32_t i; };
+    static thread_local std::vector<KhDlfCand> khdl_cand;   // Scratch.
+    khdl_cand.clear();
+    for (uint32_t khdl_i = 0; khdl_i < g_dl.pool_n; ++khdl_i) {
+        const float* const khdl_r = g_dl.pool[khdl_i].rec;
+        bool khdl_fin = true;
+        for (int khdl_a = 0; khdl_a < 22; ++khdl_a) khdl_fin = khdl_fin && std::isfinite(khdl_r[khdl_a]);
+        if (!khdl_fin) continue;
+        KhDlfCand khdl_e;
+        double khdl_dd = 0.0;
+        for (int khdl_a = 0; khdl_a < 3; ++khdl_a) {
+            khdl_e.rel[khdl_a] = static_cast<float>(static_cast<double>(khdl_r[khdl_a]) -
+                                                    static_cast<double>(khdl_cb.fx_cam[khdl_a]));
+            khdl_dd += static_cast<double>(khdl_e.rel[khdl_a]) * static_cast<double>(khdl_e.rel[khdl_a]);
+        }
+        const float khdl_dist = static_cast<float>(std::sqrt(khdl_dd));
+        if (!std::isfinite(khdl_dist)) continue;
+        // Its brightness at attenuation 1: DynLights' combine without the N.L, its brightest channel, times the
+        // pass's gain.
+        float khdl_peak = 0.0f;
+        for (int khdl_c = 0; khdl_c < 3; ++khdl_c) {
+            khdl_peak = fmaxf(khdl_peak, (khdl_gd[khdl_c] * khdl_r[8 + khdl_c] + khdl_r[12 + khdl_c]) * khdl_gi);
+        }
+        if (!(khdl_peak > KH_DLF_EPS)) continue;
+        float khdl_reach = khdl_dist + khdl_maxd;
+        if (khdl_r[21] > 1.0e-6f) {   // The hard fade (kh_dl_select's reach).
+            khdl_reach = fminf(khdl_reach, (khdl_r[20] + 1.0f / khdl_r[21]) / khdl_scale);
+        }
+        // The attenuation's reach: 1 / (c + l x + q x^2) falls to KH_DLF_EPS / peak at x = d * scale - start. A light
+        // whose constant term alone is past it never shows; negative terms (no engine light has them) leave the
+        // reach to the fade and maxDistance.
+        const float khdl_k = khdl_peak / KH_DLF_EPS;
+        const float khdl_c0 = khdl_r[17], khdl_l = khdl_r[18], khdl_q = khdl_r[19];
+        if (!(khdl_k > khdl_c0)) continue;
+        if (khdl_l >= 0.0f && khdl_q >= 0.0f) {
+            // The positive root of q x^2 + l x - (k - c) in the form that keeps a tiny q from cancelling it away.
+            const float khdl_den = khdl_l + std::sqrt(khdl_l * khdl_l + 4.0f * khdl_q * (khdl_k - khdl_c0));
+            if (khdl_den > 1.0e-12f) {   // Else unbounded.
+                const float khdl_x = 2.0f * (khdl_k - khdl_c0) / khdl_den;
+                if (std::isfinite(khdl_x)) {
+                    khdl_reach = fminf(khdl_reach, (fmaxf(khdl_r[16], 0.0f) + khdl_x) / khdl_scale);
+                }
+            }
+        }
+        if (!(khdl_reach > 0.0f) || !std::isfinite(khdl_reach)) continue;
+        if (khdl_dist - khdl_reach > khdl_maxd) continue;
+        khdl_e.key = khdl_dist - khdl_reach;
+        khdl_e.reach = khdl_reach;
+        khdl_e.i = khdl_i;
+        khdl_cand.push_back(khdl_e);
+    }
+    std::stable_sort(khdl_cand.begin(), khdl_cand.end(),
+                     [](const KhDlfCand& khdl_a, const KhDlfCand& khdl_b) { return khdl_a.key < khdl_b.key; });
+    if (khdl_cand.size() > khdl_max) khdl_cand.resize(khdl_max);
+    std::stable_partition(khdl_cand.begin(), khdl_cand.end(),
+                          [](const KhDlfCand& khdl_a) { return g_dl.pool[khdl_a.i].spot == 0; });
+    khdl_out.resize(khdl_cand.size() * 24u);
+    for (size_t khdl_j = 0; khdl_j < khdl_cand.size(); ++khdl_j) {
+        const KhDlfCand& khdl_e = khdl_cand[khdl_j];
+        const DlPoolLight& khdl_pl = g_dl.pool[khdl_e.i];
+        float* const khdl_o = &khdl_out[khdl_j * 24u];
+        memcpy(khdl_o, khdl_pl.rec, KH_DL_LIGHT_BYTES);
+        khdl_o[0] = khdl_e.rel[0];
+        khdl_o[1] = khdl_e.rel[1];
+        khdl_o[2] = khdl_e.rel[2];
+        const int khdl_s = khdl_shadow ? kh_dls_slot_of(khdl_pl) : -1;
+        khdl_o[22] = (khdl_s >= 0 && kh_dls_published(static_cast<uint32_t>(khdl_s)))
+                   ? static_cast<float>(khdl_s + 1) : 0.0f;
+        if (khdl_s >= 0 && khdl_o[22] == 0.0f) kh_stat(g_stats.dlf_unshadowed);   // KH_DL_DIAG (CN-4).
+        khdl_o[23] = khdl_e.reach;
+        if (khdl_pl.spot == 0) ++khdl_pn;
+    }
+    return static_cast<uint32_t>(khdl_cand.size());
+}
 inline void kh_dls_fill_cb(ConstantData& khf_cb) {
     // One fill for every consumer (both mesh passes, the mask cast, the world
     // receive). The rule is every other g_sun_range consumer's clamp; the
@@ -41745,17 +42219,17 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         const bool khsc_live = RVExtBridge::get_projection_view_transform(cpv);
 
         if (g_ro.cycle_pv_valid) {
-            extract_camera_pos(g_ro.cycle_pv.view, cam_e);
+            kh_cam_of(g_ro.cycle_pv.view, cam_e);
             cam_valid = true;
             if (khsc_live && !g_boundary_pv_valid) {
                 float khsc_lc[3];
-                extract_camera_pos(cpv.view, khsc_lc);
+                kh_cam_of(cpv.view, khsc_lc);
                 if (latch_cam_dist_sq(cam_e, khsc_lc) > KH_LATCH_JUMP_M * KH_LATCH_JUMP_M) {
                     cam_e[0] = khsc_lc[0]; cam_e[1] = khsc_lc[1]; cam_e[2] = khsc_lc[2];
                 }
             }
         } else if (khsc_live) {
-            extract_camera_pos(cpv.view, cam_e);
+            kh_cam_of(cpv.view, cam_e);
             cam_valid = true;
         } else if (g_ls.cam[0] != 0.0f || g_ls.cam[1] != 0.0f || g_ls.cam[2] != 0.0f) {
             cam_e[0] = g_ls.cam[0];
@@ -43998,7 +44472,8 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
 
     // Placed at the top of the per-draw fire so it cannot run at the frame
     // boundary (the partitioned-frame overcast lived there). Only removes the
-    // wait for a publish whose data the freeze discards anyway.
+    // wait for a publish: a freeze without one keeps the bridge's rotation
+    // (KH_FIRE_ADOPT declines on a frame view older than the cycle).
     if (!g_mask_cast_fired && !g_mask_cast_arm && g_ro.cycle_pv_valid && !g_ro.cycle_pv_stale && !g_ls.phase_on_atlas) {
         g_mask_cast_arm = true;
     }
@@ -44202,9 +44677,9 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         // with only a uniform screen-space lag.
                 memcpy(g_fire_view2, g_ls.frame_view, sizeof(g_fire_view2));
 
-        // Taken here, while g_fire_view2 still holds the engine's own render
-        // view and before the bridge adoption replaces it: the only point where
-        // both members of the pair exist at once.
+        // The freeze below replaces it with the cycle's camera (the bridge's, or a live read when the latch is
+        // old) under the engine's frame rotation (KH_FIRE_ADOPT); the seed stands where no cycle camera is usable
+        // or the era guard refuses it.
 
         if (g_ro.cycle_pv_stale) {
             RVExtBridge::ProjectionViewTransform khfe_pv = {};
@@ -44242,16 +44717,31 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
             float khfe_bc[3];
             float khfe_pc[3];
             if (khpl_live) {
-                extract_camera_pos(reinterpret_cast<const float(*)[4]>(khpl_view), khfe_bc);
+                kh_cam_of(reinterpret_cast<const float(*)[4]>(khpl_view), khfe_bc);
             } else {
-                extract_camera_pos(g_ro.cycle_pv.view, khfe_bc);
+                kh_cam_of(g_ro.cycle_pv.view, khfe_bc);
             }
             // frame_view[r*4+c] == cycle_pv.view[r][c] elementwise.
-            extract_camera_pos(reinterpret_cast<const float(*)[4]>(g_fire_view2), khfe_pc);
+            kh_cam_of(reinterpret_cast<const float(*)[4]>(g_fire_view2), khfe_pc);
             const float khfe_dx = khfe_pc[0] - khfe_bc[0];
             const float khfe_dy = khfe_pc[1] - khfe_bc[1];
             const float khfe_dz = khfe_pc[2] - khfe_bc[2];
             const float khfe_d = sqrtf(khfe_dx * khfe_dx + khfe_dy * khfe_dy + khfe_dz * khfe_dz);
+
+            // KH_FIRE_ADOPT (KH_FX_FRAME_ADOPT): the frozen view is the meshes' - this camera under the engine's
+            // frame rotation when that is fresh, as the injection, the flush and the DLS world pass's unfrozen
+            // branch take theirs. PSMaskCast and the DLS world pass's frozen branch reconstruct the engine's depth
+            // through it (castMat below), and that depth was drawn under the engine's rotation: the bridge's own
+            // trails it by up to a frame in a fast turn, and the meshes' shadows on the world trailed with it.
+            // Adoption keeps the camera (kh_adopt_frame_view rebuilds the translation from the honest one), so
+            // the era guard's distance (khfe_bc, above) is the same. A fire armed before this cycle's view publish
+            // (the head arm in mask_cast_engine needs none) finds the frame view older than the cycle's clear:
+            // adoption declines and the freeze keeps the bridge's rotation, as it always did. The injection's own
+            // adoption decides again at its own time, so in such a cycle the freeze may hold the bridge's rotation
+            // while the meshes take the frame's (the split every cycle had before).
+            RVExtBridge::ProjectionViewTransform khfe_apv = g_ro.cycle_pv;
+            if (khpl_live) memcpy(&khfe_apv.view[0][0], khpl_view, sizeof(khpl_view));
+            kh_adopt_frame_view(khfe_apv);
 
             // The shadow freeze. khfe_d is the distance between the incumbent
             // frozen camera and the live one. The era guard refuses the bridge
@@ -44262,9 +44752,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
                 g_fire_era_reject_run = 0;
                 for (int khfe_r = 0; khfe_r < 4; ++khfe_r) {
                     for (int khfe_c = 0; khfe_c < 4; ++khfe_c) {
-                        g_fire_view2[khfe_r * 4 + khfe_c] = khpl_live
-                            ? khpl_view[khfe_r * 4 + khfe_c]
-                            : g_ro.cycle_pv.view[khfe_r][khfe_c];
+                        g_fire_view2[khfe_r * 4 + khfe_c] = khfe_apv.view[khfe_r][khfe_c];
                     }
                 }
 
@@ -44274,9 +44762,7 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
                 if (g_fire_era_reject_run >= KH_FIRE_ERA_RECOVER_N) {
                     for (int khfe_r = 0; khfe_r < 4; ++khfe_r) {
                         for (int khfe_c = 0; khfe_c < 4; ++khfe_c) {
-                            g_fire_view2[khfe_r * 4 + khfe_c] = khpl_live
-                                ? khpl_view[khfe_r * 4 + khfe_c]
-                                : g_ro.cycle_pv.view[khfe_r][khfe_c];
+                            g_fire_view2[khfe_r * 4 + khfe_c] = khfe_apv.view[khfe_r][khfe_c];
                         }
                     }
 
@@ -44293,8 +44779,8 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
             g_fire_refreeze_pending = false;
             float khrv_a[3];
             float khrv_b[3];
-            extract_camera_pos(reinterpret_cast<const float(*)[4]>(g_fire_refreeze_view), khrv_a);
-            extract_camera_pos(reinterpret_cast<const float(*)[4]>(g_fire_view2), khrv_b);
+            kh_cam_of(reinterpret_cast<const float(*)[4]>(g_fire_refreeze_view), khrv_a);
+            kh_cam_of(reinterpret_cast<const float(*)[4]>(g_fire_view2), khrv_b);
             const float khrv_dx = khrv_a[0] - khrv_b[0];
             const float khrv_dy = khrv_a[1] - khrv_b[1];
             const float khrv_dz = khrv_a[2] - khrv_b[2];
@@ -46995,6 +47481,9 @@ inline void kh_volume_seam_inject(ID3D11DeviceContext* ctx, uint32_t khv_w, uint
     if (g_rp_seam_b) {   // KH_VOL_REPLAY: at the injection this frame's latch is the pass's camera; no tracker advances.
         if (!g_ro.cycle_pv_valid) {  return; }
         khv_pv = g_ro.cycle_pv;
+        // KH_FX_FRAME_ADOPT: the injection's own frame (it adopts this latch), so the footprint lies where the
+        // meshes that read it (t24 / t33) are drawn, and on the engine's picture.
+        kh_adopt_frame_view(khv_pv);
         if (g_ro.engine_proj_valid) {
             khv_pv.projection[2][2] = g_ro.engine_m22;
             khv_pv.projection[3][2] = g_ro.engine_m32;
@@ -48271,6 +48760,7 @@ inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
         const RenderObject& o = g_scene.objs[khpf_i];
         if (!o.visible || !o.fullscreen || !o.localized || o.ui_only || o.effect <= 0) continue;
         if (o.effect == static_cast<int>(EffectId::Ssgi)) continue;
+        if (o.effect == static_cast<int>(EffectId::DynLightFog)) continue;   // KH_DLF: the main view's lights.
         // KH_FX_USER: a user pass joins once its single-sample build is ready (asking queues it).
         if (o.effect == KH_EFFECT_CUSTOM &&
             (!khpf_dev || !kh_user_fx_ps(khpf_dev, kh_fx_shader_of(o), nullptr, 1u))) continue;
@@ -50421,10 +50911,11 @@ inline bool kh_vmir_wanted(const float khvw_cam[3], const float khvw_proj[4][4])
     return khvw_want || (g_vmir_want_cycle != ~0ull && g_topo_cycles >= g_vmir_want_cycle &&
                          g_topo_cycles - g_vmir_want_cycle <= KH_VMIR_HOLD);
 }
-inline int kh_rp_obj_ndc(const RenderObject& o, const float khro_cam[3], float khro_b[4], float& khro_d) {
+inline int kh_rp_obj_ndc(const RenderObject& o, const float (*khro_v)[4], const float khro_cam[3], float khro_b[4],
+                         float& khro_d) {
     khro_d = 0.0f;
     if (kh_in_front(o)) return 2;
-    const float (*V)[4] = g_ro.cycle_pv.view;
+    const float (*V)[4] = khro_v;   // KH_RP_ADOPT: the caller's view (kh_rp_view_of).
     const float (*Pm)[4] = g_ro.cycle_pv.projection;
     const bool khro_r = g_rp_rast_on;   // KH_REPLAY_RASTER.
     const float sx = khro_r ? g_rp_rast[0] : Pm[0][0] / Pm[2][3], sy = khro_r ? g_rp_rast[1] : Pm[1][1] / Pm[2][3];
@@ -50462,8 +50953,8 @@ inline bool kh_rp_mir_flagged(const RenderObject& o) {
 // convex and in front of the camera, so its screen bound is that of its corners inside the slab and of its edges'
 // crossings of the two planes. 1 = khmb_b holds [x0, y0, x1, y1]; 0 = none of the box lies in the band; -1 = no
 // usable projection (the caller takes the whole object's bound). The caller has checked the latch.
-inline int kh_rp_mir_band_ndc(const RenderObject& o, float khmb_b[4]) {
-    const float (*V)[4] = g_ro.cycle_pv.view;
+inline int kh_rp_mir_band_ndc(const RenderObject& o, const float (*khmb_view)[4], float khmb_b[4]) {
+    const float (*V)[4] = khmb_view;   // KH_RP_ADOPT: the caller's view (kh_rp_view_of).
     const float (*Pm)[4] = g_ro.cycle_pv.projection;
     if (!(Pm[2][2] > 1.0e-6f) || !(fabsf(Pm[2][3]) > 1.0e-6f)) return -1;
     const float khmb_n = -Pm[3][2] / Pm[2][2];
@@ -50557,17 +51048,28 @@ inline void kh_rp_rect_close(KhRpRect& khrc_r) {
     khrc_r.px = khrc_r.any ? kh_rp_px_of(khrc_r.x0, khrc_r.y0, khrc_r.x1, khrc_r.y1) : D3D11_RECT{ 0, 0, 0, 0 };
     if (kh_rp_px_empty(khrc_r.px)) khrc_r.any = false;
 }
+// KH_RP_ADOPT (KH_FX_FRAME_ADOPT): the view the rectangles bound our meshes through - the cycle latch under the
+// engine's frame rotation when fresh, the frame our meshes are drawn in (the injection and the flush adopt the same
+// latch) and replay B's footprint with them. Through the bridge's own rotation a fast turn put the meshes' leading
+// edge up to a frame of rotation outside the 16 px margin. The camera is the latch's (adoption keeps it).
+inline void kh_rp_view_of(float khrv_v[4][4]) {
+    RVExtBridge::ProjectionViewTransform khrv_pv = g_ro.cycle_pv;
+    kh_adopt_frame_view(khrv_pv);
+    memcpy(khrv_v, &khrv_pv.view[0][0], sizeof(float) * 16u);
+}
 // KH_REPLAY_SCISSOR: the rectangles the replay draws in - every visible mesh of ours (the volume count) and the ones
-// that can read the mirror (KH_MIR_REPLAY) - through the cycle latch, in the replay's raster (KH_REPLAY_RASTER). Both
-// are the whole target when the latch is not
+// that can read the mirror (KH_MIR_REPLAY) - through the cycle latch (KH_RP_ADOPT), in the replay's raster
+// (KH_REPLAY_RASTER). Both are the whole target when the latch is not
 // usable or an inFront mesh is visible.
 inline void kh_rp_scissor_rects(KhRpRect& khsr_all, KhRpRect& khsr_mir) {
     khsr_all = KhRpRect();
     khsr_mir = KhRpRect();
     if (!g_ro.cycle_pv_valid || g_rp_w == 0 || g_rp_h == 0) return;
     if (!(fabsf(g_ro.cycle_pv.projection[2][3]) > 1.0e-6f)) return;
+    float khsr_v[4][4];
+    kh_rp_view_of(khsr_v);
     float cam[3];
-    kh_cam_of(g_ro.cycle_pv.view, cam);
+    kh_cam_of(khsr_v, cam);
     KhRpRect a, m;
     a.full = m.full = false;
     for (uint32_t i = 0; i < g_scene.objs.size(); ++i) {
@@ -50575,13 +51077,13 @@ inline void kh_rp_scissor_rects(KhRpRect& khsr_all, KhRpRect& khsr_mir) {
         const RenderObject& o = g_scene.objs[i];
         if (!o.visible) continue;
         float b[4], d = 0.0f;
-        const int k = kh_rp_obj_ndc(o, cam, b, d);
+        const int k = kh_rp_obj_ndc(o, khsr_v, cam, b, d);
         if (k == 0) continue;
         if (k == 2) return;   // Both whole.
         kh_rp_rect_add(a, b);
         if (kh_rp_mir_reader(o, cam)) {   // KH_MIR_BAND_RECT: a band-only reader, its band's part alone.
             float mb[4];
-            const int mk = kh_rp_mir_flagged(o) ? -1 : kh_rp_mir_band_ndc(o, mb);
+            const int mk = kh_rp_mir_flagged(o) ? -1 : kh_rp_mir_band_ndc(o, khsr_v, mb);
             if (mk < 0) kh_rp_rect_add(m, b);
             else if (mk == 1) kh_rp_rect_add(m, mb);
         }
@@ -50604,8 +51106,10 @@ inline void kh_rp_covered(const std::vector<RenderObject>& khrc_list, bool& khrc
         if (!g_rp_sc_all.full) khrc_vol = false;
         if (!g_rp_sc_mir.full) khrc_mir = false;
     } else {
+        float khrc_v[4][4];
+        kh_rp_view_of(khrc_v);   // KH_RP_ADOPT: the rectangles' own view.
         float cam[3];
-        kh_cam_of(g_ro.cycle_pv.view, cam);
+        kh_cam_of(khrc_v, cam);
         auto inside = [](const D3D11_RECT& khin_r, const KhRpRect& khin_in) {
             if (khin_in.full || kh_rp_px_empty(khin_r)) return true;
             return khin_in.any && khin_r.left >= khin_in.px.left && khin_r.top >= khin_in.px.top &&
@@ -50615,13 +51119,13 @@ inline void kh_rp_covered(const std::vector<RenderObject>& khrc_list, bool& khrc
             if (!khrc_vol && !khrc_mir) break;
             if (!o.visible) continue;
             float b[4], d = 0.0f;
-            const int k = kh_rp_obj_ndc(o, cam, b, d);
+            const int k = kh_rp_obj_ndc(o, khrc_v, cam, b, d);
             if (k == 0) continue;
             const D3D11_RECT pr = k == 1 ? kh_rp_px_of(b[0], b[1], b[2], b[3]) : D3D11_RECT{ 0, 0, 1, 1 };
             if (khrc_vol && !g_rp_sc_all.full && (k == 2 || !inside(pr, g_rp_sc_all))) khrc_vol = false;
             if (khrc_mir && !g_rp_sc_mir.full && kh_rp_mir_reader(o, cam)) {   // KH_MIR_BAND_RECT: the same bound.
                 float mb[4];
-                const int mk = (k == 2 || kh_rp_mir_flagged(o)) ? -1 : kh_rp_mir_band_ndc(o, mb);
+                const int mk = (k == 2 || kh_rp_mir_flagged(o)) ? -1 : kh_rp_mir_band_ndc(o, khrc_v, mb);
                 const D3D11_RECT pm = mk < 0 ? pr : (mk == 1 ? kh_rp_px_of(mb[0], mb[1], mb[2], mb[3])
                                                               : D3D11_RECT{ 0, 0, 0, 0 });
                 if (k == 2 || !inside(pm, g_rp_sc_mir)) khrc_mir = false;
@@ -51799,7 +52303,27 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     // stamping here keeps the flush from flapping over.
     g_composite_last_inject_ms.store(steady_now_ms(), std::memory_order_relaxed);
     if (khr_elig_n == 0) {
-        if (!khc_any_caster) return;
+        if (!khc_any_caster) {
+            // KH_DL_TRIGGER_HARVEST: nothing to draw, but the dynamic-light pool is still harvested at this trigger,
+            // inside the main pass, as an injection harvests it (dynlights_acquire, below) - not at the scene flush
+            // (KH_DL_FALLBACK_HARVEST), whose span starts after the frame's resolve: its routine windows (the span's
+            // first uploads) were other passes' lists than the main pass's after the trigger, and a light the latter
+            // alone carried was re-sighted and not rewritten - a flashlight that froze at some angles until one of
+            // our meshes was in the scene (the CO-2 dumps: the main pass's variant was all but never placed). An
+            // anomalous cycle is the injection's (khr_anomalous below): re-armed for a later partition while the
+            // rescue window is shut, a rescue harvests nothing. Unlike an injection with a mesh near the camera
+            // (KH_PART_NEAR), a far partition's trigger is not refused - as with our meshes farther off. The view
+            // is the cycle's (dynlights_acquire keeps it for the trigger mirror only).
+            if (g_proj_locator_ever && g_ro.slot_near_live <= 0.0f) {
+                if (!kh_rescue_window_open()) {
+                    g_ro.injected = false;
+                    g_ro.inject_attempts = 0;
+                }
+                return;
+            }
+            if (g_ro.cycle_pv_valid) dynlights_acquire(ctx, g_ro.cycle_pv.view);
+            return;
+        }
     }
     ID3D11Device* dev = RVExtBridge::get_d3d_device();
     if (!dev) {  return; }
@@ -51974,7 +52498,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         kh_enc_far(pv.projection[2][2], pv.projection[3][2]) <= KH_ENC_FAR_MAX &&   // Celestial-class: never.
         khr_eff_near > 1.5f * khr_cam_near) {
         float khr_cam[3];
-        extract_camera_pos(pv.view, khr_cam);
+        kh_cam_of(pv.view, khr_cam);
         float khr_min_clear = 1e9f;
 
         for (uint32_t khr_slot : khr_elig) {   // KH_SCENE: every eligible mesh, pre-cull independent.
@@ -54042,7 +54566,7 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
         mask_note_draw(self);
         mask_cast_engine(self);
 
-        if (g_ls.wanted.load(std::memory_order_relaxed)) {
+        if (kh_dl_cpu_wanted()) {   // KH_DLF_DEMAND: a lit mesh or a caster, or a dynamicLightFog pass.
             // Every draw's cb11, not every 16th: the pool follows the engine at
             // ~50 ms instead of riding its TTL. The per-window dedupe and the
             // arena cap bound the copies.
@@ -54214,7 +54738,7 @@ inline bool kh_dlsw_mask_render(ID3D11DeviceContext* khm_ctx,
     // Rebase: the mask must adopt centerRel like every other consumer of that
     // geometry.
     float khm_cam[3] = { 0.0f, 0.0f, 0.0f };
-    extract_camera_pos(reinterpret_cast<const float(*)[4]>(khm_view), khm_cam);
+    kh_cam_of(reinterpret_cast<const float(*)[4]>(khm_view), khm_cam);
     const bool khm_reb = kh_rebase_vp(khm_frm, khm_cam);
 
     // StateBackup owes the restore: without it the world pass's own capture
@@ -54634,7 +55158,9 @@ inline void kh_dls_world_pass_body(ID3D11DeviceContext* khw_ctx) {
 
     {
         float khw_cam[3] = { 0.0f, 0.0f, 0.0f };
-        extract_camera_pos(khw_pv.view, khw_cam);
+        kh_cam_of(khw_pv.view, khw_cam);   // KH_CAM_HONEST (re-derived below from castMat, the same point).
+        float khw_inv[3][3];
+        const bool khw_inv_ok = !khw_frozen && kh_view_inv_rows(khw_pv.view, khw_inv);
 
         for (int khw_r = 0; khw_r < 3; ++khw_r) {
             khw_frm.cast_view[0][khw_r] = khw_frozen ? g_fire_view2[12 + khw_r]
@@ -54646,11 +55172,11 @@ inline void kh_dls_world_pass_body(ID3D11DeviceContext* khw_ctx) {
                 khw_frm.cast_mat[khw_r][1] = g_fire_cast_inv[khw_r * 3 + 1];
                 khw_frm.cast_mat[khw_r][2] = g_fire_cast_inv[khw_r * 3 + 2];
             } else {
-                // Inverse rotation of a row-vector orthonormal view is its
-                // transpose, which is what KhCastWorld's three dots expect.
-                khw_frm.cast_mat[khw_r][0] = khw_pv.view[khw_r][0];
-                khw_frm.cast_mat[khw_r][1] = khw_pv.view[khw_r][1];
-                khw_frm.cast_mat[khw_r][2] = khw_pv.view[khw_r][2];
+                // KH_CAM_HONEST: the view's cofactor inverse rotation, as the freeze takes its own; the transpose
+                // (the inverse of an exactly orthonormal rotation) only where that is refused.
+                khw_frm.cast_mat[khw_r][0] = khw_inv_ok ? khw_inv[khw_r][0] : khw_pv.view[khw_r][0];
+                khw_frm.cast_mat[khw_r][1] = khw_inv_ok ? khw_inv[khw_r][1] : khw_pv.view[khw_r][1];
+                khw_frm.cast_mat[khw_r][2] = khw_inv_ok ? khw_inv[khw_r][2] : khw_pv.view[khw_r][2];
             }
             khw_frm.cast_mat[khw_r][3] = 0.0f;   // KH_CAST_OCC lane hygiene.
         }
@@ -54672,13 +55198,11 @@ inline void kh_dls_world_pass_body(ID3D11DeviceContext* khw_ctx) {
         // The camera the normal's facing test uses must come from the same view
         // the reconstruction did. Derived by the reconstruction's own algebra:
         // with zl = 0, KhCastWorld reduces to (-translation) dotted through the
-        // inverse rotation.
-        if (khw_frozen) {
-            for (int khw_r = 0; khw_r < 3; ++khw_r) {
-                khw_cam[khw_r] = -(khw_frm.cast_view[0][0] * khw_frm.cast_mat[khw_r][0] +
-                                   khw_frm.cast_view[0][1] * khw_frm.cast_mat[khw_r][1] +
-                                   khw_frm.cast_view[0][2] * khw_frm.cast_mat[khw_r][2]);
-            }
+        // inverse rotation. KH_CAM_HONEST: in both branches, so the camera is castMat's whichever it holds.
+        for (int khw_r = 0; khw_r < 3; ++khw_r) {
+            khw_cam[khw_r] = -(khw_frm.cast_view[0][0] * khw_frm.cast_mat[khw_r][0] +
+                               khw_frm.cast_view[0][1] * khw_frm.cast_mat[khw_r][1] +
+                               khw_frm.cast_view[0][2] * khw_frm.cast_mat[khw_r][2]);
         }
         khw_frm.cast_view[2][0] = khw_cam[0];
         khw_frm.cast_view[2][1] = khw_cam[1];
@@ -55435,7 +55959,7 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
                 g_boundary_pv_valid = true;
                 // Adopt the bridge PV at the clear (see KH_LATCH_JUMP_M).
                 float khc_cam[3];
-                extract_camera_pos(pv.view, khc_cam);
+                kh_cam_of(pv.view, khc_cam);
                 g_cam_step_m = g_latch_cam_valid
                              ? sqrtf(latch_cam_dist_sq(khc_cam, g_latch_cam)) : 0.0f;
                 g_ro.cycle_pv = pv;
@@ -55575,7 +56099,7 @@ inline void ensure_reorder_hook() {
 // The per-frame work, run from flush_locked.
 // KH_RENDER_FLUSH round A: the fullscreen chain, lifted out of flush_locked
 // verbatim (the moved block: the ping-pong through chain_tex, the SSGI
-// gather / pyramid / resolve, the LUT and user-shader passes, the fusion, the
+// seed / gather / resolve, the LUT and user-shader passes, the fusion, the
 // final write-back into the saved OM). What the flush supplied from its
 // locals arrives as parameters: the depth SRV it had at t1 (null when the
 // depth is not ready), whether a scene capture is still owed (the flush's
@@ -55639,17 +56163,11 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
             ID3D11SamplerState* khsg_s2old = nullptr;   // KH_FX_SAMP_S2: the saved s2.
             if (khfp_effect == static_cast<int>(EffectId::Ssgi) && !khfp_ps) {
                 if (!g_res.chain_srv[2] || !g_res.chain_srv[4] ||
-                    !g_res.chain_rtv[4] || !g_res.khsg_sampler) return;   // Pyramid joins the drop-whole
-                                                                          // Gate.
+                    !g_res.chain_rtv[4] || !g_res.khsg_sampler) return;   // The seed joins the drop-whole
+                                                                          // gate.
                 ctx->PSGetSamplers(2, 1, &khsg_s2old);   // KH_FX_SAMP_S2: slot 2.
                 const float khsg_l0sv = khfp_cbd.local0[0];
                 const float khsg_l1sv = khfp_cbd.local0[1];
-                // [2]/[3] join the save - the pyramid level loop rides them
-                // (source dims for the downsample); a localized ssgi's mask
-                // centre z and shape live there and the resolve's tail
-                // reads them.
-                const float khsg_l2sv = khfp_cbd.local0[2];
-                const float khsg_l3sv = khfp_cbd.local0[3];
                 khfp_cbd.local0[1] = (float)g_res.scene_w / (float)(g_khsg_w > 0 ? g_khsg_w : 1);
                 ctx->PSSetSamplers(2, 1, &g_res.khsg_sampler);
                 // Both exits release; s1 itself is untouched at either
@@ -55681,37 +56199,7 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                 }
                 ctx->OMSetRenderTargets(1, &g_res.chain_rtv[4], nullptr);
                 ctx->PSSetShaderResources(0, 1, &src_srv);
-                ctx->Draw(3, 0);
-                // Each level draws through the disjoint per-mip views with
-                // the wide-tent kernel (effect 27); source dims ride
-                // local0.zw.
-                if (g_res.khsg_pyr_levels > 1) {
-                    khfp_cbd.fx_meta[0] = 27.0f;
-                    int khsg_lw = g_khsg_w > 0 ? g_khsg_w : 1;
-                    int khsg_lh = g_khsg_h > 0 ? g_khsg_h : 1;
-
-                    for (int khsg_m = 1; khsg_m < g_res.khsg_pyr_levels; ++khsg_m) {
-                        khfp_cbd.local0[2] = (float)khsg_lw;   // Source level dims.
-                        khfp_cbd.local0[3] = (float)khsg_lh;
-                        if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) break;
-                        khsg_lw = khsg_lw > 1 ? khsg_lw / 2 : 1;
-                        khsg_lh = khsg_lh > 1 ? khsg_lh / 2 : 1;
-                        D3D11_VIEWPORT khsg_vpm = {};
-                        khsg_vpm.Width    = (float)khsg_lw;
-                        khsg_vpm.Height   = (float)khsg_lh;
-                        khsg_vpm.MaxDepth = 1.0f;
-                        ctx->OMSetRenderTargets(1, &g_res.khsg_mip_rtv[khsg_m], nullptr);
-                        ctx->RSSetViewports(1, &khsg_vpm);
-                        ctx->PSSetShaderResources(3, 1, &g_res.khsg_mip_srv[khsg_m - 1]);
-                        ctx->Draw(3, 0);
-                    }
-
-                    ID3D11ShaderResourceView* khsg_pn = nullptr;
-                    ctx->PSSetShaderResources(3, 1, &khsg_pn);
-                    ctx->RSSetViewports(1, &khsg_vph);   // Back to the gather grid.
-                } else {
-                    ctx->GenerateMips(g_res.chain_srv[4]);
-                }
+                ctx->Draw(3, 0);   // The radiance seed (effect 26), the gather's one level (KH_SSGI_SEED).
                 ctx->OMSetRenderTargets(1, &g_res.chain_rtv[2], nullptr);
                 khfp_cbd.fx_meta[0] = 22.0f;
                 if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
@@ -55721,7 +56209,7 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                     return;
                 }
                 ctx->PSSetShaderResources(3, 1, &g_res.chain_srv[4]);
-                ctx->Draw(3, 0);   // The gather (t0 = source for albedo, t3 = pyramid taps).
+                ctx->Draw(3, 0);   // The gather (t0 = source for albedo, t3 = the seed its taps read).
                 khsg_fin = g_res.chain_srv[2];   // Raw gather until smoothing lands.
                 // Missing buffer or a failed upload skips the draw whole -
                 // the resolve reads the raw gather instead (one noisier
@@ -55760,8 +56248,6 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                 }
                 khfp_cbd.local0[0] = khsg_l0sv;
                 khfp_cbd.local0[1] = khsg_l1sv;
-                khfp_cbd.local0[2] = khsg_l2sv;
-                khfp_cbd.local0[3] = khsg_l3sv;
                 if (khsg_vpn) {
                     ctx->RSSetViewports(1, &khsg_vps);
                 } else {
@@ -55778,6 +56264,83 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                                     / (float)(g_khsg_w > 0 ? g_khsg_w : 1));
                 khfp_cbd.fx_meta[0] = 24.0f;
                 khsg_pair = true;
+            }
+            // KH_DLF: dynamicLightFog - its lights into the ring (t40, kh_dlf_select), our meshes' light maps at
+            // t36 (shadows >= 1; their lanes are the frame's, kh_fx_frame_template's), the gather (32) onto the SSGI
+            // grid's [2], two filter iterations (33: [2] -> [3] at step 1, [3] -> [2] at step 2; a failed upload
+            // keeps the last good buffer, the SSGI's rule), then the pass itself (31) composites the final buffer
+            // from t3, bound below once the OM has moved off it.
+            // dl_ctl.x arms the composite; unarmed (no light selected, the ring, the grid or the gather's upload
+            // failed, an unarmed camera) it passes the picture through. local0 carries the grid to the side draws
+            // (x = the filter's step, y = the grid factor, zw = the grid's size) and is put back before the
+            // composite, whose localization mask reads it; so is the viewport.
+            ID3D11ShaderResourceView* khdlf_fin = nullptr;
+            if (khfp_effect == static_cast<int>(EffectId::DynLightFog) && !khfp_ps) {
+                KH_GPU_SCOPE(ctx, KHG_DLF);   // KH_PROF.
+                khfp_cbd.dl_ctl[0] = 0.0f;
+                static thread_local std::vector<float> khdlf_rec;   // Scratch.
+                uint32_t khdlf_pn = 0, khdlf_first = 0;
+                float khdlf_scale = 1.0f;
+                const uint32_t khdlf_n = (g_res.chain_rtv[2] && g_res.chain_srv[2] && g_khsg_w > 0 && g_khsg_h > 0)
+                                       ? kh_dlf_select(khfp_cbd, khdlf_rec, khdlf_pn, khdlf_scale) : 0u;
+                const bool khdlf_up = khdlf_n > 0 && kh_dlr_append(ctx, khdlf_rec.data(), khdlf_n * 6u, khdlf_first);
+                if (khdlf_n > 0 && !khdlf_up) kh_stat(g_stats.dl_ring_fails);   // KH_DL_DIAG.
+                if (khdlf_up) {
+                    memcpy(&khfp_cbd.dl_first[0], &khdlf_first, sizeof(khdlf_first));
+                    khfp_cbd.dl_first[1] = 0.0f;
+                    khfp_cbd.dl_first[2] = 0.0f;
+                    khfp_cbd.dl_first[3] = 0.0f;
+                    kh_dl_fill_ctl(khfp_cbd, khdlf_n, khdlf_pn, khdlf_scale);   // dl_ctl.x = 3: armed.
+                    float khdlf_l0[4];
+                    memcpy(khdlf_l0, khfp_cbd.local0, sizeof(khdlf_l0));
+                    khfp_cbd.local0[0] = 1.0f;
+                    khfp_cbd.local0[1] = static_cast<float>(g_res.scene_w) / static_cast<float>(g_khsg_w);
+                    khfp_cbd.local0[2] = static_cast<float>(g_khsg_w);
+                    khfp_cbd.local0[3] = static_cast<float>(g_khsg_h);
+                    D3D11_VIEWPORT khdlf_vps; UINT khdlf_vpn = 1;
+                    ctx->RSGetViewports(&khdlf_vpn, &khdlf_vps);
+                    D3D11_VIEWPORT khdlf_vpg = {};
+                    khdlf_vpg.Width    = static_cast<float>(g_khsg_w);
+                    khdlf_vpg.Height   = static_cast<float>(g_khsg_h);
+                    khdlf_vpg.MaxDepth = 1.0f;
+                    ctx->RSSetViewports(1, &khdlf_vpg);
+                    ctx->PSSetShader(g_res.ps_effect, nullptr, 0);
+                    ID3D11ShaderResourceView* khdlf_null = nullptr;
+                    ctx->PSSetShaderResources(3, 1, &khdlf_null);   // Off t3 before [2] becomes a target.
+                    khfp_cbd.fx_meta[0] = static_cast<float>(KH_DLF_GATHER);
+                    if (kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
+                        ID3D11ShaderResourceView* khdlf_dls = (khfp_cbd.fx1[2] >= 0.5f) ? g_res.dls_srv : nullptr;
+                        ctx->OMSetRenderTargets(1, &g_res.chain_rtv[2], nullptr);
+                        ctx->PSSetShaderResources(0, 1, &src_srv);
+                        ctx->PSSetShaderResources(36, 1, &khdlf_dls);
+                        ctx->Draw(3, 0);
+                        ctx->PSSetShaderResources(36, 1, &khdlf_null);
+                        khdlf_fin = g_res.chain_srv[2];
+                        if (g_res.chain_rtv[3] && g_res.chain_srv[3]) {
+                            khfp_cbd.fx_meta[0] = static_cast<float>(KH_DLF_FILTER);
+                            for (int khdlf_it = 0; khdlf_it < 2; ++khdlf_it) {
+                                khfp_cbd.local0[0] = khdlf_it == 0 ? 1.0f : 2.0f;
+                                if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) break;
+                                const int khdlf_to = khdlf_it == 0 ? 3 : 2;
+                                ctx->OMSetRenderTargets(1, &g_res.chain_rtv[khdlf_to], nullptr);
+                                ctx->PSSetShaderResources(3, 1, &khdlf_fin);
+                                ctx->Draw(3, 0);
+                                ctx->PSSetShaderResources(3, 1, &khdlf_null);
+                                khdlf_fin = g_res.chain_srv[khdlf_to];
+                            }
+                        }
+                    }
+                    memcpy(khfp_cbd.local0, khdlf_l0, sizeof(khdlf_l0));
+                    if (khdlf_vpn) {
+                        ctx->RSSetViewports(1, &khdlf_vps);
+                    } else {
+                        khdlf_vpg.Width  = static_cast<float>(g_res.scene_w);
+                        khdlf_vpg.Height = static_cast<float>(g_res.scene_h);
+                        ctx->RSSetViewports(1, &khdlf_vpg);
+                    }
+                    khfp_cbd.fx_meta[0] = static_cast<float>(EffectId::DynLightFog);
+                    if (!khdlf_fin) khfp_cbd.dl_ctl[0] = 0.0f;
+                }
             }
             // KH_FX_SIDE: fog scatter's per-pixel fog (side id 28, the frame's size) or the sun flare's visibility
             // (29, 1 x 1), drawn before the pass's constants go up; they then arm matCtl.y, and t4 carries it.
@@ -55834,6 +56397,7 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
             if (khsg_pair) {
                 ctx->PSSetShaderResources(3, 1, &khsg_fin);
             }
+            if (khdlf_fin) ctx->PSSetShaderResources(3, 1, &khdlf_fin);   // KH_DLF: the fog, for the composite.
             KhGlowBind khgl_b;   // KH_GLOW_PYR: the pyramid at t3 and its sampler at s2, for this draw.
             if (khgl_on) khgl_b.bind(ctx, g_res.glow_pyr[0]);
             KhAnaBind khan_b;   // KH_ANA_PYR: its atlases at t3 / t6, for this draw.
@@ -55855,6 +56419,10 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                                                          // Back.
                 if (khsg_s2old) { khsg_s2old->Release(); khsg_s2old = nullptr; }
             }
+            if (khdlf_fin) {   // KH_DLF: off t3 before the next pass's draws.
+                ID3D11ShaderResourceView* khdlf_n3 = nullptr;
+                ctx->PSSetShaderResources(3, 1, &khdlf_n3);
+            }
 
             if (!khfp_final) {
                 src_srv = g_res.chain_srv[write_idx];
@@ -55868,6 +56436,14 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
             // packing for every blend mode, so a zero-opacity pass costs
             // nothing.
             if (f.second.color[3] <= 0.001f) continue;
+            // KH_DLF: no fresh light in the pool, or no intensity - the pass would add nothing, so it is skipped
+            // whole as a zero-opacity pass is. Here, ahead of the pending pass's flush: a skip after it would leave
+            // the chain's last pass unflushed as the final one, and its write-back into the scene lost. Only under a
+            // blend its unarmed composite leaves as it was (normal, lighten, darken): additive, multiply and screen
+            // blend the unchanged picture into itself, so there the pass runs and blends as it does armed.
+            if (f.second.effect == static_cast<int>(EffectId::DynLightFog) &&
+                (f.second.blend_mode == 0 || f.second.blend_mode == 4 || f.second.blend_mode == 5) &&
+                (!(f.second.fx[0] > 0.0f) || !kh_dlf_pool_live())) continue;
 
             // Custom effect: the pass draws with the user PS; absent or
             // failed compiles skip the pass (reported once).
@@ -56204,15 +56780,16 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
     kh_uvs_upload(ctx, dev);    // KH_USER_VS: last - its source is whatever those two left in the slot.
     }   // End of the scene flush's housekeeping.
     // KH_DL_FALLBACK_HARVEST: a cycle no accepted injection harvested (a rescue
-    // or anomalous cycle, a far-phase refusal, a scene with no opaque mesh to
-    // inject) still merges its span here, before this flush's late draws fill
+    // or anomalous cycle, a far-phase refusal, an injection that returned early,
+    // no trigger at all; a trigger with nothing of ours to draw harvests there,
+    // KH_DL_TRIGGER_HARVEST) still merges its span here, before this flush's late draws fill
     // their lights. The same harvest the injection runs - presence, TTL and
     // authoring unchanged - so a light lives as long as on an accepted cycle
     // (one harvest longer at most, where the next injection bridges this span:
     // KH_DL_SPAN_BRIDGE); without it the pool aged past KH_DL_POOL_STALE_MS and every mesh
     // lost every dynamic light until an injection landed again. Render thread
     // only: g_dl is render-thread state.
-    if (khfl_rt && !khfl_chain_only && g_ls.wanted.load(std::memory_order_relaxed) &&
+    if (khfl_rt && !khfl_chain_only && kh_dl_cpu_wanted() &&   // KH_DLF_DEMAND: a lit mesh / caster or the fog.
         g_dl_harvest_cycle != g_topo_cycles) {
         g_dl_harvest_cycle = g_topo_cycles;
         dynlights_harvest_arena(ctx, false);   // Resolve to resolve: no bridge.
@@ -56439,6 +57016,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
             // object (casterOnly too).
             if ((khf_live.visible && khf_live.lit && !khf_live.fullscreen &&
                  khf_live.effect != static_cast<int>(EffectId::Ssgi) &&   // KH_MESH_SSGI: draws nothing.
+                 khf_live.effect != static_cast<int>(EffectId::DynLightFog) &&   // KH_DLF: nor this.
                  (!kh_in_front(khf_live) || g_vm_slice_live.load(std::memory_order_relaxed))) ||   // KH_INFRONT.
                 kh_shadow_active(khf_live)) khf_any_lit = true;
             // KH_INFRONT: the view-model slice draws it (kh_infront_inject); it casts above. An effect mesh ignores
@@ -56455,8 +57033,10 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
                 if (khfl_chain_only && !o.fullscreen) continue;
                 if (!o.fullscreen && kh_fsaa_world_standdown()) { continue; }
                 // KH_MESH_SSGI: an effect mesh set to "ssgi" draws nothing. The gather is a scene-chain pass (its
-                // grid factor, radiance pyramid and resolve exist only there); the PIP and the UI lane skip it too.
+                // grid factor, radiance seed and resolve exist only there); the PIP and the UI lane skip it too.
                 if (!o.fullscreen && o.effect == static_cast<int>(EffectId::Ssgi)) continue;
+                // KH_DLF: an effect mesh set to dynamicLightFog likewise (its gather is the scene chain's).
+                if (!o.fullscreen && o.effect == static_cast<int>(EffectId::DynLightFog)) continue;
                 if (is_composite_eligible(o)) ++khf_comp_eligible;
                 if (!o.fullscreen) khf_any_mesh = true;
 
@@ -56686,6 +57266,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
     for (const auto& o : meshes) {
         if (o.localized || o.effect == static_cast<int>(EffectId::Pulse) ||
             o.effect == static_cast<int>(EffectId::Fogscatter) ||
+            o.effect == static_cast<int>(EffectId::DynLightFog) ||   // KH_DLF: its rays.
             o.effect == KH_EFFECT_CUSTOM) { need_inverse = true; break; }
     }
 
@@ -56693,6 +57274,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
         for (const auto& f : fullscreen) {
             if (f.second.localized || f.second.effect == static_cast<int>(EffectId::Pulse) ||
                 f.second.effect == static_cast<int>(EffectId::Fogscatter) ||
+                f.second.effect == static_cast<int>(EffectId::DynLightFog) ||   // KH_DLF: its rays.
                 f.second.effect == KH_EFFECT_CUSTOM) { need_inverse = true; break; }
         }
     }
@@ -56704,21 +57286,29 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
     // shimmers every localized mask's edge. The inverse is of the rotation-only
     // view; the camera rides in fxCam (an absolute inverse is kilometres
     // cancelling per pixel in fp32).
+    // KH_FX_FRAME_ADOPT: that camera as the meshes take it - under the engine's own frame rotation when it is fresh
+    // (kh_adopt_frame_view, on a copy), its position through the honest inverse (kh_cam_of). The transpose
+    // (extract_camera_pos) is the inverse only of an exactly orthonormal rotation: the translation carries the
+    // camera's map position, kilometres, so a rotation a little off it misplaces the camera by metres, by an amount
+    // that turns with the camera - every reconstructed point, the dynamic lights' fog's included, slid over the scene
+    // in the Zeus camera until a camera reset (user msg 12), as our meshes' shadows once did.
     float khf_dvp[4][4];
     float khf_fx_cam[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
     if (g_ro.cycle_pv_valid && !g_ro.cycle_pv_stale && fabsf(g_ro.cycle_pv.projection[2][2]) > 1.0e-6f) {
+        RVExtBridge::ProjectionViewTransform khf_dpv = g_ro.cycle_pv;
+        kh_adopt_frame_view(khf_dpv);   // The view only; the projection stays the cycle's.
         float khf_dproj[4][4];
-        memcpy(khf_dproj, g_ro.cycle_pv.projection, sizeof(khf_dproj));
+        memcpy(khf_dproj, khf_dpv.projection, sizeof(khf_dproj));
         if (g_ro.engine_proj_valid) {   // KH_FX_ENGINE_PAIR: the pair the passes linearise with.
             khf_dproj[2][2] = g_ro.engine_m22;
             khf_dproj[3][2] = g_ro.engine_m32;
         }
         float khf_dview[4][4];
-        memcpy(khf_dview, g_ro.cycle_pv.view, sizeof(khf_dview));
+        memcpy(khf_dview, khf_dpv.view, sizeof(khf_dview));
         khf_dview[3][0] = khf_dview[3][1] = khf_dview[3][2] = 0.0f;
         khf_dview[3][3] = 1.0f;
         mul_4x4(khf_dview, khf_dproj, khf_dvp);
-        extract_camera_pos(g_ro.cycle_pv.view, khf_fx_cam);
+        kh_cam_of(khf_dpv.view, khf_fx_cam);
         khf_fx_cam[3] = 1.0f;
     } else {
         memcpy(khf_dvp, view_proj, sizeof(khf_dvp));   // Absolute; fxCam stays disarmed.
@@ -56727,7 +57317,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
     // has_inverse is only consulted by objects that need it, so skipping the
     // inverse when nothing does is behaviour-identical.
     float cam[3];
-    extract_camera_pos(pv.view, cam);
+    kh_cam_of(pv.view, cam);   // KH_FX_FRAME_ADOPT: the honest inverse, as fxCam and the injection take it.
     // Taken here, before the rain tracker and every other consumer, so the pass
     // is internally coherent.
     const bool khf_engcam = kh_engcam_consume(pv.view, cam);
@@ -56835,6 +57425,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
                                                                  // Depth.
                o.effect == static_cast<int>(EffectId::Fogscatter) ||   // Live depth is the scatter's
                                                                        // Distance authority.
+               o.effect == static_cast<int>(EffectId::DynLightFog) ||   // KH_DLF: the march ends at the depth.
                o.effect == KH_EFFECT_CUSTOM;   // User shaders may sample depth.
     };
 
@@ -56876,10 +57467,12 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
         if (!has_inverse) {
             for (auto& o : meshes)
                 if (o.effect == static_cast<int>(EffectId::Pulse) ||
-                    o.effect == static_cast<int>(EffectId::Fogscatter)) o.effect = 0;
+                    o.effect == static_cast<int>(EffectId::Fogscatter) ||
+                    o.effect == static_cast<int>(EffectId::DynLightFog)) o.effect = 0;   // KH_DLF.
             for (auto& f : fullscreen)
                 if (f.second.effect == static_cast<int>(EffectId::Pulse) ||
-                    f.second.effect == static_cast<int>(EffectId::Fogscatter)) f.second.effect = 0;
+                    f.second.effect == static_cast<int>(EffectId::Fogscatter) ||
+                    f.second.effect == static_cast<int>(EffectId::DynLightFog)) f.second.effect = 0;   // KH_DLF.
         }
 
         // Without it, demote for the frame - a mesh becomes a solid, a
@@ -56889,10 +57482,12 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
         if (!depth_fx_ready) {
             for (auto& o : meshes)
                 if (o.effect == static_cast<int>(EffectId::Ssgi) ||
-                    o.effect == static_cast<int>(EffectId::Fogscatter)) o.effect = 0;
+                    o.effect == static_cast<int>(EffectId::Fogscatter) ||
+                    o.effect == static_cast<int>(EffectId::DynLightFog)) o.effect = 0;   // KH_DLF.
             for (auto& f : fullscreen)
                 if (f.second.effect == static_cast<int>(EffectId::Ssgi) ||
-                    f.second.effect == static_cast<int>(EffectId::Fogscatter)) f.second.effect = 0;
+                    f.second.effect == static_cast<int>(EffectId::Fogscatter) ||
+                    f.second.effect == static_cast<int>(EffectId::DynLightFog)) f.second.effect = 0;   // KH_DLF.
         }
 
         if (!effects_ready) {
@@ -58161,9 +58756,10 @@ inline void flush_frame() {
 
         // An empty list clears it for free.
         bool khum_wanted = false;
-        bool khum_lit = false;   // Any shadow-active mesh (shadow-live demand; casterOnly counts).
+        bool khum_lit = false;   // A visible lit mesh, or any shadow-active one (casterOnly counts): g_ls.wanted.
         bool khum_mesh = false;   // Any visible mesh at all (volume-copy demand,).
         bool khum_fogsc = false;   // KH_FOG_PROBE: a visible fog-scatter pass.
+        bool khum_dlf = false;   // KH_DLF_DEMAND: a visible scene-chain dynamicLightFog pass.
         bool khum_front = false;   // KH_INFRONT: any visible view-model mesh (the slice hook's demand).
         g_cloth_proxy_want.clear();   // KH_CLOTH_PROXY.
         const float khum_now_s = effect_time_seconds();   // KH_NO_PARK_EXPIRY: the expiry test's clock.
@@ -58187,7 +58783,8 @@ inline void flush_frame() {
             // object (casterOnly too).
             // KH_MESH_SSGI: an "ssgi" effect mesh draws nothing (the flush skips it), so it demands nothing here.
             const bool khum_nodraw = !khum_kv.second.fullscreen &&
-                                     khum_kv.second.effect == static_cast<int>(EffectId::Ssgi);
+                                     (khum_kv.second.effect == static_cast<int>(EffectId::Ssgi) ||
+                                      khum_kv.second.effect == static_cast<int>(EffectId::DynLightFog));   // KH_DLF.
             if ((khum_kv.second.visible && khum_kv.second.lit && !khum_nodraw &&
                  (!kh_in_front(khum_kv.second) || g_vm_slice_live.load(std::memory_order_relaxed))) ||   // KH_INFRONT.
                 kh_shadow_active(khum_kv.second)) khum_lit = true;
@@ -58202,6 +58799,13 @@ inline void flush_frame() {
             if (khum_kv.second.fullscreen) {
                 if (khum_kv.second.affect_ui) khum_wanted = true;
                 if (khum_kv.second.effect == static_cast<int>(EffectId::Fogscatter)) khum_fogsc = true;   // KH_FOG_PROBE.
+                // KH_DLF: a scene-chain dynamicLightFog pass reads the engine fog (the probe) and the dynamic-light
+                // pool - the light capture's demand alone (KH_DLF_DEMAND), not a lit mesh's, which would also arm
+                // the engine shadow capture the pass never reads (the FSAA 1x stand-down below clears it too).
+                if (khum_kv.second.effect == static_cast<int>(EffectId::DynLightFog) && !khum_kv.second.ui_only) {
+                    khum_fogsc = true;
+                    khum_dlf = true;
+                }
             } else {
                 khum_mesh = true;   // Every visible mesh reads the volume copy and the snapshots.
                 if (kh_in_front(khum_kv.second)) khum_front = true;   // KH_INFRONT: the slice hook's demand too.
@@ -58229,6 +58833,8 @@ inline void flush_frame() {
         // through the existing master-demand gates.
         if (khum_lit && kh_fsaa_world_standdown()) khum_lit = false;
         g_ls.wanted.store(khum_lit, std::memory_order_relaxed);
+        if (khum_dlf && kh_fsaa_world_standdown()) khum_dlf = false;   // KH_DLF_DEMAND: as the lit demand.
+        g_dlf_wanted.store(khum_dlf, std::memory_order_relaxed);
     }
 
     kh_prof_add(KHP_FLUSH_CENSUS, khff_cen_t0);
@@ -58669,6 +59275,9 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         bb->Release();
         return;
     }
+    // KH_FX_FRAME_ADOPT (KH_UI_FX_PARITY): under the engine's frame rotation when fresh, as the scene chain takes
+    // its camera (flush_locked adopts whichever source it took) - its meshes, its frame and its user lanes alike.
+    kh_adopt_frame_view(pv);
     // KH_UI_SERIAL_LATE: applied once the camera is in hand - marked before it, a failed read skipped this
     // compose's passes instead of retrying them at the next Present.
     g_ui_mask.applied_serial = khum_serial;
@@ -58694,7 +59303,7 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         khui_m32 = g_ro.engine_m32;
     }
     float khui_fx_cam[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-    extract_camera_pos(pv.view, khui_fx_cam);
+    kh_cam_of(pv.view, khui_fx_cam);   // KH_CAM_HONEST.
     float khui_dvp[4][4];
     {
         float khui_dproj[4][4], khui_dview[4][4];
@@ -58739,7 +59348,7 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         if (has_inverse) memcpy(khuf_cbf.fx_cam, khui_fx_cam, sizeof(khuf_cbf.fx_cam));   // KH_UI_FX_PARITY.
         {   // KH_USER_LANES.
             float khuf_cam[3];
-            extract_camera_pos(pv.view, khuf_cam);
+            kh_cam_of(pv.view, khuf_cam);
             kh_fill_user_cam_cb(khuf_cbf, khuf_cam, pv.view);
         }
         khuf_frame_ok = kh_upload_frame_cb(ctx, g_res.frame_cb, khuf_cbf);
@@ -58943,6 +59552,7 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         if ((o.localized || o.effect == static_cast<int>(EffectId::Pulse)) && !has_inverse) continue;
         if (o.effect == static_cast<int>(EffectId::Ssgi)) continue;
         if (o.effect == static_cast<int>(EffectId::Fogscatter)) continue;
+        if (o.effect == static_cast<int>(EffectId::DynLightFog)) continue;   // KH_DLF: the scene's fog, not the UI's.
 
         const bool khu_spill =
             o.effect == static_cast<int>(EffectId::Bloom) ||
@@ -59614,6 +60224,7 @@ inline void kh_session_globals_reset() {
     g_present_rtv_next = 0;
     g_svs_mesh_wanted.store(false, std::memory_order_relaxed);
     g_fogsc_wanted.store(false, std::memory_order_relaxed);
+    g_dlf_wanted.store(false, std::memory_order_relaxed);   // KH_DLF_DEMAND.
     g_kh_flush_active.store(false, std::memory_order_relaxed);
     g_ui_mask_injecting.store(false, std::memory_order_relaxed);
     g_kh_track_wanted.store(false, std::memory_order_relaxed);
@@ -60015,6 +60626,7 @@ inline void kh_session_globals_reset() {
     g_dl_intensity_bits.store(0x3F800000u, std::memory_order_relaxed);
     kh_reinit(g_cbs);
     g_cbs_gen = 0;
+    g_cbs_wseq = 0;   // KH_DL_REC_ORDER: with the pool (kh_reinit(g_dl), next), whose records it orders.
     kh_reinit(g_dl);
     g_dl_harvest_cycle = ~0ull;
     g_dl_harvest_flush_last = false;
@@ -60637,6 +61249,7 @@ inline bool rendering_integration_is_initialized() {
            !g_tex_cache.empty() || !g_user_ps_cache.empty() || !g_user_lut_cache.empty() ||
            !g_mat_pool.empty() ||
            g_ls.wanted.load(std::memory_order_relaxed) || g_ls.atlas_tex != nullptr ||
+           g_dlf_wanted.load(std::memory_order_relaxed) ||   // KH_DLF_DEMAND.
            g_pip_seen || g_thm_valid || g_thm_dirty || g_thm_auto_state != 0 ||
            g_stats_armed.load(std::memory_order_relaxed);
 }
@@ -60646,6 +61259,7 @@ inline void rendering_integration_process_detach() {
     g_reorder_target_ctx.store(nullptr, std::memory_order_relaxed);
     g_kh_track_wanted.store(false, std::memory_order_relaxed);
     g_ls.wanted.store(false, std::memory_order_relaxed);
+    g_dlf_wanted.store(false, std::memory_order_relaxed);   // KH_DLF_DEMAND.
     g_dl_idle.store(0, std::memory_order_relaxed);   // KH_DL_IDLE.
     g_dl_keep_n = 0u;   // KH_DL_WANT_GATE.
     g_khsa_abort.store(true, std::memory_order_relaxed);

@@ -6,8 +6,10 @@
         // renders bit-identical, so all shimmer reduces to real scene/camera
         // change. Normals come from the smaller-delta side per axis (a naive
         // derivative cross paints edge pixels with cross-object normals).
-        // Normalization is by tap count, never by surviving weight (weight-sum
-        // division turns one surviving bright tap into a sparkling pixel).
+        // Visibility is KH_SSGI_VB's bitmask (effect.hlsl): the result is the
+        // slices' sector-weighted sum, normalized by the sector count, never
+        // by surviving weight (weight-sum division turns one surviving bright
+        // tap into a sparkling pixel).
         float3 khg_b = float3(0.0f, 0.0f, 0.0f);
         // The resolve upsamples the result depth-guided at full res.
         float khg_inv = localParams0.y >= 0.25f ? localParams0.y : 2.0f;
@@ -61,124 +63,192 @@
                                                      + 0.00583715f * i.pos.y));
                 float khg_ig2 = frac(52.9829189f * frac(0.06711056f * (i.pos.x + 5.588238f)
                                                       + 0.00583715f * (i.pos.y + 5.588238f)));
-                float khg_rot = khg_ig * 6.2831853f;
                 float khg_bias = clamp(fxParams0.w, 0.0f, 0.9f);
                 float khg_fp = max(fxParams1.x, 0.25f);
                 float khg_acne = fxParams2.z > 0.001f ? fxParams2.z : 1.0f;
                 float khg_pfl = (0.01f + khg_cd * 0.0035f) * khg_acne;
+                // KH_SSGI_VB: the receiver lifted off its own surface by the
+                // acne floor, so its reconstruction noise holds no sector; the
+                // bias narrows the admitted cone about the normal (acos bias).
+                const float3 khg_V = -khg_rd;
+                const float3 khg_Pr = khg_P + khg_N * khg_pfl;
+                const float  khg_hw = acos(khg_bias);
+                // Slices and steps per side from the sample budget (two sides a
+                // slice): 12 -> 2 x 3, 16 -> 2 x 4, 32 -> 4 x 4. A budget between
+                // those rounds down to 2 x slices x steps (20 takes 16, 5 takes 4).
+                const int khg_ns = khg_n <= 8 ? 1 : (khg_n <= 16 ? 2 : 4);
+                const int khg_m = max(khg_n / (2 * khg_ns), 1);
                 float3 khg_acc = float3(0.0f, 0.0f, 0.0f);
-                float khg_ib = 0.0f;
+                float khg_ws = 0.0f;
 
-                // Stratum-0 radii must never dip inside the 2 px self-sample
-                // floor, or each pixel randomly loses its dominant nearby taps
-                // (screen-anchored black gaps).
-                float khg_hn = (float)((khg_n + 1) >> 1);
-                [loop] for (int khg_k = 0; khg_k < khg_n; ++khg_k)
+                [loop] for (int khg_si = 0; khg_si < khg_ns; ++khg_si)
                 {
-                    int khg_kp = khg_k >> 1;
-                    float khg_an = khg_kp * 2.3999632f + khg_rot + (khg_k & 1) * 3.14159265f;
-                    // A golden-ratio offset per stratum decorrelates the bands:
-                    // still position-only (seedless), one tap per annulus; the
-                    // rings collapse into isotropic variance the smoothing
-                    // chain eats.
-                    float khg_igk = frac(khg_ig2 + khg_kp * 0.61803399f);
-                    float khg_sr = max(sqrt((khg_kp + khg_igk) / khg_hn) * khg_spx, 2.05f);   // Jitter; floor clamp;
-                                                                                              // per-stratum.
-                    float2 khg_off = float2(cos(khg_an), sin(khg_an)) * khg_sr;
-                    if (dot(khg_off, khg_off) < 4.0f) continue;
-                    int2 khg_sp = int2(float2(khg_fpx) + 0.5f + khg_off);   // Full-res space.
-                    // Off-screen taps reject (clamping would smear the border
-                    // pixels' radiance into the frame edge).
-                    if (khg_sp.x < 0 || khg_sp.y < 0 ||
-                        khg_sp.x >= (int)fxMeta.z || khg_sp.y >= (int)fxMeta.w) continue;
-                    khg_ib += 1.0f;   // Counts information, not admission.
-                    float khg_sd = LinDepth(LoadDepthPS(khg_sp));
-                    if (khg_sd >= 1e8f) continue;   // Sky carries no bounce.
-                    float3 khg_S = KhgVpos(float2(khg_sp), khg_sd, khg_res, khg_m00, khg_m11);
-                    float3 khg_v = khg_S - khg_P;
-                    float khg_d = length(khg_v);
-                    if (khg_d < 1e-4f || khg_d > khg_rad) continue;
-                    float khg_ph = dot(khg_N, khg_v);
-                    // Smooth fade over [pfl, 2 pfl] instead of a hard cut:
-                    // admission cliffs re-roll under 1 px content motion.
-                    float khg_pw = smoothstep(khg_pfl, khg_pfl * 2.0f, khg_ph);
-                    if (khg_pw <= 0.0f) continue;
-                    float khg_ndl = khg_ph / khg_d;
-                    khg_ndl = saturate((khg_ndl - khg_bias) / max(1.0f - khg_bias, 1e-3f));
-                    if (khg_ndl <= 0.0f) continue;
+                    // The slice: a screen direction rotated per pixel (position
+                    // only), and the plane through the view ray it spans - the
+                    // view-space step of one pixel along it, at a unit depth
+                    // (KhgVpos; pixels need not be square).
+                    const float  khg_ph = ((float)khg_si + khg_ig) * (3.14159265f / (float)khg_ns);
+                    const float2 khg_dir = float2(cos(khg_ph), sin(khg_ph));   // Screen, y down.
+                    const float3 khg_dv = normalize(float3(khg_dir.x / (khg_m00 * khg_res.x),
+                                                           -khg_dir.y / (khg_m11 * khg_res.y), 0.0f));
+                    const float3 khg_o = normalize(khg_dv - khg_V * dot(khg_dv, khg_V));
+                    const float3 khg_ax = cross(khg_o, khg_V);
+                    const float3 khg_np = khg_N - khg_ax * dot(khg_N, khg_ax);   // The normal in the slice.
+                    const float  khg_npl = length(khg_np);
+                    if (khg_npl < 1.0e-4f) continue;
+                    const float  khg_na = atan2(dot(khg_np, khg_o), dot(khg_np, khg_V));
+                    const float  khg_c0 = KhSsgiCum(-khg_hw, khg_bias);
+                    const float  khg_cr = KhSsgiCum(khg_hw, khg_bias) - khg_c0;
+                    if (!(khg_cr > 1.0e-6f)) continue;
+                    const float  khg_jk = frac(khg_ig2 + (float)khg_si * 0.61803399f);
+                    uint   khg_mask = 0u;
+                    float3 khg_sacc = float3(0.0f, 0.0f, 0.0f);
 
-                    float khg_occ = 1.0f;
-
-                    [unroll] for (int khg_o = 1; khg_o <= 2; ++khg_o)
+                    [loop] for (int khg_sd2 = 0; khg_sd2 < 2; ++khg_sd2)
                     {
-                        float khg_ot = khg_o * 0.333f;
-                        float2 khg_op = lerp(float2(khg_fpx), float2(khg_sp), khg_ot);
-                        float khg_oz = LinDepth(LoadDepthPS(int2(khg_op)));
-                        float khg_ez = khg_cd + khg_ot * (khg_sd - khg_cd);
-                        float khg_pen = khg_ez - khg_oz;   // Blocker in front of the segment.
-                        float khg_om = 0.05f + khg_ez * 0.006f;
-                        khg_occ *= 1.0f - smoothstep(khg_om, khg_om * 3.0f, khg_pen);
-                    }
-
-                    if (khg_occ <= 0.001f) continue;
-                    // Genuine lateral transport from deeper samples carries a
-                    // positive dot.
-                    float khg_sl = 0.08f + min(khg_sd * 0.0005f, 0.24f);
-                    float khg_ce = dot(khg_S, khg_v) / (max(length(khg_S), 1e-4f) * khg_d);   // Proxy (fallback).
-
-                    {
-                        int2 khg_nr = int2(min(khg_sp.x + khg_st, (int)fxMeta.z - 1), khg_sp.y);
-                        int2 khg_nd = int2(khg_sp.x, min(khg_sp.y + khg_st, (int)fxMeta.w - 1));
-                        float khg_dr2 = LinDepth(LoadDepthPS(khg_nr));
-                        float khg_dd2 = LinDepth(LoadDepthPS(khg_nd));
-                        float khg_xob = 0.15f * khg_sd + 0.5f;   // Cross-object bound.
-
-                        if (khg_dr2 < 1e8f && khg_dd2 < 1e8f &&
-                            abs(khg_dr2 - khg_sd) < khg_xob &&
-                            abs(khg_dd2 - khg_sd) < khg_xob)
+                        const float  khg_sg = khg_sd2 == 0 ? 1.0f : -1.0f;
+                        const float2 khg_sdir = khg_dir * khg_sg;
+                        float3 khg_side = float3(0.0f, 0.0f, 0.0f);
+                        int    khg_seen = khg_m;
+                        [loop] for (int khg_k = 0; khg_k < khg_m; ++khg_k)
                         {
-                            float3 khg_sx = KhgVpos(float2(khg_nr), khg_dr2, khg_res, khg_m00, khg_m11) - khg_S;
-                            float3 khg_sy = KhgVpos(float2(khg_nd), khg_dd2, khg_res, khg_m00, khg_m11) - khg_S;
-                            float3 khg_sn = cross(khg_sy, khg_sx);
-                            float khg_snl = length(khg_sn);
-
-                            if (khg_snl > 1e-9f)
-                            {
-                                khg_sn /= khg_snl;
-                                if (dot(khg_sn, khg_S) > 0.0f) khg_sn = -khg_sn;   // Face the camera (the receiver
-                                                                                   // Rule).
-                                khg_ce = dot(khg_sn, -khg_v) / khg_d;   // True emission toward the
-                                                                        // Receiver.
+                            // Outward along the line, denser near the receiver;
+                            // the 2 px self-sample floor as before. The sample
+                            // stands for its stretch of the line: half the gap
+                            // to each neighbour (khg_h px either side).
+                            const float khg_u = ((float)khg_k + khg_jk) / (float)khg_m;
+                            const float khg_sr = max(khg_u * khg_u * khg_spx, 2.05f);
+                            const float khg_h = max(khg_u * khg_spx / (float)khg_m, 0.5f);
+                            const int2  khg_sp = int2(float2(khg_fpx) + 0.5f + khg_sdir * khg_sr);   // Full-res.
+                            // Off-screen: the rest of this side lies farther out;
+                            // the side is scaled up by the share it saw (below).
+                            if (khg_sp.x < 0 || khg_sp.y < 0 ||
+                                khg_sp.x >= (int)fxMeta.z || khg_sp.y >= (int)fxMeta.w) {
+                                khg_seen = khg_k;
+                                break;
                             }
+                            const float khg_sd = LinDepth(LoadDepthPS(khg_sp));
+                            if (khg_sd >= 1e8f) continue;   // Sky: no surface, no bounce.
+                            const float3 khg_S = KhgVpos(float2(khg_sp), khg_sd, khg_res, khg_m00, khg_m11);
+                            // The sender's neighbours one resolve step right and down
+                            // (its normal, below, and its plane): on one surface when
+                            // both lie within the cross-object bound.
+                            const int2  khg_nr = int2(min(khg_sp.x + khg_st, (int)fxMeta.z - 1), khg_sp.y);
+                            const int2  khg_nd = int2(khg_sp.x, min(khg_sp.y + khg_st, (int)fxMeta.w - 1));
+                            const float khg_dr2 = LinDepth(LoadDepthPS(khg_nr));
+                            const float khg_dd2 = LinDepth(LoadDepthPS(khg_nd));
+                            const float khg_xob = 0.15f * khg_sd + 0.5f;   // Cross-object bound.
+                            const bool  khg_on = khg_dr2 < 1e8f && khg_dd2 < 1e8f &&
+                                                 abs(khg_dr2 - khg_sd) < khg_xob && abs(khg_dd2 - khg_sd) < khg_xob;
+                            // The footprint's plane takes a tight bound (a post's
+                            // neighbour on the wall behind it is within the loose
+                            // one) and a real step both ways (at the last row or
+                            // column the step is clamped onto the sender itself).
+                            const float khg_fob = 0.02f * khg_sd + 0.02f;
+                            const bool  khg_fon = khg_nr.x > khg_sp.x && khg_nd.y > khg_sp.y &&
+                                                  abs(khg_dr2 - khg_sd) < khg_fob && abs(khg_dd2 - khg_sd) < khg_fob;
+                            // The footprint's ends on the sender's plane (1 / depth is
+                            // affine across a plane in screen space; per pixel actually
+                            // stepped); a sender on an edge is taken as a point.
+                            const float khg_iz = 1.0f / khg_sd;
+                            const float khg_izx = (1.0f / khg_dr2 - khg_iz) / max((float)(khg_nr.x - khg_sp.x), 1.0f);
+                            const float khg_izy = (1.0f / khg_dd2 - khg_iz) / max((float)(khg_nd.y - khg_sp.y), 1.0f);
+                            const float2 khg_ea = -khg_sdir * (khg_fon ? min(khg_h, khg_sr - 1.0f) : 0.0f);
+                            const float2 khg_ez = khg_sdir * (khg_fon ? khg_h : 0.0f);
+                            const float khg_iza = khg_iz + khg_izx * khg_ea.x + khg_izy * khg_ea.y;
+                            const float khg_izz = khg_iz + khg_izx * khg_ez.x + khg_izy * khg_ez.y;
+                            const float3 khg_Sa = KhgVpos(float2(khg_sp) + khg_ea, 1.0f / max(khg_iza, 0.5f * khg_iz),
+                                                          khg_res, khg_m00, khg_m11);
+                            const float3 khg_Sz = KhgVpos(float2(khg_sp) + khg_ez, 1.0f / max(khg_izz, 0.5f * khg_iz),
+                                                          khg_res, khg_m00, khg_m11);
+                            // Their backs, KH_SSGI_THICK behind along their own rays.
+                            const float3 khg_Ba = khg_Sa + khg_Sa * (KH_SSGI_THICK / max(length(khg_Sa), 1e-4f));
+                            const float3 khg_Bz = khg_Sz + khg_Sz * (KH_SSGI_THICK / max(length(khg_Sz), 1e-4f));
+                            const float3 khg_qa = khg_Sa - khg_Pr, khg_qz = khg_Sz - khg_Pr;
+                            const float3 khg_ra = khg_Ba - khg_Pr, khg_rz = khg_Bz - khg_Pr;
+                            // Wholly below the receiver's (lifted) tangent plane:
+                            // never above its horizon, whatever the rounding of
+                            // the sample onto the line.
+                            uint khg_bits = 0u;
+                            if (max(max(dot(khg_qa, khg_N), dot(khg_qz, khg_N)),
+                                    max(dot(khg_ra, khg_N), dot(khg_rz, khg_N))) > 0.0f) {
+                                khg_bits = KhSsgiBits(float4(atan2(dot(khg_qa, khg_o), dot(khg_qa, khg_V)),
+                                                             atan2(dot(khg_qz, khg_o), dot(khg_qz, khg_V)),
+                                                             atan2(dot(khg_ra, khg_o), dot(khg_ra, khg_V)),
+                                                             atan2(dot(khg_rz, khg_o), dot(khg_rz, khg_V))) - khg_na,
+                                                      khg_bias, khg_hw, khg_c0, khg_cr);
+                            }
+                            const uint khg_new = khg_bits & ~khg_mask;
+                            khg_mask = khg_mask | khg_bits;
+                            if (khg_new == 0u) continue;
+                            const float3 khg_v = khg_S - khg_P;
+                            const float khg_d = length(khg_v);
+                            if (khg_d < 1e-4f || khg_d > khg_rad) continue;
+                            // Its light: the radiance its face sends the receiver's
+                            // way, if that face turns toward it. A Lambertian face's
+                            // radiance is the same every way, so the facing test only
+                            // rejects a back face (the mask's sectors carry the
+                            // geometry) - smoothly over the slack band.
+                            float khg_sl = 0.08f + min(khg_sd * 0.0005f, 0.24f);
+                            // The proxy (fallback) until the sender's normal is known.
+                            float khg_ce = dot(khg_S, khg_v) / (max(length(khg_S), 1e-4f) * khg_d);
+
+                            if (khg_on)
+                            {
+                                float3 khg_sx = KhgVpos(float2(khg_nr), khg_dr2, khg_res, khg_m00, khg_m11) - khg_S;
+                                float3 khg_sy = KhgVpos(float2(khg_nd), khg_dd2, khg_res, khg_m00, khg_m11) - khg_S;
+                                float3 khg_sn = cross(khg_sy, khg_sx);
+                                float khg_snl = length(khg_sn);
+
+                                if (khg_snl > 1e-9f)
+                                {
+                                    khg_sn /= khg_snl;
+                                    if (dot(khg_sn, khg_S) > 0.0f) khg_sn = -khg_sn;   // Face the camera.
+                                    khg_ce = dot(khg_sn, -khg_v) / khg_d;   // Emission toward the receiver.
+                                }
+                            }
+
+                            const float khg_face = saturate((khg_ce + khg_sl) / (2.0f * khg_sl));
+                            const float khg_fall = pow(saturate(1.0f - khg_d / khg_rad), khg_fp);
+                            // Its radiance from the seed on the gather's grid (effect 26,
+                            // KH_SSGI_SEED), four taps half a texel about the sample: a
+                            // coarser level (the retired pyramid's) blurs a bright surface across an edge onto the one
+                            // beside it - a wall's light read at the foot of the ground
+                            // below it, or the ground's up the wall - and bleeds it back
+                            // as bounce (the chain's a-trous and resolve carry the grain
+                            // that reading the base level alone leaves).
+                            float2 khg_uv2 = (float2(khg_sp) + 0.5f) / khg_res;
+                            float2 khg_tx = (khg_inv * 0.5f) / float2(fxMeta.z, fxMeta.w);
+                            const float2 khg_ty = float2(khg_tx.x, -khg_tx.y);
+                            float3 khg_c = 0.25f * (khsgTex.SampleLevel(khsgSamp, khg_uv2 + khg_tx, 0.0f).rgb
+                                         + khsgTex.SampleLevel(khsgSamp, khg_uv2 - khg_tx, 0.0f).rgb
+                                         + khsgTex.SampleLevel(khsgSamp, khg_uv2 + khg_ty, 0.0f).rgb
+                                         + khsgTex.SampleLevel(khsgSamp, khg_uv2 - khg_ty, 0.0f).rgb);
+
+                            float khg_tg = frac(52.9829189f * frac(0.06711056f * (float)khg_sp.x
+                                                                 + 0.00583715f * (float)khg_sp.y));
+                            float khg_tg2 = frac(52.9829189f * frac(0.06711056f * ((float)khg_sp.x + 5.588238f)
+                                                                  + 0.00583715f * ((float)khg_sp.y + 5.588238f)));
+                            khg_c += (khg_tg - khg_tg2) * (1.0f / 255.0f);
+                            float khg_l = Luma(khg_c);
+                            if (fxParams1.w > 0.01f && khg_l > fxParams1.w)
+                                khg_c *= fxParams1.w / khg_l;   // Firefly clamp.
+                            khg_side += khg_c * (khg_face * khg_fall * (float)countbits(khg_new) * (1.0f / 32.0f));
                         }
+                        // A side cut short by the frame edge saw only part of its
+                        // stretch: scaled by the share it saw, at most 2x (the
+                        // former gather's rule for off-screen taps).
+                        khg_sacc += khg_side * ((float)khg_m / max((float)khg_seen, 0.5f * (float)khg_m));
                     }
-
-                    float khg_cs = saturate(khg_ce + khg_sl);
-                    float khg_w = khg_ndl * khg_cs * khg_pw * khg_occ * pow(saturate(1.0f - khg_d / khg_rad), khg_fp);
-                    float khg_gap = khg_spx / (2.0f * sqrt(max((float)khg_kp, 0.5f) * khg_hn));
-                    float khg_ftp = max(khg_sr * 0.125f, khg_gap);
-                    float khg_mip = clamp(log2(max(khg_ftp / khg_inv, 1.0f))
-                                        + (khg_igk - 0.5f) * 0.5f, 0.0f, 6.0f);
-                    float2 khg_uv2 = (float2(khg_sp) + 0.5f) / khg_res;
-                    float2 khg_tx = (khg_inv * exp2(khg_mip) * 0.5f) / float2(fxMeta.z, fxMeta.w);
-                    float3 khg_c = 0.25f * (khsgTex.SampleLevel(khsgSamp, khg_uv2 + khg_tx, khg_mip).rgb
-                                 + khsgTex.SampleLevel(khsgSamp, khg_uv2 - khg_tx, khg_mip).rgb
-                                 + khsgTex.SampleLevel(khsgSamp, khg_uv2 + float2( khg_tx.x, -khg_tx.y), khg_mip).rgb
-                                 + khsgTex.SampleLevel(khsgSamp, khg_uv2 + float2(-khg_tx.x,  khg_tx.y), khg_mip).rgb);
-
-                    float khg_tg = frac(52.9829189f * frac(0.06711056f * (float)khg_sp.x
-                                                         + 0.00583715f * (float)khg_sp.y));
-                    float khg_tg2 = frac(52.9829189f * frac(0.06711056f * ((float)khg_sp.x + 5.588238f)
-                                                          + 0.00583715f * ((float)khg_sp.y + 5.588238f)));
-                    khg_c += (khg_tg - khg_tg2) * (1.0f / 255.0f)
-                           * saturate(1.0f - khg_mip * 0.5f);
-                    float khg_l = Luma(khg_c);
-                    if (fxParams1.w > 0.01f && khg_l > fxParams1.w)
-                        khg_c *= fxParams1.w / khg_l;   // Firefly clamp.
-                    khg_acc += khg_c * khg_w;
+                    // GTAO's slice weight: the normal's projected length times the
+                    // lobe's integral; the normalization takes the bias-free lobe (2).
+                    khg_acc += khg_sacc * (khg_npl * khg_cr / (1.0f - khg_bias));
+                    khg_ws += khg_npl * 2.0f;
                 }
 
-                float3 khg_gi = khg_acc * (2.0f / max(khg_ib, khg_n * 0.5f));
+                // The budget's factor on the samples the slices take (2 ns m).
+                float3 khg_gi = khg_acc * (KH_SSGI_VB_GAIN * pow(12.0f / (float)(2 * khg_ns * khg_m), KH_SSGI_VB_NEXP)
+                                           / max(khg_ws, 1e-4f));
                 float khg_gl = Luma(khg_gi);
                 khg_gi = max(lerp(float3(khg_gl, khg_gl, khg_gl), khg_gi,
                                   max(fxParams1.y, 0.0f)), 0.0f);
@@ -276,23 +346,12 @@
     }
     else if (effect == 26)
     {
-        // Radiance pyramid seed (internal id: a script's effect id is
-        // validated <= KH_MAX_EFFECT (effect_id_from_gv), so 24 - 30 stay
-        // unreachable from SQF; the flush synthesizes this ahead of the
+        // The radiance seed (KH_SSGI_SEED; internal id: effect_id_from_gv refuses
+        // 24 - 30 to a script, and KH_DLF's 32 / 33 lie past KH_MAX_EFFECT,
+        // so none is reachable from SQF; the flush synthesizes this ahead of the
         // gather). i.pos spans the scaled grid,
         // so the full-frame uv rebuilds through the local0.y factor.
         float khrs_inv = localParams0.y >= 0.25f ? localParams0.y : 2.0f;
         float2 khrs_uv = i.pos.xy * khrs_inv / float2(fxMeta.z, fxMeta.w);
         return float4(sceneColor.SampleLevel(khsgSamp, khrs_uv, 0.0f).rgb, 1.0f);
-    }
-    else if (effect == 27)
-    {
-        float2 khpd_sd = float2(max(localParams0.z, 1.0f), max(localParams0.w, 1.0f));
-        float2 khpd_uv = i.pos.xy * 2.0f / khpd_sd;   // Dest px -> source-space uv.
-        float2 khpd_tx = 0.75f / khpd_sd;
-        float3 khpd_c = 0.25f * (khsgTex.SampleLevel(khsgSamp, khpd_uv + khpd_tx, 0.0f).rgb
-                      + khsgTex.SampleLevel(khsgSamp, khpd_uv - khpd_tx, 0.0f).rgb
-                      + khsgTex.SampleLevel(khsgSamp, khpd_uv + float2( khpd_tx.x, -khpd_tx.y), 0.0f).rgb
-                      + khsgTex.SampleLevel(khsgSamp, khpd_uv + float2(-khpd_tx.x,  khpd_tx.y), 0.0f).rgb);
-        return float4(khpd_c, 1.0f);
     }

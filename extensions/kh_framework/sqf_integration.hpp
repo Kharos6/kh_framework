@@ -9032,7 +9032,16 @@ static game_value get_render_stats_sqf() {
         // windows refused at the span cap; lit mesh fills that found the pool
         // stale - those draws took no dynamic light, so this staying at 0 is
         // the fix holding; light-ring appends that failed; and the most lights
-        // one draw received.
+        // one draw received. CN-4 (RenderStats' KH_DL_DIAG (CN-4) note): pool
+        // lights one harvest alone carried (dlBlinks); the reference's
+        // brightest candidate's (a placed window or an upload re-sighted
+        // through its buffer's origin) moves [brighter, dimmer] (dlRefJumps)
+        // and one-harvest
+        // excursions [brighter, dimmer] (dlRefSpikes), before the reference's
+        // median (KH_DL_REF_MEDIAN); new entries repeating an older one a
+        // whole number of land-grid cells away (dlCopies); and dynamicLightFog
+        // lights whose light map is not published (dlfUnshadowed, per pass
+        // and frame).
         out.push_back(kv("dlHarvestsInject", static_cast<float>(s.dl_harvests_inject)));
         out.push_back(kv("dlHarvestsFlush", static_cast<float>(s.dl_harvests_flush)));
         out.push_back(kv("dlHarvestsIncomplete", static_cast<float>(s.dl_harvests_incomplete)));
@@ -9040,6 +9049,18 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("dlStaleFills", static_cast<float>(s.dl_stale_fills)));
         out.push_back(kv("dlRingFails", static_cast<float>(s.dl_ring_fails)));
         out.push_back(kv("dlMeshLightsMax", static_cast<float>(s.dl_mesh_lights_max)));
+        out.push_back(kv("dlBlinks", static_cast<float>(s.dl_blinks)));   // KH_DL_DIAG (CN-4).
+        {
+            auto_array<game_value> khrj, khrs;
+            khrj.push_back(game_value(static_cast<float>(s.dl_ref_up)));
+            khrj.push_back(game_value(static_cast<float>(s.dl_ref_down)));
+            khrs.push_back(game_value(static_cast<float>(s.dl_ref_spike_up)));
+            khrs.push_back(game_value(static_cast<float>(s.dl_ref_spike_down)));
+            out.push_back(kva("dlRefJumps", std::move(khrj)));
+            out.push_back(kva("dlRefSpikes", std::move(khrs)));
+        }
+        out.push_back(kv("dlCopies", static_cast<float>(s.dl_copies)));
+        out.push_back(kv("dlfUnshadowed", static_cast<float>(s.dlf_unshadowed)));
         {
             auto_array<game_value> cam;
             for (int i = 0; i < 3; ++i) cam.push_back(game_value(khd_cam[i]));

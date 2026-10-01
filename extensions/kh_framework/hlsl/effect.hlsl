@@ -273,6 +273,378 @@ float KhSunFlareEdge(float2 spos)
     return saturate((1.3f - max(khse_n.x, khse_n.y)) / 0.3f);
 }
 
+// KH_DLF - dynamicLightFog (effect 31): the world fog lit by the engine's dynamic lights, marched per light through
+// the light's own reach and shadowed by our meshes' light maps and by the geometry the camera sees. C++ side:
+// kh_dlf_select (the lights: the engine's cb11 records, camera-relative, [5].z = our map's slot + 1 or 0, [5].w = the
+// light's reach in metres), kh_fx_chain_run's KH_DLF block (gather 32 onto the SSGI grid, filter 33 twice, then the
+// pass itself, 31, composites). The frame is camera-relative (fxCam armed - the C++ side runs nothing without it):
+// invViewProj is rotation-only and the camera sits at the origin.
+static const int   KH_DLF_SS_TAPS    = 4;       // Screen-space occlusion taps per march sample (shadows 2).
+static const float KH_DLF_SS_KEEP    = 0.25f;   // m short of the light the taps stop (the source itself).
+static const float KH_DLF_SS_SELF    = 1.0f;    // m: a surface this near the light is its own body - the housing,
+                                                 // the lamp head, the hand or hull holding it - and shadows nothing:
+                                                 // the engine's lights shine through their housings, so the fog too.
+static const float KH_DLF_SS_THICK   = 1.0f;    // m, plus this share of the view depth: the most the visible depth
+static const float KH_DLF_SS_THICK_K = 0.02f;   // may change across a crossing for it to be one surface, not an edge.
+static const int   KH_DLF_SS_REFINE  = 5;       // Halvings of a tap interval where the segment goes behind the scene.
+static const float KH_DLF_SS_BIAS_K  = 0.002f;  // A point counts as behind a surface past this share of its depth
+                                                 // (plus 5 cm): the sample's own surface is never its occluder.
+
+// The camera-relative point on the ray through uv at view depth khdr_d.
+float3 KhDlfRel(float2 khdr_uv, float khdr_d)
+{
+    const float4 khdr_nd = float4(khdr_uv.x * 2.0f - 1.0f, 1.0f - khdr_uv.y * 2.0f,
+                                  depthParams.x + depthParams.y / max(khdr_d, 1.0e-3f), 1.0f);
+    const float4 khdr_wp = mul(khdr_nd, invViewProj);
+    return khdr_wp.xyz / khdr_wp.w;
+}
+// The full-resolution pixel grid texel t stands for, and its depth key: the view depth there, the sky and everything
+// past maxDistance at maxDistance (the march's own end, so equal keys march equal paths). The gather, the filter and
+// the composite share both (a texel spans fxMeta.zw / khdf_g pixels).
+int2 KhDlfFull(int2 khdf_t, float2 khdf_g)
+{
+    const int2 khdf_p = int2((float2(khdf_t) + 0.5f) * float2(fxMeta.z, fxMeta.w) / max(khdf_g, 1.0f));
+    return clamp(khdf_p, int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
+}
+float KhDlfMaxD() { return clamp(fxParams1.y, 10.0f, 5000.0f); }
+float KhDlfKey(int2 khdk_p)
+{
+    return min(LinDepth(LoadDepthPS(khdk_p)), KhDlfMaxD());
+}
+// The engine's fog-end ramp on what lies khdn_m metres from the camera (PSMain / PSComposite's: fully fogged past the
+// fog end when the engine terms carry one, fogEngine.w in [0.5, 1.5)), a factor on the camera leg's transmittance.
+// (KhFxFogEngine applies the same ramp in front of the fog end; past it, it takes the sky's integral, KH_FOG_SKY.)
+float KhDlfEndRamp(float khdn_m)
+{
+    return (fogParams.w >= 0.5f && fogEngine.w >= 0.5f && fogEngine.w < 1.5f)
+         ? saturate((fogEngine.y - khdn_m) * fogEngine.z) : 1.0f;
+}
+// The world fog's extinction (1/m) at absolute height khds_y: the engine's height fog as PSMain / KhFxFogEngine apply
+// it (engine terms: fogEngine.x at sea level falling off with fogParams.y; else fogParams.x * 0.0153 above
+// fogParams.z), times fogScale (fxParams0.y), plus baseDensity (fxParams0.z) everywhere. Zero with the fog off.
+float KhDlfSigma(float khds_y)
+{
+    float khds_s = 0.0f;
+    if (fogParams.w >= 0.5f) {
+        khds_s = (fogEngine.w >= 0.5f) ? fogEngine.x * exp(-fogParams.y * max(khds_y, 0.0f))
+                                       : fogParams.x * 0.0153f * exp(-fogParams.y * max(khds_y - fogParams.z, 0.0f));
+    }
+    return max(khds_s, 0.0f) * max(fxParams0.y, 0.0f) + max(fxParams0.z, 0.0f);
+}
+// The optical depth of a straight path khdt_d metres long between heights khdt_y0 and khdt_y1: the closed form of
+// KhDlfSigma's height fog along it (the density at the lower end, decaying along the rise) - KhFxFogEngine's with the
+// engine terms; without them KhFxFogEngine takes the far end's density over the whole path, and this integrates the
+// same fallback density instead, so the glow's extinction matches the fog it scatters in - scaled and floored as
+// KhDlfSigma.
+float KhDlfTau(float khdt_d, float khdt_y0, float khdt_y1)
+{
+    float khdt_w = 0.0f;
+    if (fogParams.w >= 0.5f) {
+        const float khdt_lo = min(khdt_y0, khdt_y1);
+        const float khdt_s = (fogEngine.w >= 0.5f)
+                           ? fogEngine.x * exp(-fogParams.y * max(khdt_lo, 0.0f))
+                           : fogParams.x * 0.0153f * exp(-fogParams.y * max(khdt_lo - fogParams.z, 0.0f));
+        const float khdt_k = fogParams.y * abs(khdt_y1 - khdt_y0);
+        const float khdt_i = khdt_k < 1.0e-4f ? khdt_d : khdt_d * (1.0f - exp(-khdt_k)) / khdt_k;
+        khdt_w = max(khdt_s, 0.0f) * khdt_i;
+    }
+    return khdt_w * max(fxParams0.y, 0.0f) + max(fxParams0.z, 0.0f) * khdt_d;
+}
+// Henyey-Greenstein at cos khdp_c (the light's travel against the view ray's reverse: 1 looking into the light),
+// times pi: the engine's surfaces show E * albedo, so the fog's radiance is the integral of sigma E p pi ds, and an
+// isotropic medium (g = 0) scatters a quarter of E per unit optical depth. g = anisotropy (fxParams0.w).
+float KhDlfPhase(float khdp_c)
+{
+    const float khdp_g = clamp(fxParams0.w, -0.9f, 0.9f);
+    const float khdp_g2 = khdp_g * khdp_g;
+    const float khdp_b = max(1.0f + khdp_g2 - 2.0f * khdp_g * khdp_c, 1.0e-4f);
+    return (1.0f - khdp_g2) / (4.0f * khdp_b * sqrt(khdp_b));
+}
+// A light's attenuation at distance khda_dist, direction khda_l (point to light, normalised): DynLights' terms
+// (cb.hlsl) - the start offset and the constant / linear / quadratic falloff of [4], the hard fade of [5], and for a
+// spot the cone of [1] / [2] and its exponent [3].w. TWIN: DynLights and KhDynLightsPBR's loops.
+float KhDlfAtt(float4 khda_r1, float4 khda_r2, float4 khda_r3, float4 khda_r4, float4 khda_r5,
+               float khda_dist, float3 khda_l, bool khda_spot)
+{
+    const float khda_d = max(khda_dist * dlCtl.w - khda_r4.x, 0.0f);
+    float khda_a = saturate(1.0f / (dot(khda_r4.yzw, float3(1.0f, khda_d, khda_d * khda_d)) + 1e-4f));
+    khda_a *= 1.0f - saturate((khda_dist * dlCtl.w - khda_r5.x) * khda_r5.y);
+    if (khda_spot) {
+        const float khda_c = saturate((dot(-khda_r1.xyz, khda_l) - khda_r1.w) * khda_r2.w);
+        khda_a *= (khda_c > 0.0f) ? pow(khda_c, khda_r3.w) : 0.0f;   // DynLights' guard (pow(0, 0)).
+    }
+    return khda_a;
+}
+// The distance at which a light's attenuation (KhDlfAtt without fade or cone) falls to half its peak: the radius of
+// its bright core, which the march's equiangular samples crowd toward (KhDlfEquiInit). The peak is 1 / max(c, 1) (the
+// attenuation saturates at 1), so the half is where c + l x + q x^2 = 2 max(c, 1). Zero when the terms give none.
+float KhDlfCore(float4 khdo_r4)
+{
+    const float khdo_rhs = max(khdo_r4.y, 2.0f - khdo_r4.y);   // l x + q x^2 = it, x = dist * scale - start.
+    const float khdo_den = khdo_r4.z + sqrt(max(khdo_r4.z * khdo_r4.z + 4.0f * khdo_r4.w * khdo_rhs, 0.0f));
+    const float khdo_x = (khdo_rhs > 0.0f && khdo_den > 1.0e-12f) ? 2.0f * khdo_rhs / khdo_den : 0.0f;
+    return max((max(khdo_r4.x, 0.0f) + max(khdo_x, 0.0f)) / max(dlCtl.w, 1.0e-6f), 0.0f);
+}
+// The march's samples along [t0, t1] (metres along a ray), two stratified sets combined by the balance heuristic
+// (multiple importance sampling): the first (n + 1) / 2 equiangular about the point khde_tc nearest a light - spread
+// evenly in the angle they subtend from a point khde_w off the ray, so they crowd where a light falling off as the
+// square of distance is brightest - and the rest evenly spaced, which serve a light that falls off slower, whose far
+// samples alone would carry too much weight. Each sample's weight is 1 / (n_e p_e + n_u p_u) at its t: the estimate
+// is unbiased for any khde_w > 0, and never much noisier than the better of the two sets. Init returns (first angle,
+// angle span, tc, w); Step returns (t, weight) for sample khds_k of khds_n at stratum jitter khds_j.
+float4 KhDlfEquiInit(float khde_t0, float khde_t1, float khde_tc, float khde_w)
+{
+    const float khde_a0 = atan((khde_t0 - khde_tc) / khde_w);
+    const float khde_a1 = atan((khde_t1 - khde_tc) / khde_w);
+    return float4(khde_a0, max(khde_a1 - khde_a0, 0.0f), khde_tc, khde_w);
+}
+float2 KhDlfMisStep(float4 khds_e, float khds_t0, float khds_t1, int khds_k, int khds_n, float khds_j)
+{
+    const int   khds_ne = (khds_n + 1) / 2;
+    const int   khds_nu = khds_n / 2;
+    const float khds_len = max(khds_t1 - khds_t0, 1.0e-6f);
+    const bool  khds_eq = khds_k < khds_ne;
+    const float khds_te = khds_e.z + khds_e.w * tan(khds_e.x + ((float)khds_k + khds_j) / (float)khds_ne * khds_e.y);
+    const float khds_tu = khds_t0 + ((float)(khds_k - khds_ne) + khds_j) / (float)max(khds_nu, 1) * khds_len;
+    const float khds_t = khds_eq ? khds_te : khds_tu;
+    const float khds_o = khds_t - khds_e.z;
+    // n_e p_e, with p_e = w / (span (w^2 + o^2)); a zero span (a sliver) gives no equiangular density.
+    const float khds_pe = (khds_e.y > 0.0f)
+                        ? (float)khds_ne * khds_e.w / (khds_e.y * (khds_e.w * khds_e.w + khds_o * khds_o)) : 0.0f;
+    const float khds_pu = (float)khds_nu / khds_len;
+    return float2(khds_t, 1.0f / max(khds_pe + khds_pu, 1.0e-20f));
+}
+// A spot's forward cone (axis khdc_a, cosine cut khdc_cs > 0, apex at the origin) clipping [s0, s1] of t along
+// P(t) = khdc_o + khdc_d * t, with khdc_o the ray's point nearest the apex, seen from it (KhDlfCone's recentring): the
+// half-space in front of the apex, then the double cone's quadratic. A convex cone meets a line once, so one interval
+// survives; where the quadratic leaves two pieces the one in the forward nappe is the longer (the other lies behind
+// the apex, which the half-space already cut to at most a sliver). False = nothing left.
+bool KhDlfConeT(float3 khdc_d, float3 khdc_o, float3 khdc_a, float khdc_cs, inout float khdc_s0, inout float khdc_s1)
+{
+    const float khdc_ad = dot(khdc_a, khdc_d);
+    const float khdc_ao = dot(khdc_a, khdc_o);
+    if (abs(khdc_ad) < 1.0e-7f) {
+        if (khdc_ao < 0.0f) return false;
+    } else {
+        const float khdc_h = -khdc_ao / khdc_ad;
+        if (khdc_ad > 0.0f) khdc_s0 = max(khdc_s0, khdc_h);
+        else                khdc_s1 = min(khdc_s1, khdc_h);
+    }
+    if (!(khdc_s1 > khdc_s0)) return false;
+    const float khdc_c2 = khdc_cs * khdc_cs;
+    const float khdc_qa = khdc_ad * khdc_ad - khdc_c2 * dot(khdc_d, khdc_d);
+    const float khdc_qb = 2.0f * (khdc_ad * khdc_ao - khdc_c2 * dot(khdc_d, khdc_o));
+    const float khdc_qc = khdc_ao * khdc_ao - khdc_c2 * dot(khdc_o, khdc_o);
+    // The roots in the stable form - q = -(qb + sign(qb) sq) / 2, roots q / qa and qc / q: a ray near the cut's own
+    // angle (a generator's direction) has qa at float noise, where the textbook pair cancels catastrophically and
+    // loses the near root (the one that clips), while this keeps it and sends the other far. Only a qa that is
+    // negligible even against that (relative: its terms are of size |d|^2) takes the linear case.
+    if (abs(khdc_qa) <= 1.0e-10f * dot(khdc_d, khdc_d)) {
+        if (abs(khdc_qb) < 1.0e-8f) return khdc_qc >= 0.0f;
+        const float khdc_r = -khdc_qc / khdc_qb;
+        if (khdc_qb > 0.0f) khdc_s0 = max(khdc_s0, khdc_r);
+        else                khdc_s1 = min(khdc_s1, khdc_r);
+        return khdc_s1 > khdc_s0;
+    }
+    const float khdc_disc = khdc_qb * khdc_qb - 4.0f * khdc_qa * khdc_qc;
+    // disc > 0 below makes sq > 0, so q is never 0 where the roots are used.
+    const float khdc_sq = sqrt(max(khdc_disc, 0.0f));
+    const float khdc_q = -0.5f * (khdc_qb + (khdc_qb >= 0.0f ? khdc_sq : -khdc_sq));
+    const float khdc_ra = khdc_q / khdc_qa;
+    const float khdc_rb = khdc_qc / (abs(khdc_q) > 0.0f ? khdc_q : 1.0f);
+    const float khdc_r1 = min(khdc_ra, khdc_rb);
+    const float khdc_r2 = max(khdc_ra, khdc_rb);
+    if (khdc_qa < 0.0f) {   // Inside between the roots.
+        if (khdc_disc <= 0.0f) return false;
+        khdc_s0 = max(khdc_s0, khdc_r1);
+        khdc_s1 = min(khdc_s1, khdc_r2);
+        return khdc_s1 > khdc_s0;
+    }
+    if (khdc_disc <= 0.0f) return true;   // Inside everywhere (the half-space picked the nappe).
+    const float khdc_la = min(khdc_s1, khdc_r1) - khdc_s0;
+    const float khdc_lb = khdc_s1 - max(khdc_s0, khdc_r2);
+    if (khdc_la <= 0.0f && khdc_lb <= 0.0f) return false;
+    if (khdc_la >= khdc_lb) khdc_s1 = min(khdc_s1, khdc_r1);
+    else                    khdc_s0 = max(khdc_s0, khdc_r2);
+    return true;
+}
+// The cone clip of [s0, s1] along P(s) = khdc_d * s (s = view depth, the camera at the origin). The quadratic is
+// solved about the ray's point nearest the apex: from the camera its constant term is a difference of squares of the
+// light's distance, and cancels to float noise that splits the double root of a ray through the lamp by decimetres.
+bool KhDlfCone(float3 khdc_d, float3 khdc_lp, float3 khdc_a, float khdc_cs, inout float khdc_s0, inout float khdc_s1)
+{
+    const float khdc_sc = dot(khdc_d, khdc_lp) / max(dot(khdc_d, khdc_d), 1.0e-12f);
+    float khdc_t0 = khdc_s0 - khdc_sc;
+    float khdc_t1 = khdc_s1 - khdc_sc;
+    const bool khdc_in = KhDlfConeT(khdc_d, khdc_d * khdc_sc - khdc_lp, khdc_a, khdc_cs, khdc_t0, khdc_t1);
+    khdc_s0 = khdc_t0 + khdc_sc;
+    khdc_s1 = khdc_t1 + khdc_sc;
+    return khdc_in;
+}
+// Our meshes' shadow of light map slot khdv_s at absolute point khdv_p: KhDlsShadow's lookup (the face, the bias -
+// the slot's constant and slope plus one texel - and the range fade) as a single nearest compare: a fog sample has no
+// surface, so no normal offset and no receiver-plane gradient, and the march and the grid filter do the smoothing.
+// 1 = lit. TWIN: KhDlsShadow (cb.hlsl).
+float KhDlfDlsVis(int khdv_s, float3 khdv_p)
+{
+    if (khdv_s < 0 || khdv_s > 7) return 1.0f;
+    const float4 khdv_m = dlsMeta[khdv_s];
+    if (khdv_m.w <= 0.0f) return 1.0f;
+    const float khdv_rf = KhDlsRangeFade(khdv_p);
+    if (khdv_rf <= 0.0f) return 1.0f;   // KhDlsShadow's early out: past the maps' range nothing is shadowed.
+    uint khdv_w, khdv_h, khdv_n;
+    khDlsMaps.GetDimensions(khdv_w, khdv_h, khdv_n);
+    if (khdv_w < 2u) return 1.0f;
+    const float3 khdv_p0 = khdv_p - khdv_m.xyz;
+    const float  khdv_far = khdv_m.w;
+    const float  khdv_near = KhDlsNear(khdv_far);
+    float2 khdv_uv;
+    float  khdv_z, khdv_slice, khdv_sx;
+    float3 khdv_fr, khdv_fu;
+    if (!KhDlsFaceUV(khdv_s, khdv_p0, khdv_p0, khdv_near, khdv_far, khdv_uv, khdv_z, khdv_slice,
+                     khdv_fr, khdv_fu, khdv_sx)) return 1.0f;
+    const float khdv_texel = 2.0f * khdv_z / ((float)khdv_w * max(khdv_sx, 1.0e-3f));
+    const float khdv_b = dlsCtl[khdv_s].y + dlsCtl[khdv_s].w * khdv_z + khdv_texel;
+    const float khdv_a = khdv_far / (khdv_far - khdv_near);
+    const float khdv_c = -khdv_near * khdv_far / (khdv_far - khdv_near);
+    const float khdv_ref = khdv_a + khdv_c / max(khdv_z - khdv_b, khdv_near);
+    const int2  khdv_t = clamp(int2(khdv_uv * (float)khdv_w), int2(0, 0), int2((int)khdv_w - 1, (int)khdv_w - 1));
+    const float khdv_st = khDlsMaps.Load(int4(khdv_t, (int)khdv_slice, 0));
+    return (khdv_ref > khdv_st) ? saturate(1.0f - khdv_rf) : 1.0f;
+}
+// One point of KhDlfSsVis's segment, t of the way from khsp_q along khsp_v, against the depth buffer: x = how far it
+// lies behind the visible surface at its pixel (negative: in front), y = that surface's view depth, z = 1; all 0
+// when there is nothing to compare (behind the camera or off the screen). khsp_f / khsp_r / khsp_u: the view axis and
+// the right and up half-extents at view depth 1; khsp_n: their squared lengths.
+float3 KhDlfSsProbe(float3 khsp_q, float3 khsp_v, float khsp_t, float3 khsp_f, float3 khsp_r, float3 khsp_u,
+                    float3 khsp_n)
+{
+    const float3 khsp_w = khsp_q + khsp_v * khsp_t;
+    const float  khsp_vz = dot(khsp_w, khsp_f) / khsp_n.x;
+    if (khsp_vz <= 0.05f) return float3(0.0f, 0.0f, 0.0f);
+    const float2 khsp_c = float2(dot(khsp_w, khsp_r) / (khsp_n.y * khsp_vz),
+                                 dot(khsp_w, khsp_u) / (khsp_n.z * khsp_vz));
+    if (abs(khsp_c.x) >= 1.0f || abs(khsp_c.y) >= 1.0f) return float3(0.0f, 0.0f, 0.0f);
+    const int2 khsp_p = clamp(int2((khsp_c * float2(0.5f, -0.5f) + 0.5f) * float2(fxMeta.z, fxMeta.w)),
+                              int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
+    const float khsp_sd = LinDepth(LoadDepthPS(khsp_p));
+    return float3(khsp_vz - khsp_sd, khsp_sd, 1.0f);
+}
+// Whether a probe lies behind the visible surface, past a bias of 5 cm and a share of its depth (the sample's own
+// surface never counts).
+bool KhDlfSsHidden(float3 khsh_p)
+{
+    return khsh_p.x > 0.05f + KH_DLF_SS_BIAS_K * (khsh_p.x + khsh_p.y);
+}
+// The screen-space occlusion of the segment from fog sample khsv_q to the light at khsv_lp (both camera-relative) by
+// the geometry the camera sees. KH_DLF_SS_TAPS points along it (jittered by khsv_j and spaced so the last is the
+// segment's end, KH_DLF_SS_KEEP short of the light) are compared with the depth buffer. Wherever the segment goes
+// from in front of the visible surface to behind it, or back, between two of them, that interval is halved
+// KH_DLF_SS_REFINE times onto the change; the sample itself comes before the first, in front by construction of the
+// surface its own pixel shows, at view depth khsv_sd0. If the visible depth is continuous at the change (it moves
+// by less than KH_DLF_SS_THICK plus KH_DLF_SS_THICK_K of the depth), the segment passed through that surface:
+// occluded, unless the crossing lies within KH_DLF_SS_SELF of the light (its own body). If the visible depth jumps
+// there, the segment only slipped behind a silhouette, or out from behind one - a post, a window's frame, a car's
+// body in front of the light - and nothing is concluded. A point off the screen or behind the camera carries no
+// information. 1 = lit.
+float KhDlfSsVis(float3 khsv_q, float3 khsv_lp, float3 khsv_f, float3 khsv_r, float3 khsv_u, float khsv_j,
+                 float khsv_sd0)
+{
+    const float3 khsv_v = khsv_lp - khsv_q;
+    const float  khsv_len = length(khsv_v);
+    const float  khsv_span = khsv_len - KH_DLF_SS_KEEP;
+    if (khsv_span <= 0.0f) return 1.0f;
+    const float3 khsv_n = float3(max(dot(khsv_f, khsv_f), 1.0e-8f), max(dot(khsv_r, khsv_r), 1.0e-8f),
+                                 max(dot(khsv_u, khsv_u), 1.0e-8f));
+    float  khsv_pt = 0.0f;                          // The previous point: first the sample, in front.
+    float3 khsv_pp = float3(-1.0f, khsv_sd0, 1.0f);
+    [loop] for (int khsv_k = 0; khsv_k < KH_DLF_SS_TAPS; ++khsv_k) {
+        const float  khsv_t = ((float)khsv_k + khsv_j) / ((float)(KH_DLF_SS_TAPS - 1) + khsv_j)
+                            * (khsv_span / khsv_len);
+        const float3 khsv_p = KhDlfSsProbe(khsv_q, khsv_v, khsv_t, khsv_f, khsv_r, khsv_u, khsv_n);
+        const bool   khsv_ha = KhDlfSsHidden(khsv_pp);
+        [branch] if (khsv_p.z > 0.5f && khsv_pp.z > 0.5f && KhDlfSsHidden(khsv_p) != khsv_ha) {
+            float  khsv_a = khsv_pt;
+            float  khsv_b = khsv_t;
+            float3 khsv_pa = khsv_pp;
+            float3 khsv_pb = khsv_p;
+            bool   khsv_known = true;
+            [loop] for (int khsv_i = 0; khsv_i < KH_DLF_SS_REFINE; ++khsv_i) {
+                const float  khsv_m = 0.5f * (khsv_a + khsv_b);
+                const float3 khsv_pm = KhDlfSsProbe(khsv_q, khsv_v, khsv_m, khsv_f, khsv_r, khsv_u, khsv_n);
+                if (khsv_pm.z < 0.5f) {
+                    khsv_known = false;
+                    break;
+                }
+                if (KhDlfSsHidden(khsv_pm) == khsv_ha) {
+                    khsv_a = khsv_m;
+                    khsv_pa = khsv_pm;
+                } else {
+                    khsv_b = khsv_m;
+                    khsv_pb = khsv_pm;
+                }
+            }
+            const float  khsv_sm = max(khsv_pa.y, khsv_pb.y);
+            const float3 khsv_x = khsv_q + khsv_v * (0.5f * (khsv_a + khsv_b));   // The crossing.
+            if (khsv_known && abs(khsv_pa.y - khsv_pb.y) < KH_DLF_SS_THICK + KH_DLF_SS_THICK_K * khsv_sm &&
+                length(khsv_x - khsv_lp) >= KH_DLF_SS_SELF) return 0.0f;
+        }
+        khsv_pt = khsv_t;
+        khsv_pp = khsv_p;
+    }
+    return 1.0f;
+}
+
+// KH_SSGI_VB - the SSGI gather's visibility (effect 22, effect2.hlsl): screen-space indirect light with visibility
+// bitmasks (Therrien, Levesque and Gilet 2023; the method of Pascal Gilcher's iMMERSE MXAO). The receiver's hemisphere
+// is cut into slices through its view ray; along each, the samples march outward from the pixel. A sample stands for a
+// solid of thickness KH_SSGI_THICK behind its visible face (along its own view ray): seen from the receiver it spans
+// the angles from its front to its back, and it occupies the slice's sectors over that span. Its light reaches the
+// receiver through the sectors it occupies that no nearer sample already held - so a blocker in front of it shadows
+// it where it truly covers it, light passes behind a thin object, and an object in front of the receiver's view ray
+// (nearer the camera) blocks only the few sectors it spans. A sample stands for its stretch of the line (half the gap
+// to each neighbour), laid on its own surface's plane, so the samples tile the line and the coverage thins less with
+// a smaller budget. The 32 sectors of a slice split its N.L lobe about the normal's projection evenly (KhSsgiCum; the
+// bias sharpens the lobe as it did the former gather's N.L), so a sector's share is its N.L-weighted share; a slice
+// weighs its normal's projected length times its lobe's integral, and the sum is normalized by the bias-free total,
+// so a higher bias dims the result as it did before, if less steeply at the top (bias 0.9: about a seventh of 0.15's,
+// the former gather's a sixteenth).
+static const float KH_SSGI_THICK   = 1.0f;   // m.
+static const float KH_SSGI_VB_GAIN = 0.33f;   // The mean onto the former gather's (open scenes, 12).
+// Brightness is kept independent of the sample budget: fewer samples still cover fewer sectors (a sender on an edge
+// is a point, not a stretch; the thickness's ends), measured as a mean falling with n about as (n / 12)^
+// KH_SSGI_VB_NEXP (within about 15 % over 4 - 32 in the harness scenes); the result is scaled by its inverse, so the
+// budget trades noise, not brightness, as the former gather's count normalization did.
+static const float KH_SSGI_VB_NEXP = 0.21f;
+// A slice's cumulative weight at angle khsc_a (radians from the normal's projection) for a bias khsc_b: the integral
+// of the lobe (cos a - b) / (1 - b) that the former gather weighted N.L by (b = 0: the plain cosine), times (1 - b)
+// (the gather divides the slice's total by it). It rises monotonically over [-acos b, acos b], so it is the sectors'
+// distribution function. The solid angle's own |sin| about the view ray (GTAO's slice measure) is left out, as
+// MXAO's bitmask mode leaves it: against a ray-traced reference it fitted worse overall in the scenes tried.
+float KhSsgiCum(float khsc_a, float khsc_b)
+{
+    return sin(khsc_a) - khsc_b * khsc_a;
+}
+// The sectors of 32 that a sample spans: khsb_a = the angles (radians from the normal's projection, in the slice) of
+// its footprint's two ends and their backs; khsb_b = the bias; khsb_hw = the admitted half-width about the normal
+// (acos bias); khsb_c0 / khsb_cr = the slice's cumulative weight at -khsb_hw and over the whole cone (KhSsgiCum). The
+// span is unwrapped the short way from the first angle (a sample's corners lie close in angle), so a sample behind
+// the receiver cannot wrap round into it; the edges are rounded to the nearest sector.
+uint KhSsgiBits(float4 khsb_a, float khsb_b, float khsb_hw, float khsb_c0, float khsb_cr)
+{
+    const float  khsb_w0 = khsb_a.x - 6.2831853f * round(khsb_a.x * 0.15915494f);
+    const float3 khsb_dd = khsb_a.yzw - khsb_a.xxx;
+    const float3 khsb_w = khsb_w0 + (khsb_dd - 6.2831853f * round(khsb_dd * 0.15915494f));
+    const float  khsb_lo = clamp(min(khsb_w0, min(khsb_w.x, min(khsb_w.y, khsb_w.z))), -khsb_hw, khsb_hw);
+    const float  khsb_hi = clamp(max(khsb_w0, max(khsb_w.x, max(khsb_w.y, khsb_w.z))), -khsb_hw, khsb_hw);
+    const float  khsb_k = 1.0f / max(khsb_cr, 1.0e-6f);
+    const uint   khsb_b0 = (uint)round(saturate((KhSsgiCum(khsb_lo, khsb_b) - khsb_c0) * khsb_k) * 32.0f);
+    const uint   khsb_b1 = (uint)round(saturate((KhSsgiCum(khsb_hi, khsb_b) - khsb_c0) * khsb_k) * 32.0f);
+    if (khsb_b1 <= khsb_b0) return 0u;
+    const uint khsb_n = khsb_b1 - khsb_b0;
+    return (khsb_n >= 32u ? 0xFFFFFFFFu : ((1u << khsb_n) - 1u)) << khsb_b0;
+}
+
 float4 PSEffect(VSOut i) : SV_Target
 {
     KhFxBegin(i);   // KH_FX_USER: the lanes, the depth gate, the view-distance cut and the arbitration (cb.hlsl).

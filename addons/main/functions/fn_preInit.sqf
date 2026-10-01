@@ -1621,7 +1621,9 @@ if hasInterface then {
 	KH_var_postProcessingStack = [];
 	KH_var_physicsHandlers = [];
 	KH_var_mainCameraFirstPerson = true;
+	KH_var_globalIlluminationHandler = "";
 	KH_var_fogScatteringHandler = "";
+	KH_var_volumetricDynamicLightsHandler = "";
 
 	{
 		private _basePath = (getText (_x >> "path")) regexReplace ["(/)", "\\"];

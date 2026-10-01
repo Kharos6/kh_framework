@@ -72,7 +72,7 @@
 // contract at KH_SSAO_RECT_PAD.
 //
 // KH_SSAO_VB - the gather is a visibility bitmask (Therrien, Levesque and Gilet 2023; the method of Pascal Gilcher's
-// MXAO, and of the SSGI's gather, effect2.hlsl effect 22). The receiver's hemisphere is cut into KH_SA_NS slices
+// MXAO, and of the SSGI's gather, effect3.hlsl PSSsgiGather). The receiver's hemisphere is cut into KH_SA_NS slices
 // through its view ray and each slice into 32 sectors; along each slice's line the samples march outward on both
 // sides. A sample stands for a solid KH_SA_THICK x the radius deep behind its visible face (along its own view ray)
 // and occupies the sectors that solid spans above the receiver's tangent plane (KhSaEdge clips it there): an object
@@ -149,7 +149,7 @@ Texture2D<float> khsaDepth : register(t3);   // PSSsaoDepth's half-res sample-0 
 // 0.9 at 16) and the former gather read about 0.32; the gain keeps the former overall level at a given strength
 // up close. From about 10 m, where both miss most of the reference, the level depends on the scene: in the harness
 // (scenes 30 / 31) our mesh on engine ground reads 2.1 - 2.3 x the former's mean occlusion at 12.5 m and about
-// 1.35 x at 17.5 m (nearer the reference), and with the ground ours too about 0.9 x and 0.5 x.
+// 1.35 x at 17.5 m (nearer the former's level), and with the ground ours too about 0.9 x and 0.5 x.
 // Where neither holds up: a sub-pixel thin object before a surface at range (a pole at 18 m; its pixels' normal is a
 // depth step) reads as a dark column, somewhat darker than the former's, and a contact whose ground within the radius
 // is a pixel or two tall on screen (grazing, at range) is stepped over by both.

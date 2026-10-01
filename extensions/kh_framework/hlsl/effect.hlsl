@@ -12,6 +12,51 @@
 Texture2D<float> khFxSide  : register(t4);   // matCtl.y: fog scatter's per-pixel fog (28, full size) / the sun flare's visibility (29, 1 x 1).
 Texture2D<float> khUiProbe : register(t5);   // matCtl.z: the UI lane's coverage probe (30, 1 x 1).
 
+// KH_FX_LINZ - the frame's linear depth (LinDepth(LoadDepthPS(p)), metres), drawn once per scene-chain run by
+// PSFxLinZ (the unit's tail) into targets of ours and read here in place of the conversion - a multisampled load, the
+// near-plane marker's load and a division per read - by SSGI, dynamicLightFog and fog scatter. t7: the frame (one
+// texel per pixel of fxMeta.zw), armed by matCtl.x. t8 / t9: a grid's copy, keyed the way its passes read it - t8
+// the SSGI grid's (texel t holds pixel int2(t x the grid factor), the a-trous' mapping), t9
+// dynamicLightFog's (KhDlfFull's) - armed by matCtl.w (1 / 2) when the copy was drawn with the reading pass's own
+// mapping. matCtl.x and .w are otherwise unread in this unit (a textured mesh's lanes); cb.hlsl's receive textures at
+// t7 - t9 are fenced out of it, as at t4 - t6. Every reader takes the conversion in place when unarmed (effect meshes,
+// the PIP, the UI lane, a pass whose depth lanes differ from the run's) or past the copy's edge, so a read is the
+// value the conversion gives there whichever way it is taken. C++: kh_fx_linz_draw, kh_fx_chain_run (binds t7 - t9
+// and puts back what they held).
+Texture2D<float> khLinZ   : register(t7);
+Texture2D<float> khGridZS : register(t8);
+Texture2D<float> khGridZD : register(t9);
+// Unarmed (matCtl.x, one value for the whole draw: a uniform branch), the conversion alone, as before - t7 untouched,
+// whatever the route left there (effect meshes and the PIP reach this too). Armed, the copy is loaded ahead of the
+// in-range branch (texel 0 past the frame, its value unused), which only a read past the frame takes. Branches, not
+// ?: (which evaluates both arms); the conversion written once.
+float KhLinZ(int2 khlz_p)
+{
+    float khlz_z = 0.0f;
+    bool  khlz_cv = true;   // Convert in place.
+    [branch] if (matCtl.x > 0.5f) {
+        const bool khlz_in = khlz_p.x >= 0 && khlz_p.y >= 0 &&
+                             khlz_p.x < (int)fxMeta.z && khlz_p.y < (int)fxMeta.w;
+        khlz_z = khLinZ.Load(int3(khlz_in ? khlz_p : int2(0, 0), 0));
+        khlz_cv = !khlz_in;
+    }
+    [branch] if (khlz_cv) khlz_z = LinDepth(LoadDepthPS(khlz_p));
+    return khlz_z;
+}
+// The SSGI grid's: texel t of a grid at factor khsz_inv (the a-trous' rule on local0.y). Read only by the chain's
+// SSGI pass, which binds t8 to its copy or to nothing (kh_fx_chain_run), so the size query and the load (ahead of
+// the branch, texel 0 when unarmed or past the copy) meet a view of ours or none.
+float KhSsgiGridZ(int2 khsz_t, float khsz_inv)
+{
+    uint khsz_w, khsz_h;
+    khGridZS.GetDimensions(khsz_w, khsz_h);
+    const bool khsz_in = matCtl.w > 0.5f && matCtl.w < 1.5f && khsz_t.x >= 0 && khsz_t.y >= 0 &&
+                         khsz_t.x < (int)khsz_w && khsz_t.y < (int)khsz_h;
+    float khsz_z = khGridZS.Load(int3(khsz_in ? khsz_t : int2(0, 0), 0));
+    [branch] if (!khsz_in) khsz_z = KhLinZ(int2(float2(khsz_t) * khsz_inv));
+    return khsz_z;
+}
+
 // Bound at t19 only for LUT passes - t19 is reserved for this unit
 // codebase-wide (inside StateBackup's save range, so the engine's own bind is
 // restored after every flush). Sampled with integer Loads only (tetrahedral
@@ -309,7 +354,26 @@ int2 KhDlfFull(int2 khdf_t, float2 khdf_g)
 float KhDlfMaxD() { return clamp(fxParams1.y, 10.0f, 5000.0f); }
 float KhDlfKey(int2 khdk_p)
 {
-    return min(LinDepth(LoadDepthPS(khdk_p)), KhDlfMaxD());
+    return min(KhLinZ(khdk_p), KhDlfMaxD());   // KH_FX_LINZ.
+}
+// KH_FX_LINZ: KhLinZ(KhDlfFull(t, g)) - KhDlfKey before its KhDlfMaxD clamp, which KhDlfKeyG applies - through
+// the grid's copy (t9): drawn with g = its own size, so it serves a reader whose g is that size; any other reads in
+// place. Read only by the chain's dynamicLightFog pass (its filter and composite) once its lights are up - the only
+// case either runs (dlCtl.x) - when it binds t9 to its copy or to nothing (kh_fx_chain_run), so the size query and
+// the load (ahead of the branch, texel 0 when unarmed or past the copy) meet a view of ours or none.
+float KhDlfGridZ(int2 khdz_t, float2 khdz_g)
+{
+    uint khdz_w, khdz_h;
+    khGridZD.GetDimensions(khdz_w, khdz_h);
+    const bool khdz_in = matCtl.w > 1.5f && khdz_t.x >= 0 && khdz_t.y >= 0 && khdz_t.x < (int)khdz_w &&
+                         khdz_t.y < (int)khdz_h && khdz_g.x == (float)khdz_w && khdz_g.y == (float)khdz_h;
+    float khdz_z = khGridZD.Load(int3(khdz_in ? khdz_t : int2(0, 0), 0));
+    [branch] if (!khdz_in) khdz_z = KhLinZ(KhDlfFull(khdz_t, khdz_g));
+    return khdz_z;
+}
+float KhDlfKeyG(int2 khdk_t, float2 khdk_g)
+{
+    return min(KhDlfGridZ(khdk_t, khdk_g), KhDlfMaxD());
 }
 // The engine's fog-end ramp on what lies khdn_m metres from the camera (PSMain / PSComposite's: fully fogged past the
 // fog end when the engine terms carry one, fogEngine.w in [0.5, 1.5)), a factor on the camera leg's transmittance.
@@ -527,7 +591,7 @@ float3 KhDlfSsProbe(float3 khsp_q, float3 khsp_v, float khsp_t, float3 khsp_f, f
     if (abs(khsp_c.x) >= 1.0f || abs(khsp_c.y) >= 1.0f) return float3(0.0f, 0.0f, 0.0f);
     const int2 khsp_p = clamp(int2((khsp_c * float2(0.5f, -0.5f) + 0.5f) * float2(fxMeta.z, fxMeta.w)),
                               int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
-    const float khsp_sd = LinDepth(LoadDepthPS(khsp_p));
+    const float khsp_sd = KhLinZ(khsp_p);   // KH_FX_LINZ.
     return float3(khsp_vz - khsp_sd, khsp_sd, 1.0f);
 }
 // Whether a probe lies behind the visible surface, past a bias of 5 cm and a share of its depth (the sample's own
@@ -595,7 +659,7 @@ float KhDlfSsVis(float3 khsv_q, float3 khsv_lp, float3 khsv_f, float3 khsv_r, fl
     return 1.0f;
 }
 
-// KH_SSGI_VB - the SSGI gather's visibility (effect 22, effect2.hlsl): screen-space indirect light with visibility
+// KH_SSGI_VB - the SSGI gather's visibility (effect 22: PSSsgiGather): screen-space indirect light with visibility
 // bitmasks (Therrien, Levesque and Gilet 2023; the method of Pascal Gilcher's iMMERSE MXAO). The receiver's hemisphere
 // is cut into slices through its view ray; along each, the samples march outward from the pixel. A sample stands for a
 // solid of thickness KH_SSGI_THICK behind its visible face (along its own view ray): seen from the receiver it spans

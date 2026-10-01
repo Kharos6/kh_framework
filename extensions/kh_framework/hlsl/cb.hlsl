@@ -43,10 +43,12 @@ cbuffer CBObj : register(b0)
     // VS), y = the submesh slot (the instanced VS adds it to the instance's own
     // base), z = 1 when x is uniform for every instance, w = per-draw
     // alpha-mode override (>= 0 replaces the table's mode; 3 = the opaque part
-    // of a blend split). On every untextured fill x and w are zero and unread,
-    // and so are y and z except on an effect pass that drew its side value
-    // first: there y (the scene chain's fog scatter / sun flare) or z (the UI
-    // lane's coverage probe) arms that read (KH_FX_SIDE, effect.hlsl).
+    // of a blend split). On every untextured fill all four are zero, and read
+    // only as arms: y (the scene chain's fog scatter / sun flare) or z (the UI
+    // lane's coverage probe) on an effect pass that drew its side value first
+    // (KH_FX_SIDE, effect.hlsl); x (the frame's) or w (1 the SSGI grid's, 2
+    // dynamicLightFog's) on a scene-chain pass a linear-depth copy serves
+    // (KH_FX_LINZ, effect.hlsl).
     float4 matCtl;
     float4 fuseMeta;
     float4 fuseStage[12];

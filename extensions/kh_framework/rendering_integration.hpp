@@ -7707,6 +7707,14 @@ struct Resources {
     ID3D11VertexShader*      vs_fullscreen = nullptr;   // SV_VertexID fullscreen triangle.
     ID3D11PixelShader*       ps_effect = nullptr;   // Uber effect shader (meshes + fullscreen).
     UINT                     ps_effect_samples = 0;   // Depth MSAA count it was compiled for.
+    // KH_FX_SPLIT / KH_FX_LINZ (effect3.hlsl's tail): the effect unit's chain-side entry points - the linear-depth
+    // targets' builder, the SSGI gather and a-trous, dynamicLightFog's gather and filter - made with ps_effect at its
+    // sample count (ensure_effect_shader); each consumer gates on its pointer.
+    ID3D11PixelShader*       ps_fx_linz = nullptr;
+    ID3D11PixelShader*       ps_ssgi_gather = nullptr;
+    ID3D11PixelShader*       ps_ssgi_atrous = nullptr;
+    ID3D11PixelShader*       ps_dlf_gather = nullptr;
+    ID3D11PixelShader*       ps_dlf_filter = nullptr;
     ID3D11VertexShader*      vs_composite = nullptr;   // injected-path VS (adds world position).
     ID3D11PixelShader*       ps_maskcast = nullptr;   // Analytic mask cast (single-sample t0).
     ID3D11PixelShader*       ps_rpmerge = nullptr;    // KH_VOL_REPLAY: the replayed count and footprint, merged.
@@ -8025,6 +8033,13 @@ struct Resources {
     ID3D11ShaderResourceView* fxs_srv[3] = {};
     UINT                      fxs_w[3] = {};
     UINT                      fxs_h[3] = {};
+    // KH_FX_LINZ (effect.hlsl's note): the frame's linear depth [0] and the SSGI / dynamicLightFog grids' copies [1] /
+    // [2] (R32_FLOAT), drawn by kh_fx_linz_draw. Made at first use, remade on a size change, released with the device.
+    ID3D11Texture2D*          linz_tex[3] = {};
+    ID3D11RenderTargetView*   linz_rtv[3] = {};
+    ID3D11ShaderResourceView* linz_srv[3] = {};
+    UINT                      linz_w[3] = {};
+    UINT                      linz_h[3] = {};
     ID3D11Texture2D*          scene_tex = nullptr;
     ID3D11ShaderResourceView* scene_srv = nullptr;
     UINT                      scene_w = 0, scene_h = 0;
@@ -8082,6 +8097,11 @@ struct Resources {
         KH_SAFE_RELEASE(vs_fullscreen);
         KH_SAFE_RELEASE(ps_effect);
         ps_effect_samples = 0;
+        KH_SAFE_RELEASE(ps_fx_linz);   // KH_FX_SPLIT / KH_FX_LINZ.
+        KH_SAFE_RELEASE(ps_ssgi_gather);
+        KH_SAFE_RELEASE(ps_ssgi_atrous);
+        KH_SAFE_RELEASE(ps_dlf_gather);
+        KH_SAFE_RELEASE(ps_dlf_filter);
         KH_SAFE_RELEASE(vs_composite);
         KH_SAFE_RELEASE(ps_composite);
         KH_SAFE_RELEASE(ps_composite_arb);
@@ -8309,6 +8329,12 @@ struct Resources {
             KH_SAFE_RELEASE(fxs_rtv[khfs_i]);
             KH_SAFE_RELEASE(fxs_tex[khfs_i]);
             fxs_w[khfs_i] = fxs_h[khfs_i] = 0;
+        }
+        for (int khlz_i = 0; khlz_i < 3; ++khlz_i) {   // KH_FX_LINZ.
+            KH_SAFE_RELEASE(linz_srv[khlz_i]);
+            KH_SAFE_RELEASE(linz_rtv[khlz_i]);
+            KH_SAFE_RELEASE(linz_tex[khlz_i]);
+            linz_w[khlz_i] = linz_h[khlz_i] = 0;
         }
         // The sun maps, their pyramids and the tier keys' subjects all died
         // above; the flags and the input hash that claim them live outside
@@ -13153,7 +13179,9 @@ struct alignas(16) ConstantData {
                         // every instance, w = alpha-mode override (-1 none). The material lanes
                         // themselves live in the table (KhGpuMat). On an effect pass y / z are
                         // KH_FX_SIDE's arms instead (the scene chain's fog scatter / sun flare,
-                        // the UI lane's probe), zero unless the pass drew its side value first.
+                        // the UI lane's probe), zero unless the pass drew its side value first,
+                        // and x / w KH_FX_LINZ's (a scene-chain SSGI / dynamicLightFog / fog
+                        // scatter pass's linear-depth copies), zero unless one serves the pass.
     float fuse_meta[4];   // x = the fused stages (kh_fuse_append); y, zw = KH_GLOW_PYR's arm and extent
                           // (kh_glow_lanes), or on an anamorphic pass KH_ANA_PYR's arm and frame (kh_ana_lanes).
     float fuse_stage[12][4];
@@ -27754,6 +27782,17 @@ inline std::string ensure_resources(ID3D11Device* dev) {
         { khsp_comp_src.c_str(), "VSCompositeInst", "vs_5_0", khsp_d0t, 0 },
         { khfx_src.c_str(), "PSEffect", "ps_5_0", khfx_d0, 0 },
         { khfx_src.c_str(), "PSEffect", "ps_5_0", khfx_d1, 0 },
+        // KH_FX_SPLIT / KH_FX_LINZ: ensure_effect_shader's other five, at either MSAA_DEPTH (the main depth's).
+        { khfx_src.c_str(), "PSFxLinZ",     "ps_5_0", khfx_d0, 0 },
+        { khfx_src.c_str(), "PSFxLinZ",     "ps_5_0", khfx_d1, 0 },
+        { khfx_src.c_str(), "PSSsgiGather", "ps_5_0", khfx_d0, 0 },
+        { khfx_src.c_str(), "PSSsgiGather", "ps_5_0", khfx_d1, 0 },
+        { khfx_src.c_str(), "PSSsgiAtrous", "ps_5_0", khfx_d0, 0 },
+        { khfx_src.c_str(), "PSSsgiAtrous", "ps_5_0", khfx_d1, 0 },
+        { khfx_src.c_str(), "PSDlfGather",  "ps_5_0", khfx_d0, 0 },
+        { khfx_src.c_str(), "PSDlfGather",  "ps_5_0", khfx_d1, 0 },
+        { khfx_src.c_str(), "PSDlfFilter",  "ps_5_0", khfx_d0, 0 },
+        { khfx_src.c_str(), "PSDlfFilter",  "ps_5_0", khfx_d1, 0 },
         { khfx_src.c_str(), "PSGlowSeed", "ps_5_0", khfx_d0, 0 },   // KH_GLOW_PYR (the creation below).
         { khfx_src.c_str(), "PSGlowDown", "ps_5_0", khfx_d0, 0 },
         { khfx_src.c_str(), "PSAnaSeed", "ps_5_0", khfx_d0, 0 },   // KH_ANA_PYR (the creation below).
@@ -28742,6 +28781,11 @@ inline std::string ensure_depth_srv(ID3D11Device* dev, ID3D11DeviceContext* ctx,
 inline std::string ensure_effect_shader(ID3D11Device* dev) {
     if (g_res.ps_effect && g_res.ps_effect_samples == g_res.depth_sample_count) return "";
     if (g_res.ps_effect) { g_res.ps_effect->Release(); g_res.ps_effect = nullptr; }
+    // KH_FX_SPLIT / KH_FX_LINZ: the unit's chain-side entry points go and come with it (a sample-count change), so
+    // none outlives the MSAA_DEPTH it was compiled for.
+    ID3D11PixelShader** const khes_ps[5] = { &g_res.ps_fx_linz, &g_res.ps_ssgi_gather, &g_res.ps_ssgi_atrous,
+                                             &g_res.ps_dlf_gather, &g_res.ps_dlf_filter };
+    for (ID3D11PixelShader** khes_p : khes_ps) KH_SAFE_RELEASE(*khes_p);
 
     const D3D_SHADER_MACRO defines[] = {
         { "MSAA_DEPTH", g_res.depth_sample_count > 1 ? "1" : "0" },
@@ -28756,6 +28800,14 @@ inline std::string ensure_effect_shader(ID3D11Device* dev) {
     HRESULT hr = dev->CreatePixelShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &g_res.ps_effect);
     blob->Release();
     if (FAILED(hr)) return "CreatePixelShader(effect) " + hr_str(hr);
+    // KH_FX_SPLIT / KH_FX_LINZ (the prewarm tables' twins): non-fatal - absent, the pass that draws one stands down
+    // (SSGI skipped at the chain's loop top, dynamicLightFog unarmed, the depth read in place), reported once.
+    static const char* const khes_ent[5] = { "PSFxLinZ", "PSSsgiGather", "PSSsgiAtrous", "PSDlfGather", "PSDlfFilter" };
+    for (int khes_k = 0; khes_k < 5; ++khes_k) {
+        kh_ps_optional(dev, fx_src, khes_ent[khes_k], defines, khes_ps[khes_k], "KH effect split shader: ");
+        if (!*khes_ps[khes_k]) report_error_once_safe(std::string("KH effect split shader unavailable: ") +
+                                                      khes_ent[khes_k]);
+    }
     g_res.ps_effect_samples = g_res.depth_sample_count;
     return "";
 }
@@ -29938,6 +29990,74 @@ inline bool kh_fx_side_draw(ID3D11Device* dev, ID3D11DeviceContext* ctx, int khs
     }
     khsd_sv.restore(ctx);
     return khsd_ok;
+}
+
+// KH_FX_LINZ - draw linear-depth target k (effect.hlsl's note: 0 the frame, fxMeta.x 34; 1 the SSGI grid's copy, 35;
+// 2 dynamicLightFog's, 36) with PSFxLinZ, khlz_w x khlz_h, one texel per pixel, from khlz_cbd - the reading pass's
+// own constants: its depth lanes, and for a grid its mapping in local0 and its matCtl.x arm, so the copy reads the
+// frame's. kh_fx_side_draw's contract: it uploads its own slice to khlz_cb (the pass uploads after it) and every
+// other binding it makes is put back (KhGlowSave); the target's own slot (t7 + k) is nulled first and left null - the
+// caller binds the result. The target is made at first use and remade on a size change. False = none drawn: the
+// readers stay unarmed and convert in place.
+inline bool kh_fx_linz_draw(ID3D11Device* dev, ID3D11DeviceContext* ctx, int khlz_k, ConstantData& khlz_cbd,
+                            UINT khlz_w, UINT khlz_h, ID3D11Buffer* khlz_cb) {
+    if (!dev || !ctx || !khlz_cb || khlz_k < 0 || khlz_k > 2) return false;
+    if (khlz_w == 0 || khlz_h == 0 || khlz_w > 16384 || khlz_h > 16384) return false;
+    if (!g_res.ps_fx_linz || !g_res.vs_fullscreen || !g_res.rasterizer || !g_res.dss_off) return false;
+    ID3D11ShaderResourceView* khlz_null = nullptr;
+    ctx->PSSetShaderResources(7 + static_cast<UINT>(khlz_k), 1, &khlz_null);   // Off its slot before it is a target.
+    if (!g_res.linz_tex[khlz_k] || !g_res.linz_rtv[khlz_k] || !g_res.linz_srv[khlz_k] ||
+        g_res.linz_w[khlz_k] != khlz_w || g_res.linz_h[khlz_k] != khlz_h) {
+        KH_SAFE_RELEASE(g_res.linz_srv[khlz_k]);
+        KH_SAFE_RELEASE(g_res.linz_rtv[khlz_k]);
+        KH_SAFE_RELEASE(g_res.linz_tex[khlz_k]);
+        g_res.linz_w[khlz_k] = g_res.linz_h[khlz_k] = 0;
+        D3D11_TEXTURE2D_DESC khlz_td = {};
+        khlz_td.Width = khlz_w;
+        khlz_td.Height = khlz_h;
+        khlz_td.MipLevels = 1;
+        khlz_td.ArraySize = 1;
+        khlz_td.Format = DXGI_FORMAT_R32_FLOAT;
+        khlz_td.SampleDesc.Count = 1;
+        khlz_td.Usage = D3D11_USAGE_DEFAULT;
+        khlz_td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(dev->CreateTexture2D(&khlz_td, nullptr, &g_res.linz_tex[khlz_k])) ||
+            FAILED(dev->CreateRenderTargetView(g_res.linz_tex[khlz_k], nullptr, &g_res.linz_rtv[khlz_k])) ||
+            FAILED(dev->CreateShaderResourceView(g_res.linz_tex[khlz_k], nullptr, &g_res.linz_srv[khlz_k]))) {
+            KH_SAFE_RELEASE(g_res.linz_srv[khlz_k]);
+            KH_SAFE_RELEASE(g_res.linz_rtv[khlz_k]);
+            KH_SAFE_RELEASE(g_res.linz_tex[khlz_k]);
+            report_error_once_safe("KH fx linear-depth target could not be made (the depth is read in place)");
+            return false;
+        }
+        g_res.linz_w[khlz_k] = khlz_w;
+        g_res.linz_h[khlz_k] = khlz_h;
+    }
+    KhGlowSave khlz_sv;
+    khlz_sv.capture(ctx);
+    const float khlz_id0 = khlz_cbd.fx_meta[0];
+    khlz_cbd.fx_meta[0] = 34.0f + static_cast<float>(khlz_k);
+    const bool khlz_ok = kh_upload_obj_cb(ctx, khlz_cb, khlz_cbd);
+    khlz_cbd.fx_meta[0] = khlz_id0;
+    if (khlz_ok) {
+        ctx->OMSetRenderTargets(1, &g_res.linz_rtv[khlz_k], nullptr);
+        D3D11_VIEWPORT khlz_vp = {};
+        khlz_vp.Width = static_cast<float>(khlz_w);
+        khlz_vp.Height = static_cast<float>(khlz_h);
+        khlz_vp.MaxDepth = 1.0f;
+        ctx->RSSetViewports(1, &khlz_vp);
+        const FLOAT khlz_bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        ctx->IASetInputLayout(nullptr);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
+        ctx->PSSetShader(g_res.ps_fx_linz, nullptr, 0);
+        ctx->RSSetState(g_res.rasterizer);
+        ctx->OMSetDepthStencilState(g_res.dss_off, 0);
+        ctx->OMSetBlendState(nullptr, khlz_bf, 0xFFFFFFFF);
+        ctx->Draw(3, 0);
+    }
+    khlz_sv.restore(ctx);
+    return khlz_ok;
 }
 
 inline float effect_time_seconds();   // Defined below; the snapshot timestamp needs it.
@@ -56150,10 +56270,69 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
         bool                      khfp_upyr = false;   // KH_FX_USER: the user pass reads the pyramid.
         const RenderObject*       khfp_obj = nullptr;   // KH_FX_TEX: the pass's object (its textures).
         ID3D11ShaderResourceView* khfp_lut = nullptr;
+        // KH_FX_LINZ (effect.hlsl's note): this run's linear-depth targets. The frame's is drawn at the run's first
+        // pass set to read it (khlz_frame: fog scatter at its flush, SSGI past its drop-whole gate, dynamicLightFog
+        // once its lights are up), from its constants; its key is that pass's depth lanes (the
+        // depth pair, the viewport range, the marker arm) and frame size, and a pass is armed (mat_ctl x = 1) only
+        // when its own are the key - t1 and t37, the conversion's textures, are the run's own (bound above). A
+        // grid's copy is drawn for an armed pass by its block, with its own mapping (the SSGI factor; the DLF grid),
+        // and arms mat_ctl w. t7 - t9 are taken at the first draw and given back at the run's end.
+        bool                      khlz_saved = false;
+        ID3D11ShaderResourceView* khlz_prev[3] = {};
+        bool                      khlz_tried = false;
+        bool                      khlz_ok = false;
+        float                     khlz_key[7] = {};
+        bool                      khlz_gs_tried = false;
+        bool                      khlz_gs_ok = false;
+        float                     khlz_gs_inv = 0.0f;
+        bool                      khlz_gd_tried = false;
+        bool                      khlz_gd_ok = false;
+        ID3D11ShaderResourceView* khlz_none = nullptr;   // t8 / t9 for an unarmed pass.
+        auto khlz_save = [&]() {
+            if (khlz_saved) return;
+            ctx->PSGetShaderResources(7, 3, khlz_prev);
+            khlz_saved = true;
+        };
+        auto khlz_keyof = [](const ConstantData& khlz_c, float khlz_out[7]) {
+            khlz_out[0] = khlz_c.depth_params[0];
+            khlz_out[1] = khlz_c.depth_params[1];
+            khlz_out[2] = khlz_c.depth_params[2];
+            khlz_out[3] = khlz_c.depth_params[3];
+            khlz_out[4] = khlz_c.shadow_meta2[0];
+            khlz_out[5] = khlz_c.fx_meta[2];
+            khlz_out[6] = khlz_c.fx_meta[3];
+        };
+        // The frame's linear depth for a builtin SSGI / dynamicLightFog / fog-scatter pass that will read it - drawn
+        // at the run's first such call, from that pass's constants; then this pass armed when its lanes are the key
+        // (any other converts in place).
+        auto khlz_frame = [&](ConstantData& khlz_pc) {
+            float khlz_k[7];
+            khlz_keyof(khlz_pc, khlz_k);
+            if (!khlz_tried) {
+                khlz_tried = true;
+                const bool khlz_in = khlz_k[5] >= 1.0f && khlz_k[5] <= 16384.0f &&
+                                     khlz_k[6] >= 1.0f && khlz_k[6] <= 16384.0f;
+                const UINT khlz_w = khlz_in ? static_cast<UINT>(khlz_k[5]) : 0u;
+                const UINT khlz_h = khlz_in ? static_cast<UINT>(khlz_k[6]) : 0u;
+                if (khlz_w > 0 && khlz_h > 0 && static_cast<float>(khlz_w) == khlz_k[5] &&
+                    static_cast<float>(khlz_h) == khlz_k[6]) {   // A whole frame: the shader's fxMeta.zw bound.
+                    khlz_save();
+                    ConstantData khlz_c = khlz_pc;
+                    khlz_ok = kh_fx_linz_draw(dev, ctx, 0, khlz_c, khlz_w, khlz_h, g_res.constant_buffer);
+                    if (khlz_ok) {
+                        memcpy(khlz_key, khlz_k, sizeof(khlz_key));
+                        ctx->PSSetShaderResources(7, 1, &g_res.linz_srv[0]);
+                    }
+                }
+            }
+            if (khlz_ok && memcmp(khlz_key, khlz_k, sizeof(khlz_key)) == 0) khlz_pc.mat_ctl[0] = 1.0f;
+        };
 
         auto khfp_flush = [&](bool khfp_final) {
             if (!khfp_live) return;
             khfp_live = false;
+            // KH_FX_LINZ: fog scatter reads the depth whenever it runs (its side draw below, then the pass).
+            if (!khfp_ps && khfp_effect == static_cast<int>(EffectId::Fogscatter)) khlz_frame(khfp_cbd);
             bool khsg_pair = false;
             // The resolve reads whichever half-res buffer holds the final
             // smoothed field (three a-trous iterations, steps 1 / 2 / 4,
@@ -56163,12 +56342,32 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
             ID3D11SamplerState* khsg_s2old = nullptr;   // KH_FX_SAMP_S2: the saved s2.
             if (khfp_effect == static_cast<int>(EffectId::Ssgi) && !khfp_ps) {
                 if (!g_res.chain_srv[2] || !g_res.chain_srv[4] ||
-                    !g_res.chain_rtv[4] || !g_res.khsg_sampler) return;   // The seed joins the drop-whole
-                                                                          // gate.
+                    !g_res.chain_rtv[4] || !g_res.khsg_sampler ||
+                    !g_res.ps_ssgi_gather || !g_res.ps_ssgi_atrous) return;   // The seed and the gather's and
+                                                                               // a-trous' entry points (KH_FX_SPLIT)
+                                                                               // join the drop-whole gate.
                 ctx->PSGetSamplers(2, 1, &khsg_s2old);   // KH_FX_SAMP_S2: slot 2.
                 const float khsg_l0sv = khfp_cbd.local0[0];
                 const float khsg_l1sv = khfp_cbd.local0[1];
                 khfp_cbd.local0[1] = (float)g_res.scene_w / (float)(g_khsg_w > 0 ? g_khsg_w : 1);
+                // KH_FX_LINZ: the frame's (past the drop-whole gate: the pass reads it from here on), then the grid's
+                // copy at this factor, for the a-trous (KhSsgiGridZ) - an armed pass's, drawn once a run per factor;
+                // mat_ctl w = 1 arms it. t8 holds this pass's copy, or nothing when unarmed (the helper's size query
+                // and load meet no other route's view).
+                khlz_frame(khfp_cbd);
+                if (khfp_cbd.mat_ctl[0] > 0.5f && g_khsg_w > 0 && g_khsg_h > 0) {
+                    if (!khlz_gs_tried || khlz_gs_inv != khfp_cbd.local0[1]) {
+                        khlz_gs_tried = true;
+                        khlz_save();
+                        ConstantData khlz_c = khfp_cbd;
+                        khlz_gs_ok = kh_fx_linz_draw(dev, ctx, 1, khlz_c, static_cast<UINT>(g_khsg_w),
+                                                     static_cast<UINT>(g_khsg_h), g_res.constant_buffer);
+                        khlz_gs_inv = khfp_cbd.local0[1];
+                    }
+                    if (khlz_gs_ok) khfp_cbd.mat_ctl[3] = 1.0f;
+                }
+                khlz_save();
+                ctx->PSSetShaderResources(8, 1, khfp_cbd.mat_ctl[3] > 0.5f ? &g_res.linz_srv[1] : &khlz_none);
                 ctx->PSSetSamplers(2, 1, &g_res.khsg_sampler);
                 // Both exits release; s1 itself is untouched at either
                 // point.
@@ -56209,7 +56408,9 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                     return;
                 }
                 ctx->PSSetShaderResources(3, 1, &g_res.chain_srv[4]);
+                ctx->PSSetShader(g_res.ps_ssgi_gather, nullptr, 0);   // KH_FX_SPLIT: its own entry point.
                 ctx->Draw(3, 0);   // The gather (t0 = source for albedo, t3 = the seed its taps read).
+                ctx->PSSetShader(g_res.ps_effect, nullptr, 0);
                 khsg_fin = g_res.chain_srv[2];   // Raw gather until smoothing lands.
                 // Missing buffer or a failed upload skips the draw whole -
                 // the resolve reads the raw gather instead (one noisier
@@ -56217,6 +56418,7 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                 if (g_res.chain_rtv[3] && g_res.chain_srv[3]) {
                     khfp_cbd.fx_meta[0] = 25.0f;
                     khfp_cbd.local0[0] = 1.0f;
+                    ctx->PSSetShader(g_res.ps_ssgi_atrous, nullptr, 0);   // KH_FX_SPLIT: the three iterations'.
 
                     if (kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) {
                         ctx->OMSetRenderTargets(1, &g_res.chain_rtv[3], nullptr);
@@ -56246,6 +56448,7 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                     }
 
                 }
+                ctx->PSSetShader(g_res.ps_effect, nullptr, 0);   // KH_FX_SPLIT: the pass's own again.
                 khfp_cbd.local0[0] = khsg_l0sv;
                 khfp_cbd.local0[1] = khsg_l1sv;
                 if (khsg_vpn) {
@@ -56281,7 +56484,8 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                 static thread_local std::vector<float> khdlf_rec;   // Scratch.
                 uint32_t khdlf_pn = 0, khdlf_first = 0;
                 float khdlf_scale = 1.0f;
-                const uint32_t khdlf_n = (g_res.chain_rtv[2] && g_res.chain_srv[2] && g_khsg_w > 0 && g_khsg_h > 0)
+                const uint32_t khdlf_n = (g_res.chain_rtv[2] && g_res.chain_srv[2] && g_khsg_w > 0 && g_khsg_h > 0 &&
+                                          g_res.ps_dlf_gather && g_res.ps_dlf_filter)   // KH_FX_SPLIT.
                                        ? kh_dlf_select(khfp_cbd, khdlf_rec, khdlf_pn, khdlf_scale) : 0u;
                 const bool khdlf_up = khdlf_n > 0 && kh_dlr_append(ctx, khdlf_rec.data(), khdlf_n * 6u, khdlf_first);
                 if (khdlf_n > 0 && !khdlf_up) kh_stat(g_stats.dl_ring_fails);   // KH_DL_DIAG.
@@ -56297,6 +56501,23 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                     khfp_cbd.local0[1] = static_cast<float>(g_res.scene_w) / static_cast<float>(g_khsg_w);
                     khfp_cbd.local0[2] = static_cast<float>(g_khsg_w);
                     khfp_cbd.local0[3] = static_cast<float>(g_khsg_h);
+                    // KH_FX_LINZ: the frame's (the lights are up: the gather, the filter and the composite read
+                    // it), then the grid's copy (KhDlfGridZ: KhDlfFull at this grid) for the filter and the
+                    // composite - an armed pass's, drawn once a run; mat_ctl w = 2 arms it. t9 holds this pass's
+                    // copy, or nothing when unarmed (the helper's size query and load meet no other route's view).
+                    khlz_frame(khfp_cbd);
+                    if (khfp_cbd.mat_ctl[0] > 0.5f) {
+                        if (!khlz_gd_tried) {
+                            khlz_gd_tried = true;
+                            khlz_save();
+                            ConstantData khlz_c = khfp_cbd;
+                            khlz_gd_ok = kh_fx_linz_draw(dev, ctx, 2, khlz_c, static_cast<UINT>(g_khsg_w),
+                                                         static_cast<UINT>(g_khsg_h), g_res.constant_buffer);
+                        }
+                        if (khlz_gd_ok) khfp_cbd.mat_ctl[3] = 2.0f;
+                    }
+                    khlz_save();
+                    ctx->PSSetShaderResources(9, 1, khfp_cbd.mat_ctl[3] > 1.5f ? &g_res.linz_srv[2] : &khlz_none);
                     D3D11_VIEWPORT khdlf_vps; UINT khdlf_vpn = 1;
                     ctx->RSGetViewports(&khdlf_vpn, &khdlf_vps);
                     D3D11_VIEWPORT khdlf_vpg = {};
@@ -56304,7 +56525,7 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                     khdlf_vpg.Height   = static_cast<float>(g_khsg_h);
                     khdlf_vpg.MaxDepth = 1.0f;
                     ctx->RSSetViewports(1, &khdlf_vpg);
-                    ctx->PSSetShader(g_res.ps_effect, nullptr, 0);
+                    ctx->PSSetShader(g_res.ps_dlf_gather, nullptr, 0);   // KH_FX_SPLIT: its own entry point.
                     ID3D11ShaderResourceView* khdlf_null = nullptr;
                     ctx->PSSetShaderResources(3, 1, &khdlf_null);   // Off t3 before [2] becomes a target.
                     khfp_cbd.fx_meta[0] = static_cast<float>(KH_DLF_GATHER);
@@ -56318,6 +56539,7 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                         khdlf_fin = g_res.chain_srv[2];
                         if (g_res.chain_rtv[3] && g_res.chain_srv[3]) {
                             khfp_cbd.fx_meta[0] = static_cast<float>(KH_DLF_FILTER);
+                            ctx->PSSetShader(g_res.ps_dlf_filter, nullptr, 0);   // KH_FX_SPLIT: both iterations'.
                             for (int khdlf_it = 0; khdlf_it < 2; ++khdlf_it) {
                                 khfp_cbd.local0[0] = khdlf_it == 0 ? 1.0f : 2.0f;
                                 if (!kh_upload_obj_cb(ctx, g_res.constant_buffer, khfp_cbd)) break;
@@ -56330,6 +56552,7 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                             }
                         }
                     }
+                    ctx->PSSetShader(g_res.ps_effect, nullptr, 0);   // KH_FX_SPLIT: the pass's own again.
                     memcpy(khfp_cbd.local0, khdlf_l0, sizeof(khdlf_l0));
                     if (khdlf_vpn) {
                         ctx->RSSetViewports(1, &khdlf_vps);
@@ -56444,6 +56667,11 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
             if (f.second.effect == static_cast<int>(EffectId::DynLightFog) &&
                 (f.second.blend_mode == 0 || f.second.blend_mode == 4 || f.second.blend_mode == 5) &&
                 (!(f.second.fx[0] > 0.0f) || !kh_dlf_pool_live())) continue;
+            // KH_FX_SPLIT: SSGI without its gather / a-trous entry points (failed to build, reported) is skipped
+            // here for the same reason - the flush's drop-whole gate would otherwise lose the chain's write-back
+            // were it the last pass.
+            if (f.second.effect == static_cast<int>(EffectId::Ssgi) &&
+                (!g_res.ps_ssgi_gather || !g_res.ps_ssgi_atrous)) continue;
 
             // Custom effect: the pass draws with the user PS; absent or
             // failed compiles skip the pass (reported once).
@@ -56499,6 +56727,10 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
         // of the frame.
         khfp_om.restore(ctx);
         khfp_om.release();
+        if (khlz_saved) {   // KH_FX_LINZ: t7 - t9 back as the run found them.
+            ctx->PSSetShaderResources(7, 3, khlz_prev);
+            for (ID3D11ShaderResourceView*& khlz_p : khlz_prev) KH_SAFE_RELEASE(khlz_p);
+        }
     }
 }
 

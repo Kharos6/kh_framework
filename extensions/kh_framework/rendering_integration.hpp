@@ -681,8 +681,8 @@ inline bool kh_stats_on() { return g_stats_armed.load(std::memory_order_relaxed)
 // KH_PROF: opt-in frame-time instrumentation, CPU and GPU, per main-depth
 // cycle. Nothing here runs unless the stats are armed (a getRenderStats):
 // a disarmed session pays one relaxed load per scope, no clock read, no query
-// (the first fold after a disarm only closes, unread, the bracket the armed
-// cycle opened).
+// (the first fold after a disarm closes, unread, the bracket the armed cycle
+// opened, and zeroes the armed-only accumulators once - KH_PROF_DISARM).
 //
 // CPU zones: KhProfScope takes two TSC reads (__rdtsc) around a region and
 // adds the ticks and one entry to the zone's accumulators - relaxed atomics,
@@ -958,8 +958,8 @@ struct KhProfSub {
 #define KH_PROF_SUB_ALL(z, on) KhProfSub khpb_sub_##z((z), (on), true, 1u)
 // The decisions (render-thread identity; KH_PROF_SAMPLE_HASH). kh_prof_up_begin: at the head of kh_upload_capture,
 // the funnel's first step for every captured upload (Unmap and UpdateSubresource alike); KhProfDsDecision: past
-// reorder_pre_draw's render-thread gate, for the rest of the draw. Disarmed: one relaxed load each, and every step
-// below reads the bool.
+// reorder_pre_draw's render-thread gate, for the rest of the draw. Disarmed: one relaxed load and two plain stores
+// each (the bools), and every step below reads the bool.
 static uint32_t g_prof_up_ctr = 0;
 static bool     g_prof_up_on = false;
 static bool     g_prof_up_t = false;
@@ -1007,14 +1007,36 @@ struct KhProfDsDecision {
 // misses (an incomplete side), twins of an authored window, new lists hashed and the bytes hashed, matches run and
 // replayed (KH_DL_PRES_MEMO) and the record x pool-light pairs the runs stood against (records x pool, as before),
 // windows authored and the VS bytes they copied; then the pairs the runs visited (KH_DL_PRES_HIX: the lights a
-// record's height can match, or the whole pool) and the height index's rebuilds.
+// record's height can match, or the whole pool), the height index's rebuilds and its in-place moves (a presence
+// rewrite that moved a light's height). KH_MAP_MIX: the captured maps
+// (UpdateSubresource's not among them) by kind - whole-buffer (WRITE_DISCARD) and partial (WRITE_NO_OVERWRITE) -
+// each with the buffers' full ByteWidth summed (what copying the buffer whole at Unmap would move), and the
+// whole-buffer maps by ByteWidth: <= 256, <= 1 KiB, <= 4 KiB, <= 16 KiB, larger. KH_MAP_REDIRECT: the whole-buffer
+// maps handed a cached buffer and their ByteWidth (the bytes the Unmap copies to the driver's pointer), the
+// whole-buffer maps with a pending slot that were not (no free record, no cached buffer to give, wider than the
+// cap, the hooks not all installed, or KH_MAP_REDIRECT_ON false), and the cached buffers (re)assigned to a buffer (a
+// first map, a new width, or the table's churn). KH_MAP_BRANCH: the Map and Unmap hooks' per-call branches - Maps
+// through the hook, those whose forget (KH_REPLAY_CBREUSE) took g_rp_cbkeep_mx, those KH_REPLAY_SPLIT looked up in
+// its set and those it split, those that scanned the redirect records (kh_redir_drop), those the upload gate
+// admitted, and of these the ones given a pending slot and the ones finding every slot held; Unmaps through the
+// hook, those that walked the pending slots, those that found theirs, those that scanned the redirect records
+// (kh_redir_close); and the forgets that took the mutex from any hook. Counted on the hook scope's armed snapshot
+// (khps_on) - the forgets' own count excepted: kh_rp_cb_forget has callers with no such scope and loads
+// kh_stats_on() on its locked path, so on the call that straddles an arm or a disarm it and mapReplayLocks can differ
+// by one. Behind the render-thread gate, plain adds as above; elsewhere any thread, so atomic adds (kh_fun_any).
 enum KhFunnel : uint32_t {
     KHF_UPLOADS, KHF_UPDSUB, KHF_EAGER_N, KHF_EAGER_B, KHF_FENCES, KHF_EXT_N, KHF_EXT_B,
     KHF_SHADOW_N, KHF_SHADOW_B, KHF_SH11_N, KHF_SH11_B, KHF_SH10_N, KHF_SH10_B, KHF_SHVS_N, KHF_SHVS_B,
     KHF_SHOTHER_N, KHF_SHOTHER_B, KHF_WANT_REFUSED, KHF_IDLE_SKIP, KHF_GATE_PROBES,
     KHF_DRAWS, KHF_DL_NOLIST, KHF_DL_SAME, KHF_DL_MISS, KHF_DL_TWIN, KHF_DL_LISTS, KHF_DL_HASH_B,
     KHF_DL_RUNS, KHF_DL_REPLAYS, KHF_DL_PAIRS, KHF_DL_WINDOWS, KHF_DL_WIN_VS_B,
-    KHF_DL_VISITS, KHF_DL_HIX_BUILDS,   // KH_DL_PRES_HIX.
+    KHF_DL_VISITS, KHF_DL_HIX_BUILDS, KHF_DL_HIX_MOVES,   // KH_DL_PRES_HIX.
+    KHF_MAP_DISC_N, KHF_MAP_DISC_B, KHF_MAP_NOOV_N, KHF_MAP_NOOV_B,   // KH_MAP_MIX.
+    KHF_MAP_W256, KHF_MAP_W1K, KHF_MAP_W4K, KHF_MAP_W16K, KHF_MAP_WBIG,
+    KHF_REDIR_N, KHF_REDIR_B, KHF_REDIR_REFUSED, KHF_REDIR_BUFS,   // KH_MAP_REDIRECT.
+    KHF_HK_MAP_N, KHF_HK_RP_LOCK, KHF_HK_RP_CHECK, KHF_HK_RP_SPLIT, KHF_HK_RD_DROP,   // KH_MAP_BRANCH.
+    KHF_HK_ADMIT, KHF_HK_PENDING, KHF_HK_NOSLOT,
+    KHF_HK_UNMAP_N, KHF_HK_UN_WALK, KHF_HK_UN_HIT, KHF_HK_RD_CLOSE, KHF_RP_LOCKS,
     KHF_N
 };
 static const char* const g_fun_name[] = {
@@ -1024,13 +1046,24 @@ static const char* const g_fun_name[] = {
     "gateProbes",
     "draws", "dlNoList", "dlSameUpload", "dlShadowMiss", "dlTwin", "dlNewLists", "dlHashBytes",
     "dlMatchRuns", "dlMatchReplays", "dlMatchPairs", "dlWindows", "dlWindowVsBytes",
-    "dlMatchVisited", "dlHeightIxBuilds",
+    "dlMatchVisited", "dlHeightIxBuilds", "dlHeightIxMoves",
+    "mapDiscard", "mapDiscardBytes", "mapNoOverwrite", "mapNoOverwriteBytes",
+    "mapW256", "mapW1k", "mapW4k", "mapW16k", "mapWBig",
+    "mapRedirected", "mapRedirectedBytes", "mapRedirectRefused", "mapRedirectBuffers",
+    "mapCalls", "mapReplayLocks", "mapReplayChecks", "mapReplaySplits", "mapRedirectDrops",
+    "mapAdmitted", "mapPending", "mapNoSlot",
+    "unmapCalls", "unmapSlotWalks", "unmapSlotHits", "unmapRedirectCloses", "replayLocks",
 };
 static_assert(sizeof(g_fun_name) / sizeof(g_fun_name[0]) == KHF_N, "KH_PROF_FUNNEL: a name per counter");
 static std::atomic<uint64_t> g_fun_acc[KHF_N];   // This cycle's (render-thread identity).
 static std::atomic<uint64_t> g_fun_pub[KHF_N];   // The ended cycle's (the fold).
 static std::atomic<uint64_t> g_fun_win[KHF_N];   // Summed over the window (KH_PROF_WINDOW).
 inline void kh_fun(KhFunnel khfn_k, uint64_t khfn_n) { kh_prof_plain_add(g_fun_acc[khfn_k], khfn_n); }
+// KH_MAP_BRANCH: a count made off the render-thread gate (any thread): an atomic add, armed callers only, and only to
+// a counter kh_fun never adds to.
+inline void kh_fun_any(KhFunnel khfa_k, uint64_t khfa_n) {
+    g_fun_acc[khfa_k].fetch_add(khfa_n, std::memory_order_relaxed);
+}
 // The want table's kinds (kh_dl_want_note's tag; a buffer named in more than one role carries each bit).
 static constexpr uint8_t KH_DL_KIND_CB11 = 1u;
 static constexpr uint8_t KH_DL_KIND_CB10 = 2u;
@@ -1042,6 +1075,21 @@ inline void kh_fun_shadow(uint8_t khfs_kind, uint64_t khfs_b) {
     else if (khfs_kind & KH_DL_KIND_CB10) { kh_fun(KHF_SH10_N, 1u); kh_fun(KHF_SH10_B, khfs_b); }
     else if (khfs_kind & KH_DL_KIND_VS)   { kh_fun(KHF_SHVS_N, 1u); kh_fun(KHF_SHVS_B, khfs_b); }
     else                                  { kh_fun(KHF_SHOTHER_N, 1u); kh_fun(KHF_SHOTHER_B, khfs_b); }
+}
+// KH_MAP_MIX: one captured map - its kind and its buffer's full ByteWidth (armed callers only).
+inline void kh_fun_map_mix(bool khmm_discard, uint32_t khmm_w) {
+    if (!khmm_discard) {
+        kh_fun(KHF_MAP_NOOV_N, 1u);
+        kh_fun(KHF_MAP_NOOV_B, khmm_w);
+        return;
+    }
+    kh_fun(KHF_MAP_DISC_N, 1u);
+    kh_fun(KHF_MAP_DISC_B, khmm_w);
+    if (khmm_w <= 256u)        kh_fun(KHF_MAP_W256, 1u);
+    else if (khmm_w <= 1024u)  kh_fun(KHF_MAP_W1K, 1u);
+    else if (khmm_w <= 4096u)  kh_fun(KHF_MAP_W4K, 1u);
+    else if (khmm_w <= 16384u) kh_fun(KHF_MAP_W16K, 1u);
+    else                       kh_fun(KHF_MAP_WBIG, 1u);
 }
 // scanExtBytes: the extension bytes each step made the funnel copy (the step in flight, g_prof_up_cur).
 static std::atomic<uint64_t> g_prof_xb_acc[KHP_ZONE_N];
@@ -14371,6 +14419,10 @@ static std::vector<KhShaderJob> g_khsm_q;   // Built before any worker starts.
 static std::atomic<size_t> g_khsm_next{0};
 // Deliberately never destructed (detached workers may outlive static teardown).
 static std::vector<std::thread>& g_khsm_thr = *(new std::vector<std::thread>());
+// The workers kh_shader_mt_shutdown detached, by a duplicate of each thread's handle (the detach closes std::thread's
+// own): process_detach bounds and ends them as it does the listed ones. Pruned of exited threads at each shutdown.
+// Never destructed, as g_khsm_thr; the same callers touch both.
+static std::vector<HANDLE>& g_khsm_orphans = *(new std::vector<HANDLE>());
 static bool g_khsm_active = false;   // A batch is live (caller thread only).
 static std::atomic<int> g_khsm_live{0};
 static std::atomic<bool> g_khsa_abort{false};
@@ -14792,6 +14844,17 @@ inline bool kh_shader_async_gate(const KhShaderJob* khsa_jobs, size_t khsa_n) {
     return true;
 }
 
+// Closes the kept handles of detached workers that have exited.
+inline void kh_khsm_orphans_prune() {
+    size_t khop_k = 0;
+    for (size_t khop_i = 0; khop_i < g_khsm_orphans.size(); ++khop_i) {
+        const HANDLE khop_h = g_khsm_orphans[khop_i];
+        if (WaitForSingleObject(khop_h, 0) == WAIT_OBJECT_0) CloseHandle(khop_h);
+        else g_khsm_orphans[khop_k++] = khop_h;
+    }
+    g_khsm_orphans.resize(khop_k);
+}
+
 inline void kh_shader_mt_shutdown(bool khss_wait) {
     g_khsa_abort.store(true, std::memory_order_relaxed);
     const uint64_t khss_t0 = steady_now_ms();
@@ -14805,11 +14868,18 @@ inline void kh_shader_mt_shutdown(bool khss_wait) {
            steady_now_ms() - khss_t0 < khss_bound) {
         Sleep(10);
     }
+    kh_khsm_orphans_prune();
     if (g_khsm_live.load(std::memory_order_acquire) == 0) {
         kh_shader_mt_finish(false);   // The clean path: join and free everything.
     } else {
         for (std::thread& khss_t : g_khsm_thr) {
-            if (khss_t.joinable()) { try { khss_t.detach(); } catch (...) {} }
+            if (!khss_t.joinable()) continue;
+            HANDLE khss_h = nullptr;   // Kept for process_detach (g_khsm_orphans); none kept = as before.
+            if (DuplicateHandle(GetCurrentProcess(), static_cast<HANDLE>(khss_t.native_handle()), GetCurrentProcess(),
+                                &khss_h, 0, FALSE, DUPLICATE_SAME_ACCESS) && khss_h) {
+                try { g_khsm_orphans.push_back(khss_h); } catch (...) { CloseHandle(khss_h); }
+            }
+            try { khss_t.detach(); } catch (...) {}
         }
         g_khsm_thr.clear();
         g_khsm_active = false;
@@ -29287,7 +29357,8 @@ inline std::string ensure_effect_shader(ID3D11Device* dev) {
     return "";
 }
 
-// Injected-path shaders, compiled per depth MSAA count.
+// The composite unit (the injection's shaders, and the flush's near-gap route), compiled once: single-sample
+// whatever the depth's count (below).
 static uint64_t g_comp_fail_streak = 0;
 // Backoff: a failed compile must not retry per injection (a D3DCompile every
 // frame is a framerate collapse).
@@ -29319,8 +29390,8 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
 
     // comp_depth_samples is the snapshot's count, pinned to 1 by
     // snapshot_composite_depth: this unit always compiles MSAA_DEPTH 0 /
-    // SAMPLE_COUNT 1 (composite.hlsl's MSAA branch is never built), matching
-    // ensure_resources' hard-coded speculation tables.
+    // SAMPLE_COUNT 1 (composite.hlsl has no MSAA path: it reads the snapshot
+    // alone), matching ensure_resources' hard-coded speculation tables.
     const std::string sc = std::to_string(g_res.comp_depth_samples > 0 ? g_res.comp_depth_samples : 1);
 
     const D3D_SHADER_MACRO defines[] = {
@@ -30575,14 +30646,21 @@ inline std::string snapshot_composite_depth(ID3D11Device* dev, ID3D11DeviceConte
         // max(.x, .y) rule, gone to KhCastZPick, read the engine's depth).
         // Always single-sample, whatever the main depth's count: the resolve
         // (PSDepthResolve, compiled at the live count) folds the samples to
-        // the farthest plane in .x, so a pixel any sample leaves uncovered
-        // reads as clear and the guard keeps the fragment. That is safe
-        // because every draw the guard shaders serve keeps a hardware depth
-        // test against the live main depth - the injection never rebinds the
-        // OM (it draws into the DSV the trigger verified) and the flush's mesh
-        // DSS is never dss_off for a composite-eligible solid - so the
-        // per-sample cut happens there. The guard only discards early where
-        // ALL samples are covered.
+        // the farthest plane in .x, so a guard discards only where every
+        // sample lies nearer than the fragment (a pixel any sample leaves
+        // uncovered reads as clear and keeps it). The injection's composite
+        // draws keep a hardware depth test against the live main depth (the
+        // injection never rebinds the OM: it draws into the DSV the trigger
+        // verified), so their per-sample cut happens there. The flush's
+        // readers draw with dss_off - no hardware test: the guard of a
+        // DepthMode::Off solid (PSMain, or PSComposite's ARB twin when the
+        // solid takes the near-gap route) and an effect mesh's far-frame
+        // arbitration (khArbSnap, t2). On a pixel a nearer surface covers in
+        // part, .x reads the farther sample, the fragment survives and writes
+        // every sample it covers: such a draw paints over up to a 1 px rim
+        // along the edges of what stands in front of it (MSAA only - world
+        // meshes stand down at 1x). Accepted as is: the unread .y (nearest)
+        // would trade that rim for a 1 px gap in the draw instead.
         cd.Format = DXGI_FORMAT_R32G32_FLOAT;
         cd.SampleDesc.Count = 1;
         cd.Usage = D3D11_USAGE_DEFAULT;
@@ -32399,6 +32477,8 @@ struct ProjPendingMap {
     ID3D11Resource* res = nullptr;
     void* data = nullptr;
     uint32_t bytes = 0;
+    bool discard = false;   // KH_MAP_MIX: the map was WRITE_DISCARD (armed counters; KH_MAP_REDIRECT takes no other).
+    bool redir = false;     // KH_MAP_REDIRECT: data is the cached buffer handed to the engine, not the driver's.
 };
 static ProjPendingMap g_proj_pending[8];
 
@@ -32664,15 +32744,195 @@ inline void kh_wc_stream(uint8_t* khwc_d, const uint8_t* khwc_s, uint32_t khwc_n
     }
     if (khwc_i < khwc_n) memcpy(khwc_d + khwc_i, khwc_s + khwc_i, khwc_n - khwc_i);
 }
-// True when it fenced and streamed; false = the plain memcpy (no SSE4.1, or
-// under 16 bytes, where no aligned 16-byte load fits). KH_WC_SMALL: the floor
-// was 128 bytes, which sent the engine's small constant buffers (64 to 127
-// bytes: the scanners admit 64 and up) to memcpy - one uncached bus read per
-// 16 bytes of write-combined memory. Streaming them costs one MFENCE per such
-// capture where the source is cacheable (NVIDIA's maps, and UpdateSubresource
-// data on every vendor): the accepted price.
+// KH_MAP_REDIRECT - the capture's source moved into cached memory. Every map the capture takes is the engine's
+// WRITE_DISCARD of a constant buffer (KH_MAP_MIX: 100 % of them, none partial, every width <= 4 KiB, in the town and
+// the interior), and reading the mapped memory is the capture's whole cost: a fence and a streaming read per map on
+// write-combined memory, and on memory behind the PCIe BAR (AMD with Smart Access Memory) reads that cross the bus
+// at a fraction of a GB/s. So hooked_map hands the engine a cached buffer of ours instead of the driver's pointer
+// (kh_redir_open), and hooked_unmap copies the buffer's whole ByteWidth to the driver's pointer just before the
+// original Unmap (kh_redir_close) - a write, which no memory type makes slow. The capture between them reads the
+// cached copy (g_wc_cached_src: kh_wc_copy's plain memcpy, no fence). 3Dmigoto's TrackAndDivertMap does the same
+// for its texture tracking and states its limit: a WRITE_NO_OVERWRITE map cannot be redirected - nobody knows which
+// bytes the application wrote - so those keep the mapped read as before, as does every map the capture does not
+// take (no pending slot, another context, a width past KH_REDIR_MAX).
+// The GPU sees the engine's bytes: everything the engine wrote reaches the driver's pointer before the original
+// Unmap, in the same thread. What the engine left unwritten is undefined after a DISCARD (the driver's renamed
+// memory held anything); here it is the same buffer's previous bytes - one cached buffer per engine buffer
+// (g_rbuf), never another buffer's, so a scanner reading an unwritten tail meets this buffer's own past contents,
+// not a stranger's matrices (zeros when the cached buffer was just assigned).
+// The copy-back does not depend on the capture: its record (g_redir, keyed by context and buffer) is written at the
+// Map and consumed by the Unmap of that context, whatever the slot table, the gate or a reset did in between, and
+// the records are never reset (a mapping in flight must reach its Unmap). A record is published by its context's
+// pointer (stored last), so a Map or Unmap on another thread - a deferred context - reads the live count and
+// compares context pointers, and touches nothing else. Any successful Map of a buffer drops a record of an earlier
+// mapping of it on that context whose Unmap never came (kh_redir_drop). A cached buffer still named by a live
+// record is never handed out again or re-assigned. The capture checks its slot's buffer is a live record's
+// (kh_redir_holds) before reading it: a stale slot is not captured. The redirect costs a cached write by the engine,
+// the capture's plain read, and one write of the whole ByteWidth to the driver's pointer per map.
+// KH_MAP_REDIRECT_ON false: every map as before (the build-time off switch).
+static constexpr bool     KH_MAP_REDIRECT_ON = true;
+static constexpr uint32_t KH_REDIR_N = 8u;           // Maps in flight at once (as g_proj_pending).
+static constexpr uint32_t KH_REDIR_MAX = 16384u;     // The widest map redirected (measured: none past 4 KiB).
+static constexpr uint32_t KH_RBUF_N = 2048u;         // Cached buffers, one per engine buffer.
+static constexpr uint32_t KH_RBUF_PROBE = 8u;
+static_assert(KH_RBUF_N == 2048u, "KH_MAP_REDIRECT: kh_redir_buf_for's >> 53 takes 11 bits - re-derive it");
+struct KhRedirBuf {
+    const void* res = nullptr;       // The engine buffer it serves (weak: an identity, never dereferenced).
+    uint32_t    cap = 0;             // Usable bytes at buf.
+    uint32_t    want = 0;            // The width it last served (another: a new buffer at a recycled address).
+    uint8_t*    buf = nullptr;       // 64-byte aligned, inside mem.
+    // new[] / delete[] by kh_redir_buf_for alone, and never freed by a destructor: at an unload (FreeLibrary) the
+    // engine can be writing a buffer handed out before the hooks went, and a static destructor would free it under
+    // that write (the file's rule for objects that may outlive static teardown, as g_khsm_thr).
+    uint8_t*    mem = nullptr;
+};
+static KhRedirBuf g_rbuf[KH_RBUF_N];
+struct KhRedir {
+    std::atomic<void*> ctx{ nullptr };   // The mapping context; null = free. Stored last at the Map; cleared at the
+                                         // Unmap after its copy, or when the next Map of the buffer drops it.
+    const void* res = nullptr;           // The mapped buffer.
+    void*       real = nullptr;          // The driver's pointer.
+    uint8_t*    buf = nullptr;           // The cached buffer the engine writes.
+    uint32_t    bytes = 0;               // The buffer's ByteWidth: all of it goes to real.
+};
+static KhRedir g_redir[KH_REDIR_N];
+// Live records: a hint that lets an Unmap or a Map with none skip the search. Written (plain load and store, no
+// locked instruction - a map is 21k - 42k a frame) only by a Map or Unmap on a context that owns a record: the
+// immediate context, which the engine never uses from two threads at once (KH_UI_DIAG: the runtime's multithread
+// protection is off and the engine hands the context over between its render and game threads) - so no update is
+// lost, and the hand-over orders each update before the next. A deferred context only reads it (a record could name
+// one only at the address of a context torn down mid-map, recycled - then one copy-back could be skipped, and no
+// write lands in freed memory), and owns no record a stale value could make it miss.
+static std::atomic<uint32_t> g_redir_live{ 0u };
+inline void kh_redir_live_add(int32_t khrl_d) noexcept {
+    const int32_t khrl_n = static_cast<int32_t>(g_redir_live.load(std::memory_order_relaxed)) + khrl_d;
+    g_redir_live.store(static_cast<uint32_t>(khrl_n), std::memory_order_relaxed);
+}
+static bool g_wc_cached_src = false;   // The capture in flight reads a cached buffer (render thread; hooked_unmap).
+// Is khrb_buf named by a live record (of any context)? Only the render thread writes a record's buffer, at the Map.
+inline bool kh_redir_buf_live(const uint8_t* khrb_buf) noexcept {
+    for (uint32_t khrb_i = 0; khrb_i < KH_REDIR_N; ++khrb_i) {
+        if (g_redir[khrb_i].ctx.load(std::memory_order_acquire) && g_redir[khrb_i].buf == khrb_buf) return true;
+    }
+    return false;
+}
+// The cached buffer for engine buffer khrb_res, at least khrb_n bytes; nullptr = none can be given (khrb_on: the
+// hook scope's armed snapshot, for the funnel's count). Its own entry
+// when the probe run holds one, as it is while the width it serves is unchanged; else - grown, or another width at
+// the address (a released buffer's address recycled) - re-assigned; else an unused entry, else one whose memory no
+// live record names (the table's churn). A buffer a live record names is never handed out again or re-assigned.
+// Memory is kept when large enough, and zeroed whenever the entry is (re)assigned. Not distinguished: a recycled
+// address carrying the same width (the width cache pins what it holds, so only after its eviction) - its first map
+// may meet the released buffer's bytes where the engine writes none, as the driver's renamed memory could. The
+// home slot takes the product's high bits (an allocator's aligned addresses differ in their high bits).
+inline uint8_t* kh_redir_buf_for(const void* khrb_res, uint32_t khrb_n, bool khrb_on) {
+    const uint32_t khrb_h = static_cast<uint32_t>(
+        ((static_cast<uint64_t>(reinterpret_cast<uintptr_t>(khrb_res)) >> 4) * 0x9E3779B97F4A7C15ull) >> 53) &
+        (KH_RBUF_N - 1u);
+    int32_t khrb_own = -1, khrb_empty = -1;
+    for (uint32_t khrb_p = 0; khrb_p < KH_RBUF_PROBE; ++khrb_p) {
+        const int32_t khrb_i = static_cast<int32_t>((khrb_h + khrb_p) & (KH_RBUF_N - 1u));
+        const KhRedirBuf& khrb_e = g_rbuf[khrb_i];
+        if (!khrb_e.res) { if (khrb_empty < 0) khrb_empty = khrb_i; continue; }
+        if (khrb_e.res == khrb_res) { khrb_own = khrb_i; break; }
+    }
+    if (khrb_own >= 0) {
+        KhRedirBuf& khrb_o = g_rbuf[khrb_own];
+        if (kh_redir_buf_live(khrb_o.buf)) return nullptr;
+        if (khrb_o.cap >= khrb_n && khrb_o.want == khrb_n) return khrb_o.buf;
+    }
+    int32_t khrb_at = khrb_own >= 0 ? khrb_own : khrb_empty;
+    for (uint32_t khrb_p = 0; khrb_at < 0 && khrb_p < KH_RBUF_PROBE; ++khrb_p) {   // Churn: the first idle one.
+        const int32_t khrb_i = static_cast<int32_t>((khrb_h + khrb_p) & (KH_RBUF_N - 1u));
+        if (!kh_redir_buf_live(g_rbuf[khrb_i].buf)) khrb_at = khrb_i;
+    }
+    if (khrb_at < 0) return nullptr;
+    KhRedirBuf& khrb_t = g_rbuf[khrb_at];
+    const uint32_t khrb_cap = (khrb_n + 63u) & ~63u;
+    if (khrb_t.cap < khrb_cap) {
+        uint8_t* const khrb_m = new uint8_t[static_cast<size_t>(khrb_cap) + 63u];   // May throw: nothing changed yet.
+        delete[] khrb_t.mem;   // No live record names it (above).
+        khrb_t.mem = khrb_m;
+        const uintptr_t khrb_a = (reinterpret_cast<uintptr_t>(khrb_t.mem) + 63u) & ~static_cast<uintptr_t>(63u);
+        khrb_t.buf = reinterpret_cast<uint8_t*>(khrb_a);
+        khrb_t.cap = khrb_cap;
+    }
+    memset(khrb_t.buf, 0, khrb_t.cap);
+    khrb_t.res = khrb_res;
+    khrb_t.want = khrb_n;
+    if (khrb_on) kh_fun(KHF_REDIR_BUFS, 1u);   // KH_PROF_FUNNEL.
+    return khrb_t.buf;
+}
+// hooked_map, after any successful Map of khrd_res on khrd_ctx (any thread): a record of an earlier mapping of it
+// whose Unmap never came through the hook (a context torn down mid-map) is dropped - its driver pointer is dead, and
+// an Unmap of the new mapping must not copy into it.
+inline void kh_redir_drop(void* khrd_ctx, const void* khrd_res) noexcept {
+    for (uint32_t khrd_i = 0; khrd_i < KH_REDIR_N; ++khrd_i) {
+        KhRedir& khrd_r = g_redir[khrd_i];
+        if (khrd_r.ctx.load(std::memory_order_acquire) != khrd_ctx || khrd_r.res != khrd_res) continue;
+        khrd_r.ctx.store(nullptr, std::memory_order_release);
+        kh_redir_live_add(-1);
+    }
+}
+// hooked_map, an admitted WRITE_DISCARD with a pending slot (render thread): hands the engine our cached buffer -
+// khro_m->pData is replaced, the record already published, and nothing is left to throw - and returns it; or
+// returns nullptr, the map left as it is. khro_n: the buffer's ByteWidth; khro_on: the hook scope's armed snapshot.
+inline uint8_t* kh_redir_open(void* khro_ctx, const void* khro_res, D3D11_MAPPED_SUBRESOURCE* khro_m, uint32_t khro_n,
+                              bool khro_on) {
+    if (!KH_MAP_REDIRECT_ON || !khro_m || !khro_m->pData || khro_n == 0u || khro_n > KH_REDIR_MAX) return nullptr;
+    if (!g_reorder_hook_active.load(std::memory_order_acquire)) return nullptr;   // Map and Unmap both hooked.
+    int32_t khro_free = -1;
+    for (uint32_t khro_i = 0; khro_i < KH_REDIR_N && khro_free < 0; ++khro_i) {
+        if (!g_redir[khro_i].ctx.load(std::memory_order_acquire)) khro_free = static_cast<int32_t>(khro_i);
+    }
+    if (khro_free < 0) return nullptr;
+    uint8_t* const khro_b = kh_redir_buf_for(khro_res, khro_n, khro_on);   // The one call that may throw.
+    if (!khro_b) return nullptr;
+    KhRedir& khro_r = g_redir[khro_free];
+    khro_r.res = khro_res;
+    khro_r.real = khro_m->pData;
+    khro_r.buf = khro_b;
+    khro_r.bytes = khro_n;
+    kh_redir_live_add(1);
+    khro_r.ctx.store(khro_ctx, std::memory_order_release);
+    khro_m->pData = khro_b;
+    return khro_b;
+}
+// The capture's check (render thread, inside the Unmap, before kh_redir_close): is khrh_buf this context's live
+// record for khrh_res?
+inline bool kh_redir_holds(void* khrh_ctx, const void* khrh_res, const void* khrh_buf) noexcept {
+    for (uint32_t khrh_i = 0; khrh_i < KH_REDIR_N; ++khrh_i) {
+        const KhRedir& khrh_r = g_redir[khrh_i];
+        if (khrh_r.ctx.load(std::memory_order_acquire) == khrh_ctx && khrh_r.res == khrh_res &&
+            khrh_r.buf == khrh_buf) return true;
+    }
+    return false;
+}
+// hooked_unmap, any thread, before the original Unmap: this context's record for khrc_res, if any - its bytes to the
+// driver's pointer, whole, and the record freed.
+inline void kh_redir_close(void* khrc_ctx, const void* khrc_res) noexcept {
+    for (uint32_t khrc_i = 0; khrc_i < KH_REDIR_N; ++khrc_i) {
+        KhRedir& khrc_r = g_redir[khrc_i];
+        if (khrc_r.ctx.load(std::memory_order_acquire) != khrc_ctx || khrc_r.res != khrc_res) continue;
+        memcpy(khrc_r.real, khrc_r.buf, khrc_r.bytes);
+        khrc_r.ctx.store(nullptr, std::memory_order_release);
+        kh_redir_live_add(-1);
+        return;
+    }
+}
+// True when it fenced and streamed; false = the plain memcpy (a cached source -
+// a redirected map's buffer, KH_MAP_REDIRECT - or no SSE4.1, or under 16
+// bytes, where no aligned 16-byte load fits). KH_WC_SMALL: the floor was 128
+// bytes, which sent the engine's small constant buffers (64 to 127 bytes: the
+// scanners admit 64 and up) to memcpy - one uncached bus read per 16 bytes of
+// write-combined memory. Streaming them costs one MFENCE per such capture where
+// the source is cacheable (UpdateSubresource data on every vendor, and a map
+// the redirect did not take on NVIDIA): the accepted price.
 inline bool kh_wc_copy(void* khwc_dst, const void* khwc_src, uint32_t khwc_n) {
-    if (khwc_n < 16u || !kh_wc_stream_ok()) { memcpy(khwc_dst, khwc_src, khwc_n); return false; }
+    if (g_wc_cached_src || khwc_n < 16u || !kh_wc_stream_ok()) {   // KH_MAP_REDIRECT: a cached source - plain.
+        memcpy(khwc_dst, khwc_src, khwc_n);
+        return false;
+    }
     if (g_prof_up_on) kh_fun(KHF_FENCES, 1u);   // KH_PROF_FUNNEL (the funnel is this function's one user).
     _mm_mfence();
     kh_wc_stream(static_cast<uint8_t*>(khwc_dst), static_cast<const uint8_t*>(khwc_src), khwc_n);
@@ -35631,17 +35891,33 @@ inline void kh_dl_pres_sight(DlPoolLight& khps_pl, uint64_t khps_now, uint64_t k
 // word, lowest bit first (kh_dl_bit_low), which is ascending pool index; reading clears the marks.
 // Fresh: checked whenever g_dl_pres_epoch has moved since the last check - every writer of the pool moves it
 // (KH_DL_PRES_MEMO's note: the harvest, the resets, a rewrite that changes a record's bytes) - or the pool's count
-// differs. The heights' bits are compared with the build's and the index is rebuilt only when one differs: street
-// lamps keep their heights, so a harvest or a colour rewrite leaves it standing.
+// differs. The heights' bits are compared with the index's: street lamps keep their heights, so a harvest or a
+// colour rewrite leaves it standing. A presence rewrite that moves a light's height moves its entry in place
+// (kh_dl_phix_move), so the compare finds it in step. Any other difference makes it stale (invalid), and it is
+// rebuilt only once the whole-pool walks run while it stood stale have visited KH_DL_HIX_PAYBACK times the pairs a
+// rebuild costs (KH_DL_HIX_DEBT: a run of a few records after a height change paid a whole rebuild - up to 8 x the
+// walk it replaced). A pool under KH_DL_HIX_MIN_POOL lights always walks (the index cannot pay there). Which way a
+// run goes never changes its outcome - both are the same walk over the same lights in pool order - only its cost.
+// KH_DL_HIX_OOM: the index is marked invalid before its rebuild's allocations (and around an in-place move, which
+// allocates nothing) and valid only after it completes, so an allocation that throws leaves it invalid (rebuilt from
+// scratch later), never half-built and in use.
 // A record whose candidates exceed a sixth of the pool walks the whole pool as before - the same result, and there
-// the walk is the cheaper (CU's bench: a band holding a quarter of a large pool ran at 1.1 - 1.35 x the walk with the
-// index, a seventh at 0.50 - 0.55 x). The test is one compare after the lower bound: is the (n / 6 + 1)-th candidate
+// the walk is the cheaper (the bench of the conversation that wrote the index, not re-run since: a band holding a
+// quarter of a large pool ran at 1.1 - 1.35 x the walk with the index, a seventh at 0.50 - 0.55 x). Neither way is
+// always faster than the pre-band walk: on pools of a few hundred lights whose heights mostly lie within a few
+// metres (the band holding a third to two thirds of the pool, where the index stands down), the band's own branch
+// mispredicts and a run took up to ~1.6 x the pre-band walk (g++; ~1.3 x clang; MSVC unmeasured) - at the measured
+// pools (25 - 48 lights) 0.7 - 0.9 x. The test is one compare after the lower bound: is the (n / 6 + 1)-th candidate
 // inside the band? - so a dense band pays one binary search before the walk, and nothing is marked. Render thread
 // (as g_dl); the session reset reinitialises it.
+static constexpr uint32_t KH_DL_HIX_MIN_POOL = 64u;   // Smaller pools always walk.
+static constexpr uint64_t KH_DL_HIX_PAYBACK = 4u;     // Stale walks repay this many rebuilds before one is made.
 struct KhDlPresHix {
-    uint64_t epoch = 0;                            // g_dl_pres_epoch at the last check (0 = never checked).
+    bool     valid = false;                        // hb / hs / mark describe the pool's heights (KH_DL_HIX_OOM).
+    uint64_t epoch = 0;                            // g_dl_pres_epoch at the last check that found it in step.
     uint32_t n = 0;                                // g_dl.pool_n at the build.
-    std::vector<uint32_t> hb;                      // Each pool light's height bits at the build.
+    uint64_t debt = 0;                             // KH_DL_HIX_DEBT: pairs walked while stale, since the last build.
+    std::vector<uint32_t> hb;                      // Each pool light's height bits.
     std::vector<std::pair<float, uint32_t>> hs;    // The non-NaN heights, ascending, with their pool indices.
     std::vector<uint64_t> mark;                    // One bit per pool light, all clear between records.
     std::vector<uint32_t> cand;                    // A record's candidates (a run's scratch).
@@ -35657,18 +35933,25 @@ inline uint32_t kh_dl_bit_low(uint64_t khbl_w) {
     };
     return khbl_tab[((khbl_w & (~khbl_w + 1u)) * 0x03F79D71B4CB0A89ull) >> 58];
 }
-inline void kh_dl_phix_check() {
+// A rebuild's cost in walked pairs (the unit of KH_DL_HIX_DEBT): n (log2 n + 2) steps of KH_DL_HIX_STEP_PAIRS -
+// measured (g++ / clang -O2, pools of 64 - 1024): a rebuild took the time of 3.3 - 5.2 x n (log2 n + 2) pairs the
+// band turns away (the cheapest pair, so the debt is never repaid early).
+static constexpr uint64_t KH_DL_HIX_STEP_PAIRS = 4u;
+inline uint64_t kh_dl_phix_cost(uint32_t khx_n) {
+    uint64_t khx_l = 1u;
+    while ((1ull << khx_l) < khx_n) ++khx_l;
+    return static_cast<uint64_t>(khx_n) * (khx_l + 2u) * KH_DL_HIX_STEP_PAIRS;
+}
+// The index rebuilt from the pool (KH_DL_HIX_OOM: invalid until it completes; an allocation may throw).
+inline void kh_dl_phix_build() {
     KhDlPresHix& khx = g_dl_phix;
+    khx.valid = false;
     const uint32_t khx_n = g_dl.pool_n;
-    if (khx.epoch == g_dl_pres_epoch && khx.n == khx_n) return;
-    khx.epoch = g_dl_pres_epoch;
-    bool khx_same = khx.n == khx_n && khx.hb.size() == khx_n;
-    for (uint32_t d = 0; khx_same && d < khx_n; ++d) khx_same = khx.hb[d] == kh_dl_fbits(g_dl.pool[d].rec[1]);
-    if (khx_same) return;
     if (g_prof_ds_on) kh_fun(KHF_DL_HIX_BUILDS, 1u);   // KH_PROF_FUNNEL.
-    khx.n = khx_n;
     khx.hb.resize(khx_n);
     khx.hs.clear();
+    khx.hs.reserve(khx_n);     // At most one entry per light: kh_dl_phix_move's insert never allocates.
+    khx.cand.reserve(khx_n);   // Nor does kh_dl_phix_cands' read-back.
     for (uint32_t d = 0; d < khx_n; ++d) {
         const float khx_h = g_dl.pool[d].rec[1];
         khx.hb[d] = kh_dl_fbits(khx_h);
@@ -35676,6 +35959,58 @@ inline void kh_dl_phix_check() {
     }
     std::sort(khx.hs.begin(), khx.hs.end());   // Height, then index (no NaN: a strict weak order).
     khx.mark.assign((static_cast<size_t>(khx_n) + 63u) / 64u, 0ull);
+    khx.n = khx_n;
+    khx.epoch = g_dl_pres_epoch;
+    khx.debt = 0u;
+    khx.valid = true;
+}
+// A run's start (render thread): may the index serve this run? In step - its epoch, or a compare of every height's
+// bits (which clears the debt) - it may. Heights out of step mark it invalid; a pool of another count leaves it
+// unused (valid: the count may come back with the same heights, and the compare then finds it in step). Either way it
+// is rebuilt (and may serve) only once the debt is paid (KH_DL_HIX_DEBT).
+inline bool kh_dl_phix_ready() {
+    KhDlPresHix& khx = g_dl_phix;
+    const uint32_t khx_n = g_dl.pool_n;
+    if (khx_n < KH_DL_HIX_MIN_POOL) return false;
+    if (khx.valid && khx.n == khx_n) {
+        if (khx.epoch == g_dl_pres_epoch) return true;
+        bool khx_same = khx.hb.size() == khx_n;
+        for (uint32_t d = 0; khx_same && d < khx_n; ++d) khx_same = khx.hb[d] == kh_dl_fbits(g_dl.pool[d].rec[1]);
+        if (khx_same) { khx.epoch = g_dl_pres_epoch; khx.debt = 0u; return true; }
+        khx.valid = false;   // Stale: walks repay a rebuild first.
+    }
+    if (khx.debt < KH_DL_HIX_PAYBACK * kh_dl_phix_cost(khx_n)) return false;
+    kh_dl_phix_build();
+    return khx.valid;
+}
+// A walk run while the index could not serve (kh_dl_phix_ready false on a pool it would cover): its pairs repay -
+// khx_records: the records that walked (a record with a non-finite position walks nothing).
+inline void kh_dl_phix_paid(uint32_t khx_records) {
+    if (g_dl.pool_n < KH_DL_HIX_MIN_POOL) return;
+    g_dl_phix.debt += static_cast<uint64_t>(khx_records) * g_dl.pool_n;
+}
+// A presence rewrite moved pool light khx_d's height from khx_was to khx_now: its entry moves with it, keeping a
+// valid index in step (an index not in step for this light is left valid for the next run's compare, which finds
+// it stale; an invalid one waits for its rebuild). Allocates nothing (the build reserved one entry per light), so it
+// cannot throw between the rewrite and the epoch's bump.
+inline void kh_dl_phix_move(uint32_t khx_d, float khx_was, float khx_now) {
+    KhDlPresHix& khx = g_dl_phix;
+    if (!khx.valid || khx_d >= khx.n || khx.hb.size() != khx.n) return;
+    if (khx.hb[khx_d] != kh_dl_fbits(khx_was) || kh_dl_fbits(khx_was) == kh_dl_fbits(khx_now)) return;
+    khx.valid = false;   // KH_DL_HIX_OOM: valid again only once the move completes.
+    if (khx_was == khx_was) {
+        const std::pair<float, uint32_t> khx_o(khx_was, khx_d);
+        const auto khx_it = std::lower_bound(khx.hs.begin(), khx.hs.end(), khx_o);
+        if (khx_it == khx.hs.end() || khx_it->second != khx_d || !(khx_it->first == khx_was)) return;   // Left stale.
+        khx.hs.erase(khx_it);
+    }
+    if (khx_now == khx_now) {
+        const std::pair<float, uint32_t> khx_e(khx_now, khx_d);
+        khx.hs.insert(std::lower_bound(khx.hs.begin(), khx.hs.end(), khx_e), khx_e);
+    }
+    khx.hb[khx_d] = kh_dl_fbits(khx_now);
+    if (g_prof_ds_on) kh_fun(KHF_DL_HIX_MOVES, 1u);   // KH_PROF_FUNNEL.
+    khx.valid = true;
 }
 // A record's candidates at height khc_y (finite): pool indices, ascending, in g_dl_phix.cand. False: more than a
 // sixth of the pool - walk all of it.
@@ -35843,7 +36178,8 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
     int      khp_mp[KH_DL_MAX_LIGHTS];   // KH_DL_PRES_MEMO: this run's picks in record order (the entry's log).
     uint32_t khp_mp_n = 0;
     uint64_t khp_vis = 0;   // KH_DL_PRES_HIX: the pairs this run visited (armed only).
-    if (!khp_mh) kh_dl_phix_check();   // KH_DL_PRES_HIX: the index as the pool stands.
+    const bool khp_hix = !khp_mh && kh_dl_phix_ready();   // KH_DL_PRES_HIX: may the index serve this run?
+    uint32_t khp_walked = 0;   // KH_DL_HIX_DEBT: the records that walked the pool (finite positions).
 
     for (uint32_t i = 0; !khp_mh && i < khp_total; ++i) {   // KH_DL_PRES_MEMO: a hit has the outcome.
         const float* khp_r = reinterpret_cast<const float*>(khp_l + i * KH_DL_LIGHT_BYTES);
@@ -35854,70 +36190,137 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
         bool  khp_pick_org = false;   // KH_DL_PRES_REC: the pick matched in the origin's cube.
         float khp_w_best = -1.0f;     // KH_DL_PRES_STALE: the best lanes among lights elsewhere (-1: none).
 
-        // KH_DL_PRES_HIX: the lights whose height can pass the band below, in pool order (or the whole pool).
-        const bool     khp_ix = kh_dl_phix_cands(khp_r[1]);
-        const uint32_t khp_vn = khp_ix ? static_cast<uint32_t>(g_dl_phix.cand.size()) : g_dl.pool_n;
-        if (g_prof_ds_on) khp_vis += khp_vn;
-        for (uint32_t khp_vi = 0; khp_vi < khp_vn; ++khp_vi) {
-            const uint32_t d = khp_ix ? g_dl_phix.cand[khp_vi] : khp_vi;
-            const DlPoolLight& khp_pl = g_dl.pool[d];
-            // KH_DL_PRES_BAND: each of the three tests below - the origin's cube, the stale test (khp_elsewhere) and
-            // the grid test - first needs this light's height within KH_DL_MATCH_M (the cube, strictly) or 0.25 m (the
-            // other two) of the record's, by the same expression, and a light that passes none of them reaches only
-            // the `continue` below (no pick, no census, no stale verdict). So a light outside both bands - or with a
-            // NaN height, which fails every compare - is skipped here, in pool order as before. In a town most of the
-            // pool lies outside any one record's band. Edit the bands here with the tests' own, and KH_DL_PRES_HIX's
-            // interval (kh_dl_phix_cands: [r - 1, r + 1], the widest band) with them.
-            const float khp_dyb = fabsf(khp_pl.rec[1] - khp_r[1]);
-            if (!(khp_dyb < KH_DL_MATCH_M) && !(khp_dyb <= 0.25f)) continue;
-            bool  khp_same = false;
-            bool  khp_same_org = false;
-            float khp_dpos = 0.0f;
+        // KH_DL_PRES_HIX: the lights whose height can pass the band below, in pool order, when the index serves this
+        // run (kh_dl_phix_ready) and the band is narrow; else the whole pool. The two loops' bodies are the same text
+        // (the walk's own loop, as it was: no indirection per light) - an edit to one is made to both.
+        ++khp_walked;
+        if (khp_hix && kh_dl_phix_cands(khp_r[1])) {
+            if (g_prof_ds_on) khp_vis += g_dl_phix.cand.size();
+            for (const uint32_t d : g_dl_phix.cand) {
+                const DlPoolLight& khp_pl = g_dl.pool[d];
+                // KH_DL_PRES_BAND: each of the three tests below - the origin's cube, the stale test (khp_elsewhere)
+                // and the grid test - first needs this light's height within KH_DL_MATCH_M (the cube, strictly) or 0.25
+                // m (the other two) of the record's, by the same expression, and a light that passes none of them
+                // reaches only the `continue` below (no pick, no census, no stale verdict). So a light outside both
+                // bands - or with a NaN height, which fails every compare - is skipped here, in pool order as before.
+                // In a town most of the pool lies outside any one record's band. Edit the bands here with the tests'
+                // own, and KH_DL_PRES_HIX's interval (kh_dl_phix_cands: [r - 1, r + 1], the widest band) with them.
+                const float khp_dyb = fabsf(khp_pl.rec[1] - khp_r[1]);
+                if (!(khp_dyb < KH_DL_MATCH_M) && !(khp_dyb <= 0.25f)) continue;
+                bool  khp_same = false;
+                bool  khp_same_org = false;
+                float khp_dpos = 0.0f;
 
-            if (khp_origin) {   // The harvest's transform, the re-sight's cube.
-                const float khp_ax = fabsf(khp_pl.rec[0] - (khp_ox + khp_r[0]));
-                const float khp_ay = fabsf(khp_pl.rec[1] - khp_r[1]);
-                const float khp_az = fabsf(khp_pl.rec[2] - (khp_oz + khp_r[2]));
-                if (khp_ax < KH_DL_MATCH_M && khp_ay < KH_DL_MATCH_M && khp_az < KH_DL_MATCH_M) {
-                    khp_same = true;
-                    khp_same_org = true;
-                    khp_dpos = khp_ax + khp_ay + khp_az;
+                if (khp_origin) {   // The harvest's transform, the re-sight's cube.
+                    const float khp_ax = fabsf(khp_pl.rec[0] - (khp_ox + khp_r[0]));
+                    const float khp_ay = fabsf(khp_pl.rec[1] - khp_r[1]);
+                    const float khp_az = fabsf(khp_pl.rec[2] - (khp_oz + khp_r[2]));
+                    if (khp_ax < KH_DL_MATCH_M && khp_ay < KH_DL_MATCH_M && khp_az < KH_DL_MATCH_M) {
+                        khp_same = true;
+                        khp_same_org = true;
+                        khp_dpos = khp_ax + khp_ay + khp_az;
+                    }
+                }
+                // KH_DL_PRES_STALE: read by the rewrites alone - none without khp_rw, none once stale.
+                if (khp_rw && !khp_stale && !khp_same_org && khp_elsewhere(khp_pl, khp_r)) {
+                    const float khp_wl = khp_lanes(khp_pl, khp_r);
+                    if (khp_w_best < 0.0f || khp_wl < khp_w_best) khp_w_best = khp_wl;
+                }
+
+                // Grid test / census, on the learned grid (KH_DL_ORIGIN_GRID; none learned: no grid match).
+                const float khp_q = kh_dl_grid();
+                if (!khp_same && khp_q > 0.0f && fabsf(khp_pl.rec[1] - khp_r[1]) <= 0.25f) {
+                    float khp_dx = khp_pl.rec[0] - khp_r[0];
+                    khp_dx -= khp_q * floorf(khp_dx / khp_q + 0.5f);
+                    float khp_dz = khp_pl.rec[2] - khp_r[2];
+                    khp_dz -= khp_q * floorf(khp_dz / khp_q + 0.5f);
+                    const float khp_res = fabsf(khp_dx) > fabsf(khp_dz) ? fabsf(khp_dx) : fabsf(khp_dz);
+                    if (khp_best < 0.0f || khp_res < khp_best) khp_best = khp_res;
+
+                    // The fallback: no origin, or an origin gone stale on a flip.
+                    if (khp_res <= KH_DL_ORIGIN_RES_MAX) {
+                        khp_same = true;
+                        khp_dpos = fabsf(khp_dx) + fabsf(khp_pl.rec[1] - khp_r[1]) + fabsf(khp_dz);
+                    }
+                }
+
+                if (!khp_same) continue;
+                bool khp_taken = false;
+                for (uint32_t c = 0; c < khp_claim_n; ++c) {
+                    if (khp_claim[c] == static_cast<int>(d)) { khp_taken = true; break; }
+                }
+                if (khp_taken) continue;   // An earlier record of this list is that light.
+                float khp_cost = khp_dpos;
+                for (int k = 3; k < 24; ++k) khp_cost += fabsf(khp_pl.rec[k] - khp_r[k]);
+                if (khp_pick < 0 || khp_cost < khp_pick_cost) {
+                    khp_pick = static_cast<int>(d);
+                    khp_pick_cost = khp_cost;
+                    khp_pick_org = khp_same_org;
                 }
             }
-            // KH_DL_PRES_STALE: read by the rewrites alone - none without khp_rw, none once stale.
-            if (khp_rw && !khp_stale && !khp_same_org && khp_elsewhere(khp_pl, khp_r)) {
-                const float khp_wl = khp_lanes(khp_pl, khp_r);
-                if (khp_w_best < 0.0f || khp_wl < khp_w_best) khp_w_best = khp_wl;
-            }
+        } else {
+            if (g_prof_ds_on) khp_vis += g_dl.pool_n;
+            for (uint32_t d = 0; d < g_dl.pool_n; ++d) {
+                const DlPoolLight& khp_pl = g_dl.pool[d];
+                // KH_DL_PRES_BAND: each of the three tests below - the origin's cube, the stale test (khp_elsewhere)
+                // and the grid test - first needs this light's height within KH_DL_MATCH_M (the cube, strictly) or 0.25
+                // m (the other two) of the record's, by the same expression, and a light that passes none of them
+                // reaches only the `continue` below (no pick, no census, no stale verdict). So a light outside both
+                // bands - or with a NaN height, which fails every compare - is skipped here, in pool order as before.
+                // In a town most of the pool lies outside any one record's band. Edit the bands here with the tests'
+                // own, and KH_DL_PRES_HIX's interval (kh_dl_phix_cands: [r - 1, r + 1], the widest band) with them.
+                const float khp_dyb = fabsf(khp_pl.rec[1] - khp_r[1]);
+                if (!(khp_dyb < KH_DL_MATCH_M) && !(khp_dyb <= 0.25f)) continue;
+                bool  khp_same = false;
+                bool  khp_same_org = false;
+                float khp_dpos = 0.0f;
 
-            // Grid test / census, on the learned grid (KH_DL_ORIGIN_GRID; none learned: no grid match).
-            const float khp_q = kh_dl_grid();
-            if (!khp_same && khp_q > 0.0f && fabsf(khp_pl.rec[1] - khp_r[1]) <= 0.25f) {
-                float khp_dx = khp_pl.rec[0] - khp_r[0];
-                khp_dx -= khp_q * floorf(khp_dx / khp_q + 0.5f);
-                float khp_dz = khp_pl.rec[2] - khp_r[2];
-                khp_dz -= khp_q * floorf(khp_dz / khp_q + 0.5f);
-                const float khp_res = fabsf(khp_dx) > fabsf(khp_dz) ? fabsf(khp_dx) : fabsf(khp_dz);
-                if (khp_best < 0.0f || khp_res < khp_best) khp_best = khp_res;
-
-                if (khp_res <= KH_DL_ORIGIN_RES_MAX) {   // The fallback: no origin, or an origin gone stale on a flip.
-                    khp_same = true;
-                    khp_dpos = fabsf(khp_dx) + fabsf(khp_pl.rec[1] - khp_r[1]) + fabsf(khp_dz);
+                if (khp_origin) {   // The harvest's transform, the re-sight's cube.
+                    const float khp_ax = fabsf(khp_pl.rec[0] - (khp_ox + khp_r[0]));
+                    const float khp_ay = fabsf(khp_pl.rec[1] - khp_r[1]);
+                    const float khp_az = fabsf(khp_pl.rec[2] - (khp_oz + khp_r[2]));
+                    if (khp_ax < KH_DL_MATCH_M && khp_ay < KH_DL_MATCH_M && khp_az < KH_DL_MATCH_M) {
+                        khp_same = true;
+                        khp_same_org = true;
+                        khp_dpos = khp_ax + khp_ay + khp_az;
+                    }
                 }
-            }
+                // KH_DL_PRES_STALE: read by the rewrites alone - none without khp_rw, none once stale.
+                if (khp_rw && !khp_stale && !khp_same_org && khp_elsewhere(khp_pl, khp_r)) {
+                    const float khp_wl = khp_lanes(khp_pl, khp_r);
+                    if (khp_w_best < 0.0f || khp_wl < khp_w_best) khp_w_best = khp_wl;
+                }
 
-            if (!khp_same) continue;
-            bool khp_taken = false;
-            for (uint32_t c = 0; c < khp_claim_n; ++c) {
-                if (khp_claim[c] == static_cast<int>(d)) { khp_taken = true; break; }
-            }
-            if (khp_taken) continue;   // An earlier record of this list is that light.
-            float khp_cost = khp_dpos;
-            for (int k = 3; k < 24; ++k) khp_cost += fabsf(khp_pl.rec[k] - khp_r[k]);
-            if (khp_pick < 0 || khp_cost < khp_pick_cost) {
-                khp_pick = static_cast<int>(d);
-                khp_pick_cost = khp_cost;
-                khp_pick_org = khp_same_org;
+                // Grid test / census, on the learned grid (KH_DL_ORIGIN_GRID; none learned: no grid match).
+                const float khp_q = kh_dl_grid();
+                if (!khp_same && khp_q > 0.0f && fabsf(khp_pl.rec[1] - khp_r[1]) <= 0.25f) {
+                    float khp_dx = khp_pl.rec[0] - khp_r[0];
+                    khp_dx -= khp_q * floorf(khp_dx / khp_q + 0.5f);
+                    float khp_dz = khp_pl.rec[2] - khp_r[2];
+                    khp_dz -= khp_q * floorf(khp_dz / khp_q + 0.5f);
+                    const float khp_res = fabsf(khp_dx) > fabsf(khp_dz) ? fabsf(khp_dx) : fabsf(khp_dz);
+                    if (khp_best < 0.0f || khp_res < khp_best) khp_best = khp_res;
+
+                    // The fallback: no origin, or an origin gone stale on a flip.
+                    if (khp_res <= KH_DL_ORIGIN_RES_MAX) {
+                        khp_same = true;
+                        khp_dpos = fabsf(khp_dx) + fabsf(khp_pl.rec[1] - khp_r[1]) + fabsf(khp_dz);
+                    }
+                }
+
+                if (!khp_same) continue;
+                bool khp_taken = false;
+                for (uint32_t c = 0; c < khp_claim_n; ++c) {
+                    if (khp_claim[c] == static_cast<int>(d)) { khp_taken = true; break; }
+                }
+                if (khp_taken) continue;   // An earlier record of this list is that light.
+                float khp_cost = khp_dpos;
+                for (int k = 3; k < 24; ++k) khp_cost += fabsf(khp_pl.rec[k] - khp_r[k]);
+                if (khp_pick < 0 || khp_cost < khp_pick_cost) {
+                    khp_pick = static_cast<int>(d);
+                    khp_pick_cost = khp_cost;
+                    khp_pick_org = khp_same_org;
+                }
             }
         }
         // KH_DL_PRES_STALE: this record's light found elsewhere, and a better match than the origin's (the note
@@ -35950,6 +36353,7 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
     }
 
     if (g_prof_ds_on && !khp_mh) kh_fun(KHF_DL_VISITS, khp_vis);   // KH_PROF_FUNNEL (KH_DL_PRES_HIX).
+    if (!khp_mh && !khp_hix) kh_dl_phix_paid(khp_walked);   // KH_DL_HIX_DEBT: walks the index could not serve.
 
     // KH_DL_PRES_REC: the re-sight carries the live record (spot direction, colour, position), written as the
     // merge writes it - unless a record showed the origin stale (KH_DL_PRES_STALE): then stamped only.
@@ -35968,6 +36372,7 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
         khp_pl.spot = khp_rw_rec[k] >= static_cast<uint32_t>(khp_pc_i) ? 1 : 0;
         khp_pl.rec_wseq = khp_wseq;   // KH_DL_REC_ORDER.
         if (memcmp(khp_was, khp_pl.rec, sizeof(khp_was)) != 0) khp_moved = true;
+        kh_dl_phix_move(static_cast<uint32_t>(khp_rw_pick[k]), khp_was[1], khp_pl.rec[1]);   // KH_DL_PRES_HIX.
     }
     if (khp_moved) ++g_dl_pres_epoch;   // KH_DL_PRES_MEMO: every entry stored before this is out of date.
     // KH_DL_PRES_MEMO: a run that moved nothing is a fixed point - re-run now, it gives this outcome - and is
@@ -51251,9 +51656,11 @@ static uint32_t g_rp_stage_used = 0;             // Bytes this pass; a slot neve
 inline void kh_rp_cb_count() {   // The caller holds g_rp_cbkeep_mx.
     g_rp_cbkeep_n.store(g_rp_cbkeep.n + g_rp_img.n, std::memory_order_release);
 }
-inline void kh_rp_cb_forget(ID3D11Resource* khcf_r) {
-    if (!khcf_r || g_rp_cbkeep_n.load(std::memory_order_acquire) == 0u) return;
+// KH_MAP_BRANCH: true when it took g_rp_cbkeep_mx (hooked_map counts it; the other callers ignore it).
+inline bool kh_rp_cb_forget(ID3D11Resource* khcf_r) {
+    if (!khcf_r || g_rp_cbkeep_n.load(std::memory_order_acquire) == 0u) return false;
     std::lock_guard<std::mutex> khcf_l(g_rp_cbkeep_mx);
+    if (kh_stats_on()) kh_fun_any(KHF_RP_LOCKS, 1u);   // KH_MAP_BRANCH: one relaxed load, on the locked path only.
     KhRpCbKeep khcf_e = {};
     if (g_rp_cbkeep.erase(static_cast<const void*>(khcf_r), &khcf_e)) {
         khcf_e.eng->Release();   // The entry's reference; the writer holds its own, so never the last.
@@ -51261,6 +51668,7 @@ inline void kh_rp_cb_forget(ID3D11Resource* khcf_r) {
     KhRpImg khcf_i = {};
     if (g_rp_img.erase(static_cast<const void*>(khcf_r), &khcf_i)) khcf_i.eng->Release();   // KH_REPLAY_CPUCB.
     kh_rp_cb_count();
+    return true;
 }
 // KH_RP_UNLOCKED_RELEASE: one of the two locked maps emptied, its pins released after g_rp_cbkeep_mx is let go. A pin
 // can be its buffer's last reference (the engine may drop a buffer while it is listed), and a final Release enters
@@ -51752,15 +52160,17 @@ inline void kh_rp_front_note(const D3D11_VIEWPORT& khfn_vp) {
     g_rp_front_vp = khfn_vp;
 }
 // KH_REPLAY_SPLIT: from the Map hook, before the engine's map reaches the runtime, so the copy queued here reads the
-// contents the draws recorded so far used.
-inline void kh_rp_on_map(ID3D11DeviceContext* self, ID3D11Resource* res, D3D11_MAP type) {
-    if (type != D3D11_MAP_WRITE_DISCARD || !res) return;
-    if (self != g_reorder_target_ctx.load(std::memory_order_relaxed) || !reorder_on_render_thread() || g_ro.in_injection) return;
-    if (g_rp_pass != g_svs_frame_seq || g_rp_ended || !g_rp_ok || g_rp_n == 0) return;
+// contents the draws recorded so far used. KH_MAP_BRANCH: 0 = stood down before the lookup, 1 = looked the buffer up
+// (on the render thread) and did not split it, 2 = split it.
+inline int kh_rp_on_map(ID3D11DeviceContext* self, ID3D11Resource* res, D3D11_MAP type) {
+    if (type != D3D11_MAP_WRITE_DISCARD || !res) return 0;
+    if (self != g_reorder_target_ctx.load(std::memory_order_relaxed) || !reorder_on_render_thread() ||
+        g_ro.in_injection) return 0;
+    if (g_rp_pass != g_svs_frame_seq || g_rp_ended || !g_rp_ok || g_rp_n == 0) return 0;
     // KH_RP_UNCAPPED: a lookup in the set of buffers a record still flags, not a walk of the records - this runs on
     // every DISCARD map inside the pass (one per draw or more), so a walk made the pass quadratic in its draws.
     ID3D11Buffer* const* const khom_e = g_rp_dynset.find(res);
-    if (!khom_e) return;
+    if (!khom_e) return 1;
     ID3D11Buffer* const eng = *khom_e;
     UINT bytes = 0, bind = 0;
     kh_rp_is_mutable(eng, &bytes, &bind);
@@ -51779,7 +52189,7 @@ inline void kh_rp_on_map(ID3D11DeviceContext* self, ID3D11Resource* res, D3D11_M
         sp.bytes = bytes;
         sp.bind = bind;
     }
-    if (!sp.b) { g_rp_ok = false; kh_stat(g_rp_c.refused); return; }
+    if (!sp.b) { g_rp_ok = false; kh_stat(g_rp_c.refused); return 1; }
     ++g_rp_split_used;
     const bool prev = g_ro.in_injection;
     g_ro.in_injection = true;
@@ -51794,6 +52204,7 @@ inline void kh_rp_on_map(ID3D11DeviceContext* self, ID3D11Resource* res, D3D11_M
     }
     g_rp_dynset.erase(eng);   // No record flags it now; a later draw that binds it adds it again.
     kh_stat(g_rp_c.splits);
+    return 2;
 }
 // The stencil resolve (the bracket): the rewritable vertex / index buffers the pass still references, copied once.
 inline void kh_rp_pass_end(ID3D11DeviceContext* ctx) {
@@ -52947,19 +53358,34 @@ inline void kh_upload_scan(ID3D11Resource* res, const void* khus_d, uint32_t khu
 }
 
 static HRESULT STDMETHODCALLTYPE hooked_map(ID3D11DeviceContext* self, ID3D11Resource* res, UINT sub, D3D11_MAP type, UINT flags, D3D11_MAPPED_SUBRESOURCE* mapped) {
+    KH_PROF_SCOPE(KHP_HOOK_MAP);   // KH_PROF (KH_MAP_BRANCH: from the top - the replay calls are the hook's cost).
+    const bool khmb_on = khps_scope_KHP_HOOK_MAP.khps_on;   // KH_MAP_BRANCH: the scope's armed snapshot.
+    int khmb_rp = 0;   // KH_MAP_BRANCH: kh_rp_on_map's branch.
+    bool khmb_lk = false;   // KH_MAP_BRANCH: the forget took the mutex.
     // KH_REPLAY_SPLIT: before the discard reaches the runtime. A split that threw (its pool's push_back) refuses
     // the pass, as kh_rp_record's catch does - left armed, the draws kept reading the buffer the discard rewrites.
-    try { kh_rp_on_map(self, res, type); } catch (...) { g_rp_ok = false; }
-    try { kh_rp_cb_forget(res); } catch (...) {}   // KH_REPLAY_CBREUSE: any map may write.
-    KH_PROF_SCOPE(KHP_HOOK_MAP);   // KH_PROF.
+    try { khmb_rp = kh_rp_on_map(self, res, type); } catch (...) { g_rp_ok = false; }
+    try { khmb_lk = kh_rp_cb_forget(res); } catch (...) {}   // KH_REPLAY_CBREUSE: any map may write.
+    if (khmb_on) {   // KH_MAP_BRANCH.
+        kh_fun_any(KHF_HK_MAP_N, 1u);
+        if (khmb_lk) kh_fun_any(KHF_HK_RP_LOCK, 1u);
+        if (khmb_rp != 0) kh_fun(KHF_HK_RP_CHECK, 1u);   // Past the split's render-thread gate: plain.
+        if (khmb_rp == 2) kh_fun(KHF_HK_RP_SPLIT, 1u);
+    }
     const uint64_t khdm_t0 = kh_prof_drv_t0(khps_scope_KHP_HOOK_MAP);   // KH_PROF_DRV.
     const HRESULT hr = g_orig_map(self, res, sub, type, flags, mapped);
     kh_prof_drv(KHP_DRV_MAP, khdm_t0);
+    // KH_MAP_REDIRECT: a record of an earlier mapping of this buffer, here, never reached its Unmap.
+    if (SUCCEEDED(hr) && sub == 0 && g_redir_live.load(std::memory_order_relaxed) != 0u) {
+        kh_redir_drop(static_cast<void*>(self), res);
+        if (khmb_on) kh_fun_any(KHF_HK_RD_DROP, 1u);   // KH_MAP_BRANCH.
+    }
 
     try {
     if (SUCCEEDED(hr) && mapped && mapped->pData && sub == 0 &&
         (type == D3D11_MAP_WRITE_DISCARD || type == D3D11_MAP_WRITE_NO_OVERWRITE) &&
         kh_upload_hook_wanted(self, res)) {
+        if (khmb_on) kh_fun(KHF_HK_ADMIT, 1u);   // KH_MAP_BRANCH (past the gate's render-thread test: plain).
         const uint32_t bytes = proj_upload_byte_width(res);
 
         if (bytes != 0) {
@@ -52971,9 +53397,26 @@ static HRESULT STDMETHODCALLTYPE hooked_map(ID3D11DeviceContext* self, ID3D11Res
             }
 
             if (slot) {
+                if (khmb_on) kh_fun(KHF_HK_PENDING, 1u);   // KH_MAP_BRANCH.
                 slot->res = res;
                 slot->data = mapped->pData;
                 slot->bytes = bytes;
+                slot->discard = type == D3D11_MAP_WRITE_DISCARD;   // KH_MAP_MIX.
+                slot->redir = false;
+                if (slot->discard) {   // KH_MAP_REDIRECT: the engine writes our buffer (kh_redir_open swaps it in).
+                    uint8_t* const khrm_b = kh_redir_open(static_cast<void*>(self), res, mapped, bytes, khmb_on);
+                    if (khrm_b) {
+                        slot->data = khrm_b;
+                        slot->redir = true;
+                    }
+                    // KH_PROF_FUNNEL, on the hook scope's snapshot: g_prof_up_on is still the previous capture's.
+                    if (khmb_on) {
+                        if (khrm_b) { kh_fun(KHF_REDIR_N, 1u); kh_fun(KHF_REDIR_B, bytes); }
+                        else kh_fun(KHF_REDIR_REFUSED, 1u);
+                    }
+                }
+            } else if (khmb_on) {
+                kh_fun(KHF_HK_NOSLOT, 1u);   // KH_MAP_BRANCH: every slot held.
             }
         }
     }
@@ -52984,25 +53427,37 @@ static HRESULT STDMETHODCALLTYPE hooked_map(ID3D11DeviceContext* self, ID3D11Res
 
 static void STDMETHODCALLTYPE hooked_unmap(ID3D11DeviceContext* self, ID3D11Resource* res, UINT sub) {
     KH_PROF_SCOPE(KHP_HOOK_MAP);   // KH_PROF.
+    const bool khmb_on = khps_scope_KHP_HOOK_MAP.khps_on;   // KH_MAP_BRANCH: the scope's armed snapshot.
+    if (khmb_on) kh_fun_any(KHF_HK_UNMAP_N, 1u);   // KH_MAP_BRANCH.
     bool khus_cap = false;   // KH_UPLOAD_LAZY: this call captured.
+    bool khus_cached = false;   // KH_MAP_REDIRECT: this call raised g_wc_cached_src.
     try {
     if (sub == 0 && self == g_reorder_target_ctx.load(std::memory_order_relaxed)) {
+        if (khmb_on) kh_fun_any(KHF_HK_UN_WALK, 1u);   // KH_MAP_BRANCH.
         for (auto& p : g_proj_pending) {
             if (p.res == res) {
                 // The engine has finished writing; the pointer is valid until
-                // the original Unmap below runs. One WC read into the scratch;
-                // the scanners walk the cached copy.
+                // the original Unmap below runs. One read into the scratch - of
+                // the mapped memory (the WC read), or, a redirected map's
+                // (KH_MAP_REDIRECT), of our cached buffer, plainly and only while
+                // this context's record still holds it (a stale slot is skipped);
+                // the scanners walk what the capture returns (the buffer's whole
+                // shadow when the light capture takes it, else the scratch).
                 // KH_PENDING_TAKE: the slot is emptied before anything below can throw - left set, a later Unmap
                 // of this buffer (whose Map the gate turned down) read the pointer of a mapping that had ended.
+                if (khmb_on) kh_fun_any(KHF_HK_UN_HIT, 1u);   // KH_MAP_BRANCH.
                 const ProjPendingMap khus_p = p;
                 p = ProjPendingMap{};
                 // KH_PENDING_GATE: this Unmap ends the slot's mapping whatever the gate says now (a thread-id
                 // reset or hand-over between the Map and here left the slot holding the pointer of an ended
                 // mapping). Only the capture is render-thread-only (pairs with the map gate above).
                 if (!reorder_on_render_thread() || g_ro.in_injection) break;
+                if (khus_p.redir && !kh_redir_holds(static_cast<void*>(self), res, khus_p.data)) break;
                 uint32_t khus_n = khus_p.bytes;
                 khus_cap = true;
+                if (khus_p.redir) { g_wc_cached_src = true; khus_cached = true; }   // KH_MAP_REDIRECT.
                 const void* khus_d = kh_upload_capture(res, khus_p.data, khus_n);   // KH_DL_CPU.
+                if (g_prof_up_on) kh_fun_map_mix(khus_p.discard, khus_p.bytes);   // KH_MAP_MIX (the capture armed it).
                 kh_upload_scan(res, khus_d, khus_n);
                 KH_PROF_SUB(KHP_SC_RPIMG, g_prof_up_on, g_prof_up_t);   // KH_PROF_UPLOAD.
                 kh_rp_img_note(res, khus_d, khus_n);   // KH_REPLAY_CPUCB: before the source is unmapped.
@@ -53013,6 +53468,13 @@ static void STDMETHODCALLTYPE hooked_unmap(ID3D11DeviceContext* self, ID3D11Reso
 
     } catch (...) { kh_hook_except(); }
     if (khus_cap) kh_upload_capture_end();   // Before the source is unmapped.
+    if (khus_cached) g_wc_cached_src = false;   // KH_MAP_REDIRECT.
+    // KH_MAP_REDIRECT: the engine's bytes to the driver's pointer, whatever the capture did (any thread: the record
+    // is this context's or none).
+    if (sub == 0 && g_redir_live.load(std::memory_order_relaxed) != 0u) {
+        kh_redir_close(static_cast<void*>(self), res);
+        if (khmb_on) kh_fun_any(KHF_HK_RD_CLOSE, 1u);   // KH_MAP_BRANCH.
+    }
     const uint64_t khdu_t0 = kh_prof_drv_t0(khps_scope_KHP_HOOK_MAP);   // KH_PROF_DRV.
     g_orig_unmap(self, res, sub);
     kh_prof_drv(KHP_DRV_UNMAP, khdu_t0);
@@ -61524,10 +61986,14 @@ inline void kh_session_scratch_reset() {
 // g_mesh_publish_pending and g_mesh_cache_later_q (kh_mesh_release_session); the material pool
 // (kh_material_pool_reset keeps the pinned default); the cloth pool's records
 // (kh_cloth_workers_stop); the read-memo epoch (bumped, never reset); the presence memo's epoch
-// (g_dl_pres_epoch, KH_DL_PRES_MEMO: bumped, never reset - the session reset empties its table); the profiler's
+// (g_dl_pres_epoch, KH_DL_PRES_MEMO: bumped, never reset - the session reset empties its table); the map
+// redirect (g_redir / g_redir_live / g_rbuf, KH_MAP_REDIRECT: a mapping in flight must reach its Unmap, which frees
+// its record; the cached buffers are the process's; g_wc_cached_src is raised and lowered around each capture); the
+// profiler's
 // TSC calibration (g_prof_cal_q / g_prof_cal_t / g_prof_tsc_per_us, KH_PROF_SUB: the machine's rate - the next armed
-// fold measures it again over the gap) and its sampling state (g_prof_up_* / g_prof_ds_*: call counters, the bools
-// taken again before every use); the GPU pass list's entries (g_gpu_pass_pub, KH_GPU_PASS: read only below
+// fold measures it again over the gap) and its sampling state (g_prof_up_ctr / _on / _t, g_prof_ds_ctr / _on / _t:
+// call counters, the bools taken again before every use - g_prof_up_cur, the step in flight, is reset); the GPU pass
+// list's entries (g_gpu_pass_pub, KH_GPU_PASS: read only below
 // g_gpu_pass_pub_n, which the stats reset zeroes); the fast clock (g_fast_clock, KH_FAST_CLOCK: a new clock origin
 // re-anchors it); the want table's role bits (g_dl_keep_kind: written afresh with each new entry); the Eden flag's copy
 // (g_attach_eden, KH_ATTACH_EDEN: stored again at the next Draw3D or command read); the game thread's
@@ -62596,7 +63062,9 @@ inline void rendering_integration_reset() {
 // what makes that path safe without a call.
 //
 // Unloading: our threads are alive and would return into unmapped code once
-// the DLL goes. Each is asked to stop, waited for briefly and terminated. Under
+// the DLL goes. Each is asked to stop, waited for briefly and terminated -
+// the shader pool's workers an earlier shutdown detached too, by the handles
+// kept for them (g_khsm_orphans). Under
 // the loader lock a worker that obeys cannot finish exiting (its thread detach
 // needs that lock), so every wait runs its budget out and every worker is
 // terminated; the stop request is what gets it out of our code first (a job
@@ -62619,9 +63087,15 @@ inline void kh_thread_stop_bounded(std::thread& khts_t, DWORD khts_ms) {
 // its queued / finished jobs, a pending mesh publish or deferred destroy, the
 // caches, the shadow and PIP state, the terrain heightfield. A session that
 // never touched the extension reads false on every term and DllMain skips the
-// detach, as it does for the other frameworks. Plain reads only: the caller is
-// the game thread (the only writer of the script-side containers) and no lock
-// may be taken from DllMain.
+// detach, as it does for the other frameworks. No lock may be taken from
+// DllMain, so every read is lock-free: the script-side containers' writer is
+// the game thread, the caller; the worker queues (g_khtl_q / g_khtl_done,
+// g_khmw_q, g_khsm_map) and g_tex_cache have other writers and are read
+// racily. Each worker's has a term that reads true while that writer can run
+// (g_khtl_running, g_khmw_running, g_khsm_live); the render thread's writes
+// (g_tex_cache, g_khsm_map's erases - the hooks' draws or the shared Present's
+// UI flush) need an object or a UI effect, so g_draw_list / g_res.initialized
+// read true. The verdict does not hang on the racy reads.
 inline bool rendering_integration_is_initialized() {
     return !g_draw_list.empty() || g_scene.alive_n > 0 || !g_affectors.empty() || !g_cloth_proxy.empty() ||
            g_draw3d_eh_active || g_ui_driver_registered ||
@@ -62650,8 +63124,6 @@ inline void rendering_integration_process_detach() {
     g_ls.wanted.store(false, std::memory_order_relaxed);
     g_dlf_wanted.store(false, std::memory_order_relaxed);   // KH_DLF_DEMAND.
     g_dl_idle.store(0, std::memory_order_relaxed);   // KH_DL_IDLE.
-    g_dl_keep_n = 0u;   // KH_DL_WANT_GATE.
-    memset(g_dl_keep_ix, 0, sizeof(g_dl_keep_ix));   // KH_DL_WANT_INDEX.
     g_khsa_abort.store(true, std::memory_order_relaxed);
     g_khmw_abort.store(true, std::memory_order_relaxed);
     g_khtl_abort.store(true, std::memory_order_relaxed);
@@ -62683,6 +63155,16 @@ inline void rendering_integration_process_detach() {
         kh_thread_stop_bounded(khpd_t, khpd_el < 200u ? static_cast<DWORD>(200u - khpd_el) : 0u);
     }
     g_khsm_thr.clear();
+    // The workers an earlier shutdown detached, on what is left of the same budget (one inside D3DCompile cannot be
+    // told to stop).
+    for (const HANDLE khpd_h : g_khsm_orphans) {
+        const uint64_t khpd_el = steady_now_ms() - khpd_t0;
+        if (WaitForSingleObject(khpd_h, khpd_el < 200u ? static_cast<DWORD>(200u - khpd_el) : 0u) == WAIT_TIMEOUT) {
+            TerminateThread(khpd_h, 0);
+        }
+        CloseHandle(khpd_h);
+    }
+    g_khsm_orphans.clear();
     g_khsm_active = false;
     g_khsa_state = 0;
     // The cloth pool, the same way. A worker woken with the stop set drains the

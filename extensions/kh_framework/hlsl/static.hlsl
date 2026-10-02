@@ -1087,8 +1087,10 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
     // snapshot, whose .x is the farthest sample (PSDepthResolve). World
     // meshes draw only on a multisampled main depth (kh_fsaa_world_standdown),
     // so this runs on MSAA frames: a pixel any sample leaves uncovered reads as
-    // the far clear and keeps the fragment, and the hardware depth test makes
-    // the per-sample cut (see snapshot_composite_depth).
+    // the far clear and keeps the fragment. The flush arms it for DepthMode::Off
+    // solids alone, which draw with no hardware depth test, so nothing makes a
+    // per-sample cut: such a solid paints over up to a 1 px rim along the edges
+    // of nearer surfaces (accepted - see snapshot_composite_depth).
     if (fxParams1.x < 1e8f) {
         int2 gpx = clamp(int2(i.pos.xy), int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
         // A raw depth at either clear value is no scene (PSComposite's sceneClear, PSDepthResolve's rule):

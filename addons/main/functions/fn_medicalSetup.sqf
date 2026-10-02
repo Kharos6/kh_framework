@@ -49,11 +49,11 @@ if KH_var_medical then {
                     if !(_unit getVariable ["KH_var_medicalHandling", true]) exitWith {};
                     _hitPoint = toLowerANSI _hitPoint;
 
-                    if (((_context isEqualTo 0) && (_projectile isEqualTo "") && (isNull _source) && (isNull _instigator)) || (_context isEqualTo 3)) exitWith {
+                    if (((_context isEqualTo 0) && (_projectile isEqualTo "") && (isNull _source) && (isNull _instigator))) exitWith {
                         _damage;
                     };
 
-                    private _totalDamage = _context isEqualTo 0;
+                    private _totalDamage = (_context isEqualTo 0) || (_context isEqualTo 4);
 
                     private _currentDamage = if _totalDamage then {
                         damage _unit;
@@ -177,7 +177,7 @@ if KH_var_medical then {
                     if _totalDamage then {
                         if (
                             ((_currentDamage + (_processedDamage * KH_var_absoluteTotalDamageMultiplier)) >= KH_var_incapacitationThreshold) && 
-                            (((_unit getVariable ["KH_var_allowIncapacitation", KH_var_allowIncapacitation]) && _isPlayer) || (_unit getVariable ["KH_var_allowIncapacitation", KH_var_allowAiIncapacitation]))
+                            (_unit getVariable ["KH_var_allowIncapacitation", [KH_var_allowAiIncapacitation, KH_var_allowIncapacitation] select _isPlayer])
                            ) then {
                             if _withstanding then {
                                 (
@@ -352,7 +352,10 @@ if KH_var_medical then {
                                                             },
                                                             {
                                                                 ((!KH_var_withstandingRequireStabilization || (player getVariable ["KH_var_stabilized", false])) && (isNull (attachedTo player)));
-                                                            }
+                                                            },
+                                                            {},
+                                                            {},
+                                                            {}
                                                         ],
                                                         false,
                                                         true,
@@ -537,8 +540,8 @@ if KH_var_medical then {
                                                     [KH_var_reviveHealMedic, KH_var_selfReviveHealMedic] select (_caller isEqualTo _target)
                                                 ] select ([_caller getUnitTrait "Medic", false] call KH_fnc_parseBoolean);
 
-                                                _target setDamage (((damage _target) - _damageOffset) max 0);
                                                 private _damages = getAllHitPointsDamage _target;
+                                                _target setDamage (((damage _target) - _damageOffset) max 0);
 
                                                 if ((damage _target) isEqualTo 0) then {
                                                     _damageOffset = 1;
@@ -847,13 +850,15 @@ if KH_var_medical then {
                                     };
 
                                     if KH_var_incapacitationDamageSpillover then {
+                                        private _spilloverBase = _currentDamage max KH_var_incapacitationThreshold;
+
                                         (
-                                            (_currentDamage + (_processedDamage * KH_var_absoluteTotalDamageMultiplier * KH_var_absoluteIncapacitatedDamageMultiplier)) max 
-                                            KH_var_incapacitationThreshold
+                                            _spilloverBase +
+                                            ((((_currentDamage + (_processedDamage * KH_var_absoluteTotalDamageMultiplier)) - _spilloverBase) max 0) * KH_var_absoluteIncapacitatedDamageMultiplier)
                                         ) min ([1, 0.99] select (_unit getVariable ["KH_var_plotArmor", false]));
                                     }
                                     else {
-                                        [KH_var_incapacitationThreshold, 0.99] select (_unit getVariable ["KH_var_plotArmor", false]);
+                                        KH_var_incapacitationThreshold min ([1, 0.99] select (_unit getVariable ["KH_var_plotArmor", false]));
                                     };
                                 };
                             };
@@ -931,8 +936,8 @@ if KH_var_medical then {
                                                     };
                                                 };
 
-                                                _injured setDamage ((_oldDamage - _damageOffset) max 0);
                                                 private _damages = getAllHitPointsDamage _injured;
+                                                _injured setDamage ((_oldDamage - _damageOffset) max 0);
 
                                                 if ((damage _injured) isEqualTo 0) then {
                                                     _damageOffset = 1;

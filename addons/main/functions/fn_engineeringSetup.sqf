@@ -35,7 +35,7 @@ if _continue then {
                 _damage;
             };
 
-            private _totalDamage = _context isEqualTo 0;
+            private _totalDamage = (_context isEqualTo 0) || (_context isEqualTo 4);
 
             private _currentDamage = if _totalDamage then {
                 damage _unit;

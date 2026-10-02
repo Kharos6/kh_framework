@@ -201,7 +201,9 @@ static bool ensure_minhook() {
 // first (its UI passes composite onto the engine's frame), then the HTML
 // overlay (UIFramework, drawn on top). A
 // subscriber must not throw. Clearing a slot stops later calls; one already
-// made may still be running, so each module keeps its own in-flight guard.
+// made may still be running, so a module that clears its slot keeps its own
+// in-flight guard. The renderer never clears its slot: its subscriber stays
+// until MH_Uninitialize, which DllMain runs after the renderer's teardown.
 // The original runs under UIFramework's long-standing rule: a structured
 // exception inside it (D3D teardown) reads as S_OK.
 // KH_OVERLAY_BRACKET: the renderer hooks the game's immediate context, and

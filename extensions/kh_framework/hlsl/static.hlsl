@@ -319,10 +319,11 @@ void PSInjDepthA(VSOut i)
 // PSInjDepthA's clip - an edit here is an edit to that mask.
 float4 PSDlsMaskA(VSOut i) : SV_Target
 {
-    // The mask prepass draws a fading level with the colour
-    // draw's own dither, so the mask at a pixel is the level that pixel shows
-    // (a mask holding the union would cut the shown level behind the hidden
-    // one's nearer surface - speckle). The dlsw mask fills no dither.
+    // The dlsw mask draws a fading level with the colour draw's own dither
+    // (KH_DLSW_MASK_DITHER), so the mask at a pixel is the level that pixel
+    // shows (a mask holding the union claims the world's pixels inside the
+    // hidden level's outline as ours). The seam's footprint mask draws one
+    // level with a zero lane: no cut.
     const float2 khma_dx = ddx(i.uv);   // KH_MAT_GRAD: the gradients at entry, ahead of the cut, in uniform flow.
     const float2 khma_dy = ddy(i.uv);
     KhObjLoad(i.iobj0, i.iobj1);

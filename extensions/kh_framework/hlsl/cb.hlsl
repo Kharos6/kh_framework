@@ -312,7 +312,8 @@ void KhObjLoad(float4 khol_a, float4 khol_b)
 }
 // The vertex side: the CB lanes (per-object draws)...
 // The LOD crossfade's per-pixel cut, one body for every pass that draws a
-// fading level (the two colour twins): +v = the
+// fading level (the two colour twins, and the dlsw mask's PSDlsMask /
+// PSDlsMaskA - KH_DLSW_MASK_DITHER): +v = the
 // finer level keeps the pixels below v, -v = the coarser keeps the rest.
 // Complementary at every pixel, whichever pass asks.
 void KhLodDitherCut(float2 khld_px, float khld_v)
@@ -813,11 +814,13 @@ float KhThmTolCell()
     return thmParams.z * floor((thmMeta.x + 1024.0f) / 1025.0f);
 }
 
-// Both callers read the result only through one test - clearance + 1.5 tolerance cells (KhThmTolCell)
-// below -thmMeta.z discards the fragment - and the running minimum can only
-// fall, so once that test holds the remaining steps cannot change the
-// outcome: the march stops there. The test is the callers' own expression,
-// evaluated on the running value, so the decision is identical.
+// Both callers discard the fragment when clearance + 1.5 tolerance cells (KhThmTolCell) falls below
+// -thmMeta.z, and the running minimum can only fall, so once that test holds
+// the remaining steps cannot change the outcome: the march stops there. The
+// test is the callers' own expression, evaluated on the running value, so the
+// decision is identical. PSComposite's arbitration cap (KH_ARB_DEPTH) reads the
+// value too; a fragment the march stopped early for is discarded (occ) before
+// anything the cap computed is used.
 float KhThmClearance(float3 cam, float3 wp)
 {
     float mc = 1.0e9f;
@@ -3109,8 +3112,9 @@ void KhVsCore(float3 khvc_lp, float3 khvc_ln, float3 khvc_ctr, float3 khvc_rel, 
 // static and composite compiles - kh_white_ensure, ensure_resources'
 // static and composite tables, ensure_composite_shader, kh_user_mat_ps's
 // three material twins and kh_user_mat_vs's vertex stage - and by nothing
-// else. EVERY compile of the effect unit (ensure_resources' prewarm pair,
-// ensure_effect_shader, kh_pip_fx_shader) and kh_user_fx_ps's cb + user
+// else. EVERY compile of the effect unit (ensure_resources' prewarm rows
+// and its four kh_ps_optional pyramid entries, ensure_effect_shader,
+// kh_pip_fx_shader) and kh_user_fx_ps's cb + user
 // post-FX pass MSAA_DEPTH and KH_FX_UNIT, never KH_RECEIVE_TEX; that is what
 // keeps shadowAtlas off depthTex at t1. white.hlsl
 // declares no register of its own, so the white unit takes the block below

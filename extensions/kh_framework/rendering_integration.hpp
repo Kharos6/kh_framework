@@ -634,7 +634,12 @@ namespace RenderIntegration {
 // ---- ARRAY = getRenderStats ------------------------------------------------
 // Render statistics: counters and hook state, the render-thread frame trace
 // and the dynamic-light state. The first call arms collection (statsArmed 0)
-// and reports zero counters; later calls report what accumulated since
+// and reports zero counters; later calls report what accumulated since.
+// Nothing is timed or counted while collection is off. Timings: "<zone>Us" /
+// "<zone>N" are the last frame's (the one-in-16 sampled zones are noisy there);
+// profWindow and gpuWindow are every zone's mean and worst frame since the
+// arming; funnel counts the constant-buffer capture's work; gpuPasses and
+// gpuPassWindow time each post-processing pass on the GPU
 //
 // ---- BOOL = resetRenderStats -----------------------------------------------
 // Zero the render counters and disarm collection until the next
@@ -675,16 +680,22 @@ static std::atomic<bool> g_stats_armed{ false };
 inline bool kh_stats_on() { return g_stats_armed.load(std::memory_order_relaxed); }
 // KH_PROF: opt-in frame-time instrumentation, CPU and GPU, per main-depth
 // cycle. Nothing here runs unless the stats are armed (a getRenderStats):
-// a disarmed session pays one relaxed load per scope, no QPC, no query (the
-// first fold after a disarm only closes, unread, the bracket the armed cycle
-// opened).
+// a disarmed session pays one relaxed load per scope, no clock read, no query
+// (the first fold after a disarm only closes, unread, the bracket the armed
+// cycle opened).
 //
-// CPU zones: KhProfScope takes two QueryPerformanceCounter reads around a
-// region and adds the ticks and one entry to the zone's accumulators -
-// relaxed atomics, because zones run on the render thread, the game thread
-// under the park, the UI-phase thread and the worker pool. The fold at the
-// main depth clear (kh_prof_fold) converts the accumulators to microseconds
-// and publishes them with the entry counts as "the ended cycle's" values.
+// CPU zones: KhProfScope takes two TSC reads (__rdtsc) around a region and
+// adds the ticks and one entry to the zone's accumulators - relaxed atomics,
+// because zones run on the render thread, the game thread under the park, the
+// UI-phase thread and the worker pool. The fold at the main depth clear
+// (kh_prof_fold) converts the accumulators to microseconds (the TSC's rate it
+// measures against QPC between armed folds, KH_PROF_SUB; kh_prof_now /
+// kh_prof_add intervals stay on QPC) and publishes them with the entry counts
+// as "the ended cycle's" values. KH_PROF_TSC_CLOCK: a QPC call (~40 ns) is a
+// zone's floor per timed call, as large as the work of the small hooks, and
+// x16 on a sampled zone; a TSC read is a few ns. The TSC zones publish whole
+// armed cycles only (the cycle the arming splits reads 0; by the next one
+// the rate is measured).
 // Worker-pool zones (cloth, chain, skin, BVH) sum across workers, so they
 // are worker-microseconds and can exceed the frame; divide by the count. The
 // BVH build's zone also takes the game thread's builds (a rigid collider's
@@ -725,9 +736,35 @@ enum KhProfZone : uint32_t {
     KHP_W_CLOTH_SIM, KHP_W_CHAIN_SIM, KHP_W_SKIN_JOB, KHP_W_BVH_BUILD, KHP_W_BVH_REFIT,
     // One-shot builders (import time).
     KHP_LOD_BUILD, KHP_ENSURE_RES,
+    // KH_PROF_HOOKS: every other installed context hook's own work (the swap chain's rare ResizeBuffers has no
+    // zone), the driver's call left outside (hookUpdSub alone wraps its driver call: drvUpdSub below takes it out).
+    // hookUpdSub / hookPsSrv / hookOmBlend / hookOmDss / drawRecord / hookCopyRegion / hookMisc are sampled
+    // (KH_PROF_SAMPLE); hookOmRt / hookOmRtUav / hookCopyRes / hookResolve are
+    // called far less, some calls with heavy work (a PIP leave, the flush at the resolve), and are timed whole, as is
+    // drawPost (KH_PROF_TSC: its work - the view-model mirror's re-issued draw, the UI quad, the bracket - lands on
+    // one draw or two a frame). The zones nest and are not additive: they time every call through the hook, ours
+    // too, so the work our own code issues inside a zone (the flush inside hookResolve, the PIP leave inside hookOmRt
+    // / hookCopyRes, our draws inside a draw step) also counts in the zones of the hooks it calls.
+    KHP_HOOK_UPDSUB, KHP_HOOK_PSSRV, KHP_HOOK_OMRT, KHP_HOOK_OMRTUAV, KHP_HOOK_OMBLEND, KHP_HOOK_OMDSS,
+    KHP_HOOK_COPYRES, KHP_HOOK_RESOLVE, KHP_HOOK_COPYREGION, KHP_HOOK_MISC, KHP_DRAW_RECORD, KHP_DRAW_POST,
+    // KH_PROF_DRV: the driver's own Map / Unmap (inside hookMap) and UpdateSubresource (inside hookUpdSub), timed on
+    // one call in KH_PROF_SAMPLE_EVERY of their own (kh_prof_drv_t0) with the TSC and scaled; their N is those calls
+    // x KH_PROF_SAMPLE_EVERY (an estimate). Our share of hookMap is about hookMap - drvMap - drvUnmap.
+    KHP_DRV_MAP, KHP_DRV_UNMAP, KHP_DRV_UPDSUB,
+    // KH_PROF_UPLOAD: the funnel's steps for each captured upload (KhProfSub; one decision per upload, timed one in
+    // KH_PROF_SAMPLE_EVERY): the capture (the copy), then each scanner, then the replay's image note.
+    KHP_UP_CAPTURE, KHP_SC_PROJ, KHP_SC_LIVE, KHP_SC_LOCATOR, KHP_SC_PIP, KHP_SC_ENGCAM, KHP_SC_REG, KHP_SC_VIEW,
+    KHP_SC_B2, KHP_SC_RPIMG,
+    // KH_PROF_DRAWSTEP: reorder_pre_draw's steps for the engine's draws (KhProfSub; one decision per draw, our own
+    // draws take none): dsShadowNote / dsMaskNote / dlSample sampled; timed whole the ones whose work lands on a few
+    // draws a frame (dsSeamPump, dsPip, dsInfront: the seam / svs, PIP and in-front injections), or one draw in 8 or
+    // 16, or a retry (dsCascbind, dsSkybind, dsLatch). mask cast, band commit, the UI mask and the injection keep
+    // their own zones above.
+    KHP_DS_SEAM, KHP_DS_PIP, KHP_DS_SHADOW, KHP_DS_MASK, KHP_DS_DL, KHP_DS_INFRONT, KHP_DS_CASCBIND,
+    KHP_DS_SKYBIND, KHP_DS_LATCH,
     KHP_ZONE_N
 };
-static const char* const g_prof_zone_name[KHP_ZONE_N] = {
+static const char* const g_prof_zone_name[] = {
     "hookClear", "hookDraw", "hookMap", "uploadScan",
     "inject", "attachStep", "sceneSync", "objbufSync", "sunLadder",
     "dlsFrame", "dlsWorld", "maskCast", "svsPrime", "svsVolCopy",
@@ -740,7 +777,15 @@ static const char* const g_prof_zone_name[KHP_ZONE_N] = {
     "uiMaskDraw",
     "wClothSim", "wChainSim", "wSkinJob", "wBvhBuild", "wBvhRefit",
     "lodBuild", "ensureRes",
+    "hookUpdSub", "hookPsSrv", "hookOmRt", "hookOmRtUav", "hookOmBlend", "hookOmDss",
+    "hookCopyRes", "hookResolve", "hookCopyRegion", "hookMisc", "drawRecord", "drawPost",
+    "drvMap", "drvUnmap", "drvUpdSub",
+    "upCapture", "scProj", "scShadowLive", "scLocator", "scPip", "scEngcam", "scShadowReg", "scShadowView",
+    "scB2", "scRpImg",
+    "dsSeamPump", "dsPip", "dsShadowNote", "dsMaskNote", "dlSample", "dsInfront", "dsCascbind",
+    "dsSkybind", "dsLatch",
 };
+static_assert(sizeof(g_prof_zone_name) / sizeof(g_prof_zone_name[0]) == KHP_ZONE_N, "KH_PROF: a name per zone");
 static std::atomic<uint64_t> g_prof_ticks[KHP_ZONE_N];
 static std::atomic<uint64_t> g_prof_count[KHP_ZONE_N];
 static std::atomic<uint64_t> g_prof_us_pub[KHP_ZONE_N];
@@ -757,31 +802,68 @@ inline uint64_t kh_prof_freq() {
     static const uint64_t khpf = [] { LARGE_INTEGER khpf_f = {}; QueryPerformanceFrequency(&khpf_f); return khpf_f.QuadPart > 0 ? static_cast<uint64_t>(khpf_f.QuadPart) : 1ull; }();
     return khpf;
 }
-// KH_PROF_SAMPLE: the two zones entered tens of thousands of times a frame
+// KH_PROF_SAMPLE: the zones entered tens of thousands of times a frame
 // (KHP_HOOK_MAP on every Map and Unmap, KHP_UPLOAD_SCAN on every scanned
-// upload) take one QPC pair in KH_PROF_SAMPLE_EVERY entries and scale the
+// upload, and the hooks KH_PROF_HOOKS adds: kh_prof_sampled's set) take one
+// clock pair in KH_PROF_SAMPLE_EVERY entries and scale the
 // ticks; the count stays exact. Two QPC calls on ~50,000 entries a frame were
 // ~4 ms of the armed hook figures and most of the armed-vs-unarmed frame gap.
 static constexpr uint32_t KH_PROF_SAMPLE_EVERY = 16u;
+static_assert((KH_PROF_SAMPLE_EVERY & (KH_PROF_SAMPLE_EVERY - 1u)) == 0u, "KH_PROF_SAMPLE: a power of two");
 static std::atomic<uint32_t> g_prof_sample_ctr[KHP_ZONE_N];   // hooked_map's scope opens before its thread gate: any thread.
-inline bool kh_prof_sampled(KhProfZone khpz_z) { return khpz_z == KHP_HOOK_MAP || khpz_z == KHP_UPLOAD_SCAN; }
+// KH_PROF_TSC_CLOCK: the zones' TSC ticks (KhProfScope, KH_PROF_TSC, KH_PROF_DRV with atomic adds, any thread;
+// KhProfSub with plain adds, render thread - no zone is written both ways), converted by the fold (KH_PROF_SUB).
+static std::atomic<uint64_t> g_prof_tsc[KHP_ZONE_N];
+// KH_PROF_HOOKS: the hooks the engine calls thousands of times a frame join the sampled set.
+inline bool kh_prof_sampled(KhProfZone khpz_z) {
+    switch (khpz_z) {
+    case KHP_HOOK_MAP: case KHP_UPLOAD_SCAN: case KHP_HOOK_UPDSUB: case KHP_HOOK_PSSRV: case KHP_HOOK_OMBLEND:
+    case KHP_HOOK_OMDSS: case KHP_HOOK_COPYREGION: case KHP_HOOK_MISC: case KHP_DRAW_RECORD:
+        return true;
+    default:
+        return false;
+    }
+}
+// KH_PROF_SAMPLE_HASH: which calls are timed - a mix of the zone's call counter, not the counter's own residue. The
+// residue locks onto call patterns: hookMap's Map and Unmap strictly alternate on one counter, so every timed call
+// was an Unmap (or every one a Map). khpm_salt draws further decisions from the same count (the driver's timing,
+// KH_PROF_DRV) independent of the first, so one's cost lands in the other's samples at its true rate.
+inline uint32_t kh_prof_mix(uint32_t khpm_x, uint32_t khpm_salt) {
+    khpm_x ^= khpm_salt * 0x9E3779B9u;
+    khpm_x ^= khpm_x >> 16; khpm_x *= 0x7FEB352Du;
+    khpm_x ^= khpm_x >> 15; khpm_x *= 0x846CA68Bu;
+    khpm_x ^= khpm_x >> 16;
+    return khpm_x;
+}
+inline bool kh_prof_pick(uint32_t khpk_c, uint32_t khpk_salt) {
+    return (kh_prof_mix(khpk_c, khpk_salt) & (KH_PROF_SAMPLE_EVERY - 1u)) == 0u;
+}
 struct KhProfScope {
     KhProfZone khps_z;
-    int64_t    khps_t0;
+    uint64_t   khps_t0;   // KH_PROF_TSC_CLOCK: the TSC at the entry.
     bool       khps_on;
     bool       khps_timed;
-    explicit KhProfScope(KhProfZone khps_zone) : khps_z(khps_zone), khps_t0(0), khps_on(kh_stats_on()), khps_timed(false) {
+    uint32_t   khps_c;   // KH_PROF_SAMPLE_HASH: a sampled zone's call count (0 = none drawn).
+    explicit KhProfScope(KhProfZone khps_zone)
+        : khps_z(khps_zone), khps_t0(0), khps_on(kh_stats_on()), khps_timed(false), khps_c(0) {
         if (!khps_on) return;
-        khps_timed = !kh_prof_sampled(khps_zone) || ((g_prof_sample_ctr[khps_zone].fetch_add(1, std::memory_order_relaxed) + 1u) % KH_PROF_SAMPLE_EVERY) == 0u;
-        if (khps_timed) { LARGE_INTEGER khps_q = {}; QueryPerformanceCounter(&khps_q); khps_t0 = khps_q.QuadPart; }
+        if (kh_prof_sampled(khps_zone)) {
+            khps_c = g_prof_sample_ctr[khps_zone].fetch_add(1, std::memory_order_relaxed) + 1u;
+            khps_timed = kh_prof_pick(khps_c, 0u);
+        } else {
+            khps_timed = true;
+        }
+        if (khps_timed) khps_t0 = __rdtsc();
     }
     ~KhProfScope() {
         if (!khps_on) return;
         g_prof_count[khps_z].fetch_add(1, std::memory_order_relaxed);
         if (!khps_timed) return;
-        LARGE_INTEGER khps_q = {}; QueryPerformanceCounter(&khps_q);
-        const uint64_t khps_dt = static_cast<uint64_t>(khps_q.QuadPart - khps_t0);
-        g_prof_ticks[khps_z].fetch_add(kh_prof_sampled(khps_z) ? khps_dt * KH_PROF_SAMPLE_EVERY : khps_dt, std::memory_order_relaxed);
+        const uint64_t khps_t1 = __rdtsc();
+        if (khps_t1 <= khps_t0) return;   // KH_PROF_TSC_CLOCK: a backwards read (unsynchronised cores) is dropped.
+        const uint64_t khps_dt = khps_t1 - khps_t0;
+        g_prof_tsc[khps_z].fetch_add(kh_prof_sampled(khps_z) ? khps_dt * KH_PROF_SAMPLE_EVERY : khps_dt,
+                                     std::memory_order_relaxed);
     }
     KhProfScope(const KhProfScope&) = delete;
     KhProfScope& operator=(const KhProfScope&) = delete;
@@ -796,6 +878,197 @@ inline void kh_prof_add(KhProfZone khpa_z, int64_t khpa_t0) {
     g_prof_ticks[khpa_z].fetch_add(static_cast<uint64_t>(khpa_q.QuadPart - khpa_t0), std::memory_order_relaxed);
     g_prof_count[khpa_z].fetch_add(1, std::memory_order_relaxed);
 }
+// KH_PROF_SUB - the steps of one captured upload (KH_PROF_UPLOAD) and of one draw (KH_PROF_DRAWSTEP). Tens of
+// thousands of entries a frame, so a QPC pair on each, or an atomic read-modify-write, would itself move the frame:
+// one decision per upload / per draw (kh_prof_up_begin / KhProfDsDecision: armed, and one in KH_PROF_SAMPLE_EVERY
+// timed), then each step counts with a plain add and, on a timed one, reads the TSC (__rdtsc) twice - scaled by its
+// rate (khpb_scale: the sample rate, or 1 for a step timed whole). The fold converts the ticks with the TSC's rate it
+// measured against QPC since the last armed fold (an invariant TSC, as QPC itself uses where it has one - without one,
+// a CPU older than invariant TSCs, a zone is scaled by the interval's average rate: a measurement error only; a read
+// that runs backwards - cores whose TSCs disagree - drops that sample). Written only by the
+// render-thread identity (the hooks past reorder_on_render_thread, the funnel behind kh_upload_hook_wanted) and folded
+// on it: relaxed loads and stores, no read-modify-write - a race would miscount, not corrupt.
+static KhProfZone g_prof_up_cur = KHP_ZONE_N;   // The step in flight (scanExtBytes' owner); KHP_ZONE_N = none.
+inline void kh_prof_plain_add(std::atomic<uint64_t>& khpa_a, uint64_t khpa_n) {
+    khpa_a.store(khpa_a.load(std::memory_order_relaxed) + khpa_n, std::memory_order_relaxed);
+}
+// KH_PROF_DRV: the driver's own call inside a sampled hook scope (khpd_s), timed on one call in
+// KH_PROF_SAMPLE_EVERY of its own (a second decision from the scope's count) with the TSC, and scaled. Its own
+// decision, not the scope's: timed on the scope's timed calls, its cost would sit in every call the scope extrapolates.
+// Any thread (the hooks'), so atomics; 0 = not timed (nothing recorded).
+inline uint64_t kh_prof_drv_t0(const KhProfScope& khpd_s) {
+    if (khpd_s.khps_c == 0u || !kh_prof_pick(khpd_s.khps_c, 1u)) return 0u;
+    return __rdtsc();
+}
+inline void kh_prof_drv(KhProfZone khpd_z, uint64_t khpd_t0) {
+    if (khpd_t0 == 0u) return;
+    const uint64_t khpd_t1 = __rdtsc();
+    if (khpd_t1 <= khpd_t0) return;   // KH_PROF_TSC_CLOCK: a backwards read is dropped.
+    g_prof_tsc[khpd_z].fetch_add((khpd_t1 - khpd_t0) * KH_PROF_SAMPLE_EVERY, std::memory_order_relaxed);
+    g_prof_count[khpd_z].fetch_add(KH_PROF_SAMPLE_EVERY, std::memory_order_relaxed);
+}
+// KH_PROF_TSC: a zone timed whole with the TSC, any thread - for a hook called on every draw whose work lands on a
+// few of them (a 1-in-16 sample would read 0 or 16x a frame): two TSC reads and two atomic adds per armed call.
+struct KhProfTscScope {
+    KhProfZone khpt_z;
+    uint64_t   khpt_t0;
+    bool       khpt_on;
+    explicit KhProfTscScope(KhProfZone khpt_zone) : khpt_z(khpt_zone), khpt_t0(0), khpt_on(kh_stats_on()) {
+        if (khpt_on) khpt_t0 = __rdtsc();
+    }
+    ~KhProfTscScope() {
+        if (!khpt_on) return;
+        g_prof_count[khpt_z].fetch_add(1, std::memory_order_relaxed);
+        const uint64_t khpt_t1 = __rdtsc();
+        if (khpt_t1 > khpt_t0) g_prof_tsc[khpt_z].fetch_add(khpt_t1 - khpt_t0, std::memory_order_relaxed);
+    }
+    KhProfTscScope(const KhProfTscScope&) = delete;
+    KhProfTscScope& operator=(const KhProfTscScope&) = delete;
+};
+#define KH_PROF_TSC(z) KhProfTscScope khpt_scope_##z(z)
+struct KhProfSub {
+    KhProfZone khpb_z;
+    KhProfZone khpb_prev;
+    uint64_t   khpb_t0;
+    uint64_t   khpb_scale;
+    bool       khpb_on;
+    bool       khpb_timed;
+    KhProfSub(KhProfZone khpb_zone, bool khpb_armed, bool khpb_time, uint64_t khpb_rate)
+        : khpb_z(khpb_zone), khpb_prev(KHP_ZONE_N), khpb_t0(0), khpb_scale(khpb_rate), khpb_on(khpb_armed),
+          khpb_timed(khpb_armed && khpb_time) {
+        if (!khpb_on) return;
+        kh_prof_plain_add(g_prof_count[khpb_z], 1u);
+        khpb_prev = g_prof_up_cur;
+        g_prof_up_cur = khpb_z;
+        if (khpb_timed) khpb_t0 = __rdtsc();
+    }
+    ~KhProfSub() {
+        if (!khpb_on) return;
+        if (khpb_timed) {
+            const uint64_t khpb_t1 = __rdtsc();
+            if (khpb_t1 > khpb_t0) kh_prof_plain_add(g_prof_tsc[khpb_z], (khpb_t1 - khpb_t0) * khpb_scale);
+        }
+        g_prof_up_cur = khpb_prev;
+    }
+    KhProfSub(const KhProfSub&) = delete;
+    KhProfSub& operator=(const KhProfSub&) = delete;
+};
+// A sampled step (timed on the upload's / draw's decision), and a step timed whole whenever it runs armed.
+#define KH_PROF_SUB(z, on, timed) KhProfSub khpb_sub_##z((z), (on), (timed), KH_PROF_SAMPLE_EVERY)
+#define KH_PROF_SUB_ALL(z, on) KhProfSub khpb_sub_##z((z), (on), true, 1u)
+// The decisions (render-thread identity; KH_PROF_SAMPLE_HASH). kh_prof_up_begin: at the head of kh_upload_capture,
+// the funnel's first step for every captured upload (Unmap and UpdateSubresource alike); KhProfDsDecision: past
+// reorder_pre_draw's render-thread gate, for the rest of the draw. Disarmed: one relaxed load each, and every step
+// below reads the bool.
+static uint32_t g_prof_up_ctr = 0;
+static bool     g_prof_up_on = false;
+static bool     g_prof_up_t = false;
+inline void kh_prof_up_begin() {
+    g_prof_up_on = kh_stats_on();
+    g_prof_up_t = g_prof_up_on && kh_prof_pick(++g_prof_up_ctr, 2u);
+}
+static uint32_t g_prof_ds_ctr = 0;
+static bool     g_prof_ds_on = false;
+static bool     g_prof_ds_t = false;
+// khdd_own: one of our own draws (g_ro.in_injection) - not one of the engine's: no decision of its own, nothing
+// counted, and the engine draw it is issued inside (a seam / PIP / in-front injection) gets its decision back.
+struct KhProfDsDecision {
+    bool khdd_own;
+    bool khdd_on;
+    bool khdd_t;
+    explicit KhProfDsDecision(bool khdd_own_draw) : khdd_own(khdd_own_draw), khdd_on(false), khdd_t(false) {
+        const bool khdd_armed = kh_stats_on();
+        if (khdd_own && khdd_armed) {
+            khdd_on = g_prof_ds_on;
+            khdd_t = g_prof_ds_t;
+            g_prof_ds_on = false;
+            g_prof_ds_t = false;
+            return;
+        }
+        khdd_own = false;
+        g_prof_ds_on = khdd_armed;
+        g_prof_ds_t = khdd_armed && kh_prof_pick(++g_prof_ds_ctr, 3u);
+    }
+    ~KhProfDsDecision() {
+        if (!khdd_own) return;
+        g_prof_ds_on = khdd_on;
+        g_prof_ds_t = khdd_t;
+    }
+    KhProfDsDecision(const KhProfDsDecision&) = delete;
+    KhProfDsDecision& operator=(const KhProfDsDecision&) = delete;
+};
+// KH_PROF_FUNNEL - counts and bytes per cycle (render-thread identity, armed only; plain adds as KhProfSub's). The
+// upload funnel: captured uploads (UpdateSubresource's among them), the eager copies and bytes, the write-combined
+// fences, the extensions past the eager copy (kh_upload_need / kh_upload_copy_range) and their bytes, the light
+// capture's whole copies (kh_cbs_write) and bytes, in all and by what the sampler named the buffer (the want table's
+// kind, tagged while armed: cb11, cb10, a VS slot, none yet), uploads the want table refused (a shadow, if any,
+// marked stale), captures the idle cadence skipped, and the want table's index slots probed. The light sampler: the
+// engine's draws past the render-thread gate, draws with no cb11 bound, uploads already processed this span, shadow
+// misses (an incomplete side), twins of an authored window, new lists hashed and the bytes hashed, matches run and
+// replayed (KH_DL_PRES_MEMO) and the record x pool-light pairs the runs compared, windows authored and the VS bytes
+// they copied.
+enum KhFunnel : uint32_t {
+    KHF_UPLOADS, KHF_UPDSUB, KHF_EAGER_N, KHF_EAGER_B, KHF_FENCES, KHF_EXT_N, KHF_EXT_B,
+    KHF_SHADOW_N, KHF_SHADOW_B, KHF_SH11_N, KHF_SH11_B, KHF_SH10_N, KHF_SH10_B, KHF_SHVS_N, KHF_SHVS_B,
+    KHF_SHOTHER_N, KHF_SHOTHER_B, KHF_WANT_REFUSED, KHF_IDLE_SKIP, KHF_GATE_PROBES,
+    KHF_DRAWS, KHF_DL_NOLIST, KHF_DL_SAME, KHF_DL_MISS, KHF_DL_TWIN, KHF_DL_LISTS, KHF_DL_HASH_B,
+    KHF_DL_RUNS, KHF_DL_REPLAYS, KHF_DL_PAIRS, KHF_DL_WINDOWS, KHF_DL_WIN_VS_B,
+    KHF_N
+};
+static const char* const g_fun_name[] = {
+    "uploads", "updSubUploads", "eagerCopies", "eagerBytes", "wcFences", "extCopies", "extBytes",
+    "shadowCopies", "shadowBytes", "shadowCb11Copies", "shadowCb11Bytes", "shadowCb10Copies", "shadowCb10Bytes",
+    "shadowVsCopies", "shadowVsBytes", "shadowOtherCopies", "shadowOtherBytes", "wantRefused", "idleSkips",
+    "gateProbes",
+    "draws", "dlNoList", "dlSameUpload", "dlShadowMiss", "dlTwin", "dlNewLists", "dlHashBytes",
+    "dlMatchRuns", "dlMatchReplays", "dlMatchPairs", "dlWindows", "dlWindowVsBytes",
+};
+static_assert(sizeof(g_fun_name) / sizeof(g_fun_name[0]) == KHF_N, "KH_PROF_FUNNEL: a name per counter");
+static std::atomic<uint64_t> g_fun_acc[KHF_N];   // This cycle's (render-thread identity).
+static std::atomic<uint64_t> g_fun_pub[KHF_N];   // The ended cycle's (the fold).
+static std::atomic<uint64_t> g_fun_win[KHF_N];   // Summed over the window (KH_PROF_WINDOW).
+inline void kh_fun(KhFunnel khfn_k, uint64_t khfn_n) { kh_prof_plain_add(g_fun_acc[khfn_k], khfn_n); }
+// The want table's kinds (kh_dl_want_note's tag; a buffer named in more than one role carries each bit).
+static constexpr uint8_t KH_DL_KIND_CB11 = 1u;
+static constexpr uint8_t KH_DL_KIND_CB10 = 2u;
+static constexpr uint8_t KH_DL_KIND_VS = 4u;
+inline void kh_fun_shadow(uint8_t khfs_kind, uint64_t khfs_b) {
+    kh_fun(KHF_SHADOW_N, 1u);
+    kh_fun(KHF_SHADOW_B, khfs_b);
+    if (khfs_kind & KH_DL_KIND_CB11)     { kh_fun(KHF_SH11_N, 1u); kh_fun(KHF_SH11_B, khfs_b); }
+    else if (khfs_kind & KH_DL_KIND_CB10) { kh_fun(KHF_SH10_N, 1u); kh_fun(KHF_SH10_B, khfs_b); }
+    else if (khfs_kind & KH_DL_KIND_VS)   { kh_fun(KHF_SHVS_N, 1u); kh_fun(KHF_SHVS_B, khfs_b); }
+    else                                  { kh_fun(KHF_SHOTHER_N, 1u); kh_fun(KHF_SHOTHER_B, khfs_b); }
+}
+// scanExtBytes: the extension bytes each step made the funnel copy (the step in flight, g_prof_up_cur).
+static std::atomic<uint64_t> g_prof_xb_acc[KHP_ZONE_N];
+static std::atomic<uint64_t> g_prof_xb_pub[KHP_ZONE_N];
+static std::atomic<uint64_t> g_prof_xb_win[KHP_ZONE_N];
+inline void kh_fun_ext(uint64_t khfe_b) {
+    kh_fun(KHF_EXT_N, 1u);
+    kh_fun(KHF_EXT_B, khfe_b);
+    if (g_prof_up_cur < KHP_ZONE_N) kh_prof_plain_add(g_prof_xb_acc[g_prof_up_cur], khfe_b);
+}
+// KH_PROF_WINDOW - one cycle is one sample: a 1-in-16 zone multiplies one interrupted call by 16, and a step that runs
+// once a frame lands on the cycle or not. Every whole armed cycle (a published fold, KH_PROF_DISARM, whose previous
+// fold was armed too) also adds to these, so getRenderStats can report each zone's mean and worst cycle since the
+// arming or the last resetRenderStats.
+static std::atomic<uint64_t> g_prof_win_cycles{ 0 };
+static std::atomic<uint64_t> g_prof_win_us[KHP_ZONE_N];
+static std::atomic<uint64_t> g_prof_win_n[KHP_ZONE_N];
+static std::atomic<uint64_t> g_prof_win_max[KHP_ZONE_N];
+// KH_PROF_SUB's rate: TSC ticks per microsecond, measured at each armed fold over the interval since the previous one
+// - the conversion of every TSC-timed zone (every CPU zone but kh_prof_add's QPC intervals). 0 until two armed folds
+// have run in this process (those zones' time then publishes as 0); kept across resets - the machine's rate,
+// measured again by every armed fold. Render-thread identity writes.
+static uint64_t g_prof_cal_q = 0;
+static uint64_t g_prof_cal_t = 0;
+static std::atomic<double> g_prof_tsc_per_us{ 0.0 };
+// KH_PROF_WINDOW: the last fold found collection on (render thread). The window takes whole armed cycles only: the
+// cycle the arming split stays out of the means (its fold publishes the counts and kh_prof_add's QPC zones - nothing
+// at all when it is also the first fold after a reset, KH_PROF_DISARM; the TSC zones, scanExtBytes and the funnel
+// read 0 there).
+static bool g_prof_prev_on = false;
 
 enum KhGpuZone : uint32_t {
     KHG_INJECT, KHG_SUN_LADDER, KHG_DLS_FRAME, KHG_DLS_WORLD, KHG_MASK_CAST, KHG_SVS_PRIME,
@@ -812,10 +1085,17 @@ static constexpr uint32_t KH_GPU_RING = 8u;
 // The cycles back a slot is read, never waiting (< KH_GPU_RING): the GPU was measured running 5 cycles behind the CPU
 // under load at 4K, and a slot read sooner is never done. The ring reopens it KH_GPU_RING - KH_GPU_LAG folds later.
 static constexpr uint32_t KH_GPU_LAG = 6u;
+// KH_GPU_PASS: the effect passes a cycle times (the scene chain's and the UI chain's), each its own timestamp pair in
+// the cycle's bracket, keyed by kh_gpu_pass_key; past this many in a cycle the rest go untimed.
+static constexpr uint32_t KH_GPU_PASS_N = 32u;
 struct KhGpuProf {
     ID3D11Query* disjoint[KH_GPU_RING] = {};
     ID3D11Query* ts[KHG_ZONE_N][KH_GPU_RING][2] = {};
     bool         used[KHG_ZONE_N][KH_GPU_RING] = {};
+    ID3D11Query* pts[KH_GPU_RING][KH_GPU_PASS_N][2] = {};   // KH_GPU_PASS.
+    uint32_t     pass_n[KH_GPU_RING] = {};
+    uint32_t     pass_key[KH_GPU_RING][KH_GPU_PASS_N] = {};
+    bool         pass_used[KH_GPU_RING][KH_GPU_PASS_N] = {};
     bool         ready = false;    // Queries exist.
     bool         failed = false;   // A create failed: the GPU side stands down for the session.
     int          open_slot = -1;   // Slot whose disjoint is begun, -1 = none.
@@ -823,6 +1103,52 @@ struct KhGpuProf {
 };
 static KhGpuProf g_gpu_prof;
 static std::atomic<uint64_t> g_gpu_us_pub[KHG_ZONE_N];
+// KH_PROF_WINDOW: every GPU value the fold harvested since the arming / reset (sum, count, worst).
+static std::atomic<uint64_t> g_gpu_win_us[KHG_ZONE_N];
+static std::atomic<uint64_t> g_gpu_win_n[KHG_ZONE_N];
+static std::atomic<uint64_t> g_gpu_win_max[KHG_ZONE_N];
+// KH_GPU_PASS: a pass's key - the effect id (0 - 255), the chain (bit 8: 0 the scene's, 1 the UI's), a user shader
+// (bit 9), the stages fused into it (bits 10 - 15, at most 63).
+inline uint32_t kh_gpu_pass_key(uint32_t khgk_chain, int khgk_effect, bool khgk_user, uint32_t khgk_fused) {
+    const uint32_t khgk_e = khgk_effect < 0 ? 0u : (khgk_effect > 255 ? 255u : static_cast<uint32_t>(khgk_effect));
+    const uint32_t khgk_f = khgk_fused > 63u ? 63u : khgk_fused;
+    return khgk_e | ((khgk_chain & 1u) << 8) | ((khgk_user ? 1u : 0u) << 9) | (khgk_f << 10);
+}
+// The harvested cycle's passes (key << 32 | microseconds), in draw order, and how many; and the window per (chain,
+// user, effect) - the key's low KH_GPU_PASS_W bits: sum, count, worst.
+static constexpr uint32_t KH_GPU_PASS_W = 1024u;
+static std::atomic<uint64_t> g_gpu_pass_pub[KH_GPU_PASS_N];
+static std::atomic<uint32_t> g_gpu_pass_pub_n{ 0 };
+static std::atomic<uint64_t> g_gpu_passw_us[KH_GPU_PASS_W];
+static std::atomic<uint64_t> g_gpu_passw_n[KH_GPU_PASS_W];
+static std::atomic<uint64_t> g_gpu_passw_max[KH_GPU_PASS_W];
+// KH_PROF_WINDOW / KH_PROF_FUNNEL / KH_GPU_PASS: the window starts again and the published values go to zero - by
+// resetRenderStats (kh_prof_reset_pub) and by the first fold after it (KH_PROF_DISARM).
+inline void kh_prof_window_zero() {
+    g_prof_win_cycles.store(0, std::memory_order_relaxed);
+    for (uint32_t khwz_z = 0; khwz_z < KHP_ZONE_N; ++khwz_z) {
+        g_prof_win_us[khwz_z].store(0, std::memory_order_relaxed);
+        g_prof_win_n[khwz_z].store(0, std::memory_order_relaxed);
+        g_prof_win_max[khwz_z].store(0, std::memory_order_relaxed);
+        g_prof_xb_pub[khwz_z].store(0, std::memory_order_relaxed);
+        g_prof_xb_win[khwz_z].store(0, std::memory_order_relaxed);
+    }
+    for (uint32_t khwz_z = 0; khwz_z < KHG_ZONE_N; ++khwz_z) {
+        g_gpu_win_us[khwz_z].store(0, std::memory_order_relaxed);
+        g_gpu_win_n[khwz_z].store(0, std::memory_order_relaxed);
+        g_gpu_win_max[khwz_z].store(0, std::memory_order_relaxed);
+    }
+    for (uint32_t khwz_k = 0; khwz_k < KHF_N; ++khwz_k) {
+        g_fun_pub[khwz_k].store(0, std::memory_order_relaxed);
+        g_fun_win[khwz_k].store(0, std::memory_order_relaxed);
+    }
+    g_gpu_pass_pub_n.store(0, std::memory_order_relaxed);
+    for (uint32_t khwz_w = 0; khwz_w < KH_GPU_PASS_W; ++khwz_w) {
+        g_gpu_passw_us[khwz_w].store(0, std::memory_order_relaxed);
+        g_gpu_passw_n[khwz_w].store(0, std::memory_order_relaxed);
+        g_gpu_passw_max[khwz_w].store(0, std::memory_order_relaxed);
+    }
+}
 inline uint32_t kh_gpu_slot() { return static_cast<uint32_t>(g_gpu_prof.cycle % KH_GPU_RING); }
 inline bool kh_gpu_prof_ensure(ID3D11DeviceContext* khgp_ctx) {
     if (g_gpu_prof.ready) return true;
@@ -839,12 +1165,21 @@ inline bool kh_gpu_prof_ensure(ID3D11DeviceContext* khgp_ctx) {
             if (FAILED(khgp_dev->CreateQuery(&khgp_td, &g_gpu_prof.ts[khgp_z][khgp_r][0])) ||
                 FAILED(khgp_dev->CreateQuery(&khgp_td, &g_gpu_prof.ts[khgp_z][khgp_r][1]))) khgp_ok = false;
         }
+        for (uint32_t khgp_p = 0; khgp_p < KH_GPU_PASS_N && khgp_ok; ++khgp_p) {   // KH_GPU_PASS.
+            D3D11_QUERY_DESC khgp_pd = {}; khgp_pd.Query = D3D11_QUERY_TIMESTAMP;
+            if (FAILED(khgp_dev->CreateQuery(&khgp_pd, &g_gpu_prof.pts[khgp_r][khgp_p][0])) ||
+                FAILED(khgp_dev->CreateQuery(&khgp_pd, &g_gpu_prof.pts[khgp_r][khgp_p][1]))) khgp_ok = false;
+        }
     }
     khgp_dev->Release();
     if (!khgp_ok) {
         for (uint32_t khgp_r = 0; khgp_r < KH_GPU_RING; ++khgp_r) {
             KH_SAFE_RELEASE(g_gpu_prof.disjoint[khgp_r]);
             for (uint32_t khgp_z = 0; khgp_z < KHG_ZONE_N; ++khgp_z) { KH_SAFE_RELEASE(g_gpu_prof.ts[khgp_z][khgp_r][0]); KH_SAFE_RELEASE(g_gpu_prof.ts[khgp_z][khgp_r][1]); }
+            for (uint32_t khgp_p = 0; khgp_p < KH_GPU_PASS_N; ++khgp_p) {   // KH_GPU_PASS.
+                KH_SAFE_RELEASE(g_gpu_prof.pts[khgp_r][khgp_p][0]);
+                KH_SAFE_RELEASE(g_gpu_prof.pts[khgp_r][khgp_p][1]);
+            }
         }
         g_gpu_prof.failed = true;
         return false;
@@ -860,6 +1195,12 @@ inline void kh_gpu_prof_release() {
             KH_SAFE_RELEASE(g_gpu_prof.ts[khgr_z][khgr_r][1]);
             g_gpu_prof.used[khgr_z][khgr_r] = false;
         }
+        for (uint32_t khgr_p = 0; khgr_p < KH_GPU_PASS_N; ++khgr_p) {   // KH_GPU_PASS.
+            KH_SAFE_RELEASE(g_gpu_prof.pts[khgr_r][khgr_p][0]);
+            KH_SAFE_RELEASE(g_gpu_prof.pts[khgr_r][khgr_p][1]);
+            g_gpu_prof.pass_used[khgr_r][khgr_p] = false;
+        }
+        g_gpu_prof.pass_n[khgr_r] = 0;
     }
     g_gpu_prof.ready = false;
     g_gpu_prof.failed = false;
@@ -887,6 +1228,34 @@ struct KhGpuScope {
     KhGpuScope& operator=(const KhGpuScope&) = delete;
 };
 #define KH_GPU_SCOPE(ctx, z) KhGpuScope khgs_scope_##z((ctx), z)
+// KH_GPU_PASS: one effect pass's GPU interval - KhGpuScope's rules (only inside an open cycle bracket, on a ready
+// query set; an end that finds its bracket closed drops the pair), one of the cycle's KH_GPU_PASS_N pairs.
+struct KhGpuPassScope {
+    ID3D11DeviceContext* khgq_ctx;
+    int                  khgq_slot;   // The bracket the begin stamp went to; -1 = none.
+    uint32_t             khgq_i;
+    KhGpuPassScope(ID3D11DeviceContext* khgq_c, uint32_t khgq_chain, int khgq_effect, bool khgq_user,
+                   uint32_t khgq_fused) : khgq_ctx(khgq_c), khgq_slot(-1), khgq_i(0) {
+        if (!kh_stats_on() || !khgq_ctx || g_gpu_prof.open_slot < 0 || !g_gpu_prof.ready) return;
+        const uint32_t khgq_s = static_cast<uint32_t>(g_gpu_prof.open_slot);
+        if (g_gpu_prof.pass_n[khgq_s] >= KH_GPU_PASS_N) return;
+        khgq_i = g_gpu_prof.pass_n[khgq_s]++;
+        g_gpu_prof.pass_key[khgq_s][khgq_i] = kh_gpu_pass_key(khgq_chain, khgq_effect, khgq_user, khgq_fused);
+        g_gpu_prof.pass_used[khgq_s][khgq_i] = true;
+        khgq_ctx->End(g_gpu_prof.pts[khgq_s][khgq_i][0]);
+        khgq_slot = static_cast<int>(khgq_s);
+    }
+    ~KhGpuPassScope() {
+        if (khgq_slot < 0) return;
+        if (g_gpu_prof.open_slot != khgq_slot) {
+            g_gpu_prof.pass_used[static_cast<uint32_t>(khgq_slot)][khgq_i] = false;
+            return;
+        }
+        khgq_ctx->End(g_gpu_prof.pts[static_cast<uint32_t>(khgq_slot)][khgq_i][1]);
+    }
+    KhGpuPassScope(const KhGpuPassScope&) = delete;
+    KhGpuPassScope& operator=(const KhGpuPassScope&) = delete;
+};
 
 // The cycle fold, at the main depth clear on the render thread: publish the
 // CPU accumulators, close this cycle's GPU bracket, harvest the slot
@@ -897,12 +1266,69 @@ inline void kh_prof_fold(ID3D11DeviceContext* khpf_ctx) {
     // KH_PROF_DISARM: publish only what was measured armed and since the last reset.
     const uint32_t khpf_ep = g_prof_epoch.load(std::memory_order_acquire);
     const bool khpf_pub = khpf_on && khpf_ep == g_prof_epoch_seen;
+    const bool khpf_reset = khpf_ep != g_prof_epoch_seen;   // A resetRenderStats since the last fold.
     g_prof_epoch_seen = khpf_ep;
+    // KH_PROF_WINDOW: a whole armed cycle. The TSC zones, scanExtBytes and the funnel publish these only: a scope
+    // still open at a disarm adds after it, and nothing drains them disarmed - the arming fold drops what they hold.
+    const bool khpf_win = khpf_pub && g_prof_prev_on;
+    g_prof_prev_on = khpf_on;
+    // KH_PROF_DISARM for the window, the funnel and the passes: the first fold after a reset, armed or not, drops the
+    // armed-only accumulators and zeroes the window and what is published, on this thread (a fold that raced a reset
+    // made without the graphics lock may have added pre-reset values after the reset zeroed them). Once a reset.
+    if (khpf_reset) {
+        for (uint32_t khpf_z = 0; khpf_z < KHP_ZONE_N; ++khpf_z) {
+            g_prof_tsc[khpf_z].store(0, std::memory_order_relaxed);
+            g_prof_xb_acc[khpf_z].store(0, std::memory_order_relaxed);
+        }
+        for (uint32_t khpf_k = 0; khpf_k < KHF_N; ++khpf_k) g_fun_acc[khpf_k].store(0, std::memory_order_relaxed);
+        kh_prof_window_zero();
+    }
+    // KH_PROF_SUB: the TSC's rate over the interval since the last armed fold. Disarmed folds skip the new work below
+    // (nothing armed-only accumulates while disarmed: disarming is a reset, whose leftovers the block above dropped).
+    double khpf_tpu = 0.0;
+    if (khpf_on) {
+        LARGE_INTEGER khpf_q = {};
+        QueryPerformanceCounter(&khpf_q);
+        const uint64_t khpf_qn = static_cast<uint64_t>(khpf_q.QuadPart);
+        const uint64_t khpf_tn = __rdtsc();
+        if (g_prof_cal_q != 0 && khpf_qn > g_prof_cal_q && khpf_tn > g_prof_cal_t) {
+            g_prof_tsc_per_us.store(static_cast<double>(khpf_tn - g_prof_cal_t) * static_cast<double>(khpf_f) /
+                                    (static_cast<double>(khpf_qn - g_prof_cal_q) * 1.0e6), std::memory_order_relaxed);
+        }
+        g_prof_cal_q = khpf_qn;
+        g_prof_cal_t = khpf_tn;
+        khpf_tpu = g_prof_tsc_per_us.load(std::memory_order_relaxed);
+        if (khpf_win) g_prof_win_cycles.fetch_add(1u, std::memory_order_relaxed);   // KH_PROF_WINDOW.
+    }
     for (uint32_t khpf_z = 0; khpf_z < KHP_ZONE_N; ++khpf_z) {
         const uint64_t khpf_t = g_prof_ticks[khpf_z].exchange(0, std::memory_order_relaxed);
         const uint64_t khpf_n = g_prof_count[khpf_z].exchange(0, std::memory_order_relaxed);
-        g_prof_us_pub[khpf_z].store(khpf_pub ? khpf_t * 1000000ull / khpf_f : 0ull, std::memory_order_relaxed);
+        uint64_t khpf_us = khpf_pub ? khpf_t * 1000000ull / khpf_f : 0ull;
+        if (khpf_on) {   // KH_PROF_SUB / KH_PROF_UPLOAD / KH_PROF_WINDOW.
+            const uint64_t khpf_s = g_prof_tsc[khpf_z].exchange(0, std::memory_order_relaxed);
+            const uint64_t khpf_x = g_prof_xb_acc[khpf_z].exchange(0, std::memory_order_relaxed);
+            if (khpf_win && khpf_s != 0 && khpf_tpu > 0.0) {
+                khpf_us += static_cast<uint64_t>(static_cast<double>(khpf_s) / khpf_tpu);
+            }
+            g_prof_xb_pub[khpf_z].store(khpf_win ? khpf_x : 0ull, std::memory_order_relaxed);
+            if (khpf_win) {
+                g_prof_win_us[khpf_z].fetch_add(khpf_us, std::memory_order_relaxed);
+                g_prof_win_n[khpf_z].fetch_add(khpf_n, std::memory_order_relaxed);
+                g_prof_xb_win[khpf_z].fetch_add(khpf_x, std::memory_order_relaxed);
+                if (khpf_us > g_prof_win_max[khpf_z].load(std::memory_order_relaxed)) {
+                    g_prof_win_max[khpf_z].store(khpf_us, std::memory_order_relaxed);
+                }
+            }
+        }
+        g_prof_us_pub[khpf_z].store(khpf_pub ? khpf_us : 0ull, std::memory_order_relaxed);
         g_prof_n_pub[khpf_z].store(khpf_pub ? khpf_n : 0ull, std::memory_order_relaxed);
+    }
+    if (khpf_on) {   // KH_PROF_FUNNEL.
+        for (uint32_t khpf_k = 0; khpf_k < KHF_N; ++khpf_k) {
+            const uint64_t khpf_v = g_fun_acc[khpf_k].exchange(0, std::memory_order_relaxed);
+            g_fun_pub[khpf_k].store(khpf_win ? khpf_v : 0ull, std::memory_order_relaxed);
+            if (khpf_win) g_fun_win[khpf_k].fetch_add(khpf_v, std::memory_order_relaxed);
+        }
     }
     if (!khpf_pub) {   // KH_PROF_DISARM: the GPU times too (the note above g_prof_epoch).
         for (uint32_t khpf_z = 0; khpf_z < KHG_ZONE_N; ++khpf_z) {
@@ -917,6 +1343,7 @@ inline void kh_prof_fold(ID3D11DeviceContext* khpf_ctx) {
             for (uint32_t khpf_z = 0; khpf_z < KHG_ZONE_N; ++khpf_z) {
                 for (uint32_t khpf_r = 0; khpf_r < KH_GPU_RING; ++khpf_r) g_gpu_prof.used[khpf_z][khpf_r] = false;
             }
+            for (uint32_t khpf_r = 0; khpf_r < KH_GPU_RING; ++khpf_r) g_gpu_prof.pass_n[khpf_r] = 0;   // KH_GPU_PASS.
         }
         // Harvest: the slot KH_GPU_LAG cycles back, never waiting.
         if (khpf_pub && g_gpu_prof.cycle >= KH_GPU_LAG) {
@@ -930,16 +1357,47 @@ inline void kh_prof_fold(ID3D11DeviceContext* khpf_ctx) {
                     if (khpf_ctx->GetData(g_gpu_prof.ts[khpf_z][khpf_s][0], &khpf_a, sizeof(khpf_a), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
                         khpf_ctx->GetData(g_gpu_prof.ts[khpf_z][khpf_s][1], &khpf_b, sizeof(khpf_b), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
                         khpf_b >= khpf_a) {
-                        g_gpu_us_pub[khpf_z].store((khpf_b - khpf_a) * 1000000ull / khpf_dj.Frequency, std::memory_order_relaxed);
+                        const uint64_t khpf_g = (khpf_b - khpf_a) * 1000000ull / khpf_dj.Frequency;
+                        g_gpu_us_pub[khpf_z].store(khpf_g, std::memory_order_relaxed);
+                        g_gpu_win_us[khpf_z].fetch_add(khpf_g, std::memory_order_relaxed);   // KH_PROF_WINDOW.
+                        g_gpu_win_n[khpf_z].fetch_add(1u, std::memory_order_relaxed);
+                        if (khpf_g > g_gpu_win_max[khpf_z].load(std::memory_order_relaxed)) {
+                            g_gpu_win_max[khpf_z].store(khpf_g, std::memory_order_relaxed);
+                        }
                     }
                     g_gpu_prof.used[khpf_z][khpf_s] = false;
                 }
+                // KH_GPU_PASS: the slot's passes, in draw order; the published list is this cycle's.
+                uint32_t khpf_pk = 0;
+                for (uint32_t khpf_i = 0; khpf_i < g_gpu_prof.pass_n[khpf_s]; ++khpf_i) {
+                    if (!g_gpu_prof.pass_used[khpf_s][khpf_i]) continue;
+                    g_gpu_prof.pass_used[khpf_s][khpf_i] = false;
+                    UINT64 khpf_a = 0, khpf_b = 0;
+                    ID3D11Query* const* const khpf_q = g_gpu_prof.pts[khpf_s][khpf_i];
+                    const UINT khpf_fl = D3D11_ASYNC_GETDATA_DONOTFLUSH;
+                    if (khpf_ctx->GetData(khpf_q[0], &khpf_a, sizeof(khpf_a), khpf_fl) != S_OK ||
+                        khpf_ctx->GetData(khpf_q[1], &khpf_b, sizeof(khpf_b), khpf_fl) != S_OK ||
+                        khpf_b < khpf_a) continue;
+                    const uint64_t khpf_g = (khpf_b - khpf_a) * 1000000ull / khpf_dj.Frequency;
+                    const uint32_t khpf_key = g_gpu_prof.pass_key[khpf_s][khpf_i];
+                    g_gpu_pass_pub[khpf_pk++].store((static_cast<uint64_t>(khpf_key) << 32) | (khpf_g & 0xFFFFFFFFull),
+                                                    std::memory_order_relaxed);
+                    const uint32_t khpf_w = khpf_key & (KH_GPU_PASS_W - 1u);
+                    g_gpu_passw_us[khpf_w].fetch_add(khpf_g, std::memory_order_relaxed);
+                    g_gpu_passw_n[khpf_w].fetch_add(1u, std::memory_order_relaxed);
+                    if (khpf_g > g_gpu_passw_max[khpf_w].load(std::memory_order_relaxed)) {
+                        g_gpu_passw_max[khpf_w].store(khpf_g, std::memory_order_relaxed);
+                    }
+                }
+                g_gpu_pass_pub_n.store(khpf_pk, std::memory_order_relaxed);
             }
         }
     }
     if (khpf_on && khpf_ctx && kh_gpu_prof_ensure(khpf_ctx)) {
         const uint32_t khpf_s = kh_gpu_slot();
         for (uint32_t khpf_z = 0; khpf_z < KHG_ZONE_N; ++khpf_z) g_gpu_prof.used[khpf_z][khpf_s] = false;
+        for (uint32_t khpf_i = 0; khpf_i < KH_GPU_PASS_N; ++khpf_i) g_gpu_prof.pass_used[khpf_s][khpf_i] = false;
+        g_gpu_prof.pass_n[khpf_s] = 0;   // KH_GPU_PASS.
         khpf_ctx->Begin(g_gpu_prof.disjoint[khpf_s]);
         g_gpu_prof.open_slot = static_cast<int>(khpf_s);
     }
@@ -947,6 +1405,7 @@ inline void kh_prof_fold(ID3D11DeviceContext* khpf_ctx) {
 inline void kh_prof_reset_pub() {
     for (uint32_t khpr_z = 0; khpr_z < KHP_ZONE_N; ++khpr_z) { g_prof_us_pub[khpr_z].store(0, std::memory_order_relaxed); g_prof_n_pub[khpr_z].store(0, std::memory_order_relaxed); }
     for (uint32_t khpr_z = 0; khpr_z < KHG_ZONE_N; ++khpr_z) g_gpu_us_pub[khpr_z].store(0, std::memory_order_relaxed);
+    kh_prof_window_zero();   // KH_PROF_WINDOW (the cycle in flight's accumulators are the fold's to drop).
 }
 
 enum class DepthMode : int {
@@ -12971,6 +13430,10 @@ struct RenderStats {
     uint64_t dl_ref_spike_down = 0;
     uint64_t dl_copies = 0;
     uint64_t dlf_unshadowed = 0;
+    // KH_DL_PRES_MEMO - the light lists presence matched against the pool (uploads past the count check), and how
+    // many of those replayed a remembered match instead of running it.
+    uint64_t dl_pres_calls = 0;
+    uint64_t dl_pres_memo_hits = 0;
 };
 static RenderStats g_stats;
 // KH_STATS_ARMED: collection is off until the first getRenderStats; a
@@ -26698,7 +27161,13 @@ inline uint32_t kh_draw_textured(ID3D11DeviceContext* ctx, ID3D11Device* dev,
         if (khum_part == 2 && mat.alpha_mode != 2) continue;
         ID3D11PixelShader* khum_want = khum_builtin_ps;
         // A submesh that asked for a user shader and has not got one (pending
-        // or failed) draws flat white, not builtin PBR.
+        // or failed) draws flat white, not builtin PBR. PSWhite is the colour
+        // alone: none of the replaced PS's per-pixel cuts (the LOD dither, our
+        // own near plane, the view-distance cut, the terrain lane, the guard),
+        // so the white submesh can show past the object's view distance or
+        // through a ridge its siblings respect (and draws both levels whole in
+        // an LOD fade): briefly while the compile is pending or queued, for
+        // good when it failed (reported once).
         bool khum_white = false;
 
         if (mat.shader == 1 && !mat.user_shader.empty()) {
@@ -28586,12 +29055,13 @@ inline std::string ensure_fx_chain(ID3D11Device* dev) {
     return "";
 }
 
-// Capture core, parameterized on the source RTV: the flush/injection call it
-// with the bound target; the tail composite calls it with the latched scene RTV
-// (the bound target at the sweep is the engine's shadow mask). The caller keeps
-// ownership of the RTV reference.
+// Capture core, parameterized on the source RTV: ensure_scene_capture calls it
+// with the bound target (its one caller). The caller keeps
+// ownership of the RTV reference. KH_CAP_DEFER: khcap_copy false runs every
+// check and (re)creation - the same verdict, the same target - and leaves the
+// copy (a resolve, on an MSAA scene) to a later call.
 inline std::string ensure_scene_capture_from(ID3D11Device* dev, ID3D11DeviceContext* ctx,
-                                             ID3D11RenderTargetView* rtv) {
+                                             ID3D11RenderTargetView* rtv, bool khcap_copy = true) {
     if (!rtv) return "no RTV";
     ID3D11Resource* res = nullptr;
     rtv->GetResource(&res);
@@ -28631,21 +29101,23 @@ inline std::string ensure_scene_capture_from(ID3D11Device* dev, ID3D11DeviceCont
         g_res.scene_fmt = capture_fmt;
     }
 
-    if (src_desc.SampleDesc.Count > 1) {
-        ctx->ResolveSubresource(g_res.scene_tex, 0, src_tex, 0, capture_fmt);
-    } else {
-        ctx->CopyResource(g_res.scene_tex, src_tex);
+    if (khcap_copy) {   // KH_CAP_DEFER: false leaves the copy to a later call.
+        if (src_desc.SampleDesc.Count > 1) {
+            ctx->ResolveSubresource(g_res.scene_tex, 0, src_tex, 0, capture_fmt);
+        } else {
+            ctx->CopyResource(g_res.scene_tex, src_tex);
+        }
     }
 
     src_tex->Release();
     return "";
 }
 
-inline std::string ensure_scene_capture(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+inline std::string ensure_scene_capture(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khcap_copy = true) {
     ID3D11RenderTargetView* rtv = nullptr;
     ctx->OMGetRenderTargets(1, &rtv, nullptr);
     if (!rtv) return "no RTV bound";
-    const std::string err = ensure_scene_capture_from(dev, ctx, rtv);
+    const std::string err = ensure_scene_capture_from(dev, ctx, rtv, khcap_copy);
     rtv->Release();
     return err;
 }
@@ -30230,6 +30702,121 @@ inline double effect_time_seconds_d() {
 }
 inline float effect_time_seconds() {
     return static_cast<float>(effect_time_seconds_d());
+}
+// KH_FAST_CLOCK - effect_time_seconds_d() for the upload funnel: the locator takes the time on every captured upload
+// (~38,000 a frame in a heavy interior), and steady_clock's QPC is the runtime's calls into ntdll around an RDTSCP. The
+// TSC instead - one RDTSC - carried from an anchor (a steady_clock read paired with the TSC reads around it, both on
+// one core: RDTSCP's TSC_AUX) by the TSC's rate, measured between anchors; a new anchor every KH_FAST_CLOCK_SPAN_S of
+// TSC time, and whenever the TSC reads behind the anchor. Only where Windows itself counts QPC from the TSC (an
+// invariant TSC, RDTSCP, and QPC at 10 MHz - the frequency it reports for a TSC source, whose cores it keeps in step);
+// elsewhere, before the first rate, and on a session reset's new clock origin until it re-anchors, steady_clock
+// itself, as before. The value tracks a steady_clock read at the same instant within half the anchor pairing (the
+// narrowest of up to three; typically tens of nanoseconds) plus the rate's error over one span - typically well
+// under a microsecond - and never runs backwards within a clock origin: a decision against a threshold differs from
+// the old one only when the threshold falls inside that error, as if the upload came that much earlier or later.
+// Worst cases: three preempted pairings in a row (about the narrowest one's width, for up to two spans), a resume
+// that restored the TSC across a sleep (the sleep is missing until the span runs out: at most KH_FAST_CLOCK_SPAN_S of
+// TSC time), and a change of the TSC's own rate (a VM moved live to a host whose TSC runs at another rate; not on
+// bare metal with an invariant TSC): up to the change's share of KH_FAST_CLOCK_SPAN_S until the span runs out. An
+// anchor whose TSC and steady_clock intervals disagree by more than KH_FAST_CLOCK_AGREE drops the rate and measures
+// it again. Render thread only (the upload funnel); plain state.
+static constexpr double KH_FAST_CLOCK_SPAN_S = 0.25;    // A fresh anchor this often (TSC time).
+static constexpr double KH_FAST_CLOCK_FIRST_S = 0.05;   // A rate: anchors at least this far apart.
+static constexpr double KH_FAST_CLOCK_PAIR_S = 2.0e-6;  // A pairing at most this wide ends the retakes.
+static constexpr double KH_FAST_CLOCK_AGREE = 0.01;     // A span whose two clocks disagree more: the rate is dropped.
+struct KhFastClock {
+    int8_t   usable = 0;       // 0 = not asked yet, 1 = the TSC is QPC's source, -1 = steady_clock only.
+    int64_t  t0 = 0;           // g_effect_t0 at the anchor: a different origin (a session reset) re-anchors.
+    double   base_s = 0.0;     // effect_time_seconds_d() at the anchor.
+    uint64_t base_tsc = 0;     // The TSC at the anchor (the middle of its pairing); 0 = no anchor.
+    double   tsc_per_s = 0.0;  // The TSC's rate; 0 = not measured (steady_clock is read).
+    double   s_per_tsc = 0.0;  // Its inverse.
+    double   last = 0.0;       // The last value returned (this origin's): the clock never runs backwards.
+};
+static KhFastClock g_fast_clock;
+inline bool kh_tsc_is_qpc() {
+    int khti_r[4] = { 0, 0, 0, 0 };
+    __cpuid(khti_r, static_cast<int>(0x80000000u));
+    if (static_cast<uint32_t>(khti_r[0]) < 0x80000007u) return false;
+    __cpuid(khti_r, static_cast<int>(0x80000001u));
+    if ((khti_r[3] & (1 << 27)) == 0) return false;   // EDX bit 27: RDTSCP.
+    __cpuid(khti_r, static_cast<int>(0x80000007u));
+    if ((khti_r[3] & (1 << 8)) == 0) return false;   // EDX bit 8: invariant TSC.
+    LARGE_INTEGER khti_f = {};
+    return QueryPerformanceFrequency(&khti_f) && khti_f.QuadPart == 10000000;   // QPC from the TSC.
+}
+inline double kh_fast_clock_out(double khfo_v) {
+    KhFastClock& khfo_c = g_fast_clock;
+    if (khfo_v < khfo_c.last) khfo_v = khfo_c.last;
+    khfo_c.last = khfo_v;
+    return khfo_v;
+}
+// steady_clock, held to the clock's last value while the origin is the one it was taken on.
+inline double kh_fast_clock_steady() {
+    const double khfs_v = effect_time_seconds_d();
+    return g_effect_t0.load(std::memory_order_relaxed) == g_fast_clock.t0 ? kh_fast_clock_out(khfs_v) : khfs_v;
+}
+inline double kh_fast_effect_seconds_d() {
+    KhFastClock& khfc_c = g_fast_clock;
+    if (khfc_c.usable <= 0) {
+        if (khfc_c.usable < 0) return effect_time_seconds_d();
+        khfc_c.usable = kh_tsc_is_qpc() ? 1 : -1;
+        if (khfc_c.usable < 0) return effect_time_seconds_d();
+    }
+    const uint64_t khfc_tsc = __rdtsc();
+    const int64_t khfc_t0 = g_effect_t0.load(std::memory_order_relaxed);
+    if (khfc_c.tsc_per_s > 0.0 && khfc_c.base_tsc != 0 && khfc_t0 == khfc_c.t0 && khfc_tsc >= khfc_c.base_tsc) {
+        // The interval is far below 2^63 ticks: the signed conversion is one instruction.
+        const double khfc_dt = static_cast<double>(static_cast<int64_t>(khfc_tsc - khfc_c.base_tsc)) * khfc_c.s_per_tsc;
+        if (khfc_dt < KH_FAST_CLOCK_SPAN_S) return kh_fast_clock_out(khfc_c.base_s + khfc_dt);
+    }
+    if (khfc_c.tsc_per_s <= 0.0 && khfc_c.base_tsc != 0 && khfc_t0 == khfc_c.t0) {
+        // No rate yet: steady_clock until the anchor is KH_FAST_CLOCK_FIRST_S old.
+        const double khfc_v = effect_time_seconds_d();
+        if (khfc_v - khfc_c.base_s < KH_FAST_CLOCK_FIRST_S &&
+            g_effect_t0.load(std::memory_order_relaxed) == khfc_c.t0) return kh_fast_clock_out(khfc_v);
+    }
+    // An anchor: steady_clock between two TSC reads on one core; the narrowest of up to three pairs (a preemption
+    // between the reads widens one, a move to another core spoils one), done at the first narrow one once the rate is
+    // known.
+    double khfc_s = 0.0;
+    uint64_t khfc_mid = 0, khfc_w = ~0ull;
+    for (int khfc_k = 0; khfc_k < 3; ++khfc_k) {
+        unsigned int khfc_xa = 0, khfc_xb = 0;
+        const uint64_t khfc_a = __rdtscp(&khfc_xa);
+        const double khfc_v = effect_time_seconds_d();
+        const uint64_t khfc_b = __rdtscp(&khfc_xb);
+        if (khfc_xa != khfc_xb || khfc_b < khfc_a) continue;   // Another core, or backwards: no pairing.
+        if (khfc_b - khfc_a < khfc_w) {
+            khfc_w = khfc_b - khfc_a;
+            khfc_s = khfc_v;
+            khfc_mid = khfc_a + khfc_w / 2u;
+        }
+        if (khfc_c.tsc_per_s > 0.0 && static_cast<double>(khfc_w) <= khfc_c.tsc_per_s * KH_FAST_CLOCK_PAIR_S) break;
+    }
+    if (khfc_w == ~0ull) return kh_fast_clock_steady();   // No pairing: steady_clock, the anchor kept.
+    const int64_t khfc_t1 = g_effect_t0.load(std::memory_order_relaxed);   // The origin the reads were made on.
+    if (khfc_t1 != khfc_c.t0) {   // A new origin (the first use, a session reset): its values start over.
+        khfc_c.t0 = khfc_t1;
+        khfc_c.last = 0.0;
+        khfc_c.base_tsc = 0;
+    }
+    if (khfc_c.base_tsc != 0 && khfc_mid > khfc_c.base_tsc) {
+        const double khfc_ds = khfc_s - khfc_c.base_s;
+        const double khfc_dn = static_cast<double>(khfc_mid - khfc_c.base_tsc);   // TSC ticks over the same interval.
+        if (khfc_ds >= KH_FAST_CLOCK_FIRST_S) {
+            const double khfc_rate = khfc_dn / khfc_ds;
+            const bool khfc_part = khfc_c.tsc_per_s > 0.0 &&
+                                   fabs(khfc_dn * khfc_c.s_per_tsc - khfc_ds) > KH_FAST_CLOCK_AGREE * khfc_ds;
+            // The clocks parted over the span (a resume, a rate change): no rate - measured again from this anchor.
+            const bool khfc_ok = !khfc_part && khfc_rate > 1.0e8 && khfc_rate < 2.0e10;
+            khfc_c.tsc_per_s = khfc_ok ? khfc_rate : 0.0;
+            khfc_c.s_per_tsc = khfc_ok ? 1.0 / khfc_rate : 0.0;
+        }
+    }
+    khfc_c.base_s = khfc_s;
+    khfc_c.base_tsc = khfc_mid;
+    return kh_fast_clock_out(khfc_s);
 }
 // The shader's time lane (fxMeta.y): seconds since the object was created,
 // formed in double and handed over as float, so an effect's animation keeps
@@ -32073,6 +32660,7 @@ inline void kh_wc_stream(uint8_t* khwc_d, const uint8_t* khwc_s, uint32_t khwc_n
 // data on every vendor): the accepted price.
 inline bool kh_wc_copy(void* khwc_dst, const void* khwc_src, uint32_t khwc_n) {
     if (khwc_n < 16u || !kh_wc_stream_ok()) { memcpy(khwc_dst, khwc_src, khwc_n); return false; }
+    if (g_prof_up_on) kh_fun(KHF_FENCES, 1u);   // KH_PROF_FUNNEL (the funnel is this function's one user).
     _mm_mfence();
     kh_wc_stream(static_cast<uint8_t*>(khwc_dst), static_cast<const uint8_t*>(khwc_src), khwc_n);
     return true;
@@ -32129,6 +32717,7 @@ inline void kh_wc_more(void* khwm_d, const void* khwm_s, uint32_t khwm_n) {
 inline const void* kh_upload_scratch(const void* khus_src, uint32_t& khus_bytes) {
     if (khus_bytes > KH_UPLOAD_SCRATCH_BYTES) khus_bytes = KH_UPLOAD_SCRATCH_BYTES;
     const uint32_t khus_eager = khus_bytes < KH_UPLOAD_EAGER_BYTES ? khus_bytes : KH_UPLOAD_EAGER_BYTES;
+    if (g_prof_up_on) { kh_fun(KHF_EAGER_N, 1u); kh_fun(KHF_EAGER_B, khus_eager); }   // KH_PROF_FUNNEL.
     const bool khus_fenced = kh_wc_copy(g_upload_scratch, khus_src, khus_eager);
     g_upc.src = static_cast<const uint8_t*>(khus_src);
     g_upc.fenced = khus_fenced;   // KH_WC_TAIL.
@@ -32143,6 +32732,7 @@ inline void kh_upload_need(const void* khun_d, uint32_t khun_n) {
     if (!g_upc.src || khun_d != static_cast<const void*>(g_upload_scratch)) return;
     if (khun_n > g_upc.total) khun_n = g_upc.total;
     if (khun_n <= g_upc.have) return;
+    if (g_prof_up_on) kh_fun_ext(khun_n - g_upc.have);   // KH_PROF_FUNNEL.
     kh_wc_more(g_upload_scratch + g_upc.have, g_upc.src + g_upc.have, khun_n - g_upc.have);   // KH_WC_TAIL.
     g_upc.have = khun_n;
 }
@@ -32157,6 +32747,7 @@ inline void kh_upload_copy_range(void* khur_dst, const void* khur_d, uint32_t kh
     if (g_upc.src && khur_d == static_cast<const void*>(g_upload_scratch) && khur_off + khur_n > g_upc.have) {
         const uint32_t khur_h = khur_off < g_upc.have ? g_upc.have - khur_off : 0u;   // Already in the scratch.
         if (khur_h) memcpy(khur_o, g_upload_scratch + khur_off, khur_h);
+        if (g_prof_up_on) kh_fun_ext(khur_n - khur_h);   // KH_PROF_FUNNEL.
         kh_wc_more(khur_o + khur_h, g_upc.src + khur_off + khur_h, khur_n - khur_h);   // KH_WC_TAIL.
         return;
     }
@@ -34476,28 +35067,76 @@ static constexpr uint32_t KH_DL_WANT_N = 64u;   // KH_DL_WANT_GATE: identities t
 static constexpr uint64_t KH_DL_WANT_KEEP = 4u;
 static const void* g_dl_keep_id[KH_DL_WANT_N];
 static uint64_t    g_dl_keep_cycle[KH_DL_WANT_N];
+static uint8_t     g_dl_keep_kind[KH_DL_WANT_N];   // KH_PROF_FUNNEL: the roles the sampler named it in (armed only).
 static uint32_t    g_dl_keep_n = 0u;
-inline void kh_dl_want_note(const void* khdw_id) {
+// KH_DL_WANT_INDEX - the table's entries found by identity through an open-addressed index (linear probing, at most
+// half full: each live entry's slot + 1, 0 = empty) instead of a walk of the entries: the gate asks on every captured
+// upload while the light capture runs (kh_dl_cpu_capture_now; ~38,000 a frame in a heavy interior; a refused one
+// walked every entry). The entries themselves - their order, the stalest
+// replaced, ties to the lowest slot - are as before; the index is rebuilt whole on that replacement (a full table and
+// a new identity) and cleared with the entries (g_dl_keep_n = 0). Render thread throughout, as the table.
+static constexpr uint32_t KH_DL_WANT_IX = 2u * KH_DL_WANT_N;
+static_assert((KH_DL_WANT_IX & (KH_DL_WANT_IX - 1u)) == 0u && KH_DL_WANT_N < 255u, "KH_DL_WANT_INDEX: the index shape");
+static uint8_t g_dl_keep_ix[KH_DL_WANT_IX];
+inline uint32_t kh_dl_want_hash(const void* khwh_id) {
+    uint64_t khwh_h = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(khwh_id));
+    khwh_h ^= khwh_h >> 33;
+    khwh_h *= 0xff51afd7ed558ccdull;
+    khwh_h ^= khwh_h >> 33;
+    return static_cast<uint32_t>(khwh_h) & (KH_DL_WANT_IX - 1u);
+}
+// The entry holding khwf_id, or KH_DL_WANT_N; khwf_probes (when given) takes the index slots looked at.
+inline uint32_t kh_dl_want_find(const void* khwf_id, uint32_t* khwf_probes = nullptr) {
+    uint32_t khwf_h = kh_dl_want_hash(khwf_id), khwf_n = 0u;
+    for (uint32_t khwf_k = 0; khwf_k < KH_DL_WANT_IX; ++khwf_k) {
+        const uint32_t khwf_e = g_dl_keep_ix[khwf_h];
+        ++khwf_n;
+        if (khwf_e == 0u) break;
+        const uint32_t khwf_i = khwf_e - 1u;
+        if (khwf_i < g_dl_keep_n && g_dl_keep_id[khwf_i] == khwf_id) {
+            if (khwf_probes) *khwf_probes = khwf_n;
+            return khwf_i;
+        }
+        khwf_h = (khwf_h + 1u) & (KH_DL_WANT_IX - 1u);
+    }
+    if (khwf_probes) *khwf_probes = khwf_n;
+    return KH_DL_WANT_N;
+}
+inline void kh_dl_want_ix_put(uint32_t khwp_i) {
+    uint32_t khwp_h = kh_dl_want_hash(g_dl_keep_id[khwp_i]);
+    while (g_dl_keep_ix[khwp_h] != 0u) khwp_h = (khwp_h + 1u) & (KH_DL_WANT_IX - 1u);
+    g_dl_keep_ix[khwp_h] = static_cast<uint8_t>(khwp_i + 1u);
+}
+inline void kh_dl_want_note(const void* khdw_id, uint8_t khdw_kind) {
     if (!khdw_id) return;
     // KH_DL_WANT_GATE: the persistent table (refresh, add, or replace the stalest).
-    uint32_t khdw_at = KH_DL_WANT_N, khdw_st = 0u;
-    for (uint32_t i = 0; i < g_dl_keep_n; ++i) {
-        if (g_dl_keep_id[i] == khdw_id) { khdw_at = i; break; }
-        if (g_dl_keep_cycle[i] < g_dl_keep_cycle[khdw_st]) khdw_st = i;
-    }
+    uint32_t khdw_at = kh_dl_want_find(khdw_id);   // KH_DL_WANT_INDEX.
     if (khdw_at == KH_DL_WANT_N) {
-        if (g_dl_keep_n < KH_DL_WANT_N) khdw_at = g_dl_keep_n++;
-        else khdw_at = khdw_st;
-        g_dl_keep_id[khdw_at] = khdw_id;
+        if (g_dl_keep_n < KH_DL_WANT_N) {
+            khdw_at = g_dl_keep_n++;
+            g_dl_keep_id[khdw_at] = khdw_id;
+            kh_dl_want_ix_put(khdw_at);
+        } else {
+            uint32_t khdw_st = 0u;   // The stalest entry, the lowest slot on a tie.
+            for (uint32_t i = 1; i < g_dl_keep_n; ++i) {
+                if (g_dl_keep_cycle[i] < g_dl_keep_cycle[khdw_st]) khdw_st = i;
+            }
+            khdw_at = khdw_st;
+            g_dl_keep_id[khdw_at] = khdw_id;
+            memset(g_dl_keep_ix, 0, sizeof(g_dl_keep_ix));   // KH_DL_WANT_INDEX: rebuilt whole.
+            for (uint32_t i = 0; i < g_dl_keep_n; ++i) kh_dl_want_ix_put(i);
+        }
+        g_dl_keep_kind[khdw_at] = 0u;   // KH_PROF_FUNNEL: a new identity's roles start over.
     }
     g_dl_keep_cycle[khdw_at] = g_topo_cycles;
+    if (g_prof_ds_on) g_dl_keep_kind[khdw_at] |= khdw_kind;   // KH_PROF_FUNNEL.
 }
-inline bool kh_dl_want_gate(const void* khdg_id) {
-    for (uint32_t i = 0; i < g_dl_keep_n; ++i) {
-        if (g_dl_keep_id[i] != khdg_id) continue;
-        return g_dl_keep_cycle[i] <= g_topo_cycles && g_topo_cycles - g_dl_keep_cycle[i] <= KH_DL_WANT_KEEP;
-    }
-    return false;
+// KH_PROF_FUNNEL: khdg_kind / khdg_probes (when given) take the entry's roles and the index slots looked at.
+inline bool kh_dl_want_gate(const void* khdg_id, uint8_t* khdg_kind = nullptr, uint32_t* khdg_probes = nullptr) {
+    const uint32_t i = kh_dl_want_find(khdg_id, khdg_probes);   // KH_DL_WANT_INDEX.
+    if (i == KH_DL_WANT_N) return false;
+    if (khdg_kind) *khdg_kind = g_dl_keep_kind[i];
+    return g_dl_keep_cycle[i] <= g_topo_cycles && g_topo_cycles - g_dl_keep_cycle[i] <= KH_DL_WANT_KEEP;
 }
 inline bool kh_dl_cpu_capture_now() {
     if (!kh_dl_cpu_wanted()) return false;
@@ -34576,15 +35215,32 @@ inline void kh_cbs_clear() {
 }
 // Every captured upload, in the hooks: the shadow when the CPU capture wants
 // the buffer, the scratch otherwise.
+// KH_PROF_UPLOAD: the funnel's first step for every captured upload, so the upload's measurement decision is taken
+// here (kh_prof_up_begin), and the capture's own time and counts (upCapture, KH_PROF_FUNNEL) with it.
 inline const void* kh_upload_capture(ID3D11Resource* khuc_res, const void* khuc_src, uint32_t& khuc_bytes) {
+    kh_prof_up_begin();
+    KH_PROF_SUB(KHP_UP_CAPTURE, g_prof_up_on, g_prof_up_t);
+    if (g_prof_up_on) kh_fun(KHF_UPLOADS, 1u);
     kh_upload_capture_end();   // KH_UPLOAD_LAZY: a shadow capture is whole; only the scratch sets a record.
     if (kh_dl_cpu_capture_now()) {   // KH_DL_IDLE.
-        if (kh_dl_want_gate(static_cast<const void*>(khuc_res))) {   // KH_DL_WANT_GATE.
+        uint8_t  khuc_kind = 0u;     // KH_PROF_FUNNEL (armed only).
+        uint32_t khuc_probes = 0u;
+        const bool khuc_want = kh_dl_want_gate(static_cast<const void*>(khuc_res),   // KH_DL_WANT_GATE.
+                                               g_prof_up_on ? &khuc_kind : nullptr,
+                                               g_prof_up_on ? &khuc_probes : nullptr);
+        if (g_prof_up_on) kh_fun(KHF_GATE_PROBES, khuc_probes);
+        if (khuc_want) {
             const void* khuc_p = kh_cbs_write(static_cast<void*>(khuc_res), khuc_src, khuc_bytes);
-            if (khuc_p) return khuc_p;
+            if (khuc_p) {
+                if (g_prof_up_on) kh_fun_shadow(khuc_kind, khuc_bytes);
+                return khuc_p;
+            }
         } else {
             kh_cbs_stale(static_cast<const void*>(khuc_res));   // KH_DL_WANT_STALE: this upload goes uncaptured.
+            if (g_prof_up_on) kh_fun(KHF_WANT_REFUSED, 1u);
         }
+    } else if (g_prof_up_on && kh_dl_cpu_wanted()) {
+        kh_fun(KHF_IDLE_SKIP, 1u);   // KH_DL_IDLE's cadence: a cycle that captures nothing whole.
     }
     return kh_upload_scratch(khuc_src, khuc_bytes);
 }
@@ -34830,6 +35486,122 @@ inline bool kh_dl_ctl_main(const float* khm_c) {
     return !(fabsf(khm_c[8] - g_dl.main_scale) > 0.25f * fabsf(g_dl.main_scale));
 }
 
+// KH_DL_CHASH - the twin check's content hash (dynlights_sample_draw_cpu): XXH64 (seed 0) of ctl || records, read 8
+// bytes at a time in four independent lanes. ctl is exactly two of XXH64's 32-byte stripes, so streaming it and then
+// the records is XXH64 of the two laid end to end. Only ever compared for equality within one span; the byte-at-a-time
+// FNV-1a it replaced ran ~4 cycles a byte on one multiply chain (a 32-light list is 3,136 bytes, every new upload).
+static constexpr uint64_t KH_XXH_P1 = 0x9E3779B185EBCA87ull;
+static constexpr uint64_t KH_XXH_P2 = 0xC2B2AE3D27D4EB4Full;
+static constexpr uint64_t KH_XXH_P3 = 0x165667B19E3779F9ull;
+static constexpr uint64_t KH_XXH_P4 = 0x85EBCA77C2B2AE63ull;
+static constexpr uint64_t KH_XXH_P5 = 0x27D4EB2F165667C5ull;
+inline uint64_t kh_xxh_rotl(uint64_t khxl_x, int khxl_r) { return (khxl_x << khxl_r) | (khxl_x >> (64 - khxl_r)); }
+inline uint64_t kh_xxh_round(uint64_t khxr_a, uint64_t khxr_w) {
+    return kh_xxh_rotl(khxr_a + khxr_w * KH_XXH_P2, 31) * KH_XXH_P1;
+}
+inline void kh_xxh_stripe(uint64_t (&khxs_v)[4], const uint8_t* khxs_p) {
+    for (int khxs_k = 0; khxs_k < 4; ++khxs_k) {
+        uint64_t khxs_w;
+        memcpy(&khxs_w, khxs_p + khxs_k * 8, 8);
+        khxs_v[khxs_k] = kh_xxh_round(khxs_v[khxs_k], khxs_w);
+    }
+}
+// khch_c: the ctl (KH_DL_CTL_BYTES); khch_l / khch_n: the records hashed (any length).
+inline uint64_t kh_dl_chash(const uint8_t* khch_c, const uint8_t* khch_l, uint32_t khch_n) {
+    static_assert(KH_DL_CTL_BYTES == 64u, "KH_DL_CHASH: the ctl is two whole stripes");
+    // XXH64's lane seeds at seed 0: P1 + P2 and -P1 (mod 2^64), written out (no folded wrap for MSVC's C4307).
+    uint64_t khch_v[4] = { 0x60EA27EEADC0B5D6ull, KH_XXH_P2, 0ull, 0x61C8864E7A143579ull };
+    kh_xxh_stripe(khch_v, khch_c);
+    kh_xxh_stripe(khch_v, khch_c + 32);
+    uint32_t khch_i = 0;
+    for (; khch_n - khch_i >= 32u; khch_i += 32u) kh_xxh_stripe(khch_v, khch_l + khch_i);
+    uint64_t khch_h = kh_xxh_rotl(khch_v[0], 1) + kh_xxh_rotl(khch_v[1], 7) + kh_xxh_rotl(khch_v[2], 12) +
+                      kh_xxh_rotl(khch_v[3], 18);
+    for (int khch_k = 0; khch_k < 4; ++khch_k) {
+        khch_h = (khch_h ^ kh_xxh_round(0ull, khch_v[khch_k])) * KH_XXH_P1 + KH_XXH_P4;
+    }
+    khch_h += static_cast<uint64_t>(KH_DL_CTL_BYTES) + khch_n;
+    for (; khch_n - khch_i >= 8u; khch_i += 8u) {
+        uint64_t khch_w;
+        memcpy(&khch_w, khch_l + khch_i, 8);
+        khch_h = kh_xxh_rotl(khch_h ^ kh_xxh_round(0ull, khch_w), 27) * KH_XXH_P1 + KH_XXH_P4;
+    }
+    if (khch_n - khch_i >= 4u) {
+        uint32_t khch_w4;
+        memcpy(&khch_w4, khch_l + khch_i, 4);
+        khch_h = kh_xxh_rotl(khch_h ^ (static_cast<uint64_t>(khch_w4) * KH_XXH_P1), 23) * KH_XXH_P2 + KH_XXH_P3;
+        khch_i += 4u;
+    }
+    for (; khch_i < khch_n; ++khch_i) {
+        khch_h = kh_xxh_rotl(khch_h ^ (static_cast<uint64_t>(khch_l[khch_i]) * KH_XXH_P5), 11) * KH_XXH_P1;
+    }
+    khch_h ^= khch_h >> 33;
+    khch_h *= KH_XXH_P2;
+    khch_h ^= khch_h >> 29;
+    khch_h *= KH_XXH_P3;
+    khch_h ^= khch_h >> 32;
+    return khch_h;
+}
+
+// KH_DL_PRES_MEMO - presence's match, remembered. The engine uploads a light list for nearly every draw, and the
+// draws of one room carry the same list again and again; each upload ran the whole match (every record against every
+// pool light), which nothing but the pool and the key below decides. An entry holds a run's outcome - the light each
+// record picked, the rewrites it owed, the stale verdict, the counts - and a later upload of the same list replays it:
+// the sightings (kh_dl_pres_sight, the loop's own body) and the tail (the rewrites, with that upload's own capture
+// order and bytes; the reference) run as a run would. Exact: an entry is stored only by a run that is a fixed point -
+// its rewrites changed no record byte, so the pool it matched against is the pool after it - and it is replayed only
+// while nothing the match reads has changed since: the key is the content itself (ctl and the counted records,
+// compared byte for byte - the hash only picks the entry), the record count, the span (khp_seq, which the unplaced
+// notes are read against), the buffer's origin and whether it may rewrite (khp_rw: the origin table, the cycle's
+// view and the main reference), the land grid as read (kh_dl_grid_base / kh_dl_grid), and the epoch below. The rest
+// of what the match reads - the pool (records, count, order) and the unplaced notes - is written only by presence's
+// own rewrites, the harvest and the session / device resets, and each of those moves the epoch (a rewrite only when
+// it changes a record's bytes: one that leaves them writes no more than spot and rec_wseq, which the match does not
+// read); the origin table,
+// the cycle's view, the main reference and the land grid reach the match only through the keyed values, whoever
+// writes them. The sightings (stamp, gap mark, count, seq) are not read by the match, so a replay applies them per
+// upload exactly as a run does: every count the TTL and the fast lane read is the one the full runs gave. Render
+// thread (as g_dl).
+static constexpr uint32_t KH_DL_PMEMO_N = 32;   // Entries (power of two), direct-mapped on the content hash.
+struct KhDlPresMemo {
+    uint64_t epoch = 0;   // g_dl_pres_epoch at the store; 0 = empty.
+    uint64_t seq = 0;     // The span (khp_seq).
+    uint32_t total = 0;   // Records matched.
+    uint32_t ox = 0, oz = 0, cb = 0, q = 0;   // Bits: the origin, kh_dl_grid_base, kh_dl_grid.
+    uint8_t  origin = 0, rw = 0, stale = 0, any_org = 0;
+    uint32_t unknown = 0, unpl = 0, hits = 0;
+    uint32_t pick_n = 0;                      // The picks in record order (records that matched nothing skipped).
+    int32_t  pick[KH_DL_MAX_LIGHTS] = {};
+    uint32_t rw_n = 0;                        // The rewrites owed (pool light, record).
+    int32_t  rw_pick[KH_DL_MAX_LIGHTS] = {};
+    uint32_t rw_rec[KH_DL_MAX_LIGHTS] = {};
+    uint8_t  bytes[KH_DL_STAGE_BYTES] = {};   // ctl, then total records.
+};
+static KhDlPresMemo g_dl_pmemo[KH_DL_PMEMO_N];
+// Bumped by every writer of what the match reads beyond the key (the pool and the unplaced notes): the harvest
+// (dynlights_harvest_arena), the resets (kh_dl_pmemo_clear) and a presence rewrite that changes a record's bytes.
+// Never reset: it only moves on, and an entry matches only the value it was stored at.
+static uint64_t g_dl_pres_epoch = 1;
+inline void kh_dl_pmemo_clear() {
+    for (KhDlPresMemo& khpc_e : g_dl_pmemo) khpc_e.epoch = 0;
+    ++g_dl_pres_epoch;
+}
+inline uint32_t kh_dl_fbits(float khfb_f) {
+    uint32_t khfb_u;
+    memcpy(&khfb_u, &khfb_f, 4);
+    return khfb_u;
+}
+// A sighting, priced as the aux re-sight prices one - presence's, a run's and a replay's (one body).
+inline void kh_dl_pres_sight(DlPoolLight& khps_pl, uint64_t khps_now, uint64_t khps_seq) {
+    if (khps_pl.stamp != 0) {
+        const uint64_t khps_gap = khps_now >= khps_pl.stamp ? khps_now - khps_pl.stamp : 0;
+        khps_pl.gap_max_ms = kh_dl_gap_mark(khps_pl.gap_max_ms, khps_gap);
+        if (khps_pl.sightings < 0xFFFF) khps_pl.sightings++;
+    }
+    khps_pl.stamp = khps_now;
+    if (khps_seq > khps_pl.seq) khps_pl.seq = khps_seq;
+}
+
 // One upload's records against the pool. Primary: the origin the last harvest
 // resolved for this buffer identity puts the record in world; the re-sight's
 // KH_DL_MATCH_M cube names the pool light. No origin yet, or a miss: the
@@ -34847,7 +35619,8 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
                                           uint32_t khp_bytes11, uint64_t khp_seq,
                                           uint64_t khp_now,
                                           uint32_t& khp_unpl, uint32_t& khp_hit_n,   // KH_DL_UNPL: unplaced / matched.
-                                          uint64_t khp_wseq) {   // KH_DL_REC_ORDER.
+                                          uint64_t khp_wseq,     // KH_DL_REC_ORDER.
+                                          uint64_t khp_chash) {  // KH_DL_PRES_MEMO: the content's (KH_DL_CHASH).
     int32_t khp_pc_i = 0, khp_sc_i = 0;
     memcpy(&khp_pc_i, khp_ctl + 0, 4);
     memcpy(&khp_sc_i, khp_ctl + 16, 4);
@@ -34856,6 +35629,7 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
     if (khp_total > KH_DL_MAX_LIGHTS) khp_total = KH_DL_MAX_LIGHTS;
     const uint32_t khp_avail = khp_bytes11 / KH_DL_LIGHT_BYTES;
     if (khp_total > khp_avail) khp_total = khp_avail;
+    kh_stat(g_stats.dl_pres_calls);   // KH_DL_PRES_MEMO.
     float khp_ox = 0.0f, khp_oz = 0.0f;
     const bool khp_origin = kh_dl_win_origin_of(khp_buf, khp_ox, khp_oz);
     uint32_t khp_unknown = 0, khp_hits = 0;
@@ -34921,7 +35695,41 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
         return khn_c;
     };
 
-    for (uint32_t i = 0; i < khp_total; ++i) {
+    // KH_DL_PRES_MEMO: the entry this content maps to, and whether it holds this match (the key: the note above
+    // KH_DL_PMEMO_N). A hit takes the run's outcome and applies its sightings; the loop below does not run.
+    const float khp_q0 = kh_dl_grid();
+    KhDlPresMemo& khp_me = g_dl_pmemo[static_cast<uint32_t>(khp_chash) & (KH_DL_PMEMO_N - 1u)];
+    bool khp_mh = khp_me.epoch == g_dl_pres_epoch && khp_me.seq == khp_seq && khp_me.total == khp_total &&
+                  khp_me.origin == (khp_origin ? 1 : 0) && khp_me.ox == kh_dl_fbits(khp_ox) &&
+                  khp_me.oz == kh_dl_fbits(khp_oz) && khp_me.rw == (khp_rw ? 1 : 0) &&
+                  khp_me.cb == kh_dl_fbits(khp_cb) && khp_me.q == kh_dl_fbits(khp_q0) &&
+                  memcmp(khp_me.bytes, khp_ctl, KH_DL_CTL_BYTES) == 0 &&
+                  memcmp(khp_me.bytes + KH_DL_CTL_BYTES, khp_l, khp_total * KH_DL_LIGHT_BYTES) == 0;
+    for (uint32_t k = 0; khp_mh && k < khp_me.pick_n; ++k) {   // The epoch guarantees it; a stale index never reads.
+        if (khp_me.pick[k] < 0 || static_cast<uint32_t>(khp_me.pick[k]) >= g_dl.pool_n) khp_mh = false;
+    }
+    if (g_prof_ds_on) {   // KH_PROF_FUNNEL: a run compares every record with every pool light.
+        if (khp_mh) kh_fun(KHF_DL_REPLAYS, 1u);
+        else { kh_fun(KHF_DL_RUNS, 1u); kh_fun(KHF_DL_PAIRS, static_cast<uint64_t>(khp_total) * g_dl.pool_n); }
+    }
+    if (khp_mh) {
+        kh_stat(g_stats.dl_pres_memo_hits);
+        for (uint32_t k = 0; k < khp_me.pick_n; ++k) kh_dl_pres_sight(g_dl.pool[khp_me.pick[k]], khp_now, khp_seq);
+        khp_stale = khp_me.stale != 0;
+        khp_any_org = khp_me.any_org != 0;
+        khp_unknown = khp_me.unknown;
+        khp_unpl = khp_me.unpl;
+        khp_hits = khp_me.hits;
+        khp_rw_n = khp_me.rw_n;
+        for (uint32_t k = 0; k < khp_rw_n; ++k) {
+            khp_rw_pick[k] = khp_me.rw_pick[k];
+            khp_rw_rec[k] = khp_me.rw_rec[k];
+        }
+    }
+    int      khp_mp[KH_DL_MAX_LIGHTS];   // KH_DL_PRES_MEMO: this run's picks in record order (the entry's log).
+    uint32_t khp_mp_n = 0;
+
+    for (uint32_t i = 0; !khp_mh && i < khp_total; ++i) {   // KH_DL_PRES_MEMO: a hit has the outcome.
         const float* khp_r = reinterpret_cast<const float*>(khp_l + i * KH_DL_LIGHT_BYTES);
         if (!dl_finite(khp_r[0]) || !dl_finite(khp_r[1]) || !dl_finite(khp_r[2])) continue;
         float khp_best = -1.0f;   // Census: the best grid residual among y-compatible pool lights.
@@ -34932,6 +35740,14 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
 
         for (uint32_t d = 0; d < g_dl.pool_n; ++d) {
             const DlPoolLight& khp_pl = g_dl.pool[d];
+            // KH_DL_PRES_BAND: each of the three tests below - the origin's cube, the stale test (khp_elsewhere) and
+            // the grid test - first needs this light's height within KH_DL_MATCH_M (the cube, strictly) or 0.25 m (the
+            // other two) of the record's, by the same expression, and a light that passes none of them reaches only
+            // the `continue` below (no pick, no census, no stale verdict). So a light outside both bands - or with a
+            // NaN height, which fails every compare - is skipped here, in pool order as before. In a town most of the
+            // pool lies outside any one record's band. Edit the bands here with the tests' own.
+            const float khp_dyb = fabsf(khp_pl.rec[1] - khp_r[1]);
+            if (!(khp_dyb < KH_DL_MATCH_M) && !(khp_dyb <= 0.25f)) continue;
             bool  khp_same = false;
             bool  khp_same_org = false;
             float khp_dpos = 0.0f;
@@ -34993,14 +35809,8 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
             DlPoolLight& khp_pl = g_dl.pool[khp_pick];
             if (khp_claim_n < KH_DL_MAX_LIGHTS) khp_claim[khp_claim_n++] = khp_pick;
             if (khp_pick_org) khp_any_org = true;   // KH_DL_REF_SEEN.
-            // A sighting, priced as the aux re-sight prices one.
-            if (khp_pl.stamp != 0) {
-                const uint64_t khp_gap = khp_now >= khp_pl.stamp ? khp_now - khp_pl.stamp : 0;
-                khp_pl.gap_max_ms = kh_dl_gap_mark(khp_pl.gap_max_ms, khp_gap);
-                if (khp_pl.sightings < 0xFFFF) khp_pl.sightings++;
-            }
-            khp_pl.stamp = khp_now;
-            if (khp_seq > khp_pl.seq) khp_pl.seq = khp_seq;
+            kh_dl_pres_sight(khp_pl, khp_now, khp_seq);   // KH_DL_PRES_MEMO: the replay's body too.
+            if (khp_mp_n < KH_DL_MAX_LIGHTS) khp_mp[khp_mp_n++] = khp_pick;   // KH_DL_PRES_MEMO.
             // KH_DL_PRES_REC: owed (written below, KH_DL_PRES_STALE). A grid-fallback match has no world
             // position and rewrites none. The light is claimed, so no later record reads its record.
             if (khp_rw && khp_pick_org && khp_rw_n < KH_DL_MAX_LIGHTS) {
@@ -35019,17 +35829,50 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
 
     // KH_DL_PRES_REC: the re-sight carries the live record (spot direction, colour, position), written as the
     // merge writes it - unless a record showed the origin stale (KH_DL_PRES_STALE): then stamped only.
+    bool khp_moved = false;   // KH_DL_PRES_MEMO: a rewrite changed a record's bytes (what the match reads).
     for (uint32_t k = 0; k < khp_rw_n && !khp_stale; ++k) {
         DlPoolLight& khp_pl = g_dl.pool[khp_rw_pick[k]];
         // KH_DL_REC_ORDER: a buffer sampled again at a later draw without a new upload holds an older content than
         // what a newer upload has written since: the light stays stamped, its record stands.
         if (khp_pl.rec_wseq > khp_wseq) continue;
         const float* khp_r = reinterpret_cast<const float*>(khp_l + khp_rw_rec[k] * KH_DL_LIGHT_BYTES);
+        float khp_was[24];   // KH_DL_PRES_MEMO.
+        memcpy(khp_was, khp_pl.rec, sizeof(khp_was));
         memcpy(khp_pl.rec, khp_r, sizeof(khp_pl.rec));
         khp_pl.rec[0] = khp_ox + khp_r[0];   // +0 rewritten to absolute world.
         khp_pl.rec[2] = khp_oz + khp_r[2];
         khp_pl.spot = khp_rw_rec[k] >= static_cast<uint32_t>(khp_pc_i) ? 1 : 0;
         khp_pl.rec_wseq = khp_wseq;   // KH_DL_REC_ORDER.
+        if (memcmp(khp_was, khp_pl.rec, sizeof(khp_was)) != 0) khp_moved = true;
+    }
+    if (khp_moved) ++g_dl_pres_epoch;   // KH_DL_PRES_MEMO: every entry stored before this is out of date.
+    // KH_DL_PRES_MEMO: a run that moved nothing is a fixed point - re-run now, it gives this outcome - and is
+    // remembered while the land grid read the same at its end (the game thread stages the cell once a session).
+    if (!khp_mh && !khp_moved && kh_dl_fbits(kh_dl_grid_base()) == kh_dl_fbits(khp_cb) &&
+        kh_dl_fbits(kh_dl_grid()) == kh_dl_fbits(khp_q0)) {
+        khp_me.epoch = g_dl_pres_epoch;
+        khp_me.seq = khp_seq;
+        khp_me.total = khp_total;
+        khp_me.origin = khp_origin ? 1 : 0;
+        khp_me.ox = kh_dl_fbits(khp_ox);
+        khp_me.oz = kh_dl_fbits(khp_oz);
+        khp_me.rw = khp_rw ? 1 : 0;
+        khp_me.cb = kh_dl_fbits(khp_cb);
+        khp_me.q = kh_dl_fbits(khp_q0);
+        khp_me.stale = khp_stale ? 1 : 0;
+        khp_me.any_org = khp_any_org ? 1 : 0;
+        khp_me.unknown = khp_unknown;
+        khp_me.unpl = khp_unpl;
+        khp_me.hits = khp_hits;
+        khp_me.pick_n = khp_mp_n;
+        for (uint32_t k = 0; k < khp_mp_n; ++k) khp_me.pick[k] = khp_mp[k];
+        khp_me.rw_n = khp_rw_n;
+        for (uint32_t k = 0; k < khp_rw_n; ++k) {
+            khp_me.rw_pick[k] = khp_rw_pick[k];
+            khp_me.rw_rec[k] = khp_rw_rec[k];
+        }
+        memcpy(khp_me.bytes, khp_ctl, KH_DL_CTL_BYTES);
+        memcpy(khp_me.bytes + KH_DL_CTL_BYTES, khp_l, khp_total * KH_DL_LIGHT_BYTES);
     }
 
     // KH_DL_REF_SEEN: a list that re-sighted a record through its buffer's origin (of any age, whatever its rewrite
@@ -35093,10 +35936,11 @@ inline void dynlights_sample_draw_cpu(ID3D11DeviceContext1* khd_c1, ID3D11Buffer
         g_dl.side_miss[khd_w] = 0;
         g_dl.side_uploads[khd_w] = 0;
     }
-    kh_dl_want_note(khd_b11);   // KH_DL_WANT_GATE.
+    kh_dl_want_note(khd_b11, KH_DL_KIND_CB11);   // KH_DL_WANT_GATE.
     KhCbShadow* khd_s11 = kh_cbs_find(khd_b11);
     if (!khd_s11) {
         g_dl.side_miss[khd_w] = 1;
+        if (g_prof_ds_on) kh_fun(KHF_DL_MISS, 1u);   // KH_PROF_FUNNEL.
         return;
     }
     // Every upload from here to the next injection belongs to the harvest that
@@ -35109,6 +35953,7 @@ inline void dynlights_sample_draw_cpu(ID3D11DeviceContext1* khd_c1, ID3D11Buffer
     // no list walk.
     if (khd_s11->pres_gen == khd_s11->gen && khd_s11->pres_first == khd_f11 &&
         khd_s11->pres_seq == khd_seq) {
+        if (g_prof_ds_on) kh_fun(KHF_DL_SAME, 1u);   // KH_PROF_FUNNEL.
         return;
     }
 
@@ -35118,17 +35963,19 @@ inline void dynlights_sample_draw_cpu(ID3D11DeviceContext1* khd_c1, ID3D11Buffer
     if (!khd_b10) {
         return;
     }
-    kh_dl_want_note(khd_b10);   // KH_DL_WANT_GATE.
+    kh_dl_want_note(khd_b10, KH_DL_KIND_CB10);   // KH_DL_WANT_GATE.
     const KhCbShadow* khd_s10 = kh_cbs_find(khd_b10);
     khd_b10->Release();   // Identity taken; the shadow is what is read.
     const uint32_t khd_off10 = khd_f10 * 16u;
     const uint32_t khd_off11 = khd_f11 * 16u;
     if (!khd_s10 || khd_off10 + KH_DL_CTL_BYTES > khd_s10->bytes) {
         g_dl.side_miss[khd_w] = 1;
+        if (g_prof_ds_on) kh_fun(KHF_DL_MISS, 1u);   // KH_PROF_FUNNEL.
         return;
     }
     if (khd_off11 >= khd_s11->bytes) {
         g_dl.side_miss[khd_w] = 1;
+        if (g_prof_ds_on) kh_fun(KHF_DL_MISS, 1u);   // KH_PROF_FUNNEL.
         return;
     }
     uint32_t khd_want11 = KH_DL_ARR_BYTES;
@@ -35150,10 +35997,10 @@ inline void dynlights_sample_draw_cpu(ID3D11DeviceContext1* khd_c1, ID3D11Buffer
             if (khd_cn < khd_hn) khd_hn = khd_cn;
         }
     }
-    uint64_t khd_h = CryptoGenerator::FNV1A64_OFFSET;
-    khd_h = CryptoGenerator::fnv1a64_update(khd_h, reinterpret_cast<const char*>(khd_p10), KH_DL_CTL_BYTES);
-    if (khd_hn > 0) {
-        khd_h = CryptoGenerator::fnv1a64_update(khd_h, reinterpret_cast<const char*>(khd_p11), khd_hn);
+    const uint64_t khd_h = kh_dl_chash(khd_p10, khd_p11, khd_hn);   // KH_DL_CHASH.
+    if (g_prof_ds_on) {   // KH_PROF_FUNNEL.
+        kh_fun(KHF_DL_LISTS, 1u);
+        kh_fun(KHF_DL_HASH_B, KH_DL_CTL_BYTES + khd_hn);
     }
     // This upload is processed from here on, whatever becomes of it below.
     khd_s11->pres_gen = khd_s11->gen;
@@ -35168,6 +36015,7 @@ inline void dynlights_sample_draw_cpu(ID3D11DeviceContext1* khd_c1, ID3D11Buffer
             if (g_dl.win_meta[khd_w][i].wseq != 0 && g_dl.win_meta[khd_w][i].wseq < khd_s11->wseq) {
                 g_dl.win_meta[khd_w][i].wseq = khd_s11->wseq;
             }
+            if (g_prof_ds_on) kh_fun(KHF_DL_TWIN, 1u);   // KH_PROF_FUNNEL.
             return;
         }
     }
@@ -35178,7 +36026,8 @@ inline void dynlights_sample_draw_cpu(ID3D11DeviceContext1* khd_c1, ID3D11Buffer
                                                      khd_p10, khd_p11, khd_want11,
                                                      khd_seq,
                                                      steady_now_ms(), khd_unpl, khd_hit_n,
-                                                     khd_s11->wseq);   // KH_DL_REC_ORDER.
+                                                     khd_s11->wseq,   // KH_DL_REC_ORDER.
+                                                     khd_h);   // KH_DL_PRES_MEMO.
     // A note may not starve a light of the window that could place it: an
     // upload carrying two known lights clears the vote's bar, so its noted
     // records author as unknown ones do.
@@ -35229,7 +36078,7 @@ inline void dynlights_sample_draw_cpu(ID3D11DeviceContext1* khd_c1, ID3D11Buffer
         khd_meta.vs_bytes[khd_vs] = 0;
 
         if (khd_vsb[khd_vs]) {
-            kh_dl_want_note(khd_vsb[khd_vs]);   // KH_DL_WANT_GATE.
+            kh_dl_want_note(khd_vsb[khd_vs], KH_DL_KIND_VS);   // KH_DL_WANT_GATE.
             const KhCbShadow* khd_sv = kh_cbs_find(khd_vsb[khd_vs]);
             const uint32_t khd_voff = khd_vsf[khd_vs] * 16u;
 
@@ -35243,6 +36092,7 @@ inline void dynlights_sample_draw_cpu(ID3D11DeviceContext1* khd_c1, ID3D11Buffer
                 if (khd_vwant >= 64u) {   // At least one 4x4.
                     memcpy(khd_vs_dst, khd_sv->data.data() + khd_voff, khd_vwant);
                     khd_meta.vs_bytes[khd_vs] = static_cast<uint16_t>(khd_vwant);
+                    if (g_prof_ds_on) kh_fun(KHF_DL_WIN_VS_B, khd_vwant);   // KH_PROF_FUNNEL.
                 }
             }
 
@@ -35253,6 +36103,7 @@ inline void dynlights_sample_draw_cpu(ID3D11DeviceContext1* khd_c1, ID3D11Buffer
     }
 
     g_dl.win_count[khd_w] = khd_slot + 1;
+    if (g_prof_ds_on) kh_fun(KHF_DL_WINDOWS, 1u);   // KH_PROF_FUNNEL.
 }
 
 inline void dynlights_sample_draw(ID3D11DeviceContext* ctx) {
@@ -35263,6 +36114,7 @@ inline void dynlights_sample_draw(ID3D11DeviceContext* ctx) {
     khd_c1->PSGetConstantBuffers1(11, 1, &khd_b11, &khd_f11, &khd_n11);
 
     if (!khd_b11) {
+        if (g_prof_ds_on) kh_fun(KHF_DL_NOLIST, 1u);   // KH_PROF_FUNNEL.
         return;
     }
 
@@ -35924,6 +36776,24 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
         const float* khd_base = khd_block(static_cast<int32_t>(khd_s));
 
         for (uint32_t khd_off = 0; khd_off + 12 <= khd_fl; khd_off += 4) {
+            {   // KH_DL_SCAN_PRE - each form reads its rotation from the same nine floats here (as rows or as columns:
+                // [0..2], [4..6], [8..10]) and dl_cand_structure fails it when a row's squared norm is outside
+                // [0.96, 1.04]. One of the nine past 1.03 in magnitude puts its row past 1.04 in either reading - a
+                // sum of squares only grows, rounded or not; all nine under 0.56 keep every row under 0.95. A NaN
+                // in a row makes its norm NaN, which the test passes, so a NaN among the nine leaves the offset to
+                // the forms. Such an offset fails every form, and only a passing form runs anything below: it is
+                // skipped here, in offset order as before. Most offsets of an engine buffer hold no rotation; they
+                // were the scan's bulk. Edit with dl_cand_structure's bounds.
+                static constexpr uint32_t khd_rot9[9] = { 0, 1, 2, 4, 5, 6, 8, 9, 10 };
+                bool khd_pre_nan = false, khd_pre_big = false, khd_pre_small = true;
+                for (const uint32_t khd_pre_k : khd_rot9) {
+                    const float khd_pre_x = khd_base[khd_off + khd_pre_k];
+                    if (!(khd_pre_x == khd_pre_x)) khd_pre_nan = true;
+                    if (fabsf(khd_pre_x) > 1.03f) khd_pre_big = true;
+                    if (!(fabsf(khd_pre_x) < 0.56f)) khd_pre_small = false;
+                }
+                if ((khd_pre_big || khd_pre_small) && !khd_pre_nan) continue;
+            }
             for (uint8_t khd_form = 0; khd_form < 4; ++khd_form) {
                 if (khd_off + dl_form_floats(khd_form) > khd_fl) continue;
                 float khd_v[4][4];
@@ -36707,6 +37577,7 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side, bool 
 // (DO_NOT_WAIT; a stall retries next injection without flipping), then flip
 // sides.
 inline void dynlights_harvest_arena(ID3D11DeviceContext* ctx, bool khd_bridge) {
+    ++g_dl_pres_epoch;   // KH_DL_PRES_MEMO: the merge and the sweep rewrite the pool, the origins and the notes.
     if (kh_dl_cpu_wanted()) {
         // The windows drawn since the last injection are CPU-resident: merge
         // them now. No flip, no Map. A side holding GPU-arena windows (a mode
@@ -37858,6 +38729,7 @@ inline void fill_dynlights_cb(ID3D11DeviceContext* ctx, ConstantData& cbd, const
 inline void dynlights_reset_session() {
     g_dl_idle.store(0, std::memory_order_relaxed);   // KH_DL_IDLE.
     g_dl_keep_n = 0u;   // KH_DL_WANT_GATE.
+    memset(g_dl_keep_ix, 0, sizeof(g_dl_keep_ix));   // KH_DL_WANT_INDEX.
     memset(g_dl_keep_id, 0, sizeof(g_dl_keep_id));
     memset(g_dl_keep_cycle, 0, sizeof(g_dl_keep_cycle));
     g_dl.valid = false;
@@ -37889,6 +38761,7 @@ inline void dynlights_reset_session() {
         g_dl.side_uploads[khd_s] = 0;
     }
     g_dl.harvest_seq = 0;
+    kh_dl_pmemo_clear();   // KH_DL_PRES_MEMO: the span count restarts with the pool.
     memset(g_dl.unpl_q, 0, sizeof(g_dl.unpl_q));   // KH_DL_UNPL.
     memset(g_dl.unpl_seq, 0, sizeof(g_dl.unpl_seq));
     kh_cbs_clear();
@@ -38649,16 +39522,39 @@ inline float kh_ao_dist() {
 // drawn over since (the hands) keeps its own. Valid for the cycle that wrote it (g_nzm_cycle).
 static uint64_t g_nzm_cycle = ~0ull;   // The cycle the marker was cleared and written in (~0 = none).
 inline bool kh_nzm_valid() { return g_nzm_cycle == g_topo_cycles && g_res.nzm_srv != nullptr; }
+// KH_NEARZ_READER - the passes that read the depth (and through LoadDepthPS the marker): the localization and band
+// masks (KhFxFinish: KhWorldPosFenced, LoadDepthPS), outline, pulse and distance fog (PSEffect), the sun flare (its
+// pass and its visibility side draw, 29), SSGI (gather, a-trous, resolve), fog scatter (the pass and its side draw,
+// 28) and dynamicLightFog (gather, filter, composite) with their linear-depth frames (PSFxLinZ), and a user shader,
+// which may. Every other built-in - and the fused point stages (1, 2, 3, 5), the glow / anamorphic pyramids and the
+// LUT - reads neither. The scene chain's depth predicate (flush_locked's needs_depth: the read-only depth swap, the
+// depth pair) and the marker's reader test (kh_nzm_wanted) are this one rule. A reader that appears between the
+// injection's test and the chain (a script's change landing at the flush's sync) gets its first frame without the
+// marker - as the first fullscreen pass of any kind did before: the mark is gone by the chain. And at SSAO strength
+// 0 the injection reaches ensure_depth_srv only through kh_ssao_pre, so with no depth reader an FSAA toggle's wipe
+// (kh_msaa_toggle_wipe) waits for the flush's own trigger later in that frame - as with no effect at all before.
+inline bool kh_fx_needs_depth(const RenderObject& o) {
+    return o.localized || o.banded ||
+           o.effect == static_cast<int>(EffectId::Outline) ||
+           o.effect == static_cast<int>(EffectId::Pulse) ||
+           o.effect == static_cast<int>(EffectId::Fog) ||
+           o.effect == static_cast<int>(EffectId::SunFlare) ||
+           o.effect == static_cast<int>(EffectId::Ssgi) ||   // Gather + resolve read live depth.
+           o.effect == static_cast<int>(EffectId::Fogscatter) ||   // Live depth is the scatter's distance authority.
+           o.effect == static_cast<int>(EffectId::DynLightFog) ||   // KH_DLF: the march ends at the depth.
+           o.effect == KH_EFFECT_CUSTOM;   // User shaders may sample depth.
+}
 // The marker may have a reader this cycle: a visible fullscreen or local pass the scene chain runs, which arms it
 // (the flush's rule: every fullscreen pass but a UI-mode one - ui_only - which the UI chain runs with no marker
-// armed). An effect mesh is not one either - no effect mesh is armed (KH_NEARZ_MARK's limit), so it neither
-// reads the marker nor asks for it. Without a reader the marker is not written, and with SSAO off the drawers do
-// not mark for it (kh_ssao_pre).
+// armed), and that reads the depth (KH_NEARZ_READER: a pass that never calls LoadDepthPS never reads the marker). An
+// effect mesh is not one either - no effect mesh is armed (KH_NEARZ_MARK's limit), so it neither reads the marker
+// nor asks for it. Without a reader the marker is not written; with SSAO off as well the drawers do not mark
+// (kh_ssao_pre returns on neither term nor marker) and the SSAO pass does not run at all.
 inline bool kh_nzm_wanted() {
     for (uint32_t i = 0; i < g_scene.objs.size(); ++i) {
         if (!g_scene.alive[i]) continue;
         const RenderObject& o = g_scene.objs[i];
-        if (o.visible && (o.fullscreen || o.localized) && !o.ui_only) return true;
+        if (o.visible && (o.fullscreen || o.localized) && !o.ui_only && kh_fx_needs_depth(o)) return true;
     }
     return false;
 }
@@ -39003,7 +39899,7 @@ inline void kh_ssao_post(ID3D11DeviceContext* ctx, const KhSsaoPass& khsp) {
     }   // End of the term pass; the eraser below does not depend on it.
     // KH_NEARZ_MARK: this drawer's near-z gap pixels into the marker while the mark stands. A cycle's first write
     // clears it; a later drawer adds its own pixels (the pass discards every other). Only for a reader (khsp.nzm):
-    // with no fullscreen pass the target is never made and the pass never draws.
+    // with no depth-reading fullscreen pass (KH_NEARZ_READER) the target is never made and the pass never draws.
     if (khsp.nzm && khsp.nz_near > 0.0f && g_res.ps_ssao_nzmark && g_res.depth_srv && g_res.depth_sten_srv &&
         g_res.ssao_cb) {
         ID3D11Device* khnm_dev = nullptr;
@@ -39780,7 +40676,7 @@ inline void locator_note_upload(ID3D11Resource* res, const void* data, uint32_t 
         }
     }
 
-    const float now = effect_time_seconds();
+    const float now = static_cast<float>(kh_fast_effect_seconds_d());   // KH_FAST_CLOCK: every captured upload.
 
     if (nf >= 72) {
         kh_upload_need(data, (nf < 96u ? nf : 96u) * 4u);   // KH_UPLOAD_LAZY: the anchor and locator_capture's 96.
@@ -39845,28 +40741,17 @@ inline void shadow_live_upload(const void* data, uint32_t bytes) {
     const float* f = static_cast<const float*>(data);
     const uint32_t nfloats = bytes / 4;
 
+    // KH_LIVE_DEAD: a latched cycle and the small sampling block each ran shadow_live_test_window over a few
+    // offsets and kept nothing - the predicate writes no state (it reads the window and the published sun; nothing
+    // reads errno or the FP status) and the loops broke on its verdict alone - so the loops are gone. Their lazy
+    // copies stay as they were (the scratch holds the same bytes for every reader after).
     if (g_ls.cycle_latched) {
         kh_upload_need(data, (nfloats < 140u ? nfloats : 140u) * 4u);   // KH_UPLOAD_LAZY: offsets 0..128, 12 floats.
-        for (uint32_t off = 0; off + 12 <= nfloats && off <= 128; off += 4) {
-            if (shadow_live_test_window(f + off)) {  break; }   // A predicate: nothing is kept (the copy above is all).
-        }
-
         return;
     }
 
-    // The small sampling block is tested the same way and likewise keeps
-    // nothing (shadow_live_test_window writes no state); the lazy copy is the
-    // loop's one effect.
     if (bytes <= 256) {
         kh_upload_need(data, bytes);   // KH_UPLOAD_LAZY (inside the eager copy).
-        const float* ff = static_cast<const float*>(data);
-        const uint32_t nf = static_cast<uint32_t>(bytes / 4);
-
-        for (uint32_t off = 0; off + 12 <= nf && off <= 8; off += 4) {
-            if (shadow_live_test_window(ff + off)) {
-                break;
-            }
-        }
     }
 
     if (g_ls.pending_valid && bytes < g_ls.pending_bytes) return;   // Never downgrade (same size:
@@ -40352,6 +41237,7 @@ inline void release_shadow_device_state() {
 
     memset(g_dl.win_meta, 0, sizeof(g_dl.win_meta));
     g_dl.pool_n = 0;   // Pool positions are pod but the stamp must not lie.
+    kh_dl_pmemo_clear();   // KH_DL_PRES_MEMO: the pool it indexes is gone (the span count is not reset here).
     g_dl.pool_stamp = 0;
     g_dl.valid = false;   // getRenderStats reports it (dlValid); a fresh harvest re-arms.
 
@@ -51899,16 +52785,39 @@ inline void kh_pip_pre_draw(ID3D11DeviceContext* ctx) {
 
 // KH_UPLOAD_LAZY: every scanner below calls kh_upload_need before it reads past
 // KH_UPLOAD_EAGER_BYTES of khus_d (the rule at kh_upload_scratch).
+// KH_PROF_UPLOAD: each scanner its own step (KhProfSub, on the upload's decision taken at the capture).
 inline void kh_upload_scan(ID3D11Resource* res, const void* khus_d, uint32_t khus_n) {
     KH_PROF_SCOPE(KHP_UPLOAD_SCAN);   // KH_PROF.
-    kh_b2_snap_note(res, khus_d, khus_n);   // KH_MIR_CPU (no-op until b2 is learned).
-    proj_scan_upload(res, khus_d, khus_n);
-    shadow_live_upload(khus_d, khus_n);
-    locator_note_upload(res, khus_d, khus_n);   // fog/sun color locators (read-only).
-    kh_pip_note_upload(res, khus_d, khus_n);   // KH_PIP: the engine's view / projection blocks, any pass.
-    kh_engcam_scan(res, khus_d, khus_n);
+    {
+        KH_PROF_SUB(KHP_SC_B2, g_prof_up_on, g_prof_up_t);
+        kh_b2_snap_note(res, khus_d, khus_n);   // KH_MIR_CPU (no-op until b2 is learned).
+    }
+    {
+        KH_PROF_SUB(KHP_SC_PROJ, g_prof_up_on, g_prof_up_t);
+        proj_scan_upload(res, khus_d, khus_n);
+    }
+    {
+        KH_PROF_SUB(KHP_SC_LIVE, g_prof_up_on, g_prof_up_t);
+        shadow_live_upload(khus_d, khus_n);
+    }
+    {
+        KH_PROF_SUB(KHP_SC_LOCATOR, g_prof_up_on, g_prof_up_t);
+        locator_note_upload(res, khus_d, khus_n);   // fog/sun color locators (read-only).
+    }
+    {
+        KH_PROF_SUB(KHP_SC_PIP, g_prof_up_on, g_prof_up_t);
+        kh_pip_note_upload(res, khus_d, khus_n);   // KH_PIP: the engine's view / projection blocks, any pass.
+    }
+    {
+        KH_PROF_SUB(KHP_SC_ENGCAM, g_prof_up_on, g_prof_up_t);
+        kh_engcam_scan(res, khus_d, khus_n);
+    }
     if (!g_ro.in_injection && shadow_live_wanted()) {   // Our own CBs carry view rows too.
-        shadow_register_upload(res, khus_d, khus_n);
+        {
+            KH_PROF_SUB(KHP_SC_REG, g_prof_up_on, g_prof_up_t);
+            shadow_register_upload(res, khus_d, khus_n);
+        }
+        KH_PROF_SUB(KHP_SC_VIEW, g_prof_up_on, g_prof_up_t);
         shadow_view_scan(res, khus_d, khus_n);
     }
 }
@@ -51919,7 +52828,9 @@ static HRESULT STDMETHODCALLTYPE hooked_map(ID3D11DeviceContext* self, ID3D11Res
     try { kh_rp_on_map(self, res, type); } catch (...) { g_rp_ok = false; }
     try { kh_rp_cb_forget(res); } catch (...) {}   // KH_REPLAY_CBREUSE: any map may write.
     KH_PROF_SCOPE(KHP_HOOK_MAP);   // KH_PROF.
+    const uint64_t khdm_t0 = kh_prof_drv_t0(khps_scope_KHP_HOOK_MAP);   // KH_PROF_DRV.
     const HRESULT hr = g_orig_map(self, res, sub, type, flags, mapped);
+    kh_prof_drv(KHP_DRV_MAP, khdm_t0);
 
     try {
     if (SUCCEEDED(hr) && mapped && mapped->pData && sub == 0 &&
@@ -51969,6 +52880,7 @@ static void STDMETHODCALLTYPE hooked_unmap(ID3D11DeviceContext* self, ID3D11Reso
                 khus_cap = true;
                 const void* khus_d = kh_upload_capture(res, khus_p.data, khus_n);   // KH_DL_CPU.
                 kh_upload_scan(res, khus_d, khus_n);
+                KH_PROF_SUB(KHP_SC_RPIMG, g_prof_up_on, g_prof_up_t);   // KH_PROF_UPLOAD.
                 kh_rp_img_note(res, khus_d, khus_n);   // KH_REPLAY_CPUCB: before the source is unmapped.
                 break;
             }
@@ -51977,24 +52889,36 @@ static void STDMETHODCALLTYPE hooked_unmap(ID3D11DeviceContext* self, ID3D11Reso
 
     } catch (...) { kh_hook_except(); }
     if (khus_cap) kh_upload_capture_end();   // Before the source is unmapped.
+    const uint64_t khdu_t0 = kh_prof_drv_t0(khps_scope_KHP_HOOK_MAP);   // KH_PROF_DRV.
     g_orig_unmap(self, res, sub);
+    kh_prof_drv(KHP_DRV_UNMAP, khdu_t0);
 }
 
 static void STDMETHODCALLTYPE hooked_draw_auto(ID3D11DeviceContext* self) {   // KH_VOL_REPLAY.
-    try { if (kh_rp_engine_call(self) && g_svs_vol_dsv_bound) kh_rp_foreign(5); } catch (...) { kh_hook_except(); }
+    {
+        KH_PROF_SCOPE(KHP_HOOK_MISC);   // KH_PROF_HOOKS.
+        try { if (kh_rp_engine_call(self) && g_svs_vol_dsv_bound) kh_rp_foreign(5); } catch (...) { kh_hook_except(); }
+    }
     g_orig_draw_auto(self);
 }
 static void STDMETHODCALLTYPE hooked_draw_indexed_inst_indirect(ID3D11DeviceContext* self, ID3D11Buffer* args, UINT off) {
-    try { if (kh_rp_engine_call(self) && g_svs_vol_dsv_bound) kh_rp_foreign(5); } catch (...) { kh_hook_except(); }
+    {
+        KH_PROF_SCOPE(KHP_HOOK_MISC);   // KH_PROF_HOOKS.
+        try { if (kh_rp_engine_call(self) && g_svs_vol_dsv_bound) kh_rp_foreign(5); } catch (...) { kh_hook_except(); }
+    }
     g_orig_draw_indexed_inst_indirect(self, args, off);
 }
 static void STDMETHODCALLTYPE hooked_draw_inst_indirect(ID3D11DeviceContext* self, ID3D11Buffer* args, UINT off) {
-    try { if (kh_rp_engine_call(self) && g_svs_vol_dsv_bound) kh_rp_foreign(5); } catch (...) { kh_hook_except(); }
+    {
+        KH_PROF_SCOPE(KHP_HOOK_MISC);   // KH_PROF_HOOKS.
+        try { if (kh_rp_engine_call(self) && g_svs_vol_dsv_bound) kh_rp_foreign(5); } catch (...) { kh_hook_except(); }
+    }
     g_orig_draw_inst_indirect(self, args, off);
 }
 static void STDMETHODCALLTYPE hooked_copy_region(ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dsub, UINT x, UINT y,
                                                  UINT z, ID3D11Resource* src, UINT ssub, const D3D11_BOX* box) {
     try {
+        KH_PROF_SCOPE(KHP_HOOK_COPYREGION);   // KH_PROF_HOOKS.
         kh_rp_cb_forget(dst);   // KH_REPLAY_CBREUSE.
         if (kh_rp_engine_call(self) && dst && g_svs_vol_src && static_cast<void*>(dst) == static_cast<void*>(g_svs_vol_src))
             kh_rp_foreign(6);
@@ -52005,13 +52929,17 @@ static void STDMETHODCALLTYPE hooked_copy_region(ID3D11DeviceContext* self, ID3D
 // it writes the volume buffer in, as its context-0 twin above does.
 static void STDMETHODCALLTYPE hooked_copy_structure_count(ID3D11DeviceContext* self, ID3D11Buffer* dst, UINT off,
                                                           ID3D11UnorderedAccessView* src) {
-    try { kh_rp_cb_forget(dst); } catch (...) { kh_hook_except(); }
+    {
+        KH_PROF_SCOPE(KHP_HOOK_MISC);   // KH_PROF_HOOKS.
+        try { kh_rp_cb_forget(dst); } catch (...) { kh_hook_except(); }
+    }
     g_orig_copy_structure_count(self, dst, off, src);
 }
 static void STDMETHODCALLTYPE hooked_copy_region1(ID3D11DeviceContext1* self, ID3D11Resource* dst, UINT dsub, UINT x,
                                                   UINT y, UINT z, ID3D11Resource* src, UINT ssub, const D3D11_BOX* box,
                                                   UINT flags) {
     try {
+        KH_PROF_SCOPE(KHP_HOOK_COPYREGION);   // KH_PROF_HOOKS.
         kh_rp_cb_forget(dst);
         if (kh_rp_engine_call(self) && dst && g_svs_vol_src && static_cast<void*>(dst) == static_cast<void*>(g_svs_vol_src))
             kh_rp_foreign(6);
@@ -52021,12 +52949,18 @@ static void STDMETHODCALLTYPE hooked_copy_region1(ID3D11DeviceContext1* self, ID
 static void STDMETHODCALLTYPE hooked_update_subresource1(ID3D11DeviceContext1* self, ID3D11Resource* res, UINT sub,
                                                          const D3D11_BOX* box, const void* data, UINT rp, UINT dp,
                                                          UINT flags) {
-    try { kh_rp_cb_forget(res); } catch (...) { kh_hook_except(); }
+    {
+        KH_PROF_SCOPE(KHP_HOOK_MISC);   // KH_PROF_HOOKS.
+        try { kh_rp_cb_forget(res); } catch (...) { kh_hook_except(); }
+    }
     g_orig_update_subresource1(self, res, sub, box, data, rp, dp, flags);
 }
 static void STDMETHODCALLTYPE hooked_execute_command_list(ID3D11DeviceContext* self, ID3D11CommandList* cl, BOOL restore) {
-    try { if (kh_rp_engine_call(self)) kh_rp_foreign(4); } catch (...) { kh_hook_except(); }
-    try { kh_rp_img_clear(); } catch (...) { kh_hook_except(); }   // KH_REPLAY_CPUCB: it can write any buffer.
+    {
+        KH_PROF_SCOPE(KHP_HOOK_MISC);   // KH_PROF_HOOKS.
+        try { if (kh_rp_engine_call(self)) kh_rp_foreign(4); } catch (...) { kh_hook_except(); }
+        try { kh_rp_img_clear(); } catch (...) { kh_hook_except(); }   // KH_REPLAY_CPUCB: it can write any buffer.
+    }
     g_orig_execute_command_list(self, cl, restore);
 }
 // Installed one by one after the core table succeeded: a failure leaves that one off and never touches the core hooks.
@@ -52074,6 +53008,8 @@ inline void kh_rp_extra_hooks(ID3D11DeviceContext* ctx, void** vt) {
 // copy, so the copy carries them; the first copy of a cycle is the engine's
 // opaque boundary. RT0 is compared by resource, not by view.
 static void STDMETHODCALLTYPE hooked_copyresource(ID3D11DeviceContext* self, ID3D11Resource* dst, ID3D11Resource* src) {
+    {
+    KH_PROF_SCOPE(KHP_HOOK_COPYRES);   // KH_PROF_HOOKS: ours, up to the driver's call.
     try { kh_rp_cb_forget(dst); } catch (...) {}   // KH_REPLAY_CBREUSE.
     try {   // KH_VOL_REPLAY: a copy into the volume buffer inside a pass.
         if (kh_rp_engine_call(self) && dst && g_svs_vol_src && static_cast<void*>(dst) == static_cast<void*>(g_svs_vol_src))
@@ -52099,10 +53035,12 @@ static void STDMETHODCALLTYPE hooked_copyresource(ID3D11DeviceContext* self, ID3
         }
     }
     } catch (...) { kh_hook_except(); }
+    }
     g_orig_copyresource(self, dst, src);
 }
 
 static void STDMETHODCALLTYPE hooked_updatesubresource(ID3D11DeviceContext* self, ID3D11Resource* res, UINT sub, const D3D11_BOX* dst_box, const void* data, UINT row_pitch, UINT depth_pitch) {
+    KH_PROF_SCOPE(KHP_HOOK_UPDSUB);   // KH_PROF_HOOKS: the whole hook (the driver's share: drvUpdSub).
     try { kh_rp_cb_forget(res); } catch (...) {}   // KH_REPLAY_CBREUSE.
     bool khus_cap = false;   // KH_UPLOAD_LAZY: this call captured.
     try {
@@ -52114,14 +53052,18 @@ static void STDMETHODCALLTYPE hooked_updatesubresource(ID3D11DeviceContext* self
             uint32_t khus_n = bytes;
             khus_cap = true;
             const void* khus_d = kh_upload_capture(res, data, khus_n);   // KH_DL_CPU.
+            if (g_prof_up_on) kh_fun(KHF_UPDSUB, 1u);   // KH_PROF_FUNNEL.
             kh_upload_scan(res, khus_d, khus_n);
+            KH_PROF_SUB(KHP_SC_RPIMG, g_prof_up_on, g_prof_up_t);   // KH_PROF_UPLOAD.
             kh_rp_img_note(res, khus_d, khus_n);   // KH_REPLAY_CPUCB: the caller's data is the whole buffer.
         }
     }
 
     } catch (...) { kh_hook_except(); }
     if (khus_cap) kh_upload_capture_end();   // Before the caller's data is returned.
+    const uint64_t khdd_t0 = kh_prof_drv_t0(khps_scope_KHP_HOOK_UPDSUB);   // KH_PROF_DRV.
     g_orig_updatesubresource(self, res, sub, dst_box, data, row_pitch, depth_pitch);
+    kh_prof_drv(KHP_DRV_UPDSUB, khdd_t0);
 }
 
 // Game-thread context use never overlaps this: a park stalls the render thread,
@@ -54601,6 +55543,8 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
 
         return;
     }
+    KhProfDsDecision khpd_dec(g_ro.in_injection);   // KH_PROF_DRAWSTEP: this draw's measurement decision.
+    if (g_prof_ds_on) kh_fun(KHF_DRAWS, 1u);
 
     // KH_UI_MASK_RT: the coverage mask machine sees THIS thread's draws too.
     // Measured (KH_UI_DIAG): the engine issues most of its UI-pass draws on
@@ -54626,9 +55570,15 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
     // Deferred seam injection, render thread only and before this draw - the
     // first volume draw, so the buffer still carries our depth when the stencil
     // counting reads it.
-    kh_volume_seam_pump(self);
+    {
+        KH_PROF_SUB_ALL(KHP_DS_SEAM, g_prof_ds_on);   // KH_PROF_DRAWSTEP: timed whole.
+        kh_volume_seam_pump(self);
+    }
 
-    if (g_pip.on && !g_ro.dsv_main && !g_ro.in_injection) kh_pip_pre_draw(self);   // KH_PIP.
+    if (g_pip.on && !g_ro.dsv_main && !g_ro.in_injection) {   // KH_PIP.
+        KH_PROF_SUB_ALL(KHP_DS_PIP, g_prof_ds_on);   // KH_PROF_DRAWSTEP: timed whole.
+        kh_pip_pre_draw(self);
+    }
 
     // The mirror-pass survey, after the pump, armed only.
     if (g_svs_vol_dsv_now && !g_ro.in_injection) {
@@ -54682,14 +55632,21 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
 
     if (!g_ro.in_injection) {
         kh_band_stage_commit(self);   // Land staged seals before the injection.
-        shadow_note_draw(self);
-        mask_note_draw(self);
+        {
+            KH_PROF_SUB(KHP_DS_SHADOW, g_prof_ds_on, g_prof_ds_t);   // KH_PROF_DRAWSTEP.
+            shadow_note_draw(self);
+        }
+        {
+            KH_PROF_SUB(KHP_DS_MASK, g_prof_ds_on, g_prof_ds_t);   // KH_PROF_DRAWSTEP.
+            mask_note_draw(self);
+        }
         mask_cast_engine(self);
 
         if (kh_dl_cpu_wanted()) {   // KH_DLF_DEMAND: a lit mesh or a caster, or a dynamicLightFog pass.
             // Every draw's cb11, not every 16th: the pool follows the engine at
             // ~50 ms instead of riding its TTL. The per-window dedupe and the
             // arena cap bound the copies.
+            KH_PROF_SUB(KHP_DS_DL, g_prof_ds_on, g_prof_ds_t);   // KH_PROF_DRAWSTEP.
             dynlights_sample_draw(self);
         }
     }
@@ -54697,6 +55654,7 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
     // draws (the injection never runs inside the atlas phase); the every-16th
     // sample plus the freshness idle keep healthy sessions at zero cost.
     if (!g_ro.in_injection && g_ls.phase_on_atlas && ((++g_cascharv_ctr & 15) == 0)) {
+        KH_PROF_SUB_ALL(KHP_DS_CASCBIND, g_prof_ds_on);   // KH_PROF_DRAWSTEP: one draw in 16, timed whole.
         cascbind_step(self);
     }
 
@@ -54705,6 +55663,7 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
     if (!g_ro.in_injection && g_ro.dsv_main &&
         g_infront_wanted.load(std::memory_order_relaxed) &&
         !g_kh_flush_active.load(std::memory_order_relaxed)) {
+        KH_PROF_SUB_ALL(KHP_DS_INFRONT, g_prof_ds_on);   // KH_PROF_DRAWSTEP: timed whole.
         kh_infront_pre_draw(self);
     }
 
@@ -54715,6 +55674,7 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
             // Retry until the first success, capped at the first 8 opaque draws
             // - every latch consumer runs after this point in the frame.
             if (g_ro.cycle_pv_stale && g_ro.opaque_draws < 8) {
+                KH_PROF_SUB_ALL(KHP_DS_LATCH, g_prof_ds_on);   // KH_PROF_DRAWSTEP: the bridge's retry, timed whole.
                 RVExtBridge::ProjectionViewTransform khl_pv = {};
 
                 // KH_LATCH_FOLD: no continuity gate (the clear has none either).
@@ -54752,6 +55712,7 @@ inline void reorder_pre_draw(ID3D11DeviceContext* self) {
             if ((g_ro.opaque_draws & 7) == 0 &&
                 ((g_fog_valid && g_fog[0] > 1e-4f) ||
                  (!g_ls.view_src_valid && shadow_live_wanted()))) {
+                KH_PROF_SUB_ALL(KHP_DS_SKYBIND, g_prof_ds_on);   // KH_PROF_DRAWSTEP: one opaque draw in 8, timed whole.
                 skybind_step(self);
             }
 
@@ -54992,9 +55953,10 @@ inline bool kh_dlsw_mask_render(ID3D11DeviceContext* khm_ctx,
             khm_bound_vb = khm_want;
         }
         // The mask covers whatever the injection drew: the level kh_lod_pick
-        // chose (same pick, same inputs), and during a fade both levels, so the
-        // mask covers their union. Not the shadow LOD. An inFront mesh is the
-        // slice's, drawn at level 0 only (KH_INFRONT_LOD).
+        // chose (same pick, same inputs), and during a fade both levels, each
+        // cut by the colour pass's dither (KH_DLSW_MASK_DITHER), so the mask at
+        // a pixel holds the level that pixel shows. Not the shadow LOD. An
+        // inFront mesh is the slice's, drawn at level 0 only (KH_INFRONT_LOD).
         {
             const MeshDef& khm_md = mesh_def(khm_c.mesh);
             int   khm_lvl = 0;
@@ -55008,6 +55970,19 @@ inline bool kh_dlsw_mask_render(ID3D11DeviceContext* khm_ctx,
             bool khm_ok = true;
             for (int khm_it = 0; khm_it < khm_iters && khm_ok; ++khm_it) {
                 const int khm_lv = mesh_lod_clamp(khm_md, khm_lvl + khm_it);
+                // KH_DLSW_MASK_DITHER: a fading level takes the dither lane the injection's crossfade loop gives it
+                // (kh_lod_dither: the finer level first), which PSDlsMask (blendCtl.w) and PSDlsMaskA (its object
+                // lane) cut by. A mask holding the union claimed the world's pixels inside the hidden level's
+                // outline as ours, and KhDlsMaskCov kept our dynamic-light shadow off them for the fade. The alpha
+                // route uploads khm_obj per submesh below; the plain route uploads it here. khm_obj is this
+                // caster's own, so the lane leaks into no other caster.
+                if (khm_iters == 2) {
+                    khm_obj.blend_ctl[3] = kh_lod_dither(khm_lt, khm_it != 0);
+                    if (!khm_want_alpha) {
+                        khm_ok = kh_upload_obj_cb(khm_ctx, g_res.composite_cb, khm_obj);
+                        if (!khm_ok) break;
+                    }
+                }
                 if (khm_want_alpha) {   // Per submesh of the level, the material's lanes + maps bound.
                     const std::vector<MeshSubmesh>& khm_tab = mesh_lod_submeshes(khm_md, khm_lv);
                     for (size_t khm_s = 0; khm_s < khm_tab.size() && khm_ok; ++khm_s) {
@@ -55609,6 +56584,7 @@ inline void kh_main_depth_readopt(ID3D11DeviceContext* khdr_ctx, ID3D11Resource*
 // dynamic-light world pass and the flush. The format argument is unused: the passes key on the source identity.
 static void STDMETHODCALLTYPE hooked_resolvesubresource(ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dst_sub, ID3D11Resource* src, UINT src_sub, DXGI_FORMAT fmt) {
     try {
+    KH_PROF_SCOPE(KHP_HOOK_RESOLVE);   // KH_PROF_HOOKS: the DLS world pass and the flush included.
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed)) {
         if (src && reorder_on_render_thread() && !g_ro.in_injection &&
             !g_kh_flush_active.load(std::memory_order_relaxed)) {
@@ -55669,6 +56645,7 @@ static void STDMETHODCALLTYPE hooked_resolvesubresource(ID3D11DeviceContext* sel
 
 static void STDMETHODCALLTYPE hooked_pssetshaderresources(ID3D11DeviceContext* self, UINT start, UINT n, ID3D11ShaderResourceView* const* srvs) {
     try {
+    KH_PROF_SCOPE(KHP_HOOK_PSSRV);   // KH_PROF_HOOKS.
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&   // Context first.
         reorder_on_render_thread() &&
         !g_ro.in_injection && g_ls.atlas_tex && srvs) {
@@ -55722,9 +56699,13 @@ static void STDMETHODCALLTYPE hooked_pssetshaderresources(ID3D11DeviceContext* s
 
 static void STDMETHODCALLTYPE hooked_draw_indexed(ID3D11DeviceContext* self, UINT ic, UINT sil, INT bvl) {
     try { reorder_pre_draw(self); } catch (...) { kh_hook_except(); }
-    kh_rp_record(self, 1, ic, sil, 0, bvl, 0);   // KH_VOL_REPLAY: the engine's state, after our pre-draw work.
+    {
+        KH_PROF_SCOPE(KHP_DRAW_RECORD);   // KH_PROF_HOOKS.
+        kh_rp_record(self, 1, ic, sil, 0, bvl, 0);   // KH_VOL_REPLAY: engine state after our pre-draw work.
+    }
     g_orig_draw_indexed(self, ic, sil, bvl);
     try {
+    KH_PROF_TSC(KHP_DRAW_POST);   // KH_PROF_HOOKS: mirror re-issue (with its driver draw), UI quad, bracket.
     // Mirror re-issue; the flag is set for the tracked context's own draw. The
     // context test first: g_vmir_pending is a plain render-thread bool, and
     // this hook runs on every thread that draws through a shared vtable.
@@ -55744,9 +56725,13 @@ static void STDMETHODCALLTYPE hooked_draw_indexed(ID3D11DeviceContext* self, UIN
 
 static void STDMETHODCALLTYPE hooked_draw(ID3D11DeviceContext* self, UINT vc, UINT svl) {
     try { reorder_pre_draw(self); } catch (...) { kh_hook_except(); }
-    kh_rp_record(self, 2, vc, svl, 0, 0, 0);   // KH_VOL_REPLAY: the engine's state, after our pre-draw work.
+    {
+        KH_PROF_SCOPE(KHP_DRAW_RECORD);   // KH_PROF_HOOKS.
+        kh_rp_record(self, 2, vc, svl, 0, 0, 0);   // KH_VOL_REPLAY: engine state after our pre-draw work.
+    }
     g_orig_draw(self, vc, svl);
     try {
+    KH_PROF_TSC(KHP_DRAW_POST);   // KH_PROF_HOOKS: mirror re-issue (with its driver draw), UI quad, bracket.
     // Mirror re-issue; the flag is set for the tracked context's own draw. The
     // context test first: g_vmir_pending is a plain render-thread bool, and
     // this hook runs on every thread that draws through a shared vtable.
@@ -55766,9 +56751,13 @@ static void STDMETHODCALLTYPE hooked_draw(ID3D11DeviceContext* self, UINT vc, UI
 
 static void STDMETHODCALLTYPE hooked_draw_indexed_instanced(ID3D11DeviceContext* self, UINT icpi, UINT ic, UINT sil, INT bvl, UINT sil2) {
     try { reorder_pre_draw(self); } catch (...) { kh_hook_except(); }
-    kh_rp_record(self, 3, icpi, ic, sil, bvl, sil2);   // KH_VOL_REPLAY: the engine's state, after our pre-draw work.
+    {
+        KH_PROF_SCOPE(KHP_DRAW_RECORD);   // KH_PROF_HOOKS.
+        kh_rp_record(self, 3, icpi, ic, sil, bvl, sil2);   // KH_VOL_REPLAY: engine state after our pre-draw work.
+    }
     g_orig_draw_indexed_instanced(self, icpi, ic, sil, bvl, sil2);
     try {
+    KH_PROF_TSC(KHP_DRAW_POST);   // KH_PROF_HOOKS: mirror re-issue (with its driver draw), UI quad, bracket.
     // Mirror re-issue; the flag is set for the tracked context's own draw. The
     // context test first: g_vmir_pending is a plain render-thread bool, and
     // this hook runs on every thread that draws through a shared vtable.
@@ -55788,9 +56777,13 @@ static void STDMETHODCALLTYPE hooked_draw_indexed_instanced(ID3D11DeviceContext*
 
 static void STDMETHODCALLTYPE hooked_draw_instanced(ID3D11DeviceContext* self, UINT vcpi, UINT ic, UINT svl, UINT sil) {
     try { reorder_pre_draw(self); } catch (...) { kh_hook_except(); }
-    kh_rp_record(self, 4, vcpi, ic, svl, 0, sil);   // KH_VOL_REPLAY: the engine's state, after our pre-draw work.
+    {
+        KH_PROF_SCOPE(KHP_DRAW_RECORD);   // KH_PROF_HOOKS.
+        kh_rp_record(self, 4, vcpi, ic, svl, 0, sil);   // KH_VOL_REPLAY: engine state after our pre-draw work.
+    }
     g_orig_draw_instanced(self, vcpi, ic, svl, sil);
     try {
+    KH_PROF_TSC(KHP_DRAW_POST);   // KH_PROF_HOOKS: mirror re-issue (with its driver draw), UI quad, bracket.
     // Mirror re-issue; the flag is set for the tracked context's own draw. The
     // context test first: g_vmir_pending is a plain render-thread bool, and
     // this hook runs on every thread that draws through a shared vtable.
@@ -55849,6 +56842,7 @@ inline void kh_hook_desc_cache_release() {
 
 static void STDMETHODCALLTYPE hooked_omset_blendstate(ID3D11DeviceContext* self, ID3D11BlendState* bs, const FLOAT bf[4], UINT mask) {
     try {
+    KH_PROF_SCOPE(KHP_HOOK_OMBLEND);   // KH_PROF_HOOKS.
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && !g_ro.in_injection &&
         !g_kh_flush_active && !g_ui_mask_injecting &&   // own-state exclusion by flags.
         reorder_on_render_thread()) {
@@ -55871,6 +56865,7 @@ static void STDMETHODCALLTYPE hooked_omset_blendstate(ID3D11DeviceContext* self,
 
 static void STDMETHODCALLTYPE hooked_omset_depthstencil(ID3D11DeviceContext* self, ID3D11DepthStencilState* dss, UINT ref) {
     try {
+    KH_PROF_SCOPE(KHP_HOOK_OMDSS);   // KH_PROF_HOOKS.
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && !g_ro.in_injection &&
         !g_kh_flush_active && !g_ui_mask_injecting &&   // own-state exclusion by flags.
         reorder_on_render_thread()) {
@@ -55890,6 +56885,7 @@ static void STDMETHODCALLTYPE hooked_omset_depthstencil(ID3D11DeviceContext* sel
 
 static void STDMETHODCALLTYPE hooked_omset_rendertargets(ID3D11DeviceContext* self, UINT n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv) {
     try {
+    KH_PROF_SCOPE(KHP_HOOK_OMRT);   // KH_PROF_HOOKS.
     // Foreign contexts fall straight through.
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && !g_ro.in_injection &&
         !g_kh_flush_active && !g_ui_mask_injecting &&   // own-state exclusion by flags.
@@ -55922,6 +56918,7 @@ static void STDMETHODCALLTYPE hooked_omset_rendertargets(ID3D11DeviceContext* se
 
 static void STDMETHODCALLTYPE hooked_omset_rts_and_uavs(ID3D11DeviceContext* self, UINT n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv, UINT uav_start, UINT n_uavs, ID3D11UnorderedAccessView* const* uavs, const UINT* counts) {
     try {
+    KH_PROF_SCOPE(KHP_HOOK_OMRTUAV);   // KH_PROF_HOOKS.
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && !g_ro.in_injection &&
         !g_kh_flush_active && !g_ui_mask_injecting &&   // own-state exclusion by flags.
         reorder_on_render_thread() &&
@@ -56222,8 +57219,8 @@ inline void ensure_reorder_hook() {
 // seed / gather / resolve, the LUT and user-shader passes, the fusion, the
 // final write-back into the saved OM). What the flush supplied from its
 // locals arrives as parameters: the depth SRV it had at t1 (null when the
-// depth is not ready), whether a scene capture is still owed (the flush's
-// mesh loop takes one when meshes drew), and its two lambdas - the per-pass
+// depth is not ready), whether a scene capture is still owed (when meshes
+// drew, or the flush's setup left its copy here - KH_CAP_DEFER), and its two lambdas - the per-pass
 // constant-buffer fill (upload_cb, chain_pass = true, deferred) and the
 // depth-demand predicate - as template parameters, so the call sites inside
 // are the flush's own text. The caller performs the read-only DSV swap before
@@ -56331,6 +57328,9 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
         auto khfp_flush = [&](bool khfp_final) {
             if (!khfp_live) return;
             khfp_live = false;
+            // KH_GPU_PASS: the pass whole - its side draws, pyramids and linear-depth builds included.
+            KhGpuPassScope khgq_pass(ctx, 0u, khfp_effect, khfp_ps != nullptr,
+                                     static_cast<uint32_t>(khfp_cbd.fuse_meta[0] + 0.5f));
             // KH_FX_LINZ: fog scatter reads the depth whenever it runs (its side draw below, then the pass).
             if (!khfp_ps && khfp_effect == static_cast<int>(EffectId::Fogscatter)) khlz_frame(khfp_cbd);
             bool khsg_pair = false;
@@ -57647,22 +58647,29 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
     // Capability gating per frame: effects need the scene capture and the
     // effect shader; depth effects additionally need the depth SRV in the PS,
     // which requires the read-only DSV swap.
-    auto needs_depth = [](const RenderObject& o) {
-        return o.localized || o.banded ||
-               o.effect == static_cast<int>(EffectId::Outline) ||
-               o.effect == static_cast<int>(EffectId::Pulse) ||
-               o.effect == static_cast<int>(EffectId::Fog) ||
-               o.effect == static_cast<int>(EffectId::SunFlare) ||
-               o.effect == static_cast<int>(EffectId::Ssgi) ||   // Gather + resolve read live
-                                                                 // Depth.
-               o.effect == static_cast<int>(EffectId::Fogscatter) ||   // Live depth is the scatter's
-                                                                       // Distance authority.
-               o.effect == static_cast<int>(EffectId::DynLightFog) ||   // KH_DLF: the march ends at the depth.
-               o.effect == KH_EFFECT_CUSTOM;   // User shaders may sample depth.
-    };
+    auto needs_depth = [](const RenderObject& o) { return kh_fx_needs_depth(o); };   // KH_NEARZ_READER.
 
     bool any_effect = !fullscreen.empty();
     bool any_depth_fx = false;
+    // KH_CAP_DEFER - with no mesh of this flush's own (none to draw, none composite-eligible: so no SSAO term either),
+    // the scene capture has one reader, the chain, and nothing draws into the scene between here and the chain (the
+    // sun pyramids' conversion draws into its own targets and restores the OM; the DSV swap moves the depth view
+    // only). So the copy is taken where the chain takes its own after meshes (kh_fx_chain_run's khfc_capture): the
+    // same picture from the same target. A chain this flush hands to KH_FX_LATE then costs no copy here - the late
+    // flush takes its own, as it did - which on an MSAA scene was a full resolve a frame for nothing. Not under a
+    // predicate the engine left bound: the copy here runs under it, the chain's after StateBackup has cleared it (a
+    // copy the predicate skipped left the chain the last capture; deferred, it would get this frame's). So with one
+    // bound the copy stays here. Nothing between here and the setup's copy sets predication (only StateBackup does).
+    bool khf_cap_defer = meshes.empty() && khf_comp_eligible == 0;
+    if (khf_cap_defer) {
+        ID3D11Predicate* khf_cap_pred = nullptr;
+        BOOL khf_cap_pred_v = FALSE;
+        ctx->GetPredication(&khf_cap_pred, &khf_cap_pred_v);
+        if (khf_cap_pred) {
+            khf_cap_defer = false;
+            khf_cap_pred->Release();
+        }
+    }
 
     for (const auto& o : meshes) {
         if (o.effect > 0) any_effect = true;
@@ -57685,7 +58692,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
         {
             std::string khf_fx_err = ensure_depth_srv(dev, ctx, &dw, &dh);
             if (khf_fx_err.empty()) khf_fx_err = ensure_effect_shader(dev);
-            if (khf_fx_err.empty()) khf_fx_err = kh_scene_capture_timed(dev, ctx);
+            if (khf_fx_err.empty()) {   // KH_CAP_DEFER: the checks always, the copy below or at the chain.
+                khf_fx_err = khf_cap_defer ? ensure_scene_capture(dev, ctx, false) : kh_scene_capture_timed(dev, ctx);
+            }
             effects_ready = khf_fx_err.empty();
             // Once per distinct message, which named the symptom but never the
             // cause.
@@ -58595,7 +59604,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
             // or had no chain to run left the render thread's chain refused for a cycle nobody drew it in.
             if (!khfl_rt) g_fx_park_cycle = g_topo_cycles;
             khf_dsv_swap(true);   // The chain samples live depth; its OM save must hold the read-only view.
-            kh_fx_chain_run(dev, ctx, fullscreen, bf, ps_srvs[1], !meshes.empty(), upload_cb, needs_depth);
+            kh_fx_chain_run(dev, ctx, fullscreen, bf, ps_srvs[1], !meshes.empty() || khf_cap_defer,   // KH_CAP_DEFER.
+                            upload_cb, needs_depth);
         }
     }
 
@@ -59629,6 +60639,8 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     auto khuf_flush = [&](bool khuf_final) {
         if (!khuf_live) return;
         khuf_live = false;
+        KhGpuPassScope khgq_upass(ctx, 1u, static_cast<int>(khuf_cbd.fx_meta[0] + 0.5f), false,   // KH_GPU_PASS.
+                                  static_cast<uint32_t>(khuf_cbd.fuse_meta[0] + 0.5f));
         // KH_FX_SIDE: the lane's coverage probe (side id 30, 1 x 1) of this pass's own source, drawn before the
         // pass's constants go up; they then arm matCtl.z, and t5 carries it.
         bool khuf_probe = false;
@@ -59845,6 +60857,7 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 
         kh_fill_local_band_cb(cbd, o);
         if (khu_ufx) {
+            KhGpuPassScope khgq_uuser(ctx, 1u, o.effect, true, 0u);   // KH_GPU_PASS: a UI-lane user effect.
             // KH_FX_USER: the pyramid of the pass's own source (t0, the capture) when its file reads it - the UI
             // route's, glow_pyr[1] - built before the pass's constants go up (kh_glow_build uploads its own).
             bool khu_gl = false;
@@ -60378,7 +61391,13 @@ inline void kh_session_scratch_reset() {
 // both mission edges by kh_crew_clear_all);
 // g_mesh_publish_pending and g_mesh_cache_later_q (kh_mesh_release_session); the material pool
 // (kh_material_pool_reset keeps the pinned default); the cloth pool's records
-// (kh_cloth_workers_stop); the read-memo epoch (bumped, never reset); the Eden flag's copy
+// (kh_cloth_workers_stop); the read-memo epoch (bumped, never reset); the presence memo's epoch
+// (g_dl_pres_epoch, KH_DL_PRES_MEMO: bumped, never reset - the session reset empties its table); the profiler's
+// TSC calibration (g_prof_cal_q / g_prof_cal_t / g_prof_tsc_per_us, KH_PROF_SUB: the machine's rate - the next armed
+// fold measures it again over the gap) and its sampling state (g_prof_up_* / g_prof_ds_*: call counters, the bools
+// taken again before every use); the GPU pass list's entries (g_gpu_pass_pub, KH_GPU_PASS: read only below
+// g_gpu_pass_pub_n, which the stats reset zeroes); the fast clock (g_fast_clock, KH_FAST_CLOCK: a new clock origin
+// re-anchors it); the want table's role bits (g_dl_keep_kind: written afresh with each new entry); the Eden flag's copy
 // (g_attach_eden, KH_ATTACH_EDEN: stored again at the next Draw3D or command read); the game thread's
 // id (g_game_tid, KH_RESET_THREAD: the process's, stamped by flush_frame, flush_ui_frame and
 // ensure_draw_eh); the collider
@@ -60435,6 +61454,11 @@ inline void kh_session_globals_reset() {
     for (auto& khsg_a : g_prof_us_pub) khsg_a.store(0, std::memory_order_relaxed);
     for (auto& khsg_a : g_prof_n_pub) khsg_a.store(0, std::memory_order_relaxed);
     for (auto& khsg_a : g_prof_sample_ctr) khsg_a.store(0, std::memory_order_relaxed);   // KH_PROF_SAMPLE.
+    for (auto& khsg_a : g_prof_tsc) khsg_a.store(0, std::memory_order_relaxed);   // KH_PROF_SUB.
+    for (auto& khsg_a : g_prof_xb_acc) khsg_a.store(0, std::memory_order_relaxed);   // KH_PROF_UPLOAD.
+    for (auto& khsg_a : g_fun_acc) khsg_a.store(0, std::memory_order_relaxed);   // KH_PROF_FUNNEL.
+    g_prof_up_cur = KHP_ZONE_N;
+    g_prof_prev_on = false;   // KH_PROF_WINDOW.
     g_prof_epoch.store(0, std::memory_order_relaxed);   // KH_PROF_DISARM.
     g_prof_epoch_seen = 0;
     kh_reinit(g_gpu_prof);
@@ -61494,6 +62518,7 @@ inline void rendering_integration_process_detach() {
     g_dlf_wanted.store(false, std::memory_order_relaxed);   // KH_DLF_DEMAND.
     g_dl_idle.store(0, std::memory_order_relaxed);   // KH_DL_IDLE.
     g_dl_keep_n = 0u;   // KH_DL_WANT_GATE.
+    memset(g_dl_keep_ix, 0, sizeof(g_dl_keep_ix));   // KH_DL_WANT_INDEX.
     g_khsa_abort.store(true, std::memory_order_relaxed);
     g_khmw_abort.store(true, std::memory_order_relaxed);
     g_khtl_abort.store(true, std::memory_order_relaxed);

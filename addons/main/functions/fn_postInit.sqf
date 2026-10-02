@@ -1960,13 +1960,19 @@ isNil {
 							false
 						];
 
+						removeRenderHandler KH_var_volumetricDynamicLightsHandler;
+
 						if KH_var_renderingVolumetricDynamicLights then {
 							KH_var_volumetricDynamicLightsHandler = addPostFX ["dynamicLightFog", [1, 1, 0, 0.6, 16, 250, 2, 24]];
 						};
+						
+						removeRenderHandler KH_var_fogScatteringHandler;
 
 						if KH_var_renderingFogScattering then {
 							KH_var_fogScatteringHandler = addPostFX ["fogScatter", [1, 0, 12]];
 						};
+
+						removeRenderHandler KH_var_globalIlluminationHandler;
 
 						if KH_var_renderingGlobalIllumination then {
 							KH_var_globalIlluminationHandler = addPostFX ["ssgi", [1, 6, 12, 0.05, 1, 1, 100, 3, 0.5]];

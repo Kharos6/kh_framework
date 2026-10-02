@@ -107,7 +107,9 @@
     {
         // Joint bilateral upsample (KH_SSAO_SEP's recipe): the four grid texels around the pixel, bilinear weights
         // times depth-key agreement; none agreeing, the nearest in depth of the 3 x 3. Unarmed (dlCtl.x: no light
-        // selected, the ring or the grid missing, an unarmed camera) the pass leaves the picture as it was.
+        // selected, the ring or the grid missing, an unarmed camera) outc stays the scene: under blend 0 / 4 / 5 the
+        // pass leaves the picture as it was; additive, multiply and screen blend it into itself (KhFxFinish), as
+        // the C++ chain's skip rule says.
         [branch] if (dlCtl.x >= 0.5f) {
             uint khdc_w, khdc_h;
             khsgTex.GetDimensions(khdc_w, khdc_h);

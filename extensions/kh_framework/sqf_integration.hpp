@@ -8978,9 +8978,11 @@ static game_value get_render_stats_sqf() {
         // KH_PROF: the ended cycle's frame-time breakdown. For every CPU zone,
         // "<zone>Us" is the microseconds spent in it during the cycle and
         // "<zone>N" its entry count (hookMap counts maps and unmaps; the w*
-        // zones are worker-microseconds summed across the pool). For every GPU
+        // zones are worker-microseconds summed across the pool; the drv* zones'
+        // N is an estimate - their sampled calls x 16). For every GPU
         // zone, "<zone>Us" is the GPU interval of its last run in the cycle
-        // six clears back (timestamp queries read without a stall).
+        // six clears back (timestamp queries read without a stall). The zones
+        // and what nests in what: KhProfZone's notes (rendering_integration.hpp).
         for (uint32_t khps_z = 0; khps_z < RenderIntegration::KHP_ZONE_N; ++khps_z) {
             const std::string khps_n = RenderIntegration::g_prof_zone_name[khps_z];
             out.push_back(kv((khps_n + "Us").c_str(), static_cast<float>(RenderIntegration::g_prof_us_pub[khps_z].load(std::memory_order_relaxed))));
@@ -8988,6 +8990,102 @@ static game_value get_render_stats_sqf() {
         }
         for (uint32_t khgs_z = 0; khgs_z < RenderIntegration::KHG_ZONE_N; ++khgs_z) {
             out.push_back(kv((std::string(RenderIntegration::g_gpu_zone_name[khgs_z]) + "Us").c_str(), static_cast<float>(RenderIntegration::g_gpu_us_pub[khgs_z].load(std::memory_order_relaxed))));
+        }
+        // KH_PROF_WINDOW: the whole armed frames folded since the arming / resetRenderStats (the frame the arming
+        // splits is left out) and, per CPU zone, [name, mean us,
+        // worst frame's us, mean N] - profWindow [frames, [...]]; per GPU zone [name, mean us, worst us, frames
+        // harvested] - gpuWindow. The one-frame "<zone>Us" above swing with the 1-in-16 sampling; the means do not
+        // (a sampled zone's worst is still one frame's 16x extrapolation: read it for the zones timed whole).
+        {
+            namespace RI = RenderIntegration;
+            const uint64_t khpw_c = RI::g_prof_win_cycles.load(std::memory_order_relaxed);
+            const double khpw_d = khpw_c > 0 ? static_cast<double>(khpw_c) : 1.0;
+            // khpw_ld: any of the atomics below, read relaxed, as a double; khpw_f: a number for the script.
+            const auto khpw_ld = [](const auto& a) { return static_cast<double>(a.load(std::memory_order_relaxed)); };
+            const auto khpw_f = [](double v) { return game_value(static_cast<float>(v)); };
+            auto_array<game_value> khpw_z;
+            for (uint32_t khpw_i = 0; khpw_i < RI::KHP_ZONE_N; ++khpw_i) {
+                auto_array<game_value> khpw_e;
+                khpw_e.push_back(game_value(RI::g_prof_zone_name[khpw_i]));
+                khpw_e.push_back(khpw_f(khpw_ld(RI::g_prof_win_us[khpw_i]) / khpw_d));
+                khpw_e.push_back(khpw_f(khpw_ld(RI::g_prof_win_max[khpw_i])));
+                khpw_e.push_back(khpw_f(khpw_ld(RI::g_prof_win_n[khpw_i]) / khpw_d));
+                khpw_z.push_back(game_value(std::move(khpw_e)));
+            }
+            auto_array<game_value> khpw;
+            khpw.push_back(game_value(static_cast<float>(khpw_c)));
+            khpw.push_back(game_value(std::move(khpw_z)));
+            out.push_back(kva("profWindow", std::move(khpw)));
+            auto_array<game_value> khgw;
+            for (uint32_t khgw_i = 0; khgw_i < RI::KHG_ZONE_N; ++khgw_i) {
+                const uint64_t khgw_n = RI::g_gpu_win_n[khgw_i].load(std::memory_order_relaxed);
+                auto_array<game_value> khgw_e;
+                khgw_e.push_back(game_value(RI::g_gpu_zone_name[khgw_i]));
+                const double khgw_d = khgw_n ? static_cast<double>(khgw_n) : 1.0;
+                khgw_e.push_back(khpw_f(khpw_ld(RI::g_gpu_win_us[khgw_i]) / khgw_d));
+                khgw_e.push_back(khpw_f(khpw_ld(RI::g_gpu_win_max[khgw_i])));
+                khgw_e.push_back(game_value(static_cast<float>(khgw_n)));
+                khgw.push_back(game_value(std::move(khgw_e)));
+            }
+            out.push_back(kva("gpuWindow", std::move(khgw)));
+            // KH_PROF_FUNNEL: [name, last frame, mean per frame] - the constant-buffer capture (uploads, copies and
+            // bytes by kind, the light sampler's lists, matches and windows; the KH_PROF_FUNNEL note above KhFunnel).
+            auto_array<game_value> khfw;
+            for (uint32_t khfw_i = 0; khfw_i < RI::KHF_N; ++khfw_i) {
+                auto_array<game_value> khfw_e;
+                khfw_e.push_back(game_value(RI::g_fun_name[khfw_i]));
+                khfw_e.push_back(khpw_f(khpw_ld(RI::g_fun_pub[khfw_i])));
+                khfw_e.push_back(khpw_f(khpw_ld(RI::g_fun_win[khfw_i]) / khpw_d));
+                khfw.push_back(game_value(std::move(khfw_e)));
+            }
+            out.push_back(kva("funnel", std::move(khfw)));
+            // KH_PROF_UPLOAD: [step, last frame's bytes, mean per frame] - the bytes each funnel step made the capture
+            // copy past its eager 384 (steps with none in the window left out).
+            auto_array<game_value> khxw;
+            for (uint32_t khxw_i = 0; khxw_i < RI::KHP_ZONE_N; ++khxw_i) {
+                const uint64_t khxw_w = RI::g_prof_xb_win[khxw_i].load(std::memory_order_relaxed);
+                if (khxw_w == 0) continue;
+                auto_array<game_value> khxw_e;
+                khxw_e.push_back(game_value(RI::g_prof_zone_name[khxw_i]));
+                khxw_e.push_back(khpw_f(khpw_ld(RI::g_prof_xb_pub[khxw_i])));
+                khxw_e.push_back(game_value(static_cast<float>(static_cast<double>(khxw_w) / khpw_d)));
+                khxw.push_back(game_value(std::move(khxw_e)));
+            }
+            out.push_back(kva("scanExtBytes", std::move(khxw)));
+            // KH_GPU_PASS: the harvested frame's effect passes in draw order, [chain (0 scene, 1 UI), effect id, user
+            // shader 0/1, stages fused into it, us]; and per (chain, effect, user) since the arming [chain, effect id,
+            // user, mean us, worst us, passes timed].
+            auto_array<game_value> khgp;
+            const uint32_t khgp_n = RI::g_gpu_pass_pub_n.load(std::memory_order_relaxed);
+            for (uint32_t khgp_i = 0; khgp_i < khgp_n && khgp_i < RI::KH_GPU_PASS_N; ++khgp_i) {
+                const uint64_t khgp_v = RI::g_gpu_pass_pub[khgp_i].load(std::memory_order_relaxed);
+                const uint32_t khgp_k = static_cast<uint32_t>(khgp_v >> 32);
+                auto_array<game_value> khgp_e;
+                khgp_e.push_back(game_value(static_cast<float>((khgp_k >> 8) & 1u)));
+                khgp_e.push_back(game_value(static_cast<float>(khgp_k & 255u)));
+                khgp_e.push_back(game_value(static_cast<float>((khgp_k >> 9) & 1u)));
+                khgp_e.push_back(game_value(static_cast<float>((khgp_k >> 10) & 63u)));
+                khgp_e.push_back(game_value(static_cast<float>(khgp_v & 0xFFFFFFFFull)));
+                khgp.push_back(game_value(std::move(khgp_e)));
+            }
+            out.push_back(kva("gpuPasses", std::move(khgp)));
+            auto_array<game_value> khgq;
+            for (uint32_t khgq_w = 0; khgq_w < RI::KH_GPU_PASS_W; ++khgq_w) {
+                const uint64_t khgq_n = RI::g_gpu_passw_n[khgq_w].load(std::memory_order_relaxed);
+                if (khgq_n == 0) continue;
+                auto_array<game_value> khgq_r;
+                khgq_r.push_back(game_value(static_cast<float>((khgq_w >> 8) & 1u)));
+                khgq_r.push_back(game_value(static_cast<float>(khgq_w & 255u)));
+                khgq_r.push_back(game_value(static_cast<float>((khgq_w >> 9) & 1u)));
+                khgq_r.push_back(khpw_f(khpw_ld(RI::g_gpu_passw_us[khgq_w]) / static_cast<double>(khgq_n)));
+                khgq_r.push_back(khpw_f(khpw_ld(RI::g_gpu_passw_max[khgq_w])));
+                khgq_r.push_back(game_value(static_cast<float>(khgq_n)));
+                khgq.push_back(game_value(std::move(khgq_r)));
+            }
+            out.push_back(kva("gpuPassWindow", std::move(khgq)));
+            // KH_PROF_SUB: the TSC's measured rate (MHz) every TSC-timed zone was converted with (0 = not yet measured
+            // in this process; resets keep it).
+            out.push_back(kv("profTscMhz", static_cast<float>(RI::g_prof_tsc_per_us.load(std::memory_order_relaxed))));
         }
         out.push_back(kv("lockRetries", static_cast<float>(s.lock_retries)));
         out.push_back(kv("lockFailedFrames", static_cast<float>(s.lock_failed_frames)));
@@ -9050,6 +9148,12 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("dlRingFails", static_cast<float>(s.dl_ring_fails)));
         out.push_back(kv("dlMeshLightsMax", static_cast<float>(s.dl_mesh_lights_max)));
         out.push_back(kv("dlBlinks", static_cast<float>(s.dl_blinks)));   // KH_DL_DIAG (CN-4).
+        {   // KH_DL_PRES_MEMO: [light lists matched, of those replayed from the memo].
+            auto_array<game_value> khpm;
+            khpm.push_back(game_value(static_cast<float>(s.dl_pres_calls)));
+            khpm.push_back(game_value(static_cast<float>(s.dl_pres_memo_hits)));
+            out.push_back(kva("dlPresence", std::move(khpm)));
+        }
         {
             auto_array<game_value> khrj, khrs;
             khrj.push_back(game_value(static_cast<float>(s.dl_ref_up)));

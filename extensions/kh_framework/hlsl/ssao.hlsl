@@ -604,7 +604,7 @@ float4 PSSsaoApply(float4 pos : SV_Position) : SV_Target
         }
     }
     // KH_SSAO_OURS: an odd pixel of ours whose two texels are not (a sliver of our mesh one pixel wide between
-    // engine pixels) has no term among its four; it takes the nearest of ours in the 3 x 3 around, depth-weighted.
+    // engine pixels) has no term among its four; it takes the depth-weighted mean of ours in the 3 x 3 around.
     if (!(khsq_wsum > 1.0e-4f)) {
         [unroll] for (int khsq_n = -1; khsq_n <= 1; ++khsq_n) {
             [unroll] for (int khsq_m = -1; khsq_m <= 1; ++khsq_m) {

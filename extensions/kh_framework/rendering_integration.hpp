@@ -1005,14 +1005,16 @@ struct KhProfDsDecision {
 // marked stale), captures the idle cadence skipped, and the want table's index slots probed. The light sampler: the
 // engine's draws past the render-thread gate, draws with no cb11 bound, uploads already processed this span, shadow
 // misses (an incomplete side), twins of an authored window, new lists hashed and the bytes hashed, matches run and
-// replayed (KH_DL_PRES_MEMO) and the record x pool-light pairs the runs compared, windows authored and the VS bytes
-// they copied.
+// replayed (KH_DL_PRES_MEMO) and the record x pool-light pairs the runs stood against (records x pool, as before),
+// windows authored and the VS bytes they copied; then the pairs the runs visited (KH_DL_PRES_HIX: the lights a
+// record's height can match, or the whole pool) and the height index's rebuilds.
 enum KhFunnel : uint32_t {
     KHF_UPLOADS, KHF_UPDSUB, KHF_EAGER_N, KHF_EAGER_B, KHF_FENCES, KHF_EXT_N, KHF_EXT_B,
     KHF_SHADOW_N, KHF_SHADOW_B, KHF_SH11_N, KHF_SH11_B, KHF_SH10_N, KHF_SH10_B, KHF_SHVS_N, KHF_SHVS_B,
     KHF_SHOTHER_N, KHF_SHOTHER_B, KHF_WANT_REFUSED, KHF_IDLE_SKIP, KHF_GATE_PROBES,
     KHF_DRAWS, KHF_DL_NOLIST, KHF_DL_SAME, KHF_DL_MISS, KHF_DL_TWIN, KHF_DL_LISTS, KHF_DL_HASH_B,
     KHF_DL_RUNS, KHF_DL_REPLAYS, KHF_DL_PAIRS, KHF_DL_WINDOWS, KHF_DL_WIN_VS_B,
+    KHF_DL_VISITS, KHF_DL_HIX_BUILDS,   // KH_DL_PRES_HIX.
     KHF_N
 };
 static const char* const g_fun_name[] = {
@@ -1022,6 +1024,7 @@ static const char* const g_fun_name[] = {
     "gateProbes",
     "draws", "dlNoList", "dlSameUpload", "dlShadowMiss", "dlTwin", "dlNewLists", "dlHashBytes",
     "dlMatchRuns", "dlMatchReplays", "dlMatchPairs", "dlWindows", "dlWindowVsBytes",
+    "dlMatchVisited", "dlHeightIxBuilds",
 };
 static_assert(sizeof(g_fun_name) / sizeof(g_fun_name[0]) == KHF_N, "KH_PROF_FUNNEL: a name per counter");
 static std::atomic<uint64_t> g_fun_acc[KHF_N];   // This cycle's (render-thread identity).
@@ -29671,21 +29674,29 @@ inline bool ensure_sun_pf(ID3D11Device* dev) {
                 return false;
         }
     }
-    bool khpf_scr_stale = false;   // KH_SUN_LADDER: the scratch pyramid follows the hero size.
+    // KH_PF_SCR_MAX: the scratch takes each tier's level m - 1 whole (kh_sun_pf_convert's CopySubresourceRegion),
+    // so it is the largest tier's size - the far tier is off the size ladder (kh_sun_far_size), and a copy larger
+    // than the scratch's level is outside what D3D11 defines. Every tier is one size while g_sun_size_div is 1
+    // (today, always).
+    UINT khpf_scr_sz = khpf_sz[0];
+    for (int khpf_k = 1; khpf_k < 4; ++khpf_k) {
+        if (khpf_sz[khpf_k] > khpf_scr_sz) khpf_scr_sz = khpf_sz[khpf_k];
+    }
+    bool khpf_scr_stale = false;   // KH_SUN_LADDER: the scratch pyramid follows the tiers' sizes.
     if (g_res.sun_pf_scr) {
         D3D11_TEXTURE2D_DESC khpf_shave = {};
         g_res.sun_pf_scr->GetDesc(&khpf_shave);
-        khpf_scr_stale = khpf_shave.Width != khpf_sz[0];
+        khpf_scr_stale = khpf_shave.Width != khpf_scr_sz;
     }
-    for (UINT khpf_m = 0; (khpf_sz[0] >> khpf_m) >= 1u && khpf_m < 12u; ++khpf_m)   // KH_PF_WHOLE, the scratch's.
+    for (UINT khpf_m = 0; (khpf_scr_sz >> khpf_m) >= 1u && khpf_m < 12u; ++khpf_m)   // KH_PF_WHOLE, the scratch's.
         if (!g_res.sun_pf_scr_srvm[khpf_m]) khpf_scr_stale = true;
     if (!g_res.sun_pf_scr || !g_res.sun_pf_scr_srvm[0] || khpf_scr_stale) {
         KH_SAFE_RELEASE(g_res.sun_pf_scr);
         for (UINT khpf_m = 0; khpf_m < 12u; ++khpf_m)
             KH_SAFE_RELEASE(g_res.sun_pf_scr_srvm[khpf_m]);
         D3D11_TEXTURE2D_DESC ts = {};
-        ts.Width = khpf_sz[0];
-        ts.Height = khpf_sz[0];
+        ts.Width = khpf_scr_sz;
+        ts.Height = khpf_scr_sz;
         ts.MipLevels = 0;
         ts.ArraySize = 1;
         ts.Format = DXGI_FORMAT_R32G32_FLOAT;
@@ -29693,7 +29704,7 @@ inline bool ensure_sun_pf(ID3D11Device* dev) {
         ts.Usage = D3D11_USAGE_DEFAULT;
         ts.BindFlags = D3D11_BIND_SHADER_RESOURCE;
         if (FAILED(dev->CreateTexture2D(&ts, nullptr, &g_res.sun_pf_scr))) return false;
-        for (UINT khpf_m = 0; (khpf_sz[0] >> khpf_m) >= 1u && khpf_m < 12u; ++khpf_m) {
+        for (UINT khpf_m = 0; (khpf_scr_sz >> khpf_m) >= 1u && khpf_m < 12u; ++khpf_m) {
             D3D11_SHADER_RESOURCE_VIEW_DESC sm = {};
             sm.Format = DXGI_FORMAT_R32G32_FLOAT;
             sm.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
@@ -30559,7 +30570,9 @@ inline std::string snapshot_composite_depth(ID3D11Device* dev, ID3D11DeviceConte
         cd.Height = dh;
         cd.MipLevels = 1;
         cd.ArraySize = 1;
-        // Two-plane: readers take .x; the one .y reader takes max(.x, .y).
+        // Two-plane (.x farthest, .y nearest): every reader takes .x - the .y
+        // is written (PSDepthResolve) and read by none (the mask cast's
+        // max(.x, .y) rule, gone to KhCastZPick, read the engine's depth).
         // Always single-sample, whatever the main depth's count: the resolve
         // (PSDepthResolve, compiled at the live count) folds the samples to
         // the farthest plane in .x, so a pixel any sample leaves uncovered
@@ -35602,6 +35615,107 @@ inline void kh_dl_pres_sight(DlPoolLight& khps_pl, uint64_t khps_now, uint64_t k
     if (khps_seq > khps_pl.seq) khps_pl.seq = khps_seq;
 }
 
+// KH_DL_PRES_HIX - presence's height index. A run (a KH_DL_PRES_MEMO miss) stood every record against every pool
+// light, and KH_DL_PRES_BAND turns away first each light whose height is not within the band of the record's -
+// fabsf(light - record) < KH_DL_MATCH_M (1 m), or <= 0.25 m, inside it. In a town that is most of the pool for
+// each record. The index holds the pool's heights in ascending order with their pool indices, so a record visits
+// only the lights whose height lies in [r - 1, r + 1], and visits them in POOL order, running the loop's body on them
+// unchanged - the band test first.
+// Exact: a float difference under 1 is an exact difference under 1 (rounding is monotone and 1 is a float), so every
+// light the band admits has r - 1 < h < r + 1 exactly; rounding to double is monotone too, so fl(r - 1) <= h <=
+// fl(r + 1) - the interval's ends taken in double, inclusive (at large |r| both round onto r itself). A NaN height is
+// left out of the index and fails every compare of the band; a light the band turns away reached only its
+// `continue`. So the picks, the claims, the census, the stale verdict and every tie (a pick replaces only on a
+// strictly lower cost: the first in pool order wins) come out as the whole-pool walk gives them.
+// Pool order without a comparison sort: the candidates are marked in a pool-sized bit map and read back word by
+// word, lowest bit first (kh_dl_bit_low), which is ascending pool index; reading clears the marks.
+// Fresh: checked whenever g_dl_pres_epoch has moved since the last check - every writer of the pool moves it
+// (KH_DL_PRES_MEMO's note: the harvest, the resets, a rewrite that changes a record's bytes) - or the pool's count
+// differs. The heights' bits are compared with the build's and the index is rebuilt only when one differs: street
+// lamps keep their heights, so a harvest or a colour rewrite leaves it standing.
+// A record whose candidates exceed a sixth of the pool walks the whole pool as before - the same result, and there
+// the walk is the cheaper (CU's bench: a band holding a quarter of a large pool ran at 1.1 - 1.35 x the walk with the
+// index, a seventh at 0.50 - 0.55 x). The test is one compare after the lower bound: is the (n / 6 + 1)-th candidate
+// inside the band? - so a dense band pays one binary search before the walk, and nothing is marked. Render thread
+// (as g_dl); the session reset reinitialises it.
+struct KhDlPresHix {
+    uint64_t epoch = 0;                            // g_dl_pres_epoch at the last check (0 = never checked).
+    uint32_t n = 0;                                // g_dl.pool_n at the build.
+    std::vector<uint32_t> hb;                      // Each pool light's height bits at the build.
+    std::vector<std::pair<float, uint32_t>> hs;    // The non-NaN heights, ascending, with their pool indices.
+    std::vector<uint64_t> mark;                    // One bit per pool light, all clear between records.
+    std::vector<uint32_t> cand;                    // A record's candidates (a run's scratch).
+};
+static KhDlPresHix g_dl_phix;
+// The index of the lowest set bit of a non-zero word (de Bruijn: no intrinsic, no unary minus on unsigned).
+inline uint32_t kh_dl_bit_low(uint64_t khbl_w) {
+    static constexpr uint8_t khbl_tab[64] = {
+         0,  1, 48,  2, 57, 49, 28,  3, 61, 58, 50, 42, 38, 29, 17,  4,
+        62, 55, 59, 36, 53, 51, 43, 22, 45, 39, 33, 30, 24, 18, 12,  5,
+        63, 47, 56, 27, 60, 41, 37, 16, 54, 35, 52, 21, 44, 32, 23, 11,
+        46, 26, 40, 15, 34, 20, 31, 10, 25, 14, 19,  9, 13,  8,  7,  6,
+    };
+    return khbl_tab[((khbl_w & (~khbl_w + 1u)) * 0x03F79D71B4CB0A89ull) >> 58];
+}
+inline void kh_dl_phix_check() {
+    KhDlPresHix& khx = g_dl_phix;
+    const uint32_t khx_n = g_dl.pool_n;
+    if (khx.epoch == g_dl_pres_epoch && khx.n == khx_n) return;
+    khx.epoch = g_dl_pres_epoch;
+    bool khx_same = khx.n == khx_n && khx.hb.size() == khx_n;
+    for (uint32_t d = 0; khx_same && d < khx_n; ++d) khx_same = khx.hb[d] == kh_dl_fbits(g_dl.pool[d].rec[1]);
+    if (khx_same) return;
+    if (g_prof_ds_on) kh_fun(KHF_DL_HIX_BUILDS, 1u);   // KH_PROF_FUNNEL.
+    khx.n = khx_n;
+    khx.hb.resize(khx_n);
+    khx.hs.clear();
+    for (uint32_t d = 0; d < khx_n; ++d) {
+        const float khx_h = g_dl.pool[d].rec[1];
+        khx.hb[d] = kh_dl_fbits(khx_h);
+        if (khx_h == khx_h) khx.hs.emplace_back(khx_h, d);   // NaN fails the band: never a candidate.
+    }
+    std::sort(khx.hs.begin(), khx.hs.end());   // Height, then index (no NaN: a strict weak order).
+    khx.mark.assign((static_cast<size_t>(khx_n) + 63u) / 64u, 0ull);
+}
+// A record's candidates at height khc_y (finite): pool indices, ascending, in g_dl_phix.cand. False: more than a
+// sixth of the pool - walk all of it.
+inline bool kh_dl_phix_cands(float khc_y) {
+    KhDlPresHix& khx = g_dl_phix;
+    khx.cand.clear();
+    const double khc_lo = static_cast<double>(khc_y) - 1.0;
+    const double khc_hi = static_cast<double>(khc_y) + 1.0;
+    const auto khc_b = std::lower_bound(khx.hs.begin(), khx.hs.end(), khc_lo,
+                                        [](const std::pair<float, uint32_t>& khc_e, double khc_v) {
+                                            return static_cast<double>(khc_e.first) < khc_v;
+                                        });
+    // More than a sixth (k * 6 > n, k > floor(n / 6)): the (floor(n / 6) + 1)-th candidate exists and is in the band.
+    const std::ptrdiff_t khc_q = static_cast<std::ptrdiff_t>(khx.n / 6u);
+    if (khx.hs.end() - khc_b > khc_q && static_cast<double>(khc_b[khc_q].first) <= khc_hi) {
+        return false;
+    }
+    auto khc_z = khc_b;
+    while (khc_z != khx.hs.end() && static_cast<double>(khc_z->first) <= khc_hi) ++khc_z;   // At most n / 6.
+    const size_t khc_k = static_cast<size_t>(khc_z - khc_b);
+    if (khc_k == 1u) khx.cand.push_back(khc_b->second);
+    if (khc_k < 2u) return true;
+    uint32_t khc_wl = 0xFFFFFFFFu, khc_wh = 0u;
+    for (auto khc_it = khc_b; khc_it != khc_z; ++khc_it) {
+        const uint32_t khc_w = khc_it->second >> 6;
+        khx.mark[khc_w] |= 1ull << (khc_it->second & 63u);
+        if (khc_w < khc_wl) khc_wl = khc_w;
+        if (khc_w > khc_wh) khc_wh = khc_w;
+    }
+    for (uint32_t khc_w = khc_wl; khc_w <= khc_wh; ++khc_w) {
+        uint64_t khc_m = khx.mark[khc_w];
+        khx.mark[khc_w] = 0ull;
+        while (khc_m) {
+            khx.cand.push_back(khc_w * 64u + kh_dl_bit_low(khc_m));
+            khc_m &= khc_m - 1u;
+        }
+    }
+    return true;
+}
+
 // One upload's records against the pool. Primary: the origin the last harvest
 // resolved for this buffer identity puts the record in world; the re-sight's
 // KH_DL_MATCH_M cube names the pool light. No origin yet, or a miss: the
@@ -35708,7 +35822,7 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
     for (uint32_t k = 0; khp_mh && k < khp_me.pick_n; ++k) {   // The epoch guarantees it; a stale index never reads.
         if (khp_me.pick[k] < 0 || static_cast<uint32_t>(khp_me.pick[k]) >= g_dl.pool_n) khp_mh = false;
     }
-    if (g_prof_ds_on) {   // KH_PROF_FUNNEL: a run compares every record with every pool light.
+    if (g_prof_ds_on) {   // KH_PROF_FUNNEL: a run's records against the pool (its visits: KH_DL_PRES_HIX, below).
         if (khp_mh) kh_fun(KHF_DL_REPLAYS, 1u);
         else { kh_fun(KHF_DL_RUNS, 1u); kh_fun(KHF_DL_PAIRS, static_cast<uint64_t>(khp_total) * g_dl.pool_n); }
     }
@@ -35728,6 +35842,8 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
     }
     int      khp_mp[KH_DL_MAX_LIGHTS];   // KH_DL_PRES_MEMO: this run's picks in record order (the entry's log).
     uint32_t khp_mp_n = 0;
+    uint64_t khp_vis = 0;   // KH_DL_PRES_HIX: the pairs this run visited (armed only).
+    if (!khp_mh) kh_dl_phix_check();   // KH_DL_PRES_HIX: the index as the pool stands.
 
     for (uint32_t i = 0; !khp_mh && i < khp_total; ++i) {   // KH_DL_PRES_MEMO: a hit has the outcome.
         const float* khp_r = reinterpret_cast<const float*>(khp_l + i * KH_DL_LIGHT_BYTES);
@@ -35738,14 +35854,20 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
         bool  khp_pick_org = false;   // KH_DL_PRES_REC: the pick matched in the origin's cube.
         float khp_w_best = -1.0f;     // KH_DL_PRES_STALE: the best lanes among lights elsewhere (-1: none).
 
-        for (uint32_t d = 0; d < g_dl.pool_n; ++d) {
+        // KH_DL_PRES_HIX: the lights whose height can pass the band below, in pool order (or the whole pool).
+        const bool     khp_ix = kh_dl_phix_cands(khp_r[1]);
+        const uint32_t khp_vn = khp_ix ? static_cast<uint32_t>(g_dl_phix.cand.size()) : g_dl.pool_n;
+        if (g_prof_ds_on) khp_vis += khp_vn;
+        for (uint32_t khp_vi = 0; khp_vi < khp_vn; ++khp_vi) {
+            const uint32_t d = khp_ix ? g_dl_phix.cand[khp_vi] : khp_vi;
             const DlPoolLight& khp_pl = g_dl.pool[d];
             // KH_DL_PRES_BAND: each of the three tests below - the origin's cube, the stale test (khp_elsewhere) and
             // the grid test - first needs this light's height within KH_DL_MATCH_M (the cube, strictly) or 0.25 m (the
             // other two) of the record's, by the same expression, and a light that passes none of them reaches only
             // the `continue` below (no pick, no census, no stale verdict). So a light outside both bands - or with a
             // NaN height, which fails every compare - is skipped here, in pool order as before. In a town most of the
-            // pool lies outside any one record's band. Edit the bands here with the tests' own.
+            // pool lies outside any one record's band. Edit the bands here with the tests' own, and KH_DL_PRES_HIX's
+            // interval (kh_dl_phix_cands: [r - 1, r + 1], the widest band) with them.
             const float khp_dyb = fabsf(khp_pl.rec[1] - khp_r[1]);
             if (!(khp_dyb < KH_DL_MATCH_M) && !(khp_dyb <= 0.25f)) continue;
             bool  khp_same = false;
@@ -35826,6 +35948,8 @@ inline uint32_t dynlights_presence_upload(const void* khp_buf,
             if (kh_dl_unpl_recent(khp_r, khp_seq)) ++khp_unpl; else ++khp_unknown;
         }
     }
+
+    if (g_prof_ds_on && !khp_mh) kh_fun(KHF_DL_VISITS, khp_vis);   // KH_PROF_FUNNEL (KH_DL_PRES_HIX).
 
     // KH_DL_PRES_REC: the re-sight carries the live record (spot direction, colour, position), written as the
     // merge writes it - unless a record showed the origin stale (KH_DL_PRES_STALE): then stamped only.
@@ -55952,11 +56076,19 @@ inline bool kh_dlsw_mask_render(ID3D11DeviceContext* khm_ctx,
             khm_ctx->IASetIndexBuffer(g_res.mesh_ib[khm_c.mesh], DXGI_FORMAT_R32_UINT, 0);
             khm_bound_vb = khm_want;
         }
-        // The mask covers whatever the injection drew: the level kh_lod_pick
-        // chose (same pick, same inputs), and during a fade both levels, each
-        // cut by the colour pass's dither (KH_DLSW_MASK_DITHER), so the mask at
-        // a pixel holds the level that pixel shows. Not the shadow LOD. An
-        // inFront mesh is the slice's, drawn at level 0 only (KH_INFRONT_LOD).
+        // The mask covers whatever the colour pass drew: the level kh_lod_pick
+        // chose, and during a fade both levels, each cut by the colour pass's
+        // dither (KH_DLSW_MASK_DITHER), so the mask at a pixel holds the level
+        // that pixel shows. Same pick, same inputs on a cycle the injection
+        // drew (it published g_lod_proj_px before this resolve). A cycle whose
+        // meshes the flush draws late publishes after this pass (flush_locked
+        // runs after kh_dls_world_pass), so in a frame whose projection changed
+        // (a zoom, a FOV change) the pick here used the last value: the mask's
+        // level - or, during a fade, its dither - can differ from the colour
+        // pass's, and the mask then holds another level's outline than the one
+        // shown, for that frame (UA-1: documented, not changed). Not the shadow
+        // LOD. An inFront mesh is the slice's, drawn at level 0 only
+        // (KH_INFRONT_LOD).
         {
             const MeshDef& khm_md = mesh_def(khm_c.mesh);
             int   khm_lvl = 0;
@@ -61889,6 +62021,7 @@ inline void kh_session_globals_reset() {
     kh_reinit(g_dl_cd_bufs);
     kh_reinit(g_dl_cd_first);
     g_dl_cd_n = 0;
+    kh_reinit(g_dl_phix);   // KH_DL_PRES_HIX: the pool's height index (with g_dl, above).
     kh_reinit(g_dls);
     g_dls_n = 0;
     g_dls_frame = 0;

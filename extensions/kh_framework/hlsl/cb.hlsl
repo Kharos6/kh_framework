@@ -3402,7 +3402,8 @@ SamplerState khsgSamp : register(s2);
 Texture2DMS<float> depthTex : register(t1);
 float LoadDepthRaw(int2 px) { return depthTex.Load(px, 0); }
 #else
-// Two-plane snapshot; declaration only.
+// The live depth, not the snapshot: a single-channel view (the flush's depth_srv, the PIP's pip_depth_srv) under a
+// float2 declaration; LoadDepthRaw reads .x alone (the C++ note at flush_locked's ps_srvs).
 Texture2D<float2> depthTex : register(t1);
 float LoadDepthRaw(int2 px) { return depthTex.Load(int3(px, 0)).x; }
 #endif

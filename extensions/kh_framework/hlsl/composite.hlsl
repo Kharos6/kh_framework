@@ -1,6 +1,7 @@
 // composite.hlsl - joined with composite2.hlsl after cb.hlsl into the composite unit (no #include). Any edit changes the unit's shader cache key.
 
-// Two-plane snapshot: .x farthest (guard), .y nearest (witness). The snapshot
+// Two-plane snapshot: .x farthest (the guard; GuardSceneRaw reads .x alone),
+// .y nearest (PSDepthResolve writes it; nothing reads it). The snapshot
 // is ALWAYS single-sample - snapshot_composite_depth pins comp_depth_samples
 // to 1, and PSDepthResolve (compiled at the live count) folds the samples into
 // the farthest plane - so this unit is only ever compiled MSAA_DEPTH 0. The

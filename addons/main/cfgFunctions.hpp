@@ -169,7 +169,6 @@ class CfgFunctions
 			class teleport {headerType = -1;};
 			class toggleUserInput {headerType = -1;};
 			class traverseObstacle {headerType = -1;};
-			class triggerCbaEvent {headerType = -1;};
 			class uiContextCall {headerType = -1;};
 			class updateAiInstance {headerType = -1;};
 			class updateMeleeState {headerType = -1;};

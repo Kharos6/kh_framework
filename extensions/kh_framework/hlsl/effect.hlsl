@@ -22,27 +22,9 @@ Texture2D<float> khUiProbe : register(t5);   // matCtl.z: the UI lane's coverage
 // t7 - t9 are fenced out of it, as at t4 - t6. Every reader takes the conversion in place when unarmed (effect meshes,
 // the PIP, the UI lane, a pass whose depth lanes differ from the run's) or past the copy's edge, so a read is the
 // value the conversion gives there whichever way it is taken. C++: kh_fx_linz_draw, kh_fx_chain_run (binds t7 - t9
-// and puts back what they held).
-Texture2D<float> khLinZ   : register(t7);
+// and puts back what they held). t7 and KhLinZ are cb.hlsl's (the KH_FX_UNIT section: a user effect reads the same).
 Texture2D<float> khGridZS : register(t8);
 Texture2D<float> khGridZD : register(t9);
-// Unarmed (matCtl.x, one value for the whole draw: a uniform branch), the conversion alone, as before - t7 untouched,
-// whatever the route left there (effect meshes and the PIP reach this too). Armed, the copy is loaded ahead of the
-// in-range branch (texel 0 past the frame, its value unused), which only a read past the frame takes. Branches, not
-// ?: (which evaluates both arms); the conversion written once.
-float KhLinZ(int2 khlz_p)
-{
-    float khlz_z = 0.0f;
-    bool  khlz_cv = true;   // Convert in place.
-    [branch] if (matCtl.x > 0.5f) {
-        const bool khlz_in = khlz_p.x >= 0 && khlz_p.y >= 0 &&
-                             khlz_p.x < (int)fxMeta.z && khlz_p.y < (int)fxMeta.w;
-        khlz_z = khLinZ.Load(int3(khlz_in ? khlz_p : int2(0, 0), 0));
-        khlz_cv = !khlz_in;
-    }
-    [branch] if (khlz_cv) khlz_z = LinDepth(LoadDepthPS(khlz_p));
-    return khlz_z;
-}
 // The SSGI grid's: texel t of a grid at factor khsz_inv (the a-trous' rule on local0.y). Read only by the chain's
 // SSGI pass, which binds t8 to its copy or to nothing (kh_fx_chain_run), so the size query and the load (ahead of
 // the branch, texel 0 when unarmed or past the copy) meet a view of ours or none.
@@ -249,74 +231,13 @@ float4 KhRainLayer(float2 q, float tt, float2 grid, float seedOfs,
 float KhFsFog(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float fs_m11)
 {
     float fs_s = KhFxFogEngine(fs_px, fs_d, fs_res, fs_m00, fs_m11);   // KH_FX_USER: the engine term, one body.
-
-    // KH fog passes (effect-13 math twin - the same linear-depth ramp and
-    // skyAmount rule; edit both or neither), opacity-scaled, combined as
-    // independent media.
-    float fs_fence = KhEncFence();
-
-    [unroll] for (int fs_i = 0; fs_i < 2; ++fs_i)
-    {
-        float4 fs_e = fs_i == 0 ? fxParams1 : fxParams2;
-        if (fs_e.w > 0.001f)
-        {
-            float fs_f = saturate((fs_d - fs_e.x) / max(fs_e.y - fs_e.x, 1.0f));
-            float fs_w = saturate((min(fs_d, fs_fence) - fs_fence * 0.98f)
-                                  / max(fs_fence * 0.019f, 1.0f));
-            fs_f = lerp(fs_f, saturate(fs_e.z), fs_w);
-            if (fs_d > 1e8f) fs_f = saturate(fs_e.z);   // Belt (the feather already lands here).
-            fs_s = 1.0f - (1.0f - fs_s) * (1.0f - fs_f * fs_e.w);
-        }
-    }
-
+    fs_s = KhFxFogPasses(fs_s, fs_d, fxParams1, fxParams2);   // KH_FX_FOGREC: the KH fog passes, one body (cb.hlsl).
     return saturate(fs_s);
 }
 
-// Sun flare's source (effect 16, side id 29): the direction projects as a point at infinity (w = 0). False = the
-// source is behind the camera or well off screen; spos its uv, sp its pixel.
-bool KhSunFlareSpot(out float2 spos, out int2 sp)
-{
-    spos = float2(0.0f, 0.0f);
-    sp = int2(0, 0);
-    const float4 clip = mul(float4(fxParams0.xyz, 0.0f), viewProj);
-    if (!(clip.w > 0.01f)) return false;
-    const float2 sndc = clip.xy / clip.w;
-    if (!all(abs(sndc) < 1.3f)) return false;
-    spos = float2(sndc.x * 0.5f + 0.5f, 0.5f - sndc.y * 0.5f);
-    sp = int2(saturate(spos) * float2(fxMeta.z, fxMeta.w));
-    return true;
-}
-// Its visibility: the flare fades via depth occlusion at the source - sky = visible, geometry = blocked - over 25
-// taps around it. The same for every pixel of the pass (KH_FX_SIDE draws it once where it can). A tap off the frame
-// is absent information and is left out of the average (fog scatter's rule): a Load there reads 0, the near plane,
-// which counted as blocked and dimmed a sun standing near an edge. KhSunFlareSpot clamps the source to the frame
-// edge (one past it), so some taps always land inside; with none (a frame a few pixels wide) it reads 0.
-float KhSunFlareVis(int2 sp)
-{
-    float vis = 0.0f;
-    float khsf_n = 0.0f;
-    const float khsf_f = KhEncFence();
-    [unroll] for (int oy = -2; oy <= 2; ++oy)
-    [unroll] for (int ox = -2; ox <= 2; ++ox)
-    {
-        // KH_FX_PX_REF: nearest whole px.
-        const int2 khsf_p = sp + int2(ox, oy) * max((int)floor(3.0f * KhFxPx() + 0.5f), 1);
-        if (khsf_p.x < 0 || khsf_p.y < 0 || khsf_p.x >= (int)fxMeta.z || khsf_p.y >= (int)fxMeta.w) continue;
-        float khsf_d = LinDepth(LoadDepthPS(khsf_p));
-        vis += saturate((min(khsf_d, khsf_f) - khsf_f * 0.98f)
-                        / max(khsf_f * 0.019f, 1.0f));
-        khsf_n += 1.0f;
-    }
-    return khsf_n > 0.0f ? vis / khsf_n : 0.0f;
-}
-// KH_FLARE_EDGE: the source's fade as it leaves the frame - 1 on screen, falling linearly with the farther axis to 0
-// where KhSunFlareSpot gives up (1.3 NDC). Past the edge the source is clamped to it and its visibility is the
-// border's, so without the fade the flare held that level out to 1.3 and then vanished in one frame.
-float KhSunFlareEdge(float2 spos)
-{
-    const float2 khse_n = abs(spos * 2.0f - 1.0f);
-    return saturate((1.3f - max(khse_n.x, khse_n.y)) / 0.3f);
-}
+// Sun flare's source (effect 16, side id 29): its direction, fxParams0.xyz (engine axes - the C++ converts the
+// script's), through cb.hlsl's KhFxSunSpot; KhSunFlareVis / KhSunFlareEdge are cb.hlsl's too.
+bool KhSunFlareSpot(out float2 spos, out int2 sp) { return KhFxSunSpot(fxParams0.xyz, spos, sp); }
 
 // KH_DLF - dynamicLightFog (effect 31): the world fog lit by the engine's dynamic lights, marched per light through
 // the light's own reach and shadowed by our meshes' light maps and by the geometry the camera sees. C++ side:
@@ -912,7 +833,7 @@ float4 PSEffect(VSOut i) : SV_Target
     else if (effect == 13)   // Distance fog: [startDist m, endDist m, skyAmount 0.1], color = fog
                              // Color.
     {
-        // Twin edit at KhFsFog's fog-pass loop.
+        // Twin edit at cb.hlsl's KhFxFogPasses (KhFsFog's and KhFxFogAt's fog-pass loop).
         float d = LinDepth(LoadDepthPS(px));
         float f = saturate((d - fxParams0.x) / max(fxParams0.y - fxParams0.x, 1.0f));
         float khfg_f = KhEncFence();
@@ -1024,9 +945,9 @@ float4 PSEffect(VSOut i) : SV_Target
     else if (effect == 16)   // Sun flare, source-aware: p0.xyz = direction (engine space), p0.w =
                              // Size;
     {
-        // KhSunFlareSpot / KhSunFlareVis / KhSunFlareEdge above. KH_FX_SIDE: the scene chain draws the visibility
-        // (edge fade included) once, 1 x 1, before the pass (side id 29) and arms matCtl.y; unarmed, each pixel
-        // measures it.
+        // KhSunFlareSpot above (KhSunFlareVis / KhSunFlareEdge: cb.hlsl). KH_FX_SIDE: the scene chain draws the
+        // visibility (edge fade included) once, 1 x 1, before the pass (side id 29) and arms matCtl.y; unarmed, each
+        // pixel measures it.
         float2 spos;
         int2 sp;
         if (KhSunFlareSpot(spos, sp))

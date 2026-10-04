@@ -3,8 +3,9 @@
     else if (effect == 23)   // Fogscatter
     {
         float2 khfs_res = float2(fxMeta.z, fxMeta.w);
-        float khfs_m00 = max(length(float3(viewProj[0].x, viewProj[1].x, viewProj[2].x)), 1e-6f);
-        float khfs_m11 = max(length(float3(viewProj[0].y, viewProj[1].y, viewProj[2].y)), 1e-6f);
+        const float2 khfs_ms = KhFxProjScale();
+        float khfs_m00 = khfs_ms.x;
+        float khfs_m11 = khfs_ms.y;
         float khfs_in = max(fxParams0.x, 0.0f);
         float khfs_rm = fxParams0.y > 0.5f ? clamp(fxParams0.y, 2.0f, 96.0f) * KhFxPx()   // KH_FX_PX_REF.
                                            : clamp(fxMeta.w / 90.0f, 4.0f, 64.0f);
@@ -19,10 +20,16 @@
         [branch] if (khfs_side) khfs_f0 = khFxSide.Load(int3(px, 0));
         else                    khfs_f0 = KhFsFog(float2(px), khfs_cd, khfs_res, khfs_m00, khfs_m11);
         float khfs_sc = saturate(khfs_f0 * khfs_in);
-        float khfs_c1 = 3.0f * khfs_rm * khfs_rm / (float)khfs_n;
-        float khfs_rc = max(khfs_rm * khfs_sc, 1.0f);
-        float khfs_ws = (1.0f - khfs_sc) + khfs_sc * khfs_c1 / (khfs_rc * khfs_rc);
+        // KH_FS_SELF (cb.hlsl's KhFsOwnW): the receiver's own term - its unscattered share and its own pixel's share
+        // of its own scatter cone. Weighted as a whole tap (3 rm^2 / n / rc^2, about 38x at the defaults) every
+        // receiver kept an extra 3 / (n sc) of its own sharp value - a light's core through thick fog, a one-pixel step
+        // at a silhouette where everything is fogged, and a look that changed with the taps. (A near tap's pyramid
+        // footprint, KH_GLOW_PYR, still covers the pixel - about 0.7 of its share again.)
+        const float khfs_w0 = KhFsOwnW(khfs_sc, khfs_rm);
+        float khfs_ws = khfs_w0;
         float3 khfs_acc = scene * khfs_ws;
+        // KH_FS_SKY: the most fog a NEARER source that reaches this receiver puts on its ray (R, below the loop).
+        float khfs_fx = khfs_sc;
         float khfs_ig = frac(52.9829189f * frac(0.06711056f * i.pos.x
                                               + 0.00583715f * i.pos.y));
         float khfs_ig2 = frac(52.9829189f * frac(0.06711056f * (i.pos.x + 5.588238f)
@@ -38,12 +45,13 @@
         // KH_FS_MIX: a source scatters over a disc of rm x its scatter (khfs_rk below). In thin fog that disc is a
         // few pixels while the taps spread evenly over the full radius rm, so only the pixels whose first tap
         // happened to land inside it took a share, each at the full disc's weight: sparse bright points around every
-        // light. Most sources that reach this receiver scatter about as much as it does or less - a farther one is
-        // held to the receiver's own by the deflection gate, and a nearer one, on nearly the same view ray, has
-        // crossed less fog - so the radii now come from a mixture: a quarter of the distribution over the
+        // light. Most sources that reach this receiver scatter about as much as it does or less - a farther one
+        // takes the receiver's own by the deflection gate (KH_FS_SKY), and a nearer one, on nearly the same view
+        // ray, has crossed less fog - so the radii now come from a mixture: a quarter of the distribution over the
         // receiver's own disc ri (rm x its scatter, at least 2 px), three quarters over rm as before, still one
         // stratum per tap pair. Each tap is weighted by the mixture's density where it lands (the balance
-        // heuristic) - pi / (n qi) of the disc's area inside ri, pi / (n qo) outside, in place of pi rm^2 / n - so
+        // heuristic) - pi / (2 hn qi) of the disc's area inside ri, pi / (2 hn qo) outside (2 hn = n for an even
+        // count; KH_FS_ODD below), in place of pi rm^2 / n - so
         // it estimates the same sum. Where a nearer source does scatter more (a sky whose fog is below a nearer
         // object's: a fog pass's skyAmount under its ramp, the far fence's feather, the engine's fog-end ramp
         // against its sky; or, in the fallback fog mode, a higher farther surface), the even three quarters still
@@ -55,8 +63,13 @@
         const float khfs_qo = 0.75f / (khfs_rm * khfs_rm);   // The density outside ri, x pi.
         const float khfs_qi = 0.25f / (khfs_ri * khfs_ri) + khfs_qo;   // ...and inside it.
         const float khfs_fi = khfs_qi * khfs_ri * khfs_ri;   // The share of the distribution inside ri.
-        const float khfs_cwi = 3.0f / ((float)khfs_n * khfs_qi);   // khfs_c1's per-tap twins (3 / pi x the area).
-        const float khfs_cwo = 3.0f / ((float)khfs_n * khfs_qo);
+        // KH_FS_ODD: a stratum (a tap pair) holds 1 / hn of the distribution, so a tap of a pair stands for half of it,
+        // 1 / (2 hn) - 1 / n for an even count - and an odd count's lone last tap for all of it (doubled below).
+        // Weighted 1 / n each, an odd count's full strata took (n + 1) / n of their share and the lone one (n + 1) / 2n
+        // (5 taps: the inner rings 1.2x, the outer 0.6x - a tighter halo). The footprint (khfs_gs) keeps 1 / n: a look.
+        const float khfs_nt = 2.0f * khfs_hn;
+        const float khfs_cwi = 3.0f / (khfs_nt * khfs_qi);   // The cone's 3 / pi x the tap's share of the area.
+        const float khfs_cwo = 3.0f / (khfs_nt * khfs_qo);
 
         [loop] for (int khfs_k = 0; khfs_k < khfs_n; ++khfs_k)
         {
@@ -80,11 +93,18 @@
             [branch] if (khfs_side) khfs_fs = khFxSide.Load(int3(khfs_sp, 0));   // KH_FX_SIDE.
             else                    khfs_fs = KhFsFog(float2(khfs_sp), khfs_sd, khfs_res, khfs_m00, khfs_m11);
             float khfs_ss = saturate(khfs_fs * khfs_in);
-            if (khfs_sd > khfs_cd) khfs_ss = min(khfs_ss, khfs_sc);   // Deflection gate.
+            // Deflection gate (KH_FS_SKY - G): a farther source's light reaches this receiver through this receiver's
+            // own column, so it scatters with this receiver's fog - also where the farther source reads less (a sky
+            // whose fog is below a ramp-fogged ridge in front of it), which min(ss, sc) kept off the ridge.
+            khfs_ss = KhFsSourceFog(khfs_ss, khfs_sc, khfs_sd, khfs_cd);
             float khfs_rk = khfs_rm * khfs_ss;
             if (khfs_sr >= khfs_rk) continue;   // This source's disc does not reach.
+            // KH_FS_SKY - R: a nearer source that scatters more - this ray runs beside its column and crossed that fog
+            // too. Tapered over the source's disc, as its weight is, so the floor fades out with its reach.
+            khfs_fx = KhFsNearFloor(khfs_fx, khfs_ss, khfs_sr, khfs_rk, khfs_sd, khfs_cd);
             float khfs_w = khfs_ss * (khfs_inr ? khfs_cwi : khfs_cwo) * (1.0f - khfs_sr / khfs_rk)
                          / max(khfs_rk * khfs_rk, 1.0f);   // KH_FS_MIX: the tap's own share.
+            if ((khfs_k | 1) >= khfs_n) khfs_w *= 2.0f;   // KH_FS_ODD: an odd count's lone last tap.
             float3 khfs_c;
             if (khfs_gm >= 1.0f)      khfs_c = KhGlowTap(khfs_pc, khfs_gs);
             else if (khfs_gm <= 0.0f) khfs_c = SampleScene(khfs_sp);
@@ -93,14 +113,30 @@
             khfs_ws += khfs_w;
         }
 
-        outc = khfs_acc / max(khfs_ws, 1e-4f);
+        // KH_FS_SKY - R: beside a nearer source that scatters more (a sky or past-the-fog-end receiver beside a ridge
+        // the ramp has fogged), the receiver's own term at that fog - smaller, so more of the neighbours' scatter
+        // shows and the step at the silhouette softens. The own term (KH_FS_SELF) falls with the fog everywhere -
+        // 1 - 0.045 f while the cone is under a pixel, 1 - f + 0.955 / (rm^2 f) after - so dw < 0 whenever fx > sc;
+        // the min is a guard (never less bleed than before). fx > sc only beside such a source; elsewhere this is
+        // skipped and nothing changes.
+        [branch] if (khfs_fx > khfs_sc) {
+            const float khfs_dw = min(KhFsOwnW(khfs_fx, khfs_rm) - khfs_w0, 0.0f);
+            khfs_acc += scene * khfs_dw;
+            khfs_ws += khfs_dw;
+        }
+        // KH_FS_FLOOR: ws never falls below the own weight at full fog, KhFsOwnW(1, rm) = 0.955 / max(rm, 1)^2 - the
+        // least own weight at any fog; the taps only add, and R takes the own term down to KhFsOwnW(fx) at most - so
+        // the guard is half of it, which only rounding could reach. A fixed 1e-4 bound under KH_FS_SELF once rm passed
+        // 98 px (a radius param past ~49 at 2160 rows): a fully fogged receiver no tap reached darkened to w0 / 1e-4.
+        outc = khfs_acc / max(khfs_ws, 0.5f * KhFsOwnW(1.0f, khfs_rm));
     }
     else if (effect == 28)   // KH_FX_SIDE: fog scatter's per-pixel fog (KhFsFog), drawn before the pass.
     {
         // Fog scatter's own inputs, the same expressions (its lanes are this pass's).
         const float2 khfa_res = float2(fxMeta.z, fxMeta.w);
-        const float khfa_m00 = max(length(float3(viewProj[0].x, viewProj[1].x, viewProj[2].x)), 1e-6f);
-        const float khfa_m11 = max(length(float3(viewProj[0].y, viewProj[1].y, viewProj[2].y)), 1e-6f);
+        const float2 khfa_ms = KhFxProjScale();
+        const float khfa_m00 = khfa_ms.x;
+        const float khfa_m11 = khfa_ms.y;
         return float4(KhFsFog(float2(px), KhLinZ(px), khfa_res, khfa_m00, khfa_m11), 0.0f, 0.0f, 1.0f);
     }
     else if (effect == 31)   // KH_DLF: dynamicLightFog - the grid's fog (t3) upsampled and added to the scene.

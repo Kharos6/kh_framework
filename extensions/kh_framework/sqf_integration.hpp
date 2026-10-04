@@ -5337,8 +5337,15 @@ static uint64_t kh_temporal_gen_of(const std::string& khgo_id) {
     return khgo_it == g_kh_temporal_gen.end() ? 0 : khgo_it->second;
 }
 
-// Both mission edges (main.cpp: pre_init, mission_ended), never inside a run.
+static void kh_unit_tracking_clear();   // KH_UNIT_TRACK_RESET (defined with update_unit_states).
+// Both mission edges (main.cpp: pre_init, mission_ended), never inside a run - and the sqf side's other per-mission
+// state rides it: the per-unit tracking (KH_UNIT_TRACK_RESET) and the call bridge's two values (KH_CALL_ARGS_RESET:
+// setCallArguments / setReturnValue - a value left there held the last mission's arrays, objects and code into the
+// next, where a script reading it before setting it found them).
 static void kh_temporal_clear() {
+    kh_unit_tracking_clear();
+    g_call_arguments = game_value();
+    g_return_value = game_value();
     g_kh_temporal_stack.clear();
     g_kh_temporal_additions.clear();
     g_kh_temporal_deletions.clear();
@@ -6610,6 +6617,15 @@ static std::string kh_weapon_lower(const S& khwl_s) {
     return khwl_out;
 }
 
+// KH_UNIT_TRACK_RESET - both mission edges (kh_temporal_clear). The per-unit yaw rings (g_unit_states, framework.hpp)
+// and weapon slots (g_unit_weapons) are keyed by the unit object's address, which the next mission's allocator reuses:
+// a carried entry handed a new unit the old one's heading history and slots - its first-seen weapon events withheld
+// wherever the slot matched. Game thread, as their one writer.
+static void kh_unit_tracking_clear() {
+    g_unit_states.clear();
+    g_unit_weapons.clear();
+}
+
 static void update_unit_states() {
     auto units = sqf::get_variable(sqf::mission_namespace(), "kh_var_allmen");
     const float now = static_cast<float>(sqf::diag_ticktime());
@@ -6992,7 +7008,7 @@ static bool kh_rv_bone_pair(const game_value& v, game_value& out_obj,
 //
 // addRender3D [[x,y,zASL], rotation, mesh]. Everything else - size, color,
 // mode, sceneRead, effect, params, band, blend, duration, lit, twoSided,
-// lodLock, inFront, casterOnly, castShadow, receiveShadow, occluder, clothSimulation,
+// lodLock, inFront, showInFront, casterOnly, castShadow, receiveShadow, occluder, clothSimulation,
 // physicsCollider, visible,
 // material,
 // attachPosition, attachRotation -
@@ -7144,8 +7160,8 @@ static game_value add_render3d_sqf(game_value_parameter args) {
             // KH_SKEL: the proxies, now the mesh's bones are known, and frame
             // one seeded from the parent (the proxies have not been simulated
             // yet; the skin holds the rest pose until they have). The mesh
-            // starts in its rest box, lod_locked like a cloth - a decimated
-            // level has vertices no bone weights. A parent that cannot be read
+            // starts in its rest box; lodLock stays the script's (every LOD
+            // level carries bone weights: KH_LOD_SKIN). A parent that cannot be read
             // is refused (without a report, KH_NULL_SILENT), as [object, false]
             // refuses it, rather than leaving the mesh at the map origin.
             if (!RenderIntegration::kh_attach_read(khr_bparent, khr_ap, khr_ar)) {
@@ -7157,7 +7173,6 @@ static game_value add_render3d_sqf(game_value_parameter args) {
                 return game_value("");
             }
             obj.skel = true;
-            obj.lod_lock = true;
             RenderIntegration::kh_skel_rest_box(obj);
             if (khr_brot) {
                 memcpy(obj.rot_m, khr_ar, sizeof(obj.rot_m));
@@ -7199,7 +7214,7 @@ static game_value add_render3d_sqf(game_value_parameter args) {
 // Property set both kinds own. Returns 1 = applied, 0 = recognized but the
 // value was invalid (err set), -1 = not a shared property (fall through to the
 // caller's kind-specific set).
-// KH_FX_TEX: a .hlsl effect's own textures - [[path, "user0" .. "user5", "srgb" | "linear"?], ...], the whole set
+// KH_FX_TEX: an effect's own textures - [[path, "user0" .. "user5", "srgb" | "linear"?], ...], the whole set
 // (a slot the array does not name is cleared; [] clears them all). Checked in full before anything is set.
 static bool kh_rv_fx_textures(const game_value& v, RenderIntegration::RenderObject& obj, std::string& err) {
     static const char* const khft_form = "textures must be an array of [path, \"user0\" .. \"user5\", "
@@ -7684,8 +7699,8 @@ static bool kh_rv_chain_sim(const game_value& val, RenderIntegration::RenderObje
     R::kh_attach_proxy_orphan(khch_drop);
     const bool khch_was = obj.chain_sim;
     obj.chain_sim = khch_on;
-    // LOD-locked for the cloth's reason: a decimated level's own vertices are
-    // not the skeleton's to move.
+    // LOD-locked: the chain's box is level 0's (the writeback's box rule), so a
+    // coarser level's own vertices could stand outside the box it is culled by.
     if (khch_on) obj.lod_lock = true;
     // A plain object is drawn at its authored size while it simulates (the
     // chain's box follows its shape - kh_cloth_upload); the script's size is
@@ -7758,7 +7773,6 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
                                    : !RenderIntegration::kh_attach_rot_own(handle);   // KH_SKEL_ROT_OWN.
                 RenderIntegration::kh_attach_skel_set(handle, khs_own.release(), khs_mem, khb_parent, khs_rot);
                 obj.skel = true;
-                obj.lod_lock = true;
                 RenderIntegration::kh_skel_rest_box(obj);
                 RenderIntegration::kh_attach_offset_pos(obj, khs_r, khs_p);   // The root, then its centre.
                 if (khs_rot) {
@@ -7968,16 +7982,23 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
     if (prop == "lodlock") {
         bool b = obj.lod_lock;
         if (!kh_rv_bool(val, b, "lodLock", err)) return false;
-        // KH_LOD_FORCED: a skeletal binding, a cloth and a chain draw level 0 alone - a decimated level's own
-        // vertices are not the skin's or the solver's to move - so the lock they set is not the script's to clear.
-        if (!b && (obj.skel || obj.cloth_sim || obj.chain_sim)) {
-            err = "lodLock stays on while a skeletal binding, clothSimulation or chainSimulation is on";
+        // KH_LOD_FORCED: a cloth and a chain draw level 0 alone - a cloth leaves a decimated level's own vertices
+        // at rest, and a chain's box is level 0's - so the lock they set is not the script's to clear.
+        // A skeletal binding sets none: every level skins (KH_LOD_SKIN).
+        if (!b && (obj.cloth_sim || obj.chain_sim)) {
+            err = "lodLock stays on while clothSimulation or chainSimulation is on";
             return false;
         }
         obj.lod_lock = b;
         return true;
     }
     if (prop == "infront")  { bool b = obj.in_front;  if (!kh_rv_bool(val, b, "inFront", err))  return false; obj.in_front = b;  return true; }   // KH_INFRONT.
+    if (prop == "showinfront") {   // KH_SHOW_INFRONT: a mesh's alone, as inFront.
+        bool b = obj.show_in_front;
+        if (!kh_rv_bool(val, b, "showInFront", err)) return false;
+        obj.show_in_front = b;
+        return true;
+    }
     // A mesh's alone: updatePostFX refuses it (a pass casts nothing; every caster test excludes passes).
     if (prop == "casteronly") {
         bool b = obj.caster_only;
@@ -8007,7 +8028,10 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
     if (prop == "physicscollider")   return kh_rv_physics_collider(val, obj, err);
     if (prop == "chainsimulation") return kh_rv_chain_sim(val, obj, handle, err);
     if (prop == "simulationlod") return kh_rv_sim_lod(val, obj, err);   // KH_SIM_LOD.
-    err = "unknown property (position | attachPosition | size | rotation | attachRotation | mesh | material | mode | sceneRead | effect | params | lit | twoSided | lodLock | inFront | casterOnly | castShadow | receiveShadow | occluder | clothSimulation | physicsCollider | chainSimulation | simulationLod | textures | color | visible | blend | band | duration)";
+    err = "unknown property (position | attachPosition | size | rotation | attachRotation | mesh | material | mode | "
+          "sceneRead | effect | params | lit | twoSided | lodLock | inFront | showInFront | casterOnly | castShadow | "
+          "receiveShadow | occluder | clothSimulation | physicsCollider | chainSimulation | simulationLod | textures | "
+          "color | visible | blend | band | duration)";
     return false;
 }
 
@@ -8947,6 +8971,13 @@ static game_value get_render_stats_sqf() {
         // means no name matched); and the memory-point proxies following the
         // parents.
         out.push_back(kv("skinnedMeshes", static_cast<float>(s.skin_meshes)));
+        // KH_SKIN_POOL: of those, the ones whose pose lives in a shared skin
+        // pool chunk (instanceable; the rest draw one by one); and, since the
+        // stats were armed, the skeletal instances the colour buckets drew from
+        // a chunk - each its own pose (one per instance per draw; a
+        // crossfading one twice).
+        out.push_back(kv("skinPooled", static_cast<float>(s.skin_pooled)));
+        out.push_back(kv("skinInstanced", static_cast<float>(s.skin_inst)));
         out.push_back(kv("skinBones", static_cast<float>(s.skin_bones)));
         out.push_back(kv("skinBonesDriven", static_cast<float>(s.skin_bones_driven)));
         out.push_back(kv("skinProxies", static_cast<float>(s.skin_proxies)));
@@ -8959,7 +8990,23 @@ static game_value get_render_stats_sqf() {
         // a worker's exact box for the same pose (1 = exact; 0 = no worker measured one - only a collider's job measures).
         out.push_back(kv("skinGpu", static_cast<float>(RenderIntegration::g_skin_so_n.load(std::memory_order_relaxed))));
         out.push_back(kv("skinCpu", static_cast<float>(RenderIntegration::g_skin_cpu_n.load(std::memory_order_relaxed))));
+        // KH_SKIN_CULL: the last complete cycle's culls - a step that left a binding unskinned because no pass
+        // could draw it (one passed over at several steps counts at each; one a PIP, park or flush skinned later
+        // anyway counts here and, from the render thread, in skinGpu too).
+        out.push_back(kv("skinCulled",
+                         static_cast<float>(RenderIntegration::g_skin_cull_n.load(std::memory_order_relaxed))));
         out.push_back(kv("skinGpuOff", RenderIntegration::g_skin_so_failed.load(std::memory_order_relaxed) ? 1.0f : 0.0f));
+        // KH_SKIN_GPU_MOVE, since the stats were armed: skeletal bindings moved from CPU skinning to GPU skinning once
+        // the device gave them a buffer, and the device's refusals of a GPU-skinning buffer or a mesh's rest stream
+        // (each leaves a binding on the CPU path, asked again about two seconds on - or, when even its CPU buffer is
+        // refused, without a buffer and asked every frame: a count climbing every frame means memory is exhausted).
+        out.push_back(kv("skinGpuMoves", static_cast<float>(s.skin_gpu_moves)));
+        out.push_back(kv("skinGpuRefused", static_cast<float>(s.skin_gpu_refused)));
+        // KH_SHOW_INFRONT (gauge): the main view's first-person verdict - the cycle that last ended drew the game's
+        // view-model slice (1) or not (0). The detector runs only while a visible mesh with showInFront false (not
+        // inFront) or a visible inFront mesh with showInFront true exists; 0 otherwise.
+        out.push_back(kv("firstPerson",
+                         RenderIntegration::g_vm_slice_live.load(std::memory_order_relaxed) ? 1.0f : 0.0f));
         {
             const uint32_t khsg_b = RenderIntegration::g_skin_bound_worst_bits.load(std::memory_order_relaxed);
             float khsg_r = 0.0f;

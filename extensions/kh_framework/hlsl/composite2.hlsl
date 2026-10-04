@@ -53,6 +53,13 @@ VSOutC VSCompositeInst(VSIn i, VSInst n)
     return o;
 }
 
+// KH_SKIN_POOL - VSCompositeInst over a skin pool chunk (cb.hlsl's KhSkPull).
+// Twin: VSMainInstSk in the static unit.
+VSOutC VSCompositeInstSk(VSInstSk s)
+{
+    return VSCompositeInst(KhSkPull(s.vid, khObjs[s.islot].res.w), KhSkLane(s));
+}
+
 #if KH_ARB_DEPTH
 float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace, out float khaODepth : SV_Depth) : SV_Target
 #else
@@ -242,7 +249,9 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
     // shading normal. The mapped normal drives the sun N.L gate below
     // (khShN); the self-shadow bias keeps the geometric one (khBiasN).
     KhMatLoad(i.matIx);   // KH_MAT_TABLE: the lanes below read from the entry.
-    KhMatSurf khtxS = KhSampleMat(i.uv);
+    float2 khtxDx, khtxDy;   // KH_UV_ANIM: the material's uv and its gradients (i.uv's, unanimated). TWIN.
+    const float2 khtxUv = KhMatUv(i.uv, khtxDx, khtxDy);
+    KhMatSurf khtxS = KhSampleMatG(khtxUv, khtxDx, khtxDy);
 
     if (matParams0.y >= 0.5f && matParams0.y < 1.5f) clip(khtxS.alpha - matParams0.z);   // Cutout kill.
     // Opaque alpha contract: sampled alpha never reaches the blend on the
@@ -254,7 +263,7 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
         // The verdict tolerates compression: BC3/BC7 alpha in a block that also
         // holds transparent texels lands an opaque texel at ~0.93-0.98. Solid
         // is >= 0.9; a designed glass (0.3-0.6) still blends. Twin edit.
-        const float khtxCls = KhMatRouteTexel(matParams3.y, 1.0f, i.uv);
+        const float khtxCls = KhMatRouteTexel(matParams3.y, 1.0f, khtxUv);
         if (matParams0.y >= 2.5f) {
             clip(khtxCls - 0.9f);
             khtxS.alpha = 1.0f;
@@ -392,7 +401,9 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
 #if KH_TEXTURED
     khtxS.albedo *= i.icol.rgb;   // The object colour tints the albedo lane only.
 #if KH_USER_MAT
-    khUserUvPs = i.uv;   // KH_USER_LANES: KhUserUv / KhUserPixel. TWIN: PSMain / PSComposite.
+    khUserUvPs = khtxUv;   // KH_USER_LANES: KhUserUv / KhUserPixel. TWIN: PSMain / PSComposite.
+    khUserUvRawPs = i.uv;   // KH_UV_ANIM: KhUserUvRaw / KhUserUvDx / KhUserUvDy.
+    khUserUvGPs = float4(khtxDx, khtxDy);
     khUserPxPs = i.pos.xy;
     float3 lc = KhUserShade(khtxS, i.wpos, khtxN, smf);
 #else

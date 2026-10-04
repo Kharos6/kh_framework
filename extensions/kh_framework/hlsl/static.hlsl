@@ -44,6 +44,13 @@ VSOut VSMainInst(VSIn i, VSInst n)
     return o;
 }
 
+// KH_SKIN_POOL - VSMainInst over a skin pool chunk (cb.hlsl's KhSkPull): the
+// instance's vertex from its own slice, then VSMainInst itself.
+VSOut VSMainInstSk(VSInstSk s)
+{
+    return VSMainInst(KhSkPull(s.vid, khObjs[s.islot].res.w), KhSkLane(s));
+}
+
 #if KH_USER_VS
 // KH_USER_VS - the user vertex stage's one entry point: a material .hlsl's
 // KhUserVertex (it sits between cb.hlsl and this file) over every vertex of a
@@ -122,6 +129,21 @@ float4 VSSeamInst(VSInSeam i) : SV_Position
              r.rot0.xyz, r.rot1.xyz, r.rot2.xyz, khsi_pos, khsi_wpos, khsi_wrel, khsi_nrm);
     return khsi_pos;
 }
+// KH_SKIN_POOL: VSSeamInst over a skin pool chunk (the pulled vertex, the same lane).
+VSInSeam KhSkSeam(VSInstSk s)
+{
+    const VSIn p = KhSkPull(s.vid, khObjs[s.islot].res.w);
+    VSInSeam i;
+    i.pos = p.pos;
+    i.nrm = p.nrm;
+    i.islot = s.islot;
+    i.ilane = s.ilane;
+    return i;
+}
+float4 VSSeamInstSk(VSInstSk s) : SV_Position
+{
+    return VSSeamInst(KhSkSeam(s));
+}
 
 // KH_VOL_FOOT: the seam's footprint view distance (m) into its R32F mask, under
 // a MIN blend - the witness's record of where our surface stood when the
@@ -188,6 +210,11 @@ float4 VSMirrorInst(VSInSeam i) : SV_Position
     precise float3 khmi_rel = (r.pos.xyz - khPass.xyz) + r.res.xyz;   // KH_POS_RES.
     return KhMirClip((khPass.w > 0.5f) ? (khmi_rel + khmi_l) : khmi_wp);
 }
+// KH_SKIN_POOL: VSMirrorInst over a skin pool chunk.
+float4 VSMirrorInstSk(VSInstSk s) : SV_Position
+{
+    return VSMirrorInst(KhSkSeam(s));
+}
 float4 VSSunDepth(VSInSun i) : SV_Position
 {
     KhObjRec r = khObjs[i.islot];
@@ -199,6 +226,17 @@ float4 VSSunDepth(VSInSun i) : SV_Position
     precise float3 khsu_c = (r.pos.xyz - sunOrigin.xyz) + r.res.xyz;
     float3 wr = khsu_c + (lp.x * r.rot0.xyz + lp.y * r.rot1.xyz + lp.z * r.rot2.xyz);
     return mul(float4(wr, 1.0f), viewProj);
+}
+// KH_SKIN_POOL: VSSunDepth over a skin pool chunk.
+float4 VSSunDepthSk(VSInstSk s) : SV_Position
+{
+    const VSIn p = KhSkPull(s.vid, khObjs[s.islot].res.w);
+    VSInSun i;
+    i.pos = p.pos;
+    i.nrm = p.nrm;
+    i.islot = s.islot;
+    i.ilane = s.ilane;
+    return VSSunDepth(i);
 }
 
 #if KH_TEXTURED
@@ -260,9 +298,9 @@ float KhSunDither(float2 khsd_px)
 
 void PSSunDepthA(VSOutSunA i)
 {
-    const float2 khsa_dx = ddx(i.uv);   // KH_MAT_GRAD: the gradients at entry, in uniform flow.
-    const float2 khsa_dy = ddy(i.uv);
     KhMatLoad((uint)matCtl.x);   // KH_MAT_TABLE: per-submesh draw, the CB lane.
+    float2 khsa_dx, khsa_dy;   // KH_MAT_GRAD: the gradients at entry, in uniform flow - KH_UV_ANIM: the colour
+    const float2 khsa_uv = KhMatUv(i.uv, khsa_dx, khsa_dy);   // pass's uv, so the shadow's holes are its holes.
     float khsa_a = i.alpha;
     int khsa_mode = (int)matParams0.y;   // 0 opaque, 1 cutout, 2 blend (kh_bind_material).
     // The material's alpha by its own route (diffuse.a by default; 1 when no
@@ -279,12 +317,12 @@ void PSSunDepthA(VSOutSunA i)
     // paid); the worst fxc can do with the guard is hoist the chain back to
     // where it already is.
     float khsa_t = 1.0f;
-    if (khsa_mode == 1 || khsa_mode == 2) khsa_t = KhMatRouteG(matParams3.y, 1.0f, i.uv, khsa_dx, khsa_dy);
+    if (khsa_mode == 1 || khsa_mode == 2) khsa_t = KhMatRouteG(matParams3.y, 1.0f, khsa_uv, khsa_dx, khsa_dy);
     if (khsa_mode == 1) clip(khsa_t - matParams0.z);   // Cutout: the cutoff kills, survivors cast full.
     else if (khsa_mode == 2) {
         // KH_CAST_BLEND_BRANCH: nested, not && - fxc evaluates both operands, so the texel chain ran for
         // every opaque fragment too. Same verdict; KhMatRouteTexel is Loads only (no gradient).
-        [branch] if (KhMatRouteTexel(matParams3.y, 1.0f, i.uv) < 0.9f) khsa_a *= khsa_t;
+        [branch] if (KhMatRouteTexel(matParams3.y, 1.0f, khsa_uv) < 0.9f) khsa_a *= khsa_t;
     }
     if (khsa_a >= 0.996f) return;                       // Solid.
     clip(khsa_a - 0.004f);                              // Transparent: casts nothing.
@@ -297,16 +335,16 @@ void PSSunDepthA(VSOutSunA i)
 // inherits the glass's shadow. Whole translucent objects never reach it.
 void PSInjDepthA(VSOut i)
 {
-    const float2 khfa_dx = ddx(i.uv);   // KH_MAT_GRAD: the gradients at entry, in uniform flow.
-    const float2 khfa_dy = ddy(i.uv);
     KhMatLoad(i.matIx);   // KH_MAT_TABLE.
+    float2 khfa_dx, khfa_dy;   // KH_MAT_GRAD: the gradients at entry, in uniform flow (KH_UV_ANIM: KhMatUv's).
+    const float2 khfa_uv = KhMatUv(i.uv, khfa_dx, khfa_dy);
     int khfa_mode = (int)matParams0.y;
     // KH_CAST_ALPHA_SKIP (see PSSunDepthA): the filtered alpha is read by the
     // cutout arm alone, so opaque and blend materials asked for six samples and
     // threw the answer away.
-    if (khfa_mode == 1) clip(KhMatRouteG(matParams3.y, 1.0f, i.uv, khfa_dx, khfa_dy) - matParams0.z);
+    if (khfa_mode == 1) clip(KhMatRouteG(matParams3.y, 1.0f, khfa_uv, khfa_dx, khfa_dy) - matParams0.z);
     // The colour pass's own verdict.
-    else if (khfa_mode == 2) clip(KhMatRouteTexel(matParams3.y, 1.0f, i.uv) - 0.9f);
+    else if (khfa_mode == 2) clip(KhMatRouteTexel(matParams3.y, 1.0f, khfa_uv) - 0.9f);
 }
 
 // The world pass's self-mask carries depth-writing texels only (the seam
@@ -324,16 +362,16 @@ float4 PSDlsMaskA(VSOut i) : SV_Target
     // shows (a mask holding the union claims the world's pixels inside the
     // hidden level's outline as ours). The seam's footprint mask draws one
     // level with a zero lane: no cut.
-    const float2 khma_dx = ddx(i.uv);   // KH_MAT_GRAD: the gradients at entry, ahead of the cut, in uniform flow.
-    const float2 khma_dy = ddy(i.uv);
+    KhMatLoad(i.matIx);   // KH_MAT_TABLE. Ahead of the cut, for KhMatUv's gradients (KH_UV_ANIM).
+    float2 khma_dx, khma_dy;   // KH_MAT_GRAD: the gradients at entry, ahead of the cut, in uniform flow.
+    const float2 khma_uv = KhMatUv(i.uv, khma_dx, khma_dy);
     KhObjLoad(i.iobj0, i.iobj1);
     KhLodDitherCut(i.pos.xy, khObjDither);
-    KhMatLoad(i.matIx);   // KH_MAT_TABLE.
     int khma_mode = (int)matParams0.y;
     // KH_CAST_ALPHA_SKIP (see PSSunDepthA).
-    if (khma_mode == 1) clip(KhMatRouteG(matParams3.y, 1.0f, i.uv, khma_dx, khma_dy) - matParams0.z);
+    if (khma_mode == 1) clip(KhMatRouteG(matParams3.y, 1.0f, khma_uv, khma_dx, khma_dy) - matParams0.z);
     // The colour pass's own verdict.
-    else if (khma_mode == 2) clip(KhMatRouteTexel(matParams3.y, 1.0f, i.uv) - 0.9f);
+    else if (khma_mode == 2) clip(KhMatRouteTexel(matParams3.y, 1.0f, khma_uv) - 0.9f);
     return float4(i.pos.w, 0.0f, 0.0f, 0.0f);
 }
 #endif
@@ -1124,7 +1162,9 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
     // shading normal. The mapped normal drives the sun N.L gate below
     // (khShN); the self-shadow bias keeps the geometric one (khBiasN).
     KhMatLoad(i.matIx);   // KH_MAT_TABLE: the lanes below read from the entry.
-    KhMatSurf khtxS = KhSampleMat(i.uv);
+    float2 khtxDx, khtxDy;   // KH_UV_ANIM: the material's uv and its gradients (i.uv's, unanimated). TWIN.
+    const float2 khtxUv = KhMatUv(i.uv, khtxDx, khtxDy);
+    KhMatSurf khtxS = KhSampleMatG(khtxUv, khtxDx, khtxDy);
     if (matParams0.y >= 0.5f && matParams0.y < 1.5f) clip(khtxS.alpha - matParams0.z);   // Cutout kill.
     // Opaque alpha contract: sampled alpha never reaches the blend on the
     // opaque and cutout modes - survivors draw at alpha 1. A blend material is
@@ -1135,7 +1175,7 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
         // The verdict tolerates compression: BC3/BC7 alpha in a block that also
         // holds transparent texels lands an opaque texel at ~0.93-0.98. Solid
         // is >= 0.9; a designed glass (0.3-0.6) still blends. Twin edit.
-        const float khtxCls = KhMatRouteTexel(matParams3.y, 1.0f, i.uv);
+        const float khtxCls = KhMatRouteTexel(matParams3.y, 1.0f, khtxUv);
         if (matParams0.y >= 2.5f) {
             clip(khtxCls - 0.9f);
             khtxS.alpha = 1.0f;
@@ -1248,7 +1288,9 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
 #if KH_TEXTURED
     khtxS.albedo *= i.icol.rgb;   // The object colour tints the albedo lane only.
 #if KH_USER_MAT
-    khUserUvPs = i.uv;   // KH_USER_LANES: KhUserUv / KhUserPixel. TWIN: PSMain / PSComposite.
+    khUserUvPs = khtxUv;   // KH_USER_LANES: KhUserUv / KhUserPixel. TWIN: PSMain / PSComposite.
+    khUserUvRawPs = i.uv;   // KH_UV_ANIM: KhUserUvRaw / KhUserUvDx / KhUserUvDy.
+    khUserUvGPs = float4(khtxDx, khtxDy);
     khUserPxPs = i.pos.xy;
     float3 lc = KhUserShade(khtxS, i.wpos, khtxN, smf);
 #else

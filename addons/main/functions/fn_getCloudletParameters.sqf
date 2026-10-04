@@ -68,9 +68,16 @@ private _result = [
         getText (_cloudlet >> "beforeDestroyScript"),
         objNull,
         ["SCALAR", _cloudlet >> "angle", 0] call KH_fnc_getConfigValue,
-        true,
-        -1,
-        [[0, 0, 0, 0]],
+        ["BOOL", _cloudlet >> "onSurface", false] call KH_fnc_getConfigValue,
+        ["SCALAR", _cloudlet >> "bounceOnSurface", -1] call KH_fnc_getConfigValue,
+        if ((getArray (_cloudlet >> "emissiveColor")) isEqualTypeAll []) then {
+            (getArray (_cloudlet >> "emissiveColor")) apply {
+                [[0, 0, 0, 0], _x] select (_x isEqualTypeAll 0);
+            };
+        }
+        else {
+            [[0, 0, 0, 0]];
+        },
         [[0, 1, 0], [0, 0, 1]]
     ],
     [

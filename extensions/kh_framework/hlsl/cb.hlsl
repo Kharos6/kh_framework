@@ -27,8 +27,10 @@ cbuffer CBObj : register(b0)
     // is this cycle's (KH_NEARZ_MARK), else 0.
     float4 shadowMeta2;   // y = object view-distance cut; z = 1 for a
                           // depth-Off overlay (KH_VOL_WITNESS), else 0; w = the first
-                          // vertex of the run VSUserSo is drawing (KH_USER_VS's pass
-                          // alone; zero, and unread, everywhere else).
+                          // vertex of the run VSUserSo is drawing (KH_USER_VS's pass),
+                          // or on an effect-chain pass the KH_VM_SEE arm (1 = the depth
+                          // behind the view model's translucent planes, t34; 2 = also
+                          // their transmittance, t41); 0 everywhere else.
     // Engine-axes rotation rows (row-vector): world = center + local.x*R0 +
     // local.y*R1 + local.z*R2.
     float4 objRot0;
@@ -68,11 +70,19 @@ cbuffer CBObj : register(b0)
     // KH_USER_LANES: x = the session clock (s), y = this object's creation on
     // it (s). Read through the KhUser* accessors below. C++ twin user_obj.
     float4 khUserObj;
-    // KH_FX_TEX: a user effect's own textures - 1 + each one's layer in its page
+    // KH_FX_TEX: an effect's own textures - 1 + each one's layer in its page
     // ([0].xyzw = user0 .. user3, [1].xy = user4 / user5; 0 = absent or still
-    // loading; [1].zw unused). Zero on every draw but a user effect's. Read
-    // through KhUserTex* (the KH_FX_UNIT section). C++ twin fx_tex.
+    // loading; [1].zw unused). Zero on every draw but a user effect's and
+    // (KH_FX_TEX_ALL) a builtin effect pass's with textures. Read through
+    // KhUserTex* (the KH_FX_UNIT section). C++ twin fx_tex.
     float4 khFxTexLay[2];
+    // KH_FX_FOGREC: the scene's KH fog passes as a user effect sees them - up to two records [startDist, endDist,
+    // skyAmount, opacity] (opacity 0 = none): the two the builtin fog scatter takes (the fullscreen distance-fog
+    // passes, neither localized nor banded, the two most opaque). Filled for a user effect in the scene chain; zero on
+    // every other draw (an effect mesh, the UI lane and a picture-in-picture - whose passes are all localized - see
+    // the engine's fog alone, as the builtin's do). Read through KhFxFogAt / KhFxFogPasses (the KH_FX_UNIT section).
+    // C++ twin fx_fog.
+    float4 khFxFog[2];
 };
 
  cbuffer CBFrame : register(b1)
@@ -262,7 +272,9 @@ cbuffer CBEngView2 : register(b4)
 // rot1.w = lit ambient fraction, rot2.w = lit diffuse fraction; col carries no
 // lifetime envelope (the lane's alpha does). res.xyz = KH_POS_RES, the centre's
 // part finer than pos's float: every relative centre a record forms (against
-// khPass, against sunOrigin) adds it; res.w unread.
+// khPass, against sunOrigin) adds it; res.w = KH_SKIN_POOL, a skeletal
+// binding's vertex base in its skin pool chunk (an exact integer; 0 for every
+// other object), read only by the Sk twins through KhSkPull.
 struct KhObjRec { float4 pos; float4 size; float4 rot0; float4 rot1; float4 rot2; float4 col; float4 res; };
 StructuredBuffer<KhObjRec> khObjs : register(t39);
 
@@ -362,7 +374,8 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 // draws flat unlit white instead (the white placeholder, with the default
 // material); the builtin PBR shades it only if the placeholder itself was not
 // built.
-//   s     the material sampled at the pixel's UV (KhSampleMat); the object
+//   s     the material sampled at the pixel's UV - after the material's texture
+//         animation (KhMatUv), KhUserUv() - by KhSampleMatG; the object
 //         colour already tints s.albedo. s.alpha is informational: coverage is
 //         decided around the call (below).
 //   wpos  the world position (engine axes: x east, y up, z north; absolute m).
@@ -426,6 +439,27 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //             (below). Defaults: basecolor 1,1,1; roughness 0.8; metalness 0;
 //             glossiness 0.2; specularColor 1,1,1; fresnel 1.5,0; the two
 //             strengths 1; cutoff 0.5; opaque.
+//             Texture animation (KH_UV_ANIM; every shader kind takes them, the
+//             builtin "pbr" / "arma" too): "uvScale" (number or [u, v]),
+//             "uvOffset" [u, v], "uvScroll" [u, v] per second, "uvRotation"
+//             (degrees, about the tile's centre), "uvRotationSpeed" (degrees
+//             per second), "uvWarp" [amplitude, frequency, speed], "flipbook"
+//             [columns, rows, fps, frames?]. The lookup (KhMatUv):
+//               uv' = KhUvAffine(uv, A, c), A = S * R(angle) - c holds the
+//                     centre, the offset and the scroll (wrapped to [0, 1));
+//               then KhUvWarp(uv', amplitude, frequency, phase) - the ripple
+//                     is tied to the surface, the picture scrolls through it;
+//               then KhUvFlip(uv', [columns, rows], frame).
+//             Every map of the slot moves together (user0 .. user5 included),
+//             and so do the coverage verdicts and the shadows: a cutout or
+//             blend material's holes and casts follow its picture (its object
+//             then redraws the shadows it is in every frame). The clock is the
+//             renderer's session clock - real time, running while the game is
+//             paused or time-accelerated - so objects sharing a material move
+//             in step; the phases are formed in double, once a frame. Normal
+//             maps turn and stretch with the
+//             picture (KhUvNrm, inside KhSampleMat); the warp does not bend
+//             them.
 // What they arrive as - the fields of s (KhMatSurf, from KhSampleMat):
 //   albedo    diffuse.rgb (1 with no map) x basecolor x the object colour.
 //   alpha     the routed "alpha" (1 unrouted).
@@ -448,11 +482,27 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 // loaded - and KhUserMatBaseColor / Roughness / Metalness /
 // EmissiveIntensity / NormalStrength / Cutoff / AlphaMode / SpecularColor /
 // Glossiness / Fresnel(), each the script's param (or its default).
-// Re-sampling the material (animation): KhUserUv() is the pixel's UV, so
-// KhSampleMat(KhUserUv() + offset) re-samples the whole surface and
-// KhMatFetch(slot, uv) one map, filtered (the slot numbers above;
-// KhMatFetchTexel(slot, uv) is the unfiltered texel at mip 0); drive the
-// offset from KhUserTime().
+// Re-sampling the material (animation): KhUserUv() is the uv the builtin
+// sampled - the pixel's, after the material's own texture animation when it
+// has one (KhUserUvRaw() is the mesh's, KhUserUvDx() / KhUserUvDy() the
+// gradients the builtin used) - so KhSampleMatG(KhUserUv() + offset,
+// KhUserUvDx(), KhUserUvDy()) re-samples the whole surface (anywhere: the
+// gradients are handed in) and KhUserTexGrad(i, KhUserUv(), KhUserUvDx(),
+// KhUserUvDy()) one of its own maps. The implicit forms - KhSampleMat(uv) (in
+// uniform flow), KhUserTex(i, uv), KhMatFetch(slot, uv) - take the gradients
+// of their uv, which is right for a material without a flipbook; with one,
+// KhUserUv() jumps between cells at every whole uv (a face's edge, a tile's)
+// and an implicit read there drops to a coarse mip - a seam: use the
+// gradient forms. KhMatFetchTexel(slot, uv) is the unfiltered texel at mip 0
+// (the slot numbers above). Drive the offset from KhUserTime(), or use the
+// KH_UV_ANIM helpers (KhUvAffine / KhUvWarp / KhUvFlip). KhUserUv() lives in
+// the animated space: an offset worked out in the mesh's uv (parallax from
+// KhUserTangent / KhUserBitangent, a vertex stage's) belongs on
+// KhUserUvRaw() - KhMatUv(KhUserUvRaw() + offset, dx, dy) applies the
+// material's animation to it and returns the gradients (in uniform flow).
+// What KhUserShade does moves the COLOUR only: the coverage and the shadows
+// follow the builtin's uv - give the material the texture-animation params
+// above to move those too.
 // Textures of its own (KH_USER_TEX): the material's texture slots user0 ..
 // user5 (script: [path, "user0", "srgb" | "linear"], linear by default) are
 // this shader's alone - no builtin input reads them. Read them with
@@ -503,7 +553,9 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //   v.tan      the unit tangent, object space (zero where the mesh has none),
 //              and v.tanSign its handedness. Write v.tan with v.nrm.
 //   v.uv       the texture coordinate. Writable: it is what the pixel stage
-//              receives (KhUserUv), the one channel from this stage to that.
+//              receives (KhUserUvRaw; KhUserUv once the material's texture
+//              animation, if any, has moved it), the one channel from this
+//              stage to that.
 //   v.rest     READ: v.pos as authored (or as skinned / simulated this frame -
 //              the stage runs after both), whatever you have written to v.pos.
 //   v.id       READ: the vertex's index in the mesh's vertex array - stable
@@ -539,6 +591,10 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 // there are no interpolants of your own from this stage to KhUserShade (v.uv
 // is the channel). While the stage compiles the mesh draws undeformed; if it
 // fails (reported once) it stays so.
+// A material shader (and its vertex stage) reads no scene colour and no depth
+// of its own - the scene's picture and depth are bound only where the guards
+// read them - so a refraction or an edge softened against the scene cannot be
+// written in one; an effect mesh can (the EFFECT section).
 //
 // ---- EFFECT shaders (a fullscreen pass or effect mesh given a .hlsl path) --
 // The script side: the object's "effect" property is the .hlsl path (where a
@@ -550,22 +606,58 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 // single-sample copy) and KH_FX_UNIT = 1: the KH_FX_UNIT section at the end of
 // this file - the builtin effects' own declarations and helpers, the text
 // their shader is built on - is in it. Do not declare what it declares, and
-// declare no texture or sampler of your own: nothing binds a register a user
-// shader declares, and a taken register fails the compile.
+// declare no texture or sampler of your own: the registers are assigned by
+// this file, and one you declare may collide with one of ours (fxc reports it
+// only once both are read) or read whatever the route left bound there.
 // Where it runs: the scene chain, the UI lane, effect meshes and - a localized
-// pass, as the builtins' - a picture-in-picture.
+// pass, as the builtins' - a picture-in-picture (never the injection).
+// Use only the KH_FX_UNIT section's helpers and the lanes named here: the
+// rest of this file (the mesh shading, the sun / DLS shadow functions,
+// KhSceneMeters) compiles in an effect, but its resources are not bound for
+// one.
 // Bound for it, as for the builtin effects (the section declares each):
 //   sceneColor (t0)  the pass's source. SampleScene(px) reads it clamped to the
 //                    frame (and premultiplied in the UI spill lane).
 //   depthTex (t1)    the depth the pass sees. LoadDepthPS(px) is the builtins'
 //                    read: the raw depth (LoadDepthRaw), with our near-plane
 //                    marker applied where one of our meshes drew nearer than
-//                    the near plane. LinDepth(raw) = metres along the view
-//                    axis (1e9 for the far plane and the sky);
+//                    the near plane, and the scene's depth where the view
+//                    model's translucent planes hid it (KH_VM_SEE, khVmSee
+//                    below). LinDepth(raw) = metres along the view
+//                    axis (1e9 for the far plane and the sky); KhLinZ(px) =
+//                    LinDepth(LoadDepthPS(px)) (a builtin pass may read a copy
+//                    of the frame's; a user pass converts);
 //                    KhWorldPosFenced(px, uv, d) = the world position (engine
-//                    axes, absolute) and d its distance, fenced short of the
-//                    far plane; KhgVpos = the view-space position.
-//   khNzMark (t37)   that marker (armed by shadowMeta2.x; LoadDepthPS reads it).
+//                    axes, absolute) at the pixel's centre (uv = i.pos.xy /
+//                    fxMeta.zw) and d its view depth (LinDepth's), held short
+//                    of the far plane (0.999 x KhEncFence());
+//                    KhgVpos(float2(px), d, fxMeta.zw, m.x, m.y), m =
+//                    KhFxProjScale(), = the view-space position at view depth d.
+//   khNzMark (t37)   that marker (armed by shadowMeta2.x in the scene chain
+//                    only - never an effect mesh, the PIP or the UI lane;
+//                    LoadDepthPS reads it).
+//   khVmSee (t34) / khVmT (t41)  KH_VM_SEE: the depth behind the first-person
+//                    view model's translucent planes (a 3D scope's eyepiece, a
+//                    sight's glass) and their transmittance. Armed (KhVmSeeArmed(),
+//                    shadowMeta2.w) in the scene chain past the view model alone:
+//                    MSAA, the viewport's MinDepth above 0 (depthParams.z), a
+//                    cycle whose view model drew a translucent plane and in which
+//                    a pass reads the depth - a user effect counts when its file
+//                    names LoadDepthPS, LoadDepthRaw, KhLinZ, KhWorldPosFenced,
+//                    KhSunFlareVis, a KhVmSee helper or one of these views. Then
+//                    LoadDepthPS returns the scene's depth there;
+//                    KhVmSeeCovered(px) says a plane wrote its own
+//                    over it; KhVmSeeT(px) is their transmittance (1 elsewhere
+//                    and unarmed). The builtin fogs, fog scatter, dynamicLightFog
+//                    and SSGI also fade by it (KhFxFinish); a user effect that
+//                    puts a medium or light into the scene does that itself,
+//                    before KhFxFinish: outc = KhVmSeeFade(scene, outc, px).
+//                    The UI lane reads the depth at Present, where LoadDepthPS
+//                    returns the planes' near depth, as for the builtins; at 1x
+//                    (and with MSAA while the late chain is refused or backed
+//                    off) the chain runs before the view model draws - no planes
+//                    in the depth yet - and a picture-in-picture has no view
+//                    model.
 //   khArbSnap (t2)   an effect mesh's arbitration snapshot (KhFxBegin reads it).
 //   khsgTex (t3) / khsgSamp (s2)  the pass's source pre-filtered: the pyramid
 //                    the builtin glows read, built for a pass whose file calls
@@ -587,14 +679,47 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //                    and loaded), KhUserTexSize(i) (texels; 0 when absent),
 //                    with i a literal 0 - 5 (a non-literal i samples all six
 //                    and selects). An absent or still-loading texture reads
-//                    zero.
+//                    zero. To move one (scroll, turn, ripple, a flipbook),
+//                    transform the uv with the KH_UV_ANIM helpers (KhUvAffine /
+//                    KhUvWarp / KhUvFlip) driven by fxMeta.y, the pass's age.
 // Helpers there, besides those: KhUiCov(px) (the UI coverage, in the UI lane),
 // Luma (BT.709), KhFxPx() (the factor from a 1080-row frame to this one - the
-// builtins' pixel sizes are 1080-row pixels), KhEncFence(), KhFxFogEngine
-// (the engine's fog at a pixel), KhHashF / Hash / Hash2 (integer hashes of
-// a float2 - exact at any magnitude; a time seed goes in KhHashF's integer
-// lane), KhSin / KhCos (sin / cos reduced to one period - for a growing
-// argument), KhGrainGc (the builtin grain's noise).
+// builtins' pixel sizes are 1080-row pixels), KhEncFence() (the far plane's
+// distance from the encode pair, clamped to [500, 100000] m - a view depth past
+// 0.98 of it is the sky's), KhFxProjScale() (the projection's x / y scales),
+// KhHashF / Hash / Hash2 (integer hashes of a float2 - exact at any magnitude;
+// a time seed goes in KhHashF's integer lane), KhSin / KhCos (sin / cos reduced
+// to one period - for a growing argument), KhGrainGc (the builtin grain's
+// noise), KhSqfToEngine(p) (a position from the params, SQF [x, y, zASL], in
+// engine axes: p.xzy - the C++ converts the builtin Pulse's and SunFlare's
+// itself; a user's arrive as sent), the KhVmSee helpers (above), and:
+//   fog          KhFxFogAt(px, d) = the fog the builtin fog scatter sees at px
+//                (0 none - 1 all; d its view depth, KhLinZ(px), 1e9 the sky):
+//                the engine's height fog (KhFxFogEngine(float2(px), d,
+//                fxMeta.zw, m.x, m.y), its sky integrated along the view ray)
+//                and the scene's distance-fog passes (KhFxFogPasses over the
+//                khFxFog records, filled in the scene chain), as independent
+//                media. Not the engine's haze (KhHazeT) or the
+//                below-layer term the mesh fog adds. The UI lane's fog lanes
+//                are zero (KhFxFogEngine returns 0 there; lighting1.w = 0 says
+//                the same of the sun).
+//   scatter      KhFsOwnW(s, rm), KhFsSourceFog(ss, sc, sd, cd),
+//                KhFsNearFloor(fx, ss, sr, rk, sd, cd): fog scatter's rules for
+//                a pixel that spreads its fog's share s over a cone of radius
+//                rm s - its own weight, the fog a source scatters into it with
+//                (a farther one, the sky behind a ridge, takes the receiver's)
+//                and the floor a nearer one puts on its own term, so a
+//                silhouette against the sky bleeds (their note below;
+//                effect3.hlsl's effect 23 is the worked example).
+//   sun          KhFxSunSpot(dir, spos, sp) (a direction - lighting1.xyz for
+//                the sun or moon - projected as a point at infinity: false
+//                behind the camera or well off screen), KhSunFlareVis(sp) (how
+//                much sky shows at it, 25 depth taps), KhSunFlareEdge(spos)
+//                (its fade leaving the frame).
+// The dynamic-light lanes (dlCtl, dlGlobal, dlView, dlFirst) are filled for a
+// lit object alone: an effect mesh is lit by default (updateRender3D's "lit"),
+// and DynLights then returns the lights that reach it; a fullscreen pass is
+// not lit and reads zero. The builtin rain lens's own lanes are its alone.
 // The builtin's first and last lines, opt-in (one body with its own shader):
 //     KhFxBegin(i);                               call it first
 //     return KhFxFinish(SampleScene(px), outc, i.pos.xy);
@@ -608,7 +733,8 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //   fxMeta     x = effect id, y = the object's age in seconds (formed in
 //              double: the most precise clock), zw = the target size in px.
 //              uv = i.pos.xy / fxMeta.zw.
-//   fxParams0..2  the script's twelve effect parameters, in order.
+//   fxParams0..2  the script's twelve effect parameters, in order (a world
+//              position among them arrives in SQF axes: KhSqfToEngine).
 //   color      the object colour; color.a is the script's opacity (a
 //              fullscreen pass whose color.a <= 0.001 is skipped undrawn).
 //   sizeAxes.w the blend mode (0 normal, 1 additive, 2 multiply, 3 screen,
@@ -660,7 +786,12 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //                         the pass camera's axes (engine axes, unit length);
 //                         Forward is the direction it looks.
 //   KhUserViewDir(wpos)   unit vector from wpos toward the camera.
-//   KhUserUv()            MATERIAL only: the pixel's texture UV.
+//   KhUserUv()            MATERIAL only: the pixel's texture UV, as the
+//                         builtin sampled it (after the material's texture
+//                         animation); KhUserUvRaw() the mesh's own,
+//                         KhUserUvDx() / KhUserUvDy() its gradients.
+//   KhUvMatrix / KhUvAffine / KhUvWarp / KhUvFlip / KhUvNrm   both: texture-
+//                         coordinate animation (KH_UV_ANIM, below).
 //   KhUserPixel()         MATERIAL only: the pixel's position in the target, px
 //                         (an effect has i.pos.xy).
 //   KhUserTex*            both: a material's user0 .. user5 (the MATERIAL
@@ -692,8 +823,13 @@ float3 KhUserViewDir(float3 khuv_wpos)
 // Set by PSMain / PSComposite immediately before KhUserShade (TWIN).
 static float2 khUserUvPs = float2(0.0f, 0.0f);
 static float2 khUserPxPs = float2(0.0f, 0.0f);
+static float2 khUserUvRawPs = float2(0.0f, 0.0f);   // KH_UV_ANIM: the mesh's own uv.
+static float4 khUserUvGPs = float4(0.0f, 0.0f, 0.0f, 0.0f);   // KH_UV_ANIM: KhUserUv's ddx (xy) and ddy (zw).
 float2 KhUserUv()    { return khUserUvPs; }
 float2 KhUserPixel() { return khUserPxPs; }
+float2 KhUserUvRaw() { return khUserUvRawPs; }
+float2 KhUserUvDx()  { return khUserUvGPs.xy; }
+float2 KhUserUvDy()  { return khUserUvGPs.zw; }
 // KH_USER_VS: object space (metres, the object's centre at 0) to world and a
 // direction likewise - the builtin transform's own arithmetic (KhVsCore), for
 // a vertex stage that needs to know where it is (wind, a world-space wave).
@@ -714,6 +850,67 @@ float3 KhUserVtxObjectDir(float3 khvw_d)
 {
     if (objRot0.w < 0.5f) return khvw_d;
     return float3(dot(khvw_d, objRot0.xyz), dot(khvw_d, objRot1.xyz), dot(khvw_d, objRot2.xyz));
+}
+// KH_UV_ANIM - texture-coordinate animation. The materials' (the script's uv* /
+// flipbook params, KhMatUv) is built from these; any shader may use them on its
+// own coordinates - a user or builtin effect moving its KhUserTex maps by
+// fxMeta.y, a material's KhUserShade. Pure functions of their arguments, in
+// every unit.
+//   KhUvMatrix(scale, radians)  A = S * R as float4 (a00, a01, a10, a11) - the
+//                               lookup turns by the angle (the picture the
+//                               other way), then scales.
+//   KhUvAffine(uv, A, c)        A * uv + c. About the tile's centre:
+//                               c = 0.5 - KhUvAffine(0.5, A, 0) + offset.
+//   KhUvWarp(uv, amp, freq, ph) uv + amp * sin(2 pi (freq * uv.yx + ph)): a
+//                               ripple across each axis; ph its phase per axis.
+//   KhUvFlip(uv, grid, frame)   the uv inside cell 'frame' (0 ..) of a grid.x x
+//                               grid.y sheet, row by row from v = 0. Sample it
+//                               with the gradients of uv divided by grid (no
+//                               mip seam at the cells' edges).
+//   KhUvNrm(xy, A)              a tangent-space normal's xy, sampled at
+//                               A * uv + c, in the surface's own frame:
+//                               A^T * xy / sqrt|det A| - the bumps turn,
+//                               mirror and stretch with the picture (the
+//                               slope of the surface it draws, A^T * xy);
+//                               a uniform tiling does not steepen them; a
+//                               non-uniform one steepens them along its
+//                               denser axis and flattens them along the
+//                               other, by the root of the scales' ratio.
+// Precision: a float time t resolves t x 6e-8 s (2 ms after 10 hours), and a
+// motion of rate x t inherits that step times the rate - frac(rate * t) keeps
+// the arguments small but cannot win the lost resolution back. fxMeta.y is the
+// pass's own age (formed in double, then float), so it stays fine for a pass
+// that is not hours old; the material params form theirs in double (C++
+// kh_uv_anim_lanes) and never coarsen.
+float4 KhUvMatrix(float2 khuv_s, float khuv_a)
+{
+    float khuv_sn, khuv_cs;
+    sincos(khuv_a, khuv_sn, khuv_cs);
+    return float4(khuv_s.x * khuv_cs, -khuv_s.x * khuv_sn, khuv_s.y * khuv_sn, khuv_s.y * khuv_cs);
+}
+float2 KhUvAffine(float2 khuv_uv, float4 khuv_m, float2 khuv_c)
+{
+    return float2(khuv_m.x * khuv_uv.x + khuv_m.y * khuv_uv.y, khuv_m.z * khuv_uv.x + khuv_m.w * khuv_uv.y) + khuv_c;
+}
+float2 KhUvWarp(float2 khuv_uv, float khuv_amp, float khuv_f, float2 khuv_ph)
+{
+    return khuv_uv + khuv_amp * sin(6.28318531f * frac(khuv_f * khuv_uv.yx + khuv_ph));
+}
+float2 KhUvFlip(float2 khuv_uv, float2 khuv_g, float khuv_fr)
+{
+    const float khuv_i = floor(khuv_fr);
+    const float khuv_r = floor((khuv_i + 0.5f) / khuv_g.x);
+    const float2 khuv_c = float2(khuv_i - khuv_r * khuv_g.x, khuv_r);
+    // Held 1e-6 inside the cell's edges (a 60th of a texel on a 16384-texel sheet): frac of a uv a hair below a whole
+    // number rounds to 1.0 in fp32, and the sum and the division round either way - each lands a texel index on the
+    // neighbouring frame (the last column's on 1.0: the first column's, once wrapped).
+    return clamp((frac(khuv_uv) + khuv_c) / khuv_g, khuv_c / khuv_g + 1.0e-6f, (khuv_c + 1.0f) / khuv_g - 1.0e-6f);
+}
+float2 KhUvNrm(float2 khuv_xy, float4 khuv_m)
+{
+    const float khuv_d = abs(khuv_m.x * khuv_m.w - khuv_m.y * khuv_m.z);
+    return float2(khuv_m.x * khuv_xy.x + khuv_m.z * khuv_xy.y, khuv_m.y * khuv_xy.x + khuv_m.w * khuv_xy.y)
+         * rsqrt(max(khuv_d, 1.0e-12f));
 }
 #if KH_USER_MAT
 // KH_USER_FRAME: set by PSMain / PSComposite where they build the mapped
@@ -2328,7 +2525,7 @@ Texture2DArray<float4> matSpecular : register(t18);
 Texture2DArray<float4> matSpecColor : register(t42);
 SamplerState matSamp : register(s0);
 
-// One entry per material-set slot, C++ twin KhGpuMat (9 float4). p0..p3 = the
+// One entry per material-set slot, C++ twin KhGpuMat (13 float4). p0..p3 = the
 // matParams0..3 lanes (map-bound flags, alpha mode, cutoff, normal strength /
 // base colour, roughness / metalness, emissive intensity, occ route, rough
 // route / metal route, alpha route, gloss route, spec workflow); lay0 =
@@ -2338,8 +2535,14 @@ SamplerState matSamp : register(s0);
 // arma model and, KH_USER_SLOTS, for a user material (whose model lane stays
 // 0); zero for pbr but the specular route (p5.z), which is -1 (unrouted);
 // lay1.zw and lay2 = KH_USER_TEX's user0..user5 layers. p0.x's bits 0-5 are
-// the six maps' bound flags, bits 6-11 the user maps'.
-struct KhGpuMat { float4 p0; float4 p1; float4 p2; float4 p3; float4 lay0; float4 lay1; float4 p4; float4 p5; float4 lay2; };
+// the six maps' bound flags, bits 6-11 the user maps'. KH_UV_ANIM: bit 12 =
+// the uv transform, 13 its warp, 14 the flipbook; an0 = its matrix A, an1 =
+// (translation c, warp phase), an2 = (warp amplitude, frequency), an3 =
+// (columns, rows, frame) - C++ kh_uv_anim_lanes, once a cycle.
+struct KhGpuMat {
+    float4 p0; float4 p1; float4 p2; float4 p3; float4 lay0; float4 lay1; float4 p4; float4 p5; float4 lay2;
+    float4 an0; float4 an1; float4 an2; float4 an3;
+};
 StructuredBuffer<KhGpuMat> khMats : register(t38);
 
 // The per-pixel material lanes. KhMatLoad fills them from the table entry once
@@ -2347,6 +2550,7 @@ StructuredBuffer<KhGpuMat> khMats : register(t38);
 // instance).
 static float4 khMatLay0 = 0.0f, khMatLay1 = 0.0f, khMatLay2 = 0.0f;
 static float4 matParams4 = 0.0f, matParams5 = 0.0f;
+static uint khMatIx = 0;   // KH_UV_ANIM: the entry KhMatLoad read (its animation lanes load where a flag needs them).
 void KhMatLoad(uint khml_ix)
 {
     KhGpuMat khml_m = khMats[khml_ix];
@@ -2359,7 +2563,36 @@ void KhMatLoad(uint khml_ix)
     khMatLay2 = khml_m.lay2;   // KH_USER_TEX.
     matParams4 = khml_m.p4;
     matParams5 = khml_m.p5;
+    khMatIx = khml_ix;   // KH_UV_ANIM.
     if (matCtl.w >= 0.0f) matParams0.y = matCtl.w;   // The draw's alpha-mode override.
+}
+// KH_UV_ANIM: the uv this material's maps are read at, and its gradients - every reader takes it (the colour twins,
+// the blend split's texel verdict, the alpha casters), so colour, coverage and shadows agree. After KhMatLoad, in
+// uniform flow (the gradients are taken here, after the branches reconverge; the flags are per draw or per
+// instance, and a quad never spans two). Unanimated (bits 12 - 14 clear) it returns uv and ddx / ddy of it, as the
+// readers took before. The flipbook's gradients are the continuous uv's over the sheet: no mip seam at a cell edge.
+// The lanes are read here, under their flags (an unanimated material loads none of them).
+float2 KhMatUv(float2 khmu_uv, out float2 khmu_dx, out float2 khmu_dy)
+{
+    const uint khmu_f = (uint)(int)matParams0.x;
+    float2 khmu_c = khmu_uv;
+    [branch] if (khmu_f & 4096u) {
+        const float4 khmu_a1 = khMats[khMatIx].an1;
+        khmu_c = KhUvAffine(khmu_uv, khMats[khMatIx].an0, khmu_a1.xy);
+        [branch] if (khmu_f & 8192u) {
+            const float4 khmu_a2 = khMats[khMatIx].an2;
+            khmu_c = KhUvWarp(khmu_c, khmu_a2.x, khmu_a2.y, khmu_a1.zw);
+        }
+    }
+    khmu_dx = ddx(khmu_c);
+    khmu_dy = ddy(khmu_c);
+    [branch] if (khmu_f & 16384u) {
+        const float4 khmu_a3 = khMats[khMatIx].an3;
+        khmu_dx /= khmu_a3.xy;
+        khmu_dy /= khmu_a3.xy;
+        khmu_c = KhUvFlip(khmu_c, khmu_a3.xy, khmu_a3.z);
+    }
+    return khmu_c;
 }
 float KhMatLayer(int slot)
 {
@@ -2595,12 +2828,11 @@ uint KhMatNeed()
     return khmn_m;
 }
 
-KhMatSurf KhSampleMat(float2 uv)
+// KH_UV_ANIM: the body takes the gradients from its caller (KhMatUv's, for the builtin readers); uv is in the
+// material's animated space, so a turned or mirrored material's normal map is turned back by KhUvNrm (bit 12).
+KhMatSurf KhSampleMatG(float2 uv, float2 khsm_dx, float2 khsm_dy)
 {
     KhMatSurf s;
-    // KH_MAT_GRAD: the gradients here, before any branch (this is where the implicit sample took them).
-    const float2 khsm_dx = ddx(uv);
-    const float2 khsm_dy = ddy(uv);
     const uint khsm_need = KhMatNeed();
     KhMatTaps khsm_m = (KhMatTaps)0;
     [branch] if (khsm_need & 1u)  khsm_m.t0 = matDiffuse.SampleGrad(matSamp, float3(uv, khMatLay0.x), khsm_dx, khsm_dy);
@@ -2614,6 +2846,7 @@ KhMatSurf KhSampleMat(float2 uv)
     s.albedo = dif.rgb * matParams1.xyz;
     s.alpha = KhMatRouteTap(khsm_m, matParams3.y, 1.0f);
     s.nrmT = (flags & 2) ? (khsm_m.t1.xyz * 2.0f - 1.0f) : float3(0.0f, 0.0f, 1.0f);
+    [branch] if (flags & 4096) s.nrmT.xy = KhUvNrm(s.nrmT.xy, khMats[khMatIx].an0);   // KH_UV_ANIM (not the warp).
     s.nrmT.xy *= matParams0.w;
     s.occ = KhMatRouteTap(khsm_m, matParams2.z, 1.0f);
     s.rough = KhMatRouteTap(khsm_m, matParams2.w, matParams1.w);
@@ -2632,6 +2865,12 @@ KhMatSurf KhSampleMat(float2 uv)
     s.specTint = KhMatRouteTap(khsm_m, matParams5.z, 1.0f) * khsm_sc * matParams4.xyz;
     s.fresnelNK = matParams5.xy;
     return s;
+}
+// The user contract's: the gradients of uv here (KH_MAT_GRAD: where the implicit sample took them), so call it in
+// uniform flow. uv is a coordinate in the material's animated space (KhUserUv()'s).
+KhMatSurf KhSampleMat(float2 uv)
+{
+    return KhSampleMatG(uv, ddx(uv), ddy(uv));
 }
 
 // The arma model's Fresnel: the reflectance of a conductor of complex index
@@ -3037,6 +3276,47 @@ struct VSInst {
     float3 ilane : TEXCOORD5;    // x = dither, y = alpha, z = material base.
 };
 
+// KH_SKIN_POOL - a skin pool chunk (C++ KhSkinPoolChunk): the GPU-skinned
+// poses of many skeletal bindings of one mesh, each its whole MeshVertex array
+// (48 bytes: pos 0, nrm 12, uv 24, tan 32) from its own vertex base, viewed as
+// uint4 - three elements a vertex. An Sk twin (static.hlsl, composite2.hlsl)
+// pulls its instance's vertex at the record's base (KhObjRec res.w) plus the
+// vertex's index, then runs the twin it wraps, unchanged: asfloat moves the
+// bits the input assembler fetches from the same bytes for a 32-bit float
+// element, so every instance draws exactly the pose its own slice holds - its
+// own deformation - and the bucket draws them all in one call. Every bucket
+// draw passes BaseVertexLocation 0, so SV_VertexID is the index's value.
+// VSInstSk is the twins' one input: the lane (VSInst's two elements on slot
+// 1; C++ layout_inst_sk) and the vertex id - no slot-0 element.
+Buffer<uint4> khSkinPool : register(t52);
+struct VSInstSk {
+    uint   islot : TEXCOORD4;
+    float3 ilane : TEXCOORD5;
+    uint   vid   : SV_VertexID;
+};
+VSIn KhSkPull(uint khsp_vid, float khsp_base)
+{
+    const uint khsp_e = ((uint)khsp_base + khsp_vid) * 3u;
+    const uint4 khsp_a = khSkinPool.Load((int)khsp_e);
+    const uint4 khsp_b = khSkinPool.Load((int)(khsp_e + 1u));
+    VSIn i;
+    i.pos = asfloat(khsp_a.xyz);                            // MeshVertex bytes 0 - 11.
+    i.nrm = asfloat(uint3(khsp_a.w, khsp_b.x, khsp_b.y));   // 12 - 23.
+#if KH_TEXTURED
+    const uint4 khsp_c = khSkinPool.Load((int)(khsp_e + 2u));
+    i.uv = asfloat(khsp_b.zw);                              // 24 - 31.
+    i.tan = asfloat(khsp_c);                                // 32 - 47.
+#endif
+    return i;
+}
+VSInst KhSkLane(VSInstSk s)
+{
+    VSInst n;
+    n.islot = s.islot;
+    n.ilane = s.ilane;
+    return n;
+}
+
 float3 KhRotateR(float3 p, float3 r0, float3 r1, float3 r2)
 {
     return p.x * r0 + p.y * r1 + p.z * r2;
@@ -3382,10 +3662,15 @@ float KhHazeT(float khaz_d, float khaz_wposY, float khaz_camY, float khaz_layerY
 // the builtin effect shader (effect.hlsl, effect2.hlsl and effect3.hlsl follow
 // this file) and into every user effect shader (the USER SHADER CONTRACT's
 // EFFECT section) - one text for both, so a
-// user effect reads the scene, the depth, the pyramid and the fog as the
-// builtins do, and can begin and finish its pixel with the builtin's own lines
-// (KhFxBegin / KhFxFinish, below). Fenced: the mesh units declare other
-// resources at t0 - t3 (static.hlsl, composite.hlsl).
+// user effect reads the scene, the depth (the near-plane marker and KH_VM_SEE
+// included), the pyramid and the fog (the engine's, and the scene's fog passes
+// where khFxFog is filled) as the builtins do, scatters by fog scatter's own
+// rules, and can begin and finish its pixel with the builtin's own lines
+// (KhFxBegin / KhFxFinish, below). What stays the builtins' is built for one
+// pass and bound around it: the side values (fog scatter's per-pixel fog, the
+// sun flare's visibility, the UI probe), the linear-depth copies, the SSGI /
+// dynamicLightFog grids, the anamorphic atlas and the LUT. Fenced: the mesh
+// units declare other resources at t0 - t3 (static.hlsl, composite.hlsl).
 // ===========================================================================
 #if KH_FX_UNIT
 Texture2D<float4> sceneColor : register(t0);
@@ -3413,8 +3698,21 @@ float LoadDepthRaw(int2 px) { return depthTex.Load(int3(px, 0)).x; }
 // true distance) where a drawer of ours wrote one this cycle; where its raw is
 // still the live raw, that distance comes back re-encoded through this pass's
 // own pair, so LinDepth (and every reader of this load) gets the true one. Any
-// other pixel - the hands drawn over since, the world - loads as it is.
+// other pixel - the hands drawn over since, the world - loads as it is (but
+// for KH_VM_SEE, below).
 Texture2D<float2> khNzMark : register(t37);
+// KH_VM_SEE: past the view model (the scene chain at a later resolve, KH_FX_LATE - MSAA), a sight's translucent
+// planes - a 3D scope's eyepiece over its whole aperture, a holosight's glass - have written their own near depth
+// over the scene they show, so every reader here saw a wall a few centimetres away. khVmSee holds the raw depth
+// (sample 0, LoadDepthRaw's) as the view model's first translucent draw found it - the world, or the view model's
+// opaque parts, which its depth prepass has drawn by then - and khVmT the planes' transmittance (1 = none: the
+// product of 1 - alpha over the ones that blend over with it). Armed by shadowMeta2.w: 1 = LoadDepthPS takes the
+// snapshot where the live raw is below the world's range (depthParams.z) and the snapshot's is in it - after the
+// marker, whose pixels (and our gap's, below the range in the snapshot too) keep theirs; 2 = KhFxFinish also fades
+// the pass to the scene there by the transmittance (KhVmSeeT, below). Armed only with depthParams.z above 0, so an
+// unbound view (null: loads 0) or a pixel off the texture applies neither.
+Texture2D<float> khVmSee : register(t34);
+Texture2D<float> khVmT : register(t41);
 float LoadDepthPS(int2 px)
 {
     const float khnz_r = LoadDepthRaw(px);
@@ -3424,7 +3722,40 @@ float LoadDepthPS(int2 px)
             return depthParams.z + (depthParams.w - depthParams.z) * (depthParams.x + depthParams.y / khnz_m.y);
         }
     }
+    [branch] if (shadowMeta2.w > 0.5f && khnz_r < depthParams.z) {   // KH_VM_SEE.
+        const float khvs_s = khVmSee.Load(int3(px, 0));
+        if (khvs_s >= depthParams.z) return khvs_s;
+    }
     return khnz_r;
+}
+// KH_VM_SEE: the view model's translucent planes' transmittance at px where the snapshot holds the scene - 1
+// elsewhere and on an unarmed pass. KhFxFinish fades a builtin medium pass by it (shadowMeta2.w 2, KhVmSeeFade).
+float KhVmSeeT(int2 px)
+{
+    float khvt_t = 1.0f;
+    [branch] if (shadowMeta2.w > 0.5f) {
+        if (khVmSee.Load(int3(px, 0)) >= depthParams.z) khvt_t = khVmT.Load(int3(px, 0));
+    }
+    return khvt_t;
+}
+// KH_VM_SEE for any effect: the arm (this pass substitutes - the scene chain past the view model, in a cycle whose
+// snapshot landed; not a first-person test), whether a view-model translucent plane wrote its own depth over the
+// scene at px (LoadDepthPS returns the snapshot there), and the builtin medium passes' fade, guarded so a pixel no
+// plane covers keeps outc exactly.
+bool KhVmSeeArmed() { return shadowMeta2.w > 0.5f; }
+bool KhVmSeeCovered(int2 px)
+{
+    bool khvc_c = false;
+    [branch] if (shadowMeta2.w > 0.5f && LoadDepthRaw(px) < depthParams.z) {
+        khvc_c = khVmSee.Load(int3(px, 0)) >= depthParams.z;
+    }
+    return khvc_c;
+}
+float3 KhVmSeeFade(float3 scene, float3 outc, int2 px)
+{
+    const float khvf_t = KhVmSeeT(px);
+    if (khvf_t < 1.0f) outc = lerp(scene, outc, khvf_t);
+    return outc;
 }
 
 Texture2D<float> khArbSnap : register(t2);
@@ -3503,6 +3834,26 @@ float LinDepth(float raw)
     return d > 0.0f ? d : 1e9f;
 }
 
+// KH_FX_LINZ (effect.hlsl's note): LinDepth(LoadDepthPS(p)), or the frame's copy of it at t7 where a builtin pass
+// armed one (matCtl.x - zero for a user pass, which converts). Unarmed (one value for the whole draw: a uniform
+// branch), the conversion alone - t7 untouched, whatever the route left there (effect meshes and the PIP reach this
+// too). Armed, the copy is loaded ahead of the in-range branch (texel 0 past the frame, its value unused), which only
+// a read past the frame takes. Branches, not ?: (which evaluates both arms); the conversion written once.
+Texture2D<float> khLinZ : register(t7);
+float KhLinZ(int2 khlz_p)
+{
+    float khlz_z = 0.0f;
+    bool  khlz_cv = true;   // Convert in place.
+    [branch] if (matCtl.x > 0.5f) {
+        const bool khlz_in = khlz_p.x >= 0 && khlz_p.y >= 0 &&
+                             khlz_p.x < (int)fxMeta.z && khlz_p.y < (int)fxMeta.w;
+        khlz_z = khLinZ.Load(int3(khlz_in ? khlz_p : int2(0, 0), 0));
+        khlz_cv = !khlz_in;
+    }
+    [branch] if (khlz_cv) khlz_z = LinDepth(LoadDepthPS(khlz_p));
+    return khlz_z;
+}
+
 // KH_HASH - integer hashing (pcg3d, Jarzynski & Olano, "Hash Functions for GPU Rendering", JCGT 2020) in place of
 // frac(sin(dot(p, k)) * 43758.5453). D3D11 specifies sin only on [-100 pi, 100 pi]; the sine hash fed it ~1e5 from
 // a pixel position and, through the time-seeded callers (fxMeta.y is seconds since the object's creation and never
@@ -3552,6 +3903,14 @@ float3 KhWorldPosFenced(int2 px, float2 uv, out float khwf_d)
     return khwf_wp.xyz / khwf_wp.w + (fxCam.w > 0.5f ? fxCam.xyz : float3(0.0f, 0.0f, 0.0f));
 }
 
+// The projection's x / y scales (KhgVpos's vp_m00 / vp_m11, KhFxFogEngine's fs_m00 / fs_m11): the lengths of
+// viewProj's first and second columns over its xyz rows (a rebase moves only row 3).
+float2 KhFxProjScale()
+{
+    return float2(max(length(float3(viewProj[0].x, viewProj[1].x, viewProj[2].x)), 1e-6f),
+                  max(length(float3(viewProj[0].y, viewProj[1].y, viewProj[2].y)), 1e-6f));
+}
+
 // Pure function of its arguments; reads no CB.
 float3 KhgVpos(float2 vp_px, float vp_d, float2 vp_res, float vp_m00, float vp_m11)
 {
@@ -3564,9 +3923,8 @@ float3 KhgVpos(float2 vp_px, float vp_d, float2 vp_res, float vp_m00, float vp_m
 // KH_FX_USER: the engine's own fog at a pixel - the share of its light the
 // engine's fog replaces (0 none - 1 all), from the view distance fs_d (LinDepth),
 // the frame fs_res (fxMeta.zw) and the projection's two scales fs_m00 / fs_m11
-// (the lengths of viewProj's first and second columns over its xyz rows, as
-// fog scatter forms them). Fog scatter's engine term (KhFsFog adds the KH fog
-// passes to it) - one body. KH_FOG_SKY: the sky (a depth past the far fence) and,
+// (KhFxProjScale()). Fog scatter's engine term (KhFsFog adds the KH fog
+// passes to it, KhFxFogPasses) - one body. KH_FOG_SKY: the sky (a depth past the far fence) and,
 // with the engine's fog-end ramp, whatever lies past the fog end - where the game
 // shows no geometry, only sky and clouds - take the height fog integrated along
 // the view ray to infinity instead of the ramp's full fog: looking up from above
@@ -3638,6 +3996,122 @@ float KhFxFogEngine(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float
         fs_s = 1.0f - saturate(fs_tr);
     }
     return fs_s;
+}
+
+// KH_FX_FOGREC: the KH fog passes (effect 13's twin - the same linear-depth ramp and skyAmount rule; edit both or
+// neither), two records [startDist, endDist, skyAmount, opacity] (opacity 0 = none), each combined with the fog
+// fraction fs_s as an independent medium; unsaturated. KhFsFog's loop (fxParams1 / 2, the builtin fog scatter's
+// system lanes) and KhFxFogAt's (khFxFog).
+float KhFxFogPasses(float fs_s, float fs_d, float4 fs_r0, float4 fs_r1)
+{
+    float fs_fence = KhEncFence();
+
+    [unroll] for (int fs_i = 0; fs_i < 2; ++fs_i)
+    {
+        float4 fs_e = fs_i == 0 ? fs_r0 : fs_r1;
+        if (fs_e.w > 0.001f)
+        {
+            float fs_f = saturate((fs_d - fs_e.x) / max(fs_e.y - fs_e.x, 1.0f));
+            float fs_w = saturate((min(fs_d, fs_fence) - fs_fence * 0.98f)
+                                  / max(fs_fence * 0.019f, 1.0f));
+            fs_f = lerp(fs_f, saturate(fs_e.z), fs_w);
+            if (fs_d > 1e8f) fs_f = saturate(fs_e.z);   // Belt (the feather already lands here).
+            fs_s = 1.0f - (1.0f - fs_s) * (1.0f - fs_f * fs_e.w);
+        }
+    }
+
+    return fs_s;
+}
+// The fog the builtin fog scatter sees at px (KhFsFog's twin, with the user's records): 0 none - 1 all, d its view
+// depth. The engine's fog and the scene's fog passes where khFxFog is filled (the scene chain).
+float KhFxFogAt(int2 px, float d)
+{
+    const float2 khfa_m = KhFxProjScale();
+    float khfa_s = KhFxFogEngine(float2(px), d, float2(fxMeta.z, fxMeta.w), khfa_m.x, khfa_m.y);
+    khfa_s = KhFxFogPasses(khfa_s, d, khFxFog[0], khFxFog[1]);
+    return saturate(khfa_s);
+}
+
+// KH_FS_SELF / KH_FS_SKY - the rules of a screen-space scatter in which each pixel spreads its fog's share s of its
+// light over a cone of radius rm s px (fog scatter, effect 23 in effect3.hlsl - the worked example: its taps, their
+// weights and the pyramid's footprints):
+//   KhFsOwnW(s, rm)  the receiver's own weight: its unscattered share (1 - s) and its own pixel's share of its cone,
+//                    3 / (pi max(rm s, 1)^2) (a cone of radius r and height 1 holds pi r^2 / 3; the taps sample the
+//                    cone around the pixel - 1 px out at least - so the pixel is not weighted as a tap).
+//   KhFsSourceFog(ss, sc, sd, cd)  the fog a source at view depth sd (its own fog ss) scatters with into a receiver at
+//                    cd (its own sc): a FARTHER source's light reaches the receiver through the receiver's own column,
+//                    so sc - the sky behind a fogged ridge glows onto it; a nearer one its own.
+//   KhFsNearFloor(fx, ss, sr, rk, sd, cd)  for a source that reaches (sr, its distance in px, below rk = rm x its
+//                    fog): the most fog a NEARER source puts on the receiver's ray (it runs beside that column and
+//                    crossed that fog too), tapered over the source's disc. Start fx at sc; after the taps, where
+//                    fx > sc, add min(KhFsOwnW(fx, rm) - KhFsOwnW(sc, rm), 0) to the receiver's weight (scene x it
+//                    to the sum) - so a sky or past-the-fog-end receiver beside a fogged ridge bleeds.
+float KhFsOwnW(float s, float rm)
+{
+    const float khfo_r = max(rm * s, 1.0f);
+    return (1.0f - s) + s * 0.95492966f / (khfo_r * khfo_r);
+}
+float KhFsSourceFog(float ss, float sc, float sd, float cd)
+{
+    float khfg_s = ss;
+    if (sd > cd) khfg_s = sc;
+    return khfg_s;
+}
+float KhFsNearFloor(float fx, float ss, float sr, float rk, float sd, float cd)
+{
+    float khfn_x = fx;
+    if (sd < cd) khfn_x = max(fx, ss * (1.0f - sr / rk));
+    return khfn_x;
+}
+
+// A position from the script's params, SQF [x, y, zASL], in engine axes (east, up, north).
+float3 KhSqfToEngine(float3 p) { return p.xzy; }
+
+// A source at infinity in direction dir (engine axes: the sun flare's fxParams0.xyz, or lighting1.xyz for the sun /
+// moon): the direction projects as a point at infinity (w = 0). False = the source is behind the camera or well off
+// screen; spos its uv, sp its pixel (clamped to the frame).
+bool KhFxSunSpot(float3 khss_dir, out float2 spos, out int2 sp)
+{
+    spos = float2(0.0f, 0.0f);
+    sp = int2(0, 0);
+    const float4 clip = mul(float4(khss_dir, 0.0f), viewProj);
+    if (!(clip.w > 0.01f)) return false;
+    const float2 sndc = clip.xy / clip.w;
+    if (!all(abs(sndc) < 1.3f)) return false;
+    spos = float2(sndc.x * 0.5f + 0.5f, 0.5f - sndc.y * 0.5f);
+    sp = int2(saturate(spos) * float2(fxMeta.z, fxMeta.w));
+    return true;
+}
+// Its visibility: the flare fades via depth occlusion at the source - sky = visible, geometry = blocked - over 25
+// taps around it. The same for every pixel of the pass (the builtin sun flare draws it once where it can, KH_FX_SIDE).
+// A tap off the frame is absent information and is left out of the average (fog scatter's rule): a Load there reads
+// 0, the near plane, which counted as blocked and dimmed a sun standing near an edge. KhFxSunSpot clamps the source
+// to the frame edge (one past it), so some taps always land inside; with none (a frame a few pixels wide) it reads 0.
+float KhSunFlareVis(int2 sp)
+{
+    float vis = 0.0f;
+    float khsf_n = 0.0f;
+    const float khsf_f = KhEncFence();
+    [unroll] for (int oy = -2; oy <= 2; ++oy)
+    [unroll] for (int ox = -2; ox <= 2; ++ox)
+    {
+        // KH_FX_PX_REF: nearest whole px.
+        const int2 khsf_p = sp + int2(ox, oy) * max((int)floor(3.0f * KhFxPx() + 0.5f), 1);
+        if (khsf_p.x < 0 || khsf_p.y < 0 || khsf_p.x >= (int)fxMeta.z || khsf_p.y >= (int)fxMeta.w) continue;
+        float khsf_d = LinDepth(LoadDepthPS(khsf_p));
+        vis += saturate((min(khsf_d, khsf_f) - khsf_f * 0.98f)
+                        / max(khsf_f * 0.019f, 1.0f));
+        khsf_n += 1.0f;
+    }
+    return khsf_n > 0.0f ? vis / khsf_n : 0.0f;
+}
+// KH_FLARE_EDGE: the source's fade as it leaves the frame - 1 on screen, falling linearly with the farther axis to 0
+// where KhFxSunSpot gives up (1.3 NDC). Past the edge the source is clamped to it and its visibility is the
+// border's, so without the fade the flare held that level out to 1.3 and then vanished in one frame.
+float KhSunFlareEdge(float2 spos)
+{
+    const float2 khse_n = abs(spos * 2.0f - 1.0f);
+    return saturate((1.3f - max(khse_n.x, khse_n.y)) / 0.3f);
 }
 
 // Point-op pass fusion. CPU twin: the chain loops' pending append
@@ -3734,7 +4208,14 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
 // sampler). The material shaders' KH_USER_TEX functions, by the same names and
 // rules: the selects are ?: chains, not flow, so a filtered sample never sits
 // in divergent control flow; with a literal index fxc drops the other five.
-// The builtin effects bind none of these and read none.
+// KH_FX_TEX_ALL: a BUILTIN effect's pass binds them too when its object names
+// some (the same script property, on every route; none of today's builtins
+// reads them). Builtin code reads them with KhUserTexLod / KhUserTexGrad only:
+// PSEffect dispatches through if-chains fxc cannot prove uniform, where an
+// implicit-derivative sample has no derivative. For a fullscreen pass at uv =
+// i.pos.xy / fxMeta.zw the gradients are dx = float2(1 / fxMeta.z, 0), dy =
+// float2(0, 1 / fxMeta.w); fxMeta.y (the pass's age) drives an animation (the
+// KH_UV_ANIM helpers, KhUvAffine / KhUvWarp / KhUvFlip).
 Texture2DArray<float4> khUserMap0 : register(t43);
 Texture2DArray<float4> khUserMap1 : register(t44);
 Texture2DArray<float4> khUserMap2 : register(t45);
@@ -3833,8 +4314,10 @@ void KhFxBegin(VSOut i)
     }
 }
 
-// KhFxFinish: the pixel finished as the builtin finishes its own - the
-// localization mask (and its inverse), the band mask, the UI lane's coverage,
+// KhFxFinish: the pixel finished as the builtin finishes its own - for a builtin
+// medium pass, the fade through the view model's translucent planes (KH_VM_SEE:
+// shadowMeta2.w 2, never a user effect's) - the localization mask (and its
+// inverse), the band mask, the UI lane's coverage,
 // opacity (color.a) and the blend mode, the fused stages, then the packing
 // its composite wants (a fullscreen pass writes the composite; an effect mesh
 // returns what the hardware blend expects). scene = the pass's source at the
@@ -3844,6 +4327,12 @@ float4 KhFxFinish(float3 scene, float3 outc, float2 pos)
     const int2 px = int2(pos);
     const float2 uv = pos / float2(fxMeta.z, fxMeta.w);
     const float t = fxMeta.y;
+
+    // KH_VM_SEE (shadowMeta2.w 2: a builtin medium pass): where the snapshot holds the scene, the pass shows through
+    // the view model's translucent planes by their transmittance - faded to the scene (which carries the planes' own
+    // colour) as they cover it. First, so the masks, the opacity, the blend and the fused stages compose with it as
+    // with any mask - and only where a plane covers (T < 1), so every other pixel keeps outc exactly (KhVmSeeFade).
+    [branch] if (shadowMeta2.w > 1.5f) outc = KhVmSeeFade(scene, outc, px);
 
     if (localParams1.y > 0.5f)
     {

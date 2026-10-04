@@ -26,3 +26,15 @@ float2 PSDepthResolve(float4 pos : SV_Position) : SV_Target
     return float2(d, d);
 #endif
 }
+
+// KH_VM_SEE: sample 0 of the live depth, raw - the sample cb.hlsl's LoadDepthRaw reads, so the effect chain compares
+// a pixel's snapshot with its live depth bit for bit - into an R32_FLOAT target (kh_vmsee_snapshot).
+float PSDepthS0(float4 pos : SV_Position) : SV_Target
+{
+    const int2 p = int2(pos.xy);
+#if MSAA_DEPTH
+    return resolveSrc.Load(p, 0);
+#else
+    return resolveSrc.Load(int3(p, 0));
+#endif
+}

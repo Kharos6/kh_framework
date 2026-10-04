@@ -2,12 +2,16 @@
 // STANDALONE unit (cb.hlsl is not prefixed): one vertex shader and no pixel
 // stage. C++ (kh_skin_so_batch) draws a mesh's REST STREAM as a point list
 // through VSSkinSo with stream output bound and rasterisation off, so every
-// streamed vertex lands in the binding's own vertex buffer as one MeshVertex -
+// streamed vertex lands in the binding's vertex buffer as one MeshVertex -
 // the same 48 bytes (position, normal, uv, tangent) kh_skin_verts writes on the
-// CPU. A lod_locked binding streams level 0's prefix alone (KH_SKIN_LVL0): the
-// decimated levels' tail keeps older bytes and is never drawn. Every pass that
-// draws the mesh binds that buffer as it always has:
-// no other shader knows skinning exists.
+// CPU. Every binding streams the whole rest stream, locked or not: every LOD
+// level skins (KH_LOD_SKIN; KH_SKIN_LVL0 retired). KH_SKIN_POOL: that buffer is
+// the binding's slice of its mesh's pool chunk, streamed at the slice's offset
+// (or a buffer of its own when the pool cannot give one). Every pass that draws
+// the mesh binds it at that offset - a mesh under a vertex stage (KH_USER_VS)
+// draws the stage's deformed copy of it instead - and the instanced routes read
+// the same bytes through the chunk's view (the Sk twins' KhSkPull, cb.hlsl): no
+// other shader skins.
 //
 // TWIN of kh_skin_verts (rendering_integration.hpp) - the same sums in the
 // same order. Change one and change the other.

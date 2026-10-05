@@ -2,6 +2,10 @@
 
 #define NOMINMAX
 #define STB_IMAGE_IMPLEMENTATION
+// KH_STB_DIM: stb refuses a picture wider or taller than the renderer's cap (16384, the texture loaders' own
+// test) from its header, before it allocates - its default allows 2^24 a side, so a 20-byte .tga claiming
+// 23170 x 23170 had stb allocate and fill ~2 GB before the cap refused the result.
+#define STBI_MAX_DIMENSIONS 16384
 #define FD_SETSIZE 256
 
 #include <winsock2.h>
@@ -138,6 +142,8 @@ static bool g_is_server = false;
 static bool g_is_dedicated_server = false;
 static bool g_is_headless = false;
 static bool g_is_player = false;
+// Closed (DB, the user: a non-issue): g_game_time / g_mission_time are float sums of diag_deltaTime, so past
+// ~18 h at 240 fps one frame's step rounds (the clock runs fast, then stops at ~36 h).
 static float g_game_time = 0.0f;
 static int g_game_frame = 0;
 static float g_mission_time = 0.0f;
@@ -655,16 +661,27 @@ public:
 
 static std::mutex g_err_once_mutex;
 static std::vector<std::string> g_err_once;
+// KH_ERR_ONCE_CAP: the 256-message cap was reached this session and said so (under g_err_once_mutex; cleared
+// with g_err_once by the renderer's session reset).
+static bool g_err_once_capped = false;
 
 static void report_error_once_safe(const std::string& msg) {
+    std::string khec_msg;   // Built only for a message that is reported (a repeat costs no copy).
     {
         std::lock_guard<std::mutex> g(g_err_once_mutex);
         if (std::find(g_err_once.begin(), g_err_once.end(), msg) != g_err_once.end()) return;
-        if (g_err_once.size() >= 256) return;
-        g_err_once.push_back(msg);
+        if (g_err_once.size() >= 256) {
+            // KH_ERR_ONCE_CAP: the first message past the cap is replaced by one saying later ones go unreported.
+            if (g_err_once_capped) return;
+            g_err_once_capped = true;
+            khec_msg = "KH: 256 distinct errors this session; later ones are not reported (" + msg + ")";
+        } else {
+            g_err_once.push_back(msg);
+            khec_msg = msg;
+        }
     }
 
-    MainThreadScheduler::instance().schedule([msg]() { report_error(msg); });
+    MainThreadScheduler::instance().schedule([khec_msg]() { report_error(khec_msg); });
 }
 
 template<typename Key, typename Value>
@@ -926,6 +943,8 @@ static game_value json_to_game_value(const std::string& json) {
 }
 
 static void initialize_terrain_matrix() {
+    bool khtm_building = false;   // KH_TERRAIN_PARTIAL: the rows below are being replaced.
+
     try {
         static std::string cached_world;
         static float cached_grid_width = 0;
@@ -955,6 +974,7 @@ static void initialize_terrain_matrix() {
         int grid_points = static_cast<int>(g_world_size / g_terrain_grid_width) + 1;
         
         // Initialize matrix
+        khtm_building = true;
         g_terrain_matrix.clear();
         g_terrain_matrix.reserve(grid_points);
         
@@ -977,8 +997,13 @@ static void initialize_terrain_matrix() {
             g_terrain_matrix.push_back(std::move(row));
         }        
     } catch (const std::exception& e) {
+        // KH_TERRAIN_PARTIAL: a build that threw part-way (an allocation; the rows are ~67 MB on a large map)
+        // left the cache keys naming this world with only its first rows - every later call returned early on
+        // them. Emptied, the matrix is built again at the next call, as one that was never built.
+        if (khtm_building) g_terrain_matrix.clear();
         report_error("Failed to initialize terrain matrix: " + std::string(e.what()));
     } catch (...) {
+        if (khtm_building) g_terrain_matrix.clear();   // KH_TERRAIN_PARTIAL.
         report_error("Unknown error while initializing terrain matrix");
     }
 }

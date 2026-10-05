@@ -474,8 +474,8 @@ struct VSOutDM { float4 pos : SV_Position; float dist : TEXCOORD0; };
 
 VSOutDM VSDlsMask(VSIn i)
 {
-    // The same object transform every mesh draw uses, fp32 rebase included;
-    // centerRel.w = 0 keeps the absolute path.
+    // The same object transform every mesh draw uses, fp32 rebase included (the engine camera's when the
+    // mesh draws took it, KH_DLSW_ENGCAM); centerRel.w = 0 keeps the absolute path.
     const float3 khdm_l = KhRotate(i.pos * sizeAxes.xyz);
     float3 khdm_w = (centerRel.w > 0.5f) ? (centerRel.xyz + khdm_l)
                                          : (centerSize.xyz + khdm_l);
@@ -801,7 +801,8 @@ float3 KhDlswFog(float distM, float3 khdf_wpos, float3 khdf_cam, out float trans
             float k = fogParams.y * dh / max(khaFbA, 1.0e-4f);
             float integ = k < 1.0e-6f ? khaFbA : (1.0f - exp(-khaFbA * k)) / k;
             float minY = khaFbOn ? min(khaFbLay, hgt) : min(hgt, camY);
-            trans *= exp(-integ * fogEngine.x * exp(-fogParams.y * max(minY, 0.0f)));
+            // KH_FOG_EXP_CAP (PSComposite's note). TWIN.
+            trans *= exp(-integ * fogEngine.x * exp(min(-fogParams.y * max(minY, 0.0f), 60.0f)));
         } else {
             float dens = fogParams.x * exp(-fogParams.y * max(hgt - fogParams.z, 0.0f));
             trans = exp(-distM * dens * 0.0153f);
@@ -1332,7 +1333,8 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
                 float k = fogParams.y * dh / max(khaFbA, 1.0e-4f);
                 float integ = k < 1.0e-6f ? khaFbA : (1.0f - exp(-khaFbA * k)) / k;
                 float minY = khaFbOn ? min(khaFbLay, hgt) : min(hgt, camY);
-                trans *= exp(-integ * fogEngine.x * exp(-fogParams.y * max(minY, 0.0f)));
+                // KH_FOG_EXP_CAP (PSComposite's note). TWIN.
+                trans *= exp(-integ * fogEngine.x * exp(min(-fogParams.y * max(minY, 0.0f), 60.0f)));
             } else {
                 float dens = fogParams.x * exp(-fogParams.y * max(hgt - fogParams.z, 0.0f));
                 trans = exp(-distM * dens * 0.0153f);
@@ -1402,10 +1404,24 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
 #endif
     if (bm == 1 || bm == 3) return float4(lc * a, 1.0f);
     if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), lc, a), 1.0f);
-    if (bm == 4) return float4(lc * a, 1.0f);
-    if (bm == 5) return float4(lerp(float3(65504.0f, 65504.0f, 65504.0f), lc, a), 1.0f);
+    // KH_BLEND_MINMAX: lighten / darken (MAX / MIN blend ops, which take no factors). With the flush's own
+    // copy of the scene just before this mesh bound at t3 (blendCtl.x), the exact
+    // lerp(scene, max / min(scene, colour), a): on a single-sample target the op keeps it as written (it
+    // is >= / <= the scene); on a multisampled one the flush draws it with a replacing blend. Else the
+    // hardware forms: lighten max(scene, colour x a), darken exact only at a = 1. Twin: PSComposite.
+    if (bm == 4 || bm == 5) {
+        // KH_TEX_OWN_BRANCH: a branch, so a route that leaves blendCtl.x 0 (the injection, the inFront
+        // slice: t3 is not ours there) never loads t3, whatever fxc would flatten. Twin: PSComposite.
+        [branch] if (blendCtl.x >= 0.5f) {
+            float3 khmm_s = sceneColorTex.Load(int3(int2(i.pos.xy), 0)).rgb;
+            float3 khmm_t = bm == 4 ? max(khmm_s, lc) : min(khmm_s, lc);
+            return float4(lerp(khmm_s, khmm_t, a), 1.0f);
+        }
+        if (bm == 4) return float4(lc * a, 1.0f);
+        return float4(lerp(float3(65504.0f, 65504.0f, 65504.0f), lc, a), 1.0f);
+    }
 
-    if (blendCtl.x >= 0.5f) {
+    [branch] if (blendCtl.x >= 0.5f) {   // KH_TEX_OWN_BRANCH (above).
         // Twin: PSComposite. Every pixel blends by a.
         float3 scn = sceneColorTex.Load(int3(int2(i.pos.xy), 0)).rgb;
         float3 ts = scn / (1.0f + scn);

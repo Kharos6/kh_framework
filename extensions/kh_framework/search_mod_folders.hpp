@@ -100,8 +100,19 @@ typedef struct _OBJECT_TYPE_INFORMATION {
 // encrypted (not readable).
 // PBO_PATH: every integration that looks a file up in a folder of its own (rendering, html_ui, ai_models,
 // tts_models, stt_models) takes a path with ONE leading separator - "\x\kh\addons\main\ui\kh_logo_512.paa" or
-// "/x/kh/..." - as such an engine path instead (is_pbo_path): no Documents folder, no mod folder. Two leading
-// separators are a network path ("\\server\share"), as before; so is anything else a path already was.
+// "/x/kh/..." - as such an engine path instead (is_pbo_path): no Documents folder, no mod folder. Anything else
+// is a file inside such a folder (PATH_CONFINE).
+// PATH_CONFINE: a name that comes from a script or a page reaches the disk only inside a folder the code chose
+// (Documents\Arma 3\kh_framework\<integration>, a loaded mod's <integration> folder, Ultralight's resources).
+// confined_join takes a request only when it names a file BELOW the folder (is_plain_relative_path): no drive
+// ("C:\...", "C:x"), no leading separator - one is a PBO path (above), two a network path ("\\server\share",
+// "\\?\..."), both refused here - no ':' (a drive, an alternate stream), no ".." segment, no segment ending in
+// '.' or ' ' (Windows trims them: ".. " would be "..") and no device name (plain_path_segment, PBO_EXTRACT's rule).
+// A refused request touches no file: nothing is opened, tested or connected to. path_within answers an ABSOLUTE
+// path inside a folder - Ultralight resolves a page's links to absolute paths, and openHTML takes one inside an
+// html_ui folder - by its text, segment by segment
+// (ASCII and Unicode case alike, no ".." resolved: a path that needs one is refused), the part below the folder
+// plain as above. Both are lexical: a junction or link inside a folder is the folder owner's own and is followed.
 // PBO_LIST (list_pbo_directory): the files under an engine folder, at any depth, whichever PBOs hold them - one
 // whose prefix is the folder or lies inside it, or one whose prefix holds the folder - each path answered by the PBO
 // read_pbo_file would take it from.
@@ -560,6 +571,35 @@ private:
         return w;
     }
 
+    // A path segment that is a plain file name (PBO_EXTRACT, PATH_CONFINE): not "", "." or "..", no character
+    // Windows forbids in a name, no trailing '.' or ' ', no device name - also with spaces before the extension
+    // ("nul .txt"), COM / LPT with a superscript 1-3, and in any case ("Con" is CON).
+    static bool plain_path_segment(const std::string& seg) {
+        if (seg.empty() || seg == "." || seg == "..") return false;
+
+        for (char c : seg) {
+            if (static_cast<unsigned char>(c) < 32 || c == ':' || c == '<' || c == '>' || c == '"' || c == '|' ||
+                c == '?' || c == '*' || c == '/' || c == '\\') return false;
+        }
+
+        if (seg.back() == '.' || seg.back() == ' ') return false;   // Windows drops them: two names, one file.
+        std::string stem = seg.substr(0, seg.find('.'));
+        for (char& c : stem) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
+        // KH_PBO_DEVNAME: Windows drops the spaces before the extension too ("nul .txt" is NUL), and takes COM /
+        // LPT with a superscript 1-3 (UTF-8 C2 B9 / C2 B2 / C2 B3) as a port as well - and so the lone byte B9 /
+        // B2 / B3 too: the superscript in Windows-1252, the code page a narrow path is converted with on a Western
+        // system (confined_join's folder / request). After the ASCII "com" / "lpt" no valid UTF-8 name holds it.
+        while (!stem.empty() && stem.back() == ' ') stem.pop_back();
+        const bool khpd_port = stem.compare(0, 3, "com") == 0 || stem.compare(0, 3, "lpt") == 0;
+
+        const bool khpd_digit = (stem.size() == 4 && ((stem[3] >= '0' && stem[3] <= '9') || stem[3] == '\xB9' ||
+                                                      stem[3] == '\xB2' || stem[3] == '\xB3')) ||
+                                (stem.size() == 5 && stem[3] == '\xC2' &&
+                                 (stem[4] == '\xB9' || stem[4] == '\xB2' || stem[4] == '\xB3'));
+
+        return !(stem == "con" || stem == "prn" || stem == "aux" || stem == "nul" || (khpd_port && khpd_digit));
+    }
+
     // A normalised engine path as a relative filesystem path; false when a segment is not a plain file name.
     static bool pbo_safe_rel(const std::string& key, std::filesystem::path& rel) {
         rel.clear();
@@ -569,28 +609,7 @@ private:
             size_t b = key.find('\\', a);
             if (b == std::string::npos) b = key.size();
             const std::string seg = key.substr(a, b - a);
-            if (seg.empty() || seg == "." || seg == "..") return false;
-
-            for (char c : seg) {
-                if (static_cast<unsigned char>(c) < 32 || c == ':' || c == '<' || c == '>' || c == '"' || c == '|' ||
-                    c == '?' || c == '*' || c == '/') return false;
-            }
-
-            if (seg.back() == '.' || seg.back() == ' ') return false;   // Windows drops them: two names, one file.
-            std::string stem = seg.substr(0, seg.find('.'));   // Lower case already (pbo_normalise).
-            // KH_PBO_DEVNAME: Windows drops the spaces before the extension too ("nul .txt" is NUL), and takes COM /
-            // LPT with a superscript 1-3 (UTF-8 C2 B9 / C2 B2 / C2 B3) as a port as well.
-            while (!stem.empty() && stem.back() == ' ') stem.pop_back();
-            const bool khpd_port = stem.compare(0, 3, "com") == 0 || stem.compare(0, 3, "lpt") == 0;
-
-            const bool khpd_digit = (stem.size() == 4 && stem[3] >= '0' && stem[3] <= '9') ||
-                                    (stem.size() == 5 && stem[3] == '\xC2' &&
-                                     (stem[4] == '\xB9' || stem[4] == '\xB2' || stem[4] == '\xB3'));
-
-            if (stem == "con" || stem == "prn" || stem == "aux" || stem == "nul" || (khpd_port && khpd_digit)) {
-                return false;
-            }
-
+            if (!plain_path_segment(seg)) return false;   // A key holds no '\\' inside a segment, nor upper case.
             const std::wstring w = pbo_wide(seg);
             if (w.empty()) return false;
             rel /= w;
@@ -1017,13 +1036,106 @@ public:
         return std::filesystem::path();
     }
 
+    // PATH_CONFINE (the note above the class): whether request names a file BELOW a folder - every segment between
+    // '\\' / '/' a plain file name ("" and "." skipped), no leading separator, at least one segment.
+    static bool is_plain_relative_path(const std::string& request) {
+        try {
+            if (request.empty() || request[0] == '\\' || request[0] == '/') return false;
+            bool any = false;
+            size_t a = 0;
+
+            while (a <= request.size()) {
+                size_t b = request.find_first_of("\\/", a);
+                if (b == std::string::npos) b = request.size();
+                const std::string seg = request.substr(a, b - a);
+
+                if (!seg.empty() && seg != ".") {
+                    if (!plain_path_segment(seg)) return false;
+                    any = true;
+                }
+
+                a = b + 1;
+            }
+
+            return any;
+        } catch (const std::exception&) {   // Out of memory.
+            return false;
+        }
+    }
+
+    // PATH_CONFINE: folder / request - the path the lookups always formed - when the request is plain-relative
+    // and the folder is set; empty otherwise, before any file is touched.
+    static std::filesystem::path confined_join(const std::filesystem::path& folder, const std::string& request) {
+        try {
+            if (folder.empty() || !is_plain_relative_path(request)) return std::filesystem::path();
+            return folder / request;
+        } catch (...) {   // Out of memory, or a name the code page cannot take.
+            return std::filesystem::path();
+        }
+    }
+
+    // PATH_CONFINE: whether the absolute path path_text names a file inside folder - the same count of leading
+    // separators, the folder's every segment in order (its drive or server and share first; compared without case),
+    // then one or more plain segments ("" and "." skipped on both sides; any ".." refuses). Lexical: nothing is
+    // touched. So "\\.\server\share\..." passes against a folder on that share: a device path, which opens nothing.
+    static bool path_within(const std::string& path_text, const std::filesystem::path& folder) {
+        try {
+            const std::wstring fw = folder.wstring();
+            size_t fl = 0, pl = 0;
+            while (fl < fw.size() && (fw[fl] == L'\\' || fw[fl] == L'/')) ++fl;
+            while (pl < path_text.size() && (path_text[pl] == '\\' || path_text[pl] == '/')) ++pl;
+            if (fl != pl) return false;
+            std::vector<std::wstring> fs;
+
+            for (size_t a = fl; a <= fw.size();) {
+                size_t b = fw.find_first_of(L"\\/", a);
+                if (b == std::wstring::npos) b = fw.size();
+                std::wstring seg = fw.substr(a, b - a);
+                if (seg == L"..") return false;
+                if (!seg.empty() && seg != L".") fs.push_back(std::move(seg));
+                a = b + 1;
+            }
+
+            if (fs.empty()) return false;
+            size_t k = 0;   // Folder segments matched.
+            bool below = false;   // A plain segment past the folder.
+
+            for (size_t a = pl; a <= path_text.size();) {
+                size_t b = path_text.find_first_of("\\/", a);
+                if (b == std::string::npos) b = path_text.size();
+                const std::string seg = path_text.substr(a, b - a);
+                a = b + 1;
+                if (seg.empty() || seg == ".") continue;
+                if (seg == "..") return false;
+
+                if (k < fs.size()) {   // The same conversion a path from this text makes (the open's).
+                    const std::wstring w = std::filesystem::path(seg).wstring();
+
+                    if (CompareStringOrdinal(w.c_str(), static_cast<int>(w.size()), fs[k].c_str(),
+                                             static_cast<int>(fs[k].size()), TRUE) != CSTR_EQUAL) return false;
+
+                    ++k;
+                } else {
+                    if (!plain_path_segment(seg)) return false;
+                    below = true;
+                }
+            }
+
+            return below;
+        } catch (...) {   // Out of memory, or a name the code page cannot take.
+            return false;
+        }
+    }
+
     static std::filesystem::path find_file_by_name(
         const std::vector<std::filesystem::path>& directories,
         const std::string& filename) {
         
         for (const auto& dir : directories) {
             try {
-                std::filesystem::path full_path = dir / filename;
+                // PATH_CONFINE: the name below the folder only (a bare file name always is).
+                std::filesystem::path full_path = confined_join(dir, filename);
+                if (full_path.empty()) continue;
                 
                 if (std::filesystem::exists(full_path) && 
                     std::filesystem::is_regular_file(full_path)) {

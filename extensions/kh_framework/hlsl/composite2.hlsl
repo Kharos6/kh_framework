@@ -445,7 +445,12 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
                 float k = fogParams.y * dh / max(khaFbA, 1.0e-4f);
                 float integ = k < 1.0e-6f ? khaFbA : (1.0f - exp(-khaFbA * k)) / k;
                 float minY = khaFbOn ? min(khaFbLay, hgt) : min(hgt, camY);
-                trans *= exp(-integ * fogEngine.x * exp(-fogParams.y * max(minY, 0.0f)));
+                // KH_FOG_EXP_CAP: a negative fog decay (setFog takes -1 .. 1) grows the falloff with
+                // height, and past |decay| x h = 88.7 its exp overflows; capped at e^60 - full fog
+                // either way (short of a density below ~1e-23 /m, which the cap leaves partly clear),
+                // with room for any path length in any product order - a zero density
+                // gives 0 x e^60 = 0, not 0 x inf = NaN. TWIN: PSMain, KhDlswFog, KhFxFogEngine.
+                trans *= exp(-integ * fogEngine.x * exp(min(-fogParams.y * max(minY, 0.0f), 60.0f)));
             } else {
                 float dens = fogParams.x * exp(-fogParams.y * max(hgt - fogParams.z, 0.0f));
                 trans = exp(-distM * dens * 0.0153f);
@@ -521,13 +526,29 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
 #endif
     if (bm == 1 || bm == 3) return float4(lc * a, 1.0f);
     if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), lc, a), 1.0f);
-    if (bm == 4) return float4(lc * a, 1.0f);
-     if (bm == 5) return float4(lerp(float3(65504.0f, 65504.0f, 65504.0f), lc, a), 1.0f);
+    // KH_BLEND_MINMAX: lighten / darken (MAX / MIN blend ops, which take no factors). With the flush's own
+    // copy of the scene just before this mesh bound at t3 (blendCtl.x), the exact
+    // lerp(scene, max / min(scene, colour), a): on a single-sample target the op keeps it as written (it
+    // is >= / <= the scene); on a multisampled one the flush draws it with a replacing blend. Else the
+    // hardware forms: lighten max(scene, colour x a), darken exact only at a = 1. Twin: PSMain.
+    if (bm == 4 || bm == 5) {
+        // KH_TEX_OWN_BRANCH: a branch, so a route that leaves blendCtl.x 0 (the injection, the inFront
+        // slice: t3 is not ours there) never loads t3, whatever fxc would flatten. Twin: PSMain.
+        [branch] if (blendCtl.x >= 0.5f) {
+            float3 khmm_s = sceneColorTex.Load(int3(int2(i.pos.xy), 0)).rgb;
+            float3 khmm_t = bm == 4 ? max(khmm_s, lc) : min(khmm_s, lc);
+            return float4(lerp(khmm_s, khmm_t, a), 1.0f);
+        }
+        if (bm == 4) return float4(lc * a, 1.0f);
+        return float4(lerp(float3(65504.0f, 65504.0f, 65504.0f), lc, a), 1.0f);
+    }
 
     // Simple transparency per the spec is a display-space mix: sample the
     // pre-mesh scene capture at this pixel, blend in Reinhard space, invert,
-    // write opaque.
-    if (blendCtl.x >= 0.5f) {
+    // write opaque. KH_TRANSL_ROUTES: a blend material's translucent part, an effect mesh and an inFront mesh
+    // (the hands slice, no capture) blend in linear HDR instead (hardware) - a different look over a bright
+    // background, kept as they look by the user's decision (DB): not a parity defect.
+    [branch] if (blendCtl.x >= 0.5f) {   // KH_TEX_OWN_BRANCH (above).
         // Twin: PSMain. Every pixel blends by a (the injection never arms
         // blendCtl.x; the flush's near-gap route can).
         float3 scn = sceneColorTex.Load(int3(int2(i.pos.xy), 0)).rgb;

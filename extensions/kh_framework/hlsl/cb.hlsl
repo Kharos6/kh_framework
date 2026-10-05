@@ -38,8 +38,9 @@ cbuffer CBObj : register(b0)
     float4 objRot2;   // objRot0.w = 1 marks a filled matrix; 0 (the zeroed default) reads as identity.
     // x = 1: normal-blend translucent mesh with the scene capture bound (the
     // flush's fill; the injection writes 0) - the packing composites in
-    // Reinhard space against t3 and writes opaque. w = the LOD crossfade
-    // dither. y / z unread.
+    // Reinhard space against t3 and writes opaque; or a lighten / darken mesh
+    // with its own capture bound (KH_BLEND_MINMAX) - the exact lerp against t3.
+    // w = the LOD crossfade dither. y / z unread.
     float4 blendCtl;
     // x = this draw's material table index (base + submesh slot; non-instanced
     // VS), y = the submesh slot (the instanced VS adds it to the instance's own
@@ -89,8 +90,9 @@ cbuffer CBObj : register(b0)
 {
     row_major float4x4 viewProj;   // Rebased on the two mesh passes (see centerRel); absolute elsewhere.
     row_major float4x4 invViewProj;   // Clip -> world (row-vector convention). Camera-relative
-                                      // when fxCam.w = 1 (every reader adds fxCam.xyz back:
-                                      // KhWorldPosFenced, KhFsFog); absolute when fxCam.w = 0.
+                                      // when fxCam.w = 1 (KhWorldPosFenced and KhFsFog add
+                                      // fxCam.xyz back; KhWorldPosRelFenced's readers take
+                                      // camera-relative points instead); absolute when fxCam.w = 0.
     float4 lighting1;   // xyz = unit vector toward the sun/moon (engine axes), w = lighting valid flag.
     // rgb = the engine's sun colour in HDR scene units ((1,1,1) before the
     // first publish), w = shadow-map strength.
@@ -217,8 +219,9 @@ cbuffer CBObj : register(b0)
     // yzw free. Zero wherever no bucket draws.
     float4 khPass;
     float4 khPassObj;
-    // xyz = the camera invViewProj is relative to, w = 1 arms it (every reader
-    // adds xyz after the reconstruction); w = 0 = invViewProj is absolute.
+    // xyz = the camera invViewProj is relative to, w = 1 arms it (KhWorldPosFenced
+    // and KhFsFog add xyz after the reconstruction; KhWorldPosRelFenced's readers
+    // take camera-relative points instead); w = 0 = invViewProj is absolute.
     float4 fxCam;
     // KH_USER_LANES: the pass camera - xyz position (engine axes, absolute),
     // w = 1 when filled; the rows are its right, up and forward axes. Read
@@ -378,7 +381,9 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //         animation (KhMatUv), KhUserUv() - by KhSampleMatG; the object
 //         colour already tints s.albedo. s.alpha is informational: coverage is
 //         decided around the call (below).
-//   wpos  the world position (engine axes: x east, y up, z north; absolute m).
+//   wpos  the world position (engine axes: x east, y up, z north; absolute m - a
+//         float of world size: steps of 2 - 4 mm 16 - 40 km from the origin,
+//         which a pattern keyed on it shows).
 //   n     the shading normal the builtin uses: unit, normal map applied, and
 //         reversed on the back face of a two-sided mesh.
 //   smf   the sun shadow factor, 0 dark - 1 lit: the received world shadows
@@ -618,7 +623,11 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 // Bound for it, as for the builtin effects (the section declares each):
 //   sceneColor (t0)  the pass's source. SampleScene(px) reads it clamped to the
 //                    frame (and premultiplied in the UI spill lane).
-//   depthTex (t1)    the depth the pass sees. LoadDepthPS(px) is the builtins'
+//   depthTex (t1)    the depth the pass sees. On the UI (centerSize.w above 1)
+//                    it is at the 3D render's size, which differs from the
+//                    frame's at a Sampling other than 100 %: LoadDepthRaw /
+//                    LoadDepthPS / KhLinZ map the pixel (KH_UI_DEPTH_SCALE),
+//                    a direct depthTex.Load does not. LoadDepthPS(px) is the builtins'
 //                    read: the raw depth (LoadDepthRaw), with our near-plane
 //                    marker applied where one of our meshes drew nearer than
 //                    the near plane, and the scene's depth where the view
@@ -644,7 +653,8 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //                    cycle whose view model drew a translucent plane and in which
 //                    a pass reads the depth - a user effect counts when its file
 //                    names LoadDepthPS, LoadDepthRaw, KhLinZ, KhWorldPosFenced,
-//                    KhSunFlareVis, a KhVmSee helper or one of these views. Then
+//                    KhWorldPosRelFenced, KhSunFlareVis, a KhVmSee helper or one
+//                    of these views. Then
 //                    LoadDepthPS returns the scene's depth there;
 //                    KhVmSeeCovered(px) says a plane wrote its own
 //                    over it; KhVmSeeT(px) is their transmittance (1 elsewhere
@@ -834,7 +844,8 @@ float2 KhUserUvDy()  { return khUserUvGPs.zw; }
 // direction likewise - the builtin transform's own arithmetic (KhVsCore), for
 // a vertex stage that needs to know where it is (wind, a world-space wave).
 // The object lanes are the drawn object's on every per-object draw, which the
-// vertex stage's pass is.
+// vertex stage's pass is. Absolute floats (wpos's precision): a round trip
+// back to object space (minus centerSize) lands on that world step.
 float3 KhUserVtxWorld(float3 khvw_p)
 {
     if (objRot0.w < 0.5f) return centerSize.xyz + khvw_p;
@@ -2037,6 +2048,10 @@ void ClipEdgeSliver(float3 wpos)
     if (khes_deg < 0.05f) clip(khes_nv - 0.005f);
 }
 
+// A mesh's localization / band mask tests its interpolated absolute wpos, so far from the origin the mask's
+// edge steps with wpos's float (2 - 4 mm at 16 - 40 km; seen only with falloff ~0, where the edge crosses a
+// surface near the camera). The effect passes and Pulse test the camera-relative point (KH_LOCAL_REL); the
+// same here needs a camera-relative position out of the mesh vertex stage - documented, not changed (DB).
 float SolidMask(float3 wpos)
 {
     float m = 1.0f;
@@ -3058,8 +3073,13 @@ float3 KhPbrAmbient(float3 khpa_n, float3 khpa_v, bool khpa_vOk, float khpa_roug
     // grazing part included - the tint x curve form of the direct term.
     const bool   khpa_nk = khFrNK.z >= 0.5f;
     const float  khpa_f0 = khpa_nk ? KhFresnelNK(1.0f, khFrNK.x, khFrNK.y) : 0.0f;
-    const float3 khpa_envBRDF = khpa_nk ? khpa_F0 * (khpa_f0 * khpa_AB.x + khpa_AB.y)
-                                        : khpa_F0 * khpa_AB.x + khpa_AB.y;
+    // KH_ENVBRDF_FLOOR: the fit's B dips below zero from roughness ~0.71 head-on and ~0.89 at every N.V
+    // (-0.0024 at 1), so with F0 near 0 (a black rough metal, a black specular texel, an arma conductor curve
+    // near 0 - fresnel N ~1, K ~0 - under a non-zero tint) the ambient specular was a small negative radiance
+    // written into the HDR scene. Floored at 0; every non-negative value is unchanged (UE4 instead scales B by
+    // saturate(50 F0), which also dims F0 below 0.02).
+    const float3 khpa_envBRDF = max(khpa_nk ? khpa_F0 * (khpa_f0 * khpa_AB.x + khpa_AB.y)
+                                            : khpa_F0 * khpa_AB.x + khpa_AB.y, 0.0f);
 
     // The dome along the reflection vector, blurred toward its mean.
     const float3 khpa_R = reflect(-khpa_v, khpa_n);
@@ -3683,14 +3703,39 @@ Texture2D<float4> khsgTex : register(t3);
 // pass's anisotropic clamp (KH_GLOW_PYR, C++ KhGlowBind).
 SamplerState khsgSamp : register(s2);
 
+// KH_UI_DEPTH_SCALE: the UI lane (centerSize.w above 1: 1.25 / 2 / 3) draws in back-buffer pixels (fxMeta.zw is
+// the back buffer's size) while t1 is the scene's depth at the 3D render size - display x Sampling. Where the
+// two differ the pixel is mapped by the ratio (the 3D picture fills the back buffer): its centre, scaled, then
+// truncated. Equal sizes give px back exactly ((px + 0.5) x a ratio within an ulp of 1). Every other route
+// draws in the depth's own pixels and keeps px. Every reader of t1 goes through LoadDepthRaw.
 #if MSAA_DEPTH
 Texture2DMS<float> depthTex : register(t1);
-float LoadDepthRaw(int2 px) { return depthTex.Load(px, 0); }
+int2 KhDepthPx(int2 px)
+{
+    [branch] if (centerSize.w > 1.125f) {
+        uint khdp_w, khdp_h, khdp_n;
+        depthTex.GetDimensions(khdp_w, khdp_h, khdp_n);
+        if (khdp_w > 0u && fxMeta.z >= 1.0f && fxMeta.w >= 1.0f)
+            px = int2((float2(px) + 0.5f) * float2((float)khdp_w / fxMeta.z, (float)khdp_h / fxMeta.w));
+    }
+    return px;
+}
+float LoadDepthRaw(int2 px) { return depthTex.Load(KhDepthPx(px), 0); }
 #else
 // The live depth, not the snapshot: a single-channel view (the flush's depth_srv, the PIP's pip_depth_srv) under a
 // float2 declaration; LoadDepthRaw reads .x alone (the C++ note at flush_locked's ps_srvs).
 Texture2D<float2> depthTex : register(t1);
-float LoadDepthRaw(int2 px) { return depthTex.Load(int3(px, 0)).x; }
+int2 KhDepthPx(int2 px)
+{
+    [branch] if (centerSize.w > 1.125f) {
+        uint khdp_w, khdp_h;
+        depthTex.GetDimensions(khdp_w, khdp_h);
+        if (khdp_w > 0u && fxMeta.z >= 1.0f && fxMeta.w >= 1.0f)
+            px = int2((float2(px) + 0.5f) * float2((float)khdp_w / fxMeta.z, (float)khdp_h / fxMeta.w));
+    }
+    return px;
+}
+float LoadDepthRaw(int2 px) { return depthTex.Load(int3(KhDepthPx(px), 0)).x; }
 #endif
 // KH_NEARZ_MARK: our near-z fragments nearer than the near plane are written
 // into a gap below the viewport's MinDepth that this pair reads as a flat wall
@@ -3782,7 +3827,8 @@ float Luma(float3 c) { return dot(c, float3(0.2126f, 0.7152f, 0.0722f)); }   // 
 // frame (fxMeta.w, the height of the picture it draws), so a look holds at any resolution. Exactly 1 at 1080
 // rows, and every use multiplies it onto the finished pixel quantity, so at 1080 rows each quantity is the
 // unscaled one (up to fxc reordering a product - it is not IEEE-strict - a rounding step on an offset at
-// most). What stays in real pixels: sharpen's 1-px neighbourhood (sharpening is of the display's pixels), anti-aliasing
+// most). What stays in real pixels: sharpen's 1-px neighbourhood (the pixels of the frame the pass draws: the
+// display's on the UI, the 3D render's on the scene - they differ at a Sampling other than 100 %), anti-aliasing
 // widths (the CRT tube's feather), per-pixel dither and sampling noise (deband's grain, the interleaved
 // rotations), and the SSGI chain (its radius is in metres; its resolve works on the gather's own grid).
 float KhFxPx() { return max(fxMeta.w, 1.0f) / 1080.0f; }
@@ -3888,6 +3934,18 @@ float KhEncFence()
     return clamp(khef_far, 500.0f, 100000.0f);
 }
 
+// KH_LOCAL_REL: the same reconstruction without the camera added - relative to fxCam when it is armed, absolute
+// (as KhWorldPosFenced) when it is not. KhWorldPosFenced = this + fxCam.
+float3 KhWorldPosRelFenced(int2 px, float2 uv, out float khwr_d)
+{
+    float khwr_raw = LinDepth(LoadDepthPS(px));
+    khwr_d = min(khwr_raw, KhEncFence() * 0.999f);
+    float4 khwr_nd = float4(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f,
+                            depthParams.x + depthParams.y / max(khwr_d, 1.0f), 1.0f);
+    float4 khwr_wp = mul(khwr_nd, invViewProj);
+    return khwr_wp.xyz / khwr_wp.w;
+}
+
 float3 KhWorldPosFenced(int2 px, float2 uv, out float khwf_d)
 {
     float khwf_raw = LinDepth(LoadDepthPS(px));
@@ -3985,7 +4043,8 @@ float KhFxFogEngine(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float
             float fs_k = fogParams.y * fs_dh / max(fs_distM, 1.0e-4f);
             float fs_integ = fs_k < 1.0e-6f ? fs_distM : (1.0f - exp(-fs_distM * fs_k)) / fs_k;
             float fs_minY = min(fs_hgt, fs_camY);
-            fs_tr = fs_ramp * exp(-fs_integ * fogEngine.x * exp(-fogParams.y * max(fs_minY, 0.0f)));
+            // KH_FOG_EXP_CAP (PSComposite's note): a zero density read 1 - saturate(NaN) = full fog. TWIN.
+            fs_tr = fs_ramp * exp(-fs_integ * fogEngine.x * exp(min(-fogParams.y * max(fs_minY, 0.0f), 60.0f)));
         }
         else
         {
@@ -4170,7 +4229,7 @@ float3 KhFusePoint(int id, float3 c, float2 uv, float2 pos, float t,
         const float3 gc = KhGrainGc(pos, t, p0, p1.x);   // Effect 5's twin: one body.
         float luma = saturate(Luma(c));
         float resp = lerp(1.0f, 4.0f * luma * (1.0f - luma) * 0.9f + 0.1f, p0.w);
-        return c + gc * p0.x * resp;
+        return max(c + gc * p0.x * resp, 0.0f);   // KH_GRAIN_FLOOR (effect 5's note). TWIN.
     }
     return c;
 }
@@ -4337,7 +4396,12 @@ float4 KhFxFinish(float3 scene, float3 outc, float2 pos)
     if (localParams1.y > 0.5f)
     {
         float khlm_d;
-        float3 nd3 = abs(KhWorldPosFenced(px, uv, khlm_d) - localParams0.xyz) / max(localRadii.xyz, 0.01f);
+        // KH_LOCAL_REL: the camera-relative point against the centre made relative to the camera. Adding the
+        // camera's kilometres to the point first (KhWorldPosFenced) rounded it to the world's float step (2 - 4
+        // mm far from the origin), which a sharp falloff turned into a crawling staircase; centre - camera of
+        // two nearby floats is exact (precise keeps it from being reassociated).
+        precise float3 khlm_c = localParams0.xyz - (fxCam.w > 0.5f ? fxCam.xyz : float3(0.0f, 0.0f, 0.0f));
+        float3 nd3 = abs(KhWorldPosRelFenced(px, uv, khlm_d) - khlm_c) / max(localRadii.xyz, 0.01f);
         // Normalized distance: 1.0 = the mask surface (ellipsoid or mesh).
         float nd = (localParams0.w > 0.5f)
                  ? max(nd3.x, max(nd3.y, nd3.z))   // Cube (Chebyshev).

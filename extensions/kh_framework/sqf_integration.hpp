@@ -7423,7 +7423,9 @@ static bool kh_rv_cloth_sim(const game_value& val, RenderIntegration::RenderObje
         else if (k == "sleep")       { if (!kh_rv_cloth_num(v, "sleep", 0.0f, 10.0f, khcs_c.sleep, err)) return false; }
         else if (k == "shell")       { if (!kh_rv_cloth_num(v, "shell", 0.0f, 1.0f, khcs_c.shell, err)) return false; }
         else if (k == "wind")        { if (!kh_rv_cloth_num(v, "wind", 0.0f, 10.0f, khcs_c.wind, err)) return false; }
-        else if (k == "buoyancy")    { if (!kh_rv_cloth_num(v, "buoyancy", 0.0f, 5.0f, khcs_c.buoyancy, err)) return false; }
+        // KH_BUOY_RANGE: up to gravity's own magnitude - buoyancy g is neutral at gravity g (the reference).
+        else if (k == "buoyancy")    { if (!kh_rv_cloth_num(v, "buoyancy", 0.0f, 10.0f, khcs_c.buoyancy, err))
+                                           return false; }
         else if (k == "waterdrag")   { if (!kh_rv_cloth_num(v, "waterDrag", 0.0f, 1.0f, khcs_c.water_drag, err)) return false; }
         else if (k == "selfcollision") { if (!kh_rv_bool(v, khcs_c.self_collide, "cloth parameter 'selfCollision'", err)) return false; }
         else if (k == "selfthickness") { if (!kh_rv_cloth_num(v, "selfThickness", 0.001f, 0.25f, khcs_c.self_thickness, err)) return false; }
@@ -7654,7 +7656,9 @@ static bool kh_rv_chain_sim(const game_value& val, RenderIntegration::RenderObje
         else if (k == "range")       { if (!kh_rv_chain_num(v, "range", 0.0f, 200.0f, P.range, err)) return false; }
         else if (k == "sleep")       { if (!kh_rv_chain_num(v, "sleep", 0.0f, 10.0f, P.sleep, err)) return false; }
         else if (k == "wind")        { if (!kh_rv_chain_num(v, "wind", 0.0f, 10.0f, P.wind, err)) return false; }
-        else if (k == "buoyancy")    { if (!kh_rv_chain_num(v, "buoyancy", 0.0f, 5.0f, P.buoyancy, err)) return false; }
+        // KH_BUOY_RANGE: as the cloth's.
+        else if (k == "buoyancy")    { if (!kh_rv_chain_num(v, "buoyancy", 0.0f, 10.0f, P.buoyancy, err))
+                                           return false; }
         else if (k == "waterdrag")   { if (!kh_rv_chain_num(v, "waterDrag", 0.0f, 1.0f, P.water_drag, err)) return false; }
         else if (k == "iterations")  { if (!kh_rv_chain_num(v, "iterations", 1.0f, 16.0f, khch_f, err)) return false;
                                        P.iterations = static_cast<uint16_t>(khch_f + 0.5f); }
@@ -8944,7 +8948,10 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("solverWorkers", static_cast<float>(RenderIntegration::g_cloth_thr_n.load(std::memory_order_relaxed))));   // KH_POOL_SPLIT: the cloth / chain pool's threads (0 = not started yet).
         out.push_back(kv("skinWorkers", static_cast<float>(RenderIntegration::g_skin_thr_n.load(std::memory_order_relaxed))));   // ...and the skin pool's.
         out.push_back(kv("physicsColliders", static_cast<float>(s.physics_colliders)));
-        out.push_back(kv("physicsAffectors", static_cast<float>(s.physics_affectors)));
+        // KH_AFF_GAUGE: the live count (a gauge, game thread) - the stats copy is taken only by a scene flush,
+        // which needs a mesh, so affectors with no mesh read 0 or a stale count.
+        out.push_back(kv("physicsAffectors", static_cast<float>(
+            RenderIntegration::g_affectors_n.load(std::memory_order_relaxed))));
         // KH_SIM_LOD: the share of the objects' own solver work (substeps x
         // iterations) the cloth and chain steps ran at last frame; 1 = every
         // instance at its dials (or none stepped).
@@ -8984,9 +8991,16 @@ static game_value get_render_stats_sqf() {
         // skinSkipped rising means the pool is not keeping up: a changed pose
         // waited a frame for its mesh's previous skinning to finish.
         out.push_back(kv("skinSkipped", static_cast<float>(s.skin_skipped)));
+        // skinPoolFull (since armed): full CPU skins by the skin pool's workers - a binding's first result, an
+        // unhide, a device reset, or a span no render-thread step covers (the bootstrap, the watchdog's parks).
+        // They are not in skinCpu. With skinned characters in view it stays put in normal play; climbing every
+        // frame means their poses are being skinned on the CPU.
+        out.push_back(kv("skinPoolFull", static_cast<float>(s.skin_pool_full)));
         // KH_SKIN_GPU: the last complete cycle's skins by path - the GPU's and the pool's (skinCpu 0 with skinGpu > 0 = every drawn
         // binding is skinned on the GPU; a binding skinned twice in a cycle counts twice); 1 = the stream-output objects could not
-        // be made this session (reported once; the CPU path stands); and, while armed, the largest ratio of the GPU path's bound to
+        // be made (reported once; the CPU path stands - asked again about two seconds on when the device refused
+        // memory, else until a device reset or the session's end); and, while armed, the largest ratio of the GPU
+        // path's bound to
         // a worker's exact box for the same pose (1 = exact; 0 = no worker measured one - only a collider's job measures).
         out.push_back(kv("skinGpu", static_cast<float>(RenderIntegration::g_skin_so_n.load(std::memory_order_relaxed))));
         out.push_back(kv("skinCpu", static_cast<float>(RenderIntegration::g_skin_cpu_n.load(std::memory_order_relaxed))));
@@ -8997,7 +9011,8 @@ static game_value get_render_stats_sqf() {
                          static_cast<float>(RenderIntegration::g_skin_cull_n.load(std::memory_order_relaxed))));
         out.push_back(kv("skinGpuOff", RenderIntegration::g_skin_so_failed.load(std::memory_order_relaxed) ? 1.0f : 0.0f));
         // KH_SKIN_GPU_MOVE, since the stats were armed: skeletal bindings moved from CPU skinning to GPU skinning once
-        // the device gave them a buffer, and the device's refusals of a GPU-skinning buffer or a mesh's rest stream
+        // the device gave them a buffer, and the device's refusals of a GPU-skinning buffer, a mesh's rest stream or
+        // the GPU-skinning objects' memory
         // (each leaves a binding on the CPU path, asked again about two seconds on - or, when even its CPU buffer is
         // refused, without a buffer and asked every frame: a count climbing every frame means memory is exhausted).
         out.push_back(kv("skinGpuMoves", static_cast<float>(s.skin_gpu_moves)));
@@ -10597,7 +10612,8 @@ static void initialize_sqf_integration() {
 
     _sqf_all_render_handlers = intercept::client::host::register_sqf_command(
         "allRenderHandlers",
-        "Returns every live render object (khr_) and physics affector (khpa_) handle, in creation order",
+        "Returns every live render object handle (khr_) in creation order, then every physics affector handle "
+        "(khpa_) in creation order",
         userFunctionWrapper<all_render_handlers_sqf>,
         game_data_type::ARRAY
     );

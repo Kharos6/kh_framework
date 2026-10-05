@@ -8,6 +8,17 @@ constexpr uint32_t KHDATA_VERSION = 1;
 constexpr size_t MAX_KHDATA_FILES = 1024;
 constexpr size_t MAX_TOTAL_KHDATA_SIZE = 1024LL * 1024LL * 1024LL;
 constexpr int MAX_KHDATA_SAVE_ATTEMPTS = 3;
+// KH_KHDATA_BOUND: a .khdata file is read as untrusted bytes (a crash mid-write elsewhere, a disk error, another
+// program): every length is held to the file's size, and the counts of all its containers together to the
+// values it has bytes for, before anything is allocated; every read is checked; and no value lies
+// KHDATA_MAX_DEPTH levels deep (the stored value is level 0, an array's elements one level below it, a hash
+// map's keys and values two - its [key, value] pairs are arrays in the file). write_variable refuses such a
+// value, and save_file leaves out one that became so after its write (the file holds the script's own array),
+// so every value a save writes can be read back.
+// KHDATA_MIN_VALUE_BYTES is the least a stored value takes: its flag and its type.
+constexpr int KHDATA_MAX_DEPTH = 256;
+constexpr uint64_t KHDATA_MIN_VALUE_BYTES = sizeof(bool) + sizeof(game_data_type);
+static_assert(sizeof(bool) == 1, "KH_KHDATA_BOUND: the file's flags are one byte each");
 
 class KHDataFile {
 public:
@@ -45,7 +56,31 @@ public:
         return game_value();
     }
 
+    // KH_KHDATA_BOUND: whether no value in it lies as deep as read_game_value refuses (its depth rule, mirrored).
+    static bool depth_ok(const game_value& value, int depth) {
+        if (depth >= KHDATA_MAX_DEPTH) return false;   // Depth 0 is the value itself.
+        const auto type = value.type_enum();
+
+        if (type == game_data_type::ARRAY) {
+            for (const auto& elem : value.to_array()) {
+                if (!depth_ok(elem, depth + 1)) return false;
+            }
+        } else if (type == game_data_type::HASHMAP) {
+            for (const auto& pair : value.to_hashmap()) {   // Each pair is an array in the file.
+                if (!depth_ok(pair.key, depth + 2) || !depth_ok(pair.value, depth + 2)) return false;
+            }
+        }
+
+        return true;
+    }
+
     bool write_variable(const std::string& var_name, const game_value& value) {        
+        // KH_KHDATA_BOUND: refused whole, before anything changes.
+        if (!depth_ok(value, 0)) {
+            throw std::runtime_error("KHData: '" + var_name + "' holds a value " + std::to_string(KHDATA_MAX_DEPTH) +
+                                     " levels deep or more and cannot be saved");
+        }
+
         // Store old value for rollback
         game_value old_value;
         bool had_old_value = false;
@@ -162,7 +197,8 @@ private:
         }
     }
     
-    static std::string read_string(std::ifstream& stream) {
+    // KH_KHDATA_BOUND: limit = the file's size - no length can exceed it.
+    static std::string read_string(std::ifstream& stream, uint64_t limit) {
         uint32_t len;
         stream.read(reinterpret_cast<char*>(&len), sizeof(len));
 
@@ -170,6 +206,8 @@ private:
             report_error("Failed to read string length");
             throw std::runtime_error("Failed to read string length");
         }
+
+        if (len > limit) throw std::runtime_error("KHData: a string longer than its file");
 
         std::string str(len, '\0');
         stream.read(&str[0], len);
@@ -447,15 +485,22 @@ private:
         }
     }
     
-    static game_value read_game_value(std::ifstream& stream) {
-        bool is_serialized;
-        stream.read(reinterpret_cast<char*>(&is_serialized), sizeof(bool));
+    // KH_KHDATA_BOUND: limit = the file's size (no length can exceed it); elems = the container elements the file
+    // still has bytes for, shared by all of its containers (each count is taken from it before the engine
+    // reserves); depth = the containers above.
+    static game_value read_game_value(std::ifstream& stream, uint64_t limit, uint64_t& elems, int depth = 0) {
+        if (depth >= KHDATA_MAX_DEPTH) throw std::runtime_error("KHData: nested too deep");
+        // Read as a byte: a stored byte other than 0 / 1 is no bool. A failed read leaves it 0 and the stream
+        // failed, which the type's read below reports.
+        uint8_t serialized_flag = 0;
+        stream.read(reinterpret_cast<char*>(&serialized_flag), sizeof(serialized_flag));
+        const bool is_serialized = serialized_flag != 0;
         
         if (is_serialized) {
             // Read the original serialized string-type
             game_data_type original_type;
             stream.read(reinterpret_cast<char*>(&original_type), sizeof(original_type));
-            std::string serialized = read_string(stream);
+            std::string serialized = read_string(stream, limit);   // A failed read above fails its length's.
             
             // Reconstruct based on type
             switch (original_type) {
@@ -579,6 +624,7 @@ private:
             // Read type normally
             game_data_type type;
             stream.read(reinterpret_cast<char*>(&type), sizeof(type));
+            if (!stream.good()) throw std::runtime_error("KHData: truncated value");
             
             switch (type) {
                 case game_data_type::NOTHING:
@@ -588,26 +634,33 @@ private:
                 case game_data_type::SCALAR: {
                     float val;
                     stream.read(reinterpret_cast<char*>(&val), sizeof(val));
+                    if (!stream.good()) throw std::runtime_error("KHData: truncated value");
                     return game_value(val);
                 }
 
                 case game_data_type::BOOL: {
-                    bool val;
+                    uint8_t val = 0;   // KH_KHDATA_BOUND: a byte, as the flag above.
                     stream.read(reinterpret_cast<char*>(&val), sizeof(val));
-                    return game_value(val);
+                    if (!stream.good()) throw std::runtime_error("KHData: truncated value");
+                    return game_value(val != 0);
                 }
 
                 case game_data_type::STRING:
-                    return game_value(read_string(stream));
+                    return game_value(read_string(stream, limit));
 
                 case game_data_type::ARRAY: {
                     uint32_t size;
                     stream.read(reinterpret_cast<char*>(&size), sizeof(size));
+                    if (!stream.good()) throw std::runtime_error("KHData: truncated value");
+                    // KH_KHDATA_BOUND: no more values than the file has bytes for, counting every container's, before
+                    // the engine allocates.
+                    if (size > elems) throw std::runtime_error("KHData: count past file");
+                    elems -= size;
                     auto_array<game_value> arr;
                     arr.reserve(size);
 
                     for (uint32_t i = 0; i < size; i++) {
-                        arr.push_back(read_game_value(stream));
+                        arr.push_back(read_game_value(stream, limit, elems, depth + 1));
                     }
                     
                     return game_value(std::move(arr));
@@ -617,11 +670,16 @@ private:
                     //Reconstruct from array
                     uint32_t size;
                     stream.read(reinterpret_cast<char*>(&size), sizeof(size));
+                    if (!stream.good()) throw std::runtime_error("KHData: truncated value");
+                    // KH_KHDATA_BOUND: no more values than the file has bytes for, counting every container's, before
+                    // the engine allocates.
+                    if (size > elems) throw std::runtime_error("KHData: count past file");
+                    elems -= size;
                     auto_array<game_value> arr;
                     arr.reserve(size);
 
                     for (uint32_t i = 0; i < size; i++) {
-                        arr.push_back(read_game_value(stream));
+                        arr.push_back(read_game_value(stream, limit, elems, depth + 1));
                     }
 
                     return raw_call_sqf_args_native(g_compiled_sqf_create_hash_map_from_array, game_value(std::move(arr)));
@@ -631,6 +689,17 @@ private:
                     return game_value();
             }
         }
+    }
+
+    // KH_KHDATA_BOUND: the open file's size in bytes, the reads' limit (0 when it cannot be told - the stream has
+    // then failed, so the first read after it throws, and the load with it).
+    static uint64_t stream_bytes(std::ifstream& stream) {
+        const std::streampos cur = stream.tellg();
+        stream.seekg(0, std::ios::end);
+        const std::streampos end = stream.tellg();
+        stream.seekg(cur);
+        if (cur < 0 || end < 0 || !stream.good()) return 0;
+        return static_cast<uint64_t>(static_cast<std::streamoff>(end));
     }
 
     static bool validate_filename(const std::string& filename) {
@@ -679,6 +748,12 @@ private:
         
         // Check Windows reserved device names
         if (upper == "CON" || upper == "PRN" || upper == "AUX" || upper == "NUL") {
+            return false;
+        }
+
+        // PATH_CONFINE: the stored name as a plain file name too (search_mod_folders.hpp) - Windows also takes a
+        // device name with spaces before the extension ("nul .x", "com1 .x") as the device.
+        if (!ModFolderSearcher::is_plain_relative_path(filename + ".khdata")) {
             return false;
         }
         
@@ -737,7 +812,9 @@ public:
             for (const auto& entry : std::filesystem::directory_iterator(base_path)) {
                 auto ext = entry.path().extension();
                 
-                if (ext == ".tmp" || ext == ".backup") {
+                // KH_KHDATA_BACKUP: a .backup stays - load_file keeps it the last copy that loaded, and
+                // load_file_from_backup restores from it; only a save's leftover .tmp goes.
+                if (ext == ".tmp") {
                     try {
                         std::filesystem::remove(entry.path());
                     } catch (...) {
@@ -758,8 +835,10 @@ public:
         size_t size = sizeof(uint32_t) * 3; // Header size (magic, version, var_count)
         
         for (const auto& [name, value] : file->get_variables()) {
+            const size_t value_size = calculate_value_size(value);
+            if (value_size == KHDATA_SIZE_DEEP) continue;   // KH_KHDATA_BOUND: not written (save_file).
             size += sizeof(uint32_t) + name.length(); // Variable name
-            size += calculate_value_size(value);      // Variable value
+            size += value_size;                       // Variable value
         }
         
         size = static_cast<size_t>(size * 1.1);        
@@ -834,6 +913,9 @@ public:
 
         if (file_size < 12) { // Minimum header size
             report_error("File too small to be valid: " + filename);
+            // KH_KHDATA_BACKUP: a main cut short (a crash before its data reached the disk) is the shape the
+            // backup is kept for - left unloaded, the next save would replace it with an empty file.
+            if (std::filesystem::exists(backup_path)) return load_file_from_backup(filename);
             return false;
         }
         
@@ -847,11 +929,15 @@ public:
         try {
             // Try loading main file first
             std::ifstream stream(filepath, std::ios::binary);
+            // KH_KHDATA_BACKUP: whether the values came from the main, every byte of it accounted for - only such
+            // a main refreshes the backup below.
+            bool khld_exact = true;
 
             if (!stream) {
                 // Try backup if main fails
                 if (std::filesystem::exists(backup_path)) {
                     stream.open(backup_path, std::ios::binary);
+                    khld_exact = false;   // KH_KHDATA_BACKUP: the backup's values - the main is unread.
 
                     if (stream) {
                         sqf::diag_log("Loading from backup: " + filename);
@@ -873,21 +959,32 @@ public:
             }
             
             if (magic != KHDATA_MAGIC || version != KHDATA_VERSION) {
+                // KH_KHDATA_BACKUP: no magic - the main's first bytes are lost (zeroed by a crash), so the
+                // backup. A version this build does not know is a real file, not damage: left as it is - as is
+                // a header that failed to read (above), which may be a passing read error on a good file.
+                if (magic != KHDATA_MAGIC && std::filesystem::exists(backup_path)) {
+                    stream.close();   // The restore copies the backup over this file.
+                    return load_file_from_backup(filename);
+                }
+
                 return false;
             }
             
             // Read variables
             std::unordered_map<std::string, game_value> vars;
+            const uint64_t limit = stream_bytes(stream);   // KH_KHDATA_BOUND.
+            uint64_t elems = limit / KHDATA_MIN_VALUE_BYTES;
             
             for (uint32_t i = 0; i < var_count; i++) {
-                std::string var_name = read_string(stream);
-                game_value value = read_game_value(stream);
+                std::string var_name = read_string(stream, limit);
+                game_value value = read_game_value(stream, limit, elems);
                 vars[var_name] = value;
             }
             
             if (!stream.eof() && stream.peek() != EOF) {
                 sqf::diag_log("Warning - extra data in file: " + filename);
                 // File may be corrupt but we loaded what we could
+                khld_exact = false;   // KH_KHDATA_BACKUP: bytes left over (a count damaged lower) - not exact.
             }
 
             // Create file object
@@ -897,12 +994,15 @@ public:
             
             // On successful load and validation, create/update backup if needed
             try {
-                bool should_backup = true;
+                bool should_backup = khld_exact;   // KH_KHDATA_BACKUP: from an exact main only.
                 
-                if (std::filesystem::exists(backup_path)) {
+                if (should_backup && std::filesystem::exists(backup_path)) {
                     auto main_time = std::filesystem::last_write_time(filepath);
                     auto backup_time = std::filesystem::last_write_time(backup_path);
-                    should_backup = (main_time > backup_time);
+                    // KH_KHDATA_BACKUP: any difference - the copy keeps the main's time (CopyFile), so equal
+                    // means already copied; a backup stamped later than its main (a clock change) is refreshed
+                    // too, where ">" left it stale for good.
+                    should_backup = (main_time != backup_time);
                 }
                 
                 if (should_backup) {
@@ -970,16 +1070,18 @@ public:
             
             // Read variables
             std::unordered_map<std::string, game_value> vars;
+            const uint64_t limit = stream_bytes(stream);   // KH_KHDATA_BOUND.
+            uint64_t elems = limit / KHDATA_MIN_VALUE_BYTES;
             
             for (uint32_t i = 0; i < var_count; i++) {
-                std::string var_name = read_string(stream);
+                std::string var_name = read_string(stream, limit);
 
                 if (var_name.length() > 256) {  // Sanity check
                     report_error("Variable name too long in backup");
                     return false;
                 }
                 
-                game_value value = read_game_value(stream);
+                game_value value = read_game_value(stream, limit, elems);
                 vars[var_name] = value;
             }
             
@@ -990,23 +1092,49 @@ public:
             
             // Try to restore the main file from backup
             auto main_path = base_path / (filename + ".khdata");
+            // KH_KHDATA_BACKUP: the main it replaces is kept first, as <file>.khdata.bad - the load that failed may
+            // have met a passing read error on a good file newer than the backup. One copy, the latest; no
+            // load reads it (initialize takes ".khdata" only), delete_file removes it. A main that cannot be kept
+            // is not replaced, and the backup stays: the values are the backup's, in memory only, until a save.
+            bool khkb_kept = true, khkb_restored = false;
+            {
+                auto bad_path = main_path;
+                bad_path += ".bad";
+                std::error_code bad_ec;
+                const bool main_there = std::filesystem::exists(main_path, bad_ec);
+                if (bad_ec) {
+                    khkb_kept = false;
+                } else if (main_there) {
+                    std::filesystem::copy_file(main_path, bad_path, std::filesystem::copy_options::overwrite_existing,
+                                               bad_ec);
+                    khkb_kept = !bad_ec;
+                }
+            }
 
-            try {
-                std::filesystem::copy_file(backup_path, main_path, 
-                    std::filesystem::copy_options::overwrite_existing);
-                sqf::diag_log("Restored " + filename + " from backup");
-            } catch (...) {
-                report_error("Could not restore main file from backup for " + filename);
+            if (khkb_kept) {
+                try {
+                    std::filesystem::copy_file(backup_path, main_path,
+                        std::filesystem::copy_options::overwrite_existing);
+                    khkb_restored = true;
+                    sqf::diag_log("Restored " + filename + " from backup");
+                } catch (...) {
+                    report_error("Could not restore main file from backup for " + filename);
+                }
+            } else {
+                report_error("Loaded " + filename + " from its backup; its main file could not be read or set aside "
+                             "and was left as it is");
             }
             
             files[filename] = std::move(file);
             update_total_size();
 
-            try {
-                std::filesystem::remove(backup_path);
-                sqf::diag_log("Deleted backup after successful restoration: " + filename);
-            } catch (...) {
-                // Non-critical if we can't delete the backup
+            if (khkb_restored) {   // KH_KHDATA_BACKUP: else the backup is the only copy on disk of what loaded.
+                try {
+                    std::filesystem::remove(backup_path);
+                    sqf::diag_log("Deleted backup after successful restoration: " + filename);
+                } catch (...) {
+                    // Non-critical if we can't delete the backup
+                }
             }
 
             return true;
@@ -1020,7 +1148,13 @@ public:
         }
     }
 
+    // KH_KHDATA_BOUND: what calculate_value_size answers for a value that reaches KHDATA_MAX_DEPTH - one that
+    // save_file does not write. It is passed straight up, so the walk stops at the first such path (an array
+    // that holds itself twice would otherwise be walked 2^256 times; past the depth, the stack's).
+    static constexpr size_t KHDATA_SIZE_DEEP = ~static_cast<size_t>(0);
+
     static size_t calculate_value_size(const game_value& value, int depth = 0) {       
+        if (depth >= KHDATA_MAX_DEPTH) return KHDATA_SIZE_DEEP;   // KH_KHDATA_BOUND.
         size_t size = sizeof(bool);  // For the special handling flag
         size += sizeof(game_data_type);  // For the type enum
         
@@ -1049,7 +1183,9 @@ public:
                 
                 // Recursively calculate size of each element
                 for (const auto& elem : arr) {
-                    size += calculate_value_size(elem, depth + 1);
+                    const size_t elem_size = calculate_value_size(elem, depth + 1);
+                    if (elem_size == KHDATA_SIZE_DEEP) return KHDATA_SIZE_DEEP;   // KH_KHDATA_BOUND.
+                    size += elem_size;
                 }
 
                 break;
@@ -1064,8 +1200,11 @@ public:
                     // Account for the array wrapper
                     size += sizeof(bool) + sizeof(game_data_type) + sizeof(uint32_t);
                     // Key and value
-                    size += calculate_value_size(pair.key, depth + 1);
-                    size += calculate_value_size(pair.value, depth + 1);
+                    const size_t key_size = calculate_value_size(pair.key, depth + 1);
+                    if (key_size == KHDATA_SIZE_DEEP) return KHDATA_SIZE_DEEP;   // KH_KHDATA_BOUND.
+                    const size_t pair_value_size = calculate_value_size(pair.value, depth + 1);
+                    if (pair_value_size == KHDATA_SIZE_DEEP) return KHDATA_SIZE_DEEP;
+                    size += key_size + pair_value_size;
                 }
 
                 break;
@@ -1217,15 +1356,36 @@ public:
                 // Write header
                 uint32_t magic = KHDATA_MAGIC;
                 uint32_t version = KHDATA_VERSION;
-                uint32_t var_count = static_cast<uint32_t>(file->get_variables().size());
+                // KH_KHDATA_BOUND: only values the reader accepts. write_variable refused deeper ones, but the file
+                // holds the script's own array, which the script can nest further after the write; written, it
+                // would fail the whole file's next load. Left out (it stays in memory) and reported.
+                std::vector<const std::pair<const std::string, game_value>*> khsv_vars;
+                std::string khsv_skipped;
+                khsv_vars.reserve(file->get_variables().size());
+
+                for (const auto& khsv_v : file->get_variables()) {
+                    if (KHDataFile::depth_ok(khsv_v.second, 0)) {
+                        khsv_vars.push_back(&khsv_v);
+                    } else {
+                        khsv_skipped += (khsv_skipped.empty() ? "'" : ", '") + khsv_v.first + "'";
+                    }
+                }
+
+                if (!khsv_skipped.empty()) {
+                    report_error("KHData: not saved - nested " + std::to_string(KHDATA_MAX_DEPTH) +
+                                 " levels deep or more since written: " + khsv_skipped + " in " +
+                                 file->get_filepath().string());
+                }
+
+                uint32_t var_count = static_cast<uint32_t>(khsv_vars.size());
                 stream.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
                 stream.write(reinterpret_cast<const char*>(&version), sizeof(version));
                 stream.write(reinterpret_cast<const char*>(&var_count), sizeof(var_count));
                 
                 // Write variables
-                for (const auto& [name, value] : file->get_variables()) {
-                    write_string(stream, name);
-                    write_game_value(stream, value);
+                for (const auto* khsv_v : khsv_vars) {
+                    write_string(stream, khsv_v->first);
+                    write_game_value(stream, khsv_v->second);
                 }
 
                 if (!stream.good()) {
@@ -1290,8 +1450,16 @@ public:
         
         // Delete from disk
         auto filepath = base_path / (filename + ".khdata");
+        // KH_KHDATA_BACKUP: its backup goes with it - a later file of the name must not restore deleted data.
+        auto backup_path = filepath;
+        backup_path += ".backup";
 
         try {
+            std::error_code backup_ec;
+            std::filesystem::remove(backup_path, backup_ec);
+            auto bad_path = filepath;   // And a main a restore set aside (load_file_from_backup).
+            bad_path += ".bad";
+            std::filesystem::remove(bad_path, backup_ec);
             return std::filesystem::remove(filepath);
         } catch (...) {
             return false;

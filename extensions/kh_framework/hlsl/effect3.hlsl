@@ -666,8 +666,13 @@ float4 PSDlfGather(VSOut i) : SV_Target
                     if (khdg_v <= 0.0f) continue;
                     // Extinction on both legs: the camera's (the height fog's closed form, and the engine's fog-end
                     // ramp as its fog applies it) and the light's (the local density over the distance to it).
-                    const float khdg_t = KhDlfTau(khdg_tw.x, khdg_cy, khdg_py) + khdg_sg * khdg_dist;
-                    khdg_sum += khdg_tw.y * khdg_at * khdg_sg * KhDlfPhase(dot(khdg_lv, khdg_rd)) * khdg_v
+                    // KH_FOG_EXP_CAP: the density capped (finite), so an optical depth that overflows (a huge
+                    // fogScale under a negative decay) gives 1e30 x 0 = 0 and a sample exactly at the light a
+                    // finite optical depth, not inf x 0 = NaN - a NaN here took the light's whole glow out of the
+                    // texel and, through the filter, its neighbours'.
+                    const float khdg_sgc = min(khdg_sg, 1.0e30f);
+                    const float khdg_t = KhDlfTau(khdg_tw.x, khdg_cy, khdg_py) + khdg_sgc * khdg_dist;
+                    khdg_sum += khdg_tw.y * khdg_at * khdg_sgc * KhDlfPhase(dot(khdg_lv, khdg_rd)) * khdg_v
                               * exp(-khdg_t) * KhDlfEndRamp(khdg_tw.x);
                 }
                 // DynLights' combine without the N.L: the diffuse under the global tint, plus the per-light

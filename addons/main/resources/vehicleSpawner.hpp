@@ -26,7 +26,7 @@ class KH_ResourceVehicleSpawner
             h = QUOTE(RSC_POS_H(30));
             colorBackground[] = {0, 0, 0, 0.9};
         };
-        class VehicleImage: KH_ResourcePicture
+        class VehicleImage: RscPicture
         {
             idc = 103;
             x = QUOTE(RSC_POS_X(60.5));

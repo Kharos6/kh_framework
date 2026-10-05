@@ -311,8 +311,10 @@ float KhDlfSigma(float khds_y)
 {
     float khds_s = 0.0f;
     if (fogParams.w >= 0.5f) {
-        khds_s = (fogEngine.w >= 0.5f) ? fogEngine.x * exp(-fogParams.y * max(khds_y, 0.0f))
-                                       : fogParams.x * 0.0153f * exp(-fogParams.y * max(khds_y - fogParams.z, 0.0f));
+        // KH_FOG_EXP_CAP (composite2.hlsl's note): the falloff capped at e^60 under a negative decay.
+        khds_s = (fogEngine.w >= 0.5f)
+               ? fogEngine.x * exp(min(-fogParams.y * max(khds_y, 0.0f), 60.0f))
+               : fogParams.x * 0.0153f * exp(min(-fogParams.y * max(khds_y - fogParams.z, 0.0f), 60.0f));
     }
     return max(khds_s, 0.0f) * max(fxParams0.y, 0.0f) + max(fxParams0.z, 0.0f);
 }
@@ -326,9 +328,9 @@ float KhDlfTau(float khdt_d, float khdt_y0, float khdt_y1)
     float khdt_w = 0.0f;
     if (fogParams.w >= 0.5f) {
         const float khdt_lo = min(khdt_y0, khdt_y1);
-        const float khdt_s = (fogEngine.w >= 0.5f)
-                           ? fogEngine.x * exp(-fogParams.y * max(khdt_lo, 0.0f))
-                           : fogParams.x * 0.0153f * exp(-fogParams.y * max(khdt_lo - fogParams.z, 0.0f));
+        const float khdt_s = (fogEngine.w >= 0.5f)   // KH_FOG_EXP_CAP, as KhDlfSigma.
+                           ? fogEngine.x * exp(min(-fogParams.y * max(khdt_lo, 0.0f), 60.0f))
+                           : fogParams.x * 0.0153f * exp(min(-fogParams.y * max(khdt_lo - fogParams.z, 0.0f), 60.0f));
         const float khdt_k = fogParams.y * abs(khdt_y1 - khdt_y0);
         const float khdt_i = khdt_k < 1.0e-4f ? khdt_d : khdt_d * (1.0f - exp(-khdt_k)) / khdt_k;
         khdt_w = max(khdt_s, 0.0f) * khdt_i;
@@ -702,7 +704,9 @@ float4 PSEffect(VSOut i) : SV_Target
 
         float luma = saturate(Luma(scene));
         float resp = lerp(1.0f, 4.0f * luma * (1.0f - luma) * 0.9f + 0.1f, fxParams0.w);
-        outc = scene + gc * fxParams0.x * resp;
+        // KH_GRAIN_FLOOR: the zero-mean grain took a dark pixel below zero, a negative radiance in the HDR
+        // scene; floored as sharpen's output is. TWIN: KhFusePoint id 5.
+        outc = max(scene + gc * fxParams0.x * resp, 0.0f);
     }
     else if (effect == 6)   // Sharpen: [strength].
     {
@@ -795,7 +799,10 @@ float4 PSEffect(VSOut i) : SV_Target
         // Fenced reconstruction + the fence feather keep the ring continuous:
         // sky (clamped to the fence) lands at feather zero.
         float khpl_d;
-        float dist = distance(KhWorldPosFenced(px, uv, khpl_d), fxParams0.xyz);
+        // KH_LOCAL_REL (cb.hlsl's localization mask): the camera-relative point against the centre made
+        // relative to the camera, exactly.
+        precise float3 khpl_c = fxParams0.xyz - (fxCam.w > 0.5f ? fxCam.xyz : float3(0.0f, 0.0f, 0.0f));
+        float dist = distance(KhWorldPosRelFenced(px, uv, khpl_d), khpl_c);
         float band = max(fxParams1.x, 0.01f);
         float ring = 1.0f - saturate(abs(dist - fxParams0.w) / band);
         ring *= ring;
@@ -962,7 +969,11 @@ float4 PSEffect(VSOut i) : SV_Target
                     float2 d = uv - spos;
                     d.x *= aspect;
                     float r = length(d) / max(fxParams0.w, 0.01f);
-                    float ang = atan2(d.y, d.x);
+                    // KH_FLARE_ATAN: atan2(0, 0) is NaN as fxc lowers it (0 x rcp(0)) - the pixel whose centre is
+                    // the source's; 1e-20 moves no non-zero d.x (a non-zero difference of floats is no finer than
+                    // the ulp of the smallest uv - half a texel, 0.5 / width - ~1e-12 at the least, far above where
+                    // 1e-20 rounds away).
+                    float ang = atan2(d.y, d.x + 1.0e-20f);
                     float star = pow(abs(sin(ang * 6.0f)), 8.0f) * fxParams1.z;
                     float core = exp(-r * 18.0f) * 2.0f + exp(-r * 3.0f) * (0.35f + star * saturate(1.0f - r));
                     float2 axis = float2((0.5f - spos.x) * aspect, 0.5f - spos.y);

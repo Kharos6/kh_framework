@@ -187,6 +187,12 @@ private:
     }
 };
 
+// PATH_CONFINE (search_mod_folders.hpp's note): every path Ultralight asks for - a page, its links, a fetch from
+// its script, Ultralight's own resources - is answered only from inside a trusted folder: Ultralight's
+// resources, an html_ui folder (relative below it, or absolute inside it), the PBOs under pbo_root, and the
+// game's working folder for Ultralight's "resources/" alone. A drive path elsewhere, a network path and anything
+// needing '..' to leave a folder are answered "no such file" without touching the disk - a page, which a
+// script can write whole (createHTML), cannot read the player's files or open a network share.
 class UIFileSystem : public ultralight::FileSystem {
 public:
     UIFileSystem(
@@ -276,7 +282,15 @@ public:
             {".json", "application/json"}, {".xml", "application/xml"}
         };
         
-        std::string ext = std::filesystem::path(path.utf8().data()).extension().string();
+        // KH_UI_NARROW: the extension from the UTF-8 text itself, by path::extension's rule (the last '.' of the
+        // file name, not its first character; none for "." / "..") - a path made of the text converts it
+        // with the code page, and string() back, either of which throws for a name the code page cannot take.
+        const std::string khmt_p = path.utf8().data();
+        const size_t khmt_s = khmt_p.find_last_of("\\/");
+        const std::string khmt_n = khmt_s == std::string::npos ? khmt_p : khmt_p.substr(khmt_s + 1);
+        const size_t khmt_d = khmt_n.rfind('.');
+        std::string ext = (khmt_n == "." || khmt_n == ".." || khmt_d == std::string::npos || khmt_d == 0)
+                              ? std::string() : khmt_n.substr(khmt_d);
         
         // Lowercase in-place
         for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -290,6 +304,13 @@ public:
     
     void clear_cache() {
         exists_cache_.clear();
+    }
+
+    // KH_UI_ONE_RENDERER: the html_ui folders again at a session's start (the file system lives for the process
+    // with the Renderer). Ultralight may ask from its own threads, so readers take a copy under the lock.
+    void set_search_paths(const std::vector<std::filesystem::path>& khsp_paths) {
+        std::unique_lock<std::shared_mutex> khsp_l(search_mx_);
+        search_paths_ = khsp_paths;
     }
 
     // PBO_PATH (search_mod_folders.hpp's note): an HTML file named with one leading slash is inside the loaded PBOs.
@@ -334,8 +355,33 @@ public:
 
 private:
     std::vector<std::filesystem::path> search_paths_;
+    mutable std::shared_mutex search_mx_;   // KH_UI_ONE_RENDERER: search_paths_ (set_search_paths).
+
+    std::vector<std::filesystem::path> search_paths() const {
+        std::shared_lock<std::shared_mutex> khsp_l(search_mx_);
+        return search_paths_;
+    }
     std::filesystem::path resources_path_;
     mutable LRUCache<std::string, bool> exists_cache_;
+
+    // PATH_CONFINE: the file path_str names inside folder - folder / path_str for a path below it, the path itself
+    // for an absolute one inside it - else empty, with nothing touched.
+    static std::filesystem::path ConfinedIn(const std::filesystem::path& folder, const std::string& path_str) {
+        if (folder.empty()) return {};
+        std::filesystem::path full = ModFolderSearcher::confined_join(folder, path_str);
+        if (full.empty() && ModFolderSearcher::path_within(path_str, folder)) full = path_str;
+        return full;
+    }
+
+    // PATH_CONFINE: the game's working folder answers Ultralight's own resources alone - its resource prefix
+    // "resources/" (icudt67l.dat, cacert.pem) - so a page reads nothing else of the install folder.
+    static bool WorkingFolderResource(const std::string& path_str) {
+        if (path_str.size() <= 10 || !ModFolderSearcher::is_plain_relative_path(path_str)) return false;
+        for (size_t k = 0; k < 9; ++k) {
+            if ((path_str[k] | 0x20) != "resources"[k]) return false;
+        }
+        return path_str[9] == '/' || path_str[9] == '\\';
+    }
 
     bool CheckExistsInternal(const std::string& path_str) const {
         std::string pbo_key;
@@ -343,22 +389,28 @@ private:
 
         try {
             // Check resources path first
-            if (!resources_path_.empty()) {
-                if (std::filesystem::exists(resources_path_ / path_str)) {
-                    return true;
-                }
+            std::filesystem::path full = ConfinedIn(resources_path_, path_str);
+
+            if (!full.empty() && std::filesystem::exists(full)) {
+                return true;
             }
             
             // Check search paths
-            for (const auto& base : search_paths_) {
-                if (std::filesystem::exists(base / path_str)) {
+            for (const auto& base : search_paths()) {
+                full = ConfinedIn(base, path_str);
+
+                if (!full.empty() && std::filesystem::exists(full)) {
                     return true;
                 }
             }
             
-            // Check absolute/relative path
-            return std::filesystem::exists(path_str);
-        } catch (const std::filesystem::filesystem_error&) {
+            // PATH_CONFINE: the working folder, for Ultralight's resources only (an absolute path is answered
+            // above or not at all).
+            return WorkingFolderResource(path_str) && std::filesystem::exists(path_str);
+        } catch (const std::exception&) {
+            // KH_UI_NARROW: a filesystem error, or a name the code page cannot take (std::system_error from the
+            // narrow-to-wide conversion: ConfinedIn's absolute path, the working-folder test) - no such file,
+            // never an exception into Ultralight.
             return false;
         }
     }
@@ -366,29 +418,28 @@ private:
     std::filesystem::path ResolvePath(const std::string& path_str) const {
         try {
             // Check resources path first
-            if (!resources_path_.empty()) {
-                std::filesystem::path full = resources_path_ / path_str;
+            std::filesystem::path full = ConfinedIn(resources_path_, path_str);
 
-                if (std::filesystem::exists(full)) {
-                    return full;
-                }
+            if (!full.empty() && std::filesystem::exists(full)) {
+                return full;
             }
             
             // Check search paths
-            for (const auto& base : search_paths_) {
-                std::filesystem::path full = base / path_str;
+            for (const auto& base : search_paths()) {
+                full = ConfinedIn(base, path_str);
 
-                if (std::filesystem::exists(full)) {
+                if (!full.empty() && std::filesystem::exists(full)) {
                     return full;
                 }
             }
             
-            // Check absolute/relative path
-            if (std::filesystem::exists(path_str)) {
+            // PATH_CONFINE: the working folder, for Ultralight's resources only.
+            if (WorkingFolderResource(path_str) && std::filesystem::exists(path_str)) {
                 return path_str;
             }
-        } catch (const std::filesystem::filesystem_error&) {
-            // Ignore filesystem errors
+        } catch (const std::exception&) {
+            // KH_UI_NARROW: as CheckExistsInternal - a filesystem error or a name the code page cannot take
+            // resolves to nothing.
         }
         
         return {};
@@ -944,42 +995,67 @@ public:
         std::lock_guard<std::mutex> lock(init_mutex_);
         if (shutting_down_.load(std::memory_order_acquire)) return false;
         if (initialized_.load(std::memory_order_acquire)) return true;
-        should_stop_.store(false, std::memory_order_release);
         ladder_reset(present_ladder_);   // KH_UI_HOOK_LADDER: fresh strikes per init
         ladder_reset(wndproc_ladder_);
-        worker_thread_ = std::thread(&UIFramework::worker_thread_func, this);
-        auto start = std::chrono::steady_clock::now();
-        constexpr auto timeout = std::chrono::seconds(10);
+
+        // KH_UI_ONE_RENDERER: a worker that ended (an exception out of its loop; a failed start joins itself) is
+        // joined and a new one started; its Ultralight objects are left alive (the new worker's Create would
+        // release the old Renderer off its thread). A running one - with its Renderer - serves this session too.
+        if (worker_thread_.joinable() && !worker_running_.load(std::memory_order_acquire)) {
+            worker_thread_.join();
+            leak_ultralight_objects(false);
+        }
+
+        {   // Under the worker's mutex: an idle worker's wait sees it (no lost wake).
+            std::lock_guard<std::mutex> khui_l(worker_mutex_);
+            session_active_.store(true, std::memory_order_release);
+        }
+
+        if (!worker_thread_.joinable()) {
+            should_stop_.store(false, std::memory_order_release);
+            worker_initialized_.store(false, std::memory_order_release);
+            worker_init_failed_.store(false, std::memory_order_release);
+            worker_thread_ = std::thread(&UIFramework::worker_thread_func, this);
+            auto start = std::chrono::steady_clock::now();
+            constexpr auto timeout = std::chrono::seconds(10);
         
-        while (!worker_initialized_.load(std::memory_order_acquire) &&
-               !worker_init_failed_.load(std::memory_order_acquire)) {
-            if (std::chrono::steady_clock::now() - start > timeout) {
-                MainThreadScheduler::instance().schedule([]() {
-                    report_error("KH - UI Framework: Worker thread initialization timeout");
-                });
+            while (!worker_initialized_.load(std::memory_order_acquire) &&
+                   !worker_init_failed_.load(std::memory_order_acquire)) {
+                if (std::chrono::steady_clock::now() - start > timeout) {
+                    MainThreadScheduler::instance().schedule([]() {
+                        report_error("KH - UI Framework: Worker thread initialization timeout");
+                    });
 
-                should_stop_.store(true, std::memory_order_release);
-                worker_cv_.notify_all();
+                    should_stop_.store(true, std::memory_order_release);
+                    worker_cv_.notify_all();
 
+                    if (worker_thread_.joinable()) {
+                        worker_thread_.join();
+                    }
+
+                    session_active_.store(false, std::memory_order_release);
+                    return false;
+                }
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        
+            if (worker_init_failed_.load(std::memory_order_acquire)) {
                 if (worker_thread_.joinable()) {
                     worker_thread_.join();
                 }
 
+                session_active_.store(false, std::memory_order_release);
                 return false;
             }
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-        
-        if (worker_init_failed_.load(std::memory_order_acquire)) {
-            if (worker_thread_.joinable()) {
-                worker_thread_.join();
-            }
-
-            return false;
+        } else {
+            // KH_UI_ONE_RENDERER: the session's html_ui folders and a clean exists cache, on the worker, ahead of
+            // any command this session queues (the queue is in order).
+            queue_command([this]() { refresh_session_paths(); });
         }
         
         initialized_.store(true, std::memory_order_release);
+        worker_cv_.notify_all();   // KH_UI_ONE_RENDERER: an idle worker resumes the session's work.
         return true;
     }
 
@@ -1007,17 +1083,26 @@ public:
         hook_installed_.store(false, std::memory_order_release);
     }
 
-    void shutdown() {
+    // KH_UI_ONE_RENDERER: shutdown() closes the session (the mission edges): every document closed on the worker,
+    // which then idles with its Renderer for the next session. shutdown(true) stops and joins the worker (the
+    // DLL's detach, the singleton's destructor). A session close whose worker has left (an exception out of its
+    // loop) is taken to the final stop.
+    void shutdown(bool khui_final = false) {
+        if (!khui_final && !initialized_.load(std::memory_order_acquire)) return;   // No session open.
         if (!initialized_.load(std::memory_order_acquire) && 
             !worker_thread_.joinable()) {
             return;
         }
 
+        session_active_.store(false, std::memory_order_seq_cst);   // KH_UI_ONE_RENDERER: no hook / update.
         shutting_down_.store(true, std::memory_order_seq_cst);
-        should_stop_.store(true, std::memory_order_release);
-        
-        {
-            std::lock_guard<std::mutex> lock(worker_mutex_);
+
+        // KH_UI_ONE_RENDERER: the stop's wake only on the final path (a session close wakes the worker with its
+        // own command; a pending flag with no command made the idle worker spin until it came). The lock is
+        // bounded: at the process's exit the worker was ended, possibly holding it.
+        if (khui_final) {
+            should_stop_.store(true, std::memory_order_release);
+            std::unique_lock<std::mutex> lock = khui_lock_bounded(worker_mutex_);
             has_pending_commands_.store(true, std::memory_order_release);
         }
 
@@ -1045,9 +1130,18 @@ public:
             std::this_thread::yield();
         }
 
+        // KH_UI_ONE_RENDERER: a session close waits for the worker to close every document (as long as it runs:
+        // the baseline's join had no bound either); a worker that has left becomes the final stop.
+        if (!khui_final && !close_session_documents()) {
+            khui_final = true;
+            should_stop_.store(true, std::memory_order_release);
+            worker_cv_.notify_all();
+        }
+
         // Wait for worker thread to finish
-        if (worker_thread_.joinable()) {
+        if (khui_final && worker_thread_.joinable()) {
             worker_thread_.join();
+            leak_ultralight_objects(true);   // KH_UI_ONE_RENDERER: only a worker that ran no cleanup.
         }
 
         try {
@@ -1064,13 +1158,16 @@ public:
             d3d_renderer_.cleanup();
         } catch (...) {}
 
-        // Reset ALL state for potential re-initialization
+        // Reset ALL state for potential re-initialization (KH_UI_ONE_RENDERER: the worker's own state only when
+        // it was stopped)
         d3d_initialized_.store(false, std::memory_order_release);
         initialized_.store(false, std::memory_order_release);
-        worker_initialized_.store(false, std::memory_order_release);
-        worker_init_failed_.store(false, std::memory_order_release);
-        should_stop_.store(false, std::memory_order_release);
-        has_pending_commands_.store(false, std::memory_order_release);
+        if (khui_final) {
+            worker_initialized_.store(false, std::memory_order_release);
+            worker_init_failed_.store(false, std::memory_order_release);
+            should_stop_.store(false, std::memory_order_release);
+            has_pending_commands_.store(false, std::memory_order_release);
+        }
         shutting_down_.store(false, std::memory_order_release);
     }
 
@@ -1395,6 +1492,27 @@ public:
 
         if (render_list.empty()) return;
 
+        // KH_PRESENT_OWN (RenderIntegration's kh_present_cb, the same rule): the shared Present runs for every
+        // swap chain this process presents. One of another device (an overlay or capture tool) is not the
+        // game's frame: no document is drawn for it and its size is not taken as the screen's. Identity by
+        // IUnknown; a device that cannot be told is served as before. Two queries and two releases per Present
+        // with a document to draw.
+        {
+            auto khpo_ri = RVExtBridge::get_render_info();
+            auto* const khpo_game = khpo_ri ? khpo_ri->d3dDevice : nullptr;
+            if (khpo_game) {
+                IUnknown* khpo_sd = nullptr;
+                IUnknown* khpo_gd = nullptr;
+                const bool khpo_have =
+                    SUCCEEDED(swap_chain->GetDevice(__uuidof(IUnknown), reinterpret_cast<void**>(&khpo_sd))) &&
+                    SUCCEEDED(khpo_game->QueryInterface(__uuidof(IUnknown), reinterpret_cast<void**>(&khpo_gd)));
+                const bool khpo_foreign = khpo_have && khpo_sd != khpo_gd;
+                if (khpo_sd) khpo_sd->Release();
+                if (khpo_gd) khpo_gd->Release();
+                if (khpo_foreign) return;
+            }
+        }
+
         // KH_UI_RESIZE: the back buffer's size, read every Present that draws (nothing before this reads it). A
         // resolution change goes through ResizeBuffers on the same swapchain (RenderIntegration's
         // KH_PRESENT_RESIZE), so a read keyed on the swapchain pointer kept the old size - the viewport, the pixel
@@ -1483,11 +1601,18 @@ public:
 
 private:
     UIFramework() = default;
-    ~UIFramework() { shutdown(); }
+    ~UIFramework() { shutdown(true); }   // KH_UI_ONE_RENDERER: the worker stops with the process.
     UIFramework(const UIFramework&) = delete;
     UIFramework& operator=(const UIFramework&) = delete;
 
     void worker_thread_func() {
+        // KH_UI_ONE_RENDERER: whether this thread is still in its function (initialize() joins a worker that left).
+        worker_running_.store(true, std::memory_order_release);
+        struct KhUiRunning {
+            std::atomic<bool>& flag;
+            ~KhUiRunning() { flag.store(false, std::memory_order_release); }
+        } khui_running{worker_running_};
+
         try {
             if (!initialize_ultralight()) {
                 worker_init_failed_.store(true, std::memory_order_release);
@@ -1521,16 +1646,22 @@ private:
             };
 
             while (!should_stop_.load(std::memory_order_acquire)) {
-                try {
-                    ensure_present_hook();
-                    ensure_wndproc_hook();
-                } catch (...) {
-                    worker_iter_failed();
+                // KH_UI_ONE_RENDERER: between sessions the worker keeps its Renderer and serves commands only (the
+                // session close, the next session's refresh): no hook ensured, no update, a 100 ms wait.
+                const bool khui_live = session_active_.load(std::memory_order_acquire);
+
+                if (khui_live) {
+                    try {
+                        ensure_present_hook();
+                        ensure_wndproc_hook();
+                    } catch (...) {
+                        worker_iter_failed();
+                    }
                 }
 
                 try {
                     process_commands();
-                    update_ultralight();
+                    if (khui_live) update_ultralight();
                 } catch (...) {
                     worker_iter_failed();
                 }
@@ -1538,10 +1669,19 @@ private:
                 {
                     std::unique_lock<std::mutex> lock(worker_mutex_);
 
-                    worker_cv_.wait_for(lock, std::chrono::milliseconds(16), [this] {
-                        return should_stop_.load(std::memory_order_acquire) ||
-                               has_pending_commands_.load(std::memory_order_acquire);
-                    });
+                    if (khui_live) {
+                        worker_cv_.wait_for(lock, std::chrono::milliseconds(16), [this] {
+                            return should_stop_.load(std::memory_order_acquire) ||
+                                   has_pending_commands_.load(std::memory_order_acquire);
+                        });
+                    } else {
+                        // Timed as well: a wake missed by a flag set outside this mutex costs <= 100 ms.
+                        worker_cv_.wait_for(lock, std::chrono::milliseconds(100), [this] {
+                            return should_stop_.load(std::memory_order_acquire) ||
+                                   has_pending_commands_.load(std::memory_order_acquire) ||
+                                   session_active_.load(std::memory_order_acquire);
+                        });
+                    }
                 }
             }
 
@@ -1635,7 +1775,9 @@ private:
         }
     }
 
-    void cleanup_ultralight() {
+    // KH_UI_ONE_RENDERER: the documents (their Views) closed, the Renderer left standing - the session's end.
+    // Worker thread.
+    void close_all_documents_internal() {
         {
             std::lock_guard<std::mutex> lock(documents_mutex_);
 
@@ -1660,10 +1802,118 @@ private:
                 renderer_->Render();
             } catch (...) {}
         }
+    }
 
+    // The worker's end: every document, then the Renderer, the file system and the font loader.
+    void cleanup_ultralight() {
+        close_all_documents_internal();
+        web_session_ = nullptr;   // KH_UI_SESSION_RESET: before the Renderer that made it.
+        web_session_failed_ = false;
         renderer_ = nullptr;
         file_system_.reset();
         font_loader_.reset();
+    }
+
+    // KH_UI_ONE_RENDERER: the next session's html_ui folders (find_html_file's and the file system's) and an
+    // empty exists cache - what a new file system had at every mission before. Worker thread.
+    void refresh_session_paths() {
+        html_dirs_ = find_html_ui_directories();
+
+        if (file_system_) {
+            file_system_->set_search_paths(html_dirs_);
+            file_system_->clear_cache();
+        }
+    }
+
+    // KH_UI_SESSION_RESET: the session's web storage, made at its first view. With one Renderer for the process
+    // (KH_UI_ONE_RENDERER) the default session would carry a page's cookies and local storage from one mission
+    // into the next; a non-persistent session per mission starts clean, as the per-mission Renderer did, and
+    // writes nothing to disk. Released at the session close, after its views. A session that cannot be made
+    // gives nullptr - every view of this session then takes the default one (one store for all of its pages,
+    // as before), and the next session asks again. Worker thread.
+    ultralight::RefPtr<ultralight::Session> web_session() {
+        if (!web_session_ && !web_session_failed_ && renderer_) {
+            const std::string khws_name = "kh_ui_" + std::to_string(++web_session_n_);
+            web_session_ = renderer_->CreateSession(false, ultralight::String(khws_name.c_str()));
+            web_session_failed_ = !web_session_;
+
+            if (web_session_failed_) {   // Once a session: its pages keep the default store (no reset).
+                MainThreadScheduler::instance().schedule([]() {
+                    report_error("KH - UI Framework: could not create a web session; this mission's pages "
+                                 "share the default one (their storage is not reset)");
+                });
+            }
+        }
+
+        return web_session_;
+    }
+
+    // KH_UI_ONE_RENDERER: the session close on the worker, waited for while the worker runs (no time bound: a
+    // worker that is only slow finishes it, and a stuck one held the baseline's join the same way); false when
+    // no worker runs or it left before answering. Game thread.
+    bool close_session_documents() {
+        if (!worker_thread_.joinable() || !worker_running_.load(std::memory_order_acquire)) return false;
+        auto khcs_p = std::make_shared<std::promise<void>>();
+        std::future<void> khcs_f = khcs_p->get_future();
+
+        queue_command([this, khcs_p]() {
+            try {
+                close_all_documents_internal();
+                web_session_ = nullptr;   // KH_UI_SESSION_RESET: its views are closed; the next mission's is new.
+                web_session_failed_ = false;
+                // The memory the closed pages leave (cached images, scripts, style sheets) is given back at the
+                // mission edge, as the Renderer's destruction gave back its own: on the worker, outside any
+                // Ultralight callback (PurgeMemory's rule).
+                if (renderer_) renderer_->PurgeMemory();
+            } catch (...) {}
+
+            khcs_p->set_value();
+        });
+
+        while (khcs_f.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
+            if (!worker_running_.load(std::memory_order_acquire)) {
+                return khcs_f.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+            }
+        }
+
+        return true;
+    }
+
+    // KH_UI_ONE_RENDERER: a lock a thread the process already ended may hold for good (the exit): tried for
+    // ~100 ms, then the caller goes on without it - no other thread runs then; a live holder lets go well
+    // inside it (the worker's predicate test; the documents' lock with the worker joined). The bound is a
+    // steady-clock deadline: a 1 ms sleep lasts a whole timer tick (15.6 ms at Windows' default
+    // resolution), so a count of 100 sleeps was ~1.6 s - and the exit takes two such locks.
+    static std::unique_lock<std::mutex> khui_lock_bounded(std::mutex& khlb_m) {
+        std::unique_lock<std::mutex> khlb_l(khlb_m, std::try_to_lock);
+        const auto khlb_end = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+        while (!khlb_l.owns_lock() && std::chrono::steady_clock::now() < khlb_end) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            (void)khlb_l.try_lock();
+        }
+
+        return khlb_l;
+    }
+
+    // KH_UI_ONE_RENDERER: a worker that ended without cleanup_ultralight (ended by the process at its exit, or
+    // by an exception out of its loop) leaves its Ultralight objects here. Released off the thread that made
+    // them - at the exit, into a library whose threads are gone - they could hang or fault, so they are left
+    // alive, never deleted by intent: the Renderer, the web session (KH_UI_SESSION_RESET), the documents (their
+    // Views), the file system and the font loader (the Platform holds raw pointers to both). No worker runs.
+    // khlu_exit: the documents' lock is bounded (khui_lock_bounded).
+    void leak_ultralight_objects(bool khlu_exit) {
+        if (!renderer_) return;
+        (void)new ultralight::RefPtr<ultralight::Renderer>(renderer_);
+        renderer_ = nullptr;   // A count step only: the copy above keeps it.
+        if (web_session_) (void)new ultralight::RefPtr<ultralight::Session>(web_session_);   // KH_UI_SESSION_RESET.
+        web_session_ = nullptr;
+        web_session_failed_ = false;
+        (void)file_system_.release();
+        (void)font_loader_.release();
+        std::unique_lock<std::mutex> khlu_l = khlu_exit ? khui_lock_bounded(documents_mutex_)
+                                                        : std::unique_lock<std::mutex>(documents_mutex_);
+        (void)new std::unordered_map<std::string, std::shared_ptr<UIDocument>>(std::move(documents_));
+        documents_.clear();
     }
 
     void update_ultralight() {
@@ -1754,6 +2004,9 @@ private:
             pending_commands_.push_back(std::move(cmd));
             has_pending_commands_.store(true, std::memory_order_release);
         }
+        // KH_UI_ONE_RENDERER: through the worker's mutex once, so a worker between its predicate test and its
+        // wait cannot miss this notify (the idle wait is long; the session's was 16 ms).
+        { std::lock_guard<std::mutex> khqc_l(worker_mutex_); }
         worker_cv_.notify_one();
     }
 
@@ -1793,7 +2046,7 @@ private:
         ultralight::ViewConfig vc;
         vc.is_accelerated = false;
         vc.is_transparent = true;
-        auto view = renderer_->CreateView(w, h, vc, nullptr);
+        auto view = renderer_->CreateView(w, h, vc, web_session());   // KH_UI_SESSION_RESET.
 
         if (!view) {
             MainThreadScheduler::instance().schedule([]() {
@@ -1843,7 +2096,7 @@ private:
         ultralight::ViewConfig vc;
         vc.is_accelerated = false;
         vc.is_transparent = true;
-        auto view = renderer_->CreateView(w, h, vc, nullptr);
+        auto view = renderer_->CreateView(w, h, vc, web_session());   // KH_UI_SESSION_RESET.
 
         if (!view) {
             MainThreadScheduler::instance().schedule([]() {
@@ -1919,7 +2172,7 @@ private:
         ultralight::ViewConfig vc;
         vc.is_accelerated = false;
         vc.is_transparent = true;
-        auto new_view = renderer_->CreateView(width, height, vc, nullptr);
+        auto new_view = renderer_->CreateView(width, height, vc, web_session());   // KH_UI_SESSION_RESET.
         if (!new_view) return;
         new_view->set_view_listener(doc->listener.get());
         new_view->set_load_listener(doc->listener.get());
@@ -2036,6 +2289,16 @@ private:
     std::atomic<bool> should_stop_{false};
     std::atomic<bool> worker_initialized_{false};
     std::atomic<bool> worker_init_failed_{false};
+    // KH_UI_ONE_RENDERER: the worker is inside its function; a session is open (hooks ensured, Ultralight
+    // updated) - the worker outlives sessions.
+    std::atomic<bool> worker_running_{false};
+    std::atomic<bool> session_active_{false};
+    // KH_UI_SESSION_RESET: this session's in-memory web storage (cookies, local / session storage, caches) and
+    // the count that names each one uniquely. Worker thread only (made, used and released there; a dead
+    // worker's is left alive with its other objects).
+    ultralight::RefPtr<ultralight::Session> web_session_;
+    uint32_t web_session_n_ = 0;
+    bool web_session_failed_ = false;   // This session's CreateSession failed: its views take the default one.
     std::mutex worker_mutex_;
     std::condition_variable worker_cv_;
     
@@ -2150,7 +2413,8 @@ private:
         try {
             MainThreadScheduler::instance().schedule([this]() {
                 if (!shutting_down_.load(std::memory_order_acquire) &&
-                    !should_stop_.load(std::memory_order_acquire)) {
+                    !should_stop_.load(std::memory_order_acquire) &&
+                    session_active_.load(std::memory_order_acquire)) {   // KH_UI_ONE_RENDERER.
                     if (install_wndproc_hook()) ladder_success(wndproc_ladder_);
                     else ladder_fail_round(wndproc_ladder_, "WndProc (mouse/keyboard) hook install failed",
                                            "HTML input disabled");
@@ -2190,9 +2454,14 @@ private:
             return UIFileSystem::pbo_root() / key;
         }
 
+        // PATH_CONFINE: a file inside an html_ui folder only - below it (relative), or an absolute path inside it
+        // (KH_HTML_ABS: path_within, the rule the page's own links are answered by in UIFileSystem::ConfinedIn).
+        // A drive, rooted or network path elsewhere, or one leaving the folder through '..', is not found (and
+        // touches nothing).
         for (const auto& base : html_dirs_) {
-            auto p = base / filename;
-            if (std::filesystem::exists(p)) return p;
+            auto p = ModFolderSearcher::confined_join(base, filename);
+            if (p.empty() && ModFolderSearcher::path_within(filename, base)) p = filename;   // KH_HTML_ABS.
+            if (!p.empty() && std::filesystem::exists(p)) return p;
         }
 
         return {};

@@ -26,7 +26,7 @@ class KH_ResourceRemoteController
             h = QUOTE(RSC_POS_H(30));
             colorBackground[] = {0, 0, 0, 0.9};
         };
-        class UnitImage: KH_ResourcePicture
+        class UnitImage: RscPicture
         {
             idc = 103;
             x = QUOTE(RSC_POS_X(60.5));

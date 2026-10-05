@@ -206,7 +206,10 @@ public:
         auto search_paths = find_all_tts_model_directories();
         
         for (const auto& base_path : search_paths) {
-            std::filesystem::path model_path = base_path / model_name;
+            // PATH_CONFINE (search_mod_folders.hpp's note): a folder below the models folder only - a drive,
+            // rooted or network path, or one leaving the folder through '..', is not found (and touches nothing).
+            std::filesystem::path model_path = ModFolderSearcher::confined_join(base_path, model_name);
+            if (model_path.empty()) break;   // The name's verdict, the same under every folder.
             
             if (std::filesystem::exists(model_path) && std::filesystem::is_directory(model_path)) {
                 return model_path;

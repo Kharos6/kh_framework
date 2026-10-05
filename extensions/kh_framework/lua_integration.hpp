@@ -1934,6 +1934,13 @@ static void initialize_lua_state() {
             sol::lib::jit
         );
 
+        // PATH_CONFINE (search_mod_folders.hpp's note): the base library's dofile and loadfile read a file by a
+        // path the script chooses - anywhere on the disk, or a network share - so a mission could read the
+        // player's files as chunks (a parse error quotes them) or make the game open a share. Nothing here uses
+        // them; Lua code arrives as text from SQF (load, loadstring stay).
+        (*g_lua_state)["dofile"] = sol::nil;
+        (*g_lua_state)["loadfile"] = sol::nil;
+
         // Override print function to use Arma's system_chat and diag_log
         (*g_lua_state)["print"] = [](sol::variadic_args args) {
             try {

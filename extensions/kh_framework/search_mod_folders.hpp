@@ -509,7 +509,7 @@ private:
         const bool packed = entry.method == PBO_METHOD_PACKED && entry.original_size != 0 &&
                             entry.original_size != entry.data_size;
 
-        // KH_PBO_LZSS_BOUND: this LZSS gives at most 9 bytes per input byte (a 2-byte reference at most 18, a
+        // This LZSS gives at most 9 bytes per input byte (a 2-byte reference at most 18, a
         // literal 1, flag bytes none), so a larger unpacked size is corrupt - refused before it is allocated.
         if (packed && entry.original_size / 9 > entry.data_size) return fail("corrupt packed data in " + pbo_utf8(pbo));
 
@@ -546,11 +546,11 @@ private:
     class PboExtractXLock {
     public:
         PboExtractXLock() {
-            static const HANDLE khxl_h = CreateMutexW(nullptr, FALSE, L"Local\\kh_framework_pbo_extract");
-            h_ = khxl_h;
+            static const HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Local\\kh_framework_pbo_extract");
+            h_ = mutex;
             if (h_) {
-                const DWORD khxl_r = WaitForSingleObject(h_, INFINITE);
-                owned_ = khxl_r == WAIT_OBJECT_0 || khxl_r == WAIT_ABANDONED;
+                const DWORD wait_result = WaitForSingleObject(h_, INFINITE);
+                owned_ = wait_result == WAIT_OBJECT_0 || wait_result == WAIT_ABANDONED;
             }
         }
         ~PboExtractXLock() { if (owned_) ReleaseMutex(h_); }
@@ -585,19 +585,19 @@ private:
         if (seg.back() == '.' || seg.back() == ' ') return false;   // Windows drops them: two names, one file.
         std::string stem = seg.substr(0, seg.find('.'));
         for (char& c : stem) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
-        // KH_PBO_DEVNAME: Windows drops the spaces before the extension too ("nul .txt" is NUL), and takes COM /
+        // Windows drops the spaces before the extension too ("nul .txt" is NUL), and takes COM /
         // LPT with a superscript 1-3 (UTF-8 C2 B9 / C2 B2 / C2 B3) as a port as well - and so the lone byte B9 /
         // B2 / B3 too: the superscript in Windows-1252, the code page a narrow path is converted with on a Western
         // system (confined_join's folder / request). After the ASCII "com" / "lpt" no valid UTF-8 name holds it.
         while (!stem.empty() && stem.back() == ' ') stem.pop_back();
-        const bool khpd_port = stem.compare(0, 3, "com") == 0 || stem.compare(0, 3, "lpt") == 0;
+        const bool is_port_name = stem.compare(0, 3, "com") == 0 || stem.compare(0, 3, "lpt") == 0;
 
-        const bool khpd_digit = (stem.size() == 4 && ((stem[3] >= '0' && stem[3] <= '9') || stem[3] == '\xB9' ||
+        const bool has_digit = (stem.size() == 4 && ((stem[3] >= '0' && stem[3] <= '9') || stem[3] == '\xB9' ||
                                                       stem[3] == '\xB2' || stem[3] == '\xB3')) ||
                                 (stem.size() == 5 && stem[3] == '\xC2' &&
                                  (stem[4] == '\xB9' || stem[4] == '\xB2' || stem[4] == '\xB3'));
 
-        return !(stem == "con" || stem == "prn" || stem == "aux" || stem == "nul" || (khpd_port && khpd_digit));
+        return !(stem == "con" || stem == "prn" || stem == "aux" || stem == "nul" || (is_port_name && has_digit));
     }
 
     // A normalised engine path as a relative filesystem path; false when a segment is not a plain file name.
@@ -621,9 +621,9 @@ private:
 
     // Documents\Arma 3\kh_framework\cache\pbo (empty when Documents is unknown).
     static std::filesystem::path pbo_extract_root() {
-        char docs[MAX_PATH];
-        if (SHGetFolderPathA(NULL, CSIDL_MYDOCUMENTS, NULL, SHGFP_TYPE_CURRENT, docs) != S_OK) return {};
-        return std::filesystem::path(docs) / "Arma 3" / "kh_framework" / "cache" / "pbo";
+        const std::filesystem::path docs = kh_framework_documents_dir();
+        if (docs.empty()) return {};
+        return docs / "cache" / "pbo";
     }
 
     // One file's copy (pbo_extract_mutex held): out = its path under root\files. key is normalised.
@@ -651,7 +651,7 @@ private:
         const bool packed = entry.method == PBO_METHOD_PACKED && entry.original_size != 0 &&
                             entry.original_size != entry.data_size;
 
-        // KH_PBO_LZSS_BOUND (pbo_read_uncached): an unpacked size LZSS cannot reach is refused before any allocation.
+        // As pbo_read_uncached: an unpacked size LZSS cannot reach is refused before any allocation.
         if (packed && entry.original_size / 9 > entry.data_size) return fail("corrupt packed data in " + pbo_utf8(pbo));
         const uint64_t want = packed ? entry.original_size : entry.data_size;
         PboFile file(pbo);
@@ -814,7 +814,7 @@ private:
                 continue;
             }
 
-            // Skip handles with problematic access rights. KH_ACCESS_FIRST: before any call on the handle - a
+            // Skip handles with problematic access rights. Before any call on the handle - a
             // synchronous pipe's queries (GetFileType's among them) can wait while a read on it is pending.
             if (handle.GrantedAccess == 0x0012019f) {
                 continue;
@@ -873,18 +873,18 @@ private:
 
             // Check if this is a PBO file
             if (objectName.Length && objectName.Buffer && objectTypeInfo->Name.Buffer) {
-                // KH_NT_NAME_LEN: a UNICODE_STRING need not end in a NUL - its Length (bytes) bounds it.
+                // A UNICODE_STRING need not end in a NUL - its Length (bytes) bounds it.
                 std::wstring_view tmp_type(objectTypeInfo->Name.Buffer, objectTypeInfo->Name.Length / sizeof(wchar_t));
                 std::wstring_view tmp_name(objectName.Buffer, objectName.Length / sizeof(wchar_t));
-                // KH_PBO_CASE: ".pbo" in any case, as the extension test below takes it (c | 0x20 folds ASCII only).
-                bool khpc_pbo = false;
+                // ".pbo" in any case, as the extension test below takes it (c | 0x20 folds ASCII only).
+                bool is_pbo = false;
 
-                for (size_t k = 0; !khpc_pbo && k + 4 <= tmp_name.size(); ++k) {
-                    khpc_pbo = tmp_name[k] == L'.' && (tmp_name[k + 1] | 0x20) == L'p' &&
+                for (size_t k = 0; !is_pbo && k + 4 <= tmp_name.size(); ++k) {
+                    is_pbo = tmp_name[k] == L'.' && (tmp_name[k + 1] | 0x20) == L'p' &&
                                (tmp_name[k + 2] | 0x20) == L'b' && (tmp_name[k + 3] | 0x20) == L'o';
                 }
 
-                if (tmp_type == L"File"sv && khpc_pbo) {
+                if (tmp_type == L"File"sv && is_pbo) {
                     // A path that does not fit returns the size it needs (terminator included) and writes nothing.
                     std::vector<wchar_t> buffer(MAX_PATH);
 
@@ -948,6 +948,28 @@ public:
         return discover_mod_folders();
     }
 
+    // Documents\Arma 3\kh_framework (empty when Documents is unknown).
+    static std::filesystem::path kh_framework_documents_dir() {
+        char docs[MAX_PATH];
+        if (SHGetFolderPathA(NULL, CSIDL_MYDOCUMENTS, NULL, SHGFP_TYPE_CURRENT, docs) != S_OK) return {};
+        return std::filesystem::path(docs) / "Arma 3" / "kh_framework";
+    }
+
+    // The folders an integration looks its files up in: Documents\Arma 3\kh_framework\<name> first (when it
+    // exists), then every active mod's <name> folder.
+    static std::vector<std::filesystem::path> kh_framework_search_paths(const std::string& name) {
+        std::vector<std::filesystem::path> paths;
+
+        try {
+            const std::filesystem::path docs = kh_framework_documents_dir();
+            if (!docs.empty() && std::filesystem::exists(docs / name)) paths.push_back(docs / name);
+        } catch (...) {}
+
+        auto mod_dirs = find_directories_in_mods(name);
+        paths.insert(paths.end(), mod_dirs.begin(), mod_dirs.end());
+        return paths;
+    }
+
     static std::vector<std::filesystem::path> find_directories_in_mods(const std::string& dir_name) {
         std::vector<std::filesystem::path> found_dirs;
         auto mod_folders = discover_mod_folders();
@@ -972,7 +994,7 @@ public:
         const std::vector<std::filesystem::path>& directories,
         const std::string& extension) {
         std::vector<std::filesystem::path> found_files;
-        // KH_EXT_WIDE: the extension as UTF-8 (the engine's strings), compared wide in ASCII lower case.
+        // The extension as UTF-8 (the engine's strings), compared wide in ASCII lower case.
         std::wstring lowercase_ext = pbo_wide(extension);
         for (auto& c : lowercase_ext) if (c >= L'A' && c <= L'Z') c = static_cast<wchar_t>(c + 32);
         
@@ -984,7 +1006,7 @@ public:
                 
                 for (const auto& entry : std::filesystem::directory_iterator(dir)) {
                     if (entry.is_regular_file()) {
-                        // KH_EXT_WIDE: wide - path::string() throws on a character the ANSI code page lacks,
+                        // Wide - path::string() throws on a character the ANSI code page lacks,
                         // and the catch outside the loop then ended the whole directory's scan.
                         std::wstring file_ext = entry.path().extension().wstring();
                         for (auto& c : file_ext) if (c >= L'A' && c <= L'Z') c = static_cast<wchar_t>(c + 32);
@@ -1006,7 +1028,7 @@ public:
         const std::vector<std::filesystem::path>& directories,
         const std::string& extension) {
         
-        // KH_EXT_WIDE: the extension as UTF-8 (the engine's strings), compared wide in ASCII lower case.
+        // The extension as UTF-8 (the engine's strings), compared wide in ASCII lower case.
         std::wstring lowercase_ext = pbo_wide(extension);
         for (auto& c : lowercase_ext) if (c >= L'A' && c <= L'Z') c = static_cast<wchar_t>(c + 32);
         
@@ -1018,7 +1040,7 @@ public:
                 
                 for (const auto& entry : std::filesystem::directory_iterator(dir)) {
                     if (entry.is_regular_file()) {
-                        // KH_EXT_WIDE: wide - path::string() throws on a character the ANSI code page lacks,
+                        // Wide - path::string() throws on a character the ANSI code page lacks,
                         // and the catch outside the loop then ended the whole directory's scan.
                         std::wstring file_ext = entry.path().extension().wstring();
                         for (auto& c : file_ext) if (c >= L'A' && c <= L'Z') c = static_cast<wchar_t>(c + 32);
@@ -1150,7 +1172,6 @@ public:
     }
 
     template<typename Predicate>
-
     static std::vector<std::filesystem::path> find_files(
         const std::vector<std::filesystem::path>& directories,
         Predicate predicate) {

@@ -282,18 +282,15 @@ public:
             {".json", "application/json"}, {".xml", "application/xml"}
         };
         
-        // KH_UI_NARROW: the extension from the UTF-8 text itself, by path::extension's rule (the last '.' of the
+        // The extension from the UTF-8 text itself, by path::extension's rule (the last '.' of the
         // file name, not its first character; none for "." / "..") - a path made of the text converts it
         // with the code page, and string() back, either of which throws for a name the code page cannot take.
-        const std::string khmt_p = path.utf8().data();
-        const size_t khmt_s = khmt_p.find_last_of("\\/");
-        const std::string khmt_n = khmt_s == std::string::npos ? khmt_p : khmt_p.substr(khmt_s + 1);
-        const size_t khmt_d = khmt_n.rfind('.');
-        std::string ext = (khmt_n == "." || khmt_n == ".." || khmt_d == std::string::npos || khmt_d == 0)
-                              ? std::string() : khmt_n.substr(khmt_d);
-        
-        // Lowercase in-place
-        for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        const std::string utf8_path = path.utf8().data();
+        const size_t slash = utf8_path.find_last_of("\\/");
+        const std::string name = slash == std::string::npos ? utf8_path : utf8_path.substr(slash + 1);
+        const size_t dot = name.rfind('.');
+        const std::string ext = kh_lower_copy((name == "." || name == ".." || dot == std::string::npos || dot == 0)
+                                                  ? std::string() : name.substr(dot));
         auto it = mime_types.find(ext);
         return (it != mime_types.end()) ? it->second : "application/octet-stream";
     }
@@ -306,11 +303,11 @@ public:
         exists_cache_.clear();
     }
 
-    // KH_UI_ONE_RENDERER: the html_ui folders again at a session's start (the file system lives for the process
+    // The html_ui folders again at a session's start (the file system lives for the process
     // with the Renderer). Ultralight may ask from its own threads, so readers take a copy under the lock.
-    void set_search_paths(const std::vector<std::filesystem::path>& khsp_paths) {
-        std::unique_lock<std::shared_mutex> khsp_l(search_mx_);
-        search_paths_ = khsp_paths;
+    void set_search_paths(const std::vector<std::filesystem::path>& paths) {
+        std::unique_lock<std::shared_mutex> lock(search_mx_);
+        search_paths_ = paths;
     }
 
     // PBO_PATH (search_mod_folders.hpp's note): an HTML file named with one leading slash is inside the loaded PBOs.
@@ -355,10 +352,10 @@ public:
 
 private:
     std::vector<std::filesystem::path> search_paths_;
-    mutable std::shared_mutex search_mx_;   // KH_UI_ONE_RENDERER: search_paths_ (set_search_paths).
+    mutable std::shared_mutex search_mx_;   // search_paths_ (set_search_paths).
 
     std::vector<std::filesystem::path> search_paths() const {
-        std::shared_lock<std::shared_mutex> khsp_l(search_mx_);
+        std::shared_lock<std::shared_mutex> lock(search_mx_);
         return search_paths_;
     }
     std::filesystem::path resources_path_;
@@ -408,7 +405,7 @@ private:
             // above or not at all).
             return WorkingFolderResource(path_str) && std::filesystem::exists(path_str);
         } catch (const std::exception&) {
-            // KH_UI_NARROW: a filesystem error, or a name the code page cannot take (std::system_error from the
+            // A filesystem error, or a name the code page cannot take (std::system_error from the
             // narrow-to-wide conversion: ConfinedIn's absolute path, the working-folder test) - no such file,
             // never an exception into Ultralight.
             return false;
@@ -438,7 +435,7 @@ private:
                 return path_str;
             }
         } catch (const std::exception&) {
-            // KH_UI_NARROW: as CheckExistsInternal - a filesystem error or a name the code page cannot take
+            // As CheckExistsInternal - a filesystem error or a name the code page cannot take
             // resolves to nothing.
         }
         
@@ -446,44 +443,43 @@ private:
     }
 };
 
-// KH_JS_BOUND: a page's value is page data, and one call converts at most KH_JS_ELEMS_MAX array elements in all,
-// nested at most KH_JS_DEPTH_MAX deep. Unbounded, an array holding itself (a = []; a.push(a)) recursed until the
+// A page's value is page data, and one call converts at most JS_ELEMS_MAX array elements in all,
+// nested at most JS_DEPTH_MAX deep. Unbounded, an array holding itself (a = []; a.push(a)) recursed until the
 // worker's stack overflowed and the process died; one holding itself twice doubled the work at every level; and a
 // length set far past the elements (a.length = 4e9) reserved it all. An array past the depth converts as nil, one
 // whose elements would take the call past the budget as empty; each element is counted once, when its array
 // reserves it.
-// KH_JS_GAME_THREAD: JavaScriptCore calls the bridge on the Ultralight worker (renderer_->Update, the page commands),
-// and a game_value may not be made or freed there - it allocates from the engine's SQF pools, which are the game
-// thread's alone (the renderer's own rule, rendering_integration.hpp KH_ATTACH_OFFSET). The page's values are copied
-// into this plain tree on the worker instead and made game_values in the scheduled call, on the game thread: the same
-// nil / bool / number / string / array shapes, the same values, the same bounds as before.
+// JavaScriptCore calls the bridge on the Ultralight worker (renderer_->Update, the page commands), and a
+// game_value may not be made or freed there - it allocates from the engine's SQF pools, which are the game
+// thread's alone. The page's values are copied into this plain tree on the worker and made game_values in the
+// scheduled call, on the game thread.
 struct KhJsVal {
-    enum Kind : uint8_t { KH_JSV_NIL, KH_JSV_BOOL, KH_JSV_NUM, KH_JSV_STR, KH_JSV_ARR };
-    Kind kind = KH_JSV_NIL;
+    enum Kind : uint8_t { JSV_NIL, JSV_BOOL, JSV_NUM, JSV_STR, JSV_ARR };
+    Kind kind = JSV_NIL;
     bool b = false;
     float n = 0.0f;
     std::string s;
     std::vector<KhJsVal> a;
 };
-static constexpr int KH_JS_DEPTH_MAX = 64;
-static constexpr size_t KH_JS_ELEMS_MAX = 1000000;
+static constexpr int JS_DEPTH_MAX = 64;
+static constexpr size_t JS_ELEMS_MAX = 1000000;
 static KhJsVal js_value_to_kh_js(JSContextRef ctx, JSValueRef value, int depth, size_t& budget) {
-    KhJsVal out;   // KH_JS_GAME_THREAD: nil.
+    KhJsVal out;   // Nil.
 
     if (JSValueIsNull(ctx, value) || JSValueIsUndefined(ctx, value)) {
         return out;
     }
 
-    if (depth > KH_JS_DEPTH_MAX) return out;   // KH_JS_BOUND.
+    if (depth > JS_DEPTH_MAX) return out;
     
     if (JSValueIsBoolean(ctx, value)) {
-        out.kind = KhJsVal::KH_JSV_BOOL;
+        out.kind = KhJsVal::JSV_BOOL;
         out.b = JSValueToBoolean(ctx, value);
         return out;
     }
     
     if (JSValueIsNumber(ctx, value)) {
-        out.kind = KhJsVal::KH_JSV_NUM;
+        out.kind = KhJsVal::JSV_NUM;
         out.n = static_cast<float>(JSValueToNumber(ctx, value, nullptr));
         return out;
     }
@@ -494,7 +490,7 @@ static KhJsVal js_value_to_kh_js(JSContextRef ctx, JSValueRef value, int depth, 
         std::vector<char> buffer(max_size);
         JSStringGetUTF8CString(js_str, buffer.data(), max_size);
         JSStringRelease(js_str);
-        out.kind = KhJsVal::KH_JSV_STR;
+        out.kind = KhJsVal::JSV_STR;
         out.s = std::string(buffer.data());
         return out;
     }
@@ -505,7 +501,7 @@ static KhJsVal js_value_to_kh_js(JSContextRef ctx, JSValueRef value, int depth, 
         JSValueRef length_val = JSObjectGetProperty(ctx, arr_obj, length_str, nullptr);
         JSStringRelease(length_str);
         const double js_len = JSValueToNumber(ctx, length_val, nullptr);
-        // KH_JS_BOUND: a count within what the call has left, or empty.
+        // A count within what the call has left, or empty.
         size_t length = 0;
 
         if (js_len >= 0.0 && js_len <= static_cast<double>(budget)) {
@@ -513,7 +509,7 @@ static KhJsVal js_value_to_kh_js(JSContextRef ctx, JSValueRef value, int depth, 
             budget -= length;
         }
 
-        out.kind = KhJsVal::KH_JSV_ARR;
+        out.kind = KhJsVal::JSV_ARR;
         out.a.reserve(length);
         
         for (size_t i = 0; i < length; i++) {
@@ -533,7 +529,7 @@ static KhJsVal js_value_to_kh_js(JSContextRef ctx, JSValueRef value, int depth, 
             std::vector<char> buffer(max_size);
             JSStringGetUTF8CString(json_str, buffer.data(), max_size);
             JSStringRelease(json_str);
-            out.kind = KhJsVal::KH_JSV_STR;
+            out.kind = KhJsVal::JSV_STR;
             out.s = std::string(buffer.data());
             return out;
         }
@@ -542,14 +538,14 @@ static KhJsVal js_value_to_kh_js(JSContextRef ctx, JSValueRef value, int depth, 
     return out;
 }
 
-// KH_JS_GAME_THREAD: a converted value as its game_value. GAME THREAD ONLY (the scheduled call). The tree is at most
-// KH_JS_DEPTH_MAX + 1 deep and KH_JS_ELEMS_MAX elements in all (js_value_to_kh_js).
+// A converted value as its game_value. GAME THREAD ONLY (the scheduled call). The tree is at most
+// JS_DEPTH_MAX + 1 deep and JS_ELEMS_MAX elements in all (js_value_to_kh_js).
 static game_value kh_js_to_game_value(const KhJsVal& v) {
     switch (v.kind) {
-    case KhJsVal::KH_JSV_BOOL: return game_value(v.b);
-    case KhJsVal::KH_JSV_NUM:  return game_value(v.n);
-    case KhJsVal::KH_JSV_STR:  return game_value(std::string(v.s));
-    case KhJsVal::KH_JSV_ARR: {
+    case KhJsVal::JSV_BOOL: return game_value(v.b);
+    case KhJsVal::JSV_NUM:  return game_value(v.n);
+    case KhJsVal::JSV_STR:  return game_value(std::string(v.s));
+    case KhJsVal::JSV_ARR: {
         auto_array<game_value> result;
         result.reserve(v.a.size());
         for (const KhJsVal& e : v.a) result.push_back(kh_js_to_game_value(e));
@@ -580,12 +576,12 @@ private:
             return JSValueMakeUndefined(ctx);
         }
         
-        // KH_JS_BOUND: an exception (an allocation) must not unwind through JavaScriptCore's own frames - the
+        // An exception (an allocation) must not unwind through JavaScriptCore's own frames - the
         // event is dropped instead. The arguments share one element budget.
         try {
-            // KH_JS_GAME_THREAD: the arguments as plain values here (this is the Ultralight worker); the game_value
+            // The arguments as plain values here (this is the Ultralight worker); the game_value
             // - the single argument, or the array of them - is made in the scheduled call, on the game thread.
-            size_t budget = KH_JS_ELEMS_MAX;
+            size_t budget = JS_ELEMS_MAX;
             std::vector<KhJsVal> args_list;
             args_list.reserve(argumentCount);
 
@@ -602,7 +598,7 @@ private:
                     } else {
                         auto_array<game_value> args_array;
                         args_array.reserve(args.size());
-                        for (const KhJsVal& khjs_a : args) args_array.push_back(kh_js_to_game_value(khjs_a));
+                        for (const KhJsVal& arg : args) args_array.push_back(kh_js_to_game_value(arg));
                         args_to_send = game_value(std::move(args_array));
                     }
                 } catch (...) {
@@ -622,21 +618,18 @@ class UIDocumentListener : public ultralight::ViewListener, public ultralight::L
 public:
     void OnAddConsoleMessage(ultralight::View* caller,
                              const ultralight::ConsoleMessage& msg) override {
-        auto level = msg.level();
-        
-        if (level == ultralight::kMessageLevel_Error || 
-            level == ultralight::kMessageLevel_Warning) {
-            std::string level_str = (level == ultralight::kMessageLevel_Error) ? "Error" : "Warning";
+        const auto level = msg.level();
+        if (level != ultralight::kMessageLevel_Error && level != ultralight::kMessageLevel_Warning) return;
+        const bool is_error = level == ultralight::kMessageLevel_Error;
+        const std::string text = std::string("KH UI: JS ") + (is_error ? "error" : "warning") + " at line " +
+                                 std::to_string(msg.line_number()) + ", col " + std::to_string(msg.column_number()) +
+                                 ": " + std::string(msg.message().utf8().data());
 
-            std::string err = "JS " + level_str
-                            + " at line " + std::to_string(msg.line_number()) 
-                            + ", col " + std::to_string(msg.column_number())
-                            + ": " + std::string(msg.message().utf8().data());
-            
-            MainThreadScheduler::instance().schedule([err]() {
-                report_error("KH - UI Framework: " + err);
-            });
-        }
+        // A page's console.error is an error; its console.warn is logged only.
+        MainThreadScheduler::instance().schedule([text, is_error]() {
+            if (is_error) report_error(text);
+            else sqf::diag_log(text);
+        });
     }
     
     void OnDOMReady(ultralight::View* caller,
@@ -655,7 +648,6 @@ struct UIDocument {
     std::string html_content;
     ultralight::RefPtr<ultralight::View> view;
     bool visible = true;
-    bool fullscreen = false;
     bool interactive = true;
     int x = 0, y = 0, width = 0, height = 0;
     float opacity = 1.0f;
@@ -894,26 +886,6 @@ public:
         context_->PSSetSamplers(0, 1, sampler_state_.GetAddressOf());
     }
     
-    void draw_quad(const std::string& doc_id, int sw, int sh, int dx, int dy, int dw, int dh, float opacity) {
-        if (!initialized_.load(std::memory_order_acquire) || !context_) return;
-        std::lock_guard<std::mutex> lock(texture_mutex_);
-        auto it = doc_textures_.find(doc_id);
-        if (it == doc_textures_.end() || !it->second.srv) return;
-        D3D11_MAPPED_SUBRESOURCE m;
-
-        if (SUCCEEDED(context_->Map(constant_buffer_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
-            ConstantBuffer* cb = (ConstantBuffer*)m.pData;
-            cb->screen_width = (float)sw; cb->screen_height = (float)sh;
-            cb->offset_x = (float)dx; cb->offset_y = (float)dy;
-            cb->doc_width = (float)dw; cb->doc_height = (float)dh;
-            cb->opacity = opacity;
-            context_->Unmap(constant_buffer_.Get(), 0);
-        }
-
-        context_->PSSetShaderResources(0, 1, it->second.srv.GetAddressOf());
-        context_->Draw(4, 0);
-    }
-
     void draw_quad_with_srv(ID3D11ShaderResourceView* srv, int sw, int sh, 
                             int dx, int dy, int dw, int dh, float opacity) {
         if (!initialized_.load(std::memory_order_acquire) || !context_ || !srv) return;
@@ -977,14 +949,16 @@ public:
 
 class UIFramework {
 public:
+    // Never destroyed: at process exit the worker threads are already gone when static destructors would run
+    // (a mutex one of them held would hang the exit); DllMain's unload path stops the framework instead.
     static UIFramework& instance() {
-        static UIFramework inst;
-        return inst;
+        static UIFramework* inst = new UIFramework();
+        return *inst;
     }
 
     // Initialize the UI framework and start the worker thread
     bool initialize() {
-        // KH_PLAYER_ONLY: only a machine with an interface shows HTML (hasInterface,
+        // Only a machine with an interface shows HTML (hasInterface,
         // framework.hpp's g_is_player). On a dedicated server or a headless client
         // nothing starts - no worker, no hook - and create / open return ''. The
         // html* commands stand down before reaching here (sqf_integration.hpp,
@@ -995,10 +969,10 @@ public:
         std::lock_guard<std::mutex> lock(init_mutex_);
         if (shutting_down_.load(std::memory_order_acquire)) return false;
         if (initialized_.load(std::memory_order_acquire)) return true;
-        ladder_reset(present_ladder_);   // KH_UI_HOOK_LADDER: fresh strikes per init
+        ladder_reset(present_ladder_);   // Fresh strikes per init
         ladder_reset(wndproc_ladder_);
 
-        // KH_UI_ONE_RENDERER: a worker that ended (an exception out of its loop; a failed start joins itself) is
+        // A worker that ended (an exception out of its loop; a failed start joins itself) is
         // joined and a new one started; its Ultralight objects are left alive (the new worker's Create would
         // release the old Renderer off its thread). A running one - with its Renderer - serves this session too.
         if (worker_thread_.joinable() && !worker_running_.load(std::memory_order_acquire)) {
@@ -1007,7 +981,7 @@ public:
         }
 
         {   // Under the worker's mutex: an idle worker's wait sees it (no lost wake).
-            std::lock_guard<std::mutex> khui_l(worker_mutex_);
+            std::lock_guard<std::mutex> worker_lock(worker_mutex_);
             session_active_.store(true, std::memory_order_release);
         }
 
@@ -1023,7 +997,7 @@ public:
                    !worker_init_failed_.load(std::memory_order_acquire)) {
                 if (std::chrono::steady_clock::now() - start > timeout) {
                     MainThreadScheduler::instance().schedule([]() {
-                        report_error("KH - UI Framework: Worker thread initialization timeout");
+                        report_error("KH UI: worker thread initialization timed out");
                     });
 
                     should_stop_.store(true, std::memory_order_release);
@@ -1049,60 +1023,35 @@ public:
                 return false;
             }
         } else {
-            // KH_UI_ONE_RENDERER: the session's html_ui folders and a clean exists cache, on the worker, ahead of
+            // The session's html_ui folders and a clean exists cache, on the worker, ahead of
             // any command this session queues (the queue is in order).
             queue_command([this]() { refresh_session_paths(); });
         }
         
         initialized_.store(true, std::memory_order_release);
-        worker_cv_.notify_all();   // KH_UI_ONE_RENDERER: an idle worker resumes the session's work.
+        worker_cv_.notify_all();   // An idle worker resumes the session's work.
         return true;
     }
 
-    void emergency_shutdown() {
-        shutting_down_.store(true, std::memory_order_seq_cst);
-        initialized_.store(false, std::memory_order_seq_cst);
-        instance_ptr_.store(nullptr, std::memory_order_seq_cst);
-        should_stop_.store(true, std::memory_order_seq_cst);
-        worker_cv_.notify_all();
-
-        __try {
-            uninstall_wndproc_hook();
-        }
-        __except(EXCEPTION_EXECUTE_HANDLER) {}
-
-        __try {
-            if (hook_installed_.load(std::memory_order_acquire) && hooked_present_addr_) {
-                kh_present_subscribe(KH_PRESENT_SLOT_UI, nullptr);   // KH_SHARED_PRESENT: never the hook itself.
-            }
-        }
-        __except(EXCEPTION_EXECUTE_HANDLER) {
-            // Ignore failures during emergency shutdown
-        }
-        
-        hook_installed_.store(false, std::memory_order_release);
-    }
-
-    // KH_UI_ONE_RENDERER: shutdown() closes the session (the mission edges): every document closed on the worker,
-    // which then idles with its Renderer for the next session. shutdown(true) stops and joins the worker (the
-    // DLL's detach, the singleton's destructor). A session close whose worker has left (an exception out of its
-    // loop) is taken to the final stop.
-    void shutdown(bool khui_final = false) {
-        if (!khui_final && !initialized_.load(std::memory_order_acquire)) return;   // No session open.
+    // A session close (final_stop false) closes the documents and keeps the worker and its Renderer for the next
+    // session; the final stop (the unload) ends the worker too. A session close whose worker has left becomes
+    // the final stop.
+    void shutdown(bool final_stop = false) {
+        if (!final_stop && !initialized_.load(std::memory_order_acquire)) return;   // No session open.
         if (!initialized_.load(std::memory_order_acquire) && 
             !worker_thread_.joinable()) {
             return;
         }
 
-        session_active_.store(false, std::memory_order_seq_cst);   // KH_UI_ONE_RENDERER: no hook / update.
+        session_active_.store(false, std::memory_order_seq_cst);   // No hook / update.
         shutting_down_.store(true, std::memory_order_seq_cst);
 
-        // KH_UI_ONE_RENDERER: the stop's wake only on the final path (a session close wakes the worker with its
-        // own command; a pending flag with no command made the idle worker spin until it came). The lock is
-        // bounded: at the process's exit the worker was ended, possibly holding it.
-        if (khui_final) {
+        // The stop's wake only on the final path (a session close wakes the worker with its own command; a
+        // pending flag with no command made the idle worker spin until it came). The lock is bounded: a worker
+        // that died holding it must not hang the unload.
+        if (final_stop) {
             should_stop_.store(true, std::memory_order_release);
-            std::unique_lock<std::mutex> lock = khui_lock_bounded(worker_mutex_);
+            std::unique_lock<std::mutex> lock = lock_bounded(worker_mutex_);
             has_pending_commands_.store(true, std::memory_order_release);
         }
 
@@ -1112,7 +1061,7 @@ public:
             std::lock_guard<std::mutex> lock(hook_mutex_);
             
             if (hook_installed_.load(std::memory_order_acquire) && hooked_present_addr_) {
-                kh_present_subscribe(KH_PRESENT_SLOT_UI, nullptr);   // KH_SHARED_PRESENT: never the hook itself.
+                kh_present_subscribe(KH_PRESENT_SLOT_UI, nullptr);   // Never the hook itself.
             }
         }
 
@@ -1130,18 +1079,18 @@ public:
             std::this_thread::yield();
         }
 
-        // KH_UI_ONE_RENDERER: a session close waits for the worker to close every document (as long as it runs:
-        // the baseline's join had no bound either); a worker that has left becomes the final stop.
-        if (!khui_final && !close_session_documents()) {
-            khui_final = true;
+        // A session close waits for the worker to close every document (as long as it runs); a worker that has
+        // left becomes the final stop.
+        if (!final_stop && !close_session_documents()) {
+            final_stop = true;
             should_stop_.store(true, std::memory_order_release);
             worker_cv_.notify_all();
         }
 
         // Wait for worker thread to finish
-        if (khui_final && worker_thread_.joinable()) {
+        if (final_stop && worker_thread_.joinable()) {
             worker_thread_.join();
-            leak_ultralight_objects(true);   // KH_UI_ONE_RENDERER: only a worker that ran no cleanup.
+            leak_ultralight_objects(true);   // Only a worker that ran no cleanup.
         }
 
         try {
@@ -1158,11 +1107,11 @@ public:
             d3d_renderer_.cleanup();
         } catch (...) {}
 
-        // Reset ALL state for potential re-initialization (KH_UI_ONE_RENDERER: the worker's own state only when
+        // Reset ALL state for potential re-initialization (the worker's own state only when
         // it was stopped)
         d3d_initialized_.store(false, std::memory_order_release);
         initialized_.store(false, std::memory_order_release);
-        if (khui_final) {
+        if (final_stop) {
             worker_initialized_.store(false, std::memory_order_release);
             worker_init_failed_.store(false, std::memory_order_release);
             should_stop_.store(false, std::memory_order_release);
@@ -1492,30 +1441,28 @@ public:
 
         if (render_list.empty()) return;
 
-        // KH_PRESENT_OWN (RenderIntegration's kh_present_cb, the same rule): the shared Present runs for every
-        // swap chain this process presents. One of another device (an overlay or capture tool) is not the
-        // game's frame: no document is drawn for it and its size is not taken as the screen's. Identity by
-        // IUnknown; a device that cannot be told is served as before. Two queries and two releases per Present
-        // with a document to draw.
+        // The shared Present runs for every swap chain this process presents. One of another device (an overlay
+        // or capture tool) is not the game's frame: no document is drawn for it and its size is not taken as the
+        // screen's. Identity by IUnknown; a device that cannot be told is served.
         {
-            auto khpo_ri = RVExtBridge::get_render_info();
-            auto* const khpo_game = khpo_ri ? khpo_ri->d3dDevice : nullptr;
-            if (khpo_game) {
-                IUnknown* khpo_sd = nullptr;
-                IUnknown* khpo_gd = nullptr;
-                const bool khpo_have =
-                    SUCCEEDED(swap_chain->GetDevice(__uuidof(IUnknown), reinterpret_cast<void**>(&khpo_sd))) &&
-                    SUCCEEDED(khpo_game->QueryInterface(__uuidof(IUnknown), reinterpret_cast<void**>(&khpo_gd)));
-                const bool khpo_foreign = khpo_have && khpo_sd != khpo_gd;
-                if (khpo_sd) khpo_sd->Release();
-                if (khpo_gd) khpo_gd->Release();
-                if (khpo_foreign) return;
+            auto render_info = RVExtBridge::get_render_info();
+            auto* const game_device = render_info ? render_info->d3dDevice : nullptr;
+            if (game_device) {
+                IUnknown* chain_device = nullptr;
+                IUnknown* game_unknown = nullptr;
+                const bool have_both =
+                    SUCCEEDED(swap_chain->GetDevice(__uuidof(IUnknown), reinterpret_cast<void**>(&chain_device))) &&
+                    SUCCEEDED(game_device->QueryInterface(__uuidof(IUnknown), reinterpret_cast<void**>(&game_unknown)));
+                const bool foreign = have_both && chain_device != game_unknown;
+                if (chain_device) chain_device->Release();
+                if (game_unknown) game_unknown->Release();
+                if (foreign) return;
             }
         }
 
-        // KH_UI_RESIZE: the back buffer's size, read every Present that draws (nothing before this reads it). A
-        // resolution change goes through ResizeBuffers on the same swapchain (RenderIntegration's
-        // KH_PRESENT_RESIZE), so a read keyed on the swapchain pointer kept the old size - the viewport, the pixel
+        // The back buffer's size, read every Present that draws (nothing before this reads it). A
+        // resolution change goes through ResizeBuffers on the same swapchain (RenderIntegration hooks it),
+        // so a read keyed on the swapchain pointer kept the old size - the viewport, the pixel
         // mapping and the off-screen test with it, and a document past the old edge was clipped or never drawn.
         // GetDesc takes no buffer reference.
         {
@@ -1601,17 +1548,17 @@ public:
 
 private:
     UIFramework() = default;
-    ~UIFramework() { shutdown(true); }   // KH_UI_ONE_RENDERER: the worker stops with the process.
+    ~UIFramework() = default;
     UIFramework(const UIFramework&) = delete;
     UIFramework& operator=(const UIFramework&) = delete;
 
     void worker_thread_func() {
-        // KH_UI_ONE_RENDERER: whether this thread is still in its function (initialize() joins a worker that left).
+        // Whether this thread is still in its function (initialize() joins a worker that left).
         worker_running_.store(true, std::memory_order_release);
-        struct KhUiRunning {
+        struct RunningFlag {
             std::atomic<bool>& flag;
-            ~KhUiRunning() { flag.store(false, std::memory_order_release); }
-        } khui_running{worker_running_};
+            ~RunningFlag() { flag.store(false, std::memory_order_release); }
+        } running_flag{worker_running_};
 
         try {
             if (!initialize_ultralight()) {
@@ -1621,13 +1568,13 @@ private:
             
             worker_initialized_.store(true, std::memory_order_release);
 
-            // KH_UI_HOOK_LADDER: both hooks go through the three-strike
+            // Both hooks go through the three-strike
             // ensure, once per worker iteration (~16 ms), so a failed
             // install retries at +1 s and +10 s before it is declared
             // dead - the same shape as RenderIntegration's
             // ensure_reorder_hook. Cheap early-out once installed.
             // Main processing loop
-            // KH_UI_WORKER_KEEP: an exception out of an iteration (an allocation in the pixel cache, the hook
+            // An exception out of an iteration (an allocation in the pixel cache, the hook
             // ladder's scheduling) ended the worker with initialized_ still set - and create_html, open_html and
             // the JS getter wait on the worker with no timeout, so the next such call froze the game thread for
             // good. The step is dropped instead (reported once) and the loop goes on - the hook ensures and the
@@ -1640,17 +1587,17 @@ private:
 
                 try {
                     MainThreadScheduler::instance().schedule([]() {
-                        report_error("KH - UI Framework: a worker update failed; the worker carries on");
+                        report_error("KH UI: a worker update failed; the worker carries on");
                     });
                 } catch (...) {}
             };
 
             while (!should_stop_.load(std::memory_order_acquire)) {
-                // KH_UI_ONE_RENDERER: between sessions the worker keeps its Renderer and serves commands only (the
+                // Between sessions the worker keeps its Renderer and serves commands only (the
                 // session close, the next session's refresh): no hook ensured, no update, a 100 ms wait.
-                const bool khui_live = session_active_.load(std::memory_order_acquire);
+                const bool session_live = session_active_.load(std::memory_order_acquire);
 
-                if (khui_live) {
+                if (session_live) {
                     try {
                         ensure_present_hook();
                         ensure_wndproc_hook();
@@ -1661,7 +1608,7 @@ private:
 
                 try {
                     process_commands();
-                    if (khui_live) update_ultralight();
+                    if (session_live) update_ultralight();
                 } catch (...) {
                     worker_iter_failed();
                 }
@@ -1669,7 +1616,7 @@ private:
                 {
                     std::unique_lock<std::mutex> lock(worker_mutex_);
 
-                    if (khui_live) {
+                    if (session_live) {
                         worker_cv_.wait_for(lock, std::chrono::milliseconds(16), [this] {
                             return should_stop_.load(std::memory_order_acquire) ||
                                    has_pending_commands_.load(std::memory_order_acquire);
@@ -1690,13 +1637,13 @@ private:
             std::string error_msg = e.what();
 
             MainThreadScheduler::instance().schedule([error_msg]() {
-                report_error("KH - UI Framework: Worker thread error: " + error_msg);
+                report_error("KH UI: worker thread error: " + error_msg);
             });
 
             worker_init_failed_.store(true, std::memory_order_release);
         } catch (...) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - UI Framework: Worker thread unknown error");
+                report_error("KH UI: worker thread error: unknown exception");
             });
 
             worker_init_failed_.store(true, std::memory_order_release);
@@ -1743,7 +1690,7 @@ private:
             
             if (!renderer_) {
                 MainThreadScheduler::instance().schedule([]() {
-                    report_error("KH - UI Framework: Failed to create renderer");
+                    report_error("KH UI: failed to create the renderer");
                 });
 
                 file_system_.reset();
@@ -1756,7 +1703,7 @@ private:
             std::string error_msg = e.what();
 
             MainThreadScheduler::instance().schedule([error_msg]() {
-                report_error("KH - UI Framework: init failed: " + error_msg);
+                report_error("KH UI: initialization failed: " + error_msg);
             });
 
             file_system_.reset();
@@ -1765,7 +1712,7 @@ private:
             return false;
         } catch (...) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - UI Framework: init failed: Unknown exception");
+                report_error("KH UI: initialization failed: unknown exception");
             });
 
             file_system_.reset();
@@ -1775,7 +1722,7 @@ private:
         }
     }
 
-    // KH_UI_ONE_RENDERER: the documents (their Views) closed, the Renderer left standing - the session's end.
+    // The documents (their Views) closed, the Renderer left standing - the session's end.
     // Worker thread.
     void close_all_documents_internal() {
         {
@@ -1807,14 +1754,14 @@ private:
     // The worker's end: every document, then the Renderer, the file system and the font loader.
     void cleanup_ultralight() {
         close_all_documents_internal();
-        web_session_ = nullptr;   // KH_UI_SESSION_RESET: before the Renderer that made it.
+        web_session_ = nullptr;   // Before the Renderer that made it.
         web_session_failed_ = false;
         renderer_ = nullptr;
         file_system_.reset();
         font_loader_.reset();
     }
 
-    // KH_UI_ONE_RENDERER: the next session's html_ui folders (find_html_file's and the file system's) and an
+    // The next session's html_ui folders (find_html_file's and the file system's) and an
     // empty exists cache - what a new file system had at every mission before. Worker thread.
     void refresh_session_paths() {
         html_dirs_ = find_html_ui_directories();
@@ -1825,21 +1772,20 @@ private:
         }
     }
 
-    // KH_UI_SESSION_RESET: the session's web storage, made at its first view. With one Renderer for the process
-    // (KH_UI_ONE_RENDERER) the default session would carry a page's cookies and local storage from one mission
-    // into the next; a non-persistent session per mission starts clean, as the per-mission Renderer did, and
-    // writes nothing to disk. Released at the session close, after its views. A session that cannot be made
-    // gives nullptr - every view of this session then takes the default one (one store for all of its pages,
-    // as before), and the next session asks again. Worker thread.
+    // The session's web storage, made at its first view. With one Renderer for the process the default session
+    // would carry a page's cookies and local storage from one mission into the next; a non-persistent session
+    // per mission starts clean and writes nothing to disk. Released at the session close, after its views. A
+    // session that cannot be made gives nullptr - every view of this session then takes the default one, and the
+    // next session asks again. Worker thread.
     ultralight::RefPtr<ultralight::Session> web_session() {
         if (!web_session_ && !web_session_failed_ && renderer_) {
-            const std::string khws_name = "kh_ui_" + std::to_string(++web_session_n_);
-            web_session_ = renderer_->CreateSession(false, ultralight::String(khws_name.c_str()));
+            const std::string session_name = "kh_ui_" + std::to_string(++web_session_n_);
+            web_session_ = renderer_->CreateSession(false, ultralight::String(session_name.c_str()));
             web_session_failed_ = !web_session_;
 
             if (web_session_failed_) {   // Once a session: its pages keep the default store (no reset).
                 MainThreadScheduler::instance().schedule([]() {
-                    report_error("KH - UI Framework: could not create a web session; this mission's pages "
+                    report_error("KH UI: could not create a web session; this mission's pages "
                                  "share the default one (their storage is not reset)");
                 });
             }
@@ -1848,18 +1794,17 @@ private:
         return web_session_;
     }
 
-    // KH_UI_ONE_RENDERER: the session close on the worker, waited for while the worker runs (no time bound: a
-    // worker that is only slow finishes it, and a stuck one held the baseline's join the same way); false when
-    // no worker runs or it left before answering. Game thread.
+    // The session close on the worker, waited for while the worker runs (no time bound: a worker that is only
+    // slow finishes it); false when no worker runs or it left before answering. Game thread.
     bool close_session_documents() {
         if (!worker_thread_.joinable() || !worker_running_.load(std::memory_order_acquire)) return false;
-        auto khcs_p = std::make_shared<std::promise<void>>();
-        std::future<void> khcs_f = khcs_p->get_future();
+        auto done = std::make_shared<std::promise<void>>();
+        std::future<void> done_future = done->get_future();
 
-        queue_command([this, khcs_p]() {
+        queue_command([this, done]() {
             try {
                 close_all_documents_internal();
-                web_session_ = nullptr;   // KH_UI_SESSION_RESET: its views are closed; the next mission's is new.
+                web_session_ = nullptr;   // Its views are closed; the next mission's is new.
                 web_session_failed_ = false;
                 // The memory the closed pages leave (cached images, scripts, style sheets) is given back at the
                 // mission edge, as the Renderer's destruction gave back its own: on the worker, outside any
@@ -1867,51 +1812,49 @@ private:
                 if (renderer_) renderer_->PurgeMemory();
             } catch (...) {}
 
-            khcs_p->set_value();
+            done->set_value();
         });
 
-        while (khcs_f.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
+        while (done_future.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
             if (!worker_running_.load(std::memory_order_acquire)) {
-                return khcs_f.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+                return done_future.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
             }
         }
 
         return true;
     }
 
-    // KH_UI_ONE_RENDERER: a lock a thread the process already ended may hold for good (the exit): tried for
-    // ~100 ms, then the caller goes on without it - no other thread runs then; a live holder lets go well
-    // inside it (the worker's predicate test; the documents' lock with the worker joined). The bound is a
-    // steady-clock deadline: a 1 ms sleep lasts a whole timer tick (15.6 ms at Windows' default
-    // resolution), so a count of 100 sleeps was ~1.6 s - and the exit takes two such locks.
-    static std::unique_lock<std::mutex> khui_lock_bounded(std::mutex& khlb_m) {
-        std::unique_lock<std::mutex> khlb_l(khlb_m, std::try_to_lock);
-        const auto khlb_end = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
-        while (!khlb_l.owns_lock() && std::chrono::steady_clock::now() < khlb_end) {
+    // A lock a worker that died may hold for good: tried for ~100 ms (a steady-clock deadline - a 1 ms sleep
+    // lasts a whole timer tick), then the caller goes on without it; a live holder lets go well inside it (the
+    // worker's predicate test; the documents' lock with the worker joined).
+    static std::unique_lock<std::mutex> lock_bounded(std::mutex& mutex) {
+        std::unique_lock<std::mutex> lock(mutex, std::try_to_lock);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+
+        while (!lock.owns_lock() && std::chrono::steady_clock::now() < deadline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            (void)khlb_l.try_lock();
+            (void)lock.try_lock();
         }
 
-        return khlb_l;
+        return lock;
     }
 
-    // KH_UI_ONE_RENDERER: a worker that ended without cleanup_ultralight (ended by the process at its exit, or
-    // by an exception out of its loop) leaves its Ultralight objects here. Released off the thread that made
-    // them - at the exit, into a library whose threads are gone - they could hang or fault, so they are left
-    // alive, never deleted by intent: the Renderer, the web session (KH_UI_SESSION_RESET), the documents (their
-    // Views), the file system and the font loader (the Platform holds raw pointers to both). No worker runs.
-    // khlu_exit: the documents' lock is bounded (khui_lock_bounded).
-    void leak_ultralight_objects(bool khlu_exit) {
+    // A worker that ended without cleanup_ultralight (an exception out of its loop) leaves its Ultralight objects
+    // here. Released off the thread that made them they could hang or fault, so they are left alive, never
+    // deleted by intent: the Renderer, the web session, the documents (their Views), the file system and the
+    // font loader (the Platform holds raw pointers to both). No worker runs.
+    // final_stop: the documents' lock is bounded (lock_bounded).
+    void leak_ultralight_objects(bool final_stop) {
         if (!renderer_) return;
         (void)new ultralight::RefPtr<ultralight::Renderer>(renderer_);
         renderer_ = nullptr;   // A count step only: the copy above keeps it.
-        if (web_session_) (void)new ultralight::RefPtr<ultralight::Session>(web_session_);   // KH_UI_SESSION_RESET.
+        if (web_session_) (void)new ultralight::RefPtr<ultralight::Session>(web_session_);
         web_session_ = nullptr;
         web_session_failed_ = false;
         (void)file_system_.release();
         (void)font_loader_.release();
-        std::unique_lock<std::mutex> khlu_l = khlu_exit ? khui_lock_bounded(documents_mutex_)
-                                                        : std::unique_lock<std::mutex>(documents_mutex_);
+        std::unique_lock<std::mutex> lock = final_stop ? lock_bounded(documents_mutex_)
+                                                       : std::unique_lock<std::mutex>(documents_mutex_);
         (void)new std::unordered_map<std::string, std::shared_ptr<UIDocument>>(std::move(documents_));
         documents_.clear();
     }
@@ -1964,7 +1907,7 @@ private:
                     int dirty_top = std::max(0, dirty.top);
                     int dirty_bottom = std::min(h, dirty.bottom);
 
-                    // KH_UI_DIRTY_UNION: the range a Present has not uploaded yet (texture_needs_update still set;
+                    // The range a Present has not uploaded yet (texture_needs_update still set;
                     // on_present clears it under this lock once it has) is still owed - the new rows join it.
                     // Replacing it lost those rows whenever two passes landed between Presents (a frame under
                     // 60 fps, a mouse move waking the worker, a document skipped off screen), and the texture kept
@@ -2004,9 +1947,9 @@ private:
             pending_commands_.push_back(std::move(cmd));
             has_pending_commands_.store(true, std::memory_order_release);
         }
-        // KH_UI_ONE_RENDERER: through the worker's mutex once, so a worker between its predicate test and its
+        // Through the worker's mutex once, so a worker between its predicate test and its
         // wait cannot miss this notify (the idle wait is long; the session's was 16 ms).
-        { std::lock_guard<std::mutex> khqc_l(worker_mutex_); }
+        { std::lock_guard<std::mutex> lock(worker_mutex_); }
         worker_cv_.notify_one();
     }
 
@@ -2027,54 +1970,85 @@ private:
                 std::string error_msg = e.what();
 
                 MainThreadScheduler::instance().schedule([error_msg]() {
-                    report_error("KH - UI Framework: Command error: " + error_msg);
+                    report_error("KH UI: command failed: " + error_msg);
                 });
             } catch (...) {
                 MainThreadScheduler::instance().schedule([]() {
-                    report_error("KH - UI Framework: Command unknown error");
+                    report_error("KH UI: command failed: unknown exception");
                 });
             }
         }
     }
 
-    void create_html_internal(const std::string& doc_id, const std::string& html_content, 
-                              int x, int y, int width, int height, float opacity) {
-        if (!renderer_) return;
-        int w = width, h = height;
-        bool fs = (width <= 0 || height <= 0);
-        if (fs) { w = GetSystemMetrics(SM_CXSCREEN); h = GetSystemMetrics(SM_CYSCREEN); }
+    // A View of the given size with the transparent, CPU-rendered configuration every document uses, or null.
+    ultralight::RefPtr<ultralight::View> create_view(int width, int height) {
         ultralight::ViewConfig vc;
         vc.is_accelerated = false;
         vc.is_transparent = true;
-        auto view = renderer_->CreateView(w, h, vc, web_session());   // KH_UI_SESSION_RESET.
+        return renderer_->CreateView(width, height, vc, web_session());
+    }
+
+    // A new document with its View (create_html_internal, open_html_internal): a width or height of 0 or less is
+    // the screen's. Null when there is no renderer or the View could not be made (reported).
+    std::shared_ptr<UIDocument> make_document(const std::string& doc_id, int x, int y, int width, int height,
+                                              float opacity) {
+        if (!renderer_) return nullptr;
+        int w = width, h = height;
+        if (width <= 0 || height <= 0) { w = GetSystemMetrics(SM_CXSCREEN); h = GetSystemMetrics(SM_CYSCREEN); }
+        auto view = create_view(w, h);
 
         if (!view) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - UI Framework: Failed to create view for dynamic HTML");
+                report_error("KH UI: failed to create a view");
             });
 
-            return;
+            return nullptr;
         }
         
         view->Focus();
         auto doc = std::make_shared<UIDocument>();
         doc->id = doc_id;
-        doc->html_content = html_content;
         doc->view = view;
         doc->x = x; doc->y = y;
         doc->width = w; doc->height = h;
         doc->opacity = std::clamp(opacity, 0.0f, 1.0f);
-        doc->fullscreen = fs;
         doc->listener = std::make_unique<UIDocumentListener>();
         view->set_view_listener(doc->listener.get());
         view->set_load_listener(doc->listener.get());
-        view->LoadHTML(ultralight::String(html_content.c_str()));
+        return doc;
+    }
 
-        {
-            std::lock_guard<std::mutex> lock(documents_mutex_);
-            doc->z_order = static_cast<int>(documents_.size());
-            documents_[doc->id] = doc;
+    // The document into documents_, on top.
+    void register_document(const std::shared_ptr<UIDocument>& doc) {
+        std::lock_guard<std::mutex> lock(documents_mutex_);
+        doc->z_order = static_cast<int>(documents_.size());
+        documents_[doc->id] = doc;
+    }
+
+    // The file: URL of a path on disk.
+    static std::string file_url(const std::string& path) {
+        std::string url = "file:///" + path;
+        std::replace(url.begin(), url.end(), '\\', '/');
+        return url;
+    }
+
+    // The document's page into a View: its HTML text when it was created from one, else its file.
+    static void load_document(const ultralight::RefPtr<ultralight::View>& view, const std::string& html_content,
+                              const std::string& html_path) {
+        if (!html_content.empty()) {
+            view->LoadHTML(ultralight::String(html_content.c_str()));
+        } else {
+            view->LoadURL(ultralight::String(file_url(html_path).c_str()));
         }
+    }
+
+    void create_html_internal(const std::string& doc_id, const std::string& html_content,
+                              int x, int y, int width, int height, float opacity) {
+        auto doc = make_document(doc_id, x, y, width, height, opacity);
+        if (!doc) return;
+        doc->html_content = html_content;
+        doc->view->LoadHTML(ultralight::String(html_content.c_str()));
+        register_document(doc);
     }
 
     void open_html_internal(const std::string& doc_id, const std::string& filename, 
@@ -2083,50 +2057,17 @@ private:
 
         if (html_path.empty()) {
             MainThreadScheduler::instance().schedule([filename]() {
-                report_error("KH - UI Framework: HTML not found: " + filename);
+                report_error("KH UI: HTML file not found: " + filename);
             });
 
             return;
         }
 
-        if (!renderer_) return;
-        int w = width, h = height;
-        bool fs = (width <= 0 || height <= 0);
-        if (fs) { w = GetSystemMetrics(SM_CXSCREEN); h = GetSystemMetrics(SM_CYSCREEN); }
-        ultralight::ViewConfig vc;
-        vc.is_accelerated = false;
-        vc.is_transparent = true;
-        auto view = renderer_->CreateView(w, h, vc, web_session());   // KH_UI_SESSION_RESET.
-
-        if (!view) {
-            MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - UI Framework: Failed to create view");
-            });
-
-            return;
-        }
-        
-        view->Focus();
-        auto doc = std::make_shared<UIDocument>();
-        doc->id = doc_id;
+        auto doc = make_document(doc_id, x, y, width, height, opacity);
+        if (!doc) return;
         doc->html_path = html_path.string();
-        doc->view = view;
-        doc->x = x; doc->y = y;
-        doc->width = w; doc->height = h;
-        doc->opacity = std::clamp(opacity, 0.0f, 1.0f);
-        doc->fullscreen = fs;
-        doc->listener = std::make_unique<UIDocumentListener>();
-        view->set_view_listener(doc->listener.get());
-        view->set_load_listener(doc->listener.get());
-        std::string url = "file:///" + html_path.string();
-        std::replace(url.begin(), url.end(), '\\', '/');
-        view->LoadURL(ultralight::String(url.c_str()));
-
-        {
-            std::lock_guard<std::mutex> lock(documents_mutex_);
-            doc->z_order = static_cast<int>(documents_.size());
-            documents_[doc->id] = doc;
-        }
+        doc->view->LoadURL(ultralight::String(file_url(doc->html_path).c_str()));
+        register_document(doc);
     }
 
     void close_html_internal(const std::string& doc_id) {
@@ -2140,7 +2081,7 @@ private:
             documents_.erase(it);
         }
 
-        // KH_UI_CLOSE_ORDER: the pixels first, then the texture. A Present holding this document from its snapshot
+        // The pixels first, then the texture. A Present holding this document from its snapshot
         // uploads under pixel_mutex through update_texture, which makes the texture entry when it is missing; with
         // the texture removed first, an upload in between made it again, and nothing removed it before shutdown.
         // Cleared first, that upload finds no pixels; one already under the lock finishes before the removal.
@@ -2169,21 +2110,11 @@ private:
         }
         
         if (!renderer_ || !doc) return;
-        ultralight::ViewConfig vc;
-        vc.is_accelerated = false;
-        vc.is_transparent = true;
-        auto new_view = renderer_->CreateView(width, height, vc, web_session());   // KH_UI_SESSION_RESET.
+        auto new_view = create_view(width, height);
         if (!new_view) return;
         new_view->set_view_listener(doc->listener.get());
         new_view->set_load_listener(doc->listener.get());
-
-        if (!doc->html_content.empty()) {
-            new_view->LoadHTML(ultralight::String(doc->html_content.c_str()));
-        } else {
-            std::string url = "file:///" + html_path_copy;
-            std::replace(url.begin(), url.end(), '\\', '/');
-            new_view->LoadURL(ultralight::String(url.c_str()));
-        }
+        load_document(new_view, doc->html_content, html_path_copy);
 
         {
             std::lock_guard<std::mutex> lock(documents_mutex_);
@@ -2197,7 +2128,6 @@ private:
             doc->view = new_view;
             doc->width = width;
             doc->height = height;
-            doc->fullscreen = false;
             std::lock_guard<std::mutex> pixel_lock(doc->pixel_mutex);
             doc->pixels_ready.store(false, std::memory_order_release);
             doc->cached_pixels.clear();
@@ -2221,14 +2151,7 @@ private:
         }
         
         if (!view_copy) return;
-
-        if (!doc->html_content.empty()) {
-            view_copy->LoadHTML(ultralight::String(doc->html_content.c_str()));
-        } else {
-            std::string url = "file:///" + html_path_copy;
-            std::replace(url.begin(), url.end(), '\\', '/');
-            view_copy->LoadURL(ultralight::String(url.c_str()));
-        }
+        load_document(view_copy, doc->html_content, html_path_copy);
         
         {
             std::lock_guard<std::mutex> lock(documents_mutex_);
@@ -2289,11 +2212,11 @@ private:
     std::atomic<bool> should_stop_{false};
     std::atomic<bool> worker_initialized_{false};
     std::atomic<bool> worker_init_failed_{false};
-    // KH_UI_ONE_RENDERER: the worker is inside its function; a session is open (hooks ensured, Ultralight
+    // The worker is inside its function; a session is open (hooks ensured, Ultralight
     // updated) - the worker outlives sessions.
     std::atomic<bool> worker_running_{false};
     std::atomic<bool> session_active_{false};
-    // KH_UI_SESSION_RESET: this session's in-memory web storage (cookies, local / session storage, caches) and
+    // This session's in-memory web storage (cookies, local / session storage, caches) and
     // the count that names each one uniquely. Worker thread only (made, used and released there; a dead
     // worker's is left alive with its other objects).
     ultralight::RefPtr<ultralight::Session> web_session_;
@@ -2309,11 +2232,11 @@ private:
 
     // MinHook members
     static std::atomic<UIFramework*> instance_ptr_;
-    static void* hooked_present_addr_;   // KH_SHARED_PRESENT: the target this module subscribed through.
+    static void* hooked_present_addr_;   // The target this module subscribed through.
     static std::atomic<bool> hook_installed_;
     static std::mutex hook_mutex_;
 
-    // KH_UI_HOOK_LADDER: the three-strike install ladder, one per
+    // The three-strike install ladder, one per
     // hook. TWIN of RenderIntegration's g_reorder_hook_* lanes and
     // kh_reorder_hook_fail_round: a failed install is retried after 1 s,
     // then after 10 s, then declared dead for the session with ONE
@@ -2365,7 +2288,7 @@ private:
         l.failed.store(true, std::memory_order_release);
         l.retry_ms.store(0, std::memory_order_release);
 
-        const std::string msg = std::string("KH - UI Framework: ") + what + " (phase "
+        const std::string msg = std::string("KH UI: ") + what + " (phase "
                               + std::to_string(l.fail_phase.load(std::memory_order_acquire)) + ", status "
                               + std::to_string(l.status.load(std::memory_order_acquire)) + ", attempt "
                               + std::to_string(n) + "); " + disabled;
@@ -2408,13 +2331,13 @@ private:
         if (!ladder_due(wndproc_ladder_)) return;
         wndproc_ladder_.pending.store(true, std::memory_order_release);
 
-        // KH_UI_WORKER_KEEP: a schedule that throws must not leave 'pending' set - every later call returned at it
+        // A schedule that throws must not leave 'pending' set - every later call returned at it
         // and the install never came. Not rethrown: the next iteration asks again.
         try {
             MainThreadScheduler::instance().schedule([this]() {
                 if (!shutting_down_.load(std::memory_order_acquire) &&
                     !should_stop_.load(std::memory_order_acquire) &&
-                    session_active_.load(std::memory_order_acquire)) {   // KH_UI_ONE_RENDERER.
+                    session_active_.load(std::memory_order_acquire)) {
                     if (install_wndproc_hook()) ladder_success(wndproc_ladder_);
                     else ladder_fail_round(wndproc_ladder_, "WndProc (mouse/keyboard) hook install failed",
                                            "HTML input disabled");
@@ -2429,20 +2352,7 @@ private:
 
 
     std::vector<std::filesystem::path> find_html_ui_directories() {
-        std::vector<std::filesystem::path> paths;
-
-        try {
-            char docs[MAX_PATH];
-
-            if (SHGetFolderPathA(NULL, CSIDL_MYDOCUMENTS, NULL, SHGFP_TYPE_CURRENT, docs) == S_OK) {
-                auto p = std::filesystem::path(docs) / "Arma 3" / "kh_framework" / "html_ui";
-                if (std::filesystem::exists(p)) paths.push_back(p);
-            }
-        } catch (...) {}
-
-        auto mod_dirs = ModFolderSearcher::find_directories_in_mods("html_ui");
-        paths.insert(paths.end(), mod_dirs.begin(), mod_dirs.end());
-        return paths;
+        return ModFolderSearcher::kh_framework_search_paths("html_ui");
     }
 
     std::filesystem::path find_html_file(const std::string& filename) {
@@ -2455,19 +2365,19 @@ private:
         }
 
         // PATH_CONFINE: a file inside an html_ui folder only - below it (relative), or an absolute path inside it
-        // (KH_HTML_ABS: path_within, the rule the page's own links are answered by in UIFileSystem::ConfinedIn).
+        // (path_within, the rule the page's own links are answered by in UIFileSystem::ConfinedIn).
         // A drive, rooted or network path elsewhere, or one leaving the folder through '..', is not found (and
         // touches nothing).
         for (const auto& base : html_dirs_) {
             auto p = ModFolderSearcher::confined_join(base, filename);
-            if (p.empty() && ModFolderSearcher::path_within(filename, base)) p = filename;   // KH_HTML_ABS.
+            if (p.empty() && ModFolderSearcher::path_within(filename, base)) p = filename;
             if (!p.empty() && std::filesystem::exists(p)) return p;
         }
 
         return {};
     }
 
-    // KH_SHARED_PRESENT: a subscriber of framework.hpp's one Present detour
+    // A subscriber of framework.hpp's one Present detour
     // (slot KH_PRESENT_SLOT_UI, after the renderer's); the detour forwards to
     // the original under this module's old rule (an exception there reads as
     // S_OK).
@@ -2489,7 +2399,6 @@ private:
         if (hwnd) return hwnd;
         
         // Fallback: enumerate windows for this process
-        DWORD current_pid = GetCurrentProcessId();
         HWND found_hwnd = nullptr;
         
         EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
@@ -2531,17 +2440,17 @@ private:
         ComPtr<IDXGISwapChain> temp_swap_chain;
         D3D_FEATURE_LEVEL fl;
 
-        // KH_UI_HOOK_LADDER: failures below record the phase and status
+        // Failures below record the phase and status
         // and return false; the ladder (ensure_present_hook) decides when
         // to retry and reports once, on the third strike. Nothing partial
         // survives a failed attempt: the temp device/swap chain are ComPtr,
         // a created-but-not-enabled hook is removed before returning.
-        const HRESULT khsc_hr = D3D11CreateDeviceAndSwapChain(0, D3D_DRIVER_TYPE_HARDWARE, 0, 0, 0, 0, 
+        const HRESULT hr = D3D11CreateDeviceAndSwapChain(0, D3D_DRIVER_TYPE_HARDWARE, 0, 0, 0, 0,
             D3D11_SDK_VERSION, &sd, &temp_swap_chain, &dev, &fl, &ctx);
 
-        if (FAILED(khsc_hr)) {
+        if (FAILED(hr)) {
             present_ladder_.fail_phase.store(1, std::memory_order_release);
-            present_ladder_.status.store(static_cast<int32_t>(khsc_hr), std::memory_order_release);
+            present_ladder_.status.store(static_cast<int32_t>(hr), std::memory_order_release);
             instance_ptr_.store(nullptr, std::memory_order_release);
             return false;
         }
@@ -2549,15 +2458,15 @@ private:
         void** vtable = *(void***)temp_swap_chain.Get();
         void* present_addr = vtable[8];
 
-        // KH_SHARED_PRESENT: the renderer detours the same Present, and MinHook
+        // The renderer detours the same Present, and MinHook
         // takes one hook per target - the one detour is framework.hpp's, shared.
         // Status -1 = MinHook unavailable (phase 2, as the render side records
         // it); any other failure is phase 3 with its MH_STATUS (-2 = no target
         // slot). A hook that would not enable was removed by kh_present_hook.
-        const int khmh_st = kh_present_hook(present_addr);
-        if (khmh_st != MH_OK) {
-            present_ladder_.fail_phase.store(khmh_st == -1 ? 2 : 3, std::memory_order_release);
-            present_ladder_.status.store(static_cast<int32_t>(khmh_st), std::memory_order_release);
+        const int hook_status = kh_present_hook(present_addr);
+        if (hook_status != MH_OK) {
+            present_ladder_.fail_phase.store(hook_status == -1 ? 2 : 3, std::memory_order_release);
+            present_ladder_.status.store(static_cast<int32_t>(hook_status), std::memory_order_release);
             instance_ptr_.store(nullptr, std::memory_order_release);
             return false;
         }
@@ -2573,7 +2482,7 @@ private:
         if (!hook_installed_.load(std::memory_order_acquire)) return;
 
         if (hooked_present_addr_) {
-            // KH_SHARED_PRESENT: unsubscribe only - the detour is shared with the
+            // Unsubscribe only - the detour is shared with the
             // renderer and stays until MH_Uninitialize.
             kh_present_subscribe(KH_PRESENT_SLOT_UI, nullptr);
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -2694,7 +2603,7 @@ private:
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 
-    // Game thread (scheduled by ensure_wndproc_hook). KH_UI_HOOK_LADDER:
+    // Game thread (scheduled by ensure_wndproc_hook). Hook ladder:
     // failures record the phase and status and return false; the ladder
     // retries and reports once, on the third strike. A missing window is
     // the transient this ladder exists for.
@@ -2929,119 +2838,6 @@ private:
         doc->view->FireScrollEvent(evt);
     }
 
-    static int windows_vk_to_ultralight_keycode(WPARAM vk) {
-        // Ultralight uses the same values as Windows for most keys
-        switch (vk) {
-            case VK_BACK:       return 0x08;  // Backspace
-            case VK_TAB:        return 0x09;  // Tab
-            case VK_CLEAR:      return 0x0C;  // Clear
-            case VK_RETURN:     return 0x0D;  // Enter
-            case VK_SHIFT:      return 0x10;  // Shift
-            case VK_CONTROL:    return 0x11;  // Ctrl
-            case VK_MENU:       return 0x12;  // Alt
-            case VK_PAUSE:      return 0x13;  // Pause
-            case VK_CAPITAL:    return 0x14;  // Caps Lock
-            case VK_ESCAPE:     return 0x1B;  // Escape
-            case VK_SPACE:      return 0x20;  // Space
-            case VK_PRIOR:      return 0x21;  // Page Up
-            case VK_NEXT:       return 0x22;  // Page Down
-            case VK_END:        return 0x23;  // End
-            case VK_HOME:       return 0x24;  // Home
-            case VK_LEFT:       return 0x25;  // Left Arrow
-            case VK_UP:         return 0x26;  // Up Arrow
-            case VK_RIGHT:      return 0x27;  // Right Arrow
-            case VK_DOWN:       return 0x28;  // Down Arrow
-            case VK_SELECT:     return 0x29;  // Select
-            case VK_PRINT:      return 0x2A;  // Print
-            case VK_EXECUTE:    return 0x2B;  // Execute
-            case VK_SNAPSHOT:   return 0x2C;  // Print Screen
-            case VK_INSERT:     return 0x2D;  // Insert
-            case VK_DELETE:     return 0x2E;  // Delete
-            case VK_HELP:       return 0x2F;  // Help
-            // 0-9 keys (0x30-0x39) - same as Windows
-            case '0': case '1': case '2': case '3': case '4':
-            case '5': case '6': case '7': case '8': case '9':
-                return static_cast<int>(vk);
-            // A-Z keys (0x41-0x5A) - same as Windows
-            case 'A': case 'B': case 'C': case 'D': case 'E': case 'F':
-            case 'G': case 'H': case 'I': case 'J': case 'K': case 'L':
-            case 'M': case 'N': case 'O': case 'P': case 'Q': case 'R':
-            case 'S': case 'T': case 'U': case 'V': case 'W': case 'X':
-            case 'Y': case 'Z':
-                return static_cast<int>(vk);
-            case VK_LWIN:       return 0x5B;  // Left Windows
-            case VK_RWIN:       return 0x5C;  // Right Windows
-            case VK_APPS:       return 0x5D;  // Applications
-            case VK_SLEEP:      return 0x5F;  // Sleep
-            // Numpad keys
-            case VK_NUMPAD0:    return 0x60;
-            case VK_NUMPAD1:    return 0x61;
-            case VK_NUMPAD2:    return 0x62;
-            case VK_NUMPAD3:    return 0x63;
-            case VK_NUMPAD4:    return 0x64;
-            case VK_NUMPAD5:    return 0x65;
-            case VK_NUMPAD6:    return 0x66;
-            case VK_NUMPAD7:    return 0x67;
-            case VK_NUMPAD8:    return 0x68;
-            case VK_NUMPAD9:    return 0x69;
-            case VK_MULTIPLY:   return 0x6A;
-            case VK_ADD:        return 0x6B;
-            case VK_SEPARATOR:  return 0x6C;
-            case VK_SUBTRACT:   return 0x6D;
-            case VK_DECIMAL:    return 0x6E;
-            case VK_DIVIDE:     return 0x6F;
-            // Function keys
-            case VK_F1:         return 0x70;
-            case VK_F2:         return 0x71;
-            case VK_F3:         return 0x72;
-            case VK_F4:         return 0x73;
-            case VK_F5:         return 0x74;
-            case VK_F6:         return 0x75;
-            case VK_F7:         return 0x76;
-            case VK_F8:         return 0x77;
-            case VK_F9:         return 0x78;
-            case VK_F10:        return 0x79;
-            case VK_F11:        return 0x7A;
-            case VK_F12:        return 0x7B;
-            case VK_F13:        return 0x7C;
-            case VK_F14:        return 0x7D;
-            case VK_F15:        return 0x7E;
-            case VK_F16:        return 0x7F;
-            case VK_F17:        return 0x80;
-            case VK_F18:        return 0x81;
-            case VK_F19:        return 0x82;
-            case VK_F20:        return 0x83;
-            case VK_F21:        return 0x84;
-            case VK_F22:        return 0x85;
-            case VK_F23:        return 0x86;
-            case VK_F24:        return 0x87;
-            case VK_NUMLOCK:    return 0x90;
-            case VK_SCROLL:     return 0x91;
-            case VK_LSHIFT:     return 0xA0;
-            case VK_RSHIFT:     return 0xA1;
-            case VK_LCONTROL:   return 0xA2;
-            case VK_RCONTROL:   return 0xA3;
-            case VK_LMENU:      return 0xA4;
-            case VK_RMENU:      return 0xA5;
-            // OEM keys
-            case VK_OEM_1:      return 0xBA;  // ;:
-            case VK_OEM_PLUS:   return 0xBB;  // =+
-            case VK_OEM_COMMA:  return 0xBC;  // ,
-            case VK_OEM_MINUS:  return 0xBD;  // -_
-            case VK_OEM_PERIOD: return 0xBE;  // .>
-            case VK_OEM_2:      return 0xBF;  // /?
-            case VK_OEM_3:      return 0xC0;  // `~
-            case VK_OEM_4:      return 0xDB;  // [{
-            case VK_OEM_5:      return 0xDC;  // \|
-            case VK_OEM_6:      return 0xDD;  // ]}
-            case VK_OEM_7:      return 0xDE;  // '"
-            case VK_OEM_8:      return 0xDF;
-            case VK_OEM_102:    return 0xE2;  // <> or \| on RT 102-key
-            default:
-                return static_cast<int>(vk);
-        }
-    }
-
     static unsigned get_keyboard_modifiers() {
         unsigned modifiers = 0;
 
@@ -3055,8 +2851,10 @@ private:
     }
 
     void on_key_event(WPARAM vk, LPARAM lParam, bool is_down, bool is_system_key) {
-        int ul_keycode = windows_vk_to_ultralight_keycode(vk);
+        // Ultralight's virtual key codes (GK_*) are the Windows VK_* values.
+        int ul_keycode = static_cast<int>(vk);
         unsigned modifiers = get_keyboard_modifiers();
+        const bool is_auto_repeat = is_down && ((lParam >> 30) & 1);   // Bit 30: the key was already down.
         
         // Determine if this is a keypad key
         bool is_keypad = false;
@@ -3076,8 +2874,9 @@ private:
             is_keypad = true;
         }
         
-        queue_command([this, ul_keycode, vk, modifiers, is_down, is_keypad]() {
-            fire_key_event_to_all_documents(ul_keycode, static_cast<int>(vk), modifiers, is_down, is_keypad);
+        queue_command([this, ul_keycode, vk, modifiers, is_down, is_keypad, is_system_key, is_auto_repeat]() {
+            fire_key_event_to_all_documents(ul_keycode, static_cast<int>(vk), modifiers, is_down, is_keypad,
+                                            is_system_key, is_auto_repeat);
         });
     }
 
@@ -3094,7 +2893,8 @@ private:
         });
     }
 
-    void fire_key_event_to_all_documents(int ul_keycode, int native_keycode, unsigned modifiers, bool is_down, bool is_keypad) {
+    void fire_key_event_to_all_documents(int ul_keycode, int native_keycode, unsigned modifiers, bool is_down,
+                                         bool is_keypad, bool is_system_key, bool is_auto_repeat) {
         if (shutting_down_.load(std::memory_order_acquire)) return;
         std::vector<std::shared_ptr<UIDocument>> docs_to_notify;
         
@@ -3115,9 +2915,9 @@ private:
             evt.virtual_key_code = ul_keycode;
             evt.native_key_code = native_keycode;
             evt.modifiers = modifiers;
-            evt.is_auto_repeat = false;
+            evt.is_auto_repeat = is_auto_repeat;
             evt.is_keypad = is_keypad;
-            evt.is_system_key = false;
+            evt.is_system_key = is_system_key;
             GetKeyIdentifierFromVirtualKeyCode(native_keycode, evt.key_identifier);
             doc->view->FireKeyEvent(evt);
         }

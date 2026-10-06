@@ -54,5 +54,8 @@
         // so the full-frame uv rebuilds through the local0.y factor.
         float khrs_inv = localParams0.y >= 0.25f ? localParams0.y : 2.0f;
         float2 khrs_uv = i.pos.xy * khrs_inv / float2(fxMeta.z, fxMeta.w);
-        return float4(sceneColor.SampleLevel(khsgSamp, khrs_uv, 0.0f).rgb, 1.0f);
+        // KH_GI_FINITE: held to [0, 65504] (the 16F range; min / max take the non-NaN operand, so a NaN reads 0)
+        // - a NaN pixel (a broken user shader's) seeded every gather sample that reached it, and the a-trous
+        // passes spread it ~35 px round. A finite non-negative scene passes unchanged.
+        return float4(min(max(sceneColor.SampleLevel(khsgSamp, khrs_uv, 0.0f).rgb, 0.0f), 65504.0f), 1.0f);
     }

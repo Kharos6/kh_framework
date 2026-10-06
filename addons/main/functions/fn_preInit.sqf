@@ -53,7 +53,7 @@ KH_var_executedStacks = [];
 	[],
 	{
 		params [["_event", "", [""]], "_arguments"];
-		luaTriggerEvent _event;
+		_arguments luaTriggerEvent _event;
 	}
 ] call KH_fnc_addEventHandler;
 

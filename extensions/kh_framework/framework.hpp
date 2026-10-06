@@ -2,7 +2,7 @@
 
 #define NOMINMAX
 #define STB_IMAGE_IMPLEMENTATION
-// KH_STB_DIM: stb refuses a picture wider or taller than the renderer's cap (16384, the texture loaders' own
+// stb refuses a picture wider or taller than the renderer's cap (16384, the texture loaders' own
 // test) from its header, before it allocates - its default allows 2^24 a side, so a 20-byte .tga claiming
 // 23170 x 23170 had stb allocate and fill ~2 GB before the cap refused the result.
 #define STBI_MAX_DIMENSIONS 16384
@@ -17,15 +17,18 @@
 #include <Winternl.h>
 #include <string>
 #include <vector>
+#include <array>
 #include <regex>
 #include <random>
 #include <deque>
+#include <list>
 #include <functional>
 #include <algorithm>
 #include <sstream>
 #include <fstream>
 #include <cmath>
 #include <cstdint>
+#include <cctype>
 #include <filesystem>
 #include <iomanip>
 #include <memory>
@@ -84,6 +87,18 @@ constexpr float DEG_TO_RAD = PI / 180.0f;
 constexpr float EPSILON = 0.0001f;
 constexpr float YAW_WINDOW = 0.1f;    // 100ms measurement window
 constexpr const int YAW_MAXSAMPLES = 32;  // ring capacity (enough for very high fps over 100ms)
+
+// Lower / upper-cased copies (ASCII; each char passed unsigned, as the C functions require).
+static std::string kh_lower_copy(std::string value) {
+    for (char& c : value) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return value;
+}
+
+static std::string kh_upper_copy(std::string value) {
+    for (char& c : value) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    return value;
+}
+
 static game_value trigger_cba_event_sqf(game_value_parameter params);
 static code g_compiled_sqf_generic_call;
 static code g_compiled_sqf_generic_call_args;
@@ -103,7 +118,6 @@ static code g_compiled_sqf_game_event_handler_lua_bridge;
 static code g_compiled_sqf_execute_lua;
 static code g_compiled_sqf_remove_handler;
 static code g_compiled_sqf_create_hash_map_from_array;
-static code g_compiled_sqf_create_hash_map;
 static code g_compiled_sqf_trigger_lua_reset_event;
 static code g_compiled_ai_initialized_event;
 static code g_compiled_ai_response_progress_event;
@@ -196,7 +210,7 @@ static bool ensure_minhook() {
     return true;
 }
 
-// KH_SHARED_PRESENT: IDXGISwapChain::Present is one function per DXGI
+// IDXGISwapChain::Present is one function per DXGI
 // implementation and MinHook takes one hook per target, so a second module's
 // MH_CreateHook on it fails (MH_ERROR_ALREADY_CREATED) and one module's
 // MH_RemoveHook would take the other's hook with it. Every module subscribes
@@ -212,7 +226,7 @@ static bool ensure_minhook() {
 // until MH_Uninitialize, which DllMain runs after the renderer's teardown.
 // The original runs under UIFramework's long-standing rule: a structured
 // exception inside it (D3D teardown) reads as S_OK.
-// KH_OVERLAY_BRACKET: the renderer hooks the game's immediate context, and
+// The renderer hooks the game's immediate context, and
 // another module's present-time draws on it are not the engine's: the
 // dispatcher calls the begin / end pair the renderer registered around every
 // subscriber but the renderer's own, and the renderer excludes those draws as
@@ -228,66 +242,66 @@ static void* g_kh_present_target[KH_PRESENT_TARGETS] = {};   // Under g_kh_prese
 static KhSharedPresentFn g_kh_present_orig[KH_PRESENT_TARGETS] = {};   // Set before the target is enabled.
 static std::mutex g_kh_present_mu;
 
-static void kh_present_dispatch(IDXGISwapChain* khpd_sc, UINT khpd_sync, UINT khpd_flags) {
-    for (int khpd_i = 0; khpd_i < KH_PRESENT_SLOTS; ++khpd_i) {
-        const KhSharedPresentCb khpd_cb = g_kh_present_cb[khpd_i].load(std::memory_order_acquire);
-        if (!khpd_cb) continue;
-        int (*const khpd_b)() = khpd_i != KH_PRESENT_SLOT_RENDER
-                                ? g_kh_overlay_begin.load(std::memory_order_acquire) : nullptr;
-        void (*const khpd_e)(int) = khpd_b ? g_kh_overlay_end.load(std::memory_order_acquire) : nullptr;
-        const bool khpd_br = khpd_b && khpd_e;
-        const int khpd_tok = khpd_br ? khpd_b() : 0;
-        khpd_cb(khpd_sc, khpd_sync, khpd_flags);
-        if (khpd_br) khpd_e(khpd_tok);
+static void kh_present_dispatch(IDXGISwapChain* swap_chain, UINT sync_interval, UINT flags) {
+    for (int slot = 0; slot < KH_PRESENT_SLOTS; ++slot) {
+        const KhSharedPresentCb callback = g_kh_present_cb[slot].load(std::memory_order_acquire);
+        if (!callback) continue;
+        int (*const overlay_begin)() = slot != KH_PRESENT_SLOT_RENDER
+                                           ? g_kh_overlay_begin.load(std::memory_order_acquire) : nullptr;
+        void (*const overlay_end)(int) = overlay_begin ? g_kh_overlay_end.load(std::memory_order_acquire) : nullptr;
+        const bool bracketed = overlay_begin && overlay_end;
+        const int token = bracketed ? overlay_begin() : 0;
+        callback(swap_chain, sync_interval, flags);
+        if (bracketed) overlay_end(token);
     }
 }
-template <int KhK>
-static HRESULT STDMETHODCALLTYPE kh_present_detour(IDXGISwapChain* khpt_sc, UINT khpt_sync, UINT khpt_flags) {
+template <int Target>
+static HRESULT STDMETHODCALLTYPE kh_present_detour(IDXGISwapChain* swap_chain, UINT sync_interval, UINT flags) {
     // DXGI_PRESENT_TEST presents nothing and every subscriber draws, so none
-    // runs on a test (KH_PRESENT_TEST).
-    if (!(khpt_flags & DXGI_PRESENT_TEST)) kh_present_dispatch(khpt_sc, khpt_sync, khpt_flags);
-    const KhSharedPresentFn khpt_orig = g_kh_present_orig[KhK];
-    if (!khpt_orig) return E_FAIL;
+    // runs on a test.
+    if (!(flags & DXGI_PRESENT_TEST)) kh_present_dispatch(swap_chain, sync_interval, flags);
+    const KhSharedPresentFn original = g_kh_present_orig[Target];
+    if (!original) return E_FAIL;
     __try {
-        return khpt_orig(khpt_sc, khpt_sync, khpt_flags);
+        return original(swap_chain, sync_interval, flags);
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         return S_OK;
     }
 }
-// MH_OK when khph_addr is detoured (now or before); -1 when MinHook is
+// MH_OK when address is detoured (now or before); -1 when MinHook is
 // unavailable, -2 when every target slot is taken, else the failing MH_STATUS
 // (a created hook that would not enable is removed again).
-static int kh_present_hook(void* khph_addr) {
-    if (!khph_addr) return -2;
+static int kh_present_hook(void* address) {
+    if (!address) return -2;
     if (!ensure_minhook()) return -1;
-    std::lock_guard<std::mutex> khph_l(g_kh_present_mu);
-    for (int khph_k = 0; khph_k < KH_PRESENT_TARGETS; ++khph_k) {
-        if (g_kh_present_target[khph_k] == khph_addr) return MH_OK;
+    std::lock_guard<std::mutex> lock(g_kh_present_mu);
+    for (int target = 0; target < KH_PRESENT_TARGETS; ++target) {
+        if (g_kh_present_target[target] == address) return MH_OK;
     }
-    for (int khph_k = 0; khph_k < KH_PRESENT_TARGETS; ++khph_k) {
-        if (g_kh_present_target[khph_k]) continue;
-        void* const khph_det = khph_k == 0 ? reinterpret_cast<void*>(&kh_present_detour<0>)
+    for (int target = 0; target < KH_PRESENT_TARGETS; ++target) {
+        if (g_kh_present_target[target]) continue;
+        void* const detour = target == 0 ? reinterpret_cast<void*>(&kh_present_detour<0>)
                                            : reinterpret_cast<void*>(&kh_present_detour<1>);
-        MH_STATUS khph_st = MH_CreateHook(khph_addr, khph_det, reinterpret_cast<void**>(&g_kh_present_orig[khph_k]));
-        if (khph_st != MH_OK) return static_cast<int>(khph_st);
-        khph_st = MH_EnableHook(khph_addr);
-        if (khph_st != MH_OK) {
-            MH_RemoveHook(khph_addr);
-            g_kh_present_orig[khph_k] = nullptr;
-            return static_cast<int>(khph_st);
+        MH_STATUS status = MH_CreateHook(address, detour, reinterpret_cast<void**>(&g_kh_present_orig[target]));
+        if (status != MH_OK) return static_cast<int>(status);
+        status = MH_EnableHook(address);
+        if (status != MH_OK) {
+            MH_RemoveHook(address);
+            g_kh_present_orig[target] = nullptr;
+            return static_cast<int>(status);
         }
-        g_kh_present_target[khph_k] = khph_addr;
+        g_kh_present_target[target] = address;
         return MH_OK;
     }
     return -2;
 }
-static void kh_present_subscribe(KhPresentSlot khps_slot, KhSharedPresentCb khps_cb) {
-    g_kh_present_cb[khps_slot].store(khps_cb, std::memory_order_release);
+static void kh_present_subscribe(KhPresentSlot slot, KhSharedPresentCb callback) {
+    g_kh_present_cb[slot].store(callback, std::memory_order_release);
 }
-static void kh_present_overlay_register(int (*khpo_begin)(), void (*khpo_end)(int)) {
-    g_kh_overlay_end.store(khpo_end, std::memory_order_release);
-    g_kh_overlay_begin.store(khpo_begin, std::memory_order_release);
+static void kh_present_overlay_register(int (*begin)(), void (*end)(int)) {
+    g_kh_overlay_end.store(end, std::memory_order_release);
+    g_kh_overlay_begin.store(begin, std::memory_order_release);
 }
 
 // Detect explicitly dedicated server
@@ -299,8 +313,7 @@ static bool get_machine_is_server() {
         char module_name[MAX_PATH];
 
         if (GetModuleFileNameA(NULL, module_name, MAX_PATH) != 0) {
-            std::string exe_name = std::filesystem::path(module_name).filename().string();
-            std::transform(exe_name.begin(), exe_name.end(), exe_name.begin(), ::tolower);
+            std::string exe_name = kh_lower_copy(std::filesystem::path(module_name).filename().string());
             is_server = exe_name == "arma3server_x64.exe" || exe_name == "arma3server.exe";
         }
 
@@ -407,7 +420,7 @@ static float s_smootherstep(float t) { return t * t * t * (t * (t * 6.0f - 15.0f
 static float curve_shape(const std::string& curve, bool is_bezier, float t, const std::vector<float>& bezier_interior) {
     if (curve == "linear") return t;
     if (curve == "smoothstep") return t * t * (3.0f - 2.0f * t);
-    if (curve == "smootherstep") return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+    if (curve == "smootherstep") return s_smootherstep(t);
     if (curve == "easein") return t * t;
     if (curve == "easeout") return t * (2.0f - t);
     if (curve == "sine") return 0.5f * (1.0f - std::cos(t * PI));
@@ -499,6 +512,50 @@ static game_value kh_param(const auto_array<game_value>& arr, size_t index, game
     }
 
     return value;
+}
+
+// kh_param for one type, as the value: a SCALAR / BOOL / STRING element, else the default.
+static float kh_param_float(const auto_array<game_value>& arr, size_t index, float default_value) {
+    return static_cast<float>(kh_param(arr, index, game_value(default_value), { game_data_type::SCALAR }));
+}
+
+static bool kh_param_bool(const auto_array<game_value>& arr, size_t index, bool default_value) {
+    return static_cast<bool>(kh_param(arr, index, game_value(default_value), { game_data_type::BOOL }));
+}
+
+static std::string kh_param_string(const auto_array<game_value>& arr, size_t index, const std::string& default_value) {
+    return static_cast<std::string>(kh_param(arr, index, game_value(default_value), { game_data_type::STRING }));
+}
+
+// The effects from arr[start_index] on (ttsSpeak, ttsUpdateSpeaker, tsApplyVoiceEffects): each element a [name, value]
+// pair, or one element holding the whole chain ([[name, value], ...] - the shape the SQF functions pass, as one
+// argument); anything else is skipped.
+static std::vector<std::pair<std::string, float>> kh_parse_effects(const auto_array<game_value>& arr,
+                                                                   size_t start_index) {
+    std::vector<std::pair<std::string, float>> effects;
+
+    auto add_pair = [&effects](const game_value& pair) {
+        if (pair.type_enum() != game_data_type::ARRAY) return;
+        auto& effect_arr = pair.to_array();
+
+        if (effect_arr.size() >= 2 && effect_arr[0].type_enum() == game_data_type::STRING &&
+            effect_arr[1].type_enum() == game_data_type::SCALAR) {
+            effects.emplace_back(static_cast<std::string>(effect_arr[0]), static_cast<float>(effect_arr[1]));
+        }
+    };
+
+    for (size_t i = start_index; i < arr.size(); i++) {
+        if (arr[i].type_enum() != game_data_type::ARRAY) continue;
+        auto& element = arr[i].to_array();
+
+        if (!element.empty() && element[0].type_enum() == game_data_type::ARRAY) {   // A chain in one element.
+            for (const game_value& pair : element) add_pair(pair);
+        } else {
+            add_pair(arr[i]);
+        }
+    }
+
+    return effects;
 }
 
 static game_value kh_make_array(std::initializer_list<game_value> values) {
@@ -615,9 +672,11 @@ private:
     std::mutex queue_mutex;
 
 public:
+    // Never destroyed, as the framework singletons are not: nothing it holds needs releasing at exit, and a heap
+    // instance cannot be touched by a destructor that ran before some last caller.
     static MainThreadScheduler& instance() {
-        static MainThreadScheduler inst;
-        return inst;
+        static MainThreadScheduler* inst = new MainThreadScheduler();
+        return *inst;
     }
 
     void schedule(std::function<void()> command) {
@@ -647,8 +706,10 @@ public:
         for (auto& cmd : commands_to_execute) {
             try {
                 cmd();
+            } catch (const std::exception& e) {
+                sqf::diag_log("KH Framework: scheduled command failed: " + std::string(e.what()));
             } catch (...) {
-                // Command failed - continue with others
+                sqf::diag_log("KH Framework: scheduled command failed: unknown exception");
             }
         }
     }
@@ -657,31 +718,45 @@ public:
         std::lock_guard<std::mutex> lock(queue_mutex);
         pending_commands.clear();
     }
+
+    // The queue moved out (game thread), to survive a clear(); restore() puts it back in front of whatever was
+    // scheduled since.
+    std::deque<std::function<void()>> take() {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        return std::move(pending_commands);
+    }
+
+    void restore(std::deque<std::function<void()>>&& commands) {
+        if (commands.empty()) return;
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        pending_commands.insert(pending_commands.begin(), std::make_move_iterator(commands.begin()),
+                                std::make_move_iterator(commands.end()));
+    }
 };
 
 static std::mutex g_err_once_mutex;
 static std::vector<std::string> g_err_once;
-// KH_ERR_ONCE_CAP: the 256-message cap was reached this session and said so (under g_err_once_mutex; cleared
+// The 256-message cap was reached this session and said so (under g_err_once_mutex; cleared
 // with g_err_once by the renderer's session reset).
 static bool g_err_once_capped = false;
 
 static void report_error_once_safe(const std::string& msg) {
-    std::string khec_msg;   // Built only for a message that is reported (a repeat costs no copy).
+    std::string reported_msg;   // Built only for a message that is reported (a repeat costs no copy).
     {
         std::lock_guard<std::mutex> g(g_err_once_mutex);
         if (std::find(g_err_once.begin(), g_err_once.end(), msg) != g_err_once.end()) return;
         if (g_err_once.size() >= 256) {
-            // KH_ERR_ONCE_CAP: the first message past the cap is replaced by one saying later ones go unreported.
+            // The first message past the cap is replaced by one saying later ones go unreported.
             if (g_err_once_capped) return;
             g_err_once_capped = true;
-            khec_msg = "KH: 256 distinct errors this session; later ones are not reported (" + msg + ")";
+            reported_msg = "KH Framework: 256 distinct errors this session; later ones are not reported (" + msg + ")";
         } else {
             g_err_once.push_back(msg);
-            khec_msg = msg;
+            reported_msg = msg;
         }
     }
 
-    MainThreadScheduler::instance().schedule([khec_msg]() { report_error(khec_msg); });
+    MainThreadScheduler::instance().schedule([reported_msg]() { report_error(reported_msg); });
 }
 
 template<typename Key, typename Value>
@@ -849,9 +924,6 @@ static std::string game_value_to_json(const game_value& val) {
             return result;
         }
 
-        case game_data_type::NOTHING:
-            return "null";
-            
         default:
             return "null";
     }
@@ -868,21 +940,82 @@ static game_value json_to_game_value(const std::string& json) {
     if (json.size() >= 2 && json.front() == '"' && json.back() == '"') {
         std::string result;
         result.reserve(json.size() - 2);
-        
-        for (size_t i = 1; i < json.size() - 1; ++i) {
-            if (json[i] == '\\' && i + 1 < json.size() - 1) {
-                char next = json[i + 1];
+        const size_t end = json.size() - 1;
 
-                switch (next) {
-                    case '"': result += '"'; ++i; break;
-                    case '\\': result += '\\'; ++i; break;
-                    case 'n': result += '\n'; ++i; break;
-                    case 'r': result += '\r'; ++i; break;
-                    case 't': result += '\t'; ++i; break;
-                    default: result += json[i]; break;
-                }
+        // Four hex digits at i (i + 4 <= end), or -1.
+        auto hex4 = [&](size_t i) -> int {
+            if (i + 4 > end) return -1;
+            int value = 0;
+
+            for (size_t k = 0; k < 4; ++k) {
+                const char h = json[i + k];
+                int d;
+                if (h >= '0' && h <= '9') d = h - '0';
+                else if (h >= 'a' && h <= 'f') d = h - 'a' + 10;
+                else if (h >= 'A' && h <= 'F') d = h - 'A' + 10;
+                else return -1;
+                value = (value << 4) | d;
+            }
+
+            return value;
+        };
+        auto push_utf8 = [&](uint32_t cp) {
+            if (cp < 0x80) {
+                result += static_cast<char>(cp);
+            } else if (cp < 0x800) {
+                result += static_cast<char>(0xC0 | (cp >> 6));
+                result += static_cast<char>(0x80 | (cp & 0x3F));
+            } else if (cp < 0x10000) {
+                result += static_cast<char>(0xE0 | (cp >> 12));
+                result += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+                result += static_cast<char>(0x80 | (cp & 0x3F));
             } else {
+                result += static_cast<char>(0xF0 | (cp >> 18));
+                result += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+                result += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+                result += static_cast<char>(0x80 | (cp & 0x3F));
+            }
+        };
+
+        for (size_t i = 1; i < end; ++i) {
+            if (json[i] != '\\' || i + 1 >= end) {
                 result += json[i];
+                continue;
+            }
+
+            const char next = json[i + 1];
+
+            switch (next) {
+                case '"': result += '"'; ++i; break;
+                case '\\': result += '\\'; ++i; break;
+                case '/': result += '/'; ++i; break;
+                case 'b': result += '\b'; ++i; break;
+                case 'f': result += '\f'; ++i; break;
+                case 'n': result += '\n'; ++i; break;
+                case 'r': result += '\r'; ++i; break;
+                case 't': result += '\t'; ++i; break;
+                case 'u': {
+                    const int cp = hex4(i + 2);
+                    // Malformed: kept as written. \u0000 too: an embedded NUL ends the SQF string, the six
+                    // characters do not.
+                    if (cp <= 0) { result += json[i]; break; }
+                    i += 5;
+
+                    if (cp >= 0xD800 && cp <= 0xDBFF && i + 6 < end && json[i + 1] == '\\' && json[i + 2] == 'u') {
+                        const int low = hex4(i + 3);
+
+                        if (low >= 0xDC00 && low <= 0xDFFF) {
+                            push_utf8(0x10000 + ((static_cast<uint32_t>(cp) - 0xD800) << 10) +
+                                      (static_cast<uint32_t>(low) - 0xDC00));
+                            i += 6;
+                            break;
+                        }
+                    }
+
+                    push_utf8(static_cast<uint32_t>(cp));
+                    break;
+                }
+                default: result += json[i]; break;
             }
         }
 
@@ -905,18 +1038,21 @@ static game_value json_to_game_value(const std::string& json) {
         while (pos < content.size()) {
             char c = content[pos];
             
-            if (c == '"' && (pos == 0 || content[pos - 1] != '\\')) {
-                in_string = !in_string;
-            } else if (!in_string) {
-                if (c == '[' || c == '{') depth++;
-                else if (c == ']' || c == '}') depth--;
-                else if (c == ',' && depth == 0) {
-                    arr.push_back(json_to_game_value(content.substr(start, pos - start)));
-                    start = pos + 1;
-                    while (start < content.size() && content[start] == ' ') start++;
-                    pos = start;
-                    continue;
-                }
+            if (in_string) {
+                if (c == '\\') { pos += 2; continue; }   // The escaped character is not a delimiter.
+                if (c == '"') in_string = false;
+            } else if (c == '"') {
+                in_string = true;
+            } else if (c == '[' || c == '{') {
+                depth++;
+            } else if (c == ']' || c == '}') {
+                depth--;
+            } else if (c == ',' && depth == 0) {
+                arr.push_back(json_to_game_value(content.substr(start, pos - start)));
+                start = pos + 1;
+                while (start < content.size() && content[start] == ' ') start++;
+                pos = start;
+                continue;
             }
 
             pos++;
@@ -943,7 +1079,7 @@ static game_value json_to_game_value(const std::string& json) {
 }
 
 static void initialize_terrain_matrix() {
-    bool khtm_building = false;   // KH_TERRAIN_PARTIAL: the rows below are being replaced.
+    bool building = false;   // The rows below are being replaced.
 
     try {
         static std::string cached_world;
@@ -974,7 +1110,7 @@ static void initialize_terrain_matrix() {
         int grid_points = static_cast<int>(g_world_size / g_terrain_grid_width) + 1;
         
         // Initialize matrix
-        khtm_building = true;
+        building = true;
         g_terrain_matrix.clear();
         g_terrain_matrix.reserve(grid_points);
         
@@ -997,14 +1133,14 @@ static void initialize_terrain_matrix() {
             g_terrain_matrix.push_back(std::move(row));
         }        
     } catch (const std::exception& e) {
-        // KH_TERRAIN_PARTIAL: a build that threw part-way (an allocation; the rows are ~67 MB on a large map)
+        // A build that threw part-way (an allocation; the rows are ~67 MB on a large map)
         // left the cache keys naming this world with only its first rows - every later call returned early on
         // them. Emptied, the matrix is built again at the next call, as one that was never built.
-        if (khtm_building) g_terrain_matrix.clear();
-        report_error("Failed to initialize terrain matrix: " + std::string(e.what()));
+        if (building) g_terrain_matrix.clear();
+        report_error("getTerrainMatrix: failed to initialize the terrain matrix: " + std::string(e.what()));
     } catch (...) {
-        if (khtm_building) g_terrain_matrix.clear();   // KH_TERRAIN_PARTIAL.
-        report_error("Unknown error while initializing terrain matrix");
+        if (building) g_terrain_matrix.clear();
+        report_error("getTerrainMatrix: failed to initialize the terrain matrix: unknown error");
     }
 }
 

@@ -29,133 +29,114 @@ public:
         ZIPVOICE
     };
 
+    // The files of a model folder, each by its role ("" when absent): tokens.txt, lexicon.txt, voices.bin, and the
+    // .onnx files by name - acoustic, vocoder / vocos, text_encoder, flow_matching / fm_decoder, kokoro, kitten,
+    // else the generic model (the last such file wins). has_espeak: an espeak-ng-data folder.
+    struct ModelFiles {
+        std::string tokens;
+        std::string lexicon;
+        std::string voices;
+        std::string acoustic;
+        std::string vocoder;
+        std::string text_encoder;
+        std::string flow_matching;
+        std::string kokoro;
+        std::string kitten;
+        std::string model;
+        std::string model_lower_name;   // The generic model's file name in lower case (the type's hints).
+        bool has_espeak = false;
+    };
+
+    // False when the folder cannot be read.
+    static bool scan_model_files(const std::filesystem::path& model_path, ModelFiles& files) {
+        try {
+            std::filesystem::path espeak_path = model_path / "espeak-ng-data";
+            files.has_espeak = std::filesystem::exists(espeak_path) && std::filesystem::is_directory(espeak_path);
+
+            for (const auto& entry : std::filesystem::directory_iterator(model_path)) {
+                if (!entry.is_regular_file()) continue;
+                std::string lower_filename = kh_lower_copy(entry.path().filename().string());
+                const std::string path = entry.path().string();
+
+                if (lower_filename == "tokens.txt") {
+                    files.tokens = path;
+                } else if (lower_filename == "lexicon.txt") {
+                    files.lexicon = path;
+                } else if (lower_filename == "voices.bin") {
+                    files.voices = path;
+                } else if (lower_filename.ends_with(".onnx")) {
+                    if (lower_filename.find("acoustic") != std::string::npos) {
+                        files.acoustic = path;
+                    } else if (lower_filename.find("vocoder") != std::string::npos ||
+                               lower_filename.find("vocos") != std::string::npos) {
+                        files.vocoder = path;
+                    } else if (lower_filename.find("text_encoder") != std::string::npos ||
+                               lower_filename.find("text-encoder") != std::string::npos) {
+                        files.text_encoder = path;
+                    } else if (lower_filename.find("flow_matching") != std::string::npos ||
+                               lower_filename.find("flow-matching") != std::string::npos ||
+                               lower_filename.find("fm_decoder") != std::string::npos) {
+                        files.flow_matching = path;
+                    } else if (lower_filename.find("kokoro") != std::string::npos) {
+                        files.kokoro = path;
+                    } else if (lower_filename.find("kitten") != std::string::npos) {
+                        files.kitten = path;
+                    } else {
+                        files.model = path;
+                        files.model_lower_name = lower_filename;
+                    }
+                }
+            }
+        } catch (...) {
+            return false;
+        }
+
+        return true;
+    }
+
+    // The model type its files say, in an order that keeps the types apart: Zipvoice (text encoder + flow matching
+    // + vocoder), Matcha (acoustic + vocoder), Kitten / Kokoro by file name, Kitten / Kokoro with voices.bin by the
+    // folder's or file's name (Kokoro when neither says), VITS (a generic model with espeak, a lexicon or tokens).
+    static TTSModelType detect_model_type(const std::filesystem::path& model_path, const ModelFiles& files) {
+        std::string lower_dir_name = kh_lower_copy(model_path.filename().string());
+        const bool has_tokens = !files.tokens.empty();
+        const bool has_generic_onnx = !files.model.empty();
+        const bool has_voices_bin = !files.voices.empty();
+
+        if (!files.text_encoder.empty() && !files.flow_matching.empty() && !files.vocoder.empty() && has_tokens) {
+            return TTSModelType::ZIPVOICE;
+        }
+
+        if (!files.acoustic.empty() && !files.vocoder.empty() && files.text_encoder.empty() &&
+            files.flow_matching.empty()) {
+            return TTSModelType::MATCHA;
+        }
+
+        if (!files.kitten.empty() && has_tokens) return TTSModelType::KITTEN;
+        if (!files.kokoro.empty() && has_tokens) return TTSModelType::KOKORO;
+
+        if (has_voices_bin && has_generic_onnx && has_tokens) {
+            if (lower_dir_name.find("kitten") != std::string::npos) return TTSModelType::KITTEN;
+            if (lower_dir_name.find("kokoro") != std::string::npos) return TTSModelType::KOKORO;
+            if (files.model_lower_name.find("kitten") != std::string::npos) return TTSModelType::KITTEN;
+            return TTSModelType::KOKORO;
+        }
+
+        if (has_generic_onnx && !has_voices_bin && (files.has_espeak || !files.lexicon.empty() || has_tokens)) {
+            return TTSModelType::VITS;
+        }
+
+        return TTSModelType::UNKNOWN;
+    }
+
     static TTSModelType detect_model_type(const std::filesystem::path& model_path) {
         if (model_path.empty() || !std::filesystem::exists(model_path) || !std::filesystem::is_directory(model_path)) {
             return TTSModelType::UNKNOWN;
         }
 
-        std::string dir_name = model_path.filename().string();
-        std::string lower_dir_name = dir_name;
-        std::transform(lower_dir_name.begin(), lower_dir_name.end(), lower_dir_name.begin(), ::tolower);
-        bool has_tokens = false;
-        bool has_espeak = false;
-        bool has_lexicon = false;
-        bool has_voices_bin = false;
-        bool has_acoustic_onnx = false;
-        bool has_vocoder_onnx = false;
-        bool has_text_encoder_onnx = false;
-        bool has_flow_matching_onnx = false;
-        bool has_kokoro_onnx = false;
-        bool has_kitten_onnx = false;
-        bool has_generic_onnx = false;
-        std::string generic_onnx_name;
-        
-        try {
-            std::filesystem::path espeak_path = model_path / "espeak-ng-data";
-            has_espeak = std::filesystem::exists(espeak_path) && std::filesystem::is_directory(espeak_path);
-            
-            for (const auto& file : std::filesystem::directory_iterator(model_path)) {
-                if (!file.is_regular_file()) continue;
-                std::string filename = file.path().filename().string();
-                std::string lower_filename = filename;
-                std::transform(lower_filename.begin(), lower_filename.end(), lower_filename.begin(), ::tolower);
-                
-                // Check for specific files
-                if (lower_filename == "tokens.txt") {
-                    has_tokens = true;
-                }
-                else if (lower_filename == "lexicon.txt") {
-                    has_lexicon = true;
-                }
-                else if (lower_filename == "voices.bin") {
-                    has_voices_bin = true;
-                }
-                else if (lower_filename.ends_with(".onnx")) {
-                    // Categorize ONNX files by name patterns
-                    if (lower_filename.find("acoustic") != std::string::npos) {
-                        has_acoustic_onnx = true;
-                    }
-                    else if (lower_filename.find("vocoder") != std::string::npos ||
-                            lower_filename.find("vocos") != std::string::npos) {
-                        has_vocoder_onnx = true;
-                    }
-                    else if (lower_filename.find("text_encoder") != std::string::npos || 
-                            lower_filename.find("text-encoder") != std::string::npos) {
-                        has_text_encoder_onnx = true;
-                    }
-                    else if (lower_filename.find("flow_matching") != std::string::npos || 
-                            lower_filename.find("flow-matching") != std::string::npos ||
-                            lower_filename.find("fm_decoder") != std::string::npos) {
-                        has_flow_matching_onnx = true;
-                    }
-                    else if (lower_filename.find("kokoro") != std::string::npos) {
-                        has_kokoro_onnx = true;
-                    }
-                    else if (lower_filename.find("kitten") != std::string::npos) {
-                        has_kitten_onnx = true;
-                    }
-                    else {
-                        // Generic ONNX file (potential VITS, Kokoro, or Kitten model)
-                        has_generic_onnx = true;
-                        generic_onnx_name = lower_filename;
-                    }
-                }
-            }
-        } catch (...) {
-            return TTSModelType::UNKNOWN;
-        }
-        
-        // Detection logic with priority ordering to prevent mis-detection
-        // 1. ZIPVOICE: Must have text_encoder + flow_matching + vocoder
-        if (has_text_encoder_onnx && has_flow_matching_onnx && has_vocoder_onnx && has_tokens) {
-            return TTSModelType::ZIPVOICE;
-        }
-        
-        // 2. MATCHA: Must have acoustic + vocoder (but NOT text_encoder/flow_matching which would be Zipvoice)
-        if (has_acoustic_onnx && has_vocoder_onnx && !has_text_encoder_onnx && !has_flow_matching_onnx) {
-            return TTSModelType::MATCHA;
-        }
-        
-        // 3. KITTEN: Check filename first, then directory name
-        if (has_kitten_onnx && has_tokens) {
-            return TTSModelType::KITTEN;
-        }
-        
-        // 4. KOKORO: Check filename first, then directory name  
-        if (has_kokoro_onnx && has_tokens) {
-            return TTSModelType::KOKORO;
-        }
-        
-        // 5. KOKORO/KITTEN with voices.bin: Use DIRECTORY NAME to distinguish
-        if (has_voices_bin && has_generic_onnx && has_tokens) {
-            // Check directory name for hints
-            if (lower_dir_name.find("kitten") != std::string::npos) {
-                return TTSModelType::KITTEN;
-            }
-            
-            if (lower_dir_name.find("kokoro") != std::string::npos) {
-                return TTSModelType::KOKORO;
-            }
-            
-            // Fallback: Check onnx filename
-            if (generic_onnx_name.find("kitten") != std::string::npos) {
-                return TTSModelType::KITTEN;
-            }
-
-            if (generic_onnx_name.find("kokoro") != std::string::npos) {
-                return TTSModelType::KOKORO;
-            }
-
-            // Default to KOKORO for voices.bin models if no other hints
-            return TTSModelType::KOKORO;
-        }
-        
-        // 6. VITS: Generic onnx + (espeak OR lexicon OR tokens) but NO voices.bin
-        if (has_generic_onnx && !has_voices_bin && (has_espeak || has_lexicon || has_tokens)) {
-            return TTSModelType::VITS;
-        }
-        
-        return TTSModelType::UNKNOWN;
+        ModelFiles files;
+        if (!scan_model_files(model_path, files)) return TTSModelType::UNKNOWN;
+        return detect_model_type(model_path, files);
     }
 
     static std::string model_type_to_string(TTSModelType type) {
@@ -170,25 +151,7 @@ public:
     }
 
     static std::vector<std::filesystem::path> find_all_tts_model_directories() {
-        std::vector<std::filesystem::path> search_paths;
-        
-        // Priority 1: Documents folder
-        try {
-            char docs_path[MAX_PATH];
-
-            if (SHGetFolderPathA(NULL, CSIDL_MYDOCUMENTS, NULL, SHGFP_TYPE_CURRENT, docs_path) == S_OK) {
-                std::filesystem::path docs_tts_models = std::filesystem::path(docs_path) / "Arma 3" / "kh_framework" / "tts_models";
-
-                if (std::filesystem::exists(docs_tts_models)) {
-                    search_paths.push_back(docs_tts_models);
-                }
-            }
-        } catch (...) {}
-
-        // Priority 2: Mod folders
-        auto mod_tts_dirs = ModFolderSearcher::find_directories_in_mods("tts_models");
-        search_paths.insert(search_paths.end(), mod_tts_dirs.begin(), mod_tts_dirs.end());
-        return search_paths;
+        return ModFolderSearcher::kh_framework_search_paths("tts_models");
     }
 
     static std::filesystem::path find_model(const std::string& model_name) {
@@ -199,7 +162,7 @@ public:
             std::filesystem::path out;
             std::string err;
             if (ModFolderSearcher::extract_pbo_directory(model_name, out, &err)) return out;
-            MainThreadScheduler::instance().schedule([err]() { sqf::diag_log("KH - TTS Framework: " + err); });
+            MainThreadScheduler::instance().schedule([err]() { sqf::diag_log("KH TTS: " + err); });
             return std::filesystem::path();
         }
 
@@ -240,9 +203,8 @@ public:
         for (const auto& entry : std::filesystem::directory_iterator(model_path)) {
             if (!entry.is_regular_file()) continue;
             std::string filename = entry.path().filename().string();
-            std::string lower_filename = filename;
-            std::transform(lower_filename.begin(), lower_filename.end(), lower_filename.begin(), ::tolower);
-            
+            std::string lower_filename = kh_lower_copy(filename);
+
             if (lower_filename == "lexicon.txt") {
                 return entry.path();
             }
@@ -281,7 +243,7 @@ public:
 class TTSFramework {
 private:
     TTSFramework() = default;
-    ~TTSFramework() { cleanup(); }
+    ~TTSFramework() = default;
     TTSFramework(const TTSFramework&) = delete;
     TTSFramework& operator=(const TTSFramework&) = delete;
     std::shared_ptr<const SherpaOnnxOfflineTts> tts_handle;
@@ -453,7 +415,7 @@ private:
             std::string speaker_id_copy = state->speaker_id;
 
             MainThreadScheduler::instance().schedule([speaker_id_copy]() {
-                report_error("KH - TTS Framework: Failed to open audio output device for speaker: " + speaker_id_copy);
+                report_error("KH TTS: failed to open the audio output device for speaker " + speaker_id_copy);
             });
 
             state->finished_was_stopped = true;
@@ -633,7 +595,7 @@ private:
                     int error_code = result;
                     
                     MainThreadScheduler::instance().schedule([error_code]() {
-                        report_error("KH - TTS Framework: waveOutWrite failed with error code: " + std::to_string(error_code));
+                        report_error("KH TTS: waveOutWrite failed with error code " + std::to_string(error_code));
                     });
 
                     break;
@@ -725,17 +687,18 @@ private:
             }
         }
         
-        // Drain remaining threads on shutdown
-        std::unique_lock<std::mutex> lock(cleanup_mutex);
+        // Drain the threads queued so far on shutdown, outside the lock (a thread queued from here on is joined by
+        // cleanup()'s final drain).
+        std::deque<std::thread> remaining;
 
-        for (auto& t : threads_to_cleanup) {
-            if (t.joinable()) {
-                lock.unlock();
-                t.join();
-                lock.lock();
-            }
+        {
+            std::lock_guard<std::mutex> lock(cleanup_mutex);
+            remaining.swap(threads_to_cleanup);
         }
-        threads_to_cleanup.clear();
+
+        for (auto& t : remaining) {
+            if (t.joinable()) t.join();
+        }
     }
 
     void queue_thread_for_cleanup(std::thread&& t) {
@@ -902,7 +865,7 @@ private:
                     std::string error_msg = e.what();
 
                     MainThreadScheduler::instance().schedule([error_msg]() {
-                        report_error("KH - TTS Framework: Generation exception: " + error_msg);
+                        report_error("KH TTS: generation failed: " + error_msg);
                     });
                 } catch (...) {}
             }
@@ -910,9 +873,11 @@ private:
     }
     
 public:
+    // Never destroyed: at process exit the worker threads are already gone when static destructors would run
+    // (a mutex one of them held would hang the exit); DllMain's unload path stops the framework instead.
     static TTSFramework& instance() {
-        static TTSFramework inst;
-        return inst;
+        static TTSFramework* inst = new TTSFramework();
+        return *inst;
     }
 
     bool load_model(
@@ -937,6 +902,7 @@ public:
             }
             
             tts_handle.reset();
+            is_initialized_flag.store(false, std::memory_order_release);   // Until the new model is in.
 
             try {
                 std::filesystem::path model_path;
@@ -946,7 +912,7 @@ public:
                     model_path = TTSModelDiscovery::find_any_model();
                     
                     if (model_path.empty()) {
-                        log_message = "KH - TTS Framework: No TTS models found in any search location";
+                        log_message = "ttsLoadModel: no TTS model found in any search location";
                     } else {
                         resolved_model_name = model_path.filename().string();
                     }
@@ -954,65 +920,38 @@ public:
                     model_path = TTSModelDiscovery::find_model(model_name);
                     
                     if (model_path.empty()) {
-                        log_message = "KH - TTS Framework: Model not found: " + model_name;
+                        log_message = "ttsLoadModel: model not found: " + model_name;
                     }
                 }
 
                 if (!model_path.empty()) {
-                    TTSModelDiscovery::TTSModelType model_type = TTSModelDiscovery::detect_model_type(model_path);
+                    TTSModelDiscovery::ModelFiles files;
+                    TTSModelDiscovery::TTSModelType model_type = TTSModelDiscovery::TTSModelType::UNKNOWN;
+
+                    if (TTSModelDiscovery::scan_model_files(model_path, files)) {
+                        model_type = TTSModelDiscovery::detect_model_type(model_path, files);
+                    }
                     
                     if (model_type == TTSModelDiscovery::TTSModelType::UNKNOWN) {
-                        log_message = "KH - TTS Framework: Could not determine model type for: " + model_path.string();
+                        log_message = "ttsLoadModel: could not determine the model type of " + model_path.string();
                     } else {
-                        std::string model_file_path;
-                        std::string tokens_file_path;
-                        std::string lexicon_path;
-                        std::string acoustic_path;
-                        std::string vocoder_path;
-                        std::string voices_path;
-                        std::string text_encoder_path;
-                        std::string flow_matching_path;
+                        // The generic model file is the one a Kokoro / Kitten model is named after too: the type's
+                        // own file when it has one, else the generic one.
+                        using TTSModelType = TTSModelDiscovery::TTSModelType;
+                        const std::string& model_file_path =
+                            model_type == TTSModelType::KOKORO && !files.kokoro.empty() ? files.kokoro
+                          : model_type == TTSModelType::KITTEN && !files.kitten.empty() ? files.kitten
+                          : files.model;
+                        const std::string& tokens_file_path = files.tokens;
+                        const std::string& lexicon_path = files.lexicon;
+                        const std::string& acoustic_path = files.acoustic;
+                        const std::string& vocoder_path = files.vocoder;
+                        const std::string& voices_path = files.voices;
+                        const std::string& text_encoder_path = files.text_encoder;
+                        const std::string& flow_matching_path = files.flow_matching;
                         std::string dict_dir_path;
                         std::filesystem::path espeak_data_path = TTSModelDiscovery::find_espeak_data(model_path);
                         std::string espeak_data_str = espeak_data_path.empty() ? "" : espeak_data_path.string();
-
-                        for (const auto& entry : std::filesystem::directory_iterator(model_path)) {
-                            if (!entry.is_regular_file()) continue;
-                            std::string filename = entry.path().filename().string();
-                            std::string lower_filename = filename;
-                            std::transform(lower_filename.begin(), lower_filename.end(), lower_filename.begin(), ::tolower);
-                            
-                            if (lower_filename == "tokens.txt") {
-                                tokens_file_path = entry.path().string();
-                            }
-                            else if (lower_filename == "lexicon.txt") {
-                                lexicon_path = entry.path().string();
-                            }
-                            else if (lower_filename == "voices.bin") {
-                                voices_path = entry.path().string();
-                            }
-                            else if (lower_filename.ends_with(".onnx")) {
-                                if (lower_filename.find("acoustic") != std::string::npos) {
-                                    acoustic_path = entry.path().string();
-                                }
-                                else if (lower_filename.find("vocoder") != std::string::npos ||
-                                        lower_filename.find("vocos") != std::string::npos) {
-                                    vocoder_path = entry.path().string();
-                                }
-                                else if (lower_filename.find("text_encoder") != std::string::npos ||
-                                        lower_filename.find("text-encoder") != std::string::npos) {
-                                    text_encoder_path = entry.path().string();
-                                }
-                                else if (lower_filename.find("flow_matching") != std::string::npos ||
-                                        lower_filename.find("flow-matching") != std::string::npos ||
-                                        lower_filename.find("fm_decoder") != std::string::npos) {
-                                    flow_matching_path = entry.path().string();
-                                }
-                                else {
-                                    model_file_path = entry.path().string();
-                                }
-                            }
-                        }
                         
                         // Check for dict directory (used by some Kokoro models)
                         std::filesystem::path dict_path = model_path / "dict";
@@ -1099,7 +1038,7 @@ public:
                                 break;
                                 
                             default:
-                                log_message = "KH - TTS Framework: Unsupported model type";
+                                log_message = "ttsLoadModel: unsupported model type";
                                 break;
                         }
                         
@@ -1115,7 +1054,7 @@ public:
                                 SherpaOnnxCreateOfflineTts(&config), TtsHandleDeleter{});
                             
                             if (!tts_handle) {
-                                log_message = "KH - TTS Framework: Failed to create TTS instance";
+                                log_message = "ttsLoadModel: failed to create the TTS instance";
                             } else {
                                 num_speakers = SherpaOnnxOfflineTtsNumSpeakers(tts_handle.get());
                                 sample_rate = SherpaOnnxOfflineTtsSampleRate(tts_handle.get());
@@ -1124,20 +1063,20 @@ public:
                                 is_initialized_flag.store(true, std::memory_order_release);
                                 success = true;
                                 
-                                log_message = "KH - TTS Framework: Model loaded successfully - " + model_path.string() + 
+                                log_message = "KH TTS: model loaded - " + model_path.string() +
                                     " | Type: " + TTSModelDiscovery::model_type_to_string(model_type) +
                                     " | Speakers: " + std::to_string(loaded_num_speakers) + 
                                     " | Sample Rate: " + std::to_string(loaded_sample_rate) + " Hz";
                             }
                         }
                         else if (log_message.empty()) {
-                            log_message = "KH - TTS Framework: Missing required files for " + 
+                            log_message = "ttsLoadModel: missing required files for " +
                                         TTSModelDiscovery::model_type_to_string(model_type) + " model";
                         }
                     }
                 }
             } catch (const std::exception& e) {
-                log_message = "KH - TTS Framework: Model loading exception: " + std::string(e.what());
+                log_message = "ttsLoadModel: " + std::string(e.what());
             }
         }
 
@@ -1148,7 +1087,7 @@ public:
                 if (success) {
                     sqf::diag_log(msg);
                 } else {
-                    report_error("KH - TTS Framework: " + msg);
+                    report_error(msg);
                 }
             });
         }
@@ -1173,7 +1112,7 @@ public:
             const std::vector<std::pair<std::string, float>>& effects = {}) {
         if (!is_initialized_flag) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - TTS Framework: Cannot start speak - no model loaded");
+                report_error("ttsSpeak: no model loaded");
             });
             
             return false;
@@ -1313,28 +1252,6 @@ public:
         for (const auto& speaker_id : speakers_that_were_playing) {
             schedule_tts_finished_event(speaker_id, true);
         }
-    }
-
-    static std::vector<std::pair<std::string, float>> parse_effects_from_args(const game_value& args, size_t start_index) {
-        std::vector<std::pair<std::string, float>> effects;
-        if (args.type_enum() != game_data_type::ARRAY) return effects;
-        auto& arr = args.to_array();
-
-        for (size_t i = start_index; i < arr.size(); i++) {
-            if (arr[i].type_enum() == game_data_type::ARRAY) {
-                auto& effect_arr = arr[i].to_array();
-
-                if (effect_arr.size() >= 2 && 
-                    effect_arr[0].type_enum() == game_data_type::STRING &&
-                    effect_arr[1].type_enum() == game_data_type::SCALAR) {
-                    std::string name = effect_arr[0];
-                    float value = effect_arr[1];
-                    effects.emplace_back(name, value);
-                }
-            }
-        }
-        
-        return effects;
     }
 
     bool is_initialized() {

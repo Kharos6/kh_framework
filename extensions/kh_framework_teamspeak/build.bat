@@ -105,6 +105,7 @@ cl /LD /arch:AVX /O2 /Ob3 /GL /MT /std:c++20 /EHsc /TP /Gy /Gw /GS- ^
     /EXPORT:ts3plugin_onEditCapturedVoiceDataEvent ^
     /EXPORT:ts3plugin_processCommand ^
     /EXPORT:ts3plugin_commandKeyword ^
+    /EXPORT:ts3plugin_requestAutoload ^
     user32.lib kernel32.lib advapi32.lib shell32.lib
 
 REM Check if build was successful

@@ -5,12 +5,9 @@ using namespace intercept::types;
 
 static registered_sqf_function _sqf_execute_lua_any_array;
 static registered_sqf_function _sqf_execute_lua_any_string;
-static registered_sqf_function _sqf_execute_lua_any_code;
 static registered_sqf_function _sqf_execute_lua_string;
 static registered_sqf_function _sqf_execute_lua_array;
-static registered_sqf_function _sqf_execute_lua_code;
 static registered_sqf_function _sqf_compile_lua_string_string;
-static registered_sqf_function _sqf_compile_lua_string_code;
 static registered_sqf_function _sqf_crypto_hash_string_string;
 static registered_sqf_function _sqf_generate_uid;
 static registered_sqf_function _sqf_get_epoch;
@@ -182,14 +179,6 @@ struct kh_command_entry {
 
 static std::unordered_map<std::string, kh_command_entry> g_sqf_command_map;
 static bool g_sqf_command_map_initialized = false;
-static const std::unordered_set<std::string> g_sqf_command_map_skip = {};
-
-static std::string kh_lower_copy(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-
-    return value;
-}
 
 // Only plain identifiers are callable by name; this filters out the symbolic
 // operators supportInfo also reports (+, -, ==, #, !, &&,...), which would
@@ -221,13 +210,7 @@ static void kh_register_command_variant(const std::string& name, int arity) {
         return;
     }
 
-    const std::string key = kh_lower_copy(name);
-
-    if (g_sqf_command_map_skip.find(key) != g_sqf_command_map_skip.end()) {
-        return;
-    }
-
-    kh_command_entry& entry = g_sqf_command_map[key];
+    kh_command_entry& entry = g_sqf_command_map[kh_lower_copy(name)];
 
     if (entry.canonical_name.empty()) {
         entry.canonical_name = name;
@@ -340,7 +323,7 @@ static void populate_sqf_command_map() {
         const auto entries = sqf::support_info("");
 
         if (entries.empty()) {
-            sqf::diag_log("KH Framework Extension - supportInfo returned no command list");
+            sqf::diag_log("KH Framework: supportInfo returned no command list");
             return;
         }
 
@@ -360,13 +343,13 @@ static void populate_sqf_command_map() {
             }
         }
 
-        sqf::diag_log("KH Framework Extension - Command table: "
+        sqf::diag_log("KH Framework: command table: "
                       + std::to_string(g_sqf_command_map.size()) + " commands, "
                       + std::to_string(compiled) + " variants");
     } catch (const std::exception& e) {
-        sqf::diag_log("KH Framework Extension - Failed to build command table: " + std::string(e.what()));
+        sqf::diag_log("KH Framework: failed to build the command table: " + std::string(e.what()));
     } catch (...) {
-        sqf::diag_log("KH Framework Extension - Failed to build command table");
+        sqf::diag_log("KH Framework: failed to build the command table");
     }
 }
 
@@ -397,32 +380,44 @@ static std::string kh_command_arity_description(const kh_command_entry& entry) {
     return out.empty() ? std::string("none") : out;
 }
 
-// KH_SQF_INT - a script number a handler needs as an int: a SCALAR, finite and
+// A script number a handler needs as an int: a SCALAR, finite and
 // above INT_MIN and below 2^31 (RenderIntegration::kh_gv_int; fractions truncate). A
 // float -> int conversion of NaN / inf / an out-of-range value is UB, so every
 // such argument goes through here, and the handler reports and fails when it
 // returns false (out is then left as it was).
-static bool kh_sqf_int(const game_value& khsi_v, int& khsi_out) {
-    if (khsi_v.type_enum() != game_data_type::SCALAR) return false;
-    return RenderIntegration::kh_gv_int(khsi_v, khsi_out);
+static bool kh_sqf_int(const game_value& value, int& out) {
+    if (value.type_enum() != game_data_type::SCALAR) return false;
+    return RenderIntegration::kh_gv_int(value, out);
 }
 
-// KH_SQF_INT for the client ids inside an ARRAY target (khNetworkMessageSend, khSetVariable): false when a
+// kh_sqf_int for the client ids inside an ARRAY target (khNetworkMessageSend, khSetVariable): false when a
 // number element is not an int (each one reaches the network layer's conversion as a lone number target does),
 // at any depth - a nested array is resolved as a target in its own right. Any other target is not this check's.
-static bool kh_sqf_target_ids_ok(const game_value& khst_t) {
-    if (khst_t.type_enum() != game_data_type::ARRAY) return true;
-    int khst_i = 0;
+static bool kh_sqf_target_ids_ok(const game_value& target) {
+    if (target.type_enum() != game_data_type::ARRAY) return true;
+    int id = 0;
 
-    for (const game_value& khst_e : khst_t.to_array()) {
-        if (khst_e.type_enum() == game_data_type::SCALAR && !kh_sqf_int(khst_e, khst_i)) return false;
-        if (khst_e.type_enum() == game_data_type::ARRAY && !kh_sqf_target_ids_ok(khst_e)) return false;
+    for (const game_value& element : target.to_array()) {
+        if (element.type_enum() == game_data_type::SCALAR && !kh_sqf_int(element, id)) return false;
+        if (element.type_enum() == game_data_type::ARRAY && !kh_sqf_target_ids_ok(element)) return false;
     }
 
     return true;
 }
 
-// KH_LUA_STACK - room for khlr_n more slots on the Lua stack, asked before they are pushed (sol::as_args and
+// Whether a [target, jip] pair of the emission commands means this machine only: no target (nil / true) and no
+// JIP (nil / false). Anything else goes through triggerCbaEvent.
+static bool kh_target_is_local_only(const game_value& target, const game_value& jip) {
+    const bool local_target = target.is_nil() ||
+                              (target.type_enum() == game_data_type::BOOL && static_cast<bool>(target));
+    const bool no_jip = jip.is_nil() || (jip.type_enum() == game_data_type::BOOL && !static_cast<bool>(jip));
+    return local_target && no_jip;
+}
+
+static game_value kh_trigger_cba_event_native(game_value event_name, game_value args, game_value target,
+                                              game_value jip);
+
+// Room for count more slots on the Lua stack, asked before they are pushed (sol::as_args and
 // the raw pushes take one per value; Lua guarantees only LUA_MINSTACK free slots). lua_checkstack grows the
 // stack (protected, whatever the frames below hold) or refuses. LuaJIT's refuses once this frame would pass
 // LUAI_MAXCSTACK (8000 slots), while its pushes grow the stack themselves up to its 65500-slot ceiling -
@@ -431,16 +426,16 @@ static bool kh_sqf_target_ids_ok(const game_value& khst_t) {
 // stack (a script's Lua -> SQF -> Lua) can still overflow there, as any such call could before this guard
 // (a push past the ceiling raises a stack-overflow error, outside any protected call of ours).
 // The 1e6 bound is past any Lua's limit and keeps the int conversion exact.
-static bool kh_lua_room(lua_State* khlr_l, size_t khlr_n) {
-    if (khlr_n > 1000000u) return false;
+static bool kh_lua_room(lua_State* L, size_t count) {
+    if (count > 1000000u) return false;
 #if defined(LUAJIT_VERSION)
-    const size_t khlr_top = static_cast<size_t>(lua_gettop(khlr_l)) + khlr_n + LUA_MINSTACK;
-    if (khlr_top <= static_cast<size_t>(LUAI_MAXCSTACK)) {
-        return lua_checkstack(khlr_l, static_cast<int>(khlr_n) + LUA_MINSTACK) != 0;
+    const size_t top = static_cast<size_t>(lua_gettop(L)) + count + LUA_MINSTACK;
+    if (top <= static_cast<size_t>(LUAI_MAXCSTACK)) {
+        return lua_checkstack(L, static_cast<int>(count) + LUA_MINSTACK) != 0;
     }
-    return khlr_top < 65500u;
+    return top < 65500u;
 #else
-    return lua_checkstack(khlr_l, static_cast<int>(khlr_n) + LUA_MINSTACK) != 0;
+    return lua_checkstack(L, static_cast<int>(count) + LUA_MINSTACK) != 0;
 #endif
 }
 
@@ -453,33 +448,20 @@ static game_value execute_lua_sqf(game_value_parameter args, game_value_paramete
             auto& arr = code_or_function.to_array();
 
             if (arr.empty()) {
-                report_error("Remote execution requires at least function");
+                report_error("luaExecute: remote execution requires at least function");
                 return game_value();
             }
 
-            game_value lua_code = arr[0];
-            game_value target_gv = arr.size() > 1 ? arr[1] : game_value();
-            game_value environment_gv = arr.size() > 2 ? arr[2] : game_value();
-            game_value special_gv = arr.size() > 3 ? arr[3] : game_value();            
-            std::string code_str;
-
-            if (lua_code.type_enum() == game_data_type::CODE) {
-                auto code_data = lua_code.get_as<game_data_code>();
-                code_str = static_cast<std::string>(code_data->code_string);
-            } else if (lua_code.type_enum() == game_data_type::STRING) {
-                code_str = static_cast<std::string>(lua_code);
-            } else {
-                report_error("Bad code type");
+            // Lua code is a STRING (the CODE overloads were removed: Lua is not SQF).
+            if (arr[0].type_enum() != game_data_type::STRING) {
+                report_error("luaExecute: the Lua code or function name must be a string");
                 return game_value();
             }
 
-            auto_array<game_value> sqf_params;
-            sqf_params.push_back(std::move(args));
-            sqf_params.push_back(game_value(code_str));
-            sqf_params.push_back(target_gv);
-            sqf_params.push_back(environment_gv);
-            sqf_params.push_back(special_gv);
-            return raw_call_sqf_args_native(g_compiled_sqf_execute_lua, game_value(std::move(sqf_params)));
+            return raw_call_sqf_args_native(g_compiled_sqf_execute_lua, kh_make_array({
+                args, arr[0], kh_param(arr, 1, game_value()), kh_param(arr, 2, game_value()),
+                kh_param(arr, 3, game_value())
+            }));
         }
 
         sol::protected_function func;
@@ -490,14 +472,7 @@ static game_value execute_lua_sqf(game_value_parameter args, game_value_paramete
         if (exec_it != g_local_exec_cache.end()) {
             func = exec_it->second.func;
         } else {
-            std::string code_str;
-
-            if (code_or_function.type_enum() == game_data_type::CODE) {
-                auto code_data = code_or_function.get_as<game_data_code>();
-                code_str = static_cast<std::string>(code_data->code_string);
-            } else {
-                code_str = static_cast<std::string>(code_or_function);
-            }
+            std::string code_str = static_cast<std::string>(code_or_function);   // STRING: the only registration.
 
             // Bare global function name vs. Arbitrary code.
             if (code_str.find(' ') == std::string::npos && code_str.find('(') == std::string::npos) {
@@ -509,11 +484,11 @@ static game_value execute_lua_sqf(game_value_parameter args, game_value_paramete
                     func = (*g_lua_state)[code_str];
 
                     if (!func.valid()) {
-                        report_error("Function '" + code_str + "' not found");
+                        report_error("luaExecute: function '" + code_str + "' not found");
                         return game_value();
                     }
 
-                    g_call_cache[code_str] = {code_str, func, true};
+                    g_call_cache[code_str] = {func};
                 }
             } else {
                 size_t code_hash = std::hash<std::string>{}(code_str);
@@ -527,7 +502,7 @@ static game_value execute_lua_sqf(game_value_parameter args, game_value_paramete
 
                     if (!load_res.valid()) {
                         sol::error err = load_res;
-                        report_error(std::string(err.what()));
+                        report_error("luaExecute: " + std::string(err.what()));
                         return game_value();
                     }
 
@@ -536,7 +511,7 @@ static game_value execute_lua_sqf(game_value_parameter args, game_value_paramete
 
                     if (!factory_result.valid()) {
                         sol::error err = factory_result;
-                        report_error("Failed to create function: " + std::string(err.what()));
+                        report_error("luaExecute: " + std::string(err.what()));
                         return game_value();
                     }
 
@@ -558,10 +533,11 @@ static game_value execute_lua_sqf(game_value_parameter args, game_value_paramete
             if (arr.empty()) {
                 result = func();
             } else {
-                // KH_LUA_STACK: sol::as_args pushes one slot per element - room for them first, or the
+                // sol::as_args pushes one slot per element - room for them first, or the
                 // call is refused (kh_lua_room).
                 if (!kh_lua_room(g_lua_state->lua_state(), arr.size())) {
-                    report_error("Too many arguments for the Lua stack (" + std::to_string(arr.size()) + ")");
+                    report_error("luaExecute: too many arguments for the Lua stack (" + std::to_string(arr.size()) +
+                                 ")");
                     return game_value();
                 }
 
@@ -582,7 +558,7 @@ static game_value execute_lua_sqf(game_value_parameter args, game_value_paramete
 
         if (!result.valid()) {
             sol::error err = result;
-            report_error(std::string(err.what()));
+            report_error("luaExecute: " + std::string(err.what()));
             return game_value();
         }
 
@@ -592,13 +568,13 @@ static game_value execute_lua_sqf(game_value_parameter args, game_value_paramete
             return convert_lua_to_game_value(result.get<sol::object>());
         }
     } catch (const sol::error& e) {
-        report_error(std::string(e.what()));
+        report_error("luaExecute: " + std::string(e.what()));
         return game_value();
     } catch (const std::exception& e) {
-        report_error(std::string(e.what()));
+        report_error("luaExecute: " + std::string(e.what()));
         return game_value();
     } catch (...) {
-        report_error("Unknown error occurred");
+        report_error("luaExecute: unknown error");
         return game_value();
     }
 }
@@ -606,21 +582,12 @@ static game_value execute_lua_sqf(game_value_parameter args, game_value_paramete
 static game_value compile_lua_sqf(game_value_parameter name, game_value_parameter code) {    
     try {
         LuaStackGuard guard(*g_lua_state);
-        std::string lua_code;
-
-        // Handle CODE type or STRING type
-        if (code.type_enum() == game_data_type::CODE) {
-            auto code_data = code.get_as<game_data_code>();
-            lua_code = static_cast<std::string>(code_data->code_string);
-        } else {
-            lua_code = static_cast<std::string>(code);
-        }
-
+        std::string lua_code = static_cast<std::string>(code);   // STRING: the only registration.
         std::string lua_name = static_cast<std::string>(name);
 
         // Validate the Lua name
         if (lua_name.empty()) {
-            report_error("Function name cannot be empty");
+            report_error("luaCompile: function name cannot be empty");
             return game_value();
         }
 
@@ -629,69 +596,52 @@ static game_value compile_lua_sqf(game_value_parameter name, game_value_paramete
         if (result.success) {
             if (!lua_name.empty() && result.function.valid()) {
                 // Update call cache
-                g_call_cache[lua_name] = {lua_name, result.function, true};
-                // KH_LUA_RECOMPILE: execute_lua_sqf looks in g_local_exec_cache first (keyed by the
+                g_call_cache[lua_name] = {result.function};
+                // execute_lua_sqf looks in g_local_exec_cache first (keyed by the
                 // call site's value), so a call site that ran the old function would keep running it.
                 g_local_exec_cache.clear();
             }
 
             return game_value();
         } else {
-            report_error(result.error_message);
+            report_error("luaCompile: " + result.error_message);
             return game_value();
         }
 
     } catch (const sol::error& e) {
-        report_error("Lua compilation - " + std::string(e.what()));
+        report_error("luaCompile: " + std::string(e.what()));
         return game_value();
     } catch (const std::exception& e) {
-        report_error(std::string(e.what()));
+        report_error("luaCompile: " + std::string(e.what()));
         return game_value();
     } catch (...) {
-        report_error("Unknown error during compilation");
+        report_error("luaCompile: unknown error");
         return game_value();
     }
 }
 
 static game_value crypto_hash_sqf(game_value_parameter type, game_value_parameter input) {
     try {
-        std::string hash_type = static_cast<std::string>(type);
+        std::string hash_type = kh_lower_copy(static_cast<std::string>(type));
         std::string input_str = static_cast<std::string>(input);
+        static const std::unordered_map<std::string, std::string (*)(const std::string&)> hashers = {
+            { "md5", CryptoGenerator::md5 },         { "sha1", CryptoGenerator::sha1 },
+            { "sha256", CryptoGenerator::sha256 },   { "sha512", CryptoGenerator::sha512 },
+            { "fnv1a32", CryptoGenerator::fnv1a32 }, { "fnv1a64", CryptoGenerator::fnv1a64 },
+            { "crc32", CryptoGenerator::crc32 },     { "xxhash32", CryptoGenerator::xxhash32 },
+            { "adler32", CryptoGenerator::adler32 }, { "djb2", CryptoGenerator::djb2 },
+            { "sdbm", CryptoGenerator::sdbm }
+        };
+        const auto it = hashers.find(hash_type);
 
-        // Convert to lowercase for comparison
-        std::transform(hash_type.begin(), hash_type.end(), hash_type.begin(), ::tolower);
-
-        std::string result;
-        if (hash_type == "md5") {
-            result = CryptoGenerator::md5(input_str);
-        } else if (hash_type == "sha1") {
-            result = CryptoGenerator::sha1(input_str);
-        } else if (hash_type == "sha256") {
-            result = CryptoGenerator::sha256(input_str);
-        } else if (hash_type == "sha512") {
-            result = CryptoGenerator::sha512(input_str);
-        } else if (hash_type == "fnv1a32") {
-            result = CryptoGenerator::fnv1a32(input_str);
-        } else if (hash_type == "fnv1a64") {
-            result = CryptoGenerator::fnv1a64(input_str);
-        } else if (hash_type == "crc32") {
-            result = CryptoGenerator::crc32(input_str);
-        } else if (hash_type == "xxhash32") {
-            result = CryptoGenerator::xxhash32(input_str);
-        } else if (hash_type == "adler32") {
-            result = CryptoGenerator::adler32(input_str);
-        } else if (hash_type == "djb2") {
-            result = CryptoGenerator::djb2(input_str);
-        } else if (hash_type == "sdbm") {
-            result = CryptoGenerator::sdbm(input_str);
-        } else {
-            report_error("Unknown hash type: " + hash_type);
+        if (it == hashers.end()) {
+            report_error("cryptoHash: unknown hash type: " + hash_type);
             return game_value();
         }
 
-        return game_value(result);
+        return game_value(it->second(input_str));
     } catch (const std::exception& e) {
-        report_error(std::string(e.what()));
+        report_error("cryptoHash: " + std::string(e.what()));
         return game_value("");
     }
 }
@@ -700,32 +650,20 @@ static game_value generate_random_string_sqf(game_value_parameter options, game_
     try {
         int len = 0;
 
-        if (!kh_sqf_int(length, len)) {   // KH_SQF_INT.
-            report_error("Length must be a number within int range");
+        if (!kh_sqf_int(length, len)) {
+            report_error("generateRandomString: length must be a number within int range");
             return game_value();
         }
 
         if (len <= 0) {
-            report_error("Length must be greater than 0");
+            report_error("generateRandomString: length must be greater than 0");
             return game_value();
         }
 
-        bool use_numbers = true;
-        bool use_letters = true;
-        bool use_symbols = true;
         auto& arr = options.to_array();
-
-        if (arr.size() >= 1 && !arr[0].is_nil()) {
-            use_numbers = static_cast<bool>(arr[0]);
-        }
-
-        if (arr.size() >= 2 && !arr[1].is_nil()) {
-            use_letters = static_cast<bool>(arr[1]);
-        }
-
-        if (arr.size() >= 3 && !arr[2].is_nil()) {
-            use_symbols = static_cast<bool>(arr[2]);
-        }
+        bool use_numbers = kh_param_bool(arr, 0, true);
+        bool use_letters = kh_param_bool(arr, 1, true);
+        bool use_symbols = kh_param_bool(arr, 2, true);
 
         // If all are explicitly false, default to all true
         if (!use_numbers && !use_letters && !use_symbols) {
@@ -737,7 +675,7 @@ static game_value generate_random_string_sqf(game_value_parameter options, game_
         std::string result = RandomStringGenerator::generate(len, use_numbers, use_letters, use_symbols);
         return game_value(result);
     } catch (const std::exception& e) {
-        report_error(std::string(e.what()));
+        report_error("generateRandomString: " + std::string(e.what()));
         return game_value("");
     }
 }
@@ -747,14 +685,14 @@ static game_value generate_uid_sqf() {
         std::string uid = UIDGenerator::generate();
         return game_value(uid);
     } catch (const std::exception& e) {
-        report_error(std::string(e.what()));
+        report_error("generateUid: " + std::string(e.what()));
         return game_value("");
     }
 }
 
 static game_value get_epoch_sqf() noexcept {
     try {
-        // KH_EPOCH_SYSTEM: the Unix epoch (system_clock); high_resolution_clock is steady_clock on MSVC (uptime).
+        // The Unix epoch (system_clock); high_resolution_clock is steady_clock on MSVC (uptime).
         auto now = std::chrono::system_clock::now();
         auto duration = now.time_since_epoch();
         auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
@@ -771,7 +709,7 @@ static game_value get_epoch_delta_sqf(game_value_parameter past_epoch_str) noexc
     try {
         std::string past_str = static_cast<std::string>(past_epoch_str);
         double past_epoch = std::stod(past_str);
-        auto now = std::chrono::system_clock::now();   // KH_EPOCH_SYSTEM: getEpoch's clock.
+        auto now = std::chrono::system_clock::now();   // getEpoch's clock.
         auto duration = now.time_since_epoch();
         auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
         double current_epoch = microseconds / 1000000.0;
@@ -782,12 +720,11 @@ static game_value get_epoch_delta_sqf(game_value_parameter past_epoch_str) noexc
 }
 
 static game_value read_khdata_sqf(game_value_parameter filename, game_value_parameter var_param) {
+    game_value default_value;
+
     try {
-        std::string file_str = static_cast<std::string>(filename);
-        std::transform(file_str.begin(), file_str.end(), file_str.begin(), ::tolower);
+        std::string file_str = kh_lower_copy(static_cast<std::string>(filename));
         std::string var_str;
-        game_value default_value;
-        bool has_default = false;
 
         if (var_param.type_enum() == game_data_type::STRING) {
             var_str = static_cast<std::string>(var_param);
@@ -795,45 +732,30 @@ static game_value read_khdata_sqf(game_value_parameter filename, game_value_para
             auto& arr = var_param.to_array();
 
             if (arr.empty() || arr[0].type_enum() != game_data_type::STRING) {
-                report_error("Array must contain variable name as first element");
+                report_error("readKhData: array must contain variable name as first element");
                 return game_value();
             }
 
             var_str = static_cast<std::string>(arr[0]);
-
-            if (arr.size() > 1) {
-                default_value = arr[1];
-                has_default = true;
-            }
+            default_value = kh_param(arr, 1, game_value());
         }
 
-        std::transform(var_str.begin(), var_str.end(), var_str.begin(), ::tolower);        
+        var_str = kh_lower_copy(var_str);
         auto* file = KHDataManager::instance().get_or_create_file(file_str);
-
-        if (!file) {
-            return has_default ? default_value : game_value();
-        }
-
+        if (!file) return default_value;
         game_value result = file->read_variable(var_str);
-
-        // Return default value if result is nil and default was provided
-        if (result.is_nil() && has_default) {
-            return default_value;
-        }
-
-        return result;
+        return result.is_nil() ? default_value : result;
     } catch (const std::exception& e) {
-        report_error(std::string(e.what()));
-        return game_value();
+        report_error("readKhData: " + std::string(e.what()));
+        return default_value;
     } catch (...) {
-        return game_value();
+        return default_value;
     }
 }
 
 static game_value read_khdata_unary_sqf(game_value_parameter filename) {
     try {
-        std::string file_str = static_cast<std::string>(filename);
-        std::transform(file_str.begin(), file_str.end(), file_str.begin(), ::tolower);
+        std::string file_str = kh_lower_copy(static_cast<std::string>(filename));
         auto* file = KHDataManager::instance().get_or_create_file(file_str);
 
         if (!file) {
@@ -850,98 +772,83 @@ static game_value read_khdata_unary_sqf(game_value_parameter filename) {
 
         return game_value(std::move(arr));
     } catch (const std::exception& e) {
-        report_error(std::string(e.what()));
-        return game_value();
+        report_error("readKhData: " + std::string(e.what()));
+        return game_value(auto_array<game_value>());
     } catch (...) {
-        return game_value();
+        return game_value(auto_array<game_value>());
     }
 }
 
 static game_value write_khdata_sqf(game_value_parameter filename, game_value_parameter params) {
     try {
-        std::string file_str = static_cast<std::string>(filename);
-        std::transform(file_str.begin(), file_str.end(), file_str.begin(), ::tolower);
+        std::string file_str = kh_lower_copy(static_cast<std::string>(filename));
 
         if (params.size() < 2) {
-            report_error("Must be an array with at least the name and value");
+            report_error("writeKhData: must be an array with at least the name and value");
             return game_value();
         }
 
         auto& arr = params.to_array();
 
         if (arr[0].type_enum() != game_data_type::STRING) {
-            report_error("First array element must be variable name (string)");
+            report_error("writeKhData: first array element must be variable name (string)");
             return game_value();
         }
 
-        std::string var_name = static_cast<std::string>(arr[0]);
-        std::transform(var_name.begin(), var_name.end(), var_name.begin(), ::tolower);
-        game_value value = arr[1];
-        game_value target = arr.size() > 2 ? arr[2] : game_value();
-        game_value jip = arr.size() > 3 ? arr[3] : game_value();
+        std::string var_name = kh_lower_copy(static_cast<std::string>(arr[0]));
+        const game_value& value = arr[1];
+        game_value target = kh_param(arr, 2, game_value());
+        game_value jip = kh_param(arr, 3, game_value());
 
         if (file_str.empty() || var_name.empty()) {
-            report_error("Empty file name or variable name");
+            report_error("writeKhData: empty file name or variable name");
             return game_value();
         }
 
-        // If target or jip is specified, trigger CBA event
-        if (!((target.is_nil() || (target.type_enum() == game_data_type::BOOL && static_cast<bool>(target))) &&
-            (jip.is_nil() || (jip.type_enum() == game_data_type::BOOL && !static_cast<bool>(jip))))) {   
-            // Build CBA parameters: ["KH_eve_khDataWriteEmission", [file_str,
-            // var_name, value], target, jip]
-            auto_array<game_value> value_array;
-            value_array.push_back(file_str);
-            value_array.push_back(var_name);
-            value_array.push_back(value);
-            auto_array<game_value> cba_params;
-            cba_params.push_back(game_value("KH_eve_khDataWriteEmission"));
-            cba_params.push_back(game_value(std::move(value_array)));
-            cba_params.push_back(target);
-            cba_params.push_back(jip);
-            trigger_cba_event_sqf(game_value(std::move(cba_params)));
+        if (!kh_target_is_local_only(target, jip)) {
+            kh_trigger_cba_event_native(game_value("KH_eve_khDataWriteEmission"),
+                                        kh_make_array({ game_value(file_str), game_value(var_name), value }), target,
+                                        jip);
             return game_value();
-        } else {
-            auto* file = KHDataManager::instance().get_or_create_file(file_str);
-
-            if (!file) {
-                report_error("Failed to access file");
-                return game_value();
-            }
-
-            file->write_variable(var_name, value);
         }
 
+        auto* file = KHDataManager::instance().get_or_create_file(file_str);
+
+        if (!file) {
+            report_error("writeKhData: failed to access file");
+            return game_value();
+        }
+
+        file->write_variable(var_name, value);
         return game_value();
     } catch (const std::exception& e) {
-        report_error(std::string(e.what()));
+        report_error("writeKhData: " + std::string(e.what()));
         return game_value();
     }
 }
 
 static game_value flush_khdata_sqf() {
     try {
-        int count = KHDataManager::instance().flush_all();
+        KHDataManager::instance().flush_all();
         return game_value();
     } catch (const std::exception& e) {
-        report_error(std::string(e.what()));
+        report_error("flushKhData: " + std::string(e.what()));
         return game_value();
     }
 }
 
 static game_value delete_khdata_file_sqf(game_value_parameter filename) {
     try {
-        std::string file_str = static_cast<std::string>(filename);
-        std::transform(file_str.begin(), file_str.end(), file_str.begin(), ::tolower);
+        std::string file_str = kh_lower_copy(static_cast<std::string>(filename));
 
         if (KHDataManager::instance().delete_file(file_str)) {
             return game_value();
         } else {
-            report_error("Failed to delete file");
+            report_error("deleteKhDataFile: failed to delete file");
             return game_value();
         }
     } catch (const std::exception& e) {
-        report_error(std::string(e.what()));
+        report_error("deleteKhDataFile: " + std::string(e.what()));
         return game_value();
     }
 }
@@ -971,7 +878,7 @@ static game_value get_terrain_matrix_sqf() {
 
         return game_value(std::move(matrix));
     } catch (...) {
-        report_error("Failed to retrieve terrain matrix");
+        report_error("getTerrainMatrix: failed to retrieve terrain matrix");
         return game_value(auto_array<game_value>());
     }
 }
@@ -993,32 +900,23 @@ static game_value trigger_lua_event_sqf(game_value_parameter left_arg, game_valu
             auto& arr = right_arg.to_array();
 
             if (arr.empty()) {
-                report_error("Array cannot be empty");
+                report_error("luaTriggerEvent: array cannot be empty");
                 return game_value();
             }
 
             if (arr[0].type_enum() != game_data_type::STRING) {
-                report_error("First array element must be event name (string)");
+                report_error("luaTriggerEvent: first array element must be event name (string)");
                 return game_value();
             }
 
             event_name = static_cast<std::string>(arr[0]);
-            target = arr.size() > 1 ? arr[1] : game_value();
-            jip = arr.size() > 2 ? arr[2] : game_value();
+            target = kh_param(arr, 1, game_value());
+            jip = kh_param(arr, 2, game_value());
         }
 
-        // Check if we should use CBA event
-        if (!((target.is_nil() || (target.type_enum() == game_data_type::BOOL && static_cast<bool>(target))) &&
-            (jip.is_nil() || (jip.type_enum() == game_data_type::BOOL && !static_cast<bool>(jip))))) {         
-            auto_array<game_value> cba_event_data;
-            cba_event_data.push_back(game_value(event_name));
-            cba_event_data.push_back(event_args);
-            auto_array<game_value> cba_params;
-            cba_params.push_back(game_value("KH_eve_luaEventTrigger"));
-            cba_params.push_back(game_value(std::move(cba_event_data)));
-            cba_params.push_back(target);
-            cba_params.push_back(jip);
-            trigger_cba_event_sqf(game_value(std::move(cba_params)));
+        if (!kh_target_is_local_only(target, jip)) {
+            kh_trigger_cba_event_native(game_value("KH_eve_luaEventTrigger"),
+                                        kh_make_array({ game_value(event_name), event_args }), target, jip);
         } else {
             LuaStackGuard guard(*g_lua_state);
 
@@ -1026,17 +924,26 @@ static game_value trigger_lua_event_sqf(game_value_parameter left_arg, game_valu
             sol::state& lua = *g_lua_state;
             lua_State* L = lua.lua_state();
 
-            // KH_LUA_STACK: four fixed slots (event.trigger, name, target, jip) and one per
+            // Four fixed slots (event.trigger, name, target, jip) and one per
             // argument - room for them first, or the call is refused (kh_lua_room).
-            const size_t khte_n = event_args.type_enum() == game_data_type::ARRAY ? event_args.to_array().size() : 1;
+            const size_t argument_count =
+                event_args.type_enum() == game_data_type::ARRAY ? event_args.to_array().size() : 1;
 
-            if (!kh_lua_room(L, khte_n + 4u)) {
-                report_error("Failed to trigger event: too many arguments (" + std::to_string(khte_n) + ")");
+            if (!kh_lua_room(L, argument_count + 4u)) {
+                report_error("luaTriggerEvent: too many arguments (" + std::to_string(argument_count) + ")");
                 return game_value();
             }
 
-            // Push function
+            // Push function. The global is checked: a script that overwrote `event` would otherwise raise an
+            // unprotected Lua error here (a panic ends the process).
             lua_getglobal(L, "event");
+
+            if (lua_type(L, -1) != LUA_TTABLE) {
+                lua_pop(L, 1);
+                report_error("luaTriggerEvent: the Lua global 'event' is not a table");
+                return game_value();
+            }
+
             lua_getfield(L, -1, "trigger");
             lua_remove(L, -2);   // Clean up event table from stack
             lua_pushstring(L, event_name.c_str());
@@ -1064,12 +971,12 @@ static game_value trigger_lua_event_sqf(game_value_parameter left_arg, game_valu
 
             // Call the function
             if (lua_pcall(L, arg_count, 1, 0) != 0) {
-                // KH_LUA_ERR_NULL: lua_tostring is NULL for a non-string, non-number error object.
-                const char* khte_msg = lua_tostring(L, -1);
-                std::string err = khte_msg ? std::string(khte_msg)
+                // lua_tostring is NULL for a non-string, non-number error object.
+                const char* lua_message = lua_tostring(L, -1);
+                std::string err = lua_message ? std::string(lua_message)
                                            : "error object of type " + std::string(lua_typename(L, lua_type(L, -1)));
                 lua_pop(L, 1);
-                report_error("Failed to trigger event: " + err);
+                report_error("luaTriggerEvent: " + err);
                 return game_value();
             }
 
@@ -1079,10 +986,10 @@ static game_value trigger_lua_event_sqf(game_value_parameter left_arg, game_valu
 
         return game_value();
     } catch (const std::exception& e) {
-        report_error("Failed to trigger event: " + std::string(e.what()));
+        report_error("luaTriggerEvent: " + std::string(e.what()));
         return game_value();
     } catch (...) {
-        report_error("Failed to trigger event");
+        report_error("luaTriggerEvent: failed to trigger event");
         return game_value();
     }
 }
@@ -1106,7 +1013,7 @@ static game_value emit_lua_variable_sqf(game_value_parameter params) {
             if (lua_var.valid()) {
                 emit_value = convert_lua_to_game_value(lua_var);
             } else {
-                report_error("Lua global variable '" + var_name + "' not found");
+                report_error("luaEmitVariable: Lua global variable '" + var_name + "' not found");
                 return game_value();
             }
         } else {
@@ -1114,7 +1021,7 @@ static game_value emit_lua_variable_sqf(game_value_parameter params) {
             auto& arr = params.to_array();
 
             if (arr.empty() || arr[0].type_enum() != game_data_type::STRING) {
-                report_error("First element must be variable name (string)");
+                report_error("luaEmitVariable: first element must be variable name (string)");
                 return game_value();
             }
 
@@ -1126,38 +1033,24 @@ static game_value emit_lua_variable_sqf(game_value_parameter params) {
                 if (lua_var.valid()) {
                     emit_value = convert_lua_to_game_value(lua_var);
                 } else {
-                    report_error("Lua global variable '" + var_name + "' not found");
+                    report_error("luaEmitVariable: Lua global variable '" + var_name + "' not found");
                     return game_value();
                 }
             } else {
-                // Value provided
                 emit_value = arr[1];
-
-                if (arr.size() > 2) {
-                    target = arr[2];
-                }
-
-                if (arr.size() > 3) {
-                    jip = arr[3];
-                }
+                target = kh_param(arr, 2, game_value());
+                jip = kh_param(arr, 3, game_value());
             }
         }
 
-        auto_array<game_value> emission_data;
-        emission_data.push_back(game_value(var_name));
-        emission_data.push_back(emit_value);
-        auto_array<game_value> cba_params;
-        cba_params.push_back(game_value("KH_eve_luaVariableEmission"));
-        cba_params.push_back(game_value(std::move(emission_data)));
-        cba_params.push_back(target);
-        cba_params.push_back(jip);
-        trigger_cba_event_sqf(game_value(std::move(cba_params)));
+        kh_trigger_cba_event_native(game_value("KH_eve_luaVariableEmission"),
+                                    kh_make_array({ game_value(var_name), emit_value }), target, jip);
         return game_value();
     } catch (const std::exception& e) {
-        report_error("Failed to emit variable: " + std::string(e.what()));
+        report_error("luaEmitVariable: " + std::string(e.what()));
         return game_value();
     } catch (...) {
-        report_error("Failed to emit variable");
+        report_error("luaEmitVariable: failed to emit variable");
         return game_value();
     }
 }
@@ -1174,56 +1067,39 @@ static game_value lua_set_variable_sqf(game_value_parameter params) {
         auto& arr = params.to_array();
 
         if (arr.empty() || arr[0].type_enum() != game_data_type::STRING) {
-            report_error("First element must be variable name (string)");
+            report_error("luaSetVariable: first element must be variable name (string)");
             return game_value();
         }
 
         var_name = static_cast<std::string>(arr[0]);
 
         if (arr.size() < 2) {
-            report_error("Must provide at least name and value");
+            report_error("luaSetVariable: must provide at least name and value");
             return game_value();
         }
 
         set_value = arr[1];
-
-        if (arr.size() > 2) {
-            target = arr[2];
-        }
-
-        if (arr.size() > 3) {
-            jip = arr[3];
-        }
+        target = kh_param(arr, 2, game_value());
+        jip = kh_param(arr, 3, game_value());
 
         if (var_name.empty()) {
-            report_error("Variable name cannot be empty");
+            report_error("luaSetVariable: variable name cannot be empty");
             return game_value();
         }
 
-        // Check if we should use CBA event
-        if (!((target.is_nil() || (target.type_enum() == game_data_type::BOOL && static_cast<bool>(target))) &&
-            (jip.is_nil() || (jip.type_enum() == game_data_type::BOOL && !static_cast<bool>(jip))))) { 
-            auto_array<game_value> emission_data;
-            emission_data.push_back(game_value(var_name));
-            emission_data.push_back(set_value);
-            auto_array<game_value> cba_params;
-            cba_params.push_back(game_value("KH_eve_luaVariableEmission"));
-            cba_params.push_back(game_value(std::move(emission_data)));
-            cba_params.push_back(target);
-            cba_params.push_back(jip);
-            trigger_cba_event_sqf(game_value(std::move(cba_params)));
+        if (!kh_target_is_local_only(target, jip)) {
+            kh_trigger_cba_event_native(game_value("KH_eve_luaVariableEmission"),
+                                        kh_make_array({ game_value(var_name), set_value }), target, jip);
             return game_value();
-        } else {
-            // Set directly in Lua global namespace
-            lua[var_name] = convert_game_value_to_lua(set_value);
         }
 
+        lua[var_name] = convert_game_value_to_lua(set_value);
         return game_value();
     } catch (const std::exception& e) {
-        report_error("Failed to set Lua variable: " + std::string(e.what()));
+        report_error("luaSetVariable: " + std::string(e.what()));
         return game_value();
     } catch (...) {
-        report_error("Failed to set Lua variable");
+        report_error("luaSetVariable: failed to set Lua variable");
         return game_value();
     }
 }
@@ -1234,50 +1110,34 @@ static game_value lua_get_variable_sqf(game_value_parameter params) {
         sol::state& lua = *g_lua_state;
         std::string var_name;
         game_value default_value;
-        bool has_default = false;
 
         if (params.type_enum() == game_data_type::STRING) {
             var_name = static_cast<std::string>(params);
         } else {
-            // Must be array
             auto& arr = params.to_array();
 
             if (arr.empty() || arr[0].type_enum() != game_data_type::STRING) {
-                report_error("First element must be variable name (string)");
+                report_error("luaGetVariable: first element must be variable name (string)");
                 return game_value();
             }
 
             var_name = static_cast<std::string>(arr[0]);
-
-            if (arr.size() > 1) {
-                default_value = arr[1];
-                has_default = true;
-            }
+            default_value = kh_param(arr, 1, game_value());
         }
 
         if (var_name.empty()) {
-            report_error("Variable name cannot be empty");
+            report_error("luaGetVariable: variable name cannot be empty");
             return game_value();
         }
 
-        // Get value from Lua global
         sol::object lua_var = lua[var_name];
-
-        // Check if variable exists and is not nil
-        if (!lua_var.valid() || lua_var.get_type() == sol::type::nil) {
-            if (has_default) {
-                return default_value;
-            }
-
-            return game_value();
-        }
-
+        if (!lua_var.valid() || lua_var.get_type() == sol::type::nil) return default_value;
         return convert_lua_to_game_value(lua_var);
     } catch (const std::exception& e) {
-        report_error("Failed to get Lua variable: " + std::string(e.what()));
+        report_error("luaGetVariable: " + std::string(e.what()));
         return game_value();
     } catch (...) {
-        report_error("Failed to get Lua variable");
+        report_error("luaGetVariable: failed to get Lua variable");
         return game_value();
     }
 }
@@ -1301,10 +1161,10 @@ static game_value execute_sqf(game_value_parameter args, game_value_parameter co
 
         return kh_execute_impl(game_value(std::move(params)));
     } catch (const std::exception& e) {
-        report_error(std::string(e.what()));
+        report_error("execute: " + std::string(e.what()));
         return game_value();
     } catch (...) {
-        report_error("An unknown error occurred");
+        report_error("execute: unknown error");
         return game_value();
     }
 }
@@ -1313,12 +1173,10 @@ static game_value remove_handler_sqf(game_value_parameter handler_info) {
     try {        
         // Nest in outer array for _this call since the remover accepts array
         // in _this
-        auto_array<game_value> nested;
-        nested.push_back(handler_info);
-        raw_call_sqf_args_native(g_compiled_sqf_remove_handler, game_value(std::move(nested)));
+        raw_call_sqf_args_native(g_compiled_sqf_remove_handler, kh_make_array({ handler_info }));
         return game_value();
     } catch (const std::exception& e) {
-        report_error("Failed to remove handler: " + std::string(e.what()));
+        report_error("removeHandler: " + std::string(e.what()));
         return game_value();
     }
 }
@@ -1341,319 +1199,315 @@ static game_value get_call_arguments_sqf() noexcept {
     return g_call_arguments;
 }
 
+// Rotation helpers shared by the euler / quaternion commands. Conventions: euler angles are [pitch, roll, yaw] in
+// degrees, the rotation R_Z(-yaw) R_Y(-roll) R_X(-pitch) of the identity frame dir [0, 1, 0], up [0, 0, 1];
+// quaternions are [w, x, y, z]. The arithmetic is kept in one place so every command answers alike.
+
+static game_value kh_vec3_gv(float x, float y, float z) {
+    return kh_make_array({ game_value(x), game_value(y), game_value(z) });
+}
+
+static game_value kh_quat_gv(float w, float x, float y, float z) {
+    return kh_make_array({ game_value(w), game_value(x), game_value(y), game_value(z) });
+}
+
+static game_value kh_dir_up_gv(const vector3& dir, const vector3& up) {
+    return kh_make_array({ kh_vec3_gv(dir.x, dir.y, dir.z), kh_vec3_gv(up.x, up.y, up.z) });
+}
+
+// [[dirX, dirY, dirZ], [upX, upY, upZ]] of a command's argument; false (reported, cmd names the command) otherwise.
+static bool kh_parse_dir_up(const game_value& vectors, const char* cmd, vector3& dir, vector3& up) {
+    if (vectors.type_enum() != game_data_type::ARRAY || vectors.to_array().size() != 2) {
+        report_error(std::string(cmd) + ": requires an array of 2 vectors [[dirX, dirY, dirZ], [upX, upY, upZ]]");
+        return false;
+    }
+
+    auto& vec_array = vectors.to_array();
+
+    if (vec_array[0].type_enum() != game_data_type::ARRAY || vec_array[1].type_enum() != game_data_type::ARRAY ||
+        vec_array[0].to_array().size() != 3 || vec_array[1].to_array().size() != 3) {
+        report_error(std::string(cmd) + ": requires three components per vector");
+        return false;
+    }
+
+    auto& dir_array = vec_array[0].to_array();
+    auto& up_array = vec_array[1].to_array();
+    dir = vector3(static_cast<float>(dir_array[0]), static_cast<float>(dir_array[1]), static_cast<float>(dir_array[2]));
+    up = vector3(static_cast<float>(up_array[0]), static_cast<float>(up_array[1]), static_cast<float>(up_array[2]));
+    return true;
+}
+
+// [w, x, y, z] of a command's argument; false (reported) otherwise.
+static bool kh_parse_quat(const game_value& quat, const char* cmd, float& w, float& x, float& y, float& z) {
+    if (quat.type_enum() != game_data_type::ARRAY || quat.to_array().size() != 4) {
+        report_error(std::string(cmd) + ": requires an array of 4 elements [w, x, y, z]");
+        return false;
+    }
+
+    auto& q = quat.to_array();
+    w = static_cast<float>(q[0]);
+    x = static_cast<float>(q[1]);
+    y = static_cast<float>(q[2]);
+    z = static_cast<float>(q[3]);
+    return true;
+}
+
+// [pitch, roll, yaw] of a command's argument; false (reported) otherwise.
+static bool kh_parse_euler(const game_value& rotation, const char* cmd, float& pitch, float& roll, float& yaw) {
+    if (rotation.type_enum() != game_data_type::ARRAY || rotation.to_array().size() != 3) {
+        report_error(std::string(cmd) + ": requires an array of 3 elements [pitch, roll, yaw]");
+        return false;
+    }
+
+    auto& rot = rotation.to_array();
+    pitch = static_cast<float>(rot[0]);
+    roll = static_cast<float>(rot[1]);
+    yaw = static_cast<float>(rot[2]);
+    return true;
+}
+
+// The quaternion scaled to unit length; false when it is (nearly) zero, w / x / y / z left as they were.
+static bool kh_normalize_quat(float& w, float& x, float& y, float& z) {
+    float len = std::sqrt(w * w + x * x + y * y + z * z);
+    if (len < EPSILON) return false;
+    w /= len; x /= len; y /= len; z /= len;
+    return true;
+}
+
+// An object's dir / up, or - with a relative object - the dir of the line from the object to it (up = world up).
+static void kh_object_dir_up(const object& obj, const game_value& relative, vector3& dir, vector3& up) {
+    dir = sqf::vector_dir(obj);
+    up = sqf::vector_up(obj);
+    if (relative.is_nil()) return;
+    object rel_obj = static_cast<object>(relative);
+    vector3 current_pos = sqf::get_pos_atl(obj);
+    vector3 relative_pos = sqf::get_pos_atl(rel_obj);
+    float dx = relative_pos.x - current_pos.x;
+    float dy = relative_pos.y - current_pos.y;
+    float dz = relative_pos.z - current_pos.z;
+    float distance_horizontal = std::sqrt(dx * dx + dy * dy);
+    float yaw = std::atan2(dy, dx);
+    float pitch = std::atan2(dz, distance_horizontal);
+    float cos_pitch = std::cos(pitch);
+    float sin_pitch = std::sin(pitch);
+    float cos_yaw = std::cos(yaw);
+    float sin_yaw = std::sin(yaw);
+    dir.x = cos_pitch * cos_yaw;
+    dir.y = cos_pitch * sin_yaw;
+    dir.z = sin_pitch;
+    up.x = 0.0f;
+    up.y = 0.0f;
+    up.z = 1.0f;
+}
+
+// An orthonormal frame: right = dir x up, up = right x dir, every vector unit length.
+struct kh_frame {
+    float rightX, rightY, rightZ;
+    float dirX, dirY, dirZ;
+    float upX, upY, upZ;
+};
+
+// The frame of a dir / up pair; false when either vector or their cross product is (nearly) zero.
+static bool kh_frame_from_dir_up(const vector3& dir, const vector3& up, kh_frame& f) {
+    float dirX = dir.x, dirY = dir.y, dirZ = dir.z;
+    float dirLen = std::sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
+    if (dirLen < EPSILON) return false;
+    dirX /= dirLen; dirY /= dirLen; dirZ /= dirLen;
+
+    float upX = up.x, upY = up.y, upZ = up.z;
+    float upLen = std::sqrt(upX * upX + upY * upY + upZ * upZ);
+    if (upLen < EPSILON) return false;
+    upX /= upLen; upY /= upLen; upZ /= upLen;
+
+    float rightX = dirY * upZ - dirZ * upY;
+    float rightY = dirZ * upX - dirX * upZ;
+    float rightZ = dirX * upY - dirY * upX;
+    float rightLen = std::sqrt(rightX * rightX + rightY * rightY + rightZ * rightZ);
+    if (rightLen < EPSILON) return false;
+    rightX /= rightLen; rightY /= rightLen; rightZ /= rightLen;
+
+    f.rightX = rightX; f.rightY = rightY; f.rightZ = rightZ;
+    f.dirX = dirX; f.dirY = dirY; f.dirZ = dirZ;
+    f.upX = rightY * dirZ - rightZ * dirY;
+    f.upY = rightZ * dirX - rightX * dirZ;
+    f.upZ = rightX * dirY - rightY * dirX;
+    return true;
+}
+
+// The euler angles of a frame, each in [0, 360). At gimbal lock (the right column's X / Y vanish) the pitch is 0
+// and the yaw comes from the dir column.
+static game_value kh_frame_to_euler(const kh_frame& f) {
+    float aroundX, aroundY, aroundZ;
+    float cosRoll = std::sqrt(f.rightX * f.rightX + f.rightY * f.rightY);
+
+    if (cosRoll > EPSILON) {
+        aroundX = std::fmod(-std::atan2(f.dirZ, f.upZ) * RAD_TO_DEG + 360.0f, 360.0f);
+        aroundY = std::fmod(std::atan2(f.rightZ, cosRoll) * RAD_TO_DEG + 360.0f, 360.0f);
+        aroundZ = std::fmod(-std::atan2(f.rightY, f.rightX) * RAD_TO_DEG + 360.0f, 360.0f);
+    } else {
+        aroundX = 0.0f;
+        aroundY = (f.rightZ > 0.0f) ? 90.0f : 270.0f;
+        float coupled = std::atan2(-f.dirX, f.dirY);
+        aroundZ = std::fmod(-coupled * RAD_TO_DEG + 360.0f, 360.0f);
+    }
+
+    return kh_vec3_gv(aroundX, aroundY, aroundZ);
+}
+
+// The quaternion of a frame (Shepperd's method on the matrix with columns [right, dir, up]).
+static game_value kh_frame_to_quaternion(const kh_frame& f) {
+    float m00 = f.rightX, m11 = f.dirY, m22 = f.upZ;
+    float trace = m00 + m11 + m22;
+    float w, x, y, z;
+
+    if (trace > 0.0f) {
+        float s = std::sqrt(trace + 1.0f) * 2.0f;
+        w = 0.25f * s;
+        x = (f.dirZ - f.upY) / s;
+        y = (f.upX - f.rightZ) / s;
+        z = (f.rightY - f.dirX) / s;
+    } else if (m00 > m11 && m00 > m22) {
+        float s = std::sqrt(1.0f + m00 - m11 - m22) * 2.0f;
+        w = (f.dirZ - f.upY) / s;
+        x = 0.25f * s;
+        y = (f.rightY + f.dirX) / s;
+        z = (f.upX + f.rightZ) / s;
+    } else if (m11 > m22) {
+        float s = std::sqrt(1.0f + m11 - m00 - m22) * 2.0f;
+        w = (f.upX - f.rightZ) / s;
+        x = (f.rightY + f.dirX) / s;
+        y = 0.25f * s;
+        z = (f.dirZ + f.upY) / s;
+    } else {
+        float s = std::sqrt(1.0f + m22 - m00 - m11) * 2.0f;
+        w = (f.rightY - f.dirX) / s;
+        x = (f.upX + f.rightZ) / s;
+        y = (f.dirZ + f.upY) / s;
+        z = 0.25f * s;
+    }
+
+    return kh_quat_gv(w, x, y, z);
+}
+
+// The dir / up of euler angles (degrees).
+static void kh_euler_to_dir_up(float pitch, float roll, float yaw, vector3& dir, vector3& up) {
+    float aroundX = -pitch * DEG_TO_RAD;
+    float aroundY = -roll * DEG_TO_RAD;
+    float aroundZ = -yaw * DEG_TO_RAD;
+    float dirX = 0.0f;
+    float dirY = 1.0f;
+    float dirZ = 0.0f;
+    float upX = 0.0f;
+    float upY = 0.0f;
+    float upZ = 1.0f;
+
+    if (std::abs(aroundX) > 0.0001f) {
+        float cosX = std::cos(aroundX);
+        float sinX = std::sin(aroundX);
+        dirY = cosX;
+        dirZ = sinX;
+        upY = -sinX;
+        upZ = cosX;
+    }
+
+    if (std::abs(aroundY) > 0.0001f) {
+        float cosY = std::cos(aroundY);
+        float sinY = std::sin(aroundY);
+        dirX = dirZ * sinY;
+        dirZ = dirZ * cosY;
+        upX = upZ * sinY;
+        upZ = upZ * cosY;
+    }
+
+    if (std::abs(aroundZ) > 0.0001f) {
+        float cosZ = std::cos(aroundZ);
+        float sinZ = std::sin(aroundZ);
+        float dirXTemp = dirX;
+        dirX = dirXTemp * cosZ - dirY * sinZ;
+        dirY = dirY * cosZ + dirXTemp * sinZ;
+        float upXTemp = upX;
+        upX = upXTemp * cosZ - upY * sinZ;
+        upY = upY * cosZ + upXTemp * sinZ;
+    }
+
+    dir = vector3(dirX, dirY, dirZ);
+    up = vector3(upX, upY, upZ);
+}
+
+// The dir / up of a quaternion (the identity frame for a zero one): dir = R [0, 1, 0], up = R [0, 0, 1].
+static void kh_quaternion_to_dir_up(float w, float x, float y, float z, vector3& dir, vector3& up) {
+    if (!kh_normalize_quat(w, x, y, z)) {
+        dir = vector3(0.0f, 1.0f, 0.0f);
+        up = vector3(0.0f, 0.0f, 1.0f);
+        return;
+    }
+
+    dir = vector3(2.0f * (x * y - w * z), 1.0f - 2.0f * (x * x + z * z), 2.0f * (y * z + w * x));
+    up = vector3(2.0f * (x * z + w * y), 2.0f * (y * z - w * x), 1.0f - 2.0f * (x * x + y * y));
+}
+
 static game_value get_rotation_euler_sqf(game_value_parameter relative, game_value_parameter entity) {
     try {
-        object obj = static_cast<object>(entity);
-
-        auto make_zero_result = []() {
-            auto_array<game_value> r;
-            r.reserve(3);
-            r.push_back(game_value(0.0f));
-            r.push_back(game_value(0.0f));
-            r.push_back(game_value(0.0f));
-            return game_value(std::move(r));
-        };
-
-        vector3 dir = sqf::vector_dir(obj);
-        vector3 up = sqf::vector_up(obj);
-
-        // If relative object is not nil, calculate relative rotation
-        if (!relative.is_nil()) {
-            object rel_obj = static_cast<object>(relative);
-            vector3 current_pos = sqf::get_pos_atl(obj);
-            vector3 relative_pos = sqf::get_pos_atl(rel_obj);
-            float dx = relative_pos.x - current_pos.x;
-            float dy = relative_pos.y - current_pos.y;
-            float dz = relative_pos.z - current_pos.z;
-            float distance_horizontal = std::sqrt(dx * dx + dy * dy);
-            float yaw = std::atan2(dy, dx);
-            float pitch = std::atan2(dz, distance_horizontal);
-            float cos_pitch = std::cos(pitch);
-            float sin_pitch = std::sin(pitch);
-            float cos_yaw = std::cos(yaw);
-            float sin_yaw = std::sin(yaw);
-            dir.x = cos_pitch * cos_yaw;
-            dir.y = cos_pitch * sin_yaw;
-            dir.z = sin_pitch;
-            up.x = 0.0f;
-            up.y = 0.0f;
-            up.z = 1.0f;
-        }
-
-        // Normalize direction vector
-        float dirX = dir.x;
-        float dirY = dir.y;
-        float dirZ = dir.z;
-        float dirLen = std::sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
-        if (dirLen < EPSILON) return make_zero_result();
-        dirX /= dirLen; dirY /= dirLen; dirZ /= dirLen;
-
-        // Normalize up vector
-        float upX = up.x;
-        float upY = up.y;
-        float upZ = up.z;
-        float upLen = std::sqrt(upX * upX + upY * upY + upZ * upZ);
-        if (upLen < EPSILON) return make_zero_result();
-        upX /= upLen; upY /= upLen; upZ /= upLen;
-
-        // Right vector = dir up
-        float rightX = dirY * upZ - dirZ * upY;
-        float rightY = dirZ * upX - dirX * upZ;
-        float rightZ = dirX * upY - dirY * upX;
-        float rightLen = std::sqrt(rightX * rightX + rightY * rightY + rightZ * rightZ);
-        if (rightLen < EPSILON) return make_zero_result();
-        rightX /= rightLen; rightY /= rightLen; rightZ /= rightLen;
-
-        // Re-orthogonalize up = right dir
-        upX = rightY * dirZ - rightZ * dirY;
-        upY = rightZ * dirX - rightX * dirZ;
-        upZ = rightX * dirY - rightY * dirX;
-        float aroundX, aroundY, aroundZ;
-        float cosRoll = std::sqrt(rightX * rightX + rightY * rightY);
-
-        if (cosRoll > EPSILON) {
-            aroundX = std::fmod(-std::atan2(dirZ, upZ) * RAD_TO_DEG + 360.0f, 360.0f);
-            aroundY = std::fmod(std::atan2(rightZ, cosRoll) * RAD_TO_DEG + 360.0f, 360.0f);
-            aroundZ = std::fmod(-std::atan2(rightY, rightX) * RAD_TO_DEG + 360.0f, 360.0f);
-        } else {
-            aroundX = 0.0f;
-            aroundY = (rightZ > 0.0f) ? 90.0f : 270.0f;
-            float coupled = std::atan2(-dirX, dirY);
-            aroundZ = std::fmod(-coupled * RAD_TO_DEG + 360.0f, 360.0f);
-        }
-
-        auto_array<game_value> result;
-        result.reserve(3);
-        result.push_back(game_value(aroundX));
-        result.push_back(game_value(aroundY));
-        result.push_back(game_value(aroundZ));
-        return game_value(std::move(result));
+        vector3 dir, up;
+        kh_object_dir_up(static_cast<object>(entity), relative, dir, up);
+        kh_frame f;
+        if (!kh_frame_from_dir_up(dir, up, f)) return kh_vec3_gv(0.0f, 0.0f, 0.0f);
+        return kh_frame_to_euler(f);
     } catch (const std::exception& e) {
-        report_error("Failed to get rotation: " + std::string(e.what()));
+        report_error("getRotationEuler: " + std::string(e.what()));
         return game_value();
     }
 }
 
 static game_value set_rotation_euler_sqf(game_value_parameter entity, game_value_parameter rotation) {
     try {
-        object obj = static_cast<object>(entity);
-        auto& rot = rotation.to_array();
-
-        if (rot.size() != 3) {
-            report_error("Rotation must be an array of 3 elements [pitch, roll, yaw]");
-            return game_value();
-        }
-
-        float aroundX = -static_cast<float>(rot[0]) * DEG_TO_RAD;
-        float aroundY = -static_cast<float>(rot[1]) * DEG_TO_RAD;
-        float aroundZ = -static_cast<float>(rot[2]) * DEG_TO_RAD;
-        float dirX = 0.0f;
-        float dirY = 1.0f;
-        float dirZ = 0.0f;
-        float upX = 0.0f;
-        float upY = 0.0f;
-        float upZ = 1.0f;
-
-        if (std::abs(aroundX) > 0.0001f) {
-            float cosX = std::cos(aroundX);
-            float sinX = std::sin(aroundX);
-            dirY = cosX;
-            dirZ = sinX;
-            upY = -sinX;
-            upZ = cosX;
-        }
-
-        if (std::abs(aroundY) > 0.0001f) {
-            float cosY = std::cos(aroundY);
-            float sinY = std::sin(aroundY);
-            dirX = dirZ * sinY;
-            dirZ = dirZ * cosY;
-            upX = upZ * sinY;
-            upZ = upZ * cosY;
-        }
-
-        if (std::abs(aroundZ) > 0.0001f) {
-            float cosZ = std::cos(aroundZ);
-            float sinZ = std::sin(aroundZ);
-            float dirXTemp = dirX;
-            dirX = dirXTemp * cosZ - dirY * sinZ;
-            dirY = dirY * cosZ + dirXTemp * sinZ;
-            float upXTemp = upX;
-            upX = upXTemp * cosZ - upY * sinZ;
-            upY = upY * cosZ + upXTemp * sinZ;
-        }
-
-        vector3 dir(dirX, dirY, dirZ);
-        vector3 up(upX, upY, upZ);
-        sqf::set_vector_dir_and_up(obj, dir, up);
+        float pitch, roll, yaw;
+        if (!kh_parse_euler(rotation, "setRotationEuler", pitch, roll, yaw)) return game_value();
+        vector3 dir, up;
+        kh_euler_to_dir_up(pitch, roll, yaw, dir, up);
+        sqf::set_vector_dir_and_up(static_cast<object>(entity), dir, up);
         return game_value();
     } catch (const std::exception& e) {
-        report_error("Failed to set rotation: " + std::string(e.what()));
+        report_error("setRotationEuler: " + std::string(e.what()));
         return game_value();
     }
 }
 
 static game_value vector_to_euler_sqf(game_value_parameter vectors) {
     try {
-        auto& vec_array = vectors.to_array();
-
-        if (vec_array.size() != 2) {
-            report_error("vectorToEuler requires an array of 2 vectors [[dirX, dirY, dirZ], [upX, upY, upZ]]");
-            return game_value();
-        }
-
-        auto& dir_array = vec_array[0].to_array();
-        auto& up_array = vec_array[1].to_array();
-
-        if (dir_array.size() != 3 || up_array.size() != 3) {
-            report_error("vectorToEuler requires three components per vector");
-            return game_value();
-        }
-
-        auto make_zero_result = []() {
-            auto_array<game_value> r;
-            r.reserve(3);
-            r.push_back(game_value(0.0f));
-            r.push_back(game_value(0.0f));
-            r.push_back(game_value(0.0f));
-            return game_value(std::move(r));
-        };
-
-        float dirX = static_cast<float>(dir_array[0]);
-        float dirY = static_cast<float>(dir_array[1]);
-        float dirZ = static_cast<float>(dir_array[2]);
-        float dirLen = std::sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
-        if (dirLen < EPSILON) return make_zero_result();
-        dirX /= dirLen; dirY /= dirLen; dirZ /= dirLen;
-
-        // Extract and normalize up vector
-        float upX = static_cast<float>(up_array[0]);
-        float upY = static_cast<float>(up_array[1]);
-        float upZ = static_cast<float>(up_array[2]);
-        float upLen = std::sqrt(upX * upX + upY * upY + upZ * upZ);
-        if (upLen < EPSILON) return make_zero_result();
-        upX /= upLen; upY /= upLen; upZ /= upLen;
-
-        // Right vector = dir up
-        float rightX = dirY * upZ - dirZ * upY;
-        float rightY = dirZ * upX - dirX * upZ;
-        float rightZ = dirX * upY - dirY * upX;
-        float rightLen = std::sqrt(rightX * rightX + rightY * rightY + rightZ * rightZ);
-        if (rightLen < EPSILON) return make_zero_result();
-        rightX /= rightLen; rightY /= rightLen; rightZ /= rightLen;
-        upX = rightY * dirZ - rightZ * dirY;
-        upY = rightZ * dirX - rightX * dirZ;
-        upZ = rightX * dirY - rightY * dirX;
-        float aroundX, aroundY, aroundZ;
-        float cosRoll = std::sqrt(rightX * rightX + rightY * rightY);
-
-        if (cosRoll > EPSILON) {
-            // Normal case
-            aroundX = std::fmod(-std::atan2(dirZ, upZ) * RAD_TO_DEG + 360.0f, 360.0f);
-            aroundY = std::fmod(std::atan2(rightZ, cosRoll) * RAD_TO_DEG + 360.0f, 360.0f);
-            aroundZ = std::fmod(-std::atan2(rightY, rightX) * RAD_TO_DEG + 360.0f, 360.0f);
-        } else {
-            // Gimbal lock
-            aroundX = 0.0f;
-            aroundY = (rightZ > 0.0f) ? 90.0f : 270.0f;
-            float coupled = std::atan2(-dirX, dirY);
-            aroundZ = std::fmod(-coupled * RAD_TO_DEG + 360.0f, 360.0f);
-        }
-
-        auto_array<game_value> result;
-        result.reserve(3);
-        result.push_back(game_value(aroundX));
-        result.push_back(game_value(aroundY));
-        result.push_back(game_value(aroundZ));
-        return game_value(std::move(result));
+        vector3 dir, up;
+        if (!kh_parse_dir_up(vectors, "vectorToEuler", dir, up)) return game_value();
+        kh_frame f;
+        if (!kh_frame_from_dir_up(dir, up, f)) return kh_vec3_gv(0.0f, 0.0f, 0.0f);
+        return kh_frame_to_euler(f);
     } catch (const std::exception& e) {
-        report_error("Failed to convert vector to euler: " + std::string(e.what()));
+        report_error("vectorToEuler: " + std::string(e.what()));
         return game_value();
     }
 }
 
 static game_value euler_to_vector_sqf(game_value_parameter rotation) {
     try {
-        auto& rot = rotation.to_array();
-
-        if (rot.size() != 3) {
-            report_error("eulerToVector requires an array of 3 elements [pitch, roll, yaw]");
-            return game_value();
-        }
-
-        float aroundX = -static_cast<float>(rot[0]) * DEG_TO_RAD;
-        float aroundY = -static_cast<float>(rot[1]) * DEG_TO_RAD;
-        float aroundZ = -static_cast<float>(rot[2]) * DEG_TO_RAD;
-        float dirX = 0.0f;
-        float dirY = 1.0f;
-        float dirZ = 0.0f;
-        float upX = 0.0f;
-        float upY = 0.0f;
-        float upZ = 1.0f;
-
-        if (std::abs(aroundX) > 0.0001f) {
-            float cosX = std::cos(aroundX);
-            float sinX = std::sin(aroundX);
-            dirY = cosX;
-            dirZ = sinX;
-            upY = -sinX;
-            upZ = cosX;
-        }
-
-        if (std::abs(aroundY) > 0.0001f) {
-            float cosY = std::cos(aroundY);
-            float sinY = std::sin(aroundY);
-            dirX = dirZ * sinY;
-            dirZ = dirZ * cosY;
-            upX = upZ * sinY;
-            upZ = upZ * cosY;
-        }
-
-        if (std::abs(aroundZ) > 0.0001f) {
-            float cosZ = std::cos(aroundZ);
-            float sinZ = std::sin(aroundZ);
-            float dirXTemp = dirX;
-            dirX = dirXTemp * cosZ - dirY * sinZ;
-            dirY = dirY * cosZ + dirXTemp * sinZ;
-            float upXTemp = upX;
-            upX = upXTemp * cosZ - upY * sinZ;
-            upY = upY * cosZ + upXTemp * sinZ;
-        }
-
-        auto_array<game_value> dir_array;
-        dir_array.reserve(3);
-        dir_array.push_back(game_value(dirX));
-        dir_array.push_back(game_value(dirY));
-        dir_array.push_back(game_value(dirZ));
-        auto_array<game_value> up_array;
-        up_array.reserve(3);
-        up_array.push_back(game_value(upX));
-        up_array.push_back(game_value(upY));
-        up_array.push_back(game_value(upZ));
-        auto_array<game_value> result;
-        result.reserve(2);
-        result.push_back(game_value(std::move(dir_array)));
-        result.push_back(game_value(std::move(up_array)));
-        return game_value(std::move(result));
+        float pitch, roll, yaw;
+        if (!kh_parse_euler(rotation, "eulerToVector", pitch, roll, yaw)) return game_value();
+        vector3 dir, up;
+        kh_euler_to_dir_up(pitch, roll, yaw, dir, up);
+        return kh_dir_up_gv(dir, up);
     } catch (const std::exception& e) {
-        report_error("Failed to convert euler to vector: " + std::string(e.what()));
+        report_error("eulerToVector: " + std::string(e.what()));
         return game_value();
     }
 }
 
 static game_value euler_to_quaternion_sqf(game_value_parameter rotation) {
     try {
-        auto& rot = rotation.to_array();
-
-        if (rot.size() != 3) {
-            report_error("eulerToQuaternion requires an array of 3 elements [pitch, roll, yaw]");
-            return game_value();
-        }
+        float pitch, roll, yaw;
+        if (!kh_parse_euler(rotation, "eulerToQuaternion", pitch, roll, yaw)) return game_value();
 
         // Negate to match eulerToVector convention: R_Z(-yaw) R_Y(-roll) R_X(-pitch)
-        float halfX = -static_cast<float>(rot[0]) * DEG_TO_RAD * 0.5f;
-        float halfY = -static_cast<float>(rot[1]) * DEG_TO_RAD * 0.5f;
-        float halfZ = -static_cast<float>(rot[2]) * DEG_TO_RAD * 0.5f;
+        float halfX = -pitch * DEG_TO_RAD * 0.5f;
+        float halfY = -roll * DEG_TO_RAD * 0.5f;
+        float halfZ = -yaw * DEG_TO_RAD * 0.5f;
         float cx = std::cos(halfX), sx = std::sin(halfX);
         float cy = std::cos(halfY), sy = std::sin(halfY);
         float cz = std::cos(halfZ), sz = std::sin(halfZ);
@@ -1663,63 +1517,32 @@ static game_value euler_to_quaternion_sqf(game_value_parameter rotation) {
         float x = cz * cy * sx - sz * sy * cx;
         float y = cz * sy * cx + sz * cy * sx;
         float z = sz * cy * cx - cz * sy * sx;
-        auto_array<game_value> result;
-        result.reserve(4);
-        result.push_back(game_value(w));
-        result.push_back(game_value(x));
-        result.push_back(game_value(y));
-        result.push_back(game_value(z));
-        return game_value(std::move(result));
+        return kh_quat_gv(w, x, y, z);
     } catch (const std::exception& e) {
-        report_error("Failed to convert euler to quaternion: " + std::string(e.what()));
+        report_error("eulerToQuaternion: " + std::string(e.what()));
         return game_value();
     }
 }
 
 static game_value quaternion_to_euler_sqf(game_value_parameter quat) {
     try {
-        auto& q = quat.to_array();
+        float w, x, y, z;
+        if (!kh_parse_quat(quat, "quaternionToEuler", w, x, y, z)) return game_value();
+        if (!kh_normalize_quat(w, x, y, z)) return kh_vec3_gv(0.0f, 0.0f, 0.0f);
 
-        if (q.size() != 4) {
-            report_error("quaternionToEuler requires an array of 4 elements [w, x, y, z]");
-            return game_value();
-        }
-
-        float w = static_cast<float>(q[0]);
-        float x = static_cast<float>(q[1]);
-        float y = static_cast<float>(q[2]);
-        float z = static_cast<float>(q[3]);
-
-        // Normalize quaternion
-        float len = std::sqrt(w * w + x * x + y * y + z * z);
-
-        if (len < EPSILON) {
-            auto_array<game_value> r;
-            r.reserve(3);
-            r.push_back(game_value(0.0f));
-            r.push_back(game_value(0.0f));
-            r.push_back(game_value(0.0f));
-            return game_value(std::move(r));
-        }
-
-        w /= len; x /= len; y /= len; z /= len;
-
-        // ZYX euler extraction These extract the angles of R_Z(-yaw)
-        // r_Y(-roll) R_X(-pitch)
+        // ZYX euler extraction: the angles of R_Z(-yaw) R_Y(-roll) R_X(-pitch)
         float sinRoll = 2.0f * (w * y - z * x);
         float aroundX, aroundY, aroundZ;
 
         if (std::abs(sinRoll) > 1.0f - EPSILON) {
-            // Gimbal lock roll is 90
+            // Gimbal lock: roll is 90. The right column's X / Y are cos(roll) * ... = 0 here, so the yaw comes
+            // from the dir column (-dirX, dirY), as in vectorToEuler / getRotationEuler.
             aroundX = 0.0f;
             aroundY = (sinRoll < 0.0f) ? 90.0f : 270.0f;
-            // KH_QUAT_GIMBAL: the right column's X / Y are cos(roll) * ... = 0 here, so the yaw
-            // comes from the dir column (-dirX, dirY), as in vectorToEuler / getRotationEuler.
             float coupled = std::atan2(-2.0f * (x * y - w * z), 1.0f - 2.0f * (x * x + z * z));
             aroundZ = std::fmod(-coupled * RAD_TO_DEG + 360.0f, 360.0f);
         } else {
-            // Normal case negate extracted angles to undo the convention
-            // negation
+            // Normal case: negate the extracted angles to undo the convention's negation
             float extractedX = std::atan2(2.0f * (w * x + y * z), 1.0f - 2.0f * (x * x + y * y));
             float extractedY = std::asin(sinRoll);
             float extractedZ = std::atan2(2.0f * (w * z + x * y), 1.0f - 2.0f * (y * y + z * z));
@@ -1728,216 +1551,55 @@ static game_value quaternion_to_euler_sqf(game_value_parameter quat) {
             aroundZ = std::fmod(-extractedZ * RAD_TO_DEG + 360.0f, 360.0f);
         }
 
-        auto_array<game_value> result;
-        result.reserve(3);
-        result.push_back(game_value(aroundX));
-        result.push_back(game_value(aroundY));
-        result.push_back(game_value(aroundZ));
-        return game_value(std::move(result));
+        return kh_vec3_gv(aroundX, aroundY, aroundZ);
     } catch (const std::exception& e) {
-        report_error("Failed to convert quaternion to euler: " + std::string(e.what()));
+        report_error("quaternionToEuler: " + std::string(e.what()));
         return game_value();
     }
 }
 
 static game_value vector_to_quaternion_sqf(game_value_parameter vectors) {
     try {
-        auto& vec_array = vectors.to_array();
-
-        if (vec_array.size() != 2) {
-            report_error("vectorToQuaternion requires an array of 2 vectors [[dirX, dirY, dirZ], [upX, upY, upZ]]");
-            return game_value();
-        }
-
-        auto& dir_array = vec_array[0].to_array();
-        auto& up_array = vec_array[1].to_array();
-
-        if (dir_array.size() != 3 || up_array.size() != 3) {
-            report_error("vectorToQuaternion requires three components per vector");
-            return game_value();
-        }
-
-        auto make_identity = []() {
-            auto_array<game_value> r;
-            r.reserve(4);
-            r.push_back(game_value(1.0f));
-            r.push_back(game_value(0.0f));
-            r.push_back(game_value(0.0f));
-            r.push_back(game_value(0.0f));
-            return game_value(std::move(r));
-        };
-
-        // Normalize direction
-        float dirX = static_cast<float>(dir_array[0]);
-        float dirY = static_cast<float>(dir_array[1]);
-        float dirZ = static_cast<float>(dir_array[2]);
-        float dirLen = std::sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
-        if (dirLen < EPSILON) return make_identity();
-        dirX /= dirLen; dirY /= dirLen; dirZ /= dirLen;
-
-        // Normalize up
-        float upX = static_cast<float>(up_array[0]);
-        float upY = static_cast<float>(up_array[1]);
-        float upZ = static_cast<float>(up_array[2]);
-        float upLen = std::sqrt(upX * upX + upY * upY + upZ * upZ);
-        if (upLen < EPSILON) return make_identity();
-        upX /= upLen; upY /= upLen; upZ /= upLen;
-
-        // Right = dir up
-        float rightX = dirY * upZ - dirZ * upY;
-        float rightY = dirZ * upX - dirX * upZ;
-        float rightZ = dirX * upY - dirY * upX;
-        float rightLen = std::sqrt(rightX * rightX + rightY * rightY + rightZ * rightZ);
-        if (rightLen < EPSILON) return make_identity();
-        rightX /= rightLen; rightY /= rightLen; rightZ /= rightLen;
-
-        // Re-orthogonalize up = right dir
-        upX = rightY * dirZ - rightZ * dirY;
-        upY = rightZ * dirX - rightX * dirZ;
-        upZ = rightX * dirY - rightY * dirX;
-
-        // Rotation matrix columns: [right, dir, up] m00=rightX m01=dirX
-        // m02=upX m10=rightY m11=dirY m12=upY m20=rightZ m21=dirZ m22=upZ
-        // Shepperd's method
-        float m00 = rightX, m11 = dirY, m22 = upZ;
-        float trace = m00 + m11 + m22;
-        float w, x, y, z;
-
-        if (trace > 0.0f) {
-            float s = std::sqrt(trace + 1.0f) * 2.0f;
-            w = 0.25f * s;
-            x = (dirZ - upY) / s;
-            y = (upX - rightZ) / s;
-            z = (rightY - dirX) / s;
-        } else if (m00 > m11 && m00 > m22) {
-            float s = std::sqrt(1.0f + m00 - m11 - m22) * 2.0f;
-            w = (dirZ - upY) / s;
-            x = 0.25f * s;
-            y = (rightY + dirX) / s;
-            z = (upX + rightZ) / s;
-        } else if (m11 > m22) {
-            float s = std::sqrt(1.0f + m11 - m00 - m22) * 2.0f;
-            w = (upX - rightZ) / s;
-            x = (rightY + dirX) / s;
-            y = 0.25f * s;
-            z = (dirZ + upY) / s;
-        } else {
-            float s = std::sqrt(1.0f + m22 - m00 - m11) * 2.0f;
-            w = (rightY - dirX) / s;
-            x = (upX + rightZ) / s;
-            y = (dirZ + upY) / s;
-            z = 0.25f * s;
-        }
-
-        auto_array<game_value> result;
-        result.reserve(4);
-        result.push_back(game_value(w));
-        result.push_back(game_value(x));
-        result.push_back(game_value(y));
-        result.push_back(game_value(z));
-        return game_value(std::move(result));
+        vector3 dir, up;
+        if (!kh_parse_dir_up(vectors, "vectorToQuaternion", dir, up)) return game_value();
+        kh_frame f;
+        if (!kh_frame_from_dir_up(dir, up, f)) return kh_quat_gv(1.0f, 0.0f, 0.0f, 0.0f);
+        return kh_frame_to_quaternion(f);
     } catch (const std::exception& e) {
-        report_error("Failed to convert vector to quaternion: " + std::string(e.what()));
+        report_error("vectorToQuaternion: " + std::string(e.what()));
         return game_value();
     }
 }
 
 static game_value quaternion_to_vector_sqf(game_value_parameter quat) {
     try {
-        auto& q = quat.to_array();
-
-        if (q.size() != 4) {
-            report_error("quaternionToVector requires an array of 4 elements [w, x, y, z]");
-            return game_value();
-        }
-
-        float w = static_cast<float>(q[0]);
-        float x = static_cast<float>(q[1]);
-        float y = static_cast<float>(q[2]);
-        float z = static_cast<float>(q[3]);
-
-        // Normalize
-        float len = std::sqrt(w * w + x * x + y * y + z * z);
-
-        if (len < EPSILON) {
-            // Identity orientation
-            auto_array<game_value> dir_arr;
-            dir_arr.reserve(3);
-            dir_arr.push_back(game_value(0.0f));
-            dir_arr.push_back(game_value(1.0f));
-            dir_arr.push_back(game_value(0.0f));
-            auto_array<game_value> up_arr;
-            up_arr.reserve(3);
-            up_arr.push_back(game_value(0.0f));
-            up_arr.push_back(game_value(0.0f));
-            up_arr.push_back(game_value(1.0f));
-            auto_array<game_value> result;
-            result.reserve(2);
-            result.push_back(game_value(std::move(dir_arr)));
-            result.push_back(game_value(std::move(up_arr)));
-            return game_value(std::move(result));
-        }
-        w /= len; x /= len; y /= len; z /= len;
-
-        // Rotation matrix from quaternion dir = R * [0,1,0] (column 1 of
-        // rotation matrix)
-        float dirX = 2.0f * (x * y - w * z);
-        float dirY = 1.0f - 2.0f * (x * x + z * z);
-        float dirZ = 2.0f * (y * z + w * x);
-
-        // Up = R * [0,0,1] (column 2 of rotation matrix)
-        float upX = 2.0f * (x * z + w * y);
-        float upY = 2.0f * (y * z - w * x);
-        float upZ = 1.0f - 2.0f * (x * x + y * y);
-        auto_array<game_value> dir_arr;
-        dir_arr.reserve(3);
-        dir_arr.push_back(game_value(dirX));
-        dir_arr.push_back(game_value(dirY));
-        dir_arr.push_back(game_value(dirZ));
-        auto_array<game_value> up_arr;
-        up_arr.reserve(3);
-        up_arr.push_back(game_value(upX));
-        up_arr.push_back(game_value(upY));
-        up_arr.push_back(game_value(upZ));
-        auto_array<game_value> result;
-        result.reserve(2);
-        result.push_back(game_value(std::move(dir_arr)));
-        result.push_back(game_value(std::move(up_arr)));
-        return game_value(std::move(result));
+        float w, x, y, z;
+        if (!kh_parse_quat(quat, "quaternionToVector", w, x, y, z)) return game_value();
+        vector3 dir, up;
+        kh_quaternion_to_dir_up(w, x, y, z, dir, up);
+        return kh_dir_up_gv(dir, up);
     } catch (const std::exception& e) {
-        report_error("Failed to convert quaternion to vector: " + std::string(e.what()));
+        report_error("quaternionToVector: " + std::string(e.what()));
         return game_value();
     }
 }
 
 static game_value quaternion_slerp_sqf(game_value_parameter right_arg) {
     try {
+        if (right_arg.type_enum() != game_data_type::ARRAY || right_arg.to_array().size() != 3) {
+            report_error("quaternionSlerp: requires [quatA, quatB, t]");
+            return game_value();
+        }
+
         auto& params = right_arg.to_array();
+        float aw, ax, ay, az, bw, bx, by, bz;
 
-        if (params.size() != 3) {
-            report_error("quaternionSlerp requires [quatA, quatB, t]");
+        if (!kh_parse_quat(params[0], "quaternionSlerp", aw, ax, ay, az) ||
+            !kh_parse_quat(params[1], "quaternionSlerp", bw, bx, by, bz)) {
             return game_value();
         }
 
-        auto& qa = params[0].to_array();
-        auto& qb = params[1].to_array();
         float t = static_cast<float>(params[2]);
-
-        if (qa.size() != 4 || qb.size() != 4) {
-            report_error("quaternionSlerp requires quaternions with 4 components each");
-            return game_value();
-        }
-
-        float aw = static_cast<float>(qa[0]);
-        float ax = static_cast<float>(qa[1]);
-        float ay = static_cast<float>(qa[2]);
-        float az = static_cast<float>(qa[3]);
-        float bw = static_cast<float>(qb[0]);
-        float bx = static_cast<float>(qb[1]);
-        float by = static_cast<float>(qb[2]);
-        float bz = static_cast<float>(qb[3]);
-
-        // Dot product
         float dot = aw * bw + ax * bx + ay * by + az * bz;
 
         // Take shortest path
@@ -1949,8 +1611,7 @@ static game_value quaternion_slerp_sqf(game_value_parameter right_arg) {
         float w, x, y, z;
 
         if (dot > 0.9995f) {
-            // Very close linear interpolation to avoid division by
-            // near-zero sin
+            // Very close: linear interpolation to avoid division by near-zero sin
             w = aw + t * (bw - aw);
             x = ax + t * (bx - ax);
             y = ay + t * (by - ay);
@@ -1973,289 +1634,99 @@ static game_value quaternion_slerp_sqf(game_value_parameter right_arg) {
             w /= len; x /= len; y /= len; z /= len;
         }
 
-        auto_array<game_value> result;
-        result.reserve(4);
-        result.push_back(game_value(w));
-        result.push_back(game_value(x));
-        result.push_back(game_value(y));
-        result.push_back(game_value(z));
-        return game_value(std::move(result));
+        return kh_quat_gv(w, x, y, z);
     } catch (const std::exception& e) {
-        report_error("Failed to slerp quaternions: " + std::string(e.what()));
+        report_error("quaternionSlerp: " + std::string(e.what()));
         return game_value();
     }
 }
 
 static game_value quaternion_multiply_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
     try {
-        auto& qa = left_arg.to_array();
-        auto& qb = right_arg.to_array();
+        float aw, ax, ay, az, bw, bx, by, bz;
 
-        if (qa.size() != 4 || qb.size() != 4) {
-            report_error("quaternionMultiply requires quaternions with 4 components each");
+        if (!kh_parse_quat(left_arg, "quaternionMultiply", aw, ax, ay, az) ||
+            !kh_parse_quat(right_arg, "quaternionMultiply", bw, bx, by, bz)) {
             return game_value();
         }
 
-        float aw = static_cast<float>(qa[0]);
-        float ax = static_cast<float>(qa[1]);
-        float ay = static_cast<float>(qa[2]);
-        float az = static_cast<float>(qa[3]);
-        float bw = static_cast<float>(qb[0]);
-        float bx = static_cast<float>(qb[1]);
-        float by = static_cast<float>(qb[2]);
-        float bz = static_cast<float>(qb[3]);
         float w = aw * bw - ax * bx - ay * by - az * bz;
         float x = aw * bx + ax * bw + ay * bz - az * by;
         float y = aw * by - ax * bz + ay * bw + az * bx;
         float z = aw * bz + ax * by - ay * bx + az * bw;
-        auto_array<game_value> result;
-        result.reserve(4);
-        result.push_back(game_value(w));
-        result.push_back(game_value(x));
-        result.push_back(game_value(y));
-        result.push_back(game_value(z));
-        return game_value(std::move(result));
+        return kh_quat_gv(w, x, y, z);
     } catch (const std::exception& e) {
-        report_error("Failed to multiply quaternions: " + std::string(e.what()));
+        report_error("quaternionMultiply: " + std::string(e.what()));
         return game_value();
     }
 }
 
 static game_value get_quaternion_rotation_sqf(game_value_parameter relative, game_value_parameter entity) {
     try {
-        object obj = static_cast<object>(entity);
-
-        auto make_identity = []() {
-            auto_array<game_value> r;
-            r.reserve(4);
-            r.push_back(game_value(1.0f));
-            r.push_back(game_value(0.0f));
-            r.push_back(game_value(0.0f));
-            r.push_back(game_value(0.0f));
-            return game_value(std::move(r));
-        };
-
-        vector3 dir = sqf::vector_dir(obj);
-        vector3 up = sqf::vector_up(obj);
-
-        if (!relative.is_nil()) {
-            object rel_obj = static_cast<object>(relative);
-            vector3 current_pos = sqf::get_pos_atl(obj);
-            vector3 relative_pos = sqf::get_pos_atl(rel_obj);
-            float dx = relative_pos.x - current_pos.x;
-            float dy = relative_pos.y - current_pos.y;
-            float dz = relative_pos.z - current_pos.z;
-            float distance_horizontal = std::sqrt(dx * dx + dy * dy);
-            float yaw = std::atan2(dy, dx);
-            float pitch = std::atan2(dz, distance_horizontal);
-            float cos_pitch = std::cos(pitch);
-            float sin_pitch = std::sin(pitch);
-            float cos_yaw = std::cos(yaw);
-            float sin_yaw = std::sin(yaw);
-            dir.x = cos_pitch * cos_yaw;
-            dir.y = cos_pitch * sin_yaw;
-            dir.z = sin_pitch;
-            up.x = 0.0f;
-            up.y = 0.0f;
-            up.z = 1.0f;
-        }
-
-        // Normalize direction
-        float dirX = dir.x, dirY = dir.y, dirZ = dir.z;
-        float dirLen = std::sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
-        if (dirLen < EPSILON) return make_identity();
-        dirX /= dirLen; dirY /= dirLen; dirZ /= dirLen;
-
-        // Normalize up
-        float upX = up.x, upY = up.y, upZ = up.z;
-        float upLen = std::sqrt(upX * upX + upY * upY + upZ * upZ);
-        if (upLen < EPSILON) return make_identity();
-        upX /= upLen; upY /= upLen; upZ /= upLen;
-
-        // Right = dir up
-        float rightX = dirY * upZ - dirZ * upY;
-        float rightY = dirZ * upX - dirX * upZ;
-        float rightZ = dirX * upY - dirY * upX;
-        float rightLen = std::sqrt(rightX * rightX + rightY * rightY + rightZ * rightZ);
-        if (rightLen < EPSILON) return make_identity();
-        rightX /= rightLen; rightY /= rightLen; rightZ /= rightLen;
-
-        // Re-orthogonalize up = right dir
-        upX = rightY * dirZ - rightZ * dirY;
-        upY = rightZ * dirX - rightX * dirZ;
-        upZ = rightX * dirY - rightY * dirX;
-
-        // Shepperd's method
-        float m00 = rightX, m11 = dirY, m22 = upZ;
-        float trace = m00 + m11 + m22;
-        float w, x, y, z;
-
-        if (trace > 0.0f) {
-            float s = std::sqrt(trace + 1.0f) * 2.0f;
-            w = 0.25f * s;
-            x = (dirZ - upY) / s;
-            y = (upX - rightZ) / s;
-            z = (rightY - dirX) / s;
-        } else if (m00 > m11 && m00 > m22) {
-            float s = std::sqrt(1.0f + m00 - m11 - m22) * 2.0f;
-            w = (dirZ - upY) / s;
-            x = 0.25f * s;
-            y = (rightY + dirX) / s;
-            z = (upX + rightZ) / s;
-        } else if (m11 > m22) {
-            float s = std::sqrt(1.0f + m11 - m00 - m22) * 2.0f;
-            w = (upX - rightZ) / s;
-            x = (rightY + dirX) / s;
-            y = 0.25f * s;
-            z = (dirZ + upY) / s;
-        } else {
-            float s = std::sqrt(1.0f + m22 - m00 - m11) * 2.0f;
-            w = (rightY - dirX) / s;
-            x = (upX + rightZ) / s;
-            y = (dirZ + upY) / s;
-            z = 0.25f * s;
-        }
-
-        auto_array<game_value> result;
-        result.reserve(4);
-        result.push_back(game_value(w));
-        result.push_back(game_value(x));
-        result.push_back(game_value(y));
-        result.push_back(game_value(z));
-        return game_value(std::move(result));
+        vector3 dir, up;
+        kh_object_dir_up(static_cast<object>(entity), relative, dir, up);
+        kh_frame f;
+        if (!kh_frame_from_dir_up(dir, up, f)) return kh_quat_gv(1.0f, 0.0f, 0.0f, 0.0f);
+        return kh_frame_to_quaternion(f);
     } catch (const std::exception& e) {
-        report_error("Failed to get quaternion rotation: " + std::string(e.what()));
+        report_error("getRotationQuaternion: " + std::string(e.what()));
         return game_value();
     }
 }
 
 static game_value set_quaternion_rotation_sqf(game_value_parameter entity, game_value_parameter quat) {
     try {
-        object obj = static_cast<object>(entity);
-        auto& q = quat.to_array();
-
-        if (q.size() != 4) {
-            report_error("setQuaternionRotation requires [w, x, y, z]");
-            return game_value();
-        }
-
-        float w = static_cast<float>(q[0]);
-        float x = static_cast<float>(q[1]);
-        float y = static_cast<float>(q[2]);
-        float z = static_cast<float>(q[3]);
-
-        // Normalize
-        float len = std::sqrt(w * w + x * x + y * y + z * z);
-
-        if (len < EPSILON) {
-            sqf::set_vector_dir_and_up(obj, vector3(0.0f, 1.0f, 0.0f), vector3(0.0f, 0.0f, 1.0f));
-            return game_value();
-        }
-
-        w /= len; x /= len; y /= len; z /= len;
-
-        // dir = R * [0,1,0]
-        float dirX = 2.0f * (x * y - w * z);
-        float dirY = 1.0f - 2.0f * (x * x + z * z);
-        float dirZ = 2.0f * (y * z + w * x);
-
-        // Up = R * [0,0,1]
-        float upX = 2.0f * (x * z + w * y);
-        float upY = 2.0f * (y * z - w * x);
-        float upZ = 1.0f - 2.0f * (x * x + y * y);
-        sqf::set_vector_dir_and_up(obj, vector3(dirX, dirY, dirZ), vector3(upX, upY, upZ));
+        float w, x, y, z;
+        if (!kh_parse_quat(quat, "setRotationQuaternion", w, x, y, z)) return game_value();
+        vector3 dir, up;
+        kh_quaternion_to_dir_up(w, x, y, z, dir, up);
+        sqf::set_vector_dir_and_up(static_cast<object>(entity), dir, up);
         return game_value();
     } catch (const std::exception& e) {
-        report_error("Failed to set quaternion rotation: " + std::string(e.what()));
+        report_error("setRotationQuaternion: " + std::string(e.what()));
         return game_value();
     }
 }
 
 static game_value axis_angle_to_quaternion_sqf(game_value_parameter params) {
     try {
+        if (params.type_enum() != game_data_type::ARRAY || params.to_array().size() != 2) {
+            report_error("axisAngleToQuaternion: requires [[axisX, axisY, axisZ], angle]");
+            return game_value();
+        }
+
         auto& arr = params.to_array();
 
-        if (arr.size() != 2) {
-            report_error("axisAngleToQuaternion requires [[axisX, axisY, axisZ], angle]");
+        if (arr[0].type_enum() != game_data_type::ARRAY || arr[0].to_array().size() != 3) {
+            report_error("axisAngleToQuaternion: requires axis with 3 components");
             return game_value();
         }
 
         auto& axis_array = arr[0].to_array();
-
-        if (axis_array.size() != 3) {
-            report_error("axisAngleToQuaternion requires axis with 3 components");
-            return game_value();
-        }
-
         float axisX = static_cast<float>(axis_array[0]);
         float axisY = static_cast<float>(axis_array[1]);
         float axisZ = static_cast<float>(axis_array[2]);
         float angle = static_cast<float>(arr[1]);
-
-        // Normalize axis
         float axisLen = std::sqrt(axisX * axisX + axisY * axisY + axisZ * axisZ);
-
-        if (axisLen < EPSILON) {
-            // Zero axis return identity
-            auto_array<game_value> r;
-            r.reserve(4);
-            r.push_back(game_value(1.0f));
-            r.push_back(game_value(0.0f));
-            r.push_back(game_value(0.0f));
-            r.push_back(game_value(0.0f));
-            return game_value(std::move(r));
-        }
-
+        if (axisLen < EPSILON) return kh_quat_gv(1.0f, 0.0f, 0.0f, 0.0f);   // Zero axis: identity
         axisX /= axisLen; axisY /= axisLen; axisZ /= axisLen;
         float halfAngle = angle * DEG_TO_RAD * 0.5f;
         float s = std::sin(halfAngle);
-        float w = std::cos(halfAngle);
-        float x = axisX * s;
-        float y = axisY * s;
-        float z = axisZ * s;
-        auto_array<game_value> result;
-        result.reserve(4);
-        result.push_back(game_value(w));
-        result.push_back(game_value(x));
-        result.push_back(game_value(y));
-        result.push_back(game_value(z));
-        return game_value(std::move(result));
+        return kh_quat_gv(std::cos(halfAngle), axisX * s, axisY * s, axisZ * s);
     } catch (const std::exception& e) {
-        report_error("Failed to convert axis-angle to quaternion: " + std::string(e.what()));
+        report_error("axisAngleToQuaternion: " + std::string(e.what()));
         return game_value();
     }
 }
 
 static game_value quaternion_to_axis_angle_sqf(game_value_parameter quat) {
     try {
-        auto& q = quat.to_array();
+        float w, x, y, z;
+        if (!kh_parse_quat(quat, "quaternionToAxisAngle", w, x, y, z)) return game_value();
 
-        if (q.size() != 4) {
-            report_error("quaternionToAxisAngle requires [w, x, y, z]");
-            return game_value();
+        if (!kh_normalize_quat(w, x, y, z)) {
+            return kh_make_array({ kh_vec3_gv(0.0f, 1.0f, 0.0f), game_value(0.0f) });
         }
-
-        float w = static_cast<float>(q[0]);
-        float x = static_cast<float>(q[1]);
-        float y = static_cast<float>(q[2]);
-        float z = static_cast<float>(q[3]);
-
-        // Normalize
-        float len = std::sqrt(w * w + x * x + y * y + z * z);
-
-        if (len < EPSILON) {
-            auto_array<game_value> axis_arr;
-            axis_arr.reserve(3);
-            axis_arr.push_back(game_value(0.0f));
-            axis_arr.push_back(game_value(1.0f));
-            axis_arr.push_back(game_value(0.0f));
-            auto_array<game_value> result;
-            result.reserve(2);
-            result.push_back(game_value(std::move(axis_arr)));
-            result.push_back(game_value(0.0f));
-            return game_value(std::move(result));
-        }
-        w /= len; x /= len; y /= len; z /= len;
 
         // Ensure w is positive so angle is in [0, 360)
         if (w < 0.0f) {
@@ -2274,24 +1745,15 @@ static game_value quaternion_to_axis_angle_sqf(game_value_parameter quat) {
             axisY = y / s;
             axisZ = z / s;
         } else {
-            // Near-zero rotation axis is arbitrary
+            // Near-zero rotation: the axis is arbitrary
             axisX = 0.0f;
             axisY = 1.0f;
             axisZ = 0.0f;
         }
 
-        auto_array<game_value> axis_arr;
-        axis_arr.reserve(3);
-        axis_arr.push_back(game_value(axisX));
-        axis_arr.push_back(game_value(axisY));
-        axis_arr.push_back(game_value(axisZ));
-        auto_array<game_value> result;
-        result.reserve(2);
-        result.push_back(game_value(std::move(axis_arr)));
-        result.push_back(game_value(angle));
-        return game_value(std::move(result));
+        return kh_make_array({ kh_vec3_gv(axisX, axisY, axisZ), game_value(angle) });
     } catch (const std::exception& e) {
-        report_error("Failed to convert quaternion to axis-angle: " + std::string(e.what()));
+        report_error("quaternionToAxisAngle: " + std::string(e.what()));
         return game_value();
     }
 }
@@ -2301,7 +1763,7 @@ static game_value initialize_ai_sqf(game_value_parameter ai_name) {
         std::string name = ai_name;
 
         if (name.empty()) {
-            report_error("KH - AI Framework: Error in initializeAi - Name cannot be empty");
+            report_error("initializeAi: name cannot be empty");
             return game_value(false);
         }
 
@@ -2309,7 +1771,7 @@ static game_value initialize_ai_sqf(game_value_parameter ai_name) {
         bool success = framework.initialize_ai(name);        
         return game_value(success);
     } catch (const std::exception& e) {
-        report_error("KH - AI Framework: Error in initializeAi - " + std::string(e.what()));
+        report_error("initializeAi: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -2319,7 +1781,7 @@ static game_value stop_ai_sqf(game_value_parameter ai_name) {
         std::string name = ai_name;
 
         if (name.empty()) {
-            report_error("KH - AI Framework: Error in stopAi - Name cannot be empty");
+            report_error("stopAi: name cannot be empty");
             return game_value(false);
         }
 
@@ -2327,7 +1789,7 @@ static game_value stop_ai_sqf(game_value_parameter ai_name) {
         bool success = framework.stop_ai(name);        
         return game_value(success);
     } catch (const std::exception& e) {
-        report_error("KH - AI Framework: Error in stopAi - " + std::string(e.what()));
+        report_error("stopAi: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -2338,7 +1800,7 @@ static game_value stop_all_ai_sqf() {
         framework.stop_all();
         return game_value(true);
     } catch (const std::exception& e) {
-        report_error("KH - AI Framework: Error in stopAllAi - " + std::string(e.what()));
+        report_error("stopAllAi: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -2348,14 +1810,14 @@ static game_value is_ai_active_sqf(game_value_parameter ai_name) {
         std::string name = ai_name;
 
         if (name.empty()) {
-            report_error("KH - AI Framework: Error in isAiActive - Name cannot be empty");
+            report_error("isAiActive: name cannot be empty");
             return game_value(false);
         }
 
         auto& framework = AIFramework::instance();
         return game_value(framework.is_ai_active(name));
     } catch (const std::exception& e) {
-        report_error("KH - AI Framework: Error in isAiActive - " + std::string(e.what()));
+        report_error("isAiActive: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -2365,14 +1827,14 @@ static game_value is_ai_generating_sqf(game_value_parameter ai_name) {
         std::string name = ai_name;
 
         if (name.empty()) {
-            report_error("KH - AI Framework: Error in isAiGenerating - Name cannot be empty");
+            report_error("isAiGenerating: name cannot be empty");
             return game_value(false);
         }
 
         bool is_generating = AIFramework::instance().is_ai_generating(name);
         return game_value(is_generating);
     } catch (const std::exception& e) {
-        report_error("KH - AI Framework: Error in isAiGenerating: " + std::string(e.what()));
+        report_error("isAiGenerating: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -2389,7 +1851,7 @@ static game_value get_active_ai_sqf() {
 
         return result;
     } catch (const std::exception& e) {
-        report_error("KH - AI Framework: Error in getActiveAi - " + std::string(e.what()));
+        report_error("getActiveAi: " + std::string(e.what()));
         return game_value();
     }
 }
@@ -2399,15 +1861,13 @@ static game_value set_ai_model_sqf(game_value_parameter model) {
         std::string filename = model;
 
         if (filename.empty()) {
-            report_error("KH - AI Framework: Error in setAiModel - Name cannot be empty");
+            report_error("setAiModel: name cannot be empty");
             return game_value(false);
         }
 
-        auto& framework = AIFramework::instance();
-        framework.set_model_path(filename);
-        return game_value(true);
+        return game_value(AIFramework::instance().set_model_path(filename));
     } catch (const std::exception& e) {
-        report_error("KH - AI Framework: Error in setAiModel - " + std::string(e.what()));
+        report_error("setAiModel: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -2418,7 +1878,7 @@ static game_value set_ai_instance_model_path_sqf(game_value_parameter left_arg, 
         std::string filename = right_arg;
 
         if (ai_name.empty() || filename.empty()) {
-            report_error("KH - AI Framework: Error in setAiModel - Both AI name and model filename must be provided");
+            report_error("setAiModel: both AI name and model filename must be provided");
             return game_value(false);
         }
 
@@ -2426,7 +1886,7 @@ static game_value set_ai_instance_model_path_sqf(game_value_parameter left_arg, 
         bool success = framework.set_ai_model_path(ai_name, filename);
         return game_value(success);
     } catch (const std::exception& e) {
-        report_error("KH - AI Framework: Error in setAiModelPath - " + std::string(e.what()));
+        report_error("setAiModel: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -2437,7 +1897,7 @@ static game_value update_ai_system_prompt_sqf(game_value_parameter left_arg, gam
         std::string prompt = right_arg;
 
         if (ai_name.empty()) {
-            report_error("KH - AI Framework: Error in updateAiSystemPrompt - Name cannot be empty");
+            report_error("updateAiSystemPrompt: name cannot be empty");
             return game_value(false);
         }
 
@@ -2445,7 +1905,7 @@ static game_value update_ai_system_prompt_sqf(game_value_parameter left_arg, gam
         bool success = framework.update_system_prompt(ai_name, prompt);        
         return game_value(success);
     } catch (const std::exception& e) {
-        report_error("KH - AI Framework: Error in updateAiSystemPrompt - " + std::string(e.what()));
+        report_error("updateAiSystemPrompt: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -2456,7 +1916,7 @@ static game_value update_ai_master_prompt_sqf(game_value_parameter left_arg, gam
         std::string prompt = right_arg;
 
         if (ai_name.empty()) {
-            report_error("KH - AI Framework: Error in updateAiMasterPrompt - Name cannot be empty");
+            report_error("updateAiMasterPrompt: name cannot be empty");
             return game_value(false);
         }
 
@@ -2464,7 +1924,7 @@ static game_value update_ai_master_prompt_sqf(game_value_parameter left_arg, gam
         bool success = framework.update_master_prompt(ai_name, prompt);
         return game_value(success);
     } catch (const std::exception& e) {
-        report_error("KH - AI Framework: Error in updateAiMasterPrompt - " + std::string(e.what()));
+        report_error("updateAiMasterPrompt: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -2475,7 +1935,7 @@ static game_value update_ai_user_prompt_sqf(game_value_parameter left_arg, game_
         std::string prompt = right_arg;
 
         if (ai_name.empty()) {
-            report_error("KH - AI Framework: Error in updateAiUserPrompt - Name cannot be empty");
+            report_error("updateAiUserPrompt: name cannot be empty");
             return game_value(false);
         }
 
@@ -2483,7 +1943,7 @@ static game_value update_ai_user_prompt_sqf(game_value_parameter left_arg, game_
         bool success = framework.update_user_prompt(ai_name, prompt);
         return game_value(success);
     } catch (const std::exception& e) {
-        report_error("KH - AI Framework: Error in updateAiUserPrompt - " + std::string(e.what()));
+        report_error("updateAiUserPrompt: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -2494,64 +1954,64 @@ static game_value set_ai_parameters_sqf(game_value_parameter left_arg, game_valu
         std::vector<float> tensor_split;
 
         if (ai_name.empty()) {
-            report_error("KH - AI Framework: Error in setAiParameters - Name cannot be empty");
+            report_error("setAiParameters: name cannot be empty");
             return game_value(false);
         }
 
-        auto params = right_arg.to_array();
+        auto& params = right_arg.to_array();
 
         if (params.size() != 25) {
-            report_error("KH - AI Framework: setAiParameters requires exactly 25 parameters");
+            report_error("setAiParameters: requires exactly 25 parameters");
             return game_value(false);
         }
 
-        // KH_SQF_INT: every integer parameter is checked before it is converted; the first bad
-        // index is reported below and nothing is applied. A nil one reads 0, as the float and bool
-        // slots read it (and as every slot always has).
-        int khap_bad = -1;
-        auto khap_int = [&](size_t khap_i) {
-            int khap_v = 0;
-            if (params[khap_i].is_nil()) return khap_v;
-            if (!kh_sqf_int(params[khap_i], khap_v) && khap_bad < 0) khap_bad = static_cast<int>(khap_i);
-            return khap_v;
+        // Every integer parameter is checked before it is converted; the first bad index (a non-number, or a number
+        // that is not an int in range) is reported below and nothing is applied. A nil one reads 0; the float and
+        // bool slots read 0 / false for nil or a wrong type (kh_param), as every slot always has.
+        int bad_index = -1;
+        auto int_param = [&](size_t i) {
+            int v = 0;
+            if (params[i].is_nil()) return v;
+            if (!kh_sqf_int(params[i], v) && bad_index < 0) bad_index = static_cast<int>(i);
+            return v;
         };
-        int n_ctx = khap_int(0);
-        int max_new_tokens = khap_int(1);
-        float temperature = static_cast<float>(params[2]);
-        int top_k = khap_int(3);
-        float top_p = static_cast<float>(params[4]);
-        float min_p = static_cast<float>(params[5]);
-        float typical_p = static_cast<float>(params[6]);
-        float repeat_penalty = static_cast<float>(params[7]);
-        int repeat_last_n = khap_int(8);
-        float presence_penalty = static_cast<float>(params[9]);
-        float frequency_penalty = static_cast<float>(params[10]);
-        int mirostat = khap_int(11);
-        float mirostat_tau = static_cast<float>(params[12]);
-        float mirostat_eta = static_cast<float>(params[13]);
-        // KH_AI_SEED: the seed is llama.cpp's uint32 (0xFFFFFFFF = random), carried in an int as the baseline's
-        // round trip did. SQF numbers are floats, so 4294967295 arrives as 2^32 and is taken as 0xFFFFFFFF.
+        int n_ctx = int_param(0);
+        int max_new_tokens = int_param(1);
+        float temperature = kh_param_float(params, 2, 0.0f);
+        int top_k = int_param(3);
+        float top_p = kh_param_float(params, 4, 0.0f);
+        float min_p = kh_param_float(params, 5, 0.0f);
+        float typical_p = kh_param_float(params, 6, 0.0f);
+        float repeat_penalty = kh_param_float(params, 7, 0.0f);
+        int repeat_last_n = int_param(8);
+        float presence_penalty = kh_param_float(params, 9, 0.0f);
+        float frequency_penalty = kh_param_float(params, 10, 0.0f);
+        int mirostat = int_param(11);
+        float mirostat_tau = kh_param_float(params, 12, 0.0f);
+        float mirostat_eta = kh_param_float(params, 13, 0.0f);
+        // The seed is llama.cpp's uint32 (0xFFFFFFFF = random), carried in an int. SQF numbers are floats, so
+        // 4294967295 arrives as 2^32 and is taken as 0xFFFFFFFF.
         int seed = 0;
         {
-            float khas_f = -1.0e30f;   // A non-number fails the range below; nil reads 0, as above.
-            if (params[14].is_nil()) khas_f = 0.0f;
-            else if (params[14].type_enum() == game_data_type::SCALAR) khas_f = static_cast<float>(params[14]);
-            if (khas_f >= -2147483648.0f && khas_f <= 4294967296.0f) {   // NaN fails both.
-                const uint32_t khas_u = khas_f >= 4294967296.0f ? 0xFFFFFFFFu
-                                      : static_cast<uint32_t>(static_cast<int64_t>(khas_f));
-                seed = static_cast<int>(khas_u);
-            } else if (khap_bad < 0) {
-                khap_bad = 14;
+            float seed_f = -1.0e30f;   // A non-number fails the range below; nil reads 0, as above.
+            if (params[14].is_nil()) seed_f = 0.0f;
+            else if (params[14].type_enum() == game_data_type::SCALAR) seed_f = static_cast<float>(params[14]);
+            if (seed_f >= -2147483648.0f && seed_f <= 4294967296.0f) {   // NaN fails both.
+                const uint32_t seed_u = seed_f >= 4294967296.0f ? 0xFFFFFFFFu
+                                      : static_cast<uint32_t>(static_cast<int64_t>(seed_f));
+                seed = static_cast<int>(seed_u);
+            } else if (bad_index < 0) {
+                bad_index = 14;
             }
         }
-        int n_batch = khap_int(15);
-        int n_ubatch = khap_int(16);
-        int cpu_threads = khap_int(17);
-        int cpu_threads_batch = khap_int(18);
-        int gpu_layers = khap_int(19);
-        bool flash_attention = static_cast<bool>(params[20]);
-        bool offload_kv_cache = static_cast<bool>(params[21]);
-        int main_gpu = khap_int(22);
+        int n_batch = int_param(15);
+        int n_ubatch = int_param(16);
+        int cpu_threads = int_param(17);
+        int cpu_threads_batch = int_param(18);
+        int gpu_layers = int_param(19);
+        bool flash_attention = kh_param_bool(params, 20, false);
+        bool offload_kv_cache = kh_param_bool(params, 21, false);
+        int main_gpu = int_param(22);
 
         if (params[23].type_enum() == game_data_type::ARRAY) {
             auto& split_params = params[23].to_array();
@@ -2562,16 +2022,16 @@ static game_value set_ai_parameters_sqf(game_value_parameter left_arg, game_valu
                 }
             }
         } else {
-            report_error("KH - AI Framework: setAiParameters error: Tensor Split must be an array");
-            return game_value(false);   // KH_AI_SPLIT_FAIL: like every other check here.
+            report_error("setAiParameters: tensor split must be an array");
+            return game_value(false);   // Like every other check here.
         }
 
-        int split_mode = khap_int(24);
+        int split_mode = int_param(24);
 
-        if (khap_bad >= 0) {
-            report_error("KH - AI Framework: setAiParameters error: parameter " + std::to_string(khap_bad) +
-                         (khap_bad == 14 ? " (seed) must be a number from -2147483648 to 4294967295"
-                                         : " must be a number within int range"));
+        if (bad_index >= 0) {
+            report_error("setAiParameters: parameter " + std::to_string(bad_index) +
+                         (bad_index == 14 ? " (seed) must be a number from -2147483648 to 4294967295"
+                                          : " must be a number within int range"));
             return game_value(false);
         }
 
@@ -2586,7 +2046,7 @@ static game_value set_ai_parameters_sqf(game_value_parameter left_arg, game_valu
 
         return game_value(result);
     } catch (const std::exception& e) {
-        report_error("KH - AI Framework: setAiParameters error: " + std::string(e.what()));
+        report_error("setAiParameters: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -2596,14 +2056,14 @@ static game_value trigger_ai_inference_sqf(game_value_parameter right_arg) {
         std::string ai_name = right_arg;
 
         if (ai_name.empty()) {
-            report_error("KH - AI Framework: Error in triggerAiInference - Name cannot be empty");
+            report_error("triggerAiInference: name cannot be empty");
             return game_value(false);
         }
 
         bool result = AIFramework::instance().trigger_ai_inference(ai_name);
         return game_value(result);
     } catch (const std::exception& e) {
-        report_error("KH - AI Framework: triggerAiInference error: " + std::string(e.what()));
+        report_error("triggerAiInference: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -2611,15 +2071,16 @@ static game_value trigger_ai_inference_sqf(game_value_parameter right_arg) {
 static game_value set_ai_markers_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
     try {
         std::string ai_name = left_arg;
-        auto markers = right_arg.to_array();
+        auto& markers = right_arg.to_array();
 
         if (ai_name.empty()) {
-            report_error("KH - AI Framework: Error in setAiMarkers - Name cannot be empty");
+            report_error("setAiMarkers: name cannot be empty");
             return game_value(false);
         }
 
         if (markers.size() != 6) {
-            report_error("KH - AI Framework: setAiMarkers requires exactly 6 markers: [systemStart, systemEnd, userStart, userEnd, assistantStart, assistantEnd]");
+            report_error("setAiMarkers: requires exactly 6 markers: [systemStart, systemEnd, userStart, userEnd, "
+                         "assistantStart, assistantEnd]");
             return game_value(false);
         }
 
@@ -2633,7 +2094,7 @@ static game_value set_ai_markers_sqf(game_value_parameter left_arg, game_value_p
         bool success = framework.set_ai_markers(ai_name, sys_start, sys_end, usr_start, usr_end, asst_start, asst_end);
         return game_value(success);
     } catch (const std::exception& e) {
-        report_error("KH - AI Framework: Error in setAiMarkers - " + std::string(e.what()));
+        report_error("setAiMarkers: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -2642,7 +2103,7 @@ static game_value abort_ai_generation_sqf(game_value_parameter right) {
     std::string ai_name = right;
 
     if (ai_name.empty()) {
-        report_error("KH - AI Framework: Error in abortAiGeneration - Name cannot be empty");
+        report_error("abortAiGeneration: name cannot be empty");
         return game_value(false);
     }
 
@@ -2650,7 +2111,7 @@ static game_value abort_ai_generation_sqf(game_value_parameter right) {
         bool success = AIFramework::instance().abort_ai_generation(ai_name);
         return game_value(success);
     } catch (const std::exception& e) {
-        report_error("KH - AI Framework: Error in abortAiGeneration - " + std::string(e.what()));
+        report_error("abortAiGeneration: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -2659,7 +2120,7 @@ static game_value log_ai_generation_sqf(game_value_parameter left_arg, game_valu
     std::string ai_name = left_arg;
 
     if (ai_name.empty()) {
-        report_error("KH - AI Framework: Error in logAiGeneration - Name cannot be empty");
+        report_error("logAiGeneration: name cannot be empty");
         return game_value(false);
     }
 
@@ -2669,7 +2130,7 @@ static game_value log_ai_generation_sqf(game_value_parameter left_arg, game_valu
         bool success = AIFramework::instance().set_ai_log_generation(ai_name, enabled);
         return game_value(success);
     } catch (const std::exception& e) {
-        report_error("KH - AI Framework: Error in logAiGeneration - " + std::string(e.what()));
+        report_error("logAiGeneration: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -2678,7 +2139,7 @@ static game_value reset_ai_context_sqf(game_value_parameter right) {
     std::string ai_name = right;
 
     if (ai_name.empty()) {
-        report_error("KH - AI Framework: Error in resetAiContext - Name cannot be empty");
+        report_error("resetAiContext: name cannot be empty");
         return game_value(false);
     }
 
@@ -2686,23 +2147,16 @@ static game_value reset_ai_context_sqf(game_value_parameter right) {
         bool success = AIFramework::instance().reset_ai_context(ai_name);
         return game_value(success);
     } catch (const std::exception& e) {
-        report_error("KH - AI Framework: Error in resetAiContext - " + std::string(e.what()));
+        report_error("resetAiContext: " + std::string(e.what()));
         return game_value(false);
     }
 }
 
 static game_value tts_load_model_sqf(game_value_parameter model) {
     try {
-        std::string model_name = model;        
-        bool success = TTSFramework::instance().load_model(model_name);
-
-        if (!success) {
-            report_error("KH - TTS Framework: Failed to load model: " + model_name);
-        }
-
-        return game_value(success);
+        return game_value(TTSFramework::instance().load_model(static_cast<std::string>(model)));   // Reports itself.
     } catch (const std::exception& e) {
-        report_error("KH - TTS Framework: Error in ttsLoadModel - " + std::string(e.what()));
+        report_error("ttsLoadModel: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -2716,114 +2170,95 @@ static game_value tts_load_model_with_config_sqf(game_value_parameter left_arg, 
         float length_scale = 1.0f;
 
         if (right_arg.type_enum() == game_data_type::ARRAY) {
-            try {
-                auto config = right_arg.to_array();
+            auto& config = right_arg.to_array();
 
-                if (config.size() > 0 && !config[0].is_nil() && !kh_sqf_int(config[0], num_threads)) {
-                    // KH_SQF_INT.
-                    report_error("KH - TTS Framework: ttsLoadModel - thread count must be a number within int range");
-                    return game_value(false);
-                }
-
-                if (config.size() > 1 && !config[1].is_nil()) {
-                    noise_scale = static_cast<float>(config[1]);
-                }
-
-                if (config.size() > 2 && !config[2].is_nil()) {
-                    noise_scale_w = static_cast<float>(config[2]);
-                }
-
-                if (config.size() > 3 && !config[3].is_nil()) {
-                    length_scale = static_cast<float>(config[3]);
-                }
-            } catch (...) {
-                // Use defaults if parsing fails
+            if (config.size() > 0 && !config[0].is_nil() && !kh_sqf_int(config[0], num_threads)) {   // Nil keeps 4.
+                report_error("ttsLoadModel: thread count must be a number within int range");
+                return game_value(false);
             }
+
+            noise_scale = kh_param_float(config, 1, noise_scale);
+            noise_scale_w = kh_param_float(config, 2, noise_scale_w);
+            length_scale = kh_param_float(config, 3, length_scale);
         }
 
-        bool success = TTSFramework::instance().load_model(
-            model_name, num_threads, noise_scale, noise_scale_w, length_scale
-        );
-
-        if (!success) {
-            report_error("KH - TTS Framework: Failed to load model: " + model_name);
-        }
-
-        return game_value(success);
+        // A failure is reported by the framework itself.
+        return game_value(TTSFramework::instance().load_model(model_name, num_threads, noise_scale, noise_scale_w,
+                                                              length_scale));
     } catch (const std::exception& e) {
-        report_error("KH - TTS Framework: Error in ttsLoadModel - " + std::string(e.what()));
+        report_error("ttsLoadModel: " + std::string(e.what()));
         return game_value(false);
     }
 }
 
 static game_value tts_speak_sqf(game_value_parameter params) {
     try {
-        auto arr = params.to_array();
+        auto& arr = params.to_array();
 
         if (arr.size() < 2) {
-            report_error("KH - TTS Framework: ttsSpeak requires at least [speakerId, text]");
+            report_error("ttsSpeak: requires at least [speakerId, text]");
             return game_value(false);
         }
 
         std::string speaker_id = arr[0];
         std::string text = arr[1];
-        float x = arr.size() > 2 ? static_cast<float>(arr[2]) : 0.0f;
-        float y = arr.size() > 3 ? static_cast<float>(arr[3]) : 0.0f;
-        float z = arr.size() > 4 ? static_cast<float>(arr[4]) : 0.0f;
-        float volume = arr.size() > 5 ? static_cast<float>(arr[5]) : 1.0f;
-        float speed = arr.size() > 6 ? static_cast<float>(arr[6]) : 1.0f;
+        float x = kh_param_float(arr, 2, 0.0f);
+        float y = kh_param_float(arr, 3, 0.0f);
+        float z = kh_param_float(arr, 4, 0.0f);
+        float volume = kh_param_float(arr, 5, 1.0f);
+        float speed = kh_param_float(arr, 6, 1.0f);
         int sid = 0;
 
-        if (arr.size() > 7 && !arr[7].is_nil() && !kh_sqf_int(arr[7], sid)) {   // KH_SQF_INT; nil keeps 0.
-            report_error("KH - TTS Framework: ttsSpeak - speaker sid must be a number within int range");
+        if (arr.size() > 7 && !arr[7].is_nil() && !kh_sqf_int(arr[7], sid)) {   // Nil keeps 0.
+            report_error("ttsSpeak: speaker sid must be a number within int range");
             return game_value(false);
         }
 
-        auto effects = TTSFramework::parse_effects_from_args(arr, 8);
+        auto effects = kh_parse_effects(arr, 8);
 
         if (speaker_id.empty()) {
-            report_error("KH - TTS Framework: Speaker ID cannot be empty");
+            report_error("ttsSpeak: speaker ID cannot be empty");
             return game_value(false);
         }
 
         if (text.empty()) {
-            report_error("KH - TTS Framework: Text cannot be empty");
+            report_error("ttsSpeak: text cannot be empty");
             return game_value(false);
         }
 
         bool success = TTSFramework::instance().speak(speaker_id, text, x, y, z, volume, speed, sid, effects);
         return game_value(success);
     } catch (const std::exception& e) {
-        report_error("KH - TTS Framework: Error in ttsSpeak - " + std::string(e.what()));
+        report_error("ttsSpeak: " + std::string(e.what()));
         return game_value(false);
     }
 }
 
 static game_value tts_update_speaker_sqf(game_value_parameter params) {
     try {
-        auto arr = params.to_array();
+        auto& arr = params.to_array();
 
         if (arr.size() < 5) {
-            report_error("KH - TTS Framework: ttsUpdateSpeaker requires [speakerId, x, y, z, volume]");
+            report_error("ttsUpdateSpeaker: requires [speakerId, x, y, z, volume]");
             return game_value(false);
         }
 
         std::string speaker_id = arr[0];
-        float x = static_cast<float>(arr[1]);
-        float y = static_cast<float>(arr[2]);
-        float z = static_cast<float>(arr[3]);
-        float volume = static_cast<float>(arr[4]);
-        auto effects = TTSFramework::parse_effects_from_args(arr, 5);
+        float x = kh_param_float(arr, 1, 0.0f);
+        float y = kh_param_float(arr, 2, 0.0f);
+        float z = kh_param_float(arr, 3, 0.0f);
+        float volume = kh_param_float(arr, 4, 0.0f);
+        auto effects = kh_parse_effects(arr, 5);
 
         if (speaker_id.empty()) {
-            report_error("KH - TTS Framework: Speaker ID cannot be empty");
+            report_error("ttsUpdateSpeaker: speaker ID cannot be empty");
             return game_value(false);
         }
 
         bool success = TTSFramework::instance().update_speaker(speaker_id, x, y, z, volume, effects);
         return game_value(success);
     } catch (const std::exception& e) {
-        report_error("KH - TTS Framework: Error in ttsUpdateSpeaker - " + std::string(e.what()));
+        report_error("ttsUpdateSpeaker: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -2833,14 +2268,14 @@ static game_value tts_stop_speaker_sqf(game_value_parameter speaker_id) {
         std::string id = speaker_id;
 
         if (id.empty()) {
-            report_error("KH - TTS Framework: Speaker ID cannot be empty");
+            report_error("ttsStopSpeaker: speaker ID cannot be empty");
             return game_value(false);
         }
 
         bool success = TTSFramework::instance().stop_speaker(id);
         return game_value(success);
     } catch (const std::exception& e) {
-        report_error("KH - TTS Framework: Error in ttsStopSpeaker - " + std::string(e.what()));
+        report_error("ttsStopSpeaker: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -2856,7 +2291,7 @@ static game_value tts_is_playing_sqf(game_value_parameter speaker_id) {
         bool is_playing = TTSFramework::instance().is_playing(id);
         return game_value(is_playing);
     } catch (const std::exception& e) {
-        report_error("KH - TTS Framework: Error in ttsIsPlaying - " + std::string(e.what()));
+        report_error("ttsIsPlaying: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -2866,7 +2301,7 @@ static game_value tts_stop_all_sqf() {
         TTSFramework::instance().stop_all();
         return game_value(true);
     } catch (const std::exception& e) {
-        report_error("KH - TTS Framework: Error in ttsStopAll - " + std::string(e.what()));
+        report_error("ttsStopAll: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -2876,7 +2311,7 @@ static game_value tts_is_initialized_sqf() {
         bool initialized = TTSFramework::instance().is_initialized();
         return game_value(initialized);
     } catch (const std::exception& e) {
-        report_error("KH - TTS Framework: Error in ttsIsInitialized - " + std::string(e.what()));
+        report_error("ttsIsInitialized: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -2884,9 +2319,9 @@ static game_value tts_is_initialized_sqf() {
 static game_value stt_load_model_sqf(game_value_parameter model_name) {
     try {
         std::string model = model_name;
-        return game_value(STTFramework::instance().load_model_public(model));
+        return game_value(STTFramework::instance().load_model(model));
     } catch (const std::exception& e) {
-        report_error("KH - STT Framework: sttLoadModel failed: " + std::string(e.what()));
+        report_error("sttLoadModel: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -2898,55 +2333,55 @@ static game_value stt_load_model_with_config_sqf(game_value_parameter model_name
         int threads = 4;
 
         if (config_arr.size() > 0 && !config_arr[0].is_nil() &&
-            !kh_sqf_int(config_arr[0], threads)) {   // KH_SQF_INT; nil keeps 4.
-            report_error("KH - STT Framework: sttLoadModel - thread count must be a number within int range");
+            !kh_sqf_int(config_arr[0], threads)) {   // Nil keeps 4.
+            report_error("sttLoadModel: thread count must be a number within int range");
             return game_value(false);
         }
 
-        return game_value(STTFramework::instance().load_model_public(model, threads));
+        return game_value(STTFramework::instance().load_model(model, threads));
     } catch (const std::exception& e) {
-        report_error("KH - STT Framework: sttLoadModel failed: " + std::string(e.what()));
+        report_error("sttLoadModel: " + std::string(e.what()));
         return game_value(false);
     }
 }
 
 static game_value stt_is_initialized_sqf() {
     try {
-        return game_value(STTFramework::instance().is_initialized_public());
+        return game_value(STTFramework::instance().is_initialized());
     } catch (const std::exception& e) {
-        report_error("KH - STT Framework: sttIsInitialized failed: " + std::string(e.what()));
+        report_error("sttIsInitialized: " + std::string(e.what()));
         return game_value(false);
     }
 }
 
 static game_value stt_is_capturing_sqf() {
     try {
-        return game_value(STTFramework::instance().is_capturing_audio_public());
+        return game_value(STTFramework::instance().is_capturing_audio());
     } catch (const std::exception& e) {
-        report_error("KH - STT Framework: sttIsCapturing failed: " + std::string(e.what()));
+        report_error("sttIsCapturing: " + std::string(e.what()));
         return game_value(false);
     }
 }
 
 static game_value stt_start_capture_sqf() {
     try {
-        return game_value(STTFramework::instance().start_capture_public());
+        return game_value(STTFramework::instance().start_capture());
     } catch (const std::exception& e) {
-        report_error("KH - STT Framework: sttStartCapture failed: " + std::string(e.what()));
+        report_error("sttStartCapture: " + std::string(e.what()));
         return game_value(false);
     }
 }
 
 static game_value stt_stop_capture_sqf() {
     try {
-        return game_value(STTFramework::instance().stop_capture_public());
+        return game_value(STTFramework::instance().stop_capture());
     } catch (const std::exception& e) {
-        report_error("KH - STT Framework: sttStopCapture failed: " + std::string(e.what()));
+        report_error("sttStopCapture: " + std::string(e.what()));
         return game_value(false);
     }
 }
 
-// KH_PLAYER_ONLY: the HTML UI (html*) and the renderer (the SQF COMMAND REFERENCE in
+// The HTML UI (html*) and the renderer (the SQF COMMAND REFERENCE in
 // rendering_integration.hpp) exist only where there is an interface - framework.hpp's g_is_player
 // (hasInterface). On a dedicated server or a headless client each of their commands returns its empty
 // value at once - no parse, no report, nothing started: '' for a STRING, false for a BOOL, [] for an
@@ -2954,7 +2389,7 @@ static game_value stt_stop_capture_sqf() {
 static bool kh_gfx_off() { return !g_is_player; }
 
 static game_value ui_create_html_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
-    if (kh_gfx_off()) return game_value("");   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value("");
     try {
         std::string html_content = left_arg;
 
@@ -2965,25 +2400,25 @@ static game_value ui_create_html_sqf(game_value_parameter left_arg, game_value_p
         int x = 0, y = 0, width = 0, height = 0;
         float opacity = 1.0f;
         auto& arr = right_arg.to_array();
-        int* const khhc_dst[4] = { &x, &y, &width, &height };
+        int* const targets[4] = { &x, &y, &width, &height };
 
-        for (size_t khhc_i = 0; khhc_i < 4 && khhc_i < arr.size(); ++khhc_i) {   // KH_SQF_INT; nil keeps 0.
-            if (!arr[khhc_i].is_nil() && !kh_sqf_int(arr[khhc_i], *khhc_dst[khhc_i])) {
-                report_error("KH - UI Framework: htmlCreate - x, y, width, height must be numbers within int range");
+        for (size_t i = 0; i < 4 && i < arr.size(); ++i) {   // Nil keeps 0.
+            if (!arr[i].is_nil() && !kh_sqf_int(arr[i], *targets[i])) {
+                report_error("htmlCreate: x, y, width, height must be numbers within int range");
                 return game_value("");
             }
         }
 
-        opacity = arr.size() > 4 ? static_cast<float>(arr[4]) : 1.0f;
+        opacity = kh_param_float(arr, 4, 1.0f);
         return game_value(UIFramework::instance().create_html(html_content, x, y, width, height, opacity));
     } catch (const std::exception& e) {
-        report_error("KH - UI Framework: Error in htmlCreate - " + std::string(e.what()));
+        report_error("htmlCreate: " + std::string(e.what()));
         return game_value("");
     }
 }
 
 static game_value ui_open_html_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
-    if (kh_gfx_off()) return game_value("");   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value("");
     try {
         std::string filename = left_arg;
 
@@ -2996,27 +2431,27 @@ static game_value ui_open_html_sqf(game_value_parameter left_arg, game_value_par
 
         if (right_arg.type_enum() == game_data_type::ARRAY) {
             auto& arr = right_arg.to_array();
-            int* const khho_dst[4] = { &x, &y, &width, &height };
+            int* const targets[4] = { &x, &y, &width, &height };
 
-            for (size_t khho_i = 0; khho_i < 4 && khho_i < arr.size(); ++khho_i) {   // KH_SQF_INT; nil keeps 0.
-                if (!arr[khho_i].is_nil() && !kh_sqf_int(arr[khho_i], *khho_dst[khho_i])) {
-                    report_error("KH - UI Framework: htmlOpen - x, y, width, height must be numbers within int range");
+            for (size_t i = 0; i < 4 && i < arr.size(); ++i) {   // Nil keeps 0.
+                if (!arr[i].is_nil() && !kh_sqf_int(arr[i], *targets[i])) {
+                    report_error("htmlOpen: x, y, width, height must be numbers within int range");
                     return game_value("");
                 }
             }
 
-            opacity = arr.size() > 4 ? static_cast<float>(arr[4]) : 1.0f;
+            opacity = kh_param_float(arr, 4, 1.0f);
         }
 
         return game_value(UIFramework::instance().open_html(filename, x, y, width, height, opacity));
     } catch (const std::exception& e) {
-        report_error("KH - UI Framework: Error in htmlOpen - " + std::string(e.what()));
+        report_error("htmlOpen: " + std::string(e.what()));
         return game_value("");
     }
 }
 
 static game_value ui_close_html_sqf(game_value_parameter args) {
-    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(false);
     try {
         std::string doc_id = args;
 
@@ -3026,13 +2461,13 @@ static game_value ui_close_html_sqf(game_value_parameter args) {
 
         return game_value(UIFramework::instance().close_html(doc_id));
     } catch (const std::exception& e) {
-        report_error("KH - UI Framework: Error in htmlClose - " + std::string(e.what()));
+        report_error("htmlClose: " + std::string(e.what()));
         return game_value(false);
     }
 }
 
 static game_value ui_set_html_visible_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
-    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(false);
     try {
         std::string doc_id = left_arg;
 
@@ -3043,13 +2478,13 @@ static game_value ui_set_html_visible_sqf(game_value_parameter left_arg, game_va
         bool visible = static_cast<bool>(right_arg);
         return game_value(UIFramework::instance().set_html_visible(doc_id, visible));
     } catch (const std::exception& e) {
-        report_error("KH - UI Framework: Error in htmlSetVisible - " + std::string(e.what()));
+        report_error("htmlSetVisible: " + std::string(e.what()));
         return game_value(false);
     }
 }
 
 static game_value ui_get_open_documents_sqf() {
-    if (kh_gfx_off()) return game_value(auto_array<game_value>());   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(auto_array<game_value>());
     try {
         auto docs = UIFramework::instance().get_open_documents();
         auto_array<game_value> result;
@@ -3061,23 +2496,23 @@ static game_value ui_get_open_documents_sqf() {
 
         return game_value(std::move(result));
     } catch (const std::exception& e) {
-        report_error("KH - UI Framework: Error in htmlGetOpenDocuments - " + std::string(e.what()));
+        report_error("htmlGetOpenDocuments: " + std::string(e.what()));
         return game_value(auto_array<game_value>());
     }
 }
 
 static game_value ui_is_initialized_sqf() {
-    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(false);
     try {
         return game_value(UIFramework::instance().is_initialized());
     } catch (const std::exception& e) {
-        report_error("KH - UI Framework: Error in htmlIsInitialized - " + std::string(e.what()));
+        report_error("htmlIsInitialized: " + std::string(e.what()));
         return game_value(false);
     }
 }
 
 static game_value ui_execute_js_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
-    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(false);
     try {
         std::string doc_id = left_arg;
 
@@ -3093,13 +2528,13 @@ static game_value ui_execute_js_sqf(game_value_parameter left_arg, game_value_pa
 
         return game_value(UIFramework::instance().execute_javascript(doc_id, script));
     } catch (const std::exception& e) {
-        report_error("KH - UI Framework: Error in htmlExecuteJS - " + std::string(e.what()));
+        report_error("htmlExecuteJS: " + std::string(e.what()));
         return game_value(false);
     }
 }
 
 static game_value ui_set_js_variable_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
-    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(false);
     try {
         std::string doc_id = left_arg;
 
@@ -3126,13 +2561,13 @@ static game_value ui_set_js_variable_sqf(game_value_parameter left_arg, game_val
         std::string value_json = game_value_to_json(arr[1]);
         return game_value(UIFramework::instance().set_js_variable(doc_id, var_name, value_json));
     } catch (const std::exception& e) {
-        report_error("KH - UI Framework: Error in htmlSetJsVariable - " + std::string(e.what()));
+        report_error("htmlSetJsVariable: " + std::string(e.what()));
         return game_value(false);
     }
 }
 
 static game_value ui_get_js_variable_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
-    if (kh_gfx_off()) return game_value();   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value();
     try {
         std::string doc_id = left_arg;
 
@@ -3149,13 +2584,13 @@ static game_value ui_get_js_variable_sqf(game_value_parameter left_arg, game_val
         std::string json_result = UIFramework::instance().get_js_variable(doc_id, var_name);
         return json_to_game_value(json_result);
     } catch (const std::exception& e) {
-        report_error("KH - UI Framework: Error in htmlGetJsVariable - " + std::string(e.what()));
+        report_error("htmlGetJsVariable: " + std::string(e.what()));
         return game_value();
     }
 }
 
 static game_value ui_set_position_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
-    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(false);
     try {
         std::string doc_id = left_arg;
 
@@ -3175,20 +2610,20 @@ static game_value ui_set_position_sqf(game_value_parameter left_arg, game_value_
 
         int x = 0, y = 0;
 
-        if (!kh_sqf_int(arr[0], x) || !kh_sqf_int(arr[1], y)) {   // KH_SQF_INT.
-            report_error("KH - UI Framework: htmlSetPosition - x and y must be numbers within int range");
+        if (!kh_sqf_int(arr[0], x) || !kh_sqf_int(arr[1], y)) {
+            report_error("htmlSetPosition: x and y must be numbers within int range");
             return game_value(false);
         }
 
         return game_value(UIFramework::instance().set_html_position(doc_id, x, y));
     } catch (const std::exception& e) {
-        report_error("KH - UI Framework: Error in htmlSetPosition - " + std::string(e.what()));
+        report_error("htmlSetPosition: " + std::string(e.what()));
         return game_value(false);
     }
 }
 
 static game_value ui_set_opacity_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
-    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(false);
     try {
         std::string doc_id = left_arg;
 
@@ -3199,13 +2634,13 @@ static game_value ui_set_opacity_sqf(game_value_parameter left_arg, game_value_p
         float opacity = static_cast<float>(right_arg);
         return game_value(UIFramework::instance().set_html_opacity(doc_id, opacity));
     } catch (const std::exception& e) {
-        report_error("KH - UI Framework: Error in htmlSetOpacity - " + std::string(e.what()));
+        report_error("htmlSetOpacity: " + std::string(e.what()));
         return game_value(false);
     }
 }
 
 static game_value ui_set_size_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
-    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(false);
     try {
         std::string doc_id = left_arg;
 
@@ -3225,8 +2660,8 @@ static game_value ui_set_size_sqf(game_value_parameter left_arg, game_value_para
 
         int width = 0, height = 0;
 
-        if (!kh_sqf_int(arr[0], width) || !kh_sqf_int(arr[1], height)) {   // KH_SQF_INT.
-            report_error("KH - UI Framework: htmlSetSize - width and height must be numbers within int range");
+        if (!kh_sqf_int(arr[0], width) || !kh_sqf_int(arr[1], height)) {
+            report_error("htmlSetSize: width and height must be numbers within int range");
             return game_value(false);
         }
 
@@ -3236,13 +2671,13 @@ static game_value ui_set_size_sqf(game_value_parameter left_arg, game_value_para
 
         return game_value(UIFramework::instance().set_html_size(doc_id, width, height));
     } catch (const std::exception& e) {
-        report_error("KH - UI Framework: Error in htmlSetSize - " + std::string(e.what()));
+        report_error("htmlSetSize: " + std::string(e.what()));
         return game_value(false);
     }
 }
 
 static game_value ui_set_z_order_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
-    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(false);
     try {
         std::string doc_id = left_arg;
 
@@ -3252,20 +2687,20 @@ static game_value ui_set_z_order_sqf(game_value_parameter left_arg, game_value_p
 
         int z_order = 0;
 
-        if (!kh_sqf_int(right_arg, z_order)) {   // KH_SQF_INT.
-            report_error("KH - UI Framework: htmlSetZOrder - z-order must be a number within int range");
+        if (!kh_sqf_int(right_arg, z_order)) {
+            report_error("htmlSetZOrder: z-order must be a number within int range");
             return game_value(false);
         }
 
         return game_value(UIFramework::instance().set_html_z_order(doc_id, z_order));
     } catch (const std::exception& e) {
-        report_error("KH - UI Framework: Error in htmlSetZOrder - " + std::string(e.what()));
+        report_error("htmlSetZOrder: " + std::string(e.what()));
         return game_value(false);
     }
 }
 
 static game_value ui_bring_to_front_sqf(game_value_parameter args) {
-    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(false);
     try {
         std::string doc_id = args;
 
@@ -3275,13 +2710,13 @@ static game_value ui_bring_to_front_sqf(game_value_parameter args) {
 
         return game_value(UIFramework::instance().bring_html_to_front(doc_id));
     } catch (const std::exception& e) {
-        report_error("KH - UI Framework: Error in htmlBringToFront - " + std::string(e.what()));
+        report_error("htmlBringToFront: " + std::string(e.what()));
         return game_value(false);
     }
 }
 
 static game_value ui_send_to_back_sqf(game_value_parameter args) {
-    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(false);
     try {
         std::string doc_id = args;
 
@@ -3291,13 +2726,13 @@ static game_value ui_send_to_back_sqf(game_value_parameter args) {
 
         return game_value(UIFramework::instance().send_html_to_back(doc_id));
     } catch (const std::exception& e) {
-        report_error("KH - UI Framework: Error in htmlSendToBack - " + std::string(e.what()));
+        report_error("htmlSendToBack: " + std::string(e.what()));
         return game_value(false);
     }
 }
 
 static game_value ui_reload_html_sqf(game_value_parameter args) {
-    if (kh_gfx_off()) return game_value("");   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value("");
     try {
         std::string doc_id = args;
 
@@ -3307,9 +2742,192 @@ static game_value ui_reload_html_sqf(game_value_parameter args) {
 
         return game_value(UIFramework::instance().reload_html(doc_id));
     } catch (const std::exception& e) {
-        report_error("KH - UI Framework: Error in htmlReload - " + std::string(e.what()));
+        report_error("htmlReload: " + std::string(e.what()));
         return game_value("");
     }
+}
+
+// The JIP argument of khNetworkMessageSend / khSetVariable: a key (STRING), true (a generated key), or
+// [dependency (object / group; anything else = no dependency gating), unitRequired, key ("" / missing = generated)].
+// Anything else: no JIP.
+struct kh_jip_spec {
+    std::string key;
+    std::string dependency_net_id;
+    bool dependency_is_group = false;
+    bool unit_required = false;
+};
+
+static kh_jip_spec kh_parse_jip(const game_value& jip_arg) {
+    kh_jip_spec jip;
+
+    if (jip_arg.type_enum() == game_data_type::STRING) {
+        jip.key = static_cast<std::string>(jip_arg);
+    } else if (jip_arg.type_enum() == game_data_type::BOOL && static_cast<bool>(jip_arg)) {
+        jip.key = UIDGenerator::generate();
+    } else if (jip_arg.type_enum() == game_data_type::ARRAY) {
+        auto& jip_arr = jip_arg.to_array();
+        if (jip_arr.empty()) return jip;
+        const game_value& dependency = jip_arr[0];
+
+        if (dependency.type_enum() == game_data_type::OBJECT) {
+            object dep_obj = static_cast<object>(dependency);
+
+            if (!sqf::is_null(dep_obj)) {
+                jip.dependency_net_id = static_cast<std::string>(sqf::net_id(dep_obj));
+                jip.dependency_is_group = false;
+            }
+        } else if (dependency.type_enum() == game_data_type::GROUP) {
+            group dep_grp = static_cast<group>(dependency);
+
+            if (!sqf::is_null(dep_grp)) {
+                jip.dependency_net_id = static_cast<std::string>(sqf::net_id(dep_grp));
+                jip.dependency_is_group = true;
+            }
+        }
+
+        jip.unit_required = static_cast<bool>(kh_param(jip_arr, 1, game_value(false), { game_data_type::BOOL }));
+        jip.key = static_cast<std::string>(kh_param(jip_arr, 2, game_value(""), { game_data_type::STRING }));
+        if (jip.key.empty()) jip.key = UIDGenerator::generate();
+    }
+
+    return jip;
+}
+
+// Sends event_name / message to a target as khNetworkMessageSend and khSetVariable do: a client id (negative =
+// every client but it), a bool (true = this machine, false = nobody), an object's / team member's owner, a
+// group's / side's / location's units, a CODE condition every client evaluates, a target string ("SERVER",
+// "GLOBAL", ..., else an extended one), or an array of such targets. With a JIP key the message is stored under
+// it first (a CODE target stores the conditional wrapper instead). what prefixes the errors. The result is the
+// command's: the JIP key when there is one, else whether the send succeeded (true where nothing had to go out).
+static game_value kh_network_dispatch(const char* what, const game_value& target, const std::string& event_name,
+                                      const game_value& message, const kh_jip_spec& jip) {
+    auto& net = NetworkFramework::instance();
+    const int owner = static_cast<int>(sqf::client_owner());
+    auto done = [&](bool success) { return jip.key.empty() ? game_value(success) : game_value(jip.key); };
+
+    // A number target is a client id, checked before anything (the JIP store) acts.
+    int client_id = 0;
+
+    if (target.type_enum() == game_data_type::SCALAR && !kh_sqf_int(target, client_id)) {
+        report_error(std::string(what) + ": a client id target must be a number within int range");
+        return game_value(false);
+    }
+
+    if (!kh_sqf_target_ids_ok(target)) {
+        report_error(std::string(what) + ": a client id in an array target must be a number within int range");
+        return game_value(false);
+    }
+
+    // A CODE target: its case below stores the conditional wrapper instead (no plain-then-replace).
+    if (!jip.key.empty() && target.type_enum() != game_data_type::CODE) {
+        net.store_jip_message(jip.key, event_name, message, owner, jip.dependency_net_id, jip.dependency_is_group,
+                              jip.unit_required);
+    }
+
+    NetworkTargetType target_type;
+    game_value target_data;
+    // is_nil, not the NOTHING case: an engine nil's type_enum() is not always NOTHING.
+    if (target.is_nil()) return done(false);
+
+    switch (target.type_enum()) {
+        case game_data_type::SCALAR:
+            if (client_id >= 0) return done(net.send_message(client_id, event_name, message));
+            target_type = NetworkTargetType::CLIENT_ID_EXCLUDE;
+            target_data = target;
+            break;
+
+        case game_data_type::BOOL:
+            if (!static_cast<bool>(target)) return done(true);
+            target_type = NetworkTargetType::LOCAL_ONLY;
+            break;
+
+        case game_data_type::OBJECT:
+            if (sqf::is_null(static_cast<object>(target))) return done(true);
+            target_type = NetworkTargetType::OBJECT_OWNER;
+            target_data = target;
+            break;
+
+        case game_data_type::GROUP:
+            if (sqf::is_null(static_cast<group>(target))) return done(true);
+            target_type = NetworkTargetType::GROUP_MEMBERS;
+            target_data = target;
+            break;
+
+        case game_data_type::TEAM_MEMBER: {
+            game_value agent_obj = sqf::agent(target);
+            if (agent_obj.is_nil() || sqf::is_null(static_cast<object>(agent_obj))) return done(true);
+            target_type = NetworkTargetType::TEAM_MEMBER_OWNER;
+            target_data = target;
+            break;
+        }
+
+        case game_data_type::SIDE:
+            target_type = NetworkTargetType::SIDE_MEMBERS;
+            target_data = target;
+            break;
+
+        case game_data_type::LOCATION:
+            if (sqf::is_null(static_cast<location>(target))) return done(true);
+            target_type = NetworkTargetType::LOCATION_UNITS;
+            target_data = target;
+            break;
+
+        case game_data_type::CODE: {
+            game_value cond_payload = kh_make_array({ target, game_value(event_name), message });
+
+            // The key stores the conditional event itself (the name and payload sent below), so a client that
+            // joins later gets the same condition-gated event under it. The joiner evaluates the condition when
+            // the message arrives: one that reads its player unit needs unitRequired. A later plain JIP set of a
+            // variable supersedes it (store_jip_message erases it).
+            if (!jip.key.empty()) {
+                net.store_jip_message(jip.key, NET_INTERNAL_CONDITIONAL_EVENT, cond_payload, owner,
+                                      jip.dependency_net_id, jip.dependency_is_group, jip.unit_required);
+            }
+
+            return done(net.send_message_to_target(NetworkTargetType::CODE_CONDITION, game_value(),
+                                                   NET_INTERNAL_CONDITIONAL_EVENT, cond_payload));
+        }
+
+        case game_data_type::STRING: {
+            std::string target_str = static_cast<std::string>(target);
+            if (target_str.empty()) return done(true);
+            std::string target_upper = kh_upper_copy(target_str);
+
+            if (target_upper == "SERVER") {
+                target_type = NetworkTargetType::STRING_SERVER;
+            } else if (target_upper == "GLOBAL") {
+                target_type = NetworkTargetType::STRING_GLOBAL;
+            } else if (target_upper == "LOCAL") {
+                target_type = NetworkTargetType::STRING_LOCAL;
+            } else if (target_upper == "PLAYERS") {
+                target_type = NetworkTargetType::STRING_PLAYERS;
+            } else if (target_upper == "REMOTE") {
+                target_type = NetworkTargetType::STRING_REMOTE;
+            } else if (target_upper == "ADMIN") {
+                target_type = NetworkTargetType::STRING_ADMIN;
+            } else if (target_upper == "HEADLESS") {
+                target_type = NetworkTargetType::STRING_HEADLESS;
+            } else if (target_upper == "CURATORS") {
+                target_type = NetworkTargetType::STRING_CURATORS;
+            } else {
+                target_type = NetworkTargetType::STRING_EXTENDED;
+                target_data = game_value(target_str);
+            }
+
+            break;
+        }
+
+        case game_data_type::ARRAY:
+            if (target.to_array().empty()) return done(true);
+            target_type = NetworkTargetType::ARRAY_TARGETS;
+            target_data = target;
+            break;
+
+        default:
+            return done(true);
+    }
+
+    return done(net.send_message_to_target(target_type, target_data, event_name, message));
 }
 
 static game_value network_message_send_sqf(game_value_parameter left_arg, game_value_parameter right_arg) {
@@ -3317,264 +2935,21 @@ static game_value network_message_send_sqf(game_value_parameter left_arg, game_v
         auto& arr = right_arg.to_array();
 
         if (arr.size() < 2) {
-            report_error("KH Network: networkMessageSend requires [eventName, target]");
+            report_error("khNetworkMessageSend: requires [eventName, target]");
             return game_value(false);
         }
 
-        std::string event_name = static_cast<std::string>(arr[0]);
-        std::transform(event_name.begin(), event_name.end(), event_name.begin(), ::tolower);
-        game_value target = arr[1];
-        std::string jip_key = "";
-        std::string dependency_net_id = "";
-        bool dependency_is_group = false;
-        bool unit_required = false;
-
-        if (arr.size() > 2) {
-            game_value jip_arg = arr[2];
-
-            if (jip_arg.type_enum() == game_data_type::STRING) {
-                jip_key = static_cast<std::string>(jip_arg);
-            } else if (jip_arg.type_enum() == game_data_type::BOOL && static_cast<bool>(jip_arg)) {
-                jip_key = UIDGenerator::generate();
-            } else if (jip_arg.type_enum() == game_data_type::ARRAY) {
-                // Dependency can be object or group - will be stored as netId
-                auto& jip_arr = jip_arg.to_array();
-
-                if (!jip_arr.empty()) {
-                    // [0] dependency (object or group; null/other = no
-                    // dependency gating)
-                    game_value dependency = jip_arr[0];
-
-                    if (dependency.type_enum() == game_data_type::OBJECT) {
-                        object dep_obj = static_cast<object>(dependency);
-
-                        if (!sqf::is_null(dep_obj)) {
-                            dependency_net_id = static_cast<std::string>(sqf::net_id(dep_obj));
-                            dependency_is_group = false;
-                        }
-                    } else if (dependency.type_enum() == game_data_type::GROUP) {
-                        group dep_grp = static_cast<group>(dependency);
-
-                        if (!sqf::is_null(dep_grp)) {
-                            dependency_net_id = static_cast<std::string>(sqf::net_id(dep_grp));
-                            dependency_is_group = true;
-                        }
-                    }
-
-                    // unitRequired
-                    if (jip_arr.size() > 1 && jip_arr[1].type_enum() == game_data_type::BOOL) {
-                        unit_required = static_cast<bool>(jip_arr[1]);
-                    }
-
-                    if (jip_arr.size() > 2 && jip_arr[2].type_enum() == game_data_type::STRING) {
-                        std::string key_str = static_cast<std::string>(jip_arr[2]);
-                        jip_key = key_str.empty() ? UIDGenerator::generate() : key_str;
-                    } else {
-                        jip_key = UIDGenerator::generate();
-                    }
-                }
-            }
-        }
-
-        game_value message = left_arg;
+        std::string event_name = kh_lower_copy(static_cast<std::string>(arr[0]));
 
         if (event_name.empty()) {
-            report_error("KH Network: Event name cannot be empty");
+            report_error("khNetworkMessageSend: event name cannot be empty");
             return game_value(false);
         }
 
-        // KH_SQF_INT: a number target is a client id, checked before anything (the JIP store) acts.
-        int khns_client = 0;
-
-        if (!target.is_nil() && target.type_enum() == game_data_type::SCALAR && !kh_sqf_int(target, khns_client)) {
-            report_error("KH Network: A client id target must be a number within int range");
-            return game_value(false);
-        }
-
-        if (!kh_sqf_target_ids_ok(target)) {
-            report_error("KH Network: A client id in an array target must be a number within int range");
-            return game_value(false);
-        }
-
-        NetworkTargetType target_type;
-        game_value target_data;
-        bool target_is_code = (!target.is_nil() && target.type_enum() == game_data_type::CODE);
-
-        // A CODE target: its case below stores the conditional wrapper
-        // instead (KH_JIP_CODE; no plain-then-replace).
-        if (!jip_key.empty() && !target_is_code) {
-            NetworkFramework::instance().store_jip_message(jip_key, event_name, message, static_cast<int>(sqf::client_owner()), dependency_net_id, dependency_is_group, unit_required);
-        }
-
-        if (target.is_nil()) {
-            return (!jip_key.empty()) ? game_value(jip_key) : game_value(false);
-        }
-
-        auto type = target.type_enum();
-
-        switch (type) {
-            case game_data_type::SCALAR: {
-                int client_id = khns_client;   // KH_SQF_INT: checked above.
-
-                if (client_id < 0) {
-                    target_type = NetworkTargetType::CLIENT_ID_EXCLUDE;
-                    target_data = target;
-                } else {
-                    bool success = NetworkFramework::instance().send_message(client_id, event_name, message);                    
-                    return (!jip_key.empty()) ? game_value(jip_key) : game_value(success);
-                }
-
-                break;
-            }
-
-            case game_data_type::BOOL: {
-                bool val = static_cast<bool>(target);
-
-                if (!val) {
-                    return (!jip_key.empty()) ? game_value(jip_key) : game_value(true);
-                }
-
-                target_type = NetworkTargetType::LOCAL_ONLY;
-                break;
-            }
-
-            case game_data_type::OBJECT: {
-                object target_obj = static_cast<object>(target);
-
-                if (sqf::is_null(target_obj)) {
-                    return (!jip_key.empty()) ? game_value(jip_key) : game_value(true);
-                }
-
-                target_type = NetworkTargetType::OBJECT_OWNER;
-                target_data = target;
-                break;
-            }
-
-            case game_data_type::GROUP: {
-                group target_grp = static_cast<group>(target);
-
-                if (sqf::is_null(target_grp)) {
-                    return (!jip_key.empty()) ? game_value(jip_key) : game_value(true);
-                }
-
-                target_type = NetworkTargetType::GROUP_MEMBERS;
-                target_data = target;
-                break;
-            }
-
-            case game_data_type::TEAM_MEMBER: {
-                game_value agent_obj = sqf::agent(target);
-
-                if (agent_obj.is_nil() || sqf::is_null(static_cast<object>(agent_obj))) {
-                    return (!jip_key.empty()) ? game_value(jip_key) : game_value(true);
-                }
-
-                target_type = NetworkTargetType::TEAM_MEMBER_OWNER;
-                target_data = target;
-                break;
-            }
-
-            case game_data_type::SIDE:
-                target_type = NetworkTargetType::SIDE_MEMBERS;
-                target_data = target;
-                break;
-
-            case game_data_type::LOCATION: {
-                location target_loc = static_cast<location>(target);
-
-                if (sqf::is_null(target_loc)) {
-                    return (!jip_key.empty()) ? game_value(jip_key) : game_value(true);
-                }
-
-                target_type = NetworkTargetType::LOCATION_UNITS;
-                target_data = target;
-                break;
-            }
-
-            case game_data_type::CODE: {
-                auto_array<game_value> cond_data;
-                cond_data.push_back(target);
-                cond_data.push_back(game_value(event_name));
-                cond_data.push_back(message);
-                game_value cond_payload(std::move(cond_data));
-
-                // KH_JIP_CODE: the key stores the conditional event itself (the name and payload sent below), so a
-                // client that joins later gets the same condition-gated event under it. The joiner evaluates the
-                // condition when the message arrives: one that reads its player unit needs unitRequired.
-                if (!jip_key.empty()) {
-                    NetworkFramework::instance().store_jip_message(
-                        jip_key, NET_INTERNAL_CONDITIONAL_EVENT, cond_payload, static_cast<int>(sqf::client_owner()),
-                        dependency_net_id, dependency_is_group, unit_required);
-                }
-
-                bool success = NetworkFramework::instance().send_message_to_target(
-                    NetworkTargetType::CODE_CONDITION,
-                    game_value(),
-                    NET_INTERNAL_CONDITIONAL_EVENT,
-                    cond_payload
-                );
-
-                return (!jip_key.empty()) ? game_value(jip_key) : game_value(success);
-            }
-
-            case game_data_type::STRING: {
-                std::string target_str = static_cast<std::string>(target);
-
-                if (target_str.empty()) {
-                    return (!jip_key.empty()) ? game_value(jip_key) : game_value(true);
-                }
-
-                std::string target_upper = target_str;
-                std::transform(target_upper.begin(), target_upper.end(), target_upper.begin(), ::toupper);
-
-                if (target_upper == "SERVER") {
-                    target_type = NetworkTargetType::STRING_SERVER;
-                } else if (target_upper == "GLOBAL") {
-                    target_type = NetworkTargetType::STRING_GLOBAL;
-                } else if (target_upper == "LOCAL") {
-                    target_type = NetworkTargetType::STRING_LOCAL;
-                } else if (target_upper == "PLAYERS") {
-                    target_type = NetworkTargetType::STRING_PLAYERS;
-                } else if (target_upper == "REMOTE") {
-                    target_type = NetworkTargetType::STRING_REMOTE;
-                } else if (target_upper == "ADMIN") {
-                    target_type = NetworkTargetType::STRING_ADMIN;
-                } else if (target_upper == "HEADLESS") {
-                    target_type = NetworkTargetType::STRING_HEADLESS;
-                } else if (target_upper == "CURATORS") {
-                    target_type = NetworkTargetType::STRING_CURATORS;
-                } else {
-                    target_type = NetworkTargetType::STRING_EXTENDED;
-                    target_data = game_value(target_str);
-                }
-
-                break;
-            }
-
-            case game_data_type::ARRAY: {
-                if (target.to_array().empty()) {
-                    return (!jip_key.empty()) ? game_value(jip_key) : game_value(true);
-                }
-
-                target_type = NetworkTargetType::ARRAY_TARGETS;
-                target_data = target;
-                break;
-            }
-
-            default:
-                return (!jip_key.empty()) ? game_value(jip_key) : game_value(true);
-        }
-
-        bool success = NetworkFramework::instance().send_message_to_target(
-            target_type,
-            target_data,
-            event_name,
-            message
-        );
-
-        return (!jip_key.empty()) ? game_value(jip_key) : game_value(success);
+        return kh_network_dispatch("khNetworkMessageSend", arr[1], event_name, left_arg,
+                                   kh_parse_jip(kh_param(arr, 2, game_value())));
     } catch (const std::exception& e) {
-        report_error("KH Network: Error in networkMessageSend - " + std::string(e.what()));
+        report_error("khNetworkMessageSend: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -3584,14 +2959,14 @@ static game_value network_remove_jip_sqf(game_value_parameter jip_key_value) {
         std::string jip_key = static_cast<std::string>(jip_key_value);
 
         if (jip_key.empty()) {
-            report_error("KH Network: JIP key cannot be empty");
+            report_error("khNetworkMessageRemoveJip: JIP key cannot be empty");
             return game_value(false);
         }
 
         NetworkFramework::instance().request_remove_jip(jip_key);
         return game_value(true);
     } catch (const std::exception& e) {
-        report_error("KH Network: Error in networkMessageRemoveJip - " + std::string(e.what()));
+        report_error("khNetworkMessageRemoveJip: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -3605,11 +2980,10 @@ static game_value network_message_receive_sqf(game_value_parameter left_arg, gam
     };
 
     try {
-        std::string event_name = static_cast<std::string>(left_arg);
-        std::transform(event_name.begin(), event_name.end(), event_name.begin(), ::tolower);
+        std::string event_name = kh_lower_copy(static_cast<std::string>(left_arg));
 
         if (event_name.empty()) {
-            report_error("KH Network: Event name cannot be empty");
+            report_error("khNetworkMessageReceive: event name cannot be empty");
             return fail();
         }
 
@@ -3620,7 +2994,7 @@ static game_value network_message_receive_sqf(game_value_parameter left_arg, gam
             auto& arr = right_arg.to_array();
 
             if (arr.size() < 2) {
-                report_error("KH Network: networkMessageReceive requires [arguments, function] or just function");
+                report_error("khNetworkMessageReceive: requires [arguments, function] or just function");
                 return fail();
             }
 
@@ -3629,7 +3003,7 @@ static game_value network_message_receive_sqf(game_value_parameter left_arg, gam
             if (arr[1].type_enum() == game_data_type::CODE) {
                 handler_function = static_cast<code>(arr[1]);
             } else {
-                report_error("KH Network: Handler must be code");
+                report_error("khNetworkMessageReceive: handler must be code");
                 return fail();
             }
         } else {
@@ -3639,7 +3013,7 @@ static game_value network_message_receive_sqf(game_value_parameter left_arg, gam
         // Ensure network is initialized
         if (!NetworkFramework::instance().is_initialized()) {
             if (!NetworkFramework::instance().initialize()) {
-                report_error("KH Network: Failed to initialize network framework");
+                report_error("khNetworkMessageReceive: failed to initialize network framework");
                 return fail();
             }
         }
@@ -3651,7 +3025,7 @@ static game_value network_message_receive_sqf(game_value_parameter left_arg, gam
         result.push_back(game_value(static_cast<float>(sqf::client_owner())));
         return game_value(std::move(result));
     } catch (const std::exception& e) {
-        report_error("KH Network: Error in networkMessageReceive - " + std::string(e.what()));
+        report_error("khNetworkMessageReceive: " + std::string(e.what()));
         return fail();
     }
 }
@@ -3669,19 +3043,19 @@ static game_value network_remove_handler_sqf(game_value_parameter handler_value)
             auto& a = handler_value.to_array();
 
             if (a.size() < 2) {
-                report_error("KH Network: networkRemoveHandler requires [handlerId, owner]");
+                report_error("khNetworkRemoveHandler: requires [handlerId, owner]");
                 return game_value(false);
             }
 
-            if (!kh_sqf_int(a[0], handler_id) || !kh_sqf_int(a[1], owner_id)) {   // KH_SQF_INT.
-                report_error("KH Network: networkRemoveHandler [handlerId, owner] must be numbers within int range");
+            if (!kh_sqf_int(a[0], handler_id) || !kh_sqf_int(a[1], owner_id)) {
+                report_error("khNetworkRemoveHandler: [handlerId, owner] must be numbers within int range");
                 return game_value(false);
             }
         } else {
             // Back-compat: a bare handler id targets a handler owned by this
             // machine.
-            if (!kh_sqf_int(handler_value, handler_id)) {   // KH_SQF_INT.
-                report_error("KH Network: Handler ID must be a number within int range");
+            if (!kh_sqf_int(handler_value, handler_id)) {
+                report_error("khNetworkRemoveHandler: handler ID must be a number within int range");
                 return game_value(false);
             }
 
@@ -3689,14 +3063,14 @@ static game_value network_remove_handler_sqf(game_value_parameter handler_value)
         }
 
         if (handler_id < 0) {
-            report_error("KH Network: Invalid handler ID");
+            report_error("khNetworkRemoveHandler: invalid handler ID");
             return game_value(false);
         }
 
         NetworkFramework::instance().request_remove_handler(handler_id, owner_id);
         return game_value(true);
     } catch (const std::exception& e) {
-        report_error("KH Network: Error in networkRemoveHandler - " + std::string(e.what()));
+        report_error("khNetworkRemoveHandler: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -3729,7 +3103,7 @@ static game_value enable_network_logging_sqf(game_value_parameter enabled_value)
         NetworkFramework::instance().set_network_logging(enabled);
         return game_value(true);
     } catch (const std::exception& e) {
-        report_error("KH Network: Error in khNetworkLog - " + std::string(e.what()));
+        report_error("enableKhNetworkLogging: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -3739,281 +3113,25 @@ static game_value kh_set_variable_impl(game_value_parameter left_arg, game_value
         auto& arr = right_arg.to_array();
 
         if (arr.size() < 2) {
-            report_error("KH SetVariable: Array must contain at least [name, value]");
+            report_error("khSetVariable: array must contain at least [name, value]");
             return game_value(false);
         }
 
-        std::string var_name = static_cast<std::string>(arr[0]);
-        std::transform(var_name.begin(), var_name.end(), var_name.begin(), ::tolower);
-        game_value value = arr[1];
-        game_value target = arr.size() > 2 ? arr[2] : game_value(true);
+        std::string var_name = kh_lower_copy(static_cast<std::string>(arr[0]));
 
         if (var_name.empty()) {
-            report_error("KH SetVariable: Variable name cannot be empty");
+            report_error("khSetVariable: variable name cannot be empty");
             return game_value(false);
         }
 
-        // KH_SQF_INT: a number target is a client id, checked before anything (the JIP store) acts.
-        int khsv_client = 0;
-
-        if (!target.is_nil() && target.type_enum() == game_data_type::SCALAR && !kh_sqf_int(target, khsv_client)) {
-            report_error("KH SetVariable: A client id target must be a number within int range");
-            return game_value(false);
-        }
-
-        if (!kh_sqf_target_ids_ok(target)) {
-            report_error("KH SetVariable: A client id in an array target must be a number within int range");
-            return game_value(false);
-        }
-
-        std::string jip_key = "";
-        std::string dependency_net_id = "";
-        bool dependency_is_group = false;
-        bool unit_required = false;
-
-        if (arr.size() > 3) {
-            game_value jip_arg = arr[3];
-
-            if (jip_arg.type_enum() == game_data_type::STRING) {
-                jip_key = static_cast<std::string>(jip_arg);
-            } else if (jip_arg.type_enum() == game_data_type::BOOL && static_cast<bool>(jip_arg)) {
-                jip_key = UIDGenerator::generate();
-            } else if (jip_arg.type_enum() == game_data_type::ARRAY) {
-                auto& jip_arr = jip_arg.to_array();
-
-                if (!jip_arr.empty()) {
-                    game_value dependency = jip_arr[0];
-
-                    if (dependency.type_enum() == game_data_type::OBJECT) {
-                        object dep_obj = static_cast<object>(dependency);
-
-                        if (!sqf::is_null(dep_obj)) {
-                            dependency_net_id = static_cast<std::string>(sqf::net_id(dep_obj));
-                            dependency_is_group = false;
-                        }
-                    } else if (dependency.type_enum() == game_data_type::GROUP) {
-                        group dep_grp = static_cast<group>(dependency);
-
-                        if (!sqf::is_null(dep_grp)) {
-                            dependency_net_id = static_cast<std::string>(sqf::net_id(dep_grp));
-                            dependency_is_group = true;
-                        }
-                    }
-
-                    // unitRequired
-                    if (jip_arr.size() > 1 && jip_arr[1].type_enum() == game_data_type::BOOL) {
-                        unit_required = static_cast<bool>(jip_arr[1]);
-                    }
-
-                    if (jip_arr.size() > 2 && jip_arr[2].type_enum() == game_data_type::STRING) {
-                        std::string key_str = static_cast<std::string>(jip_arr[2]);
-                        jip_key = key_str.empty() ? UIDGenerator::generate() : key_str;
-                    } else {
-                        jip_key = UIDGenerator::generate();
-                    }
-                }
-            }
-        }
-
-        game_value ns_data = NetworkFramework::serialize_namespace_for_network(left_arg);
-        auto_array<game_value> message_data;
-        message_data.push_back(ns_data);
-        message_data.push_back(game_value(var_name));
-        message_data.push_back(value);
-        game_value message(std::move(message_data));
-        bool target_is_code = (!target.is_nil() && target.type_enum() == game_data_type::CODE);
-
-        // Store the JIP message now, unless the target is CODE: its case
-        // below stores the conditional wrapper instead (KH_JIP_CODE; no
-        // plain-then-replace).
-        if (!jip_key.empty() && !target_is_code) {
-            NetworkFramework::instance().store_jip_message(
-                jip_key, 
-                NET_INTERNAL_SET_VARIABLE_EVENT, 
-                message, 
-                static_cast<int>(sqf::client_owner()),
-                dependency_net_id,
-                dependency_is_group,
-                unit_required
-            );
-        }
-
-        NetworkTargetType target_type;
-        game_value target_data;
-
-        if (target.is_nil()) {
-            return (!jip_key.empty()) ? game_value(jip_key) : game_value(false);
-        }
-
-        auto type = target.type_enum();
-
-        switch (type) {
-            case game_data_type::SCALAR: {
-                int client_id = khsv_client;   // KH_SQF_INT: checked above.
-
-                if (client_id < 0) {
-                    target_type = NetworkTargetType::CLIENT_ID_EXCLUDE;
-                    target_data = target;
-                } else {
-                    bool success = NetworkFramework::instance().send_message(
-                        client_id, 
-                        NET_INTERNAL_SET_VARIABLE_EVENT, 
-                        message
-                    );
-
-                    return (!jip_key.empty()) ? game_value(jip_key) : game_value(success);
-                }
-
-                break;
-            }
-
-            case game_data_type::BOOL: {
-                bool val = static_cast<bool>(target);
-
-                if (!val) {
-                    return (!jip_key.empty()) ? game_value(jip_key) : game_value(true);
-                }
-
-                target_type = NetworkTargetType::LOCAL_ONLY;
-                break;
-            }
-
-            case game_data_type::OBJECT: {
-                object target_obj = static_cast<object>(target);
-
-                if (sqf::is_null(target_obj)) {
-                    return (!jip_key.empty()) ? game_value(jip_key) : game_value(true);
-                }
-
-                target_type = NetworkTargetType::OBJECT_OWNER;
-                target_data = target;
-                break;
-            }
-
-            case game_data_type::GROUP: {
-                group target_grp = static_cast<group>(target);
-
-                if (sqf::is_null(target_grp)) {
-                    return (!jip_key.empty()) ? game_value(jip_key) : game_value(true);
-                }
-
-                target_type = NetworkTargetType::GROUP_MEMBERS;
-                target_data = target;
-                break;
-            }
-
-            case game_data_type::TEAM_MEMBER: {   // KH_SETVAR_TEAM: as networkMessageSend's case.
-                game_value agent_obj = sqf::agent(target);
-
-                if (agent_obj.is_nil() || sqf::is_null(static_cast<object>(agent_obj))) {
-                    return (!jip_key.empty()) ? game_value(jip_key) : game_value(true);
-                }
-
-                target_type = NetworkTargetType::TEAM_MEMBER_OWNER;
-                target_data = target;
-                break;
-            }
-
-            case game_data_type::SIDE:
-                target_type = NetworkTargetType::SIDE_MEMBERS;
-                target_data = target;
-                break;
-
-            case game_data_type::LOCATION: {
-                location target_loc = static_cast<location>(target);
-
-                if (sqf::is_null(target_loc)) {
-                    return (!jip_key.empty()) ? game_value(jip_key) : game_value(true);
-                }
-
-                target_type = NetworkTargetType::LOCATION_UNITS;
-                target_data = target;
-                break;
-            }
-
-            case game_data_type::CODE: {
-                auto_array<game_value> cond_data;
-                cond_data.push_back(target);
-                cond_data.push_back(game_value(std::string(NET_INTERNAL_SET_VARIABLE_EVENT)));
-                cond_data.push_back(message);
-                game_value cond_payload(std::move(cond_data));
-
-                // KH_JIP_CODE: as networkMessageSend - the key stores the conditional event sent below; a later
-                // plain JIP set of the variable supersedes it (store_jip_message erases it).
-                if (!jip_key.empty()) {
-                    NetworkFramework::instance().store_jip_message(
-                        jip_key, NET_INTERNAL_CONDITIONAL_EVENT, cond_payload, static_cast<int>(sqf::client_owner()),
-                        dependency_net_id, dependency_is_group, unit_required);
-                }
-
-                bool success = NetworkFramework::instance().send_message_to_target(
-                    NetworkTargetType::CODE_CONDITION,
-                    game_value(),
-                    NET_INTERNAL_CONDITIONAL_EVENT,
-                    cond_payload
-                );
-
-                return (!jip_key.empty()) ? game_value(jip_key) : game_value(success);
-            }
-
-            case game_data_type::STRING: {
-                std::string target_str = static_cast<std::string>(target);
-
-                if (target_str.empty()) {
-                    return (!jip_key.empty()) ? game_value(jip_key) : game_value(true);
-                }
-
-                std::string target_upper = target_str;
-                std::transform(target_upper.begin(), target_upper.end(), target_upper.begin(), ::toupper);
-
-                if (target_upper == "SERVER") {
-                    target_type = NetworkTargetType::STRING_SERVER;
-                } else if (target_upper == "GLOBAL") {
-                    target_type = NetworkTargetType::STRING_GLOBAL;
-                } else if (target_upper == "LOCAL") {
-                    target_type = NetworkTargetType::STRING_LOCAL;
-                } else if (target_upper == "PLAYERS") {
-                    target_type = NetworkTargetType::STRING_PLAYERS;
-                } else if (target_upper == "REMOTE") {
-                    target_type = NetworkTargetType::STRING_REMOTE;
-                } else if (target_upper == "ADMIN") {
-                    target_type = NetworkTargetType::STRING_ADMIN;
-                } else if (target_upper == "HEADLESS") {
-                    target_type = NetworkTargetType::STRING_HEADLESS;
-                } else if (target_upper == "CURATORS") {
-                    target_type = NetworkTargetType::STRING_CURATORS;
-                } else {
-                    target_type = NetworkTargetType::STRING_EXTENDED;
-                    target_data = game_value(target_str);
-                }
-
-                break;
-            }
-
-            case game_data_type::ARRAY: {
-                if (target.to_array().empty()) {
-                    return (!jip_key.empty()) ? game_value(jip_key) : game_value(true);
-                }
-
-                target_type = NetworkTargetType::ARRAY_TARGETS;
-                target_data = target;
-                break;
-            }
-
-            default:
-                return (!jip_key.empty()) ? game_value(jip_key) : game_value(true);
-        }
-
-        bool success = NetworkFramework::instance().send_message_to_target(
-            target_type,
-            target_data,
-            NET_INTERNAL_SET_VARIABLE_EVENT,
-            message
-        );
-
-        return (!jip_key.empty()) ? game_value(jip_key) : game_value(success);
+        game_value message = kh_make_array({
+            NetworkFramework::serialize_namespace_for_network(left_arg), game_value(var_name), arr[1]
+        });
+        const game_value target = kh_param(arr, 2, game_value(true));
+        return kh_network_dispatch("khSetVariable", target, NET_INTERNAL_SET_VARIABLE_EVENT, message,
+                                   kh_parse_jip(kh_param(arr, 3, game_value())));
     } catch (const std::exception& e) {
-        report_error("KH SetVariable: Error - " + std::string(e.what()));
+        report_error("khSetVariable: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -4023,12 +3141,12 @@ static game_value ts_connect_sqf() {
         bool success = TeamspeakFramework::instance().initialize();
 
         if (success) {
-            sqf::diag_log("KH - TeamSpeak: Connected to IPC");
+            sqf::diag_log("KH TeamSpeak: connected to IPC");
         }
 
         return game_value(success);
     } catch (const std::exception& e) {
-        report_error("KH - TeamSpeak: Error in tsConnect - " + std::string(e.what()));
+        report_error("tsConnect: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -4036,10 +3154,10 @@ static game_value ts_connect_sqf() {
 static game_value ts_disconnect_sqf() {
     try {
         TeamspeakFramework::instance().cleanup();
-        sqf::diag_log("KH - TeamSpeak: Disconnected from IPC");
+        sqf::diag_log("KH TeamSpeak: disconnected from IPC");
         return game_value(true);
     } catch (const std::exception& e) {
-        report_error("KH - TeamSpeak: Error in tsDisconnect - " + std::string(e.what()));
+        report_error("tsDisconnect: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -4047,15 +3165,15 @@ static game_value ts_disconnect_sqf() {
 static game_value ts_apply_voice_effects_sqf(game_value_parameter params) {
     try {
         if (params.type_enum() != game_data_type::ARRAY) {
-            report_error("KH - TeamSpeak: tsApplyVoiceEffects requires an array of effects");
+            report_error("tsApplyVoiceEffects: requires an array of effects");
             return game_value(false);
         }
 
-        auto effects = TeamspeakFramework::parse_effects_from_args(params, 0);
+        auto effects = kh_parse_effects(params.to_array(), 0);
         bool success = TeamspeakFramework::instance().apply_voice_effects(effects);        
         return game_value(success);
     } catch (const std::exception& e) {
-        report_error("KH - TeamSpeak: Error in tsApplyVoiceEffects - " + std::string(e.what()));
+        report_error("tsApplyVoiceEffects: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -4065,7 +3183,7 @@ static game_value ts_clear_voice_effects_sqf() {
         bool success = TeamspeakFramework::instance().clear_voice_effects();        
         return game_value(success);
     } catch (const std::exception& e) {
-        report_error("KH - TeamSpeak: Error in tsClearVoiceEffects - " + std::string(e.what()));
+        report_error("tsClearVoiceEffects: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -4074,7 +3192,7 @@ static game_value ts_is_initialized_sqf() {
     try {
         return game_value(TeamspeakFramework::instance().is_initialized());
     } catch (const std::exception& e) {
-        report_error("KH - TeamSpeak: Error in tsIsInitialized - " + std::string(e.what()));
+        report_error("tsIsInitialized: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -4083,7 +3201,7 @@ static game_value ts_is_plugin_active_sqf() {
     try {
         return game_value(TeamspeakFramework::instance().is_plugin_active());
     } catch (const std::exception& e) {
-        report_error("KH - TeamSpeak: Error in tsIsPluginActive - " + std::string(e.what()));
+        report_error("tsIsPluginActive: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -4092,7 +3210,7 @@ static game_value ts_is_connected_sqf() {
     try {
         return game_value(TeamspeakFramework::instance().is_connected());
     } catch (const std::exception& e) {
-        report_error("KH - TeamSpeak: Error in tsIsConnected - " + std::string(e.what()));
+        report_error("tsIsConnected: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -4101,7 +3219,7 @@ static game_value ts_is_plugin_installed_sqf() {
     try {
         return game_value(TeamspeakFramework::is_plugin_installed());
     } catch (const std::exception& e) {
-        report_error("KH - TeamSpeak: Error in tsIsPluginInstalled - " + std::string(e.what()));
+        report_error("tsIsPluginInstalled: " + std::string(e.what()));
         return game_value(false);
     }
 }
@@ -4170,44 +3288,37 @@ static game_value serialize_function_impl(const game_value& function, bool is_pu
 
         return game_value(hash_str);
     } catch (const std::exception& e) {
-        report_error(std::string(e.what()));
+        report_error("serializeFunction: " + std::string(e.what()));
         return game_value();
     } catch (...) {
-        report_error("Failed to serialize function");
+        report_error("serializeFunction: failed to serialize function");
         return game_value();
     }
+}
+
+// Runs fnc with the arguments as _thisArguments (left as they were when nil) and itself as _thisFunction - called
+// when unscheduled, else spawned with the arguments (an empty array for nil).
+static game_value kh_call_or_spawn(const code& fnc, const game_value& arguments, bool unscheduled) {
+    if (!unscheduled) return sqf::spawn(arguments.is_nil() ? game_value(auto_array<game_value>()) : arguments, fnc);
+    static const r_string n_arguments("_thisarguments");
+    static const r_string n_function("_thisfunction");
+    auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
+    if (!arguments.is_nil()) game_state->set_local_variable(n_arguments, arguments);
+    game_state->set_local_variable(n_function, fnc);
+    return raw_call_sqf_native(arguments.is_nil() ? g_compiled_sqf_generic_call : g_compiled_sqf_generic_call_args);
 }
 
 static game_value call_serialized_function_sqf(game_value_parameter arguments, game_value_parameter params) {
     try {
         auto& arr = params.to_array();
-        game_value function = arr.size() > 0 ? arr[0] : game_value();
-        bool unscheduled = arr.size() > 2 ? static_cast<bool>(arr[2]) : true;
+        game_value function = kh_param(arr, 0, game_value());
+        const bool unscheduled = kh_param_bool(arr, 2, true);
         const bool args_nil = arguments.is_nil();
-        static const r_string n_arguments("_thisarguments");
-        static const r_string n_function("_thisfunction");
         auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
 
         // Case 1: _function is CODE -> run it directly
-        if (!function.is_nil() && function.type_enum() == game_data_type::CODE) {
-            code fnc = static_cast<code>(function);
-
-            if (unscheduled) {
-                if (args_nil) {
-                    game_state->set_local_variable(n_function, fnc);
-                    return raw_call_sqf_native(g_compiled_sqf_generic_call);
-                } else {
-                    game_state->set_local_variable(n_arguments, arguments);
-                    game_state->set_local_variable(n_function, fnc);
-                    return raw_call_sqf_native(g_compiled_sqf_generic_call_args);
-                }
-            } else {
-                if (args_nil) {
-                    return sqf::spawn(game_value(auto_array<game_value>()), fnc);
-                } else {
-                    return sqf::spawn(arguments, fnc);
-                }
-            }
+        if (function.type_enum() == game_data_type::CODE) {
+            return kh_call_or_spawn(static_cast<code>(function), arguments, unscheduled);
         }
 
         // Case 2: _function is a string name -> resolve from missionNamespace
@@ -4218,14 +3329,14 @@ static game_value call_serialized_function_sqf(game_value_parameter arguments, g
             kh_command_entry* entry = kh_find_command(fname);
 
             if (entry != nullptr) {
-                static const r_string kh_n_left_argument("_khleftargument");
-                static const r_string kh_n_right_argument("_khrightargument");
+                static const r_string n_left_argument("_khleftargument");
+                static const r_string n_right_argument("_khrightargument");
                 int argument_count = 0;
                 const auto_array<game_value>* argument_array = nullptr;
 
                 if (!args_nil) {
                     if (arguments.type_enum() != game_data_type::ARRAY) {
-                        report_error("KH Framework Extension - Command '" + entry->canonical_name
+                        report_error("callSerializedFunction: command '" + entry->canonical_name
                                      + "' expects its arguments as an array");
 
                         return game_value();
@@ -4236,7 +3347,7 @@ static game_value call_serialized_function_sqf(game_value_parameter arguments, g
                 }
 
                 if (argument_count > 2) {
-                    report_error("KH Framework Extension - Command '" + entry->canonical_name
+                    report_error("callSerializedFunction: command '" + entry->canonical_name
                                  + "' was given " + std::to_string(argument_count)
                                  + " arguments; SQF commands accept at most 2");
 
@@ -4248,7 +3359,7 @@ static game_value call_serialized_function_sqf(game_value_parameter arguments, g
                     : entry->spawn_variant[argument_count];
 
                 if (!variant.exists) {
-                    report_error("KH Framework Extension - Command '" + entry->canonical_name
+                    report_error("callSerializedFunction: command '" + entry->canonical_name
                                  + "' has no variant taking " + std::to_string(argument_count)
                                  + " argument(s); supported argument counts: "
                                  + kh_command_arity_description(*entry));
@@ -4265,10 +3376,10 @@ static game_value call_serialized_function_sqf(game_value_parameter arguments, g
 
                 if (argument_count > 0) {
                     const auto_array<game_value>& args_ref = *argument_array;
-                    game_state->set_local_variable(kh_n_right_argument, args_ref[argument_count - 1]);
+                    game_state->set_local_variable(n_right_argument, args_ref[argument_count - 1]);
 
                     if (argument_count == 2) {
-                        game_state->set_local_variable(kh_n_left_argument, args_ref[0]);
+                        game_state->set_local_variable(n_left_argument, args_ref[0]);
                     }
                 }
 
@@ -4280,50 +3391,23 @@ static game_value call_serialized_function_sqf(game_value_parameter arguments, g
             rv_namespace ns = sqf::mission_namespace();
             game_value stored = sqf::get_variable(ns, fname);
 
-            if (!stored.is_nil() && stored.type_enum() == game_data_type::CODE) {
-                code fnc = static_cast<code>(stored);
-
-                if (unscheduled) {
-                    if (args_nil) {
-                        game_state->set_local_variable(n_function, fnc);
-                        return raw_call_sqf_native(g_compiled_sqf_generic_call);
-                    } else {
-                        game_state->set_local_variable(n_arguments, arguments);
-                        game_state->set_local_variable(n_function, fnc);
-                        return raw_call_sqf_native(g_compiled_sqf_generic_call_args);
-                    }
-                } else {
-                    if (args_nil) {
-                        return sqf::spawn(game_value(auto_array<game_value>()), fnc);
-                    } else {
-                        return sqf::spawn(arguments, fnc);
-                    }
-                }
+            if (stored.type_enum() == game_data_type::CODE) {
+                return kh_call_or_spawn(static_cast<code>(stored), arguments, unscheduled);
             }
         }
 
         // Case 3: fallback -> remote execute call
-        game_value caller = arr.size() > 1 ? arr[1] : game_value(2);
-        auto_array<game_value> special;
-        special.push_back(game_value(std::string("CALLBACK")));
-        auto_array<game_value> fn_wrap;
-        fn_wrap.push_back(function);
-        special.push_back(game_value(std::move(fn_wrap)));
-        special.push_back(game_value(std::string("KH_fnc_retrieveSerializedFunction")));
-        auto_array<game_value> inner;
-        inner.push_back(arguments);
-        inner.push_back(function);
-        inner.push_back(caller);
-        inner.push_back(game_value(unscheduled));
-        auto_array<game_value> exec_args;
-        exec_args.push_back(game_value(std::move(inner)));
-        exec_args.push_back(game_value(std::string("KH_fnc_processRemoteSerializedFunction")));
-        exec_args.push_back(game_value(std::string("SERVER")));
-        exec_args.push_back(game_value(true));
-        exec_args.push_back(game_value(std::move(special)));
-        return kh_execute_impl(game_value(std::move(exec_args)));
+        game_value caller = kh_param(arr, 1, game_value(2));
+        return kh_execute_impl(kh_make_array({
+            kh_make_array({ arguments, function, caller, game_value(unscheduled) }),
+            game_value("KH_fnc_processRemoteSerializedFunction"),
+            game_value("SERVER"),
+            game_value(true),
+            kh_make_array({ game_value("CALLBACK"), kh_make_array({ function }),
+                            game_value("KH_fnc_retrieveSerializedFunction") })
+        }));
     } catch (const std::exception& e) {
-        report_error(std::string(e.what()));
+        report_error("callSerializedFunction: " + std::string(e.what()));
         return game_value();
     }
 }
@@ -4346,33 +3430,21 @@ static game_value kh_hashmap_get(const game_value& map, const game_value& key) {
 }
 
 static game_value kh_cba_local_event(const game_value& event_name, const game_value& arguments) {
-    auto_array<game_value> event_params;
-    event_params.push_back(event_name);
-    event_params.push_back(arguments);
-    return raw_call_sqf_args_native(g_compiled_kh_cba_local_event, game_value(std::move(event_params)));
+    return raw_call_sqf_args_native(g_compiled_kh_cba_local_event, kh_make_array({ event_name, arguments }));
 }
 
 static game_value kh_cba_server_event(const game_value& event_name, const game_value& arguments) {
-    auto_array<game_value> event_params;
-    event_params.push_back(event_name);
-    event_params.push_back(arguments);
-    return raw_call_sqf_args_native(g_compiled_kh_cba_server_event, game_value(std::move(event_params)));
+    return raw_call_sqf_args_native(g_compiled_kh_cba_server_event, kh_make_array({ event_name, arguments }));
 }
 
 static game_value kh_cba_owner_event(const game_value& event_name, const game_value& arguments, const game_value& owner_machine) {
-    auto_array<game_value> event_params;
-    event_params.push_back(event_name);
-    event_params.push_back(arguments);
-    event_params.push_back(owner_machine);
-    return raw_call_sqf_args_native(g_compiled_kh_cba_owner_event, game_value(std::move(event_params)));
+    return raw_call_sqf_args_native(g_compiled_kh_cba_owner_event,
+                                    kh_make_array({ event_name, arguments, owner_machine }));
 }
 
 static game_value kh_cba_target_event(const game_value& event_name, const game_value& arguments, const game_value& event_target) {
-    auto_array<game_value> event_params;
-    event_params.push_back(event_name);
-    event_params.push_back(arguments);
-    event_params.push_back(event_target);
-    return raw_call_sqf_args_native(g_compiled_kh_cba_target_event, game_value(std::move(event_params)));
+    return raw_call_sqf_args_native(g_compiled_kh_cba_target_event,
+                                    kh_make_array({ event_name, arguments, event_target }));
 }
 
 // Native equivalent of SQF 'flatten'; nils are preserved as elements
@@ -4390,13 +3462,9 @@ static void kh_flatten_into(const game_value& value, auto_array<game_value>& out
 
 // equivalent: execute [_arguments, _function, _target, true, false]
 static game_value kh_cba_execute_remote(const game_value& execute_arguments, const code& function, const char* execute_target) {
-    auto_array<game_value> exec_args;
-    exec_args.push_back(execute_arguments);
-    exec_args.push_back(game_value(function));
-    exec_args.push_back(game_value(std::string(execute_target)));
-    exec_args.push_back(game_value(true));
-    exec_args.push_back(game_value(false));
-    return kh_execute_impl(game_value(std::move(exec_args)));
+    return kh_execute_impl(kh_make_array({
+        execute_arguments, game_value(function), game_value(execute_target), game_value(true), game_value(false)
+    }));
 }
 
 static game_value kh_cba_owner_event_broadcast(const game_value& event_name, const game_value& arguments, const char* machines_variable, bool has_excluded_machine, float excluded_machine) {
@@ -4560,7 +3628,7 @@ static game_value trigger_cba_event_sqf(game_value_parameter params) {
         if (params.type_enum() != game_data_type::ARRAY) return game_value();
         auto& p = params.to_array();
         game_value event = kh_param(p, 0, game_value(std::string()), {game_data_type::STRING, game_data_type::ARRAY});
-        game_value arguments = p.size() > 1 ? p[1] : game_value();
+        game_value arguments = kh_param(p, 1, game_value());
         game_value target = kh_param(p, 2, game_value(true), {game_data_type::BOOL, game_data_type::SCALAR, game_data_type::STRING, game_data_type::ARRAY, game_data_type::CODE, game_data_type::OBJECT, game_data_type::TEAM_MEMBER, game_data_type::GROUP, game_data_type::SIDE, game_data_type::LOCATION});
         game_value jip = kh_param(p, 3, game_value(false), {game_data_type::BOOL, game_data_type::ARRAY});
 
@@ -4778,10 +3846,10 @@ static game_value trigger_cba_event_sqf(game_value_parameter params) {
 
         return return_value;
     } catch (const std::exception& e) {
-        report_error(std::string(e.what()));
+        report_error("triggerCbaEvent: " + std::string(e.what()));
         return game_value();
     } catch (...) {
-        report_error("An unknown error occurred in triggerCbaEvent");
+        report_error("triggerCbaEvent: unknown error");
         return game_value();
     }
 }
@@ -4909,8 +3977,8 @@ static game_value process_cba_group_event_sqf(game_value_parameter params) {
     try {
         if (params.type_enum() != game_data_type::ARRAY) return game_value();
         auto& p = params.to_array();
-        game_value event = p.size() > 0 ? p[0] : game_value();
-        game_value arguments = p.size() > 1 ? p[1] : game_value();
+        game_value event = kh_param(p, 0, game_value());
+        game_value arguments = kh_param(p, 1, game_value());
         game_value target = kh_param(p, 2, game_value(), {game_data_type::GROUP});
 
         if (target.is_nil()) {
@@ -4930,10 +3998,10 @@ static game_value process_cba_group_event_sqf(game_value_parameter params) {
 
         return game_value();
     } catch (const std::exception& e) {
-        report_error(std::string(e.what()));
+        report_error("processCbaGroupEvent: " + std::string(e.what()));
         return game_value();
     } catch (...) {
-        report_error("An unknown error occurred in processCbaGroupEvent");
+        report_error("processCbaGroupEvent: unknown error");
         return game_value();
     }
 }
@@ -4944,7 +4012,7 @@ static game_value process_cba_code_event_sqf(game_value_parameter params) {
     try {
         if (params.type_enum() != game_data_type::ARRAY) return game_value();
         auto& p = params.to_array();
-        game_value event = p.size() > 0 ? p[0] : game_value();
+        game_value event = kh_param(p, 0, game_value());
         game_value arguments = kh_param(p, 1, game_value(auto_array<game_value>()), {});
         game_value function = kh_param(p, 2, game_value(g_compiled_kh_empty_code), {game_data_type::CODE});
         static const r_string n_arguments("_thisarguments");
@@ -4960,10 +4028,10 @@ static game_value process_cba_code_event_sqf(game_value_parameter params) {
 
         return game_value();
     } catch (const std::exception& e) {
-        report_error(std::string(e.what()));
+        report_error("processCbaCodeEvent: " + std::string(e.what()));
         return game_value();
     } catch (...) {
-        report_error("An unknown error occurred in processCbaCodeEvent");
+        report_error("processCbaCodeEvent: unknown error");
         return game_value();
     }
 }
@@ -4975,8 +4043,8 @@ static game_value process_cba_array_event_sqf(game_value_parameter params) {
     try {
         if (params.type_enum() != game_data_type::ARRAY) return game_value();
         auto& p = params.to_array();
-        game_value event = p.size() > 0 ? p[0] : game_value();
-        game_value arguments = p.size() > 1 ? p[1] : game_value();
+        game_value event = kh_param(p, 0, game_value());
+        game_value arguments = kh_param(p, 1, game_value());
         game_value targets = kh_param(p, 2, game_value(auto_array<game_value>()), {game_data_type::ARRAY});
         game_value caller = kh_param(p, 3, game_value(static_cast<float>(sqf::client_owner())), {game_data_type::SCALAR});
 
@@ -5147,21 +4215,18 @@ static game_value process_cba_array_event_sqf(game_value_parameter params) {
 
         return game_value();
     } catch (const std::exception& e) {
-        report_error(std::string(e.what()));
+        report_error("processCbaArrayEvent: " + std::string(e.what()));
         return game_value();
     } catch (...) {
-        report_error("An unknown error occurred in processCbaArrayEvent");
+        report_error("processCbaArrayEvent: unknown error");
         return game_value();
     }
 }
 
 static game_value kh_trigger_cba_event_native(game_value event_name, game_value args, game_value target, game_value jip) {
-    auto_array<game_value> cba_params;
-    cba_params.push_back(std::move(event_name));
-    cba_params.push_back(std::move(args));
-    cba_params.push_back(std::move(target));
-    cba_params.push_back(std::move(jip));
-    return trigger_cba_event_sqf(game_value(std::move(cba_params)));
+    return trigger_cba_event_sqf(kh_make_array({
+        std::move(event_name), std::move(args), std::move(target), std::move(jip)
+    }));
 }
 
 static void kh_trigger_stack_handler(const std::string& environment_id, bool delete_handler, bool override_timeout_on_deletion, bool condition_failure) {
@@ -5222,82 +4287,82 @@ static std::unordered_map<std::string, uint64_t> g_kh_temporal_gen;
 // The entry the run is calling, for the length of the call (executionReplaced); null otherwise.
 static KhTemporalEntry* g_kh_temporal_current = nullptr;
 
-// One entry from its array. False with the reason in khte_err.
-static bool kh_temporal_entry_of(const game_value& khte_v, KhTemporalEntry& khte_e, std::string& khte_err) {
-    if (khte_v.type_enum() != game_data_type::ARRAY) {
-        khte_err = "an execution must be an ARRAY";
+// One entry from its array. False with the reason in error.
+static bool kh_temporal_entry_of(const game_value& value, KhTemporalEntry& entry, std::string& error) {
+    if (value.type_enum() != game_data_type::ARRAY) {
+        error = "an execution must be an ARRAY";
         return false;
     }
 
-    auto& khte_a = khte_v.to_array();
+    auto& elements = value.to_array();
 
-    if (khte_a.size() != 10) {
-        khte_err = "an execution has 10 elements, not " + std::to_string(khte_a.size());
+    if (elements.size() != 10) {
+        error = "an execution has 10 elements, not " + std::to_string(elements.size());
         return false;
     }
 
-    if (khte_a[1].type_enum() != game_data_type::CODE || khte_a[2].type_enum() != game_data_type::SCALAR ||
-        khte_a[3].type_enum() != game_data_type::SCALAR || khte_a[6].type_enum() != game_data_type::STRING ||
-        khte_a[9].type_enum() != game_data_type::SCALAR) {
-        khte_err = "an execution is [arguments, function (CODE), interval (SCALAR), due (SCALAR), epoch, handlerId, "
+    if (elements[1].type_enum() != game_data_type::CODE || elements[2].type_enum() != game_data_type::SCALAR ||
+        elements[3].type_enum() != game_data_type::SCALAR || elements[6].type_enum() != game_data_type::STRING ||
+        elements[9].type_enum() != game_data_type::SCALAR) {
+        error = "an execution is [arguments, function (CODE), interval (SCALAR), due (SCALAR), epoch, handlerId, "
                    "id (STRING), previousReturn, executionTime, executionCount (SCALAR)]";
         return false;
     }
 
-    khte_e.arguments = khte_a[0];
-    khte_e.function = khte_a[1];
-    khte_e.interval = static_cast<float>(khte_a[2]);
-    khte_e.due = static_cast<float>(khte_a[3]);
-    khte_e.epoch = khte_a[4];
-    khte_e.handler_id = khte_a[5];
-    khte_e.event_name = khte_a[6];
-    khte_e.id = static_cast<std::string>(khte_a[6]);
-    khte_e.previous_return = khte_a[7];
-    khte_e.execution_time = khte_a[8];
-    khte_e.execution_count = static_cast<float>(khte_a[9]);
-    khte_e.removed = false;
-    khte_e.replaced = false;
-    khte_e.owner.clear();
+    entry.arguments = elements[0];
+    entry.function = elements[1];
+    entry.interval = static_cast<float>(elements[2]);
+    entry.due = static_cast<float>(elements[3]);
+    entry.epoch = elements[4];
+    entry.handler_id = elements[5];
+    entry.event_name = elements[6];
+    entry.id = static_cast<std::string>(elements[6]);
+    entry.previous_return = elements[7];
+    entry.execution_time = elements[8];
+    entry.execution_count = static_cast<float>(elements[9]);
+    entry.removed = false;
+    entry.replaced = false;
+    entry.owner.clear();
     return true;
 }
 
 // Queues an addition: at the back, or at the front (a timeout with priority). owner: the environment id a timeout
 // entry belongs to, so a replacement of that environment takes it too.
 static void kh_push_temporal_addition(const game_value& entry, bool prepend, const std::string& owner = std::string()) {
-    KhTemporalEntry khpa_e;
-    std::string khpa_err;
+    KhTemporalEntry parsed;
+    std::string error;
 
-    if (!kh_temporal_entry_of(entry, khpa_e, khpa_err)) {
-        report_error("Temporal execution: " + khpa_err);
+    if (!kh_temporal_entry_of(entry, parsed, error)) {
+        report_error("KH Temporal: " + error);
         return;
     }
 
-    khpa_e.owner = owner;
+    parsed.owner = owner;
 
     if (prepend) {
-        g_kh_temporal_additions.insert(g_kh_temporal_additions.begin(), std::move(khpa_e));
+        g_kh_temporal_additions.insert(g_kh_temporal_additions.begin(), std::move(parsed));
     } else {
-        g_kh_temporal_additions.push_back(std::move(khpa_e));
+        g_kh_temporal_additions.push_back(std::move(parsed));
     }
 }
 
 // Every stack entry with the id leaves the stack: now, or - while the stack runs - it runs no more and leaves when
 // the run ends. An entry added during the run and not yet joined leaves at once.
-static void kh_temporal_stack_remove(const std::string& khsr_id) {
-    auto khsr_is = [&khsr_id](const KhTemporalEntry& khsr_e) { return khsr_e.id == khsr_id; };
-    std::vector<KhTemporalEntry>& khsr_late = g_kh_temporal_stack_late;
-    khsr_late.erase(std::remove_if(khsr_late.begin(), khsr_late.end(), khsr_is), khsr_late.end());
+static void kh_temporal_stack_remove(const std::string& id) {
+    auto has_id = [&id](const KhTemporalEntry& entry) { return entry.id == id; };
+    std::vector<KhTemporalEntry>& late = g_kh_temporal_stack_late;
+    late.erase(std::remove_if(late.begin(), late.end(), has_id), late.end());
 
     if (g_kh_temporal_running) {
-        for (KhTemporalEntry& khsr_e : g_kh_temporal_stack) {
-            if (khsr_e.id == khsr_id) {
-                khsr_e.removed = true;
+        for (KhTemporalEntry& entry : g_kh_temporal_stack) {
+            if (entry.id == id) {
+                entry.removed = true;
                 g_kh_temporal_removed_any = true;
             }
         }
     } else {
-        std::vector<KhTemporalEntry>& khsr_s = g_kh_temporal_stack;
-        khsr_s.erase(std::remove_if(khsr_s.begin(), khsr_s.end(), khsr_is), khsr_s.end());
+        std::vector<KhTemporalEntry>& stack = g_kh_temporal_stack;
+        stack.erase(std::remove_if(stack.begin(), stack.end(), has_id), stack.end());
     }
 }
 
@@ -5306,42 +4371,42 @@ static void kh_temporal_stack_remove(const std::string& khsr_id) {
 // timeout) leaves the stack - now, or while the stack runs it runs no more and leaves when the run ends, and inside
 // its own call executionReplaced answers true - and leaves the late entries and the queued additions; the id's
 // queued deletion is dropped (it would take the new executor); the monitor entry and its tick counter go.
-static void kh_temporal_replace(const std::string& khrp_id) {
-    ++g_kh_temporal_gen[khrp_id];
-    auto khrp_is = [&khrp_id](const KhTemporalEntry& khrp_e) { return khrp_e.id == khrp_id || khrp_e.owner == khrp_id; };
-    std::vector<KhTemporalEntry>& khrp_a = g_kh_temporal_additions;
-    khrp_a.erase(std::remove_if(khrp_a.begin(), khrp_a.end(), khrp_is), khrp_a.end());
-    std::vector<KhTemporalEntry>& khrp_late = g_kh_temporal_stack_late;
-    khrp_late.erase(std::remove_if(khrp_late.begin(), khrp_late.end(), khrp_is), khrp_late.end());
+static void kh_temporal_replace(const std::string& id) {
+    ++g_kh_temporal_gen[id];
+    auto belongs = [&id](const KhTemporalEntry& entry) { return entry.id == id || entry.owner == id; };
+    std::vector<KhTemporalEntry>& additions = g_kh_temporal_additions;
+    additions.erase(std::remove_if(additions.begin(), additions.end(), belongs), additions.end());
+    std::vector<KhTemporalEntry>& late = g_kh_temporal_stack_late;
+    late.erase(std::remove_if(late.begin(), late.end(), belongs), late.end());
 
     if (g_kh_temporal_running) {
-        for (KhTemporalEntry& khrp_e : g_kh_temporal_stack) {
-            if (khrp_is(khrp_e)) {
-                khrp_e.removed = true;
-                khrp_e.replaced = true;
+        for (KhTemporalEntry& entry : g_kh_temporal_stack) {
+            if (belongs(entry)) {
+                entry.removed = true;
+                entry.replaced = true;
                 g_kh_temporal_removed_any = true;
             }
         }
     } else {
-        std::vector<KhTemporalEntry>& khrp_s = g_kh_temporal_stack;
-        khrp_s.erase(std::remove_if(khrp_s.begin(), khrp_s.end(), khrp_is), khrp_s.end());
+        std::vector<KhTemporalEntry>& stack = g_kh_temporal_stack;
+        stack.erase(std::remove_if(stack.begin(), stack.end(), belongs), stack.end());
     }
 
-    g_kh_temporal_deletions.erase(khrp_id);
-    raw_call_sqf_args_native(g_compiled_kh_monitor_delete, game_value(khrp_id));
+    g_kh_temporal_deletions.erase(id);
+    raw_call_sqf_args_native(g_compiled_kh_monitor_delete, game_value(id));
 }
 
 // The replacement generation of an id (0: never replaced).
-static uint64_t kh_temporal_gen_of(const std::string& khgo_id) {
-    const auto khgo_it = g_kh_temporal_gen.find(khgo_id);
-    return khgo_it == g_kh_temporal_gen.end() ? 0 : khgo_it->second;
+static uint64_t kh_temporal_gen_of(const std::string& id) {
+    const auto it = g_kh_temporal_gen.find(id);
+    return it == g_kh_temporal_gen.end() ? 0 : it->second;
 }
 
-static void kh_unit_tracking_clear();   // KH_UNIT_TRACK_RESET (defined with update_unit_states).
+static void kh_unit_tracking_clear();   // Defined with update_unit_states.
 // Both mission edges (main.cpp: pre_init, mission_ended), never inside a run - and the sqf side's other per-mission
-// state rides it: the per-unit tracking (KH_UNIT_TRACK_RESET) and the call bridge's two values (KH_CALL_ARGS_RESET:
-// setCallArguments / setReturnValue - a value left there held the last mission's arrays, objects and code into the
-// next, where a script reading it before setting it found them).
+// state rides it: the per-unit tracking and the call bridge's two values (setCallArguments / setReturnValue - a
+// value left there held the last mission's arrays, objects and code into the next, where a script reading it before
+// setting it found them).
 static void kh_temporal_clear() {
     kh_unit_tracking_clear();
     g_call_arguments = game_value();
@@ -5357,10 +4422,8 @@ static void kh_temporal_clear() {
 }
 
 static void kh_monitor_set(const std::string& environment_id, game_value entry) {
-    auto_array<game_value> set_params;
-    set_params.push_back(game_value(environment_id));
-    set_params.push_back(std::move(entry));
-    raw_call_sqf_args_native(g_compiled_kh_monitor_set, game_value(std::move(set_params)));
+    raw_call_sqf_args_native(g_compiled_kh_monitor_set,
+                             kh_make_array({ game_value(environment_id), std::move(entry) }));
 }
 
 static game_value kh_due_time(float delay) {
@@ -5373,12 +4436,8 @@ static game_value kh_due_time(float delay) {
 // blocks, so user functions can still read them through SQF's shared call
 // scope
 static game_value kh_immediate_call(const game_value& arguments, const game_value& function, const game_value& handler_id, float execution_time) {
-    auto_array<game_value> wrapper_params;
-    wrapper_params.push_back(arguments);
-    wrapper_params.push_back(function);
-    wrapper_params.push_back(handler_id);
-    wrapper_params.push_back(game_value(execution_time));
-    return raw_call_sqf_args_native(g_compiled_kh_immediate_call, game_value(std::move(wrapper_params)));
+    return raw_call_sqf_args_native(g_compiled_kh_immediate_call,
+                                    kh_make_array({ arguments, function, handler_id, game_value(execution_time) }));
 }
 
 struct KHSpecialParseResult {
@@ -5425,7 +4484,7 @@ static game_value process_execution_sqf(game_value_parameter execute_params) {
     try {
         if (execute_params.type_enum() != game_data_type::ARRAY) return game_value();
         auto& p = execute_params.to_array();
-        game_value arguments = p.size() > 0 ? p[0] : game_value();
+        game_value arguments = kh_param(p, 0, game_value());
         game_value function = kh_param(p, 1, game_value(g_compiled_kh_empty_code), {game_data_type::STRING, game_data_type::CODE});
         game_value target = kh_param(p, 2, game_value(true), {game_data_type::BOOL, game_data_type::SCALAR, game_data_type::STRING, game_data_type::ARRAY, game_data_type::CODE, game_data_type::OBJECT, game_data_type::TEAM_MEMBER, game_data_type::GROUP, game_data_type::SIDE, game_data_type::LOCATION});
         game_value special = kh_param(p, 3, game_value(false), {game_data_type::BOOL, game_data_type::ARRAY});
@@ -5490,7 +4549,7 @@ static game_value process_execution_sqf(game_value_parameter execute_params) {
 
         if (special_type == "PERSISTENT") {
             game_value entity = kh_param(sp, 1, game_value(sqf::obj_null()), {game_data_type::OBJECT, game_data_type::GROUP});
-            game_value sendoff_arguments = sp.size() > 2 ? sp[2] : game_value();
+            game_value sendoff_arguments = kh_param(sp, 2, game_value());
             game_value sendoff_function = kh_param(sp, 3, game_value(g_compiled_kh_empty_code), {game_data_type::STRING, game_data_type::CODE});
             std::string persistent_execution_id = static_cast<std::string>(kh_param(sp, 4, game_value(std::string()), {game_data_type::STRING}));
 
@@ -5575,10 +4634,10 @@ static game_value process_execution_sqf(game_value_parameter execute_params) {
 
         return game_value();
     } catch (const std::exception& e) {
-        report_error(std::string(e.what()));
+        report_error("processExecution: " + std::string(e.what()));
         return game_value();
     } catch (...) {
-        report_error("An unknown error occurred in processExecution");
+        report_error("processExecution: unknown error");
         return game_value();
     }
 }
@@ -5591,7 +4650,7 @@ static game_value kh_call_subfunction(const game_value& fed_arguments, bool basi
     }
 
     auto& fed = fed_arguments.to_array();
-    game_value arguments = fed.size() > 0 ? fed[0] : game_value();
+    game_value arguments = kh_param(fed, 0, game_value());
     auto_array<game_value> call_params;
 
     if (fed.size() > 1) {
@@ -5605,12 +4664,49 @@ static game_value kh_call_subfunction(const game_value& fed_arguments, bool basi
     return call_serialized_function_sqf(arguments, game_value(std::move(call_params)));
 }
 
+// What an execute hands its subfunction: the callSerializedFunction form (basic) or the processExecution form.
+static game_value kh_execute_fed(bool basic, const game_value& arguments, const game_value& serialized_function,
+                                 const game_value& client_owner, const game_value& unscheduled,
+                                 const game_value& target, const game_value& special, const std::string& id_override) {
+    return basic
+        ? kh_make_array({arguments, serialized_function, client_owner, unscheduled})
+        : kh_make_array({arguments, serialized_function, target, special, game_value(id_override), unscheduled});
+}
+
+// An execute's handler id: [[["TEMPORAL"], environment, environmentId, clientOwner], specialReturn].
+static game_value kh_execute_handler_id(const game_value& environment, const std::string& environment_id,
+                                        const game_value& client_owner, const game_value& special_return) {
+    return kh_make_array({
+        kh_make_array({kh_make_array({game_value("TEMPORAL")}), environment, game_value(environment_id), client_owner}),
+        special_return
+    });
+}
+
+// Queues the timeout entry of an execute's environment: due in timeout seconds / frames (kh_due_time), owned by
+// the environment id so a replacement takes it too.
+static void kh_push_timeout_entry(const std::string& environment_id, float timeout, bool priority, float cba_time) {
+    std::string timeout_id = UIDGenerator::generate();
+
+    kh_push_temporal_addition(kh_make_array({
+        kh_make_array({game_value(environment_id), game_value(timeout_id)}),
+        game_value(g_compiled_kh_handler_timeout),
+        game_value(timeout),
+        kh_due_time(timeout),
+        game_value(-1.0f),
+        game_value(timeout_id),
+        game_value(timeout_id),
+        game_value(),
+        game_value(cba_time),
+        game_value(0.0f)
+    }), priority, environment_id);
+}
+
 static game_value kh_execute_impl(game_value_parameter execute_params) {
     try {
         if (execute_params.type_enum() != game_data_type::ARRAY) return game_value();
         auto& p = execute_params.to_array();
         rv_namespace ns = sqf::mission_namespace();
-        game_value arguments = p.size() > 0 ? p[0] : game_value();
+        game_value arguments = kh_param(p, 0, game_value());
         game_value function = kh_param(p, 1, game_value(g_compiled_kh_empty_code), {game_data_type::STRING, game_data_type::CODE});
         game_value target = kh_param(p, 2, game_value(true), {game_data_type::BOOL, game_data_type::SCALAR, game_data_type::STRING, game_data_type::ARRAY, game_data_type::CODE, game_data_type::OBJECT, game_data_type::TEAM_MEMBER, game_data_type::GROUP, game_data_type::SIDE, game_data_type::LOCATION});
         game_value environment = kh_param(p, 3, game_value(true), {game_data_type::BOOL, game_data_type::SCALAR, game_data_type::STRING, game_data_type::ARRAY, game_data_type::CODE});
@@ -5628,10 +4724,8 @@ static game_value kh_execute_impl(game_value_parameter execute_params) {
         // BOOL environment: immediate local dispatch, _environment doubles as
         // _unscheduled
         if (environment.type_enum() == game_data_type::BOOL) {
-            game_value fed = basic
-                ? kh_make_array({arguments, serialized_function, client_owner, environment})
-                : kh_make_array({arguments, serialized_function, target, special, game_value(std::string()), environment});
-            return kh_call_subfunction(fed, basic);
+            return kh_call_subfunction(kh_execute_fed(basic, arguments, serialized_function, client_owner, environment,
+                                                      target, special, std::string()), basic);
         }
 
         if (arguments.is_nil()) {
@@ -5724,10 +4818,8 @@ static game_value kh_execute_impl(game_value_parameter execute_params) {
             }
 
             KHSpecialParseResult parsed_special = kh_parse_special_execution(special, target);
-
-            game_value fed = basic
-                ? kh_make_array({arguments, serialized_function, client_owner, unscheduled})
-                : kh_make_array({arguments, serialized_function, target, special, game_value(parsed_special.special_id_override), unscheduled});
+            game_value fed = kh_execute_fed(basic, arguments, serialized_function, client_owner, unscheduled, target,
+                                            special, parsed_special.special_id_override);
 
             kh_monitor_set(environment_id, kh_make_array({
                 kh_make_array({arguments, timeout_function, environment_type, game_value(environment_id), parsed_special.return_value}),
@@ -5737,10 +4829,8 @@ static game_value kh_execute_impl(game_value_parameter execute_params) {
                 game_value(timeout_on_deletion)
             }));
 
-            game_value handler_id = kh_make_array({
-                kh_make_array({kh_make_array({game_value("TEMPORAL")}), environment_type, game_value(environment_id), client_owner}),
-                parsed_special.return_value
-            });
+            game_value handler_id = kh_execute_handler_id(environment_type, environment_id, client_owner,
+                                                          parsed_special.return_value);
 
             game_value previous_return;
             bool continue_execution = true;
@@ -5776,20 +4866,7 @@ static game_value kh_execute_impl(game_value_parameter execute_params) {
             }), false);
 
             if (!iteration_count && timeout_number != 0.0f) {
-                std::string timeout_id = UIDGenerator::generate();
-
-                kh_push_temporal_addition(kh_make_array({
-                    kh_make_array({game_value(environment_id), game_value(timeout_id)}),
-                    game_value(g_compiled_kh_handler_timeout),
-                    game_value(timeout_number),
-                    kh_due_time(timeout_number),
-                    game_value(-1.0f),
-                    game_value(timeout_id),
-                    game_value(timeout_id),
-                    game_value(),
-                    game_value(cba_time),
-                    game_value(0.0f)
-                }), timeout_priority, environment_id);
+                kh_push_timeout_entry(environment_id, timeout_number, timeout_priority, cba_time);
             }
 
             return handler_id;
@@ -5863,10 +4940,8 @@ static game_value kh_execute_impl(game_value_parameter execute_params) {
 
             KHSpecialParseResult parsed_special = kh_parse_special_execution(special, target);
             game_value condition = sqf::get_variable(ns, static_cast<std::string>(serialize_function_impl(environment_type, false)));
-
-            game_value fed = basic
-                ? kh_make_array({arguments, serialized_function, client_owner, unscheduled})
-                : kh_make_array({arguments, serialized_function, target, special, game_value(parsed_special.special_id_override), unscheduled});
+            game_value fed = kh_execute_fed(basic, arguments, serialized_function, client_owner, unscheduled, target,
+                                            special, parsed_special.special_id_override);
 
             kh_monitor_set(environment_id, kh_make_array({
                 kh_make_array({arguments, timeout_function, game_value(environment_id), game_value(interval), parsed_special.return_value}),
@@ -5876,10 +4951,8 @@ static game_value kh_execute_impl(game_value_parameter execute_params) {
                 game_value(timeout_on_deletion)
             }));
 
-            game_value handler_id = kh_make_array({
-                kh_make_array({kh_make_array({game_value("TEMPORAL")}), game_value(interval), game_value(environment_id), client_owner}),
-                parsed_special.return_value
-            });
+            game_value handler_id = kh_execute_handler_id(game_value(interval), environment_id, client_owner,
+                                                          parsed_special.return_value);
 
             game_value previous_return;
             bool continue_execution = true;
@@ -5956,24 +5029,11 @@ static game_value kh_execute_impl(game_value_parameter execute_params) {
                 previous_return,
                 game_value(cba_time),
                 game_value(immediate ? 1.0f : 0.0f)
-                        }), false);
+            }), false);
 
             if ((!iteration_count && timeout_number != 0.0f) || iteration_timeout != 0.0f) {
-                std::string timeout_id = UIDGenerator::generate();
                 const float true_timeout = (iteration_timeout != 0.0f) ? iteration_timeout : timeout_number;
-
-                kh_push_temporal_addition(kh_make_array({
-                    kh_make_array({game_value(environment_id), game_value(timeout_id)}),
-                    game_value(g_compiled_kh_handler_timeout),
-                    game_value(true_timeout),
-                    kh_due_time(true_timeout),
-                    game_value(-1.0f),
-                    game_value(timeout_id),
-                    game_value(timeout_id),
-                    game_value(),
-                    game_value(cba_time),
-                    game_value(0.0f)
-                }), timeout_priority, environment_id);
+                kh_push_timeout_entry(environment_id, true_timeout, timeout_priority, cba_time);
             }
 
             return handler_id;
@@ -5985,15 +5045,10 @@ static game_value kh_execute_impl(game_value_parameter execute_params) {
             game_value unscheduled = kh_param(env, 1, game_value(true), {game_data_type::BOOL});
             KHSpecialParseResult parsed_special = kh_parse_special_execution(special, target);
             const float environment_type_number = parse_number(static_cast<std::string>(environment_type));
-
-            game_value fed = basic
-                ? kh_make_array({arguments, serialized_function, client_owner, unscheduled})
-                : kh_make_array({arguments, serialized_function, target, special, game_value(parsed_special.special_id_override), unscheduled});
-
-            game_value handler_id = kh_make_array({
-                kh_make_array({kh_make_array({game_value("TEMPORAL")}), game_value(environment_type_number), game_value(environment_id), client_owner}),
-                parsed_special.return_value
-            });
+            game_value fed = kh_execute_fed(basic, arguments, serialized_function, client_owner, unscheduled, target,
+                                            special, parsed_special.special_id_override);
+            game_value handler_id = kh_execute_handler_id(game_value(environment_type_number), environment_id,
+                                                          client_owner, parsed_special.return_value);
 
             if (environment_type_number == 0.0f) {
                 kh_call_subfunction(fed, basic);
@@ -6028,104 +5083,108 @@ static game_value kh_execute_impl(game_value_parameter execute_params) {
         // ==============================
         return game_value();
     } catch (const std::exception& e) {
-        report_error(std::string(e.what()));
+        report_error("execute: " + std::string(e.what()));
         return game_value();
     } catch (...) {
-        report_error("An unknown error occurred in execute");
+        report_error("execute: unknown error");
         return game_value();
     }
+}
+
+// What the curve commands share: type is the curve's name ("bezier" takes its interior points from a[5]);
+// params is [minFrom, maxFrom, value, minTo, maxTo, (bezier points,) clip / floor]. False when the arguments are
+// not that shape (the command answers its zero value).
+struct kh_curve_args {
+    float min_from = 0.0f;
+    float max_from = 0.0f;
+    float value = 0.0f;
+    std::string curve;
+    bool is_bezier = false;
+    std::vector<float> interior;
+    size_t extra_index = 5;   // Of the element after the (bezier) points: clip or floor.
+};
+
+static bool kh_curve_read(const game_value& type, const game_value& params, kh_curve_args& c) {
+    if (type.type_enum() != game_data_type::STRING || params.type_enum() != game_data_type::ARRAY) return false;
+    auto& a = params.to_array();
+    if (a.size() < 5) return false;
+    c.min_from = static_cast<float>(a[0]);
+    c.max_from = static_cast<float>(a[1]);
+    c.value = static_cast<float>(a[2]);
+    c.curve = kh_lower_copy(static_cast<std::string>(type));
+    c.is_bezier = (c.curve == "bezier");
+
+    if (c.is_bezier) {
+        c.interior = read_bezier_interior(kh_param(a, 5, game_value()));
+        c.extra_index = 6;
+    } else {
+        c.extra_index = 5;
+    }
+
+    return true;
+}
+
+// The value's position in [minFrom, maxFrom], clipped to [0, 1] when asked (0 for an empty range).
+static float kh_curve_t(const kh_curve_args& c, bool clip) {
+    const float span = c.max_from - c.min_from;
+    float t = (span == 0.0f) ? 0.0f : (c.value - c.min_from) / span;
+    if (clip) { if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f; }
+    return t;
+}
+
+// The shaped position of the curve's arguments: a[extra_index] is the clip flag.
+static float kh_curve_shaped(const kh_curve_args& c, const auto_array<game_value>& a) {
+    const bool clip = static_cast<bool>(kh_param(a, c.extra_index, game_value(false), { game_data_type::BOOL }));
+    return curve_shape(c.curve, c.is_bezier, kh_curve_t(c, clip), c.interior);
+}
+
+// The curve's slope at the value, clipped to [0, 1], no less than the floor a[extra_index] (0 by default).
+static float kh_curve_slope_floored(const kh_curve_args& c, const auto_array<game_value>& a) {
+    const float floor_val = kh_param_float(a, c.extra_index, 0.0f);
+    float slope = curve_slope(c.curve, c.is_bezier, kh_curve_t(c, true), c.interior);
+    if (slope < floor_val) slope = floor_val;
+    return slope;
 }
 
 static game_value curve_conversion_sqf(game_value_parameter type, game_value_parameter params) {
-    if (type.type_enum() != game_data_type::STRING) return game_value(0.0f);
+    kh_curve_args c;
+    if (!kh_curve_read(type, params, c)) return game_value(0.0f);
     auto& a = params.to_array();
-    if (a.size() < 5) return game_value(0.0f);
-    const float min_from = static_cast<float>(a[0]);
-    const float max_from = static_cast<float>(a[1]);
-    const float value = static_cast<float>(a[2]);
     const float min_to = static_cast<float>(a[3]);
     const float max_to = static_cast<float>(a[4]);
-    std::string curve = static_cast<std::string>(type);
-    std::transform(curve.begin(), curve.end(), curve.begin(), ::tolower);
-    const bool is_bezier = (curve == "bezier");
-    std::vector<float> interior;
-    size_t clip_index;
-
-    if (is_bezier) {
-        interior = read_bezier_interior(a.size() > 5 ? a[5] : game_value());
-        clip_index = 6;
-    } else {
-        clip_index = 5;
-    }
-
-    const bool clip = a.size() > clip_index && a[clip_index].type_enum() == game_data_type::BOOL && static_cast<bool>(a[clip_index]);
-    const float span = max_from - min_from;
-    float t = (span == 0.0f) ? 0.0f : (value - min_from) / span;
-    if (clip) { if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f; }
-    const float shaped = curve_shape(curve, is_bezier, t, interior);
-    return game_value(min_to + (max_to - min_to) * shaped);
+    return game_value(min_to + (max_to - min_to) * kh_curve_shaped(c, a));
 }
 
 static game_value inverse_curve_conversion_sqf(game_value_parameter type, game_value_parameter params) {
-    auto_array<game_value> result;
-    auto fail = [&]() { result.push_back(game_value(0.0f)); result.push_back(game_value(0.0f)); return game_value(std::move(result)); };
-    if (type.type_enum() != game_data_type::STRING) return fail();
+    kh_curve_args c;
+    if (!kh_curve_read(type, params, c)) return kh_make_array({ game_value(0.0f), game_value(0.0f) });
     auto& a = params.to_array();
-    if (a.size() < 5) return fail();
-    const float min_from = static_cast<float>(a[0]);
-    const float max_from = static_cast<float>(a[1]);
-    const float out = static_cast<float>(a[2]);
+    const float out = c.value;
     const float min_to = static_cast<float>(a[3]);
     const float max_to = static_cast<float>(a[4]);
-    std::string curve = static_cast<std::string>(type);
-    std::transform(curve.begin(), curve.end(), curve.begin(), ::tolower);
-    const bool is_bezier = (curve == "bezier");
-    std::vector<float> interior;
-    if (is_bezier) interior = read_bezier_interior(a.size() > 5 ? a[5] : game_value());
     const float to_span = max_to - min_to;
     float shaped = (to_span == 0.0f) ? 0.0f : (out - min_to) / to_span;
     if (shaped < 0.0f) shaped = 0.0f; else if (shaped > 1.0f) shaped = 1.0f;
-    const float t = curve_inverse_shape(curve, is_bezier, shaped, interior);
-    const float value = min_from + t * (max_from - min_from);
-    result.push_back(game_value(value));
-    result.push_back(game_value(t));
-    return game_value(std::move(result));
+    const float t = curve_inverse_shape(c.curve, c.is_bezier, shaped, c.interior);
+    const float value = c.min_from + t * (c.max_from - c.min_from);
+    return kh_make_array({ game_value(value), game_value(t) });
 }
 
 static game_value vector_curve_conversion_sqf(game_value_parameter type, game_value_parameter params) {
-    if (type.type_enum() != game_data_type::STRING) return game_value(auto_array<game_value>());
+    kh_curve_args c;
+    if (!kh_curve_read(type, params, c)) return game_value(auto_array<game_value>());
     auto& a = params.to_array();
-    if (a.size() < 5) return game_value(auto_array<game_value>());
 
     if (a[3].type_enum() != game_data_type::ARRAY || a[4].type_enum() != game_data_type::ARRAY) {
         return game_value(auto_array<game_value>());
     }
 
-    const float min_from = static_cast<float>(a[0]);
-    const float max_from = static_cast<float>(a[1]);
-    const float value = static_cast<float>(a[2]);
     auto& from_vec = a[3].to_array();
     auto& to_vec = a[4].to_array();
     const size_t dim = from_vec.size() < to_vec.size() ? from_vec.size() : to_vec.size();   // 2 or 3 (min of both)
-    std::string curve = static_cast<std::string>(type);
-    std::transform(curve.begin(), curve.end(), curve.begin(), ::tolower);
-    const bool is_bezier = (curve == "bezier");
-    std::vector<float> interior;
-    size_t clip_index;
-
-    if (is_bezier) {
-        interior = read_bezier_interior(a.size() > 5 ? a[5] : game_value());
-        clip_index = 6;
-    } else {
-        clip_index = 5;
-    }
-
-    const bool clip = a.size() > clip_index && a[clip_index].type_enum() == game_data_type::BOOL && static_cast<bool>(a[clip_index]);
-    const float span = max_from - min_from;
-    float t = (span == 0.0f) ? 0.0f : (value - min_from) / span;
-    if (clip) { if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f; }
-    const float shaped = curve_shape(curve, is_bezier, t, interior);
+    const float shaped = kh_curve_shaped(c, a);
     auto_array<game_value> result;
+    result.reserve(dim);
 
     for (size_t i = 0; i < dim; ++i) {
         const float f = static_cast<float>(from_vec[i]);
@@ -6137,33 +5196,24 @@ static game_value vector_curve_conversion_sqf(game_value_parameter type, game_va
 }
 
 static game_value inverse_vector_curve_conversion_sqf(game_value_parameter type, game_value_parameter params) {
-    auto_array<game_value> fail;
-    fail.push_back(game_value(0.0f));
-    fail.push_back(game_value(0.0f));
-    if (type.type_enum() != game_data_type::STRING) return game_value(std::move(fail));
+    kh_curve_args c;
+    if (!kh_curve_read(type, params, c)) return kh_make_array({ game_value(0.0f), game_value(0.0f) });
     auto& a = params.to_array();
-    if (a.size() < 5) return game_value(std::move(fail));
 
-    if (a[2].type_enum() != game_data_type::ARRAY || a[3].type_enum() != game_data_type::ARRAY || a[4].type_enum() != game_data_type::ARRAY) {
-        return game_value(std::move(fail));
+    if (a[2].type_enum() != game_data_type::ARRAY || a[3].type_enum() != game_data_type::ARRAY ||
+        a[4].type_enum() != game_data_type::ARRAY) {
+        return kh_make_array({ game_value(0.0f), game_value(0.0f) });
     }
 
-    const float min_from = static_cast<float>(a[0]);
-    const float max_from = static_cast<float>(a[1]);
     auto& out_vec = a[2].to_array();   // Desired output vector (old curve's current result)
     auto& from_vec = a[3].to_array();
     auto& to_vec = a[4].to_array();
     size_t dim = from_vec.size();
     if (to_vec.size() < dim) dim = to_vec.size();
     if (out_vec.size() < dim) dim = out_vec.size();
-    std::string curve = static_cast<std::string>(type);
-    std::transform(curve.begin(), curve.end(), curve.begin(), ::tolower);
-    const bool is_bezier = (curve == "bezier");
-    std::vector<float> interior;
-    if (is_bezier) interior = read_bezier_interior(a.size() > 5 ? a[5] : game_value());
 
-    // Recover shaped from the component with the largest span (most stable);
-    // shared t means any non-degenerate axis works
+    // Recover shaped from the component with the largest span (most stable); shared t means any non-degenerate
+    // axis works
     float best_span_abs = 0.0f;
     float shaped = 0.0f;
 
@@ -6181,66 +5231,32 @@ static game_value inverse_vector_curve_conversion_sqf(game_value_parameter type,
 
     // If all components are degenerate (from == to), shaped stays 0 -> t = 0
     if (shaped < 0.0f) shaped = 0.0f; else if (shaped > 1.0f) shaped = 1.0f;
-    const float t = curve_inverse_shape(curve, is_bezier, shaped, interior);
-    const float value = min_from + t * (max_from - min_from);
-    auto_array<game_value> result;
-    result.push_back(game_value(value));
-    result.push_back(game_value(t));
-    return game_value(std::move(result));
+    const float t = curve_inverse_shape(c.curve, c.is_bezier, shaped, c.interior);
+    const float value = c.min_from + t * (c.max_from - c.min_from);
+    return kh_make_array({ game_value(value), game_value(t) });
 }
 
 static game_value curve_slope_sqf(game_value_parameter type, game_value_parameter params) {
-    if (type.type_enum() != game_data_type::STRING) return game_value(0.0f);
-    auto& a = params.to_array();
-    if (a.size() < 5) return game_value(0.0f);
-    const float min_from = static_cast<float>(a[0]);
-    const float max_from = static_cast<float>(a[1]);
-    const float value    = static_cast<float>(a[2]);
-    std::string curve = static_cast<std::string>(type);
-    std::transform(curve.begin(), curve.end(), curve.begin(), ::tolower);
-    const bool is_bezier = (curve == "bezier");
-    std::vector<float> interior;
-    size_t floor_index;
-    if (is_bezier) { interior = read_bezier_interior(a.size() > 5 ? a[5] : game_value()); floor_index = 6; }
-    else { floor_index = 5; }
-    const float floor_val = (a.size() > floor_index && a[floor_index].type_enum() == game_data_type::SCALAR) ? static_cast<float>(a[floor_index]) : 0.0f;
-    const float span = max_from - min_from;
-    float t = (span == 0.0f) ? 0.0f : (value - min_from) / span;
-    if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
-    float slope = curve_slope(curve, is_bezier, t, interior);
-    if (slope < floor_val) slope = floor_val;
-    return game_value(slope);
+    kh_curve_args c;
+    if (!kh_curve_read(type, params, c)) return game_value(0.0f);
+    return game_value(kh_curve_slope_floored(c, params.to_array()));
 }
 
 static game_value vector_curve_slope_sqf(game_value_parameter type, game_value_parameter params) {
-    if (type.type_enum() != game_data_type::STRING) return game_value(auto_array<game_value>());
+    kh_curve_args c;
+    if (!kh_curve_read(type, params, c)) return game_value(auto_array<game_value>());
     auto& a = params.to_array();
-    if (a.size() < 5) return game_value(auto_array<game_value>());
 
     if (a[3].type_enum() != game_data_type::ARRAY || a[4].type_enum() != game_data_type::ARRAY) {
         return game_value(auto_array<game_value>());
     }
 
-    const float min_from = static_cast<float>(a[0]);
-    const float max_from = static_cast<float>(a[1]);
-    const float value = static_cast<float>(a[2]);
     auto& from_vec = a[3].to_array();
     auto& to_vec = a[4].to_array();
     const size_t dim = from_vec.size() < to_vec.size() ? from_vec.size() : to_vec.size();
-    std::string curve = static_cast<std::string>(type);
-    std::transform(curve.begin(), curve.end(), curve.begin(), ::tolower);
-    const bool is_bezier = (curve == "bezier");
-    std::vector<float> interior;
-    size_t floor_index;
-    if (is_bezier) { interior = read_bezier_interior(a.size() > 5 ? a[5] : game_value()); floor_index = 6; }
-    else { floor_index = 5; }
-    const float floor_val = (a.size() > floor_index && a[floor_index].type_enum() == game_data_type::SCALAR) ? static_cast<float>(a[floor_index]) : 0.0f;
-    const float span = max_from - min_from;
-    float t = (span == 0.0f) ? 0.0f : (value - min_from) / span;
-    if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
-    float slope = curve_slope(curve, is_bezier, t, interior);
-    if (slope < floor_val) slope = floor_val;
+    const float slope = kh_curve_slope_floored(c, a);
     auto_array<game_value> result;
+    result.reserve(dim);
 
     for (size_t i = 0; i < dim; ++i) {
         const float f = static_cast<float>(from_vec[i]);
@@ -6335,26 +5351,6 @@ static game_value network_message_send_unary_sqf(game_value_parameter right_arg)
     return network_message_send_sqf(game_value(), right_arg);
 }
 
-static game_value kh_set_variable_namespace(game_value_parameter left_arg, game_value_parameter right_arg) {
-    return kh_set_variable_impl(left_arg, right_arg);
-}
-
-static game_value kh_set_variable_object(game_value_parameter left_arg, game_value_parameter right_arg) {
-    return kh_set_variable_impl(left_arg, right_arg);
-}
-
-static game_value kh_set_variable_group(game_value_parameter left_arg, game_value_parameter right_arg) {
-    return kh_set_variable_impl(left_arg, right_arg);
-}
-
-static game_value kh_set_variable_location(game_value_parameter left_arg, game_value_parameter right_arg) {
-    return kh_set_variable_impl(left_arg, right_arg);
-}
-
-static game_value kh_set_variable_display(game_value_parameter left_arg, game_value_parameter right_arg) {
-    return kh_set_variable_impl(left_arg, right_arg);
-}
-
 static std::unordered_set<std::string> kh_build_string_set(const auto_array<game_value>& arr) {
     std::unordered_set<std::string> set;
     set.reserve(arr.size());
@@ -6383,8 +5379,12 @@ static void process_temporal_execution_stack() {
                 const std::unordered_set<std::string> entity_deletion_set = kh_build_string_set(entity_deletions);
 
                 for (size_t r = 0; r < entity_init.size(); ++r) {
-                    auto& e = entity_init[r].to_array();
-                    bool del = (e.size() > 4 && kh_set_contains(entity_deletion_set, e[4]));
+                    bool del = false;
+
+                    if (entity_init[r].type_enum() == game_data_type::ARRAY) {   // Anything else is kept as it is.
+                        auto& e = entity_init[r].to_array();
+                        del = (e.size() > 4 && kh_set_contains(entity_deletion_set, e[4]));
+                    }
 
                     if (!del) {
                         if (w != r) entity_init[w] = entity_init[r];
@@ -6410,8 +5410,8 @@ static void process_temporal_execution_stack() {
     }
 
     if (!g_kh_temporal_deletions.empty()) {
-        stack.erase(std::remove_if(stack.begin(), stack.end(), [](const KhTemporalEntry& khtd_e) {
-            return g_kh_temporal_deletions.count(khtd_e.id) != 0;
+        stack.erase(std::remove_if(stack.begin(), stack.end(), [](const KhTemporalEntry& entry) {
+            return g_kh_temporal_deletions.count(entry.id) != 0;
         }), stack.end());
 
         g_kh_temporal_deletions.clear();
@@ -6485,8 +5485,8 @@ static void process_temporal_execution_stack() {
     g_kh_temporal_running = false;
 
     if (g_kh_temporal_removed_any) {
-        stack.erase(std::remove_if(stack.begin(), stack.end(), [](const KhTemporalEntry& khtr_e) {
-            return khtr_e.removed;
+        stack.erase(std::remove_if(stack.begin(), stack.end(), [](const KhTemporalEntry& entry) {
+            return entry.removed;
         }), stack.end());
         g_kh_temporal_removed_any = false;
     }
@@ -6511,67 +5511,68 @@ static void process_temporal_execution_stack() {
 //   "DELETIONS" [false, id]: taken off the queue.
 // An execution is the ten-element entry, an id a STRING. Returns true when the edit was
 // applied - a removal that matched nothing included; a malformed request is reported and returns false.
-static game_value manage_execution_stack_sqf(game_value_parameter khme_which, game_value_parameter khme_args) {
+static game_value manage_execution_stack_sqf(game_value_parameter which, game_value_parameter args) {
     try {
-        const std::string khme_w = kh_lower_copy(static_cast<std::string>(khme_which));
-        const int khme_k = khme_w == "stack" ? 0 : khme_w == "additions" ? 1 : khme_w == "deletions" ? 2 : -1;
+        const std::string which_lower = kh_lower_copy(static_cast<std::string>(which));
+        const int kind = which_lower == "stack" ? 0 : which_lower == "additions" ? 1
+                       : which_lower == "deletions" ? 2 : -1;
 
-        if (khme_k < 0) {
+        if (kind < 0) {
             report_error("manageExecutionStack: the stack is \"STACK\", \"ADDITIONS\" or \"DELETIONS\", not \"" +
-                         static_cast<std::string>(khme_which) + "\"");
+                         static_cast<std::string>(which) + "\"");
             return game_value(false);
         }
 
-        auto& khme_a = khme_args.to_array();
+        auto& arr = args.to_array();
 
-        if (khme_a.size() != 2 || khme_a[0].type_enum() != game_data_type::BOOL) {
+        if (arr.size() != 2 || arr[0].type_enum() != game_data_type::BOOL) {
             report_error("manageExecutionStack: the right argument is [add (BOOL), element]");
             return game_value(false);
         }
 
-        const bool khme_add = static_cast<bool>(khme_a[0]);
-        const game_value& khme_el = khme_a[1];
+        const bool add = static_cast<bool>(arr[0]);
+        const game_value& element = arr[1];
 
-        if (khme_add && khme_k != 2) {
-            KhTemporalEntry khme_e;
-            std::string khme_err;
+        if (add && kind != 2) {
+            KhTemporalEntry entry;
+            std::string error;
 
-            if (!kh_temporal_entry_of(khme_el, khme_e, khme_err)) {
-                report_error("manageExecutionStack: " + khme_err);
+            if (!kh_temporal_entry_of(element, entry, error)) {
+                report_error("manageExecutionStack: " + error);
                 return game_value(false);
             }
 
-            if (khme_k == 1) {
-                g_kh_temporal_additions.push_back(std::move(khme_e));
+            if (kind == 1) {
+                g_kh_temporal_additions.push_back(std::move(entry));
             } else if (g_kh_temporal_running) {
-                g_kh_temporal_stack_late.push_back(std::move(khme_e));
+                g_kh_temporal_stack_late.push_back(std::move(entry));
             } else {
-                g_kh_temporal_stack.push_back(std::move(khme_e));
+                g_kh_temporal_stack.push_back(std::move(entry));
             }
 
             return game_value(true);
         }
 
-        if (khme_el.type_enum() != game_data_type::STRING) {
+        if (element.type_enum() != game_data_type::STRING) {
             report_error("manageExecutionStack: an id must be a STRING");
             return game_value(false);
         }
 
-        const std::string khme_id = static_cast<std::string>(khme_el);
+        const std::string id = static_cast<std::string>(element);
 
-        if (khme_k == 2) {
-            if (khme_add) {
-                g_kh_temporal_deletions.insert(khme_id);
+        if (kind == 2) {
+            if (add) {
+                g_kh_temporal_deletions.insert(id);
             } else {
-                g_kh_temporal_deletions.erase(khme_id);
+                g_kh_temporal_deletions.erase(id);
             }
-        } else if (khme_k == 1) {
-            std::vector<KhTemporalEntry>& khme_q = g_kh_temporal_additions;
-            khme_q.erase(std::remove_if(khme_q.begin(), khme_q.end(), [&khme_id](const KhTemporalEntry& khme_x) {
-                return khme_x.id == khme_id;
-            }), khme_q.end());
+        } else if (kind == 1) {
+            std::vector<KhTemporalEntry>& queue = g_kh_temporal_additions;
+            queue.erase(std::remove_if(queue.begin(), queue.end(), [&id](const KhTemporalEntry& queued) {
+                return queued.id == id;
+            }), queue.end());
         } else {
-            kh_temporal_stack_remove(khme_id);
+            kh_temporal_stack_remove(id);
         }
 
         return game_value(true);
@@ -6579,7 +5580,7 @@ static game_value manage_execution_stack_sqf(game_value_parameter khme_which, ga
         report_error("manageExecutionStack: " + std::string(e.what()));
         return game_value(false);
     } catch (...) {
-        report_error("An unknown error occurred in manageExecutionStack");
+        report_error("manageExecutionStack: unknown error");
         return game_value(false);
     }
 }
@@ -6606,18 +5607,9 @@ struct KhUnitWeapons {
     bool seen_this_frame = false;
 };
 static std::unordered_map<void*, KhUnitWeapons> g_unit_weapons;
-static const char* const KH_WEAPON_SLOT_NAMES[3] = { "PRIMARY", "SECONDARY", "TERTIARY" };
+static const char* const WEAPON_SLOT_NAMES[3] = { "PRIMARY", "SECONDARY", "TERTIARY" };
 
-template <class S>
-static std::string kh_weapon_lower(const S& khwl_s) {
-    std::string khwl_out(khwl_s.c_str(), khwl_s.size());
-    for (char& khwl_c : khwl_out) {
-        if (khwl_c >= 'A' && khwl_c <= 'Z') khwl_c = static_cast<char>(khwl_c - 'A' + 'a');
-    }
-    return khwl_out;
-}
-
-// KH_UNIT_TRACK_RESET - both mission edges (kh_temporal_clear). The per-unit yaw rings (g_unit_states, framework.hpp)
+// Both mission edges (kh_temporal_clear). The per-unit yaw rings (g_unit_states, framework.hpp)
 // and weapon slots (g_unit_weapons) are keyed by the unit object's address, which the next mission's allocator reuses:
 // a carried entry handed a new unit the old one's heading history and slots - its first-seen weapon events withheld
 // wherever the slot matched. Game thread, as their one writer.
@@ -6633,11 +5625,11 @@ static void update_unit_states() {
     for (auto& kv : g_unit_weapons) kv.second.seen_this_frame = false;
 
     struct KhWeaponEvent { game_value unit; int slot; game_value weapon; };
-    std::vector<KhWeaponEvent> khws_events;
+    std::vector<KhWeaponEvent> events;
 
     for (size_t i = 0; i < units.size(); ++i) {
         const auto& unit = units[i];
-        if (unit.type_enum() != game_data_type::OBJECT) continue;   // KH_ALLMEN_TYPE: data is read as an object.
+        if (unit.type_enum() != game_data_type::OBJECT) continue;   // Data is read as an object.
         game_data_object* gd = (game_data_object*)unit.data.get();
         if (gd == nullptr || gd->object == nullptr || gd->object->object == nullptr) continue;
         void* key = (void*)gd->object->object;
@@ -6649,19 +5641,19 @@ static void update_unit_states() {
         st.time[st.head] = now;
         if (st.count < YAW_MAXSAMPLES) st.count++;
 
-        auto khws_it = g_unit_weapons.find(key);
-        const bool khws_first = khws_it == g_unit_weapons.end();
-        if (khws_first) khws_it = g_unit_weapons.emplace(key, KhUnitWeapons()).first;
-        KhUnitWeapons& khws_w = khws_it->second;
-        khws_w.seen_this_frame = true;
-        const sqf_return_string khws_cur[3] = {
+        auto weapons_it = g_unit_weapons.find(key);
+        const bool first_seen = weapons_it == g_unit_weapons.end();
+        if (first_seen) weapons_it = g_unit_weapons.emplace(key, KhUnitWeapons()).first;
+        KhUnitWeapons& weapons = weapons_it->second;
+        weapons.seen_this_frame = true;
+        const sqf_return_string current[3] = {
             sqf::primary_weapon(unit), sqf::handgun_weapon(unit), sqf::secondary_weapon(unit)
         };
-        for (int khws_s = 0; khws_s < 3; ++khws_s) {
-            std::string khws_low = kh_weapon_lower(khws_cur[khws_s]);
-            if (!khws_first && khws_low == khws_w.slot[khws_s]) continue;
-            khws_w.slot[khws_s] = std::move(khws_low);
-            khws_events.push_back({ unit, khws_s, game_value(khws_cur[khws_s]) });
+        for (int slot = 0; slot < 3; ++slot) {
+            std::string lowered = kh_lower_copy(std::string(current[slot].c_str(), current[slot].size()));
+            if (!first_seen && lowered == weapons.slot[slot]) continue;
+            weapons.slot[slot] = std::move(lowered);
+            events.push_back({ unit, slot, game_value(current[slot]) });
         }
     }
 
@@ -6676,10 +5668,13 @@ static void update_unit_states() {
     }
 
     // The weapon-slot events, after the walk and the prune.
-    static const game_value khws_event_name("KH_eve_weaponSlotChanged");
-    for (const KhWeaponEvent& khws_e : khws_events) {
-        kh_cba_local_event(khws_event_name, kh_make_array({
-            khws_e.unit, game_value(KH_WEAPON_SLOT_NAMES[khws_e.slot]), khws_e.weapon }));
+    if (!events.empty()) {
+        const game_value event_name("KH_eve_weaponSlotChanged");
+
+        for (const KhWeaponEvent& event : events) {
+            kh_cba_local_event(event_name, kh_make_array({
+                event.unit, game_value(WEAPON_SLOT_NAMES[event.slot]), event.weapon }));
+        }
     }
 }
 
@@ -9405,15 +8400,6 @@ static void initialize_sqf_integration() {
         game_data_type::ARRAY
     );
 
-    _sqf_execute_lua_any_code = intercept::client::host::register_sqf_command(
-        "luaExecute",
-        "Execute Lua code or function",
-        userFunctionWrapper<execute_lua_sqf>,
-        game_data_type::ANY,
-        game_data_type::ANY,
-        game_data_type::CODE
-    );
-
     _sqf_compile_lua_string_string = intercept::client::host::register_sqf_command(
         "luaCompile",
         "Compile Lua code and register it as a named function",
@@ -9421,15 +8407,6 @@ static void initialize_sqf_integration() {
         game_data_type::NOTHING,
         game_data_type::STRING,
         game_data_type::STRING
-    );
-
-    _sqf_compile_lua_string_code = intercept::client::host::register_sqf_command(
-        "luaCompile",
-        "Compile Lua code and register it as a named function",
-        userFunctionWrapper<compile_lua_sqf>,
-        game_data_type::NOTHING,
-        game_data_type::STRING,
-        game_data_type::CODE
     );
 
     _sqf_crypto_hash_string_string = intercept::client::host::register_sqf_command(
@@ -9636,14 +8613,6 @@ static void initialize_sqf_integration() {
         userFunctionWrapper<execute_lua_sqf_unary>,
         game_data_type::ANY,
         game_data_type::ARRAY
-    );
-
-    _sqf_execute_lua_code = intercept::client::host::register_sqf_command(
-        "luaExecute",
-        "Execute Lua code or function",
-        userFunctionWrapper<execute_lua_sqf_unary>,
-        game_data_type::ANY,
-        game_data_type::CODE
     );
 
     _sqf_generate_random_string_scalar = intercept::client::host::register_sqf_command(
@@ -10293,7 +9262,7 @@ static void initialize_sqf_integration() {
         game_data_type::SCALAR
     );
 
-    // KH_NET_REMOVE_ARRAY: the [handlerId, owner] pair khNetworkMessageReceive returns.
+    // The [handlerId, owner] pair khNetworkMessageReceive returns.
     _sqf_kh_network_remove_handler_array = intercept::client::host::register_sqf_command(
         "khNetworkRemoveHandler",
         "Remove a network message handler by [handlerId, owner]",
@@ -10334,7 +9303,7 @@ static void initialize_sqf_integration() {
     _sqf_kh_set_variable_namespace_array = intercept::client::host::register_sqf_command(
         "khSetVariable",
         "Set a variable on a namespace and synchronize across network. Usage: namespace khSetVariable [name, value, target, jip]",
-        userFunctionWrapper<kh_set_variable_namespace>,
+        userFunctionWrapper<kh_set_variable_impl>,
         game_data_type::ANY,
         game_data_type::NAMESPACE,
         game_data_type::ARRAY
@@ -10343,7 +9312,7 @@ static void initialize_sqf_integration() {
     _sqf_kh_set_variable_object_array = intercept::client::host::register_sqf_command(
         "khSetVariable",
         "Set a variable on an object and synchronize across network. Usage: object khSetVariable [name, value, target, jip]",
-        userFunctionWrapper<kh_set_variable_object>,
+        userFunctionWrapper<kh_set_variable_impl>,
         game_data_type::ANY,
         game_data_type::OBJECT,
         game_data_type::ARRAY
@@ -10352,7 +9321,7 @@ static void initialize_sqf_integration() {
     _sqf_kh_set_variable_group_array = intercept::client::host::register_sqf_command(
         "khSetVariable",
         "Set a variable on a group and synchronize across network. Usage: group khSetVariable [name, value, target, jip]",
-        userFunctionWrapper<kh_set_variable_group>,
+        userFunctionWrapper<kh_set_variable_impl>,
         game_data_type::ANY,
         game_data_type::GROUP,
         game_data_type::ARRAY
@@ -10361,7 +9330,7 @@ static void initialize_sqf_integration() {
     _sqf_kh_set_variable_location_array = intercept::client::host::register_sqf_command(
         "khSetVariable",
         "Set a variable on a location and synchronize across network. Usage: location khSetVariable [name, value, target, jip]",
-        userFunctionWrapper<kh_set_variable_location>,
+        userFunctionWrapper<kh_set_variable_impl>,
         game_data_type::ANY,
         game_data_type::LOCATION,
         game_data_type::ARRAY
@@ -10370,7 +9339,7 @@ static void initialize_sqf_integration() {
     _sqf_kh_set_variable_display_array = intercept::client::host::register_sqf_command(
         "khSetVariable",
         "Set a variable on a display and synchronize across network. Usage: display khSetVariable [name, value, target, jip]",
-        userFunctionWrapper<kh_set_variable_display>,
+        userFunctionWrapper<kh_set_variable_impl>,
         game_data_type::ANY,
         game_data_type::DISPLAY,
         game_data_type::ARRAY
@@ -10785,7 +9754,6 @@ static void initialize_sqf_integration() {
 
     g_compiled_sqf_remove_handler = sqf::compile(R"(setReturnValue (getCallArguments call KH_fnc_removeHandler);)");
     g_compiled_sqf_create_hash_map_from_array = sqf::compile(R"(setReturnValue (createHashMapFromArray getCallArguments);)");
-    g_compiled_sqf_create_hash_map = sqf::compile(R"(setReturnValue createHashMap;)");
     g_compiled_sqf_trigger_lua_reset_event = sqf::compile(R"(setReturnValue (["KH_eve_luaReset"] call CBA_fnc_localEvent);)");
     g_compiled_ai_initialized_event = sqf::compile(R"(["KH_eve_aiInitialized", _khargs] call CBA_fnc_localEvent;)");
     g_compiled_ai_response_progress_event = sqf::compile(R"(["KH_eve_aiResponseProgress", _khargs] call CBA_fnc_localEvent;)");

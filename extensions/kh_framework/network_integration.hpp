@@ -180,7 +180,7 @@ struct JipMessage {
     bool dependency_is_group;
     bool unit_required = false;
     uint64_t seq = 0;   // replay-order sequence
-    // KH_JIP_CODE: for a condition-gated setVariable (NET_INTERNAL_CONDITIONAL_EVENT wrapping
+    // For a condition-gated setVariable (NET_INTERNAL_CONDITIONAL_EVENT wrapping
     // NET_INTERNAL_SET_VARIABLE_EVENT), the variable's own key ("_SETVAR_..."); empty for every other entry.
     std::string setvar_key;
 };
@@ -540,7 +540,7 @@ class NetworkFramework {
 private:
     // Singleton
     NetworkFramework() = default;
-    ~NetworkFramework() { shutdown(); }
+    ~NetworkFramework() = default;
     NetworkFramework(const NetworkFramework&) = delete;
     NetworkFramework& operator=(const NetworkFramework&) = delete;
     std::atomic<bool> initialized_{false};
@@ -559,6 +559,10 @@ private:
     COWHandlerMap cow_handlers_;
     std::unordered_map<int, PendingSend> client_pending_sends_;
     PendingSend server_pending_send_;
+    // Counts the server connections made (under server_connection_mutex_): a handle value can be reused by the
+    // next connection, so the send and receive threads tell connections apart by this, not by the SOCKET.
+    uint64_t server_connection_generation_{0};
+    uint64_t server_pending_send_generation_{0};   // The connection server_pending_send_ was started on.
     std::deque<OutgoingMessage> client_send_queue_;
     std::unordered_map<int, std::deque<OutgoingMessage>> per_client_queues_;
     std::unordered_map<int, int64_t> client_stall_start_times_;
@@ -631,7 +635,7 @@ private:
     
     static uint32_t read_uint32(const uint8_t* data, size_t& offset, size_t max_size) {
         if (offset + 4 > max_size) {
-            throw std::runtime_error("Buffer underrun reading uint32");
+            throw std::runtime_error("buffer underrun reading uint32");
         }
         
         uint32_t value = static_cast<uint32_t>(data[offset]) |
@@ -652,7 +656,7 @@ private:
         uint32_t len = read_uint32(data, offset, max_size);
 
         if (len > max_size - offset) {
-            throw std::runtime_error("String length exceeds buffer size");
+            throw std::runtime_error("string length exceeds buffer size");
         }
 
         std::string result(reinterpret_cast<const char*>(data + offset), len);
@@ -679,7 +683,7 @@ private:
 
     static bool read_bool(const uint8_t* data, size_t& offset, size_t max_size) {
         if (offset + 1 > max_size) {
-            throw std::runtime_error("Buffer underrun reading bool");
+            throw std::runtime_error("buffer underrun reading bool");
         }
 
         bool value = data[offset] != 0;
@@ -711,11 +715,11 @@ private:
             shift += 7;
 
             if (shift >= 32) {
-                throw std::runtime_error("Varint too long");
+                throw std::runtime_error("varint too long");
             }
         }
         
-        throw std::runtime_error("Buffer underrun reading varint");
+        throw std::runtime_error("buffer underrun reading varint");
     }
 
     static void write_string_compact(std::vector<uint8_t>& buffer, const std::string& str) {
@@ -727,7 +731,7 @@ private:
         uint32_t len = read_varint(data, offset, max_size);
         
         if (len > max_size - offset) {
-            throw std::runtime_error("String length exceeds buffer size");
+            throw std::runtime_error("string length exceeds buffer size");
         }
         
         std::string result(reinterpret_cast<const char*>(data + offset), len);
@@ -922,7 +926,7 @@ private:
 
     static float read_float16(const uint8_t* data, size_t& offset, size_t max_size) {
         if (offset + 2 > max_size) {
-            throw std::runtime_error("Buffer underrun reading float16");
+            throw std::runtime_error("buffer underrun reading float16");
         }
 
         uint16_t h = static_cast<uint16_t>(data[offset]) |
@@ -944,7 +948,7 @@ private:
 
     static float read_float32_raw(const uint8_t* data, size_t& offset, size_t max_size) {
         if (offset + 4 > max_size) {
-            throw std::runtime_error("Buffer underrun reading float32");
+            throw std::runtime_error("buffer underrun reading float32");
         }
 
         uint32_t raw = static_cast<uint32_t>(data[offset]) |
@@ -1207,7 +1211,7 @@ private:
     
     static uint16_t read_uint16(const uint8_t* data, size_t& offset, size_t max_size) {
         if (offset + 2 > max_size) {
-            throw std::runtime_error("Buffer underrun reading uint16");
+            throw std::runtime_error("buffer underrun reading uint16");
         }
         
         uint16_t value = static_cast<uint16_t>(data[offset]) |
@@ -1509,7 +1513,13 @@ private:
         return false;
     }
 
-    static void serialize_game_value(std::vector<uint8_t>& buffer, const game_value& value) {
+    // The most container levels a value may nest (the value itself is level 0; a hash map's keys and values are one
+    // below it): refused on both sides, so neither a script's self-holding array nor a crafted payload recurses
+    // without bound.
+    static constexpr int NET_MAX_NESTING = 256;
+
+    static void serialize_game_value(std::vector<uint8_t>& buffer, const game_value& value, int depth = 0) {
+        if (depth >= NET_MAX_NESTING) throw std::runtime_error("value nested too deep to serialize");
         auto type = value.type_enum();
         
         switch (type) {
@@ -1592,7 +1602,7 @@ private:
                 
                 if (arr.size() == 1) {
                     buffer.push_back(static_cast<uint8_t>(WireType::ARRAY_SINGLE));
-                    serialize_game_value(buffer, arr[0]);
+                    serialize_game_value(buffer, arr[0], depth + 1);
                     return;
                 }
                 
@@ -1606,7 +1616,7 @@ private:
                 write_varint(buffer, static_cast<uint32_t>(arr.size()));
                 
                 for (const auto& elem : arr) {
-                    serialize_game_value(buffer, elem);
+                    serialize_game_value(buffer, elem, depth + 1);
                 }
                 
                 return;
@@ -1625,8 +1635,8 @@ private:
                 write_varint(buffer, count);
                 
                 for (const auto& pair : map) {
-                    serialize_game_value(buffer, pair.key);
-                    serialize_game_value(buffer, pair.value);
+                    serialize_game_value(buffer, pair.key, depth + 1);
+                    serialize_game_value(buffer, pair.value, depth + 1);
                 }
 
                 return;
@@ -1766,7 +1776,7 @@ private:
             case game_data_type::NetObject:
             case game_data_type::SUBGROUP:
             case game_data_type::TARGET:
-                throw std::runtime_error("Cannot serialize unsupported network type");
+                throw std::runtime_error("cannot serialize unsupported network type");
                 
             default:
                 buffer.push_back(static_cast<uint8_t>(WireType::NOTHING));
@@ -1774,10 +1784,14 @@ private:
         }
     }
     
-    static game_value deserialize_game_value(const uint8_t* data, size_t& offset, size_t max_size) {
+    // The payload is untrusted bytes: every read is bounded by max_size, a container's count by the bytes left (an
+    // element takes at least one), and the nesting by NET_MAX_NESTING, before anything is allocated.
+    static game_value deserialize_game_value(const uint8_t* data, size_t& offset, size_t max_size, int depth = 0) {
         if (offset >= max_size) {
-            throw std::runtime_error("Buffer underrun during deserialization");
+            throw std::runtime_error("buffer underrun during deserialization");
         }
+
+        if (depth >= NET_MAX_NESTING) throw std::runtime_error("value nested too deep to deserialize");
         
         WireType wire_type = static_cast<WireType>(data[offset++]);
         
@@ -1799,11 +1813,11 @@ private:
                 return game_value(static_cast<float>(read_varint(data, offset, max_size)));
             
             case WireType::SCALAR_VARINT_N:
-                return game_value(static_cast<float>(-static_cast<int32_t>(read_varint(data, offset, max_size))));
+                return game_value(-static_cast<float>(read_varint(data, offset, max_size)));
             
             case WireType::SCALAR_FLOAT: {
                 if (offset + 4 > max_size) {
-                    throw std::runtime_error("Buffer underrun reading float");
+                    throw std::runtime_error("buffer underrun reading float");
                 }
 
                 uint32_t raw = static_cast<uint32_t>(data[offset]) |
@@ -1834,17 +1848,18 @@ private:
                 
             case WireType::ARRAY_SINGLE: {
                 auto_array<game_value> arr;
-                arr.push_back(deserialize_game_value(data, offset, max_size));
+                arr.push_back(deserialize_game_value(data, offset, max_size, depth + 1));
                 return game_value(std::move(arr));
             }
             
             case WireType::ARRAY: {
                 uint32_t count = read_varint(data, offset, max_size);
+                if (count > max_size - offset) throw std::runtime_error("array count past buffer");
                 auto_array<game_value> arr;
                 arr.reserve(count);
                 
                 for (uint32_t i = 0; i < count; i++) {
-                    arr.push_back(deserialize_game_value(data, offset, max_size));
+                    arr.push_back(deserialize_game_value(data, offset, max_size, depth + 1));
                 }
                 
                 return game_value(std::move(arr));
@@ -1886,7 +1901,7 @@ private:
 
             case WireType::VEC2_MIXED: {
                 if (offset >= max_size) {
-                    throw std::runtime_error("Buffer underrun reading vec2 mixed encoding");
+                    throw std::runtime_error("buffer underrun reading vec2 mixed encoding");
                 }
 
                 uint8_t encoding = data[offset++];
@@ -1924,7 +1939,7 @@ private:
 
             case WireType::VEC3_MIXED: {
                 if (offset + 2 > max_size) {
-                    throw std::runtime_error("Buffer underrun reading vec3 mixed encoding");
+                    throw std::runtime_error("buffer underrun reading vec3 mixed encoding");
                 }
 
                 uint8_t encoding1 = data[offset++];
@@ -1969,13 +1984,15 @@ private:
             
             case WireType::HASHMAP: {
                 uint32_t count = read_varint(data, offset, max_size);
+                if (count > (max_size - offset) / 2) throw std::runtime_error("hash map count past buffer");
                 auto_array<game_value> pairs;
                 pairs.reserve(count);
                 
                 for (uint32_t i = 0; i < count; i++) {
                     auto_array<game_value> kv;
-                    kv.push_back(deserialize_game_value(data, offset, max_size));
-                    kv.push_back(deserialize_game_value(data, offset, max_size));
+                    kv.reserve(2);
+                    kv.push_back(deserialize_game_value(data, offset, max_size, depth + 1));
+                    kv.push_back(deserialize_game_value(data, offset, max_size, depth + 1));
                     pairs.push_back(game_value(std::move(kv)));
                 }
                 
@@ -2006,7 +2023,7 @@ private:
             
             case WireType::SPECIAL_NAMESPACE: {
                 if (offset >= max_size) {
-                    throw std::runtime_error("Buffer underrun reading namespace");
+                    throw std::runtime_error("buffer underrun reading namespace");
                 }
                 
                 switch (static_cast<WireNamespace>(data[offset++])) {
@@ -2021,7 +2038,7 @@ private:
             
             case WireType::SPECIAL_SIDE: {
                 if (offset >= max_size) {
-                    throw std::runtime_error("Buffer underrun reading side");
+                    throw std::runtime_error("buffer underrun reading side");
                 }
                 
                 switch (static_cast<WireSide>(data[offset++])) {
@@ -2600,8 +2617,7 @@ private:
             case game_data_type::STRING: {
                 std::string target_str = static_cast<std::string>(target);
                 if (target_str.empty()) break;
-                std::string target_upper = target_str;
-                std::transform(target_upper.begin(), target_upper.end(), target_upper.begin(), ::toupper);
+                std::string target_upper = kh_upper_copy(target_str);
                 NetworkTargetType str_type;
                 bool use_extended = false;
                 if (target_upper == "SERVER") str_type = NetworkTargetType::STRING_SERVER;
@@ -2896,7 +2912,7 @@ private:
             
             return true;
         } catch (const std::exception& e) {
-            report_error("KH Network: Failed to send to targets - " + std::string(e.what()));
+            report_error("KH Network: failed to send to the targets: " + std::string(e.what()));
             return false;
         }
     }
@@ -2934,14 +2950,6 @@ private:
         packet.insert(packet.end(), final_payload->begin(), final_payload->end());
     }
 
-    std::vector<uint8_t> create_network_packet(int target_client, int sender_client,
-                                                    const std::string& event_name,
-                                                    const std::vector<uint8_t>& payload) {
-        std::vector<uint8_t> packet;
-        create_network_packet_into(packet, target_client, sender_client, event_name, payload);
-        return packet;
-    }
-        
     bool parse_network_packet(const std::vector<uint8_t>& data, int& target_client, 
                                     int& sender_client, std::string& event_name, 
                                     std::vector<uint8_t>& payload) {
@@ -3002,10 +3010,9 @@ private:
         ka.keepaliveinterval = static_cast<ULONG>(config_keepalive_interval_ms_);
         DWORD bytes_returned = 0;
         WSAIoctl(sock, SIO_KEEPALIVE_VALS, &ka, sizeof(ka), nullptr, 0, &bytes_returned, nullptr, nullptr);
-        struct linger lin;
-        lin.l_onoff = 1;
-        lin.l_linger = 2;
-        setsockopt(sock, SOL_SOCKET, SO_LINGER, reinterpret_cast<const char*>(&lin), sizeof(lin));
+        // No SO_LINGER: with a non-zero linger on a non-blocking socket, closesocket fails with WSAEWOULDBLOCK while
+        // unsent data remains and the handle stays open (every close here is unchecked). The default close sends
+        // what is queued in the background.
         return true;
     }
 
@@ -3068,13 +3075,13 @@ private:
         std::unique_lock<std::mutex> recon_lock(reconnect_mutex_, std::try_to_lock);
 
         if (!recon_lock.owns_lock()) {
-            // Another thread is reconnecting — wait for it to finish
+            // Another thread is reconnecting - wait for it to finish
             std::lock_guard<std::mutex> wait_lock(reconnect_mutex_);
             std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
             return server_connection_ != INVALID_SOCKET;
         }
 
-        // Re-check — might have been reconnected between our first check and acquiring the lock
+        // Re-check - might have been reconnected between our first check and acquiring the lock
         {
             std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
             if (server_connection_ != INVALID_SOCKET) return true;
@@ -3084,7 +3091,7 @@ private:
     }
 
     enum class RecvNBResult {
-        OK,             // Got some data (or nothing available yet — both fine)
+        OK,             // Got some data (or nothing available yet - both fine)
         DISCONNECTED
     };
 
@@ -3118,78 +3125,53 @@ private:
         }
     }
 
+    // One HTTPS GET of a public-IP service, its body through parser; "" on any failure. The handles close on every
+    // path (WinHttpHandle).
     std::string fetch_public_ip_from_service(const wchar_t* host, const wchar_t* path, 
                                               const std::function<std::string(const std::string&)>& parser) {
-        std::string result;
-        HINTERNET hSession = nullptr;
-        HINTERNET hConnect = nullptr;
-        HINTERNET hRequest = nullptr;
-        
-        hSession = WinHttpOpen(L"KH-Network/1.0", 
-                               WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                               WINHTTP_NO_PROXY_NAME, 
-                               WINHTTP_NO_PROXY_BYPASS, 
-                               0);
+        struct WinHttpHandle {
+            HINTERNET h = nullptr;
+            ~WinHttpHandle() { if (h) WinHttpCloseHandle(h); }
+            explicit operator bool() const { return h != nullptr; }
+        };
 
-        if (!hSession) {
-            return result;
-        }
+        WinHttpHandle session;
+        session.h = WinHttpOpen(L"KH-Network/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
+                                WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!session) return "";
         
         // Set timeouts: resolve=5s, connect=5s, send=5s, receive=5s
-        WinHttpSetTimeouts(hSession, 5000, 5000, 5000, 5000);
+        WinHttpSetTimeouts(session.h, 5000, 5000, 5000, 5000);
         
-        hConnect = WinHttpConnect(hSession, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
-
-        if (!hConnect) {
-            WinHttpCloseHandle(hSession);
-            return result;
-        }
+        WinHttpHandle connect;
+        connect.h = WinHttpConnect(session.h, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
+        if (!connect) return "";
         
-        hRequest = WinHttpOpenRequest(hConnect, L"GET", path,
-                                       nullptr, WINHTTP_NO_REFERER,
-                                       WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                       WINHTTP_FLAG_SECURE);
-        if (!hRequest) {
-            WinHttpCloseHandle(hConnect);
-            WinHttpCloseHandle(hSession);
-            return result;
-        }
+        WinHttpHandle request;
+        request.h = WinHttpOpenRequest(connect.h, L"GET", path, nullptr, WINHTTP_NO_REFERER,
+                                       WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+        if (!request) return "";
         
         // Ignore certificate errors for reliability (IP services use valid certs anyway)
         DWORD dwFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
                         SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
                         SECURITY_FLAG_IGNORE_CERT_CN_INVALID;
 
-        WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &dwFlags, sizeof(dwFlags));
+        WinHttpSetOption(request.h, WINHTTP_OPTION_SECURITY_FLAGS, &dwFlags, sizeof(dwFlags));
         
-        if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                                 WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
-            WinHttpCloseHandle(hRequest);
-            WinHttpCloseHandle(hConnect);
-            WinHttpCloseHandle(hSession);
-            return result;
+        if (!WinHttpSendRequest(request.h, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
+            return "";
         }
         
-        if (!WinHttpReceiveResponse(hRequest, nullptr)) {
-            WinHttpCloseHandle(hRequest);
-            WinHttpCloseHandle(hConnect);
-            WinHttpCloseHandle(hSession);
-            return result;
-        }
+        if (!WinHttpReceiveResponse(request.h, nullptr)) return "";
         
-        // Check status code
         DWORD statusCode = 0;
         DWORD statusCodeSize = sizeof(statusCode);
 
-        if (!WinHttpQueryHeaders(hRequest, 
-                                  WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                                  WINHTTP_HEADER_NAME_BY_INDEX, 
-                                  &statusCode, &statusCodeSize, 
-                                  WINHTTP_NO_HEADER_INDEX) || statusCode != 200) {
-            WinHttpCloseHandle(hRequest);
-            WinHttpCloseHandle(hConnect);
-            WinHttpCloseHandle(hSession);
-            return result;
+        if (!WinHttpQueryHeaders(request.h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                 WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusCodeSize,
+                                 WINHTTP_NO_HEADER_INDEX) || statusCode != 200) {
+            return "";
         }
         
         // Read response body
@@ -3201,7 +3183,7 @@ private:
         
         do {
             dwSize = 0;
-            if (!WinHttpQueryDataAvailable(hRequest, &dwSize)) {
+            if (!WinHttpQueryDataAvailable(request.h, &dwSize)) {
                 break;
             }
 
@@ -3211,7 +3193,7 @@ private:
 
             DWORD toRead = (dwSize > sizeof(buffer)) ? sizeof(buffer) : dwSize;
 
-            if (!WinHttpReadData(hRequest, buffer, toRead, &dwDownloaded)) {
+            if (!WinHttpReadData(request.h, buffer, toRead, &dwDownloaded)) {
                 break;
             }
 
@@ -3222,15 +3204,8 @@ private:
             }
         } while (dwSize > 0);
         
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        
-        if (!response_body.empty()) {
-            result = parser(response_body);
-        }
-        
-        return result;
+        if (response_body.empty()) return "";
+        return parser(response_body);
     }
     
     // Validates an IPv4 address string
@@ -3270,23 +3245,6 @@ private:
         return dots == 3 && has_digit;
     }
     
-    // Trims whitespace from a string
-    std::string trim_ip_string(const std::string& str) {
-        size_t start = 0;
-        size_t end = str.length();
-        
-        while (start < end && (str[start] == ' ' || str[start] == '\t' || 
-               str[start] == '\r' || str[start] == '\n')) {
-            start++;
-        }
-        while (end > start && (str[end - 1] == ' ' || str[end - 1] == '\t' || 
-               str[end - 1] == '\r' || str[end - 1] == '\n')) {
-            end--;
-        }
-        
-        return str.substr(start, end - start);
-    }
-    
     // Parser for plain text IP responses (ipify, amazonaws)
     static std::string parse_plain_text_ip(const std::string& response) {
         std::string trimmed;
@@ -3324,31 +3282,6 @@ private:
         return response.substr(pos, end - pos);
     }
     
-    // Parser for ipinfo.io JSON response (finds "ip": "x.x.x.x")
-    static std::string parse_ipinfo_json(const std::string& response) {
-        // Look for "ip": " or "ip":"
-        size_t pos = response.find("\"ip\"");
-        
-        if (pos == std::string::npos) {
-            return "";
-        }
-        
-        pos = response.find("\"", pos + 4);
-
-        if (pos == std::string::npos) {
-            return "";
-        }
-
-        pos++; // Skip opening quote
-        size_t end = response.find("\"", pos);
-
-        if (end == std::string::npos) {
-            return "";
-        }
-        
-        return response.substr(pos, end - pos);
-    }
-
     // Detects the public IP address by querying multiple services
     // Falls back to local IP if all services fail
     std::string detect_public_ip() {
@@ -3427,14 +3360,17 @@ private:
         if (client_send_queue_.empty()) return;
         if (!ensure_server_connection()) return;       // leave queued, in order
         SOCKET server_sock = INVALID_SOCKET;
+        uint64_t server_generation = 0;
 
         {
             std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
             server_sock = server_connection_;
+            server_generation = server_connection_generation_;
         }
 
         if (server_sock == INVALID_SOCKET) return;
         const size_t max_msgs = config_coalesce_enabled_ ? config_coalesce_max_messages_ : 1;
+        server_pending_send_generation_ = server_generation;   // What a partial send below belongs to.
 
         while (!client_send_queue_.empty() && server_pending_send_.complete()) {
             chunk.clear();
@@ -3523,7 +3459,7 @@ private:
 
             if (listen_active_clients_.size() > max_clients_per_select && !warned_fd_limit_.exchange(true)) {
                 MainThreadScheduler::instance().schedule([]() {
-                    sqf::diag_log("KH Network: WARNING - More than " + std::to_string(FD_SETSIZE - 1) + 
+                    sqf::diag_log("KH Network: more than " + std::to_string(FD_SETSIZE - 1) +
                                 " clients connected, some may experience delayed messages");
                 });
             }
@@ -3639,7 +3575,7 @@ private:
                             client_recv_buffers_.erase(id);
 
                             MainThreadScheduler::instance().schedule([id]() {
-                                sqf::diag_log("KH Network: Client " + std::to_string(id) + " disconnected");
+                                sqf::diag_log("KH Network: client " + std::to_string(id) + " disconnected");
                             });
                         }
                     }
@@ -3692,7 +3628,7 @@ private:
                             });
 
                             MainThreadScheduler::instance().schedule([client_id]() {
-                                sqf::diag_log("KH Network: Client " + std::to_string(client_id) + " connected");
+                                sqf::diag_log("KH Network: client " + std::to_string(client_id) + " connected");
                             });
 
                             continue;
@@ -3834,40 +3770,43 @@ private:
             return true;
         }
 
-        server_recv_buffer_.reset();
+        // server_recv_buffer_ is the receive thread's alone (it resets it when the connection changes); this may run
+        // on the send thread while that thread parses it.
         server_connection_ = sock;
+        ++server_connection_generation_;
         return true;
     }
     
+    // A client's receive loop (the server's clients are read by the listen thread). server_recv_buffer_ belongs to
+    // this thread: bytes of one connection only - it is reset whenever the connection it reads is a new one (the
+    // send thread may reconnect too, through ensure_server_connection).
     void receive_thread_func() {
         std::vector<NetworkMessage> parsed_messages;
         parsed_messages.reserve(config_coalesce_max_messages_);
+        uint64_t buffer_generation = 0;   // The connection server_recv_buffer_ holds bytes of.
         
         while (running_) {
-            if (is_server_) {
-                // Server mode - handled by listen thread
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                continue;
-            }
-            
             // Client mode - receive from server
             SOCKET sock = INVALID_SOCKET;
+            uint64_t generation = 0;
 
             {
                 std::lock_guard<std::mutex> lock(server_connection_mutex_);
                 sock = server_connection_;
+                generation = server_connection_generation_;
             }
             
             // If disconnected, attempt to reconnect indefinitely until shutdown
             if (sock == INVALID_SOCKET) {
                 if (ensure_server_connection()) {
                     MainThreadScheduler::instance().schedule([]() {
-                        sqf::diag_log("KH Network: Reconnected to server");
+                        sqf::diag_log("KH Network: reconnected to server");
                     });
 
                     {
                         std::lock_guard<std::mutex> lock(server_connection_mutex_);
                         sock = server_connection_;
+                        generation = server_connection_generation_;
                     }
                 } else {
                     int waited_ms = 0;
@@ -3886,6 +3825,11 @@ private:
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
+
+            if (generation != buffer_generation) {
+                server_recv_buffer_.reset();
+                buffer_generation = generation;
+            }
             
             fd_set read_fds;
             FD_ZERO(&read_fds);
@@ -3899,7 +3843,8 @@ private:
                 
                 {
                     std::lock_guard<std::mutex> lock(server_connection_mutex_);
-                    if (server_connection_ != sock) continue;   // reconnected under us
+                    // Closed, or reconnected (a reused handle value included), under us.
+                    if (server_connection_ != sock || server_connection_generation_ != generation) continue;
                     recv_result = recv_nonblocking(sock, server_recv_buffer_);
                 }
 
@@ -3909,7 +3854,7 @@ private:
                     {
                         std::lock_guard<std::mutex> lock(server_connection_mutex_);
 
-                        if (server_connection_ != INVALID_SOCKET && server_connection_ == sock) {
+                        if (server_connection_ != INVALID_SOCKET && server_connection_generation_ == generation) {
                             ::shutdown(server_connection_, SD_BOTH);
                             closesocket(server_connection_);
                             server_connection_ = INVALID_SOCKET;
@@ -3919,7 +3864,7 @@ private:
                     }
 
                     MainThreadScheduler::instance().schedule([]() {
-                        sqf::diag_log("KH Network: Connection to server lost, attempting to reconnect...");
+                        sqf::diag_log("KH Network: connection to server lost; reconnecting");
                     });
                 } else {
                     // Extract all complete messages
@@ -4001,7 +3946,7 @@ private:
             client_pending_sends_.erase(client_id);
             
             MainThreadScheduler::instance().schedule([client_id]() {
-                sqf::diag_log("KH Network: Client " + std::to_string(client_id) + " disconnected (stall/error)");
+                sqf::diag_log("KH Network: client " + std::to_string(client_id) + " disconnected (stall/error)");
             });
         }
     }
@@ -4011,13 +3956,17 @@ private:
     void process_pending_send_client() {
         if (server_pending_send_.complete()) return;
         SOCKET sock = INVALID_SOCKET;
+        uint64_t generation = 0;
         
         {
             std::lock_guard<std::mutex> srv_lock(server_connection_mutex_);
             sock = server_connection_;
+            generation = server_connection_generation_;
         }
         
-        if (sock == INVALID_SOCKET) {
+        // Gone, or a new connection (the receive thread reconnected in between): the tail of a packet the old
+        // connection never got whole is dropped, not written as the first bytes of the new stream.
+        if (sock == INVALID_SOCKET || generation != server_pending_send_generation_) {
             server_pending_send_.clear();
             return;
         }
@@ -4349,9 +4298,11 @@ private:
     }
 
 public:
+    // Never destroyed: at process exit the worker threads are already gone when static destructors would run
+    // (a mutex one of them held would hang the exit); DllMain's unload path stops the framework instead.
     static NetworkFramework& instance() {
-        static NetworkFramework inst;
-        return inst;
+        static NetworkFramework* inst = new NetworkFramework();
+        return *inst;
     }
     
     bool initialize() {
@@ -4368,13 +4319,6 @@ public:
         }
 
         wsa_initialized_ = true;
-        
-        // Detect local IP
-        {
-            std::lock_guard<std::mutex> lock(local_ip_mutex_);
-            local_ip_ = detect_public_ip();
-        }
-        
         payload_pool_ = std::make_shared<PayloadPool>(256);
         initialized_.store(true);
         return true;
@@ -4401,7 +4345,7 @@ public:
             listen_socket_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
             if (listen_socket_ == INVALID_SOCKET) {
-                report_error("KH Network: Failed to create listen socket");
+                report_error("KH Network: failed to create the listen socket");
                 return false;
             }
             
@@ -4414,20 +4358,20 @@ public:
             server_addr.sin_port = htons(static_cast<u_short>(network_port_));
             
             if (bind(listen_socket_, reinterpret_cast<struct sockaddr*>(&server_addr), sizeof(server_addr)) == SOCKET_ERROR) {
-                report_error("KH Network: Failed to bind listen socket on port " + std::to_string(network_port_));
+                report_error("KH Network: failed to bind the listen socket on port " + std::to_string(network_port_));
                 closesocket(listen_socket_);
                 listen_socket_ = INVALID_SOCKET;
                 return false;
             }
             
             if (listen(listen_socket_, SOMAXCONN) == SOCKET_ERROR) {
-                report_error("KH Network: Failed to listen");
+                report_error("KH Network: failed to listen");
                 closesocket(listen_socket_);
                 listen_socket_ = INVALID_SOCKET;
                 return false;
             }
             
-            sqf::diag_log("KH Network: Server listening on port " + std::to_string(network_port_));
+            sqf::diag_log("KH Network: server listening on port " + std::to_string(network_port_));
         }
         
         running_.store(true);
@@ -4435,14 +4379,13 @@ public:
         if (as_server) {
             listen_thread_ = std::thread(&NetworkFramework::listen_thread_func, this);
         } else {
-            if (!connect_to_server_internal()) {
-                report_error("KH Network: Initial connection to server failed");
-            } else {
-                sqf::diag_log("KH Network: Connected to server");
-            }
+            // Not an error: the receive thread keeps reconnecting (and says so).
+            sqf::diag_log(connect_to_server_internal() ? "KH Network: connected to server"
+                                                       : "KH Network: initial connection to server failed");
+
+            receive_thread_ = std::thread(&NetworkFramework::receive_thread_func, this);
         }
 
-        receive_thread_ = std::thread(&NetworkFramework::receive_thread_func, this);
         send_thread_ = std::thread(&NetworkFramework::send_thread_func, this);
         return true;
     }
@@ -4518,6 +4461,11 @@ public:
             client_send_queue_.clear();
         }
 
+        {   // Looked up again by the next session (a failed lookup falls back to the LAN address).
+            std::lock_guard<std::mutex> lock(local_ip_mutex_);
+            local_ip_.clear();
+        }
+
         {
             std::lock_guard<std::mutex> lock(incoming_mutex_);
             incoming_queue_.clear();
@@ -4526,6 +4474,12 @@ public:
         {
             std::lock_guard<std::mutex> lock(local_incoming_mutex_);
             local_incoming_queue_.clear();
+        }
+
+        {   // Messages queued after the send thread's last pop would otherwise go out in the next session.
+            OutgoingMessage dropped;
+            while (outgoing_queue_lockfree_.try_pop(dropped)) {}
+            outgoing_has_data_.store(false, std::memory_order_release);
         }
 
         cow_handlers_.clear();
@@ -4554,8 +4508,11 @@ public:
         return network_port_;
     }
     
+    // The address clients connect to: the public IP (the lookups take seconds, so only here, on the server, and
+    // once per session - shutdown() clears it; the LAN address when every service fails) and the port.
     std::string get_local_ip_port() {
         std::lock_guard<std::mutex> lock(local_ip_mutex_);
+        if (local_ip_.empty()) local_ip_ = detect_public_ip();
         return local_ip_ + ":" + std::to_string(network_port_);
     }
     
@@ -4584,7 +4541,7 @@ public:
                     store_data.push_back(game_value(static_cast<float>(sender)));
                     send_message(2, NET_INTERNAL_STORE_JIP_EVENT, game_value(std::move(store_data)));
                 } catch (const std::exception& e) {
-                    report_error("KH Network: Failed to forward JIP store request - " + std::string(e.what()));
+                    report_error("KH Network: failed to forward a JIP store request: " + std::string(e.what()));
                 }
             }
 
@@ -4593,7 +4550,7 @@ public:
         
         std::string actual_key = jip_key;
         
-        // KH_JIP_CODE: the variable's key ("_SETVAR_<ns>_<id>_<var>") of a plain set - which is stored under it, one
+        // The variable's key ("_SETVAR_<ns>_<id>_<var>") of a plain set - which is stored under it, one
         // entry per variable - or of a condition-gated set [condition, NET_INTERNAL_SET_VARIABLE_EVENT, message],
         // which keeps its own key (each condition is its own entry) and records the variable's in setvar_key.
         std::string var_key;
@@ -4651,7 +4608,7 @@ public:
             std::vector<uint8_t> payload(tls_buffer.begin(), tls_buffer.end());
             std::lock_guard<std::mutex> lock(jip_mutex_);
 
-            // KH_JIP_CODE: a plain JIP set of the variable supersedes its condition-gated sets stored before it - a
+            // A plain JIP set of the variable supersedes its condition-gated sets stored before it - a
             // joiner replays the plain value alone. (The replay ignores targets, for every entry: a plain set sent
             // to some clients only is replayed to every joiner, and supersedes the conditional sets all the same.)
             if (!setvar_cond && !var_key.empty()) {
@@ -4666,9 +4623,9 @@ public:
             jip_messages_[actual_key] = {event_name, std::move(payload), sender, dependency_net_id, dependency_is_group,
                                          unit_required, seq, setvar_cond ? var_key : std::string()};
         } catch (const std::exception& e) {
-            report_error("KH Network: Failed to store JIP message '" + actual_key + "' - " + std::string(e.what()));
+            report_error("KH Network: failed to store JIP message '" + actual_key + "': " + std::string(e.what()));
         } catch (...) {
-            report_error("KH Network: Failed to store JIP message '" + actual_key + "' - unknown error");
+            report_error("KH Network: failed to store JIP message '" + actual_key + "': unknown error");
         }
     }
 
@@ -4705,11 +4662,6 @@ public:
         send_message(owner_client_id, NET_INTERNAL_REMOVE_HANDLER_EVENT, game_value(std::move(data)));
     }
     
-    void clear_all_jip_messages() {
-        std::lock_guard<std::mutex> lock(jip_mutex_);
-        jip_messages_.clear();
-    }
-
     void send_jip_messages_to_client(int client_id) {
         std::vector<std::tuple<std::string, std::shared_ptr<std::vector<uint8_t>>, int, uint64_t>> messages_to_send;
         
@@ -4750,7 +4702,7 @@ public:
             }
         }
         
-        // KH_JIP_ORDER: the replay goes out in registration order (JipMessage::seq; a key stored again keeps its
+        // The replay goes out in registration order (JipMessage::seq; a key stored again keeps its
         // first seq) instead of the map's arbitrary one, where a message could reach the joiner ahead of an earlier
         // one it builds on. The joiner still runs unit-gated entries once its unit exists, after the others.
         std::sort(messages_to_send.begin(), messages_to_send.end(),
@@ -4797,7 +4749,7 @@ public:
             outgoing_has_data_.store(true, std::memory_order_release);
             return true;
         } catch (const std::exception& e) {
-            report_error("KH Network: Failed to serialize message - " + std::string(e.what()));
+            report_error("KH Network: failed to serialize a message: " + std::string(e.what()));
             return false;
         }
     }
@@ -4924,7 +4876,7 @@ public:
             // Send to server with special routing event name
             return send_message(2, NET_INTERNAL_ROUTE_EVENT, game_value(std::move(route_data)));
         } catch (const std::exception& e) {
-            report_error("KH Network: Failed to send routing request - " + std::string(e.what()));
+            report_error("KH Network: failed to send a routing request: " + std::string(e.what()));
             return false;
         }
     }
@@ -4944,7 +4896,7 @@ public:
             auto& arr = route_data.to_array();
             
             if (arr.size() < 4) {
-                report_error("KH Network: Invalid routing request format");
+                report_error("KH Network: invalid routing request format");
                 return;
             }
             
@@ -4956,7 +4908,7 @@ public:
             std::vector<int> targets = resolve_targets_server(target_type, target_data, sender_client_id, local_exec);
             send_to_targets(targets, local_exec, event_name, message, sender_client_id);
         } catch (const std::exception& e) {
-            report_error("KH Network: Failed to process routing request - " + std::string(e.what()));
+            report_error("KH Network: failed to process a routing request: " + std::string(e.what()));
         }
     }
     
@@ -4968,6 +4920,50 @@ public:
         return cow_handlers_.remove_handler(handler_id);
     }
     
+    // Runs every handler of event_name with the message as _this, and _sender, _args and _handlerid set (the names
+    // khNetworkMessageReceive's handlers read).
+    void invoke_handlers(const std::string& event_name, const game_value& message, int sender_client_id) {
+        HandlerListPtr handlers = cow_handlers_.get_handlers(event_name);
+        if (!handlers) return;
+        auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
+        static r_string message_name = "_this"sv;
+        static r_string sender_name = "_sender"sv;
+        static r_string args_name = "_args"sv;
+        static r_string handler_id_name = "_handlerid"sv;
+
+        for (const auto& handler : *handlers) {
+            try {
+                game_state->set_local_variable(message_name, message);
+                game_state->set_local_variable(sender_name, game_value(static_cast<float>(sender_client_id)));
+                game_state->set_local_variable(args_name, handler.handler_arguments);
+                game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
+                intercept::client::host::functions.invoke_raw_unary(
+                    intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
+            } catch (const std::exception& e) {
+                report_error("KH Network: handler error for '" + event_name + "': " + std::string(e.what()));
+            }
+        }
+    }
+
+    // A condition-gated message, [condition, event, message] (NET_INTERNAL_CONDITIONAL_EVENT): the condition runs
+    // here, and the message is delivered when it answers true - a variable set (NET_INTERNAL_SET_VARIABLE_EVENT) or
+    // an event's handlers.
+    void process_conditional_message(const game_value& data, int sender_client_id) {
+        auto& arr = data.to_array();
+        if (arr.size() < 3) return;
+        code condition = arr[0];
+        std::string real_event_name = static_cast<std::string>(arr[1]);
+        game_value real_message = arr[2];
+        game_value result = raw_call_sqf_native(condition);
+        if (result.type_enum() != game_data_type::BOOL || !static_cast<bool>(result)) return;
+
+        if (real_event_name == NET_INTERNAL_SET_VARIABLE_EVENT) {
+            process_set_variable_message(real_message, sender_client_id);
+        } else {
+            invoke_handlers(real_event_name, real_message, sender_client_id);
+        }
+    }
+
     // Called from main thread during on_frame
     void process_incoming_messages() {
         // Process local messages first (no deserialization needed)
@@ -4994,73 +4990,20 @@ public:
                     continue;
                 }
                 
-                // Check for internal conditional event
                 if (msg.event_name == NET_INTERNAL_CONDITIONAL_EVENT) {
                     try {
-                        auto& arr = msg.message.to_array();
-                        
-                        if (arr.size() >= 3) {
-                            code condition = arr[0];
-                            std::string real_event_name = static_cast<std::string>(arr[1]);
-                            game_value real_message = arr[2];
-                            game_value result = raw_call_sqf_native(condition);
-                            
-                            if (result.type_enum() == game_data_type::BOOL && static_cast<bool>(result)) {
-                                if (real_event_name == NET_INTERNAL_SET_VARIABLE_EVENT) {
-                                    process_set_variable_message(real_message, msg.sender_client_id);
-                                } else {
-                                    HandlerListPtr handlers = cow_handlers_.get_handlers(real_event_name);
-                                
-                                    if (handlers) {
-                                        for (const auto& handler : *handlers) {
-                                            try {
-                                                auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
-                                                static r_string message_name = "_this"sv;
-                                                static r_string sender_name = "_sender"sv;
-                                                static r_string args_name = "_args"sv;
-                                                static r_string handler_id_name = "_handlerid"sv;
-                                                game_state->set_local_variable(message_name, real_message);
-                                                game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
-                                                game_state->set_local_variable(args_name, handler.handler_arguments);
-                                                game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
-                                                intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
-                                            } catch (const std::exception& e) {
-                                                report_error("KH Network: Handler error for '" + msg.event_name + "' - " + std::string(e.what()));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        process_conditional_message(msg.message, msg.sender_client_id);
                     } catch (const std::exception& e) {
-                        report_error("KH Network: Failed to process local conditional message - " + std::string(e.what()));
+                        report_error("KH Network: failed to process a local conditional message: " +
+                                     std::string(e.what()));
                     }
 
                     continue;
                 }
                 
-                HandlerListPtr handlers = cow_handlers_.get_handlers(msg.event_name);
-                
-                if (handlers) {
-                    for (const auto& handler : *handlers) {
-                        try {
-                            auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
-                            static r_string message_name = "_this"sv;
-                            static r_string sender_name = "_sender"sv;
-                            static r_string args_name = "_args"sv;
-                            static r_string handler_id_name = "_handlerid"sv;
-                            game_state->set_local_variable(message_name, msg.message);
-                            game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
-                            game_state->set_local_variable(args_name, handler.handler_arguments);
-                            game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
-                            intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
-                        } catch (const std::exception& e) {
-                            report_error("KH Network: Handler error for '" + msg.event_name + "' - " + std::string(e.what()));
-                        }
-                    }
-                }
+                invoke_handlers(msg.event_name, msg.message, msg.sender_client_id);
             } catch (const std::exception& e) {
-                report_error("KH Network: Failed to process local message - " + std::string(e.what()));
+                report_error("KH Network: failed to process a local message: " + std::string(e.what()));
             }
         }
         
@@ -5111,7 +5054,7 @@ public:
                                 );
                             }
                         } catch (const std::exception& e) {
-                            report_error("KH Network: Failed to process JIP store request - " + std::string(e.what()));
+                            report_error("KH Network: failed to process a JIP store request: " + std::string(e.what()));
                         }
                     }
 
@@ -5123,7 +5066,8 @@ public:
                             game_value key_gv = deserialize_game_value(msg.payload.data(), offset, msg.payload.size());
                             remove_jip_message(static_cast<std::string>(key_gv));
                         } catch (const std::exception& e) {
-                            report_error("KH Network: Failed to process JIP removal request - " + std::string(e.what()));
+                            report_error("KH Network: failed to process a JIP removal request: " +
+                                         std::string(e.what()));
                         }
                     }
 
@@ -5139,7 +5083,8 @@ public:
                                 remove_message_handler(static_cast<int>(static_cast<float>(a[0])));
                             }
                         } catch (const std::exception& e) {
-                            report_error("KH Network: Failed to process handler removal request - " + std::string(e.what()));
+                            report_error("KH Network: failed to process a handler removal request: " +
+                                         std::string(e.what()));
                         }
                     }
 
@@ -5166,7 +5111,8 @@ public:
                             std::lock_guard<std::mutex> lock(incoming_mutex_);
                             incoming_queue_.emplace_back(inner_event, std::move(inner_payload), msg.sender_client_id);
                         } catch (const std::exception& e) {
-                            report_error("KH Network: Failed to unwrap unit-gated JIP message - " + std::string(e.what()));
+                            report_error("KH Network: failed to unwrap a unit-gated JIP message: " +
+                                         std::string(e.what()));
                         }
                     }
 
@@ -5176,43 +5122,10 @@ public:
                         try {
                             size_t offset = 0;
                             game_value cond_data = deserialize_game_value(msg.payload.data(), offset, msg.payload.size());
-                            auto& arr = cond_data.to_array();
-                            
-                            if (arr.size() >= 3) {
-                                code condition = arr[0];
-                                std::string real_event_name = static_cast<std::string>(arr[1]);
-                                game_value real_message = arr[2];
-                                game_value result = raw_call_sqf_native(condition);
-                                
-                                if (result.type_enum() == game_data_type::BOOL && static_cast<bool>(result)) {
-                                    if (real_event_name == NET_INTERNAL_SET_VARIABLE_EVENT) {
-                                        process_set_variable_message(real_message, msg.sender_client_id);
-                                    } else {
-                                        HandlerListPtr handlers = cow_handlers_.get_handlers(real_event_name);
-                                        
-                                        if (handlers) {
-                                            for (const auto& handler : *handlers) {
-                                                try {
-                                                    auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
-                                                    static r_string message_name = "_this"sv;
-                                                    static r_string sender_name = "_sender"sv;
-                                                    static r_string args_name = "_args"sv;
-                                                    static r_string handler_id_name = "_handlerid"sv;
-                                                    game_state->set_local_variable(message_name, real_message);
-                                                    game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
-                                                    game_state->set_local_variable(args_name, handler.handler_arguments);
-                                                    game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
-                                                    intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
-                                                } catch (const std::exception& e) {
-                                                    report_error("KH Network: Handler error for '" + msg.event_name + "' - " + std::string(e.what()));
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            process_conditional_message(cond_data, msg.sender_client_id);
                         } catch (const std::exception& e) {
-                            report_error("KH Network: Failed to process conditional message - " + std::string(e.what()));
+                            report_error("KH Network: failed to process a conditional message: " +
+                                         std::string(e.what()));
                         }
                     }
 
@@ -5232,35 +5145,16 @@ public:
                                   " | Payload: " + std::to_string(msg.payload.size()) + "B");
                 }
                 
-                HandlerListPtr handlers = cow_handlers_.get_handlers(msg.event_name);
-                
-                if (handlers) {
-                    for (const auto& handler : *handlers) {
-                        try {
-                            auto game_state = (intercept::client::host::functions.get_engine_allocator())->gameState;
-                            static r_string message_name = "_this"sv;
-                            static r_string sender_name = "_sender"sv;
-                            static r_string args_name = "_args"sv;
-                            static r_string handler_id_name = "_handlerid"sv;
-                            game_state->set_local_variable(message_name, deserialized);
-                            game_state->set_local_variable(sender_name, game_value(static_cast<float>(msg.sender_client_id)));
-                            game_state->set_local_variable(args_name, handler.handler_arguments);
-                            game_state->set_local_variable(handler_id_name, game_value(static_cast<float>(handler.handler_id)));
-                            intercept::client::host::functions.invoke_raw_unary(intercept::client::__sqf::unary__isnil__code_string__ret__bool, handler.handler_function);
-                        } catch (const std::exception& e) {
-                            report_error("KH Network: Handler error for '" + msg.event_name + "' - " + std::string(e.what()));
-                        }
-                    }
-                }
+                invoke_handlers(msg.event_name, deserialized, msg.sender_client_id);
             } catch (const std::exception& e) {
-                report_error("KH Network: Failed to deserialize message - " + std::string(e.what()));
+                report_error("KH Network: failed to deserialize a message: " + std::string(e.what()));
             }
         }
     }
 
     void apply_settings(const game_value& settings) {
         if (running_) {
-            report_error("KH Network: Cannot apply settings while running");
+            report_error("KH Network: settings cannot be applied while running");
             return;
         }
 
@@ -5336,19 +5230,12 @@ public:
             } else if (type == game_data_type::SCALAR) {
                 return static_cast<float>(arr[index]) != 0.0f;
             } else if (type == game_data_type::STRING) {
-                std::string str_val = static_cast<std::string>(arr[index]);
+                const std::string str_val = kh_lower_copy(static_cast<std::string>(arr[index]));
 
                 if (str_val.empty()) {
                     return default_val;
                 }
 
-                // Convert to lowercase for comparison
-                for (char& c : str_val) {
-                    if (c >= 'A' && c <= 'Z') {
-                        c = c + ('a' - 'A');
-                    }
-                }
-                
                 if (str_val == "true" || str_val == "1" || str_val == "yes") {
                     return true;
                 } else if (str_val == "false" || str_val == "0" || str_val == "no") {
@@ -5401,11 +5288,7 @@ public:
         }
 
         network_logging_enabled_.store(enabled);
-        sqf::diag_log(std::string("KH Network: Logging ") + (enabled ? "ENABLED" : "DISABLED"));
-    }
-
-    bool is_network_logging_enabled() const {
-        return network_logging_enabled_;
+        sqf::diag_log(std::string("KH Network: logging ") + (enabled ? "enabled" : "disabled"));
     }
 
     void log_network_message(const std::string& direction, const std::string& event_name, 
@@ -5462,6 +5345,8 @@ public:
                     return SetVariableNamespaceType::NAMESPACE_PARSING;
                 } else if (ns_value == sqf::server_namespace()) {
                     return SetVariableNamespaceType::NAMESPACE_SERVER;
+                } else if (ns_value == sqf::mission_profile_namespace()) {
+                    return SetVariableNamespaceType::NAMESPACE_MISSION_PROFILE;
                 }
                 // Default to mission namespace
                 return SetVariableNamespaceType::NAMESPACE_MISSION;
@@ -5545,6 +5430,7 @@ public:
 
     static void apply_set_variable_from_network(const game_value& ns_data, const std::string& var_name, const game_value& value) {        
         auto& arr = ns_data.to_array();
+        if (arr.size() < 2) throw std::runtime_error("malformed namespace data");
         
         SetVariableNamespaceType ns_type = static_cast<SetVariableNamespaceType>(
             static_cast<uint8_t>(static_cast<float>(arr[0]))
@@ -5640,19 +5526,17 @@ public:
                     break;
             }
         } catch (const std::exception& e) {
-            report_error("KH Network: Failed to apply variable - " + std::string(e.what()));
+            report_error("KH Network: failed to apply a variable: " + std::string(e.what()));
         }
     }
 
     static void process_set_variable_message(const game_value& message, int sender_client_id) {
         try {
             auto& arr = message.to_array();
-            game_value ns_data = arr[0];
-            std::string var_name = static_cast<std::string>(arr[1]);
-            game_value value = arr[2];
-            apply_set_variable_from_network(ns_data, var_name, value);
+            if (arr.size() < 3) throw std::runtime_error("malformed set-variable message");
+            apply_set_variable_from_network(arr[0], static_cast<std::string>(arr[1]), arr[2]);
         } catch (const std::exception& e) {
-            report_error("KH Network: Error processing message - " + std::string(e.what()));
+            report_error("KH Network: failed to process a set-variable message: " + std::string(e.what()));
         }
     }
         
@@ -5671,7 +5555,7 @@ public:
 
 static void network_pre_init() {
     if (!NetworkFramework::instance().initialize()) {
-        report_error("KH Network: Failed to initialize");
+        report_error("KH Network: failed to initialize");
         return;
     }
 
@@ -5683,7 +5567,7 @@ static void network_pre_init() {
         sqf::set_variable(sqf::mission_namespace(), "kh_var_serveraddress", game_value(ip_port), true);
 
         if (NetworkFramework::instance().start(true)) {
-            sqf::diag_log("KH Network: Server started successfully");
+            sqf::diag_log("KH Network: server started");
         }
     } else {
         game_value server_ip_gv = sqf::get_variable(sqf::mission_namespace(), "kh_var_serveraddress", game_value(""));
@@ -5693,10 +5577,10 @@ static void network_pre_init() {
             NetworkFramework::instance().set_server_ip(server_ip);
             
             if (NetworkFramework::instance().start(false)) {
-                sqf::diag_log("KH Network: Client started successfully");
+                sqf::diag_log("KH Network: client started");
             }
         } else {
-            report_error("KH Network: Failed to get server");
+            report_error("KH Network: no server address (kh_var_serveraddress) to connect to");
         }
     }
 }

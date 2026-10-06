@@ -36,7 +36,6 @@ using namespace intercept::types;
 #define CAST_FLOAT(x) static_cast<float>(x)
 #define CAST_INT(x) static_cast<int>(x)
 #define CAST_STRING(x) static_cast<std::string>(x)
-#define CAST_R_STRING(x) static_cast<r_string>(x)
 #define CAST_VECTOR3(x) static_cast<vector3>(x)
 #define CAST_VECTOR2(x) static_cast<vector2>(x)
 #define CAST_DIARY_RECORD(x) static_cast<diary_record>(x)
@@ -55,8 +54,6 @@ using namespace intercept::types;
 #define CAST_CONFIG(x) static_cast<config>(x)
 #define CAST_NETOBJECT(x) static_cast<netobject>(x)
 #define CAST_SUBGROUP(x) static_cast<subgroup>(x)
-#define CAST_ARRAY(gv) gv.to_array()
-#define CAST_HASHMAP(gv) gv.to_hashmap()
 
 // TYPE CONVERSION MACROS - LUA VALUE TO GAME VALUE OR STANDARD VALUE
 #define LUA_TO_BOOL(x) (IS_WRAPPER(x) ? CAST_BOOL(GET_WRAPPER_VALUE(x)) : (x).as<bool>())
@@ -77,7 +74,6 @@ using namespace intercept::types;
 #define LUA_TO_SCRIPT(x) CAST_SCRIPT(GET_WRAPPER_VALUE(x))
 #define LUA_TO_TEXT(x) CAST_TEXT(GET_WRAPPER_VALUE(x))
 #define LUA_TO_CONFIG(x) CAST_CONFIG(GET_WRAPPER_VALUE(x))
-#define LUA_TO_TARGET(x) CAST_TARGET(GET_WRAPPER_VALUE(x))
 #define LUA_TO_NETOBJECT(x) CAST_NETOBJECT(GET_WRAPPER_VALUE(x))
 #define LUA_TO_SUBGROUP(x) CAST_SUBGROUP(GET_WRAPPER_VALUE(x))
 #define LUA_TO_DIARY_RECORD(x) CAST_DIARY_RECORD(GET_WRAPPER_VALUE(x))
@@ -86,33 +82,6 @@ using namespace intercept::types;
 #define LUA_TO_VECTOR2(x) CAST_VECTOR2(convert_lua_to_game_value(x))
 #define LUA_TO_ARRAY(x) convert_lua_to_game_value(x).to_array()
 #define LUA_TO_HASHMAP(x) convert_lua_to_game_value(x).to_hashmap()
-#define LUA_OPT_TO_BOOL(opt, default_val) ((opt) ? LUA_TO_BOOL(*(opt)) : (default_val))
-#define LUA_OPT_TO_FLOAT(opt, default_val) ((opt) ? LUA_TO_FLOAT(*(opt)) : (default_val))
-#define LUA_OPT_TO_INT(opt, default_val) ((opt) ? LUA_TO_INT(*(opt)) : (default_val))
-#define LUA_OPT_TO_STRING(opt, default_val) ((opt) ? LUA_TO_STRING(*(opt)) : (default_val))
-#define LUA_OPT_TO_R_STRING(opt, default_val) ((opt) ? LUA_TO_R_STRING(*(opt)) : (default_val))
-#define LUA_OPT_TO_OBJECT(opt, default_val) ((opt) ? LUA_TO_OBJECT(*(opt)) : (default_val))
-#define LUA_OPT_TO_SIDE(opt, default_val) ((opt) ? LUA_TO_SIDE(*(opt)) : (default_val))
-#define LUA_OPT_TO_GROUP(opt, default_val) ((opt) ? LUA_TO_GROUP(*(opt)) : (default_val))
-#define LUA_OPT_TO_DISPLAY(opt, default_val) ((opt) ? LUA_TO_DISPLAY(*(opt)) : (default_val))
-#define LUA_OPT_TO_CONTROL(opt, default_val) ((opt) ? LUA_TO_CONTROL(*(opt)) : (default_val))
-#define LUA_OPT_TO_LOCATION(opt, default_val) ((opt) ? LUA_TO_LOCATION(*(opt)) : (default_val))
-#define LUA_OPT_TO_TASK(opt, default_val) ((opt) ? LUA_TO_TASK(*(opt)) : (default_val))
-#define LUA_OPT_TO_TEAM_MEMBER(opt, default_val) ((opt) ? LUA_TO_TEAM_MEMBER(*(opt)) : (default_val))
-#define LUA_OPT_TO_NAMESPACE(opt, default_val) ((opt) ? LUA_TO_NAMESPACE(*(opt)) : (default_val))
-#define LUA_OPT_TO_CODE(opt, default_val) ((opt) ? LUA_TO_CODE(*(opt)) : (default_val))
-#define LUA_OPT_TO_SCRIPT(opt, default_val) ((opt) ? LUA_TO_SCRIPT(*(opt)) : (default_val))
-#define LUA_OPT_TO_TEXT(opt, default_val) ((opt) ? LUA_TO_TEXT(*(opt)) : (default_val))
-#define LUA_OPT_TO_CONFIG(opt, default_val) ((opt) ? LUA_TO_CONFIG(*(opt)) : (default_val))
-#define LUA_OPT_TO_TARGET(opt, default_val) ((opt) ? LUA_TO_TARGET(*(opt)) : (default_val))
-#define LUA_OPT_TO_NETOBJECT(opt, default_val) ((opt) ? LUA_TO_NETOBJECT(*(opt)) : (default_val))
-#define LUA_OPT_TO_SUBGROUP(opt, default_val) ((opt) ? LUA_TO_SUBGROUP(*(opt)) : (default_val))
-#define LUA_OPT_TO_DIARY_RECORD(opt, default_val) ((opt) ? LUA_TO_DIARY_RECORD(*(opt)) : (default_val))
-#define LUA_OPT_TO_GAME_VALUE(opt, default_val) ((opt) ? LUA_TO_GAME_VALUE(*(opt)) : (default_val))
-#define LUA_OPT_TO_VECTOR3(opt, default_val) ((opt) ? LUA_TO_VECTOR3(*(opt)) : (default_val))
-#define LUA_OPT_TO_VECTOR2(opt, default_val) ((opt) ? LUA_TO_VECTOR2(*(opt)) : (default_val))
-#define LUA_OPT_TO_ARRAY(opt, default_val) ((opt) ? LUA_TO_ARRAY(*(opt)) : (default_val))
-#define LUA_OPT_TO_HASHMAP(opt, default_val) ((opt) ? LUA_TO_HASHMAP(*(opt)) : (default_val))
 
 // GENERIC VALUE TO LUA
 #define GV_TO_LUA(x) convert_game_value_to_lua(x)
@@ -315,7 +284,6 @@ REG_SQF_CMD_2_VOID("disableBrakes", disable_brakes, LUA_TO_OBJECT, LUA_TO_BOOL);
 REG_SQF_CMD_2_VOID("disableCollisionWith", disable_collision_with, LUA_TO_OBJECT, LUA_TO_OBJECT);
 REG_SQF_CMD_2_VOID("disableConversation", disable_conversation, LUA_TO_OBJECT, LUA_TO_BOOL);
 REG_SQF_CMD_0_VOID("disableDebriefingStats", disable_debriefing_stats);
-REG_SQF_CMD_1_VOID("disableDynamicSimulationSystem", enable_dynamic_simulation_system, LUA_TO_BOOL);
 REG_SQF_CMD_2_VOID("disableNVGEquipment", disable_nvgequipment, LUA_TO_OBJECT, LUA_TO_BOOL);
 REG_SQF_CMD_1_VOID("disableRemoteSensors", disable_remote_sensors, LUA_TO_BOOL);
 REG_SQF_CMD_2_VOID("disableTIEquipment", disable_tiequipment, LUA_TO_OBJECT, LUA_TO_BOOL);
@@ -917,82 +885,36 @@ REG_SQF_CMD_2("worldToModelVisual", world_to_model_visual, LUA_TO_OBJECT, LUA_TO
 REG_SQF_CMD_0("worldSize", world_size);
 
 sqf_table["call"] = [](sol::object code_obj, sol::optional<sol::object> args) -> sol::object {
-    code compiled;
-
     if (code_obj.get_type() == sol::type::userdata) {
         sol::optional<GameValueWrapper> wrapper = code_obj.as<sol::optional<GameValueWrapper>>();
         
         if (wrapper && wrapper->value.type_enum() == game_data_type::CODE) {
-            compiled = wrapper->value;
-            
-            if (!args) {
-                return GV_TO_LUA(sqf::call2(compiled));
-            } else {
-                return GV_TO_LUA(sqf::call2(compiled, LUA_TO_GAME_VALUE(*args)));
-            }
+            const code compiled = wrapper->value;
+            if (!args) return GV_TO_LUA(sqf::call2(compiled));
+            return GV_TO_LUA(sqf::call2(compiled, LUA_TO_GAME_VALUE(*args)));
         }
     }
     
-    std::string code_or_func_str = code_obj.as<std::string>();
-    std::string key;
+    // A string: a function name (no space or ';'), called as it is, or code, called as a block. Compiled once per
+    // string and arity.
+    const std::string code_or_func_str = code_obj.as<std::string>();
+    const bool is_name = code_or_func_str.find(' ') == std::string::npos &&
+                         code_or_func_str.find(';') == std::string::npos;
+    const std::string key = (args ? "1:" : "0:") + code_or_func_str;
+    auto cache_it = g_sqf_function_cache.find(key);
+    code compiled;
 
-    if (!args) {
-        key = code_or_func_str;
+    if (cache_it != g_sqf_function_cache.end()) {
+        compiled = cache_it->second;
     } else {
-        key = code_or_func_str + "_";
-    }                   
-    
-    if (code_or_func_str.find(' ') == std::string::npos && code_or_func_str.find(';') == std::string::npos) {
-        if (!args) {
-            auto cache_it = g_sqf_function_cache.find(key);
-            
-            if (cache_it != g_sqf_function_cache.end()) {
-                compiled = cache_it->second;
-            } else {
-                compiled = sqf::compile("setReturnValue (call " + code_or_func_str + ");");
-                g_sqf_function_cache[key] = compiled;
-            }
-            
-            return GV_TO_LUA(raw_call_sqf_native(compiled));
-        } else {
-            auto cache_it = g_sqf_function_cache.find(key);
-            
-            if (cache_it != g_sqf_function_cache.end()) {
-                compiled = cache_it->second;
-            } else {
-                compiled = sqf::compile("setReturnValue (getCallArguments call " + code_or_func_str + ");");
-                g_sqf_function_cache[key] = compiled;
-            }
-            
-            return GV_TO_LUA(raw_call_sqf_args_native(compiled, LUA_TO_GAME_VALUE(*args)));
-        }
-    } else {
-        if (!args) {
-            auto cache_it = g_sqf_function_cache.find(key);
-            
-            if (cache_it != g_sqf_function_cache.end()) {
-                compiled = cache_it->second;
-            } else {
-                compiled = sqf::compile("setReturnValue (call {" + code_or_func_str + "});");
-                g_sqf_function_cache[key] = compiled;
-            }
-            
-            return GV_TO_LUA(raw_call_sqf_native(compiled));
-        } else {
-            auto cache_it = g_sqf_function_cache.find(key);
-            
-            if (cache_it != g_sqf_function_cache.end()) {
-                compiled = cache_it->second;
-            } else {
-                compiled = sqf::compile("setReturnValue (getCallArguments call {" + code_or_func_str + "});");
-                g_sqf_function_cache[key] = compiled;
-            }
-            
-            return GV_TO_LUA(raw_call_sqf_args_native(compiled, LUA_TO_GAME_VALUE(*args)));
-        }
+        const std::string body = is_name ? code_or_func_str : "{" + code_or_func_str + "}";
+        compiled = sqf::compile(args ? "setReturnValue (getCallArguments call " + body + ");"
+                                     : "setReturnValue (call " + body + ");");
+        g_sqf_function_cache[key] = compiled;
     }
-    
-    return sol::nil;
+
+    if (!args) return GV_TO_LUA(raw_call_sqf_native(compiled));
+    return GV_TO_LUA(raw_call_sqf_args_native(compiled, LUA_TO_GAME_VALUE(*args)));
 };
 
 sqf_table["combatBehaviour"] = [](sol::object target) -> sol::object {
@@ -1069,6 +991,8 @@ sqf_table["formation"] = [](sol::object target) -> sol::object {
             return GV_TO_LUA(formation(LUA_TO_GROUP(target)));
         case GDT_TEAM_MEMBER:
             return GV_TO_LUA(formation(LUA_TO_TEAM_MEMBER(target)));
+        default:
+            break;
     }
 
     return sol::nil;
@@ -1100,6 +1024,8 @@ sqf_table["getUnitLoadout"] = [](sol::object source) -> sol::object {
             return GV_TO_LUA(get_unit_loadout(LUA_TO_CONFIG(source)));
         case GDT_STRING:
             return GV_TO_LUA(get_unit_loadout(LUA_TO_STRING(source)));
+        default:
+            break;
     }
 
     return sol::nil;
@@ -1151,6 +1077,8 @@ sqf_table["isNull"] = [](sol::object obj) -> sol::object {
             return GV_TO_LUA(is_null(LUA_TO_GROUP(obj)));
         case GDT_LOCATION:
             return GV_TO_LUA(is_null(LUA_TO_LOCATION(obj)));
+        default:
+            break;
     }
 
     return sol::nil;
@@ -1180,6 +1108,8 @@ sqf_table["knowsAbout"] = [](sol::object source, sol::object target) -> sol::obj
             return GV_TO_LUA(knows_about(LUA_TO_GROUP(source), LUA_TO_OBJECT(target)));
         case GDT_SIDE:
             return GV_TO_LUA(knows_about(LUA_TO_SIDE(source), LUA_TO_OBJECT(target)));
+        default:
+            break;
     }
 
     return sol::nil;
@@ -1193,6 +1123,8 @@ sqf_table["leader"] = [](sol::object entity) -> sol::object {
             return GV_TO_LUA(leader(LUA_TO_TEAM_MEMBER(entity)));
         case GDT_OBJECT:
             return GV_TO_LUA(leader(LUA_TO_OBJECT(entity)));
+        default:
+            break;
     }
 
     return sol::nil;

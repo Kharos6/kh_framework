@@ -12,6 +12,8 @@
 #include <thread>
 #include <vector>
 #include <algorithm>
+#include <chrono>
+#include <cstddef>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -967,7 +969,6 @@ namespace AudioEffects {
             size_t echo_samples = static_cast<size_t>(std::min(echo_delay, 2.0f) * sample_rate);
 
             if (echo_samples > 0 && echo_samples != state.echo_buffer.size()) {
-                size_t old_size = state.echo_buffer.size();
                 state.echo_buffer.resize(echo_samples, 0.0f);
                 
                 // Keep position valid, wrap if buffer shrunk
@@ -1503,7 +1504,10 @@ static bool init_shared_memory() {
                 ts3Functions.logMessage(msg, LogLevel_WARNING, PLUGIN_NAME, 0);
             }
         } else {
-            if (WaitForSingleObject(g_mutex_handle, 100) == WAIT_OBJECT_0) {
+            // WAIT_ABANDONED (the extension died holding the mutex) owns it too, so it is released as well.
+            const DWORD wait = WaitForSingleObject(g_mutex_handle, 100);
+
+            if (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED) {
                 g_plugin_status->version = TS_IPC_VERSION;
                 g_plugin_status->plugin_active = 1;
                 g_plugin_status->sample_rate = g_audio_state.sample_rate;
@@ -1520,7 +1524,9 @@ static bool init_shared_memory() {
 static void cleanup_shared_memory() {
     if (g_plugin_status != nullptr) {
         if (g_mutex_handle != nullptr) {
-            if (WaitForSingleObject(g_mutex_handle, 100) == WAIT_OBJECT_0) {
+            const DWORD wait = WaitForSingleObject(g_mutex_handle, 100);
+
+            if (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED) {
                 g_plugin_status->plugin_active = 0;
                 ReleaseMutex(g_mutex_handle);
             }
@@ -1648,13 +1654,12 @@ static void update_plugin_status() {
 
             return;                                        // next tick starts clean
         }
-        
-        g_plugin_status->version = TS_IPC_VERSION;
     }
 
     DWORD wait_result = WaitForSingleObject(g_mutex_handle, 0);
 
     if (wait_result == WAIT_OBJECT_0 || wait_result == WAIT_ABANDONED) {
+        g_plugin_status->version = TS_IPC_VERSION;
         g_plugin_status->plugin_active = 1;
         g_plugin_status->connected = g_connected.load() ? 1 : 0;
         g_plugin_status->sample_rate = g_audio_state.sample_rate;
@@ -1664,8 +1669,9 @@ static void update_plugin_status() {
 }
 
 static bool process_audio(short* samples, int sample_count, int channels, const TSVoiceEffectConfig& effects) {
+    if (!samples || sample_count <= 0 || channels <= 0) return false;
     std::lock_guard<std::mutex> audio_lock(g_audio_state_mutex);
- 
+
     if (!g_plugin_initialized.load(std::memory_order_acquire)) {
         return false;
     }
@@ -1948,11 +1954,11 @@ void ts3plugin_shutdown() {
     if (g_ipc_poll_thread.joinable()) {
         g_ipc_poll_thread.join();
     }
-    
-    {
+
+    {   // A capture callback inside process_audio finishes first; one entering later returns on the cleared flag.
         std::lock_guard<std::mutex> lock(g_audio_state_mutex);
     }
-    
+
     {
         std::lock_guard<std::mutex> lock(g_ipc_handle_mutex);
         cleanup_shared_memory();
@@ -2000,10 +2006,23 @@ int ts3plugin_processCommand(uint64 serverConnectionHandlerID, const char* comma
     char msg[2048];
     
     if (strcmp(command, "status") == 0) {
-        bool shm_connected = (g_effect_config != nullptr);
-        bool effects_active = g_cached_effects.effects_enabled != 0;
-        
-        int offset = snprintf(msg, sizeof(msg), 
+        bool shm_connected;
+
+        {
+            std::lock_guard<std::mutex> lock(g_ipc_handle_mutex);
+            shm_connected = g_effect_config != nullptr;
+        }
+
+        TSVoiceEffectConfig effects;
+
+        {
+            std::lock_guard<std::mutex> lock(g_effect_mutex);
+            effects = g_cached_effects;
+        }
+
+        bool effects_active = effects.effects_enabled != 0;
+
+        int offset = snprintf(msg, sizeof(msg),
             "[b]KH Voice Modulation Status:[/b]\n"
             "IPC Connected: %s\n"
             "Effects Active: %s\n"
@@ -2012,14 +2031,16 @@ int ts3plugin_processCommand(uint64 serverConnectionHandlerID, const char* comma
             effects_active ? "Yes" : "No",
             g_connected.load() ? "Yes" : "No"
         );
-        
-        if (effects_active && g_cached_effects.effect_chain_count > 0) {
-            offset += snprintf(msg + offset, sizeof(msg) - offset, "\n[b]Effect Chain (%d effects):[/b]\n", g_cached_effects.effect_chain_count);
-            
-            for (uint8_t i = 0; i < g_cached_effects.effect_chain_count && i < TSVoiceEffectConfig::MAX_EFFECT_CHAIN; i++) {
-                TSEffectType type = static_cast<TSEffectType>(g_cached_effects.effect_chain_types[i]);
-                float value = g_cached_effects.effect_chain_values[i];
-                offset += snprintf(msg + offset, sizeof(msg) - offset, "  %d. %s: %.3f\n", i + 1, get_effect_name(type), value);
+
+        if (effects_active && effects.effect_chain_count > 0) {
+            offset += snprintf(msg + offset, sizeof(msg) - offset, "\n[b]Effect Chain (%d effects):[/b]\n",
+                               effects.effect_chain_count);
+
+            for (uint8_t i = 0; i < effects.effect_chain_count && i < TSVoiceEffectConfig::MAX_EFFECT_CHAIN; i++) {
+                TSEffectType type = static_cast<TSEffectType>(effects.effect_chain_types[i]);
+                float value = effects.effect_chain_values[i];
+                offset += snprintf(msg + offset, sizeof(msg) - offset, "  %d. %s: %.3f\n", i + 1,
+                                   get_effect_name(type), value);
                 if (offset >= static_cast<int>(sizeof(msg) - 64)) break;
             }
         }

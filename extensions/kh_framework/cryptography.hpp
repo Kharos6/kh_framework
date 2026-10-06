@@ -39,10 +39,10 @@ class CryptoGenerator {
 private:
     // Pre-computed lookup table for hex conversion
     static constexpr char hex_chars[] = "0123456789abcdef";
+
     template<typename T>
-    
     static void append_hex(std::string& result, T value) {
-        for (size_t i = sizeof(T); i-- > 0; ) {        // MSB first → big-endian
+        for (size_t i = sizeof(T); i-- > 0; ) {   // MSB first (big-endian)
             uint8_t byte = (value >> (i * 8)) & 0xFF;
             result.push_back(hex_chars[byte >> 4]);
             result.push_back(hex_chars[byte & 0x0F]);
@@ -51,57 +51,51 @@ private:
 
 public:
     static std::string bytes_to_hex(const std::vector<uint8_t>& bytes) {
-        std::stringstream ss;
-        ss << std::hex << std::setfill('0');
+        std::string result;
+        result.reserve(bytes.size() * 2);
 
         for (uint8_t byte : bytes) {
-            ss << std::setw(2) << static_cast<int>(byte);
+            result.push_back(hex_chars[byte >> 4]);
+            result.push_back(hex_chars[byte & 0x0F]);
         }
 
-        return ss.str();
+        return result;
     }
 
-    // Windows CryptoAPI hash wrapper
+    // Windows CryptoAPI hash; throws on a failure (the SQF command / Lua function that asked reports it).
     static std::string windows_hash(const std::string& input, ALG_ID algorithm) {
         HCRYPTPROV hProv = CryptoProvider::get();
 
         if (!hProv || !CryptoProvider::is_initialized()) {
-            report_error("CryptoProvider not initialized - Windows cryptography unavailable");
-            return "";
+            throw std::runtime_error("Windows cryptography is unavailable");
         }
-            
+
         HCRYPTHASH hHash = 0;
 
         if (!CryptCreateHash(hProv, algorithm, 0, 0, &hHash)) {
-            report_error("Failed to create hash context for algorithm " + std::to_string(algorithm));
-            return "";
+            throw std::runtime_error("failed to create a hash context for algorithm " + std::to_string(algorithm));
         }
-        
-        if (!CryptHashData(hHash, reinterpret_cast<const BYTE*>(input.c_str()), 
-                        static_cast<DWORD>(input.length()), 0)) {
-            CryptDestroyHash(hHash);
-            report_error("Failed to hash data");
-            return "";
+
+        struct HashGuard { HCRYPTHASH h; ~HashGuard() { CryptDestroyHash(h); } } hash_guard{ hHash };
+
+        if (!CryptHashData(hHash, reinterpret_cast<const BYTE*>(input.c_str()),
+                           static_cast<DWORD>(input.length()), 0)) {
+            throw std::runtime_error("failed to hash the data");
         }
-        
+
         DWORD hashSize = 0;
         DWORD sizeSize = sizeof(DWORD);
 
         if (!CryptGetHashParam(hHash, HP_HASHSIZE, reinterpret_cast<BYTE*>(&hashSize), &sizeSize, 0)) {
-            CryptDestroyHash(hHash);
-            report_error("Failed to get hash size");
-            return "";
+            throw std::runtime_error("failed to get the hash size");
         }
-        
+
         std::vector<uint8_t> hashData(hashSize);
 
         if (!CryptGetHashParam(hHash, HP_HASHVAL, hashData.data(), &hashSize, 0)) {
-            CryptDestroyHash(hHash);
-            report_error("Failed to get hash value");
-            return "";
+            throw std::runtime_error("failed to get the hash value");
         }
-        
-        CryptDestroyHash(hHash);
+
         return bytes_to_hex(hashData);
     }
 
@@ -150,9 +144,8 @@ public:
         return result;
     }
 
-    // Raw FNV-1a 64 for binary consumers (cache keys, change detection):
-    // numeric result, arbitrary bytes, streaming form. Separate from the
-    // SQF-facing fnv1a64() below, which stays as it is.
+    // Raw FNV-1a 64 for binary consumers (cache keys, change detection): numeric result, arbitrary bytes,
+    // streaming form.
     static constexpr uint64_t FNV1A64_OFFSET = 0xcbf29ce484222325ull;
     static constexpr uint64_t FNV1A64_PRIME  = 0x100000001b3ull;
 
@@ -176,26 +169,16 @@ public:
     }
 
     static std::string fnv1a64(const std::string& input) {
-        uint64_t hash = 0xcbf29ce484222325ull;
-        const uint8_t* data = reinterpret_cast<const uint8_t*>(input.data());
-        const uint8_t* end = data + input.size();
-
-        while (data != end) {
-            hash ^= *data++;
-            hash *= 0x100000001b3ull;
-        }
-
         std::string result;
         result.reserve(16);
-        append_hex(result, hash);
+        append_hex(result, fnv1a64_raw(input.data(), input.size()));
         return result;
     }
 
     static std::string crc32(const std::string& input) {
-        static uint32_t crc_table[256];
-        static bool table_initialized = false;
-        
-        if (!table_initialized) {
+        static const std::array<uint32_t, 256> crc_table = [] {
+            std::array<uint32_t, 256> table{};
+
             for (uint32_t i = 0; i < 256; i++) {
                 uint32_t crc = i;
 
@@ -203,12 +186,12 @@ public:
                     crc = (crc & 1) ? ((crc >> 1) ^ 0xEDB88320u) : (crc >> 1);
                 }
 
-                crc_table[i] = crc;
+                table[i] = crc;
             }
 
-            table_initialized = true;
-        }
-        
+            return table;
+        }();
+
         uint32_t crc = 0xFFFFFFFFu;
         const uint8_t* data = reinterpret_cast<const uint8_t*>(input.data());
         const uint8_t* end = data + input.size();

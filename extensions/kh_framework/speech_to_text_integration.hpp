@@ -37,181 +37,117 @@ public:
         }
     }
 
-    static STTModelType detect_stt_model_type(const std::filesystem::path& model_path) {
-        if (model_path.empty() || !std::filesystem::exists(model_path) || !std::filesystem::is_directory(model_path)) {
-            return STTModelType::UNKNOWN;
-        }
+    // The files of a model folder, each by its role ("" when absent): tokens.txt and the .onnx files by name -
+    // Moonshine's preprocess / encode / uncached_decode / cached_decode, a transducer's or Whisper's encoder /
+    // decoder / joiner, else the generic model.* file.
+    struct ModelFiles {
+        std::string tokens;
+        std::string encoder;
+        std::string decoder;
+        std::string joiner;
+        std::string model;
+        std::string preprocess;
+        std::string encode;
+        std::string uncached_decode;
+        std::string cached_decode;
+    };
 
-        std::string dir_name = model_path.filename().string();
-        std::string lower_dir_name = dir_name;
-        std::transform(lower_dir_name.begin(), lower_dir_name.end(), lower_dir_name.begin(), ::tolower);
-        bool has_tokens = false;
-        bool has_encoder = false;
-        bool has_decoder = false;
-        bool has_joiner = false;
-        bool has_generic_model = false;
-        bool has_preprocess = false;
-        bool has_encode = false;
-        bool has_uncached_decode = false;
-        bool has_cached_decode = false;
-        std::string encoder_path;
-        std::string decoder_path;
-        std::string joiner_path;
-        std::string generic_model_path;
-        std::string preprocess_path;
-        std::string encode_path;
-        std::string uncached_decode_path;
-        std::string cached_decode_path;
-        std::string tokens_path;
-        
+    // False when the folder cannot be read.
+    static bool scan_model_files(const std::filesystem::path& model_path, ModelFiles& files) {
         try {
-            for (const auto& file : std::filesystem::directory_iterator(model_path)) {
-                if (!file.is_regular_file()) continue;
-                std::string filename = file.path().filename().string();
-                std::string lower_filename = filename;
-                std::transform(lower_filename.begin(), lower_filename.end(), lower_filename.begin(), ::tolower);
-                
+            for (const auto& entry : std::filesystem::directory_iterator(model_path)) {
+                if (!entry.is_regular_file()) continue;
+                std::string lower_filename = kh_lower_copy(entry.path().filename().string());
+                const std::string path = entry.path().string();
+
                 if (lower_filename == "tokens.txt") {
-                    has_tokens = true;
-                    tokens_path = file.path().string();
-                }
-                else if (lower_filename.ends_with(".onnx")) {
-                    // Moonshine detection (must check first - has specific naming)
+                    files.tokens = path;
+                } else if (lower_filename.ends_with(".onnx")) {
+                    // Moonshine's names first (its "encode" is not "encoder")
                     if (lower_filename.find("preprocess") != std::string::npos) {
-                        has_preprocess = true;
-                        preprocess_path = file.path().string();
-                    }
-                    else if (lower_filename.find("uncached_decode") != std::string::npos ||
-                            lower_filename.find("uncached-decode") != std::string::npos) {
-                        has_uncached_decode = true;
-                        uncached_decode_path = file.path().string();
-                    }
-                    else if (lower_filename.find("cached_decode") != std::string::npos ||
-                            lower_filename.find("cached-decode") != std::string::npos) {
-                        has_cached_decode = true;
-                        cached_decode_path = file.path().string();
-                    }
-                    // Note: Moonshine uses "encode" not "encoder"
-                    else if ((lower_filename.find("encode") != std::string::npos && 
-                            lower_filename.find("encoder") == std::string::npos) ||
-                            lower_filename == "encode.onnx" ||
-                            lower_filename == "encode.int8.onnx") {
-                        has_encode = true;
-                        encode_path = file.path().string();
-                    }
-                    // Transducer/Whisper components
-                    else if (lower_filename.find("encoder") != std::string::npos) {
-                        has_encoder = true;
-                        encoder_path = file.path().string();
-                    }
-                    else if (lower_filename.find("decoder") != std::string::npos) {
-                        has_decoder = true;
-                        decoder_path = file.path().string();
-                    }
-                    else if (lower_filename.find("joiner") != std::string::npos) {
-                        has_joiner = true;
-                        joiner_path = file.path().string();
-                    }
-                    // Generic model.onnx (for Paraformer, SenseVoice, NeMo, etc.)
-                    else if (lower_filename == "model.onnx" || 
-                            lower_filename == "model.int8.onnx" ||
-                            lower_filename.starts_with("model.")) {
-                        has_generic_model = true;
-                        generic_model_path = file.path().string();
+                        files.preprocess = path;
+                    } else if (lower_filename.find("uncached_decode") != std::string::npos ||
+                               lower_filename.find("uncached-decode") != std::string::npos) {
+                        files.uncached_decode = path;
+                    } else if (lower_filename.find("cached_decode") != std::string::npos ||
+                               lower_filename.find("cached-decode") != std::string::npos) {
+                        files.cached_decode = path;
+                    } else if (lower_filename.find("encode") != std::string::npos &&
+                               lower_filename.find("encoder") == std::string::npos) {
+                        files.encode = path;
+                    } else if (lower_filename.find("encoder") != std::string::npos) {
+                        files.encoder = path;
+                    } else if (lower_filename.find("decoder") != std::string::npos) {
+                        files.decoder = path;
+                    } else if (lower_filename.find("joiner") != std::string::npos) {
+                        files.joiner = path;
+                    } else if (lower_filename.starts_with("model.")) {   // model.onnx, model.int8.onnx, ...
+                        files.model = path;
                     }
                 }
             }
         } catch (...) {
-            return STTModelType::UNKNOWN;
+            return false;
         }
-        
-        // Detection logic - ORDER MATTERS (most specific first)
-        // 1. MOONSHINE: preprocess + encode + uncached_decode + cached_decode
-        if (has_preprocess && has_encode && has_uncached_decode && has_cached_decode && has_tokens) {
+
+        return true;
+    }
+
+    // The model type its files say, most specific first: Moonshine (its four files), a transducer (encoder +
+    // decoder + joiner), Whisper (encoder + decoder), else a single model.* file whose folder name tells the type
+    // (SenseVoice, Paraformer, NeMo CTC, Zipformer CTC, Wenet CTC, TDNN; Paraformer when nothing does).
+    static STTModelType detect_stt_model_type(const std::filesystem::path& model_path, const ModelFiles& files) {
+        std::string lower_dir_name = kh_lower_copy(model_path.filename().string());
+        const bool has_tokens = !files.tokens.empty();
+
+        if (!files.preprocess.empty() && !files.encode.empty() && !files.uncached_decode.empty() &&
+            !files.cached_decode.empty() && has_tokens) {
             return STTModelType::MOONSHINE;
         }
-        
-        // 2. TRANSDUCER: encoder + decoder + joiner
-        if (has_encoder && has_decoder && has_joiner && has_tokens) {
-            return STTModelType::TRANSDUCER;
+
+        if (!files.encoder.empty() && !files.decoder.empty() && has_tokens) {
+            return files.joiner.empty() ? STTModelType::WHISPER : STTModelType::TRANSDUCER;
         }
-        
-        // 3. WHISPER: encoder + decoder (no joiner)
-        if (has_encoder && has_decoder && !has_joiner && has_tokens) {
-            return STTModelType::WHISPER;
-        }
-        
-        // 4-9. Single model types - use directory name to distinguish
-        if (has_generic_model && has_tokens) {
-            // Check directory name for model type hints
-            
-            // SenseVoice
+
+        if (!files.model.empty() && has_tokens) {
             if (lower_dir_name.find("sense-voice") != std::string::npos ||
                 lower_dir_name.find("sensevoice") != std::string::npos ||
                 lower_dir_name.find("sense_voice") != std::string::npos) {
                 return STTModelType::SENSEVOICE;
             }
-            
-            // Paraformer
-            if (lower_dir_name.find("paraformer") != std::string::npos) {
-                return STTModelType::PARAFORMER;
-            }
-            
-            // NeMo CTC (check for both "nemo" and "ctc")
-            if (lower_dir_name.find("nemo") != std::string::npos &&
-                lower_dir_name.find("ctc") != std::string::npos) {
+
+            if (lower_dir_name.find("paraformer") != std::string::npos) return STTModelType::PARAFORMER;
+
+            if (lower_dir_name.find("nemo") != std::string::npos && lower_dir_name.find("ctc") != std::string::npos) {
                 return STTModelType::NEMO_CTC;
             }
-            
-            // Zipformer CTC
+
             if (lower_dir_name.find("zipformer") != std::string::npos &&
                 lower_dir_name.find("ctc") != std::string::npos) {
                 return STTModelType::ZIPFORMER_CTC;
             }
-            
-            // Wenet CTC
-            if (lower_dir_name.find("wenet") != std::string::npos) {
-                return STTModelType::WENET_CTC;
-            }
-            
-            // TDNN
-            if (lower_dir_name.find("tdnn") != std::string::npos) {
-                return STTModelType::TDNN;
-            }
-            
-            // NeMo CTC without explicit "ctc" in name (NeMo models are usually CTC)
-            if (lower_dir_name.find("nemo") != std::string::npos) {
-                return STTModelType::NEMO_CTC;
-            }
-            
-            // Default single-model fallback: Try Paraformer (most common single-model type)
-            // This is a reasonable default since Paraformer is widely used
-            return STTModelType::PARAFORMER;
+
+            if (lower_dir_name.find("wenet") != std::string::npos) return STTModelType::WENET_CTC;
+            if (lower_dir_name.find("tdnn") != std::string::npos) return STTModelType::TDNN;
+            if (lower_dir_name.find("nemo") != std::string::npos) return STTModelType::NEMO_CTC;   // NeMo is CTC
+            return STTModelType::PARAFORMER;   // The most common single-model type
         }
-        
+
         return STTModelType::UNKNOWN;
     }
 
+    static STTModelType detect_stt_model_type(const std::filesystem::path& model_path) {
+        if (model_path.empty() || !std::filesystem::exists(model_path) || !std::filesystem::is_directory(model_path)) {
+            return STTModelType::UNKNOWN;
+        }
+
+        ModelFiles files;
+        if (!scan_model_files(model_path, files)) return STTModelType::UNKNOWN;
+        return detect_stt_model_type(model_path, files);
+    }
+
     static std::vector<std::filesystem::path> find_all_stt_model_directories() {
-        std::vector<std::filesystem::path> search_paths;
-        
-        // Priority 1: Documents folder
-        try {
-            char docs_path[MAX_PATH];
-
-            if (SHGetFolderPathA(NULL, CSIDL_MYDOCUMENTS, NULL, SHGFP_TYPE_CURRENT, docs_path) == S_OK) {
-                std::filesystem::path docs_stt_models = std::filesystem::path(docs_path) / "Arma 3" / "kh_framework" / "stt_models";
-
-                if (std::filesystem::exists(docs_stt_models)) {
-                    search_paths.push_back(docs_stt_models);
-                }
-            }
-        } catch (...) {}
-
-        // Priority 2: Mod folders
-        auto mod_stt_dirs = ModFolderSearcher::find_directories_in_mods("stt_models");
-        search_paths.insert(search_paths.end(), mod_stt_dirs.begin(), mod_stt_dirs.end());
-        return search_paths;
+        return ModFolderSearcher::kh_framework_search_paths("stt_models");
     }
 
     static std::filesystem::path find_model(const std::string& model_name) {
@@ -222,7 +158,7 @@ public:
             std::filesystem::path out;
             std::string err;
             if (ModFolderSearcher::extract_pbo_directory(model_name, out, &err)) return out;
-            MainThreadScheduler::instance().schedule([err]() { sqf::diag_log("KH - STT Framework: " + err); });
+            MainThreadScheduler::instance().schedule([err]() { sqf::diag_log("KH STT: " + err); });
             return std::filesystem::path();
         }
 
@@ -317,7 +253,7 @@ public:
 class STTFramework {
 private:
     STTFramework() = default;
-    ~STTFramework() { cleanup(); }
+    ~STTFramework() = default;
     STTFramework(const STTFramework&) = delete;
     STTFramework& operator=(const STTFramework&) = delete;
     std::shared_ptr<const SherpaOnnxOfflineRecognizer> recognizer_handle;
@@ -368,9 +304,9 @@ private:
         }
     }
 
-void audio_capture_worker() {
-        capture_thread_alive = true;
-
+    // capture_thread_alive is set by the spawning code before the thread exists (a thread that has not run yet is
+    // alive, so start_capture never joins one that is about to enter the capture loop) and cleared here on exit.
+    void audio_capture_worker() {
         struct ThreadAliveGuard {
             std::atomic<bool>& flag;
             ThreadAliveGuard(std::atomic<bool>& f) : flag(f) {}
@@ -383,120 +319,59 @@ void audio_capture_worker() {
             ~CoInitGuard() { CoUninitialize(); }
         } co_guard;
         
-        HRESULT hr;
-        IMMDeviceEnumerator* enumerator = nullptr;
-        IMMDevice* device = nullptr;
-        IAudioClient* audio_client = nullptr;
-        IAudioCaptureClient* capture_client = nullptr;
-        WAVEFORMATEX* device_format = nullptr;
-        
-        hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
-                              __uuidof(IMMDeviceEnumerator), (void**)&enumerator);
+        // The interfaces release themselves (ComPtr) on every path out of here; a failure reports what failed.
+        auto fail = [](const char* what) {
+            std::string message = std::string("KH STT: ") + what;
+            MainThreadScheduler::instance().schedule([message]() { report_error(message); });
+        };
 
-        if (FAILED(hr)) {
-            MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - STT Framework: Failed to create device enumerator");
-            });
+        Microsoft::WRL::ComPtr<IMMDeviceEnumerator> enumerator;
+        Microsoft::WRL::ComPtr<IMMDevice> device;
+        Microsoft::WRL::ComPtr<IAudioClient> audio_client;
+        Microsoft::WRL::ComPtr<IAudioCaptureClient> capture_client;
+        HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                      IID_PPV_ARGS(enumerator.GetAddressOf()));
+        if (FAILED(hr)) return fail("failed to create the device enumerator");
+        hr = enumerator->GetDefaultAudioEndpoint(eCapture, eConsole, device.GetAddressOf());
+        if (FAILED(hr)) return fail("failed to get the default capture device");
+        hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                              reinterpret_cast<void**>(audio_client.GetAddressOf()));
+        if (FAILED(hr)) return fail("failed to activate the audio client");
 
-            return;
+        uint32_t device_sample_rate;
+        uint16_t device_channels;
+        uint16_t device_bits;
+        bool is_float;
+
+        {
+            WAVEFORMATEX* device_format = nullptr;
+            hr = audio_client->GetMixFormat(&device_format);
+            if (FAILED(hr)) return fail("failed to get the mix format");
+            struct FormatFree { WAVEFORMATEX* p; ~FormatFree() { CoTaskMemFree(p); } } format_free{ device_format };
+            REFERENCE_TIME buffer_duration = 200000;
+            hr = audio_client->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, buffer_duration, 0, device_format, nullptr);
+            if (FAILED(hr)) return fail("failed to initialize the audio client");
+            hr = audio_client->GetService(IID_PPV_ARGS(capture_client.GetAddressOf()));
+            if (FAILED(hr)) return fail("failed to get the capture client");
+            device_sample_rate = device_format->nSamplesPerSec;
+            device_channels = device_format->nChannels;
+            device_bits = device_format->wBitsPerSample;
+            is_float = (device_format->wFormatTag == WAVE_FORMAT_IEEE_FLOAT);
+
+            if (device_format->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+                WAVEFORMATEXTENSIBLE* ext = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(device_format);
+                // Check SubFormat - IEEE float GUID is {00000003-0000-0010-8000-00AA00389B71}
+                is_float = (ext->SubFormat.Data1 == 3 && ext->SubFormat.Data2 == 0 && ext->SubFormat.Data3 == 0x10);
+            }
+
+            // The loop below reads 32-bit float, 16-bit and 32-bit integer frames; anything else would be silence.
+            const bool supported = device_channels > 0 && (is_float ? device_bits == 32
+                                                                     : device_bits == 16 || device_bits == 32);
+            if (!supported) return fail("unsupported capture format");
         }
-        
-        hr = enumerator->GetDefaultAudioEndpoint(eCapture, eConsole, &device);
 
-        if (FAILED(hr)) {
-            enumerator->Release();
-
-            MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - STT Framework: Failed to get default capture device");
-            });
-
-            return;
-        }
-        
-        hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&audio_client);
-
-        if (FAILED(hr)) {
-            device->Release();
-            enumerator->Release();
-
-            MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - STT Framework: Failed to activate audio client");
-            });
-
-            return;
-        }
-        
-        hr = audio_client->GetMixFormat(&device_format);
-
-        if (FAILED(hr)) {
-            audio_client->Release();
-            device->Release();
-            enumerator->Release();
-
-            MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - STT Framework: Failed to get mix format");
-            });
-
-            return;
-        }
-        
-        REFERENCE_TIME buffer_duration = 200000;
-        hr = audio_client->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, buffer_duration, 0, device_format, nullptr);
-
-        if (FAILED(hr)) {
-            CoTaskMemFree(device_format);
-            audio_client->Release();
-            device->Release();
-            enumerator->Release();
-
-            MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - STT Framework: Failed to initialize audio client");
-            });
-
-            return;
-        }
-        
-        hr = audio_client->GetService(__uuidof(IAudioCaptureClient), (void**)&capture_client);
-
-        if (FAILED(hr)) {
-            CoTaskMemFree(device_format);
-            audio_client->Release();
-            device->Release();
-            enumerator->Release();
-
-            MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - STT Framework: Failed to get capture client");
-            });
-
-            return;
-        }
-        
-        uint32_t device_sample_rate = device_format->nSamplesPerSec;
-        uint16_t device_channels = device_format->nChannels;
-        uint16_t device_bits = device_format->wBitsPerSample;
-        bool is_float = (device_format->wFormatTag == WAVE_FORMAT_IEEE_FLOAT);
-
-        if (device_format->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
-            WAVEFORMATEXTENSIBLE* ext = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(device_format);
-            // Check SubFormat - IEEE float GUID is {00000003-0000-0010-8000-00AA00389B71}
-            is_float = (ext->SubFormat.Data1 == 3 && ext->SubFormat.Data2 == 0 && ext->SubFormat.Data3 == 0x10);
-        }
-        
-        CoTaskMemFree(device_format);
         hr = audio_client->Start();
-
-        if (FAILED(hr)) {
-            capture_client->Release();
-            audio_client->Release();
-            device->Release();
-            enumerator->Release();
-
-            MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - STT Framework: Failed to start capture");
-            });
-
-            return;
-        }
+        if (FAILED(hr)) return fail("failed to start the capture");
         
         std::vector<int16_t> resample_buffer;
         
@@ -586,10 +461,6 @@ void audio_capture_worker() {
         }
         
         audio_client->Stop();
-        capture_client->Release();
-        audio_client->Release();
-        device->Release();
-        enumerator->Release();
     }
 
     void processing_worker() {
@@ -632,7 +503,7 @@ void audio_capture_worker() {
                     std::string error_msg = e.what();
 
                     MainThreadScheduler::instance().schedule([error_msg]() {
-                        report_error("KH - STT Framework: Transcription failed: " + error_msg);
+                        report_error("KH STT: transcription failed: " + error_msg);
                     });
                 }
             }
@@ -648,7 +519,7 @@ void audio_capture_worker() {
             std::lock_guard<std::mutex> lock(stt_mutex);
 
             if (!recognizer_handle) {
-                throw std::runtime_error("STT not initialized");
+                throw std::runtime_error("no model loaded");
             }
 
             handle_copy = recognizer_handle;
@@ -678,7 +549,7 @@ void audio_capture_worker() {
         );
         
         if (!stream) {
-            throw std::runtime_error("Failed to create recognition stream");
+            throw std::runtime_error("failed to create the recognition stream");
         }
 
         SherpaOnnxAcceptWaveformOffline(stream.get(), current_sample_rate, 
@@ -711,15 +582,32 @@ void audio_capture_worker() {
         return transcription;
     }
 
+public:
+    // Never destroyed: at process exit the worker threads are already gone when static destructors would run
+    // (a mutex one of them held would hang the exit); DllMain's unload path stops the framework instead.
+    static STTFramework& instance() {
+        static STTFramework* inst = new STTFramework();
+        return *inst;
+    }
+
     bool load_model(const std::string& model_name, int num_threads = 4) {
         std::string log_message;
         bool success = false;
         std::string resolved_model_name;
         int loaded_sample_rate = 0;
         
+        {   // A capture in progress is ended and its audio dropped: after a failed load there is nothing to transcribe
+            // it with, and SQF guarded by sttIsInitialized could not stop it.
+            std::lock_guard<std::mutex> state_lock(capture_state_mutex);
+            is_capturing.store(false, std::memory_order_release);
+            capture_buffer.stop_recording();
+            capture_buffer.clear();
+        }
+
         {
             std::lock_guard<std::mutex> lock(stt_mutex);
             recognizer_handle.reset();
+            is_initialized_flag.store(false, std::memory_order_release);   // Until the new model is in.
 
             try {
                 std::filesystem::path model_path;
@@ -729,7 +617,7 @@ void audio_capture_worker() {
                     model_path = STTModelDiscovery::find_any_model();
                     
                     if (model_path.empty()) {
-                        log_message = "KH - STT Framework: No STT models found in any search location";
+                        log_message = "sttLoadModel: no STT model found in any search location";
                     } else {
                         resolved_model_name = model_path.filename().string();
                     }
@@ -737,76 +625,31 @@ void audio_capture_worker() {
                     model_path = STTModelDiscovery::find_model(model_name);
                     
                     if (model_path.empty()) {
-                        log_message = "KH - STT Framework: Model not found: " + model_name;
+                        log_message = "sttLoadModel: model not found: " + model_name;
                     }
                 }
 
                 if (!model_path.empty()) {
-                    // Detect model type
-                    STTModelDiscovery::STTModelType model_type = STTModelDiscovery::detect_stt_model_type(model_path);
+                    STTModelDiscovery::ModelFiles files;
+                    STTModelDiscovery::STTModelType model_type = STTModelDiscovery::STTModelType::UNKNOWN;
+
+                    if (STTModelDiscovery::scan_model_files(model_path, files)) {
+                        model_type = STTModelDiscovery::detect_stt_model_type(model_path, files);
+                    }
                     
                     if (model_type == STTModelDiscovery::STTModelType::UNKNOWN) {
-                        log_message = "KH - STT Framework: Unable to determine model type for: " + model_path.string();
+                        log_message = "sttLoadModel: could not determine the model type of " + model_path.string();
                     }
                     else {
-                        std::string encoder_path;
-                        std::string decoder_path;
-                        std::string joiner_path;
-                        std::string tokens_path;
-                        std::string generic_model_path;
-                        
-                        // Moonshine-specific
-                        std::string preprocess_path;
-                        std::string encode_path;
-                        std::string uncached_decode_path;
-                        std::string cached_decode_path;
-                        
-                        for (const auto& entry : std::filesystem::directory_iterator(model_path)) {
-                            if (!entry.is_regular_file()) continue;
-                            std::string filename = entry.path().filename().string();
-                            std::string lower_filename = filename;
-                            std::transform(lower_filename.begin(), lower_filename.end(), lower_filename.begin(), ::tolower);
-                            
-                            if (lower_filename == "tokens.txt") {
-                                tokens_path = entry.path().string();
-                            }
-                            else if (lower_filename.ends_with(".onnx")) {
-                                // Moonshine files
-                                if (lower_filename.find("preprocess") != std::string::npos) {
-                                    preprocess_path = entry.path().string();
-                                }
-                                else if (lower_filename.find("uncached_decode") != std::string::npos ||
-                                        lower_filename.find("uncached-decode") != std::string::npos) {
-                                    uncached_decode_path = entry.path().string();
-                                }
-                                else if (lower_filename.find("cached_decode") != std::string::npos ||
-                                        lower_filename.find("cached-decode") != std::string::npos) {
-                                    cached_decode_path = entry.path().string();
-                                }
-                                else if ((lower_filename.find("encode") != std::string::npos && 
-                                        lower_filename.find("encoder") == std::string::npos) ||
-                                        lower_filename == "encode.onnx" ||
-                                        lower_filename == "encode.int8.onnx") {
-                                    encode_path = entry.path().string();
-                                }
-                                // Transducer/Whisper
-                                else if (lower_filename.find("encoder") != std::string::npos) {
-                                    encoder_path = entry.path().string();
-                                }
-                                else if (lower_filename.find("decoder") != std::string::npos) {
-                                    decoder_path = entry.path().string();
-                                }
-                                else if (lower_filename.find("joiner") != std::string::npos) {
-                                    joiner_path = entry.path().string();
-                                }
-                                // Generic model
-                                else if (lower_filename == "model.onnx" || 
-                                        lower_filename == "model.int8.onnx" ||
-                                        lower_filename.starts_with("model.")) {
-                                    generic_model_path = entry.path().string();
-                                }
-                            }
-                        }
+                        const std::string& encoder_path = files.encoder;
+                        const std::string& decoder_path = files.decoder;
+                        const std::string& joiner_path = files.joiner;
+                        const std::string& tokens_path = files.tokens;
+                        const std::string& generic_model_path = files.model;
+                        const std::string& preprocess_path = files.preprocess;
+                        const std::string& encode_path = files.encode;
+                        const std::string& uncached_decode_path = files.uncached_decode;
+                        const std::string& cached_decode_path = files.cached_decode;
                         
                         // Configure recognizer based on model type
                         SherpaOnnxOfflineRecognizerConfig config;
@@ -900,7 +743,7 @@ void audio_capture_worker() {
                                 break;
                                 
                             default:
-                                log_message = "KH - STT Framework: Unsupported model type";
+                                log_message = "sttLoadModel: unsupported model type";
                                 break;
                         }
                         
@@ -918,7 +761,7 @@ void audio_capture_worker() {
                             );
                             
                             if (!recognizer_handle) {
-                                log_message = "KH - STT Framework: Failed to create recognizer for " + 
+                                log_message = "sttLoadModel: failed to create the recognizer for " +
                                             STTModelDiscovery::stt_model_type_to_string(model_type) + " model";
                             }
                             else {
@@ -927,19 +770,19 @@ void audio_capture_worker() {
                                 is_initialized_flag.store(true, std::memory_order_release);
                                 success = true;
                                 
-                                log_message = "KH - STT Framework: " + STTModelDiscovery::stt_model_type_to_string(model_type) + 
-                                    " model loaded successfully - " + model_path.string() + 
+                                log_message = "KH STT: " + STTModelDiscovery::stt_model_type_to_string(model_type) +
+                                    " model loaded - " + model_path.string() +
                                     " | Sample Rate: " + std::to_string(loaded_sample_rate) + " Hz";
                             }
                         }
                         else if (log_message.empty()) {
-                            log_message = "KH - STT Framework: Missing required files for " + 
+                            log_message = "sttLoadModel: missing required files for " +
                                         STTModelDiscovery::stt_model_type_to_string(model_type) + " model";
                         }
                     }
                 }
             } catch (const std::exception& e) {
-                log_message = "KH - STT Framework: Model loading exception: " + std::string(e.what());
+                log_message = "sttLoadModel: " + std::string(e.what());
             }
         }
 
@@ -950,7 +793,7 @@ void audio_capture_worker() {
                 if (success) {
                     sqf::diag_log(msg);
                 } else {
-                    report_error("KH - STT Framework: " + msg);
+                    report_error(msg);
                 }
             });
         }
@@ -958,6 +801,7 @@ void audio_capture_worker() {
         if (success) {
             if (!capture_thread_running) {
                 capture_thread_running.store(true, std::memory_order_release);
+                capture_thread_alive.store(true, std::memory_order_release);
                 capture_thread = std::thread(&STTFramework::audio_capture_worker, this);
             }
 
@@ -1022,42 +866,24 @@ void audio_capture_worker() {
         capture_thread_alive.store(false, std::memory_order_release);
     }
 
-    bool start_capture_manual() {
+    bool start_capture() {
         if (!is_initialized_flag) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - STT Framework: Cannot start capture - no model loaded");
+                report_error("sttStartCapture: no model loaded");
             });
             
             return false;
         }
 
+        // A capture thread that exited (its device failed; it reported why) is joined and started again.
         if (!capture_thread_alive) {
             if (capture_thread.joinable()) {
                 capture_thread.join();
             }
 
-            if (is_initialized_flag) {
-                capture_thread_running.store(true, std::memory_order_release);
-                capture_thread = std::thread(&STTFramework::audio_capture_worker, this);
-
-                for (int i = 0; i < 50 && !capture_thread_alive && capture_thread_running; i++) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                }
-                
-                if (!capture_thread_alive) {
-                    MainThreadScheduler::instance().schedule([]() {
-                        report_error("KH - STT Framework: Failed to restart capture thread");
-                    });
-
-                    return false;
-                }
-            } else {
-                MainThreadScheduler::instance().schedule([]() {
-                    report_error("KH - STT Framework: Capture thread not running and no model loaded");
-                });
-
-                return false;
-            }
+            capture_thread_running.store(true, std::memory_order_release);
+            capture_thread_alive.store(true, std::memory_order_release);
+            capture_thread = std::thread(&STTFramework::audio_capture_worker, this);
         }
 
         // Clear pending transcriptions when starting new capture
@@ -1093,7 +919,7 @@ void audio_capture_worker() {
         return true;
     }
 
-    bool stop_capture_manual() {
+    bool stop_capture() {
         std::unique_lock<std::mutex> state_lock(capture_state_mutex);
         bool was_capturing = is_capturing.exchange(false, std::memory_order_acq_rel);
         
@@ -1119,35 +945,5 @@ void audio_capture_worker() {
         } else {            
             return false;
         }
-    }
-    
-public:
-    static STTFramework& instance() {
-        static STTFramework instance;
-        return instance;
-    }
-
-    bool load_model_public(const std::string& model_name, int num_threads = 4) {
-        return load_model(model_name, num_threads);
-    }
-
-    bool is_initialized_public() const {
-        return is_initialized();
-    }
-
-    bool is_capturing_audio_public() const {
-        return is_capturing_audio();
-    }
-
-    bool start_capture_public() {
-        return start_capture_manual();
-    }
-
-    bool stop_capture_public() {
-        return stop_capture_manual();
-    }
-
-    void cleanup_public() {
-        cleanup();
     }
 };

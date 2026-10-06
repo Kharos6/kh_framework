@@ -519,7 +519,10 @@ float4 PSSsgiGather(VSOut i) : SV_Target
                 // Receiver-albedo proxy: bounce lands tinted by the surface it
                 // lights (scene chroma over a luma floor), read at the full-res
                 // pixel this grid texel stands for (i.pos spans the grid).
-                float3 khg_scn = SampleScene(khg_fpx);
+                // KH_GI_FINITE: held to [0, 65504] as the seed is - a NaN pixel here made the texel NaN (0 x NaN)
+                // and the a-trous passes spread it; a negative one divided by a luma near -0.3. A finite
+                // non-negative scene passes unchanged.
+                float3 khg_scn = min(max(SampleScene(khg_fpx), 0.0f), 65504.0f);
                 float3 khg_alb = khg_scn / (Luma(khg_scn) + 0.3f);
                 khg_b = khg_gi * lerp(float3(1.0f, 1.0f, 1.0f), khg_alb, saturate(fxParams2.x))
                       * color.rgb * max(fxParams0.x, 0.0f) * khg_rng * khg_conf;

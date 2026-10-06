@@ -17,7 +17,7 @@ private _aiInstanceArgumentsId = ["KH_var_aiInstanceArguments_", _name] joinStri
 private _aiInstanceTriggerId = ["KH_var_aiInstanceTrigger_", _name] joinString "";
 private _aiInstanceResponseProgressHandlerId = ["KH_var_aiInstanceResponseProgressHandler_", _name] joinString "";
 private _aiInstanceResponseHandlerId = ["KH_var_aiInstanceResponseHandler_", _name] joinString "";
-missionNamespace setVariable [_aiInstanceArgumentsId, [_systemPrompt, _userPrompt, _responseProgressFunction, _responseFunction, _abortGeneration, _resetContext, _logGeneration, _stop]];
+missionNamespace setVariable [_aiInstanceArgumentsId, [_masterPrompt, _systemPrompt, _userPrompt, _responseProgressFunction, _responseFunction, _abortGeneration, _resetContext, _logGeneration, _stop]];
 missionNamespace setVariable [_aiInstanceTriggerId, _triggerInference];
 
 if (missionNamespace isNil _aiInstanceHandlerId) then {
@@ -27,7 +27,7 @@ if (missionNamespace isNil _aiInstanceHandlerId) then {
         [_name, _aiInstanceHandlerId, _aiInstanceArgumentsId, _aiInstanceTriggerId, _aiInstanceResponseProgressHandlerId, _aiInstanceResponseHandlerId],
         {
             params ["_name", "_aiInstanceHandlerId", "_aiInstanceArgumentsId", "_aiInstanceTriggerId", "_aiInstanceResponseProgressHandlerId", "_aiInstanceResponseHandlerId"];
-            (missionNamespace getVariable _aiInstanceArgumentsId) params ["_systemPrompt", "_userPrompt", "_responseProgressFunction", "_responseFunction", "_abortGeneration", "_resetContext", "_logGeneration", "_stop"];
+            (missionNamespace getVariable _aiInstanceArgumentsId) params ["_masterPrompt", "_systemPrompt", "_userPrompt", "_responseProgressFunction", "_responseFunction", "_abortGeneration", "_resetContext", "_logGeneration", "_stop"];
             if !(isAiActive _name) exitWith {};
             
             if _stop exitWith {

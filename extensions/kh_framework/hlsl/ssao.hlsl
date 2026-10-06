@@ -98,9 +98,12 @@
 //
 // The radius is world-space, so far away it is a few pixels and the term
 // with it. As the distance grows the radius is floored at KH_SA_RANGE_FRAC of
-// it (a constant footprint on screen from there on), which is what keeps a
-// crease or a contact readable across a street: the larger-scale occlusion a
-// far mesh shows is as real as the close one's, only coarser.
+// it (a constant footprint on screen from there on, at a given field of view:
+// the floor is in metres, so through a zoomed optic the same mesh's term
+// spans more of its surroundings - 15 m at 300 m, held to 256 half pixels),
+// which is what keeps a crease or a contact readable across a street: the
+// larger-scale occlusion a far mesh shows is as real as the close one's, only
+// coarser.
 //
 // What this does not do, by design: a translucent or depth-Off draw of ours
 // writes no depth and so is never "ours" here (no term on it, as before), and

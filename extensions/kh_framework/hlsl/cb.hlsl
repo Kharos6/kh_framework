@@ -362,8 +362,23 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 // the file relative to it). The first use compiles it in the background - a
 // material draws flat white and an effect pass is skipped until it lands - and
 // the result is cached on disk; a compile error is reported once, with fxc's
-// own message. A file is read once per mission: restart the mission to pick up
-// an edit.
+// own message - its line numbers your file's own (KH_USER_LINE). Each
+// compiled variant (below) reads the file at its own first use, and every one
+// reads it again after a device reset (alt-tab in exclusive fullscreen, a
+// video-settings change): an edit made mid-mission reaches some variants and
+// not others - restart the mission to pick it up everywhere.
+// The compile runs on worker threads. While one is in flight the other user
+// shaders wait for it, and a device reset or a mission end that meets it
+// waits for it to end (meanwhile every mesh of ours draws the white
+// placeholder and no post-processing runs): keep a unit that compiles in
+// seconds.
+// Every variable at file scope must be static (static const for a constant):
+// a plain global (float k = 0.5;) is a shader constant - its initializer is
+// ignored and it reads whatever constant buffer its register holds, one of
+// ours or the engine's. Declare no cbuffer: nothing fills one. Bound
+// every loop by a literal, or clamp a count taken from a parameter: a draw
+// that runs for about two seconds of GPU time makes Windows reset the driver,
+// which the game does not survive.
 //
 // ---- MATERIAL shaders (a material whose shader is a .hlsl path) ----------
 // Placed after this file and BEFORE the builtin pixel shaders, and compiled
@@ -393,10 +408,14 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //         distance of 5 m or less in the video options), it is 1 wherever the
 //         face turns to the sun.
 //   RETURN the lit colour in the engine's linear HDR scene units (the units of
-//         lighting2 and lightAmb), before fog. Around the call the builtin
-//         applies fog, the coverage (the material's cutout / blend alpha times
-//         the object colour's alpha) and the object's blend mode - a user
-//         shader cannot change coverage.
+//         lighting2 and lightAmb), before fog: finite and not negative - it
+//         is held to [0, 65504], a NaN reads 0 (KH_USER_FINITE). Around the
+//         call the builtin applies fog, the coverage (the material's cutout /
+//         blend alpha times the object colour's alpha) and the object's blend
+//         mode. Coverage is that alpha's: a discard or clip in KhUserShade
+//         removes the pixel from this colour draw alone - the shadows the mesh
+//         casts, its cast onto the world and an inFront mesh's depth prepass
+//         keep the whole surface.
 // The builtin's own recipe is the reference to copy or wrap: KhApplyPBR(s,
 // wpos, n, smf) is what KhUserShade replaces, and ApplyLighting (untextured)
 // documents the combine. Rules its pieces follow:
@@ -518,8 +537,11 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //     KhUserTexSize(i)             its size in texels (0 when absent)
 // with i a literal 0 - 5 (a non-literal i samples all six and selects). An
 // absent or still-loading map reads zero. Declare no texture or sampler of
-// your own: nothing binds a register a user shader declares, and a taken
-// register fails the compile.
+// your own: nothing binds a register a user shader declares. One declared
+// without a register takes a free one - possibly one of ours the unit does
+// not read (khArbSnap's t2, another route's picture) - and reads whatever
+// the route left bound there; fxc reports a clash with one of ours only
+// when both are read.
 // The surface frame (KH_USER_FRAME), the builtin's own:
 //     KhUserGeomNormal()  the interpolated vertex normal, unit, reversed on the
 //                         back face of a two-sided mesh (n is it with the
@@ -583,7 +605,8 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //              all the culling, the LOD radius, the sun-map fit and the cast
 //              have: every bounds test pads the object by it. Too small and
 //              the mesh is culled at the screen edge while still in view, or
-//              its shadow is clipped; too large costs only a looser fit.
+//              its shadow is clipped; too large costs only a looser fit. It
+//              is not enforced: a vertex moved past it is drawn where it lands.
 //              Default 0 - right only for a stage that stays inside the box.
 //   "vertexStatic"  1: the result depends on nothing that changes by itself
 //              (no clock, no camera) - it is then evaluated again only when
@@ -737,7 +760,9 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 // the depth gate, the view-distance cut and the far-frame arbitration.
 // KhFxFinish applies what the builtin applies to its result: the localization
 // mask and its inverse, the band mask, opacity (color.a) and the blend mode,
-// and packs the output for the composite the pass is in. Without them the
+// and packs the output for the composite the pass is in (under additive,
+// multiply and screen the masks scale the opacity, so the picture outside
+// them is left as it was - KH_LOCAL_BLEND). Without them the
 // output is written as returned - the rest of this section - and the shader
 // should still begin with KhObjLoad(i.iobj0, i.iobj1).
 //   fxMeta     x = effect id, y = the object's age in seconds (formed in
@@ -758,7 +783,14 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //           t0 is the engine's HDR scene colour at its scene resolve, before
 //           the engine's own post-processing and tonemap, and the output
 //           REPLACES the pixel's colour (no hardware blend), in the same
-//           linear HDR units.
+//           linear HDR units. Write every pixel - return SampleScene(px) to
+//           leave one as it was - and never discard or clip: the chain's
+//           targets are not cleared, so a discarded pixel shows an older
+//           frame's or the pre-chain picture. Return alpha 1 (KhFxFinish
+//           does): the chain's last pass writes the alpha into the engine's
+//           target too. Return finite, non-negative colour: a NaN or
+//           inf runs on into the later passes that read the pixel and
+//           into the game's own post-processing.
 //           1.25 = the UI phase (a pass the script set to affect the UI): t0
 //           is the finished display frame, post-tonemap, UI included (0 - 1),
 //           its alpha the UI coverage, and the hardware lerps the frame toward
@@ -4235,8 +4267,8 @@ float3 KhFusePoint(int id, float3 c, float2 uv, float2 pos, float t,
 }
 
 // Fused-stage composite: the packing tail's blend algebra over the running
-// value, plus - write-window lanes only - the coverage destination lerp in its
-// pre-composite position.
+// value, plus - write-window lanes only - the coverage destination mask (KH_LOCAL_BLEND: a lerp in its
+// pre-composite position under normal / lighten / darken, the opacity's factor under the other three).
 float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float t)
 {
     int n = (int)fuseMeta.x;
@@ -4246,9 +4278,13 @@ float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float
         float4 fcol = fuseStage[s * 4 + 3];
         float3 c = KhFusePoint((int)fm.x, v, uv, pos, t,
                                fuseStage[s * 4 + 1], fuseStage[s * 4 + 2], fcol);
-        if (uiLane) c = lerp(v, c, cov);
         float a = fcol.w;
         int bm = (int)fm.y;
+        if (uiLane)   // KH_LOCAL_BLEND: additive, multiply and screen take the coverage on the opacity.
+        {
+            if (bm == 1 || bm == 2 || bm == 3) a *= cov;
+            else c = lerp(v, c, cov);
+        }
         float3 mixed = lerp(v, c, a);
         if (bm == 1)      v = v + c * a;
         else if (bm == 2) v = v * lerp(float3(1.0f, 1.0f, 1.0f), c, a);
@@ -4386,12 +4422,32 @@ float4 KhFxFinish(float3 scene, float3 outc, float2 pos)
     const int2 px = int2(pos);
     const float2 uv = pos / float2(fxMeta.z, fxMeta.w);
     const float t = fxMeta.y;
+    int bm = (int)sizeAxes.w;
+
+    // KH_LOCAL_BLEND - every mask below (KH_VM_SEE's transmittance, the localization mask and its inverse, the
+    // band mask, the UI coverage) is how much of the pass reaches the pixel. Under normal, lighten and darken it
+    // lerps outc toward the scene, which the blend then leaves as it was. Under additive, multiply and screen that
+    // lerp blended the scene into itself where the mask is 0 (an additive local pass at opacity 0.5 brightened the
+    // whole picture 1.5x outside its volume), so for those three the masks scale the opacity instead (khlb_m): the
+    // picture is untouched where a mask is 0 and blended as before where it is 1. khlb_m stays exactly 1 under
+    // the other three, whose arithmetic is unchanged. KhFuseTail takes the UI coverage by the same rule; fused
+    // stages carry no other mask (kh_fuse_appendable).
+    const bool khlb_scale = bm == 1 || bm == 2 || bm == 3;
+    float khlb_m = 1.0f;
 
     // KH_VM_SEE (shadowMeta2.w 2: a builtin medium pass): where the snapshot holds the scene, the pass shows through
     // the view model's translucent planes by their transmittance - faded to the scene (which carries the planes' own
     // colour) as they cover it. First, so the masks, the opacity, the blend and the fused stages compose with it as
     // with any mask - and only where a plane covers (T < 1), so every other pixel keeps outc exactly (KhVmSeeFade).
-    [branch] if (shadowMeta2.w > 1.5f) outc = KhVmSeeFade(scene, outc, px);
+    [branch] if (shadowMeta2.w > 1.5f)
+    {
+        if (khlb_scale)
+        {
+            const float khlb_t = KhVmSeeT(px);   // KH_LOCAL_BLEND: the transmittance on the opacity.
+            if (khlb_t < 1.0f) khlb_m *= khlb_t;
+        }
+        else outc = KhVmSeeFade(scene, outc, px);
+    }
 
     if (localParams1.y > 0.5f)
     {
@@ -4411,7 +4467,8 @@ float4 KhFxFinish(float3 scene, float3 outc, float2 pos)
         // everything except the volume, falloff band and sky included. C++ twin
         // local_radii[3] (addLocalPostFX 'inverse').
         if (localRadii.w >= 0.5f) mask = 1.0f - mask;
-        outc = lerp(scene, outc, mask);
+        if (khlb_scale) khlb_m *= mask;   // KH_LOCAL_BLEND.
+        else outc = lerp(scene, outc, mask);
     }
 
     // Camera-distance band mask: full strength within [min, max], fading over
@@ -4424,18 +4481,22 @@ float4 KhFxFinish(float3 scene, float3 outc, float2 pos)
         float mask = smoothstep(bandParams.x - fall, bandParams.x, d);
         if (bandParams.y > 0.0f)
             mask *= 1.0f - smoothstep(bandParams.y, bandParams.y + fall, d);
-        outc = lerp(scene, outc, mask);
+        if (khlb_scale) khlb_m *= mask;   // KH_LOCAL_BLEND.
+        else outc = lerp(scene, outc, mask);
     }
 
     // UI-coverage destination mask (write-window masked lane, centerSize.w =
     // 2): the effect vanishes smoothly off the UI.
     if (centerSize.w > 1.5f && centerSize.w < 2.5f)
-        outc = lerp(scene, outc, KhUiCov(px));   // Spill = w 3, excluded.
+    {
+        const float khlb_cov = KhUiCov(px);
+        if (khlb_scale) khlb_m *= khlb_cov;   // KH_LOCAL_BLEND.
+        else outc = lerp(scene, outc, khlb_cov);   // Spill = w 3, excluded.
+    }
 
-    int bm = (int)sizeAxes.w;
     if (centerSize.w > 0.5f)
     {
-        float a = color.a;
+        float a = color.a * khlb_m;   // KH_LOCAL_BLEND: khlb_m is 1 under normal, lighten and darken.
         float3 mixed = lerp(scene, outc, a);
         float3 comp;
         if (bm == 1)      comp = scene + outc * a;   // Additive.
@@ -4461,8 +4522,8 @@ float4 KhFxFinish(float3 scene, float3 outc, float2 pos)
     // Blend-mode output packing (meshes: hardware blend against the live
     // framebuffer; intensity pre-applied where blend factors cannot express
     // it).
-    if (bm == 1 || bm == 3) return float4(outc * color.a, 1.0f);   // Additive, screen.
-    if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), outc, color.a), 1.0f);   // Multiply.
+    if (bm == 1 || bm == 3) return float4(outc * (color.a * khlb_m), 1.0f);   // Additive, screen (KH_LOCAL_BLEND).
+    if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), outc, color.a * khlb_m), 1.0f);   // Multiply.
     if (bm == 4 || bm == 5) return float4(lerp(scene, outc, color.a), 1.0f);   // Lighten, darken (MAX/MIN op).
     return float4(outc, color.a);   // Normal (alpha lerp).
 }

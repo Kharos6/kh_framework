@@ -34,8 +34,9 @@ std::mutex LlamaBackend::backend_mutex;
 
 class AIModelDiscovery {
 public:
-    static std::vector<std::filesystem::path> find_all_ai_model_directories() {
-        return ModFolderSearcher::find_directories_in_mods("ai_models");
+    // The folders a model file is looked for in (ModFolderSearcher::kh_framework_search_paths).
+    static std::vector<std::filesystem::path> search_paths() {
+        return ModFolderSearcher::kh_framework_search_paths("ai_models");
     }
 
     // Search for a specific .gguf file across all locations (Documents + Mods)
@@ -47,67 +48,33 @@ public:
             std::filesystem::path out;
             std::string err;
             if (ModFolderSearcher::extract_pbo_file(filename, out, &err)) return out.string();
-            MainThreadScheduler::instance().schedule([err]() { sqf::diag_log("KH - AI Framework: " + err); });
+            MainThreadScheduler::instance().schedule([err]() { sqf::diag_log("KH AI: " + err); });
             return "";
         }
 
-        std::vector<std::filesystem::path> search_paths;
-        
-        // Priority 1: Documents folder
-        try {
-            char docs_path[MAX_PATH];
-            
-            if (SHGetFolderPathA(NULL, CSIDL_MYDOCUMENTS, NULL, SHGFP_TYPE_CURRENT, docs_path) == S_OK) {
-                std::filesystem::path docs_ai_models = std::filesystem::path(docs_path) / "Arma 3" / "kh_framework" / "ai_models";
-                search_paths.push_back(docs_ai_models);
-            }
-        } catch (...) {}
-
-        // Priority 2: Mod folders
-        auto mod_ai_dirs = find_all_ai_model_directories();
-        search_paths.insert(search_paths.end(), mod_ai_dirs.begin(), mod_ai_dirs.end());
-        
-        // Search for the file
-        auto found_path = ModFolderSearcher::find_file_by_name(search_paths, filename);
+        auto found_path = ModFolderSearcher::find_file_by_name(search_paths(), filename);
         return found_path.empty() ? "" : found_path.string();
     }
 
     static std::string find_any_gguf_model() {
-        std::vector<std::filesystem::path> search_paths;
-        
-        // Priority 1: Documents folder
-        try {
-            char docs_path[MAX_PATH];
-            
-            if (SHGetFolderPathA(NULL, CSIDL_MYDOCUMENTS, NULL, SHGFP_TYPE_CURRENT, docs_path) == S_OK) {
-                std::filesystem::path docs_ai_models = std::filesystem::path(docs_path) / "Arma 3" / "kh_framework" / "ai_models";
-                search_paths.push_back(docs_ai_models);
-            }
-        } catch (...) {}
-
-        // Priority 2: Mod folders
-        auto mod_ai_dirs = find_all_ai_model_directories();
-        search_paths.insert(search_paths.end(), mod_ai_dirs.begin(), mod_ai_dirs.end());
-        
-        // Find first .gguf file
-        auto found_path = ModFolderSearcher::find_first_file_with_extension(search_paths, ".gguf");
+        auto found_path = ModFolderSearcher::find_first_file_with_extension(search_paths(), ".gguf");
         return found_path.empty() ? "" : found_path.string();
     }
 };
 
 struct SharedModel {
     llama_model* model;
-    std::atomic<int> ref_count{0};
+    std::atomic<int> ref_count;
     std::string model_path;
     std::string cache_key;
     llama_model_params model_params;
     
     SharedModel(llama_model* m, const std::string& path, const llama_model_params& params)
-        : model(m), model_path(path), model_params(params), ref_count(1) {}
+        : model(m), ref_count(1), model_path(path), model_params(params) {}
     
     ~SharedModel() {
         if (model) {
-            llama_free_model(model);
+            llama_model_free(model);
             model = nullptr;
         }
     }
@@ -128,10 +95,10 @@ private:
            << "|main_gpu:" << params.main_gpu
            << "|vocab_only:" << params.vocab_only;
 
-        if (params.tensor_split != nullptr) {
+        if (params.tensor_split != nullptr) {   // llama_max_devices() entries (set_parameters pads it).
             ss << "|tensor_split:";
 
-            for (int i = 0; i < 128; i++) { // LLAMA_MAX_DEVICES is typically 128
+            for (size_t i = 0; i < llama_max_devices(); i++) {
                 if (params.tensor_split[i] > 0.0f) {
                     ss << i << "=" << std::fixed << std::setprecision(3) << params.tensor_split[i] << ",";
                 }
@@ -157,15 +124,9 @@ public:
             return shared_model;
         }
 
-        llama_model* model = llama_load_model_from_file(model_path.c_str(), model_params);
+        llama_model* model = llama_model_load_from_file(model_path.c_str(), model_params);
         
-        if (!model) {
-            MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: Failed to load model from file");
-            });
-
-            throw std::runtime_error("Failed to load model from file");
-        }
+        if (!model) throw std::runtime_error("failed to load the model file " + model_path);
         
         auto shared_model = std::make_shared<SharedModel>(model, model_path, model_params);
         shared_model->cache_key = key;
@@ -202,10 +163,10 @@ private:
     const llama_vocab* vocab = nullptr;
     llama_sampler* sampler = nullptr;
     bool initialized{false};
+    bool backend_initialized{false};   // LlamaBackend::init() done (its cleanup pairs with it, initialized or not).
     std::vector<llama_token> system_prompt_tokens;
     std::atomic<int> system_prompt_token_count{0};
     std::atomic<bool> system_prompt_cached{false};
-    std::atomic<bool> force_terminate{false};
     std::vector<llama_token> master_prompt_tokens;
     std::atomic<int> master_prompt_token_count{0};
     std::atomic<bool> master_prompt_cached{false};
@@ -258,6 +219,9 @@ private:
     std::string marker_user_end;
     std::string marker_assistant_start;
     std::string marker_assistant_end;
+
+    // Thrown out of a decode once stop() asked the thread to end; the turn ends without a report.
+    struct StopRequested {};
 
     void schedule_log(const std::string& message) {
         if (!log_generation) return;
@@ -334,14 +298,15 @@ private:
                 
         vocab = nullptr;
         
-        if (initialized) {
+        if (backend_initialized) {
             try {
                 LlamaBackend::cleanup();
             } catch (...) {}
             
-            initialized = false;
+            backend_initialized = false;
         }
-        
+
+        initialized = false;
         system_prompt_cached = false;
         system_prompt_tokens.clear();
         system_prompt_token_count = 0;
@@ -365,97 +330,66 @@ private:
         }
     }
     
-    std::vector<llama_token> tokenize_with_chunking(const std::string& text) const {
-        try {
-            std::vector<llama_token> tokens = common_tokenize(ctx, text, true, true);
-            
-            if (tokens.size() > MAX_PROMPT_TOKENS) {
-                tokens.resize(MAX_PROMPT_TOKENS);
-            }
-            
-            return tokens;
-        } catch (const std::exception& e) {
-            std::string error_msg = e.what();
+    // Tokens of text, parsed for special tokens (the markers), at most MAX_PROMPT_TOKENS. add_bos: the model's BOS
+    // in front - for the system prompt only, which opens the context; a BOS inside the context is noise.
+    std::vector<llama_token> tokenize_with_chunking(const std::string& text, bool add_bos) const {
+        std::vector<llama_token> tokens = common_tokenize(ctx, text, add_bos, true);
 
-            MainThreadScheduler::instance().schedule([error_msg]() {
-                report_error("KH - AI Framework: Tokenization error: " + error_msg);
-            });
-
-            throw;
+        if (tokens.size() > MAX_PROMPT_TOKENS) {
+            tokens.resize(MAX_PROMPT_TOKENS);
         }
+
+        return tokens;
     }
     
+    // Decodes tokens into the context, N_BATCH at a time; throws on a failed batch (what says which prompt), or
+    // StopRequested once stop() was called (between batches, and from inside a batch through the abort callback).
+    void decode_tokens(std::vector<llama_token>& tokens, const char* what) {
+        for (size_t i = 0; i < tokens.size(); i += N_BATCH) {
+            if (should_stop) throw StopRequested{};
+            size_t batch_size = std::min(static_cast<size_t>(N_BATCH), tokens.size() - i);
+            llama_batch batch = llama_batch_get_one(&tokens[i], static_cast<int32_t>(batch_size));
+            const int result = llama_decode(ctx, batch);
+
+            if (result != 0) {
+                if (should_stop) throw StopRequested{};
+                throw std::runtime_error(std::string(what) + " decode failed at chunk " + std::to_string(i / N_BATCH) +
+                                         " with code " + std::to_string(result));
+            }
+        }
+    }
+
+    // The system prompt into the context (position 0 on): cached when every token decoded; a failure throws (the
+    // thread reports it once) and leaves it uncached.
     void cache_system_prompt() {
         std::lock_guard<std::mutex> lock(prompt_mutex);
         system_prompt_cached = false;
         system_prompt_tokens.clear();
         system_prompt_token_count = 0;
-        
-        try {
-            std::string sys_prompt = create_system_prompt();
-            system_prompt_tokens = tokenize_with_chunking(sys_prompt);
-            system_prompt_token_count = static_cast<int>(system_prompt_tokens.size());
-            
-            for (size_t i = 0; i < system_prompt_tokens.size(); i += N_BATCH) {
-                size_t batch_size = std::min(static_cast<size_t>(N_BATCH), system_prompt_tokens.size() - i);
-                llama_batch batch = llama_batch_get_one(&system_prompt_tokens[i], static_cast<int32_t>(batch_size));
-                int result = llama_decode(ctx, batch);
-
-                if (result != 0) {
-                    MainThreadScheduler::instance().schedule([]() {
-                        report_error("KH - AI Framework: System prompt decode failed");
-                    });
-                }
-            }
-      
-            system_prompt_cached = true;
-        } catch (const std::exception& e) {
-            std::string name = ai_name;
-            std::string error_msg = e.what();
-
-            MainThreadScheduler::instance().schedule([name, error_msg]() {
-                report_error("KH - AI Framework: AI Controller (" + name + "): Failed to cache system prompt: " + error_msg);
-            });
-        }
+        std::string sys_prompt = create_system_prompt();
+        system_prompt_tokens = tokenize_with_chunking(sys_prompt, true);
+        system_prompt_token_count = static_cast<int>(system_prompt_tokens.size());
+        decode_tokens(system_prompt_tokens, "system prompt");
+        system_prompt_cached = true;
     }
 
+    // The master prompt into the context, after the system prompt (the caller trims the context to it first).
     void cache_master_prompt() {
         std::lock_guard<std::mutex> lock(prompt_mutex);
         master_prompt_cached = false;
         master_prompt_tokens.clear();
         master_prompt_token_count = 0;
-        
+
         if (master_prompt.empty()) {
             master_prompt_cached = true;
             return;
         }
-        
-        try {
-            std::string master_text = marker_user_start + "\n" + master_prompt + "\n" + marker_user_end + "\n";
-            master_prompt_tokens = tokenize_with_chunking(master_text);
-            master_prompt_token_count = static_cast<int>(master_prompt_tokens.size());
-            
-            for (size_t i = 0; i < master_prompt_tokens.size(); i += N_BATCH) {
-                size_t batch_size = std::min(static_cast<size_t>(N_BATCH), master_prompt_tokens.size() - i);
-                llama_batch batch = llama_batch_get_one(&master_prompt_tokens[i], static_cast<int32_t>(batch_size));
-                int result = llama_decode(ctx, batch);
 
-                if (result != 0) {
-                    MainThreadScheduler::instance().schedule([]() {
-                        report_error("KH - AI Framework: Master prompt decode failed");
-                    });
-                }
-            }
-    
-            master_prompt_cached = true;
-        } catch (const std::exception& e) {
-            std::string name = ai_name;
-            std::string error_msg = e.what();
-
-            MainThreadScheduler::instance().schedule([name, error_msg]() {
-                report_error("KH - AI Framework: AI Controller (" + name + "): Failed to cache master prompt: " + error_msg);
-            });
-        }
+        std::string master_text = marker_user_start + "\n" + master_prompt + "\n" + marker_user_end + "\n";
+        master_prompt_tokens = tokenize_with_chunking(master_text, false);
+        master_prompt_token_count = static_cast<int>(master_prompt_tokens.size());
+        decode_tokens(master_prompt_tokens, "master prompt");
+        master_prompt_cached = true;
     }
 
     class GenerationGuard {
@@ -493,36 +427,31 @@ private:
             current_user_message = user_prompt;
         }
         
-        if (!ctx || !model) {
-            MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: Context or model not initialized");
-            });
-
-            throw std::runtime_error("Context or model not initialized");
-        }
+        if (!ctx || !model) throw std::runtime_error("context or model not initialized");
 
         std::unique_lock<std::mutex> kv_lock(kv_cache_mutex);
-        bool system_prompt_was_recached = false;
+        llama_memory_t kv_memory = llama_get_memory(ctx);
         
+        // The context holds [system prompt][master prompt][the last call's conversation]. A changed system prompt
+        // rebuilds it all; a changed master prompt is decoded after the system prompt; otherwise the old
+        // conversation is dropped and this call's decoded after the two.
         if (!system_prompt_cached) {
-            llama_memory_t kv_memory = llama_get_memory(ctx);
             llama_memory_seq_rm(kv_memory, -1, 0, -1);
-            cache_system_prompt();
             master_prompt_cached = false;
-            system_prompt_was_recached = true;
+            cache_system_prompt();
         }
 
-        bool master_prompt_was_recached = false;
-        
         if (!master_prompt_cached) {
+            llama_memory_seq_rm(kv_memory, -1, system_prompt_token_count, -1);
             cache_master_prompt();
-            master_prompt_was_recached = true;
+        } else {
+            llama_memory_seq_rm(kv_memory, -1, system_prompt_token_count + master_prompt_token_count, -1);
         }
 
         std::string new_message_text = marker_user_start + "\n" + current_user_message + "\n" + marker_user_end + "\n" + marker_assistant_start + "\n";
         
         // Tokenize new message
-        std::vector<llama_token> new_message_tokens = tokenize_with_chunking(new_message_text);
+        std::vector<llama_token> new_message_tokens = tokenize_with_chunking(new_message_text, false);
         int new_message_token_count = static_cast<int>(new_message_tokens.size());
         
         // Calculate available space for history
@@ -538,7 +467,7 @@ private:
                 std::string user_part = marker_user_start + "\n" + it->user_message + "\n" + marker_user_end + "\n";
                 std::string assistant_part = marker_assistant_start + "\n" + it->assistant_reply + "\n" + marker_assistant_end + "\n";
                 std::string full_turn = user_part + assistant_part;
-                std::vector<llama_token> turn_tokens = tokenize_with_chunking(full_turn);
+                std::vector<llama_token> turn_tokens = tokenize_with_chunking(full_turn, false);
                 int turn_token_count = static_cast<int>(turn_tokens.size());
                 
                 // Check if adding this turn would exceed budget
@@ -558,7 +487,7 @@ private:
             
             conversation_builder << new_message_text;
             std::string conversation_text = conversation_builder.str();
-            all_prompt_tokens = tokenize_with_chunking(conversation_text);
+            all_prompt_tokens = tokenize_with_chunking(conversation_text, false);
             size_t turns_to_keep = history_parts.size();
 
             while (conversation_history.size() > turns_to_keep) {
@@ -566,48 +495,12 @@ private:
             }
         }
         
-        if (all_prompt_tokens.empty()) {
-            MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: Tokenization produced empty result");
-            });
-
-            throw std::runtime_error("Tokenization produced empty result");
-        }
-
+        if (all_prompt_tokens.empty()) throw std::runtime_error("tokenization produced an empty result");
+        llama_sampler_reset(sampler);
+        decode_tokens(all_prompt_tokens, "conversation");
+        
         llama_batch batch;
         int decode_result = 0;
-        llama_memory_t kv_memory = llama_get_memory(ctx);
-
-        if (!system_prompt_was_recached && !master_prompt_was_recached) {
-            int cached_end = system_prompt_token_count + master_prompt_token_count;
-            llama_memory_seq_rm(kv_memory, -1, cached_end, -1);
-        }
-        
-        llama_sampler_reset(sampler);
-        
-        // Decode ONLY conversation tokens (system prompt already in KV cache)
-        auto start_decode = std::chrono::high_resolution_clock::now();
-        
-        for (size_t i = 0; i < all_prompt_tokens.size(); i += N_BATCH) {
-            size_t batch_size = std::min(static_cast<size_t>(N_BATCH), all_prompt_tokens.size() - i);
-            batch = llama_batch_get_one(&all_prompt_tokens[i], static_cast<int32_t>(batch_size));
-            decode_result = llama_decode(ctx, batch);
-            
-            if (decode_result != 0) {
-                int chunk_num = static_cast<int>(i / N_BATCH);
-                int result_code = decode_result;
-
-                MainThreadScheduler::instance().schedule([chunk_num, result_code]() {
-                    report_error("KH - AI Framework: Decode failed at chunk " + 
-                                std::to_string(chunk_num) + " with code " + 
-                                std::to_string(result_code));
-                });
-
-                throw std::runtime_error("Decode failed");
-            }
-        }
-        
-        auto end_decode = std::chrono::high_resolution_clock::now();
         std::string processed_display_output;
         processed_display_output.reserve(MAX_NEW_TOKENS * 4);
         int n_generated = 0;
@@ -619,55 +512,69 @@ private:
 
         if (log_generation) {
             int total_tokens = system_prompt_token_count + master_prompt_token_count + static_cast<int>(all_prompt_tokens.size());
-            schedule_log("KH - AI Framework: (" + ai_name + "): ========== INFERENCE START ==========");
-            schedule_log("KH - AI Framework: (" + ai_name + "):   System Token Count: " + std::to_string(system_prompt_token_count) + " tokens");
-            schedule_log("KH - AI Framework: (" + ai_name + "):   Master Token Count: " + std::to_string(master_prompt_token_count) + " tokens");
-            schedule_log("KH - AI Framework: (" + ai_name + "):   Conversation Token Count: " + std::to_string(total_tokens - system_prompt_token_count) + " tokens");
-            schedule_log("KH - AI Framework: (" + ai_name + "):   Total Context Usage: " + std::to_string(total_tokens) + " / " + std::to_string(N_CTX));
-            schedule_log("KH - AI Framework: (" + ai_name + "):   Maximum Generated Tokens: " + std::to_string(MAX_NEW_TOKENS));
-            schedule_log("KH - AI Framework: (" + ai_name + "):   Maximum Total Tokens: " + std::to_string(MAX_PROMPT_TOKENS));
-            schedule_log("KH - AI Framework: (" + ai_name + "):   Context Size: " + std::to_string(N_CTX));
-            schedule_log("KH - AI Framework: (" + ai_name + "):   -------- Sampling Parameters --------");
-            schedule_log("KH - AI Framework: (" + ai_name + "):   Mirostat: " + std::string(MIROSTAT == 0 ? "disabled" : (MIROSTAT == 1 ? "v1" : "v2")));
+            schedule_log("KH AI (" + ai_name + "): ========== INFERENCE START ==========");
+            schedule_log("KH AI (" + ai_name + "):   System Token Count: " +
+                         std::to_string(system_prompt_token_count) + " tokens");
+            schedule_log("KH AI (" + ai_name + "):   Master Token Count: " +
+                         std::to_string(master_prompt_token_count) + " tokens");
+            schedule_log("KH AI (" + ai_name + "):   Conversation Token Count: " +
+                         std::to_string(total_tokens - system_prompt_token_count) + " tokens");
+            schedule_log("KH AI (" + ai_name + "):   Total Context Usage: " + std::to_string(total_tokens) + " / " +
+                         std::to_string(N_CTX));
+            schedule_log("KH AI (" + ai_name + "):   Maximum Generated Tokens: " + std::to_string(MAX_NEW_TOKENS));
+            schedule_log("KH AI (" + ai_name + "):   Maximum Total Tokens: " + std::to_string(MAX_PROMPT_TOKENS));
+            schedule_log("KH AI (" + ai_name + "):   Context Size: " + std::to_string(N_CTX));
+            schedule_log("KH AI (" + ai_name + "):   -------- Sampling Parameters --------");
+            schedule_log("KH AI (" + ai_name + "):   Mirostat: " +
+                         std::string(MIROSTAT == 0 ? "disabled" : (MIROSTAT == 1 ? "v1" : "v2")));
             if (MIROSTAT > 0) {
-                schedule_log("KH - AI Framework: (" + ai_name + "):   Mirostat Tau: " + std::to_string(MIROSTAT_TAU));
-                schedule_log("KH - AI Framework: (" + ai_name + "):   Mirostat Eta: " + std::to_string(MIROSTAT_ETA));
-                schedule_log("KH - AI Framework: (" + ai_name + "):   (Temperature, Top K, Top P, Min P, and Typical P are ignored when Mirostat enabled)");
+                schedule_log("KH AI (" + ai_name + "):   Mirostat Tau: " + std::to_string(MIROSTAT_TAU));
+                schedule_log("KH AI (" + ai_name + "):   Mirostat Eta: " + std::to_string(MIROSTAT_ETA));
+                schedule_log("KH AI (" + ai_name + "):   (Temperature, Top K, Top P, Min P, and Typical P are "
+                             "ignored when Mirostat enabled)");
             } else {
-                schedule_log("KH - AI Framework: (" + ai_name + "):   Temperature: " + std::to_string(TEMPERATURE));
-                schedule_log("KH - AI Framework: (" + ai_name + "):   Top K: " + std::to_string(TOP_K));
-                schedule_log("KH - AI Framework: (" + ai_name + "):   Top P: " + std::to_string(TOP_P));
-                schedule_log("KH - AI Framework: (" + ai_name + "):   Min P: " + std::to_string(MIN_P));
-                schedule_log("KH - AI Framework: (" + ai_name + "):   Typical P: " + std::to_string(TYPICAL_P) + (TYPICAL_P >= 1.0f ? " (disabled)" : ""));
+                schedule_log("KH AI (" + ai_name + "):   Temperature: " + std::to_string(TEMPERATURE));
+                schedule_log("KH AI (" + ai_name + "):   Top K: " + std::to_string(TOP_K));
+                schedule_log("KH AI (" + ai_name + "):   Top P: " + std::to_string(TOP_P));
+                schedule_log("KH AI (" + ai_name + "):   Min P: " + std::to_string(MIN_P));
+                schedule_log("KH AI (" + ai_name + "):   Typical P: " + std::to_string(TYPICAL_P) +
+                             (TYPICAL_P >= 1.0f ? " (disabled)" : ""));
             }
-            schedule_log("KH - AI Framework: (" + ai_name + "):   -------- Penalty Parameters --------");
-            schedule_log("KH - AI Framework: (" + ai_name + "):   Repeat Penalty: " + std::to_string(REPEAT_PENALTY) + (REPEAT_PENALTY == 1.0f ? " (disabled)" : ""));
-            schedule_log("KH - AI Framework: (" + ai_name + "):   Repeat Last N: " + std::to_string(REPEAT_LAST_N) + (REPEAT_LAST_N == 0 ? " (disabled)" : ""));
-            schedule_log("KH - AI Framework: (" + ai_name + "):   Presence Penalty: " + std::to_string(PRESENCE_PENALTY) + (PRESENCE_PENALTY == 0.0f ? " (disabled)" : ""));
-            schedule_log("KH - AI Framework: (" + ai_name + "):   Frequency Penalty: " + std::to_string(FREQUENCY_PENALTY) + (FREQUENCY_PENALTY == 0.0f ? " (disabled)" : ""));
-            schedule_log("KH - AI Framework: (" + ai_name + "):   -------- Hardware Parameters --------");
-            schedule_log("KH - AI Framework: (" + ai_name + "):   Seed: " + (SEED == LLAMA_DEFAULT_SEED ? "random" : std::to_string(SEED)));
-            schedule_log("KH - AI Framework: (" + ai_name + "):   Batch Size: " + std::to_string(N_BATCH));
-            schedule_log("KH - AI Framework: (" + ai_name + "):   Micro Batch Size: " + std::to_string(N_UBATCH));
-            schedule_log("KH - AI Framework: (" + ai_name + "):   CPU Threads: " + std::to_string(CPU_THREADS));
-            schedule_log("KH - AI Framework: (" + ai_name + "):   CPU Threads Batch: " + std::to_string(CPU_THREADS_BATCH));
-            schedule_log("KH - AI Framework: (" + ai_name + "):   GPU Layers: " + std::to_string(GPU_LAYERS));
-            schedule_log("KH - AI Framework: (" + ai_name + "):   Flash Attention: " + std::string(FLASH_ATTENTION ? "enabled" : "disabled"));
-            schedule_log("KH - AI Framework: (" + ai_name + "):   KV Cache Offload: " + std::string(OFFLOAD_KV_CACHE ? "enabled" : "disabled"));
-            schedule_log("KH - AI Framework: (" + ai_name + "):   Main GPU: " + std::to_string(MAIN_GPU));
-            schedule_log("KH - AI Framework: (" + ai_name + "):   Split Mode: " + std::string(SPLIT_MODE == 0 ? "none" : (SPLIT_MODE == 1 ? "layer" : "row")));
+            schedule_log("KH AI (" + ai_name + "):   -------- Penalty Parameters --------");
+            schedule_log("KH AI (" + ai_name + "):   Repeat Penalty: " + std::to_string(REPEAT_PENALTY) +
+                         (REPEAT_PENALTY == 1.0f ? " (disabled)" : ""));
+            schedule_log("KH AI (" + ai_name + "):   Repeat Last N: " + std::to_string(REPEAT_LAST_N) +
+                         (REPEAT_LAST_N == 0 ? " (disabled)" : ""));
+            schedule_log("KH AI (" + ai_name + "):   Presence Penalty: " + std::to_string(PRESENCE_PENALTY) +
+                         (PRESENCE_PENALTY == 0.0f ? " (disabled)" : ""));
+            schedule_log("KH AI (" + ai_name + "):   Frequency Penalty: " + std::to_string(FREQUENCY_PENALTY) +
+                         (FREQUENCY_PENALTY == 0.0f ? " (disabled)" : ""));
+            schedule_log("KH AI (" + ai_name + "):   -------- Hardware Parameters --------");
+            schedule_log("KH AI (" + ai_name + "):   Seed: " +
+                         (SEED == LLAMA_DEFAULT_SEED ? "random" : std::to_string(SEED)));
+            schedule_log("KH AI (" + ai_name + "):   Batch Size: " + std::to_string(N_BATCH));
+            schedule_log("KH AI (" + ai_name + "):   Micro Batch Size: " + std::to_string(N_UBATCH));
+            schedule_log("KH AI (" + ai_name + "):   CPU Threads: " + std::to_string(CPU_THREADS));
+            schedule_log("KH AI (" + ai_name + "):   CPU Threads Batch: " + std::to_string(CPU_THREADS_BATCH));
+            schedule_log("KH AI (" + ai_name + "):   GPU Layers: " + std::to_string(GPU_LAYERS));
+            schedule_log("KH AI (" + ai_name + "):   Flash Attention: " +
+                         std::string(FLASH_ATTENTION ? "enabled" : "disabled"));
+            schedule_log("KH AI (" + ai_name + "):   KV Cache Offload: " +
+                         std::string(OFFLOAD_KV_CACHE ? "enabled" : "disabled"));
+            schedule_log("KH AI (" + ai_name + "):   Main GPU: " + std::to_string(MAIN_GPU));
+            schedule_log("KH AI (" + ai_name + "):   Split Mode: " +
+                         std::string(SPLIT_MODE == 0 ? "none" : (SPLIT_MODE == 1 ? "layer" : "row")));
         }
 
         for (int i = 0; i < MAX_NEW_TOKENS; i++) {
-            if (should_stop || force_terminate) {
-                // Only set generation_completed here - we still want partial responses if the user stops
+            if (should_stop) {   // The partial response is still returned, but not kept as a turn.
                 generation_completed = false;
                 break;
             }
 
             if (abort_generation) {
                 break;
-            };
+            }
 
             auto sample_start = std::chrono::high_resolution_clock::now();
             llama_token new_token_id = llama_sampler_sample(sampler, ctx, -1);
@@ -677,10 +584,11 @@ private:
             if (new_token_id < 0 || new_token_id >= vocab_size) {
                 int token_id = new_token_id;
                 int vsize = vocab_size;
+                std::string name = ai_name;
 
-                MainThreadScheduler::instance().schedule([token_id, vsize]() {
-                    report_error("KH - AI Framework: Invalid token ID sampled: " + std::to_string(token_id) + 
-                                " (vocab size: " + std::to_string(vsize) + ")");
+                MainThreadScheduler::instance().schedule([name, token_id, vsize]() {
+                    report_error("KH AI (" + name + "): invalid token ID sampled: " + std::to_string(token_id) +
+                                 " (vocab size: " + std::to_string(vsize) + ")");
                 });
                             
                 break;
@@ -697,8 +605,10 @@ private:
             auto ttp_end = std::chrono::high_resolution_clock::now();
             
             if (n_chars < 0) {
-                MainThreadScheduler::instance().schedule([]() {
-                    report_error("KH - AI Framework: ERROR: Token to piece conversion failed");
+                std::string name = ai_name;
+
+                MainThreadScheduler::instance().schedule([name]() {
+                    report_error("KH AI (" + name + "): token to piece conversion failed");
                 });
 
                 break;
@@ -710,8 +620,10 @@ private:
             auto get_batch_end = std::chrono::high_resolution_clock::now();
             
             if (batch.n_tokens != 1) {
-                MainThreadScheduler::instance().schedule([]() {
-                    report_error("KH - AI Framework: ERROR: Batch creation failed");
+                std::string name = ai_name;
+
+                MainThreadScheduler::instance().schedule([name]() {
+                    report_error("KH AI (" + name + "): batch creation failed");
                 });
 
                 break;
@@ -726,22 +638,30 @@ private:
             try {
                 decode_result = llama_decode(ctx, batch);
             } catch (const std::exception& e) {
+                std::string name = ai_name;
                 std::string error_msg = e.what();
 
-                MainThreadScheduler::instance().schedule([error_msg]() {
-                    report_error("KH - AI Framework: EXCEPTION during generation: " + error_msg);
+                MainThreadScheduler::instance().schedule([name, error_msg]() {
+                    report_error("KH AI (" + name + "): exception during generation: " + error_msg);
                 });
 
                 break;
             }
 
             auto decode_end = std::chrono::high_resolution_clock::now();
-                    
-            if (decode_result != 0) {
-                int token_num = n_generated;
 
-                MainThreadScheduler::instance().schedule([token_num]() {
-                    report_error("KH - AI Framework: Generation decode failed at token " + std::to_string(token_num));
+            if (decode_result != 0) {
+                if (should_stop) {   // Aborted by stop() (the abort callback); not a fault.
+                    generation_completed = false;
+                    break;
+                }
+
+                int token_num = n_generated;
+                std::string name = ai_name;
+
+                MainThreadScheduler::instance().schedule([name, token_num]() {
+                    report_error("KH AI (" + name + "): generation decode failed at token " +
+                                 std::to_string(token_num));
                 });
 
                 break;
@@ -755,18 +675,22 @@ private:
                 auto current_time = std::chrono::high_resolution_clock::now();
                 auto time_since_last_log = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - last_log_time);
                 auto sample_duration = std::chrono::duration_cast<std::chrono::milliseconds>(sample_end - sample_start);
-                schedule_log("KH - AI Framework: (" + ai_name + "):   Token Sampling Time: " + std::to_string(sample_duration.count()) + "ms");
+                schedule_log("KH AI (" + ai_name + "):   Token Sampling Time: " +
+                             std::to_string(sample_duration.count()) + "ms");
                 auto ttp_duration = std::chrono::duration_cast<std::chrono::milliseconds>(ttp_end - ttp_start);
-                schedule_log("KH - AI Framework: (" + ai_name + "):   Token To Piece Time: " + std::to_string(ttp_duration.count()) + "ms");
+                schedule_log("KH AI (" + ai_name + "):   Token To Piece Time: " +
+                             std::to_string(ttp_duration.count()) + "ms");
                 auto get_batch_duration = std::chrono::duration_cast<std::chrono::milliseconds>(get_batch_end - get_batch_start);
-                schedule_log("KH - AI Framework: (" + ai_name + "):   Token Batch Time: " + std::to_string(get_batch_duration.count()) + "ms");
+                schedule_log("KH AI (" + ai_name + "):   Token Batch Time: " +
+                             std::to_string(get_batch_duration.count()) + "ms");
                 auto decode_duration = std::chrono::duration_cast<std::chrono::milliseconds>(decode_end - decode_start);
-                schedule_log("KH - AI Framework: (" + ai_name + "):   Token Decode Time: " + std::to_string(decode_duration.count()) + "ms");
+                schedule_log("KH AI (" + ai_name + "):   Token Decode Time: " +
+                             std::to_string(decode_duration.count()) + "ms");
                 
                 if (time_since_last_log.count() >= 1000) {
                     float tokens_per_second = (tokens_since_last_log * 1000.0f) / time_since_last_log.count();
 
-                    schedule_log("KH - AI Framework: (" + ai_name + "):   Generation rate: " + 
+                    schedule_log("KH AI (" + ai_name + "):   Generation rate: " +
                                 std::to_string(static_cast<int>(tokens_per_second)) + " tokens/sec (" + 
                                 std::to_string(tokens_since_last_log) + " tokens in " + 
                                 std::to_string(time_since_last_log.count()) + "ms)");
@@ -781,16 +705,20 @@ private:
         auto gen_duration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start_gen);
 
         if (log_generation) {
-            schedule_log("KH - AI Framework: (" + ai_name + "):   Tokens Generated: " + std::to_string(n_generated));
-            schedule_log("KH - AI Framework: (" + ai_name + "):   Total Generation Time: " + std::to_string(gen_duration.count()) + "ms");
-            schedule_log("KH - AI Framework: (" + ai_name + "):   Response: " + processed_display_output);
-            schedule_log("KH - AI Framework: (" + ai_name + "): ========== INFERENCE END ==========");
+            schedule_log("KH AI (" + ai_name + "):   Tokens Generated: " + std::to_string(n_generated));
+            schedule_log("KH AI (" + ai_name + "):   Total Generation Time: " + std::to_string(gen_duration.count()) +
+                         "ms");
+            schedule_log("KH AI (" + ai_name + "):   Response: " + processed_display_output);
+            schedule_log("KH AI (" + ai_name + "): ========== INFERENCE END ==========");
         }
 
-        size_t end_pos = processed_display_output.find(marker_assistant_end);
+        // The reply up to the assistant end marker, when one is set (an empty marker is found at 0).
+        if (!marker_assistant_end.empty()) {
+            size_t end_pos = processed_display_output.find(marker_assistant_end);
 
-        if (end_pos != std::string::npos) {
-            processed_display_output = processed_display_output.substr(0, end_pos);
+            if (end_pos != std::string::npos) {
+                processed_display_output.erase(end_pos);
+            }
         }
 
         size_t start = processed_display_output.find_first_not_of(" \n\r\t");
@@ -818,65 +746,46 @@ private:
     void ai_thread_func(const std::string& model_path) {
         try {
             initialize_internal(model_path);
-        } catch (const std::exception& e) {
-            std::string name = ai_name;
-            std::string error_msg = e.what();
-
-            MainThreadScheduler::instance().schedule([name, error_msg]() {
-                report_error("KH - AI Framework: AI Controller (" + name + "): Failed to initialize: " + error_msg);
-            });
-
+        } catch (...) {   // Reported by initialize_internal.
             running = false;
             return;
         }
         
-        // Main processing loop - waits for inference triggers
-        while (!should_stop && !force_terminate) {
+        // Waits for inference triggers until stop().
+        while (!should_stop) {
             try {
-                if (force_terminate) {
-                    std::string name = ai_name;
-
-                    MainThreadScheduler::instance().schedule([name]() {
-                        sqf::diag_log("KH - AI Framework: AI thread (" + name + ") received force termination signal");
-                    });
-
-                    break;
-                }
-
                 {
                     std::unique_lock<std::mutex> lock(inference_mutex);
 
-                    inference_trigger.wait(lock, [this] { 
-                        return (inference_requested && initialized) || should_stop || force_terminate;
+                    inference_trigger.wait(lock, [this] {
+                        return (inference_requested && initialized) || should_stop;
                     });
-                    
-                    if (should_stop || force_terminate) {
+
+                    if (should_stop) {
                         break;
                     }
 
                     inference_requested = false;
                 }
-                
+
                 bool should_process = false;
 
                 {
                     std::lock_guard<std::mutex> lock(prompt_mutex);
                     should_process = !user_prompt.empty();
                 }
-                
+
                 if (!should_process) {
                     continue;
                 }
 
-                if (force_terminate) break;
                 abort_generation = false;
-                std::string raw_response = generate_response();
-                if (force_terminate) break;
+                std::string raw_response = generate_response();   // Partial after stopAi: still raised below.
 
                 {
                     std::string name = ai_name;
                     std::string response = raw_response;
-                    
+
                     MainThreadScheduler::instance().schedule([name, response]() {
                         auto_array<game_value> ai_response_data;
                         ai_response_data.push_back(game_value(name));
@@ -884,12 +793,14 @@ private:
                         raw_call_sqf_args_native_no_return(g_compiled_ai_response_event, game_value(std::move(ai_response_data)));
                     });
                 }
+            } catch (const StopRequested&) {
+                break;
             } catch (const std::exception& e) {
                 std::string name = ai_name;
                 std::string error_msg = e.what();
 
                 MainThreadScheduler::instance().schedule([name, error_msg]() {
-                    report_error("KH - AI Framework: AI Controller (" + name + "): Thread error: " + error_msg);
+                    report_error("KH AI (" + name + "): " + error_msg);
                 });
 
                 std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -899,13 +810,19 @@ private:
     
     void initialize_internal(const std::string& model_path) {        
         try {
-            LlamaBackend::init();           
+            LlamaBackend::init();
+            backend_initialized = true;
             llama_model_params model_params = llama_model_default_params();
             model_params.n_gpu_layers = g_gpu_available() ? GPU_LAYERS : 0;
             model_params.use_mmap = true;
             model_params.use_mlock = false;
             model_params.main_gpu = MAIN_GPU;
             model_params.split_mode = static_cast<llama_split_mode>(SPLIT_MODE);
+            // A false return abandons the load: stop() during a load then joins without waiting for it.
+            model_params.progress_callback = [](float, void* data) -> bool {
+                return !static_cast<AIController*>(data)->should_stop.load(std::memory_order_acquire);
+            };
+            model_params.progress_callback_user_data = this;
 
             if (!TENSOR_SPLIT.empty()) {
                 model_params.tensor_split = TENSOR_SPLIT.data();
@@ -918,34 +835,18 @@ private:
 
                 MainThreadScheduler::instance().schedule([gpu, backend]() {
                     if (gpu) {
-                        sqf::diag_log("KH - AI Framework: using GPU - " + backend);
+                        sqf::diag_log("KH AI: using GPU - " + backend);
                     } else {
-                        sqf::diag_log("KH - AI Framework: using CPU");
+                        sqf::diag_log("KH AI: using CPU");
                     }
                 });
             }
 
-            // Get or create shared model - will share if model_path AND all model_params match
+            // Shared with every controller whose model_path and model_params match.
             shared_model = SharedModelManager::get_or_create_model(model_path, model_params);
-
-            if (!shared_model || !shared_model->model) {
-                MainThreadScheduler::instance().schedule([]() {
-                    report_error("KH - AI Framework: Failed to load model");
-                });
-
-                throw std::runtime_error("Failed to load model");
-            }
-
             model = shared_model->model;
             vocab = llama_model_get_vocab(model);
-
-            if (!vocab) {
-                MainThreadScheduler::instance().schedule([]() {
-                    report_error("KH - AI Framework: Failed to get vocabulary");
-                });
-
-                throw std::runtime_error("Failed to get vocabulary");
-            }
+            if (!vocab) throw std::runtime_error("failed to get the vocabulary");
 
             llama_context_params ctx_params = llama_context_default_params();
             ctx_params.n_ctx = N_CTX;
@@ -953,20 +854,23 @@ private:
             ctx_params.n_ubatch = N_UBATCH;
             ctx_params.n_threads = CPU_THREADS;
             ctx_params.n_threads_batch = CPU_THREADS_BATCH;
-            ctx_params.flash_attn_type = g_gpu_available() ? (FLASH_ATTENTION ? LLAMA_FLASH_ATTN_TYPE_ENABLED : LLAMA_FLASH_ATTN_TYPE_DISABLED) : LLAMA_FLASH_ATTN_TYPE_DISABLED;
+            const bool flash_attention = g_gpu_available() && FLASH_ATTENTION;
+            ctx_params.flash_attn_type = flash_attention ? LLAMA_FLASH_ATTN_TYPE_ENABLED
+                                                         : LLAMA_FLASH_ATTN_TYPE_DISABLED;
             ctx_params.offload_kqv = g_gpu_available() ? OFFLOAD_KV_CACHE : false;
             ctx_params.type_k = GGML_TYPE_Q8_0;
-            ctx_params.type_v = GGML_TYPE_Q8_0;
+            // llama.cpp refuses a quantized V cache without flash attention ("V cache quantization requires
+            // flash_attn"), so the CPU path and a GPU with it disabled keep V at F16.
+            ctx_params.type_v = flash_attention ? GGML_TYPE_Q8_0 : GGML_TYPE_F16;
+            // Ends a running llama_decode once stop() was called (honoured by the CPU backend; a GPU batch ends on
+            // its own), so stop() can always join the thread.
+            ctx_params.abort_callback = [](void* data) -> bool {
+                return static_cast<AIController*>(data)->should_stop.load(std::memory_order_acquire);
+            };
+            ctx_params.abort_callback_data = this;
 
-            ctx = llama_new_context_with_model(model, ctx_params);
-
-            if (!ctx) {
-                MainThreadScheduler::instance().schedule([]() {
-                    report_error("KH - AI Framework: Failed to create context");
-                });
-
-                throw std::runtime_error("Failed to create context");
-            }
+            ctx = llama_init_from_model(model, ctx_params);
+            if (!ctx) throw std::runtime_error("failed to create the context");
 
             auto sampler_params = llama_sampler_chain_default_params();
             sampler_params.no_perf = false;
@@ -982,7 +886,7 @@ private:
             // Mirostat OR traditional sampling (mutually exclusive)
             if (MIROSTAT == 1) {
                 llama_sampler_chain_add(sampler, llama_sampler_init_mirostat(
-                    llama_n_vocab(llama_model_get_vocab(model)),
+                    llama_vocab_n_tokens(vocab),
                     SEED,
                     MIROSTAT_TAU,
                     MIROSTAT_ETA,
@@ -1012,11 +916,14 @@ private:
                 llama_sampler_chain_add(sampler, llama_sampler_init_dist(SEED));
             }
 
+            // A stop that arrived after the model load (during the context or sampler setup) ends the thread as
+            // silently as one during the load: no KH_eve_aiInitialized for a controller that is being destroyed.
+            if (should_stop) throw std::runtime_error("stopped during initialization");
             initialized = true;
 
             {
                 std::string name = ai_name;
-                
+
                 MainThreadScheduler::instance().schedule([name]() {
                     auto_array<game_value> ai_initialized_data;
                     ai_initialized_data.push_back(game_value(name));
@@ -1025,27 +932,28 @@ private:
             }
         } catch (const std::exception& e) {
             cleanup_resources();
+            if (should_stop) throw;   // The load was abandoned by stop(): not a fault.
             std::string name = ai_name;
             std::string error_msg = e.what();
 
             MainThreadScheduler::instance().schedule([name, error_msg]() {
-                report_error("KH - AI Framework: AI Controller (" + name + "): Initialization failed: " + error_msg);
-                
-                if (error_msg.find("CUDA") != std::string::npos || 
+                report_error("KH AI (" + name + "): initialization failed: " + error_msg);
+
+                if (error_msg.find("CUDA") != std::string::npos ||
                     error_msg.find("cublas") != std::string::npos ||
                     error_msg.find("GPU") != std::string::npos) {
-                    report_error("KH - AI Framework: This may be a CUDA-related error. Ensure CUDA Toolkit 12.x is installed.");
+                    sqf::diag_log("KH AI: this may be a CUDA-related error; ensure CUDA Toolkit 12.x is installed");
                 }
             });
-            
+
             throw;
         } catch (...) {
             cleanup_resources();
             std::string name = ai_name;
 
             MainThreadScheduler::instance().schedule([name]() {
-                report_error("KH - AI Framework: AI Controller (" + name + "): FAILED: Unknown error");
-                report_error("KH - AI Framework: CUDA libraries not found or failed to load.");
+                report_error("KH AI (" + name + "): initialization failed: unknown error (CUDA libraries not found or "
+                             "failed to load?)");
             });
 
             throw;
@@ -1065,20 +973,21 @@ public:
                 ai_thread.join();
             }
         } catch (const std::exception& e) {
-            // Log but don't throw from destructor - schedule for next frame
+            std::string name = ai_name;
             std::string error_msg = e.what();
 
-            MainThreadScheduler::instance().schedule([error_msg]() {
-                report_error("KH - AI Framework: Exception in ~AIController: " + error_msg);
+            MainThreadScheduler::instance().schedule([name, error_msg]() {
+                report_error("KH AI (" + name + "): exception while stopping: " + error_msg);
             });
         } catch (...) {
-            MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: Unknown exception in ~AIController");
+            std::string name = ai_name;
+
+            MainThreadScheduler::instance().schedule([name]() {
+                report_error("KH AI (" + name + "): unknown exception while stopping");
             });
         }
     }
-    
-    // Delete copy/move constructors
+
     AIController(const AIController&) = delete;
     AIController& operator=(const AIController&) = delete;
     AIController(AIController&&) = delete;
@@ -1089,26 +998,24 @@ public:
             std::string name = ai_name;
 
             MainThreadScheduler::instance().schedule([name]() {
-                report_error("KH - AI Framework: AI Controller (" + name + "): Already running");
+                report_error("KH AI (" + name + "): already running");
             });
 
             return false;
         }
-        
-        // Use instance-specific model path if set, otherwise use provided path
+
         if (model_path.empty()) {
             std::string name = ai_name;
 
             MainThreadScheduler::instance().schedule([name]() {
-                report_error("KH - AI Framework: AI Controller (" + name + "): No model path specified");
+                report_error("KH AI (" + name + "): no model path specified");
             });
 
             return false;
         }
-        
+
         should_stop = false;
         running = true;
-        force_terminate = false;
         abort_generation = false;
         is_generating = false;
         inference_requested = false;
@@ -1122,71 +1029,44 @@ public:
         return true;
     }
 
-    void stop() {
+    // Tells the thread to end without waiting for it (stop() joins). stop_all() signals every controller first, so
+    // that no join waits for ANOTHER controller's model load: get_or_create_model holds models_mutex for the whole
+    // load, which a stopping controller's release_model (and a queued load) waits for.
+    void request_stop() {
         if (!running) {
             return;
         }
-        
+
         should_stop = true;
         abort_generation = true;
-        running = false;
-        
+
         {
             std::lock_guard<std::mutex> lock(inference_mutex);
             inference_requested = true;
         }
 
         inference_trigger.notify_all();
-        auto start = std::chrono::steady_clock::now();
-        
-        while (is_generating && 
-            std::chrono::steady_clock::now() - start < std::chrono::seconds(1)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    // Ends the thread and joins it: a model load stops at its next progress step, a generation at its next token, a
+    // prompt decode at its next batch (the CPU backend ends the batch itself through the abort callback), so the
+    // join waits for one step, batch or load phase at most - or for the 1 s pause after a reported thread error -
+    // once every controller sharing models_mutex has been signalled (request_stop; llama_init_from_model has no
+    // abort point and is waited out).
+    void stop() {
+        if (!running) {
+            return;
         }
-        
-        // If still generating, force terminate
-        if (is_generating) {
-            force_terminate = true;
-            inference_trigger.notify_all();
-            
-            // Give it another second for safety
-            start = std::chrono::steady_clock::now();
-            
-            while (is_generating && 
-                std::chrono::steady_clock::now() - start < std::chrono::seconds(1)) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            }
-        }
-        
-        // Final join - this will block until thread actually exits
+
+        request_stop();
+        running = false;
+
         if (ai_thread.joinable()) {
-            if (is_generating) {
-                ai_thread.detach();
-                std::string name = ai_name;
-
-                MainThreadScheduler::instance().schedule([name]() {
-                    report_error("KH - AI Framework: AI Controller (" + name + "): thread unresponsive, detached; resources intentionally leaked");
-                });
-
-                sampler = nullptr;
-                ctx = nullptr;
-                shared_model.reset();
-                model = nullptr;
-                vocab = nullptr;
-                initialized = false;
-                should_stop = false;
-                force_terminate = false;
-                abort_generation = false;
-                running = false;
-                return;
-            }
-
             ai_thread.join();
         }
-                    
+
         cleanup_resources();
         should_stop = false;
-        force_terminate = false;
         abort_generation = false;
         is_generating = false;
         running = false;
@@ -1280,7 +1160,7 @@ public:
                 int split_mode) {
         if (running) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: Cannot change parameters while AI is running. Stop the AI first.");
+                report_error("setAiParameters: the AI is running; stop it first");
             });
 
             return false;
@@ -1289,7 +1169,7 @@ public:
         // Validate params
         if (n_ctx < 512) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: N_CTX must be at least 512");
+                report_error("setAiParameters: N_CTX must be at least 512");
             });
 
             return false;
@@ -1297,7 +1177,7 @@ public:
         
         if (max_new_tokens < 1) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: MAX_NEW_TOKENS must be at least 1");
+                report_error("setAiParameters: MAX_NEW_TOKENS must be at least 1");
             });
 
             return false;
@@ -1305,7 +1185,7 @@ public:
         
         if (temperature < 0.0f || temperature > 2.0f) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: TEMPERATURE must be between 0.0 and 2.0");
+                report_error("setAiParameters: TEMPERATURE must be between 0.0 and 2.0");
             });
 
             return false;
@@ -1313,7 +1193,7 @@ public:
         
         if (top_k < 1 || top_k > 1000) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: TOP_K must be between 1 and 1000");
+                report_error("setAiParameters: TOP_K must be between 1 and 1000");
             });
 
             return false;
@@ -1321,7 +1201,7 @@ public:
         
         if (top_p < 0.0f || top_p > 1.0f) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: TOP_P must be between 0.0 and 1.0");
+                report_error("setAiParameters: TOP_P must be between 0.0 and 1.0");
             });
 
             return false;
@@ -1329,7 +1209,7 @@ public:
 
         if (min_p < 0.0f || min_p > 1.0f) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: MIN_P must be between 0.0 and 1.0");
+                report_error("setAiParameters: MIN_P must be between 0.0 and 1.0");
             });
 
             return false;
@@ -1337,7 +1217,7 @@ public:
 
         if (typical_p < 0.0f || typical_p > 1.0f) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: TYPICAL_P must be between 0.0 and 1.0");
+                report_error("setAiParameters: TYPICAL_P must be between 0.0 and 1.0");
             });
 
             return false;
@@ -1345,7 +1225,7 @@ public:
 
         if (repeat_penalty < 0.5f || repeat_penalty > 3.0f) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: REPEAT_PENALTY must be between 0.5 and 3.0");
+                report_error("setAiParameters: REPEAT_PENALTY must be between 0.5 and 3.0");
             });
 
             return false;
@@ -1353,7 +1233,8 @@ public:
 
         if (repeat_last_n < -1 || repeat_last_n > n_ctx) {
             MainThreadScheduler::instance().schedule([n_ctx]() {
-                report_error("KH - AI Framework: REPEAT_LAST_N must be between -1 and N_CTX (" + std::to_string(n_ctx) + ")");
+                report_error("setAiParameters: REPEAT_LAST_N must be between -1 and N_CTX (" + std::to_string(n_ctx) +
+                             ")");
             });
 
             return false;
@@ -1361,7 +1242,7 @@ public:
 
         if (presence_penalty < -2.0f || presence_penalty > 2.0f) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: PRESENCE_PENALTY must be between -2.0 and 2.0");
+                report_error("setAiParameters: PRESENCE_PENALTY must be between -2.0 and 2.0");
             });
 
             return false;
@@ -1369,7 +1250,7 @@ public:
 
         if (frequency_penalty < -2.0f || frequency_penalty > 2.0f) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: FREQUENCY_PENALTY must be between -2.0 and 2.0");
+                report_error("setAiParameters: FREQUENCY_PENALTY must be between -2.0 and 2.0");
             });
 
             return false;
@@ -1377,7 +1258,7 @@ public:
 
         if (mirostat < 0 || mirostat > 2) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: MIROSTAT must be 0 (disabled), 1 (v1), or 2 (v2)");
+                report_error("setAiParameters: MIROSTAT must be 0 (disabled), 1 (v1), or 2 (v2)");
             });
 
             return false;
@@ -1385,7 +1266,7 @@ public:
 
         if (mirostat_tau < 0.5f || mirostat_tau > 10.0f) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: MIROSTAT_TAU must be between 0.5 and 10.0");
+                report_error("setAiParameters: MIROSTAT_TAU must be between 0.5 and 10.0");
             });
             
             return false;
@@ -1393,7 +1274,7 @@ public:
 
         if (mirostat_eta < 0.01f || mirostat_eta > 1.0f) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: MIROSTAT_ETA must be between 0.01 and 1.0");
+                report_error("setAiParameters: MIROSTAT_ETA must be between 0.01 and 1.0");
             });
 
             return false;
@@ -1401,7 +1282,7 @@ public:
         
         if (n_batch < 1) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: N_BATCH must be at least 1");
+                report_error("setAiParameters: N_BATCH must be at least 1");
             });
 
             return false;
@@ -1409,7 +1290,7 @@ public:
         
         if (n_ubatch < 1) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: N_UBATCH must be at least 1");
+                report_error("setAiParameters: N_UBATCH must be at least 1");
             });
 
             return false;
@@ -1417,7 +1298,7 @@ public:
         
         if (cpu_threads < 1) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: CPU_THREADS must be greater than 0");
+                report_error("setAiParameters: CPU_THREADS must be greater than 0");
             });
 
             return false;
@@ -1425,7 +1306,7 @@ public:
 
         if (cpu_threads_batch < 1) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: CPU_THREADS_BATCH must be greater than 0");
+                report_error("setAiParameters: CPU_THREADS_BATCH must be greater than 0");
             });
 
             return false;
@@ -1433,7 +1314,7 @@ public:
 
         if (split_mode < 0 || split_mode > 2) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: SPLIT_MODE must be 0 (NONE), 1 (LAYER), or 2 (ROW)");
+                report_error("setAiParameters: SPLIT_MODE must be 0 (NONE), 1 (LAYER), or 2 (ROW)");
             });
 
             return false;
@@ -1443,7 +1324,8 @@ public:
             int required = SAFETY_MARGIN + max_new_tokens + 2048;
             
             MainThreadScheduler::instance().schedule([required]() {
-                report_error("KH - AI Framework: N_CTX too small for MAX_NEW_TOKENS. Need at least " + std::to_string(required));
+                report_error("setAiParameters: N_CTX too small for MAX_NEW_TOKENS; needs at least " +
+                             std::to_string(required));
             });
 
             return false;
@@ -1474,6 +1356,8 @@ public:
         OFFLOAD_KV_CACHE = offload_kv_cache;
         MAIN_GPU = main_gpu;
         TENSOR_SPLIT = tensor_split;
+        // llama.cpp reads llama_max_devices() entries from tensor_split; the rest are 0 (no share).
+        if (!TENSOR_SPLIT.empty()) TENSOR_SPLIT.resize(llama_max_devices(), 0.0f);
         SPLIT_MODE = split_mode;
         system_prompt_cached = false;
         system_prompt_tokens.clear();
@@ -1489,7 +1373,7 @@ public:
             std::string name = ai_name;
 
             MainThreadScheduler::instance().schedule([name]() {
-                report_error("KH - AI Framework: AI (" + name + ") is not running");
+                report_error("triggerAiInference: AI (" + name + ") is not running");
             });
             
             return false;
@@ -1542,7 +1426,10 @@ public:
 
         {
             std::lock_guard<std::mutex> prompt_lock(prompt_mutex);
-            master_prompt.clear();
+            master_prompt.clear();   // Its cached tokens went with the context above.
+            master_prompt_cached = false;
+            master_prompt_tokens.clear();
+            master_prompt_token_count = 0;
             user_prompt.clear();
         }
         
@@ -1554,7 +1441,7 @@ public:
                      const std::string& asst_start, const std::string& asst_end) {
         if (running) {
             MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: Cannot change markers while AI is running. Stop the AI first.");
+                report_error("setAiMarkers: the AI is running; stop it first");
             });
 
             return false;
@@ -1642,120 +1529,61 @@ private:
     AIFramework() = default;
     
 public:
-    // Get singleton instance
+    // Never destroyed: at process exit the AI threads are already gone when static destructors would run, and
+    // stopping the controllers then would lock mutexes a killed thread may hold. DllMain's unload path stops them.
     static AIFramework& instance() {
-        static AIFramework instance;
-        return instance;
+        static AIFramework* inst = new AIFramework();
+        return *inst;
     }
-    
-    // Delete copy/move constructors
+
     AIFramework(const AIFramework&) = delete;
     AIFramework& operator=(const AIFramework&) = delete;
     AIFramework(AIFramework&&) = delete;
     AIFramework& operator=(AIFramework&&) = delete;
 
-    static std::filesystem::path get_ai_models_path() {
-        char docs_path[MAX_PATH];
-        
-        if (SHGetFolderPathA(NULL, CSIDL_MYDOCUMENTS, NULL, SHGFP_TYPE_CURRENT, docs_path) != S_OK) {
-            MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: Failed to get Documents folder path");
-            });
-
-            throw std::runtime_error("Failed to get Documents folder path");
-        }
-        
-        std::filesystem::path ai_models_path = std::filesystem::path(docs_path) / "Arma 3" / "kh_framework" / "ai_models";
-
-        try {
-            std::filesystem::create_directories(ai_models_path);
-        } catch (const std::exception& e) {
-            std::string error_msg = e.what();
-
-            MainThreadScheduler::instance().schedule([error_msg]() {
-                report_error("KH - AI Framework: Failed to create AI models directory: " + error_msg);
-            });
-
-            throw std::runtime_error("Failed to create AI models directory: " + std::string(e.what()));
-        }
-        
-        return ai_models_path;
-    }
-
-    static std::vector<std::filesystem::path> get_all_ai_model_paths() {
-        std::vector<std::filesystem::path> paths;
-        
-        // Priority 1: Documents folder
-        try {
-            paths.push_back(get_ai_models_path());
-        } catch (...) {
-            // Documents folder unavailable, continue with mod folders
-        }
-        
-        // Priority 2: Active mod folders
-        try {
-            auto mod_ai_dirs = AIModelDiscovery::find_all_ai_model_directories();
-            paths.insert(paths.end(), mod_ai_dirs.begin(), mod_ai_dirs.end());
-        } catch (...) {
-            // Mod discovery failed, use only documents folder
-        }
-        
-        return paths;
-    }
-
+    // Empty when nothing was found (the caller reports it); a search error throws to the caller's catch.
     static std::string find_any_gguf_model() {
-        try {
-            std::string model_path = AIModelDiscovery::find_any_gguf_model();
-            
-            if (!model_path.empty()) {
-                MainThreadScheduler::instance().schedule([model_path]() {
-                    sqf::diag_log("KH - AI Framework: Model loaded successfully - " + model_path);
-                });
+        std::string model_path = AIModelDiscovery::find_any_gguf_model();
 
-                return model_path;
-            }
-
-            MainThreadScheduler::instance().schedule([]() {
-                report_error("KH - AI Framework: No .gguf model files found in any search location");
+        if (!model_path.empty()) {
+            MainThreadScheduler::instance().schedule([model_path]() {
+                sqf::diag_log("KH AI: model found - " + model_path);
             });
-
-            return "";
-        } catch (const std::exception& e) {
-            std::string error_msg = e.what();
-
-            MainThreadScheduler::instance().schedule([error_msg]() {
-                report_error("KH - AI Framework: Error searching for model files: " + error_msg);
-            });
-
-            return "";
         }
+
+        return model_path;
     }
 
-    void set_model_path(const std::string& filename) {
+    // False (reported) when the file is not found in any search location.
+    bool set_model_path(const std::string& filename) {
         try {
             // Search across all available locations
             std::string found_path = AIModelDiscovery::find_model_file(filename);
             
             if (found_path.empty()) {
                 MainThreadScheduler::instance().schedule([filename]() {
-                    report_error("KH - AI Framework: AI model file not found: " + filename);
+                    report_error("setAiModel: model file not found: " + filename);
                 });
 
-                return;
+                return false;
             }
             
             std::lock_guard<std::mutex> lock(model_path_mutex);
             model_path = found_path;
 
             MainThreadScheduler::instance().schedule([found_path]() {
-                sqf::diag_log("KH - AI Framework: Model path set to: " + found_path);
+                sqf::diag_log("KH AI: model path set to " + found_path);
             });
+
+            return true;
         } catch (const std::exception& e) {
             std::string error_msg = e.what();
 
             MainThreadScheduler::instance().schedule([error_msg]() {
-                report_error("KH - AI Framework: Error setting global model path - " + error_msg);
+                report_error("setAiModel: " + error_msg);
             });
+
+            return false;
         }
     }
 
@@ -1771,7 +1599,7 @@ public:
             
             if (found_path.empty()) {
                 MainThreadScheduler::instance().schedule([filename]() {
-                    report_error("KH - AI Framework: Model file not found: " + filename);
+                    report_error("setAiModel: model file not found: " + filename);
                 });
 
                 return false;
@@ -1783,7 +1611,7 @@ public:
             }
             
             MainThreadScheduler::instance().schedule([ai_name, found_path]() {
-                sqf::diag_log("KH - AI Framework: AI (" + ai_name + ") model path set to: " + found_path);
+                sqf::diag_log("KH AI (" + ai_name + "): model path set to " + found_path);
             });
 
             return true;
@@ -1791,7 +1619,7 @@ public:
             std::string error_msg = e.what();
 
             MainThreadScheduler::instance().schedule([error_msg]() {
-                report_error("KH - AI Framework: Error setting AI model path - " + error_msg);
+                report_error("setAiModel: " + error_msg);
             });
 
             return false;
@@ -1922,7 +1750,7 @@ bool set_ai_parameters(const std::string& ai_name, int n_ctx, int max_new_tokens
         
         if (it == ai_instances.end()) {
             MainThreadScheduler::instance().schedule([ai_name]() {
-                report_error("KH - AI Framework: AI (" + ai_name + ") not found");
+                report_error("triggerAiInference: AI (" + ai_name + ") not found");
             });
 
             return false;
@@ -1980,7 +1808,7 @@ bool set_ai_parameters(const std::string& ai_name, int n_ctx, int max_new_tokens
                 
                 if (current_model_path.empty()) {
                     MainThreadScheduler::instance().schedule([]() {
-                        report_error("KH - AI Framework: No model path set and no .gguf files found in AI models directory");
+                        report_error("initializeAi: no model path set and no .gguf file found in any search location");
                     });
 
                     return false;
@@ -1991,14 +1819,6 @@ bool set_ai_parameters(const std::string& ai_name, int n_ctx, int max_new_tokens
                     std::lock_guard<std::mutex> lock(model_path_mutex);
                     model_path = current_model_path;
                 }
-            }
-            
-            if (current_model_path.empty()) {
-                MainThreadScheduler::instance().schedule([]() {
-                    report_error("KH - AI Framework: No model path set");
-                });
-
-                return false;
             }
             
             // Create AI instance
@@ -2076,7 +1896,7 @@ bool set_ai_parameters(const std::string& ai_name, int n_ctx, int max_new_tokens
                 }
                 
                 MainThreadScheduler::instance().schedule([ai_name]() {
-                    report_error("KH - AI Framework: Failed to initialize AI (" + ai_name + ")");
+                    report_error("initializeAi: failed to start AI (" + ai_name + ")");
                 });
 
                 return false;
@@ -2087,7 +1907,7 @@ bool set_ai_parameters(const std::string& ai_name, int n_ctx, int max_new_tokens
             std::string error_msg = e.what();
 
             MainThreadScheduler::instance().schedule([ai_name, error_msg]() {
-                report_error("KH - AI Framework: Exception initializing AI (" + ai_name + "): " + error_msg);
+                report_error("initializeAi: AI (" + ai_name + "): " + error_msg);
             });
 
             return false;
@@ -2104,7 +1924,7 @@ bool set_ai_parameters(const std::string& ai_name, int n_ctx, int max_new_tokens
             
             if (it == ai_instances.end()) {
                 MainThreadScheduler::instance().schedule([ai_name]() {
-                    report_error("KH - AI Framework: AI (" + ai_name + ") was not found");
+                    report_error("stopAi: AI (" + ai_name + ") not found");
                 });
 
                 return false;
@@ -2136,7 +1956,12 @@ bool set_ai_parameters(const std::string& ai_name, int n_ctx, int max_new_tokens
             ai_instances.clear();
             initialized = false;
         }
-        
+
+        // Every controller signalled before the first join (see request_stop).
+        for (auto& ai : ais_to_stop) {
+            if (ai) ai->request_stop();
+        }
+
         for (auto& ai : ais_to_stop) {
             if (ai) {
                 try {
@@ -2203,7 +2028,7 @@ bool set_ai_parameters(const std::string& ai_name, int n_ctx, int max_new_tokens
 
         if (it == ai_instances.end()) {
             MainThreadScheduler::instance().schedule([ai_name]() {
-                report_error("KH - AI Framework: AI (" + ai_name + ") was not found");
+                report_error("abortAiGeneration: AI (" + ai_name + ") not found");
             });
 
             return false;
@@ -2276,7 +2101,7 @@ bool set_ai_parameters(const std::string& ai_name, int n_ctx, int max_new_tokens
 
         if (it == ai_instances.end()) {
             MainThreadScheduler::instance().schedule([ai_name]() {
-                report_error("KH - AI Framework: AI (" + ai_name + ") was not found");
+                report_error("resetAiContext: AI (" + ai_name + ") not found");
             });
 
             return false;

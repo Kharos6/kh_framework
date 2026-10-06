@@ -406,6 +406,9 @@ float4 PSComposite(VSOutC i, bool khFront : SV_IsFrontFace) : SV_Target
     khUserUvGPs = float4(khtxDx, khtxDy);
     khUserPxPs = i.pos.xy;
     float3 lc = KhUserShade(khtxS, i.wpos, khtxN, smf);
+    // KH_USER_FINITE: a user material's result held to [0, 65504] (the 16F scene's range; a NaN reads 0), so a
+    // broken shader stays on its own pixels. TWIN: PSMain / PSComposite.
+    lc = min(max(lc, 0.0f), 65504.0f);
 #else
     float3 lc = KhApplyPBR(khtxS, i.wpos, khtxN, smf);
 #endif

@@ -104,7 +104,7 @@ constexpr size_t TS_STATUS_MEMORY_SIZE = sizeof(TSPluginStatus);
 class TeamspeakFramework {
 private:
     TeamspeakFramework() = default;
-    ~TeamspeakFramework() { cleanup(); }
+    ~TeamspeakFramework() = default;
     TeamspeakFramework(const TeamspeakFramework&) = delete;
     TeamspeakFramework& operator=(const TeamspeakFramework&) = delete;
     HANDLE shared_memory_handle = nullptr;
@@ -140,7 +140,7 @@ private:
         mutex_handle = CreateMutexA(nullptr, FALSE, TS_MUTEX_NAME);
         
         if (mutex_handle == nullptr) {
-            report_error("KH - TeamSpeak: Failed to create mutex");
+            report_error("KH TeamSpeak: failed to create the mutex");
             return false;
         }
         
@@ -155,7 +155,7 @@ private:
         );
         
         if (shared_memory_handle == nullptr) {
-            report_error("KH - TeamSpeak: Failed to create shared memory for effects");
+            report_error("KH TeamSpeak: failed to create the shared memory for effects");
             CloseHandle(mutex_handle);
             mutex_handle = nullptr;
             return false;
@@ -166,7 +166,7 @@ private:
         );
         
         if (effect_config == nullptr) {
-            report_error("KH - TeamSpeak: Failed to map shared memory for effects");
+            report_error("KH TeamSpeak: failed to map the shared memory for effects");
             CloseHandle(shared_memory_handle);
             shared_memory_handle = nullptr;
             CloseHandle(mutex_handle);
@@ -185,7 +185,7 @@ private:
         );
         
         if (status_memory_handle == nullptr) {
-            report_error("KH - TeamSpeak: Failed to create shared memory for status");
+            report_error("KH TeamSpeak: failed to create the shared memory for status");
             UnmapViewOfFile(effect_config);
             effect_config = nullptr;
             CloseHandle(shared_memory_handle);
@@ -200,7 +200,7 @@ private:
         );
         
         if (plugin_status == nullptr) {
-            report_error("KH - TeamSpeak: Failed to map shared memory for status");
+            report_error("KH TeamSpeak: failed to map the shared memory for status");
             CloseHandle(status_memory_handle);
             status_memory_handle = nullptr;
             UnmapViewOfFile(effect_config);
@@ -221,7 +221,7 @@ private:
         DWORD wait_result = WaitForSingleObject(mutex_handle, 1000);
         
         if (wait_result != WAIT_OBJECT_0 && wait_result != WAIT_ABANDONED) {
-            sqf::diag_log("KH - TeamSpeak: Mutex wait timeout in reset_effects_internal");
+            sqf::diag_log("KH TeamSpeak: mutex wait timed out while resetting the effects");
             return;
         }
 
@@ -263,13 +263,16 @@ private:
                         lost_reported = true;             // report once, not every second
 
                         MainThreadScheduler::instance().schedule([]() {
-                            sqf::diag_log("KH - TeamSpeak: Plugin connection lost");
+                            sqf::diag_log("KH TeamSpeak: plugin connection lost");
                         });
                     }
                 }
             }
             
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            // One tick a second, in steps, so cleanup()'s join at a mission's end waits about 50 ms, not up to 1 s.
+            for (int i = 0; i < 20 && heartbeat_running.load(std::memory_order_acquire); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
         }
     }
     
@@ -332,50 +335,29 @@ private:
             }
         }
         
-        // Check registry for custom installation path
-        HKEY hKey;
-        
-        if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\TeamSpeak 3 Client", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        // The registry's install location: the user's, the machine's, and a 32-bit client's on 64-bit Windows.
+        const std::pair<HKEY, const char*> registry_keys[] = {
+            { HKEY_CURRENT_USER, "Software\\TeamSpeak 3 Client" },
+            { HKEY_LOCAL_MACHINE, "Software\\TeamSpeak 3 Client" },
+            { HKEY_LOCAL_MACHINE, "Software\\WOW6432Node\\TeamSpeak 3 Client" },
+        };
+
+        for (const auto& [hive, subkey] : registry_keys) {
+            HKEY hKey;
+            if (RegOpenKeyExA(hive, subkey, 0, KEY_READ, &hKey) != ERROR_SUCCESS) continue;
             char install_path[MAX_PATH];
             DWORD path_size = MAX_PATH;
             DWORD type;
             
-            if (RegQueryValueExA(hKey, "InstallLocation", nullptr, &type, reinterpret_cast<LPBYTE>(install_path), &path_size) == ERROR_SUCCESS) {
-                std::string plugins_path = std::string(install_path) + "\\plugins";
-                
-                if (std::filesystem::exists(plugins_path) && std::filesystem::is_directory(plugins_path)) {
-                    valid_paths.push_back(plugins_path);
-                }
-            }
-            
-            RegCloseKey(hKey);
-        }
-        
-        // Also check HKEY_LOCAL_MACHINE
-        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "Software\\TeamSpeak 3 Client", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-            char install_path[MAX_PATH];
-            DWORD path_size = MAX_PATH;
-            DWORD type;
-            
-            if (RegQueryValueExA(hKey, "InstallLocation", nullptr, &type, reinterpret_cast<LPBYTE>(install_path), &path_size) == ERROR_SUCCESS) {
-                std::string plugins_path = std::string(install_path) + "\\plugins";
-                
-                if (std::filesystem::exists(plugins_path) && std::filesystem::is_directory(plugins_path)) {
-                    valid_paths.push_back(plugins_path);
-                }
-            }
-            
-            RegCloseKey(hKey);
-        }
-        
-        // Check WOW6432Node for 32-bit TS3 on 64-bit Windows
-        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "Software\\WOW6432Node\\TeamSpeak 3 Client", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-            char install_path[MAX_PATH];
-            DWORD path_size = MAX_PATH;
-            DWORD type;
-            
-            if (RegQueryValueExA(hKey, "InstallLocation", nullptr, &type, reinterpret_cast<LPBYTE>(install_path), &path_size) == ERROR_SUCCESS) {
-                std::string plugins_path = std::string(install_path) + "\\plugins";
+            const bool have_value = RegQueryValueExA(hKey, "InstallLocation", nullptr, &type,
+                                                     reinterpret_cast<LPBYTE>(install_path),
+                                                     &path_size) == ERROR_SUCCESS;
+
+            if (have_value && (type == REG_SZ || type == REG_EXPAND_SZ) && path_size > 0) {
+                install_path[std::min<DWORD>(path_size, MAX_PATH - 1)] = '\0';   // The value need not end in a NUL.
+                std::string install_dir = install_path;
+                if (type == REG_EXPAND_SZ) install_dir = expand_env_path(install_dir);
+                std::string plugins_path = install_dir + "\\plugins";
                 
                 if (std::filesystem::exists(plugins_path) && std::filesystem::is_directory(plugins_path)) {
                     valid_paths.push_back(plugins_path);
@@ -389,9 +371,11 @@ private:
     }
 
 public:
+    // Never destroyed: at process exit the worker threads are already gone when static destructors would run
+    // (a mutex one of them held would hang the exit); DllMain's unload path stops the framework instead.
     static TeamspeakFramework& instance() {
-        static TeamspeakFramework inst;
-        return inst;
+        static TeamspeakFramework* inst = new TeamspeakFramework();
+        return *inst;
     }
     
     bool initialize() {
@@ -463,52 +447,32 @@ public:
         return is_initialized_flag.load(std::memory_order_acquire);
     }
     
-    bool is_plugin_active() const {
-        if (!is_initialized_flag.load(std::memory_order_acquire)) {
-            return false;
-        }
-
+    // The plugin's status under the IPC mutex: active = it says so and its heartbeat is less than 5 s old;
+    // connected = active and in a server. False for both when the IPC is not up or the mutex is not had in 50 ms.
+    void read_plugin_status(bool& active, bool& connected) const {
+        active = false;
+        connected = false;
+        if (!is_initialized_flag.load(std::memory_order_acquire)) return;
         std::lock_guard<std::mutex> lock(ipc_mutex);
-        
-        if (plugin_status == nullptr || mutex_handle == nullptr) {
-            return false;
-        }
-        
+        if (plugin_status == nullptr || mutex_handle == nullptr) return;
         DWORD wait_result = WaitForSingleObject(mutex_handle, 50);
-        
-        if (wait_result != WAIT_OBJECT_0 && wait_result != WAIT_ABANDONED) {
-            return false;
-        }
-        
+        if (wait_result != WAIT_OBJECT_0 && wait_result != WAIT_ABANDONED) return;
         uint32_t current_tick = static_cast<uint32_t>(GetTickCount());
         uint32_t last_heartbeat = plugin_status->last_heartbeat;
-        bool active = plugin_status->plugin_active && (current_tick - last_heartbeat) < 5000;
+        active = plugin_status->plugin_active && (current_tick - last_heartbeat) < 5000;
+        connected = active && (plugin_status->connected != 0);
         ReleaseMutex(mutex_handle);
+    }
+
+    bool is_plugin_active() const {
+        bool active, connected;
+        read_plugin_status(active, connected);
         return active;
     }
         
     bool is_connected() const {
-        if (!is_initialized_flag.load(std::memory_order_acquire)) {
-            return false;
-        }
-        
-        std::lock_guard<std::mutex> lock(ipc_mutex);
-        
-        if (plugin_status == nullptr || mutex_handle == nullptr) {
-            return false;
-        }
-        
-        DWORD wait_result = WaitForSingleObject(mutex_handle, 50);
-
-        if (wait_result != WAIT_OBJECT_0 && wait_result != WAIT_ABANDONED) {
-            return false;
-        }
-        
-        uint32_t current_tick = static_cast<uint32_t>(GetTickCount());
-        uint32_t last_heartbeat = plugin_status->last_heartbeat;
-        bool active = plugin_status->plugin_active && (current_tick - last_heartbeat) < 5000;
-        bool connected = active && (plugin_status->connected != 0);
-        ReleaseMutex(mutex_handle);
+        bool active, connected;
+        read_plugin_status(active, connected);
         return connected;
     }
 
@@ -626,6 +590,22 @@ public:
         write_effects_to_shared_memory(effects_copy);
     }
     
+    // Process exit (DllMain, lpReserved != NULL): the plugin has no liveness check and would keep applying the last
+    // effect chain to the user's voice after the game closed. Every other thread is dead by then, so this touches
+    // nothing a dead thread may hold: ipc_mutex only by try_lock, the named mutex with a short bounded wait
+    // (WAIT_ABANDONED accepted), the mapped view (never unmapped - the instance is never destroyed), no SQF.
+    void clear_effects_at_exit() {
+        std::unique_lock<std::mutex> ipc_lock(ipc_mutex, std::try_to_lock);
+        if (!ipc_lock.owns_lock() || effect_config == nullptr || mutex_handle == nullptr) return;
+        const DWORD wait_result = WaitForSingleObject(mutex_handle, 100);
+        if (wait_result != WAIT_OBJECT_0 && wait_result != WAIT_ABANDONED) return;
+        memset(effect_config, 0, sizeof(TSVoiceEffectConfig));
+        effect_config->version = TS_IPC_VERSION;
+        effect_config->sequence_number = sequence_counter.fetch_add(1, std::memory_order_relaxed) + 1;
+        effect_config->checksum = calculate_checksum(effect_config);
+        ReleaseMutex(mutex_handle);
+    }
+
     bool clear_voice_effects() {
         // Always clear stored effects
         {
@@ -672,12 +652,12 @@ public:
         std::string source_dll_path = get_plugin_dll_source_path();
         
         if (source_dll_path.empty()) {
-            sqf::diag_log("KH - TeamSpeak: Could not determine extension directory");
+            sqf::diag_log("KH TeamSpeak: could not determine the extension directory");
             return false;
         }
         
         if (!std::filesystem::exists(source_dll_path)) {
-            sqf::diag_log("KH - TeamSpeak: Plugin DLL not found at: " + source_dll_path);
+            sqf::diag_log("KH TeamSpeak: plugin DLL not found at " + source_dll_path);
             return false;
         }
         
@@ -685,7 +665,7 @@ public:
         auto ts3_dirs = find_ts3_plugin_directories();
         
         if (ts3_dirs.empty()) {
-            sqf::diag_log("KH - TeamSpeak: No TeamSpeak plugin directories found");
+            sqf::diag_log("KH TeamSpeak: no TeamSpeak plugin directory found");
             return false;
         }
         
@@ -705,17 +685,17 @@ public:
                     std::filesystem::copy_options::overwrite_existing
                 );
                 
-                sqf::diag_log("KH - TeamSpeak: Plugin installed to: " + dest_path);
+                sqf::diag_log("KH TeamSpeak: plugin installed to " + dest_path);
                 installed = true;
                 break;
             } catch (const std::filesystem::filesystem_error& e) {
-                sqf::diag_log("KH - TeamSpeak: Failed to copy plugin to " + dest_path + ": " + std::string(e.what()));
+                sqf::diag_log("KH TeamSpeak: failed to copy the plugin to " + dest_path + ": " + std::string(e.what()));
                 // Continue trying other directories
             }
         }
         
         if (!installed) {
-            sqf::diag_log("KH - TeamSpeak: Failed to install plugin to any TeamSpeak directory");
+            sqf::diag_log("KH TeamSpeak: failed to install the plugin to any TeamSpeak directory");
         }
         
         return installed;
@@ -741,29 +721,6 @@ public:
 
         return false;
     }
-
-    // Parse effects from game_value args (matches TTS format)
-    static std::vector<std::pair<std::string, float>> parse_effects_from_args(const game_value& args, size_t start_index) {
-        std::vector<std::pair<std::string, float>> effects;
-        if (args.type_enum() != game_data_type::ARRAY) return effects;
-        auto& arr = args.to_array();
-        
-        for (size_t i = start_index; i < arr.size(); i++) {
-            if (arr[i].type_enum() == game_data_type::ARRAY) {
-                auto& effect_arr = arr[i].to_array();
-                
-                if (effect_arr.size() >= 2 && 
-                    effect_arr[0].type_enum() == game_data_type::STRING &&
-                    effect_arr[1].type_enum() == game_data_type::SCALAR) {
-                    std::string name = effect_arr[0];
-                    float value = effect_arr[1];
-                    effects.emplace_back(name, value);
-                }
-            }
-        }
-        
-        return effects;
-    }
 };
 
 // Auto-install check function - call from pre_start
@@ -774,9 +731,7 @@ static void teamspeak_check_and_install_plugin() {
         if (!TeamspeakFramework::is_plugin_installed(&needs_update) || needs_update) {
             TeamspeakFramework::install_plugin();
         }
-    } catch (const std::exception& e) {
-        // ...
     } catch (...) {
-        // ...
+        // Not installed this run (install_plugin reports its own failures); the next start tries again.
     }
 }

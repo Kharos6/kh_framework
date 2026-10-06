@@ -252,6 +252,17 @@ struct GameValueWrapper {
     bool is_game_value() const { return true; }
 };
 
+// The SQF value a wrapper argument carries; a plain Lua value is a type error (thrown, reported by the caller). An
+// unchecked as<GameValueWrapper>() on a non-userdata reads a null pointer when the build has no SOL_SAFE_* settings.
+static game_value kh_lua_wrapper_value(const sol::object& object) {
+    if (!object.is<GameValueWrapper>()) {
+        throw std::runtime_error("expected an SQF value, got a Lua " +
+                                 sol::type_name(object.lua_state(), object.get_type()));
+    }
+
+    return object.as<GameValueWrapper>().value;
+}
+
 // Convert game_value to Lua object
 static sol::object convert_game_value_to_lua(const game_value& value) {
     sol::state& lua = *g_lua_state;
@@ -1176,14 +1187,30 @@ namespace LuaFunctions {
                         args_table[idx++] = arg;
                     }
 
-                    sol::protected_function wrapper_factory = lua.script(R"(
-                        return function()
-                            local target, special, func, args = ...
-                            return util.execute(target, nil, special, func, table.unpack(args))
+                    args_table["n"] = idx - 1;   // The count: nil holes and trailing nils unpack as given.
+                    // A factory that binds the call's values into the closure the scheduler runs. safe_script:
+                    // protected whatever the build's SOL_SAFE_* settings (script() is unprotected without them);
+                    // table.unpack exists in LuaJIT only with LUA52COMPAT, unpack always. (The chunk used to read
+                    // `...` inside a non-vararg function - a syntax error, so no scheduled form ever ran.)
+                    sol::protected_function wrapper_factory = lua.safe_script(R"(
+                        return function(target, special, func, args)
+                            local unpack_n = table.unpack or unpack
+                            return function()
+                                return util.execute(target, nil, special, func, unpack_n(args, 1, args.n))
+                            end
                         end
                     )");
                     return wrapper_factory(target, special, func, args_table);
                 };
+
+                const bool scheduled = environment.get_type() == sol::type::number ||
+                                       environment.get_type() == sol::type::string;
+
+                // A function that can never run is refused here, not reported once per tick by the scheduled call.
+                if (scheduled && func.get_type() != sol::type::string && func.get_type() != sol::type::function) {
+                    report_error("util.execute: function must be a string or Lua function for local execution");
+                    return sol::nil;
+                }
 
                 if (environment.get_type() == sol::type::number) {
                     // Interval: execute_immediately=true, timeout=0, prioritizeTimeout=false
@@ -1227,11 +1254,17 @@ namespace LuaFunctions {
                         args_vec.push_back(arg);
                     }
 
-                    if (args_vec.empty()) {
-                        return pfunc();
+                    // The result checked: an error in the function is reported here (converting an invalid result
+                    // to an object silently yields the error text when the build has no SOL_SAFE_* settings).
+                    sol::protected_function_result result = args_vec.empty() ? pfunc() : pfunc(sol::as_args(args_vec));
+
+                    if (!result.valid()) {
+                        sol::error err = result;
+                        report_error("util.execute: " + std::string(err.what()));
+                        return sol::nil;
                     }
 
-                    return pfunc(sol::as_args(args_vec));
+                    return result.return_count() > 0 ? result.get<sol::object>() : sol::make_object(lua, sol::nil);
                 }
             }
 
@@ -1486,41 +1519,54 @@ namespace LuaFunctions {
                 func_args.push_back(args[i]);
             }
 
+            // One run of the profiled function; a Lua error in it ends the profile with one report (the protected
+            // call swallows it otherwise).
+            auto run_once = [&]() -> bool {
+                sol::protected_function_result result =
+                    func_args.empty() ? compiled() : compiled(sol::as_args(func_args));
+                if (result.valid()) return true;
+                sol::error err = result;
+                report_error("util.profile: " + std::string(err.what()));
+                return false;
+            };
+
             // Warm up if count > 100 - user probably expects overusage speed
             if (count > 100) {
                 for (int i = 0; i < 100; i++) {
-                    if (func_args.empty()) {
-                        compiled();
-                    } else {
-                        compiled(sol::as_args(func_args));
-                    }
+                    if (!run_once()) return sol::nil;
                 }
             }
 
-            // Get timer function
-            sol::function get_time = lua["time"]["getBoot"];
+            // Get timer function (protected: a call that fails is a reported fault, whatever the SOL_SAFE_* build
+            // settings - sol::function is unprotected without them).
+            sol::protected_function get_time = lua["time"]["getBoot"];
 
             if (!get_time.valid()) {
                 report_error("util.profile: high precision timer not available");
                 return sol::nil;
             }
 
-            // Profile execution
-            double start_time = get_time();
+            auto now_ms = [&](double& out) -> bool {
+                sol::protected_function_result result = get_time();
+                if (!result.valid()) {
+                    sol::error err = result;
+                    report_error("util.profile: time.getBoot failed: " + std::string(err.what()));
+                    return false;
+                }
 
-            if (func_args.empty()) {
-                // Loop for no arguments
-                for (int i = 0; i < count; i++) {
-                    compiled();
-                }
-            } else {
-                // Loop for with arguments
-                for (int i = 0; i < count; i++) {
-                    compiled(sol::as_args(func_args));
-                }
+                out = result.get<double>();
+                return true;
+            };
+
+            // Profile execution
+            double start_time = 0.0, end_time = 0.0;
+            if (!now_ms(start_time)) return sol::nil;
+
+            for (int i = 0; i < count; i++) {
+                if (!run_once()) return sol::nil;
             }
 
-            double end_time = get_time();
+            if (!now_ms(end_time)) return sol::nil;
             double total_time = end_time - start_time;
             double average_time = total_time / count;
             char buffer[256];
@@ -1665,12 +1711,16 @@ namespace LuaFunctions {
                 arg_vec.push_back(arg);
             }
 
-            // Call the function with the new environment
-            if (arg_vec.empty()) {
-                return func();
-            } else {
-                return func(sol::as_args(arg_vec));
+            // Call the function with the new environment; an error in it is reported here (see util.execute).
+            sol::protected_function_result result = arg_vec.empty() ? func() : func(sol::as_args(arg_vec));
+
+            if (!result.valid()) {
+                sol::error err = result;
+                report_error("util.withSqf: " + std::string(err.what()));
+                return sol::nil;
             }
+
+            return result.return_count() > 0 ? result.get<sol::object>() : sol::make_object(lua, sol::nil);
         } catch (const std::exception& e) {
             report_error("util.withSqf: " + std::string(e.what()));
             return sol::nil;
@@ -1917,10 +1967,11 @@ static void initialize_lua_state() {
             }
         });
         
-        // A C++ exception that escapes a bound function (the lua_wrappers_sqf.hpp wrappers have no try blocks: a
-        // wrong-typed argument throws here) is reported, then becomes the Lua error of the call. Protected callers
-        // that report their errors (luaExecute, event.trigger, ...) report it a second time; the ones that do not
-        // (util.profile, util.execute, util.withSqf, the __toSQF path) would otherwise lose it.
+        // A C++ exception that escapes a bound function is reported, then becomes the Lua error of the call (the
+        // protected caller - luaExecute, event.trigger, util.* - reports it a second time; the __toSQF path would
+        // otherwise lose it). In a build where sol propagates exceptions instead (SOL_PROPAGATE_EXCEPTIONS, on by
+        // default with LuaJIT) this handler does not run and LuaJIT's pcall turns the exception into the error text
+        // "C++ exception" - which is why the bound functions catch and report their own faults.
         g_lua_state->set_exception_handler([](lua_State* L, sol::optional<const std::exception&> maybe_exception,
                                               sol::string_view description) -> int {
             report_error("KH Lua: " + (maybe_exception ? std::string(maybe_exception->what())

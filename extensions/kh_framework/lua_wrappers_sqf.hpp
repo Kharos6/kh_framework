@@ -88,7 +88,10 @@ using namespace intercept::types;
 
 // TYPE HELPER MACROS
 #define IS_WRAPPER(x) (x).is<GameValueWrapper>()
-#define GET_WRAPPER_VALUE(x) (x).as<GameValueWrapper>().value
+// Checked: a plain Lua value where an SQF value (wrapper) is required is a type error, reported by the wrapper's
+// catch - an unchecked as<GameValueWrapper>() on a non-userdata reads a null pointer when the build has no SOL_SAFE_*
+// settings (the user's config.hpp has none).
+#define GET_WRAPPER_VALUE(x) kh_lua_wrapper_value(x)
 
 #define TYPE_OF(x) \
 (IS_WRAPPER(x) ? GET_WRAPPER_VALUE(x).type_enum() : \
@@ -98,40 +101,46 @@ using namespace intercept::types;
     (x.is<sol::table>() ? game_data_type::ARRAY : \
         game_data_type::NOTHING)))))
 
-// REGISTRATION MACROS - RETURN VALUE
+// REGISTRATION MACROS. Every wrapper catches its own faults (a wrong-typed argument - GET_WRAPPER_VALUE, to_array -
+// or a failed conversion) and reports "sqf.<name>: <what>", returning nil: an exception leaving a bound function
+// reaches Lua as the bare text "C++ exception" in a build where sol propagates exceptions (LuaJIT's default).
+#define SQF_WRAPPER_CATCH(lua_name) \
+    catch (const std::exception& e) { \
+        report_error(std::string("sqf.") + lua_name + ": " + e.what()); \
+        return sol::nil; \
+    }
+
+// RETURN VALUE
 #define REG_SQF_CMD_0(lua_name, name) \
     sqf_table[lua_name] = []() -> sol::object { \
-        return GV_TO_LUA(name()); \
+        try { return GV_TO_LUA(name()); } SQF_WRAPPER_CATCH(lua_name) \
     }
 
 #define REG_SQF_CMD_1(lua_name, name, p1_conv) \
     sqf_table[lua_name] = [](sol::object p1) -> sol::object { \
-        return GV_TO_LUA(name(p1_conv(p1))); \
+        try { return GV_TO_LUA(name(p1_conv(p1))); } SQF_WRAPPER_CATCH(lua_name) \
     }
 
 #define REG_SQF_CMD_2(lua_name, name, p1_conv, p2_conv) \
     sqf_table[lua_name] = [](sol::object p1, sol::object p2) -> sol::object { \
-        return GV_TO_LUA(name(p1_conv(p1), p2_conv(p2))); \
+        try { return GV_TO_LUA(name(p1_conv(p1), p2_conv(p2))); } SQF_WRAPPER_CATCH(lua_name) \
     }
 
 
-// REGISTRATION MACROS - VOID RETURN
+// VOID RETURN
 #define REG_SQF_CMD_0_VOID(lua_name, name) \
     sqf_table[lua_name] = []() -> sol::object { \
-        name(); \
-        return sol::nil; \
+        try { name(); return sol::nil; } SQF_WRAPPER_CATCH(lua_name) \
     }
 
 #define REG_SQF_CMD_1_VOID(lua_name, name, p1_conv) \
     sqf_table[lua_name] = [](sol::object p1) -> sol::object { \
-        name(p1_conv(p1)); \
-        return sol::nil; \
+        try { name(p1_conv(p1)); return sol::nil; } SQF_WRAPPER_CATCH(lua_name) \
     }
 
 #define REG_SQF_CMD_2_VOID(lua_name, name, p1_conv, p2_conv) \
     sqf_table[lua_name] = [](sol::object p1, sol::object p2) -> sol::object { \
-        name(p1_conv(p1), p2_conv(p2)); \
-        return sol::nil; \
+        try { name(p1_conv(p1), p2_conv(p2)); return sol::nil; } SQF_WRAPPER_CATCH(lua_name) \
     }
 
 /*
@@ -885,369 +894,435 @@ REG_SQF_CMD_2("worldToModelVisual", world_to_model_visual, LUA_TO_OBJECT, LUA_TO
 REG_SQF_CMD_0("worldSize", world_size);
 
 sqf_table["call"] = [](sol::object code_obj, sol::optional<sol::object> args) -> sol::object {
-    if (code_obj.get_type() == sol::type::userdata) {
-        sol::optional<GameValueWrapper> wrapper = code_obj.as<sol::optional<GameValueWrapper>>();
+    try {
+        if (code_obj.get_type() == sol::type::userdata) {
+            sol::optional<GameValueWrapper> wrapper = code_obj.as<sol::optional<GameValueWrapper>>();
         
-        if (wrapper && wrapper->value.type_enum() == game_data_type::CODE) {
-            const code compiled = wrapper->value;
-            if (!args) return GV_TO_LUA(sqf::call2(compiled));
-            return GV_TO_LUA(sqf::call2(compiled, LUA_TO_GAME_VALUE(*args)));
+            if (wrapper && wrapper->value.type_enum() == game_data_type::CODE) {
+                const code compiled = wrapper->value;
+                if (!args) return GV_TO_LUA(sqf::call2(compiled));
+                return GV_TO_LUA(sqf::call2(compiled, LUA_TO_GAME_VALUE(*args)));
+            }
         }
-    }
     
-    // A string: a function name (no space or ';'), called as it is, or code, called as a block. Compiled once per
-    // string and arity.
-    const std::string code_or_func_str = code_obj.as<std::string>();
-    const bool is_name = code_or_func_str.find(' ') == std::string::npos &&
-                         code_or_func_str.find(';') == std::string::npos;
-    const std::string key = (args ? "1:" : "0:") + code_or_func_str;
-    auto cache_it = g_sqf_function_cache.find(key);
-    code compiled;
+        // A string: a function name (no space or ';'), called as it is, or code, called as a block. Compiled once per
+        // string and arity.
+        const std::string code_or_func_str = code_obj.as<std::string>();
+        const bool is_name = code_or_func_str.find(' ') == std::string::npos &&
+                             code_or_func_str.find(';') == std::string::npos;
+        const std::string key = (args ? "1:" : "0:") + code_or_func_str;
+        auto cache_it = g_sqf_function_cache.find(key);
+        code compiled;
 
-    if (cache_it != g_sqf_function_cache.end()) {
-        compiled = cache_it->second;
-    } else {
-        const std::string body = is_name ? code_or_func_str : "{" + code_or_func_str + "}";
-        compiled = sqf::compile(args ? "setReturnValue (getCallArguments call " + body + ");"
-                                     : "setReturnValue (call " + body + ");");
-        g_sqf_function_cache[key] = compiled;
-    }
+        if (cache_it != g_sqf_function_cache.end()) {
+            compiled = cache_it->second;
+        } else {
+            const std::string body = is_name ? code_or_func_str : "{" + code_or_func_str + "}";
+            compiled = sqf::compile(args ? "setReturnValue (getCallArguments call " + body + ");"
+                                         : "setReturnValue (call " + body + ");");
+            g_sqf_function_cache[key] = compiled;
+        }
 
-    if (!args) return GV_TO_LUA(raw_call_sqf_native(compiled));
-    return GV_TO_LUA(raw_call_sqf_args_native(compiled, LUA_TO_GAME_VALUE(*args)));
+        if (!args) return GV_TO_LUA(raw_call_sqf_native(compiled));
+        return GV_TO_LUA(raw_call_sqf_args_native(compiled, LUA_TO_GAME_VALUE(*args)));
+    } SQF_WRAPPER_CATCH("call")
 };
 
 sqf_table["combatBehaviour"] = [](sol::object target) -> sol::object {
-    if (TYPE_OF(target) == GDT_OBJECT) {
-        return GV_TO_LUA(combat_behaviour(LUA_TO_OBJECT(target)));
-    } else {
-        return GV_TO_LUA(combat_behaviour(LUA_TO_GROUP(target)));
-    }
+    try {
+        if (TYPE_OF(target) == GDT_OBJECT) {
+            return GV_TO_LUA(combat_behaviour(LUA_TO_OBJECT(target)));
+        } else {
+            return GV_TO_LUA(combat_behaviour(LUA_TO_GROUP(target)));
+        }
+    } SQF_WRAPPER_CATCH("combatBehaviour")
 };
 
 sqf_table["commandSuppressiveFire"] = [](sol::object unit, sol::object target) -> sol::object {
-    if (TYPE_OF(target) == GDT_OBJECT) {
-        command_suppressive_fire(LUA_TO_OBJECT(unit), LUA_TO_OBJECT(target));
-    } else {
-        command_suppressive_fire(LUA_TO_OBJECT(unit), LUA_TO_VECTOR3(target));
-    }
+    try {
+        if (TYPE_OF(target) == GDT_OBJECT) {
+            command_suppressive_fire(LUA_TO_OBJECT(unit), LUA_TO_OBJECT(target));
+        } else {
+            command_suppressive_fire(LUA_TO_OBJECT(unit), LUA_TO_VECTOR3(target));
+        }
 
-    return sol::nil;
+        return sol::nil;
+    } SQF_WRAPPER_CATCH("commandSuppressiveFire")
 };
 
 sqf_table["createGroup"] = [](sol::object arg_side, sol::optional<sol::object> delete_when_empty) -> sol::object {
-    if (!delete_when_empty) {
-        return GV_TO_LUA(create_group(LUA_TO_SIDE(arg_side)));
-    } else {
-        return GV_TO_LUA(create_group(LUA_TO_SIDE(arg_side), LUA_TO_BOOL(*delete_when_empty)));
-    }
+    try {
+        if (!delete_when_empty) {
+            return GV_TO_LUA(create_group(LUA_TO_SIDE(arg_side)));
+        } else {
+            return GV_TO_LUA(create_group(LUA_TO_SIDE(arg_side), LUA_TO_BOOL(*delete_when_empty)));
+        }
+    } SQF_WRAPPER_CATCH("createGroup")
 };
 
 sqf_table["createVehicleCrew"] = [](sol::object p1, sol::optional<sol::object> p2) -> sol::object {
-    if (!p2) {
-        return GV_TO_LUA(create_vehicle_crew(LUA_TO_OBJECT(p1)));
-    } else {
-        if (TYPE_OF(p1) == GDT_GROUP) {
-            return GV_TO_LUA(create_vehicle_crew(LUA_TO_GROUP(p1), LUA_TO_OBJECT(*p2)));
+    try {
+        if (!p2) {
+            return GV_TO_LUA(create_vehicle_crew(LUA_TO_OBJECT(p1)));
         } else {
-            return GV_TO_LUA(create_vehicle_crew(LUA_TO_SIDE(p1), LUA_TO_OBJECT(*p2)));
+            if (TYPE_OF(p1) == GDT_GROUP) {
+                return GV_TO_LUA(create_vehicle_crew(LUA_TO_GROUP(p1), LUA_TO_OBJECT(*p2)));
+            } else {
+                return GV_TO_LUA(create_vehicle_crew(LUA_TO_SIDE(p1), LUA_TO_OBJECT(*p2)));
+            }
         }
-    }
+    } SQF_WRAPPER_CATCH("createVehicleCrew")
 };
 
 sqf_table["dynamicSimulationEnabled"] = [](sol::object entity) -> sol::object {
-    if (TYPE_OF(entity) == GDT_OBJECT) {
-        return GV_TO_LUA(dynamic_simulation_enabled(LUA_TO_OBJECT(entity)));
-    } else {
-        return GV_TO_LUA(dynamic_simulation_enabled(LUA_TO_GROUP(entity)));
-    }
+    try {
+        if (TYPE_OF(entity) == GDT_OBJECT) {
+            return GV_TO_LUA(dynamic_simulation_enabled(LUA_TO_OBJECT(entity)));
+        } else {
+            return GV_TO_LUA(dynamic_simulation_enabled(LUA_TO_GROUP(entity)));
+        }
+    } SQF_WRAPPER_CATCH("dynamicSimulationEnabled")
 };
 
 sqf_table["enableDynamicSimulation"] = [](sol::object entity, sol::object enable) -> sol::object {
-    if (TYPE_OF(entity) == GDT_OBJECT) {
-        enable_dynamic_simulation(LUA_TO_OBJECT(entity), LUA_TO_BOOL(enable));
-    } else {
-        enable_dynamic_simulation(LUA_TO_GROUP(entity), LUA_TO_BOOL(enable));
-    }
+    try {
+        if (TYPE_OF(entity) == GDT_OBJECT) {
+            enable_dynamic_simulation(LUA_TO_OBJECT(entity), LUA_TO_BOOL(enable));
+        } else {
+            enable_dynamic_simulation(LUA_TO_GROUP(entity), LUA_TO_BOOL(enable));
+        }
 
-    return sol::nil;
+        return sol::nil;
+    } SQF_WRAPPER_CATCH("enableDynamicSimulation")
 };
 
 sqf_table["forgetTarget"] = [](sol::object source, sol::object target) -> sol::object {
-    if (TYPE_OF(source) == GDT_OBJECT) {
-        forget_target(LUA_TO_OBJECT(source), LUA_TO_OBJECT(target));
-    } else {
-        forget_target(LUA_TO_GROUP(source), LUA_TO_OBJECT(target));
-    }
+    try {
+        if (TYPE_OF(source) == GDT_OBJECT) {
+            forget_target(LUA_TO_OBJECT(source), LUA_TO_OBJECT(target));
+        } else {
+            forget_target(LUA_TO_GROUP(source), LUA_TO_OBJECT(target));
+        }
 
-    return sol::nil;
+        return sol::nil;
+    } SQF_WRAPPER_CATCH("forgetTarget")
 };
 
 sqf_table["formation"] = [](sol::object target) -> sol::object {
-    switch (TYPE_OF(target)) {
-        case GDT_OBJECT:
-            return GV_TO_LUA(formation(LUA_TO_OBJECT(target)));
-        case GDT_GROUP:
-            return GV_TO_LUA(formation(LUA_TO_GROUP(target)));
-        case GDT_TEAM_MEMBER:
-            return GV_TO_LUA(formation(LUA_TO_TEAM_MEMBER(target)));
-        default:
-            break;
-    }
+    try {
+        switch (TYPE_OF(target)) {
+            case GDT_OBJECT:
+                return GV_TO_LUA(formation(LUA_TO_OBJECT(target)));
+            case GDT_GROUP:
+                return GV_TO_LUA(formation(LUA_TO_GROUP(target)));
+            case GDT_TEAM_MEMBER:
+                return GV_TO_LUA(formation(LUA_TO_TEAM_MEMBER(target)));
+            default:
+                break;
+        }
 
-    return sol::nil;
+        return sol::nil;
+    } SQF_WRAPPER_CATCH("formation")
 };
 
 sqf_table["getRelDir"] = [](sol::object p1, sol::object p2) -> sol::object {
-    if (TYPE_OF(p2) == GDT_OBJECT) {
-        return GV_TO_LUA(get_rel_dir(LUA_TO_OBJECT(p1), LUA_TO_OBJECT(p2)));
-    } else {
-        return GV_TO_LUA(get_rel_dir(LUA_TO_OBJECT(p1), LUA_TO_VECTOR3(p2)));
-    }
+    try {
+        if (TYPE_OF(p2) == GDT_OBJECT) {
+            return GV_TO_LUA(get_rel_dir(LUA_TO_OBJECT(p1), LUA_TO_OBJECT(p2)));
+        } else {
+            return GV_TO_LUA(get_rel_dir(LUA_TO_OBJECT(p1), LUA_TO_VECTOR3(p2)));
+        }
+    } SQF_WRAPPER_CATCH("getRelDir")
 };
 
 sqf_table["getTerrainHeightASL"] = [](sol::object pos) -> sol::object {
-    game_value pos_gv = LUA_TO_GAME_VALUE(pos);
+    try {
+        game_value pos_gv = LUA_TO_GAME_VALUE(pos);
 
-    if (pos_gv.size() == 2) {
-        return GV_TO_LUA(get_terrain_height_asl(CAST_VECTOR2(pos_gv)));
-    } else {
-        return GV_TO_LUA(get_terrain_height_asl(CAST_VECTOR3(pos_gv)));
-    }
+        if (pos_gv.size() == 2) {
+            return GV_TO_LUA(get_terrain_height_asl(CAST_VECTOR2(pos_gv)));
+        } else {
+            return GV_TO_LUA(get_terrain_height_asl(CAST_VECTOR3(pos_gv)));
+        }
+    } SQF_WRAPPER_CATCH("getTerrainHeightASL")
 };
 
 sqf_table["getUnitLoadout"] = [](sol::object source) -> sol::object {
-    switch (TYPE_OF(source)) {
-        case GDT_OBJECT:
-            return GV_TO_LUA(get_unit_loadout(LUA_TO_OBJECT(source)));
-        case GDT_CONFIG:
-            return GV_TO_LUA(get_unit_loadout(LUA_TO_CONFIG(source)));
-        case GDT_STRING:
-            return GV_TO_LUA(get_unit_loadout(LUA_TO_STRING(source)));
-        default:
-            break;
-    }
+    try {
+        switch (TYPE_OF(source)) {
+            case GDT_OBJECT:
+                return GV_TO_LUA(get_unit_loadout(LUA_TO_OBJECT(source)));
+            case GDT_CONFIG:
+                return GV_TO_LUA(get_unit_loadout(LUA_TO_CONFIG(source)));
+            case GDT_STRING:
+                return GV_TO_LUA(get_unit_loadout(LUA_TO_STRING(source)));
+            default:
+                break;
+        }
 
-    return sol::nil;
+        return sol::nil;
+    } SQF_WRAPPER_CATCH("getUnitLoadout")
 };
 
 sqf_table["groupId"] = [](sol::object entity) -> sol::object {
-    if (TYPE_OF(entity) == GDT_OBJECT) {
-        return GV_TO_LUA(group_id(LUA_TO_OBJECT(entity)));
-    } else {
-        return GV_TO_LUA(group_id(LUA_TO_GROUP(entity)));
-    }
+    try {
+        if (TYPE_OF(entity) == GDT_OBJECT) {
+            return GV_TO_LUA(group_id(LUA_TO_OBJECT(entity)));
+        } else {
+            return GV_TO_LUA(group_id(LUA_TO_GROUP(entity)));
+        }
+    } SQF_WRAPPER_CATCH("groupId")
 };
 
 sqf_table["hideObject"] = [](sol::object obj, sol::optional<sol::object> hide) -> sol::object {
-    if (!hide) {
-        hide_object(LUA_TO_OBJECT(obj));
-    } else {
-        hide_object(LUA_TO_OBJECT(obj), LUA_TO_BOOL(*hide));
-    }
+    try {
+        if (!hide) {
+            hide_object(LUA_TO_OBJECT(obj));
+        } else {
+            hide_object(LUA_TO_OBJECT(obj), LUA_TO_BOOL(*hide));
+        }
 
-    return sol::nil;
+        return sol::nil;
+    } SQF_WRAPPER_CATCH("hideObject")
 };
 
 sqf_table["hideObjectGlobal"] = [](sol::object obj, sol::optional<sol::object> hide) -> sol::object {
-    if (!hide) {
-        hide_object_global(LUA_TO_OBJECT(obj));
-    } else {
-        hide_object_global(LUA_TO_OBJECT(obj), LUA_TO_BOOL(*hide));
-    }
+    try {
+        if (!hide) {
+            hide_object_global(LUA_TO_OBJECT(obj));
+        } else {
+            hide_object_global(LUA_TO_OBJECT(obj), LUA_TO_BOOL(*hide));
+        }
     
-    return sol::nil;
+        return sol::nil;
+    } SQF_WRAPPER_CATCH("hideObjectGlobal")
 };
 
 sqf_table["isNull"] = [](sol::object obj) -> sol::object {
-    switch (TYPE_OF(obj)) {
-        case GDT_OBJECT:
-            return GV_TO_LUA(is_null(LUA_TO_OBJECT(obj)));
-        case GDT_CONTROL:
-            return GV_TO_LUA(is_null(LUA_TO_CONTROL(obj)));
-        case GDT_DISPLAY:
-            return GV_TO_LUA(is_null(LUA_TO_DISPLAY(obj)));
-        case GDT_SCRIPT:
-            return GV_TO_LUA(is_null(LUA_TO_SCRIPT(obj)));
-        case GDT_TASK:
-            return GV_TO_LUA(is_null(LUA_TO_TASK(obj)));
-        case GDT_CONFIG:
-            return GV_TO_LUA(is_null(LUA_TO_CONFIG(obj)));
-        case GDT_GROUP:
-            return GV_TO_LUA(is_null(LUA_TO_GROUP(obj)));
-        case GDT_LOCATION:
-            return GV_TO_LUA(is_null(LUA_TO_LOCATION(obj)));
-        default:
-            break;
-    }
+    try {
+        switch (TYPE_OF(obj)) {
+            case GDT_OBJECT:
+                return GV_TO_LUA(is_null(LUA_TO_OBJECT(obj)));
+            case GDT_CONTROL:
+                return GV_TO_LUA(is_null(LUA_TO_CONTROL(obj)));
+            case GDT_DISPLAY:
+                return GV_TO_LUA(is_null(LUA_TO_DISPLAY(obj)));
+            case GDT_SCRIPT:
+                return GV_TO_LUA(is_null(LUA_TO_SCRIPT(obj)));
+            case GDT_TASK:
+                return GV_TO_LUA(is_null(LUA_TO_TASK(obj)));
+            case GDT_CONFIG:
+                return GV_TO_LUA(is_null(LUA_TO_CONFIG(obj)));
+            case GDT_GROUP:
+                return GV_TO_LUA(is_null(LUA_TO_GROUP(obj)));
+            case GDT_LOCATION:
+                return GV_TO_LUA(is_null(LUA_TO_LOCATION(obj)));
+            default:
+                break;
+        }
 
-    return sol::nil;
+        return sol::nil;
+    } SQF_WRAPPER_CATCH("isNull")
 };
 
 sqf_table["isOnRoad"] = [](sol::object pos) -> sol::object {
-    if (TYPE_OF(pos) == GDT_OBJECT) {
-        return GV_TO_LUA(is_on_road(LUA_TO_OBJECT(pos)));
-    } else {
-        return GV_TO_LUA(is_on_road(LUA_TO_VECTOR3(pos)));
-    }
+    try {
+        if (TYPE_OF(pos) == GDT_OBJECT) {
+            return GV_TO_LUA(is_on_road(LUA_TO_OBJECT(pos)));
+        } else {
+            return GV_TO_LUA(is_on_road(LUA_TO_VECTOR3(pos)));
+        }
+    } SQF_WRAPPER_CATCH("isOnRoad")
 };
 
 sqf_table["isWeaponDeployed"] = [](sol::object obj, sol::optional<sol::object> on_ground) -> sol::object {
-    if (!on_ground) {
-        return GV_TO_LUA(is_weapon_deployed(LUA_TO_OBJECT(obj)));
-    } else {
-        return GV_TO_LUA(is_weapon_deployed(LUA_TO_OBJECT(obj), LUA_TO_BOOL(*on_ground)));
-    }
+    try {
+        if (!on_ground) {
+            return GV_TO_LUA(is_weapon_deployed(LUA_TO_OBJECT(obj)));
+        } else {
+            return GV_TO_LUA(is_weapon_deployed(LUA_TO_OBJECT(obj), LUA_TO_BOOL(*on_ground)));
+        }
+    } SQF_WRAPPER_CATCH("isWeaponDeployed")
 };
 
 sqf_table["knowsAbout"] = [](sol::object source, sol::object target) -> sol::object {
-    switch (TYPE_OF(source)) {
-        case GDT_OBJECT:
-            return GV_TO_LUA(knows_about(LUA_TO_OBJECT(source), LUA_TO_OBJECT(target)));
-        case GDT_GROUP:
-            return GV_TO_LUA(knows_about(LUA_TO_GROUP(source), LUA_TO_OBJECT(target)));
-        case GDT_SIDE:
-            return GV_TO_LUA(knows_about(LUA_TO_SIDE(source), LUA_TO_OBJECT(target)));
-        default:
-            break;
-    }
+    try {
+        switch (TYPE_OF(source)) {
+            case GDT_OBJECT:
+                return GV_TO_LUA(knows_about(LUA_TO_OBJECT(source), LUA_TO_OBJECT(target)));
+            case GDT_GROUP:
+                return GV_TO_LUA(knows_about(LUA_TO_GROUP(source), LUA_TO_OBJECT(target)));
+            case GDT_SIDE:
+                return GV_TO_LUA(knows_about(LUA_TO_SIDE(source), LUA_TO_OBJECT(target)));
+            default:
+                break;
+        }
 
-    return sol::nil;
+        return sol::nil;
+    } SQF_WRAPPER_CATCH("knowsAbout")
 };
 
 sqf_table["leader"] = [](sol::object entity) -> sol::object {
-    switch (TYPE_OF(entity)) {
-        case GDT_GROUP:
-            return GV_TO_LUA(leader(LUA_TO_GROUP(entity)));
-        case GDT_TEAM_MEMBER:
-            return GV_TO_LUA(leader(LUA_TO_TEAM_MEMBER(entity)));
-        case GDT_OBJECT:
-            return GV_TO_LUA(leader(LUA_TO_OBJECT(entity)));
-        default:
-            break;
-    }
+    try {
+        switch (TYPE_OF(entity)) {
+            case GDT_GROUP:
+                return GV_TO_LUA(leader(LUA_TO_GROUP(entity)));
+            case GDT_TEAM_MEMBER:
+                return GV_TO_LUA(leader(LUA_TO_TEAM_MEMBER(entity)));
+            case GDT_OBJECT:
+                return GV_TO_LUA(leader(LUA_TO_OBJECT(entity)));
+            default:
+                break;
+        }
 
-    return sol::nil;
+        return sol::nil;
+    } SQF_WRAPPER_CATCH("leader")
 };
 
 sqf_table["local"] = [](sol::object entity) -> sol::object {
-    if (TYPE_OF(entity) == GDT_OBJECT) {
-        return GV_TO_LUA(local(LUA_TO_OBJECT(entity)));
-    } else {
-        return GV_TO_LUA(local(LUA_TO_GROUP(entity)));
-    }
+    try {
+        if (TYPE_OF(entity) == GDT_OBJECT) {
+            return GV_TO_LUA(local(LUA_TO_OBJECT(entity)));
+        } else {
+            return GV_TO_LUA(local(LUA_TO_GROUP(entity)));
+        }
+    } SQF_WRAPPER_CATCH("local")
 };
 
 sqf_table["lock"] = [](sol::object obj, sol::object value) -> sol::object {
-    if (value.is<bool>()) {
-        lock(LUA_TO_OBJECT(obj), LUA_TO_BOOL(value));
-    } else {
-        lock(LUA_TO_OBJECT(obj), LUA_TO_FLOAT(value));
-    }
+    try {
+        if (value.is<bool>()) {
+            lock(LUA_TO_OBJECT(obj), LUA_TO_BOOL(value));
+        } else {
+            lock(LUA_TO_OBJECT(obj), LUA_TO_FLOAT(value));
+        }
 
-    return sol::nil;
+        return sol::nil;
+    } SQF_WRAPPER_CATCH("lock")
 };
 
 sqf_table["move"] = [](sol::object entity, sol::object pos) -> sol::object {
-    if (TYPE_OF(entity) == GDT_OBJECT) {
-        move(LUA_TO_OBJECT(entity), LUA_TO_VECTOR3(pos));
-    } else {
-        move(LUA_TO_GROUP(entity), LUA_TO_VECTOR3(pos));
-    }
+    try {
+        if (TYPE_OF(entity) == GDT_OBJECT) {
+            move(LUA_TO_OBJECT(entity), LUA_TO_VECTOR3(pos));
+        } else {
+            move(LUA_TO_GROUP(entity), LUA_TO_VECTOR3(pos));
+        }
 
-    return sol::nil;
+        return sol::nil;
+    } SQF_WRAPPER_CATCH("move")
 };
 
 sqf_table["moveOut"] = [](sol::object p1, sol::optional<sol::object> p2) -> sol::object {
-    if (!p2) {
-        move_out(LUA_TO_OBJECT(p1));
-    } else {
-        move_out(LUA_TO_OBJECT(p1), LUA_TO_OBJECT(*p2));
-    }
+    try {
+        if (!p2) {
+            move_out(LUA_TO_OBJECT(p1));
+        } else {
+            move_out(LUA_TO_OBJECT(p1), LUA_TO_OBJECT(*p2));
+        }
 
-    return sol::nil;
+        return sol::nil;
+    } SQF_WRAPPER_CATCH("moveOut")
 };
 
 sqf_table["screenToWorld"] = [](sol::object p1, sol::optional<sol::object> p2) -> sol::object {
-    if (!p2) {
-        return GV_TO_LUA(screen_to_world(LUA_TO_VECTOR2(p1)));
-    } else {
-        return GV_TO_LUA(screen_to_world(LUA_TO_OBJECT(p1), LUA_TO_VECTOR2(*p2)));
-    }
+    try {
+        if (!p2) {
+            return GV_TO_LUA(screen_to_world(LUA_TO_VECTOR2(p1)));
+        } else {
+            return GV_TO_LUA(screen_to_world(LUA_TO_OBJECT(p1), LUA_TO_VECTOR2(*p2)));
+        }
+    } SQF_WRAPPER_CATCH("screenToWorld")
 };
 
 sqf_table["screenToWorldDirection"] = [](sol::object p1, sol::optional<sol::object> p2) -> sol::object {
-    if (!p2) {
-        return GV_TO_LUA(screen_to_world_direction(LUA_TO_VECTOR2(p1)));
-    } else {
-        return GV_TO_LUA(screen_to_world_direction(LUA_TO_OBJECT(p1), LUA_TO_VECTOR2(*p2)));
-    }
+    try {
+        if (!p2) {
+            return GV_TO_LUA(screen_to_world_direction(LUA_TO_VECTOR2(p1)));
+        } else {
+            return GV_TO_LUA(screen_to_world_direction(LUA_TO_OBJECT(p1), LUA_TO_VECTOR2(*p2)));
+        }
+    } SQF_WRAPPER_CATCH("screenToWorldDirection")
 };
 
 sqf_table["setAirportSide"] = [](sol::object p1, sol::object side_arg) -> sol::object {
-    if (p1.is<float>() || p1.is<int>()) {
-        set_airport_side(LUA_TO_FLOAT(p1), LUA_TO_SIDE(side_arg));
-    } else {
-        set_airport_side(LUA_TO_OBJECT(p1), LUA_TO_SIDE(side_arg));
-    }
+    try {
+        if (p1.is<float>() || p1.is<int>()) {
+            set_airport_side(LUA_TO_FLOAT(p1), LUA_TO_SIDE(side_arg));
+        } else {
+            set_airport_side(LUA_TO_OBJECT(p1), LUA_TO_SIDE(side_arg));
+        }
 
-    return sol::nil;
+        return sol::nil;
+    } SQF_WRAPPER_CATCH("setAirportSide")
 };
 
 sqf_table["setCaptive"] = [](sol::object obj, sol::object status) -> sol::object {
-    if (status.is<bool>()) {
-        set_captive(LUA_TO_OBJECT(obj), LUA_TO_BOOL(status));
-    } else {
-        set_captive(LUA_TO_OBJECT(obj), LUA_TO_FLOAT(status));
-    }
+    try {
+        if (status.is<bool>()) {
+            set_captive(LUA_TO_OBJECT(obj), LUA_TO_BOOL(status));
+        } else {
+            set_captive(LUA_TO_OBJECT(obj), LUA_TO_FLOAT(status));
+        }
 
-    return sol::nil;
+        return sol::nil;
+    } SQF_WRAPPER_CATCH("setCaptive")
 };
 
 sqf_table["setObjectViewDistance"] = [](sol::object distance, sol::optional<sol::object> shadow) -> sol::object {
-    if (!shadow) {
-        set_object_view_distance(LUA_TO_FLOAT(distance));
-    } else {
-        set_object_view_distance(LUA_TO_FLOAT(distance), LUA_TO_FLOAT(*shadow));
-    }
+    try {
+        if (!shadow) {
+            set_object_view_distance(LUA_TO_FLOAT(distance));
+        } else {
+            set_object_view_distance(LUA_TO_FLOAT(distance), LUA_TO_FLOAT(*shadow));
+        }
 
-    return sol::nil;
+        return sol::nil;
+    } SQF_WRAPPER_CATCH("setObjectViewDistance")
 };
 
 sqf_table["speedMode"] = [](sol::object target) -> sol::object {
-    if (TYPE_OF(target) == GDT_OBJECT) {
-        return GV_TO_LUA(speed_mode(LUA_TO_OBJECT(target)));
-    } else {
-        return GV_TO_LUA(speed_mode(LUA_TO_GROUP(target)));
-    }
+    try {
+        if (TYPE_OF(target) == GDT_OBJECT) {
+            return GV_TO_LUA(speed_mode(LUA_TO_OBJECT(target)));
+        } else {
+            return GV_TO_LUA(speed_mode(LUA_TO_GROUP(target)));
+        }
+    } SQF_WRAPPER_CATCH("speedMode")
 };
 
 sqf_table["surfaceIsWater"] = [](sol::object pos) -> sol::object {
-    game_value pos_gv = LUA_TO_GAME_VALUE(pos);
+    try {
+        game_value pos_gv = LUA_TO_GAME_VALUE(pos);
 
-    if (pos_gv.size() == 2) {
-        return GV_TO_LUA(surface_is_water(CAST_VECTOR2(pos_gv)));
-    } else {
-        return GV_TO_LUA(surface_is_water(CAST_VECTOR3(pos_gv)));
-    }
+        if (pos_gv.size() == 2) {
+            return GV_TO_LUA(surface_is_water(CAST_VECTOR2(pos_gv)));
+        } else {
+            return GV_TO_LUA(surface_is_water(CAST_VECTOR3(pos_gv)));
+        }
+    } SQF_WRAPPER_CATCH("surfaceIsWater")
 };
 
 sqf_table["surfaceNormal"] = [](sol::object pos) -> sol::object {
-    game_value pos_gv = LUA_TO_GAME_VALUE(pos);
+    try {
+        game_value pos_gv = LUA_TO_GAME_VALUE(pos);
 
-    if (pos_gv.size() == 2) {
-        return GV_TO_LUA(surface_normal(CAST_VECTOR2(pos_gv)));
-    } else {
-        return GV_TO_LUA(surface_normal(CAST_VECTOR3(pos_gv)));
-    }
+        if (pos_gv.size() == 2) {
+            return GV_TO_LUA(surface_normal(CAST_VECTOR2(pos_gv)));
+        } else {
+            return GV_TO_LUA(surface_normal(CAST_VECTOR3(pos_gv)));
+        }
+    } SQF_WRAPPER_CATCH("surfaceNormal")
 };
 
 sqf_table["useAISteeringComponent"] = [](sol::object p1, sol::optional<sol::object> p2) -> sol::object {
-    if (!p2) {
-        use_ai_steering_component(LUA_TO_BOOL(p1));
-    } else {
-        use_ai_steering_component(LUA_TO_OBJECT(p1), LUA_TO_BOOL(*p2));
-    }
+    try {
+        if (!p2) {
+            use_ai_steering_component(LUA_TO_BOOL(p1));
+        } else {
+            use_ai_steering_component(LUA_TO_OBJECT(p1), LUA_TO_BOOL(*p2));
+        }
 
-    return sol::nil;
+        return sol::nil;
+    } SQF_WRAPPER_CATCH("useAISteeringComponent")
 };

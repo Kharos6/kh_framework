@@ -1,8 +1,5 @@
 #pragma once
 
-#include <cmath>
-#include <cstring>
-
 namespace RVExtBridge {
 
 enum TextureFormat : uint32_t {

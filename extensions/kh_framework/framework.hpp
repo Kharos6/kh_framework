@@ -27,6 +27,7 @@
 #include <sstream>
 #include <fstream>
 #include <cmath>
+#include <cstring>
 #include <cstdint>
 #include <cctype>
 #include <filesystem>

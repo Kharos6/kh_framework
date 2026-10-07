@@ -19,6 +19,7 @@ static registered_sqf_function _sqf_read_khdata_string_string;
 static registered_sqf_function _sqf_flush_khdata;
 static registered_sqf_function _sqf_delete_khdata_file_string;
 static registered_sqf_function _sqf_get_terrain_matrix;
+static registered_sqf_function _sqf_read_file_string;
 static registered_sqf_function _sqf_emit_lua_variable_string;
 static registered_sqf_function _sqf_emit_lua_variable_array;
 static registered_sqf_function _sqf_lua_set_variable_array;
@@ -776,6 +777,100 @@ static game_value read_khdata_unary_sqf(game_value_parameter filename) {
         return game_value(auto_array<game_value>());
     } catch (...) {
         return game_value(auto_array<game_value>());
+    }
+}
+
+// readFile: a file's raw contents. One leading separator = an engine path inside the loaded PBOs (PBO_PATH, read
+// through ModFolderSearcher's cache); anything else = a path below Documents\Arma 3\kh_framework, then below each
+// active mod's root folder (PATH_CONFINE) - the first folder that holds it wins. The game's own install folder is
+// not a mod folder here (the discovery reports it as the parent of its Addons folder; it holds server.cfg and the
+// like). "" (reported) when no file is found or it cannot be read.
+static game_value read_file_sqf(game_value_parameter path_arg) {
+    try {
+        const std::string path = static_cast<std::string>(path_arg);
+
+        if (ModFolderSearcher::is_pbo_path(path)) {
+            std::string err;
+            const std::shared_ptr<const std::vector<uint8_t>> data = ModFolderSearcher::read_pbo_file_shared(path, &err);
+
+            if (!data) {
+                report_error("readFile: " + err);
+                return game_value(std::string());
+            }
+
+            return game_value(std::string(data->begin(), data->end()));
+        }
+
+        if (!ModFolderSearcher::is_plain_relative_path(path)) {
+            report_error("readFile: not a plain relative path: " + path);
+            return game_value(std::string());
+        }
+
+        // The request as UTF-16 (the engine's strings are UTF-8; a narrow path would be read in the ANSI code page).
+        const int wide_length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.data(),
+                                                    static_cast<int>(path.size()), nullptr, 0);
+
+        if (wide_length <= 0) {
+            report_error("readFile: not valid UTF-8: " + path);
+            return game_value(std::string());
+        }
+
+        std::wstring wide_path(static_cast<size_t>(wide_length), L'\0');
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.data(), static_cast<int>(path.size()), &wide_path[0],
+                            wide_length);
+        const std::filesystem::path relative_path(wide_path);
+
+        // The folder of the game's executable (found once; empty when it cannot be).
+        static const std::filesystem::path game_folder = []() {
+            std::vector<wchar_t> module_name(MAX_PATH);
+
+            while (true) {
+                const DWORD n = GetModuleFileNameW(nullptr, module_name.data(), static_cast<DWORD>(module_name.size()));
+                if (n == 0) return std::filesystem::path();
+                if (n < module_name.size()) return std::filesystem::path(std::wstring(module_name.data(), n)).parent_path();
+                module_name.resize(module_name.size() * 2);
+            }
+        }();
+
+        std::vector<std::filesystem::path> folders;
+        const std::filesystem::path documents_folder = ModFolderSearcher::kh_framework_documents_dir();
+        if (!documents_folder.empty()) folders.push_back(documents_folder);
+
+        for (const auto& mod_folder : ModFolderSearcher::get_active_mod_folders()) {
+            std::error_code ec;
+            if (!game_folder.empty() && std::filesystem::equivalent(mod_folder, game_folder, ec)) continue;
+            folders.push_back(mod_folder);
+        }
+
+        for (const auto& folder : folders) {
+            const std::filesystem::path full_path = folder / relative_path;
+            std::error_code ec;
+            if (!std::filesystem::is_regular_file(full_path, ec)) continue;
+            std::ifstream file(full_path, std::ios::binary);
+
+            if (!file) {
+                report_error("readFile: cannot open: " + path);
+                return game_value(std::string());
+            }
+
+            std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+
+            if (file.bad()) {
+                report_error("readFile: cannot read: " + path);
+                return game_value(std::string());
+            }
+
+            return game_value(content);
+        }
+
+        report_error("readFile: file not found: " + path);
+        return game_value(std::string());
+    } catch (const std::exception& e) {
+        report_error("readFile: " + std::string(e.what()));
+        return game_value(std::string());
+    } catch (...) {
+        report_error("readFile: unknown error");
+        return game_value(std::string());
     }
 }
 
@@ -8384,7 +8479,7 @@ static game_value flush_ui_render_sqf() {
 static void initialize_sqf_integration() {
     _sqf_execute_lua_any_string = intercept::client::host::register_sqf_command(
         "luaExecute",
-        "Execute Lua code or function",
+        "Executes Lua code or a named Lua function, optionally with arguments, and returns the result.",
         userFunctionWrapper<execute_lua_sqf>,
         game_data_type::ANY,
         game_data_type::ANY,
@@ -8393,7 +8488,7 @@ static void initialize_sqf_integration() {
 
     _sqf_execute_lua_any_array = intercept::client::host::register_sqf_command(
         "luaExecute",
-        "Execute Lua code or function",
+        "Executes Lua code or a named Lua function, optionally with arguments, and returns the result.",
         userFunctionWrapper<execute_lua_sqf>,
         game_data_type::ANY,
         game_data_type::ANY,
@@ -8402,7 +8497,7 @@ static void initialize_sqf_integration() {
 
     _sqf_compile_lua_string_string = intercept::client::host::register_sqf_command(
         "luaCompile",
-        "Compile Lua code and register it as a named function",
+        "Compiles Lua code and registers it as a named Lua function.",
         userFunctionWrapper<compile_lua_sqf>,
         game_data_type::NOTHING,
         game_data_type::STRING,
@@ -8411,7 +8506,7 @@ static void initialize_sqf_integration() {
 
     _sqf_crypto_hash_string_string = intercept::client::host::register_sqf_command(
         "cryptoHash",
-        "Compute cryptographic hash of input",
+        "Returns the cryptographic hash of a string using the specified algorithm.",
         userFunctionWrapper<crypto_hash_sqf>,
         game_data_type::STRING,
         game_data_type::STRING,
@@ -8420,7 +8515,7 @@ static void initialize_sqf_integration() {
 
     _sqf_generate_random_string_array_scalar = intercept::client::host::register_sqf_command(
         "generateRandomString", 
-        "Generate random string",
+        "Returns a random string of the given length, optionally with custom character set options.",
         userFunctionWrapper<generate_random_string_sqf>,
         game_data_type::STRING,
         game_data_type::ARRAY,
@@ -8429,21 +8524,21 @@ static void initialize_sqf_integration() {
 
     _sqf_generate_uid = intercept::client::host::register_sqf_command(
         "generateUid",
-        "Generate a unique identifier",
+        "Returns a new unique identifier.",
         userFunctionWrapper<generate_uid_sqf>,
         game_data_type::STRING
     );
 
     _sqf_get_epoch = intercept::client::host::register_sqf_command(
         "getEpoch",
-        "Get current epoch time",
+        "Returns the current epoch time.",
         userFunctionWrapper<get_epoch_sqf>,
         game_data_type::STRING
     );
 
     _sqf_get_epoch_delta = intercept::client::host::register_sqf_command(
         "getEpochDelta",
-        "Get delta time in seconds from a past epoch to now",
+        "Returns the time in seconds that has passed since a previously captured epoch.",
         userFunctionWrapper<get_epoch_delta_sqf>,
         game_data_type::SCALAR,
         game_data_type::STRING
@@ -8451,7 +8546,7 @@ static void initialize_sqf_integration() {
 
     _sqf_write_khdata_string_array = intercept::client::host::register_sqf_command(
         "writeKhData",
-        "Write variable to KHData file",
+        "Writes a variable to a KHData file.",
         userFunctionWrapper<write_khdata_sqf>,
         game_data_type::NOTHING,
         game_data_type::STRING,
@@ -8460,7 +8555,7 @@ static void initialize_sqf_integration() {
 
     _sqf_read_khdata_string = intercept::client::host::register_sqf_command(
         "readKhData",
-        "Read variable from KHData file",
+        "Reads a variable from a KHData file, or returns the names of all variables in the file.",
         userFunctionWrapper<read_khdata_unary_sqf>,
         game_data_type::ARRAY,
         game_data_type::STRING
@@ -8468,7 +8563,7 @@ static void initialize_sqf_integration() {
 
     _sqf_read_khdata_string_string = intercept::client::host::register_sqf_command(
         "readKhData",
-        "Read variable from KHData file",
+        "Reads a variable from a KHData file, or returns the names of all variables in the file.",
         userFunctionWrapper<read_khdata_sqf>,
         game_data_type::ANY,
         game_data_type::STRING,
@@ -8477,7 +8572,7 @@ static void initialize_sqf_integration() {
 
     _sqf_read_khdata_string_array = intercept::client::host::register_sqf_command(
         "readKhData",
-        "Read variable from KHData file",
+        "Reads a variable from a KHData file, or returns the names of all variables in the file.",
         userFunctionWrapper<read_khdata_sqf>,
         game_data_type::ANY,
         game_data_type::STRING,
@@ -8486,14 +8581,14 @@ static void initialize_sqf_integration() {
 
     _sqf_flush_khdata = intercept::client::host::register_sqf_command(
         "flushKhData",
-        "Flush all dirty KHData files to disk",
+        "Writes all pending KHData changes to disk.",
         userFunctionWrapper<flush_khdata_sqf>,
         game_data_type::NOTHING
     );
 
     _sqf_delete_khdata_file_string = intercept::client::host::register_sqf_command(
         "deleteKhDataFile",
-        "Delete KHData file",
+        "Deletes a KHData file.",
         userFunctionWrapper<delete_khdata_file_sqf>,
         game_data_type::NOTHING,
         game_data_type::STRING
@@ -8501,14 +8596,22 @@ static void initialize_sqf_integration() {
 
     _sqf_get_terrain_matrix = intercept::client::host::register_sqf_command(
         "getTerrainMatrix",
-        "Get the pre-calculated terrain height matrix",
+        "Returns the precalculated terrain height matrix.",
         userFunctionWrapper<get_terrain_matrix_sqf>,
         game_data_type::ARRAY
     );
 
+    _sqf_read_file_string = intercept::client::host::register_sqf_command(
+        "readFile",
+        "Returns the raw contents of a file inside a loaded PBO, the kh_framework Documents folder or an active mod's folder.",
+        userFunctionWrapper<read_file_sqf>,
+        game_data_type::STRING,
+        game_data_type::STRING
+    );
+
     _sqf_trigger_lua_event_any_string = intercept::client::host::register_sqf_command(
         "luaTriggerEvent",
-        "Trigger Lua event handlers",
+        "Triggers the Lua event handlers of an event, optionally with arguments.",
         userFunctionWrapper<trigger_lua_event_sqf>,
         game_data_type::ANY,
         game_data_type::ANY,
@@ -8517,7 +8620,7 @@ static void initialize_sqf_integration() {
 
     _sqf_trigger_lua_event_any_array = intercept::client::host::register_sqf_command(
         "luaTriggerEvent",
-        "Trigger Lua event handlers",
+        "Triggers the Lua event handlers of an event, optionally with arguments.",
         userFunctionWrapper<trigger_lua_event_sqf>,
         game_data_type::ANY,
         game_data_type::ANY,
@@ -8526,7 +8629,7 @@ static void initialize_sqf_integration() {
 
     _sqf_emit_lua_variable_string = intercept::client::host::register_sqf_command(
         "luaEmitVariable",
-        "Emit Lua variable",
+        "Sends the value of a Lua global variable to the chosen targets.",
         userFunctionWrapper<emit_lua_variable_sqf>,
         game_data_type::ANY,
         game_data_type::STRING
@@ -8534,7 +8637,7 @@ static void initialize_sqf_integration() {
 
     _sqf_emit_lua_variable_array = intercept::client::host::register_sqf_command(
         "luaEmitVariable",
-        "Emit Lua variable",
+        "Sends the value of a Lua global variable to the chosen targets.",
         userFunctionWrapper<emit_lua_variable_sqf>,
         game_data_type::NOTHING,
         game_data_type::ARRAY
@@ -8542,7 +8645,7 @@ static void initialize_sqf_integration() {
 
     _sqf_lua_set_variable_array = intercept::client::host::register_sqf_command(
         "luaSetVariable",
-        "Set Lua variable",
+        "Sets a Lua global variable.",
         userFunctionWrapper<lua_set_variable_sqf>,
         game_data_type::NOTHING,
         game_data_type::ARRAY
@@ -8550,7 +8653,7 @@ static void initialize_sqf_integration() {
 
     _sqf_lua_get_variable_string = intercept::client::host::register_sqf_command(
         "luaGetVariable",
-        "Get Lua variable",
+        "Returns the value of a Lua global variable.",
         userFunctionWrapper<lua_get_variable_sqf>,
         game_data_type::ANY,
         game_data_type::STRING
@@ -8558,7 +8661,7 @@ static void initialize_sqf_integration() {
 
     _sqf_lua_get_variable_array = intercept::client::host::register_sqf_command(
         "luaGetVariable",
-        "Get Lua variable",
+        "Returns the value of a Lua global variable.",
         userFunctionWrapper<lua_get_variable_sqf>,
         game_data_type::ANY,
         game_data_type::ARRAY
@@ -8566,7 +8669,7 @@ static void initialize_sqf_integration() {
 
     _sqf_execute_any_code = intercept::client::host::register_sqf_command(
         "execute",
-        "Execute SQF",
+        "Executes an SQF function on the chosen targets, optionally delayed, repeated, conditional or persistent.",
         userFunctionWrapper<execute_sqf>,
         game_data_type::ANY,
         game_data_type::ANY,
@@ -8575,7 +8678,7 @@ static void initialize_sqf_integration() {
 
     _sqf_execute_any_string = intercept::client::host::register_sqf_command(
         "execute",
-        "Execute SQF",
+        "Executes an SQF function on the chosen targets, optionally delayed, repeated, conditional or persistent.",
         userFunctionWrapper<execute_sqf>,
         game_data_type::ANY,
         game_data_type::ANY,
@@ -8584,7 +8687,7 @@ static void initialize_sqf_integration() {
 
     _sqf_execute_any_array = intercept::client::host::register_sqf_command(
         "execute",
-        "Execute SQF",
+        "Executes an SQF function on the chosen targets, optionally delayed, repeated, conditional or persistent.",
         userFunctionWrapper<execute_sqf>,
         game_data_type::ANY,
         game_data_type::ANY,
@@ -8593,7 +8696,7 @@ static void initialize_sqf_integration() {
 
     _sqf_remove_handler_array = intercept::client::host::register_sqf_command(
         "removeHandler",
-        "Remove an execution handler",
+        "Removes a handler created by execute.",
         userFunctionWrapper<remove_handler_sqf>,
         game_data_type::NOTHING,
         game_data_type::ARRAY
@@ -8601,7 +8704,7 @@ static void initialize_sqf_integration() {
 
     _sqf_execute_lua_string = intercept::client::host::register_sqf_command(
         "luaExecute",
-        "Execute Lua code or function",
+        "Executes Lua code or a named Lua function, optionally with arguments, and returns the result.",
         userFunctionWrapper<execute_lua_sqf_unary>,
         game_data_type::ANY,
         game_data_type::STRING
@@ -8609,7 +8712,7 @@ static void initialize_sqf_integration() {
 
     _sqf_execute_lua_array = intercept::client::host::register_sqf_command(
         "luaExecute",
-        "Execute Lua code or function",
+        "Executes Lua code or a named Lua function, optionally with arguments, and returns the result.",
         userFunctionWrapper<execute_lua_sqf_unary>,
         game_data_type::ANY,
         game_data_type::ARRAY
@@ -8617,7 +8720,7 @@ static void initialize_sqf_integration() {
 
     _sqf_generate_random_string_scalar = intercept::client::host::register_sqf_command(
         "generateRandomString",
-        "Generate random string",
+        "Returns a random string of the given length, optionally with custom character set options.",
         userFunctionWrapper<generate_random_string_sqf_unary>,
         game_data_type::STRING,
         game_data_type::SCALAR
@@ -8625,7 +8728,7 @@ static void initialize_sqf_integration() {
 
     _sqf_trigger_lua_event_string = intercept::client::host::register_sqf_command(
         "luaTriggerEvent",
-        "Trigger Lua event handlers",
+        "Triggers the Lua event handlers of an event, optionally with arguments.",
         userFunctionWrapper<trigger_lua_event_sqf_unary>,
         game_data_type::ANY,
         game_data_type::STRING
@@ -8633,7 +8736,7 @@ static void initialize_sqf_integration() {
 
     _sqf_trigger_lua_event_array = intercept::client::host::register_sqf_command(
         "luaTriggerEvent",
-        "Trigger Lua event handlers",
+        "Triggers the Lua event handlers of an event, optionally with arguments.",
         userFunctionWrapper<trigger_lua_event_sqf_unary>,
         game_data_type::ANY,
         game_data_type::ARRAY
@@ -8641,7 +8744,7 @@ static void initialize_sqf_integration() {
 
     _sqf_execute_code = intercept::client::host::register_sqf_command(
         "execute",
-        "Execute SQF",
+        "Executes an SQF function on the chosen targets, optionally delayed, repeated, conditional or persistent.",
         userFunctionWrapper<execute_sqf_unary>,
         game_data_type::ANY,
         game_data_type::CODE
@@ -8649,7 +8752,7 @@ static void initialize_sqf_integration() {
 
     _sqf_execute_string = intercept::client::host::register_sqf_command(
         "execute",
-        "Execute SQF",
+        "Executes an SQF function on the chosen targets, optionally delayed, repeated, conditional or persistent.",
         userFunctionWrapper<execute_sqf_unary>,
         game_data_type::ANY,
         game_data_type::STRING
@@ -8657,7 +8760,7 @@ static void initialize_sqf_integration() {
 
     _sqf_execute_array = intercept::client::host::register_sqf_command(
         "execute",
-        "Execute SQF",
+        "Executes an SQF function on the chosen targets, optionally delayed, repeated, conditional or persistent.",
         userFunctionWrapper<execute_sqf_unary>,
         game_data_type::ANY,
         game_data_type::ARRAY
@@ -8665,7 +8768,7 @@ static void initialize_sqf_integration() {
 
     _sqf_set_return_value = intercept::client::host::register_sqf_command(
         "setReturnValue",
-        "Store a return value in fast memory",
+        "Stores a value in fast memory for getReturnValue to retrieve.",
         userFunctionWrapper<set_return_value_sqf>,
         game_data_type::NOTHING,
         game_data_type::ANY
@@ -8673,14 +8776,14 @@ static void initialize_sqf_integration() {
 
     _sqf_get_return_value = intercept::client::host::register_sqf_command(
         "getReturnValue",
-        "Retrieve the stored return value",
+        "Returns the value stored with setReturnValue.",
         userFunctionWrapper<get_return_value_sqf>,
         game_data_type::ANY
     );
 
     _sqf_set_call_arguments = intercept::client::host::register_sqf_command(
         "setCallArguments",
-        "Store call arguments in fast memory",
+        "Stores call arguments in fast memory for getCallArguments to retrieve.",
         userFunctionWrapper<set_call_arguments_sqf>,
         game_data_type::NOTHING,
         game_data_type::ANY
@@ -8688,14 +8791,14 @@ static void initialize_sqf_integration() {
 
     _sqf_get_call_arguments = intercept::client::host::register_sqf_command(
         "getCallArguments",
-        "Retrieve the stored call arguments",
+        "Returns the arguments stored with setCallArguments.",
         userFunctionWrapper<get_call_arguments_sqf>,
         game_data_type::ANY
     );
 
     _sqf_get_rotation_euler_object = intercept::client::host::register_sqf_command(
         "getRotationEuler",
-        "Get object rotation as Euler angles [pitch, roll, yaw] in degrees",
+        "Returns an object's rotation as Euler angles [pitch, roll, yaw] in degrees, or the rotation that points it at another object.",
         userFunctionWrapper<get_rotation_euler_unary>,
         game_data_type::ARRAY,
         game_data_type::OBJECT
@@ -8703,7 +8806,7 @@ static void initialize_sqf_integration() {
 
     _sqf_get_rotation_euler_object_object = intercept::client::host::register_sqf_command(
         "getRotationEuler",
-        "Get object rotation as Euler angles [pitch, roll, yaw] in degrees",
+        "Returns an object's rotation as Euler angles [pitch, roll, yaw] in degrees, or the rotation that points it at another object.",
         userFunctionWrapper<get_rotation_euler_sqf>,
         game_data_type::ARRAY,
         game_data_type::OBJECT,
@@ -8712,7 +8815,7 @@ static void initialize_sqf_integration() {
 
     _sqf_set_rotation_euler = intercept::client::host::register_sqf_command(
         "setRotationEuler",
-        "Set object rotation from Euler angles [pitch, roll, yaw] in degrees",
+        "Sets an object's rotation from Euler angles [pitch, roll, yaw] in degrees.",
         userFunctionWrapper<set_rotation_euler_sqf>,
         game_data_type::NOTHING,
         game_data_type::OBJECT,
@@ -8721,7 +8824,7 @@ static void initialize_sqf_integration() {
 
     _sqf_vector_to_euler = intercept::client::host::register_sqf_command(
         "vectorToEuler",
-        "Convert [vectorDir, vectorUp] to Euler angles [pitch, roll, yaw] in degrees",
+        "Converts [vectorDir, vectorUp] to Euler angles [pitch, roll, yaw] in degrees.",
         userFunctionWrapper<vector_to_euler_sqf>,
         game_data_type::ARRAY,
         game_data_type::ARRAY
@@ -8729,7 +8832,7 @@ static void initialize_sqf_integration() {
 
     _sqf_euler_to_vector = intercept::client::host::register_sqf_command(
         "eulerToVector",
-        "Convert Euler angles [pitch, roll, yaw] in degrees to [vectorDir, vectorUp]",
+        "Converts Euler angles [pitch, roll, yaw] in degrees to [vectorDir, vectorUp].",
         userFunctionWrapper<euler_to_vector_sqf>,
         game_data_type::ARRAY,
         game_data_type::ARRAY
@@ -8737,7 +8840,7 @@ static void initialize_sqf_integration() {
 
     _sqf_euler_to_quaternion = intercept::client::host::register_sqf_command(
         "eulerToQuaternion",
-        "Convert Euler angles [pitch, roll, yaw] in degrees to quaternion [w, x, y, z]",
+        "Converts Euler angles [pitch, roll, yaw] in degrees to a quaternion [w, x, y, z].",
         userFunctionWrapper<euler_to_quaternion_sqf>,
         game_data_type::ARRAY,
         game_data_type::ARRAY
@@ -8745,7 +8848,7 @@ static void initialize_sqf_integration() {
 
     _sqf_quaternion_to_euler = intercept::client::host::register_sqf_command(
         "quaternionToEuler",
-        "Convert quaternion [w, x, y, z] to Euler angles [pitch, roll, yaw] in degrees",
+        "Converts a quaternion [w, x, y, z] to Euler angles [pitch, roll, yaw] in degrees.",
         userFunctionWrapper<quaternion_to_euler_sqf>,
         game_data_type::ARRAY,
         game_data_type::ARRAY
@@ -8753,7 +8856,7 @@ static void initialize_sqf_integration() {
 
     _sqf_vector_to_quaternion = intercept::client::host::register_sqf_command(
         "vectorToQuaternion",
-        "Convert [vectorDir, vectorUp] to quaternion [w, x, y, z]",
+        "Converts [vectorDir, vectorUp] to a quaternion [w, x, y, z].",
         userFunctionWrapper<vector_to_quaternion_sqf>,
         game_data_type::ARRAY,
         game_data_type::ARRAY
@@ -8761,7 +8864,7 @@ static void initialize_sqf_integration() {
 
     _sqf_quaternion_to_vector = intercept::client::host::register_sqf_command(
         "quaternionToVector",
-        "Convert quaternion [w, x, y, z] to [vectorDir, vectorUp]",
+        "Converts a quaternion [w, x, y, z] to [vectorDir, vectorUp].",
         userFunctionWrapper<quaternion_to_vector_sqf>,
         game_data_type::ARRAY,
         game_data_type::ARRAY
@@ -8769,7 +8872,7 @@ static void initialize_sqf_integration() {
 
     _sqf_quaternion_slerp = intercept::client::host::register_sqf_command(
         "quaternionSlerp",
-        "Spherical linear interpolation between two quaternions",
+        "Spherically interpolates between two quaternions.",
         userFunctionWrapper<quaternion_slerp_sqf>,
         game_data_type::ARRAY,
         game_data_type::ARRAY
@@ -8777,7 +8880,7 @@ static void initialize_sqf_integration() {
 
     _sqf_quaternion_multiply = intercept::client::host::register_sqf_command(
         "quaternionMultiply",
-        "Multiply two quaternions",
+        "Multiplies two quaternions.",
         userFunctionWrapper<quaternion_multiply_sqf>,
         game_data_type::ARRAY,
         game_data_type::ARRAY,
@@ -8786,7 +8889,7 @@ static void initialize_sqf_integration() {
 
     _sqf_get_rotation_quaternion_object = intercept::client::host::register_sqf_command(
         "getRotationQuaternion",
-        "Get object rotation as quaternion [w, x, y, z]",
+        "Returns an object's rotation as a quaternion [w, x, y, z], or the rotation that points it at another object.",
         userFunctionWrapper<get_quaternion_rotation_unary>,
         game_data_type::ARRAY,
         game_data_type::OBJECT
@@ -8794,7 +8897,7 @@ static void initialize_sqf_integration() {
 
     _sqf_get_rotation_quaternion_object_object = intercept::client::host::register_sqf_command(
         "getRotationQuaternion",
-        "Get object rotation as quaternion [w, x, y, z]",
+        "Returns an object's rotation as a quaternion [w, x, y, z], or the rotation that points it at another object.",
         userFunctionWrapper<get_quaternion_rotation_sqf>,
         game_data_type::ARRAY,
         game_data_type::OBJECT,
@@ -8803,7 +8906,7 @@ static void initialize_sqf_integration() {
 
     _sqf_set_rotation_quaternion = intercept::client::host::register_sqf_command(
         "setRotationQuaternion",
-        "Set object rotation from quaternion [w, x, y, z]",
+        "Sets an object's rotation from a quaternion [w, x, y, z].",
         userFunctionWrapper<set_quaternion_rotation_sqf>,
         game_data_type::NOTHING,
         game_data_type::OBJECT,
@@ -8812,7 +8915,7 @@ static void initialize_sqf_integration() {
 
     _sqf_axis_angle_to_quaternion = intercept::client::host::register_sqf_command(
         "axisAngleToQuaternion",
-        "Convert [[axisX, axisY, axisZ], angle] to quaternion [w, x, y, z]",
+        "Converts an axis and angle [[x, y, z], angle] to a quaternion [w, x, y, z].",
         userFunctionWrapper<axis_angle_to_quaternion_sqf>,
         game_data_type::ARRAY,
         game_data_type::ARRAY
@@ -8820,7 +8923,7 @@ static void initialize_sqf_integration() {
 
     _sqf_quaternion_to_axis_angle = intercept::client::host::register_sqf_command(
         "quaternionToAxisAngle",
-        "Convert quaternion [w, x, y, z] to [[axisX, axisY, axisZ], angle]",
+        "Converts a quaternion [w, x, y, z] to an axis and angle [[x, y, z], angle].",
         userFunctionWrapper<quaternion_to_axis_angle_sqf>,
         game_data_type::ARRAY,
         game_data_type::ARRAY
@@ -8828,7 +8931,7 @@ static void initialize_sqf_integration() {
 
     _sqf_initialize_ai = intercept::client::host::register_sqf_command(
         "initializeAi",
-        "Initialize an AI instance with specified name",
+        "Initializes a named AI instance.",
         userFunctionWrapper<initialize_ai_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING
@@ -8836,7 +8939,7 @@ static void initialize_sqf_integration() {
 
     _sqf_stop_ai = intercept::client::host::register_sqf_command(
         "stopAi",
-        "Stop a specific AI instance",
+        "Stops a named AI instance.",
         userFunctionWrapper<stop_ai_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING
@@ -8844,14 +8947,14 @@ static void initialize_sqf_integration() {
 
     _sqf_stop_all_ai = intercept::client::host::register_sqf_command(
         "stopAllAi",
-        "Stop all AI instances",
+        "Stops all AI instances.",
         userFunctionWrapper<stop_all_ai_sqf>,
         game_data_type::BOOL
     );
 
     _sqf_is_ai_active = intercept::client::host::register_sqf_command(
         "isAiActive",
-        "Check if a specific AI is currently active",
+        "Returns true if a named AI instance is active.",
         userFunctionWrapper<is_ai_active_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING
@@ -8859,7 +8962,7 @@ static void initialize_sqf_integration() {
 
     _sqf_is_ai_generating = intercept::client::host::register_sqf_command(
         "isAiGenerating",
-        "Check if a specific AI is currently generating a response",
+        "Returns true if a named AI instance is generating a response.",
         userFunctionWrapper<is_ai_generating_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING
@@ -8867,14 +8970,14 @@ static void initialize_sqf_integration() {
 
     _sqf_get_active_ai = intercept::client::host::register_sqf_command(
         "getActiveAi",
-        "Get array of active AI names",
+        "Returns the names of all active AI instances.",
         userFunctionWrapper<get_active_ai_sqf>,
         game_data_type::ARRAY
     );
 
     _sqf_set_ai_model_string = intercept::client::host::register_sqf_command(
         "setAiModel",
-        "Set the global AI model",
+        "Sets the model used by AI instances, either globally or for a named instance.",
         userFunctionWrapper<set_ai_model_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING
@@ -8882,7 +8985,7 @@ static void initialize_sqf_integration() {
 
     _sqf_set_ai_model_string_string = intercept::client::host::register_sqf_command(
         "setAiModel",
-        "Set the specific AI instance model",
+        "Sets the model used by AI instances, either globally or for a named instance.",
         userFunctionWrapper<set_ai_instance_model_path_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING,
@@ -8891,7 +8994,7 @@ static void initialize_sqf_integration() {
 
     _sqf_update_ai_system_prompt = intercept::client::host::register_sqf_command(
         "updateAiSystemPrompt",
-        "Update the system prompt for an AI",
+        "Updates the system prompt of a named AI instance.",
         userFunctionWrapper<update_ai_system_prompt_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING,
@@ -8900,7 +9003,7 @@ static void initialize_sqf_integration() {
 
     _sqf_update_ai_master_prompt = intercept::client::host::register_sqf_command(
         "updateAiMasterPrompt",
-        "Update the master prompt for an AI",
+        "Updates the master prompt of a named AI instance.",
         userFunctionWrapper<update_ai_master_prompt_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING,
@@ -8909,7 +9012,7 @@ static void initialize_sqf_integration() {
 
     _sqf_update_ai_user_prompt = intercept::client::host::register_sqf_command(
         "updateAiUserPrompt",
-        "Update the user prompt for an AI",
+        "Updates the user prompt of a named AI instance.",
         userFunctionWrapper<update_ai_user_prompt_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING,
@@ -8918,7 +9021,7 @@ static void initialize_sqf_integration() {
 
     _sqf_set_ai_parameters = intercept::client::host::register_sqf_command(
         "setAiParameters",
-        "Set parameters for an AI",
+        "Sets the generation parameters of a named AI instance.",
         userFunctionWrapper<set_ai_parameters_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING,
@@ -8927,7 +9030,7 @@ static void initialize_sqf_integration() {
 
     _sqf_trigger_ai_inference = intercept::client::host::register_sqf_command(
         "triggerAiInference",
-        "Trigger inference for an AI",
+        "Starts response generation for a named AI instance.",
         userFunctionWrapper<trigger_ai_inference_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING
@@ -8935,7 +9038,7 @@ static void initialize_sqf_integration() {
 
     _sqf_set_ai_markers = intercept::client::host::register_sqf_command(
         "setAiMarkers",
-        "Set custom prompt markers for an AI instance",
+        "Sets the custom prompt markers of a named AI instance.",
         userFunctionWrapper<set_ai_markers_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING,
@@ -8944,7 +9047,7 @@ static void initialize_sqf_integration() {
 
     _sqf_abort_ai_generation = intercept::client::host::register_sqf_command(
         "abortAiGeneration",
-        "Abort current AI response generation for specified AI",
+        "Aborts the response a named AI instance is currently generating.",
         userFunctionWrapper<abort_ai_generation_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING
@@ -8952,7 +9055,7 @@ static void initialize_sqf_integration() {
 
     _sqf_log_ai_generation = intercept::client::host::register_sqf_command(
         "logAiGeneration",
-        "Enable or disable generation statistics logging for specified AI",
+        "Enables or disables generation statistics logging for a named AI instance.",
         userFunctionWrapper<log_ai_generation_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING,
@@ -8961,7 +9064,7 @@ static void initialize_sqf_integration() {
 
     _sqf_reset_ai_context = intercept::client::host::register_sqf_command(
         "resetAiContext",
-        "Reset conversation context for specified AI",
+        "Resets the conversation context of a named AI instance.",
         userFunctionWrapper<reset_ai_context_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING
@@ -8969,7 +9072,7 @@ static void initialize_sqf_integration() {
 
     _sqf_tts_load_model_string = intercept::client::host::register_sqf_command(
         "ttsLoadModel",
-        "Load a TTS model",
+        "Loads a text-to-speech model, optionally with configuration.",
         userFunctionWrapper<tts_load_model_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING
@@ -8977,7 +9080,7 @@ static void initialize_sqf_integration() {
 
     _sqf_tts_load_model_string_array = intercept::client::host::register_sqf_command(
         "ttsLoadModel",
-        "Load a TTS model with configuration",
+        "Loads a text-to-speech model, optionally with configuration.",
         userFunctionWrapper<tts_load_model_with_config_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING,
@@ -8986,14 +9089,14 @@ static void initialize_sqf_integration() {
 
     _sqf_tts_is_initialized = intercept::client::host::register_sqf_command(
         "ttsIsInitialized",
-        "Check if TTS system is initialized",
+        "Returns true if the text-to-speech system is initialized.",
         userFunctionWrapper<tts_is_initialized_sqf>,
         game_data_type::BOOL
     );
 
     _sqf_tts_speak = intercept::client::host::register_sqf_command(
         "ttsSpeak",
-        "Generate and play speech",
+        "Generates speech from text and plays it through a speaker.",
         userFunctionWrapper<tts_speak_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY
@@ -9001,7 +9104,7 @@ static void initialize_sqf_integration() {
 
     _sqf_tts_update_speaker = intercept::client::host::register_sqf_command(
         "ttsUpdateSpeaker",
-        "Update speaker position/volume",
+        "Updates the position and volume of a text-to-speech speaker.",
         userFunctionWrapper<tts_update_speaker_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY
@@ -9009,7 +9112,7 @@ static void initialize_sqf_integration() {
 
     _sqf_tts_stop_speaker = intercept::client::host::register_sqf_command(
         "ttsStopSpeaker",
-        "Stop specific speaker",
+        "Stops a text-to-speech speaker.",
         userFunctionWrapper<tts_stop_speaker_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING
@@ -9017,7 +9120,7 @@ static void initialize_sqf_integration() {
 
     _sqf_tts_is_playing = intercept::client::host::register_sqf_command(
         "ttsIsPlaying",
-        "Check if speaker is playing",
+        "Returns true if a text-to-speech speaker is playing.",
         userFunctionWrapper<tts_is_playing_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING
@@ -9025,14 +9128,14 @@ static void initialize_sqf_integration() {
 
     _sqf_tts_stop_all = intercept::client::host::register_sqf_command(
         "ttsStopAll",
-        "Stop all speakers",
+        "Stops all text-to-speech speakers.",
         userFunctionWrapper<tts_stop_all_sqf>,
         game_data_type::BOOL
     );
 
     _sqf_stt_load_model_string = intercept::client::host::register_sqf_command(
         "sttLoadModel",
-        "Load an STT model by name",
+        "Loads a speech-to-text model, optionally with configuration.",
         userFunctionWrapper<stt_load_model_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING
@@ -9040,7 +9143,7 @@ static void initialize_sqf_integration() {
 
     _sqf_stt_load_model_string_array = intercept::client::host::register_sqf_command(
         "sttLoadModel",
-        "Load STT model with config",
+        "Loads a speech-to-text model, optionally with configuration.",
         userFunctionWrapper<stt_load_model_with_config_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING,
@@ -9049,35 +9152,35 @@ static void initialize_sqf_integration() {
 
     _sqf_stt_is_initialized = intercept::client::host::register_sqf_command(
         "sttIsInitialized",
-        "Check if STT is initialized",
+        "Returns true if the speech-to-text system is initialized.",
         userFunctionWrapper<stt_is_initialized_sqf>,
         game_data_type::BOOL
     );
 
     _sqf_stt_is_capturing = intercept::client::host::register_sqf_command(
         "sttIsCapturing",
-        "Check if currently capturing audio",
+        "Returns true if speech-to-text audio capture is active.",
         userFunctionWrapper<stt_is_capturing_sqf>,
         game_data_type::BOOL
     );
 
     _sqf_stt_start_capture = client::host::register_sqf_command(
         "sttStartCapture", 
-        "Manually start audio capture",
+        "Starts speech-to-text audio capture.",
         userFunctionWrapper<stt_start_capture_sqf>,
         game_data_type::BOOL
     );
 
     _sqf_stt_stop_capture = client::host::register_sqf_command(
         "sttStopCapture", 
-        "Manually stop audio capture and process",
+        "Stops speech-to-text audio capture and transcribes the captured audio.",
         userFunctionWrapper<stt_stop_capture_sqf>,
         game_data_type::BOOL
     );
 
     _sqf_html_create = intercept::client::host::register_sqf_command(
         "htmlCreate",
-        "Create an HTML UI overlay from HTML content string",
+        "Creates an HTML UI document from an HTML string and returns its ID.",
         userFunctionWrapper<ui_create_html_sqf>,
         game_data_type::STRING,
         game_data_type::STRING,
@@ -9086,7 +9189,7 @@ static void initialize_sqf_integration() {
 
     _sqf_html_open = intercept::client::host::register_sqf_command(
         "htmlOpen",
-        "Open an HTML file as UI overlay",
+        "Opens an HTML file as an HTML UI document and returns its ID.",
         userFunctionWrapper<ui_open_html_sqf>,
         game_data_type::STRING,
         game_data_type::STRING,
@@ -9095,7 +9198,7 @@ static void initialize_sqf_integration() {
 
     _sqf_html_close = intercept::client::host::register_sqf_command(
         "htmlClose",
-        "Close an HTML UI document by ID",
+        "Closes an HTML UI document.",
         userFunctionWrapper<ui_close_html_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING
@@ -9103,7 +9206,7 @@ static void initialize_sqf_integration() {
 
     _sqf_html_set_visible = intercept::client::host::register_sqf_command(
         "htmlSetVisible",
-        "Set HTML UI visibility",
+        "Shows or hides an HTML UI document.",
         userFunctionWrapper<ui_set_html_visible_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING,
@@ -9112,21 +9215,21 @@ static void initialize_sqf_integration() {
 
     _sqf_html_get_open = intercept::client::host::register_sqf_command(
         "htmlGetOpenDocuments",
-        "Get array of open HTML UI document IDs",
+        "Returns the IDs of all open HTML UI documents.",
         userFunctionWrapper<ui_get_open_documents_sqf>,
         game_data_type::ARRAY
     );
 
     _sqf_html_is_initialized = intercept::client::host::register_sqf_command(
         "htmlIsInitialized",
-        "Check if HTML UI framework is initialized",
+        "Returns true if the HTML UI framework is initialized.",
         userFunctionWrapper<ui_is_initialized_sqf>,
         game_data_type::BOOL
     );
 
     _sqf_html_execute_js = intercept::client::host::register_sqf_command(
         "htmlExecuteJS",
-        "Execute JavaScript in HTML document",
+        "Executes JavaScript in an HTML UI document.",
         userFunctionWrapper<ui_execute_js_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING,
@@ -9135,7 +9238,7 @@ static void initialize_sqf_integration() {
 
     _sqf_html_set_js_variable = intercept::client::host::register_sqf_command(
         "htmlSetJsVariable",
-        "Set a global JavaScript variable in HTML document",
+        "Sets a global JavaScript variable in an HTML UI document.",
         userFunctionWrapper<ui_set_js_variable_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING,
@@ -9144,7 +9247,7 @@ static void initialize_sqf_integration() {
 
     _sqf_html_get_js_variable = intercept::client::host::register_sqf_command(
         "htmlGetJsVariable",
-        "Get a global JavaScript variable from HTML document",
+        "Returns a global JavaScript variable from an HTML UI document.",
         userFunctionWrapper<ui_get_js_variable_sqf>,
         game_data_type::ANY,
         game_data_type::STRING,
@@ -9153,7 +9256,7 @@ static void initialize_sqf_integration() {
 
     _sqf_html_set_position = intercept::client::host::register_sqf_command(
         "htmlSetPosition",
-        "Set HTML UI position",
+        "Sets the screen position of an HTML UI document.",
         userFunctionWrapper<ui_set_position_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING,
@@ -9162,7 +9265,7 @@ static void initialize_sqf_integration() {
 
     _sqf_html_set_opacity = intercept::client::host::register_sqf_command(
         "htmlSetOpacity",
-        "Set HTML UI opacity",
+        "Sets the opacity of an HTML UI document.",
         userFunctionWrapper<ui_set_opacity_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING,
@@ -9171,7 +9274,7 @@ static void initialize_sqf_integration() {
 
     _sqf_html_set_size = intercept::client::host::register_sqf_command(
         "htmlSetSize",
-        "Resize HTML UI",
+        "Sets the size of an HTML UI document.",
         userFunctionWrapper<ui_set_size_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING,
@@ -9180,7 +9283,7 @@ static void initialize_sqf_integration() {
 
     _sqf_html_set_z_order = intercept::client::host::register_sqf_command(
         "htmlSetZOrder",
-        "Set HTML UI z-order",
+        "Sets the z-order of an HTML UI document.",
         userFunctionWrapper<ui_set_z_order_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING,
@@ -9189,7 +9292,7 @@ static void initialize_sqf_integration() {
 
     _sqf_html_bring_to_front = intercept::client::host::register_sqf_command(
         "htmlBringToFront",
-        "Bring HTML UI to front of all others",
+        "Moves an HTML UI document in front of all others.",
         userFunctionWrapper<ui_bring_to_front_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING
@@ -9197,7 +9300,7 @@ static void initialize_sqf_integration() {
 
     _sqf_html_send_to_back = intercept::client::host::register_sqf_command(
         "htmlSendToBack",
-        "Send HTML UI behind all others",
+        "Moves an HTML UI document behind all others.",
         userFunctionWrapper<ui_send_to_back_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING
@@ -9205,7 +9308,7 @@ static void initialize_sqf_integration() {
 
     _sqf_html_reload = intercept::client::host::register_sqf_command(
         "htmlReload",
-        "Reload HTML file from disk",
+        "Reloads an HTML UI document from its file on disk.",
         userFunctionWrapper<ui_reload_html_sqf>,
         game_data_type::STRING,
         game_data_type::STRING
@@ -9213,7 +9316,7 @@ static void initialize_sqf_integration() {
 
     _sqf_kh_network_message_send_any_array = intercept::client::host::register_sqf_command(
         "khNetworkMessageSend",
-        "Send a network message",
+        "Sends a KH network message to the chosen targets.",
         userFunctionWrapper<network_message_send_sqf>,
         game_data_type::ANY,
         game_data_type::ANY,
@@ -9222,7 +9325,7 @@ static void initialize_sqf_integration() {
 
     _sqf_kh_network_message_send_array = intercept::client::host::register_sqf_command(
         "khNetworkMessageSend",
-        "Send a network message",
+        "Sends a KH network message to the chosen targets.",
         userFunctionWrapper<network_message_send_unary_sqf>,
         game_data_type::ANY,
         game_data_type::ARRAY
@@ -9230,7 +9333,7 @@ static void initialize_sqf_integration() {
 
     _sqf_kh_network_remove_jip = intercept::client::host::register_sqf_command(
         "khNetworkMessageRemoveJip",
-        "Remove a JIP message by its key",
+        "Removes a stored JIP network message by its key.",
         userFunctionWrapper<network_remove_jip_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING
@@ -9238,7 +9341,7 @@ static void initialize_sqf_integration() {
 
     _sqf_kh_network_message_receive_string_array = intercept::client::host::register_sqf_command(
         "khNetworkMessageReceive",
-        "Register a handler for network messages",
+        "Registers a handler for a KH network message and returns its ID.",
         userFunctionWrapper<network_message_receive_sqf>,
         game_data_type::ARRAY,
         game_data_type::STRING,
@@ -9247,7 +9350,7 @@ static void initialize_sqf_integration() {
 
     _sqf_kh_network_message_receive_string_code = intercept::client::host::register_sqf_command(
         "khNetworkMessageReceive",
-        "Register a handler for network messages",
+        "Registers a handler for a KH network message and returns its ID.",
         userFunctionWrapper<network_message_receive_sqf>,
         game_data_type::ARRAY,
         game_data_type::STRING,
@@ -9256,7 +9359,7 @@ static void initialize_sqf_integration() {
 
     _sqf_kh_network_remove_handler = intercept::client::host::register_sqf_command(
         "khNetworkRemoveHandler",
-        "Remove a network message handler by ID",
+        "Removes a KH network message handler.",
         userFunctionWrapper<network_remove_handler_sqf>,
         game_data_type::BOOL,
         game_data_type::SCALAR
@@ -9265,7 +9368,7 @@ static void initialize_sqf_integration() {
     // The [handlerId, owner] pair khNetworkMessageReceive returns.
     _sqf_kh_network_remove_handler_array = intercept::client::host::register_sqf_command(
         "khNetworkRemoveHandler",
-        "Remove a network message handler by [handlerId, owner]",
+        "Removes a KH network message handler.",
         userFunctionWrapper<network_remove_handler_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY
@@ -9273,28 +9376,28 @@ static void initialize_sqf_integration() {
 
     _sqf_kh_network_is_initialized = intercept::client::host::register_sqf_command(
         "khNetworkIsInitialized",
-        "Check if the network framework is initialized",
+        "Returns true if the KH network framework is initialized.",
         userFunctionWrapper<network_is_initialized_sqf>,
         game_data_type::BOOL
     );
 
     _sqf_kh_network_initialize = intercept::client::host::register_sqf_command(
         "khNetworkInitialize",
-        "Initialize network framework",
+        "Initializes the KH network framework.",
         userFunctionWrapper<network_initialize_sqf>,
         game_data_type::BOOL
     );
 
     _sqf_kh_network_shutdown = intercept::client::host::register_sqf_command(
         "khNetworkShutdown",
-        "Shutdown the network framework",
+        "Shuts down the KH network framework.",
         userFunctionWrapper<network_shutdown_sqf>,
         game_data_type::BOOL
     );
 
     _sqf_enable_network_logging = intercept::client::host::register_sqf_command(
         "enableKhNetworkLogging",
-        "Network message logging",
+        "Enables or disables KH network message logging.",
         userFunctionWrapper<enable_network_logging_sqf>,
         game_data_type::BOOL,
         game_data_type::BOOL
@@ -9302,7 +9405,7 @@ static void initialize_sqf_integration() {
 
     _sqf_kh_set_variable_namespace_array = intercept::client::host::register_sqf_command(
         "khSetVariable",
-        "Set a variable on a namespace and synchronize across network. Usage: namespace khSetVariable [name, value, target, jip]",
+        "Sets a variable on a namespace, object, group, location or display and synchronizes it to the chosen targets.",
         userFunctionWrapper<kh_set_variable_impl>,
         game_data_type::ANY,
         game_data_type::NAMESPACE,
@@ -9311,7 +9414,7 @@ static void initialize_sqf_integration() {
 
     _sqf_kh_set_variable_object_array = intercept::client::host::register_sqf_command(
         "khSetVariable",
-        "Set a variable on an object and synchronize across network. Usage: object khSetVariable [name, value, target, jip]",
+        "Sets a variable on a namespace, object, group, location or display and synchronizes it to the chosen targets.",
         userFunctionWrapper<kh_set_variable_impl>,
         game_data_type::ANY,
         game_data_type::OBJECT,
@@ -9320,7 +9423,7 @@ static void initialize_sqf_integration() {
 
     _sqf_kh_set_variable_group_array = intercept::client::host::register_sqf_command(
         "khSetVariable",
-        "Set a variable on a group and synchronize across network. Usage: group khSetVariable [name, value, target, jip]",
+        "Sets a variable on a namespace, object, group, location or display and synchronizes it to the chosen targets.",
         userFunctionWrapper<kh_set_variable_impl>,
         game_data_type::ANY,
         game_data_type::GROUP,
@@ -9329,7 +9432,7 @@ static void initialize_sqf_integration() {
 
     _sqf_kh_set_variable_location_array = intercept::client::host::register_sqf_command(
         "khSetVariable",
-        "Set a variable on a location and synchronize across network. Usage: location khSetVariable [name, value, target, jip]",
+        "Sets a variable on a namespace, object, group, location or display and synchronizes it to the chosen targets.",
         userFunctionWrapper<kh_set_variable_impl>,
         game_data_type::ANY,
         game_data_type::LOCATION,
@@ -9338,7 +9441,7 @@ static void initialize_sqf_integration() {
 
     _sqf_kh_set_variable_display_array = intercept::client::host::register_sqf_command(
         "khSetVariable",
-        "Set a variable on a display and synchronize across network. Usage: display khSetVariable [name, value, target, jip]",
+        "Sets a variable on a namespace, object, group, location or display and synchronizes it to the chosen targets.",
         userFunctionWrapper<kh_set_variable_impl>,
         game_data_type::ANY,
         game_data_type::DISPLAY,
@@ -9347,21 +9450,21 @@ static void initialize_sqf_integration() {
 
     _sqf_ts_connect = intercept::client::host::register_sqf_command(
         "tsConnect",
-        "Initialize TeamSpeak IPC connection",
+        "Opens the connection to the TeamSpeak plugin.",
         userFunctionWrapper<ts_connect_sqf>,
         game_data_type::BOOL
     );
 
     _sqf_ts_disconnect = intercept::client::host::register_sqf_command(
         "tsDisconnect",
-        "Cleanup TeamSpeak IPC connection",
+        "Closes the connection to the TeamSpeak plugin.",
         userFunctionWrapper<ts_disconnect_sqf>,
         game_data_type::BOOL
     );
 
     _sqf_ts_apply_voice_effects = intercept::client::host::register_sqf_command(
         "tsApplyVoiceEffects",
-        "Apply voice effects to TeamSpeak transmission",
+        "Applies voice effects to the local TeamSpeak transmission.",
         userFunctionWrapper<ts_apply_voice_effects_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY
@@ -9369,42 +9472,42 @@ static void initialize_sqf_integration() {
 
     _sqf_ts_clear_voice_effects = intercept::client::host::register_sqf_command(
         "tsClearVoiceEffects",
-        "Clear all voice effects from TeamSpeak transmission",
+        "Removes all voice effects from the local TeamSpeak transmission.",
         userFunctionWrapper<ts_clear_voice_effects_sqf>,
         game_data_type::BOOL
     );
 
     _sqf_ts_is_initialized = intercept::client::host::register_sqf_command(
         "tsIsInitialized",
-        "Check if TeamSpeak integration is initialized",
+        "Returns true if the TeamSpeak integration is initialized.",
         userFunctionWrapper<ts_is_initialized_sqf>,
         game_data_type::BOOL
     );
 
     _sqf_ts_is_plugin_active = intercept::client::host::register_sqf_command(
         "tsIsPluginActive",
-        "Check if TeamSpeak plugin is active and responding",
+        "Returns true if the TeamSpeak plugin is active and responding.",
         userFunctionWrapper<ts_is_plugin_active_sqf>,
         game_data_type::BOOL
     );
 
     _sqf_ts_is_connected = intercept::client::host::register_sqf_command(
         "tsIsConnected",
-        "Check if connected to a TeamSpeak server",
+        "Returns true if TeamSpeak is connected to a server.",
         userFunctionWrapper<ts_is_connected_sqf>,
         game_data_type::BOOL
     );
 
     _sqf_ts_is_plugin_installed = intercept::client::host::register_sqf_command(
         "tsIsPluginInstalled",
-        "Check if TeamSpeak plugin is installed",
+        "Returns true if the TeamSpeak plugin is installed.",
         userFunctionWrapper<ts_is_plugin_installed_sqf>,
         game_data_type::BOOL
     );
 
     _sqf_serialize_function_code = intercept::client::host::register_sqf_command(
         "serializeFunction", 
-        "Serialize a function for execution/transfer",
+        "Serializes a function so it can be executed locally or sent across the network.",
         userFunctionWrapper<serialize_function_unary>,
         game_data_type::STRING, 
         game_data_type::CODE
@@ -9412,7 +9515,7 @@ static void initialize_sqf_integration() {
 
     _sqf_serialize_function_string = intercept::client::host::register_sqf_command(
         "serializeFunction", 
-        "Serialize a function for execution/transfer",
+        "Serializes a function so it can be executed locally or sent across the network.",
         userFunctionWrapper<serialize_function_unary>,
         game_data_type::STRING, 
         game_data_type::STRING
@@ -9420,7 +9523,7 @@ static void initialize_sqf_integration() {
 
     _sqf_serialize_function_bool_code = intercept::client::host::register_sqf_command(
         "serializeFunction", 
-        "Serialize a function for execution/transfer",
+        "Serializes a function so it can be executed locally or sent across the network.",
         userFunctionWrapper<serialize_function_binary>,
         game_data_type::STRING, 
         game_data_type::BOOL, 
@@ -9429,7 +9532,7 @@ static void initialize_sqf_integration() {
 
     _sqf_serialize_function_bool_string = intercept::client::host::register_sqf_command(
         "serializeFunction", 
-        "Serialize a function for execution/transfer",
+        "Serializes a function so it can be executed locally or sent across the network.",
         userFunctionWrapper<serialize_function_binary>,
         game_data_type::STRING, 
         game_data_type::BOOL, 
@@ -9438,7 +9541,7 @@ static void initialize_sqf_integration() {
 
     _sqf_call_serialized_function = intercept::client::host::register_sqf_command(
         "callSerializedFunction",
-        "Call a serialized function",
+        "Calls a serialized function with the given arguments.",
         userFunctionWrapper<call_serialized_function_sqf>,
         game_data_type::ANY,
         game_data_type::ANY,
@@ -9447,7 +9550,7 @@ static void initialize_sqf_integration() {
 
     _sqf_curve_conversion = intercept::client::host::register_sqf_command(
         "curveConversion",
-        "Remaps value through an easing curve; linear, smoothstep, smootherstep, easeIn, easeOut, sine, exponentialIn, exponentialOut, circular all take [minFrom, maxFrom, value, minTo, maxTo, clip]; bezier takes [minFrom, maxFrom, value, minTo, maxTo, points, clip] where points is an array of interior control ordinates (endpoints 0 and 1 are implicit; omit or [] for a classic cubic ease)",
+        "Remaps a value from one range to another through an easing curve.",
         userFunctionWrapper<curve_conversion_sqf>,
         game_data_type::SCALAR,
         game_data_type::STRING,
@@ -9456,7 +9559,7 @@ static void initialize_sqf_integration() {
 
     _sqf_inverse_curve_conversion = intercept::client::host::register_sqf_command(
         "inverseCurveConversion",
-        "Returns [value, t] where value is the input this curve needs to produce desiredOutput and 't' is the normalized progress (0..1) at that point. Useful to swap curve type/ranges mid-animation without snapping by feeding the old curve's current output and the new curve's params. Format [minFrom, maxFrom, desiredOutput, minTo, maxTo]; bezier takes [minFrom, maxFrom, desiredOutput, minTo, maxTo, points]",
+        "Returns the input value and normalized progress that make an easing curve produce a desired output. Useful for switching curves mid-animation without snapping.",
         userFunctionWrapper<inverse_curve_conversion_sqf>,
         game_data_type::ARRAY,
         game_data_type::STRING,
@@ -9465,7 +9568,7 @@ static void initialize_sqf_integration() {
 
     _sqf_vector_curve_conversion = intercept::client::host::register_sqf_command(
         "vectorCurveConversion",
-        "Eases a single progress value along a path between fromVec and toVec (2D or 3D), returning the eased vector with one shared curve parameter across components. Curves linear, smoothstep, smootherstep, easeIn, easeOut, sine, exponentialIn, exponentialOut, circular take [minFrom, maxFrom, value, fromVec, toVec, clip]; bezier takes [minFrom, maxFrom, value, fromVec, toVec, points, clip] where points is an array of interior control ordinates (omit or [] for a classic cubic ease)",
+        "Eases a progress value along the path between two vectors and returns the resulting vector.",
         userFunctionWrapper<vector_curve_conversion_sqf>,
         game_data_type::ARRAY,
         game_data_type::STRING,
@@ -9474,7 +9577,7 @@ static void initialize_sqf_integration() {
 
     _sqf_inverse_vector_curve_conversion = intercept::client::host::register_sqf_command(
         "inverseVectorCurveConversion",
-        "Returns [value, t] that are the scalar progress input and normalized t (0..1) that make this curve output desiredOutputVec along the fromVec->toVec path. Useful to swap curve type/endpoints mid-animation without snapping. Format [minFrom, maxFrom, desiredOutputVec, fromVec, toVec]; bezier takes [minFrom, maxFrom, desiredOutputVec, fromVec, toVec, points]",
+        "Returns the input value and normalized progress that make a vector easing curve produce a desired vector. Useful for switching curves mid-animation without snapping.",
         userFunctionWrapper<inverse_vector_curve_conversion_sqf>,
         game_data_type::ARRAY,
         game_data_type::STRING,
@@ -9483,7 +9586,7 @@ static void initialize_sqf_integration() {
 
     _sqf_curve_slope = intercept::client::host::register_sqf_command(
         "curveSlope",
-        "Format [minFrom, maxFrom, value, minTo, maxTo, floor]. Returns the curve's normalized rate of change (slope) at the position of value within minFrom..maxFrom. Use as a speed multiplier: linear gives constant 1, easeIn accelerates, easeOut decelerates, smoothstep is slow-fast-slow. Optional floor sets a minimum slope so flat regions still progress. For bezier: [minFrom, maxFrom, value, minTo, maxTo, points, floor].",
+        "Returns the normalized slope of an easing curve at a value, for use as a speed multiplier.",
         userFunctionWrapper<curve_slope_sqf>,
         game_data_type::SCALAR,
         game_data_type::STRING,
@@ -9492,7 +9595,7 @@ static void initialize_sqf_integration() {
 
     _sqf_vector_curve_slope = intercept::client::host::register_sqf_command(
         "vectorCurveSlope",
-        "Format [minFrom, maxFrom, value, fromVec, toVec, floor]. Returns the per-component rate-of-change vector slope*(toVec-fromVec) at the shared progress of value, i.e. the velocity direction/magnitude along the path. Optional floor sets a minimum slope. For bezier: [minFrom, maxFrom, value, fromVec, toVec, points, floor].",
+        "Returns the rate of change of a vector easing curve at a value, as a velocity along the path.",
         userFunctionWrapper<vector_curve_slope_sqf>,
         game_data_type::ARRAY,
         game_data_type::STRING,
@@ -9501,7 +9604,7 @@ static void initialize_sqf_integration() {
 
     _sqf_get_unit_yaw_speed = intercept::client::host::register_sqf_command(
         "getUnitYawSpeed",
-        "Returns the unit's yaw rotation speed in degrees/second, measured over a 100ms window",
+        "Returns a unit's yaw rotation speed in degrees per second.",
         userFunctionWrapper<get_unit_yaw_speed_sqf>,
         game_data_type::SCALAR,
         game_data_type::OBJECT
@@ -9509,7 +9612,7 @@ static void initialize_sqf_integration() {
 
     _sqf_process_execution = intercept::client::host::register_sqf_command(
         "processExecution",
-        "Internal KH execution processor - dispatches an execution descriptor to its target(s)",
+        "Internal: dispatches an execution to its targets.",
         userFunctionWrapper<process_execution_sqf>,
         game_data_type::ANY,
         game_data_type::ARRAY
@@ -9517,8 +9620,7 @@ static void initialize_sqf_integration() {
 
     _sqf_manage_execution_stack_string_array = intercept::client::host::register_sqf_command(
         "manageExecutionStack",
-        "\"STACK\" / \"ADDITIONS\" / \"DELETIONS\" manageExecutionStack [add, element]: adds an execution array "
-        "(an id for DELETIONS) or removes by id. Returns true when applied",
+        "Adds an entry to, or removes an entry from, one of the execution stacks.",
         userFunctionWrapper<manage_execution_stack_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING,
@@ -9527,14 +9629,14 @@ static void initialize_sqf_integration() {
 
     _sqf_execution_replaced = intercept::client::host::register_sqf_command(
         "executionReplaced",
-        "Internal KH temporal stack guard - whether the stack entry being run was replaced during its call",
+        "Internal: returns true if the running execution stack entry was replaced during its call.",
         userFunctionWrapper<execution_replaced_sqf>,
         game_data_type::BOOL
     );
 
     _sqf_trigger_cba_event_array = intercept::client::host::register_sqf_command(
         "triggerCbaEvent",
-        "Triggers a CBA event through the KH target resolution model. Format [event, arguments, target, jip], where event is either a string or [eventName, entity] for entity events. Returns the JIP handler id array when jip is requested",
+        "Triggers a CBA event on the chosen targets, optionally with JIP.",
         userFunctionWrapper<trigger_cba_event_sqf>,
         game_data_type::ANY,
         game_data_type::ARRAY
@@ -9542,7 +9644,7 @@ static void initialize_sqf_integration() {
 
     _sqf_process_cba_group_event = intercept::client::host::register_sqf_command(
         "processCbaGroupEvent",
-        "Internal KH CBA dispatcher - fires an owner event on every machine owning a unit of the given group. Format [event, arguments, group]",
+        "Internal: fires an event on every machine that owns a unit of a group.",
         userFunctionWrapper<process_cba_group_event_sqf>,
         game_data_type::ANY,
         game_data_type::ARRAY
@@ -9550,7 +9652,7 @@ static void initialize_sqf_integration() {
 
     _sqf_process_cba_array_event = intercept::client::host::register_sqf_command(
         "processCbaArrayEvent",
-        "Internal KH CBA dispatcher - resolves an array of mixed targets to owner machines and fires per-owner events. Format [event, arguments, flattenedTargets, caller]",
+        "Internal: fires an event on every machine that owns one of a list of targets.",
         userFunctionWrapper<process_cba_array_event_sqf>,
         game_data_type::ANY,
         game_data_type::ARRAY
@@ -9558,7 +9660,7 @@ static void initialize_sqf_integration() {
 
     _sqf_process_cba_code_event = intercept::client::host::register_sqf_command(
         "processCbaCodeEvent",
-        "Internal KH CBA dispatcher - calls the predicate with the arguments and fires a local event if it returns true. Format [event, arguments, function]",
+        "Internal: fires a local event if a condition function returns true.",
         userFunctionWrapper<process_cba_code_event_sqf>,
         game_data_type::ANY,
         game_data_type::ARRAY
@@ -9566,7 +9668,7 @@ static void initialize_sqf_integration() {
 
     _sqf_remove_render_handler_string = intercept::client::host::register_sqf_command(
         "removeRenderHandler",
-        "Remove a retained render object or a physics affector by its handle. Returns true when something was removed",
+        "Removes a render object or physics affector by its handle.",
         userFunctionWrapper<remove_render_handler_sqf>,
         game_data_type::BOOL,
         game_data_type::STRING
@@ -9574,22 +9676,21 @@ static void initialize_sqf_integration() {
 
     _sqf_remove_all_render_handlers = intercept::client::host::register_sqf_command(
         "removeAllRenderHandlers",
-        "Remove every retained render object (mesh and post-processing pass) and every physics affector. Returns true",
+        "Removes all render objects and physics affectors.",
         userFunctionWrapper<remove_all_render_handlers_sqf>,
         game_data_type::BOOL
     );
 
     _sqf_all_render_handlers = intercept::client::host::register_sqf_command(
         "allRenderHandlers",
-        "Returns every live render object handle (khr_) in creation order, then every physics affector handle "
-        "(khpa_) in creation order",
+        "Returns the handles of all render objects and physics affectors.",
         userFunctionWrapper<all_render_handlers_sqf>,
         game_data_type::ARRAY
     );
 
     _sqf_add_render3d_array = intercept::client::host::register_sqf_command(
         "addRender3D",
-        "Create a persistent 3D mesh from [position, rotation, mesh]; position and rotation may follow an object or a memory point, or bind the mesh's skeleton. Returns the khr_ handle, or '' after reporting the fault",
+        "Creates a persistent 3D mesh and returns its handle.",
         userFunctionWrapper<add_render3d_sqf>,
         game_data_type::STRING,
         game_data_type::ARRAY
@@ -9597,7 +9698,7 @@ static void initialize_sqf_integration() {
 
     _sqf_update_render3d_array = intercept::client::host::register_sqf_command(
         "updateRender3D",
-        "Update a persistent 3D mesh with [handle, property, value] or an array of such triples. Returns true only if every triple applied",
+        "Updates the properties of a persistent 3D mesh.",
         userFunctionWrapper<update_render3d_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY
@@ -9605,7 +9706,7 @@ static void initialize_sqf_integration() {
 
     _sqf_add_physics_affector_array = intercept::client::host::register_sqf_command(
         "addPhysicsAffector",
-        "Create a physics affector (wind, turbulence, vortex, force, radial or drag) that pushes simulated cloth, from [type, [lifetime, position, ...]]. Returns the khpa_ handle, or '' after reporting the fault",
+        "Creates a physics affector that pushes simulated cloth and returns its handle.",
         userFunctionWrapper<add_physics_affector_sqf>,
         game_data_type::STRING,
         game_data_type::ARRAY
@@ -9613,7 +9714,7 @@ static void initialize_sqf_integration() {
 
     _sqf_update_physics_affector_array = intercept::client::host::register_sqf_command(
         "updatePhysicsAffector",
-        "Update a physics affector with [handle, property, value] or an array of such triples. Returns true only if every triple applied",
+        "Updates the properties of a physics affector.",
         userFunctionWrapper<update_physics_affector_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY
@@ -9621,7 +9722,7 @@ static void initialize_sqf_integration() {
 
     _sqf_update_post_fx_array = intercept::client::host::register_sqf_command(
         "updatePostFX",
-        "Update a fullscreen or local post-processing pass with [handle, property, value] or an array of such triples. Returns true only if every triple applied",
+        "Updates the properties of a post-processing effect.",
         userFunctionWrapper<update_post_fx_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY
@@ -9629,7 +9730,7 @@ static void initialize_sqf_integration() {
 
     _sqf_add_postfx_array = intercept::client::host::register_sqf_command(
         "addPostFX",
-        "Create a persistent fullscreen post-processing pass from [effect, params, color, band, blend, affectUI, duration]. Returns the khr_ handle, or '' after reporting the fault",
+        "Creates a persistent fullscreen post-processing effect and returns its handle.",
         userFunctionWrapper<add_postfx_sqf>,
         game_data_type::STRING,
         game_data_type::ARRAY
@@ -9637,7 +9738,7 @@ static void initialize_sqf_integration() {
 
     _sqf_add_local_postfx_array = intercept::client::host::register_sqf_command(
         "addLocalPostFX",
-        "Create a persistent post-processing effect confined to a world-space volume, from [position, radius, falloff, effect, ...]. Returns the khr_ handle, or '' after reporting the fault",
+        "Creates a persistent post-processing effect confined to a world-space volume and returns its handle.",
         userFunctionWrapper<add_local_postfx_sqf>,
         game_data_type::STRING,
         game_data_type::ARRAY
@@ -9645,21 +9746,21 @@ static void initialize_sqf_integration() {
 
     _sqf_get_render_stats = intercept::client::host::register_sqf_command(
         "getRenderStats",
-        "Returns the render statistics. The first call arms collection and reports zero counters",
+        "Returns the render statistics, starting their collection on the first call.",
         userFunctionWrapper<get_render_stats_sqf>,
         game_data_type::ARRAY
     );
 
     _sqf_reset_render_stats = intercept::client::host::register_sqf_command(
         "resetRenderStats",
-        "Zero the render counters and disarm collection until the next getRenderStats. Returns true",
+        "Resets the render statistics and stops collecting them until the next getRenderStats call.",
         userFunctionWrapper<reset_render_stats_sqf>,
         game_data_type::BOOL
     );
 
     _sqf_set_render_ao = intercept::client::host::register_sqf_command(
         "setRenderAmbientOcclusion",
-        "[strength] or [strength, radius]. Screen-space ambient occlusion on our meshes only",
+        "Sets the screen-space ambient occlusion applied to KH meshes.",
         userFunctionWrapper<set_render_ao_sqf>,
         game_data_type::BOOL,
         game_data_type::ARRAY
@@ -9667,7 +9768,7 @@ static void initialize_sqf_integration() {
 
     _sqf_set_ssgi_scale = intercept::client::host::register_sqf_command(
         "setSsgiScale",
-        "SSGI gather resolution multiplier: 1 full res, 0.5 half (default), 2 supersampled",
+        "Sets the resolution scale of screen-space global illumination.",
         userFunctionWrapper<set_ssgi_scale_sqf>,
         game_data_type::BOOL,
         game_data_type::SCALAR
@@ -9675,7 +9776,7 @@ static void initialize_sqf_integration() {
 
     _sqf_allow_dynamic_shadows = intercept::client::host::register_sqf_command(
         "allowDynamicShadows",
-        "Whether dynamic lights cast shadows from our meshes",
+        "Sets whether dynamic lights cast shadows from KH meshes.",
         userFunctionWrapper<allow_dynamic_shadows_sqf>,
         game_data_type::BOOL,
         game_data_type::BOOL
@@ -9683,7 +9784,7 @@ static void initialize_sqf_integration() {
 
     _sqf_flush_ui_render = intercept::client::host::register_sqf_command(
         "flushUIRender",
-        "Renders all UI-affecting passes",
+        "Immediately renders all passes that affect the UI.",
         userFunctionWrapper<flush_ui_render_sqf>,
         game_data_type::BOOL
     );

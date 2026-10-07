@@ -115,6 +115,7 @@ void intercept::pre_start() {
 }
 
 void intercept::pre_init() {
+    ModFolderSearcher::clear_cache();
     g_is_server = sqf::is_server();
     g_is_headless = (!(sqf::is_server()) && !(sqf::has_interface()));
     populate_sqf_command_map();
@@ -216,6 +217,7 @@ void intercept::mission_ended() {
     kh_stop_frameworks_cleared(true);
     sqf::diag_log("KH Framework: mission end");
     g_is_menu = true;
+    ModFolderSearcher::clear_cache();
 }
 
 // The folders a runtime's DLLs are looked for in (try_load_* and delay_load_hook): the SDK environment

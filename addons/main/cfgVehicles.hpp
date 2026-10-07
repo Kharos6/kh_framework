@@ -29,6 +29,9 @@ class CfgVehicles
 	class KH_SwordGeneric01: KH_MeleeWeaponTertiaryBase
 	{
 		author = "Kharos";
+		scope = 2;
+		scopeCurator = 2;
+		displayName = "Sword - Generic 01";
 		model = "\x\kh\addons\main\models\SM_SwordGeneric01.p3d";
 		hiddenSelections[] = {
 			"mat_sword"
@@ -51,6 +54,9 @@ class CfgVehicles
 	class KH_KnifeM9: KH_MeleeWeaponTertiaryBase
 	{
 		author = "Kharos";
+		scope = 2;
+		scopeCurator = 2;
+		displayName = "Knife M9";
 		model = "\x\kh\addons\main\models\SM_KnifeM9.p3d";
 		hiddenSelections[] = {
 			"mat_knife"

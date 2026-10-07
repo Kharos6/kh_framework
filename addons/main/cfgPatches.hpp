@@ -32,7 +32,9 @@ class CfgPatches
 			"KH_InvisibleWall_32x1x32",
 			"KH_InvisibleWalkableSurface_1x1x0",
 			"KH_InvisibleWalkableSurface_2x2x0",
-			"KH_InvisibleWalkableSurface_4x4x0"
+			"KH_InvisibleWalkableSurface_4x4x0",
+			"KH_SwordGeneric01",
+			"KH_KnifeM9"
 		};
 		weapons[] = {
 			"KH_SwordGeneric01",

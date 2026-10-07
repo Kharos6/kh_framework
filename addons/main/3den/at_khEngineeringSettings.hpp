@@ -1,6 +1,6 @@
 class KH_EngineeringSettings: Title
 {
-	attributeLoad = "[_this controlsGroupCtrl 103, _this controlsGroupCtrl 104, 'x'] call BIS_fnc_initSliderValue; [_this controlsGroupCtrl 103, _this controlsGroupCtrl 104, 'x', _value select 3] call BIS_fnc_initSliderValue; [_this controlsGroupCtrl 105, _this controlsGroupCtrl 106, 'x'] call BIS_fnc_initSliderValue; [_this controlsGroupCtrl 105, _this controlsGroupCtrl 106, 'x', _value select 3] call BIS_fnc_initSliderValue; [_this controlsGroupCtrl 107, _this controlsGroupCtrl 108, 'x'] call BIS_fnc_initSliderValue; [_this controlsGroupCtrl 107, _this controlsGroupCtrl 108, 'x', _value select 3] call BIS_fnc_initSliderValue; [_this, _value] call KH_fnc_loadControlAttributes;";
+	attributeLoad = "[_this controlsGroupCtrl 103, _this controlsGroupCtrl 104, 'x'] call BIS_fnc_initSliderValue; [_this controlsGroupCtrl 103, _this controlsGroupCtrl 104, 'x', _value select 3] call BIS_fnc_initSliderValue; [_this controlsGroupCtrl 105, _this controlsGroupCtrl 106, 'x'] call BIS_fnc_initSliderValue; [_this controlsGroupCtrl 105, _this controlsGroupCtrl 106, 'x', _value select 5] call BIS_fnc_initSliderValue; [_this controlsGroupCtrl 107, _this controlsGroupCtrl 108, 'x'] call BIS_fnc_initSliderValue; [_this controlsGroupCtrl 107, _this controlsGroupCtrl 108, 'x', _value select 7] call BIS_fnc_initSliderValue; [_this, _value] call KH_fnc_loadControlAttributes;";
 	attributeSave = "[_this] call KH_fnc_saveControlAttributes;";
 	h = QUOTE(7 * CTRL_DEFAULT_H + 80 * pixelH);
 	class Controls: Controls
@@ -22,7 +22,7 @@ class KH_EngineeringSettings: Title
 		class KHEngineeringHandlingTitle: Title
 		{
 			text = "KH Engineering Handling";
-			tooltip = "True enables the KH Engineering system on this unit.";
+			tooltip = "True enables the KH Engineering system on this vehicle.";
 			y = QUOTE(2 * CTRL_DEFAULT_H + 5 * CTRL_DEFAULT_Y);
 		};
 		class KHEngineeringHandling: ctrlCheckbox

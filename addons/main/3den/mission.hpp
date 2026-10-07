@@ -220,7 +220,7 @@ class Mission
 								if (_value isEqualTo '') then {\
 									if (fileExists 'kh_playerMissionLoadInit.sqf') then {\
 										KH_fnc_playerMissionLoadInit = compileScript ['kh_playerMissionLoadInit.sqf', false, ''];\
-									};
+									};\
 								}\
 								else {\
 									KH_fnc_playerMissionLoadInit = compile _value;\
@@ -405,42 +405,6 @@ class Mission
 						";
 						defaultValue = "''";
 						validate = "expression";
-					};
-				};
-			};
-			class KH_Miscellaneous
-			{
-				displayName = "KH Miscellaneous";
-				collapsed = 1;
-				class Attributes
-				{
-					class KH_QuickFunctions
-					{
-						displayName = "Quick Functions";
-						tooltip = "Hashmap style arrays where the key is the name of the function, and the value is the path to the function file which can either be SQF or Lua. The function will be compiled and defined in both the missionNamespace and uiNamespace if it is an SQF function, and into Lua global variables if it is a Lua function. These functions will then become available for execution in the KH Console for quick and easy access during the mission.";
-						property = "KH_QuickFunctions";
-						control = "EditMulti5";
-						expression = 
-						"\
-							if ((_value isNotEqualTo '') && !is3DEN) then {\
-								{\
-									_x params ['_name', '_function'];\
-									if ('.sqf' in _function) then {\
-										_function = compile (preprocessFileLineNumbers _function);\
-										missionNamespace setVariable [_name, _function];\
-										uiNamespace setVariable [_name, _function];\
-										KH_var_quickFunctionsSqf set [_name, _function];\
-									}\
-									else {\
-										_name luaCompile (loadFile _function);\
-										KH_var_quickFunctionsLua set [_name, _function];\
-									};\
-								} forEach (parseSimpleArray (['[', _value, ']'] joinString ''));\
-								uiNamespace setVariable ['KH_var_quickFunctionsSqf', KH_var_quickFunctionsSqf];\
-								uiNamespace setVariable ['KH_var_quickFunctionsLua', KH_var_quickFunctionsLua];\
-							};\
-						";
-						defaultValue = "''";
 					};
 				};
 			};

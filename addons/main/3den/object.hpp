@@ -113,7 +113,7 @@ class Object
 								true,\
 								[\
 									'PERSISTENT',\
-									true,\
+									_this,\
 									[],\
 									{},\
 									''\
@@ -241,7 +241,7 @@ class Object
 								true,\
 								[\
 									'PERSISTENT',\
-									true,\
+									_this,\
 									[],\
 									{},\
 									''\
@@ -272,32 +272,6 @@ class Object
 					";
 					defaultValue = "''";
 					validate = "expression";
-				};
-				class KH_SetRandomLoadout
-				{
-					displayName = "Set Random Loadout";
-					tooltip = "Either loadout arrays or a global variable containing an array of loadouts that will be selected from at random and applied to this unit.";
-					property = "KH_SetRandomLoadout";
-					control = "EditMulti5";
-					expression = 
-					"\
-						if ((_value isNotEqualTo '') && (_value isNotEqualTo '[]') && !is3DEN) then {\
-							KH_var_postInitExecutions pushBack [\
-								[_this, _value],\
-								{\
-									params ['_entity', '_loadouts'];\
-									if (('[' in _loadouts) || (']' in _loadouts)) then {\
-										_entity setUnitLoadout (selectRandom (parseSimpleArray (['[', _loadouts, ']'] joinString '')));\
-									}\
-									else {\
-										_entity setUnitLoadout (selectRandom (missionNamespace getVariable [_loadouts, []]));\
-									};\
-								}\
-							];\
-						};\
-					";
-					defaultValue = "''";
-					condition = "objectControllable";
 				};
 			};
 		};
@@ -383,7 +357,7 @@ class Object
 								[];\
 							}\
 							else {\
-								createHashMapFromArray (parseSimpleArray _hitPointDamageMultipliers);\
+								createHashMapFromArray (parseSimpleArray (['[', _hitPointDamageMultipliers, ']'] joinString ''));\
 							};\
 							KH_var_postInitExecutions pushBack [[_this, true, _damageMultiplier, _totalDamageMultiplier, _impactDamageMultiplier, _hitPointDamageMultipliers, _recoverable], KH_fnc_engineeringSetup];\
 						};\
@@ -447,7 +421,6 @@ class Object
 						_value params ['_toggle', '_allowPersistency', '_playerUseVariableName', '_allowTransforms'];\
 						if (_toggle && !is3DEN) then {\
 							if _allowPersistency then {\
-								_this setVariable ['KH_var_playerPersistencyUseVariableName', true];\
 								if _playerUseVariableName then {\
 									_this setVariable ['KH_var_playerPersistencyUseVariableName', true];\
 								};\
@@ -498,7 +471,7 @@ class Object
 										true,\
 										[\
 											'PERSISTENT',\
-											true,\
+											_entity,\
 											[_entity, _remoteFunction],\
 											{\
 												params ['_entity', '_remoteFunction'];\

@@ -105,7 +105,7 @@ class KH_SideRelations: Title
 		};
 		class OpforToGreenforTitle: Title
 		{
-			text = "OPFOR To GREENFFOR";
+			text = "OPFOR To GREENFOR";
 			tooltip = "True makes OPFOR units friendly to GREENFOR units.";
 			y = QUOTE(8 * CTRL_DEFAULT_H + 35 * CTRL_DEFAULT_Y);
 		};

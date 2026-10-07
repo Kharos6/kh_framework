@@ -98,7 +98,7 @@ class KH_ModuleEntitySpawner: Module_F
 		class KH_ModuleEntitySpawnerCondition: EditCodeMulti5
 		{
 			displayName = "Condition";
-			tooltip = "Unscheduled code, executed locally to the server, that must return true in order for a spawn to be allowed. Passed arguments available through _this are: [_chosenSpawnPoint (ARRAY), _spawnedCount (SCALAR)]. Local variables exposed to the function are: _handlerId (ARRAY).";
+			tooltip = "Unscheduled code, executed locally to the server, that must return true in order for a spawn to be allowed. Passed arguments available through _this are: [_chosenSpawnPoint (ARRAY), _spawnedCount (SCALAR), _spawnPosition (ARRAY)]. Local variables exposed to the function are: _handlerId (ARRAY).";
 			property = "KH_ModuleEntitySpawnerCondition";
 			defaultValue = "'true'";
 		};
@@ -127,7 +127,7 @@ class KH_ModuleEntitySpawner: Module_F
 		{
 			displayName = "Validate Position";
 			tooltip = "True makes it so that the spawner refuses to spawn an entity if a player is looking at the chosen spawn position at spawn time.";
-			property = "KH_ModuleEntitySpawnerAmount";
+			property = "KH_ModuleEntitySpawnerValidatePosition";
 			defaultValue = "true";
 		};
 		class KH_ModuleEntitySpawnerMinimumPlayerDistance: Edit

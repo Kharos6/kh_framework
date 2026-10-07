@@ -2,7 +2,7 @@ class Extended_PreInit_EventHandlers
 {
     class KH_Main
 	{
-		init = "call (compileScript ['\x\kh\addons\main\functions\XEH_preInit.sqf'])";
+		init = "call (compileScript ['\x\kh\addons\main\functions\XEH_preInit.sqf']);";
     };
 };
 class Extended_InitPost_EventHandlers
@@ -11,7 +11,7 @@ class Extended_InitPost_EventHandlers
     {
         class KH_Main
         {
-            init = "[param [0], false, objNull] call KH_fnc_entityInitHandler";
+            init = "[param [0], false, objNull] call KH_fnc_entityInitHandler;";
         };
     };
 };
@@ -21,7 +21,7 @@ class Extended_Respawn_EventHandlers
     {
         class KH_Main
         {
-            respawn = "[param [0], true, param [1]] call KH_fnc_entityInitHandler";
+            respawn = "[param [0], true, param [1]] call KH_fnc_entityInitHandler;";
         };
     };
 };
@@ -31,7 +31,7 @@ class Extended_Deleted_EventHandlers
     {
         class KH_Main
         {
-            deleted = "call KH_fnc_entityDeletedHandler";
+            deleted = "call KH_fnc_entityDeletedHandler;";
         };
     };
 };

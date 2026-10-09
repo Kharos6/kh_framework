@@ -24,11 +24,23 @@ private _parsedUnits = [];
 		continue;
 	};
 
-	if !(isNull (group _x)) then {
-		_parsedUnits pushBackUnique _x;
+	if (_x isKindOf "Man") then {
+		if !(isNull (group _x)) then {
+			_parsedUnits pushBackUnique _x;
+		}
+		else {
+			_x setOwner _owner;
+		};
 	}
 	else {
-		_x setOwner _owner;
+		if ((crew _x) isNotEqualTo []) then {
+			{
+				_parsedUnits pushBackUnique _x;
+			} forEach (crew _x);
+		}
+		else {
+			_x setOwner _owner;
+		};
 	};
 } forEach _entities;
 

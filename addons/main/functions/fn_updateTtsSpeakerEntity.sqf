@@ -33,7 +33,7 @@ execute [
             private _worldDir = (positionCameraToWorld [0, 0, 0]) vectorFromTo (unitAimPositionVisual _entity);
 
             private _cameraForward = if (isNull curatorCamera) then {
-                getCameraViewDirection KH_var_playerUnit;
+                getCameraViewDirection KH_var_mainCamera;
             }
             else {
                 vectorDir curatorCamera;

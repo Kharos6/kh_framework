@@ -3,6 +3,7 @@ _inventory params ["_itemInventory", "_magazines", "_weaponInventory", "_backpac
 clearItemCargoGlobal _object;
 clearWeaponCargoGlobal _object;
 clearBackpackCargoGlobal _object;
+clearMagazineCargoGlobal _object;
 private _inventorySorted = [];
 _itemInventory params ["_inventoryItems", "_inventoryItemCount"];
 
@@ -29,7 +30,7 @@ for "_i" from 0 to ((count _inventoryItems) - 1) do {
 if KH_var_aceLoaded then {
 	{
 		[_x, _object] call ace_cargo_fnc_removeCargoItem;
-	} forEach (_object getVariable ["ace_cargo_loaded", []]);
+	} forEach +(_object getVariable ["ace_cargo_loaded", []]);
 
 	private _aceCargoCount = 0;
 	
@@ -44,6 +45,7 @@ if KH_var_aceLoaded then {
 		clearItemCargoGlobal _object;
 		clearWeaponCargoGlobal _object;
 		clearBackpackCargoGlobal _object;
+		clearMagazineCargoGlobal _object;
 		private _inventorySorted = [];
 		_itemInventory params ["_inventoryItems", "_inventoryItemCount"];
 

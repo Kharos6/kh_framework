@@ -59,8 +59,9 @@ else {
 
 if (_start isEqualType objNull) then {
     if (isPlayer _start) then {
-        _verticalFov = (getObjectFOV _start) * (180 / pi) * _verticalFov;
-        _horizontalFov = 2 * (atan (((_start getVariable ["KH_var_playerAspectRatio", 1.777777]) * _horizontalFov) * tan ((_verticalFov / 2) * (pi / 180)))) * (180 / pi);
+        private _fullVerticalFov = (getObjectFOV _start) * (180 / pi);
+        _verticalFov = 2 * (atan (_verticalFov * (tan (_fullVerticalFov / 2))));
+        _horizontalFov = 2 * (atan ((_start getVariable ["KH_var_playerAspectRatio", 1.777777]) * _horizontalFov * (tan (_fullVerticalFov / 2))));
         _maximumDistance = _start getVariable ["KH_var_playerViewDistance", _maximumDistance];
         _start = AGLToASL (_start getVariable ["KH_var_playerCameraPosition", eyePos _start]);
     }
@@ -178,7 +179,7 @@ if (_directionXYMagnitude > 0.001 && _targetXYMagnitude > 0.001) then {
     _horizontalAngle = acos _dotProduct;
 };
 
-private _dirPitch = asin (((_direction select 2) max 0.001) / ((vectorMagnitude _direction) max 0.001));
+private _dirPitch = asin ((((_direction select 2) / ((vectorMagnitude _direction) max 0.001)) max -1) min 1);
 private _targetPitch = asin (_toTargetNormalized select 2);
 private _verticalAngle = abs (_targetPitch - _dirPitch);
 

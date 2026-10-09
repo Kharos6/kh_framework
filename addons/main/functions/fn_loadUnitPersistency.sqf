@@ -10,12 +10,14 @@ private _unitPersistency = KH_var_khDataNamespace readKhData [["unitPersistency_
             private _attributes = _unitPersistency get _variableName;
 
             if !(isNil "_attributes") then {
+                private _currentOverrideAttributes = _overrideAttributes;
+
                 if !(_x getVariable ["KH_var_persistencyTransforms", true]) then {
-                    _overrideAttributes = +_overrideAttributes;
-                    _overrideAttributes insert [-1, [26, 27, 28], true];
+                    _currentOverrideAttributes = +_overrideAttributes;
+                    _currentOverrideAttributes insert [-1, [26, 27, 28], true];
                 };
 
-                [_x, _attributes, _overrideAttributes, true] call KH_fnc_setUnitAttributes;
+                [_x, _attributes, _currentOverrideAttributes, true] call KH_fnc_setUnitAttributes;
             };
         };
     };

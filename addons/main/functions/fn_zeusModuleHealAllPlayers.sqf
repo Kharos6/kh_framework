@@ -2,17 +2,15 @@ isNil {
 	params [["_logic", objNull, [objNull]]];
 
 	{
-        private _unit = _x;
-        _unit setDamage 0;
-
-        {
-            _unit setHitPointDamage [_x, 0];
-        } forEach ((getAllHitPointsDamage _unit) select 0);
-
         execute [
-            [_unit],
+            [_x],
             {
                 params ["_unit"];
+                _unit setDamage 0;
+
+                {
+                    _unit setHitPointDamage [_x, 0];
+                } forEach ((getAllHitPointsDamage _unit) select 0);
                 
                 if (_unit isEqualTo player) then {
                     if (!(isNil "KH_var_withstandingEffectRadial") && !(isNil "KH_var_withstandingEffectChromatic") && !(isNil "KH_var_withstandingEffectWet")) then {
@@ -36,17 +34,17 @@ isNil {
                     };
                 };
             },
-            _unit,
+            _x,
             true,
             false
         ];
         
         if KH_var_medical then {
-            _unit setVariable ["KH_var_incapacitated", false, true];
-            _unit setVariable ["KH_var_withstanding", false, true];
-            _unit setVariable ["KH_var_stabilized", false, true];
-            _unit setVariable ["KH_var_beingRevived", false, true];
-            _unit setVariable ["KH_var_beingStabilized", false, true];
+            _x setVariable ["KH_var_incapacitated", false, true];
+            _x setVariable ["KH_var_withstanding", false, true];
+            _x setVariable ["KH_var_stabilized", false, true];
+            _x setVariable ["KH_var_beingRevived", false, true];
+            _x setVariable ["KH_var_beingStabilized", false, true];
         };
     } forEach KH_var_allPlayerUnits;
 

@@ -1,6 +1,6 @@
 params [["_camera", objNull, [objNull]], ["_stepX", 0.01, [0]], ["_stepY", 0.01, [0]], ["_shiftX", 0, [0]], ["_shiftY", 0, [0]], ["_raycast", false, [true]], ["_draw", [], [[]]]];
 private _safeZoneX = safeZoneX + (_stepX * _shiftX);
-private _safeZoneY = safeZoneY + (_stepX * _shiftY);
+private _safeZoneY = safeZoneY + (_stepY * _shiftY);
 private _endX = 1 + (abs safeZoneX);
 private _endY = 1 + (abs safeZoneY);
 private _allPositions = [];
@@ -30,14 +30,11 @@ if (isNull _camera) then {
             for "_positionY" from _safeZoneY to _endY step _stepY do {
                 private _cameraPosition = positionCameraToWorld [0, 0, 0];
                 private _position = screenToWorld [_positionX, _positionY];
-                private _currentVectorDirection = _cameraPosition vectorFromTo _position;
                 private _screenToWorldDirection = screenToWorldDirection [_positionX, _positionY];
+                private _currentVectorDirection = (AGLToASL _cameraPosition) vectorFromTo (AGLToASL _position);
                 
-                if ([(_currentVectorDirection select 0) toFixed 0, (_currentVectorDirection select 1) toFixed 0, (_currentVectorDirection select 2) toFixed 0] 
-                    isNotEqualTo 
-                    [(_screenToWorldDirection select 0) toFixed 0, (_screenToWorldDirection select 1) toFixed 0, (_screenToWorldDirection select 2) toFixed 0]
-                   ) then {
-                    _allPositions pushBack (_cameraPosition vectorAdd (_screenToWorldDirection vectorMultiply viewDistance));
+                if (((_currentVectorDirection vectorDotProduct _screenToWorldDirection) < 0.995) || (_position isEqualTo [0, 0, 0])) then {
+                    _allPositions pushBack (ASLToAGL ((AGLToASL _cameraPosition) vectorAdd (_screenToWorldDirection vectorMultiply viewDistance)));
                 }
                 else {
                     _allPositions pushBack _position;
@@ -71,14 +68,11 @@ else {
             for "_positionY" from _safeZoneY to _endY step _stepY do {
                 private _cameraPosition = _camera modelToWorld [0, 0, 0];
                 private _position = _camera screenToWorld [_positionX, _positionY];
-                private _currentVectorDirection = _cameraPosition vectorFromTo _position;
                 private _screenToWorldDirection = _camera screenToWorldDirection [_positionX, _positionY];
+                private _currentVectorDirection = (AGLToASL _cameraPosition) vectorFromTo (AGLToASL _position);
                 
-                if ([(_currentVectorDirection select 0) toFixed 0, (_currentVectorDirection select 1) toFixed 0, (_currentVectorDirection select 2) toFixed 0] 
-                    isNotEqualTo 
-                    [(_screenToWorldDirection select 0) toFixed 0, (_screenToWorldDirection select 1) toFixed 0, (_screenToWorldDirection select 2) toFixed 0]
-                   ) then {
-                    _allPositions pushBack (_cameraPosition vectorAdd (_screenToWorldDirection vectorMultiply viewDistance));
+                if (((_currentVectorDirection vectorDotProduct _screenToWorldDirection) < 0.995) || (_position isEqualTo [0, 0, 0])) then {
+                    _allPositions pushBack (ASLToAGL ((AGLToASL _cameraPosition) vectorAdd (_screenToWorldDirection vectorMultiply viewDistance)));
                 }
                 else {
                     _allPositions pushBack _position;

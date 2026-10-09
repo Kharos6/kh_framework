@@ -46,9 +46,7 @@ if _groups then {
             false
         ];
     } forEach allGroups;
-};
 
-if _objects then {
     [
         "MISSION",
         "GroupCreated",
@@ -71,7 +69,9 @@ if _objects then {
             ];
         }
     ] call KH_fnc_addEventHandler;
+};
 
+if _objects then {
     [
         [], 
         ["Man", "MineGeneric", "Logic", "EmptyDetector"],
@@ -113,9 +113,9 @@ if _scenario then {
 [
     "CBA",
     "KH_eve_missionEnded",
-    [_identifier, _captureFinalData],
+    [_identifier, _captureFinalData, _units, _groups, _objects, _scenario],
     {
-        _args params ["_identifier", "_captureFinalData"];
+        _args params ["_identifier", "_captureFinalData", "_units", "_groups", "_objects", "_scenario"];
         private _unitDataFinal = createHashMap;
         private _groupDataFinal = createHashMap;
         private _objectDataFinal = createHashMap;
@@ -142,7 +142,7 @@ if _scenario then {
             if _objects then {
                 {
                     _objectDataFinal set [netId _x, [_x] call KH_fnc_getObjectAttributes];
-                } forEach (entities [[], ["Man"], false, true]);
+                } forEach ((allMissionObjects "") select {!(_x isKindOf "Man");});
             };
 
             if _scenario then {

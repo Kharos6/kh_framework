@@ -26,11 +26,11 @@ if _state then {
 								};
 							}
 							else {
-								if (viewDistance < KH_var_viewDistanceLimit) then {
+								if (viewDistance < (abs KH_var_viewDistanceLimit)) then {
 									setViewDistance (abs KH_var_viewDistanceLimit);
 								};
 								
-								if ((getObjectViewDistance select 0) < KH_var_viewDistanceLimit) then {
+								if ((getObjectViewDistance select 0) < (abs KH_var_viewDistanceLimit)) then {
 									setObjectViewDistance (abs KH_var_viewDistanceLimit);
 								};
 							};

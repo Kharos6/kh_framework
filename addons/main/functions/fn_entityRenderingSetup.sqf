@@ -36,7 +36,7 @@ if (_entity isKindOf "Man") then {
 
                     private _properties = ((configProperties [
                         _x, 
-                        "!((toLowerANSI (configName _x)) in ['model', 'mesh', 'bindskeleton', 'followrotation']);",
+                        "!((toLowerANSI (configName _x)) in ['model', 'mesh', 'bindskeleton', 'followrotation', 'static', 'showinvehicle']);",
                         true
                     ]) apply {
                         [_renderHandler, configName _x, ["", _x, nil] call KH_fnc_getConfigValue];
@@ -83,11 +83,13 @@ if (_entity isKindOf "Man") then {
             params ["_entity"];
 
             {
-                _x params ["_renderHandler", "_class"];
+                {
+                    _x params ["_renderHandler", "_class"];
 
-                if ((getNumber (_class >> "showInVehicle")) isEqualTo 0) then {
-                    updateRender3D [_renderHandler, "visible", false];
-                };
+                    if ((getNumber (_class >> "showInVehicle")) isEqualTo 0) then {
+                        updateRender3D [_renderHandler, "visible", false];
+                    };
+                } forEach _x;
             } forEach (values (_entity getVariable ["KH_var_renderHandlers", createHashMap]));    
         },
         ["KH_var_renderingGetInHandler", hashValue _entity] joinString "_"
@@ -101,11 +103,13 @@ if (_entity isKindOf "Man") then {
             params ["_entity"];
 
             {
-                _x params ["_renderHandler", "_class"];
+                {
+                    _x params ["_renderHandler", "_class"];
 
-                if ((getNumber (_class >> "showInVehicle")) isEqualTo 0) then {
-                    updateRender3D [_renderHandler, "visible", true];
-                };
+                    if ((getNumber (_class >> "showInVehicle")) isEqualTo 0) then {
+                        updateRender3D [_renderHandler, "visible", true];
+                    };
+                } forEach _x;
             } forEach (values (_entity getVariable ["KH_var_renderHandlers", createHashMap]));        
         },
         ["KH_var_renderingGetOutHandler", hashValue _entity] joinString "_"
@@ -136,7 +140,7 @@ if (_entity isKindOf "Man") then {
 
                 private _properties = ((configProperties [
                     _x, 
-                    "!((toLowerANSI (configName _x)) in ['model', 'mesh', 'bindskeleton', 'followrotation']);",
+                    "!((toLowerANSI (configName _x)) in ['model', 'mesh', 'bindskeleton', 'followrotation', 'static', 'showinvehicle']);",
                     true
                 ]) apply {
                     [_renderHandler, configName _x, ["", _x, nil] call KH_fnc_getConfigValue];
@@ -167,7 +171,7 @@ private _currentHandlers = [];
     
     private _properties = ((configProperties [
         _x, 
-        "!((toLowerANSI (configName _x)) in ['model', 'mesh', 'bindskeleton', 'followrotation']);",
+        "!((toLowerANSI (configName _x)) in ['model', 'mesh', 'bindskeleton', 'followrotation', 'static', 'showinvehicle']);",
         true
     ]) apply {
         [_renderHandler, configName _x, ["", _x, nil] call KH_fnc_getConfigValue];

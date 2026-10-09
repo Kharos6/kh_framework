@@ -165,7 +165,7 @@ switch _type do {
 
             if _typeObject then {
                 [
-                    ["DRAW_UI", [], {}, _duration, [], {}],
+                    ["DRAW_UI", _conditionArguments, _conditionFunction, _duration, [], {}],
                     true,
                     [_start, _end, _beamColor, _dotColor, _dotSize, _beamThickness, _beamMaxLength, _ir],
                     {
@@ -204,7 +204,7 @@ switch _type do {
                 _end = _start vectorFromTo _end;
 
                 [
-                    ["DRAW_UI", [], {}, _duration, [], {}],
+                    ["DRAW_UI", _conditionArguments, _conditionFunction, _duration, [], {}],
                     true,
                     [_start, _end, _beamColor, _dotColor, _dotSize, _beamThickness, _beamMaxLength, _ir],
                     {
@@ -290,6 +290,8 @@ switch _type do {
                     true,
                     [_texture, _color, _position, _width, _height, _angle, _text, _shadow, _textSize, _font, _textAlign, _drawSideArrows, _offsetX, _offsetY],
                     {
+                        private _position = _args param [2, []];
+                        private _drawSideArrows = _args param [11, false]; 
                         if (!_drawSideArrows && ((worldToScreen _position) isEqualTo [])) exitWith {};
                         drawIcon3D _args;
                     }

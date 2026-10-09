@@ -14,7 +14,7 @@ isNil {
                 private _markerUserEnd = _logic getVariable ["KH_ModuleAIInstanceSetupMarkerUserEnd", ""];
                 private _markerAssistantStart = _logic getVariable ["KH_ModuleAIInstanceSetupMarkerAssistantStart", ""];
                 private _markerAssistantEnd = _logic getVariable ["KH_ModuleAIInstanceSetupMarkerAssistantEnd", ""];
-                private _systemPrompt = compile (_logic getVariable ["KH_ModuleAIInstanceSetupSystemPrompt", ""]);
+                private _systemPrompt = compile (_logic getVariable ["KH_ModuleAIInstanceSetupSystemPrompt", "KH_var_defaultAiSystemPrompt"]);
                 private _masterPrompt = compile (_logic getVariable ["KH_ModuleAIInstanceSetupMasterPrompt", ""]);
                 private _userPrompt = compile (_logic getVariable ["KH_ModuleAIInstanceSetupUserPrompt", ""]);
                 private _contextSize = parseNumber (_logic getVariable ["KH_ModuleAIInstanceSetupContextSize", "32768"]);
@@ -32,7 +32,7 @@ isNil {
                 private _mirostatTau = parseNumber (_logic getVariable ["KH_ModuleAIInstanceSetupMirostatTau", "5"]);
                 private _mirostatEta = parseNumber (_logic getVariable ["KH_ModuleAIInstanceSetupMirostatETA", "0.1"]);
                 private _seed = parseNumber (_logic getVariable ["KH_ModuleAIInstanceSetupSeed", "-1"]);
-                private _batchSize = parseNumber (_logic getVariable ["KH_ModuleAIInstanceSetupUserBatchSize", "2048"]);
+                private _batchSize = parseNumber (_logic getVariable ["KH_ModuleAIInstanceSetupBatchSize", "2048"]);
                 private _microBatchSize = parseNumber (_logic getVariable ["KH_ModuleAIInstanceSetupMicroBatchSize", "1024"]);
                 private _cpuThreads = parseNumber (_logic getVariable ["KH_ModuleAIInstanceSetupCPUThreads", "4"]);
                 private _cpuThreadsBatch = parseNumber (_logic getVariable ["KH_ModuleAIInstanceSetupCPUThreadsBatch", "6"]);
@@ -145,7 +145,7 @@ isNil {
                             _this set [10, call (_this select 10)];
                             _this set [11, call (_this select 11)];
                             _this deleteAt 0;
-                            execute [_this, "KH_fnc_aiInstanceSetup", [missionNamespace getVariable _owner, KH_var_allPlayerUidMachines get _owner] select ((_owner select [0, 1]) isNotEqualTo 0), true, false];
+                            execute [_this, "KH_fnc_aiInstanceSetup", [missionNamespace getVariable _owner, KH_var_allPlayerUidMachines get _owner] select ((parseNumber (_owner select [0, 1])) isNotEqualTo 0), true, false];
                         },
                         true,
                         {
@@ -157,7 +157,10 @@ isNil {
                             else {
                                 if !(missionNamespace isNil _owner) then {
                                     private _unit = missionNamespace getVariable _owner;
-                                    (!(local _unit) && !(isNull _unit));
+                                    ((!(isNull _unit) && !(local _unit)) || (isPlayer _unit));
+                                }
+                                else {
+                                    false;
                                 };
                             };
                         },

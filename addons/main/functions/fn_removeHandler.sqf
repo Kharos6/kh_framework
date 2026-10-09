@@ -34,9 +34,9 @@ else {
         _id params [["_type", [], [[]]], ["_event", "", [true, 0, ""]], ["_handlerId", 0, [0, "", []]], ["_eventOwner", 2, [0]]];
 
         execute [
-            [_type, _event, _handlerId],
+            [_type, _event, _handlerId, _eventOwner],
             {
-                params ["_type", "_event", "_handlerId"];
+                params ["_type", "_event", "_handlerId", "_eventOwner"];
                 _type params [["_eventType", "", [""]], "_target"];
 
                 switch _eventType do {
@@ -98,7 +98,7 @@ else {
                     };
                 };
 
-                triggerCbaEvent ["KH_eve_handlerRemoved", [_id], true, false];
+                triggerCbaEvent ["KH_eve_handlerRemoved", [_type, _event, _handlerId, _eventOwner], true, false];
             },
             _eventOwner,
             true,

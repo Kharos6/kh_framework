@@ -111,15 +111,51 @@ if ((_userPrompt isNotEqualTo "") && (_userPrompt isNotEqualTo (text ""))) then 
 };
 
 if (_responseProgressFunction isNotEqualTo {}) then {
-    ["CBA", "KH_eve_aiResponseProgress", [], _responseProgressFunction] call KH_fnc_addEventHandler;
+    [
+        "CBA",
+        "KH_eve_aiResponseProgress",
+        [_name, _responseProgressFunction],
+        {
+            params ["_name"];
+            _args params ["_thisName", "_function"];
+
+            if (_name isEqualTo _thisName) then {
+                call _function;
+            };
+        }
+    ] call KH_fnc_addEventHandler;
 };
 
 if (_responseFunction isNotEqualTo {}) then {
-    ["CBA", "KH_eve_aiResponse", [], _responseFunction] call KH_fnc_addEventHandler;
+    [
+        "CBA",
+        "KH_eve_aiResponse",
+        [_name, _responseFunction],
+        {
+            params ["_name"];
+            _args params ["_thisName", "_function"];
+
+            if (_name isEqualTo _thisName) then {
+                call _function;
+            };
+        }
+    ] call KH_fnc_addEventHandler;
 };
 
 if (_init isNotEqualTo {}) then {
-    ["CBA", "KH_eve_aiInitialized", [], _init] call KH_fnc_addEventHandler;
+    [
+        "CBA",
+        "KH_eve_aiInitialized",
+        [_name, _init],
+        {
+            params ["_name"];
+            _args params ["_thisName", "_function"];
+
+            if (_name isEqualTo _thisName) then {
+                call _function;
+            };
+        }
+    ] call KH_fnc_addEventHandler;
 };
 
 if _logGeneration then {
@@ -133,8 +169,12 @@ if _immediateInference then {
         [_name],
         {
             params ["_name"];
-            triggerAiInference _name;
-            [_handlerId] call KH_fnc_removeHandler;
+            _args params ["_thisName"];
+
+            if (_name isEqualTo _thisName) then {
+                triggerAiInference _name;
+                [_handlerId] call KH_fnc_removeHandler;
+            };
         }
     ] call KH_fnc_addEventHandler;
 };

@@ -48,7 +48,7 @@ if (_action isNotEqualTo "") then {
                         ] call KH_fnc_setAnimation;
                     }
                     else {
-                        private _gestureMode = (getArray ((_unit getVariable ["KH_var_meleeWeaponConfig", configNull]) >> "kh_meleeModesGestures")) param [(getArray ((_unit getVariable ["KH_var_meleeWeaponConfig", configNull]) >> "kh_meleeModes")) find _mode, []];
+                        private _gestureMode = (getArray ((_unit getVariable ["KH_var_specialWeaponConfig", configNull]) >> "kh_meleeModesGestures")) param [(getArray ((_unit getVariable ["KH_var_specialWeaponConfig", configNull]) >> "kh_meleeModes")) find _mode, []];
                         
                         if (_gestureMode isNotEqualTo []) then {
                             private _newIndex = (_unit getVariable ["KH_var_attackGestureIndex", -1]) + 1;
@@ -81,7 +81,7 @@ if (_action isNotEqualTo "") then {
                     };
                 }
                 else {
-                    private _gestureMode = (getArray ((_unit getVariable ["KH_var_meleeWeaponConfig", configNull]) >> "kh_meleeModesGestures")) param [(getArray ((_unit getVariable ["KH_var_meleeWeaponConfig", configNull]) >> "kh_meleeModes")) find _mode, []];
+                    private _gestureMode = (getArray ((_unit getVariable ["KH_var_specialWeaponConfig", configNull]) >> "kh_meleeModesGestures")) param [(getArray ((_unit getVariable ["KH_var_specialWeaponConfig", configNull]) >> "kh_meleeModes")) find _mode, []];
                     
                     if (_gestureMode isEqualTo []) then {
                         [
@@ -334,7 +334,7 @@ if (_action isNotEqualTo "") then {
                     };
                 }
                 else {
-                    if ((getArray (configFile >> _moves >> "actions" >> (getText (configFile >> _moves >> "states" >> (animationState _unit) >> "actions")) >> "KH_MeleeParryGesture")) isNotEqualTo []) then {
+                    if (((getArray (configFile >> _moves >> "actions" >> (getText (configFile >> _moves >> "states" >> (animationState _unit) >> "actions")) >> "KH_MeleeParryGesture")) param [0, ""]) isNotEqualTo "") then {
                         if !(_unit getVariable ["KH_var_meleeMoveActive", false]) then {
                             [_unit, ["ACTION_PLAY_NOW", "KH_MeleeParryGesture", true], false, false] call KH_fnc_setAnimation;
                         }
@@ -496,7 +496,7 @@ if (_action isNotEqualTo "") then {
         };
 
         case "CYCLE_ATTACK_MODE": {
-            private _modes = getArray ((_unit getVariable ["KH_var_meleeWeaponConfig", configNull]) >> "kh_meleeModes");
+            private _modes = getArray ((_unit getVariable ["KH_var_specialWeaponConfig", configNull]) >> "kh_meleeModes");
 
             if (_modes isNotEqualTo []) then {
                 private _currentModeIndex = _modes find (_unit getVariable ["KH_var_meleeMode", ""]);

@@ -13,12 +13,12 @@ isNil {
             parseNumber (_logic getVariable ["KH_ModuleEntitySpawnerMaximum", "1"]),
             compile (_logic getVariable ["KH_ModuleEntitySpawnerCondition", "true"]),
             compile (_logic getVariable ["KH_ModuleEntitySpawnerInit", ""]),
-            switch (_logic getVariable ["KH_ModuleEntitySpawnerType", ""]) do {
+            switch (_logic getVariable ["KH_ModuleEntitySpawnerType", "UNIT"]) do {
                 case "UNIT": {
                     [
                         "UNIT",
-                        _logic getVariable ["KH_ModuleEntitySpawnerPlacementMode", ""],
-                        switch (_logic getVariable ["KH_ModuleEntitySpawnerSide", ""]) do {
+                        _logic getVariable ["KH_ModuleEntitySpawnerPlacementMode", "NONE"],
+                        switch (_logic getVariable ["KH_ModuleEntitySpawnerSide", "BLUFOR"]) do {
                             case "BLUFOR": {
                                 west;
                             };
@@ -42,8 +42,8 @@ isNil {
                 case "UNIT_GROUP": {
                     [
                         "UNIT",
-                        _logic getVariable ["KH_ModuleEntitySpawnerPlacementMode", ""],
-                        switch (_logic getVariable ["KH_ModuleEntitySpawnerSide", ""]) do {
+                        _logic getVariable ["KH_ModuleEntitySpawnerPlacementMode", "NONE"],
+                        switch (_logic getVariable ["KH_ModuleEntitySpawnerSide", "BLUFOR"]) do {
                             case "BLUFOR": {
                                 west;
                             };
@@ -65,14 +65,14 @@ isNil {
                 };
 
                 case "AGENT": {
-                    ["AGENT", _logic getVariable ["KH_ModuleEntitySpawnerPlacementMode", ""]];
+                    ["AGENT", _logic getVariable ["KH_ModuleEntitySpawnerPlacementMode", "NONE"]];
                 };
 
                 case "GROUP": {
                     [
                         "GROUP",
-                        _logic getVariable ["KH_ModuleEntitySpawnerPlacementMode", ""],
-                        switch (_logic getVariable ["KH_ModuleEntitySpawnerSide", ""]) do {
+                        _logic getVariable ["KH_ModuleEntitySpawnerPlacementMode", "NONE"],
+                        switch (_logic getVariable ["KH_ModuleEntitySpawnerSide", "BLUFOR"]) do {
                             case "BLUFOR": {
                                 west;
                             };
@@ -93,7 +93,7 @@ isNil {
                 };
 
                 case "OBJECT": {
-                    ["OBJECT", _logic getVariable ["KH_ModuleEntitySpawnerPlacementMode", ""], false];
+                    ["OBJECT", _logic getVariable ["KH_ModuleEntitySpawnerPlacementMode", "NONE"], false];
                 };
 
                 case "SIMPLE_OBJECT": {
@@ -101,7 +101,7 @@ isNil {
                 };
 
                 case "VEHICLE": {
-                    ["VEHICLE", _logic getVariable ["KH_ModuleEntitySpawnerPlacementMode", ""]];
+                    ["VEHICLE", _logic getVariable ["KH_ModuleEntitySpawnerPlacementMode", "NONE"]];
                 };
             },
             parseNumber (_logic getVariable ["KH_ModuleEntitySpawnerInterval", "1"]),

@@ -15,11 +15,12 @@ params [
 ];
 
 private _spawnerCount = generateUid;
+private _spawnerId = ["KH_eve_spawner_", generateUid] joinString "";
 missionNamespace setVariable [_spawnerCount, 0];
 
 private _entityHandler = [
 	"CBA",
-	"KH_eve_spawnedEntityTerminated",
+	_spawnerId,
 	[_spawnerCount],
 	{
 		_args params ["_spawnerCount"];
@@ -28,9 +29,9 @@ private _entityHandler = [
 ] call KH_fnc_addEventHandler;
 
 private _spawnHandler = execute [
-	[_entityTypes, _transforms, _radius, _amount, _maximum, _condition, _init, _type, _countKilled, _validatePosition, _minimumPlayerDistance, _maximumPlayerDistance, _spawnerCount],
+	[_entityTypes, _transforms, _radius, _amount, _maximum, _condition, _init, _type, _countKilled, _validatePosition, _minimumPlayerDistance, _maximumPlayerDistance, _spawnerCount, _spawnerId],
 	{
-		params ["_entityTypes", "_transforms", "_radius", "_amount", "_maximum", "_condition", "_init", "_type", "_countKilled", "_validatePosition", "_minimumPlayerDistance", "_maximumPlayerDistance", "_spawnerCount"];
+		params ["_entityTypes", "_transforms", "_radius", "_amount", "_maximum", "_condition", "_init", "_type", "_countKilled", "_validatePosition", "_minimumPlayerDistance", "_maximumPlayerDistance", "_spawnerCount", "_spawnerId"];
 
 		if ((missionNamespace getVariable [_spawnerCount, 0]) < _maximum) then {
 			private _negativeRadius = [-(_radius select 0), -(_radius select 1), -(_radius select 2)];
@@ -61,25 +62,6 @@ private _spawnHandler = execute [
 							_chosenTransforms select 0;
 						};
 
-						if !([_chosenTransforms, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
-							continue;
-						};
-
-						private _spawnValid = true;
-
-						if _validatePosition then {
-							{
-								if ([_x, AGLToASL _position, _x, 1, _minimumPlayerDistance, _maximumPlayerDistance, objNull] call KH_fnc_getPositionVisibility) then {
-									_spawnValid = false;
-									break;
-								};
-							} forEach KH_var_allPlayerUnits;
-						};
-
-						if !_spawnValid then {
-							continue;
-						};
-
 						private _rotation = if ((count _chosenTransforms) > 1) then {
 							if ((_chosenTransforms select 1) isEqualType objNull) then {
 								private _chosenEntity = _chosenTransforms select 1;
@@ -101,7 +83,28 @@ private _spawnHandler = execute [
 						
 						_position = _position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
 
-						if !([_position, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
+						if !([_chosenTransforms, missionNamespace getVariable [_spawnerCount, 0], _position] call _condition) then {
+							continue;
+						};
+
+						private _spawnValid = true;
+
+						if _validatePosition then {
+							{
+								if ([_x, AGLToASL _position, _x, 1, _minimumPlayerDistance, _maximumPlayerDistance, objNull] call KH_fnc_getPositionVisibility) then {
+									_spawnValid = false;
+									break;
+								};
+							} forEach KH_var_allPlayerUnits;
+						};
+
+						if (_spawnValid && (_maximumPlayerDistance > 0) && (KH_var_allPlayerUnits isNotEqualTo [])) then {
+							if ((KH_var_allPlayerUnits findIf {(_x distance _position) <= _maximumPlayerDistance}) isEqualTo -1) then {
+								_spawnValid = false;
+							};
+						};
+
+						if !_spawnValid then {
 							continue;
 						};
 
@@ -121,7 +124,6 @@ private _spawnHandler = execute [
 
 				case "GROUP": {
 					(_type select [1]) params [["_placementMode", "CAN_COLLIDE", [""]], ["_side", sideUnknown, [sideUnknown]]];
-					private _group = createGroup [_side, _countKilled];
 
 					for "_i" from 1 to _amount do {
 						private _chosenTransforms = selectRandom _transforms;
@@ -131,25 +133,6 @@ private _spawnHandler = execute [
 						}
 						else {
 							_chosenTransforms select 0;
-						};
-
-						if !([_chosenTransforms, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
-							continue;
-						};
-
-						private _spawnValid = true;
-
-						if _validatePosition then {
-							{
-								if ([_x, AGLToASL _position, _x, 1, _minimumPlayerDistance, _maximumPlayerDistance, objNull] call KH_fnc_getPositionVisibility) then {
-									_spawnValid = false;
-									break;
-								};
-							} forEach KH_var_allPlayerUnits;
-						};
-
-						if !_spawnValid then {
-							continue;
 						};
 
 						private _rotation = if ((count _chosenTransforms) > 1) then {
@@ -173,11 +156,33 @@ private _spawnHandler = execute [
 						
 						_position = _position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
 
-						if !([_position, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
+						if !([_chosenTransforms, missionNamespace getVariable [_spawnerCount, 0], _position] call _condition) then {
+							continue;
+						};
+
+						private _spawnValid = true;
+
+						if _validatePosition then {
+							{
+								if ([_x, AGLToASL _position, _x, 1, _minimumPlayerDistance, _maximumPlayerDistance, objNull] call KH_fnc_getPositionVisibility) then {
+									_spawnValid = false;
+									break;
+								};
+							} forEach KH_var_allPlayerUnits;
+						};
+
+						if (_spawnValid && (_maximumPlayerDistance > 0) && (KH_var_allPlayerUnits isNotEqualTo [])) then {
+							if ((KH_var_allPlayerUnits findIf {(_x distance _position) <= _maximumPlayerDistance}) isEqualTo -1) then {
+								_spawnValid = false;
+							};
+						};
+
+						if !_spawnValid then {
 							continue;
 						};
 
 						private _groupArray = selectRandom _entityTypes;
+						private _group = createGroup [_side, _countKilled];
 
 						{
 							private _unit = _group createUnit [_x, _position, [], 0, _placementMode];
@@ -208,25 +213,6 @@ private _spawnHandler = execute [
 							_chosenTransforms select 0;
 						};
 
-						if !([_chosenTransforms, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
-							continue;
-						};
-
-						private _spawnValid = true;
-
-						if _validatePosition then {
-							{
-								if ([_x, AGLToASL _position, _x, 1, _minimumPlayerDistance, _maximumPlayerDistance, objNull] call KH_fnc_getPositionVisibility) then {
-									_spawnValid = false;
-									break;
-								};
-							} forEach KH_var_allPlayerUnits;
-						};
-
-						if !_spawnValid then {
-							continue;
-						};
-
 						private _rotation = if ((count _chosenTransforms) > 1) then {
 							if ((_chosenTransforms select 1) isEqualType objNull) then {
 								private _chosenEntity = _chosenTransforms select 1;
@@ -248,7 +234,28 @@ private _spawnHandler = execute [
 
 						_position = _position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
 
-						if !([_position, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
+						if !([_chosenTransforms, missionNamespace getVariable [_spawnerCount, 0], _position] call _condition) then {
+							continue;
+						};
+
+						private _spawnValid = true;
+
+						if _validatePosition then {
+							{
+								if ([_x, AGLToASL _position, _x, 1, _minimumPlayerDistance, _maximumPlayerDistance, objNull] call KH_fnc_getPositionVisibility) then {
+									_spawnValid = false;
+									break;
+								};
+							} forEach KH_var_allPlayerUnits;
+						};
+
+						if (_spawnValid && (_maximumPlayerDistance > 0) && (KH_var_allPlayerUnits isNotEqualTo [])) then {
+							if ((KH_var_allPlayerUnits findIf {(_x distance _position) <= _maximumPlayerDistance}) isEqualTo -1) then {
+								_spawnValid = false;
+							};
+						};
+
+						if !_spawnValid then {
 							continue;
 						};
 
@@ -279,25 +286,6 @@ private _spawnHandler = execute [
 							_chosenTransforms select 0;
 						};
 
-						if !([_chosenTransforms, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
-							continue;
-						};
-
-						private _spawnValid = true;
-
-						if _validatePosition then {
-							{
-								if ([_x, AGLToASL _position, _x, 1, _minimumPlayerDistance, _maximumPlayerDistance, objNull] call KH_fnc_getPositionVisibility) then {
-									_spawnValid = false;
-									break;
-								};
-							} forEach KH_var_allPlayerUnits;
-						};
-
-						if !_spawnValid then {
-							continue;
-						};
-
 						private _rotation = if ((count _chosenTransforms) > 1) then {
 							if ((_chosenTransforms select 1) isEqualType objNull) then {
 								private _chosenEntity = _chosenTransforms select 1;
@@ -319,7 +307,28 @@ private _spawnHandler = execute [
 
 						_position = _position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
 
-						if !([_position, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
+						if !([_chosenTransforms, missionNamespace getVariable [_spawnerCount, 0], _position] call _condition) then {
+							continue;
+						};
+
+						private _spawnValid = true;
+
+						if _validatePosition then {
+							{
+								if ([_x, AGLToASL _position, _x, 1, _minimumPlayerDistance, _maximumPlayerDistance, objNull] call KH_fnc_getPositionVisibility) then {
+									_spawnValid = false;
+									break;
+								};
+							} forEach KH_var_allPlayerUnits;
+						};
+
+						if (_spawnValid && (_maximumPlayerDistance > 0) && (KH_var_allPlayerUnits isNotEqualTo [])) then {
+							if ((KH_var_allPlayerUnits findIf {(_x distance _position) <= _maximumPlayerDistance}) isEqualTo -1) then {
+								_spawnValid = false;
+							};
+						};
+
+						if !_spawnValid then {
 							continue;
 						};
 
@@ -355,25 +364,6 @@ private _spawnHandler = execute [
 							_chosenTransforms select 0;
 						};
 
-						if !([_chosenTransforms, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
-							continue;
-						};
-
-						private _spawnValid = true;
-
-						if _validatePosition then {
-							{
-								if ([_x, _position, _x, 1, _minimumPlayerDistance, _maximumPlayerDistance, objNull] call KH_fnc_getPositionVisibility) then {
-									_spawnValid = false;
-									break;
-								};
-							} forEach KH_var_allPlayerUnits;
-						};
-
-						if !_spawnValid then {
-							continue;
-						};
-
 						private _rotation = if ((count _chosenTransforms) > 1) then {
 							if ((_chosenTransforms select 1) isEqualType objNull) then {
 								private _chosenEntity = _chosenTransforms select 1;
@@ -395,7 +385,28 @@ private _spawnHandler = execute [
 
 						_position = _position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
 
-						if !([_position, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
+						if !([_chosenTransforms, missionNamespace getVariable [_spawnerCount, 0], _position] call _condition) then {
+							continue;
+						};
+
+						private _spawnValid = true;
+
+						if _validatePosition then {
+							{
+								if ([_x, _position, _x, 1, _minimumPlayerDistance, _maximumPlayerDistance, objNull] call KH_fnc_getPositionVisibility) then {
+									_spawnValid = false;
+									break;
+								};
+							} forEach KH_var_allPlayerUnits;
+						};
+
+						if (_spawnValid && (_maximumPlayerDistance > 0) && (KH_var_allPlayerUnits isNotEqualTo [])) then {
+							if ((KH_var_allPlayerUnits findIf {(_x distance _position) <= _maximumPlayerDistance}) isEqualTo -1) then {
+								_spawnValid = false;
+							};
+						};
+
+						if !_spawnValid then {
 							continue;
 						};
 
@@ -426,25 +437,6 @@ private _spawnHandler = execute [
 							_chosenTransforms select 0;
 						};
 
-						if !([_chosenTransforms, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
-							continue;
-						};
-
-						private _spawnValid = true;
-
-						if _validatePosition then {
-							{
-								if ([_x, AGLToASL _position, _x, 1, _minimumPlayerDistance, _maximumPlayerDistance, objNull] call KH_fnc_getPositionVisibility) then {
-									_spawnValid = false;
-									break;
-								};
-							} forEach KH_var_allPlayerUnits;
-						};
-
-						if !_spawnValid then {
-							continue;
-						};
-
 						private _rotation = if ((count _chosenTransforms) > 1) then {
 							if ((_chosenTransforms select 1) isEqualType objNull) then {
 								private _chosenEntity = _chosenTransforms select 1;
@@ -466,7 +458,28 @@ private _spawnHandler = execute [
 
 						_position = _position vectorAdd [random [(_radius select 0), 0, (_negativeRadius select 0)], random [(_radius select 1), 0, (_negativeRadius select 1)], random [(_radius select 2), 0, (_negativeRadius select 2)]];
 						
-						if !([_position, missionNamespace getVariable [_spawnerCount, 0]] call _condition) then {
+						if !([_chosenTransforms, missionNamespace getVariable [_spawnerCount, 0], _position] call _condition) then {
+							continue;
+						};
+
+						private _spawnValid = true;
+
+						if _validatePosition then {
+							{
+								if ([_x, AGLToASL _position, _x, 1, _minimumPlayerDistance, _maximumPlayerDistance, objNull] call KH_fnc_getPositionVisibility) then {
+									_spawnValid = false;
+									break;
+								};
+							} forEach KH_var_allPlayerUnits;
+						};
+
+						if (_spawnValid && (_maximumPlayerDistance > 0) && (KH_var_allPlayerUnits isNotEqualTo [])) then {
+							if ((KH_var_allPlayerUnits findIf {(_x distance _position) <= _maximumPlayerDistance}) isEqualTo -1) then {
+								_spawnValid = false;
+							};
+						};
+
+						if !_spawnValid then {
 							continue;
 						};
 
@@ -490,19 +503,21 @@ private _spawnHandler = execute [
 
 			if (_spawnedEntities isEqualTypeAll grpNull) then {
 				{
+					private _spawnedGroup = _x;
+
 					[
-						["ENTITY", _group, "REMOTE"],
+						["ENTITY", _spawnedGroup, "REMOTE"],
 						"Deleted",
-						[],
+						[_spawnerId],
 						{
-							params ["_entity"];
-							triggerCbaEvent ["KH_eve_spawnedEntityTerminated", [], true, false];
+							_args params ["_spawnerId"];
+							triggerCbaEvent [_spawnerId, [], true, false];
 							[_handlerId] call KH_fnc_removeHandler;
 						}
 					] call KH_fnc_addEventHandler;
 
 					{
-						_x addCuratorEditableObjects [units _x, true];
+						_x addCuratorEditableObjects [units _spawnedGroup, true];
 					} forEach allCurators;
 				} forEach _spawnedEntities;
 			}
@@ -512,10 +527,10 @@ private _spawnHandler = execute [
 						[
 							["ENTITY", _x, "REMOTE"],
 							"Killed",
-							[],
+							[_spawnerId],
 							{
-								params ["_entity"];
-								triggerCbaEvent ["KH_eve_spawnedEntityTerminated", [], true, false];
+								_args params ["_spawnerId"];
+								triggerCbaEvent [_spawnerId, [], true, false];
 								[_handlerId] call KH_fnc_removeHandler;
 							}
 						] call KH_fnc_addEventHandler;
@@ -524,14 +539,10 @@ private _spawnHandler = execute [
 					[
 						["ENTITY", _x, "REMOTE"],
 						"Deleted",
-						[],
+						[_spawnerId],
 						{
-							params ["_entity"];
-
-							if (alive _entity) then {
-								triggerCbaEvent ["KH_eve_spawnedEntityTerminated", [], true, false];
-							};
-
+							_args params ["_spawnerId"];
+							triggerCbaEvent [_spawnerId, [], true, false];
 							[_handlerId] call KH_fnc_removeHandler;
 						}
 					] call KH_fnc_addEventHandler;

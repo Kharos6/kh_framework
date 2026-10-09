@@ -22,7 +22,7 @@ missionNamespace setVariable [_lightId, true, true];
             params ["_source", "_light", "_duration", "_conditionArguments", "_conditionFunction", "_lightId"];
             if (!(missionNamespace getVariable _lightId) || !(_conditionArguments call _conditionFunction)) exitWith {};
             
-            private _emitter = if (isClass (configFile >> "CfgLights" >> _particle)) then {
+            private _emitter = if (isClass (configFile >> "CfgLights" >> _light)) then {
                 private _startingPosition = _source;
                 private _entity = objNull;
                 private _selection = "";
@@ -32,7 +32,7 @@ missionNamespace setVariable [_lightId, true, true];
                     if !(_source isEqualTypeAll 0) then {
                         _entity = _source param [0, objNull, [objNull]];
                         _selection = _source param [1, "", [""]];
-                        _trackingPosition = _source param [2, [], [[]]];
+                        _trackingPosition = _source param [2, [0, 0, 0], [[]]];
                         _startingPosition = ASLToATL (_entity modelToWorldVisualWorld (_entity selectionPosition _selection));
                     }; 
                 }
@@ -41,7 +41,7 @@ missionNamespace setVariable [_lightId, true, true];
                     _startingPosition = getPosATLVisual _source;
                 };
 
-                private _parameters = [configFile >> "CfgLights" >> (getText (_x >> "type"))] call KH_fnc_getLightParameters;
+                private _parameters = [configFile >> "CfgLights" >> _light] call KH_fnc_getLightParameters;
                 private _lightSource = createVehicleLocal ["#lightpoint", _startingPosition, [], 0, "CAN_COLLIDE"];
                 _lightSource setLightColor (_parameters select 0);
                 _lightSource setLightAmbient ((_parameters select 1) select [0, 3]);
@@ -56,6 +56,8 @@ missionNamespace setVariable [_lightId, true, true];
                 if !(isNull _entity) then {
                     _lightSource attachTo [_entity, _trackingPosition, _selection, true];
                 };
+
+                _lightSource;
             }
             else {
                 objNull;

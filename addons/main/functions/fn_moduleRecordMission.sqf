@@ -8,13 +8,14 @@ isNil {
         private _groups = _logic getVariable ["KH_ModuleRecordMissionGroups", true];
         private _objects = _logic getVariable ["KH_ModuleRecordMissionObjects", true];
         private _scenario = _logic getVariable ["KH_ModuleRecordMissionScenario", true];
+        private _captureFinalData = _logic getVariable ["KH_ModuleRecordMissionCaptureFinalData", true];
         
         if (_owner isEqualTo "") then {
-            [_identifier, _units, _groups, _objects, _scenario] call KH_fnc_recordMission;
+            [_identifier, _units, _groups, _objects, _scenario, _captureFinalData] call KH_fnc_recordMission;
         }
         else {
             execute [
-                [_owner, [_identifier, _units, _groups, _objects, _scenario]],
+                [_owner, [_identifier, _units, _groups, _objects, _scenario, _captureFinalData]],
                 {
                     params ["_owner", "_arguments"];
                     execute [_arguments, "KH_fnc_recordMission", missionNamespace getVariable _owner, true, false];
@@ -25,7 +26,10 @@ isNil {
                     
                     if !(missionNamespace isNil _owner) then {
                         private _unit = missionNamespace getVariable _owner;
-                        (!(local _unit) && !(isNull _unit));
+                        ((!(isNull _unit) && !(local _unit)) || (isPlayer _unit));
+                    }
+                    else {
+                        false;
                     };
                 },
                 false

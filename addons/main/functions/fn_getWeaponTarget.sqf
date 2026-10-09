@@ -25,7 +25,7 @@ if ((KH_var_weaponTargetCheckFrame isEqualTo diag_frameNo) && (KH_var_weaponTarg
     ];
 };
 
-KH_var_weaponTargetIgnores = _ignored;
+KH_var_weaponTargetIgnores = +_ignored;
 KH_var_weaponTargetCheckFrame = diag_frameNo;
 private _weaponType = [KH_var_playerUnit] call KH_fnc_getCurrentWeaponSlot;
 
@@ -42,7 +42,7 @@ private _weaponTarget = ([
         _weaponPosition vectorAdd ((KH_var_playerUnit weaponDirection (currentWeapon KH_var_playerUnit)) vectorMultiply viewDistance);
     }
     else {
-        _weaponPosition vectorAdd ((getCameraViewDirection KH_var_playerUnit) vectorMultiply viewDistance);
+        _weaponPosition vectorAdd ((getCameraViewDirection KH_var_mainCamera) vectorMultiply viewDistance);
     },
     _ignored,
     true, 

@@ -51,6 +51,10 @@ else {
     _jip = true;
 };
 
+if (_condition isEqualType "") then {
+    _condition = [{}, _condition, {}, {}, {}];
+};
+
 if (_duration isEqualType []) then {
     _progressDisplay = _duration param [1, "NONE", [""]];
     _duration = _duration param [0, false, [true, 0]];
@@ -656,12 +660,12 @@ private _actionHandler = execute [
                     missionNamespace setVariable [_resultStartId, _resultStart];
                     missionNamespace setVariable [_resultProgressId, nil];
 
-                    if _exclusive then {
-                        missionNamespace setVariable [_conditionShowId, false, KH_var_allMachines - [clientOwner]];
+                    if (_duration isNotEqualTo 0) then {
+                        missionNamespace setVariable [_allowedActivationId, false];
 
-                        if (_duration isNotEqualTo 0) then {
+                        if _exclusive then {
+                            missionNamespace setVariable [_conditionShowId, false, KH_var_allMachines - [clientOwner]];
                             missionNamespace setVariable [_actionSafetyId, getPlayerUID player, 2];
-                            missionNamespace setVariable [_allowedActivationId, false];
                         };
                     };
 
@@ -730,7 +734,7 @@ private _actionHandler = execute [
                                 _handlerId,
                                 _interactionHelper,
                                 diag_tickTime,
-                                diag_tickTime + _duration,
+                                diag_tickTime + ([_duration, 0] select (_duration isEqualTo true)),
                                 _resultStart,
                                 _progressId
                             ],
@@ -904,7 +908,7 @@ private _actionHandler = execute [
                                     switch _progressDetection do {
                                         case true: {
                                             deleteVehicle _interactionHelper;
-                                            private _viewTarget = call (missionNamespace getVariable _detectionType);
+                                            private _viewTarget = [] call (missionNamespace getVariable _detectionType);
                                             
                                             if (((_viewTarget select 1) > _distance) || ((_viewTarget select 4) isNotEqualTo _target)) then {
                                                 false;
@@ -926,9 +930,9 @@ private _actionHandler = execute [
 
                                         default {
                                             deleteVehicle _interactionHelper;
-                                            private _viewTarget = call (missionNamespace getVariable _detectionType);
+                                            private _viewTarget = [] call (missionNamespace getVariable _detectionType);
                                             
-                                            if (((_viewTarget select 1) > _distance) || ((_viewTarget select 5) isNotEqualTo _progressDetection)) then {
+                                            if (((_viewTarget select 1) > _distance) || (((_viewTarget select 5) param [0, ""]) isNotEqualTo _progressDetection) || ((_viewTarget select 4) isNotEqualTo _target)) then {
                                                 false;
                                             }
                                             else {
@@ -939,7 +943,7 @@ private _actionHandler = execute [
                                 },
                                 true,
                                 0,
-                                [_duration, false, true, true],
+                                [[_duration, 0] select (_duration isEqualTo true), false, true, true],
                                 {
                                     params [
                                         "_target",
@@ -1097,6 +1101,7 @@ private _actionHandler = execute [
                             else {
                                 private _caller = _this;
                                 private _target = missionNamespace getVariable '", _objectId, "';
+                                private _handlerId = [missionNamespace, '", _actionExistenceId, "', true];
                                 (((missionNamespace getVariable '", _argumentsReferenceId, "') call (missionNamespace getVariable '", _conditionShowReferenceId, "')) && (missionNamespace getVariable '", _conditionShowId, "'));
                             };
                         };
@@ -1267,7 +1272,7 @@ private _actionHandler = execute [
         _parsedParent setUserActionText [_action, _menuName, _windowBackgroundName, _windowForegroundName];
 
         if _handleParentActionRecovery then {            
-            if (_playerOnly isEqualTo false) then {
+            if !_playerOnly then {
                 private _controlledUnitActions = [KH_var_playerUnit];
 
                 [
@@ -1431,7 +1436,7 @@ private _actionHandler = execute [
             };
         };
 
-        if (_handleObjectActionRecovery && _visiblePerPlayer) then {
+        if (_handleObjectActionRecovery && _visiblePerPlayer && !(_handleParentActionRecovery && (_parent isEqualType true))) then {
             [
                 ["ENTITY", player, "LOCAL"],
                 "Respawn",
@@ -1760,7 +1765,7 @@ if !(isNil "_parsedConditionExist") then {
     ];
 };
 
-if !(isNil "_functionTerminate") then {
+if (_firstCall && !(isNil "_functionTerminate")) then {
     [
         "CBA",
         "KH_eve_handlerRemoved",

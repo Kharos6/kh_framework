@@ -17,21 +17,20 @@ else {
             [_vehicle, "GUNNER"];
         }
         else {
-            if (_unit in (crew _vehicle)) then {
-                [_vehicle, "CARGO", _vehicle getCargoIndex _unit];
-            }
-            else {
-                private _return = [_vehicle, "ANY"];
+            private _return = [_vehicle, "ANY"];
 
-                {
-                    if (_unit isEqualTo (_vehicle turretUnit _x)) then {
-                        _return = [_vehicle, "TURRET", _x];
-                        break;
-                    };
-                } forEach (allTurrets _vehicle);
-                
-                _return;
+            {
+                if (_unit isEqualTo (_vehicle turretUnit _x)) then {
+                    _return = [_vehicle, "TURRET", _x];
+                    break;
+                };
+            } forEach (allTurrets _vehicle);
+
+            if ((_return select 1) isEqualTo "ANY") then {
+                _return = [_vehicle, "CARGO", _vehicle getCargoIndex _unit];
             };
+
+            _return;
         };
     };
 };

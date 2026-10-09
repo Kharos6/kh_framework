@@ -65,8 +65,8 @@ for "_i" from _minX to _maxX step _gridWidth do {
     for "_j" from _minY to _maxY step _gridWidth do {
         private _dx = _i - _snappedX;
         private _dy = _j - _snappedY;
-        private _rotatedX = _dx * _cosDirection + _dy * _sinDirection;
-        private _rotatedY = -_dx * _sinDirection + _dy * _cosDirection;
+        private _rotatedX = _dx * _cosDirection - _dy * _sinDirection;
+        private _rotatedY = _dx * _sinDirection + _dy * _cosDirection;
         private _inShape = false;
         private _normalizedDistance = 0;
 
@@ -199,31 +199,32 @@ else {
 
             if (diag_tickTime < (_startTime + _changeDuration)) then {
                 private _time = (diag_tickTime - _startTime) / _changeDuration;
+                private _currentHeights = [];
 
-                setTerrainHeight [
-                    _originalHeights apply {
-                        _x params ["_i", "_j", "_originalHeight"];
-                        
-                        [
-                            _i, 
-                            _j, 
-                            switch _animationCurveType do {
-                                case "NONE": { 
-                                    _originalHeight;
-                                };
+                {
+                    _x params ["_i", "_j", "_originalHeight"];
+                    private _targetHeight = (_targetHeights select _forEachIndex) select 2;
+                    
+                    _currentHeights pushBack [
+                        _i, 
+                        _j, 
+                        switch _animationCurveType do {
+                            case "NONE": { 
+                                _originalHeight;
+                            };
 
-                                case "LINEAR": { 
-                                    linearConversion [0, 1, _time, _originalHeight, (_targetHeights select _forEachIndex) select 2, false];
-                                };
+                            case "LINEAR": { 
+                                linearConversion [0, 1, _time, _originalHeight, _targetHeight, false];
+                            };
 
-                                case "BEZIER": {
-                                    linearConversion [0, 1, _time * _time * (3 - 2 * _time), _originalHeight, (_targetHeights select _forEachIndex) select 2, false];
-                                };
-                            }
-                        ];
-                    }, 
-                    _adjustObjectHeight
-                ];
+                            case "BEZIER": {
+                                linearConversion [0, 1, _time * _time * (3 - 2 * _time), _originalHeight, _targetHeight, false];
+                            };
+                        }
+                    ];
+                } forEach _originalHeights;
+
+                setTerrainHeight [_currentHeights, _adjustObjectHeight];
             }
             else {
                 setTerrainHeight [_targetHeights, _adjustObjectHeight];

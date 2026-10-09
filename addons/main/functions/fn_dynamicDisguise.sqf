@@ -143,9 +143,7 @@ if _state then {
 					} forEach KH_var_allMen;
 
 					if !(_player getVariable ["KH_var_disguiseDetected", false]) then {
-						if (_currentSide isNotEqualTo sideUnknown) then {
-							_player setVariable ["KH_var_disguiseState", true];
-						};
+						_player setVariable ["KH_var_disguiseState", _currentSide isNotEqualTo sideUnknown];
 					}
 					else {
 						if !(_player getVariable ["KH_var_disguiseRecoveryChecker", false]) then {

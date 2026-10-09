@@ -16,10 +16,6 @@ KH_var_inGameUiEventHandlerStack = createHashMap;
 KH_var_temporalExecutionStackMonitor = createHashMap;
 KH_var_drawUiExecutionStackMonitor = createHashMap;
 KH_var_animationEvents = createHashMap;
-KH_var_quickFunctionsSqf = createHashMap;
-uiNamespace setVariable ["KH_var_quickFunctionsSqf", KH_var_quickFunctionsSqf];
-KH_var_quickFunctionsLua = createHashMap;
-uiNamespace setVariable ["KH_var_quickFunctionsLua", KH_var_quickFunctionsLua];
 KH_var_inGameUiEventHandlerStackDeletions = [];
 KH_var_uiContextExecutionStack = [];
 KH_var_drawUi2dExecutionStack = [];
@@ -37,6 +33,11 @@ KH_var_entityInitializationsDeletions = [];
 KH_var_mouseTargetCheckFrame = 0;
 KH_var_viewTargetCheckFrame = 0;
 KH_var_weaponTargetCheckFrame = 0;
+KH_var_headViewTargetCheckFrame = 0;
+KH_var_mouseTargetIgnores = [];
+KH_var_viewTargetIgnores = [];
+KH_var_weaponTargetIgnores = [];
+KH_var_headViewTargetIgnores = [];
 KH_var_allAddedDisplays = [];
 KH_var_allEntities = [];
 KH_var_allLocalEntities = [];
@@ -82,7 +83,7 @@ KH_var_executedStacks = [];
     private _basePath = (getText (_x >> "path")) regexReplace ["(/)", "\\"];
 
     {
-        private _function = loadFile ([
+        private _function = readFile ([
             _basePath,
             ["", "\"] select (_basePath isNotEqualTo ""),
             if (isText (_x >> "path")) then {
@@ -150,7 +151,7 @@ KH_var_executedStacks = [];
 				private _basePath = (getText (_x >> "path")) regexReplace ["(/)", "\\"];
 
 				{
-					private _function = loadFile ([
+					private _function = readFile ([
 						_basePath,
 						["", "\"] select (_basePath isNotEqualTo ""),
 						if (isText (_x >> "path")) then {
@@ -171,12 +172,12 @@ KH_var_executedStacks = [];
 					};
 
 					_name luaCompile _function;
-
-					{
-						luaExecute _x;
-					} forEach KH_var_resetInitLuaExecutions;
 				} forEach ("true" configClasses _x);
-			} forEach ("true" configClasses (configFile >> "CfgLuaFunctions"));
+			} forEach (("true" configClasses (configFile >> "CfgLuaFunctions")) + ("true" configClasses (missionConfigFile >> "CfgLuaFunctions")));
+
+			{
+				luaExecute _x;
+			} forEach KH_var_resetInitLuaExecutions;
 		};
 	}
 ] call KH_fnc_addEventHandler;
@@ -243,7 +244,7 @@ KH_var_executedStacks = [];
 	[], 
 	{
 		params ["_arguments", ["_function", "", [""]], ["_caller", 2, [0]], ["_unscheduled", true, [true]], ["_callbackId", "", [""]]];
-		triggerCbaEvent [_callbackId, _arguments callSerializedFunction [_function, _caller, _unscheduled], _caller, false];		
+		triggerCbaEvent [_callbackId, _arguments callSerializedFunction [_function, _caller, true], _caller, false];		
 	}
 ] call KH_fnc_addEventHandler;
 
@@ -262,7 +263,7 @@ KH_var_executedStacks = [];
 				_difference = 360 - _difference;
 			};
 			
-			if (_difference >= KH_var_meleeDodgeFailureAngleRange) then {
+			if (_difference >= (KH_var_meleeDodgeFailureAngleRange / 2)) then {
 				_continue = false;
 			};
 		};
@@ -463,7 +464,7 @@ KH_var_executedStacks = [];
 				_difference = 360 - _difference;
 			};
 			
-			if (_difference >= KH_var_meleeDodgeFailureAngleRange) then {
+			if (_difference >= (KH_var_meleeDodgeFailureAngleRange / 2)) then {
 				_continue = false;
 			};
 		};
@@ -595,7 +596,7 @@ KH_var_executedStacks = [];
 				_difference = 360 - _difference;
 			};
 			
-			if (_difference >= KH_var_meleeDodgeFailureAngleRange) then {
+			if (_difference >= (KH_var_meleeDodgeFailureAngleRange / 2)) then {
 				_continue = false;
 			};
 		};
@@ -774,6 +775,8 @@ if isServer then {
 	publicVariable "KH_var_diagnosticsState";
 	KH_var_missionSuspended = false;
 	publicVariable "KH_var_missionSuspended";
+	KH_var_filterPlayerEquipmentList = [];
+	KH_var_filterPlayerEquipmentFilter = false;
 	KH_var_jipHandlers = createHashMap;
 	KH_var_playerPresenceHandlers = createHashMap;
 	KH_var_headlessClientTransfers = [];
@@ -881,6 +884,7 @@ if isServer then {
 		[],
 		{
 			params ["_name", "_arguments", "_dependency", "_unitRequired", "_jipId"];
+			missionNamespace setVariable [_jipId, true];
 			private _currentHandler = KH_var_jipHandlers get _jipId;
 			private _continue = true;
 
@@ -964,7 +968,7 @@ if isServer then {
 											};
 										}
 										else {
-											if (isNil {KH_var_allIdMachines get _x;}) then {
+											if ((KH_var_allIdMachines isNil _dependency) && (KH_var_allPlayerUidMachines isNil _dependency)) then {
 												_condition = false;
 											};
 										};
@@ -1018,7 +1022,7 @@ if isServer then {
 														};
 													}
 													else {
-														if (isNil {KH_var_allIdMachines get _x;}) then {
+														if ((KH_var_allIdMachines isNil _x) && (KH_var_allPlayerUidMachines isNil _x)) then {
 															_condition = false;
 															break;
 														};
@@ -1117,15 +1121,20 @@ if isServer then {
 					{
 						private _object = param [4];
 						private _distance = param [6];
+						private _unit = _x getVariable ["KH_var_playerUnit", _x];
+
+						if (isNull _unit) then {
+							_unit = _x;
+						};
 
 						if _present then {
-							if ((_x distance _object) <= _distance) then {
+							if ((_unit distance _object) <= _distance) then {
 								triggerCbaEvent ["KH_eve_execution", [_arguments, _function, _caller, _unscheduled], _x, false];
 								_deletions pushBack _forEachIndex;
 							};
 						}
 						else {
-							if ((_x distance _object) > _distance) then {
+							if ((_unit distance _object) > _distance) then {
 								triggerCbaEvent ["KH_eve_execution", [_arguments, _function, _caller, _unscheduled], _x, false];
 								_deletions pushBack _forEachIndex;
 							};
@@ -1156,21 +1165,24 @@ if isServer then {
 							[_arguments, _function, _caller, _unscheduled, _object, _present, _distance, _nearId, _unit],
 							{
 								params ["_arguments", "_function", "_caller", "_unscheduled", "_object", "_present", "_distance", "_nearId", "_unit"];
-								_unit = _unit getVariable ["KH_var_playerUnit", _unit];
-								_this set [8, _unit];
+								private _presenceUnit = _unit getVariable ["KH_var_playerUnit", _unit];
+
+								if (isNull _presenceUnit) then {
+									_presenceUnit = _unit;
+								};
 
 								if ((isNull _object) || !(missionNamespace getVariable _nearId)) exitWith {
 									[_handlerId] call KH_fnc_removeHandler;
 								};
 								
 								if _present then {
-									if ((_unit distance _object) <= _distance) then {
+									if ((_presenceUnit distance _object) <= _distance) then {
 										triggerCbaEvent ["KH_eve_execution", [_arguments, _function, _caller, _unscheduled], _unit, false];
 										[_handlerId] call KH_fnc_removeHandler;
 									};
 								}
 								else {
-									if ((_unit distance _object) > _distance) then {
+									if ((_presenceUnit distance _object) > _distance) then {
 										triggerCbaEvent ["KH_eve_execution", [_arguments, _function, _caller, _unscheduled], _unit, false];
 										[_handlerId] call KH_fnc_removeHandler;
 									};
@@ -1334,6 +1346,8 @@ if isServer then {
 						_x params ["_unit", "_owner", "_recreate"];
 						
 						if ((vehicleVarName _headlessClient) isEqualTo _owner) then {
+							_unit setVariable ["KH_var_headlessClientTransferInit", _unit getVariable ["KH_var_headlessClientTransferInit", {}], _headlessClientOwner];
+
 							if !_recreate then {
 								_assignedEntities pushBack _unit;
 							}
@@ -1342,8 +1356,6 @@ if isServer then {
 							};
 						};
 					} forEach KH_var_headlessClientTransfers;
-					
-					_unit setVariable ["KH_var_headlessClientTransferInit", _unit getVariable ["KH_var_headlessClientTransferInit", {}], _headlessClientOwner];
 
 					if (_assignedEntities isNotEqualTo []) then {
 						[
@@ -1914,7 +1926,7 @@ if hasInterface then {
 			};
 
 			private _unit = player;
-			private _filteredClassItems = getArray ((configOf _unit) >> "kh_equipmentFilter");
+			private _filteredClassItems = (getArray ((configOf _unit) >> "kh_equipmentFilter")) apply {toLowerANSI _x;};
 			if ((KH_var_filterPlayerEquipmentList isEqualTo []) && (_filteredClassItems isEqualTo [])) exitWith {};
 			private _filteredClassItemsFilter = (getNumber ((configOf _unit) >> "kh_equipmentFilterType")) isEqualTo 1;
 			private _currentLoadout = getUnitLoadout player;
@@ -1931,11 +1943,16 @@ if hasInterface then {
 					toLowerANSI (_x param [0, ""]);
 				};
 
-				private _forbiddenEquipment = if KH_var_filterPlayerEquipmentFilter then {
-					["", _currentSlotItem] select !(_currentSlotItem in KH_var_filterPlayerEquipmentList);
+				private _forbiddenEquipment = if (KH_var_filterPlayerEquipmentList isEqualTo []) then {
+					"";
 				}
 				else {
-					["", _currentSlotItem] select (_currentSlotItem in KH_var_filterPlayerEquipmentList);
+					if KH_var_filterPlayerEquipmentFilter then {
+						["", _currentSlotItem] select !(_currentSlotItem in KH_var_filterPlayerEquipmentList);
+					}
+					else {
+						["", _currentSlotItem] select (_currentSlotItem in KH_var_filterPlayerEquipmentList);
+					};
 				};
 
 				if (_forbiddenEquipment isEqualTo "") then {
@@ -1948,7 +1965,6 @@ if hasInterface then {
 				};
 
 				if (_forbiddenEquipment isNotEqualTo "") then {
-					systemChat (["FORBIDDEN EQUIPMENT: ", getText (configFile >> (["CfgWeapons", "CfgVehicles"] select (_forEachIndex isEqualTo 5)) >> _currentSlotItem >> "displayName")] joinString "");
 					_invalid = true;
 
 					if (isNull _weaponHolder) then {
@@ -2257,7 +2273,7 @@ if hasInterface then {
 			player setVariable ["KH_var_playerViewDistance", viewDistance, 2];
 			player setVariable ["KH_var_playerAspectRatio", getResolution select 4, 2];
 			player setVariable ["KH_var_playerCameraPosition", positionCameraToWorld [0, 0, 0], 2];
-			player setVariable ["KH_var_playerCameraDirection", getCameraViewDirection player, 2];
+			player setVariable ["KH_var_playerCameraDirection", getCameraViewDirection KH_var_mainCamera, 2];
 
 			if ((KH_var_anchorPlayersToGeometry || (KH_var_anchorPlayersToMovingObjects isNotEqualTo 0)) && (isNull (objectParent player)) && (isNull (attachedTo player)) && (alive player)) then {
 				private _position = getPosASLVisual player;

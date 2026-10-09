@@ -17,7 +17,7 @@ isNil {
                         private _conditionComplete = _logic getVariable ["KH_ModuleAddActionConditionComplete", "true"];
                         private _detectionShow = _logic getVariable ["KH_ModuleAddActionDetectionShow", "true"];
                         private _detectionProgress = _logic getVariable ["KH_ModuleAddActionDetectionProgress", "false"];
-                        private _parent = _logic getVariable ["KH_ModuleAddActionParent", ""];
+                        private _parent = _logic getVariable ["KH_ModuleAddActionParent", "true"];
                         private _useAllPlayers = _units isEqualTo [];
 
                         private _arguments = [
@@ -130,7 +130,7 @@ isNil {
                             _logic getVariable ["KH_ModuleAddActionExclusive", true],
                             ["PLAYERS", _logic getVariable ["KH_ModuleAddActionJIP", true]],
                             [[_duration, true] select (_duration isEqualTo -1), _logic getVariable ["KH_ModuleAddActionProgressDisplay", "NONE"]],
-                            parseNumber (_logic getVariable ["KH_ModuleAddActionDistance", "3"]),
+                            parseNumber (_logic getVariable ["KH_ModuleAddActionDistance", "2"]),
                             _logic getVariable ["KH_ModuleAddActionShowImmediately", true],
                             _logic getVariable ["KH_ModuleAddActionAllowIncapacitated", false],
                             _logic getVariable ["KH_ModuleAddActionHideOnUse", false],

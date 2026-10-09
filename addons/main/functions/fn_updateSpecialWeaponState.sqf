@@ -76,23 +76,23 @@ if (_currentSelectedWeapon isNotEqualTo "") then {
         _unit setVariable ["KH_var_meleeType", getText (_weaponConfig >> "kh_meleeType"), true];
     };
 
-    if ((_unit getVariable ["KH_var_currentMeleeWeapon", ""]) isEqualTo _currentSelectedWeapon) exitWith {};
-    _unit setVariable ["KH_var_currentMeleeWeapon", _currentSelectedWeapon];
+    if ((_unit getVariable ["KH_var_currentSpecialWeapon", ""]) isEqualTo _currentSelectedWeapon) exitWith {};
+    _unit setVariable ["KH_var_currentSpecialWeapon", _currentSelectedWeapon];
     private _meleeState = (getNumber (configFile >> "CfgWeapons" >> _currentSelectedWeapon >> "kh_meleeWeapon")) isEqualTo 1;
-    _unit setVariable ["KH_var_meleeWeaponConfig", _weaponConfig];
+    _unit setVariable ["KH_var_specialWeaponConfig", _weaponConfig];
     _unit setVariable ["KH_var_meleeMode", (getArray (_weaponConfig >> "kh_meleeModes")) param [0, ""], true];
     _unit setVariable ["KH_var_inMeleeState", _meleeState];
 
     if ((getText (_weaponConfig >> "kh_specialActions")) isNotEqualTo "") then {
-        _unit setVariable ["KH_var_meleeWeaponSlot", _currentWeaponSlot];
+        _unit setVariable ["KH_var_specialWeaponSlot", _currentWeaponSlot];
         
         execute [
             [
                 _unit, 
                 [
                     ["ACTION_SWITCH", "KH_GestureNone", true],
-                    ["ACTION_SWITCH", [getText ((_unit getVariable ["KH_var_meleeWeaponConfig", configNull]) >> "kh_specialActions"), "Transition"] joinString "", true], 
-                    ["ACTION_PLAY", getText ((_unit getVariable ["KH_var_meleeWeaponConfig", configNull]) >> "kh_specialActions"), true]
+                    ["ACTION_SWITCH", [getText ((_unit getVariable ["KH_var_specialWeaponConfig", configNull]) >> "kh_specialActions"), "Transition"] joinString "", true], 
+                    ["ACTION_PLAY", getText ((_unit getVariable ["KH_var_specialWeaponConfig", configNull]) >> "kh_specialActions"), true]
                 ], 
                 false,
                 false
@@ -104,7 +104,7 @@ if (_currentSelectedWeapon isNotEqualTo "") then {
         ];
     }
     else {
-        if (((_unit getVariable ["KH_var_meleeWeaponSlot", ""]) isEqualTo _currentWeaponSlot) && !_meleeState) then {
+        if (((_unit getVariable ["KH_var_specialWeaponSlot", ""]) isEqualTo _currentWeaponSlot) && !_meleeState) then {
             [
                 _unit, 
                 [
@@ -132,12 +132,14 @@ if (_currentSelectedWeapon isNotEqualTo "") then {
                 false
             ] call KH_fnc_setAnimation;
 
-            _unit setVariable ["KH_var_meleeWeaponSlot", ""];
+            _unit setVariable ["KH_var_specialWeaponSlot", ""];
         };
     };
 }
 else {
-    _unit setVariable ["KH_var_currentMeleeWeapon", ""];
+    _unit setVariable ["KH_var_currentSpecialWeapon", ""];
+    _unit setVariable ["KH_var_specialWeaponConfig", configNull];
+    _unit setVariable ["KH_var_specialWeaponSlot", ""];
 };
 
 nil;

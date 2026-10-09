@@ -10,7 +10,7 @@ KH_var_recordedObjects = createHashMap;
 {
     private _attributes = (((_y select 0) select 1) get "Header") select 1;
     private _object = createVehicle [_attributes select 3, [0, 0, 0], [], 0, "CAN_COLLIDE"];
-    [_object, _attributes, [], true] call KH_fnc_setObjectAttributes;
+    _object = [_object, _attributes, [], true] call KH_fnc_setObjectAttributes;
     _object allowDamage false;
     KH_var_recordedObjects set [_x, _object];
 } forEach KH_var_recordedObjectData;
@@ -25,7 +25,7 @@ KH_var_recordedObjects = createHashMap;
 {
     private _attributes = (((_y select 0) select 1) get "Header") select 3;
     private _unit = (KH_var_recordedGroups get (((((_y select 0) select 1) get "Group") select 0) select 1)) createUnit [_attributes select 3, [0, 0, 0], [], 0, "CAN_COLLIDE"];
-    [_unit, _attributes, [], true] call KH_fnc_setUnitAttributes;
+    _unit = [_unit, _attributes, [], true] call KH_fnc_setUnitAttributes;
     _unit enableAIFeature ["AUTOTARGET", false];
     _unit enableAIFeature ["MOVE", false];
     _unit enableAIFeature ["TARGET", false];
@@ -57,85 +57,87 @@ if (KH_var_recordedScenarioData isNotEqualTo []) then {
 execute [
     [],
     {
-        private _currentRecordedScenarioData = KH_var_recordedScenarioData select (missionNamespace getVariable ["KH_var_currentRecordingIndex", 0]);
+        if (KH_var_recordedScenarioData isNotEqualTo []) then {
+            private _currentRecordedScenarioData = KH_var_recordedScenarioData select (missionNamespace getVariable ["KH_var_currentRecordingIndex", 0]);
 
-        if (CBA_missionTime >= ((KH_var_recordedScenarioData param [(missionNamespace getVariable ["KH_var_currentRecordingIndex", 0]) + 1, [999999]]) select 0)) then {
-            private _nextData = KH_var_recordedScenarioData param [(missionNamespace getVariable ["KH_var_currentRecordingIndex", 0]) + 1, []];
+            if (CBA_missionTime >= ((KH_var_recordedScenarioData param [(missionNamespace getVariable ["KH_var_currentRecordingIndex", 0]) + 1, [999999]]) select 0)) then {
+                private _nextData = KH_var_recordedScenarioData param [(missionNamespace getVariable ["KH_var_currentRecordingIndex", 0]) + 1, []];
 
-            if (_nextData isNotEqualTo []) then {
-                [missionNamespace, ((_nextData select 1) get "Header") select 2, []] call KH_fnc_setMissionAttributes;
-                missionNamespace setVariable ["KH_var_currentRecordingIndex", (missionNamespace getVariable ["KH_var_currentRecordingIndex", 0]) + 1];
-            };
-        }
-        else {
-            private _currentData = _currentRecordedScenarioData select 1;
-
-            {
-                _x params ["_time", "_data"];
-
-                if (_time <= CBA_missionTime) then {
-                    _data params [
-                        "_environmentEnabled",
-                        "_timeMultiplier",
-                        "_date",
-                        "_fogParams",
-                        "_wind",
-                        "_windDir",
-                        "_gusts",
-                        "_overcast",
-                        "_lightnings",
-                        "_rainParams",
-                        "_rainbow",
-                        "_humidity",
-                        "_waves"
-                    ];
-
-                    setTimeMultiplier _timeMultiplier;
-                    setDate _date;
-                    0 setFog _fogParams;
-                    setWind [_wind select 0, _wind select 1, true];
-                    0 setWindDir _windDir;
-                    0 setGusts _gusts;
-                    0 setOvercast _overcast;
-                    0 setLightnings _lightnings;
-                    setRain _rainParams;
-                    0 setRainbow _rainbow;
-                    setHumidity _humidity;
-                    0 setWaves _waves;
-                    forceWeatherChange;
-                    enableEnvironment _environmentEnabled;
-                }
-                else {
-                    break;
+                if (_nextData isNotEqualTo []) then {
+                    [((_nextData select 1) get "Header") select 2, []] call KH_fnc_setMissionAttributes;
+                    missionNamespace setVariable ["KH_var_currentRecordingIndex", (missionNamespace getVariable ["KH_var_currentRecordingIndex", 0]) + 1];
                 };
-            } forEach (_currentData get "Environment");
+            }
+            else {
+                private _currentData = _currentRecordedScenarioData select 1;
 
-            {
-                _x params ["_time", "_data"];
+                {
+                    _x params ["_time", "_data"];
 
-                if (_time <= CBA_missionTime) then {
-                    {
-                        _x params ["_side1", "_side2", "_relationship"];
-                        _side1 setFriend [_side2, _relationship];
-                    } forEach _data;
-                }
-                else {
-                    break;
-                };
-            } forEach (_currentData get "SideRelations");
+                    if (_time <= CBA_missionTime) then {
+                        _data params [
+                            "_environmentEnabled",
+                            "_timeMultiplier",
+                            "_date",
+                            "_fogParams",
+                            "_wind",
+                            "_windDir",
+                            "_gusts",
+                            "_overcast",
+                            "_lightnings",
+                            "_rainParams",
+                            "_rainbow",
+                            "_humidity",
+                            "_waves"
+                        ];
 
-            {
-                private _currentRemovalData = +(_currentData get _x);
-
-                [
-                    _currentRemovalData,
-                    {
-                        ((_x select 0) <= CBA_missionTime);
+                        setTimeMultiplier _timeMultiplier;
+                        setDate _date;
+                        0 setFog _fogParams;
+                        setWind [_wind select 0, _wind select 1, true];
+                        0 setWindDir _windDir;
+                        0 setGusts _gusts;
+                        0 setOvercast _overcast;
+                        0 setLightnings _lightnings;
+                        setRain _rainParams;
+                        0 setRainbow _rainbow;
+                        setHumidity _humidity;
+                        0 setWaves _waves;
+                        forceWeatherChange;
+                        enableEnvironment _environmentEnabled;
                     }
-                ] call KH_fnc_deleteArrayElements;
+                    else {
+                        break;
+                    };
+                } forEach (_currentData get "Environment");
 
-                _currentData set [_x, _currentRemovalData];
-            } forEach ["Environment", "SideRelations"];
+                {
+                    _x params ["_time", "_data"];
+
+                    if (_time <= CBA_missionTime) then {
+                        {
+                            _x params ["_side1", "_side2", "_relationship"];
+                            _side1 setFriend [_side2, _relationship];
+                        } forEach _data;
+                    }
+                    else {
+                        break;
+                    };
+                } forEach (_currentData get "SideRelations");
+
+                {
+                    private _currentRemovalData = +(_currentData get _x);
+
+                    [
+                        _currentRemovalData,
+                        {
+                            ((_x select 0) <= CBA_missionTime);
+                        }
+                    ] call KH_fnc_deleteArrayElements;
+
+                    _currentData set [_x, _currentRemovalData];
+                } forEach ["Environment", "SideRelations"];
+            };
         };
 
         {
@@ -151,8 +153,10 @@ execute [
                 private _nextData = _y param [(_object getVariable ["KH_var_currentRecordingIndex", 0]) + 1, []];
 
                 if (_nextData isNotEqualTo []) then {
-                    [_object, ((_nextData select 1) get "Header") select 3, [], true] call KH_fnc_setObjectAttributes;
-                    _object setVariable ["KH_var_currentRecordingIndex", (_object getVariable ["KH_var_currentRecordingIndex", 0]) + 1];
+                    private _currentIndex = _object getVariable ["KH_var_currentRecordingIndex", 0];
+                    _object = [_object, ((_nextData select 1) get "Header") select 1, [], true] call KH_fnc_setObjectAttributes;
+                    KH_var_recordedObjects set [_x, _object];
+                    _object setVariable ["KH_var_currentRecordingIndex", _currentIndex + 1];
                 };
 
                 continue;
@@ -240,7 +244,7 @@ execute [
                 private _nextData = _y param [(_group getVariable ["KH_var_currentRecordingIndex", 0]) + 1, []];
 
                 if (_nextData isNotEqualTo []) then {
-                    [_group, ((_nextData select 1) get "Header") select 3, [], true] call KH_fnc_setGroupAttributes;
+                    [_group, ((_nextData select 1) get "Header") select 1, []] call KH_fnc_setGroupAttributes;
                     _group setVariable ["KH_var_currentRecordingIndex", (_group getVariable ["KH_var_currentRecordingIndex", 0]) + 1];
                 };
 
@@ -299,8 +303,10 @@ execute [
 
                 if (_nextData isNotEqualTo []) then {
                     [_unit] joinSilent (KH_var_recordedGroups get ((((_nextData select 1) get "Group") select 0) select 1));
-                    [_unit, ((_nextData select 1) get "Header") select 3, [], true] call KH_fnc_setUnitAttributes;
-                    _unit setVariable ["KH_var_currentRecordingIndex", (_unit getVariable ["KH_var_currentRecordingIndex", 0]) + 1];
+                    private _currentIndex = _unit getVariable ["KH_var_currentRecordingIndex", 0];
+                    _unit = [_unit, ((_nextData select 1) get "Header") select 3, [], true] call KH_fnc_setUnitAttributes;
+                    KH_var_recordedUnits set [_x, _unit];
+                    _unit setVariable ["KH_var_currentRecordingIndex", _currentIndex + 1];
                 };
 
                 continue;

@@ -25,13 +25,13 @@ if ((KH_var_headViewTargetCheckFrame isEqualTo diag_frameNo) && (KH_var_headView
     ];
 };
 
-KH_var_headViewTargetIgnores = _ignored;
+KH_var_headViewTargetIgnores = +_ignored;
 KH_var_headViewTargetCheckFrame = diag_frameNo;
 private _viewPosition = KH_var_playerUnit modelToWorldWorld (KH_var_playerUnit selectionPosition "head");
 
 private _viewTarget = ([
     _viewPosition, 
-    _viewPosition vectorAdd ((getCameraViewDirection KH_var_playerUnit) vectorMultiply viewDistance), 
+    _viewPosition vectorAdd ((getCameraViewDirection KH_var_mainCamera) vectorMultiply viewDistance), 
     _ignored,
     true, 
     1, 

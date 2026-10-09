@@ -71,5 +71,14 @@ else {
 };
 
 if _throw then {
-	throw ([_header, " | ", _message joinString ""] joinString "");
+	throw ([
+		_header, 
+		" | ", 
+		if (_message isEqualType "") then {
+			_message;
+		} 
+		else {
+			_message joinString "";
+		}
+	] joinString "");
 };

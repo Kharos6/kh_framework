@@ -2,16 +2,26 @@ params [["_object", objNull, [objNull]], ["_attributes", [], [[]]], ["_overrideA
 (_attributes select [3]) params ["_type", "_simple", "_savedAttributes"];
 
 if _respectSimple then {
+	private _recreated = false;
+
 	if _simple then {
 		if !(isSimpleObject _object) then {
 			deleteVehicle _object;
 			_object = createSimpleObject [_type, [0, 0, 0], false];
+			_recreated = true;
 		};
 	}
 	else {
 		if (isSimpleObject _object) then {
 			deleteVehicle _object;
 			_object = createVehicle [_type, [0, 0, 0], [], 0, "CAN_COLLIDE"];
+			_recreated = true;
+		};
+	};
+
+	if _recreated then {
+		if (!(_attributes param [2, true]) && ((_attributes param [1, ""]) isNotEqualTo "")) then {
+			[_object, _attributes select 1] call KH_fnc_setEntityVariableName;
 		};
 	};
 };

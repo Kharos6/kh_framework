@@ -21,7 +21,7 @@ isNil {
 					KH_var_disguiseSideHeadgear = [[], [], []];
 				};
 
-				if (_logic getVariable ["KH_ModuleDynamicDisguiseEquipmentUniforms", false]) then {
+				if (_logic getVariable ["KH_ModuleDynamicDisguiseEquipmentUniforms", true]) then {
 					{
 						_uniforms pushBackUnique (uniform _x);
 					} forEach _units;
@@ -33,7 +33,7 @@ isNil {
 					} forEach _units;
 				};
 
-				if (_logic getVariable ["KH_ModuleDynamicDisguiseEquipmentHeadgear", false]) then {
+				if (_logic getVariable ["KH_ModuleDynamicDisguiseEquipmentHeadgear", true]) then {
 					{
 						_headgear pushBackUnique (headgear _x);
 					} forEach _units;

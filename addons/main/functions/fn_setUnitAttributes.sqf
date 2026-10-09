@@ -2,10 +2,13 @@ params [["_unit", objNull, [objNull]], ["_attributes", [], [[]]], ["_overrideAtt
 (_attributes select [3]) params ["_type", "_agent", "_savedAttributes"];
 
 if _respectAgent then {
+	private _recreated = false;
+
 	if _agent then {
 		if !(isAgent (teamMember _unit)) then {
 			deleteVehicle _unit;
 			_unit = createAgent [_type, [0, 0, 0], [], 0, "CAN_COLLIDE"];
+			_recreated = true;
 		};
 	}
 	else {
@@ -13,6 +16,13 @@ if _respectAgent then {
 			private _group = createGroup [side _unit, true];
 			deleteVehicle _unit;
 			_unit = _group createUnit [_type, [0, 0, 0], [], 0, "CAN_COLLIDE"];
+			_recreated = true;
+		};
+	};
+
+	if _recreated then {
+		if (!(_attributes param [2, true]) && ((_attributes param [1, ""]) isNotEqualTo "")) then {
+			[_unit, _attributes select 1] call KH_fnc_setEntityVariableName;
 		};
 	};
 };
@@ -217,7 +227,7 @@ execute [
 			_unit setUnitTrait [_name, _value];
 		} forEach _traits;
 
-		_weaponState params ["_weapon", "_muzzle", "_firemode"];
+		_weaponState params ["_weapon", "_muzzle", "_fireMode"];
 		_unit selectWeapon [_weapon, _muzzle, _fireMode];
 
 		{

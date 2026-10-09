@@ -118,9 +118,9 @@ private _result = [
                         _args params ["_unit", "_collector", "_name"];
 
                         execute [
-                            [_projectile, _position, _velocity, _unit],
+                            [_projectile, _position, _velocity, _unit, _name],
                             {
-                                params ["_projectile", "_position", "_velocity", "_unit"];
+                                params ["_projectile", "_position", "_velocity", "_unit", "_name"];
                                 ((_unit getVariable _name) get "ProjectileExplode") pushBack [(CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0, [netId _projectile, _position, _velocity]];
                             },
                             _collector,
@@ -142,9 +142,9 @@ private _result = [
                         _args params ["_unit", "_collector", "_name"];
 
                         execute [
-                            [_projectile, _hitEntity, _position, _velocity, _unit],
+                            [_projectile, _hitEntity, _position, _velocity, _unit, _name],
                             {
-                                params ["_projectile", "_hitEntity", "_position", "_velocity", "_unit"];
+                                params ["_projectile", "_hitEntity", "_position", "_velocity", "_unit", "_name"];
                                 ((_unit getVariable _name) get "ProjectileHit") pushBack [(CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0, [netId _hitEntity, netId _projectile, _position, _velocity]];
                             },
                             _collector,
@@ -163,9 +163,9 @@ private _result = [
                         _args params ["_unit", "_collector", "_name"];
 
                         execute [
-                            [_projectile, _hitEntity, _unit],
+                            [_projectile, _hitEntity, _unit, _name],
                             {
-                                params ["_projectile", "_hitEntity", "_unit"];
+                                params ["_projectile", "_hitEntity", "_unit", "_name"];
                                 ((_unit getVariable _name) get "ProjectileHitExplode") pushBack [(CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0, [netId _hitEntity, netId _projectile]];
                             },
                             _collector,
@@ -296,17 +296,27 @@ private _result = [
         [
             ["ENTITY", _unit, "PERSISTENT"],
             "Respawn",
-            [_captureRespawn],
+            [_captureRespawn, clientOwner],
             {
-                params ["_unit"];
-                _args params ["_captureRespawn"];
-                
-                if _captureRespawn then {
-                    [_unit] call KH_fnc_collectUnitData;
-                }
-                else {
-                    [_unit getVariable ["KH_var_dataCollectionHandlers", []]] call KH_fnc_removeHandler;
-                };
+                params ["_unit", "_corpse"];
+                _args params ["_captureRespawn", "_collector"];
+
+                execute [
+                    [_unit, _corpse, _captureRespawn],
+                    {
+                        params ["_unit", "_corpse", "_captureRespawn"];
+
+                        if _captureRespawn then {
+                            [_unit] call KH_fnc_collectUnitData;
+                        }
+                        else {
+                            [_corpse getVariable ["KH_var_dataCollectionHandlers", []]] call KH_fnc_removeHandler;
+                        };
+                    },
+                    _collector,
+                    true,
+                    false
+                ];
 
                 nil;
             }
@@ -362,11 +372,11 @@ private _result = [
             {
                 private _unit = param [0];
                 private _visionMode = param [1];
-                private _TiIndex = param [2];
+                private _tiIndex = param [2];
                 private _vehicle = param [5];
                 private _turret = param [6];
                 _args params ["_data"];
-                (_data get "VisionMode") pushBack [(CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0, [_visionMode, _TiIndex, netId _vehicle, _turret]];
+                (_data get "VisionMode") pushBack [(CBA_missionTime - ([_unit, false] call KH_fnc_getLatency)) max 0, [_visionMode, _tiIndex, netId _vehicle, _turret]];
             }
         ] call KH_fnc_addEventHandler,
         [
@@ -374,6 +384,7 @@ private _result = [
             "WeaponChanged",
             [_data],
             {
+                private _unit = param [0];
                 private _newWeapon = param [2];
                 private _newMode = param [4];
                 private _newMuzzle = param [6];
@@ -500,25 +511,25 @@ private _result = [
                     _unit setVariable ["KH_var_collectedPosition", _currentPosition];
                 };
 
-                if ((_unit getVariable ["KH_var_collectedStance", ""]) isNotEqualTo (toUpperANSI (unitPos _unit))) then {
-                    private _currentStance = switch (stance _unit) do {
-                        case "STAND": {
-                            "UP";
-                        };
-
-                        case "CROUCH": {
-                            "MIDDLE";
-                        };
-
-                        case "PRONE": {
-                            "DOWN";
-                        };
-
-                        default {
-                            "AUTO";
-                        };
+                private _currentStance = switch (stance _unit) do {
+                    case "STAND": {
+                        "UP";
                     };
 
+                    case "CROUCH": {
+                        "MIDDLE";
+                    };
+
+                    case "PRONE": {
+                        "DOWN";
+                    };
+
+                    default {
+                        "AUTO";
+                    };
+                };
+
+                if ((_unit getVariable ["KH_var_collectedStance", ""]) isNotEqualTo _currentStance) then {
                     (_data get "Stance") pushBack [_trueTime, _currentStance];
                     _unit setVariable ["KH_var_collectedStance", _currentStance];
                 };
@@ -630,7 +641,7 @@ private _result = [
                     [];
                 };
 
-                private _otherTasks = (waypoints _unit) apply {[waypointType _x, getWPPos [_unit, _x select 1]];};
+                private _otherTasks = (waypoints _unit) apply {[waypointType _x, getWPPos _x];};
 
                 if ((_unit getVariable ["KH_var_collectedTask", []]) isNotEqualTo [_currentTask, _otherTasks]) then {
                     (_data get "Task") pushBack [_trueTime, [_currentTask, _otherTasks]];

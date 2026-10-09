@@ -5,7 +5,7 @@ if !(isNil "_entity") exitWith {
     _entity;
 };
 
-if (_type isNotEqualTo "") then {
+if !(_type isEqualType "") then {
     _type = typeName _type;
 };
 

@@ -178,7 +178,7 @@ if _state then {
 					_x getVariable ["KH_var_playerViewDistance", 1],
 					_x getVariable ["KH_var_playerCameraPosition", eyePos _x],
 					_x getVariable ["KH_var_playerCameraDirection", eyeDirection _x],
-					_x getVariable ["KH_var_playerUnit", objNull]
+					_x getVariable ["KH_var_playerUnit", _x]
 				];
 			} forEach (KH_var_allPlayerUnits + KH_var_allHeadlessUnits);
 

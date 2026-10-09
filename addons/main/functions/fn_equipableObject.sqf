@@ -116,7 +116,7 @@ if (_object isNil "KH_var_equipableObjectSet") then {
 };
 
 if !(isNull _unit) then {
-	if (_unit getVariable ["KH_var_equipableObjectExclusive", false]) exitWith {};
+	if (_exclusive && (_unit getVariable ["KH_var_equipableObjectExclusive", false])) exitWith {};
 	triggerCbaEvent ["KH_eve_equipableObjectExchanged", [_unit, _object, true], "GLOBAL", false];
 
 	if _exclusive then {
@@ -130,24 +130,11 @@ if !(isNull _unit) then {
 		_object attachTo [_unit, _position];
 	};
 
-	_object setObjectScale _scale;
-
-	if (_rotation isEqualType objNull) then {
-		_object setVectorDirAndUp [vectorDir _rotation, vectorUp _rotation];
-	}
-	else {
-		if (_rotation isEqualTypeAll []) then {
-			_object setVectorDirAndUp _rotation;
-		}
-		else {
-			_object setRotationEuler _rotation;
-		};
-	};
-
 	execute [
-		[_object, _rotation],
+		[_object, _rotation, _scale],
 		{
-			params ["_object", "_rotation"];
+			params ["_object", "_rotation", "_scale"];
+			_object setObjectScale _scale;
 
 			if (_rotation isEqualType objNull) then {
 				_object setVectorDirAndUp [vectorDir _rotation, vectorUp _rotation];
@@ -196,6 +183,10 @@ if !(isNull _unit) then {
 						{
 							params ["_object", "_hideInVehicles", "_disableCollision"];
 
+							if (isNull _object) exitWith {
+								[_handlerId] call KH_fnc_removeHandler;
+							};
+
 							if _disableCollision then {
 								if ((getPhysicsCollisionFlag _object) select 0) then {
 									execute [
@@ -224,11 +215,10 @@ if !(isNull _unit) then {
 							};
 
 							if _hideInVehicles then {
-								if !(isNull (objectParent (attachedTo _object))) then {
-									_object hideObjectGlobal true;
-								}
-								else {
-									_object hideObjectGlobal false;
+								private _hidden = !(isNull (objectParent (attachedTo _object)));
+
+								if ((isObjectHidden _object) isNotEqualTo _hidden) then {
+									_object hideObjectGlobal _hidden;
 								};
 							};
 						},

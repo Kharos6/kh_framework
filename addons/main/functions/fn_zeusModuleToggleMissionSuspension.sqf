@@ -6,7 +6,7 @@ isNil {
 		"ButtonClick",
 		[_display, _logic],
 		{
-			_args params ["_display"];
+			_args params ["_display", "_logic"];
 
             execute [
                 [cbChecked (_display displayCtrl 101), ctrlText (_display displayCtrl 102), clientOwner],
@@ -90,7 +90,7 @@ isNil {
                             },
                             KH_var_allPlayerMachines - [KH_var_adminMachine, _caller],
                             true,
-                            false
+                            ["JIP", {KH_var_missionSuspended;}, true, ""]
                         ];
                     }
                     else {

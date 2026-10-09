@@ -147,6 +147,7 @@ private _result = if !((_animation select 0) isEqualType "") then {
             };
         },
         true,
+        true,
         false
     ];
 
@@ -434,7 +435,11 @@ if (
                                             };
                                             
                                             case _throw: {
-                                                _unit action ["UseWeapon", _unit, _unit, ((_unit weaponsInfo [(currentThrowable _unit) select 0, false]) param [0, []]) param [0, -1]];
+                                                private _throwable = currentThrowable _unit;
+
+                                                if (_throwable isNotEqualTo []) then {
+                                                    _unit action ["UseWeapon", _unit, _unit, ((_unit weaponsInfo [_throwable select 1, false]) param [0, []]) param [0, -1]];
+                                                };
                                             };
 
                                             case _reload: {

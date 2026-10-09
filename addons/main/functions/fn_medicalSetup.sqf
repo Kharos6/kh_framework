@@ -124,12 +124,12 @@ if KH_var_medical then {
                         case "hitlegs": {
                             "legs";
                         };
-                        
+                    
                         default {
                             "body";
                         };
                     };
-                    
+                
                     private _isPlayer = isPlayer _unit;
                     private _incapacitated = _unit getVariable ["KH_var_incapacitated", false];
                     private _withstanding = _unit getVariable ["KH_var_withstanding", false];
@@ -161,7 +161,7 @@ if KH_var_medical then {
                                 case "pelvis": {
                                     KH_var_absoluteDamageMultiplierPelvis;
                                 };
-                                
+                            
                                 default {
                                     1;
                                 };
@@ -318,7 +318,7 @@ if KH_var_medical then {
                                                                         if KH_var_incapacitatedCaptives then {
                                                                             player setCaptive true;
                                                                         };
-                                                                        
+                                                                    
                                                                         player setVariable ["KH_var_withstanding", false, true];
                                                                     },
                                                                     [
@@ -421,7 +421,7 @@ if KH_var_medical then {
                                                     KH_var_withstandingEffectChromatic = nil;
                                                     KH_var_withstandingEffectWet = nil;
                                                 };
-                                                
+                                            
                                                 if !(isNil "KH_var_incapacitationFade") then {
                                                     ppEffectDestroy KH_var_incapacitationFade;
                                                     KH_var_incapacitationFade = nil;
@@ -440,6 +440,10 @@ if KH_var_medical then {
                                         [_unit],
                                         {
                                             params ["_unit"];
+
+                                            if !(alive _unit) exitWith {
+                                                [_handlerId] call KH_fnc_removeHandler;
+                                            };
 
                                             if (_unit getVariable ["KH_var_incapacitated", false]) then {
                                                 if !(_unit getVariable ["KH_var_withstanding", false]) then {
@@ -540,16 +544,25 @@ if KH_var_medical then {
                                                     [KH_var_reviveHealMedic, KH_var_selfReviveHealMedic] select (_caller isEqualTo _target)
                                                 ] select ([_caller getUnitTrait "Medic", false] call KH_fnc_parseBoolean);
 
-                                                private _damages = getAllHitPointsDamage _target;
-                                                _target setDamage (((damage _target) - _damageOffset) max 0);
+                                                execute [
+                                                    [_target, _damageOffset],
+                                                    {
+                                                        params ["_target", "_damageOffset"];
+                                                        private _damages = getAllHitPointsDamage _target;
+                                                        _target setDamage (((damage _target) - _damageOffset) max 0);
 
-                                                if ((damage _target) isEqualTo 0) then {
-                                                    _damageOffset = 1;
-                                                };
+                                                        if ((damage _target) isEqualTo 0) then {
+                                                            _damageOffset = 1;
+                                                        };
 
-                                                {
-                                                    _target setHitPointDamage [_x, (((_damages select 2) select _forEachIndex) - _damageOffset) max 0];
-                                                } forEach (_damages select 0);
+                                                        {
+                                                            _target setHitPointDamage [_x, (((_damages select 2) select _forEachIndex) - _damageOffset) max 0];
+                                                        } forEach (_damages select 0);
+                                                    },
+                                                    _target,
+                                                    true,
+                                                    false
+                                                ];
 
                                                 execute [
                                                     [_target, _caller],
@@ -678,7 +691,19 @@ if KH_var_medical then {
                                         ],
                                         [_unit],
                                         {
-                                            [_target, [((_target nearEntities ["AllVehicles", 10]) select {!(_x isKindOf "Man");}) select 0, "CARGO", 0], true] call KH_fnc_setUnitVehicleSlot;
+                                            private _vehicle = ((_target nearEntities ["AllVehicles", 10]) select {!(_x isKindOf "Man");}) param [0, objNull];
+                                            if (isNull _vehicle) exitWith {};
+
+                                            execute [
+                                                [_target, _vehicle],
+                                                {
+                                                    params ["_unit", "_vehicle"];
+                                                    [_unit, [_vehicle, "CARGO", 0], true] call KH_fnc_setUnitVehicleSlot;
+                                                },
+                                                _target,
+                                                true,
+                                                false
+                                            ];
                                         },
                                         [
                                             {
@@ -706,7 +731,7 @@ if KH_var_medical then {
                                         "",
                                         [false, true]
                                     ] call KH_fnc_addAction;				
-                                
+                            
                                     if KH_var_stabilizationAllowed then {
                                         [
                                             [_unit, false],
@@ -778,7 +803,7 @@ if KH_var_medical then {
                                                             _caller removeItem "FirstAidKit";
                                                         };
                                                     };
-                                                    
+                                                
                                                     _target setVariable ["KH_var_beingStabilized", false, true];
                                                     _target setVariable ["KH_var_stabilized", true, true];
                                                     _caller setVariable ["KH_var_stabilizing", false, true];
@@ -798,7 +823,7 @@ if KH_var_medical then {
                                                     if ((_target getVariable ["KH_var_beingRevived", false]) || (_caller getVariable ["KH_var_reviving", false]) || (_caller getVariable ["KH_var_treating", false])) exitWith {
                                                         false;
                                                     };
-                                                    
+                                                
                                                     if (_caller isEqualTo _target) then {
                                                         if KH_var_selfStabilization then {
                                                             if (KH_var_selfStabilizationMedicOnly && !([_caller getUnitTrait "Medic", false] call KH_fnc_parseBoolean)) exitWith {
@@ -936,16 +961,25 @@ if KH_var_medical then {
                                                     };
                                                 };
 
-                                                private _damages = getAllHitPointsDamage _injured;
-                                                _injured setDamage ((_oldDamage - _damageOffset) max 0);
+                                                execute [
+                                                    [_injured, _oldDamage, _damageOffset],
+                                                    {
+                                                        params ["_injured", "_oldDamage", "_damageOffset"];
+                                                        private _damages = getAllHitPointsDamage _injured;
+                                                        _injured setDamage ((_oldDamage - _damageOffset) max 0);
 
-                                                if ((damage _injured) isEqualTo 0) then {
-                                                    _damageOffset = 1;
-                                                };
+                                                        if ((damage _injured) isEqualTo 0) then {
+                                                            _damageOffset = 1;
+                                                        };
 
-                                                {
-                                                    _injured setHitPointDamage [_x, (((_damages select 2) select _forEachIndex) - _damageOffset) max 0];
-                                                } forEach (_damages select 0);
+                                                        {
+                                                            _injured setHitPointDamage [_x, (((_damages select 2) select _forEachIndex) - _damageOffset) max 0];
+                                                        } forEach (_damages select 0);
+                                                    },
+                                                    _injured,
+                                                    true,
+                                                    false
+                                                ];
                                             };
                                         };
 
@@ -971,7 +1005,7 @@ if KH_var_medical then {
                 },
                 "GLOBAL",
                 true,
-                false
+                ["JIP", _unit, false, ""]
             ];
 
             [
@@ -991,7 +1025,7 @@ if KH_var_medical then {
                         KH_var_withstandingEffectChromatic = nil;
                         KH_var_withstandingEffectWet = nil;
                     };
-                    
+                
                     if !(isNil "KH_var_incapacitationFade") then {
                         ppEffectDestroy KH_var_incapacitationFade;
                         KH_var_incapacitationFade = nil;

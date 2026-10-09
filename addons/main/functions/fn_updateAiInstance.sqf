@@ -28,10 +28,18 @@ if (missionNamespace isNil _aiInstanceHandlerId) then {
         {
             params ["_name", "_aiInstanceHandlerId", "_aiInstanceArgumentsId", "_aiInstanceTriggerId", "_aiInstanceResponseProgressHandlerId", "_aiInstanceResponseHandlerId"];
             (missionNamespace getVariable _aiInstanceArgumentsId) params ["_masterPrompt", "_systemPrompt", "_userPrompt", "_responseProgressFunction", "_responseFunction", "_abortGeneration", "_resetContext", "_logGeneration", "_stop"];
-            if !(isAiActive _name) exitWith {};
-            
+
             if _stop exitWith {
                 stopAi _name;
+
+                if !(missionNamespace isNil _aiInstanceResponseProgressHandlerId) then {
+                    [missionNamespace getVariable _aiInstanceResponseProgressHandlerId] call KH_fnc_removeHandler;
+                };
+
+                if !(missionNamespace isNil _aiInstanceResponseHandlerId) then {
+                    [missionNamespace getVariable _aiInstanceResponseHandlerId] call KH_fnc_removeHandler;
+                };
+
                 missionNamespace setVariable [_aiInstanceHandlerId, nil];
                 [_handlerId] call KH_fnc_removeHandler;
             };
@@ -95,7 +103,7 @@ if (missionNamespace isNil _aiInstanceHandlerId) then {
                     _args params ["_thisName", "_aiInstanceArgumentsId"];
 
                     if (_name isEqualTo _thisName) then {
-                        private _responseProgressFunction = (missionNamespace getVariable _aiInstanceArgumentsId) select 2;
+                        private _responseProgressFunction = (missionNamespace getVariable _aiInstanceArgumentsId) select 3;
 
                         if (_responseProgressFunction isNotEqualTo {}) then {
                             [_name, _response] call _responseProgressFunction;
@@ -117,7 +125,7 @@ if (missionNamespace isNil _aiInstanceHandlerId) then {
                         _args params ["_thisName", "_aiInstanceHandlerId", "_aiInstanceArgumentsId", "_responseProgressHandler"];
 
                         if (_name isEqualTo _thisName) then {
-                            private _responseFunction = (missionNamespace getVariable _aiInstanceArgumentsId) select 3;
+                            private _responseFunction = (missionNamespace getVariable _aiInstanceArgumentsId) select 4;
 
                             if (_responseFunction isNotEqualTo {}) then {
                                 [_name, _response] call _responseFunction;
@@ -142,6 +150,8 @@ if (missionNamespace isNil _aiInstanceHandlerId) then {
         0,
         false
     ];
+
+    nil;
 }
 else {
     missionNamespace setVariable [_aiInstanceHandlerId, false];

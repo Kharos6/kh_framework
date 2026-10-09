@@ -11,9 +11,9 @@ if _move then {
 }
 else {
     if _config then {
-        (_unit getVariable ["KH_var_gesturesStatesConfig", configNull]) >> ((getArray ((_unit getVariable ["KH_var_movesActionsConfig", configNull]) >> (getText ((_unit getVariable ["KH_var_movesStatesConfig", configNull]) >> (animationState _unit) >> "actions")) >> _action)) select 0);
+        (_unit getVariable ["KH_var_gesturesStatesConfig", configNull]) >> ((getArray ((_unit getVariable ["KH_var_movesActionsConfig", configNull]) >> (getText ((_unit getVariable ["KH_var_movesStatesConfig", configNull]) >> (animationState _unit) >> "actions")) >> _action)) param [0, ""]);
     }
     else {
-        (getArray ((_unit getVariable ["KH_var_movesActionsConfig", configNull]) >> (getText ((_unit getVariable ["KH_var_movesStatesConfig", configNull]) >> (animationState _unit) >> "actions")) >> _action)) select 0;
+        (getArray ((_unit getVariable ["KH_var_movesActionsConfig", configNull]) >> (getText ((_unit getVariable ["KH_var_movesStatesConfig", configNull]) >> (animationState _unit) >> "actions")) >> _action)) param [0, ""];
     };
 };

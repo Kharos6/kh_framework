@@ -9,7 +9,7 @@ if _group then {
 };
 
 if _object then {
-    [_identifier, entities [[], ["Man"], false, true]] call KH_fnc_saveObjectPersistency;
+    [_identifier, (allMissionObjects "") select {!(_x isKindOf "Man");}] call KH_fnc_saveObjectPersistency;
 };
 
 if _player then {

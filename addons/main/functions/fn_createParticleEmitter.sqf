@@ -31,7 +31,7 @@ missionNamespace setVariable [_particleId, true, true];
                 if !(_source isEqualTypeAll 0) then {
                     _entity = _source param [0, objNull, [objNull]];
                     _selection = _source param [1, "", [""]];
-                    _trackingPosition = _source param [2, [], [[]]];
+                    _trackingPosition = _source param [2, [0, 0, 0], [[]]];
                     _startingPosition = ASLToATL (_entity modelToWorldVisualWorld (_entity selectionPosition _selection));
                 }; 
             }

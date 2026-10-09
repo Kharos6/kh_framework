@@ -31,28 +31,21 @@ private _triggerHandler = execute [
 		params ["_entity", "_maximumDistance", "_conditionPlayer", "_interval", "_event", "_triggerId"];
 		
 		execute [
-			[_entity, _maximumDistance, _conditionPlayer, _event, _triggerId],
+			[_entity, _maximumDistance, _conditionPlayer, _event, _triggerId, false],
 			{
-				params ["_entity", "_maximumDistance", "_conditionPlayer", "_event", "_triggerId"];
+				params ["_entity", "_maximumDistance", "_conditionPlayer", "_event", "_triggerId", "_previouslyActive"];
 
-				if !(_entity getVariable _triggerId) exitWith {
+				if !(_entity getVariable [_triggerId, false]) exitWith {
 					[_handlerId] call KH_fnc_removeHandler;
 				};
 
-				if ([_entity] call _conditionPlayer) then {						
-					if !(isNull _entity) then {
-						if (
-							((player distance _entity) <= _maximumDistance) && 
-							(alive player) && 
-							(isNull curatorCamera)
-						   ) then {
-							triggerCbaEvent [_event, [player], "SERVER", false];
-						};
-					}
-					else {
-						[_handlerId] call KH_fnc_removeHandler;
-					};
+				private _active = ([_entity] call _conditionPlayer) && ((player distance _entity) <= _maximumDistance) && (alive player) && (isNull curatorCamera);
+
+				if (_active || _previouslyActive) then {
+					triggerCbaEvent [_event, [player, _active], "SERVER", false];
 				};
+
+				_this set [5, _active];
 			},
 			true,
 			_interval,
@@ -86,7 +79,7 @@ private _eventHandler = [
 		_entity getVariable _conditionReference
 	],
 	{
-		params ["_currentPlayer"];
+		params ["_currentPlayer", "_active"];
 
 		_args params [
 			"_entity", 
@@ -112,23 +105,28 @@ private _eventHandler = [
 				[_handlerId] call KH_fnc_removeHandler;
 			};
 								
-			if ((_currentPlayer distance _entity) < _minimumDistance) then {
-				_conditionReference set [getPlayerUID _currentPlayer, true];
+			if !_active then {
+				_conditionReference set [getPlayerUID _currentPlayer, false];
 			}
 			else {
-				_conditionReference set [getPlayerUID _currentPlayer, [_currentPlayer, _entity, _currentPlayer, _screenPercentage, 0, _maximumDistance, true] call KH_fnc_getPositionVisibility];
-			};
-			
-			private _condition = false;
-			
-			{
-				if _y then {
-					_condition = true;
-					break;
+				if ((_currentPlayer distance _entity) < _minimumDistance) then {
+					_conditionReference set [getPlayerUID _currentPlayer, true];
+				}
+				else {
+					_conditionReference set [getPlayerUID _currentPlayer, [_currentPlayer, _entity, _currentPlayer, _screenPercentage, 0, _maximumDistance, true] call KH_fnc_getPositionVisibility];
 				};
-			} forEach _conditionReference;
-			
+			};
+
 			if _shared then {
+				private _condition = false;
+
+				{
+					if _y then {
+						_condition = true;
+						break;
+					};
+				} forEach _conditionReference;
+
 				if _condition then {
 					if !(_entity getVariable _entityVariable) then {
 						_entity setVariable [_firstTrigger, true];
@@ -149,17 +147,21 @@ private _eventHandler = [
 						};
 					};
 				};
+
+				_entity setVariable [_entityVariable, _condition];
 			}
 			else {
+				private _condition = _conditionReference getOrDefault [getPlayerUID _currentPlayer, false];
+
 				if _condition then {
-					if !(_currentPlayer getVariable _playerVariable) then {
+					if !(_currentPlayer getVariable [_playerVariable, false]) then {
 						_entity setVariable [_firstTrigger, true];
 						[_currentPlayer, _entity] call _trueFunctionServer;
 						execute [[_entity], _trueFunctionPlayer, _currentPlayer, true, false];
 					};
 				}
 				else {
-					if (_currentPlayer getVariable _playerVariable) then {
+					if (_currentPlayer getVariable [_playerVariable, false]) then {
 						if (_entity getVariable [_firstTrigger, false]) then {
 							[_currentPlayer, _entity] call _falseFunctionServer;
 							execute [[_entity], _falseFunctionPlayer, _currentPlayer, true, false];
@@ -171,10 +173,9 @@ private _eventHandler = [
 						};	
 					};	
 				};
+
+				_currentPlayer setVariable [_playerVariable, _condition];
 			};
-			
-			_entity setVariable [_entityVariable, _condition];
-			_currentPlayer setVariable [_playerVariable, _condition];
 		};	
 	}
 ] call KH_fnc_addEventHandler;

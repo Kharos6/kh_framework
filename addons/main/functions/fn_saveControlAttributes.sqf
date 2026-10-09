@@ -3,10 +3,10 @@ private _controlsIDCSorted = [];
 private _attributes = [];
 
 {
-	private _currentIDC = ctrlIDC _x;
+	private _currentIdc = ctrlIDC _x;
 	
-	if ((_currentIDC isNotEqualTo -1) && (_currentIDC >= 100)) then {
-		_controlsIDCSorted pushBack _currentIDC;
+	if ((_currentIdc isNotEqualTo -1) && (_currentIdc >= 100)) then {
+		_controlsIDCSorted pushBack _currentIdc;
 	};
 } forEach (allControls _controlGroup);
 

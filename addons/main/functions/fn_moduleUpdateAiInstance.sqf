@@ -22,11 +22,12 @@ isNil {
             execute [
                 [_owner, _name, _systemPrompt, _masterPrompt, _userPrompt, _responseProgressFunction, _responseFunction, _triggerInference, _abortGeneration, _resetContext, _logGeneration, _stop],
                 {
+                    params ["_owner"];
                     _this set [2, call (_this select 2)];
                     _this set [3, call (_this select 3)];
                     _this set [4, call (_this select 4)];
                     _this deleteAt 0;
-                    execute [_this, "KH_fnc_updateAiInstance", missionNamespace getVariable _owner, true, false];
+                    execute [_this, "KH_fnc_updateAiInstance", [missionNamespace getVariable _owner, KH_var_allPlayerUidMachines get _owner] select ((parseNumber (_owner select [0, 1])) isNotEqualTo 0), true, false];
                 },
                 true,
                 {
@@ -38,7 +39,10 @@ isNil {
                     else {
                         if !(missionNamespace isNil _owner) then {
                             private _unit = missionNamespace getVariable _owner;
-                            (!(local _unit) && !(isNull _unit));
+                            ((!(isNull _unit) && !(local _unit)) || (isPlayer _unit));
+                        }
+                        else {
+                            false;
                         };
                     };
                 },

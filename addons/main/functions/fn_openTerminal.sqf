@@ -15,9 +15,9 @@ ctrlSetText [102, missionNamespace getVariable [_identifierOutput, ctrlText 102]
 ctrlSetText [103, missionNamespace getVariable [_identifierInput, ctrlText 103]];
 
 execute [
-	[_identifierOutput, _identifierInput],
+	[_identifierOutput, _identifierInput, ctrlText 103],
 	{
-		params ["_identifierOutput", "_identifierInput"];
+		params ["_identifierOutput", "_identifierInput", "_previousInput"];
 
 		if !dialog then {
 			[_handlerId] call KH_fnc_removeHandler;
@@ -25,17 +25,9 @@ execute [
 		else {
 			ctrlSetText [102, missionNamespace getVariable [_identifierOutput, ctrlText 102]];
 			private _input = ctrlText 103;
-
-			execute [
-				[_identifierInput, _input],
-				{
-					params ["_identifierInput", "_input"];
-					missionNamespace setVariable [_identifierInput, _input, true];
-				},
-				"SERVER",
-				true,
-				false
-			];
+			if (_input isEqualTo _previousInput) exitWith {};
+			_this set [2, _input];
+			missionNamespace setVariable [_identifierInput, _input, true];
 		};
 	},
 	true,

@@ -42,7 +42,11 @@ _unit setVariable ["KH_var_unitControllerId", _id, true];
                 "_animationCondition"
             ];
 
-            _unit setVariable ["KH_var_preUnitControllerAnimationFeature", _unit checkAIFeature "ANIM"];
+            if !(_unit getVariable ["KH_var_unitControllerActive", false]) then {
+                _unit setVariable ["KH_var_preUnitControllerAnimationFeature", _unit checkAIFeature "ANIM"];
+            };
+
+            _unit setVariable ["KH_var_unitControllerActive", true];
             _unit enableAIFeature ["ANIM", false];
 
             _unit setVariable [
@@ -89,7 +93,11 @@ _unit setVariable ["KH_var_unitControllerId", _id, true];
                         ];
 
                         if (((_unit getVariable ["KH_var_unitControllerId", ""]) isNotEqualTo _id) || !([_unit] call _condition) || !(missionNamespace getVariable _id)) exitWith {
-                            _unit enableAIFeature ["ANIM", _unit getVariable ["KH_var_preUnitControllerAnimationFeature", true]];
+                            if ((_unit getVariable ["KH_var_unitControllerId", ""]) isEqualTo _id) then {
+                                _unit enableAIFeature ["ANIM", _unit getVariable ["KH_var_preUnitControllerAnimationFeature", true]];
+                                _unit setVariable ["KH_var_unitControllerActive", false];
+                            };
+
                             [_handlerId] call KH_fnc_removeHandler;
                         };
 
@@ -142,7 +150,7 @@ _unit setVariable ["KH_var_unitControllerId", _id, true];
 
                                 private _destinationObject = if (_currentStep isEqualType objNull) then {
                                     _currentStep = getPosASLVisual _currentStep;
-                                    alive _destinationObject;
+                                    alive _currentStep;
                                 }
                                 else {
                                     false;
@@ -321,6 +329,6 @@ _unit setVariable ["KH_var_unitControllerId", _id, true];
                 _unit setVariable ["KH_var_calculatedPathId", generateUid];
             };
         }
-    ] call KH_fnc_addEventhandler,
+    ] call KH_fnc_addEventHandler,
     [missionNamespace, _id, true]
 ];

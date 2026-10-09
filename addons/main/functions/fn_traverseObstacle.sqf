@@ -124,7 +124,7 @@ private _vault = ((([
 
 _unit setVariable ["KH_var_traversalTarget", [_chosenTraversalTarget select 0, (_unit modelToWorldVisualWorld [0, _unitLength * 2.75, 0]) select 1, _chosenTraversalTarget select 2]];
 
-[
+private _traversing = [
     _unit,
     [
         "ACTION_PLAY_NOW", 
@@ -219,4 +219,8 @@ _unit setVariable ["KH_var_traversalTarget", [_chosenTraversalTarget select 0, (
     false
 ] call KH_fnc_setAnimation;
 
-true;
+if !_traversing then {
+    _unit setVariable ["KH_var_traversalTarget", []];
+};
+
+_traversing;

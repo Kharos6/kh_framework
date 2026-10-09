@@ -14,7 +14,7 @@ private _resetInitLuaExecutions = uiNamespace getVariable "KH_var_resetInitLuaEx
     private _basePath = (getText (_x >> "path")) regexReplace ["(/)", "\\"];
 
     {
-        private _function = loadFile ([
+        private _function = readFile ([
             _basePath,
             ["", "\"] select (_basePath isNotEqualTo ""),
             if (isText (_x >> "path")) then {

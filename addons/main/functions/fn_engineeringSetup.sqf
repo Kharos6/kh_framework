@@ -15,7 +15,7 @@ _vehicle setVariable ["KH_var_engineeringTotalDamageMultiplier", _totalDamageMul
 _vehicle setVariable ["KH_var_engineeringImpactDamageMultiplier", _impactDamageMultiplier, true];
 
 if (_hitPointDamageMultipliers isEqualType []) then {
-    _hitPointDamageMultipliers = createHashMapFromArray _hitPointDamageMultipliers;
+    _hitPointDamageMultipliers = createHashMapFromArray (_hitPointDamageMultipliers apply {[toLowerANSI (_x select 0), _x select 1];});
 };
 
 _vehicle setVariable ["KH_var_engineeringHitPointDamageMultipliers", _hitPointDamageMultipliers, true];

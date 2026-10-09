@@ -50,6 +50,7 @@ execute [
 	[_object, _vehicles, _height, _distance, _maximumParticipants, _duration, _objectName, _fultonId],
 	{
 		_args params ["_object", "_vehicles", "_height", "_distance", "_maximumParticipants", "_duration", "_objectName", "_fultonId"];
+		if (missionNamespace getVariable [_fultonId, false]) exitWith {};
 		missionNamespace setVariable [_fultonId, true, true];
 		private _mainFulton = createVehicle ["B_Parachute_02_F", _object, [], 0, "CAN_COLLIDE"];
 		_mainFulton allowDamage false;
@@ -87,7 +88,7 @@ execute [
 							"KH_eve_playerRespawned",
 							[],
 							{
-								params ["_unit"];
+								private _unit = param [3];
 								_unit setVariable ["KH_var_fultonAttached", false, true];
 								triggerCbaEvent ["KH_eve_fultonDetached", [], _unit, false];
 							}
@@ -162,42 +163,52 @@ execute [
 				false
 			];
 
-			if (isPlayer _participant) then {
-				private _detachAction = [
-					_participant,
-					["Detach Self From Fulton ", _objectName] joinString "",
-					"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
-					"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
-					"(_this getVariable ['KH_var_fultonAttached', false])",
-					"(_caller getVariable ['KH_var_fultonAttached', false])",
-					{},
-					{},
-					{
-						isNil {
-							_caller setVariable ["KH_var_fultonAttached", false, true];
-							triggerCbaEvent ["KH_eve_fultonDetached", [], true, false];
-						};
-					},
-					{},
-					[],
-					3,
-					0,
-					false,
-					false,
-					false
-				] call BIS_fnc_holdActionAdd; 
+			execute [
+				[_participant, _objectName],
+				{
+					params ["_participant", "_objectName"];
 
-				[
-					"CBA",
-					"KH_eve_fultonDetached",
-					[_detachAction],
-					{
-						_args params ["_detachAction"];
-						[player, _detachAction] call BIS_fnc_holdActionRemove;
-						[_handlerId] call KH_fnc_removeHandler;
-					}
-				] call KH_fnc_addEventHandler;
-			};
+					if (isPlayer _participant) then {
+						private _detachAction = [
+							_participant,
+							["Detach Self From Fulton ", _objectName] joinString "",
+							"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
+							"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_unloadVehicle_ca.paa",
+							"(_this getVariable ['KH_var_fultonAttached', false])",
+							"(_caller getVariable ['KH_var_fultonAttached', false])",
+							{},
+							{},
+							{
+								isNil {
+									_caller setVariable ["KH_var_fultonAttached", false, true];
+									triggerCbaEvent ["KH_eve_fultonDetached", [], true, false];
+								};
+							},
+							{},
+							[],
+							3,
+							0,
+							false,
+							false,
+							false
+						] call BIS_fnc_holdActionAdd; 
+
+						[
+							"CBA",
+							"KH_eve_fultonDetached",
+							[_detachAction],
+							{
+								_args params ["_detachAction"];
+								[player, _detachAction] call BIS_fnc_holdActionRemove;
+								[_handlerId] call KH_fnc_removeHandler;
+							}
+						] call KH_fnc_addEventHandler;
+					};
+				},
+				_participant,
+				true,
+				false
+			];
 		};
 
 		execute [
@@ -207,11 +218,11 @@ execute [
 				"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
 				"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
 				["
-					(((count (missionNamespace getVariable ['", _currentFultonParticipants, "', []])) <= ", _maximumParticipants, ") && 
+					(((count (missionNamespace getVariable ['", _currentFultonParticipants, "', []])) < ", _maximumParticipants, ") && 
 					!(_this getVariable ['KH_var_fultonAttached', false]) && ((_this distance _target) < 6))
 				"] joinString "",
 				["
-					(((count (missionNamespace getVariable ['", _currentFultonParticipants, "', []])) <= ", _maximumParticipants, ") && 
+					(((count (missionNamespace getVariable ['", _currentFultonParticipants, "', []])) < ", _maximumParticipants, ") && 
 					!(_caller getVariable ['KH_var_fultonAttached', false]) && ((_caller distance _target) < 6))
 				"] joinString "",
 				{},
@@ -253,12 +264,12 @@ execute [
 									"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
 									"\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
 									["
-										(((count (missionNamespace getVariable ['", _currentFultonParticipants, "', []])) <= ", _maximumParticipants, ") && 
+										(((count (missionNamespace getVariable ['", _currentFultonParticipants, "', []])) < ", _maximumParticipants, ") && 
 										!(_target getVariable ['KH_var_fultonAttached', false]) && ((_target distance (missionNamespace getVariable '", _fultonBox, "')) < 6) && 
 										(_target isNotEqualTo _this) && ((_this distance _target) < 4) && (alive _target))
 									"] joinString "",
 									["
-										(((count (missionNamespace getVariable ['", _currentFultonParticipants, "', []])) <= ", _maximumParticipants, ") && 
+										(((count (missionNamespace getVariable ['", _currentFultonParticipants, "', []])) < ", _maximumParticipants, ") && 
 										!(_target getVariable ['KH_var_fultonAttached', false]) && ((_target distance (missionNamespace getVariable '", _fultonBox, "')) < 6) && 
 										(_target isNotEqualTo _caller) && ((_caller distance _target) < 4) && (alive _target))
 									"] joinString "",
@@ -424,6 +435,15 @@ execute [
 													[_unit, _vehicle, _duration],
 													{
 														params ["_unit", "_vehicle", "_duration"];
+
+														if !(alive _vehicle) exitWith {
+															[_unit, ["MOVE_SWITCH", [""], false], false, false] call KH_fnc_setAnimation;
+															_unit allowDamage true;
+															_unit setUnitFreefallHeight -1;
+															_unit setVariable ["KH_var_fultonRemainingTime", nil];
+															[_handlerId] call KH_fnc_removeHandler;
+														};
+
 														private _remainingTime = _unit getVariable ["KH_var_fultonRemainingTime", _duration];
 														_remainingTime = _remainingTime - _totalDelta;
 														_unit setVariable ["KH_var_fultonRemainingTime", _remainingTime];

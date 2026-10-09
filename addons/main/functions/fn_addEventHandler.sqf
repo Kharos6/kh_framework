@@ -129,13 +129,17 @@ switch _eventType do {
 				_remoteHandler = [
 					"CBA",
 					_remoteEventId,
-					[_entityOwnerId, _argumentsId, _eventNameId, _function],
+					[_entityOwnerId, _argumentsId, _eventNameId, _function, _handlerId, _previousReturnId],
 					{
-						_args params ["_entityOwnerId", "_argumentsId", "_eventNameId", "_function"];
+						_args params ["_entityOwnerId", "_argumentsId", "_eventNameId", "_function", "_outerHandlerId", "_previousReturnId"];
 						private _entityOwner = missionNamespace getVariable _entityOwnerId;
 						private _args = missionNamespace getVariable _argumentsId;
 						private _eventName = missionNamespace getVariable _eventNameId;
-						call (missionNamespace getVariable _function);
+						private _handlerId = missionNamespace getVariable _outerHandlerId;
+						private _previousReturn = missionNamespace getVariable _previousReturnId;
+						private _result = call (missionNamespace getVariable _function);
+						missionNamespace setVariable [_previousReturnId, _result];
+						_result;
 					}
 				] call KH_fnc_addEventHandler;
 
@@ -155,9 +159,9 @@ switch _eventType do {
 				] call KH_fnc_addEventHandler;
 
 				_handler = execute [
-					[_entity, _event, _persistentEventId, _persistentExecutionId, _persistentEntityId, _entityOwnerId, clientOwner], 
+					[_entity, _event, _persistentEventId, _persistentExecutionId, _persistentEntityId, _entityOwnerId, clientOwner, _remoteEventId], 
 					{
-						params ["_entity", "_event", "_persistentEventId", "_persistentExecutionId", "_persistentEntityId", "_entityOwnerId", "_eventOwner"];
+						params ["_entity", "_event", "_persistentEventId", "_persistentExecutionId", "_persistentEntityId", "_entityOwnerId", "_eventOwner", "_remoteEventId"];
 						missionNamespace setVariable [_entityOwnerId, clientOwner, _eventOwner];
 
 						missionNamespace setVariable [
@@ -216,6 +220,7 @@ switch _eventType do {
 									"if (missionNamespace getVariable ['", _persistentExecutionId, "', true]) then {
 										private _args = missionNamespace getVariable '", _argumentsId, "';
 										private _eventName = missionNamespace getVariable '", _eventNameId, "';
+										private _handlerId = missionNamespace getVariable '", _handlerId, "';
 										private _previousReturn = missionNamespace getVariable '", _previousReturnId, "';
 										private _result = call (missionNamespace getVariable '", _function, "');
 										missionNamespace setVariable ['", _previousReturnId, "', _result];

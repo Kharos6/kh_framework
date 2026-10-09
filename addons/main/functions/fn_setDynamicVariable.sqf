@@ -13,15 +13,16 @@ params [
     ["_target", false, [true, 0, []]]
 ];
 
-if (_namespace isNil "KH_var_dynamicVariables") then {
+if (isNil {_namespace getVariable "KH_var_dynamicVariables";}) then {
     _namespace setVariable ["KH_var_dynamicVariables", createHashMap];
 };
 
-if (_namespace isNil _name) then {
+if (isNil {_namespace getVariable _name;}) then {
     _namespace setVariable [_name, _baseValue];
 };
 
-private _entry = (_namespace getVariable ["KH_var_dynamicVariables", createHashMap]) get _name;
+private _dynamicVariables = _namespace getVariable "KH_var_dynamicVariables";
+private _entry = _dynamicVariables get _name;
 
 private _continue = if !(isNil "_entry") then {
     if ((_entry param [13, 0]) isNotEqualTo _interval) then {
@@ -59,7 +60,7 @@ private _continue = if !(isNil "_entry") then {
             _maximumValue = [_maximumValue];
         };
 
-        KH_var_dynamicVariables set [
+        _dynamicVariables set [
             _name, 
             [
                 _baseValue, 
@@ -124,7 +125,7 @@ if (_maximumValue isEqualType 0) then {
     _maximumValue = [_maximumValue];
 };
 
-KH_var_dynamicVariables set [
+_dynamicVariables set [
     _name, 
     [
         _baseValue, 
@@ -149,7 +150,8 @@ execute [
     [_namespace, _name, _existenceId],
     {
         params ["_namespace", "_name"];
-        private _entry = KH_var_dynamicVariables get _name;
+        private _dynamicVariables = _namespace getVariable ["KH_var_dynamicVariables", createHashMap];
+        private _entry = _dynamicVariables get _name;
 
         if (isNil "_entry") exitWith {
             [_handlerId] call KH_fnc_removeHandler;
@@ -175,7 +177,7 @@ execute [
         private _variable = _namespace getVariable _name;
 
         if (isNil "_variable") exitWith {
-            KH_var_dynamicVariables deleteAt _name;
+            _dynamicVariables deleteAt _name;
             [_handlerId] call KH_fnc_removeHandler;
         };
 
@@ -192,7 +194,8 @@ execute [
         private ["_currentValue", "_currentKey", "_keys"];
 
         if !_baseValueIsArray then {
-            _keys = (keys _baseValue) sort true;
+            _keys = keys _baseValue;
+            _keys sort true;
         };
 
         for "_i" from 0 to (((count _variable) - 1) min ((count _baseValue) - 1)) do {
@@ -216,7 +219,7 @@ execute [
                     _currentBaseValue = _baseValue param [_i, _currentBaseValue];
                 }
                 else {
-                    if !(_baseValue isNil _currentKey) then {
+                    if (_currentKey in _baseValue) then {
                         _currentBaseValue = _baseValue get _currentKey;
                     };
                 };
@@ -225,7 +228,7 @@ execute [
                     _currentChangingValue = _changingValue param [_i, _currentChangingValue];
                 }
                 else {
-                    if !(_changingValue isNil _currentKey) then {
+                    if (_currentKey in _changingValue) then {
                         _currentChangingValue = _changingValue get _currentKey;
                     };
                 };
@@ -234,7 +237,7 @@ execute [
                     _currentMinimumValue = _minimumValue param [_i, _currentMinimumValue];
                 }
                 else {
-                    if !(_minimumValue isNil _currentKey) then {
+                    if (_currentKey in _minimumValue) then {
                         _currentMinimumValue = _minimumValue get _currentKey;
                     };
                 };
@@ -243,7 +246,7 @@ execute [
                     _currentMaximumValue = _maximumValue param [_i, _currentMaximumValue];
                 }
                 else {
-                    if !(_maximumValue isNil _currentKey) then {
+                    if (_currentKey in _maximumValue) then {
                         _currentMaximumValue = _maximumValue get _currentKey;
                     };
                 };
@@ -364,8 +367,12 @@ execute [
             true
         ],
         {
-            private _name = param [1];
-            KH_var_dynamicVariables deleteAt _name;
+            params ["_namespace", "_name", "_existenceId"];
+            private _dynamicVariables = _namespace getVariable ["KH_var_dynamicVariables", createHashMap];
+
+            if (((_dynamicVariables getOrDefault [_name, []]) param [14, ""]) isEqualTo _existenceId) then {
+                _dynamicVariables deleteAt _name;
+            };
         },
         _interval isNotEqualTo 0,
         true

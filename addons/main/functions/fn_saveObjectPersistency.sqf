@@ -1,4 +1,4 @@
-params [["_identifier", "", [""]], ["_objects", entities [[], ["Man"], false, true], []]];
+params [["_identifier", "", [""]], ["_objects", (allMissionObjects "") select {!(_x isKindOf "Man");}, []]];
 
 if (_identifier isEqualTo "") exitWith {
 	createHashMap;

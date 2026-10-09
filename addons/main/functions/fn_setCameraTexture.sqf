@@ -9,6 +9,7 @@ else {
 };
 
 _camera camSetTarget _target;
+_camera camCommit 0;
 _renderTarget = (_renderTarget min 8) max 1;
 
 switch _renderTarget do {
@@ -52,3 +53,5 @@ switch _renderTarget do {
 		_camera cameraEffect ["Internal", "BACK", "khrt8"];		
 	};
 };
+
+_camera;

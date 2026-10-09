@@ -6,16 +6,17 @@ isNil {
 		{
 			params ["_logic"];
             private _unit = attachedTo _logic;
-            _unit setDamage 0;
-
-            {
-                _unit setHitPointDamage [_x, 0];
-            } forEach ((getAllHitPointsDamage _unit) select 0);
 
             execute [
                 [_unit],
                 {
                     params ["_unit"];
+
+                    _unit setDamage 0;
+
+                    {
+                        _unit setHitPointDamage [_x, 0];
+                    } forEach ((getAllHitPointsDamage _unit) select 0);
                     
                     if (_unit isEqualTo player) then {
                         if (!(isNil "KH_var_withstandingEffectRadial") && !(isNil "KH_var_withstandingEffectChromatic") && !(isNil "KH_var_withstandingEffectWet")) then {

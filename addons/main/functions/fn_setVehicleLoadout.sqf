@@ -22,7 +22,7 @@ _vehicle setRepairCargo _repairCargo;
 } forEach _weaponsInfo;
 
 {
-    _vehicle setPylonLoadout [_x select 0, _x select 3, true];
+    _vehicle setPylonLoadout [_x select 0, _x select 3, true, _x select 2];
 } forEach _pylonsInfo;
 
 {

@@ -38,7 +38,9 @@ KH_var_playerUnit addAction [
     "KH_eve_playerControlledUnitChanged",
     [_action, _condition, _id, _unitActions, _argumentsId, _conditionId],
     {
+        private _owner = param [0];
         private _unit = param [3];
+        if (_owner isNotEqualTo clientOwner) exitWith {};
         _args params ["_action", "_condition", "_id", "_unitActions", "_argumentsId", "_conditionId"];
 
         if !(missionNamespace getVariable _id) exitWith {

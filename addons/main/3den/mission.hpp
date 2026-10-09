@@ -508,7 +508,7 @@ class Mission
 									{\
 										_args params ['_identifier', '_players', '_units', '_groups', '_objects', '_mission'];\
 										if _objects then {\
-											[_identifier, entities [[], ['Man'], false, true]] call KH_fnc_saveObjectPersistency;\
+											[_identifier, (allMissionObjects '') select {!(_x isKindOf 'Man');}] call KH_fnc_saveObjectPersistency;\
 										};\
 										if _units then {\
 											[_identifier, KH_var_allMen] call KH_fnc_saveUnitPersistency;\

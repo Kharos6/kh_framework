@@ -14,7 +14,7 @@ isNil {
                 compile (_logic getVariable ["KH_ModuleUpdateTTSSpeakerEntityGeneratedFunction", ""]),
                 compile (_logic getVariable ["KH_ModuleUpdateTTSSpeakerEntityFinishedFunction", ""]),
                 _logic getVariable ["KH_ModuleUpdateTTSSpeakerEntitySubtitleName", ""],
-                _logic getVariable ["KH_ModuleUpdateTTSSpeakerEntityOverride", false]
+                _logic getVariable ["KH_ModuleUpdateTTSSpeakerEntityOverride", true]
             ],
             {
                 params ["_units", "_text", "_volume", "_speed", "_speakerId", "_maximumDistance", "_effectChain", "_functionGenerated", "_functionFinished", "_subtitleName", "_override"];

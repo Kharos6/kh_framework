@@ -5,9 +5,6 @@ isNil {
 			KH_var_missionLoaded = true;
 
 			if isServer then {
-				KH_var_meleeDodgeFailureAngleRange = KH_var_meleeDodgeFailureAngleRange / 2;
-				publicVariable "KH_var_meleeDodgeFailureAngleRange";
-
 				switch KH_var_incapacitationAvailability do {
 					case 0: {
 						KH_var_allowIncapacitation = false;
@@ -223,136 +220,135 @@ isNil {
 						];
 
 						if !(isNil "KH_var_missionStartSuspension") then {
-							{
-								KH_var_missionSuspensionEntities = [];
-								private _timeMultiplier = timeMultiplier;
-								setTimeMultiplier 0.1;
+							KH_var_missionSuspensionEntities = [];
+							private _timeMultiplier = timeMultiplier;
+							setTimeMultiplier 0.1;
 
+							{
+								if !(_x in KH_var_missionSuspensionEntities) then {
+									_x setVariable ["KH_var_originalSimulationState", simulationEnabled _x];
+									_x enableSimulationGlobal false;
+								};
+
+								private _parent = objectParent _x;
+								
+								if !(_parent in KH_var_missionSuspensionEntities) then {
+									_parent setVariable ["KH_var_originalSimulationState", simulationEnabled _parent];
+									_parent enableSimulationGlobal false;
+								};
+								
+								KH_var_missionSuspensionEntities insert [-1, [_x, _parent], true];
+							} forEach ([KH_var_allPlayerUnits, allUnits + (agents apply {agent _x;})] select (KH_var_missionStartSuspension isEqualTo 2));
+
+							private _playerLoadHandler = [
+								"CBA",
+								"KH_eve_playerLoaded",
+								[],
 								{
-									if !(_x in KH_var_missionSuspensionEntities) then {
-										_x setVariable ["KH_var_originalSimulationState", simulationEnabled _x];
-										_x enableSimulationGlobal false;
+									private _unit = param [3];
+
+									if !(_unit in KH_var_missionSuspensionEntities) then {
+										_unit setVariable ["KH_var_originalSimulationState", simulationEnabled _unit];
+										_unit enableSimulationGlobal false;
 									};
 
-									private _parent = objectParent _x;
-									
+									private _parent = objectParent _unit;
+
 									if !(_parent in KH_var_missionSuspensionEntities) then {
 										_parent setVariable ["KH_var_originalSimulationState", simulationEnabled _parent];
 										_parent enableSimulationGlobal false;
 									};
-									
-									KH_var_missionSuspensionEntities insert [-1, [_x, _parent], true];
-								} forEach ([KH_var_allPlayerUnits, allUnits + (agents apply {agent _x;})] select (KH_var_missionStartSuspension isEqualTo 2));
+								
+									KH_var_missionSuspensionEntities insert [-1, [_unit, _parent], true];
+								}
+							] call KH_fnc_addEventHandler;
 
-								private _playerLoadHandler = [
-									"CBA",
-									"KH_eve_playerLoaded",
-									[],
-									{
-										private _unit = param [3];
-
-										if !(_unit in KH_var_missionSuspensionEntities) then {
-											_unit setVariable ["KH_var_originalSimulationState", simulationEnabled _unit];
-											_unit enableSimulationGlobal false;
-										};
-
-										private _parent = objectParent _unit;
-
-										if !(_parent in KH_var_missionSuspensionEntities) then {
-											_parent setVariable ["KH_var_originalSimulationState", simulationEnabled _parent];
-											_parent enableSimulationGlobal false;
-										};
-									
-										KH_var_missionSuspensionEntities insert [-1, [_unit, _parent], true];
-									}
-								] call KH_fnc_addEventHandler;
-
-								execute [
-									[],
-									{
-										with uiNamespace do {
-											if (isNil "KH_var_suspensionDisplay") then {
+							execute [
+								[],
+								{
+									with uiNamespace do {
+										if (isNil "KH_var_suspensionDisplay") then {
+											KH_var_suspensionDisplay = ["RscText", "PLAYERS LOADING...", [0, false, 0], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
+										}
+										else {
+											if (isNull KH_var_suspensionDisplay) then {
 												KH_var_suspensionDisplay = ["RscText", "PLAYERS LOADING...", [0, false, 0], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
-											}
-											else {
-												if (isNull KH_var_suspensionDisplay) then {
-													KH_var_suspensionDisplay = ["RscText", "PLAYERS LOADING...", [0, false, 0], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
-												};
 											};
-
-											nil;
 										};
 
-										execute [
-											[],
-											{
-												if !KH_var_playersLoaded then {
-													with uiNamespace do {
-														if (isNull KH_var_suspensionDisplay) then {
-															KH_var_suspensionDisplay = ["RscText", "PLAYERS LOADING...", [0, false, 0], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
-															nil;
-														};
-													};
+										nil;
+									};
 
-													nil;
-												}
-												else {
-													[_handlerId] call KH_fnc_removeHandler;
-												};
-											},
-											true,
-											0,
-											false
-										];
-									},
-									KH_var_allPlayerMachines - [KH_var_adminMachine],
-									true,
-									["JIP", {!KH_var_playersLoaded;}, true, ""]
-								];
-
-								execute [
-									[_timeMultiplier, _playerLoadHandler],
-									{
-										params ["_timeMultiplier", "_playerLoadHandler"];
-
+									execute [
+										[],
 										{
-											_x enableSimulationGlobal (_x getVariable ["KH_var_originalSimulationState", true]);
-										} forEach KH_var_missionSuspensionEntities;
-
-										setTimeMultiplier _timeMultiplier;
-
-										execute [
-											[],
-											{
+											if !KH_var_playersLoaded then {
 												with uiNamespace do {
-													if !(isNil "KH_var_suspensionDisplay") then {
-														ctrlDelete KH_var_suspensionDisplay;
-														KH_var_suspensionDisplay = nil;
+													if (isNull KH_var_suspensionDisplay) then {
+														KH_var_suspensionDisplay = ["RscText", "PLAYERS LOADING...", [0, false, 0], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
 														nil;
 													};
 												};
 
 												nil;
-											},
-											"PLAYERS",
-											true,
-											false
-										];
+											}
+											else {
+												[_handlerId] call KH_fnc_removeHandler;
+											};
+										},
+										true,
+										0,
+										false
+									];
+								},
+								KH_var_allPlayerMachines - [KH_var_adminMachine],
+								true,
+								["JIP", {!KH_var_playersLoaded;}, true, ""]
+							];
 
-										[_playerLoadHandler] call KH_fnc_removeHandler;
-										KH_var_missionSuspended = false;
-										publicVariable "KH_var_missionSuspended";
-									},
-									true,
-									{KH_var_playersLoaded;},
-									false
-								];
-							} forEach (allUnits + (agents apply {agent _x;}));
+							execute [
+								[_timeMultiplier, _playerLoadHandler],
+								{
+									params ["_timeMultiplier", "_playerLoadHandler"];
+
+									{
+										_x enableSimulationGlobal (_x getVariable ["KH_var_originalSimulationState", true]);
+									} forEach KH_var_missionSuspensionEntities;
+
+									setTimeMultiplier _timeMultiplier;
+
+									execute [
+										[],
+										{
+											with uiNamespace do {
+												if !(isNil "KH_var_suspensionDisplay") then {
+													ctrlDelete KH_var_suspensionDisplay;
+													KH_var_suspensionDisplay = nil;
+													nil;
+												};
+											};
+
+											nil;
+										},
+										"PLAYERS",
+										true,
+										false
+									];
+
+									[_playerLoadHandler] call KH_fnc_removeHandler;
+									KH_var_missionSuspended = false;
+									publicVariable "KH_var_missionSuspended";
+								},
+								true,
+								{KH_var_playersLoaded;},
+								false
+							];
 						};
 						
 						if !(isNil "ace_medical") then {
 							if (ace_medical && KH_var_medical) then {
 								KH_var_medical = false;
+								publicVariable "KH_var_medical";
 								diag_log "KH Framework - KH Medical disabled due to ACE Medical";
 							};
 						};
@@ -619,6 +615,7 @@ isNil {
 																		);
 
 																		_this set [24, true];
+																		_hitFatigue = true;
 																	};
 
 																	if (_time >= _start) then {
@@ -842,6 +839,7 @@ isNil {
 																		);
 
 																		_this set [25, true];
+																		_parryFatigue = true;
 																	};
 
 																	if ((_time >= _start) && (_time <= _end)) then {
@@ -921,6 +919,7 @@ isNil {
 																		);
 
 																		_this set [26, true];
+																		_kickFatigue = true;
 																	};
 
 																	if (_time >= _start) then {
@@ -1044,6 +1043,7 @@ isNil {
 																		);
 
 																		_this set [27, true];
+																		_tackleFatigue = true;
 																	};
 
 																	if ((_time >= _start) && (_time <= _end)) then {
@@ -1164,6 +1164,7 @@ isNil {
 																		);
 																		
 																		_this set [28, true];
+																		_dodgeFatigue = true;
 																	};
 
 																	if ((_time >= _start) && (_time <= _end)) then {
@@ -1174,7 +1175,7 @@ isNil {
 																		break;
 																	}
 																	else {
-																		if ((_unit getVariable ["KH_var_currentMeleeDodgeDirection", -1]) isNotEqualTo "") then {
+																		if ((_unit getVariable ["KH_var_currentMeleeDodgeDirection", -1]) isNotEqualTo -1) then {
 																			_unit setVariable ["KH_var_currentMeleeDodgeDirection", -1, _clientType];
 																		};
 																	};
@@ -1227,8 +1228,8 @@ isNil {
 												};
 											};
 
-											if !(isNil (KH_var_animationEvents get _animation)) then {
-												private _events = KH_var_animationEvents get _animation;
+											if !(KH_var_animationEvents isNil _animation) then {
+												private _events = +(KH_var_animationEvents get _animation);
 												
 												{
 													if (_x select 2) then {
@@ -1376,7 +1377,7 @@ isNil {
 								private _networkingEnabled = [missionNamespace, "KH_var_networking", "SERVER"] call KH_fnc_getRemoteVariable;
 								if (isNil "_networkingEnabled") exitWith {};
 
-								if !_networkingEnabled exitWith {
+								if !(_networkingEnabled param [0, false]) exitWith {
 									[_handlerId] call KH_fnc_removeHandler;
 								};
 
@@ -2758,7 +2759,7 @@ isNil {
 									};
 								};
 							};
-						} forEach ((KH_var_allMen - [KH_var_playerUnit]) select {_x isKindOf "CAManBase";});
+						} forEach ((KH_var_allMen - [KH_var_playerUnit]) select {(_x isKindOf "CAManBase") && (local _x) && (alive _x) && !(isPlayer _x);});
 					};
 				};
 			};

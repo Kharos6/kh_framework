@@ -34,6 +34,12 @@ if _softAttach exitWith {
 
     if ((missionNamespace getVariable [_attachHandlerEntityId, []]) isNotEqualTo []) then {
         [missionNamespace getVariable [_attachHandlerEntityId, []]] call KH_fnc_removeHandler;
+
+        {
+            deleteVehicle _x;
+        } forEach (_entity getVariable ["KH_var_attachRoadways", []]);
+
+        _entity setVariable ["KH_var_attachRoadways", []];
         
         execute [
             [_entity, velocity _entity],
@@ -49,19 +55,9 @@ if _softAttach exitWith {
 
     private _attachHandlerId = generateUid;
     missionNamespace setVariable [_attachHandlerId, true];
+    private _absolutePosition = _position isEqualType true;
 
-    execute [
-        [_entity],
-        {
-            params ["_entity"];
-            _entity setPhysicsCollisionFlag false;
-        },
-        "GLOBAL",
-        true,
-        false
-    ];
-
-    if (_position isEqualType true) then {
+    if _absolutePosition then {
         _position = if _position then {
             getPosASLVisual _entity;
         }
@@ -70,7 +66,7 @@ if _softAttach exitWith {
         };
     };
 
-    if (_bone isNotEqualTo "") then {
+    if ((_bone isNotEqualTo "") && !_absolutePosition) then {
         _entity setPosASL ((_target modelToWorldVisualWorld (_target selectionPosition _bone)) vectorAdd _position);
     }
     else {
@@ -124,6 +120,7 @@ if _softAttach exitWith {
         [];
     };
 
+    _entity setVariable ["KH_var_attachRoadways", _roadways];
     _entity setVariable ["KH_var_attachLocalPosition", []];
     _entity setVariable ["KH_var_attachFallVelocity", (velocity _entity) select 2];
     _entity setVariable ["KH_var_attachCurrentAnimationState", ""];
@@ -194,17 +191,6 @@ if _softAttach exitWith {
                 {
                     deleteVehicle _x;
                 } forEach _roadways;
-        
-                execute [
-                    [_entity],
-                    {
-                        params ["_entity"];
-                        _entity setPhysicsCollisionFlag true;
-                    },
-                    "GLOBAL",
-                    true,
-                    false
-                ];
 
                 _entity setVariable ["KH_var_attachLocalPosition", []];
                 _entity setVariable ["KH_var_attachFallVelocity", 0];
@@ -245,24 +231,25 @@ if _softAttach exitWith {
             
             if _checkCollision then {
                 private _wallIntersectionStartPosition = _entityPosition vectorAdd [0, 0, 0.1];
+                private _currentEntityIgnores = +_entityIgnores;
 
                 private _wallIntersections = [[
-                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0, 0.5, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0, -0.5, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.5, 0, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.5, 0, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.354, 0.354, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.354, 0.354, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.354, -0.354, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.354, -0.354, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.427, 0.427, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.427, 0.427, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.427, -0.427, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.427, -0.427, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.177, 0.177, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.177, 0.177, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.177, -0.177, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []],
-                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.177, -0.177, 1], _entityIgnores, true, 1, "GEOM", "FIRE", true, []]
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0, 0.5, 1], _currentEntityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0, -0.5, 1], _currentEntityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.5, 0, 1], _currentEntityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.5, 0, 1], _currentEntityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.354, 0.354, 1], _currentEntityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.354, 0.354, 1], _currentEntityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.354, -0.354, 1], _currentEntityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.354, -0.354, 1], _currentEntityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.427, 0.427, 1], _currentEntityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.427, 0.427, 1], _currentEntityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.427, -0.427, 1], _currentEntityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.427, -0.427, 1], _currentEntityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.177, 0.177, 1], _currentEntityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.177, 0.177, 1], _currentEntityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [0.177, -0.177, 1], _currentEntityIgnores, true, 1, "GEOM", "FIRE", true, []],
+                    [_wallIntersectionStartPosition, _entityAimPosition vectorAdd [-0.177, -0.177, 1], _currentEntityIgnores, true, 1, "GEOM", "FIRE", true, []]
                 ]] call KH_fnc_raycast;
 
                 private _wallCollisionVector = if (_wallIntersections isNotEqualTo []) then {
@@ -506,6 +493,15 @@ if (_position isEqualType true) then {
     }
     else {
         [0, 0, 0];
+    };
+};
+
+if (_rotation isEqualType true) then {
+    _rotation = if _rotation then {
+        [_target vectorWorldToModelVisual (vectorDirVisual _entity), _target vectorWorldToModelVisual (vectorUpVisual _entity)];
+    }
+    else {
+        [[0, 1, 0], [0, 0, 1]];
     };
 };
 

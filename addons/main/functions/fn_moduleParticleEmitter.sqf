@@ -23,7 +23,7 @@ isNil {
                     parseNumber (_logic getVariable ["KH_ModuleParticleEmitterDuration", "0"]),
                     [],
                     [_logic],
-                    compile (_logic getVariable ["KH_ModuleParticleEmitterCondition", "true;"]), 
+                    compile (_logic getVariable ["KH_ModuleParticleEmitterCondition", "true"]), 
                     "GLOBAL",
                     true
                 ] call KH_fnc_createParticleEmitter;

@@ -149,7 +149,7 @@ private _result = [
             [_data],
             {
                 private _object = param [0];
-                private _pylonindex = param [1];
+                private _pylonIndex = param [1];
                 private _newMagazine = param [2];
                 _args params ["_data"];
                 (_data get "PylonChanged") pushBack [(CBA_missionTime - ([_object, false] call KH_fnc_getLatency)) max 0, [_pylonIndex, _newMagazine]];

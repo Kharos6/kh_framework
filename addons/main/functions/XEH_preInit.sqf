@@ -239,7 +239,7 @@
 		"True allows Teamspeak voice effects to be applied by equipment that has a valid voice effect array. Requires restart."
 	], 
 	"KH Miscellaneous", 
-	false,
+	true,
 	1,
 	{},
 	true
@@ -2855,18 +2855,7 @@
     ], 
 	[0, 360, 90, 0],
 	1,
-	{
-		execute [
-			[],
-			{
-				KH_var_meleeDodgeFailureAngleRange = KH_var_meleeDodgeFailureAngleRange / 2;
-				publicVariable "KH_var_meleeDodgeFailureAngleRange";
-			},
-			"SERVER",
-			"1",
-			false
-		];
-	},
+	{},
 	false
 ] call CBA_fnc_addSetting;
 
@@ -3092,18 +3081,16 @@
 				};
 			};
 
-			if (missionNamespace isNil "KH_var_sttHandler") then {
+			if (missionNamespace isNil "KH_var_sttCaptureWatcher") then {
 				missionNamespace setVariable [
-					"KH_var_sttHandler",
+					"KH_var_sttCaptureWatcher",
 					execute [
 						[],
 						{
-							if sttIsInitialized then {
-								if !sttIsCapturing then {
-									if !(uiNamespace isNil "KH_var_speechRecognitionDisplay") then {
-										ctrlDelete (uiNamespace getVariable "KH_var_speechRecognitionDisplay");
-										uiNamespace setVariable ["KH_var_speechRecognitionDisplay", nil];
-									};
+							if !sttIsCapturing then {
+								if !(uiNamespace isNil "KH_var_speechRecognitionDisplay") then {
+									ctrlDelete (uiNamespace getVariable "KH_var_speechRecognitionDisplay");
+									uiNamespace setVariable ["KH_var_speechRecognitionDisplay", nil];
 								};
 							};
 						},
@@ -3138,18 +3125,16 @@
 				};
 			};
 
-			if (missionNamespace isNil "KH_var_sttHandler") then {
+			if (missionNamespace isNil "KH_var_sttCaptureWatcher") then {
 				missionNamespace setVariable [
-					"KH_var_sttHandler",
+					"KH_var_sttCaptureWatcher",
 					execute [
 						[],
 						{
-							if sttIsInitialized then {
-								if !sttIsCapturing then {
-									if !(uiNamespace isNil "KH_var_speechRecognitionDisplay") then {
-										ctrlDelete (uiNamespace getVariable "KH_var_speechRecognitionDisplay");
-										uiNamespace setVariable ["KH_var_speechRecognitionDisplay", nil];
-									};
+							if !sttIsCapturing then {
+								if !(uiNamespace isNil "KH_var_speechRecognitionDisplay") then {
+									ctrlDelete (uiNamespace getVariable "KH_var_speechRecognitionDisplay");
+									uiNamespace setVariable ["KH_var_speechRecognitionDisplay", nil];
 								};
 							};
 						},
@@ -3206,14 +3191,6 @@
 			ctrlSetText [101, _currentConsoleCache param [((count _currentConsoleCache) -1) max 0, ""]];
 			lbSetCurSel [108, profileNamespace getVariable ["KH_var_consoleLanguage", 0]];
 			KH_var_consoleCacheIndex = ((count _currentConsoleCache) - 1) max 0;
-			lbClear 109;
-			lbAdd [109, "None"];
-
-			{
-				lbAdd [109, _x];
-			} forEach ([KH_var_quickFunctionsSqf, KH_var_quickFunctionsLua] select (lbCurSel 108));
-
-			lbSetCurSel [109, 0];
 
 			[
 				["CONTROL", _display displayCtrl 104],
@@ -3368,37 +3345,6 @@
 				{
 					private _selectedIndex = param [1, 0];
 					profileNamespace setVariable ["KH_var_consoleLanguage", _selectedIndex];
-					lbClear 109;
-					lbAdd [109, "None"];
-
-					{
-						lbAdd [109, _x];
-					} forEach ([KH_var_quickFunctionsSqf, KH_var_quickFunctionsLua] select _selectedIndex);
-
-					lbSetCurSel [109, 0];
-				}
-			] call KH_fnc_addEventHandler;
-
-			[
-				["CONTROL", _display displayCtrl 109],
-				"LBSelChanged",
-				[],
-				{
-					private _selectedIndex = param [1, 0];
-
-					if (_selectedIndex isNotEqualTo 0) then {
-						private _language = lbCurSel 108;
-						private _entry = ([KH_var_quickFunctionsSqf, KH_var_quickFunctionsLua] select _language) get (lbText [109, _selectedIndex]);
-
-						if !(isNil "_entry") then {
-							if (_language isEqualTo 0) then {
-								ctrlSetText [101, toString _entry];
-							}
-							else {
-								ctrlSetText [101, _entry];
-							};
-						};
-					};
 				}
 			] call KH_fnc_addEventHandler;
 		};

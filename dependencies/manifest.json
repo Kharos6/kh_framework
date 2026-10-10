@@ -16,9 +16,9 @@
   "manifest_version": 2,
   "url": "https://github.com/Kharos6/kh_framework/releases/download/Dependency/kh_framework_deps.zip",
   "file": "kh_framework_deps.zip",
-  "src_hash": "532fa95d4d3337b22d1b4ce5a09569daeb67dab6f35e767c012f9fbc5a467ae7",
-  "sha256": "b944858c9031ba858b22f830ed7f1cbc0e515badeda6d1f3ac9bb6323052c59c",
-  "size": 113052228,
+  "src_hash": "6c3838e3fd4ccdd03429b63dd3a3ce34df644cbe89abbc49ac020a9876fc1854",
+  "sha256": "f8b79942035995cec905dce6778acccfce34d72cabe9e6a34ec1e5fbb25b4bcd",
+  "size": 113052382,
   "sources": [
     { "from": "hemtt.exe", "to": "." },
     { "from": "extensions/kh_framework/intercept/lib/**", "to": "extensions/kh_framework/intercept/lib" },

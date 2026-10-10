@@ -3,6 +3,7 @@ private _initId = generateUid;
 private _blockerId = generateUid;
 missionNamespace setVariable [_initId, true];
 KH_var_entityInitializations pushBack [_typeInclude, _typeExclude, _args, _function, _initId, _blockerId];
+private _ammoConfig = configFile >> "CfgAmmo";
 
 if _applyRetroactively then {
     {
@@ -38,7 +39,8 @@ if _applyRetroactively then {
             };
         };
 
-        _continue && (((typeOf _entity) select [0, 1]) isNotEqualTo "#");
+        private _type = typeOf _entity;
+        _continue && ((_type select [0, 1]) isNotEqualTo "#") && !(isClass (_ammoConfig >> _type));
     });
 };
 

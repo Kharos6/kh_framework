@@ -45,7 +45,7 @@ class KH_ResourceEndMission
         class KH_FadeTypeTitle: RscText
         {
 			text = "Fade Type";
-            tooltip = "Type of fade to play. -2 instantly ends the mission without the signature closing shot and music, -1 plays the signature closing shot and music, and any value of 0 and above is a fade to black for that amount of seconds.";
+            tooltip = "Type of fade to play. -2 plays the signature closing shot and music, -1 instantly ends the mission without the signature closing shot and music, and any value of 0 and above is a fade to black for that amount of seconds.";
             x = QUOTE(RSC_POS_X(40));
             y = QUOTE(RSC_POS_Y(42));
             w = QUOTE(RSC_POS_W(10));

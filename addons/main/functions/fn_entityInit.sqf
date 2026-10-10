@@ -38,7 +38,7 @@ if _applyRetroactively then {
             };
         };
 
-        _continue;
+        _continue && (((typeOf _entity) select [0, 1]) isNotEqualTo "#");
     });
 };
 

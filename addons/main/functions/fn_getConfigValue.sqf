@@ -3,7 +3,7 @@ params [["_type", "", [""]], ["_config", configNull, ["", [], {}, objNull, teamM
 if !(_config isEqualType configNull) then {
     _config = switch (typeName _config) do {
         case "STRING": {
-            call (compile _config);
+            [] call (compile _config);
         };
 
         case "ARRAY": {
@@ -42,7 +42,7 @@ if !(_config isEqualType configNull) then {
         };
 
         case "CODE": {
-            call _config;
+            [] call _config;
         };
 
         case "OBJECT": {

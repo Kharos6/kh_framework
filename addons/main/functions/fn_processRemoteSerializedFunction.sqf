@@ -10,7 +10,7 @@ if !(isNil "_storedFunction") exitWith {
 
     if _unscheduled then {
         if (isNil "_arguments") then {
-            call _storedFunction;
+            [] call _storedFunction;
         }
         else {
             _arguments call _storedFunction;

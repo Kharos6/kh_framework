@@ -10003,7 +10003,7 @@ static void initialize_sqf_integration() {
 
         if _unscheduled then {
             if (isNil "_arguments") then {
-                call (missionNamespace getVariable _function);
+                [] call (missionNamespace getVariable _function);
             }
             else {
                 _arguments call (missionNamespace getVariable _function);

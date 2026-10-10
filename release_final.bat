@@ -9,6 +9,7 @@ REM                                          .hemttout\release and fills it with
 REM   4. copies everything from .hemttout\dev into .hemttout\release, EXCEPT the
 REM      "addons" and "keys" folders and "mod.cpp" (HEMTT already produced those)
 REM   5. copies <Documents>\Arma 3\kh_framework\cache into .hemttout\release\cache
+REM      (optional: a missing cache only produces a warning that waits for a key)
 REM
 REM Note: HEMTT zips the release into releases\ at the end of step 3, i.e. BEFORE
 REM steps 4-5, so that archive holds the PBOs only; .hemttout\release is the
@@ -60,7 +61,7 @@ set /p KH_DOCS=<"%TEMP%\kh_docs_path.txt"
 del "%TEMP%\kh_docs_path.txt" >nul 2>nul
 if not defined KH_DOCS set "KH_DOCS=%USERPROFILE%\Documents"
 set "KH_CACHE=%KH_DOCS%\Arma 3\kh_framework\cache"
-if not exist "%KH_CACHE%\" goto :fail_nocache
+if not exist "%KH_CACHE%\" goto :done_nocache
 robocopy "%KH_CACHE%" "%KH_REL%\cache" /E /NJH /NJS /NDL /NP
 if errorlevel 8 goto :fail_copy
 
@@ -68,6 +69,18 @@ echo.
 echo ================= RELEASE READY: %KH_REL% =================
 echo.
 timeout /t 3 /nobreak >nul
+exit /b 0
+
+:done_nocache
+echo.
+echo ================= RELEASE READY (WITHOUT cache): %KH_REL% =================
+echo.
+echo WARNING: cache folder not found, so release\cache was NOT populated:
+echo          "%KH_CACHE%"
+echo          Run the game with the dev build once and execute the renderer so it generates the cache, then
+echo          either run this again or copy that folder into the release yourself.
+echo.
+pause
 exit /b 0
 
 :fail_deps
@@ -93,12 +106,6 @@ exit /b 1
 :fail_copy
 echo.
 echo ================= RELEASE STOPPED: a copy step failed ^(robocopy exit code %ERRORLEVEL%^) - see above =================
-pause
-exit /b 1
-:fail_nocache
-echo.
-echo ================= RELEASE STOPPED: cache folder not found: "%KH_CACHE%" =================
-echo Run the game with the dev build once so it generates the cache, then run this again.
 pause
 exit /b 1
 

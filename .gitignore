@@ -9,3 +9,11 @@
 .hemttout
 .vscode
 releases/
+
+# dependency bootstrap (dependencies/README.md): downloaded packages, install state,
+# and the author-side upload staging folder. Only manifest.json is versioned.
+dependencies/.cache/
+dependencies/.state/
+dependencies/upload/
+# delivered by the manifest, not by git
+extensions/kh_framework/cuda/

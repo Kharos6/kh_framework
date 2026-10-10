@@ -10,68 +10,31 @@ REM Project root = two levels up from this script (...\kh_framework\).
 REM Derived from the script location, so it works on any drive/user folder.
 for %%I in ("%~dp0..\..") do set "KH_ROOT=%%~fI"
 set "KH_DEPLOY=%KH_ROOT%\.hemttout\dev"
-
-REM Try different VS2022 installation paths and editions
-set "VS2022_FOUND="
-
-REM Check for Enterprise edition
-if exist "C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" (
-    call "C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-    set "VS2022_FOUND=1"
-    echo Found VS2022 Enterprise
-    goto :build
+REM ---------------------------------------------------------------------------
+REM Fetch / verify the prebuilt binary dependencies (.lib, .dll, hemtt.exe, the
+REM Ultralight resources, ...) listed in dependencies\manifest.json. They are
+REM not in git; this downloads whatever is missing and is instant otherwise.
+REM ---------------------------------------------------------------------------
+set "KH_DEP_NOPAUSE=1"
+call "%KH_ROOT%\dependencies\get_dependencies.bat"
+if errorlevel 1 (
+    echo.
+    echo ERROR: could not obtain the binary dependencies - see the messages above.
+    echo        Re-run dependencies\get_dependencies.bat once the problem is fixed.
+    pause
+    exit /b 1
 )
 
-REM Check for Professional edition
-if exist "C:\Program Files (x86)\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat" (
-    call "C:\Program Files (x86)\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
-    set "VS2022_FOUND=1"
-    echo Found VS2022 Professional
-    goto :build
-)
 
-REM Check for Community edition
-if exist "C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" (
-    call "C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
-    set "VS2022_FOUND=1"
-    echo Found VS2022 Community
-    goto :build
+REM Locate Visual Studio 2022+ and initialise the x64 toolchain (cl / link / rc).
+REM Shared logic lives in extensions\vsenv.bat (vswhere-based: any edition, any
+REM drive, VS 2022 / 2026, Build Tools; KH_VCVARS overrides; works inside a
+REM Developer Command Prompt too).
+call "%~dp0..\vsenv.bat"
+if errorlevel 1 (
+    pause
+    exit /b 1
 )
-
-REM Check for BuildTools edition
-if exist "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" (
-    call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-    set "VS2022_FOUND=1"
-    echo Found VS2022 BuildTools
-    goto :build
-)
-
-REM Check alternative installation location (Program Files instead of Program Files (x86))
-if exist "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" (
-    call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-    set "VS2022_FOUND=1"
-    echo Found VS2022 Enterprise (alt location)
-    goto :build
-)
-
-if exist "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat" (
-    call "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
-    set "VS2022_FOUND=1"
-    echo Found VS2022 Professional (alt location)
-    goto :build
-)
-
-if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" (
-    call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
-    set "VS2022_FOUND=1"
-    echo Found VS2022 Community (alt location)
-    goto :build
-)
-
-echo ERROR: Visual Studio 2022 not found!
-echo Please install Visual Studio 2022 with C++ tools or modify the paths in this script.
-pause
-exit /b 1
 
 :build
 
@@ -171,20 +134,21 @@ if errorlevel 1 (
     echo DEPLOY FAILED for the .ts3_plugin package - is a file lock held on "%KH_DEPLOY%"?
     echo.
     pause
-    exit
+    exit /b 1
 )
 copy /Y "output\plugins\kh_framework_teamspeak_win64.dll" "%KH_DEPLOY%\kh_framework_teamspeak_win64.dll" >nul
 if errorlevel 1 (
     echo DEPLOY FAILED for the DLL - is TeamSpeak running with the plugin loaded?
     echo.
     pause
-    exit
+    exit /b 1
 )
 echo Deployed:
 echo   - %KH_DEPLOY%\kh_framework_teamspeak.ts3_plugin
 echo   - %KH_DEPLOY%\kh_framework_teamspeak_win64.dll
-REM Fully successful build + package + deploy: close the window automatically.
-exit
+REM Success: give the banner a moment to be read, then close (return 0).
+if not defined KH_BUILD_ALL timeout /t 2 /nobreak >nul
+exit /b 0
 
 :package_failed
 echo ================================
@@ -197,3 +161,4 @@ echo.
 echo.
 pause
 endlocal
+exit /b 1

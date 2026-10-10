@@ -188,24 +188,14 @@ if !(isNull _unit) then {
 							};
 
 							if _disableCollision then {
-								if ((getPhysicsCollisionFlag _object) select 0) then {
+								private _collision = isNull (attachedTo _object);
+
+								if (((getPhysicsCollisionFlag _object) select 0) isNotEqualTo _collision) then {
 									execute [
-										[_object],
+										[_object, _collision],
 										{
-											params ["_object"];
-											_object setPhysicsCollisionFlag false;
-										},
-										"GLOBAL",
-										true,
-										["JIP", _object, false, ["KH_var_equipableObjectCollision", _object] joinString "_"]
-									];
-								}
-								else {
-									execute [
-										[_object],
-										{
-											params ["_object"];
-											_object setPhysicsCollisionFlag true;
+											params ["_object", "_collision"];
+											_object setPhysicsCollisionFlag _collision;
 										},
 										"GLOBAL",
 										true,

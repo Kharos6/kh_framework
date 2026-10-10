@@ -83,10 +83,8 @@ private _maxResultsOverride = [_maxResults, -1] select _allowIgnoredCheck;
 
 private _positionParser = if !(isNull _object) then {
 	{
-		private _relativeOffsetStart = _object modelToWorldVisualWorld _currentPositionStart;
-		_currentPositionStart = _relativeOffsetStart vectorAdd (_relativeOffsetStart vectorDiff _position);
-		private _relativeOffsetEnd = _object modelToWorldVisualWorld _currentPositionEnd;
-		_currentPositionEnd = _relativeOffsetEnd vectorAdd (_relativeOffsetEnd vectorDiff _position);
+		_currentPositionStart = _object modelToWorldVisualWorld _currentPositionStart;
+		_currentPositionEnd = _object modelToWorldVisualWorld _currentPositionEnd;
 	};
 }
 else {

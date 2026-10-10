@@ -401,6 +401,10 @@ if _softAttach exitWith {
                 case "VARIABLE": {
                     (vectorMagnitude _newVelocity) < 10;
                 };
+
+                default {
+                    true;
+                };
             };
 
             private _newPosition = if (_useGravity && (_groundIntersection isEqualTo [])) then {

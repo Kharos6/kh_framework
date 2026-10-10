@@ -64,7 +64,6 @@ class CfgKHMeleeTypes
         {
             type = "KH_MeleeGenericManTackle";
             damageFunction = "";
-            angle = 45;
             power = 0.5;
             cost = 0.2;
             costInfliction = 0.5;

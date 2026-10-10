@@ -75,6 +75,7 @@ execute [
         _object,
 		_simulation,
         _hidden,
+        _position,
         _inventory,
         _equipmentDisabled,
         _vehicleCargo
@@ -84,6 +85,7 @@ execute [
             "_object",
             "_simulation",
             "_hidden",
+            "_position",
             "_inventory",
             "_equipmentDisabled",
             "_vehicleCargo"

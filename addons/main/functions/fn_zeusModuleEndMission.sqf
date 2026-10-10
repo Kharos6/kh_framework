@@ -10,11 +10,11 @@ isNil {
             private _fadeType = parseNumber (ctrlText (_display displayCtrl 102));
 
             if (_fadeType isEqualTo -2) then {
-                _fadeType = false;
+                _fadeType = true;
             }
             else {
                 if (_fadeType isEqualTo -1) then {
-                    _fadeType = true;
+                    _fadeType = false;
                 };
             };
 

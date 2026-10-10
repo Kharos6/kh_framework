@@ -3,6 +3,7 @@ if ((count _this) isEqualTo 1) then {
 	private _allIntersections = [];
 	private _allIgnored = [];
 	private _allMaxResults = [];
+	private _allSpecIndices = [];
 
 	{
 		_x params [
@@ -56,6 +57,8 @@ if ((count _this) isEqualTo 1) then {
 		private _distance = _start vectorDistance _end;
 
 		if (_distance <= 5000) then {
+			_allSpecIndices pushBack _forEachIndex;
+
 			_allIntersections pushBack [
 				_start, 
 				_end, 
@@ -79,6 +82,7 @@ if ((count _this) isEqualTo 1) then {
 				};
 
 				private _currentStart = _start vectorAdd ((_start vectorFromTo _end) vectorMultiply ((_i - 1) * 5000));
+				_allSpecIndices pushBack _forEachIndex;
 
 				_allIntersections pushBack [
 					_currentStart, 
@@ -143,57 +147,57 @@ if ((count _this) isEqualTo 1) then {
 
 	private _intersections = lineIntersectsSurfaces [_allIntersections];
 	private _flattenedIntersections = [];
+	private _resultCounts = [];
 
 	{
-		{
-			_flattenedIntersections pushBack _x;
-		} forEach _x;
-	} forEach _intersections;
-
-	_intersections = _flattenedIntersections;
+		_resultCounts pushBack 0;
+	} forEach _allIgnored;
 
 	{
-		_x params ["_allowIgnoredCheck", "_ignored"];
+		private _specIndex = _allSpecIndices select _forEachIndex;
+		(_allIgnored select _specIndex) params ["_allowIgnoredCheck", "_ignored"];
 
 		if _allowIgnoredCheck then {
-			private _maxResults = _allMaxResults select _forEachIndex;
-			private _deletions = [];
+			private _maxResults = _allMaxResults select _specIndex;
 
 			if (_maxResults isEqualTo -1) then {
 				_maxResults = 999999;
 			};
 
-			private _resultCount = 0;
+			private _resultCount = _resultCounts select _specIndex;
 			private _ignoreTerrain = "TERRAIN" in _ignored;
 			private _ignoredObjects = _ignored select {_x isEqualType objNull;};
 			private _ignoredTypes = _ignored select {_x isEqualType "";};
 
 			{
 				if (_resultCount >= _maxResults) then {
-					_deletions pushBack _forEachIndex;
-					continue;
+					break;
 				};
 
 				private _object = _x param [3, objNull];
 
 				if ((isNull _object) && _ignoreTerrain) then {
-					_deletions pushBack _forEachIndex;
-				}
-				else {
-					if ((_object in _ignoredObjects) || ((_ignoredTypes findIf {_object isKindOf _x;}) isNotEqualTo -1)) then {
-						_deletions pushBack _forEachIndex;
-					}
-					else {
-						_resultCount = _resultCount + 1;
-					};
+					continue;
 				};
-			} forEach _intersections;
 
-			_intersections deleteAt _deletions;
+				if ((_object in _ignoredObjects) || ((_ignoredTypes findIf {_object isKindOf _x;}) isNotEqualTo -1)) then {
+					continue;
+				};
+
+				_flattenedIntersections pushBack _x;
+				_resultCount = _resultCount + 1;
+			} forEach _x;
+
+			_resultCounts set [_specIndex, _resultCount];
+		}
+		else {
+			{
+				_flattenedIntersections pushBack _x;
+			} forEach _x;
 		};
-	} forEach _allIgnored;
+	} forEach _intersections;
 
-	_intersections;
+	_flattenedIntersections;
 }
 else {
 	params [

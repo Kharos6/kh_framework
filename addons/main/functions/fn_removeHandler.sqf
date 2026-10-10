@@ -98,7 +98,7 @@ else {
                     };
                 };
 
-                triggerCbaEvent ["KH_eve_handlerRemoved", [_type, _event, _handlerId, _eventOwner], true, false];
+                triggerCbaEvent ["KH_eve_handlerRemoved", [[_type, _event, _handlerId, _eventOwner]], true, false];
             },
             _eventOwner,
             true,

@@ -79,7 +79,6 @@ private _permutation = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
 private _combinedMatrix = _permutation matrixMultiply [_vectorDir vectorCrossProduct _vectorUp, _vectorDir, _vectorUp];
 private _grids = [];
 private _intersectionCheckCount = 0;
-private _maxResultsOverride = [_maxResults, -1] select _allowIgnoredCheck;
 
 private _positionParser = if !(isNull _object) then {
 	{
@@ -101,7 +100,7 @@ switch _type do {
 				private _currentPositionStart = ([[_primaryAxis, _secondaryAxisIteration, _tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
 				private _currentPositionEnd = ([[-_primaryAxis, _secondaryAxisIteration, _tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
 				call _positionParser;
-				_grids pushBack [_currentPositionStart, _currentPositionEnd, _ignored1, _ignored2, _sort, _maxResultsOverride, _lod1, _lod2, _returnUnique];
+				_grids pushBack [_currentPositionStart, _currentPositionEnd, _ignored1, _ignored2, _sort, -1, _lod1, _lod2, _returnUnique];
 				_intersectionCheckCount = _intersectionCheckCount + 1;
 			};
 		};
@@ -118,7 +117,7 @@ switch _type do {
 				private _currentPositionStart = ([[_primaryAxisIteration, _secondaryAxisIteration, _tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
 				private _currentPositionEnd = ([[-_primaryAxisIteration, -_secondaryAxisIteration, -_tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
 				call _positionParser;
-				_grids pushBack [_currentPositionStart, _currentPositionEnd, _ignored1, _ignored2, _sort, _maxResultsOverride, _lod1, _lod2, _returnUnique];
+				_grids pushBack [_currentPositionStart, _currentPositionEnd, _ignored1, _ignored2, _sort, -1, _lod1, _lod2, _returnUnique];
 				_intersectionCheckCount = _intersectionCheckCount + 1;
 			};
 		};
@@ -134,7 +133,7 @@ switch _type do {
 				private _currentPositionStart = ([[-_currentHeight, _secondaryAxisIteration, _tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
 				private _currentPositionEnd = ([[-_currentHeight, -_secondaryAxisIteration, -_tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
 				call _positionParser;
-				_grids pushBack [_currentPositionStart, _currentPositionEnd, _ignored1, _ignored2, _sort, _maxResultsOverride, _lod1, _lod2, _returnUnique];
+				_grids pushBack [_currentPositionStart, _currentPositionEnd, _ignored1, _ignored2, _sort, -1, _lod1, _lod2, _returnUnique];
 				_intersectionCheckCount = _intersectionCheckCount + 1;
 			};
 		};
@@ -163,7 +162,7 @@ switch _type do {
 					private _currentPositionStart = [0, 0, 0];
 					private _currentPositionEnd = ([[_currentHeight, _surfaceSecondary, _surfaceTertiary]] matrixMultiply _combinedMatrix) select 0;
 					call _positionParser;
-					_grids pushBack [_currentPositionStart, _currentPositionEnd, _ignored1, _ignored2, _sort, _maxResultsOverride, _lod1, _lod2, _returnUnique];
+					_grids pushBack [_currentPositionStart, _currentPositionEnd, _ignored1, _ignored2, _sort, -1, _lod1, _lod2, _returnUnique];
 					_intersectionCheckCount = _intersectionCheckCount + 1;
 				};
 			};
@@ -183,7 +182,7 @@ private _flattenedIntersections = [];
 
 _intersections = _flattenedIntersections;
 
-if _allowIgnoredCheck then {
+if (_allowIgnoredCheck || (_maxResults isNotEqualTo -1)) then {
 	private _deletions = [];
 
 	if (_maxResults isEqualTo -1) then {

@@ -44,7 +44,6 @@ if (_position isEqualType objNull) then {
 
 private _grids = [];
 private _intersectionCheckCount = 0;
-private _maxResultsOverride = [_maxResults, -1] select _allowIgnoredCheck;
 
 if (_rotation isEqualType objNull) then {
     _rotation = [vectorDir _rotation, vectorUp _rotation];
@@ -78,7 +77,7 @@ if (_cone isEqualTo 0) then {
             _ignored1, 
             _ignored2, 
             _sort, 
-            _maxResultsOverride, 
+            -1, 
             _lod1, 
             _lod2, 
             _returnUnique
@@ -121,7 +120,7 @@ else {
             _ignored1,
             _ignored2,
             _sort,
-            _maxResultsOverride,
+            -1,
             _lod1,
             _lod2,
             _returnUnique
@@ -143,7 +142,7 @@ private _flattenedIntersections = [];
 
 _intersections = _flattenedIntersections;
 
-if _allowIgnoredCheck then {
+if (_allowIgnoredCheck || (_maxResults isNotEqualTo -1)) then {
 	private _deletions = [];
 
 	if (_maxResults isEqualTo -1) then {

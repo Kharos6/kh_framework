@@ -1636,6 +1636,7 @@ if hasInterface then {
 	KH_var_volumetricDynamicLightsHandler = "";
 	KH_var_filterPlayerEquipmentList = [];
 	KH_var_filterPlayerEquipmentFilter = false;
+	uiNamespace setVariable ["KH_var_loadingDisplay", controlNull];
 
 	{
 		private _basePath = (getText (_x >> "path")) regexReplace ["(/)", "\\"];

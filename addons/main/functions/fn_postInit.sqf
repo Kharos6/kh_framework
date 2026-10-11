@@ -1308,67 +1308,12 @@ isNil {
 				];
 			}
 			else {
-				"KH_var_displayLayer" cutRsc ["KH_ResourceKHDisplay", "PLAIN", -1, true, true];
-
-				execute [
-					[],
-					{
-						with uiNamespace do {
-							KH_var_loadingDisplay = ["RscText", "LOADING...", [0, false, 0], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
-							nil;
-						};
-						
-						nil;
-					},
-					true,
-					{CBA_missionTime > 0;},
-					false
-				];
-
-				execute [
-					[],
-					{
-						if (!KH_var_clientRegistered && !KH_var_missionInitialized) then {
-							with uiNamespace do {
-								if (isNull KH_var_loadingDisplay) then {
-									KH_var_loadingDisplay = ["RscText", "LOADING...", [0, false, 0], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
-									nil;
-								};
-							};
-
-							nil;
-						}
-						else {
-							[_handlerId] call KH_fnc_removeHandler;
-						};
-					},
-					true,
-					0,
-					false
-				];
-
 				execute [
 					[],
 					{
 						if KH_var_missionStarted then {
 							KH_var_jip = true;
 						};
-
-						execute [
-							[],
-							{
-								with uiNamespace do {
-									ctrlDelete KH_var_loadingDisplay;
-									KH_var_loadingDisplay = nil;
-									nil;
-								};
-
-								nil;
-							},
-							true,
-							{!(uiNamespace isNil "KH_var_loadingDisplay");},
-							false
-						];
 
 						execute [
 							[],
@@ -1421,14 +1366,44 @@ isNil {
 			};
 			
 			if hasInterface then {
+				"KH_var_displayLayer" cutRsc ["KH_ResourceKHDisplay", "PLAIN", -1, true, true];
+
+				if !isServer then {
+					execute [
+						[],
+						{
+							if (!KH_var_clientRegistered || !KH_var_missionInitialized) then {
+								with uiNamespace do {
+									if (isNull KH_var_loadingDisplay) then {
+										KH_var_loadingDisplay = ["RscText", "WAITING FOR SERVER...", [0, false, 0], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
+										nil;
+									};
+								};
+
+								nil;
+							}
+							else {
+								with uiNamespace do {
+									if !(isNull KH_var_loadingDisplay) then {
+										ctrlDelete KH_var_loadingDisplay;
+									};
+								};
+
+								[_handlerId] call KH_fnc_removeHandler;
+							};
+						},
+						true,
+						0,
+						false
+					];
+				};
+
 				triggerCbaEvent ["KH_eve_playerMissionPreloaded", [clientOwner], "SERVER", false];
 				[[], [], [], KH_fnc_entityRenderingSetup, true] call KH_fnc_entityInit;
 				
 				execute [
 					[],
-					{
-						"KH_var_displayLayer" cutRsc ["KH_ResourceKHDisplay", "PLAIN", -1, true, true];
-						
+					{						
 						{
 							private _stored = [hashValue _x, "missionLoad"] joinString "_";
 

@@ -26,6 +26,14 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
+echo Copying mod.cpp to dev...
+copy /Y ".hemttout\build\mod.cpp" ".hemttout\dev\mod.cpp" >nul
+
+if errorlevel 1 (
+    echo COPY OF mod.cpp TO DEV FAILED - is .hemttout\build\mod.cpp missing?
+    pause
+    exit /b 1
+)
 
 echo Done.
 if not defined KH_BUILD_ALL timeout /t 2 /nobreak >nul

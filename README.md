@@ -8,13 +8,13 @@ KH Framework is a tool package designed to facilitate the creation of missions a
   COMPATIBILITY
 </h1>
 
-Likely compatible with just about everything on the workshop.
+Likely compatible with just about every other mod out there.
 
 <h1 align="center">
   NOTES
 </h1>
 
-- No guarantees that every aspect of the mod functions perfectly are made. Any issues should be reported.
+- Due to the scope and ambition of the mod, there is a chance some features may not behave as expected. Testing is still ongoing, and the mod may be considered experimental. Any issues should be reported.
 - This mod must be installed on every machine and the server.
 
 <h1 align="center">
@@ -40,6 +40,6 @@ Requirements: Windows 10/11 and **Visual Studio 2022** (any edition - the free C
   DISCLAIMER
 </h1>
 
-While AI tools were **NOT** used in any capacity to create SQF code, Lua code, Arma Config code, or art assets, large portions of the rest of the codebase may have been either written or edited by an LLM. That being said, my past mod projects and career experience at least gave me an edge in understanding how things are meant to look and behave. For that reason, while I am not opposed to using AI, I will not accept any AI-made pull requests unless they had been tested a dozen times over and the person behind them has at least a basic understanding of them.
+While AI tools were **NOT** used in any capacity to create SQF code, Lua code, Arma Config code, or art assets, large portions of the rest of the codebase may have been either written or edited by an LLM. My past mod projects and career experience did give me an edge in understanding how things are meant to look and behave, so while I am not opposed to using AI, its output must hold under scrutiny beyond just being able to compile and work for a minute in a controlled environment; I will not accept any AI-made pull requests unless they have been tested a dozen times over and the person behind them has at least a basic understanding of them.
 
 So long as it is done in good will, and credit to the original author(s) is provided alongside the necessary links to the original content, you are allowed to modify, redistribute, and repurpose this mod as you see fit.

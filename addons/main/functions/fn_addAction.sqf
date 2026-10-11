@@ -425,12 +425,17 @@ private _actionHandler = execute [
             _progressWindowForegroundName = _name;
         }
         else {
+            private _nameFallback = {
+                params ["_currentName", "_default"];
+                [_currentName, _default] select (_currentName isEqualTo "");
+            };
+
             _menuName = _name param [0, "", [""]];
-            _windowBackgroundName = _name param [1, _menuName, [""]];
-            _windowForegroundName = _name param [2, _menuName, [""]];
-            _progressMenuName = _name param [3, _menuName, [""]];
-            _progressWindowBackgroundName = _name param [4, _progressMenuName, [""]];
-            _progressWindowForegroundName = _name param [5, _progressMenuName, [""]];
+            _windowBackgroundName = [_name param [1, "", [""]], _menuName] call _nameFallback;
+            _windowForegroundName = [_name param [2, "", [""]], _menuName] call _nameFallback;
+            _progressMenuName = [_name param [3, "", [""]], _menuName] call _nameFallback;
+            _progressWindowBackgroundName = [_name param [4, "", [""]], _progressMenuName] call _nameFallback;
+            _progressWindowForegroundName = [_name param [5, "", [""]], _progressMenuName] call _nameFallback;
         };
 
         private _conditionParser = {

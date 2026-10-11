@@ -775,8 +775,6 @@ if isServer then {
 	publicVariable "KH_var_diagnosticsState";
 	KH_var_missionSuspended = false;
 	publicVariable "KH_var_missionSuspended";
-	KH_var_filterPlayerEquipmentList = [];
-	KH_var_filterPlayerEquipmentFilter = false;
 	KH_var_jipHandlers = createHashMap;
 	KH_var_playerPresenceHandlers = createHashMap;
 	KH_var_headlessClientTransfers = [];
@@ -1636,6 +1634,8 @@ if hasInterface then {
 	KH_var_globalIlluminationHandler = "";
 	KH_var_fogScatteringHandler = "";
 	KH_var_volumetricDynamicLightsHandler = "";
+	KH_var_filterPlayerEquipmentList = [];
+	KH_var_filterPlayerEquipmentFilter = false;
 
 	{
 		private _basePath = (getText (_x >> "path")) regexReplace ["(/)", "\\"];

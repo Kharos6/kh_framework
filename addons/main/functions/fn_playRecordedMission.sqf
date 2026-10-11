@@ -268,7 +268,7 @@ execute [
                 _x params ["_time", "_data"];
 
                 if (_time <= CBA_missionTime) then {
-                    _group setLeader (KH_var_recordedUnits get _data);
+                    _group selectLeader (KH_var_recordedUnits get _data);
                 }
                 else {
                     break;

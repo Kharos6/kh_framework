@@ -97,9 +97,9 @@ private _result = [
                 params ["_group", "_data"];
                 private _trueTime = (CBA_missionTime - ([_group, false] call KH_fnc_getLatency)) max 0;
 
-                private _currentTask = if ((count (waypoints _group)) > 1) then {
-                    private _currentWaypoint = ((waypoints _group) select {(_x select 1) isEqualTo (currentWaypoint _group);}) select 0;
-                    private _taskPosition = getWPPos [_group, _currentWaypoint select 1];
+                private _currentTask = if (((count (waypoints _group)) > 1) && ((currentWaypoint _group) < (count (waypoints _group)))) then {
+                    private _currentWaypoint = [_group, currentWaypoint _group];
+                    private _taskPosition = getWPPos _currentWaypoint;
 
                     private _roadwayTaskIntersection = [
                         _taskPosition vectorAdd [0, 0, 0.1],

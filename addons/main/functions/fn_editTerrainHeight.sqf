@@ -123,7 +123,7 @@ for "_i" from _minX to _maxX step _gridWidth do {
                 };
 
                 _index = _index min (count _points - 1);
-                private _p1 = _points select (_index - 1);
+                private _p1 = _points select ((_index - 1) max 0);
                 private _p2 = _points select _index;
                 
                 private _t = if ((_p2 select 0) isEqualTo (_p1 select 0)) then { 
@@ -135,7 +135,7 @@ for "_i" from _minX to _maxX step _gridWidth do {
                 
                 switch _curveType do {
                     case "NONE": { 
-                        _p1 select 1;
+                        [_p1 select 1, _p2 select 1] select (_normalizedDistance >= (_p2 select 0));
                     };
                     
                     case "LINEAR": { 

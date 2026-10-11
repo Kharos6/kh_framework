@@ -545,9 +545,9 @@ private _result = [
                     _unit setVariable ["KH_var_collectedTargets", _currentTargets];
                 };
 
-                private _currentTask = if ((count (waypoints _unit)) > 1) then {
-                    private _currentWaypoint = ((waypoints _unit) select {(_x select 1) isEqualTo (currentWaypoint (group _unit));}) select 0;
-                    private _taskPosition = getWPPos [_unit, _currentWaypoint select 1];
+                private _currentTask = if (((count (waypoints _unit)) > 1) && ((currentWaypoint (group _unit)) < (count (waypoints _unit)))) then {
+                    private _currentWaypoint = [group _unit, currentWaypoint (group _unit)];
+                    private _taskPosition = getWPPos _currentWaypoint;
 
                     private _roadwayTaskIntersection = [
                         _taskPosition vectorAdd [0, 0, 0.1],

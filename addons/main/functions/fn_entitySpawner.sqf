@@ -523,20 +523,7 @@ private _spawnHandler = execute [
 			}
 			else {
 				{
-					if _countKilled then {
-						[
-							["ENTITY", _x, "REMOTE"],
-							"Killed",
-							[_spawnerId],
-							{
-								_args params ["_spawnerId"];
-								triggerCbaEvent [_spawnerId, [], true, false];
-								[_handlerId] call KH_fnc_removeHandler;
-							}
-						] call KH_fnc_addEventHandler;
-					};
-
-					[
+					private _deletedHandler = [
 						["ENTITY", _x, "REMOTE"],
 						"Deleted",
 						[_spawnerId],
@@ -546,6 +533,20 @@ private _spawnHandler = execute [
 							[_handlerId] call KH_fnc_removeHandler;
 						}
 					] call KH_fnc_addEventHandler;
+
+					if _countKilled then {
+						[
+							["ENTITY", _x, "REMOTE"],
+							"Killed",
+							[_spawnerId, _deletedHandler],
+							{
+								_args params ["_spawnerId", "_deletedHandler"];
+								triggerCbaEvent [_spawnerId, [], true, false];
+								[_deletedHandler] call KH_fnc_removeHandler;
+								[_handlerId] call KH_fnc_removeHandler;
+							}
+						] call KH_fnc_addEventHandler;
+					};
 				} forEach _spawnedEntities;
 
 				{

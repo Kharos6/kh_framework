@@ -149,8 +149,9 @@ _unit setVariable ["KH_var_unitControllerId", _id, true];
                                 private _currentStep = _currentPath param [0, [0, 0, 0]];
 
                                 private _destinationObject = if (_currentStep isEqualType objNull) then {
+                                    private _alive = alive _currentStep;
                                     _currentStep = getPosASLVisual _currentStep;
-                                    alive _currentStep;
+                                    _alive;
                                 }
                                 else {
                                     false;

@@ -1,6 +1,11 @@
 params [["_unit", objNull, [objNull]]];
+private _currentWeapon = currentWeapon _unit;
 
-switch (currentWeapon _unit) do {
+if (_currentWeapon isEqualTo "") exitWith {
+    "NONE";
+};
+
+switch _currentWeapon do {
     case (primaryWeapon _unit): {
         "PRIMARY";
     };

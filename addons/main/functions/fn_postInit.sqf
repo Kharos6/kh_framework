@@ -1956,6 +1956,226 @@ isNil {
 
 						allowDynamicShadows KH_var_renderingDynamicShadows;
 						setRenderAmbientOcclusion [[0, 1] select KH_var_renderingAmbientOcclusion, 0.5];
+
+						[
+							["PLAYER", true],
+							"unit",
+							[],
+							{
+								execute [
+									_this,
+									{
+										params ["_unit"];
+										private _previousUnit = KH_var_playerUnit;
+										KH_var_playerUnit = _unit;
+										player setVariable ["KH_var_playerUnit", KH_var_playerUnit, true];
+
+										{
+											[_previousUnit, _unit] call _x;
+										} forEach KH_var_playerControlledUnitChangeStack;
+
+										[_previousUnit, _unit] call KH_fnc_playerControlledUnitChangeInit;
+										triggerCbaEvent ["KH_eve_playerControlledUnitChanged", [clientOwner, getPlayerUID player, getPlayerID player, _unit, _previousUnit], "GLOBAL", false];
+
+										if (KH_var_postProcessingHandler isNotEqualTo []) then {
+											[KH_var_postProcessingHandler] call KH_fnc_removeHandler;
+										};
+
+										execute [
+											[],
+											{
+												private _applied = false;
+												private _weaponsConfigParent = configFile >> "CfgWeapons";
+
+												{
+													private _effects = getArray (_x >> "kh_postProcessing");
+
+													if (_effects isNotEqualTo []) then {
+														{
+															removeRenderHandler _x;
+														} forEach KH_var_postProcessingStack;
+
+														KH_var_postProcessingStack resize 0;
+
+														{
+															KH_var_postProcessingStack pushBack (addPostFX _x);
+														} forEach _effects;
+
+														_applied = true;
+														break;
+													};
+												} forEach [
+													configFile >> "CfgGlasses" >> (goggles KH_var_playerUnit),
+													_weaponsConfigParent >> (hmd KH_var_playerUnit),
+													_weaponsConfigParent >> (headgear KH_var_playerUnit),
+													configFile >> "CfgVehicles" >> (backpack KH_var_playerUnit), 
+													_weaponsConfigParent >> (vest KH_var_playerUnit),
+													_weaponsConfigParent >> (uniform KH_var_playerUnit)
+												];
+
+												if !_applied then {
+													{
+														removeRenderHandler _x;
+													} forEach KH_var_postProcessingStack;
+
+													KH_var_postProcessingStack resize 0;
+												};
+											},
+											true,
+											"1",
+											false
+										];
+
+										KH_var_postProcessingHandler = [
+											["ENTITY", KH_var_playerUnit, "LOCAL"],
+											"SlotItemChanged",
+											[],
+											{
+												execute [
+													[],
+													{
+														private _applied = false;
+														private _weaponsConfigParent = configFile >> "CfgWeapons";
+
+														{
+															private _effects = getArray (_x >> "kh_postProcessing");
+
+															if (_effects isNotEqualTo []) then {
+																{
+																	removeRenderHandler _x;
+																} forEach KH_var_postProcessingStack;
+
+																KH_var_postProcessingStack resize 0;
+
+																{
+																	KH_var_postProcessingStack pushBack (addPostFX _x);
+																} forEach _effects;
+
+																_applied = true;
+																break;
+															};
+														} forEach [
+															configFile >> "CfgGlasses" >> (goggles KH_var_playerUnit),
+															_weaponsConfigParent >> (hmd KH_var_playerUnit),
+															_weaponsConfigParent >> (headgear KH_var_playerUnit),
+															configFile >> "CfgVehicles" >> (backpack KH_var_playerUnit), 
+															_weaponsConfigParent >> (vest KH_var_playerUnit),
+															_weaponsConfigParent >> (uniform KH_var_playerUnit)
+														];
+
+														if !_applied then {
+															{
+																removeRenderHandler _x;
+															} forEach KH_var_postProcessingStack;
+
+															KH_var_postProcessingStack resize 0;
+														};
+													},
+													true,
+													"-1",
+													false
+												];
+											}
+										] call KH_fnc_addEventHandler;
+
+										if isMultiplayer then {
+											execute [
+												[],
+												{
+													private _voiceEffects = [missionNamespace, "KH_var_allowTeamspeakVoiceEffectPresets", "SERVER"] call KH_fnc_getRemoteVariable;
+													if (isNil "_voiceEffects") exitWith {};
+
+													if KH_var_allowTeamspeakVoiceEffectPresets then {
+														if (KH_var_playerVoiceEffectHandler isNotEqualTo []) then {
+															[KH_var_playerVoiceEffectHandler] call KH_fnc_removeHandler;
+														};
+
+														execute [
+															[],
+															{
+																private _applied = false;
+																private _weaponsConfigParent = configFile >> "CfgWeapons";
+
+																{
+																	private _effects = getArray (_x >> "kh_teamspeakVoiceEffects");
+
+																	if (_effects isNotEqualTo []) then {
+																		tsApplyVoiceEffects _effects;
+																		_applied = true;
+																		break;
+																	};
+																} forEach [
+																	configFile >> "CfgGlasses" >> (goggles KH_var_playerUnit),
+																	_weaponsConfigParent >> (hmd KH_var_playerUnit),
+																	_weaponsConfigParent >> (headgear KH_var_playerUnit),
+																	configFile >> "CfgVehicles" >> (backpack KH_var_playerUnit), 
+																	_weaponsConfigParent >> (vest KH_var_playerUnit),
+																	_weaponsConfigParent >> (uniform KH_var_playerUnit)
+																];
+
+																if !_applied then {
+																	tsClearVoiceEffects;
+																};
+															},
+															true,
+															"1",
+															false
+														];
+
+														KH_var_playerVoiceEffectHandler = [
+															["ENTITY", KH_var_playerUnit, "LOCAL"],
+															"SlotItemChanged",
+															[],
+															{
+																execute [
+																	[],
+																	{
+																		private _applied = false;
+																		private _weaponsConfigParent = configFile >> "CfgWeapons";
+
+																		{
+																			private _effects = getArray (_x >> "kh_teamspeakVoiceEffects");
+
+																			if (_effects isNotEqualTo []) then {
+																				tsApplyVoiceEffects _effects;
+																				_applied = true;
+																				break;
+																			};
+																		} forEach [
+																			configFile >> "CfgGlasses" >> (goggles KH_var_playerUnit),
+																			_weaponsConfigParent >> (hmd KH_var_playerUnit),
+																			_weaponsConfigParent >> (headgear KH_var_playerUnit),
+																			configFile >> "CfgVehicles" >> (backpack KH_var_playerUnit), 
+																			_weaponsConfigParent >> (vest KH_var_playerUnit),
+																			_weaponsConfigParent >> (uniform KH_var_playerUnit)
+																		];
+
+																		if !_applied then {
+																			tsClearVoiceEffects;
+																		};
+																	},
+																	true,
+																	"-1",
+																	false
+																];
+															}
+														] call KH_fnc_addEventHandler;
+													};
+
+													[_handlerId] call KH_fnc_removeHandler;
+												},
+												true,
+												0,
+												false
+											];
+										};
+									},
+									true,
+									{!(isNull player) && (alive player);},
+									false
+								];
+							}
+						] call KH_fnc_addEventHandler;
 					},
 					true,
 					{KH_var_clientRegistered && KH_var_missionInitialized;},

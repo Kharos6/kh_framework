@@ -61,6 +61,7 @@ execute [
                 {
                     params ["_speakerId", "_text", "_duration"];
                     _args params ["_entity", "_speaker", "_argumentsId", "_maximumDistance", "_effectChain", "_subtitleName"];
+                    _entity setRandomLip true;
 
                     if (_speakerId isEqualTo _speaker) then {
                         missionNamespace setVariable [
@@ -113,21 +114,21 @@ execute [
             [
                 "CBA",
                 "KH_eve_ttsFinished",
-                [_speaker, _generationHandler, _argumentsId, _subtitleName],
+                [_entity, _speaker, _generationHandler, _argumentsId, _subtitleName],
                 {
                     params ["_speakerId", "_stopped"];
-                    _args params ["_speaker", "_generationHandler", "_argumentsId", "_subtitleName"];
+                    _args params ["_entity", "_speaker", "_generationHandler", "_argumentsId", "_subtitleName"];
 
                     if (_speakerId isEqualTo _speaker) then {
                         if _stopped then {
                             [_generationHandler] call KH_fnc_removeHandler;
                             call ((missionNamespace getVariable _argumentsId) select 4);
-                            [_handlerId] call KH_fnc_removeHandler;
                         }
                         else {
                             call ((missionNamespace getVariable _argumentsId) select 4);
-                            [_handlerId] call KH_fnc_removeHandler;
                         };
+
+                        _entity setRandomLip false;
 
                         if !(missionNamespace isNil _speaker) then {
                             [missionNamespace getVariable _speaker] call KH_fnc_removeHandler;
@@ -137,6 +138,8 @@ execute [
                         if (_subtitleName isNotEqualTo "") then {
                             ["", "", 0] call KH_fnc_displaySubtitle;
                         };
+
+                        [_handlerId] call KH_fnc_removeHandler;
                     };
                 }
             ] call KH_fnc_addEventHandler;

@@ -46,13 +46,8 @@ if KH_var_medical then {
                 [],
                 {
                     params ["_unit", "_selection", "_damage", "_source", "_projectile", "_hitPartIndex", "_instigator", "_hitPoint", "_directHit", "_context"];
-                    if !(_unit getVariable ["KH_var_medicalHandling", true]) exitWith {};
                     _hitPoint = toLowerANSI _hitPoint;
-
-                    if (((_context isEqualTo 0) && (_projectile isEqualTo "") && (isNull _source) && (isNull _instigator))) exitWith {
-                        _damage;
-                    };
-
+                    if (!(_unit getVariable ["KH_var_medicalHandling", true]) || ((_context isEqualTo 0) && (_projectile isEqualTo "") && (isNull _source) && (isNull _instigator))) exitWith {};
                     private _totalDamage = (_context isEqualTo 0) || (_context isEqualTo 4);
 
                     private _currentDamage = if _totalDamage then {
@@ -201,6 +196,7 @@ if KH_var_medical then {
                                     ) min ([1, 0.99] select (_unit getVariable ["KH_var_plotArmor", false]));
                                 }
                                 else {
+                                    if !(alive _unit) exitWith {};
                                     _unit setUnconscious true;
                                     _unit setVariable ["KH_var_incapacitated", true, true];
 
@@ -241,9 +237,10 @@ if KH_var_medical then {
                                     if (_unit isEqualTo player) then {
                                         if KH_var_withstandingAllowed then {
                                             execute [
-                                                [],
+                                                [_unit],
                                                 {
-                                                    if (!(player getVariable ["KH_var_incapacitated", false]) || !(alive player)) exitWith {};
+                                                    params ["_unit"];
+                                                    if ((_unit isNotEqualTo player) || !(_unit getVariable ["KH_var_incapacitated", false]) || !(alive _unit)) exitWith {};
 
                                                     [
                                                         [true, false],

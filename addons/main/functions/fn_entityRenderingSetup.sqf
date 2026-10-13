@@ -36,7 +36,7 @@ if (_entity isKindOf "Man") then {
 
                     private _properties = ((configProperties [
                         _x, 
-                        "!((toLowerANSI (configName _x)) in ['model', 'mesh', 'bindskeleton', 'followrotation', 'static', 'showinvehicle']);",
+                        "!((toLowerANSI (configName _x)) in ['model', 'mesh', 'bindskeleton', 'followrotation', 'static', 'hideinvehicle']);",
                         true
                     ]) apply {
                         [_renderHandler, configName _x, ["", _x, nil] call KH_fnc_getConfigValue];
@@ -46,7 +46,7 @@ if (_entity isKindOf "Man") then {
                         updateRender3D _properties;
                     };
 
-                    if (((getNumber (_x >> "showInVehicle")) isEqualTo 0) && !(isNull (objectParent _entity))) then {
+                    if (((getNumber (_x >> "hideInVehicle")) isEqualTo 1) && !(isNull (objectParent _entity))) then {
                         updateRender3D [_renderHandler, "visible", false];
                     };
 
@@ -86,7 +86,7 @@ if (_entity isKindOf "Man") then {
                 {
                     _x params ["_renderHandler", "_class"];
 
-                    if ((getNumber (_class >> "showInVehicle")) isEqualTo 0) then {
+                    if ((getNumber (_class >> "hideInVehicle")) isEqualTo 1) then {
                         updateRender3D [_renderHandler, "visible", false];
                     };
                 } forEach _x;
@@ -106,7 +106,7 @@ if (_entity isKindOf "Man") then {
                 {
                     _x params ["_renderHandler", "_class"];
 
-                    if ((getNumber (_class >> "showInVehicle")) isEqualTo 0) then {
+                    if ((getNumber (_class >> "hideInVehicle")) isEqualTo 1) then {
                         updateRender3D [_renderHandler, "visible", true];
                     };
                 } forEach _x;
@@ -140,7 +140,7 @@ if (_entity isKindOf "Man") then {
 
                 private _properties = ((configProperties [
                     _x, 
-                    "!((toLowerANSI (configName _x)) in ['model', 'mesh', 'bindskeleton', 'followrotation', 'static', 'showinvehicle']);",
+                    "!((toLowerANSI (configName _x)) in ['model', 'mesh', 'bindskeleton', 'followrotation', 'static', 'hideinvehicle']);",
                     true
                 ]) apply {
                     [_renderHandler, configName _x, ["", _x, nil] call KH_fnc_getConfigValue];
@@ -171,7 +171,7 @@ private _currentHandlers = [];
     
     private _properties = ((configProperties [
         _x, 
-        "!((toLowerANSI (configName _x)) in ['model', 'mesh', 'bindskeleton', 'followrotation', 'static', 'showinvehicle']);",
+        "!((toLowerANSI (configName _x)) in ['model', 'mesh', 'bindskeleton', 'followrotation', 'static', 'hideinvehicle']);",
         true
     ]) apply {
         [_renderHandler, configName _x, ["", _x, nil] call KH_fnc_getConfigValue];
@@ -181,7 +181,7 @@ private _currentHandlers = [];
         updateRender3D _properties;
     };
 
-    if (((getNumber (_x >> "showInVehicle")) isEqualTo 0) && !(isNull (objectParent _entity))) then {
+    if (((getNumber (_x >> "hideInVehicle")) isEqualTo 1) && !(isNull (objectParent _entity))) then {
         updateRender3D [_renderHandler, "visible", false];
     };
 

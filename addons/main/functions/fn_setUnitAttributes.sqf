@@ -1,6 +1,10 @@
 params [["_unit", objNull, [objNull]], ["_attributes", [], [[]]], ["_overrideAttributes", [], [[]]], ["_respectAgent", true, [true]]];
 (_attributes select [3]) params ["_type", "_agent", "_savedAttributes"];
 
+if ((vehicleVarName _unit) isEqualTo "") then {
+    [_unit, _attributes select 1] call KH_fnc_setEntityVariableName;
+};
+
 if _respectAgent then {
 	private _recreated = false;
 
@@ -81,6 +85,7 @@ _savedAttributes params [
 	"_behaviour",
 	"_skill",
 	"_aiFeatures",
+	"_side",
 	"_group",
 	"_assignedTeam",
 	"_vehicle",
@@ -99,6 +104,7 @@ execute [
 		_insignia,
         _loadout,
         _position,
+		_side,
 		_group,
 		_assignedTeam
 	], 
@@ -111,6 +117,7 @@ execute [
 			"_insignia",
 			"_loadout",
 			"_position",
+			"_side",
 			"_group",
 			"_assignedTeam"
 		];
@@ -122,7 +129,7 @@ execute [
 		_unit setUnitLoadout _loadout;
 		_unit setPosATL _position;
 		_group = call {
-			private _allGroups = groups (side (group _unit));
+			private _allGroups = groups _side;
 			private _index = _allGroups findIf {(_group isEqualTo (groupId _x));};
 
 			if (_index isNotEqualTo -1) then {
@@ -240,14 +247,14 @@ execute [
 		
 		_unit setVectorDirAndUp [_vectorDir, _vectorUp];
 		_unit setVelocityModelSpace _velocityModelSpace;
-		_unit setDamage _damage;
+		_unit setDamage [_damage, false];
 
 		if (_hitPointsDamage isNotEqualTo []) then {
 			private _hitPointNames = _hitPointsDamage select 0;
 			private _hitPointValues = _hitPointsDamage select 2;
 
 			for "_i" from 0 to ((count _hitPointNames) - 1) do {
-				_unit setHitPointDamage [_hitPointNames select _i, _hitPointValues select _i];
+				_unit setHitPointDamage [_hitPointNames select _i, _hitPointValues select _i, false];
 			};
 		};
 
@@ -292,8 +299,7 @@ execute [
 		_unit enableAIFeature ["HEARING", _aiFeatures select 19];
 
 		if (_vehicle isNotEqualTo []) then {
-			_vehicle set [0, ["OBJECT", _vehicle select 0] call KH_fnc_getEntityByIdentifier];
-			[_unit, _vehicle, true] call KH_fnc_setUnitVehicleSlot;
+			[_unit, ["OBJECT", _vehicle select 0] call KH_fnc_getEntityByIdentifier, true] call KH_fnc_setUnitVehicleSlot;
 		};
 
 		private _collisionEntity = ["OBJECT", _collisionDisabledWith] call KH_fnc_getEntityByIdentifier;

@@ -108,8 +108,10 @@ class CfgFunctions
 			class moduleFultonExtract {headerType = -1;};
 			class moduleInitializeStt {headerType = -1;};
 			class moduleInitializeTts {headerType = -1;};
+			class moduleLocalPostProcessing {headerType = -1;};
 			class moduleParticleEmitter {headerType = -1;};
 			class modulePlayRecordedMission {headerType = -1;};
+			class modulePostProcessing {headerType = -1;};
 			class moduleRecordMission {headerType = -1;};
 			class moduleTeleporter {headerType = -1;};
 			class moduleUpdateAiInstance {headerType = -1;};

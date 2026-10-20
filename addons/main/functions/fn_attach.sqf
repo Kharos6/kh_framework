@@ -34,11 +34,7 @@ if _softAttach exitWith {
 
     if ((missionNamespace getVariable [_attachHandlerEntityId, []]) isNotEqualTo []) then {
         [missionNamespace getVariable [_attachHandlerEntityId, []]] call KH_fnc_removeHandler;
-
-        {
-            deleteVehicle _x;
-        } forEach (_entity getVariable ["KH_var_attachRoadways", []]);
-
+        deleteVehicle (_entity getVariable ["KH_var_attachRoadways", []]);
         _entity setVariable ["KH_var_attachRoadways", []];
         
         execute [
@@ -188,10 +184,7 @@ if _softAttach exitWith {
             };
             
             if (!_attachValid || !(missionNamespace getVariable _attachHandlerId) || !(isNull (objectParent _entity)) || !(isNull (attachedTo _entity)) || !(alive _entity)) exitWith {
-                {
-                    deleteVehicle _x;
-                } forEach _roadways;
-
+                deleteVehicle _roadways;
                 _entity setVariable ["KH_var_attachLocalPosition", []];
                 _entity setVariable ["KH_var_attachFallVelocity", 0];
                 _entity setVariable ["KH_var_attachCurrentAnimationState", ""];

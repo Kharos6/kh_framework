@@ -6,6 +6,14 @@ params [["_object", objNull, [objNull]]];
     _object getVariable ["KH_var_generatedVariableName", false],
 	typeOf _object,
     isSimpleObject _object,
+	call {
+		if (_object in KH_var_allChangedBuildings) then {
+			KH_var_allTerrainChangedBuildings get (hashValue _object);
+		}
+		else {
+			[];
+		};
+	},
 	[
 		simulationEnabled _object,
 		dynamicSimulationEnabled _object,

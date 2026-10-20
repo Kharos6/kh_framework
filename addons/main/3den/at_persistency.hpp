@@ -2,7 +2,7 @@ class KH_Persistency: Title
 {
 	attributeLoad = "(_this controlsGroupCtrl 103) lbAdd 'NONE'; (_this controlsGroupCtrl 103) lbAdd 'SAVED'; (_this controlsGroupCtrl 103) lbAdd 'INITIAL'; (_this controlsGroupCtrl 103) lbAdd 'DEATH'; [_this, _value] call KH_fnc_loadControlAttributes;";
 	attributeSave = "[_this] call KH_fnc_saveControlAttributes;";
-	h = QUOTE(8 * CTRL_DEFAULT_H + 90 * pixelH);
+	h = QUOTE(10 * CTRL_DEFAULT_H + 95 * pixelH);
 	class Controls: Controls
 	{
 		class ToggleTitle: Title
@@ -64,7 +64,7 @@ class KH_Persistency: Title
 		class UnitsTitle: Title
 		{
 			text = "Units";
-			tooltip = "True preserves unit attributes. Attributes are assigned based on variable names, saved and loaded only if the unit has a variable name assigned.";
+			tooltip = "True preserves unit attributes. Attributes are assigned based on variable names, saved and loaded only if the unit has a variable name assigned unless Undefined Units is true.";
 			y = QUOTE(5 * CTRL_DEFAULT_H + 20 * CTRL_DEFAULT_Y);
 		};
 		class Units: ctrlCheckbox
@@ -75,13 +75,13 @@ class KH_Persistency: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class GroupsTitle: Title
+		class UnitsUndefinedTitle: Title
 		{
-			text = "Groups";
-			tooltip = "True preserves group attributes. Attributes are assigned based on the group side and ID.";
+			text = "Undefined Units";
+			tooltip = "True preserves undefined unit attributes, with the valid entities being reset on each save and only present on the same terrain. Requires Units to be true.";
 			y = QUOTE(6 * CTRL_DEFAULT_H + 25 * CTRL_DEFAULT_Y);
 		};
-		class Groups: ctrlCheckbox
+		class UnitsUndefined: ctrlCheckbox
 		{
 			idc = 105;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -89,13 +89,13 @@ class KH_Persistency: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class ObjectsTitle: Title
+		class GroupsTitle: Title
 		{
-			text = "Objects";
-			tooltip = "True preserves object attributes. Attributes are assigned based on variable names, saved and loaded only if the object has a variable name assigned.";
+			text = "Groups";
+			tooltip = "True preserves group attributes. Attributes are assigned based on the group side and ID.";
 			y = QUOTE(7 * CTRL_DEFAULT_H + 30 * CTRL_DEFAULT_Y);
 		};
-		class Objects: ctrlCheckbox
+		class Groups: ctrlCheckbox
 		{
 			idc = 106;
 			x = QUOTE(CTRL_DEFAULT_X);
@@ -103,17 +103,45 @@ class KH_Persistency: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class MissionTitle: Title
+		class ObjectsTitle: Title
 		{
-			text = "Mission";
-			tooltip = "True preserves the mission state, such as the environmental conditions and date.";
+			text = "Objects";
+			tooltip = "True preserves object attributes. Attributes are assigned based on variable names, saved and loaded only if the object has a variable name assigned unless Undefined Objects is true.";
 			y = QUOTE(8 * CTRL_DEFAULT_H + 35 * CTRL_DEFAULT_Y);
 		};
-		class Mission: ctrlCheckbox
+		class Objects: ctrlCheckbox
 		{
 			idc = 107;
 			x = QUOTE(CTRL_DEFAULT_X);
 			y = QUOTE(8 * CTRL_DEFAULT_H + 35 * CTRL_DEFAULT_Y);
+			w = QUOTE(5 * GRID_W);
+			h = QUOTE(CTRL_DEFAULT_H);
+		};
+		class ObjectsUndefinedTitle: Title
+		{
+			text = "Undefined Objects";
+			tooltip = "True preserves undefined object attributes, with the valid entities being reset on each save and only present on the same terrain. Requires Objects to be true.";
+			y = QUOTE(9 * CTRL_DEFAULT_H + 40 * CTRL_DEFAULT_Y);
+		};
+		class ObjectsUndefined: ctrlCheckbox
+		{
+			idc = 108;
+			x = QUOTE(CTRL_DEFAULT_X);
+			y = QUOTE(9 * CTRL_DEFAULT_H + 40 * CTRL_DEFAULT_Y);
+			w = QUOTE(5 * GRID_W);
+			h = QUOTE(CTRL_DEFAULT_H);
+		};
+		class MissionTitle: Title
+		{
+			text = "Mission";
+			tooltip = "True preserves the mission state, such as the environmental conditions and date.";
+			y = QUOTE(10 * CTRL_DEFAULT_H + 45 * CTRL_DEFAULT_Y);
+		};
+		class Mission: ctrlCheckbox
+		{
+			idc = 109;
+			x = QUOTE(CTRL_DEFAULT_X);
+			y = QUOTE(10 * CTRL_DEFAULT_H + 45 * CTRL_DEFAULT_Y);
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};

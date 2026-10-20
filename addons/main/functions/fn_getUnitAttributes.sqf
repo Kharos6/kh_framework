@@ -82,6 +82,7 @@ params [["_unit", objNull, [objNull]]];
 			_unit checkAIFeature "COMMAND",
 			_unit checkAIFeature "HEARING"
 		],
+		side (group _unit),
 		groupId (group _unit),
 		assignedTeam _unit,
 		call {

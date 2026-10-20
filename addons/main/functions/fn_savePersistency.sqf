@@ -1,15 +1,17 @@
-params [["_identifier", "", [""]], ["_unit", true, [true]], ["_group", true, [true]], ["_object", true, [true]], ["_player", true, [true]], ["_mission", true, [true]]];
+params [["_identifier", "", [""]], ["_unit", [true, false], [[]]], ["_group", true, [true]], ["_object", [true, false], [[]]], ["_player", true, [true]], ["_mission", true, [true]]];
+_unit params [["_saveUnit", true, [true]], ["_saveUnitUndefined", false, [true]]];
+_object params [["_saveObject", true, [true]], ["_saveObjectUndefined", false, [true]]];
 
-if _unit then {
-    [_identifier, KH_var_allMen] call KH_fnc_saveUnitPersistency;
+if _saveUnit then {
+    [_identifier, KH_var_allMen, _saveUnitUndefined] call KH_fnc_saveUnitPersistency;
 };
 
 if _group then {
     [_identifier, allGroups] call KH_fnc_saveGroupPersistency;
 };
 
-if _object then {
-    [_identifier, (allMissionObjects "") select {!(_x isKindOf "Man");}] call KH_fnc_saveObjectPersistency;
+if _saveObject then {
+    [_identifier, (allMissionObjects "") select {!(_x isKindOf "Man") && !(_x isKindOf "Logic") && !(_x isKindOf "EmptyDetector") && (((typeOf _x) select [0, 1]) isNotEqualTo "#");}, _saveObjectUndefined] call KH_fnc_saveObjectPersistency;
 };
 
 if _player then {

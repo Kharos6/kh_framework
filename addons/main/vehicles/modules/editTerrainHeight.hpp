@@ -88,11 +88,11 @@ class KH_ModuleEditTerrainHeight: Module_F
 			property = "KH_ModuleEditTerrainHeightAdjustObjectHeight";
 			defaultValue = "true";
 		};
-		class KH_ModuleEditTerrainHeightShowChanges: Checkbox
+		class KH_ModuleEditTerrainHeightShow: Checkbox
 		{
-			displayName = "Show Changes";
+			displayName = "Show";
 			tooltip = "True shows the terrain changes in the editor.";
-			property = "KH_ModuleEditTerrainHeightShowChanges";
+			property = "KH_ModuleEditTerrainHeightShow";
 			defaultValue = "true";
 		};
 		class ModuleDescription: ModuleDescription {};

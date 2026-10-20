@@ -467,7 +467,7 @@ class Mission
 						control = "KH_Persistency";
 						expression = 
 						"\
-							_value params ['_toggle', '_identifier', '_players', '_playerRespawnType', '_units', '_groups', '_objects', '_mission'];\
+							_value params ['_toggle', '_identifier', '_players', '_playerRespawnType', '_units', '_unitsUndefined', '_groups', '_objects', '_objectsUndefined', '_mission'];\
 							if (_toggle && !is3DEN && isServer) then {\
 								private _respawnType = switch _playerRespawnType do {\
 									case 1: {\
@@ -504,14 +504,14 @@ class Mission
 								[\
 									'CBA',\
 									'KH_eve_missionEnded',\
-									[_identifier, _players, _units, _groups, _objects, _mission],\
+									[_identifier, _players, _units, _unitsUndefined, _groups, _objects, _objectsUndefined, _mission],\
 									{\
-										_args params ['_identifier', '_players', '_units', '_groups', '_objects', '_mission'];\
+										_args params ['_identifier', '_players', '_units', '_unitsUndefined', '_groups', '_objects', '_objectsUndefined', '_mission'];\
 										if _objects then {\
-											[_identifier, (allMissionObjects '') select {!(_x isKindOf 'Man');}] call KH_fnc_saveObjectPersistency;\
+											[_identifier, (allMissionObjects '') select {!(_x isKindOf 'Man') && !(_x isKindOf 'Logic') && !(_x isKindOf 'EmptyDetector') && (((typeOf _x) select [0, 1]) isNotEqualTo '#');}, _objectsUndefined] call KH_fnc_saveObjectPersistency;\
 										};\
 										if _units then {\
-											[_identifier, KH_var_allMen] call KH_fnc_saveUnitPersistency;\
+											[_identifier, KH_var_allMen, _unitsUndefined] call KH_fnc_saveUnitPersistency;\
 										};\
 										if _players then {\
 											[_identifier, KH_var_allPlayerUnits] call KH_fnc_savePlayerPersistency;\
@@ -527,7 +527,7 @@ class Mission
 								] call KH_fnc_addEventHandler;\
 							};\
 						";
-						defaultValue = "[false, profileName, true, 2, true, true, true, true]";
+						defaultValue = "[false, profileName, true, 2, true, false, true, true, false, true]";
 					};
 				};
 			};

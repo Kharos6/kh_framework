@@ -1367,37 +1367,6 @@ isNil {
 			
 			if hasInterface then {
 				"KH_var_displayLayer" cutRsc ["KH_ResourceKHDisplay", "PLAIN", -1, true, true];
-
-				if !isServer then {
-					execute [
-						[],
-						{
-							if (!KH_var_clientRegistered || !KH_var_missionInitialized) then {
-								with uiNamespace do {
-									if (isNull KH_var_loadingDisplay) then {
-										KH_var_loadingDisplay = ["RscText", "WAITING FOR SERVER...", [0, false, 0], [0, 0, 0, 1], [0, 0, 100, 100], false, [0, 0, 0]] call KH_fnc_draw2d;
-										nil;
-									};
-								};
-
-								nil;
-							}
-							else {
-								with uiNamespace do {
-									if !(isNull KH_var_loadingDisplay) then {
-										ctrlDelete KH_var_loadingDisplay;
-									};
-								};
-
-								[_handlerId] call KH_fnc_removeHandler;
-							};
-						},
-						true,
-						0,
-						false
-					];
-				};
-
 				triggerCbaEvent ["KH_eve_playerMissionPreloaded", [clientOwner], "SERVER", false];
 				[[], [], [], KH_fnc_entityRenderingSetup, true] call KH_fnc_entityInit;
 				
@@ -1418,6 +1387,8 @@ isNil {
 						execute [
 							[],
 							{
+								KH_var_playerUnit = player;
+
 								{
 									private _stored = [hashValue _x, "load"] joinString "_";
 
@@ -1440,6 +1411,7 @@ isNil {
 									[],
 									{
 										params ["_unit", "_corpse"];
+										KH_var_playerUnit = _unit;
 										_corpse setVariable ["KH_var_playerUnit", _unit, true];
 
 										{

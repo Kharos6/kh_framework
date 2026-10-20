@@ -32,10 +32,7 @@ isNil {
 
         case "unregisteredFromWorld3DEN": {
             _input params [["_logic", objNull, [objNull]]];
-            
-            {
-                deleteVehicle _x;
-            } forEach (_logic getVariable ["KH_var_allTiedEntities", []]);
+            deleteVehicle (_logic getVariable ["KH_var_allTiedEntities", []]);
         };
 
         default {
@@ -49,10 +46,7 @@ isNil {
 
             if !_show exitWith {
                 _logic setVariable ["KH_var_particleShow", _show];
-                
-                {
-                    deleteVehicle _x;
-                } forEach (_logic getVariable ["KH_var_allTiedEntities", []]);
+                deleteVehicle (_logic getVariable ["KH_var_allTiedEntities", []]);
             };
 
             private _particle = ((_logic get3DENAttribute "KH_ModuleParticleEmitterParticle") select 0) select 0;
@@ -67,10 +61,7 @@ isNil {
                 _logic setVariable ["KH_var_particleShow", _show];
                 _logic setVariable ["KH_var_particleClass", _particle];
                 _logic setVariable ["KH_var_particleDuration", _duration];
-
-                {
-                    deleteVehicle _x;
-                } forEach (_logic getVariable ["KH_var_allTiedEntities", []]);
+                deleteVehicle (_logic getVariable ["KH_var_allTiedEntities", []]);
 
                 if (isClass (configFile >> "CfgCloudlets" >> _particle)) then {
                     private _parameters = [configFile >> "CfgCloudlets" >> _particle] call KH_fnc_getCloudletParameters;
@@ -115,10 +106,7 @@ isNil {
                     [_logic, _duration, +(_logic getVariable ["KH_var_allTiedEntities", []])] spawn {
                         params ["_logic", "_duration", "_entities"];
                         sleep _duration;
-
-                        {
-                            deleteVehicle _x;
-                        } forEach _entities;
+                        deleteVehicle _entities;
                     };
                 };
             };

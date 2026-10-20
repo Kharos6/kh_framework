@@ -1,4 +1,5 @@
 params [["_vehicle", objNull, [objNull]], ["_loadout", [], [[]]]];
+private _empty = (crew _vehicle) isEqualTo [];
 
 _loadout params [
     "_fuel",
@@ -31,20 +32,11 @@ _vehicle setRepairCargo _repairCargo;
 
 _vehicle setPlateNumber _plateNumber;
 _components params ["_componentsId", "_allComponents"];
-private _currentVehicleData = _vehicle getVariable ["bis_fnc_saveVehicle_data", []];
+_vehicle setVariable ["bis_fnc_saveVehicle_data", [_componentsId, _allComponents]];
+[_vehicle, [_vehicle, _componentsId]] call BIS_fnc_loadVehicle;
 
-if (_currentVehicleData isEqualTo []) then {
-    _vehicle setVariable ["bis_fnc_saveVehicle_data", [_componentsId, _allComponents]];
-}
-else {
-    if (_componentsId in _currentVehicleData) then {
-        private _index = _currentVehicleData find _componentsId;
-        _currentVehicleData deleteAt [_index, _index + 1];
-    };
-
-    _currentVehicleData pushBack _componentsId;
-    _currentVehicleData pushBack _allComponents;
+if _empty then {
+    deleteVehicleCrew _vehicle;    
 };
 
-[_vehicle, [_vehicle, _componentsId]] call BIS_fnc_loadVehicle;
 nil;

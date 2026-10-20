@@ -43,6 +43,8 @@ KH_var_allEntities = [];
 KH_var_allLocalEntities = [];
 KH_var_allMen = [];
 KH_var_allLocalMen = [];
+KH_var_allChangedBuildings = [];
+KH_var_allTerrainChangedBuildings = createHashMap;
 KH_var_cloudletParameterCache = createHashMap;
 KH_var_lightParameterCache = createHashMap;
 KH_var_executedStacks = [];
@@ -245,6 +247,18 @@ KH_var_executedStacks = [];
 	{
 		params ["_arguments", ["_function", "", [""]], ["_caller", 2, [0]], ["_unscheduled", true, [true]], ["_callbackId", "", [""]]];
 		triggerCbaEvent [_callbackId, _arguments callSerializedFunction [_function, _caller, true], _caller, false];		
+	}
+] call KH_fnc_addEventHandler;
+
+[
+	"MISSION",
+	"BuildingChanged",
+	[], 
+	{
+		params ["_from", "_to"];
+		KH_var_allChangedBuildings pushBack _to;
+		private _position = getPosWorld _from;
+		KH_var_allTerrainChangedBuildings set [hashValue _to, [[toLowerANSI ((getModelInfo _from) select 0), [(_position select 0) toFixed 2, (_position select 1) toFixed 2, 0], (getDir _from) toFixed 2] joinString "_", _position]];
 	}
 ] call KH_fnc_addEventHandler;
 
@@ -1636,7 +1650,6 @@ if hasInterface then {
 	KH_var_volumetricDynamicLightsHandler = "";
 	KH_var_filterPlayerEquipmentList = [];
 	KH_var_filterPlayerEquipmentFilter = false;
-	uiNamespace setVariable ["KH_var_loadingDisplay", controlNull];
 
 	{
 		private _basePath = (getText (_x >> "path")) regexReplace ["(/)", "\\"];
@@ -1868,6 +1881,7 @@ if hasInterface then {
 		[], 
 		{
 			params ["_previousUnit", "_newUnit"];
+			KH_var_playerUnit = _newUnit;
 
 			{
 				[_previousUnit] call _x;

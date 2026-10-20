@@ -142,7 +142,7 @@ if _scenario then {
             if _objects then {
                 {
                     _objectDataFinal set [netId _x, [_x] call KH_fnc_getObjectAttributes];
-                } forEach ((allMissionObjects "") select {!(_x isKindOf "Man");});
+                } forEach ((allMissionObjects "") select {!(_x isKindOf "Man") && !(_x isKindOf "Logic") && !(_x isKindOf "EmptyDetector") && (((typeOf _x) select [0, 1]) isNotEqualTo "#");});
             };
 
             if _scenario then {

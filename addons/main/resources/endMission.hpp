@@ -54,7 +54,7 @@ class KH_ResourceEndMission
         class KH_FadeType: ctrlEdit
         {
 			idc = 102;
-            text = "-1";
+            text = "-2";
             x = QUOTE(RSC_POS_X(50));
             y = QUOTE(RSC_POS_Y(42));
             w = QUOTE(RSC_POS_W(9.75));

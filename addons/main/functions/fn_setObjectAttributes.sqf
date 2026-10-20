@@ -1,5 +1,11 @@
 params [["_object", objNull, [objNull]], ["_attributes", [], [[]]], ["_overrideAttributes", [], [[]]], ["_respectSimple", true, [true]]];
-(_attributes select [3]) params ["_type", "_simple", "_savedAttributes"];
+private _type = _attributes select 3;
+private _simple = _attributes select 4;
+private _savedAttributes = _attributes select 6;
+
+if ((vehicleVarName _object) isEqualTo "") then {
+    [_object, _attributes select 1] call KH_fnc_setEntityVariableName;
+};
 
 if _respectSimple then {
 	private _recreated = false;
@@ -27,7 +33,7 @@ if _respectSimple then {
 };
 
 if (_overrideAttributes isNotEqualTo []) then {
-	private _currentAttributes = ([_object] call KH_fnc_getObjectAttributes) select 5;
+	private _currentAttributes = ([_object] call KH_fnc_getObjectAttributes) select 6;
 
 	{
 		if (_x isEqualType 0) then {
@@ -152,14 +158,14 @@ execute [
         _object setVectorDirAndUp [_vectorDir, _vectorUp];
         _object setVelocityModelSpace _velocityModelSpace;
         _object setAngularVelocityModelSpace _angularVelocityModelSpace;
-        _object setDamage _damage;
+        _object setDamage [_damage, false];
 
         if (_hitPointsDamage isNotEqualTo []) then {
             private _hitPointNames = _hitPointsDamage select 0;
             private _hitPointValues = _hitPointsDamage select 2;
 
             for "_i" from 0 to ((count _hitPointNames) - 1) do {
-                _object setHitPointDamage [_hitPointNames select _i, _hitPointValues select _i];
+                _object setHitPointDamage [_hitPointNames select _i, _hitPointValues select _i, false];
             };
         };
         

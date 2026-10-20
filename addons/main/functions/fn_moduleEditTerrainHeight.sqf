@@ -23,7 +23,7 @@ isNil {
             if _activated then {
                 private _area = _logic getVariable "objectarea";
 
-                private _modifiedTerrain = [
+                [
                     getPosASL _logic,
                     [_area select 0, _area select 1],
                     _area select 3,
@@ -52,10 +52,10 @@ isNil {
             KH_var_allModifiedTerrain = createHashMap;
 
             {
-                if ((_x isNotEqualTo _logic) && ((_x get3DENAttribute "KH_ModuleEditTerrainHeightShowChanges") select 0)) then {
+                if ((_x isNotEqualTo _logic) && ((_x get3DENAttribute "KH_ModuleEditTerrainHeightShow") select 0)) then {
                     private _area = (_x get3DENAttribute "size3") select 0;
 
-                    private _modifiedTerrain = [
+                    [
                         getPosASL _x,
                         [_area select 0, _area select 1],
                         (_x get3DENAttribute "isRectangle") select 0,
@@ -80,10 +80,10 @@ isNil {
             KH_var_allModifiedTerrain = createHashMap;
             
             {
-                if ((_x get3DENAttribute "KH_ModuleEditTerrainHeightShowChanges") select 0) then {
+                if ((_x get3DENAttribute "KH_ModuleEditTerrainHeightShow") select 0) then {
                     private _area = (_x get3DENAttribute "size3") select 0;
 
-                    private _modifiedTerrain = [
+                    [
                         getPosASL _x,
                         [_area select 0, _area select 1],
                         (_x get3DENAttribute "isRectangle") select 0,

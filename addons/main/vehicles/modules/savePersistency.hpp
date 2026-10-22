@@ -18,7 +18,9 @@ class KH_ModuleSavePersistency: Module_F
 	curatorInfoTypeEmpty = "";
 	curatorCanAttach = 0;
 	icon = "\a3\Modules_F\Data\iconSavegame_ca.paa";
-	class Attributes: AttributesBase {};
+	class Attributes: AttributesBase {
+		class ModuleDescription: ModuleDescription {};
+	};
 	class ModuleDescription: ModuleDescription
 	{
 		description[] = {"Saves any persistency values if the persistency system is enabled. Activates multiple times, with a trigger, on the server."};

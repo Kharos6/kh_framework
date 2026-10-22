@@ -1662,7 +1662,7 @@
 	[
         ["NONE", "BAR", "PERCENTAGE"],
         ["NONE", "BAR", "PERCENTAGE"],
-        1
+        2
     ],
 	0,
 	{},

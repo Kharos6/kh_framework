@@ -104,7 +104,7 @@ else {
                 "ICON",
                 [
                     "\x\kh\addons\main\ui\helper_arrow_up.paa",
-                    KH_var_uiEnabledElementColor,
+                    KH_var_uiActiveElementColor,
                     if (_detection isEqualType "") then {
                         _object modelToWorldVisual (_object selectionPosition _detection);
                     }
@@ -798,7 +798,7 @@ private _actionHandler = execute [
                                         "ACTIVE";
                                     }
                                     else {
-                                        private _progressColor = KH_var_uiEnabledElementColor call BIS_fnc_colorRGBAtoHTML;
+                                        private _progressColor = KH_var_uiActiveElementColor call BIS_fnc_colorRGBAtoHTML;
 
                                         switch (_progressDisplay) do {
                                             case "PERCENTAGE": {

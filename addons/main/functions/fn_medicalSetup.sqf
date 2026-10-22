@@ -209,6 +209,23 @@ if KH_var_medical then {
                                         KH_var_incapacitationFade ppEffectEnable true;
                                         KH_var_incapacitationFade ppEffectAdjust [1, 1, 0, [0, 0, 0, 0], [1, 1, 1, 0], [0.33, 0.33, 0.33, 0], [0, 0, 0, 0, 0, 0, 4]];
                                         KH_var_incapacitationFade ppEffectCommit KH_var_incapacitationDeathTime;
+                                        KH_var_incapacitationChromatic = ppEffectCreate ["ChromAberration", 200];
+                                        KH_var_incapacitationChromatic ppEffectEnable true;
+                                        KH_var_incapacitationChromatic ppEffectAdjust [0, 0, true];
+                                        KH_var_incapacitationChromatic ppEffectCommit 0;
+
+                                        KH_var_incapacitationChromaticHandler = execute [
+                                            [0],
+                                            {
+                                                params ["_oscillation"];
+                                                KH_var_incapacitationChromatic ppEffectAdjust [_oscillation, _oscillation, true];
+                                                KH_var_incapacitationChromatic ppEffectCommit 3;
+                                                _this set [0, [0, 0.01] select (_oscillation isEqualTo 0)];
+                                            },
+                                            true,
+                                            3,
+                                            false
+                                        ];
                                     };
 
                                     execute [
@@ -423,7 +440,17 @@ if KH_var_medical then {
                                                     ppEffectDestroy KH_var_incapacitationFade;
                                                     KH_var_incapacitationFade = nil;
                                                     nil;
-                                                };														
+                                                };			
+
+                                                if !(isNil "KH_var_incapacitationChromatic") then {
+                                                    ppEffectDestroy KH_var_incapacitationChromatic;
+                                                    KH_var_incapacitationChromatic = nil;
+                                                };	
+
+                                                if !(isNil "KH_var_incapacitationChromaticHandler") then {
+                                                    [KH_var_incapacitationChromaticHandler] call KH_fnc_removeHandler;
+                                                    KH_var_incapacitationChromaticHandler = nil;
+                                                };	
                                             },
                                             true,
                                             {
@@ -1027,6 +1054,16 @@ if KH_var_medical then {
                         ppEffectDestroy KH_var_incapacitationFade;
                         KH_var_incapacitationFade = nil;
                         nil;
+                    };	
+
+                    if !(isNil "KH_var_incapacitationChromatic") then {
+                        ppEffectDestroy KH_var_incapacitationChromatic;
+                        KH_var_incapacitationChromatic = nil;
+                    };	
+
+                    if !(isNil "KH_var_incapacitationChromaticHandler") then {
+                        [KH_var_incapacitationChromaticHandler] call KH_fnc_removeHandler;
+                        KH_var_incapacitationChromaticHandler = nil;
                     };	
                 }
             ] call KH_fnc_addEventHandler;

@@ -1868,10 +1868,10 @@ isNil {
 														_control ctrlSetAngle [KH_var_healthDisplayBarAngle, 0, 0, true];
 														_controlBackground ctrlSetAngle [KH_var_healthDisplayBarAngle, 0, 0, true];
 														_control ctrlSetStructuredText (parseText "");
-														_control ctrlSetBackgroundColor KH_var_uiEnabledElementColor;
+														_control ctrlSetBackgroundColor KH_var_uiActiveElementColor;
 													}
 													else {
-														private _percentageColor = KH_var_uiEnabledElementColor call BIS_fnc_colorRGBAtoHTML;
+														private _percentageColor = KH_var_uiActiveElementColor call BIS_fnc_colorRGBAtoHTML;
 
 														private _position = [
 															[KH_var_healthDisplayPercentagePositionX, KH_var_healthDisplayPercentagePositionY, KH_var_healthDisplayPercentageSizeX, KH_var_healthDisplayPercentageSizeY], 

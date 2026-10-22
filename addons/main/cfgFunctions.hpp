@@ -113,6 +113,7 @@ class CfgFunctions
 			class modulePlayRecordedMission {headerType = -1;};
 			class modulePostProcessing {headerType = -1;};
 			class moduleRecordMission {headerType = -1;};
+			class moduleSavePersistency {headerType = -1;};
 			class moduleTeleporter {headerType = -1;};
 			class moduleUpdateAiInstance {headerType = -1;};
 			class moduleUpdateTtsSpeakerEntity {headerType = -1;};

@@ -194,7 +194,7 @@ if _state then {
 							execute [
 								[],
 								{
-									systemChat "Someone saw me. I am no longer disguised.";
+									hint "Someone saw me. I am no longer disguised.";
 								},
 								_player,
 								true,
@@ -244,7 +244,7 @@ if _state then {
 									[_currentSide],
 									{
 										params ["_currentSide"];
-										systemChat (["No one saw me. I am now disguised as the ", _currentSide, " side."] joinString "");
+										hint (["No one saw me. I am now disguised as the ", _currentSide, " side."] joinString "");
 									},
 									_player,
 									true,

@@ -469,6 +469,14 @@ class Mission
 						"\
 							_value params ['_toggle', '_identifier', '_players', '_playerRespawnType', '_units', '_unitsUndefined', '_groups', '_objects', '_objectsUndefined', '_mission'];\
 							if (_toggle && !is3DEN && isServer) then {\
+								KH_var_missionPersistencyIdentifier = _identifier;\
+								KH_var_missionPersistencyPlayers = _players;\
+								KH_var_missionPersistencyUnits = _units;\
+								KH_var_missionPersistencyUnitsUndefined = _unitsUndefined;\
+								KH_var_missionPersistencyGroups = _groups;\
+								KH_var_missionPersistencyObjects = _objects;\
+								KH_var_missionPersistencyObjectsUndefined = _objectsUndefined;\
+								KH_var_missionPersistencyMission = _mission;\
 								private _respawnType = switch _playerRespawnType do {\
 									case 1: {\
 										'SAVED';\

@@ -21,11 +21,11 @@ execute [
 				private _condition = _args param [7];
 
 				if (missionNamespace getVariable _identifier) then {
-					systemChat "Someone is already using this terminal.";
+					hint "Someone is already using this terminal.";
 				};
 
 				if !(call _condition) then {
-					systemChat "I cannot access this terminal.";
+					hint "I cannot access this terminal.";
 				};
 			};
 		},

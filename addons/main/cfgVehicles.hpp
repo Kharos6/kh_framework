@@ -385,6 +385,7 @@ class CfgVehicles
 	#include "\x\kh\addons\main\vehicles\modules\playRecordedMission.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\postProcessing.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\recordMission.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\savePersistency.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\teleporter.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\updateAiInstance.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\updateTtsSpeakerEntity.hpp"

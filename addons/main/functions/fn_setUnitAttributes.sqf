@@ -1,10 +1,6 @@
 params [["_unit", objNull, [objNull]], ["_attributes", [], [[]]], ["_overrideAttributes", [], [[]]], ["_respectAgent", true, [true]]];
 (_attributes select [3]) params ["_type", "_agent", "_savedAttributes"];
 
-if ((vehicleVarName _unit) isEqualTo "") then {
-    [_unit, _attributes select 1] call KH_fnc_setEntityVariableName;
-};
-
 if _respectAgent then {
 	private _recreated = false;
 
@@ -23,13 +19,9 @@ if _respectAgent then {
 			_recreated = true;
 		};
 	};
-
-	if _recreated then {
-		if (!(_attributes param [2, true]) && ((_attributes param [1, ""]) isNotEqualTo "")) then {
-			[_unit, _attributes select 1] call KH_fnc_setEntityVariableName;
-		};
-	};
 };
+
+[_unit, _attributes select 1, _attributes select 2] call KH_fnc_setEntityVariableName;
 
 if (_overrideAttributes isNotEqualTo []) then {
 	private _currentAttributes = ([_unit] call KH_fnc_getUnitAttributes) select 5;

@@ -1,38 +1,62 @@
 params [["_identifier", "", [""]], ["_overrideAttributes", [], [[]]]];
 if (_identifier isEqualTo "") exitWith {};
-private _objectPersistency = KH_var_khDataNamespace readKhData [["objectPersistency_", _identifier] joinString "", createHashMap];
-private _undefinedId = [toLowerANSI worldName, "_undefinedObjectPersistency_", _identifier] joinString "";
-private _undefinedObjectPersistency = KH_var_khDataNamespace readKhData [_undefinedId, []];
+private _persistencyNamespace = [_identifier, "persistency"] joinString "_";
+private _objectPersistency = _persistencyNamespace readKhData ["objectPersistency", createHashMap];
+private _undefinedObjectPersistency = _persistencyNamespace readKhData [["undefinedObjectPersistency", toLowerANSI worldName] joinString "_", []];
 
 {
-    if (_x getVariable ["KH_var_allowPersistency", true]) then {
-        private _variableName = vehicleVarName _x;
+    private _variableName = vehicleVarName _x;
 
-        if ((_variableName isNotEqualTo "") && !(_x getVariable ["KH_var_generatedVariableName", false])) then {
-            private _attributes = _objectPersistency get _variableName;
+    if ((_variableName isNotEqualTo "") && !(_x getVariable ["KH_var_generatedVariableName", false])) then {
+        private _savedData = _objectPersistency get _variableName;
 
-            if !(isNil "_attributes") then {
-                private _currentOverrideAttributes = _overrideAttributes;
+        if !(isNil "_savedData") then {
+            private _currentOverrideAttributes = _overrideAttributes;
 
-                if !(_x getVariable ["KH_var_persistencyTransforms", true]) then {
-                    _currentOverrideAttributes = +_overrideAttributes;
-                    _currentOverrideAttributes insert [-1, [4, 5, 6], true];
-                };
-
-                [_x, _attributes, _currentOverrideAttributes, true] call KH_fnc_setObjectAttributes;
+            if !(_x getVariable ["KH_var_persistencyTransforms", true]) then {
+                _currentOverrideAttributes = +_overrideAttributes;
+                _currentOverrideAttributes insert [-1, [4, 5, 6], true];
             };
+
+            [_x, _savedData, _currentOverrideAttributes, true] call KH_fnc_setObjectAttributes;
         };
     };
-} forEach ((allMissionObjects "") select {!(_x isKindOf "Man") && !(_x isKindOf "Logic") && !(_x isKindOf "EmptyDetector") && (((typeOf _x) select [0, 1]) isNotEqualTo "#");});
+} forEach ((allMissionObjects "") select {(_x getVariable ["KH_var_allowPersistency", true]) && !(_x isKindOf "Man") && !(_x isKindOf "Logic") && !(_x isKindOf "EmptyDetector") && (((typeOf _x) select [0, 1]) isNotEqualTo "#");});
 
 private _terrainObjectChanges = [];
 
 {
-    private _object = createVehicle [_x select 3, (_x select 6) select 4, [], 0, "CAN_COLLIDE"];
-    [_object, _x, [], true] call KH_fnc_setObjectAttributes;
+    private _exists = false;
 
-    if ((_x select 5) isNotEqualTo []) then {
-        _terrainObjectChanges pushBack (_x select 5);
+    private _savedData = if ((count _x) isEqualTo 2) then {
+        if !(KH_var_edenIds isNil (_x select 0)) then {
+            _exists = !(isNull (KH_var_edenIds get (_x select 0)));
+        };
+
+        _x select 1;
+    }
+    else {
+        _x;
+    };
+
+    if _exists then {
+        private _currentEntity = KH_var_edenIds get (_x select 0);
+        private _currentOverrideAttributes = _overrideAttributes;
+
+        if !(_currentEntity getVariable ["KH_var_persistencyTransforms", true]) then {
+            _currentOverrideAttributes = +_overrideAttributes;
+            _currentOverrideAttributes insert [-1, [4, 5, 6], true];
+        };
+
+        [_currentEntity, _savedData, _currentOverrideAttributes, true] call KH_fnc_setObjectAttributes;
+    }
+    else {
+        private _object = createVehicle [_savedData select 3, (_savedData select 6) select 4, [], 0, "CAN_COLLIDE"];
+        [_object, _savedData, _overrideAttributes, true] call KH_fnc_setObjectAttributes;
+
+        if ((_savedData select 5) isNotEqualTo []) then {
+            _terrainObjectChanges pushBack (_savedData select 5);
+        };
     };
 } forEach _undefinedObjectPersistency;
 

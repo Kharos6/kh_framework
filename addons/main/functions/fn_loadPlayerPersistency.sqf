@@ -146,8 +146,9 @@ if (isNil "KH_var_playerPersistencySet") then {
 };
 
 if (_identifier isEqualTo "") exitWith {};
-KH_var_playerPersistencyUid = KH_var_khDataNamespace readKhData [["playerPersistencyUid_", _identifier] joinString "", createHashMap];
-KH_var_playerPersistencyVariableName = KH_var_khDataNamespace readKhData [["playerPersistencyVariableName_", _identifier] joinString "", createHashMap];
+private _persistencyNamespace = [_identifier, "persistency"] joinString "_";
+KH_var_playerPersistencyUid = _persistencyNamespace readKhData ["playerPersistencyUid", createHashMap];
+KH_var_playerPersistencyVariableName = _persistencyNamespace readKhData ["playerPersistencyVariableName", createHashMap];
 
 {
 	private _uid = getPlayerUID _x;

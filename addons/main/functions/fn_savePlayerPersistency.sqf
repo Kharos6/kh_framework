@@ -1,27 +1,38 @@
-params [["_identifier", "", [""]], ["_players", KH_var_allPlayerUnits, []]];
+params [["_identifier", "", [""]], ["_players", KH_var_allPlayerUnits, []], ["_saveDisconnected", true, [true]]];
 
 if (_identifier isEqualTo "") exitWith {
 	createHashMap;
 };
 
-private _persistencyUidId = ["playerPersistencyUid_", _identifier] joinString "";
-private _persistencyVariableNameId = ["playerPersistencyVariableName_", _identifier] joinString "";
-private _currentEntriesUid = KH_var_khDataNamespace readKhData [_persistencyUidId, createHashMap];
-private _currentEntriesVariableName = KH_var_khDataNamespace readKhData [_persistencyVariableNameId, createHashMap];
+private _persistencyNamespace = [_identifier, "persistency"] joinString "_";
+private _currentEntriesUid = _persistencyNamespace readKhData ["playerPersistencyUid", createHashMap];
+private _currentEntriesVariableName = _persistencyNamespace readKhData ["playerPersistencyVariableName", createHashMap];
 
 {
-	if (_x getVariable ["KH_var_allowPersistency", true]) then {
-		private _scores = getPlayerScores _x;
-		_scores deleteAt 5;
-		_currentEntriesUid set [getPlayerUID _x, [[_x] call KH_fnc_getUnitAttributes, _scores]];
-		private _variableName = vehicleVarName _x;
+	private _scores = getPlayerScores _x;
+	_scores deleteAt 5;
+	_currentEntriesUid set [getPlayerUID _x, [[_x] call KH_fnc_getUnitAttributes, _scores]];
+	private _variableName = vehicleVarName _x;
 
-		if ((_variableName isNotEqualTo "") && !(_x getVariable ["KH_var_generatedVariableName", false])) then {
-			_currentEntriesVariableName set [_variableName, [[_x] call KH_fnc_getUnitAttributes, _scores]];
-		};
+	if ((_variableName isNotEqualTo "") && !(_x getVariable ["KH_var_generatedVariableName", false])) then {
+		_currentEntriesVariableName set [_variableName, [[_x] call KH_fnc_getUnitAttributes, _scores]];
 	};
-} forEach _players;
+} forEach (_players select {_x getVariable ["KH_var_allowPersistency", true];});
 
-KH_var_khDataNamespace writeKhData [_persistencyUidId, _currentEntriesUid];
-KH_var_khDataNamespace writeKhData [_persistencyVariableNameId, _currentEntriesVariableName];
+if _saveDisconnected then {
+	{
+		_y params ["_variableName", "_attributes", "_scores", "_allowPersistency", "_generatedVariableName"];
+
+		if _allowPersistency then {
+			_currentEntriesUid set [_x, [_attributes, _scores]];
+
+			if ((_variableName isNotEqualTo "") && !_generatedVariableName) then {
+				_currentEntriesVariableName set [_variableName, [_attributes, _scores]];
+			};
+		};
+	} forEach KH_var_disconnectedPlayerStorage;
+};
+
+_persistencyNamespace writeKhData ["playerPersistencyUid", _currentEntriesUid];
+_persistencyNamespace writeKhData ["playerPersistencyVariableName", _currentEntriesVariableName];
 [_currentEntriesUid, _currentEntriesVariableName];

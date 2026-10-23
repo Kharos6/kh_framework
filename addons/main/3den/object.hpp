@@ -8,6 +8,28 @@ class Object
 			collapsed = 1;
 			class Attributes
 			{
+				class KH_EdenID
+				{
+					displayName = "Eden ID";
+					tooltip = "Defines the Eden ID for this entity.";
+					property = "KH_EdenID";
+					control = "Edit";
+					expression = 
+					"\
+						if !is3DEN then {\
+							private _ids = missionNamespace getVariable 'KH_var_edenIds';\
+							if (missionNamespace isNil 'KH_var_edenIds') then {\
+								missionNamespace setVariable ['KH_var_edenIds', createHashMap];\
+								_ids = missionNamespace getVariable 'KH_var_edenIds';\
+							};\
+							_ids set [_value, _this];\
+							_this setVariable ['KH_var_edenId', _value];\
+						};\
+					";
+					defaultValue = "-1";
+					condition = "script";
+					conditionScript = "false";
+				};
 				class KH_AimCoefficient
 				{
 					displayName = "Aim Coefficient";

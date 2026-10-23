@@ -1,6 +1,6 @@
 params [["_identifier", "", [""]]];
 if (_identifier isEqualTo "") exitWith {};
-private _savedPersistency = KH_var_khDataNamespace readKhData [["missionPersistency_", _identifier] joinString "", []];
+private _savedPersistency = ([_identifier, "persistency"] joinString "_") readKhData ["missionPersistency", []];
 
 if (_savedPersistency isNotEqualTo []) then {
     [_savedPersistency, []] call KH_fnc_setMissionAttributes;

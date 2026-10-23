@@ -3675,57 +3675,70 @@ class CfgMovesMaleSdr: CfgMovesBasic
         class AmovPknlMstpSrasWlnrDnon_AinvPknlMstpSrasWlnrDnon;
         class AinvPknlMstpSlayWlnrDnon_medicOther: AmovPknlMstpSrasWlnrDnon_AinvPknlMstpSrasWlnrDnon
         {
+            canBlendStep = 0;
             forceAim = 1;
         };
         class AmovPknlMstpSnonWnonDnon;
         class AinvPknlMstpSlayWnonDnon_medic: AmovPknlMstpSnonWnonDnon
         {
+            canBlendStep = 0;
             forceAim = 1;
         };
         class AmovPknlMstpSrasWrflDnon_AinvPknlMstpSlayWrflDnon;
         class AinvPknlMstpSlayWnonDnon_medicOther: AmovPknlMstpSrasWrflDnon_AinvPknlMstpSlayWrflDnon
         {
+            canBlendStep = 0;
             forceAim = 1;
         };
         class AmovPknlMstpSrasWpstDnon;
         class AinvPknlMstpSlayWpstDnon_medic: AmovPknlMstpSrasWpstDnon
         {
+            canBlendStep = 0;
             forceAim = 1;
         };
         class AinvPknlMstpSlayWpstDnon_medicOther: AmovPknlMstpSrasWpstDnon
         {
+            canBlendStep = 0;
             forceAim = 1;
         };
         class AinvPknlMstpSlayWrflDnon_medic: AmovPknlMstpSrasWrflDnon_AinvPknlMstpSlayWrflDnon
         {
+            canBlendStep = 0;
             forceAim = 1;
         };
         class AinvPknlMstpSlayWrflDnon_medicOther: AmovPknlMstpSrasWrflDnon_AinvPknlMstpSlayWrflDnon
         {
+            canBlendStep = 0;
             forceAim = 1;
         };
         class AinvPpneMstpSlayWnonDnon_medic: AinvPknlMstpSlayWpstDnon_medic
         {
+            canBlendStep = 0;
             forceAim = 1;
         };
         class AinvPpneMstpSlayWnonDnon_medicOther: AinvPknlMstpSlayWnonDnon_medicOther
         {
+            canBlendStep = 0;
             forceAim = 1;
         };
         class AinvPpneMstpSlayWpstDnon_medic: AinvPknlMstpSlayWpstDnon_medic
         {
+            canBlendStep = 0;
             forceAim = 1;
         };
         class AinvPpneMstpSlayWpstDnon_medicOther: AinvPknlMstpSlayWpstDnon_medicOther
         {
+            canBlendStep = 0;
             forceAim = 1;
         };
         class AinvPpneMstpSlayWrflDnon_medic: AinvPknlMstpSlayWrflDnon_medic
         {
+            canBlendStep = 0;
             forceAim = 1;
         };
         class AinvPpneMstpSlayWrflDnon_medicOther: AinvPknlMstpSlayWrflDnon_medic
         {
+            canBlendStep = 0;
             forceAim = 1;
         };
     };

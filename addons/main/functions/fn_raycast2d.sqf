@@ -28,16 +28,6 @@ _angle = ((_angle min 180) max 0) - 90;
 	}
 ] call KH_fnc_deleteArrayElements;
 
-private _allowIgnoredCheck = true;
-private _ignored1 = objNull;
-private _ignored2 = objNull;
-
-if (((count _ignored) <= 2) && (_ignored isEqualTypeAll objNull)) then {
-	_ignored1 = _ignored param [0, objNull, ["", objNull]];
-	_ignored2 = _ignored param [1, objNull, ["", objNull]];
-	_allowIgnoredCheck = false;
-};
-
 if (_position isEqualType objNull) then {
 	_position = _position modelToWorldVisualWorld [0, 0, 0];
 };
@@ -74,8 +64,8 @@ if (_cone isEqualTo 0) then {
                 (_right select 1) * _localX + (_vectorDir select 1) * _localY + (_vectorUp select 1) * _componentZ,
                 (_right select 2) * _localX + (_vectorDir select 2) * _localY + (_vectorUp select 2) * _componentZ
             ], 
-            _ignored1, 
-            _ignored2, 
+            objNull, 
+            objNull, 
             _sort, 
             -1, 
             _lod1, 
@@ -117,8 +107,8 @@ else {
         _grids pushBack [
             _position,
             _position vectorAdd (_rayDirection vectorMultiply _length),
-            _ignored1,
-            _ignored2,
+            objNull,
+            objNull,
             _sort,
             -1,
             _lod1,
@@ -131,7 +121,6 @@ else {
 };
 
 private _intersections = lineIntersectsSurfaces [_grids];
-private _intersectionCount = {_x isNotEqualTo [];} count _intersections;
 private _flattenedIntersections = [];
 
 {
@@ -141,42 +130,39 @@ private _flattenedIntersections = [];
 } forEach _intersections;
 
 _intersections = _flattenedIntersections;
+private _deletions = [];
 
-if (_allowIgnoredCheck || (_maxResults isNotEqualTo -1)) then {
-	private _deletions = [];
+if (_maxResults isEqualTo -1) then {
+	_maxResults = 999999;
+};
 
-	if (_maxResults isEqualTo -1) then {
-		_maxResults = 999999;
+private _resultCount = 0;
+private _ignoreTerrain = "TERRAIN" in _ignored;
+private _ignoredObjects = _ignored select {_x isEqualType objNull;};
+private _ignoredTypes = _ignored select {_x isEqualType "";};
+
+{		
+	if (_resultCount >= _maxResults) then {
+		_deletions pushBack _forEachIndex;
+		continue;
 	};
 
-	private _resultCount = 0;
-	private _ignoreTerrain = "TERRAIN" in _ignored;
-	private _ignoredObjects = _ignored select {_x isEqualType objNull;};
-	private _ignoredTypes = _ignored select {_x isEqualType "";};
+	private _object = _x param [3, objNull];
 
-	{		
-		if (_resultCount >= _maxResults) then {
-			_deletions pushBack _forEachIndex;
-			continue;
-		};
-
-		private _object = _x param [3, objNull];
-
-		if ((isNull _object) && _ignoreTerrain) then {
+	if ((isNull _object) && _ignoreTerrain) then {
+		_deletions pushBack _forEachIndex;
+	}
+	else {
+		if ((_object in _ignoredObjects) || ((_ignoredTypes findIf {_object isKindOf _x;}) isNotEqualTo -1)) then {
 			_deletions pushBack _forEachIndex;
 		}
 		else {
-			if ((_object in _ignoredObjects) || ((_ignoredTypes findIf {_object isKindOf _x;}) isNotEqualTo -1)) then {
-				_deletions pushBack _forEachIndex;
-			}
-			else {
-				_resultCount = _resultCount + 1;
-			};
+			_resultCount = _resultCount + 1;
 		};
-	} forEach _intersections;
+	};
+} forEach _intersections;
 
-	_intersections deleteAt _deletions;
-};
+_intersections deleteAt _deletions;
 
 if (_draw isNotEqualTo []) then {
 	_draw params [["_type", "", [""]], ["_arguments", [], [[]]], ["_duration", 0, [0, ""]]];
@@ -232,4 +218,4 @@ if (_draw isNotEqualTo []) then {
 	};
 };
 
-[_intersections, _intersectionCheckCount, _intersectionCount];
+[_intersections, _intersectionCheckCount, count _intersections];

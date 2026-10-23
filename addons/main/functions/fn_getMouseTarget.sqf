@@ -1,4 +1,4 @@
-params [["_ignored", [], [[], objNull]]];
+params [["_ignored", [], [[], objNull]], ["_lod1", "VIEW", [""]], ["_lod2", "FIRE", [""]]];
 
 _ignored = if (_ignored isEqualType objNull) then {
     if !(isNull _ignored) then {
@@ -12,7 +12,10 @@ else {
     _ignored + [KH_var_playerUnit, objectParent KH_var_playerUnit, attachedTo KH_var_playerUnit] + (attachedObjects KH_var_playerUnit);
 };
 
-if ((KH_var_mouseTargetCheckFrame isEqualTo diag_frameNo) && (KH_var_mouseTargetIgnores isEqualTo _ignored)) exitWith {
+private _parameters = +_this;
+_parameters set [0, _ignored];
+
+if ((KH_var_mouseTargetCheckFrame isEqualTo diag_frameNo) && (KH_var_mouseTargetParameters isEqualTo _parameters)) exitWith {
     [
         KH_var_mouseTargetSurfacePosition,
         KH_var_mouseTargetSurfaceDistance,
@@ -25,7 +28,7 @@ if ((KH_var_mouseTargetCheckFrame isEqualTo diag_frameNo) && (KH_var_mouseTarget
     ];
 };
 
-KH_var_mouseTargetIgnores = +_ignored;
+KH_var_mouseTargetParameters = _parameters;
 KH_var_mouseTargetCheckFrame = diag_frameNo;
 private _mousePosition = AGLToASL (positionCameraToWorld [0, 0, 0]);
 
@@ -35,8 +38,8 @@ private _mouseTarget = ([
     _ignored,
     true, 
     1, 
-    "VIEW", 
-    "FIRE", 
+    _lod1, 
+    _lod2, 
     true,
     []
 ] call KH_fnc_raycast) param [0, []];

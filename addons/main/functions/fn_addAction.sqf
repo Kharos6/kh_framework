@@ -693,7 +693,6 @@ private _actionHandler = execute [
                     }
                     else {
                         missionNamespace setVariable [_progressId, true];
-                        private _interactionHelper = createSimpleObject ["KH_HelperSquare", getPosASL _caller, true];
                         missionNamespace setVariable [_lastProgressId, 0];
 
                         private _durationHandler = execute [
@@ -737,7 +736,7 @@ private _actionHandler = execute [
                                 _progressDetection,
                                 _actionId,
                                 _handlerId,
-                                _interactionHelper,
+                                _caller distance _target,
                                 diag_tickTime,
                                 diag_tickTime + ([_duration, 0] select (_duration isEqualTo true)),
                                 _resultStart,
@@ -784,7 +783,7 @@ private _actionHandler = execute [
                                     "_progressDetection",
                                     "_actionId",
                                     "_handlerId",
-                                    "_interactionHelper",
+                                    "_interactionDistance",
                                     "_startTime",
                                     "_endTime",
                                     "_resultStart",
@@ -884,7 +883,7 @@ private _actionHandler = execute [
                                         "_progressDetection",
                                         "_actionId",
                                         "_handlerId",
-                                        "_interactionHelper",
+                                        "_interactionDistance",
                                         "_startTime",
                                         "_endTime",
                                         "_resultStart",
@@ -899,20 +898,17 @@ private _actionHandler = execute [
                                         (missionNamespace getVariable _completionId) ||
                                         ((((lifeState _caller) isEqualTo "INCAPACITATED") || ((lifeState _caller) isEqualTo "UNCONSCIOUS")) && !_allowIncapacitated)
                                        ) exitWith {
-                                        deleteVehicle _interactionHelper;
                                         false;
                                     };
 
                                     private _resultProgress = missionNamespace getVariable _resultProgressId;
 
                                     if (_target isEqualTo _caller) exitWith {
-                                        deleteVehicle _interactionHelper;
                                         _arguments call _conditionProgress;
                                     };
 
                                     switch _progressDetection do {
                                         case true: {
-                                            deleteVehicle _interactionHelper;
                                             private _viewTarget = [] call (missionNamespace getVariable _detectionType);
                                             
                                             if (((_viewTarget select 1) > _distance) || ((_viewTarget select 4) isNotEqualTo _target)) then {
@@ -924,8 +920,7 @@ private _actionHandler = execute [
                                         };
 
                                         case false: {
-                                            if ((_interactionHelper distance _caller) > _distance) then {
-                                                deleteVehicle _interactionHelper;
+                                            if ((_caller distance _target) > (_distance + _interactionDistance)) then {
                                                 false;
                                             }
                                             else {
@@ -934,7 +929,6 @@ private _actionHandler = execute [
                                         };
 
                                         default {
-                                            deleteVehicle _interactionHelper;
                                             private _viewTarget = [] call (missionNamespace getVariable _detectionType);
                                             
                                             if (((_viewTarget select 1) > _distance) || (((_viewTarget select 5) param [0, ""]) isNotEqualTo _progressDetection) || ((_viewTarget select 4) isNotEqualTo _target)) then {
@@ -990,14 +984,13 @@ private _actionHandler = execute [
                                         "_progressDetection",
                                         "_actionId",
                                         "_handlerId",
-                                        "_interactionHelper",
+                                        "_interactionDistance",
                                         "_startTime",
                                         "_endTime",
                                         "_resultStart",
                                         "_progressId"
                                     ];
                                     
-                                    deleteVehicle _interactionHelper;
                                     missionNamespace setVariable [_allowedActivationId, true];
                                     missionNamespace setVariable [_progressId, false];
                                     private _resultProgress = missionNamespace getVariable _resultProgressId;

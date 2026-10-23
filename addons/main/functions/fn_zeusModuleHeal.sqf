@@ -59,8 +59,6 @@ isNil {
                 _unit setVariable ["KH_var_incapacitated", false, true];
                 _unit setVariable ["KH_var_withstanding", false, true];
                 _unit setVariable ["KH_var_stabilized", false, true];
-                _unit setVariable ["KH_var_beingRevived", false, true];
-                _unit setVariable ["KH_var_beingStabilized", false, true];
             };
             
             deleteVehicle _logic;

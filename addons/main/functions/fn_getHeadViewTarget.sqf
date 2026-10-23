@@ -1,4 +1,4 @@
-params [["_ignored", [], [[], objNull]]];
+params [["_ignored", [], [[], objNull]], ["_lod1", "VIEW", [""]], ["_lod2", "FIRE", [""]]];
 
 _ignored = if (_ignored isEqualType objNull) then {
     if !(isNull _ignored) then {
@@ -12,7 +12,10 @@ else {
     _ignored + [KH_var_playerUnit, objectParent KH_var_playerUnit, attachedTo KH_var_playerUnit] + (attachedObjects KH_var_playerUnit);
 };
 
-if ((KH_var_headViewTargetCheckFrame isEqualTo diag_frameNo) && (KH_var_headViewTargetIgnores isEqualTo _ignored)) exitWith {
+private _parameters = +_this;
+_parameters set [0, _ignored];
+
+if ((KH_var_headViewTargetCheckFrame isEqualTo diag_frameNo) && (KH_var_headViewTargetParameters isEqualTo _parameters)) exitWith {
     [
         KH_var_headViewTargetSurfacePosition,
         KH_var_headViewTargetSurfaceDistance,
@@ -25,9 +28,9 @@ if ((KH_var_headViewTargetCheckFrame isEqualTo diag_frameNo) && (KH_var_headView
     ];
 };
 
-KH_var_headViewTargetIgnores = +_ignored;
+KH_var_headViewTargetParameters = _parameters;
 KH_var_headViewTargetCheckFrame = diag_frameNo;
-private _viewPosition = KH_var_playerUnit modelToWorldWorld (KH_var_playerUnit selectionPosition "head");
+private _viewPosition = KH_var_playerUnit modelToWorldVisualWorld (KH_var_playerUnit selectionPosition "head");
 
 private _viewTarget = ([
     _viewPosition, 
@@ -35,8 +38,8 @@ private _viewTarget = ([
     _ignored,
     true, 
     1, 
-    "VIEW", 
-    "FIRE", 
+    _lod1, 
+    _lod2, 
     true,
     []
 ] call KH_fnc_raycast) param [0, []];

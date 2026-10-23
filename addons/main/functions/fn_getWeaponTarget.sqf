@@ -1,4 +1,4 @@
-params [["_ignored", [], [[], objNull]]];
+params [["_ignored", [], [[], objNull]], ["_lod1", "VIEW", [""]], ["_lod2", "FIRE", [""]]];
 
 _ignored = if (_ignored isEqualType objNull) then {
     if !(isNull _ignored) then {
@@ -12,7 +12,10 @@ else {
     _ignored + [KH_var_playerUnit, objectParent KH_var_playerUnit, attachedTo KH_var_playerUnit] + (attachedObjects KH_var_playerUnit);
 };
 
-if ((KH_var_weaponTargetCheckFrame isEqualTo diag_frameNo) && (KH_var_weaponTargetIgnores isEqualTo _ignored)) exitWith {
+private _parameters = +_this;
+_parameters set [0, _ignored];
+
+if ((KH_var_weaponTargetCheckFrame isEqualTo diag_frameNo) && (KH_var_weaponTargetParameters isEqualTo _parameters)) exitWith {
     [
         KH_var_weaponTargetSurfacePosition,
         KH_var_weaponTargetSurfaceDistance,
@@ -25,7 +28,7 @@ if ((KH_var_weaponTargetCheckFrame isEqualTo diag_frameNo) && (KH_var_weaponTarg
     ];
 };
 
-KH_var_weaponTargetIgnores = +_ignored;
+KH_var_weaponTargetParameters = _parameters;
 KH_var_weaponTargetCheckFrame = diag_frameNo;
 private _weaponType = [KH_var_playerUnit] call KH_fnc_getCurrentWeaponSlot;
 
@@ -47,8 +50,8 @@ private _weaponTarget = ([
     _ignored,
     true, 
     1, 
-    "VIEW", 
-    "FIRE", 
+    _lod1, 
+    _lod2, 
     true,
     []
 ] call KH_fnc_raycast) param [0, []];

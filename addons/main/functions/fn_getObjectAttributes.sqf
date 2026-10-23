@@ -7,7 +7,7 @@ params [["_object", objNull, [objNull]]];
 	typeOf _object,
     isSimpleObject _object,
 	call {
-		if (_object in KH_var_allChangedBuildings) then {
+		if !(KH_var_allTerrainChangedBuildings isNil (hashValue _object)) then {
 			KH_var_allTerrainChangedBuildings get (hashValue _object);
 		}
 		else {

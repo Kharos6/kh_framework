@@ -528,16 +528,20 @@
 
 [
 	"KH_var_reviveRequireStabilization",
-	"CHECKBOX",   
+	"LIST",   
 	[
 		"Revive Require Stabilization", 
-		"True requires a unit to be stabilized before they can be revived."
+		"Defines whether stabilization is required before a unit can be revived, and for whom."
 	], 
 	[
         "KH Medical",
         "Incapacitation"
     ], 
-	false,
+	[
+        [0, 1, 2],
+        ["NEVER", "ONLY FOR NON-MEDICS", "ALWAYS"],
+        1
+    ],
 	1,
 	{},
 	false
@@ -1275,6 +1279,23 @@
 ] call CBA_fnc_addSetting;
 
 [
+	"KH_var_withstandingAllowHealing",
+	"CHECKBOX",   
+	[
+		"Allow Healing", 
+		"True allows healing on a unit that is withstanding."
+	], 
+	[
+        "KH Medical",
+        "Withstanding"
+    ], 
+	false,
+	1,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
 	"KH_var_withstandingAllowRevivingOthers",
 	"CHECKBOX",   
 	[
@@ -1879,6 +1900,27 @@
 	[
 		"Give Up Progress Display", 
 		"The type of progress representation displayed to the person giving up."
+	], 
+	[
+        "KH Medical",
+        "Interface"
+    ], 
+	[
+        ["NONE", "BAR", "PERCENTAGE", "TIME"],
+        ["NONE", "BAR", "PERCENTAGE", "TIME"],
+        1
+    ],
+	0,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
+	"KH_var_healProgressDisplay",
+	"LIST",   
+	[
+		"Heal Progress Display", 
+		"The type of progress representation displayed for healing actions."
 	], 
 	[
         "KH Medical",

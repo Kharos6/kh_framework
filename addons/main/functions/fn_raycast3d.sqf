@@ -13,8 +13,6 @@ params [
 	["_draw", [], [[]]]
 ];
 
-private _allowIgnoredCheck = true;
-
 [
 	_ignored, 
 	{
@@ -26,15 +24,6 @@ private _allowIgnoredCheck = true;
 		};
 	}
 ] call KH_fnc_deleteArrayElements;
-
-private _ignored1 = objNull;
-private _ignored2 = objNull;
-
-if (((count _ignored) <= 2) && (_ignored isEqualTypeAll objNull)) then {
-	_ignored1 = _ignored param [0, objNull, ["", objNull]];
-	_ignored2 = _ignored param [1, objNull, ["", objNull]];
-	_allowIgnoredCheck = false;
-};
 
 private _object = objNull;
 
@@ -100,7 +89,7 @@ switch _type do {
 				private _currentPositionStart = ([[_primaryAxis, _secondaryAxisIteration, _tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
 				private _currentPositionEnd = ([[-_primaryAxis, _secondaryAxisIteration, _tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
 				call _positionParser;
-				_grids pushBack [_currentPositionStart, _currentPositionEnd, _ignored1, _ignored2, _sort, -1, _lod1, _lod2, _returnUnique];
+				_grids pushBack [_currentPositionStart, _currentPositionEnd, objNull, objNull, _sort, -1, _lod1, _lod2, _returnUnique];
 				_intersectionCheckCount = _intersectionCheckCount + 1;
 			};
 		};
@@ -117,7 +106,7 @@ switch _type do {
 				private _currentPositionStart = ([[_primaryAxisIteration, _secondaryAxisIteration, _tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
 				private _currentPositionEnd = ([[-_primaryAxisIteration, -_secondaryAxisIteration, -_tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
 				call _positionParser;
-				_grids pushBack [_currentPositionStart, _currentPositionEnd, _ignored1, _ignored2, _sort, -1, _lod1, _lod2, _returnUnique];
+				_grids pushBack [_currentPositionStart, _currentPositionEnd, objNull, objNull, _sort, -1, _lod1, _lod2, _returnUnique];
 				_intersectionCheckCount = _intersectionCheckCount + 1;
 			};
 		};
@@ -133,7 +122,7 @@ switch _type do {
 				private _currentPositionStart = ([[-_currentHeight, _secondaryAxisIteration, _tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
 				private _currentPositionEnd = ([[-_currentHeight, -_secondaryAxisIteration, -_tertiaryAxisIteration]] matrixMultiply _combinedMatrix) select 0;
 				call _positionParser;
-				_grids pushBack [_currentPositionStart, _currentPositionEnd, _ignored1, _ignored2, _sort, -1, _lod1, _lod2, _returnUnique];
+				_grids pushBack [_currentPositionStart, _currentPositionEnd, objNull, objNull, _sort, -1, _lod1, _lod2, _returnUnique];
 				_intersectionCheckCount = _intersectionCheckCount + 1;
 			};
 		};
@@ -162,7 +151,7 @@ switch _type do {
 					private _currentPositionStart = [0, 0, 0];
 					private _currentPositionEnd = ([[_currentHeight, _surfaceSecondary, _surfaceTertiary]] matrixMultiply _combinedMatrix) select 0;
 					call _positionParser;
-					_grids pushBack [_currentPositionStart, _currentPositionEnd, _ignored1, _ignored2, _sort, -1, _lod1, _lod2, _returnUnique];
+					_grids pushBack [_currentPositionStart, _currentPositionEnd, objNull, objNull, _sort, -1, _lod1, _lod2, _returnUnique];
 					_intersectionCheckCount = _intersectionCheckCount + 1;
 				};
 			};
@@ -171,7 +160,6 @@ switch _type do {
 };
 
 private _intersections = lineIntersectsSurfaces [_grids];
-private _intersectionCount = {_x isNotEqualTo [];} count _intersections;
 private _flattenedIntersections = [];
 
 {
@@ -181,42 +169,39 @@ private _flattenedIntersections = [];
 } forEach _intersections;
 
 _intersections = _flattenedIntersections;
+private _deletions = [];
 
-if (_allowIgnoredCheck || (_maxResults isNotEqualTo -1)) then {
-	private _deletions = [];
+if (_maxResults isEqualTo -1) then {
+	_maxResults = 999999;
+};
 
-	if (_maxResults isEqualTo -1) then {
-		_maxResults = 999999;
+private _resultCount = 0;
+private _ignoreTerrain = "TERRAIN" in _ignored;
+private _ignoredObjects = _ignored select {_x isEqualType objNull;};
+private _ignoredTypes = _ignored select {_x isEqualType "";};
+
+{		
+	if (_resultCount >= _maxResults) then {
+		_deletions pushBack _forEachIndex;
+		continue;
 	};
 
-	private _resultCount = 0;
-	private _ignoreTerrain = "TERRAIN" in _ignored;
-	private _ignoredObjects = _ignored select {_x isEqualType objNull;};
-	private _ignoredTypes = _ignored select {_x isEqualType "";};
+	private _object = _x param [3, objNull];
 
-	{		
-		if (_resultCount >= _maxResults) then {
-			_deletions pushBack _forEachIndex;
-			continue;
-		};
-
-		private _object = _x param [3, objNull];
-
-		if ((isNull _object) && _ignoreTerrain) then {
+	if ((isNull _object) && _ignoreTerrain) then {
+		_deletions pushBack _forEachIndex;
+	}
+	else {
+		if ((_object in _ignoredObjects) || ((_ignoredTypes findIf {_object isKindOf _x;}) isNotEqualTo -1)) then {
 			_deletions pushBack _forEachIndex;
 		}
 		else {
-			if ((_object in _ignoredObjects) || ((_ignoredTypes findIf {_object isKindOf _x;}) isNotEqualTo -1)) then {
-				_deletions pushBack _forEachIndex;
-			}
-			else {
-				_resultCount = _resultCount + 1;
-			};
+			_resultCount = _resultCount + 1;
 		};
-	} forEach _intersections;
+	};
+} forEach _intersections;
 
-	_intersections deleteAt _deletions;
-};
+_intersections deleteAt _deletions;
 
 if (_draw isNotEqualTo []) then {
 	_draw params [["_type", "", [""]], ["_arguments", [], [[]]], ["_duration", 0, [0, ""]]];
@@ -272,4 +257,4 @@ if (_draw isNotEqualTo []) then {
 	};
 };
 
-[_intersections, _intersectionCheckCount, _intersectionCount];
+[_intersections, _intersectionCheckCount, count _intersections];

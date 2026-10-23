@@ -1355,7 +1355,7 @@ isNil {
 								[_handlerId] call KH_fnc_removeHandler;
 							},
 							true,
-							0,
+							1,
 							false
 						];
 					},
@@ -1449,7 +1449,7 @@ isNil {
 									"Inventory",
 									[],
 									{
-										private _currentTarget = ([] call KH_fnc_getHeadViewTarget) select 4;
+										private _currentTarget = ([[], "GEOM", "FIRE"] call KH_fnc_getHeadViewTarget) select 4;
 
 										if !(missionNamespace isNil "KH_var_remoteInventoryHandler") then {
 											[KH_var_remoteInventoryHandler] call KH_fnc_removeHandler;
@@ -1493,7 +1493,7 @@ isNil {
 											false;
 										};
 										
-										private _headViewTarget = [] call KH_fnc_getHeadViewTarget;
+										private _headViewTarget = [[], "GEOM", "FIRE"] call KH_fnc_getHeadViewTarget;
 										private _currentTargetDistance = _headViewTarget select 1;
 										private _currentTarget = _headViewTarget select 4;
 										((_currentTarget isKindOf "Man") && (alive _currentTarget) && (_currentTargetDistance <= 2));
@@ -1829,6 +1829,262 @@ isNil {
 								if (isNil "_medical") exitWith {};
 
 								if (_medical param [0, false]) then {
+									hideActions [true, [7, 113, 114, 115, 116, 119]];
+
+									[
+										[false, true],
+										"<img size='1.8' image='\a3\ui_f\data\IGUI\Cfg\Actions\heal_ca'/>",
+										[999999],
+										[
+											{
+												[_caller, ["ACTION_PLAY_NOW", "MedicOther", true], false, false] call KH_fnc_setAnimation;
+												private _currentTarget = ([[], "GEOM", "FIRE"] call KH_fnc_getHeadViewTarget) select 4;
+												_caller setVariable ["KH_var_healingTarget", ([[], "GEOM", "FIRE"] call KH_fnc_getHeadViewTarget) select 4, true];
+												_this set [0, _caller distance _currentTarget];
+											},
+											{},
+											{
+												if !(_caller getVariable ["KH_var_incapacitated", false]) then {
+													[_caller, ["ACTION_SWITCH", "MedicStop", true], false, false] call KH_fnc_setAnimation;
+												};
+
+												_this set [0, 999999];
+												_caller setVariable ["KH_var_healingTarget", objNull, true];
+											},
+											{
+												if !(_caller getVariable ["KH_var_incapacitated", false]) then {
+													[_caller, ["ACTION_SWITCH", "MedicStop", true], false, false] call KH_fnc_setAnimation;
+												};
+
+												_this set [0, 999999];
+												_caller setVariable ["KH_var_healingTarget", objNull, true];
+											},
+											{
+												private _currentTarget = _caller getVariable ["KH_var_healingTarget", objNull];
+												_caller setVariable ["KH_var_healingTarget", objNull, true];
+												_this set [0, 999999];
+												[_caller, ["ACTION_SWITCH", "MedicStop", true], false, false] call KH_fnc_setAnimation;
+												private _isMedic = [_caller getUnitTrait "Medic", false] call KH_fnc_parseBoolean;
+
+												private _damageOffset = if (((_caller nearEntities 15) findIf {((getNumber ((configOf _x) >> "attendant")) isEqualTo 1) && !(_x isKindOf "Man");}) isNotEqualTo -1) then {
+													1;
+												}
+												else {
+													if KH_var_batchHeal then {
+														private _items = items _caller;
+														private _healItemCount = [_items, "FirstAidKit"] call KH_fnc_countArrayElements;
+														private _currentDamageOffset = 0;
+
+														if !("Medikit" in _items) then {
+															for "_i" from 1 to _healItemCount do {
+																_currentDamageOffset = _currentDamageOffset + ([
+																	[KH_var_firstAidKitHeal, KH_var_firstAidKitHealWithstanding] select (_currentTarget getVariable ["KH_var_withstanding", false]),
+																	[KH_var_firstAidKitHealMedic, KH_var_firstAidKitHealWithstandingMedic] select (_currentTarget getVariable ["KH_var_withstanding", false])
+																] select _isMedic);
+
+																_caller removeItem "FirstAidKit";
+
+																if (_currentDamageOffset >= 1) then {
+																	_currentDamageOffset = _currentDamageOffset min 1;
+																	break;
+																};
+															};
+														}
+														else {
+															_currentDamageOffset = 1;
+														};
+
+														_currentDamageOffset;
+													}
+													else {
+														_caller removeItem "FirstAidKit";
+														([KH_var_firstAidKitHeal, KH_var_firstAidKitHealMedic] select _isMedic) min 1;
+													};
+												};
+
+												execute [
+													[_currentTarget, _damageOffset],
+													{
+														params ["_currentTarget", "_damageOffset"];
+														private _damages = getAllHitPointsDamage _currentTarget;
+														_currentTarget setDamage (((damage _currentTarget) - _damageOffset) max 0);
+
+														if ((damage _currentTarget) isEqualTo 0) then {
+															_damageOffset = 1;
+														};
+
+														{
+															_currentTarget setHitPointDamage [_x, (((_damages select 2) select _forEachIndex) - _damageOffset) max 0];
+														} forEach (_damages select 0);
+													},
+													_currentTarget,
+													true,
+													false
+												];
+											}
+										],
+										[
+											{},
+											{
+												params ["_startingDistance"];
+												private _currentTreatingTarget = _caller getVariable ["KH_var_healingTarget", objNull];
+												private _headViewTarget = [[], "GEOM", "FIRE"] call KH_fnc_getHeadViewTarget;
+												private _currentTarget = [_headViewTarget select 4, _currentTreatingTarget] select !(isNull _currentTreatingTarget);
+												private _currentTargetDistance = _headViewTarget select 1;
+												private _text = ["<img size='1.8' image='\a3\ui_f\data\IGUI\Cfg\Actions\heal_ca'/><br/>TREAT ", toUpper (name _currentTarget)] joinString "";
+												private _isMedic = [_caller getUnitTrait "Medic", false] call KH_fnc_parseBoolean;
+												private _items = items _caller;
+												_caller setUserActionText [_actionId, _text, _text, ""];
+												
+												(
+													(_currentTreatingTarget isNotEqualTo _caller) &&
+													(_currentTarget isKindOf "Man") &&
+													(alive _currentTarget) &&
+													(((_currentTargetDistance <= 3) && (isNull _currentTreatingTarget)) || (((_caller distance _currentTarget) <= (_startingDistance + 3)) && !(isNull _currentTreatingTarget))) &&
+													((("Medikit" in _items) && _isMedic) || ("FirstAidKit" in _items)) &&
+													!(_caller getVariable ["KH_var_incapacitated", false]) &&
+													!(_caller getVariable ["KH_var_reviving", false]) && 
+													!(_caller getVariable ["KH_var_stabilizing", false]) &&
+													(!(_currentTarget getVariable ["KH_var_incapacitated", false]) || ((_currentTarget getVariable ["KH_var_withstanding", false]) && KH_var_withstandingAllowHealing)) &&
+													(((damage _currentTarget) isNotEqualTo 0) || (([(getAllHitPointsDamage _currentTarget) param [2, []]] call KH_fnc_arraySum) isNotEqualTo 0))
+												);
+											},
+											{},
+											{},
+											{}
+										],
+										true,
+										false,
+										true,
+										[7, KH_var_healProgressDisplay],
+										3,
+										true,
+										false,
+										false,
+										false,
+										true,
+										"",
+										"",
+										[false, true]
+									] call KH_fnc_addAction;
+
+									[
+										[false, true],
+										[
+											"<img size='1.8' image='\a3\ui_f\data\IGUI\Cfg\Actions\heal_ca'/><br/>TREAT SELF",
+											nil,
+											nil,
+											"<img size='1.8' image='\a3\ui_f\data\IGUI\Cfg\Actions\heal_ca'/><br/>TREAT SELF"
+										],
+										[],
+										[
+											{
+												[_caller, ["ACTION_PLAY_NOW", "Medic", true], false, false] call KH_fnc_setAnimation;
+												_caller setVariable ["KH_var_healingTarget", _caller, true];
+											},
+											{},
+											{
+												if !(_caller getVariable ["KH_var_incapacitated", false]) then {
+													[_caller, ["ACTION_SWITCH", "MedicStop", true], false, false] call KH_fnc_setAnimation;
+												};
+
+												_caller setVariable ["KH_var_healingTarget", objNull, true];
+											},
+											{
+												if !(_caller getVariable ["KH_var_incapacitated", false]) then {
+													[_caller, ["ACTION_SWITCH", "MedicStop", true], false, false] call KH_fnc_setAnimation;
+												};
+
+												_caller setVariable ["KH_var_healingTarget", objNull, true];
+											},
+											{
+												_caller setVariable ["KH_var_healingTarget", objNull, true];
+												[_caller, ["ACTION_SWITCH", "MedicStop", true], false, false] call KH_fnc_setAnimation;
+												private _isMedic = [_caller getUnitTrait "Medic", false] call KH_fnc_parseBoolean;
+
+												private _damageOffset = if (((_caller nearEntities 15) findIf {((getNumber ((configOf _x) >> "attendant")) isEqualTo 1) && !(_x isKindOf "Man");}) isNotEqualTo -1) then {
+													1;
+												}
+												else {
+													if KH_var_batchHeal then {
+														private _items = items _caller;
+														private _healItemCount = [_items, "FirstAidKit"] call KH_fnc_countArrayElements;
+														private _currentDamageOffset = 0;
+
+														if !("Medikit" in _items) then {
+															for "_i" from 1 to _healItemCount do {
+																_currentDamageOffset = _currentDamageOffset + ([
+																	[KH_var_firstAidKitSelfHeal, KH_var_firstAidKitSelfHealWithstanding] select (_caller getVariable ["KH_var_withstanding", false]),
+																	[KH_var_firstAidKitSelfHealMedic, KH_var_firstAidKitSelfHealWithstandingMedic] select (_caller getVariable ["KH_var_withstanding", false])
+																] select _isMedic);
+
+																_caller removeItem "FirstAidKit";
+
+																if (_currentDamageOffset >= 1) then {
+																	_currentDamageOffset = _currentDamageOffset min 1;
+																	break;
+																};
+															};
+														}
+														else {
+															_currentDamageOffset = 1;
+														};
+
+														_currentDamageOffset;
+													}
+													else {
+														_caller removeItem "FirstAidKit";
+														([KH_var_firstAidKitSelfHeal, KH_var_firstAidKitSelfHealMedic] select _isMedic) min 1;
+													};
+												};
+
+												private _damages = getAllHitPointsDamage _caller;
+												_caller setDamage (((damage _caller) - _damageOffset) max 0);
+
+												if ((damage _caller) isEqualTo 0) then {
+													_damageOffset = 1;
+												};
+
+												{
+													_caller setHitPointDamage [_x, (((_damages select 2) select _forEachIndex) - _damageOffset) max 0];
+												} forEach (_damages select 0);
+											}
+										],
+										[
+											{},
+											{
+												private _currentTarget = _caller getVariable ["KH_var_healingTarget", objNull];
+												private _isMedic = [_caller getUnitTrait "Medic", false] call KH_fnc_parseBoolean;
+												private _items = items _caller;
+
+												(
+													((("Medikit" in _items) && _isMedic) || ("FirstAidKit" in _items)) &&
+													((_currentTarget isEqualTo _caller) || (isNull _currentTarget)) &&
+													(!(_caller getVariable ["KH_var_incapacitated", false]) || ((_caller getVariable ["KH_var_withstanding", false]) && KH_var_withstandingAllowHealing)) &&
+													!(_caller getVariable ["KH_var_reviving", false]) && 
+													!(_caller getVariable ["KH_var_stabilizing", false]) &&
+													(((damage _caller) isNotEqualTo 0) || (([(getAllHitPointsDamage _caller) param [2, []]] call KH_fnc_arraySum) isNotEqualTo 0))
+												);
+											},
+											{},
+											{},
+											{}
+										],
+										true,
+										false,
+										true,
+										[7, KH_var_healProgressDisplay],
+										0,
+										true,
+										false,
+										false,
+										false,
+										true,
+										"",
+										"",
+										[false, true]
+									] call KH_fnc_addAction;
+
 									private _medicalControl = (uiNamespace getVariable ["KH_var_display", displayNull]) ctrlCreate ["RscStructuredText", -1];
 									private _medicalControlBackground = (uiNamespace getVariable ["KH_var_display", displayNull]) ctrlCreate ["RscText", -1];
 									_medicalControl ctrlShow false;
@@ -1896,7 +2152,7 @@ isNil {
 											};
 										},
 										true,
-										0,
+										1,
 										false
 									];
 								};
@@ -2137,7 +2393,7 @@ isNil {
 													[_handlerId] call KH_fnc_removeHandler;
 												},
 												true,
-												0,
+												1,
 												false
 											];
 										};
@@ -2220,6 +2476,10 @@ isNil {
 						_entity setVariable ["KH_var_movesStatesConfig", _movesConfig >> "States"];
 						_entity setVariable ["KH_var_gesturesConfig", _gesturesConfig];
 						_entity setVariable ["KH_var_gesturesStatesConfig", _gesturesConfig >> "States"];
+					};
+
+					if (([_entity] call KH_fnc_getEntityNetworkType) isEqualTo "LOCAL") then {
+						KH_var_allLocalOnlyEntities pushBackUnique _entity;
 					};
 
 					if (local _entity) then {

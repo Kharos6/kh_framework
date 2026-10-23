@@ -11,21 +11,21 @@ if (_entity isEqualType objNull) then {
 
 	if (missionNamespace isNil _variableName) then {
 		if (_variableName isNotEqualTo "") then {
-			[_entity, _variableName] call KH_fnc_setEntityVariableName;
+			[_entity, _variableName, _entity getVariable ["KH_var_generatedVariableName", false]] call KH_fnc_setEntityVariableName;
 		}
 		else {
 			_variableName = hashValue _entity;
 
 			if (missionNamespace isNil _variableName) then {
 				if (_generateIfEmpty isEqualTo true) then {
-					_variableName = [_entity, ""] call KH_fnc_setEntityVariableName;
+					_variableName = [_entity, "", false] call KH_fnc_setEntityVariableName;
 				}
 				else {
 					if (_generateIfEmpty isEqualTo false) then {
 						_variableName = "";
 					}
 					else {
-						_variableName = [_entity, _generateIfEmpty] call KH_fnc_setEntityVariableName;
+						_variableName = [_entity, _generateIfEmpty, false] call KH_fnc_setEntityVariableName;
 					};
 				};
 			};
@@ -37,11 +37,11 @@ else {
 
 	if (missionNamespace isNil _variableName) then {
 		if (_generateIfEmpty isEqualTo true) then {
-			_variableName = [_entity, ""] call KH_fnc_setEntityVariableName;
+			_variableName = [_entity, "", false] call KH_fnc_setEntityVariableName;
 		}
 		else {
 			if (_generateIfEmpty isNotEqualTo false) then {
-				_variableName = [_entity, _generateIfEmpty] call KH_fnc_setEntityVariableName;
+				_variableName = [_entity, _generateIfEmpty, false] call KH_fnc_setEntityVariableName;
 			};
 		};
 	};

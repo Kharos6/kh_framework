@@ -1,5 +1,3 @@
-KH_var_khDataNamespace = ["kh_namespace_", profileName] joinString "";
-uiNamespace setVariable ["KH_var_khDataNamespace", KH_var_khDataNamespace];
 KH_var_gameSessionId = uiNamespace getVariable "KH_var_gameSessionId";
 KH_var_missionSessionId = generateUid;
 uiNamespace setVariable ["KH_var_missionSessionId", KH_var_missionSessionId];
@@ -34,20 +32,25 @@ KH_var_mouseTargetCheckFrame = 0;
 KH_var_viewTargetCheckFrame = 0;
 KH_var_weaponTargetCheckFrame = 0;
 KH_var_headViewTargetCheckFrame = 0;
-KH_var_mouseTargetIgnores = [];
-KH_var_viewTargetIgnores = [];
-KH_var_weaponTargetIgnores = [];
-KH_var_headViewTargetIgnores = [];
+KH_var_mouseTargetParameters = [];
+KH_var_viewTargetParameters = [];
+KH_var_weaponTargetParameters = [];
+KH_var_headViewTargetParameters = [];
 KH_var_allAddedDisplays = [];
 KH_var_allEntities = [];
 KH_var_allLocalEntities = [];
+KH_var_allLocalOnlyEntities = [];
 KH_var_allMen = [];
 KH_var_allLocalMen = [];
-KH_var_allChangedBuildings = [];
 KH_var_allTerrainChangedBuildings = createHashMap;
 KH_var_cloudletParameterCache = createHashMap;
 KH_var_lightParameterCache = createHashMap;
 KH_var_executedStacks = [];
+
+if (isNil "KH_var_edenIds") then {
+	KH_var_edenIds = createHashMap;
+};
+
 ["KH_eve_execution", {(_this select 0) callSerializedFunction (_this select [1]);}] call CBA_fnc_addEventHandler;
 
 [
@@ -256,9 +259,18 @@ KH_var_executedStacks = [];
 	[], 
 	{
 		params ["_from", "_to"];
-		KH_var_allChangedBuildings pushBack _to;
-		private _position = getPosWorld _from;
-		KH_var_allTerrainChangedBuildings set [hashValue _to, [[toLowerANSI ((getModelInfo _from) select 0), [(_position select 0) toFixed 2, (_position select 1) toFixed 2, 0], (getDir _from) toFixed 2] joinString "_", _position]];
+		private _terrainInfo = KH_var_allTerrainChangedBuildings get (hashValue _from);
+
+		if (isNil "_terrainInfo") then {
+			if (([_from] call KH_fnc_getEntityNetworkType) isEqualTo "TERRAIN") then {
+				private _position = getPosWorld _from;
+				KH_var_allTerrainChangedBuildings set [hashValue _to, [[toLowerANSI ((getModelInfo _from) select 0), [(_position select 0) toFixed 2, (_position select 1) toFixed 2, 0], (getDir _from) toFixed 2] joinString "_", _position]];
+			};
+		}
+		else {
+			KH_var_allTerrainChangedBuildings set [hashValue _to, _terrainInfo];
+			KH_var_allTerrainChangedBuildings deleteAt (hashValue _from);
+		};
 	}
 ] call KH_fnc_addEventHandler;
 
@@ -789,6 +801,7 @@ if isServer then {
 	publicVariable "KH_var_diagnosticsState";
 	KH_var_missionSuspended = false;
 	publicVariable "KH_var_missionSuspended";
+	KH_var_disconnectedPlayerStorage = createHashMap;
 	KH_var_jipHandlers = createHashMap;
 	KH_var_playerPresenceHandlers = createHashMap;
 	KH_var_headlessClientTransfers = [];
@@ -1302,6 +1315,7 @@ if isServer then {
 		"KH_eve_playerLoaded",
 		[],
 		{
+			private _uid = param [1];
 			private _unit = param [3];
 
 			if KH_var_playersLoaded then {
@@ -1323,6 +1337,8 @@ if isServer then {
 					};
 				} forEach _arrayBuilderArray;
 			};
+
+			KH_var_disconnectedPlayerStorage deleteAt _uid;
 		}
 	] call KH_fnc_addEventHandler;
 
@@ -1547,6 +1563,13 @@ if isServer then {
 				publicVariable "KH_var_allPlayerUidMachines";
 				KH_var_allPlayerIdMachines deleteAt _id;
 				publicVariable "KH_var_allPlayerIdMachines";
+
+				if (_attributes isNotEqualTo []) then {
+					private _scores = getPlayerScores _unit;
+					_scores deleteAt 5;
+					KH_var_disconnectedPlayerStorage set [_uid, [vehicleVarName _unit, _attributes, _scores, _unit getVariable ["KH_var_allowPersistency", true], _unit getVariable ["KH_var_generatedVariableName", false]]];
+				};
+
 				triggerCbaEvent ["KH_eve_playerDisconnected", [_machineId, _uid, _id, _unit, _attributes], "GLOBAL", false];
 			}
 			else {

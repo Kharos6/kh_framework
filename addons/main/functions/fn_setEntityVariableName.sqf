@@ -1,4 +1,4 @@
-params [["_entity", objNull, [objNull, teamMemberNull, grpNull]], ["_name", "", [""]]];
+params [["_entity", objNull, [objNull, teamMemberNull, grpNull]], ["_name", "", [""]], ["_forceGenerated", false, [true]]];
 
 if (_entity isEqualType teamMemberNull) then {
 	_entity = agent _entity;
@@ -17,7 +17,7 @@ if (_entity isEqualType objNull) then {
 		};
 	}
 	else {
-		_entity setVariable ["KH_var_generatedVariableName", false, true];
+		_entity setVariable ["KH_var_generatedVariableName", _forceGenerated, true];
 	};
 
 	missionNamespace setVariable [_name, _entity, true];
@@ -40,7 +40,7 @@ else {
 		_entity setVariable ["KH_var_generatedVariableName", true, true];
 	}
 	else {
-		_entity setVariable ["KH_var_generatedVariableName", false, true];
+		_entity setVariable ["KH_var_generatedVariableName", _forceGenerated, true];
 	};
 
 	missionNamespace setVariable [_name, _entity, true];

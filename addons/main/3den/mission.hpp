@@ -4,6 +4,42 @@ class Mission
 	{
 		class AttributeCategories
 		{
+			class KH_Miscellaneous
+			{
+				displayName = "KH Miscellaneous";
+				collapsed = 1;
+				class Attributes
+				{
+					class KH_EdenIDStorage
+					{
+						displayName = "Eden ID Storage";
+						tooltip = "Defines the Eden ID storage for this mission.";
+						property = "KH_EdenIDStorage";
+						control = "Edit";
+						expression = 
+						"\
+							if (isServer && !is3DEN) then {\
+								execute [\
+									[missionNamespace getVariable ['KH_var_edenIds', createHashMap]],\
+									{\
+										params ['_edenIds'];\
+										missionNamespace setVariable ['KH_var_edenIds', _edenIds];\
+										{\
+											_y setVariable ['KH_var_edenId', _x];\
+										} forEach _edenIds;\
+									},\
+									'REMOTE',\
+									true,\
+									true\
+								];\
+							};\
+						";
+						defaultValue = "0";
+						condition = "script";
+						conditionScript = "false";
+					};
+				};
+			};
 			class KH_Initialization
 			{
 				displayName = "KH Initialization";
@@ -467,10 +503,11 @@ class Mission
 						control = "KH_Persistency";
 						expression = 
 						"\
-							_value params ['_toggle', '_identifier', '_players', '_playerRespawnType', '_units', '_unitsUndefined', '_groups', '_objects', '_objectsUndefined', '_mission'];\
+							_value params ['_toggle', '_identifier', '_players', '_playersDisconnected', '_playerRespawnType', '_units', '_unitsUndefined', '_groups', '_objects', '_objectsUndefined', '_mission'];\
 							if (_toggle && !is3DEN && isServer) then {\
 								KH_var_missionPersistencyIdentifier = _identifier;\
 								KH_var_missionPersistencyPlayers = _players;\
+								KH_var_missionPersistencyPlayersDisconnected = _playersDisconnected;\
 								KH_var_missionPersistencyUnits = _units;\
 								KH_var_missionPersistencyUnitsUndefined = _unitsUndefined;\
 								KH_var_missionPersistencyGroups = _groups;\
@@ -512,9 +549,9 @@ class Mission
 								[\
 									'CBA',\
 									'KH_eve_missionEnded',\
-									[_identifier, _players, _units, _unitsUndefined, _groups, _objects, _objectsUndefined, _mission],\
+									[_identifier, _players, _playersDisconnected, _units, _unitsUndefined, _groups, _objects, _objectsUndefined, _mission],\
 									{\
-										_args params ['_identifier', '_players', '_units', '_unitsUndefined', '_groups', '_objects', '_objectsUndefined', '_mission'];\
+										_args params ['_identifier', '_players', '_playersDisconnected', '_units', '_unitsUndefined', '_groups', '_objects', '_objectsUndefined', '_mission'];\
 										if _objects then {\
 											[_identifier, (allMissionObjects '') select {!(_x isKindOf 'Man') && !(_x isKindOf 'Logic') && !(_x isKindOf 'EmptyDetector') && (((typeOf _x) select [0, 1]) isNotEqualTo '#');}, _objectsUndefined] call KH_fnc_saveObjectPersistency;\
 										};\
@@ -522,7 +559,7 @@ class Mission
 											[_identifier, KH_var_allMen, _unitsUndefined] call KH_fnc_saveUnitPersistency;\
 										};\
 										if _players then {\
-											[_identifier, KH_var_allPlayerUnits] call KH_fnc_savePlayerPersistency;\
+											[_identifier, KH_var_allPlayerUnits, _playersDisconnected] call KH_fnc_savePlayerPersistency;\
 										};\
 										if _groups then {\
 											[_identifier, allGroups] call KH_fnc_saveGroupPersistency;\
@@ -535,7 +572,7 @@ class Mission
 								] call KH_fnc_addEventHandler;\
 							};\
 						";
-						defaultValue = "[false, profileName, true, 2, true, false, true, true, false, true]";
+						defaultValue = "[false, profileName, true, true, 2, true, false, true, true, false, true]";
 					};
 				};
 			};

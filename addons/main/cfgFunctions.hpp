@@ -54,6 +54,7 @@ class CfgFunctions
 			class getDestinationTime {headerType = -1;};
 			class getDestinationVelocity {headerType = -1;};
 			class getEntityByIdentifier {headerType = -1;};
+			class getEntityNetworkType {headerType = -1;};
 			class getEntityVariableName {headerType = -1;};
 			class getGroupAttributes {headerType = -1;};
 			class getHeadViewTarget {headerType = -1;};

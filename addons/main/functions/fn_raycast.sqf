@@ -30,20 +30,7 @@ if ((count _this) isEqualTo 1) then {
 			}
 		] call KH_fnc_deleteArrayElements;
 		
-		private _allowIgnoredCheck = true;
-		private _ignored1 = objNull;
-		private _ignored2 = objNull;
-
-		if (((count _ignored) <= 2) && (_ignored isEqualTypeAll objNull)) then {
-			_ignored1 = _ignored param [0, objNull, ["", objNull]];
-			_ignored2 = _ignored param [1, objNull, ["", objNull]];
-			_allowIgnoredCheck = false;
-			_allIgnored pushBack [false, _ignored];
-		}
-		else {
-			_allIgnored pushBack [true, _ignored];
-		};
-
+		_allIgnored pushBack _ignored;
 		_allMaxResults pushBack _maxResults;
 
 		if (_start isEqualType objNull) then {
@@ -62,18 +49,16 @@ if ((count _this) isEqualTo 1) then {
 			_allIntersections pushBack [
 				_start, 
 				_end, 
-				_ignored1, 
-				_ignored2, 
+				objNull, 
+				objNull, 
 				_sort,
-				[_maxResults, -1] select _allowIgnoredCheck, 
+				-1, 
 				_lod1, 
 				_lod2, 
 				_returnUnique
 			];
 		}
 		else {
-			private _maxResultsOverride = [_maxResults, -1] select _allowIgnoredCheck;
-
 			for "_i" from 1 to (ceil (_distance / 5000)) do {
 				private _currentDistance = _distance - (_i - 1) * 5000;
 
@@ -87,10 +72,10 @@ if ((count _this) isEqualTo 1) then {
 				_allIntersections pushBack [
 					_currentStart, 
 					_currentStart vectorAdd ((_start vectorFromTo _end) vectorMultiply _currentDistance), 
-					_ignored1, 
-					_ignored2, 
+					objNull, 
+					objNull, 
 					_sort, 
-					_maxResultsOverride, 
+					-1, 
 					_lod1,
 					_lod2, 
 					_returnUnique
@@ -155,46 +140,38 @@ if ((count _this) isEqualTo 1) then {
 
 	{
 		private _specIndex = _allSpecIndices select _forEachIndex;
-		(_allIgnored select _specIndex) params ["_allowIgnoredCheck", "_ignored"];
+		private _ignored = _allIgnored select _specIndex;
+		private _maxResults = _allMaxResults select _specIndex;
 
-		if _allowIgnoredCheck then {
-			private _maxResults = _allMaxResults select _specIndex;
+		if (_maxResults isEqualTo -1) then {
+			_maxResults = 999999;
+		};
 
-			if (_maxResults isEqualTo -1) then {
-				_maxResults = 999999;
+		private _resultCount = _resultCounts select _specIndex;
+		private _ignoreTerrain = "TERRAIN" in _ignored;
+		private _ignoredObjects = _ignored select {_x isEqualType objNull;};
+		private _ignoredTypes = _ignored select {_x isEqualType "";};
+
+		{
+			if (_resultCount >= _maxResults) then {
+				break;
 			};
 
-			private _resultCount = _resultCounts select _specIndex;
-			private _ignoreTerrain = "TERRAIN" in _ignored;
-			private _ignoredObjects = _ignored select {_x isEqualType objNull;};
-			private _ignoredTypes = _ignored select {_x isEqualType "";};
+			private _object = _x param [3, objNull];
 
-			{
-				if (_resultCount >= _maxResults) then {
-					break;
-				};
+			if ((isNull _object) && _ignoreTerrain) then {
+				continue;
+			};
 
-				private _object = _x param [3, objNull];
+			if ((_object in _ignoredObjects) || ((_ignoredTypes findIf {_object isKindOf _x;}) isNotEqualTo -1)) then {
+				continue;
+			};
 
-				if ((isNull _object) && _ignoreTerrain) then {
-					continue;
-				};
+			_flattenedIntersections pushBack _x;
+			_resultCount = _resultCount + 1;
+		} forEach _x;
 
-				if ((_object in _ignoredObjects) || ((_ignoredTypes findIf {_object isKindOf _x;}) isNotEqualTo -1)) then {
-					continue;
-				};
-
-				_flattenedIntersections pushBack _x;
-				_resultCount = _resultCount + 1;
-			} forEach _x;
-
-			_resultCounts set [_specIndex, _resultCount];
-		}
-		else {
-			{
-				_flattenedIntersections pushBack _x;
-			} forEach _x;
-		};
+		_resultCounts set [_specIndex, _resultCount];
 	} forEach _intersections;
 
 	_flattenedIntersections;
@@ -224,16 +201,6 @@ else {
 		}
 	] call KH_fnc_deleteArrayElements;
 
-	private _allowIgnoredCheck = true;
-	private _ignored1 = objNull;
-	private _ignored2 = objNull;
-
-	if (((count _ignored) <= 2) && (_ignored isEqualTypeAll objNull)) then {
-		_ignored1 = _ignored param [0, objNull, ["", objNull]];
-		_ignored2 = _ignored param [1, objNull, ["", objNull]];
-		_allowIgnoredCheck = false;
-	};
-
 	if (_start isEqualType objNull) then {
 		_start = _start modelToWorldVisualWorld [0, 0, 0];
 	};
@@ -249,10 +216,10 @@ else {
 		lineIntersectsSurfaces [
 			_start, 
 			_end, 
-			_ignored1, 
-			_ignored2,
+			objNull, 
+			objNull,
 			_sort, 
-			[_maxResults, -1] select _allowIgnoredCheck, 
+			-1, 
 			_lod1, 
 			_lod2, 
 			_returnUnique
@@ -260,7 +227,6 @@ else {
 	}
 	else {
 		private _allIntersections = [];
-		private _maxResultsOverride = [_maxResults, -1] select _allowIgnoredCheck;
 
 		for "_i" from 1 to (ceil (_distance / 5000)) do {
 			private _currentDistance = _distance - (_i - 1) * 5000;
@@ -274,10 +240,10 @@ else {
 			_allIntersections pushBack [
 				_currentStart, 
 				_currentStart vectorAdd ((_start vectorFromTo _end) vectorMultiply _currentDistance), 
-				_ignored1, 
-				_ignored2, 
+				objNull, 
+				objNull, 
 				_sort, 
-				_maxResultsOverride, 
+				-1, 
 				_lod1,
 				_lod2, 
 				_returnUnique
@@ -300,41 +266,39 @@ else {
 		_intersections = _flattenedIntersections;
 	};
 
-	if _allowIgnoredCheck then {
-		private _deletions = [];
+	private _deletions = [];
 
-		if (_maxResults isEqualTo -1) then {
-			_maxResults = 999999;
+	if (_maxResults isEqualTo -1) then {
+		_maxResults = 999999;
+	};
+
+	private _resultCount = 0;
+	private _ignoreTerrain = "TERRAIN" in _ignored;
+	private _ignoredObjects = _ignored select {_x isEqualType objNull;};
+	private _ignoredTypes = _ignored select {_x isEqualType "";};
+
+	{
+		if (_resultCount >= _maxResults) then {
+			_deletions pushBack _forEachIndex;
+			continue;
 		};
 
-		private _resultCount = 0;
-		private _ignoreTerrain = "TERRAIN" in _ignored;
-		private _ignoredObjects = _ignored select {_x isEqualType objNull;};
-		private _ignoredTypes = _ignored select {_x isEqualType "";};
+		private _object = _x param [3, objNull];
 
-		{
-			if (_resultCount >= _maxResults) then {
-				_deletions pushBack _forEachIndex;
-				continue;
-			};
-
-			private _object = _x param [3, objNull];
-
-			if ((isNull _object) && _ignoreTerrain) then {
+		if ((isNull _object) && _ignoreTerrain) then {
+			_deletions pushBack _forEachIndex;
+		}
+		else {
+			if ((_object in _ignoredObjects) || ((_ignoredTypes findIf {_object isKindOf _x;}) isNotEqualTo -1)) then {
 				_deletions pushBack _forEachIndex;
 			}
 			else {
-				if ((_object in _ignoredObjects) || ((_ignoredTypes findIf {_object isKindOf _x;}) isNotEqualTo -1)) then {
-					_deletions pushBack _forEachIndex;
-				}
-				else {
-					_resultCount = _resultCount + 1;
-				};
+				_resultCount = _resultCount + 1;
 			};
-		} forEach _intersections;
+		};
+	} forEach _intersections;
 
-		_intersections deleteAt _deletions;
-	};
+	_intersections deleteAt _deletions;
 
 	if (_draw isNotEqualTo []) then {
 		_draw params [["_type", "", [""]], ["_arguments", [], [[]]], ["_duration", 0, [0, ""]]];

@@ -66,6 +66,10 @@ execute [
 		_group setCombatMode _combatMode;
 		_group setSpeedMode _speedMode;
 
+		for "_i" from 0 to ((count (waypoints _group)) - 1) do {
+			deleteWaypoint [_group, 0];
+		};
+
 		{
 			private _waypoint = _group addWaypoint [_x select 12, 1, -1, _x select 11];
 			private _waypointAttachedVehicle = ["OBJECT", _x select 0] call KH_fnc_getEntityByIdentifier;

@@ -53,21 +53,38 @@ private _groups = [];
 	private _attributes = [_x] call KH_fnc_getUnitAttributes;
 	
 	if _recreate then {
+		private _edenId = _x getVariable ["KH_var_edenId", ""];
+
 		execute [
-			[_owner, _x, _group, _init, _attributes],
+			[_owner, _x, _group, _init, _attributes, _edenId],
 			{
-				params ["_owner", "_unit", "_group", "_init", "_attributes"];
+				params ["_owner", "_unit", "_group", "_init", "_attributes", "_edenId"];
 				
 				execute [
-					[_unit, _group, _init, _attributes],
+					[_unit, _group, _init, _attributes, _edenId],
 					{
-						params ["_unit", "_group", "_init", "_attributes"];
+						params ["_unit", "_group", "_init", "_attributes", "_edenId"];
 						private _newUnit = _group createUnit [_attributes select 3, _unit, [], 0, "CAN_COLLIDE"];
+
+						if (_edenId isNotEqualTo "") then {
+							_newUnit setVariable ["KH_var_edenId", _edenId, true];
+							KH_var_edenIds set [_edenId, _newUnit];
+
+							execute [
+								[_newUnit, _edenId],
+								{
+									params ["_newUnit", "_edenId"];
+									KH_var_edenIds set [_edenId, _newUnit];
+								},
+								"REMOTE",
+								true,
+								["KH_var_edenIdRecreation", _edenId, _newUnit] joinString "_"
+							];
+						};
+
 						private _variableName = vehicleVarName _unit;
 						deleteVehicle _unit;
 						[_newUnit, _attributes, [], true] call KH_fnc_setUnitAttributes;
-						_newUnit setVehicleVarName _variableName;
-						missionNamespace setVariable [_variableName, _newUnit, true];
 						[_newUnit] call _init;
 					},
 					_owner,

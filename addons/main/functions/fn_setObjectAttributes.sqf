@@ -3,10 +3,6 @@ private _type = _attributes select 3;
 private _simple = _attributes select 4;
 private _savedAttributes = _attributes select 6;
 
-if ((vehicleVarName _object) isEqualTo "") then {
-    [_object, _attributes select 1] call KH_fnc_setEntityVariableName;
-};
-
 if _respectSimple then {
 	private _recreated = false;
 
@@ -24,13 +20,9 @@ if _respectSimple then {
 			_recreated = true;
 		};
 	};
-
-	if _recreated then {
-		if (!(_attributes param [2, true]) && ((_attributes param [1, ""]) isNotEqualTo "")) then {
-			[_object, _attributes select 1] call KH_fnc_setEntityVariableName;
-		};
-	};
 };
+
+[_object, _attributes select 1, _attributes select 2] call KH_fnc_setEntityVariableName;
 
 if (_overrideAttributes isNotEqualTo []) then {
 	private _currentAttributes = ([_object] call KH_fnc_getObjectAttributes) select 6;

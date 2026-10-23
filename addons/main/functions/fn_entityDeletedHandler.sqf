@@ -8,6 +8,10 @@ if (_entity in KH_var_allLocalEntities) then {
     KH_var_allLocalEntities deleteAt (KH_var_allLocalEntities find _entity);
 };
 
+if (_entity in KH_var_allLocalOnlyEntities) then {
+    KH_var_allLocalOnlyEntities deleteAt (KH_var_allLocalOnlyEntities find _entity);
+};
+
 if (_entity in KH_var_allMen) then {
     KH_var_allMen deleteAt (KH_var_allMen find _entity);
 };

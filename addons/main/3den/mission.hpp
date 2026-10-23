@@ -651,43 +651,6 @@ class Mission
 							};
 						};
 					};
-					class KH_PlayerSynchronizer
-					{
-						displayName = "Player Synchronizer";
-						tooltip = "Hashmap style arrays where the key is a string of the variable name of an entity, and the value is an array of strings of variable names of players which are to be synchronized to the entity assigned to the key. Ideal for making sure modules are synchronized to respawning or JIP players, as well as initial players at the start of the mission.";
-						property = "KH_PlayerSynchronizer";
-						control = "EditMulti5";
-						expression = 
-						"\
-							if ((_value isNotEqualTo '') && !is3DEN && isServer) then {\
-								_value = ['[', _value, ']'] joinString '';\
-								KH_var_postInitExecutions pushBack [\
-									[createHashMapFromArray (parseSimpleArray _value)],\
-									{\
-										params ['_value'];\
-										{\
-											[\
-												'CBA',\
-												_x,\
-												[_value],\
-												{\
-													_args params ['_value'];\
-													{\
-														private _parsedEntities = [];\
-														{\
-															_parsedEntities pushBack (missionNamespace getVariable [_x, objNull]);\
-														} forEach _y;\
-														(missionNamespace getVariable [_x, objNull]) synchronizeObjectsAdd _parsedEntities;\
-													} forEach _value;\
-												}\
-											] call KH_fnc_addEventHandler;\
-										} forEach ['KH_eve_playerLoaded', 'KH_eve_playerRespawned'];\
-									}\
-								];\
-							};\
-						";
-						defaultValue = "''";
-					};
 					class KH_RecoverDisconnectedPlayers
 					{
 						displayName = "Recover Disconnected Players";

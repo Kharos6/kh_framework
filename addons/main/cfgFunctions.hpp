@@ -116,6 +116,7 @@ class CfgFunctions
 			class moduleRecordMission {headerType = -1;};
 			class moduleSavePersistency {headerType = -1;};
 			class moduleTeleporter {headerType = -1;};
+			class moduleUnitLoiter {headerType = -1;};
 			class moduleUpdateAiInstance {headerType = -1;};
 			class moduleUpdateTtsSpeakerEntity {headerType = -1;};
 			class moduleVisualTrigger {headerType = -1;};
@@ -166,6 +167,7 @@ class CfgFunctions
 			class setTerminalText {headerType = -1;};
 			class setUnitAttributes {headerType = -1;};
 			class setUnitController {headerType = -1;};
+			class setUnitLoiter {headerType = -1;};
 			class setUnitVehicleSlot {headerType = -1;};
 			class setVehicleLoadout {headerType = -1;};
 			class setVideoTexture {headerType = -1;};

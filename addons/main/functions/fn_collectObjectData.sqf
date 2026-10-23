@@ -27,7 +27,7 @@ _data set ["CargoLoaded", []];
 _data set ["CargoUnloaded", []];
 _data set ["CollisionLights", []];
 _data set ["Damage", []];
-_data set ["Deleted", []];
+_data set ["Deleted", -1];
 _data set ["Direction", []];
 _data set ["Engine", []];
 _data set ["Fuel", []];

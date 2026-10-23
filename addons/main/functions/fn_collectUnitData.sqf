@@ -431,8 +431,17 @@ private _result = [
                     _unit setVariable ["KH_var_collectedDamage", _currentDamage];
                 };
 
-                if ((_unit getVariable ["KH_var_collectedDirection", []]) isNotEqualTo [vectorDirVisual _unit, vectorUpVisual _unit]) then {
-                    private _currentDirection = [vectorDirVisual _unit, vectorUpVisual _unit];
+                private _vectorDir = vectorDirVisual _unit;
+                private _vectorUp = vectorUpVisual _unit;
+                _vectorDir set [0, parseNumber ((_vectorDir select 0) toFixed 2)];
+                _vectorDir set [1, parseNumber ((_vectorDir select 1) toFixed 2)];
+                _vectorDir set [2, parseNumber ((_vectorDir select 2) toFixed 2)];
+                _vectorUp set [0, parseNumber ((_vectorUp select 0) toFixed 2)];
+                _vectorUp set [1, parseNumber ((_vectorUp select 1) toFixed 2)];
+                _vectorUp set [2, parseNumber ((_vectorUp select 2) toFixed 2)];
+
+                if ((_unit getVariable ["KH_var_collectedDirection", []]) isNotEqualTo [_vectorDir, _vectorUp]) then {
+                    private _currentDirection = [_vectorDir, _vectorUp];
                     (_data get "Direction") pushBack [_trueTime, _currentDirection];
                     _unit setVariable ["KH_var_collectedDirection", _currentDirection];
                 };
@@ -504,9 +513,12 @@ private _result = [
                 };
 
                 private _positionAsl = getPosASLVisual _unit;
+                _positionAsl set [0, parseNumber ((_positionAsl select 0) toFixed 2)];
+                _positionAsl set [1, parseNumber ((_positionAsl select 1) toFixed 2)];
+                _positionAsl set [2, parseNumber ((_positionAsl select 2) toFixed 2)];
 
-                if ((_unit getVariable ["KH_var_collectedPosition", []]) isNotEqualTo [_positionAsl select [0, 2], (getPosATLVisual _unit) select 2, _positionAsl select 2, (getPosVisual _unit) select 2]) then {
-                    private _currentPosition = [_positionAsl select [0, 2], (getPosATLVisual _unit) select 2, _positionAsl select 2, (getPosVisual _unit) select 2];
+                if ((_unit getVariable ["KH_var_collectedPosition", []]) isNotEqualTo [_positionAsl select [0, 2], parseNumber (((getPosATLVisual _unit) select 2) toFixed 2), _positionAsl select 2, parseNumber (((getPosVisual _unit) select 2) toFixed 2)]) then {
+                    private _currentPosition = [_positionAsl select [0, 2], parseNumber (((getPosATLVisual _unit) select 2) toFixed 2), _positionAsl select 2, parseNumber (((getPosVisual _unit) select 2) toFixed 2)];
                     (_data get "Position") pushBack [CBA_missionTime, _currentPosition];
                     _unit setVariable ["KH_var_collectedPosition", _currentPosition];
                 };
@@ -736,7 +748,7 @@ private _result = [
                 };
             },
             true,
-            0.1,
+            1,
             false
         ]
     ]

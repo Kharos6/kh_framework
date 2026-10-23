@@ -201,7 +201,7 @@ private _result = [
                 };
             },
             true,
-            0.1,
+            1,
             false
         ]
     ]

@@ -12,6 +12,7 @@ KH_var_recordedObjects = createHashMap;
     private _object = createVehicle [_attributes select 3, [0, 0, 0], [], 0, "CAN_COLLIDE"];
     _object = [_object, _attributes, [], true] call KH_fnc_setObjectAttributes;
     _object allowDamage false;
+    _object setPhysicsCollisionFlag false;
     KH_var_recordedObjects set [_x, _object];
 } forEach KH_var_recordedObjectData;
 
@@ -26,6 +27,7 @@ KH_var_recordedObjects = createHashMap;
     private _attributes = (((_y select 0) select 1) get "Header") select 3;
     private _unit = (KH_var_recordedGroups get (((((_y select 0) select 1) get "Group") select 0) select 1)) createUnit [_attributes select 3, [0, 0, 0], [], 0, "CAN_COLLIDE"];
     _unit = [_unit, _attributes, [], true] call KH_fnc_setUnitAttributes;
+    _unit setPhysicsCollisionFlag false;
     _unit enableAIFeature ["AUTOTARGET", false];
     _unit enableAIFeature ["MOVE", false];
     _unit enableAIFeature ["TARGET", false];
@@ -183,9 +185,11 @@ execute [
                 _x params ["_time", "_data"];
 
                 if (_time <= CBA_missionTime) then {
-                    _object setVectorDirAndUp _data;
+                    _object setVariable ["KH_var_transformInterval", 0];
+                    _object setVariable ["KH_var_rotationData", [[vectorDirVisual _object, vectorUpVisual _object], _data]];
                 }
                 else {
+                    _object setVariable ["KH_var_transformInterval", ((_object getVariable ["KH_var_transformInterval", 0]) + _totalDelta) min 1];
                     break;
                 };
             } forEach (_currentData get "Direction");
@@ -194,23 +198,14 @@ execute [
                 _x params ["_time", "_data"];
 
                 if (_time <= CBA_missionTime) then {
-                    _object setPosATL [(_data select 0) select 0, (_data select 0) select 1, _data select 1];
+                    _object setVariable ["KH_var_transformInterval", 0];
+                    _object setVariable ["KH_var_positionData", [getPosASLVisual _object, [(_data select 0) select 0, (_data select 0) select 1, _data select 2]]];
                 }
                 else {
+                    _object setVariable ["KH_var_transformInterval", ((_object getVariable ["KH_var_transformInterval", 0]) + _totalDelta) min 1];
                     break;
                 };
             } forEach (_currentData get "Position");
-
-            {
-                _x params ["_time", "_data"];
-
-                if (_time <= CBA_missionTime) then {
-                    _object setVelocity _data;
-                }
-                else {
-                    break;
-                };
-            } forEach (_currentData get "Velocity");
 
             {
                 private _currentRemovalData = +(_currentData get _x);
@@ -228,6 +223,21 @@ execute [
                 "Direction",
                 "Position",
                 "Velocity"
+            ];
+
+            private _positionData = _object getVariable ["KH_var_positionData", []];
+            private _rotationData = _object getVariable ["KH_var_rotationData", []];
+
+            _object setVelocityTransformation [
+                _positionData param [0, [0, 0, 0]],
+                _positionData param [1, [0, 0, 0]],
+                [0, 0, 0],
+                [0, 0, 0],
+                (_rotationData param [0, [[0, 1, 0], [0, 0, 1]]]) select 0,
+                (_rotationData param [1, [[0, 1, 0], [0, 0, 1]]]) select 0,
+                (_rotationData param [0, [[0, 1, 0], [0, 0, 1]]]) select 1,
+                (_rotationData param [1, [[0, 1, 0], [0, 0, 1]]]) select 1,
+                _object getVariable ["KH_var_transformInterval", 0]
             ];
         } forEach KH_var_recordedObjectData;
 
@@ -318,9 +328,7 @@ execute [
                 _x params ["_time", "_data"];
 
                 if (_time <= CBA_missionTime) then {
-                    private _recordedMove = _data select 0;
-                    _unit setVariable ["KH_var_recordedMove", _recordedMove];
-                    _unit switchMove [_recordedMove];
+                    _unit switchMove [_data select 0];
                 }
                 else {
                     break;
@@ -357,9 +365,11 @@ execute [
                 _x params ["_time", "_data"];
 
                 if (_time <= CBA_missionTime) then {
-                    _unit setVectorDirAndUp _data;
+                    _unit setVariable ["KH_var_transformInterval", 0];
+                    _unit setVariable ["KH_var_rotationData", [[vectorDirVisual _unit, vectorUpVisual _unit], _data]];
                 }
                 else {
+                    _unit setVariable ["KH_var_transformInterval", ((_unit getVariable ["KH_var_transformInterval", 0]) + _totalDelta) min 1];
                     break;
                 };
             } forEach (_currentData get "Direction");
@@ -447,12 +457,11 @@ execute [
 
                 if (isNull (objectParent _unit)) then {
                     if (_time <= CBA_missionTime) then {
-                        if ((_unit getVariable ["KH_var_recordedMove", ""]) isNotEqualTo (_unit getVariable ["KH_var_previousRecordedMove", ""])) then {
-                            _unit setVariable ["KH_var_previousRecordedMove", _unit getVariable ["KH_var_recordedMove", ""]];
-                            _unit setPosATL [(_data select 0) select 0, (_data select 0) select 1, _data select 1];
-                        };
+                        _unit setVariable ["KH_var_transformInterval", 0];
+                        _unit setVariable ["KH_var_positionData", [getPosASLVisual _unit, [(_data select 0) select 0, (_data select 0) select 1, _data select 2]]];
                     }
                     else {
+                        _unit setVariable ["KH_var_transformInterval", ((_unit getVariable ["KH_var_transformInterval", 0]) + _totalDelta) min 1];
                         break;
                     };
                 };
@@ -518,19 +527,6 @@ execute [
             {
                 _x params ["_time", "_data"];
 
-                if (isNull (objectParent _unit)) then {
-                    if (_time <= CBA_missionTime) then {
-                        _unit setVelocity _data;
-                    }
-                    else {
-                        break;
-                    };
-                };
-            } forEach (_currentData get "Velocity");
-
-            {
-                _x params ["_time", "_data"];
-
                 if (_time <= CBA_missionTime) then {
                     _unit selectWeapon [_data select 0, _data select 2, _data select 1];
                 }
@@ -570,6 +566,21 @@ execute [
                 "VehicleTurnState", 
                 "Velocity", 
                 "Weapon"
+            ];
+
+            private _positionData = _unit getVariable ["KH_var_positionData", []];
+            private _rotationData = _unit getVariable ["KH_var_rotationData", []];
+
+            _unit setVelocityTransformation [
+                _positionData param [0, [0, 0, 0]],
+                _positionData param [1, [0, 0, 0]],
+                [0, 0, 0],
+                [0, 0, 0],
+                (_rotationData param [0, [[0, 1, 0], [0, 0, 1]]]) select 0,
+                (_rotationData param [1, [[0, 1, 0], [0, 0, 1]]]) select 0,
+                (_rotationData param [0, [[0, 1, 0], [0, 0, 1]]]) select 1,
+                (_rotationData param [1, [[0, 1, 0], [0, 0, 1]]]) select 1,
+                _unit getVariable ["KH_var_transformInterval", 0]
             ];
         } forEach KH_var_recordedUnitData;
     },

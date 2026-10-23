@@ -28,7 +28,7 @@ _data set ["Roads", ([worldSize / 2, worldSize / 2] nearRoads (worldSize * sqrt 
 _data set ["SideRelations", []];
 
 _data set ["TerrainObjects", (nearestTerrainObjects [[worldSize / 2, worldSize / 2], ["Thing", "Static"], worldSize * sqrt 2 / 2, false, true]) apply {
-    [typeOf _x, getPosATLVisual _x, boundingBoxReal [_x, "FireGeometry"]];
+    [typeOf _x, getPosASLVisual _x, boundingBoxReal [_x, "FireGeometry"]];
 }];
 
 private _result = [
@@ -42,7 +42,7 @@ private _result = [
             {
                 params ["_from", "_to", "_isRuin"];
                 _args params ["_data"];
-                (_data get "BuildingChanged") pushBack [CBA_missionTime, [typeOf _from, getPosATLVisual _from, netId _to, _isRuin]];
+                (_data get "BuildingChanged") pushBack [CBA_missionTime, [typeOf _from, getPosASLVisual _from, netId _to, _isRuin]];
             }
         ] call KH_fnc_addEventHandler,
         execute [
@@ -62,7 +62,7 @@ private _result = [
                 };
             },
             true,
-            0.1,
+            1,
             false
         ]
     ]

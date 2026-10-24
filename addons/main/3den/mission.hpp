@@ -4,42 +4,6 @@ class Mission
 	{
 		class AttributeCategories
 		{
-			class KH_Miscellaneous
-			{
-				displayName = "KH Miscellaneous";
-				collapsed = 1;
-				class Attributes
-				{
-					class KH_EdenIDStorage
-					{
-						displayName = "Eden ID Storage";
-						tooltip = "Defines the Eden ID storage for this mission.";
-						property = "KH_EdenIDStorage";
-						control = "Edit";
-						expression = 
-						"\
-							if (isServer && !is3DEN) then {\
-								execute [\
-									[missionNamespace getVariable ['KH_var_edenIds', createHashMap]],\
-									{\
-										params ['_edenIds'];\
-										missionNamespace setVariable ['KH_var_edenIds', _edenIds];\
-										{\
-											_y setVariable ['KH_var_edenId', _x];\
-										} forEach _edenIds;\
-									},\
-									'REMOTE',\
-									true,\
-									true\
-								];\
-							};\
-						";
-						defaultValue = "0";
-						condition = "script";
-						conditionScript = "false";
-					};
-				};
-			};
 			class KH_Initialization
 			{
 				displayName = "KH Initialization";

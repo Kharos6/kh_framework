@@ -23,7 +23,7 @@ class Object
 								_ids = missionNamespace getVariable 'KH_var_edenIds';\
 							};\
 							_ids set [_value, _this];\
-							_this setVariable ['KH_var_edenId', _value];\
+							_this setVariable ['KH_var_edenId', _value, true];\
 						};\
 					";
 					defaultValue = "-1";
@@ -274,11 +274,11 @@ class Object
 					defaultValue = "false";
 					condition = "objectControllable";
 				};
-				class KH_ServerEntityInit
+				class KH_ServerObjectInit
 				{
-					displayName = "Server Entity Init";
-					tooltip = "Unscheduled code executed locally to the server with this entity passed as an argument. Passed arguments available through _this are: [_entity (OBJECT)].";
-					property = "KH_ServerEntityInit";
+					displayName = "Server Object Init";
+					tooltip = "Unscheduled code executed locally to the server with this object passed as an argument. Passed arguments available through _this are: [_object (OBJECT)].";
+					property = "KH_ServerObjectInit";
 					control = "EditCodeMulti5";
 					expression = 
 					"\
@@ -286,8 +286,8 @@ class Object
 							KH_var_postInitExecutions pushBack [\
 								[_this, compile _value],\
 								{\
-									params ['_entity', '_function'];\
-									[_entity] call _function;\
+									params ['_object', '_function'];\
+									[_object] call _function;\
 								}\
 							];\
 						};\

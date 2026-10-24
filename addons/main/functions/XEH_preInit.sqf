@@ -232,6 +232,20 @@
 ] call CBA_fnc_addSetting;
 
 [
+	"KH_var_khDataFlushInterval",
+	"TIME",   
+	[
+		"KH Data Flush Interval", 
+		"The interval at which KH Data is written to disk, preserving its state. Set to 0 if no interval is desired, in which case the data is only saved when a mission starts or ends."
+	], 
+	"KH Miscellaneous", 
+	[0, 36000, 600],
+	2,
+	{},
+	false
+] call CBA_fnc_addSetting;
+
+[
 	"KH_var_allowTeamspeakVoiceEffectPresets",
 	"CHECKBOX",   
 	[

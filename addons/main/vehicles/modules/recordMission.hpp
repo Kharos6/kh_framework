@@ -17,7 +17,7 @@ class KH_ModuleRecordMission: Module_F
 	curatorInfoType = "";
 	curatorInfoTypeEmpty = "";
 	curatorCanAttach = 0;
-	icon = "iconmodule";
+	icon = "\a3\Modules_F\Data\iconSavegame_ca.paa";
 	class Attributes: AttributesBase
 	{
 		class KH_ModuleRecordMissionCollector: Edit

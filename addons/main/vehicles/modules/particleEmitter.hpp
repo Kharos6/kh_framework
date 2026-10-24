@@ -17,7 +17,7 @@ class KH_ModuleParticleEmitter: Module_F
 	curatorInfoType = "";
 	curatorInfoTypeEmpty = "";
 	curatorCanAttach = 0;
-	icon = "iconmodule";
+	icon = "\a3\Modules_F_Curator\Data\iconFlare_ca.paa";
 	class Attributes: AttributesBase
 	{
 		class KH_ModuleParticleEmitterShow: Checkbox
@@ -45,7 +45,7 @@ class KH_ModuleParticleEmitter: Module_F
 		class KH_ModuleParticleEmitterCondition: EditCodeMulti5
 		{
 			displayName = "Condition";
-			tooltip = "Unscheduled code, executed locally to each client, that must return true in order for the particle to exist. Passed arguments available through _this are: [_logic (OBJECT)]";
+			tooltip = "Unscheduled code, executed locally to each client, that must return true in order for the particle to exist. Passed arguments available through _this are: [_logic (OBJECT)].";
 			property = "KH_ModuleParticleEmitterCondition";
 			defaultValue = "'true'";
 		};

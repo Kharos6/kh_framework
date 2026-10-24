@@ -17,7 +17,7 @@ class KH_ModulePlayRecordedMission: Module_F
 	curatorInfoType = "";
 	curatorInfoTypeEmpty = "";
 	curatorCanAttach = 0;
-	icon = "iconmodule";
+	icon = "IconTimeline";
 	class Attributes: AttributesBase
 	{
 		class KH_ModulePlayRecordedMissionIdentifier: Edit

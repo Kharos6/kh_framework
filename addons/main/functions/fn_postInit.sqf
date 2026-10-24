@@ -5,6 +5,8 @@ isNil {
 			KH_var_missionLoaded = true;
 
 			if isServer then {
+				publicVariable "KH_var_edenIds";
+				
 				switch KH_var_incapacitationAvailability do {
 					case 0: {
 						KH_var_allowIncapacitation = false;

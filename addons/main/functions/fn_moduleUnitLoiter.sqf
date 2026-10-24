@@ -14,7 +14,9 @@ isNil {
                         parseNumber (_logic getVariable ["KH_ModuleUnitLoiterRandomDelayMinimum", "5"]),
                         parseNumber (_logic getVariable ["KH_ModuleUnitLoiterRandomDelayMiddle", "15"]),
                         parseNumber (_logic getVariable ["KH_ModuleUnitLoiterRandomDelayMaximum", "30"])
-                    ]
+                    ],
+                    [_x],
+                    compile (_logic getVariable ["KH_ModuleUnitLoiterCondition", "true"])
                 ] call KH_fnc_setUnitLoiter;
             } forEach _units;
         }

@@ -55,11 +55,18 @@ class KH_ModuleUnitLoiter: Module_F
 			property = "KH_ModuleUnitLoiterRandomDelayMaximum";
 			defaultValue = "'30'";
 		};
+		class KH_ModuleUnitLoiterCondition: EditCodeMulti5
+		{
+			displayName = "Condition";
+			tooltip = "Unscheduled code, executed locally to the loitering unit, that must return true in order for the unit to loiter. Passed arguments available through _this are: [_unit (OBJECT)].";
+			property = "KH_ModuleUnitLoiterCondition";
+			defaultValue = "'true'";
+		};
 		class ModuleDescription: ModuleDescription {};
 	};
 	class ModuleDescription: ModuleDescription
 	{
-		description[] = {"Makes the synchronized units loiter around their current area within a radius. Activates multiple times, without a trigger, on the server."};
+		description[] = {"Makes the synchronized units loiter around their current area within a radius. Activates multiple times, with a trigger, on the server."};
 		sync[] = {"AnyPerson"};
 		position = 0;
 		direction = 0;

@@ -1622,6 +1622,15 @@ if isServer then {
 	execute [
 		[],
 		{
+			if !(isNil "KH_var_khDataFlushInterval") then {
+				if (KH_var_khDataFlushInterval isNotEqualTo 0) then {
+					if (diag_tickTime >= (missionNamespace getVariable ["KH_var_khDataFlushTime", 0])) then {
+						missionNamespace setVariable ["KH_var_khDataFlushTime", diag_tickTime + KH_var_khDataFlushInterval];
+						flushKhData;
+					};
+				};
+			};
+
 			if (KH_var_adminMachine isNotEqualTo clientOwner) then {
 				{
 					_x setVariable ["KH_var_playerViewDistance", _x getVariable ["KH_var_playerViewDistance", 999999], KH_var_adminMachine];
@@ -1728,6 +1737,15 @@ if hasInterface then {
 	execute [
 		[],
 		{
+			if !(isNil "KH_var_khDataFlushInterval") then {
+				if (KH_var_khDataFlushInterval isNotEqualTo 0) then {
+					if (diag_tickTime >= (missionNamespace getVariable ["KH_var_khDataFlushTime", 0])) then {
+						missionNamespace setVariable ["KH_var_khDataFlushTime", diag_tickTime + KH_var_khDataFlushInterval];
+						flushKhData;
+					};
+				};
+			};
+
 			private _mainCamera = ((allCameras select {_x select 2;}) param [0, []]) param [0, KH_var_playerUnit];
 			private _cameraView = cameraView;
 			private _mainCameraFirstPerson = ((_cameraView isEqualTo "INTERNAL") || (_cameraView isEqualTo "GUNNER")) && ((KH_var_mainCamera isEqualTo KH_var_playerUnit) || (KH_var_mainCamera isEqualTo (objectParent KH_var_playerUnit)));
@@ -2354,6 +2372,23 @@ if (!isServer && !hasInterface) then {
 		},
 		true,
 		1,
+		false
+	];
+
+	execute [
+		[],
+		{
+			if !(isNil "KH_var_khDataFlushInterval") then {
+				if (KH_var_khDataFlushInterval isNotEqualTo 0) then {
+					if (diag_tickTime >= (missionNamespace getVariable ["KH_var_khDataFlushTime", 0])) then {
+						missionNamespace setVariable ["KH_var_khDataFlushTime", diag_tickTime + KH_var_khDataFlushInterval];
+						flushKhData;
+					};
+				};
+			};
+		},
+		true,
+		0,
 		false
 	];
 };

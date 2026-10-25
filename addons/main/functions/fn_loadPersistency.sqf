@@ -1,4 +1,4 @@
-params [["_identifier", "", [""]], ["_unit", true, [true, []]], ["_group", true, [true, []]], ["_object", true, [true, []]], ["_player", true, [true, []]], ["_mission", true, [true]]];
+params [["_identifier", "", [""]], ["_unit", true, [true, []]], ["_group", true, [true, []]], ["_object", true, [true, []]], ["_player", true, [true, []]], ["_marker", true, [true, []]], ["_mission", true, [true]]];
 
 if (_object isEqualType true) then {
     if _object then {
@@ -34,6 +34,15 @@ if (_group isEqualType true) then {
 }
 else {
     _group call KH_fnc_loadGroupPersistency;
+};
+
+if (_marker isEqualType true) then {
+    if _marker then {
+        [_identifier, []] call KH_fnc_loadMarkerPersistency;
+    };
+}
+else {
+    _marker call KH_fnc_loadMarkerPersistency;
 };
 
 if _mission then {

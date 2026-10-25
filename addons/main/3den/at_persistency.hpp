@@ -2,7 +2,7 @@ class KH_Persistency: Title
 {
 	attributeLoad = "(_this controlsGroupCtrl 104) lbAdd 'NONE'; (_this controlsGroupCtrl 104) lbAdd 'SAVED'; (_this controlsGroupCtrl 104) lbAdd 'INITIAL'; (_this controlsGroupCtrl 104) lbAdd 'DEATH'; [_this, _value] call KH_fnc_loadControlAttributes;";
 	attributeSave = "[_this] call KH_fnc_saveControlAttributes;";
-	h = QUOTE(11 * CTRL_DEFAULT_H + 100 * pixelH);
+	h = QUOTE(12 * CTRL_DEFAULT_H + 105 * pixelH);
 	class Controls: Controls
 	{
 		class ToggleTitle: Title
@@ -145,17 +145,31 @@ class KH_Persistency: Title
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};
-		class MissionTitle: Title
+		class MarkersTitle: Title
 		{
-			text = "Mission";
-			tooltip = "True preserves the mission state, such as the environmental conditions and date.";
+			text = "Markers";
+			tooltip = "True preserves markers, with the valid markers dependent on the same terrain being used.";
 			y = QUOTE(11 * CTRL_DEFAULT_H + 50 * CTRL_DEFAULT_Y);
 		};
-		class Mission: ctrlCheckbox
+		class Markers: ctrlCheckbox
 		{
 			idc = 110;
 			x = QUOTE(CTRL_DEFAULT_X);
 			y = QUOTE(11 * CTRL_DEFAULT_H + 50 * CTRL_DEFAULT_Y);
+			w = QUOTE(5 * GRID_W);
+			h = QUOTE(CTRL_DEFAULT_H);
+		};
+		class MissionTitle: Title
+		{
+			text = "Mission";
+			tooltip = "True preserves the mission state, such as the environmental conditions and date.";
+			y = QUOTE(12 * CTRL_DEFAULT_H + 55 * CTRL_DEFAULT_Y);
+		};
+		class Mission: ctrlCheckbox
+		{
+			idc = 111;
+			x = QUOTE(CTRL_DEFAULT_X);
+			y = QUOTE(12 * CTRL_DEFAULT_H + 55 * CTRL_DEFAULT_Y);
 			w = QUOTE(5 * GRID_W);
 			h = QUOTE(CTRL_DEFAULT_H);
 		};

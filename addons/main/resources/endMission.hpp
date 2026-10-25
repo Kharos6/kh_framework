@@ -62,7 +62,7 @@ class KH_ResourceEndMission
         };
         class KH_ButtonOK: RscButtonMenuOK 
         {
-            x = QUOTE(RSC_POS_X(40));
+            x = QUOTE(RSC_POS_X(55));
             y = QUOTE(RSC_POS_Y(45));
             w = QUOTE(RSC_POS_W(5));
             h = QUOTE(RSC_POS_H(2));
@@ -71,7 +71,7 @@ class KH_ResourceEndMission
         };
         class KH_ButtonCancel: RscButtonMenuCancel 
         {
-            x = QUOTE(RSC_POS_X(55));
+            x = QUOTE(RSC_POS_X(40));
             y = QUOTE(RSC_POS_Y(45));
             w = QUOTE(RSC_POS_W(5));
             h = QUOTE(RSC_POS_H(2));

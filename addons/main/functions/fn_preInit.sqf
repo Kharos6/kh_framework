@@ -43,6 +43,7 @@ KH_var_allLocalOnlyEntities = [];
 KH_var_allMen = [];
 KH_var_allLocalMen = [];
 KH_var_allTerrainChangedBuildings = createHashMap;
+KH_var_allMarkers = createHashMap;
 KH_var_cloudletParameterCache = createHashMap;
 KH_var_lightParameterCache = createHashMap;
 KH_var_executedStacks = [];
@@ -270,6 +271,89 @@ if (isNil "KH_var_edenIds") then {
 		else {
 			KH_var_allTerrainChangedBuildings set [hashValue _to, _terrainInfo];
 			KH_var_allTerrainChangedBuildings deleteAt (hashValue _from);
+		};
+	}
+] call KH_fnc_addEventHandler;
+
+[
+	"MISSION",
+	"MarkerCreated",
+	[], 
+	{
+		private _marker = param [0];
+		private _owner = param [2];
+		private _local = param [3];
+		private _markerInfo = [side (group _owner), [_x] call KH_fnc_getMarkerAttributes];
+		KH_var_allMarkers set [_marker, _markerInfo];
+		
+		if _local then {
+			if !isServer then {
+				if ((customWaypointPosition select [0, 2]) isEqualTo ((getMarkerPos _marker) select [0, 2])) exitWith {};
+				
+				execute [
+					[_marker, _markerInfo],
+					{
+						params ["_marker", "_markerInfo"];
+						KH_var_allMarkers set [_marker, _markerInfo];
+					},
+					"SERVER",
+					true,
+					false
+				];
+			};
+		};		
+	}
+] call KH_fnc_addEventHandler;
+
+[
+	"MISSION",
+	"MarkerUpdated",
+	[], 
+	{
+		params ["_marker", "_local"];
+		private _markerInfo = [(KH_var_allMarkers get _marker) param [0, sideUnknown], [_x] call KH_fnc_getMarkerAttributes];
+		KH_var_allMarkers set [_marker, _markerInfo];
+		
+		if _local then {
+			if !isServer then {
+				if ((customWaypointPosition select [0, 2]) isEqualTo ((getMarkerPos _marker) select [0, 2])) exitWith {};
+
+				execute [
+					[_marker, _markerInfo],
+					{
+						params ["_marker", "_markerInfo"];
+						KH_var_allMarkers set [_marker, _markerInfo];
+					},
+					"SERVER",
+					true,
+					false
+				];
+			};
+		};		
+	}
+] call KH_fnc_addEventHandler;
+
+[
+	"MISSION",
+	"MarkerDeleted",
+	[], 
+	{
+		params ["_marker", "_local"];
+		KH_var_allMarkers deleteAt _marker;
+		
+		if _local then {
+			if !isServer then {
+				execute [
+					[_marker],
+					{
+						params ["_marker"];
+						KH_var_allMarkers deleteAt _marker;
+					},
+					"SERVER",
+					true,
+					false
+				];
+			};
 		};
 	}
 ] call KH_fnc_addEventHandler;
@@ -804,6 +888,7 @@ if isServer then {
 	KH_var_disconnectedPlayerStorage = createHashMap;
 	KH_var_jipHandlers = createHashMap;
 	KH_var_playerPresenceHandlers = createHashMap;
+	KH_var_queuedMarkers = [];
 	KH_var_headlessClientTransfers = [];
 	KH_var_entityArrayBuilderArrays = [];
 	KH_var_groupArrayBuilderArrays = [];
@@ -1339,6 +1424,18 @@ if isServer then {
 			};
 
 			KH_var_disconnectedPlayerStorage deleteAt _uid;
+			private _markerDeletions = [];
+
+			{
+				_x params ["_markerName", "_side", "_markerChannel", "_markerPosition", "_markerAttributes"];
+
+				if (_side isEqualTo (side (group _unit))) then {
+					_markerDeletions pushBack _forEachIndex;
+					[createMarker [_markerName, _markerPosition, _markerChannel, _unit], _markerAttributes, [], false] call KH_fnc_setMarkerAttributes;
+				};
+			} forEach KH_var_queuedMarkers;
+
+			KH_var_queuedMarkers deleteAt _markerDeletions;
 		}
 	] call KH_fnc_addEventHandler;
 
@@ -2111,7 +2208,7 @@ if hasInterface then {
 			player setVariable ["KH_var_playerCameraPosition", positionCameraToWorld [0, 0, 0], 2];
 			player setVariable ["KH_var_playerCameraDirection", getCameraViewDirection KH_var_mainCamera, 2];
 
-			if ((KH_var_anchorPlayersToGeometry || (KH_var_anchorPlayersToMovingObjects isNotEqualTo 0)) && (isNull (objectParent player)) && (isNull (attachedTo player)) && (alive player)) then {
+			if ((KH_var_anchorPlayersToGeometry || (KH_var_anchorPlayersToMovingObjects isNotEqualTo "NONE")) && (isNull (objectParent player)) && (isNull (attachedTo player)) && (alive player)) then {
 				private _position = getPosASLVisual player;
 				private _aimPosition = [_position select 0, _position select 1, (AGLToASL (unitAimPositionVisual player)) select 2];
 
@@ -2153,7 +2250,7 @@ if hasInterface then {
 					] call KH_fnc_raycast;
 				};
 
-				private _useRoadway = if (KH_var_anchorPlayersToMovingObjects isNotEqualTo 0) then {
+				private _useRoadway = if (KH_var_anchorPlayersToMovingObjects isNotEqualTo "NONE") then {
 					if ((_groundIntersection isNotEqualTo []) && (_roofIntersection isEqualTo [])) then {
 						private _entity = (_groundIntersection select 0) select 3;
 
@@ -2192,19 +2289,7 @@ if hasInterface then {
 										[
 											true, 
 											true,
-											switch KH_var_anchorPlayersToMovingObjects do {
-												case 1: {
-													"VELOCITY";
-												};
-
-												case 2: {
-													"POSITION";
-												};
-
-												case 3: {
-													"VARIABLE";
-												};
-											},
+											KH_var_anchorPlayersToMovingObjects,
 											true,
 											true,
 											1,

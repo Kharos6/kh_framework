@@ -310,7 +310,7 @@
 	], 
 	"KH Miscellaneous", 
 	[
-        [0, 1, 2, 3],
+        ["NONE", "VELOCITY", "POSITION", "VARIABLE"],
         ["NONE", "VELOCITY BASED", "POSITION BASED", "VARIABLE"],
         0
     ],

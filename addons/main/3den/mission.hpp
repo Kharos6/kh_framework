@@ -467,7 +467,7 @@ class Mission
 						control = "KH_Persistency";
 						expression = 
 						"\
-							_value params ['_toggle', '_identifier', '_players', '_playersDisconnected', '_playerRespawnType', '_units', '_unitsUndefined', '_groups', '_objects', '_objectsUndefined', '_mission'];\
+							_value params ['_toggle', '_identifier', '_players', '_playersDisconnected', '_playerRespawnType', '_units', '_unitsUndefined', '_groups', '_objects', '_objectsUndefined', '_markers', '_mission'];\
 							if (_toggle && !is3DEN && isServer) then {\
 								KH_var_missionPersistencyIdentifier = _identifier;\
 								KH_var_missionPersistencyPlayers = _players;\
@@ -477,6 +477,7 @@ class Mission
 								KH_var_missionPersistencyGroups = _groups;\
 								KH_var_missionPersistencyObjects = _objects;\
 								KH_var_missionPersistencyObjectsUndefined = _objectsUndefined;\
+								KH_var_missionPersistencyMarkers = _markers;\
 								KH_var_missionPersistencyMission = _mission;\
 								private _respawnType = switch _playerRespawnType do {\
 									case 1: {\
@@ -507,15 +508,18 @@ class Mission
 								if _groups then {\
 									[_identifier, []] call KH_fnc_loadGroupPersistency;\
 								};\
+								if _markers then {\
+									[_identifier, []] call KH_fnc_loadMarkerPersistency;\
+								};\
 								if _mission then {\
 									[_identifier] call KH_fnc_loadMissionPersistency;\
 								};\
 								[\
 									'CBA',\
 									'KH_eve_missionEnded',\
-									[_identifier, _players, _playersDisconnected, _units, _unitsUndefined, _groups, _objects, _objectsUndefined, _mission],\
+									[_identifier, _players, _playersDisconnected, _units, _unitsUndefined, _groups, _objects, _objectsUndefined, _markers, _mission],\
 									{\
-										_args params ['_identifier', '_players', '_playersDisconnected', '_units', '_unitsUndefined', '_groups', '_objects', '_objectsUndefined', '_mission'];\
+										_args params ['_identifier', '_players', '_playersDisconnected', '_units', '_unitsUndefined', '_groups', '_objects', '_objectsUndefined', '_markers', '_mission'];\
 										if _objects then {\
 											[_identifier, (allMissionObjects '') select {!(_x isKindOf 'Man') && !(_x isKindOf 'Logic') && !(_x isKindOf 'EmptyDetector') && (((typeOf _x) select [0, 1]) isNotEqualTo '#');}, _objectsUndefined] call KH_fnc_saveObjectPersistency;\
 										};\
@@ -528,6 +532,9 @@ class Mission
 										if _groups then {\
 											[_identifier, allGroups] call KH_fnc_saveGroupPersistency;\
 										};\
+										if _markers then {\
+											[_identifier, keys KH_var_allMarkers] call KH_fnc_saveMarkerPersistency;\
+										};\
 										if _mission then {\
 											[_identifier] call KH_fnc_saveMissionPersistency;\
 										};\
@@ -536,7 +543,7 @@ class Mission
 								] call KH_fnc_addEventHandler;\
 							};\
 						";
-						defaultValue = "[false, profileName, true, true, 2, true, false, true, true, false, true]";
+						defaultValue = "[false, profileName, true, true, 2, true, false, true, true, false, true, true]";
 					};
 				};
 			};
@@ -719,6 +726,36 @@ class Mission
 						defaultValue = "0";
 						validate = "number";
 						typeName = "NUMBER";
+					};
+					class KH_EmptyGroupCleanup
+					{
+						displayName = "Empty Group Cleanup";
+						tooltip = "True ensures that the engine's empty group deletion is forced on every created group.";
+						property = "KH_EmptyGroupCleanup";
+						control = "Checkbox";
+						expression = 
+						"\
+							if (_value && !is3DEN) then {\
+								[\
+									'MISSION',\
+									'GroupCreated',\
+									[],\
+									{\
+										execute [\
+											_this,\
+											{\
+												params ['_group'];\
+												_group deleteGroupWhenEmpty true;\
+											},\
+											true,\
+											'1',\
+											false\
+										];\
+									}\
+								] call KH_fnc_addEventHandler;\
+							};\
+						";
+						defaultValue = "false";
 					};
 				};
 			};

@@ -19,11 +19,13 @@ private _undefinedUnitPersistency = _persistencyNamespace readKhData [["undefine
                 _currentOverrideAttributes insert [-1, [26, 27, 28], true];
             };
 
-            private _group = ["GROUP", [_attributes select 39, _attributes select 40] joinString "_"] call KH_fnc_getEntityByIdentifier;
+            if !(_savedData select 4) then {
+                private _group = ["GROUP", [_attributes select 39, _attributes select 40] joinString "_"] call KH_fnc_getEntityByIdentifier;
 
-            if (isNull _group) then {
-                _group = createGroup [_attributes select 39, true];
-                _group setGroupIdGlobal [_attributes select 40];
+                if (isNull _group) then {
+                    _group = createGroup [_attributes select 39, true];
+                    _group setGroupIdGlobal [_attributes select 40];
+                };
             };
 
             [_x, _savedData, _currentOverrideAttributes, true] call KH_fnc_setUnitAttributes;
@@ -46,12 +48,6 @@ private _undefinedUnitPersistency = _persistencyNamespace readKhData [["undefine
     };
 
     private _attributes = _savedData select 5;
-    private _group = ["GROUP", [_attributes select 39, _attributes select 40] joinString "_"] call KH_fnc_getEntityByIdentifier;
-
-    if (isNull _group) then {
-        _group = createGroup [_attributes select 39, true];
-        _group setGroupIdGlobal [_attributes select 40];
-    };
 
     if _exists then {
         private _currentEntity = KH_var_edenIds get (_x select 0);
@@ -65,7 +61,19 @@ private _undefinedUnitPersistency = _persistencyNamespace readKhData [["undefine
         [_currentEntity, _savedData, _currentOverrideAttributes, true] call KH_fnc_setUnitAttributes;
     }
     else {
-        [_group createUnit [_savedData select 3, _attributes select 26, [], 0, "CAN_COLLIDE"], _savedData, _overrideAttributes, true] call KH_fnc_setUnitAttributes;
+        private _group = ["GROUP", [_attributes select 39, _attributes select 40] joinString "_"] call KH_fnc_getEntityByIdentifier;
+
+        if !(_savedData select 4) then {
+            if (isNull _group) then {
+                _group = createGroup [_attributes select 39, true];
+                _group setGroupIdGlobal [_attributes select 40];
+            };
+
+            [_group createUnit [_savedData select 3, _attributes select 26, [], 0, "CAN_COLLIDE"], _savedData, _overrideAttributes, true] call KH_fnc_setUnitAttributes;
+        }
+        else {
+            [createAgent [_savedData select 3, _attributes select 26, [], 0, "CAN_COLLIDE"], _savedData, _overrideAttributes, true] call KH_fnc_setUnitAttributes;
+        };
     };
 } forEach _undefinedUnitPersistency;
 

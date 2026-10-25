@@ -4,6 +4,10 @@ isNil {
 		{
 			KH_var_missionLoaded = true;
 
+			{
+				KH_var_allMarkers set [_x, [sideUnknown, [_x] call KH_fnc_getMarkerAttributes]];
+			} forEach allMapMarkers;
+
 			if isServer then {
 				publicVariable "KH_var_edenIds";
 				
@@ -1421,7 +1425,7 @@ isNil {
 										} forEach KH_var_playerRespawnStack;
 
 										[_corpse] call KH_fnc_playerRespawnInit;
-										triggerCbaEvent ["KH_eve_playerRespawned", [owner _unit, getPlayerUID _unit, getPlayerID _unit, _unit, _corpse], "GLOBAL", false];
+										triggerCbaEvent ["KH_eve_playerRespawned", [clientOwner, getPlayerUID _unit, getPlayerID _unit, _unit, _corpse], "GLOBAL", false];
 										nil;
 									}
 								] call KH_fnc_addEventHandler;
@@ -1442,7 +1446,7 @@ isNil {
 										} forEach KH_var_playerKilledStack;
 
 										[_killer, _instigator] call KH_fnc_playerKilledInit;
-										triggerCbaEvent ["KH_eve_playerKilled", [owner _unit, getPlayerUID _unit, getPlayerID _unit, _unit, _killer, _instigator], "GLOBAL", false];
+										triggerCbaEvent ["KH_eve_playerKilled", [clientOwner, getPlayerUID _unit, getPlayerID _unit, _unit, _killer, _instigator], "GLOBAL", false];
 									}
 								] call KH_fnc_addEventHandler;
 

@@ -8,17 +8,21 @@ if (_owner isEqualType objNull) then {
 	_owner = owner _owner;
 };
 
+private _unitLoadoutChecks = [];
 private _parsedUnits = [];
 
 {
 	if (_x isEqualType teamMemberNull) then {
-		(agent _x) setOwner _owner;
+		private _agent = agent _x;
+		_agent setOwner _owner;
+		_unitLoadoutChecks pushBackUnique [_agent, getUnitLoadout _agent];
 		continue;
 	};
 
 	if (_x isEqualType grpNull) then {
 		{
 			_parsedUnits pushBackUnique _x;
+			_unitLoadoutChecks pushBackUnique [_x, getUnitLoadout _x];
 		} forEach (units _x);
 
 		continue;
@@ -27,6 +31,7 @@ private _parsedUnits = [];
 	if (_x isKindOf "Man") then {
 		if !(isNull (group _x)) then {
 			_parsedUnits pushBackUnique _x;
+			_unitLoadoutChecks pushBackUnique [_x, getUnitLoadout _x];
 		}
 		else {
 			_x setOwner _owner;
@@ -36,6 +41,7 @@ private _parsedUnits = [];
 		if ((crew _x) isNotEqualTo []) then {
 			{
 				_parsedUnits pushBackUnique _x;
+				_unitLoadoutChecks pushBackUnique [_x, getUnitLoadout _x];
 			} forEach (crew _x);
 		}
 		else {
@@ -151,5 +157,23 @@ private _groups = [];
 {
 	_x setGroupOwner _owner;
 } forEach _groups;
+
+execute [
+	[_unitLoadoutChecks],
+	{
+		params ["_unitLoadoutChecks"];
+
+		{
+			_x params ["_unit", "_loadout"];
+
+			if ((getUnitLoadout _unit) isNotEqualTo _loadout) then {
+				_unit setUnitLoadout _loadout;
+			};
+		} forEach _unitLoadoutChecks;
+	},
+	true,
+	"1",
+	false
+];
 
 nil;

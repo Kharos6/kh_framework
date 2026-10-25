@@ -60,6 +60,7 @@ class CfgFunctions
 			class getHeadViewTarget {headerType = -1;};
 			class getLatency {headerType = -1;};
 			class getLightParameters {headerType = -1;};
+			class getMarkerAttributes {headerType = -1;};
 			class getMissionAttributes {headerType = -1;};
 			class getMouseTarget {headerType = -1;};
 			class getNormalizedScreenTransforms {headerType = -1;};
@@ -86,6 +87,7 @@ class CfgFunctions
 			class loadControlAttributes {headerType = -1;};
 			class loadDisplay {headerType = -1;};
 			class loadGroupPersistency {headerType = -1;};
+			class loadMarkerPersistency {headerType = -1;};
 			class loadMissionPersistency {headerType = -1;};
 			class loadObjectPersistency {headerType = -1;};
 			class loadPersistency {headerType = -1;};
@@ -142,6 +144,7 @@ class CfgFunctions
 			class rotateVector {headerType = -1;};
 			class saveControlAttributes {headerType = -1;};
 			class saveGroupPersistency {headerType = -1;};
+			class saveMarkerPersistency {headerType = -1;};
 			class saveMissionPersistency {headerType = -1;};
 			class saveObjectPersistency {headerType = -1;};
 			class savePersistency {headerType = -1;};
@@ -155,6 +158,7 @@ class CfgFunctions
 			class setDynamicVariable {headerType = -1;};
 			class setEntityVariableName {headerType = -1;};
 			class setGroupAttributes {headerType = -1;};
+			class setMarkerAttributes {headerType = -1;};
 			class setMissionAttributes {headerType = -1;};
 			class setObjectAttributes {headerType = -1;};
 			class setObjectInventory {headerType = -1;};

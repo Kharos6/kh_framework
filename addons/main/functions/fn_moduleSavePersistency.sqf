@@ -8,6 +8,7 @@ isNil {
             KH_var_missionPersistencyGroups,
             [KH_var_missionPersistencyObjects, KH_var_missionPersistencyObjectsUndefined],
             [KH_var_missionPersistencyPlayers, KH_var_missionPersistencyPlayersDisconnected],
+            KH_var_missionPersistencyMarkers,
             KH_var_missionPersistencyMission
         ] call KH_fnc_savePersistency;
 	};

@@ -11,6 +11,8 @@ isNil {
             KH_var_missionPersistencyMarkers,
             KH_var_missionPersistencyMission
         ] call KH_fnc_savePersistency;
+
+        execute [[], {hint "MISSION SAVED";}, "GLOBAL", true, false];
 	};
 };
 

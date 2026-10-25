@@ -44,8 +44,6 @@ KH_var_allMen = [];
 KH_var_allLocalMen = [];
 KH_var_allTerrainChangedBuildings = createHashMap;
 KH_var_allMarkers = createHashMap;
-KH_var_cloudletParameterCache = createHashMap;
-KH_var_lightParameterCache = createHashMap;
 KH_var_executedStacks = [];
 
 if (isNil "KH_var_edenIds") then {

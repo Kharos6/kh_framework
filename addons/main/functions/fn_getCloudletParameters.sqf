@@ -9,6 +9,10 @@ else {
     configName _cloudlet;
 };
 
+if (isNil "KH_var_cloudletParameterCache") then {
+    KH_var_cloudletParameterCache = createHashMap;
+};
+
 if !(KH_var_cloudletParameterCache isNil _currentEntry) exitWith {
     +(KH_var_cloudletParameterCache get _currentEntry);
 };

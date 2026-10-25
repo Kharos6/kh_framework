@@ -53,8 +53,8 @@ private _climbIntersections = ([
     [_unit, "TERRAIN"] + (attachedObjects _unit),
     false, 
     -1, 
-    "GEOM", 
-    "ROADWAY",
+    "ROADWAY", 
+    ["NONE", "GEOM"] select KH_var_anchorPlayersToGeometry,
     true,
     [[], ["LINE", [], 1]] select KH_var_traversalDebugMode
 ] call KH_fnc_raycast3d) select 0;

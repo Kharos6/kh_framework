@@ -1,14 +1,12 @@
 isNil {
     params [["_mode", "", [""]], ["_input", [], [[]]]];
-    
-    if is3DEN then {
-        if (isNil "KH_var_cloudletParameterCache") then {
-            KH_var_cloudletParameterCache = createHashMap;
-        };
 
-        if (isNil "KH_var_lightParameterCache") then {
-            KH_var_lightParameterCache = createHashMap;
-        };
+    if (isNil "KH_var_cloudletParameterCache") then {
+        KH_var_cloudletParameterCache = createHashMap;
+    };
+
+    if (isNil "KH_var_lightParameterCache") then {
+        KH_var_lightParameterCache = createHashMap;
     };
 
     switch _mode do {

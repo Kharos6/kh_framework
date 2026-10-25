@@ -9,6 +9,10 @@ else {
     configName _light;
 };
 
+if (isNil "KH_var_lightParameterCache") then {
+    KH_var_lightParameterCache = createHashMap;
+};
+
 if !(KH_var_lightParameterCache isNil _currentEntry) exitWith {
     +(KH_var_lightParameterCache get _currentEntry);
 };

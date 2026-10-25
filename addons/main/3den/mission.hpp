@@ -727,36 +727,6 @@ class Mission
 						validate = "number";
 						typeName = "NUMBER";
 					};
-					class KH_EmptyGroupCleanup
-					{
-						displayName = "Empty Group Cleanup";
-						tooltip = "True ensures that the engine's empty group deletion is forced on every created group.";
-						property = "KH_EmptyGroupCleanup";
-						control = "Checkbox";
-						expression = 
-						"\
-							if (_value && !is3DEN) then {\
-								[\
-									'MISSION',\
-									'GroupCreated',\
-									[],\
-									{\
-										execute [\
-											_this,\
-											{\
-												params ['_group'];\
-												_group deleteGroupWhenEmpty true;\
-											},\
-											true,\
-											'1',\
-											false\
-										];\
-									}\
-								] call KH_fnc_addEventHandler;\
-							};\
-						";
-						defaultValue = "false";
-					};
 				};
 			};
 		};

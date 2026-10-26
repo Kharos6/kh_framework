@@ -393,11 +393,13 @@ class CfgVehicles
 	#include "\x\kh\addons\main\vehicles\modules\visualTrigger.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusArma.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusBreakDisguise.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\zeusDeleteEmptyGroups.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusDisembarkUnits.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusEndMission.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusHeal.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusHealAllPlayers.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusKill.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusRagdollUnit.hpp"
+	#include "\x\kh\addons\main\vehicles\modules\zeusSavePersistency.hpp"
 	#include "\x\kh\addons\main\vehicles\modules\zeusToggleMissionSuspension.hpp"
 };

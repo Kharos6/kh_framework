@@ -447,7 +447,9 @@ if KH_var_medical then {
                                                 if !(isNil "KH_var_incapacitationChromaticHandler") then {
                                                     [KH_var_incapacitationChromaticHandler] call KH_fnc_removeHandler;
                                                     KH_var_incapacitationChromaticHandler = nil;
-                                                };	
+                                                };
+
+                                                nil;
                                             },
                                             true,
                                             {

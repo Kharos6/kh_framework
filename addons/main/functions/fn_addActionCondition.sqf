@@ -6,7 +6,6 @@ private _handlerConditionId = generateUid;
 missionNamespace setVariable [_id, true];
 missionNamespace setVariable [_argumentsId, _arguments];
 missionNamespace setVariable [_conditionId, _condition];
-
 private _unitActions = [KH_var_playerUnit];
 
 KH_var_playerUnit addAction [ 

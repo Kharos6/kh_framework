@@ -188,12 +188,14 @@ class CfgFunctions
 			class visualTrigger {headerType = -1;};
 			class zeusModuleArma {headerType = -1;};
 			class zeusModuleBreakDisguise {headerType = -1;};
+			class zeusModuleDeleteEmptyGroups {headerType = -1;};
 			class zeusModuleDisembarkUnits {headerType = -1;};
 			class zeusModuleEndMission {headerType = -1;};
 			class zeusModuleHeal {headerType = -1;};
 			class zeusModuleHealAllPlayers {headerType = -1;};
 			class zeusModuleKill {headerType = -1;};
 			class zeusModuleRagdollUnit {headerType = -1;};
+			class zeusModuleSavePersistency {headerType = -1;};
 			class zeusModuleToggleMissionSuspension {headerType = -1;};
 		};
 	};

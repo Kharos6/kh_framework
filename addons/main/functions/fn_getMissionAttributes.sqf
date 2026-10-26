@@ -27,14 +27,6 @@
 
             _allRelations;
         },
-        call {
-            private _allVariables = [];
-
-			{
-				_allVariables pushBack _x;
-			} forEach (missionNamespace getVariable ["KH_var_persistentVariables", []]);
-
-            _allVariables;
-        }
+        missionNamespace getVariable ["KH_var_persistentVariables", []]
     ]
 ];

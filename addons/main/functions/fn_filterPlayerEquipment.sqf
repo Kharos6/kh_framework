@@ -9,8 +9,9 @@ _equipment = _equipment apply {toLowerANSI _x;};
 
 if _overwrite then {
     KH_var_filterPlayerEquipmentList = _equipment;
-    nil;
 }
 else {
     KH_var_filterPlayerEquipmentList insert [-1, _equipment, true];
 };
+
+nil;

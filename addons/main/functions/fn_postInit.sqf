@@ -1850,18 +1850,10 @@ isNil {
 											},
 											{},
 											{
-												if !(_caller getVariable ["KH_var_incapacitated", false]) then {
-													[_caller, ["ACTION_SWITCH", "MedicStop", true], false, false] call KH_fnc_setAnimation;
-												};
-
 												_this set [0, 999999];
 												_caller setVariable ["KH_var_healingTarget", objNull, true];
 											},
 											{
-												if !(_caller getVariable ["KH_var_incapacitated", false]) then {
-													[_caller, ["ACTION_SWITCH", "MedicStop", true], false, false] call KH_fnc_setAnimation;
-												};
-
 												_this set [0, 999999];
 												_caller setVariable ["KH_var_healingTarget", objNull, true];
 											},
@@ -1869,7 +1861,6 @@ isNil {
 												private _currentTarget = _caller getVariable ["KH_var_healingTarget", objNull];
 												_caller setVariable ["KH_var_healingTarget", objNull, true];
 												_this set [0, 999999];
-												[_caller, ["ACTION_SWITCH", "MedicStop", true], false, false] call KH_fnc_setAnimation;
 												private _isMedic = [_caller getUnitTrait "Medic", false] call KH_fnc_parseBoolean;
 
 												private _damageOffset = if (((_caller nearEntities 15) findIf {((getNumber ((configOf _x) >> "attendant")) isEqualTo 1) && !(_x isKindOf "Man");}) isNotEqualTo -1) then {
@@ -1962,7 +1953,7 @@ isNil {
 										true,
 										false,
 										true,
-										[7, KH_var_healProgressDisplay],
+										[5, KH_var_healProgressDisplay],
 										3,
 										true,
 										false,
@@ -1990,22 +1981,13 @@ isNil {
 											},
 											{},
 											{
-												if !(_caller getVariable ["KH_var_incapacitated", false]) then {
-													[_caller, ["ACTION_SWITCH", "MedicStop", true], false, false] call KH_fnc_setAnimation;
-												};
-
-												_caller setVariable ["KH_var_healingTarget", objNull, true];
-											},
-											{
-												if !(_caller getVariable ["KH_var_incapacitated", false]) then {
-													[_caller, ["ACTION_SWITCH", "MedicStop", true], false, false] call KH_fnc_setAnimation;
-												};
-
 												_caller setVariable ["KH_var_healingTarget", objNull, true];
 											},
 											{
 												_caller setVariable ["KH_var_healingTarget", objNull, true];
-												[_caller, ["ACTION_SWITCH", "MedicStop", true], false, false] call KH_fnc_setAnimation;
+											},
+											{
+												_caller setVariable ["KH_var_healingTarget", objNull, true];
 												private _isMedic = [_caller getUnitTrait "Medic", false] call KH_fnc_parseBoolean;
 
 												private _damageOffset = if (((_caller nearEntities 15) findIf {((getNumber ((configOf _x) >> "attendant")) isEqualTo 1) && !(_x isKindOf "Man");}) isNotEqualTo -1) then {
@@ -2079,7 +2061,7 @@ isNil {
 										true,
 										false,
 										true,
-										[7, KH_var_healProgressDisplay],
+										[5, KH_var_healProgressDisplay],
 										0,
 										true,
 										false,
@@ -2091,8 +2073,8 @@ isNil {
 										[false, true]
 									] call KH_fnc_addAction;
 
-									private _medicalControl = (uiNamespace getVariable ["KH_var_display", displayNull]) ctrlCreate ["RscStructuredText", -1];
 									private _medicalControlBackground = (uiNamespace getVariable ["KH_var_display", displayNull]) ctrlCreate ["RscText", -1];
+									private _medicalControl = (uiNamespace getVariable ["KH_var_display", displayNull]) ctrlCreate ["RscStructuredText", -1];
 									_medicalControl ctrlShow false;
 									_medicalControlBackground ctrlShow false;
 									_medicalControlBackground ctrlSetBackgroundColor KH_var_uiBackgroundColor;

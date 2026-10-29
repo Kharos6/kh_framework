@@ -17,7 +17,7 @@ class KH_ModuleUnitLoiter: Module_F
 	curatorInfoType = "";
 	curatorInfoTypeEmpty = "";
 	curatorCanAttach = 0;
-	icon = "A3\modules_f_beta\data\FiringDrills\iconModuleFD_ca";
+	icon = "A3\modules_f_beta\data\FiringDrills\iconModuleFD_ca.paa";
 	class Attributes: AttributesBase
 	{
 		class KH_ModuleUnitLoiterRadius: Edit

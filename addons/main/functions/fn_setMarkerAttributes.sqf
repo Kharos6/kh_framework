@@ -39,6 +39,20 @@ if (_overrideAttributes isNotEqualTo []) then {
 	} forEach _overrideAttributes;
 };
 
+_savedAttributes params [
+	"_type",
+	"_position",
+	"_direction",
+	"_size",
+	"_color",
+	"_alpha",
+	"_text",
+	"_brush",
+	"_polyline",
+	"_shadow",
+	"_shape"
+];
+
 _marker setMarkerTypeLocal _type;
 _marker setMarkerPosLocal _position;
 _marker setMarkerDirLocal _direction;

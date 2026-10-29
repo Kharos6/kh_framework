@@ -14,7 +14,6 @@ params [["_marker", "", [""]]];
         markerAlpha _marker,
         markerText _marker,
         markerBrush _marker,
-        markerDrawPriority _marker,
         markerPolyline _marker,
         markerShadow _marker,
         markerShape _marker

@@ -40,6 +40,7 @@ class CfgFunctions
 			class editTerrainHeight {headerType = -1;};
 			class endMission {headerType = -1;};
 			class engineeringSetup {headerType = -1;};
+			class entityAttachedObjectSetup {headerType = -1;};
 			class entityDeletedHandler {headerType = -1;};
 			class entityInit {headerType = -1;};
 			class entityInitHandler {headerType = -1;};
@@ -77,6 +78,7 @@ class CfgFunctions
 			class getUnitStateAction {headerType = -1;};
 			class getUnitVehicleSlot {headerType = -1;};
 			class getUnitWeaponSlot {headerType = -1;};
+			class getVariableSafe {headerType = -1;};
 			class getVehicleLoadout {headerType = -1;};
 			class getViewTarget {headerType = -1;};
 			class getWeaponPosition {headerType = -1;};

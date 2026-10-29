@@ -3,7 +3,7 @@ class KH_ResourceEndMission
     idd = -1;
     function = "KH_fnc_zeusModuleEndMission";
     movingEnable = 1;
-    onLoad = "[_this select 0, 'KH_ResourceEndMission'] call KH_fnc_loadDisplay";
+    onLoad = "[_this select 0, 'KH_ResourceEndMission'] call KH_fnc_loadDisplay;";
     class Controls 
     {
         class KH_Title: RscText 

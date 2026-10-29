@@ -156,6 +156,12 @@
 				if KH_var_renderingVolumetricDynamicLights then {
 					KH_var_volumetricDynamicLightsHandler = addPostFX ["dynamicLightFog", [1, 1, 0, 0.6, 16, 250, 2, 24]];
 				};
+				
+				removeRenderHandler KH_var_fogScatteringHandler;
+
+				if KH_var_renderingFogScattering then {
+					KH_var_fogScatteringHandler = addPostFX ["fogScatter", [0.5, 0, 12]];
+				};
 
 				nil;
 			},
@@ -186,10 +192,16 @@
 		execute [
 			[],
 			{
+				removeRenderHandler KH_var_volumetricDynamicLightsHandler;
+
+				if KH_var_renderingVolumetricDynamicLights then {
+					KH_var_volumetricDynamicLightsHandler = addPostFX ["dynamicLightFog", [1, 1, 0, 0.6, 16, 250, 2, 24]];
+				};
+				
 				removeRenderHandler KH_var_fogScatteringHandler;
 
 				if KH_var_renderingFogScattering then {
-					KH_var_fogScatteringHandler = addPostFX ["fogScatter", [1, 0, 12]];
+					KH_var_fogScatteringHandler = addPostFX ["fogScatter", [0.5, 0, 12]];
 				};
 
 				nil;

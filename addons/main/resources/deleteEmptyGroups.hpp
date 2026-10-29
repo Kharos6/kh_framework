@@ -3,7 +3,7 @@ class KH_ResourceDeleteEmptyGroups
     idd = -1;
     function = "KH_fnc_zeusModuleDeleteEmptyGroups";
     movingEnable = 1;
-    onLoad = "[_this select 0, 'KH_ResourceDeleteEmptyGroups'] call KH_fnc_loadDisplay";
+    onLoad = "[_this select 0, 'KH_ResourceDeleteEmptyGroups'] call KH_fnc_loadDisplay;";
     class Controls 
     {
         class KH_Title: RscText 

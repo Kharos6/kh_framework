@@ -25,7 +25,7 @@ if (_entity isKindOf "Man") then {
                     removeRenderHandler (_x select 0);
                 } forEach (_renderHandlers get _key);
 
-                _renderHandlers set [_key, []];
+                _renderHandlers deleteAt _key;
             };
             
             if _assigned then {
@@ -69,7 +69,9 @@ if (_entity isKindOf "Man") then {
                     )
                 );
 
-                _renderHandlers set [_key, _currentHandlers];
+                if (_currentHandlers isNotEqualTo []) then {
+                    _renderHandlers set [_key, _currentHandlers];
+                };
             };                    
         },
         ["KH_var_renderingSlotItemHandler", hashValue _entity] joinString "_"
@@ -130,7 +132,7 @@ if (_entity isKindOf "Man") then {
                     removeRenderHandler (_x select 0);
                 } forEach (_renderHandlers get _slot);
 
-                _renderHandlers set [_slot, []];
+                _renderHandlers deleteAt _slot;
             };
 
             private _currentHandlers = [];
@@ -153,7 +155,9 @@ if (_entity isKindOf "Man") then {
                 _currentHandlers pushBack [_renderHandler, _x];
             } forEach ("true" configClasses (configFile >> "CfgWeapons" >> _newWeapon >> "KH_Rendering3D"));
 
-            _renderHandlers set [_slot, _currentHandlers];                 
+            if (_currentHandlers isNotEqualTo []) then {
+                _renderHandlers set [_slot, _currentHandlers];
+            };            
         },
         ["KH_var_renderingWeaponSlotHandler", hashValue _entity] joinString "_"
     ] call KH_fnc_addEventHandler;

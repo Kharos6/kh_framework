@@ -1375,6 +1375,7 @@ isNil {
 				"KH_var_displayLayer" cutRsc ["KH_ResourceKHDisplay", "PLAIN", -1, true, true];
 				triggerCbaEvent ["KH_eve_playerMissionPreloaded", [clientOwner], "SERVER", false];
 				[[], [], [], KH_fnc_entityRenderingSetup, true] call KH_fnc_entityInit;
+				[[], [], [], KH_fnc_entityAttachedObjectSetup, true] call KH_fnc_entityInit;
 				
 				execute [
 					[],
@@ -2161,7 +2162,7 @@ isNil {
 						removeRenderHandler KH_var_fogScatteringHandler;
 
 						if KH_var_renderingFogScattering then {
-							KH_var_fogScatteringHandler = addPostFX ["fogScatter", [1, 0, 12]];
+							KH_var_fogScatteringHandler = addPostFX ["fogScatter", [0.5, 0, 12]];
 						};
 
 						removeRenderHandler KH_var_globalIlluminationHandler;
@@ -2563,6 +2564,11 @@ isNil {
 					if KH_var_allowAiMelee then {
 						{
 							private _unit = _x;
+							
+							if (captive _unit) then {
+								continue;
+							};
+
 							private _isAgent = !(isNull (agent (teamMember _unit)));
 							private _primaryWeapon = primaryWeapon _unit;
 							private _handgunWeapon = handgunWeapon _unit;

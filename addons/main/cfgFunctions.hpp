@@ -74,6 +74,7 @@ class CfgFunctions
 			class getSideRelations {headerType = -1;};
 			class getUnitActionState {headerType = -1;};
 			class getUnitAttributes {headerType = -1;};
+			class getUnitCapability {headerType = -1;};
 			class getUnitMoveType {headerType = -1;};
 			class getUnitStateAction {headerType = -1;};
 			class getUnitVehicleSlot {headerType = -1;};

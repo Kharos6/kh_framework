@@ -16,7 +16,7 @@ class Group
 					control = "Edit";
 					expression = 
 					"\
-						if ((_value isNotEqualTo '') && !is3DEN) then {\
+						if (!is3DEN && (_value isNotEqualTo '')) then {\
 							_value = ['[', _value, ']'] joinString '';\
 							{\
 								private _originalValueArray = missionNamespace getVariable [_x, []];\
@@ -38,7 +38,7 @@ class Group
 					control = "Edit";
 					expression = 
 					"\
-						if ((_value isNotEqualTo '') && !is3DEN) then {\
+						if (!is3DEN && (_value isNotEqualTo '')) then {\
 							_value = ['[', _value, ']'] joinString '';\
 							KH_var_postInitExecutions pushBack [\
 								[_this, parseSimpleArray _value],\
@@ -61,7 +61,7 @@ class Group
 					control = "EditCodeMulti5";
 					expression = 
 					"\
-						if ((_value isNotEqualTo '') && !is3DEN) then {\
+						if (!is3DEN && (_value isNotEqualTo '')) then {\
 							KH_var_postInitExecutions pushBack [\
 								[_this, compile _value],\
 								{\
@@ -93,7 +93,7 @@ class Group
 					control = "EditCodeMulti5";
 					expression = 
 					"\
-						if ((_value isNotEqualTo '') && !is3DEN) then {\
+						if (!is3DEN && (_value isNotEqualTo '')) then {\
 							KH_var_postInitExecutions pushBack [\
 								[_this, compile _value],\
 								{\

@@ -140,12 +140,7 @@ if !(isNull _unit) then {
 				_object setVectorDirAndUp [vectorDir _rotation, vectorUp _rotation];
 			}
 			else {
-				if (_rotation isEqualTypeAll []) then {
-					_object setVectorDirAndUp _rotation;
-				}
-				else {
-					_object setRotationEuler _rotation;
-				};
+				_object setVectorDirAndUp _rotation;
 			};
 		},
 		_object,

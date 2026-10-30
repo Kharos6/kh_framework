@@ -68,13 +68,8 @@ private _spawnHandler = execute [
 								[vectorDir _chosenEntity, vectorUp _chosenEntity];
 							}
 							else {
-								if ((_chosenTransforms select 1) isEqualTypeAll []) then {
-									private _vectors = _chosenTransforms select 1;
-									[_vectors select 0, _vectors select 1];
-								}
-								else {
-									_chosenTransforms select 1;
-								};
+								private _vectors = _chosenTransforms select 1;
+								[_vectors select 0, _vectors select 1];
 							};
 						}
 						else {
@@ -109,14 +104,7 @@ private _spawnHandler = execute [
 						};
 
 						private _unit = _group createUnit [selectRandom _entityTypes, _position, [], 0, _placementMode];
-						
-						if (_rotation isEqualTypeAll []) then {
-							_unit setVectorDirAndUp _rotation;
-						}
-						else {
-							_unit setRotationEuler _rotation;
-						};
-
+						_unit setVectorDirAndUp _rotation;
 						[_unit, _chosenTransforms, _position] call _init;
 						_spawnedEntities pushBack _unit;
 					};
@@ -141,13 +129,8 @@ private _spawnHandler = execute [
 								[vectorDir _chosenEntity, vectorUp _chosenEntity];
 							}
 							else {
-								if ((_chosenTransforms select 1) isEqualTypeAll []) then {
-									private _vectors = _chosenTransforms select 1;
-									[_vectors select 0, _vectors select 1];
-								}
-								else {
-									_chosenTransforms select 1;
-								};
+								private _vectors = _chosenTransforms select 1;
+								[_vectors select 0, _vectors select 1];
 							};
 						}
 						else {
@@ -185,14 +168,7 @@ private _spawnHandler = execute [
 						private _group = createGroup [_side, _countKilled];
 
 						{
-							private _unit = _group createUnit [_x, _position, [], 0, _placementMode];
-
-							if (_rotation isEqualTypeAll []) then {
-								_unit setVectorDirAndUp _rotation;
-							}
-							else {
-								_unit setRotationEuler _rotation;
-							};
+							(_group createUnit [_x, _position, [], 0, _placementMode]) setVectorDirAndUp _rotation;
 						} forEach _groupArray;
 
 						[_group, _chosenTransforms, _position] call _init;
@@ -219,13 +195,8 @@ private _spawnHandler = execute [
 								[vectorDir _chosenEntity, vectorUp _chosenEntity];
 							}
 							else {
-								if ((_chosenTransforms select 1) isEqualTypeAll []) then {
-									private _vectors = _chosenTransforms select 1;
-									[_vectors select 0, _vectors select 1];
-								}
-								else {
-									_chosenTransforms select 1;
-								};
+								private _vectors = _chosenTransforms select 1;
+								[_vectors select 0, _vectors select 1];
 							};
 						}
 						else {
@@ -260,14 +231,7 @@ private _spawnHandler = execute [
 						};
 
 						private _agent = createAgent [selectRandom _entityTypes, _position, [], 0, _placementMode];
-
-						if (_rotation isEqualTypeAll []) then {
-							_agent setVectorDirAndUp _rotation;
-						}
-						else {
-							_agent setRotationEuler _rotation;
-						};
-
+						_agent setVectorDirAndUp _rotation;
 						[_agent, _chosenTransforms, _position] call _init;
 						_spawnedEntities pushBack _agent;
 					};
@@ -292,13 +256,8 @@ private _spawnHandler = execute [
 								[vectorDir _chosenEntity, vectorUp _chosenEntity];
 							}
 							else {
-								if ((_chosenTransforms select 1) isEqualTypeAll []) then {
-									private _vectors = _chosenTransforms select 1;
-									[_vectors select 0, _vectors select 1];
-								}
-								else {
-									_chosenTransforms select 1;
-								};
+								private _vectors = _chosenTransforms select 1;
+								[_vectors select 0, _vectors select 1];
 							};
 						}
 						else {
@@ -339,13 +298,7 @@ private _spawnHandler = execute [
 							createVehicleLocal [selectRandom _entityTypes, _position, [], 0, _placementMode];
 						};
 
-						if (_rotation isEqualTypeAll []) then {
-							_object setVectorDirAndUp _rotation;
-						}
-						else {
-							_object setRotationEuler _rotation;
-						};
-
+						_object setVectorDirAndUp _rotation;
 						[_object, _chosenTransforms, _position] call _init;
 						_spawnedEntities pushBack _object;
 					};
@@ -370,13 +323,8 @@ private _spawnHandler = execute [
 								[vectorDir _chosenEntity, vectorUp _chosenEntity];
 							}
 							else {
-								if ((_chosenTransforms select 1) isEqualTypeAll []) then {
-									private _vectors = _chosenTransforms select 1;
-									[_vectors select 0, _vectors select 1];
-								}
-								else {
-									_chosenTransforms select 1;
-								};
+								private _vectors = _chosenTransforms select 1;
+								[_vectors select 0, _vectors select 1];
 							};
 						}
 						else {
@@ -411,14 +359,7 @@ private _spawnHandler = execute [
 						};
 
 						private _object = createSimpleObject [selectRandom _entityTypes, _position, _local];
-
-						if (_rotation isEqualTypeAll []) then {
-							_object setVectorDirAndUp _rotation;
-						}
-						else {
-							_object setRotationEuler _rotation;
-						};
-
+						_object setVectorDirAndUp _rotation;
 						[_object, _chosenTransforms, _position] call _init;
 						_spawnedEntities pushBack _object;
 					};
@@ -443,13 +384,8 @@ private _spawnHandler = execute [
 								[vectorDir _chosenEntity, vectorUp _chosenEntity];
 							}
 							else {
-								if ((_chosenTransforms select 1) isEqualTypeAll []) then {
-									private _vectors = _chosenTransforms select 1;
-									[_vectors select 0, _vectors select 1];
-								}
-								else {
-									_chosenTransforms select 1;
-								};
+								private _vectors = _chosenTransforms select 1;
+								[_vectors select 0, _vectors select 1];
 							};
 						}
 						else {
@@ -484,14 +420,7 @@ private _spawnHandler = execute [
 						};
 
 						private _vehicle = createVehicle [selectRandom _entityTypes, _position, [], 0, _placementMode];
-
-						if (_rotation isEqualTypeAll []) then {
-							_vehicle setVectorDirAndUp _rotation;
-						}
-						else {
-							_vehicle setRotationEuler _rotation;
-						};
-
+						_vehicle setVectorDirAndUp _rotation;
 						createVehicleCrew _vehicle;
 						[_vehicle, _chosenTransforms, _position] call _init;
 						_spawnedEntities pushBack _vehicle;

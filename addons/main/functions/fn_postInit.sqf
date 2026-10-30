@@ -2516,7 +2516,7 @@ isNil {
 
 				if (_delay isEqualTo 0) then {
 					if (isNil "_arguments") then {
-						call _function;
+						[] call _function;
 					}
 					else {
 						_arguments call _function;
@@ -2538,7 +2538,7 @@ isNil {
 							(_this select [1]) params ["_arguments", "_function"];
 
 							if (isNil "_arguments") then {
-								call _function;
+								[] call _function;
 							}
 							else {
 								_arguments call _function;

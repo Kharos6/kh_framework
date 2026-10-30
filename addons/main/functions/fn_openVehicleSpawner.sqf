@@ -1,4 +1,4 @@
-params [["_types", [], [[]]], ["_position", objNull, [[], objNull]], ["_rotation", [0, 0, 0], [[], objNull]]];
+params [["_types", [], [[]]], ["_position", objNull, [[], objNull]], ["_rotation", [[0, 1, 0], [0, 0, 1]], [[], objNull]]];
 
 if (_types isEqualTo []) exitWith {
     hint "No vehicles available.";
@@ -19,11 +19,6 @@ if (_position isEqualType objNull) then {
 
 if (_rotation isEqualType objNull) then {
     _rotation = [vectorDir _rotation, vectorUp _rotation];
-}
-else {
-	if (_rotation isEqualTypeAll 0) then {
-		_rotation = eulerToVector _rotation;
-	};
 };
 
 [

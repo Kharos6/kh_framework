@@ -38,7 +38,7 @@ class Object
 					control = "Edit";
 					expression = 
 					"\
-						if ((_value isNotEqualTo -1) && !is3DEN) then {\
+						if (!is3DEN && (_value isNotEqualTo -1)) then {\
 							KH_var_postInitExecutions pushBack [\
 								[_this, _value],\
 								{\
@@ -69,7 +69,7 @@ class Object
 					control = "Edit";
 					expression = 
 					"\
-						if ((_value isNotEqualTo -1) && !is3DEN) then {\
+						if (!is3DEN && (_value isNotEqualTo -1)) then {\
 							KH_var_postInitExecutions pushBack [\
 								[_this, _value],\
 								{\
@@ -100,7 +100,7 @@ class Object
 					control = "Edit";
 					expression = 
 					"\
-						if ((_value isNotEqualTo '') && !is3DEN) then {\
+						if (!is3DEN && (_value isNotEqualTo '')) then {\
 							private _array = parseSimpleArray (['[', _value, ']'] joinString '');\
 							_this setVariable ['KH_var_assignedEntityArrayBuilderArrays', _array];\
 							{\
@@ -123,7 +123,7 @@ class Object
 					control = "Edit";
 					expression = 
 					"\
-						if ((_value isNotEqualTo -1) && !is3DEN) then {\
+						if (!is3DEN && (_value isNotEqualTo -1)) then {\
 							_this setUnitFreefallHeight _value;\
 							execute [\
 								[_this, _value],\
@@ -156,7 +156,7 @@ class Object
 					control = "EditCodeMulti5";
 					expression = 
 					"\
-						if ((_value isNotEqualTo '') && !is3DEN) then {\
+						if (!is3DEN && (_value isNotEqualTo '')) then {\
 							KH_var_postInitExecutions pushBack [\
 								[_this, compile _value],\
 								{\
@@ -224,7 +224,7 @@ class Object
 					control = "Checkbox";
 					expression = 
 					"\
-						if (_value && !is3DEN) then {\
+						if (!is3DEN && _value) then {\
 							KH_var_postInitExecutions pushBack [\
 								[_this],\
 								{\
@@ -252,7 +252,7 @@ class Object
 					control = "Checkbox";
 					expression = 
 					"\
-						if (_value && !is3DEN) then {\
+						if (!is3DEN && _value) then {\
 							execute [\
 								[_this],\
 								{\
@@ -282,7 +282,7 @@ class Object
 					control = "EditCodeMulti5";
 					expression = 
 					"\
-						if ((_value isNotEqualTo '') && !is3DEN) then {\
+						if (!is3DEN && (_value isNotEqualTo '')) then {\
 							KH_var_postInitExecutions pushBack [\
 								[_this, compile _value],\
 								{\
@@ -316,7 +316,7 @@ class Object
 					expression = 
 					"\
 						_value params ['_toggle', '_event', '_init', '_invert'];\
-						if (_toggle && !is3DEN && (_event isNotEqualTo '')) then {\
+						if (!is3DEN && _toggle && (_event isNotEqualTo '')) then {\
 							if !(isNull (missionNamespace getVariable [_event, objNull])) then {\
 								_event = missionNamespace getVariable [_event, objNull];\
 							};\
@@ -346,7 +346,7 @@ class Object
 					expression = 
 					"\
 						_value params ['_toggle', '_init'];\
-						if (_toggle && !is3DEN) then {\
+						if (!is3DEN && _toggle) then {\
 							KH_var_postInitExecutions pushBack [[_this, compile _init], KH_fnc_convertToAgent, {KH_var_playersLoaded && !KH_var_missionSuspended;}];\
 						};\
 					";
@@ -374,7 +374,7 @@ class Object
 					expression = 
 					"\
 						_value params ['_toggle', '_engineeringHandling', '_recoverable', '_damageMultiplier', '_damageMultiplierDummy', '_totalDamageMultiplier', '_totalDamageMultiplierDummy', '_impactDamageMultiplier', '_impactDamageMultiplierDummy', '_hitPointDamageMultipliers'];\
-						if (_toggle && _engineeringHandling && !is3DEN) then {\
+						if (!is3DEN && _toggle && _engineeringHandling) then {\
 							_hitPointDamageMultipliers = if (_hitPointDamageMultipliers isEqualTo '') then {\
 								[];\
 							}\
@@ -408,7 +408,7 @@ class Object
 					expression = 
 					"\
 						_value params ['_toggle', '_medicalHandling', '_plotArmor', '_damageMultiplier', '_damageMultiplierDummy', '_incapacitation'];\
-						if (_toggle && !is3DEN) then {\
+						if (!is3DEN && _toggle) then {\
 							_this setVariable ['KH_var_medicalHandling', _medicalHandling, true];\
 							_this setVariable ['KH_var_plotArmor', _plotArmor, true];\
 							_this setVariable ['KH_var_damageMultiplier', _damageMultiplier, true];\
@@ -441,7 +441,7 @@ class Object
 					expression = 
 					"\
 						_value params ['_toggle', '_allowPersistency', '_playerUseVariableName', '_allowTransforms'];\
-						if (_toggle && !is3DEN) then {\
+						if (!is3DEN && _toggle) then {\
 							if _allowPersistency then {\
 								if _playerUseVariableName then {\
 									_this setVariable ['KH_var_playerPersistencyUseVariableName', true];\
@@ -478,7 +478,7 @@ class Object
 					expression = 
 					"\
 						_value params ['_toggle', '_localFunction', '_remoteFunction'];\
-						if (_toggle && !is3DEN) then {\
+						if (!is3DEN && _toggle) then {\
 							KH_var_postInitExecutions pushBack [\
 								[_this, compile _localFunction, compile _remoteFunction],\
 								{\
@@ -529,7 +529,7 @@ class Object
 					expression = 
 					"\
 						_value params ['_toggle', '_owner', '_recreate', '_init'];\
-						if (_toggle && !is3DEN) then {\
+						if (!is3DEN && _toggle) then {\
 							KH_var_headlessClientTransfers pushBack [_this, _owner, _recreate];\
 							if (_init isNotEqualTo '') then {\
 								_this setVariable ['KH_var_headlessClientTransferInit', compile _init];\

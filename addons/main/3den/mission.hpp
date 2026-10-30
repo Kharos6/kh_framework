@@ -301,7 +301,7 @@ class Mission
 						expression = 
 						"\
 							_value params ['_toggle', '_curators', '_curatorModules', '_hide', '_disableDamage'];\
-							if (_toggle && !is3DEN && isServer) then {\
+							if (!is3DEN && isServer && _toggle) then {\
 								KH_var_postInitExecutions pushBack [\
 									[parseSimpleArray (['[', _curators, ']'] joinString ''), parseSimpleArray (['[', _curatorModules, ']'] joinString ''), _hide, _disableDamage],\
 									{\
@@ -342,7 +342,7 @@ class Mission
 						expression = 
 						"\
 							_value params ['_toggle', '_identifier', '_players', '_playersDisconnected', '_playerRespawnType', '_units', '_unitsUndefined', '_groups', '_objects', '_objectsUndefined', '_markers', '_mission'];\
-							if (_toggle && !is3DEN && isServer) then {\
+							if (!is3DEN && isServer && _toggle) then {\
 								KH_var_missionPersistencyIdentifier = _identifier;\
 								KH_var_missionPersistencyPlayers = _players;\
 								KH_var_missionPersistencyPlayersDisconnected = _playersDisconnected;\
@@ -440,7 +440,7 @@ class Mission
 						expression = 
 						"\
 							_value params ['_toggle', '_bluforToBlufor', '_bluforToOpfor', '_bluforToGreenfor', '_bluforToCivilian', '_opforToBlufor', '_opforToOpfor', '_opforToGreenfor', '_opforToCivilian', '_greenforToBlufor', '_greenforToOpfor', '_greenforToGreenfor', '_greenforToCivilian', '_civilianToBlufor', '_civilianToOpfor', '_civilianToGreenfor', '_civilianToCivilian'];\
-							if (_toggle && !is3DEN && isServer) then {\
+							if (!is3DEN && isServer && _toggle) then {\
 								KH_var_initialSideRelations = [[west, west, _bluforToBlufor], [west, east, _bluforToOpfor], [west, resistance, _bluforToGreenfor], [west, civilian, _bluforToCivilian], [east, west, _opforToBlufor], [east, east, _opforToOpfor], [east, resistance, _opforToGreenfor], [east, civilian, _opforToCivilian], [resistance, west, _greenforToBlufor], [resistance, east, _greenforToOpfor], [resistance, resistance, _greenforToGreenfor], [resistance, civilian, _greenforToCivilian], [civilian, west, _civilianToBlufor], [civilian, east, _civilianToOpfor], [civilian, resistance, _civilianToGreenfor], [civilian, civilian, _civilianToCivilian]];\
 							};\
 						";
@@ -468,7 +468,7 @@ class Mission
 						control = "Combo";
 						expression = 
 						"\
-							if ((_value isNotEqualTo 0) && !is3DEN && isServer) then {\
+							if (!is3DEN && isServer && (_value isNotEqualTo 0)) then {\
 								KH_var_missionStartSuspension = _value;\
 							};\
 						";
@@ -504,7 +504,7 @@ class Mission
 						control = "Combo";
 						expression = 
 						"\
-							if ((_value isNotEqualTo 0) && !is3DEN && isServer) then {\
+							if (!is3DEN && isServer && (_value isNotEqualTo 0)) then {\
 								[true, _value isEqualTo 2] call KH_fnc_recoverDisconnectedPlayers;\
 							};\
 						";
@@ -559,7 +559,7 @@ class Mission
 						expression = 
 						"\
 							_value params ['_toggle', '_ambientLife', '_ambientSounds', '_windCoefficient'];\
-							if (_toggle && !is3DEN) then {\
+							if (!is3DEN && _toggle) then {\
 								KH_var_postInitExecutions pushBack [\
 									[_ambientLife, _ambientSounds, _windCoefficient],\
 									{\
@@ -593,7 +593,7 @@ class Mission
 						control = "Edit";
 						expression = 
 						"\
-							if ((_value isNotEqualTo 0) && !is3DEN && isServer) then {\
+							if (!is3DEN && isServer && (_value isNotEqualTo 0)) then {\
 								KH_var_postInitExecutions pushBack [[true, _value], KH_fnc_limitViewDistance];\
 							};\
 						";

@@ -18,11 +18,6 @@ if (_position isEqualType objNull) then {
 
 if (_rotation isEqualType objNull) then {
 	_rotation = [vectorDir _rotation, vectorUp _rotation];
-}
-else {
-	if (_rotation isEqualTypeAll 0) then {
-		_rotation = eulerToVector _rotation;
-	};
 };
 
 private _useTransition = if (_transition isNotEqualTo 0) then {
@@ -47,14 +42,7 @@ execute [
 
 					if (isNull (objectParent _entity)) then {
 						_entity setPosATL _position;
-
-						if (_rotation isEqualTypeAll []) then {
-							_entity setVectorDirAndUp _rotation;
-						}
-						else {
-							_entity setRotationEuler _rotation;
-						};
-
+						_entity setVectorDirAndUp _rotation;
 						[_entity] call _init;
 						[_handlerId] call KH_fnc_removeHandler;
 					}
@@ -70,14 +58,7 @@ execute [
 		}
 		else {
 			_entity setPosATL _position;
-
-			if (_rotation isEqualTypeAll []) then {
-				_entity setVectorDirAndUp _rotation;
-			}
-			else {
-				_entity setRotationEuler _rotation;
-			};
-
+			_entity setVectorDirAndUp _rotation;
 			[_entity] call _init;
 		};
 	},

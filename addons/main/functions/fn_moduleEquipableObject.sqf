@@ -11,7 +11,7 @@ isNil {
                         _x,
                         _logic getVariable ["KH_ModuleEquipableObjectBone", ""],
                         _logic getVariable ["KH_ModuleEquipableObjectPosition", [0, 0, 0]],
-                        _logic getVariable ["KH_ModuleEquipableObjectRotation", [0, 0, 0]],
+                        eulerToVector (_logic getVariable ["KH_ModuleEquipableObjectRotation", [0, 0, 0]]),
                         parseNumber (_logic getVariable ["KH_ModuleEquipableObjectScale", "1"]),
                         _logic getVariable ["KH_ModuleEquipableObjectDisableCollision", true],
                         _logic getVariable ["KH_ModuleEquipableObjectHideInVehicles", true],

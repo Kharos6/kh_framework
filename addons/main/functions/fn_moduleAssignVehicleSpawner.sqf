@@ -6,38 +6,12 @@ isNil {
 
             if _activated then {
                 {
-                    execute [
-                        [
-                            _x,
-                            "Access Vehicle Depot",
-                            "\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
-                            "\a3\data_f_destroyer\data\UI\IGUI\Cfg\holdactions\holdAction_loadVehicle_ca.paa",
-                            "((_this distance _target) < 6)",
-                            "((_caller distance _target) < 6)",
-                            {},
-                            {},
-                            {
-                                isNil {
-                                    (_this select 3) call KH_fnc_openVehicleSpawner;
-                                };
-                            },
-                            {},
-                            [
-                                parseSimpleArray (["[", _logic getVariable ["KH_ModuleAssignVehicleSpawnerVehicleTypes", ""], "]"] joinString ""),
-                                _logic,
-                                _logic
-                            ],
-                            1,
-                            0,
-                            false,
-                            false,
-                            true
-                        ],
-                        "BIS_fnc_holdActionAdd", 
-                        "PLAYERS",
-                        true,
-                        ["JIP", _x, false, ""]
-                    ];
+                    [
+                        _x,
+                        _logic,
+                        _logic,
+                        parseSimpleArray (["[", _logic getVariable ["KH_ModuleAssignVehicleSpawnerVehicleTypes", ""], "]"] joinString "")
+                    ] call KH_fnc_assignVehicleSpawner;
                 } forEach _units;
             };
         }

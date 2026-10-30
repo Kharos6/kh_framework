@@ -14,6 +14,7 @@ class CfgFunctions
 			class assignIdentificationCard {headerType = -1;};
 			class assignParachute {headerType = -1;};
 			class assignTerminal {headerType = -1;};
+			class assignVehicleSpawner {headerType = -1;};
 			class attach {headerType = -1;};
 			class breakDisguise {headerType = -1;};
 			class cameraSequence {headerType = -1;};

@@ -2104,7 +2104,7 @@ if hasInterface then {
 					missionNamespace setVariable [
 						_id, 
 						if (isNil "_arguments") then {
-							call _function;
+							[] call _function;
 						}
 						else {
 							_arguments call _function;

@@ -10,11 +10,6 @@ if (_position isEqualType objNull) then {
 
 if (_vectorDirAndUp isEqualType objNull) then {
     _vectorDirAndUp = [vectorDirVisual _vectorDirAndUp, vectorUpVisual _vectorDirAndUp];
-}
-else {
-    if (_vectorDirAndUp isEqualTypeAll 0) then {
-        _vectorDirAndUp = eulerToVector _vectorDirAndUp;
-    };
 };
 
 _vectorDirAndUp params [["_vectorDir", [0, 1, 0], [[]]], ["_vectorUp", [0, 0, 1], [[]]]];

@@ -78,12 +78,7 @@ if _softAttach exitWith {
         };
     };
 
-    if (_rotation isEqualTypeAll []) then {
-        _entity setVectorDirAndUp _rotation;
-    }
-    else {
-        _entity setRotationEuler _rotation;
-    };
+    _entity setVectorDirAndUp _rotation;
 
     private _healthHandler = [
         ["ENTITY", _entity, "PERSISTENT"],
@@ -503,13 +498,7 @@ if (_rotation isEqualType true) then {
 };
 
 _entity attachTo [_target, _position, _bone, true];
-
-if (_rotation isEqualTypeAll []) then {
-    _entity setVectorDirAndUp _rotation;
-}
-else {
-    _entity setRotationEuler _rotation;
-};
+_entity setVectorDirAndUp _rotation;
 
 if (_scale isEqualTo 0) then {
     _entity setObjectScale _oldScale;

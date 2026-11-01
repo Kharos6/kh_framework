@@ -6027,8 +6027,10 @@ static bool kh_rv_lit(const game_value& v, RenderIntegration::RenderObject& obj,
         obj.lit = false;
     } else {
         obj.lit = true;
-        obj.light_ambient = static_cast<float>(la[0]);
-        if (la.size() >= 2) obj.light_diffuse = static_cast<float>(la[1]);
+        // KH_LIT_NONNEG: each is 0 or more (the reference's range, clamped silently): a negative one wrote negative
+        // radiance into the HDR scene. A value >= 0 is kept as given.
+        obj.light_ambient = std::max(static_cast<float>(la[0]), 0.0f);
+        if (la.size() >= 2) obj.light_diffuse = std::max(static_cast<float>(la[1]), 0.0f);
     }
     return true;
 }
@@ -6319,7 +6321,7 @@ static bool kh_rv_fx_textures(const game_value& v, RenderIntegration::RenderObje
         if (khft_e.size() < 2 || khft_e.size() > 3 || khft_e[0].type_enum() != game_data_type::STRING ||
             khft_e[1].type_enum() != game_data_type::STRING) { err = khft_form; return false; }
         std::string khft_n = static_cast<std::string>(khft_e[1]);
-        std::transform(khft_n.begin(), khft_n.end(), khft_n.begin(), ::tolower);
+        khft_n = kh_lower_copy(std::move(khft_n));
         if (!(khft_n.size() == 5 && khft_n.compare(0, 4, "user") == 0 && khft_n[4] >= '0' &&
               khft_n[4] < '0' + RenderIntegration::KH_MAT_USER_MAPS)) {
             err = "texture slot '" + static_cast<std::string>(khft_e[1]) + "' must be user0 .. user5";
@@ -6338,7 +6340,7 @@ static bool kh_rv_fx_textures(const game_value& v, RenderIntegration::RenderObje
         if (khft_e.size() > 2 && !khft_e[2].is_nil()) {
             std::string khft_cs = khft_e[2].type_enum() == game_data_type::STRING ? static_cast<std::string>(khft_e[2])
                                                                                    : std::string();
-            std::transform(khft_cs.begin(), khft_cs.end(), khft_cs.begin(), ::tolower);
+            khft_cs = kh_lower_copy(std::move(khft_cs));
             if (khft_cs != "srgb" && khft_cs != "linear") {
                 err = "a texture's third element is \"srgb\" or \"linear\" (the default)";
                 return false;
@@ -6426,7 +6428,7 @@ static bool kh_rv_cloth_pairs(const game_value& val, const char* khcp_what,
             return false;
         }
         std::string khcp_k = static_cast<std::string>(khcp_p[0]);
-        std::transform(khcp_k.begin(), khcp_k.end(), khcp_k.begin(), ::tolower);
+        khcp_k = kh_lower_copy(std::move(khcp_k));
         khcp_out.push_back(std::make_pair(khcp_k, khcp_p[1]));
     }
     return true;
@@ -6501,7 +6503,8 @@ static bool kh_rv_cloth_sim(const game_value& val, RenderIntegration::RenderObje
         if      (k == "stiffness" || k == "stretch") { if (!kh_rv_cloth_num(v, "stiffness", 0.0f, 1.0f, khcs_c.stretch, err)) return false; }
         else if (k == "bend")        { if (!kh_rv_cloth_num(v, "bend", 0.0f, 1.0f, khcs_c.bend, err)) return false; }
         else if (k == "damping")     { if (!kh_rv_cloth_num(v, "damping", 0.0f, 1.0f, khcs_c.damping, err)) return false; }
-        else if (k == "drag")        { if (!kh_rv_cloth_num(v, "drag", 0.0f, 1.0f, khcs_c.drag, err)) return false; }
+        // KH_CLOTH_DRAG: drag and waterDrag are forces per point (kg/s), not fractions.
+        else if (k == "drag")        { if (!kh_rv_cloth_num(v, "drag", 0.0f, 1000.0f, khcs_c.drag, err)) return false; }
         else if (k == "mass")        { if (!kh_rv_cloth_num(v, "mass", 0.001f, 100.0f, khcs_c.mass, err)) return false; }
         else if (k == "gravity")     { if (!kh_rv_cloth_num(v, "gravity", -10.0f, 10.0f, khcs_c.gravity, err)) return false; }
         else if (k == "maxstretch")  { if (!kh_rv_cloth_num(v, "maxStretch", 1.0f, 4.0f, khcs_c.max_stretch, err)) return false; }
@@ -6516,7 +6519,8 @@ static bool kh_rv_cloth_sim(const game_value& val, RenderIntegration::RenderObje
         // KH_BUOY_RANGE: up to gravity's own magnitude - buoyancy g is neutral at gravity g (the reference).
         else if (k == "buoyancy")    { if (!kh_rv_cloth_num(v, "buoyancy", 0.0f, 10.0f, khcs_c.buoyancy, err))
                                            return false; }
-        else if (k == "waterdrag")   { if (!kh_rv_cloth_num(v, "waterDrag", 0.0f, 1.0f, khcs_c.water_drag, err)) return false; }
+        else if (k == "waterdrag")   { if (!kh_rv_cloth_num(v, "waterDrag", 0.0f, 1000.0f, khcs_c.water_drag, err))
+                                           return false; }
         else if (k == "selfcollision") { if (!kh_rv_bool(v, khcs_c.self_collide, "cloth parameter 'selfCollision'", err)) return false; }
         else if (k == "selfthickness") { if (!kh_rv_cloth_num(v, "selfThickness", 0.001f, 0.25f, khcs_c.self_thickness, err)) return false; }
         else if (k == "selffriction")  { if (!kh_rv_cloth_num(v, "selfFriction", 0.0f, 1.0f, khcs_c.self_friction, err)) return false; }
@@ -6603,7 +6607,7 @@ static bool kh_rv_chain_bone(const game_value& val, const char* khcb_key, std::s
         return false;
     }
     khcb_dst = static_cast<std::string>(val);
-    std::transform(khcb_dst.begin(), khcb_dst.end(), khcb_dst.begin(), ::tolower);   // As the import stores them.
+    khcb_dst = kh_lower_copy(std::move(khcb_dst));   // As the import stores them.
     return true;
 }
 
@@ -6619,7 +6623,7 @@ static bool kh_rv_chain_point(const game_value& val, const char* khcp_key, const
         return false;
     }
     std::string khcp_s = static_cast<std::string>(val);
-    std::transform(khcp_s.begin(), khcp_s.end(), khcp_s.begin(), ::tolower);
+    khcp_s = kh_lower_copy(std::move(khcp_s));
     if (khcp_s != "head" && khcp_s != "tail") {
         err = std::string("chain parameter '") + khcp_key + "' must be \"head\" or \"tail\", not '" + khcp_s + "'";
         return false;
@@ -6734,7 +6738,8 @@ static bool kh_rv_chain_sim(const game_value& val, RenderIntegration::RenderObje
         else if (k == "damping")     { if (!kh_rv_chain_num(v, "damping", 0.0f, 1.0f, P.damping, err)) return false; }
         else if (k == "lineardamping")  { if (!kh_rv_chain_num(v, "linearDamping", 0.0f, 1.0f, P.lin_damping, err)) return false; }
         else if (k == "angulardamping") { if (!kh_rv_chain_num(v, "angularDamping", 0.0f, 1.0f, P.ang_damping, err)) return false; }
-        else if (k == "drag")        { if (!kh_rv_chain_num(v, "drag", 0.0f, 1.0f, P.drag, err)) return false; }
+        // KH_CLOTH_DRAG: drag and waterDrag are the whole chain's forces (kg/s), not fractions.
+        else if (k == "drag")        { if (!kh_rv_chain_num(v, "drag", 0.0f, 1000.0f, P.drag, err)) return false; }
         else if (k == "mass")        { if (!kh_rv_chain_num(v, "mass", 0.001f, 1000.0f, P.mass, err)) return false; }
         else if (k == "gravity")     { if (!kh_rv_chain_num(v, "gravity", -10.0f, 10.0f, P.gravity, err)) return false; }
         else if (k == "thickness")   { if (!kh_rv_chain_num(v, "thickness", 0.0f, 1.0f, P.thickness, err)) return false; }
@@ -6749,7 +6754,8 @@ static bool kh_rv_chain_sim(const game_value& val, RenderIntegration::RenderObje
         // KH_BUOY_RANGE: as the cloth's.
         else if (k == "buoyancy")    { if (!kh_rv_chain_num(v, "buoyancy", 0.0f, 10.0f, P.buoyancy, err))
                                            return false; }
-        else if (k == "waterdrag")   { if (!kh_rv_chain_num(v, "waterDrag", 0.0f, 1.0f, P.water_drag, err)) return false; }
+        else if (k == "waterdrag")   { if (!kh_rv_chain_num(v, "waterDrag", 0.0f, 1000.0f, P.water_drag, err))
+                                           return false; }
         else if (k == "iterations")  { if (!kh_rv_chain_num(v, "iterations", 1.0f, 16.0f, khch_f, err)) return false;
                                        P.iterations = static_cast<uint16_t>(khch_f + 0.5f); }
         else if (k == "substeps")    { if (!kh_rv_chain_num(v, "substeps", 1.0f, 8.0f, khch_f, err)) return false;
@@ -7214,7 +7220,7 @@ static bool kh_update_one(const char* cmd, bool want_fullscreen,
     if (t[1].type_enum() != game_data_type::STRING) { kh_rv_report(cmd, "property" + where + " must be a string"); return false; }
     const std::string handle = static_cast<std::string>(t[0]);
     std::string prop = static_cast<std::string>(t[1]);
-    std::transform(prop.begin(), prop.end(), prop.begin(), ::tolower);
+    prop = kh_lower_copy(std::move(prop));
 
     // Parse OUTSIDE the draw-list lock: the value parsers may touch the disk
     // (a first-seen .fbx runs the whole import and parks the render thread to
@@ -7424,15 +7430,16 @@ static const KhAffSchema KH_AFF_SCHEMA[] = {
     { "radial", RenderIntegration::KH_AFF_RADIAL, { 0.0f, 1.0f, 0.0f }, 2,
       { { "strength", "strength", 20.0f, -1000.0f, 1000.0f },
         { "falloff", "falloff", 1.0f, 0.0f, 1.0f } } },
+    // KH_CLOTH_DRAG: the air's density times 1 + strength (RenderIntegration::KH_AFF_DRAG_MAX at most).
     { "drag", RenderIntegration::KH_AFF_DRAG, { 0.0f, 1.0f, 0.0f }, 2,
-      { { "strength", "strength", 0.5f, 0.0f, 1.0f },
+      { { "strength", "strength", 10.0f, 0.0f, RenderIntegration::KH_AFF_DRAG_MAX },
         { "falloff", "falloff", 0.25f, 0.0f, 1.0f } } },
 };
 static const char* const KH_AFF_TYPES = "wind | turbulence | vortex | force | radial | drag";
 static constexpr float KH_AFF_SCALE_MAX = 100000.0f;
 
 static const KhAffSchema* kh_aff_schema_named(std::string khas_n) {
-    std::transform(khas_n.begin(), khas_n.end(), khas_n.begin(), ::tolower);
+    khas_n = kh_lower_copy(std::move(khas_n));
     for (const KhAffSchema& khas_s : KH_AFF_SCHEMA) if (khas_n == khas_s.name) return &khas_s;
     return nullptr;
 }
@@ -7633,7 +7640,7 @@ static bool kh_aff_update_one(const game_value& triple, int index) {
     if (t[1].type_enum() != game_data_type::STRING) { kh_rv_report(cmd, "property" + where + " must be a string"); return false; }
     const std::string handle = static_cast<std::string>(t[0]);
     std::string prop = static_cast<std::string>(t[1]);
-    std::transform(prop.begin(), prop.end(), prop.begin(), ::tolower);
+    prop = kh_lower_copy(std::move(prop));
 
     const double khpu_now = RenderIntegration::effect_time_seconds_d();
     RenderIntegration::kh_aff_reap(khpu_now);
@@ -7839,7 +7846,7 @@ static game_value set_render_ao_sqf(game_value_parameter arg) {
             khao_has_d = true;
         }
         if (!(khao_s == khao_s) || (khao_has_d && !(khao_d == khao_d))) {
-            kh_rv_report("setRenderAmbientOcclusion", "NaN");
+            kh_rv_report("setRenderAmbientOcclusion", "strength and radius must be numbers, not NaN");
             return game_value(false);
         }
         if (khao_s < 0.0f) khao_s = 0.0f;
@@ -8017,8 +8024,9 @@ static game_value get_render_stats_sqf() {
         // drawn from it, 0 = not attempted yet, -1 = the install failed and the
         // UI passes are back on the graphics lock.
         out.push_back(kv("presentHookActive", RenderIntegration::g_present_hook_active.load(std::memory_order_relaxed) ? 1.0f : (RenderIntegration::g_present_hook_failed ? -1.0f : 0.0f)));
-        // KH_UI_POISON_RUN: consecutive UI flushes whose eight coverage probes
-        // all read 255. At KH_UI_POISON_DEAD the mask is dead for that display
+        // KH_UI_POISON_RUN: consecutive readings of the UI flush's alpha stage
+        // (eight 64 x 8 boxes) in which every texel reads 255. At
+        // KH_UI_POISON_DEAD the mask is dead for that display
         // and no UI pass draws - which is the map screen, by decision.
         out.push_back(kv("uiPoisonRun", static_cast<float>(RenderIntegration::g_ui_poison_run)));   // A plain int, read torn-free on x64.
         out.push_back(kv("uiFlushes", static_cast<float>(s.ui_flushes)));
@@ -8243,6 +8251,53 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("lockFailedFrames", static_cast<float>(s.lock_failed_frames)));
         out.push_back(kv("hookActive", RenderIntegration::g_reorder_hook_active.load(std::memory_order_relaxed) ? 1.0f : 0.0f));
         out.push_back(kv("hookFailed", RenderIntegration::g_reorder_hook_failed ? 1.0f : 0.0f));
+        // Exceptions caught inside the context hooks this session (each dropped that hook's work for the
+        // frame); an event count, kept whether or not the stats are armed. 0 in a healthy session.
+        out.push_back(kv("hookExceptions",
+                         static_cast<float>(RenderIntegration::g_hook_exceptions.load(std::memory_order_relaxed))));
+        // KH_FX_PAIR_HOLD: depth-pair verdicts that held the adopted pair against the frame's (the effect
+        // chain's and the UI lane's depth readers, kh_fx_depth_pair_guard), since the stats were armed. A
+        // count stepping on the frame of a one-frame depth glitch (fog or light through a near surface)
+        // names the foreign latch the guard holds off. 0 in a healthy session.
+        out.push_back(kv("fxPairHolds", static_cast<float>(s.fx_pair_holds)));
+        // KH_WSEE_GPUT - "wseeGpu": the see-through record's GPU time in one frame of 16 while armed (KhWseeGput:
+        // timestamps around each re-issue and pass, read back later without a wait; nothing drawn or decided reads
+        // them). [frames read, frames dropped (not read within 14 frames, or disjoint), blocks left untimed (past 4096
+        // stamps a frame, or nested), [[kind, ms in the last frame read, its intervals, mean ms per frame read, mean
+        // intervals], ...]] - kinds: opqPost (the late opaques' replays after the frame's first fence-type layer),
+        // fence (the fence-type layers'), particle (the particle-type re-issues' whole), pT / pNW / pTp / pTp2 / pTf
+        // (their passes), pOther (a catch-all, 0 today), tail (our own translucent parts'), capture, b2, chainE (the
+        // edge mask's draw), d3Resolve, pOne (KH_PSB: the one pass; its block counts as particle). Each interval is
+        // elapsed GPU time between two timestamps (the pipeline's drain and refill included): an upper bound of each
+        // kind's cost.
+        {
+            namespace RI = RenderIntegration;
+            const double khwg_fr = static_cast<double>(RI::g_wsee_gput_read.load(std::memory_order_relaxed));
+            const double khwg_d = khwg_fr > 0.0 ? khwg_fr : 1.0;
+            auto_array<game_value> khwg;
+            khwg.push_back(game_value(static_cast<float>(khwg_fr)));
+            khwg.push_back(game_value(static_cast<float>(RI::g_wsee_gput_drop.load(std::memory_order_relaxed))));
+            khwg.push_back(game_value(static_cast<float>(RI::g_wsee_gput_untimed.load(std::memory_order_relaxed))));
+            auto_array<game_value> khwg_k;
+            for (uint32_t khwg_i = 0; khwg_i < RI::KHWG_N; ++khwg_i) {
+                auto_array<game_value> khwg_e;
+                khwg_e.push_back(game_value(RI::g_wsee_gput_name[khwg_i]));
+                const auto khwg_ld = [](const std::atomic<uint64_t>& a) {
+                    return static_cast<double>(a.load(std::memory_order_relaxed));
+                };
+                const double khwg_nl = khwg_ld(RI::g_wsee_gput_ns_last[khwg_i]);
+                const double khwg_cl = khwg_ld(RI::g_wsee_gput_n_last[khwg_i]);
+                const double khwg_ns = khwg_ld(RI::g_wsee_gput_ns_sum[khwg_i]);
+                const double khwg_cs = khwg_ld(RI::g_wsee_gput_n_sum[khwg_i]);
+                khwg_e.push_back(game_value(static_cast<float>(khwg_nl * 1.0e-6)));
+                khwg_e.push_back(game_value(static_cast<float>(khwg_cl)));
+                khwg_e.push_back(game_value(static_cast<float>(khwg_ns * 1.0e-6 / khwg_d)));
+                khwg_e.push_back(game_value(static_cast<float>(khwg_cs / khwg_d)));
+                khwg_k.push_back(game_value(std::move(khwg_e)));
+            }
+            khwg.push_back(game_value(std::move(khwg_k)));
+            out.push_back(kva("wseeGpu", std::move(khwg)));
+        }
         // The frame trace.
         out.push_back(kv("traceLocked", khrt_got ? 1.0f : 0.0f));
         out.push_back(kv("frameCycles", static_cast<float>(khrt_cycles)));
@@ -8357,11 +8412,12 @@ static game_value get_render_stats_sqf() {
         }
         {   // KH_VOL_REPLAY: [merged frames, fallback frames, refused passes, ring wraps captured, scissored frames,
             // full-screen frames, mirror merged, mirror fallback, mirror idle (KH_MIR_REPLAY), uncovered passes
-            // (KH_REPLAY_SCISSOR), constant snapshots copied on the GPU, from the CPU (KH_REPLAY_CPUCB)].
+            // (KH_REPLAY_SCISSOR), constant snapshots copied on the GPU, from the CPU (KH_REPLAY_CPUCB), write splits
+            // (KH_RP_WRITE_SPLIT), passes refused at the write split cap (KH_RP_SPLIT_CAP)].
             const auto& c = RenderIntegration::g_rp_c;
             auto_array<game_value> a;
             for (uint64_t v : { c.merged, c.fallback, c.refused, c.splits, c.scissored, c.fullscreen, c.mir_merged,
-                                c.mir_fallback, c.mir_idle, c.uncovered, c.cb_gpu, c.cb_cpu })
+                                c.mir_fallback, c.mir_idle, c.uncovered, c.cb_gpu, c.cb_cpu, c.wsplits, c.capped })
                 a.push_back(game_value(static_cast<float>(v)));
             out.push_back(kva("stencilReplay", std::move(a)));
         }
@@ -8377,6 +8433,9 @@ static game_value get_render_stats_sqf() {
             out.push_back(kva("paintRead", std::move(a)));
         }
         return game_value(std::move(out));
+    } catch (const std::exception& e) {
+        report_error(std::string("getRenderStats: ") + e.what());
+        return game_value(auto_array<game_value>());
     } catch (...) {
         report_error("getRenderStats: unknown exception");
         return game_value(auto_array<game_value>());
@@ -8457,10 +8516,11 @@ static game_value add_local_postfx_sqf(game_value_parameter args) {
     }
 }
 
-// Driven automatically by the internal overlay control created by
-// ensure_ui_driver; also callable from a Draw EH on a custom display. Cheap
-// no-op when no UI-affecting passes exist. Returns bool: true if passes were
-// queued this call.
+// Driven automatically by the mission "Draw2D" handler ensure_ui_driver's
+// init adds; also callable from a Draw EH on a custom display. Cheap no-op
+// when no UI-affecting passes exist. Returns bool (flush_ui_frame): true when
+// a UI pass exists and either the Present path draws the passes (nothing is
+// drawn here) or the lock path ran the UI flush now.
 static game_value flush_ui_render_sqf() {
     if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
 

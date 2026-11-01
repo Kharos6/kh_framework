@@ -2,8 +2,8 @@
 // #include). Any edit changes the unit's shader cache key.
 
 // Both entry points are wrappers over KhVsCore - the per-object one hands in
-// the CB lanes, the instanced one the stream's. Twin: VSComposite /
-// VSCompositeInst.
+// the CB lanes, the instanced one the record's at the stream's slot (t39).
+// Twin: VSComposite / VSCompositeInst.
 VSOut VSMain(VSIn i)
 {
     VSOut o;
@@ -61,7 +61,7 @@ VSOut VSMainInstSk(VSInstSk s)
 // then draws the deformed buffer with the vertex shader it always had.
 // The stored lanes are KhVsCore's, and this is its exact inverse: a position
 // in the object's box (KhVsCore multiplies it by the edge lengths, as they
-// are), a normal it divides by them (floored at 1e-4, its own floor), a
+// are), a normal it divides by them (floored at 1e-12, its own KH_NRM_FLOOR), a
 // tangent the wrappers multiply by them. KhUserVertex sees the metric ones
 // and they are stored back the same way. A lane it did not change is handed
 // on bit for bit, so a vertex it leaves where it was matches its undeformed
@@ -77,7 +77,7 @@ struct VSOutUserSo {
 VSOutUserSo VSUserSo(VSIn i, uint khuv_vid : SV_VertexID)
 {
     const float3 khuv_s = sizeAxes.xyz;
-    const float3 khuv_sn = max(khuv_s, float3(1.0e-4f, 1.0e-4f, 1.0e-4f));   // KhVsCore's normal floor.
+    const float3 khuv_sn = max(khuv_s, float3(1.0e-12f, 1.0e-12f, 1.0e-12f));   // KhVsCore's floor (KH_NRM_FLOOR).
     const float3 khuv_ok = step(float3(1.0e-30f, 1.0e-30f, 1.0e-30f), abs(khuv_s));   // 1 = the axis has extent.
     const float3 khuv_inv = khuv_ok / lerp(float3(1.0f, 1.0f, 1.0f), khuv_s, khuv_ok);
     const float3 khuv_n = i.nrm / khuv_sn;
@@ -757,11 +757,19 @@ float4 KhDlsWorldMain(VSOut i, out float3 khw_wo, out float khw_zo)
     return float4(khw_f, 1.0f);
 }
 
+// KH_DLSW_DISCARD: a factor of exactly 1 leaves dest as it is under dest * src
+// (src * 0 + dest * 1 = dest for every finite or infinite dest, a NaN stays
+// NaN, -0.0 comes back +0.0), so the pixel is discarded instead of read and
+// written at every sample - dest kept bit-exact. Last statement: every
+// derivative (KH_DLSW_GRAD, the factor's) is taken before it; the pass binds no
+// depth or stencil test or write (dss_off), no coverage from alpha, RGB alone.
 float4 PSDlsWorld(VSOut i) : SV_Target
 {
     float3 khw_w;
     float  khw_z;
-    return KhDlsWorldMain(i, khw_w, khw_z);
+    const float4 khw_f = KhDlsWorldMain(i, khw_w, khw_z);
+    if (all(khw_f.rgb == 1.0f)) discard;
+    return khw_f;
 }
 
 // KH_DLSW_FOG. The engine's forward shaders fog every pixel before this pass
@@ -864,6 +872,8 @@ KhDlswFogOut PSDlsWorldFog(VSOut i)
         const float3 khwf_c = KhDlswFog(khwf_z, khwf_w, castView[2].xyz, khwf_t);
         khwf_o.add = float4(khwf_c * ((1.0f - khwf_t) * (1.0f - khwf_o.mul.rgb)), 0.0f);
     }
+    // KH_DLSW_DISCARD (PSDlsWorld's): src0 * 1 + dest * src1 is dest when src1 is exactly 1 and src0 exactly 0.
+    if (all(khwf_o.mul.rgb == 1.0f) && all(khwf_o.add.rgb == 0.0f)) discard;
     return khwf_o;
 }
 // PSMaskCast's near_ok: is the point within some caster's shadow reach (the
@@ -1095,8 +1105,20 @@ VSOut VSFullscreen(uint vid : SV_VertexID)
     return o;
 }
 
-float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
+#if KH_TEXTURED
+// KH_WSEE: the textured route's SV_Coverage also carries a sorted tail part's per-sample occlusion verdict (cb.hlsl
+// KhWseeMeshCut's khMsCov; every sample on any other draw). The untextured route exports none: a sorted part is drawn
+// through the textured twins alone (the flush's lane needs the textured draw), so an export there would cost every
+// solid's draw for nothing. PSComposite keeps its signatures: the composite unit never takes the lane.
+KhMeshOut PSMain(VSOut i, bool khFront : SV_IsFrontFace,
+                 out uint khA2cCov : SV_Coverage)   // KH_MESH_O1; KH_CUTOUT_A2C (cb.hlsl KhCutoutCover).
+#else
+KhMeshOut PSMain(VSOut i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: two outputs (cb.hlsl KhMeshOut).
+#endif
 {
+#if KH_TEXTURED
+    khA2cCov = 0xFFFFFFFFu;   // KH_CUTOUT_A2C: every sample the raster covers, but a cutout's edge. TWIN: PSComposite.
+#endif
     // TWO-SIDED: a back face is the other side of the same sheet, so it shades
     // with the front's normal reversed. Every consumer below reads i.nrm or
     // the mapped normal built from it (the N.L gate, the self-shadow bias, the
@@ -1155,6 +1177,15 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
 
         if (khtC < 1.5e9f && khtC < -thmMeta.z) discard;
     }
+    // KH_WSEE: a sorted tail part's occlusion test against the layer record (cb.hlsl's note at
+    // KhWseeMeshCut; nothing on any other draw). Not in PSComposite: the composite unit never takes the lane.
+    KhWseeMeshCut(i.pos);
+#if KH_TEXTURED
+    // KH_WSEE: its per-sample verdict as the coverage (all samples unarmed). Before the cutout mask below, which a
+    // sorted part never takes today (a blend material's translucent part: its submeshes are blend, not cutout) - the
+    // mask is ANDed in all the same (KH_A2C_AND), so a route that ever arms both keeps the occlusion verdict.
+    khA2cCov &= khMsCov;
+#endif
 
     int bm = (int)sizeAxes.w;
 #if KH_TEXTURED
@@ -1166,7 +1197,8 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
     float2 khtxDx, khtxDy;   // KH_UV_ANIM: the material's uv and its gradients (i.uv's, unanimated). TWIN.
     const float2 khtxUv = KhMatUv(i.uv, khtxDx, khtxDy);
     KhMatSurf khtxS = KhSampleMatG(khtxUv, khtxDx, khtxDy);
-    if (matParams0.y >= 0.5f && matParams0.y < 1.5f) clip(khtxS.alpha - matParams0.z);   // Cutout kill.
+    // Cutout kill (KH_CUTOUT_A2C: alpha to coverage on a multisampled target, KhCutoutCover). TWIN: PSComposite.
+    if (matParams0.y >= 0.5f && matParams0.y < 1.5f) khA2cCov &= KhCutoutCover(khtxS.alpha);   // KH_A2C_AND.
     // Opaque alpha contract: sampled alpha never reaches the blend on the
     // opaque and cutout modes - survivors draw at alpha 1. A blend material is
     // split at the texel: solid texels draw in the opaque part and still
@@ -1209,6 +1241,10 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
             khtxN = normalize(khtt * (khFs * khtxS.nrmT.x) + khtb * khtxS.nrmT.y + khtn * khtxS.nrmT.z);
         } else khtxN = khtn;   // Degenerate tangent: geometric normal.
     }
+    // KH_SPEC_AA: the shading normal's screen-space variance widens the lobe (KhSpecAAKernel), taken here - top level,
+    // so the quad's four pixels (helpers included) take the derivatives together - and carried by s to KhApplyPBR /
+    // KhUserShade: the sun, the lamps, the overcast lobe and the ambient alike. TWIN: PSMain / PSComposite.
+    khtxS = KhSpecAA(khtxS, khtxN);
 #endif
     float smf = 1.0f;
     // The self-shadow bias takes the interpolated normal (reversed on a back
@@ -1294,15 +1330,23 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
     khUserUvGPs = float4(khtxDx, khtxDy);
     khUserPxPs = i.pos.xy;
     float3 lc = KhUserShade(khtxS, i.wpos, khtxN, smf);
-    // KH_USER_FINITE: a user material's result held to [0, 65504] (the 16F scene's range; a NaN reads 0), so a
-    // broken shader stays on its own pixels. TWIN: PSMain / PSComposite.
-    lc = min(max(lc, 0.0f), 65504.0f);
 #else
     float3 lc = KhApplyPBR(khtxS, i.wpos, khtxN, smf);
 #endif
 #else
     float3 lc = ApplyLighting(i.icol.rgb, i.wpos, i.nrm, smf);
 #endif
+    // KH_USER_FINITE / KH_PBR_FINITE: every route's result held to [0, 1e30] before fog and every return below
+    // (min / max: a NaN reads 0, +inf 1e30, -inf and negatives 0), so a broken shader's NaN / inf never reaches the
+    // blends or the scene's readers. Every finite lc in [0, 1e30] passes bit for bit: a highlight past the scene's
+    // range keeps its energy through fog, coverage and the blends, and the 16F store saturates it at the format's
+    // largest finite value (D3D's conversion rounds an over-range finite toward zero; only an inf stays inf). 1e30
+    // keeps every form below finite - the fog lerp, x a (a <= 1: UNORM maps, icol.a held to [0, 1]), lerp(1, lc, a),
+    // the lighten / darken lerps, the Reinhard mix (lc / (1 + lc) <= 1), KhWseeMeshOut, and the blender's product
+    // with a 16F destination (<= 65504 x 1e30 = 6.6e34, fp32's limit 3.4e38). Negative lc is not kept: only an
+    // unchecked negative basecolor or emissiveIntensity makes one, and no stage relies on it. TWIN: PSMain /
+    // PSComposite.
+    lc = min(max(lc, 0.0f), 1.0e30f);
 
     // KhDlswFog (static.hlsl) is this block's transmittance and colour for the
     // world pass (KH_DLSW_FOG): an edit here is an edit there. TWIN.
@@ -1405,8 +1449,9 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
 #else
     float a = i.icol.a * SolidMask(i.wpos) * khFogKeep;
 #endif
-    if (bm == 1 || bm == 3) return float4(lc * a, 1.0f);
-    if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), lc, a), 1.0f);
+    // KH_MESH_O1: every return but the sorted tail's writes the colour alone (KhMeshOutC). TWIN: PSComposite.
+    if (bm == 1 || bm == 3) return KhMeshOutC(float4(lc * a, 1.0f));
+    if (bm == 2) return KhMeshOutC(float4(lerp(float3(1.0f, 1.0f, 1.0f), lc, a), 1.0f));
     // KH_BLEND_MINMAX: lighten / darken (MAX / MIN blend ops, which take no factors). With the flush's own
     // copy of the scene just before this mesh bound at t3 (blendCtl.x), the exact
     // lerp(scene, max / min(scene, colour), a): on a single-sample target the op keeps it as written (it
@@ -1418,10 +1463,10 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
         [branch] if (blendCtl.x >= 0.5f) {
             float3 khmm_s = sceneColorTex.Load(int3(int2(i.pos.xy), 0)).rgb;
             float3 khmm_t = bm == 4 ? max(khmm_s, lc) : min(khmm_s, lc);
-            return float4(lerp(khmm_s, khmm_t, a), 1.0f);
+            return KhMeshOutC(float4(lerp(khmm_s, khmm_t, a), 1.0f));
         }
-        if (bm == 4) return float4(lc * a, 1.0f);
-        return float4(lerp(float3(65504.0f, 65504.0f, 65504.0f), lc, a), 1.0f);
+        if (bm == 4) return KhMeshOutC(float4(lc * a, 1.0f));
+        return KhMeshOutC(float4(lerp(float3(65504.0f, 65504.0f, 65504.0f), lc, a), 1.0f));
     }
 
     [branch] if (blendCtl.x >= 0.5f) {   // KH_TEX_OWN_BRANCH (above).
@@ -1430,10 +1475,11 @@ float4 PSMain(VSOut i, bool khFront : SV_IsFrontFace) : SV_Target
         float3 ts = scn / (1.0f + scn);
         float3 tl = lc / (1.0f + lc);
         float3 tm = lerp(ts, tl, a);
-        return float4(tm / max(1.0f - tm, 0.0039f), 1.0f);   // Cap ~HDR 255.
+        return KhMeshOutC(float4(tm / max(1.0f - tm, 0.0039f), 1.0f));   // Cap ~HDR 255.
     }
 
-    return float4(lc, a);
+    // KH_WSEE: the colour alone (KhMeshOutC) but on a sorted tail part (its layer-aware composite, cb.hlsl).
+    return KhWseeMeshOut(lc, a);
 }
 // KH_VOL_REPLAY: the merge - replay B's count (t49) and footprint distance (t50) where replay A (t34) equals the
 // engine's count (t41), and everywhere when the seam withheld our footprint (colour.y: that copy counted against

@@ -1,5 +1,8 @@
 // cb.hlsl - the shared prefix, concatenated into every unit by C++ (no
 // #include). Any edit changes every unit's shader cache key.
+// KH_WSEE_PSB_LS: log2 of the one pass's scale s (s = 2; the TWIN of C++ KH_PSB_LS and PSPsbZb's KH_PSB_ZB_LS) -
+// read by both sections' record texel (KhWseePsbAt / KhWseeMsPsbAt).
+#define KH_WSEE_PSB_LS 1
 
 cbuffer CBObj : register(b0)
 {
@@ -40,7 +43,8 @@ cbuffer CBObj : register(b0)
     // flush's fill; the injection writes 0) - the packing composites in
     // Reinhard space against t3 and writes opaque; or a lighten / darken mesh
     // with its own capture bound (KH_BLEND_MINMAX) - the exact lerp against t3.
-    // w = the LOD crossfade dither. y / z unread.
+    // w = the LOD crossfade dither. y unread. z = KH_CUTOUT_A2C: 1 keeps a cutout's hard clip on a multisampled
+    // target (the view-model slice), else 0 (KhCutoutCover).
     float4 blendCtl;
     // x = this draw's material table index (base + submesh slot; non-instanced
     // VS), y = the submesh slot (the instanced VS adds it to the instance's own
@@ -54,7 +58,7 @@ cbuffer CBObj : register(b0)
     // (KH_FX_LINZ, effect.hlsl).
     float4 matCtl;
     float4 fuseMeta;
-    float4 fuseStage[12];
+    float4 fuseStage[12];   // [4s] = effect, blend, age (KH_FUSE_CLOCK), 0; then p0, p1, colour. C++ fuse_stage.
     float4 fxParams2;   // Effect parameters [8..11] (C++ twin fx2).
     // x = mode (0 off, 1 camera-relative world, 2 view space, 3 absolute pool),
     // y = point count, z = spot count, w = global distance scale (cb10[2].x).
@@ -73,16 +77,30 @@ cbuffer CBObj : register(b0)
     float4 khUserObj;
     // KH_FX_TEX: an effect's own textures - 1 + each one's layer in its page
     // ([0].xyzw = user0 .. user3, [1].xy = user4 / user5; 0 = absent or still
-    // loading; [1].zw unused). Zero on every draw but a user effect's and
+    // loading). Zero on every draw but a user effect's and
     // (KH_FX_TEX_ALL) a builtin effect pass's with textures. Read through
     // KhUserTex* (the KH_FX_UNIT section). C++ twin fx_tex.
+    // [1].z = KH_WSEE's arm (1, the only value an effect pass takes; the KH_FX_UNIT
+    // section's KH_WSEE note): 0 on every draw but an armed scene-chain effect pass's - its side draws (fog scatter's
+    // per-pixel fog, the sun flare's visibility, the SSGI and dynamicLightFog grids) and the run's agreement mask
+    // (PSWseeAgree) carry the pass's lanes, so they read it too. C++ twin fx_tex[1][2]. [1].w = KH_WSEE's bound views
+    // where [1].z arms (read as (uint)(w + 0.5): the bits are KhWseeAvail's table), 0 on every other draw. C++ twin
+    // fx_tex[1][3]. KH_WSEE on a sorted mesh draw (no effect): [1].z = the sorted tail's mode (1 = the occlusion test
+    // against the layer record, the plain blend; 2 = that and the layer-aware composite; 3 = the composite on a scene
+    // target that is not a float format, its inputs held to [0, 1] - KhWseeMeshMode, C++ kh_wsee_sort_mode), 0 on
+    // every other mesh draw; [1].w bit 3 = the B2 moment (khMsB2 bound in modes 2 and 3), bit 5 = khMsD3 bound (every
+    // mode), bits 6 / 7 KH_PSB, bits 8 / 9 KH_WSEE_NOPRE (khMsS2 bound in every mode); 0 elsewhere.
     float4 khFxTexLay[2];
     // KH_FX_FOGREC: the scene's KH fog passes as a user effect sees them - up to two records [startDist, endDist,
     // skyAmount, opacity] (opacity 0 = none): the two the builtin fog scatter takes (the fullscreen distance-fog
-    // passes, neither localized nor banded, the two most opaque). Filled for a user effect in the scene chain; zero on
-    // every other draw (an effect mesh, the UI lane and a picture-in-picture - whose passes are all localized - see
-    // the engine's fog alone, as the builtin's do). Read through KhFxFogAt / KhFxFogPasses (the KH_FX_UNIT section).
-    // C++ twin fx_fog.
+    // passes, neither localized nor banded nor additive, multiply or screen, the two most opaque). Filled for a user
+    // effect in the scene chain and
+    // (KH_DLF_FOGREC) for dynamicLightFog's pass and its side draws (effect.hlsl KhDlfPassMedium; its fxParams2.xy say
+    // whether each record's pass draws before it); zero on every other draw (an effect mesh, the UI lane and a
+    // picture-in-picture - whose passes are all localized - see the engine's fog alone, as the builtin's do). Read
+    // through KhFxFogAt / KhFxFogPasses (the KH_FX_UNIT section).
+    // C++ twin fx_fog. KH_WSEE on a sorted mesh draw ([1].z of khFxTexLay above 0): [0] = the main depth's decode
+    // (the engine's m22, m32, then the world's viewport MinDepth, MaxDepth; KhWseeMeshMeters), zero elsewhere.
     float4 khFxFog[2];
 };
 
@@ -141,8 +159,11 @@ cbuffer CBObj : register(b0)
     // (lane 41), y = fog end distance (lane 48), z = inverse ramp range (lane
     // 49), w = terms valid.
     float4 fogEngine;
-    float4 fogSky;   // The sky CB's view-elevation gradient control.
-    float4 fogSkyCol;   // The sky CB's fog base colour (row 7).
+    // fogSky: the fog colour's view-elevation gains (x nadir, y horizon, z zenith), w = armed - filled (1, 1, 1, 1)
+    // once the sky CB matched (in the fill's fog block), so the target is fogSkyCol.rgb. fogSkyCol.rgb: the sky
+    // CB's row 1. KH_FOG_SKY_DOC.
+    float4 fogSky;
+    float4 fogSkyCol;
     float4 hazePars;   // Engine distance haze, the sky CB's row 14.
     // x = origin world X, y = origin world Z (SQF y), z = node spacing (m: the terrain grid's own where the
     // framework's terrain matrix is the source, a whole multiple of it past KH_THM_MAX_SIDE nodes a side), w =
@@ -303,8 +324,8 @@ float4 KhDlRec(int khdr_i)
 // itself: PSDlsMask, the one reader of blendCtl.w, and the DLS world pass,
 // whose KhDlsWorldFactor reads lighting0.z / .w (kh_dls_world_pass fills both
 // with 1).
-static float khObjAmb = 0.0f;      // lighting0.z twin: base-colour fraction kept in shadow.
-static float khObjDif = 0.0f;      // lighting0.w twin: n.L-scaled fraction.
+static float khObjAmb = 0.0f;      // lighting0.z twin: the scale of the engine's ambient (lightAmb) on this mesh.
+static float khObjDif = 0.0f;      // lighting0.w twin: the scale of the engine's sun (lighting2), the n.L term.
 static float khObjCut = 0.0f;      // shadowMeta2.y twin: object view-distance cut (m, 0 = off).
 static float khObjDither = 0.0f;   // blendCtl.w twin: the LOD crossfade dither for this draw.
 // KH_SHADOW_SWITCH: lighting0.y / KhObjRec pos.w twin - 1 = receiveShadow off,
@@ -359,19 +380,39 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 // or in the text below; nothing of the contract lives anywhere else.
 // Where the file goes: Documents\Arma 3\kh_framework\rendering, else any
 // loaded mod's 'rendering' folder (searched in that order; the script names
-// the file relative to it). The first use compiles it in the background - a
+// the file relative to it). Save it as UTF-8 or ANSI: UTF-16 text (Notepad's
+// "Unicode") or a NUL byte is refused with a report (KH_USER_UTF16). The
+// first use compiles it in the background - a
 // material draws flat white and an effect pass is skipped until it lands - and
-// the result is cached on disk; a compile error is reported once, with fxc's
-// own message - its line numbers your file's own (KH_USER_LINE). Each
+// the result is cached on disk; a compile error is reported with fxc's own
+// message - its line numbers your file's own (KH_USER_LINE) - once per
+// distinct message (KH_USER_ERR_ONCE): each compiled variant (below) remembers
+// its own failure, and variants failing with the same message report it once.
+// A failed variant stays failed - not compiled again - until the mission
+// restarts or the device resets (KH_USER_FAIL_STAYS): fix the file, then
+// restart the mission. Each
 // compiled variant (below) reads the file at its own first use, and every one
 // reads it again after a device reset (alt-tab in exclusive fullscreen, a
-// video-settings change): an edit made mid-mission reaches some variants and
+// video-settings change; whether the file defines a vertex stage is read once
+// per mission): an edit made mid-mission reaches some variants and
 // not others - restart the mission to pick it up everywhere.
-// The compile runs on worker threads. While one is in flight the other user
-// shaders wait for it, and a device reset or a mission end that meets it
-// waits for it to end (meanwhile every mesh of ours draws the white
-// placeholder and no post-processing runs): keep a unit that compiles in
-// seconds.
+// The compile runs on worker threads, and a material's is not quick
+// (KH_USER_END_NOWAIT): its unit is this file, yours and the whole builtin
+// mesh shader (static.hlsl, or composite + composite2), so each variant costs
+// about what that shader does - a five-line KhUserShade measured 49 s for one
+// variant under fxc (the builtin twins: a minute or two). An effect's unit (this
+// file and yours alone) and a vertex stage's take about a second. Variants
+// asked for in the same few frames compile side by side, up to a core each;
+// one asked for while a batch is in flight waits for that whole batch, then
+// compiles. Meanwhile the material draws the white placeholder and the effect
+// pass is skipped. Neither a device reset nor a mission end waits for a user
+// compile: it runs on, detached, and until it ends every mesh of ours draws
+// the white placeholder and no post-processing runs - the next mission's
+// first frames included. A finished unit is cached on disk
+// (Documents\Arma 3\kh_framework\cache), keyed by the unit's whole text, its
+// defines and the compile flags: an unchanged file compiles once per machine, each
+// edit once more. To spare players the wait, ship the .khsc files in your
+// mod's 'cache' folder (the SQF reference's SHADER COMPILE AND CACHE).
 // Every variable at file scope must be static (static const for a constant):
 // a plain global (float k = 0.5;) is a shader constant - its initializer is
 // ignored and it reads whatever constant buffer its register holds, one of
@@ -388,6 +429,10 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 // section (an effect's: a material compile does not define it); it cannot call
 // into static.hlsl / composite2.hlsl (they come after it). It defines
 //     float3 KhUserShade(KhMatSurf s, float3 wpos, float3 n, float smf)
+// (a file defining the five-parameter form of the interim builds, with an
+// `out float3 ambient`, no longer compiles - fxc's message is reported once
+// and the submesh draws the white placeholder until the file is updated and
+// the mission restarted).
 // While the compile is pending, or if it fails (reported once), the submesh
 // draws flat unlit white instead (the white placeholder, with the default
 // material); the builtin PBR shades it only if the placeholder itself was not
@@ -409,27 +454,94 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //         face turns to the sun.
 //   RETURN the lit colour in the engine's linear HDR scene units (the units of
 //         lighting2 and lightAmb), before fog: finite and not negative - it
-//         is held to [0, 65504], a NaN reads 0 (KH_USER_FINITE). Around the
+//         is held to [0, 1e30], a NaN reads 0 and an inf 1e30
+//         (KH_USER_FINITE); the 16F scene stores at most its largest finite
+//         value, 65504 (the store saturates). Around the
 //         call the builtin applies fog, the coverage (the material's cutout /
 //         blend alpha times the object colour's alpha) and the object's blend
 //         mode. Coverage is that alpha's: a discard or clip in KhUserShade
 //         removes the pixel from this colour draw alone - the shadows the mesh
-//         casts, its cast onto the world and an inFront mesh's depth prepass
-//         keep the whole surface.
+//         casts, its cast onto the world, an inFront mesh's depth prepass and
+//         its stencil footprint (KH_SEAM_USER_CLIP: the surface the engine's
+//         shadow volumes are counted against) keep the whole surface. A cutout
+//         material's edge is decided before
+//         the call: on a multisampled scene it takes alpha to coverage
+//         (KH_CUTOUT_A2C, KhCutoutCover), so an edge pixel may reach only some
+//         of its samples; the shading runs once per pixel as before. A blend
+//         material's translucent part (KhUserMatAlphaMode() 2) in a sorted
+//         tail - a cycle whose see-through record landed on a multisampled
+//         scene (not PIP) - is drawn after the game's blended layers with no
+//         hardware depth test: around the call the builtin tests the pixel
+//         per sample against the see-through record (KH_WSEE, KhWseeMeshCut -
+//         discarded where every sample lies behind an opaque, the kept samples
+//         its coverage) and composites the colour under the layers in front
+//         of it (KhWseeMeshOut; on a non-float scene target, mode 3, colour
+//         and alpha held to [0, 1] first); on any other cycle it draws as
+//         before, depth-tested by the hardware. Nothing in KhUserShade changes
+//         this: return the straight lit colour as on any draw.
 // The builtin's own recipe is the reference to copy or wrap: KhApplyPBR(s,
 // wpos, n, smf) is what KhUserShade replaces, and ApplyLighting (untextured)
 // documents the combine. Rules its pieces follow:
-//   - khObjAmb / khObjDif are this object's ambient and sun-diffuse fractions
-//     (loaded at the PS entry, per instance on a bucket draw). Scale the
-//     ambient and the direct sun by them; never read lighting0.zw directly.
-//   - DynLights(wpos, n) / KhDynLightsPBR(...) carry every dynamic light that
-//     reaches the mesh, with their own shadows (none with receiveShadow off or
-//     every mesh's shadows off); add them as they are. The n passed drives
-//     their N.L; their shadow lookup takes the geometric normal (KH_DLS_GEOM_N).
-//   - Ambient occlusion is NOT a shader term: KH_SSAO multiplies the result at
-//     the pixel after the draw. s.occ is the material's occlusion map, for the
-//     ambient only (as KhPbrAmbient applies it).
+//   - khObjAmb / khObjDif are this object's lit [ambient, diffuse] (loaded at
+//     the PS entry, per instance on a bucket draw): scales, 0 or more, of the
+//     engine's ambient (lightAmb) and of its sun's direct n.L term (lighting2)
+//     (KH_LIT_SCALES). Scale the ambient and the direct sun by them (the
+//     builtin's overcast lobe, sky light, takes khObjAmb); the dynamic lights
+//     take neither. Never read lighting0.zw directly.
+//   - DynLights(wpos, n) / KhDynLightsPBR(..., occ) carry every dynamic
+//     light that reaches the mesh, with their own shadows (none with
+//     receiveShadow off or every mesh's shadows off); add them as they are.
+//     The n passed drives their N.L; their shadow lookup takes the geometric
+//     normal (KH_DLS_GEOM_N). DynLights, KhDynLightsPBR and KhApplyPBR take a
+//     screen gradient (fwidth(wpos), KH_USER_LIGHT_GRAD): call them in uniform
+//     flow, not inside a loop with a per-pixel break.
+//   - Ambient occlusion is NOT a shader term: KH_SSAO multiplies the whole
+//     colour of a depth-writing solid's pixels after the draw, at the sample.
+//     s.occ is the material's occlusion map, for the ambient only (as
+//     KhPbrAmbient applies it, and KhDynLightsPBR's occ argument to each
+//     lamp's ambient - KhApplyPBR passes s.occ).
+//   - The ambient (KhPbrAmbient, and each lamp's ambient in KhDynLightsPBR)
+//     is the split sum's: its env-BRDF, F82 and dome tables (KH_ENV_LUT /
+//     KH_ENV_F82 / KH_DOME_LUT: 544, 512 and 768 of the shader's 4096
+//     immediate-constant-buffer float4s) take at most 1824, those a shader's
+//     calls reach (KH_ICB_DOC): KhApplyPBR all three; KhDynLightsPBR alone no
+//     dome, 1056 or less. For an ambient
+//     of your own (another sky, a dome from a user map):
+//     KhPbrAmbSplit(N.V, rough, F0) is its specular response E to a unit
+//     radiance (the builtin's diffuse keeps (1 - metal)(1 - E)),
+//     KhEnvBrdfLut(N.V, rough) the (A, B) behind it, KhEnvBrdfC(N.V, rough)
+//     the arma model's F82 term (KH_ENV_F82) and
+//     KhDomeSkyShare(R.y, rough) the sky's share of the dome along R - pure
+//     functions; KhPbrAmbSplit shades the arma model (s.model = 1, the
+//     conductor Fresnel of fresnelNK) only after a KhApplyPBR call in the
+//     same pixel set it, Schlick's form before.
 //   - Emissive is not added for you: KhApplyPBR adds s.emissive last.
+//   - Highlights (KH_GGX_EXACT, KH_SMITH_HC): KhGGXSpec is the exact GGX
+//     single-scatter lobe at every roughness (its D and the height-correlated
+//     Smith G2), held to 0.045 at the low end. KhApplyPBR and KhDynLightsPBR
+//     multiply every lobe by the multiple-scattering compensation Fms
+//     (KH_MS_DIRECT; KhPbrAmbSplitF(N.V, rough, F0, fms) returns it beside
+//     E): a lobe of your own takes it the same way. A glossy surface takes a
+//     small, bright sun or lamp highlight - a white metal's at 0.045 peaks at
+//     ~2e4 (sun) x the light's colour head-on, ~1.3e5 at N.V 0.15 and more
+//     toward grazing (~2e6 at N.V 0.01), as spec x Fms x pi x N.L before
+//     khObjDif. KhApplyPBR widens the sun's lobe by the sun's disc
+//     (KH_SUN_DISC) and KhDynLightsPBR a lamp's by a 0.05 m emitter at its
+//     distance (KH_DL_RADIUS: a lamp 10 m off widens as the sun, 1 m off
+//     ~1 % of a point's peak, 100 m off 0.85 of it). Every route's colour
+//     then loses only NaN, inf and negatives (KH_PBR_FINITE, [0, 1e30];
+//     RETURN above); the 16F scene stores at most 65504.
+//   - Specular anti-aliasing (KH_SPEC_AA): s arrives with rough and gloss
+//     widened (s.aaA2, below) by the normal map's filtering and the screen-
+//     space variance of n, so a lobe that narrow does not sparkle where the
+//     normal turns faster than the pixels sample it. Shading with a normal
+//     of your own m (a second normal map, parallax), add its variance in
+//     uniform flow: s = KhSpecAA(s, m) (= KhMatWiden(s, KhSpecAAKernel(m))) -
+//     on top of n's, which errs toward the wider. A roughness or gloss you set
+//     yourself takes none: KhRoughWiden(rough, s.aaA2) is the builtin's
+//     widening of it (gloss: 1 - KhRoughWiden(1 - gloss, s.aaA2)). The map's
+//     own value, un-widened, is (s.rough^4 - s.aaA2)^(1/4) while s.rough is
+//     below 1 (the widening is held to 1; no helper inverts it).
 // The material's inputs (KH_USER_SLOTS) - EVERY map slot, routing input and
 // param there is belongs to a .hlsl material. The script side (updateRender3D
 // "material"), one entry per submesh selector:
@@ -455,6 +567,10 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //               alpha      diffuse.a
 //               gloss      specular.a - smdi.b when named "smdi"
 //               specular   none (1) - smdi.g when named "smdi"
+//             A route reads its map as the slot is decoded: the r / g / b of
+//             an sRGB slot (diffuse, emissive, specular, speccolor) arrive
+//             decoded from sRGB, so route data from orm / as, smdi, normal or
+//             an alpha (never decoded).
 //   params    "basecolor" [r,g,b], "roughness", "metalness" (or "metallic"),
 //             "glossiness", "specularColor" [r,g,b], "fresnel" [N,K] (or an
 //             rvmat's "fresnel(N,K)" string), "emissiveIntensity",
@@ -489,23 +605,39 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //   alpha     the routed "alpha" (1 unrouted).
 //   nrmT      the tangent-space normal, xy x normalStrength (0,0,1, no map).
 //   occ, rough, metal   the routed inputs; with no map behind a route, 1, the
-//             roughness param and the metalness param.
+//             roughness param and the metalness param - rough widened by
+//             KH_SPEC_AA (aaA2).
 //   emissive  emissive.rgb x emissiveIntensity (0 with no map).
 //   specF0    slot 4's rgb as sampled (0 with no map); specOn = 1 when that
 //             slot holds a "specular" map - the builtin then shades spec-gloss
-//             from specF0 and gloss. 0 under "smdi" (its rgb is no F0).
-//   gloss     the routed "gloss"; 0 with no map behind it - take
-//             KhUserMatGlossiness() then (the builtin arma model does).
+//             from specF0 and gloss (roughness 1 - gloss: KH_GLOSS_ROUGH). 0
+//             under "smdi" (its rgb is no F0).
+//   gloss     the routed "gloss"; with no map behind the route, slot 4's
+//             alpha where that slot holds a "specular" map (SMDI.b under
+//             "smdi"), else 0 - take KhUserMatGlossiness() then (the builtin
+//             arma model does) - widened by KH_SPEC_AA as 1 - rough is (aaA2).
 //   specTint  the routed "specular" (1 unrouted) x speccolor.rgb (1 with no
 //             map) x the specularColor param.
 //   fresnelNK the fresnel param.
 //   model     0. Set it to 1 before KhApplyPBR(s, ...) to shade with the arma
 //             model - spec-gloss from gloss, specTint as F0, the conductor
-//             Fresnel of fresnelNK - instead of metal-rough.
+//             Fresnel of fresnelNK - instead of metal-rough. KH_GLOSS_ROUGH:
+//             spec-gloss takes roughness = 1 - gloss (floored at 0.045, as
+//             every roughness); there is no specularPower.
+//   aaA2      KH_SPEC_AA: the GGX alpha^2 (alpha = roughness^2) added to
+//             rough and gloss - the normal map's filtering (KhToksvigA2, in
+//             KhSampleMatG, png / tga / bmp normal maps: a re-sample
+//             carries its own) plus the variance of
+//             n over the pixel (KhSpecAAKernel, added by the builtin before
+//             KhUserShade). 0 on a flat, unmapped surface up close.
 // The raw values behind them: KhUserMatHas(slot) - the map resolved and is
 // loaded - and KhUserMatBaseColor / Roughness / Metalness /
 // EmissiveIntensity / NormalStrength / Cutoff / AlphaMode / SpecularColor /
 // Glossiness / Fresnel(), each the script's param (or its default).
+// KhUserMatAlphaMode() is 0 opaque, 1 cutout, 2 blend - and 3 on a blend
+// material's depth-writing draw (its solid texels - the routed alpha's mip 0
+// texel 0.9 or more - drawn with the opaques at alpha 1; the rest draw in
+// the translucent tail as 2).
 // Re-sampling the material (animation): KhUserUv() is the uv the builtin
 // sampled - the pixel's, after the material's own texture animation when it
 // has one (KhUserUvRaw() is the mesh's, KhUserUvDx() / KhUserUvDy() the
@@ -645,7 +777,14 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 // one.
 // Bound for it, as for the builtin effects (the section declares each):
 //   sceneColor (t0)  the pass's source. SampleScene(px) reads it clamped to the
-//                    frame (and premultiplied in the UI spill lane).
+//                    frame (and premultiplied in the UI spill lane);
+//                    KhSampleSceneBil(p) at a fractional position p (pixel
+//                    centres at k + 0.5, as i.pos.xy), bilinear over four
+//                    SampleScene taps - the texel itself at a centre - as
+//                    every builtin displacement effect (chromatic aberration,
+//                    distortion, the rain lens, the CRT) reads: a tap at the
+//                    nearest whole pixel steps a pixel at a time
+//                    (KH_FX_BILINEAR).
 //   depthTex (t1)    the depth the pass sees. On the UI (centerSize.w above 1)
 //                    it is at the 3D render's size, which differs from the
 //                    frame's at a Sampling other than 100 %: LoadDepthRaw /
@@ -655,7 +794,8 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //                    marker applied where one of our meshes drew nearer than
 //                    the near plane, and the scene's depth where the view
 //                    model's translucent planes hid it (KH_VM_SEE, khVmSee
-//                    below). LinDepth(raw) = metres along the view
+//                    below; KH_WSEE's khWs* below leave it the front
+//                    depth). LinDepth(raw) = metres along the view
 //                    axis (1e9 for the far plane and the sky); KhLinZ(px) =
 //                    LinDepth(LoadDepthPS(px)) (a builtin pass may read a copy
 //                    of the frame's; a user pass converts);
@@ -675,9 +815,13 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //                    MSAA, the viewport's MinDepth above 0 (depthParams.z), a
 //                    cycle whose view model drew a translucent plane and in which
 //                    a pass reads the depth - a user effect counts when its file
-//                    names LoadDepthPS, LoadDepthRaw, KhLinZ, KhWorldPosFenced,
-//                    KhWorldPosRelFenced, KhSunFlareVis, a KhVmSee helper or one
-//                    of these views. Then
+//                    calls LoadDepthPS(...), LoadDepthRaw, KhLinZ, KhWorldPosFenced,
+//                    KhWorldPosRelFenced, KhSunFlareVis or a KhVmSee helper (the
+//                    whole name followed by a parenthesis, outside a comment:
+//                    "#define D LoadDepthPS" and D(px) is not a call of it), or
+//                    names one of these views or an identifier beginning KhWsee
+//                    or khWs (the scan is C++
+//                    kh_user_src_reads_depth). Then
 //                    LoadDepthPS returns the scene's depth there;
 //                    KhVmSeeCovered(px) says a plane wrote its own
 //                    over it; KhVmSeeT(px) is their transmittance (1 elsewhere
@@ -691,6 +835,128 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //                    off) the chain runs before the view model draws - no planes
 //                    in the depth yet - and a picture-in-picture has no view
 //                    model.
+//   khWsS (t53) / khWsT (t54) / khWsB (t55) / khWsR (t56) / khWsN (t57) /
+//   khWsE (t58) / khWsC (t59, MSAA)  KH_WSEE: the world's blended draws (a
+//                    wire fence, foliage, glass, particles, smoke) - the raw
+//                    depth behind them, their transmittance and the late
+//                    opaque flag, the scene colour behind them, the chain's
+//                    input, the nearest raw depth of the ones that write none,
+//                    the samples' classes (KH_WSEE_EDGE_COST: a uint word,
+//                    KhWseeClassWord) and the scene's sample colours
+//                    (the KH_FX_UNIT section's KH_WSEE note). khWsC (and
+//                    KhWseeClassC, which loads it) is bound only where
+//                    KhWseeAvail() bit 1 is set - the pass's own draw, not
+//                    the run's last pass where the scene cannot take the copy
+//                    back, nor where the scene's sample view is missing;
+//                    elsewhere it loads 0: test the bit, and without it take
+//                    the pixel's colour (SampleScene) as effect 13 does. Armed
+//                    (KhWseeArmed()) in the scene chain alone, in a cycle
+//                    whose capture landed, for a user effect that is localized
+//                    or banded or whose file names KhSunFlareVis or an
+//                    identifier beginning KhWsee or khWs - these helpers and
+//                    views (C++ kh_user_src_uses_wsee: the scan is textual,
+//                    any such identifier outside a comment arms it - on a
+//                    #define line, under #if 0, in a string, a name of your
+//                    own with that prefix; over-arming costs the capture,
+//                    never the picture - and only a name assembled by ##
+//                    escapes it. An effect reading the
+//                    depth otherwise alone is not armed - it would see the
+//                    front depth either way, and every armed pass costs the
+//                    capture). LoadDepthPS
+//                    stays the depth buffer's (the layers' that write it).
+//                    KhWseeCovered(px) says layers cover px; KhWseeT(px) is
+//                    their transmittance (1 elsewhere and unarmed - and where
+//                    the covering layers are fully transparent there: covered
+//                    at T = 1 shows only what is behind them);
+//                    KhWseeFrontRaw(px) / KhWseeBehindRaw(px) the nearest
+//                    layer's raw depth and the raw depth behind them (each
+//                    LoadDepthPS's where none covers). T = KhWseeAt(px,
+//                    LoadDepthPS(px), o) gives them from one read: o = (front
+//                    raw, behind raw, G), covered exactly where o.y > o.x
+//                    (o = (r, r, 0) and T = 1 where not; T = 1 can be
+//                    covered). G is 0 where the colour behind the layers is
+//                    the capture's; 1 where a surface was drawn over the
+//                    scene after the cycle's first fence-type layer - the
+//                    depth holds it, or a layer drawn over it later (the
+//                    behind raw is then that surface's own depth); 0.5 where
+//                    such a surface was drawn before that layer and khWsB2
+//                    was taken (KhWseeAvail() bit 3: its colour is in khWsB2,
+//                    its depth the behind; 1 without it) - so a test for a
+//                    late surface is o.z > 0.25, not o.z > 0.5.
+//                    A depth-derived
+//                    quantity Q is then
+//                    T Q(behind) + (1 - T) Q(front), as the builtins take it.
+//                    With MSAA a pixel's samples may differ (a leaf's edge):
+//                    KhWseeCount(px, r, g) is 1 (the per-pixel rule above)
+//                    or, where they disagree, the samples to take (the
+//                    depth's count, at most KH_WSEE_NS; g = the pixel's depth
+//                    gradient, an out), and KhWseeSampleAt(px, r, k, n, g, o)
+//                    the rule on sample k (k < n = the count; n = 1 is
+//                    KhWseeAt) - Q is then the mean over them. KhWseeMix(px,
+//                    r, q, z, e) does all of it as the builtins do - where
+//                    khWsE's class word stands it takes one pair per class
+//                    of samples (one T texel, one surface within a few per
+//                    cent of one depth), weighed by the class's members
+//                    (KhWseeCountW): the cheaper approximation of that mean,
+//                    not the loop over every sample - (a statement; brace it
+//                    under
+//                    an unbraced if / else): on entry q holds Q at r =
+//                    LoadDepthPS(px) of that same px, e is an expression of
+//                    the float z (a view depth, LinDepth's; z a name unused in
+//                    the scope - the macro declares it) giving Q there, free
+//                    of gradients (Load / SampleLevel: it runs in a loop) -
+//                    evaluated only at the other depths; px, r and q plain
+//                    variables; on exit q is the blend (q as it was unarmed
+//                    and where nothing covers and the samples agree; under
+//                    layers passing 98 % or more with the depth buffer at
+//                    the behind, Q(behind) alone - KH_WSEE_FAINT, within 2 %
+//                    of the blend, e not evaluated). Two
+//                    such masks multiplied average each alone, not their
+//                    product (edges only). Where several layer groups
+//                    cover a pixel (the fence-type layers, the particle-type
+//                    ones drawn before / after the cycle's second snapshot,
+//                    each split by its distance from the surface behind)
+//                    KhWseeGroups(px, z, t) gives them one by one - their
+//                    count n, raw depths nearest first and transmittances - to
+//                    compose front to back (KhWseeMix does): (1 - t.x) Q(z.x)
+//                    + t.x (1 - t.y) Q(z.y) + t.x t.y (1 - t.z) Q(z.z) +
+//                    t.x t.y t.z Q(behind). n may exceed 3 (up to 7): z / t
+//                    hold the three nearest, KhWseeGroups7(px, z, t, z2, t2)
+//                    all of them (groups 0 - 3 in z / t as float4, 4 - 6 in
+//                    z2 / t2; KhWseeGroups5 the five nearest); an absent group
+//                    sits at the behind with t 1, so the sum above over all
+//                    seven is right at any n.
+//                    The colour behind the layers: KhWseeBehindColor(px,
+//                    scene, behind, t) (below, in the section) gives it as the
+//                    distance fog takes it - never read khWsB / khWsB2 raw:
+//                    they are the capture's colours, older than every chain
+//                    pass before this one, and hold no colour behind a
+//                    surface drawn over the scene after the capture, nor
+//                    the dynamic-light shadows our meshes cast on the
+//                    world (applied after). The
+//                    colours are taken only from the cycle after a pass
+//                    naming these identifiers first runs: such a pass added
+//                    draws its first frame unarmed (every helper here at its
+//                    unarmed value). KhFxFinish
+//                    already blends its localization and
+//                    band masks so (KhFxLocalMask / KhFxBandMask give the
+//                    masks alone); an effect's own use of the depth does it
+//                    itself. Never armed on an effect mesh, the UI lane or a
+//                    picture-in-picture. khWsC, KhWseeClassWord and the
+//                    sample-level helpers (KhWseeNs / Grad / Same / Disagree
+//                    / ClassC) exist only under MSAA_DEPTH 1 - guard a read
+//                    with #if MSAA_DEPTH (the same file compiles for a
+//                    picture-in-picture, or with antialiasing off, at
+//                    MSAA_DEPTH 0: fxc then reports an undeclared identifier
+//                    and the pass is skipped); KhWseeCount / SampleAt / Mix /
+//                    Groups exist in both (count 1 at MSAA_DEPTH 0).
+//                    KH_PSB: the particle layers' record
+//                    is split over khWsT's B / A and khWsN beside khWsP0 /
+//                    khWsP1 / khWsNb / khWsNb2 (t66 - t69, the one pass's,
+//                    at 1 / 2 the frame: KhWseePsbAt), and a pre late opaque
+//                    is derived (KhWseeAvail() bit 8, KH_WSEE_NOPRE) - read
+//                    the record (T's G included) through these helpers,
+//                    not raw.
 //   khArbSnap (t2)   an effect mesh's arbitration snapshot (KhFxBegin reads it).
 //   khsgTex (t3) / khsgSamp (s2)  the pass's source pre-filtered: the pyramid
 //                    the builtin glows read, built for a pass whose file calls
@@ -725,12 +991,16 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 // to one period - for a growing argument), KhGrainGc (the builtin grain's
 // noise), KhSqfToEngine(p) (a position from the params, SQF [x, y, zASL], in
 // engine axes: p.xzy - the C++ converts the builtin Pulse's and SunFlare's
-// itself; a user's arrive as sent), the KhVmSee helpers (above), and:
+// itself; a user's arrive as sent), the KhVmSee and KhWsee helpers (above),
+// KhWorldPosRelAt(uv, z, df) (KhWorldPosFenced's point less fxCam's camera, at
+// a given LINEAR view depth z - LinDepth(KhWseeBehindRaw(px)), say, not the raw
+// value; df = z held short of the far plane), and:
 //   fog          KhFxFogAt(px, d) = the fog the builtin fog scatter sees at px
 //                (0 none - 1 all; d its view depth, KhLinZ(px), 1e9 the sky):
 //                the engine's height fog (KhFxFogEngine(float2(px), d,
-//                fxMeta.zw, m.x, m.y), its sky integrated along the view ray)
-//                and the scene's distance-fog passes (KhFxFogPasses over the
+//                fxMeta.zw, m.x, m.y), its sky integrated along the view ray,
+//                with the engine's view-distance fade) and the scene's
+//                distance-fog passes (KhFxFogPasses over the
 //                khFxFog records, filled in the scene chain), as independent
 //                media. Not the engine's haze (KhHazeT) or the
 //                below-layer term the mesh fog adds. The UI lane's fog lanes
@@ -747,7 +1017,8 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //   sun          KhFxSunSpot(dir, spos, sp) (a direction - lighting1.xyz for
 //                the sun or moon - projected as a point at infinity: false
 //                behind the camera or well off screen), KhSunFlareVis(sp) (how
-//                much sky shows at it, 25 depth taps), KhSunFlareEdge(spos)
+//                much sky shows at it, 25 depth taps - through KH_WSEE's
+//                layers by their transmittance), KhSunFlareEdge(spos)
 //                (its fade leaving the frame).
 // The dynamic-light lanes (dlCtl, dlGlobal, dlView, dlFirst) are filled for a
 // lit object alone: an effect mesh is lit by default (updateRender3D's "lit"),
@@ -761,8 +1032,13 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 // KhFxFinish applies what the builtin applies to its result: the localization
 // mask and its inverse, the band mask, opacity (color.a) and the blend mode,
 // and packs the output for the composite the pass is in (under additive,
-// multiply and screen the masks scale the opacity, so the picture outside
-// them is left as it was - KH_LOCAL_BLEND). Without them the
+// multiply and screen, and on an effect mesh under normal, the masks scale
+// the opacity, so the picture outside them is left as it was -
+// KH_LOCAL_BLEND, KH_FX_MASK_ALPHA). KhFxLocalMask(px) / KhFxBandMask(px)
+// are those two masks alone, as KhFxFinish forms them (the inverse applied;
+// through KH_WSEE's layers where they cover) - 1 on a pass that is not
+// localized / not banded - for a term shaped before KhFxFinish, or a pass
+// that returns raw (KH_FX_MASK_ACC). Without KhFxBegin / KhFxFinish the
 // output is written as returned - the rest of this section - and the shader
 // should still begin with KhObjLoad(i.iobj0, i.iobj1).
 //   fxMeta     x = effect id, y = the object's age in seconds (formed in
@@ -787,10 +1063,11 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //           leave one as it was - and never discard or clip: the chain's
 //           targets are not cleared, so a discarded pixel shows an older
 //           frame's or the pre-chain picture. Return alpha 1 (KhFxFinish
-//           does): the chain's last pass writes the alpha into the engine's
-//           target too. Return finite, non-negative colour: a NaN or
-//           inf runs on into the later passes that read the pixel and
-//           into the game's own post-processing.
+//           does): the scene chain's last pass writes the alpha into the
+//           engine's target too (a picture-in-picture's passes write the
+//           colour alone: its alpha stays the engine's). Return finite,
+//           non-negative colour: a NaN or inf runs on into the later passes
+//           that read the pixel and into the game's own post-processing.
 //           1.25 = the UI phase (a pass the script set to affect the UI): t0
 //           is the finished display frame, post-tonemap, UI included (0 - 1),
 //           its alpha the UI coverage, and the hardware lerps the frame toward
@@ -842,10 +1119,16 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //   KhUserPerturb / KhUserFrontFace   MATERIAL only: see the MATERIAL section.
 //   KhUserVtxWorld(p) / KhUserVtxWorldDir(d) / KhUserVtxObjectDir(d)
 //                         object space <-> world, for the VERTEX stage.
-// Object lanes (per-object draws: the drawn object; on a bucket draw these
-// are the first instance's - use the accessors): centerSize.xyz its centre
-// (engine axes), sizeAxes.xyz its edge lengths (engine axes), objRot0..2.xyz
-// its rotation rows (objRot0.w = 1 when set, identity otherwise).
+// Object lanes (per-object draws: the drawn object; KH_INST_DOC: on a bucket
+// draw - one call drawing many objects of one mesh and material - they are
+// one member's, the bucket's representative, for every instance, and no accessor
+// returns them per instance): centerSize.xyz its centre (engine axes),
+// sizeAxes.xyz its edge lengths (engine axes), objRot0..2.xyz its rotation
+// rows (objRot0.w = 1 when set, identity otherwise); the CB's color likewise.
+// A material whose look depends on them varies wrongly across a bucket. Per
+// instance a material has KhUserTime() (each one's age), khObjAmb / khObjDif,
+// the pixel's own position, normal, tangent and UV, and the colour the
+// builtin applies (the instance's).
 // Scene lanes: lighting1.xyz the unit vector toward the sun or moon (w = 1
 // valid), lighting2.rgb its colour and lightAmb.rgb the ambient (HDR scene
 // units).
@@ -1010,12 +1293,14 @@ SamplerState khPfSamp : register(s1);   // Linear-clamp.
 // class ((i & 1) | (j & 1) << 1 of its first node's indices; 0 = the diagonal from (i, j) to (i + 1, j + 1), 1 = the
 // one from (i + 1, j) to (i, j + 1), 2 = a bilinear fit where the split is not known - a grid not at the matrix's
 // native spacing, or a split not recognised), carried as base-3 digit k of thmParams.w - 1. C++ twin:
-// kh_cloth_ground_plane. Returns -1e6 outside the heightfield (= no occlusion evidence).
+// kh_cloth_ground_plane. Returns -1e6 outside the heightfield (= no occlusion evidence). KH_THM_EDGE: data up to
+// the far node lines, exclusive - g < thmMeta - 1 (integers) keeps int(g) + 1 inside the texture with no margin;
+// the twin also takes the node line itself (it clamps the cell), a set of measure zero.
 float KhThmHeight(float2 xz)
 {
     float2 g = (xz - thmParams.xy) / max(thmParams.z, 1e-3f);
     if (g.x < 0.0f || g.y < 0.0f ||
-        g.x > thmMeta.x - 1.001f || g.y > thmMeta.y - 1.001f) return -1.0e6f;
+        g.x >= thmMeta.x - 1.0f || g.y >= thmMeta.y - 1.0f) return -1.0e6f;
     int2 c0 = int2(g);
     float2 f = g - float2(c0);
     // KH_SHADOW_GATHER's form: the 2 x 2 block (c0, c0 + 1) in one fetch, sampled at the corner its texels share,
@@ -1107,8 +1392,10 @@ Texture2D<float2> khSunPf5 : register(t20);   // Far (KH_FAR_PF; t20 was free in
 // matters, and it is CLAMP - samp_pf's, or the default state a null binding
 // invokes. Every pass that runs those kernels binds it: the mesh passes
 // (injection, flush, PIP, inFront), the mask cast and the DLS world pass.
-// Every map they read is a single-mip view, so the level is mip 0 on every
-// path. It is also KhPfMu's sampler (a trilinear read of the moment pyramids at
+// KH_GATHER_NO_LOD: Gather computes no level of detail and takes no
+// derivatives - it reads the view's most detailed mip on every path, in
+// divergent flow too (these maps are single-mip views besides). It is also
+// KhPfMu's sampler (a trilinear read of the moment pyramids at
 // an explicit level) and the Gather of KhThmHeight, ShadowMapSample and
 // KhBandTap4 - all on those same passes. (Declared above KhThmHeight.)
 float2 KhPfMu(Texture2D<float2> khpb_t, float2 khpb_uv, float khpb_base, float khpb_lod)
@@ -1226,9 +1513,12 @@ static const int   KH_VOL_WITNESS_R = 2;
 // surface. KH_VOL_FOOT: our own footprint mask when the copy has one - no
 // encode to decode, so a moving near plane cannot shift it; otherwise the
 // copy's depth plane decoded through the seam's encode (stenVol.xy,
-// stenVol2.yw). No finite distance (at or past infinity) = no surface; the
-// projection's far is finite (m22 > 1), so a cleared depth texel (1.0) decodes
-// to the far plane's distance, which a fragment short of it never matches.
+// stenVol2.yw). No finite distance (at or past infinity) = no surface. A
+// cleared depth texel (1.0) decodes to the far plane's distance only where the
+// range's MaxDepth is 1; under the world range [0.011, 0.999] its ndc exceeds
+// 1, so it decodes to no surface where f / n exceeds ~989 (near 0.2, far
+// 12000), else to a distance past the far plane (near 5, far 1600: ~2363 m) -
+// a fragment short of the far never matches it either way.
 float KhVolWitnessDist(int2 khvw_p)
 {
     if (stenVol4.x >= 0.5f) {
@@ -1962,7 +2252,7 @@ float SunShadowOcclusionSelf(float3 wrel, float3 nrm, KhSunSelfGrad khsg)   // K
     float khsr_tw = 2.0f / (max(sunMeta.y, 1.0f) * max(khsr_iR, 1e-6f));
     float khsr_k = khsr_tw * khsr_iD / max(ndl, 0.02f)
                  * saturate(1.0f - 3.0f * khsg.fwn);
-    float khsr_gc = KH_RPDB_GC(khsr_tw) * khsr_iD;   // KH_RPDB_WORLD_CLAMP twin.
+    float khsr_gc = KH_RPDB_GC(khsr_tw) * khsr_iD;   // KH_RPDB_WORLD_CLAMP. TWIN: KhSelfTier's khT_gc.
     float2 khsr_g = clamp(
         float2( dot(n, khsr_cr / max(khsr_iR, 1e-9f)) * khsr_k,
                -dot(n, khsr_cu / max(khsr_iR, 1e-9f)) * khsr_k),
@@ -1971,7 +2261,7 @@ float SunShadowOcclusionSelf(float3 wrel, float3 nrm, KhSunSelfGrad khsg)   // K
     float khsr_tan = clamp(sqrt(saturate(1.0f - ndl * ndl)) / max(ndl, 0.02f),
                            1.0f, 1.0e4f);
     float khsr_b = max(sunMeta.z, 1.5f * khsr_tw * khsr_iD)   // Tier-proportional floor.
-                 + 0.35f * khsr_tan * KH_SLOPE_TW(khsr_tw) * khsr_iD;   // KH_SLOPE_WORLD twin.
+                 + 0.35f * khsr_tan * KH_SLOPE_TW(khsr_tw) * khsr_iD;   // KH_SLOPE_WORLD. TWIN: KhSelfTier's khT_b.
     float khsr_gs = min(khgs, 4.0f * khsr_tw);
     khsr_b += khsr_gs * khsr_iD;
     float khsr_w = saturate(0.001f / max(khsr_tw, 1e-6f));
@@ -2499,8 +2789,8 @@ float3 DynLights(float3 wpos, float3 nrm)
         // (KhDlsSoft's 9 KhDlsBilin, one each). Twin: KhDlsWorldFactor, which has
         // carried this same guard since it was written; the two mesh loops did
         // not. No gradient is skipped with it: khs_fwp is priced before the
-        // loop, and KhDlsSoft's Gathers read a single-mip array (mip 0 whatever
-        // their implicit derivatives say - KH_SHADOW_GATHER).
+        // loop, and KhDlsSoft's Gathers take none: Gather computes no level of
+        // detail and reads the array's most detailed mip (KH_GATHER_NO_LOD).
         if (att <= 0.0f) continue;
 
         // The shadow scales the directional term only. KhDlRec(b + 3) is the
@@ -2528,6 +2818,361 @@ float3 DynLights(float3 wpos, float3 nrm)
     return acc * dlGlobal.w;
 }
 
+// KH_MESH_O1 - the two outputs of the mesh pixel shaders (PSMain, PSComposite, PSWhite). o1 is the sorted tail's
+// dual-source blend operand (KhWseeMeshOut, modes 2 and 3: the C++ bs_wsee_sort reads it as SRC1_COLOR /
+// SRC1_ALPHA) and 0 on every other draw, where slot 1 is unbound and the output is dropped (a route that draws them
+// under the engine's binding binds slot 0 alone first - KhOmSlot0 - so it never lands in an engine target).
+struct KhMeshOut { float4 c : SV_Target0; float4 o1 : SV_Target1; };
+// KH_MESH_O1: the colour alone - o1 zero.
+KhMeshOut KhMeshOutC(float4 khmo_c)
+{
+    KhMeshOut khmo_o;
+    khmo_o.c = khmo_c;
+    khmo_o.o1 = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    return khmo_o;
+}
+
+// KH_WSEE - the sorted tail parts (the flush's normal-blend parts that test the depth without writing it, the
+// injection's deferred ones among them) draw after the game's layers, and PSMain (its textured twin, a user
+// material's static twin, PSWhite in their place) tests and composites them against the cycle's record (the
+// KH_FX_UNIT section's KH_WSEE note). The mesh unit's views (declared below; C++ KhWseeSortScope binds them): khMsS
+// (S), khMsT (T), khMsB (B), khMsZ (the live main depth, MS), khMsN (NWpre), khMsQ (Q: the scene resolved before the
+// run's first compositing part), khMsN2 (NWpost), khMsB2, khMsS2, khMsD3, khMsP0 / P1 / Nb / Nb2 - the FX unit's
+// record. Armed by khFxTexLay[1].z (KhWseeMeshMode: 1 = the occlusion test with the plain blend; 2 = the test and
+// the layer-aware composite under the dual-source state on a float target; 3 = the same on any other target, colour
+// and alpha held to [0, 1]; C++ kh_wsee_sort_mode) on such a part's draw alone - 0 on every other mesh draw, where
+// nothing here loads and the output is the colour alone (KhMeshOutC). The decode is khFxFog[0] (m22, m32, the
+// world's MinDepth / MaxDepth). The C++ binds no depth test (the main depth holds the fence's transparent texels,
+// which would hide our glass), so:
+//   OCCLUSION (KhWseeMeshCut, per sample k): the opaque raw o_k = for a late opaque (T.G at k) its live depth - D3
+//   where D3 stands, at sample 0 and at k > 0 whose sample 0 is late too; for a derived pre sample 0 (S2 != S in the
+//   world's range, bit 8 / 9; the live r0 < S without S2) and its G = 0 samples on its surface (KhWseeMsSame) S2
+//   where B2 or D3 stands, else the live depth; for a G = 0 sample with no fence-type layer of its own (T.R = 1) its
+//   live depth (KH_WSEE_SURF_BEHIND: another surface's sample at an edge, or sample 0 written after the snapshot by
+//   a draw the record holds nothing of - late then, G = 1); else S.
+//   The fragment is discarded at k where o_k lies below the world's range (in front: the slice, our near gap) or
+//   SV_Position.w lies past o_k in metres by more than KH_WSEE_MS_REL relative or KH_WSEE_MS_ZTOL (8 D24 steps at
+//   o), whichever is larger (the two encodes' error, a coplanar part). The kept set goes out as SV_Coverage (khMsCov,
+//   ANDed with the raster's); empty = discard. 2 n + 1 loads a fragment. The layer verdict (front, Tr, background)
+//   is sample 0's for the pixel.
+//   COMPOSITE (KhWseeMeshOut, modes 2 / 3): the nearest layer f = min(live, NWpre, NWpost) (NW positions through
+//   KhWseeMsNwPos); a layer stands where f < o and f is in the world's range. In front of the fragment the target
+//   becomes dest + Tr a (c - X), Tr = Tw Tpre Tpost (held by the stacking cap Tr X <= Q per channel, KhWseeMsCap),
+//   X = B - or B2 with Tr = Tw Tpost where B2 was taken (bit 3) and no pre layer lies in front of the fragment (every
+//   pre layer is then in B2). Written without a negative source: o0 = (Tr a c, 0), o1 = (saturate(1 - Tr a X /
+//   max(Q, KH_WSEE_MS_QMIN)), 1), dest taken as Q - exact where no tail part drew the pixel after Q was taken (an
+//   earlier part leaves out off by -d Tr a X / Q); per sample the factor is the pixel's, so the resolve is exact.
+//   Over a late opaque (G marks it, but a derived pre one with the B2 form; X would be O, which no snapshot holds):
+//   o1 = (1 - Tr a, 1), dest for the surface - off by Tr a (P - (1 - Tr) O), small where the layers in front are
+//   faint. No layer, or the nearest behind the fragment: the plain over, o0 = (a c, a), o1 = 1 - a. Mode 1: the
+//   test with the plain blend.
+//   Light-adding layers (in NW, not in T) keep the composite exact (each layer is affine in what lies behind). Not in
+//   the record (taken as absent): screen, multiply and the like.
+// Not covered: layers both in front of and behind the fragment at one pixel (Tr is all of theirs); our own parts
+// overlapping (an earlier sorted part is in T / NW but not in B); the layer verdict at sample 0 only; a late opaque
+// a depth-writing layer drew over afterwards where D3 does not stand; engine layers the record does not place are
+// covered at a by our later tail parts; an opaque drawn after a nearer fence-type layer at a sample (it failed the
+// engine's own test there: in no depth and no record).
+#if !KH_FX_UNIT
+Texture2D<float> khMsS : register(t53);
+Texture2DMS<float4> khMsT : register(t54);   // RGBA - Tw, G, Tpre, Tpost.
+Texture2D<float4> khMsB : register(t55);
+Texture2DMS<float> khMsZ : register(t56);
+Texture2D<float> khMsN : register(t57);
+Texture2D<float4> khMsQ : register(t58);
+Texture2D<float> khMsN2 : register(t59);   // NWpost (khMsN is NWpre).
+Texture2D<float4> khMsB2 : register(t60);   // B2, bound in modes 2 / 3 where khFxTexLay[1].w bit 3 (its moment) is set.
+Texture2D<float> khMsS2 : register(t62);    // S2 (the depth at the B2 moment), bound where bit 9 says.
+// KH_WSEE_OQ2: a post late opaque's D3 is resolved from its own interpolated depth (PSWseeD3Res).
+Texture2D<float> khMsD3 : register(t65);    // D3 (a late opaque's own depth), where bit 5 says it stands.
+// KH_PSB (the FX section's note at khWsP0): the one pass's record (KH_PSB_PHASE: Tpre in P0's R, Tpost in P1's,
+// NWpre in N, NWpost in N2) where khFxTexLay[1].w bit 6 says a re-issue drew into it; bit 7: the old record's NW
+// holds its clear (not loaded). The sorted part reads each phase as the product of both records' T and the nearer of
+// both NWs, the read-time reset at sample 0's late opaque (a phase whose nearest one-pass layer lies behind the
+// opaque raw o: 1).
+Texture2D<float4> khMsP0 : register(t66);
+Texture2D<float4> khMsP1 : register(t67);   // KH_PSB_PHASE: the post phase's.
+Texture2D<float> khMsNb : register(t68);
+Texture2D<float> khMsNb2 : register(t69);   // KH_PSB_PHASE: NWpost.
+// KH_PSB_LORES (twin of the FX unit's KhWseePsbAt): the one pass draws at 1 / 2 the frame a side (KH_WSEE_PSB_LS), so
+// the record's texel for pixel px is px >> 1, clamped to floor(W / 2) - 1 (W = khMsS's size): the one pass certainly
+// writes that texel, while the texel past it may be undrawn or partial at an odd W (KH_PSB_LORES_EDGE) - the frame's
+// last W mod 2 pixels read their neighbour block's texel in place of the clear.
+int2 KhWseeMsPsbAt(int2 khmp_px) {
+    const int khmp_ls = KH_WSEE_PSB_LS;   // s = 2 (C++ KH_PSB_LS).
+    uint khmp_w, khmp_h;
+    khMsS.GetDimensions(khmp_w, khmp_h);   // KH_PSB_LORES_EDGE.
+    return min(khmp_px >> khmp_ls, max((int2((int)khmp_w, (int)khmp_h) >> khmp_ls) - 1, int2(0, 0)));
+}
+#define KH_WSEE_MS_REL 2.0e-3f
+#define KH_WSEE_MS_QMIN 1.0e-6f   // Q's floor in the divisor (Q = 0: B's share is 0 there; the factor saturates).
+#define KH_WSEE_MS_ZTOL (8.0f / 16777216.0f)
+// KhWseeMeshCut's verdict for KhWseeMeshOut (one pixel's: per invocation).
+static bool khMsFront = false;   // The nearest layer lies in front of the fragment (mode 2).
+static float khMsTr = 1.0f;   // T at sample 0 where khMsFront (Tw Tpre Tpost; capped against B and Q).
+static float3 khMsBg = float3(0.0f, 0.0f, 0.0f);   // B where khMsFront (or B2, T then Tw Tpost).
+static float3 khMsQv = float3(1.0f, 1.0f, 1.0f);   // Q where khMsFront.
+static bool khMsLate = false;   // khMsFront over a late opaque (G = 1): dest stands for what lies behind.
+// Bit k set where the fragment lies in front of sample k's opaque - the caller's SV_Coverage.
+// Every bit unarmed (the raster's coverage stands).
+static uint khMsCov = 0xFFFFFFFFu;
+#define KH_WSEE_MS_NS 32u   // The samples tested at most - SV_Coverage's width, D3D11's sample cap.
+float KhWseeMeshMode() { return khFxTexLay[1].z; }
+// The view depth (m) of a raw main-depth value - LinDepth's rule on khFxFog[0] (about the far plane's distance at
+// raw == MaxDepth, 1e9 past it).
+float KhWseeMeshMeters(float khmm_raw)
+{
+    const float khmm_n = (khmm_raw - khFxFog[0].z) / max(khFxFog[0].w - khFxFog[0].z, 1e-6f);
+    const float khmm_d = khmm_n - khFxFog[0].x;
+    if (khmm_d > -1e-7f) return 1e9f;
+    const float khmm_m = khFxFog[0].y / khmm_d;
+    return khmm_m > 0.0f ? khmm_m : 1e9f;
+}
+// KH_WSEE - the stacking cap (the FX section's KhWseeCap, the mesh unit's twin): a layer record cannot show more
+// of khmp_x (the colour behind the layers) than the pixel khmp_p holds - T held to khmp_p / khmp_x per channel where
+// khmp_x exceeds KH_WSEE_CAP_EPS. A consistent record is unchanged.
+#define KH_WSEE_CAP_EPS (1.0f / 1024.0f)
+float KhWseeMsCap(float khmp_t, float3 khmp_p, float3 khmp_x)
+{
+    [unroll] for (int khmp_i = 0; khmp_i < 3; ++khmp_i) {
+        if (khmp_x[khmp_i] > KH_WSEE_CAP_EPS) khmp_t = min(khmp_t, max(khmp_p[khmp_i], 0.0f) / khmp_x[khmp_i]);
+    }
+    return khmp_t;
+}
+// An NW raw khmn_n as the layer's POSITION - KhWseeNwPos's twin (its note; C++ KhWseeSurfVp's push, Hi =
+// khFxFog[0].w here): the pushed value itself still decides absorption (n' against the opaque); only an n' at or
+// before Hi is taken back; no layer (NW's clear, 1) stays 1. KH_WSEE_SURF_TOL: C++'s twin.
+#define KH_WSEE_SURF_TOL (0.02f)
+float KhWseeMsNwPos(float khmn_n)
+{
+    const bool khmn_b = khmn_n < 1.0f && khmn_n <= khFxFog[0].w;   // A pushed value (<= Hi).
+    return khmn_b ? (khmn_n - KH_WSEE_SURF_TOL * khFxFog[0].w) / (1.0f - KH_WSEE_SURF_TOL) : khmn_n;
+}
+// One sample's occlusion test for the fragment's view depth khmk_w (m) against the sample's
+// opaque raw khmk_o: false below the world's range, or where the fragment lies past o's metres by more than
+// KH_WSEE_MS_REL relative or eight D24 steps at o (KH_WSEE_MS_ZTOL; the larger).
+bool KhWseeMsKeep(float khmk_o, float khmk_w)
+{
+    if (khmk_o < khFxFog[0].z) return false;
+    const float khmk_zo = KhWseeMeshMeters(khmk_o);
+    const float khmk_zu = KhWseeMeshMeters(min(khmk_o + KH_WSEE_MS_ZTOL, 1.0f));
+    return !(khmk_w > max(khmk_zo * (1.0f + KH_WSEE_MS_REL), khmk_zu));
+}
+// KH_WSEE_NOPRE: whether sample khms_k's raw khms_rk lies on sample 0's surface (raw khms_r0, screen gradient khms_g)
+// - the FX unit's KhWseeSame / KhWseeGrad (their twins: the same rule on the same live depth, khMsZ here, its
+// KH_WSEE_ZTOL KH_WSEE_MS_ZTOL's value), so KhWseeMeshCut's per-sample pre flags are the chain's.
+float2 KhWseeMsGrad(int2 px, float khmg_r0)
+{
+    uint khmg_w, khmg_h, khmg_n;
+    khMsZ.GetDimensions(khmg_w, khmg_h, khmg_n);
+    float2 khmg_g = float2(0.0f, 0.0f);
+    [unroll] for (int khmg_a = 0; khmg_a < 2; ++khmg_a) {
+        const int2 khmg_e = khmg_a == 0 ? int2(1, 0) : int2(0, 1);
+        const int  khmg_p = khmg_a == 0 ? px.x : px.y;
+        const int  khmg_m = (int)(khmg_a == 0 ? khmg_w : khmg_h);
+        const bool khmg_hf = khmg_p + 1 < khmg_m;
+        const bool khmg_hb = khmg_p > 0;
+        const float khmg_f = khMsZ.Load(px + khmg_e, 0) - khmg_r0;   // Off the frame: unused (selected away).
+        const float khmg_b = khmg_r0 - khMsZ.Load(px - khmg_e, 0);
+        float khmg_d = 0.0f;
+        if (khmg_hf && khmg_hb) khmg_d = abs(khmg_f) <= abs(khmg_b) ? khmg_f : khmg_b;
+        else if (khmg_hf) khmg_d = khmg_f;
+        else if (khmg_hb) khmg_d = khmg_b;
+        if (khmg_a == 0) khmg_g.x = khmg_d;
+        else khmg_g.y = khmg_d;
+    }
+    return khmg_g;
+}
+bool KhWseeMsSame(uint khms_k, float khms_r0, float khms_rk, float2 khms_g)
+{
+    const float2 khms_d = khMsZ.GetSamplePosition((int)khms_k) - khMsZ.GetSamplePosition(0);
+    const float  khms_p = khms_r0 + dot(khms_g, khms_d);
+    return abs(khms_rk - khms_p) <= KH_WSEE_MS_ZTOL + 0.5f * dot(abs(khms_g), abs(khms_d));
+}
+// The occlusion test and the layer verdict at the fragment khmc_p (SV_Position: xy the pixel, w its view depth).
+// Discards; armed alone. The test per sample into khMsCov, the discard where no sample keeps the fragment; the layer
+// verdict sample 0's.
+void KhWseeMeshCut(float4 khmc_p)
+{
+    [branch] if (KhWseeMeshMode() > 0.5f) {
+        const int2 khmc_px = int2(khmc_p.xy);
+        const float4 khmc_t = khMsT.Load(khmc_px, 0);
+        const float khmc_z = khMsZ.Load(khmc_px, 0);
+        bool       khmc_g = khmc_t.y > 0.25f;   // A replayed late opaque (G = 1; T holds no 0.5).
+        // A derived pre one (KH_WSEE_NOPRE, below; bit 3 the B2 moment, S2 bound - B2 too in modes 2 / 3): its depth is
+        // S2's - a fence drawn over it since holds the live depth there.
+        const bool khmc_b2 = ((uint)(khFxTexLay[1].w + 0.5f) & 8u) != 0u;
+        bool       khmc_pre = false;   // Set by the derived path alone (T's G is 0 or 1).
+        // D3 stands (bit 5): a late opaque's opaque raw is its own depth.
+        const bool khmc_d3 = ((uint)(khFxTexLay[1].w + 0.5f) & 32u) != 0u;
+        const float khmc_s = khMsS.Load(int3(khmc_px, 0));   // Once: every G = 0 sample's opaque (sample 0's S).
+        float khmc_o = khmc_g ? khmc_z : khmc_s;
+        [branch] if (khmc_d3 && khmc_g) khmc_o = khMsD3.Load(int3(khmc_px, 0));
+        // KH_WSEE_NOPRE (the FX section's note at khWsS2): bit 8 - this cycle's pre late opaques were not replayed;
+        // sample 0 is pre where S2 (bit 9, bound in every mode; else the live depth) differs from S and no post
+        // opaque owns it, and reads as a replayed one did: its opaque raw S2 where B2 or D3 stands, else the live
+        // depth; the loop's G = 0 samples on its surface likewise (below).
+        const uint khmc_av0 = (uint)(khFxTexLay[1].w + 0.5f);
+        const bool khmc_d2 = (khmc_av0 & 512u) != 0u && (khmc_b2 || khmc_d3);   // A derived opaque's raw is S2.
+        bool  khmc_dp = false;
+        float khmc_dr = khmc_z;
+        [branch] if (!khmc_g && (khmc_av0 & 256u) != 0u) {
+            // KhWseeRule's twin test - S2 only in the world's range, there S2 != S; else
+            // the live depth before S; the reference itself in the world's range (the slice's raw: no late opaque).
+            bool khmc_dq = khmc_z < khmc_s;
+            [branch] if ((khmc_av0 & 512u) != 0u) {
+                const float khmc_s2 = khMsS2.Load(int3(khmc_px.x + (int)(khmc_t.x > 2.0f), khmc_px.y, 0));
+                const bool  khmc_dw = khmc_s2 >= khFxFog[0].z;
+                khmc_dq = khmc_dw ? (khmc_s2 != khmc_s && khmc_s >= khFxFog[0].z) : khmc_dq;
+                khmc_dr = khmc_dw ? khmc_s2 : khmc_dr;
+            }
+            khmc_dp = khmc_dq && khmc_dr >= khFxFog[0].z;
+            [branch] if (khmc_dp) {
+                khmc_g = true;
+                khmc_pre = khmc_b2;
+                khmc_o = khmc_d2 ? khmc_dr : khmc_z;
+            }
+        }
+        // KH_WSEE_SURF_BEHIND (KhWseeRule's twin): sample 0's live depth nearer than its snapshot, no late opaque
+        // replayed and no fence-type layer at the sample (T.R = 1) - a depth-writing draw after the capture the
+        // record holds nothing of stands at z: the opaque raw is z and the surface is late (G = 1: dest stands for
+        // it in the composite; B is behind it, not behind the layers). Before, S: a part behind such a surface (a
+        // sea surface the replay missed) was kept and drawn over it.
+        [branch] if (!khmc_g && khmc_t.x >= 1.0f && khmc_z < khmc_s) {
+            khmc_g = true;
+            khmc_o = khmc_z;
+        }
+        bool   khmc_gh = false;   // KH_WSEE_NOPRE: the gradient taken (KhWseeMsSame's), once a fragment.
+        float2 khmc_gr = float2(0.0f, 0.0f);
+        // Sample 0's verdict is bit 0; samples 1 .. n - 1 (n the live depth's count) each take their own T and live
+        // depth, S the pixel's (the loop loads no S2: the derived path above did). A G = 1 sample k takes its live
+        // depth - KhWseeRule's rule, so the fog and the glass agree at an edge - or, with D3, sample 0's D3 where
+        // sample 0 is a replayed (G = 1) opaque (khmc_o holds it: no load; a derived one has G 0 in T).
+        uint khmc_w, khmc_h, khmc_n;
+        khMsZ.GetDimensions(khmc_w, khmc_h, khmc_n);
+        khmc_n = clamp(khmc_n, 1u, KH_WSEE_MS_NS);
+        uint khmc_m = KhWseeMsKeep(khmc_o, khmc_p.w) ? 1u : 0u;
+        [loop] for (uint khmc_k = 1u; khmc_k < khmc_n; ++khmc_k) {
+            const float4 khmc_tk = khMsT.Load(khmc_px, (int)khmc_k);
+            const float  khmc_zk = khMsZ.Load(khmc_px, (int)khmc_k);
+            const bool   khmc_gk = khmc_tk.y > 0.25f;
+            // KH_WSEE_SURF_BEHIND: S is sample 0's snapshot alone - a G = 0 sample with no fence-type layer of its
+            // own (T.R = 1) takes its live depth (its own surface: another one at an edge, sample 0's where they
+            // agree - z_k = S then, as before - or a surface written after the snapshot); a fence-type texel keeps S
+            // (the main depth holds its transparent texels, which would hide a part behind them).
+            float khmc_ok = (khmc_gk || khmc_tk.x >= 1.0f) ? khmc_zk : khmc_s;
+            [branch] if (khmc_d3) {   // A replayed sample 0 (G 1) - a derived one has G 0 in T.
+                if (khmc_gk && khmc_t.y > 0.25f) khmc_ok = khmc_o;
+            }
+            // KH_WSEE_NOPRE: a G = 0 sample under a derived pre sample 0 is pre too where it lies on sample 0's
+            // surface - KhWseeMsSame, the chain's KhWseeSame on the same depth (so the fog and the glass agree at an
+            // edge); its gradient once a fragment, its address carrying a raw-derived 0 (fxc keeps the loads here).
+            [branch] if (khmc_dp && khmc_tk.y <= 0.25f) {
+                bool khmc_on = khmc_zk == khmc_z;
+                [branch] if (!khmc_on) {
+                    [branch] if (!khmc_gh) khmc_gr = KhWseeMsGrad(khmc_px + int2((int)(khmc_zk > 2.0f), 0), khmc_z);
+                    khmc_gh = true;
+                    khmc_on = KhWseeMsSame(khmc_k, khmc_z, khmc_zk, khmc_gr);
+                }
+                if (khmc_on) khmc_ok = khmc_d2 ? khmc_o : khmc_zk;
+            }
+            if (KhWseeMsKeep(khmc_ok, khmc_p.w)) khmc_m |= 1u << khmc_k;
+        }
+        khMsCov = khmc_m;
+        if (khmc_m == 0u) discard;
+        [branch] if (KhWseeMeshMode() > 1.5f) {
+            // G = 1: N alone can be nearer. Both phases' nearest particle-type layer. KH_PSB: of both records
+            // (bit 7 clear: the old one's; bit 6: the one pass's).
+            const uint khmc_av = (uint)(khFxTexLay[1].w + 0.5f);
+            float2 khmc_nn = float2(1.0f, 1.0f);
+            float2 khmc_nb = float2(1.0f, 1.0f);
+            float  khmc_no = 1.0f;   // KH_WSEE_NOPRE: the old record's NWpre alone (its read-time reset's).
+            [branch] if ((khmc_av & 128u) == 0u) {
+                khmc_nn = float2(khMsN.Load(int3(khmc_px, 0)), khMsN2.Load(int3(khmc_px, 0)));
+                khmc_no = khmc_nn.x;
+            }
+            [branch] if ((khmc_av & 64u) != 0u) {
+                const int2 khmc_bp = KhWseeMsPsbAt(khmc_px);   // KH_PSB_LORES: the record's texel.
+                khmc_nb = float2(khMsNb.Load(int3(khmc_bp, 0)), khMsNb2.Load(int3(khmc_bp, 0)));   // KH_PSB_PHASE.
+                khmc_nn = min(khmc_nn, khmc_nb);
+            }
+            const float khmc_np = khmc_nn.x;
+            const float khmc_nq = khmc_nn.y;
+            const float khmc_f = min(khmc_z, min(khmc_np, khmc_nq));
+            [branch] if (khmc_f < khmc_o && khmc_f >= khFxFog[0].z) {
+                // The nearest layer's position - an NW in front of the opaque taken back from its push
+                // (KhWseeMsNwPos); one at or behind it (absorbed) is no layer here. The pre layer's gated position
+                // once (khmc_pp); the B2 choice below reads the same.
+                const float khmc_pp = khmc_np < khmc_o ? KhWseeMsNwPos(khmc_np) : 1.0f;
+                const float khmc_fp = min(khmc_z, min(khmc_pp, khmc_nq < khmc_o ? KhWseeMsNwPos(khmc_nq) : 1.0f));
+                [branch] if (KhWseeMeshMeters(khmc_fp) < khmc_p.w) {
+                    khMsFront = true;
+                    // KH_PSB: the one pass's Tpre / Tpost at the pixel, the read-time reset over sample 0's late
+                    // opaque (its raw o), times the old record's (bit 6 clear: 1 - the old record's value bit for bit).
+                    float2 khmc_q = float2(1.0f, 1.0f);
+                    [branch] if ((khmc_av & 64u) != 0u) {
+                        const int2 khmc_qb = KhWseeMsPsbAt(khmc_px);   // KH_PSB_LORES: the record's texel.
+                        const int3 khmc_qa = int3(khmc_qb.x + (int)(khmc_t.x > 2.0f), khmc_qb.y, 0);
+                        khmc_q = float2(khMsP0.Load(khmc_qa).x, khMsP1.Load(khmc_qa).x);   // KH_PSB_PHASE.
+                        khmc_q = float2(khmc_g && khmc_nb.x > khmc_o ? 1.0f : khmc_q.x,
+                                        khmc_g && khmc_nb.y > khmc_o ? 1.0f : khmc_q.y);
+                    }
+                    // KH_WSEE_NOPRE: a derived pre sample 0 - the replay's reset of the old record's Tpre at read time.
+                    const float khmc_tz = (khmc_dp && khmc_no > khmc_o ? 1.0f : khmc_t.z) * khmc_q.x,
+                                khmc_tw = khmc_t.w * khmc_q.y;
+                    khMsTr = khmc_t.x * khmc_tz * khmc_tw;   // Every layer's.
+                    // No pre layer in front of the fragment and B2 taken: B2 behind, the fence-type and post layers'
+                    // T (also over a derived pre late opaque: B2 holds its colour); a late opaque with a pre layer in
+                    // front, or one drawn after B2, takes dest for what lies behind. The pre layer's position is
+                    // khmc_pp's gated one: an NWpre absorbed by the opaque is no layer in front here either (taken
+                    // back from the push it lies up to 2 % before the opaque and would refuse B2 to a part there).
+                    const bool khmc_b2x = khmc_b2 && !(KhWseeMeshMeters(khmc_pp) < khmc_p.w);
+                    khMsLate = khmc_g && !(khmc_pre && khmc_b2x);
+                    [branch] if (!khMsLate) {
+                        khMsQv = khMsQ.Load(int3(khmc_px, 0)).rgb;
+                        [branch] if (khmc_b2x) {
+                            khMsBg = khMsB2.Load(int3(khmc_px, 0)).rgb;
+                            khMsTr = khmc_t.x * khmc_tw;   // KH_PSB: both records' post phase.
+                        } else {
+                            khMsBg = khMsB.Load(int3(khmc_px, 0)).rgb;
+                        }
+                        khMsTr = KhWseeMsCap(khMsTr, khMsQv, khMsBg);   // The stacking cap (Q holds T X).
+                    }
+                }
+            }
+        }
+    }
+}
+// A sorted part's output for its straight colour khmw_c and alpha khmw_a (PSMain's normal-blend return): the colour
+// alone (KhMeshOutC) unarmed and in mode 1; in modes 2 and 3 the dual-source pair above (SV_Target0 = o0,
+// SV_Target1 = o1).
+KhMeshOut KhWseeMeshOut(float3 khmw_c, float khmw_a)
+{
+    KhMeshOut khmw_o = KhMeshOutC(float4(khmw_c, khmw_a));
+    [branch] if (KhWseeMeshMode() > 1.5f) {
+        float3 khmw_k = khmw_c;
+        float khmw_q = khmw_a;
+        if (KhWseeMeshMode() > 2.5f) {   // Mode 3: the inputs the plain blend's would be held to.
+            khmw_k = saturate(khmw_k);
+            khmw_q = saturate(khmw_q);
+        }
+        if (khMsFront) {
+            const float3 khmw_ta = (khMsTr * khmw_q).xxx;
+            khmw_o.c = float4(khmw_ta * khmw_k, 0.0f);
+            if (khMsLate) {   // G = 1: dest for the late surface behind the layers.
+                khmw_o.o1 = float4(1.0f - khmw_ta, 1.0f);
+            } else {
+                khmw_o.o1 = float4(saturate(1.0f - khmw_ta * khMsBg / max(khMsQv, KH_WSEE_MS_QMIN)), 1.0f);
+            }
+        } else {
+            khmw_o.c = float4(khmw_k * khmw_q, khmw_q);
+            khmw_o.o1 = (1.0f - khmw_q).xxxx;
+        }
+    }
+    return khmw_o;
+}
+#endif
+
 // smf: per-pixel shadow factor from the caller (received world shadows and the
 // private sun-depth self term, min-combined - they answer the same question at
 // different granularities and must not stack).
@@ -2541,8 +3186,8 @@ float3 ApplyLighting(float3 base, float3 wpos, float3 nrm, float smf)
     float ndl = saturate(dot(n, lighting1.xyz));
     float3 direct = lighting2.rgb * (ndl * khObjDif * smf);   // Per-pixel receive + self term
                                                               // (min-combined upstream).
-    // Ambient occlusion is not a term here: KH_SSAO multiplies the injected
-    // pass's result at the pixel (PSSsaoApply, ssao.hlsl) after the draw.
+    // Ambient occlusion is not a term here: KH_SSAO multiplies the drawer's
+    // result at the pixel (PSSsaoApply, ssao.hlsl) after the draw.
     return base * (lightAmb.rgb * khObjAmb + direct + DynLights(wpos, nrm));
 }
 
@@ -2563,7 +3208,7 @@ static float4 matParams0 = 0.0f, matParams1 = 0.0f, matParams2 = 0.0f, matParams
 // in static.hlsl). A user (.hlsl) material takes all six under either naming
 // (KH_USER_SLOTS: its specular page is read linear when the script named it
 // "smdi"); its own maps (KH_USER_TEX) follow at t43-t48. StateBackup saves
-// t0-t48.
+// t0-t69 (KH_WSEE's t53 - t69 included: the C++ KH_WSEE note's REGISTERS).
 Texture2DArray<float4> matDiffuse  : register(t14);
 Texture2DArray<float4> matNormal   : register(t15);
 Texture2DArray<float4> matOrm      : register(t16);
@@ -2585,7 +3230,8 @@ SamplerState matSamp : register(s0);
 // the six maps' bound flags, bits 6-11 the user maps'. KH_UV_ANIM: bit 12 =
 // the uv transform, 13 its warp, 14 the flipbook; an0 = its matrix A, an1 =
 // (translation c, warp phase), an2 = (warp amplitude, frequency), an3 =
-// (columns, rows, frame) - C++ kh_uv_anim_lanes, once a cycle.
+// (columns, rows, frame) - C++ kh_uv_anim_lanes, once a cycle. Bit 15 =
+// KH_SPEC_AA's Toksvig arm (KhToksvigA2).
 struct KhGpuMat {
     float4 p0; float4 p1; float4 p2; float4 p3; float4 lay0; float4 lay1; float4 p4; float4 p5; float4 lay2;
     float4 an0; float4 an1; float4 an2; float4 an3;
@@ -2755,9 +3401,10 @@ float KhMatRoute(float route, float fallback, float2 uv)
 // The blend split classifies by the texel's own alpha: a point fetch at mip 0
 // through the same route, never the filtered sample. The filtered alpha
 // averages a transparent neighbour into an opaque texel wherever the footprint
-// touches the window (the rim at distance, a uv seam where the hardware picks
-// the coarsest mip), so such texels would leave the opaque pass and the part
-// pass could not cover them - bites through a solid hull.
+// touches the window (the rim, wider the coarser the mip), so such texels would
+// leave the opaque pass and the part pass could not cover them - bites through
+// a solid hull. (A uv seam no longer picks a coarse mip: KH_MAT_GRAD's
+// gradients are the triangle's own, taken before KH_UV_ANIM's cell wrap.)
 // The texel under t = frac(uv) of a w x h level. frac of a uv a hair below zero rounds to exactly 1.0 in fp32, one past
 // the last texel, where a Load returns zero (alpha 0: a solid texel read as clear); the index stops at the last one.
 int2 KhMatTexelIx(float2 t, uint w, uint h)
@@ -2854,7 +3501,42 @@ struct KhMatSurf {
     // intensity x SPECCOLOR x specularColor, and the fresnel (N, K). Filled for
     // a user material too (KH_USER_SLOTS), which may set model itself.
     float model; float3 specTint; float2 fresnelNK;
+    // KH_SPEC_AA: the GGX alpha^2 already added to rough and gloss (KhMatWiden) - the normal map's filtering
+    // (KhToksvigA2, in KhSampleMatG) and, in the builtin's s, the shading normal's screen-space variance.
+    float aaA2;
 };
+
+// KH_SPEC_AA: a roughness widened by a2add in GGX alpha^2 (alpha = rough^2): (rough^4 + a2add)^(1/4), held to
+// [0, 1] (KhApplyPBR's saturate); a2add <= 0 returns it as it is. Pure.
+float KhRoughWiden(float khrw_r, float khrw_a2)
+{
+    const float khrw_s = saturate(khrw_r);
+    const float khrw_q = khrw_s * khrw_s;
+    return khrw_a2 > 0.0f ? sqrt(sqrt(saturate(khrw_q * khrw_q + khrw_a2))) : khrw_r;
+}
+// KH_SPEC_AA: s with a2add more alpha^2 on both lanes a shading reads - rough, and gloss as 1 - rough (KH_GLOSS_ROUGH)
+// - so the widening holds whichever workflow shades; aaA2 keeps the sum.
+KhMatSurf KhMatWiden(KhMatSurf s, float a2add)
+{
+    s.rough = KhRoughWiden(s.rough, a2add);
+    s.gloss = a2add > 0.0f ? 1.0f - KhRoughWiden(1.0f - s.gloss, a2add) : s.gloss;
+    s.aaA2 += max(a2add, 0.0f);
+    return s;
+}
+// KH_SPEC_AA (geometric specular anti-aliasing; Kaplanyan et al. 2016, Tokuyoshi and Kaplanyan 2019 / 2021, JCGT
+// 10(2) Listing 5): the alpha^2 that the variance of the normal n over the pixel's footprint adds, from its screen
+// derivatives - 2 sigma^2 (|ddx n|^2 + |ddy n|^2), sigma^2 = 1 / (2 pi) the pixel filter's variance in pixels (a
+// Gaussian of peak 1: their choice over the earlier 0.25, closer to a box and less over-blurred), clamped at kappa =
+// 0.18 (theirs: the derivative estimate's error past it). A highlight whose normal turns faster than the pixel grid
+// samples it - curvature at range, a normal map's detail near a pixel - widens until the pixel's samples agree,
+// instead of sparkling. ddx / ddy: call in uniform control flow (a quad's four pixels all reach it).
+float KhSpecAAKernel(float3 khsa_n)
+{
+    const float3 khsa_dx = ddx(khsa_n);
+    const float3 khsa_dy = ddy(khsa_n);
+    return min(2.0f * 0.15915494f * (dot(khsa_dx, khsa_dx) + dot(khsa_dy, khsa_dy)), 0.18f);
+}
+KhMatSurf KhSpecAA(KhMatSurf s, float3 n) { return KhMatWiden(s, KhSpecAAKernel(n)); }
 
 // One tap set for the whole surface; the flag guards and the six routes are
 // selects over it. The guards still decide what an absent map means (white
@@ -2875,8 +3557,40 @@ uint KhMatNeed()
     return khmn_m;
 }
 
+// KH_SPEC_AA (Toksvig 2005, "Mipmapping Normal Maps"): the GGX alpha^2 the normal map's own filtering adds. A
+// filtered read of unit normals is shorter the more they spread: variance (1 - L) / L for its length L, alpha^2 = 2 x
+// that (the same 2 sigma^2 as KhSpecAAKernel). The mips are box averages not renormalised (kh_tex_build_mips), so L
+// holds it - armed by p0.x bit 15 for a png / tga / bmp map alone (kh_mat_gpu_fill, by extension: a .dds / .paa's own
+// levels may be renormalised or block-compressed, and the levels KH_DDS_MIP_FILL builds below them are not told
+// apart). khtk_n is the decoded texel as read (t1 * 2 - 1), before
+// normalStrength and KhUvNrm change its length; their effect on the spread scales the variance instead (s^2, and
+// |M|_F^2 / 2 for KhUvNrm's M = A^T / sqrt|det A|). KH_TOKSVIG_Q = 1 / 128 of the deficit is 8-bit quantisation's (up
+// to sqrt(3) / 255), not spread; the deficit counts as far as the read is minified (saturate(lod), the level the 16x
+// anisotropic sampler reads - KH_ANISO_16). A jpg is not armed (its error passes 1 / 128): prefer png normal maps.
+static const float KH_TOKSVIG_Q = 0.0078125f;
+float KhToksvigA2(float3 khtk_n, float2 khtk_dx, float2 khtk_dy)
+{
+    uint khtk_w, khtk_h, khtk_e;
+    matNormal.GetDimensions(khtk_w, khtk_h, khtk_e);
+    const float2 khtk_wh = float2((float)khtk_w, (float)khtk_h);
+    const float2 khtk_ex = khtk_dx * khtk_wh;
+    const float2 khtk_ey = khtk_dy * khtk_wh;
+    const float khtk_px = dot(khtk_ex, khtk_ex);
+    const float khtk_py = dot(khtk_ey, khtk_ey);
+    const float khtk_lod = 0.5f * log2(max(min(khtk_px, khtk_py), max(khtk_px, khtk_py) * (1.0f / 256.0f)));   // 16^2.
+    const float khtk_len = length(khtk_n);
+    const float khtk_var = max(1.0f - khtk_len - KH_TOKSVIG_Q, 0.0f) / max(khtk_len, 1.0e-4f);
+    float khtk_k2 = matParams0.w * matParams0.w;   // normalStrength scales the slopes.
+    [branch] if (((int)matParams0.x) & 4096) {   // KH_UV_ANIM: KhUvNrm's matrix (KhSampleMatG's).
+        const float4 khtk_a = khMats[khMatIx].an0;
+        khtk_k2 *= 0.5f * dot(khtk_a, khtk_a) / max(abs(khtk_a.x * khtk_a.w - khtk_a.y * khtk_a.z), 1.0e-12f);
+    }
+    return 2.0f * khtk_var * khtk_k2 * saturate(khtk_lod);
+}
+
 // KH_UV_ANIM: the body takes the gradients from its caller (KhMatUv's, for the builtin readers); uv is in the
 // material's animated space, so a turned or mirrored material's normal map is turned back by KhUvNrm (bit 12).
+// KH_SPEC_AA: rough and gloss arrive widened by the map's filtering (KhToksvigA2; aaA2 holds it).
 KhMatSurf KhSampleMatG(float2 uv, float2 khsm_dx, float2 khsm_dy)
 {
     KhMatSurf s;
@@ -2893,6 +3607,8 @@ KhMatSurf KhSampleMatG(float2 uv, float2 khsm_dx, float2 khsm_dy)
     s.albedo = dif.rgb * matParams1.xyz;
     s.alpha = KhMatRouteTap(khsm_m, matParams3.y, 1.0f);
     s.nrmT = (flags & 2) ? (khsm_m.t1.xyz * 2.0f - 1.0f) : float3(0.0f, 0.0f, 1.0f);
+    float khsm_tk = 0.0f;   // KH_SPEC_AA: the map's Toksvig term, from the texel as decoded (before the two below).
+    [branch] if ((flags & 32770) == 32770) khsm_tk = KhToksvigA2(s.nrmT, khsm_dx, khsm_dy);   // Bit 15: armed.
     [branch] if (flags & 4096) s.nrmT.xy = KhUvNrm(s.nrmT.xy, khMats[khMatIx].an0);   // KH_UV_ANIM (not the warp).
     s.nrmT.xy *= matParams0.w;
     s.occ = KhMatRouteTap(khsm_m, matParams2.z, 1.0f);
@@ -2911,7 +3627,8 @@ KhMatSurf KhSampleMatG(float2 uv, float2 khsm_dx, float2 khsm_dy)
     const float3 khsm_sc = (flags & 32) ? khsm_m.t5.rgb : float3(1.0f, 1.0f, 1.0f);
     s.specTint = KhMatRouteTap(khsm_m, matParams5.z, 1.0f) * khsm_sc * matParams4.xyz;
     s.fresnelNK = matParams5.xy;
-    return s;
+    s.aaA2 = 0.0f;
+    return KhMatWiden(s, khsm_tk);   // KH_SPEC_AA.
 }
 // The user contract's: the gradients of uv here (KH_MAT_GRAD: where the implicit sample took them), so call it in
 // uniform flow. uv is a coordinate in the material's animated space (KhUserUv()'s).
@@ -2920,11 +3637,40 @@ KhMatSurf KhSampleMat(float2 uv)
     return KhSampleMatG(uv, ddx(uv), ddy(uv));
 }
 
+// KH_CUTOUT_A2C - a cutout material's coverage in the colour twins (PSMain / PSComposite; their SV_Coverage),
+// called for a cutout pixel alone (matParams0.y in [0.5, 1.5)) with the routed alpha khcc_a. A single-sample
+// target, or a draw that asks for the hard edge (blendCtl.z: the view-model slice, whose depth prepass clips at
+// the cutoff and culls the world under it - a sample its colour then left out would show no world), keeps the
+// clip at the cutoff exactly as before, at full coverage. A multisampled one takes alpha to coverage on a
+// sharpened alpha (Golus 2017, "Anti-aliased Alpha Test"): s = (a - cutoff) / fwidth(a) + 0.5, held to [0, 1] -
+// the edge one pixel wide, centred on the cutoff - and covers round(s x n) of the n samples, the low ones (sample
+// 0 first, so a pixel with any sample of ours is ours at sample 0 - the SSAO term's test); none = discarded, as
+// the clip did. The mask is a function of the alpha and its screen gradient alone: no dither, no clock, steady
+// on a still view. The hardware ANDs it with the raster coverage; the depth, the stencil mark (KH_SSAO_MARK) and
+// both targets follow it per sample, and the written alpha stays the opaque contract's 1. fwidth is taken inside
+// the cutout branch: its condition is a material lane, one value per draw or per instance - uniform in a quad.
+// The casters, the seam footprint, the dlsw mask and the slice prepass keep their clip (shadows unchanged).
+uint KhCutoutCover(float khcc_a)
+{
+    const float khcc_d = khcc_a - matParams0.z;
+    const uint khcc_n = GetRenderTargetSampleCount();
+    if (khcc_n <= 1u || blendCtl.z >= 0.5f) {
+        clip(khcc_d);   // The hard edge: the old cutout kill, verbatim.
+        return 0xFFFFFFFFu;
+    }
+    const float khcc_s = saturate(khcc_d / max(fwidth(khcc_a), 1.0e-4f) + 0.5f);
+    const uint khcc_k = min((uint)(khcc_s * (float)khcc_n + 0.5f), khcc_n);
+    if (khcc_k == 0u) discard;   // No sample: the pixel is killed before the shading, as the clip killed it.
+    return khcc_k >= khcc_n ? 0xFFFFFFFFu : ((1u << khcc_k) - 1u);
+}
+
 // The arma model's Fresnel: the reflectance of a conductor of complex index
 // N + iK at incidence cos = khfn_c, the mean of the s and p polarisations -
 // the function Arma's procedural "fresnel(N,K)" texture tabulates, term for
 // term (AA, BB, FS, FP with sin S tan S = sin^2 S / cos S). 1 at grazing for
-// every N, K; ((N-1)^2+K^2)/((N+1)^2+K^2) head-on. The cosine is floored so
+// every N, K but N = 1, K = 0 (no interface: 0, except at the cosine floor
+// below, where fp32 rounds 1 - c^2 to 1 and it reads about 0.75);
+// ((N-1)^2+K^2)/((N+1)^2+K^2) head-on. The cosine is floored so
 // tan S stays finite at grazing, and AA^2 + BB^2 so that N = K = 0 head-on
 // (0/0 in the original, a NaN in TexView) reads its limit, 1.
 float KhFresnelNK(float khfn_c, float khfn_n, float khfn_k)
@@ -2959,6 +3705,26 @@ static float4 khFrNK = 0.0f;
 // KhGGXSpec * pi * C * N.L - the same irradiance the diffuse takes. The split-sum ambient (KhPbrAmbient) reads
 // radiance through the environment BRDF and takes no pi.
 static const float KH_PBR_PI = 3.14159265f;
+// KH_GGX_EXACT: D is the GGX (Trowbridge-Reitz) distribution a2 / (pi dd^2), dd = 1 - (N.H)^2 (1 - a2), a2 = rough^4,
+// exact for every roughness a caller can pass: rough is held to KH_ROUGH_MIN here (KhApplyPBR's floor, the env-BRDF
+// table's first row), so a user's KhDynLightsPBR / KhGGXSpec call below it shades as 0.045 does. 1 - (N.H)^2 is
+// taken as |N x H|^2: at 0.045 the lobe's centre lies within 1 - (N.H)^2 < a2 = 4.1e-6, about 70 fp32 ulps of 1,
+// where 1 - ndh * ndh cancels (up to 22 % error in D there, measured); the cross product carries none. A half vector
+// at or below the surface keeps dd = 1 there (D = a2 / pi, as before). The floor below cannot bite for unit N and H:
+// dd >= a2 >= 4.1e-6, so pi dd^2 >= 5.3e-11. The former floor (pi dd^2 >= 1e-6) capped D at a2 x 1e6 and so cut the
+// lobe for every roughness below 0.154: 1.45 % of the energy kept at 0.045, 32 % at 0.1 - glossy surfaces took a
+// dim, wide sun / lamp highlight instead of a bright, tight one.
+static const float KH_ROUGH_MIN = 0.045f;
+static const float KH_SUN_DISC_A = 0.00155f;   // KH_SUN_DISC: tan(0.2665 deg) / 3, the sun's alpha term (KhApplyPBR).
+// KH_DL_RADIUS: a lamp is an emitter of this radius (m), not a point - the same rule as the sun's disc (Karis 2013
+// eq. 10, alpha' = saturate(alpha + radius / (3 distance)), D normalised, so the highlight keeps its energy and
+// spreads over the emitter's reflection). The engine's light records carry no size, so one radius stands for every
+// lamp: 0.05 m - a bulb, a headlight's reflector, a torch head - the assumption, in one place. At 10 m it widens as
+// the sun does (0.00167); at 1 m a 0.045 surface's peak falls to ~1 % of a point's, at 100 m to 0.85 (its glint
+// still saturates the 16F scene as the sun's does; only lamps within a few metres soften visibly).
+// KhDynLightsPBRE's lobe alone; the per-light ambient and the diffuse take no size. A user lobe shading a lamp of its
+// own may widen the same way: sqrt(min(rough * rough + KH_DL_RADIUS_M / (3 distance), 1)).
+static const float KH_DL_RADIUS_M = 0.05f;
 float3 KhGGXSpec(float3 n, float3 v, float3 l, float rough, float3 F0, out float3 outF)
 {
     float3 h = normalize(l + v);
@@ -2966,26 +3732,859 @@ float3 KhGGXSpec(float3 n, float3 v, float3 l, float rough, float3 F0, out float
     float ndv = max(dot(n, v), 1.0e-4f);
     float ndh = saturate(dot(n, h));
     float vdh = saturate(dot(v, h));
+    rough = max(rough, KH_ROUGH_MIN);   // KH_GGX_EXACT.
     float aa = rough * rough;
     float a2 = aa * aa;
-    float dd = ndh * ndh * (a2 - 1.0f) + 1.0f;
-    float D = a2 / max(3.14159265f * dd * dd, 1.0e-6f);
-    float kk = (rough + 1.0f) * (rough + 1.0f) * 0.125f;
+    const float3 khgx_c = cross(n, h);   // KH_GGX_EXACT: |N x H|^2 = 1 - (N.H)^2 without the cancellation.
+    float dd = (ndh > 0.0f ? dot(khgx_c, khgx_c) : 1.0f) + ndh * ndh * a2;
+    float D = a2 / max(3.14159265f * dd * dd, 1.0e-20f);
+    // KH_SMITH_HC: the masking-shadowing is the exact height-correlated Smith G2 of GGX, 1 / (1 + L(v) + L(l)),
+    // L(c) = (sqrt(1 + a2 (1 - c^2) / c^2) - 1) / 2 (Heitz 2014; the Smith microsurface's own, which the random walk
+    // of Heitz 2016 reproduces; Filament's V_SmithGGXCorrelated), folded with the 1 / (4 N.V N.L) into one exact
+    // visibility term. The env-BRDF table integrates the same G2 (KH_ENV_LUT). N.V and N.L are floored at 1e-4 and
+    // each root is at least alpha >= 0.002, so the denominator is 4e-7 or more.
     float gl = max(ndl, 1.0e-4f);
-    float G = (ndv / (ndv * (1.0f - kk) + kk)) * (gl / (gl * (1.0f - kk) + kk));
+    float khgx_vis = 0.5f / (gl * sqrt(ndv * ndv * (1.0f - a2) + a2) + ndv * sqrt(gl * gl * (1.0f - a2) + a2));
     [branch] if (khFrNK.z >= 0.5f) {
         outF = F0 * KhFresnelNK(vdh, khFrNK.x, khFrNK.y);
     } else {
         outF = F0 + (1.0f - F0) * pow(1.0f - vdh, 5.0f);
     }
-    return D * G * outF / max(4.0f * ndv * gl, 1.0e-4f);
+    return D * khgx_vis * outF;   // KH_SMITH_HC.
+}
+
+// KH_ENV_LUT / KH_ENV_F82 / KH_DOME_LUT: the split-sum's precomputed integrals, as immediate constant buffers
+// (static const arrays: fxc and DXC place them in the shader itself - no slot, no resource, no C++). Generated
+// offline by kh_gen_lut.cpp (a standalone tool kept with the campaign tools, kh_dq_tools.zip dq/lut/, not part of
+// the build; 2048^2 / 512^2 stratified samples an env / dome node, integration error <= 2.4e-4 / 1.3e-4).
+// Grids (the generator's constants - change both together):
+//   roughness  17 nodes, rough = 0.045 + 0.955 t^2, t = j / 16 (denser where the lobe narrows); below 0.045
+//              (KhApplyPBR's floor) the first row holds.
+//   KH_ENVBRDF_LUT  Karis 2013's IntegrateBRDF (F = F0 A + B; GGX D with alpha = rough^2, the shader's) with the
+//              height-correlated Smith G2 = 1 / (1 + L(v) + L(l)), the direct lobes' (KH_SMITH_HC), 33 N.V nodes,
+//              N.V = 0.004 + 0.996 t^2, t = i / 32; below N.V 0.004 the first column holds (as a texture LUT's
+//              clamp does). Pair-packed: element [j * 32 + i] = (A, B at node i, A, B at node i + 1) of row j.
+//              544 float4, 8704 bytes. Bilinear error against the integral <= 0.0070 (worst at a cell midpoint,
+//              N.V 0.016, rough 0.068; <= 0.0059 for N.V >= 0.05).
+//   KH_ENVBRDF_C  KH_ENV_F82: C, the integral of (v.h)(1 - v.h)^6 under the same G2 (Hoffman 2019's F82 term), on
+//              the same grid. Corner-packed: element [j * 32 + i] = (C(i, j), C(i + 1, j), C(i, j + 1),
+//              C(i + 1, j + 1)). 512 float4, 8192 bytes. Bilinear error <= 0.00055 (N.V 0.010, rough 0.091;
+//              <= 0.00044 for N.V >= 0.05): <= 0.0045 of an arma E at the largest F82 weight (N 1, K 0).
+//   KH_DOME_LUT  the dome's SKY SHARE prefiltered along R (Karis' prefilter, N = V = R, weights N.L) - the
+//              weight, not radiance: KhPbrAmbient's dome is amb x lerp(KH_PBR_GROUND, 1, share), linear in the
+//              share, so the table holds for any ambient colour and any KH_PBR_GROUND. It bakes the horizon,
+//              share = smoothstep(-0.15, 0.15, l.y): REGENERATE (kh_gen_lut.cpp's kh_sstep) if those edges change.
+//              49 R.y nodes, R.y = u |u|, u = -1 + i / 24 (denser at the horizon). Corner-packed: element
+//              [j * 48 + i] = (P(i, j), P(i + 1, j), P(i, j + 1), P(i + 1, j + 1)). 768 float4, 12288 bytes.
+//              Bilinear error <= 0.0057 (worst at a cell midpoint, R.y -0.125, rough 0.068): <= 0.0037 of the
+//              ambient after the (1 - KH_PBR_GROUND) = 0.65 scale.
+//   All three: 1824 float4 (29184 bytes) of the 4096-float4 immediate constant buffer; a shader that reads none
+//   keeps none.
+static const float KH_LUT_RMIN = 0.045f;
+static const float KH_ENVLUT_NMIN = 0.004f;
+static const float4 KH_ENVBRDF_LUT[544] = {
+    0.03331f, 0.87945f, 0.03578f, 0.89322f, 0.03578f, 0.89322f, 0.04624f, 0.91671f, 0.04624f, 0.91671f, 0.06695f,
+    0.91793f, 0.06695f, 0.91793f, 0.09726f, 0.89649f, 0.09726f, 0.89649f, 0.13599f, 0.86114f, 0.13599f, 0.86114f,
+    0.18199f, 0.81654f, 0.18199f, 0.81654f, 0.23407f, 0.76512f, 0.23407f, 0.76512f, 0.29098f, 0.70853f, 0.29098f,
+    0.70853f, 0.35142f, 0.64829f, 0.35142f, 0.64829f, 0.41407f, 0.58572f, 0.41407f, 0.58572f, 0.47762f, 0.52225f,
+    0.47762f, 0.52225f, 0.54080f, 0.45915f, 0.54080f, 0.45915f, 0.60238f, 0.39758f, 0.60238f, 0.39758f, 0.66129f,
+    0.33868f, 0.66129f, 0.33868f, 0.71657f, 0.28341f, 0.71657f, 0.28341f, 0.76744f, 0.23255f, 0.76744f, 0.23255f,
+    0.81327f, 0.18671f, 0.81327f, 0.18671f, 0.85369f, 0.14631f, 0.85369f, 0.14631f, 0.88847f, 0.11152f, 0.88847f,
+    0.11152f, 0.91763f, 0.08237f, 0.91763f, 0.08237f, 0.94135f, 0.05864f, 0.94135f, 0.05864f, 0.96001f, 0.03998f,
+    0.96001f, 0.03998f, 0.97412f, 0.02588f, 0.97412f, 0.02588f, 0.98428f, 0.01572f, 0.98428f, 0.01572f, 0.99119f,
+    0.00881f, 0.99119f, 0.00881f, 0.99555f, 0.00445f, 0.99555f, 0.00445f, 0.99805f, 0.00195f, 0.99805f, 0.00195f,
+    0.99931f, 0.00069f, 0.99931f, 0.00069f, 0.99982f, 0.00018f, 0.99982f, 0.00018f, 0.99997f, 0.00003f, 0.99997f,
+    0.00003f, 1.00000f, 0.00000f, 1.00000f, 0.00000f, 1.00000f, 0.00000f, 0.03731f, 0.86565f, 0.03916f, 0.87772f,
+    0.03916f, 0.87772f, 0.04850f, 0.90373f, 0.04850f, 0.90373f, 0.06842f, 0.91089f, 0.06842f, 0.91089f, 0.09825f,
+    0.89303f, 0.09825f, 0.89303f, 0.13668f, 0.85930f, 0.13668f, 0.85930f, 0.18249f, 0.81547f, 0.18249f, 0.81547f,
+    0.23443f, 0.76444f, 0.23443f, 0.76444f, 0.29124f, 0.70808f, 0.29124f, 0.70808f, 0.35160f, 0.64796f, 0.35160f,
+    0.64796f, 0.41421f, 0.58552f, 0.41421f, 0.58552f, 0.47771f, 0.52209f, 0.47771f, 0.52209f, 0.54085f, 0.45902f,
+    0.54085f, 0.45902f, 0.60243f, 0.39752f, 0.60243f, 0.39752f, 0.66133f, 0.33864f, 0.66133f, 0.33864f, 0.71659f,
+    0.28338f, 0.71659f, 0.28338f, 0.76745f, 0.23253f, 0.76745f, 0.23253f, 0.81328f, 0.18671f, 0.81328f, 0.18671f,
+    0.85368f, 0.14630f, 0.85368f, 0.14630f, 0.88847f, 0.11152f, 0.88847f, 0.11152f, 0.91762f, 0.08237f, 0.91762f,
+    0.08237f, 0.94135f, 0.05865f, 0.94135f, 0.05865f, 0.96001f, 0.03999f, 0.96001f, 0.03999f, 0.97411f, 0.02588f,
+    0.97411f, 0.02588f, 0.98428f, 0.01572f, 0.98428f, 0.01572f, 0.99119f, 0.00881f, 0.99119f, 0.00881f, 0.99555f,
+    0.00445f, 0.99555f, 0.00445f, 0.99805f, 0.00195f, 0.99805f, 0.00195f, 0.99930f, 0.00069f, 0.99930f, 0.00069f,
+    0.99982f, 0.00018f, 0.99982f, 0.00018f, 0.99997f, 0.00003f, 0.99997f, 0.00003f, 1.00000f, 0.00000f, 1.00000f,
+    0.00000f, 1.00000f, 0.00000f, 0.05289f, 0.83857f, 0.05281f, 0.84193f, 0.05281f, 0.84193f, 0.05805f, 0.86240f,
+    0.05805f, 0.86240f, 0.07460f, 0.88231f, 0.07460f, 0.88231f, 0.10239f, 0.87748f, 0.10239f, 0.87748f, 0.13958f,
+    0.85087f, 0.13958f, 0.85087f, 0.18457f, 0.81055f, 0.18457f, 0.81055f, 0.23594f, 0.76136f, 0.23594f, 0.76136f,
+    0.29234f, 0.70606f, 0.29234f, 0.70606f, 0.35241f, 0.64658f, 0.35241f, 0.64658f, 0.41479f, 0.58455f, 0.41479f,
+    0.58455f, 0.47813f, 0.52142f, 0.47813f, 0.52142f, 0.54114f, 0.45855f, 0.54114f, 0.45855f, 0.60261f, 0.39716f,
+    0.60261f, 0.39716f, 0.66143f, 0.33840f, 0.66143f, 0.33840f, 0.71665f, 0.28324f, 0.71665f, 0.28324f, 0.76749f,
+    0.23246f, 0.76749f, 0.23246f, 0.81329f, 0.18667f, 0.81329f, 0.18667f, 0.85368f, 0.14629f, 0.85368f, 0.14629f,
+    0.88845f, 0.11153f, 0.88845f, 0.11153f, 0.91760f, 0.08238f, 0.91760f, 0.08238f, 0.94133f, 0.05866f, 0.94133f,
+    0.05866f, 0.95999f, 0.04000f, 0.95999f, 0.04000f, 0.97409f, 0.02590f, 0.97409f, 0.02590f, 0.98426f, 0.01573f,
+    0.98426f, 0.01573f, 0.99118f, 0.00882f, 0.99118f, 0.00882f, 0.99554f, 0.00445f, 0.99554f, 0.00445f, 0.99805f,
+    0.00195f, 0.99805f, 0.00195f, 0.99930f, 0.00070f, 0.99930f, 0.00070f, 0.99982f, 0.00018f, 0.99982f, 0.00018f,
+    0.99997f, 0.00003f, 0.99997f, 0.00003f, 1.00000f, 0.00000f, 1.00000f, 0.00000f, 1.00000f, 0.00000f, 0.08826f,
+    0.81767f, 0.08569f, 0.81143f, 0.08569f, 0.81143f, 0.08385f, 0.80894f, 0.08385f, 0.80894f, 0.09233f, 0.82356f,
+    0.09233f, 0.82356f, 0.11427f, 0.83448f, 0.11427f, 0.83448f, 0.14783f, 0.82433f, 0.14783f, 0.82433f, 0.19049f,
+    0.79449f, 0.19049f, 0.79449f, 0.24027f, 0.75129f, 0.24027f, 0.75129f, 0.29552f, 0.69946f, 0.29552f, 0.69946f,
+    0.35475f, 0.64212f, 0.35475f, 0.64212f, 0.41648f, 0.58146f, 0.41648f, 0.58146f, 0.47934f, 0.51927f, 0.47934f,
+    0.51927f, 0.54198f, 0.45704f, 0.54198f, 0.45704f, 0.60316f, 0.39612f, 0.60316f, 0.39612f, 0.66178f, 0.33770f,
+    0.66178f, 0.33770f, 0.71683f, 0.28277f, 0.71683f, 0.28277f, 0.76754f, 0.23217f, 0.76754f, 0.23217f, 0.81326f,
+    0.18650f, 0.81326f, 0.18650f, 0.85360f, 0.14621f, 0.85360f, 0.14621f, 0.88834f, 0.11151f, 0.88834f, 0.11151f,
+    0.91751f, 0.08241f, 0.91751f, 0.08241f, 0.94125f, 0.05871f, 0.94125f, 0.05871f, 0.95991f, 0.04005f, 0.95991f,
+    0.04005f, 0.97403f, 0.02594f, 0.97403f, 0.02594f, 0.98421f, 0.01577f, 0.98421f, 0.01577f, 0.99114f, 0.00885f,
+    0.99114f, 0.00885f, 0.99551f, 0.00447f, 0.99551f, 0.00447f, 0.99803f, 0.00196f, 0.99803f, 0.00196f, 0.99929f,
+    0.00070f, 0.99929f, 0.00070f, 0.99981f, 0.00018f, 0.99981f, 0.00018f, 0.99997f, 0.00003f, 0.99997f, 0.00003f,
+    1.00000f, 0.00000f, 1.00000f, 0.00000f, 1.00000f, 0.00000f, 0.14819f, 0.78701f, 0.14431f, 0.77967f, 0.14431f,
+    0.77967f, 0.13660f, 0.76466f, 0.13660f, 0.76466f, 0.13422f, 0.75735f, 0.13422f, 0.75735f, 0.14450f, 0.76170f,
+    0.14450f, 0.76170f, 0.16897f, 0.76399f, 0.16897f, 0.76399f, 0.20548f, 0.75155f, 0.20548f, 0.75155f, 0.25115f,
+    0.72235f, 0.25115f, 0.72235f, 0.30353f, 0.68005f, 0.30353f, 0.68005f, 0.36064f, 0.62891f, 0.36064f, 0.62891f,
+    0.42078f, 0.57235f, 0.42078f, 0.57235f, 0.48241f, 0.51291f, 0.48241f, 0.51291f, 0.54411f, 0.45261f, 0.54411f,
+    0.45261f, 0.60458f, 0.39306f, 0.60458f, 0.39306f, 0.66264f, 0.33562f, 0.66264f, 0.33562f, 0.71728f, 0.28141f,
+    0.71728f, 0.28141f, 0.76768f, 0.23131f, 0.76768f, 0.23131f, 0.81321f, 0.18601f, 0.81321f, 0.18601f, 0.85341f,
+    0.14598f, 0.85341f, 0.14598f, 0.88807f, 0.11144f, 0.88807f, 0.11144f, 0.91717f, 0.08243f, 0.91717f, 0.08243f,
+    0.94091f, 0.05879f, 0.94091f, 0.05879f, 0.95958f, 0.04015f, 0.95958f, 0.04015f, 0.97373f, 0.02604f, 0.97373f,
+    0.02604f, 0.98395f, 0.01586f, 0.98395f, 0.01586f, 0.99092f, 0.00892f, 0.99092f, 0.00892f, 0.99536f, 0.00452f,
+    0.99536f, 0.00452f, 0.99796f, 0.00200f, 0.99796f, 0.00200f, 0.99925f, 0.00072f, 0.99925f, 0.00072f, 0.99979f,
+    0.00019f, 0.99979f, 0.00019f, 0.99996f, 0.00003f, 0.99996f, 0.00003f, 0.99999f, 0.00000f, 0.99999f, 0.00000f,
+    1.00000f, 0.00000f, 0.23047f, 0.72884f, 0.22673f, 0.72402f, 0.22673f, 0.72402f, 0.21742f, 0.71128f, 0.21742f,
+    0.71128f, 0.20808f, 0.69617f, 0.20808f, 0.69617f, 0.20593f, 0.68554f, 0.20593f, 0.68554f, 0.21609f, 0.68057f,
+    0.21609f, 0.68057f, 0.23993f, 0.67475f, 0.23993f, 0.67475f, 0.27593f, 0.66026f, 0.27593f, 0.66026f, 0.32136f,
+    0.63352f, 0.32136f, 0.63352f, 0.37351f, 0.59531f, 0.37351f, 0.59531f, 0.43001f, 0.54844f, 0.43001f, 0.54844f,
+    0.48890f, 0.49601f, 0.48890f, 0.49601f, 0.54850f, 0.44073f, 0.54850f, 0.44073f, 0.60735f, 0.38479f, 0.60735f,
+    0.38479f, 0.66418f, 0.32995f, 0.66418f, 0.32995f, 0.71790f, 0.27763f, 0.71790f, 0.27763f, 0.76762f, 0.22889f,
+    0.76762f, 0.22889f, 0.81267f, 0.18457f, 0.81267f, 0.18457f, 0.85256f, 0.14521f, 0.85256f, 0.14521f, 0.88704f,
+    0.11112f, 0.88704f, 0.11112f, 0.91606f, 0.08240f, 0.91606f, 0.08240f, 0.93978f, 0.05892f, 0.93978f, 0.05892f,
+    0.95852f, 0.04037f, 0.95852f, 0.04037f, 0.97275f, 0.02627f, 0.97275f, 0.02627f, 0.98309f, 0.01607f, 0.98309f,
+    0.01607f, 0.99015f, 0.00908f, 0.99015f, 0.00908f, 0.99466f, 0.00464f, 0.99466f, 0.00464f, 0.99732f, 0.00207f,
+    0.99732f, 0.00207f, 0.99868f, 0.00076f, 0.99868f, 0.00076f, 0.99926f, 0.00021f, 0.99926f, 0.00021f, 0.99945f,
+    0.00004f, 0.99945f, 0.00004f, 0.99949f, 0.00000f, 0.99949f, 0.00000f, 0.99951f, 0.00000f, 0.32918f, 0.64534f,
+    0.32623f, 0.64255f, 0.32623f, 0.64255f, 0.31828f, 0.63449f, 0.31828f, 0.63449f, 0.30791f, 0.62242f, 0.30791f,
+    0.62242f, 0.29936f, 0.60874f, 0.29936f, 0.60874f, 0.29755f, 0.59604f, 0.29755f, 0.59604f, 0.30621f, 0.58486f,
+    0.30621f, 0.58486f, 0.32686f, 0.57276f, 0.32686f, 0.57276f, 0.35891f, 0.55591f, 0.35891f, 0.55591f, 0.40040f,
+    0.53145f, 0.40040f, 0.53145f, 0.44885f, 0.49865f, 0.44885f, 0.49865f, 0.50175f, 0.45859f, 0.50175f, 0.45859f,
+    0.55691f, 0.41333f, 0.55691f, 0.41333f, 0.61244f, 0.36516f, 0.61244f, 0.36516f, 0.66679f, 0.31620f, 0.66679f,
+    0.31620f, 0.71868f, 0.26825f, 0.71868f, 0.26825f, 0.76708f, 0.22273f, 0.76708f, 0.22273f, 0.81120f, 0.18074f,
+    0.81120f, 0.18074f, 0.85051f, 0.14302f, 0.85051f, 0.14302f, 0.88466f, 0.11007f, 0.88466f, 0.11007f, 0.91357f,
+    0.08208f, 0.91357f, 0.08208f, 0.93732f, 0.05903f, 0.93732f, 0.05903f, 0.95621f, 0.04071f, 0.95621f, 0.04071f,
+    0.97066f, 0.02669f, 0.97066f, 0.02669f, 0.98123f, 0.01647f, 0.98123f, 0.01647f, 0.98856f, 0.00942f, 0.98856f,
+    0.00942f, 0.99332f, 0.00489f, 0.99332f, 0.00489f, 0.99617f, 0.00223f, 0.99617f, 0.00223f, 0.99770f, 0.00085f,
+    0.99770f, 0.00085f, 0.99844f, 0.00025f, 0.99844f, 0.00025f, 0.99874f, 0.00005f, 0.99874f, 0.00005f, 0.99892f,
+    0.00001f, 0.99892f, 0.00001f, 0.99900f, 0.00000f, 0.43672f, 0.54674f, 0.43461f, 0.54503f, 0.43461f, 0.54503f,
+    0.42865f, 0.53996f, 0.42865f, 0.53996f, 0.42010f, 0.53174f, 0.42010f, 0.53174f, 0.41097f, 0.52088f, 0.41097f,
+    0.52088f, 0.40410f, 0.50826f, 0.40410f, 0.50826f, 0.40262f, 0.49476f, 0.40262f, 0.49476f, 0.40914f, 0.48063f,
+    0.40914f, 0.48063f, 0.42519f, 0.46516f, 0.42519f, 0.46516f, 0.45090f, 0.44685f, 0.45090f, 0.44685f, 0.48525f,
+    0.42424f, 0.48525f, 0.42424f, 0.52647f, 0.39654f, 0.52647f, 0.39654f, 0.57245f, 0.36389f, 0.57245f, 0.36389f,
+    0.62102f, 0.32728f, 0.62102f, 0.32728f, 0.67023f, 0.28819f, 0.67023f, 0.28819f, 0.71841f, 0.24824f, 0.71841f,
+    0.24824f, 0.76422f, 0.20897f, 0.76422f, 0.20897f, 0.80662f, 0.17171f, 0.80662f, 0.17171f, 0.84486f, 0.13747f,
+    0.84486f, 0.13747f, 0.87848f, 0.10698f, 0.87848f, 0.10698f, 0.90723f, 0.08067f, 0.90723f, 0.08067f, 0.93113f,
+    0.05869f, 0.93113f, 0.05869f, 0.95037f, 0.04097f, 0.95037f, 0.04097f, 0.96530f, 0.02724f, 0.96530f, 0.02724f,
+    0.97642f, 0.01709f, 0.97642f, 0.01709f, 0.98431f, 0.00998f, 0.98431f, 0.00998f, 0.98961f, 0.00532f, 0.98961f,
+    0.00532f, 0.99292f, 0.00253f, 0.99292f, 0.00253f, 0.99486f, 0.00103f, 0.99486f, 0.00103f, 0.99590f, 0.00034f,
+    0.99590f, 0.00034f, 0.99646f, 0.00008f, 0.99646f, 0.00008f, 0.99678f, 0.00002f, 0.99678f, 0.00002f, 0.99696f,
+    0.00000f, 0.54440f, 0.44406f, 0.54289f, 0.44288f, 0.54289f, 0.44288f, 0.53867f, 0.43937f, 0.53867f, 0.43937f,
+    0.53230f, 0.43354f, 0.53230f, 0.43354f, 0.52482f, 0.42550f, 0.52482f, 0.42550f, 0.51757f, 0.41543f, 0.51757f,
+    0.41543f, 0.51233f, 0.40362f, 0.51233f, 0.40362f, 0.51098f, 0.39035f, 0.51098f, 0.39035f, 0.51527f, 0.37577f,
+    0.51527f, 0.37577f, 0.52643f, 0.35971f, 0.52643f, 0.35971f, 0.54492f, 0.34177f, 0.54492f, 0.34177f, 0.57048f,
+    0.32143f, 0.57048f, 0.32143f, 0.60214f, 0.29833f, 0.60214f, 0.29833f, 0.63846f, 0.27247f, 0.63846f, 0.27247f,
+    0.67778f, 0.24426f, 0.67778f, 0.24426f, 0.71839f, 0.21446f, 0.71839f, 0.21446f, 0.75869f, 0.18409f, 0.75869f,
+    0.18409f, 0.79732f, 0.15421f, 0.79732f, 0.15421f, 0.83321f, 0.12582f, 0.83321f, 0.12582f, 0.86558f, 0.09977f,
+    0.86558f, 0.09977f, 0.89393f, 0.07665f, 0.89393f, 0.07665f, 0.91803f, 0.05685f, 0.91803f, 0.05685f, 0.93791f,
+    0.04051f, 0.93791f, 0.04051f, 0.95376f, 0.02756f, 0.95376f, 0.02756f, 0.96595f, 0.01775f, 0.96595f, 0.01775f,
+    0.97495f, 0.01070f, 0.97495f, 0.01070f, 0.98132f, 0.00595f, 0.98132f, 0.00595f, 0.98562f, 0.00298f, 0.98562f,
+    0.00298f, 0.98840f, 0.00131f, 0.98840f, 0.00131f, 0.99016f, 0.00049f, 0.99016f, 0.00049f, 0.99128f, 0.00015f,
+    0.99128f, 0.00015f, 0.99205f, 0.00003f, 0.99205f, 0.00003f, 0.99265f, 0.00000f, 0.64418f, 0.34686f, 0.64305f,
+    0.34596f, 0.64305f, 0.34596f, 0.63987f, 0.34327f, 0.63987f, 0.34327f, 0.63504f, 0.33882f, 0.63504f, 0.33882f,
+    0.62913f, 0.33265f, 0.62913f, 0.33265f, 0.62284f, 0.32480f, 0.62284f, 0.32480f, 0.61704f, 0.31537f, 0.61704f,
+    0.31537f, 0.61276f, 0.30448f, 0.61276f, 0.30448f, 0.61111f, 0.29224f, 0.61111f, 0.29224f, 0.61315f, 0.27875f,
+    0.61315f, 0.27875f, 0.61973f, 0.26406f, 0.61973f, 0.26406f, 0.63137f, 0.24811f, 0.63137f, 0.24811f, 0.64814f,
+    0.23085f, 0.64814f, 0.23085f, 0.66969f, 0.21223f, 0.66969f, 0.21223f, 0.69526f, 0.19233f, 0.69526f, 0.19233f,
+    0.72382f, 0.17138f, 0.72382f, 0.17138f, 0.75419f, 0.14979f, 0.75419f, 0.14979f, 0.78512f, 0.12808f, 0.78512f,
+    0.12808f, 0.81547f, 0.10687f, 0.81547f, 0.10687f, 0.84422f, 0.08679f, 0.84422f, 0.08679f, 0.87058f, 0.06840f,
+    0.87058f, 0.06840f, 0.89402f, 0.05212f, 0.89402f, 0.05212f, 0.91421f, 0.03823f, 0.91421f, 0.03823f, 0.93108f,
+    0.02685f, 0.93108f, 0.02685f, 0.94473f, 0.01793f, 0.94473f, 0.01793f, 0.95544f, 0.01128f, 0.95544f, 0.01128f,
+    0.96358f, 0.00660f, 0.96358f, 0.00660f, 0.96960f, 0.00353f, 0.96960f, 0.00353f, 0.97395f, 0.00169f, 0.97395f,
+    0.00169f, 0.97708f, 0.00070f, 0.97708f, 0.00070f, 0.97937f, 0.00024f, 0.97937f, 0.00024f, 0.98111f, 0.00007f,
+    0.98111f, 0.00007f, 0.98251f, 0.00001f, 0.73005f, 0.26199f, 0.72905f, 0.26125f, 0.72905f, 0.26125f, 0.72624f,
+    0.25907f, 0.72624f, 0.25907f, 0.72202f, 0.25550f, 0.72202f, 0.25550f, 0.71681f, 0.25057f, 0.71681f, 0.25057f,
+    0.71107f, 0.24435f, 0.71107f, 0.24435f, 0.70524f, 0.23690f, 0.70524f, 0.23690f, 0.69988f, 0.22828f, 0.69988f,
+    0.22828f, 0.69558f, 0.21859f, 0.69558f, 0.21859f, 0.69294f, 0.20792f, 0.69294f, 0.20792f, 0.69258f, 0.19636f,
+    0.69258f, 0.19636f, 0.69503f, 0.18401f, 0.69503f, 0.18401f, 0.70069f, 0.17093f, 0.70069f, 0.17093f, 0.70972f,
+    0.15722f, 0.70972f, 0.15722f, 0.72209f, 0.14295f, 0.72209f, 0.14295f, 0.73751f, 0.12825f, 0.73751f, 0.12825f,
+    0.75550f, 0.11329f, 0.75550f, 0.11329f, 0.77538f, 0.09829f, 0.77538f, 0.09829f, 0.79642f, 0.08355f, 0.79642f,
+    0.08355f, 0.81782f, 0.06937f, 0.81782f, 0.06937f, 0.83884f, 0.05609f, 0.83884f, 0.05609f, 0.85882f, 0.04400f,
+    0.85882f, 0.04400f, 0.87722f, 0.03335f, 0.87722f, 0.03335f, 0.89369f, 0.02431f, 0.89369f, 0.02431f, 0.90802f,
+    0.01693f, 0.90802f, 0.01693f, 0.92018f, 0.01117f, 0.92018f, 0.01117f, 0.93024f, 0.00692f, 0.93024f, 0.00692f,
+    0.93842f, 0.00397f, 0.93842f, 0.00397f, 0.94499f, 0.00206f, 0.94499f, 0.00206f, 0.95024f, 0.00095f, 0.95024f,
+    0.00095f, 0.95447f, 0.00037f, 0.95447f, 0.00037f, 0.95795f, 0.00011f, 0.95795f, 0.00011f, 0.96087f, 0.00002f,
+    0.79892f, 0.19296f, 0.79783f, 0.19234f, 0.79783f, 0.19234f, 0.79480f, 0.19052f, 0.79480f, 0.19052f, 0.79032f,
+    0.18757f, 0.79032f, 0.18757f, 0.78480f, 0.18356f, 0.78480f, 0.18356f, 0.77862f, 0.17856f, 0.77862f, 0.17856f,
+    0.77213f, 0.17263f, 0.77213f, 0.17263f, 0.76566f, 0.16585f, 0.76566f, 0.16585f, 0.75952f, 0.15830f, 0.75952f,
+    0.15830f, 0.75407f, 0.15006f, 0.75407f, 0.15006f, 0.74964f, 0.14123f, 0.74964f, 0.14123f, 0.74658f, 0.13189f,
+    0.74658f, 0.13189f, 0.74517f, 0.12215f, 0.74517f, 0.12215f, 0.74568f, 0.11210f, 0.74568f, 0.11210f, 0.74827f,
+    0.10184f, 0.74827f, 0.10184f, 0.75301f, 0.09147f, 0.75301f, 0.09147f, 0.75984f, 0.08111f, 0.75984f, 0.08111f,
+    0.76861f, 0.07086f, 0.76861f, 0.07086f, 0.77904f, 0.06088f, 0.77904f, 0.06088f, 0.79078f, 0.05131f, 0.79078f,
+    0.05131f, 0.80344f, 0.04229f, 0.80344f, 0.04229f, 0.81657f, 0.03398f, 0.81657f, 0.03398f, 0.82977f, 0.02652f,
+    0.82977f, 0.02652f, 0.84264f, 0.02000f, 0.84264f, 0.02000f, 0.85487f, 0.01450f, 0.85487f, 0.01450f, 0.86623f,
+    0.01003f, 0.86623f, 0.01003f, 0.87658f, 0.00657f, 0.87658f, 0.00657f, 0.88584f, 0.00402f, 0.88584f, 0.00402f,
+    0.89405f, 0.00226f, 0.89405f, 0.00226f, 0.90129f, 0.00113f, 0.90129f, 0.00113f, 0.90766f, 0.00049f, 0.90766f,
+    0.00049f, 0.91329f, 0.00016f, 0.91329f, 0.00016f, 0.91831f, 0.00003f, 0.85055f, 0.14020f, 0.84920f, 0.13967f,
+    0.84920f, 0.13967f, 0.84547f, 0.13810f, 0.84547f, 0.13810f, 0.83995f, 0.13563f, 0.83995f, 0.13563f, 0.83317f,
+    0.13231f, 0.83317f, 0.13231f, 0.82556f, 0.12823f, 0.82556f, 0.12823f, 0.81743f, 0.12347f, 0.81743f, 0.12347f,
+    0.80906f, 0.11810f, 0.80906f, 0.11810f, 0.80069f, 0.11221f, 0.80069f, 0.11221f, 0.79256f, 0.10587f, 0.79256f,
+    0.10587f, 0.78486f, 0.09917f, 0.78486f, 0.09917f, 0.77779f, 0.09218f, 0.77779f, 0.09218f, 0.77154f, 0.08500f,
+    0.77154f, 0.08500f, 0.76629f, 0.07770f, 0.76629f, 0.07770f, 0.76216f, 0.07036f, 0.76216f, 0.07036f, 0.75930f,
+    0.06306f, 0.75930f, 0.06306f, 0.75777f, 0.05588f, 0.75777f, 0.05588f, 0.75761f, 0.04889f, 0.75761f, 0.04889f,
+    0.75881f, 0.04217f, 0.75881f, 0.04217f, 0.76131f, 0.03579f, 0.76131f, 0.03579f, 0.76500f, 0.02983f, 0.76500f,
+    0.02983f, 0.76973f, 0.02433f, 0.76973f, 0.02433f, 0.77534f, 0.01937f, 0.77534f, 0.01937f, 0.78163f, 0.01499f,
+    0.78163f, 0.01499f, 0.78842f, 0.01122f, 0.78842f, 0.01122f, 0.79551f, 0.00807f, 0.79551f, 0.00807f, 0.80275f,
+    0.00553f, 0.80275f, 0.00553f, 0.80999f, 0.00358f, 0.80999f, 0.00358f, 0.81714f, 0.00215f, 0.81714f, 0.00215f,
+    0.82412f, 0.00116f, 0.82412f, 0.00116f, 0.83088f, 0.00055f, 0.83088f, 0.00055f, 0.83741f, 0.00020f, 0.83741f,
+    0.00020f, 0.84370f, 0.00004f, 0.88683f, 0.10193f, 0.88507f, 0.10146f, 0.88507f, 0.10146f, 0.88018f, 0.10008f,
+    0.88018f, 0.10008f, 0.87297f, 0.09792f, 0.87297f, 0.09792f, 0.86411f, 0.09511f, 0.86411f, 0.09511f, 0.85411f,
+    0.09171f, 0.85411f, 0.09171f, 0.84335f, 0.08782f, 0.84335f, 0.08782f, 0.83214f, 0.08350f, 0.83214f, 0.08350f,
+    0.82071f, 0.07885f, 0.82071f, 0.07885f, 0.80926f, 0.07392f, 0.80926f, 0.07392f, 0.79797f, 0.06880f, 0.79797f,
+    0.06880f, 0.78697f, 0.06354f, 0.78697f, 0.06354f, 0.77641f, 0.05823f, 0.77641f, 0.05823f, 0.76639f, 0.05291f,
+    0.76639f, 0.05291f, 0.75702f, 0.04766f, 0.75702f, 0.04766f, 0.74838f, 0.04251f, 0.74838f, 0.04251f, 0.74054f,
+    0.03753f, 0.74054f, 0.03753f, 0.73357f, 0.03275f, 0.73357f, 0.03275f, 0.72752f, 0.02823f, 0.72752f, 0.02823f,
+    0.72242f, 0.02399f, 0.72242f, 0.02399f, 0.71828f, 0.02007f, 0.71828f, 0.02007f, 0.71510f, 0.01649f, 0.71510f,
+    0.01649f, 0.71287f, 0.01327f, 0.71287f, 0.01327f, 0.71153f, 0.01043f, 0.71153f, 0.01043f, 0.71107f, 0.00797f,
+    0.71107f, 0.00797f, 0.71140f, 0.00589f, 0.71140f, 0.00589f, 0.71249f, 0.00418f, 0.71249f, 0.00418f, 0.71426f,
+    0.00281f, 0.71426f, 0.00281f, 0.71664f, 0.00178f, 0.71664f, 0.00178f, 0.71959f, 0.00103f, 0.71959f, 0.00103f,
+    0.72304f, 0.00052f, 0.72304f, 0.00052f, 0.72694f, 0.00021f, 0.72694f, 0.00021f, 0.73123f, 0.00005f, 0.91066f,
+    0.07529f, 0.90833f, 0.07485f, 0.90833f, 0.07485f, 0.90190f, 0.07359f, 0.90190f, 0.07359f, 0.89240f, 0.07163f,
+    0.89240f, 0.07163f, 0.88070f, 0.06916f, 0.88070f, 0.06916f, 0.86747f, 0.06623f, 0.86747f, 0.06623f, 0.85317f,
+    0.06294f, 0.85317f, 0.06294f, 0.83818f, 0.05938f, 0.83818f, 0.05938f, 0.82277f, 0.05561f, 0.82277f, 0.05561f,
+    0.80717f, 0.05169f, 0.80717f, 0.05169f, 0.79156f, 0.04770f, 0.79156f, 0.04770f, 0.77610f, 0.04369f, 0.77610f,
+    0.04369f, 0.76091f, 0.03970f, 0.76091f, 0.03970f, 0.74607f, 0.03578f, 0.74607f, 0.03578f, 0.73168f, 0.03198f,
+    0.73168f, 0.03198f, 0.71780f, 0.02831f, 0.71780f, 0.02831f, 0.70449f, 0.02483f, 0.70449f, 0.02483f, 0.69180f,
+    0.02155f, 0.69180f, 0.02155f, 0.67976f, 0.01848f, 0.67976f, 0.01848f, 0.66840f, 0.01566f, 0.66840f, 0.01566f,
+    0.65777f, 0.01308f, 0.65777f, 0.01308f, 0.64787f, 0.01075f, 0.64787f, 0.01075f, 0.63872f, 0.00869f, 0.63872f,
+    0.00869f, 0.63033f, 0.00687f, 0.63033f, 0.00687f, 0.62272f, 0.00531f, 0.62272f, 0.00531f, 0.61588f, 0.00398f,
+    0.61588f, 0.00398f, 0.60982f, 0.00288f, 0.60982f, 0.00288f, 0.60452f, 0.00200f, 0.60452f, 0.00200f, 0.59998f,
+    0.00131f, 0.59998f, 0.00131f, 0.59620f, 0.00079f, 0.59620f, 0.00079f, 0.59315f, 0.00043f, 0.59315f, 0.00043f,
+    0.59083f, 0.00019f, 0.59083f, 0.00019f, 0.58921f, 0.00005f, 0.92505f, 0.05728f, 0.92203f, 0.05684f, 0.92203f,
+    0.05684f, 0.91367f, 0.05562f, 0.91367f, 0.05562f, 0.90132f, 0.05378f, 0.90132f, 0.05378f, 0.88612f, 0.05148f,
+    0.88612f, 0.05148f, 0.86888f, 0.04885f, 0.86888f, 0.04885f, 0.85023f, 0.04597f, 0.85023f, 0.04597f, 0.83062f,
+    0.04292f, 0.83062f, 0.04292f, 0.81040f, 0.03976f, 0.81040f, 0.03976f, 0.78987f, 0.03657f, 0.78987f, 0.03657f,
+    0.76923f, 0.03337f, 0.76923f, 0.03337f, 0.74866f, 0.03023f, 0.74866f, 0.03023f, 0.72832f, 0.02717f, 0.72832f,
+    0.02717f, 0.70829f, 0.02423f, 0.70829f, 0.02423f, 0.68869f, 0.02143f, 0.68869f, 0.02143f, 0.66956f, 0.01879f,
+    0.66956f, 0.01879f, 0.65097f, 0.01632f, 0.65097f, 0.01632f, 0.63296f, 0.01404f, 0.63296f, 0.01404f, 0.61555f,
+    0.01195f, 0.61555f, 0.01195f, 0.59877f, 0.01005f, 0.59877f, 0.01005f, 0.58263f, 0.00835f, 0.58263f, 0.00835f,
+    0.56715f, 0.00684f, 0.56715f, 0.00684f, 0.55232f, 0.00551f, 0.55232f, 0.00551f, 0.53815f, 0.00436f, 0.53815f,
+    0.00436f, 0.52465f, 0.00338f, 0.52465f, 0.00338f, 0.51180f, 0.00255f, 0.51180f, 0.00255f, 0.49961f, 0.00187f,
+    0.49961f, 0.00187f, 0.48807f, 0.00132f, 0.48807f, 0.00132f, 0.47717f, 0.00088f, 0.47717f, 0.00088f, 0.46691f,
+    0.00055f, 0.46691f, 0.00055f, 0.45727f, 0.00031f, 0.45727f, 0.00031f, 0.44826f, 0.00015f, 0.44826f, 0.00015f,
+    0.43985f, 0.00004f, 0.93261f, 0.04530f, 0.92877f, 0.04485f, 0.92877f, 0.04485f, 0.91813f, 0.04361f, 0.91813f,
+    0.04361f, 0.90242f, 0.04179f, 0.90242f, 0.04179f, 0.88309f, 0.03957f, 0.88309f, 0.03957f, 0.86118f, 0.03710f,
+    0.86118f, 0.03710f, 0.83748f, 0.03447f, 0.83748f, 0.03447f, 0.81257f, 0.03175f, 0.81257f, 0.03175f, 0.78690f,
+    0.02902f, 0.78690f, 0.02902f, 0.76083f, 0.02633f, 0.76083f, 0.02633f, 0.73463f, 0.02370f, 0.73463f, 0.02370f,
+    0.70854f, 0.02117f, 0.70854f, 0.02117f, 0.68271f, 0.01877f, 0.68271f, 0.01877f, 0.65731f, 0.01652f, 0.65731f,
+    0.01652f, 0.63242f, 0.01442f, 0.63242f, 0.01442f, 0.60813f, 0.01248f, 0.60813f, 0.01248f, 0.58451f, 0.01071f,
+    0.58451f, 0.01071f, 0.56160f, 0.00911f, 0.56160f, 0.00911f, 0.53944f, 0.00767f, 0.53944f, 0.00767f, 0.51803f,
+    0.00639f, 0.51803f, 0.00639f, 0.49740f, 0.00526f, 0.49740f, 0.00526f, 0.47754f, 0.00428f, 0.47754f, 0.00428f,
+    0.45846f, 0.00343f, 0.45846f, 0.00343f, 0.44014f, 0.00270f, 0.44014f, 0.00270f, 0.42257f, 0.00209f, 0.42257f,
+    0.00209f, 0.40573f, 0.00158f, 0.40573f, 0.00158f, 0.38962f, 0.00116f, 0.38962f, 0.00116f, 0.37420f, 0.00082f,
+    0.37420f, 0.00082f, 0.35946f, 0.00056f, 0.35946f, 0.00056f, 0.34537f, 0.00036f, 0.34537f, 0.00036f, 0.33192f,
+    0.00021f, 0.33192f, 0.00021f, 0.31908f, 0.00010f, 0.31908f, 0.00010f, 0.30682f, 0.00003f
+};
+static const float4 KH_ENVBRDF_C[512] = {
+    0.00587f, 0.00643f, 0.00642f, 0.00690f, 0.00643f, 0.00855f, 0.00690f, 0.00885f, 0.00855f, 0.01244f, 0.00885f,
+    0.01261f, 0.01244f, 0.01775f, 0.01261f, 0.01786f, 0.01775f, 0.02406f, 0.01786f, 0.02412f, 0.02406f, 0.03085f,
+    0.02412f, 0.03089f, 0.03085f, 0.03764f, 0.03089f, 0.03765f, 0.03764f, 0.04393f, 0.03765f, 0.04393f, 0.04393f,
+    0.04928f, 0.04393f, 0.04928f, 0.04928f, 0.05334f, 0.04928f, 0.05333f, 0.05334f, 0.05583f, 0.05333f, 0.05582f,
+    0.05583f, 0.05662f, 0.05582f, 0.05661f, 0.05662f, 0.05567f, 0.05661f, 0.05566f, 0.05567f, 0.05308f, 0.05566f,
+    0.05307f, 0.05308f, 0.04907f, 0.05307f, 0.04907f, 0.04907f, 0.04394f, 0.04907f, 0.04394f, 0.04394f, 0.03805f,
+    0.04394f, 0.03804f, 0.03805f, 0.03179f, 0.03804f, 0.03178f, 0.03179f, 0.02554f, 0.03178f, 0.02554f, 0.02554f,
+    0.01965f, 0.02554f, 0.01965f, 0.01965f, 0.01440f, 0.01965f, 0.01440f, 0.01440f, 0.00997f, 0.01440f, 0.00997f,
+    0.00997f, 0.00646f, 0.00997f, 0.00646f, 0.00646f, 0.00386f, 0.00646f, 0.00387f, 0.00386f, 0.00209f, 0.00387f,
+    0.00209f, 0.00209f, 0.00100f, 0.00209f, 0.00100f, 0.00100f, 0.00040f, 0.00100f, 0.00040f, 0.00040f, 0.00012f,
+    0.00040f, 0.00012f, 0.00012f, 0.00003f, 0.00012f, 0.00003f, 0.00003f, 0.00000f, 0.00003f, 0.00000f, 0.00000f,
+    0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00642f, 0.00690f, 0.00850f, 0.00871f,
+    0.00690f, 0.00885f, 0.00871f, 0.01007f, 0.00885f, 0.01261f, 0.01007f, 0.01335f, 0.01261f, 0.01786f, 0.01335f,
+    0.01830f, 0.01786f, 0.02412f, 0.01830f, 0.02438f, 0.02412f, 0.03089f, 0.02438f, 0.03102f, 0.03089f, 0.03765f,
+    0.03102f, 0.03771f, 0.03765f, 0.04393f, 0.03771f, 0.04394f, 0.04393f, 0.04928f, 0.04394f, 0.04926f, 0.04928f,
+    0.05333f, 0.04926f, 0.05329f, 0.05333f, 0.05582f, 0.05329f, 0.05577f, 0.05582f, 0.05661f, 0.05577f, 0.05655f,
+    0.05661f, 0.05566f, 0.05655f, 0.05561f, 0.05566f, 0.05307f, 0.05561f, 0.05303f, 0.05307f, 0.04907f, 0.05303f,
+    0.04903f, 0.04907f, 0.04394f, 0.04903f, 0.04391f, 0.04394f, 0.03804f, 0.04391f, 0.03803f, 0.03804f, 0.03178f,
+    0.03803f, 0.03177f, 0.03178f, 0.02554f, 0.03177f, 0.02553f, 0.02554f, 0.01965f, 0.02553f, 0.01965f, 0.01965f,
+    0.01440f, 0.01965f, 0.01440f, 0.01440f, 0.00997f, 0.01440f, 0.00997f, 0.00997f, 0.00646f, 0.00997f, 0.00646f,
+    0.00646f, 0.00387f, 0.00646f, 0.00387f, 0.00387f, 0.00209f, 0.00387f, 0.00209f, 0.00209f, 0.00100f, 0.00209f,
+    0.00100f, 0.00100f, 0.00040f, 0.00100f, 0.00040f, 0.00040f, 0.00012f, 0.00040f, 0.00012f, 0.00012f, 0.00003f,
+    0.00012f, 0.00003f, 0.00003f, 0.00000f, 0.00003f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f,
+    0.00000f, 0.00000f, 0.00000f, 0.00850f, 0.00871f, 0.01285f, 0.01276f, 0.00871f, 0.01007f, 0.01276f, 0.01319f,
+    0.01007f, 0.01335f, 0.01319f, 0.01533f, 0.01335f, 0.01830f, 0.01533f, 0.01946f, 0.01830f, 0.02438f, 0.01946f,
+    0.02503f, 0.02438f, 0.03102f, 0.02503f, 0.03137f, 0.03102f, 0.03771f, 0.03137f, 0.03785f, 0.03771f, 0.04394f,
+    0.03785f, 0.04394f, 0.04394f, 0.04926f, 0.04394f, 0.04917f, 0.04926f, 0.05329f, 0.04917f, 0.05316f, 0.05329f,
+    0.05577f, 0.05316f, 0.05562f, 0.05577f, 0.05655f, 0.05562f, 0.05640f, 0.05655f, 0.05561f, 0.05640f, 0.05546f,
+    0.05561f, 0.05303f, 0.05546f, 0.05290f, 0.05303f, 0.04903f, 0.05290f, 0.04892f, 0.04903f, 0.04391f, 0.04892f,
+    0.04383f, 0.04391f, 0.03803f, 0.04383f, 0.03797f, 0.03803f, 0.03177f, 0.03797f, 0.03173f, 0.03177f, 0.02553f,
+    0.03173f, 0.02551f, 0.02553f, 0.01965f, 0.02551f, 0.01964f, 0.01965f, 0.01440f, 0.01964f, 0.01440f, 0.01440f,
+    0.00997f, 0.01440f, 0.00998f, 0.00997f, 0.00646f, 0.00998f, 0.00647f, 0.00646f, 0.00387f, 0.00647f, 0.00388f,
+    0.00387f, 0.00209f, 0.00388f, 0.00210f, 0.00209f, 0.00100f, 0.00210f, 0.00100f, 0.00100f, 0.00040f, 0.00100f,
+    0.00040f, 0.00040f, 0.00012f, 0.00040f, 0.00013f, 0.00012f, 0.00003f, 0.00013f, 0.00003f, 0.00003f, 0.00000f,
+    0.00003f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.01285f,
+    0.01276f, 0.01925f, 0.01905f, 0.01276f, 0.01319f, 0.01905f, 0.01886f, 0.01319f, 0.01533f, 0.01886f, 0.01964f,
+    0.01533f, 0.01946f, 0.01964f, 0.02221f, 0.01946f, 0.02503f, 0.02221f, 0.02655f, 0.02503f, 0.03137f, 0.02655f,
+    0.03208f, 0.03137f, 0.03785f, 0.03208f, 0.03807f, 0.03785f, 0.04394f, 0.03807f, 0.04384f, 0.04394f, 0.04917f,
+    0.04384f, 0.04888f, 0.04917f, 0.05316f, 0.04888f, 0.05276f, 0.05316f, 0.05562f, 0.05276f, 0.05517f, 0.05562f,
+    0.05640f, 0.05517f, 0.05595f, 0.05640f, 0.05546f, 0.05595f, 0.05504f, 0.05546f, 0.05290f, 0.05504f, 0.05254f,
+    0.05290f, 0.04892f, 0.05254f, 0.04862f, 0.04892f, 0.04383f, 0.04862f, 0.04359f, 0.04383f, 0.03797f, 0.04359f,
+    0.03780f, 0.03797f, 0.03173f, 0.03780f, 0.03162f, 0.03173f, 0.02551f, 0.03162f, 0.02545f, 0.02551f, 0.01964f,
+    0.02545f, 0.01961f, 0.01964f, 0.01440f, 0.01961f, 0.01440f, 0.01440f, 0.00998f, 0.01440f, 0.01000f, 0.00998f,
+    0.00647f, 0.01000f, 0.00650f, 0.00647f, 0.00388f, 0.00650f, 0.00390f, 0.00388f, 0.00210f, 0.00390f, 0.00212f,
+    0.00210f, 0.00100f, 0.00212f, 0.00102f, 0.00100f, 0.00040f, 0.00102f, 0.00041f, 0.00040f, 0.00013f, 0.00041f,
+    0.00013f, 0.00013f, 0.00003f, 0.00013f, 0.00003f, 0.00003f, 0.00000f, 0.00003f, 0.00000f, 0.00000f, 0.00000f,
+    0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.01925f, 0.01905f, 0.02636f, 0.02622f, 0.01905f,
+    0.01886f, 0.02622f, 0.02596f, 0.01886f, 0.01964f, 0.02596f, 0.02604f, 0.01964f, 0.02221f, 0.02604f, 0.02712f,
+    0.02221f, 0.02655f, 0.02712f, 0.02965f, 0.02655f, 0.03208f, 0.02965f, 0.03356f, 0.03208f, 0.03807f, 0.03356f,
+    0.03837f, 0.03807f, 0.04384f, 0.03837f, 0.04341f, 0.04384f, 0.04888f, 0.04341f, 0.04801f, 0.04888f, 0.05276f,
+    0.04801f, 0.05166f, 0.05276f, 0.05517f, 0.05166f, 0.05400f, 0.05517f, 0.05595f, 0.05400f, 0.05480f, 0.05595f,
+    0.05504f, 0.05480f, 0.05398f, 0.05504f, 0.05254f, 0.05398f, 0.05161f, 0.05254f, 0.04862f, 0.05161f, 0.04786f,
+    0.04862f, 0.04359f, 0.04786f, 0.04300f, 0.04359f, 0.03780f, 0.04300f, 0.03737f, 0.03780f, 0.03162f, 0.03737f,
+    0.03133f, 0.03162f, 0.02545f, 0.03133f, 0.02528f, 0.02545f, 0.01961f, 0.02528f, 0.01954f, 0.01961f, 0.01440f,
+    0.01954f, 0.01439f, 0.01440f, 0.01000f, 0.01439f, 0.01002f, 0.01000f, 0.00650f, 0.01002f, 0.00654f, 0.00650f,
+    0.00390f, 0.00654f, 0.00395f, 0.00390f, 0.00212f, 0.00395f, 0.00216f, 0.00212f, 0.00102f, 0.00216f, 0.00105f,
+    0.00102f, 0.00041f, 0.00105f, 0.00043f, 0.00041f, 0.00013f, 0.00043f, 0.00014f, 0.00013f, 0.00003f, 0.00014f,
+    0.00003f, 0.00003f, 0.00000f, 0.00003f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f,
+    0.00000f, 0.00000f, 0.02636f, 0.02622f, 0.03251f, 0.03247f, 0.02622f, 0.02596f, 0.03247f, 0.03237f, 0.02596f,
+    0.02604f, 0.03237f, 0.03238f, 0.02604f, 0.02712f, 0.03238f, 0.03280f, 0.02712f, 0.02965f, 0.03280f, 0.03395f,
+    0.02965f, 0.03356f, 0.03395f, 0.03605f, 0.03356f, 0.03837f, 0.03605f, 0.03905f, 0.03837f, 0.04341f, 0.03905f,
+    0.04261f, 0.04341f, 0.04801f, 0.04261f, 0.04621f, 0.04801f, 0.05166f, 0.04621f, 0.04930f, 0.05166f, 0.05400f,
+    0.04930f, 0.05142f, 0.05400f, 0.05480f, 0.05142f, 0.05225f, 0.05480f, 0.05398f, 0.05225f, 0.05163f, 0.05398f,
+    0.05161f, 0.05163f, 0.04955f, 0.05161f, 0.04786f, 0.04955f, 0.04615f, 0.04786f, 0.04300f, 0.04615f, 0.04165f,
+    0.04300f, 0.03737f, 0.04165f, 0.03637f, 0.03737f, 0.03133f, 0.03637f, 0.03065f, 0.03133f, 0.02528f, 0.03065f,
+    0.02486f, 0.02528f, 0.01954f, 0.02486f, 0.01933f, 0.01954f, 0.01439f, 0.01933f, 0.01433f, 0.01439f, 0.01002f,
+    0.01433f, 0.01006f, 0.01002f, 0.00654f, 0.01006f, 0.00663f, 0.00654f, 0.00395f, 0.00663f, 0.00405f, 0.00395f,
+    0.00216f, 0.00405f, 0.00225f, 0.00216f, 0.00105f, 0.00225f, 0.00111f, 0.00105f, 0.00043f, 0.00111f, 0.00047f,
+    0.00043f, 0.00014f, 0.00047f, 0.00016f, 0.00014f, 0.00003f, 0.00016f, 0.00004f, 0.00003f, 0.00000f, 0.00004f,
+    0.00001f, 0.00000f, 0.00000f, 0.00001f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.03251f, 0.03247f,
+    0.03636f, 0.03637f, 0.03247f, 0.03237f, 0.03637f, 0.03640f, 0.03237f, 0.03238f, 0.03640f, 0.03649f, 0.03238f,
+    0.03280f, 0.03649f, 0.03674f, 0.03280f, 0.03395f, 0.03674f, 0.03727f, 0.03395f, 0.03605f, 0.03727f, 0.03822f,
+    0.03605f, 0.03905f, 0.03822f, 0.03965f, 0.03905f, 0.04261f, 0.03965f, 0.04152f, 0.04261f, 0.04621f, 0.04152f,
+    0.04361f, 0.04621f, 0.04930f, 0.04361f, 0.04559f, 0.04930f, 0.05142f, 0.04559f, 0.04708f, 0.05142f, 0.05225f,
+    0.04708f, 0.04772f, 0.05225f, 0.05163f, 0.04772f, 0.04728f, 0.05163f, 0.04955f, 0.04728f, 0.04563f, 0.04955f,
+    0.04615f, 0.04563f, 0.04280f, 0.04615f, 0.04165f, 0.04280f, 0.03895f, 0.04165f, 0.03637f, 0.03895f, 0.03431f,
+    0.03637f, 0.03065f, 0.03431f, 0.02919f, 0.03065f, 0.02486f, 0.02919f, 0.02391f, 0.02486f, 0.01933f, 0.02391f,
+    0.01880f, 0.01933f, 0.01433f, 0.01880f, 0.01411f, 0.01433f, 0.01006f, 0.01411f, 0.01004f, 0.01006f, 0.00663f,
+    0.01004f, 0.00673f, 0.00663f, 0.00405f, 0.00673f, 0.00419f, 0.00405f, 0.00225f, 0.00419f, 0.00239f, 0.00225f,
+    0.00111f, 0.00239f, 0.00123f, 0.00111f, 0.00047f, 0.00123f, 0.00055f, 0.00047f, 0.00016f, 0.00055f, 0.00021f,
+    0.00016f, 0.00004f, 0.00021f, 0.00006f, 0.00004f, 0.00001f, 0.00006f, 0.00001f, 0.00001f, 0.00000f, 0.00001f,
+    0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.03636f, 0.03637f, 0.03717f, 0.03719f, 0.03637f, 0.03640f,
+    0.03719f, 0.03725f, 0.03640f, 0.03649f, 0.03725f, 0.03735f, 0.03649f, 0.03674f, 0.03735f, 0.03752f, 0.03674f,
+    0.03727f, 0.03752f, 0.03778f, 0.03727f, 0.03822f, 0.03778f, 0.03816f, 0.03822f, 0.03965f, 0.03816f, 0.03869f,
+    0.03965f, 0.04152f, 0.03869f, 0.03938f, 0.04152f, 0.04361f, 0.03938f, 0.04016f, 0.04361f, 0.04559f, 0.04016f,
+    0.04091f, 0.04559f, 0.04708f, 0.04091f, 0.04144f, 0.04708f, 0.04772f, 0.04144f, 0.04154f, 0.04772f, 0.04728f,
+    0.04154f, 0.04099f, 0.04728f, 0.04563f, 0.04099f, 0.03965f, 0.04563f, 0.04280f, 0.03965f, 0.03745f, 0.04280f,
+    0.03895f, 0.03745f, 0.03442f, 0.03895f, 0.03431f, 0.03442f, 0.03070f, 0.03431f, 0.02919f, 0.03070f, 0.02649f,
+    0.02919f, 0.02391f, 0.02649f, 0.02205f, 0.02391f, 0.01880f, 0.02205f, 0.01764f, 0.01880f, 0.01411f, 0.01764f,
+    0.01349f, 0.01411f, 0.01004f, 0.01349f, 0.00982f, 0.01004f, 0.00673f, 0.00982f, 0.00675f, 0.00673f, 0.00419f,
+    0.00675f, 0.00434f, 0.00419f, 0.00239f, 0.00434f, 0.00258f, 0.00239f, 0.00123f, 0.00258f, 0.00139f, 0.00123f,
+    0.00055f, 0.00139f, 0.00067f, 0.00055f, 0.00021f, 0.00067f, 0.00028f, 0.00021f, 0.00006f, 0.00028f, 0.00010f,
+    0.00006f, 0.00001f, 0.00010f, 0.00003f, 0.00001f, 0.00000f, 0.00003f, 0.00001f, 0.00000f, 0.00000f, 0.00001f,
+    0.00000f, 0.03717f, 0.03719f, 0.03502f, 0.03503f, 0.03719f, 0.03725f, 0.03503f, 0.03506f, 0.03725f, 0.03735f,
+    0.03506f, 0.03510f, 0.03735f, 0.03752f, 0.03510f, 0.03515f, 0.03752f, 0.03778f, 0.03515f, 0.03521f, 0.03778f,
+    0.03816f, 0.03521f, 0.03527f, 0.03816f, 0.03869f, 0.03527f, 0.03533f, 0.03869f, 0.03938f, 0.03533f, 0.03538f,
+    0.03938f, 0.04016f, 0.03538f, 0.03538f, 0.04016f, 0.04091f, 0.03538f, 0.03530f, 0.04091f, 0.04144f, 0.03530f,
+    0.03507f, 0.04144f, 0.04154f, 0.03507f, 0.03458f, 0.04154f, 0.04099f, 0.03458f, 0.03375f, 0.04099f, 0.03965f,
+    0.03375f, 0.03248f, 0.03965f, 0.03745f, 0.03248f, 0.03070f, 0.03745f, 0.03442f, 0.03070f, 0.02840f, 0.03442f,
+    0.03070f, 0.02840f, 0.02561f, 0.03070f, 0.02649f, 0.02561f, 0.02244f, 0.02649f, 0.02205f, 0.02244f, 0.01903f,
+    0.02205f, 0.01764f, 0.01903f, 0.01557f, 0.01764f, 0.01349f, 0.01557f, 0.01222f, 0.01349f, 0.00982f, 0.01222f,
+    0.00916f, 0.00982f, 0.00675f, 0.00916f, 0.00652f, 0.00675f, 0.00434f, 0.00652f, 0.00436f, 0.00434f, 0.00258f,
+    0.00436f, 0.00272f, 0.00258f, 0.00139f, 0.00272f, 0.00156f, 0.00139f, 0.00067f, 0.00156f, 0.00081f, 0.00067f,
+    0.00028f, 0.00081f, 0.00037f, 0.00028f, 0.00010f, 0.00037f, 0.00015f, 0.00010f, 0.00003f, 0.00015f, 0.00005f,
+    0.00003f, 0.00001f, 0.00005f, 0.00001f, 0.00001f, 0.00000f, 0.00001f, 0.00000f, 0.03502f, 0.03503f, 0.03074f,
+    0.03073f, 0.03503f, 0.03506f, 0.03073f, 0.03070f, 0.03506f, 0.03510f, 0.03070f, 0.03065f, 0.03510f, 0.03515f,
+    0.03065f, 0.03057f, 0.03515f, 0.03521f, 0.03057f, 0.03046f, 0.03521f, 0.03527f, 0.03046f, 0.03031f, 0.03527f,
+    0.03533f, 0.03031f, 0.03010f, 0.03533f, 0.03538f, 0.03010f, 0.02982f, 0.03538f, 0.03538f, 0.02982f, 0.02945f,
+    0.03538f, 0.03530f, 0.02945f, 0.02896f, 0.03530f, 0.03507f, 0.02896f, 0.02833f, 0.03507f, 0.03458f, 0.02833f,
+    0.02754f, 0.03458f, 0.03375f, 0.02754f, 0.02653f, 0.03375f, 0.03248f, 0.02653f, 0.02528f, 0.03248f, 0.03070f,
+    0.02528f, 0.02377f, 0.03070f, 0.02840f, 0.02377f, 0.02197f, 0.02840f, 0.02561f, 0.02197f, 0.01991f, 0.02561f,
+    0.02244f, 0.01991f, 0.01763f, 0.02244f, 0.01903f, 0.01763f, 0.01519f, 0.01903f, 0.01557f, 0.01519f, 0.01269f,
+    0.01557f, 0.01222f, 0.01269f, 0.01023f, 0.01222f, 0.00916f, 0.01023f, 0.00792f, 0.00916f, 0.00652f, 0.00792f,
+    0.00585f, 0.00652f, 0.00436f, 0.00585f, 0.00410f, 0.00436f, 0.00272f, 0.00410f, 0.00270f, 0.00272f, 0.00156f,
+    0.00270f, 0.00165f, 0.00156f, 0.00081f, 0.00165f, 0.00093f, 0.00081f, 0.00037f, 0.00093f, 0.00047f, 0.00037f,
+    0.00015f, 0.00047f, 0.00021f, 0.00015f, 0.00005f, 0.00021f, 0.00008f, 0.00005f, 0.00001f, 0.00008f, 0.00002f,
+    0.00001f, 0.00000f, 0.00002f, 0.00000f, 0.03074f, 0.03073f, 0.02545f, 0.02542f, 0.03073f, 0.03070f, 0.02542f,
+    0.02535f, 0.03070f, 0.03065f, 0.02535f, 0.02522f, 0.03065f, 0.03057f, 0.02522f, 0.02505f, 0.03057f, 0.03046f,
+    0.02505f, 0.02482f, 0.03046f, 0.03031f, 0.02482f, 0.02452f, 0.03031f, 0.03010f, 0.02452f, 0.02416f, 0.03010f,
+    0.02982f, 0.02416f, 0.02372f, 0.02982f, 0.02945f, 0.02372f, 0.02319f, 0.02945f, 0.02896f, 0.02319f, 0.02256f,
+    0.02896f, 0.02833f, 0.02256f, 0.02182f, 0.02833f, 0.02754f, 0.02182f, 0.02095f, 0.02754f, 0.02653f, 0.02095f,
+    0.01996f, 0.02653f, 0.02528f, 0.01996f, 0.01883f, 0.02528f, 0.02377f, 0.01883f, 0.01755f, 0.02377f, 0.02197f,
+    0.01755f, 0.01615f, 0.02197f, 0.01991f, 0.01615f, 0.01462f, 0.01991f, 0.01763f, 0.01462f, 0.01298f, 0.01763f,
+    0.01519f, 0.01298f, 0.01129f, 0.01519f, 0.01269f, 0.01129f, 0.00956f, 0.01269f, 0.01023f, 0.00956f, 0.00787f,
+    0.01023f, 0.00792f, 0.00787f, 0.00626f, 0.00792f, 0.00585f, 0.00626f, 0.00479f, 0.00585f, 0.00410f, 0.00479f,
+    0.00350f, 0.00410f, 0.00270f, 0.00350f, 0.00243f, 0.00270f, 0.00165f, 0.00243f, 0.00158f, 0.00165f, 0.00093f,
+    0.00158f, 0.00095f, 0.00093f, 0.00047f, 0.00095f, 0.00052f, 0.00047f, 0.00021f, 0.00052f, 0.00025f, 0.00021f,
+    0.00008f, 0.00025f, 0.00010f, 0.00008f, 0.00002f, 0.00010f, 0.00003f, 0.00002f, 0.00000f, 0.00003f, 0.00000f,
+    0.02545f, 0.02542f, 0.02020f, 0.02016f, 0.02542f, 0.02535f, 0.02016f, 0.02006f, 0.02535f, 0.02522f, 0.02006f,
+    0.01988f, 0.02522f, 0.02505f, 0.01988f, 0.01965f, 0.02505f, 0.02482f, 0.01965f, 0.01935f, 0.02482f, 0.02452f,
+    0.01935f, 0.01899f, 0.02452f, 0.02416f, 0.01899f, 0.01856f, 0.02416f, 0.02372f, 0.01856f, 0.01807f, 0.02372f,
+    0.02319f, 0.01807f, 0.01750f, 0.02319f, 0.02256f, 0.01750f, 0.01686f, 0.02256f, 0.02182f, 0.01686f, 0.01613f,
+    0.02182f, 0.02095f, 0.01613f, 0.01533f, 0.02095f, 0.01996f, 0.01533f, 0.01445f, 0.01996f, 0.01883f, 0.01445f,
+    0.01350f, 0.01883f, 0.01755f, 0.01350f, 0.01248f, 0.01755f, 0.01615f, 0.01248f, 0.01140f, 0.01615f, 0.01462f,
+    0.01140f, 0.01027f, 0.01462f, 0.01298f, 0.01027f, 0.00911f, 0.01298f, 0.01129f, 0.00911f, 0.00793f, 0.01129f,
+    0.00956f, 0.00793f, 0.00677f, 0.00956f, 0.00787f, 0.00677f, 0.00564f, 0.00787f, 0.00626f, 0.00564f, 0.00456f,
+    0.00626f, 0.00479f, 0.00456f, 0.00358f, 0.00479f, 0.00350f, 0.00358f, 0.00270f, 0.00350f, 0.00243f, 0.00270f,
+    0.00195f, 0.00243f, 0.00158f, 0.00195f, 0.00133f, 0.00158f, 0.00095f, 0.00133f, 0.00085f, 0.00095f, 0.00052f,
+    0.00085f, 0.00050f, 0.00052f, 0.00025f, 0.00050f, 0.00026f, 0.00025f, 0.00010f, 0.00026f, 0.00012f, 0.00010f,
+    0.00003f, 0.00012f, 0.00004f, 0.00003f, 0.00000f, 0.00004f, 0.00001f, 0.02020f, 0.02016f, 0.01566f, 0.01562f,
+    0.02016f, 0.02006f, 0.01562f, 0.01549f, 0.02006f, 0.01988f, 0.01549f, 0.01530f, 0.01988f, 0.01965f, 0.01530f,
+    0.01503f, 0.01965f, 0.01935f, 0.01503f, 0.01471f, 0.01935f, 0.01899f, 0.01471f, 0.01433f, 0.01899f, 0.01856f,
+    0.01433f, 0.01389f, 0.01856f, 0.01807f, 0.01389f, 0.01339f, 0.01807f, 0.01750f, 0.01339f, 0.01285f, 0.01750f,
+    0.01686f, 0.01285f, 0.01225f, 0.01686f, 0.01613f, 0.01225f, 0.01161f, 0.01613f, 0.01533f, 0.01161f, 0.01092f,
+    0.01533f, 0.01445f, 0.01092f, 0.01019f, 0.01445f, 0.01350f, 0.01019f, 0.00942f, 0.01350f, 0.01248f, 0.00942f,
+    0.00863f, 0.01248f, 0.01140f, 0.00863f, 0.00782f, 0.01140f, 0.01027f, 0.00782f, 0.00699f, 0.01027f, 0.00911f,
+    0.00699f, 0.00617f, 0.00911f, 0.00793f, 0.00617f, 0.00536f, 0.00793f, 0.00677f, 0.00536f, 0.00458f, 0.00677f,
+    0.00564f, 0.00458f, 0.00383f, 0.00564f, 0.00456f, 0.00383f, 0.00313f, 0.00456f, 0.00358f, 0.00313f, 0.00249f,
+    0.00358f, 0.00270f, 0.00249f, 0.00191f, 0.00270f, 0.00195f, 0.00191f, 0.00142f, 0.00195f, 0.00133f, 0.00142f,
+    0.00101f, 0.00133f, 0.00085f, 0.00101f, 0.00067f, 0.00085f, 0.00050f, 0.00067f, 0.00042f, 0.00050f, 0.00026f,
+    0.00042f, 0.00024f, 0.00026f, 0.00012f, 0.00024f, 0.00011f, 0.00012f, 0.00004f, 0.00011f, 0.00004f, 0.00004f,
+    0.00001f, 0.00004f, 0.00001f, 0.01566f, 0.01562f, 0.01210f, 0.01205f, 0.01562f, 0.01549f, 0.01205f, 0.01192f,
+    0.01549f, 0.01530f, 0.01192f, 0.01171f, 0.01530f, 0.01503f, 0.01171f, 0.01143f, 0.01503f, 0.01471f, 0.01143f,
+    0.01110f, 0.01471f, 0.01433f, 0.01110f, 0.01072f, 0.01433f, 0.01389f, 0.01072f, 0.01029f, 0.01389f, 0.01339f,
+    0.01029f, 0.00983f, 0.01339f, 0.01285f, 0.00983f, 0.00933f, 0.01285f, 0.01225f, 0.00933f, 0.00880f, 0.01225f,
+    0.01161f, 0.00880f, 0.00824f, 0.01161f, 0.01092f, 0.00824f, 0.00767f, 0.01092f, 0.01019f, 0.00767f, 0.00707f,
+    0.01019f, 0.00942f, 0.00707f, 0.00647f, 0.00942f, 0.00863f, 0.00647f, 0.00586f, 0.00863f, 0.00782f, 0.00586f,
+    0.00526f, 0.00782f, 0.00699f, 0.00526f, 0.00466f, 0.00699f, 0.00617f, 0.00466f, 0.00408f, 0.00617f, 0.00536f,
+    0.00408f, 0.00353f, 0.00536f, 0.00458f, 0.00353f, 0.00300f, 0.00458f, 0.00383f, 0.00300f, 0.00250f, 0.00383f,
+    0.00313f, 0.00250f, 0.00205f, 0.00313f, 0.00249f, 0.00205f, 0.00164f, 0.00249f, 0.00191f, 0.00164f, 0.00127f,
+    0.00191f, 0.00142f, 0.00127f, 0.00096f, 0.00142f, 0.00101f, 0.00096f, 0.00069f, 0.00101f, 0.00067f, 0.00069f,
+    0.00048f, 0.00067f, 0.00042f, 0.00048f, 0.00031f, 0.00042f, 0.00024f, 0.00031f, 0.00018f, 0.00024f, 0.00011f,
+    0.00018f, 0.00009f, 0.00011f, 0.00004f, 0.00009f, 0.00004f, 0.00004f, 0.00001f, 0.00004f, 0.00001f, 0.01210f,
+    0.01205f, 0.00949f, 0.00944f, 0.01205f, 0.01192f, 0.00944f, 0.00929f, 0.01192f, 0.01171f, 0.00929f, 0.00907f,
+    0.01171f, 0.01143f, 0.00907f, 0.00878f, 0.01143f, 0.01110f, 0.00878f, 0.00845f, 0.01110f, 0.01072f, 0.00845f,
+    0.00808f, 0.01072f, 0.01029f, 0.00808f, 0.00767f, 0.01029f, 0.00983f, 0.00767f, 0.00724f, 0.00983f, 0.00933f,
+    0.00724f, 0.00679f, 0.00933f, 0.00880f, 0.00679f, 0.00633f, 0.00880f, 0.00824f, 0.00633f, 0.00585f, 0.00824f,
+    0.00767f, 0.00585f, 0.00537f, 0.00767f, 0.00707f, 0.00537f, 0.00489f, 0.00707f, 0.00647f, 0.00489f, 0.00442f,
+    0.00647f, 0.00586f, 0.00442f, 0.00395f, 0.00586f, 0.00526f, 0.00395f, 0.00350f, 0.00526f, 0.00466f, 0.00350f,
+    0.00307f, 0.00466f, 0.00408f, 0.00307f, 0.00266f, 0.00408f, 0.00353f, 0.00266f, 0.00228f, 0.00353f, 0.00300f,
+    0.00228f, 0.00192f, 0.00300f, 0.00250f, 0.00192f, 0.00160f, 0.00250f, 0.00205f, 0.00160f, 0.00130f, 0.00205f,
+    0.00164f, 0.00130f, 0.00104f, 0.00164f, 0.00127f, 0.00104f, 0.00081f, 0.00127f, 0.00096f, 0.00081f, 0.00061f,
+    0.00096f, 0.00069f, 0.00061f, 0.00045f, 0.00069f, 0.00048f, 0.00045f, 0.00031f, 0.00048f, 0.00031f, 0.00031f,
+    0.00021f, 0.00031f, 0.00018f, 0.00021f, 0.00013f, 0.00018f, 0.00009f, 0.00013f, 0.00007f, 0.00009f, 0.00004f,
+    0.00007f, 0.00003f, 0.00004f, 0.00001f, 0.00003f, 0.00001f, 0.00949f, 0.00944f, 0.00765f, 0.00760f, 0.00944f,
+    0.00929f, 0.00760f, 0.00744f, 0.00929f, 0.00907f, 0.00744f, 0.00720f, 0.00907f, 0.00878f, 0.00720f, 0.00691f,
+    0.00878f, 0.00845f, 0.00691f, 0.00657f, 0.00845f, 0.00808f, 0.00657f, 0.00621f, 0.00808f, 0.00767f, 0.00621f,
+    0.00582f, 0.00767f, 0.00724f, 0.00582f, 0.00542f, 0.00724f, 0.00679f, 0.00542f, 0.00500f, 0.00679f, 0.00633f,
+    0.00500f, 0.00459f, 0.00633f, 0.00585f, 0.00459f, 0.00418f, 0.00585f, 0.00537f, 0.00418f, 0.00378f, 0.00537f,
+    0.00489f, 0.00378f, 0.00339f, 0.00489f, 0.00442f, 0.00339f, 0.00302f, 0.00442f, 0.00395f, 0.00302f, 0.00266f,
+    0.00395f, 0.00350f, 0.00266f, 0.00233f, 0.00350f, 0.00307f, 0.00233f, 0.00201f, 0.00307f, 0.00266f, 0.00201f,
+    0.00172f, 0.00266f, 0.00228f, 0.00172f, 0.00146f, 0.00228f, 0.00192f, 0.00146f, 0.00122f, 0.00192f, 0.00160f,
+    0.00122f, 0.00100f, 0.00160f, 0.00130f, 0.00100f, 0.00081f, 0.00130f, 0.00104f, 0.00081f, 0.00064f, 0.00104f,
+    0.00081f, 0.00064f, 0.00050f, 0.00081f, 0.00061f, 0.00050f, 0.00038f, 0.00061f, 0.00045f, 0.00038f, 0.00028f,
+    0.00045f, 0.00031f, 0.00028f, 0.00020f, 0.00031f, 0.00021f, 0.00020f, 0.00013f, 0.00021f, 0.00013f, 0.00013f,
+    0.00008f, 0.00013f, 0.00007f, 0.00008f, 0.00005f, 0.00007f, 0.00003f, 0.00005f, 0.00002f, 0.00003f, 0.00001f,
+    0.00002f, 0.00001f
+};
+static const float4 KH_DOME_LUT[768] = {
+    0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f,
+    0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f,
+    0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f,
+    0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f,
+    0.00000f, 0.00001f, 0.00000f, 0.00002f, 0.00001f, 0.00005f, 0.00002f, 0.00009f, 0.00005f, 0.00019f, 0.00009f,
+    0.00029f, 0.00019f, 0.00418f, 0.00029f, 0.00460f, 0.00418f, 0.04736f, 0.00460f, 0.04779f, 0.04736f, 0.12132f,
+    0.04779f, 0.12168f, 0.12132f, 0.20639f, 0.12168f, 0.20667f, 0.20639f, 0.28961f, 0.20667f, 0.28981f, 0.28961f,
+    0.36307f, 0.28981f, 0.36320f, 0.36307f, 0.42237f, 0.36320f, 0.42244f, 0.42237f, 0.46539f, 0.42244f, 0.46543f,
+    0.46539f, 0.49134f, 0.46543f, 0.49135f, 0.49134f, 0.50000f, 0.49135f, 0.50000f, 0.50000f, 0.50866f, 0.50000f,
+    0.50865f, 0.50866f, 0.53461f, 0.50865f, 0.53457f, 0.53461f, 0.57763f, 0.53457f, 0.57756f, 0.57763f, 0.63693f,
+    0.57756f, 0.63680f, 0.63693f, 0.71039f, 0.63680f, 0.71019f, 0.71039f, 0.79361f, 0.71019f, 0.79333f, 0.79361f,
+    0.87868f, 0.79333f, 0.87832f, 0.87868f, 0.95264f, 0.87832f, 0.95221f, 0.95264f, 0.99582f, 0.95221f, 0.99540f,
+    0.99582f, 0.99981f, 0.99540f, 0.99971f, 0.99981f, 0.99995f, 0.99971f, 0.99991f, 0.99995f, 0.99999f, 0.99991f,
+    0.99998f, 0.99999f, 1.00000f, 0.99998f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f,
+    1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f,
+    1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f,
+    1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f,
+    1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f,
+    0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f,
+    0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f,
+    0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f,
+    0.00001f, 0.00000f, 0.00000f, 0.00001f, 0.00005f, 0.00000f, 0.00002f, 0.00005f, 0.00015f, 0.00002f, 0.00009f,
+    0.00015f, 0.00033f, 0.00009f, 0.00029f, 0.00033f, 0.00079f, 0.00029f, 0.00460f, 0.00079f, 0.00634f, 0.00460f,
+    0.04779f, 0.00634f, 0.04962f, 0.04779f, 0.12168f, 0.04962f, 0.12320f, 0.12168f, 0.20667f, 0.12320f, 0.20783f,
+    0.20667f, 0.28981f, 0.20783f, 0.29063f, 0.28981f, 0.36320f, 0.29063f, 0.36372f, 0.36320f, 0.42244f, 0.36372f,
+    0.42274f, 0.42244f, 0.46543f, 0.42274f, 0.46556f, 0.46543f, 0.49135f, 0.46556f, 0.49138f, 0.49135f, 0.50000f,
+    0.49138f, 0.50000f, 0.50000f, 0.50865f, 0.50000f, 0.50862f, 0.50865f, 0.53457f, 0.50862f, 0.53444f, 0.53457f,
+    0.57756f, 0.53444f, 0.57726f, 0.57756f, 0.63680f, 0.57726f, 0.63628f, 0.63680f, 0.71019f, 0.63628f, 0.70937f,
+    0.71019f, 0.79333f, 0.70937f, 0.79217f, 0.79333f, 0.87832f, 0.79217f, 0.87680f, 0.87832f, 0.95221f, 0.87680f,
+    0.95038f, 0.95221f, 0.99540f, 0.95038f, 0.99366f, 0.99540f, 0.99971f, 0.99366f, 0.99921f, 0.99971f, 0.99991f,
+    0.99921f, 0.99967f, 0.99991f, 0.99998f, 0.99967f, 0.99985f, 0.99998f, 1.00000f, 0.99985f, 0.99995f, 1.00000f,
+    1.00000f, 0.99995f, 0.99999f, 1.00000f, 1.00000f, 0.99999f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f,
+    1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f,
+    1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f,
+    1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 0.00000f,
+    0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f,
+    0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f,
+    0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00004f, 0.00000f, 0.00000f,
+    0.00004f, 0.00013f, 0.00000f, 0.00001f, 0.00013f, 0.00026f, 0.00001f, 0.00005f, 0.00026f, 0.00044f, 0.00005f,
+    0.00015f, 0.00044f, 0.00071f, 0.00015f, 0.00033f, 0.00071f, 0.00119f, 0.00033f, 0.00079f, 0.00119f, 0.00243f,
+    0.00079f, 0.00634f, 0.00243f, 0.01093f, 0.00634f, 0.04962f, 0.01093f, 0.05462f, 0.04962f, 0.12320f, 0.05462f,
+    0.12742f, 0.12320f, 0.20783f, 0.12742f, 0.21107f, 0.20783f, 0.29063f, 0.21107f, 0.29294f, 0.29063f, 0.36372f,
+    0.29294f, 0.36522f, 0.36372f, 0.42274f, 0.36522f, 0.42358f, 0.42274f, 0.46556f, 0.42358f, 0.46594f, 0.46556f,
+    0.49138f, 0.46594f, 0.49148f, 0.49138f, 0.50000f, 0.49148f, 0.50000f, 0.50000f, 0.50862f, 0.50000f, 0.50852f,
+    0.50862f, 0.53444f, 0.50852f, 0.53406f, 0.53444f, 0.57726f, 0.53406f, 0.57642f, 0.57726f, 0.63628f, 0.57642f,
+    0.63478f, 0.63628f, 0.70937f, 0.63478f, 0.70706f, 0.70937f, 0.79217f, 0.70706f, 0.78893f, 0.79217f, 0.87680f,
+    0.78893f, 0.87258f, 0.87680f, 0.95038f, 0.87258f, 0.94538f, 0.95038f, 0.99366f, 0.94538f, 0.98907f, 0.99366f,
+    0.99921f, 0.98907f, 0.99757f, 0.99921f, 0.99967f, 0.99757f, 0.99881f, 0.99967f, 0.99985f, 0.99881f, 0.99929f,
+    0.99985f, 0.99995f, 0.99929f, 0.99956f, 0.99995f, 0.99999f, 0.99956f, 0.99974f, 0.99999f, 1.00000f, 0.99974f,
+    0.99987f, 1.00000f, 1.00000f, 0.99987f, 0.99996f, 1.00000f, 1.00000f, 0.99996f, 1.00000f, 1.00000f, 1.00000f,
+    1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f,
+    1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f,
+    1.00000f, 1.00000f, 1.00000f, 1.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f,
+    0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00000f, 0.00001f, 0.00000f, 0.00000f,
+    0.00001f, 0.00011f, 0.00000f, 0.00000f, 0.00011f, 0.00024f, 0.00000f, 0.00000f, 0.00024f, 0.00036f, 0.00000f,
+    0.00004f, 0.00036f, 0.00048f, 0.00004f, 0.00013f, 0.00048f, 0.00066f, 0.00013f, 0.00026f, 0.00066f, 0.00094f,
+    0.00026f, 0.00044f, 0.00094f, 0.00140f, 0.00044f, 0.00071f, 0.00140f, 0.00217f, 0.00071f, 0.00119f, 0.00217f,
+    0.00365f, 0.00119f, 0.00243f, 0.00365f, 0.00724f, 0.00243f, 0.01093f, 0.00724f, 0.02143f, 0.01093f, 0.05462f,
+    0.02143f, 0.06645f, 0.05462f, 0.12742f, 0.06645f, 0.13763f, 0.12742f, 0.21107f, 0.13763f, 0.21901f, 0.21107f,
+    0.29294f, 0.21901f, 0.29862f, 0.29294f, 0.36522f, 0.29862f, 0.36891f, 0.36522f, 0.42358f, 0.36891f, 0.42567f,
+    0.42358f, 0.46594f, 0.42567f, 0.46687f, 0.46594f, 0.49148f, 0.46687f, 0.49171f, 0.49148f, 0.50000f, 0.49171f,
+    0.50000f, 0.50000f, 0.50852f, 0.50000f, 0.50829f, 0.50852f, 0.53406f, 0.50829f, 0.53313f, 0.53406f, 0.57642f,
+    0.53313f, 0.57433f, 0.57642f, 0.63478f, 0.57433f, 0.63109f, 0.63478f, 0.70706f, 0.63109f, 0.70138f, 0.70706f,
+    0.78893f, 0.70138f, 0.78099f, 0.78893f, 0.87258f, 0.78099f, 0.86237f, 0.87258f, 0.94538f, 0.86237f, 0.93355f,
+    0.94538f, 0.98907f, 0.93355f, 0.97857f, 0.98907f, 0.99757f, 0.97857f, 0.99276f, 0.99757f, 0.99881f, 0.99276f,
+    0.99635f, 0.99881f, 0.99929f, 0.99635f, 0.99783f, 0.99929f, 0.99956f, 0.99783f, 0.99860f, 0.99956f, 0.99974f,
+    0.99860f, 0.99906f, 0.99974f, 0.99987f, 0.99906f, 0.99934f, 0.99987f, 0.99996f, 0.99934f, 0.99952f, 0.99996f,
+    1.00000f, 0.99952f, 0.99964f, 1.00000f, 1.00000f, 0.99964f, 0.99976f, 1.00000f, 1.00000f, 0.99976f, 0.99989f,
+    1.00000f, 1.00000f, 0.99989f, 0.99999f, 1.00000f, 1.00000f, 0.99999f, 1.00000f, 1.00000f, 1.00000f, 1.00000f,
+    1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 1.00000f, 0.00000f, 0.00000f,
+    0.00000f, 0.00002f, 0.00000f, 0.00000f, 0.00002f, 0.00017f, 0.00000f, 0.00000f, 0.00017f, 0.00026f, 0.00000f,
+    0.00001f, 0.00026f, 0.00031f, 0.00001f, 0.00011f, 0.00031f, 0.00044f, 0.00011f, 0.00024f, 0.00044f, 0.00063f,
+    0.00024f, 0.00036f, 0.00063f, 0.00090f, 0.00036f, 0.00048f, 0.00090f, 0.00128f, 0.00048f, 0.00066f, 0.00128f,
+    0.00184f, 0.00066f, 0.00094f, 0.00184f, 0.00269f, 0.00094f, 0.00140f, 0.00269f, 0.00404f, 0.00140f, 0.00217f,
+    0.00404f, 0.00629f, 0.00217f, 0.00365f, 0.00629f, 0.01047f, 0.00365f, 0.00724f, 0.01047f, 0.01948f, 0.00724f,
+    0.02143f, 0.01948f, 0.04220f, 0.02143f, 0.06645f, 0.04220f, 0.08989f, 0.06645f, 0.13763f, 0.08989f, 0.15843f,
+    0.13763f, 0.21901f, 0.15843f, 0.23543f, 0.21901f, 0.29862f, 0.23543f, 0.31045f, 0.29862f, 0.36891f, 0.31045f,
+    0.37662f, 0.36891f, 0.42567f, 0.37662f, 0.43005f, 0.42567f, 0.46687f, 0.43005f, 0.46882f, 0.46687f, 0.49171f,
+    0.46882f, 0.49220f, 0.49171f, 0.50000f, 0.49220f, 0.50000f, 0.50000f, 0.50829f, 0.50000f, 0.50780f, 0.50829f,
+    0.53313f, 0.50780f, 0.53118f, 0.53313f, 0.57433f, 0.53118f, 0.56995f, 0.57433f, 0.63109f, 0.56995f, 0.62338f,
+    0.63109f, 0.70138f, 0.62338f, 0.68955f, 0.70138f, 0.78099f, 0.68955f, 0.76457f, 0.78099f, 0.86237f, 0.76457f,
+    0.84157f, 0.86237f, 0.93355f, 0.84157f, 0.91011f, 0.93355f, 0.97857f, 0.91011f, 0.95780f, 0.97857f, 0.99276f,
+    0.95780f, 0.98052f, 0.99276f, 0.99635f, 0.98052f, 0.98953f, 0.99635f, 0.99783f, 0.98953f, 0.99371f, 0.99783f,
+    0.99860f, 0.99371f, 0.99596f, 0.99860f, 0.99906f, 0.99596f, 0.99731f, 0.99906f, 0.99934f, 0.99731f, 0.99816f,
+    0.99934f, 0.99952f, 0.99816f, 0.99872f, 0.99952f, 0.99964f, 0.99872f, 0.99910f, 0.99964f, 0.99976f, 0.99910f,
+    0.99937f, 0.99976f, 0.99989f, 0.99937f, 0.99956f, 0.99989f, 0.99999f, 0.99956f, 0.99969f, 0.99999f, 1.00000f,
+    0.99969f, 0.99974f, 1.00000f, 1.00000f, 0.99974f, 0.99983f, 1.00000f, 1.00000f, 0.99983f, 0.99998f, 1.00000f,
+    1.00000f, 0.99998f, 1.00000f, 0.00000f, 0.00002f, 0.00000f, 0.00001f, 0.00002f, 0.00017f, 0.00001f, 0.00015f,
+    0.00017f, 0.00026f, 0.00015f, 0.00034f, 0.00026f, 0.00031f, 0.00034f, 0.00060f, 0.00031f, 0.00044f, 0.00060f,
+    0.00097f, 0.00044f, 0.00063f, 0.00097f, 0.00150f, 0.00063f, 0.00090f, 0.00150f, 0.00225f, 0.00090f, 0.00128f,
+    0.00225f, 0.00331f, 0.00128f, 0.00184f, 0.00331f, 0.00487f, 0.00184f, 0.00269f, 0.00487f, 0.00720f, 0.00269f,
+    0.00404f, 0.00720f, 0.01080f, 0.00404f, 0.00629f, 0.01080f, 0.01664f, 0.00629f, 0.01047f, 0.01664f, 0.02664f,
+    0.01047f, 0.01948f, 0.02664f, 0.04477f, 0.01948f, 0.04220f, 0.04477f, 0.07735f, 0.04220f, 0.08989f, 0.07735f,
+    0.12819f, 0.08989f, 0.15843f, 0.12819f, 0.19303f, 0.15843f, 0.23543f, 0.19303f, 0.26317f, 0.23543f, 0.31045f,
+    0.26317f, 0.33063f, 0.31045f, 0.37662f, 0.33063f, 0.38985f, 0.37662f, 0.43005f, 0.38985f, 0.43757f, 0.43005f,
+    0.46882f, 0.43757f, 0.47218f, 0.46882f, 0.49220f, 0.47218f, 0.49304f, 0.49220f, 0.50000f, 0.49304f, 0.50000f,
+    0.50000f, 0.50780f, 0.50000f, 0.50696f, 0.50780f, 0.53118f, 0.50696f, 0.52782f, 0.53118f, 0.56995f, 0.52782f,
+    0.56243f, 0.56995f, 0.62338f, 0.56243f, 0.61015f, 0.62338f, 0.68955f, 0.61015f, 0.66937f, 0.68955f, 0.76457f,
+    0.66937f, 0.73683f, 0.76457f, 0.84157f, 0.73683f, 0.80697f, 0.84157f, 0.91011f, 0.80697f, 0.87181f, 0.91011f,
+    0.95780f, 0.87181f, 0.92265f, 0.95780f, 0.98052f, 0.92265f, 0.95523f, 0.98052f, 0.98953f, 0.95523f, 0.97336f,
+    0.98953f, 0.99371f, 0.97336f, 0.98336f, 0.99371f, 0.99596f, 0.98336f, 0.98920f, 0.99596f, 0.99731f, 0.98920f,
+    0.99280f, 0.99731f, 0.99816f, 0.99280f, 0.99513f, 0.99816f, 0.99872f, 0.99513f, 0.99669f, 0.99872f, 0.99910f,
+    0.99669f, 0.99775f, 0.99910f, 0.99937f, 0.99775f, 0.99850f, 0.99937f, 0.99956f, 0.99850f, 0.99903f, 0.99956f,
+    0.99969f, 0.99903f, 0.99940f, 0.99969f, 0.99974f, 0.99940f, 0.99966f, 0.99974f, 0.99983f, 0.99966f, 0.99985f,
+    0.99983f, 0.99998f, 0.99985f, 0.99999f, 0.99998f, 1.00000f, 0.99999f, 1.00000f, 0.00000f, 0.00001f, 0.00003f,
+    0.00021f, 0.00001f, 0.00015f, 0.00021f, 0.00054f, 0.00015f, 0.00034f, 0.00054f, 0.00103f, 0.00034f, 0.00060f,
+    0.00103f, 0.00172f, 0.00060f, 0.00097f, 0.00172f, 0.00269f, 0.00097f, 0.00150f, 0.00269f, 0.00404f, 0.00150f,
+    0.00225f, 0.00404f, 0.00593f, 0.00225f, 0.00331f, 0.00593f, 0.00862f, 0.00331f, 0.00487f, 0.00862f, 0.01247f,
+    0.00487f, 0.00720f, 0.01247f, 0.01807f, 0.00720f, 0.01080f, 0.01807f, 0.02638f, 0.01080f, 0.01664f, 0.02638f,
+    0.03894f, 0.01664f, 0.02664f, 0.03894f, 0.05811f, 0.02664f, 0.04477f, 0.05811f, 0.08692f, 0.04477f, 0.07735f,
+    0.08692f, 0.12778f, 0.07735f, 0.12819f, 0.12778f, 0.18010f, 0.12819f, 0.19303f, 0.18010f, 0.23973f, 0.19303f,
+    0.26317f, 0.23973f, 0.30087f, 0.26317f, 0.33063f, 0.30087f, 0.35824f, 0.33063f, 0.38985f, 0.35824f, 0.40802f,
+    0.38985f, 0.43757f, 0.40802f, 0.44792f, 0.43757f, 0.47218f, 0.44792f, 0.47680f, 0.47218f, 0.49304f, 0.47680f,
+    0.49420f, 0.49304f, 0.50000f, 0.49420f, 0.50000f, 0.50000f, 0.50696f, 0.50000f, 0.50580f, 0.50696f, 0.52782f,
+    0.50580f, 0.52320f, 0.52782f, 0.56243f, 0.52320f, 0.55208f, 0.56243f, 0.61015f, 0.55208f, 0.59198f, 0.61015f,
+    0.66937f, 0.59198f, 0.64176f, 0.66937f, 0.73683f, 0.64176f, 0.69913f, 0.73683f, 0.80697f, 0.69913f, 0.76027f,
+    0.80697f, 0.87181f, 0.76027f, 0.81990f, 0.87181f, 0.92265f, 0.81990f, 0.87222f, 0.92265f, 0.95523f, 0.87222f,
+    0.91308f, 0.95523f, 0.97336f, 0.91308f, 0.94189f, 0.97336f, 0.98336f, 0.94189f, 0.96106f, 0.98336f, 0.98920f,
+    0.96106f, 0.97362f, 0.98920f, 0.99280f, 0.97362f, 0.98193f, 0.99280f, 0.99513f, 0.98193f, 0.98753f, 0.99513f,
+    0.99669f, 0.98753f, 0.99138f, 0.99669f, 0.99775f, 0.99138f, 0.99407f, 0.99775f, 0.99850f, 0.99407f, 0.99596f,
+    0.99850f, 0.99903f, 0.99596f, 0.99731f, 0.99903f, 0.99940f, 0.99731f, 0.99828f, 0.99940f, 0.99966f, 0.99828f,
+    0.99897f, 0.99966f, 0.99985f, 0.99897f, 0.99946f, 0.99985f, 0.99999f, 0.99946f, 0.99979f, 0.99999f, 1.00000f,
+    0.99979f, 0.99997f, 0.00003f, 0.00021f, 0.00002f, 0.00053f, 0.00021f, 0.00054f, 0.00053f, 0.00133f, 0.00054f,
+    0.00103f, 0.00133f, 0.00250f, 0.00103f, 0.00172f, 0.00250f, 0.00415f, 0.00172f, 0.00269f, 0.00415f, 0.00643f,
+    0.00269f, 0.00404f, 0.00643f, 0.00957f, 0.00404f, 0.00593f, 0.00957f, 0.01389f, 0.00593f, 0.00862f, 0.01389f,
+    0.01986f, 0.00862f, 0.01247f, 0.01986f, 0.02811f, 0.01247f, 0.01807f, 0.02811f, 0.03955f, 0.01807f, 0.02638f,
+    0.03955f, 0.05538f, 0.02638f, 0.03894f, 0.05538f, 0.07706f, 0.03894f, 0.05811f, 0.07706f, 0.10606f, 0.05811f,
+    0.08692f, 0.10606f, 0.14323f, 0.08692f, 0.12778f, 0.14323f, 0.18808f, 0.12778f, 0.18010f, 0.18808f, 0.23842f,
+    0.18010f, 0.23973f, 0.23842f, 0.29087f, 0.23973f, 0.30087f, 0.29087f, 0.34180f, 0.30087f, 0.35824f, 0.34180f,
+    0.38813f, 0.35824f, 0.40802f, 0.38813f, 0.42768f, 0.40802f, 0.44792f, 0.42768f, 0.45913f, 0.44792f, 0.47680f,
+    0.45913f, 0.48180f, 0.47680f, 0.49420f, 0.48180f, 0.49545f, 0.49420f, 0.50000f, 0.49545f, 0.50000f, 0.50000f,
+    0.50580f, 0.50000f, 0.50455f, 0.50580f, 0.52320f, 0.50455f, 0.51820f, 0.52320f, 0.55208f, 0.51820f, 0.54087f,
+    0.55208f, 0.59198f, 0.54087f, 0.57232f, 0.59198f, 0.64176f, 0.57232f, 0.61187f, 0.64176f, 0.69913f, 0.61187f,
+    0.65820f, 0.69913f, 0.76027f, 0.65820f, 0.70913f, 0.76027f, 0.81990f, 0.70913f, 0.76158f, 0.81990f, 0.87222f,
+    0.76158f, 0.81192f, 0.87222f, 0.91308f, 0.81192f, 0.85677f, 0.91308f, 0.94189f, 0.85677f, 0.89394f, 0.94189f,
+    0.96106f, 0.89394f, 0.92294f, 0.96106f, 0.97362f, 0.92294f, 0.94462f, 0.97362f, 0.98193f, 0.94462f, 0.96045f,
+    0.98193f, 0.98753f, 0.96045f, 0.97189f, 0.98753f, 0.99138f, 0.97189f, 0.98014f, 0.99138f, 0.99407f, 0.98014f,
+    0.98611f, 0.99407f, 0.99596f, 0.98611f, 0.99043f, 0.99596f, 0.99731f, 0.99043f, 0.99357f, 0.99731f, 0.99828f,
+    0.99357f, 0.99585f, 0.99828f, 0.99897f, 0.99585f, 0.99750f, 0.99897f, 0.99946f, 0.99750f, 0.99867f, 0.99946f,
+    0.99979f, 0.99867f, 0.99947f, 0.99979f, 0.99997f, 0.99947f, 0.99998f, 0.00002f, 0.00053f, 0.00004f, 0.00119f,
+    0.00053f, 0.00133f, 0.00119f, 0.00301f, 0.00133f, 0.00250f, 0.00301f, 0.00559f, 0.00250f, 0.00415f, 0.00559f,
+    0.00917f, 0.00415f, 0.00643f, 0.00917f, 0.01402f, 0.00643f, 0.00957f, 0.01402f, 0.02052f, 0.00957f, 0.01389f,
+    0.02052f, 0.02917f, 0.01389f, 0.01986f, 0.02917f, 0.04058f, 0.01986f, 0.02811f, 0.04058f, 0.05551f, 0.02811f,
+    0.03955f, 0.05551f, 0.07476f, 0.03955f, 0.05538f, 0.07476f, 0.09911f, 0.05538f, 0.07706f, 0.09911f, 0.12910f,
+    0.07706f, 0.10606f, 0.12910f, 0.16470f, 0.10606f, 0.14323f, 0.16470f, 0.20516f, 0.14323f, 0.18808f, 0.20516f,
+    0.24892f, 0.18808f, 0.23842f, 0.24892f, 0.29389f, 0.23842f, 0.29087f, 0.29389f, 0.33780f, 0.29087f, 0.34180f,
+    0.33780f, 0.37861f, 0.34180f, 0.38813f, 0.37861f, 0.41474f, 0.38813f, 0.42768f, 0.41474f, 0.44508f, 0.42768f,
+    0.45913f, 0.44508f, 0.46902f, 0.45913f, 0.48180f, 0.46902f, 0.48621f, 0.48180f, 0.49545f, 0.48621f, 0.49655f,
+    0.49545f, 0.50000f, 0.49655f, 0.50000f, 0.50000f, 0.50455f, 0.50000f, 0.50345f, 0.50455f, 0.51820f, 0.50345f,
+    0.51379f, 0.51820f, 0.54087f, 0.51379f, 0.53098f, 0.54087f, 0.57232f, 0.53098f, 0.55492f, 0.57232f, 0.61187f,
+    0.55492f, 0.58526f, 0.61187f, 0.65820f, 0.58526f, 0.62139f, 0.65820f, 0.70913f, 0.62139f, 0.66220f, 0.70913f,
+    0.76158f, 0.66220f, 0.70611f, 0.76158f, 0.81192f, 0.70611f, 0.75108f, 0.81192f, 0.85677f, 0.75108f, 0.79484f,
+    0.85677f, 0.89394f, 0.79484f, 0.83530f, 0.89394f, 0.92294f, 0.83530f, 0.87090f, 0.92294f, 0.94462f, 0.87090f,
+    0.90089f, 0.94462f, 0.96045f, 0.90089f, 0.92524f, 0.96045f, 0.97189f, 0.92524f, 0.94449f, 0.97189f, 0.98014f,
+    0.94449f, 0.95942f, 0.98014f, 0.98611f, 0.95942f, 0.97083f, 0.98611f, 0.99043f, 0.97083f, 0.97948f, 0.99043f,
+    0.99357f, 0.97948f, 0.98598f, 0.99357f, 0.99585f, 0.98598f, 0.99083f, 0.99585f, 0.99750f, 0.99083f, 0.99441f,
+    0.99750f, 0.99867f, 0.99441f, 0.99699f, 0.99867f, 0.99947f, 0.99699f, 0.99881f, 0.99947f, 0.99998f, 0.99881f,
+    0.99996f, 0.00004f, 0.00119f, 0.00009f, 0.00255f, 0.00119f, 0.00301f, 0.00255f, 0.00631f, 0.00301f, 0.00559f,
+    0.00631f, 0.01155f, 0.00559f, 0.00917f, 0.01155f, 0.01855f, 0.00917f, 0.01402f, 0.01855f, 0.02771f, 0.01402f,
+    0.02052f, 0.02771f, 0.03947f, 0.02052f, 0.02917f, 0.03947f, 0.05430f, 0.02917f, 0.04058f, 0.05430f, 0.07270f,
+    0.04058f, 0.05551f, 0.07270f, 0.09508f, 0.05551f, 0.07476f, 0.09508f, 0.12165f, 0.07476f, 0.09911f, 0.12165f,
+    0.15236f, 0.09911f, 0.12910f, 0.15236f, 0.18676f, 0.12910f, 0.16470f, 0.18676f, 0.22401f, 0.16470f, 0.20516f,
+    0.22401f, 0.26290f, 0.20516f, 0.24892f, 0.26290f, 0.30204f, 0.24892f, 0.29389f, 0.30204f, 0.34000f, 0.29389f,
+    0.33780f, 0.34000f, 0.37552f, 0.33780f, 0.37861f, 0.37552f, 0.40757f, 0.37861f, 0.41474f, 0.40757f, 0.43539f,
+    0.41474f, 0.44508f, 0.43539f, 0.45850f, 0.44508f, 0.46902f, 0.45850f, 0.47661f, 0.46902f, 0.48621f, 0.47661f,
+    0.48960f, 0.48621f, 0.49655f, 0.48960f, 0.49740f, 0.49655f, 0.50000f, 0.49740f, 0.50000f, 0.50000f, 0.50345f,
+    0.50000f, 0.50260f, 0.50345f, 0.51379f, 0.50260f, 0.51040f, 0.51379f, 0.53098f, 0.51040f, 0.52339f, 0.53098f,
+    0.55492f, 0.52339f, 0.54150f, 0.55492f, 0.58526f, 0.54150f, 0.56461f, 0.58526f, 0.62139f, 0.56461f, 0.59243f,
+    0.62139f, 0.66220f, 0.59243f, 0.62448f, 0.66220f, 0.70611f, 0.62448f, 0.66000f, 0.70611f, 0.75108f, 0.66000f,
+    0.69796f, 0.75108f, 0.79484f, 0.69796f, 0.73710f, 0.79484f, 0.83530f, 0.73710f, 0.77599f, 0.83530f, 0.87090f,
+    0.77599f, 0.81324f, 0.87090f, 0.90089f, 0.81324f, 0.84764f, 0.90089f, 0.92524f, 0.84764f, 0.87835f, 0.92524f,
+    0.94449f, 0.87835f, 0.90492f, 0.94449f, 0.95942f, 0.90492f, 0.92730f, 0.95942f, 0.97083f, 0.92730f, 0.94570f,
+    0.97083f, 0.97948f, 0.94570f, 0.96053f, 0.97948f, 0.98598f, 0.96053f, 0.97229f, 0.98598f, 0.99083f, 0.97229f,
+    0.98145f, 0.99083f, 0.99441f, 0.98145f, 0.98845f, 0.99441f, 0.99699f, 0.98845f, 0.99369f, 0.99699f, 0.99881f,
+    0.99369f, 0.99745f, 0.99881f, 0.99996f, 0.99745f, 0.99991f, 0.00009f, 0.00255f, 0.00018f, 0.00507f, 0.00255f,
+    0.00631f, 0.00507f, 0.01225f, 0.00631f, 0.01155f, 0.01225f, 0.02180f, 0.01155f, 0.01855f, 0.02180f, 0.03399f,
+    0.01855f, 0.02771f, 0.03399f, 0.04909f, 0.02771f, 0.03947f, 0.04909f, 0.06736f, 0.03947f, 0.05430f, 0.06736f,
+    0.08896f, 0.05430f, 0.07270f, 0.08896f, 0.11392f, 0.07270f, 0.09508f, 0.11392f, 0.14206f, 0.09508f, 0.12165f,
+    0.14206f, 0.17301f, 0.12165f, 0.15236f, 0.17301f, 0.20617f, 0.15236f, 0.18676f, 0.20617f, 0.24075f, 0.18676f,
+    0.22401f, 0.24075f, 0.27584f, 0.22401f, 0.26290f, 0.27584f, 0.31049f, 0.26290f, 0.30204f, 0.31049f, 0.34381f,
+    0.30204f, 0.34000f, 0.34381f, 0.37501f, 0.34000f, 0.37552f, 0.37501f, 0.40345f, 0.37552f, 0.40757f, 0.40345f,
+    0.42864f, 0.40757f, 0.43539f, 0.42864f, 0.45027f, 0.43539f, 0.45850f, 0.45027f, 0.46811f, 0.45850f, 0.47661f,
+    0.46811f, 0.48204f, 0.47661f, 0.48960f, 0.48204f, 0.49202f, 0.48960f, 0.49740f, 0.49202f, 0.49800f, 0.49740f,
+    0.50000f, 0.49800f, 0.50000f, 0.50000f, 0.50260f, 0.50000f, 0.50200f, 0.50260f, 0.51040f, 0.50200f, 0.50798f,
+    0.51040f, 0.52339f, 0.50798f, 0.51796f, 0.52339f, 0.54150f, 0.51796f, 0.53189f, 0.54150f, 0.56461f, 0.53189f,
+    0.54973f, 0.56461f, 0.59243f, 0.54973f, 0.57136f, 0.59243f, 0.62448f, 0.57136f, 0.59655f, 0.62448f, 0.66000f,
+    0.59655f, 0.62499f, 0.66000f, 0.69796f, 0.62499f, 0.65619f, 0.69796f, 0.73710f, 0.65619f, 0.68951f, 0.73710f,
+    0.77599f, 0.68951f, 0.72416f, 0.77599f, 0.81324f, 0.72416f, 0.75925f, 0.81324f, 0.84764f, 0.75925f, 0.79383f,
+    0.84764f, 0.87835f, 0.79383f, 0.82699f, 0.87835f, 0.90492f, 0.82699f, 0.85794f, 0.90492f, 0.92730f, 0.85794f,
+    0.88608f, 0.92730f, 0.94570f, 0.88608f, 0.91104f, 0.94570f, 0.96053f, 0.91104f, 0.93264f, 0.96053f, 0.97229f,
+    0.93264f, 0.95091f, 0.97229f, 0.98145f, 0.95091f, 0.96601f, 0.98145f, 0.98845f, 0.96601f, 0.97820f, 0.98845f,
+    0.99369f, 0.97820f, 0.98775f, 0.99369f, 0.99745f, 0.98775f, 0.99493f, 0.99745f, 0.99991f, 0.99493f, 0.99982f,
+    0.00018f, 0.00507f, 0.00035f, 0.00935f, 0.00507f, 0.01225f, 0.00935f, 0.02174f, 0.01225f, 0.02180f, 0.02174f,
+    0.03726f, 0.02180f, 0.03399f, 0.03726f, 0.05585f, 0.03399f, 0.04909f, 0.05585f, 0.07746f, 0.04909f, 0.06736f,
+    0.07746f, 0.10192f, 0.06736f, 0.08896f, 0.10192f, 0.12896f, 0.08896f, 0.11392f, 0.12896f, 0.15818f, 0.11392f,
+    0.14206f, 0.15818f, 0.18907f, 0.14206f, 0.17301f, 0.18907f, 0.22103f, 0.17301f, 0.20617f, 0.22103f, 0.25342f,
+    0.20617f, 0.24075f, 0.25342f, 0.28557f, 0.24075f, 0.27584f, 0.28557f, 0.31686f, 0.27584f, 0.31049f, 0.31686f,
+    0.34671f, 0.31049f, 0.34381f, 0.34671f, 0.37465f, 0.34381f, 0.37501f, 0.37465f, 0.40027f, 0.37501f, 0.40345f,
+    0.40027f, 0.42327f, 0.40345f, 0.42864f, 0.42327f, 0.44345f, 0.42864f, 0.45027f, 0.44345f, 0.46065f, 0.45027f,
+    0.46811f, 0.46065f, 0.47479f, 0.46811f, 0.48204f, 0.47479f, 0.48581f, 0.48204f, 0.49202f, 0.48581f, 0.49369f,
+    0.49202f, 0.49800f, 0.49369f, 0.49842f, 0.49800f, 0.50000f, 0.49842f, 0.50000f, 0.50000f, 0.50200f, 0.50000f,
+    0.50158f, 0.50200f, 0.50798f, 0.50158f, 0.50631f, 0.50798f, 0.51796f, 0.50631f, 0.51419f, 0.51796f, 0.53189f,
+    0.51419f, 0.52521f, 0.53189f, 0.54973f, 0.52521f, 0.53935f, 0.54973f, 0.57136f, 0.53935f, 0.55655f, 0.57136f,
+    0.59655f, 0.55655f, 0.57673f, 0.59655f, 0.62499f, 0.57673f, 0.59973f, 0.62499f, 0.65619f, 0.59973f, 0.62535f,
+    0.65619f, 0.68951f, 0.62535f, 0.65329f, 0.68951f, 0.72416f, 0.65329f, 0.68314f, 0.72416f, 0.75925f, 0.68314f,
+    0.71443f, 0.75925f, 0.79383f, 0.71443f, 0.74658f, 0.79383f, 0.82699f, 0.74658f, 0.77897f, 0.82699f, 0.85794f,
+    0.77897f, 0.81093f, 0.85794f, 0.88608f, 0.81093f, 0.84182f, 0.88608f, 0.91104f, 0.84182f, 0.87104f, 0.91104f,
+    0.93264f, 0.87104f, 0.89808f, 0.93264f, 0.95091f, 0.89808f, 0.92254f, 0.95091f, 0.96601f, 0.92254f, 0.94415f,
+    0.96601f, 0.97820f, 0.94415f, 0.96274f, 0.97820f, 0.98775f, 0.96274f, 0.97826f, 0.98775f, 0.99493f, 0.97826f,
+    0.99065f, 0.99493f, 0.99982f, 0.99065f, 0.99965f, 0.00035f, 0.00935f, 0.00063f, 0.01579f, 0.00935f, 0.02174f,
+    0.01579f, 0.03495f, 0.02174f, 0.03726f, 0.03495f, 0.05725f, 0.03726f, 0.05585f, 0.05725f, 0.08221f, 0.05585f,
+    0.07746f, 0.08221f, 0.10937f, 0.07746f, 0.10192f, 0.10937f, 0.13826f, 0.10192f, 0.12896f, 0.13826f, 0.16838f,
+    0.12896f, 0.15818f, 0.16838f, 0.19922f, 0.15818f, 0.18907f, 0.19922f, 0.23028f, 0.18907f, 0.22103f, 0.23028f,
+    0.26106f, 0.22103f, 0.25342f, 0.26106f, 0.29111f, 0.25342f, 0.28557f, 0.29111f, 0.32002f, 0.28557f, 0.31686f,
+    0.32002f, 0.34744f, 0.31686f, 0.34671f, 0.34744f, 0.37306f, 0.34671f, 0.37465f, 0.37306f, 0.39666f, 0.37465f,
+    0.40027f, 0.39666f, 0.41806f, 0.40027f, 0.42327f, 0.41806f, 0.43710f, 0.42327f, 0.44345f, 0.43710f, 0.45372f,
+    0.44345f, 0.46065f, 0.45372f, 0.46783f, 0.46065f, 0.47479f, 0.46783f, 0.47940f, 0.47479f, 0.48581f, 0.47940f,
+    0.48841f, 0.48581f, 0.49369f, 0.48841f, 0.49485f, 0.49369f, 0.49842f, 0.49485f, 0.49871f, 0.49842f, 0.50000f,
+    0.49871f, 0.50000f, 0.50000f, 0.50158f, 0.50000f, 0.50129f, 0.50158f, 0.50631f, 0.50129f, 0.50515f, 0.50631f,
+    0.51419f, 0.50515f, 0.51159f, 0.51419f, 0.52521f, 0.51159f, 0.52060f, 0.52521f, 0.53935f, 0.52060f, 0.53217f,
+    0.53935f, 0.55655f, 0.53217f, 0.54628f, 0.55655f, 0.57673f, 0.54628f, 0.56290f, 0.57673f, 0.59973f, 0.56290f,
+    0.58194f, 0.59973f, 0.62535f, 0.58194f, 0.60334f, 0.62535f, 0.65329f, 0.60334f, 0.62694f, 0.65329f, 0.68314f,
+    0.62694f, 0.65256f, 0.68314f, 0.71443f, 0.65256f, 0.67998f, 0.71443f, 0.74658f, 0.67998f, 0.70889f, 0.74658f,
+    0.77897f, 0.70889f, 0.73894f, 0.77897f, 0.81093f, 0.73894f, 0.76972f, 0.81093f, 0.84182f, 0.76972f, 0.80078f,
+    0.84182f, 0.87104f, 0.80078f, 0.83162f, 0.87104f, 0.89808f, 0.83162f, 0.86174f, 0.89808f, 0.92254f, 0.86174f,
+    0.89063f, 0.92254f, 0.94415f, 0.89063f, 0.91779f, 0.94415f, 0.96274f, 0.91779f, 0.94275f, 0.96274f, 0.97826f,
+    0.94275f, 0.96505f, 0.97826f, 0.99065f, 0.96505f, 0.98421f, 0.99065f, 0.99965f, 0.98421f, 0.99937f, 0.00063f,
+    0.01579f, 0.00105f, 0.02419f, 0.01579f, 0.03495f, 0.02419f, 0.05074f, 0.03495f, 0.05725f, 0.05074f, 0.07940f,
+    0.05725f, 0.08221f, 0.07940f, 0.10946f, 0.08221f, 0.10937f, 0.10946f, 0.14034f, 0.10937f, 0.13826f, 0.14034f,
+    0.17157f, 0.13826f, 0.16838f, 0.17157f, 0.20270f, 0.16838f, 0.19922f, 0.20270f, 0.23336f, 0.19922f, 0.23028f,
+    0.23336f, 0.26321f, 0.23028f, 0.26106f, 0.26321f, 0.29197f, 0.26106f, 0.29111f, 0.29197f, 0.31939f, 0.29111f,
+    0.32002f, 0.31939f, 0.34526f, 0.32002f, 0.34744f, 0.34526f, 0.36942f, 0.34744f, 0.37306f, 0.36942f, 0.39173f,
+    0.37306f, 0.39666f, 0.39173f, 0.41209f, 0.39666f, 0.41806f, 0.41209f, 0.43042f, 0.41806f, 0.43710f, 0.43042f,
+    0.44667f, 0.43710f, 0.45372f, 0.44667f, 0.46079f, 0.45372f, 0.46783f, 0.46079f, 0.47275f, 0.46783f, 0.47940f,
+    0.47275f, 0.48256f, 0.47940f, 0.48841f, 0.48256f, 0.49019f, 0.48841f, 0.49485f, 0.49019f, 0.49564f, 0.49485f,
+    0.49871f, 0.49564f, 0.49891f, 0.49871f, 0.50000f, 0.49891f, 0.50000f, 0.50000f, 0.50129f, 0.50000f, 0.50109f,
+    0.50129f, 0.50515f, 0.50109f, 0.50436f, 0.50515f, 0.51159f, 0.50436f, 0.50981f, 0.51159f, 0.52060f, 0.50981f,
+    0.51744f, 0.52060f, 0.53217f, 0.51744f, 0.52725f, 0.53217f, 0.54628f, 0.52725f, 0.53921f, 0.54628f, 0.56290f,
+    0.53921f, 0.55333f, 0.56290f, 0.58194f, 0.55333f, 0.56958f, 0.58194f, 0.60334f, 0.56958f, 0.58791f, 0.60334f,
+    0.62694f, 0.58791f, 0.60827f, 0.62694f, 0.65256f, 0.60827f, 0.63058f, 0.65256f, 0.67998f, 0.63058f, 0.65474f,
+    0.67998f, 0.70889f, 0.65474f, 0.68061f, 0.70889f, 0.73894f, 0.68061f, 0.70803f, 0.73894f, 0.76972f, 0.70803f,
+    0.73679f, 0.76972f, 0.80078f, 0.73679f, 0.76664f, 0.80078f, 0.83162f, 0.76664f, 0.79730f, 0.83162f, 0.86174f,
+    0.79730f, 0.82843f, 0.86174f, 0.89063f, 0.82843f, 0.85966f, 0.89063f, 0.91779f, 0.85966f, 0.89054f, 0.91779f,
+    0.94275f, 0.89054f, 0.92060f, 0.94275f, 0.96505f, 0.92060f, 0.94926f, 0.96505f, 0.98421f, 0.94926f, 0.97581f,
+    0.98421f, 0.99937f, 0.97581f, 0.99895f, 0.00105f, 0.02419f, 0.00161f, 0.03363f, 0.02419f, 0.05074f, 0.03363f,
+    0.06701f, 0.05074f, 0.07940f, 0.06701f, 0.10070f, 0.07940f, 0.10946f, 0.10070f, 0.13416f, 0.10946f, 0.14034f,
+    0.13416f, 0.16703f, 0.14034f, 0.17157f, 0.16703f, 0.19904f, 0.17157f, 0.20270f, 0.19904f, 0.22996f, 0.20270f,
+    0.23336f, 0.22996f, 0.25963f, 0.23336f, 0.26321f, 0.25963f, 0.28789f, 0.26321f, 0.29197f, 0.28789f, 0.31462f,
+    0.29197f, 0.31939f, 0.31462f, 0.33974f, 0.31939f, 0.34526f, 0.33974f, 0.36316f, 0.34526f, 0.36942f, 0.36316f,
+    0.38483f, 0.36942f, 0.39173f, 0.38483f, 0.40470f, 0.39173f, 0.41209f, 0.40470f, 0.42275f, 0.41209f, 0.43042f,
+    0.42275f, 0.43893f, 0.43042f, 0.44667f, 0.43893f, 0.45322f, 0.44667f, 0.46079f, 0.45322f, 0.46562f, 0.46079f,
+    0.47275f, 0.46562f, 0.47612f, 0.47275f, 0.48256f, 0.47612f, 0.48472f, 0.48256f, 0.49019f, 0.48472f, 0.49140f,
+    0.49019f, 0.49564f, 0.49140f, 0.49618f, 0.49564f, 0.49891f, 0.49618f, 0.49904f, 0.49891f, 0.50000f, 0.49904f,
+    0.50000f, 0.50000f, 0.50109f, 0.50000f, 0.50096f, 0.50109f, 0.50436f, 0.50096f, 0.50382f, 0.50436f, 0.50981f,
+    0.50382f, 0.50860f, 0.50981f, 0.51744f, 0.50860f, 0.51528f, 0.51744f, 0.52725f, 0.51528f, 0.52388f, 0.52725f,
+    0.53921f, 0.52388f, 0.53438f, 0.53921f, 0.55333f, 0.53438f, 0.54678f, 0.55333f, 0.56958f, 0.54678f, 0.56107f,
+    0.56958f, 0.58791f, 0.56107f, 0.57725f, 0.58791f, 0.60827f, 0.57725f, 0.59530f, 0.60827f, 0.63058f, 0.59530f,
+    0.61517f, 0.63058f, 0.65474f, 0.61517f, 0.63684f, 0.65474f, 0.68061f, 0.63684f, 0.66026f, 0.68061f, 0.70803f,
+    0.66026f, 0.68538f, 0.70803f, 0.73679f, 0.68538f, 0.71211f, 0.73679f, 0.76664f, 0.71211f, 0.74037f, 0.76664f,
+    0.79730f, 0.74037f, 0.77004f, 0.79730f, 0.82843f, 0.77004f, 0.80096f, 0.82843f, 0.85966f, 0.80096f, 0.83297f,
+    0.85966f, 0.89054f, 0.83297f, 0.86584f, 0.89054f, 0.92060f, 0.86584f, 0.89930f, 0.92060f, 0.94926f, 0.89930f,
+    0.93299f, 0.94926f, 0.97581f, 0.93299f, 0.96637f, 0.97581f, 0.99895f, 0.96637f, 0.99839f, 0.00161f, 0.03363f,
+    0.00225f, 0.04287f, 0.03363f, 0.06701f, 0.04287f, 0.08175f, 0.06701f, 0.10070f, 0.08175f, 0.11891f, 0.10070f,
+    0.13416f, 0.11891f, 0.15434f, 0.13416f, 0.16703f, 0.15434f, 0.18804f, 0.16703f, 0.19904f, 0.18804f, 0.22002f,
+    0.19904f, 0.22996f, 0.22002f, 0.25026f, 0.22996f, 0.25963f, 0.25026f, 0.27878f, 0.25963f, 0.28789f, 0.27878f,
+    0.30557f, 0.28789f, 0.31462f, 0.30557f, 0.33063f, 0.31462f, 0.33974f, 0.33063f, 0.35396f, 0.33974f, 0.36316f,
+    0.35396f, 0.37556f, 0.36316f, 0.38483f, 0.37556f, 0.39544f, 0.38483f, 0.40470f, 0.39544f, 0.41359f, 0.40470f,
+    0.42275f, 0.41359f, 0.43003f, 0.42275f, 0.43893f, 0.43003f, 0.44473f, 0.43893f, 0.45322f, 0.44473f, 0.45768f,
+    0.45322f, 0.46562f, 0.45768f, 0.46891f, 0.46562f, 0.47612f, 0.46891f, 0.47841f, 0.47612f, 0.48472f, 0.47841f,
+    0.48618f, 0.48472f, 0.49140f, 0.48618f, 0.49223f, 0.49140f, 0.49618f, 0.49223f, 0.49655f, 0.49618f, 0.49904f,
+    0.49655f, 0.49914f, 0.49904f, 0.50000f, 0.49914f, 0.50000f, 0.50000f, 0.50096f, 0.50000f, 0.50086f, 0.50096f,
+    0.50382f, 0.50086f, 0.50345f, 0.50382f, 0.50860f, 0.50345f, 0.50777f, 0.50860f, 0.51528f, 0.50777f, 0.51382f,
+    0.51528f, 0.52388f, 0.51382f, 0.52159f, 0.52388f, 0.53438f, 0.52159f, 0.53109f, 0.53438f, 0.54678f, 0.53109f,
+    0.54232f, 0.54678f, 0.56107f, 0.54232f, 0.55527f, 0.56107f, 0.57725f, 0.55527f, 0.56997f, 0.57725f, 0.59530f,
+    0.56997f, 0.58641f, 0.59530f, 0.61517f, 0.58641f, 0.60456f, 0.61517f, 0.63684f, 0.60456f, 0.62444f, 0.63684f,
+    0.66026f, 0.62444f, 0.64604f, 0.66026f, 0.68538f, 0.64604f, 0.66937f, 0.68538f, 0.71211f, 0.66937f, 0.69443f,
+    0.71211f, 0.74037f, 0.69443f, 0.72122f, 0.74037f, 0.77004f, 0.72122f, 0.74974f, 0.77004f, 0.80096f, 0.74974f,
+    0.77998f, 0.80096f, 0.83297f, 0.77998f, 0.81196f, 0.83297f, 0.86584f, 0.81196f, 0.84566f, 0.86584f, 0.89930f,
+    0.84566f, 0.88109f, 0.89930f, 0.93299f, 0.88109f, 0.91825f, 0.93299f, 0.96637f, 0.91825f, 0.95713f, 0.96637f,
+    0.99839f, 0.95713f, 0.99775f
+};
+// KH_ENV_LUT: (A, B) at (N.V, rough), bilinear; every index clamped (NaN reads the first node: saturate).
+float2 KhEnvBrdfLut(float khel_ndv, float khel_rough)
+{
+    const float khel_x = sqrt(saturate((khel_ndv - KH_ENVLUT_NMIN) * (1.0f / (1.0f - KH_ENVLUT_NMIN)))) * 32.0f;
+    const float khel_y = sqrt(saturate((khel_rough - KH_LUT_RMIN) * (1.0f / (1.0f - KH_LUT_RMIN)))) * 16.0f;
+    const int   khel_ix = min((int)khel_x, 31);
+    const int   khel_iy = min((int)khel_y, 15);
+    const float khel_tx = khel_x - (float)khel_ix;
+    const float khel_ty = khel_y - (float)khel_iy;
+    const float4 khel_a = KH_ENVBRDF_LUT[khel_iy * 32 + khel_ix];
+    const float4 khel_b = KH_ENVBRDF_LUT[khel_iy * 32 + 32 + khel_ix];
+    return lerp(lerp(khel_a.xy, khel_a.zw, khel_tx), lerp(khel_b.xy, khel_b.zw, khel_tx), khel_ty);
+}
+// KH_ENV_F82: the F82 integral C at (N.V, rough), bilinear on KhEnvBrdfLut's grid and clamps.
+float KhEnvBrdfC(float khec_ndv, float khec_rough)
+{
+    const float khec_x = sqrt(saturate((khec_ndv - KH_ENVLUT_NMIN) * (1.0f / (1.0f - KH_ENVLUT_NMIN)))) * 32.0f;
+    const float khec_y = sqrt(saturate((khec_rough - KH_LUT_RMIN) * (1.0f / (1.0f - KH_LUT_RMIN)))) * 16.0f;
+    const int   khec_ix = min((int)khec_x, 31);
+    const int   khec_iy = min((int)khec_y, 15);
+    const float4 khec_q = KH_ENVBRDF_C[khec_iy * 32 + khec_ix];
+    return lerp(lerp(khec_q.x, khec_q.y, khec_x - (float)khec_ix), lerp(khec_q.z, khec_q.w, khec_x - (float)khec_ix),
+                khec_y - (float)khec_iy);
+}
+// KH_DOME_LUT: the dome's sky share prefiltered along R at (R.y, rough), bilinear; every index clamped.
+float KhDomeSkyShare(float khdq_ry, float khdq_rough)
+{
+    const float khdq_c = clamp(khdq_ry, -1.0f, 1.0f);
+    const float khdq_u = (khdq_c < 0.0f) ? -sqrt(-khdq_c) : sqrt(khdq_c);
+    const float khdq_x = saturate(0.5f * khdq_u + 0.5f) * 48.0f;
+    const float khdq_y = sqrt(saturate((khdq_rough - KH_LUT_RMIN) * (1.0f / (1.0f - KH_LUT_RMIN)))) * 16.0f;
+    const int   khdq_ix = min((int)khdq_x, 47);
+    const int   khdq_iy = min((int)khdq_y, 15);
+    const float khdq_tx = khdq_x - (float)khdq_ix;
+    const float khdq_ty = khdq_y - (float)khdq_iy;
+    const float4 khdq_q = KH_DOME_LUT[khdq_iy * 48 + khdq_ix];
+    return lerp(lerp(khdq_q.x, khdq_q.y, khdq_tx), lerp(khdq_q.z, khdq_q.w, khdq_tx), khdq_ty);
+}
+
+// KH_AMB_MS: the split-sum ambient's response to a unit radiance, shared by the sky ambient (KhPbrAmbient) and
+// each lamp's ambient (KhDynLightsPBR): returns the specular albedo E, and both callers' diffuse keeps 1 - E
+// (KH_AMB_KD). E is the environment BRDF (F0 * A + B; KH_ENV_LUT, the integral itself) times the
+// multiple-scattering energy compensation (Turquin 2019; Fdez-Aguera 2019): Ess = A + B is the single-scatter
+// albedo of a white (F = 1) lobe, and Fms = 1 + F0 (1 / Ess - 1) gives back what the lobe loses to
+// inter-reflection between microfacets, so a white metal reflects a uniform sky whole at every roughness.
+// KH_MS_DIRECT: Fms belongs to the surface (its roughness, its F0, the view's N.V), not to the ambient: every direct
+// GGX lobe takes it too - the sun's, the overcast lobe's and each lamp's (KhGGXSpec x Fms), as Turquin 2019,
+// Kulla-Conty 2017 and Filament apply it to every light; KhPbrAmbSplitF returns it beside E (priced once per pixel,
+// KH_AMB_E_ONCE). KhGGXSpec itself stays the single-scatter lobe. Ess is 0.307 or more over the table (rough 1,
+// N.V 1), so the 0.25 floor never binds. F0 is held to [0, 1] in Fms, the published form's range: an arma tint
+// above 1 compensates as a white metal does.
+// KH_AMB_MS_REF: the colour term was checked against the Smith microsurface's brute-force multiple scattering
+// (Heitz 2016's random walk) for F0 0.04 - 1, gold and copper, rough 0.25 - 1: Turquin's form is the closest of the
+// published ones on this table. Fdez-Aguera 2019's FmsEms = Ems FssEss Favg / (1 - Favg Ems) reads darker (gold's
+// green at rough 1, head-on: 0.510; the walk 0.584; this form 0.642), and Kulla-Conty's Eavg form (a third table)
+// darker too, most away from head-on. On the height-correlated table (KH_SMITH_HC), for F0 0.04 - 1, gold and copper
+// at rough 0.045 - 1: from rough 0.8 on the F0-linear colour term errs bright head-on (gold's green +0.058 at rough
+// 1); below it E is within -0.018 of the walk for N.V >= 0.2, and reads dark at N.V 0.05 (down to -0.046, a
+// dielectric at rough 0.2).
+float3 KhPbrAmbSplitF(float khms_ndv, float khms_rough, float3 khms_F0, out float3 khms_fmsOut)
+{
+    const float2 khms_AB = KhEnvBrdfLut(khms_ndv, khms_rough);   // KH_ENV_LUT (A, B).
+    // Armed (khFrNK), F0 is the arma tint, and the tint scales the whole of the
+    // conductor curve, the grazing part included - the tint x curve form of the
+    // direct term. KH_ENV_F82: the curve is integrated in Hoffman 2019's F82
+    // form, r + (1 - r)(1 - c)^5 - a c (1 - c)^6: r its head-on value, and a
+    // set so that the form meets the curve at c = 1/7 (82 deg, Hoffman's fit
+    // point) as well. Schlick's form alone (a = 0) misses the curve's dip
+    // below it toward grazing (near 82 deg; a conductor's, and a weak
+    // interface's - N near 1 - whose curve stays far under Schlick's). It
+    // integrates to r A + B - a C (C: KhEnvBrdfC). A branch: khFrNK is per
+    // material. KH_F82_SELECT: the term is kept only where the F82 form is
+    // closer to the curve than Schlick's at c = 1/4 (75.5 deg). A dielectric-
+    // like curve (N about 1.35 - 2.3, small K; fresnel(1.5, 0), the arma
+    // default, among them) lies above Schlick's at mid angles, where the term -
+    // it lowers the form wherever a > 0, as for these - pulls the wrong way: on
+    // its own it made such a material's E worse against the walk (Heitz 2016)
+    // at 2 / 3 of the points sampled. Measured over 198 materials (N 0.15 -
+    // 3.2, K 0 - 7.3): the test picks the form with the lower mean error
+    // against the exact single-scatter integral of the curve for 186 (the 12
+    // misses lose <= 0.0028), and against the walk for 42 of the 45 walked.
+    // No material's mean error exceeds the received tree's (Schlick on its
+    // separable table) on either reference; node by node, 6.7 % of the
+    // single-scatter nodes (by <= 0.053) and 16 % of the walk's (by <= 0.045)
+    // are worse - glossy glancing nodes where that table's under-integration
+    // offset Schlick's overshoot. Of the test points swept (1/7 - 0.4), 1/4
+    // leaves the fewest single-scatter nodes worse. It is uniform per material.
+    const bool   khms_nk = khFrNK.z >= 0.5f;
+    float  khms_f0 = 0.0f;
+    float  khms_c = 0.0f;
+    float  khms_fa = 0.0f;
+    [branch] if (khms_nk) {
+        khms_f0 = KhFresnelNK(1.0f, khFrNK.x, khFrNK.y);
+        const float khms_f82 = KhFresnelNK(0.14285715f, khFrNK.x, khFrNK.y);   // c = 1/7.
+        // a = (Schlick(r) at 1/7 - the curve there) / ((1/7)(6/7)^6); (6/7)^5 = 0.46266437.
+        const float khms_a82 = (khms_f0 + (1.0f - khms_f0) * 0.46266437f - khms_f82) * 17.651385f;
+        // KH_F82_SELECT: the curve, Schlick's form and the F82 form at c = 1/4; (3/4)^5 = 0.2373046875,
+        // (1/4)(3/4)^6 = 0.04449462890625 (both exact in fp32).
+        const float khms_c4 = KhFresnelNK(0.25f, khFrNK.x, khFrNK.y);
+        const float khms_s4 = khms_f0 + (1.0f - khms_f0) * 0.2373046875f;
+        khms_fa = (abs(khms_c4 - (khms_s4 - khms_a82 * 0.04449462890625f)) < abs(khms_c4 - khms_s4)) ? khms_a82 : 0.0f;
+        khms_c = KhEnvBrdfC(khms_ndv, khms_rough);
+    }
+    // KH_ENVBRDF_FLOOR: the table's A, B and C are integrals of non-negative terms (>= 0 at every node, so
+    // between them), but the F82 form dips below zero between grazing and head-on where the curve is near 0
+    // (N near 1, K 0), and a user may pass a negative F0 or tint: E is held to 0 or more.
+    const float3 khms_envBRDF = max(khms_nk ? khms_F0 * (khms_f0 * khms_AB.x + khms_AB.y - khms_fa * khms_c)
+                                            : khms_F0 * khms_AB.x + khms_AB.y, 0.0f);
+    // KH_AMB_MS: the head-on reflectance (the arma model's tint x curve) and the compensation.
+    const float  khms_ess = max(khms_AB.x + khms_AB.y, 0.25f);
+    const float3 khms_F0n = saturate(khms_nk ? khms_F0 * khms_f0 : khms_F0);
+    const float3 khms_Fms = 1.0f + khms_F0n * (1.0f / khms_ess - 1.0f);
+    khms_fmsOut = khms_Fms;   // KH_MS_DIRECT.
+    return khms_envBRDF * khms_Fms;
+}
+// KH_MS_DIRECT: E alone (the public form).
+float3 KhPbrAmbSplit(float khms_ndv, float khms_rough, float3 khms_F0)
+{
+    float3 khms_fms;
+    return KhPbrAmbSplitF(khms_ndv, khms_rough, khms_F0, khms_fms);
 }
 
 // Engine dynamic lights on the PBR path: modes 1 camera-relative world / 2 view
 // space / 3 absolute, offset + a0/a1/a2 attenuation on the scaled distance, the
 // spot cone log/mul/exp pow with its degenerate-exponent guard, and the hard
-// range fade.
-float3 KhDynLightsPBR(float3 wpos, float3 nrm, float3 albedo, float3 F0, float rough, float metal)
+// range fade. KH_DL_AMB_OCC: occ is the material's occlusion (s.occ), for the per-light ambient alone - as
+// KhPbrAmbient takes it for the sky ambient; the direct terms do not take it. KH_AMB_E_ONCE: the body; envE is the
+// ambient response E and envFms the lobes' compensation (KhPbrAmbSplitF at this pixel's N.V, KH_MS_DIRECT) when
+// envKnown - KhApplyPBR prices them once for the sky, the sun and the lamps, their N and V being the same - else
+// they are priced here. The form below is the public one.
+float3 KhDynLightsPBRE(float3 wpos, float3 nrm, float3 albedo, float3 F0, float rough, float metal, float occ,
+                       float3 envE, float3 envFms, bool envKnown)
 {
     if (dlCtl.x < 0.5f) return float3(0.0f, 0.0f, 0.0f);
     int pointN = (int)dlCtl.y;
@@ -3016,6 +4615,21 @@ float3 KhDynLightsPBR(float3 wpos, float3 nrm, float3 albedo, float3 F0, float r
     }
 
     float kdM = 1.0f - saturate(metal);
+    // KH_DL_AMB_SPEC: a lamp's ambient is a uniform radiance (no direction, no N.L), so it takes the split-sum
+    // under a uniform environment: the env-BRDF specular with its compensation (KH_AMB_MS), and the diffuse
+    // keeps what that specular (E, the weight returned) does not reflect, kdM x (1 - E) (Fdez-Aguera 2019's
+    // kD = 1 - the specular albedo; the sky ambient's KH_AMB_KD): a white dielectric's lamp ambient stays 1 at
+    // every angle and roughness. Without a view (mode 3, zeroed camera) there is no lobe and the diffuse stays
+    // whole - albedo itself, a metal's included, as KhPbrAmbientE's no-view branch keeps it (KH_DL_AMB_METAL; kdM
+    // there zeroed a metal's lamp ambient). Priced once per pixel: the light count does not change its cost.
+    float3 khs_ambK = albedo * (specOn >= 0.5f ? kdM : 1.0f);
+    float3 khs_fms = envFms;   // KH_MS_DIRECT: read with the lobes, which run only with a view (specOn).
+    if (specOn >= 0.5f) {
+        float3 khs_envMs = envE;   // KH_AMB_E_ONCE.
+        if (!envKnown) khs_envMs = KhPbrAmbSplitF(saturate(dot(n, v)), rough, F0, khs_fms);
+        khs_ambK = khs_ambK * saturate(1.0f - khs_envMs) + khs_envMs;
+    }
+    khs_ambK *= occ;   // KH_DL_AMB_OCC: the material's occlusion scales ambient light, diffuse and specular.
     float3 acc = float3(0.0f, 0.0f, 0.0f);
     const float khs_fwp = length(fwidth(wpos));   // Footprint priced outside the loop.
     // KH_DLS_GEOM_N: the shadow lookup's normal; n (shading) keeps the N.L term.
@@ -3052,12 +4666,12 @@ float3 KhDynLightsPBR(float3 wpos, float3 nrm, float3 albedo, float3 F0, float r
         const float khs_amb = lerp(KH_DLS_AMB_KEEP, 1.0f, khs_sh);
         float ndl = max(dot(n, L), 0.0f);
         float3 diffI = dlGlobal.xyz * KhDlRec(b + 2).xyz * ndl * khs_sh;
-        // The diffuse keeps what the lobe does not reflect. Only the arma model
-        // takes 1 - F here, as KhApplyPBR's sun does: it has no metal lane, so
-        // F alone can take a conductor's diffuse (fresnel(1.3, 7) reflects ~90 %
-        // head-on). pbr keeps kdM alone - its metals are zeroed by it, and its
-        // dielectrics' ~4 % is the received look. Without a view (mode 3,
-        // zeroed camera) there is no lobe and no F, and the diffuse stays whole.
+        // KH_DL_KD_F: the diffuse keeps what the lobe does not reflect, kdM x
+        // (1 - F) for every model - KhApplyPBR's sun rule, (1 - F)(1 - metal).
+        // The arma model has no metal lane, so there F alone takes a
+        // conductor's diffuse (fresnel(1.3, 7) reflects ~90 % head-on). Without
+        // a view (mode 3, zeroed camera) there is no lobe and no F, and the
+        // diffuse stays whole.
         float3 khsKd = kdM;
         float3 khsSpec = float3(0.0f, 0.0f, 0.0f);
 
@@ -3071,73 +4685,67 @@ float3 KhDynLightsPBR(float3 wpos, float3 nrm, float3 albedo, float3 F0, float r
         // ambient below does NOT take the gate: it is not scaled by ndl.
         if (specOn >= 0.5f && ndl > 0.0f) {
             float3 khsF;
-            khsSpec = KhGGXSpec(n, v, L, rough, F0, khsF) * (diffI * KH_PBR_PI);   // KH_PBR_PI.
-            if (khFrNK.z >= 0.5f) khsKd *= saturate(1.0f - khsF);   // The arma tint may exceed 1.
+            // KH_DL_RADIUS: the lobe widened by the emitter's angular radius at this distance (dist: metres to the
+            // light, before dlCtl.w's attenuation scale) - KhApplyPBR's KH_SUN_DISC rule for a lamp.
+            const float khsRw = sqrt(min(rough * rough + KH_DL_RADIUS_M / (3.0f * max(dist, 1.0e-3f)), 1.0f));
+            khsSpec = KhGGXSpec(n, v, L, khsRw, F0, khsF)
+                    * (khs_fms * diffI * KH_PBR_PI);   // KH_PBR_PI; KH_MS_DIRECT: the compensation.
+            khsKd *= saturate(1.0f - khsF);   // KH_DL_KD_F. The arma tint may exceed 1.
         }
 
-        acc += (albedo * (diffI * khsKd + KhDlRec(b + 3).xyz * khs_amb) + khsSpec) * att;
+        // KH_DL_AMB_METAL / KH_DL_AMB_SPEC: the per-light ambient takes the response priced above (khs_ambK):
+        // kdM on the diffuse - a metal has no diffuse albedo, its albedo lane is its F0 colour - times what the
+        // env-BRDF specular leaves, plus that specular.
+        acc += (albedo * (diffI * khsKd) + KhDlRec(b + 3).xyz * (khs_amb * khs_ambK) + khsSpec) * att;
     }
 
     return acc * dlGlobal.w;
 }
+// KH_DL_AMB_OCC: the public form with the occlusion; E is priced inside.
+float3 KhDynLightsPBR(float3 wpos, float3 nrm, float3 albedo, float3 F0, float rough, float metal, float occ)
+{
+    return KhDynLightsPBRE(wpos, nrm, albedo, F0, rough, metal, occ, float3(0.0f, 0.0f, 0.0f),
+                           float3(1.0f, 1.0f, 1.0f), false);
+}
 
 // The split-sum ambient the direct term implies: ambient specular from the
-// dome, (1 - metal) on the diffuse - a metal has no diffuse albedo, so without
+// dome, (1 - metal) x (1 - E) on the diffuse (KH_AMB_KD) - a metal has no diffuse albedo, so without
 // this it goes flat grey-brown the moment the direct term dies (shadow,
 // overcast, dusk). There is no reflection target; the dome is analytic.
 static const float KH_PBR_GROUND = 0.35f;
-float3 KhPbrAmbient(float3 khpa_n, float3 khpa_v, bool khpa_vOk, float khpa_rough,
-                    float3 khpa_F0, float khpa_metal, float3 khpa_albedo,
-                    float3 khpa_amb, float khpa_occ)
+// KH_AMB_E_ONCE: the body, given E (khpa_envBRDF: KhPbrAmbSplit at this N.V, the environment BRDF with its
+// multiple-scattering compensation, KH_AMB_MS); KhPbrAmbient below is the public form.
+float3 KhPbrAmbientE(float3 khpa_n, float3 khpa_v, bool khpa_vOk, float khpa_rough,
+                     float khpa_metal, float3 khpa_albedo,
+                     float3 khpa_amb, float khpa_occ, float3 khpa_envBRDF)
 {
     const float3 khpa_ambo = khpa_amb * khpa_occ;
     if (!khpa_vOk) return khpa_albedo * khpa_ambo;
 
-    const float khpa_ndv = saturate(dot(khpa_n, khpa_v));
-    // Karis env BRDF (F0 * A + B).
-    const float4 khpa_c0 = float4(-1.0f, -0.0275f, -0.572f, 0.022f);
-    const float4 khpa_c1 = float4(1.0f, 0.0425f, 1.04f, -0.04f);
-    const float4 khpa_r = khpa_rough * khpa_c0 + khpa_c1;
-    const float  khpa_a004 = min(khpa_r.x * khpa_r.x, exp2(-9.28f * khpa_ndv)) * khpa_r.x + khpa_r.y;
-    const float2 khpa_AB = float2(-1.04f, 1.04f) * khpa_a004 + khpa_r.zw;
-    // Armed (khFrNK), F0 is the arma tint: the conductor curve's head-on value
-    // takes Schlick's F0 in the fit, and the tint scales the whole of it, the
-    // grazing part included - the tint x curve form of the direct term.
-    const bool   khpa_nk = khFrNK.z >= 0.5f;
-    const float  khpa_f0 = khpa_nk ? KhFresnelNK(1.0f, khFrNK.x, khFrNK.y) : 0.0f;
-    // KH_ENVBRDF_FLOOR: the fit's B dips below zero from roughness ~0.71 head-on and ~0.89 at every N.V
-    // (-0.0024 at 1), so with F0 near 0 (a black rough metal, a black specular texel, an arma conductor curve
-    // near 0 - fresnel N ~1, K ~0 - under a non-zero tint) the ambient specular was a small negative radiance
-    // written into the HDR scene. Floored at 0; every non-negative value is unchanged (UE4 instead scales B by
-    // saturate(50 F0), which also dims F0 below 0.02).
-    const float3 khpa_envBRDF = max(khpa_nk ? khpa_F0 * (khpa_f0 * khpa_AB.x + khpa_AB.y)
-                                            : khpa_F0 * khpa_AB.x + khpa_AB.y, 0.0f);
-
-    // The dome along the reflection vector, blurred toward its mean.
+    // KH_DOME_LUT: the dome prefiltered along the reflection vector by this roughness's GGX lobe (the split sum's
+    // prefiltered radiance, tabulated): the dome itself when smooth, the hemisphere-lighting irradiance
+    // 0.35 + 0.65 (1 + R.y) / 2 at rough 1. It replaces a blur toward the dome's mean (0.675 whichever way R
+    // points). KH_AMB_MS: the diffuse below reads the flat ambient on purpose - it is the engine's own ambient
+    // (albedo x lightAmb on its surfaces, ApplyLighting's twin) - and the dome is the reflection's sky / ground
+    // split; the two are not one irradiance model.
     const float3 khpa_R = reflect(-khpa_v, khpa_n);
-    const float  khpa_sky = smoothstep(-0.15f, 0.15f, khpa_R.y);
-    const float3 khpa_dome = khpa_amb * lerp(KH_PBR_GROUND, 1.0f, khpa_sky);
-    const float3 khpa_mean = khpa_amb * (0.5f * (1.0f + KH_PBR_GROUND));
-    const float3 khpa_env = lerp(khpa_dome, khpa_mean, khpa_rough * khpa_rough);
+    const float3 khpa_env = khpa_amb * lerp(KH_PBR_GROUND, 1.0f, KhDomeSkyShare(khpa_R.y, khpa_rough));
 
-    // Roughness-aware Schlick at N.V: what the surface reflects of the sky is
-    // what the diffuse does not get.
-    const float3 khpa_Fr = max(float3(1.0f - khpa_rough, 1.0f - khpa_rough, 1.0f - khpa_rough), khpa_F0);
-    float3 khpa_Famb = khpa_F0 + (khpa_Fr - khpa_F0) * pow(1.0f - khpa_ndv, 5.0f);
-    if (khpa_nk) {
-        // The same form on the conductor curve: its own rise from head-on
-        // toward grazing, normalised to 0..1, stands in for Schlick's
-        // (1 - ndv)^5, and roughness caps where it may reach exactly as
-        // max(1 - rough, F0) does above.
-        const float khpa_rise = saturate((KhFresnelNK(khpa_ndv, khFrNK.x, khFrNK.y) - khpa_f0) /
-                                         max(1.0f - khpa_f0, 1.0e-4f));
-        const float khpa_top = max(1.0f - khpa_rough, khpa_f0);
-        khpa_Famb = khpa_F0 * (khpa_f0 + (khpa_top - khpa_f0) * khpa_rise);
-    }
-
-    const float3 khpa_diff = khpa_albedo * khpa_ambo * (1.0f - khpa_metal) * saturate(1.0f - khpa_Famb);
+    // KH_AMB_KD: the diffuse keeps what the specular does not reflect, 1 - E (Fdez-Aguera 2019's kD; Filament's
+    // 1 - E): a white dielectric under a uniform ambient returns 1 at every N.V and roughness. The roughness-aware
+    // Schlick (1 - Famb) it replaces outgrew E at grazing and darkened silhouettes (a uniform ambient: 0.66 at
+    // N.V 0, rough 0.5).
+    const float3 khpa_diff = khpa_albedo * khpa_ambo * (1.0f - khpa_metal) * saturate(1.0f - khpa_envBRDF);
     const float3 khpa_spec = khpa_env * khpa_envBRDF * khpa_occ;
     return khpa_diff + khpa_spec;
+}
+float3 KhPbrAmbient(float3 khpa_n, float3 khpa_v, bool khpa_vOk, float khpa_rough,
+                    float3 khpa_F0, float khpa_metal, float3 khpa_albedo,
+                    float3 khpa_amb, float khpa_occ)
+{
+    float3 khpa_E = float3(0.0f, 0.0f, 0.0f);   // KH_AMB_E_ONCE: no view, no specular - E is not read.
+    if (khpa_vOk) khpa_E = KhPbrAmbSplit(saturate(dot(khpa_n, khpa_v)), khpa_rough, khpa_F0);
+    return KhPbrAmbientE(khpa_n, khpa_v, khpa_vOk, khpa_rough, khpa_metal, khpa_albedo, khpa_amb, khpa_occ, khpa_E);
 }
 
     // Compact GGX (Cook-Torrance specular + Lambert diffuse).
@@ -3150,13 +4758,21 @@ float3 KhApplyPBR(KhMatSurf m, float3 wpos, float3 n, float smf)
     khFrNK = khar_nk ? float4(max(m.fresnelNK, float2(0.0f, 0.0f)), 1.0f, 0.0f) : float4(0.0f, 0.0f, 0.0f, 0.0f);
     const bool khar_sg = m.specOn >= 0.5f || khar_nk;   // Spec-gloss: rough from gloss, no metal.
     float rough = khar_sg ? saturate(1.0f - m.gloss) : saturate(m.rough);
-    rough = max(rough, 0.045f);
+    rough = max(rough, KH_ROUGH_MIN);   // KH_ROUGH_MIN_ONE: KhGGXSpec's floor and the env-BRDF table's first row.
     float3 F0 = khar_nk ? max(m.specTint, float3(0.0f, 0.0f, 0.0f))
               : m.specOn >= 0.5f ? m.specF0
               : lerp(float3(0.04f, 0.04f, 0.04f), m.albedo, saturate(m.metal));
     float metal = khar_sg ? 0.0f : saturate(m.metal);
     float3 l = lighting1.xyz;
     float3 v = normalize(fxParams0.xyz - wpos);
+    // KH_AMB_E_ONCE: E and the lobes' compensation Fms (KH_MS_DIRECT) priced once, for the sky's ambient, the sun's
+    // two lobes and every lamp (one N, one V, one roughness: the surface's - the sun disc's and the overcast lobe's
+    // widening shape the light, not the microsurface). E is read only with a view, which is when both are priced;
+    // without one the lobes take no compensation (Fms 1).
+    const bool  khov_vOk = dot(fxParams0.xyz, fxParams0.xyz) >= 1.0f;
+    float3 khae_E = float3(0.0f, 0.0f, 0.0f);
+    float3 khae_Fms = float3(1.0f, 1.0f, 1.0f);
+    if (khov_vOk) khae_E = KhPbrAmbSplitF(saturate(dot(n, v)), rough, F0, khae_Fms);
     float ndl = saturate(dot(n, l));
     // Both sun terms (direct here, the overcast lobe below) carry ndl * smf;
     // when it is 0 the GGX lobes that feed only them are not evaluated. Exact.
@@ -3164,9 +4780,16 @@ float3 KhApplyPBR(KhMatSurf m, float3 wpos, float3 n, float smf)
     float3 direct = float3(0.0f, 0.0f, 0.0f);
     if (khsd_lit) {
         float3 F;
-        float3 spec = KhGGXSpec(n, v, l, rough, F0, F);
+        // KH_SUN_DISC: the sun is a disc, not a point - its lobe widened by the disc's angular radius (Karis 2013,
+        // "Real Shading in Unreal Engine 4", eq. 10: alpha' = saturate(alpha + sourceRadius / (3 distance)); for a
+        // light at infinity sourceRadius / distance = tan(theta_s), so alpha' = alpha + tan(0.2665 deg) / 3 =
+        // alpha + 0.00155, alpha = rough^2). D stays normalised, so the highlight keeps its energy and spreads over
+        // the disc's reflection: its peak falls to (alpha / alpha')^2 of a point's - 0.32 at roughness 0.045, 0.75
+        // at 0.1, 0.93 at 0.2, 0.99 at 0.5. The lamps take the same rule at KH_DL_RADIUS_M (KhDynLightsPBRE).
+        float3 spec = KhGGXSpec(n, v, l, sqrt(min(rough * rough + KH_SUN_DISC_A, 1.0f)), F0, F);
         float3 kd = saturate(1.0f - F) * (1.0f - metal);   // The arma tint may exceed 1.
-        direct = lighting2.rgb * (khObjDif * ndl * smf) * (kd * m.albedo + spec * KH_PBR_PI);   // KH_PBR_PI.
+        direct = lighting2.rgb * (khObjDif * ndl * smf)
+               * (kd * m.albedo + spec * (khae_Fms * KH_PBR_PI));   // KH_PBR_PI; KH_MS_DIRECT.
     }
     // The sun through cloud is a wide highlight: under overcast the sun colour
     // falls to a fraction of the ambient and the GGX lobe above is gone, yet
@@ -3174,7 +4797,6 @@ float3 KhApplyPBR(KhMatSurf m, float3 wpos, float3 n, float smf)
     // highlight on a metal. This is that patch: the same GGX toward lighting1,
     // roughness floored (an area light), radiance the ambient's, weighted by
     // how dim the sun is against the ambient.
-    const bool  khov_vOk = dot(fxParams0.xyz, fxParams0.xyz) >= 1.0f;
     const float khov_sun = max(lighting2.r, max(lighting2.g, lighting2.b));
     const float khov_amb = max(lightAmb.r, max(lightAmb.g, lightAmb.b));
     const float khov_w = (lightAmb.w >= 0.5f && khov_vOk)
@@ -3182,16 +4804,17 @@ float3 KhApplyPBR(KhMatSurf m, float3 wpos, float3 n, float smf)
     float3 khov = float3(0.0f, 0.0f, 0.0f);
     if (khsd_lit && khov_w > 0.0f) {   // KH_SUN_SKIP_DARK.
         float3 khov_F;
-        khov = KhGGXSpec(n, v, l, max(rough, 0.6f), F0, khov_F)
+        khov = KhGGXSpec(n, v, l, max(rough, 0.6f), F0, khov_F) * khae_Fms   // KH_MS_DIRECT.
              * (lightAmb.rgb * khObjAmb) * (khov_w * ndl * smf * KH_PBR_PI);   // KH_PBR_PI: a punctual lobe too.
     }
     // The split-sum ambient replaces albedo * amb. smf is not passed - the sky
     // is not shadowed by our casters. The material's own occlusion map scales
-    // the ambient alone; the screen-space term (KH_SSAO) is applied after the
-    // draw, at the pixel.
-    const float3 amb = KhPbrAmbient(n, v, khov_vOk, rough, F0, metal, m.albedo,
-                                    lightAmb.rgb * khObjAmb, m.occ);
-    return amb + KhDynLightsPBR(wpos, n, m.albedo, F0, rough, metal) + direct + khov + m.emissive;
+    // the ambient alone - the sky's here, each lamp's in KhDynLightsPBR (KH_DL_AMB_OCC); the screen-space term
+    // (KH_SSAO) multiplies the whole colour after the draw, at the sample. E and Fms: priced above (KH_AMB_E_ONCE).
+    const float3 amb = KhPbrAmbientE(n, v, khov_vOk, rough, metal, m.albedo,
+                                     lightAmb.rgb * khObjAmb, m.occ, khae_E);
+    return amb + KhDynLightsPBRE(wpos, n, m.albedo, F0, rough, metal, m.occ, khae_E, khae_Fms, true)
+         + direct + khov + m.emissive;
 }
 #endif
 
@@ -3206,9 +4829,10 @@ float3 KhApplyPBR(KhMatSurf m, float3 wpos, float3 n, float smf)
 // light function instruction for instruction (cb11 stride 6, the same offset
 // table, the same 1e-4 guards, the same log/mul/exp cone pow, ambient
 // accumulated without N.L). This is the third copy of that loop in this file
-// (beside DynLights and KhDynLightsPBR, plus kh_dls_atten in the C++); they
+// (beside DynLights and KhDynLightsPBRE; KhDlfAtt in effect.hlsl, and
+// kh_dls_atten in the C++ (the distance terms alone, no cone), make five); they
 // differ in what they ACCUMULATE, not in how they attenuate, so any edit to the
-// attenuation or the cone in one is an edit to all four. Offsets: [b+0]
+// attenuation or the cone in one is an edit to all five. Offsets: [b+0]
 // position, [b+1] spot axis + cone threshold, [b+2] diffuse + cone scale, [b+3]
 // ambient + cone exponent, [b+4] offset + (a0,a1,a2), [b+5] fade start +
 // inverse width + OUR SHADOW SLOT. THE DENOMINATOR IS GENEROUS: Ltotal adds the
@@ -3318,7 +4942,9 @@ struct VSOut { float4 pos : SV_Position; float3 wpos : TEXCOORD0; float3 nrm : T
 
 // The one vertex transform. The per-object lanes (centre, rebase-relative
 // centre + arm, edge lengths, rotation rows) come from the CB on a per-object
-// draw and from the instance stream on a batch draw; everything below the lane
+// draw and, on a batch draw, from the object record (khObjs, t39) at the slot
+// the instance lane names - the rebase-relative centre formed from it by the
+// wrapper ((pos - khPass) + res); everything below the lane
 // read is identical, so the four entry points (VSMain / VSMainInst, VSComposite
 // / VSCompositeInst) are wrappers that only choose the source. VSInst = the
 // 16-byte lane (C++ twin KhInstLane): record slot, LOD dither, final colour
@@ -3436,8 +5062,12 @@ void KhVsCore(float3 khvc_lp, float3 khvc_ln, float3 khvc_ctr, float3 khvc_rel, 
     khvc_owrel = (khvc_relArm > 0.5f) ? (khvTp + (khPass.xyz - sunOrigin.xyz)) : (wp - sunOrigin.xyz);
     // Per-axis scale is non-uniform: normals take the inverse scale, then the
     // object rotation (the inverse-transpose of scale-then-rotate for
-    // orthonormal R - see kh_set_rotation).
-    khvc_onrm = normalize(KhRotateR(khvc_ln / max(khvc_size, float3(1e-4f, 1e-4f, 1e-4f)), khvc_r0, khvc_r1, khvc_r2));
+    // orthonormal R - see kh_set_rotation). KH_NRM_FLOOR: the floor only guards a zero axis (1e-12: n / size stays
+    // far inside float range); every drawn axis divides by its own size. A floor of 1e-4 (0.1 mm) gave any axis
+    // drawn thinner than that the wrong weight - a flat import (KH_IMPORT_FLAT) drawn at a size below 1 among
+    // them, the tangent of its bent normals' tilt then scaled by 1 / that size.
+    khvc_onrm = normalize(KhRotateR(khvc_ln / max(khvc_size, float3(1e-12f, 1e-12f, 1e-12f)),
+                                    khvc_r0, khvc_r1, khvc_r2));
 }
 
 // The effect unit's depthTex owns t1. KH_RECEIVE_TEX is passed by the white,
@@ -3714,8 +5344,8 @@ float KhHazeT(float khaz_d, float khaz_wposY, float khaz_camY, float khaz_layerY
 // the builtin effect shader (effect.hlsl, effect2.hlsl and effect3.hlsl follow
 // this file) and into every user effect shader (the USER SHADER CONTRACT's
 // EFFECT section) - one text for both, so a
-// user effect reads the scene, the depth (the near-plane marker and KH_VM_SEE
-// included), the pyramid and the fog (the engine's, and the scene's fog passes
+// user effect reads the scene, the depth (the near-plane marker, KH_VM_SEE and
+// KH_WSEE included), the pyramid and the fog (the engine's, and the scene's fog passes
 // where khFxFog is filled) as the builtins do, scatters by fog scatter's own
 // rules, and can begin and finish its pixel with the builtin's own lines
 // (KhFxBegin / KhFxFinish, below). What stays the builtins' is built for one
@@ -3790,10 +5420,1068 @@ Texture2D<float2> khNzMark : register(t37);
 // unbound view (null: loads 0) or a pixel off the texture applies neither.
 Texture2D<float> khVmSee : register(t34);
 Texture2D<float> khVmT : register(t41);
+// KH_WSEE - the record the chain reads (C++: the KH_WSEE design note in rendering_integration_injection.hpp holds the
+// targets, the pass table, the register map and the lane bits; the declarations below carry this unit's registers).
+// The world's blended draws (DestBlend INV_SRC_ALPHA, no A2C: fences, foliage, glass, particles) leave the scene behind
+// them in the colour while the depth holds their own (fence-type) or nothing (particle-type). C++ captures at the
+// cycle's first such draw: khWsS the raw depth then (sample 0), khWsB the scene colour then (resolved only where a
+// colour reader wants it, KH_WSEE_BWANT); khWsT (RGBA8 at the depth's sample count) cleared (1, 0, 1, 1) and khWsN /
+// khWsN2 (1x raw) cleared 1. Each fence-type draw is replayed into T.R (dest *= 1 - alpha, EQUAL: the samples it
+// wrote); each particle-type draw into T.B (pre) or T.A (post, after the cycle's B2 moment) under LESS_EQUAL and
+// depth-only into N / N2 (LESS, write: the nearest such layer); each late opaque drawn after the B2 moment resets T
+// to (1, 1, 1, 1) at the samples it wrote (G = 1: S is stale there) - one drawn before it is derived (KH_WSEE_NOPRE,
+// the note at khWsS2); our translucent tail likewise. A light-adding draw (DestBlend ONE) goes into N alone (its
+// light is in S beyond T B, fogged at the front); a test-off over-blend into T untested. Multiply, screen,
+// subtractive, MIN / MAX stay out. khWsR is the chain's input capture, khWsE the class word (KhWseeClassWord), khWsC
+// (MS) the scene's sample colours at the chain's capture, khWsB2 / khWsS2 the colour and depth at the B2 moment
+// (bit 3 / 9), khWsTp / khWsTf the split (bit 4), khWsD3 the late opaques' own depth (bit 5), khWsP0 / P1 / Nb / Nb2
+// the one pass's record (bits 6 / 7). KhWseeAvail() lists the bits.
+// PER PIXEL (KhWseeRule / KhWseeAt): r = LoadDepthPS's raw (the marker and KH_VM_SEE applied), n = min(N, N2) (as
+// positions: KhWseeNwPos), s = S, (Tw, G, Tpre, Tpost) = T at sample 0. front f = min(r, n); behind b = G ? D3 (bit 5;
+// else r) : s (S2 for a derived pre; r, G = 1, for a sample off sample 0's surface or a sample 0 written after the
+// snapshot by a draw the record holds nothing of, where Tw = 1 - KH_WSEE_SURF_BEHIND); COVERED = armed, f >=
+// depthParams.z (the world's range) and b > f. No threshold
+// on Tr: Tr = 1 with b > f is a fully transparent layer. A covered pixel blends what the pass derives from depth,
+// Q = Tr Q(b) + (1 - Tr) Q(f) with Tr = Tw Tpre Tpost - or, with two or more layer groups, front to back by group
+// (below): KhFxFinish's localization and band masks, Pulse's ring, the sun flare's taps, fog scatter's share
+// (KhFsFogW), dynamicLightFog's march (one march to b, a second sum cut at f) and the distance fog (13). SSGI keeps
+// the front depth. Uncovered pixels are exactly today's; every KH_WSEE load sits behind the arm.
+// THE DISTANCE FOG (13), exact where G = 0: S = Tr B + E (E the layers' own light): out = Tq Fb2 + (1 - f_front)
+// max(S - Tq B2', 0) + (1 - Tq) f_front g with Fb2 = Tpre lerp(B', g, f_b) + (1 - f_pre) max(B2' - Tpre B', 0) +
+// (1 - Tpre) f_pre g, Tq = Tw Tpost, f_front = f(min(r, NWpost)), f_pre = f(NWpre) where it lies before the behind,
+// else f_b, B' = max(B + (S - R), 0), B2'
+// likewise (the earlier chain passes' change given to the background); without B2 one stage over B with T = the
+// product. Exact for one layer a stage in the first colour-changing pass. G = 1 and KH_VM_SEE's planes: the factor
+// blend lerp(S, g, Tr f(b) + (1 - Tr) f(f)). STACKING CAP (KhWseeCap, wherever B or B2 is read): per channel the
+// record cannot show more background than the pixel holds, S >= T X, so T is held to min_c S_c / X_c over X_c >
+// KH_WSEE_CAP_EPS (it hides the symptom of one draw's layers overlapping; per sample against the sample's own colour).
+// PER SAMPLE (MSAA_DEPTH; KhWseeCount / KhWseeSampleAt / KhWseeMix): where a pixel's samples disagree - a T texel
+// differs bit for bit, or a raw lies off sample 0's surface (KhWseeSame: a plane's samples differ bit for bit, so
+// each is predicted from sample 0 by the pixel's raw-depth gradient) - khWsE says so where bound (bit 0), else the
+// inline test (KhWseeDisagree); the masks, Pulse, the flare taps, fog scatter's share and the distance fog take each
+// sample k < min(count, KH_WSEE_NS) by the rule on its own r_k and T_k (n, s the pixel's) and average - the builtins
+// one pair a class, weighted by its members (KhWseeCountW); KhWseeCount (the user contract) every sample. S is sample
+// 0's, so a G = 0 sample is covered only with evidence of its own (Tr_k < 1, or n < r_k) or where it lies on sample
+// 0's surface and sample 0 holds a depth-writing layer (s > r_0). The distance fog is exact per sample with khWsC
+// (bit 1): o_k on C_k' = C_k + (S - R), out = mean_k o_k. dynamicLightFog and SSGI stay per pixel (sample 0). The
+// marker and KH_VM_SEE are sample-0 constructs: a pixel LoadDepthPS changed keeps the per-pixel path.
+// ARMED by khFxTexLay[1].z = 1 (uniform per draw, only on the fullscreen lane: centerSize.w = 1) - an armed scene-chain
+// pass, its side draws and its agreement mask (C++ kh_fx_chain_run). LoadDepthPS stays the depth buffer's; the scene
+// chain draws in the depth's own pixels (KhDepthPx).
+// LAYER GROUPS (khWsGz / khWsGt, khWsGz2 / khWsGt2; KhWseeGroupsSet8): the fence-type layers (Tw at r), and per
+// phase the part at its NW position (Tm), the 25 % band's part (Tx at KhWseeNearRaw: the band's middle) and the
+// 100 % band's (Tx2 at KhWseeNearRaw2) - the pre phase measured from the behind, the post from r - or, where r lies
+// beyond D (KhWseeFarRaw) the far part (Tx at max(D, the phase's NW)) where Tf >= T - 1.5 / 255 (Tf has no occlusion
+// test). Near: Tm = Tp held to [T, 1], Tx = T / Tm (Tp's layers are a subset of T's: same draws, fewer fragments);
+// Tm2 = Tp2 held to [Tm, 1], Tx2 = Tm / Tm2; far: Tx = Tf held to [T, 1], Tm = T / Tx. A part within one UNORM8 step
+// of none is no group. Up to seven groups; with Tp = T and Tf = 1 only the three NW groups stand. Two or more: Q =
+// (1 - T1) Q(z1) + T1 (1 - T2) Q(z2) + ... + prod T_i Q(behind) (KhWseeMix, dynamicLightFog's cuts, effect 13's
+// factor, KhWseeFogMean, KhWseeGroups7); one: the two-depth blend with the group's own depth as the front where that
+// lies behind min(r, n) (KhWseeOneFront: a faded sprite leaves T = 1 but sets NW); none: the front.
+// NOT COVERED: one draw's layers overlapping one another (T counts each fragment, N the nearest); two layers of one
+// phase both off any surface share the nearer's depth (one NW a phase); a fence-type layer over a late opaque surface
+// not coplanar with it where D3 does not stand (behind = r: uncovered); a particle-type layer drawn after B2 but
+// behind a later fence (post: fogged at the fence); at a per-sample pixel a fully transparent writer's texel off
+// sample 0's surface (uncovered), and a sample within KhWseeSame's tolerance of a layer at sample 0 (a contact line);
+// a pass both localized and banded multiplies the two averaged masks; layers over the cleared depth are never
+// absorbed by the 2 % push; the effect meshes (unarmed); FSAA 1x (the capture does not land).
+Texture2D<float> khWsS : register(t53);
+#if MSAA_DEPTH
+Texture2DMS<float4> khWsT : register(t54);   // RGBA - Tw, G, Tpre, Tpost.
+#else
+Texture2D<float4> khWsT : register(t54);
+#endif
+Texture2D<float4> khWsB : register(t55);
+Texture2D<float4> khWsR : register(t56);
+Texture2D<float> khWsN : register(t57);   // NWpre.
+Texture2D<uint> khWsE : register(t58);   // KH_WSEE_EDGE_COST: the class word (KhWseeClassWord).
+#if MSAA_DEPTH
+Texture2DMS<float4> khWsC : register(t59);
+#endif
+Texture2D<float4> khWsB2 : register(t60);   // B2, where KhWseeAvail() bit 3 says it was taken.
+Texture2D<float> khWsN2 : register(t61);    // NWpost.
+Texture2D<float> khWsS2 : register(t62);    // S2 (the B2 moment's depth), bound where KhWseeAvail() bit 9 says.
+// KH_WSEE_NOPRE: a late opaque marked before the B2 attempt is not replayed; where bit 8 stands the rule derives it.
+// Sample 0 is pre where S2 != S (bit 9: S2 bound, taken at the B2 moment whether B2 landed; only in the world's range
+// - the view-model slice writes the depth untracked, so there and without S2 the live r0 < S decides) and no post
+// opaque owns it (G 0); a sample k > 0 where sample 0 is and it lies on sample 0's surface (KhWseeSame). It reads as
+// a replayed pre sample did: behind S2 where B2 (bit 3) or D3 (bit 5) stands, else the live depth; G 0.5 with B2, else
+// 1; the old record's pre channels (Tpre, Tp's R / B) 1 where its NWpre lies behind that behind - the replay's EQUAL
+// reset at read time (KH_PSB's rule for its own record). Differs from a replay: a pre layer drawn before the opaque
+// and lying in front of it is kept (and any of its phase behind it drawn before it); an off-plane edge sample reads
+// G = 0 with S behind; an opaque that wrote S's own value at sample 0 is no pre sample; a test-off over-blend after
+// a pre opaque and behind it is reset; the class word reads T's bytes, which no replay reset (a pixel whose Tpre
+// differed between samples under a pre opaque reads more classes); a depth write the hooks do not track between the
+// capture and the B2 moment reads as a pre late opaque (the premise: only tracked late opaques write the depth
+// there). Bit 8 clear: the rule as before.
+// Tp: the particle-type layers counting only fragments NOT within the near band of the surface behind them (R pre,
+// G post; B / A the 100 % band), at the depth's sample count; Tf: the fragments farther than D (R pre, G post), 1x.
+// Bit 4.
+#if MSAA_DEPTH
+Texture2DMS<float4> khWsTp : register(t63);
+#else
+Texture2D<float4> khWsTp : register(t63);
+#endif
+Texture2D<float2> khWsTf : register(t64);
+// D3 (bit 5): the main depth's sample 0 raw at the last time a late opaque owned sample 0 (no value of this cycle
+// elsewhere: never read there); a post one's is resolved from its own interpolated depth z (KH_WSEE_OQ2,
+// PSWseeD3Res: the live sample 0 where it lies within KH_WSEE_D3_TOL of z, else z).
+Texture2D<float> khWsD3 : register(t65);
+// KH_PSB - the one pass's record (C++ kh_psb_post), where bit 6 says a re-issue drew into it: a particle-type draw
+// whose shader has the one-pass variant is drawn ONCE, single sample, its five passes' depth verdicts made in its
+// shader at the block's centre against the largest sample 0 of its 2 x 2 block (KH_PSB_LORES below), into khWsP0 (t66)
+// and khWsNb (t68) for a pre layer, khWsP1 / khWsNb2 (t67 / t69) for a post one (KH_PSB_PHASE): P = (T, the 25 %
+// band's, the 100 % band's, Tf's) of the phase, N its NW (the same pushed raws, MIN). Each channel is dest *= 1 - a
+// under INV_SRC_COLOR or, the alpha channel, INV_SRC_ALPHA - the same factor, so the same byte GIVEN that the blend
+// unit rounds both alike (D3D11 defines one formula and promises nothing of the precision; failing it, an LSB).
+// Draws the one pass cannot take (no variant, a partial sample mask, a depth bias) and our own tail draw today's
+// passes into T, Tp, Tf and N - "the old record"; bit 7 says it holds no particle-type layer this cycle (its N / Tp /
+// Tf not loaded). Each phase's channel is the product of both records' and its NW the nearer (min), so every consumer
+// below the rule's loads is unchanged; bit 6 clear = the old record bit for bit.
+// The late-opaque reset as a READ-TIME RULE: P is single sample and gets no reset, so at a sample G marks a phase
+// whose nearest one-pass layer (Nb, pushed) lies behind the sample's behind b reads 1 in every one-pass channel of it
+// (every layer of the phase would fail its own test against b). Exact where the phase's layers all lie behind the
+// opaque or were all drawn after it; a layer drawn before it and lying in front is kept (with any of its phase behind
+// it drawn before it). The Tf channel is reset too (harmless: a reset phase reads T = 1, and the far branch then
+// gives Tx = Tm = 1). The old record keeps the replay's reset. Else: the one pass's channels are the pixel's at every
+// sample, its band verdicts the block's, its pushes the shader's (z m + a: ulps from the viewport shift's), and it
+// rasterizes at one sample (a sprite edge covers the pixels whose centre it covers).
+// The alpha is the engine's own instructions' (KH_PSV's alpha variant: the same rounding caveat).
+Texture2D<float4> khWsP0 : register(t66);
+Texture2D<float4> khWsP1 : register(t67);
+Texture2D<float> khWsNb : register(t68);
+Texture2D<float> khWsNb2 : register(t69);   // KH_PSB_PHASE: NWpost.
+// KH_PSB_LORES (twin of the mesh unit's KhWseeMsPsbAt): the one pass draws at 1 / 2 the frame a side (KH_WSEE_PSB_LS),
+// so the record's texel for pixel px is px >> 1, clamped to floor(W / 2) - 1 (W = khWsS's size): the one pass
+// certainly writes that texel, while the texel past it may be undrawn or partial at an odd W (KH_PSB_LORES_EDGE) -
+// the frame's last W mod 2 pixels read their neighbour block's texel in place of the clear.
+int2 KhWseePsbAt(int2 khpa_px) {
+    const int khpa_ls = KH_WSEE_PSB_LS;   // s = 2 (C++ KH_PSB_LS).
+    uint khpa_w, khpa_h;
+    khWsS.GetDimensions(khpa_w, khpa_h);   // KH_PSB_LORES_EDGE.
+    return min(khpa_px >> khpa_ls, max((int2((int)khpa_w, (int)khpa_h) >> khpa_ls) - 1, int2(0, 0)));
+}
+// The stacking cap's floor (KhWseeCap) - a channel of the colour behind the layers at or below it caps nothing.
+#define KH_WSEE_CAP_EPS (1.0f / 1024.0f)
+// An NW raw as the layer's POSITION (twin KhWseeMsNwPos): the NW passes are drawn pushed back (C++ KhWseeSurfVp:
+// n' = (1 - TOL) n + TOL Hi, Hi the viewport's MaxDepth = depthParams.w where shifted), so n = (n' - TOL Hi) /
+// (1 - TOL). KhWseeRule keeps the pushed value wherever it DECIDES (the range test, n' against r, the evidence rule)
+// and takes this wherever NW is a depth (the front, khWsLn, the groups). The clear (1) stays 1; only an n' <= Hi is
+// taken back (one past it was drawn in another range and reads at most 2.04 % near). TWIN: C++ KH_WSEE_SURF_TOL.
+#define KH_WSEE_SURF_TOL (0.02f)
+float KhWseeNwPos(float khwn_n)
+{
+    const bool khwn_b = khwn_n < 1.0f && khwn_n <= depthParams.w;   // A pushed value (<= Hi).
+    return khwn_b ? (khwn_n - KH_WSEE_SURF_TOL * depthParams.w) / (1.0f - KH_WSEE_SURF_TOL) : khwn_n;
+}
+// The most samples a pixel takes (the per-sample loops' bound; the rest of a larger count are left out). The loops'
+// attribute: without MSAA the count is 1 (a [loop] of one iteration draws fxc's X3557).
+#define KH_WSEE_NS 8u
+// KH_WSEE_FAINT - a pair covered by layers passing this much of the light or more, the depth buffer already at the
+// behind (o.y == r: no depth-writing layer among them), takes Q at r alone: the blend T Q(behind) + (1 - T) Q(front)
+// is then within (1 - T) of the front / behind difference of Q(r) - under 2 % of it - and every evaluation of Q at
+// another depth (the front, the groups) is spared. Thin rain, drizzle, a faint haze sprite cost the consumers nothing;
+// smoke, foliage and glass keep the blend. One rule for every reader: KhWseeMix (fog scatter, the masks, Pulse, the sun
+// flare, user effects through it), effect 13's own loop, and dynamicLightFog's split marker (effect3.hlsl
+// KH_DLF_WS_FAINT, the same constant). The record itself is untouched: the sorted mesh cut and the colour helpers
+// read it as before.
+#define KH_WSEE_FAINT_T 0.98f
+#if MSAA_DEPTH
+#define KH_WSEE_LOOP [loop]
+#else
+#define KH_WSEE_LOOP [unroll]
+#endif
+// KH_FX_LEAN: an entry compiled with KH_FX_LEAN 1 runs no record maths - C++ draws such a build only where none can
+// run (fog scatter's PSFsSplitS and dynamicLightFog's PSDlfComp on an unlocalized, unbanded pass: their record code
+// is KhFxFinish's mask blocks alone, which such a pass skips), so its value is the full build's; the record's
+// registers are declared but unreferenced in it (fxc keeps no binding for them).
+#if KH_FX_LEAN
+bool KhWseeArmed() { return false; }
+#else
+bool KhWseeArmed() { return khFxTexLay[1].z > 0.5f && centerSize.w > 0.875f && centerSize.w < 1.125f; }
+#endif
+// The last covered verdict's own record for a caller that needs more than the product (effect 13): the T texel (Tw,
+// G, Tpre, Tpost), (NWpre, NWpost) and the sample's raw. Set by KhWseeRule where it covers; read right after it.
+static float4 khWsLx = float4(1.0f, 0.0f, 1.0f, 1.0f);
+static float2 khWsLn = float2(1.0f, 1.0f);
+static float khWsLr = 1.0f;
+// The last covered verdict's layer groups (KhWseeRule; read right after it): khWsGn how many stand (T < 1), khWsGz
+// their raw depths nearest first (each held to the behind), khWsGt their transmittances; an absent group sits at the
+// behind with T = 1 (weight 0). Composed front to back by KhWseeMix (the KH_WSEE note above: LAYER GROUPS).
+static uint khWsGn = 0u;
+static float3 khWsGz = float3(1.0f, 1.0f, 1.0f);
+static float3 khWsGt = float3(1.0f, 1.0f, 1.0f);
+// The split's groups (bit 4; KhWseeGroupsSet8): up to seven, the four farthest in khWsGz2 / khWsGt2; khWsLs = (Tm pre,
+// Tx pre, Tm post, Tx post) at khWsLzx, khWsLs2 = (Tx2 pre, Tx2 post) at khWsLzx2. khWsSp false: the loops run over
+// the three NW groups alone.
+static bool khWsSp = false;
+static float4 khWsGz2 = float4(1.0f, 1.0f, 1.0f, 1.0f);
+static float4 khWsGt2 = float4(1.0f, 1.0f, 1.0f, 1.0f);
+static float4 khWsLs = float4(1.0f, 1.0f, 1.0f, 1.0f);
+static float2 khWsLzx = float2(1.0f, 1.0f);   // (pre, post) - each phase's own.
+static float2 khWsLs2 = float2(1.0f, 1.0f);   // (pre, post).
+static float2 khWsLzx2 = float2(1.0f, 1.0f);
+// The groups of one covered verdict (khwg_x the T texel, khwg_nn = (NWpre, NWpost), khwg_r the sample's raw, khwg_b
+// the behind) into khWsGn / khWsGz / khWsGt - sorted by depth (three compare-exchanges).
+void KhWseeGroupsSet(float4 khwg_x, float2 khwg_nn, float khwg_r, float khwg_b)
+{
+    float3 khwg_t = float3(khwg_x.x, khwg_x.z, khwg_x.w);
+    float3 khwg_z = min(float3(khwg_r, khwg_nn.x, khwg_nn.y), khwg_b.xxx);
+    uint khwg_n = 0u;
+    [unroll] for (int khwg_i = 0; khwg_i < 3; ++khwg_i) {
+        if (khwg_t[khwg_i] < 1.0f) {
+            ++khwg_n;
+        } else {
+            khwg_t[khwg_i] = 1.0f;
+            khwg_z[khwg_i] = khwg_b;
+        }
+    }
+    float2 khwg_s;
+    if (khwg_z.x > khwg_z.y) { khwg_s = float2(khwg_z.x, khwg_t.x); khwg_z.x = khwg_z.y; khwg_t.x = khwg_t.y;
+                               khwg_z.y = khwg_s.x; khwg_t.y = khwg_s.y; }
+    if (khwg_z.y > khwg_z.z) { khwg_s = float2(khwg_z.y, khwg_t.y); khwg_z.y = khwg_z.z; khwg_t.y = khwg_t.z;
+                               khwg_z.z = khwg_s.x; khwg_t.z = khwg_s.y; }
+    if (khwg_z.x > khwg_z.y) { khwg_s = float2(khwg_z.x, khwg_t.x); khwg_z.x = khwg_z.y; khwg_t.x = khwg_t.y;
+                               khwg_z.y = khwg_s.x; khwg_t.y = khwg_s.y; }
+    khWsGn = khwg_n;
+    khWsGz = khwg_z;
+    khWsGt = khwg_t;
+}
+// Group khwq_i's (0 - 2) raw depth and transmittance (a select chain: no indexed static).
+float KhWseeGroupZ(uint khwq_i) { return khwq_i == 0u ? khWsGz.x : (khwq_i == 1u ? khWsGz.y : khWsGz.z); }
+float KhWseeGroupT(uint khwq_i) { return khwq_i == 0u ? khWsGt.x : (khwq_i == 1u ? khWsGt.y : khWsGt.z); }
+// Group khwq_i of 0 - 6 (3 - 6: the split's four farther groups, khWsGz2 / khWsGt2) - the consumers' bound 7.
+float KhWseeGroupZ7(uint khwq_i)
+{
+    return khwq_i < 3u ? KhWseeGroupZ(khwq_i)
+         : (khwq_i == 3u ? khWsGz2.x : (khwq_i == 4u ? khWsGz2.y : (khwq_i == 5u ? khWsGz2.z : khWsGz2.w)));
+}
+float KhWseeGroupT7(uint khwq_i)
+{
+    return khwq_i < 3u ? KhWseeGroupT(khwq_i)
+         : (khwq_i == 3u ? khWsGt2.x : (khwq_i == 4u ? khWsGt2.y : (khwq_i == 5u ? khWsGt2.z : khWsGt2.w)));
+}
+// The near band's middle for a surface at raw khwb_b: a fragment fails the near push's LESS_EQUAL against khwb_b
+// where its raw z > (khwb_b - TOL Hi) / (1 - TOL) (Hi = the world range's MaxDepth, depthParams.w - C++ pushes only
+// viewports of that Max), so the band is (that, khwb_b]; its raw middle is the harmonic middle in distance - khwb_b's
+// distance / 1.125 near the camera (a push of 25 %). KH_WSEE_NEAR_TOL: C++'s twin (0.2: s / (1 - s) = 25 %).
+#define KH_WSEE_NEAR_TOL (0.2f)
+float KhWseeNearRaw(float khwb_b)
+{
+    const float khwb_lo = max((khwb_b - KH_WSEE_NEAR_TOL * depthParams.w) / (1.0f - KH_WSEE_NEAR_TOL), depthParams.z);
+    return 0.5f * (khwb_lo + khwb_b);
+}
+// The 100 % band's middle for a surface at raw khwb_b: the same at KH_WSEE_NEAR_TOL2 (C++'s twin, 0.5: s / (1 - s) =
+// 100 %) - the band runs from half the surface's distance to the surface, its raw middle the harmonic middle in
+// distance, two thirds of the surface's distance near the camera (the whole band's middle, one constant).
+#define KH_WSEE_NEAR_TOL2 (0.5f)
+float KhWseeNearRaw2(float khwb_b)
+{
+    const float khwb_lo = max((khwb_b - KH_WSEE_NEAR_TOL2 * depthParams.w) / (1.0f - KH_WSEE_NEAR_TOL2),
+                              depthParams.z);
+    return 0.5f * (khwb_lo + khwb_b);
+}
+// The far distance D's raw (C++ kh_wsee_far_raw's twin): KH_WSEE_FAR_FRAC of the far plane of the pair the chain
+// decodes with (depthParams.x = m22: ndc = m22 + (1 - m22) / FRAC), in the world range.
+#define KH_WSEE_FAR_FRAC (0.25f)
+float KhWseeFarRaw()
+{
+    return depthParams.z + (depthParams.w - depthParams.z) *
+           (depthParams.x + (1.0f - depthParams.x) / KH_WSEE_FAR_FRAC);
+}
+// KhWseeGroupsSet8: each phase's opacity split into the part at its NW position (Tm) and the near-surface part (Tx at
+// KhWseeNearRaw of the phase's reference: the behind for pre, the live r for post), the 100 % band's part (Tx2 at
+// KhWseeNearRaw2) - or, where r lies beyond D, the far part (Tx at max(D, the phase's NW) - KH_WSEE_FARNW: Tf's
+// fragments lie beyond D and at or beyond the phase's NW, so the farther is the nearest bound the record gives; NW
+// at or before D gives D). Near: Tm = Tp held to [T, 1], Tx = T / Tm; Tm2 = Tp2 held to [Tm, 1], Tx2 = Tm / Tm2.
+// Far: Tx = Tf held to [T, 1], Tm = T / Tx, only where Tf >= T - 1.5 / 255 (Tf has no occlusion test, so a Tf below T
+// holds fragments T lacks - hidden behind far terrain or absorbed by the 2 % push - which would move the visible
+// layers' opacity to D; that phase keeps one group); T = Tf = 0 exactly (an opaque far record) reads Tm = 1: the
+// phase stands at the far part. A part within one UNORM8 step of none is no group. With Tp = T and Tf = 1 the four
+// extra parts are absent and the three NW groups are the unsplit record's bit for bit.
+void KhWseeGroupsSet8(float4 khwg_x, float2 khwg_nn, float khwg_r, float khwg_b, float4 khwg_tp, float2 khwg_tf)
+{
+    float2 khwg_tm = khwg_x.zw;
+    float2 khwg_tx = float2(1.0f, 1.0f);
+    float2 khwg_tx2 = float2(1.0f, 1.0f);   // The 100 % band's part (absent on the far branch).
+    float2 khwg_zx;
+    float2 khwg_zx2 = float2(khwg_b, khwg_b);
+    const float khwg_d = KhWseeFarRaw();
+    // The far split on the live depth: r beyond D (the sky, far terrain - no depth writer nearer than D at the
+    // sample, so nothing of the far part lies hidden behind a nearer surface; a fence or a window against the sky
+    // keeps the near split). Not covered: Tf is per pixel while T is per sample (far silhouettes may disagree); a
+    // near-surface layer on a surface beyond D is not split; under a nearer layer of the phase (NW before D) the far
+    // part stays at D - the record holds no depth of the far part's own (Tf's pass writes none).
+    const bool khwg_far = khwg_r > khwg_d && khwg_d > depthParams.z && khwg_d < depthParams.w;
+    if (khwg_far) {
+        khwg_zx = max(float2(khwg_d, khwg_d), khwg_nn);   // KH_WSEE_FARNW.
+        [unroll] for (int khwg_f = 0; khwg_f < 2; ++khwg_f) {
+            const float khwg_tt = khwg_x[2 + khwg_f];
+            const float khwg_fx = min(max(khwg_tf[khwg_f], khwg_tt), 1.0f);
+            if (khwg_tf[khwg_f] >= khwg_tt - 1.5f / 255.0f && khwg_fx < 1.0f - 1.5f / 255.0f) {
+                khwg_tx[khwg_f] = khwg_fx;
+                khwg_tm[khwg_f] = khwg_fx > 0.0f ? khwg_tt / khwg_fx : 1.0f;
+            }
+        }
+    } else {
+        // Each phase's band is measured from the depth its layers were tested against: the pre phase's from the
+        // behind (S, or S2 under a pre late opaque), the post phase's (and our tail's) from the live depth r.
+        khwg_zx = float2(KhWseeNearRaw(khwg_b), KhWseeNearRaw(khwg_r));
+        khwg_zx2 = float2(KhWseeNearRaw2(khwg_b), KhWseeNearRaw2(khwg_r));   // The same references.
+        [unroll] for (int khwg_q = 0; khwg_q < 2; ++khwg_q) {
+            const float khwg_tt = khwg_x[2 + khwg_q];
+            const float khwg_pm = min(max(khwg_tp[khwg_q], khwg_tt), 1.0f);
+            const float khwg_px = khwg_pm > 0.0f ? khwg_tt / khwg_pm : 1.0f;
+            // A near part within one UNORM8 step of none (Tp within 1.5 / 255 of T, or Tx within 1.5 / 255 of 1) is
+            // no group: a colour and an alpha blend unit that round a step apart make no phantom group.
+            if (khwg_pm - khwg_tt > 1.5f / 255.0f && khwg_px < 1.0f - 1.5f / 255.0f) {
+                khwg_tm[khwg_q] = khwg_pm;
+                khwg_tx[khwg_q] = khwg_px;
+            }
+            // The 100 % band (Tp's B / A, a subset of R / G) splits the part at NW once more: Tm2 = Tp2 held to
+            // [Tm, 1] stays at the NW position, Tx2 = Tm / Tm2 goes to the band's middle - under the same guard.
+            const float khwg_pm2 = min(max(khwg_tp[2 + khwg_q], khwg_tm[khwg_q]), 1.0f);
+            const float khwg_px2 = khwg_pm2 > 0.0f ? khwg_tm[khwg_q] / khwg_pm2 : 1.0f;
+            if (khwg_pm2 - khwg_tm[khwg_q] > 1.5f / 255.0f && khwg_px2 < 1.0f - 1.5f / 255.0f) {
+                khwg_tx2[khwg_q] = khwg_px2;
+                khwg_tm[khwg_q] = khwg_pm2;
+            }
+        }
+    }
+    khWsSp = true;
+    khWsLs = float4(khwg_tm.x, khwg_tx.x, khwg_tm.y, khwg_tx.y);
+    khWsLzx = khwg_zx;
+    khWsLs2 = khwg_tx2;
+    khWsLzx2 = khwg_zx2;
+    // The three NW groups sorted by KhWseeGroupsSet, then the four band / far parts inserted each after every group
+    // at or before it (a stable insertion in selects alone: a compare-exchange network here cost fxc tens of seconds
+    // of PSEffect's build over the KhWseeRule sites).
+    KhWseeGroupsSet(float4(khwg_x.x, khwg_x.y, khwg_tm.x, khwg_tm.y), khwg_nn, khwg_r, khwg_b);
+    float3 khwg_z = khWsGz, khwg_t = khWsGt;
+    const bool  khwg_p3 = khwg_tx.x < 1.0f, khwg_p4 = khwg_tx.y < 1.0f;
+    const float khwg_z3 = khwg_p3 ? min(khwg_zx.x, khwg_b) : khwg_b, khwg_t3 = khwg_p3 ? khwg_tx.x : 1.0f;
+    const float khwg_z4 = khwg_p4 ? min(khwg_zx.y, khwg_b) : khwg_b, khwg_t4 = khwg_p4 ? khwg_tx.y : 1.0f;
+    // The pre phase's near / far part into the three: four (q).
+    const bool  khwg_a0 = khwg_z.x <= khwg_z3, khwg_a1 = khwg_z.y <= khwg_z3, khwg_a2 = khwg_z.z <= khwg_z3;
+    const float4 khwg_qz = float4(khwg_a0 ? khwg_z.x : khwg_z3, khwg_a1 ? khwg_z.y : (khwg_a0 ? khwg_z3 : khwg_z.x),
+                                  khwg_a2 ? khwg_z.z : (khwg_a1 ? khwg_z3 : khwg_z.y), khwg_a2 ? khwg_z3 : khwg_z.z);
+    const float4 khwg_qt = float4(khwg_a0 ? khwg_t.x : khwg_t3, khwg_a1 ? khwg_t.y : (khwg_a0 ? khwg_t3 : khwg_t.x),
+                                  khwg_a2 ? khwg_t.z : (khwg_a1 ? khwg_t3 : khwg_t.y), khwg_a2 ? khwg_t3 : khwg_t.z);
+    // The post phase's into q: five (r).
+    const bool khwg_b0 = khwg_qz.x <= khwg_z4, khwg_b1 = khwg_qz.y <= khwg_z4, khwg_b2 = khwg_qz.z <= khwg_z4,
+               khwg_b3 = khwg_qz.w <= khwg_z4;
+    const float khwg_rz0 = khwg_b0 ? khwg_qz.x : khwg_z4,
+                khwg_rz1 = khwg_b1 ? khwg_qz.y : (khwg_b0 ? khwg_z4 : khwg_qz.x),
+                khwg_rz2 = khwg_b2 ? khwg_qz.z : (khwg_b1 ? khwg_z4 : khwg_qz.y),
+                khwg_rz3 = khwg_b3 ? khwg_qz.w : (khwg_b2 ? khwg_z4 : khwg_qz.z),
+                khwg_rz4 = khwg_b3 ? khwg_z4 : khwg_qz.w;
+    const float khwg_rt0 = khwg_b0 ? khwg_qt.x : khwg_t4,
+                khwg_rt1 = khwg_b1 ? khwg_qt.y : (khwg_b0 ? khwg_t4 : khwg_qt.x),
+                khwg_rt2 = khwg_b2 ? khwg_qt.z : (khwg_b1 ? khwg_t4 : khwg_qt.y),
+                khwg_rt3 = khwg_b3 ? khwg_qt.w : (khwg_b2 ? khwg_t4 : khwg_qt.z),
+                khwg_rt4 = khwg_b3 ? khwg_t4 : khwg_qt.w;
+    // The 100 % band parts into the five: six (s), then seven - the same stable insertion; the three nearest into
+    // khWsGz / khWsGt, the four farthest into khWsGz2 / khWsGt2.
+    const bool  khwg_p5 = khwg_tx2.x < 1.0f, khwg_p6 = khwg_tx2.y < 1.0f;
+    const float khwg_z5 = khwg_p5 ? min(khwg_zx2.x, khwg_b) : khwg_b, khwg_t5 = khwg_p5 ? khwg_tx2.x : 1.0f;
+    const float khwg_z6 = khwg_p6 ? min(khwg_zx2.y, khwg_b) : khwg_b, khwg_t6 = khwg_p6 ? khwg_tx2.y : 1.0f;
+    const bool khwg_c0 = khwg_rz0 <= khwg_z5, khwg_c1 = khwg_rz1 <= khwg_z5, khwg_c2 = khwg_rz2 <= khwg_z5,
+               khwg_c3 = khwg_rz3 <= khwg_z5, khwg_c4 = khwg_rz4 <= khwg_z5;
+    const float khwg_sz0 = khwg_c0 ? khwg_rz0 : khwg_z5, khwg_sz1 = khwg_c1 ? khwg_rz1 : (khwg_c0 ? khwg_z5 : khwg_rz0),
+                khwg_sz2 = khwg_c2 ? khwg_rz2 : (khwg_c1 ? khwg_z5 : khwg_rz1),
+                khwg_sz3 = khwg_c3 ? khwg_rz3 : (khwg_c2 ? khwg_z5 : khwg_rz2),
+                khwg_sz4 = khwg_c4 ? khwg_rz4 : (khwg_c3 ? khwg_z5 : khwg_rz3), khwg_sz5 = khwg_c4 ? khwg_z5 : khwg_rz4;
+    const float khwg_st0 = khwg_c0 ? khwg_rt0 : khwg_t5, khwg_st1 = khwg_c1 ? khwg_rt1 : (khwg_c0 ? khwg_t5 : khwg_rt0),
+                khwg_st2 = khwg_c2 ? khwg_rt2 : (khwg_c1 ? khwg_t5 : khwg_rt1),
+                khwg_st3 = khwg_c3 ? khwg_rt3 : (khwg_c2 ? khwg_t5 : khwg_rt2),
+                khwg_st4 = khwg_c4 ? khwg_rt4 : (khwg_c3 ? khwg_t5 : khwg_rt3), khwg_st5 = khwg_c4 ? khwg_t5 : khwg_rt4;
+    const bool khwg_d0 = khwg_sz0 <= khwg_z6, khwg_d1 = khwg_sz1 <= khwg_z6, khwg_d2 = khwg_sz2 <= khwg_z6,
+               khwg_d3 = khwg_sz3 <= khwg_z6, khwg_d4 = khwg_sz4 <= khwg_z6, khwg_d5 = khwg_sz5 <= khwg_z6;
+    khWsGz = float3(khwg_d0 ? khwg_sz0 : khwg_z6, khwg_d1 ? khwg_sz1 : (khwg_d0 ? khwg_z6 : khwg_sz0),
+                    khwg_d2 ? khwg_sz2 : (khwg_d1 ? khwg_z6 : khwg_sz1));
+    khWsGt = float3(khwg_d0 ? khwg_st0 : khwg_t6, khwg_d1 ? khwg_st1 : (khwg_d0 ? khwg_t6 : khwg_st0),
+                    khwg_d2 ? khwg_st2 : (khwg_d1 ? khwg_t6 : khwg_st1));
+    khWsGz2 = float4(khwg_d3 ? khwg_sz3 : (khwg_d2 ? khwg_z6 : khwg_sz2),
+                     khwg_d4 ? khwg_sz4 : (khwg_d3 ? khwg_z6 : khwg_sz3),
+                     khwg_d5 ? khwg_sz5 : (khwg_d4 ? khwg_z6 : khwg_sz4), khwg_d5 ? khwg_z6 : khwg_sz5);
+    khWsGt2 = float4(khwg_d3 ? khwg_st3 : (khwg_d2 ? khwg_t6 : khwg_st2),
+                     khwg_d4 ? khwg_st4 : (khwg_d3 ? khwg_t6 : khwg_st3),
+                     khwg_d5 ? khwg_st5 : (khwg_d4 ? khwg_t6 : khwg_st4), khwg_d5 ? khwg_t6 : khwg_st5);
+    khWsGn += (khwg_p3 ? 1u : 0u) + (khwg_p4 ? 1u : 0u) + (khwg_p5 ? 1u : 0u) + (khwg_p6 ? 1u : 0u);
+}
+// The stacking cap: a layer record cannot show more of khwc_x (the colour behind those layers) than the pixel khwc_p
+// holds - per channel khwc_p >= T khwc_x - so T is held to khwc_p / khwc_x over the channels where khwc_x exceeds
+// KH_WSEE_CAP_EPS. A consistent record is unchanged; an over-reported one (one draw's layers overlapping one another:
+// the replay counts the nearest fragment per sample alone) no longer shows more background than the pixel has.
+float KhWseeCap(float khwc_t, float3 khwc_p, float3 khwc_x)
+{
+    [unroll] for (int khwc_i = 0; khwc_i < 3; ++khwc_i) {
+        if (khwc_x[khwc_i] > KH_WSEE_CAP_EPS) khwc_t = min(khwc_t, max(khwc_p[khwc_i], 0.0f) / khwc_x[khwc_i]);
+    }
+    return khwc_t;
+}
+// The views bound beside the arm (khFxTexLay[1].w; an unbound view loads 0, which the shader cannot tell from data):
+// bit 0 khWsE, 1 khWsC, 2 the per-sample path allowed (clear: every pixel takes the per-pixel rule), 3 khWsB2 and
+// khWsS2 (the B2 moment taken), 4 khWsTp / khWsTf, 5 khWsD3, 6 the one pass's record (t66 - t69), 7 the old record
+// holds no particle-type layer (khWsN / N2 / Tp / Tf not loaded), 8 a pre late opaque was not replayed (derived, the
+// note at khWsS2), 9 khWsS2 bound as its reference. Bits 10 - 11 retired. Read only where armed. C++ twin fx_tex[1][3].
+uint KhWseeAvail() { return (uint)(khFxTexLay[1].w + 0.5f); }
+// KH_WSEE: the rule on one sample's raw khwr_r and T's sample khwr_k - Tr returned, khwr_o = (front raw, behind raw,
+// G: 0, 1 a late opaque, 0.5 a derived pre with S2 behind) where covered (khwr_o.y > khwr_o.x), (khwr_r, khwr_r, 0)
+// and 1 where not. S holds sample 0's snapshot alone (raw khwr_r0), so for another sample s > r_k is no evidence of a
+// layer (a geometry edge drawn before the snapshot, a tilted surface's slope): a G = 0 sample is covered only with
+// evidence of its own (Tr_k < 1, or n < r_k) or, khwr_own (on sample 0's surface, KhWseeSame), with sample 0's
+// (s > r_0) - and s is no behind for a sample off that surface either: its behind is its own live depth, G = 1
+// (KH_WSEE_SURF_BEHIND, which also takes a sample 0 whose depth was written after the snapshot by a draw the
+// record holds nothing of as the surface it is). The per-pixel rule passes khwr_own true and khwr_r0 = khwr_r. Loads: N and N2, then S (the front in
+// the world's range), then T only where a layer can cover (n < r, or s > r) - 3 on most pixels; D3, S2, the one pass's
+// and the split's texels and T's sample 0 (k > 0) behind T, their address carrying a T-derived 0 (khwr_z: Tw <= 1,
+// but not provably so to fxc) so fxc cannot speculate them beside S in the sample-loop sites (KhWseeMix, effect 13:
+// there it loads S beside N before the loop, loop-invariant). Each load behind the test before it (KH_VMSEE_NEST:
+// nested ifs - fxc evaluates both operands of &&). Callers hold the arm.
+// TWIN (KH_DLF_SPLIT): effect3.hlsl's KhDlfWsMaybe takes this function's NW loads and its two outer tests (the range
+// test, n < r || s > r) as the superset of its covered set - an edit to either is made in both.
+float KhWseeRule(int2 px, float khwr_r, uint khwr_k, bool khwr_own, float khwr_r0, out float3 khwr_o)
+{
+    float khwr_t = 1.0f;
+    khwr_o = float3(khwr_r, khwr_r, 0.0f);
+    khWsGn = 0u;   // No groups unless covered (below).
+    khWsSp = false;   // No split likewise (KhWseeGroupsSet8 sets it).
+    float2 khwr_nn = float2(1.0f, 1.0f);
+    float2 khwr_nb = float2(1.0f, 1.0f);   // KH_PSB: the one pass's NW alone (the read-time rule's).
+    float  khwr_no = 1.0f;   // KH_WSEE_NOPRE: the old record's NWpre alone (its read-time reset's).
+    {
+        // KH_PSB: the old record's NW where it holds a layer (bit 7 clear), the one pass's where it drew (bit 6) -
+        // each phase's nearest is the nearer of the two.
+        [branch] if ((KhWseeAvail() & 128u) == 0u) {
+            khwr_nn = float2(khWsN.Load(int3(px, 0)), khWsN2.Load(int3(px, 0)));
+            khwr_no = khwr_nn.x;   // KH_WSEE_NOPRE.
+        }
+        [branch] if ((KhWseeAvail() & 64u) != 0u) {
+            const int2 khwr_bp = KhWseePsbAt(px);   // KH_PSB_LORES: the record's texel.
+            khwr_nb = float2(khWsNb.Load(int3(khwr_bp, 0)), khWsNb2.Load(int3(khwr_bp, 0)));   // KH_PSB_PHASE.
+            khwr_nn = min(khwr_nn, khwr_nb);
+        }
+    }
+    const float khwr_n = min(khwr_nn.x, khwr_nn.y);
+    const float khwr_f = min(khwr_r, khwr_n);
+    [branch] if (khwr_f >= depthParams.z) {
+        const float khwr_s = khWsS.Load(int3(px, 0));
+        [branch] if (khwr_n < khwr_r || khwr_s > khwr_r) {
+#if MSAA_DEPTH
+            float4 khwr_x = khWsT.Load(px, (int)khwr_k);   // KH_PSB: its particle channels take P0's below.
+#else
+            float4 khwr_x = khWsT.Load(int3(px, 0));
+#endif
+            bool        khwr_g = khwr_x.y > 0.25f;   // A replayed late opaque (G = 1; T holds no 0.5).
+            float khwr_b = khwr_g ? khwr_r : khwr_s;
+            float khwr_gz = khwr_g ? 1.0f : 0.0f;
+            // A late opaque (G): behind = D3 at sample 0 (bit 5) - at k > 0 only where sample 0 is late too (its G
+            // loaded once; the address khwr_z keeps fxc from hoisting it) - else the live depth.
+            [branch] if (khwr_g) {
+                const int khwr_z = (int)(khwr_x.x > 2.0f);   // Tw <= 1: 0, but not to fxc.
+                const bool khwr_d3 = (KhWseeAvail() & 32u) != 0u;
+                bool khwr_p0 = true;
+#if MSAA_DEPTH
+                [branch] if (khwr_k != 0u && khwr_d3) {
+                    const float khwr_g0 = khWsT.Load(px, khwr_z).y;
+                    khwr_p0 = khwr_g0 > 0.25f;   // G is 0 or 1 in T.
+                }
+#endif
+                [branch] if (khwr_d3 && khwr_p0) khwr_b = khWsD3.Load(int3(px, khwr_z));
+            }
+            // KH_WSEE_NOPRE (bit 8; the note at khWsS2): sample 0 is pre where S2 != S (bit 9) - without S2 the live
+            // sample 0 before S - and G is 0; k > 0 where sample 0 is and khwr_own. Then behind = S2 where B2 or D3
+            // stands else the live depth, G = 0.5 with B2 else 1, and the old record's pre phase (Tpre here, Tp's pre
+            // bands below) reads 1 where its NWpre lies behind that behind - the replay's reset at read time.
+            bool khwr_ro = false;
+            [branch] if (!khwr_g && (KhWseeAvail() & 256u) != 0u) {
+                const int khwr_dz = (int)(khwr_x.x > 2.0f);   // Tw <= 1: 0, but not to fxc.
+                // S2 is the reference only where it lies in the world's range (the view-model slice draws untracked:
+                // its raw in S2 is no late opaque's) and there any change marks sample 0 (S2 != S); else the live r0
+                // (LoadDepthPS's world depth at a KH_VM_SEE pixel) with r0 < S (its substitutes may lie beyond S).
+                float khwr_dr = khwr_r0;
+                bool  khwr_dp = khwr_r0 < khwr_s;
+                [branch] if ((KhWseeAvail() & 512u) != 0u) {
+                    const float khwr_s2 = khWsS2.Load(int3(px + int2(khwr_dz, 0), 0));
+                    const bool  khwr_dw = khwr_s2 >= depthParams.z;
+                    khwr_dp = khwr_dw ? (khwr_s2 != khwr_s && khwr_s >= depthParams.z) : khwr_dp;
+                    khwr_dr = khwr_dw ? khwr_s2 : khwr_dr;
+                }
+                khwr_dp = khwr_dp && khwr_own && khwr_dr >= depthParams.z;
+#if MSAA_DEPTH
+                [branch] if (khwr_dp && khwr_k != 0u) khwr_dp = khWsT.Load(px, khwr_dz).y <= 0.25f;
+#endif
+                [branch] if (khwr_dp) {
+                    khwr_g = true;
+                    khwr_b = ((KhWseeAvail() & 512u) != 0u && (KhWseeAvail() & 40u) != 0u) ? khwr_dr : khwr_r;
+                    khwr_gz = (KhWseeAvail() & 8u) != 0u ? 0.5f : 1.0f;
+                    khwr_ro = khwr_no > khwr_b;
+                    khwr_x.z = khwr_ro ? 1.0f : khwr_x.z;
+                }
+            }
+            // KH_WSEE_SURF_BEHIND: two samples whose behind is the live depth, taken as a late opaque without D3 (G =
+            // 1: the factor blend, never the colour formula against B - B is not the colour behind their layers).
+            // (a) A sample off sample 0's surface (!khwr_own): S holds sample 0's snapshot alone, so s is another
+            // surface's depth, no behind of this one - with the layers' evidence (a rain streak's Tr < 1) the sample
+            // took s as its behind: at every geometry edge the near sample took the far one's fog or the far the
+            // near's, a bright or dark seam along every edge under a faint layer. (b) Sample 0 itself (k = 0: its
+            // snapshot is its own, bit for bit - another sample of its surface would differ from s by its slope) with
+            // its live depth nearer than its snapshot, no late opaque replayed and no fence-type layer at the sample
+            // (Tw = 1): a depth-writing draw after the capture the record holds nothing of (a late opaque whose replay
+            // was refused or failed, or a qualifying draw that wrote depth where its replay left no T) stands at r,
+            // and the snapshot is behind IT, not behind the layers - with behind = s and the colour formula the
+            // stacking cap, against a B the pixel no longer shows, took the stack for opaque and put its light at
+            // the nearest layer (a rain streak before such a sea surface took the streak's fog, not the sea's). A
+            // fence-type layer at the sample (Tw < 1) keeps s in both cases: it is that layer over the snapshot, as
+            // recorded. TWIN: KhWseeMeshCut's opaque raw (the glass and the fog agree at an edge and over such a
+            // surface).
+            [branch] if (!khwr_g && khwr_x.x >= 1.0f && (!khwr_own || (khwr_k == 0u && khwr_s > khwr_r))) {
+                khwr_g = true;
+                khwr_b = khwr_r;
+                khwr_gz = 1.0f;
+            }
+            // KH_PSB (the note at khWsP0): the one pass's channels at the pixel (bit 6), the read-time reset at a
+            // late-opaque sample (a phase whose nearest one-pass layer lies behind the behind: 1), then multiplied
+            // into the old record's - Tpre / Tpost here, the bands and Tf at the split below.
+            float4 khwr_q0 = float4(1.0f, 1.0f, 1.0f, 1.0f);
+            float4 khwr_q1 = float4(1.0f, 1.0f, 1.0f, 1.0f);
+            [branch] if ((KhWseeAvail() & 64u) != 0u) {
+                const int khwr_qz = (int)(khwr_x.x > 2.0f);   // Tw <= 1: 0, but not to fxc.
+                // KH_PSB_PHASE: (Tpre, Tpost, the 25 % band's pre / post) and (the 100 % band's, Tf's) from the two
+                // phases' targets.
+                const int2 khwr_qb = KhWseePsbAt(px);   // KH_PSB_LORES: the record's texel.
+                const float4 khwr_qp = khWsP0.Load(int3(khwr_qb + int2(khwr_qz, 0), 0));
+                const float4 khwr_qq = khWsP1.Load(int3(khwr_qb + int2(khwr_qz, 0), 0));
+                khwr_q0 = float4(khwr_qp.x, khwr_qq.x, khwr_qp.y, khwr_qq.y);
+                [branch] if ((KhWseeAvail() & 16u) != 0u) khwr_q1 = float4(khwr_qp.z, khwr_qq.z, khwr_qp.w, khwr_qq.w);
+                const bool khwr_rp = khwr_g && khwr_nb.x > khwr_b;   // The pre phase's layers all behind.
+                const bool khwr_rq = khwr_g && khwr_nb.y > khwr_b;   // The post phase's.
+                khwr_q0 = float4(khwr_rp ? 1.0f : khwr_q0.x, khwr_rq ? 1.0f : khwr_q0.y,
+                                 khwr_rp ? 1.0f : khwr_q0.z, khwr_rq ? 1.0f : khwr_q0.w);
+                khwr_q1 = float4(khwr_rp ? 1.0f : khwr_q1.x, khwr_rq ? 1.0f : khwr_q1.y,
+                                 khwr_rp ? 1.0f : khwr_q1.z, khwr_rq ? 1.0f : khwr_q1.w);
+                khwr_x.zw = khwr_x.zw * khwr_q0.xy;
+            }
+            // The transmittance, Tw Tpre Tpost.
+            const float khwr_tp = khwr_x.x * khwr_x.z * khwr_x.w;
+            if (khwr_b > khwr_f) {
+                if (khwr_g || khwr_n < khwr_r || khwr_tp < 1.0f || (khwr_own && khwr_s > khwr_r0)) {
+                    // NW as a position (KhWseeNwPos) - the front out, khWsLn and the groups' depths; the
+                    // pushed value decided above.
+                    const float2 khwr_np = float2(KhWseeNwPos(khwr_nn.x), KhWseeNwPos(khwr_nn.y));
+                    const float  khwr_fp = khwr_n < khwr_r ? min(khwr_np.x, khwr_np.y) : khwr_r;
+                    khwr_o = float3(khwr_fp, khwr_b, khwr_gz);
+                    khwr_t = khwr_tp;
+                    khWsLx = khwr_x;
+                    khWsLn = khwr_np;
+                    khWsLr = khwr_r;
+                    // The layer groups; with the split (bit 4) the sample's Tp and the pixel's Tf too - loaded here
+                    // alone (covered), their address carrying a T-derived 0.
+                    {
+                        [branch] if ((KhWseeAvail() & 16u) != 0u) {
+                            const int khwr_lz = (int)(khwr_x.x > 2.0f);   // Tw <= 1: 0, but not to fxc.
+                            float4 khwr_lp = float4(1.0f, 1.0f, 1.0f, 1.0f);   // KH_PSB: the old record's where it
+                            float2 khwr_lf = float2(1.0f, 1.0f);                // holds a layer (bit 7 clear).
+                            [branch] if ((KhWseeAvail() & 128u) == 0u) {
+#if MSAA_DEPTH
+                                khwr_lp = khWsTp.Load(px + int2(khwr_lz, 0), (int)khwr_k);   // RGBA.
+#else
+                                khwr_lp = khWsTp.Load(int3(px + int2(khwr_lz, 0), 0));
+#endif
+                                // KH_WSEE_NOPRE: the replay's reset of Tp's pre bands, at read time (above).
+                                khwr_lp = khwr_ro ? float4(1.0f, khwr_lp.y, 1.0f, khwr_lp.w) : khwr_lp;
+                                khwr_lf = khWsTf.Load(int3(px + int2(khwr_lz, 0), 0));
+                            }
+                            khwr_lp = khwr_lp * float4(khwr_q0.zw, khwr_q1.xy);   // KH_PSB: times the one pass's.
+                            khwr_lf = khwr_lf * khwr_q1.zw;
+                            KhWseeGroupsSet8(khwr_x, khwr_np, khwr_r, khwr_b, khwr_lp, khwr_lf);
+                        } else {
+                            KhWseeGroupsSet(khwr_x, khwr_np, khwr_r, khwr_b);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return khwr_t;
+}
+// KH_WSEE: the per-pixel rule at px given its front raw khwa_r (LoadDepthPS's) - the layers' transmittance Tr
+// returned (1 where not covered), khwa_o = (front raw, behind raw, G: 1 = a late opaque surface - the behind raw is
+// its own depth where D3 stands (bit 5), else the live depth -, 0.5 = one drawn before the cycle's first fence-type
+// layer with B2 taken - KhWseeRule)
+// where covered, which is exactly where khwa_o.y > khwa_o.x - (khwa_r, khwa_r, 0) elsewhere and unarmed. The loads
+// only when armed (uniform lanes alone). KH_WSEE_FXC: Tr comes back as the value, not as a second out beside a bool -
+// that shape stopped d3dcompiler_47 on PSEffect with "internal error: compilation aborted unexpectedly".
+float KhWseeAt(int2 px, float khwa_r, out float3 khwa_o)
+{
+    float khwa_t = 1.0f;
+    khwa_o = float3(khwa_r, khwa_r, 0.0f);
+    [branch] if (KhWseeArmed()) {
+        khwa_t = KhWseeRule(px, khwa_r, 0u, true, khwa_r, khwa_o);
+    }
+    return khwa_t;
+}
+// KhWseeOneFront - with exactly one layer group its opacity lies at ITS depth (khWsGz.x, held to the behind) where
+// that lies behind the front: max(khWsGz.x, front). T is a UNORM8 blend, so a sprite with a < 1 / 510 at a pixel
+// leaves T = 1 while NW (discard-based) holds its depth: under such a faded sprite the one-group mix Tr Q(behind) +
+// (1 - Tr) Q(front) charged the group's whole opacity at the sprite's depth. A part the split places nearer than its
+// layer (a band part for a pane in the band's farther half) keeps the layer's own front; slot 0 is the present group
+// unless its depth tied the behind (every slot then sits at the behind, behind the front: the mix an identity either
+// way). None or two and more: the front as before. Not covered: a pane in no band under such a sprite (one NW a
+// phase). khwof_o = KhWseeRule's (front, behind, G).
+float KhWseeOneFront(float3 khwof_o)
+{
+    return khWsGn == 1u ? max(khWsGz.x, khwof_o.x) : khwof_o.x;
+}
+#if MSAA_DEPTH
+// The depth's sample count, at most KH_WSEE_NS.
+uint KhWseeNs()
+{
+    uint khwz_w, khwz_h, khwz_n;
+    depthTex.GetDimensions(khwz_w, khwz_h, khwz_n);
+    return clamp(khwz_n, 1u, KH_WSEE_NS);
+}
+// KH_WSEE_SAME: whether sample khwq_k (raw khwq_rk) lies on sample 0's surface (raw khwq_r0) - a heuristic. At MSAA
+// each sample's depth is the primitive's at that sample's position, so a tilted surface's samples are never bit for
+// bit equal; across a plane the raw depth (z / w) is affine in screen x, y, so sample k is predicted from sample 0 by
+// the pixel's raw-depth gradient khwq_g (KhWseeGrad) times the offset between their positions (GetSamplePosition, in
+// pixels) and is the same surface within KH_WSEE_ZTOL raw plus half the predicted change (creases, curvature, the
+// gradient's own rounding). Simulated at 4K / D24 and D32F / 4x and 8x: planes to 80 deg and spheres read "same",
+// edges whose depth jumps 0.5 % or more read "different" in all but about 0.1 % (features under 2 px up to 4 %); a
+// missed edge keeps the per-pixel path. Assumes the standard sample patterns GetSamplePosition reports; a driver
+// reporting no positions falls back to the KH_WSEE_ZTOL floor.
+#define KH_WSEE_ZTOL (8.0f / 16777216.0f)
+// The pixel's raw-depth screen gradient (per pixel) from its four neighbours' sample-0 raws: per axis the one-sided
+// difference of the smaller magnitude (edge-aware: a neighbour across an edge differs by the jump), at the frame's
+// edge the one there is (0 with neither). KH_WSEE_NOPRE: its and KhWseeSame's mesh-unit twins KhWseeMsGrad / MsSame.
+float2 KhWseeGrad(int2 px, float khwg_r0)
+{
+    uint khwg_w, khwg_h, khwg_n;
+    depthTex.GetDimensions(khwg_w, khwg_h, khwg_n);
+    float2 khwg_g = float2(0.0f, 0.0f);
+    [unroll] for (int khwg_a = 0; khwg_a < 2; ++khwg_a) {
+        const int2 khwg_e = khwg_a == 0 ? int2(1, 0) : int2(0, 1);
+        const int  khwg_p = khwg_a == 0 ? px.x : px.y;
+        const int  khwg_m = (int)(khwg_a == 0 ? khwg_w : khwg_h);
+        const bool khwg_hf = khwg_p + 1 < khwg_m;
+        const bool khwg_hb = khwg_p > 0;
+        const float khwg_f = depthTex.Load(px + khwg_e, 0) - khwg_r0;   // Off the frame: unused (selected away).
+        const float khwg_b = khwg_r0 - depthTex.Load(px - khwg_e, 0);
+        float khwg_d = 0.0f;
+        if (khwg_hf && khwg_hb) khwg_d = abs(khwg_f) <= abs(khwg_b) ? khwg_f : khwg_b;
+        else if (khwg_hf) khwg_d = khwg_f;
+        else if (khwg_hb) khwg_d = khwg_b;
+        if (khwg_a == 0) khwg_g.x = khwg_d;
+        else khwg_g.y = khwg_d;
+    }
+    return khwg_g;
+}
+bool KhWseeSame(uint khwq_k, float khwq_r0, float khwq_rk, float2 khwq_g)
+{
+    const float2 khwq_d = depthTex.GetSamplePosition((int)khwq_k) - depthTex.GetSamplePosition(0);
+    const float  khwq_p = khwq_r0 + dot(khwq_g, khwq_d);
+    return abs(khwq_rk - khwq_p) <= KH_WSEE_ZTOL + 0.5f * dot(abs(khwq_g), abs(khwq_d));
+}
+// How far px's samples (the first KhWseeNs) disagree: 2 - a T texel's Tw or G other than sample 0's, bit for bit, or
+// a raw depth off sample 0's surface (KhWseeSame - its gradient only where some raw differs bit for bit, so a pixel
+// parallel to the image costs nothing more); 1 - only Tpre or Tpost differ; 0 - they agree. The search stops once
+// the level reaches khwd_stop (KhWseeDisagree: 1).
+uint KhWseeDisagreeLv(int2 px, uint khwd_stop)
+{
+    const uint   khwd_n = KhWseeNs();
+    const float  khwd_r = depthTex.Load(px, 0);
+    const float4 khwd_t = khWsT.Load(px, 0);   // Every channel.
+    uint khwd_d = 0u;
+    bool khwd_z = false;
+    [loop] for (uint khwd_k = 1u; khwd_k < khwd_n; ++khwd_k) {
+        const float4 khwd_tk = khWsT.Load(px, (int)khwd_k);
+        if (any(khwd_tk.xy != khwd_t.xy)) {
+            khwd_d = 2u;
+            break;
+        }
+        if (any(khwd_tk.zw != khwd_t.zw)) {
+            khwd_d = 1u;
+            if (khwd_stop <= 1u) break;
+        }
+        if (depthTex.Load(px, (int)khwd_k) != khwd_r) khwd_z = true;
+    }
+    [branch] if (khwd_d < khwd_stop && khwd_z) {
+        const float2 khwd_g = KhWseeGrad(px, khwd_r);
+        [loop] for (uint khwd_j = 1u; khwd_j < khwd_n; ++khwd_j) {
+            if (!KhWseeSame(khwd_j, khwd_r, depthTex.Load(px, (int)khwd_j), khwd_g)) {
+                khwd_d = 2u;
+                break;
+            }
+        }
+    }
+    return khwd_d;
+}
+// The inline test where khWsE is not bound.
+bool KhWseeDisagree(int2 px)
+{
+    return KhWseeDisagreeLv(px, 1u) >= 1u;
+}
+// KH_WSEE_EDGE_COST - THE CLASS WORD. khWsE (t58) holds, per pixel, the classes of its KhWseeNs samples (PSWseeAgree,
+// once a chain run): a class = the samples sharing their T texel (all four bytes) and their side of sample 0's surface
+// (own: the raw is sample 0's bit for bit or KhWseeSame); an off-surface sample joins an off-surface class only where
+// its raw is near the class's first (KH_WSEE_CLS_REL below). Up to four classes in order of first appearance: bits
+// 0 - 15 sample k's class (2 bits at 2k; sample 0 is class 0), bits 16 - 18 the own flag of classes 1 - 3, bits
+// 20 - 21 the class count - 1, bit 30 (KH_WSEE_CW_L2) the level-2 verdict (Tw or G other than sample 0's, or a raw off
+// its surface), bit 31 (KH_WSEE_CW_OV) more than four classes (the other bits mean nothing; consumers take every
+// sample). The word is 0 exactly where KhWseeDisagreeLv's level is 0 (its verdicts bit for bit: the nearness test
+// only splits classes), so a pass's samples disagree where it is nonzero. Loads: 2 per sample, the gradient's 4 only
+// once a raw differs (its address carries a raw-derived 0 so fxc cannot hoist them onto every pixel). The pass
+// discards where the word is 0, so the stencil C++ binds with it marks exactly the pixels a consumer may take per
+// sample.
+#define KH_WSEE_CW_L2 0x40000000u
+#define KH_WSEE_CW_OV 0x80000000u
+// KH_WSEE_CLS_REL: an off-surface raw r joins a class of first raw r_c where |r - r_c| <= KH_WSEE_ZTOL +
+// KH_WSEE_CLS_REL |r_c - r_inf| (r_inf the raw at infinity in the pass's range): the raw is affine in 1 / d, so the
+// members lie within about 3 % of the first one's distance to a km, widening to the depth's resolution floor beyond;
+// the sky's cleared raw and a ridge stay apart except within a few % of a finite far plane. Below depthParams.z (the
+// view-model slice, another projection) it is no distance window. ALU only; only off-surface samples run it.
+#define KH_WSEE_CLS_REL (1.0f / 32.0f)
+uint KhWseeClassWord(int2 px)
+{
+    const uint   khcw_n = KhWseeNs();
+    const float  khcw_r0 = depthTex.Load(px, 0);
+    const float4 khcw_t0 = khWsT.Load(px, 0);
+    const uint4  khcw_b0 = (uint4)(khcw_t0 * 255.0f + 0.5f);   // UNORM8: the stored byte exactly.
+    uint4  khcw_key = uint4(khcw_b0.x | (khcw_b0.y << 8) | (khcw_b0.z << 16) | (khcw_b0.w << 24), 0u, 0u, 0u);
+    float4 khcw_rc = float4(khcw_r0, 0.0f, 0.0f, 0.0f);   // Each class's first raw.
+    const float khcw_ri = depthParams.z + (depthParams.w - depthParams.z) * depthParams.x;
+    uint   khcw_own = 1u;   // Bit c: class c lies on sample 0's surface.
+    uint   khcw_nc = 1u;
+    uint   khcw_map = 0u;
+    uint   khcw_eq = 0u;    // Bit k: sample k's raw is sample 0's bit for bit.
+    bool   khcw_ov = false;
+    bool   khcw_l2 = false;
+    bool   khcw_z = false;
+    float2 khcw_g = float2(0.0f, 0.0f);
+    // KH_WSEE_EFAST: every T texel and raw loaded together (unrolled, the index held to the count), word 0 returned
+    // where every T texel is sample 0's and every raw is sample 0's or on its surface (one class, own, no level 2);
+    // elsewhere the loop below runs as before. No early return (fxc's X4000 at the loop): khcw_fz marks word 0 and the
+    // loop runs only without it. At 2x / 4x the samples past the count reload the last one (a cached texel).
+    bool khcw_fz = false;
+    {
+        bool  khcw_ft = true, khcw_fd = false;
+        float khcw_fr[KH_WSEE_NS];
+        khcw_fr[0] = khcw_r0;
+        [unroll] for (uint khcw_fk = 1u; khcw_fk < KH_WSEE_NS; ++khcw_fk) {
+            const bool   khcw_fi = khcw_fk < khcw_n;
+            const float4 khcw_ftk = khWsT.Load(px, (int)min(khcw_fk, khcw_n - 1u));
+            const float  khcw_frk = depthTex.Load(px, (int)min(khcw_fk, khcw_n - 1u));
+            khcw_fr[khcw_fk] = khcw_frk;
+            khcw_ft = khcw_ft && (!khcw_fi || all(khcw_ftk == khcw_t0));
+            khcw_fd = khcw_fd || (khcw_fi && khcw_frk != khcw_r0);
+        }
+        [branch] if (khcw_ft) {
+            khcw_fz = !khcw_fd;
+            [branch] if (khcw_fd) {
+                // The gradient's address carries a raw-derived 0 (as in the loop below; a raw is at most 1).
+                const float2 khcw_fg = KhWseeGrad(px + int2((int)(khcw_r0 > 2.0f), 0), khcw_r0);
+                bool khcw_fo = true;
+                [unroll] for (uint khcw_fj = 1u; khcw_fj < KH_WSEE_NS; ++khcw_fj) {
+                    khcw_fo = khcw_fo && (khcw_fj >= khcw_n ||
+                                          KhWseeSame(khcw_fj, khcw_r0, khcw_fr[khcw_fj], khcw_fg));
+                }
+                khcw_fz = khcw_fo;
+            }
+        }
+    }
+    uint khcw_w = 0u;   // One return - the fast path's word 0, else the loop's word below.
+    [branch] if (!khcw_fz) {
+        [loop] for (uint khcw_k = 1u; khcw_k < khcw_n; ++khcw_k) {
+            const float4 khcw_tk = khWsT.Load(px, (int)khcw_k);
+            const float  khcw_rk = depthTex.Load(px, (int)khcw_k);
+            if (any(khcw_tk.xy != khcw_t0.xy)) khcw_l2 = true;
+            bool khcw_on = true;
+            [branch] if (khcw_rk != khcw_r0) {
+                // The address's offset is 0 (a raw is at most 1) but not to fxc - the loads stay in this branch.
+                [branch] if (!khcw_z) khcw_g = KhWseeGrad(px + int2((int)(khcw_rk > 2.0f), 0), khcw_r0);
+                khcw_z = true;
+                khcw_on = KhWseeSame(khcw_k, khcw_r0, khcw_rk, khcw_g);
+                if (!khcw_on) khcw_l2 = true;
+            } else {
+                khcw_eq |= 1u << khcw_k;
+            }
+            const uint4 khcw_bk = (uint4)(khcw_tk * 255.0f + 0.5f);
+            const uint  khcw_kk = khcw_bk.x | (khcw_bk.y << 8) | (khcw_bk.z << 16) | (khcw_bk.w << 24);
+            const uint  khcw_o = khcw_on ? 1u : 0u;
+            uint khcw_c = 4u;
+            // An on-surface sample matches an on-surface class by its key alone; only an off-surface one pays the
+            // nearness test (fxc evaluates both operands of ||, so an agreeing pixel's loop carries none of it).
+            [branch] if (khcw_on) {
+                [unroll] for (uint khcw_j = 0u; khcw_j < 4u; ++khcw_j) {
+                    const bool khcw_m = khcw_key[khcw_j] == khcw_kk && ((khcw_own >> khcw_j) & 1u) == 1u;
+                    if (khcw_c == 4u && khcw_j < khcw_nc && khcw_m) khcw_c = khcw_j;
+                }
+            } else {
+                [unroll] for (uint khcw_j1 = 0u; khcw_j1 < 4u; ++khcw_j1) {
+                    const bool khcw_nr = abs(khcw_rk - khcw_rc[khcw_j1]) <=   // Near the class's first raw.
+                                         KH_WSEE_ZTOL + KH_WSEE_CLS_REL * abs(khcw_rc[khcw_j1] - khcw_ri);
+                    const bool khcw_m = khcw_key[khcw_j1] == khcw_kk && ((khcw_own >> khcw_j1) & 1u) == 0u && khcw_nr;
+                    if (khcw_c == 4u && khcw_j1 < khcw_nc && khcw_m) khcw_c = khcw_j1;
+                }
+            }
+            if (khcw_c == 4u) {
+                khcw_ov = khcw_ov || khcw_nc >= 4u;
+                khcw_c = min(khcw_nc, 3u);
+                [unroll] for (uint khcw_i = 1u; khcw_i < 4u; ++khcw_i) {
+                    if (khcw_i == khcw_nc) {
+                        khcw_key[khcw_i] = khcw_kk;
+                        khcw_rc[khcw_i] = khcw_rk;
+                    }
+                }
+                khcw_own |= khcw_nc < 4u ? (khcw_o << khcw_nc) : 0u;
+                khcw_nc = min(khcw_nc + 1u, 4u);
+            }
+            khcw_map |= khcw_c << (2u * khcw_k);
+        }
+        // KhWseeDisagreeLv's second loop for the samples whose raw is sample 0's bit for bit (its KhWseeSame on every
+        // sample once some raw differs): the same call on the same values, no load.
+        [branch] if (khcw_z && !khcw_l2) {
+            [loop] for (uint khcw_j2 = 1u; khcw_j2 < khcw_n; ++khcw_j2) {
+                [branch] if (((khcw_eq >> khcw_j2) & 1u) != 0u) {
+                    if (!KhWseeSame(khcw_j2, khcw_r0, khcw_r0, khcw_g)) khcw_l2 = true;
+                }
+            }
+        }
+        const uint khcw_lv = khcw_l2 ? KH_WSEE_CW_L2 : 0u;
+        khcw_w = khcw_ov ? (KH_WSEE_CW_OV | khcw_lv)
+                         : (khcw_lv | ((khcw_nc - 1u) << 20) | (((khcw_own >> 1) & 7u) << 16) | (khcw_map & 0xFFFFu));
+    }
+    return khcw_w;
+}
+#endif
+// KH_WSEE per sample: how many depth pairs px takes given its front raw khwn_r (LoadDepthPS's) - 1 (unarmed, no MSAA,
+// the samples agree, or the marker / KH_VM_SEE changed sample 0 - both sample-0 constructs) or KhWseeNs where they
+// disagree; khwn_g = the pixel's raw-depth gradient for KhWseeSampleAt (0 on the per-pixel path), taken here outside
+// the caller's sample loop (inside it fxc hoists its four loads onto every pixel). The fast path reads khWsE alone
+// where bound.
+// KH_WSEE_EDGE_COST - KhWseeCountW (the builtins): where khWsE's word stands (bit 0) and is nonzero, the pixel's
+// CLASSES (1 - 4; khwn_w = the word, no gradient) in place of its samples; past four classes or without the word every
+// sample (khwn_w = KH_WSEE_CW_OV, the gradient taken); khwn_w = 0 on the per-pixel path. KhWseeSampleAtW takes class
+// k's first member (raw, T texel, own flag), KhWseeClassM its member count (weight members / KhWseeNs, KhWseeDivW): the
+// rule and Q once per class. The value moves only within a class (its members take the first member's raw and Tp).
+// KhWseeCount (the user contract) keeps every sample where they disagree.
+uint KhWseeCountW(int2 px, float khwn_r, out float2 khwn_g, out uint khwn_w)
+{
+    uint khwn_c = 1u;
+    khwn_g = float2(0.0f, 0.0f);
+    khwn_w = 0u;
+#if MSAA_DEPTH
+    [branch] if (KhWseeArmed()) {
+        [branch] if ((KhWseeAvail() & 4u) != 0u) {   // Bit 2: per sample allowed (KH_WSEE_EPIX clears it).
+            uint khwn_e;
+            // khWsE is the class word: nonzero where the samples disagree (KhWseeClassWord); the inline test reads as
+            // past four classes.
+            [branch] if ((KhWseeAvail() & 1u) != 0u) {
+                khwn_e = khWsE.Load(int3(px, 0));
+            } else {
+                khwn_e = KhWseeDisagree(px) ? KH_WSEE_CW_OV : 0u;
+            }
+            [branch] if (khwn_e != 0u) {
+                [branch] if (khwn_r == depthTex.Load(px, 0)) {
+                    [branch] if ((khwn_e & KH_WSEE_CW_OV) != 0u) {
+                        khwn_c = KhWseeNs();
+                        khwn_g = KhWseeGrad(px, khwn_r);
+                        khwn_w = KH_WSEE_CW_OV;
+                    } else {
+                        khwn_c = ((khwn_e >> 20) & 3u) + 1u;
+                        khwn_w = khwn_e;
+                    }
+                }
+            }
+        }
+    }
+#endif
+    return khwn_c;
+}
+uint KhWseeCount(int2 px, float khwn_r, out float2 khwn_g)
+{
+    uint khwn_w;
+    uint khwn_c = KhWseeCountW(px, khwn_r, khwn_g, khwn_w);
+#if MSAA_DEPTH
+    [branch] if (khwn_w != 0u && (khwn_w & KH_WSEE_CW_OV) == 0u) {   // KH_WSEE_EDGE_COST: every sample here.
+        khwn_c = KhWseeNs();
+        khwn_g = KhWseeGrad(px, khwn_r);
+    }
+#endif
+    return khwn_c;
+}
+// KH_WSEE_EDGE_COST: class khcs_c of word khcs_w - bit 2k set where sample k (k < KhWseeNs) is a member; its
+// member count (KhWseeClassM, as a weight: 1 outside the class form - every sample, or the per-pixel rule) and its
+// first member (KhWseeClassRep); KhWseeDivW the weights' sum (KhWseeNs in the class form, else the pair count).
+uint KhWseeClassSet(uint khcs_w, uint khcs_c)
+{
+#if MSAA_DEPTH
+    const uint khcs_x = (khcs_w & 0xFFFFu) ^ (khcs_c * 0x5555u);   // 0 in the pairs that hold class c.
+    return ~(khcs_x | (khcs_x >> 1)) & 0x5555u & ((1u << (2u * KhWseeNs())) - 1u);
+#else
+    return 1u;
+#endif
+}
+float KhWseeClassM(uint khcs_w, uint khcs_c)
+{
+    float khcs_m = 1.0f;
+#if MSAA_DEPTH
+    [branch] if (khcs_w != 0u && (khcs_w & KH_WSEE_CW_OV) == 0u) {
+        khcs_m = (float)countbits(KhWseeClassSet(khcs_w, khcs_c));
+    }
+#endif
+    return khcs_m;
+}
+uint KhWseeClassRep(uint khcs_w, uint khcs_c) { return firstbitlow(KhWseeClassSet(khcs_w, khcs_c)) >> 1; }
+float KhWseeDivW(uint khcs_w, uint khcs_n)
+{
+    float khcs_d = (float)khcs_n;
+#if MSAA_DEPTH
+    [branch] if (khcs_w != 0u && (khcs_w & KH_WSEE_CW_OV) == 0u) khcs_d = (float)KhWseeNs();
+#endif
+    return khcs_d;
+}
+#if MSAA_DEPTH
+// KH_WSEE_EDGE_COST: the scene's sample colours (khWsC) for pair khcc_c - in the class form the mean of the
+// class's members' (exact for the affine parts of effect 13's per-sample rule; its clamp and cap then see the mean),
+// else sample khcc_c's own.
+float3 KhWseeClassC(int2 px, uint khcc_w, uint khcc_c)
+{
+    float3 khcc_s = float3(0.0f, 0.0f, 0.0f);
+    [branch] if (khcc_w != 0u && (khcc_w & KH_WSEE_CW_OV) == 0u) {
+        const uint khcc_set = KhWseeClassSet(khcc_w, khcc_c);
+        [loop] for (uint khcc_k = 0u; khcc_k < KhWseeNs(); ++khcc_k) {
+            [branch] if (((khcc_set >> (2u * khcc_k)) & 1u) != 0u) khcc_s += khWsC.Load(px, (int)khcc_k).rgb;
+        }
+        khcc_s /= (float)countbits(khcc_set);
+    } else {
+        khcc_s = khWsC.Load(px, (int)khcc_c).rgb;
+    }
+    return khcc_s;
+}
+#endif
+// The pair of px's sample khws_k of khws_n with gradient khws_g (KhWseeCount's): KhWseeAt's out and value on that
+// sample's own raw and T texel (n and s the pixel's; khws_r is sample 0's raw on this path, KhWseeCount having checked
+// that LoadDepthPS left it as it is; the sample shares sample 0's layer verdict where KhWseeSame); khws_n = 1 is
+// KhWseeAt itself. One body for both: a per-pixel case inside a caller's sample loop would be loop-invariant and fxc
+// would hoist KhWseeRule's loads out of their branches (the T load then on every pixel). KhWseeSampleAtW: in the class
+// form (khws_w KhWseeCountW's word) khws_k is a class - its first member's raw and T texel and the class's own flag
+// from the word (no KhWseeSame); else (khws_w 0 or KH_WSEE_CW_OV) KhWseeSampleAt itself.
+float KhWseeSampleAtW(int2 px, float khws_r, uint khws_k, uint khws_n, uint khws_w, float2 khws_g, out float3 khws_o)
+{
+    float khws_t = 1.0f;
+    khws_o = float3(khws_r, khws_r, 0.0f);
+#if MSAA_DEPTH
+    uint  khws_s = khws_n > 1u ? khws_k : 0u;
+    float khws_rk = khws_r;
+    bool  khws_own = true;
+    [branch] if (khws_w != 0u && (khws_w & KH_WSEE_CW_OV) == 0u) {
+        khws_s = KhWseeClassRep(khws_w, khws_k);
+        khws_own = khws_k == 0u || ((khws_w >> (15u + khws_k)) & 1u) != 0u;
+        khws_rk = depthTex.Load(px, (int)khws_s);
+    } else {
+        [branch] if (khws_n > 1u) {
+            khws_rk = depthTex.Load(px, (int)khws_s);
+            khws_own = khws_rk == khws_r;
+            [branch] if (!khws_own) khws_own = KhWseeSame(khws_s, khws_r, khws_rk, khws_g);
+        }
+    }
+    [branch] if (KhWseeArmed()) {
+        khws_t = KhWseeRule(px, khws_rk, khws_s, khws_own, khws_r, khws_o);
+    }
+#else
+    khws_t = KhWseeAt(px, khws_r, khws_o);
+#endif
+    return khws_t;
+}
+float KhWseeSampleAt(int2 px, float khws_r, uint khws_k, uint khws_n, float2 khws_g, out float3 khws_o)
+{
+    return KhWseeSampleAtW(px, khws_r, khws_k, khws_n, 0u, khws_g, khws_o);
+}
+// KhWseeMix - the two-depth blend of a quantity, per sample where px's samples disagree. khwm_q holds Q at the front
+// raw khwm_r; khwm_e is an expression of the float khwm_z (a view depth, LinDepth's) giving Q there. Each pair takes Tr
+// Q(behind) + (1 - Tr) Q(front) - or the front-to-back group composition where two or more groups cover it, one group's
+// at its own depth (KhWseeOneFront) - and khwm_q becomes their mean (the classes' weighted mean with khWsE:
+// KhWseeClassM / KhWseeDivW); left exactly as it was unarmed and where nothing covers and the samples agree (an
+// uncovered pair takes Q(r_k)). One-entry caches keep khwm_e to the depths not yet seen, so the per-pixel path
+// evaluates it at most once per covered pixel at the behind and once at a no-write layer's front, plus once per
+// further layer group whose depth is neither (KhWseeOneFront's group where one stands, each KhWseeGroupZ7 group where
+// two or more do). KH_WSEE_FAINT (khwm_fn): a pair covered by faint layers alone, the behind the depth buffer's, takes
+// Q at r and evaluates nothing (the constant's note at KH_WSEE_FAINT_T). Contract: khwm_r must be
+// LoadDepthPS(khwm_px) of the same pixel; khwm_z a name unused in the scope (the macro declares it); khwm_e free of
+// gradients (Load / SampleLevel, no Sample or ddx: it runs inside a [loop] and [branch]es); khwm_px, khwm_r, khwm_q
+// plain variables (read several times). A statement ending in a block: brace it as the body of an unbraced if / else.
+// One loop over all seven groups (khWsGz / khWsGz2) so the caller's expression is not repeated.
+#define KhWseeMix(khwm_px, khwm_r, khwm_q, khwm_z, khwm_e) \
+    [branch] if (KhWseeArmed()) { \
+        float2 khwm_g; \
+        uint khwm_w; \
+        const uint khwm_n = KhWseeCountW(khwm_px, khwm_r, khwm_g, khwm_w); \
+        float khwm_lf = khwm_r, khwm_qf = khwm_q, khwm_lb = khwm_r, khwm_qb = khwm_q, khwm_a = 0.0f; \
+        bool khwm_c = khwm_n > 1u || khwm_w != 0u; \
+        KH_WSEE_LOOP for (uint khwm_k = 0u; khwm_k < khwm_n; ++khwm_k) { \
+            float3 khwm_o; \
+            const float khwm_t = KhWseeSampleAtW(khwm_px, khwm_r, khwm_k, khwm_n, khwm_w, khwm_g, khwm_o); \
+            const bool khwm_fn = khwm_o.y > khwm_o.x && khwm_t >= KH_WSEE_FAINT_T && khwm_o.y == khwm_r; \
+            float khwm_v = khwm_q; \
+            [branch] if (!khwm_fn) { \
+            [branch] if (khwm_o.x != khwm_lf) { \
+                khwm_lf = khwm_o.x; \
+                const float khwm_z = LinDepth(khwm_o.x); \
+                khwm_qf = (khwm_e); \
+            } \
+            khwm_v = khwm_qf; \
+            [branch] if (khwm_o.y > khwm_o.x) { \
+                khwm_c = true; \
+                [branch] if (khwm_o.y != khwm_lb) { \
+                    khwm_lb = khwm_o.y; \
+                    const float khwm_z = LinDepth(khwm_o.y); \
+                    khwm_qb = (khwm_e); \
+                } \
+                [branch] if (khWsGn >= 2u) { \
+                    float khwm_gv = 0.0f, khwm_gp = 1.0f; \
+                    [loop] for (uint khwm_i = 0u; khwm_i < (khWsSp ? 7u : 3u); ++khwm_i) { \
+                        const float khwm_gt = KhWseeGroupT7(khwm_i); \
+                        [branch] if (khwm_gt < 1.0f) { \
+                            const float khwm_gr = KhWseeGroupZ7(khwm_i); \
+                            float khwm_gq = khwm_qb; \
+                            [branch] if (khwm_gr == khwm_lf) { \
+                                khwm_gq = khwm_qf; \
+                            } else { \
+                                [branch] if (khwm_gr != khwm_lb) { \
+                                    const float khwm_z = LinDepth(khwm_gr); \
+                                    khwm_gq = (khwm_e); \
+                                } \
+                            } \
+                            khwm_gv += khwm_gp * (1.0f - khwm_gt) * khwm_gq; \
+                            khwm_gp *= khwm_gt; \
+                        } \
+                    } \
+                    khwm_v = khwm_gv + khwm_gp * khwm_qb; \
+                } else { \
+                    const float khwm_of = KhWseeOneFront(khwm_o); \
+                    float khwm_q1 = khwm_qb; \
+                    [branch] if (khwm_of == khwm_lf) { \
+                        khwm_q1 = khwm_qf; \
+                    } else { \
+                        [branch] if (khwm_of != khwm_lb) { \
+                            const float khwm_z = LinDepth(khwm_of); \
+                            khwm_q1 = (khwm_e); \
+                        } \
+                    } \
+                    khwm_v = khwm_t * khwm_qb + (1.0f - khwm_t) * khwm_q1; \
+                } \
+            } \
+            } \
+            khwm_a += KhWseeClassM(khwm_w, khwm_k) * khwm_v; \
+        } \
+        if (khwm_c) khwm_q = khwm_a / KhWseeDivW(khwm_w, khwm_n); \
+    }
 float LoadDepthPS(int2 px)
 {
     const float khnz_r = LoadDepthRaw(px);
-    if (shadowMeta2.x > 0.5f) {
+    if (shadowMeta2.x > 0.5f) {   // TWIN (KH_DLF_SPLIT): effect3.hlsl KhDlfWsMaybe's mark test.
         const float2 khnz_m = khNzMark.Load(int3(px, 0));
         if (khnz_m.x > 0.0f && khnz_m.x == khnz_r && khnz_m.y > 0.0f) {
             return depthParams.z + (depthParams.w - depthParams.z) * (depthParams.x + depthParams.y / khnz_m.y);
@@ -3823,8 +6511,9 @@ bool KhVmSeeArmed() { return shadowMeta2.w > 0.5f; }
 bool KhVmSeeCovered(int2 px)
 {
     bool khvc_c = false;
-    [branch] if (shadowMeta2.w > 0.5f && LoadDepthRaw(px) < depthParams.z) {
-        khvc_c = khVmSee.Load(int3(px, 0)) >= depthParams.z;
+    // KH_VMSEE_NEST: nested as KhVmSeeT is - fxc evaluates both operands of &&, so the depth fetch ran unarmed too.
+    [branch] if (shadowMeta2.w > 0.5f) {
+        if (LoadDepthRaw(px) < depthParams.z) khvc_c = khVmSee.Load(int3(px, 0)) >= depthParams.z;
     }
     return khvc_c;
 }
@@ -3833,6 +6522,160 @@ float3 KhVmSeeFade(float3 scene, float3 outc, int2 px)
     const float khvf_t = KhVmSeeT(px);
     if (khvf_t < 1.0f) outc = lerp(scene, outc, khvf_t);
     return outc;
+}
+// KH_WSEE for any effect (KhWseeArmed above), the per-pixel rule (sample 0): whether the world's blended layers cover
+// px, their transmittance there (1 elsewhere and unarmed; covered layers can be fully transparent: 1 too), the
+// nearest layer's raw depth and the raw depth behind them (each the front raw - LoadDepthPS's - where not covered).
+bool KhWseeCovered(int2 px)
+{
+    bool khwc_c = false;
+    [branch] if (KhWseeArmed()) {
+        float3 khwc_o;
+        KhWseeAt(px, LoadDepthPS(px), khwc_o);
+        khwc_c = khwc_o.y > khwc_o.x;
+    }
+    return khwc_c;
+}
+float KhWseeT(int2 px)
+{
+    float khwt_t = 1.0f;
+    [branch] if (KhWseeArmed()) {
+        float3 khwt_o;
+        khwt_t = KhWseeAt(px, LoadDepthPS(px), khwt_o);
+    }
+    return khwt_t;
+}
+float KhWseeFrontRaw(int2 px)
+{
+    const float khwf_r = LoadDepthPS(px);
+    float3 khwf_o = float3(khwf_r, khwf_r, 0.0f);
+    [branch] if (KhWseeArmed()) {
+        KhWseeAt(px, khwf_r, khwf_o);
+    }
+    return khwf_o.x;
+}
+float KhWseeBehindRaw(int2 px)
+{
+    const float khwb_r = LoadDepthPS(px);
+    float3 khwb_o = float3(khwb_r, khwb_r, 0.0f);
+    [branch] if (KhWseeArmed()) {
+        KhWseeAt(px, khwb_r, khwb_o);
+    }
+    return khwb_o.y;
+}
+// The layer groups covering px (per pixel, sample 0; khWsGz / khWsGt's note): how many (2 or more, up to 7 - the
+// three nearest here: compose them front to back;
+// 1: one group - the blend by KhWseeT between KhWseeFrontRaw and KhWseeBehindRaw is exact for it where khwu_z.x is
+// the front, else between khwu_z.x and the behind; 0: uncovered or unarmed), their raw depths nearest first (khwu_z)
+// and transmittances (khwu_t; an absent group: the behind's raw at T 1). Q is then composed front to back: (1 - t.x)
+// Q(z.x) + t.x (1 - t.y) Q(z.y) + t.x t.y (1 - t.z) Q(z.z) + t.x t.y t.z Q(behind) - as KhWseeMix does per sample.
+uint KhWseeGroups(int2 px, out float3 khwu_z, out float3 khwu_t)
+{
+    const float khwu_r = LoadDepthPS(px);
+    uint khwu_n = 0u;
+    khwu_z = khwu_r.xxx;
+    khwu_t = float3(1.0f, 1.0f, 1.0f);
+    [branch] if (KhWseeArmed()) {
+        float3 khwu_o;
+        KhWseeAt(px, khwu_r, khwu_o);
+        if (khwu_o.y > khwu_o.x) {
+            khwu_n = khWsGn;
+            khwu_z = khwu_n > 0u ? khWsGz : khwu_o.yyy;
+            khwu_t = khwu_n > 0u ? khWsGt : float3(1.0f, 1.0f, 1.0f);
+        }
+    }
+    return khwu_n;   // Up to 7 (KhWseeGroups5 / KhWseeGroups7 give more); the three nearest.
+}
+// KhWseeGroups with five groups (fence-type, and per phase the part at its NW position and the near-surface or far
+// part): groups 0 - 3 in khwu_z / khwu_t, group 4 in khwu_g4 (depth, T) - the five NEAREST of up to seven
+// (KhWseeGroups7 gives all).
+uint KhWseeGroups5(int2 px, out float4 khwu_z, out float4 khwu_t, out float2 khwu_g4)
+{
+    const float khwu_r = LoadDepthPS(px);
+    uint khwu_n = 0u;
+    khwu_z = khwu_r.xxxx;
+    khwu_t = float4(1.0f, 1.0f, 1.0f, 1.0f);
+    khwu_g4 = float2(khwu_r, 1.0f);
+    [branch] if (KhWseeArmed()) {
+        float3 khwu_o;
+        KhWseeAt(px, khwu_r, khwu_o);
+        if (khwu_o.y > khwu_o.x) {
+            khwu_n = khWsGn;
+            khwu_z = khwu_n > 0u ? float4(khWsGz, khWsSp ? khWsGz2.x : khwu_o.y) : khwu_o.yyyy;
+            khwu_t = khwu_n > 0u ? float4(khWsGt, khWsSp ? khWsGt2.x : 1.0f) : float4(1.0f, 1.0f, 1.0f, 1.0f);
+            khwu_g4 = (khwu_n > 0u && khWsSp) ? float2(khWsGz2.y, khWsGt2.y) : float2(khwu_o.y, 1.0f);
+        }
+    }
+    return khwu_n;
+}
+// KhWseeGroups with all seven groups (fence-type, and per phase the part at its NW position, the 100 % band's and the
+// 25 % band's or far part): groups 0 - 3 in khwu_z / khwu_t, 4 - 6 in khwu_z2 / khwu_t2 (an absent group: the
+// behind's raw at T 1).
+uint KhWseeGroups7(int2 px, out float4 khwu_z, out float4 khwu_t, out float3 khwu_z2, out float3 khwu_t2)
+{
+    const float khwu_r = LoadDepthPS(px);
+    uint khwu_n = 0u;
+    khwu_z = khwu_r.xxxx;
+    khwu_t = float4(1.0f, 1.0f, 1.0f, 1.0f);
+    khwu_z2 = khwu_r.xxx;
+    khwu_t2 = float3(1.0f, 1.0f, 1.0f);
+    [branch] if (KhWseeArmed()) {
+        float3 khwu_o;
+        KhWseeAt(px, khwu_r, khwu_o);
+        if (khwu_o.y > khwu_o.x) {
+            khwu_n = khWsGn;
+            khwu_z = khwu_n > 0u ? float4(khWsGz, khWsSp ? khWsGz2.x : khwu_o.y) : khwu_o.yyyy;
+            khwu_t = khwu_n > 0u ? float4(khWsGt, khWsSp ? khWsGt2.x : 1.0f) : float4(1.0f, 1.0f, 1.0f, 1.0f);
+            khwu_z2 = (khwu_n > 0u && khWsSp) ? khWsGz2.yzw : khwu_o.yyy;
+            khwu_t2 = (khwu_n > 0u && khWsSp) ? khWsGt2.yzw : float3(1.0f, 1.0f, 1.0f);
+        }
+    }
+    return khwu_n;
+}
+// KH_WSEE_BEHIND - the scene colour behind px's layers (the per-pixel rule, sample 0) and their transmittance over
+// it, as the distance fog's exact stages take them at a pixel whose samples agree (TWIN: effect.hlsl's effect 13, its
+// per-sample loop with the sample's own colour as the cap's pixel; the formulas here are its sample-0 ones): the
+// capture's colour plus this pass's change since it (scene - R, the chain's input), held >= 0 - B2's where a late
+// opaque was drawn before the cycle's first fence-type layer (G = 0.5: its colour is in B2), else B's - and the
+// transmittance held by the stacking cap (KhWseeCap): with B2 the product of the two stages' caps (Tw Tpost against
+// the pixel over B2'; Tpre against B2' over B'), else the whole product against the pixel over B'. true where
+// covered and the colour behind is known; false - behind = scene, t = 1 - unarmed, uncovered, where a surface was
+// drawn over the scene after the cycle's first fence-type layer (G = 1: no colour behind it was taken) and where
+// KH_VM_SEE's planes cover px (the pixel holds their light): blend by depth alone there, as effect 13's factor blend
+// and KhWseeMix do. Every load sits behind the arm and the covered test; scene is the pass's source at px
+// (SampleScene). A file calling it names a KhWsee identifier, so it is a colour reader (C++ kh_wsee_col_reader):
+// armed only in a cycle whose capture resolved B (B2 with it where bit 3 stands), unarmed in the cycle it first asks.
+// LIMITATION: B / B2 are taken before the C++ multiplies the scene by our dynamic-light world shadow
+// (kh_dls_world_pass), so a world surface our meshes shadow from a dynamic light reads unshadowed behind a layer.
+bool KhWseeBehindColor(int2 px, float3 scene, out float3 behind, out float t)
+{
+    bool khwb_k = false;
+    behind = scene;
+    t = 1.0f;
+    [branch] if (KhWseeArmed()) {
+        float3 khwb_o;
+        const float khwb_tr = KhWseeAt(px, LoadDepthPS(px), khwb_o);
+        [branch] if (khwb_o.y > khwb_o.x && khwb_o.z < 0.75f) {
+            [branch] if (KhVmSeeT(px) >= 1.0f) {
+                const float3 khwb_d = scene - khWsR.Load(int3(px, 0)).rgb;   // S - R.
+                const float4 khwb_x = khWsLx;   // The rule's T texel (Tw, G, Tpre, Tpost).
+                [branch] if (khwb_o.z > 0.25f) {
+                    behind = max(khWsB2.Load(int3(px, 0)).rgb + khwb_d, 0.0f);
+                    t = KhWseeCap(khwb_x.x * khwb_x.w, scene, behind);
+                } else {
+                    behind = max(khWsB.Load(int3(px, 0)).rgb + khwb_d, 0.0f);
+                    [branch] if ((KhWseeAvail() & 8u) != 0u) {
+                        const float3 khwb_b2 = max(khWsB2.Load(int3(px, 0)).rgb + khwb_d, 0.0f);
+                        t = KhWseeCap(khwb_x.x * khwb_x.w, scene, khwb_b2) * KhWseeCap(khwb_x.z, khwb_b2, behind);
+                    } else {
+                        t = KhWseeCap(khwb_tr, scene, behind);
+                    }
+                }
+                khwb_k = true;
+            }
+        }
+    }
+    return khwb_k;
 }
 
 Texture2D<float> khArbSnap : register(t2);
@@ -3843,6 +6686,25 @@ float3 SampleScene(int2 px)
     float4 khss = sceneColor.Load(int3(px, 0));
     if (centerSize.w > 2.5f) return khss.rgb * khss.a;
     return khss.rgb;
+}
+
+// KH_FX_BILINEAR - the scene at a fractional pixel position p (pixel centres at k + 0.5, as SV_Position's), the
+// four SampleScene texels around it weighted bilinearly (each tap through SampleScene: clamped to the frame, the UI
+// spill lane's premultiplication per tap). A displacement effect read its taps at the nearest whole pixel, so a
+// shift below half a pixel was none and a growing one stepped a pixel at a time (chromatic aberration's ring line,
+// distortion's staircases). At a pixel centre the texel itself, exactly: an axis with no fraction takes its first
+// texel by a select, not lerp(a, b, 0) - an Inf or NaN neighbour would make that NaN. Four loads a tap, for one.
+float3 KhSampleSceneBil(float2 p)
+{
+    const float2 khsb_q = p - 0.5f;
+    const float2 khsb_i = floor(khsb_q);
+    const float2 khsb_f = khsb_q - khsb_i;
+    const int2 khsb_p = int2(khsb_i);
+    const float3 khsb_a = SampleScene(khsb_p);
+    const float3 khsb_c = SampleScene(khsb_p + int2(0, 1));
+    const float3 khsb_t = khsb_f.x > 0.0f ? lerp(khsb_a, SampleScene(khsb_p + int2(1, 0)), khsb_f.x) : khsb_a;
+    const float3 khsb_u = khsb_f.x > 0.0f ? lerp(khsb_c, SampleScene(khsb_p + int2(1, 1)), khsb_f.x) : khsb_c;
+    return khsb_f.y > 0.0f ? lerp(khsb_t, khsb_u, khsb_f.y) : khsb_t;
 }
 
 // Meaningless in the scene phase - callers gate on the flag.
@@ -3968,14 +6830,23 @@ float KhEncFence()
 
 // KH_LOCAL_REL: the same reconstruction without the camera added - relative to fxCam when it is armed, absolute
 // (as KhWorldPosFenced) when it is not. KhWorldPosFenced = this + fxCam.
-float3 KhWorldPosRelFenced(int2 px, float2 uv, out float khwr_d)
+// KH_NEAR_RECON: the view depth is re-encoded as it is down to a millimetre (KhDlfRel's floor; the divide is
+// never at risk - a depth decodes at about the near plane or farther); a floor of 1 m put every surface nearer
+// than a metre - the first-person hands and weapon, a wall the player stands against - a metre out along its
+// ray, so a localized volume, a Pulse ring or a user effect took it as standing there.
+// KH_WSEE: KhWorldPosRelAt is its body at a given LINEAR view depth khwr_z (LinDepth's) - the fence and the
+// KH_NEAR_RECON floor as here - so a two-depth pass reconstructs the point behind the world's blended layers too.
+float3 KhWorldPosRelAt(float2 uv, float khwr_z, out float khwr_d)
 {
-    float khwr_raw = LinDepth(LoadDepthPS(px));
-    khwr_d = min(khwr_raw, KhEncFence() * 0.999f);
+    khwr_d = min(khwr_z, KhEncFence() * 0.999f);
     float4 khwr_nd = float4(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f,
-                            depthParams.x + depthParams.y / max(khwr_d, 1.0f), 1.0f);
+                            depthParams.x + depthParams.y / max(khwr_d, 1.0e-3f), 1.0f);   // KH_NEAR_RECON.
     float4 khwr_wp = mul(khwr_nd, invViewProj);
     return khwr_wp.xyz / khwr_wp.w;
+}
+float3 KhWorldPosRelFenced(int2 px, float2 uv, out float khwr_d)
+{
+    return KhWorldPosRelAt(uv, LinDepth(LoadDepthPS(px)), khwr_d);
 }
 
 float3 KhWorldPosFenced(int2 px, float2 uv, out float khwf_d)
@@ -3983,7 +6854,7 @@ float3 KhWorldPosFenced(int2 px, float2 uv, out float khwf_d)
     float khwf_raw = LinDepth(LoadDepthPS(px));
     khwf_d = min(khwf_raw, KhEncFence() * 0.999f);
     float4 khwf_nd = float4(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f,
-                            depthParams.x + depthParams.y / max(khwf_d, 1.0f), 1.0f);
+                            depthParams.x + depthParams.y / max(khwf_d, 1.0e-3f), 1.0f);   // KH_NEAR_RECON.
     float4 khwf_wp = mul(khwf_nd, invViewProj);
     // With fxCam armed the inverse is of a rotation-only view (camera at the
     // origin) - small numbers, exact in fp32 - and the camera is added here,
@@ -4037,7 +6908,7 @@ float KhFxFogEngine(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float
         // the beyond-far mirror and to raw-depth teeter by construction.
         float2 fs_uv = (fs_px + 0.5f) / fs_res;
         float4 fs_nd = float4(fs_uv.x * 2.0f - 1.0f, 1.0f - fs_uv.y * 2.0f,
-                              depthParams.x + depthParams.y / max(fs_de, 1.0f), 1.0f);
+                              depthParams.x + depthParams.y / max(fs_de, 1.0e-3f), 1.0f);   // KH_NEAR_RECON.
         float4 fs_wp = mul(fs_nd, invViewProj);
         // With fxCam armed the inverse is camera-relative and the height comes
         // back relative too; fogColor.w is the camera's absolute altitude, so
@@ -4089,10 +6960,12 @@ float KhFxFogEngine(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float
     return fs_s;
 }
 
-// KH_FX_FOGREC: the KH fog passes (effect 13's twin - the same linear-depth ramp and skyAmount rule; edit both or
-// neither), two records [startDist, endDist, skyAmount, opacity] (opacity 0 = none), each combined with the fog
-// fraction fs_s as an independent medium; unsaturated. KhFsFog's loop (fxParams1 / 2, the builtin fog scatter's
-// system lanes) and KhFxFogAt's (khFxFog).
+// KH_FX_FOGREC: the KH fog passes (effect 13's twin, effect.hlsl's KhFxDistFogF - the same linear-depth ramp and
+// skyAmount rule; edit both or neither), two records [startDist, endDist, skyAmount, opacity] (opacity 0 = none), each
+// combined with the fog fraction fs_s as an independent medium; unsaturated. KhFsFog's loop (fxParams1 / 2, the
+// builtin fog scatter's system lanes) and KhFxFogAt's (khFxFog). One depth per call: KH_WSEE's two are its
+// caller's blend (fog scatter's KhFsFogW; effect 13 blends its twin KhFxDistFogF the same way). KH_DLF_FOGREC: a third
+// twin, effect.hlsl's KhDlfPassF (one record's factor and its derivative, dynamicLightFog's medium).
 float KhFxFogPasses(float fs_s, float fs_d, float4 fs_r0, float4 fs_r1)
 {
     float fs_fence = KhEncFence();
@@ -4178,6 +7051,18 @@ bool KhFxSunSpot(float3 khss_dir, out float2 spos, out int2 sp)
 // A tap off the frame is absent information and is left out of the average (fog scatter's rule): a Load there reads
 // 0, the near plane, which counted as blocked and dimmed a sun standing near an edge. KhFxSunSpot clamps the source
 // to the frame edge (one past it), so some taps always land inside; with none (a frame a few pixels wide) it reads 0.
+// KH_WSEE: a tap the world's blended layers cover sees the sky through them by their transmittance - Tr x the
+// behind depth's verdict + (1 - Tr) x the front's (a fence or foliage against the sun no longer blocks it whole), per
+// sample where the tap's pixel's samples disagree (KhWseeMix). Armed, the taps are taken again in one loop - not 25
+// unrolled copies of KhWseeMix's - in the same order, so an uncovered tap adds the same value. The scene chain draws
+// this once (side 29); where that side draw is unavailable an armed pass's every pixel pays the 25 taps twice and 25
+// KhWseeMix (3 - 4 loads each, more at a disagreeing tap).
+// One tap's verdict at view depth khsf_d (khsf_f = KhEncFence()): the far fence's feather, 1 = sky.
+float KhSunFlareTap(float khsf_d, float khsf_f)
+{
+    return saturate((min(khsf_d, khsf_f) - khsf_f * 0.98f)
+                    / max(khsf_f * 0.019f, 1.0f));
+}
 float KhSunFlareVis(int2 sp)
 {
     float vis = 0.0f;
@@ -4189,10 +7074,22 @@ float KhSunFlareVis(int2 sp)
         // KH_FX_PX_REF: nearest whole px.
         const int2 khsf_p = sp + int2(ox, oy) * max((int)floor(3.0f * KhFxPx() + 0.5f), 1);
         if (khsf_p.x < 0 || khsf_p.y < 0 || khsf_p.x >= (int)fxMeta.z || khsf_p.y >= (int)fxMeta.w) continue;
-        float khsf_d = LinDepth(LoadDepthPS(khsf_p));
-        vis += saturate((min(khsf_d, khsf_f) - khsf_f * 0.98f)
-                        / max(khsf_f * 0.019f, 1.0f));
+        vis += KhSunFlareTap(LinDepth(LoadDepthPS(khsf_p)), khsf_f);
         khsf_n += 1.0f;
+    }
+    [branch] if (KhWseeArmed()) {   // KH_WSEE.
+        const int khsf_st = max((int)floor(3.0f * KhFxPx() + 0.5f), 1);
+        float khsf_w = 0.0f;
+        [loop] for (uint khsf_i = 0u; khsf_i < 25u; ++khsf_i)
+        {
+            const int2 khsf_p = sp + (int2(uint2(khsf_i % 5u, khsf_i / 5u)) - 2) * khsf_st;
+            if (khsf_p.x < 0 || khsf_p.y < 0 || khsf_p.x >= (int)fxMeta.z || khsf_p.y >= (int)fxMeta.w) continue;
+            const float khsf_r = LoadDepthPS(khsf_p);
+            float khsf_v = KhSunFlareTap(LinDepth(khsf_r), khsf_f);
+            KhWseeMix(khsf_p, khsf_r, khsf_v, khsf_z, KhSunFlareTap(khsf_z, khsf_f));
+            khsf_w += khsf_v;
+        }
+        vis = khsf_w;
     }
     return khsf_n > 0.0f ? vis / khsf_n : 0.0f;
 }
@@ -4205,36 +7102,41 @@ float KhSunFlareEdge(float2 spos)
     return saturate((1.3f - max(khse_n.x, khse_n.y)) / 0.3f);
 }
 
-// Point-op pass fusion. CPU twin: the chain loops' pending append
-// (kh_fuse_append) enforces the fusible set {1 invert, 2 colorgrade, 3
-// vignette, 5 grain}, never localized / banded / spill / LUT / custom, so this
-// path carries no masks.
-// Film grain's noise (effect 5 and KhFusePoint's id 5 - one body): smooth value noise over grainSizePx cells,
-// triangular-ish and signed, optional chroma. p0 = [amount, fps, grainSizePx, lumaResponse], chroma = the chroma
-// lane. KH_HASH: the frame (time quantized to fps) is the hash's integer lane, the cells' own coordinates the
-// other two, so no frame count or position reaches a float sum.
+// Point-op pass fusion. CPU twin: the chain loops' gate (kh_fuse_appendable,
+// then kh_fuse_append) admits the fusible set {1 invert, 2 colorgrade, 3
+// vignette, 5 grain}, never localized / banded / with textures (KH_FX_TEX_ALL)
+// / spill / LUT / custom, so this path carries no masks.
+// KH_GRAIN_SIZE: film grain's noise layer - smooth (smoothstep-bilinear) value noise at grain-cell coordinates
+// gp, three independent lanes [luma, red, blue] from one hash per lattice corner (pcg3d's three words). khgv_o
+// shifts the lattice so two layers never hash the same corner. Each lane in [0, 1), mean 1/2.
+float3 KhGrainVn(float2 gp, float khgv_o, uint f)
+{
+    const float2 ip = floor(gp) + khgv_o;
+    float2 fp = frac(gp);
+    fp = fp * fp * (3.0f - 2.0f * fp);
+    const float3 n00 = (float3)(KhPcg3(uint3(asuint(ip), f)) >> 8u);
+    const float3 n10 = (float3)(KhPcg3(uint3(asuint(ip + float2(1, 0)), f)) >> 8u);
+    const float3 n01 = (float3)(KhPcg3(uint3(asuint(ip + float2(0, 1)), f)) >> 8u);
+    const float3 n11 = (float3)(KhPcg3(uint3(asuint(ip + float2(1, 1)), f)) >> 8u);
+    return lerp(lerp(n00, n10, fp.x), lerp(n01, n11, fp.x), fp.y) * (1.0f / 16777216.0f);
+}
+// Film grain's noise (effect 5 and KhFusePoint's id 5 - one body): smooth value noise over grainSizePx cells plus
+// a finer octave over cells 2.13 times smaller, triangular-ish and signed, optional chroma. p0 = [amount, fps,
+// grainSizePx, lumaResponse], chroma = the chroma lane. KH_HASH: the frame (time quantized to fps) is the hash's
+// integer lane, the cells' own coordinates the other two. KH_GRAIN_SIZE: both octaves over cells of grainSizePx x
+// KhFxPx() pixels, so the grain is one picture at any resolution. The gain 0.5929 = 0.5 (the two-octave mean) x
+// sqrt(1901 / 1352) keeps the 1080-row amplitude the defaults were tuned at with a per-pixel hash octave (variance
+// 1/12, against this value noise's pointwise (1/12)(26/35)^2).
 float3 KhGrainGc(float2 pos, float t, float4 p0, float chroma)
 {
     const float fps = max(p0.y, 1.0f);
     const uint f = (uint)floor(t * fps);
     const float2 gp = pos / (max(p0.z, 1.0f) * KhFxPx());   // KH_FX_PX_REF.
-    const float2 ip = floor(gp);
-    float2 fp = frac(gp);
-    fp = fp * fp * (3.0f - 2.0f * fp);
-    const float n00 = KhHashF(ip, f);
-    const float n10 = KhHashF(ip + float2(1, 0), f);
-    const float n01 = KhHashF(ip + float2(0, 1), f);
-    const float n11 = KhHashF(ip + float2(1, 1), f);
-    const float nv = lerp(lerp(n00, n10, fp.x), lerp(n01, n11, fp.x), fp.y);
-    const float nf = KhHashF(gp * 2.13f + 17.0f, f);
-    const float g = (nv + nf) * 0.5f - 0.5f;   // Triangular-ish, signed.
-    float3 gc = g.xxx;
+    const float3 n = KhGrainVn(gp, 0.0f, f) + KhGrainVn(gp * 2.13f, 0.5f, f);   // Coarse + fine octave.
+    const float3 gl = (n - 1.0f) * 0.5929f;   // Triangular-ish, signed, zero-mean: lanes [luma, red, blue].
+    float3 gc = gl.xxx;
     if (chroma > 0.001f)
-    {
-        const float gr = (lerp(KhHashF(ip + 31.0f, f), KhHashF(ip + float2(1, 1) + 31.0f, f), fp.x) + KhHashF(gp * 1.71f + 47.0f, f)) * 0.5f - 0.5f;
-        const float gb = (lerp(KhHashF(ip + 73.0f, f), KhHashF(ip + float2(1, 1) + 73.0f, f), fp.x) + KhHashF(gp * 2.71f + 89.0f, f)) * 0.5f - 0.5f;
-        gc = lerp(gc, float3(gr, g, gb), chroma);
-    }
+        gc = lerp(gc, gl.yxz, chroma);   // Red and blue from their own lanes, green the luma's.
     return gc;
 }
 
@@ -4244,9 +7146,9 @@ float3 KhFusePoint(int id, float3 c, float2 uv, float2 pos, float t,
     if (id == 1) return (1.0f - saturate(c)) * col.rgb;
     if (id == 2)
     {
-        float3 g = c * col.rgb * p0.z;
+        float3 g = c * p0.z;   // KH_GRADE_TINT: effect 2's order - the tint after the saturation.
         float l = Luma(g);
-        g = lerp(l.xxx, g, p0.x);
+        g = lerp(l.xxx, g, p0.x) * col.rgb;
         g = (g - 0.5f) * p0.y + 0.5f;
         return pow(max(g, 0.0f), max(p0.w, 1.0e-4f));   // Effect 2's twin: see its gamma floor.
     }
@@ -4269,14 +7171,16 @@ float3 KhFusePoint(int id, float3 c, float2 uv, float2 pos, float t,
 // Fused-stage composite: the packing tail's blend algebra over the running
 // value, plus - write-window lanes only - the coverage destination mask (KH_LOCAL_BLEND: a lerp in its
 // pre-composite position under normal / lighten / darken, the opacity's factor under the other three).
-float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos, float t)
+// KH_FUSE_CLOCK: each stage on its own clock, fm.z = its pass's age (kh_fuse_append) - the fxMeta.y it takes
+// unfused, so a fused grain draws the frame its own pass would.
+float3 KhFuseTail(float3 v, float cov, bool uiLane, float2 uv, float2 pos)
 {
     int n = (int)fuseMeta.x;
     [loop] for (int s = 0; s < n; ++s)
     {
         float4 fm = fuseStage[s * 4];
         float4 fcol = fuseStage[s * 4 + 3];
-        float3 c = KhFusePoint((int)fm.x, v, uv, pos, t,
+        float3 c = KhFusePoint((int)fm.x, v, uv, pos, fm.z,
                                fuseStage[s * 4 + 1], fuseStage[s * 4 + 2], fcol);
         float a = fcol.w;
         int bm = (int)fm.y;
@@ -4409,11 +7313,69 @@ void KhFxBegin(VSOut i)
     }
 }
 
+// KH_WSEE: KhFxFinish's localization and band masks at a view depth z (LinDepth's) - each block's body after its
+// depth read, so the front mask is today's arithmetic - and a covered pixel takes Tr x the mask behind the world's
+// blended layers + (1 - Tr) x the front's, per sample where its samples disagree (KhWseeMix). khlm_c = the centre
+// relative to the camera (KH_LOCAL_REL). The inverse (localRadii.w) is applied after the blend: linear (and an
+// average of masks: affine), so either order gives the same.
+float KhFxLocalMaskAt(float3 khlm_c, float2 uv, float khlm_z)
+{
+    float khlm_d;
+    float3 nd3 = abs(KhWorldPosRelAt(uv, khlm_z, khlm_d) - khlm_c) / max(localRadii.xyz, 0.01f);
+    // Normalized distance: 1.0 = the mask surface (ellipsoid or mesh).
+    float nd = (localParams0.w > 0.5f)
+             ? max(nd3.x, max(nd3.y, nd3.z))   // Cube (Chebyshev).
+             : length(nd3);   // Sphere/ellipsoid.
+    return 1.0f - smoothstep(1.0f, 1.0f + max(localParams1.x, 0.001f), nd);
+}
+float KhFxBandMaskAt(int2 px, float khbr_z)
+{
+    // KH_BAND_RADIAL: the distance of the surface the pixel shows - its view depth taken out along its ray, as
+    // the reference says ("metres from the camera") and as the mesh twin measures (SolidMask). The view depth
+    // alone reached ~1.7 x farther toward the screen's sides at a 16:9 field of view. The sky stays the sky.
+    // (Distance fog 13 and the fog passes keep the view depth, as the mesh fog does: deliberate.)
+    const float2 khbr_m = KhFxProjScale();
+    float d = khbr_z > 1.0e8f ? khbr_z : length(KhgVpos(float2(px), khbr_z, fxMeta.zw, khbr_m.x, khbr_m.y));
+    float fall = max(bandParams.z, 0.01f);
+    float mask = smoothstep(bandParams.x - fall, bandParams.x, d);
+    if (bandParams.y > 0.0f)
+        mask *= 1.0f - smoothstep(bandParams.y, bandParams.y + fall, d);
+    return mask;
+}
+// KH_FX_MASK_ACC - the pass's localization mask (its inverse applied) and band mask at px, as KhFxFinish forms them
+// (TWIN: its two mask blocks, with uv = i.pos.xy / fxMeta.zw - px + 0.5 is i.pos.xy at a pixel centre): at both depths
+// through the world's blended layers where KH_WSEE covers, per sample where the samples disagree. 1 on a pass that
+// is not localized / not banded. Every depth read behind the lane test, as KhFxFinish's.
+float KhFxLocalMask(int2 px)
+{
+    float khlm_m = 1.0f;
+    [branch] if (localParams1.y > 0.5f) {
+        precise float3 khlm_c = localParams0.xyz - (fxCam.w > 0.5f ? fxCam.xyz : float3(0.0f, 0.0f, 0.0f));
+        const float2 khlm_uv = (float2(px) + 0.5f) / float2(fxMeta.z, fxMeta.w);
+        const float khlm_r = LoadDepthPS(px);
+        khlm_m = KhFxLocalMaskAt(khlm_c, khlm_uv, LinDepth(khlm_r));
+        KhWseeMix(px, khlm_r, khlm_m, khlm_z, KhFxLocalMaskAt(khlm_c, khlm_uv, khlm_z));
+        if (localRadii.w >= 0.5f) khlm_m = 1.0f - khlm_m;
+    }
+    return khlm_m;
+}
+float KhFxBandMask(int2 px)
+{
+    float khbm_m = 1.0f;
+    [branch] if (bandParams.w > 0.5f) {
+        const float khbm_r = LoadDepthPS(px);
+        khbm_m = KhFxBandMaskAt(px, LinDepth(khbm_r));
+        KhWseeMix(px, khbm_r, khbm_m, khbm_z, KhFxBandMaskAt(px, khbm_z));
+    }
+    return khbm_m;
+}
+
 // KhFxFinish: the pixel finished as the builtin finishes its own - for a builtin
 // medium pass, the fade through the view model's translucent planes (KH_VM_SEE:
 // shadowMeta2.w 2, never a user effect's) - the localization mask (and its
-// inverse), the band mask, the UI lane's coverage,
-// opacity (color.a) and the blend mode, the fused stages, then the packing
+// inverse), the band mask (each at both depths where KH_WSEE covers, per sample
+// where its samples disagree), the UI lane's coverage, opacity (color.a) and
+// the blend mode, the fused stages, then the packing
 // its composite wants (a fullscreen pass writes the composite; an effect mesh
 // returns what the hardware blend expects). scene = the pass's source at the
 // pixel (SampleScene), outc = the effect's result, pos = i.pos.xy. Return it.
@@ -4421,18 +7383,24 @@ float4 KhFxFinish(float3 scene, float3 outc, float2 pos)
 {
     const int2 px = int2(pos);
     const float2 uv = pos / float2(fxMeta.z, fxMeta.w);
-    const float t = fxMeta.y;
     int bm = (int)sizeAxes.w;
 
     // KH_LOCAL_BLEND - every mask below (KH_VM_SEE's transmittance, the localization mask and its inverse, the
-    // band mask, the UI coverage) is how much of the pass reaches the pixel. Under normal, lighten and darken it
-    // lerps outc toward the scene, which the blend then leaves as it was. Under additive, multiply and screen that
-    // lerp blended the scene into itself where the mask is 0 (an additive local pass at opacity 0.5 brightened the
-    // whole picture 1.5x outside its volume), so for those three the masks scale the opacity instead (khlb_m): the
-    // picture is untouched where a mask is 0 and blended as before where it is 1. khlb_m stays exactly 1 under
-    // the other three, whose arithmetic is unchanged. KhFuseTail takes the UI coverage by the same rule; fused
+    // band mask, the UI coverage) is how much of the pass reaches the pixel. Under normal (a chain pass's), lighten
+    // and darken it lerps outc toward the scene, which the blend then leaves as it was. Under additive, multiply and
+    // screen that lerp blended the scene into itself where the mask is 0 (an additive local pass at opacity 0.5
+    // brightened the whole picture 1.5x outside its volume), so for those three the masks scale the opacity instead
+    // (khlb_m): the picture is untouched where a mask is 0 and blended as before where it is 1. khlb_m stays exactly 1
+    // under the other three, whose arithmetic is unchanged. KhFuseTail takes the UI coverage by the same rule; fused
     // stages carry no other mask (kh_fuse_appendable).
-    const bool khlb_scale = bm == 1 || bm == 2 || bm == 3;
+    // KH_FX_MASK_ALPHA - on an effect MESH under normal blend (centerSize.w 0, bm 0) the masks scale khlb_m as well,
+    // and the mesh packing below puts it on the alpha the hardware blend reads: the lerp of outc toward `scene` wrote
+    // the capture back where a mask is 0 (over everything drawn since it was taken, at the draw's opacity). Where the
+    // capture equals the pixel the two forms agree for every mask value (lerp(d, lerp(d, o, m), a) = lerp(d, o, a m));
+    // where a mask is 0 the pixel is now left as it was. The chain (centerSize.w 1), the UI lane and the other mesh
+    // modes keep their expressions. TWIN: the
+    // chain's masks and KhFuseTail's coverage rule are KH_LOCAL_BLEND's; the UI lane's coverage is the chain's.
+    const bool khlb_scale = bm == 1 || bm == 2 || bm == 3 || (bm == 0 && centerSize.w < 0.5f);
     float khlb_m = 1.0f;
 
     // KH_VM_SEE (shadowMeta2.w 2: a builtin medium pass): where the snapshot holds the scene, the pass shows through
@@ -4451,18 +7419,15 @@ float4 KhFxFinish(float3 scene, float3 outc, float2 pos)
 
     if (localParams1.y > 0.5f)
     {
-        float khlm_d;
         // KH_LOCAL_REL: the camera-relative point against the centre made relative to the camera. Adding the
         // camera's kilometres to the point first (KhWorldPosFenced) rounded it to the world's float step (2 - 4
         // mm far from the origin), which a sharp falloff turned into a crawling staircase; centre - camera of
         // two nearby floats is exact (precise keeps it from being reassociated).
         precise float3 khlm_c = localParams0.xyz - (fxCam.w > 0.5f ? fxCam.xyz : float3(0.0f, 0.0f, 0.0f));
-        float3 nd3 = abs(KhWorldPosRelFenced(px, uv, khlm_d) - khlm_c) / max(localRadii.xyz, 0.01f);
-        // Normalized distance: 1.0 = the mask surface (ellipsoid or mesh).
-        float nd = (localParams0.w > 0.5f)
-                 ? max(nd3.x, max(nd3.y, nd3.z))   // Cube (Chebyshev).
-                 : length(nd3);   // Sphere/ellipsoid.
-        float mask = 1.0f - smoothstep(1.0f, 1.0f + max(localParams1.x, 0.001f), nd);
+        const float khlm_r = LoadDepthPS(px);
+        float mask = KhFxLocalMaskAt(khlm_c, uv, LinDepth(khlm_r));
+        // KH_WSEE: behind the world's blended layers by their transmittance (per sample where they disagree).
+        KhWseeMix(px, khlm_r, mask, khlm_z, KhFxLocalMaskAt(khlm_c, uv, khlm_z));
         // localRadii.w >= 0.5 complements the mask - the effect reaches
         // everything except the volume, falloff band and sky included. C++ twin
         // local_radii[3] (addLocalPostFX 'inverse').
@@ -4476,11 +7441,11 @@ float4 KhFxFinish(float3 scene, float3 outc, float2 pos)
     // Multiplies with the localization mask.
     if (bandParams.w > 0.5f)
     {
-        float d = LinDepth(LoadDepthPS(px));
-        float fall = max(bandParams.z, 0.01f);
-        float mask = smoothstep(bandParams.x - fall, bandParams.x, d);
-        if (bandParams.y > 0.0f)
-            mask *= 1.0f - smoothstep(bandParams.y, bandParams.y + fall, d);
+        // KH_BAND_RADIAL (KhFxBandMaskAt): the distance of the surface the pixel shows, along its ray.
+        const float khbr_r = LoadDepthPS(px);
+        float mask = KhFxBandMaskAt(px, LinDepth(khbr_r));
+        // KH_WSEE: behind the world's blended layers by their transmittance (per sample where they disagree).
+        KhWseeMix(px, khbr_r, mask, khbr_z, KhFxBandMaskAt(px, khbr_z));
         if (khlb_scale) khlb_m *= mask;   // KH_LOCAL_BLEND.
         else outc = lerp(scene, outc, mask);
     }
@@ -4511,11 +7476,11 @@ float4 KhFxFinish(float3 scene, float3 outc, float2 pos)
                 int2((int)fxMeta.z - 1, (int)fxMeta.w - 1)), 0));
             if (centerSize.w > 2.5f)
                 comp += khuRaw.rgb * (1.0f - khuRaw.a);
-            comp = KhFuseTail(comp, khuRaw.a, true, uv, pos, t);
+            comp = KhFuseTail(comp, khuRaw.a, true, uv, pos);
             return float4(comp, khuRaw.a);   // Coverage passthrough.
         }
 
-        comp = KhFuseTail(comp, 1.0f, false, uv, pos, t);   // (scene chain lane).
+        comp = KhFuseTail(comp, 1.0f, false, uv, pos);   // (scene chain lane).
         return float4(comp, 1.0f);
     }
 
@@ -4525,6 +7490,6 @@ float4 KhFxFinish(float3 scene, float3 outc, float2 pos)
     if (bm == 1 || bm == 3) return float4(outc * (color.a * khlb_m), 1.0f);   // Additive, screen (KH_LOCAL_BLEND).
     if (bm == 2) return float4(lerp(float3(1.0f, 1.0f, 1.0f), outc, color.a * khlb_m), 1.0f);   // Multiply.
     if (bm == 4 || bm == 5) return float4(lerp(scene, outc, color.a), 1.0f);   // Lighten, darken (MAX/MIN op).
-    return float4(outc, color.a);   // Normal (alpha lerp).
+    return float4(outc, color.a * khlb_m);   // Normal (alpha lerp); KH_FX_MASK_ALPHA: the masks on the alpha.
 }
 #endif

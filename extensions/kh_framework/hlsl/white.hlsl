@@ -12,7 +12,15 @@ VSOutW VSWhite(VSIn i)
     return o;
 }
 
-float4 PSWhite(VSOutW i) : SV_Target
+// KH_WSEE: in place of a sorted tail part's user material (pending or failed - kh_draw_textured), the same test
+// and composite as PSMain's (cb.hlsl KhWseeMeshCut / KhWseeMeshOut; the lane is set on normal blend alone): that draw
+// has no depth test. Unarmed, flat unlit white (KH_MESH_O1: the colour alone, KhMeshOutC). The test's
+// per-sample verdict goes out as SV_Coverage (cb.hlsl khMsCov, PSMain's khA2cCov twin; every sample unarmed - the
+// raster's coverage stands).
+KhMeshOut PSWhite(VSOutW i, out uint khwc_cov : SV_Coverage)
 {
-    return float4(1.0f, 1.0f, 1.0f, 1.0f);
+    KhWseeMeshCut(i.pos);
+    khwc_cov = khMsCov;
+    [branch] if (KhWseeMeshMode() > 0.5f) return KhWseeMeshOut(float3(1.0f, 1.0f, 1.0f), 1.0f);
+    return KhMeshOutC(float4(1.0f, 1.0f, 1.0f, 1.0f));
 }

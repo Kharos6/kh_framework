@@ -16,7 +16,7 @@ Texture2D<float> khUiProbe : register(t5);   // matCtl.z: the UI lane's coverage
 // PSFxLinZ (the unit's tail) into targets of ours and read here in place of the conversion - a multisampled load, the
 // near-plane marker's load and a division per read - by SSGI, dynamicLightFog and fog scatter. t7: the frame (one
 // texel per pixel of fxMeta.zw), armed by matCtl.x. t8 / t9: a grid's copy, keyed the way its passes read it - t8
-// the SSGI grid's (texel t holds pixel int2(t x the grid factor), the a-trous' mapping), t9
+// the SSGI grid's (texel t holds pixel KhSsgiFull(t), the a-trous' mapping), t9
 // dynamicLightFog's (KhDlfFull's) - armed by matCtl.w (1 / 2) when the copy was drawn with the reading pass's own
 // mapping. matCtl.x and .w are otherwise unread in this unit (a textured mesh's lanes); cb.hlsl's receive textures at
 // t7 - t9 are fenced out of it, as at t4 - t6. Every reader takes the conversion in place when unarmed (effect meshes,
@@ -25,17 +25,35 @@ Texture2D<float> khUiProbe : register(t5);   // matCtl.z: the UI lane's coverage
 // and puts back what they held). t7 and KhLinZ are cb.hlsl's (the KH_FX_UNIT section: a user effect reads the same).
 Texture2D<float> khGridZS : register(t8);
 Texture2D<float> khGridZD : register(t9);
-// The SSGI grid's: texel t of a grid at factor khsz_inv (the a-trous' rule on local0.y). Read only by the chain's
-// SSGI pass, which binds t8 to its copy or to nothing (kh_fx_chain_run), so the size query and the load (ahead of
-// the branch, texel 0 when unarmed or past the copy) meet a view of ours or none.
-float KhSsgiGridZ(int2 khsz_t, float khsz_inv)
+// KH_SSGI_CENTRE: the SSGI grid's size (local0.zw, set by the chain's SSGI block; unset, the frame over the scalar
+// factor local0.y, 2 below 0.25) and the full-resolution pixel its texel t stands for - its block's centre, each
+// axis by its own factor (fxMeta.zw over the grid's size: the grid's sides are rounded apart, so one factor from the
+// width drifted up to ~3 px down the frame against the resolve, which reads the grid by normalized coords), held
+// to the frame - KhDlfFull's mapping. The seed (26) samples the same centre; the gather (22), the grid's depth copy
+// (PSFxLinZ 35) and KhSsgiGridZ's in-place read take this pixel. It was the block's first pixel, int2(t x factor):
+// (factor - 1) / 2 pixels up and left of the texel the seed and the resolve take, 1.5 at setSsgiScale 0.25.
+float2 KhSsgiGrid()
+{
+    const float khsc_f = localParams0.y >= 0.25f ? localParams0.y : 2.0f;
+    return localParams0.z >= 1.0f && localParams0.w >= 1.0f ? localParams0.zw
+                                                            : max(float2(fxMeta.z, fxMeta.w) / khsc_f, 1.0f);
+}
+int2 KhSsgiFull(int2 khsc_t)
+{
+    const int2 khsc_p = int2((float2(khsc_t) + 0.5f) * float2(fxMeta.z, fxMeta.w) / KhSsgiGrid());
+    return clamp(khsc_p, int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
+}
+// The SSGI grid's: texel t of the grid (KhSsgiFull's pixel). Read only by the chain's SSGI pass, which binds t8 to
+// its copy or to nothing (kh_fx_chain_run), so the size query and the load (ahead of the branch, texel 0 when
+// unarmed or past the copy) meet a view of ours or none.
+float KhSsgiGridZ(int2 khsz_t)
 {
     uint khsz_w, khsz_h;
     khGridZS.GetDimensions(khsz_w, khsz_h);
     const bool khsz_in = matCtl.w > 0.5f && matCtl.w < 1.5f && khsz_t.x >= 0 && khsz_t.y >= 0 &&
                          khsz_t.x < (int)khsz_w && khsz_t.y < (int)khsz_h;
     float khsz_z = khGridZS.Load(int3(khsz_in ? khsz_t : int2(0, 0), 0));
-    [branch] if (!khsz_in) khsz_z = KhLinZ(int2(float2(khsz_t) * khsz_inv));
+    [branch] if (!khsz_in) khsz_z = KhLinZ(KhSsgiFull(khsz_t));   // KH_SSGI_CENTRE.
     return khsz_z;
 }
 
@@ -234,6 +252,19 @@ float KhFsFog(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float fs_m1
     fs_s = KhFxFogPasses(fs_s, fs_d, fxParams1, fxParams2);   // KH_FX_FOGREC: the KH fog passes, one body (cb.hlsl).
     return saturate(fs_s);
 }
+// KH_WSEE: fog scatter's per-pixel fog share at fs_p of view depth fs_d - where the world's blended layers cover it,
+// the share composed by layer group at each group's depth (KhWseeMix; one group at its own depth), per sample where
+// the samples disagree; elsewhere and unarmed KhFsFog itself. Every caller that computes a pixel's share takes it (the
+// receiver, the taps in place, side draw 28); the scatter's depth comparisons keep the depth buffer's.
+float KhFsFogW(int2 fs_p, float fs_d, float2 fs_res, float fs_m00, float fs_m11)
+{
+    float fs_s = KhFsFog(float2(fs_p), fs_d, fs_res, fs_m00, fs_m11);
+    [branch] if (KhWseeArmed()) {
+        const float fs_r = LoadDepthPS(fs_p);
+        KhWseeMix(fs_p, fs_r, fs_s, fs_z, KhFsFog(float2(fs_p), fs_z, fs_res, fs_m00, fs_m11));
+    }
+    return fs_s;
+}
 
 // Sun flare's source (effect 16, side id 29): its direction, fxParams0.xyz (engine axes - the C++ converts the
 // script's), through cb.hlsl's KhFxSunSpot; KhSunFlareVis / KhSunFlareEdge are cb.hlsl's too.
@@ -255,6 +286,16 @@ static const float KH_DLF_SS_THICK_K = 0.02f;   // may change across a crossing 
 static const int   KH_DLF_SS_REFINE  = 5;       // Halvings of a tap interval where the segment goes behind the scene.
 static const float KH_DLF_SS_BIAS_K  = 0.002f;  // A point counts as behind a surface past this share of its depth
                                                  // (plus 5 cm): the sample's own surface is never its occluder.
+static const float KH_DLF_SS_RISE    = 1.0f;    // KH_DLF_SS: m straight up from a surface's point that
+                                                 // must still show that surface (within a tenth, plus THICK_K of the
+                                                 // depth) for it to STAND - a wall - and be continued behind a nearer
+                                                 // one; the ground, a roof, a ceiling recede and are not. No C++ twin.
+// KH_DLF_SS_R2: no per-light verdict from single-pixel probes about the light (a walled-light or enclosing-plane
+// test): behind foliage each probe is leaf or gap by chance, so camera motion flips such a verdict and the light's
+// whole glow with it. KhDlfSsCovered's one-pixel gate (the plane continuation's) flips as often but moves the glow by
+// about 1.4 % behind a canopy (up to about 4 % with a wall within SELF before the light). Limits: a lantern 0.3 - 1 m
+// behind a wall leaks through it within SELF of the light (the housing rule), and the fog round a body before such a
+// wall can glow where the raised probe lands on the body - neither sees what the depth buffer does not hold.
 
 // The camera-relative point on the ray through uv at view depth khdr_d.
 float3 KhDlfRel(float2 khdr_uv, float khdr_d)
@@ -265,19 +306,38 @@ float3 KhDlfRel(float2 khdr_uv, float khdr_d)
     return khdr_wp.xyz / khdr_wp.w;
 }
 // The full-resolution pixel grid texel t stands for, and its depth key: the view depth there, the sky and everything
-// past maxDistance at maxDistance (the march's own end, so equal keys march equal paths). The gather, the filter and
-// the composite share both (a texel spans fxMeta.zw / khdf_g pixels).
+// past maxDistance at maxDistance (the march's own end, so equal keys march equal paths; KH_DLF_FOGREC: KhDlfKeyZ moves
+// the sky and the far fence's feather band apart under a fog pass drawn after this one). The gather, the filter and the
+// composite share both (a texel spans fxMeta.zw / khdf_g pixels).
 int2 KhDlfFull(int2 khdf_t, float2 khdf_g)
 {
     const int2 khdf_p = int2((float2(khdf_t) + 0.5f) * float2(fxMeta.z, fxMeta.w) / max(khdf_g, 1.0f));
     return clamp(khdf_p, int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
 }
 float KhDlfMaxD() { return clamp(fxParams1.y, 10.0f, 5000.0f); }
+// KH_DLF_FOGREC: with a fog pass drawn after this one (KhDlfPassMedium's khdm_tz) a texel's glow is scaled for the
+// surface it shows, and toward the far fence a pass's factor goes from its ramp to skyAmount (the feather w:
+// KhFxFogPasses' 0 at 0.98 of KhEncFence to 1 at 0.999 of it, 1 past 1e8 - the sky), so the key moves with w from
+// min(depth, maxDistance) to 4 maxDistance: the sky keys apart from every surface the feather leaves alone, and a
+// surface in the feather (a ridge near the far plane) between them, so the filter and the upsample blend glows only
+// where their factors are close. Without such a pass the key is min(depth, maxDistance), bit for bit. Not covered:
+// covered texels key by the front's depth and take T at the behind; the upsample's 3x3 fallback (no key agreeing)
+// compares the keys clamped to maxDistance, ties broken by the unclamped ones.
+float KhDlfKeyZ(float khdk_z)
+{
+    const bool  khdk_af = (khFxFog[0].w > 0.001f && fxParams2.x < 0.5f) ||
+                          (khFxFog[1].w > 0.001f && fxParams2.y < 0.5f);
+    const float khdk_f = KhEncFence();
+    const float khdk_w = khdk_z > 1e8f ? 1.0f
+                                       : saturate((min(khdk_z, khdk_f) - khdk_f * 0.98f) / max(khdk_f * 0.019f, 1.0f));
+    const float khdk_m = min(khdk_z, KhDlfMaxD());
+    return khdk_af ? lerp(khdk_m, 4.0f * KhDlfMaxD(), khdk_w) : khdk_m;
+}
 float KhDlfKey(int2 khdk_p)
 {
-    return min(KhLinZ(khdk_p), KhDlfMaxD());   // KH_FX_LINZ.
+    return KhDlfKeyZ(KhLinZ(khdk_p));   // KH_FX_LINZ.
 }
-// KH_FX_LINZ: KhLinZ(KhDlfFull(t, g)) - KhDlfKey before its KhDlfMaxD clamp, which KhDlfKeyG applies - through
+// KH_FX_LINZ: KhLinZ(KhDlfFull(t, g)) - KhDlfKey before KhDlfKeyZ, which KhDlfKeyG applies - through
 // the grid's copy (t9): drawn with g = its own size, so it serves a reader whose g is that size; any other reads in
 // place. Read only by the chain's dynamicLightFog pass (its filter and composite) once its lights are up - the only
 // case either runs (dlCtl.x) - when it binds t9 to its copy or to nothing (kh_fx_chain_run), so the size query and
@@ -294,7 +354,7 @@ float KhDlfGridZ(int2 khdz_t, float2 khdz_g)
 }
 float KhDlfKeyG(int2 khdk_t, float2 khdk_g)
 {
-    return min(KhDlfGridZ(khdk_t, khdk_g), KhDlfMaxD());
+    return KhDlfKeyZ(KhDlfGridZ(khdk_t, khdk_g));   // KH_DLF_FOGREC.
 }
 // The engine's fog-end ramp on what lies khdn_m metres from the camera (PSMain / PSComposite's: fully fogged past the
 // fog end when the engine terms carry one, fogEngine.w in [0.5, 1.5)), a factor on the camera leg's transmittance.
@@ -307,6 +367,8 @@ float KhDlfEndRamp(float khdn_m)
 // The world fog's extinction (1/m) at absolute height khds_y: the engine's height fog as PSMain / KhFxFogEngine apply
 // it (engine terms: fogEngine.x at sea level falling off with fogParams.y; else fogParams.x * 0.0153 above
 // fogParams.z), times fogScale (fxParams0.y), plus baseDensity (fxParams0.z) everywhere. Zero with the fog off.
+// TWIN: C++ kh_dlf_medium_zero (KH_DLF_MEDIUM0) reads these terms to skip a pass whose medium is zero - a term
+// added here is added there.
 float KhDlfSigma(float khds_y)
 {
     float khds_s = 0.0f;
@@ -318,24 +380,107 @@ float KhDlfSigma(float khds_y)
     }
     return max(khds_s, 0.0f) * max(fxParams0.y, 0.0f) + max(fxParams0.z, 0.0f);
 }
-// The optical depth of a straight path khdt_d metres long between heights khdt_y0 and khdt_y1: the closed form of
-// KhDlfSigma's height fog along it (the density at the lower end, decaying along the rise) - KhFxFogEngine's with the
-// engine terms; without them KhFxFogEngine takes the far end's density over the whole path, and this integrates the
-// same fallback density instead, so the glow's extinction matches the fog it scatters in - scaled and floored as
-// KhDlfSigma.
+// The optical depth of a straight path khdt_d metres long between heights khdt_y0 and khdt_y1 - with the engine terms
+// KhFxFogEngine's form (the density at the lower end, decaying along the rise: the mesh fog's own); without them
+// KhFxFogEngine takes the far end's density over the whole path, and this integrates the same fallback density
+// instead, so the glow's extinction matches the fog it scatters in: flat below its base (fogParams.z), decaying above
+// it. KH_DLF_TAU_BASE: the share of the path below the base takes the flat density - the decaying form alone thinned
+// a path that dips below the base, and one wholly below it, to as little as a hundredth of its optical depth (a
+// valley's lamps glowed through thick fog almost unattenuated); a path wholly above is as before. Scaled and floored
+// as KhDlfSigma. The engine branch is the mesh fog's form and not KhDlfSigma's integral below sea level: it takes the
+// density at max(lo, 0) decaying along the whole rise where KhDlfSigma holds it flat below 0, so a path that dips
+// below sea level gets less optical depth than the fog it scatters in - at least 1 / (1 + x) of it, x = the height
+// decay (fogParams.y) times the depth below 0 the path reaches (a quarter at x = 3, an eighth at 7), the bound
+// approached by a long rise from there; no floor as x grows (y >= 0: within 1e-4 relative).
+// Neither branch holds the mesh fog's below-layer term (fogBelow, the camera under the layer), nor does KhDlfSigma.
 float KhDlfTau(float khdt_d, float khdt_y0, float khdt_y1)
 {
     float khdt_w = 0.0f;
     if (fogParams.w >= 0.5f) {
         const float khdt_lo = min(khdt_y0, khdt_y1);
-        const float khdt_s = (fogEngine.w >= 0.5f)   // KH_FOG_EXP_CAP, as KhDlfSigma.
-                           ? fogEngine.x * exp(min(-fogParams.y * max(khdt_lo, 0.0f), 60.0f))
-                           : fogParams.x * 0.0153f * exp(min(-fogParams.y * max(khdt_lo - fogParams.z, 0.0f), 60.0f));
-        const float khdt_k = fogParams.y * abs(khdt_y1 - khdt_y0);
-        const float khdt_i = khdt_k < 1.0e-4f ? khdt_d : khdt_d * (1.0f - exp(-khdt_k)) / khdt_k;
-        khdt_w = max(khdt_s, 0.0f) * khdt_i;
+        if (fogEngine.w >= 0.5f) {
+            const float khdt_s = fogEngine.x * exp(min(-fogParams.y * max(khdt_lo, 0.0f), 60.0f));   // KH_FOG_EXP_CAP.
+            const float khdt_k = fogParams.y * abs(khdt_y1 - khdt_y0);
+            const float khdt_i = khdt_k < 1.0e-4f ? khdt_d : khdt_d * (1.0f - exp(-khdt_k)) / khdt_k;
+            khdt_w = max(khdt_s, 0.0f) * khdt_i;
+        } else {
+            // khdt_fb = the path's share below the base (a level path: all or none); the rest rises from
+            // max(lo, base) with the decaying form.
+            const float khdt_hi = max(khdt_y0, khdt_y1);
+            const float khdt_dh = khdt_hi - khdt_lo;
+            const float khdt_a = fogParams.x * 0.0153f;
+            const float khdt_fb = khdt_dh > 1.0e-4f ? saturate((fogParams.z - khdt_lo) / khdt_dh)
+                                                    : (khdt_lo <= fogParams.z ? 1.0f : 0.0f);
+            const float khdt_s = khdt_a * exp(min(-fogParams.y * max(khdt_lo - fogParams.z, 0.0f), 60.0f));
+            const float khdt_k = fogParams.y * (khdt_hi - max(khdt_lo, fogParams.z));
+            const float khdt_da = khdt_d * (1.0f - khdt_fb);   // The path above the base (all of it: khdt_d exactly).
+            const float khdt_i = khdt_k < 1.0e-4f ? khdt_da : khdt_da * (1.0f - exp(-khdt_k)) / khdt_k;
+            khdt_w = max(khdt_s, 0.0f) * khdt_i + max(khdt_a, 0.0f) * khdt_d * khdt_fb;
+        }
     }
     return khdt_w * max(fxParams0.y, 0.0f) + max(fxParams0.z, 0.0f) * khdt_d;
+}
+// KH_DLF_FOGREC (the chain's own fog passes as a medium for dynamicLightFog, as fog scatter takes them -
+// KH_FX_FOGREC): one fog pass's factor f at view depth khdq_z - KhFxFogPasses' ramp, far-fence
+// feather and skyAmount rule for one record khdq_e [startDist, endDist, skyAmount, opacity] (TWIN: an edit there is
+// made here) - and its derivative in view depth (khdq_df; 0 where saturate holds a term flat, and past 1e8).
+float KhDlfPassF(float khdq_z, float4 khdq_e, out float khdq_df)
+{
+    const float khdq_fence = KhEncFence();
+    const float khdq_rd = max(khdq_e.y - khdq_e.x, 1.0f);
+    const float khdq_rx = (khdq_z - khdq_e.x) / khdq_rd;
+    const float khdq_r = saturate(khdq_rx);
+    const float khdq_wd = max(khdq_fence * 0.019f, 1.0f);
+    const float khdq_wx = (min(khdq_z, khdq_fence) - khdq_fence * 0.98f) / khdq_wd;
+    const float khdq_w = saturate(khdq_wx);
+    const float khdq_sky = saturate(khdq_e.z);
+    const float khdq_dr = (khdq_rx > 0.0f && khdq_rx < 1.0f) ? 1.0f / khdq_rd : 0.0f;
+    const float khdq_dw = (khdq_wx > 0.0f && khdq_wx < 1.0f && khdq_z < khdq_fence) ? 1.0f / khdq_wd : 0.0f;
+    const bool  khdq_far = khdq_z > 1e8f;
+    khdq_df = khdq_far ? 0.0f : (1.0f - khdq_w) * khdq_dr + (khdq_sky - khdq_r) * khdq_dw;
+    return khdq_far ? khdq_sky : lerp(khdq_r, khdq_sky, khdq_w);
+}
+// KH_DLF_FOGREC: the chain's distance-fog passes as the light fog's medium at a sample of view depth khdm_z (khdm_rl
+// metres of ray per unit of view depth), up to two records in khFxFog (the two most opaque fullscreen fog passes, as
+// fog scatter takes them; C++ kh_dlf_fog_pack), fxParams2.x / .y = 1 where that record's pass draws before this one. A
+// pass fogs what lies at view depth z by a f(z): to the camera it is a medium of transmittance T(z) = 1 - a f(z),
+// extinction sigma = a f' / T per unit of view depth (f' held at 0 or more: a factor that falls with depth - the sky's
+// feather under the ramp - removes no light). x = the camera leg's transmittance: for a pass drawn BEFORE this one, T
+// at the sample (the picture this pass adds to holds its fog already); for one drawn AFTER, which fogs the glow with
+// the picture by T at the surface the texel shows (khdm_tz, T at that depth per record, 1 for a pass drawn before or
+// none), min(1, T at the sample / that T): where the factor thins with depth (a sky
+// under skyAmount below the ramp) the glow is brought to its own T - exact on an uncovered texel - instead of keeping
+// the surface's larger one (a hot halo over the sky near endDist); where it thickens, the later pass over-fogs a glow
+// before the surface, as any glow in the picture, and nothing is raised (a raise would reach the passes between them
+// too). y = the passes' extinction per metre for the light leg, sigma / rl, times fogScale as the game's fog's
+// (KhDlfSigma); z = their scattering per metre seen from the camera, fogScale x sigma / rl x x - computed with each
+// pass's own factor folded in (a f' / rl for a pass drawn before; min(sigma / rl, a f' / rl / T at the surface) for one
+// after), so a pass whose T reaches 0 scatters nothing past it and nothing is divided by 0. (1, 0, 0) with no record.
+// TWIN: C++ kh_dlf_medium_zero (KH_DLF_MEDIUM0) reads the record test and fogScale's factor here.
+float3 KhDlfPassMedium(float khdm_z, float khdm_rl, float2 khdm_tz)
+{
+    const float khdm_fs = max(fxParams0.y, 0.0f);
+    float  khdm_t[2], khdm_s[2], khdm_k[2];
+    bool   khdm_b[2];
+    [unroll] for (int khdm_i = 0; khdm_i < 2; ++khdm_i) {
+        const float4 khdm_e = khdm_i == 0 ? khFxFog[0] : khFxFog[1];
+        const bool   khdm_on = khdm_e.w > 0.001f;   // KhFxFogPasses' record test.
+        float khdm_df;
+        const float khdm_f = KhDlfPassF(khdm_z, khdm_e, khdm_df);
+        const float khdm_a = khdm_on ? saturate(khdm_e.w) : 0.0f;
+        khdm_t[khdm_i] = saturate(1.0f - khdm_a * khdm_f);
+        khdm_s[khdm_i] = khdm_a * max(khdm_df, 0.0f) / khdm_rl;   // sigma T, per metre.
+        khdm_k[khdm_i] = min(khdm_s[khdm_i] / max(khdm_t[khdm_i], 1.0e-30f), 1.0e30f);   // sigma (KH_FOG_EXP_CAP).
+        khdm_b[khdm_i] = khdm_on && (khdm_i == 0 ? fxParams2.x : fxParams2.y) > 0.5f;
+    }
+    // Each record's camera factor (c) and its own scattering with that factor folded in (o).
+    const float khdm_q0 = max(khdm_tz.x, 1.0e-30f), khdm_q1 = max(khdm_tz.y, 1.0e-30f);
+    const float khdm_c0 = khdm_b[0] ? khdm_t[0] : min(khdm_t[0] / khdm_q0, 1.0f);
+    const float khdm_c1 = khdm_b[1] ? khdm_t[1] : min(khdm_t[1] / khdm_q1, 1.0f);
+    const float khdm_o0 = khdm_b[0] ? khdm_s[0] : min(khdm_k[0], khdm_s[0] / khdm_q0);
+    const float khdm_o1 = khdm_b[1] ? khdm_s[1] : min(khdm_k[1], khdm_s[1] / khdm_q1);
+    const float khdm_y = min(khdm_fs * (khdm_k[0] + khdm_k[1]), 1.0e30f);
+    return float3(khdm_c0 * khdm_c1, khdm_y, min(khdm_fs * (khdm_o0 * khdm_c1 + khdm_o1 * khdm_c0), 1.0e30f));
 }
 // Henyey-Greenstein at cos khdp_c (the light's travel against the view ray's reverse: 1 looking into the light),
 // times pi: the engine's surfaces show E * albedo, so the fog's radiance is the integral of sigma E p pi ds, and an
@@ -349,7 +494,8 @@ float KhDlfPhase(float khdp_c)
 }
 // A light's attenuation at distance khda_dist, direction khda_l (point to light, normalised): DynLights' terms
 // (cb.hlsl) - the start offset and the constant / linear / quadratic falloff of [4], the hard fade of [5], and for a
-// spot the cone of [1] / [2] and its exponent [3].w. TWIN: DynLights and KhDynLightsPBR's loops.
+// spot the cone of [1] / [2] and its exponent [3].w. TWIN (five copies): DynLights, KhDynLightsPBRE and
+// KhDlsWorldFactor's loops (cb.hlsl), kh_dls_atten (C++, the distance terms alone).
 float KhDlfAtt(float4 khda_r1, float4 khda_r2, float4 khda_r3, float4 khda_r4, float4 khda_r5,
                float khda_dist, float3 khda_l, bool khda_spot)
 {
@@ -363,8 +509,14 @@ float KhDlfAtt(float4 khda_r1, float4 khda_r2, float4 khda_r3, float4 khda_r4, f
     return khda_a;
 }
 // The distance at which a light's attenuation (KhDlfAtt without fade or cone) falls to half its peak: the radius of
-// its bright core, which the march's equiangular samples crowd toward (KhDlfEquiInit). The peak is 1 / max(c, 1) (the
-// attenuation saturates at 1), so the half is where c + l x + q x^2 = 2 max(c, 1). Zero when the terms give none.
+// its bright core, which the march's equiangular samples crowd toward (KhDlfEquiInit). For a start offset of 0 or
+// more the peak is 1 / max(c, 1) (the attenuation saturates at 1), so the half is where c + l x + q x^2 = 2 max(c, 1).
+// A negative start ([4].x < 0: x never falls below -start) is not modelled - the distance comes out where the
+// attenuation is anywhere from ~0.17 to nearly all of its value at the start (0.5 just below 0; for a constant term
+// under 1 it dips to ~0.17 where the attenuation stops saturating, then rises toward all of it the further below 0
+// the start); only the equiangular width takes it, so the estimate's noise moves, not its mean (KhDlfMisStep is
+// unbiased for any width).
+// Zero when the terms give none.
 float KhDlfCore(float4 khdo_r4)
 {
     const float khdo_rhs = max(khdo_r4.y, 2.0f - khdo_r4.y);   // l x + q x^2 = it, x = dist * scale - start.
@@ -387,8 +539,8 @@ float4 KhDlfEquiInit(float khde_t0, float khde_t1, float khde_tc, float khde_w)
 }
 float2 KhDlfMisStep(float4 khds_e, float khds_t0, float khds_t1, int khds_k, int khds_n, float khds_j)
 {
-    const int   khds_ne = (khds_n + 1) / 2;
-    const int   khds_nu = khds_n / 2;
+    const int   khds_ne = (int)((uint)(khds_n + 1) / 2u);   // KH_UDIV: as uint (khds_n is 4 - 64) - fxc's X3556.
+    const int   khds_nu = (int)((uint)khds_n / 2u);
     const float khds_len = max(khds_t1 - khds_t0, 1.0e-6f);
     const bool  khds_eq = khds_k < khds_ne;
     const float khds_te = khds_e.z + khds_e.w * tan(khds_e.x + ((float)khds_k + khds_j) / (float)khds_ne * khds_e.y);
@@ -523,6 +675,16 @@ bool KhDlfSsHidden(float3 khsh_p)
 {
     return khsh_p.x > 0.05f + KH_DLF_SS_BIAS_K * (khsh_p.x + khsh_p.y);
 }
+// KH_DLF_SS: whether the camera's view of the light itself is covered - its pixel shows a surface more
+// than KH_DLF_SS_SELF nearer than it (nearer by less: its own housing). KhDlfSsVis's khsv_cov, the gate of its plane
+// continuation; the gather works it out once per light per texel. Off the screen or behind the camera: not covered.
+bool KhDlfSsCovered(float3 khsc_lp, float3 khsc_f, float3 khsc_r, float3 khsc_u)
+{
+    const float3 khsc_n = float3(max(dot(khsc_f, khsc_f), 1.0e-8f), max(dot(khsc_r, khsc_r), 1.0e-8f),
+                                 max(dot(khsc_u, khsc_u), 1.0e-8f));
+    const float3 khsc_p = KhDlfSsProbe(float3(0.0f, 0.0f, 0.0f), khsc_lp, 1.0f, khsc_f, khsc_r, khsc_u, khsc_n);
+    return khsc_p.z > 0.5f && khsc_p.x > KH_DLF_SS_SELF;
+}
 // The screen-space occlusion of the segment from fog sample khsv_q to the light at khsv_lp (both camera-relative) by
 // the geometry the camera sees. KH_DLF_SS_TAPS points along it (jittered by khsv_j and spaced so the last is the
 // segment's end, KH_DLF_SS_KEEP short of the light) are compared with the depth buffer. Wherever the segment goes
@@ -534,8 +696,24 @@ bool KhDlfSsHidden(float3 khsh_p)
 // there, the segment only slipped behind a silhouette, or out from behind one - a post, a window's frame, a car's
 // body in front of the light - and nothing is concluded. A point off the screen or behind the camera carries no
 // information. 1 = lit.
+// KH_DLF_SS - the plane continuation, gated by khsv_cov (KhDlfSsCovered: the light itself is hidden
+// behind a surface more than KH_DLF_SS_SELF nearer than it). A jump to a NEARER surface from in front of a farther
+// one is the segment slipping behind something that stands before the surface it is about to cross - a soldier
+// before the wall of the room the light is in: the crossing lies at pixels he covers, and without this the sample
+// stays lit, his surroundings glow with a light the wall hides. With the light covered, and the far surface STANDING
+// (one probe KH_DLF_SS_RISE straight up from its point still shows it at that depth: a wall; the ground - the lamp
+// behind him over open ground - a roof or a ceiling recede from there and are left alone), the far surface is taken
+// to go on behind the nearer one at its view depth: where the segment reaches that depth, short of the light, one
+// probe reads the pixel there - the nearer surface still covering it, or the far one itself showing within
+// KH_DLF_SS_THICK, is the crossing (occluded, under the same KH_DLF_SS_SELF rule); something farther (the far
+// surface ended: a doorway, the sky) concludes nothing, as before. Only `return 0` is added: every crossing found
+// without it is still found, and with khsv_cov false (the light seen, or off the screen) nothing here runs. Limits:
+// a wall that ENDS behind the nearer one - its corner, with the light beyond it - casts a false shadow around the
+// nearer one's silhouette, only while the light itself is hidden; a wall whose top lies within KH_DLF_SS_RISE of the
+// crossing is not continued (today's leak there); a light within KH_DLF_SS_SELF of its wall still leaks (the housing
+// rule); the gate is hard, so the glow switches as the nearer one's edge crosses the light's pixel.
 float KhDlfSsVis(float3 khsv_q, float3 khsv_lp, float3 khsv_f, float3 khsv_r, float3 khsv_u, float khsv_j,
-                 float khsv_sd0)
+                 float khsv_sd0, bool khsv_cov)
 {
     const float3 khsv_v = khsv_lp - khsv_q;
     const float  khsv_len = length(khsv_v);
@@ -575,6 +753,34 @@ float KhDlfSsVis(float3 khsv_q, float3 khsv_lp, float3 khsv_f, float3 khsv_r, fl
             const float3 khsv_x = khsv_q + khsv_v * (0.5f * (khsv_a + khsv_b));   // The crossing.
             if (khsv_known && abs(khsv_pa.y - khsv_pb.y) < KH_DLF_SS_THICK + KH_DLF_SS_THICK_K * khsv_sm &&
                 length(khsv_x - khsv_lp) >= KH_DLF_SS_SELF) return 0.0f;
+            // KH_DLF_SS: the plane continuation (the note above). The far surface's depth, khsv_ext, is
+            // pa's (the side the segment was in front of); the segment's view depth is linear in t, so the point
+            // where it reaches khsv_ext is exact - clamped at a (within the bias the crossing is at a itself) and at
+            // the light, and only where the light lies past that depth (the segment going deeper). The probe there
+            // sees either side's surface (within THICK of khsv_ext, or nearer: still covered) - the crossing. First
+            // the far surface must stand: its point at a (pa's pixel's ray at depth khsv_ext - the frame is world
+            // axes, y up) raised KH_DLF_SS_RISE is probed; a wall shows it there at that depth, the ground shows
+            // farther ground or the sky (in front: x well below 0), a roof or ceiling something nearer (x above 0).
+            [branch] if (khsv_cov && khsv_known && !khsv_ha &&
+                         khsv_pb.y < khsv_pa.y - (KH_DLF_SS_THICK + KH_DLF_SS_THICK_K * khsv_sm)) {
+                const float khsv_ext = khsv_pa.y;
+                const float khsv_qz = dot(khsv_q, khsv_f) / khsv_n.x;   // The sample's view depth...
+                const float khsv_dz = dot(khsv_v, khsv_f) / khsv_n.x;   // ... and the segment's change of it.
+                [branch] if (khsv_dz > 1.0e-4f && khsv_qz + khsv_dz > khsv_ext) {
+                    const float  khsv_za = max(khsv_qz + khsv_a * khsv_dz, 0.05f);   // The view depth at a.
+                    const float3 khsv_sa = (khsv_q + khsv_v * khsv_a) * (khsv_ext / khsv_za);   // The surface at a.
+                    const float3 khsv_pr = KhDlfSsProbe(khsv_sa, float3(0.0f, KH_DLF_SS_RISE, 0.0f), 1.0f, khsv_f,
+                                                        khsv_r, khsv_u, khsv_n);
+                    const bool   khsv_st = khsv_pr.z > 0.5f &&
+                                           abs(khsv_pr.x) < 0.1f * KH_DLF_SS_RISE + KH_DLF_SS_THICK_K * khsv_ext;
+                    const float  khsv_tx = clamp((khsv_ext - khsv_qz) / khsv_dz, khsv_a, 1.0f);
+                    const float3 khsv_px = KhDlfSsProbe(khsv_q, khsv_v, khsv_tx, khsv_f, khsv_r, khsv_u, khsv_n);
+                    const float3 khsv_xx = khsv_q + khsv_v * khsv_tx;   // The crossing of the continued surface.
+                    if (khsv_st && khsv_px.z > 0.5f &&
+                        khsv_px.y < khsv_ext + (KH_DLF_SS_THICK + KH_DLF_SS_THICK_K * khsv_ext) &&
+                        length(khsv_xx - khsv_lp) >= KH_DLF_SS_SELF) return 0.0f;
+                }
+            }
         }
         khsv_pt = khsv_t;
         khsv_pp = khsv_p;
@@ -599,8 +805,8 @@ float KhDlfSsVis(float3 khsv_q, float3 khsv_lp, float3 khsv_f, float3 khsv_r, fl
 static const float KH_SSGI_THICK   = 1.0f;   // m.
 static const float KH_SSGI_VB_GAIN = 0.33f;   // The mean onto the former gather's (open scenes, 12).
 // Brightness is kept independent of the sample budget: fewer samples still cover fewer sectors (a sender on an edge
-// is a point, not a stretch; the thickness's ends), measured as a mean falling with n about as (n / 12)^
-// KH_SSGI_VB_NEXP (within about 15 % over 4 - 32 in the harness scenes); the result is scaled by its inverse, so the
+// is a point, not a stretch; the thickness's ends), measured as a mean rising with n about as (n / 12)^
+// KH_SSGI_VB_NEXP (within about 15 % over 4 - 32 samples); the result is scaled by its inverse, so the
 // budget trades noise, not brightness, as the former gather's count normalization did.
 static const float KH_SSGI_VB_NEXP = 0.21f;
 // A slice's cumulative weight at angle khsc_a (radians from the normal's projection) for a bias khsc_b: the integral
@@ -630,6 +836,170 @@ uint KhSsgiBits(float4 khsb_a, float khsb_b, float khsb_hw, float khsb_c0, float
     if (khsb_b1 <= khsb_b0) return 0u;
     const uint khsb_n = khsb_b1 - khsb_b0;
     return (khsb_n >= 32u ? 0xFFFFFFFFu : ((1u << khsb_n) - 1u)) << khsb_b0;
+}
+
+// KH_WSEE (cb.hlsl's note): the two depth-derived quantities of PSEffect's own that a covered pixel takes at both
+// depths, each from a view depth z (LinDepth's) - the effect's body after its depth read, so the front is today's.
+// Distance fog's factor (effect 13): the ramp, the far fence's feather toward skyAmount, the sky's skyAmount. Twin
+// edit at cb.hlsl's KhFxFogPasses (KhFsFog's and KhFxFogAt's fog-pass loop).
+float KhFxDistFogF(float d)
+{
+    float f = saturate((d - fxParams0.x) / max(fxParams0.y - fxParams0.x, 1.0f));
+    float khfg_f = KhEncFence();
+    float khfg_w = saturate((min(d, khfg_f) - khfg_f * 0.98f) / max(khfg_f * 0.019f, 1.0f));
+    f = lerp(f, saturate(fxParams0.z), khfg_w);
+    if (d > 1e8f) f = saturate(fxParams0.z);   // Sky/far-plane pixels (belt; the feather
+                                               // Already lands here).
+    return f;
+}
+// KH_WSEE: the distance fog's factor for a stage's layers' own light by layer group - the mean of the factor over the
+// stage's groups (raw depth khws_z, transmittance khws_t; up to four, sorted here - a stable order), each weighted by
+// its share of the stage's opacity front to back, (1 - T_i) prod_{j<i} T_j, and taken at its own depth (khws_qb, the
+// behind's factor, at or past the behind khws_b). A group with T >= 1 weighs nothing; khws_d where none weighs.
+float KhWseeFogMean(float4 khws_z, float4 khws_t, float khws_b, float khws_qb, float khws_d)
+{
+    float khws_zz[4] = { khws_z.x, khws_z.y, khws_z.z, khws_z.w };
+    float khws_tt[4] = { khws_t.x, khws_t.y, khws_t.z, khws_t.w };
+    [unroll] for (int khws_p = 0; khws_p < 3; ++khws_p) {
+        [unroll] for (int khws_j = 0; khws_j < 3 - khws_p; ++khws_j) {
+            if (khws_zz[khws_j] > khws_zz[khws_j + 1]) {
+                const float khws_sz = khws_zz[khws_j], khws_st = khws_tt[khws_j];
+                khws_zz[khws_j] = khws_zz[khws_j + 1];
+                khws_tt[khws_j] = khws_tt[khws_j + 1];
+                khws_zz[khws_j + 1] = khws_sz;
+                khws_tt[khws_j + 1] = khws_st;
+            }
+        }
+    }
+    float khws_a = 0.0f, khws_w = 0.0f, khws_g = 1.0f;
+    [unroll] for (int khws_i = 0; khws_i < 4; ++khws_i) {
+        [branch] if (khws_tt[khws_i] < 1.0f) {
+            const float khws_wi = khws_g * (1.0f - khws_tt[khws_i]);
+            const float khws_f = khws_zz[khws_i] >= khws_b ? khws_qb : KhFxDistFogF(LinDepth(khws_zz[khws_i]));
+            khws_a += khws_wi * khws_f;
+            khws_w += khws_wi;
+            khws_g *= khws_tt[khws_i];
+        }
+    }
+    return khws_w > 0.0f ? khws_a / khws_w : khws_d;
+}
+// The same over every group of the last covered verdict (up to seven, sorted: KhWseeGroupT7 / Z7).
+float KhWseeFogMeanAll(float khws_b, float khws_qb, float khws_d)
+{
+    float khws_a = 0.0f, khws_w = 0.0f, khws_g = 1.0f;
+    [loop] for (uint khws_i = 0u; khws_i < 7u; ++khws_i) {
+        const float khws_ti = KhWseeGroupT7(khws_i);
+        [branch] if (khws_ti < 1.0f) {
+            const float khws_zi = KhWseeGroupZ7(khws_i);
+            const float khws_wi = khws_g * (1.0f - khws_ti);
+            khws_a += khws_wi * (khws_zi >= khws_b ? khws_qb : KhFxDistFogF(LinDepth(khws_zi)));
+            khws_w += khws_wi;
+            khws_g *= khws_ti;
+        }
+    }
+    return khws_w > 0.0f ? khws_a / khws_w : khws_d;
+}
+// KH_WSEE_STAGE_MEAN: a stage's front factor without the layer-depth split - the mean over the stage's groups as they
+// stand in the record: the fence-type layers at the live depth khws_r (Tw) and the particle-type phase at its nearest
+// khws_n (its T), by their shares of the stage's opacity front to back (KhWseeFogMean). Before, the stage's light took
+// the factor at min(r, NWpost) alone - right for one layer, wrong where an opaque-like fence-type layer (a sea surface
+// recorded as one, foliage) stands far behind a faint near one: all of the stage's light, nearly all of it the far
+// layer's, was fogged as the near one (a rain streak before a fogged sea cut the fog out). With one group the mean is
+// that group's own factor: at r for the fence-type layers alone (min(r, NWpost) with no particle layer), at NWpost
+// for the particle phase alone (clamped to r, where min(r, NWpost) put it). The split (khWsSp) takes its own richer
+// mean (KhWseeFogMean over the bands), as before.
+float KhWseeStageMean(float khws_r, float khws_tr, float khws_n, float khws_tn, float khws_b, float khws_qb, float khws_d)
+{
+    return KhWseeFogMean(float4(khws_r, min(khws_n, khws_r), khws_b, khws_b), float4(khws_tr, khws_tn, 1.0f, 1.0f),
+                         khws_b, khws_qb, khws_d);
+}
+// Pulse's ring (effect 11) at view depth z: khpl_c = its centre relative to the camera (KH_LOCAL_REL). Fenced
+// reconstruction + the fence feather keep the ring continuous: sky (clamped to the fence) lands at feather zero.
+float KhFxPulseRing(float3 khpl_c, float2 uv, float z)
+{
+    float khpl_d;
+    float dist = distance(KhWorldPosRelAt(uv, z, khpl_d), khpl_c);
+    float band = max(fxParams1.x, 0.01f);
+    float ring = 1.0f - saturate(abs(dist - fxParams0.w) / band);
+    ring *= ring;
+    float khpl_f = KhEncFence();
+    ring *= 1.0f - saturate((khpl_d - khpl_f * 0.98f) / max(khpl_f * 0.019f, 1.0f));
+    return ring;
+}
+
+// KH_OL_D2 (outline, effect 10): w = 1 / z at p, and one axis's depth edge as the second difference of w, which is 0
+// on any plane. KhOlAxis works along unit axis khoa_a from khoa_c (khoa_p its coordinate along the axis, khoa_hi the
+// last index, khoa_d the step), in frame pixels, or (khoa_t, the UI lane) in depth texels: there the depth is at the
+// 3D render's size, and frame-pixel taps mapped through KhDepthPx land 1 and 2 texels apart at a Sampling that does
+// not divide the step - their second difference is then one texel's slope, not 0, so the taps step in texels.
+// It counts only where the forward segment holds the break (its jump at least the other segment's), the pixels a
+// forward first difference of z marks (its tap clamped to the frame, as LoadDepthPS needs), so a line keeps that
+// width and side, at the borders too. Centred (taps -d, 0, +d) inside; within d of the start (no -d tap) the
+// one-sided form into the frame (0, +d, +2d); within d of the end the forward tap is the frame's last pixel, s =
+// hi - p < d away, with the slopes compared at their spacings: (w(+s) - w0) - (s / d)(w0 - w(-d)) - a backward
+// one-sided form (0, -d, -2d) would miss a break between p and the edge, which the clamped forward tap draws. A pixel
+// that fits none of the three - p < d with p + 2d > hi, which only a frame under 3d pixels along the axis has - gives
+// 0 (a line there can lose all d of its pixels). khoa_wx = w at the tap across the break (the forward one; w0 where
+// nothing counts).
+float KhOlW(int2 khow_p) { return 1.0f / max(LinDepth(LoadDepthPS(khow_p)), 1.0e-3f); }
+// The raw depth at depth texel khor_t, with no pixel map (KhDepthPx) - the UI lane's taps (its LoadDepthPS is this
+// at KhDepthPx(px): the near-z mark and KH_VM_SEE are never armed there).
+float KhOlRawT(int2 khor_t)
+{
+#if MSAA_DEPTH
+    return depthTex.Load(khor_t, 0);
+#else
+    return depthTex.Load(int3(khor_t, 0)).x;
+#endif
+}
+int2 KhOlDepthDim()
+{
+    uint khod_w, khod_h;
+#if MSAA_DEPTH
+    uint khod_n;
+    depthTex.GetDimensions(khod_w, khod_h, khod_n);
+#else
+    depthTex.GetDimensions(khod_w, khod_h);
+#endif
+    return int2((int)khod_w, (int)khod_h);
+}
+float KhOlTap(int2 khot_c, int2 khot_a, int khot_k, bool khot_t)
+{
+    const int2 khot_q = khot_c + khot_a * khot_k;
+    float khot_w;
+    [branch] if (khot_t) khot_w = 1.0f / max(LinDepth(KhOlRawT(khot_q)), 1.0e-3f);
+    else                 khot_w = KhOlW(khot_q);
+    return khot_w;
+}
+float KhOlAxis(int2 khoa_c, int2 khoa_a, int khoa_d, int khoa_p, int khoa_hi, bool khoa_t, float khoa_w0,
+               out float khoa_wx)
+{
+    float khoa_e = 0.0f;
+    khoa_wx = khoa_w0;
+    [branch] if (khoa_p - khoa_d >= 0 && khoa_p + khoa_d <= khoa_hi) {   // Centred.
+        const float khoa_wp = KhOlTap(khoa_c, khoa_a, khoa_d, khoa_t);
+        const float khoa_wm = KhOlTap(khoa_c, khoa_a, -khoa_d, khoa_t);
+        if (abs(khoa_wp - khoa_w0) >= abs(khoa_w0 - khoa_wm)) {
+            khoa_e = abs(khoa_wp + khoa_wm - 2.0f * khoa_w0);
+            khoa_wx = khoa_wp;
+        }
+    } else if (khoa_p - khoa_d < 0 && khoa_p + 2 * khoa_d <= khoa_hi) {   // The start: into the frame.
+        const float khoa_w1 = KhOlTap(khoa_c, khoa_a, khoa_d, khoa_t);
+        const float khoa_w2 = KhOlTap(khoa_c, khoa_a, 2 * khoa_d, khoa_t);
+        if (abs(khoa_w1 - khoa_w0) >= abs(khoa_w2 - khoa_w1)) {
+            khoa_e = abs(khoa_w0 - 2.0f * khoa_w1 + khoa_w2);
+            khoa_wx = khoa_w1;
+        }
+    } else if (khoa_p + khoa_d > khoa_hi && khoa_p - khoa_d >= 0) {   // The end: the forward tap at the edge.
+        const float khoa_s = (float)(khoa_hi - khoa_p) / (float)khoa_d;
+        const float khoa_wf = KhOlTap(khoa_c, khoa_a, khoa_hi - khoa_p, khoa_t);
+        const float khoa_wm = KhOlTap(khoa_c, khoa_a, -khoa_d, khoa_t);
+        if (abs(khoa_wf - khoa_w0) >= khoa_s * abs(khoa_w0 - khoa_wm)) {
+            khoa_e = abs((khoa_wf - khoa_w0) - khoa_s * (khoa_w0 - khoa_wm));
+            khoa_wx = khoa_wf;
+        }
+    }
+    return khoa_e;
 }
 
 float4 PSEffect(VSOut i) : SV_Target
@@ -672,9 +1042,11 @@ float4 PSEffect(VSOut i) : SV_Target
     else if (effect == 2)   // colorGrade: [saturation, contrast, brightness, gamma], tint =
                             // Color.rgb.
     {
-        float3 c = scene * color.rgb * fxParams0.z;
+        // KH_GRADE_TINT: brightness, saturation, then the tint, then contrast - before the saturation the tint would
+        // only move the luma weights, and saturation 0 would leave a tinted grade grey. TWIN: KhFusePoint's id 2.
+        float3 c = scene * fxParams0.z;
         float l = Luma(c);
-        c = lerp(l.xxx, c, fxParams0.x);
+        c = lerp(l.xxx, c, fxParams0.x) * color.rgb;
         c = (c - 0.5f) * fxParams0.y + 0.5f;
         // The exponent floored at 1e-4: gamma 0 (or below) was pow(0, 0) = NaN on every black pixel (and inf below
         // zero); at the floor black stays black and the rest goes to ~1 - the limit gamma -> 0 gives.
@@ -689,17 +1061,21 @@ float4 PSEffect(VSOut i) : SV_Target
     }
     else if (effect == 4)   // Chromatic aberration: [strengthPx], radial.
     {
-        float2 off = (uv - 0.5f) * fxParams0.x * KhFxPx();   // KH_FX_PX_REF.
-        float r = SampleScene(int2(i.pos.xy + off)).r;
-        float b = SampleScene(int2(i.pos.xy - off)).b;
+        // KH_FX_ROUND: the shift grows with the radius on the picture - x in heights (x the aspect), as the sun
+        // flare measures it - so it is round; in uv the side edges, 1.78 x farther at 16:9, shifted as the top
+        // and bottom. Unchanged along the vertical: strengthPx / 2 at the top and bottom edges.
+        float2 off = float2((uv.x - 0.5f) * (fxMeta.z / fxMeta.w), uv.y - 0.5f)
+                   * fxParams0.x * KhFxPx();   // KH_FX_PX_REF.
+        float r = KhSampleSceneBil(i.pos.xy + off).r;   // KH_FX_BILINEAR.
+        float b = KhSampleSceneBil(i.pos.xy - off).b;
         outc = float3(r, scene.g, b);
     }
     else if (effect == 5)   // Film grain: [amount, fps, grainSizePx, lumaResponse, chroma].
     {
         // Filmic grain: smooth value noise with spatial extent, triangular
-        // amplitude distribution, response peaking in the mid-shadows and
-        // protecting highlights, optional chroma, time quantized to a frame
-        // rate.
+        // amplitude distribution, response peaking at mid-grey and falling
+        // toward shadows and highlights alike, optional chroma, time quantized
+        // to a frame rate.
         const float3 gc = KhGrainGc(i.pos.xy, t, fxParams0, fxParams1.x);   // KhFusePoint's twin: one body.
 
         float luma = saturate(Luma(scene));
@@ -710,10 +1086,20 @@ float4 PSEffect(VSOut i) : SV_Target
     }
     else if (effect == 6)   // Sharpen: [strength].
     {
+        // KH_SHARPEN_LIMIT: the 5-tap Laplacian, limited to the five taps' own range per channel (the limiting of
+        // contrast-adaptive sharpening). On the linear HDR scene the unlimited form took the dark side of any edge of
+        // (1 + k) / k : 1 or more (3 : 1 at the default 0.5: every skyline against trees) to zero - a black line -
+        // and lifted the bright side as far above it. The limit removes every overshoot, not only that one: a pixel
+        // that is its five taps' brightest or darkest (either side of a hard edge, a one-pixel detail) is left as it
+        // is, and a pixel between them steepens toward them as before, up to their range - a soft edge sharpens, a
+        // hard one keeps no halo.
+        const float3 khsh_r = SampleScene(px + int2(1, 0)), khsh_l = SampleScene(px - int2(1, 0));
+        const float3 khsh_d = SampleScene(px + int2(0, 1)), khsh_u = SampleScene(px - int2(0, 1));
         float3 s = scene * (1.0f + 4.0f * fxParams0.x)
-                 - fxParams0.x * (SampleScene(px + int2(1, 0)) + SampleScene(px - int2(1, 0))
-                                + SampleScene(px + int2(0, 1)) + SampleScene(px - int2(0, 1)));
-        outc = max(s, 0.0f);
+                 - fxParams0.x * (khsh_r + khsh_l + khsh_d + khsh_u);
+        const float3 khsh_mn = min(scene, min(min(khsh_r, khsh_l), min(khsh_d, khsh_u)));
+        const float3 khsh_mx = max(scene, max(max(khsh_r, khsh_l), max(khsh_d, khsh_u)));
+        outc = max(clamp(s, khsh_mn, khsh_mx), 0.0f);
     }
     else if (effect == 7)   // Gaussian-ish blur: [radiusPx].
     {
@@ -770,7 +1156,7 @@ float4 PSEffect(VSOut i) : SV_Target
     {
         float2 off = float2(KhSin(uv.y * fxParams0.y * 6.2832f + t * fxParams0.z),   // KH_HASH: t grows.
                             KhCos(uv.x * fxParams0.y * 6.2832f + t * fxParams0.z)) * fxParams0.x * KhFxPx();   // KH_FX_PX_REF.
-        outc = SampleScene(int2(i.pos.xy + off));
+        outc = KhSampleSceneBil(i.pos.xy + off);   // KH_FX_BILINEAR.
     }
 
         else if (effect == 10)   // Outline: [depthEdgeScale, lumEdgeScale, sceneDarken, glowBoost],
@@ -780,13 +1166,47 @@ float4 PSEffect(VSOut i) : SV_Target
         // step spanning the same part of the picture measures the same depth and luma differences, so the thresholds
         // hold at any size.
         const int khol_d = max((int)floor(KhFxPx() + 0.5f), 1);
-        // The depth taps clamp to the frame as SampleScene clamps the luma taps: LoadDepthPS does not, and a Load
-        // past the right or bottom edge reads 0 - the near plane - which drew an edge line along both borders.
+        // The depth taps stay inside the frame (KhOlAxis picks its forms so), as SampleScene clamps the luma taps:
+        // LoadDepthPS does not, and a Load past the frame's edge reads 0 - the near plane - which would draw an
+        // edge line along the borders.
         const int2 khol_hi = int2((int)fxMeta.z - 1, (int)fxMeta.w - 1);
-        float dC = LinDepth(LoadDepthPS(px));
-        float dX = LinDepth(LoadDepthPS(min(px + int2(khol_d, 0), khol_hi))) - dC;
-        float dY = LinDepth(LoadDepthPS(min(px + int2(0, khol_d), khol_hi))) - dC;
-        float depthEdge = saturate((abs(dX) + abs(dY)) / max(dC, 1.0f) * fxParams0.x);
+        // KH_OL_D2: the depth edge is the second difference of w = 1 / z (z = LinDepth), which is affine in screen
+        // space on any plane: zero on every plane at any slant and distance, large where the surface breaks (a
+        // silhouette; a crease, by its change of slope). A first difference of z grows with the slant: level ground
+        // would draw as edge from ~100 m and as solid edge colour past ~400 m (depthEdge 4, 1080 rows). Per axis:
+        // KhOlAxis (its note: the gating that keeps the first difference's pixels, the forms at the borders, the UI
+        // lane's texel steps). Scale, per axis: x z z_x / max(min(z, z_x), 1), z_x = 1 / w at the tap across the
+        // break - a step z -> z' then gives |z' - z| / max(min(z, z'), 1) on BOTH sides of it, at least the first
+        // difference's |z' - z| / max(z, 1) on its side (10 -> 11 m at depthEdge 4: 0.40 either side; a hand at
+        // 0.1 m against 10 m: saturated either side); scaled by the centre's z alone the near side would stop at
+        // depthEdge x min(z, 1) x (1 - z / z'). On a plane z_x ~ z: z^2 / max(z, 1), the residue of the depth's own
+        // quantisation. A surface against the sky (1e9: w 1e-9) gives ~1e9 / max(z, 1): saturated on both sides at
+        // any depthEdge above ~1e-9 x max(z, 1) (2e-5 at 20 km); the sky against the sky gives 0.
+        // Cost: five depth reads a pixel (LoadDepthPS: up to three loads each - the depth, the near-z mark, KH_VM_SEE)
+        // where the first difference took three.
+        const float khol_z = LinDepth(LoadDepthPS(px));
+        const float khol_w = 1.0f / max(khol_z, 1.0e-3f);   // KhOlW(px).
+        // The UI lane (centerSize.w above 1.125, KhDepthPx's test): the axes in depth texels, the step the frame's in
+        // texels (rounded, at least 1), the centre KhDepthPx(px) - the texel LoadDepthPS(px) read.
+        const bool khol_t = centerSize.w > 1.125f;
+        int2 khol_c = px;
+        int2 khol_e = khol_hi;
+        int2 khol_s = int2(khol_d, khol_d);
+        [branch] if (khol_t) {
+            const int2 khol_n = KhOlDepthDim();
+            if (khol_n.x > 0 && khol_n.y > 0) {
+                khol_c = KhDepthPx(px);
+                khol_e = khol_n - 1;
+                khol_s = max(int2(floor((float)khol_d * float2(khol_n) / max(fxMeta.zw, float2(1.0f, 1.0f)) + 0.5f)),
+                             int2(1, 1));
+            }
+        }
+        float khol_wx, khol_wy;
+        const float khol_ex = KhOlAxis(khol_c, int2(1, 0), khol_s.x, khol_c.x, khol_e.x, khol_t, khol_w, khol_wx);
+        const float khol_ey = KhOlAxis(khol_c, int2(0, 1), khol_s.y, khol_c.y, khol_e.y, khol_t, khol_w, khol_wy);
+        const float khol_zx = 1.0f / khol_wx, khol_zy = 1.0f / khol_wy;
+        float depthEdge = saturate((khol_ex * khol_z * khol_zx / max(min(khol_z, khol_zx), 1.0f)
+                                  + khol_ey * khol_z * khol_zy / max(min(khol_z, khol_zy), 1.0f)) * fxParams0.x);
         float lC = Luma(scene);
         float lumEdge = saturate((abs(Luma(SampleScene(px + int2(khol_d, 0))) - lC)
                                 + abs(Luma(SampleScene(px + int2(0, khol_d))) - lC)) * fxParams0.y);
@@ -796,18 +1216,15 @@ float4 PSEffect(VSOut i) : SV_Target
     else if (effect == 11)   // Pulse: p0.xyz = center (engine space), p0.w = radius; p1 =
                              // [bandWidth, intensity].
     {
-        // Fenced reconstruction + the fence feather keep the ring continuous:
-        // sky (clamped to the fence) lands at feather zero.
-        float khpl_d;
         // KH_LOCAL_REL (cb.hlsl's localization mask): the camera-relative point against the centre made
-        // relative to the camera, exactly.
+        // relative to the camera, exactly. The ring itself: KhFxPulseRing.
         precise float3 khpl_c = fxParams0.xyz - (fxCam.w > 0.5f ? fxCam.xyz : float3(0.0f, 0.0f, 0.0f));
-        float dist = distance(KhWorldPosRelFenced(px, uv, khpl_d), khpl_c);
-        float band = max(fxParams1.x, 0.01f);
-        float ring = 1.0f - saturate(abs(dist - fxParams0.w) / band);
-        ring *= ring;
-        float khpl_f = KhEncFence();
-        ring *= 1.0f - saturate((khpl_d - khpl_f * 0.98f) / max(khpl_f * 0.019f, 1.0f));
+        const float khpl_r = LoadDepthPS(px);
+        float ring = KhFxPulseRing(khpl_c, uv, LinDepth(khpl_r));
+        // KH_WSEE: the ring on what lies behind the world's blended layers shows through them by their
+        // transmittance, the ring on the layers by the rest (additive light: exact), per sample where the pixel's
+        // samples disagree (KhWseeMix).
+        KhWseeMix(px, khpl_r, ring, khpl_z, KhFxPulseRing(khpl_c, uv, khpl_z));
         outc = scene + color.rgb * ring * fxParams1.y;
     }
     else if (effect == 12)   // Halation: [threshold, intensity, radiusPx], color = glow tint
@@ -837,21 +1254,200 @@ float4 PSEffect(VSOut i) : SV_Target
         }
         outc = scene + KhGlowSel(acc, khha_p, khha_m) * color.rgb * fxParams0.y;
     }
-    else if (effect == 13)   // Distance fog: [startDist m, endDist m, skyAmount 0.1], color = fog
+    else if (effect == 13)   // Distance fog: [startDist m, endDist m, skyAmount 1], color = fog
                              // Color.
     {
-        // Twin edit at cb.hlsl's KhFxFogPasses (KhFsFog's and KhFxFogAt's fog-pass loop).
-        float d = LinDepth(LoadDepthPS(px));
-        float f = saturate((d - fxParams0.x) / max(fxParams0.y - fxParams0.x, 1.0f));
-        float khfg_f = KhEncFence();
-        float khfg_w = saturate((min(d, khfg_f) - khfg_f * 0.98f) / max(khfg_f * 0.019f, 1.0f));
-        f = lerp(f, saturate(fxParams0.z), khfg_w);
-        if (d > 1e8f) f = saturate(fxParams0.z);   // Sky/far-plane pixels (belt; the feather
-                                                   // Already lands here).
+        // The factor: KhFxDistFogF (twin edit at cb.hlsl's KhFxFogPasses).
+        const float khfg_r = LoadDepthPS(px);
+        const float f = KhFxDistFogF(LinDepth(khfg_r));
         outc = lerp(scene, color.rgb, f);
+        // KH_WSEE: S = Tr B + E (E the layers' own light) - the background fogged by f behind, the layers' light by f
+        // in front: Tr lerp(B', g, f_b) + (1 - f_f) max(S - Tr B', 0) + (1 - Tr) f_f g, with B' = max(B + (S - R), 0)
+        // (the earlier chain passes' change to the pixel, given to the background too). Exact for one blended layer
+        // in the first chain pass that changes the colour; approximate after earlier passes and for several layers.
+        // Only where G < 0.75 (G = 0, or a derived pre with B2: B / B2 is the background) and KH_VM_SEE's planes do
+        // not also cover the pixel; elsewhere covered the factor blend lerp(S, g, Tr f_b + (1 - Tr) f_f). Per sample
+        // where the samples disagree: with khWsC each sample's colour C_k' = C_k + (S - R) takes its own rule in place
+        // of S (lerp(C_k', g, f(r_k)) uncovered) and the pixel their mean - unclamped, so equal factors give lerp(S, g,
+        // f) exactly; without it lerp(S, g, mean of the samples' factors). One-entry caches keep KhFxDistFogF to the
+        // depths not yet seen (KhWseeMix's).
+        [branch] if (KhWseeArmed()) {
+            // KH_WSEE_EDGE_COST: the pairs are classes where khWsE's word stands (cb.hlsl KhWseeCountW), each
+            // weighed by its members and coloured by their mean C (KhWseeClassC); else every sample.
+            float2       khfg_g;
+            uint         khfg_w;
+            const uint   khfg_n = KhWseeCountW(px, khfg_r, khfg_g, khfg_w);
+            const bool   khfg_pm = khfg_n > 1u || khfg_w != 0u;   // KH_WSEE_EDGE_COST: the per-sample form.
+            const bool   khfg_cs = khfg_pm && (KhWseeAvail() & 2u) != 0u;   // The samples' colours (t59).
+            const bool   khfg_co = !khfg_pm || khfg_cs;   // A colour per pair: the exact rule can apply.
+            float  khfg_lf = khfg_r, khfg_qf = f, khfg_lb = khfg_r, khfg_qb = f, khfg_fa = 0.0f;
+            float3 khfg_ca = float3(0.0f, 0.0f, 0.0f);
+            bool   khfg_c = khfg_pm;
+            float3 khfg_d = float3(0.0f, 0.0f, 0.0f);   // S - R: the earlier chain passes' change (per sample only).
+#if MSAA_DEPTH
+            [branch] if (khfg_cs) khfg_d = scene - khWsR.Load(int3(px, 0)).rgb;
+#endif
+            KH_WSEE_LOOP for (uint khfg_k = 0u; khfg_k < khfg_n; ++khfg_k) {
+                float3 khfg_o;
+                const float khfg_t = KhWseeSampleAtW(px, khfg_r, khfg_k, khfg_n, khfg_w, khfg_g, khfg_o);
+                // KH_WSEE_FAINT (cb.hlsl): faint layers alone, the behind the depth buffer's - the factor at r (f),
+                // the plain lerp below; nothing evaluated at another depth. KhWseeMix's rule.
+                const bool  khfg_fn = khfg_o.y > khfg_o.x && khfg_t >= KH_WSEE_FAINT_T && khfg_o.y == khfg_r;
+                float khfg_fk = f;
+                bool  khfg_ex = false;
+                [branch] if (!khfg_fn) {
+                [branch] if (khfg_o.x != khfg_lf) {
+                    khfg_lf = khfg_o.x;
+                    khfg_qf = KhFxDistFogF(LinDepth(khfg_o.x));
+                }
+                khfg_fk = khfg_qf;
+                [branch] if (khfg_o.y > khfg_o.x) {
+                    khfg_c = true;
+                    [branch] if (khfg_o.y != khfg_lb) {
+                        khfg_lb = khfg_o.y;
+                        khfg_qb = KhFxDistFogF(LinDepth(khfg_o.y));
+                    }
+                    // Two or more layer groups: the factor composed front to back (the factor blend and the mean
+                    // factor; the exact stages keep their own formula). One group: its front is KhWseeOneFront's.
+                    [branch] if (khWsGn >= 2u) {
+                        float khfg_gv = 0.0f, khfg_gp = 1.0f;
+                        [loop] for (uint khfg_i = 0u; khfg_i < (khWsSp ? 7u : 3u); ++khfg_i) {
+                            const float khfg_gt = KhWseeGroupT7(khfg_i);
+                            [branch] if (khfg_gt < 1.0f) {
+                                const float khfg_gr = KhWseeGroupZ7(khfg_i);
+                                float khfg_gq = khfg_qb;
+                                [branch] if (khfg_gr == khfg_lf) {
+                                    khfg_gq = khfg_qf;
+                                } else {
+                                    [branch] if (khfg_gr != khfg_lb) khfg_gq = KhFxDistFogF(LinDepth(khfg_gr));
+                                }
+                                khfg_gv += khfg_gp * (1.0f - khfg_gt) * khfg_gq;
+                                khfg_gp *= khfg_gt;
+                            }
+                        }
+                        khfg_fk = khfg_gv + khfg_gp * khfg_qb;
+                    } else {
+                        // The factor at the one group's own depth (the cached front / behind reused).
+                        const float khfg_of = KhWseeOneFront(khfg_o);
+                        float khfg_q1 = khfg_qb;
+                        [branch] if (khfg_of == khfg_lf) {
+                            khfg_q1 = khfg_qf;
+                        } else {
+                            [branch] if (khfg_of != khfg_lb) khfg_q1 = KhFxDistFogF(LinDepth(khfg_of));
+                        }
+                        khfg_fk = khfg_t * khfg_qb + (1.0f - khfg_t) * khfg_q1;
+                    }
+                    khfg_ex = khfg_o.z < 0.75f;   // G = 0 or a derived pre with B2 (0.5).
+                }
+                }
+                const float khfg_m = KhWseeClassM(khfg_w, khfg_k);   // KH_WSEE_EDGE_COST: the pair's weight.
+                khfg_fa += khfg_m * khfg_fk;
+                [branch] if (khfg_co) {
+                    float3 khfg_sc = scene;
+#if MSAA_DEPTH
+                    [branch] if (khfg_cs) khfg_sc = KhWseeClassC(px, khfg_w, khfg_k) + khfg_d;   // KH_WSEE_EDGE_COST.
+#endif
+                    float3 khfg_ok = lerp(khfg_sc, color.rgb, khfg_fk);
+                    // TWIN: cb.hlsl KhWseeBehindColor is the per-pixel form of the three stages below (the colour
+                    // behind and the capped transmittance it gives the user contract) - KH_WSEE_BEHIND.
+                    [branch] if (khfg_ex) {
+                        if (KhVmSeeT(px) >= 1.0f) {
+                            // An infinite colour in S, R, B or B2 (an engine shader's inf; a 16F target holds inf,
+                            // 32F whatever was written) makes the sample NaN below as the plain fog's lerp does; not
+                            // capped (4 ALU a covered sample for a write no engine pass is known to make). S - R per
+                            // sample as written: loop-invariant, fxc hoists the load out of the sample loop.
+                            const float3 khfg_d2 = scene - khWsR.Load(int3(px, 0)).rgb;   // S - R.
+                            const float4 khfg_x = khWsLx;
+                            [branch] if (khfg_o.z > 0.25f) {
+                                // G = 0.5: a late opaque drawn before B2 (derived, B2 bound) - its colour is B2's
+                                // and its depth the behind (S2's): one stage over B2' = B2 + (S - R), the fence-type
+                                // and post layers (Tw Tpost, capped against the pixel) at the front of them, min(r,
+                                // NWpost); the pre layers drawn over it before B2 are in B2's colour, fogged by the
+                                // factor blend between its fog and NWpre's (Tpre; exact where there are none).
+                                const float3 khfg_b2 = max(khWsB2.Load(int3(px, 0)).rgb + khfg_d2, 0.0f);
+                                const float  khfg_tq = KhWseeCap(khfg_x.x * khfg_x.w, khfg_sc, khfg_b2);
+                                float khfg_fp = khWsLn.x < khfg_o.y ? KhFxDistFogF(LinDepth(khWsLn.x)) : khfg_qb;
+                                // With the layer-depth split each stage's light by its groups (the pre ones at NWpre
+                                // and their band / far parts; the fence-type and post ones).
+                                const bool khfg_sp = khWsSp && (khWsLs.y < 1.0f || khWsLs.w < 1.0f ||
+                                                                khWsLs2.x < 1.0f || khWsLs2.y < 1.0f);
+                                [branch] if (khfg_sp) {
+                                    khfg_fp = KhWseeFogMean(float4(khWsLn.x, khWsLzx2.x, khWsLzx.x, khfg_o.y),
+                                                            float4(khWsLs.x, khWsLs2.x, khWsLs.y, 1.0f), khfg_o.y,
+                                                            khfg_qb, khfg_fp);
+                                }
+                                const float  khfg_fb = khfg_x.z * khfg_qb + (1.0f - khfg_x.z) * khfg_fp;
+                                float khfg_ff = KhFxDistFogF(LinDepth(min(khWsLr, khWsLn.y)));
+                                [branch] if (khfg_sp) {
+                                    khfg_ff = KhWseeFogMean(float4(khWsLr, khWsLn.y, khWsLzx2.y, khWsLzx.y),
+                                                            float4(khfg_x.x, khWsLs.z, khWsLs2.y, khWsLs.w), khfg_o.y,
+                                                            khfg_qb, khfg_ff);
+                                } else {   // KH_WSEE_STAGE_MEAN.
+                                    khfg_ff = KhWseeStageMean(khWsLr, khfg_x.x, khWsLn.y, khfg_x.w, khfg_o.y,
+                                                              khfg_qb, khfg_ff);
+                                }
+                                khfg_ok = khfg_tq * lerp(khfg_b2, color.rgb, khfg_fb)
+                                        + (1.0f - khfg_ff) * max(khfg_sc - khfg_tq * khfg_b2, 0.0f)
+                                        + (1.0f - khfg_tq) * khfg_ff * color.rgb;
+                            } else {
+                                const float3 khfg_b = max(khWsB.Load(int3(px, 0)).rgb + khfg_d2, 0.0f);
+                                // The two stages - the particle-type layers drawn before B2 over B (Tpre, their light
+                                // at NWpre), then the fence-type layers and the particle-type ones after B2 over B2
+                                // (Tw Tpost, their light at min(r, NWpost)) - each stage's T held by the stacking cap.
+                                // The record is KhWseeRule's (khWsLx, khWsLn, khWsLr: this sample's). Without B2: one
+                                // stage over B, every layer's T at the front. Per sample the cap's pixel is the
+                                // sample's own colour khfg_sc.
+                                [branch] if ((KhWseeAvail() & 8u) != 0u) {
+                                    const float3 khfg_b2 = max(khWsB2.Load(int3(px, 0)).rgb + khfg_d2, 0.0f);
+                                    const float  khfg_tq = KhWseeCap(khfg_x.x * khfg_x.w, khfg_sc, khfg_b2);
+                                    const float  khfg_tp = KhWseeCap(khfg_x.z, khfg_b2, khfg_b);
+                                    // f_pre: NWpre's, where it lies before the behind (b); f_front: min(r, NWpost)'s.
+                                    float khfg_fp = khWsLn.x < khfg_o.y ? KhFxDistFogF(LinDepth(khWsLn.x)) : khfg_qb;
+                                    float khfg_ff = KhFxDistFogF(LinDepth(min(khWsLr, khWsLn.y)));
+                                    [branch] if (khWsSp && (khWsLs.y < 1.0f || khWsLs.w < 1.0f ||
+                                                            khWsLs2.x < 1.0f || khWsLs2.y < 1.0f)) {
+                                        khfg_fp = KhWseeFogMean(float4(khWsLn.x, khWsLzx2.x, khWsLzx.x, khfg_o.y),
+                                                                float4(khWsLs.x, khWsLs2.x, khWsLs.y, 1.0f), khfg_o.y,
+                                                                khfg_qb, khfg_fp);
+                                        khfg_ff = KhWseeFogMean(float4(khWsLr, khWsLn.y, khWsLzx2.y, khWsLzx.y),
+                                                                float4(khfg_x.x, khWsLs.z, khWsLs2.y, khWsLs.w),
+                                                                khfg_o.y, khfg_qb, khfg_ff);
+                                    } else {   // KH_WSEE_STAGE_MEAN.
+                                        khfg_ff = KhWseeStageMean(khWsLr, khfg_x.x, khWsLn.y, khfg_x.w, khfg_o.y,
+                                                                  khfg_qb, khfg_ff);
+                                    }
+                                    const float3 khfg_f2 = khfg_tp * lerp(khfg_b, color.rgb, khfg_qb)
+                                                         + (1.0f - khfg_fp) * max(khfg_b2 - khfg_tp * khfg_b, 0.0f)
+                                                         + (1.0f - khfg_tp) * khfg_fp * color.rgb;
+                                    khfg_ok = khfg_tq * khfg_f2
+                                            + (1.0f - khfg_ff) * max(khfg_sc - khfg_tq * khfg_b2, 0.0f)
+                                            + (1.0f - khfg_tq) * khfg_ff * color.rgb;
+                                } else {
+                                    const float khfg_tc = KhWseeCap(khfg_t, khfg_sc, khfg_b);
+                                    float khfg_f1 = khfg_qf;   // The light by group with the split.
+                                    [branch] if (khWsSp && (khWsLs.y < 1.0f || khWsLs.w < 1.0f ||
+                                                            khWsLs2.x < 1.0f || khWsLs2.y < 1.0f)) {
+                                        khfg_f1 = KhWseeFogMeanAll(khfg_o.y, khfg_qb, khfg_qf);
+                                    } else {   // KH_WSEE_STAGE_MEAN: the one stage's three groups (KhWseeGroupsSet's).
+                                        khfg_f1 = KhWseeFogMean(float4(khWsGz, khfg_o.y), float4(khWsGt, 1.0f),
+                                                                khfg_o.y, khfg_qb, khfg_qf);
+                                    }
+                                    khfg_ok = khfg_tc * lerp(khfg_b, color.rgb, khfg_qb)
+                                            + (1.0f - khfg_f1) * max(khfg_sc - khfg_tc * khfg_b, 0.0f)
+                                            + (1.0f - khfg_tc) * khfg_f1 * color.rgb;
+                                }
+                            }
+                        }
+                    }
+                    khfg_ca += khfg_m * khfg_ok;
+                }
+            }
+            const float khfg_dv = KhWseeDivW(khfg_w, khfg_n);   // KH_WSEE_EDGE_COST: the weights' sum.
+            if (khfg_c) outc = khfg_co ? khfg_ca / khfg_dv : lerp(scene, color.rgb, khfg_fa / khfg_dv);
+        }
     }
     else if (effect == 14)   // Lens flare, image-based: [threshold, intensity, ghostCount,
-                             // ghostSpacing] + [haloRadius, haloIntensity.
+                             // ghostSpacing] + [haloRadius, haloIntensity, chromaPx.
     {
         // Bright pixels anywhere in the capture spawn a ghost train mirrored
         // through screen centre, plus a halo ring. The HDR capture makes the
@@ -860,6 +1456,10 @@ float4 PSEffect(VSOut i) : SV_Target
         float2 ghostVec = (cuv - uv) * fxParams0.w;
         int nGhosts = clamp((int)fxParams0.z, 1, 8);
         float3 acc = 0.0f;
+        // KH_FX_ROUND: the ghosts' window, the halo ring and the colour fringe's direction are measured on the
+        // picture - x in heights (khlf_a, the aspect), as the sun flare measures - so the lens's circles are round;
+        // in uv they were ellipses 1.78 x wider at 16:9. haloRadius is in heights (unchanged along the vertical).
+        const float2 khlf_a = float2(fxMeta.z / fxMeta.w, 1.0f);
         // KH_GLOW_PYR: a ghost is the picture scaled by 1 - ghostSpacing * g about the centre, so a point read
         // either magnifies pixels into blocks or skips them; from the (thresholded) pyramid each ghost reads over
         // that scale (two pixels at least), and so does the halo.
@@ -867,10 +1467,11 @@ float4 PSEffect(VSOut i) : SV_Target
         for (int g = 1; g <= nGhosts; ++g)
         {
             float2 suv = uv + ghostVec * (float)g;
-            float w = 1.0f - saturate(length(suv - cuv) * 1.6f);
+            float w = 1.0f - saturate(length((suv - cuv) * khlf_a) * 1.6f);
             w = w * w;
             float2 spf = saturate(suv) * float2(fxMeta.z, fxMeta.w);
-            float2 cdir = normalize(ghostVec + 1e-5f) * fxParams1.z * KhFxPx();   // KH_FX_PX_REF.
+            float2 cdir = normalize(ghostVec * float2(fxMeta.z, fxMeta.w) + 1e-5f)
+                        * fxParams1.z * KhFxPx();   // KH_FX_PX_REF.
             float3 s;
             if (khlf_g)
             {
@@ -887,9 +1488,9 @@ float4 PSEffect(VSOut i) : SV_Target
             }
             acc += s * w;
         }
-        float rC = length(uv - cuv);
+        float rC = length((uv - cuv) * khlf_a);
         float hw = 1.0f - saturate(abs(rC - fxParams1.x) * 8.0f);
-        float2 huv = uv + normalize(cuv - uv + 1e-5f) * fxParams1.x;
+        float2 huv = uv + normalize((cuv - uv) * khlf_a + 1e-5f) * fxParams1.x / khlf_a;
         if (khlf_g)
             acc += KhGlowTap(saturate(huv) * float2(fxMeta.z, fxMeta.w), 2.0f) * hw * fxParams1.y;
         else
@@ -1062,6 +1663,8 @@ float4 PSEffect(VSOut i) : SV_Target
         float lB = 0.0f;
         // KH_GLOW_PYR: the twelve taps sit 0.785 rad apart along their rings (2 pi rad / 8, 2 pi (rad / 2) / 4);
         // each over that spacing, the base estimate is the smooth local average it stands for.
+        // KH_CLARITY_ID: each tap weighs 1 / 12 (it was 0.0833: the weights summed to 0.9996, so a flat picture
+        // read a detail of 0.0004 x its luma and was scaled by 1.0003 at the default strength).
         const float khcl_s = 0.7854f * rad;
         const float khcl_m = KhGlowMix(khcl_s);
 
@@ -1070,13 +1673,13 @@ float4 PSEffect(VSOut i) : SV_Target
             [loop] for (int k = 0; k < 8; ++k)
             {
                 float ang = float(k) * 0.7854f + 0.3927f;
-                lB += Luma(SampleScene(px + int2(cos(ang) * rad, sin(ang) * rad))) * 0.0833f;
+                lB += Luma(SampleScene(px + int2(cos(ang) * rad, sin(ang) * rad))) * (1.0f / 12.0f);
             }
 
             [loop] for (int k2 = 0; k2 < 4; ++k2)
             {
                 float ang2 = float(k2) * 1.5708f;
-                lB += Luma(SampleScene(px + int2(cos(ang2) * rad * 0.5f, sin(ang2) * rad * 0.5f))) * 0.0833f;
+                lB += Luma(SampleScene(px + int2(cos(ang2) * rad * 0.5f, sin(ang2) * rad * 0.5f))) * (1.0f / 12.0f);
             }
         }
         float khcl_p = 0.0f;
@@ -1085,19 +1688,23 @@ float4 PSEffect(VSOut i) : SV_Target
             [loop] for (int khcl_k = 0; khcl_k < 8; ++khcl_k)
             {
                 const float khcl_a = float(khcl_k) * 0.7854f + 0.3927f;
-                khcl_p += Luma(KhGlowTap(i.pos.xy + float2(cos(khcl_a), sin(khcl_a)) * rad, khcl_s)) * 0.0833f;
+                khcl_p += Luma(KhGlowTap(i.pos.xy + float2(cos(khcl_a), sin(khcl_a)) * rad, khcl_s)) * (1.0f / 12.0f);
             }
             [loop] for (int khcl_j = 0; khcl_j < 4; ++khcl_j)
             {
                 const float khcl_b = float(khcl_j) * 1.5708f;
-                khcl_p += Luma(KhGlowTap(i.pos.xy + float2(cos(khcl_b), sin(khcl_b)) * (rad * 0.5f), khcl_s)) * 0.0833f;
+                khcl_p += Luma(KhGlowTap(i.pos.xy + float2(cos(khcl_b), sin(khcl_b)) * (rad * 0.5f), khcl_s))
+                        * (1.0f / 12.0f);
             }
         }
         lB = KhGlowSel(lB, khcl_p, khcl_m);
 
         float detail = lC - lB;
         detail = detail / (1.0f + 2.5f * abs(detail));   // Soft limiter (anti-halo).
-        float scale = (lC + fxParams0.x * detail * 2.2f) / max(lC, 1e-3f);
+        // KH_CLARITY_ID: the floor guards the division only - the identity term stays 1. As (lC + s d 2.2) /
+        // max(lC, 1e-3) it scaled any pixel under a luma of 1e-3 by lC / 1e-3 with no detail at all (strength 0, a
+        // flat area): down to the 0.3 clamp, the darkest night shadows crushed. Equal above 1e-3 (to an ulp).
+        float scale = 1.0f + fxParams0.x * detail * 2.2f / max(lC, 1e-3f);
         outc = scene * clamp(scale, 0.3f, 3.0f);
     }
     else if (effect == 19)   // Deband: [threshold(1/255), rangePx, grain(1/255)].
@@ -1182,11 +1789,11 @@ float4 PSEffect(VSOut i) : SV_Target
         // Refraction through the drops: inverted-wide sample + chroma split.
         float refr = max(fxParams0.w, 0.0f);
         float2 offPx = -nrm * refr * (20.0f + fwdK * 8.0f) * KhFxPx();   // KH_FX_PX_REF.
-        int2 rp = px + int2(offPx);
+        const float2 khrl_c = float2(px) + 0.5f;   // KH_FX_BILINEAR: the pixel's centre.
         float3 through;
-        through.g = SampleScene(rp).g;
-        through.r = SampleScene(px + int2(offPx * 1.07f)).r;
-        through.b = SampleScene(px + int2(offPx * 0.93f)).b;
+        through.g = KhSampleSceneBil(khrl_c + offPx).g;
+        through.r = KhSampleSceneBil(khrl_c + offPx * 1.07f).r;
+        through.b = KhSampleSceneBil(khrl_c + offPx * 0.93f).b;
         float3 col = lerp(base, through, saturate(drop * 1.4f));
         // Specular bead: light from the upper hemisphere of the drop.
         col += drop * pow(saturate(-nrm.y + 0.15f), 6.0f) * 0.25f;
@@ -1218,16 +1825,28 @@ float4 PSEffect(VSOut i) : SV_Target
         khc_dpx.x += khc_wob;
         float2 khc_fpx = khc_cc * khc_r2 * 4.0f * fxParams1.x * KhFxPx();   // KH_FX_PX_REF.
         float3 khc_col;
-        khc_col.r = SampleScene(int2(khc_dpx + khc_fpx)).r;
-        khc_col.g = SampleScene(int2(khc_dpx)).g;
-        khc_col.b = SampleScene(int2(khc_dpx - khc_fpx)).b;
+        khc_col.r = KhSampleSceneBil(khc_dpx + khc_fpx).r;   // KH_FX_BILINEAR (khc_dpx: the centre, unwarped).
+        khc_col.g = KhSampleSceneBil(khc_dpx).g;
+        khc_col.b = KhSampleSceneBil(khc_dpx - khc_fpx).b;
 
         // Beam scanlines: a shaped sine whose exponent narrows in the shadows
         // and widens toward the highlights (phosphor blooming); the 1.32 gain
-        // recovers the average level the dark gaps remove.
+        // lifts the average level the dark gaps remove (to 0.95 in the
+        // highlights, 0.75 at mid-grey, 0.64 in the shadows).
         float khc_lum = saturate(Luma(khc_col));
+        const float khc_bex = lerp(2.2f, 0.65f, khc_lum);
         float khc_beam = pow(abs(KhSin(khc_phase * 3.14159265f)),   // KH_HASH: the phase scrolls with t.
-                             lerp(2.2f, 0.65f, khc_lum));
+                             khc_bex);
+        // KH_CRT_BANDLIMIT - the lines' period on screen: rows per line at this pixel, through the warp's vertical
+        // stretch (d duv.y / d uv.y). Sampled once per pixel, a period of 2 rows or less cannot be drawn (at 2 a
+        // phase of 0.25 lights every row alike, a phase of 0 alternates full and none, and the scroll swept between
+        // them - blinking lines and moire bands); so the profile fades to its own mean (|sin|^e averaged over a line,
+        // a fit within 0.005) from 3 rows per line down to 2. At 3 and more the lines are exactly as before.
+        const float khc_dy = 1.0f + khc_curv * khc_r2 * (1.0f + 0.8f * khc_r2)
+                           + 2.0f * khc_cc.y * khc_cc.y * khc_curv * (1.0f + 1.6f * khc_r2);
+        const float khc_rows = fxMeta.w / max(khc_lines * khc_dy, 1.0e-4f);
+        const float khc_mean = 0.88611f + khc_bex * (0.05438f * khc_bex - 0.30191f);
+        if (khc_rows < 3.0f) khc_beam = lerp(khc_mean, khc_beam, smoothstep(2.0f, 3.0f, khc_rows));
         khc_col *= lerp(1.0f, khc_beam * 1.32f, saturate(fxParams0.y));
 
         // Aperture grille (KH_CRT_MASK): R, G and B stripes, one triad maskSizePx wide (fxParams2.z, pixels of a
@@ -1264,9 +1883,14 @@ float4 PSEffect(VSOut i) : SV_Target
         // is black), a ~2 px feathered edge and a soft glass falloff into the
         // corners.
         khc_col *= color.rgb;
-        float khc_cr = clamp(fxParams1.w, 0.003f, 0.5f);
-        float2 khc_q = abs(khc_duv - 0.5f);
-        float2 khc_ex = max(khc_q - (0.5f - khc_cr), 0.0f);
+        // KH_FX_ROUND: the corners measured on the picture - x in heights (khc_as, the aspect) - so they are
+        // round and the feather is 2 px on both axes; in uv they were ellipses 1.78 x wider at 16:9 and the
+        // feather 3.6 px across x. cornerRadius is in heights (unchanged along the vertical), at most half the
+        // shorter side.
+        const float khc_as = fxMeta.z / fxMeta.w;
+        float khc_cr = clamp(fxParams1.w, 0.003f, 0.5f * min(khc_as, 1.0f));
+        float2 khc_q = abs(khc_duv - 0.5f) * float2(khc_as, 1.0f);
+        float2 khc_ex = max(khc_q - (float2(0.5f * khc_as, 0.5f) - khc_cr), 0.0f);
         float khc_cd = length(khc_ex);
         float khc_feather = 2.0f / fxMeta.w;
         float khc_tube = 1.0f - smoothstep(khc_cr - khc_feather, khc_cr, khc_cd);

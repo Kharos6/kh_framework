@@ -24,9 +24,11 @@ namespace RenderIntegration {
 //
 // A number outside the range a key or value gives below is clamped to it,
 // silently (the solvers and passes are stable over those ranges) - except
-// a blend mode or an effect given as a number, a material's texture
-// animation (uvScale, uvScroll, uvWarp, flipbook) and vertexBound, which
-// are refused with a report outside theirs.
+// a blend mode, a depth mode (mode), an effect, a mask shape or a mesh
+// index given as a number, a material's fresnel pair, texture animation (every key) and
+// vertexBound, which are refused with a report outside theirs, as is a
+// simulationLod pair out of order. A number given for one of the first
+// four is truncated toward zero first (blend 5.9 is 5, -0.5 is 0).
 //
 // KH_PLAYER_ONLY: only a machine with an interface has graphics (hasInterface,
 // framework.hpp's g_is_player). On a dedicated server or a headless client
@@ -71,8 +73,55 @@ namespace RenderIntegration {
 // strip): a block format needs that (such a BC7 .dds is refused, with the
 // reason). A
 // channel the converter dropped does not come back: an alpha reads opaque, a
-// colour channel what the file stores in its place.
+// colour channel what the file stores in its place - except a _novhq normal
+// map's Z, which its X and Y determine and which is rebuilt from them. A .dds
+// is BC1, BC2, BC3,
+// BC7 or 32-bit RGBA; any other format (BC4, a BC5 / ATI2 normal map, 24-bit,
+// float) is refused with the reason. KH_DDS_MIP_FILL: a texture held as 32-bit
+// RGBA (such a .dds, or a .paa / DXT file held uncompressed as above) whose
+// file stops short of the 1 x 1 level keeps its levels and gets the rest of
+// its chain built at load, from its smallest, as a png's is built (a file with
+// no chain gets it all); a BC1 / BC2 / BC3 / BC7 one keeps only the levels it
+// has - export it with mips, or it shimmers at range. A normal map is read
+// DirectX-style - its
+// green pointing down the picture - as Arma's own _nohq is: an OpenGL-style
+// map (Blender's bakes, Substance's "OpenGL" normal export) needs its green
+// channel inverted, or its bumps read as dents along that axis.
 // Operation Flashpoint's palette-indexed files are not read.
+//
+// ---- SHADER COMPILE AND CACHE ----------------------------------------------
+// KH_SHADER_FIRST_RUN: the renderer's own shaders are compiled on the player's
+// machine, by the d3dcompiler_47.dll the game loads, at the first mission that
+// uses the renderer - and again, for the units concerned, after an update
+// that changes a shader file (a unit's key holds the text of every file it is
+// composed of: cb.hlsl is in most of them). The set is some 130 units (and the
+// placeholder's own two), some 18 minutes of compile work in all: the six
+// mesh and injection shaders take about 35 - 45 seconds each, the four full
+// effect shaders about 2 - 4 minutes each, the rest seconds (estimates,
+// measured with the same d3dcompiler_47 on one core of a loaded machine - a
+// desktop core is likely faster, a busier one up to three times slower). They
+// compile on worker threads, one per hardware thread, and the placeholder
+// stays until the last unit lands, so that first start takes at least the
+// longest unit's time on any number of cores - roughly 9.5 - 10 minutes on 2,
+// 5 on 4, 4 - 4.5 on 8 (the queue simulated with those times).
+// The game runs on meanwhile, but every mesh of ours draws flat unlit white
+// (the placeholder) and no post-processing pass runs. Each compiled unit is
+// written to Documents\Arma 3\kh_framework\cache (khs_*.khsc, beside the
+// mesh and texture caches), and later starts read it back instead: a frame or
+// more of the placeholder at each mission start and device reset. A user .hlsl
+// compiles the same way at its first use (cb.hlsl's USER SHADER CONTRACT: a
+// material's three variants take tens of seconds each).
+// Shipping a cache: the renderer also reads khs_*.khsc from every mod's
+// 'cache' folder (read-only, after Documents). Run the release once - start a
+// mission, wait for the placeholder to give way, and draw every .hlsl material
+// and effect the mod ships, in each context it is drawn in - then copy the
+// .khsc files from Documents\Arma 3\kh_framework\cache (best emptied first)
+// into the mod's 'cache' folder - a user effect compiles per depth sample
+// count (MSAA_DEPTH), so run it with FSAA both off and on before copying. A
+// blob's key is the unit's whole text, its
+// entry point and defines, the compile flags and the key's version
+// (KH_SHADER_KEY_EPOCH) - not the compiler DLL's version, so a shipped blob
+// serves every player and survives a Windows update of d3dcompiler_47.dll.
 //
 // ---- STRING = addRender3D ARRAY --------------------------------------------
 // [[x,y,zASL], rotation, mesh]. rotation = nil | yaw | [pitch, yaw, roll] |
@@ -117,7 +166,10 @@ namespace RenderIntegration {
 // the pose, and at range it draws a coarser LOD level as any mesh does, every
 // level skinned (lodLock true keeps the full-detail one). Many bindings of one
 // mesh draw together, instanced, each in its own pose (getRenderStats:
-// skinPooled, skinInstanced), wherever a mesh of their kind would. With
+// skinPooled, skinInstanced), wherever a mesh of their kind would - up to 1364
+// bones that carry weight (bones no vertex is weighted to do not count): a
+// bigger skeleton is skinned on the CPU and its bindings draw one by one
+// (getRenderStats skinCpu). With
 // clothSimulation on it is the cloth's to draw: the bones carry what
 // kh_cloth_pin holds (a partly pinned vertex
 // is pulled toward where its bones put it) and leave what kh_cloth_sim frees
@@ -169,28 +221,57 @@ namespace RenderIntegration {
 // band | duration.
 //
 // The value forms (a property's own paragraph below adds to its form):
-// size a number or [x, y, z] - multipliers of the mesh's own size | mode
+// size a number or [x, y, z] - multipliers of the mesh's own size (without
+// a report, a multiplier of 0 reads as 1, full size, and a negative one as
+// its magnitude: hide a mesh with visible false) | mode
 // 0 (depth test), 1 (test and write) or 2 (overlay) | sceneRead true: the
 // scene read through the mesh, tinted (colorGrade at its defaults), false:
 // none | effect a builtin effect (addPostFX's list) or a .hlsl / .cube path
+// (ssgi and dynamicLightFog are accepted on a mesh and draw nothing there)
 // | params up to 12 numbers, the effect's parameters in order (nil keeps
-// the default) | lit true / false, or [ambient, diffuse] numbers (lit,
-// with those; [ambient] alone sets the ambient) or [] (false) | color
-// [r, g, b, a] | visible true / false | blend normal | additive | multiply
+// the default; a new effect or sceneRead puts every one back to its
+// default, here and in updatePostFX, so give params after it - a batch
+// applies its triples in order) | lit true / false, or [ambient,
+// diffuse] numbers (lit,
+// with those, each 0 or more; [ambient] alone sets the ambient) or []
+// (false): ambient scales the game's ambient (sky) light on the mesh and
+// diffuse the direct light of its sun or moon, 0.4 and 0.6 until set (true
+// keeps the last pair; the shadows a mesh casts onto the game's world under
+// dynamic lights weigh the world's own sky and sun light at full strength,
+// whatever this pair); the game's dynamic lights light it at their own
+// strength, scaled by neither | color
+// [r, g, b, a] (fewer numbers keep the rest; red, green and blue held to
+// 0 - 65504, alpha to 0 - 1, a NaN read as 1) | visible true / false |
+// twoSided true / false (false at the spawn): back faces drawn too |
+// casterOnly true / false (default false): true keeps the mesh casting
+// while it is not drawn (visible false, or hidden by showInFront) - it
+// hides nothing: pair it with visible false for a shadow-only object
+// | blend normal | additive | multiply
 // | screen | lighten | darken (or 0 - 5; addPostFX's paragraph says what
-// each does) | band [minDist, maxDist, falloff?] metres from the camera ([]
-// clears) | duration seconds or [fadeIn, hold, fadeOut] ([] = permanent),
-// counted from the update in real time - the renderer's session clock,
+// each does) | band [minDist, maxDist, falloff?] metres from the camera,
+// faded in over falloff before minDist and out over falloff past maxDist
+// (falloff 10 m until one is given, kept when left out, at least 0.01 m); a
+// maxDist of 0 or less has no far end, the sky included, and fewer than
+// two numbers clear the band | duration seconds or [fadeIn, hold,
+// fadeOut] (a total of 0 ([], 0 or a negative number) is permanent, a
+// negative part counting as 0; an infinite part stands: an infinite fadeIn
+// never shows), counted from the update in real time - the renderer's session clock,
 // which runs on while the game is paused or time-accelerated, as uiSleep
 // counts and sleep does not; every duration below (addPostFX,
 // addLocalPostFX, updatePostFX) counts the same way. A mesh is a builtin
-// - box | steps | sphere | cylinder | cone | pyramid - a registry index or
-// a .fbx path.
+// - box | steps | sphere | cylinder | cone | pyramid, the first four also
+// cube | test | ball | cyl - its registry index (a whole number, a fraction
+// truncated: 0 - 5 are the builtins in that order, a higher one an import's,
+// in load order - name an import by its path; an index naming no mesh is
+// refused) or a .fbx path. An .fbx is imported whole, as one mesh: every node holding
+// geometry, hidden ones included, each material a part of it - except that
+// of an LOD group only the first level (LOD0) is taken; the coarser levels
+// drawn at range are always made from the imported geometry.
 // Also taken, meaning the same: scale (size), lighting (lit), fxparams
 // (params); in a material, the map albedo (diffuse), the params color
 // (basecolor), metallic (metalness), gloss (glossiness), speccolor
 // (specularcolor) and emissive (emissiveintensity), the routing input
-// metalness (metallic), and the selector "" ("*"); in clothSimulation
+// metalness (metallic), and the selectors "" and -1 ("*"); in clothSimulation
 // and chainSimulation, stretch (stiffness).
 //
 // castShadow and receiveShadow (both true by default) switch the mesh's
@@ -200,19 +281,28 @@ namespace RenderIntegration {
 // takes none - not the world's, not our meshes' (its own included), not those
 // our meshes cast under dynamic lights; the sun and every dynamic light still
 // light it, and a face turned from the sun stays unlit. An unlit mesh (lit
-// false) neither casts nor receives whatever these say. A shadow view
+// false) neither casts nor receives whatever these say, and an effect mesh
+// or one at mode 2 casts none. A shadow view
 // distance of 5 m or less in the video options turns every mesh's shadows
 // off, as if both were false on all of them, and idles the machinery only
 // shadows use; raising it turns them back on. The setting is read about
 // four times a second while any mesh or post-processing pass exists and 3D
 // frames are drawn, so a change takes effect within about a quarter second.
 //
+// In a picture-in-picture (a scope, mirror or camera feed) a mesh takes none
+// of the game's own shadows - ours, the sun's and those our meshes cast under
+// dynamic lights, still fall on it - and only an opaque solid is drawn there:
+// an effect mesh, mode 2, a blend mode other than normal, a colour alpha or a
+// duration fade below 1, inFront true and a blend material's translucent
+// texels are left out of it.
+//
 // inFront true draws the mesh in the game's first-person view-model layer -
 // the depth slice the weapon and hands occupy - so it stands in front of the
 // whole world and still sorts correctly against the weapon and hands
 // themselves; it casts and receives shadows as any mesh does, always draws
 // its full-detail level, and is not drawn in a view with no view model
-// (third person). Effect meshes ignore it.
+// (third person). An opaque one (blend normal, colour alpha 1) at mode 0 is
+// drawn as at mode 1: it writes the slice's depth. Effect meshes ignore it.
 //
 // showInFront (true by default) false hides the mesh while the view is a
 // first-person one - a frame in which the game draws its first-person weapon
@@ -238,7 +328,11 @@ namespace RenderIntegration {
 // is level 0's alone - and it stays on when they end; lodLock false is
 // refused while one of them is on. A skeletal binding leaves it as it is:
 // every level carries its own bone weights, so a far character draws a
-// coarser level, skinned as level 0 is.
+// coarser level, skinned as level 0 is. The level follows the mesh's size on
+// screen and, more weakly, its distance; through optics (a zoomed view, or a
+// picture-in-picture's own zoom) that distance counts as the one at which the
+// mesh would look its size unzoomed, so a scope shows the level the same
+// picture shows to the bare eye.
 //
 // Our meshes hide one another automatically: a mesh stops being drawn while
 // another of our meshes provably covers it completely. A mesh can hide what
@@ -281,25 +375,42 @@ namespace RenderIntegration {
 // must be painted with the vertex groups or colour sets kh_cloth_sim (where
 // it moves) and kh_cloth_pin (where it does not) - a gradient between them
 // blends smoothly from rigid to free and is centred, so painting a vertex
-// halfway lets it hang about halfway - and an unpainted mesh simply does not
-// simulate. Keys: stiffness | bend | damping | drag | mass | gravity |
+// halfway lets it hang about halfway at the default mass (the paint sets how
+// loosely a vertex is held, in metres per newton, so a heavier cloth or a
+// stronger gravity sags further through the same paint) - and an unpainted
+// mesh simply does not simulate. Keys: stiffness | bend | damping | drag |
+// mass | gravity |
 // maxStretch | thickness | friction | maxSpeed | teleport | range | sleep |
 // shell | wind | buoyancy | waterDrag | selfCollision | selfThickness |
 // selfFriction | iterations | substeps. Their ranges: stiffness, bend,
-// damping, drag, thickness, friction, shell, waterDrag and selfFriction 0 -
-// 1; mass 0.001 - 100; gravity -10 - 10; maxStretch 1 - 4; maxSpeed 0.1 -
-// 1000; teleport 0.05 - 1000; range 0 - 200; sleep 0 - 10; wind 0 - 10;
-// buoyancy 0 - 10; selfThickness 0.001 - 0.25; iterations 1 - 64;
-// substeps 1 - 8.
+// damping, thickness, friction, shell and selfFriction 0 - 1; drag and
+// waterDrag 0 - 1000; mass 0.001 - 100; gravity -10 - 10; maxStretch 1 - 4;
+// maxSpeed 0.1 - 1000; teleport 0.05 - 1000; range 0 - 200; sleep 0 - 10;
+// wind 0 - 10; buoyancy 0 - 10; selfThickness 0.001 - 0.25; iterations 1 -
+// 64; substeps 1 - 8.
+//
+// mass is per simulated point (kg, default 0.2). drag is the air's drag on
+// the cloth, a force per point against its motion RELATIVE TO THE AIR (kg/s,
+// i.e. newtons per m/s; default 0.735), as on a flat plate: in full against
+// motion through its faces, 2 % of it along them. Divided by mass it is how
+// fast that relative motion dies away (3.7 /s at the defaults), so a heavier
+// cloth falls faster, swings on longer and is moved less by the same wind.
+// waterDrag (kg/s per point, default 12.26) is the same in water. damping
+// takes out the rate at which the cloth stretches and folds, not its motion
+// as a whole: a swinging or flapping cloth is slowed by drag, and at the
+// default stiffness damping changes little that can be seen.
 //
 // Cloth reacts to the world wind automatically: wind scales it per object (0
-// ignores wind) and it acts through each face's own facing, so cloth edge-on
-// to the wind is barely pushed. It also reacts to water - sea level is 0 ASL
-// and anything below it is submerged - where buoyancy sets the upward
-// acceleration as a multiple of standard gravity (9.81 m/s^2), whatever the
-// object's own gravity: at the default gravity 1, 0 sinks as if in air, 1 is
-// neutral and above 1 rises (at gravity g, buoyancy g is neutral) - waterDrag
-// replaces drag while under, and wind stops acting.
+// ignores wind, and the air around it is still), and a cloth moves in a wind
+// exactly as it moves through still air at the wind's speed - through each
+// face's own facing, so cloth edge-on to the wind, or lying flat in it, is
+// barely pushed. It also reacts to water - sea level is 0 ASL and anything
+// below it is submerged - where buoyancy sets the upward acceleration as a
+// multiple of standard gravity (9.81 m/s^2), whatever the object's own
+// gravity: at the default gravity 1, 0 sinks as if in air, 1 is neutral and
+// above 1 rises (at gravity g, buoyancy g is neutral) - waterDrag replaces
+// drag while under (in proportion across the 10 cm at the surface, still water
+// below and the moving air above), and wind stops acting.
 //
 // shell is for THICK cloth: a solidified mesh is two separate surfaces that
 // share no geometry except the rim, so without it the front and back drift
@@ -328,9 +439,13 @@ namespace RenderIntegration {
 // second so the cloth can fall open, then resumes.
 //
 // physicsCollider makes the mesh push cloth around, using its real
-// triangles: keys margin (0 - 10) | friction (0 - 1) | inside (inside contains cloth instead
+// triangles: keys margin (0 - 10, default 0) | friction (0 - 1, default 1) |
+// inside (inside contains cloth instead
 // of excluding it) | convex. A collider must be a closed, outward-facing
-// mesh - inside and outside are decided from its winding.
+// mesh - inside and outside are decided from its winding. A mesh that is
+// clothSimulation as well pushes other cloth as its modelled shape, carried
+// by the object, not as its simulated one: a second cloth laid on it lands
+// on the shape it was modelled in, wherever the first has sagged to.
 //
 // convex (default false) is the cheap path for a collider built from CONVEX
 // pieces - a body made of a capsule per bone, say, all in one mesh, each
@@ -361,7 +476,12 @@ namespace RenderIntegration {
 // affectors (addPhysicsAffector) are the external forces. Cloth lands on the
 // terrain, with its friction key: the ground itself, not what stands on it -
 // buildings, floors, bridges and rocks need colliders, and cloth on an upper
-// floor falls through it to the ground below.
+// floor falls through it to the ground below. Cloth, and a chain below, run
+// on real time, as an affector's lifetime does (addPhysicsAffector): on
+// through the pause menu, and taking no notice of setAccTime - under time
+// acceleration or slow motion the object's own motion changes pace and the
+// cloth's does not, so in slow motion a flag falls and flaps at its usual
+// speed on a vehicle that crawls.
 //
 // chainSimulation simulates the mesh's own skeleton as a chain of rigid
 // bodies - a rope, a chain, an ammo belt: every bone from the start bone
@@ -391,24 +511,40 @@ namespace RenderIntegration {
 // which links two objects with one chain; endRotation true then follows that
 // memory point's (or that object's) rotation. endPosition places the end
 // bone's point - its head unless endPoint says "tail" - and an end held away
-// from where it stands is brought there at 2 m/s rather than snapped |
-// stiffness (0-1, 1 = the joints hold exactly) | bend and twist (0-1: 0
-// limp, 1 rigid) | swingLimit and twistLimit (degrees, 180 = none - a chain
-// does not collide with itself, and limits are what keep its links from
-// folding through each other) | damping | linearDamping and angularDamping
+// from where it stands is brought there at 2 m/s rather than snapped. A
+// position past the chain's reach is held at the reach along the same line
+// (with endRotation held too, at what the end bone reaches at that
+// orientation). WARNING: a held endRotation that a swingLimit or twistLimit
+// cannot allow is met by neither - the joints share the error - and with a
+// held endPosition beside it the links can be pulled open for good; such a
+// chain is reset to its rest pose every 6 s (the runaway guard, a visible
+// pop). Loosen the limit, free one of the two holds, or hold a rotation the
+// limits allow |
+// stiffness (0-1, 1 = the joints hold exactly; below 1 each joint is a
+// spring that the weight of the whole chain below it stretches, so a long
+// chain hangs longer than modelled - forty bones about 0.65 m longer at
+// 0.9, whatever their length (a third of a 2 m chain) - and 0 lets the
+// links part) | bend and twist (0-1: 0 limp, 1 rigid) |
+// swingLimit and twistLimit (degrees, 180 = none - a chain does not collide
+// with itself, and limits are what keep its links from folding through each
+// other; 10 degrees on a thin chain swung hard wants iterations 4, and a
+// tighter one can break open in bursts even then)
+// | damping | linearDamping and angularDamping
 // (0-1, default 0 = off: the share of each link's motion, and of its spin,
 // relative to the object carrying the chain that is removed every 1/120 s -
-// the loss damping cannot give a chain swinging as one) | drag (against the
-// air, which moves with the world wind times wind) | mass (kg, the whole
-// chain) | gravity |
+// the loss damping cannot give a chain swinging as one) | drag (kg/s, the
+// whole chain's, default 0.6: the air - the world wind times wind plus the
+// wind affectors' air - draws each link toward its own velocity at drag /
+// mass per second, so a heavier chain swings less in a wind; waterDrag,
+// default 61.3, is the same in water) | mass (kg, the whole chain) | gravity |
 // thickness | friction | maxSpeed | teleport | range | sleep | wind |
 // buoyancy | waterDrag | iterations | substeps. A simulating chain is drawn
 // at its authored size (size is kept for when it stops), forces lodLock,
 // cannot also be clothSimulation, and does not itself push cloth. A chain
 // that cannot simulate (no skeleton, or a named bone missing) is named once
 // in the RPT. The ranges of a chain's numbers: stiffness, bend, twist,
-// damping, linearDamping, angularDamping, drag, thickness, friction and
-// waterDrag 0 - 1; swingLimit and twistLimit 0 - 180; mass 0.001 - 1000;
+// damping, linearDamping, angularDamping, thickness and friction 0 - 1; drag
+// and waterDrag 0 - 1000; swingLimit and twistLimit 0 - 180; mass 0.001 - 1000;
 // gravity -10 - 10; maxSpeed 0.1 - 1000; teleport 0.05 - 1000; range 0 -
 // 200; sleep 0 - 10; wind 0 - 10; buoyancy 0 - 10; iterations 1 - 16;
 // substeps 1 - 8.
@@ -427,15 +563,22 @@ namespace RenderIntegration {
 // this, and below minScreenShare, it runs at the floor; fullScreenShare
 // (default 0.06) - an object whose bounding sphere spans more of the screen
 // height than this runs whole, however far; minScreenShare (default 0.015) -
-// below this, and beyond minDistance, it runs at the floor. The defaults are
-// fitted to a 1 x 2 m cape at the default field of view: whole out to 25 m,
-// at the floor from 100 m, and the two shares are what such a cape spans at
-// those distances, so a smaller cloth is reduced sooner and a larger one
-// later. Between the two distances and the two shares it ramps smoothly,
-// taking the better of the distance and the screen verdicts; iterations give
-// first, substeps only below half share. fullDistance must be under
-// minDistance and minScreenShare under fullScreenShare. getRenderStats
-// reports simLodShare, the share of the solver work run last frame.
+// below this, and beyond minDistance, it runs at the floor. Distance and
+// screen share are the main view's (a zoomed main view counts by its zoom): a
+// picture-in-picture - a 3D scope, mirror or camera feed - does not raise the
+// share. The defaults are fitted to a 1 x 2 m cape at the default field of
+// view: whole out to 25 m, at the floor from 100 m, and the two shares are
+// what such a cape spans at those distances, so a smaller cloth is reduced
+// sooner and a larger one later. Between the two distances and the two shares
+// it ramps smoothly, taking the better of the distance and the screen
+// verdicts; iterations give first, substeps only below half share.
+// fullDistance must be under minDistance and minScreenShare under
+// fullScreenShare, tested after the distances are held to 0 - 100000 m and
+// the shares to 0 - 1 (so two distances both past 100000 m are refused as
+// out of order). getRenderStats reports simLodShare, the share of the
+// solver work run last frame. A chain never runs under two iterations and
+// three substeps here (or its own iterations / substeps where those are
+// fewer): fewer let a long chain's joints come apart.
 //
 // position and rotation each take a game OBJECT to follow it every frame, or
 // any ordinary value to detach and take that value. position also takes
@@ -467,22 +610,80 @@ namespace RenderIntegration {
 // only its own lane and only while that lane follows an object; both are
 // remembered across a detach, and nil clears.
 //
+// material [[selector, shader, textures?, params?], ...]: selector a
+// submesh's name or index, or -1 / "*" / "" for every submesh; shader
+// "pbr", "arma" or a .hlsl path; textures [[path, map, routing?], ...],
+// routing [[input, "r" | "g" | "b" | "a"], ...]; params [[key, value],
+// ...]. pbr's maps are diffuse | normal | orm | emissive | specular and its
+// routing inputs occlusion | roughness | metallic | alpha | gloss (the
+// other kinds' are below). An entry gives its submeshes a whole material:
+// what it leaves out takes its default (basecolor [1, 1, 1], roughness
+// 0.8, metalness 0, emissiveintensity and normalstrength 1, cutoff 0.5,
+// opaque). A submesh no entry names keeps what it has, so [] changes
+// nothing and a material is never taken off - only a new object starts
+// without one. The set stays through a mesh change, by submesh index: a
+// submesh the old mesh did not have draws with none.
+//
 // material params: basecolor | roughness | metalness | emissiveintensity |
-// normalstrength | cutoff | alphamode opaque|cutout|blend (blend: texels
-// with alpha >= 0.9 draw solid with depth, the rest as a post-scene
-// translucent part - hardware alpha, no depth write, back-to-front; casting
-// is per object, never per material).
+// normalstrength | cutoff | alphamode opaque|cutout|blend (blend: texels with
+// alpha >= 0.9 draw solid with depth, the rest as a post-scene translucent
+// part - hardware alpha, no depth write, back-to-front; casting is per
+// object, never per material). cutout: alpha below the cutoff is a hole; on a
+// multisampled scene (FSAA above 1x) the hole's edge is anti-aliased by alpha
+// to coverage on a sharpened alpha (KH_CUTOUT_A2C: an edge one pixel wide,
+// centred on the cutoff), as the engine's own foliage is with its ATOC
+// option; in a picture-in-picture view (single-sample), in the view-model
+// slice (inFront) and in every shadow it casts it stays the hard clip at the
+// cutoff. A specular map turns the pbr shader to specular-gloss: its rgb is
+// the reflectance head-on and its alpha the gloss (or the gloss routing
+// input), which sets the roughness as 1 - gloss - roughness and metalness are
+// then unused, and a map with no alpha reads gloss 1, a mirror (roughness
+// 0.045, the floor every material keeps). basecolor, specularcolor (arma and
+// .hlsl) and the object's color are linear multipliers (glTF's convention),
+// not sRGB values: 0.5 is sRGB 0.735, and sRGB 0.5 is 0.214 here.
+// Highlights (every shader kind): the sun's and each lamp's highlight is the
+// exact GGX lobe at every roughness down to that floor - the GGX distribution
+// with the height-correlated Smith masking (KH_GGX_EXACT, KH_SMITH_HC) - with
+// the energy a rough surface's single bounce loses given back by the factor
+// its sky reflection takes (KH_MS_DIRECT), so a glossy surface (roughness
+// below ~0.15, gloss above ~0.85) shows a small, bright highlight - on a
+// polished metal (roughness 0.045) ~20,000 (the sun, times the mesh's lit
+// diffuse - 0.6 by default) or ~61,000 (a lamp) times the light's colour at
+// its centre seen head-on, rising as the view
+// turns glancing (~130,000 / ~410,000 where the view's cosine to the surface
+// normal is 0.15, millions nearer grazing); the scene stores at most its
+// format's largest value (65504), so such a glint is a saturated spot for the
+// bloom. The mesh's own fog, coverage and blend mode dim it from its full
+// value (KH_PBR_FINITE removes only NaN, infinity and negatives); a surface
+// drawn over it later blends with the stored value - the
+// sun's spread over the reflection of its disc (0.27 degrees in radius, 0.53
+// across; KH_SUN_DISC); a lamp is a point. Specular anti-aliasing
+// (KH_SPEC_AA) widens the roughness where the surface normal varies inside a
+// pixel - a normal map's detail averaged away at range (read from the
+// shortened normals of its mips for a png / tga / bmp normal map; a jpg's
+// compression error, and a .paa / .dds file's own levels - renormalised by
+// some tools, or block-compressed - leave its length no measure, and a
+// .paa / .dds takes none of it, the levels KH_DDS_MIP_FILL builds included)
+// and the normal's change
+// from pixel to pixel (curvature, bumps near the pixel size, every normal
+// map) - so such highlights soften and dim with distance instead of sparkling
+// as the view moves; a flat surface up close keeps its roughness, and rough
+// materials (0.5 and up) barely change.
 //
 // Texture animation (every shader kind; KH_UV_ANIM) - params that move every
 // map of the submesh together, in colour, in the cutout / blend coverage and
 // in the shadows it casts: uvScale (a number or [u, v]: repeats per uv unit,
-// negative mirrors; default 1) | uvOffset [u, v] | uvScroll [u, v] (uv units
-// per second; the picture appears to move the opposite way) | uvRotation
-// (degrees, about the tile's centre) | uvRotationSpeed (degrees per second) |
+// negative mirrors; default 1; each 0.0001 - 10000 in size) | uvOffset
+// [u, v] (each at most 1000000 in size) | uvScroll [u, v] (uv units per
+// second, each at most 10000 in size; the picture appears to move the
+// opposite way) | uvRotation (degrees, about the tile's centre) |
+// uvRotationSpeed (degrees per second) - each at most 1000000 in size |
 // uvWarp [amplitude, frequency, speed] (a ripple across each axis: amplitude
-// in uv units 0 - 1, frequency in ripples per uv unit, speed in cycles per
-// second; the ripple stays on the surface while the picture scrolls through
-// it) | flipbook [columns, rows, fps, frames?] (a sheet of frames, row by
+// in uv units 0 - 1, frequency in ripples per uv unit 0 - 1000, speed in
+// cycles per second, at most 1000 in size; the ripple stays on the surface
+// while the picture scrolls through it) | flipbook [columns, rows, fps,
+// frames?] (whole columns and rows 1 - 256, fps 0 - 1000, frames whole,
+// 1 - columns x rows; a sheet of frames, row by
 // row from the top-left; frames defaults to columns x rows - a bilinear or
 // mipmapped read at a cell's edge takes from its neighbour, so give a sheet a
 // gutter or few mips). The lookup is scale x rotation about the tile's centre,
@@ -504,16 +705,19 @@ namespace RenderIntegration {
 // specular and smdi, so give one name of each pair, and the name says what
 // the map holds (as and smdi as described for "arma" below, smdi read as
 // data rather than colour) - routing inputs occlusion | roughness | metallic
-// | alpha | gloss | specular, and the params above plus glossiness |
+// | alpha | gloss | specular (the r, g or b of diffuse, emissive, specular or
+// speccolor reaches a route decoded from sRGB: route data from orm, as, smdi,
+// normal or an alpha), and the params above plus glossiness |
 // specularcolor | fresnel. It also takes the texture slots user0 .. user5,
 // which only its own code reads (KhUserTex): their third element is "srgb"
 // for colour data or "linear" (the default) instead of a routing array. It
 // also takes two params that act only when the .hlsl defines a vertex stage
-// (KhUserVertex, which deforms the mesh on the GPU): vertexBound (metres, default 0) is the
-// farthest the stage moves any vertex - culling, the level of detail and the
-// shadow fits pad the object by it, so a value too small lets the mesh
-// vanish or its shadow clip at the screen edge, and one too large costs only
-// a looser fit - and vertexStatic (0 or 1, default 0) says the result
+// (KhUserVertex, which deforms the mesh on the GPU): vertexBound (metres, 0 to under
+// 1000000, default 0) is the
+// farthest the stage moves any vertex - culling and the shadow fits pad the
+// object by it (the level of detail does not), so a value too small lets the
+// mesh vanish or its shadow clip at the screen edge, and one too large costs
+// only a looser fit - and vertexStatic (0 or 1, default 0) says the result
 // depends on no clock and no camera, so it is worked out again only when the
 // object moves, turns, resizes or changes colour or material; an object with
 // a vertex stage is drawn on its own, outside the instanced batches.
@@ -524,8 +728,11 @@ namespace RenderIntegration {
 // specular) | emissive, routing inputs occlusion | gloss | specular | alpha,
 // and params basecolor | glossiness (without an smdi map, default 0.2) |
 // specularcolor [r, g, b] | fresnel [N, K] or an rvmat string with
-// fresnel(N,K) in it (refractive index and absorption, default 1.5, 0) |
-// emissiveintensity | normalstrength | cutoff | alphamode.
+// fresnel(N,K) in it (refractive index and absorption, each 0 to under
+// 10000, default 1.5, 0) |
+// emissiveintensity | normalstrength | cutoff | alphamode. The gloss sets the
+// roughness of the same GGX highlight as 1 - gloss (glossiness 0.2 shades as
+// pbr's roughness 0.8); an rvmat's specularPower is not read.
 //
 // Every true/false value also takes 1/0, except rotation and chain
 // endRotation, where a bare number is a yaw.
@@ -542,7 +749,8 @@ namespace RenderIntegration {
 // ---- STRING = addPostFX ARRAY ----------------------------------------------
 // [effect, params?, [r,g,b,a]?, band?, blend?, affectUI?, duration?]. Create
 // a persistent fullscreen post-processing pass. affectUI takes 'scene' |
-// 'UI' | 'both' | true/false | 1/0.
+// 'UI' | 'both' | true/false | 1/0 (true is 'both', false 'scene'). nil
+// skips an optional slot, and so does '' for blend and affectUI.
 //
 // A size an effect's params give in pixels (blur, bloom and halation
 // radius, grain size, aberration, distortion, lens-flare chroma,
@@ -555,49 +763,92 @@ namespace RenderIntegration {
 // refraction, the sun flare's occlusion test). What stays per pixel:
 // sharpen's 1-px neighbourhood, anti-aliasing, per-pixel dither and
 // sampling noise, and SSGI's sample-grid widths (its radius is in metres).
+// Grain is one picture at any resolution: both its noise layers are sized
+// by grainSizePx (KH_GRAIN_SIZE). The radial measures are round on the
+// picture (KH_FX_ROUND): chromatic's shift (strengthPx / 2 at the top and
+// bottom edges, more toward the sides), lens flare's ghost fade and halo
+// (haloRadius in picture heights) and the CRT's corners (cornerRadius in
+// picture heights, at most half the shorter side); the vignette follows
+// the frame's shape.
 //
-// The builtin effects (by name, or by id 0 - 23 / 31 in this order) and
-// their params with the defaults; colour = the pass's colour. solid (no
-// effect: an ordinary mesh; meshes only) | invert: (1 - picture) x colour |
-// colorGrade [saturation 1, contrast 1, brightness 1, gamma 1], tinted by
-// colour | vignette [startRadius 0.5, softness 0.5], colour at the edge |
-// chromatic [strengthPx 3] | grain [amount 0.06, fps 24, grainSizePx 1.5,
-// lumaResponse 0.7, chroma 0.3] | sharpen [strength 0.5] | blur [radiusPx
-// 2] | bloom [threshold 1, intensity 0.8, radiusPx 2] | distortion
+// The builtin effects (by name, or by id 0 - 23 / 31 in this order) and their
+// params with the defaults; colour = the pass's colour, [1, 1, 1, 1] when
+// none is given (a vignette wants a dark one, e.g. [0, 0, 0, 1]: on white it
+// brightens the edges). A range or a least / most value after a param is one
+// the effect holds it to. solid (no effect: an ordinary mesh; meshes only) |
+// invert: (1 - picture) x colour | colorGrade [saturation 1, contrast 1,
+// brightness 1, gamma 1] (worked in the order brightness, saturation, the
+// tint by colour - after the saturation, so saturation 0 with a colour
+// (contrast 1) gives a one-colour picture in one pass - contrast, then gamma,
+// the result to the power gamma - KH_GAMMA_DOC: above 1 darkens values under 1
+// and lifts those
+// past 1 - the scene's highlights - below 1 the reverse) | vignette
+// [startRadius 0.5, softness 0.5], colour at the edge | chromatic
+// [strengthPx 3] | grain [amount 0.06, fps 24 (at least 1: 0 does not freeze
+// it), grainSizePx 1.5 (at least 1), lumaResponse 0.7, chroma 0.3] | sharpen
+// [strength 0.5] (held to each pixel's own 5-pixel range, so no halo: a hard
+// edge or a one-pixel detail is left as it is, a soft edge steepens) | blur
+// [radiusPx 2] | bloom [threshold 1, intensity 0.8, radiusPx 2] | distortion
 // [amplitudePx 6, frequency 6, speed 2] | outline [depthEdge 4, lumEdge 2,
-// sceneDarken 0.25, glowBoost 1.5], colour = the edge | pulse [x 0, y 0,
-// zASL 0, radius 50, bandWidth 3, intensity 2] | halation [threshold 1,
-// intensity 1.2, radiusPx 5] | fog [startDist 200, endDist 1200,
-// skyAmount 1], colour = the fog | lensflare [threshold 1.1, intensity
-// 0.7, ghosts 5, spacing 0.35, haloRadius 0.45, haloIntensity 0.6,
-// chromaPx 3] | anamorphic [threshold 1.2, intensity 1.2, lengthPx 220,
-// falloffPow 2, vertical 0] | sunflare [dirX 0, dirY 0.5, dirZ 0.8 (SQF
-// axes), size 0.15, ghostDots 4, ringIntensity 0.6, starburst 1.2] |
-// glitch [intensity 1, speed 8, sliceAmountPx 24, sliceBands 12,
-// colorSplitPx 6, blockAmount 0.5, noiseAmount 0.35, burstiness 0.7] |
-// clarity [strength 0.35, radiusPx 22] | deband [threshold 1.6, rangePx
-// 16, grain 0.6] (threshold and grain in 1/255) | rainlens or rain
-// [intensity 0.6, speed 1, condensation 0.35, refract 1] | crt [curvature
-// 0.12, scanlines 0.45, lineCount 540, maskStrength 0.35, aberrationPx 1.5,
-// flicker 0.25, rollingBand 0.3, cornerRadius 0.06, lineScroll 4 (lines
-// a second), wobblePx 1.5, maskSizePx 3] | ssgi [intensity 0.7, radius 4
-// (m), samples 12 (4 - 32), bias 0.15 (0 - 0.9), falloff 2 (the bounce's
-// falloff exponent over the radius, at least 0.25), saturation 1, range
-// 300 (m; fades from 70 %), fireflyClamp 3 (0 = none),
-// albedoTint 0.65, giOnly 0 (1 = the light alone), offsetScale 1 (0 = 1),
-// resolveWidth 0 (0 = 3; 1 - 8)] | fogscatter
-// [intensity 1, radiusPx 0 (0 = from the picture's height; 2 - 96), taps
-// 12 (4 - 24)] | dynamicLightFog (below). A .cube LUT takes [strength 1,
-// encode 0 (0 = by lane, 1 = never, 2 = always)]. ssgi, fogscatter and
-// dynamicLightFog draw nothing on the UI.
+// sceneDarken 0.25, glowBoost 1.5], colour = the edge: the result is the
+// picture x sceneDarken (the share of it kept) plus colour x edge x
+// glowBoost, the edge a depth edge - a break in the surface (a silhouette, a
+// crease), not a slope: a plane draws none at any slant or distance, to the
+// depth buffer's precision - plus a luma edge | pulse [x 0, y 0, zASL 0,
+// radius 50, bandWidth 3 (at least 0.01), intensity 2] | halation [threshold 1, intensity
+// 1.2, radiusPx 5] (blur's, bloom's and halation's radius at least one of the
+// picture's pixels: 0 still blurs) | fog [startDist 200, endDist 1200,
+// skyAmount 1 (0 - 1)], colour = the fog (its distances are view depth -
+// along the view's axis, where a band's run along the ray - and its ramp is
+// at least 1 m long) | lensflare [threshold 1.1, intensity 0.7, ghosts 5
+// (1 - 8), spacing 0.35, haloRadius 0.45, haloIntensity 0.6, chromaPx 3] |
+// anamorphic [threshold 1.2, intensity 1.2, lengthPx 220, falloffPow 2 (at
+// least 0.1), vertical 0] | sunflare [dirX 0, dirY 0.5, dirZ 0.8 (SQF axes),
+// size 0.15 (at least 0.01), ghostDots 4 (whole dots, at most 4),
+// ringIntensity 0.6, starburst 1.2] | glitch [intensity 1, speed 8 (at least
+// 0.1), sliceAmountPx 24, sliceBands 12 (at least 1), colorSplitPx 6,
+// blockAmount 0.5 (0 - 1), noiseAmount 0.35, burstiness 0.7] | clarity [strength
+// 0.35, radiusPx 22 (at least 4)] | deband [threshold 1.6 (at least 0.1),
+// rangePx 16 (at least 2), grain 0.6] (threshold and grain in 1/255) |
+// rainlens or rain [intensity 0.6 (0 - 1), speed 1 (at least 0), condensation 0.35
+// (0 - 1), refract 1 (at least 0)] (at intensity 0 the drops stay at their base amount and
+// the film at a quarter: the colour's alpha fades the pass out) | crt
+// [curvature 0.12 (at least 0), scanlines 0.45 (0 - 1), lineCount 320 (at least 16; lines under 3
+// picture rows apart fade to an even level - 2 rows cannot be drawn - so they
+// thin where the warp packs them, toward the tube's corners, and a picture
+// with fewer than 3 rows a line shows them faint or not at all: 320 lines on
+// 720 rows), maskStrength 0.35 (0 - 1), aberrationPx 1.5, flicker 0.25 (0 - 1), rollingBand
+// 0.3 (0 - 1), cornerRadius 0.06 (at least 0.003), lineScroll 4 (lines a second),
+// wobblePx 1.5, maskSizePx 3 (at least 1)] | ssgi [intensity 0.7 (at least 0), radius 4
+// (m; at least 0.1), samples 12 (4 - 32; rounded down to a count its slices
+// and steps can make: 20 takes 16), bias 0.15 (0 - 0.9), falloff 2 (the
+// bounce's falloff exponent over the radius, at least 0.25), saturation 1 (at least 0),
+// range 300 (m; fades from 70 %; 1 or less: no fade), fireflyClamp 3
+// (0 = none), albedoTint 0.65 (0 - 1), giOnly 0 (1 = the light alone), offsetScale 1
+// (0 = 1), resolveWidth 0 (below 0.5 = 1.5 x the grid's spacing: 3 at the default
+// scale; 0.5 = 3; 1 - 8)] | fogscatter [intensity 0.5 (at least 0), radiusPx 0 (0.5 or less = from
+// the picture's height; 2 - 96), taps 12 (4 - 24); what it scatters is the
+// share of each pixel's light the game's fog takes - the height fog with its
+// view-distance fade - and the scene's fog passes (the two most opaque
+// fullscreen, unlocalized, unbanded ones not on blend additive, multiply or
+// screen; on an effect mesh and in a picture-in-picture the game's fog
+// alone)] | dynamicLightFog (below).
+// A .cube LUT takes [strength 1 (0 - 1), encode 0 (0 = by lane, 1 = never,
+// 2 = always)]. ssgi, fogscatter and dynamicLightFog draw nothing on the UI.
 //
 // The blend modes, by the colour's alpha (the opacity): normal mixes;
 // additive adds colour x opacity; multiply multiplies the picture by
-// lerp(1, colour, opacity); screen is 1 - (1 - a)(1 - b), by opacity;
-// lighten and darken take the larger / smaller of the two, by opacity
-// (an inFront mesh, a blend material's translucent texels, or any frame the
-// scene cannot be copied: lighten takes the larger of the picture and
-// colour x opacity, darken acts at opacity 1 only).
+// lerp(1, colour, opacity); screen is 1 - (1 - a)(1 - b), by opacity; lighten
+// and darken take the larger / smaller of the two, by opacity (an inFront
+// mesh, a blend material's translucent texels, or any frame the scene cannot
+// be copied: lighten takes the larger of the picture and colour x opacity,
+// darken acts at opacity 1 only). On a post-processing pass the colour these
+// modes take is the pass's whole result, which already holds the picture -
+// for bloom, halation, lens flare, anamorphic, sunflare, pulse and outline
+// the picture with the glow or the edges on it, not the glow alone: additive
+// bloom at opacity 1 doubles the picture on the scene, multiply squares it (on
+// the UI these four spill and blend normally; outline's picture is the share
+// sceneDarken keeps).
 // multiply and screen are the display formulas, taken as they stand: on
 // the scene (linear HDR, past 1 where it is bright) a colour past 1
 // brightens under multiply, and under screen a source or a background
@@ -608,21 +859,51 @@ namespace RenderIntegration {
 // blend material's translucent texels, an effect mesh on normal blend (and
 // any mesh on a frame the scene cannot be copied) mix in linear HDR, as the
 // game's own glass does (KH_TRANSL_ROUTES: all kept as they look).
+// Draw cost (KH_INST_RUN): meshes on blend normal batch into one instanced
+// draw per mesh, material, LOD level and (textured) submesh, among meshes that
+// share lit, twoSided, depth mode, the dynamic lights they take, the route
+// near the camera and (skeletal) the skin pool chunk (a blend material's translucent texels draw one mesh at a
+// time); a mesh on another blend mode
+// batches only within a back-to-front stretch of meshes on the same blend
+// mode at depth mode TestOnly - at the default TestWrite it draws on its
+// own, and an effect mesh, a fullscreen pass, a depth-Off overlay or a
+// translucent lighten / darken between cuts the stretch - so the drawn
+// order is the true one.
 //
-// Every builtin effect runs one formula on the scene (linear HDR, before
-// the game's tonemap) and on the UI (the finished display frame, 0 - 1).
-// invert, colorGrade (contrast turns about 0.5), grain and deband (steps
-// of 1/255) are written for display values, so on the scene they act on
-// linear light: tune them there as they look there. A .cube LUT is looked
-// up over its [0, 1] domain - a value past 1 takes the LUT's edge, the
-// .cube rule for input outside the domain - and on the scene through a 2.2
-// encode / decode; a DOMAIN_MIN / DOMAIN_MAX other than 0 / 1 is resampled
-// onto [0, 1], so an HDR-domain LUT's part past 1 is not used. A .cube is
-// read and parsed on the render thread when its pass first draws, and
-// again after a device reset (alt-tab in exclusive fullscreen, a
-// video-settings change): a large one (65 or more points a side) holds
-// that frame for a moment. A lattice value that is not a number, or lies
-// beyond +-65504, refuses the LUT with a report.
+// Every builtin effect runs one formula on the scene (linear HDR, before the
+// game's tonemap) and on the UI (the finished display frame, 0 - 1). invert,
+// colorGrade (contrast turns about 0.5), grain and deband (steps of 1/255)
+// are written for display values, and so are clarity's limiter (on the scene
+// it lifts the same local contrast less in a bright area than in a dark one),
+// outline's luma edge, glitch's static and the rain drops' highlight
+// (absolute amounts of brightness), so on the scene they act on linear light:
+// tune them there as they look there. On the UI bloom, halation, lens flare
+// and anamorphic add nothing at a threshold of 1 or more - their defaults -
+// so give them one below 1 there; such a pass (its params in their ordinary
+// range; not localized, banded or textured) is not drawn on the UI unless the
+// next pass fuses into it. In a frame whose UI covers the whole display
+// (eight points across it each three-quarters covered or more) every builtin
+// or .cube pass leaves the UI as it is; a .hlsl effect has no such rule and
+// applies by the UI's coverage there (the whole display where the UI is
+// opaque). A display whose every pixel in eight small areas across it reads
+// fully covered for a few frames running (the map) stops every UI pass, a
+// .hlsl one included, until one of them reads a pixel below full coverage
+// again, as when it closes (KH_UI_COV_LIVE).
+// A .cube LUT is looked up over its [0, 1]
+// domain - a value past 1 takes the LUT's edge, the .cube rule for input
+// outside the domain - and on the scene through a 2.2 encode / decode; a
+// DOMAIN_MIN / DOMAIN_MAX (or Resolve's LUT_3D_INPUT_RANGE, one span for all
+// three channels) other than 0 / 1 is resampled onto [0, 1], so an HDR-domain
+// LUT's part past 1 is not used. A .cube is read and parsed on the render
+// thread when its pass first draws, and again after a device reset (alt-tab
+// in exclusive fullscreen, a video-settings change): a large one (65 or more
+// points a side) holds that frame for a moment. A lattice value that is not a
+// number, or lies beyond +-65504, refuses the LUT with a report. Only a 3D
+// LUT is read, LUT_3D_SIZE 2 - 128 points a side: a 1D LUT, or a 1D shaper
+// with its 3D table (LUT_1D_SIZE), is refused with a report. Its lines may
+// end in LF, CRLF or a lone CR (KH_CUBE_CR), and its numbers' decimal point
+// is '.' whatever the process's locale (KH_NUM_C), as in an rvmat's
+// fresnel(N,K).
 //
 // The glows and blurs - blur, bloom, halation, lens flare, clarity, the
 // rain lens's condensation film and fog scatter - read a pre-filtered copy
@@ -643,15 +924,41 @@ namespace RenderIntegration {
 // street lamps, flashlights, fires, vehicle lights: each glows through the
 // fog around it in its own colour and brightness, a spot lighting its cone
 // alone into a beam, as bright as the light and as thick as the fog there.
-// The density is the game's own fog as it stands, thinning with height as
-// the game's does, so with the game's fog at 0 the pass adds nothing unless
-// baseDensity is set. The fog in front of it dims the glow as the game's fog
-// dims anything (past the game's fog end, nothing shows), and the glow stops
-// at the first surface - against the sky it reaches maxDistance. Params
+// The density is the game's own fog as it stands, thinning with height as the
+// game's does, so with the game's fog at 0 the pass adds nothing unless
+// baseDensity is set or a fog pass stands (below). With no medium at all - no
+// baseDensity, and neither the game's fog nor a fog pass (or fogScale 0,
+// which takes both out) - it also gathers nothing: it costs one full-screen
+// draw, its last step, which then passes the picture through
+// (KH_DLF_MEDIUM0). The fog in front of it dims the glow as the fog it
+// scatters in would - the game's fog times fogScale, plus baseDensity's haze:
+// as the game's fog dims anything only at fogScale 1 and baseDensity 0 (a
+// higher fogScale dims a far glow more than the scene beside it); past the
+// game's fog end, nothing shows. The glow stops
+// at the first surface - against the sky it reaches maxDistance. The scene's
+// own distance-fog passes (fog - the two most opaque fullscreen,
+// unlocalized, unbanded ones not on blend additive, multiply or screen, as
+// fog scatter takes them) are part of the
+// medium too: their fog scatters the light (times fogScale) - a lamp whose
+// glow lies between a pass's startDist and endDist lights that fog too - and
+// a fog pass drawn before this one dims the glow as it dims a surface at the
+// glow's distance; one drawn after it fogs the glow with the rest of the
+// picture by the surface's distance (a glow before a fully fogged sky then
+// goes with it, where the pass's fog thins with distance the glow keeps its
+// own), so add the fog pass first. Two parts of the game's fog are not in
+// the medium: the extra fog the meshes take below the game's fog layer
+// while the camera is under it (under water), so there the glow scatters and
+// dims in the air's fog; and below sea level the fog it scatters in keeps
+// its sea-level density while its dimming toward the camera takes the
+// game's own height-fog form, so a glow whose path to the camera dips below
+// sea level is dimmed by less than the fog along it - by as little as
+// 1 / (1 + x) of it, x = the fog's height decay times the depth below sea
+// level the path reaches (a quarter at x = 3, an eighth at 7).
+// Params
 // [intensity 1, fogScale 1, baseDensity 0, anisotropy 0.6, steps 16,
-// maxDistance 250, shadows 2, maxLights 24]: intensity scales the light the
-// fog scatters; fogScale multiplies the game's fog density and baseDensity
-// (per metre) adds an even haze of its own; anisotropy (-0.9 .. 0.9) is how
+// maxDistance 250, shadows 2, maxLights 24]: intensity (at least 0) scales the light the
+// fog scatters; fogScale (at least 0) multiplies the game's fog density and baseDensity
+// (per metre, at least 0) adds an even haze of its own; anisotropy (-0.9 .. 0.9) is how
 // strongly the fog scatters forward - toward 0.9 the glow gathers where you
 // look into the light, 0 spreads it evenly; steps (4 - 64) are the samples
 // taken through each light's reach, gathered toward its bright core, fewer
@@ -666,29 +973,46 @@ namespace RenderIntegration {
 // setSsgiScale sets (half size by default) and filtered up to the picture,
 // so geometry thinner than a grid texel - a wire, a thin post - can show
 // the glow of what lies behind it (setSsgiScale 1 works it out per pixel);
-// getRenderStats reports the grid work's GPU time as gDlFogUs (the pass's
-// last step, the upsample onto the picture, counts in gFlush). The game's
-// geometry casts only what the camera sees of it: a wall off screen or
-// behind the camera casts no shaft, a thin post or branch seen side-on
-// casts a faint one, something standing within about a metre of the
-// surface behind it (more, farther off) is taken as part of that surface
-// (a lamp between the two is shadowed by it), and a surface within a metre
-// of a light - its housing, the hand or vehicle holding it - casts none, as
-// the game's lights shine through their own. The lights are the ones the
-// game uploads for the frame, as our meshes' dynamic lighting has them, and
-// a visible pass keeps that capture running as a lit mesh does; with FSAA
-// at 1x none are read and the pass adds nothing. addLocalPostFX confines
-// it as it confines any pass, by the surface each pixel shows: where that
-// surface lies outside the volume - the sky included - the glow is cut,
-// though the fog it crosses may lie inside (with inverse, the reverse). On
-// a mesh (updateRender3D's effect), in a picture-in-picture and on the UI
-// it draws nothing. Its cost grows as lights x steps x the grid's texels,
-// shadows adding to every step: the maxima together - 64 lights reaching
-// into the view, 64 steps, setSsgiScale 2, shadows 2 - are estimated (not
-// measured) at a second or more a frame on a mid-range GPU - in one
-// draw, and a draw that runs about two seconds makes Windows reset the
-// driver, which the game does not survive. Raise them a step at a time,
-// watching gDlFogUs.
+// getRenderStats reports the grid work's GPU time as gDlFogUs, with the
+// picture-sized linear depth when this pass draws it (the chain draws it
+// once, for the first of its fog scatter, ssgi and dynamicLightFog passes to
+// need it); the pass's last step, the upsample onto the picture, counts in
+// gFlush. The game's geometry casts only what the camera sees of it: a wall
+// off screen or behind the camera casts no shaft, a thin post or branch seen
+// side-on casts a faint one, something standing within about a metre of the
+// surface behind it (more, farther off) is taken as part of that surface (a
+// lamp between the two is shadowed by it), and a surface within a metre of a
+// light - its housing, the hand or vehicle holding it - casts none, as the
+// game's lights shine through their own (so does the part of a wall within
+// a metre of a lantern just behind it). Blended layers that pass 98 % or
+// more of the light behind them and write no depth (thin rain, drizzle, a
+// faint haze sprite) are taken as absent for this pass - the glow is marched
+// to the surface behind them as if they were not there (the difference is
+// under 2 % of the glow's front share; KH_DLF_WS_FAINT); smoke, foliage and
+// glass still shade and sort it. Someone standing before the wall of
+// the room a light is in, hiding the light and the wall where its rays
+// would cross it, does not uncover it: a wall - a surface that still stands
+// a metre above the point hidden - is taken to go on behind him, so the fog
+// around him is not lit by that light (the ground, a roof, a ceiling are
+// not continued: a lamp behind him over open ground glows as before); a
+// wall that ends behind him - its corner, with the light beyond it -
+// shadows the fog about him only while he hides the light; where the point
+// a metre above lands on him instead, the fog about him can still glow. The
+// lights are the ones the game uploads for the frame, as our meshes'
+// dynamic lighting has them, and a visible pass keeps that capture running
+// as a lit mesh does; with FSAA at 1x none are read and the pass adds
+// nothing.
+// addLocalPostFX confines it as it confines any pass, by the surface each
+// pixel shows: where that surface lies outside the volume - the sky
+// included - the glow is cut, though the fog it crosses may lie inside
+// (with inverse, the reverse). On a mesh (updateRender3D's effect), in a
+// picture-in-picture and on the UI it draws nothing. Its cost grows as
+// lights x steps x the grid's texels, shadows adding to every step: the
+// maxima together - 64 lights reaching into the view, 64 steps,
+// setSsgiScale 2, shadows 2 - are estimated (not measured) at a second or
+// more a frame on a mid-range GPU - in one draw, and a draw that runs
+// about two seconds makes Windows reset the driver, which the game does
+// not survive. Raise them a step at a time, watching gDlFogUs.
 //
 // Returns the khr_ handle, or '' after reporting the fault
 //
@@ -728,9 +1052,15 @@ namespace RenderIntegration {
 //
 // uiSpill true lets a .hlsl effect on the UI spill past the UI's coverage
 // (bloom, halation, lensflare and anamorphic always do, the other builtins
-// never: on them it changes nothing). shape sphere | ellipsoid (0) or cube
-// | box (1); localSphere [radius, falloff?] ([] = not localized); radius a
-// number or [x, y, z] metres; falloff metres.
+// never: on them it changes nothing); a pass that spills blends normally
+// there, whatever its blend. shape sphere | ellipsoid (0) or cube
+// | box (1); localSphere [radius, falloff?] ([] = not localized) localizes
+// the pass about its position ([0, 0, 0] on an addPostFX pass until
+// position is set), and radius, falloff, shape and inverse act only on a
+// localized pass; radius a
+// number or [x, y, z] metres; falloff metres, along the mean radius: a
+// stretched shape fades over falloff x that axis's radius / the mean radius
+// on each axis (exact for a sphere or cube).
 //
 // Every true/false value also takes 1/0.
 //
@@ -749,7 +1079,8 @@ namespace RenderIntegration {
 // lifetime = seconds or [fadeIn, hold, fadeOut] (nil, [] or 0 = permanent);
 // an affector deletes itself when its lifetime ends. It counts real time,
 // as a duration does (updateRender3D): on through a pause or time
-// acceleration.
+// acceleration. Unlike a duration's, a part of 1e30 or more in size is
+// refused.
 //
 // position = [x, y, zASL].
 //
@@ -757,7 +1088,8 @@ namespace RenderIntegration {
 //
 // scale = a radius in metres or [x, y, z] half-extents along the affector's
 // right, forward (vectorDir) and up - world east, north and up for a type
-// with no direction - and nil or 0 acts everywhere.
+// with no direction - and nil or a radius of 0 acts everywhere (each
+// half-extent must be above 0).
 //
 // falloff = the outer fraction (0-1) of that region over which the effect
 // fades to nothing.
@@ -765,7 +1097,7 @@ namespace RenderIntegration {
 // The ranges of the type's own numbers: wind speed -200 - 200; turbulence
 // strength 0 - 200 (a negative one is 0: no turbulence), eddySize 0.01 -
 // 1000, rate 0 - 50; vortex swirl, inflow and updraft -200 - 200, core 0
-// - 1000; force and radial strength -1000 - 1000; drag strength 0 - 1. A
+// - 1000; force and radial strength -1000 - 1000; drag strength 0 - 1000. A
 // radius or half-extent is held to 100000 m; a negative lifetime (or part
 // of one) counts as 0, and a radius of 0 or below acts everywhere.
 //
@@ -792,9 +1124,10 @@ namespace RenderIntegration {
 // away from position (m/s^2; negative pulls toward it), fading to nothing
 // within 0.1 m of it.
 //
-// drag [lifetime, position, scale, strength 0.5, falloff 0.25]: thicker air
-// - the fraction of the cloth's velocity removed per 1/120 s (0-1), on top
-// of the cloth's own drag.
+// drag [lifetime, position, scale, strength 10, falloff 0.25]: thicker air
+// - the air's density times 1 + strength, so all the drag the air puts on
+// cloth and chains (their drag, through each face and along it) is that much
+// stronger, against their motion relative to the air; not under water.
 //
 // wind, turbulence and vortex move the AIR: they add to the world wind and
 // push cloth exactly as it does - through each face's own facing, so cloth
@@ -840,13 +1173,21 @@ namespace RenderIntegration {
 // Render statistics: counters and hook state, the render-thread frame trace
 // and the dynamic-light state. The first call arms collection (statsArmed 0)
 // and reports zero counters; later calls report what accumulated since.
-// Nothing is timed or counted while collection is off. Timings: "<zone>Us" /
+// Nothing is timed or counted while collection is off (hookExceptions excepted:
+// a session count, kept always). Timings: "<zone>Us" /
 // "<zone>N" are the last frame's (the one-in-16 sampled zones are noisy there);
 // profWindow and gpuWindow are every zone's mean and worst frame since the
 // arming; funnel counts the constant-buffer capture's work; gpuPasses and
 // gpuPassWindow time each post-processing pass on the GPU (the first 32
-// drawn in a frame; any past them go untimed). The result is an array of
-// [name, value] pairs
+// drawn in a frame; any past them go untimed); wseeGpu times the
+// see-through record's re-draws by kind on the GPU, one frame in 16
+// (KH_WSEE_GPUT: elapsed time between timestamps, an upper reading). The
+// see-through system's own cost is in ms: the CPU zones dsWsee (the
+// pre-draw step, sampled), wseePost (the re-draws), wseeClear (its work at
+// each frame's start, the particle shader compiles included) and
+// wseeCapture (the capture and its second snapshot), the GPU zones gWsee
+// (the capture) and gWseeB2 (the second snapshot), and wseeGpu.
+// The result is an array of [name, value] pairs
 //
 // ---- BOOL = resetRenderStats -----------------------------------------------
 // Zero the render counters and disarm collection until the next
@@ -855,7 +1196,50 @@ namespace RenderIntegration {
 // ---- BOOL = setRenderAmbientOcclusion ARRAY --------------------------------
 // [strength] or [strength, radius]. Screen-space ambient occlusion on our
 // meshes only: strength 0 - 4 (default 1; 0 = off), radius 0.05 - 5 m
-// (default 0.5)
+// (default 0.5; left out, the radius stays as it is). The term darkens
+// the whole colour of our marked pixels (the
+// meshes that write depth, lit or not) by the occlusion measured around them.
+//
+// ---- SEE-THROUGH (built in; no command) -----------------------------------
+// Always on (KH_WSEE_ON at compile time; no script switch). The depth-reading
+// post-processing passes (distance fog, fog scatter, dynamicLightFog, Pulse,
+// the sun flare, SSGI's sky, the localized and banded masks) see through the
+// world's blended surfaces (fences, foliage, glass) and particles to the
+// scene behind them, per antialiasing sample at their edges; FSAA 1x is not
+// covered. While a pass that uses it is on, every frame captures the depth
+// and colour at the world's first blended draw past our meshes' injection
+// (blended surfaces drawn before it count as the scene) and draws each later
+// blended draw of the world again into the record - a particle once, at half
+// the frame's resolution, where its shader's bytecode is held, else two to
+// five times; an additive glow by a depth-only re-draw - and each late
+// opaque drawn after the frame's first fence-type surface once more; our own
+// translucent parts sort against the world's layers. Buffers: about 1.26 GB
+// at 3840 x 2160 8x with a 64-bit scene (more for 128-bit), 66 MB more, plus
+// the hold of their geometry, once our parts sort, freed after 600 frames without a pass that uses it;
+// nothing checks them against the card's video memory (a record too large
+// pages - stutter - rather than fails). The colours are taken only for a
+// frame whose distance fog, user effect or sorted parts read them: such a
+// pass added draws its first frame as before see-through. Visible
+// approximations: the particles' transparency and depth are read once per
+// 2 x 2 block (an edge, a dithered fade or a spark narrower than 2 pixels at
+// block steps; smoke behind a nearer outline may count up to a pixel over
+// it; its texture a mip softer; the last column / row of an odd frame size
+// takes the block beside it); the reduced particle shaders may move a
+// transparency by 1 / 255; an edge pixel takes each group of its samples
+// once; multiply and other darkening blends, and the layers' own light over
+// a surface the world drew late (trees), are approximated; the late surfaces
+// drawn before the frame's first fence-type surface are read from depth
+// copies, not drawn again (their antialiasing sample edges differ from a
+// drawn record; a particle drawn before such a surface but in front of it
+// is kept, with any particle of its phase behind that surface). KNOWN
+// LIMITATION: the colour behind the layers is taken before the
+// dynamic-light shadows our meshes cast on the world are applied to the
+// scene, so under smoke or glass the distance fog shows those shadows
+// lifted (and our sorted glass over them darkens them further). Its cost in ms: getRenderStats' dsWsee, wseePost,
+// wseeClear, wseeCapture, gWsee, gWseeB2 and wseeGpu. An engine pixel shader
+// whose bytecode cannot be reduced (its re-draws keep the whole shader, or
+// two passes where one would do) is named once in the RPT with its size and
+// a refusal code
 //
 // ---- BOOL = setSsgiScale SCALAR --------------------------------------------
 // SSGI gather resolution multiplier: 1 full res, 0.5 half (default), 2
@@ -870,8 +1254,11 @@ namespace RenderIntegration {
 // or this is set false
 //
 // ---- BOOL = flushUIRender --------------------------------------------------
-// Renders all UI-affecting passes, and turns on the UI driver that
-// otherwise calls it each frame. Returns true when passes were queued
+// Turns on the UI driver that otherwise calls it each frame. The UI-affecting
+// passes are drawn when the game presents its frame; while that is not
+// serving (no UI flush there for a quarter second), this call renders them
+// itself. Returns false when no such pass exists or the render could not
+// run, else true
 // ===========================================================================
 
 // KH_PLAYER_ONLY (the reference above): false = this machine has no graphics
@@ -963,7 +1350,10 @@ enum KhProfZone : uint32_t {
     KHP_HOOK_COPYRES, KHP_HOOK_RESOLVE, KHP_HOOK_COPYREGION, KHP_HOOK_MISC, KHP_DRAW_RECORD, KHP_DRAW_POST,
     // KH_PROF_DRV: the driver's own Map / Unmap (inside hookMap) and UpdateSubresource (inside hookUpdSub), timed on
     // one call in KH_PROF_SAMPLE_EVERY of their own (kh_prof_drv_t0) with the TSC and scaled; their N is those calls
-    // x KH_PROF_SAMPLE_EVERY (an estimate). Our share of hookMap is about hookMap - drvMap - drvUnmap.
+    // x KH_PROF_SAMPLE_EVERY (an estimate). hookMap - drvMap - drvUnmap estimates our share of hookMap only while
+    // the driver's calls cost alike: the scope and the driver are sampled on different calls, so a Map that stalls in
+    // the driver (waiting on the GPU) lands scaled in one estimate and not the other - a large difference, or a drvMap
+    // max above hookMap's, then reads as a driver stall, not our work.
     KHP_DRV_MAP, KHP_DRV_UNMAP, KHP_DRV_UPDSUB,
     // KH_PROF_UPLOAD: the funnel's steps for each captured upload (KhProfSub; one decision per upload, timed one in
     // KH_PROF_SAMPLE_EVERY): the capture (the copy), then each scanner, then the replay's image note.
@@ -976,6 +1366,17 @@ enum KhProfZone : uint32_t {
     // their own zones above.
     KHP_DS_SEAM, KHP_DS_PIP, KHP_DS_SHADOW, KHP_DS_MASK, KHP_DS_DL, KHP_DS_INFRONT, KHP_DS_CASCBIND,
     KHP_DS_SKYBIND, KHP_DS_LATCH,
+    // KH_WSEE - the see-through record's CPU zones. dsWsee - the pre-draw's step for the engine's draws in a wanted
+    // cycle (kh_wsee_pre_draw: the state reads and the capture; sampled, as dsShadowNote). wseePost - the re-issues
+    // (kh_wsee_post, inside the draw hooks' post: the saves, the passes' draws and the restore), timed whole with the
+    // TSC as drawPost is, which it nests in.
+    KHP_DS_WSEE, KHP_WSEE_POST,
+    // wseeClear - the see-through work at each main-depth clear (kh_wsee_cycle_note, kh_psv_cycle_head's variant
+    // compiles - KH_PSV_MAKE_N entries at most, up to three driver compiles each -, kh_wsee_gput_head), nested in
+    // hookClear; wseeCapture - the capture and the B2 / S2 moment (kh_wsee_snapshot, kh_wsee_b2_take: once a cycle
+    // each, refusals counted too), nested in dsWsee or in inject (the injection tail's capture). Both timed whole with
+    // the TSC (KH_PROF_TSC), as wseePost.
+    KHP_WSEE_CLEAR, KHP_WSEE_CAP,
     KHP_ZONE_N
 };
 static const char* const g_prof_zone_name[] = {
@@ -998,6 +1399,7 @@ static const char* const g_prof_zone_name[] = {
     "scB2", "scRpImg",
     "dsSeamPump", "dsPip", "dsShadowNote", "dsMaskNote", "dlSample", "dsInfront", "dsCascbind",
     "dsSkybind", "dsLatch",
+    "dsWsee", "wseePost", "wseeClear", "wseeCapture",   // KH_WSEE.
 };
 static_assert(sizeof(g_prof_zone_name) / sizeof(g_prof_zone_name[0]) == KHP_ZONE_N, "KH_PROF: a name per zone");
 static std::atomic<uint64_t> g_prof_ticks[KHP_ZONE_N];
@@ -1335,16 +1737,285 @@ static std::atomic<double> g_prof_tsc_per_us{ 0.0 };
 // read 0 there).
 static bool g_prof_prev_on = false;
 
+// KH_WSEE_GPUT - GPU timing of the see-through record's own work (stats alone: every write under kh_stats_on; nothing
+// drawn or decided reads it). KHG_WSEE / KHG_WSEE_B2 time the capture and B2 alone - the re-issues run inside the
+// engine's draw stream and no zone brackets them. One frame in KH_WSEE_GPUT_EVERY while armed and capturing (cycle %
+// 16 == KH_WSEE_GPUT_AT) ends a timestamp at each re-issue's save and restore (kh_wsee_re_save / kh_wsee_re_restore),
+// before each particle-type pass (kh_wsee_re_set) and around the capture, B2, our tail, the chain's E draw and D3's
+// resolve (KhWseeGputScope); the frame is one disjoint query from its clear to the next. Read back at later clears
+// without a flush or a wait (at most KH_WSEE_GPUT_READ stamps a clear; a frame not read whole within KH_WSEE_GPUT_WAIT
+// clears is dropped; a ring of KH_WSEE_GPUT_RING frames). Per kind: the sum of its intervals in the frame and their
+// count (getRenderStats "wseeGpu"). An interval is elapsed GPU time - the pipeline's drain and refill around the draws
+// included, never less than their own time: a sum over many short intervals over-states their marginal cost, and the
+// probe frame runs slower by its stamps. A block that would not fit (KH_WSEE_GPUT_N stamps a frame, eight kept for a
+// block's own) or that opens inside another goes untimed (counted). The chain's thread (the chain's E draw and the
+// resolve: the render thread, a park that stalls it, or the game thread's late chain inside a resolve the
+// engine issues there: the engine never drives the immediate context from two threads at once). Released with the
+// KH_PROF queries (kh_gpu_prof_release: the device, the session); a refused make latches until then. The first probe
+// frame makes 8,194 queries inside the main depth's clear hook (a render-thread hitch of a few ms, once per session
+// and device reset); the clears after a probe frame issue up to KH_WSEE_GPUT_READ GetData calls each. KHWG_P_OTHER: a
+// pass without a kind of its own (kh_wsee_gput_pk gives every pass one).
+enum KhWseeGputKind : uint32_t {
+    KHWG_OPQ_POST, KHWG_FENCE, KHWG_PART, KHWG_P_T, KHWG_P_NW, KHWG_P_TP, KHWG_P_TP2, KHWG_P_TF,
+    KHWG_P_OTHER, KHWG_TAIL, KHWG_CAPTURE, KHWG_B2, KHWG_CHAIN_E, KHWG_D3RES,
+    KHWG_P_ONE,   // KH_PSB: the one pass (a particle-type re-issue drawn once).
+    KHWG_N
+};
+static const char* const g_wsee_gput_name[KHWG_N] = {
+    "opqPost", "fence", "particle", "pT", "pNW", "pTp", "pTp2", "pTf",
+    "pOther", "tail", "capture", "b2", "chainE", "d3Resolve",
+    "pOne",
+};
+static constexpr uint32_t KH_WSEE_GPUT_N = 4096u;
+static constexpr uint32_t KH_WSEE_GPUT_RING = 2u;
+static constexpr uint32_t KH_WSEE_GPUT_READ = 1024u;
+static constexpr uint64_t KH_WSEE_GPUT_EVERY = 16u;
+static constexpr uint64_t KH_WSEE_GPUT_AT = 8u;
+static constexpr uint64_t KH_WSEE_GPUT_WAIT = 14u;
+// A stamp's event: the kind in the low six bits, the role above (a block's begin, a pass's start, a block's end).
+static constexpr uint8_t KHWG_EV_BEGIN = 0x00u, KHWG_EV_PASS = 0x40u, KHWG_EV_END = 0x80u;
+struct KhWseeGput {
+    ID3D11Query* dj[KH_WSEE_GPUT_RING] = {};
+    ID3D11Query* ts[KH_WSEE_GPUT_RING][KH_WSEE_GPUT_N] = {};
+    uint8_t      ev[KH_WSEE_GPUT_RING][KH_WSEE_GPUT_N] = {};
+    uint64_t     tv[KH_WSEE_GPUT_RING][KH_WSEE_GPUT_N] = {};   // The values read back.
+    uint32_t     n[KH_WSEE_GPUT_RING] = {};      // Stamps ended in the slot's frame.
+    uint32_t     rd[KH_WSEE_GPUT_RING] = {};     // Of them read back.
+    uint64_t     cyc[KH_WSEE_GPUT_RING] = {};
+    uint64_t     freq[KH_WSEE_GPUT_RING] = {};   // The disjoint query's (0 = not read yet).
+    bool         wait[KH_WSEE_GPUT_RING] = {};
+    int          open = -1;    // The slot recording (this frame), -1 = none.
+    uint32_t     next = 0;     // The slot the next probe frame takes.
+    int          blk = -1;     // The open block's begin stamp in the open slot, -1 = none.
+    bool         ready = false;
+    bool         failed = false;
+};
+static KhWseeGput g_wsee_gput;
+// Published (the harvest writes, getRenderStats reads): per kind the last frame read's ns and intervals, and the sums
+// over every frame read since the arming / resetRenderStats; the frames read, dropped, and the blocks left untimed.
+static std::atomic<uint64_t> g_wsee_gput_ns_last[KHWG_N];
+static std::atomic<uint64_t> g_wsee_gput_n_last[KHWG_N];
+static std::atomic<uint64_t> g_wsee_gput_ns_sum[KHWG_N];
+static std::atomic<uint64_t> g_wsee_gput_n_sum[KHWG_N];
+static std::atomic<uint64_t> g_wsee_gput_read{ 0 };
+static std::atomic<uint64_t> g_wsee_gput_drop{ 0 };
+static std::atomic<uint64_t> g_wsee_gput_untimed{ 0 };
+inline void kh_wsee_gput_zero_pub() {   // resetRenderStats (reset_stat_counters).
+    for (uint32_t khgz_k = 0; khgz_k < KHWG_N; ++khgz_k) {
+        g_wsee_gput_ns_last[khgz_k].store(0, std::memory_order_relaxed);
+        g_wsee_gput_n_last[khgz_k].store(0, std::memory_order_relaxed);
+        g_wsee_gput_ns_sum[khgz_k].store(0, std::memory_order_relaxed);
+        g_wsee_gput_n_sum[khgz_k].store(0, std::memory_order_relaxed);
+    }
+    g_wsee_gput_read.store(0, std::memory_order_relaxed);
+    g_wsee_gput_drop.store(0, std::memory_order_relaxed);
+    g_wsee_gput_untimed.store(0, std::memory_order_relaxed);
+}
+inline void kh_wsee_gput_release() {
+    for (uint32_t khgr_s = 0; khgr_s < KH_WSEE_GPUT_RING; ++khgr_s) {
+        KH_SAFE_RELEASE(g_wsee_gput.dj[khgr_s]);
+        for (ID3D11Query*& khgr_q : g_wsee_gput.ts[khgr_s]) KH_SAFE_RELEASE(khgr_q);
+        g_wsee_gput.n[khgr_s] = g_wsee_gput.rd[khgr_s] = 0;
+        g_wsee_gput.freq[khgr_s] = 0;
+        g_wsee_gput.wait[khgr_s] = false;
+    }
+    g_wsee_gput.open = -1;
+    g_wsee_gput.next = 0;
+    g_wsee_gput.blk = -1;
+    g_wsee_gput.ready = false;
+    g_wsee_gput.failed = false;
+}
+inline bool kh_wsee_gput_ensure(ID3D11DeviceContext* khge_ctx) {
+    if (g_wsee_gput.ready) return true;
+    if (g_wsee_gput.failed || !khge_ctx) return false;
+    ID3D11Device* khge_dev = nullptr;
+    khge_ctx->GetDevice(&khge_dev);
+    bool khge_ok = khge_dev != nullptr;
+    D3D11_QUERY_DESC khge_dd = {};
+    khge_dd.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+    D3D11_QUERY_DESC khge_td = {};
+    khge_td.Query = D3D11_QUERY_TIMESTAMP;
+    for (uint32_t khge_s = 0; khge_s < KH_WSEE_GPUT_RING && khge_ok; ++khge_s) {
+        khge_ok = SUCCEEDED(khge_dev->CreateQuery(&khge_dd, &g_wsee_gput.dj[khge_s]));
+        for (uint32_t khge_i = 0; khge_i < KH_WSEE_GPUT_N && khge_ok; ++khge_i) {
+            khge_ok = SUCCEEDED(khge_dev->CreateQuery(&khge_td, &g_wsee_gput.ts[khge_s][khge_i]));
+        }
+    }
+    if (khge_dev) khge_dev->Release();
+    if (!khge_ok) {
+        kh_wsee_gput_release();
+        g_wsee_gput.failed = true;
+        return false;
+    }
+    g_wsee_gput.ready = true;
+    return true;
+}
+// A block's begin (khgb_k its kind, or KHWG_N: the first pass's, kh_wsee_gput_pass).
+inline void kh_wsee_gput_begin(ID3D11DeviceContext* khgb_ctx, uint32_t khgb_k) {
+    if (g_wsee_gput.open < 0 || !kh_stats_on()) return;
+    const uint32_t khgb_s = static_cast<uint32_t>(g_wsee_gput.open);
+    if (g_wsee_gput.blk >= 0 || g_wsee_gput.n[khgb_s] + 8u > KH_WSEE_GPUT_N) {
+        g_wsee_gput_untimed.fetch_add(1u, std::memory_order_relaxed);
+        return;
+    }
+    const uint32_t khgb_i = g_wsee_gput.n[khgb_s]++;
+    g_wsee_gput.ev[khgb_s][khgb_i] = static_cast<uint8_t>(KHWG_EV_BEGIN | (khgb_k & 0x3Fu));
+    khgb_ctx->End(g_wsee_gput.ts[khgb_s][khgb_i]);
+    g_wsee_gput.blk = static_cast<int>(khgb_i);
+}
+// A pass of the open block: the block's kind where its begin left it open (khgp_bk), and a pass stamp of kind khgp_pk
+// (KHWG_N: none - the one-pass kinds take the block's interval alone). One stamp is always left for the end.
+inline void kh_wsee_gput_pass(ID3D11DeviceContext* khgp_ctx, uint32_t khgp_bk, uint32_t khgp_pk) {
+    if (g_wsee_gput.blk < 0 || g_wsee_gput.open < 0) return;
+    const uint32_t khgp_s = static_cast<uint32_t>(g_wsee_gput.open);
+    uint8_t& khgp_b = g_wsee_gput.ev[khgp_s][static_cast<uint32_t>(g_wsee_gput.blk)];
+    if ((khgp_b & 0x3Fu) == KHWG_N) khgp_b = static_cast<uint8_t>(KHWG_EV_BEGIN | (khgp_bk & 0x3Fu));
+    if (khgp_pk >= KHWG_N || g_wsee_gput.n[khgp_s] + 1u >= KH_WSEE_GPUT_N) return;
+    const uint32_t khgp_i = g_wsee_gput.n[khgp_s]++;
+    g_wsee_gput.ev[khgp_s][khgp_i] = static_cast<uint8_t>(KHWG_EV_PASS | (khgp_pk & 0x3Fu));
+    khgp_ctx->End(g_wsee_gput.ts[khgp_s][khgp_i]);
+}
+inline void kh_wsee_gput_end(ID3D11DeviceContext* khgn_ctx) {
+    if (g_wsee_gput.blk < 0 || g_wsee_gput.open < 0) return;
+    const uint32_t khgn_s = static_cast<uint32_t>(g_wsee_gput.open);
+    const uint32_t khgn_i = g_wsee_gput.n[khgn_s]++;   // Room: the begin kept eight, a pass leaves one.
+    g_wsee_gput.ev[khgn_s][khgn_i] = KHWG_EV_END;
+    khgn_ctx->End(g_wsee_gput.ts[khgn_s][khgn_i]);
+    g_wsee_gput.blk = -1;
+}
+// A whole-kind block (the capture, B2, our tail, E, the resolve): its begin at construction, its end at destruction
+// where this scope opened it. Nothing in it may set a slot (only the clear does: kh_wsee_gput_head).
+struct KhWseeGputScope {
+    ID3D11DeviceContext* khgs_ctx;
+    bool                 khgs_on;
+    KhWseeGputScope(ID3D11DeviceContext* khgs_c, uint32_t khgs_k) : khgs_ctx(khgs_c), khgs_on(false) {
+        if (g_wsee_gput.open < 0 || g_wsee_gput.blk >= 0 || !khgs_ctx) {
+            if (g_wsee_gput.open >= 0 && g_wsee_gput.blk >= 0 && kh_stats_on()) {
+                g_wsee_gput_untimed.fetch_add(1u, std::memory_order_relaxed);
+            }
+            return;
+        }
+        kh_wsee_gput_begin(khgs_ctx, khgs_k);
+        khgs_on = g_wsee_gput.blk >= 0;
+    }
+    ~KhWseeGputScope() {
+        if (khgs_on) kh_wsee_gput_end(khgs_ctx);
+    }
+    KhWseeGputScope(const KhWseeGputScope&) = delete;
+    KhWseeGputScope& operator=(const KhWseeGputScope&) = delete;
+};
+// A read slot's frame folded: each block's interval to its kind (a block no pass named - the re-issue's stencil
+// backstop, which draws nothing - to the particle kind), each pass's to the pass kind, to its block's end or the next
+// pass; published as the last frame and added to the sums.
+inline void kh_wsee_gput_fold(uint32_t khgf_s) {
+    uint64_t khgf_ns[KHWG_N] = {};
+    uint64_t khgf_n[KHWG_N] = {};
+    const double khgf_f = static_cast<double>(g_wsee_gput.freq[khgf_s]);
+    const auto khgf_add = [&](uint32_t khgf_k, uint64_t khgf_a, uint64_t khgf_b) {
+        if (khgf_k >= KHWG_N || khgf_b < khgf_a) return;
+        khgf_ns[khgf_k] += static_cast<uint64_t>(static_cast<double>(khgf_b - khgf_a) * 1.0e9 / khgf_f);
+        ++khgf_n[khgf_k];
+    };
+    int khgf_bi = -1, khgf_pi = -1;
+    uint32_t khgf_bk = KHWG_N, khgf_pk = KHWG_N;
+    for (uint32_t khgf_i = 0; khgf_i < g_wsee_gput.n[khgf_s]; ++khgf_i) {
+        const uint8_t khgf_e = g_wsee_gput.ev[khgf_s][khgf_i];
+        const uint64_t khgf_t = g_wsee_gput.tv[khgf_s][khgf_i];
+        if ((khgf_e & 0xC0u) == KHWG_EV_BEGIN) {
+            khgf_bi = static_cast<int>(khgf_i);
+            khgf_bk = khgf_e & 0x3Fu;
+            khgf_pi = -1;
+        } else if (khgf_bi >= 0 && (khgf_e & 0xC0u) == KHWG_EV_PASS) {
+            if (khgf_pi >= 0) khgf_add(khgf_pk, g_wsee_gput.tv[khgf_s][static_cast<uint32_t>(khgf_pi)], khgf_t);
+            khgf_pi = static_cast<int>(khgf_i);
+            khgf_pk = khgf_e & 0x3Fu;
+        } else if (khgf_bi >= 0 && (khgf_e & 0xC0u) == KHWG_EV_END) {
+            if (khgf_pi >= 0) khgf_add(khgf_pk, g_wsee_gput.tv[khgf_s][static_cast<uint32_t>(khgf_pi)], khgf_t);
+            khgf_add(khgf_bk >= KHWG_N ? static_cast<uint32_t>(KHWG_PART) : khgf_bk,
+                     g_wsee_gput.tv[khgf_s][static_cast<uint32_t>(khgf_bi)], khgf_t);
+            khgf_bi = khgf_pi = -1;
+        }
+    }
+    for (uint32_t khgf_k = 0; khgf_k < KHWG_N; ++khgf_k) {
+        g_wsee_gput_ns_last[khgf_k].store(khgf_ns[khgf_k], std::memory_order_relaxed);
+        g_wsee_gput_n_last[khgf_k].store(khgf_n[khgf_k], std::memory_order_relaxed);
+        g_wsee_gput_ns_sum[khgf_k].fetch_add(khgf_ns[khgf_k], std::memory_order_relaxed);
+        g_wsee_gput_n_sum[khgf_k].fetch_add(khgf_n[khgf_k], std::memory_order_relaxed);
+    }
+    g_wsee_gput_read.fetch_add(1u, std::memory_order_relaxed);
+}
+// The main depth's clear (render thread; khgh_c the new cycle, khgh_cap whether it captures - g_wsee_on): the frame
+// recorded ends (its disjoint query; a block still open there is dropped with what followed it), the frames awaited
+// are read as far as they are done, and a probe frame opens. Disarmed: nothing recorded, nothing awaited.
+inline void kh_wsee_gput_head(ID3D11DeviceContext* khgh_ctx, uint64_t khgh_c, bool khgh_cap) {
+    if (g_wsee_gput.open >= 0) {
+        const uint32_t khgh_o = static_cast<uint32_t>(g_wsee_gput.open);
+        if (g_wsee_gput.blk >= 0) g_wsee_gput.n[khgh_o] = static_cast<uint32_t>(g_wsee_gput.blk);
+        khgh_ctx->End(g_wsee_gput.dj[khgh_o]);
+        g_wsee_gput.wait[khgh_o] = true;
+        g_wsee_gput.open = -1;
+        g_wsee_gput.blk = -1;
+    }
+    if (!kh_stats_on()) {
+        for (bool& khgh_w : g_wsee_gput.wait) khgh_w = false;
+        return;
+    }
+    uint32_t khgh_budget = KH_WSEE_GPUT_READ;
+    for (uint32_t khgh_s = 0; khgh_s < KH_WSEE_GPUT_RING; ++khgh_s) {
+        if (!g_wsee_gput.wait[khgh_s]) continue;
+        if (khgh_c - g_wsee_gput.cyc[khgh_s] > KH_WSEE_GPUT_WAIT) {
+            g_wsee_gput.wait[khgh_s] = false;
+            g_wsee_gput_drop.fetch_add(1u, std::memory_order_relaxed);
+            continue;
+        }
+        if (g_wsee_gput.freq[khgh_s] == 0) {
+            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT khgh_dj = {};
+            if (khgh_ctx->GetData(g_wsee_gput.dj[khgh_s], &khgh_dj, sizeof(khgh_dj),
+                                  D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) continue;
+            if (khgh_dj.Disjoint || khgh_dj.Frequency == 0) {
+                g_wsee_gput.wait[khgh_s] = false;
+                g_wsee_gput_drop.fetch_add(1u, std::memory_order_relaxed);
+                continue;
+            }
+            g_wsee_gput.freq[khgh_s] = khgh_dj.Frequency;
+        }
+        while (khgh_budget > 0 && g_wsee_gput.rd[khgh_s] < g_wsee_gput.n[khgh_s]) {
+            UINT64 khgh_t = 0;
+            if (khgh_ctx->GetData(g_wsee_gput.ts[khgh_s][g_wsee_gput.rd[khgh_s]], &khgh_t, sizeof(khgh_t),
+                                  D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) break;
+            g_wsee_gput.tv[khgh_s][g_wsee_gput.rd[khgh_s]++] = khgh_t;
+            --khgh_budget;
+        }
+        if (g_wsee_gput.rd[khgh_s] == g_wsee_gput.n[khgh_s]) {
+            kh_wsee_gput_fold(khgh_s);
+            g_wsee_gput.wait[khgh_s] = false;
+        }
+    }
+    if (khgh_cap && khgh_c % KH_WSEE_GPUT_EVERY == KH_WSEE_GPUT_AT && !g_wsee_gput.wait[g_wsee_gput.next] &&
+        kh_wsee_gput_ensure(khgh_ctx)) {
+        const uint32_t khgh_s = g_wsee_gput.next;
+        g_wsee_gput.n[khgh_s] = g_wsee_gput.rd[khgh_s] = 0;
+        g_wsee_gput.freq[khgh_s] = 0;
+        g_wsee_gput.cyc[khgh_s] = khgh_c;
+        khgh_ctx->Begin(g_wsee_gput.dj[khgh_s]);
+        g_wsee_gput.open = static_cast<int>(khgh_s);
+        g_wsee_gput.next = (khgh_s + 1u) % KH_WSEE_GPUT_RING;
+    }
+}
+
 enum KhGpuZone : uint32_t {
     KHG_INJECT, KHG_SUN_LADDER, KHG_DLS_FRAME, KHG_DLS_WORLD, KHG_MASK_CAST, KHG_SVS_PRIME,
     KHG_SVS_VOL_COPY, KHG_VMIR, KHG_SSAO_POST, KHG_SNAPSHOT, KHG_PIP,
     KHG_FLUSH, KHG_FLUSH_UI, KHG_SCENE_CAPTURE, KHG_DLF,
+    KHG_WSEE,   // KH_WSEE: the capture (kh_wsee_snapshot) alone - one pair a zone a cycle, so no re-issue is timed.
+    KHG_WSEE_B2,   // B2 and S2 (kh_wsee_b2_take), once a cycle.
     KHG_ZONE_N
 };
 static const char* const g_gpu_zone_name[KHG_ZONE_N] = {
     "gInject", "gSunLadder", "gDlsFrame", "gDlsWorld", "gMaskCast", "gSvsPrime",
     "gSvsVolCopy", "gVmir", "gSsaoPost", "gSnapshot", "gPip",
     "gFlush", "gFlushUi", "gSceneCapture", "gDlFog",
+    "gWsee", "gWseeB2",
 };
 static constexpr uint32_t KH_GPU_RING = 8u;
 // The cycles back a slot is read, never waiting (< KH_GPU_RING): the GPU was measured running 5 cycles behind the CPU
@@ -1453,6 +2124,7 @@ inline bool kh_gpu_prof_ensure(ID3D11DeviceContext* khgp_ctx) {
     return true;
 }
 inline void kh_gpu_prof_release() {
+    kh_wsee_gput_release();   // KH_WSEE_GPUT: its queries share the KH_PROF set's lifetime.
     for (uint32_t khgr_r = 0; khgr_r < KH_GPU_RING; ++khgr_r) {
         KH_SAFE_RELEASE(g_gpu_prof.disjoint[khgr_r]);
         for (uint32_t khgr_z = 0; khgr_z < KHG_ZONE_N; ++khgr_z) {
@@ -1954,10 +2626,12 @@ struct KhClothParams {
     // 0..1 MATERIAL damping per KH_CLOTH_H: it removes that fraction of the
     // rate at which each constraint stretches or folds, and nothing else. A
     // rigid motion changes no constraint, so a swing, a spin and the carrier's
-    // own motion are all left to air - 'drag' and the face term.
+    // own motion are all left to the air - 'drag'.
     float damping;
-    float drag;           // 0..1 air drag against absolute velocity, per KH_CLOTH_H.
-    float mass;           // Particle mass (kg). Scales response to gravity vs constraints.
+    // KH_CLOTH_DRAG: the air's drag per point (kg/s) against its motion relative to the air, in full through its
+    // faces and KH_CLOTH_SKIN of it along them; acceleration = this / mass. kh_cloth_substep.
+    float drag;
+    float mass;           // Particle mass (kg). Scales response to gravity vs constraints, and to the media's drag.
     float gravity;        // Multiplier on standard gravity; 0 = weightless.
     float max_stretch;    // Hard post-solve limit as a multiple of rest length (>= 1).
     float thickness;      // Cloth collision radius (m).
@@ -1985,7 +2659,7 @@ struct KhClothParams {
     float shell;
     // Multiplier on the world wind the game reports; 0 = this object ignores
     // the world's wind, and the air around it is still air - which still
-    // resists its motion. Wind acts through the particle's own facing, so a
+    // resists its motion. Wind acts through the drag (KH_CLOTH_DRAG), so a
     // cloth edge-on to it is barely pushed, and it scales as 1 / mass.
     float wind;
     // Upward acceleration underwater as a multiple of STANDARD gravity (not of
@@ -1994,9 +2668,9 @@ struct KhClothParams {
     // cloth settles where buoyancy balances gravity, so 'gravity'
     // divided by this is the fraction of KH_CLOTH_WATER_BAND it floats at.
     float buoyancy;
-    // Velocity damping per KH_CLOTH_H while submerged, the twin of 'drag' and
-    // ramped in over the same band. Water is not air: a cape entering it
-    // should slow hard rather than keep swinging.
+    // KH_CLOTH_DRAG: the water's drag per point (kg/s), the twin of 'drag' in
+    // still water, taken in over the same band in proportion. Water is not
+    // air: a cape entering it should slow hard rather than keep swinging.
     float water_drag;
     // SELF-COLLISION (clothSimulation's selfCollision / selfThickness /
     // selfFriction keys), off by default. With it on, no particle comes
@@ -2072,10 +2746,24 @@ struct KhClothState {
     std::vector<KhClothDist> stretch;
     std::vector<KhClothDist> bend;      // Opposite corners across a shared edge.
     std::vector<KhClothTri>  tri;       // Level-0 faces: the wind normal and self-collision's faces.
-    float    centre[3];                 // The frame the rest pose was last resolved against.
+    // KH_SUB_CLOCK: the carrier's frame at the SIMULATION'S time - where the
+    // last substep ended, which stands short of the frame's end by the substep
+    // accumulator's leftover (under one substep). The particles stand against
+    // it, the writeback is relative to it and the next step's substeps run
+    // from it; fend is the frame's end (the step's input), which the teleport,
+    // jolt and sleep tests read as a frame-to-frame motion. Equal when nothing
+    // is left over (60 / 120 fps at the default two substeps).
+    float    centre[3];
     float    rot[9];
     float    size[3];
     bool     rotated;
+    KhClothFrame fend;
+    // KH_SUB_CLOCK: the fraction of the last step's span (the frame above to
+    // its end) that the substeps covered: 1 when nothing was left over, 0
+    // when none ran. kh_cloth_sync places each collider's previous pose by it
+    // and kh_cloth_guide_prep the skeleton's, so both start where the
+    // simulation stands; kh_chain_step places its own lanes by it.
+    float    sub_t;
     bool     primed;                    // False until the first step has placed the particles.
     // Sea level on the up axis of the frame the particles live in. The core
     // is frame-agnostic and this is its one absolute fact; the runtime
@@ -2141,9 +2829,10 @@ struct KhClothState {
     // KH_TELEPORT_ONCE: carrier_v was taken across a rebase (the jump's own
     // travel), so the next test also takes no jump from where the carrier stood.
     bool                  carrier_vreb;
-    // How far (m) the farthest particle stood from the carrier's centre at the
-    // end of the last step, or 0 before one: kh_cloth_sync's reach for colliders and
-    // affectors. A scalar, written by the worker, read on a non-busy instance.
+    // How far (m) the farthest particle stood from the carrier's centre (the
+    // state's frame, KH_SUB_CLOCK) at the end of the last step, or 0 before
+    // one: kh_cloth_sync's reach for colliders and affectors. A scalar,
+    // written by the worker, read on a non-busy instance.
     float                 reach;
     // Worker-private: the per-substep collider views (kh_cloth_step).
     std::vector<KhPhysicsColliderView> col_sub;
@@ -2157,13 +2846,15 @@ struct KhClothState {
     std::vector<KhColClearCol> col_clear_col;   // ...and each column's pose chain.
     // KH_SKEL: a skeletal binding's guide for the rigid-follow targets
     // (kh_cloth_target), 3 floats per particle, mesh-local like 'rest': where
-    // the skeleton puts each particle at the start of the frame (a) and at its
-    // end (b). A simulated particle's entry is its rest position - the bones
+    // the skeleton put each particle at the simulation's time (a - the last
+    // substep's end, KH_SUB_CLOCK) and where it puts it at the frame's end
+    // (b). A simulated particle's entry is its rest position - the bones
     // move only what is pinned, wholly or in part. Both empty = no guide, and
     // every target is 'rest'. Filled on the worker ahead of the step
     // (kh_cloth_guide_prep). guide_t0 / guide_t1 are the fractions of the
-    // frame the running substep starts and ends at, so guide_t1 is where the
-    // frame in 'centre' stands (kh_cloth_step sets both).
+    // step's span (KH_SUB_CLOCK: guide_a stands at the simulation's time) the
+    // running substep starts and ends at, so guide_t1 is where the frame in
+    // 'centre' stands (kh_cloth_step sets both).
     std::vector<float>    guide_a;
     std::vector<float>    guide_b;
     float                 guide_t0;
@@ -2182,14 +2873,14 @@ static constexpr uint32_t KH_FORK_EACH_MIN = 512u;   // Below this the fork's wa
 // A scripted field that pushes cloth in one of three ways, and the way is what
 // separates the types:
 // - AIR (wind, turbulence, vortex) moves the air. It adds to the world wind at
-//   the particle and acts through exactly that term: through the particle's
-//   own facing, against its own motion, as 1 / mass, and not under water - so
-//   cloth edge-on to it is barely pushed, and the cloth's 'wind' dial, which
-//   scales only the world's wind, does not scale it.
+//   the particle and acts through exactly that term: the drag (KH_CLOTH_DRAG),
+//   through the particle's own facing, against its own motion, as 1 / mass,
+//   and not under water - so cloth edge-on to it is barely pushed, and the
+//   cloth's 'wind' dial, which scales only the world's wind, does not scale it.
 // - FORCE (force, radial) accelerates every simulated particle alike, as
 //   gravity does, whatever its facing or mass.
-// - DRAG (drag) thickens the medium: a further fraction of the velocity is
-//   lost per KH_CLOTH_H, on top of the cloth's own drag and stated the same way.
+// - DRAG (drag) thickens the air: its density is 1 + the strengths summed,
+//   which scales all of the air's drag (KH_CLOTH_DRAG) and none of the water's.
 // Each is confined to an ellipsoid in its own axes (or acts everywhere),
 // faded to zero across the outer 'edge' fraction of it, and scaled by its
 // lifetime envelope. kh_cloth_sync builds the views in the instance's own
@@ -2201,7 +2892,7 @@ static constexpr uint32_t KH_AFF_MODES = 8u;       // Turbulence's Fourier modes
 // p is the type's parameters as kh_aff_frame_build resolved them - wind:
 // speed (m/s); turbulence: unused (its modes carry it); vortex: swirl,
 // inflow, updraft (m/s), core (m, > 0); force and radial: strength (m/s^2);
-// drag: strength (0..1 per KH_CLOTH_H).
+// drag: strength (the air thickened by it, 0..KH_AFF_DRAG_MAX: KH_CLOTH_DRAG).
 struct KhClothAffView {
     uint8_t type;
     bool    bounded;                 // False = acts everywhere; inv_r unread.
@@ -2265,7 +2956,7 @@ struct KhChainParams {
     // to one without these dials.
     float lin_damping;
     float ang_damping;    // ...and of its spin relative to the carrier's own turn.
-    float drag;           // 0..1 of the velocity against the air (the world wind x wind) removed per KH_CLOTH_H.
+    float drag;           // KH_CLOTH_DRAG: kg/s, the whole chain's drag against motion relative to the air.
     float mass;           // kg, the whole simulated chain, shared by each bone's length.
     float gravity;        // Multiplier on standard gravity.
     float thickness;      // Contact offset (m) held between the geometry and the ground or a collider.
@@ -2278,7 +2969,7 @@ struct KhChainParams {
     float sleep;          // Mean body speed (m/s) under which a chain on a still carrier parks.
     float wind;           // Multiplier on the world wind the game reports.
     float buoyancy;       // Upward acceleration underwater as a multiple of standard gravity (the cloth's rule).
-    float water_drag;     // The twin of 'drag' while submerged.
+    float water_drag;     // KH_CLOTH_DRAG: kg/s, the twin of 'drag' in still water.
     uint16_t iterations;  // Constraint passes per substep.
     uint16_t substeps;    // Substeps per 1/60 s, as the cloth's.
 };
@@ -2346,12 +3037,17 @@ struct KhChainState {
     std::vector<KhSkinInf> inf;        // Per render vertex, or empty.
     std::vector<uint8_t>   lvl0;       // Per render vertex: 1 = level 0 draws it (the box), or empty = all.
     float ext[3] = { 1.0f, 1.0f, 1.0f };   // MeshDef::native_ext: a stored position times this is carrier-local.
-    // The skeleton's pose at the last step's end (kh_skin_affine's layout), the
+    // The skeleton's pose where the last step's substeps ended (kh_skin_affine's
+    // layout; KH_SUB_CLOCK: its frame's end when nothing was left over), the
     // start of this step's interpolation. Empty = none.
     std::vector<float> guide_prev;
-    // The end's targets at the last step's end, the start of this step's
-    // interpolation of a kind-2 target (the kind it was, so a change is not
-    // swept).
+    // KH_GUIDE_END: the pose at the last step's frame END, as given (bit for bit) - the held_moved test's reference:
+    // guide_prev is a blend at a leftover (not bit-exact even for a still pose), so a comparison against it would
+    // read a still skeleton as moving. Empty = none.
+    std::vector<float> guide_end;
+    // The end's targets where the last step's substeps ended (KH_SUB_CLOCK, as
+    // above), the start of this step's interpolation of a kind-2 target (the
+    // kind it was, so a change is not swept).
     uint8_t prev_pos = 0, prev_rot = 0;
     float   prev_p[3] = { 0.0f, 0.0f, 0.0f };
     float   prev_q[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
@@ -2392,6 +3088,8 @@ struct KhChainState {
     std::vector<int32_t> solve_meta;
     std::vector<int32_t> solve_at;
     float    mass_built = 0.0f;        // The 'mass' the bodies were distributed at.
+    // KH_CHAIN_RUNAWAY: seconds the rigid joints have stood open, less the steps they stood closed (kh_chain_step).
+    float    runaway_t = 0.0f;
 };
 
 struct KhMaterialMap {
@@ -2417,8 +3115,8 @@ static constexpr int KH_MAT_MAPS = KH_MAT_MAPS_BUILTIN + KH_MAT_USER_MAPS;
 // believed only inside a KhBindScope (opened after the state capture of the injection, the flush, the PIP, the
 // in-front slice and seam, the sun's union and tiers, the DLS faces, the seams and the dlsw mask; its thread and
 // context; it begins and ends knowing nothing) and is forgotten by every other writer of those slots:
-// StateBackup::restore (t0 - t48), KhRpSave's
-// restore (t0 - t63), the replay's draws (t0 - t15), mask_cast_engine's restore (t0 - t32) and kh_fx_tex_bind /
+// StateBackup::restore (t0 - t69), KhRpSave's
+// restore (t0 - t127), the replay's draws (t0 - t127), mask_cast_engine's restore (t0 - t32) and kh_fx_tex_bind /
 // unbind (t43 - t48) - every other PSSetShaderResources in the renderer binds other slots, and none of these views is
 // ever a render target or UAV (whose bind would unbind it). A recorded view is bound, so the context's reference
 // keeps it alive: no new view can take its address while the record names it. Outside a scope - or on another
@@ -2633,12 +3331,21 @@ struct KhAnaPyr {
 // Forward: KH_THM_DEVRESET - the heightfield's live flags, dropped by Resources::release (defined after
 // kh_thm_upload in rendering_integration_features.hpp).
 inline void kh_thm_device_lost();
+// Forward: KH_PSV - the reduced particle shaders' variants and our builtins' blobs, dropped by Resources::release
+// (defined with the capture in rendering_integration_injection.hpp).
+inline void kh_psv_device_lost();
 
 struct Resources {
     ID3D11VertexShader*      vs = nullptr;
     ID3D11PixelShader*       ps = nullptr;
     ID3D11VertexShader*      vs_fullscreen = nullptr;   // SV_VertexID fullscreen triangle.
     ID3D11PixelShader*       ps_effect = nullptr;   // Uber effect shader (meshes + fullscreen).
+    // KH_FX_LEAN_PASS: PSEffect built with KH_FX_LEAN 1 (cb.hlsl's note: KhWseeArmed() false, so none of the
+    // see-through record's code is compiled in - the record's registers with it), made with ps_effect at its sample
+    // count (non-fatal). A draw whose constants leave the pass unarmed (fx_tex[1][2] <= 0.5: the shader's arm reads
+    // that lane, so the full build would run none of that code either) takes it - the scene and UI chains' builtin
+    // passes. Absent, ps_effect.
+    ID3D11PixelShader*       ps_effect_lean = nullptr;
     UINT                     ps_effect_samples = 0;   // Depth MSAA count it was compiled for.
     // KH_FX_SPLIT / KH_FX_LINZ (effect3.hlsl's tail): the effect unit's chain-side entry points - the linear-depth
     // targets' builder, the SSGI gather and a-trous, dynamicLightFog's gather and filter - made with ps_effect at its
@@ -2648,6 +3355,33 @@ struct Resources {
     ID3D11PixelShader*       ps_ssgi_atrous = nullptr;
     ID3D11PixelShader*       ps_dlf_gather = nullptr;
     ID3D11PixelShader*       ps_dlf_filter = nullptr;
+    // KH_FS_SPLIT (effect3.hlsl's PSFsSplitS): fog scatter's own entry for the scene chain where its side draw (28)
+    // is armed, made with ps_effect likewise; absent, the pass draws ps_effect's branch as before.
+    ID3D11PixelShader*       ps_fs_split = nullptr;
+    // KH_WSEE_EDGE_COST (effect3.hlsl's PSFsSide): fog scatter's side value (28) as its own entry, made with ps_effect
+    // likewise; absent, kh_fx_side_draw draws it with ps_effect's branch as before.
+    ID3D11PixelShader*       ps_fs_side = nullptr;
+    // KH_FX_LEAN (cb.hlsl's note): PSFsSplitS and effect3.hlsl's PSDlfComp built with KH_FX_LEAN 1 - no record
+    // maths -, for an unlocalized, unbanded fog scatter / dynamicLightFog composite in the scene chain; made with
+    // ps_effect likewise; absent, the full build (ps_fs_split) or ps_effect's branch.
+    ID3D11PixelShader*       ps_fs_split_lean = nullptr;
+    ID3D11PixelShader*       ps_dlf_comp = nullptr;
+    // KH_DLF_SPLIT (effect3.hlsl's PSDlfClass note): dynamicLightFog's gather built with KH_FX_LEAN 1 (no record code)
+    // and the entry that marks the grid texels a layer may cover, made with ps_effect likewise; with both and the
+    // stencil (dlf_st_*: D24_UNORM_S8_UINT at the grid target's size, made at first use, remade on a size change,
+    // released with the grid targets - release_fx_chain) an armed pass's gather draws twice under it (dss_dlf_mark
+    // marks 1, dss_dlf_sel tests EQUAL: ref 0 the lean build, 1 the full one); an unarmed pass draws the lean build
+    // alone. Without the lean build, or armed without the marker (made with the system built in alone) or the
+    // stencil, the full build alone, as before. A refused stencil latches at its size (dlf_st_fail_*,
+    // another size tries again); the latch and the states go with the device.
+    ID3D11PixelShader*       ps_dlf_gather_lean = nullptr;
+    ID3D11PixelShader*       ps_dlf_class = nullptr;
+    ID3D11Texture2D*         dlf_st_tex = nullptr;
+    ID3D11DepthStencilView*  dlf_st_dsv = nullptr;
+    UINT                     dlf_st_w = 0, dlf_st_h = 0;
+    UINT                     dlf_st_fail_w = 0, dlf_st_fail_h = 0;   // The refused size (0 x 0: none).
+    ID3D11DepthStencilState* dss_dlf_mark = nullptr;
+    ID3D11DepthStencilState* dss_dlf_sel = nullptr;
     ID3D11VertexShader*      vs_composite = nullptr;   // injected-path VS (adds world position).
     ID3D11PixelShader*       ps_maskcast = nullptr;   // Analytic mask cast (single-sample t0).
     ID3D11PixelShader*       ps_rpmerge = nullptr;    // KH_VOL_REPLAY: the replayed count and footprint, merged.
@@ -2738,6 +3472,9 @@ struct Resources {
     ID3D11Buffer*             obj_sb = nullptr;
     ID3D11ShaderResourceView* obj_srv = nullptr;
     uint32_t                  obj_cap = 0;   // Records the buffer holds.
+    // KH_OBJBUF_RETRY: kh_objbuf_sync calls still to refuse at once after the device refused the buffer (0 = ask);
+    // a new device (release) asks at once.
+    uint32_t                  obj_wait = 0;
     // Release wall: a freed mesh's VB/IB/def wait two flushes so per-frame
     // caster lists built before the release drain first. Swept by
     // kh_mesh_grave_sweep.
@@ -2835,6 +3572,244 @@ struct Resources {
     UINT                      ps_vmsee_fail = 0;
     ID3D11BlendState*         bs_vmsee_t = nullptr;
     bool                      bs_vmsee_failed = false;
+    // KH_WSEE: the capture's targets (kh_wsee_snapshot; all the main depth's size) - S (R32_FLOAT, single sample:
+    // sample 0 of the main depth, raw), T (R8G8B8A8_UNORM at the main depth's sample count and quality: bound beside
+    // depth_dsv_ro for the re-issues, so it must match that view's texture; cleared to (1, 0, 1, 1): R the fence-type
+    // transmittance, G = 1 where a late opaque's re-issue drew, B / A the particle-type layers' before / after B2),
+    // B (the scene target's view format, single sample: its resolve) and NW (wsee_n_*: R32_TYPELESS single sample, a
+    // D32_FLOAT DSV and an R32_FLOAT SRV; cleared to 1: the nearest depth of the blended draws that write none). Made
+    // by the first capture that needs them (kh_wsee_targets, KH_VMSEE_LAZY's rule), remade at a size, sample-count,
+    // quality or format change. The chain's own: E (wsee_e_*: R32_UINT at the chain's frame size, the class word,
+    // kh_wsee_agree_draw) and C (wsee_c_srv: a Texture2DMS view of the scene target the chain captures from, in its
+    // RTV's format, keyed by that texture and format - it holds a reference to the engine's texture until a rekey or
+    // a release; kh_wsee_scene_ms). All released when the main depth goes to one sample (kh_msaa_toggle_wipe: 1x
+    // captures nothing; KH_WSEE_MSAA_FREE: at a change to another count the capture's targets and C alone, E staying),
+    // after KH_WSEE_IDLE_FREE cycles without a want (kh_wsee_cycle_note) and with the device; C also at the
+    // swapchain's resize (release_wsee_c). wsee_depth_id: the depth texture they were last captured against (an
+    // identity, never dereferenced: kh_wsee_valid's test against depth_res_identity). The capture's pass shader and
+    // the blended re-issue's blend are KH_VM_SEE's (ps_vmsee_s0, bs_vmsee_t), its depth state dss_test; the record's
+    // own (kh_wsee_ensure, kept until the device goes): ps_wsee_one (depth_resolve.hlsl PSWseeOne, the late-opaque
+    // re-issue's store path), ps_wsee_copy (an inline copy, the chain's final write when its last pass read C),
+    // dss_wsee_nw (LESS, write, no stencil: NW) and dss_wsee_eq (EQUAL, no write, no stencil: the late-opaque
+    // re-issue); ps_wsee_agree (effect3.hlsl PSWseeAgree) is the effect unit's (ensure_effect_shader: made and
+    // released with it). KH_WSEE_FAIL_RETRY: a refused make latches its key (wsee_fail_*) and cycle (wsee_fail_cycle);
+    // the key is asked again KH_WSEE_HOLD_FAIL_RETRY cycles later (a transient refusal - memory the engine freed
+    // since - would otherwise hold the record off until the device goes); a refusal stamps it again, a success clears
+    // the latch. The same for the split's (wsee_ld_fail_*), the one pass's (wsee_pb_fail_*) and D3m's
+    // (wsee_d3m_fail_*) targets.
+    ID3D11Texture2D*          wsee_s_tex = nullptr;
+    ID3D11RenderTargetView*   wsee_s_rtv = nullptr;
+    ID3D11ShaderResourceView* wsee_s_srv = nullptr;
+    ID3D11Texture2D*          wsee_t_tex = nullptr;
+    ID3D11RenderTargetView*   wsee_t_rtv = nullptr;
+    ID3D11ShaderResourceView* wsee_t_srv = nullptr;
+    ID3D11Texture2D*          wsee_b_tex = nullptr;
+    ID3D11ShaderResourceView* wsee_b_srv = nullptr;
+    UINT                      wsee_w = 0, wsee_h = 0, wsee_samples = 0, wsee_quality = 0;
+    DXGI_FORMAT               wsee_b_fmt = DXGI_FORMAT_UNKNOWN;
+    void*                     wsee_depth_id = nullptr;
+    // The engine's depth view last found to be wsee_depth_id's texture (kh_wsee_dsv_is_depth compares pointers
+    // first), held by one reference so its address is no other view's while kept, with the identity it matched
+    // (wsee_dsv_pin_id; a hit needs it to be wsee_depth_id's still). Released with the capture's targets, where the
+    // capture takes another depth (kh_wsee_snapshot) and at a clear with the identity moved or the capture unwanted
+    // (kh_wsee_cycle_note) - the one reference also keeps the engine's depth texture until then.
+    ID3D11DepthStencilView*   wsee_dsv_pin = nullptr;
+    void*                     wsee_dsv_pin_id = nullptr;
+    UINT                      wsee_fail_w = 0, wsee_fail_h = 0, wsee_fail_s = 0, wsee_fail_q = 0;
+    DXGI_FORMAT               wsee_fail_f = DXGI_FORMAT_UNKNOWN;
+    uint64_t                  wsee_fail_cycle = 0u;   // KH_WSEE_FAIL_RETRY.
+    ID3D11Texture2D*          wsee_n_tex = nullptr;   // NW.
+    ID3D11DepthStencilView*   wsee_n_dsv = nullptr;
+    ID3D11ShaderResourceView* wsee_n_srv = nullptr;
+    // B2 (wsee_b2_*: B's desc - the scene resolved at the cycle's first fence-type layer, kh_wsee_b2_take; only in a
+    // cycle that resolved B) and NWpost (wsee_n2_*: NW's desc - the nearest particle-type layer drawn after B2;
+    // wsee_n_* is NWpre). Made and released with S, T, B and NW (kh_wsee_targets, release_wsee_capture).
+    ID3D11Texture2D*          wsee_b2_tex = nullptr;
+    ID3D11ShaderResourceView* wsee_b2_srv = nullptr;
+    ID3D11Texture2D*          wsee_n2_tex = nullptr;
+    ID3D11DepthStencilView*   wsee_n2_dsv = nullptr;
+    ID3D11ShaderResourceView* wsee_n2_srv = nullptr;
+    // S2 - the main depth's sample 0, raw, at B2's moment (S's desc; kh_wsee_b2_take): the depth the late opaques
+    // drawn before B2 left there. Made and released with S, T, B and NW.
+    ID3D11Texture2D*          wsee_s2_tex = nullptr;
+    ID3D11RenderTargetView*   wsee_s2_rtv = nullptr;
+    ID3D11ShaderResourceView* wsee_s2_srv = nullptr;
+    // D3 - the main depth's sample 0 raw at the last time a late opaque owned sample 0 (S's desc with a UAV and, from
+    // kh_wsee_d3m_targets, an RTV: the store path's replay stores it once a pixel from the main depth's view - its
+    // sample-0 invocation, depth_resolve.hlsl PSWseeOne / PSWseeOneL -, the D3m path's resolve writes it). Made and
+    // released with S, T, B and NW (kh_wsee_targets, all or nothing; release_wsee_capture); 33 MB at 3840x2160.
+    ID3D11Texture2D*           wsee_d3_tex = nullptr;
+    ID3D11UnorderedAccessView* wsee_d3_uav = nullptr;
+    ID3D11ShaderResourceView*  wsee_d3_srv = nullptr;
+    // KH_WSEE_OQ2: D3m - R32_FLOAT at T's sample count and quality (the post late opaques' replays write their own
+    // depth there as a third target: depth_resolve.hlsl PSWseeOneZ / PSWseeOneZL; 265 MB at 3840x2160 8x) - and D3's
+    // RTV (kh_wsee_d3m_resolve writes D3 from D3m before a reader binds it). Made by the capture
+    // (kh_wsee_d3m_targets) where the main depth's view is 24- or 32-bit, at T's key plus that view's format; released
+    // with the capture's targets; a refused make latches its key and cycle (wsee_d3m_fail_*, KH_WSEE_FAIL_RETRY).
+    // Absent, every post replay takes the store path (the UAV and the main depth's view). wsee_rs_pin: the engine's
+    // rasterizer state last asked whether it biases or clamps depth (kh_wsee_d3m_path), held by one reference so its
+    // address is no other state's while kept, with the verdict; released with the pinned depth view.
+    ID3D11RenderTargetView*   wsee_d3_rtv = nullptr;
+    ID3D11Texture2D*          wsee_d3m_tex = nullptr;
+    ID3D11RenderTargetView*   wsee_d3m_rtv = nullptr;
+    ID3D11ShaderResourceView* wsee_d3m_srv = nullptr;
+    UINT                      wsee_d3m_w = 0, wsee_d3m_h = 0, wsee_d3m_s = 0, wsee_d3m_q = 0;
+    UINT                      wsee_d3m_fail_w = 0, wsee_d3m_fail_h = 0, wsee_d3m_fail_s = 0, wsee_d3m_fail_q = 0;
+    DXGI_FORMAT               wsee_d3m_dfmt = DXGI_FORMAT_UNKNOWN;    // The main depth's view format it was made at,
+    DXGI_FORMAT               wsee_d3m_fail_f = DXGI_FORMAT_UNKNOWN;  // and the refused key's (both in the key).
+    uint64_t                  wsee_d3m_fail_cycle = 0u;   // KH_WSEE_FAIL_RETRY.
+    ID3D11RasterizerState*    wsee_rs_pin = nullptr;
+    bool                      wsee_rs_pin_plain = false;
+    ID3D11RasterizerState*    wsee_rs_pin_psb = nullptr;   // KH_PSB_RSPIN: kh_psb_rs_ok's own pin, the same rule;
+    bool                      wsee_rs_pin_psb_ok = false, wsee_rs_pin_psb_sc = false;   // its two verdicts.
+    ID3D11Texture2D*          wsee_e_tex = nullptr;   // E.
+    ID3D11RenderTargetView*   wsee_e_rtv = nullptr;
+    ID3D11ShaderResourceView* wsee_e_srv = nullptr;
+    UINT                      wsee_e_w = 0, wsee_e_h = 0;
+    bool                      wsee_e_failed = false;
+    UINT                      wsee_e_fail_w = 0, wsee_e_fail_h = 0;   // KH_WSEE_EFAIL_KEY: the refused size.
+    // KH_WSEE_EDGE_COST: E is R32_UINT (the class word, cb.hlsl KhWseeClassWord). Beside it a stencil of E's size
+    // (wsee_es_*: R24G8_TYPELESS, a D24_UNORM_S8_UINT view), cleared to 0 and marked 1 by E's draw where the word is
+    // nonzero (dss_wsee_smark: no depth, stencil ALWAYS / REPLACE), so a frame-size draw with a per-sample site can be
+    // drawn twice under dss_wsee_ssel (no depth, stencil EQUAL / KEEP, ref 0 then 1) - the agreeing pixels and the
+    // edge pixels in warps of their own (kh_fx_side_draw, khfp_flush). Made and released with E (release_wsee_chain);
+    // the states with the device. A refused make latches wsee_es_failed: E is drawn without the stencil and nothing is
+    // split. KH_WSEE_EFAIL_KEY: both refusal latches (E's wsee_e_failed too) hold at the refused size alone
+    // (wsee_e_fail_* / wsee_es_fail_*): another size tries again; the latches go with the device.
+    ID3D11Texture2D*          wsee_es_tex = nullptr;
+    ID3D11DepthStencilView*   wsee_es_dsv = nullptr;
+    bool                      wsee_es_failed = false;
+    UINT                      wsee_es_fail_w = 0, wsee_es_fail_h = 0;   // KH_WSEE_EFAIL_KEY: the refused size.
+    ID3D11DepthStencilState*  dss_wsee_smark = nullptr;
+    ID3D11DepthStencilState*  dss_wsee_ssel = nullptr;
+    // C, its key (an identity) and its refused key. The refused key holds no reference, so a recycled address could
+    // refuse another texture's view until release_wsee_c (a resize, a count change, 1x, the idle free) or the device
+    // goes - it needs a CreateShaderResourceView of a valid desc to fail first.
+    ID3D11ShaderResourceView* wsee_c_srv = nullptr;
+    void*                     wsee_c_res = nullptr;
+    DXGI_FORMAT               wsee_c_fmt = DXGI_FORMAT_UNKNOWN;
+    UINT                      wsee_c_w = 0, wsee_c_h = 0, wsee_c_s = 0;   // The capture's key it was made against.
+    void*                     wsee_c_fail_res = nullptr;
+    DXGI_FORMAT               wsee_c_fail_fmt = DXGI_FORMAT_UNKNOWN;
+    ID3D11PixelShader*        ps_wsee_one = nullptr;
+    ID3D11PixelShader*        ps_wsee_copy = nullptr;
+    ID3D11PixelShader*        ps_wsee_agree = nullptr;
+    ID3D11DepthStencilState*  dss_wsee_nw = nullptr;
+    ID3D11DepthStencilState*  dss_wsee_eq = nullptr;
+    // The sorted tail's layer-aware composite (dual source: out = o0 + dest x o1, alpha alike); made by
+    // kh_wsee_ensure, non-fatal (absent, the sorted tail takes the plain blend - mode 1 - and the injection defers
+    // nothing).
+    ID3D11BlendState*         bs_wsee_sort = nullptr;
+    bool                      bs_wsee_sort_failed = false;
+    // The particle-type re-issues' T passes - Tpre in T's B (ZERO / INV_SRC_ALPHA, blue only) and Tpost in T's A
+    // (the alpha factors ZERO / INV_SRC_ALPHA, alpha only); the fence-type pass keeps bs_vmsee_t (red only). Made by
+    // kh_wsee_ensure with the record's depth states (required).
+    ID3D11BlendState*         bs_wsee_tpre = nullptr;
+    ID3D11BlendState*         bs_wsee_tpost = nullptr;
+    // Q - the scene's colour just before the flush's first sorted part (B's desc: the scene target's view format,
+    // single sample - its resolve), the composite's divisor (cb.hlsl KhWseeMeshOut); made by kh_wsee_defer_ok whenever
+    // the injection weighs a deferral and by the flush's first compositing part (kh_wsee_q_ensure), released with the
+    // capture's targets. A refused make latches until the device goes.
+    ID3D11Texture2D*          wsee_q_tex = nullptr;
+    ID3D11ShaderResourceView* wsee_q_srv = nullptr;
+    bool                      wsee_q_failed = false;
+    // The geometry hold - one DEFAULT vertex buffer the injection copies the deformed vertex arrays of its deferred
+    // parts into (kh_wsee_hold_take; g_wsee_hold's note), wsee_hold_cap bytes; grown by doubling (the old contents
+    // copied to the new buffer's start: no entry moves), released with the capture's targets (release_wsee_targets),
+    // after KH_WSEE_IDLE_FREE cycles without a copy using it (kh_wsee_cycle_note) and with the device. wsee_hold_gen
+    // steps at every make and release (a growth keeps it). KH_WSEE_HOLD_FAIL: a refused CreateBuffer latches its size
+    // (wsee_hold_fail_cap) - a growth to that size or past it is refused without the call (kh_wsee_hold_reserve) until
+    // the hold is released; 0 = nothing refused. KH_WSEE_HOLD_FAIL_RETRY: the cycle it was refused in
+    // (wsee_hold_fail_cycle) - KH_WSEE_HOLD_FAIL_RETRY cycles later one ask at that size is let through again (a
+    // transient refusal - memory the engine freed since - would otherwise hold the deferral off until the hold's idle
+    // release, which a deferral asked for every cycle never reaches); a refusal stamps it again.
+    ID3D11Buffer*             wsee_hold_vb = nullptr;
+    UINT                      wsee_hold_cap = 0u;
+    UINT                      wsee_hold_fail_cap = 0u;
+    uint64_t                  wsee_hold_fail_cycle = 0u;
+    uint64_t                  wsee_hold_gen = 0u;
+    bool                      wsee_v2_failed = false;     // ps_wsee_one, a depth or a T blend state refused.
+    // Tp - R8G8B8A8_UNORM at the main depth's sample count and quality (bound beside depth_dsv_ro, as T), cleared to
+    // 1: the particle-type layers' transmittance counting only fragments NOT within KH_WSEE_NEAR_TOL of the surface
+    // behind them (R pre, G post; their replay pushed back by the near shift) and the same for the KH_WSEE_NEAR_TOL2
+    // band (B / A); 265 MB at 3840x2160 8x. Tf - R8G8_UNORM single sample, cleared to 1: the pre / post particle-type
+    // fragments FARTHER than the cycle's distance D (wsee_tfd_*: its own D32 target, cleared to D's raw, tested
+    // GREATER without a write). Made by the capture (kh_wsee_ld_targets) at T's key; released with the capture's
+    // targets and at the first clear after the split was refused (wsee_ld_failed); a refused make latches its key and
+    // cycle (wsee_ld_fail_*, KH_WSEE_FAIL_RETRY) - another key tries at once. The late-opaque replay's MRT twin
+    // (depth_resolve.hlsl PSWseeOneL: T and Tp at once) is kh_wsee_ensure's (compiled at the flush, never inside a
+    // draw hook); the four band blend states (T's particle factors on red / green, blue / alpha) and the far depth
+    // state are kh_wsee_ld_ensure's; a refused shader or state latches the split off until the device goes.
+    ID3D11Texture2D*          wsee_tp_tex = nullptr;
+    ID3D11RenderTargetView*   wsee_tp_rtv = nullptr;
+    ID3D11ShaderResourceView* wsee_tp_srv = nullptr;
+    ID3D11Texture2D*          wsee_tf_tex = nullptr;
+    ID3D11RenderTargetView*   wsee_tf_rtv = nullptr;
+    ID3D11ShaderResourceView* wsee_tf_srv = nullptr;
+    ID3D11Texture2D*          wsee_tfd_tex = nullptr;
+    ID3D11DepthStencilView*   wsee_tfd_dsv = nullptr;
+    UINT                      wsee_ld_w = 0, wsee_ld_h = 0, wsee_ld_s = 0, wsee_ld_q = 0;
+    UINT                      wsee_ld_fail_w = 0, wsee_ld_fail_h = 0, wsee_ld_fail_s = 0, wsee_ld_fail_q = 0;
+    uint64_t                  wsee_ld_fail_cycle = 0u;   // KH_WSEE_FAIL_RETRY.
+    ID3D11PixelShader*        ps_wsee_one_l = nullptr;
+    // KH_WSEE_OQ2: the post twins writing D3m (PSWseeOneZ / PSWseeOneZL) and D3's resolve (PSWseeD3Res) -
+    // kh_wsee_ensure's; a refusal latches the store path for every post replay until the device goes
+    // (ps_wsee_oq2_failed), reported once.
+    ID3D11PixelShader*        ps_wsee_one_z = nullptr;
+    ID3D11PixelShader*        ps_wsee_one_zl = nullptr;
+    ID3D11PixelShader*        ps_wsee_d3_res = nullptr;
+    bool                      ps_wsee_oq2_failed = false;
+    ID3D11BlendState*         bs_wsee_ldpre = nullptr;
+    ID3D11BlendState*         bs_wsee_ldpost = nullptr;
+    ID3D11BlendState*         bs_wsee_ldpre2 = nullptr;    // The second band's (Tp's B / A).
+    ID3D11BlendState*         bs_wsee_ldpost2 = nullptr;
+    ID3D11DepthStencilState*  dss_wsee_far = nullptr;
+    bool                      wsee_ld_failed = false;
+    // KH_PSB: the one pass's record, a target pair a phase (KH_PSB_PHASE) - P0 / N the pre phase's, P1 / N2 the post
+    // one's: P (R8G8B8A8_UNORM) = (T, the 25 % band's, the 100 % band's, Tf's) of its phase, N (R32_FLOAT) its NW -
+    // single sample, cleared to 1 by the capture; made there (kh_psb_targets) while a one-pass variant exists,
+    // released with the capture's targets (release_wsee_pb); a refused make latches its key and cycle
+    // (wsee_pb_fail_*, KH_WSEE_FAIL_RETRY). KH_PSB_LORES: at ceil(size / s) a side, s = 1 << KH_PSB_LS = 2 (33 MB at
+    // 3840x2160); the one pass draws into them at that scale (kh_psb_post) and every reader takes the texel px >>
+    // KH_PSB_LS (clamped at the frame's edge: KH_PSB_LORES_EDGE). The blend states (kh_psb_ensure): P takes ZERO /
+    // INV_SRC_COLOR (the alpha's ZERO / INV_SRC_ALPHA), N MIN; [0] the layer-depth split standing (all four channels),
+    // [1] not (T and the 25 % band alone; the other two keep their clear). No N-alone state: a light-adding draw keeps
+    // its NW pass. The constant buffers: one per verdict set (pushed | test-off << 1 | Tf drawn << 2), four rows -
+    // (m_i, Dq), (a_i, D), the masks and the read count, the block's addressing -, refilled when the cycle's Hi, D
+    // or sample count differ from what one holds (psb_cb_key). A refused state or buffer latches the one pass off
+    // until the device goes (psb_failed).
+    ID3D11Texture2D*          wsee_p0_tex = nullptr;
+    ID3D11RenderTargetView*   wsee_p0_rtv = nullptr;
+    ID3D11ShaderResourceView* wsee_p0_srv = nullptr;
+    ID3D11Texture2D*          wsee_p1_tex = nullptr;
+    ID3D11RenderTargetView*   wsee_p1_rtv = nullptr;
+    ID3D11ShaderResourceView* wsee_p1_srv = nullptr;
+    ID3D11Texture2D*          wsee_nb_tex = nullptr;
+    ID3D11RenderTargetView*   wsee_nb_rtv = nullptr;
+    ID3D11ShaderResourceView* wsee_nb_srv = nullptr;
+    ID3D11Texture2D*          wsee_nb2_tex = nullptr;   // KH_PSB_PHASE: N2 (NWpost).
+    ID3D11RenderTargetView*   wsee_nb2_rtv = nullptr;
+    ID3D11ShaderResourceView* wsee_nb2_srv = nullptr;
+    UINT                      wsee_pb_w = 0, wsee_pb_h = 0;
+    UINT                      wsee_pb_fail_w = 0, wsee_pb_fail_h = 0;
+    uint64_t                  wsee_pb_fail_cycle = 0u;   // KH_WSEE_FAIL_RETRY.
+    // KH_PSB_ZB: Zb (R32G32_FLOAT: the largest of S over a texel's s x s block, the block pixel holding it) at the
+    // record's size, made with P0 / P1 / N / N2 (kh_psb_targets) and released with them; 17 MB at 3840x2160. PSPsbZb
+    // at log2 s = KH_PSB_LS (kh_wsee_ensure; psb_zb_failed: refused, not retried until the device goes).
+    // wsee_zb_refused: a refused make at the targets' key - no retry until the targets are released; the one pass
+    // reads its block without the bound meanwhile.
+    ID3D11Texture2D*          wsee_zb_tex = nullptr;
+    ID3D11RenderTargetView*   wsee_zb_rtv = nullptr;
+    ID3D11ShaderResourceView* wsee_zb_srv = nullptr;
+    ID3D11PixelShader*        ps_psb_zb = nullptr;   // One build (KH_PSB_LS).
+    bool                      psb_zb_failed = false;
+    bool                      wsee_zb_refused = false;   // KH_PSB_ZB: Zb refused at this key.
+    ID3D11BlendState*         bs_psb[2] = {};       // KH_PSB_PHASE: the split on, off.
+    ID3D11Buffer*             psb_cb[8] = {};       // pushed | test-off << 1 | Tf << 2.
+    uint32_t                  psb_cb_key[8][4] = {};   // KH_PSB_LORES: and the scale.
+    bool                      psb_cb_set[8] = {};
+    bool                      psb_failed = false;
+    bool                      ps_wsee_copy_failed = false;
     // KH_PIP_FX: the PIP pass's own scene capture (t0, copied per pass), its
     // depth copied (t1; single-sample, so PSEffect's MSAA_DEPTH 0 build reads
     // it), and that build. Sized to the PIP the last fire saw.
@@ -2864,14 +3839,6 @@ struct Resources {
     ID3D11BlendState*        blend_ui_spill = nullptr;
     ID3D11BlendState*        blend_alpha_zero = nullptr;   // Blend off, alpha-only write mask.
     ID3D11PixelShader*       ps_alpha_zero = nullptr;
-    ID3D11Texture2D*          cov_hist_tex = nullptr;   // last-sane coverage history (full).
-    // Backbuffer copy taken post-correction: by induction its alpha is always
-    // sane; the substitute mask for poison frames.
-    ID3D11ShaderResourceView* cov_hist_srv = nullptr;
-    UINT                      cov_hist_w = 0;
-    UINT                      cov_hist_h = 0;
-    uint32_t                  cov_hist_fmt = 0;
-    ID3D11PixelShader*       ps_cov_fix = nullptr;
     ID3D11PixelShader*       ps_premult_copy = nullptr;
     ID3D11RasterizerState*   rasterizer = nullptr;   // cullNone, MSAA, no depth bias, no depth clip.
     ID3D11Texture2D*          sun_tex = nullptr;
@@ -2908,10 +3875,15 @@ struct Resources {
     ID3D11GeometryShader*     skin_so_gs = nullptr;
     ID3D11InputLayout*        skin_so_layout = nullptr;
     ID3D11Buffer*             skin_so_cb = nullptr;
+    // KH_SKIN_SO_BIG: the large class's VSSkinSo, its stream-output object and its CBSkin (KH_SKIN_SO_BONES bones,
+    // 65,504 bytes). KH_SKIN_SO_LAZY: made by kh_skin_so_big_ensure only when a binding needs them; released here.
+    ID3D11VertexShader*       skin_so_vs_l = nullptr;
+    ID3D11GeometryShader*     skin_so_gs_l = nullptr;
+    ID3D11Buffer*             skin_so_cb_l = nullptr;
     ID3D11Buffer*             uvs_obj_cb = nullptr;     // KH_USER_VS: the deform pass's own b0 / b1 (the white
     ID3D11Buffer*             uvs_frame_cb = nullptr;   // placeholder's no-borrowing contract).
-    ID3D11RasterizerState*    rast_sun = nullptr;   // cullNone, no scene depth bias.
-    // rast_sun's twin at a lower bias (CullNone, as rast_sun).
+    ID3D11RasterizerState*    rast_sun = nullptr;   // cullNone, 16 / 3.0 bias; not the ladder's (KH_SUN_RS_TEXT).
+    // rast_sun's twin at a lower bias (CullNone, as rast_sun): what kh_sun_rs_pick binds for every sun-depth pass.
     ID3D11RasterizerState*    rast_sun_lo = nullptr;   // low-bias default (8 / 1.0).
     ID3D11RasterizerState*    rast_sun_pk = nullptr;
     ID3D11RasterizerState*    rast_sun_lo_pk = nullptr;
@@ -3027,8 +3999,8 @@ struct Resources {
                                                         // While depth-testing.
     void*                     depth_res_identity = nullptr;   // Identity only, never dereferenced.
     UINT                      depth_sample_count = 0;
+    uint32_t                  depth_srv_gen = 0;   // KH_PSB_ZB: steps at every release (Zb names the view it read).
 
-    void*                    comp_depth_identity = nullptr;
     void release_bb_capture() {
         if (bb_tex) { bb_tex->Release(); bb_tex = nullptr; }
         if (bb_srv) { bb_srv->Release(); bb_srv = nullptr; }
@@ -3047,6 +4019,9 @@ struct Resources {
             KH_SAFE_RELEASE(chain_srv[i]);
         }
         KH_SAFE_RELEASE(khsg_sampler);
+        KH_SAFE_RELEASE(dlf_st_dsv);   // KH_DLF_SPLIT: the grid's stencil goes with the grid.
+        KH_SAFE_RELEASE(dlf_st_tex);
+        dlf_st_w = dlf_st_h = 0;
     }
 
     void release_scene_capture() {
@@ -3067,6 +4042,7 @@ struct Resources {
         if (depth_dsv_ro) { depth_dsv_ro->Release(); depth_dsv_ro = nullptr; }
         depth_res_identity = nullptr;
         depth_sample_count = 0;
+        ++depth_srv_gen;   // KH_PSB_ZB: a Zb made from the view released here is not read against its successor.
         g_eds_memo_res = nullptr;   // The fast-path key dies with the SRV.
     }
 
@@ -3082,17 +4058,152 @@ struct Resources {
         vmsee_w = vmsee_h = 0;
     }
 
+    // KH_WSEE: the capture's targets and what hangs on them - at a key change or a refused make (kh_wsee_targets), a
+    // sample-count change (kh_msaa_toggle_wipe: at 1x with the chain's own, at another count with C alone), a long
+    // idle (kh_wsee_cycle_note) and the device's release; the last two and 1x take the chain's own (E, C) with them
+    // (release_wsee_chain).
+    void release_wsee_capture() {
+        KH_SAFE_RELEASE(wsee_s_srv);
+        KH_SAFE_RELEASE(wsee_s_rtv);
+        KH_SAFE_RELEASE(wsee_s_tex);
+        KH_SAFE_RELEASE(wsee_t_srv);
+        KH_SAFE_RELEASE(wsee_t_rtv);
+        KH_SAFE_RELEASE(wsee_t_tex);
+        KH_SAFE_RELEASE(wsee_b_srv);
+        KH_SAFE_RELEASE(wsee_b_tex);
+        KH_SAFE_RELEASE(wsee_n_srv);
+        KH_SAFE_RELEASE(wsee_b2_srv);
+        KH_SAFE_RELEASE(wsee_b2_tex);
+        KH_SAFE_RELEASE(wsee_s2_srv);
+        KH_SAFE_RELEASE(wsee_s2_rtv);
+        KH_SAFE_RELEASE(wsee_s2_tex);
+        release_wsee_d3m();   // KH_WSEE_OQ2: D3m and D3's RTV (on D3's texture) first.
+        KH_SAFE_RELEASE(wsee_d3_srv);
+        KH_SAFE_RELEASE(wsee_d3_uav);
+        KH_SAFE_RELEASE(wsee_d3_tex);
+        KH_SAFE_RELEASE(wsee_n2_srv);
+        KH_SAFE_RELEASE(wsee_n2_dsv);
+        KH_SAFE_RELEASE(wsee_n2_tex);
+        KH_SAFE_RELEASE(wsee_n_dsv);
+        KH_SAFE_RELEASE(wsee_n_tex);
+        KH_SAFE_RELEASE(wsee_q_srv);
+        KH_SAFE_RELEASE(wsee_q_tex);
+        release_wsee_ld();
+        release_wsee_pb();   // KH_PSB.
+        wsee_w = wsee_h = wsee_samples = wsee_quality = 0;
+        wsee_b_fmt = DXGI_FORMAT_UNKNOWN;
+        wsee_depth_id = nullptr;
+        release_wsee_dsv_pin();   // No identity to match.
+    }
+    // The pinned depth view (its note above) and the pinned rasterizer states alone.
+    void release_wsee_dsv_pin() {
+        KH_SAFE_RELEASE(wsee_dsv_pin);
+        wsee_dsv_pin_id = nullptr;
+        KH_SAFE_RELEASE(wsee_rs_pin);   // KH_WSEE_OQ2: the pinned rasterizer state - the same lifetime.
+        wsee_rs_pin_plain = false;
+        KH_SAFE_RELEASE(wsee_rs_pin_psb);   // KH_PSB_RSPIN: likewise.
+        wsee_rs_pin_psb_ok = wsee_rs_pin_psb_sc = false;
+    }
+    // KH_WSEE_OQ2: D3m and D3's RTV alone (kh_wsee_d3m_targets' rekey and refusal; the capture's release).
+    void release_wsee_d3m() {
+        KH_SAFE_RELEASE(wsee_d3m_srv);
+        KH_SAFE_RELEASE(wsee_d3m_rtv);
+        KH_SAFE_RELEASE(wsee_d3m_tex);
+        KH_SAFE_RELEASE(wsee_d3_rtv);
+        wsee_d3m_w = wsee_d3m_h = wsee_d3m_s = wsee_d3m_q = 0;
+        wsee_d3m_dfmt = DXGI_FORMAT_UNKNOWN;
+    }
+    // Tp, Tf and Tf's depth alone (also at the first clear after the split was refused, wsee_ld_failed).
+    void release_wsee_ld() {
+        KH_SAFE_RELEASE(wsee_tp_srv);
+        KH_SAFE_RELEASE(wsee_tp_rtv);
+        KH_SAFE_RELEASE(wsee_tp_tex);
+        KH_SAFE_RELEASE(wsee_tf_srv);
+        KH_SAFE_RELEASE(wsee_tf_rtv);
+        KH_SAFE_RELEASE(wsee_tf_tex);
+        KH_SAFE_RELEASE(wsee_tfd_dsv);
+        KH_SAFE_RELEASE(wsee_tfd_tex);
+        wsee_ld_w = wsee_ld_h = wsee_ld_s = wsee_ld_q = 0;
+    }
+    // KH_PSB: P0, P1, N, N2 (KH_PSB_PHASE) and Zb with its refusal (KH_PSB_ZB) alone (with the capture's targets).
+    void release_wsee_pb() {
+        KH_SAFE_RELEASE(wsee_p0_srv);
+        KH_SAFE_RELEASE(wsee_p0_rtv);
+        KH_SAFE_RELEASE(wsee_p0_tex);
+        KH_SAFE_RELEASE(wsee_p1_srv);
+        KH_SAFE_RELEASE(wsee_p1_rtv);
+        KH_SAFE_RELEASE(wsee_p1_tex);
+        KH_SAFE_RELEASE(wsee_nb_srv);
+        KH_SAFE_RELEASE(wsee_nb_rtv);
+        KH_SAFE_RELEASE(wsee_nb_tex);
+        KH_SAFE_RELEASE(wsee_nb2_srv);   // KH_PSB_PHASE.
+        KH_SAFE_RELEASE(wsee_nb2_rtv);
+        KH_SAFE_RELEASE(wsee_nb2_tex);
+        KH_SAFE_RELEASE(wsee_zb_srv);   // KH_PSB_ZB.
+        KH_SAFE_RELEASE(wsee_zb_rtv);
+        KH_SAFE_RELEASE(wsee_zb_tex);
+        wsee_zb_refused = false;   // KH_PSB_ZB: the next make may try it again.
+        wsee_pb_w = wsee_pb_h = 0;
+    }
+    // C alone: also at a sample-count change (kh_msaa_toggle_wipe) and at the swapchain's resize (hooked_resizebuffers,
+    // KH_PRESENT_RESIZE's rule) - a render-resolution change recreates the engine's scene target, and C's reference
+    // would keep the old one alive (530 MB at 3840x2160 8x RGBA16F) until the next chain run rekeyed it.
+    void release_wsee_c() {
+        KH_SAFE_RELEASE(wsee_c_srv);   // The engine's scene texture goes back to its own references.
+        wsee_c_res = nullptr;
+        wsee_c_fmt = DXGI_FORMAT_UNKNOWN;
+        wsee_c_w = wsee_c_h = wsee_c_s = 0;
+        // The refusal's identity goes with the view - nothing of ours holds the refused texture, so the engine's next
+        // scene target (the resize that brought us here) may take its address; the next chain run asks once more
+        // (kh_wsee_scene_ms).
+        wsee_c_fail_res = nullptr;
+        wsee_c_fail_fmt = DXGI_FORMAT_UNKNOWN;
+    }
+    // The geometry hold. A release mid-cycle (a switch to one sample, the device) leaves the cycle's held copies no
+    // buffer: the generation tells the flush (kh_wsee_hold_ref), which drops them.
+    void release_wsee_hold() {
+        if (wsee_hold_vb) ++wsee_hold_gen;
+        KH_SAFE_RELEASE(wsee_hold_vb);
+        wsee_hold_cap = 0u;
+        wsee_hold_fail_cap = 0u;   // KH_WSEE_HOLD_FAIL: the next reserve may try that size again.
+        wsee_hold_fail_cycle = 0u;
+    }
+    void release_wsee_chain() {
+        KH_SAFE_RELEASE(wsee_e_srv);
+        KH_SAFE_RELEASE(wsee_e_rtv);
+        KH_SAFE_RELEASE(wsee_e_tex);
+        wsee_e_w = wsee_e_h = 0;
+        KH_SAFE_RELEASE(wsee_es_dsv);   // KH_WSEE_EDGE_COST: E's stencil goes with it.
+        KH_SAFE_RELEASE(wsee_es_tex);
+        release_wsee_c();
+    }
+    void release_wsee_targets() {
+        release_wsee_capture();
+        release_wsee_chain();
+        release_wsee_hold();
+    }
+
     void release() {
         KH_SAFE_RELEASE(vs);
         KH_SAFE_RELEASE(ps);
         KH_SAFE_RELEASE(vs_fullscreen);
         KH_SAFE_RELEASE(ps_effect);
+        KH_SAFE_RELEASE(ps_effect_lean);   // KH_FX_LEAN_PASS.
         ps_effect_samples = 0;
         KH_SAFE_RELEASE(ps_fx_linz);   // KH_FX_SPLIT / KH_FX_LINZ.
         KH_SAFE_RELEASE(ps_ssgi_gather);
         KH_SAFE_RELEASE(ps_ssgi_atrous);
         KH_SAFE_RELEASE(ps_dlf_gather);
         KH_SAFE_RELEASE(ps_dlf_filter);
+        KH_SAFE_RELEASE(ps_fs_split);   // KH_FS_SPLIT.
+        KH_SAFE_RELEASE(ps_fs_side);   // KH_WSEE_EDGE_COST.
+        KH_SAFE_RELEASE(ps_fs_split_lean);   // KH_FX_LEAN.
+        KH_SAFE_RELEASE(ps_dlf_comp);
+        KH_SAFE_RELEASE(ps_dlf_gather_lean);   // KH_DLF_SPLIT (its stencil: release_fx_chain, below).
+        KH_SAFE_RELEASE(ps_dlf_class);
+        KH_SAFE_RELEASE(dss_dlf_mark);
+        KH_SAFE_RELEASE(dss_dlf_sel);
+        dlf_st_fail_w = dlf_st_fail_h = 0;
         KH_SAFE_RELEASE(vs_composite);
         KH_SAFE_RELEASE(ps_composite);
         KH_SAFE_RELEASE(ps_composite_arb);
@@ -3106,7 +4217,6 @@ struct Resources {
         KH_SAFE_RELEASE(thm_tex);
         KH_SAFE_RELEASE(thm_srv);
         kh_thm_device_lost();   // KH_THM_DEVRESET: the live flags go with the texture.
-        comp_depth_identity = nullptr;
         comp_depth_w = comp_depth_h = 0;
         comp_depth_samples = 1;
         KH_SAFE_RELEASE(input_layout);
@@ -3142,6 +4252,7 @@ struct Resources {
         KH_SAFE_RELEASE(obj_srv);
         KH_SAFE_RELEASE(obj_sb);
         obj_cap = 0;
+        obj_wait = 0;   // KH_OBJBUF_RETRY.
         for (auto& khr_mb : mesh_vb) KH_SAFE_RELEASE(khr_mb);
         mesh_vb.clear();
         for (auto& khr_mi : mesh_ib) KH_SAFE_RELEASE(khr_mi);
@@ -3184,6 +4295,9 @@ struct Resources {
         KH_SAFE_RELEASE(vs_sunpf);
         KH_SAFE_RELEASE(uvs_frame_cb);   // KH_USER_VS.
         KH_SAFE_RELEASE(uvs_obj_cb);
+        KH_SAFE_RELEASE(skin_so_cb_l);   // KH_SKIN_SO_BIG.
+        KH_SAFE_RELEASE(skin_so_gs_l);
+        KH_SAFE_RELEASE(skin_so_vs_l);
         KH_SAFE_RELEASE(skin_so_cb);   // KH_SKIN_GPU.
         KH_SAFE_RELEASE(skin_so_layout);
         KH_SAFE_RELEASE(skin_so_gs);
@@ -3273,6 +4387,58 @@ struct Resources {
         ps_vmsee_fail = 0;
         KH_SAFE_RELEASE(bs_vmsee_t);
         bs_vmsee_failed = false;
+        release_wsee_targets();   // KH_WSEE.
+        wsee_fail_w = wsee_fail_h = wsee_fail_s = wsee_fail_q = 0;
+        wsee_fail_f = DXGI_FORMAT_UNKNOWN;
+        wsee_fail_cycle = 0u;   // KH_WSEE_FAIL_RETRY: the four stamps go with their keys.
+        wsee_e_failed = false;
+        wsee_es_failed = false;   // KH_WSEE_EDGE_COST: E's stencil and its states.
+        wsee_e_fail_w = wsee_e_fail_h = wsee_es_fail_w = wsee_es_fail_h = 0;   // KH_WSEE_EFAIL_KEY.
+        KH_SAFE_RELEASE(dss_wsee_smark);
+        KH_SAFE_RELEASE(dss_wsee_ssel);
+        wsee_c_fail_res = nullptr;
+        wsee_c_fail_fmt = DXGI_FORMAT_UNKNOWN;
+        KH_SAFE_RELEASE(ps_wsee_one);
+        // KH_PSV: every variant of the engine's (and our tail's) pixel shaders, the queries, and our six builtins'
+        // registered blobs (their shaders die here too).
+        kh_psv_device_lost();
+        KH_SAFE_RELEASE(ps_wsee_copy);
+        KH_SAFE_RELEASE(ps_wsee_agree);
+        KH_SAFE_RELEASE(dss_wsee_nw);
+        KH_SAFE_RELEASE(dss_wsee_eq);
+        KH_SAFE_RELEASE(bs_wsee_tpre);
+        KH_SAFE_RELEASE(bs_wsee_tpost);
+        KH_SAFE_RELEASE(bs_wsee_sort);
+        bs_wsee_sort_failed = false;
+        KH_SAFE_RELEASE(ps_wsee_one_l);
+        KH_SAFE_RELEASE(ps_wsee_one_z);   // KH_WSEE_OQ2.
+        KH_SAFE_RELEASE(ps_wsee_one_zl);
+        KH_SAFE_RELEASE(ps_wsee_d3_res);
+        ps_wsee_oq2_failed = false;
+        wsee_d3m_fail_w = wsee_d3m_fail_h = wsee_d3m_fail_s = wsee_d3m_fail_q = 0;
+        wsee_d3m_fail_f = DXGI_FORMAT_UNKNOWN;
+        wsee_d3m_fail_cycle = 0u;
+        KH_SAFE_RELEASE(bs_wsee_ldpre);
+        KH_SAFE_RELEASE(bs_wsee_ldpost);
+        KH_SAFE_RELEASE(bs_wsee_ldpre2);
+        KH_SAFE_RELEASE(bs_wsee_ldpost2);
+        KH_SAFE_RELEASE(dss_wsee_far);
+        wsee_ld_failed = false;
+        for (ID3D11BlendState*& khrb_b : bs_psb) KH_SAFE_RELEASE(khrb_b);   // KH_PSB: its states and buffers.
+        for (int khrb_i = 0; khrb_i < 8; ++khrb_i) {
+            KH_SAFE_RELEASE(psb_cb[khrb_i]);
+            psb_cb_set[khrb_i] = false;
+        }
+        psb_failed = false;
+        KH_SAFE_RELEASE(ps_psb_zb);   // KH_PSB_ZB.
+        psb_zb_failed = false;
+        wsee_pb_fail_w = wsee_pb_fail_h = 0;
+        wsee_pb_fail_cycle = 0u;
+        wsee_ld_fail_w = wsee_ld_fail_h = wsee_ld_fail_s = wsee_ld_fail_q = 0;
+        wsee_ld_fail_cycle = 0u;
+        wsee_q_failed = false;
+        wsee_v2_failed = false;
+        ps_wsee_copy_failed = false;
         KH_SAFE_RELEASE(ps_effect_pip);   // KH_PIP_FX.
         ps_effect_pip_tried = false;
         KH_SAFE_RELEASE(pip_scene_srv);
@@ -3294,7 +4460,6 @@ struct Resources {
         KH_SAFE_RELEASE(blend_alpha_zero);
         KH_SAFE_RELEASE(ps_alpha_zero);
         KH_SAFE_RELEASE(ps_premult_copy);
-        KH_SAFE_RELEASE(ps_cov_fix);
         KH_SAFE_RELEASE(ps_inj_depth_a);
         KH_SAFE_RELEASE(ps_maskprime);
         KH_SAFE_RELEASE(ps_maskcast);
@@ -3304,9 +4469,6 @@ struct Resources {
         KH_SAFE_RELEASE(ps_dls_world_fog);
         KH_SAFE_RELEASE(ps_seam_foot);
 
-        KH_SAFE_RELEASE(cov_hist_srv);
-        KH_SAFE_RELEASE(cov_hist_tex);
-        cov_hist_w = 0; cov_hist_h = 0; cov_hist_fmt = 0;
         KH_SAFE_RELEASE(rasterizer);
         KH_SAFE_RELEASE(rasterizer_cull);
         KH_SAFE_RELEASE(rasterizer_front);
@@ -3449,14 +4611,10 @@ struct RenderObject {
     // expect it to still hold - and a KhAttach entry is erased the moment both
     // its lanes clear. Being here also means they ride the ordinary staged
     // update-and-commit like every other property instead of being written
-    // side-band under a different lock. The price is MEASURED, not estimated,
-    // and the measurement is +56 bytes on sizeof(RenderObject), paid on every
-    // staging copy the flush and the injection make, plus one bool
-    // test per lane per step for the meshes that set neither - which is all of
-    // them until a script asks. The DELTA is what was measured and is what the
-    // claim rests on; the absolute (296 -> 352 under the offline harness's
-    // g++ x86-64) is a different compiler's number and is not asserted for
-    // this build.
+    // side-band under a different lock. The price is +56 bytes on
+    // sizeof(RenderObject), paid on every staging copy the flush and the
+    // injection make, plus one bool test per lane per step for the meshes that
+    // set neither - which is all of them until a script asks.
     float attach_pos[3] = {};
     float attach_rot[9] = { 1.0f, 0.0f, 0.0f,
                             0.0f, 1.0f, 0.0f,
@@ -3521,12 +4679,16 @@ struct RenderObject {
     // colour loops, so no crossfade.
     bool  lod_lock = false;
     int   blend_mode = 0;   // 0 normal, 1 additive, 2 multiply, 3 screen, 4 lighten, 5 darken.
-    // Every opaque solid (effect 0, depth not Off, not a normal-blend
-    // translucent) draws through a bucket: one DrawIndexedInstanced per (mesh,
-    // LOD, material pages, blend, depth mode, lit, twoSided, part, route) from
-    // the object record buffer (t39) + a 16-byte instance lane. The per-object
-    // CB path serves translucents and effect meshes only. Materials: an
-    // interned pool-owned set; updates swap the pointer.
+    // KH_INST_DOC: a mesh kh_inst_eligible admits draws through a bucket - one DrawIndexedInstanced per LOD
+    // level its members draw at (a crossfading member at two; textured, one per drawn submesh of the level; a
+    // blend material's translucent part, one per member, KH_INST_PART_ORDER), per bucket key (KhInstKey: mesh,
+    // skin pool chunk, material pages, blend, depth
+    // mode, lit, twoSided, part, the pass's route - in the flush also its draw-order run, KH_INST_RUN - and the
+    // dynamic-light selection), from the object record buffer (t39) + a 16-byte instance lane. The per-object
+    // CB path serves the rest: normal-blend translucents, effect meshes, fullscreen passes, depth Off, cloth /
+    // chain / unpooled skeletal / vertex-stage meshes, exact lighten / darken, localized / banded meshes, a
+    // translucent part copy, a slot drawing a substitute, and a bucket that would overflow the lane ring
+    // (KH_INST_OVERFLOW). Materials: an interned pool-owned set; updates swap the pointer.
     const KhMaterialSet* materials = nullptr;
     // KH_SCENE: this object's slot in the live scene, assigned by
     // add_render_object and carried through every copy the script side makes.
@@ -3534,13 +4696,22 @@ struct RenderObject {
     int   mesh = 0;   // Mesh registry id 0 = "box"; published ids only - see mesh_id_clamp.
     float color[4] = { 1, 1, 1, 1 };
     bool  lit = false;
-    float light_ambient = 0.40f;   // base-color fraction kept in full shadow.
-    float light_diffuse = 0.60f;   // n.L-scaled fraction (ambient + diffuse ~ 1).
+    float light_ambient = 0.40f;   // Scale of the engine's ambient light on this mesh (lit [ambient, diffuse]).
+    float light_diffuse = 0.60f;   // Scale of the engine's sun on this mesh (the n.L term); neither scales a lamp.
     uint64_t seq = 0;   // Creation order (fullscreen pass chaining).
     // Transient, set only on the flush's staging copies, never stored. An
     // injected object's part is drawn by the injection; the flush stages a part
     // only for objects it owns.
     uint8_t draw_part = 0;
+    // KH_WSEE_DEFER_FLAG - transient, 1 on the injection's deferred copies alone (kh_wsee_defer_note), never stored:
+    // the flush's tail recognises a copy by it after kh_mesh_order has permuted the meshes (an index range over the
+    // appended copies would name the wrong objects past the sort). In draw_part's padding byte: layout unchanged.
+    uint8_t ws_dcopy = 0u;
+    // Transient, set only on the injection's deferred copies (kh_wsee_defer_group), never stored: 0, or 1 + the copy's
+    // entry in the cycle's geometry hold (g_wsee_hold) - the flush's tail draws the part from the vertex array the
+    // injection drew with (kh_wsee_hold_ref), not from the slot's buffer as it stands then. 16 bits, in draw_part's
+    // padding: sizeof(RenderObject) unchanged (KH_WSEE_HOLD_MAX entries a cycle).
+    uint16_t ws_hold = 0u;
     DepthMode mode = DepthMode::TestOnly;
     bool  visible = true;
     bool  timed = false;
@@ -3584,8 +4755,10 @@ struct RenderObject {
 };
 
 // Effect ids shared by meshes (localized, clipped to the mesh's screen
-// footprint) and fullscreen passes. 10 and 11 sample the engine depth buffer
-// per pixel.
+// footprint) and fullscreen passes. Outline, pulse, distance fog, the sun
+// flare, SSGI, fog scatter and dynamicLightFog sample the engine depth buffer,
+// and so does any localized or banded pass and any user .hlsl effect that reads
+// the depth (kh_fx_needs_depth).
 enum class EffectId : int {
     Solid = 0, Invert = 1, ColorGrade = 2, Vignette = 3, Chromatic = 4,
     Grain = 5, Sharpen = 6, Blur = 7, Bloom = 8, Distortion = 9,
@@ -3639,6 +4812,9 @@ struct KhScene {
     std::unordered_map<uint64_t, KhSceneCell> grid;   // Mesh objects only, by centre cell.
     uint32_t alive_n = 0;
     uint64_t gen = 0;   // Bumps on every sync that changed anything.
+    // KH_SUN_GEN: bumps on every sync that took an object able to cast into the sun ladder (before or after the
+    // change - kh_scene_cast_kind), so an edit of anything else never re-opens the ladder.
+    uint64_t gen_cast = 0;
 };
 static KhScene g_scene;
 // KH_LOD_BOUNDS: the lowest mesh id an object was gridded under while that id was
@@ -3919,12 +5095,11 @@ struct RenderStats {
     // keeping up, and whether it is rescuing itself behind your back.
     // KH_CLOTH / KH_CHAIN, published by kh_cloth_upload: instances simulating
     // right now, the frames one was still busy from the previous one (since the
-    // stats were armed - a steady rise means the workers cannot keep up), the collider
-    // meshes gathered last frame and the live physics affectors.
+    // stats were armed - a steady rise means the workers cannot keep up) and the collider
+    // meshes gathered last frame.
     uint64_t cloth_instances = 0;
     uint64_t cloth_skipped = 0;
     uint64_t physics_colliders = 0;
-    uint64_t physics_affectors = 0;
     // KH_SKEL, published by the upload like the cloth's: skeletal meshes with a
     // vertex buffer, the bones of their skeletons, the bones among those whose
     // own name matched a memory point (0 with skinBones above 0 means no name
@@ -4005,12 +5180,38 @@ struct RenderStats {
     uint64_t dl_ref_spike_down = 0;
     uint64_t dl_copies = 0;
     uint64_t dlf_unshadowed = 0;
+    // KH_FX_PAIR_HOLD, since the stats were armed: depth-pair verdicts that held the adopted pair against
+    // the frame's (kh_fx_depth_pair_guard) - one per verdict that held: a flush's (the scene chain's, a
+    // park's) or the UI lane's own. A count stepping on the frame of a one-frame depth glitch (fog or light
+    // through a near surface) names the foreign latch the guard was built for.
+    uint64_t fx_pair_holds = 0;
     // KH_DL_PRES_MEMO - the light lists presence matched against the pool (uploads past the count check), and how
     // many of those replayed a remembered match instead of running it.
     uint64_t dl_pres_calls = 0;
     uint64_t dl_pres_memo_hits = 0;
 };
 static RenderStats g_stats;
+// ws_dcopy and ws_hold live in draw_part's padding, so RenderObject keeps its size and layout - draw_part, ws_dcopy,
+// ws_hold, then mode at draw_part's next 4-byte boundary. RenderObject is not standard-layout: offsetof on it is
+// conditionally supported (C++17); MSVC's and clang's both evaluate it at compile time (clang warns, silenced here).
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winvalid-offsetof"
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+#endif
+static_assert(offsetof(RenderObject, ws_dcopy) == offsetof(RenderObject, draw_part) + 1u,
+              "KH_WSEE_DEFER_FLAG: ws_dcopy sits in draw_part's padding");
+static_assert(offsetof(RenderObject, ws_hold) == offsetof(RenderObject, draw_part) + 2u,
+              "KH_WSEE: ws_hold sits in draw_part's padding");
+static_assert(offsetof(RenderObject, mode) == offsetof(RenderObject, draw_part) + 4u,
+              "KH_WSEE: ws_hold must not move mode (RenderObject's size and layout unchanged)");
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 // KH_STATS_ARMED: collection is off until the first getRenderStats; a
 // resetRenderStats zeroes the counters and disarms it again. Every counter
 // write is gated on kh_stats_on (kh_stat / kh_stat_add, or a test at the site)
@@ -4018,6 +5219,192 @@ static RenderStats g_stats;
 // g_stats_armed / kh_stats_on: defined with KH_PROF at the top of the file.
 inline void kh_stat(uint64_t& khst_c) { if (kh_stats_on()) ++khst_c; }
 inline void kh_stat_add(uint64_t& khst_c, uint64_t khst_n) { if (kh_stats_on()) khst_c += khst_n; }
+// KH_WSEE - the see-through record's globals (the KH_WSEE note at g_wsee_sv_rtvs in rendering_integration_injection.
+// hpp); the chain (the feature header) and the flush read them. The want: stamped with its cycle by a chain run in
+// which some pass would take a mode, valid capture or not (kh_fx_chain_run - any thread: the late chain-only flush may
+// be the game thread's), and by the scene flush that leaves such a chain to KH_FX_LATE (kh_wsee_arm). The landed and
+// tainted cycles: written by the render thread's hooks and by a flush's own depth writes (a park's too), read by the
+// chain against the published cycle (kh_wsee_valid). Render thread alone: the attempt stamp, the cycle's verdict
+// (taken at the main depth's clear, kh_wsee_cycle_note) and the pending re-issue.
+// KH_WSEE_ON: the whole system, chosen when the extension is compiled (no script switch). KH_WSEE_BUILD 0 builds it
+// out: no capture, no record targets, no CreatePixelShader hook or blob store, no per-clear see-through work and no
+// work in the hooks beyond the early-out tests of the Zb guard's (kh_psb_zb_draw / _dss / _clear / _dst / _list: a
+// context compare and a relaxed load each; _dss a store per OMSetDepthStencilState, KH_PSB_ZB_DSS_ARMED), XDRAW's
+// (kh_wsee_xdraw), the pre-draw's g_wsee_on test and the four core draw hooks' post-side g_wsee_pending compare (a
+// byte never set); per flush one kh_wsee_sort_mode call where a translucent or deferred part exists (0 at its first
+// test); every chain pass's KH_WSEE lanes 0 and t53 - t69 as the engine left them (no bind: KH_WSEE_BIND_ARMED).
+// Tested with `if constexpr` where a bare constant test would be one, and a function that does nothing with it out
+// wraps its whole body in one (no code left unreachable: MSVC C4127 / C4702).
+#ifndef KH_WSEE_BUILD
+#define KH_WSEE_BUILD 1
+#endif
+static constexpr bool KH_WSEE_ON = KH_WSEE_BUILD != 0;
+static std::atomic<uint64_t> g_wsee_want_cycle{ ~0ull };    // The newest cycle a chain wanted the capture in.
+static std::atomic<uint64_t> g_wsee_ok_cycle{ ~0ull };      // The cycle whose capture (S, B, T and NW cleared) landed.
+static std::atomic<uint64_t> g_wsee_taint_cycle{ ~0ull };   // The cycle whose capture a later write spoiled.
+// KH_WSEE_BWANT: the newest cycle a reader of the scene colours B / B2 wanted them - a chain run with an armed
+// distance fog or user effect (kh_wsee_col_reader), the flush's KH_FX_LATE take of one (kh_wsee_arm), the flush's
+// sorted parts compositing (modes 2 / 3) - read by the capture as its own want is (KH_WSEE_WANT_SPAN); and the cycle
+// whose capture resolved B (its B2 moment resolves B2 then, and only then).
+static std::atomic<uint64_t> g_wsee_col_want_cycle{ ~0ull };
+static std::atomic<uint64_t> g_wsee_col_cycle{ ~0ull };
+// This cycle's layer-depth verdict (kh_wsee_cycle_note: the split not refused - wsee_ld_failed; render thread).
+static bool g_wsee_cyc_layer = false;
+// The cycle whose Tp / Tf the capture cleared (the chain binds them for that cycle alone; the late chain may be the
+// game thread's), and the far plane's raw D its Tf depth was cleared to (render thread; false = none: no Tf replay
+// this cycle - Tf stays 1).
+static std::atomic<uint64_t> g_wsee_ld_cycle{ ~0ull };
+static bool  g_wsee_ld_far_ok = false;
+static float g_wsee_ld_far_lo = 0.0f, g_wsee_ld_far_hi = 1.0f;   // The world range D's raw was computed in.
+// KH_PSB: the one pass's record - the cycle whose capture cleared it, the cycle a re-issue drew into it (the chain's
+// and the sort's lane bit 6: its loads), the cycle a particle-type layer went into the old record instead (a re-issue
+// the one pass could not take, our own tail; bit 7 is its complement: the old record's NW / Tp / Tf hold their clears
+// and are not read), and D's raw the Tf verdict compares with (render thread writes; the late chain may read the
+// cycles on the game thread).
+static std::atomic<uint64_t> g_psb_cycle{ ~0ull };
+static std::atomic<uint64_t> g_psb_drew_cycle{ ~0ull };
+// KH_PSB_LORES: log2 of the one pass's scale s = 2 - P0 / P1 / N / N2 made at 1 / s of the frame a side and the one
+// pass drawn into them at that scale (Resources' KH_PSB_LORES note). TWIN of cb.hlsl's KH_WSEE_PSB_LS (the readers'
+// texel px >> it) and of PSPsbZb's KH_PSB_ZB_LS (KH_PSB_ZB_DEFS below); the static_assert pins the value (the patcher,
+// kh_psb_patch, keeps an s = 1 arm no caller takes).
+static constexpr UINT KH_PSB_LS = 1u;
+static_assert(KH_PSB_LS == 1u, "KH_PSB_LS is the twin of KH_WSEE_PSB_LS / KH_PSB_ZB_LS (s = 2)");
+// KH_PSB_ZB: the capture builds Zb (the block's largest S and where it lies) and the one pass's loop reads the live
+// depth only for the verdicts Zb leaves open. g_psb_zb_cycle: the cycle whose capture built Zb, while its guard
+// stands (kh_psb_zb_trip sets ~0: any write that could leave the main depth farther than S since the capture - the
+// guard's note in rendering_integration_injection.hpp); g_psb_zb_gen: the depth view's generation it was read through
+// (Resources' depth_srv_gen); g_psb_zb_far: the depth state bound on the engine's context (any caller's set while Zb
+// stands - kh_psb_zb_dss) can write the depth farther (GREATER, GREATER_EQUAL, NOT_EQUAL or ALWAYS with a write) -
+// true where unknown (Zb not standing or just built: the next draw looks at the live state). Render thread.
+static std::atomic<uint64_t> g_psb_zb_cycle{ ~0ull };
+static uint32_t g_psb_zb_gen = 0u;
+static bool g_psb_zb_far = true;
+// KH_PSB_ZB: PSPsbZb's defines at log2 s = KH_PSB_LS (kh_wsee_ensure's compile and the prewarm table's: one cache
+// key).
+static const D3D_SHADER_MACRO KH_PSB_ZB_DEFS[3] = {
+    { "MSAA_DEPTH", "0" }, { "KH_PSB_ZB_LS", "1" }, { nullptr, nullptr } };
+static std::atomic<uint64_t> g_psa_cycle{ ~0ull };
+// KH_PSB_TPA: the cycle a layer went into the old record's Tp (kh_wsee_post's Tp passes, kh_wsee_tail's) - the
+// late-opaque replays reset Tp from then on (kh_wsee_re_set's khwb_l); before it Tp holds its clear, which the reset
+// would write again. g_psa_cycle stays the whole old record's stamp (lane bit 7): a light-adding NW-only layer sets it
+// and writes no Tp. Render thread (the tail's: a park that stalls it).
+static std::atomic<uint64_t> g_psa_tp_cycle{ ~0ull };
+// KH_WSEE_NOPRE: a late opaque marked before the cycle's B2 attempt ("pre") is not replayed (kh_wsee_mark_opaque) and
+// the shaders derive what its replay would have written (cb.hlsl's note at khWsS2). g_wsee_nopre_cycle: the cycle a
+// pre mark was skipped in (lane bit 8; and D3's verdict, kh_wsee_d3_ok); g_wsee_s2_cycle: the cycle S2 was taken in
+// (kh_wsee_b2_take - S2 bound at t62 with lane bit 9). Render thread writes; the chain (the late one may be the game
+// thread's) and the sort scope read them.
+static std::atomic<uint64_t> g_wsee_nopre_cycle{ ~0ull };
+static std::atomic<uint64_t> g_wsee_s2_cycle{ ~0ull };
+static float g_psb_far_raw = 1.0f;
+// The late-opaque replay keeps each late opaque's own depth, D3, and the shaders take it as the behind of such a
+// surface in place of the live depth (a fence-type layer drawn over it later held that). The capture stamps
+// g_wsee_od_cycle, and the chain binds D3 at t65 with bit 5 of fx_tex[1].w for that cycle alone (the late chain may
+// be the game thread's).
+static std::atomic<uint64_t> g_wsee_od_cycle{ ~0ull };
+// KH_WSEE_OQ: a pre late opaque is skipped (g_wsee_nopre_cycle), so D3 holds no depth of it: g_wsee_d3_sync_cycle is
+// the cycle S2 was taken in after such a skip (kh_wsee_b2_take), from which the readers take S2 itself there. Render
+// thread writes; the chain (the late one may be the game thread's) and the sort scope read them through
+// kh_wsee_d3_ok.
+static std::atomic<uint64_t> g_wsee_d3_sync_cycle{ ~0ull };
+// KH_WSEE_OQ2: the cycle a post late opaque last wrote D3m in since D3's last resolve (kh_wsee_re_set sets it,
+// kh_wsee_d3m_resolve clears it to ~0 once drawn): a reader resolves D3 only where it is the reader's cycle. Render
+// thread writes; the chain (the late one may be the game thread's, inside a resolve the engine issues there: the
+// engine never drives the immediate context from two threads at once) and the sort scope read and clear it.
+static std::atomic<uint64_t> g_wsee_d3m_cycle{ ~0ull };
+// KH_WSEE_OQ: D3 stands complete for cycle khdo_c - its capture filled it (g_wsee_od_cycle) and either no pre opaque
+// was skipped or S2 was taken after them. Else its readers leave t65 null and bit 5 clear: the behind of a late opaque
+// is the live depth - the same picture at sample 0 wherever no fence-type layer drew after a late opaque (a reader
+// before the B2 attempt: the flush's sort scope), samples k > 0 taking their own depth in place of sample 0's D3;
+// S2's pass refused at the attempt leaves that cycle so.
+inline bool kh_wsee_d3_ok(uint64_t khdo_c) {
+    return g_wsee_od_cycle.load(std::memory_order_relaxed) == khdo_c &&
+           (g_wsee_nopre_cycle.load(std::memory_order_relaxed) != khdo_c ||
+            g_wsee_d3_sync_cycle.load(std::memory_order_relaxed) == khdo_c);
+}
+// The injection's translucent parts left to the flush's tail (the KH_WSEE note's SORT paragraph): copies of the
+// objects as the injection drew them (the transform, size and colour the solid took; draw_part 1), and the cycle they
+// belong to. Written by the injection (kh_wsee_defer_note), taken whole by the cycle's first scene flush that builds
+// its mesh list (flush_locked: drawn first in its order where it stands down for the injection's meshes, dropped where
+// it draws them itself - their parts with them), dropped unconsumed at the next main-depth clear (kh_wsee_cycle_note).
+// g_wsee_defer_taken / g_wsee_defer_drawn: the cycle whose flush appended them and the cycle whose flush then reached
+// its draw loop - a flush that bails between the two counts as a loss; a loss (a tainted deferred cycle too,
+// KH_WSEE_DEFER_TAINT) stands the deferral down until g_wsee_defer_back (KH_WSEE_DEFER_BACKOFF cycles: a persistent
+// cause would otherwise lose our parts every frame). The render thread's, or a park's that stalls it; reset with the
+// session's scratch (the copies hold material-set references until then).
+static uint64_t g_wsee_defer_cycle = ~0ull;
+static std::vector<RenderObject> g_wsee_defer_objs;
+static uint64_t g_wsee_defer_taken = ~0ull;
+static uint64_t g_wsee_defer_drawn = ~0ull;
+static uint64_t g_wsee_defer_back = 0;
+// The cycle's geometry hold: one entry per deferred copy (KH_WSEE_OWN_STATIC). own: an object drawn from its mesh's
+// own buffer at the injection (static, or a pose or a stage not yet installed), or one with nothing to draw at its
+// levels - no copy, the flush binds that buffer whatever the slot holds by then; else (a skinned pose - its own buffer
+// or a skin pool chunk's slice -, a cloth's or a chain's buffer, a vertex stage's output) the vertices the injection
+// drew with, as they stood then: its copy in g_res.wsee_hold_vb (kh_wsee_hold_take) - only the vertex runs the flush
+// can draw, the translucent submeshes at the injection's level and, crossfading, the next (lvl, t: the injection's
+// pick, which the flush then takes) - each at its own place relative to base (the IA offset the flush binds: vertex
+// v at base + 48 v, so the mesh's absolute indices address the copy unchanged), within [off, off + bytes). gen: the
+// hold buffer's generation at the copy (a release since: the entry is void). Beside g_wsee_defer_objs (the copies'
+// ws_hold index it, 1-based), but cleared only by the cycle's first hold (kh_wsee_hold_begin) and the session: the
+// flush reads it while it draws, after it took the copies; g_wsee_hold_used: the bytes this cycle's entries take.
+// Render thread, or a park's flush that stalls it.
+struct KhWseeHold {
+    int      mesh = -1;
+    bool     own = false;
+    UINT     base = 0u;
+    UINT     off = 0u;
+    UINT     bytes = 0u;
+    uint64_t gen = 0u;
+    int      lvl = 0;
+    float    t = 0.0f;
+};
+static std::vector<KhWseeHold> g_wsee_hold;
+static UINT g_wsee_hold_used = 0u;
+static uint64_t g_wsee_hold_cycle = ~0ull;   // The cycle g_wsee_hold's entries belong to (kh_wsee_hold_begin).
+// KH_WSEE_HOLD_IDLE_COPY: the last cycle a COPY entry used the hold buffer or its run caches (kh_wsee_hold_take, a
+// refused group that built caches) - the idle release's stamp. An own entry (the mesh's own buffer) stamps nothing:
+// static parts deferring every cycle must not keep a buffer an earlier crowd grew.
+static uint64_t g_wsee_hold_copy_cycle = ~0ull;
+// The cycle whose chain run bound its capture (kh_fx_chain_run; exactly one chain a cycle). Past it nothing of the
+// cycle reaches the picture: the pre-draw stands down and a taint is moot (kh_wsee_taint ignores it, so a late write
+// - an engine pass on the scene after the chain - cannot count the used capture as waste).
+static std::atomic<uint64_t> g_wsee_used_cycle{ ~0ull };
+static uint64_t g_wsee_snap_cycle = ~0ull;   // The cycle whose capture was attempted - once, landed or not.
+static bool     g_wsee_on = false;   // This cycle captures: KH_WSEE_ON, a want <= WANT_SPAN old, no back-off and
+                                    // no KH_WSEE_FLUSHW_PRED stand-down.
+// This draw's re-issue (the pre-draw to its hook's post; kh_wsee_post): none, a blended depth-writer's (T), a
+// blended no-write draw's (T, then NW) or a non-blended depth-writer's after the capture (T's late-opaque flag).
+static constexpr uint8_t KH_WSEE_RE_NONE = 0u, KH_WSEE_RE_BLEND = 1u, KH_WSEE_RE_NOWRITE = 2u, KH_WSEE_RE_OPAQUE = 3u;
+// A light-adding blended draw writing no depth (DestBlend ONE), into NW alone; an over-blend writing no depth with
+// the depth test off, into T without a test, then NW (kh_wsee_pre_draw's note).
+static constexpr uint8_t KH_WSEE_RE_NWONLY = 4u, KH_WSEE_RE_NOWRITE_OFF = 5u;
+static uint8_t  g_wsee_pending = KH_WSEE_RE_NONE;
+// The pending particle-type re-issue is drawn after this cycle's B2 (Tpost / NWpost), else before (Tpre / NWpre) -
+// kh_wsee_pre_draw's verdict for its post; a pending late opaque is always post (kh_wsee_mark_opaque: a pre one is
+// not replayed). Render thread.
+static bool     g_wsee_pending_post = false;
+// The cycle whose second colour snapshot B2 landed (taken at its first fence-type layer, kh_wsee_b2_take; the chain
+// reads it - atomic: the late chain may be the game thread's) and the cycle B2 was attempted in (once).
+static std::atomic<uint64_t> g_wsee_b2_cycle{ ~0ull };
+static uint64_t g_wsee_b2_try = ~0ull;
+static constexpr uint64_t KH_WSEE_WANT_SPAN = 2u;
+// KH_WSEE_HOLD_FAIL_RETRY: cycles a refused make stays refused at its key before one more ask - the hold's (its
+// size: kh_wsee_hold_reserve) and, KH_WSEE_FAIL_RETRY, the capture targets' (kh_wsee_targets, kh_wsee_ld_targets,
+// kh_psb_targets, kh_wsee_d3m_targets; Resources' note at wsee_fail_cycle).
+static constexpr uint64_t KH_WSEE_HOLD_FAIL_RETRY = 600u;
+// The cycle's capture would lie (the KH_WSEE note's TAINT list: a depth write of ours on the main depth after it
+// landed, a re-issue refused or impossible, a DrawAuto / indirect engine draw writing the main depth - KH_WSEE_XDRAW -,
+// an engine draw that does not blend and writes the scene's colour with the depth test off): the chain leaves it
+// unused for the cycle. An engine draw that does not blend and writes depth does not taint: it is re-issued into T's
+// late-opaque flag. The cycle is the writer's: g_topo_cycles (the render thread's, or a park's - it stalls the render
+// thread inside that cycle). Once a cycle.
+inline void kh_wsee_taint(uint64_t khwt_c) {
+    if (g_wsee_ok_cycle.load(std::memory_order_relaxed) != khwt_c) return;
+    if (g_wsee_used_cycle.load(std::memory_order_relaxed) == khwt_c) return;   // The chain has drawn.
+    if (g_wsee_taint_cycle.load(std::memory_order_relaxed) == khwt_c) return;
+    g_wsee_taint_cycle.store(khwt_c, std::memory_order_relaxed);
+}
 // The live flush count the graves and the band dedupe key on (a mechanism,
 // reset only by the session teardown, which empties every grave and latch that
 // holds one first). Advanced by flush_frame on the game thread and read by the
@@ -4048,8 +5435,9 @@ static UINT g_main_depth_w = 0;
 static UINT g_main_depth_h = 0;
 
 // Depth values were written through the scene viewport depth range; UI-phase
-// shaders must linearize with the same range. Updated by the scene flush;
-// initialized to the empirically probed defaults.
+// shaders must linearize with the same range. The fallback of every reader of
+// g_ro.trig_vp_*; learned at the injection trigger alone (KH_SCENE_VP_TRIG);
+// initialized to the measured world range (KH_INFRONT's RenderDoc note).
 static float g_scene_vp_min_d = 0.011f;
 static float g_scene_vp_max_d = 0.999f;
 
@@ -4104,7 +5492,9 @@ struct alignas(16) ConstantData {
     float obj_rot[3][4];   // [0][3] = 1 marks filled (the zeroed default reads as identity
                            // in-shader - auxiliary fills stay correct).
     float blend_ctl[4];   // x = perceptual-composite enable (the flush's fill only; the injection
-                          // writes 0), w = the LOD crossfade dither; y / z unread.
+                          // writes 0), w = the LOD crossfade dither; y unread; z = KH_CUTOUT_A2C: 1 keeps a
+                          // cutout's hard clip on a multisampled target (the view-model slice,
+                          // kh_infront_inject), 0 everywhere else (alpha to coverage, cb.hlsl KhCutoutCover).
     float mat_ctl[4];   // KH_MAT_TABLE (HLSL twin matCtl): x = table index (base + slot) for the
                         // non-instanced VS, y = slot for the instanced VS, z = 1 when x holds for
                         // every instance, w = alpha-mode override (-1 none). The material lanes
@@ -4115,7 +5505,8 @@ struct alignas(16) ConstantData {
                         // scatter pass's linear-depth copies), zero unless one serves the pass.
     float fuse_meta[4];   // x = the fused stages (kh_fuse_append); y, zw = KH_GLOW_PYR's arm and extent
                           // (kh_glow_lanes), or on an anamorphic pass KH_ANA_PYR's arm and frame (kh_ana_lanes).
-    float fuse_stage[12][4];
+    float fuse_stage[12][4];   // Per stage s: [4s] = effect, blend, age (s; KH_FUSE_CLOCK), 0; [4s + 1] /
+                               // [4s + 2] = fx[0..3] / fx[4..7]; [4s + 3] = colour (kh_fuse_append).
     // fx2 sits in the append region (append-only block discipline); HLSL twin
     // fxParams2. kh_fill_fx_params_cb copies the object's params 8 - 11 into
     // it (the flush's fills, the PIP's effect pass, the UI lane); the mesh
@@ -4145,12 +5536,21 @@ struct alignas(16) ConstantData {
     // shader); zero elsewhere.
     float user_obj[4];
     // KH_FX_TEX (HLSL twin khFxTexLay): an effect's textures, 1 + each one's layer in its page ([0].xyzw =
-    // user0 .. user3, [1].xy = user4 / user5; 0 = absent or still loading; [1].zw unused). Written by kh_fx_tex_fill
+    // user0 .. user3, [1].xy = user4 / user5; 0 = absent or still loading). Written by kh_fx_tex_fill
     // on a user effect's draw and (KH_FX_TEX_ALL, kh_fx_tex_on) a builtin effect pass's with textures; zero elsewhere.
+    // [1].z = KH_WSEE's mode on a scene-chain pass and its side draws (kh_fx_chain_run: 1 = armed; 0 = off - every
+    // other draw: effect meshes, the UI lane, the PIP, a cycle without a valid capture) and a sorted part's mode on
+    // its mesh draw (kh_wsee_sort_mode: 1 = the occlusion test, 2 / 3 = and the layer-aware composite);
+    // kh_fx_tex_fill leaves it.
+    // [1].w = KH_WSEE's bound views on an armed scene-chain pass, read as (uint)(w + 0.5) (kh_fx_chain_run; the shader
+    // cannot test a null view): the bit table is the KH_WSEE note's LANES paragraph (rendering_integration_injection.
+    // hpp) and cb.hlsl's KhWseeAvail; bit 1 (C) is the pass's own draw's alone, never its side draws'; on a sorted
+    // part's mesh draw bits 3, 5 - 9 alike (KhWseeSortScope); 0 on every other draw. kh_fx_tex_fill leaves it too.
     float fx_tex[2][4];
     // KH_FX_FOGREC (HLSL twin khFxFog): the scene's KH fog passes for a user effect - kh_fog_records_pack's two records
-    // [startDist, endDist, skyAmount, opacity] (opacity 0 = none), filled for a user effect in the scene chain; zero
-    // elsewhere. Last per-object field: the per-frame block (b1) starts at view_proj.
+    // [startDist, endDist, skyAmount, opacity] (opacity 0 = none), filled for a user effect in the scene chain and
+    // (KH_DLF_FOGREC, kh_dlf_fog_pack) for dynamicLightFog's pass and its side draws; zero elsewhere. Last per-object
+    // field: the per-frame block (b1) starts at view_proj.
     float fx_fog[2][4];
     float view_proj[4][4];   // Rebased on the two mesh passes (see center_rel); absolute at every other site.
     float inv_view_proj[4][4];   // Inverse of the live encode for the depth reconstruction:
@@ -4191,8 +5591,12 @@ struct alignas(16) ConstantData {
     float light_amb[4];   // Rgb = engine ambient (HDR) or (1,1,1) cold; w = engine mode.
     float fog_engine[4];   // x = density scale (blk 41), y = fog end (blk 48) z = inv ramp range
                            // (blk 49), w = valid.
-    float fog_sky[4];   // Sky row 17 gradient points; w = sky probe valid.
-    float fog_sky_col[4];   // Sky row 7 base color (fog color) w = the engine fog-layer altitude
+    float fog_sky[4];   // The fog colour's view-elevation gradient: x nadir, y horizon, z zenith gain, w = armed.
+                        // KH_FOG_SKY_DOC: each fill writes (1, 1, 1, 1) once the sky probe has matched, inside its
+                        // fog / haze / engine-terms block (gain 1: the fog target is fog_sky_col.rgb); the sky
+                        // block's row 17 goes to fog_uw_grad.
+    float fog_sky_col[4];   // Sky block row 1 (nb[4..6]): the above-layer fog target colour (KH_FOG_SKY_DOC);
+                            // w = the engine fog-layer altitude
                             // (block row 12 z + row 13 y), the branch point KhHazeT integrates
                             // against.
     float haze_pars[4];   // Engine distance haze (sky CB row 14 = PSC_HazePars): x = reference
@@ -4366,7 +5770,9 @@ struct KhClothInst {
     float auth_ext[3] = { 1.0f, 1.0f, 1.0f };
     uint32_t mesh_edges = 0;           // Stretch entries that are real mesh edges; shell links follow.
     float    shell_built = -1.0f;      // The 'shell' the current links were built for.
-    uint32_t lvl0_icount = 0;
+    // KH_CLOTH_OWN_IDX: level 0's index stream, copied at kh_cloth_build - the writeback (a pool worker) reads this
+    // and never the MeshDef, as the skin pool reads KhSkinRest and a chain its own inf / lvl0. Empty for a chain.
+    std::vector<uint32_t> lvl0_idx;
     int      mesh = -1;
     uint32_t slot = 0xFFFFFFFFu;
     // The object this instance simulates, by its creation stamp (RenderObject::
@@ -4423,6 +5829,9 @@ struct KhClothInst {
     uint16_t in_sub = 0;
 
     std::atomic<bool>     busy{ false };
+    // KH_CHAIN_END_RACE: a worker took this job off the queue (set under g_cloth_mu at the pop) and is writing its
+    // back buffers; cleared after the publish. busy is also true while the job only waits in the queue.
+    std::atomic<bool>     running{ false };
     std::atomic<uint32_t> front{ 0 };   // Which out[] the upload may read.
     std::atomic<uint32_t> gen{ 0 };     // Bumped on every publish; the upload's dirty test.
     uint32_t uploaded_gen = 0xFFFFFFFFu;
@@ -4542,7 +5951,14 @@ struct KhClothInst {
     // carries a gradient particle along by (1 - its paint weight) of what its
     // OWN target moved since - 1 at the pinned end, 0 at the simulated end, so
     // it meets both neighbours. Empty or of another bone count = no grading.
+    // KH_CLOTH_HELD_REC: what the job solved against is the guide as the step HELD it - KH_SUB_CLOCK's substeps end
+    // sub_t of the way across the frame, the pins swept from the last step's held guide to this frame's
+    // (kh_cloth_guide_prep's lane a, kh_cloth_target) - so out_guide[b] is guide_held, the bone matrices blended the
+    // same way (kh_cloth_guide_at is affine in them: the held pin positions exactly), kept by the job across steps;
+    // the frame's end as given fell (1 - sub_t) of the bones' travel short at frame rates whose frames do not divide
+    // into substeps (90 / 144 fps; none at 60 / 120). The chain's twin is c.guide_prev (KH_CHAIN_HELD_REC).
     std::vector<float> out_guide[2];
+    std::vector<float> guide_held;   // Job thread only.
     std::vector<float> ch_mat[2];
     std::vector<MeshVertex> pin_out;
     std::vector<float> pin_guide;
@@ -4641,7 +6057,10 @@ struct KhChainCfg {
     // last_pos) stays current for the frame the chain builds again.
     bool   nobuild = false;
 };
-static std::unordered_map<std::string, KhChainCfg> g_chain_cfg;
+// KH_EXIT_STATICS: never destructed (g_attach's rule): the configs hold SQF references (KhChainCfg's game_values),
+// and a quit that skips mission_ended (Alt+F4, the window closed from Windows) would release them at the DLL's
+// static teardown, after the engine is gone. The mission edges clear it (reset_retained_state).
+static std::unordered_map<std::string, KhChainCfg>& g_chain_cfg = *(new std::unordered_map<std::string, KhChainCfg>());
 
 // The world wind, ENGINE axes (east, up, north), sampled once per Draw3D by
 // kh_cloth_wind_sample and read by the sync a few lines later. One frame of
@@ -4701,7 +6120,8 @@ static uint8_t  g_ground_split[4] = { 2, 2, 2, 2 };  // KhClothGround::split, by
 // the consume-point steps).
 //
 // NORMALS. n / native_ext is the authored normal; written back as n * box it is
-// what KhVsCore's normalize(n / size) expects.
+// what KhVsCore's normalize(n / size) expects. It is skinned by the blended
+// map's inverse transpose (KH_SKIN_NRM_COF: kh_skin_nrm_cof, skin.hlsl's twin).
 //
 // CLOTH. A binding whose mesh simulates is the cloth's to draw: no skinning job
 // runs; kh_skin_sync keeps its pose as per-bone maps (KhSkinInst::guide) for
@@ -4786,13 +6206,21 @@ struct KhFxTexScope {
     ~KhFxTexScope() { if (ctx) kh_fx_tex_unbind(ctx); }
 };
 // Two writers: flush_locked and inject_composited_meshes both publish it - on
-// the render thread, or in a park's flush on the game thread with the render
-// thread held (a frame the flush never publishes on would otherwise draw
-// every object at level 0), with the same formula from their own pass. Read
-// lock-free by kh_lod_pick. KH_PIP_LOD: a pass with a camera and a target of
-// its own (the PIP) hands kh_lod_pick its own value instead - this one is the
-// main view's.
+// the render thread, in KH_FX_LATE's chain-only flush (either thread's, inside
+// the engine's resolve), or in a park's flush on the game thread with the
+// render thread held (a frame the flush never publishes on would otherwise
+// draw every object at level 0), with the same formula from their own pass.
+// KH_LOD_PARK_KEEP: a park publishes only at the injection's last pass height,
+// or while the injection has not published within the last two cycles; else
+// the last value stands. Read lock-free by kh_lod_pick. KH_PIP_LOD: a pass
+// with a camera and a target of its own (the PIP) hands kh_lod_pick its own
+// value instead - this one is the main view's.
+// KH_LOD_ONE_SCALE: both writers go through kh_lod_publish, the one definition (the projection's P11 and the height
+// of the viewport the pass draws our meshes with), which writes g_lod_zoom with it.
 static float g_lod_proj_px = 0.0f;
+// KH_LOD_ZOOM: the main view's zoom for the level pick's range term (kh_lod_zoom_of: 1 = unzoomed), published
+// with g_lod_proj_px by the same writers, read with it.
+static float g_lod_zoom = 1.0f;
 
 struct KhCullSet {
     float p[4][4] = {};   // Left, right, bottom, top - normalised.
@@ -4841,9 +6269,12 @@ static std::atomic<bool> g_mesh_publish_pending{false};
 // One KhInstLane per instance (16 B; HLSL VSInst, IA slot 1, TEXCOORD4 uint +
 // TEXCOORD5 float3): the live-scene slot (the VS reads the record from t39),
 // the LOD dither, the final alpha (envelope applied) and the material table
-// base. Two dynamic rings, one per pass thread, discard on first use and wrap,
+// base. Two dynamic rings, one per pass family (0 the flush's, 1 the injection's
+// and the PIP's), discard on first use and wrap,
 // NO_OVERWRITE per write. The sun-depth and DLS passes consume the same lane
-// through their own ring.
+// through a plain stream of their own (sun_instance_vb), the volume seam through
+// another (seam_instance_vb): no ring - each rewritten whole (WRITE_DISCARD) for
+// the set it draws next.
 struct KhInstLane {
     uint32_t slot;
     float    dither;
@@ -4867,7 +6298,8 @@ struct KhInstKey {
     int      two_sided;
     int      part;
     uint32_t route;     // The pass's per-object route bits (2 near-gap) - CB lanes, PS and
-                        // viewport.
+                        // viewport. KH_INST_RUN: the flush ORs the object's draw-order run in above
+                        // them (<< 2), so a bucket never spans a draw it does not commute with.
     uint64_t aux;       // The object's dynamic-light selection identity (kh_dl_bucket_hash; 0 when
                         // the selection is not per object): fill_dynlights_cb culls the pool to the
                         // mesh's nearest set in mode 3, and the bucket uploads the representative's.
@@ -4898,16 +6330,19 @@ struct KhInstPlan {
     std::vector<uint32_t> range_begin;   // Per bucket: first range.
     std::vector<uint32_t> range_n;       // Per bucket: range count.
     std::vector<KhInstRange> ranges;
-    std::vector<std::pair<uint64_t, uint32_t>> picked;   // Scratch: (lod << 32 | far-to-near
-                                                         // Rank, mesh index) with the dither
-                                                         // Sign folded into bit 31.
+    std::vector<std::pair<uint64_t, uint32_t>> picked;   // Scratch: (lod << 32 | distance rank, mesh
+                                                         // index) - near-to-far for a normal-blend
+                                                         // bucket, far-to-near otherwise; bit 31 =
+                                                         // the coarser half of a crossfade pair.
     std::vector<KhInstLane> lanes;       // Scratch: the pass's whole stream, one write.
     std::vector<float>    lane_d2;       // Scratch, per lane of 'lanes': its member's distance (the pass's
                                          // memo) - KH_INST_PART_ORDER's sort key.
     mutable std::vector<KhInstPartLane> part_order;   // Scratch of kh_inst_draw's part-2 walk.
     std::vector<float>    lod_t;         // Scratch, per mesh index: the member's own crossfade
                                          // fraction from its one pick (0 = none).
-    uint32_t lanes_written = 0;
+    std::vector<int>      lod_l;         // Likewise, the level that pick drew (clamped;
+                                         // the crossfade's partner is lod_l + 1 where lod_t > 0) - the
+                                         // injection's deferral reads both (one source for the bucket's rule).
 };
 
 static ID3D11VertexShader* g_vmir_vs = nullptr;
@@ -4915,7 +6350,8 @@ static ID3D11VertexShader* g_vmir_vs = nullptr;
 // Scene HDR colour capture: the bound RTV cannot be sampled while bound, so the
 // scene is resolved (MSAA) or copied into an owned single-sample texture + SRV.
 
-// KH_XTHREAD_ATOMIC: written by setSsgiScale (game thread), read by ensure_fx_chain (render thread or a park).
+// KH_XTHREAD_ATOMIC: written by setSsgiScale (game thread), read by ensure_fx_chain (the chain's thread: the render
+// thread, a park, or the game thread's late chain - KH_FX_LATE).
 static std::atomic<float> g_khsg_scale{ 0.5f };
 static std::atomic<float> g_sun_range{200.0f};
 static std::atomic<float> g_obj_vis{0.0f};
@@ -4927,6 +6363,9 @@ static std::atomic<float> g_obj_vis{0.0f};
 // restore (an exception inside a hook or the flush): the host's pipeline state
 // is never left as ours, and no captured reference leaks. The explicit
 // restore() stays the normal path; the destructor is the exception path only.
+// That holds for this struct, KhOmSave and KhPredAside; the hand-rolled brackets
+// (mask_cast_engine, KhRpSave, KhGlowSave, kh_sun_pf_convert) restore on
+// their explicit path alone (the predicate two of them set aside excepted: KH_PRED_ASIDE).
 struct StateBackup {
     ID3D11DeviceContext*     ctx_saved = nullptr;   // The context of the capture (the destructor's).
     bool                     armed = false;         // Captured and not yet restored.
@@ -4976,11 +6415,13 @@ struct StateBackup {
     // mask (t39 free at the pixel
     // stage - it is the object records' VS slot, vs_srv39 below; t34 and t41
     // are the replay merges' - PSReplayMerge / PSReplayMergeMir, which bind
-    // and null them, with t49-t51 past this range, under their own KhRpSave
-    // (t0-t63) - and the effect chain's KH_VM_SEE snapshot / transmittance,
+    // and null them, with t49-t51, under their own KhRpSave
+    // (t0-t127) - and the effect chain's KH_VM_SEE snapshot / transmittance,
     // bound by kh_fx_chain_run under the flush's backup; SSAO binds t0-t3
-    // under its own StateBackup).
-    ID3D11ShaderResourceView* ps_srvs[49] = {};   // t0..t48.
+    // under its own StateBackup). t53-t69: the KH_WSEE record (the KH_WSEE
+    // note's REGISTERS), bound by kh_fx_chain_run under the flush's backup
+    // and by the sort scope.
+    ID3D11ShaderResourceView* ps_srvs[70] = {};   // t0..t69 (t53 - t69 the KH_WSEE record: the note's REGISTERS).
     ID3D11ShaderResourceView* vs_srv39 = nullptr;   // KH_OBJBUF: the object record buffer's VS slot.
     ID3D11ShaderResourceView* vs_srv52 = nullptr;   // KH_SKIN_POOL: the Sk twins' chunk (kh_inst_sk_bind).
     ID3D11SamplerState*      ps_samps[2] = {};   // s0 material, s1 the shadow Gather (KH_SHADOW_GATHER).
@@ -5019,6 +6460,10 @@ struct StateBackup {
         ctx->IAGetIndexBuffer(&ib, &ib_fmt, &ib_offset);
         ctx->VSGetShader(&vs, vs_insts, &vs_inst_count);
         ctx->PSGetShader(&ps, ps_insts, &ps_inst_count);
+        // The arrays hold eight; a count past that (a shader with more class instances than the engine is
+        // known to use) is clamped so the restore and the release loops stay inside them.
+        if (vs_inst_count > _countof(vs_insts)) vs_inst_count = _countof(vs_insts);
+        if (ps_inst_count > _countof(ps_insts)) ps_inst_count = _countof(ps_insts);
         ctx->GSGetShader(&gs, nullptr, nullptr);
         ctx->HSGetShader(&hs, nullptr, nullptr);
         ctx->DSGetShader(&ds, nullptr, nullptr);
@@ -5062,6 +6507,10 @@ struct StateBackup {
         ctx->IASetIndexBuffer(ib, ib_fmt, ib_offset);
         ctx->VSSetShader(vs, vs_inst_count ? vs_insts : nullptr, vs_inst_count);
         ctx->PSSetShader(ps, ps_inst_count ? ps_insts : nullptr, ps_inst_count);
+        // KH_CLASS_INST: the GS / HS / DS come back without class instances (the capture takes none; the VS / PS
+        // carry eight) - a shader of those stages the engine bound with interfaces would then not be its own.
+        // Accepted: the engine is not known to use dynamic linkage at any stage; kh_wsee_re_save, the one bracket
+        // that tests for them, refuses on the pixel shader's rather than set it back without them.
         ctx->GSSetShader(gs, nullptr, 0);
         ctx->HSSetShader(hs, nullptr, 0);
         ctx->DSSetShader(ds, nullptr, 0);
@@ -5086,7 +6535,7 @@ struct StateBackup {
             }
         }
         ctx->PSSetShaderResources(0, _countof(ps_srvs), ps_srvs);
-        kh_bc_forget();   // KH_BIND_FILTER: t0 - t48 hold the capture's views again.
+        kh_bc_forget();   // KH_BIND_FILTER: t0 - t69 hold the capture's views again (ps_srvs: KH_PSB_PHASE's t69).
         ctx->VSSetShaderResources(39, 1, &vs_srv39);   // KH_OBJBUF.
         ctx->VSSetShaderResources(52, 1, &vs_srv52);   // KH_SKIN_POOL.
         ctx->PSSetSamplers(0, _countof(ps_samps), ps_samps);
@@ -5120,6 +6569,34 @@ struct StateBackup {
         KH_SAFE_RELEASE(blend);
         KH_SAFE_RELEASE(rasterizer);
         KH_SAFE_RELEASE(predicate);
+    }
+};
+
+// KH_PRED_ASIDE: the engine's predicate set aside around a GPU command of ours that runs outside any StateBackup (a
+// copy, a clear, a draw of ours in a hook or ahead of a pass's backup) and handed back with its value - a predicate
+// the engine left bound skips predicated commands, ours included (KH_UPLOAD_PRED's rule; StateBackup clears it for
+// the passes it brackets). One GetPredication per begin; nothing is set when none is bound. The explicit end() is
+// the normal path, the destructor the exception path (StateBackup's rule). Not for an engine draw re-issued at its
+// own hook (kh_vmsee_t_begin, kh_wsee_post): those keep the engine's predicate on purpose, the one the draw itself
+// took, so a draw it skipped is skipped in the record too.
+struct KhPredAside {
+    ID3D11DeviceContext* ctx = nullptr;
+    ID3D11Predicate*     pred = nullptr;
+    BOOL                 value = FALSE;
+    KhPredAside() = default;
+    KhPredAside(const KhPredAside&) = delete;
+    KhPredAside& operator=(const KhPredAside&) = delete;
+    ~KhPredAside() { end(); }
+    void begin(ID3D11DeviceContext* khpa_ctx) {
+        ctx = khpa_ctx;
+        ctx->GetPredication(&pred, &value);
+        if (pred) ctx->SetPredication(nullptr, FALSE);
+    }
+    void end() {   // Idempotent: a second call (the destructor's) finds nothing to hand back.
+        if (!pred) return;
+        ctx->SetPredication(pred, value);
+        pred->Release();
+        pred = nullptr;
     }
 };
 
@@ -5182,6 +6659,34 @@ struct KhOmSave {
         }
         KH_SAFE_RELEASE(dsv);
         uav_n = 0;
+    }
+};
+
+// KH_MESH_O1 - our mesh pixel shaders write a second output (SV_Target1, cb.hlsl KhMeshOut): the sorted tail's
+// dual-source blend operand there, 0 on every other draw, where slot 1 is unbound and it is dropped. A route that
+// draws them under the engine's binding opens this first: where the engine left a target past slot 0 or an OM UAV
+// bound, the route's draws get its slot-0 target alone (the same depth view) and the engine's whole set comes back
+// at the scope's end (the capture's destructor) - so nothing of ours lands in an engine target past slot 0. The
+// common binding (one target, no UAV) is left as it is, at the cost of the capture's two reads.
+struct KhOmSlot0 {
+    KhOmSave save;
+    void open(ID3D11DeviceContext* ctx) {
+        save.capture(ctx);
+        bool khos_more = save.uav_n != 0;
+        for (UINT khos_k = 1; khos_k < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++khos_k) {
+            if (save.rtv[khos_k]) khos_more = true;
+        }
+        if (!khos_more) {
+            save.release();   // Nothing to put back.
+            return;
+        }
+        ctx->OMSetRenderTargets(1, &save.rtv[0], save.dsv);
+    }
+    // The engine's set back now (where open changed it) - for a route that drops its own hook exclusion
+    // (g_ro.in_injection) by hand before its scope ends, so the hooks never see the restore as the engine's bind.
+    void close(ID3D11DeviceContext* ctx) {
+        if (save.armed) save.restore(ctx);
+        save.release();
     }
 };
 
@@ -5291,8 +6796,9 @@ static int                   g_thm_split = KH_THM_SPLIT_SMOOTH;
 // it). The builder waits while it is set, so the grid is frozen until the
 // upload's last read.
 static std::atomic<bool>     g_thm_dirty{ false };
-// Live texture usable. Written by kh_thm_upload_body (flush_locked: the render thread or a park) and by the
-// device release (kh_thm_device_lost); read by the drawers on those same threads.
+// Live texture usable. Written by kh_thm_upload_body (flush_locked's housekeeping: the render thread or a park) and
+// by the device release (kh_thm_device_lost); read by the drawers on those same threads, and by KH_FX_LATE's
+// chain-only flush (kh_fill_occ), which may be the game thread's inside a resolve the engine issues there.
 static std::atomic<bool>     g_thm_valid{ false };
 // KH_THM_DEVRESET: a Resources::release dropped a live heightfield texture (render thread, or the game thread
 // under the graphics lock). kh_thm_autobuild_step (game thread) turns it into a g_thm_dirty raise once the grid is
@@ -5306,6 +6812,8 @@ struct ReorderState {
     bool in_injection = false;   // Our own draws in flight: bypass tracking.
     bool blend_translucent = false;   // Current blend state alpha-blends.
     bool dss_nowrite = false;   // Current dss tests but does not write depth.
+    bool dss_write = true;   // Current dss tests and really writes depth (DepthEnable, mask ALL).
+    bool dss_stencil = false;   // Current dss tests stencil (StencilEnable).
     bool dsv_main = false;   // The main scene depth is bound.
     uint32_t opaque_draws = 0;   // Opaque main-scene draws since the last main depth clear.
     uint32_t inject_attempts = 0;   // Injection attempts this scene frame (retry bound).
@@ -5345,13 +6853,17 @@ static ReorderState g_ro;
 // thread at kh_uvs_upload's end - which declare it ahead of their StateBackup
 // so that it unwinds after the restore), flush_ui_frame's lock path
 // (KH_PARK_INJ, as the parked flush), the seam footprint's step
-// (kh_volume_seam_inject), the mirror patch's fast-path upload
+// (kh_volume_seam_inject) and the volume replay's (kh_rp_replay,
+// KH_RP_PRESYNC), the mirror patch's fast-path upload
 // (kh_vmir_patch_b2, KH_VMIR_FAST_OWN), the mirror re-issue's two OM
 // binds (kh_vmir_begin / kh_vmir_end, KH_VMIR_OM_OWN), and KH_VM_SEE's
 // snapshot (kh_vmsee_snapshot, ahead of its StateBackup) and transmittance
 // re-issue's OM binds (kh_vmsee_t_begin / kh_vmsee_t_end), and KH_STEP_OWN_FLAG's
 // steps: the cast fire's and its two repicks (mask_cast_engine) and the
-// skin-cull catch-up (kh_skin_cull_catchup).
+// skin-cull catch-up (kh_skin_cull_catchup), and KH_WSEE's capture, B2 moment
+// and D3 resolve (kh_wsee_snapshot, kh_wsee_b2_take, kh_wsee_d3m_resolve, ahead
+// of their saves), its re-issues' binds (kh_wsee_re_set, kh_wsee_re_restore)
+// and the one pass (kh_psb_post).
 struct KhInjectionFlagScope {
     bool khif_prev;
     KhInjectionFlagScope() : khif_prev(g_ro.in_injection) {}
@@ -5467,9 +6979,7 @@ struct LiveShadowState {
         int      stage_pool = -1;   // Claimed back buffer (-1 = none).
     };
     BandSlot band[8];   // All 8 engine cascades: full-range receive.
-    uint64_t band_captures = 0;
     bool     stage_any = false;   // Cheap per-draw gate for the commit.
-    uint64_t band_bail_slot = 0;   // Both slots hold nearer bands.
     bool resolve_seen_since_cast = false;
     bool view_published_this_frame = false;   // Dual gate for the cast arm.
     float last_publish_rot_err = 1.0f;   // rot agreement of the last accepted publish.
@@ -5519,8 +7029,11 @@ static float g_shadow_map_strength = 1.0f;   // 0 disables the map term.
 static float g_shadow_map_bias = 0.0015f;   // In the transform's depth units.
 static float g_shadow_map_sign = 1.0f;   // +1 standard depth, -1 reversed.
 // Private sun-depth map state (written by the render thread's pass, read by the
-// flush). vp/bias/bounds mean something only while valid; both flags reset at
-// the main depth clear.
+// flush). vp/bias/bounds mean something only while valid. The frame flag resets
+// at the main depth clear (and wherever a pass re-opens the ladder: the cast
+// fire's repicks, KH_SUN_RESTEP, KH_SUN_GEN, the resets); validity persists
+// across cycles (the input-hash skip reuses the standing map) and drops only
+// where render_sun_depth, kh_sun_ladder_forget or the session reset drops it.
 static bool  g_sun_map_rendered_frame = false;   // This frame's pass already ran.
 static bool  g_sun_map_valid = false;   // Pass produced a usable map.
 static float g_sun_map_render_time = -1.0f;   // Not reset by sub-settle sun wobble.
@@ -5669,7 +7182,6 @@ struct DynLightsState {
     float    view_cols[12] = {};   // 3 float4 view columns.
     bool     view_valid = false;
     float    cam[3] = {};   // Capture camera (engine axes).
-    uint64_t stamp_ms = 0;
     uint64_t hash = 0;
     // Staging machinery (render thread only).
     ID3D11Buffer* staging[2] = {};
@@ -5827,8 +7339,9 @@ static bool     g_khlt_lp_ok = false;
 // localization mask (cb.hlsl KhFxFinish) is 0 wherever the point KhWorldPosRelFenced rebuilds from the depth
 // lies outside the volume and its falloff - a box of half extents max(r, 0.01) x (1 + max(falloff lane,
 // 0.001)) about the centre, the ellipsoid inside it - and every such point lies inside the four side planes of
-// the matrix the pass's inverse inverts: a pixel centre is inside the viewport and its depth (>= 1 m, the
-// encode pair the matrix itself carries) in front of the camera. Outside one side plane, then, the mask is 0 at
+// the matrix the pass's inverse inverts: a pixel centre is inside the viewport and its depth (> 0: KH_NEAR_RECON's
+// 1 mm floor, through the encode pair the matrix itself carries) in front of the camera.
+// Outside one side plane, then, the mask is 0 at
 // every pixel and the pass leaves the picture as it was (KH_LOCAL_BLEND: under every blend), so it is skipped
 // as a zero-opacity pass is, with that skip's two side effects: the passes either side of it may fuse (one
 // rounding to the scene's 16F format fewer) and, every pass skipped, the target keeps the engine's alpha.
@@ -5862,6 +7375,10 @@ inline const float* kh_shadow_sun();
 inline bool kh_sun_axis_witnessed();
 inline bool kh_adopt_frame_view(RVExtBridge::ProjectionViewTransform& pv);
 inline bool kh_vmsee_valid();
+inline bool kh_wsee_valid();   // KH_WSEE.
+inline bool kh_wsee_ensure(ID3D11Device* dev);
+inline bool kh_wsee_d3m_resolve(ID3D11DeviceContext* ctx, uint64_t khdr_c);   // KH_WSEE_OQ2.
+inline void kh_psv_own(int khpo_slot, const void* khpo_bc, SIZE_T khpo_n, ID3D11PixelShader* khpo_ps);   // KH_PSV.
 
 }
 
@@ -5886,6 +7403,7 @@ inline void reset_stat_counters() {
     g_stats = RenderStats{};
     g_attach_repaired.store(0, std::memory_order_relaxed);   // KH_ATTACH_DIAG.
     g_rp_c = KhRpCounters();   // KH_VOL_REPLAY.
+    kh_wsee_gput_zero_pub();   // KH_WSEE_GPUT: "wseeGpu" (frames in flight stay the clear's to read or drop).
     g_gid_breaks = 0;   // KH_GTS_IDENTITY.
     g_rtp_c = KhRtpCounters();   // KH_RT_PAINT_READ.
     g_attach_refused.store(0, std::memory_order_relaxed);
@@ -5946,6 +7464,62 @@ inline void kh_session_scratch_reset() {
     g_vmsee_snap_cycle = ~0ull;
     g_vmsee_ok_cycle.store(~0ull, std::memory_order_relaxed);
     g_vmsee_pending = false;
+    g_wsee_want_cycle.store(~0ull, std::memory_order_relaxed);   // KH_WSEE: likewise.
+    g_wsee_col_want_cycle.store(~0ull, std::memory_order_relaxed);   // KH_WSEE_BWANT.
+    g_wsee_col_cycle.store(~0ull, std::memory_order_relaxed);
+    g_wsee_ok_cycle.store(~0ull, std::memory_order_relaxed);
+    g_wsee_taint_cycle.store(~0ull, std::memory_order_relaxed);
+    g_wsee_used_cycle.store(~0ull, std::memory_order_relaxed);
+    g_wsee_snap_cycle = ~0ull;
+    g_wsee_on = false;
+    g_wsee_pending = KH_WSEE_RE_NONE;
+    g_wsee_pending_post = false;
+    g_wsee_pd_vp_ok = false;   // The pre-draw's kept viewports are no draw's.
+    g_wsee_b2_cycle.store(~0ull, std::memory_order_relaxed);
+    g_wsee_b2_try = ~0ull;
+    g_wsee_waste_n = 0;   // KH_WSEE: the back-off restarts with the cycle counter.
+    g_wsee_backoff_end = 0;
+    g_wsee_flap_prev = -1;   // KH_WSEE_FLAP.
+    g_wsee_flap_win_start = 0;
+    g_wsee_flap_n = 0;
+    g_wsee_flushw_cycle.store(~0ull, std::memory_order_relaxed);   // KH_WSEE_FLUSHW_PRED.
+    g_wsee_flushw_off.store(~0ull, std::memory_order_relaxed);
+    g_wsee_flushw_probe = 0u;
+    g_wsee_flushw_hold = false;
+    g_wsee_opq_n = 0;   // The late-opaque cap's count.
+    g_wsee_inj_elig = false;   // The capture gate's eligibility.
+    g_wsee_cyc_layer = false;   // The cycle's layer-depth verdict.
+    g_wsee_ld_cycle.store(~0ull, std::memory_order_relaxed);
+    g_wsee_ld_far_ok = false;
+    g_wsee_ld_far_lo = 0.0f;   // The range D's raw was computed in (read under g_wsee_ld_far_ok only).
+    g_wsee_ld_far_hi = 1.0f;
+    g_psb_cycle.store(~0ull, std::memory_order_relaxed);   // KH_PSB: the one pass's record and the old one's stamp.
+    g_psb_drew_cycle.store(~0ull, std::memory_order_relaxed);
+    g_psb_zb_cycle.store(~0ull, std::memory_order_relaxed);   // KH_PSB_ZB: no Zb, its guard's state unknown.
+    g_psb_zb_gen = 0u;
+    g_psb_zb_far = true;
+    g_psa_cycle.store(~0ull, std::memory_order_relaxed);
+    g_psa_tp_cycle.store(~0ull, std::memory_order_relaxed);   // KH_PSB_TPA.
+    g_psb_far_raw = 1.0f;
+    g_wsee_od_cycle.store(~0ull, std::memory_order_relaxed);   // The cycle whose capture filled D3.
+    g_wsee_d3_sync_cycle.store(~0ull, std::memory_order_relaxed);   // KH_WSEE_OQ.
+    g_wsee_d3m_cycle.store(~0ull, std::memory_order_relaxed);   // KH_WSEE_OQ2.
+    g_wsee_nopre_cycle.store(~0ull, std::memory_order_relaxed);   // KH_WSEE_NOPRE: the skipped and the S2 cycles.
+    g_wsee_s2_cycle.store(~0ull, std::memory_order_relaxed);
+    g_wsee_defer_cycle = ~0ull;   // The deferral record and its back-off.
+    g_wsee_defer_objs.clear();
+    g_wsee_hold.clear();
+    // The per-mesh run cache and the plan scratch - kh_wsee_hold_drop clears them too, at the next session's first
+    // clear; the reset leaves nothing to that frame.
+    g_wsee_spans.clear();
+    g_wsee_run_plan.clear();
+    g_wsee_hold_used = 0u;
+    g_wsee_hold_cycle = ~0ull;
+    g_wsee_hold_copy_cycle = ~0ull;   // KH_WSEE_HOLD_IDLE_COPY.
+    g_wsee_defer_taken = ~0ull;
+    g_wsee_defer_drawn = ~0ull;
+    g_wsee_defer_back = 0;
+    g_wsee_opq_cycle = ~0ull;
     g_rp_withheld_seq = ~0ull;
     g_rp_front_seq = ~0ull;
     g_rp_eng_seq = ~0ull;
@@ -5990,8 +7564,6 @@ inline void kh_session_scratch_reset() {
     g_khlt_step_ring_i = 0;
     g_khlt_lp_ok = false;
     g_khlt_ref_ok = false;
-    g_ls.band_captures = 0;
-    g_ls.band_bail_slot = 0;
 }
 
 // KH_SESSION_RESET - every namespace-scope global of the renderer's three headers back to its
@@ -6004,7 +7576,8 @@ inline void kh_session_scratch_reset() {
 // synchronisation objects and thread records; the hook trampolines and install
 // records (the code patches stay in place for the process, pass-through while
 // disarmed); the shader pool (g_khsm_* / g_khsa_*: a detached worker may still
-// read them - its own shutdown owns them); the Draw3D / UI event-handler
+// read them - its own shutdown owns them) and its failure latch (g_khsc_fail:
+// kh_shader_mt_shutdown clears it); the Draw3D / UI event-handler
 // handles and the draw list (their own teardown, first); the attachment
 // table and the proxy pool with its key index (g_attach, g_pxy_pool,
 // g_pxy_pool_key: never destructed, emptied with the draw list at both
@@ -6014,7 +7587,9 @@ inline void kh_session_scratch_reset() {
 // g_mesh_publish_pending and g_mesh_cache_later_q (kh_mesh_release_session); the material pool
 // (kh_material_pool_reset keeps the pinned default); the cloth pool's records
 // (kh_cloth_workers_stop); the read-memo epoch (bumped, never reset); the presence memo's epoch
-// (g_dl_pres_epoch, KH_DL_PRES_MEMO: bumped, never reset - the session reset empties its table); the map
+// (g_dl_pres_epoch, KH_DL_PRES_MEMO: bumped, never reset - the session reset empties its table); the UI lane's
+// verdict serial (g_khfx_ui_serial, KH_FX_PAIR_HOLD: only its uniqueness is used) and the shader fail latch's
+// epoch (g_khsc_fail_epoch, KH_SHADER_FAIL_LATCH: bumped, never reset); the map
 // redirect (g_redir / g_redir_live / g_rbuf, KH_MAP_REDIRECT: a mapping in flight must reach its Unmap, which frees
 // its record; the cached buffers are the process's; g_wc_cached_src is raised and lowered around each capture); the
 // profiler's
@@ -6042,11 +7617,14 @@ inline void kh_session_scratch_reset() {
 // the upload scratch (written before every read); the hook install's
 // constant-buffer reuse verdict (g_rp_cbreuse_on: set where the hooks are
 // installed, as the install records); KH_VM_SEE's re-issue saves
-// (g_vmsee_sv_*: null outside one draw's kh_vmsee_t_begin / _end pair);
-// g_ui_frame_rtv / g_ui_ps_learn (kh_ui_mask_reset, below, releases and clears
-// them). Runs first in reset_session_state, after every device object is
-// released, so no COM pointer is dropped unreleased; the hand-written resets
-// below it still decide the values they set.
+// (g_vmsee_sv_*: null outside one draw's kh_vmsee_t_begin / _end pair) and KH_WSEE's (g_wsee_sv_*: likewise, its
+// kh_wsee_re_save / _restore pairs);
+// the KH_PSV blob store, its books and serial (g_psv_store, g_psv_books, g_psv_ser: the engine's shaders outlive every
+// mission - each blob goes at its shader's release, KH_PSV_TOMB);
+// g_ui_frame_rtv (kh_ui_mask_reset, below, releases it). Runs first in
+// reset_session_state, after every device object is released, so no COM
+// pointer is dropped unreleased; the hand-written resets below it still
+// decide the values they set.
 // KH_VOL_REPLAY, KH_MIR_REPLAY, KH_SEAM_WITHHOLD, KH_GTS_IDENTITY, KH_RT_PAINT_READ: every namespace-scope global of
 // these features
 // back to a fresh process's value (SESSION CLEAN SLATE). Idempotent: the GPU objects are released first (normally
@@ -6077,6 +7655,7 @@ inline void kh_rp_globals_reset() {
     g_rtp_c = KhRtpCounters();
     g_rtp_cyc = ~0ull;
     g_rtp_read_ser = 0;
+    kh_psv_device_lost();   // KH_PSV: the variants (g_res.release ran it already: idempotent).
 }
 inline void kh_session_globals_reset() {
     kh_rp_globals_reset();   // KH_VOL_REPLAY and its companions.
@@ -6117,7 +7696,6 @@ inline void kh_session_globals_reset() {
     g_ui_mask_injecting.store(false, std::memory_order_relaxed);
     g_kh_track_wanted.store(false, std::memory_order_relaxed);
     g_ui_frame_rtv_seq = 0;
-    g_ui_ps_learn_n = 0;
     kh_reinit(g_rain_vel);
     g_rain_phase = 0.0;
     kh_reinit(g_rain_prev_cam);
@@ -6162,6 +7740,7 @@ inline void kh_session_globals_reset() {
     kh_reinit(g_cast_key_scr);   // KH_SKIN_POOL: the pooled sorts' tie-break scratch.
     g_shader_cache_hits.store(0, std::memory_order_relaxed);
     g_shader_cache_misses.store(0, std::memory_order_relaxed);
+    g_khsc_trim_debt.store(KH_CACHE_SHADER_TRIM_SLACK, std::memory_order_relaxed);   // KH_CACHE_TRIM_THROTTLE.
     kh_reinit(g_physics_bvh);
     g_physics_bvh_frame = 0;
     kh_reinit(g_cloth);
@@ -6209,6 +7788,8 @@ inline void kh_session_globals_reset() {
     g_skin_pool_any = false;
     g_skin_so_failed.store(false, std::memory_order_relaxed);   // KH_SKIN_GPU.
     g_skin_so_retry_at = ~0ull;   // KH_SKIN_SO_RETRY.
+    g_skin_so_big_failed = false;   // KH_SKIN_SO_LAZY: the large class's latch.
+    g_skin_so_big_retry_at = ~0ull;
     g_skin_so_n.store(0, std::memory_order_relaxed);
     g_skin_cpu_n.store(0, std::memory_order_relaxed);
     g_skin_cull_n.store(0, std::memory_order_relaxed);   // KH_SKIN_CULL.
@@ -6224,6 +7805,7 @@ inline void kh_session_globals_reset() {
     kh_reinit(g_skin_rest_gpu);   // Its buffers went with kh_skin_release_all.
     kh_reinit(g_tex_pages);
     kh_reinit(g_tex_cache);
+    g_tex_warned.store(0, std::memory_order_relaxed);   // KH_TEX_WARN_CAP.
     kh_reinit(g_user_ps_cache);
     kh_reinit(g_user_req);
     kh_reinit(g_user_vtx_scan);   // KH_USER_VS.
@@ -6232,9 +7814,13 @@ inline void kh_session_globals_reset() {
     g_user_req_seen = 0;
     g_user_req_settle = 0;
     g_user_req_waits = 0;
+    g_user_pump_n = 0;   // KH_USER_REQ_IDLE: the stamps it is compared with went with the cache above.
     g_user_batch_own = false;
     kh_reinit(g_user_lut_cache);
     g_lod_proj_px = 0.0f;
+    g_lod_zoom = 1.0f;   // KH_LOD_ZOOM.
+    g_lod_inj_h = 0.0f;          // KH_LOD_PARK_KEEP.
+    g_lod_inj_cycle = ~0ull;
     kh_reinit(g_khmw_q);
     g_khmw_running = false;
     g_khmw_abort.store(false, std::memory_order_relaxed);
@@ -6273,7 +7859,9 @@ inline void kh_session_globals_reset() {
     g_khfx_cand_near = -1.0f;
     g_khfx_pair_ms = 0;
     g_khfx_verdict_serial = ~0ull;
+    g_khfx_verdict_cycle = ~0ull;   // KH_FX_PAIR_HOLD.
     g_khfx_verdict_held = false;
+    kh_reinit(g_khfx_in_pair);   // KH_FX_PAIR_KEY.
     g_vm_slice_live.store(false, std::memory_order_relaxed);
     g_vm_slice_known.store(false, std::memory_order_relaxed);   // KH_SHOW_INFRONT.
     g_vm_watch_cycle = false;
@@ -6370,7 +7958,6 @@ inline void kh_session_globals_reset() {
     g_blko_open_i = -1;
     kh_reinit(g_blko_open_amb);
     kh_reinit(g_blko_open_sun);
-    kh_reinit(g_blko_last);
     kh_reinit(g_blko_gen_amb);   // KH_DLSW_GEN_AMB.
     kh_reinit(g_blko_gen_sun);
     g_blko_gen_valid = false;
@@ -6429,6 +8016,10 @@ inline void kh_session_globals_reset() {
     g_shadow_map_bias = 0.0015f;
     g_shadow_map_sign = 1.0f;
     g_sun_map_rendered_frame = false;
+    g_sun_map_gen = 0;   // KH_SUN_GEN.
+    g_sun_gen_win_start = 0;   // KH_SUN_GEN_CAP.
+    g_sun_gen_win_n = 0;
+    g_sun_gen_hold_until = 0;
     g_sun_map_valid = false;
     g_sun_map_cam_anchor = false;
     g_sun_map_render_time = -1.0f;
@@ -6440,7 +8031,6 @@ inline void kh_session_globals_reset() {
     kh_reinit(g_sun_anchor_now);
     kh_reinit(g_sun_cam_now);   // KH_DLS_LOD_CAM.
     kh_reinit(g_sun_map_anchor);
-    kh_reinit(g_sun_cam_anchor);
     kh_reinit(g_sun_tier_anchor);
     kh_reinit(g_sun_tier_lat);   // KH_PCSS_CELL.
     g_vmir_w = 0;
@@ -6722,6 +8312,7 @@ inline void kh_session_globals_reset() {
     g_vm_prev_near = false;
     g_vm_pre_done = false;
     g_vm_col_done = false;
+    g_vm_pre_injected = false;   // KH_INFRONT_PRE_COL.
     g_vm_seam_done = false;
     g_vm_frame_valid = false;
     g_vm_frame_cycle = 0;
@@ -6735,6 +8326,8 @@ inline void kh_session_globals_reset() {
     g_vm_keep_m32 = 0.0f;
     g_vm_keep_ms = 0;
     kh_reinit(g_vm_meshes);
+    kh_infront_tail_release();   // KH_INFRONT: the deferred tail's held pair (released; the viewport is scratch).
+    kh_reinit(g_vm_tail_vp);
     g_inj_arb_prev_armed = false;
     g_dls_world_cycle = 0;
     g_fx_late_owed_cycle.store(~0ull, std::memory_order_relaxed);
@@ -6767,6 +8360,9 @@ inline void kh_session_globals_reset() {
 // (kh_session_teardown's clean path): the deferred destroy runs under the next
 // mission's objects, which these belong to.
 inline void kh_session_objects_reset() {
+    // KH_CACHE_SESSION_KEEP: the disk cache's files read or written from here on are the next session's own.
+    g_khmc_session_t0.store(std::filesystem::file_time_type::clock::now().time_since_epoch().count(),
+                            std::memory_order_relaxed);
     kh_reinit(g_scene);
     g_scene_unpub_min = 0xFFFFFFFFu;   // KH_LOD_BOUNDS.
     kh_reinit(g_scene_stage);
@@ -6932,7 +8528,8 @@ inline void reset_session_state() {
     g_khlt_ref_ok = false;
 
     g_khfx_pair_near = -1.0f; g_khfx_cand_near = -1.0f; g_khfx_pair_ms = 0;
-    g_khfx_verdict_serial = ~0ull; g_khfx_verdict_held = false;
+    g_khfx_verdict_serial = ~0ull; g_khfx_verdict_held = false; g_khfx_verdict_cycle = ~0ull;   // KH_FX_PAIR_HOLD.
+    g_khfx_in_pair[0] = g_khfx_in_pair[1] = 0.0f;   // KH_FX_PAIR_KEY.
     g_boundary_pv_valid = false;   // Session teardown: no stale cross-mission sample.
     g_boundary_t = -1.0f;
     g_carry_pending_serial.store(0, std::memory_order_relaxed);
@@ -7026,8 +8623,8 @@ inline void reset_retained_state() {
 // cloth / skin pool - nothing may run on after its data is gone), then every
 // device object and learned identity, the meshes (into the grave the resource
 // release frees), the instances, the caches (textures, user .hlsl, user .cube,
-// materials, asset paths), the shader pool (bounded wait, then detach - a job
-// inside D3DCompile cannot be killed), and last the session state, which puts
+// materials, asset paths), the shader pool (bounded wait - none for a user-shader batch, KH_USER_END_NOWAIT - then
+// detach: a job inside D3DCompile cannot be killed), and last the session state, which puts
 // every other global back to what a fresh process holds. khst_clean: no object
 // exists (rendering_integration_reset, after kh_mission_handles_reset). False
 // for kh_park_run's deferred destroy, which runs under the next mission's
@@ -7044,11 +8641,22 @@ inline void kh_session_teardown(bool khst_clean) {
     kh_skin_drop_all();    // KH_SKEL: likewise.
     kh_uvs_release_all();  // KH_USER_VS: likewise (the records hold nothing a mission outlives).
     kh_tex_cache_release();
+    // KH_USER_END_NOWAIT: a user-shader batch in flight (read before the release below clears g_user_batch_own; only
+    // one batch is ever live, so its workers are all the batch's). Its units are this mission's requests, which the
+    // release drops, and a material's unit is the builtin mesh shader with the file - tens of seconds of fxc - so the
+    // shutdown's bounded wait froze the game for all of its 5 s at the mission's end and the compile detached anyway
+    // (an effect's unit, about a second, ended inside the wait; detached, it ends during the next mission's start).
+    // Not waited for: detached at once. A unit it finishes still lands on disk (its bytecode in the memo too), and
+    // the next mission's first ensure holds every mesh on the white placeholder until it ends, as after a wait
+    // that ran out.
+    const bool khst_user_batch = g_user_batch_own && g_khsm_active;
     kh_user_shader_cache_release();
     kh_user_lut_cache_release();
     if (khst_clean) kh_material_pool_reset();
     RenderAssetDiscovery::clear_cache();
-    kh_shader_mt_shutdown();   // No worker may outlive a mission.
+    // A worker inside D3DCompile cannot be stopped: bounded wait (none for a user batch), then detached - it runs
+    // out its unit after the mission and exits (KH_SHADER_ORPHANS, g_khsm_orphans).
+    kh_shader_mt_shutdown(!khst_user_batch);
     g_vs_memo_epoch.fetch_add(1u, std::memory_order_relaxed);   // Every thread's read memo empties at its next read.
     if (khst_clean) {
         kh_session_objects_reset();
@@ -7090,6 +8698,7 @@ inline void kh_mission_handles_reset() {
 // detached shader worker lives).
 inline void rendering_integration_reset() {
     if (!kh_render_on()) return;   // KH_PLAYER_ONLY: nothing of this header ever started.
+    kh_psv_hook_ensure();   // KH_PSV: the CreatePixelShader hook, if the extension's load could not install it.
     bool khme_done = false;
     kh_mission_handles_reset();
 
@@ -7126,8 +8735,13 @@ inline void rendering_integration_reset() {
 // already killed our threads and nothing here may run: the five thread
 // objects (loader, cache writer, shader pool, cloth pool, skin pool) are
 // heap-leaked so
-// no static destructor can std::terminate on a still-joinable thread, which is
-// what makes that path safe without a call.
+// no static destructor can std::terminate on a still-joinable thread; and the
+// CRT still runs this DLL's static destructors after DllMain on that path, so
+// every Intercept event-handler handle (whose destructor runs an SQF command)
+// and every container of object references a quit without mission_ended
+// leaves full is heap-leaked too (KH_EXIT_STATICS). The plain code / game_value
+// statics left (as framework.hpp's) only drop a reference there, as on every
+// exit. That is what makes that path safe without a call.
 //
 // Unloading: our threads are alive and would return into unmapped code once
 // the DLL goes. Each is asked to stop, waited for briefly and terminated -
@@ -7135,8 +8749,11 @@ inline void rendering_integration_reset() {
 // kept for them (g_khsm_orphans). Under
 // the loader lock a worker that obeys cannot finish exiting (its thread detach
 // needs that lock), so every wait runs its budget out and every worker is
-// terminated; the stop request is what gets it out of our code first (a job
-// inside D3DCompile or a large cache write cannot be interrupted). The
+// terminated; the stop request is what gets it out of our code first (the
+// loader, the cache writer and the shader pool return before their next job,
+// KH_KHMW_ABORT_STOP; the cloth and skin pools after the jobs already queued,
+// below; a job inside D3DCompile or a large cache write cannot be
+// interrupted). The
 // framework's watchdog bounds the whole detach regardless.
 // No graphics lock (the render thread may never park again) and no device
 // release (a leaked COM reference at unload costs nothing; a context call
@@ -7187,6 +8804,7 @@ inline bool rendering_integration_is_initialized() {
 
 inline void rendering_integration_process_detach() {
     // Every hook is a pass-through from here and every demand gate reads off.
+    g_psv_cap_on.store(false, std::memory_order_relaxed);   // KH_PSV: the CreatePixelShader detour copies nothing.
     g_reorder_target_ctx.store(nullptr, std::memory_order_relaxed);
     g_kh_track_wanted.store(false, std::memory_order_relaxed);
     g_ls.wanted.store(false, std::memory_order_relaxed);

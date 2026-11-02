@@ -1,9 +1,7 @@
-// static.hlsl - concatenated after cb.hlsl into the static unit by C++ (no
-// #include). Any edit changes the unit's shader cache key.
+// static.hlsl - joined after cb.hlsl into the static unit by C++ (no #include); any edit changes its shader cache key.
 
-// Both entry points are wrappers over KhVsCore - the per-object one hands in
-// the CB lanes, the instanced one the record's at the stream's slot (t39).
-// Twin: VSComposite / VSCompositeInst.
+// Both entry points are wrappers over KhVsCore - the per-object one hands in the CB lanes, the instanced one the
+// record's at the stream's slot (t39). Twin: VSComposite / VSCompositeInst.
 VSOut VSMain(VSIn i)
 {
     VSOut o;
@@ -15,18 +13,16 @@ VSOut VSMain(VSIn i)
     KhObjLanesCb(o.iobj0, o.iobj1);   // KH_OBJBUF: the CB's per-object lanes.
 #if KH_TEXTURED
     o.uv = i.uv;
-    // Tangents are covariant (transform like positions, not normals): per-axis
-    // scale then the object rotation, renormalized. The handedness sign rides
-    // untouched in w.
+    // Tangents are covariant (transform like positions, not normals): per-axis scale then the object rotation,
+    // renormalized. The handedness sign rides untouched in w.
     o.tanw = float4(normalize(KhRotateR(i.tan.xyz * sizeAxes.xyz, khvR0, khvR1, khvR2)), i.tan.w);
     o.matIx = (uint)matCtl.x;   // KH_MAT_TABLE: the draw's entry.
 #endif
     return o;
 }
 
-// The bucket wrapper: the record at the lane's slot supplies what the CB
-// supplies above; the rebase-relative centre is the record centre minus the
-// pass camera (khPass), a correctly rounded float difference.
+// The bucket wrapper: the record at the lane's slot supplies what the CB supplies above; the rebase-relative centre is
+// the record centre minus the pass camera (khPass), a correctly rounded float difference.
 VSOut VSMainInst(VSIn i, VSInst n)
 {
     VSOut o;
@@ -52,22 +48,17 @@ VSOut VSMainInstSk(VSInstSk s)
 }
 
 #if KH_USER_VS
-// KH_USER_VS - the user vertex stage's one entry point: a material .hlsl's
-// KhUserVertex (it sits between cb.hlsl and this file) over every vertex of a
-// submesh, streamed out as the MeshVertex it came in as. C++ (kh_uvs_step)
-// draws the source buffer as a point list through this with stream output
-// bound and rasterisation off - kh_user_mat_vs names these four semantics in
-// this order, MeshVertex's lanes at offsets 0 / 12 / 24 / 32 - so every pass
-// then draws the deformed buffer with the vertex shader it always had.
-// The stored lanes are KhVsCore's, and this is its exact inverse: a position
-// in the object's box (KhVsCore multiplies it by the edge lengths, as they
-// are), a normal it divides by them (floored at 1e-12, its own KH_NRM_FLOOR), a
-// tangent the wrappers multiply by them. KhUserVertex sees the metric ones
-// and they are stored back the same way. A lane it did not change is handed
-// on bit for bit, so a vertex it leaves where it was matches its undeformed
-// neighbours exactly; an axis with no extent cannot be displaced along and
-// keeps the stored position. SV_VertexID restarts at 0 with every draw;
-// shadowMeta2.w is the run's first vertex.
+// KH_USER_VS - the user vertex stage's one entry point: a material .hlsl's KhUserVertex (it sits between cb.hlsl and
+// this file) over every vertex of a submesh, streamed out as the MeshVertex it came in as. C++ (kh_uvs_step) draws the
+// source buffer as a point list through this with stream output bound and rasterisation off - kh_user_mat_vs names
+// these four semantics in this order, MeshVertex's lanes at offsets 0 / 12 / 24 / 32 - so every pass then draws the
+// deformed buffer with the vertex shader it always had.
+// The stored lanes are KhVsCore's, and this is its exact inverse: a position in the object's box (KhVsCore multiplies
+// it by the edge lengths, as they are), a normal it divides by them (floored at 1e-12, its own KH_NRM_FLOOR), a tangent
+// the wrappers multiply by them. KhUserVertex sees the metric ones and they are stored back the same way. A lane it did
+// not change is handed on bit for bit, so a vertex it leaves where it was matches its undeformed neighbours exactly; an
+// axis with no extent cannot be displaced along and keeps the stored position. SV_VertexID restarts at 0 with every
+// draw; shadowMeta2.w is the run's first vertex.
 struct VSOutUserSo {
     float3 pos : POSITION;
     float3 nrm : NORMAL;
@@ -103,9 +94,8 @@ VSOutUserSo VSUserSo(VSIn i, uint khuv_vid : SV_VertexID)
 }
 #endif
 
-// The stencil-volume seam transport's instance stream: the sun ladder's own
-// lane (KhInstLane / VSInSun), so layout_sundepth binds both entry points
-// below. NORMAL is declared to keep that layout's slot-0 shape and is unread by
+// The stencil-volume seam transport's instance stream: the sun ladder's own lane (KhInstLane / VSInSun), so
+// layout_sundepth binds both entry points below. NORMAL is declared to keep that layout's slot-0 shape and is unread by
 // the mirror twin.
 struct VSInSeam {
     float3 pos : POSITION;
@@ -114,11 +104,9 @@ struct VSInSeam {
     float3 ilane : TEXCOORD5;
 };
 
-// Loop A's twin - the footprint into the engine's volume buffer. Same KhVsCore
-// and the same stenVol2.z = 3 remap as VSMain; only the lane source differs.
-// The rebase arm is khPass.w, NOT centerRel.w (never filled on an instanced
-// draw), so the C++ side must fill khPass for this pass or the absolute branch
-// is taken against a rebased viewProj.
+// Loop A's twin - the footprint into the engine's volume buffer. Same KhVsCore and the same stenVol2.z = 3 remap as
+// VSMain; only the lane source differs. The rebase arm is khPass.w, NOT centerRel.w (never filled on an instanced
+// draw), so the C++ side must fill khPass for this pass or the absolute branch is taken against a rebased viewProj.
 float4 VSSeamInst(VSInSeam i) : SV_Position
 {
     KhObjRec r = khObjs[i.islot];
@@ -145,17 +133,15 @@ float4 VSSeamInstSk(VSInstSk s) : SV_Position
     return VSSeamInst(KhSkSeam(s));
 }
 
-// KH_VOL_FOOT: the seam's footprint view distance (m) into its R32F mask, under
-// a MIN blend - the witness's record of where our surface stood when the
-// engine counted. SV_Position.w is the view distance the colour passes' own
+// KH_VOL_FOOT: the seam's footprint view distance (m) into its R32F mask, under a MIN blend - the witness's record of
+// where our surface stood when the engine counted. SV_Position.w is the view distance the colour passes' own
 // SV_Position.w carries, so the witness compares metres against metres.
 float4 PSSeamFoot(float4 khsf_pos : SV_Position) : SV_Target
 {
     return float4(khsf_pos.w, 0.0f, 0.0f, 0.0f);
 }
 
-// The sun-depth stream is the same lane the colour buckets use; the record
-// supplies centre, size and rotation.
+// The sun-depth stream is the same lane the colour buckets use; the record supplies centre, size and rotation.
 struct VSInSun {
     float3 pos : POSITION;
     float3 nrm : NORMAL;
@@ -164,11 +150,9 @@ struct VSInSun {
 };
 
 struct VSInMir { float3 pos : POSITION; };
-// The mirror prepass's clip transform, factored so the per-object entry and its
-// instanced twin cannot drift. Takes the position in the visible box's own
-// space, then rebuilds the projection with the near plane at 0.05 from the live
-// b2 low pair - deliberately NOT KhVsCore's stenVol2.z = 3 remap, which
-// recovers the engine's own z.
+// The mirror prepass's clip transform, factored so the per-object entry and its instanced twin cannot drift. Takes the
+// position in the visible box's own space, then rebuilds the projection with the near plane at 0.05 from the live b2
+// low pair - deliberately NOT KhVsCore's stenVol2.z = 3 remap, which recovers the engine's own z.
 float4 KhMirClip(float3 khmv_tp)
 {
     float4 khmv_c = mul(float4(khmv_tp, 1.0f), viewProj);
@@ -199,9 +183,8 @@ float4 VSMirror(VSInMir i) : SV_Position
     return KhMirClip((centerRel.w > 0.5f) ? (centerRel.xyz + khmv_l) : khmv_wp);
 }
 
-// Loop B's twin. KhRotate's rotated branch over the record's own rows
-// (kh_objrec_fill always writes rot0.w = 1 and identity rows for an unrotated
-// object).
+// Loop B's twin. KhRotate's rotated branch over the record's own rows (kh_objrec_fill always writes rot0.w = 1 and
+// identity rows for an unrotated object).
 float4 VSMirrorInst(VSInSeam i) : SV_Position
 {
     KhObjRec r = khObjs[i.islot];
@@ -219,9 +202,8 @@ float4 VSSunDepth(VSInSun i) : SV_Position
 {
     KhObjRec r = khObjs[i.islot];
     float3 lp = i.pos * r.size.xyz;
-    // KH_POS_RES: the centre against the anchor first (two world-scale values
-    // close together: a small, exact difference), then its residual and the
-    // turned vertex - no world-scale rounding reaches the map. The receivers'
+    // KH_POS_RES: the centre against the anchor first (two world-scale values close together: a small, exact
+    // difference), then its residual and the turned vertex - no world-scale rounding reaches the map. The receivers'
     // wrel (KhVsCore) is formed from small terms the same way.
     precise float3 khsu_c = (r.pos.xyz - sunOrigin.xyz) + r.res.xyz;
     float3 wr = khsu_c + (lp.x * r.rot0.xyz + lp.y * r.rot1.xyz + lp.z * r.rot2.xyz);
@@ -240,9 +222,8 @@ float4 VSSunDepthSk(VSInstSk s) : SV_Position
 }
 
 #if KH_TEXTURED
-// KH_CAST_ALPHA - alpha-aware casting, in the map. Both consumers of the
-// private sun-depth maps (the self kernels and PSMaskCast's world cast) read
-// the same texels, so alpha enters once, here.
+// KH_CAST_ALPHA - alpha-aware casting, in the map. Both consumers of the private sun-depth maps (the self kernels and
+// PSMaskCast's world cast) read the same texels, so alpha enters once, here.
 struct VSInSunA {
     float3 pos : POSITION;
     float3 nrm : NORMAL;
@@ -265,14 +246,11 @@ VSOutSunA VSSunDepthA(VSInSunA i)
     return o;
 }
 
-// KH_CAST_ALPHA: VSSunDepthA's per-object twin, for the depth maps' per-object
-// route (KH_SUN_OBJ, kh_sun_draw_obj_t: the union, the tiers and the light
-// faces without the instance stream or the record buffer): the object CB's
-// lanes, the position through the branch that route arms against the map's
-// origin (centerRel = centre - origin + KH_POS_RES, kh_fill_center_rel; the sun
-// anchor, or the light for a face) - KhVsCore's armed expression, so an alpha
-// caster lands on the texels VSMain puts an opaque one on - and the caster's
-// alpha in color.a. Feeds PSSunDepthA.
+// KH_CAST_ALPHA: VSSunDepthA's per-object twin, for the depth maps' per-object route (KH_SUN_OBJ, kh_sun_draw_obj_t:
+// the union, the tiers and the light faces without the instance stream or the record buffer): the object CB's lanes,
+// the position through the branch that route arms against the map's origin (centerRel = centre - origin + KH_POS_RES,
+// kh_fill_center_rel; the sun anchor, or the light for a face) - KhVsCore's armed expression, so an alpha caster lands
+// on the texels VSMain puts an opaque one on - and the caster's alpha in color.a. Feeds PSSunDepthA.
 VSOutSunA VSSunDepthAObj(VSIn i)
 {
     VSOutSunA o;
@@ -285,9 +263,8 @@ VSOutSunA VSSunDepthAObj(VSIn i)
     return o;
 }
 
-// 4x4 Bayer thresholds, (index + 0.5) / 16: every 4x4 window of map texels
-// covers the requested fraction to a sixteenth. Anchored to the map's texel
-// grid.
+// 4x4 Bayer thresholds, (index + 0.5) / 16: every 4x4 window of map texels covers the requested fraction to a
+// sixteenth. Anchored to the map's texel grid.
 float KhSunDither(float2 khsd_px)
 {
     static const float khsd_b[16] = { 0.0f, 8.0f, 2.0f, 10.0f, 12.0f, 4.0f, 14.0f, 6.0f,
@@ -305,23 +282,19 @@ void PSSunDepthA(VSOutSunA i)
     int khsa_mode = (int)matParams0.y;   // 0 opaque, 1 cutout, 2 blend (kh_bind_material).
     // The material's alpha by its own route (diffuse.a by default; 1 when no
     // map is bound), exactly the colour pass's sampling.
-    // KH_CAST_ALPHA_SKIP: KhMatRoute resolves through KhMatFetch, whose
-    // six-arm slot chain fxc hoists WHOLE (the slot is a StructuredBuffer lane,
-    // so it cannot prove it uniform and a filtered sample has no derivative in
-    // divergent flow) - one call is SIX filtered samples, as cb.hlsl's
-    // KH_MAT_GRAD note measured; KhMatRouteG (explicit gradients, a real
-    // branch) is one. An opaque material never reads the result, and a
-    // cast shader runs per casting fragment per TIER: up to five sun tiers and
-    // up to 48 dynamic-light face slices. Asking for it only where it is read
-    // is the same value on every path (1.758: a dead accumulation is still
-    // paid); the worst fxc can do with the guard is hoist the chain back to
-    // where it already is.
+    // KH_CAST_ALPHA_SKIP: KhMatRoute resolves through KhMatFetch, whose six-arm slot chain fxc hoists WHOLE (the slot
+    // is a StructuredBuffer lane, so it cannot prove it uniform and a filtered sample has no derivative in divergent
+    // flow) - one call is SIX filtered samples, as cb.hlsl's KH_MAT_GRAD note measured; KhMatRouteG (explicit
+    // gradients, a real branch) is one. An opaque material never reads the result, and a cast shader runs per casting
+    // fragment per TIER: up to five sun tiers and up to 48 dynamic-light face slices. Asking for it only where it is
+    // read is the same value on every path (a dead accumulation is still paid); the worst fxc can do with the
+    // guard is hoist the chain back to where it already is.
     float khsa_t = 1.0f;
     if (khsa_mode == 1 || khsa_mode == 2) khsa_t = KhMatRouteG(matParams3.y, 1.0f, khsa_uv, khsa_dx, khsa_dy);
     if (khsa_mode == 1) clip(khsa_t - matParams0.z);   // Cutout: the cutoff kills, survivors cast full.
     else if (khsa_mode == 2) {
-        // KH_CAST_BLEND_BRANCH: nested, not && - fxc evaluates both operands, so the texel chain ran for
-        // every opaque fragment too. Same verdict; KhMatRouteTexel is Loads only (no gradient).
+        // KH_CAST_BLEND_BRANCH: nested, not && - fxc evaluates both operands, so the texel chain would run for every
+        // opaque fragment too. Same verdict; KhMatRouteTexel is Loads only (no gradient).
         [branch] if (KhMatRouteTexel(matParams3.y, 1.0f, khsa_uv) < 0.9f) khsa_a *= khsa_t;
     }
     if (khsa_a >= 0.996f) return;                       // Solid.
@@ -329,39 +302,31 @@ void PSSunDepthA(VSOutSunA i)
     clip(khsa_a - KhSunDither(i.pos.xy));               // Partial: dithered coverage.
 }
 
-// The seam footprint carries depth-writing texels only: a translucent texel
-// writes no depth in the colour pass, so the engine's stencil count at its
-// pixel must be measured at what is behind it, or the ground behind the glass
-// inherits the glass's shadow. Whole translucent objects never reach it.
+// The seam footprint carries depth-writing texels only: a translucent texel writes no depth in the colour pass, so the
+// engine's stencil count at its pixel must be measured at what is behind it, or the ground behind the glass inherits
+// the glass's shadow. Whole translucent objects never reach it.
 void PSInjDepthA(VSOut i)
 {
     KhMatLoad(i.matIx);   // KH_MAT_TABLE.
     float2 khfa_dx, khfa_dy;   // KH_MAT_GRAD: the gradients at entry, in uniform flow (KH_UV_ANIM: KhMatUv's).
     const float2 khfa_uv = KhMatUv(i.uv, khfa_dx, khfa_dy);
     int khfa_mode = (int)matParams0.y;
-    // KH_CAST_ALPHA_SKIP (see PSSunDepthA): the filtered alpha is read by the
-    // cutout arm alone, so opaque and blend materials asked for six samples and
-    // threw the answer away.
+    // KH_CAST_ALPHA_SKIP (see PSSunDepthA): the filtered alpha is read by the cutout arm alone.
     if (khfa_mode == 1) clip(KhMatRouteG(matParams3.y, 1.0f, khfa_uv, khfa_dx, khfa_dy) - matParams0.z);
     // The colour pass's own verdict.
     else if (khfa_mode == 2) clip(KhMatRouteTexel(matParams3.y, 1.0f, khfa_uv) - 0.9f);
 }
 
-// The world pass's self-mask carries depth-writing texels only (the seam
-// footprint's rule): a cutout hole or a blend material's translucent texel
-// writes no depth, so the surface at its pixel is whatever is behind it and
-// must receive the dynamic-light shadow like the ground beside it. Survivors
-// write the view distance PSDlsMask writes (SV_Position.w is the clip w, the
-// quantity VSDlsMask stores). Second user: the seam's KH_VOL_FOOT mask draws
-// its alpha casters with it (a zero dither lane there), so it must keep
-// PSInjDepthA's clip - an edit here is an edit to that mask.
+// The world pass's self-mask carries depth-writing texels only (the seam footprint's rule): a cutout hole or a blend
+// material's translucent texel writes no depth, so the surface at its pixel is whatever is behind it and must receive
+// the dynamic-light shadow like the ground beside it. Survivors write the view distance PSDlsMask writes (SV_Position.w
+// is the clip w, the quantity VSDlsMask stores). Second user: the seam's KH_VOL_FOOT mask draws its alpha casters with
+// it (a zero dither lane there), so it must keep PSInjDepthA's clip - an edit here is an edit to that mask.
 float4 PSDlsMaskA(VSOut i) : SV_Target
 {
-    // The dlsw mask draws a fading level with the colour draw's own dither
-    // (KH_DLSW_MASK_DITHER), so the mask at a pixel is the level that pixel
-    // shows (a mask holding the union claims the world's pixels inside the
-    // hidden level's outline as ours). The seam's footprint mask draws one
-    // level with a zero lane: no cut.
+    // The dlsw mask draws a fading level with the colour draw's own dither (KH_DLSW_MASK_DITHER), so the mask at a
+    // pixel is the level that pixel shows (a mask holding the union claims the world's pixels inside the hidden level's
+    // outline as ours). The seam's footprint mask draws one level with a zero lane: no cut.
     KhMatLoad(i.matIx);   // KH_MAT_TABLE. Ahead of the cut, for KhMatUv's gradients (KH_UV_ANIM).
     float2 khma_dx, khma_dy;   // KH_MAT_GRAD: the gradients at entry, ahead of the cut, in uniform flow.
     const float2 khma_uv = KhMatUv(i.uv, khma_dx, khma_dy);
@@ -376,33 +341,26 @@ float4 PSDlsMaskA(VSOut i) : SV_Target
 }
 #endif
 
-// Analytic mask cast: per-pixel ray-vs-AABB toward the sun, drawn into the
-// engine's screen-space shadow mask with multiply blending. castMat[0..2].xyz
-// = the view's inverse rotation for KhCastWorld's row dots (cb.hlsl's lane
-// note); castView[0] = view row 3 (translation); castView[1] = (fov.x, fov.y,
-// maskW, maskH); castView[2] = sunDir.xyz + strength in w. Scene linear depth
-// at t0.
+// Analytic mask cast: per-pixel ray-vs-AABB toward the sun, drawn into the engine's screen-space shadow mask with
+// multiply blending. castMat[0..2].xyz = the view's inverse rotation for KhCastWorld's row dots (cb.hlsl's lane note);
+// castView[0] = view row 3 (translation); castView[1] = (fov.x, fov.y, maskW, maskH); castView[2] = sunDir.xyz +
+// strength in w. Scene linear depth at t0.
 Texture2D<float4> sceneDepthTex : register(t0);
 float KhSceneLoad(int2 p) { return sceneDepthTex.Load(int3(p, 0)).x; }
 
-// Pre-mesh scene colour capture (t3, single-sample) - the perceptual-composite
-// blend source for the flush mesh pass.
+// Pre-mesh scene colour capture (t3, single-sample) - the perceptual-composite blend source for the flush mesh pass.
 Texture2D<float4> sceneColorTex : register(t3);
-// Extended per-caster locality list (localityMeta.y arms): 2 float4 per caster,
-// [2i] center / [2i+1] half extents, engine axes - the uncapped twin of the
-// 16-pair CB list. Bound only at the mask cast fire.
+// Extended per-caster locality list (localityMeta.y arms): 2 float4 per caster, [2i] center / [2i+1] half extents,
+// engine axes - the uncapped twin of the 16-pair CB list. Bound only at the mask cast fire.
 StructuredBuffer<float4> khrLocalityExt : register(t2);
-// The caster-occupancy grid (KH_CAST_OCC): a cell holds the union of the
-// casters' stamped sweeps, so it refuses only points no caster's shadow
-// reaches - no shadow is lost. A superset of that truth, not of the loop's
-// lr-inflated reach (KhCastReach).
+// The caster-occupancy grid (KH_CAST_OCC): a cell holds the union of the casters' stamped sweeps, so it refuses only
+// points no caster's shadow reaches - no shadow is lost. A superset of that truth, not of the loop's lr-inflated reach
+// (KhCastReach).
 Texture2D<float2> khrCastOcc : register(t35);
 
-// The reach is a shadow, not a sphere: sweep the caster down-sun onto the
-// receiver's own height plane and test the segment (t0/t1 are where the
-// caster's base and top land at pw.y). lr is pure lateral slack.
-// SunShadowOcclusion answers 0 where no occluder stands, so this gate can only
-// cost ALU, never a wrong verdict.
+// The reach is a shadow, not a sphere: sweep the caster down-sun onto the receiver's own height plane and test the
+// segment (t0/t1 are where the caster's base and top land at pw.y). lr is pure lateral slack. SunShadowOcclusion
+// answers 0 where no occluder stands, so this gate can only cost ALU, never a wrong verdict.
  
 bool KhCastReach(float3 khcr_p, float3 khcr_c, float3 khcr_h, float khcr_lr)
 {
@@ -420,21 +378,21 @@ bool KhCastReach(float3 khcr_p, float3 khcr_c, float3 khcr_h, float khcr_lr)
     float2 khcr_r  = khcr_q - khcr_u * khcr_t;
     float2 khcr_d  = max(abs(khcr_r) - khcr_h.xz, 0.0f);
     if (dot(khcr_d, khcr_d) < khcr_lr * khcr_lr) return true;
-    // Superset contract: the sweep is not a superset of the sphere on its own
-    // (a receiver directly under a floating caster has t clamped to t0), and
-    // this gate may only ever add reach, never remove it. A false positive
-    // costs one SunShadowOcclusion that answers 0.
+    // Superset contract: the sweep is not a superset of the sphere on its own (a receiver directly under a floating
+    // caster has t clamped to t0), and this gate may only ever add reach, never remove it. A false positive costs one
+    // SunShadowOcclusion that answers 0.
     float3 khcr_ld = max(abs(khcr_p - khcr_c) - khcr_h, 0.0f);
     return dot(khcr_ld, khcr_ld) < khcr_lr * khcr_lr;
 }
 
-// The two-plane depth carries a far plane in .x and a near/witness plane in .y;
-// .x carries a constant z bias (relative error c/z), so .y is taken whenever it
-// is non-zero. One selector for every read site.
+// The cast depth at t0 (g_mask.cast_depth; the fire's frozen g_fire_lock) is single-channel - the adoption admits
+// one-channel formats alone ("a screen-sized single-channel float") - so .y loads 0 and the pick returns .x; the .y arm
+// matters only for a two-plane source. One selector for every cast-depth read site (KhCastZl, PSMaskCast); KhSceneLoad
+// is PSMain's guard read of the composite snapshot's .x, not a cast-depth read.
 float KhCastZPick(float4 khzp_t)
 {
 
-    return khzp_t.y > 0.0f ? khzp_t.y : khzp_t.x;                 // Live rule.
+    return khzp_t.y > 0.0f ? khzp_t.y : khzp_t.x;
 }
 float KhCastZl(float2 khcz_s, float2 khcz_dims)
 {
@@ -465,11 +423,9 @@ float4 PSMaskPrime(VSOut i) : SV_Target
     return float4(khpm_v, khpm_v, khpm_v, 1.0f);
 }
  
-// VSMirror overwrites z with its own conditional near plane, so its depth
-// cannot be read back. The mask is a single R32_FLOAT target holding the linear
-// view distance, in metres, of the nearest of our meshes at every pixel - the
-// same quantity KhCastZl returns for the world, so the comparison is metres
-// against metres.
+// VSMirror overwrites z with its own conditional near plane, so its depth cannot be read back. The mask is a single
+// R32_FLOAT target holding the linear view distance, in metres, of the nearest of our meshes at every pixel - the same
+// quantity KhCastZl returns for the world, so the comparison is metres against metres.
 struct VSOutDM { float4 pos : SV_Position; float dist : TEXCOORD0; };
 
 VSOutDM VSDlsMask(VSIn i)
@@ -482,8 +438,7 @@ VSOutDM VSDlsMask(VSIn i)
     float4 khdm_c = mul(float4(khdm_w, 1.0f), viewProj);
     VSOutDM o;
     o.pos = khdm_c;
-    // w of a perspective clip position is the view-space distance along the
-    // forward axis - the quantity KhCastZl returns for the world surface.
+    // Clip w: the view-space distance along the forward axis, the quantity KhCastZl returns for the world surface.
     o.dist = khdm_c.w;
     return o;
 }
@@ -494,10 +449,9 @@ float4 PSDlsMask(VSOutDM i) : SV_Target
     return float4(i.dist, 0.0f, 0.0f, 0.0f);
 }
 
-// The mask, read back by the world pass; the sentinel means no mesh covers it.
-// It carries our depth-writing texels only (an alpha caster is drawn through
-// PSDlsMaskA; an invisible or whole-translucent object is not drawn), so
-// 'nearer than the world' means 'our surface is what the eye sees here'.
+// The mask, read back by the world pass; the sentinel means no mesh covers it. It carries our depth-writing texels only
+// (an alpha caster is drawn through PSDlsMaskA; an invisible or whole-translucent object is not drawn), so 'nearer than
+// the world' means 'our surface is what the eye sees here'.
 Texture2D<float> khDlsMask : register(t37);
 // khmc_zl is the world surface's distance at the same pixel. Both are metres.
 float KhDlsMaskCov(float2 khmc_px, float khmc_w, float khmc_h, float khmc_zl)
@@ -520,38 +474,32 @@ float KhDlsMaskCov(float2 khmc_px, float khmc_w, float khmc_h, float khmc_zl)
     return khmc_n * (1.0f / 9.0f);
 }
 
-// One plane tap at a chosen pixel radius, for the two-baseline normal in
-// PSDlsWorld. Returns the two world-space central differences, or false when
-// any of the four taps is not a surface. Widening the stencil buys
-// signal-to-quantisation directly; the taps are refused rather than clamped
-// when one lands on sky or off the depth, and the caller keeps the 2x2 quad
-// derivative as the fallback (near a silhouette the narrow answer is the honest
-// one, told through khw_nrel).
+// KhDlswPlane (after KhDlswOneSided): one plane tap at a chosen pixel radius, for the two-baseline normal in PSDlsWorld
+// and PSMaskCast's snap. Returns the two world-space central differences, or false when any of the four taps is not a
+// surface or the stencil is not one plane (KH_DLSW_NRM_FLAT). Widening the stencil buys signal-to-quantisation
+// directly; the taps are refused rather than clamped when one lands on sky or off the depth, and PSDlsWorld falls back
+// to the narrower fit, then KhDlswOneSided's one-sided difference, then the 2x2 quad derivative (khw_nrel stays 1 on
+// every fallback: only two standing fits lower it).
 static const float KH_DLSW_NRM_R = 3.0f;        // Base baseline, pixels.
-// The second-difference bound that decides whether the stencil is looking at
-// one surface. zl(+r) + zl(-r) - 2*zl is zero for a plane only where its depth
-// is linear across the stencil (along a direction of constant depth, or head
-// on); in general 1/zl, not zl, is affine in screen space, so the term also
-// grows with perspective curvature - distant grazing ground exceeds the bound
-// at the wide radius first. Such a fit is refused like a broken one, and the
-// caller falls back as it does for one (PSDlsWorld to its narrower fit,
-// PSMaskCast's snap to the full band).
+// The second-difference bound that decides whether the stencil is looking at one surface. zl(+r) + zl(-r) - 2*zl is
+// zero for a plane only where its depth is linear across the stencil (along a direction of constant depth, or head on);
+// in general 1/zl, not zl, is affine in screen space, so the term also grows with perspective curvature - distant
+// grazing ground exceeds the bound at the wide radius first. Such a fit is refused like a broken one, and the caller
+// falls back as it does for one (PSDlsWorld to its narrower fit, PSMaskCast's snap to an unfitted point's tolerance:
+// the full band below the heightfield, KH_CAST_SNAP_ABOVE's above it).
 static const float KH_DLSW_NRM_FLAT = 0.02f;
 // The agreement floor for the two baselines: cos(8 deg) between two unit
 // normals; dimensionless, no knowledge of the quantisation step.
 static const float KH_DLSW_NRM_AGREE = 0.990f;
 
-// The normal at a depth discontinuity: a 2x2 quad derivative straddles the
-// cliff and returns a plane belonging to neither surface (refusing it
-// over-darkens a dark outline; trusting it draws a bright one). The centre
-// pixel belongs to exactly one surface; only the difference taken across the
-// cliff is ambiguous.
+// The normal at a depth discontinuity: a 2x2 quad derivative straddles the cliff and returns a plane belonging to
+// neither surface (refusing it over-darkens a dark outline; trusting it draws a bright one). The centre pixel belongs
+// to exactly one surface; only the difference taken across the cliff is ambiguous.
 bool KhDlswOneSided(float2 kho_px, float2 kho_dims, float kho_zc, float3 kho_w,
                     out float3 kho_dx, out float3 kho_dy)
 {
-    // KH_OUT_INIT: every path writes the outputs (fxc refuses a function that
-    // leaves an out parameter unset on one - X3508 - and PSDlsWorld with it);
-    // the caller reads them only on true. KhDlswPlane's form.
+    // KH_OUT_INIT: every path writes the outputs (fxc refuses a function that leaves an out parameter unset on one -
+    // X3508 - and PSDlsWorld with it); the caller reads them only on true. KhDlswPlane's form.
     kho_dx = float3(0.0f, 0.0f, 0.0f);
     kho_dy = float3(0.0f, 0.0f, 0.0f);
     const float kho_zpx = KhCastZl(kho_px + float2(1.0f, 0.0f), kho_dims);
@@ -564,9 +512,8 @@ bool KhDlswOneSided(float2 kho_px, float2 kho_dims, float kho_zc, float3 kho_w,
     const bool kho_vny = (kho_zny > 0.05f) && (kho_zny < 8000.0f);
     if (!(kho_vpx || kho_vnx) || !(kho_vpy || kho_vny)) return false;
 
-    // Keep the side whose depth is nearer the centre's - the side that did not
-    // cross the cliff. Signs are chosen so both differences still point along
-    // +x and +y.
+    // Keep the side whose depth is nearer the centre's - the side that did not cross the cliff. Signs are chosen so
+    // both differences still point along +x and +y.
     const bool kho_usex = kho_vpx && (!kho_vnx ||
                           abs(kho_zpx - kho_zc) <= abs(kho_znx - kho_zc));
     const bool kho_usey = kho_vpy && (!kho_vny ||
@@ -595,9 +542,8 @@ bool KhDlswPlane(float2 khp_px, float2 khp_dims, float khp_r, float khp_zc,
     if (!(khp_znx > 0.05f) || khp_znx > 8000.0f) return false;
     if (!(khp_zpy > 0.05f) || khp_zpy > 8000.0f) return false;
     if (!(khp_zny > 0.05f) || khp_zny > 8000.0f) return false;
-    // One surface, or none. A stencil straddling a silhouette fits a plane
-    // across the gap; refused, not clamped - the caller falls back to the
-    // narrowest measurement it has.
+    // One surface, or none. A stencil straddling a silhouette fits a plane across the gap; refused, not clamped - the
+    // caller falls back to the narrowest measurement it has.
     const float khp_cx = abs(khp_zpx + khp_znx - 2.0f * khp_zc);
     const float khp_cy = abs(khp_zpy + khp_zny - 2.0f * khp_zc);
     if (max(khp_cx, khp_cy) > KH_DLSW_NRM_FLAT * khp_zc) return false;
@@ -608,26 +554,18 @@ bool KhDlswPlane(float2 khp_px, float2 khp_dims, float khp_r, float khp_zc,
     return true;
 }
  
-// KH_DLS_WORLD - the world-receive pass for dynamic-light shadows. Fullscreen,
-// fired from the scene-resolve hook, emitting a MULTIPLY FACTOR under a
-// dest*src blend; the lighting arithmetic lives in KhDlsWorldFactor, this
-// shader turns a screen pixel into a world position and a normal. The depth is
-// the engine's own resolved linear depth (g_mask.cast_depth) and the view the
-// one kh_dls_world_pass hands it: the frame's, or - once this frame's first
-// cast fire has frozen the cast inputs (g_fire_lock_valid) - that fire's
-// frozen view, inverse and fov (PSMaskCast's, frozen because it paints at draw
-// 0, before this frame's depth exists; re-frozen at every frame's first fire).
-// Pairing the engine's depth with the view it was drawn under removes the
-// reprojection class. The normal is
-// reconstructed from the depth field (the engine is forward and exposes no
-// normal buffer); it is only ever used for an N.L term and KhDlsShadow's normal
-// offset, which degrade to a slightly wrong shade, not a wrong verdict, and the
-// factor is clamped to [0,1]. Every early exit returns 1.0, invisible under the
-// multiply.
-// The pass body, shared by PSDlsWorld (the multiply) and PSDlsWorldFog (its
-// dual-source form): returns the factor exactly as PSDlsWorld always has, and
-// the reconstructed world point and its view depth (khw_zo < 0 where the pixel
-// has none).
+// KH_DLS_WORLD - the world-receive pass for dynamic-light shadows. Fullscreen, fired from the scene-resolve hook,
+// emitting a MULTIPLY FACTOR under a dest*src blend; the lighting arithmetic lives in KhDlsWorldFactor, this shader
+// turns a screen pixel into a world position and a normal. The depth is the engine's own resolved linear depth
+// (g_mask.cast_depth) and the view the one kh_dls_world_pass hands it: the frame's, or - once this frame's first cast
+// fire has frozen the cast inputs (g_fire_lock_valid) - that fire's frozen view, inverse and fov (PSMaskCast's, frozen
+// because it paints at draw 0, before this frame's depth exists; re-frozen at every frame's first fire). Pairing the
+// engine's depth with the view it was drawn under removes the reprojection class. The normal is reconstructed from the
+// depth field (the engine is forward and exposes no normal buffer); it is only ever used for an N.L term and
+// KhDlsShadow's normal offset, which degrade to a slightly wrong shade, not a wrong verdict, and the factor is clamped
+// to [0,1]. Every early exit returns 1.0, invisible under the multiply.
+// The pass body, shared by PSDlsWorld (the multiply) and PSDlsWorldFog (its dual-source form): returns PSDlsWorld's
+// factor, and the reconstructed world point and its view depth (khw_zo < 0 where the pixel has none).
 float4 KhDlsWorldMain(VSOut i, out float3 khw_wo, out float khw_zo)
 {
     khw_wo = float3(0.0f, 0.0f, 0.0f);
@@ -636,31 +574,25 @@ float4 KhDlsWorldMain(VSOut i, out float3 khw_wo, out float khw_zo)
     if (khw_dims.x < 2.0f || khw_dims.y < 2.0f) return float4(1.0f, 1.0f, 1.0f, 1.0f);
     const float khw_zl = KhCastZl(i.pos.xy, khw_dims);
     const float3 khw_w = KhCastWorld(i.pos.xy, khw_dims, khw_zl);
-    // KH_DLSW_GRAD: the reconstructed point's screen gradients, taken here -
-    // before every per-pixel exit (the depth check, the range fade, the reach
-    // test, the normal's refusal, the mask's coverage), so no lane of the quad
-    // has left: the normal's fallback and the light loop's footprint
-    // (KhDlsWorldFactor's khw_fwp) read them. A pixel the depth check turns away
-    // still lends its point to its neighbours' gradients, as a helper lane would.
+    // KH_DLSW_GRAD: the reconstructed point's screen gradients, taken here - before every per-pixel exit (the depth
+    // check, the range fade, the reach test, the normal's refusal, the mask's coverage), so no lane of the quad has
+    // left: the normal's fallback and the light loop's footprint (KhDlsWorldFactor's khw_fwp) read them. A pixel the
+    // depth check turns away still lends its point to its neighbours' gradients, as a helper lane would.
     const float3 khw_gx = ddx(khw_w);
     const float3 khw_gy = ddy(khw_w);
     if (!(khw_zl > 0.05f) || khw_zl > 8000.0f) return float4(1.0f, 1.0f, 1.0f, 1.0f);
     khw_wo = khw_w;
     khw_zo = khw_zl;
 
-    // KhCastWorld builds v = (ndc.x*fovx, ndc.y*fovy, 1) * zl, so inside a
-    // quantisation plateau zl is constant across the quad and the reconstructed
-    // surface is the plane z = const in view space. Sampling the plane over
-    // KH_DLSW_NRM_R pixels instead of one improves the signal-to-quantisation
-    // ratio by that factor with no assumption about the step's size. On a
-    // resolved surface the two baselines agree; on a staircase they do not.
+    // KhCastWorld builds v = (ndc.x*fovx, ndc.y*fovy, 1) * zl, so inside a quantisation plateau zl is constant across
+    // the quad and the reconstructed surface is the plane z = const in view space. Sampling the plane over
+    // KH_DLSW_NRM_R pixels instead of one improves the signal-to-quantisation ratio by that factor with no assumption
+    // about the step's size. On a resolved surface the two baselines agree; on a staircase they do not.
  
-    // The fullscreen pass stops paying for pixels no light can reach:
-    // KhDlsFaceUV refuses every receiver whose face-axis depth is at or past
-    // that light's far plane. A cube face's axis depth is at least |p| /
-    // sqrt(3); a spot's is its depth along the spot axis, and its frustum's
-    // corners (|x|, |y| <= t z, t = 1 / the length of dlsSpotVP's column x)
-    // reach |p| = far sqrt(1 + 2 t^2). KH_DLSW_SPOT_REACH, TWIN kh_dls_shade_k.
+    // The fullscreen pass stops paying for pixels no light can reach: KhDlsFaceUV refuses every receiver whose
+    // face-axis depth is at or past that light's far plane. A cube face's axis depth is at least |p| / sqrt(3); a
+    // spot's is its depth along the spot axis, and its frustum's corners (|x|, |y| <= t z, t = 1 / the length of
+    // dlsSpotVP's column x) reach |p| = far sqrt(1 + 2 t^2). KH_DLSW_SPOT_REACH, TWIN kh_dls_shade_k.
     if (dlCtl.x >= 2.5f) {
         // The range fade, one step earlier.
         if (dlsRange.w > 0.0f) {
@@ -692,11 +624,9 @@ float4 KhDlsWorldMain(VSOut i, out float3 khw_wo, out float khw_zo)
     float khw_nrel = 1.0f;
 
     {
-        // Two baselines: the taps are central differences, so each spans 2R
-        // pixels of depth signal against one quantisation step. A failed wide
-        // fit must not set khw_nrel to 0 outright: at a silhouette the facing
-        // prior (reasoned for grazing ground under a lamp) draws a dark
-        // outline.
+        // Two baselines: the taps are central differences, so each spans 2R pixels of depth signal against one
+        // quantisation step. A failed wide fit must not set khw_nrel to 0 outright: at a silhouette the facing prior
+        // (reasoned for grazing ground under a lamp) draws a dark outline.
         const float khw_r1 = KH_DLSW_NRM_R;
         const float khw_r2 = KH_DLSW_NRM_R * 2.0f;
         float3 khw_ax, khw_ay, khw_bx, khw_by;
@@ -712,8 +642,7 @@ float4 KhDlsWorldMain(VSOut i, out float3 khw_wo, out float khw_zo)
             const float khw_l1 = length(khw_n1);
             const float khw_l2 = length(khw_n2);
             if (khw_l1 > 1e-12f && khw_l2 > 1e-12f) {
-                // Unsigned: the two planes may be wound oppositely without
-                // disagreeing about the surface they describe.
+                // Unsigned: the two planes may be wound oppositely without disagreeing about the surface they describe.
                 const float khw_ag = abs(dot(khw_n1 / khw_l1, khw_n2 / khw_l2));
                 khw_nrel = saturate((khw_ag - KH_DLSW_NRM_AGREE) /
                                     (1.0f - KH_DLSW_NRM_AGREE));
@@ -726,10 +655,9 @@ float4 KhDlsWorldMain(VSOut i, out float3 khw_wo, out float khw_zo)
             khw_dy = khw_ay;
             khw_nrel = 1.0f;
         } else {
-            // Broken inside R: a silhouette. The 2x2 quad derivative straddles
-            // it and belongs to neither surface (the pixel-wide outline); take
-            // the difference on the side that stays on the centre's own surface
-            // instead. Only if that fails too does the quad derivative stand.
+            // Broken inside R: a silhouette. The 2x2 quad derivative straddles it and belongs to neither surface (the
+            // pixel-wide outline); take the difference on the side that stays on the centre's own surface instead. Only
+            // if that fails too does the quad derivative stand.
             float3 khw_ox, khw_oy;
             if (KhDlswOneSided(i.pos.xy, khw_dims, khw_zl, khw_w, khw_ox, khw_oy)) {
                 khw_dx = khw_ox;
@@ -757,12 +685,10 @@ float4 KhDlsWorldMain(VSOut i, out float3 khw_wo, out float khw_zo)
     return float4(khw_f, 1.0f);
 }
 
-// KH_DLSW_DISCARD: a factor of exactly 1 leaves dest as it is under dest * src
-// (src * 0 + dest * 1 = dest for every finite or infinite dest, a NaN stays
-// NaN, -0.0 comes back +0.0), so the pixel is discarded instead of read and
-// written at every sample - dest kept bit-exact. Last statement: every
-// derivative (KH_DLSW_GRAD, the factor's) is taken before it; the pass binds no
-// depth or stencil test or write (dss_off), no coverage from alpha, RGB alone.
+// KH_DLSW_DISCARD: a factor of exactly 1 leaves dest as it is under dest * src (src * 0 + dest * 1 = dest for every
+// finite or infinite dest, a NaN stays NaN, -0.0 comes back +0.0), so the pixel is discarded instead of read and
+// written at every sample - dest kept bit-exact. Last statement: every derivative (KH_DLSW_GRAD, the factor's) is taken
+// before it; the pass binds no depth or stencil test or write (dss_off), no coverage from alpha, RGB alone.
 float4 PSDlsWorld(VSOut i) : SV_Target
 {
     float3 khw_w;
@@ -772,17 +698,13 @@ float4 PSDlsWorld(VSOut i) : SV_Target
     return khw_f;
 }
 
-// KH_DLSW_FOG. The engine's forward shaders fog every pixel before this pass
-// sees it: dest = T * L + (1 - T) * C (L the lit surface, T the transmittance,
-// C the fog colour). A plain multiply by the factor F darkens the fog along
-// with the light our meshes block; the correct result is T * L * F + (1 - T)
-// * C = dest * F + (1 - T) * C * (1 - F). Written as a dual-source blend: the
-// first target is the added term, the second the multiplier. T and C are the
-// mesh twins' own (PSMain / PSComposite's fog block, here as KhDlswFog) on
-// this cycle's fog lanes - the C++ copies them from this cycle's mesh frame
-// template or, on a cycle with none yet, fills them as the flush does
-// (KH_DLSW_FOG_FILL) - at the world point and view depth the pass
-// reconstructed; the camera is the reconstruction's (castView[2]).
+// KH_DLSW_FOG. The engine's forward shaders fog every pixel before this pass sees it: dest = T * L + (1 - T) * C (L the
+// lit surface, T the transmittance, C the fog colour). A plain multiply by the factor F darkens the fog along with the
+// light our meshes block; the correct result is T * L * F + (1 - T) * C = dest * F + (1 - T) * C * (1 - F). Written as
+// a dual-source blend: the first target is the added term, the second the multiplier. T and C are the mesh twins' own
+// (PSMain / PSComposite's fog block, here as KhDlswFog) on this cycle's fog lanes - the C++ copies them from this
+// cycle's mesh frame template or, on a cycle with none yet, fills them as the flush does (KH_DLSW_FOG_FILL) - at the
+// world point and view depth the pass reconstructed; the camera is the reconstruction's (castView[2]).
 float3 KhDlswFog(float distM, float3 khdf_wpos, float3 khdf_cam, out float trans)
 {
     float hgt = khdf_wpos.y;
@@ -876,12 +798,10 @@ KhDlswFogOut PSDlsWorldFog(VSOut i)
     if (all(khwf_o.mul.rgb == 1.0f) && all(khwf_o.add.rgb == 0.0f)) discard;
     return khwf_o;
 }
-// PSMaskCast's near_ok: is the point within some caster's shadow reach (the
-// occupancy grid's cell, else KhCastReach over the CB or t2 list, else the
-// combined bounds)? khno_ty widens every caster's y extent (and the grid's
-// y span) - 0 is the exact test; KH_CAST_PRE passes the snap band so the
-// answer holds for every point within it above or below khno_p. lr is
-// taken from the unwidened extents, as before.
+// PSMaskCast's near_ok: is the point within some caster's shadow reach (the occupancy grid's cell, else KhCastReach
+// over the CB or t2 list, else the combined bounds)? khno_ty widens every caster's y extent (and the grid's y span) - 0
+// is the exact test; KH_CAST_PRE passes the snap band so the answer holds for every point within it above or below
+// khno_p. lr is taken from the unwidened extents.
 bool KhCastNearOk(float3 khno_p, float khno_ty)
 {
     bool near_ok = false;
@@ -891,10 +811,9 @@ bool KhCastNearOk(float3 khno_p, float khno_ty)
         int lc = (int)localityMeta.x;
 
         if (castMat[0].w > 0.0f && localityMeta.w >= 1.0f) {
-            // Constant time in the caster count. The bound comes from the
-            // CB, not a literal, so it cannot drift from the C++ that sizes
-            // the texture; an unwritten lane (zero) leaves the grid unarmed
-            // and the t2 list below answers (kh_cast_scissor's twin gate).
+            // Constant time in the caster count. The bound comes from the CB, not a literal, so it cannot drift from
+            // the C++ that sizes the texture; an unwritten lane (zero) leaves the grid unarmed and the t2 list below
+            // answers (kh_cast_scissor's twin gate).
             int khoN = (int)localityMeta.w;
             int2 khoC = (int2)floor((khno_p.xz - float2(castMat[1].w, castMat[2].w)) * castMat[0].w);
             if (khoC.x >= 0 && khoC.y >= 0 && khoC.x < khoN && khoC.y < khoN) {
@@ -928,10 +847,9 @@ bool KhCastNearOk(float3 khno_p, float khno_ty)
     return near_ok;
 }
 
-// KH_CAST_SNAP_FACING (PSMaskCast): R16_FLOAT's relative ulp (2^-10), the
-// fallback when the fire's lane is unset; the plane fit's radius
-// (px); the resolution bar in ulps along the ray; the up-facing bar (|n.y|:
-// slopes up to 60 degrees are ground).
+// KH_CAST_SNAP_FACING (PSMaskCast): R16_FLOAT's relative ulp (2^-10), the fallback when the fire's lane is unset; the
+// plane fit's radius (px); the resolution bar in ulps along the ray; the up-facing bar (|n.y|: slopes up to 60 degrees
+// are ground).
 static const float KH_CAST_SNAP_ULP16 = 0.0009765625f;
 static const float KH_CAST_SNAP_R = 4.0f;
 static const float KH_CAST_SNAP_RES = 4.0f;
@@ -951,8 +869,7 @@ static const float KH_CAST_SNAP_ABOVE = 4.0f;
     bool khcNearOk = zl > 1.2f || castView[0].w >= 0.5f;
 
     if (!khcNearOk && zl > 0.05f) {
-        // Routed through the one selector (max(.x, .y) was a third plane rule;
-        // at mode 0 the .y plane is empty field-wide and the two coincide).
+        // The one plane rule (KhCastZPick), not max(.x, .y); the cast depth is single-channel (.y loads 0): they agree.
         float khcM0 = KhCastZPick(sceneDepthTex.Load(int3(int2(dw >> 2, dh >> 1), 0)));
         float khcM1 = KhCastZPick(sceneDepthTex.Load(int3(int2(dw >> 1, dh >> 2), 0)));
         float khcM2 = KhCastZPick(sceneDepthTex.Load(int3(int2((dw * 3) >> 2, (dh * 3) >> 2), 0)));
@@ -966,51 +883,37 @@ static const float KH_CAST_SNAP_ABOVE = 4.0f;
     float2 khrp_s = i.pos.xy;
     float3 pw = KhCastWorld(khrp_s, dimsM, zl);
 
-    // The terrain snap puts a receiver within thmMeta.z (KH_THM_BIAS_M, 0.35 m)
-    // of the heightfield onto it: the depth's quantisation moves a
-    // reconstructed ground point along the view ray, and our sun map has no
-    // terrain in it to absorb that, so an unsnapped ground shadow would crawl.
-    // KH_CAST_SNAP_ABOVE: a receiver ABOVE the heightfield is snapped only
-    // within KH_CAST_SNAP_ABOVE depth ulps carried along the ray, whatever it
-    // faces. Height alone cannot tell the ground from an engine surface lying
-    // on it (a prone body, a helmet, a low prop - within the band of the
-    // ground, which the heightfield follows), and snapped down such a surface
-    // went below every caster of ours lower than itself and took their shadow
-    // (a mesh under or inside it darkened it). Beyond the quantisation it keeps
-    // its own height, the ground above the heightfield included - noise at most
-    // one such ulp. Near the camera that is millimetres; far away the ulp grows
-    // and the whole band comes back. Below the heightfield the whole band holds.
-    // KH_CAST_SNAP_FACING: only the ground may be snapped. A wall, a plinth, a
-    // rock face or a vehicle side within that band is not the heightfield -
-    // flattened onto it, it received the shadow the ground at its foot
-    // receives, extruded straight up its face (the band of wrong shadow along
-    // every vertical surface near the ground). The surface is measured by the
-    // world pass's plane fit (KhDlswPlane) at KH_CAST_SNAP_R pixels: a 1-pixel
-    // step can sit below one quantum of a 16-bit depth, this baseline cannot,
-    // and the fit refuses a stencil that straddles an edge. A fitted plane whose
-    // two spans each exceed KH_CAST_SNAP_RES depth ulps carried along the ray
-    // and that faces sideways keeps its own height, snapped only within one
-    // such ulp (noise it could be); an up-facing plane, or none fitted, keeps
-    // the full band below the heightfield and KH_CAST_SNAP_ABOVE's tolerance
-    // above it. fogBelow.z = the ulp, relative (the fire's fill; 0 reads as
-    // R16_FLOAT's).
-    // KH_CAST_PRE: on the sun-map path the reach test runs first, here, at
-    // the unsnapped point with every y extent widened by the band the snap
-    // can move it (thmMeta.z, the snap's own guard). The exact test's grid
-    // and sphere tests are subsets of this one for every point within the
-    // band; its swept test is not strictly (the wider sweep moves the clamped
-    // t, and the box distance is not monotone in it for a diagonal sun), so a
-    // pixel can be refused here yet pass there - only where its box distance
-    // plus its overshoot past the sweep's end reaches lr (>= 5x the length of
-    // the caster's half extents): well outside the caster's swept box, which
-    // holds its shadow, so hit is unchanged in practice. Every later term only
-    // lowers hit, so the snap and the exact test run for the survivors alone.
-    // The slab path keeps its snap (it reads pw whole).
+    // The terrain snap puts a receiver within thmMeta.z (KH_THM_BIAS_M, 0.35 m) of the heightfield onto it: the depth's
+    // quantisation moves a reconstructed ground point along the view ray, and our sun map has no terrain in it to
+    // absorb that, so an unsnapped ground shadow would crawl.
+    // KH_CAST_SNAP_ABOVE: a receiver ABOVE the heightfield is snapped only within KH_CAST_SNAP_ABOVE depth ulps carried
+    // along the ray, whatever it faces. Height alone cannot tell the ground from an engine surface lying on it (a prone
+    // body, a helmet, a low prop - within the band of the ground, which the heightfield follows); snapped down, such a
+    // surface goes below every caster of ours lower than itself and takes their shadow (a mesh under or inside it
+    // darkens it). Beyond the quantisation it keeps its own height, the ground above the heightfield included - noise
+    // at most one such ulp: millimetres near the camera; far away the ulp grows and the whole band comes back. Below
+    // the heightfield the whole band holds.
+    // KH_CAST_SNAP_FACING: only the ground may be snapped. A wall, a plinth, a rock face or a vehicle side within that
+    // band, flattened onto the heightfield, receives the shadow the ground at its foot receives, extruded straight up
+    // its face (a band of wrong shadow along every vertical surface near the ground). The surface is
+    // measured by the world pass's plane fit (KhDlswPlane) at KH_CAST_SNAP_R pixels: a 1-pixel step can sit below one
+    // quantum of a 16-bit depth, this baseline cannot, and the fit refuses a stencil that straddles an edge. A fitted
+    // plane whose two spans each exceed KH_CAST_SNAP_RES depth ulps carried along the ray and that faces sideways keeps
+    // its own height, snapped only within one such ulp (noise it could be); an up-facing plane, or none fitted, keeps
+    // the full band below the heightfield and KH_CAST_SNAP_ABOVE's tolerance above it. fogBelow.z = the ulp, relative
+    // (the fire's fill; 0 reads as R16_FLOAT's).
+    // KH_CAST_PRE: on the sun-map path the reach test runs first, here, at the unsnapped point with every y extent
+    // widened by the band the snap can move it (thmMeta.z, the snap's own guard). The exact test's grid and sphere
+    // tests are subsets of this one for every point within the band; its swept test is not strictly (the wider sweep
+    // moves the clamped t, and the box distance is not monotone in it for a diagonal sun), so a pixel can be refused
+    // here yet pass there - only where its box distance plus its overshoot past the sweep's end reaches lr (>= 5x the
+    // length of the caster's half extents): well outside the caster's swept box, which holds its shadow, so hit is
+    // unchanged in practice. Every later term only lowers hit, so the snap and the exact test run for the survivors
+    // alone. The slab path keeps its snap (it reads pw whole).
     const bool khcOnMap = sunMeta.x >= 0.5f;
     const float khcPreTol = (thmParams.w >= 0.5f) ? thmMeta.z : 0.0f;
-    // KH_CAST_PRE_BRANCH: branches, not || / && / ?: - fxc evaluates every
-    // operand (no short circuit), so both caster walks ran on every pixel of
-    // the pass. Same verdicts; KhCastNearOk takes no gradient.
+    // KH_CAST_PRE_BRANCH: branches, not || / && / ?: - fxc evaluates every operand (no short circuit), so both caster
+    // walks would run on every pixel of the pass. Same verdicts; KhCastNearOk takes no gradient.
     bool khcPre = !khcOnMap;
     [branch] if (!khcPre && khcNearOk) khcPre = KhCastNearOk(pw, khcPreTol);
     if (thmParams.w >= 0.5f && khcPre) {
@@ -1038,23 +941,20 @@ static const float KH_CAST_SNAP_ABOVE = 4.0f;
         // KH_SUN_GRAD: the cast chain's gradients, here - past the snap, before
         // the per-pixel tests below (khcOnMap is a CB lane: uniform).
         const KhSunCastGrad khcG = KhSunCastGradAt(pw);
-        // KH_CAST_PRE: the exact test, survivors only (near_ok is false
-        // wherever the pre-test refused - see the snap).
+        // KH_CAST_PRE: the exact test, survivors only (near_ok is false wherever the pre-test refused - see the snap).
         bool near_ok = false;
         [branch] if (khcPre) near_ok = KhCastNearOk(pw, 0.0f);   // KH_CAST_PRE_BRANCH.
 
-        // zl floor 1.2 m: if the captured depth texture transiently holds
-        // aliased non-depth content (normalized values <= 1), every pixel
-        // reconstructs to ~the camera position and MIN-darkens the whole screen
-        // whenever the player stands near a caster.
+        // zl floor 1.2 m: if the captured depth texture transiently holds aliased non-depth content (normalized values
+        // <= 1), every pixel reconstructs to ~the camera position and MIN-darkens the whole screen whenever the player
+        // stands near a caster.
         if (near_ok && khcNearOk) {
             hit = SunShadowOcclusion(pw, khcG);   // Near floor: whole-texture verdict above.
-            // The fade is measured from the FROZEN fire camera (castMat *
-            // -castView[0]), the same view pw came from, not sunOrigin (this
-            // frame's camera): a frame of motion apart, the band moves under
-            // the shadows every frame.
+            // The fade is measured from the FROZEN fire camera (castMat * -castView[0]), the same view pw came from,
+            // not sunOrigin (this frame's camera): a frame of motion apart, the band moves under the shadows every
+            // frame.
             float3 khfc = castCam.xyz;   // KH_CB_DERIVED.
-            hit *= KhSunRangeFadeAt(pw, khfc);   // Range fade (at the helper).
+            hit *= KhSunRangeFadeAt(pw, khfc);
         }
 
     } else {
@@ -1074,19 +974,17 @@ static const float KH_CAST_SNAP_ABOVE = 4.0f;
         float tn = max(max(tmn.x, tmn.y), tmn.z);
         float tf = min(min(tmx.x, tmx.y), tmx.z);
 
-        // Locality clamp: a ground point can only be shadowed by a mesh within
-        // plausible shadow reach of it (a few diagonals stretched by sun
-        // elevation).
+        // Locality clamp: a ground point can only be shadowed by a mesh within plausible shadow reach of it (a few
+        // diagonals stretched by sun elevation).
         float castR = length(sizeAxes.xyz) * 0.5f;
         float reach = castR * (2.0f + 3.0f / max(abs(castView[2].y), 0.15f));
         float3 toCast = centerSize.xyz - pw;
         float near_enough = (dot(toCast, toCast) < reach * reach) ? 1.0f : 0.0f;
         hit = (tf >= max(tn, 0.05f) && khcNearOk && near_enough > 0.5f) ? 1.0f : 0.0f;   // Near floor: whole-texture
-                                                                                         // Verdict above.
+                                                                                         // verdict above.
     }
 
-    // Full occlusion here; the apply colours the shadow by the ambient floor
-    // (amb/(amb+sun)).
+    // Full occlusion here; the apply colours the shadow by the ambient floor (amb/(amb+sun)).
     float shade = 1.0f - hit * saturate(castView[2].w);
     return float4(shade, shade, shade, 1.0f);
 }
@@ -1119,18 +1017,13 @@ KhMeshOut PSMain(VSOut i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: two ou
 #if KH_TEXTURED
     khA2cCov = 0xFFFFFFFFu;   // KH_CUTOUT_A2C: every sample the raster covers, but a cutout's edge. TWIN: PSComposite.
 #endif
-    // TWO-SIDED: a back face is the other side of the same sheet, so it shades
-    // with the front's normal reversed. Every consumer below reads i.nrm or
-    // the mapped normal built from it (the N.L gate, the self-shadow bias, the
-    // lighting, the dynamic lights - on the textured route the gate, the
-    // lighting and the dynamic lights' N.L take the mapped one, their shadow
-    // lookup the geometric one, KH_DLS_GEOM_N), so reversing it here, with the
-    // tangent term the textured block reverses, is the whole
-    // fix. Front is the authored
-    // side: meshgen::bake and the importer wind every triangle to its normal,
-    // no rasterizer sets FrontCounterClockwise, and size is never negative.
-    // Without this a single sheet's back took the front's sun and, at N.V
-    // clamped to 0, a grazing Fresnel over its whole area. Twin: PSComposite.
+    // TWO-SIDED: a back face is the other side of the same sheet, so it shades with the front's normal reversed. Every
+    // consumer below reads i.nrm or the mapped normal built from it (on the textured route the N.L gate, the lighting
+    // and the dynamic lights' N.L take the mapped one; the self-shadow bias and the lights' shadow lookup the geometric
+    // one, KH_DLS_GEOM_N), so reversing it here, with the tangent term the textured block reverses, is the whole fix.
+    // Front is the authored side: meshgen::bake and the importer wind every triangle to its normal, no rasterizer sets
+    // FrontCounterClockwise, and size is never negative. Unreversed, a single sheet's back takes the front's sun and,
+    // at N.V clamped to 0, a grazing Fresnel over its whole area. Twin: PSComposite.
     const float khFs = khFront ? 1.0f : -1.0f;
     i.nrm *= khFs;
     KhObjLoad(i.iobj0, i.iobj1);   // KH_OBJBUF: the per-object lanes, per draw or per instance.
@@ -1139,19 +1032,15 @@ KhMeshOut PSMain(VSOut i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: two ou
     ClipOwnNear(i.pos.w);   // Our own near plane. Twin call.
     if (depthParams.y < -1.0e-3f &&
         depthParams.x + depthParams.y / max(i.pos.w, 1.0e-4f) > 1.0f) discard;
-    // Twin: PSMain / PSComposite / PSEffect. The shared tail below is kept as
-    // two copies on purpose: PSComposite interleaves KH_ARB_DEPTH blocks
-    // through it.
+    // Twin: PSMain / PSComposite / PSEffect. The shared tail below is kept as two copies on purpose: PSComposite
+    // interleaves KH_ARB_DEPTH blocks through it.
     if (khObjCut > 0.0f && i.pos.w > khObjCut) discard;
-    // Punch-through / overlay-occlusion guard, flush-path edition: the same
-    // contract as PSComposite's. When armed, t0 holds the single-sample depth
-    // snapshot, whose .x is the farthest sample (PSDepthResolve). World
-    // meshes draw only on a multisampled main depth (kh_fsaa_world_standdown),
-    // so this runs on MSAA frames: a pixel any sample leaves uncovered reads as
-    // the far clear and keeps the fragment. The flush arms it for DepthMode::Off
-    // solids alone, which draw with no hardware depth test, so nothing makes a
-    // per-sample cut: such a solid paints over up to a 1 px rim along the edges
-    // of nearer surfaces (accepted - see snapshot_composite_depth).
+    // Punch-through / overlay-occlusion guard, flush-path edition: the same contract as PSComposite's. When armed, t0
+    // holds the single-sample depth snapshot, whose .x is the farthest sample (PSDepthResolve). World meshes draw only
+    // on a multisampled main depth (kh_fsaa_world_standdown), so this runs on MSAA frames: a pixel any sample leaves
+    // uncovered reads as the far clear and keeps the fragment. The flush arms it for DepthMode::Off solids alone, which
+    // draw with no hardware depth test, so nothing makes a per-sample cut: such a solid paints over up to a 1 px rim
+    // along the edges of nearer surfaces (accepted - see snapshot_composite_depth).
     if (fxParams1.x < 1e8f) {
         int2 gpx = clamp(int2(i.pos.xy), int2(0, 0), int2((int)fxMeta.z - 1, (int)fxMeta.w - 1));
         // A raw depth at either clear value is no scene (PSComposite's sceneClear, PSDepthResolve's rule):
@@ -1162,8 +1051,7 @@ KhMeshOut PSMain(VSOut i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: two ou
         if (i.pos.w > sceneZ * (1.0f + fxParams1.y) + fxParams1.x) discard;
     }
 
-    // Analytic terrain lane (flush-path twin of PSComposite's, endpoint test
-    // included).
+    // Analytic terrain lane (flush-path twin of PSComposite's, endpoint test included).
     if (thmParams.w >= 0.5f) {
         float khtC = 2.0e9f;
         float khtHe = KhThmHeight(i.wpos.xz);
@@ -1189,25 +1077,21 @@ KhMeshOut PSMain(VSOut i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: two ou
 
     int bm = (int)sizeAxes.w;
 #if KH_TEXTURED
-    // Textured: sample below the far contract + guard blocks (the textured twin
-    // adds no return/discard above them), cutout-clip, then build the mapped
-    // shading normal. The mapped normal drives the sun N.L gate below
-    // (khShN); the self-shadow bias keeps the geometric one (khBiasN).
+    // Textured: sampled below the far contract and guard blocks (the textured twin adds no return / discard above
+    // them). The mapped normal drives the sun N.L gate (khShN); the geometric one drives the self-shadow bias
+    // (khBiasN).
     KhMatLoad(i.matIx);   // KH_MAT_TABLE: the lanes below read from the entry.
     float2 khtxDx, khtxDy;   // KH_UV_ANIM: the material's uv and its gradients (i.uv's, unanimated). TWIN.
     const float2 khtxUv = KhMatUv(i.uv, khtxDx, khtxDy);
     KhMatSurf khtxS = KhSampleMatG(khtxUv, khtxDx, khtxDy);
     // Cutout kill (KH_CUTOUT_A2C: alpha to coverage on a multisampled target, KhCutoutCover). TWIN: PSComposite.
     if (matParams0.y >= 0.5f && matParams0.y < 1.5f) khA2cCov &= KhCutoutCover(khtxS.alpha);   // KH_A2C_AND.
-    // Opaque alpha contract: sampled alpha never reaches the blend on the
-    // opaque and cutout modes - survivors draw at alpha 1. A blend material is
-    // split at the texel: solid texels draw in the opaque part and still
-    // occlude; texels below it draw in the translucent tail, alpha kept and
-    // hardware-blended without a depth write.
+    // Opaque alpha contract: sampled alpha never reaches the blend on the opaque and cutout modes - survivors draw at
+    // alpha 1. A blend material is split at the texel: solid texels draw in the opaque part and still occlude; texels
+    // below it draw in the translucent tail, alpha kept and hardware-blended without a depth write.
     if (matParams0.y >= 1.5f) {   // One verdict per texel, both parts. Twin edit.
-        // The verdict tolerates compression: BC3/BC7 alpha in a block that also
-        // holds transparent texels lands an opaque texel at ~0.93-0.98. Solid
-        // is >= 0.9; a designed glass (0.3-0.6) still blends. Twin edit.
+        // The verdict tolerates compression: BC3/BC7 alpha in a block that also holds transparent texels lands an
+        // opaque texel at ~0.93-0.98. Solid is >= 0.9; a designed glass (0.3-0.6) still blends. Twin edit.
         const float khtxCls = KhMatRouteTexel(matParams3.y, 1.0f, khtxUv);
         if (matParams0.y >= 2.5f) {
             clip(khtxCls - 0.9f);
@@ -1235,9 +1119,8 @@ KhMeshOut PSMain(VSOut i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: two ou
             khUserTPs = khtt * khFs;   // The builtin's own tangent term (below).
             khUserBPs = khtb;
 #endif
-            // On a back face khtn is already reversed and so is the bitangent
-            // it spawns; reversing the tangent term too makes the mapped normal
-            // exactly the front's reversed (one side's bump is the other's dent).
+            // On a back face khtn is already reversed and so is the bitangent it spawns; reversing the tangent term too
+            // makes the mapped normal exactly the front's reversed (one side's bump is the other's dent).
             khtxN = normalize(khtt * (khFs * khtxS.nrmT.x) + khtb * khtxS.nrmT.y + khtn * khtxS.nrmT.z);
         } else khtxN = khtn;   // Degenerate tangent: geometric normal.
     }
@@ -1247,81 +1130,65 @@ KhMeshOut PSMain(VSOut i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: two ou
     khtxS = KhSpecAA(khtxS, khtxN);
 #endif
     float smf = 1.0f;
-    // The self-shadow bias takes the interpolated normal (reversed on a back
-    // face above). Twin: PSMain / PSComposite.
+    // The self-shadow bias takes the interpolated normal (reversed on a back face above). Twin: PSMain / PSComposite.
     float3 khBiasN = normalize(i.nrm);
 
 #if KH_TEXTURED
     float3 khShN = khtxN;
-    // KH_DLS_GEOM_N: the dynamic lights' shadow lookup keeps the geometric
-    // normal, as the self-shadow bias does; their N.L takes khtxN. TWIN:
-    // PSMain / PSComposite.
+    // KH_DLS_GEOM_N: the dynamic lights' shadow lookup keeps the geometric normal, as the self-shadow bias does; their
+    // N.L takes khtxN. TWIN: PSMain / PSComposite.
     khDlsGeomN = khBiasN;
 #else
     float3 khShN = normalize(i.nrm);
 #endif
-    // KH_SUN_GRAD: the self ladder's gradients, taken here - before the N.L gate
-    // below and the ladder's own per-pixel branches - under a condition uniform
-    // in a quad (a CB lane and a per-primitive flat lane). Twin: PSMain /
-    // PSComposite.
+    // KH_SUN_GRAD: the self ladder's gradients, here - before the N.L gate and the ladder's per-pixel branches - under
+    // a condition uniform in a quad (a CB lane, a per-primitive flat lane). Twin: PSMain / PSComposite.
     KhSunSelfGrad khSG = (KhSunSelfGrad)0;
     if (lighting0.x >= 0.5f && khObjNoRecv < 0.5f) khSG = KhSunSelfGradAt(i.wrel, khBiasN);
-    // KH_SHADOW_SWITCH: with receiveShadow off (khObjNoRecv) no received term
-    // is taken - smf stays 1 where the face turns to the sun and the gate's 0
-    // below still holds where it does not. Twin: PSMain / PSComposite.
+    // KH_SHADOW_SWITCH: with receiveShadow off (khObjNoRecv) no received term is taken - smf stays 1 where the face
+    // turns to the sun and the gate's 0 below still holds where it does not. Twin: PSMain / PSComposite.
     if (lighting0.x >= 0.5f && dot(khShN, lighting1.xyz) > 0.01f && khObjNoRecv < 0.5f) {
         {
             if (maskMeta.x >= 0.5f) smf = ShadowBandFactor(i.wrel + sunOrigin.xyz);
             else                    smf = ShadowMapFactor(i.wpos);
         }
-        // A pixel the received term already darkens to 0 cannot get darker -
-        // min(0, x) = 0 - so the self ladder (the costliest term in this
-        // shader) is not consulted for it. A plain if: the ladder takes no
-        // gradient of its own (KH_SUN_GRAD - khSG, priced above).
+        // A pixel the received term already darkens to 0 cannot get darker - min(0, x) = 0 - so the self ladder (the
+        // costliest term in this shader) is not consulted for it. A plain if: the ladder takes no gradient of its own
+        // (KH_SUN_GRAD - khSG, priced above).
         if (smf > 0.0f) smf = min(smf, SunShadowFactorSelf(i.wpos, i.wrel, khBiasN, khSG));
         if (maskMeta.w >= 0.5f) {
-            // A translucent texel = the blend material's translucent part or a
-            // whole translucent object on normal blend (the mirror below
-            // replaces its count where armed). KH_VOL_WITNESS: the witness
-            // needs this fragment in the footprint the copy was counted
-            // against, which holds only depth-participating opaque casters on
-            // normal blend - so a translucent texel, a whole object below full
-            // alpha on any blend mode, an object on a see-through blend mode
-            // at any alpha (KH_FOOT_BLEND: the seam skips all of those) and a
-            // depth-Off overlay (shadowMeta2.z) have none and take the count
-            // as it stands. TWIN: PSMain and PSComposite.
+            // A translucent texel = the blend material's translucent part or a whole translucent object on normal blend
+            // (the mirror below replaces its count where armed). KH_VOL_WITNESS: the witness needs this fragment in the
+            // footprint the copy was counted against, which holds only depth-participating opaque casters on normal
+            // blend - so a translucent texel, a whole object below full alpha on any blend mode, an object on a
+            // see-through blend mode at any alpha (KH_FOOT_BLEND: the seam skips all of those) and a depth-Off overlay
+            // (shadowMeta2.z) have none and take the count as it stands. TWIN: PSMain and PSComposite.
             const bool khStenTl = (matParams0.y >= 1.5f && matParams0.y < 2.5f) ||
                                   (i.icol.a < 0.999f && bm == 0);
             const bool khStenNoWit = khStenTl || i.icol.a < 0.999f || bm != 0 || shadowMeta2.z >= 0.5f;
             float khStenU = KhStenUnit(i.pos.xy, khStenNoWit ? -1.0f : i.pos.w);
-            // The volume term starts from a witness compare - the distance our
-            // surface stood at in the copy's frame (the KH_VOL_FOOT mask, else
-            // the copy's depth decoded) must be this fragment's (KH_VOL_WITNESS)
-            // - and a translucent texel is not in the footprint, so it has none
-            // and answers with the background's stencil; where the mirror is
-            // armed it reads the mirror instead. TWIN: PSMain and PSComposite.
+            // The volume term starts from a witness compare - the distance our surface stood at in the copy's frame
+            // (the KH_VOL_FOOT mask, else the copy's depth decoded) must be this fragment's (KH_VOL_WITNESS) - and a
+            // translucent texel is not in the footprint, so it has none and answers with the background's stencil;
+            // where the mirror is armed it reads the mirror instead. TWIN: PSMain and PSComposite.
             if (mirMeta.x >= 0.5f && mirMeta.x < 1.5f && khStenTl) {
                 khStenU = KhMirUnit(i.pos.xy, mirMeta.y, mirMeta.z);
             }
-            // KH_INFRONT (mirMeta.x = 2): a view-model mesh reads the mirror
-            // over its whole surface - its count taken against itself with the
-            // volumes standing on the mirror's 0.05 near, so the world near
-            // plane's collapse never reaches it. TWIN: PSMain and PSComposite.
+            // KH_INFRONT (mirMeta.x = 2): a view-model mesh reads the mirror over its whole surface - its count taken
+            // against itself with the volumes standing on the mirror's 0.05 near, so the world near plane's collapse
+            // never reaches it. TWIN: PSMain and PSComposite.
             if (mirMeta.x >= 1.5f) khStenU = KhMirUnit(i.pos.xy, mirMeta.y, mirMeta.z);
             float khStRf = KhSunRangeFade(i.wpos);
             smf *= 1.0f - (1.0f - khStenU) * khStRf;
         }
     } else if (lighting0.x >= 0.5f && !(dot(khShN, lighting1.xyz) > 0.01f)) {
-        // The gate's refusal is a verdict, not a skip: a lit pixel it leaves at
-        // smf = 1 keeps an unshadowed direct term, and at N.L in (0, 0.01] that
-        // is HDR sun x 0.01 - a lit line along every crease inside a shadow. An
-        // unlit object keeps 1 (a user material shader may read the lane). Twin:
-        // PSMain / PSComposite.
+        // The gate's refusal is a verdict, not a skip: a lit pixel it leaves at smf = 1 keeps an unshadowed direct
+        // term, and at N.L in (0, 0.01] that is HDR sun x 0.01 - a lit line along every crease inside a shadow. An
+        // unlit object keeps 1 (a user material shader may read the lane). Twin: PSMain / PSComposite.
         smf = 0.0f;
     }
 
-    // Twin edit: PSMain and PSComposite identical from here to the shading
-    // call.
+    // Twin edit: PSMain and PSComposite identical from here to the shading call.
 #if KH_TEXTURED
     khtxS.albedo *= i.icol.rgb;   // The object colour tints the albedo lane only.
 #if KH_USER_MAT
@@ -1344,8 +1211,7 @@ KhMeshOut PSMain(VSOut i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: two ou
     // keeps every form below finite - the fog lerp, x a (a <= 1: UNORM maps, icol.a held to [0, 1]), lerp(1, lc, a),
     // the lighten / darken lerps, the Reinhard mix (lc / (1 + lc) <= 1), KhWseeMeshOut, and the blender's product
     // with a 16F destination (<= 65504 x 1e30 = 6.6e34, fp32's limit 3.4e38). Negative lc is not kept: only an
-    // unchecked negative basecolor or emissiveIntensity makes one, and no stage relies on it. TWIN: PSMain /
-    // PSComposite.
+    // unchecked negative basecolor or emissiveIntensity makes one; no stage relies on it. TWIN: PSMain / PSComposite.
     lc = min(max(lc, 0.0f), 1.0e30f);
 
     // KhDlswFog (static.hlsl) is this block's transmittance and colour for the
@@ -1373,9 +1239,8 @@ KhMeshOut PSMain(VSOut i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: two ou
 
         if (fogParams.w >= 0.5f) {
             if (fogEngine.w >= 0.5f) {
-                // Below the layer they carry the export's above-path and layer
-                // reference; a ray wholly below the layer (khaFbA == 0) takes
-                // no height fog.
+                // Below the layer they carry the export's above-path and layer reference; a ray wholly below the layer
+                // (khaFbA == 0) takes no height fog.
                 float dh = abs(hgt - khaFbRef);
                 float k = fogParams.y * dh / max(khaFbA, 1.0e-4f);
                 float integ = k < 1.0e-6f ? khaFbA : (1.0f - exp(-khaFbA * k)) / k;
@@ -1393,14 +1258,11 @@ KhMeshOut PSMain(VSOut i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: two ou
         float khaBt = khaFbOn ? exp(-khaFbB * fogBelow.x) : 1.0f;
         trans *= khaBt;
         float3 fog_target = fogColor.rgb;
-        // The sky gradients take the view ray's elevation: its rise over its
-        // LENGTH, a property of the direction alone (-1 nadir, +1 zenith).
-        // distM is the depth along the view axis, shorter than the ray off
-        // axis, so dividing by it would carry the ratio past +-1 toward the
-        // screen edges - beyond the zenith end of the linear branch, and back
-        // up the nadir's quadratic. fxParams0.xyz is the pass camera on every
-        // fill site that binds this shader; the clamp absorbs fogColor.w
-        // differing from it. Twin: PSMain / PSComposite.
+        // The sky gradients take the view ray's elevation: its rise over its LENGTH, a property of the direction alone
+        // (-1 nadir, +1 zenith). distM is the depth along the view axis, shorter than the ray off axis, so dividing by
+        // it would carry the ratio past +-1 toward the screen edges - beyond the zenith end of the linear branch, and
+        // back up the nadir's quadratic. fxParams0.xyz is the pass camera on every fill site that binds this shader;
+        // the clamp absorbs fogColor.w differing from it. Twin: PSMain / PSComposite.
         const float khFogEl = clamp((hgt - camY) / max(distance(i.wpos, fxParams0.xyz), 1.0e-4f),
                                     -1.0f, 1.0f);
 
@@ -1432,14 +1294,11 @@ KhMeshOut PSMain(VSOut i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: two ou
                          max(khaWp + khaWs, 1.0e-5f);
         }
 
-        // Only a surface that covers what is behind it shows the fog in front
-        // of it. Additive, multiply and screen do not cover: they add to or
-        // filter a background that already carries its own fog, so fog here
-        // weakens their contribution toward no change instead of painting
-        // fog_target into it (additive and screen added the fog colour; multiply
-        // tinted the background with it). Lighten and darken compare against the
-        // background, so they compare the surface as seen through the fog.
-        // Twin: PSMain / PSComposite.
+        // Only a surface that covers what is behind it shows the fog in front of it. Additive, multiply and screen do
+        // not cover: they add to or filter a background that already carries its own fog, so fog here weakens their
+        // contribution toward no change instead of painting fog_target into it (which would add the fog colour under
+        // additive and screen and tint the background under multiply). Lighten and darken compare against the
+        // background, so they compare the surface as seen through the fog. Twin: PSMain / PSComposite.
         if (bm == 1 || bm == 2 || bm == 3) khFogKeep = trans;
         else lc = lerp(fog_target, lc, trans);
     }
@@ -1452,11 +1311,10 @@ KhMeshOut PSMain(VSOut i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: two ou
     // KH_MESH_O1: every return but the sorted tail's writes the colour alone (KhMeshOutC). TWIN: PSComposite.
     if (bm == 1 || bm == 3) return KhMeshOutC(float4(lc * a, 1.0f));
     if (bm == 2) return KhMeshOutC(float4(lerp(float3(1.0f, 1.0f, 1.0f), lc, a), 1.0f));
-    // KH_BLEND_MINMAX: lighten / darken (MAX / MIN blend ops, which take no factors). With the flush's own
-    // copy of the scene just before this mesh bound at t3 (blendCtl.x), the exact
-    // lerp(scene, max / min(scene, colour), a): on a single-sample target the op keeps it as written (it
-    // is >= / <= the scene); on a multisampled one the flush draws it with a replacing blend. Else the
-    // hardware forms: lighten max(scene, colour x a), darken exact only at a = 1. Twin: PSComposite.
+    // KH_BLEND_MINMAX: lighten / darken (MAX / MIN blend ops: no factors). With the flush's own copy of the scene just
+    // before this mesh bound at t3 (blendCtl.x), the exact lerp(scene, max / min(scene, colour), a): kept as written by
+    // the op on a single-sample target (it is >= / <= the scene), drawn with a replacing blend on a multisampled one.
+    // Else the hardware forms: lighten max(scene, colour x a), darken exact only at a = 1. Twin: PSComposite.
     if (bm == 4 || bm == 5) {
         // KH_TEX_OWN_BRANCH: a branch, so a route that leaves blendCtl.x 0 (the injection, the inFront
         // slice: t3 is not ours there) never loads t3, whatever fxc would flatten. Twin: PSComposite.

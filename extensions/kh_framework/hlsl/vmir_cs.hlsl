@@ -1,10 +1,8 @@
 // vmir_cs.hlsl - a standalone unit (no #include). Any edit changes the unit's shader cache key.
 
-// KH_MIR_DRAW: the b2 patch as a draw - one texel per row of the patched
-// matrix, into a four-element R32G32B32A32_FLOAT buffer target - instead of
-// a compute dispatch (no graphics -> compute transition mid-frame). The
-// arithmetic is the former CSMirB2's, line for line; C++ twin
-// kh_mir_patch_cpu. The file keeps its name (its resource entry).
+// KH_MIR_DRAW: the b2 patch as a draw - one texel per row of the patched matrix, into a four-element R32G32B32A32_FLOAT
+// buffer target - instead of a compute dispatch (no graphics -> compute transition mid-frame). C++ twin
+// kh_mir_patch_cpu, line for line. The file keeps its name (its resource entry).
 ByteAddressBuffer khmc_in : register(t0);
 float4 VSMirB2(uint khmv_id : SV_VertexID) : SV_Position
 {

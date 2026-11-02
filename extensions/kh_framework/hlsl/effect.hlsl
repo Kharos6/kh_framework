@@ -1,14 +1,14 @@
-// effect.hlsl - concatenated after cb.hlsl into the effect unit by C++ (no
-// #include). Any edit changes the unit's shader cache key.
-// Its shared declarations and helpers are cb.hlsl's KH_FX_UNIT section (a user
-// effect compiles against the same text); what is here is the builtins' own.
+// effect.hlsl - concatenated after cb.hlsl into the effect unit by C++ (no #include). Any edit changes the unit's
+// shader cache key. Its shared declarations and helpers are cb.hlsl's KH_FX_UNIT section (a user effect compiles
+// against the same text); what is here is the builtins' own.
 
 // KH_FX_SIDE - a value that is the same for a whole pass, or that every pixel would otherwise recompute for its
-// neighbours, drawn once before the pass by this same shader into a small target of ours (the side ids 28 - 30
-// return it) and read here. Each is armed by its own lane of matCtl, which no effect pass otherwise fills
-// (kh_bind_material writes it for textured meshes only, and every effect pass's constants start from a zeroed
-// template); unarmed - effect meshes, the PIP, and any route that did not draw it - the pass computes the value in
-// place, as it always has. t4 / t5 are free in this unit (cb.hlsl's receive textures there are fenced out of it).
+// neighbours, drawn once before the pass by this unit (PSEffect; 28 by PSFsSide where made) into a target of ours (28
+// the frame's size, 29 / 30 1 x 1; the side ids 28 - 30 return it) and read here. Each is armed by its own lane of
+// matCtl (y, z), lanes no effect pass otherwise fills (kh_bind_material writes matCtl for textured meshes only,
+// KH_FX_LINZ below arms x / w alone, and every effect pass's constants start from a zeroed template); unarmed - effect
+// meshes, the PIP, and any route that did not draw it - the pass computes the value in place. t4 / t5 are free in this
+// unit (cb.hlsl's receive textures there are fenced out of it).
 Texture2D<float> khFxSide  : register(t4);   // matCtl.y: fog scatter's per-pixel fog (28, full size) / the sun flare's visibility (29, 1 x 1).
 Texture2D<float> khUiProbe : register(t5);   // matCtl.z: the UI lane's coverage probe (30, 1 x 1).
 
@@ -26,12 +26,12 @@ Texture2D<float> khUiProbe : register(t5);   // matCtl.z: the UI lane's coverage
 Texture2D<float> khGridZS : register(t8);
 Texture2D<float> khGridZD : register(t9);
 // KH_SSGI_CENTRE: the SSGI grid's size (local0.zw, set by the chain's SSGI block; unset, the frame over the scalar
-// factor local0.y, 2 below 0.25) and the full-resolution pixel its texel t stands for - its block's centre, each
-// axis by its own factor (fxMeta.zw over the grid's size: the grid's sides are rounded apart, so one factor from the
-// width drifted up to ~3 px down the frame against the resolve, which reads the grid by normalized coords), held
-// to the frame - KhDlfFull's mapping. The seed (26) samples the same centre; the gather (22), the grid's depth copy
-// (PSFxLinZ 35) and KhSsgiGridZ's in-place read take this pixel. It was the block's first pixel, int2(t x factor):
-// (factor - 1) / 2 pixels up and left of the texel the seed and the resolve take, 1.5 at setSsgiScale 0.25.
+// factor local0.y, 2 below 0.25) and the full-resolution pixel its texel t stands for - its block's centre, each axis
+// by its own factor (fxMeta.zw over the grid's size: the grid's sides are rounded apart, so one factor from the width
+// drifts up to ~3 px down the frame against the resolve, which reads the grid by normalized coords), held to the frame
+// - KhDlfFull's mapping. The seed (26) samples the same centre; the gather (22), the grid's depth copy (PSFxLinZ 35)
+// and KhSsgiGridZ's in-place read take this pixel. Do not take the block's first pixel, int2(t x factor): it lies
+// (factor - 1) / 2 pixels up and left of the texel the seed and the resolve take (1.5 at setSsgiScale 0.25).
 float2 KhSsgiGrid()
 {
     const float khsc_f = localParams0.y >= 0.25f ? localParams0.y : 2.0f;
@@ -57,10 +57,9 @@ float KhSsgiGridZ(int2 khsz_t)
     return khsz_z;
 }
 
-// Bound at t19 only for LUT passes - t19 is reserved for this unit
-// codebase-wide (inside StateBackup's save range, so the engine's own bind is
-// restored after every flush). Sampled with integer Loads only (tetrahedral
-// interpolation; no sampler, no half-texel bias).
+// Bound at t19 only for LUT passes - t19 is reserved for this unit codebase-wide (inside StateBackup's save range, so
+// the engine's own bind is restored after every flush). Sampled with integer Loads only (tetrahedral interpolation; no
+// sampler, no half-texel bias).
 Texture3D<float4> khLut : register(t19);
 float3 KhLutV(int3 p) { return khLut.Load(int4(p, 0)).rgb; }
 
@@ -217,8 +216,7 @@ float4 KhRainLayer(float2 q, float tt, float2 grid, float seedOfs,
     float x = (n.y - 0.5f) * 0.55f;
     x += (0.42f - abs(x)) * KhSin(tt * 0.7f + n.z * 6.2832f)   // KH_HASH: tt grows with time.
          * 0.4f * (1.0f - saturate(stretch * 1.4f));
-    // Drop y: a descending cycle with a linger-then-fall ease (drops hold, then
-    // slip - the real-glass cadence).
+    // Drop y: a descending cycle with a linger-then-fall ease (drops hold, then slip - the real-glass cadence).
     float cyc = frac(tt * (0.10f + n.z * 0.07f) + n.x * 7.31f);
     float py = pow(cyc, 0.65f);
     float aniso = grid.x / grid.y;   // Cell tallness in q-space.
@@ -227,8 +225,7 @@ float4 KhRainLayer(float2 q, float tt, float2 grid, float seedOfs,
     float r0 = 0.085f + n.y * 0.06f;
     float len = length(du);
     float drop = smoothstep(r0, r0 * 0.55f, len);
-    // Trail: the wet wipe above the drop, fading with distance behind, with
-    // small satellite beads left on the track.
+    // Trail: the wet wipe above the drop, fading with distance behind, with small satellite beads left on the track.
     float trackX = smoothstep(0.14f, 0.02f, abs(du.x));
     float behind = (py - f.y);
     float trail = trackX * step(0.0f, behind) * saturate(1.0f - behind * 1.15f)
@@ -242,9 +239,8 @@ float4 KhRainLayer(float2 q, float tt, float2 grid, float seedOfs,
     return float4(nrm, saturate(drop + beads * 0.6f), saturate(trail + beads));
 }
 
-// fxParams1 / fxParams2 are system lanes for effect 23: the chain loop packs up
-// to two aggregated fog-pass records [startDist, endDist, skyAmount, opacity]
-// (kh_fogscatter_pack); zeroed lanes = no pass.
+// fxParams1 / fxParams2 are system lanes for effect 23: the chain loop packs up to two aggregated fog-pass records
+// [startDist, endDist, skyAmount, opacity] (kh_fogscatter_pack); zeroed lanes = no pass.
 
 float KhFsFog(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float fs_m11)
 {
@@ -365,8 +361,9 @@ float KhDlfEndRamp(float khdn_m)
          ? saturate((fogEngine.y - khdn_m) * fogEngine.z) : 1.0f;
 }
 // The world fog's extinction (1/m) at absolute height khds_y: the engine's height fog as PSMain / KhFxFogEngine apply
-// it (engine terms: fogEngine.x at sea level falling off with fogParams.y; else fogParams.x * 0.0153 above
-// fogParams.z), times fogScale (fxParams0.y), plus baseDensity (fxParams0.z) everywhere. Zero with the fog off.
+// it (engine terms: fogEngine.x at sea level falling off with fogParams.y; else fogParams.x * 0.0153 up to fogParams.z,
+// falling off above it), times fogScale (fxParams0.y), plus baseDensity (fxParams0.z) everywhere. With the fog off the
+// game's term is zero; baseDensity still applies.
 // TWIN: C++ kh_dlf_medium_zero (KH_DLF_MEDIUM0) reads these terms to skip a pass whose medium is zero - a term
 // added here is added there.
 float KhDlfSigma(float khds_y)
@@ -382,16 +379,16 @@ float KhDlfSigma(float khds_y)
 }
 // The optical depth of a straight path khdt_d metres long between heights khdt_y0 and khdt_y1 - with the engine terms
 // KhFxFogEngine's form (the density at the lower end, decaying along the rise: the mesh fog's own); without them
-// KhFxFogEngine takes the far end's density over the whole path, and this integrates the same fallback density
-// instead, so the glow's extinction matches the fog it scatters in: flat below its base (fogParams.z), decaying above
-// it. KH_DLF_TAU_BASE: the share of the path below the base takes the flat density - the decaying form alone thinned
-// a path that dips below the base, and one wholly below it, to as little as a hundredth of its optical depth (a
-// valley's lamps glowed through thick fog almost unattenuated); a path wholly above is as before. Scaled and floored
-// as KhDlfSigma. The engine branch is the mesh fog's form and not KhDlfSigma's integral below sea level: it takes the
-// density at max(lo, 0) decaying along the whole rise where KhDlfSigma holds it flat below 0, so a path that dips
-// below sea level gets less optical depth than the fog it scatters in - at least 1 / (1 + x) of it, x = the height
-// decay (fogParams.y) times the depth below 0 the path reaches (a quarter at x = 3, an eighth at 7), the bound
-// approached by a long rise from there; no floor as x grows (y >= 0: within 1e-4 relative).
+// KhFxFogEngine takes the far end's density over the whole path, and this integrates the same fallback density instead,
+// so the glow's extinction matches the fog it scatters in: flat below its base (fogParams.z), decaying above it.
+// KH_DLF_TAU_BASE: the share of the path below the base takes the flat density. Do not use the decaying form alone: it
+// would thin a path that dips below the base, and one wholly below it, to as little as a hundredth of its optical depth
+// (a valley's lamps would glow through thick fog almost unattenuated). A path wholly above takes the decaying form.
+// Scaled and floored as KhDlfSigma. The engine branch is the mesh fog's form and not KhDlfSigma's integral below sea
+// level: it takes the density at max(lo, 0) decaying along the whole rise where KhDlfSigma holds it flat below 0, so a
+// path that dips below sea level gets less optical depth than the fog it scatters in - at least 1 / (1 + x) of it, x =
+// the height decay (fogParams.y) times the depth below 0 the path reaches (a quarter at x = 3, an eighth at 7), the
+// bound approached by a long rise from there; no floor as x grows (y >= 0: within 1e-4 relative).
 // Neither branch holds the mesh fog's below-layer term (fogBelow, the camera under the layer), nor does KhDlfSigma.
 float KhDlfTau(float khdt_d, float khdt_y0, float khdt_y1)
 {
@@ -508,14 +505,13 @@ float KhDlfAtt(float4 khda_r1, float4 khda_r2, float4 khda_r3, float4 khda_r4, f
     }
     return khda_a;
 }
-// The distance at which a light's attenuation (KhDlfAtt without fade or cone) falls to half its peak: the radius of
-// its bright core, which the march's equiangular samples crowd toward (KhDlfEquiInit). For a start offset of 0 or
-// more the peak is 1 / max(c, 1) (the attenuation saturates at 1), so the half is where c + l x + q x^2 = 2 max(c, 1).
-// A negative start ([4].x < 0: x never falls below -start) is not modelled - the distance comes out where the
-// attenuation is anywhere from ~0.17 to nearly all of its value at the start (0.5 just below 0; for a constant term
-// under 1 it dips to ~0.17 where the attenuation stops saturating, then rises toward all of it the further below 0
-// the start); only the equiangular width takes it, so the estimate's noise moves, not its mean (KhDlfMisStep is
-// unbiased for any width).
+// The distance at which a light's attenuation (KhDlfAtt without fade or cone) falls to half its peak: the radius of its
+// bright core, which the march's equiangular samples crowd toward (KhDlfEquiInit). For a start offset of 0 or more the
+// peak is 1 / max(c, 1) (the attenuation saturates at 1), so the half is where c + l x + q x^2 = 2 max(c, 1). A
+// negative start ([4].x < 0: x never falls below -start) is not modelled - the distance comes out where the attenuation
+// is anywhere from ~0.17 to nearly all of its value at the start (0.5 just below 0; for a constant term under 1 it dips
+// to ~0.17 where the attenuation stops saturating, then rises toward all of it the further below 0 the start); only the
+// equiangular width takes it, so the estimate's noise moves, not its mean (KhDlfMisStep is unbiased for any width).
 // Zero when the terms give none.
 float KhDlfCore(float4 khdo_r4)
 {
@@ -620,10 +616,11 @@ bool KhDlfCone(float3 khdc_d, float3 khdc_lp, float3 khdc_a, float khdc_cs, inou
     khdc_s1 = khdc_t1 + khdc_sc;
     return khdc_in;
 }
-// Our meshes' shadow of light map slot khdv_s at absolute point khdv_p: KhDlsShadow's lookup (the face, the bias -
-// the slot's constant and slope plus one texel - and the range fade) as a single nearest compare: a fog sample has no
-// surface, so no normal offset and no receiver-plane gradient, and the march and the grid filter do the smoothing.
-// 1 = lit. TWIN: KhDlsShadow (cb.hlsl).
+// Our meshes' shadow of light map slot khdv_s at absolute point khdv_p: KhDlsShadow's lookup (the face, the bias - the
+// slot's constant and slope plus one texel, taken here always, where KhDlsShadow adds it only with its normal offset
+// on, dlsFaceSlice[slot * 6].y - and the range fade) as a single nearest compare: a fog sample has no surface, so no
+// normal offset and no receiver-plane gradient, and the march and the grid filter do the smoothing. 1 = lit. TWIN:
+// KhDlsShadow (cb.hlsl).
 float KhDlfDlsVis(int khdv_s, float3 khdv_p)
 {
     if (khdv_s < 0 || khdv_s > 7) return 1.0f;
@@ -696,22 +693,22 @@ bool KhDlfSsCovered(float3 khsc_lp, float3 khsc_f, float3 khsc_r, float3 khsc_u)
 // there, the segment only slipped behind a silhouette, or out from behind one - a post, a window's frame, a car's
 // body in front of the light - and nothing is concluded. A point off the screen or behind the camera carries no
 // information. 1 = lit.
-// KH_DLF_SS - the plane continuation, gated by khsv_cov (KhDlfSsCovered: the light itself is hidden
-// behind a surface more than KH_DLF_SS_SELF nearer than it). A jump to a NEARER surface from in front of a farther
-// one is the segment slipping behind something that stands before the surface it is about to cross - a soldier
-// before the wall of the room the light is in: the crossing lies at pixels he covers, and without this the sample
-// stays lit, his surroundings glow with a light the wall hides. With the light covered, and the far surface STANDING
-// (one probe KH_DLF_SS_RISE straight up from its point still shows it at that depth: a wall; the ground - the lamp
-// behind him over open ground - a roof or a ceiling recede from there and are left alone), the far surface is taken
-// to go on behind the nearer one at its view depth: where the segment reaches that depth, short of the light, one
-// probe reads the pixel there - the nearer surface still covering it, or the far one itself showing within
-// KH_DLF_SS_THICK, is the crossing (occluded, under the same KH_DLF_SS_SELF rule); something farther (the far
-// surface ended: a doorway, the sky) concludes nothing, as before. Only `return 0` is added: every crossing found
-// without it is still found, and with khsv_cov false (the light seen, or off the screen) nothing here runs. Limits:
-// a wall that ENDS behind the nearer one - its corner, with the light beyond it - casts a false shadow around the
-// nearer one's silhouette, only while the light itself is hidden; a wall whose top lies within KH_DLF_SS_RISE of the
-// crossing is not continued (today's leak there); a light within KH_DLF_SS_SELF of its wall still leaks (the housing
-// rule); the gate is hard, so the glow switches as the nearer one's edge crosses the light's pixel.
+// KH_DLF_SS - the plane continuation, gated by khsv_cov (KhDlfSsCovered: the light itself is hidden behind a surface
+// more than KH_DLF_SS_SELF nearer than it). A jump to a NEARER surface from in front of a farther one is the segment
+// slipping behind something that stands before the surface it is about to cross - a soldier before the wall of the room
+// the light is in: the crossing lies at pixels he covers, and without this the sample stays lit, his surroundings glow
+// with a light the wall hides. With the light covered, and the far surface STANDING (one probe KH_DLF_SS_RISE straight
+// up from its point still shows it at that depth: a wall; the ground - the lamp behind him over open ground - a roof or
+// a ceiling recede from there and are left alone), the far surface is taken to go on behind the nearer one at its view
+// depth: where the segment reaches that depth, short of the light, one probe reads the pixel there - the nearer surface
+// still covering it, or the far one itself showing within KH_DLF_SS_THICK plus KH_DLF_SS_THICK_K of that depth, is the
+// crossing (occluded, under the same KH_DLF_SS_SELF rule); something farther (the far surface ended: a doorway, the
+// sky) concludes nothing. The continuation only adds `return 0`: every crossing found without it is still found, and
+// with khsv_cov false (the light seen, or off the screen) nothing here runs. Limits: a wall that ENDS behind the nearer
+// one - its corner, with the light beyond it - casts a false shadow around the nearer one's silhouette, only while the
+// light itself is hidden; a wall whose top lies within KH_DLF_SS_RISE of the crossing is not continued (it leaks
+// there); a light within KH_DLF_SS_SELF of its wall still leaks (the housing rule); the gate is hard, so the glow
+// switches as the nearer one's edge crosses the light's pixel.
 float KhDlfSsVis(float3 khsv_q, float3 khsv_lp, float3 khsv_f, float3 khsv_r, float3 khsv_u, float khsv_j,
                  float khsv_sd0, bool khsv_cov)
 {
@@ -796,24 +793,23 @@ float KhDlfSsVis(float3 khsv_q, float3 khsv_lp, float3 khsv_f, float3 khsv_r, fl
 // receiver through the sectors it occupies that no nearer sample already held - so a blocker in front of it shadows
 // it where it truly covers it, light passes behind a thin object, and an object in front of the receiver's view ray
 // (nearer the camera) blocks only the few sectors it spans. A sample stands for its stretch of the line (half the gap
-// to each neighbour), laid on its own surface's plane, so the samples tile the line and the coverage thins less with
-// a smaller budget. The 32 sectors of a slice split its N.L lobe about the normal's projection evenly (KhSsgiCum; the
-// bias sharpens the lobe as it did the former gather's N.L), so a sector's share is its N.L-weighted share; a slice
-// weighs its normal's projected length times its lobe's integral, and the sum is normalized by the bias-free total,
-// so a higher bias dims the result as it did before, if less steeply at the top (bias 0.9: about a seventh of 0.15's,
-// the former gather's a sixteenth).
+// to each neighbour), laid on its own surface's plane, so the samples tile the line and the coverage thins less with a
+// smaller budget. The 32 sectors of a slice split its N.L lobe about the normal's projection evenly (KhSsgiCum; the
+// bias sharpens the lobe), so a sector's share is its N.L-weighted share; a slice weighs its normal's projected length
+// times its lobe's integral, and the sum is normalized by the bias-free total, so a higher bias dims the result (bias
+// 0.9: about a seventh of 0.15's).
 static const float KH_SSGI_THICK   = 1.0f;   // m.
 static const float KH_SSGI_VB_GAIN = 0.33f;   // The mean onto the former gather's (open scenes, 12).
-// Brightness is kept independent of the sample budget: fewer samples still cover fewer sectors (a sender on an edge
-// is a point, not a stretch; the thickness's ends), measured as a mean rising with n about as (n / 12)^
-// KH_SSGI_VB_NEXP (within about 15 % over 4 - 32 samples); the result is scaled by its inverse, so the
-// budget trades noise, not brightness, as the former gather's count normalization did.
+// Brightness is kept independent of the sample budget: fewer samples still cover fewer sectors (a sender on an edge is
+// a point, not a stretch; the thickness's ends), measured as a mean rising with n about as (n / 12)^KH_SSGI_VB_NEXP
+// (within about 15 % over 4 - 32 samples); the result is scaled by its inverse, so the budget trades noise, not
+// brightness.
 static const float KH_SSGI_VB_NEXP = 0.21f;
-// A slice's cumulative weight at angle khsc_a (radians from the normal's projection) for a bias khsc_b: the integral
-// of the lobe (cos a - b) / (1 - b) that the former gather weighted N.L by (b = 0: the plain cosine), times (1 - b)
-// (the gather divides the slice's total by it). It rises monotonically over [-acos b, acos b], so it is the sectors'
-// distribution function. The solid angle's own |sin| about the view ray (GTAO's slice measure) is left out, as
-// MXAO's bitmask mode leaves it: against a ray-traced reference it fitted worse overall in the scenes tried.
+// A slice's cumulative weight at angle khsc_a (radians from the normal's projection) for a bias khsc_b: the integral of
+// the biased N.L lobe (cos a - b) / (1 - b) (b = 0: the plain cosine), times (1 - b) (the gather divides the slice's
+// total by it). It rises monotonically over [-acos b, acos b], so it is the sectors' distribution function. The solid
+// angle's own |sin| about the view ray (GTAO's slice measure) is left out, as MXAO's bitmask mode leaves it: against a
+// ray-traced reference it fitted worse overall in the scenes tried.
 float KhSsgiCum(float khsc_a, float khsc_b)
 {
     return sin(khsc_a) - khsc_b * khsc_a;
@@ -838,8 +834,9 @@ uint KhSsgiBits(float4 khsb_a, float khsb_b, float khsb_hw, float khsb_c0, float
     return (khsb_n >= 32u ? 0xFFFFFFFFu : ((1u << khsb_n) - 1u)) << khsb_b0;
 }
 
-// KH_WSEE (cb.hlsl's note): the two depth-derived quantities of PSEffect's own that a covered pixel takes at both
-// depths, each from a view depth z (LinDepth's) - the effect's body after its depth read, so the front is today's.
+// KH_WSEE (cb.hlsl's note): two of the depth-derived quantities of PSEffect's own that a covered pixel takes at both
+// depths (fog scatter's share is another: KhFsFogW, above), each from a view depth z (LinDepth's) - the effect's body
+// after its depth read, so the front is today's.
 // Distance fog's factor (effect 13): the ramp, the far fence's feather toward skyAmount, the sky's skyAmount. Twin
 // edit at cb.hlsl's KhFxFogPasses (KhFsFog's and KhFxFogAt's fog-pass loop).
 float KhFxDistFogF(float d)
@@ -849,7 +846,7 @@ float KhFxDistFogF(float d)
     float khfg_w = saturate((min(d, khfg_f) - khfg_f * 0.98f) / max(khfg_f * 0.019f, 1.0f));
     f = lerp(f, saturate(fxParams0.z), khfg_w);
     if (d > 1e8f) f = saturate(fxParams0.z);   // Sky/far-plane pixels (belt; the feather
-                                               // Already lands here).
+                                               // already lands here).
     return f;
 }
 // KH_WSEE: the distance fog's factor for a stage's layers' own light by layer group - the mean of the factor over the
@@ -901,13 +898,13 @@ float KhWseeFogMeanAll(float khws_b, float khws_qb, float khws_d)
 }
 // KH_WSEE_STAGE_MEAN: a stage's front factor without the layer-depth split - the mean over the stage's groups as they
 // stand in the record: the fence-type layers at the live depth khws_r (Tw) and the particle-type phase at its nearest
-// khws_n (its T), by their shares of the stage's opacity front to back (KhWseeFogMean). Before, the stage's light took
-// the factor at min(r, NWpost) alone - right for one layer, wrong where an opaque-like fence-type layer (a sea surface
-// recorded as one, foliage) stands far behind a faint near one: all of the stage's light, nearly all of it the far
-// layer's, was fogged as the near one (a rain streak before a fogged sea cut the fog out). With one group the mean is
-// that group's own factor: at r for the fence-type layers alone (min(r, NWpost) with no particle layer), at NWpost
-// for the particle phase alone (clamped to r, where min(r, NWpost) put it). The split (khWsSp) takes its own richer
-// mean (KhWseeFogMean over the bands), as before.
+// khws_n (its T), by their shares of the stage's opacity front to back (KhWseeFogMean). Do not take the factor at
+// min(r, NWpost) alone: right for one layer, it is wrong where an opaque-like fence-type layer (a sea surface recorded
+// as one, foliage) stands far behind a faint near one - all of the stage's light, nearly all of it the far layer's, is
+// fogged as the near one (a rain streak before a fogged sea cuts the fog out). With one group the mean is that group's
+// own factor: at r for the fence-type layers alone (min(r, NWpost) with no particle layer), at NWpost for the particle
+// phase alone (clamped to r, as min(r, NWpost) puts it). The split (khWsSp) takes its own richer mean (KhWseeFogMean
+// over the bands).
 float KhWseeStageMean(float khws_r, float khws_tr, float khws_n, float khws_tn, float khws_b, float khws_qb, float khws_d)
 {
     return KhWseeFogMean(float4(khws_r, min(khws_n, khws_r), khws_b, khws_b), float4(khws_tr, khws_tn, 1.0f, 1.0f),
@@ -1002,6 +999,11 @@ float KhOlAxis(int2 khoa_c, int2 khoa_a, int khoa_d, int khoa_p, int khoa_hi, bo
     return khoa_e;
 }
 
+// KH_FX_ONE_FORMULA: every builtin runs one formula on the scene (linear HDR, before the game's tonemap) and on the UI
+// lane (the finished display frame, 0 - 1), by design - no formula has a per-lane variant. invert, colorGrade
+// (contrast turns about 0.5), grain, deband (1/255 steps), clarity's limiter, outline's luma edge, glitch's static and
+// the rain drops' highlight are written for display values, so on the scene they act on linear light; scripts are
+// tuned to that, and a per-lane "fix" changes every tuned look.
 float4 PSEffect(VSOut i) : SV_Target
 {
     KhFxBegin(i);   // KH_FX_USER: the lanes, the depth gate, the view-distance cut and the arbitration (cb.hlsl).
@@ -1040,7 +1042,7 @@ float4 PSEffect(VSOut i) : SV_Target
         outc = (1.0f - saturate(scene)) * color.rgb;
     }
     else if (effect == 2)   // colorGrade: [saturation, contrast, brightness, gamma], tint =
-                            // Color.rgb.
+                            // color.rgb.
     {
         // KH_GRADE_TINT: brightness, saturation, then the tint, then contrast - before the saturation the tint would
         // only move the luma weights, and saturation 0 would leave a tinted grade grey. TWIN: KhFusePoint's id 2.
@@ -1048,8 +1050,10 @@ float4 PSEffect(VSOut i) : SV_Target
         float l = Luma(c);
         c = lerp(l.xxx, c, fxParams0.x) * color.rgb;
         c = (c - 0.5f) * fxParams0.y + 0.5f;
-        // The exponent floored at 1e-4: gamma 0 (or below) was pow(0, 0) = NaN on every black pixel (and inf below
-        // zero); at the floor black stays black and the rest goes to ~1 - the limit gamma -> 0 gives.
+        // KH_GAMMA_DOC: the exponent is gamma itself, not 1 / gamma - above 1 darkens values under 1 and lifts those
+        // past 1 (the scene's highlights), below 1 the reverse. Scripts are tuned to that direction: never invert it.
+        // The exponent is floored at 1e-4: gamma 0 (or below) would give pow(0, 0) = NaN on every black pixel (and inf
+        // below zero); at the floor black stays black and the rest goes to ~1 - the limit gamma -> 0 gives.
         c = pow(max(c, 0.0f), max(fxParams0.w, 1.0e-4f));
         outc = c;
     }
@@ -1061,9 +1065,9 @@ float4 PSEffect(VSOut i) : SV_Target
     }
     else if (effect == 4)   // Chromatic aberration: [strengthPx], radial.
     {
-        // KH_FX_ROUND: the shift grows with the radius on the picture - x in heights (x the aspect), as the sun
-        // flare measures it - so it is round; in uv the side edges, 1.78 x farther at 16:9, shifted as the top
-        // and bottom. Unchanged along the vertical: strengthPx / 2 at the top and bottom edges.
+        // KH_FX_ROUND: the shift grows with the radius on the picture - x in heights (x the aspect), as the sun flare
+        // measures it - so it is round (in uv the side edges, 1.78 x farther at 16:9, would shift as the top and
+        // bottom). strengthPx / 2 at the top and bottom edges.
         float2 off = float2((uv.x - 0.5f) * (fxMeta.z / fxMeta.w), uv.y - 0.5f)
                    * fxParams0.x * KhFxPx();   // KH_FX_PX_REF.
         float r = KhSampleSceneBil(i.pos.xy + off).r;   // KH_FX_BILINEAR.
@@ -1072,27 +1076,24 @@ float4 PSEffect(VSOut i) : SV_Target
     }
     else if (effect == 5)   // Film grain: [amount, fps, grainSizePx, lumaResponse, chroma].
     {
-        // Filmic grain: smooth value noise with spatial extent, triangular
-        // amplitude distribution, response peaking at mid-grey and falling
-        // toward shadows and highlights alike, optional chroma, time quantized
-        // to a frame rate.
+        // Filmic grain: smooth value noise with spatial extent, triangular amplitude distribution, response peaking at
+        // mid-grey and falling toward shadows and highlights alike, optional chroma, time quantized to a frame rate.
         const float3 gc = KhGrainGc(i.pos.xy, t, fxParams0, fxParams1.x);   // KhFusePoint's twin: one body.
 
         float luma = saturate(Luma(scene));
         float resp = lerp(1.0f, 4.0f * luma * (1.0f - luma) * 0.9f + 0.1f, fxParams0.w);
-        // KH_GRAIN_FLOOR: the zero-mean grain took a dark pixel below zero, a negative radiance in the HDR
-        // scene; floored as sharpen's output is. TWIN: KhFusePoint id 5.
+        // KH_GRAIN_FLOOR: the zero-mean grain would take a dark pixel below zero, a negative radiance in the HDR scene;
+        // floored as sharpen's output is. TWIN: KhFusePoint id 5.
         outc = max(scene + gc * fxParams0.x * resp, 0.0f);
     }
     else if (effect == 6)   // Sharpen: [strength].
     {
         // KH_SHARPEN_LIMIT: the 5-tap Laplacian, limited to the five taps' own range per channel (the limiting of
-        // contrast-adaptive sharpening). On the linear HDR scene the unlimited form took the dark side of any edge of
-        // (1 + k) / k : 1 or more (3 : 1 at the default 0.5: every skyline against trees) to zero - a black line -
-        // and lifted the bright side as far above it. The limit removes every overshoot, not only that one: a pixel
-        // that is its five taps' brightest or darkest (either side of a hard edge, a one-pixel detail) is left as it
-        // is, and a pixel between them steepens toward them as before, up to their range - a soft edge sharpens, a
-        // hard one keeps no halo.
+        // contrast-adaptive sharpening). On the linear HDR scene the unlimited form takes the dark side of any edge of
+        // (1 + k) / k : 1 or more (3 : 1 at the default 0.5: every skyline against trees) to zero - a black line - and
+        // lifts the bright side as far above it. The limit removes every overshoot: a pixel that is its five taps'
+        // brightest or darkest (either side of a hard edge, a one-pixel detail) is left as it is, and a pixel between
+        // them steepens toward them up to their range - a soft edge sharpens, a hard one keeps no halo.
         const float3 khsh_r = SampleScene(px + int2(1, 0)), khsh_l = SampleScene(px - int2(1, 0));
         const float3 khsh_d = SampleScene(px + int2(0, 1)), khsh_u = SampleScene(px - int2(0, 1));
         float3 s = scene * (1.0f + 4.0f * fxParams0.x)
@@ -1160,7 +1161,7 @@ float4 PSEffect(VSOut i) : SV_Target
     }
 
         else if (effect == 10)   // Outline: [depthEdgeScale, lumEdgeScale, sceneDarken, glowBoost],
-                                 // Color = edge.
+                                 // color = edge.
     {
         // KH_FX_PX_REF: the step is the drawn line's width - one reference pixel, to the nearest whole pixel - and a
         // step spanning the same part of the picture measures the same depth and luma differences, so the thresholds
@@ -1255,7 +1256,7 @@ float4 PSEffect(VSOut i) : SV_Target
         outc = scene + KhGlowSel(acc, khha_p, khha_m) * color.rgb * fxParams0.y;
     }
     else if (effect == 13)   // Distance fog: [startDist m, endDist m, skyAmount 1], color = fog
-                             // Color.
+                             // color.
     {
         // The factor: KhFxDistFogF (twin edit at cb.hlsl's KhFxFogPasses).
         const float khfg_r = LoadDepthPS(px);
@@ -1447,18 +1448,17 @@ float4 PSEffect(VSOut i) : SV_Target
         }
     }
     else if (effect == 14)   // Lens flare, image-based: [threshold, intensity, ghostCount,
-                             // ghostSpacing] + [haloRadius, haloIntensity, chromaPx.
+                             // ghostSpacing] + [haloRadius, haloIntensity, chromaPx].
     {
-        // Bright pixels anywhere in the capture spawn a ghost train mirrored
-        // through screen centre, plus a halo ring. The HDR capture makes the
-        // threshold physically meaningful.
+        // Bright pixels anywhere in the capture spawn a ghost train mirrored through screen centre, plus a halo ring.
+        // The HDR capture makes the threshold physically meaningful.
         float2 cuv = float2(0.5f, 0.5f);
         float2 ghostVec = (cuv - uv) * fxParams0.w;
         int nGhosts = clamp((int)fxParams0.z, 1, 8);
         float3 acc = 0.0f;
-        // KH_FX_ROUND: the ghosts' window, the halo ring and the colour fringe's direction are measured on the
-        // picture - x in heights (khlf_a, the aspect), as the sun flare measures - so the lens's circles are round;
-        // in uv they were ellipses 1.78 x wider at 16:9. haloRadius is in heights (unchanged along the vertical).
+        // KH_FX_ROUND: the ghosts' window, the halo ring and the colour fringe's direction are measured on the picture
+        // - x in heights (khlf_a, the aspect), as the sun flare measures - so the lens's circles are round (in uv they
+        // would be ellipses 1.78 x wider at 16:9). haloRadius is in heights.
         const float2 khlf_a = float2(fxMeta.z / fxMeta.w, 1.0f);
         // KH_GLOW_PYR: a ghost is the picture scaled by 1 - ghostSpacing * g about the centre, so a point read
         // either magnifies pixels into blocks or skips them; from the (thresholded) pyramid each ghost reads over
@@ -1504,18 +1504,18 @@ float4 PSEffect(VSOut i) : SV_Target
         float3 acc = 0.0f;
         float total = 0.0f;
         // KH_ANA_PYR: the taps are lengthPx / 16 apart; from two pixels up each reads the one-axis pyramid over that
-        // spacing (x KH_GLOW_FP, the glows' margin), so the streak is one continuous line instead of 16 copies of
-        // each highlight a side. Taps a pixel apart or less read the picture itself, as before (KhGlowMix).
+        // spacing (x KH_GLOW_FP, the glows' margin), so the streak is one continuous line instead of 16 copies of each
+        // highlight a side. Taps a pixel apart or less read the picture itself (KhGlowMix).
         const float khan_l = fxParams0.z * KhFxPx();   // KH_FX_PX_REF.
         const float khan_m = KhGlowMix(khan_l / 16.0f);
 
         [unroll] for (int k = 1; k <= 16; ++k)
         {
-            float t = (float)k / 16.0f;
-            float w = pow(1.0f - t, max(fxParams0.w, 0.1f));
+            float khan_t = (float)k / 16.0f;   // The tap's share of the length (not the time t).
+            float w = pow(1.0f - khan_t, max(fxParams0.w, 0.1f));
             if (khan_m < 1.0f)
             {
-                int off = (int)(t * fxParams0.z * KhFxPx());   // KH_FX_PX_REF.
+                int off = (int)(khan_t * fxParams0.z * KhFxPx());   // KH_FX_PX_REF.
                 int2 d = (fxParams1.x > 0.5f) ? int2(0, off) : int2(off, 0);
                 acc += (max(SampleScene(px + d) - fxParams0.x, 0.0f)
                       + max(SampleScene(px - d) - fxParams0.x, 0.0f)) * w;
@@ -1551,7 +1551,7 @@ float4 PSEffect(VSOut i) : SV_Target
         outc = scene + acc * color.rgb * fxParams0.y;
     }
     else if (effect == 16)   // Sun flare, source-aware: p0.xyz = direction (engine space), p0.w =
-                             // Size;
+                             // size; p1 = [ghostDots, ringIntensity, starburst].
     {
         // KhSunFlareSpot above (KhSunFlareVis / KhSunFlareEdge: cb.hlsl). KH_FX_SIDE: the scene chain draws the
         // visibility (edge fade included) once, 1 x 1, before the pass (side id 29) and arms matCtl.y; unarmed, each
@@ -1655,16 +1655,15 @@ float4 PSEffect(VSOut i) : SV_Target
     }
      else if (effect == 18)   // Clarity: [strength, radiusPx].
     {
-        // Wide-radius local contrast on luma only (the scene is rescaled by
-        // L'/L, so saturation never moves). Two-ring 12-tap base estimate; the
-        // detail term is soft-limited so strong edges do not halo.
+        // Wide-radius local contrast on luma only (the scene is rescaled by L'/L, so saturation never moves). Two-ring
+        // 12-tap base estimate; the detail term is soft-limited so strong edges do not halo.
         float rad = max(fxParams0.y, 4.0f) * KhFxPx();   // KH_FX_PX_REF.
         float lC = Luma(scene);
         float lB = 0.0f;
         // KH_GLOW_PYR: the twelve taps sit 0.785 rad apart along their rings (2 pi rad / 8, 2 pi (rad / 2) / 4);
         // each over that spacing, the base estimate is the smooth local average it stands for.
-        // KH_CLARITY_ID: each tap weighs 1 / 12 (it was 0.0833: the weights summed to 0.9996, so a flat picture
-        // read a detail of 0.0004 x its luma and was scaled by 1.0003 at the default strength).
+        // KH_CLARITY_ID: each tap weighs exactly 1 / 12 (not 0.0833: those weights sum to 0.9996, so a flat picture
+        // reads a detail of 0.0004 x its luma and is scaled by 1.0003 at the default strength).
         const float khcl_s = 0.7854f * rad;
         const float khcl_m = KhGlowMix(khcl_s);
 
@@ -1701,18 +1700,18 @@ float4 PSEffect(VSOut i) : SV_Target
 
         float detail = lC - lB;
         detail = detail / (1.0f + 2.5f * abs(detail));   // Soft limiter (anti-halo).
-        // KH_CLARITY_ID: the floor guards the division only - the identity term stays 1. As (lC + s d 2.2) /
-        // max(lC, 1e-3) it scaled any pixel under a luma of 1e-3 by lC / 1e-3 with no detail at all (strength 0, a
-        // flat area): down to the 0.3 clamp, the darkest night shadows crushed. Equal above 1e-3 (to an ulp).
+        // KH_CLARITY_ID: the floor guards the division only - the identity term stays 1. Do not write it as
+        // (lC + s d 2.2) / max(lC, 1e-3): that scales any pixel under a luma of 1e-3 by lC / 1e-3 with no detail at all
+        // (strength 0, a flat area), down to the 0.3 clamp, crushing the darkest night shadows. The two are equal above
+        // 1e-3 (to an ulp).
         float scale = 1.0f + fxParams0.x * detail * 2.2f / max(lC, 1e-3f);
         outc = scene * clamp(scale, 0.3f, 3.0f);
     }
     else if (effect == 19)   // Deband: [threshold(1/255), rangePx, grain(1/255)].
     {
-        // Gradient debanding: average four taps on a hash-rotated cross within
-        // range; adopt the average only where it stays inside the threshold
-        // (real edges never do). Triangular-pdf grain breaks residual
-        // quantization. Static noise (no TAA exists to launder animation).
+        // Gradient debanding: average four taps on a hash-rotated cross within range; adopt the average only where it
+        // stays inside the threshold (real edges never do). Triangular-pdf grain breaks residual quantization. Static
+        // noise (no TAA exists to launder animation).
         float2 h = Hash2(i.pos.xy);
         float ang = h.x * 6.2832f;
         float rad = (0.3f + 0.7f * h.y) * max(fxParams0.y, 2.0f) * KhFxPx();   // KH_FX_PX_REF (the dither stays per pixel).
@@ -1729,8 +1728,8 @@ float4 PSEffect(VSOut i) : SV_Target
         outc += tri * (fxParams0.z / 255.0f);
         outc = max(outc, 0.0f);
     }
-    else if (effect == 20)   // Rainlens: [intensity, speed, condensation, refract]; fx1 = system
-                             // Camera velocity.
+    else if (effect == 20)   // Rainlens: [intensity, speed, condensation, refract]; fx1.xyz = system
+                             // camera velocity, fx1.w = the integrated rain clock (the shader scales it by speed).
     {
         float aspect = fxMeta.z / max(fxMeta.w, 1.0f);
         float2 q = float2(uv.x * aspect, uv.y);
@@ -1774,8 +1773,7 @@ float4 PSEffect(VSOut i) : SV_Target
         fogC = KhGlowSel(fogC, khrl_p, khrl_m);
 
         fogC = lerp(fogC, Luma(fogC).xxx, 0.12f) * 1.02f;
-        // Fine static condensation droplets (twinkle in with the film, cleared
-        // where trails wiped).
+        // Fine static condensation droplets (twinkle in with the film, cleared where trails wiped).
         float2 sid = floor(q * 34.0f);
         float sn = Hash(sid);
         float2 sf = frac(q * 34.0f) - 0.5f;
@@ -1814,10 +1812,8 @@ float4 PSEffect(VSOut i) : SV_Target
         float khc_phase = khc_duv.y * khc_lines + t * fxParams2.x;
         float khc_line = floor(khc_phase);
 
-        // Tracking wobble (fxParams2.y, px): each scanline row shifts by a
-        // per-line random jitter requantized at 24 Hz plus a slow per-line
-        // sway. Only the picture wobbles; the tube mask and the grille live on
-        // the glass.
+        // Tracking wobble (fxParams2.y, px): each scanline row shifts by a per-line random jitter requantized at 24 Hz
+        // plus a slow per-line sway. Only the picture wobbles; the tube mask and the grille live on the glass.
         float khc_wob = ((Hash(float2(khc_line * 0.173f, floor(t * 24.0f) * 0.71f)) - 0.5f)
                        + 0.35f * KhSin(t * 2.3f + khc_line * 0.61f)) * fxParams2.y * KhFxPx();   // KH_FX_PX_REF, KH_HASH.
 
@@ -1829,19 +1825,18 @@ float4 PSEffect(VSOut i) : SV_Target
         khc_col.g = KhSampleSceneBil(khc_dpx).g;
         khc_col.b = KhSampleSceneBil(khc_dpx - khc_fpx).b;
 
-        // Beam scanlines: a shaped sine whose exponent narrows in the shadows
-        // and widens toward the highlights (phosphor blooming); the 1.32 gain
-        // lifts the average level the dark gaps remove (to 0.95 in the
-        // highlights, 0.75 at mid-grey, 0.64 in the shadows).
+        // Beam scanlines: a shaped sine whose exponent narrows in the shadows and widens toward the highlights
+        // (phosphor blooming); the 1.32 gain lifts the average level the dark gaps remove (to 0.95 in the highlights,
+        // 0.75 at mid-grey, 0.64 in the shadows).
         float khc_lum = saturate(Luma(khc_col));
         const float khc_bex = lerp(2.2f, 0.65f, khc_lum);
         float khc_beam = pow(abs(KhSin(khc_phase * 3.14159265f)),   // KH_HASH: the phase scrolls with t.
                              khc_bex);
         // KH_CRT_BANDLIMIT - the lines' period on screen: rows per line at this pixel, through the warp's vertical
-        // stretch (d duv.y / d uv.y). Sampled once per pixel, a period of 2 rows or less cannot be drawn (at 2 a
-        // phase of 0.25 lights every row alike, a phase of 0 alternates full and none, and the scroll swept between
-        // them - blinking lines and moire bands); so the profile fades to its own mean (|sin|^e averaged over a line,
-        // a fit within 0.005) from 3 rows per line down to 2. At 3 and more the lines are exactly as before.
+        // stretch (d duv.y / d uv.y). Sampled once per pixel, a period of 2 rows or less cannot be drawn (at 2 a phase
+        // of 0.25 lights every row alike, a phase of 0 alternates full and none, and the scroll sweeps between them -
+        // blinking lines and moire bands); so the profile fades to its own mean (|sin|^e averaged over a line, a fit
+        // within 0.005) from 3 rows per line down to 2. At 3 and more the profile is not faded.
         const float khc_dy = 1.0f + khc_curv * khc_r2 * (1.0f + 0.8f * khc_r2)
                            + 2.0f * khc_cc.y * khc_cc.y * khc_curv * (1.0f + 1.6f * khc_r2);
         const float khc_rows = fxMeta.w / max(khc_lines * khc_dy, 1.0e-4f);
@@ -1863,30 +1858,25 @@ float4 PSEffect(VSOut i) : SV_Target
                                                 KhCrtStripe(khc_xr, khc_tp, 2.0f) - KhCrtStripe(khc_xl, khc_tp, 2.0f));
         khc_col *= lerp(float3(1.0f, 1.0f, 1.0f), khc_tri * 1.35f, khc_mk);
 
-        // Rolling sync band: a soft dark bar drifting down the frame and
-        // wrapping (the vertical-hold-slipping read).
+        // Rolling sync band: a soft dark bar drifting down the frame and wrapping (the vertical-hold-slipping read).
         float khc_bpos = frac(t * 0.11f);
         float khc_bd = abs(khc_duv.y - khc_bpos);
         khc_bd = min(khc_bd, 1.0f - khc_bd);
         float khc_band = 1.0f - smoothstep(0.0f, 0.16f, khc_bd);
         khc_col *= 1.0f - khc_band * khc_band * 0.22f * saturate(fxParams1.z);
 
-        // Mains flicker: a fast beat plus a per-refresh random sparkle
-        // quantized to 60 Hz.
+        // Mains flicker: a fast beat plus a per-refresh random sparkle quantized to 60 Hz.
         float khc_fl = saturate(fxParams1.y);
         float khc_hum = KhSin(t * 100.0f * 3.14159265f) * 0.5f + 0.5f;   // KH_HASH.
         float khc_spark = Hash(float2(floor(t * 60.0f), 3.7f)) - 0.5f;
         khc_col *= 1.0f + khc_fl * (khc_hum * 0.04f + khc_spark * 0.05f);
 
-        // Phosphor tint, then the tube face: rounded-rectangle mask in the
-        // distorted space (out-of-range refraction lands outside it - the bezel
-        // is black), a ~2 px feathered edge and a soft glass falloff into the
-        // corners.
+        // Phosphor tint, then the tube face: rounded-rectangle mask in the distorted space (out-of-range refraction
+        // lands outside it - the bezel is black), a ~2 px feathered edge and a soft glass falloff into the corners.
         khc_col *= color.rgb;
-        // KH_FX_ROUND: the corners measured on the picture - x in heights (khc_as, the aspect) - so they are
-        // round and the feather is 2 px on both axes; in uv they were ellipses 1.78 x wider at 16:9 and the
-        // feather 3.6 px across x. cornerRadius is in heights (unchanged along the vertical), at most half the
-        // shorter side.
+        // KH_FX_ROUND: the corners measured on the picture - x in heights (khc_as, the aspect) - so they are round and
+        // the feather is 2 px on both axes (in uv they would be ellipses 1.78 x wider at 16:9 and the feather 3.6 px
+        // across x). cornerRadius is in heights, at most half the shorter side.
         const float khc_as = fxMeta.z / fxMeta.w;
         float khc_cr = clamp(fxParams1.w, 0.003f, 0.5f * min(khc_as, 1.0f));
         float2 khc_q = abs(khc_duv - 0.5f) * float2(khc_as, 1.0f);

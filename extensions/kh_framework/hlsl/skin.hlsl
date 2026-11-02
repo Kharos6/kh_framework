@@ -1,50 +1,37 @@
-// skin.hlsl - KH_SKIN_GPU: a skeletal binding's vertices, skinned on the GPU. A
-// STANDALONE unit (cb.hlsl is not prefixed): one vertex shader and no pixel
-// stage. C++ (kh_skin_so_batch) draws a mesh's REST STREAM as a point list
-// through VSSkinSo with stream output bound and rasterisation off, so every
-// streamed vertex lands in the binding's vertex buffer as one MeshVertex -
-// the same 48 bytes (position, normal, uv, tangent) kh_skin_verts writes on the
-// CPU. Every binding streams the whole rest stream, locked or not: every LOD
-// level skins (KH_LOD_SKIN; KH_SKIN_LVL0 retired). KH_SKIN_POOL: that buffer is
-// the binding's slice of its mesh's pool chunk, streamed at the slice's offset
-// (or a buffer of its own when the pool cannot give one). Every pass that draws
-// the mesh binds it at that offset - a mesh under a vertex stage (KH_USER_VS)
-// draws the stage's deformed copy of it instead - and the instanced routes read
-// the same bytes through the chunk's view (the Sk twins' KhSkPull, cb.hlsl): no
-// other shader skins.
+// skin.hlsl - KH_SKIN_GPU: a skeletal binding's vertices, skinned on the GPU. A STANDALONE unit (cb.hlsl is not
+// prefixed): one vertex shader and no pixel stage. C++ (kh_skin_so_batch) draws a mesh's REST STREAM as a point list
+// through VSSkinSo with stream output bound and rasterisation off, so every streamed vertex lands in the binding's
+// vertex buffer as one MeshVertex - the same 48 bytes (position, normal, uv, tangent) kh_skin_verts writes on the CPU.
+// Every binding streams the whole rest stream, locked or not: every LOD level skins (KH_LOD_SKIN; KH_SKIN_LVL0
+// retired). KH_SKIN_POOL: that buffer is the binding's slice of its mesh's pool chunk, streamed at the slice's offset
+// (or a buffer of its own when the pool cannot give one). Every pass that draws the mesh binds it at that offset - a
+// mesh under a vertex stage (KH_USER_VS) draws the stage's deformed copy of it instead - and the instanced routes read
+// the same bytes through the chunk's view (the Sk twins' KhSkPull, cb.hlsl): no other shader skins.
 //
 // TWIN of kh_skin_verts (rendering_integration_features.hpp) - the same sums in the
 // same order. Change one and change the other.
 //
-// The rest stream (C++ twin KhSkinSoVert, 80 bytes, built by
-// kh_skin_so_stream): the AUTHORED position (metres), the authored normal
-// (n / native_ext), the covariant tangent (t * native_ext) with its
-// handedness, the uv, four bone indices and four weights. A weight the CPU
-// path would skip (not above zero, or naming a bone past the skeleton) is
+// The rest stream (C++ twin KhSkinSoVert, 80 bytes, built by kh_skin_so_stream): the AUTHORED position (metres), the
+// authored normal (n / native_ext), the covariant tangent (t * native_ext) with its handedness, the uv, four bone
+// indices and four weights. A weight the CPU path would skip (not above zero, or naming a bone past the skeleton) is
 // stored as zero, so the loop below needs no bone-count test.
-// KH_SKIN_SO_PAL: a bone index is the bone's row in the mesh's palette (C++
-// KhSkinSup::pal - the bones some weight names, in bone order), not its
-// skeleton index: kh_skin_so_cb_fill writes bone pal[j]'s map at row j, so the
-// map is the one kh_skin_verts applies.
+// KH_SKIN_SO_PAL: a bone index is the bone's row in the mesh's palette (C++ KhSkinSup::pal - the bones some weight
+// names, in bone order), not its skeleton index: kh_skin_so_cb_fill writes bone pal[j]'s map at row j, so the map is
+// the one kh_skin_verts applies.
 //
-// The palette: three float4 per bone, row c = (M[0+c], M[3+c], M[6+c],
-// M[9+c]) of kh_skin_affine_of's 12-float map, so v' = v * M + T is a dot and
-// an add per axis. The weight left under one goes to the root (the identity).
+// The palette: three float4 per bone, row c = (M[0+c], M[3+c], M[6+c], M[9+c]) of kh_skin_affine_of's 12-float map, so
+// v' = v * M + T is a dot and an add per axis. The weight left under one goes to the root (the identity).
 //
-// KH_SKIN_SO_BIG: KH_SKIN_SO_BONES is the palette's size in this compile - 256
-// as written (C++ KH_SKIN_SO_BONES_S, the small class: CBSkin 770 float4), 1364
-// when C++ compiles the large class (KH_SKIN_SO_DEFS_L; C++ KH_SKIN_SO_BONES,
-// CBSkin 4094 float4, the most one cbuffer holds). C++ hands a mesh to the
-// smallest class its palette fits and keeps a bigger one on the CPU. The
-// clamp in the loop is unreachable (SKN-9): every stored index is below the
-// palette's size, which is at most this class's count; it only keeps a read
-// inside khskBone. These counts, CBSkin's ByteWidths and the refusal sites
-// change as one.
+// KH_SKIN_SO_BIG: KH_SKIN_SO_BONES is the palette's size in this compile - 256 as written (C++ KH_SKIN_SO_BONES_S, the
+// small class: CBSkin 770 float4), 1364 when C++ compiles the large class (KH_SKIN_SO_DEFS_L; C++ KH_SKIN_SO_BONES,
+// CBSkin 4094 float4, the most one cbuffer holds). C++ hands a mesh to the smallest class its palette fits and keeps a
+// bigger one on the CPU. The clamp in the loop is unreachable: every stored index is below the palette's size,
+// which is at most this class's count; it only keeps a read inside khskBone. These counts, CBSkin's ByteWidths and the
+// refusal sites change as one.
 //
-// The box: the pose is stored in its own box, as the CPU path stores it
-// (KhVsCore scales a position by size, divides a normal by it and multiplies
-// a tangent by it). The box is C++'s bound of this pose (kh_skin_so_bound);
-// whatever box is handed in, the drawn position is root + skinned * R.
+// The box: the pose is stored in its own box, as the CPU path stores it (KhVsCore scales a position by size, divides a
+// normal by it and multiplies a tangent by it). The box is C++'s bound of this pose (kh_skin_so_bound); whatever box is
+// handed in, the drawn position is root + skinned * R.
 
 #ifndef KH_SKIN_SO_BONES
 #define KH_SKIN_SO_BONES 256   // C++ twin KH_SKIN_SO_BONES_S; the large class defines it (KH_SKIN_SO_BIG above).

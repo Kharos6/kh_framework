@@ -1,138 +1,107 @@
-// ssao.hlsl - KH_SSAO, the screen-space ambient occlusion of OUR meshes. A
-// standalone unit (no cb.hlsl prefix; its own b0). Any edit changes the
-// unit's shader cache key. C++ twins: KhSsaoCb, kh_ssao_pre, kh_ssao_post, KH_SSAO_MARK.
+// ssao.hlsl - KH_SSAO, the screen-space ambient occlusion of OUR meshes. A standalone unit (no cb.hlsl prefix; its own
+// b0). Any edit changes the unit's shader cache key. C++ twins: KhSsaoCb, kh_ssao_pre, kh_ssao_post, KH_SSAO_MARK.
 //
-// Nine draws after a drawer's depth-writing draws (the world injection's on
-// the render thread, or the flush's late ones under the park), plus - whether
-// or not the term runs - the near-plane marker's draw and the C++ side's
-// eraser draw. The term is computed on a HALF-RESOLUTION grid,
-// as the SSGI's gather is: the cost is the meshes' screen coverage, and
-// the term is a smooth field the full-resolution apply upsamples
-// depth-guided (KhSaTermAt: each half texel weighed by its own depth; effect
-// 24 guides the SSGI's by its grid's own depth too, over a wider 5 x 5).
-//   PSSsaoDepth - sample 0 of the live main depth at every other pixel,
-//                 converted to metres (KhSaMeters), into an R32 half-res
-//                 texture every later tap reads (one multisampled load and
-//                 one conversion per half pixel instead of one per tap).
-//   PSSsaoMain  - half res: the occlusion term into an R8 target, 1 wherever
-//                 the pixel is not ours.
-//   PSSsaoBlur  - six times, half res, ping-ponging two R8 targets: three
-//                 levels of the depth-weighted 5-tap blur, each an x pass then
-//                 a y pass (KH_SSAO_SEP: separable - the 5 x 5 kernel's
-//                 Gaussian is a product, its depth weight taken per axis), at
-//                 strides growing level to level, at our pixels alone (the rest
-//                 pass through).
-//   PSSsaoApply - full res: the term through a joint-bilateral upsample of the
-//                 half grid (the four texels around the pixel, depth-weighted,
-//                 KhSaTermAt), MULTIPLIED into the whole scene colour
-//                 (dest.rgb *= src.rgb) at our samples alone: the C++ side
-//                 binds the read-only depth view with a stencil test on the
-//                 mark, so unmarked pixels never run it.
-//   PSSsaoNearMark - full res, while the mark stands, for a pass that routes
-//                 near-z alone: (raw, true distance) at this drawer's gap
-//                 pixels into the near-plane marker the late effect chain
-//                 reads (KH_NEARZ_MARK; see the entry point).
+// Nine draws after a drawer's depth-writing draws (the world injection's on the render thread, or the flush's late ones
+// under the park), plus - whether or not the term runs - the near-plane marker's draw and the C++ side's eraser draw.
+// The term is computed on a HALF-RESOLUTION grid, as the SSGI's gather is: the cost is the meshes' screen coverage, and
+// the term is a smooth field the full-resolution apply upsamples depth-guided (KhSaTermAt: each half texel weighed by
+// its own depth; effect 24 guides the SSGI's by its grid's own depth too, over a wider 5 x 5).
+//   PSSsaoDepth - sample 0 of the live main depth at every other pixel, converted to metres (KhSaMetersAt), into an
+//                 R32 half-res texture every later tap reads (one multisampled load and one conversion per half
+//                 pixel instead of one per tap).
+//   PSSsaoMain  - half res: the occlusion term into an R8 target, 1 wherever the pixel is not ours.
+//   PSSsaoBlur  - six times, half res, ping-ponging two R8 targets: three levels of the depth-weighted 5-tap blur,
+//                 each an x pass then a y pass (KH_SSAO_SEP: separable - the 5 x 5 kernel's Gaussian is a product,
+//                 its depth weight taken per axis), at each level's own stride (KhSaBlur: at most 3, 6 and 4 half
+//                 pixels; the third level's can be below the second's), at our pixels alone (the rest pass through).
+//   PSSsaoApply - full res: the term through a joint-bilateral upsample of the half grid (the four texels around
+//                 the pixel, depth-weighted, KhSaTermAt), MULTIPLIED into the whole scene colour (dest.rgb *=
+//                 src.rgb) at our samples alone: the C++ side binds the read-only depth view with a stencil test on
+//                 the mark, so unmarked pixels never run it.
+//   PSSsaoNearMark - full res, while the mark stands, for a pass that routes near-z alone: (raw, true distance) at
+//                 this drawer's gap pixels into the near-plane marker the late effect chain reads (KH_NEARZ_MARK;
+//                 see the entry point).
 //   (eraser)    - no shader: a stencil-only draw sets the mark back to 0.
 //
-// "Ours" is the one test every pass takes, and it is the STENCIL's answer
-// (KH_SSAO_MARK): every depth-writing draw of ours writes stencil 1 where
-// it wins the depth test (3 on a see-through blend mode, which the term
-// skips: KH_SSAO_SEE_THROUGH), the engine's world draws never write the
-// main depth's stencil, and the eraser clears the mark after the term - so a
-// pixel with the mark was painted by THIS drawer since its last pass,
-// whichever drawer that is and however the frame's races fell. An engine
-// pixel is left exactly as it was: it neither receives our term nor is
-// compared against anything but the depth it already sits in. It does
-// occlude ours - the samples read the live depth whoever wrote it - so a
-// mesh resting on the ground darkens at the contact, and an engine wall
-// darkens the mesh leaning on it. The engine's own AO stays the engine's.
+// "Ours" is the one test every pass takes, and it is the STENCIL's answer (KH_SSAO_MARK): every depth-writing draw of
+// ours while this drawer's pass is on and its post still ahead writes stencil 1 where it wins the depth test (3 on a
+// see-through blend mode, which the term skips: KH_SSAO_SEE_THROUGH; a draw with no post ahead writes no mark), the
+// engine's world draws never write the main depth's stencil, and the eraser clears the mark after the term - so a pixel
+// with the mark was painted by THIS drawer since its last pass, whichever drawer that is
+// and however the frame's races fell. An engine pixel is left exactly as it was: it neither receives our term nor is
+// compared against anything but the depth it already sits in. It does occlude ours - the samples read the live depth
+// whoever wrote it - so a mesh resting on the ground darkens at the contact, and an engine wall darkens the mesh
+// leaning on it. The engine's own AO stays the engine's.
 //
-// Depth is metres along the view axis from the injection's own pair
-// (KhSceneMeters's recipe) and the viewport range the pass drew in - or, for
-// a near-z routed fragment of ours nearer than the pass's near plane, from
-// the route's own depth ramp (KH_SSAO_NEARZ, KhSaMetersAt); the view
-// position is rebuilt from the pixel and that depth (KhgVpos's recipe). The
-// normal is taken twice: over a 1 px baseline from the nearer neighbour on
-// each screen axis (silhouette-safe: the cliff's slope is never the pixel's),
-// and over a WIDE baseline that grows with the radius on screen, which
-// averages across a mesh's facets the way its smooth shading normal does.
-// The wide one is the reference plane wherever its four taps stay on the
-// receiver's surface (depth-continuous within the radius) and it agrees with
-// the 1 px one (KH_SSAO_NWIDE: within about 20 degrees, fading out by 35 - a
-// tap past a convex corner is depth-continuous with the pixel, and the plane
-// through it bent round the corner and greyed the whole face); the 1 px one
-// answers at silhouettes and creases. With a per-facet normal the tangent
-// plane jumped at every edge and each facet took its own tone; a smooth
-// normal makes the term continuous across them.
+// Depth is metres along the view axis from the injection's own pair (KhSceneMeters's recipe) and the viewport range the
+// pass drew in - or, for a near-z routed fragment of ours nearer than the pass's near plane, from the route's own depth
+// ramp (KH_SSAO_NEARZ, KhSaMetersAt); the view position is rebuilt from the pixel and that depth (KhgVpos's recipe).
+// The normal is taken twice: over a 1 px baseline from the nearer neighbour on each screen axis (silhouette-safe: the
+// cliff's slope is never the pixel's), and over a WIDE baseline that grows with the radius on screen, which averages
+// across a mesh's facets the way its smooth shading normal does.
+// The wide one is the reference plane wherever the tap it takes on each axis (of its two, the one nearer the pixel's
+// depth) stays on the receiver's surface (depth-continuous within the radius) and it agrees with the 1 px one
+// (KH_SSAO_NWIDE: within about 20 degrees, fading out by 35 - a tap past a convex corner is depth-continuous with the
+// pixel, and without that test the plane through it would bend round the corner and grey the whole face); the 1 px one
+// answers at silhouettes and creases. A per-facet normal jumps the tangent plane at every edge (each facet its own
+// tone); the smooth one keeps the term continuous across them.
 //
-// Every pass draws over the meshes' rectangle padded by the passes' reach
-// (KH_SSAO_RECT_PAD). The gather and blur taps read no term or half-grid
-// depth texel outside it: nothing wrote there this frame - so the gather's
-// search ends at the rectangle's edge, 88 full pixels past the meshes' box,
-// short of the radius where that spans more on screen. The wide normal's
-// four depth taps (KhSaNormal at a stride of up to 24 half pixels) take no
-// such test; they stay inside because a marked pixel lies inside the
-// UNPADDED rectangle and the pad exceeds that stride - the C++ side's
-// contract at KH_SSAO_RECT_PAD.
+// Every pass draws over the meshes' rectangle padded by the passes' reach (KH_SSAO_RECT_PAD). The gather and blur taps
+// read no term or half-grid depth texel outside it: nothing wrote there this frame - so the gather's search ends at the
+// rectangle's edge, 88 full pixels past the meshes' box, short of the radius where that spans more on screen. The wide
+// normal's four depth taps (KhSaNormal at a stride of up to 24 half pixels) take no such test; they stay inside because
+// a marked pixel lies inside the UNPADDED rectangle and the pad exceeds that stride - the C++ side's contract at
+// KH_SSAO_RECT_PAD.
 //
 // KH_SSAO_VB - the gather is a visibility bitmask (Therrien, Levesque and Gilet 2023; the method of Pascal Gilcher's
 // MXAO, and of the SSGI's gather, effect3.hlsl PSSsgiGather). The receiver's hemisphere is cut into KH_SA_NS slices
 // through its view ray and each slice into 32 sectors; along each slice's line the samples march outward on both
 // sides. A sample stands for a solid KH_SA_THICK x the radius deep behind its visible face (along its own view ray)
 // and occupies the sectors that solid spans above the receiver's tangent plane (KhSaEdge clips it there): an object
-// in front of the receiver occludes what it covers, where a height-above-the-plane sum takes it as solid all
-// the way down - a dark halo on the surface behind a post. Two neighbouring samples within that depth of
-// each other are one surface, and so are the receiver and the first sample: the quad between them occupies its
-// sectors too (the ground between a wall's foot and the first sample on it is not left open). A sample counts only
-// the sectors no nearer sample held; a quad's take the mean of its two ends' falloff weights. The sectors split a
-// slice by GTAO's exact measure, cos(angle to the normal) x |sin(angle to the view ray)| (KhSaG), so a sector's share
-// is its share of the cosine-weighted hemisphere (without the |sin|, as the SSGI's gather runs, the occlusion mass
-// the estimate missed against a ray-traced reference grew 2.4 x here, and its level fell by about a third).
+// in front of the receiver occludes what it covers, where a height-above-the-plane sum takes it as solid all the way
+// down - a dark halo on the surface behind a post. Two neighbouring samples within that depth of each other are one
+// surface, and so are the receiver and the first sample: the quad between them occupies its sectors too (the ground
+// between a wall's foot and the first sample on it is not left open). A sample counts only the sectors no nearer
+// sample held; a quad's take the mean of its two ends' falloff weights. The sectors split a slice by GTAO's exact
+// measure, cos(angle to the normal) x |sin(angle to the view ray)| (KhSaG), so a sector's share is its share of the
+// cosine-weighted hemisphere (without the |sin|, as the SSGI's gather runs, the occlusion mass missed against a
+// ray-traced reference grows 2.4 x here and the level falls by about a third).
 //
-// The slices' rotation and the samples' jitter come from the
-// pixel's POSITION ALONE (no frame term: a static frame is bit-identical, every shimmer is real motion), by a 4 x 4
-// ORDERED tile of sixteen rotations: the first blur level's 5 x 5 support (its x pass then its y pass) covers a whole
-// tile - its stride is odd (KH_SSAO_TILE, KhSaBlur), so its five taps fall on all four of the tile's columns, then
-// rows - so after it every pixel holds a mix of all sixteen. A weighted mix, not the plain average: by the taps'
-// weights, and the two +-2 stride taps landing on one column, the pixel's own tile column (row) takes 0.25, the two
-// beside it 0.22 each and the opposite one 0.30, so a 4 x 4 pattern of 2 - 8 % of the raw one remains after that
-// level and 0.2 - 7.4 % after all three (the most for a term that varies smoothly with the rotation): about 2 R8
-// steps for a raw swing of 0.1. A skinned mesh is never still, and under a screen-anchored random pattern every frame
-// re-rolled its taps.
+// The slices' rotation and the samples' jitter come from the pixel's POSITION ALONE (no frame term: a static frame is
+// bit-identical, every shimmer is real motion), by a 4 x 4 ORDERED tile of sixteen rotations: the first blur level's
+// 5 x 5 support (its x pass then its y pass) covers a whole tile - its stride is odd (KH_SSAO_TILE, KhSaBlur), so its
+// five taps fall on all four of the tile's columns, then rows - so after it every pixel holds a mix of all sixteen. A
+// weighted mix, not the plain average: by the taps' weights, and the two +-2 stride taps landing on one column, the
+// pixel's own tile column (row) takes 0.25, the two beside it 0.22 each and the opposite one 0.30, so a 4 x 4 pattern
+// of 2 - 8 % of the raw one remains after that level and 0.2 - 7.4 % after all three (the most for a term that varies
+// smoothly with the rotation): about 2 R8 steps for a raw swing of 0.1. Do not use a screen-anchored random pattern: a
+// skinned mesh is never still, so under one every frame re-rolls its taps.
 // The receiver is lifted off its own surface by a floor (a share of the radius plus a little distance), heights taken
 // over its own tangent plane, so its reconstruction noise holds no sector; the term fades where it cannot be trusted:
 // at grazing incidence and where the radius spans only a few pixels. What one blur level could not hide - the
 // pattern is anchored to the screen, so a moving mesh slides under it - the three blur levels average out.
 //
-// The radius is world-space, so far away it is a few pixels and the term
-// with it. As the distance grows the radius is floored at KH_SA_RANGE_FRAC of
-// it (a constant footprint on screen from there on, at a given field of view:
-// the floor is in metres, so through a zoomed optic the same mesh's term
-// spans more of its surroundings - 15 m at 300 m, held to 256 half pixels),
-// which is what keeps a crease or a contact readable across a street: the
-// larger-scale occlusion a far mesh shows is as real as the close one's, only
-// coarser.
+// The radius is world-space, so far away it is a few pixels and the term with it. As the distance grows the radius is
+// floored at KH_SA_RANGE_FRAC of it (a constant footprint on screen from there on, at a given field of view: the floor
+// is in metres, so through a zoomed optic the same mesh's term spans more of its surroundings - 15 m at 300 m, held to
+// 256 half pixels), which is what keeps a crease or a contact readable across a street: the larger-scale occlusion a
+// far mesh shows is as real as the close one's, only coarser.
 //
-// What this does not do, by design: a translucent or depth-Off draw of ours
-// writes no depth and so is never "ours" here (no term on it, as before), and
-// the term lands before either drawer's translucent tail blends over it; the
-// PIP passes and the view-model slice draw no term; on an MSAA scene the
-// shaders' test is sample 0's: a pixel whose sample 0 is not ours takes no
-// term on any sample, and one whose sample 0 is ours takes it on its marked
-// samples (the apply's stencil test) - on every sample where the read-only
-// depth view or the test state is missing (a sub-pixel dark rim at most).
+// What this does not do, by design: a translucent or depth-Off draw of ours writes no depth and so is never "ours" here
+// (no term on it), and the term lands before either drawer's translucent tail blends over it; the PIP passes and the
+// view-model slice draw no term; on an MSAA scene the shaders' test is sample 0's: a pixel whose sample 0 is not ours
+// takes no term on any sample, and one whose sample 0 is ours takes it on its marked samples (the apply's stencil test)
+// - on every sample where the read-only depth view or the test state is missing (a sub-pixel dark rim at most).
 
 cbuffer CBSsao : register(b0)
 {
     float4 khsaProj;   // x = m00, y = m11, z = m22, w = m32 (the drawer's projection, row-vector).
     float4 khsaVp;     // x = viewport MinDepth, y = MaxDepth, z = target width, w = target height (px, full res).
-    float4 khsaCtl;    // x = radius (m), y = strength (the term's exponent), z = the blur stride
-                       // multiplier of this draw (1, 2, 3 by level); w = the blur's axis and rule
-                       // (KH_SSAO_SEP: 0 / 1 = x / y at the first two levels' stride, 2 / 3 = x / y at
-                       // the third level's - the stride the full-res apply used to blur at).
-    // The FULL-resolution pixel rectangle every pass draws over (x = left,
-    // y = top, z = right, w = bottom, exclusive): a term texel outside it was
-    // not written this frame and must not be read.
+    float4 khsaCtl;    // x = radius (m), y = strength (the term's exponent), z = the blur stride multiplier of
+                       // this draw (1, 2, 3 by level); w = the blur's axis and rule (KH_SSAO_SEP: 0 / 1 = x / y at
+                       // the first two levels' stride, 2 / 3 = x / y at the third level's).
+    // The FULL-resolution pixel rectangle every pass draws over (x = left, y = top, z = right, w = bottom, exclusive):
+    // a term texel outside it was not written this frame and must not be read.
     float4 khsaRect;
     float4 khsaHalf;   // x, y = the half-resolution grid's width and height (px); z = the near-z route's near
                        // (0 = no route this pass), w = its gap floor (KH_SSAO_NEARZ).
@@ -184,9 +153,8 @@ int2 KhSaClampHalf(int2 khsc_p)
 {
     return clamp(khsc_p, int2(0, 0), int2((int)khsaHalf.x - 1, (int)khsaHalf.y - 1));
 }
-// Is a half-grid pixel inside the rectangle (whose full-res edges round outward)?
-// The rectangle lies inside the target (kh_ssao_viewport clamps it), so this is
-// also every pass's test that a half-grid tap is on the grid.
+// Is a half-grid pixel inside the rectangle (whose full-res edges round outward)? The rectangle lies inside the target
+// (kh_ssao_viewport clamps it), so this is also every pass's test that a half-grid tap is on the grid.
 bool KhSaInRectHalf(int2 khsr_p)
 {
     return khsr_p.x >= (int)(khsaRect.x * 0.5f) && khsr_p.y >= (int)(khsaRect.y * 0.5f) &&
@@ -202,8 +170,7 @@ float KhSaMeters(float khsm_raw)
     float khsm_d = khsaProj.w / khsm_den;
     return khsm_d > 0.0f ? khsm_d : 1.0e9f;
 }
-// The half-grid depth, metres (the sample at full pixel 2p; PSSsaoDepth stored
-// it converted).
+// The half-grid depth, metres (the sample at full pixel 2p; PSSsaoDepth stored it converted).
 float KhSaDepthH(int2 khsd_hp)
 {
     return khsaDepth.Load(int3(KhSaClampHalf(khsd_hp), 0));
@@ -224,10 +191,9 @@ float3 KhSaViewH(int2 khsv_hp)
     return KhSaView(khsv_hp * 2, KhSaDepthH(khsv_hp));
 }
 
-// The normal at half pixel hp from four taps at stride khsn_st (half px), the
-// nearer neighbour per axis, facing the camera. false when a tap leaves the
-// surface (a depth step over khsn_tol) or the cross is degenerate; khsn_w =
-// how far inside the tolerance the taps sit (1 well inside, fading to 0 at it).
+// The normal at half pixel hp from four taps at stride khsn_st (half px), the nearer neighbour per axis, facing the
+// camera. false when a tap leaves the surface (a depth step over khsn_tol) or the cross is degenerate; khsn_w = how far
+// inside the tolerance the taps sit (1 well inside, fading to 0 at it).
 bool KhSaNormal(int2 khsn_hp, float3 khsn_P, int khsn_st, float khsn_tol, out float3 khsn_N, out float khsn_w)
 {
     khsn_N = float3(0.0f, 0.0f, -1.0f);
@@ -278,17 +244,13 @@ bool KhSaMarked(int2 khsk_p)
     return (KhSaMark(khsk_p) & 1u) != 0u;
 }
 
-// KH_SSAO_NEARZ: the depth of full pixel p in metres. A near-z routed draw of
-// ours writes each fragment nearer than the pass's near plane on a straight
-// line into the gap below the viewport's MinDepth (PSComposite's KH_ARB_DEPTH
-// ramp: raw = gap + (MinDepth - gap) * z / near), which the projection reads
-// as about the near distance for every one of them - a flat wall, occluding
-// nothing. A raw in that gap on a pixel of ours decodes through the ramp
-// instead; every other raw, and every raw of a pixel that is not ours (the
-// engine's hands, were their slice to reach the gap - measured, it ends at
-// 0.01, below the gap's floor 0.01012), decodes as before. khsaHalf.z = the
-// route's near (0 = none), khsaHalf.w = the gap's floor; the gap's top is
-// khsaVp.x.
+// KH_SSAO_NEARZ: the depth of full pixel p in metres. A near-z routed draw of ours writes each fragment nearer than the
+// pass's near plane on a straight line into the gap below the viewport's MinDepth (PSComposite's KH_ARB_DEPTH ramp: raw
+// = gap + (MinDepth - gap) * z / near), which the projection reads as about the near distance for every one of them - a
+// flat wall, occluding nothing. A raw in that gap on a pixel of ours decodes through the ramp instead; every other raw,
+// and every raw of a pixel that is not ours (the engine's hands, were their slice to reach the gap - measured, it ends
+// at 0.01, below the gap's floor 0.01012), decodes through KhSaMeters. khsaHalf.z = the route's near (0 = none),
+// khsaHalf.w = the gap's floor; the gap's top is khsaVp.x.
 float KhSaMetersAt(int2 khsz_p, float khsz_raw)
 {
     if (khsaHalf.z > 0.0f && khsz_raw < khsaVp.x && khsz_raw >= khsaHalf.w && KhSaMarked(khsz_p)) {
@@ -297,10 +259,9 @@ float KhSaMetersAt(int2 khsz_p, float khsz_raw)
     return KhSaMeters(khsz_raw);
 }
 
-// KH_NEARZ_MARK: (raw depth, true distance) at a full pixel of ours in the
-// near-z gap - KhSaMetersAt's own test and decode - into the near-plane
-// marker the late effect chain reads (LoadDepthPS, cb.hlsl); every other
-// pixel is discarded and keeps what the marker held.
+// KH_NEARZ_MARK: (raw depth, true distance) at a full pixel of ours in the near-z gap - KhSaMetersAt's own test and
+// decode - into the near-plane marker the late effect chain reads (LoadDepthPS, cb.hlsl); every other pixel is
+// discarded and keeps what the marker held.
 float2 PSSsaoNearMark(float4 pos : SV_Position) : SV_Target
 {
     const int2 khnm_p = int2(pos.xy);
@@ -310,7 +271,7 @@ float2 PSSsaoNearMark(float4 pos : SV_Position) : SV_Target
 }
 
 // Half res: sample 0 of the live depth at full pixel 2p, in metres - the
-// conversion every half-grid read took, taken once (R32_FLOAT keeps it exact).
+// conversion every half-grid read needs, taken once (R32_FLOAT keeps it exact).
 float PSSsaoDepth(float4 pos : SV_Position) : SV_Target
 {
     const int2 khsd_p = KhSaClampFull(int2(pos.xy) * 2);
@@ -379,10 +340,9 @@ float PSSsaoMain(float4 pos : SV_Position) : SV_Target
     if (khsp_conf <= 0.0f) return 1.0f;
     const float khsp_spx = clamp(khsp_spx0, 2.0f, 256.0f);
 
-    // The normal: the 1 px one always; the wide baseline (a third of the
-    // radius on screen) blended over it by how well its taps stay on the
-    // surface - a blend, not a switch, so a crease sliding under the pixel
-    // does not flip the plane between frames.
+    // The normal: the 1 px one always; the wide baseline (a third of the radius on screen) blended over it by how well
+    // its taps stay on the surface - a blend, not a switch, so a crease sliding under the pixel does not flip the plane
+    // between frames.
     float3 khsp_N;
     if (!KhSaNormal(khsp_hp, khsp_P, 1, 1.0e9f, khsp_N)) return 1.0f;
     {
@@ -395,11 +355,9 @@ float PSSsaoMain(float4 pos : SV_Position) : SV_Target
         }
     }
     const float3 khsp_rd = khsp_P / max(length(khsp_P), 1.0e-4f);   // The pixel's own ray.
-    // Grazing confidence: the reconstruction is noise at the silhouette's
-    // slope (the SSGI window).
+    // Grazing confidence: the reconstruction is noise at the silhouette's slope (the SSGI window).
     khsp_conf *= smoothstep(0.008f, 0.05f, abs(dot(khsp_N, khsp_rd)));
-    // The receiver's lift off its own surface (the header): a share of the
-    // radius, plus a little distance.
+    // The receiver's lift off its own surface (the header): a share of the radius, plus a little distance.
     const float  khsp_pfl = 0.02f * khsp_rad + 0.001f * khsp_z;
     const float3 khsp_V = -khsp_rd;
     const float3 khsp_Pr = khsp_P + khsp_N * khsp_pfl;
@@ -411,10 +369,9 @@ float PSSsaoMain(float4 pos : SV_Position) : SV_Target
 
     float khsp_occ = 0.0f;
     [loop] for (int khsp_si = 0; khsp_si < KH_SA_NS; ++khsp_si) {
-        // The slice: a screen direction and the plane through the view ray it
-        // spans (the view-space step of one pixel along it, at a unit depth);
-        // the normal's projection into it (n, its length npl, its angle na from
-        // the view vector) and the tangent t along the plane.
+        // The slice: a screen direction and the plane through the view ray it spans (the view-space step of one pixel
+        // along it, at a unit depth); the normal's projection into it (n, its length npl, its angle na from the view
+        // vector) and the tangent t along the plane.
         const float  khsp_an = ((float)khsp_si + khsp_ph0) * (3.14159265f / (float)KH_SA_NS);
         const float2 khsp_dir = float2(cos(khsp_an), sin(khsp_an));   // Screen, y down.
         const float3 khsp_dv = normalize(float3(khsp_dir.x / (khsaProj.x * khsaVp.z),
@@ -442,10 +399,9 @@ float PSSsaoMain(float4 pos : SV_Position) : SV_Target
         float khsp_so = 0.0f;
         [loop] for (int khsp_sd2 = 0; khsp_sd2 < 2; ++khsp_sd2) {
             const float2 khsp_sdir = khsp_sd2 == 0 ? khsp_dir : -khsp_dir;
-            // The chain opens at the receiver (its point and its back), so the
-            // first sample, continuous with it, claims the sectors down to the
-            // horizon; pz / pf / pb / pw = the last sample's depth, front, back
-            // (in the slice) and falloff weight.
+            // The chain opens at the receiver (its point and its back), so the first sample, continuous with it, claims
+            // the sectors down to the horizon; pz / pf / pb / pw = the last sample's depth, front, back (in the slice)
+            // and falloff weight.
             bool   khsp_pv = true;
             float  khsp_pz = khsp_z;
             float  khsp_pw = 1.0f;
@@ -458,15 +414,12 @@ float PSSsaoMain(float4 pos : SV_Position) : SV_Target
                 // at least 1.05 half px (the self-sample floor).
                 const float khsp_sr = max(((float)khsp_k + khsp_jk) / (float)KH_SA_M * khsp_spx, 1.05f);
                 const int2  khsp_sp = int2((float2)khsp_hp + 0.5f + khsp_sdir * khsp_sr);
-                // Samples outside the rectangle reject rather than clamp (a clamp
-                // would read the border pixel's surface as a neighbour): their
-                // half-grid depth was not written this frame, and the rectangle
-                // test is the on-grid test too (the blurs take the same rule).
-                // Either break breaks the chain. The int() above truncates
-                // toward zero: a sample under one texel left of (above) the
-                // grid's first column (row) reads that texel, at the texel's
-                // own position - a rounding like every sample's, not a clamp
-                // (only where the rectangle starts at the target's edge).
+                // Samples outside the rectangle reject rather than clamp (a clamp would read the border pixel's surface
+                // as a neighbour): their half-grid depth was not written this frame, and the rectangle test is the
+                // on-grid test too (the blurs take the same rule). Either break breaks the chain. The int() above
+                // truncates toward zero: a sample under one texel left of (above) the grid's first column (row) reads
+                // that texel, at the texel's own position - a rounding like every sample's, not a clamp (only where the
+                // rectangle starts at the target's edge).
                 if (!KhSaInRectHalf(khsp_sp)) {
                     khsp_pv = false;
                     continue;
@@ -531,30 +484,29 @@ float PSSsaoMain(float4 pos : SV_Position) : SV_Target
     return pow(max(khsp_ao, 1.0e-4f), khsaCtl.y);
 }
 
-// KH_SSAO_SEP: the depth-weighted blur of the term at half pixel hp along ONE axis - five taps weighted by
-// distance (exp(-i^2 / 8), the old 5 x 5's Gaussian, which is a product of two of these) and by relative depth
-// agreement (the SSGI resolve's weights) - at a stride (half px) that grows with the radius on screen. An x pass
-// then a y pass is the separable form of a 5 x 5 (ten taps for twenty-five; the depth weight is taken per
-// axis, the textbook approximation). khsaCtl.w: bit 0 = the axis (0 x, 1 y); >= 2 = the third level's stride rule
-// (the one the full-res apply blurred at before it became a pure upsample). Taps outside the rectangle and sky
-// taps are dropped, and so are taps that are not ours (KH_SSAO_OURS, below).
+// KH_SSAO_SEP: the depth-weighted blur of the term at half pixel hp along ONE axis - five taps weighted by distance
+// (exp(-i^2 / 8); a 5 x 5 Gaussian is the product of two of these) and by relative depth agreement (the SSGI resolve's
+// weights) - at a stride (half px) that grows with the radius on screen. An x pass then a y pass is the separable form
+// of a 5 x 5 (ten taps for twenty-five; the depth weight is taken per axis, the textbook approximation). khsaCtl.w:
+// bit 0 = the axis (0 x, 1 y); >= 2 = the third level's stride rule. Taps outside the rectangle and sky taps are
+// dropped, and so are taps that are not ours (KH_SSAO_OURS, below).
 //
 // KH_SSAO_TILE: the first level's stride is odd. The gather's rotation comes from a 4 x 4 ordered tile whose four
 // parity classes (even / odd column x even / odd row) each hold one contiguous quarter of the sixteen phases, so a
-// level whose taps are all an even number of pixels apart never mixes them: at stride 2 (and 4 at the next two
-// levels, a radius of 25 - 31 half px on screen) each pixel kept one quarter of the rotations, and a fixed 4 x 4
-// pattern stayed in the term. Five taps at an odd stride land on all four columns of the tile (offsets 0, +-s,
-// +-2s cover every residue mod 4), so the first level's x pass then y pass mixes all sixteen - by unequal weights
-// (the header's note: a residual pattern of a few % of the raw one); strides 1 and 3 are unchanged and 2 becomes
-// 3 (its neighbours' rule from a radius of 37.5 half px on). The stride's maximum, and
-// with it the passes' reach (KH_SSAO_RECT_PAD), is unchanged.
+// level whose taps are all an even number of pixels apart never mixes them: were the first level at stride 2 (and 4 at
+// the next two levels, a radius of 25 - 31 half px on screen), each pixel would keep one quarter of the rotations and a
+// fixed 4 x 4 pattern would stay in the term. Five taps at an odd stride land on all four columns of the tile (offsets
+// 0, +-s, +-2s cover every residue mod 4), so the first level's x pass then y pass mixes all sixteen - by unequal
+// weights (the header's note: a residual pattern of a few % of the raw one). The odd rule leaves strides 1 and 3 and
+// turns 2 into 3 (its neighbours' rule from a radius of 37.5 half px on), so the stride's maximum, and with it the
+// passes' reach (KH_SSAO_RECT_PAD), does not grow.
 //
-// KH_SSAO_OURS: the term exists only at our pixels - PSSsaoMain writes 1 (no occlusion) everywhere else - so a
-// tap on a pixel that is not ours carries no measurement, only that placeholder. Where one of our meshes touches
-// or pierces an engine surface the two share a depth, the depth weight admits the engine's pixels at full weight,
-// and their 1s washed out the contact's occlusion exactly where it is strongest: a bright halo along every
-// contact with engine geometry (never between two of our meshes, whose pixels all carry real terms). A masked
-// filter reads its mask: the blurs and the apply's upsample take our taps alone.
+// KH_SSAO_OURS: the term exists only at our pixels - PSSsaoMain writes 1 (no occlusion) everywhere else - so a tap on
+// a pixel that is not ours carries no measurement, only that placeholder. Where one of our meshes touches or pierces
+// an engine surface the two share a depth, the depth weight admits the engine's pixels at full weight, and their 1s
+// would wash out the contact's occlusion exactly where it is strongest: a bright halo along every contact with engine
+// geometry (never between two of our meshes, whose pixels all carry real terms). A masked filter reads its mask: the
+// blurs and the apply's upsample take our taps alone.
 float KhSaBlur(int2 khsb_hp, float khsb_z)
 {
     const float khsb_rad = max(khsaCtl.x, khsb_z * KH_SA_RANGE_FRAC);
@@ -592,10 +544,9 @@ float PSSsaoBlur(float4 pos : SV_Position) : SV_Target
     return KhSaBlur(khsr_hp, khsr_z);
 }
 
-// Full res: the term at this pixel from the half grid, depth-guided - a joint
-// bilateral upsample (KH_SSAO_SEP; the blurring is all done on the half grid)
-// over our texels alone (KH_SSAO_OURS) - dithered. For a pixel whose sample 0
-// is ours: that sample's depth guides it (PSSsaoApply's body).
+// Full res: the term at this pixel from the half grid, depth-guided - a joint bilateral upsample (KH_SSAO_SEP; the
+// blurring is all done on the half grid) over our texels alone (KH_SSAO_OURS) - dithered. For a pixel whose sample 0 is
+// ours: that sample's depth guides it (PSSsaoApply's body).
 float KhSaTermAt(float4 pos)
 {
     const int2 khsq_p = int2(pos.xy);
@@ -604,8 +555,8 @@ float KhSaTermAt(float4 pos)
     // KH_SSAO_SEP: the joint bilateral upsample (Kopf et al. 2007). Half texel hp stands at full pixel 2 hp
     // (PSSsaoDepth and the gather read there), so this pixel lies at hp + (p & 1) / 2 on the half grid: the four
     // texels around it take their bilinear weights (an even pixel is its own texel's alone) times the blurs'
-    // depth weight against this pixel's full-resolution depth. Taps off the rectangle and sky taps drop; none
-    // left falls back to the texel.
+    // depth weight against this pixel's full-resolution depth. Taps off the rectangle, taps not ours and sky taps
+    // drop; none left falls back to the 3 x 3 below, and only past that to the texel.
     const float2 khsq_f = float2(khsq_p & 1) * 0.5f;
     float khsq_sum = 0.0f;
     float khsq_wsum = 0.0f;
@@ -624,8 +575,9 @@ float KhSaTermAt(float4 pos)
             khsq_wsum += khsq_w;
         }
     }
-    // KH_SSAO_OURS: an odd pixel of ours whose two texels are not (a sliver of our mesh one pixel wide between
-    // engine pixels) has no term among its four; it takes the depth-weighted mean of ours in the 3 x 3 around.
+    // KH_SSAO_OURS: an odd pixel of ours whose two texels (four where it is odd on both axes) all drop (a sliver of our
+    // mesh one pixel wide between engine pixels) has no term among them; it takes the depth-weighted mean of ours in
+    // the 3 x 3 around.
     if (!(khsq_wsum > 1.0e-4f)) {
         [unroll] for (int khsq_n = -1; khsq_n <= 1; ++khsq_n) {
             [unroll] for (int khsq_m = -1; khsq_m <= 1; ++khsq_m) {
@@ -649,11 +601,9 @@ float KhSaTermAt(float4 pos)
     return khsq_ao;
 }
 
-// The multiply, at our pixels. The stencil test runs ahead of the shader (the
-// state writes nothing, so the discard below cannot need a late test): a pixel
-// with no marked sample is never shaded, and the output reaches only the
-// samples that pass. The sample-0 test stays - it is what makes the guiding
-// depth ours.
+// The multiply, at our pixels. The stencil test runs ahead of the shader (the state writes nothing, so the discard
+// below cannot need a late test): a pixel with no marked sample is never shaded, and the output reaches only the
+// samples that pass. The sample-0 test stays - it is what makes the guiding depth ours.
 [earlydepthstencil]
 float4 PSSsaoApply(float4 pos : SV_Position) : SV_Target
 {

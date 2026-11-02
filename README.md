@@ -40,6 +40,6 @@ Requirements: Windows 10/11 and **Visual Studio 2022** (any edition - the free C
   DISCLAIMER
 </h1>
 
-While AI tools were **NOT** used in any capacity to create SQF code, Lua code, Arma Config code, or art assets, large portions of the rest of the codebase may have been either written or edited by an LLM. My past mod projects and career experience did give me an edge in understanding how things are meant to look and behave, so while I am not opposed to using AI, its output must hold under scrutiny beyond just being able to compile and work for a minute in a controlled environment; I will not accept any AI-made pull requests unless they have been tested a dozen times over and the person behind them has at least a basic understanding of them.
+AI tools were not used to create SQF code, Lua code, Arma Config code, or art assets, though large portions of the extension may have been either written or edited by an LLM. Any code written or edited by an LLM was implemented only after strict reviews, and its contents were still planned and orchestrated entirely by a human. This standard remains a requirement for future additions or changes to this repository. If you intend to use AI to contribute to this project, its output must hold under scrutiny beyond just being able to compile and work for a minute in a controlled environment.
 
 So long as it is done in good will, and credit to the original author(s) is provided alongside the necessary links to the original content, you are allowed to modify, redistribute, and repurpose this mod as you see fit.

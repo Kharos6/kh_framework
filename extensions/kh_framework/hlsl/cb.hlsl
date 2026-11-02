@@ -339,7 +339,7 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 // whether the file defines a vertex stage is read once per mission): an edit made mid-mission reaches some variants
 // and not others - restart the mission to pick it up everywhere. The compile runs on worker threads, and a material's
 // is not quick (KH_USER_END_NOWAIT): its unit is this file, yours and the whole builtin mesh shader (static.hlsl, or
-// composite + composite2), so each variant costs about what that shader does - a five-line KhUserShade measured 49 s
+// composite.hlsl), so each variant costs about what that shader does - a five-line KhUserShade measured 49 s
 // for one variant under fxc (the builtin twins: a minute or two). An effect's unit (this file and yours alone) and a
 // vertex stage's take about a second. Variants asked for in the same few frames compile side by side, up to a core
 // each; one asked for while a batch is in flight waits for that whole batch, then compiles. Neither a device reset
@@ -360,7 +360,7 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 // Placed after this file and BEFORE the builtin pixel shaders, and compiled three times - the flush's twin
 // (static.hlsl) and the injection's guard and arbitration twins (composite) - with KH_TEXTURED = KH_USER_MAT =
 // KH_RECEIVE_TEX = 1. It may call anything in this file outside the KH_FX_UNIT section (an effect's: a material
-// compile does not define it); it cannot call into static.hlsl / composite2.hlsl (they come after it). It defines
+// compile does not define it); it cannot call into static.hlsl / composite.hlsl (they come after it). It defines
 //     float3 KhUserShade(KhMatSurf s, float3 wpos, float3 n, float smf)
 // (the older five-parameter form with an `out float3 ambient` does not compile - fxc's message is reported once and
 // the submesh draws the white placeholder until the file is updated and the mission restarted). While the compile is
@@ -743,7 +743,7 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //                rules for a pixel that spreads its fog's share s over a cone of radius rm s - its own weight, the
 //                fog a source scatters into it with (a farther one, the sky behind a ridge, takes the receiver's) and
 //                the floor a nearer one puts on its own term, so a silhouette against the sky bleeds (their note
-//                below; effect3.hlsl's effect 23 is the worked example).
+//                below; effect.hlsl's effect 23 is the worked example).
 //   sun          KhFxSunSpot(dir, spos, sp) (a direction - lighting1.xyz for the sun or moon - projected as a point
 //                at infinity: false behind the camera or well off screen), KhSunFlareVis(sp) (how much sky shows at
 //                it, 25 depth taps - through KH_WSEE's layers by their transmittance), KhSunFlareEdge(spos) (its fade
@@ -4419,7 +4419,7 @@ struct VSInst {
 
 // KH_SKIN_POOL - a skin pool chunk (C++ KhSkinPoolChunk): the GPU-skinned poses of many skeletal bindings of one mesh,
 // each its whole MeshVertex array (48 bytes: pos 0, nrm 12, uv 24, tan 32) from its own vertex base, viewed as uint4 -
-// three elements a vertex. An Sk twin (static.hlsl, composite2.hlsl) pulls its instance's vertex at the record's base
+// three elements a vertex. An Sk twin (static.hlsl, composite.hlsl) pulls its instance's vertex at the record's base
 // (KhObjRec res.w) plus the vertex's index, then runs the twin it wraps unchanged (asfloat yields the bits the input
 // assembler would fetch from the same bytes for a 32-bit float element), so every instance draws exactly its own
 // slice's pose and the bucket draws them all in one call. Every bucket draw passes BaseVertexLocation 0, so SV_VertexID
@@ -4769,8 +4769,8 @@ float KhHazeT(float khaz_d, float khaz_wposY, float khaz_camY, float khaz_layerY
     return min(exp(-khaz_I * khaz_b), 1.0f);
 }
 // ===========================================================================
-// KH_FX_UNIT - the effect unit's own declarations and helpers, compiled into the builtin effect shader (effect.hlsl,
-// effect2.hlsl and effect3.hlsl follow this file) and into every user effect shader (the USER SHADER CONTRACT's EFFECT
+// KH_FX_UNIT - the effect unit's own declarations and helpers, compiled into the builtin effect shader (effect.hlsl
+// follows this file) and into every user effect shader (the USER SHADER CONTRACT's EFFECT
 // section) - one text for both, so a user effect reads the scene, the depth (the near-plane marker, KH_VM_SEE and
 // KH_WSEE included), the pyramid and the fog (the engine's, and the scene's fog passes where khFxFog is filled) as the
 // builtins do, scatters by fog scatter's own rules, and can begin and finish its pixel with the builtin's own lines
@@ -4843,7 +4843,7 @@ Texture2D<float2> khNzMark : register(t37);
 // off the texture applies neither.
 Texture2D<float> khVmSee : register(t34);
 Texture2D<float> khVmT : register(t41);
-// KH_WSEE - the record the chain reads (C++: the KH_WSEE design note in rendering_integration_injection.hpp holds the
+// KH_WSEE - the record the chain reads (C++: the KH_WSEE design note in rendering/see_through_shaders.hpp holds the
 // targets, the pass table, the register map and the lane bits; below, this unit's registers). The world's blended
 // draws (DestBlend INV_SRC_ALPHA, no A2C: fences, foliage, glass, particles) leave the scene behind them in the colour
 // while the depth holds their own (fence-type) or nothing (particle-type). C++ captures at the cycle's first such draw:
@@ -5003,7 +5003,7 @@ float KhWseeNwPos(float khwn_n)
 // then within (1 - T) - under 2 % - of the front / behind difference of Q(r), and every evaluation of Q at another
 // depth (the front, the groups) is spared: thin rain, drizzle, a faint haze sprite cost the consumers nothing; smoke,
 // foliage and glass keep the blend. One rule for every reader: KhWseeMix (fog scatter, the masks, Pulse, the sun flare,
-// user effects through it), effect 13's own loop, and dynamicLightFog's split marker (effect3.hlsl KH_DLF_WS_FAINT, the
+// user effects through it), effect 13's own loop, and dynamicLightFog's split marker (effect.hlsl KH_DLF_WS_FAINT, the
 // same constant). The record itself is untouched: the sorted mesh cut and the colour helpers read it whole.
 #define KH_WSEE_FAINT_T 0.98f
 #if MSAA_DEPTH
@@ -5255,7 +5255,7 @@ uint KhWseeAvail() { return (uint)(khFxTexLay[1].w + 0.5f); }
 // to fxc) so fxc cannot speculate them beside S in the sample-loop sites (KhWseeMix, effect 13: there it loads S beside
 // N before the loop, loop-invariant). Each load behind the test before it (KH_VMSEE_NEST: nested ifs - fxc evaluates
 // both operands of &&). Callers hold the arm.
-// TWIN (KH_DLF_SPLIT): effect3.hlsl's KhDlfWsMaybe takes this function's NW loads and its two outer tests (the range
+// TWIN (KH_DLF_SPLIT): effect.hlsl's KhDlfWsMaybe takes this function's NW loads and its two outer tests (the range
 // test, n < r || s > r) as the superset of its covered set - an edit to either is made in both.
 float KhWseeRule(int2 px, float khwr_r, uint khwr_k, bool khwr_own, float khwr_r0, out float3 khwr_o)
 {
@@ -5895,7 +5895,7 @@ float KhWseeSampleAt(int2 px, float khws_r, uint khws_k, uint khws_n, float2 khw
 float LoadDepthPS(int2 px)
 {
     const float khnz_r = LoadDepthRaw(px);
-    if (shadowMeta2.x > 0.5f) {   // TWIN (KH_DLF_SPLIT): effect3.hlsl KhDlfWsMaybe's mark test.
+    if (shadowMeta2.x > 0.5f) {   // TWIN (KH_DLF_SPLIT): effect.hlsl KhDlfWsMaybe's mark test.
         const float2 khnz_m = khNzMark.Load(int3(px, 0));
         if (khnz_m.x > 0.0f && khnz_m.x == khnz_r && khnz_m.y > 0.0f) {
             return depthParams.z + (depthParams.w - depthParams.z) * (depthParams.x + depthParams.y / khnz_m.y);
@@ -6403,7 +6403,7 @@ float KhFxFogAt(int2 px, float d)
 }
 
 // KH_FS_SELF / KH_FS_SKY - the rules of a screen-space scatter in which each pixel spreads its fog's share s of its
-// light over a cone of radius rm s px (fog scatter, effect 23 in effect3.hlsl - the worked example: its taps, their
+// light over a cone of radius rm s px (fog scatter, effect 23 in effect.hlsl - the worked example: its taps, their
 // weights and the pyramid's footprints):
 //   KhFsOwnW(s, rm)  the receiver's own weight: its unscattered share (1 - s) and its own pixel's share of its cone,
 //                    3 / (pi max(rm s, 1)^2) (a cone of radius r and height 1 holds pi r^2 / 3; the taps sample the

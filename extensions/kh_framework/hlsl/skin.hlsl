@@ -8,7 +8,7 @@
 // mesh under a vertex stage (KH_USER_VS) draws the stage's deformed copy of it instead - and the instanced routes read
 // the same bytes through the chunk's view (the Sk twins' KhSkPull, cb.hlsl): no other shader skins.
 //
-// TWIN of kh_skin_verts (rendering_integration_features.hpp) - the same sums in the
+// TWIN of kh_skin_verts (rendering/skinning.hpp) - the same sums in the
 // same order. Change one and change the other.
 //
 // The rest stream (C++ twin KhSkinSoVert, 80 bytes, built by kh_skin_so_stream): the AUTHORED position (metres), the
@@ -61,7 +61,7 @@ struct VSOutSkin {
     float4 tan : TANGENT;
 };
 
-// KH_SKIN_NRM_COF - TWIN of kh_skin_nrm_cof (rendering_integration_features.hpp), term for term: the normal by
+// KH_SKIN_NRM_COF - TWIN of kh_skin_nrm_cof (rendering/skinning.hpp), term for term: the normal by
 // the blended map's inverse transpose. b0 / b1 / b2: the blended map B's rows (the root's share on the diagonal); n:
 // the authored normal. Returns n . cof(B) turned by det(B)'s sign at the length of n . B, or n . B itself where the
 // cofactor's squared length is outside (1e-30, 1e30) or n . B's is 1e30 or more (the select drops the other arm's

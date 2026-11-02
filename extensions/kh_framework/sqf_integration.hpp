@@ -7263,7 +7263,7 @@ static game_value all_render_handlers_sqf() {
 
 // KH_AFFECTOR - addPhysicsAffector [type, [lifetime, position, vectorDir, scale, ...]] and updatePhysicsAffector. What
 // each type does to the cloth, and why the air types and the force types act differently, is at KhClothAffView in
-// rendering_integration.hpp.
+// rendering/physics_types.hpp.
 //
 // The second array is laid out by type (KH_AFF_SCHEMA): lifetime, position, then vectorDir for the types that have a
 // direction, then scale, then the type's own numbers, falloff last. Every slot but position may be nil to take its
@@ -7984,7 +7984,7 @@ static game_value get_render_stats_sqf() {
         // it during the cycle and "<zone>N" its entry count (hookMap counts maps and unmaps; the w* zones are
         // worker-microseconds summed across the pool; the drv* zones' N is an estimate: their sampled calls x 16). For
         // every GPU zone, "<zone>Us" is the GPU interval of its last run in the cycle six clears back (timestamp
-        // queries read without a stall). Zones and nesting: KhProfZone's notes (rendering_integration.hpp).
+        // queries read without a stall). Zones and nesting: KhProfZone's notes (rendering/profiling.hpp).
         for (uint32_t khps_z = 0; khps_z < RenderIntegration::KHP_ZONE_N; ++khps_z) {
             const std::string khps_n = RenderIntegration::g_prof_zone_name[khps_z];
             out.push_back(kv((khps_n + "Us").c_str(), static_cast<float>(RenderIntegration::g_prof_us_pub[khps_z].load(std::memory_order_relaxed))));

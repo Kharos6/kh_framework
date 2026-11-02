@@ -54,7 +54,7 @@
 // KH_SSAO_RECT_PAD.
 //
 // KH_SSAO_VB - the gather is a visibility bitmask (Therrien, Levesque and Gilet 2023; the method of Pascal Gilcher's
-// MXAO, and of the SSGI's gather, effect3.hlsl PSSsgiGather). The receiver's hemisphere is cut into KH_SA_NS slices
+// MXAO, and of the SSGI's gather, effect.hlsl PSSsgiGather). The receiver's hemisphere is cut into KH_SA_NS slices
 // through its view ray and each slice into 32 sectors; along each slice's line the samples march outward on both
 // sides. A sample stands for a solid KH_SA_THICK x the radius deep behind its visible face (along its own view ray)
 // and occupies the sectors that solid spans above the receiver's tangent plane (KhSaEdge clips it there): an object
